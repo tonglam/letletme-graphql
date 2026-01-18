@@ -15,7 +15,9 @@ type EnvKey =
   | 'GOOGLE_CLIENT_SECRET'
   | 'APPLE_CLIENT_ID'
   | 'APPLE_CLIENT_SECRET'
-  | 'APP_URL';
+  | 'APP_URL'
+  | 'CORS_ORIGIN'
+  | 'CORS_CREDENTIALS';
 
 const readEnv = (key: EnvKey): string | undefined => {
   const value = Bun.env[key];
@@ -67,4 +69,8 @@ export const env = {
   APPLE_CLIENT_ID: readEnv('APPLE_CLIENT_ID') ?? '',
   APPLE_CLIENT_SECRET: readEnv('APPLE_CLIENT_SECRET') ?? '',
   APP_URL: readEnv('APP_URL') ?? 'http://localhost:3000',
+  
+  // CORS
+  CORS_ORIGIN: readEnv('CORS_ORIGIN') ?? '*',
+  CORS_CREDENTIALS: readEnv('CORS_CREDENTIALS') === 'true',
 } as const;

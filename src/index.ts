@@ -9,6 +9,26 @@ import { metrics, metricsResponse } from './infra/metrics';
 import { connectRedis, getRedis } from './infra/redis';
 import { supabase } from './infra/supabase';
 
+// CORS helper function
+function getCorsHeaders(origin: string | null): Record<string, string> {
+  const allowedOrigin = env.CORS_ORIGIN === '*' 
+    ? (origin || '*')
+    : env.CORS_ORIGIN;
+
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Origin': allowedOrigin,
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '86400', // 24 hours
+  };
+
+  if (env.CORS_CREDENTIALS) {
+    headers['Access-Control-Allow-Credentials'] = 'true';
+  }
+
+  return headers;
+}
+
 const startServer = async (): Promise<void> => {
   await connectRedis();
 
@@ -22,10 +42,22 @@ const startServer = async (): Promise<void> => {
     port: env.PORT,
     fetch: async (request: Request) => {
       const url = new URL(request.url);
+      const origin = request.headers.get('Origin');
+      const corsHeaders = getCorsHeaders(origin);
+
+      // Handle CORS preflight requests
+      if (request.method === 'OPTIONS') {
+        return new Response(null, {
+          status: 204,
+          headers: corsHeaders,
+        });
+      }
 
       // Health check
       if (url.pathname === '/health') {
-        return new Response('ok');
+        return new Response('ok', {
+          headers: corsHeaders,
+        });
       }
 
       // Prometheus metrics
@@ -41,7 +73,11 @@ const startServer = async (): Promise<void> => {
       // Device authentication endpoint (for mobile)
       if (url.pathname === '/api/device/auth' && request.method === 'POST') {
         try {
-          const body = await request.json();
+          const body = (await request.json()) as {
+            device_id?: string;
+            device_name?: string;
+            device_os?: string;
+          };
           const { device_id, device_name, device_os } = body;
 
           if (!device_id || typeof device_id !== 'string') {
@@ -49,7 +85,10 @@ const startServer = async (): Promise<void> => {
               JSON.stringify({ error: 'device_id is required and must be a string' }),
               {
                 status: 400,
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...corsHeaders,
+                },
               }
             );
           }
@@ -61,7 +100,10 @@ const startServer = async (): Promise<void> => {
 
           return new Response(JSON.stringify(result), {
             status: 200,
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...corsHeaders,
+            },
           });
         } catch (error) {
           logger.error({ err: error }, 'Device authentication failed');
@@ -69,7 +111,10 @@ const startServer = async (): Promise<void> => {
             JSON.stringify({ error: 'Authentication failed' }),
             {
               status: 500,
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                'Content-Type': 'application/json',
+                ...corsHeaders,
+              },
             }
           );
         }
@@ -110,7 +155,7 @@ const startServer = async (): Promise<void> => {
             supabase,
             redis: getRedis(),
             logger,
-            user, // Include authenticated user (or undefined)
+            user: user ?? undefined, // Convert null to undefined for GraphQLContext
           }),
         });
 
@@ -139,9 +184,15 @@ const startServer = async (): Promise<void> => {
           });
         }
 
+        // Merge CORS headers with GraphQL response headers
+        const finalHeaders = {
+          ...responseHeaders,
+          ...corsHeaders,
+        };
+
         const response = new Response(responseBody, {
           status: httpGraphQLResponse.status || 200,
-          headers: responseHeaders,
+          headers: finalHeaders,
         });
 
         metrics.httpRequestDurationSeconds
@@ -161,7 +212,10 @@ const startServer = async (): Promise<void> => {
         return response;
       }
 
-      return new Response('Not Found', { status: 404 });
+      return new Response('Not Found', {
+        status: 404,
+        headers: corsHeaders,
+      });
     },
   });
 

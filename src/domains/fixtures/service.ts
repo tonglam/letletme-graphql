@@ -19,4 +19,8 @@ export const fixturesService = {
   getCurrentFixtures(context: GraphQLContext): Promise<Fixture[]> {
     return fixturesRepository.getCurrentFixtures(context);
   },
+
+  getEventFixtures(context: GraphQLContext, eventId: number): Promise<Fixture[]> {
+    return fixturesRepository.getEventFixtures(context, eventId);
+  },
 };

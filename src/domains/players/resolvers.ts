@@ -1,5 +1,5 @@
 import type { GraphQLContext } from '../../graphql/context';
-import type { Player, PlayersFilter, Team } from './repository';
+import type { Player, PlayersFilter, PlayerTransferStats, Team } from './repository';
 import { Position } from './repository';
 import { playersService } from './service';
 
@@ -22,6 +22,11 @@ type PlayersArgs = {
 
 type TeamArgs = {
   id: number;
+};
+
+type TopTransfersArgs = {
+  eventId: number;
+  limit?: number | null;
 };
 
 const stringToPosition = (positionStr: string): Position => {
@@ -72,6 +77,27 @@ export const playersResolvers = {
       _args: Record<string, never>,
       context: GraphQLContext
     ): Promise<Team[]> => playersService.listTeams(context),
+
+    topTransfersIn: async (
+      _parent: unknown,
+      args: TopTransfersArgs,
+      context: GraphQLContext
+    ): Promise<PlayerTransferStats[]> =>
+      playersService.getTopTransfersIn(context, args.eventId, args.limit ?? 10),
+
+    topTransfersOut: async (
+      _parent: unknown,
+      args: TopTransfersArgs,
+      context: GraphQLContext
+    ): Promise<PlayerTransferStats[]> =>
+      playersService.getTopTransfersOut(context, args.eventId, args.limit ?? 10),
+  },
+  PlayerTransferStats: {
+    player: async (
+      parent: PlayerTransferStats,
+      _args: Record<string, never>,
+      context: GraphQLContext
+    ): Promise<Player | null> => playersService.getPlayerById(context, parent.playerId),
   },
   Player: {
     team: async (

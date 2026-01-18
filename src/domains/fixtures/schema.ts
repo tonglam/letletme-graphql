@@ -26,5 +26,6 @@ export const fixturesTypeDefs = /* GraphQL */ `
     fixture(id: Int!): Fixture
     fixtures(filter: FixturesFilter, limit: Int = 50, offset: Int = 0): [Fixture!]!
     currentFixtures: [Fixture!]!
+    eventFixtures(eventId: Int!): [Fixture!]!
   }
 `;

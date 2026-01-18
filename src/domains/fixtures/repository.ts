@@ -104,6 +104,7 @@ interface FixturesRepository {
     offset: number
   ): Promise<Fixture[]>;
   getCurrentFixtures(context: GraphQLContext): Promise<Fixture[]>;
+  getEventFixtures(context: GraphQLContext, eventId: number): Promise<Fixture[]>;
 }
 
 export const fixturesRepository: FixturesRepository = {
@@ -219,6 +220,29 @@ export const fixturesRepository: FixturesRepository = {
         'Failed to fetch current fixtures'
       );
       throw new Error('Failed to fetch current fixtures');
+    }
+
+    const fixtures = (data as DbFixtureRow[] | null)?.map(mapFixture) ?? [];
+    await context.redis.set(cacheKey, JSON.stringify(fixtures), 'EX', env.CACHE_TTL_SECONDS);
+    return fixtures;
+  },
+
+  async getEventFixtures(context: GraphQLContext, eventId: number): Promise<Fixture[]> {
+    const cacheKey = `fixtures:event:${eventId}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as Fixture[];
+    }
+
+    const { data, error } = await context.supabase
+      .from('event_fixtures')
+      .select('*')
+      .eq('event_id', eventId)
+      .order('kickoff_time', { ascending: true });
+
+    if (error) {
+      context.logger.error({ err: error, eventId }, 'Failed to fetch event fixtures');
+      throw new Error('Failed to fetch event fixtures');
     }
 
     const fixtures = (data as DbFixtureRow[] | null)?.map(mapFixture) ?? [];

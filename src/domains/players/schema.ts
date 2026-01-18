@@ -46,10 +46,19 @@ export const playersTypeDefs = /* GraphQL */ `
     maxPrice: Int
   }
 
+  type PlayerTransferStats {
+    player: Player!
+    eventId: Int!
+    transfersInEvent: Int!
+    transfersOutEvent: Int!
+  }
+
   extend type Query {
     player(id: Int!): Player
     players(filter: PlayersFilter, limit: Int = 50, offset: Int = 0): [Player!]!
     team(id: Int!): Team
     teams: [Team!]!
+    topTransfersIn(eventId: Int!, limit: Int = 10): [PlayerTransferStats!]!
+    topTransfersOut(eventId: Int!, limit: Int = 10): [PlayerTransferStats!]!
   }
 `;

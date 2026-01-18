@@ -61,17 +61,10 @@ type DbEventRow = {
   most_vice_captained: number | null;
 };
 
-const toIso = (value: string | Date | null): string | null => {
-  if (!value) {
-    return null;
-  }
-  return new Date(value).toISOString();
-};
-
 const mapEvent = (row: DbEventRow): Event => ({
   id: row.id,
   name: row.name,
-  deadlineTime: toIso(row.deadline_time),
+  deadlineTime: row.deadline_time, // Already ISO 8601 string from DB
   averageEntryScore: row.average_entry_score,
   finished: row.finished,
   dataChecked: row.data_checked,
@@ -196,22 +189,20 @@ export const eventsRepository: EventsRepository = {
     const { data: nextData, error: nextError } = await context.supabase
       .from('events')
       .select('deadline_time')
-      .eq('id', currentEventId + 1)
+      .eq('is_next', true)
       .limit(1);
 
     if (nextError) {
-      context.logger.error(
-        { err: nextError, eventId: currentEventId + 1 },
-        'Failed to fetch next event deadline'
-      );
+      context.logger.error({ err: nextError }, 'Failed to fetch next event deadline');
+      // Continue with null deadline if error occurs
     }
 
     const nextDeadline = (nextData?.[0] as { deadline_time: string | null } | undefined)
-      ?.deadline_time;
+      ?.deadline_time ?? null;
 
     const result: CurrentEventInfo = {
       currentEvent: currentEventId,
-      nextUtcDeadline: toIso(nextDeadline ?? null),
+      nextUtcDeadline: nextDeadline ?? null, // Already ISO 8601 string from DB
     };
 
     await context.redis.set(cacheKey, JSON.stringify(result), 'EX', env.CACHE_TTL_SECONDS);

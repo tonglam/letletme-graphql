@@ -1,10 +1,14 @@
 import type { GraphQLContext } from '../../graphql/context';
-import type { LivePerformance } from './repository';
+import type { EventLive, LivePerformance, LiveScoresFilter } from './repository';
 import { liveRepository } from './repository';
 
 export const liveService = {
-  getLiveScores(context: GraphQLContext, eventId?: number): Promise<LivePerformance[]> {
-    return liveRepository.getLiveScores(context, eventId);
+  getLiveScores(
+    context: GraphQLContext,
+    eventId?: number,
+    filter?: LiveScoresFilter | null
+  ): Promise<LivePerformance[]> {
+    return liveRepository.getLiveScores(context, eventId, filter);
   },
 
   getPlayerLive(
@@ -13,5 +17,9 @@ export const liveService = {
     eventId?: number
   ): Promise<LivePerformance | null> {
     return liveRepository.getPlayerLive(context, playerId, eventId);
+  },
+
+  getEventLive(context: GraphQLContext, eventId: number): Promise<EventLive> {
+    return liveRepository.getEventLive(context, eventId);
   },
 };

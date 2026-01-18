@@ -15,9 +15,9 @@ export const baseTypeDefs = `#graphql
 
 export const baseResolvers = {
   Query: {
-    _empty: () => null,
+    _empty: (): string | null => null,
   },
   Mutation: {
-    _empty: () => null,
+    _empty: (): string | null => null,
   },
 };

@@ -1,5 +1,5 @@
 import type { GraphQLContext } from '../../graphql/context';
-import type { Player, PlayersFilter, Team } from './repository';
+import type { Player, PlayersFilter, PlayerTransferStats, Team } from './repository';
 import { playersRepository } from './repository';
 
 export const playersService = {
@@ -22,5 +22,21 @@ export const playersService = {
 
   listTeams(context: GraphQLContext): Promise<Team[]> {
     return playersRepository.listTeams(context);
+  },
+
+  getTopTransfersIn(
+    context: GraphQLContext,
+    eventId: number,
+    limit: number
+  ): Promise<PlayerTransferStats[]> {
+    return playersRepository.getTopTransfersIn(context, eventId, limit);
+  },
+
+  getTopTransfersOut(
+    context: GraphQLContext,
+    eventId: number,
+    limit: number
+  ): Promise<PlayerTransferStats[]> {
+    return playersRepository.getTopTransfersOut(context, eventId, limit);
   },
 };

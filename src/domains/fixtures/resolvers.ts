@@ -16,6 +16,10 @@ type FixturesArgs = {
   offset?: number | null;
 };
 
+type EventFixturesArgs = {
+  eventId: number;
+};
+
 export const fixturesResolvers = {
   Query: {
     fixture: async (
@@ -41,6 +45,12 @@ export const fixturesResolvers = {
       _args: Record<string, never>,
       context: GraphQLContext
     ): Promise<Fixture[]> => fixturesService.getCurrentFixtures(context),
+
+    eventFixtures: async (
+      _parent: unknown,
+      args: EventFixturesArgs,
+      context: GraphQLContext
+    ): Promise<Fixture[]> => fixturesService.getEventFixtures(context, args.eventId),
   },
   Fixture: {
     event: async (

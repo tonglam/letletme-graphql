@@ -77,17 +77,37 @@ const mapLivePerformance = (row: DbLiveRow): LivePerformance => ({
   totalPoints: row.total_points,
 });
 
+export type LiveScoresFilter = {
+  inDreamTeam?: boolean | null;
+  minTotalPoints?: number | null;
+  maxTotalPoints?: number | null;
+};
+
+export type EventLive = {
+  eventId: number;
+  performances: LivePerformance[];
+};
+
 interface LiveRepository {
-  getLiveScores(context: GraphQLContext, eventId?: number): Promise<LivePerformance[]>;
+  getLiveScores(
+    context: GraphQLContext,
+    eventId?: number,
+    filter?: LiveScoresFilter | null
+  ): Promise<LivePerformance[]>;
   getPlayerLive(
     context: GraphQLContext,
     playerId: number,
     eventId?: number
   ): Promise<LivePerformance | null>;
+  getEventLive(context: GraphQLContext, eventId: number): Promise<EventLive>;
 }
 
 export const liveRepository: LiveRepository = {
-  async getLiveScores(context: GraphQLContext, eventId?: number): Promise<LivePerformance[]> {
+  async getLiveScores(
+    context: GraphQLContext,
+    eventId?: number,
+    filter?: LiveScoresFilter | null
+  ): Promise<LivePerformance[]> {
     let targetEventId = eventId;
 
     // If no eventId provided, get current event
@@ -112,19 +132,44 @@ export const liveRepository: LiveRepository = {
       }
     }
 
-    const cacheKey = `live:scores:${targetEventId}`;
+    // Build cache key including filter
+    const filterParts: string[] = [];
+    if (filter?.inDreamTeam !== undefined && filter.inDreamTeam !== null) {
+      filterParts.push(`dreamteam:${filter.inDreamTeam}`);
+    }
+    if (filter?.minTotalPoints !== undefined && filter.minTotalPoints !== null) {
+      filterParts.push(`minPoints:${filter.minTotalPoints}`);
+    }
+    if (filter?.maxTotalPoints !== undefined && filter.maxTotalPoints !== null) {
+      filterParts.push(`maxPoints:${filter.maxTotalPoints}`);
+    }
+    const filterKey = filterParts.length > 0 ? `:${filterParts.join(':')}` : '';
+    const cacheKey = `live:scores:${targetEventId}${filterKey}`;
     const cached = await context.redis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached) as LivePerformance[];
     }
 
-    const { data, error } = await context.supabase
+    let query = context.supabase
       .from('event_lives')
       .select('*')
       .eq('event_id', targetEventId);
 
+    // Apply filters if provided
+    if (filter?.inDreamTeam !== undefined && filter.inDreamTeam !== null) {
+      query = query.eq('in_dream_team', filter.inDreamTeam);
+    }
+    if (filter?.minTotalPoints !== undefined && filter.minTotalPoints !== null) {
+      query = query.gte('total_points', filter.minTotalPoints);
+    }
+    if (filter?.maxTotalPoints !== undefined && filter.maxTotalPoints !== null) {
+      query = query.lte('total_points', filter.maxTotalPoints);
+    }
+
+    const { data, error } = await query;
+
     if (error) {
-      context.logger.error({ err: error, eventId: targetEventId }, 'Failed to fetch live scores');
+      context.logger.error({ err: error, eventId: targetEventId, filter }, 'Failed to fetch live scores');
       throw new Error('Failed to fetch live scores');
     }
 
@@ -191,5 +236,33 @@ export const liveRepository: LiveRepository = {
     const performance = mapLivePerformance(row);
     await context.redis.set(cacheKey, JSON.stringify(performance), 'EX', LIVE_CACHE_TTL);
     return performance;
+  },
+
+  async getEventLive(context: GraphQLContext, eventId: number): Promise<EventLive> {
+    const cacheKey = `live:event:${eventId}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as EventLive;
+    }
+
+    const { data, error } = await context.supabase
+      .from('event_lives')
+      .select('*')
+      .eq('event_id', eventId);
+
+    if (error) {
+      context.logger.error({ err: error, eventId }, 'Failed to fetch event live data');
+      throw new Error('Failed to fetch event live data');
+    }
+
+    const performances = (data as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
+
+    const eventLive: EventLive = {
+      eventId,
+      performances,
+    };
+
+    await context.redis.set(cacheKey, JSON.stringify(eventLive), 'EX', LIVE_CACHE_TTL);
+    return eventLive;
   },
 };

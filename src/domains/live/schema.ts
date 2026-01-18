@@ -24,8 +24,22 @@ export const liveTypeDefs = /* GraphQL */ `
     totalPoints: Int!
   }
 
+  input LiveScoresFilter {
+    inDreamTeam: Boolean
+    minTotalPoints: Int
+    maxTotalPoints: Int
+  }
+
+  type EventLive {
+    event: Event!
+    performances: [LivePerformance!]!
+    dreamTeam: [LivePerformance!]!
+    topPerformers(limit: Int = 10): [LivePerformance!]!
+  }
+
   extend type Query {
-    liveScores(eventId: Int): [LivePerformance!]!
+    liveScores(eventId: Int, filter: LiveScoresFilter): [LivePerformance!]!
     playerLive(playerId: Int!, eventId: Int): LivePerformance
+    eventLive(eventId: Int!): EventLive
   }
 `;

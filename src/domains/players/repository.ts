@@ -145,6 +145,13 @@ const clampLimit = (limit: number): number => {
   return Math.min(Math.max(safeLimit, 1), 200);
 };
 
+export type PlayerTransferStats = {
+  playerId: number;
+  eventId: number;
+  transfersInEvent: number;
+  transfersOutEvent: number;
+};
+
 interface PlayersRepository {
   getPlayerById(context: GraphQLContext, id: number): Promise<Player | null>;
   listPlayers(
@@ -155,6 +162,16 @@ interface PlayersRepository {
   ): Promise<Player[]>;
   getTeamById(context: GraphQLContext, id: number): Promise<Team | null>;
   listTeams(context: GraphQLContext): Promise<Team[]>;
+  getTopTransfersIn(
+    context: GraphQLContext,
+    eventId: number,
+    limit: number
+  ): Promise<PlayerTransferStats[]>;
+  getTopTransfersOut(
+    context: GraphQLContext,
+    eventId: number,
+    limit: number
+  ): Promise<PlayerTransferStats[]>;
 }
 
 export const playersRepository: PlayersRepository = {
@@ -279,5 +296,89 @@ export const playersRepository: PlayersRepository = {
     const teams = (data as DbTeamRow[] | null)?.map(mapTeam) ?? [];
     await context.redis.set(cacheKey, JSON.stringify(teams), 'EX', env.CACHE_TTL_SECONDS);
     return teams;
+  },
+
+  async getTopTransfersIn(
+    context: GraphQLContext,
+    eventId: number,
+    limit: number
+  ): Promise<PlayerTransferStats[]> {
+    const safeLimit = Math.min(Math.max(limit, 1), 100);
+    const cacheKey = `players:top-transfers-in:${eventId}:${safeLimit}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as PlayerTransferStats[];
+    }
+
+    const { data, error } = await context.supabase
+      .from('player_stats')
+      .select('element_id, event_id, transfers_in_event, transfers_out_event')
+      .eq('event_id', eventId)
+      .not('transfers_in_event', 'is', null)
+      .order('transfers_in_event', { ascending: false })
+      .limit(safeLimit);
+
+    if (error) {
+      context.logger.error({ err: error, eventId, limit: safeLimit }, 'Failed to fetch top transfers in');
+      throw new Error('Failed to fetch top transfers in');
+    }
+
+    const stats =
+      (data as Array<{
+        element_id: number;
+        event_id: number;
+        transfers_in_event: number;
+        transfers_out_event: number;
+      }> | null)?.map((row) => ({
+        playerId: row.element_id,
+        eventId: row.event_id,
+        transfersInEvent: row.transfers_in_event,
+        transfersOutEvent: row.transfers_out_event ?? 0,
+      })) ?? [];
+
+    await context.redis.set(cacheKey, JSON.stringify(stats), 'EX', env.CACHE_TTL_SECONDS);
+    return stats;
+  },
+
+  async getTopTransfersOut(
+    context: GraphQLContext,
+    eventId: number,
+    limit: number
+  ): Promise<PlayerTransferStats[]> {
+    const safeLimit = Math.min(Math.max(limit, 1), 100);
+    const cacheKey = `players:top-transfers-out:${eventId}:${safeLimit}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as PlayerTransferStats[];
+    }
+
+    const { data, error } = await context.supabase
+      .from('player_stats')
+      .select('element_id, event_id, transfers_in_event, transfers_out_event')
+      .eq('event_id', eventId)
+      .not('transfers_out_event', 'is', null)
+      .order('transfers_out_event', { ascending: false })
+      .limit(safeLimit);
+
+    if (error) {
+      context.logger.error({ err: error, eventId, limit: safeLimit }, 'Failed to fetch top transfers out');
+      throw new Error('Failed to fetch top transfers out');
+    }
+
+    const stats =
+      (data as Array<{
+        element_id: number;
+        event_id: number;
+        transfers_in_event: number;
+        transfers_out_event: number;
+      }> | null)?.map((row) => ({
+        playerId: row.element_id,
+        eventId: row.event_id,
+        transfersInEvent: row.transfers_in_event ?? 0,
+        transfersOutEvent: row.transfers_out_event,
+      })) ?? [];
+
+    await context.redis.set(cacheKey, JSON.stringify(stats), 'EX', env.CACHE_TTL_SECONDS);
+    return stats;
   },
 };
