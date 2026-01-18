@@ -1,6 +1,8 @@
 import { ApolloServer, HeaderMap } from '@apollo/server';
 import type { GraphQLContext } from './graphql/context';
 import { schema } from './graphql/schema';
+import { auth, getUserFromSession } from './infra/auth';
+import { authenticateDevice, validateDeviceToken } from './infra/device-auth';
 import { env } from './infra/env';
 import { logger } from './infra/logger';
 import { metrics, metricsResponse } from './infra/metrics';
@@ -21,14 +23,59 @@ const startServer = async (): Promise<void> => {
     fetch: async (request: Request) => {
       const url = new URL(request.url);
 
+      // Health check
       if (url.pathname === '/health') {
         return new Response('ok');
       }
 
+      // Prometheus metrics
       if (url.pathname === '/metrics') {
         return metricsResponse();
       }
 
+      // Better Auth endpoints (OAuth + email/password for web)
+      if (url.pathname.startsWith('/api/auth')) {
+        return auth.handler(request);
+      }
+
+      // Device authentication endpoint (for mobile)
+      if (url.pathname === '/api/device/auth' && request.method === 'POST') {
+        try {
+          const body = await request.json();
+          const { device_id, device_name, device_os } = body;
+
+          if (!device_id || typeof device_id !== 'string') {
+            return new Response(
+              JSON.stringify({ error: 'device_id is required and must be a string' }),
+              {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' },
+              }
+            );
+          }
+
+          const result = await authenticateDevice(device_id, {
+            name: device_name,
+            os: device_os,
+          });
+
+          return new Response(JSON.stringify(result), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        } catch (error) {
+          logger.error({ err: error }, 'Device authentication failed');
+          return new Response(
+            JSON.stringify({ error: 'Authentication failed' }),
+            {
+              status: 500,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          );
+        }
+      }
+
+      // GraphQL endpoint
       if (url.pathname === '/graphql') {
         const start = performance.now();
 
@@ -38,6 +85,19 @@ const startServer = async (): Promise<void> => {
         request.headers.forEach((value, key) => {
           headers.set(key, value);
         });
+
+        // Authenticate user (web session or mobile device token)
+        let user = await getUserFromSession(request.headers);
+
+        // If no web session, try mobile device token
+        if (!user) {
+          const authHeader = request.headers.get('Authorization');
+          const token = authHeader?.replace('Bearer ', '').trim();
+
+          if (token) {
+            user = await validateDeviceToken(token);
+          }
+        }
 
         const httpGraphQLResponse = await apollo.executeHTTPGraphQLRequest({
           httpGraphQLRequest: {
@@ -50,6 +110,7 @@ const startServer = async (): Promise<void> => {
             supabase,
             redis: getRedis(),
             logger,
+            user, // Include authenticated user (or undefined)
           }),
         });
 

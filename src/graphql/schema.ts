@@ -1,4 +1,6 @@
 import { makeExecutableSchema } from '@graphql-tools/schema';
+import { authResolvers } from '../domains/auth/resolvers';
+import { authTypeDefs } from '../domains/auth/schema';
 import { entriesResolvers } from '../domains/entries/resolvers';
 import { entriesTypeDefs } from '../domains/entries/schema';
 import { eventsResolvers } from '../domains/events/resolvers';
@@ -11,9 +13,12 @@ import { liveResolvers } from '../domains/live/resolvers';
 import { liveTypeDefs } from '../domains/live/schema';
 import { playersResolvers } from '../domains/players/resolvers';
 import { playersTypeDefs } from '../domains/players/schema';
+import { baseResolvers, baseTypeDefs } from './base-schema';
 
 export const schema = makeExecutableSchema({
   typeDefs: [
+    baseTypeDefs, // Must be first to define Query and Mutation
+    authTypeDefs,
     eventsTypeDefs,
     playersTypeDefs,
     fixturesTypeDefs,
@@ -22,6 +27,8 @@ export const schema = makeExecutableSchema({
     entriesTypeDefs,
   ],
   resolvers: [
+    baseResolvers,
+    authResolvers,
     eventsResolvers,
     playersResolvers,
     fixturesResolvers,
