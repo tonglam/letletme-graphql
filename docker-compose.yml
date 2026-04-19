@@ -1,0 +1,24 @@
+x-app-image: &app-image ${APP_IMAGE:-letletme-graphql:local}
+
+services:
+  graphql:
+    image: *app-image
+    build:
+      context: .
+      target: runner
+    env_file: .env.deploy
+    ports:
+      - "4000:4000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://127.0.0.1:4000/health').then((res) => { if (!res.ok) process.exit(1); }).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
