@@ -118,15 +118,3 @@ jobs:
             done
 
             APP_IMAGE="$IMAGE_REF" docker compose ps
-
-            # Install nginx config (requires deploy user to have NOPASSWD sudo for nginx)
-            if sudo -n nginx -v 2>/dev/null; then
-              sudo cp nginx/api.letletme.top.conf /etc/nginx/sites-available/api.letletme.top.conf
-              sudo ln -sf /etc/nginx/sites-available/api.letletme.top.conf /etc/nginx/sites-enabled/api.letletme.top.conf
-              sudo nginx -t && sudo nginx -s reload
-              echo "nginx config updated"
-            else
-              cp nginx/api.letletme.top.conf ~/api.letletme.top.conf.pending
-              echo "WARNING: sudo not available — nginx config staged to ~/api.letletme.top.conf.pending"
-              echo "Run once on VPS: sudo cp ~/api.letletme.top.conf.pending /etc/nginx/sites-available/api.letletme.top.conf && sudo ln -sf /etc/nginx/sites-available/api.letletme.top.conf /etc/nginx/sites-enabled/ && sudo nginx -s reload"
-            fi
