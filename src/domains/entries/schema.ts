@@ -5,6 +5,7 @@ export const entriesTypeDefs = /* GraphQL */ `
     FREE_HIT
     TRIPLE_CAPTAIN
     WILDCARD
+    MANAGER
   }
 
   type Entry {

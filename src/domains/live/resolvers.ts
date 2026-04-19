@@ -3,7 +3,12 @@ import type { Event } from '../events/repository';
 import { eventsService } from '../events/service';
 import type { Player } from '../players/repository';
 import { playersService } from '../players/service';
-import type { EventLive, LivePerformance, LiveScoresFilter } from './repository';
+import type {
+  EventLive,
+  LiveExplain,
+  LivePerformance,
+  LiveScoresFilter,
+} from './repository';
 import { liveService } from './service';
 
 type LiveScoresArgs = {
@@ -18,6 +23,11 @@ type PlayerLiveArgs = {
 
 type EventLiveArgs = {
   eventId: number;
+};
+
+type LiveExplainArgs = {
+  eventId: number;
+  elementId: number;
 };
 
 type TopPerformersArgs = {
@@ -45,6 +55,12 @@ export const liveResolvers = {
       args: EventLiveArgs,
       context: GraphQLContext
     ): Promise<EventLive> => liveService.getEventLive(context, args.eventId),
+    eventLiveExplain: async (
+      _parent: unknown,
+      args: LiveExplainArgs,
+      context: GraphQLContext,
+    ): Promise<LiveExplain | null> =>
+      liveService.getEventLiveExplain(context, args.eventId, args.elementId),
   },
   EventLive: {
     event: async (
@@ -84,5 +100,17 @@ export const liveResolvers = {
       parent.expectedGoalInvolvements ? parseFloat(parent.expectedGoalInvolvements) : null,
     expectedGoalsConceded: (parent: LivePerformance): number | null =>
       parent.expectedGoalsConceded ? parseFloat(parent.expectedGoalsConceded) : null,
+  },
+  LiveExplain: {
+    event: async (
+      parent: LiveExplain,
+      _args: Record<string, never>,
+      context: GraphQLContext,
+    ): Promise<Event | null> => eventsService.getEventById(context, parent.eventId),
+    player: async (
+      parent: LiveExplain,
+      _args: Record<string, never>,
+      context: GraphQLContext,
+    ): Promise<Player | null> => playersService.getPlayerById(context, parent.elementId),
   },
 };

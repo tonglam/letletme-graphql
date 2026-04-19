@@ -154,6 +154,7 @@ export type PlayerTransferStats = {
 
 interface PlayersRepository {
   getPlayerById(context: GraphQLContext, id: number): Promise<Player | null>;
+  getPlayersByIds(context: GraphQLContext, ids: number[]): Promise<Player[]>;
   listPlayers(
     context: GraphQLContext,
     filter: PlayersFilter | null | undefined,
@@ -201,6 +202,33 @@ export const playersRepository: PlayersRepository = {
     const player = mapPlayer(row);
     await context.redis.set(cacheKey, JSON.stringify(player), 'EX', env.CACHE_TTL_SECONDS);
     return player;
+  },
+
+  async getPlayersByIds(context: GraphQLContext, ids: number[]): Promise<Player[]> {
+    const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
+    if (uniqueIds.length === 0) {
+      return [];
+    }
+
+    const cacheKey = `players:ids:${uniqueIds.sort((a, b) => a - b).join(',')}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as Player[];
+    }
+
+    const { data, error } = await context.supabase
+      .from('players')
+      .select('*')
+      .in('id', uniqueIds);
+
+    if (error) {
+      context.logger.error({ err: error, ids: uniqueIds }, 'Failed to fetch players by ids');
+      throw new Error('Failed to fetch players');
+    }
+
+    const players = (data as DbPlayerRow[] | null)?.map(mapPlayer) ?? [];
+    await context.redis.set(cacheKey, JSON.stringify(players), 'EX', env.CACHE_TTL_SECONDS);
+    return players;
   },
 
   async listPlayers(

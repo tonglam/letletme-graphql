@@ -3,6 +3,8 @@ import { authResolvers } from '../domains/auth/resolvers';
 import { authTypeDefs } from '../domains/auth/schema';
 import { entriesResolvers } from '../domains/entries/resolvers';
 import { entriesTypeDefs } from '../domains/entries/schema';
+import { entryLiveResolvers } from '../domains/entry-live/resolvers';
+import { entryLiveTypeDefs } from '../domains/entry-live/schema';
 import { eventOverallResultResolvers } from '../domains/event-overall-result/resolvers';
 import { eventOverallResultTypeDefs } from '../domains/event-overall-result/schema';
 import { eventsResolvers } from '../domains/events/resolvers';
@@ -11,6 +13,8 @@ import { fixturesResolvers } from '../domains/fixtures/resolvers';
 import { fixturesTypeDefs } from '../domains/fixtures/schema';
 import { leaguesResolvers } from '../domains/leagues/resolvers';
 import { leaguesTypeDefs } from '../domains/leagues/schema';
+import { liveMatchesResolvers } from '../domains/live-matches/resolvers';
+import { liveMatchesTypeDefs } from '../domains/live-matches/schema';
 import { liveResolvers } from '../domains/live/resolvers';
 import { liveTypeDefs } from '../domains/live/schema';
 import { playerValuesResolvers } from '../domains/player-values/resolvers';
@@ -28,6 +32,8 @@ export const schema = makeExecutableSchema({
     playerValuesTypeDefs,
     fixturesTypeDefs,
     liveTypeDefs,
+    entryLiveTypeDefs,
+    liveMatchesTypeDefs,
     leaguesTypeDefs,
     entriesTypeDefs,
     eventOverallResultTypeDefs,
@@ -40,6 +46,8 @@ export const schema = makeExecutableSchema({
     playerValuesResolvers,
     fixturesResolvers,
     liveResolvers,
+    liveMatchesResolvers,
+    entryLiveResolvers,
     leaguesResolvers,
     entriesResolvers,
     eventOverallResultResolvers,

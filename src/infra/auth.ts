@@ -48,13 +48,6 @@ try {
       },
     },
     
-    // Advanced settings
-    advanced: {
-      generateId: () => {
-        // Use crypto.randomUUID for secure ID generation
-        return crypto.randomUUID();
-      },
-    },
   });
   
   logger.info('Better Auth initialized successfully');

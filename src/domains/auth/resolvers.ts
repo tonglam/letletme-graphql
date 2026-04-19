@@ -1,16 +1,28 @@
 import type { GraphQLContext } from '../../graphql/context';
+import type { AuthUser } from '../../infra/auth';
 import { getUserDevices, revokeDeviceToken } from '../../infra/device-auth';
+
+type DeviceSessionPayload = {
+  id: string;
+  deviceId: string;
+  deviceName: string | null;
+  deviceOs: string | null;
+  lastActive: string;
+  createdAt: string;
+};
 
 export const authResolvers = {
   Query: {
     // Get current authenticated user
-    me: (_parent: unknown, _args: unknown, context: GraphQLContext) => {
-      // Return user from context (populated by auth middleware)
-      return context.user ?? null;
-    },
+    me: (_parent: unknown, _args: unknown, context: GraphQLContext): AuthUser | null =>
+      context.user ?? null,
 
     // Get all device sessions for current user
-    myDevices: async (_parent: unknown, _args: unknown, context: GraphQLContext) => {
+    myDevices: async (
+      _parent: unknown,
+      _args: unknown,
+      context: GraphQLContext
+    ): Promise<DeviceSessionPayload[]> => {
       if (!context.user) {
         throw new Error('Authentication required');
       }
@@ -56,13 +68,15 @@ export const authResolvers = {
       const client = await pool.connect();
 
       try {
-        const result = await client.query(
+        type DeviceTokenRow = { token: string };
+        const result = await client.query<DeviceTokenRow>(
           'SELECT token FROM device_sessions WHERE device_id = $1',
           [args.deviceId]
         );
 
-        if (result.rows.length > 0) {
-          await revokeDeviceToken(result.rows[0].token);
+        const row = result.rows[0];
+        if (row) {
+          await revokeDeviceToken(row.token);
         }
 
         return true;

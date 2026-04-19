@@ -19,6 +19,34 @@ interface DeviceAuthResult {
   isAnonymous: boolean;
 }
 
+type UserDeviceRow = {
+  id: string;
+  isAnonymous: boolean | null;
+};
+
+type DeviceSessionUserRow = {
+  user_id: string;
+  device_id: string;
+  email: string | null;
+  name: string | null;
+  emailVerified: boolean | null;
+  image: string | null;
+  isAnonymous: boolean | null;
+};
+
+type DeviceUserRow = {
+  id: string;
+};
+
+type DeviceSessionRow = {
+  id: string;
+  device_id: string;
+  device_name: string | null;
+  device_os: string | null;
+  last_active: Date;
+  created_at: Date;
+};
+
 /**
  * Authenticate a device and return a session token
  * Creates anonymous user if device is new
@@ -33,7 +61,7 @@ export async function authenticateDevice(
     await client.query('BEGIN');
     
     // Check if device already has a user
-    const existingUser = await client.query(
+    const existingUser = await client.query<UserDeviceRow>(
       'SELECT id, "isAnonymous" FROM "user" WHERE "deviceId" = $1',
       [deviceId]
     );
@@ -43,8 +71,9 @@ export async function authenticateDevice(
     
     if (existingUser.rows.length > 0) {
       // Existing device - return existing user
-      userId = existingUser.rows[0].id;
-      isAnonymous = existingUser.rows[0].isAnonymous ?? false;
+      const row = existingUser.rows[0]!;
+      userId = row.id;
+      isAnonymous = row.isAnonymous ?? false;
     } else {
       // New device - create anonymous user
       userId = crypto.randomUUID();
@@ -105,7 +134,7 @@ export async function validateDeviceToken(
   const client = await pool.connect();
   
   try {
-    const result = await client.query(
+    const result = await client.query<DeviceSessionUserRow>(
       `SELECT 
          ds.user_id, 
          ds.device_id, 
@@ -158,7 +187,7 @@ export async function linkDeviceToAccount(
     await client.query('BEGIN');
     
     // Get the anonymous user
-    const deviceUser = await client.query(
+    const deviceUser = await client.query<DeviceUserRow>(
       'SELECT id FROM "user" WHERE "deviceId" = $1 AND "isAnonymous" = true',
       [deviceId]
     );
@@ -215,7 +244,7 @@ export async function getUserDevices(userId: string): Promise<
   const client = await pool.connect();
   
   try {
-    const result = await client.query(
+    const result = await client.query<DeviceSessionRow>(
       `SELECT id, device_id, device_name, device_os, last_active, created_at
        FROM device_sessions
        WHERE user_id = $1 AND expires_at > NOW()

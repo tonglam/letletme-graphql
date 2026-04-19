@@ -489,3 +489,53 @@ query EntryEventResult {
   }
 }
 ```
+
+### Entry Live Calculation (LiveCalcData)
+
+This query composes cached entry data + live performance to produce a single, client-friendly payload.
+
+```graphql
+query LiveCalcDataExample {
+  calcLivePointsByEntry(eventId: 22, entryId: 15702) {
+    entry
+    event
+    entryName
+    playerName
+    overallPoints
+    overallRank
+    chip
+    livePoints
+    transferCost
+    liveNetPoints
+    liveTotalPoints
+    played
+    toPlay
+    captainName
+    pickList {
+      element
+      webName
+      position
+      multiplier
+      pickActive
+      totalPoints
+      minutes
+      bonus
+      teamShortName
+      againstShortName
+      wasHome
+      score
+      isGwStarted
+      isGwFinished
+      bgw
+      dgw
+    }
+    transfersList {
+      elementIn
+      elementInWebName
+      elementOut
+      elementOutWebName
+      time
+    }
+  }
+}
+```

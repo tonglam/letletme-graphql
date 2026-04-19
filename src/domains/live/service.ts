@@ -1,5 +1,5 @@
 import type { GraphQLContext } from '../../graphql/context';
-import type { EventLive, LivePerformance, LiveScoresFilter } from './repository';
+import type { EventLive, LiveExplain, LivePerformance, LiveScoresFilter } from './repository';
 import { liveRepository } from './repository';
 
 export const liveService = {
@@ -21,5 +21,13 @@ export const liveService = {
 
   getEventLive(context: GraphQLContext, eventId: number): Promise<EventLive> {
     return liveRepository.getEventLive(context, eventId);
+  },
+
+  getEventLiveExplain(
+    context: GraphQLContext,
+    eventId: number,
+    elementId: number
+  ): Promise<LiveExplain | null> {
+    return liveRepository.getEventLiveExplain(context, eventId, elementId);
   },
 };
