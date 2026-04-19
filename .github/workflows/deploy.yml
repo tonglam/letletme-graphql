@@ -75,22 +75,35 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          GRAPHQL_ENV: ${{ secrets.GRAPHQL_ENV }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: true
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV
           script: |
             set -euo pipefail
             LOWER_USER=$(echo "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             docker login ghcr.io -u "$LOWER_USER" -p "$GHCR_TOKEN"
+
+            # First-time setup: clone repo if workdir doesn't exist
+            if [ ! -d "$VPS_WORKDIR/.git" ]; then
+              mkdir -p "$VPS_WORKDIR"
+              git clone https://github.com/tonglam/letletme-graphql.git "$VPS_WORKDIR"
+            fi
+
             cd "$VPS_WORKDIR"
             git fetch --all
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
+
+            # Write env file from secret
+            printf '%s' "$GRAPHQL_ENV" > .env.deploy
+
             APP_IMAGE="$IMAGE_REF" docker compose pull graphql
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build
+
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
                 break
@@ -103,4 +116,10 @@ jobs:
               fi
               sleep 2
             done
+
             APP_IMAGE="$IMAGE_REF" docker compose ps
+
+            # Install/update nginx config and reload
+            sudo cp nginx/api.letletme.top.conf /etc/nginx/sites-available/api.letletme.top.conf
+            sudo ln -sf /etc/nginx/sites-available/api.letletme.top.conf /etc/nginx/sites-enabled/api.letletme.top.conf
+            sudo nginx -t && sudo nginx -s reload
