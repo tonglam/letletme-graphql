@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
+    "test": "bun test src",
+    "test:watch": "bun test --watch src",
     "migrate": "bun scripts/migrate.ts",
     "migrate:rls": "bun scripts/migrate-rls.ts",
     "migrate:deadline": "bun scripts/migrate-deadline-text.ts",

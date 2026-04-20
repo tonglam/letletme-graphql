@@ -39,6 +39,8 @@ export type Player = {
   position: Position;
   price: number;
   startPrice: number;
+  totalPoints: number;
+  selectedByPercent: number | null;
 };
 
 export type PlayersFilter = {
@@ -79,6 +81,19 @@ type DbPlayerRow = {
   type: number;
   price: number;
   start_price: number;
+  total_points: number | null;
+  selected_by_percent: number | string | null;
+};
+
+const asNullableNumber = (value: number | string | null | undefined): number | null => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 };
 
 const mapTeam = (row: DbTeamRow): Team => ({
@@ -112,6 +127,8 @@ const mapPlayer = (row: DbPlayerRow): Player => ({
   position: row.type as Position,
   price: row.price,
   startPrice: row.start_price,
+  totalPoints: row.total_points ?? 0,
+  selectedByPercent: asNullableNumber(row.selected_by_percent),
 });
 
 const stableStringify = (value: unknown): string => {
@@ -154,6 +171,7 @@ export type PlayerTransferStats = {
 
 interface PlayersRepository {
   getPlayerById(context: GraphQLContext, id: number): Promise<Player | null>;
+  getPlayerByIdForEvent(context: GraphQLContext, id: number, eventId: number): Promise<Player | null>;
   getPlayersByIds(context: GraphQLContext, ids: number[]): Promise<Player[]>;
   listPlayers(
     context: GraphQLContext,
@@ -202,6 +220,50 @@ export const playersRepository: PlayersRepository = {
     const player = mapPlayer(row);
     await context.redis.set(cacheKey, JSON.stringify(player), 'EX', env.CACHE_TTL_SECONDS);
     return player;
+  },
+
+  async getPlayerByIdForEvent(
+    context: GraphQLContext,
+    id: number,
+    eventId: number
+  ): Promise<Player | null> {
+    const cacheKey = `players:id:${id}:event:${eventId}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as Player;
+    }
+
+    const basePlayer = await this.getPlayerById(context, id);
+    if (!basePlayer) {
+      return null;
+    }
+
+    const { data, error } = await context.supabase
+      .from('player_stats')
+      .select('total_points, selected_by_percent')
+      .eq('event_id', eventId)
+      .eq('element_id', id)
+      .limit(1);
+
+    if (error) {
+      context.logger.warn(
+        { err: error, eventId, playerId: id },
+        'Failed to fetch player event stats; falling back to base player'
+      );
+      await context.redis.set(cacheKey, JSON.stringify(basePlayer), 'EX', env.CACHE_TTL_SECONDS);
+      return basePlayer;
+    }
+
+    const row = data?.[0] as { total_points?: number | null; selected_by_percent?: number | string | null } | undefined;
+
+    const playerForEvent: Player = {
+      ...basePlayer,
+      totalPoints: row?.total_points ?? basePlayer.totalPoints,
+      selectedByPercent: asNullableNumber(row?.selected_by_percent) ?? basePlayer.selectedByPercent,
+    };
+
+    await context.redis.set(cacheKey, JSON.stringify(playerForEvent), 'EX', env.CACHE_TTL_SECONDS);
+    return playerForEvent;
   },
 
   async getPlayersByIds(context: GraphQLContext, ids: number[]): Promise<Player[]> {

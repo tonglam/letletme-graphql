@@ -37,6 +37,9 @@ export const playersTypeDefs = /* GraphQL */ `
     position: Position!
     price: Int!
     startPrice: Int!
+    value: Int!
+    totalPoints: Int!
+    selectedByPercent: Float
   }
 
   input PlayersFilter {

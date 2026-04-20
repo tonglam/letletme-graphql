@@ -327,7 +327,7 @@ const elementTypeName = (player: Player | null): string => {
  * - Bonus: bonus points as-is
  * - Defensive contribution: DEF>=10 adds 2pts, MID/FWD>=12 adds 2pts
  */
-const calcElementLivePoints = (
+export const calcElementLivePoints = (
   elementType: number,
   live: LivePerformance | undefined,
 ): number => {

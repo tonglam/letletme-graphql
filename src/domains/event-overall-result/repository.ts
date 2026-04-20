@@ -10,19 +10,28 @@ export type TopElementInfo = {
   points: number;
 };
 
+export type EventResultPlayer = {
+  id: number;
+  webName: string;
+};
+
 export type EventResult = {
   event: number;
-  averageEntryScore: number;
+  averageScore: number;
   finished: boolean;
   highestScoringEntry: number;
   highestScore: number;
   chipPlays: ChipPlay[];
-  mostSelected: number;
-  mostTransferredIn: number;
+  mostSelectedId: number;
+  mostSelectedPlayer: EventResultPlayer | null;
+  mostCaptainedId: number;
+  mostCaptainedPlayer: EventResultPlayer | null;
+  mostTransferredInId: number;
+  mostTransferInPlayer: EventResultPlayer | null;
   topElementInfo: TopElementInfo;
   transfersMade: number;
-  mostCaptained: number;
-  mostViceCaptained: number;
+  mostViceCaptainedId: number;
+  mostViceCaptainedPlayer: EventResultPlayer | null;
 };
 
 export interface EventOverallResultRepository {
@@ -67,19 +76,44 @@ function parseEventResult(rawData: unknown): EventResult | null {
     };
   }
 
+  const parsePlayerObject = (rawPlayer: unknown): EventResultPlayer | null => {
+    if (typeof rawPlayer !== 'object' || rawPlayer === null) {
+      return null;
+    }
+    const player = rawPlayer as Record<string, unknown>;
+    return {
+      id: Number(player.id ?? 0),
+      webName: String(player.webName ?? ''),
+    };
+  };
+
+  const mostSelectedPlayer = parsePlayerObject(data.mostSelectedPlayer);
+  const mostSelectedId = Number(data.mostSelected ?? 0);
+  const mostCaptainedPlayer = parsePlayerObject(data.mostCaptainedPlayer);
+  const mostCaptainedId = Number(data.mostCaptained ?? 0);
+  const mostTransferInPlayer =
+    parsePlayerObject(data.mostTransferInPlayer) ?? parsePlayerObject(data.mostTransferredInPlayer);
+  const mostTransferredInId = Number(data.mostTransferredIn ?? 0);
+  const mostViceCaptainedId = Number(data.mostViceCaptained ?? 0);
+  const mostViceCaptainedPlayer = parsePlayerObject(data.mostViceCaptainedPlayer);
+
   return {
     event: Number(data.event ?? 0),
-    averageEntryScore: Number(data.averageEntryScore ?? 0),
+    averageScore: Number(data.averageScore ?? data.averageEntryScore ?? 0),
     finished: Boolean(data.finished ?? false),
     highestScoringEntry: Number(data.highestScoringEntry ?? 0),
     highestScore: Number(data.highestScore ?? 0),
     chipPlays,
-    mostSelected: Number(data.mostSelected ?? 0),
-    mostTransferredIn: Number(data.mostTransferredIn ?? 0),
+    mostSelectedId,
+    mostSelectedPlayer,
+    mostCaptainedId,
+    mostCaptainedPlayer,
+    mostTransferredInId,
+    mostTransferInPlayer,
     topElementInfo,
     transfersMade: Number(data.transfersMade ?? 0),
-    mostCaptained: Number(data.mostCaptained ?? 0),
-    mostViceCaptained: Number(data.mostViceCaptained ?? 0),
+    mostViceCaptainedId,
+    mostViceCaptainedPlayer,
   };
 }
 

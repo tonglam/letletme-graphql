@@ -1,4 +1,5 @@
 import type { GraphQLContext } from '../../graphql/context';
+import { calcElementLivePoints } from '../entry-live/calc-service';
 import type { ElementEventResultData } from '../entry-live/calc-service';
 import { eventsService } from '../events/service';
 import type { Fixture } from '../fixtures/repository';
@@ -312,9 +313,8 @@ const buildTeamDataMap = (
     }
 
     const team = teamsById.get(player.teamId);
-    // Apply bonus: if bonus > 0, use it; otherwise add from liveBonusMap (not implemented yet, defaulting to 0)
     const bonus = perf.bonus ?? 0;
-    const totalPoints = (perf.totalPoints ?? 0) + bonus;
+    const totalPoints = calcElementLivePoints(player.position, perf);
 
     // Extract defensive contribution with proper type handling
     const defensiveContribution: number = perf.defensiveContribution ?? 0;

@@ -1,11 +1,15 @@
 import type { GraphQLContext } from '../../graphql/context';
 
+type PositionEnum = 'GOALKEEPER' | 'DEFENDER' | 'MIDFIELDER' | 'FORWARD';
+
 export type PlayerValue = {
   playerId: number;
   playerName: string;
   teamId: number;
   teamName: string;
+  teamShortName: string;
   position: string;
+  positionEnum: PositionEnum | null;
   price: number;
   value: number;
   lastValue: number;
@@ -19,8 +23,31 @@ export type PlayerValue = {
   eventPoints: number | null;
 };
 
+export type PlayerValueHistoryItem = {
+  playerId: number;
+  changeDate: Date;
+  oldValue: number;
+  newValue: number;
+  changeType: 'RISE' | 'FALL' | 'UNCHANGED';
+  transfersIn: number | null;
+  transfersOut: number | null;
+};
+
+export type PlayerValueHistoryRepositoryItem = Omit<PlayerValueHistoryItem, 'changeType'>;
+
+export type GetPlayerValueHistoryArgs = {
+  playerId: number;
+  limit: number;
+  fromDate?: Date;
+  toDate?: Date;
+};
+
 export interface PlayerValuesRepository {
   getPlayerValues(context: GraphQLContext, changeDate?: Date | null): Promise<PlayerValue[]>;
+  getPlayerValueHistory(
+    context: GraphQLContext,
+    args: GetPlayerValueHistoryArgs
+  ): Promise<PlayerValueHistoryRepositoryItem[]>;
 }
 
 function formatDateKey(date: Date): string {
@@ -40,6 +67,7 @@ type DbPlayerValueRow = {
   player_name: string;
   team_id: number;
   team_name: string;
+  team_short_name?: string | null;
   position: string;
   price: number;
   value: number;
@@ -55,12 +83,99 @@ type DbPlayerValueRow = {
   change_date: string;
 };
 
+type DbPlayerValueHistoryRow = {
+  player_id: number;
+  value: number;
+  last_value: number | null;
+  transfers_in: number | null;
+  transfers_out: number | null;
+  change_date: string | Date;
+};
+
+const compactDatePattern = /^\d{8}$/;
+
+function toPositionEnum(position: string): PositionEnum | null {
+  const normalized = position.trim().toUpperCase();
+  if (normalized === 'GOALKEEPER' || normalized === 'GK') {
+    return 'GOALKEEPER';
+  }
+  if (normalized === 'DEFENDER' || normalized === 'DEF') {
+    return 'DEFENDER';
+  }
+  if (normalized === 'MIDFIELDER' || normalized === 'MID') {
+    return 'MIDFIELDER';
+  }
+  if (normalized === 'FORWARD' || normalized === 'FWD' || normalized === 'STRIKER') {
+    return 'FORWARD';
+  }
+  return null;
+}
+
+function buildTeamShortName(teamShortName: string | null | undefined, teamName: string): string {
+  if (teamShortName && teamShortName.trim().length > 0) {
+    return teamShortName.trim();
+  }
+
+  const words = teamName
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length > 0);
+
+  if (words.length === 0) {
+    return 'UNK';
+  }
+  if (words.length === 1) {
+    return words[0].slice(0, 3).toUpperCase();
+  }
+
+  return words
+    .slice(0, 3)
+    .map((word) => word[0].toUpperCase())
+    .join('');
+}
+
+function parseChangeDate(rawValue: string | Date): Date | null {
+  if (rawValue instanceof Date) {
+    return Number.isNaN(rawValue.getTime()) ? null : rawValue;
+  }
+
+  if (compactDatePattern.test(rawValue)) {
+    const year = Number(rawValue.slice(0, 4));
+    const month = Number(rawValue.slice(4, 6));
+    const day = Number(rawValue.slice(6, 8));
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  const parsed = new Date(rawValue);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function toTenthsValue(value: number | null | undefined): number {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return 0;
+  }
+  return Math.round(value);
+}
+
+function isWithinDateRange(date: Date, fromDate?: Date, toDate?: Date): boolean {
+  if (fromDate && date.getTime() < fromDate.getTime()) {
+    return false;
+  }
+  if (toDate && date.getTime() > toDate.getTime()) {
+    return false;
+  }
+  return true;
+}
+
 const mapDbRowToPlayerValue = (row: DbPlayerValueRow): PlayerValue => ({
   playerId: row.player_id,
   playerName: row.player_name,
   teamId: row.team_id,
   teamName: row.team_name,
+  teamShortName: buildTeamShortName(row.team_short_name, row.team_name),
   position: row.position,
+  positionEnum: toPositionEnum(row.position),
   price: row.price,
   value: row.value,
   lastValue: row.last_value,
@@ -73,6 +188,48 @@ const mapDbRowToPlayerValue = (row: DbPlayerValueRow): PlayerValue => ({
   totalPoints: row.total_points,
   eventPoints: row.event_points,
 });
+
+function mapHistoryRows(
+  rows: DbPlayerValueHistoryRow[],
+  limit: number,
+  fromDate?: Date,
+  toDate?: Date
+): PlayerValueHistoryRepositoryItem[] {
+  const normalizedRows = rows
+    .map((row) => {
+      const parsedDate = parseChangeDate(row.change_date);
+      if (!parsedDate) {
+        return null;
+      }
+      return {
+        row,
+        parsedDate,
+      };
+    })
+    .filter((item): item is { row: DbPlayerValueHistoryRow; parsedDate: Date } => item !== null)
+    .filter(({ parsedDate }) => isWithinDateRange(parsedDate, fromDate, toDate))
+    .sort((left, right) => right.parsedDate.getTime() - left.parsedDate.getTime());
+
+  const rowsForComparison = normalizedRows.slice(0, limit + 1);
+  const history: PlayerValueHistoryRepositoryItem[] = [];
+
+  for (let index = 0; index < Math.min(limit, rowsForComparison.length); index += 1) {
+    const current = rowsForComparison[index];
+    const previous = rowsForComparison[index + 1];
+    const fallbackOldValue = current.row.last_value ?? current.row.value;
+
+    history.push({
+      playerId: current.row.player_id,
+      changeDate: current.parsedDate,
+      oldValue: toTenthsValue(previous?.row.value ?? fallbackOldValue),
+      newValue: toTenthsValue(current.row.value),
+      transfersIn: current.row.transfers_in,
+      transfersOut: current.row.transfers_out,
+    });
+  }
+
+  return history;
+}
 
 async function getPlayerValuesFromDatabase(
   context: GraphQLContext,
@@ -194,7 +351,9 @@ async function getPlayerValuesFromKey(
           playerName,
           teamId,
           teamName,
+          teamShortName: buildTeamShortName((item.teamShortName as string | undefined) ?? null, teamName),
           position,
+          positionEnum: toPositionEnum(position),
           price,
           value,
           lastValue,
@@ -264,5 +423,47 @@ export const playerValuesRepository: PlayerValuesRepository = {
     }
 
     return getPlayerValuesFromKey(context, cacheKey, keyType);
+  },
+
+  async getPlayerValueHistory(
+    context: GraphQLContext,
+    args: GetPlayerValueHistoryArgs
+  ): Promise<PlayerValueHistoryRepositoryItem[]> {
+    try {
+      let query = context.supabase
+        .from('player_values')
+        .select('player_id,value,last_value,transfers_in,transfers_out,change_date')
+        .eq('player_id', args.playerId)
+        .order('change_date', { ascending: false })
+        .limit(args.limit + 1);
+
+      if (args.fromDate) {
+        query = query.gte('change_date', args.fromDate.toISOString());
+      }
+
+      if (args.toDate) {
+        query = query.lte('change_date', args.toDate.toISOString());
+      }
+
+      const { data, error } = await query;
+
+      if (error) {
+        context.logger.error(
+          { err: error, playerId: args.playerId },
+          'Failed to fetch player value history from database'
+        );
+        return [];
+      }
+
+      const rows = (data as DbPlayerValueHistoryRow[] | null) ?? [];
+      if (rows.length === 0) {
+        return [];
+      }
+
+      return mapHistoryRows(rows, args.limit, args.fromDate, args.toDate);
+    } catch (error) {
+      context.logger.error({ err: error, playerId: args.playerId }, 'Failed to query player value history');
+      return [];
+    }
   },
 };

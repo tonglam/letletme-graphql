@@ -41,6 +41,7 @@ bun run dev
 ### Implementation Tracking
 - ✅ **[Implementation Checklist](documentation/IMPLEMENTATION_CHECKLIST.md)** - Domain implementation progress (COMPLETE)
 - 📝 **[Auth Implementation Checklist](documentation/AUTH_IMPLEMENTATION_CHECKLIST.md)** - Auth implementation tasks (~87 tasks)
+- 📣 **[API Changelog](documentation/API_CHANGELOG.md)** - Contract-level API additions and rollout notes
 
 ### Operations
 - 🚀 **[Deployment Summary](documentation/DEPLOYMENT_SUMMARY.md)** - Production deployment guide
@@ -539,3 +540,36 @@ query LiveCalcDataExample {
   }
 }
 ```
+
+### Player Values Domain
+```graphql
+# Historical player value changes (descending by changeDate)
+query PlayerValueHistory {
+  playerValueHistory(playerId: 350, limit: 30, fromDate: "2026-03-01T00:00:00.000Z") {
+    playerId
+    changeDate
+    oldValue
+    newValue
+    changeType
+    transfersIn
+    transfersOut
+  }
+}
+
+# Latest snapshot with non-breaking payload extensions
+query PlayerValuesLatest {
+  playerValues {
+    playerId
+    playerName
+    teamName
+    teamShortName
+    position
+    positionEnum
+    value
+    lastValue
+  }
+}
+```
+
+`oldValue` and `newValue` are returned in tenths (same unit used by existing player values, e.g. `101` = `10.1`).
+`playerValueHistory` defaults to `limit: 30`, clamps at `365`, and returns `[]` when there is no data.

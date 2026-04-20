@@ -7,6 +7,10 @@ export const playersService = {
     return playersRepository.getPlayerById(context, id);
   },
 
+  getPlayerByIdForEvent(context: GraphQLContext, id: number, eventId: number): Promise<Player | null> {
+    return playersRepository.getPlayerByIdForEvent(context, id, eventId);
+  },
+
   listPlayers(
     context: GraphQLContext,
     filter: PlayersFilter | null | undefined,

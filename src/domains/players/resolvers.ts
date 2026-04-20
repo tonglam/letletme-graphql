@@ -97,7 +97,8 @@ export const playersResolvers = {
       parent: PlayerTransferStats,
       _args: Record<string, never>,
       context: GraphQLContext
-    ): Promise<Player | null> => playersService.getPlayerById(context, parent.playerId),
+    ): Promise<Player | null> =>
+      playersService.getPlayerByIdForEvent(context, parent.playerId, parent.eventId),
   },
   Player: {
     team: async (
@@ -105,6 +106,9 @@ export const playersResolvers = {
       _args: Record<string, never>,
       context: GraphQLContext
     ): Promise<Team | null> => playersService.getTeamById(context, parent.teamId),
+    value: (parent: Player): number => parent.price,
+    totalPoints: (parent: Player): number => parent.totalPoints ?? 0,
+    selectedByPercent: (parent: Player): number | null => parent.selectedByPercent ?? null,
     position: (parent: Player): string => {
       switch (parent.position) {
         case Position.GOALKEEPER:

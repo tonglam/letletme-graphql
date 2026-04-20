@@ -6,29 +6,31 @@ export const eventOverallResultTypeDefs = /* GraphQL */ `
     numberPlayed: Int!
   }
 
+  type EventResultPlayer {
+    id: Int!
+    webName: String!
+  }
+
   type TopElementInfo {
     element: Int!
     points: Int!
     player: Player
+    teamShortName: String
   }
 
   type EventResult {
     event: Int!
-    averageEntryScore: Int!
+    averageScore: Int!
     finished: Boolean!
     highestScoringEntry: Int!
     highestScore: Int!
     chipPlays: [ChipPlay!]!
-    mostSelected: Int!
-    mostSelectedPlayer: Player
-    mostTransferredIn: Int!
-    mostTransferredInPlayer: Player
+    mostSelectedPlayer: EventResultPlayer
+    mostCaptainedPlayer: EventResultPlayer
+    mostTransferInPlayer: EventResultPlayer
     topElementInfo: TopElementInfo!
     transfersMade: Int!
-    mostCaptained: Int!
-    mostCaptainedPlayer: Player
-    mostViceCaptained: Int!
-    mostViceCaptainedPlayer: Player
+    mostViceCaptainedPlayer: EventResultPlayer
   }
 
   extend type Query {
