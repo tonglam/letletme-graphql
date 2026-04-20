@@ -7,6 +7,8 @@ services:
       context: .
       target: runner
     env_file: .env.deploy
+    environment:
+      TZ: Asia/Shanghai
     ports:
       - "4000:4000"
     restart: unless-stopped
