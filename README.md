@@ -439,6 +439,20 @@ query LeagueEventResults {
     overallRank
   }
 }
+
+# Get tournaments joined by an entry
+query EntryTournaments {
+  entryTournaments(entryId: 12345) {
+    id
+    name
+    creator
+    leagueId
+    leagueType
+    tournamentMode
+    state
+    totalTeamNum
+  }
+}
 ```
 
 ### Entries Domain
