@@ -9,6 +9,11 @@ import type { Player, Team } from '../players/repository';
 import { playersRepository } from '../players/repository';
 import type { EntryEventPick, Pick as EntryPick } from './repository';
 import { entryLiveRepository } from './repository';
+import {
+  buildTeamMapById,
+  enrichTransferRows,
+  type EntryEventTransfersData,
+} from './transfer-enrichment';
 
 export type LiveCalcData = {
   rank: number;
@@ -93,31 +98,6 @@ export type ElementEventResultData = {
   dgw: boolean;
 };
 
-export type EntryEventTransfersData = {
-  event: number;
-  entry: number;
-  elementIn: number;
-  elementInWebName: string;
-  elementInType: number;
-  elementInTypeName: string;
-  elementInTeamId: number;
-  elementInTeamName: string;
-  elementInTeamShortName: string;
-  elementInCost: number;
-  elementInPoints: number;
-  elementInPlayed: boolean;
-  elementOut: number;
-  elementOutWebName: string;
-  elementOutTeamId: number;
-  elementOutTeamName: string;
-  elementOutTeamShortName: string;
-  elementOutType: number;
-  elementOutTypeName: string;
-  elementOutCost: number;
-  elementOutPoints: number;
-  time: string;
-};
-
 const PLAY_STATUS = {
   BLANK: 0,
   NOT_STARTED: 1,
@@ -132,8 +112,6 @@ const asScaled = (value: number | null | undefined, divisor: number): number =>
   typeof value === 'number' ? value / divisor : 0;
 
 const safeNull = <T>(value: T | null | undefined, defaultValue: T): T => value ?? defaultValue;
-
-const teamMapById = (teams: Team[]): Map<number, Team> => new Map(teams.map((t) => [t.id, t]));
 
 /**
  * Build fixture index optimized to avoid array spread operations.
@@ -452,11 +430,21 @@ const selectCaptainForScoring = (picks: ElementEventResultData[]): ElementEventR
 
 const normalizeChip = (raw: string | null | undefined): string => {
   const value = (raw ?? '').toUpperCase().trim();
-  if (value === 'BENCH_BOOST' || value === 'BB') return 'BENCH_BOOST';
-  if (value === 'TRIPLE_CAPTAIN' || value === 'TC') return 'TRIPLE_CAPTAIN';
-  if (value === 'FREE_HIT' || value === 'FH') return 'FREE_HIT';
-  if (value === 'WILDCARD' || value === 'WC') return 'WILDCARD';
-  if (value === 'NONE' || value === '') return 'NONE';
+  const compactValue = value.replace(/[^A-Z0-9]/g, '');
+  if (value === 'BENCH_BOOST' || compactValue === 'BENCHBOOST' || compactValue === 'BBOOST' || compactValue === 'BB') {
+    return 'BENCH_BOOST';
+  }
+  if (
+    value === 'TRIPLE_CAPTAIN' ||
+    compactValue === 'TRIPLECAPTAIN' ||
+    compactValue === '3XC' ||
+    compactValue === 'TC'
+  ) {
+    return 'TRIPLE_CAPTAIN';
+  }
+  if (value === 'FREE_HIT' || compactValue === 'FREEHIT' || compactValue === 'FH') return 'FREE_HIT';
+  if (value === 'WILDCARD' || compactValue === 'WILDCARD' || compactValue === 'WC') return 'WILDCARD';
+  if (compactValue === 'NONE' || compactValue === 'NA' || compactValue === '') return 'NONE';
 
   // Unknown / legacy / placeholder values (e.g. "N/A") should never leak to GraphQL enums.
   return 'NONE';
@@ -527,7 +515,7 @@ export const entryLiveCalcService = {
     ]);
 
     const entryInfo: Entry | null = entry;
-    const teamsById: Map<number, Team> = teamMapById(teams);
+    const teamsById: Map<number, Team> = buildTeamMapById(teams);
     const fixturesByTeam: Map<number, Fixture[]> = buildFixtureIndex(fixtures);
 
     const chip = normalizeChip(pickEntity?.chip ?? null);
@@ -692,39 +680,13 @@ export const entryLiveCalcService = {
     const playedCaptain = captainForScoring?.element ?? 0;
     const captainName = captainForScoring?.webName ?? '';
 
-    // Transfers enrichment (players already loaded in playersById)
-    const transfersList: EntryEventTransfersData[] = transferRows.map((t) => {
-      const inPlayer = playersById.get(t.elementIn) ?? null;
-      const outPlayer = playersById.get(t.elementOut) ?? null;
-      const inTeam = inPlayer ? teamsById.get(inPlayer.teamId) : undefined;
-      const outTeam = outPlayer ? teamsById.get(outPlayer.teamId) : undefined;
-      const inLive = liveByPlayer.get(t.elementIn);
-      const outLive = liveByPlayer.get(t.elementOut);
-
-      return {
-        event: eventId,
-        entry: entryId,
-        elementIn: t.elementIn,
-        elementInWebName: inPlayer?.webName ?? '',
-        elementInType: inPlayer?.position ?? 0,
-        elementInTypeName: elementTypeName(inPlayer),
-        elementInTeamId: inPlayer?.teamId ?? 0,
-        elementInTeamName: inTeam?.name ?? '',
-        elementInTeamShortName: inTeam?.shortName ?? '',
-        elementInCost: inPlayer ? inPlayer.price / 10 : 0,
-        elementInPoints: inLive?.totalPoints ?? 0,
-        elementInPlayed: (inLive?.minutes ?? 0) > 0,
-        elementOut: t.elementOut,
-        elementOutWebName: outPlayer?.webName ?? '',
-        elementOutTeamId: outPlayer?.teamId ?? 0,
-        elementOutTeamName: outTeam?.name ?? '',
-        elementOutTeamShortName: outTeam?.shortName ?? '',
-        elementOutType: outPlayer?.position ?? 0,
-        elementOutTypeName: elementTypeName(outPlayer),
-        elementOutCost: outPlayer ? outPlayer.price / 10 : 0,
-        elementOutPoints: outLive?.totalPoints ?? 0,
-        time: t.time ?? '',
-      };
+    const transfersList: EntryEventTransfersData[] = enrichTransferRows({
+      entryId,
+      eventId,
+      transferRows,
+      playersById,
+      teamsById,
+      liveByPlayer,
     });
 
     return {

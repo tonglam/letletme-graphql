@@ -28,6 +28,12 @@ export type EntryEventResult = {
   bank: number | null;
 };
 
+export type EntryHistoryInfo = {
+  season: string;
+  totalPoints: number;
+  overallRank: number;
+};
+
 type DbEntryRow = {
   id: number;
   entry_name: string;
@@ -53,6 +59,12 @@ type DbEntryEventResultRow = {
   event_net_points: number;
   team_value: number | null;
   bank: number | null;
+};
+
+type DbEntryHistoryInfoRow = {
+  season: string;
+  total_points: number;
+  overall_rank: number;
 };
 
 const mapEntry = (row: DbEntryRow): Entry => ({
@@ -82,9 +94,16 @@ const mapEntryEventResult = (row: DbEntryEventResultRow): EntryEventResult => ({
   bank: row.bank,
 });
 
+const mapEntryHistoryInfo = (row: DbEntryHistoryInfoRow): EntryHistoryInfo => ({
+  season: row.season,
+  totalPoints: row.total_points,
+  overallRank: row.overall_rank,
+});
+
 interface EntriesRepository {
   getEntryById(context: GraphQLContext, id: number): Promise<Entry | null>;
   getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]>;
+  getEntryHistoryInfo(context: GraphQLContext, entryId: number): Promise<EntryHistoryInfo[]>;
   getEntryEventResult(
     context: GraphQLContext,
     entryId: number,
@@ -142,6 +161,29 @@ export const entriesRepository: EntriesRepository = {
     const history = (data as DbEntryEventResultRow[] | null)?.map(mapEntryEventResult) ?? [];
     await context.redis.set(cacheKey, JSON.stringify(history), 'EX', env.CACHE_TTL_SECONDS);
     return history;
+  },
+
+  async getEntryHistoryInfo(context: GraphQLContext, entryId: number): Promise<EntryHistoryInfo[]> {
+    const cacheKey = `entries:history-info:${entryId}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as EntryHistoryInfo[];
+    }
+
+    const { data, error } = await context.supabase
+      .from('entry_history_infos')
+      .select('season,total_points,overall_rank')
+      .eq('entry_id', entryId)
+      .order('season', { ascending: true });
+
+    if (error) {
+      context.logger.error({ err: error, entryId }, 'Failed to fetch entry history info');
+      throw new Error('Failed to fetch entry history info');
+    }
+
+    const historyInfo = (data as DbEntryHistoryInfoRow[] | null)?.map(mapEntryHistoryInfo) ?? [];
+    await context.redis.set(cacheKey, JSON.stringify(historyInfo), 'EX', env.CACHE_TTL_SECONDS);
+    return historyInfo;
   },
 
   async getEntryEventResult(

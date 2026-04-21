@@ -108,7 +108,43 @@ interface EntryLiveRepository {
     entryId: number,
     eventId: number
   ): Promise<EntryEventTransferRow[]>;
+  getEntryTransferHistory(
+    context: GraphQLContext,
+    entryId: number
+  ): Promise<EntryEventTransferRow[]>;
 }
+
+const mapTransferRow = (
+  row: DbEntryEventTransferRow,
+  fallback: { entryId: number; eventId: number | null }
+): EntryEventTransferRow | null => {
+  const elementIn =
+    asNumber(row.element_in) ??
+    asNumber(row.element_in_id) ??
+    asNumber(row.player_in) ??
+    asNumber(row.in_element);
+  const elementOut =
+    asNumber(row.element_out) ??
+    asNumber(row.element_out_id) ??
+    asNumber(row.player_out) ??
+    asNumber(row.out_element);
+  const rowEventId = asNumber(row.event_id) ?? asNumber(row.event);
+  const rowEntryId = asNumber(row.entry_id) ?? asNumber(row.entry);
+  const eventId = rowEventId ?? fallback.eventId;
+  const entryId = rowEntryId ?? fallback.entryId;
+
+  if (!elementIn || !elementOut || !eventId || !entryId) {
+    return null;
+  }
+
+  return {
+    entryId,
+    eventId,
+    elementIn,
+    elementOut,
+    time: asString(row.time) ?? asString(row.created_at) ?? null,
+  };
+};
 
 export const entryLiveRepository: EntryLiveRepository = {
   async getEntryEventPick(
@@ -176,12 +212,31 @@ export const entryLiveRepository: EntryLiveRepository = {
       return JSON.parse(cached) as EntryEventTransferRow[];
     }
 
-    const { data, error } = await context.supabase
+    let queryResult = await context.supabase
       .from('entry_event_transfers')
       .select('*')
       .eq('entry_id', entryId)
       .eq('event_id', eventId)
       .order('time', { ascending: true });
+
+    if (queryResult.error && queryResult.error.message.includes('column entry_event_transfers.time does not exist')) {
+      queryResult = await context.supabase
+        .from('entry_event_transfers')
+        .select('*')
+        .eq('entry_id', entryId)
+        .eq('event_id', eventId)
+        .order('created_at', { ascending: true });
+    }
+
+    if (queryResult.error && queryResult.error.message.includes('column entry_event_transfers.created_at does not exist')) {
+      queryResult = await context.supabase
+        .from('entry_event_transfers')
+        .select('*')
+        .eq('entry_id', entryId)
+        .eq('event_id', eventId);
+    }
+
+    const { data, error } = queryResult;
 
     if (error) {
       // Graceful degradation: if transfers cannot be loaded (e.g. table missing),
@@ -195,30 +250,60 @@ export const entryLiveRepository: EntryLiveRepository = {
 
     const rows = (data as DbEntryEventTransferRow[] | null) ?? [];
     const transfers: EntryEventTransferRow[] = rows
-      .map((row) => {
-        const elementIn =
-          asNumber(row.element_in) ??
-          asNumber(row.element_in_id) ??
-          asNumber(row.player_in) ??
-          asNumber(row.in_element);
-        const elementOut =
-          asNumber(row.element_out) ??
-          asNumber(row.element_out_id) ??
-          asNumber(row.player_out) ??
-          asNumber(row.out_element);
+      .map((row) => mapTransferRow(row, { entryId, eventId }))
+      .filter((t): t is EntryEventTransferRow => t !== null);
 
-        if (!elementIn || !elementOut) {
-          return null;
-        }
+    await context.redis.set(cacheKey, JSON.stringify(transfers), 'EX', env.CACHE_TTL_SECONDS);
+    return transfers;
+  },
 
-        return {
-          entryId,
-          eventId,
-          elementIn,
-          elementOut,
-          time: asString(row.time) ?? asString(row.created_at) ?? null,
-        };
-      })
+  async getEntryTransferHistory(
+    context: GraphQLContext,
+    entryId: number
+  ): Promise<EntryEventTransferRow[]> {
+    const cacheKey = `entries:transfers:history:${entryId}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as EntryEventTransferRow[];
+    }
+
+    let queryResult = await context.supabase
+      .from('entry_event_transfers')
+      .select('*')
+      .eq('entry_id', entryId)
+      .order('event_id', { ascending: true })
+      .order('time', { ascending: true });
+
+    if (queryResult.error && queryResult.error.message.includes('column entry_event_transfers.time does not exist')) {
+      queryResult = await context.supabase
+        .from('entry_event_transfers')
+        .select('*')
+        .eq('entry_id', entryId)
+        .order('event_id', { ascending: true })
+        .order('created_at', { ascending: true });
+    }
+
+    if (queryResult.error && queryResult.error.message.includes('column entry_event_transfers.created_at does not exist')) {
+      queryResult = await context.supabase
+        .from('entry_event_transfers')
+        .select('*')
+        .eq('entry_id', entryId)
+        .order('event_id', { ascending: true });
+    }
+
+    const { data, error } = queryResult;
+
+    if (error) {
+      context.logger.error(
+        { err: error, entryId },
+        'Failed to fetch entry transfer history'
+      );
+      return [];
+    }
+
+    const rows = (data as DbEntryEventTransferRow[] | null) ?? [];
+    const transfers: EntryEventTransferRow[] = rows
+      .map((row) => mapTransferRow(row, { entryId, eventId: null }))
       .filter((t): t is EntryEventTransferRow => t !== null);
 
     await context.redis.set(cacheKey, JSON.stringify(transfers), 'EX', env.CACHE_TTL_SECONDS);

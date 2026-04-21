@@ -475,17 +475,21 @@ query GetEntry {
 # Get entry history across all events
 query EntryHistory {
   entryHistory(entryId: 12345) {
-    event {
-      id
-      name
+    results {
+      eventId
+      eventPoints
+      eventRank
+      overallPoints
+      overallRank
+      eventTransfers
+      eventTransfersCost
+      eventNetPoints
     }
-    eventPoints
-    eventRank
-    overallPoints
-    overallRank
-    eventTransfers
-    eventTransfersCost
-    eventNetPoints
+    history {
+      season
+      totalPoints
+      overallRank
+    }
   }
 }
 
@@ -495,12 +499,34 @@ query EntryEventResult {
     entry {
       entryName
     }
-    event {
-      name
-    }
+    eventId
     eventPoints
     overallPoints
     overallRank
+  }
+}
+
+# Get enriched transfer history grouped by gameweek
+query EntryTransferHistory {
+  entryTransferHistory(entryId: 12345) {
+    eventId
+    eventTransfers
+    eventTransfersCost
+    transfers {
+      elementIn
+      elementInWebName
+      elementInTeamName
+      elementInTypeName
+      elementInCost
+      elementInPoints
+      elementOut
+      elementOutWebName
+      elementOutTeamName
+      elementOutTypeName
+      elementOutCost
+      elementOutPoints
+      time
+    }
   }
 }
 ```
@@ -554,6 +580,35 @@ query LiveCalcDataExample {
   }
 }
 ```
+
+### `entry_event_transfers` Table Schema (Inferred)
+
+This repository does not include a `CREATE TABLE` migration for `entry_event_transfers`.
+The schema below is inferred from runtime query and mapping logic in `entry-live` repository code.
+
+Expected database columns:
+
+- `entry_id` (used for filtering)
+- `event_id` (used for filtering)
+- incoming player column (one of): `element_in`, `element_in_id`, `player_in`, `in_element`
+- outgoing player column (one of): `element_out`, `element_out_id`, `player_out`, `out_element`
+- `time` (used for ordering and response timestamp)
+- `created_at` (optional fallback timestamp when `time` is null/missing)
+
+Normalized internal transfer row shape:
+
+```ts
+type EntryEventTransferRow = {
+  eventId: number;
+  entryId: number;
+  elementIn: number;
+  elementOut: number;
+  time: string | null;
+};
+```
+
+For GraphQL consumers, transfer details are exposed as enriched `EntryEventTransfersData`
+records (for example via `calcLivePointsByEntry(...).transfersList`).
 
 ### Player Values Domain
 ```graphql
