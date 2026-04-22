@@ -1,0 +1,28 @@
+// Bun Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`playerValueHistory integration matches contract snapshot for response shape 1`] = `
+{
+  "data": {
+    "playerValueHistory": [
+      {
+        "changeDate": 2026-04-04T00:00:00.000Z,
+        "changeType": "RISE",
+        "newValue": 1020,
+        "oldValue": 1010,
+        "playerId": 10,
+        "transfersIn": null,
+        "transfersOut": null,
+      },
+      {
+        "changeDate": 2026-04-03T00:00:00.000Z,
+        "changeType": "RISE",
+        "newValue": 1010,
+        "oldValue": 1000,
+        "playerId": 10,
+        "transfersIn": null,
+        "transfersOut": null,
+      },
+    ],
+  },
+}
+`;

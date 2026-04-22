@@ -9,11 +9,9 @@ import { playerValuesResolvers } from './resolvers';
 import { playerValuesTypeDefs } from './schema';
 
 type HistoryRow = {
-  player_id: number;
+  element_id: number;
   value: number;
   last_value: number | null;
-  transfers_in: number | null;
-  transfers_out: number | null;
   change_date: string;
 };
 
@@ -43,7 +41,7 @@ class MockPlayerValuesHistoryQuery implements PromiseLike<QueryResult<HistoryRow
   }
 
   eq(column: string, value: number): this {
-    if (column === 'player_id') {
+    if (column === 'element_id') {
       this.playerIdFilter = value;
     }
     return this;
@@ -73,7 +71,7 @@ class MockPlayerValuesHistoryQuery implements PromiseLike<QueryResult<HistoryRow
     let filtered = [...this.rows];
 
     if (this.playerIdFilter !== null) {
-      filtered = filtered.filter((row) => row.player_id === this.playerIdFilter);
+      filtered = filtered.filter((row) => row.element_id === this.playerIdFilter);
     }
 
     if (this.fromDateFilter !== null) {
@@ -159,28 +157,22 @@ describe('playerValueHistory integration', () => {
   it('returns history rows with computed changeType', async () => {
     const rows: HistoryRow[] = [
       {
-        player_id: 10,
+        element_id: 10,
         value: 1010,
         last_value: 1000,
-        transfers_in: 4000,
-        transfers_out: 2500,
-        change_date: '2026-04-03T00:00:00.000Z',
+        change_date: '20260403',
       },
       {
-        player_id: 10,
+        element_id: 10,
         value: 1000,
         last_value: 990,
-        transfers_in: 3500,
-        transfers_out: 2600,
-        change_date: '2026-04-02T00:00:00.000Z',
+        change_date: '20260402',
       },
       {
-        player_id: 10,
+        element_id: 10,
         value: 990,
         last_value: 980,
-        transfers_in: 3300,
-        transfers_out: 2800,
-        change_date: '2026-04-01T00:00:00.000Z',
+        change_date: '20260401',
       },
     ];
 
@@ -216,12 +208,10 @@ describe('playerValueHistory integration', () => {
   it('returns empty array when player has no history', async () => {
     const rows: HistoryRow[] = [
       {
-        player_id: 77,
+        element_id: 77,
         value: 1000,
         last_value: 990,
-        transfers_in: 2000,
-        transfers_out: 1500,
-        change_date: '2026-04-01T00:00:00.000Z',
+        change_date: '20260401',
       },
     ];
 
@@ -240,28 +230,22 @@ describe('playerValueHistory integration', () => {
   it('returns rows sorted by changeDate descending', async () => {
     const rows: HistoryRow[] = [
       {
-        player_id: 10,
+        element_id: 10,
         value: 1000,
         last_value: 990,
-        transfers_in: 3000,
-        transfers_out: 2000,
-        change_date: '2026-04-01T00:00:00.000Z',
+        change_date: '20260401',
       },
       {
-        player_id: 10,
+        element_id: 10,
         value: 1010,
         last_value: 1000,
-        transfers_in: 3500,
-        transfers_out: 2100,
-        change_date: '2026-04-03T00:00:00.000Z',
+        change_date: '20260403',
       },
       {
-        player_id: 10,
+        element_id: 10,
         value: 1005,
         last_value: 1000,
-        transfers_in: 3400,
-        transfers_out: 2050,
-        change_date: '2026-04-02T00:00:00.000Z',
+        change_date: '20260402',
       },
     ];
 
@@ -291,23 +275,19 @@ describe('playerValueHistory integration', () => {
     );
   });
 
-  it('preserves nullable transfer fields in response', async () => {
+  it('returns null transfer fields because player_values does not store them', async () => {
     const rows: HistoryRow[] = [
       {
-        player_id: 10,
+        element_id: 10,
         value: 1010,
         last_value: 1000,
-        transfers_in: null,
-        transfers_out: null,
-        change_date: '2026-04-03T00:00:00.000Z',
+        change_date: '20260403',
       },
       {
-        player_id: 10,
+        element_id: 10,
         value: 1000,
         last_value: 990,
-        transfers_in: 3200,
-        transfers_out: 2100,
-        change_date: '2026-04-02T00:00:00.000Z',
+        change_date: '20260402',
       },
     ];
 
@@ -336,20 +316,16 @@ describe('playerValueHistory integration', () => {
   it('matches contract snapshot for response shape', async () => {
     const rows: HistoryRow[] = [
       {
-        player_id: 10,
+        element_id: 10,
         value: 1020,
         last_value: 1010,
-        transfers_in: 4200,
-        transfers_out: 2300,
-        change_date: '2026-04-04T00:00:00.000Z',
+        change_date: '20260404',
       },
       {
-        player_id: 10,
+        element_id: 10,
         value: 1010,
         last_value: 1000,
-        transfers_in: 3900,
-        transfers_out: 2400,
-        change_date: '2026-04-03T00:00:00.000Z',
+        change_date: '20260403',
       },
     ];
 

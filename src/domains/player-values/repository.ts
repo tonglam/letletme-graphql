@@ -84,11 +84,9 @@ type DbPlayerValueRow = {
 };
 
 type DbPlayerValueHistoryRow = {
-  player_id: number;
+  element_id: number;
   value: number;
   last_value: number | null;
-  transfers_in: number | null;
-  transfers_out: number | null;
   change_date: string | Date;
 };
 
@@ -219,12 +217,12 @@ function mapHistoryRows(
     const fallbackOldValue = current.row.last_value ?? current.row.value;
 
     history.push({
-      playerId: current.row.player_id,
+      playerId: current.row.element_id,
       changeDate: current.parsedDate,
       oldValue: toTenthsValue(previous?.row.value ?? fallbackOldValue),
       newValue: toTenthsValue(current.row.value),
-      transfersIn: current.row.transfers_in,
-      transfersOut: current.row.transfers_out,
+      transfersIn: null,
+      transfersOut: null,
     });
   }
 
@@ -389,32 +387,12 @@ export const playerValuesRepository: PlayerValuesRepository = {
     const keyType = await context.redis.type(cacheKey);
     
     if (keyType === 'none') {
-      // Key doesn't exist, try to find similar keys (only if no specific date requested)
       if (!changeDate) {
-        try {
-          const pattern = 'PlayerValue:*';
-          const keys = await context.redis.keys(pattern);
-          if (keys.length > 0) {
-            // Try the most recent key
-            const mostRecentKey = keys.sort().reverse()[0];
-            context.logger.info(
-              { 
-                cacheKey, 
-                foundKey: mostRecentKey,
-                availableKeys: keys.slice(0, 5)
-              }, 
-              'Today\'s key not found, trying most recent key'
-            );
-            
-            // Recursively try the most recent key
-            const mostRecentType = await context.redis.type(mostRecentKey);
-            if (mostRecentType !== 'none') {
-              return getPlayerValuesFromKey(context, mostRecentKey, mostRecentType);
-            }
-          }
-        } catch (error) {
-          context.logger.warn({ err: error, cacheKey }, 'Could not check for similar keys in Redis');
-        }
+        context.logger.info(
+          { cacheKey },
+          'Today\'s player values cache is missing; treating it as no price changes for today'
+        );
+        return [];
       }
       
       // No data in Redis, fallback to database
@@ -432,17 +410,17 @@ export const playerValuesRepository: PlayerValuesRepository = {
     try {
       let query = context.supabase
         .from('player_values')
-        .select('player_id,value,last_value,transfers_in,transfers_out,change_date')
-        .eq('player_id', args.playerId)
+        .select('element_id,value,last_value,change_date')
+        .eq('element_id', args.playerId)
         .order('change_date', { ascending: false })
         .limit(args.limit + 1);
 
       if (args.fromDate) {
-        query = query.gte('change_date', args.fromDate.toISOString());
+        query = query.gte('change_date', getDateKey(args.fromDate).replace('PlayerValue:', ''));
       }
 
       if (args.toDate) {
-        query = query.lte('change_date', args.toDate.toISOString());
+        query = query.lte('change_date', getDateKey(args.toDate).replace('PlayerValue:', ''));
       }
 
       const { data, error } = await query;
