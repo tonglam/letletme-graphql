@@ -289,37 +289,19 @@ const elementTypeName = (player: Player | null): string => {
 /**
  * Calculate total live points for an element.
  *
- * Uses FPL's authoritative totalPoints as the base (correctly handles
- * playing points, goals, assists, clean sheets, bonus, etc. for both
- * single-game and DGW weeks) and adds our custom defensive contribution
- * bonus on top.
- *
- * Custom scoring rules (not in FPL):
- * - Defensive contribution: DEF>=10 adds 2pts, MID/FWD>=12 adds 2pts
+ * Returns FPL's totalPoints directly — it already includes all scoring
+ * components (playing points, goals, assists, clean sheets, bonus, DC, etc.)
+ * and is correct for both single-game and DGW weeks.
  */
 export const calcElementLivePoints = (
-  elementType: number,
+  _elementType: number,
   live: LivePerformance | undefined,
 ): number => {
   if (!live) {
     return 0;
   }
 
-  const basePoints = live.totalPoints ?? 0;
-  const defensiveContribution: number = live.defensiveContribution ?? 0;
-
-  let dcBonus = 0;
-  switch (elementType) {
-    case 2: // DEFENDER
-      if (defensiveContribution >= 10) dcBonus = 2;
-      break;
-    case 3: // MIDFIELDER
-    case 4: // FORWARD
-      if (defensiveContribution >= 12) dcBonus = 2;
-      break;
-  }
-
-  return basePoints + dcBonus;
+  return live.totalPoints ?? 0;
 };
 
 const hasCompletedFixtures = (pick: ElementEventResultData): boolean =>
