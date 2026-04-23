@@ -157,16 +157,6 @@ function toTenthsValue(value: number | null | undefined): number {
   return Math.round(value);
 }
 
-function isWithinDateRange(date: Date, fromDate?: Date, toDate?: Date): boolean {
-  if (fromDate && date.getTime() < fromDate.getTime()) {
-    return false;
-  }
-  if (toDate && date.getTime() > toDate.getTime()) {
-    return false;
-  }
-  return true;
-}
-
 function buildHistoryCacheKey(args: GetPlayerValueHistoryArgs): string {
   const from = args.fromDate ? formatDateKey(args.fromDate) : 'none';
   const to = args.toDate ? formatDateKey(args.toDate) : 'none';
@@ -239,8 +229,6 @@ async function getPlayerValuesFromDatabase(
   changeDate?: Date | null
 ): Promise<PlayerValue[]> {
   try {
-    let targetDate: string | undefined;
-
     if (changeDate) {
       const dateStr = changeDate.toISOString().split('T')[0]; // YYYY-MM-DD format
       const dateStrCompact = formatDateKey(changeDate).replace('PlayerValue:', ''); // yyyyMMdd format
@@ -277,7 +265,7 @@ async function getPlayerValuesFromDatabase(
       return [];
     }
 
-    targetDate = (dateData?.[0] as DbPlayerValueRow | undefined)?.change_date;
+    const targetDate = (dateData?.[0] as DbPlayerValueRow | undefined)?.change_date;
     if (!targetDate) {
       context.logger.warn('No player values dates found in database');
       return [];
