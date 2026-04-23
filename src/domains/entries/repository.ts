@@ -1,5 +1,8 @@
 import type { GraphQLContext } from '../../graphql/context';
 import { env } from '../../infra/env';
+import { getCurrentSeason } from '../../infra/season';
+
+const NULL_SENTINEL = '__entries:null__';
 
 export type Entry = {
   id: number;
@@ -102,6 +105,8 @@ const mapEntryHistoryInfo = (row: DbEntryHistoryInfoRow): EntryHistoryInfo => ({
 
 interface EntriesRepository {
   getEntryById(context: GraphQLContext, id: number): Promise<Entry | null>;
+  getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>>;
+  getEntriesByIdsFromRedis(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>>;
   getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]>;
   getEntryHistoryInfo(context: GraphQLContext, entryId: number): Promise<EntryHistoryInfo[]>;
   getEntryEventResult(
@@ -140,10 +145,105 @@ export const entriesRepository: EntriesRepository = {
     return entry;
   },
 
+  async getEntriesByIds(
+    context: GraphQLContext,
+    ids: number[],
+  ): Promise<Map<number, Entry>> {
+    const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
+    if (uniqueIds.length === 0) {
+      return new Map();
+    }
+
+    const { data, error } = await context.supabase
+      .from('entry_infos')
+      .select('*')
+      .in('id', uniqueIds);
+
+    if (error) {
+      context.logger.error({ err: error, ids: uniqueIds }, 'Failed to batch fetch entries');
+      throw new Error('Failed to batch fetch entries');
+    }
+
+    const rows = (data as DbEntryRow[] | null) ?? [];
+    const entries = new Map<number, Entry>();
+    for (const row of rows) {
+      entries.set(row.id, mapEntry(row));
+    }
+    return entries;
+  },
+
+  async getEntriesByIdsFromRedis(
+    context: GraphQLContext,
+    ids: number[],
+  ): Promise<Map<number, Entry>> {
+    const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
+    if (uniqueIds.length === 0) {
+      return new Map();
+    }
+
+    const season = await getCurrentSeason(context);
+    const hashKey = `EntryInfo:${season}`;
+
+    try {
+      // HMGET all requested IDs from the hash
+      const values = await context.redis.hmget(hashKey, ...uniqueIds.map(String));
+      const results = new Map<number, Entry>();
+      const missingIds: number[] = [];
+
+      for (let i = 0; i < uniqueIds.length; i++) {
+        const value = values[i];
+        if (value) {
+          const parsed = JSON.parse(value) as Record<string, unknown>;
+          results.set(uniqueIds[i], {
+            id: uniqueIds[i],
+            entryName: String(parsed.entryName ?? ''),
+            playerName: String(parsed.playerName ?? ''),
+            region: parsed.region ? String(parsed.region) : null,
+            startedEvent: typeof parsed.startedEvent === 'number' ? parsed.startedEvent : null,
+            overallPoints: typeof parsed.overallPoints === 'number' ? parsed.overallPoints : null,
+            overallRank: typeof parsed.overallRank === 'number' ? parsed.overallRank : null,
+            bank: typeof parsed.bank === 'number' ? parsed.bank : null,
+            teamValue: typeof parsed.teamValue === 'number' ? parsed.teamValue : null,
+            totalTransfers: typeof parsed.totalTransfers === 'number' ? parsed.totalTransfers : null,
+          });
+        } else {
+          missingIds.push(uniqueIds[i]);
+        }
+      }
+
+      // Fallback to DB for any IDs not found in Redis
+      if (missingIds.length > 0) {
+        context.logger.info(
+          { hashKey, requested: uniqueIds.length, found: results.size, missing: missingIds.length },
+          'EntryInfo hash partial miss, falling back to DB'
+        );
+        const dbEntries = await this.getEntriesByIds(context, missingIds);
+        for (const [id, entry] of dbEntries) {
+          results.set(id, entry);
+        }
+      }
+
+      return results;
+    } catch (err) {
+      context.logger.warn(
+        { err, hashKey, ids: uniqueIds },
+        'Failed to read EntryInfo hash from Redis, falling back to DB'
+      );
+      return this.getEntriesByIds(context, uniqueIds);
+    }
+  },
+
   async getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]> {
+    if (!Number.isFinite(entryId) || entryId <= 0) {
+      return [];
+    }
+
     const cacheKey = `entries:history:${entryId}`;
     const cached = await context.redis.get(cacheKey);
-    if (cached) {
+    if (cached !== null) {
+      if (cached === NULL_SENTINEL) {
+        return [];
+      }
       return JSON.parse(cached) as EntryEventResult[];
     }
 
@@ -159,14 +259,25 @@ export const entriesRepository: EntriesRepository = {
     }
 
     const history = (data as DbEntryEventResultRow[] | null)?.map(mapEntryEventResult) ?? [];
-    await context.redis.set(cacheKey, JSON.stringify(history), 'EX', env.CACHE_TTL_SECONDS);
+    if (history.length === 0) {
+      await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', env.CACHE_TTL_SECONDS);
+    } else {
+      await context.redis.set(cacheKey, JSON.stringify(history), 'EX', env.CACHE_TTL_SECONDS);
+    }
     return history;
   },
 
   async getEntryHistoryInfo(context: GraphQLContext, entryId: number): Promise<EntryHistoryInfo[]> {
+    if (!Number.isFinite(entryId) || entryId <= 0) {
+      return [];
+    }
+
     const cacheKey = `entries:history-info:${entryId}`;
     const cached = await context.redis.get(cacheKey);
-    if (cached) {
+    if (cached !== null) {
+      if (cached === NULL_SENTINEL) {
+        return [];
+      }
       return JSON.parse(cached) as EntryHistoryInfo[];
     }
 
@@ -182,7 +293,11 @@ export const entriesRepository: EntriesRepository = {
     }
 
     const historyInfo = (data as DbEntryHistoryInfoRow[] | null)?.map(mapEntryHistoryInfo) ?? [];
-    await context.redis.set(cacheKey, JSON.stringify(historyInfo), 'EX', env.CACHE_TTL_SECONDS);
+    if (historyInfo.length === 0) {
+      await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', env.CACHE_TTL_SECONDS);
+    } else {
+      await context.redis.set(cacheKey, JSON.stringify(historyInfo), 'EX', env.CACHE_TTL_SECONDS);
+    }
     return historyInfo;
   },
 
@@ -191,6 +306,10 @@ export const entriesRepository: EntriesRepository = {
     entryId: number,
     eventId: number
   ): Promise<EntryEventResult | null> {
+    if (!Number.isFinite(entryId) || entryId <= 0 || !Number.isFinite(eventId) || eventId <= 0) {
+      return null;
+    }
+
     const cacheKey = `entries:result:${entryId}:${eventId}`;
     const cached = await context.redis.get(cacheKey);
     if (cached) {
@@ -218,4 +337,5 @@ export const entriesRepository: EntriesRepository = {
     await context.redis.set(cacheKey, JSON.stringify(result), 'EX', env.CACHE_TTL_SECONDS);
     return result;
   },
+
 };

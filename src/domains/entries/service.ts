@@ -26,6 +26,14 @@ export const entriesService = {
     return entriesRepository.getEntryById(context, id);
   },
 
+  getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
+    return entriesRepository.getEntriesByIds(context, ids);
+  },
+
+  getEntriesByIdsFromRedis(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
+    return entriesRepository.getEntriesByIdsFromRedis(context, ids);
+  },
+
   getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]> {
     return entriesRepository.getEntryHistory(context, entryId);
   },
@@ -46,6 +54,10 @@ export const entriesService = {
     context: GraphQLContext,
     entryId: number
   ): Promise<EntryGameweekTransfers[]> {
+    if (!Number.isFinite(entryId) || entryId <= 0) {
+      return [];
+    }
+
     const [transferRows, eventResults, teams] = await Promise.all([
       entryLiveRepository.getEntryTransferHistory(context, entryId),
       entriesRepository.getEntryHistory(context, entryId),

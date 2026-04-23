@@ -5,6 +5,29 @@ import type { League, LeagueEventResult, LeagueStanding } from './repository';
 import { LeagueType } from './repository';
 import { leaguesService } from './service';
 
+/**
+ * Per-request memoization for event lookups to avoid N+1 Redis/DB round-trips
+ * when resolving the `event` field on multiple LeagueEventResult rows.
+ */
+const eventsMemo = new WeakMap<GraphQLContext, Map<number, Event | null>>();
+
+const getEventByIdMemoized = async (
+  context: GraphQLContext,
+  eventId: number
+): Promise<Event | null> => {
+  let memo = eventsMemo.get(context);
+  if (!memo) {
+    memo = new Map();
+    eventsMemo.set(context, memo);
+  }
+  if (memo.has(eventId)) {
+    return memo.get(eventId)!;
+  }
+  const event = await eventsService.getEventById(context, eventId);
+  memo.set(eventId, event);
+  return event;
+};
+
 type EntryLeaguesArgs = {
   entryId: number;
 };
@@ -67,6 +90,6 @@ export const leaguesResolvers = {
       parent: LeagueEventResult,
       _args: Record<string, never>,
       context: GraphQLContext
-    ): Promise<Event | null> => eventsService.getEventById(context, parent.eventId),
+    ): Promise<Event | null> => getEventByIdMemoized(context, parent.eventId),
   },
 };

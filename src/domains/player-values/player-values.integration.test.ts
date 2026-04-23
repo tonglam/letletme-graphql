@@ -104,6 +104,7 @@ function createGraphQLContext(options: ContextOptions = {}): GraphQLContext & { 
   const redis = {
     type: async (): Promise<string> => options.redisType ?? 'none',
     get: async (): Promise<string | null> => null,
+    set: async (): Promise<string> => 'OK',
     hgetall: async (): Promise<Record<string, string>> => options.redisHashData ?? {},
   } as unknown as GraphQLContext['redis'];
 
@@ -177,7 +178,7 @@ describe('playerValues integration', () => {
     expect(result.errors).toBeUndefined();
     const data = result.data as { playerValues: unknown[] } | null;
     expect(data?.playerValues).toEqual([]);
-    expect(context.calls.supabaseFrom).toBe(0);
+    expect(context.calls.supabaseFrom).toBeGreaterThan(0);
   });
 
   it('still returns cached rows when the requested cache key exists', async () => {

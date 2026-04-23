@@ -11,7 +11,6 @@ const makeMockContext = (options: {
   entries?: Map<number, unknown>;
   picks?: Map<number, unknown>;
   transfers?: Map<number, unknown>;
-  eventResults?: Map<string, unknown>;
 }): GraphQLContext => {
   const redisState = new Map<string, string>();
   const redisHashes = new Map<string, Record<string, string>>();
@@ -30,6 +29,10 @@ const makeMockContext = (options: {
       },
       hgetall: async (key: string) => redisHashes.get(key) ?? {},
       hget: async (key: string, field: string) => redisHashes.get(key)?.[field] ?? null,
+      hmget: async (key: string, ...fields: string[]) => {
+        const hash = redisHashes.get(key) ?? {};
+        return fields.map((f) => hash[f] ?? null);
+      },
       expire: async () => 1,
     } as never,
     supabase: {

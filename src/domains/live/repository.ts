@@ -1,6 +1,8 @@
 import type { GraphQLContext } from '../../graphql/context';
 import { getCurrentSeason } from '../../infra/season';
 
+const NULL_SENTINEL = '__live:null__';
+
 export type LivePerformance = {
   eventId: number;
   playerId: number;
@@ -434,12 +436,12 @@ const mapLiveExplainBreakdown = (
   return breakdowns;
 };
 
-const resolveElementId = (row: DbLiveExplainRow): number => {
+const resolveElementId = (row: DbLiveExplainRow): number | null => {
   const elementId = row.element_id ?? row.element;
   if (typeof elementId === 'number') {
     return elementId;
   }
-  throw new Error('Event live explain row missing element identifier');
+  return null;
 };
 
 const mapLiveExplainRow = (
@@ -496,60 +498,12 @@ interface LiveRepository {
     context: GraphQLContext,
     eventId: number
   ): Promise<Map<number, LivePerformance>>;
+  getSelectedByPercent(
+    context: GraphQLContext,
+    eventId: number,
+    elementId: number
+  ): Promise<number | null>;
 }
-
-const fetchEventLiveExplainRow = async (
-  context: GraphQLContext,
-  eventId: number,
-  elementId: number
-): Promise<DbLiveExplainRow | null> => {
-  const cacheKey = `live:explain:event:${eventId}`;
-  const field = String(elementId);
-  const cached = await context.redis.hget(cacheKey, field);
-  if (cached) {
-    try {
-      return JSON.parse(cached) as DbLiveExplainRow;
-    } catch (error) {
-      context.logger.warn(
-        { err: error, cacheKey, field },
-        'Failed to parse cached event live explain row'
-      );
-    }
-  }
-
-  let { data, error } = await context.supabase
-    .from('event_live_explains')
-    .select('*')
-    .eq('event_id', eventId)
-    .eq('element_id', elementId)
-    .limit(1);
-
-  if (error && error.message && error.message.includes('element_id')) {
-    ({ data, error } = await context.supabase
-      .from('event_live_explains')
-      .select('*')
-      .eq('event_id', eventId)
-      .eq('element', elementId)
-      .limit(1));
-  }
-
-  if (error) {
-    context.logger.error(
-      { err: error, eventId, elementId },
-      'Failed to fetch event live explain row'
-    );
-    throw new Error('Failed to fetch event live explain');
-  }
-
-  const row = data?.[0] as DbLiveExplainRow | undefined;
-  if (!row) {
-    return null;
-  }
-
-  await context.redis.hset(cacheKey, field, JSON.stringify(row));
-  await context.redis.expire(cacheKey, 30);
-  return row;
-};
 
 const fetchSelectedByPercent = async (
   context: GraphQLContext,
@@ -804,30 +758,60 @@ export const liveRepository: LiveRepository = {
     eventId: number,
     elementId: number
   ): Promise<LiveExplain | null> {
-    const cacheKey = `live:explain:${eventId}:${elementId}`;
-    const cached = await context.redis.get(cacheKey);
-    if (cached) {
-      return JSON.parse(cached) as LiveExplain;
-    }
-
-    const row = await fetchEventLiveExplainRow(context, eventId, elementId);
-    if (!row) {
+    if (!Number.isFinite(eventId) || eventId <= 0 || !Number.isFinite(elementId) || elementId <= 0) {
       return null;
     }
 
-    let resolvedElementId: number;
-    try {
-      resolvedElementId = resolveElementId(row);
-    } catch (err) {
-      context.logger.error(
-        { err, eventId, elementId },
-        'Event live explain row missing element identifier'
-      );
-      throw new Error('Failed to parse event live explain data');
+    const cacheKey = `live:explain:${eventId}:${elementId}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached !== null) {
+      if (cached === NULL_SENTINEL) {
+        return null;
+      }
+      return JSON.parse(cached) as LiveExplain;
     }
 
-    const selectedBy = await fetchSelectedByPercent(context, eventId, resolvedElementId);
-    const liveExplain = mapLiveExplainRow(row, resolvedElementId, selectedBy);
+    let { data, error } = await context.supabase
+      .from('event_live_explains')
+      .select('*')
+      .eq('event_id', eventId)
+      .eq('element_id', elementId)
+      .limit(1);
+
+    if (error && error.message && error.message.includes('element_id')) {
+      ({ data, error } = await context.supabase
+        .from('event_live_explains')
+        .select('*')
+        .eq('event_id', eventId)
+        .eq('element', elementId)
+        .limit(1));
+    }
+
+    if (error) {
+      context.logger.error(
+        { err: error, eventId, elementId },
+        'Failed to fetch event live explain row'
+      );
+      throw new Error('Failed to fetch event live explain');
+    }
+
+    const row = data?.[0] as DbLiveExplainRow | undefined;
+    if (!row) {
+      await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', 30);
+      return null;
+    }
+
+    const resolvedElementId = resolveElementId(row);
+    if (resolvedElementId === null) {
+      context.logger.error(
+        { eventId, elementId, row },
+        'Event live explain row missing element identifier'
+      );
+      await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', 30);
+      return null;
+    }
+
+    const liveExplain = mapLiveExplainRow(row, resolvedElementId, null);
     await context.redis.set(cacheKey, JSON.stringify(liveExplain), 'EX', 30);
     return liveExplain;
   },
@@ -855,5 +839,16 @@ export const liveRepository: LiveRepository = {
       }
     }
     return results;
+  },
+
+  async getSelectedByPercent(
+    context: GraphQLContext,
+    eventId: number,
+    elementId: number
+  ): Promise<number | null> {
+    if (!Number.isFinite(eventId) || eventId <= 0 || !Number.isFinite(elementId) || elementId <= 0) {
+      return null;
+    }
+    return fetchSelectedByPercent(context, eventId, elementId);
   },
 };

@@ -1,5 +1,6 @@
 import type { GraphQLContext } from '../../graphql/context';
 import { env } from '../../infra/env';
+import { getCurrentSeason } from '../../infra/season';
 
 export enum Position {
   GOALKEEPER = 1,
@@ -162,6 +163,8 @@ const clampLimit = (limit: number): number => {
   return Math.min(Math.max(safeLimit, 1), 200);
 };
 
+const NULL_SENTINEL = '__team:null__';
+
 export type PlayerTransferStats = {
   playerId: number;
   eventId: number;
@@ -173,6 +176,7 @@ interface PlayersRepository {
   getPlayerById(context: GraphQLContext, id: number): Promise<Player | null>;
   getPlayerByIdForEvent(context: GraphQLContext, id: number, eventId: number): Promise<Player | null>;
   getPlayersByIds(context: GraphQLContext, ids: number[]): Promise<Player[]>;
+  getPlayersFromRedis(context: GraphQLContext): Promise<Map<number, Player>>;
   listPlayers(
     context: GraphQLContext,
     filter: PlayersFilter | null | undefined,
@@ -181,6 +185,7 @@ interface PlayersRepository {
   ): Promise<Player[]>;
   getTeamById(context: GraphQLContext, id: number): Promise<Team | null>;
   listTeams(context: GraphQLContext): Promise<Team[]>;
+  listTeamsFromRedis(context: GraphQLContext): Promise<Team[]>;
   getTopTransfersIn(
     context: GraphQLContext,
     eventId: number,
@@ -293,6 +298,44 @@ export const playersRepository: PlayersRepository = {
     return players;
   },
 
+  async getPlayersFromRedis(context: GraphQLContext): Promise<Map<number, Player>> {
+    try {
+      const season = await getCurrentSeason(context);
+      const hashKey = `Player:${season}`;
+      const hash = await context.redis.hgetall(hashKey);
+
+      if (!hash || Object.keys(hash).length === 0) {
+        context.logger.info({ hashKey }, 'Player hash missing or empty, falling back to DB');
+        return new Map();
+      }
+
+      const players = new Map<number, Player>();
+      for (const [fieldKey, value] of Object.entries(hash)) {
+        const parsed = JSON.parse(value) as Record<string, unknown>;
+        const player: Player = {
+          id: Number(fieldKey),
+          code: Number(parsed.code ?? 0),
+          webName: String(parsed.webName ?? ''),
+          firstName: parsed.firstName ? String(parsed.firstName) : null,
+          secondName: parsed.secondName ? String(parsed.secondName) : null,
+          teamId: Number(parsed.teamId ?? 0),
+          position: Number(parsed.type ?? 0) as Position,
+          price: Number(parsed.price ?? 0),
+          startPrice: Number(parsed.startPrice ?? 0),
+          totalPoints: 0,
+          selectedByPercent: null,
+        };
+        players.set(player.id, player);
+      }
+
+      context.logger.info({ hashKey, count: players.size }, 'Loaded players from Redis hash');
+      return players;
+    } catch (err) {
+      context.logger.warn({ err }, 'Failed to read Player hash from Redis');
+      return new Map();
+    }
+  },
+
   async listPlayers(
     context: GraphQLContext,
     filter: PlayersFilter | null | undefined,
@@ -343,9 +386,16 @@ export const playersRepository: PlayersRepository = {
   },
 
   async getTeamById(context: GraphQLContext, id: number): Promise<Team | null> {
+    if (!Number.isFinite(id) || id <= 0) {
+      return null;
+    }
+
     const cacheKey = `teams:id:${id}`;
     const cached = await context.redis.get(cacheKey);
-    if (cached) {
+    if (cached !== null) {
+      if (cached === NULL_SENTINEL) {
+        return null;
+      }
       return JSON.parse(cached) as Team;
     }
 
@@ -358,6 +408,7 @@ export const playersRepository: PlayersRepository = {
 
     const row = data?.[0] as DbTeamRow | undefined;
     if (!row) {
+      await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', env.CACHE_TTL_SECONDS);
       return null;
     }
 
@@ -388,11 +439,59 @@ export const playersRepository: PlayersRepository = {
     return teams;
   },
 
+  async listTeamsFromRedis(context: GraphQLContext): Promise<Team[]> {
+    try {
+      const season = await getCurrentSeason(context);
+      const hashKey = `Team:${season}`;
+      const hash = await context.redis.hgetall(hashKey);
+
+      if (!hash || Object.keys(hash).length === 0) {
+        context.logger.info({ hashKey }, 'Team hash missing or empty, falling back to DB');
+        return this.listTeams(context);
+      }
+
+      const teams: Team[] = [];
+      for (const value of Object.values(hash)) {
+        const parsed = JSON.parse(value) as Record<string, unknown>;
+        teams.push({
+          id: Number(parsed.id ?? 0),
+          code: Number(parsed.code ?? 0),
+          name: String(parsed.name ?? ''),
+          shortName: String(parsed.shortName ?? ''),
+          strength: Number(parsed.strength ?? 0),
+          position: Number(parsed.position ?? 0),
+          points: Number(parsed.points ?? 0),
+          played: Number(parsed.played ?? 0),
+          win: Number(parsed.win ?? 0),
+          draw: Number(parsed.draw ?? 0),
+          loss: Number(parsed.loss ?? 0),
+          form: parsed.form ? String(parsed.form) : null,
+          strengthOverallHome: Number(parsed.strengthOverallHome ?? 0),
+          strengthOverallAway: Number(parsed.strengthOverallAway ?? 0),
+          strengthAttackHome: Number(parsed.strengthAttackHome ?? 0),
+          strengthAttackAway: Number(parsed.strengthAttackAway ?? 0),
+          strengthDefenceHome: Number(parsed.strengthDefenceHome ?? 0),
+          strengthDefenceAway: Number(parsed.strengthDefenceAway ?? 0),
+        });
+      }
+
+      teams.sort((a, b) => a.position - b.position);
+      context.logger.info({ hashKey, count: teams.length }, 'Loaded teams from Redis hash');
+      return teams;
+    } catch (err) {
+      context.logger.warn({ err }, 'Failed to read Team hash from Redis, falling back to DB');
+      return this.listTeams(context);
+    }
+  },
+
   async getTopTransfersIn(
     context: GraphQLContext,
     eventId: number,
     limit: number
   ): Promise<PlayerTransferStats[]> {
+    if (!Number.isFinite(eventId) || eventId <= 0) {
+      return [];
+    }
     const safeLimit = Math.min(Math.max(limit, 1), 100);
     const cacheKey = `players:top-transfers-in:${eventId}:${safeLimit}`;
     const cached = await context.redis.get(cacheKey);
@@ -435,6 +534,9 @@ export const playersRepository: PlayersRepository = {
     eventId: number,
     limit: number
   ): Promise<PlayerTransferStats[]> {
+    if (!Number.isFinite(eventId) || eventId <= 0) {
+      return [];
+    }
     const safeLimit = Math.min(Math.max(limit, 1), 100);
     const cacheKey = `players:top-transfers-out:${eventId}:${safeLimit}`;
     const cached = await context.redis.get(cacheKey);

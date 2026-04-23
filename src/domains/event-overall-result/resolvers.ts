@@ -1,11 +1,57 @@
 import type { GraphQLContext } from '../../graphql/context';
-import type { Player } from '../players/repository';
+import type { Player, Team } from '../players/repository';
 import { playersService } from '../players/service';
 import type { EventResult, EventResultPlayer, TopElementInfo } from './repository';
 import { eventOverallResultService } from './service';
 
 type EventOverallResultArgs = {
   season: number;
+};
+
+/**
+ * Per-request memoization for player lookups to avoid N+1 Redis/DB round-trips
+ * when resolving player fields on multiple EventResult rows.
+ */
+const playerMemo = new WeakMap<GraphQLContext, Map<number, Player | null>>();
+
+const getPlayerByIdMemoized = async (
+  context: GraphQLContext,
+  playerId: number
+): Promise<Player | null> => {
+  let memo = playerMemo.get(context);
+  if (!memo) {
+    memo = new Map();
+    playerMemo.set(context, memo);
+  }
+  if (memo.has(playerId)) {
+    return memo.get(playerId)!;
+  }
+  const player = await playersService.getPlayerById(context, playerId);
+  memo.set(playerId, player);
+  return player;
+};
+
+/**
+ * Per-request memoization for team lookups to avoid N+1 Redis/DB round-trips
+ * when resolving team fields on multiple TopElementInfo rows.
+ */
+const teamMemo = new WeakMap<GraphQLContext, Map<number, Team | null>>();
+
+const getTeamByIdMemoized = async (
+  context: GraphQLContext,
+  teamId: number
+): Promise<Team | null> => {
+  let memo = teamMemo.get(context);
+  if (!memo) {
+    memo = new Map();
+    teamMemo.set(context, memo);
+  }
+  if (memo.has(teamId)) {
+    return memo.get(teamId)!;
+  }
+  const team = await playersService.getTeamById(context, teamId);
+  memo.set(teamId, team);
+  return team;
 };
 
 function toEventResultPlayer(player: Player): EventResultPlayer {
@@ -38,12 +84,8 @@ export const eventOverallResultResolvers = {
         return null;
       }
 
-      const player = await playersService.getPlayerById(context, parent.mostSelectedId);
-      if (!player) {
-        return null;
-      }
-
-      return toEventResultPlayer(player);
+      const player = await getPlayerByIdMemoized(context, parent.mostSelectedId);
+      return player ? toEventResultPlayer(player) : null;
     },
     mostCaptainedPlayer: async (
       parent: EventResult,
@@ -58,12 +100,8 @@ export const eventOverallResultResolvers = {
         return null;
       }
 
-      const player = await playersService.getPlayerById(context, parent.mostCaptainedId);
-      if (!player) {
-        return null;
-      }
-
-      return toEventResultPlayer(player);
+      const player = await getPlayerByIdMemoized(context, parent.mostCaptainedId);
+      return player ? toEventResultPlayer(player) : null;
     },
     mostTransferInPlayer: async (
       parent: EventResult,
@@ -78,12 +116,8 @@ export const eventOverallResultResolvers = {
         return null;
       }
 
-      const player = await playersService.getPlayerById(context, parent.mostTransferredInId);
-      if (!player) {
-        return null;
-      }
-
-      return toEventResultPlayer(player);
+      const player = await getPlayerByIdMemoized(context, parent.mostTransferredInId);
+      return player ? toEventResultPlayer(player) : null;
     },
     mostViceCaptainedPlayer: async (
       parent: EventResult,
@@ -98,12 +132,8 @@ export const eventOverallResultResolvers = {
         return null;
       }
 
-      const player = await playersService.getPlayerById(context, parent.mostViceCaptainedId);
-      if (!player) {
-        return null;
-      }
-
-      return toEventResultPlayer(player);
+      const player = await getPlayerByIdMemoized(context, parent.mostViceCaptainedId);
+      return player ? toEventResultPlayer(player) : null;
     },
   },
   TopElementInfo: {
@@ -115,7 +145,7 @@ export const eventOverallResultResolvers = {
       if (!parent.element || parent.element === 0) {
         return null;
       }
-      return playersService.getPlayerById(context, parent.element);
+      return getPlayerByIdMemoized(context, parent.element);
     },
     teamShortName: async (
       parent: TopElementInfo,
@@ -126,12 +156,12 @@ export const eventOverallResultResolvers = {
         return null;
       }
 
-      const player = await playersService.getPlayerById(context, parent.element);
+      const player = await getPlayerByIdMemoized(context, parent.element);
       if (!player) {
         return null;
       }
 
-      const team = await playersService.getTeamById(context, player.teamId);
+      const team = await getTeamByIdMemoized(context, player.teamId);
       return team?.shortName ?? null;
     },
   },

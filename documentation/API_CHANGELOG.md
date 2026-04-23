@@ -1,5 +1,18 @@
 # API Changelog
 
+## 2026-04-22 - Tournament Summary Read Model
+
+### Updated
+- `tournamentEntryRankingSummary` backend read path now uses a precomputed read model:
+  - persisted cumulative fields on `tournament_points_group_results`
+  - SQL view `v_tournament_event_snapshot` for event snapshot + tournament-scoped rank columns
+
+### Rollout Checklist
+1. Apply migration `migrations/005_tournament_summary_read_model.sql`.
+2. Ensure upstream ingestion updates cumulative fields incrementally for each event.
+3. Validate parity versus previous runtime aggregation on sampled tournaments/events.
+4. Deploy backend repository changes to consume the snapshot view.
+
 ## 2026-04-20 - Price History API
 
 ### Added

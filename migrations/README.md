@@ -66,6 +66,25 @@ Applies Row Level Security (RLS) policies to authentication tables:
 
 **Total**: 7 RLS policies
 
+### 005_tournament_summary_read_model.sql
+
+Adds a fast read model for tournament entry ranking summary:
+
+- Adds persisted cumulative columns to `tournament_points_group_results`:
+  - `cum_transfers_num`
+  - `cum_total_costs`
+  - `cum_total_bench_points`
+  - `cum_auto_sub_points`
+- Backfills cumulative data from `entry_event_results`
+- Creates indexes for summary lookup and incremental updates
+- Creates view `v_tournament_event_snapshot` with SQL-computed tournament ranks
+
+Run with:
+
+```bash
+bun run migrate:tournament-summary
+```
+
 ---
 
 ## Verification

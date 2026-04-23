@@ -84,7 +84,7 @@ export const liveTypeDefs = /* GraphQL */ `
   type LiveExplain {
     event: Event!
     eventId: Int!
-    player: Player!
+    player: Player
     elementId: Int!
     modified: Boolean
     selectedBy: Float

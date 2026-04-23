@@ -27,8 +27,8 @@ type QueryResult<T> = {
 class MockPlayerValuesHistoryQuery implements PromiseLike<QueryResult<HistoryRow>> {
   private readonly rows: HistoryRow[];
   private playerIdFilter: number | null = null;
-  private fromDateFilter: number | null = null;
-  private toDateFilter: number | null = null;
+  private fromDateFilter: string | null = null;
+  private toDateFilter: string | null = null;
   private limitValue: number | null = null;
   private ascending = false;
 
@@ -58,12 +58,12 @@ class MockPlayerValuesHistoryQuery implements PromiseLike<QueryResult<HistoryRow
   }
 
   gte(_column: string, value: string): this {
-    this.fromDateFilter = new Date(value).getTime();
+    this.fromDateFilter = value;
     return this;
   }
 
   lte(_column: string, value: string): this {
-    this.toDateFilter = new Date(value).getTime();
+    this.toDateFilter = value;
     return this;
   }
 
@@ -75,17 +75,18 @@ class MockPlayerValuesHistoryQuery implements PromiseLike<QueryResult<HistoryRow
     }
 
     if (this.fromDateFilter !== null) {
-      filtered = filtered.filter((row) => new Date(row.change_date).getTime() >= this.fromDateFilter!);
+      filtered = filtered.filter((row) => row.change_date.localeCompare(this.fromDateFilter!) >= 0);
     }
 
     if (this.toDateFilter !== null) {
-      filtered = filtered.filter((row) => new Date(row.change_date).getTime() <= this.toDateFilter!);
+      filtered = filtered.filter((row) => row.change_date.localeCompare(this.toDateFilter!) <= 0);
     }
 
     filtered.sort((left, right) => {
-      const leftTime = new Date(left.change_date).getTime();
-      const rightTime = new Date(right.change_date).getTime();
-      return this.ascending ? leftTime - rightTime : rightTime - leftTime;
+      // change_date is stored as yyyyMMdd string; lexicographic sort matches chronological
+      return this.ascending
+        ? left.change_date.localeCompare(right.change_date)
+        : right.change_date.localeCompare(left.change_date);
     });
 
     if (this.limitValue !== null) {
@@ -117,6 +118,7 @@ function createGraphQLContext(rows: HistoryRow[]): GraphQLContext {
   const redis = {
     type: async (): Promise<string> => 'none',
     get: async (): Promise<string | null> => null,
+    set: async (): Promise<string> => 'OK',
     hgetall: async (): Promise<Record<string, string>> => ({}),
     keys: async (): Promise<string[]> => [],
   } as unknown as GraphQLContext['redis'];

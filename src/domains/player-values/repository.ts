@@ -1,4 +1,5 @@
 import type { GraphQLContext } from '../../graphql/context';
+import { env } from '../../infra/env';
 
 type PositionEnum = 'GOALKEEPER' | 'DEFENDER' | 'MIDFIELDER' | 'FORWARD';
 
@@ -166,6 +167,12 @@ function isWithinDateRange(date: Date, fromDate?: Date, toDate?: Date): boolean 
   return true;
 }
 
+function buildHistoryCacheKey(args: GetPlayerValueHistoryArgs): string {
+  const from = args.fromDate ? formatDateKey(args.fromDate) : 'none';
+  const to = args.toDate ? formatDateKey(args.toDate) : 'none';
+  return `player-value-history:${args.playerId}:${args.limit}:${from}:${to}`;
+}
+
 const mapDbRowToPlayerValue = (row: DbPlayerValueRow): PlayerValue => ({
   playerId: row.player_id,
   playerName: row.player_name,
@@ -189,10 +196,10 @@ const mapDbRowToPlayerValue = (row: DbPlayerValueRow): PlayerValue => ({
 
 function mapHistoryRows(
   rows: DbPlayerValueHistoryRow[],
-  limit: number,
-  fromDate?: Date,
-  toDate?: Date
+  limit: number
 ): PlayerValueHistoryRepositoryItem[] {
+  // SQL already ordered by change_date DESC and filtered by date range;
+  // we only need to parse dates and compute pairwise old values.
   const normalizedRows = rows
     .map((row) => {
       const parsedDate = parseChangeDate(row.change_date);
@@ -204,9 +211,7 @@ function mapHistoryRows(
         parsedDate,
       };
     })
-    .filter((item): item is { row: DbPlayerValueHistoryRow; parsedDate: Date } => item !== null)
-    .filter(({ parsedDate }) => isWithinDateRange(parsedDate, fromDate, toDate))
-    .sort((left, right) => right.parsedDate.getTime() - left.parsedDate.getTime());
+    .filter((item): item is { row: DbPlayerValueHistoryRow; parsedDate: Date } => item !== null);
 
   const rowsForComparison = normalizedRows.slice(0, limit + 1);
   const history: PlayerValueHistoryRepositoryItem[] = [];
@@ -234,55 +239,76 @@ async function getPlayerValuesFromDatabase(
   changeDate?: Date | null
 ): Promise<PlayerValue[]> {
   try {
-    let query = context.supabase.from('player_values').select('*');
+    let targetDate: string | undefined;
 
-    // If changeDate is provided, filter by that date
     if (changeDate) {
-      // Format date as YYYY-MM-DD for date column, or yyyyMMdd for string column
       const dateStr = changeDate.toISOString().split('T')[0]; // YYYY-MM-DD format
       const dateStrCompact = formatDateKey(changeDate).replace('PlayerValue:', ''); // yyyyMMdd format
-      
-      // Try both formats - date column or string column
-      query = query.or(`change_date.eq.${dateStr},change_date.eq.${dateStrCompact}`);
-    } else {
-      // If no date provided, get the most recent data
-      query = query.order('change_date', { ascending: false });
+
+      // Query for the specific date (try both formats)
+      const { data, error } = await context.supabase
+        .from('player_values')
+        .select('*')
+        .or(`change_date.eq.${dateStr},change_date.eq.${dateStrCompact}`);
+
+      if (error) {
+        context.logger.error({ err: error, changeDate: changeDate?.toISOString() }, 'Failed to fetch player values from database');
+        return [];
+      }
+
+      const rows = (data as DbPlayerValueRow[] | null) ?? [];
+      if (rows.length === 0) {
+        context.logger.warn({ changeDate: changeDate?.toISOString() }, 'No player values found in database');
+        return [];
+      }
+
+      return rows.map(mapDbRowToPlayerValue);
     }
 
-    const { data, error } = await query;
+    // No date provided: find the latest change_date, then fetch rows for that date only
+    const { data: dateData, error: dateError } = await context.supabase
+      .from('player_values')
+      .select('change_date')
+      .order('change_date', { ascending: false })
+      .limit(1);
+
+    if (dateError) {
+      context.logger.error({ err: dateError }, 'Failed to fetch latest player values date');
+      return [];
+    }
+
+    targetDate = (dateData?.[0] as DbPlayerValueRow | undefined)?.change_date;
+    if (!targetDate) {
+      context.logger.warn('No player values dates found in database');
+      return [];
+    }
+
+    const { data, error } = await context.supabase
+      .from('player_values')
+      .select('*')
+      .eq('change_date', targetDate);
 
     if (error) {
-      context.logger.error({ err: error, changeDate: changeDate?.toISOString() }, 'Failed to fetch player values from database');
-      // Don't throw, return empty array to allow graceful degradation
+      context.logger.error({ err: error, targetDate }, 'Failed to fetch player values for latest date');
       return [];
     }
 
-    if (!data || data.length === 0) {
-      context.logger.warn({ changeDate: changeDate?.toISOString() }, 'No player values found in database');
+    const rows = (data as DbPlayerValueRow[] | null) ?? [];
+    if (rows.length === 0) {
+      context.logger.warn({ targetDate }, 'No player values found for latest date');
       return [];
     }
 
-    // If no specific date was requested, get the most recent change_date and filter to that
-    const rows = data as DbPlayerValueRow[];
-    let filteredRows = rows;
-    
-    if (!changeDate) {
-      // Get the most recent change_date
-      const latestDate = rows[0].change_date;
-      filteredRows = rows.filter((row) => row.change_date === latestDate);
-    }
+    const playerValues = rows.map(mapDbRowToPlayerValue);
 
-    const playerValues = filteredRows.map(mapDbRowToPlayerValue);
-    
     context.logger.info(
-      { 
-        changeDate: changeDate?.toISOString(),
-        dataDate: filteredRows[0]?.change_date,
-        count: playerValues.length 
-      }, 
+      {
+        targetDate,
+        count: playerValues.length,
+      },
       'Successfully retrieved player values from database'
     );
-    
+
     return playerValues;
   } catch (error) {
     context.logger.error({ err: error, changeDate: changeDate?.toISOString() }, 'Failed to query player values from database');
@@ -297,9 +323,12 @@ async function getPlayerValuesFromKey(
 ): Promise<PlayerValue[]> {
   try {
     if (keyType === 'string') {
-      // Handle string type (JSON array)
+      // Handle string type (JSON array or null sentinel)
       const cached = await context.redis.get(cacheKey);
       if (!cached) {
+        return [];
+      }
+      if (cached === NULL_SENTINEL) {
         return [];
       }
       const parsed = JSON.parse(cached) as unknown;
@@ -378,35 +407,51 @@ async function getPlayerValuesFromKey(
   }
 }
 
+const NULL_SENTINEL = '__pv:null__';
+
 export const playerValuesRepository: PlayerValuesRepository = {
   async getPlayerValues(context: GraphQLContext, changeDate?: Date | null): Promise<PlayerValue[]> {
     const cacheKey = getDateKey(changeDate);
     context.logger.info({ cacheKey, changeDate: changeDate?.toISOString() }, 'Looking for player values in Redis');
-    
-    // Check if key exists and what type it is
+
+    // 1. Read cache first
     const keyType = await context.redis.type(cacheKey);
-    
-    if (keyType === 'none') {
-      if (!changeDate) {
-        context.logger.info(
-          { cacheKey },
-          'Today\'s player values cache is missing; treating it as no price changes for today'
-        );
-        return [];
-      }
-      
-      // No data in Redis, fallback to database
-      context.logger.info({ cacheKey, changeDate: changeDate?.toISOString() }, 'No data in Redis, querying database');
-      return getPlayerValuesFromDatabase(context, changeDate);
+
+    if (keyType !== 'none') {
+      return getPlayerValuesFromKey(context, cacheKey, keyType);
     }
 
-    return getPlayerValuesFromKey(context, cacheKey, keyType);
+    // 2. Cache miss — query database
+    context.logger.info({ cacheKey, changeDate: changeDate?.toISOString() }, 'No data in Redis, querying database');
+    const values = await getPlayerValuesFromDatabase(context, changeDate);
+
+    // 3. Write back to Redis (cache empty results too)
+    if (values.length === 0) {
+      await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', env.CACHE_TTL_SECONDS);
+    } else {
+      await context.redis.set(cacheKey, JSON.stringify(values), 'EX', env.CACHE_TTL_SECONDS);
+    }
+
+    return values;
   },
 
   async getPlayerValueHistory(
     context: GraphQLContext,
     args: GetPlayerValueHistoryArgs
   ): Promise<PlayerValueHistoryRepositoryItem[]> {
+    if (!Number.isFinite(args.playerId) || args.playerId <= 0) {
+      return [];
+    }
+
+    const cacheKey = buildHistoryCacheKey(args);
+    const cached = await context.redis.get(cacheKey);
+    if (cached !== null) {
+      if (cached === NULL_SENTINEL) {
+        return [];
+      }
+      return JSON.parse(cached) as PlayerValueHistoryRepositoryItem[];
+    }
+
     try {
       let query = context.supabase
         .from('player_values')
@@ -435,10 +480,13 @@ export const playerValuesRepository: PlayerValuesRepository = {
 
       const rows = (data as DbPlayerValueHistoryRow[] | null) ?? [];
       if (rows.length === 0) {
+        await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', env.CACHE_TTL_SECONDS);
         return [];
       }
 
-      return mapHistoryRows(rows, args.limit, args.fromDate, args.toDate);
+      const history = mapHistoryRows(rows, args.limit);
+      await context.redis.set(cacheKey, JSON.stringify(history), 'EX', env.CACHE_TTL_SECONDS);
+      return history;
     } catch (error) {
       context.logger.error({ err: error, playerId: args.playerId }, 'Failed to query player value history');
       return [];

@@ -1,5 +1,5 @@
 import type { GraphQLContext } from '../../graphql/context';
-import type { Entry, EntryEventResult } from '../entries/repository';
+import type { Entry } from '../entries/repository';
 import { entriesService } from '../entries/service';
 import type { Fixture } from '../fixtures/repository';
 import { fixturesService } from '../fixtures/service';
@@ -42,8 +42,6 @@ type SharedData = {
 type PerEntryData = {
   entryId: number;
   entry: Entry | null;
-  currentResult: EntryEventResult | null;
-  previousResult: EntryEventResult | null;
   pickEntity: EntryEventPick | null;
   transferRows: EntryEventTransferRow[];
 };
@@ -253,13 +251,11 @@ const computeSingleEntry = (
   perEntry: PerEntryData,
   shared: SharedData,
 ): LiveCalcData => {
-  const { entry, currentResult, previousResult, pickEntity, transferRows } = perEntry;
+  const { entry, pickEntity, transferRows } = perEntry;
   const { liveByPlayer, fixturesByTeam, teamsById, playersById } = shared;
 
   const chip = normalizeChip(pickEntity?.chip ?? null);
-  const transferCost =
-    (currentResult?.eventTransfersCost ?? null) ??
-    (pickEntity?.transfersCost ?? 0);
+  const transferCost = pickEntity?.transfersCost ?? 0;
 
   const picks = pickEntity?.picks ?? [];
 
@@ -372,9 +368,9 @@ const computeSingleEntry = (
   }, 0);
 
   const liveNetPoints = livePoints - transferCost;
-  const lastOverallPoints = previousResult?.overallPoints ?? 0;
-  const lastOverallRank = previousResult?.overallRank ?? 0;
-  const lastValue = asScaled(previousResult?.teamValue ?? null, 10);
+  const lastOverallPoints = entry?.overallPoints ?? 0;
+  const lastOverallRank = entry?.overallRank ?? 0;
+  const lastValue = asScaled(entry?.teamValue ?? null, 10);
   const liveTotalPoints = lastOverallPoints + liveNetPoints;
 
   const played = activePicks.filter((p) => p.isPlayed || p.bgw || p.isGwFinished).length;
@@ -393,7 +389,7 @@ const computeSingleEntry = (
   });
 
   return {
-    rank: currentResult?.eventRank ?? 0,
+    rank: 0,
     event: eventId,
     entry: entryId,
     entryName: entry?.entryName ?? '',
@@ -444,21 +440,16 @@ export const entryLiveBatchService = {
       };
     }
 
-    // Phase 1: Load shared data (parallel, single fetch per type)
+    // Phase 1: Load shared data (all from letletme_data Redis hashes)
     const liveByPlayerMap = await liveRepository.getAllLivePerformances(context, eventId);
-    const [fixtures, teams] = await Promise.all([
+    const [fixtures, teams, playersById] = await Promise.all([
       fixturesService.getEventFixtures(context, eventId),
-      playersRepository.listTeams(context),
+      playersRepository.listTeamsFromRedis(context),
+      playersRepository.getPlayersFromRedis(context),
     ]);
 
-    const allPlayerIdsFromLive = Array.from(liveByPlayerMap.keys());
     const teamsById = buildTeamMapById(teams);
     const fixturesByTeam = buildFixtureIndex(fixtures);
-
-    const players: Player[] = allPlayerIdsFromLive.length > 0
-      ? await playersRepository.getPlayersByIds(context, allPlayerIdsFromLive)
-      : [];
-    const playersById = new Map(players.map((p) => [p.id, p]));
 
     const shared: SharedData = {
       liveByPlayer: liveByPlayerMap,
@@ -467,77 +458,32 @@ export const entryLiveBatchService = {
       fixturesByTeam,
     };
 
-    // Phase 2: Load per-entry data (parallel)
-    const entryDataSettled = await Promise.allSettled(
-      entryIds.map(async (entryId) => {
-        try {
-          const [entry, currentResult, previousResult, pickEntity, transferRows] = await Promise.all([
-            entriesService.getEntryById(context, entryId),
-            entriesService.getEntryEventResult(context, entryId, eventId),
-            eventId > 1
-              ? entriesService.getEntryEventResult(context, entryId, eventId - 1)
-              : Promise.resolve<EntryEventResult | null>(null),
-            entryLiveRepository.getEntryEventPick(context, entryId, eventId),
-            entryLiveRepository.getEntryEventTransfers(context, entryId, eventId),
-          ]);
+    // Phase 2: Batch load entry info from Redis hash (single HMGET)
+    const entriesById = await entriesService.getEntriesByIdsFromRedis(context, entryIds);
 
-          // Collect player IDs from picks + transfers and ensure they're in playersById
-          const pickPlayerIds = (pickEntity?.picks ?? []).map((p) => p.element);
-          const transferPlayerIds = transferRows.flatMap((t) => [t.elementIn, t.elementOut]);
-          const missingPlayerIds = [...new Set([...pickPlayerIds, ...transferPlayerIds])]
-            .filter((id) => !playersById.has(id));
+    // Phase 3: Batch picks + transfers (2 SQL queries, no Redis)
+    const [picksByEntry, transfersByEntry] = await Promise.all([
+      entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
+      entryLiveRepository.getEntryEventTransfersByIds(context, entryIds, eventId),
+    ]);
 
-          if (missingPlayerIds.length > 0) {
-            const extraPlayers = await playersRepository.getPlayersByIds(context, missingPlayerIds);
-            for (const p of extraPlayers) {
-              playersById.set(p.id, p);
-            }
-          }
-
-          return {
-            entryId,
-            entry,
-            currentResult,
-            previousResult,
-            pickEntity,
-            transferRows,
-          } as PerEntryData;
-        } catch (err) {
-          const message = err instanceof Error ? err.message : 'Unknown error loading entry data';
-          return { entryId, error: message } as const;
-        }
-      })
-    );
-
-    // Phase 3: Compute per-entry (parallel, pure CPU — no I/O)
+    // Phase 4: Compute per-entry (pure CPU, zero I/O)
     const results = new Map<number, LiveCalcData>();
 
-    const computePromises = entryDataSettled.map(async (settled) => {
-      if (settled.status === 'rejected') {
-        return null;
-      }
-      const result = settled.value;
-      if ('error' in result) {
-        errors.push({ entryId: result.entryId, message: result.error });
-        return null;
-      }
-      const perEntry = result as PerEntryData;
+    for (const entryId of entryIds) {
       try {
-return {
-        entryId: perEntry.entryId,
-        calcData: computeSingleEntry(perEntry.entryId, eventId, perEntry, shared),
+        const perEntry: PerEntryData = {
+          entryId,
+          entry: entriesById.get(entryId) ?? null,
+          pickEntity: picksByEntry.get(entryId) ?? null,
+          transferRows: transfersByEntry.get(entryId) ?? [],
         };
+
+        const calcData = computeSingleEntry(entryId, eventId, perEntry, shared);
+        results.set(entryId, calcData);
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Computation error';
-        errors.push({ entryId: perEntry.entryId, message });
-        return null;
-      }
-    });
-
-    const computeResults = await Promise.all(computePromises);
-    for (const cr of computeResults) {
-      if (cr) {
-        results.set(cr.entryId, cr.calcData);
+        errors.push({ entryId, message });
       }
     }
 

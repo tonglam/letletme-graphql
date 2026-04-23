@@ -7,6 +7,31 @@ import type { Entry, EntryEventResult, EntryHistoryInfo } from './repository';
 import type { EntryGameweekTransfers } from './service';
 import { entriesService } from './service';
 
+/**
+ * Per-request memoization for player-event lookups to avoid N+1 Redis/DB round-trips
+ * when resolving the `eventPlayedCaptain` field on multiple EntryEventResult rows.
+ */
+const playersForEventMemo = new WeakMap<GraphQLContext, Map<string, Player | null>>();
+
+const getPlayerByIdForEventMemoized = async (
+  context: GraphQLContext,
+  playerId: number,
+  eventId: number
+): Promise<Player | null> => {
+  const key = `${playerId}:${eventId}`;
+  let memo = playersForEventMemo.get(context);
+  if (!memo) {
+    memo = new Map();
+    playersForEventMemo.set(context, memo);
+  }
+  if (memo.has(key)) {
+    return memo.get(key)!;
+  }
+  const player = await playersService.getPlayerByIdForEvent(context, playerId, eventId);
+  memo.set(key, player);
+  return player;
+};
+
 type EntryArgs = {
   id: number;
 };
@@ -94,7 +119,22 @@ export const entriesResolvers = {
       parent: EntryEventResult,
       _args: Record<string, never>,
       context: GraphQLContext
-    ): Promise<Entry | null> => entriesService.getEntryById(context, parent.entryId),
+    ): Promise<Entry | null> => {
+      // Reuse live calc data to avoid a duplicate getEntryById round-trip
+      const liveCalc = await getLiveCalcData(context, parent.entryId, parent.eventId);
+      return {
+        id: liveCalc.entry,
+        entryName: liveCalc.entryName,
+        playerName: liveCalc.playerName,
+        region: liveCalc.region,
+        startedEvent: liveCalc.startedEvent,
+        overallPoints: liveCalc.overallPoints,
+        overallRank: liveCalc.overallRank,
+        bank: liveCalc.bank,
+        teamValue: liveCalc.teamValue,
+        totalTransfers: liveCalc.totalTransfers,
+      };
+    },
     eventBenchPoints: async (parent: EntryEventResult, _args: Record<string, never>, context: GraphQLContext): Promise<number> => {
       const liveCalc = await getLiveCalcData(context, parent.entryId, parent.eventId);
       return liveCalc.pickList
@@ -114,7 +154,7 @@ export const entriesResolvers = {
       if (!liveCalc.playedCaptain) {
         return null;
       }
-      return playersService.getPlayerByIdForEvent(context, liveCalc.playedCaptain, parent.eventId);
+      return getPlayerByIdForEventMemoized(context, liveCalc.playedCaptain, parent.eventId);
     },
     eventCaptainPoints: async (
       parent: EntryEventResult,

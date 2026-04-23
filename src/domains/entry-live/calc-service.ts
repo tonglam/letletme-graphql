@@ -1,5 +1,5 @@
 import type { GraphQLContext } from '../../graphql/context';
-import type { Entry, EntryEventResult } from '../entries/repository';
+import type { Entry } from '../entries/repository';
 import { entriesService } from '../entries/service';
 import type { Fixture } from '../fixtures/repository';
 import { fixturesService } from '../fixtures/service';
@@ -466,24 +466,16 @@ export const entryLiveCalcService = {
     // Parallel fetch all initial data
     const [
       entry,
-      currentResult,
-      previousResult,
       pickEntity,
       fixtures,
       teams,
     ]: [
       Entry | null,
-      EntryEventResult | null,
-      EntryEventResult | null,
       EntryEventPick | null,
       Fixture[],
       Team[],
     ] = await Promise.all([
       entriesService.getEntryById(context, entryId),
-      entriesService.getEntryEventResult(context, entryId, eventId),
-      eventId > 1
-        ? entriesService.getEntryEventResult(context, entryId, eventId - 1)
-        : Promise.resolve<EntryEventResult | null>(null),
       entryLiveRepository.getEntryEventPick(context, entryId, eventId),
       getEventFixtures(context, eventId),
       playersRepository.listTeams(context),
@@ -494,9 +486,7 @@ export const entryLiveCalcService = {
     const fixturesByTeam: Map<number, Fixture[]> = buildFixtureIndex(fixtures);
 
     const chip = normalizeChip(pickEntity?.chip ?? null);
-    const transferCost =
-      (currentResult?.eventTransfersCost ?? null) ??
-      (pickEntity?.transfersCost ?? 0);
+    const transferCost = pickEntity?.transfersCost ?? 0;
 
     const picks: EntryPick[] = pickEntity?.picks ?? [];
 
@@ -648,10 +638,10 @@ export const entryLiveCalcService = {
     }, 0);
 
     const liveNetPoints = livePoints - transferCost;
-    // Last overall = previous event's overall points (GW21 when querying GW22).
-    const lastOverallPoints = previousResult?.overallPoints ?? 0;
-    const lastOverallRank = previousResult?.overallRank ?? 0;
-    const lastValue = asScaled(previousResult?.teamValue ?? null, 10);
+    // Last overall = entry's overallPoints from entry_infos (end of last finalized GW)
+    const lastOverallPoints = entryInfo?.overallPoints ?? 0;
+    const lastOverallRank = entryInfo?.overallRank ?? 0;
+    const lastValue = asScaled(entryInfo?.teamValue ?? null, 10);
     // Live total = last overall + current live net points
     const liveTotalPoints = lastOverallPoints + liveNetPoints;
 
@@ -671,7 +661,7 @@ export const entryLiveCalcService = {
     });
 
     return {
-      rank: currentResult?.eventRank ?? 0,
+      rank: 0,
       event: eventId,
       entry: entryId,
       entryName: entryInfo?.entryName ?? '',

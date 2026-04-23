@@ -3,6 +3,50 @@ import type { Player, PlayersFilter, PlayerTransferStats, Team } from './reposit
 import { Position } from './repository';
 import { playersService } from './service';
 
+/**
+ * Per-request memoization for team lookups to avoid N+1 Redis/DB round-trips
+ * when resolving the `team` field on multiple Player rows.
+ */
+const teamsMemo = new WeakMap<GraphQLContext, Map<number, Team | null>>();
+
+const getTeamByIdMemoized = async (
+  context: GraphQLContext,
+  teamId: number
+): Promise<Team | null> => {
+  let memo = teamsMemo.get(context);
+  if (!memo) {
+    const allTeams = await playersService.listTeams(context);
+    memo = new Map(allTeams.map((team) => [team.id, team]));
+    teamsMemo.set(context, memo);
+  }
+  return memo.get(teamId) ?? null;
+};
+
+/**
+ * Per-request memoization for player-event lookups to avoid N+1 Redis/DB round-trips
+ * when resolving the `player` field on multiple PlayerTransferStats rows.
+ */
+const playersForEventMemo = new WeakMap<GraphQLContext, Map<string, Player | null>>();
+
+const getPlayerByIdForEventMemoized = async (
+  context: GraphQLContext,
+  playerId: number,
+  eventId: number
+): Promise<Player | null> => {
+  const key = `${playerId}:${eventId}`;
+  let memo = playersForEventMemo.get(context);
+  if (!memo) {
+    memo = new Map();
+    playersForEventMemo.set(context, memo);
+  }
+  if (memo.has(key)) {
+    return memo.get(key)!;
+  }
+  const player = await playersService.getPlayerByIdForEvent(context, playerId, eventId);
+  memo.set(key, player);
+  return player;
+};
+
 type PlayerArgs = {
   id: number;
 };
@@ -98,14 +142,14 @@ export const playersResolvers = {
       _args: Record<string, never>,
       context: GraphQLContext
     ): Promise<Player | null> =>
-      playersService.getPlayerByIdForEvent(context, parent.playerId, parent.eventId),
+      getPlayerByIdForEventMemoized(context, parent.playerId, parent.eventId),
   },
   Player: {
     team: async (
       parent: Player,
       _args: Record<string, never>,
       context: GraphQLContext
-    ): Promise<Team | null> => playersService.getTeamById(context, parent.teamId),
+    ): Promise<Team | null> => getTeamByIdMemoized(context, parent.teamId),
     value: (parent: Player): number => parent.price,
     totalPoints: (parent: Player): number => parent.totalPoints ?? 0,
     selectedByPercent: (parent: Player): number | null => parent.selectedByPercent ?? null,

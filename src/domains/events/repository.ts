@@ -1,6 +1,16 @@
 import type { GraphQLContext } from '../../graphql/context';
 import { env } from '../../infra/env';
 
+export type ChipPlay = {
+  chipName: string;
+  numberPlayed: number;
+};
+
+export type TopElementInfo = {
+  element: number;
+  points: number;
+};
+
 export type Event = {
   id: number;
   name: string;
@@ -17,11 +27,11 @@ export type Event = {
   isNext: boolean;
   cupLeagueCreate: boolean;
   h2hKoMatchesCreated: boolean;
-  chipPlays: unknown[] | null;
+  chipPlays: ChipPlay[] | null;
   mostSelected: number | null;
   mostTransferredIn: number | null;
   topElement: number | null;
-  topElementInfo: unknown | null;
+  topElementInfo: TopElementInfo | null;
   transfersMade: number | null;
   mostCaptained: number | null;
   mostViceCaptained: number | null;
@@ -77,11 +87,11 @@ const mapEvent = (row: DbEventRow): Event => ({
   isNext: row.is_next,
   cupLeagueCreate: row.cup_league_create,
   h2hKoMatchesCreated: row.h2h_ko_matches_created,
-  chipPlays: row.chip_plays,
+  chipPlays: parseChipPlays(row.chip_plays),
   mostSelected: row.most_selected,
   mostTransferredIn: row.most_transferred_in,
   topElement: row.top_element,
-  topElementInfo: row.top_element_info,
+  topElementInfo: parseTopElementInfo(row.top_element_info),
   transfersMade: row.transfers_made,
   mostCaptained: row.most_captained,
   mostViceCaptained: row.most_vice_captained,
@@ -89,6 +99,30 @@ const mapEvent = (row: DbEventRow): Event => ({
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const parseChipPlays = (raw: unknown): ChipPlay[] | null => {
+  if (!Array.isArray(raw)) return null;
+  const parsed = raw
+    .map((item): ChipPlay | null => {
+      if (!isRecord(item)) return null;
+      return {
+        chipName: String(item.chipName ?? item.chip_name ?? ''),
+        numberPlayed: Number(item.numberPlayed ?? item.num_played ?? 0),
+      };
+    })
+    .filter((item): item is ChipPlay => item !== null);
+  return parsed.length > 0 ? parsed : null;
+};
+
+const parseTopElementInfo = (raw: unknown): TopElementInfo | null => {
+  if (!isRecord(raw)) return null;
+  return {
+    element: Number(raw.element ?? raw.id ?? 0),
+    points: Number(raw.points ?? 0),
+  };
+};
+
+const NULL_SENTINEL = '__event:null__';
 
 const stableStringify = (value: unknown): string => {
   if (Array.isArray(value)) {
@@ -138,9 +172,16 @@ interface EventsRepository {
 
 export const eventsRepository: EventsRepository = {
   async getEventById(context: GraphQLContext, id: number): Promise<Event | null> {
+    if (!Number.isFinite(id) || id <= 0) {
+      return null;
+    }
+
     const cacheKey = `events:id:${id}`;
     const cached = await context.redis.get(cacheKey);
-    if (cached) {
+    if (cached !== null) {
+      if (cached === NULL_SENTINEL) {
+        return null;
+      }
       return JSON.parse(cached) as Event;
     }
 
@@ -153,6 +194,7 @@ export const eventsRepository: EventsRepository = {
 
     const row = data?.[0] as DbEventRow | undefined;
     if (!row) {
+      await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', env.CACHE_TTL_SECONDS);
       return null;
     }
 
@@ -168,44 +210,39 @@ export const eventsRepository: EventsRepository = {
       return JSON.parse(cached) as CurrentEventInfo;
     }
 
-    // Get current event
-    const { data: currentData, error: currentError } = await context.supabase
+    // Single query for both current and next event (avoids 2 round-trips).
+    // Event flags change only once per gameweek, so this is very cacheable.
+    const { data, error } = await context.supabase
       .from('events')
-      .select('id')
-      .eq('is_current', true)
-      .limit(1);
+      .select('id,deadline_time,is_current,is_next')
+      .or('is_current.eq.true,is_next.eq.true');
 
-    if (currentError) {
-      context.logger.error({ err: currentError }, 'Failed to fetch current event');
+    if (error) {
+      context.logger.error({ err: error }, 'Failed to fetch current/next event');
       throw new Error('Failed to fetch current event');
     }
 
-    const currentEventId = (currentData?.[0] as { id: number } | undefined)?.id;
-    if (!currentEventId) {
+    const rows = (data ?? []) as Array<{
+      id: number;
+      deadline_time: string | null;
+      is_current: boolean;
+      is_next: boolean;
+    }>;
+
+    const currentRow = rows.find((r) => r.is_current);
+    if (!currentRow) {
       return null;
     }
 
-    // Get next event deadline
-    const { data: nextData, error: nextError } = await context.supabase
-      .from('events')
-      .select('deadline_time')
-      .eq('is_next', true)
-      .limit(1);
-
-    if (nextError) {
-      context.logger.error({ err: nextError }, 'Failed to fetch next event deadline');
-      // Continue with null deadline if error occurs
-    }
-
-    const nextDeadline = (nextData?.[0] as { deadline_time: string | null } | undefined)
-      ?.deadline_time ?? null;
+    const nextRow = rows.find((r) => r.is_next);
 
     const result: CurrentEventInfo = {
-      currentEvent: currentEventId,
-      nextUtcDeadline: nextDeadline ?? null, // Already ISO 8601 string from DB
+      currentEvent: currentRow.id,
+      nextUtcDeadline: nextRow?.deadline_time ?? null,
     };
 
-    await context.redis.set(cacheKey, JSON.stringify(result), 'EX', env.CACHE_TTL_SECONDS);
+    // Cache for 1 hour — event flags only change once per gameweek.
+    await context.redis.set(cacheKey, JSON.stringify(result), 'EX', 3600);
     return result;
   },
 

@@ -1,4 +1,6 @@
 import type { GraphQLContext } from '../../graphql/context';
+import { MAX_EVENT_ID } from '../../infra/config';
+import { getCurrentSeason } from '../../infra/season';
 import { calcElementLivePoints } from '../entry-live/calc-service';
 import type { ElementEventResultData } from '../entry-live/calc-service';
 import { eventsService } from '../events/service';
@@ -90,8 +92,6 @@ type MatchBucketsFromRedis = {
   finished: LiveFixtureRedisRow[];
 };
 
-const LIVE_FIXTURE_HASH_KEYS = ['LiveFixtureData', 'LiveFixture'] as const;
-
 const asRecord = (value: unknown): Record<string, unknown> | null => {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return null;
@@ -147,7 +147,7 @@ const parseJsonUnknown = (value: string): unknown | null => {
 
 const normalizeLiveFixtureStatus = (rawStatus: string): MatchBucketStatus | null => {
   const normalized = rawStatus.trim().toUpperCase().replace(/[\s-]+/g, '_');
-  if (normalized === 'NOT_STARTED') {
+  if (normalized === 'NOT_STARTED' || normalized === 'NOT_START') {
     return 'NOT_STARTED';
   }
   if (normalized === 'PLAYING' || normalized === 'EVENT_NOT_FINISHED') {
@@ -249,26 +249,28 @@ const mergeMatchBuckets = (
 
 const loadLiveFixtureBucketsFromRedis = async (
   context: GraphQLContext,
+  eventId: number,
 ): Promise<MatchBucketsFromRedis | null> => {
-  for (const redisKey of LIVE_FIXTURE_HASH_KEYS) {
-    const hashEntries = await context.redis.hgetall(redisKey);
-    const fields = Object.values(hashEntries);
-    if (fields.length === 0) {
-      continue;
-    }
+  const season = await getCurrentSeason(context);
+  const redisKey = `LiveFixture:${season}:${eventId}`;
 
-    const buckets = fields.reduce<MatchBucketsFromRedis>(
-      (acc, fieldValue) => mergeMatchBuckets(acc, parseLiveFixtureHashFieldValue(fieldValue)),
-      { notStarted: [], playing: [], finished: [] },
-    );
+  const hashEntries = await context.redis.hgetall(redisKey);
+  const fields = Object.values(hashEntries);
+  if (fields.length === 0) {
+    return null;
+  }
 
-    if (
-      buckets.notStarted.length > 0 ||
-      buckets.playing.length > 0 ||
-      buckets.finished.length > 0
-    ) {
-      return buckets;
-    }
+  const buckets = fields.reduce<MatchBucketsFromRedis>(
+    (acc, fieldValue) => mergeMatchBuckets(acc, parseLiveFixtureHashFieldValue(fieldValue)),
+    { notStarted: [], playing: [], finished: [] },
+  );
+
+  if (
+    buckets.notStarted.length > 0 ||
+    buckets.playing.length > 0 ||
+    buckets.finished.length > 0
+  ) {
+    return buckets;
   }
 
   return null;
@@ -520,11 +522,11 @@ export const liveMatchesService = {
 
     // Fetch static dependencies and try Redis LiveFixture source first.
     const [nextFixtures, teams, redisBuckets] = await Promise.all([
-      currentEventId <= 38
+      currentEventId <= MAX_EVENT_ID
         ? getEventFixturesSafe(context, currentEventId + 1)
         : Promise.resolve<Fixture[]>([]),
       getTeamsSafe(context),
-      loadLiveFixtureBucketsFromRedis(context),
+      loadLiveFixtureBucketsFromRedis(context, currentEventId),
     ]);
 
     const teamsById = new Map<number, Team>(teams.map((t) => [t.id, t]));

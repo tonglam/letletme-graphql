@@ -294,15 +294,11 @@ describe('tournamentsRepository.getTournamentEventResults', () => {
   const buildContext = (options: {
     tournamentData?: unknown[];
     tournamentEntriesData?: unknown[];
-    pointsData?: unknown[];
-    leagueEventData?: unknown[];
-    entryInfoData?: unknown[];
+    resultData?: unknown[];
     entryEventResultsData?: unknown[];
     tournamentError?: unknown;
     tournamentEntriesError?: unknown;
-    pointsError?: unknown;
-    leagueEventError?: unknown;
-    entryInfoError?: unknown;
+    resultError?: unknown;
     entryEventResultsError?: unknown;
     cacheSeed?: string | null;
   }): GraphQLContext => {
@@ -354,15 +350,8 @@ describe('tournamentsRepository.getTournamentEventResults', () => {
         },
         then(resolve: (value: unknown) => unknown) {
           let result: { data: unknown[]; error: unknown } = { data: [], error: null };
-          if (table === 'tournament_points_group_results') {
-            result = { data: options.pointsData ?? [], error: options.pointsError ?? null };
-          } else if (table === 'league_event_results') {
-            result = {
-              data: options.leagueEventData ?? [],
-              error: options.leagueEventError ?? null,
-            };
-          } else if (table === 'entry_infos') {
-            result = { data: options.entryInfoData ?? [], error: options.entryInfoError ?? null };
+          if (table === 'v_tournament_event_result') {
+            result = { data: options.resultData ?? [], error: options.resultError ?? null };
           } else if (table === 'tournament_entries') {
             result = {
               data: filterRowsByActions(options.tournamentEntriesData ?? [], actions),
@@ -469,16 +458,63 @@ describe('tournamentsRepository.getTournamentEventResults', () => {
     expect(result).toEqual(cached);
   });
 
-  it('throws when the tournament does not exist', async () => {
-    const context = buildContext({ tournamentData: [] });
-    await expect(tournamentsRepository.getTournamentEventResults(context, 1, 33)).rejects.toThrow(
-      'Tournament not found'
-    );
+  it('returns empty array when the tournament has no results', async () => {
+    const context = buildContext({ resultData: [] });
+    const result = await tournamentsRepository.getTournamentEventResults(context, 1, 33);
+    expect(result).toEqual([]);
   });
 
   it('throws when the tournament mode is not POINTS_RACES', async () => {
     const context = buildContext({
-      tournamentData: [{ ...tournamentRow, group_mode: 'battle_races' }],
+      resultData: [
+        {
+          tournament_id: 1,
+          event_id: 33,
+          entry_id: 100,
+          group_id: 1,
+          event_group_rank: 1,
+          event_points: 98,
+          event_cost: 0,
+          event_net_points: 98,
+          event_rank: 50,
+          overall_points: 2001,
+          overall_rank: 200,
+          event_chip: 'bboost',
+          captain_id: 430,
+          captain_points: 12,
+          team_value: 1038,
+          bank: 22,
+          entry_name: 'League Entry 100',
+          player_name: 'Manager 100',
+          _tournament_id: 1,
+          _tournament_name: 'Tournament 1',
+          _tournament_creator: 'tong',
+          _tournament_admin_entry_id: 15702,
+          _tournament_league_id: 12121,
+          _tournament_league_type: 'classic',
+          _tournament_total_team_num: 3,
+          _tournament_tournament_mode: 'normal',
+          _tournament_group_mode: 'battle_races',
+          _tournament_group_team_num: 3,
+          _tournament_group_num: 1,
+          _tournament_group_started_event_id: 1,
+          _tournament_group_ended_event_id: 38,
+          _tournament_group_auto_averages: false,
+          _tournament_group_rounds: null,
+          _tournament_group_play_against_num: null,
+          _tournament_group_qualify_num: null,
+          _tournament_knockout_mode: null,
+          _tournament_knockout_team_num: null,
+          _tournament_knockout_rounds: null,
+          _tournament_knockout_event_num: null,
+          _tournament_knockout_started_event_id: null,
+          _tournament_knockout_ended_event_id: null,
+          _tournament_knockout_play_against_num: null,
+          _tournament_state: 'active',
+          _tournament_created_at: '2026-04-21T00:00:00.000Z',
+          _tournament_updated_at: '2026-04-21T00:00:00.000Z',
+        },
+      ],
     });
     await expect(tournamentsRepository.getTournamentEventResults(context, 1, 33)).rejects.toThrow(
       'Tournament event results currently support POINTS_RACES only'
@@ -488,53 +524,17 @@ describe('tournamentsRepository.getTournamentEventResults', () => {
   it('returns rows ordered by group and event_group_rank and caches the merged result', async () => {
     const context = buildContext({
       tournamentData: [tournamentRow],
-      pointsData: [
+      resultData: [
         {
           tournament_id: 1,
-          group_id: 2,
-          event_id: 33,
-          entry_id: 300,
-          event_group_rank: 2,
-          event_points: 81,
-          event_cost: 4,
-          event_net_points: 77,
-          event_rank: 201,
-        },
-        {
-          tournament_id: 1,
-          group_id: 1,
           event_id: 33,
           entry_id: 100,
+          group_id: 1,
           event_group_rank: 1,
           event_points: 98,
           event_cost: 0,
           event_net_points: 98,
           event_rank: 50,
-        },
-      ],
-      leagueEventData: [
-        {
-          league_id: 12121,
-          league_type: 'classic',
-          event_id: 33,
-          entry_id: 300,
-          entry_name: null,
-          player_name: null,
-          overall_points: 1880,
-          overall_rank: 1000,
-          event_chip: 'freehit',
-          captain_id: 99,
-          captain_points: 8,
-          team_value: 1025,
-          bank: 10,
-        },
-        {
-          league_id: 12121,
-          league_type: 'classic',
-          event_id: 33,
-          entry_id: 100,
-          entry_name: 'League Entry 100',
-          player_name: 'Manager 100',
           overall_points: 2001,
           overall_rank: 200,
           event_chip: 'bboost',
@@ -542,11 +542,83 @@ describe('tournamentsRepository.getTournamentEventResults', () => {
           captain_points: 12,
           team_value: 1038,
           bank: 22,
+          entry_name: 'League Entry 100',
+          player_name: 'Manager 100',
+          _tournament_id: 1,
+          _tournament_name: 'Tournament 1',
+          _tournament_creator: 'tong',
+          _tournament_admin_entry_id: 15702,
+          _tournament_league_id: 12121,
+          _tournament_league_type: 'classic',
+          _tournament_total_team_num: 3,
+          _tournament_tournament_mode: 'normal',
+          _tournament_group_mode: 'points_races',
+          _tournament_group_team_num: 3,
+          _tournament_group_num: 1,
+          _tournament_group_started_event_id: 1,
+          _tournament_group_ended_event_id: 38,
+          _tournament_group_auto_averages: false,
+          _tournament_group_rounds: null,
+          _tournament_group_play_against_num: null,
+          _tournament_group_qualify_num: null,
+          _tournament_knockout_mode: null,
+          _tournament_knockout_team_num: null,
+          _tournament_knockout_rounds: null,
+          _tournament_knockout_event_num: null,
+          _tournament_knockout_started_event_id: null,
+          _tournament_knockout_ended_event_id: null,
+          _tournament_knockout_play_against_num: null,
+          _tournament_state: 'active',
+          _tournament_created_at: '2026-04-21T00:00:00.000Z',
+          _tournament_updated_at: '2026-04-21T00:00:00.000Z',
         },
-      ],
-      entryInfoData: [
-        { id: 300, entry_name: 'Fallback Entry 300', player_name: 'Fallback Manager 300' },
-        { id: 100, entry_name: 'Fallback Entry 100', player_name: 'Fallback Manager 100' },
+        {
+          tournament_id: 1,
+          event_id: 33,
+          entry_id: 300,
+          group_id: 2,
+          event_group_rank: 2,
+          event_points: 81,
+          event_cost: 4,
+          event_net_points: 77,
+          event_rank: 201,
+          overall_points: 1880,
+          overall_rank: 1000,
+          event_chip: 'freehit',
+          captain_id: 99,
+          captain_points: 8,
+          team_value: 1025,
+          bank: 10,
+          entry_name: 'Fallback Entry 300',
+          player_name: 'Fallback Manager 300',
+          _tournament_id: 1,
+          _tournament_name: 'Tournament 1',
+          _tournament_creator: 'tong',
+          _tournament_admin_entry_id: 15702,
+          _tournament_league_id: 12121,
+          _tournament_league_type: 'classic',
+          _tournament_total_team_num: 3,
+          _tournament_tournament_mode: 'normal',
+          _tournament_group_mode: 'points_races',
+          _tournament_group_team_num: 3,
+          _tournament_group_num: 1,
+          _tournament_group_started_event_id: 1,
+          _tournament_group_ended_event_id: 38,
+          _tournament_group_auto_averages: false,
+          _tournament_group_rounds: null,
+          _tournament_group_play_against_num: null,
+          _tournament_group_qualify_num: null,
+          _tournament_knockout_mode: null,
+          _tournament_knockout_team_num: null,
+          _tournament_knockout_rounds: null,
+          _tournament_knockout_event_num: null,
+          _tournament_knockout_started_event_id: null,
+          _tournament_knockout_ended_event_id: null,
+          _tournament_knockout_play_against_num: null,
+          _tournament_state: 'active',
+          _tournament_created_at: '2026-04-21T00:00:00.000Z',
+          _tournament_updated_at: '2026-04-21T00:00:00.000Z',
+        },
       ],
     });
 
@@ -612,11 +684,17 @@ describe('tournamentsRepository.getTournamentEntryRankingSummary', () => {
           if (table === 'tournament_infos') {
             return { data: options.tournamentData ?? [], error: options.tournamentError ?? null };
           }
+          if (table === 'mv_tournament_event_snapshot') {
+            return {
+              data: filterRowsByActions(options.snapshotData ?? [], actions),
+              error: options.snapshotError ?? null,
+            };
+          }
           return { data: [], error: null };
         },
         then(resolve: (value: unknown) => unknown) {
           let result: { data: unknown[]; error: unknown } = { data: [], error: null };
-          if (table === 'v_tournament_event_snapshot') {
+          if (table === 'mv_tournament_event_snapshot') {
             result = {
               data: filterRowsByActions(options.snapshotData ?? [], actions),
               error: options.snapshotError ?? null,
@@ -714,9 +792,38 @@ describe('tournamentsRepository.getTournamentEntryRankingSummary', () => {
     expect(result).toEqual(cached);
   });
 
-  it('throws for non-points-race tournaments', async () => {
+  it('throws for non-points-race tournaments (fallback via tournament_infos)', async () => {
     const context = buildContext({
       tournamentData: [{ ...tournamentRow, group_mode: 'battle_races' }],
+    });
+
+    await expect(
+      tournamentsRepository.getTournamentEntryRankingSummary(context, 1, 3, 15702)
+    ).rejects.toThrow('Tournament ranking summary currently supports POINTS_RACES only');
+  });
+
+  it('throws for non-points-race tournaments when snapshot row carries group_mode', async () => {
+    const context = buildContext({
+      snapshotData: [
+        {
+          tournament_id: 1,
+          event_id: 3,
+          entry_id: 15702,
+          group_mode: 'battle_races',
+          tournament_overall_rank: 2,
+          overall_rank: 1000,
+          team_value: 1020,
+          cum_transfers_num: 3,
+          cum_total_costs: 4,
+          cum_total_bench_points: 11,
+          cum_auto_sub_points: 7,
+          tournament_team_value_rank: 1,
+          tournament_transfers_rank: 2,
+          tournament_costs_rank: 2,
+          tournament_bench_points_rank: 1,
+          tournament_auto_sub_rank: 1,
+        },
+      ],
     });
 
     await expect(
@@ -732,6 +839,7 @@ describe('tournamentsRepository.getTournamentEntryRankingSummary', () => {
           tournament_id: 1,
           event_id: 2,
           entry_id: 15702,
+          group_mode: 'points_races',
           tournament_overall_rank: 2,
           overall_rank: 1100,
           team_value: 1015,
@@ -749,6 +857,7 @@ describe('tournamentsRepository.getTournamentEntryRankingSummary', () => {
           tournament_id: 1,
           event_id: 3,
           entry_id: 15702,
+          group_mode: 'points_races',
           tournament_overall_rank: 2,
           overall_rank: 1000,
           team_value: 1020,

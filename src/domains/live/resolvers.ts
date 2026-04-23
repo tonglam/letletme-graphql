@@ -11,6 +11,52 @@ import type {
 } from './repository';
 import { liveService } from './service';
 
+/**
+ * Per-request memoization for player lookups to avoid N+1 Redis/DB round-trips
+ * when resolving the `player` field on multiple LivePerformance/LiveExplain rows.
+ */
+const playersMemo = new WeakMap<GraphQLContext, Map<number, Player | null>>();
+
+const getPlayerByIdMemoized = async (
+  context: GraphQLContext,
+  playerId: number
+): Promise<Player | null> => {
+  let memo = playersMemo.get(context);
+  if (!memo) {
+    memo = new Map();
+    playersMemo.set(context, memo);
+  }
+  if (memo.has(playerId)) {
+    return memo.get(playerId)!;
+  }
+  const player = await playersService.getPlayerById(context, playerId);
+  memo.set(playerId, player);
+  return player;
+};
+
+/**
+ * Per-request memoization for event lookups to avoid N+1 Redis/DB round-trips
+ * when resolving the `event` field on multiple EventLive/LivePerformance rows.
+ */
+const eventsMemo = new WeakMap<GraphQLContext, Map<number, Event | null>>();
+
+const getEventByIdMemoized = async (
+  context: GraphQLContext,
+  eventId: number
+): Promise<Event | null> => {
+  let memo = eventsMemo.get(context);
+  if (!memo) {
+    memo = new Map();
+    eventsMemo.set(context, memo);
+  }
+  if (memo.has(eventId)) {
+    return memo.get(eventId)!;
+  }
+  const event = await eventsService.getEventById(context, eventId);
+  memo.set(eventId, event);
+  return event;
+};
+
 type LiveScoresArgs = {
   eventId?: number | null;
   filter?: LiveScoresFilter | null;
@@ -67,7 +113,7 @@ export const liveResolvers = {
       parent: EventLive,
       _args: Record<string, never>,
       context: GraphQLContext
-    ): Promise<Event | null> => eventsService.getEventById(context, parent.eventId),
+    ): Promise<Event | null> => getEventByIdMemoized(context, parent.eventId),
     performances: (parent: EventLive): LivePerformance[] => parent.performances,
     dreamTeam: (parent: EventLive): LivePerformance[] =>
       parent.performances.filter((p) => p.inDreamTeam === true),
@@ -86,12 +132,12 @@ export const liveResolvers = {
       parent: LivePerformance,
       _args: Record<string, never>,
       context: GraphQLContext
-    ): Promise<Event | null> => eventsService.getEventById(context, parent.eventId),
+    ): Promise<Event | null> => getEventByIdMemoized(context, parent.eventId),
     player: async (
       parent: LivePerformance,
       _args: Record<string, never>,
       context: GraphQLContext
-    ): Promise<Player | null> => playersService.getPlayerById(context, parent.playerId),
+    ): Promise<Player | null> => getPlayerByIdMemoized(context, parent.playerId),
     expectedGoals: (parent: LivePerformance): number | null =>
       parent.expectedGoals ? parseFloat(parent.expectedGoals) : null,
     expectedAssists: (parent: LivePerformance): number | null =>
@@ -106,11 +152,17 @@ export const liveResolvers = {
       parent: LiveExplain,
       _args: Record<string, never>,
       context: GraphQLContext,
-    ): Promise<Event | null> => eventsService.getEventById(context, parent.eventId),
+    ): Promise<Event | null> => getEventByIdMemoized(context, parent.eventId),
     player: async (
       parent: LiveExplain,
       _args: Record<string, never>,
       context: GraphQLContext,
-    ): Promise<Player | null> => playersService.getPlayerById(context, parent.elementId),
+    ): Promise<Player | null> => getPlayerByIdMemoized(context, parent.elementId),
+    selectedBy: async (
+      parent: LiveExplain,
+      _args: Record<string, never>,
+      context: GraphQLContext,
+    ): Promise<number | null> =>
+      liveService.getSelectedByPercent(context, parent.eventId, parent.elementId),
   },
 };

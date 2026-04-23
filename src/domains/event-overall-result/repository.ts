@@ -122,6 +122,11 @@ export const eventOverallResultRepository: EventOverallResultRepository = {
     context: GraphQLContext,
     season: number
   ): Promise<EventResult[]> {
+    if (!Number.isFinite(season) || season <= 0) {
+      context.logger.warn({ season }, 'Invalid season value');
+      return [];
+    }
+
     const cacheKey = getCacheKey(season);
     context.logger.info({ cacheKey, season }, 'Looking for event overall result in Redis');
 

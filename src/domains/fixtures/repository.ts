@@ -125,6 +125,8 @@ const asBool = (value: unknown): boolean | null => {
 const asStr = (value: unknown): string | null =>
   typeof value === 'string' ? value : null;
 
+const NULL_SENTINEL = '__fixtures:null__';
+
 const parseJsonUnknown = (value: string): unknown | null => {
   try {
     return JSON.parse(value) as unknown;
@@ -234,9 +236,16 @@ interface FixturesRepository {
 
 export const fixturesRepository: FixturesRepository = {
   async getFixtureById(context: GraphQLContext, id: number): Promise<Fixture | null> {
+    if (!Number.isFinite(id) || id <= 0) {
+      return null;
+    }
+
     const cacheKey = `fixtures:id:${id}`;
     const cached = await context.redis.get(cacheKey);
-    if (cached) {
+    if (cached !== null) {
+      if (cached === NULL_SENTINEL) {
+        return null;
+      }
       return JSON.parse(cached) as Fixture;
     }
 
@@ -253,6 +262,7 @@ export const fixturesRepository: FixturesRepository = {
 
     const row = data?.[0] as DbFixtureRow | undefined;
     if (!row) {
+      await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', env.CACHE_TTL_SECONDS);
       return null;
     }
 
@@ -353,6 +363,10 @@ export const fixturesRepository: FixturesRepository = {
   },
 
   async getEventFixtures(context: GraphQLContext, eventId: number): Promise<Fixture[]> {
+    if (!Number.isFinite(eventId) || eventId <= 0) {
+      return [];
+    }
+
     const cacheKey = `fixtures:event:${eventId}`;
     const cached = await context.redis.get(cacheKey);
     if (cached) {

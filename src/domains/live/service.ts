@@ -30,4 +30,12 @@ export const liveService = {
   ): Promise<LiveExplain | null> {
     return liveRepository.getEventLiveExplain(context, eventId, elementId);
   },
+
+  getSelectedByPercent(
+    context: GraphQLContext,
+    eventId: number,
+    elementId: number
+  ): Promise<number | null> {
+    return liveRepository.getSelectedByPercent(context, eventId, elementId);
+  },
 };

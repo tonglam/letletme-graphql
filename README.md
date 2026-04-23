@@ -453,6 +453,57 @@ query EntryTournaments {
     totalTeamNum
   }
 }
+
+# Get event results for a points-race tournament
+# Note: v1 currently supports POINTS_RACES tournaments only.
+query TournamentEventResults {
+  tournamentEventResults(tournamentId: 1, eventId: 33) {
+    tournament {
+      id
+      name
+    }
+    event {
+      id
+      name
+    }
+    groupId
+    entryId
+    entryName
+    playerName
+    eventGroupRank
+    eventPoints
+    eventCost
+    eventNetPoints
+    eventRank
+    overallPoints
+    overallRank
+    eventChip
+    captainId
+    captainPoints
+    teamValue
+    bank
+  }
+}
+
+# Get tournament ranking summary for one entry in a points-race tournament
+# Note: v1 currently supports POINTS_RACES tournaments only.
+query TournamentEntryRankingSummary {
+  tournamentEntryRankingSummary(tournamentId: 1, eventId: 33, entryId: 15702) {
+    entryId
+    overallRank
+    tournamentOverallRank
+    teamValue
+    tournamentTeamValueRank
+    transfersNum
+    tournamentTransfersRank
+    totalCosts
+    tournamentCostsRank
+    totalBenchPoints
+    tournamentBenchPointsRank
+    autoSubPoints
+    tournamentAutoSubRank
+  }
+}
 ```
 
 ### Entries Domain

@@ -10,6 +10,7 @@
     "migrate": "bun scripts/migrate.ts",
     "migrate:rls": "bun scripts/migrate-rls.ts",
     "migrate:deadline": "bun scripts/migrate-deadline-text.ts",
+    "migrate:tournament-summary": "bun scripts/migrate-tournament-summary-read-model.ts",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
     "format": "prettier --write \"src/**/*.ts\"",

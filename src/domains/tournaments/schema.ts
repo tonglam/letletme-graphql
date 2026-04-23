@@ -54,7 +54,7 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 
   type TournamentEventResult {
     tournament: TournamentInfo!
-    event: Event!
+    event: Event
     groupId: Int!
     entryId: Int!
     entryName: String
