@@ -282,7 +282,8 @@ const computeSingleEntry = (
     const isPlayed = minutes > 0 || yellowCards > 0 || redCards > 0;
 
     const defensiveContribution: number = safeNull(live?.defensiveContribution, 0);
-    const calculatedTotalPoints = calcElementLivePoints(elementType, live);
+    const fixtureCount = teamFixtures ? teamFixtures.length : 1;
+    const calculatedTotalPoints = calcElementLivePoints(elementType, live, fixtureCount);
 
     return {
       season: null,

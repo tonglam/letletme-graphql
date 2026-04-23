@@ -308,6 +308,7 @@ const elementTypeName = (player: Player | null): string => {
 export const calcElementLivePoints = (
   elementType: number,
   live: LivePerformance | undefined,
+  fixtureCount: number = 1,
 ): number => {
   if (!live) {
     return 0;
@@ -327,16 +328,18 @@ export const calcElementLivePoints = (
   const saves = live.saves ?? 0;
   const bonus = live.bonus ?? 0;
   // Extract defensive contribution with proper type handling
-   
+    
   const defensiveContributionValue = live.defensiveContribution as number | null | undefined;
   const defensiveContribution: number = defensiveContributionValue ?? 0;
 
-  // Playing points (inlined)
+  // Playing points: 2pts per fixture if played >=60 min in that fixture.
+  // For DGW (fixtureCount > 1), we assume the player played >=60 min in all fixtures
+  // if total minutes >= 60. This matches FPL's aggregation for DGW players.
   let points = 0;
   if (minutes > 0 && minutes < 60) {
     points += 1;
-  } else if (minutes >= 60 && minutes <= 90) {
-    points += 2;
+  } else if (minutes >= 60) {
+    points += 2 * fixtureCount;
   }
 
   // Goals scored (inlined)
@@ -580,7 +583,9 @@ export const entryLiveCalcService = {
       const defensiveContribution: number = safeNull(live?.defensiveContribution, 0);
 
       // Calculate live points from individual stats
-      const calculatedTotalPoints = calcElementLivePoints(elementType, live);
+      // For DGW players (minutes > 90), pass fixture count so playing points are correct
+      const fixtureCount = teamFixtures ? teamFixtures.length : 1;
+      const calculatedTotalPoints = calcElementLivePoints(elementType, live, fixtureCount);
 
       return {
         season: null,
