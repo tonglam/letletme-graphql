@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { calculatePriceChangeType } from './service';
+import { calculatePriceChangeType } from '../../../src/domains/player-values/service';
 
 describe('calculatePriceChangeType', () => {
   it('returns RISE when newValue is greater than oldValue', () => {

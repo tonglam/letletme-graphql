@@ -11,5 +11,5 @@
     "types": ["bun-types"],
     "lib": ["ES2022"]
   },
-  "include": ["src"]
+  "include": ["src", "tests"]
 }

@@ -2,11 +2,11 @@ import { describe, expect, it } from 'bun:test';
 import { makeExecutableSchema } from '@graphql-tools/schema';
 import { graphql } from 'graphql';
 import { DateTimeResolver } from 'graphql-scalars';
-import type { GraphQLContext } from '../../graphql/context';
-import { baseResolvers, baseTypeDefs } from '../../graphql/base-schema';
-import { playersTypeDefs } from '../players/schema';
-import { playerValuesResolvers } from './resolvers';
-import { playerValuesTypeDefs } from './schema';
+import type { GraphQLContext } from '../../../src/graphql/context';
+import { baseResolvers, baseTypeDefs } from '../../../src/graphql/base-schema';
+import { playersTypeDefs } from '../../../src/domains/players/schema';
+import { playerValuesResolvers } from '../../../src/domains/player-values/resolvers';
+import { playerValuesTypeDefs } from '../../../src/domains/player-values/schema';
 
 type PlayerValueRow = {
   player_id: number;

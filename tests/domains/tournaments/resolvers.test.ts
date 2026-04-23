@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'bun:test';
-import type { GraphQLContext } from '../../graphql/context';
-import type { Event } from '../events/repository';
-import { eventsService } from '../events/service';
-import { LeagueType } from '../leagues/repository';
+import type { GraphQLContext } from '../../../src/graphql/context';
+import type { Event } from '../../../src/domains/events/repository';
+import { eventsService } from '../../../src/domains/events/service';
+import { LeagueType } from '../../../src/domains/leagues/repository';
+import { Position } from '../../../src/domains/players/repository';
+import { playersService } from '../../../src/domains/players/service';
 import {
   GroupMode,
   KnockoutMode,
   TournamentMode,
   TournamentState,
   type TournamentEventResult,
-} from './repository';
+} from '../../../src/domains/tournaments/repository';
 import {
   groupModeToEnum,
   knockoutModeToEnum,
@@ -17,7 +19,7 @@ import {
   tournamentResultChipToEnum,
   tournamentStateToEnum,
   tournamentsResolvers,
-} from './resolvers';
+} from '../../../src/domains/tournaments/resolvers';
 
 describe('tournaments resolver enum mappers', () => {
   it('maps league type to GraphQL enum', () => {
@@ -138,5 +140,43 @@ describe('TournamentEventResult resolvers', () => {
       eventsService.getEventById = original;
     }
   });
-});
 
+  it('resolves captain through playersService', async () => {
+    const original = playersService.getPlayerById;
+    const context = {} as unknown as GraphQLContext;
+    const captain = {
+      id: 430,
+      code: 1,
+      webName: 'Salah',
+      firstName: 'Mo',
+      secondName: 'Salah',
+      teamId: 12,
+      position: Position.MIDFIELDER,
+      price: 130,
+      startPrice: 125,
+      totalPoints: 200,
+      selectedByPercent: 40.1,
+    };
+
+    playersService.getPlayerById = async (inputContext: GraphQLContext, playerId: number) => {
+      expect(inputContext).toBe(context);
+      expect(playerId).toBe(430);
+      return captain;
+    };
+
+    try {
+      const result = await tournamentsResolvers.TournamentEventResult.captain(
+        ({
+          tournament: {} as never,
+          eventId: 33,
+          captainId: 430,
+        } as unknown) as TournamentEventResult,
+        {},
+        context
+      );
+      expect(result).toEqual(captain);
+    } finally {
+      playersService.getPlayerById = original;
+    }
+  });
+});

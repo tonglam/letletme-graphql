@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
-import { applyAutoSubs, calcElementLivePoints } from './calc-service';
-import type { LivePerformance } from '../live/repository';
-import type { ElementEventResultData } from './calc-service';
+import { applyAutoSubs, calcElementLivePoints } from '../../../src/domains/entry-live/calc-service';
+import type { LivePerformance } from '../../../src/domains/live/repository';
+import type { ElementEventResultData } from '../../../src/domains/entry-live/calc-service';
 
 const makeLive = (overrides: Partial<LivePerformance> = {}): LivePerformance => ({
   eventId: 1,

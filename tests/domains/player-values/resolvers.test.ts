@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { normalizePlayerValueHistoryArgs } from './resolvers';
+import { normalizePlayerValueHistoryArgs } from '../../../src/domains/player-values/resolvers';
 
 describe('normalizePlayerValueHistoryArgs', () => {
   it('uses default limit when missing', () => {

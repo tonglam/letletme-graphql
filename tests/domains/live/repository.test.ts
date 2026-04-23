@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { liveRepository } from './repository';
+import { liveRepository } from '../../../src/domains/live/repository';
 
 const makeMockRedis = (options: {
   strings?: Record<string, string>;

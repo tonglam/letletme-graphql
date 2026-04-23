@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { getCurrentSeason } from './season';
+import { getCurrentSeason } from '../../src/infra/season';
 
 const makeContext = (seasonValue: string | null): Parameters<typeof getCurrentSeason>[0] => ({
   redis: {

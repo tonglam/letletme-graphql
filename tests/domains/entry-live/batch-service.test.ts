@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
-import type { GraphQLContext } from '../../graphql/context';
-import { entryLiveBatchService } from './batch-service';
-import type { LivePerformance } from '../live/repository';
+import type { GraphQLContext } from '../../../src/graphql/context';
+import { entryLiveBatchService } from '../../../src/domains/entry-live/batch-service';
+import type { LivePerformance } from '../../../src/domains/live/repository';
 
 const makeMockContext = (options: {
   livePerformances?: Map<number, LivePerformance>;

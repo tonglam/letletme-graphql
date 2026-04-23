@@ -2,6 +2,8 @@ import type { GraphQLContext } from '../../graphql/context';
 import type { Event } from '../events/repository';
 import { eventsService } from '../events/service';
 import { LeagueType } from '../leagues/repository';
+import type { Player } from '../players/repository';
+import { playersService } from '../players/service';
 
 /**
  * Per-request memoization for event lookups to avoid N+1 Redis round-trips
@@ -24,6 +26,25 @@ const getEventByIdMemoized = async (
   const event = await eventsService.getEventById(context, eventId);
   memo.set(eventId, event);
   return event;
+};
+
+const captainMemo = new WeakMap<GraphQLContext, Map<number, Player | null>>();
+
+const getCaptainByIdMemoized = async (
+  context: GraphQLContext,
+  playerId: number
+): Promise<Player | null> => {
+  let memo = captainMemo.get(context);
+  if (!memo) {
+    memo = new Map();
+    captainMemo.set(context, memo);
+  }
+  if (memo.has(playerId)) {
+    return memo.get(playerId)!;
+  }
+  const player = await playersService.getPlayerById(context, playerId);
+  memo.set(playerId, player);
+  return player;
 };
 import type {
   TournamentEntryRankingSummary,
@@ -169,6 +190,16 @@ export const tournamentsResolvers = {
       _args: Record<string, never>,
       context: GraphQLContext
     ): Promise<Event | null> => getEventByIdMemoized(context, parent.eventId),
+    captain: async (
+      parent: TournamentEventResult,
+      _args: Record<string, never>,
+      context: GraphQLContext
+    ): Promise<Player | null> => {
+      if (parent.captainId === null || parent.captainId <= 0) {
+        return null;
+      }
+      return getCaptainByIdMemoized(context, parent.captainId);
+    },
     eventChip: (parent: TournamentEventResult): string | null =>
       tournamentResultChipToEnum(parent.eventChip),
   },

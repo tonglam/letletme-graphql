@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import type { GraphQLContext } from '../../graphql/context';
-import { fixturesRepository } from './repository';
+import type { GraphQLContext } from '../../../src/graphql/context';
+import { fixturesRepository } from '../../../src/domains/fixtures/repository';
 
 const buildContext = (options: {
   redisData?: Record<string, string>;

@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'bun:test';
-import type { GraphQLContext } from '../../graphql/context';
-import { LeagueType } from '../leagues/repository';
+import type { GraphQLContext } from '../../../src/graphql/context';
+import { LeagueType } from '../../../src/domains/leagues/repository';
 import {
   tournamentsRepository,
   type TournamentEntryRankingSummary,
   TournamentMode,
   TournamentState,
   type TournamentEventResult,
-} from './repository';
-import { tournamentsService } from './service';
+} from '../../../src/domains/tournaments/repository';
+import { tournamentsService } from '../../../src/domains/tournaments/service';
 
 describe('tournamentsService.getEntryTournaments', () => {
   it('delegates to tournamentsRepository with the same args', async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import type { GraphQLContext } from '../../graphql/context';
-import { LeagueType } from '../leagues/repository';
+import type { GraphQLContext } from '../../../src/graphql/context';
+import { LeagueType } from '../../../src/domains/leagues/repository';
 import {
   GroupMode,
   KnockoutMode,
@@ -13,7 +13,7 @@ import {
   type DbTournamentInfoRow,
   type DbTournamentEntryRow,
   type DbTournamentPointsGroupResultRow,
-} from './repository';
+} from '../../../src/domains/tournaments/repository';
 
 type QueryAction = { type: string; args: unknown[] };
 
