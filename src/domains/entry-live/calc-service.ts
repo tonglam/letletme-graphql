@@ -304,6 +304,84 @@ export const calcElementLivePoints = (
   return live.totalPoints ?? 0;
 };
 
+/**
+ * Apply FPL automatic substitutions.
+ *
+ * Rules:
+ * - No auto-subs during Bench Boost (all 15 count)
+ * - Bench players evaluated in order (position 12, 13, 14, 15)
+ * - Bench player must have played (>0 minutes) to come on
+ * - Replaces a non-playing starter (0 minutes, multiplier > 0)
+ * - Formation must remain valid after substitution
+ */
+export const applyAutoSubs = (
+  pickList: ElementEventResultData[],
+  chip: string,
+): void => {
+  if (chip === 'BENCH_BOOST') {
+    return;
+  }
+
+  const starters = pickList.filter((p) => p.position <= 11);
+  const bench = pickList
+    .filter((p) => p.position > 11)
+    .sort((a, b) => a.position - b.position);
+
+  const nonPlayingStarters = starters.filter(
+    (p) => p.minutes === 0 && p.multiplier > 0,
+  );
+
+  if (nonPlayingStarters.length === 0) {
+    return;
+  }
+
+  const isValidFormation = (active: ElementEventResultData[]): boolean => {
+    const gk = active.filter((p) => p.elementType === 1).length;
+    const def = active.filter((p) => p.elementType === 2).length;
+    const mid = active.filter((p) => p.elementType === 3).length;
+    const fwd = active.filter((p) => p.elementType === 4).length;
+    return (
+      gk === 1 &&
+      def >= 3 &&
+      def <= 5 &&
+      mid >= 2 &&
+      mid <= 5 &&
+      fwd >= 1 &&
+      fwd <= 3
+    );
+  };
+
+  for (const benchPlayer of bench) {
+    if (benchPlayer.minutes === 0) {
+      continue;
+    }
+    if (nonPlayingStarters.length === 0) {
+      break;
+    }
+
+    for (let i = 0; i < nonPlayingStarters.length; i++) {
+      const starter = nonPlayingStarters[i];
+
+      const originalStarterMult = starter.multiplier;
+      const originalBenchMult = benchPlayer.multiplier;
+
+      starter.multiplier = 0;
+      benchPlayer.multiplier = 1;
+
+      const activeAfterSub = pickList.filter((p) => p.multiplier > 0);
+
+      if (isValidFormation(activeAfterSub)) {
+        nonPlayingStarters.splice(i, 1);
+        break;
+      }
+
+      // Revert invalid substitution
+      starter.multiplier = originalStarterMult;
+      benchPlayer.multiplier = originalBenchMult;
+    }
+  }
+};
+
 const hasCompletedFixtures = (pick: ElementEventResultData): boolean =>
   pick.isGwFinished || pick.playStatus === PLAY_STATUS.BLANK || pick.bgw;
 
@@ -537,6 +615,9 @@ export const entryLiveCalcService = {
       };
     });
 
+    // Apply automatic substitutions before building active picks
+    applyAutoSubs(pickList, chip);
+
     // Determine active picks based on chip and mark them in a single pass
     const isBenchBoost = chip === 'BENCH_BOOST';
     const activePicks: ElementEventResultData[] = [];
@@ -551,7 +632,9 @@ export const entryLiveCalcService = {
       }
     }
 
-    const captainForScoring = selectCaptainForScoring(activePicks);
+    // Captain selection uses full pickList so vice-captain is found even if
+    // captain was auto-subbed out
+    const captainForScoring = selectCaptainForScoring(pickList);
     const captainMultiplier = chip === 'TRIPLE_CAPTAIN' ? 3 : 2;
 
     // Calculate live points: sum of all active picks with captain multiplier applied

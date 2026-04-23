@@ -15,6 +15,7 @@ import {
   type EntryEventTransfersData,
 } from './transfer-enrichment';
 import {
+  applyAutoSubs,
   calcElementLivePoints,
   type ElementEventResultData,
   type LiveCalcData,
@@ -341,6 +342,9 @@ const computeSingleEntry = (
     };
   });
 
+  // Apply automatic substitutions before building active picks
+  applyAutoSubs(pickList, chip);
+
   const isBenchBoost = chip === 'BENCH_BOOST';
   const activePicks: ElementEventResultData[] = [];
 
@@ -354,7 +358,9 @@ const computeSingleEntry = (
     }
   }
 
-  const captainForScoring = selectCaptainForScoring(activePicks);
+  // Captain selection uses full pickList so vice-captain is found even if
+  // captain was auto-subbed out
+  const captainForScoring = selectCaptainForScoring(pickList);
   const captainMultiplier = chip === 'TRIPLE_CAPTAIN' ? 3 : 2;
 
   const captainElementId = captainForScoring?.element;

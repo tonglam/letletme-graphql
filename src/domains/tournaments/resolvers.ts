@@ -1,10 +1,28 @@
 import type { GraphQLContext } from '../../graphql/context';
+import type { Event } from '../events/repository';
+import { eventsService } from '../events/service';
 import { LeagueType } from '../leagues/repository';
+import type {
+  TournamentEntryRankingSummary,
+  TournamentEventResult,
+  TournamentInfo,
+  TournamentMode,
+} from './repository';
 import { GroupMode, KnockoutMode, TournamentState } from './repository';
-import type { TournamentInfo, TournamentMode } from './repository';
 import { tournamentsService } from './service';
 
 type EntryTournamentsArgs = {
+  entryId: number;
+};
+
+type TournamentEventResultsArgs = {
+  tournamentId: number;
+  eventId: number;
+};
+
+type TournamentEntryRankingSummaryArgs = {
+  tournamentId: number;
+  eventId: number;
   entryId: number;
 };
 
@@ -55,6 +73,39 @@ export const tournamentStateToEnum = (state: TournamentState): string => {
   return 'ACTIVE';
 };
 
+export const tournamentResultChipToEnum = (raw: string | null): string | null => {
+  if (raw === null) {
+    return null;
+  }
+
+  const value = raw.toUpperCase().trim();
+  const compactValue = value.replace(/[^A-Z0-9]/g, '');
+  if (
+    value === 'BENCH_BOOST' ||
+    compactValue === 'BENCHBOOST' ||
+    compactValue === 'BBOOST' ||
+    compactValue === 'BB'
+  ) {
+    return 'BENCH_BOOST';
+  }
+  if (
+    value === 'TRIPLE_CAPTAIN' ||
+    compactValue === 'TRIPLECAPTAIN' ||
+    compactValue === '3XC' ||
+    compactValue === 'TC'
+  ) {
+    return 'TRIPLE_CAPTAIN';
+  }
+  if (value === 'FREE_HIT' || compactValue === 'FREEHIT' || compactValue === 'FH') {
+    return 'FREE_HIT';
+  }
+  if (value === 'WILDCARD' || compactValue === 'WILDCARD' || compactValue === 'WC') {
+    return 'WILDCARD';
+  }
+
+  return null;
+};
+
 export const tournamentsResolvers = {
   Query: {
     entryTournaments: async (
@@ -62,12 +113,40 @@ export const tournamentsResolvers = {
       args: EntryTournamentsArgs,
       context: GraphQLContext
     ): Promise<TournamentInfo[]> => tournamentsService.getEntryTournaments(context, args.entryId),
+    tournamentEventResults: async (
+      _parent: unknown,
+      args: TournamentEventResultsArgs,
+      context: GraphQLContext
+    ): Promise<TournamentEventResult[]> =>
+      tournamentsService.getTournamentEventResults(context, args.tournamentId, args.eventId),
+    tournamentEntryRankingSummary: async (
+      _parent: unknown,
+      args: TournamentEntryRankingSummaryArgs,
+      context: GraphQLContext
+    ): Promise<TournamentEntryRankingSummary> =>
+      tournamentsService.getTournamentEntryRankingSummary(
+        context,
+        args.tournamentId,
+        args.eventId,
+        args.entryId
+      ),
   },
   TournamentInfo: {
     leagueType: (parent: TournamentInfo): string => leagueTypeToEnum(parent.leagueType),
     tournamentMode: (parent: TournamentInfo): string => tournamentModeToEnum(parent.tournamentMode),
     groupMode: (parent: TournamentInfo): string | null => groupModeToEnum(parent.groupMode),
-    knockoutMode: (parent: TournamentInfo): string | null => knockoutModeToEnum(parent.knockoutMode),
+    knockoutMode: (parent: TournamentInfo): string | null =>
+      knockoutModeToEnum(parent.knockoutMode),
     state: (parent: TournamentInfo): string => tournamentStateToEnum(parent.state),
+  },
+  TournamentEventResult: {
+    tournament: (parent: TournamentEventResult): TournamentInfo => parent.tournament,
+    event: async (
+      parent: TournamentEventResult,
+      _args: Record<string, never>,
+      context: GraphQLContext
+    ): Promise<Event | null> => eventsService.getEventById(context, parent.eventId),
+    eventChip: (parent: TournamentEventResult): string | null =>
+      tournamentResultChipToEnum(parent.eventChip),
   },
 };

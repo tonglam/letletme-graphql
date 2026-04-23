@@ -1,11 +1,22 @@
 import { describe, expect, it } from 'bun:test';
+import type { GraphQLContext } from '../../graphql/context';
+import type { Event } from '../events/repository';
+import { eventsService } from '../events/service';
 import { LeagueType } from '../leagues/repository';
-import { GroupMode, KnockoutMode, TournamentState } from './repository';
+import {
+  GroupMode,
+  KnockoutMode,
+  TournamentMode,
+  TournamentState,
+  type TournamentEventResult,
+} from './repository';
 import {
   groupModeToEnum,
   knockoutModeToEnum,
   leagueTypeToEnum,
+  tournamentResultChipToEnum,
   tournamentStateToEnum,
+  tournamentsResolvers,
 } from './resolvers';
 
 describe('tournaments resolver enum mappers', () => {
@@ -34,4 +45,98 @@ describe('tournaments resolver enum mappers', () => {
     expect(tournamentStateToEnum(TournamentState.INACTIVE)).toBe('INACTIVE');
     expect(tournamentStateToEnum(TournamentState.FINISHED)).toBe('FINISHED');
   });
+
+  it('maps tournament result chip strings to GraphQL enum', () => {
+    expect(tournamentResultChipToEnum('bboost')).toBe('BENCH_BOOST');
+    expect(tournamentResultChipToEnum('freehit')).toBe('FREE_HIT');
+    expect(tournamentResultChipToEnum('wc')).toBe('WILDCARD');
+    expect(tournamentResultChipToEnum('unknown')).toBeNull();
+    expect(tournamentResultChipToEnum(null)).toBeNull();
+  });
 });
+
+describe('TournamentEventResult resolvers', () => {
+  it('returns the embedded tournament and normalizes event chip', () => {
+    const parent: TournamentEventResult = {
+      tournament: {
+        id: 1,
+        name: 'T1',
+        creator: 'alice',
+        adminEntryId: 10,
+        leagueId: 20,
+        leagueType: LeagueType.CLASSIC,
+        totalTeamNum: 8,
+        tournamentMode: TournamentMode.NORMAL,
+        groupMode: GroupMode.POINTS_RACES,
+        groupTeamNum: 4,
+        groupNum: 2,
+        groupStartedEventId: 1,
+        groupEndedEventId: 2,
+        groupAutoAverages: false,
+        groupRounds: null,
+        groupPlayAgainstNum: null,
+        groupQualifyNum: null,
+        knockoutMode: null,
+        knockoutTeamNum: null,
+        knockoutRounds: null,
+        knockoutEventNum: null,
+        knockoutStartedEventId: null,
+        knockoutEndedEventId: null,
+        knockoutPlayAgainstNum: null,
+        state: TournamentState.ACTIVE,
+        createdAt: '2026-04-21T00:00:00.000Z',
+        updatedAt: '2026-04-21T00:00:00.000Z',
+      },
+      eventId: 33,
+      groupId: 1,
+      entryId: 123,
+      entryName: 'Entry',
+      playerName: 'Player',
+      eventGroupRank: 1,
+      eventPoints: 90,
+      eventCost: 0,
+      eventNetPoints: 90,
+      eventRank: 10,
+      overallPoints: 1900,
+      overallRank: 100,
+      eventChip: 'bboost',
+      captainId: 430,
+      captainPoints: 12,
+      teamValue: 1030,
+      bank: 25,
+    };
+
+    expect(tournamentsResolvers.TournamentEventResult.tournament(parent)).toBe(parent.tournament);
+    expect(tournamentsResolvers.TournamentEventResult.eventChip(parent)).toBe('BENCH_BOOST');
+  });
+
+  it('resolves the event through eventsService', async () => {
+    const original = eventsService.getEventById;
+    const context = {} as unknown as GraphQLContext;
+    const event = { id: 33, name: 'GW 33' } as Event;
+
+    eventsService.getEventById = async (
+      inputContext: GraphQLContext,
+      eventId: number
+    ): Promise<Event | null> => {
+      expect(inputContext).toBe(context);
+      expect(eventId).toBe(33);
+      return event;
+    };
+
+    try {
+      const result = await tournamentsResolvers.TournamentEventResult.event(
+        ({
+          tournament: {} as never,
+          eventId: 33,
+        } as unknown) as TournamentEventResult,
+        {},
+        context
+      );
+      expect(result).toBe(event);
+    } finally {
+      eventsService.getEventById = original;
+    }
+  });
+});
+
