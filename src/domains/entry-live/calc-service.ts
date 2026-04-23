@@ -287,127 +287,39 @@ const elementTypeName = (player: Player | null): string => {
 };
 
 /**
- * Calculate total live points for an element based on all stats.
- * Optimized to reduce function call overhead by inlining all calculations.
- * 
- * Point calculation rules:
- * - Playing: 1pt if 0 < minutes < 60, 2pts if 60-90
- * - Goals: GKP/DEF=6pts, MID=5pts, FWD=4pts per goal
- * - Assists: 3pts per assist
- * - Clean sheets: GKP/DEF=4pts, MID=1pt per clean sheet
- * - Goals conceded: GKP/DEF=-1pt per 2 goals (rounded down)
- * - Penalties saved: 5pts per save
- * - Penalties missed: -2pts per miss
- * - Own goals: -2pts per own goal
- * - Yellow cards: -1pt per card
- * - Red cards: -3pts per card
- * - Saves: floor(saves / 3) points
- * - Bonus: bonus points as-is
+ * Calculate total live points for an element.
+ *
+ * Uses FPL's authoritative totalPoints as the base (correctly handles
+ * playing points, goals, assists, clean sheets, bonus, etc. for both
+ * single-game and DGW weeks) and adds our custom defensive contribution
+ * bonus on top.
+ *
+ * Custom scoring rules (not in FPL):
  * - Defensive contribution: DEF>=10 adds 2pts, MID/FWD>=12 adds 2pts
  */
 export const calcElementLivePoints = (
   elementType: number,
   live: LivePerformance | undefined,
-  fixtureCount: number = 1,
 ): number => {
   if (!live) {
     return 0;
   }
 
-  // Extract values once to avoid repeated null checks
-  const minutes = live.minutes ?? 0;
-  const goalsScored = live.goalsScored ?? 0;
-  const assists = live.assists ?? 0;
-  const cleanSheets = live.cleanSheets ?? 0;
-  const goalsConceded = live.goalsConceded ?? 0;
-  const penaltiesSaved = live.penaltiesSaved ?? 0;
-  const penaltiesMissed = live.penaltiesMissed ?? 0;
-  const ownGoals = live.ownGoals ?? 0;
-  const yellowCards = live.yellowCards ?? 0;
-  const redCards = live.redCards ?? 0;
-  const saves = live.saves ?? 0;
-  const bonus = live.bonus ?? 0;
-  // Extract defensive contribution with proper type handling
-    
-  const defensiveContributionValue = live.defensiveContribution as number | null | undefined;
-  const defensiveContribution: number = defensiveContributionValue ?? 0;
+  const basePoints = live.totalPoints ?? 0;
+  const defensiveContribution: number = live.defensiveContribution ?? 0;
 
-  // Playing points: 2pts per fixture if played >=60 min in that fixture.
-  // For DGW (fixtureCount > 1), we assume the player played >=60 min in all fixtures
-  // if total minutes >= 60. This matches FPL's aggregation for DGW players.
-  let points = 0;
-  if (minutes > 0 && minutes < 60) {
-    points += 1;
-  } else if (minutes >= 60) {
-    points += 2 * fixtureCount;
-  }
-
-  // Goals scored (inlined)
-  switch (elementType) {
-    case 1: // GOALKEEPER
-    case 2: // DEFENDER
-      points += 6 * goalsScored;
-      break;
-    case 3: // MIDFIELDER
-      points += 5 * goalsScored;
-      break;
-    case 4: // FORWARD
-      points += 4 * goalsScored;
-      break;
-  }
-
-  // Assists (inlined)
-  points += 3 * assists;
-
-  // Clean sheets (inlined)
-  switch (elementType) {
-    case 1: // GOALKEEPER
-    case 2: // DEFENDER
-      points += 4 * cleanSheets;
-      break;
-    case 3: // MIDFIELDER
-      points += cleanSheets;
-      break;
-  }
-
-  // Goals conceded (inlined)
-  if (elementType === 1 || elementType === 2) {
-    points -= Math.floor(goalsConceded / 2);
-  }
-
-  // Penalties saved (inlined)
-  points += 5 * penaltiesSaved;
-
-  // Penalties missed (inlined)
-  points -= 2 * penaltiesMissed;
-
-  // Own goals (inlined)
-  points -= 2 * ownGoals;
-
-  // Yellow cards (inlined)
-  points -= yellowCards;
-
-  // Red cards (inlined)
-  points -= 3 * redCards;
-
-  // Saves (inlined)
-  points += Math.floor(saves / 3);
-
-  // Bonus (inlined)
-  points += bonus;
-
-  // Defensive contribution (inlined)
+  let dcBonus = 0;
   switch (elementType) {
     case 2: // DEFENDER
-      if (defensiveContribution >= 10) points += 2;
+      if (defensiveContribution >= 10) dcBonus = 2;
       break;
     case 3: // MIDFIELDER
     case 4: // FORWARD
-      if (defensiveContribution >= 12) points += 2;
+      if (defensiveContribution >= 12) dcBonus = 2;
       break;
   }
 
-  return points;
+  return basePoints + dcBonus;
 };
 
 const hasCompletedFixtures = (pick: ElementEventResultData): boolean =>
@@ -584,8 +496,7 @@ export const entryLiveCalcService = {
 
       // Calculate live points from individual stats
       // For DGW players (minutes > 90), pass fixture count so playing points are correct
-      const fixtureCount = teamFixtures ? teamFixtures.length : 1;
-      const calculatedTotalPoints = calcElementLivePoints(elementType, live, fixtureCount);
+      const calculatedTotalPoints = calcElementLivePoints(elementType, live);
 
       return {
         season: null,
