@@ -5,6 +5,7 @@ import type { Event } from '../events/repository';
 import { eventsService } from '../events/service';
 import type { LiveCalcData } from './calc-service';
 import { entryLiveCalcService } from './calc-service';
+import { entryLiveBatchService } from './batch-service';
 import type { EntryLive as EntryLiveModel } from './service';
 import { entryLiveService } from './service';
 
@@ -16,6 +17,11 @@ type EntryLiveArgs = {
 type CalcLivePointsByEntryArgs = {
   eventId: number;
   entryId: number;
+};
+
+type CalcLivePointsForEntriesArgs = {
+  eventId: number;
+  entryIds: number[];
 };
 
 export const entryLiveResolvers = {
@@ -33,6 +39,23 @@ export const entryLiveResolvers = {
       context: GraphQLContext
     ): Promise<LiveCalcData> =>
       entryLiveCalcService.calcLivePointsByEntry(context, args.eventId, args.entryId),
+
+    calcLivePointsForEntries: async (
+      _parent: unknown,
+      args: CalcLivePointsForEntriesArgs,
+      context: GraphQLContext
+    ): Promise<{ results: LiveCalcData[]; errors: Array<{ entryId: number; message: string }>; meta: { eventId: number; totalEntries: number; succeededCount: number; failedCount: number } }> => {
+      const result = await entryLiveBatchService.calcLivePointsForEntries(
+        context,
+        args.eventId,
+        args.entryIds,
+      );
+      return {
+        results: Array.from(result.results.values()),
+        errors: result.errors,
+        meta: result.meta,
+      };
+    },
   },
   EntryLive: {
     entry: async (

@@ -1,0 +1,549 @@
+import type { GraphQLContext } from '../../graphql/context';
+import type { Entry, EntryEventResult } from '../entries/repository';
+import { entriesService } from '../entries/service';
+import type { Fixture } from '../fixtures/repository';
+import { fixturesService } from '../fixtures/service';
+import type { LivePerformance } from '../live/repository';
+import { liveRepository } from '../live/repository';
+import type { Player, Team } from '../players/repository';
+import { playersRepository } from '../players/repository';
+import type { EntryEventPick, EntryEventTransferRow } from './repository';
+import { entryLiveRepository } from './repository';
+import {
+  buildTeamMapById,
+  enrichTransferRows,
+  type EntryEventTransfersData,
+} from './transfer-enrichment';
+import {
+  calcElementLivePoints,
+  type ElementEventResultData,
+  type LiveCalcData,
+} from './calc-service';
+
+export type BatchLiveCalcResult = {
+  results: Map<number, LiveCalcData>;
+  errors: Array<{ entryId: number; message: string }>;
+  meta: {
+    eventId: number;
+    totalEntries: number;
+    succeededCount: number;
+    failedCount: number;
+  };
+};
+
+type SharedData = {
+  liveByPlayer: Map<number, LivePerformance>;
+  teamsById: Map<number, Team>;
+  playersById: Map<number, Player>;
+  fixturesByTeam: Map<number, Fixture[]>;
+};
+
+type PerEntryData = {
+  entryId: number;
+  entry: Entry | null;
+  currentResult: EntryEventResult | null;
+  previousResult: EntryEventResult | null;
+  pickEntity: EntryEventPick | null;
+  transferRows: EntryEventTransferRow[];
+};
+
+const PLAY_STATUS = {
+  BLANK: 0,
+  NOT_STARTED: 1,
+  PLAYING: 2,
+  EVENT_NOT_FINISHED: 3,
+  FINISHED: 4,
+} as const;
+
+const safeInt = (value: number | null | undefined): number =>
+  typeof value === 'number' ? value : 0;
+
+const asScaled = (value: number | null | undefined, divisor: number): number =>
+  typeof value === 'number' ? value / divisor : 0;
+
+const safeNull = <T>(value: T | null | undefined, defaultValue: T): T =>
+  value ?? defaultValue;
+
+const parseNullableFloat = (value: string | null | undefined): number | null => {
+  if (!value) {
+    return null;
+  }
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const elementTypeName = (player: Player | null): string => {
+  if (!player) return '';
+  switch (player.position) {
+    case 1: return 'GKP';
+    case 2: return 'DEF';
+    case 3: return 'MID';
+    case 4: return 'FWD';
+    default: return '';
+  }
+};
+
+const buildFixtureIndex = (fixtures: Fixture[]): Map<number, Fixture[]> => {
+  const map = new Map<number, Fixture[]>();
+  for (const fx of fixtures) {
+    const home = fx.teamHId;
+    const away = fx.teamAId;
+    const homeFixtures = map.get(home);
+    if (homeFixtures) {
+      homeFixtures.push(fx);
+    } else {
+      map.set(home, [fx]);
+    }
+    const awayFixtures = map.get(away);
+    if (awayFixtures) {
+      awayFixtures.push(fx);
+    } else {
+      map.set(away, [fx]);
+    }
+  }
+  return map;
+};
+
+const getPlayStatusForTeam = (fixtures: Fixture[] | undefined): { started: boolean; finished: boolean; status: number } => {
+  if (!fixtures || fixtures.length === 0) {
+    return { started: true, finished: true, status: PLAY_STATUS.BLANK };
+  }
+  const anyStarted = fixtures.some((f) => f.started === true);
+  const anyFinished = fixtures.some((f) => f.finished === true);
+  const allFinished = fixtures.every((f) => f.finished === true);
+
+  if (anyStarted && !allFinished) {
+    return { started: true, finished: false, status: PLAY_STATUS.PLAYING };
+  }
+  if (!anyStarted && !anyFinished) {
+    return { started: false, finished: false, status: PLAY_STATUS.NOT_STARTED };
+  }
+  if (anyFinished && !allFinished) {
+    return { started: true, finished: false, status: PLAY_STATUS.EVENT_NOT_FINISHED };
+  }
+  return { started: true, finished: true, status: PLAY_STATUS.FINISHED };
+};
+
+const joinNonEmpty = (values: string[]): string =>
+  values.filter((s) => s.trim().length > 0).join(',');
+
+const buildTeamMatchInfo = (params: {
+  teamId: number;
+  team: Team | undefined;
+  fixtures: Fixture[] | undefined;
+  teamsById: Map<number, Team>;
+}): {
+  teamCode: number;
+  teamName: string;
+  teamShortName: string;
+  againstId: number;
+  againstName: string;
+  againstShortName: string;
+  wasHome: string;
+  score: string;
+  bgw: boolean;
+  dgw: boolean;
+  isGwStarted: boolean;
+  isGwFinished: boolean;
+  playStatus: number;
+} => {
+  const { fixtures, teamId, team, teamsById } = params;
+  const status = getPlayStatusForTeam(fixtures);
+
+  if (!fixtures || fixtures.length === 0) {
+    return {
+      teamCode: team?.code ?? 0,
+      teamName: team?.name ?? '',
+      teamShortName: team?.shortName ?? '',
+      againstId: 0,
+      againstName: 'BLANK',
+      againstShortName: 'BLANK',
+      wasHome: '',
+      score: '',
+      bgw: true,
+      dgw: false,
+      isGwStarted: true,
+      isGwFinished: true,
+      playStatus: PLAY_STATUS.BLANK,
+    };
+  }
+
+  const againstIds: number[] = [];
+  const againstNames: string[] = [];
+  const againstShortNames: string[] = [];
+  const wasHomeList: string[] = [];
+  const scores: string[] = [];
+
+  for (const fx of fixtures) {
+    const isHome = fx.teamHId === teamId;
+    const againstId = isHome ? fx.teamAId : fx.teamHId;
+    const againstTeam = teamsById.get(againstId);
+
+    againstIds.push(againstId);
+    againstNames.push(againstTeam?.name ?? '');
+    againstShortNames.push(againstTeam?.shortName ?? '');
+    wasHomeList.push(isHome ? 'H' : 'A');
+
+    const teamScore = isHome ? fx.teamHScore : fx.teamAScore;
+    const againstScore = isHome ? fx.teamAScore : fx.teamHScore;
+    scores.push(
+      teamScore === null || againstScore === null ? '' : `${teamScore}-${againstScore}`
+    );
+  }
+
+  return {
+    teamCode: team?.code ?? 0,
+    teamName: team?.name ?? '',
+    teamShortName: team?.shortName ?? '',
+    againstId: againstIds.length === 1 ? againstIds[0] : 0,
+    againstName: joinNonEmpty(againstNames),
+    againstShortName: joinNonEmpty(againstShortNames),
+    wasHome: joinNonEmpty(wasHomeList),
+    score: joinNonEmpty(scores),
+    bgw: false,
+    dgw: fixtures.length > 1,
+    isGwStarted: status.started,
+    isGwFinished: status.finished,
+    playStatus: status.status,
+  };
+};
+
+const hasCompletedFixtures = (pick: ElementEventResultData): boolean =>
+  pick.isGwFinished || pick.playStatus === PLAY_STATUS.BLANK || pick.bgw;
+
+const selectCaptainForScoring = (picks: ElementEventResultData[]): ElementEventResultData | null => {
+  const captain = picks.find((p) => p.isCaptain) ?? null;
+  if (!captain) {
+    return null;
+  }
+  if (captain.isPlayed) {
+    return captain;
+  }
+  if (!hasCompletedFixtures(captain)) {
+    return captain;
+  }
+  const vice = picks.find((p) => p.isViceCaptain) ?? null;
+  return vice ?? captain;
+};
+
+const normalizeChip = (raw: string | null | undefined): string => {
+  const value = (raw ?? '').toUpperCase().trim();
+  const compactValue = value.replace(/[^A-Z0-9]/g, '');
+  if (value === 'BENCH_BOOST' || compactValue === 'BENCHBOOST' || compactValue === 'BBOOST' || compactValue === 'BB') {
+    return 'BENCH_BOOST';
+  }
+  if (
+    value === 'TRIPLE_CAPTAIN' ||
+    compactValue === 'TRIPLECAPTAIN' ||
+    compactValue === '3XC' ||
+    compactValue === 'TC'
+  ) {
+    return 'TRIPLE_CAPTAIN';
+  }
+  if (value === 'FREE_HIT' || compactValue === 'FREEHIT' || compactValue === 'FH') return 'FREE_HIT';
+  if (value === 'WILDCARD' || compactValue === 'WILDCARD' || compactValue === 'WC') return 'WILDCARD';
+  if (compactValue === 'NONE' || compactValue === 'NA' || compactValue === '') return 'NONE';
+  return 'NONE';
+};
+
+const computeSingleEntry = (
+  entryId: number,
+  eventId: number,
+  perEntry: PerEntryData,
+  shared: SharedData,
+): LiveCalcData => {
+  const { entry, currentResult, previousResult, pickEntity, transferRows } = perEntry;
+  const { liveByPlayer, fixturesByTeam, teamsById, playersById } = shared;
+
+  const chip = normalizeChip(pickEntity?.chip ?? null);
+  const transferCost =
+    (currentResult?.eventTransfersCost ?? null) ??
+    (pickEntity?.transfersCost ?? 0);
+
+  const picks = pickEntity?.picks ?? [];
+
+  const pickList: ElementEventResultData[] = picks.map((pick) => {
+    const player = playersById.get(pick.element) ?? null;
+    const team = player ? teamsById.get(player.teamId) : undefined;
+    const teamFixtures = player ? fixturesByTeam.get(player.teamId) : undefined;
+    const matchInfo = buildTeamMatchInfo({
+      teamId: player?.teamId ?? 0,
+      team,
+      fixtures: teamFixtures,
+      teamsById,
+    });
+
+    const live = liveByPlayer.get(pick.element);
+    const elementType = player?.position ?? 0;
+
+    const minutes = safeNull(live?.minutes, 0);
+    const yellowCards = safeNull(live?.yellowCards, 0);
+    const redCards = safeNull(live?.redCards, 0);
+    const isPlayed = minutes > 0 || yellowCards > 0 || redCards > 0;
+
+    const defensiveContribution: number = safeNull(live?.defensiveContribution, 0);
+    const calculatedTotalPoints = calcElementLivePoints(elementType, live);
+
+    return {
+      season: null,
+      event: eventId,
+      element: pick.element,
+      code: player?.code ?? 0,
+      webName: player?.webName ?? '',
+      price: player ? player.price / 10 : 0,
+      elementType,
+      elementTypeName: elementTypeName(player),
+      teamId: player?.teamId ?? 0,
+      teamCode: matchInfo.teamCode,
+      teamName: matchInfo.teamName,
+      teamShortName: matchInfo.teamShortName,
+      againstId: matchInfo.againstId,
+      againstName: matchInfo.againstName,
+      againstShortName:
+        matchInfo.againstShortName.length > 0
+          ? matchInfo.againstShortName
+          : 'BLANK',
+      wasHome: matchInfo.wasHome,
+      score: matchInfo.score,
+      position: pick.position,
+      multiplier: pick.multiplier,
+      isCaptain: pick.isCaptain,
+      isViceCaptain: pick.isViceCaptain,
+      isGwStarted: matchInfo.isGwStarted,
+      isGwFinished: matchInfo.isGwFinished,
+      isPlayed,
+      playStatus: matchInfo.playStatus,
+      minutes,
+      goalsScored: safeNull(live?.goalsScored, 0),
+      assists: safeNull(live?.assists, 0),
+      cleanSheets: safeNull(live?.cleanSheets, 0),
+      goalsConceded: safeNull(live?.goalsConceded, 0),
+      defensiveContribution,
+      ownGoals: safeNull(live?.ownGoals, 0),
+      penaltiesSaved: safeNull(live?.penaltiesSaved, 0),
+      penaltiesMissed: safeNull(live?.penaltiesMissed, 0),
+      yellowCards,
+      redCards,
+      saves: safeNull(live?.saves, 0),
+      bonus: safeNull(live?.bonus, 0),
+      bps: safeNull(live?.bps, 0),
+      totalPoints: calculatedTotalPoints,
+      starts: live?.starts ?? null,
+      expectedGoals: parseNullableFloat(live?.expectedGoals),
+      expectedAssists: parseNullableFloat(live?.expectedAssists),
+      expectedGoalInvolvements: parseNullableFloat(live?.expectedGoalInvolvements),
+      expectedGoalsConceded: parseNullableFloat(live?.expectedGoalsConceded),
+      inDreamTeam: live?.inDreamTeam ?? null,
+      pickActive: false,
+      autoSub: false,
+      bgw: matchInfo.bgw,
+      dgw: matchInfo.dgw,
+    };
+  });
+
+  const isBenchBoost = chip === 'BENCH_BOOST';
+  const activePicks: ElementEventResultData[] = [];
+
+  for (const pick of pickList) {
+    const isActive = isBenchBoost ? true : pick.multiplier > 0;
+    const autoSub = !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
+    pick.pickActive = isActive;
+    pick.autoSub = autoSub;
+    if (isActive) {
+      activePicks.push(pick);
+    }
+  }
+
+  const captainForScoring = selectCaptainForScoring(activePicks);
+  const captainMultiplier = chip === 'TRIPLE_CAPTAIN' ? 3 : 2;
+
+  const captainElementId = captainForScoring?.element;
+  const livePoints = activePicks.reduce((sum, p) => {
+    if (captainElementId !== undefined && p.element === captainElementId) {
+      return sum + p.totalPoints * captainMultiplier;
+    }
+    return sum + p.totalPoints;
+  }, 0);
+
+  const liveNetPoints = livePoints - transferCost;
+  const lastOverallPoints = previousResult?.overallPoints ?? 0;
+  const lastOverallRank = previousResult?.overallRank ?? 0;
+  const lastValue = asScaled(previousResult?.teamValue ?? null, 10);
+  const liveTotalPoints = lastOverallPoints + liveNetPoints;
+
+  const played = activePicks.filter((p) => p.isPlayed || p.bgw || p.isGwFinished).length;
+  const toPlay = activePicks.filter((p) => !p.isGwStarted && !p.isGwFinished && !p.bgw).length;
+
+  const playedCaptain = captainForScoring?.element ?? 0;
+  const captainName = captainForScoring?.webName ?? '';
+
+  const transfersList: EntryEventTransfersData[] = enrichTransferRows({
+    entryId,
+    eventId,
+    transferRows,
+    playersById,
+    teamsById,
+    liveByPlayer,
+  });
+
+  return {
+    rank: currentResult?.eventRank ?? 0,
+    event: eventId,
+    entry: entryId,
+    entryName: entry?.entryName ?? '',
+    playerName: entry?.playerName ?? '',
+    region: entry?.region ?? null,
+    startedEvent: safeInt(entry?.startedEvent),
+    overallPoints: safeInt(entry?.overallPoints),
+    overallRank: safeInt(entry?.overallRank),
+    value: asScaled(entry?.teamValue ?? null, 10),
+    bank: asScaled(entry?.bank ?? null, 10),
+    teamValue: asScaled(
+      (entry?.teamValue ?? null) !== null && (entry?.bank ?? null) !== null
+        ? safeInt(entry?.teamValue) - safeInt(entry?.bank)
+        : null,
+      10
+    ),
+    totalTransfers: safeInt(entry?.totalTransfers),
+    lastOverallPoints,
+    lastOverallRank,
+    lastValue,
+    chip,
+    livePoints,
+    transferCost,
+    liveNetPoints,
+    liveTotalPoints,
+    played,
+    toPlay,
+    playedCaptain,
+    captainName,
+    pickList: [...pickList].sort((a, b) => a.position - b.position),
+    transfersList,
+  };
+};
+
+export const entryLiveBatchService = {
+  async calcLivePointsForEntries(
+    context: GraphQLContext,
+    eventId: number,
+    entryIds: number[]
+  ): Promise<BatchLiveCalcResult> {
+    const errors: Array<{ entryId: number; message: string }> = [];
+
+    if (!entryIds.length) {
+      return {
+        results: new Map(),
+        errors: [],
+        meta: { eventId, totalEntries: 0, succeededCount: 0, failedCount: 0 },
+      };
+    }
+
+    // Phase 1: Load shared data (parallel, single fetch per type)
+    const liveByPlayerMap = await liveRepository.getAllLivePerformances(context, eventId);
+    const [fixtures, teams] = await Promise.all([
+      fixturesService.getEventFixtures(context, eventId),
+      playersRepository.listTeams(context),
+    ]);
+
+    const allPlayerIdsFromLive = Array.from(liveByPlayerMap.keys());
+    const teamsById = buildTeamMapById(teams);
+    const fixturesByTeam = buildFixtureIndex(fixtures);
+
+    const players: Player[] = allPlayerIdsFromLive.length > 0
+      ? await playersRepository.getPlayersByIds(context, allPlayerIdsFromLive)
+      : [];
+    const playersById = new Map(players.map((p) => [p.id, p]));
+
+    const shared: SharedData = {
+      liveByPlayer: liveByPlayerMap,
+      teamsById,
+      playersById,
+      fixturesByTeam,
+    };
+
+    // Phase 2: Load per-entry data (parallel)
+    const entryDataSettled = await Promise.allSettled(
+      entryIds.map(async (entryId) => {
+        try {
+          const [entry, currentResult, previousResult, pickEntity, transferRows] = await Promise.all([
+            entriesService.getEntryById(context, entryId),
+            entriesService.getEntryEventResult(context, entryId, eventId),
+            eventId > 1
+              ? entriesService.getEntryEventResult(context, entryId, eventId - 1)
+              : Promise.resolve<EntryEventResult | null>(null),
+            entryLiveRepository.getEntryEventPick(context, entryId, eventId),
+            entryLiveRepository.getEntryEventTransfers(context, entryId, eventId),
+          ]);
+
+          // Collect player IDs from picks + transfers and ensure they're in playersById
+          const pickPlayerIds = (pickEntity?.picks ?? []).map((p) => p.element);
+          const transferPlayerIds = transferRows.flatMap((t) => [t.elementIn, t.elementOut]);
+          const missingPlayerIds = [...new Set([...pickPlayerIds, ...transferPlayerIds])]
+            .filter((id) => !playersById.has(id));
+
+          if (missingPlayerIds.length > 0) {
+            const extraPlayers = await playersRepository.getPlayersByIds(context, missingPlayerIds);
+            for (const p of extraPlayers) {
+              playersById.set(p.id, p);
+            }
+          }
+
+          return {
+            entryId,
+            entry,
+            currentResult,
+            previousResult,
+            pickEntity,
+            transferRows,
+          } as PerEntryData;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Unknown error loading entry data';
+          return { entryId, error: message } as const;
+        }
+      })
+    );
+
+    // Phase 3: Compute per-entry (parallel, pure CPU — no I/O)
+    const results = new Map<number, LiveCalcData>();
+
+    const computePromises = entryDataSettled.map(async (settled) => {
+      if (settled.status === 'rejected') {
+        return null;
+      }
+      const result = settled.value;
+      if ('error' in result) {
+        errors.push({ entryId: result.entryId, message: result.error });
+        return null;
+      }
+      const perEntry = result as PerEntryData;
+      try {
+return {
+        entryId: perEntry.entryId,
+        calcData: computeSingleEntry(perEntry.entryId, eventId, perEntry, shared),
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Computation error';
+        errors.push({ entryId: perEntry.entryId, message });
+        return null;
+      }
+    });
+
+    const computeResults = await Promise.all(computePromises);
+    for (const cr of computeResults) {
+      if (cr) {
+        results.set(cr.entryId, cr.calcData);
+      }
+    }
+
+    return {
+      results,
+      errors,
+      meta: {
+        eventId,
+        totalEntries: entryIds.length,
+        succeededCount: results.size,
+        failedCount: errors.length,
+      },
+    };
+  },
+};

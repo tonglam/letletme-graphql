@@ -46,6 +46,13 @@ export const entryLiveTypeDefs = /* GraphQL */ `
     - calculation is performed server-side for fast client consumption
     """
     calcLivePointsByEntry(eventId: Int!, entryId: Int!): LiveCalcData!
+
+    """
+    Batch live calculation for multiple entries in a single event.
+    Shares live performance data, fixtures, teams, and players across all entries,
+    then computes each entry in parallel with error tolerance.
+    """
+    calcLivePointsForEntries(eventId: Int!, entryIds: [Int!]!): BatchLiveCalcResult!
   }
 
   type LiveCalcData {
@@ -154,6 +161,24 @@ export const entryLiveTypeDefs = /* GraphQL */ `
     elementOutCost: Float!
     elementOutPoints: Int!
     time: String!
+  }
+
+  type BatchLiveCalcResult {
+    results: [LiveCalcData!]!
+    errors: [EntryCalcError!]!
+    meta: BatchCalcMeta!
+  }
+
+  type EntryCalcError {
+    entryId: Int!
+    message: String!
+  }
+
+  type BatchCalcMeta {
+    eventId: Int!
+    totalEntries: Int!
+    succeededCount: Int!
+    failedCount: Int!
   }
 `;
 

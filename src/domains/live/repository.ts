@@ -1,6 +1,5 @@
 import type { GraphQLContext } from '../../graphql/context';
-
-const LIVE_CACHE_TTL = 30; // 30 seconds for live data
+import { getCurrentSeason } from '../../infra/season';
 
 export type LivePerformance = {
   eventId: number;
@@ -155,6 +154,89 @@ const mapLivePerformance = (row: DbLiveRow): LivePerformance => ({
   inDreamTeam: row.in_dream_team,
   totalPoints: row.total_points,
 });
+
+const asNumber = (value: unknown): number | null => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
+
+const asBoolean = (value: unknown): boolean | null => {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value === 1 ? true : value === 0 ? false : null;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') {
+      return true;
+    }
+    if (normalized === 'false' || normalized === '0') {
+      return false;
+    }
+  }
+  return null;
+};
+
+const asString = (value: unknown): string | null =>
+  typeof value === 'string' ? value : null;
+
+const parseJsonUnknown = (value: string): unknown | null => {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+};
+
+const mapSyncJobLiveRow = (raw: unknown): LivePerformance | null => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const row = raw as Record<string, unknown>;
+
+  const eventId = asNumber(row.eventId ?? row.event_id);
+  const elementId = asNumber(row.elementId ?? row.element_id);
+  if (eventId === null || elementId === null) {
+    return null;
+  }
+
+  const startsRaw = row.starts ?? row.starts;
+  const startsValue = asBoolean(startsRaw);
+
+  return {
+    eventId: Math.trunc(eventId),
+    playerId: Math.trunc(elementId),
+    minutes: asNumber(row.minutes),
+    goalsScored: asNumber(row.goalsScored ?? row.goals_scored),
+    assists: asNumber(row.assists),
+    cleanSheets: asNumber(row.cleanSheets ?? row.clean_sheets),
+    goalsConceded: asNumber(row.goalsConceded ?? row.goals_conceded),
+    ownGoals: asNumber(row.ownGoals ?? row.own_goals),
+    penaltiesSaved: asNumber(row.penaltiesSaved ?? row.penalties_saved),
+    penaltiesMissed: asNumber(row.penaltiesMissed ?? row.penalties_missed),
+    yellowCards: asNumber(row.yellowCards ?? row.yellow_cards),
+    redCards: asNumber(row.redCards ?? row.red_cards),
+    saves: asNumber(row.saves),
+    bonus: asNumber(row.bonus),
+    bps: asNumber(row.bps),
+    starts: startsValue,
+    defensiveContribution: asNumber(row.defensiveContribution ?? row.defensive_contribution),
+    expectedGoals: asString(row.expectedGoals ?? row.expected_goals) ?? null,
+    expectedAssists: asString(row.expectedAssists ?? row.expected_assists) ?? null,
+    expectedGoalInvolvements: asString(row.expectedGoalInvolvements ?? row.expected_goal_involvements) ?? null,
+    expectedGoalsConceded: asString(row.expectedGoalsConceded ?? row.expected_goals_conceded) ?? null,
+    inDreamTeam: asBoolean(row.inDreamTeam ?? row.in_dream_team),
+    totalPoints: asNumber(row.totalPoints ?? row.total_points) ?? 0,
+  };
+};
 
 const parseNumericValue = (value: unknown): number | null => {
   if (typeof value === 'number') {
@@ -410,6 +492,10 @@ interface LiveRepository {
     eventId: number,
     playerIds: number[]
   ): Promise<LivePerformance[]>;
+  getAllLivePerformances(
+    context: GraphQLContext,
+    eventId: number
+  ): Promise<Map<number, LivePerformance>>;
 }
 
 const fetchEventLiveExplainRow = async (
@@ -461,7 +547,7 @@ const fetchEventLiveExplainRow = async (
   }
 
   await context.redis.hset(cacheKey, field, JSON.stringify(row));
-  await context.redis.expire(cacheKey, LIVE_CACHE_TTL);
+  await context.redis.expire(cacheKey, 30);
   return row;
 };
 
@@ -506,11 +592,118 @@ const fetchSelectedByPercent = async (
   }
 
   await context.redis.hset(cacheKey, field, JSON.stringify(row));
-  await context.redis.expire(cacheKey, LIVE_CACHE_TTL);
+  await context.redis.expire(cacheKey, 30);
   return parseNumericValue(row.selected_by ?? row.selected_by_percent ?? null);
 };
 
+const _fetchLivePerformanceFromDbByPlayerIds = async (
+  context: GraphQLContext,
+  eventId: number,
+  playerIds: number[]
+): Promise<LivePerformance[]> => {
+  const uniqueIds = Array.from(new Set(playerIds.filter((id) => Number.isFinite(id) && id > 0)));
+  if (uniqueIds.length === 0) {
+    return [];
+  }
+
+  const { data, error } = await context.supabase
+    .from('event_lives')
+    .select('*')
+    .eq('event_id', eventId)
+    .in('element_id', uniqueIds);
+
+  if (error) {
+    context.logger.error(
+      { err: error, eventId, playerIds: uniqueIds },
+      'Failed to fetch live performances by player IDs'
+    );
+    throw new Error('Failed to fetch live performances');
+  }
+
+  return (data as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
+};
+
+const fetchAllLivePerformanceFromDb = async (
+  context: GraphQLContext,
+  eventId: number
+): Promise<LivePerformance[]> => {
+  const { data, error } = await context.supabase
+    .from('event_lives')
+    .select('*')
+    .eq('event_id', eventId);
+
+  if (error) {
+    context.logger.error(
+      { err: error, eventId },
+      'Failed to fetch all live performances from DB'
+    );
+    throw new Error('Failed to fetch live performances');
+  }
+
+  return (data as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
+};
+
+const loadEventLiveFromRedis = async (
+  context: GraphQLContext,
+  eventId: number
+): Promise<Map<number, LivePerformance> | null> => {
+  const season = await getCurrentSeason(context);
+  const hashKey = `EventLive:${season}:${eventId}`;
+
+  let hashEntries: Record<string, string>;
+  try {
+    hashEntries = await context.redis.hgetall(hashKey);
+  } catch (error) {
+    context.logger.warn(
+      { err: error, hashKey },
+      'Failed to read EventLive hash from Redis, falling back to DB'
+    );
+    return null;
+  }
+
+  const fields = Object.values(hashEntries);
+  if (fields.length === 0) {
+    return null;
+  }
+
+  const performances = new Map<number, LivePerformance>();
+  for (const fieldValue of fields) {
+    const parsed = parseJsonUnknown(fieldValue);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      continue;
+    }
+    const perf = mapSyncJobLiveRow(parsed);
+    if (perf) {
+      performances.set(perf.playerId, perf);
+    }
+  }
+
+  return performances.size > 0 ? performances : null;
+};
+
 export const liveRepository: LiveRepository = {
+  async getAllLivePerformances(
+    context: GraphQLContext,
+    eventId: number
+  ): Promise<Map<number, LivePerformance>> {
+    if (!eventId || !Number.isFinite(eventId) || eventId <= 0) {
+      return new Map();
+    }
+
+    const fromRedis = await loadEventLiveFromRedis(context, eventId);
+    if (fromRedis) {
+      return fromRedis;
+    }
+
+    context.logger.info(
+      { eventId },
+      'EventLive hash missing or empty, falling back to DB for all live performances'
+    );
+
+    const dbPerformances = await fetchAllLivePerformanceFromDb(context, eventId);
+    return new Map(dbPerformances.map((p) => [p.playerId, p]));
+  },
+
   async getLiveScores(
     context: GraphQLContext,
     eventId?: number,
@@ -518,7 +711,17 @@ export const liveRepository: LiveRepository = {
   ): Promise<LivePerformance[]> {
     let targetEventId = eventId;
 
-    // If no eventId provided, get current event
+    if (!targetEventId) {
+      const seasonKey = 'events:current:id';
+      const cachedEventId = await context.redis.get(seasonKey);
+      if (cachedEventId) {
+        targetEventId = Number.parseInt(cachedEventId, 10);
+        if (!Number.isFinite(targetEventId)) {
+          targetEventId = undefined;
+        }
+      }
+    }
+
     if (!targetEventId) {
       const { data: currentData, error: currentError } = await context.supabase
         .from('events')
@@ -540,50 +743,20 @@ export const liveRepository: LiveRepository = {
       }
     }
 
-    // Build cache key including filter
-    const filterParts: string[] = [];
+    const allPerformances = await this.getAllLivePerformances(context, targetEventId);
+    let results = Array.from(allPerformances.values());
+
     if (filter?.inDreamTeam !== undefined && filter.inDreamTeam !== null) {
-      filterParts.push(`dreamteam:${filter.inDreamTeam}`);
+      results = results.filter((p) => p.inDreamTeam === filter.inDreamTeam);
     }
     if (filter?.minTotalPoints !== undefined && filter.minTotalPoints !== null) {
-      filterParts.push(`minPoints:${filter.minTotalPoints}`);
+      results = results.filter((p) => p.totalPoints >= filter.minTotalPoints!);
     }
     if (filter?.maxTotalPoints !== undefined && filter.maxTotalPoints !== null) {
-      filterParts.push(`maxPoints:${filter.maxTotalPoints}`);
-    }
-    const filterKey = filterParts.length > 0 ? `:${filterParts.join(':')}` : '';
-    const cacheKey = `live:scores:${targetEventId}${filterKey}`;
-    const cached = await context.redis.get(cacheKey);
-    if (cached) {
-      return JSON.parse(cached) as LivePerformance[];
+      results = results.filter((p) => p.totalPoints <= filter.maxTotalPoints!);
     }
 
-    let query = context.supabase
-      .from('event_lives')
-      .select('*')
-      .eq('event_id', targetEventId);
-
-    // Apply filters if provided
-    if (filter?.inDreamTeam !== undefined && filter.inDreamTeam !== null) {
-      query = query.eq('in_dream_team', filter.inDreamTeam);
-    }
-    if (filter?.minTotalPoints !== undefined && filter.minTotalPoints !== null) {
-      query = query.gte('total_points', filter.minTotalPoints);
-    }
-    if (filter?.maxTotalPoints !== undefined && filter.maxTotalPoints !== null) {
-      query = query.lte('total_points', filter.maxTotalPoints);
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
-      context.logger.error({ err: error, eventId: targetEventId, filter }, 'Failed to fetch live scores');
-      throw new Error('Failed to fetch live scores');
-    }
-
-    const performances = (data as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
-    await context.redis.set(cacheKey, JSON.stringify(performances), 'EX', LIVE_CACHE_TTL);
-    return performances;
+    return results;
   },
 
   async getPlayerLive(
@@ -593,7 +766,6 @@ export const liveRepository: LiveRepository = {
   ): Promise<LivePerformance | null> {
     let targetEventId = eventId;
 
-    // If no eventId provided, get current event
     if (!targetEventId) {
       const { data: currentData, error: currentError } = await context.supabase
         .from('events')
@@ -615,63 +787,16 @@ export const liveRepository: LiveRepository = {
       }
     }
 
-    const cacheKey = `live:player:${playerId}:${targetEventId}`;
-    const cached = await context.redis.get(cacheKey);
-    if (cached) {
-      return JSON.parse(cached) as LivePerformance;
-    }
-
-    const { data, error } = await context.supabase
-      .from('event_lives')
-      .select('*')
-      .eq('event_id', targetEventId)
-      .eq('element_id', playerId)
-      .limit(1);
-
-    if (error) {
-      context.logger.error(
-        { err: error, playerId, eventId: targetEventId },
-        'Failed to fetch player live'
-      );
-      throw new Error('Failed to fetch player live performance');
-    }
-
-    const row = data?.[0] as DbLiveRow | undefined;
-    if (!row) {
-      return null;
-    }
-
-    const performance = mapLivePerformance(row);
-    await context.redis.set(cacheKey, JSON.stringify(performance), 'EX', LIVE_CACHE_TTL);
-    return performance;
+    const allPerformances = await this.getAllLivePerformances(context, targetEventId);
+    return allPerformances.get(playerId) ?? null;
   },
 
   async getEventLive(context: GraphQLContext, eventId: number): Promise<EventLive> {
-    const cacheKey = `live:event:${eventId}`;
-    const cached = await context.redis.get(cacheKey);
-    if (cached) {
-      return JSON.parse(cached) as EventLive;
-    }
-
-    const { data, error } = await context.supabase
-      .from('event_lives')
-      .select('*')
-      .eq('event_id', eventId);
-
-    if (error) {
-      context.logger.error({ err: error, eventId }, 'Failed to fetch event live data');
-      throw new Error('Failed to fetch event live data');
-    }
-
-    const performances = (data as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
-
-    const eventLive: EventLive = {
+    const allPerformances = await this.getAllLivePerformances(context, eventId);
+    return {
       eventId,
-      performances,
+      performances: Array.from(allPerformances.values()),
     };
-
-    await context.redis.set(cacheKey, JSON.stringify(eventLive), 'EX', LIVE_CACHE_TTL);
-    return eventLive;
   },
 
   async getEventLiveExplain(
@@ -703,7 +828,7 @@ export const liveRepository: LiveRepository = {
 
     const selectedBy = await fetchSelectedByPercent(context, eventId, resolvedElementId);
     const liveExplain = mapLiveExplainRow(row, resolvedElementId, selectedBy);
-    await context.redis.set(cacheKey, JSON.stringify(liveExplain), 'EX', LIVE_CACHE_TTL);
+    await context.redis.set(cacheKey, JSON.stringify(liveExplain), 'EX', 30);
     return liveExplain;
   },
 
@@ -721,20 +846,14 @@ export const liveRepository: LiveRepository = {
       return [];
     }
 
-    const { data, error } = await context.supabase
-      .from('event_lives')
-      .select('*')
-      .eq('event_id', eventId)
-      .in('element_id', uniqueIds);
-
-    if (error) {
-      context.logger.error(
-        { err: error, eventId, playerIds: uniqueIds },
-        'Failed to fetch live performances by player IDs'
-      );
-      throw new Error('Failed to fetch live performances');
+    const allPerformances = await this.getAllLivePerformances(context, eventId);
+    const results: LivePerformance[] = [];
+    for (const playerId of uniqueIds) {
+      const perf = allPerformances.get(playerId);
+      if (perf) {
+        results.push(perf);
+      }
     }
-
-    return (data as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
+    return results;
   },
 };
