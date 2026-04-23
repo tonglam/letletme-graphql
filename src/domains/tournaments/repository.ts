@@ -89,6 +89,96 @@ export type DbTournamentInfoRow = {
   updated_at: string;
 };
 
+export type TournamentEventResult = {
+  tournament: TournamentInfo;
+  eventId: number;
+  groupId: number;
+  entryId: number;
+  entryName: string | null;
+  playerName: string | null;
+  eventGroupRank: number | null;
+  eventPoints: number | null;
+  eventCost: number | null;
+  eventNetPoints: number | null;
+  eventRank: number | null;
+  overallPoints: number | null;
+  overallRank: number | null;
+  eventChip: string | null;
+  captainId: number | null;
+  captainPoints: number | null;
+  teamValue: number | null;
+  bank: number | null;
+};
+
+export type TournamentEntryRankingSummary = {
+  eventId: number;
+  entryId: number;
+  overallRank: number | null;
+  tournamentOverallRank: number | null;
+  teamValue: number | null;
+  tournamentTeamValueRank: number | null;
+  transfersNum: number | null;
+  tournamentTransfersRank: number | null;
+  totalCosts: number | null;
+  tournamentCostsRank: number | null;
+  totalBenchPoints: number | null;
+  tournamentBenchPointsRank: number | null;
+  autoSubPoints: number | null;
+  tournamentAutoSubRank: number | null;
+};
+
+export type DbTournamentPointsGroupResultRow = {
+  tournament_id: number;
+  group_id: number;
+  event_id: number;
+  entry_id: number;
+  event_group_rank: number | null;
+  event_points: number | null;
+  event_cost: number | null;
+  event_net_points: number | null;
+  event_rank: number | null;
+};
+
+export type DbLeagueEventResultEnrichmentRow = {
+  league_id: number;
+  league_type: string;
+  event_id: number;
+  entry_id: number;
+  entry_name: string | null;
+  player_name: string | null;
+  overall_points: number | null;
+  overall_rank: number | null;
+  event_chip: string | null;
+  captain_id: number | null;
+  captain_points: number | null;
+  team_value: number | null;
+  bank: number | null;
+};
+
+export type DbEntryInfoNameRow = {
+  id: number;
+  entry_name: string | null;
+  player_name: string | null;
+};
+
+type DbTournamentEventSnapshotRow = {
+  tournament_id: number;
+  event_id: number;
+  entry_id: number;
+  tournament_overall_rank: number | null;
+  overall_rank: number | null;
+  team_value: number | null;
+  cum_transfers_num: number;
+  cum_total_costs: number;
+  cum_total_bench_points: number;
+  cum_auto_sub_points: number;
+  tournament_team_value_rank: number | null;
+  tournament_transfers_rank: number | null;
+  tournament_costs_rank: number | null;
+  tournament_bench_points_rank: number | null;
+  tournament_auto_sub_rank: number | null;
+};
+
 const mapLeagueType = (type: string): LeagueType => {
   return type === LeagueType.H2H ? LeagueType.H2H : LeagueType.CLASSIC;
 };
@@ -136,6 +226,20 @@ const mapTournamentState = (state: string): TournamentState => {
   return TournamentState.ACTIVE;
 };
 
+const stableStringify = (value: unknown): string => {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const keys = Object.keys(value).sort();
+    const entries = keys.map(
+      (key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`
+    );
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value);
+};
+
 export const extractTournamentIds = (rows: DbTournamentEntryRow[]): number[] => {
   const unique = new Set<number>();
   rows.forEach((row) => {
@@ -174,8 +278,47 @@ export const mapTournamentInfo = (row: DbTournamentInfoRow): TournamentInfo => (
   updatedAt: row.updated_at,
 });
 
+export const mapTournamentEventResult = (
+  tournament: TournamentInfo,
+  row: DbTournamentPointsGroupResultRow,
+  leagueEventRow?: DbLeagueEventResultEnrichmentRow | null,
+  entryInfoRow?: DbEntryInfoNameRow | null
+): TournamentEventResult => ({
+  tournament,
+  eventId: row.event_id,
+  groupId: row.group_id,
+  entryId: row.entry_id,
+  entryName: leagueEventRow?.entry_name ?? entryInfoRow?.entry_name ?? null,
+  playerName: leagueEventRow?.player_name ?? entryInfoRow?.player_name ?? null,
+  eventGroupRank: row.event_group_rank,
+  eventPoints: row.event_points,
+  eventCost: row.event_cost,
+  eventNetPoints: row.event_net_points,
+  eventRank: row.event_rank,
+  overallPoints: leagueEventRow?.overall_points ?? null,
+  overallRank: leagueEventRow?.overall_rank ?? null,
+  eventChip: leagueEventRow?.event_chip ?? null,
+  captainId: leagueEventRow?.captain_id ?? null,
+  captainPoints: leagueEventRow?.captain_points ?? null,
+  teamValue: leagueEventRow?.team_value ?? null,
+  bank: leagueEventRow?.bank ?? null,
+});
+
+
 interface TournamentsRepository {
   getEntryTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]>;
+  getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]>;
+  getTournamentEventResults(
+    context: GraphQLContext,
+    tournamentId: number,
+    eventId: number
+  ): Promise<TournamentEventResult[]>;
+  getTournamentEntryRankingSummary(
+    context: GraphQLContext,
+    tournamentId: number,
+    eventId: number,
+    entryId: number
+  ): Promise<TournamentEntryRankingSummary>;
 }
 
 export const tournamentsRepository: TournamentsRepository = {
@@ -216,5 +359,228 @@ export const tournamentsRepository: TournamentsRepository = {
     const tournaments = ((infoData as DbTournamentInfoRow[] | null) ?? []).map(mapTournamentInfo);
     await context.redis.set(cacheKey, JSON.stringify(tournaments), 'EX', env.CACHE_TTL_SECONDS);
     return tournaments;
+  },
+
+  async getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]> {
+    const cacheKey = `tournaments:entry-ids:${tournamentId}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as number[];
+    }
+
+    const { data, error } = await context.supabase
+      .from('tournament_entries')
+      .select('entry_id')
+      .eq('tournament_id', tournamentId);
+
+    if (error) {
+      context.logger.error({ err: error, tournamentId }, 'Failed to fetch tournament entry IDs');
+      throw new Error('Failed to fetch tournament entry IDs');
+    }
+
+    const entryIds = ((data as { entry_id: number }[] | null) ?? []).map((row) => row.entry_id);
+    await context.redis.set(cacheKey, JSON.stringify(entryIds), 'EX', env.CACHE_TTL_SECONDS);
+    return entryIds;
+  },
+
+  async getTournamentEventResults(
+    context: GraphQLContext,
+    tournamentId: number,
+    eventId: number
+  ): Promise<TournamentEventResult[]> {
+    const cacheKey = `tournaments:event-results:${stableStringify({ tournamentId, eventId })}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as TournamentEventResult[];
+    }
+
+    const { data: tournamentData, error: tournamentError } = await context.supabase
+      .from('tournament_infos')
+      .select('*')
+      .eq('id', tournamentId)
+      .limit(1);
+
+    if (tournamentError) {
+      context.logger.error({ err: tournamentError, tournamentId }, 'Failed to fetch tournament');
+      throw new Error('Failed to fetch tournament');
+    }
+
+    const tournamentRow = (tournamentData?.[0] as DbTournamentInfoRow | undefined) ?? undefined;
+    if (!tournamentRow) {
+      throw new Error('Tournament not found');
+    }
+
+    const tournament = mapTournamentInfo(tournamentRow);
+    if (tournament.groupMode !== GroupMode.POINTS_RACES) {
+      throw new Error('Tournament event results currently support POINTS_RACES only');
+    }
+
+    const { data: resultData, error: resultError } = await context.supabase
+      .from('tournament_points_group_results')
+      .select('*')
+      .eq('tournament_id', tournamentId)
+      .eq('event_id', eventId)
+      .order('group_id', { ascending: true })
+      .order('event_group_rank', { ascending: true, nullsFirst: false })
+      .order('entry_id', { ascending: true });
+
+    if (resultError) {
+      context.logger.error(
+        { err: resultError, tournamentId, eventId },
+        'Failed to fetch tournament event results'
+      );
+      throw new Error('Failed to fetch tournament event results');
+    }
+
+    const pointRows = ((resultData as DbTournamentPointsGroupResultRow[] | null) ?? []).sort(
+      (left, right) => {
+        if (left.group_id !== right.group_id) {
+          return left.group_id - right.group_id;
+        }
+        const leftRank = left.event_group_rank ?? Number.MAX_SAFE_INTEGER;
+        const rightRank = right.event_group_rank ?? Number.MAX_SAFE_INTEGER;
+        if (leftRank !== rightRank) {
+          return leftRank - rightRank;
+        }
+        return left.entry_id - right.entry_id;
+      }
+    );
+    if (pointRows.length === 0) {
+      await context.redis.set(cacheKey, JSON.stringify([]), 'EX', env.CACHE_TTL_SECONDS);
+      return [];
+    }
+
+    const entryIds = pointRows.map((row) => row.entry_id);
+
+    const [leagueEventResponse, entryInfoResponse] = await Promise.all([
+      context.supabase
+        .from('league_event_results')
+        .select(
+          'league_id, league_type, event_id, entry_id, entry_name, player_name, overall_points, overall_rank, event_chip, captain_id, captain_points, team_value, bank'
+        )
+        .eq('league_id', tournamentRow.league_id)
+        .eq('league_type', tournamentRow.league_type)
+        .eq('event_id', eventId)
+        .in('entry_id', entryIds),
+      context.supabase.from('entry_infos').select('id, entry_name, player_name').in('id', entryIds),
+    ]);
+
+    if (leagueEventResponse.error) {
+      context.logger.error(
+        { err: leagueEventResponse.error, tournamentId, eventId },
+        'Failed to fetch league event result enrichment'
+      );
+      throw new Error('Failed to fetch tournament event results');
+    }
+
+    if (entryInfoResponse.error) {
+      context.logger.error(
+        { err: entryInfoResponse.error, tournamentId, eventId },
+        'Failed to fetch entry info enrichment'
+      );
+      throw new Error('Failed to fetch tournament event results');
+    }
+
+    const leagueEventByEntryId = new Map<number, DbLeagueEventResultEnrichmentRow>();
+    ((leagueEventResponse.data as DbLeagueEventResultEnrichmentRow[] | null) ?? []).forEach(
+      (row) => {
+        leagueEventByEntryId.set(row.entry_id, row);
+      }
+    );
+
+    const entryInfoByEntryId = new Map<number, DbEntryInfoNameRow>();
+    ((entryInfoResponse.data as DbEntryInfoNameRow[] | null) ?? []).forEach((row) => {
+      entryInfoByEntryId.set(row.id, row);
+    });
+
+    const results = pointRows.map((row) =>
+      mapTournamentEventResult(
+        tournament,
+        row,
+        leagueEventByEntryId.get(row.entry_id) ?? null,
+        entryInfoByEntryId.get(row.entry_id) ?? null
+      )
+    );
+
+    await context.redis.set(cacheKey, JSON.stringify(results), 'EX', env.CACHE_TTL_SECONDS);
+    return results;
+  },
+
+  async getTournamentEntryRankingSummary(
+    context: GraphQLContext,
+    tournamentId: number,
+    eventId: number,
+    entryId: number
+  ): Promise<TournamentEntryRankingSummary> {
+    const cacheKey = `tournaments:ranking-summary:${stableStringify({
+      tournamentId,
+      eventId,
+      entryId,
+    })}`;
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as TournamentEntryRankingSummary;
+    }
+
+    const { data: tournamentData, error: tournamentError } = await context.supabase
+      .from('tournament_infos')
+      .select('id, group_mode')
+      .eq('id', tournamentId)
+      .limit(1);
+
+    if (tournamentError) {
+      context.logger.error({ err: tournamentError, tournamentId }, 'Failed to fetch tournament');
+      throw new Error('Failed to fetch tournament');
+    }
+
+    const tournamentRow = (tournamentData?.[0] as DbTournamentInfoRow | undefined) ?? undefined;
+    if (!tournamentRow) {
+      throw new Error('Tournament not found');
+    }
+
+    const tournamentGroupMode = mapGroupMode(tournamentRow.group_mode);
+    if (tournamentGroupMode !== GroupMode.POINTS_RACES) {
+      throw new Error('Tournament ranking summary currently supports POINTS_RACES only');
+    }
+
+    const snapshotResponse = await context.supabase
+      .from('v_tournament_event_snapshot')
+      .select(
+        'tournament_id, event_id, entry_id, tournament_overall_rank, overall_rank, team_value, cum_transfers_num, cum_total_costs, cum_total_bench_points, cum_auto_sub_points, tournament_team_value_rank, tournament_transfers_rank, tournament_costs_rank, tournament_bench_points_rank, tournament_auto_sub_rank'
+      )
+      .eq('tournament_id', tournamentId)
+      .eq('event_id', eventId)
+      .eq('entry_id', entryId);
+
+    if (snapshotResponse.error) {
+      context.logger.error(
+        { err: snapshotResponse.error, tournamentId, eventId, entryId },
+        'Failed to fetch tournament snapshot metrics for summary'
+      );
+      throw new Error('Failed to fetch tournament ranking summary');
+    }
+
+    const snapshotRow =
+      (snapshotResponse.data?.[0] as DbTournamentEventSnapshotRow | undefined) ?? undefined;
+
+    const summary: TournamentEntryRankingSummary = {
+      eventId,
+      entryId,
+      overallRank: snapshotRow?.overall_rank ?? null,
+      tournamentOverallRank: snapshotRow?.tournament_overall_rank ?? null,
+      teamValue: snapshotRow?.team_value ?? null,
+      tournamentTeamValueRank: snapshotRow?.tournament_team_value_rank ?? null,
+      transfersNum: snapshotRow?.cum_transfers_num ?? 0,
+      tournamentTransfersRank: snapshotRow?.tournament_transfers_rank ?? null,
+      totalCosts: snapshotRow?.cum_total_costs ?? 0,
+      tournamentCostsRank: snapshotRow?.tournament_costs_rank ?? null,
+      totalBenchPoints: snapshotRow?.cum_total_bench_points ?? 0,
+      tournamentBenchPointsRank: snapshotRow?.tournament_bench_points_rank ?? null,
+      autoSubPoints: snapshotRow?.cum_auto_sub_points ?? 0,
+      tournamentAutoSubRank: snapshotRow?.tournament_auto_sub_rank ?? null,
+    };
+
+    await context.redis.set(cacheKey, JSON.stringify(summary), 'EX', env.CACHE_TTL_SECONDS);
+    return summary;
   },
 };

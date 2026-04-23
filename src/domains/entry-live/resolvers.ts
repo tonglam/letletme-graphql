@@ -8,6 +8,7 @@ import { entryLiveCalcService } from './calc-service';
 import { entryLiveBatchService } from './batch-service';
 import type { EntryLive as EntryLiveModel } from './service';
 import { entryLiveService } from './service';
+import { tournamentsService } from '../tournaments/service';
 
 type EntryLiveArgs = {
   entryId: number;
@@ -22,6 +23,11 @@ type CalcLivePointsByEntryArgs = {
 type CalcLivePointsForEntriesArgs = {
   eventId: number;
   entryIds: number[];
+};
+
+type CalcLivePointsForTournamentArgs = {
+  eventId: number;
+  tournamentId: number;
 };
 
 export const entryLiveResolvers = {
@@ -49,6 +55,24 @@ export const entryLiveResolvers = {
         context,
         args.eventId,
         args.entryIds,
+      );
+      return {
+        results: Array.from(result.results.values()),
+        errors: result.errors,
+        meta: result.meta,
+      };
+    },
+
+    calcLivePointsForTournament: async (
+      _parent: unknown,
+      args: CalcLivePointsForTournamentArgs,
+      context: GraphQLContext
+    ): Promise<{ results: LiveCalcData[]; errors: Array<{ entryId: number; message: string }>; meta: { eventId: number; totalEntries: number; succeededCount: number; failedCount: number } }> => {
+      const entryIds = await tournamentsService.getTournamentEntryIds(context, args.tournamentId);
+      const result = await entryLiveBatchService.calcLivePointsForEntries(
+        context,
+        args.eventId,
+        entryIds,
       );
       return {
         results: Array.from(result.results.values()),

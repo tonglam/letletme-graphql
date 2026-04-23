@@ -53,6 +53,12 @@ export const entryLiveTypeDefs = /* GraphQL */ `
     then computes each entry in parallel with error tolerance.
     """
     calcLivePointsForEntries(eventId: Int!, entryIds: [Int!]!): BatchLiveCalcResult!
+
+    """
+    Batch live calculation for all entries in a tournament.
+    Resolves entry IDs from the tournament, then computes live points for each.
+    """
+    calcLivePointsForTournament(eventId: Int!, tournamentId: Int!): BatchLiveCalcResult!
   }
 
   type LiveCalcData {
