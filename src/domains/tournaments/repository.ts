@@ -214,7 +214,6 @@ type DbTournamentEventSnapshotRow = {
   tournament_id: number;
   event_id: number;
   entry_id: number;
-  group_mode: string | null;
   tournament_overall_rank: number | null;
   overall_rank: number | null;
   team_value: number | null;
@@ -598,10 +597,32 @@ export const tournamentsRepository: TournamentsRepository = {
       return JSON.parse(cached) as TournamentEntryRankingSummary;
     }
 
+    const emptySummary: TournamentEntryRankingSummary = {
+      eventId,
+      entryId,
+      overallRank: null,
+      tournamentOverallRank: null,
+      teamValue: null,
+      tournamentTeamValueRank: null,
+      transfersNum: 0,
+      tournamentTransfersRank: null,
+      totalCosts: 0,
+      tournamentCostsRank: null,
+      totalBenchPoints: 0,
+      tournamentBenchPointsRank: null,
+      autoSubPoints: 0,
+      tournamentAutoSubRank: null,
+    };
+
+    const tournament = await getTournamentInfoById(context, tournamentId);
+    if (!tournament || tournament.groupMode !== GroupMode.POINTS_RACES) {
+      return emptySummary;
+    }
+
     const snapshotResponse = await context.supabase
       .from('mv_tournament_event_snapshot')
       .select(
-        'tournament_id, event_id, entry_id, group_mode, tournament_overall_rank, overall_rank, team_value, cum_transfers_num, cum_total_costs, cum_total_bench_points, cum_auto_sub_points, tournament_team_value_rank, tournament_transfers_rank, tournament_costs_rank, tournament_bench_points_rank, tournament_auto_sub_rank'
+        'tournament_id, event_id, entry_id, tournament_overall_rank, overall_rank, team_value, cum_transfers_num, cum_total_costs, cum_total_bench_points, cum_auto_sub_points, tournament_team_value_rank, tournament_transfers_rank, tournament_costs_rank, tournament_bench_points_rank, tournament_auto_sub_rank'
       )
       .eq('tournament_id', tournamentId)
       .eq('event_id', eventId)
@@ -609,33 +630,15 @@ export const tournamentsRepository: TournamentsRepository = {
       .limit(1);
 
     if (snapshotResponse.error) {
-      context.logger.error(
+      context.logger.warn(
         { err: snapshotResponse.error, tournamentId, eventId, entryId },
-        'Failed to fetch tournament snapshot metrics for summary'
+        'Failed to fetch tournament snapshot metrics for summary — returning empty summary'
       );
-      throw new Error('Failed to fetch tournament ranking summary');
+      return emptySummary;
     }
 
     const snapshotRow =
       (snapshotResponse.data?.[0] as DbTournamentEventSnapshotRow | undefined) ?? undefined;
-
-    const effectiveGroupMode = snapshotRow?.group_mode ?? null;
-
-    if (effectiveGroupMode === null) {
-      const tournament = await getTournamentInfoById(context, tournamentId);
-      if (!tournament) {
-        throw new Error('Tournament not found');
-      }
-      if (tournament.groupMode !== GroupMode.POINTS_RACES) {
-        throw new Error(
-          `Tournament ranking summary currently supports POINTS_RACES only, got: ${tournament.groupMode}`
-        );
-      }
-    } else if (effectiveGroupMode !== GroupMode.POINTS_RACES) {
-      throw new Error(
-        `Tournament ranking summary currently supports POINTS_RACES only, got: ${effectiveGroupMode}`
-      );
-    }
 
     const summary: TournamentEntryRankingSummary = {
       eventId,

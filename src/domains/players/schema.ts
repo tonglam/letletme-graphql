@@ -56,9 +56,28 @@ export const playersTypeDefs = /* GraphQL */ `
     transfersOutEvent: Int!
   }
 
+  type PlayerPickerTeam {
+    id: Int!
+    name: String!
+    shortName: String!
+  }
+
+  type PlayerPickerItem {
+    id: Int!
+    webName: String!
+    position: Position!
+    team: PlayerPickerTeam!
+  }
+
+  type PlayersForPickerPayload {
+    items: [PlayerPickerItem!]!
+    nextCursor: Int
+  }
+
   extend type Query {
     player(id: Int!): Player
     players(filter: PlayersFilter, limit: Int = 50, offset: Int = 0): [Player!]!
+    playersForPicker(limit: Int = 20, cursor: Int): PlayersForPickerPayload!
     team(id: Int!): Team
     teams: [Team!]!
     topTransfersIn(eventId: Int!, limit: Int = 10): [PlayerTransferStats!]!

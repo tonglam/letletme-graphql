@@ -1,5 +1,5 @@
 import type { GraphQLContext } from '../../graphql/context';
-import type { Player, PlayersFilter, PlayerTransferStats, Team } from './repository';
+import type { Player, PlayerPickerItem, PlayersFilter, PlayersForPickerPayload, PlayerTransferStats, Team } from './repository';
 import { Position } from './repository';
 import { playersService } from './service';
 
@@ -73,6 +73,11 @@ type TopTransfersArgs = {
   limit?: number | null;
 };
 
+type PlayersForPickerArgs = {
+  limit?: number | null;
+  cursor?: number | null;
+};
+
 const stringToPosition = (positionStr: string): Position => {
   switch (positionStr) {
     case 'GOALKEEPER':
@@ -113,6 +118,13 @@ export const playersResolvers = {
       return playersService.listPlayers(context, filter, args.limit ?? 50, args.offset ?? 0);
     },
 
+    playersForPicker: async (
+      _parent: unknown,
+      args: PlayersForPickerArgs,
+      context: GraphQLContext
+    ): Promise<PlayersForPickerPayload> =>
+      playersService.getPlayersForPicker(context, args.limit ?? 20, args.cursor ?? null),
+
     team: async (_parent: unknown, args: TeamArgs, context: GraphQLContext): Promise<Team | null> =>
       playersService.getTeamById(context, args.id),
 
@@ -143,6 +155,22 @@ export const playersResolvers = {
       context: GraphQLContext
     ): Promise<Player | null> =>
       getPlayerByIdForEventMemoized(context, parent.playerId, parent.eventId),
+  },
+  PlayerPickerItem: {
+    position: (parent: PlayerPickerItem): string => {
+      switch (parent.position) {
+        case Position.GOALKEEPER:
+          return 'GOALKEEPER';
+        case Position.DEFENDER:
+          return 'DEFENDER';
+        case Position.MIDFIELDER:
+          return 'MIDFIELDER';
+        case Position.FORWARD:
+          return 'FORWARD';
+        default:
+          return 'MIDFIELDER';
+      }
+    },
   },
   Player: {
     team: async (

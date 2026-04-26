@@ -165,6 +165,46 @@ const clampLimit = (limit: number): number => {
 
 const NULL_SENTINEL = '__team:null__';
 
+const PICKER_CACHE_TTL = 300;
+
+export type PlayerPickerTeam = {
+  id: number;
+  name: string;
+  shortName: string;
+};
+
+export type PlayerPickerItem = {
+  id: number;
+  webName: string;
+  position: Position;
+  team: PlayerPickerTeam;
+};
+
+export type PlayersForPickerPayload = {
+  items: PlayerPickerItem[];
+  nextCursor: number | null;
+};
+
+type DbPickerRow = {
+  id: number;
+  web_name: string;
+  position: number;
+  team_id: number;
+  team_name: string;
+  team_short_name: string;
+};
+
+const mapPickerRow = (row: DbPickerRow): PlayerPickerItem => ({
+  id: row.id,
+  webName: row.web_name,
+  position: row.position as Position,
+  team: {
+    id: row.team_id,
+    name: row.team_name,
+    shortName: row.team_short_name,
+  },
+});
+
 export type PlayerTransferStats = {
   playerId: number;
   eventId: number;
@@ -177,6 +217,11 @@ interface PlayersRepository {
   getPlayerByIdForEvent(context: GraphQLContext, id: number, eventId: number): Promise<Player | null>;
   getPlayersByIds(context: GraphQLContext, ids: number[]): Promise<Player[]>;
   getPlayersFromRedis(context: GraphQLContext): Promise<Map<number, Player>>;
+  getPlayersForPicker(
+    context: GraphQLContext,
+    limit: number,
+    cursor: number | null | undefined
+  ): Promise<PlayersForPickerPayload>;
   listPlayers(
     context: GraphQLContext,
     filter: PlayersFilter | null | undefined,
@@ -334,6 +379,39 @@ export const playersRepository: PlayersRepository = {
       context.logger.warn({ err }, 'Failed to read Player hash from Redis');
       return new Map();
     }
+  },
+
+  async getPlayersForPicker(
+    context: GraphQLContext,
+    limit: number,
+    cursor: number | null | undefined
+  ): Promise<PlayersForPickerPayload> {
+    const safeLimit = clampLimit(limit);
+    const safeCursor = cursor && Number.isFinite(cursor) && cursor > 0 ? cursor : null;
+    const cacheKey = `players:picker:${safeLimit}:${safeCursor ?? 0}`;
+
+    const cached = await context.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as PlayersForPickerPayload;
+    }
+
+    const result = await context.supabase.rpc('get_players_for_picker', {
+      p_limit: safeLimit,
+      p_cursor: safeCursor,
+    });
+
+    if (result.error) {
+      context.logger.error({ err: result.error, limit: safeLimit, cursor: safeCursor }, 'Failed to fetch players for picker');
+      throw new Error('Failed to fetch players for picker');
+    }
+
+    const rows = (result.data as DbPickerRow[] | null) ?? [];
+    const items = rows.map(mapPickerRow);
+    const nextCursor = items.length >= safeLimit ? items[items.length - 1].id : null;
+    const payload: PlayersForPickerPayload = { items, nextCursor };
+
+    await context.redis.set(cacheKey, JSON.stringify(payload), 'EX', PICKER_CACHE_TTL);
+    return payload;
   },
 
   async listPlayers(

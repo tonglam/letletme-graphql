@@ -15,6 +15,12 @@ import {
   type EntryEventTransfersData,
 } from './transfer-enrichment';
 
+export type ActiveCaptainData = {
+  id: number;
+  name: string;
+  points: number;
+};
+
 export type LiveCalcData = {
   rank: number;
   event: number;
@@ -43,6 +49,7 @@ export type LiveCalcData = {
   captainName: string;
   pickList: ElementEventResultData[];
   transfersList: EntryEventTransfersData[];
+  activeCaptain: ActiveCaptainData;
 };
 
 export type ElementEventResultData = {
@@ -328,7 +335,7 @@ export const applyAutoSubs = (
     .sort((a, b) => a.position - b.position);
 
   const nonPlayingStarters = starters.filter(
-    (p) => p.minutes === 0 && p.multiplier > 0,
+    (p) => p.minutes === 0 && p.multiplier > 0 && (p.isGwFinished || p.bgw),
   );
 
   if (nonPlayingStarters.length === 0) {
@@ -460,6 +467,7 @@ export const entryLiveCalcService = {
         captainName: '',
         pickList: [],
         transfersList: [],
+        activeCaptain: { id: 0, name: '', points: 0 },
       };
     }
 
@@ -638,7 +646,7 @@ export const entryLiveCalcService = {
     }, 0);
 
     const liveNetPoints = livePoints - transferCost;
-    // Last overall = entry's overallPoints from entry_infos (end of last finalized GW)
+    // Last overall = entry's overallPoints from entry_infos (previous GW baseline)
     const lastOverallPoints = entryInfo?.overallPoints ?? 0;
     const lastOverallRank = entryInfo?.overallRank ?? 0;
     const lastValue = asScaled(entryInfo?.teamValue ?? null, 10);
@@ -650,6 +658,11 @@ export const entryLiveCalcService = {
 
     const playedCaptain = captainForScoring?.element ?? 0;
     const captainName = captainForScoring?.webName ?? '';
+    const activeCaptain: ActiveCaptainData = {
+      id: captainForScoring?.element ?? 0,
+      name: captainForScoring?.webName ?? '',
+      points: captainForScoring?.totalPoints ?? 0,
+    };
 
     const transfersList: EntryEventTransfersData[] = enrichTransferRows({
       entryId,
@@ -693,6 +706,7 @@ export const entryLiveCalcService = {
       captainName,
       pickList: [...pickList].sort((a, b) => a.position - b.position),
       transfersList,
+      activeCaptain,
     };
   },
 };

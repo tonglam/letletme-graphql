@@ -1,5 +1,5 @@
 import type { GraphQLContext } from '../../graphql/context';
-import type { Player, PlayersFilter, PlayerTransferStats, Team } from './repository';
+import type { Player, PlayersFilter, PlayersForPickerPayload, PlayerTransferStats, Team } from './repository';
 import { playersRepository } from './repository';
 
 export const playersService = {
@@ -18,6 +18,14 @@ export const playersService = {
     offset: number
   ): Promise<Player[]> {
     return playersRepository.listPlayers(context, filter, limit, offset);
+  },
+
+  getPlayersForPicker(
+    context: GraphQLContext,
+    limit: number,
+    cursor: number | null | undefined
+  ): Promise<PlayersForPickerPayload> {
+    return playersRepository.getPlayersForPicker(context, limit, cursor);
   },
 
   getTeamById(context: GraphQLContext, id: number): Promise<Team | null> {

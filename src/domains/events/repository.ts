@@ -1,5 +1,6 @@
 import type { GraphQLContext } from '../../graphql/context';
 import { env } from '../../infra/env';
+import { getCurrentEventFromRedis } from '../../infra/event';
 
 export type ChipPlay = {
   chipName: string;
@@ -210,8 +211,30 @@ export const eventsRepository: EventsRepository = {
       return JSON.parse(cached) as CurrentEventInfo;
     }
 
-    // Single query for both current and next event (avoids 2 round-trips).
-    // Event flags change only once per gameweek, so this is very cacheable.
+    const cachedEvent = await getCurrentEventFromRedis(context);
+    if (cachedEvent) {
+      const { data: nextData, error: nextError } = await context.supabase
+        .from('events')
+        .select('deadline_time')
+        .eq('is_next', true)
+        .limit(1);
+
+      if (nextError) {
+        context.logger.error({ err: nextError }, 'Failed to fetch next event deadline');
+        throw new Error('Failed to fetch current event');
+      }
+
+      const nextRow = (nextData?.[0] as { deadline_time: string | null } | undefined) ?? null;
+      const result: CurrentEventInfo = {
+        currentEvent: cachedEvent.id,
+        nextUtcDeadline: nextRow?.deadline_time ?? null,
+      };
+
+      await context.redis.set(cacheKey, JSON.stringify(result), 'EX', 3600);
+      return result;
+    }
+
+    // Fallback: single query for both current and next event (avoids 2 round-trips).
     const { data, error } = await context.supabase
       .from('events')
       .select('id,deadline_time,is_current,is_next')
@@ -241,7 +264,6 @@ export const eventsRepository: EventsRepository = {
       nextUtcDeadline: nextRow?.deadline_time ?? null,
     };
 
-    // Cache for 1 hour — event flags only change once per gameweek.
     await context.redis.set(cacheKey, JSON.stringify(result), 'EX', 3600);
     return result;
   },

@@ -89,6 +89,13 @@ export const entryLiveTypeDefs = /* GraphQL */ `
     captainName: String!
     pickList: [ElementEventResultData!]!
     transfersList: [EntryEventTransfersData!]!
+    activeCaptain: ActiveCaptain!
+  }
+
+  type ActiveCaptain {
+    id: Int!
+    name: String!
+    points: Int!
   }
 
   type ElementEventResultData {

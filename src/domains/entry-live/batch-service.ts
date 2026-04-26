@@ -17,6 +17,7 @@ import {
 import {
   applyAutoSubs,
   calcElementLivePoints,
+  type ActiveCaptainData,
   type ElementEventResultData,
   type LiveCalcData,
 } from './calc-service';
@@ -368,6 +369,7 @@ const computeSingleEntry = (
   }, 0);
 
   const liveNetPoints = livePoints - transferCost;
+  // Last overall = entry's overallPoints from entry_infos (previous GW baseline)
   const lastOverallPoints = entry?.overallPoints ?? 0;
   const lastOverallRank = entry?.overallRank ?? 0;
   const lastValue = asScaled(entry?.teamValue ?? null, 10);
@@ -378,6 +380,11 @@ const computeSingleEntry = (
 
   const playedCaptain = captainForScoring?.element ?? 0;
   const captainName = captainForScoring?.webName ?? '';
+  const activeCaptain: ActiveCaptainData = {
+    id: captainForScoring?.element ?? 0,
+    name: captainForScoring?.webName ?? '',
+    points: captainForScoring?.totalPoints ?? 0,
+  };
 
   const transfersList: EntryEventTransfersData[] = enrichTransferRows({
     entryId,
@@ -421,6 +428,7 @@ const computeSingleEntry = (
     captainName,
     pickList: [...pickList].sort((a, b) => a.position - b.position),
     transfersList,
+    activeCaptain,
   };
 };
 

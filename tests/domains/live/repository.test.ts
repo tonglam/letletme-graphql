@@ -28,16 +28,24 @@ const makeMockRedis = (options: {
   };
 };
 
-const makeMockSupabase = (options: { data?: unknown[]; error?: unknown }) => ({
-  from: () => {
+const makeMockSupabase = (options: {
+  data?: unknown[];
+  dataByTable?: Record<string, unknown[]>;
+  error?: unknown;
+}) => ({
+  from: (table: string) => {
+    const rows =
+      options.dataByTable && Object.prototype.hasOwnProperty.call(options.dataByTable, table)
+        ? options.dataByTable[table]!
+        : (options.data ?? []);
     const builder = {
       select: () => builder,
       eq: () => builder,
       in: () => builder,
-      limit: async () => ({ data: options.data ?? [], error: options.error ?? null }),
+      limit: async () => ({ data: rows, error: options.error ?? null }),
       order: () => builder,
       then: (resolve: (value: unknown) => unknown) =>
-        resolve({ data: options.data ?? [], error: options.error ?? null }),
+        resolve({ data: rows, error: options.error ?? null }),
     };
     return builder;
   },
@@ -53,10 +61,15 @@ const buildContext = (options: {
   redisStrings?: Record<string, string>;
   redisHashes?: Record<string, Record<string, string>>;
   supabaseData?: unknown[];
+  supabaseDataByTable?: Record<string, unknown[]>;
   supabaseError?: unknown;
 }) => ({
   redis: makeMockRedis({ strings: options.redisStrings, hashes: options.redisHashes }),
-  supabase: makeMockSupabase({ data: options.supabaseData, error: options.supabaseError }),
+  supabase: makeMockSupabase({
+    data: options.supabaseData,
+    dataByTable: options.supabaseDataByTable,
+    error: options.supabaseError,
+  }),
   logger: makeMockLogger(),
   user: undefined,
 }) as never;
@@ -239,5 +252,77 @@ describe('liveRepository.getEventLive', () => {
     expect(result.eventId).toBe(33);
     expect(result.performances).toHaveLength(1);
     expect(result.performances[0].playerId).toBe(1);
+  });
+});
+
+describe('liveRepository.getEventLiveExplain', () => {
+  const playerStatsRow34_526 = {
+    event_id: 34,
+    element_id: 526,
+    total_points: 14,
+    minutes: 66,
+    goals_scored: 1,
+    assists: 2,
+    bonus: 3,
+    yellow_cards: 1,
+  };
+
+  it('maps stats from player_stats and breakdown from event_live_explain', async () => {
+    const explainFixture = {
+      fixture: 8,
+      stats: [{ identifier: 'goals_scored', points: 4, value: 1 }],
+    };
+    const context = buildContext({
+      supabaseDataByTable: {
+        player_stats: [playerStatsRow34_526],
+        event_live_explains: [
+          {
+            event_id: 34,
+            element_id: 526,
+            explain: [explainFixture],
+          },
+        ],
+      },
+    });
+    const result = await liveRepository.getEventLiveExplain(context, 34, 526);
+    expect(result).not.toBeNull();
+    expect(result!.stats.totalPoints).toBe(14);
+    expect(result!.breakdown).toHaveLength(1);
+    expect(result!.breakdown[0]!.fixtureId).toBe(8);
+    expect(result!.breakdown[0]!.stats[0]!.identifier).toBe('goals_scored');
+  });
+
+  it('uses Redis `explain` when event_live_explain has no explain JSON', async () => {
+    const redisExplain = {
+      explain: [
+        {
+          fixture: 9,
+          stats: [{ identifier: 'minutes', points: 2, value: 66 }],
+        },
+      ],
+    };
+    const context = buildContext({
+      redisStrings: { 'season:current': '2526' },
+      redisHashes: {
+        'EventLiveExplain:2526:34': {
+          526: JSON.stringify(redisExplain),
+        },
+      },
+      supabaseDataByTable: {
+        player_stats: [playerStatsRow34_526],
+        event_live_explains: [
+          { event_id: 34, element_id: 526, explain: null },
+        ],
+      },
+    });
+    const result = await liveRepository.getEventLiveExplain(context, 34, 526);
+    expect(result!.stats.totalPoints).toBe(14);
+    expect(result!.breakdown[0]!.fixtureId).toBe(9);
+  });
+
+  it('returns null when neither player_stats nor event_live_explain have a row', async () => {
+    const context = buildContext({ supabaseDataByTable: { player_stats: [], event_live_explains: [] } });
+    const result = await liveRepository.getEventLiveExplain(context, 34, 526);
+    expect(result).toBeNull();
   });
 });

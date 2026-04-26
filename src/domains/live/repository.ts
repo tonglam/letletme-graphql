@@ -1,7 +1,6 @@
 import type { GraphQLContext } from '../../graphql/context';
+import { getCurrentEventId } from '../../infra/event';
 import { getCurrentSeason } from '../../infra/season';
-
-const NULL_SENTINEL = '__live:null__';
 
 export type LivePerformance = {
   eventId: number;
@@ -27,18 +26,6 @@ export type LivePerformance = {
   expectedGoalsConceded: string | null;
   inDreamTeam: boolean | null;
   totalPoints: number;
-};
-
-export type LiveExplainStatContribution = {
-  identifier: string;
-  points: number;
-  value: number | null;
-  pointsModification: number | null;
-};
-
-export type LiveExplainBreakdown = {
-  fixtureId: number;
-  stats: LiveExplainStatContribution[];
 };
 
 export type LiveExplainStats = {
@@ -70,6 +57,18 @@ export type LiveExplainStats = {
   expectedGoalsConceded: number | null;
   totalPoints: number | null;
   inDreamTeam: boolean | null;
+};
+
+export type LiveExplainStatContribution = {
+  identifier: string;
+  points: number;
+  value: number | null;
+  pointsModification: number | null;
+};
+
+export type LiveExplainBreakdown = {
+  fixtureId: number;
+  stats: LiveExplainStatContribution[];
 };
 
 export type LiveExplain = {
@@ -117,19 +116,26 @@ type DbLiveExplainBreakdown = JsonRecord & {
   stats?: DbLiveExplainBreakdownStat[] | string | null;
 };
 
+/** Per-element GW row: `explain` JSON = fixture-level breakdown; not used for `stats` (use `player_stats`). */
 type DbLiveExplainRow = {
   event_id: number;
   element_id?: number | null;
   element?: number | null;
-  stats?: DbLiveExplainStats | string | null;
   explain?: DbLiveExplainBreakdown[] | string | null;
   modified?: boolean | number | string | null;
+} & Record<string, unknown>;
+
+type SelectedByCacheRow = {
+  selected_by_percent: number | string | null | undefined;
 };
 
-type DbPlayerStatsSelectedByRow = {
-  selected_by?: number | string | null;
-  selected_by_percent?: number | string | null;
-};
+const redisKey = {
+  eventLive: (season: string, eventId: number): string => `EventLive:${season}:${eventId}`,
+  eventLiveExplain: (season: string, eventId: number): string =>
+    `EventLiveExplain:${season}:${eventId}`,
+  playerSelectedBy: (season: string, eventId: number): string =>
+    `PlayerStatsSelected:${season}:${eventId}`,
+} as const;
 
 const mapLivePerformance = (row: DbLiveRow): LivePerformance => ({
   eventId: row.event_id,
@@ -187,8 +193,7 @@ const asBoolean = (value: unknown): boolean | null => {
   return null;
 };
 
-const asString = (value: unknown): string | null =>
-  typeof value === 'string' ? value : null;
+const asString = (value: unknown): string | null => (typeof value === 'string' ? value : null);
 
 const parseJsonUnknown = (value: string): unknown | null => {
   try {
@@ -233,8 +238,10 @@ const mapSyncJobLiveRow = (raw: unknown): LivePerformance | null => {
     defensiveContribution: asNumber(row.defensiveContribution ?? row.defensive_contribution),
     expectedGoals: asString(row.expectedGoals ?? row.expected_goals) ?? null,
     expectedAssists: asString(row.expectedAssists ?? row.expected_assists) ?? null,
-    expectedGoalInvolvements: asString(row.expectedGoalInvolvements ?? row.expected_goal_involvements) ?? null,
-    expectedGoalsConceded: asString(row.expectedGoalsConceded ?? row.expected_goals_conceded) ?? null,
+    expectedGoalInvolvements:
+      asString(row.expectedGoalInvolvements ?? row.expected_goal_involvements) ?? null,
+    expectedGoalsConceded:
+      asString(row.expectedGoalsConceded ?? row.expected_goals_conceded) ?? null,
     inDreamTeam: asBoolean(row.inDreamTeam ?? row.in_dream_team),
     totalPoints: asNumber(row.totalPoints ?? row.total_points) ?? 0,
   };
@@ -290,20 +297,20 @@ const parseBooleanValue = (value: unknown): boolean | null => {
   return null;
 };
 
-const parseObjectValue = <T extends object>(value: unknown): T | null => {
-  if (value === null || value === undefined) {
+const pickRecordValue = (
+  source: Record<string, unknown> | null | undefined,
+  ...keys: string[]
+): unknown => {
+  if (!source) {
     return null;
   }
-  if (typeof value === 'string') {
-    try {
-      const parsed: unknown = JSON.parse(value);
-      return typeof parsed === 'object' && parsed !== null ? (parsed as T) : null;
-    } catch {
-      return null;
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) {
+      const value = source[key];
+      if (value !== undefined) {
+        return value;
+      }
     }
-  }
-  if (typeof value === 'object') {
-    return value as T;
   }
   return null;
 };
@@ -323,24 +330,6 @@ const parseArrayValue = <T>(value: unknown): T[] | null => {
   return null;
 };
 
-const pickRecordValue = (
-  source: Record<string, unknown> | null | undefined,
-  ...keys: string[]
-): unknown => {
-  if (!source) {
-    return null;
-  }
-  for (const key of keys) {
-    if (Object.prototype.hasOwnProperty.call(source, key)) {
-      const value = source[key];
-      if (value !== undefined) {
-        return value;
-      }
-    }
-  }
-  return null;
-};
-
 const mapLiveExplainStats = (statsValue: DbLiveExplainStats | null): LiveExplainStats => {
   const stats: DbLiveExplainStats = statsValue ?? {};
   return {
@@ -351,7 +340,9 @@ const mapLiveExplainStats = (statsValue: DbLiveExplainStats | null): LiveExplain
     goalsConceded: parseIntegerValue(pickRecordValue(stats, 'goals_conceded', 'goalsConceded')),
     ownGoals: parseIntegerValue(pickRecordValue(stats, 'own_goals', 'ownGoals')),
     penaltiesSaved: parseIntegerValue(pickRecordValue(stats, 'penalties_saved', 'penaltiesSaved')),
-    penaltiesMissed: parseIntegerValue(pickRecordValue(stats, 'penalties_missed', 'penaltiesMissed')),
+    penaltiesMissed: parseIntegerValue(
+      pickRecordValue(stats, 'penalties_missed', 'penaltiesMissed')
+    ),
     yellowCards: parseIntegerValue(pickRecordValue(stats, 'yellow_cards', 'yellowCards')),
     redCards: parseIntegerValue(pickRecordValue(stats, 'red_cards', 'redCards')),
     saves: parseIntegerValue(pickRecordValue(stats, 'saves')),
@@ -371,7 +362,9 @@ const mapLiveExplainStats = (statsValue: DbLiveExplainStats | null): LiveExplain
     ),
     starts: parseIntegerValue(pickRecordValue(stats, 'starts')),
     expectedGoals: parseNumericValue(pickRecordValue(stats, 'expected_goals', 'expectedGoals')),
-    expectedAssists: parseNumericValue(pickRecordValue(stats, 'expected_assists', 'expectedAssists')),
+    expectedAssists: parseNumericValue(
+      pickRecordValue(stats, 'expected_assists', 'expectedAssists')
+    ),
     expectedGoalInvolvements: parseNumericValue(
       pickRecordValue(stats, 'expected_goal_involvements', 'expectedGoalInvolvements')
     ),
@@ -404,15 +397,11 @@ const mapLiveExplainBreakdownStat = (
   };
 };
 
-const mapLiveExplainBreakdown = (
-  explainValue: DbLiveExplainBreakdown[] | null
-): LiveExplainBreakdown[] => {
+const mapLiveExplainBreakdown = (explainValue: DbLiveExplainBreakdown[] | null): LiveExplainBreakdown[] => {
   if (!explainValue) {
     return [];
   }
-
   const breakdowns: LiveExplainBreakdown[] = [];
-
   for (const entry of explainValue) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       continue;
@@ -421,45 +410,119 @@ const mapLiveExplainBreakdown = (
     if (fixtureId === null) {
       continue;
     }
-
     const rawStats = Array.isArray(entry.stats)
       ? entry.stats
       : parseArrayValue<DbLiveExplainBreakdownStat>(entry.stats ?? null);
-
     const statsList = (rawStats ?? [])
-      .map((stat) => mapLiveExplainBreakdownStat(stat ?? null))
-      .filter((stat): stat is LiveExplainStatContribution => stat !== null);
-
+      .map((s) => mapLiveExplainBreakdownStat(s ?? null))
+      .filter((s): s is LiveExplainStatContribution => s !== null);
     breakdowns.push({ fixtureId, stats: statsList });
   }
-
   return breakdowns;
 };
 
-const resolveElementId = (row: DbLiveExplainRow): number | null => {
-  const elementId = row.element_id ?? row.element;
-  if (typeof elementId === 'number') {
-    return elementId;
-  }
-  return null;
+const mapBreakdownFromEventLiveRow = (row: DbLiveExplainRow): LiveExplainBreakdown[] => {
+  const arr = parseArrayValue<DbLiveExplainBreakdown>(row.explain ?? null);
+  return mapLiveExplainBreakdown(arr);
 };
 
-const mapLiveExplainRow = (
-  row: DbLiveExplainRow,
-  elementId: number,
-  selectedBy: number | null
-): LiveExplain => {
-  const statsObject = parseObjectValue<DbLiveExplainStats>(row.stats ?? null);
-  const breakdownArray = parseArrayValue<DbLiveExplainBreakdown>(row.explain ?? null);
-  return {
-    eventId: row.event_id,
-    elementId,
-    modified: parseBooleanValue(row.modified),
-    stats: mapLiveExplainStats(statsObject),
-    breakdown: mapLiveExplainBreakdown(breakdownArray),
-    selectedBy,
-  };
-};
+async function fetchPlayerStatsForLiveExplain(
+  context: GraphQLContext,
+  eventId: number,
+  elementId: number
+): Promise<DbLiveExplainStats | null> {
+  const { data, error } = await context.supabase
+    .from('player_stats')
+    .select('*')
+    .eq('event_id', eventId)
+    .eq('element_id', elementId)
+    .limit(1);
+
+  if (error) {
+    context.logger.warn(
+      { err: error, eventId, elementId },
+      'player_stats query failed for event live explain',
+    );
+    return null;
+  }
+  const raw: unknown = data?.[0];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  return raw as DbLiveExplainStats;
+}
+
+/** Supplement `explain` JSON when the DB row has no / empty `explain` (e.g. sync only wrote Redis). */
+async function loadBreakdownFromEventLiveExplainRedis(
+  context: GraphQLContext,
+  eventId: number,
+  elementId: number
+): Promise<LiveExplainBreakdown[] | null> {
+  const season = await getCurrentSeason(context);
+  const hashKey = redisKey.eventLiveExplain(season, eventId);
+  let raw: string | null;
+  try {
+    raw = await context.redis.hget(hashKey, String(elementId));
+  } catch (error) {
+    context.logger.warn(
+      { err: error, hashKey, eventId, elementId },
+      'Redis HGET EventLiveExplain failed',
+    );
+    return null;
+  }
+  if (raw === null || raw.length === 0) {
+    return null;
+  }
+  const parsed = parseJsonUnknown(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return null;
+  }
+  const o = parsed as Record<string, unknown>;
+  const ex = o.explain;
+  if (ex === undefined || ex === null) {
+    return null;
+  }
+  const arr: DbLiveExplainBreakdown[] | null = Array.isArray(ex)
+    ? (ex as DbLiveExplainBreakdown[])
+    : parseArrayValue<DbLiveExplainBreakdown>(ex);
+  if (!arr || arr.length === 0) {
+    return null;
+  }
+  const out = mapLiveExplainBreakdown(arr);
+  return out.length > 0 ? out : null;
+}
+
+async function fetchEventLiveExplainFromSupabase(
+  context: GraphQLContext,
+  eventId: number,
+  elementId: number
+): Promise<DbLiveExplainRow | null> {
+  let { data, error } = await context.supabase
+    .from('event_live_explains')
+    .select('*')
+    .eq('event_id', eventId)
+    .eq('element_id', elementId)
+    .limit(1);
+
+  if (error?.message?.includes('element_id')) {
+    ({ data, error } = await context.supabase
+      .from('event_live_explains')
+      .select('*')
+      .eq('event_id', eventId)
+      .eq('element', elementId)
+      .limit(1));
+  }
+
+  if (error) {
+    context.logger.error(
+      { err: error, eventId, elementId },
+      'event_live_explains query failed',
+    );
+    throw new Error('Failed to fetch event live explain');
+  }
+
+  return (data?.[0] as DbLiveExplainRow | undefined) ?? null;
+}
 
 export type LiveScoresFilter = {
   inDreamTeam?: boolean | null;
@@ -505,29 +568,33 @@ interface LiveRepository {
   ): Promise<number | null>;
 }
 
-const fetchSelectedByPercent = async (
+const SELECTED_BY_REDIS_TTL_SEC = 30;
+
+async function resolveSelectedByPercent(
   context: GraphQLContext,
   eventId: number,
   elementId: number
-): Promise<number | null> => {
-  const cacheKey = `live:explain:playerstats:${eventId}`;
+): Promise<number | null> {
+  const season = await getCurrentSeason(context);
+  const hashKey = redisKey.playerSelectedBy(season, eventId);
   const field = String(elementId);
-  const cached = await context.redis.hget(cacheKey, field);
+
+  const cached = await context.redis.hget(hashKey, field);
   if (cached) {
     try {
-      const parsed = JSON.parse(cached) as DbPlayerStatsSelectedByRow;
-      return parseNumericValue(parsed.selected_by ?? parsed.selected_by_percent ?? null);
+      const row = JSON.parse(cached) as SelectedByCacheRow;
+      return parseNumericValue(row.selected_by_percent);
     } catch (error) {
       context.logger.warn(
-        { err: error, cacheKey, field },
-        'Failed to parse cached player stats for selected_by'
+        { err: error, hashKey, field },
+        'Invalid JSON in PlayerStatsSelected cache',
       );
     }
   }
 
   const { data, error } = await context.supabase
     .from('player_stats')
-    .select('selected_by, selected_by_percent')
+    .select('selected_by_percent')
     .eq('event_id', eventId)
     .eq('element_id', elementId)
     .limit(1);
@@ -535,20 +602,43 @@ const fetchSelectedByPercent = async (
   if (error) {
     context.logger.warn(
       { err: error, eventId, elementId },
-      'Failed to fetch selected_by for event live explain'
+      'player_stats selected_by_percent query failed',
+    );
+  } else {
+    const row = data?.[0] as { selected_by_percent?: number | string | null } | undefined;
+    const pct = parseNumericValue(row?.selected_by_percent ?? null);
+    if (pct !== null) {
+      const cacheRow: SelectedByCacheRow = { selected_by_percent: row?.selected_by_percent };
+      await context.redis.hset(hashKey, field, JSON.stringify(cacheRow));
+      await context.redis.expire(hashKey, SELECTED_BY_REDIS_TTL_SEC);
+      return pct;
+    }
+  }
+
+  const { data: playerData, error: playerError } = await context.supabase
+    .from('players')
+    .select('selected_by_percent')
+    .eq('id', elementId)
+    .limit(1);
+
+  if (playerError) {
+    context.logger.warn(
+      { err: playerError, eventId, elementId },
+      'players selected_by_percent fallback query failed',
     );
     return null;
   }
 
-  const row = data?.[0] as DbPlayerStatsSelectedByRow | undefined;
-  if (!row) {
+  const p = playerData?.[0] as { selected_by_percent?: number | string | null } | undefined;
+  const fallback = parseNumericValue(p?.selected_by_percent ?? null);
+  if (fallback === null) {
     return null;
   }
-
-  await context.redis.hset(cacheKey, field, JSON.stringify(row));
-  await context.redis.expire(cacheKey, 30);
-  return parseNumericValue(row.selected_by ?? row.selected_by_percent ?? null);
-};
+  const cacheRow: SelectedByCacheRow = { selected_by_percent: p?.selected_by_percent };
+  await context.redis.hset(hashKey, field, JSON.stringify(cacheRow));
+  await context.redis.expire(hashKey, SELECTED_BY_REDIS_TTL_SEC);
+  return fallback;
+}
 
 const _fetchLivePerformanceFromDbByPlayerIds = async (
   context: GraphQLContext,
@@ -587,10 +677,7 @@ const fetchAllLivePerformanceFromDb = async (
     .eq('event_id', eventId);
 
   if (error) {
-    context.logger.error(
-      { err: error, eventId },
-      'Failed to fetch all live performances from DB'
-    );
+    context.logger.error({ err: error, eventId }, 'Failed to fetch all live performances from DB');
     throw new Error('Failed to fetch live performances');
   }
 
@@ -602,7 +689,7 @@ const loadEventLiveFromRedis = async (
   eventId: number
 ): Promise<Map<number, LivePerformance> | null> => {
   const season = await getCurrentSeason(context);
-  const hashKey = `EventLive:${season}:${eventId}`;
+  const hashKey = redisKey.eventLive(season, eventId);
 
   let hashEntries: Record<string, string>;
   try {
@@ -666,35 +753,11 @@ export const liveRepository: LiveRepository = {
     let targetEventId = eventId;
 
     if (!targetEventId) {
-      const seasonKey = 'events:current:id';
-      const cachedEventId = await context.redis.get(seasonKey);
-      if (cachedEventId) {
-        targetEventId = Number.parseInt(cachedEventId, 10);
-        if (!Number.isFinite(targetEventId)) {
-          targetEventId = undefined;
-        }
-      }
-    }
-
-    if (!targetEventId) {
-      const { data: currentData, error: currentError } = await context.supabase
-        .from('events')
-        .select('id')
-        .eq('is_current', true)
-        .limit(1);
-
-      if (currentError) {
-        context.logger.error(
-          { err: currentError },
-          'Failed to fetch current event for live scores'
-        );
-        throw new Error('Failed to fetch current event');
-      }
-
-      targetEventId = (currentData?.[0] as { id: number } | undefined)?.id;
-      if (!targetEventId) {
+      const currentId = await getCurrentEventId(context);
+      if (!currentId) {
         return [];
       }
+      targetEventId = currentId;
     }
 
     const allPerformances = await this.getAllLivePerformances(context, targetEventId);
@@ -721,24 +784,11 @@ export const liveRepository: LiveRepository = {
     let targetEventId = eventId;
 
     if (!targetEventId) {
-      const { data: currentData, error: currentError } = await context.supabase
-        .from('events')
-        .select('id')
-        .eq('is_current', true)
-        .limit(1);
-
-      if (currentError) {
-        context.logger.error(
-          { err: currentError },
-          'Failed to fetch current event for player live'
-        );
-        throw new Error('Failed to fetch current event');
-      }
-
-      targetEventId = (currentData?.[0] as { id: number } | undefined)?.id;
-      if (!targetEventId) {
+      const currentId = await getCurrentEventId(context);
+      if (!currentId) {
         return null;
       }
+      targetEventId = currentId;
     }
 
     const allPerformances = await this.getAllLivePerformances(context, targetEventId);
@@ -758,62 +808,43 @@ export const liveRepository: LiveRepository = {
     eventId: number,
     elementId: number
   ): Promise<LiveExplain | null> {
-    if (!Number.isFinite(eventId) || eventId <= 0 || !Number.isFinite(elementId) || elementId <= 0) {
+    if (
+      !Number.isFinite(eventId) ||
+      eventId <= 0 ||
+      !Number.isFinite(elementId) ||
+      elementId <= 0
+    ) {
       return null;
     }
 
-    const cacheKey = `live:explain:${eventId}:${elementId}`;
-    const cached = await context.redis.get(cacheKey);
-    if (cached !== null) {
-      if (cached === NULL_SENTINEL) {
-        return null;
+    const [psRow, elRow] = await Promise.all([
+      fetchPlayerStatsForLiveExplain(context, eventId, elementId),
+      fetchEventLiveExplainFromSupabase(context, eventId, elementId),
+    ]);
+
+    if (!psRow && !elRow) {
+      return null;
+    }
+
+    const stats = mapLiveExplainStats(psRow);
+    let breakdown: LiveExplainBreakdown[] = elRow ? mapBreakdownFromEventLiveRow(elRow) : [];
+    if (breakdown.length === 0) {
+      const fromRedis = await loadBreakdownFromEventLiveExplainRedis(context, eventId, elementId);
+      if (fromRedis) {
+        breakdown = fromRedis;
       }
-      return JSON.parse(cached) as LiveExplain;
     }
 
-    let { data, error } = await context.supabase
-      .from('event_live_explains')
-      .select('*')
-      .eq('event_id', eventId)
-      .eq('element_id', elementId)
-      .limit(1);
+    const modified = elRow ? parseBooleanValue(elRow.modified) : null;
 
-    if (error && error.message && error.message.includes('element_id')) {
-      ({ data, error } = await context.supabase
-        .from('event_live_explains')
-        .select('*')
-        .eq('event_id', eventId)
-        .eq('element', elementId)
-        .limit(1));
-    }
-
-    if (error) {
-      context.logger.error(
-        { err: error, eventId, elementId },
-        'Failed to fetch event live explain row'
-      );
-      throw new Error('Failed to fetch event live explain');
-    }
-
-    const row = data?.[0] as DbLiveExplainRow | undefined;
-    if (!row) {
-      await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', 30);
-      return null;
-    }
-
-    const resolvedElementId = resolveElementId(row);
-    if (resolvedElementId === null) {
-      context.logger.error(
-        { eventId, elementId, row },
-        'Event live explain row missing element identifier'
-      );
-      await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', 30);
-      return null;
-    }
-
-    const liveExplain = mapLiveExplainRow(row, resolvedElementId, null);
-    await context.redis.set(cacheKey, JSON.stringify(liveExplain), 'EX', 30);
-    return liveExplain;
+    return {
+      eventId,
+      elementId,
+      modified,
+      stats,
+      breakdown,
+      selectedBy: null,
+    };
   },
 
   async getLivePerformancesByPlayerIds(
@@ -846,9 +877,14 @@ export const liveRepository: LiveRepository = {
     eventId: number,
     elementId: number
   ): Promise<number | null> {
-    if (!Number.isFinite(eventId) || eventId <= 0 || !Number.isFinite(elementId) || elementId <= 0) {
+    if (
+      !Number.isFinite(eventId) ||
+      eventId <= 0 ||
+      !Number.isFinite(elementId) ||
+      elementId <= 0
+    ) {
       return null;
     }
-    return fetchSelectedByPercent(context, eventId, elementId);
+    return resolveSelectedByPercent(context, eventId, elementId);
   },
 };

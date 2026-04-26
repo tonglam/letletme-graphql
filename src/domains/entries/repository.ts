@@ -15,6 +15,7 @@ export type Entry = {
   bank: number | null;
   teamValue: number | null;
   totalTransfers: number | null;
+  lastEventId: number | null;
 };
 
 export type EntryEventResult = {
@@ -48,6 +49,7 @@ type DbEntryRow = {
   bank: number | null;
   team_value: number | null;
   total_transfers: number | null;
+  last_event_id: number | null;
 };
 
 type DbEntryEventResultRow = {
@@ -81,6 +83,7 @@ const mapEntry = (row: DbEntryRow): Entry => ({
   bank: row.bank,
   teamValue: row.team_value,
   totalTransfers: row.total_transfers,
+  lastEventId: row.last_event_id,
 });
 
 const mapEntryEventResult = (row: DbEntryEventResultRow): EntryEventResult => ({
@@ -205,6 +208,7 @@ export const entriesRepository: EntriesRepository = {
             bank: typeof parsed.bank === 'number' ? parsed.bank : null,
             teamValue: typeof parsed.teamValue === 'number' ? parsed.teamValue : null,
             totalTransfers: typeof parsed.totalTransfers === 'number' ? parsed.totalTransfers : null,
+            lastEventId: typeof parsed.lastEventId === 'number' ? parsed.lastEventId : null,
           });
         } else {
           missingIds.push(uniqueIds[i]);

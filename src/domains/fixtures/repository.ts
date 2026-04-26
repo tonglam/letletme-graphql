@@ -1,5 +1,6 @@
 import type { GraphQLContext } from '../../graphql/context';
 import { env } from '../../infra/env';
+import { getCurrentEventId } from '../../infra/event';
 import { getCurrentSeason } from '../../infra/season';
 
 export type Fixture = {
@@ -326,19 +327,7 @@ export const fixturesRepository: FixturesRepository = {
       return JSON.parse(cached) as Fixture[];
     }
 
-    // Get current event
-    const { data: currentData, error: currentError } = await context.supabase
-      .from('events')
-      .select('id')
-      .eq('is_current', true)
-      .limit(1);
-
-    if (currentError) {
-      context.logger.error({ err: currentError }, 'Failed to fetch current event');
-      throw new Error('Failed to fetch current event');
-    }
-
-    const currentEventId = (currentData?.[0] as { id: number } | undefined)?.id;
+    const currentEventId = await getCurrentEventId(context);
     if (!currentEventId) {
       return [];
     }

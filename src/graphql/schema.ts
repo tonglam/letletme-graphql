@@ -23,6 +23,10 @@ import { playersResolvers } from '../domains/players/resolvers';
 import { playersTypeDefs } from '../domains/players/schema';
 import { tournamentsResolvers } from '../domains/tournaments/resolvers';
 import { tournamentsTypeDefs } from '../domains/tournaments/schema';
+import { eventStatsResolvers } from '../domains/event-stats/resolvers';
+import { eventStatsTypeDefs } from '../domains/event-stats/schema';
+import { playerDetailResolvers } from '../domains/player-detail/resolvers';
+import { playerDetailTypeDefs } from '../domains/player-detail/schema';
 import { baseResolvers, baseTypeDefs } from './base-schema';
 
 export const schema = makeExecutableSchema({
@@ -40,6 +44,8 @@ export const schema = makeExecutableSchema({
     tournamentsTypeDefs,
     entriesTypeDefs,
     eventOverallResultTypeDefs,
+    eventStatsTypeDefs,
+    playerDetailTypeDefs,
   ],
   resolvers: [
     baseResolvers,
@@ -55,5 +61,7 @@ export const schema = makeExecutableSchema({
     tournamentsResolvers,
     entriesResolvers,
     eventOverallResultResolvers,
+    eventStatsResolvers,
+    playerDetailResolvers,
   ],
 });
