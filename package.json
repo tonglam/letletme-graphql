@@ -11,6 +11,7 @@
     "migrate:rls": "bun scripts/migrate-rls.ts",
     "migrate:deadline": "bun scripts/migrate-deadline-text.ts",
     "migrate:tournament-summary": "bun scripts/migrate-tournament-summary-read-model.ts",
+    "seed:mini-program-notice": "bun scripts/seed-mini-program-notice-redis.ts",
     "lint": "eslint src tests",
     "lint:fix": "eslint src tests --fix",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
