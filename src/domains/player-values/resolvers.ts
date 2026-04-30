@@ -1,3 +1,4 @@
+import { DateResolver } from 'graphql-scalars';
 import type { GraphQLContext } from '../../graphql/context';
 import type { PlayerValue, PlayerValueHistoryItem } from './repository';
 import { playerValuesService } from './service';
@@ -45,6 +46,7 @@ export function normalizePlayerValueHistoryArgs(
 }
 
 export const playerValuesResolvers = {
+  Date: DateResolver,
   Query: {
     playerValues: async (
       _parent: unknown,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { makeExecutableSchema } from '@graphql-tools/schema';
 import { graphql } from 'graphql';
-import { DateTimeResolver } from 'graphql-scalars';
+import { DateResolver, DateTimeResolver } from 'graphql-scalars';
 import type { GraphQLContext } from '../../../src/graphql/context';
 import { baseResolvers, baseTypeDefs } from '../../../src/graphql/base-schema';
 import { playersTypeDefs } from '../../../src/domains/players/schema';
@@ -124,11 +124,11 @@ function createGraphQLContext(options: ContextOptions = {}): GraphQLContext & { 
 
 const testSchema = makeExecutableSchema({
   typeDefs: [baseTypeDefs, playersTypeDefs, playerValuesTypeDefs],
-  resolvers: [baseResolvers, { DateTime: DateTimeResolver }, playerValuesResolvers],
+  resolvers: [baseResolvers, { Date: DateResolver, DateTime: DateTimeResolver }, playerValuesResolvers],
 });
 
 const playerValuesQuery = `
-  query PlayerValues($changeDate: DateTime) {
+  query PlayerValues($changeDate: Date) {
     playerValues(changeDate: $changeDate) {
       playerId
       playerName
@@ -141,6 +141,45 @@ const playerValuesQuery = `
 `;
 
 describe('playerValues integration', () => {
+  it('accepts a date-only changeDate value', async () => {
+    const context = createGraphQLContext({
+      redisType: 'none',
+      rows: [
+        {
+          player_id: 136,
+          player_name: 'Thiago',
+          team_id: 4,
+          team_name: 'Brentford',
+          team_short_name: 'BRE',
+          position: 'FWD',
+          price: 74,
+          value: 74,
+          last_value: 73,
+          points: 0,
+          selected_by: 1.2,
+          transfers_in: 1000,
+          transfers_out: 500,
+          net_transfers: 500,
+          form: 2.1,
+          total_points: 40,
+          event_points: 0,
+          change_date: '20260421',
+        },
+      ],
+    });
+
+    const result = await graphql({
+      schema: testSchema,
+      source: playerValuesQuery,
+      contextValue: context,
+      variableValues: { changeDate: '2026-04-21' },
+    });
+
+    expect(result.errors).toBeUndefined();
+    const data = result.data as { playerValues: unknown[] } | null;
+    expect(data?.playerValues).toHaveLength(1);
+  });
+
   it('returns empty array for the default current-day query when today cache is missing', async () => {
     const context = createGraphQLContext({
       redisType: 'none',

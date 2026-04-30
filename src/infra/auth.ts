@@ -97,6 +97,8 @@ export interface AuthUser {
   image?: string | null;
   isAnonymous?: boolean;
   deviceId?: string | null;
+  openid?: string | null;
+  fplEntryId?: number | null;
 }
 
 // Helper to validate and extract user from Better Auth session

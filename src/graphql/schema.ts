@@ -29,12 +29,15 @@ import { eventStatsResolvers } from '../domains/event-stats/resolvers';
 import { eventStatsTypeDefs } from '../domains/event-stats/schema';
 import { playerDetailResolvers } from '../domains/player-detail/resolvers';
 import { playerDetailTypeDefs } from '../domains/player-detail/schema';
+import { wechatAuthResolvers } from '../domains/wechat-auth/resolvers';
+import { wechatAuthTypeDefs } from '../domains/wechat-auth/schema';
 import { baseResolvers, baseTypeDefs } from './base-schema';
 
 export const schema = makeExecutableSchema({
   typeDefs: [
     baseTypeDefs, // Must be first to define Query and Mutation
     authTypeDefs,
+    wechatAuthTypeDefs,
     eventsTypeDefs,
     playersTypeDefs,
     playerValuesTypeDefs,
@@ -53,6 +56,7 @@ export const schema = makeExecutableSchema({
   resolvers: [
     baseResolvers,
     authResolvers,
+    wechatAuthResolvers,
     eventsResolvers,
     playersResolvers,
     playerValuesResolvers,

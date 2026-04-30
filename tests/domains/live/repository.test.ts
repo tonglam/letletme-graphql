@@ -232,6 +232,43 @@ describe('liveRepository.getLivePerformancesByPlayerIds', () => {
   });
 });
 
+describe('liveRepository.getLivePerformancesForEventsAndPlayers', () => {
+  it('reads historical live rows from event_lives in one bulk query', async () => {
+    const context = buildContext({
+      supabaseDataByTable: {
+        event_lives: [
+          {
+            event_id: 12, element_id: 1, minutes: 90, goals_scored: 1, assists: 0,
+            clean_sheets: 0, goals_conceded: 1, own_goals: 0, penalties_saved: 0,
+            penalties_missed: 0, yellow_cards: 0, red_cards: 0, saves: 0, bonus: 1,
+            bps: 20, starts: true, defensive_contribution: 0, expected_goals: null,
+            expected_assists: null, expected_goal_involvements: null,
+            expected_goals_conceded: null, in_dream_team: false, total_points: 8,
+          },
+          {
+            event_id: 13, element_id: 2, minutes: 0, goals_scored: 0, assists: 0,
+            clean_sheets: 0, goals_conceded: 0, own_goals: 0, penalties_saved: 0,
+            penalties_missed: 0, yellow_cards: 0, red_cards: 0, saves: 0, bonus: 0,
+            bps: 0, starts: false, defensive_contribution: 0, expected_goals: null,
+            expected_assists: null, expected_goal_involvements: null,
+            expected_goals_conceded: null, in_dream_team: false, total_points: 0,
+          },
+        ],
+      },
+    });
+
+    const result = await liveRepository.getLivePerformancesForEventsAndPlayers(
+      context,
+      [12, 13],
+      [1, 2]
+    );
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ eventId: 12, playerId: 1, totalPoints: 8 });
+    expect(result[1]).toMatchObject({ eventId: 13, playerId: 2, minutes: 0 });
+  });
+});
+
 describe('liveRepository.getEventLive', () => {
   it('returns EventLive with all Performances from Redis', async () => {
     const field1 = JSON.stringify({

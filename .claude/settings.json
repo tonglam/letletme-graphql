@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": [
+      "Bash(bun run lint *)",
+      "Bash(bun test *)",
+      "Bash(npx tsc --noEmit *)",
+      "Bash(bunx tsc --noEmit *)"
+    ]
+  }
+}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { makeExecutableSchema } from '@graphql-tools/schema';
 import { graphql } from 'graphql';
-import { DateTimeResolver } from 'graphql-scalars';
+import { DateResolver, DateTimeResolver } from 'graphql-scalars';
 import type { GraphQLContext } from '../../../src/graphql/context';
 import { baseResolvers, baseTypeDefs } from '../../../src/graphql/base-schema';
 import { playersTypeDefs } from '../../../src/domains/players/schema';
@@ -138,7 +138,7 @@ function createGraphQLContext(rows: HistoryRow[]): GraphQLContext {
 
 const testSchema = makeExecutableSchema({
   typeDefs: [baseTypeDefs, playersTypeDefs, playerValuesTypeDefs],
-  resolvers: [baseResolvers, { DateTime: DateTimeResolver }, playerValuesResolvers],
+  resolvers: [baseResolvers, { Date: DateResolver, DateTime: DateTimeResolver }, playerValuesResolvers],
 });
 
 const historyQuery = `

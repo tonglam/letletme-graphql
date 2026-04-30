@@ -557,6 +557,11 @@ interface LiveRepository {
     eventId: number,
     playerIds: number[]
   ): Promise<LivePerformance[]>;
+  getLivePerformancesForEventsAndPlayers(
+    context: GraphQLContext,
+    eventIds: number[],
+    playerIds: number[]
+  ): Promise<LivePerformance[]>;
   getAllLivePerformances(
     context: GraphQLContext,
     eventId: number
@@ -662,6 +667,38 @@ const _fetchLivePerformanceFromDbByPlayerIds = async (
       'Failed to fetch live performances by player IDs'
     );
     throw new Error('Failed to fetch live performances');
+  }
+
+  return (data as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
+};
+
+const fetchLivePerformanceFromDbByEventsAndPlayerIds = async (
+  context: GraphQLContext,
+  eventIds: number[],
+  playerIds: number[]
+): Promise<LivePerformance[]> => {
+  const uniqueEventIds = Array.from(
+    new Set(eventIds.filter((id) => Number.isFinite(id) && id > 0))
+  );
+  const uniquePlayerIds = Array.from(
+    new Set(playerIds.filter((id) => Number.isFinite(id) && id > 0))
+  );
+  if (uniqueEventIds.length === 0 || uniquePlayerIds.length === 0) {
+    return [];
+  }
+
+  const { data, error } = await context.supabase
+    .from('event_lives')
+    .select('*')
+    .in('event_id', uniqueEventIds)
+    .in('element_id', uniquePlayerIds);
+
+  if (error) {
+    context.logger.error(
+      { err: error, eventIds: uniqueEventIds, playerIds: uniquePlayerIds },
+      'Failed to fetch historical live performances by event and player IDs'
+    );
+    throw new Error('Failed to fetch historical live performances');
   }
 
   return (data as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
@@ -870,6 +907,14 @@ export const liveRepository: LiveRepository = {
       }
     }
     return results;
+  },
+
+  getLivePerformancesForEventsAndPlayers(
+    context: GraphQLContext,
+    eventIds: number[],
+    playerIds: number[]
+  ): Promise<LivePerformance[]> {
+    return fetchLivePerformanceFromDbByEventsAndPlayerIds(context, eventIds, playerIds);
   },
 
   async getSelectedByPercent(

@@ -51,16 +51,18 @@ export interface PlayerValuesRepository {
   ): Promise<PlayerValueHistoryRepositoryItem[]>;
 }
 
-function formatDateKey(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
+function formatDateKey(date: Date, options: { utc?: boolean } = {}): string {
+  const year = options.utc ? date.getUTCFullYear() : date.getFullYear();
+  const month = String((options.utc ? date.getUTCMonth() : date.getMonth()) + 1).padStart(2, '0');
+  const day = String(options.utc ? date.getUTCDate() : date.getDate()).padStart(2, '0');
   return `PlayerValue:${year}${month}${day}`;
 }
 
 function getDateKey(changeDate?: Date | null): string {
-  const date = changeDate ?? new Date();
-  return formatDateKey(date);
+  if (changeDate) {
+    return formatDateKey(changeDate, { utc: true });
+  }
+  return formatDateKey(new Date());
 }
 
 type DbPlayerValueRow = {
@@ -158,8 +160,8 @@ function toTenthsValue(value: number | null | undefined): number {
 }
 
 function buildHistoryCacheKey(args: GetPlayerValueHistoryArgs): string {
-  const from = args.fromDate ? formatDateKey(args.fromDate) : 'none';
-  const to = args.toDate ? formatDateKey(args.toDate) : 'none';
+  const from = args.fromDate ? getDateKey(args.fromDate) : 'none';
+  const to = args.toDate ? getDateKey(args.toDate) : 'none';
   return `player-value-history:${args.playerId}:${args.limit}:${from}:${to}`;
 }
 
@@ -231,7 +233,7 @@ async function getPlayerValuesFromDatabase(
   try {
     if (changeDate) {
       const dateStr = changeDate.toISOString().split('T')[0]; // YYYY-MM-DD format
-      const dateStrCompact = formatDateKey(changeDate).replace('PlayerValue:', ''); // yyyyMMdd format
+      const dateStrCompact = getDateKey(changeDate).replace('PlayerValue:', ''); // yyyyMMdd format
 
       // Query for the specific date (try both formats)
       const { data, error } = await context.supabase

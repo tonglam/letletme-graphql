@@ -1,5 +1,6 @@
 export const playerValuesTypeDefs = /* GraphQL */ `
   scalar DateTime
+  scalar Date
 
   enum PriceChangeType {
     RISE
@@ -39,7 +40,7 @@ export const playerValuesTypeDefs = /* GraphQL */ `
   }
 
   extend type Query {
-    playerValues(changeDate: DateTime): [PlayerValue!]!
+    playerValues(changeDate: Date): [PlayerValue!]!
     playerValueHistory(
       playerId: Int!
       limit: Int

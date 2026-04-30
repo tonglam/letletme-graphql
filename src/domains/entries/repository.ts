@@ -28,6 +28,11 @@ export type EntryEventResult = {
   eventTransfers: number;
   eventTransfersCost: number;
   eventNetPoints: number;
+  eventBenchPoints: number;
+  eventChip: string | null;
+  eventPlayedCaptain: number | null;
+  eventCaptainPoints: number;
+  eventPicks: unknown[];
   teamValue: number | null;
   bank: number | null;
 };
@@ -62,6 +67,11 @@ type DbEntryEventResultRow = {
   event_transfers: number;
   event_transfers_cost: number;
   event_net_points: number;
+  event_bench_points?: number | null;
+  event_chip?: string | null;
+  event_played_captain?: number | null;
+  event_captain_points?: number | null;
+  event_picks?: unknown;
   team_value: number | null;
   bank: number | null;
 };
@@ -96,9 +106,31 @@ const mapEntryEventResult = (row: DbEntryEventResultRow): EntryEventResult => ({
   eventTransfers: row.event_transfers,
   eventTransfersCost: row.event_transfers_cost,
   eventNetPoints: row.event_net_points,
+  eventBenchPoints: row.event_bench_points ?? 0,
+  eventChip: row.event_chip ?? null,
+  eventPlayedCaptain: row.event_played_captain ?? null,
+  eventCaptainPoints: row.event_captain_points ?? 0,
+  eventPicks: parseJsonArray(row.event_picks),
   teamValue: row.team_value,
   bank: row.bank,
 });
+
+const parseJsonArray = (value: unknown): unknown[] => {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value !== 'string') {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
 
 const mapEntryHistoryInfo = (row: DbEntryHistoryInfoRow): EntryHistoryInfo => ({
   season: row.season,
@@ -242,7 +274,7 @@ export const entriesRepository: EntriesRepository = {
       return [];
     }
 
-    const cacheKey = `entries:history:${entryId}`;
+    const cacheKey = `entries:history:v2:${entryId}`;
     const cached = await context.redis.get(cacheKey);
     if (cached !== null) {
       if (cached === NULL_SENTINEL) {
@@ -314,7 +346,7 @@ export const entriesRepository: EntriesRepository = {
       return null;
     }
 
-    const cacheKey = `entries:result:${entryId}:${eventId}`;
+    const cacheKey = `entries:result:v2:${entryId}:${eventId}`;
     const cached = await context.redis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached) as EntryEventResult;

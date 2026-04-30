@@ -1,6 +1,5 @@
 import type { GraphQLContext } from '../../graphql/context';
-import type { ElementEventResultData, LiveCalcData } from '../entry-live/calc-service';
-import { entryLiveCalcService } from '../entry-live/calc-service';
+import type { ElementEventResultData } from '../entry-live/calc-service';
 import type { Player } from '../players/repository';
 import { playersService } from '../players/service';
 import type { Entry, EntryEventResult, EntryHistoryInfo } from './repository';
@@ -54,31 +53,40 @@ type EntryHistoryPayload = {
   history: EntryHistoryInfo[];
 };
 
-const liveCalcCache = new WeakMap<GraphQLContext, Map<string, Promise<LiveCalcData>>>();
-
-const getLiveCalcData = (
-  context: GraphQLContext,
-  entryId: number,
-  eventId: number
-): Promise<LiveCalcData> => {
-  let requestCache = liveCalcCache.get(context);
-  if (!requestCache) {
-    requestCache = new Map<string, Promise<LiveCalcData>>();
-    liveCalcCache.set(context, requestCache);
+export const entryResultChipToEnum = (raw: string | null): string => {
+  if (raw === null) {
+    return 'NONE';
   }
 
-  const cacheKey = `${entryId}:${eventId}`;
-  const cached = requestCache.get(cacheKey);
-  if (cached) {
-    return cached;
+  const value = raw.toUpperCase().trim();
+  const compactValue = value.replace(/[^A-Z0-9]/g, '');
+  if (
+    value === 'BENCH_BOOST' ||
+    compactValue === 'BENCHBOOST' ||
+    compactValue === 'BBOOST' ||
+    compactValue === 'BB'
+  ) {
+    return 'BENCH_BOOST';
   }
-
-  const promise = entryLiveCalcService.calcLivePointsByEntry(context, eventId, entryId);
-  requestCache.set(cacheKey, promise);
-  return promise;
+  if (
+    value === 'TRIPLE_CAPTAIN' ||
+    compactValue === 'TRIPLECAPTAIN' ||
+    compactValue === '3XC' ||
+    compactValue === 'TC'
+  ) {
+    return 'TRIPLE_CAPTAIN';
+  }
+  if (value === 'FREE_HIT' || compactValue === 'FREEHIT' || compactValue === 'FH') {
+    return 'FREE_HIT';
+  }
+  if (value === 'WILDCARD' || compactValue === 'WILDCARD' || compactValue === 'WC') {
+    return 'WILDCARD';
+  }
+  if (value === 'MANAGER' || compactValue === 'MANAGER' || compactValue === 'AM') {
+    return 'MANAGER';
+  }
+  return 'NONE';
 };
-
-const getCaptainMultiplier = (chip: string): number => (chip === 'TRIPLE_CAPTAIN' ? 3 : 2);
 
 export const entriesResolvers = {
   Query: {
@@ -119,71 +127,30 @@ export const entriesResolvers = {
       parent: EntryEventResult,
       _args: Record<string, never>,
       context: GraphQLContext
-    ): Promise<Entry | null> => {
-      // Reuse live calc data to avoid a duplicate getEntryById round-trip
-      const liveCalc = await getLiveCalcData(context, parent.entryId, parent.eventId);
-      return {
-        id: liveCalc.entry,
-        entryName: liveCalc.entryName,
-        playerName: liveCalc.playerName,
-        region: liveCalc.region,
-        startedEvent: liveCalc.startedEvent,
-        overallPoints: liveCalc.overallPoints,
-        overallRank: liveCalc.overallRank,
-        bank: liveCalc.bank,
-        teamValue: liveCalc.teamValue,
-        totalTransfers: liveCalc.totalTransfers,
-      };
-    },
-    eventBenchPoints: async (parent: EntryEventResult, _args: Record<string, never>, context: GraphQLContext): Promise<number> => {
-      const liveCalc = await getLiveCalcData(context, parent.entryId, parent.eventId);
-      return liveCalc.pickList
-        .filter((pick) => pick.position > 11)
-        .reduce((sum, pick) => sum + pick.totalPoints, 0);
-    },
-    eventChip: async (parent: EntryEventResult, _args: Record<string, never>, context: GraphQLContext): Promise<string> => {
-      const liveCalc = await getLiveCalcData(context, parent.entryId, parent.eventId);
-      return liveCalc.chip;
-    },
+    ): Promise<Entry | null> => entriesService.getEntryById(context, parent.entryId),
+    eventBenchPoints: (parent: EntryEventResult): number => parent.eventBenchPoints,
+    eventChip: (parent: EntryEventResult): string => entryResultChipToEnum(parent.eventChip),
     eventPlayedCaptain: async (
       parent: EntryEventResult,
       _args: Record<string, never>,
       context: GraphQLContext
     ): Promise<Player | null> => {
-      const liveCalc = await getLiveCalcData(context, parent.entryId, parent.eventId);
-      if (!liveCalc.playedCaptain) {
+      if (parent.eventPlayedCaptain === null || parent.eventPlayedCaptain <= 0) {
         return null;
       }
-      return getPlayerByIdForEventMemoized(context, liveCalc.playedCaptain, parent.eventId);
+      return getPlayerByIdForEventMemoized(context, parent.eventPlayedCaptain, parent.eventId);
     },
-    eventCaptainPoints: async (
+    eventCaptainPoints: (parent: EntryEventResult): number => parent.eventCaptainPoints,
+    eventPicks: (
       parent: EntryEventResult,
       _args: Record<string, never>,
       context: GraphQLContext
-    ): Promise<number> => {
-      const liveCalc = await getLiveCalcData(context, parent.entryId, parent.eventId);
-      const captainPick =
-        liveCalc.pickList.find((pick) => pick.element === liveCalc.playedCaptain) ?? null;
-      if (!captainPick) {
-        return 0;
-      }
-      return captainPick.totalPoints * getCaptainMultiplier(liveCalc.chip);
-    },
-    eventPicks: async (
-      parent: EntryEventResult,
-      _args: Record<string, never>,
-      context: GraphQLContext
-    ): Promise<ElementEventResultData[]> => {
-      const liveCalc = await getLiveCalcData(context, parent.entryId, parent.eventId);
-      return liveCalc.pickList;
-    },
+    ): Promise<ElementEventResultData[]> => entriesService.getEntryEventPicks(context, parent),
     eventAutoSub: async (
       parent: EntryEventResult,
       _args: Record<string, never>,
       context: GraphQLContext
-    ): Promise<ElementEventResultData[]> => {
-      const liveCalc = await getLiveCalcData(context, parent.entryId, parent.eventId);
-      return liveCalc.pickList.filter((pick) => pick.autoSub);
-    },
+    ): Promise<ElementEventResultData[]> =>
+      (await entriesService.getEntryEventPicks(context, parent)).filter((pick) => pick.autoSub),
   },
 };

@@ -17,7 +17,9 @@ type EnvKey =
   | 'APPLE_CLIENT_SECRET'
   | 'APP_URL'
   | 'CORS_ORIGIN'
-  | 'CORS_CREDENTIALS';
+  | 'CORS_CREDENTIALS'
+  | 'WECHAT_APPID'
+  | 'WECHAT_APPSECRET';
 
 const readEnv = (key: EnvKey): string | undefined => {
   const value = Bun.env[key];
@@ -73,4 +75,8 @@ export const env = {
   // CORS
   CORS_ORIGIN: readEnv('CORS_ORIGIN') ?? '*',
   CORS_CREDENTIALS: readEnv('CORS_CREDENTIALS') === 'true',
+
+  // WeChat Mini Program
+  WECHAT_APPID: readEnv('WECHAT_APPID') ?? '',
+  WECHAT_APPSECRET: readEnv('WECHAT_APPSECRET') ?? '',
 } as const;
