@@ -40,7 +40,7 @@ export async function identifyWechatUser(
 
       if (row.email !== null) {
         // Already a real website user — update fpl_entry_id if provided and not yet set
-        if (fplEntryId != null) {
+        if (fplEntryId !== null) {
           await client.query(
             `UPDATE bauth."user" SET fpl_entry_id = COALESCE(fpl_entry_id, $1), updated_at = NOW() WHERE id = $2`,
             [fplEntryId, row.id]
@@ -48,7 +48,7 @@ export async function identifyWechatUser(
         }
         // Spread openid to all other website users sharing the same team who don't have it yet
         const effectiveTeamId = fplEntryId ?? row.fpl_entry_id;
-        if (effectiveTeamId != null) {
+        if (effectiveTeamId !== null) {
           await client.query(
             `UPDATE bauth."user" SET openid = $1, updated_at = NOW()
              WHERE fpl_entry_id = $2 AND email IS NOT NULL AND (openid IS NULL OR openid = '') AND id != $3`,
@@ -57,7 +57,7 @@ export async function identifyWechatUser(
         }
       } else {
         // Miniprogram-only row from a previous call
-        if (fplEntryId != null) {
+        if (fplEntryId !== null) {
           // Bulk-update ALL website users with this team
           const result = await client.query(
             `UPDATE bauth."user" SET openid = $1, updated_at = NOW()
@@ -79,7 +79,7 @@ export async function identifyWechatUser(
       }
     } else {
       // No row for this openid yet
-      if (fplEntryId != null) {
+      if (fplEntryId !== null) {
         // Bulk-update ALL website users with this team
         const result = await client.query(
           `UPDATE bauth."user" SET openid = $1, updated_at = NOW()
