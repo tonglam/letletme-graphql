@@ -17,15 +17,14 @@ export const fixturesTypeDefs = /* GraphQL */ `
   }
 
   input FixturesFilter {
+    id: Int
     eventId: Int
     teamId: Int
     finished: Boolean
   }
 
   extend type Query {
-    fixture(id: Int!): Fixture
     fixtures(filter: FixturesFilter, limit: Int = 50, offset: Int = 0): [Fixture!]!
-    currentFixtures: [Fixture!]!
     eventFixtures(eventId: Int!): [Fixture!]!
   }
 `;

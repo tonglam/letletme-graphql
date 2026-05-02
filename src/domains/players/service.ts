@@ -1,54 +1,76 @@
-import type { GraphQLContext } from '../../graphql/context';
-import type { Player, PlayersFilter, PlayersForPickerPayload, PlayerTransferStats, Team } from './repository';
-import { playersRepository } from './repository';
+import type { GraphQLContext } from "../../graphql/context";
+import type {
+	Player,
+	PlayersFilter,
+	PlayersForPickerPayload,
+	Team,
+	TopTransfersEnriched,
+} from "./repository";
+import { playersRepository } from "./repository";
 
 export const playersService = {
-  getPlayerById(context: GraphQLContext, id: number): Promise<Player | null> {
-    return playersRepository.getPlayerById(context, id);
-  },
+	getPlayerById(context: GraphQLContext, id: number): Promise<Player | null> {
+		return playersRepository.getPlayerById(context, id);
+	},
 
-  getPlayerByIdForEvent(context: GraphQLContext, id: number, eventId: number): Promise<Player | null> {
-    return playersRepository.getPlayerByIdForEvent(context, id, eventId);
-  },
+	getPlayerByIdForEvent(
+		context: GraphQLContext,
+		id: number,
+		eventId: number,
+	): Promise<Player | null> {
+		return playersRepository.getPlayerByIdForEvent(context, id, eventId);
+	},
 
-  listPlayers(
-    context: GraphQLContext,
-    filter: PlayersFilter | null | undefined,
-    limit: number,
-    offset: number
-  ): Promise<Player[]> {
-    return playersRepository.listPlayers(context, filter, limit, offset);
-  },
+	getPlayersByIdsForEvent(
+		context: GraphQLContext,
+		ids: number[],
+		eventId: number,
+	): Promise<Map<number, Player>> {
+		return playersRepository.getPlayersByIdsForEvent(context, ids, eventId);
+	},
 
-  getPlayersForPicker(
-    context: GraphQLContext,
-    limit: number,
-    cursor: number | null | undefined
-  ): Promise<PlayersForPickerPayload> {
-    return playersRepository.getPlayersForPicker(context, limit, cursor);
-  },
+	listPlayers(
+		context: GraphQLContext,
+		filter: PlayersFilter | null | undefined,
+		limit: number,
+		offset: number,
+	): Promise<Player[]> {
+		return playersRepository.listPlayers(context, filter, limit, offset);
+	},
 
-  getTeamById(context: GraphQLContext, id: number): Promise<Team | null> {
-    return playersRepository.getTeamById(context, id);
-  },
+	getPlayersForPicker(
+		context: GraphQLContext,
+		limit: number,
+		cursor: number | null | undefined,
+	): Promise<PlayersForPickerPayload> {
+		return playersRepository.getPlayersForPicker(context, limit, cursor);
+	},
 
-  listTeams(context: GraphQLContext): Promise<Team[]> {
-    return playersRepository.listTeams(context);
-  },
+	getTeamById(context: GraphQLContext, id: number): Promise<Team | null> {
+		return playersRepository.getTeamById(context, id);
+	},
 
-  getTopTransfersIn(
-    context: GraphQLContext,
-    eventId: number,
-    limit: number
-  ): Promise<PlayerTransferStats[]> {
-    return playersRepository.getTopTransfersIn(context, eventId, limit);
-  },
+	listTeams(context: GraphQLContext): Promise<Team[]> {
+		return playersRepository.listTeams(context);
+	},
 
-  getTopTransfersOut(
-    context: GraphQLContext,
-    eventId: number,
-    limit: number
-  ): Promise<PlayerTransferStats[]> {
-    return playersRepository.getTopTransfersOut(context, eventId, limit);
-  },
+	getTopTransfersInEnriched(
+		context: GraphQLContext,
+		eventId: number,
+		limit: number,
+	): Promise<TopTransfersEnriched> {
+		return playersRepository.getTopTransfersInEnriched(context, eventId, limit);
+	},
+
+	getTopTransfersOutEnriched(
+		context: GraphQLContext,
+		eventId: number,
+		limit: number,
+	): Promise<TopTransfersEnriched> {
+		return playersRepository.getTopTransfersOutEnriched(
+			context,
+			eventId,
+			limit,
+		);
+	},
 };

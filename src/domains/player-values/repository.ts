@@ -1,485 +1,528 @@
-import type { GraphQLContext } from '../../graphql/context';
-import { env } from '../../infra/env';
+import type { GraphQLContext } from "../../graphql/context";
 
-type PositionEnum = 'GOALKEEPER' | 'DEFENDER' | 'MIDFIELDER' | 'FORWARD';
+export type PositionEnum = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
 
 export type PlayerValue = {
-  playerId: number;
-  playerName: string;
-  teamId: number;
-  teamName: string;
-  teamShortName: string;
-  position: string;
-  positionEnum: PositionEnum | null;
-  price: number;
-  value: number;
-  lastValue: number;
-  points: number;
-  selectedBy: number;
-  transfersIn: number;
-  transfersOut: number;
-  netTransfers: number;
-  form: number | null;
-  totalPoints: number;
-  eventPoints: number | null;
+	playerId: number;
+	playerName: string;
+	teamId: number;
+	teamName: string;
+	teamShortName: string;
+	position: string;
+	positionEnum: PositionEnum | null;
+	price: number;
+	value: number;
+	lastValue: number;
+	points: number;
+	selectedBy: number;
+	transfersIn: number;
+	transfersOut: number;
+	netTransfers: number;
+	form: number | null;
+	totalPoints: number;
+	eventPoints: number | null;
 };
 
 export type PlayerValueHistoryItem = {
-  playerId: number;
-  changeDate: Date;
-  oldValue: number;
-  newValue: number;
-  changeType: 'RISE' | 'FALL' | 'UNCHANGED';
-  transfersIn: number | null;
-  transfersOut: number | null;
+	playerId: number;
+	changeDate: Date;
+	oldValue: number;
+	newValue: number;
+	changeType: "RISE" | "FALL" | "UNCHANGED";
+	transfersIn: number | null;
+	transfersOut: number | null;
 };
 
-export type PlayerValueHistoryRepositoryItem = Omit<PlayerValueHistoryItem, 'changeType'>;
+export type PlayerValueHistoryRepositoryItem = Omit<
+	PlayerValueHistoryItem,
+	"changeType"
+>;
 
 export type GetPlayerValueHistoryArgs = {
-  playerId: number;
-  limit: number;
-  fromDate?: Date;
-  toDate?: Date;
+	playerId: number;
+	fromDate?: Date;
+	toDate?: Date;
 };
 
 export interface PlayerValuesRepository {
-  getPlayerValues(context: GraphQLContext, changeDate?: Date | null): Promise<PlayerValue[]>;
-  getPlayerValueHistory(
-    context: GraphQLContext,
-    args: GetPlayerValueHistoryArgs
-  ): Promise<PlayerValueHistoryRepositoryItem[]>;
+	getPlayerValues(
+		context: GraphQLContext,
+		changeDate: Date,
+	): Promise<PlayerValue[]>;
+	getPlayerValueHistory(
+		context: GraphQLContext,
+		args: GetPlayerValueHistoryArgs,
+	): Promise<PlayerValueHistoryRepositoryItem[]>;
 }
 
 function formatDateKey(date: Date, options: { utc?: boolean } = {}): string {
-  const year = options.utc ? date.getUTCFullYear() : date.getFullYear();
-  const month = String((options.utc ? date.getUTCMonth() : date.getMonth()) + 1).padStart(2, '0');
-  const day = String(options.utc ? date.getUTCDate() : date.getDate()).padStart(2, '0');
-  return `PlayerValue:${year}${month}${day}`;
+	const year = options.utc ? date.getUTCFullYear() : date.getFullYear();
+	const month = String(
+		(options.utc ? date.getUTCMonth() : date.getMonth()) + 1,
+	).padStart(2, "0");
+	const day = String(options.utc ? date.getUTCDate() : date.getDate()).padStart(
+		2,
+		"0",
+	);
+	return `PlayerValue:${year}${month}${day}`;
 }
 
-function getDateKey(changeDate?: Date | null): string {
-  if (changeDate) {
-    return formatDateKey(changeDate, { utc: true });
-  }
-  return formatDateKey(new Date());
+function getDateKey(changeDate: Date): string {
+	return formatDateKey(changeDate, { utc: true });
+}
+
+function getCompactDateString(date: Date): string {
+	return formatDateKey(date, { utc: true }).replace("PlayerValue:", "");
+}
+
+function getIsoDateString(date: Date): string {
+	return date.toISOString().split("T")[0];
 }
 
 type DbPlayerValueRow = {
-  player_id: number;
-  player_name: string;
-  team_id: number;
-  team_name: string;
-  team_short_name?: string | null;
-  position: string;
-  price: number;
-  value: number;
-  last_value: number;
-  points: number;
-  selected_by: number;
-  transfers_in: number;
-  transfers_out: number;
-  net_transfers: number;
-  form: number | null;
-  total_points: number;
-  event_points: number | null;
-  change_date: string;
+	element_id?: number;
+	player_id?: number;
+	element_type?: number | null;
+	event_id?: number | null;
+	value: number;
+	last_value: number | null;
+	change_date: string;
+	change_type?: string | null;
 };
 
 type DbPlayerValueHistoryRow = {
-  element_id: number;
-  value: number;
-  last_value: number | null;
-  change_date: string | Date;
+	element_id: number;
+	value: number;
+	last_value: number | null;
+	change_date: string | Date;
 };
 
 const compactDatePattern = /^\d{8}$/;
 
 function toPositionEnum(position: string): PositionEnum | null {
-  const normalized = position.trim().toUpperCase();
-  if (normalized === 'GOALKEEPER' || normalized === 'GK') {
-    return 'GOALKEEPER';
-  }
-  if (normalized === 'DEFENDER' || normalized === 'DEF') {
-    return 'DEFENDER';
-  }
-  if (normalized === 'MIDFIELDER' || normalized === 'MID') {
-    return 'MIDFIELDER';
-  }
-  if (normalized === 'FORWARD' || normalized === 'FWD' || normalized === 'STRIKER') {
-    return 'FORWARD';
-  }
-  return null;
+	const normalized = position.trim().toUpperCase();
+	if (normalized === "GOALKEEPER" || normalized === "GK") {
+		return "GOALKEEPER";
+	}
+	if (normalized === "DEFENDER" || normalized === "DEF") {
+		return "DEFENDER";
+	}
+	if (normalized === "MIDFIELDER" || normalized === "MID") {
+		return "MIDFIELDER";
+	}
+	if (
+		normalized === "FORWARD" ||
+		normalized === "FWD" ||
+		normalized === "STRIKER"
+	) {
+		return "FORWARD";
+	}
+	return null;
 }
 
-function buildTeamShortName(teamShortName: string | null | undefined, teamName: string): string {
-  if (teamShortName && teamShortName.trim().length > 0) {
-    return teamShortName.trim();
-  }
+function buildTeamShortName(
+	teamShortName: string | null | undefined,
+	teamName: string,
+): string {
+	if (teamShortName && teamShortName.trim().length > 0) {
+		return teamShortName.trim();
+	}
 
-  const words = teamName
-    .split(/\s+/)
-    .map((word) => word.trim())
-    .filter((word) => word.length > 0);
+	const words = teamName
+		.split(/\s+/)
+		.map((word) => word.trim())
+		.filter((word) => word.length > 0);
 
-  if (words.length === 0) {
-    return 'UNK';
-  }
-  if (words.length === 1) {
-    return words[0].slice(0, 3).toUpperCase();
-  }
+	if (words.length === 0) {
+		return "UNK";
+	}
+	if (words.length === 1) {
+		return words[0].slice(0, 3).toUpperCase();
+	}
 
-  return words
-    .slice(0, 3)
-    .map((word) => word[0].toUpperCase())
-    .join('');
+	return words
+		.slice(0, 3)
+		.map((word) => word[0].toUpperCase())
+		.join("");
 }
 
 function parseChangeDate(rawValue: string | Date): Date | null {
-  if (rawValue instanceof Date) {
-    return Number.isNaN(rawValue.getTime()) ? null : rawValue;
-  }
+	if (rawValue instanceof Date) {
+		return Number.isNaN(rawValue.getTime()) ? null : rawValue;
+	}
 
-  if (compactDatePattern.test(rawValue)) {
-    const year = Number(rawValue.slice(0, 4));
-    const month = Number(rawValue.slice(4, 6));
-    const day = Number(rawValue.slice(6, 8));
-    const parsed = new Date(Date.UTC(year, month - 1, day));
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
-  }
+	if (compactDatePattern.test(rawValue)) {
+		const year = Number(rawValue.slice(0, 4));
+		const month = Number(rawValue.slice(4, 6));
+		const day = Number(rawValue.slice(6, 8));
+		const parsed = new Date(Date.UTC(year, month - 1, day));
+		return Number.isNaN(parsed.getTime()) ? null : parsed;
+	}
 
-  const parsed = new Date(rawValue);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
+	const parsed = new Date(rawValue);
+	return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 function toTenthsValue(value: number | null | undefined): number {
-  if (typeof value !== 'number' || Number.isNaN(value)) {
-    return 0;
-  }
-  return Math.round(value);
+	if (typeof value !== "number" || Number.isNaN(value)) {
+		return 0;
+	}
+	return Math.round(value);
 }
 
 function buildHistoryCacheKey(args: GetPlayerValueHistoryArgs): string {
-  const from = args.fromDate ? getDateKey(args.fromDate) : 'none';
-  const to = args.toDate ? getDateKey(args.toDate) : 'none';
-  return `player-value-history:${args.playerId}:${args.limit}:${from}:${to}`;
+	const from = args.fromDate ? getDateKey(args.fromDate) : "none";
+	const to = args.toDate ? getDateKey(args.toDate) : "none";
+	return `player-value-history:${args.playerId}:${from}:${to}`;
 }
 
-const mapDbRowToPlayerValue = (row: DbPlayerValueRow): PlayerValue => ({
-  playerId: row.player_id,
-  playerName: row.player_name,
-  teamId: row.team_id,
-  teamName: row.team_name,
-  teamShortName: buildTeamShortName(row.team_short_name, row.team_name),
-  position: row.position,
-  positionEnum: toPositionEnum(row.position),
-  price: row.price,
-  value: row.value,
-  lastValue: row.last_value,
-  points: row.points,
-  selectedBy: row.selected_by,
-  transfersIn: row.transfers_in,
-  transfersOut: row.transfers_out,
-  netTransfers: row.net_transfers,
-  form: row.form,
-  totalPoints: row.total_points,
-  eventPoints: row.event_points,
-});
+const mapDbRowToPlayerValue = (row: DbPlayerValueRow): PlayerValue => {
+	const rawId = row.element_id ?? row.player_id;
+	const playerId =
+		typeof rawId === "number" && Number.isFinite(rawId) ? rawId : 0;
+
+	return {
+		playerId,
+		playerName: "",
+		teamId: 0,
+		teamName: "",
+		teamShortName: "UNK",
+		position: "",
+		positionEnum: null,
+		price: 0,
+		value: row.value,
+		lastValue: row.last_value ?? row.value,
+		points: 0,
+		selectedBy: 0,
+		transfersIn: 0,
+		transfersOut: 0,
+		netTransfers: 0,
+		form: null,
+		totalPoints: 0,
+		eventPoints: null,
+	};
+};
 
 function mapHistoryRows(
-  rows: DbPlayerValueHistoryRow[],
-  limit: number
+	rows: DbPlayerValueHistoryRow[],
 ): PlayerValueHistoryRepositoryItem[] {
-  // SQL already ordered by change_date DESC and filtered by date range;
-  // we only need to parse dates and compute pairwise old values.
-  const normalizedRows = rows
-    .map((row) => {
-      const parsedDate = parseChangeDate(row.change_date);
-      if (!parsedDate) {
-        return null;
-      }
-      return {
-        row,
-        parsedDate,
-      };
-    })
-    .filter((item): item is { row: DbPlayerValueHistoryRow; parsedDate: Date } => item !== null);
+	const normalizedRows = rows
+		.map((row) => {
+			const parsedDate = parseChangeDate(row.change_date);
+			if (!parsedDate) {
+				return null;
+			}
+			return {
+				row,
+				parsedDate,
+			};
+		})
+		.filter(
+			(item): item is { row: DbPlayerValueHistoryRow; parsedDate: Date } =>
+				item !== null,
+		);
 
-  const rowsForComparison = normalizedRows.slice(0, limit + 1);
-  const history: PlayerValueHistoryRepositoryItem[] = [];
+	const history: PlayerValueHistoryRepositoryItem[] = [];
 
-  for (let index = 0; index < Math.min(limit, rowsForComparison.length); index += 1) {
-    const current = rowsForComparison[index];
-    const previous = rowsForComparison[index + 1];
-    const fallbackOldValue = current.row.last_value ?? current.row.value;
+	for (let index = 0; index < normalizedRows.length; index += 1) {
+		const current = normalizedRows[index];
+		const previous = normalizedRows[index + 1];
+		const fallbackOldValue = current.row.last_value ?? current.row.value;
 
-    history.push({
-      playerId: current.row.element_id,
-      changeDate: current.parsedDate,
-      oldValue: toTenthsValue(previous?.row.value ?? fallbackOldValue),
-      newValue: toTenthsValue(current.row.value),
-      transfersIn: null,
-      transfersOut: null,
-    });
-  }
+		history.push({
+			playerId: current.row.element_id,
+			changeDate: current.parsedDate,
+			oldValue: toTenthsValue(previous?.row.value ?? fallbackOldValue),
+			newValue: toTenthsValue(current.row.value),
+			transfersIn: null,
+			transfersOut: null,
+		});
+	}
 
-  return history;
+	return history;
+}
+
+async function resolveTargetDate(
+	context: GraphQLContext,
+	changeDate: Date,
+): Promise<string> {
+	const compactStr = getCompactDateString(changeDate);
+	const isoStr = getIsoDateString(changeDate);
+
+	const [exactResult, isoResult] = await Promise.all([
+		context.supabase
+			.from("player_values")
+			.select("change_date")
+			.eq("change_date", compactStr)
+			.limit(1),
+		context.supabase
+			.from("player_values")
+			.select("change_date")
+			.eq("change_date", isoStr)
+			.limit(1),
+	]);
+
+	if (exactResult.data && exactResult.data.length > 0) {
+		return compactStr;
+	}
+	if (isoResult.data && isoResult.data.length > 0) {
+		return isoStr;
+	}
+	return compactStr;
 }
 
 async function getPlayerValuesFromDatabase(
-  context: GraphQLContext,
-  changeDate?: Date | null
+	context: GraphQLContext,
+	changeDate: Date,
 ): Promise<PlayerValue[]> {
-  try {
-    if (changeDate) {
-      const dateStr = changeDate.toISOString().split('T')[0]; // YYYY-MM-DD format
-      const dateStrCompact = getDateKey(changeDate).replace('PlayerValue:', ''); // yyyyMMdd format
+	try {
+		const targetDate = await resolveTargetDate(context, changeDate);
 
-      // Query for the specific date (try both formats)
-      const { data, error } = await context.supabase
-        .from('player_values')
-        .select('*')
-        .or(`change_date.eq.${dateStr},change_date.eq.${dateStrCompact}`);
+		const { data, error } = await context.supabase
+			.from("player_values")
+			.select(
+				"element_id, element_type, event_id, value, last_value, change_date, change_type",
+			)
+			.eq("change_date", targetDate);
 
-      if (error) {
-        context.logger.error({ err: error, changeDate: changeDate?.toISOString() }, 'Failed to fetch player values from database');
-        return [];
-      }
+		if (error) {
+			context.logger.error(
+				{ err: error, changeDate: changeDate.toISOString(), targetDate },
+				"Failed to fetch player values from database",
+			);
+			return [];
+		}
 
-      const rows = (data as DbPlayerValueRow[] | null) ?? [];
-      if (rows.length === 0) {
-        context.logger.warn({ changeDate: changeDate?.toISOString() }, 'No player values found in database');
-        return [];
-      }
+		const rows = (data as DbPlayerValueRow[] | null) ?? [];
+		if (rows.length === 0) {
+			context.logger.warn(
+				{ changeDate: changeDate.toISOString(), targetDate },
+				"No player values found in database",
+			);
+			return [];
+		}
 
-      return rows.map(mapDbRowToPlayerValue);
-    }
-
-    // No date provided: find the latest change_date, then fetch rows for that date only
-    const { data: dateData, error: dateError } = await context.supabase
-      .from('player_values')
-      .select('change_date')
-      .order('change_date', { ascending: false })
-      .limit(1);
-
-    if (dateError) {
-      context.logger.error({ err: dateError }, 'Failed to fetch latest player values date');
-      return [];
-    }
-
-    const targetDate = (dateData?.[0] as DbPlayerValueRow | undefined)?.change_date;
-    if (!targetDate) {
-      context.logger.warn('No player values dates found in database');
-      return [];
-    }
-
-    const { data, error } = await context.supabase
-      .from('player_values')
-      .select('*')
-      .eq('change_date', targetDate);
-
-    if (error) {
-      context.logger.error({ err: error, targetDate }, 'Failed to fetch player values for latest date');
-      return [];
-    }
-
-    const rows = (data as DbPlayerValueRow[] | null) ?? [];
-    if (rows.length === 0) {
-      context.logger.warn({ targetDate }, 'No player values found for latest date');
-      return [];
-    }
-
-    const playerValues = rows.map(mapDbRowToPlayerValue);
-
-    context.logger.info(
-      {
-        targetDate,
-        count: playerValues.length,
-      },
-      'Successfully retrieved player values from database'
-    );
-
-    return playerValues;
-  } catch (error) {
-    context.logger.error({ err: error, changeDate: changeDate?.toISOString() }, 'Failed to query player values from database');
-    return [];
-  }
+		return rows.map(mapDbRowToPlayerValue);
+	} catch (error) {
+		context.logger.error(
+			{ err: error, changeDate: changeDate.toISOString() },
+			"Failed to query player values from database",
+		);
+		return [];
+	}
 }
 
-async function getPlayerValuesFromKey(
-  context: GraphQLContext,
-  cacheKey: string,
-  keyType: string
-): Promise<PlayerValue[]> {
-  try {
-    if (keyType === 'string') {
-      // Handle string type (JSON array or null sentinel)
-      const cached = await context.redis.get(cacheKey);
-      if (!cached) {
-        return [];
-      }
-      if (cached === NULL_SENTINEL) {
-        return [];
-      }
-      const parsed = JSON.parse(cached) as unknown;
-      if (!Array.isArray(parsed)) {
-        context.logger.error({ cacheKey }, 'Invalid player values data format - expected array');
-        return [];
-      }
-      const data = parsed as PlayerValue[];
-      context.logger.info({ cacheKey, count: data.length }, 'Successfully retrieved player values from Redis');
-      return data;
-    } else if (keyType === 'hash') {
-      // Handle hash type (player ID -> JSON string)
-      const hashData = await context.redis.hgetall(cacheKey);
-      const rawData = Object.values(hashData)
-        .map((value) => {
-          try {
-            return JSON.parse(value) as Record<string, unknown>;
-          } catch (error) {
-            context.logger.warn({ err: error, cacheKey }, 'Failed to parse hash value');
-            return null;
-          }
-        })
-        .filter((item): item is Record<string, unknown> => item !== null);
+function parsePlayerValuesFromHashData(
+	context: GraphQLContext,
+	cacheKey: string,
+	hashData: Record<string, string>,
+): PlayerValue[] {
+	try {
+		const rawData = Object.values(hashData)
+			.map((value) => {
+				try {
+					return JSON.parse(value) as Record<string, unknown>;
+				} catch (error) {
+					context.logger.warn(
+						{ err: error, cacheKey },
+						"Failed to parse hash value",
+					);
+					return null;
+				}
+			})
+			.filter((item): item is Record<string, unknown> => item !== null);
 
-      // Map the Redis data structure to our PlayerValue type
-      const playerValues: PlayerValue[] = rawData.map((item) => {
-        // Handle different possible field names from Redis
-        const playerId = (item.playerId as number) ?? (item.elementId as number) ?? 0;
-        const playerName = (item.playerName as string) ?? (item.webName as string) ?? '';
-        const teamId = (item.teamId as number) ?? 0;
-        const teamName = (item.teamName as string) ?? '';
-        const position = (item.position as string) ?? (item.elementTypeName as string) ?? '';
-        const price = (item.price as number) ?? (item.nowCost as number) ?? 0;
-        const value = (item.value as number) ?? 0;
-        const lastValue = (item.lastValue as number) ?? 0;
-        const points = (item.points as number) ?? (item.totalPoints as number) ?? 0;
-        const selectedBy = (item.selectedBy as number) ?? (item.selectedByPercent as number) ?? 0;
-        const transfersIn = (item.transfersIn as number) ?? (item.transfersInEvent as number) ?? 0;
-        const transfersOut = (item.transfersOut as number) ?? (item.transfersOutEvent as number) ?? 0;
-        const netTransfers = (item.netTransfers as number) ?? transfersIn - transfersOut;
-        const form = (item.form as number) ?? null;
-        const totalPoints = (item.totalPoints as number) ?? points;
-        const eventPoints = (item.eventPoints as number) ?? (item.points as number) ?? null;
+		const playerValues: PlayerValue[] = rawData.map((item) => {
+			const playerId =
+				(item.playerId as number) ?? (item.elementId as number) ?? 0;
+			const playerName =
+				(item.playerName as string) ?? (item.webName as string) ?? "";
+			const teamId = (item.teamId as number) ?? 0;
+			const teamName = (item.teamName as string) ?? "";
+			const position =
+				(item.position as string) ?? (item.elementTypeName as string) ?? "";
+			const price = (item.price as number) ?? (item.nowCost as number) ?? 0;
+			const value = (item.value as number) ?? 0;
+			const lastValue = (item.lastValue as number) ?? 0;
+			const points =
+				(item.points as number) ?? (item.totalPoints as number) ?? 0;
+			const selectedBy =
+				(item.selectedBy as number) ?? (item.selectedByPercent as number) ?? 0;
+			const transfersIn =
+				(item.transfersIn as number) ?? (item.transfersInEvent as number) ?? 0;
+			const transfersOut =
+				(item.transfersOut as number) ??
+				(item.transfersOutEvent as number) ??
+				0;
+			const netTransfers =
+				(item.netTransfers as number) ?? transfersIn - transfersOut;
+			const form = (item.form as number) ?? null;
+			const totalPoints = (item.totalPoints as number) ?? points;
+			const eventPoints =
+				(item.eventPoints as number) ?? (item.points as number) ?? null;
 
-        return {
-          playerId,
-          playerName,
-          teamId,
-          teamName,
-          teamShortName: buildTeamShortName((item.teamShortName as string | undefined) ?? null, teamName),
-          position,
-          positionEnum: toPositionEnum(position),
-          price,
-          value,
-          lastValue,
-          points,
-          selectedBy,
-          transfersIn,
-          transfersOut,
-          netTransfers,
-          form,
-          totalPoints,
-          eventPoints,
-        };
-      });
+			return {
+				playerId,
+				playerName,
+				teamId,
+				teamName,
+				teamShortName: buildTeamShortName(
+					(item.teamShortName as string | undefined) ?? null,
+					teamName,
+				),
+				position,
+				positionEnum: toPositionEnum(position),
+				price,
+				value,
+				lastValue,
+				points,
+				selectedBy,
+				transfersIn,
+				transfersOut,
+				netTransfers,
+				form,
+				totalPoints,
+				eventPoints,
+			};
+		});
 
-      context.logger.info({ cacheKey, count: playerValues.length }, 'Successfully retrieved player values from Redis');
-      return playerValues;
-    } else {
-      context.logger.error({ cacheKey, keyType }, 'Unsupported Redis key type for player values');
-      return [];
-    }
-  } catch (error) {
-    context.logger.error({ err: error, cacheKey }, 'Failed to parse player values from Redis');
-    return [];
-  }
+		return playerValues;
+	} catch (error) {
+		context.logger.error(
+			{ err: error, cacheKey },
+			"Failed to parse player values from Redis hash",
+		);
+		return [];
+	}
 }
 
-const NULL_SENTINEL = '__pv:null__';
+async function writePlayerValuesToRedis(
+	context: GraphQLContext,
+	cacheKey: string,
+	values: PlayerValue[],
+): Promise<void> {
+	if (values.length === 0) {
+		return;
+	}
+
+	const hashEntries: Record<string, string> = {};
+	for (const pv of values) {
+		hashEntries[String(pv.playerId)] = JSON.stringify(pv);
+	}
+
+	await context.redis.hset(cacheKey, hashEntries);
+}
+
+const NULL_SENTINEL = "__pv:null__";
 
 export const playerValuesRepository: PlayerValuesRepository = {
-  async getPlayerValues(context: GraphQLContext, changeDate?: Date | null): Promise<PlayerValue[]> {
-    const cacheKey = getDateKey(changeDate);
-    context.logger.info({ cacheKey, changeDate: changeDate?.toISOString() }, 'Looking for player values in Redis');
+	async getPlayerValues(
+		context: GraphQLContext,
+		changeDate: Date,
+	): Promise<PlayerValue[]> {
+		const cacheKey = getDateKey(changeDate);
 
-    // 1. Read cache first
-    const keyType = await context.redis.type(cacheKey);
+		// 1. Try hash key first (external sync job format).
+		// Guarded: if the key exists as a string type (null sentinel or legacy JSON),
+		// HGETALL throws WRONGTYPE — catch it and fall through to the GET path.
+		try {
+			const hashData = await context.redis.hgetall(cacheKey);
+			if (Object.keys(hashData).length > 0) {
+				return parsePlayerValuesFromHashData(context, cacheKey, hashData);
+			}
+		} catch (err) {
+			context.logger.warn(
+				{ cacheKey, err },
+				"HGETALL on player values key failed, trying GET",
+			);
+		}
 
-    if (keyType !== 'none') {
-      return getPlayerValuesFromKey(context, cacheKey, keyType);
-    }
+		// 2. Try string key (legacy / write-back format, one GET).
+		const stringVal = await context.redis.get(cacheKey);
+		if (stringVal) {
+			if (stringVal === NULL_SENTINEL) {
+				return [];
+			}
+			try {
+				const parsed = JSON.parse(stringVal) as PlayerValue[];
+				if (Array.isArray(parsed)) {
+					return parsed;
+				}
+			} catch {
+				// fall through to DB
+			}
+		}
 
-    // 2. Cache miss — query database
-    context.logger.info({ cacheKey, changeDate: changeDate?.toISOString() }, 'No data in Redis, querying database');
-    const values = await getPlayerValuesFromDatabase(context, changeDate);
+		// 3. Cache miss — query database for exact date.
+		const values = await getPlayerValuesFromDatabase(context, changeDate);
 
-    // 3. Write back to Redis (cache empty results too)
-    if (values.length === 0) {
-      await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', env.CACHE_TTL_SECONDS);
-    } else {
-      await context.redis.set(cacheKey, JSON.stringify(values), 'EX', env.CACHE_TTL_SECONDS);
-    }
+		// 4. Write back to Redis as hash (no TTL).
+		if (values.length === 0) {
+			await context.redis.set(cacheKey, NULL_SENTINEL);
+		} else {
+			await writePlayerValuesToRedis(context, cacheKey, values);
+		}
 
-    return values;
-  },
+		return values;
+	},
 
-  async getPlayerValueHistory(
-    context: GraphQLContext,
-    args: GetPlayerValueHistoryArgs
-  ): Promise<PlayerValueHistoryRepositoryItem[]> {
-    if (!Number.isFinite(args.playerId) || args.playerId <= 0) {
-      return [];
-    }
+	async getPlayerValueHistory(
+		context: GraphQLContext,
+		args: GetPlayerValueHistoryArgs,
+	): Promise<PlayerValueHistoryRepositoryItem[]> {
+		if (!Number.isFinite(args.playerId) || args.playerId <= 0) {
+			return [];
+		}
 
-    const cacheKey = buildHistoryCacheKey(args);
-    const cached = await context.redis.get(cacheKey);
-    if (cached !== null) {
-      if (cached === NULL_SENTINEL) {
-        return [];
-      }
-      return JSON.parse(cached) as PlayerValueHistoryRepositoryItem[];
-    }
+		const cacheKey = buildHistoryCacheKey(args);
+		const cached = await context.redis.get(cacheKey);
+		if (cached !== null) {
+			if (cached === NULL_SENTINEL) {
+				return [];
+			}
+			return JSON.parse(cached) as PlayerValueHistoryRepositoryItem[];
+		}
 
-    try {
-      let query = context.supabase
-        .from('player_values')
-        .select('element_id,value,last_value,change_date')
-        .eq('element_id', args.playerId)
-        .order('change_date', { ascending: false })
-        .limit(args.limit + 1);
+		try {
+			let query = context.supabase
+				.from("player_values")
+				.select("element_id, value, last_value, change_date")
+				.eq("element_id", args.playerId)
+				.order("change_date", { ascending: false });
 
-      if (args.fromDate) {
-        query = query.gte('change_date', getDateKey(args.fromDate).replace('PlayerValue:', ''));
-      }
+			if (args.fromDate) {
+				query = query.gte("change_date", getCompactDateString(args.fromDate));
+			}
 
-      if (args.toDate) {
-        query = query.lte('change_date', getDateKey(args.toDate).replace('PlayerValue:', ''));
-      }
+			if (args.toDate) {
+				query = query.lte("change_date", getCompactDateString(args.toDate));
+			}
 
-      const { data, error } = await query;
+			const { data, error } = await query;
 
-      if (error) {
-        context.logger.error(
-          { err: error, playerId: args.playerId },
-          'Failed to fetch player value history from database'
-        );
-        return [];
-      }
+			if (error) {
+				context.logger.error(
+					{ err: error, playerId: args.playerId },
+					"Failed to fetch player value history from database",
+				);
+				return [];
+			}
 
-      const rows = (data as DbPlayerValueHistoryRow[] | null) ?? [];
-      if (rows.length === 0) {
-        await context.redis.set(cacheKey, NULL_SENTINEL, 'EX', env.CACHE_TTL_SECONDS);
-        return [];
-      }
+			const rows = (data as DbPlayerValueHistoryRow[] | null) ?? [];
+			if (rows.length === 0) {
+				await context.redis.set(cacheKey, NULL_SENTINEL, "EX", 3600);
+				return [];
+			}
 
-      const history = mapHistoryRows(rows, args.limit);
-      await context.redis.set(cacheKey, JSON.stringify(history), 'EX', env.CACHE_TTL_SECONDS);
-      return history;
-    } catch (error) {
-      context.logger.error({ err: error, playerId: args.playerId }, 'Failed to query player value history');
-      return [];
-    }
-  },
+			const history = mapHistoryRows(rows);
+			await context.redis.set(cacheKey, JSON.stringify(history), "EX", 3600);
+			return history;
+		} catch (error) {
+			context.logger.error(
+				{ err: error, playerId: args.playerId },
+				"Failed to query player value history",
+			);
+			return [];
+		}
+	},
 };

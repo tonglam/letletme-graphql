@@ -67,10 +67,11 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
 
   extend type Query {
     """
-    Query all live matches grouped by play status.
-    
-    Returns matches for the current event (and next event fixtures) organized by status.
+    Query live matches grouped by play status.
+
+    When upcoming is false (default), returns only current event matches.
+    When upcoming is true, returns both current event matches and next event fixtures.
     """
-    liveMatches: LiveMatches!
+    liveMatches(upcoming: Boolean = false): LiveMatches!
   }
 `;

@@ -40,10 +40,9 @@ export const playerValuesTypeDefs = /* GraphQL */ `
   }
 
   extend type Query {
-    playerValues(changeDate: Date): [PlayerValue!]!
+    playerValues(changeDate: Date!): [PlayerValue!]!
     playerValueHistory(
       playerId: Int!
-      limit: Int
       fromDate: DateTime
       toDate: DateTime
     ): [PlayerValueHistoryItem!]!

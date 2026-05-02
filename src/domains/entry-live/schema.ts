@@ -45,20 +45,20 @@ export const entryLiveTypeDefs = /* GraphQL */ `
     - dynamic data (event live points) comes from Live domain (short TTL)
     - calculation is performed server-side for fast client consumption
     """
-    calcLivePointsByEntry(eventId: Int!, entryId: Int!): LiveCalcData!
+    calcLivePointsByEntry(eventId: Int!, entryId: Int!, includeLive: Boolean): LiveCalcData!
 
     """
     Batch live calculation for multiple entries in a single event.
     Shares live performance data, fixtures, teams, and players across all entries,
     then computes each entry in parallel with error tolerance.
     """
-    calcLivePointsForEntries(eventId: Int!, entryIds: [Int!]!): BatchLiveCalcResult!
+    calcLivePointsForEntries(eventId: Int!, entryIds: [Int!]!, includeLive: Boolean): BatchLiveCalcResult!
 
     """
     Batch live calculation for all entries in a tournament.
     Resolves entry IDs from the tournament, then computes live points for each.
     """
-    calcLivePointsForTournament(eventId: Int!, tournamentId: Int!): BatchLiveCalcResult!
+    calcLivePointsForTournament(eventId: Int!, tournamentId: Int!, includeLive: Boolean): BatchLiveCalcResult!
   }
 
   type LiveCalcData {
@@ -194,4 +194,3 @@ export const entryLiveTypeDefs = /* GraphQL */ `
     failedCount: Int!
   }
 `;
-

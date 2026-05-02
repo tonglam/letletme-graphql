@@ -9,7 +9,7 @@ CREATE OR REPLACE FUNCTION get_players_for_picker(
 RETURNS TABLE (
   id                   INT,
   web_name             TEXT,
-  position             SMALLINT,
+  element_type         SMALLINT,
   team_id              INT,
   team_name            TEXT,
   team_short_name      TEXT
@@ -19,7 +19,7 @@ AS $$
   SELECT
     p.id,
     p.web_name,
-    p.type       AS position,
+    p.type       AS element_type,
     p.team_id,
     t.name       AS team_name,
     t.short_name AS team_short_name

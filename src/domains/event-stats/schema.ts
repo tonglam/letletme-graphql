@@ -28,8 +28,6 @@ export const eventStatsTypeDefs = /* GraphQL */ `
   }
 
   type TournamentSelectionStats {
-    eventId: Int!
-    tournamentId: Int!
     totalEntries: Int!
     goalkeepers: [SelectionStatPlayer!]!
     defenders: [SelectionStatPlayer!]!

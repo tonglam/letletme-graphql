@@ -7,18 +7,23 @@ export const leaguesTypeDefs = /* GraphQL */ `
   type League {
     id: Int!
     name: String!
+    shortName: String
     type: LeagueType!
+    created: String
+    closed: Boolean
+    maxEntries: Int
+    scoring: String
+    adminEntry: Int
+    startEvent: Int
     startedEvent: Int
-  }
-
-  type LeagueStanding {
-    league: League!
-    entryId: Int!
-    entryName: String
-    playerName: String
-    rank: Int
-    lastRank: Int
-    overallPoints: Int!
+    entryRank: Int
+    entryLastRank: Int
+    tournamentId: Int
+    tournamentName: String
+    tournamentMode: String
+    groupMode: String
+    totalTeamNum: Int
+    state: String
   }
 
   type LeagueEventResult {
@@ -35,7 +40,6 @@ export const leaguesTypeDefs = /* GraphQL */ `
 
   extend type Query {
     entryLeagues(entryId: Int!): [League!]!
-    leagueStandings(leagueId: Int!, limit: Int = 50): [LeagueStanding!]!
     leagueEventResults(leagueId: Int!, eventId: Int!): [LeagueEventResult!]!
   }
 `;

@@ -56,5 +56,12 @@ export default [
       'no-unused-vars': 'off', // Use @typescript-eslint/no-unused-vars instead
     },
   },
+  {
+    files: ['tests/**/*.ts'],
+    rules: {
+      '@typescript-eslint/explicit-function-return-type': 'off',
+      '@typescript-eslint/explicit-module-boundary-types': 'off',
+    },
+  },
   prettier,
 ];

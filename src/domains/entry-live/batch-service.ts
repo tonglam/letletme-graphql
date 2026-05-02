@@ -1,509 +1,603 @@
-import type { GraphQLContext } from '../../graphql/context';
-import type { Entry } from '../entries/repository';
-import { entriesService } from '../entries/service';
-import type { Fixture } from '../fixtures/repository';
-import { fixturesService } from '../fixtures/service';
-import type { LivePerformance } from '../live/repository';
-import { liveRepository } from '../live/repository';
-import type { Player, Team } from '../players/repository';
-import { playersRepository } from '../players/repository';
-import type { EntryEventPick, EntryEventTransferRow } from './repository';
-import { entryLiveRepository } from './repository';
+import type { GraphQLContext } from "../../graphql/context";
+import type { Player, Team } from "../../infra/types";
+import type { Entry } from "../entries/repository";
+import { entriesService } from "../entries/service";
+import type { Fixture } from "../fixtures/repository";
+import { fixturesService } from "../fixtures/service";
+import type { LivePerformance } from "../live/repository";
+import { liveRepository } from "../live/repository";
+import { playersRepository } from "../players/repository";
 import {
-  buildTeamMapById,
-  enrichTransferRows,
-  type EntryEventTransfersData,
-} from './transfer-enrichment';
+	type ActiveCaptainData,
+	applyAutoSubs,
+	calcElementLivePoints,
+	type ElementEventResultData,
+	type LiveCalcData,
+} from "./calc-service";
+import type { EntryEventPick, EntryEventTransferRow } from "./repository";
+import { entryLiveRepository } from "./repository";
 import {
-  applyAutoSubs,
-  calcElementLivePoints,
-  type ActiveCaptainData,
-  type ElementEventResultData,
-  type LiveCalcData,
-} from './calc-service';
+	buildTeamMapById,
+	type EntryEventTransfersData,
+	enrichTransferRows,
+} from "./transfer-enrichment";
 
 export type BatchLiveCalcResult = {
-  results: Map<number, LiveCalcData>;
-  errors: Array<{ entryId: number; message: string }>;
-  meta: {
-    eventId: number;
-    totalEntries: number;
-    succeededCount: number;
-    failedCount: number;
-  };
+	results: Map<number, LiveCalcData>;
+	errors: Array<{ entryId: number; message: string }>;
+	meta: {
+		eventId: number;
+		totalEntries: number;
+		succeededCount: number;
+		failedCount: number;
+	};
 };
 
 type SharedData = {
-  liveByPlayer: Map<number, LivePerformance>;
-  teamsById: Map<number, Team>;
-  playersById: Map<number, Player>;
-  fixturesByTeam: Map<number, Fixture[]>;
+	liveByPlayer: Map<number, LivePerformance>;
+	teamsById: Map<number, Team>;
+	playersById: Map<number, Player>;
+	fixturesByTeam: Map<number, Fixture[]>;
 };
 
 type PerEntryData = {
-  entryId: number;
-  entry: Entry | null;
-  pickEntity: EntryEventPick | null;
-  transferRows: EntryEventTransferRow[];
+	entryId: number;
+	entry: Entry | null;
+	pickEntity: EntryEventPick | null;
+	transferRows: EntryEventTransferRow[];
 };
 
 const PLAY_STATUS = {
-  BLANK: 0,
-  NOT_STARTED: 1,
-  PLAYING: 2,
-  EVENT_NOT_FINISHED: 3,
-  FINISHED: 4,
+	BLANK: 0,
+	NOT_STARTED: 1,
+	PLAYING: 2,
+	EVENT_NOT_FINISHED: 3,
+	FINISHED: 4,
 } as const;
 
 const safeInt = (value: number | null | undefined): number =>
-  typeof value === 'number' ? value : 0;
+	typeof value === "number" ? value : 0;
 
 const asScaled = (value: number | null | undefined, divisor: number): number =>
-  typeof value === 'number' ? value / divisor : 0;
+	typeof value === "number" ? value / divisor : 0;
 
 const safeNull = <T>(value: T | null | undefined, defaultValue: T): T =>
-  value ?? defaultValue;
+	value ?? defaultValue;
 
-const parseNullableFloat = (value: string | null | undefined): number | null => {
-  if (!value) {
-    return null;
-  }
-  const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : null;
+const parseNullableFloat = (
+	value: string | null | undefined,
+): number | null => {
+	if (!value) {
+		return null;
+	}
+	const parsed = Number.parseFloat(value);
+	return Number.isFinite(parsed) ? parsed : null;
 };
 
 const elementTypeName = (player: Player | null): string => {
-  if (!player) return '';
-  switch (player.position) {
-    case 1: return 'GKP';
-    case 2: return 'DEF';
-    case 3: return 'MID';
-    case 4: return 'FWD';
-    default: return '';
-  }
+	if (!player) return "";
+	switch (player.position) {
+		case 1:
+			return "GKP";
+		case 2:
+			return "DEF";
+		case 3:
+			return "MID";
+		case 4:
+			return "FWD";
+		default:
+			return "";
+	}
 };
 
 const buildFixtureIndex = (fixtures: Fixture[]): Map<number, Fixture[]> => {
-  const map = new Map<number, Fixture[]>();
-  for (const fx of fixtures) {
-    const home = fx.teamHId;
-    const away = fx.teamAId;
-    const homeFixtures = map.get(home);
-    if (homeFixtures) {
-      homeFixtures.push(fx);
-    } else {
-      map.set(home, [fx]);
-    }
-    const awayFixtures = map.get(away);
-    if (awayFixtures) {
-      awayFixtures.push(fx);
-    } else {
-      map.set(away, [fx]);
-    }
-  }
-  return map;
+	const map = new Map<number, Fixture[]>();
+	for (const fx of fixtures) {
+		const home = fx.teamHId;
+		const away = fx.teamAId;
+		const homeFixtures = map.get(home);
+		if (homeFixtures) {
+			homeFixtures.push(fx);
+		} else {
+			map.set(home, [fx]);
+		}
+		const awayFixtures = map.get(away);
+		if (awayFixtures) {
+			awayFixtures.push(fx);
+		} else {
+			map.set(away, [fx]);
+		}
+	}
+	return map;
 };
 
-const getPlayStatusForTeam = (fixtures: Fixture[] | undefined): { started: boolean; finished: boolean; status: number } => {
-  if (!fixtures || fixtures.length === 0) {
-    return { started: true, finished: true, status: PLAY_STATUS.BLANK };
-  }
-  const anyStarted = fixtures.some((f) => f.started === true);
-  const anyFinished = fixtures.some((f) => f.finished === true);
-  const allFinished = fixtures.every((f) => f.finished === true);
+const getPlayStatusForTeam = (
+	fixtures: Fixture[] | undefined,
+): { started: boolean; finished: boolean; status: number } => {
+	if (!fixtures || fixtures.length === 0) {
+		return { started: true, finished: true, status: PLAY_STATUS.BLANK };
+	}
+	const anyStarted = fixtures.some((f) => f.started === true);
+	const anyFinished = fixtures.some((f) => f.finished === true);
+	const allFinished = fixtures.every((f) => f.finished === true);
 
-  if (anyStarted && !allFinished) {
-    return { started: true, finished: false, status: PLAY_STATUS.PLAYING };
-  }
-  if (!anyStarted && !anyFinished) {
-    return { started: false, finished: false, status: PLAY_STATUS.NOT_STARTED };
-  }
-  if (anyFinished && !allFinished) {
-    return { started: true, finished: false, status: PLAY_STATUS.EVENT_NOT_FINISHED };
-  }
-  return { started: true, finished: true, status: PLAY_STATUS.FINISHED };
+	if (anyStarted && !allFinished) {
+		return { started: true, finished: false, status: PLAY_STATUS.PLAYING };
+	}
+	if (!anyStarted && !anyFinished) {
+		return { started: false, finished: false, status: PLAY_STATUS.NOT_STARTED };
+	}
+	if (anyFinished && !allFinished) {
+		return {
+			started: true,
+			finished: false,
+			status: PLAY_STATUS.EVENT_NOT_FINISHED,
+		};
+	}
+	return { started: true, finished: true, status: PLAY_STATUS.FINISHED };
 };
 
 const joinNonEmpty = (values: string[]): string =>
-  values.filter((s) => s.trim().length > 0).join(',');
+	values.filter((s) => s.trim().length > 0).join(",");
 
 const buildTeamMatchInfo = (params: {
-  teamId: number;
-  team: Team | undefined;
-  fixtures: Fixture[] | undefined;
-  teamsById: Map<number, Team>;
+	teamId: number;
+	team: Team | undefined;
+	fixtures: Fixture[] | undefined;
+	teamsById: Map<number, Team>;
 }): {
-  teamCode: number;
-  teamName: string;
-  teamShortName: string;
-  againstId: number;
-  againstName: string;
-  againstShortName: string;
-  wasHome: string;
-  score: string;
-  bgw: boolean;
-  dgw: boolean;
-  isGwStarted: boolean;
-  isGwFinished: boolean;
-  playStatus: number;
+	teamCode: number;
+	teamName: string;
+	teamShortName: string;
+	againstId: number;
+	againstName: string;
+	againstShortName: string;
+	wasHome: string;
+	score: string;
+	bgw: boolean;
+	dgw: boolean;
+	isGwStarted: boolean;
+	isGwFinished: boolean;
+	playStatus: number;
 } => {
-  const { fixtures, teamId, team, teamsById } = params;
-  const status = getPlayStatusForTeam(fixtures);
+	const { fixtures, teamId, team, teamsById } = params;
+	const status = getPlayStatusForTeam(fixtures);
 
-  if (!fixtures || fixtures.length === 0) {
-    return {
-      teamCode: team?.code ?? 0,
-      teamName: team?.name ?? '',
-      teamShortName: team?.shortName ?? '',
-      againstId: 0,
-      againstName: 'BLANK',
-      againstShortName: 'BLANK',
-      wasHome: '',
-      score: '',
-      bgw: true,
-      dgw: false,
-      isGwStarted: true,
-      isGwFinished: true,
-      playStatus: PLAY_STATUS.BLANK,
-    };
-  }
+	if (!fixtures || fixtures.length === 0) {
+		return {
+			teamCode: team?.code ?? 0,
+			teamName: team?.name ?? "",
+			teamShortName: team?.shortName ?? "",
+			againstId: 0,
+			againstName: "BLANK",
+			againstShortName: "BLANK",
+			wasHome: "",
+			score: "",
+			bgw: true,
+			dgw: false,
+			isGwStarted: true,
+			isGwFinished: true,
+			playStatus: PLAY_STATUS.BLANK,
+		};
+	}
 
-  const againstIds: number[] = [];
-  const againstNames: string[] = [];
-  const againstShortNames: string[] = [];
-  const wasHomeList: string[] = [];
-  const scores: string[] = [];
+	const againstIds: number[] = [];
+	const againstNames: string[] = [];
+	const againstShortNames: string[] = [];
+	const wasHomeList: string[] = [];
+	const scores: string[] = [];
 
-  for (const fx of fixtures) {
-    const isHome = fx.teamHId === teamId;
-    const againstId = isHome ? fx.teamAId : fx.teamHId;
-    const againstTeam = teamsById.get(againstId);
+	for (const fx of fixtures) {
+		const isHome = fx.teamHId === teamId;
+		const againstId = isHome ? fx.teamAId : fx.teamHId;
+		const againstTeam = teamsById.get(againstId);
 
-    againstIds.push(againstId);
-    againstNames.push(againstTeam?.name ?? '');
-    againstShortNames.push(againstTeam?.shortName ?? '');
-    wasHomeList.push(isHome ? 'H' : 'A');
+		againstIds.push(againstId);
+		againstNames.push(againstTeam?.name ?? "");
+		againstShortNames.push(againstTeam?.shortName ?? "");
+		wasHomeList.push(isHome ? "H" : "A");
 
-    const teamScore = isHome ? fx.teamHScore : fx.teamAScore;
-    const againstScore = isHome ? fx.teamAScore : fx.teamHScore;
-    scores.push(
-      teamScore === null || againstScore === null ? '' : `${teamScore}-${againstScore}`
-    );
-  }
+		const teamScore = isHome ? fx.teamHScore : fx.teamAScore;
+		const againstScore = isHome ? fx.teamAScore : fx.teamHScore;
+		scores.push(
+			teamScore === null || againstScore === null
+				? ""
+				: `${teamScore}-${againstScore}`,
+		);
+	}
 
-  return {
-    teamCode: team?.code ?? 0,
-    teamName: team?.name ?? '',
-    teamShortName: team?.shortName ?? '',
-    againstId: againstIds.length === 1 ? againstIds[0] : 0,
-    againstName: joinNonEmpty(againstNames),
-    againstShortName: joinNonEmpty(againstShortNames),
-    wasHome: joinNonEmpty(wasHomeList),
-    score: joinNonEmpty(scores),
-    bgw: false,
-    dgw: fixtures.length > 1,
-    isGwStarted: status.started,
-    isGwFinished: status.finished,
-    playStatus: status.status,
-  };
+	return {
+		teamCode: team?.code ?? 0,
+		teamName: team?.name ?? "",
+		teamShortName: team?.shortName ?? "",
+		againstId: againstIds.length === 1 ? againstIds[0] : 0,
+		againstName: joinNonEmpty(againstNames),
+		againstShortName: joinNonEmpty(againstShortNames),
+		wasHome: joinNonEmpty(wasHomeList),
+		score: joinNonEmpty(scores),
+		bgw: false,
+		dgw: fixtures.length > 1,
+		isGwStarted: status.started,
+		isGwFinished: status.finished,
+		playStatus: status.status,
+	};
 };
 
 const hasCompletedFixtures = (pick: ElementEventResultData): boolean =>
-  pick.isGwFinished || pick.playStatus === PLAY_STATUS.BLANK || pick.bgw;
+	pick.isGwFinished || pick.playStatus === PLAY_STATUS.BLANK || pick.bgw;
 
-const selectCaptainForScoring = (picks: ElementEventResultData[]): ElementEventResultData | null => {
-  const captain = picks.find((p) => p.isCaptain) ?? null;
-  if (!captain) {
-    return null;
-  }
-  if (captain.isPlayed) {
-    return captain;
-  }
-  if (!hasCompletedFixtures(captain)) {
-    return captain;
-  }
-  const vice = picks.find((p) => p.isViceCaptain) ?? null;
-  return vice ?? captain;
+const selectCaptainForScoring = (
+	picks: ElementEventResultData[],
+): ElementEventResultData | null => {
+	const captain = picks.find((p) => p.isCaptain) ?? null;
+	if (!captain) {
+		return null;
+	}
+	if (captain.isPlayed) {
+		return captain;
+	}
+	if (!hasCompletedFixtures(captain)) {
+		return captain;
+	}
+	const vice = picks.find((p) => p.isViceCaptain) ?? null;
+	return vice ?? captain;
 };
 
 const normalizeChip = (raw: string | null | undefined): string => {
-  const value = (raw ?? '').toUpperCase().trim();
-  const compactValue = value.replace(/[^A-Z0-9]/g, '');
-  if (value === 'BENCH_BOOST' || compactValue === 'BENCHBOOST' || compactValue === 'BBOOST' || compactValue === 'BB') {
-    return 'BENCH_BOOST';
-  }
-  if (
-    value === 'TRIPLE_CAPTAIN' ||
-    compactValue === 'TRIPLECAPTAIN' ||
-    compactValue === '3XC' ||
-    compactValue === 'TC'
-  ) {
-    return 'TRIPLE_CAPTAIN';
-  }
-  if (value === 'FREE_HIT' || compactValue === 'FREEHIT' || compactValue === 'FH') return 'FREE_HIT';
-  if (value === 'WILDCARD' || compactValue === 'WILDCARD' || compactValue === 'WC') return 'WILDCARD';
-  if (compactValue === 'NONE' || compactValue === 'NA' || compactValue === '') return 'NONE';
-  return 'NONE';
+	const value = (raw ?? "").toUpperCase().trim();
+	const compactValue = value.replace(/[^A-Z0-9]/g, "");
+	if (
+		value === "BENCH_BOOST" ||
+		compactValue === "BENCHBOOST" ||
+		compactValue === "BBOOST" ||
+		compactValue === "BB"
+	) {
+		return "BENCH_BOOST";
+	}
+	if (
+		value === "TRIPLE_CAPTAIN" ||
+		compactValue === "TRIPLECAPTAIN" ||
+		compactValue === "3XC" ||
+		compactValue === "TC"
+	) {
+		return "TRIPLE_CAPTAIN";
+	}
+	if (
+		value === "FREE_HIT" ||
+		compactValue === "FREEHIT" ||
+		compactValue === "FH"
+	)
+		return "FREE_HIT";
+	if (
+		value === "WILDCARD" ||
+		compactValue === "WILDCARD" ||
+		compactValue === "WC"
+	)
+		return "WILDCARD";
+	if (compactValue === "NONE" || compactValue === "NA" || compactValue === "")
+		return "NONE";
+	return "NONE";
 };
 
 const computeSingleEntry = (
-  entryId: number,
-  eventId: number,
-  perEntry: PerEntryData,
-  shared: SharedData,
+	entryId: number,
+	eventId: number,
+	perEntry: PerEntryData,
+	shared: SharedData,
 ): LiveCalcData => {
-  const { entry, pickEntity, transferRows } = perEntry;
-  const { liveByPlayer, fixturesByTeam, teamsById, playersById } = shared;
+	const { entry, pickEntity, transferRows } = perEntry;
+	const { liveByPlayer, fixturesByTeam, teamsById, playersById } = shared;
 
-  const chip = normalizeChip(pickEntity?.chip ?? null);
-  const transferCost = pickEntity?.transfersCost ?? 0;
+	const chip = normalizeChip(pickEntity?.chip ?? null);
+	const transferCost = pickEntity?.transfersCost ?? 0;
 
-  const picks = pickEntity?.picks ?? [];
+	const picks = pickEntity?.picks ?? [];
 
-  const pickList: ElementEventResultData[] = picks.map((pick) => {
-    const player = playersById.get(pick.element) ?? null;
-    const team = player ? teamsById.get(player.teamId) : undefined;
-    const teamFixtures = player ? fixturesByTeam.get(player.teamId) : undefined;
-    const matchInfo = buildTeamMatchInfo({
-      teamId: player?.teamId ?? 0,
-      team,
-      fixtures: teamFixtures,
-      teamsById,
-    });
+	const pickList: ElementEventResultData[] = picks.map((pick) => {
+		const player = playersById.get(pick.element) ?? null;
+		const team = player ? teamsById.get(player.teamId) : undefined;
+		const teamFixtures = player ? fixturesByTeam.get(player.teamId) : undefined;
+		const matchInfo = buildTeamMatchInfo({
+			teamId: player?.teamId ?? 0,
+			team,
+			fixtures: teamFixtures,
+			teamsById,
+		});
 
-    const live = liveByPlayer.get(pick.element);
-    const elementType = player?.position ?? 0;
+		const live = liveByPlayer.get(pick.element);
+		const elementType = player?.position ?? 0;
 
-    const minutes = safeNull(live?.minutes, 0);
-    const yellowCards = safeNull(live?.yellowCards, 0);
-    const redCards = safeNull(live?.redCards, 0);
-    const isPlayed = minutes > 0 || yellowCards > 0 || redCards > 0;
+		const minutes = safeNull(live?.minutes, 0);
+		const yellowCards = safeNull(live?.yellowCards, 0);
+		const redCards = safeNull(live?.redCards, 0);
+		const isPlayed = minutes > 0 || yellowCards > 0 || redCards > 0;
 
-    const defensiveContribution: number = safeNull(live?.defensiveContribution, 0);
-    const calculatedTotalPoints = calcElementLivePoints(elementType, live);
+		const defensiveContribution: number = safeNull(
+			live?.defensiveContribution,
+			0,
+		);
+		const calculatedTotalPoints = calcElementLivePoints(elementType, live);
 
-    return {
-      season: null,
-      event: eventId,
-      element: pick.element,
-      code: player?.code ?? 0,
-      webName: player?.webName ?? '',
-      price: player ? player.price / 10 : 0,
-      elementType,
-      elementTypeName: elementTypeName(player),
-      teamId: player?.teamId ?? 0,
-      teamCode: matchInfo.teamCode,
-      teamName: matchInfo.teamName,
-      teamShortName: matchInfo.teamShortName,
-      againstId: matchInfo.againstId,
-      againstName: matchInfo.againstName,
-      againstShortName:
-        matchInfo.againstShortName.length > 0
-          ? matchInfo.againstShortName
-          : 'BLANK',
-      wasHome: matchInfo.wasHome,
-      score: matchInfo.score,
-      position: pick.position,
-      multiplier: pick.multiplier,
-      isCaptain: pick.isCaptain,
-      isViceCaptain: pick.isViceCaptain,
-      isGwStarted: matchInfo.isGwStarted,
-      isGwFinished: matchInfo.isGwFinished,
-      isPlayed,
-      playStatus: matchInfo.playStatus,
-      minutes,
-      goalsScored: safeNull(live?.goalsScored, 0),
-      assists: safeNull(live?.assists, 0),
-      cleanSheets: safeNull(live?.cleanSheets, 0),
-      goalsConceded: safeNull(live?.goalsConceded, 0),
-      defensiveContribution,
-      ownGoals: safeNull(live?.ownGoals, 0),
-      penaltiesSaved: safeNull(live?.penaltiesSaved, 0),
-      penaltiesMissed: safeNull(live?.penaltiesMissed, 0),
-      yellowCards,
-      redCards,
-      saves: safeNull(live?.saves, 0),
-      bonus: safeNull(live?.bonus, 0),
-      bps: safeNull(live?.bps, 0),
-      totalPoints: calculatedTotalPoints,
-      starts: live?.starts ?? null,
-      expectedGoals: parseNullableFloat(live?.expectedGoals),
-      expectedAssists: parseNullableFloat(live?.expectedAssists),
-      expectedGoalInvolvements: parseNullableFloat(live?.expectedGoalInvolvements),
-      expectedGoalsConceded: parseNullableFloat(live?.expectedGoalsConceded),
-      inDreamTeam: live?.inDreamTeam ?? null,
-      pickActive: false,
-      autoSub: false,
-      bgw: matchInfo.bgw,
-      dgw: matchInfo.dgw,
-    };
-  });
+		return {
+			season: null,
+			event: eventId,
+			element: pick.element,
+			code: player?.code ?? 0,
+			webName: player?.webName ?? "",
+			price: player ? player.price / 10 : 0,
+			elementType,
+			elementTypeName: elementTypeName(player),
+			teamId: player?.teamId ?? 0,
+			teamCode: matchInfo.teamCode,
+			teamName: matchInfo.teamName,
+			teamShortName: matchInfo.teamShortName,
+			againstId: matchInfo.againstId,
+			againstName: matchInfo.againstName,
+			againstShortName:
+				matchInfo.againstShortName.length > 0
+					? matchInfo.againstShortName
+					: "BLANK",
+			wasHome: matchInfo.wasHome,
+			score: matchInfo.score,
+			position: pick.position,
+			multiplier: pick.multiplier,
+			isCaptain: pick.isCaptain,
+			isViceCaptain: pick.isViceCaptain,
+			isGwStarted: matchInfo.isGwStarted,
+			isGwFinished: matchInfo.isGwFinished,
+			isPlayed,
+			playStatus: matchInfo.playStatus,
+			minutes,
+			goalsScored: safeNull(live?.goalsScored, 0),
+			assists: safeNull(live?.assists, 0),
+			cleanSheets: safeNull(live?.cleanSheets, 0),
+			goalsConceded: safeNull(live?.goalsConceded, 0),
+			defensiveContribution,
+			ownGoals: safeNull(live?.ownGoals, 0),
+			penaltiesSaved: safeNull(live?.penaltiesSaved, 0),
+			penaltiesMissed: safeNull(live?.penaltiesMissed, 0),
+			yellowCards,
+			redCards,
+			saves: safeNull(live?.saves, 0),
+			bonus: safeNull(live?.bonus, 0),
+			bps: safeNull(live?.bps, 0),
+			totalPoints: calculatedTotalPoints,
+			starts: live?.starts ?? null,
+			expectedGoals: parseNullableFloat(live?.expectedGoals),
+			expectedAssists: parseNullableFloat(live?.expectedAssists),
+			expectedGoalInvolvements: parseNullableFloat(
+				live?.expectedGoalInvolvements,
+			),
+			expectedGoalsConceded: parseNullableFloat(live?.expectedGoalsConceded),
+			inDreamTeam: live?.inDreamTeam ?? null,
+			pickActive: false,
+			autoSub: false,
+			bgw: matchInfo.bgw,
+			dgw: matchInfo.dgw,
+		};
+	});
 
-  // Apply automatic substitutions before building active picks
-  applyAutoSubs(pickList, chip);
+	// Apply automatic substitutions before building active picks
+	applyAutoSubs(pickList, chip);
 
-  const isBenchBoost = chip === 'BENCH_BOOST';
-  const activePicks: ElementEventResultData[] = [];
+	const isBenchBoost = chip === "BENCH_BOOST";
+	const activePicks: ElementEventResultData[] = [];
 
-  for (const pick of pickList) {
-    const isActive = isBenchBoost ? true : pick.multiplier > 0;
-    const autoSub = !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
-    pick.pickActive = isActive;
-    pick.autoSub = autoSub;
-    if (isActive) {
-      activePicks.push(pick);
-    }
-  }
+	for (const pick of pickList) {
+		const isActive = isBenchBoost ? true : pick.multiplier > 0;
+		const autoSub = !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
+		pick.pickActive = isActive;
+		pick.autoSub = autoSub;
+		if (isActive) {
+			activePicks.push(pick);
+		}
+	}
 
-  // Captain selection uses full pickList so vice-captain is found even if
-  // captain was auto-subbed out
-  const captainForScoring = selectCaptainForScoring(pickList);
-  const captainMultiplier = chip === 'TRIPLE_CAPTAIN' ? 3 : 2;
+	// Captain selection uses full pickList so vice-captain is found even if
+	// captain was auto-subbed out
+	const captainForScoring = selectCaptainForScoring(pickList);
+	const captainMultiplier = chip === "TRIPLE_CAPTAIN" ? 3 : 2;
 
-  const captainElementId = captainForScoring?.element;
-  const livePoints = activePicks.reduce((sum, p) => {
-    if (captainElementId !== undefined && p.element === captainElementId) {
-      return sum + p.totalPoints * captainMultiplier;
-    }
-    return sum + p.totalPoints;
-  }, 0);
+	const captainElementId = captainForScoring?.element;
+	const livePoints = activePicks.reduce((sum, p) => {
+		if (captainElementId !== undefined && p.element === captainElementId) {
+			return sum + p.totalPoints * captainMultiplier;
+		}
+		return sum + p.totalPoints;
+	}, 0);
 
-  const liveNetPoints = livePoints - transferCost;
-  // Last overall = entry's overallPoints from entry_infos (previous GW baseline)
-  const lastOverallPoints = entry?.overallPoints ?? 0;
-  const lastOverallRank = entry?.overallRank ?? 0;
-  const lastValue = asScaled(entry?.teamValue ?? null, 10);
-  const liveTotalPoints = lastOverallPoints + liveNetPoints;
+	const liveNetPoints = livePoints - transferCost;
+	// Last overall = entry's overallPoints from entry_infos (previous GW baseline)
+	const lastOverallPoints = entry?.overallPoints ?? 0;
+	const lastOverallRank = entry?.overallRank ?? 0;
+	const lastValue = asScaled(entry?.teamValue ?? null, 10);
+	const liveTotalPoints = lastOverallPoints + liveNetPoints;
 
-  const played = activePicks.filter((p) => p.isPlayed || p.bgw || p.isGwFinished).length;
-  const toPlay = activePicks.filter((p) => !p.isGwStarted && !p.isGwFinished && !p.bgw).length;
+	const played = activePicks.filter(
+		(p) => p.isPlayed || p.bgw || p.isGwFinished,
+	).length;
+	const toPlay = activePicks.filter(
+		(p) => !p.isGwStarted && !p.isGwFinished && !p.bgw,
+	).length;
 
-  const playedCaptain = captainForScoring?.element ?? 0;
-  const captainName = captainForScoring?.webName ?? '';
-  const activeCaptain: ActiveCaptainData = {
-    id: captainForScoring?.element ?? 0,
-    name: captainForScoring?.webName ?? '',
-    points: captainForScoring?.totalPoints ?? 0,
-  };
+	const playedCaptain = captainForScoring?.element ?? 0;
+	const captainName = captainForScoring?.webName ?? "";
+	const activeCaptain: ActiveCaptainData = {
+		id: captainForScoring?.element ?? 0,
+		name: captainForScoring?.webName ?? "",
+		points: captainForScoring?.totalPoints ?? 0,
+	};
 
-  const transfersList: EntryEventTransfersData[] = enrichTransferRows({
-    entryId,
-    eventId,
-    transferRows,
-    playersById,
-    teamsById,
-    liveByPlayer,
-  });
+	const transfersList: EntryEventTransfersData[] = enrichTransferRows({
+		entryId,
+		eventId,
+		transferRows,
+		playersById,
+		teamsById,
+		liveByPlayer,
+	});
 
-  return {
-    rank: 0,
-    event: eventId,
-    entry: entryId,
-    entryName: entry?.entryName ?? '',
-    playerName: entry?.playerName ?? '',
-    region: entry?.region ?? null,
-    startedEvent: safeInt(entry?.startedEvent),
-    overallPoints: safeInt(entry?.overallPoints),
-    overallRank: safeInt(entry?.overallRank),
-    value: asScaled(entry?.teamValue ?? null, 10),
-    bank: asScaled(entry?.bank ?? null, 10),
-    teamValue: asScaled(
-      (entry?.teamValue ?? null) !== null && (entry?.bank ?? null) !== null
-        ? safeInt(entry?.teamValue) - safeInt(entry?.bank)
-        : null,
-      10
-    ),
-    totalTransfers: safeInt(entry?.totalTransfers),
-    lastOverallPoints,
-    lastOverallRank,
-    lastValue,
-    chip,
-    livePoints,
-    transferCost,
-    liveNetPoints,
-    liveTotalPoints,
-    played,
-    toPlay,
-    playedCaptain,
-    captainName,
-    pickList: [...pickList].sort((a, b) => a.position - b.position),
-    transfersList,
-    activeCaptain,
-  };
+	return {
+		rank: 0,
+		event: eventId,
+		entry: entryId,
+		entryName: entry?.entryName ?? "",
+		playerName: entry?.playerName ?? "",
+		region: entry?.region ?? null,
+		startedEvent: safeInt(entry?.startedEvent),
+		overallPoints: safeInt(entry?.overallPoints),
+		overallRank: safeInt(entry?.overallRank),
+		value: asScaled(entry?.teamValue ?? null, 10),
+		bank: asScaled(entry?.bank ?? null, 10),
+		teamValue: asScaled(
+			(entry?.teamValue ?? null) !== null && (entry?.bank ?? null) !== null
+				? safeInt(entry?.teamValue) - safeInt(entry?.bank)
+				: null,
+			10,
+		),
+		totalTransfers: safeInt(entry?.totalTransfers),
+		lastOverallPoints,
+		lastOverallRank,
+		lastValue,
+		chip,
+		livePoints,
+		transferCost,
+		liveNetPoints,
+		liveTotalPoints,
+		played,
+		toPlay,
+		playedCaptain,
+		captainName,
+		pickList: [...pickList].sort((a, b) => a.position - b.position),
+		transfersList,
+		activeCaptain,
+	};
 };
 
 export const entryLiveBatchService = {
-  async calcLivePointsForEntries(
-    context: GraphQLContext,
-    eventId: number,
-    entryIds: number[]
-  ): Promise<BatchLiveCalcResult> {
-    const errors: Array<{ entryId: number; message: string }> = [];
+	async calcLivePointsForEntries(
+		context: GraphQLContext,
+		eventId: number,
+		entryIds: number[],
+		includeLive = true,
+		prefetched?: {
+			liveByPlayer?: Promise<Map<number, LivePerformance>>;
+			fixtures?: Promise<Fixture[]>;
+			teams?: Promise<Team[]>;
+		},
+	): Promise<BatchLiveCalcResult> {
+		const errors: Array<{ entryId: number; message: string }> = [];
 
-    if (!entryIds.length) {
-      return {
-        results: new Map(),
-        errors: [],
-        meta: { eventId, totalEntries: 0, succeededCount: 0, failedCount: 0 },
-      };
-    }
+		if (!entryIds.length) {
+			return {
+				results: new Map(),
+				errors: [],
+				meta: { eventId, totalEntries: 0, succeededCount: 0, failedCount: 0 },
+			};
+		}
 
-    // Phase 1: Load shared data (all from letletme_data Redis hashes)
-    const liveByPlayerMap = await liveRepository.getAllLivePerformances(context, eventId);
-    const [fixtures, teams, playersById] = await Promise.all([
-      fixturesService.getEventFixtures(context, eventId),
-      playersRepository.listTeamsFromRedis(context),
-      playersRepository.getPlayersFromRedis(context),
-    ]);
+		// Phase 1: Load shared data — live, fixtures, teams, and entry data in parallel
+		const [
+			liveByPlayerMap,
+			fixtures,
+			teams,
+			entriesById,
+			picksByEntry,
+			transfersByEntry,
+		] = await Promise.all([
+			prefetched?.liveByPlayer ??
+				(includeLive
+					? liveRepository.getAllLivePerformances(context, eventId)
+					: Promise.resolve(new Map<number, LivePerformance>())),
+			prefetched?.fixtures ??
+				fixturesService.getEventFixtures(context, eventId),
+			prefetched?.teams ?? playersRepository.listTeamsFromRedis(context),
+			// Phase 2 moved here: entry info HMGET
+			entriesService.getEntriesByIdsFromRedis(context, entryIds),
+			// Phase 3 moved here: picks + transfers (MGET cache or SQL)
+			entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
+			entryLiveRepository.getEntryEventTransfersByIds(
+				context,
+				entryIds,
+				eventId,
+			),
+		]);
 
-    const teamsById = buildTeamMapById(teams);
-    const fixturesByTeam = buildFixtureIndex(fixtures);
+		// Collect all unique player IDs from picks and transfers
+		const allPlayerIds = new Set<number>();
+		for (const [, picks] of picksByEntry) {
+			for (const pick of picks.picks) allPlayerIds.add(pick.element);
+		}
+		for (const [, rows] of transfersByEntry) {
+			for (const row of rows) {
+				allPlayerIds.add(row.elementIn);
+				allPlayerIds.add(row.elementOut);
+			}
+		}
 
-    const shared: SharedData = {
-      liveByPlayer: liveByPlayerMap,
-      teamsById,
-      playersById,
-      fixturesByTeam,
-    };
+		// Load only the needed players via HMGET (not HGETALL of all 600+)
+		const playersList = await playersRepository.getPlayersByIds(
+			context,
+			Array.from(allPlayerIds),
+		);
 
-    // Phase 2: Batch load entry info from Redis hash (single HMGET)
-    const entriesById = await entriesService.getEntriesByIdsFromRedis(context, entryIds);
+		const playersById = new Map<number, Player>();
+		for (const p of playersList) {
+			playersById.set(p.id, {
+				id: p.id,
+				webName: p.webName,
+				firstName: p.firstName,
+				secondName: p.secondName,
+				position: p.position as number,
+				teamId: p.teamId,
+				code: p.code,
+				price: p.price,
+				startPrice: p.startPrice,
+				totalPoints: p.totalPoints,
+				selectedByPercent: p.selectedByPercent,
+			});
+		}
 
-    // Phase 3: Batch picks + transfers (2 SQL queries, no Redis)
-    const [picksByEntry, transfersByEntry] = await Promise.all([
-      entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
-      entryLiveRepository.getEntryEventTransfersByIds(context, entryIds, eventId),
-    ]);
+		const teamsById = buildTeamMapById(teams);
+		const fixturesByTeam = buildFixtureIndex(fixtures);
 
-    // Phase 4: Compute per-entry (pure CPU, zero I/O)
-    const results = new Map<number, LiveCalcData>();
+		const shared: SharedData = {
+			liveByPlayer: liveByPlayerMap,
+			teamsById,
+			playersById,
+			fixturesByTeam,
+		};
 
-    for (const entryId of entryIds) {
-      try {
-        const perEntry: PerEntryData = {
-          entryId,
-          entry: entriesById.get(entryId) ?? null,
-          pickEntity: picksByEntry.get(entryId) ?? null,
-          transferRows: transfersByEntry.get(entryId) ?? [],
-        };
+		// Phase 4: Compute per-entry (pure CPU, zero I/O)
+		const results = new Map<number, LiveCalcData>();
 
-        const calcData = computeSingleEntry(entryId, eventId, perEntry, shared);
-        results.set(entryId, calcData);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Computation error';
-        errors.push({ entryId, message });
-      }
-    }
+		for (const entryId of entryIds) {
+			try {
+				const perEntry: PerEntryData = {
+					entryId,
+					entry: entriesById.get(entryId) ?? null,
+					pickEntity: picksByEntry.get(entryId) ?? null,
+					transferRows: transfersByEntry.get(entryId) ?? [],
+				};
 
-    return {
-      results,
-      errors,
-      meta: {
-        eventId,
-        totalEntries: entryIds.length,
-        succeededCount: results.size,
-        failedCount: errors.length,
-      },
-    };
-  },
+				const calcData = computeSingleEntry(entryId, eventId, perEntry, shared);
+				results.set(entryId, calcData);
+			} catch (err) {
+				const message =
+					err instanceof Error ? err.message : "Computation error";
+				errors.push({ entryId, message });
+			}
+		}
+
+		return {
+			results,
+			errors,
+			meta: {
+				eventId,
+				totalEntries: entryIds.length,
+				succeededCount: results.size,
+				failedCount: errors.length,
+			},
+		};
+	},
 };

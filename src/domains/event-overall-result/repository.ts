@@ -1,209 +1,218 @@
-import type { GraphQLContext } from '../../graphql/context';
+import type { GraphQLContext } from "../../graphql/context";
+import { getCurrentSeason } from "../../infra/season";
 
 export type ChipPlay = {
-  chipName: string;
-  numberPlayed: number;
+	chipName: string;
+	numberPlayed: number;
 };
 
 export type TopElementInfo = {
-  element: number;
-  points: number;
+	element: number;
+	points: number;
 };
 
 export type EventResultPlayer = {
-  id: number;
-  webName: string;
+	id: number;
+	webName: string;
 };
 
 export type EventResult = {
-  event: number;
-  averageScore: number;
-  finished: boolean;
-  highestScoringEntry: number;
-  highestScore: number;
-  chipPlays: ChipPlay[];
-  mostSelectedId: number;
-  mostSelectedPlayer: EventResultPlayer | null;
-  mostCaptainedId: number;
-  mostCaptainedPlayer: EventResultPlayer | null;
-  mostTransferredInId: number;
-  mostTransferInPlayer: EventResultPlayer | null;
-  topElementInfo: TopElementInfo;
-  transfersMade: number;
-  mostViceCaptainedId: number;
-  mostViceCaptainedPlayer: EventResultPlayer | null;
+	event: number;
+	averageScore: number;
+	finished: boolean;
+	highestScoringEntry: number;
+	highestScore: number;
+	chipPlays: ChipPlay[];
+	mostSelectedId: number;
+	mostSelectedPlayer: EventResultPlayer | null;
+	mostCaptainedId: number;
+	mostCaptainedPlayer: EventResultPlayer | null;
+	mostTransferredInId: number;
+	mostTransferInPlayer: EventResultPlayer | null;
+	topElementInfo: TopElementInfo;
+	transfersMade: number;
+	mostViceCaptainedId: number;
+	mostViceCaptainedPlayer: EventResultPlayer | null;
 };
 
 export interface EventOverallResultRepository {
-  getEventOverallResult(context: GraphQLContext, season: number): Promise<EventResult[]>;
+	getEventOverallResult(context: GraphQLContext): Promise<EventResult[]>;
 }
 
-function getCacheKey(season: number): string {
-  return `EventOverallResult:${season}`;
-}
+type DbEventRow = {
+	id: number;
+	average_entry_score: number | null;
+	finished: boolean;
+	highest_scoring_entry: number | null;
+	highest_score: number | null;
+	chip_plays: unknown[] | null;
+	most_selected: number | null;
+	most_transferred_in: number | null;
+	top_element: number | null;
+	top_element_info: unknown | null;
+	transfers_made: number | null;
+	most_captained: number | null;
+	most_vice_captained: number | null;
+};
 
-function parseEventResult(rawData: unknown): EventResult | null {
-  if (typeof rawData !== 'object' || rawData === null) {
-    return null;
-  }
+function mapEventResult(row: DbEventRow): EventResult {
+	// Parse chipPlays
+	let chipPlays: ChipPlay[] = [];
+	if (Array.isArray(row.chip_plays)) {
+		chipPlays = row.chip_plays
+			.map((chip: unknown) => {
+				if (typeof chip === "object" && chip !== null) {
+					const chipObj = chip as Record<string, unknown>;
+					return {
+						chipName: String(chipObj.chipName ?? ""),
+						numberPlayed: Number(chipObj.numberPlayed ?? 0),
+					};
+				}
+				return null;
+			})
+			.filter((chip): chip is ChipPlay => chip !== null);
+	}
 
-  const data = rawData as Record<string, unknown>;
+	// Parse topElementInfo
+	let topElementInfo: TopElementInfo = { element: 0, points: 0 };
+	if (
+		typeof row.top_element_info === "object" &&
+		row.top_element_info !== null
+	) {
+		const topElement = row.top_element_info as Record<string, unknown>;
+		topElementInfo = {
+			element: Number(topElement.element ?? 0),
+			points: Number(topElement.points ?? 0),
+		};
+	} else if (typeof row.top_element === "number") {
+		topElementInfo = {
+			element: row.top_element,
+			points: 0,
+		};
+	}
 
-  // Parse chipPlays array
-  let chipPlays: ChipPlay[] = [];
-  if (Array.isArray(data.chipPlays)) {
-    chipPlays = data.chipPlays
-      .map((chip: unknown) => {
-        if (typeof chip === 'object' && chip !== null) {
-          const chipObj = chip as Record<string, unknown>;
-          return {
-            chipName: String(chipObj.chipName ?? ''),
-            numberPlayed: Number(chipObj.numberPlayed ?? 0),
-          };
-        }
-        return null;
-      })
-      .filter((chip): chip is ChipPlay => chip !== null);
-  }
-
-  // Parse topElementInfo
-  let topElementInfo: TopElementInfo = { element: 0, points: 0 };
-  if (typeof data.topElementInfo === 'object' && data.topElementInfo !== null) {
-    const topElement = data.topElementInfo as Record<string, unknown>;
-    topElementInfo = {
-      element: Number(topElement.element ?? 0),
-      points: Number(topElement.points ?? 0),
-    };
-  }
-
-  const parsePlayerObject = (rawPlayer: unknown): EventResultPlayer | null => {
-    if (typeof rawPlayer !== 'object' || rawPlayer === null) {
-      return null;
-    }
-    const player = rawPlayer as Record<string, unknown>;
-    return {
-      id: Number(player.id ?? 0),
-      webName: String(player.webName ?? ''),
-    };
-  };
-
-  const mostSelectedPlayer = parsePlayerObject(data.mostSelectedPlayer);
-  const mostSelectedId = Number(data.mostSelected ?? 0);
-  const mostCaptainedPlayer = parsePlayerObject(data.mostCaptainedPlayer);
-  const mostCaptainedId = Number(data.mostCaptained ?? 0);
-  const mostTransferInPlayer =
-    parsePlayerObject(data.mostTransferInPlayer) ?? parsePlayerObject(data.mostTransferredInPlayer);
-  const mostTransferredInId = Number(data.mostTransferredIn ?? 0);
-  const mostViceCaptainedId = Number(data.mostViceCaptained ?? 0);
-  const mostViceCaptainedPlayer = parsePlayerObject(data.mostViceCaptainedPlayer);
-
-  return {
-    event: Number(data.event ?? 0),
-    averageScore: Number(data.averageScore ?? data.averageEntryScore ?? 0),
-    finished: Boolean(data.finished ?? false),
-    highestScoringEntry: Number(data.highestScoringEntry ?? 0),
-    highestScore: Number(data.highestScore ?? 0),
-    chipPlays,
-    mostSelectedId,
-    mostSelectedPlayer,
-    mostCaptainedId,
-    mostCaptainedPlayer,
-    mostTransferredInId,
-    mostTransferInPlayer,
-    topElementInfo,
-    transfersMade: Number(data.transfersMade ?? 0),
-    mostViceCaptainedId,
-    mostViceCaptainedPlayer,
-  };
+	return {
+		event: row.id,
+		averageScore: row.average_entry_score ?? 0,
+		finished: row.finished,
+		highestScoringEntry: row.highest_scoring_entry ?? 0,
+		highestScore: row.highest_score ?? 0,
+		chipPlays,
+		mostSelectedId: row.most_selected ?? 0,
+		mostSelectedPlayer: null,
+		mostCaptainedId: row.most_captained ?? 0,
+		mostCaptainedPlayer: null,
+		mostTransferredInId: row.most_transferred_in ?? 0,
+		mostTransferInPlayer: null,
+		topElementInfo,
+		transfersMade: row.transfers_made ?? 0,
+		mostViceCaptainedId: row.most_vice_captained ?? 0,
+		mostViceCaptainedPlayer: null,
+	};
 }
 
 export const eventOverallResultRepository: EventOverallResultRepository = {
-  async getEventOverallResult(
-    context: GraphQLContext,
-    season: number
-  ): Promise<EventResult[]> {
-    if (!Number.isFinite(season) || season <= 0) {
-      context.logger.warn({ season }, 'Invalid season value');
-      return [];
-    }
+	async getEventOverallResult(context: GraphQLContext): Promise<EventResult[]> {
+		const season = Number(await getCurrentSeason(context));
+		const cacheKey = `EventOverallResult:${season}`;
+		try {
+			const hashData = await context.redis.hgetall(cacheKey);
 
-    const cacheKey = getCacheKey(season);
-    context.logger.info({ cacheKey, season }, 'Looking for event overall result in Redis');
+			if (Object.keys(hashData).length > 0) {
+				const eventResults: EventResult[] = [];
+				for (const [eventId, jsonValue] of Object.entries(hashData)) {
+					try {
+						const parsed = JSON.parse(jsonValue) as unknown;
+						if (typeof parsed === "object" && parsed !== null) {
+							const data = parsed as Record<string, unknown>;
+							// Convert hash format to EventResult
+							const result: EventResult = {
+								event: Number(data.event ?? eventId),
+								averageScore: Number(
+									data.averageScore ?? data.averageEntryScore ?? 0,
+								),
+								finished: Boolean(data.finished ?? false),
+								highestScoringEntry: Number(data.highestScoringEntry ?? 0),
+								highestScore: Number(data.highestScore ?? 0),
+								chipPlays: (data.chipPlays as ChipPlay[]) ?? [],
+								mostSelectedId: Number(data.mostSelected ?? 0),
+								mostSelectedPlayer: null,
+								mostCaptainedId: Number(data.mostCaptained ?? 0),
+								mostCaptainedPlayer: null,
+								mostTransferredInId: Number(data.mostTransferredIn ?? 0),
+								mostTransferInPlayer: null,
+								topElementInfo: (data.topElementInfo as TopElementInfo) ?? {
+									element: 0,
+									points: 0,
+								},
+								transfersMade: Number(data.transfersMade ?? 0),
+								mostViceCaptainedId: Number(data.mostViceCaptained ?? 0),
+								mostViceCaptainedPlayer: null,
+							};
+							eventResults.push(result);
+						}
+					} catch (error) {
+						context.logger.warn(
+							{ err: error, cacheKey, season, eventId },
+							"Failed to parse hash value as JSON",
+						);
+					}
+				}
+				eventResults.sort((a, b) => a.event - b.event);
+				return eventResults;
+			}
 
-    try {
-      // Check if key exists
-      const keyType = await context.redis.type(cacheKey);
+			const { data, error } = await context.supabase
+				.from("events")
+				.select(
+					"id, average_entry_score, finished, highest_scoring_entry, highest_score, chip_plays, most_selected, most_transferred_in, top_element, top_element_info, transfers_made, most_captained, most_vice_captained",
+				)
+				.order("id", { ascending: true });
 
-      if (keyType === 'none') {
-        context.logger.warn({ cacheKey, season }, 'Event overall result not found in Redis');
-        return [];
-      }
+			if (error) {
+				context.logger.error(
+					{ err: error, season },
+					"Failed to fetch event overall results from DB",
+				);
+				throw new Error("Failed to fetch event overall results");
+			}
 
-      // Get the data from Redis
-      const eventResults: EventResult[] = [];
+			const eventResults =
+				(data as DbEventRow[] | null)?.map(mapEventResult) ?? [];
 
-      if (keyType === 'string') {
-        // Handle string type (JSON)
-        const cached = await context.redis.get(cacheKey);
-        if (!cached) {
-          context.logger.warn({ cacheKey, season }, 'Empty value found in Redis');
-          return [];
-        }
-        try {
-          const parsed = JSON.parse(cached) as unknown;
-          if (Array.isArray(parsed)) {
-            // If it's an array, parse each item
-            for (const item of parsed) {
-              const result = parseEventResult(item);
-              if (result) {
-                eventResults.push(result);
-              }
-            }
-          } else if (typeof parsed === 'object' && parsed !== null) {
-            // If it's an object, convert to array
-            const dataObj = parsed as Record<string, unknown>;
-            for (const value of Object.values(dataObj)) {
-              const result = parseEventResult(value);
-              if (result) {
-                eventResults.push(result);
-              }
-            }
-          }
-        } catch (error) {
-          context.logger.error({ err: error, cacheKey, season }, 'Failed to parse JSON from Redis');
-          return [];
-        }
-      } else if (keyType === 'hash') {
-        // Handle hash type - each hash field value is a JSON string that needs parsing
-        const hashData = await context.redis.hgetall(cacheKey);
+			// Write back to Redis hash (no TTL)
+			if (eventResults.length > 0) {
+				const pipeline = context.redis.pipeline();
+				for (const result of eventResults) {
+					pipeline.hset(
+						cacheKey,
+						String(result.event),
+						JSON.stringify({
+							event: result.event,
+							averageScore: result.averageScore,
+							finished: result.finished,
+							highestScoringEntry: result.highestScoringEntry,
+							highestScore: result.highestScore,
+							chipPlays: result.chipPlays,
+							mostSelected: result.mostSelectedId,
+							mostCaptained: result.mostCaptainedId,
+							mostTransferredIn: result.mostTransferredInId,
+							topElementInfo: result.topElementInfo,
+							transfersMade: result.transfersMade,
+							mostViceCaptained: result.mostViceCaptainedId,
+						}),
+					);
+				}
+				await pipeline.exec();
+			}
 
-        for (const [eventId, jsonValue] of Object.entries(hashData)) {
-          try {
-            const parsed = JSON.parse(jsonValue) as unknown;
-            const result = parseEventResult(parsed);
-            if (result) {
-              eventResults.push(result);
-            } else {
-              context.logger.warn({ cacheKey, season, eventId }, 'Failed to parse event result');
-            }
-          } catch (error) {
-            context.logger.warn({ err: error, cacheKey, season, eventId }, 'Failed to parse hash value as JSON');
-          }
-        }
-
-        // Sort by event number
-        eventResults.sort((a, b) => a.event - b.event);
-      } else {
-        context.logger.error({ cacheKey, season, keyType }, 'Unsupported Redis key type for event overall result');
-        return [];
-      }
-
-      context.logger.info({ cacheKey, season, eventCount: eventResults.length }, 'Successfully retrieved event overall result from Redis');
-
-      return eventResults;
-    } catch (error) {
-      context.logger.error({ err: error, cacheKey: getCacheKey(season), season }, 'Failed to get event overall result from Redis');
-      return [];
-    }
-  },
+			return eventResults;
+		} catch (error) {
+			context.logger.error(
+				{ err: error, cacheKey: `EventOverallResult:${season}`, season },
+				"Failed to get event overall result",
+			);
+			throw new Error("Failed to get event overall result");
+		}
+	},
 };

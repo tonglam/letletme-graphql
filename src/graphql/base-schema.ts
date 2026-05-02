@@ -14,10 +14,10 @@ export const baseTypeDefs = `#graphql
 `;
 
 export const baseResolvers = {
-  Query: {
-    _empty: (): string | null => null,
-  },
-  Mutation: {
-    _empty: (): string | null => null,
-  },
+	Query: {
+		_empty: (): string | null => null,
+	},
+	Mutation: {
+		_empty: (): string | null => null,
+	},
 };

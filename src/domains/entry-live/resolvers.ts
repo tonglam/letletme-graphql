@@ -1,97 +1,148 @@
-import type { GraphQLContext } from '../../graphql/context';
-import type { Entry } from '../entries/repository';
-import { entriesService } from '../entries/service';
-import type { Event } from '../events/repository';
-import { eventsService } from '../events/service';
-import type { LiveCalcData } from './calc-service';
-import { entryLiveCalcService } from './calc-service';
-import { entryLiveBatchService } from './batch-service';
-import type { EntryLive as EntryLiveModel } from './service';
-import { entryLiveService } from './service';
-import { tournamentsService } from '../tournaments/service';
+import type { GraphQLContext } from "../../graphql/context";
+import type { Entry } from "../entries/repository";
+import { entriesService } from "../entries/service";
+import type { Event } from "../events/repository";
+import { eventsService } from "../events/service";
+import { fixturesService } from "../fixtures/service";
+import { liveRepository } from "../live/repository";
+import { playersRepository } from "../players/repository";
+import { tournamentsService } from "../tournaments/service";
+import { entryLiveBatchService } from "./batch-service";
+import type { LiveCalcData } from "./calc-service";
+import { entryLiveCalcService } from "./calc-service";
+import type { EntryLive as EntryLiveModel } from "./service";
+import { entryLiveService } from "./service";
 
 type EntryLiveArgs = {
-  entryId: number;
-  eventId: number;
+	entryId: number;
+	eventId: number;
 };
 
 type CalcLivePointsByEntryArgs = {
-  eventId: number;
-  entryId: number;
+	eventId: number;
+	entryId: number;
+	includeLive?: boolean | null;
 };
 
 type CalcLivePointsForEntriesArgs = {
-  eventId: number;
-  entryIds: number[];
+	eventId: number;
+	entryIds: number[];
+	includeLive?: boolean | null;
 };
 
 type CalcLivePointsForTournamentArgs = {
-  eventId: number;
-  tournamentId: number;
+	eventId: number;
+	tournamentId: number;
+	includeLive?: boolean | null;
 };
 
 export const entryLiveResolvers = {
-  Query: {
-    entryLive: async (
-      _parent: unknown,
-      args: EntryLiveArgs,
-      context: GraphQLContext,
-    ): Promise<EntryLiveModel | null> =>
-      entryLiveService.getEntryLive(context, args.entryId, args.eventId),
+	Query: {
+		entryLive: async (
+			_parent: unknown,
+			args: EntryLiveArgs,
+			context: GraphQLContext,
+		): Promise<EntryLiveModel | null> =>
+			entryLiveService.getEntryLive(context, args.entryId, args.eventId),
 
-    calcLivePointsByEntry: async (
-      _parent: unknown,
-      args: CalcLivePointsByEntryArgs,
-      context: GraphQLContext
-    ): Promise<LiveCalcData> =>
-      entryLiveCalcService.calcLivePointsByEntry(context, args.eventId, args.entryId),
+		calcLivePointsByEntry: async (
+			_parent: unknown,
+			args: CalcLivePointsByEntryArgs,
+			context: GraphQLContext,
+		): Promise<LiveCalcData> =>
+			entryLiveCalcService.calcLivePointsByEntry(
+				context,
+				args.eventId,
+				args.entryId,
+				args.includeLive ?? true,
+			),
 
-    calcLivePointsForEntries: async (
-      _parent: unknown,
-      args: CalcLivePointsForEntriesArgs,
-      context: GraphQLContext
-    ): Promise<{ results: LiveCalcData[]; errors: Array<{ entryId: number; message: string }>; meta: { eventId: number; totalEntries: number; succeededCount: number; failedCount: number } }> => {
-      const result = await entryLiveBatchService.calcLivePointsForEntries(
-        context,
-        args.eventId,
-        args.entryIds,
-      );
-      return {
-        results: Array.from(result.results.values()),
-        errors: result.errors,
-        meta: result.meta,
-      };
-    },
+		calcLivePointsForEntries: async (
+			_parent: unknown,
+			args: CalcLivePointsForEntriesArgs,
+			context: GraphQLContext,
+		): Promise<{
+			results: LiveCalcData[];
+			errors: Array<{ entryId: number; message: string }>;
+			meta: {
+				eventId: number;
+				totalEntries: number;
+				succeededCount: number;
+				failedCount: number;
+			};
+		}> => {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(
+				context,
+				args.eventId,
+				args.entryIds,
+				args.includeLive ?? true,
+			);
+			return {
+				results: Array.from(result.results.values()),
+				errors: result.errors,
+				meta: result.meta,
+			};
+		},
 
-    calcLivePointsForTournament: async (
-      _parent: unknown,
-      args: CalcLivePointsForTournamentArgs,
-      context: GraphQLContext
-    ): Promise<{ results: LiveCalcData[]; errors: Array<{ entryId: number; message: string }>; meta: { eventId: number; totalEntries: number; succeededCount: number; failedCount: number } }> => {
-      const entryIds = await tournamentsService.getTournamentEntryIds(context, args.tournamentId);
-      const result = await entryLiveBatchService.calcLivePointsForEntries(
-        context,
-        args.eventId,
-        entryIds,
-      );
-      return {
-        results: Array.from(result.results.values()),
-        errors: result.errors,
-        meta: result.meta,
-      };
-    },
-  },
-  EntryLive: {
-    entry: async (
-      parent: EntryLiveModel,
-      _args: Record<string, never>,
-      context: GraphQLContext,
-    ): Promise<Entry | null> => entriesService.getEntryById(context, parent.entry.id),
-    event: async (
-      parent: EntryLiveModel,
-      _args: Record<string, never>,
-      context: GraphQLContext,
-    ): Promise<Event | null> => eventsService.getEventById(context, parent.event.id),
-  },
+		calcLivePointsForTournament: async (
+			_parent: unknown,
+			args: CalcLivePointsForTournamentArgs,
+			context: GraphQLContext,
+		): Promise<{
+			results: LiveCalcData[];
+			errors: Array<{ entryId: number; message: string }>;
+			meta: {
+				eventId: number;
+				totalEntries: number;
+				succeededCount: number;
+				failedCount: number;
+			};
+		}> => {
+			const includeLive = args.includeLive ?? true;
+			// Start shared-data fetches in parallel with the entry-IDs lookup to hide one RTT
+			const liveByPlayerPromise = includeLive
+				? liveRepository.getAllLivePerformances(context, args.eventId)
+				: Promise.resolve(new Map());
+			const fixturesPromise = fixturesService.getEventFixtures(
+				context,
+				args.eventId,
+			);
+			const teamsPromise = playersRepository.listTeamsFromRedis(context);
+
+			const entryIds = await tournamentsService.getTournamentEntryIds(
+				context,
+				args.tournamentId,
+			);
+			const result = await entryLiveBatchService.calcLivePointsForEntries(
+				context,
+				args.eventId,
+				entryIds,
+				includeLive,
+				{
+					liveByPlayer: liveByPlayerPromise,
+					fixtures: fixturesPromise,
+					teams: teamsPromise,
+				},
+			);
+			return {
+				results: Array.from(result.results.values()),
+				errors: result.errors,
+				meta: result.meta,
+			};
+		},
+	},
+	EntryLive: {
+		entry: async (
+			parent: EntryLiveModel,
+			_args: Record<string, never>,
+			context: GraphQLContext,
+		): Promise<Entry | null> =>
+			entriesService.getEntryById(context, parent.entry.id),
+		event: async (
+			parent: EntryLiveModel,
+			_args: Record<string, never>,
+			context: GraphQLContext,
+		): Promise<Event | null> =>
+			eventsService.getEventById(context, parent.event.id),
+	},
 };
-

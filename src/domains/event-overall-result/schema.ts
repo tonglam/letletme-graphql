@@ -34,6 +34,6 @@ export const eventOverallResultTypeDefs = /* GraphQL */ `
   }
 
   extend type Query {
-    eventOverallResult(season: Int!): [EventResult!]!
+    eventOverallResult: [EventResult!]!
   }
 `;

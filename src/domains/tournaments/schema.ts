@@ -92,6 +92,7 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 
   extend type Query {
     entryTournaments(entryId: Int!): [TournamentInfo!]!
+    tournamentEntryIds(tournamentId: Int!): [Int!]!
     tournamentEventResults(tournamentId: Int!, eventId: Int!): [TournamentEventResult!]!
     tournamentEntryRankingSummary(
       tournamentId: Int!
