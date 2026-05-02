@@ -519,10 +519,11 @@ export const liveMatchesService = {
 				redisBuckets.playing.length > 0 || redisBuckets.finished.length > 0;
 
 			if (needsLiveData) {
-				const livePerformances = await liveRepository.getLiveScores(
+				const livePerformancesMap = await liveRepository.getAllLivePerformances(
 					context,
 					currentEventId,
 				);
+				const livePerformances = Array.from(livePerformancesMap.values());
 
 				const relevantTeamIds = new Set<number>();
 				for (const fixture of [

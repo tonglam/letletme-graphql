@@ -1,4 +1,6 @@
+import type { GraphQLResolveInfo } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
+import { parentSelectionRequestsField } from "../../graphql/selection-set";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
 import type { Player } from "../players/repository";
@@ -21,6 +23,11 @@ const getPlayerByIdMemoized = async (
 	context: GraphQLContext,
 	playerId: number,
 ): Promise<Player | null> => {
+	const bulk = context.playersByIdPreload;
+	if (bulk?.has(playerId)) {
+		return bulk.get(playerId) ?? null;
+	}
+
 	let memo = playersMemo.get(context);
 	if (!memo) {
 		memo = new Map();
@@ -88,12 +95,35 @@ export const liveResolvers = {
 			_parent: unknown,
 			args: LiveScoresArgs,
 			context: GraphQLContext,
-		): Promise<LivePerformance[]> =>
-			liveService.getLiveScores(
+			info: GraphQLResolveInfo,
+		): Promise<LivePerformance[]> => {
+			const scores = await liveService.getLiveScores(
 				context,
 				args.eventId ?? undefined,
 				args.filter ?? undefined,
-			),
+			);
+
+			if (scores.length > 0 && parentSelectionRequestsField(info, "player")) {
+				const ids = [
+					...new Set(
+						scores
+							.map((s) => s.playerId)
+							.filter((id) => Number.isFinite(id) && id > 0),
+					),
+				];
+				const players = await playersService.getPlayersByIds(context, ids);
+				const preload = new Map<number, Player | null>();
+				for (const id of ids) {
+					preload.set(id, null);
+				}
+				for (const p of players) {
+					preload.set(p.id, p);
+				}
+				context.playersByIdPreload = preload;
+			}
+
+			return scores;
+		},
 
 		playerLive: async (
 			_parent: unknown,

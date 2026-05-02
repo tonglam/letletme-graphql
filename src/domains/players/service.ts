@@ -21,6 +21,10 @@ export const playersService = {
 		return playersRepository.getPlayerByIdForEvent(context, id, eventId);
 	},
 
+	getPlayersByIds(context: GraphQLContext, ids: number[]): Promise<Player[]> {
+		return playersRepository.getPlayersByIds(context, ids);
+	},
+
 	getPlayersByIdsForEvent(
 		context: GraphQLContext,
 		ids: number[],
