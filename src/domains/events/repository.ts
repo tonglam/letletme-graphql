@@ -322,6 +322,31 @@ export const eventsRepository: EventsRepository = {
 		const safeLimit = clampLimit(limit);
 		const safeOffset = Math.max(Number.isFinite(offset) ? offset : 0, 0);
 
+		// For isCurrent/isNext filters, derive the answer from event:current rather than
+		// trusting the flags stored in Event:{season}. The sync writes event:current first
+		// and updates the hash flags separately, so the hash can lag behind.
+		if (normalizedFilter?.isCurrent === true || normalizedFilter?.isNext === true) {
+			const currentEvent = await getCurrentEventFromRedis(context);
+			if (currentEvent) {
+				const season = await getCurrentSeason(context);
+
+				if (normalizedFilter.isCurrent === true) {
+					const raw = await context.redis.hget(`Event:${season}`, String(currentEvent.id));
+					const event = raw ? parseEventFromRedisJson(raw) : null;
+					if (event) return [{ ...event, isCurrent: true, isNext: false }];
+				}
+
+				if (normalizedFilter.isNext === true) {
+					const nextId = currentEvent.id + 1;
+					const raw = await context.redis.hget(`Event:${season}`, String(nextId));
+					const event = raw ? parseEventFromRedisJson(raw) : null;
+					if (event) return [{ ...event, isNext: true, isCurrent: false }];
+					return [];
+				}
+			}
+			// Fall through to hash scan if event:current is unavailable
+		}
+
 		// Try Redis hash first — Event:{season} is maintained by external sync
 		const season = await getCurrentSeason(context);
 		const rawList = await context.redis.hvals(`Event:${season}`);
