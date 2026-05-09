@@ -70,6 +70,7 @@ const publicFields = new Set([
 	"entry",
 	"createWechatApiSession",
 	"identifyWechatUser",
+	"calcLivePointsByEntry",
 ]);
 
 const websiteOnlyFields = new Set(["myDevices", "revokeDevice", "bindFplEntry"]);
@@ -79,7 +80,6 @@ const ownEntryArgFields = new Map([
 	["entryEventResult", "entryId"],
 	["entryTransferHistory", "entryId"],
 	["entryLive", "entryId"],
-	["calcLivePointsByEntry", "entryId"],
 	["entryLeagues", "entryId"],
 	["entryH2HMatchResults", "entryId"],
 	["entryTournaments", "entryId"],
