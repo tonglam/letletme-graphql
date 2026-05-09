@@ -96,31 +96,77 @@ describe("calcElementLivePoints", () => {
 		expect(calcElementLivePoints(1, undefined)).toBe(0);
 	});
 
-	it("returns FPL totalPoints directly", () => {
-		const live = makeLive({ totalPoints: 7 });
-		expect(calcElementLivePoints(3, live)).toBe(7);
+	it("calculates midfielder points from current live stats", () => {
+		const live = makeLive({
+			totalPoints: 0,
+			minutes: 90,
+			goalsScored: 1,
+			assists: 1,
+			cleanSheets: 1,
+			bonus: 2,
+		});
+
+		expect(calcElementLivePoints(3, live)).toBe(13);
 	});
 
-	it("returns 0 when totalPoints is 0", () => {
-		const live = makeLive({ totalPoints: 0 });
+	it("does not use stale FPL totalPoints", () => {
+		const live = makeLive({
+			totalPoints: 99,
+			minutes: 90,
+			goalsScored: 0,
+			assists: 0,
+			cleanSheets: 0,
+			bonus: 0,
+		});
+
+		expect(calcElementLivePoints(2, live)).toBe(2);
+	});
+
+	it("returns 0 when no scoring stats are present", () => {
+		const live = makeLive({ totalPoints: 9, minutes: 0 });
 		expect(calcElementLivePoints(2, live)).toBe(0);
 	});
 
-	it("handles negative totalPoints", () => {
-		const live = makeLive({ totalPoints: -3 });
-		expect(calcElementLivePoints(2, live)).toBe(-3);
+	it("calculates defender clean sheet, goals conceded, cards, and defensive contribution", () => {
+		const live = makeLive({
+			totalPoints: 0,
+			minutes: 90,
+			cleanSheets: 1,
+			goalsConceded: 2,
+			yellowCards: 1,
+			defensiveContribution: 10,
+		});
+
+		expect(calcElementLivePoints(2, live)).toBe(6);
 	});
 
-	it("returns totalPoints regardless of position type", () => {
-		for (const elementType of [1, 2, 3, 4]) {
-			const live = makeLive({ totalPoints: 5 });
-			expect(calcElementLivePoints(elementType, live)).toBe(5);
-		}
+	it("calculates goalkeeper save and penalty points", () => {
+		const live = makeLive({
+			totalPoints: 0,
+			minutes: 90,
+			cleanSheets: 1,
+			saves: 7,
+			penaltiesSaved: 1,
+			bonus: 3,
+		});
+
+		expect(calcElementLivePoints(1, live)).toBe(16);
 	});
 
-	it("does not double-count for DGW players", () => {
-		const live = makeLive({ totalPoints: 8, minutes: 180 });
-		expect(calcElementLivePoints(4, live)).toBe(8);
+	it("calculates forward attacking and negative points", () => {
+		const live = makeLive({
+			totalPoints: 0,
+			minutes: 45,
+			goalsScored: 1,
+			assists: 1,
+			ownGoals: 1,
+			penaltiesMissed: 1,
+			redCards: 1,
+			bonus: 1,
+			defensiveContribution: 12,
+		});
+
+		expect(calcElementLivePoints(4, live)).toBe(4);
 	});
 });
 

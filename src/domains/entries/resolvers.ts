@@ -54,6 +54,7 @@ type EntryEventResultArgs = {
 
 type EntryTransferHistoryArgs = {
 	entryId: number;
+	live: boolean;
 };
 
 type EntryHistoryPayload = {
@@ -140,7 +141,7 @@ export const entriesResolvers = {
 			args: EntryTransferHistoryArgs,
 			context: GraphQLContext,
 		): Promise<EntryGameweekTransfers[]> =>
-			entriesService.getEntryTransferHistory(context, args.entryId),
+			entriesService.getEntryTransferHistory(context, args.entryId, args.live),
 	},
 	EntryEventResult: {
 		entry: async (

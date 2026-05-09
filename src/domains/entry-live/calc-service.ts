@@ -307,22 +307,89 @@ const elementTypeName = (player: Player | null): string => {
 	}
 };
 
+const goalsScoredPoints = (elementType: number, goals: number): number => {
+	if (goals <= 0) return 0;
+	if (elementType === 1 || elementType === 2) return goals * 6;
+	if (elementType === 3) return goals * 5;
+	if (elementType === 4) return goals * 4;
+	return 0;
+};
+
+const cleanSheetPoints = (
+	elementType: number,
+	minutes: number,
+	cleanSheets: number,
+): number => {
+	if (minutes < 60 || cleanSheets <= 0) return 0;
+	if (elementType === 1 || elementType === 2) return cleanSheets * 4;
+	if (elementType === 3) return cleanSheets;
+	return 0;
+};
+
+const goalsConcededPoints = (
+	elementType: number,
+	goalsConceded: number,
+): number => {
+	if (goalsConceded < 2) return 0;
+	if (elementType !== 1 && elementType !== 2) return 0;
+	return -Math.floor(goalsConceded / 2);
+};
+
+const defensiveContributionPoints = (
+	elementType: number,
+	defensiveContribution: number,
+): number => {
+	if (elementType === 2 && defensiveContribution >= 10) return 2;
+	if ((elementType === 3 || elementType === 4) && defensiveContribution >= 12) {
+		return 2;
+	}
+	return 0;
+};
+
 /**
- * Calculate total live points for an element.
+ * Calculate total live points for an element from current live stats.
  *
- * Returns FPL's totalPoints directly — it already includes all scoring
- * components (playing points, goals, assists, clean sheets, bonus, DC, etc.)
- * and is correct for both single-game and DGW weeks.
+ * FPL's `stats.total_points` can lag behind stat/bonus updates during live
+ * matches, so live views calculate the total from the individual fields we
+ * receive instead of trusting that precomputed value.
  */
 export const calcElementLivePoints = (
-	_elementType: number,
+	elementType: number,
 	live: LivePerformance | undefined,
 ): number => {
 	if (!live) {
 		return 0;
 	}
 
-	return live.totalPoints ?? 0;
+	const minutes = safeInt(live.minutes);
+	const goalsScored = safeInt(live.goalsScored);
+	const assists = safeInt(live.assists);
+	const cleanSheets = safeInt(live.cleanSheets);
+	const goalsConceded = safeInt(live.goalsConceded);
+	const ownGoals = safeInt(live.ownGoals);
+	const penaltiesSaved = safeInt(live.penaltiesSaved);
+	const penaltiesMissed = safeInt(live.penaltiesMissed);
+	const yellowCards = safeInt(live.yellowCards);
+	const redCards = safeInt(live.redCards);
+	const saves = safeInt(live.saves);
+	const bonus = safeInt(live.bonus);
+	const defensiveContribution = safeInt(live.defensiveContribution);
+
+	return (
+		(minutes >= 60 ? 2 : minutes > 0 ? 1 : 0) +
+		goalsScoredPoints(elementType, goalsScored) +
+		assists * 3 +
+		cleanSheetPoints(elementType, minutes, cleanSheets) +
+		goalsConcededPoints(elementType, goalsConceded) +
+		ownGoals * -2 +
+		penaltiesSaved * 5 +
+		penaltiesMissed * -2 +
+		yellowCards * -1 +
+		redCards * -3 +
+		Math.floor(saves / 3) +
+		bonus +
+		defensiveContributionPoints(elementType, defensiveContribution)
+	);
 };
 
 /**

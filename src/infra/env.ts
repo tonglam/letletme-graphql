@@ -11,6 +11,9 @@ type EnvKey =
 	| "JWT_SECRET"
 	| "JWT_ACCESS_EXPIRY"
 	| "JWT_REFRESH_EXPIRY"
+	| "BACKEND_PROXY_SECRET"
+	| "GRAPHQL_AUTH_MODE"
+	| "METRICS_TOKEN"
 	| "GOOGLE_CLIENT_ID"
 	| "GOOGLE_CLIENT_SECRET"
 	| "APPLE_CLIENT_ID"
@@ -19,7 +22,8 @@ type EnvKey =
 	| "CORS_ORIGIN"
 	| "CORS_CREDENTIALS"
 	| "WECHAT_APPID"
-	| "WECHAT_APPSECRET";
+	| "WECHAT_APPSECRET"
+	| "WECHAT_API_SESSION_TTL_SECONDS";
 
 const readEnv = (key: EnvKey): string | undefined => {
 	const value = Bun.env[key];
@@ -64,6 +68,9 @@ export const env = {
 	JWT_SECRET: readEnv("JWT_SECRET") ?? "dev-secret-change-in-production",
 	JWT_ACCESS_EXPIRY: readEnv("JWT_ACCESS_EXPIRY") ?? "15m",
 	JWT_REFRESH_EXPIRY: readEnv("JWT_REFRESH_EXPIRY") ?? "7d",
+	BACKEND_PROXY_SECRET: readEnv("BACKEND_PROXY_SECRET") ?? "",
+	GRAPHQL_AUTH_MODE: readEnv("GRAPHQL_AUTH_MODE") ?? "enforce",
+	METRICS_TOKEN: readEnv("METRICS_TOKEN") ?? "",
 
 	// OAuth Providers (optional)
 	GOOGLE_CLIENT_ID: readEnv("GOOGLE_CLIENT_ID") ?? "",
@@ -79,4 +86,8 @@ export const env = {
 	// WeChat Mini Program
 	WECHAT_APPID: readEnv("WECHAT_APPID") ?? "",
 	WECHAT_APPSECRET: readEnv("WECHAT_APPSECRET") ?? "",
+	WECHAT_API_SESSION_TTL_SECONDS: readNumber(
+		"WECHAT_API_SESSION_TTL_SECONDS",
+		60 * 60 * 24 * 30,
+	),
 } as const;

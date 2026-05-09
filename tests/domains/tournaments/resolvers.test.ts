@@ -7,6 +7,7 @@ import { playersService } from "../../../src/domains/players/service";
 import {
 	GroupMode,
 	KnockoutMode,
+	type TournamentBattleGroupResult,
 	type TournamentEventResult,
 	TournamentMode,
 	TournamentState,
@@ -19,6 +20,7 @@ import {
 	tournamentStateToEnum,
 	tournamentsResolvers,
 } from "../../../src/domains/tournaments/resolvers";
+import { tournamentsService } from "../../../src/domains/tournaments/service";
 import type { GraphQLContext } from "../../../src/graphql/context";
 
 describe("tournaments resolver enum mappers", () => {
@@ -149,6 +151,33 @@ describe("TournamentEventResult resolvers", () => {
 		}
 	});
 
+	it("resolves event through eventsService for TournamentBattleGroupResult", async () => {
+		const original = eventsService.getEventById;
+		const context = {} as unknown as GraphQLContext;
+		const event = { id: 15, name: "GW 15" } as Event;
+
+		eventsService.getEventById = async (
+			inputContext: GraphQLContext,
+			eventId: number,
+		): Promise<Event | null> => {
+			expect(inputContext).toBe(context);
+			expect(eventId).toBe(15);
+			return event;
+		};
+
+		try {
+			const result =
+				await tournamentsResolvers.TournamentBattleGroupResult.event(
+					{ tournament: {} as never, eventId: 15 } as unknown as TournamentBattleGroupResult,
+					{},
+					context,
+				);
+			expect(result).toBe(event);
+		} finally {
+			eventsService.getEventById = original;
+		}
+	});
+
 	it("resolves captain through playersService", async () => {
 		const original = playersService.getPlayerById;
 		const context = {} as unknown as GraphQLContext;
@@ -189,5 +218,51 @@ describe("TournamentEventResult resolvers", () => {
 		} finally {
 			playersService.getPlayerById = original;
 		}
+	});
+});
+
+describe("tournamentBattleGroupResults query resolver", () => {
+	it("delegates to tournamentsService with correct args", async () => {
+		const original = tournamentsService.getTournamentBattleGroupResults;
+		const context = {} as unknown as GraphQLContext;
+		const expected: TournamentBattleGroupResult[] = [];
+
+		let capturedTournamentId = -1;
+		let capturedEventId = -1;
+		tournamentsService.getTournamentBattleGroupResults = async (
+			inputContext: GraphQLContext,
+			tournamentId: number,
+			eventId: number,
+		) => {
+			expect(inputContext).toBe(context);
+			capturedTournamentId = tournamentId;
+			capturedEventId = eventId;
+			return expected;
+		};
+
+		try {
+			const result =
+				await tournamentsResolvers.Query.tournamentBattleGroupResults(
+					undefined,
+					{ tournamentId: 7, eventId: 15 },
+					context,
+				);
+			expect(capturedTournamentId).toBe(7);
+			expect(capturedEventId).toBe(15);
+			expect(result).toBe(expected);
+		} finally {
+			tournamentsService.getTournamentBattleGroupResults = original;
+		}
+	});
+
+	it("returns tournament pass-through from TournamentBattleGroupResult resolver", () => {
+		const tournamentStub = { id: 7 } as never;
+		const parent = {
+			tournament: tournamentStub,
+			eventId: 15,
+		} as unknown as TournamentBattleGroupResult;
+		expect(
+			tournamentsResolvers.TournamentBattleGroupResult.tournament(parent),
+		).toBe(tournamentStub);
 	});
 });

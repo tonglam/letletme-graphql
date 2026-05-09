@@ -70,7 +70,8 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
     Query live matches grouped by play status.
 
     When upcoming is false (default), returns only current event matches.
-    When upcoming is true, returns both current event matches and next event fixtures.
+    Deprecated: upcoming true returns both current event matches and next event fixtures.
+    New clients should query current live matches and eventFixtures separately.
     """
     liveMatches(upcoming: Boolean = false): LiveMatches!
   }

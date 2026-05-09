@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { LeagueType } from "../../../src/domains/leagues/repository";
 import {
+	type TournamentBattleGroupResult,
 	type TournamentEntryRankingSummary,
 	type TournamentEventResult,
 	TournamentMode,
@@ -203,6 +204,87 @@ describe("tournamentsService.getTournamentEntryRankingSummary", () => {
 			expect(result).toEqual(expected);
 		} finally {
 			tournamentsRepository.getTournamentEntryRankingSummary = original;
+		}
+	});
+});
+
+describe("tournamentsService.getTournamentBattleGroupResults", () => {
+	it("delegates to tournamentsRepository with the same args", async () => {
+		const original = tournamentsRepository.getTournamentBattleGroupResults;
+		const context = {} as unknown as GraphQLContext;
+		const expected: TournamentBattleGroupResult[] = [
+			{
+				tournament: {
+					id: 7,
+					name: "H2H League",
+					creator: "tong",
+					adminEntryId: 100,
+					leagueId: 24221,
+					leagueType: LeagueType.H2H,
+					totalTeamNum: 16,
+					tournamentMode: TournamentMode.NORMAL,
+					groupMode: null,
+					groupTeamNum: null,
+					groupNum: null,
+					groupStartedEventId: null,
+					groupEndedEventId: null,
+					groupAutoAverages: false,
+					groupRounds: null,
+					groupPlayAgainstNum: null,
+					groupQualifyNum: null,
+					knockoutMode: null,
+					knockoutTeamNum: null,
+					knockoutRounds: null,
+					knockoutEventNum: null,
+					knockoutStartedEventId: null,
+					knockoutEndedEventId: null,
+					knockoutPlayAgainstNum: null,
+					state: TournamentState.ACTIVE,
+					createdAt: "2026-04-21T00:00:00.000Z",
+					updatedAt: "2026-04-21T00:00:00.000Z",
+				},
+				matchId: 501,
+				groupId: 3,
+				eventId: 15,
+				homeEntryId: 1001,
+				homeEntryName: "Home Team FC",
+				homePlayerName: "Alice",
+				homeNetPoints: 72,
+				homeRank: 1,
+				homeMatchPoints: 3,
+				awayEntryId: 2002,
+				awayEntryName: "Away Side",
+				awayPlayerName: "Bob",
+				awayNetPoints: 65,
+				awayRank: 2,
+				awayMatchPoints: 0,
+			},
+		];
+
+		let capturedTournamentId = -1;
+		let capturedEventId = -1;
+		tournamentsRepository.getTournamentBattleGroupResults = async (
+			inputContext: GraphQLContext,
+			tournamentId: number,
+			eventId: number,
+		): Promise<TournamentBattleGroupResult[]> => {
+			expect(inputContext).toBe(context);
+			capturedTournamentId = tournamentId;
+			capturedEventId = eventId;
+			return expected;
+		};
+
+		try {
+			const result = await tournamentsService.getTournamentBattleGroupResults(
+				context,
+				7,
+				15,
+			);
+			expect(capturedTournamentId).toBe(7);
+			expect(capturedEventId).toBe(15);
+			expect(result).toEqual(expected);
+		} finally {
+			tournamentsRepository.getTournamentBattleGroupResults = original;
 		}
 	});
 });

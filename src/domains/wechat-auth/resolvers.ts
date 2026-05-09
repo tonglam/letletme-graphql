@@ -1,8 +1,19 @@
 import type { GraphQLContext } from "../../graphql/context";
+import {
+	createWechatApiSession,
+	type ApiSession,
+} from "../../infra/principal";
 import { bindFplEntry, identifyWechatUser } from "./service";
 
 export const wechatAuthResolvers = {
 	Mutation: {
+		createWechatApiSession: (
+			_parent: unknown,
+			args: { code: string; fplEntryId?: number | null },
+			_context: GraphQLContext,
+		): Promise<ApiSession> =>
+			createWechatApiSession(args.code, args.fplEntryId),
+
 		identifyWechatUser: (
 			_parent: unknown,
 			args: { code: string; fplEntryId?: number | null },

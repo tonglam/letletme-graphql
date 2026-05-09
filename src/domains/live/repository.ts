@@ -137,9 +137,6 @@ const redisKey = {
     `PlayerStatsSelected:${season}:${eventId}`,
 } as const;
 
-/** GraphQL `liveScores`: `HGETALL EventLive:2526:{eventId}` only (no layered cache / DB). */
-const LIVE_SCORES_QUERY_EVENT_LIVE_SEASON = '2526';
-
 const mapLivePerformance = (row: DbLiveRow): LivePerformance => ({
   eventId: row.event_id,
   playerId: row.element_id,
@@ -860,20 +857,7 @@ export const liveRepository: LiveRepository = {
       return [];
     }
 
-    const hashKey = redisKey.eventLive(LIVE_SCORES_QUERY_EVENT_LIVE_SEASON, targetEventId);
-
-    let hashEntries: Record<string, string>;
-    try {
-      hashEntries = await context.redis.hgetall(hashKey);
-    } catch (error) {
-      context.logger.warn(
-        { err: error, hashKey },
-        'Failed to read EventLive hash for liveScores query'
-      );
-      return [];
-    }
-
-    const performances = parseEventLiveHashEntries(hashEntries);
+    const performances = await this.getAllLivePerformances(context, targetEventId);
     return applyLiveScoresFilter(Array.from(performances.values()), filter);
   },
 

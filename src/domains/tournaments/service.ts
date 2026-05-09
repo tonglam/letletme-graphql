@@ -1,5 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type {
+	EntryH2HMatchResult,
+	TournamentBattleGroupResult,
 	TournamentEntryRankingSummary,
 	TournamentEventResult,
 	TournamentInfo,
@@ -45,5 +47,24 @@ export const tournamentsService = {
 			eventId,
 			entryId,
 		);
+	},
+
+	getTournamentBattleGroupResults(
+		context: GraphQLContext,
+		tournamentId: number,
+		eventId: number,
+	): Promise<TournamentBattleGroupResult[]> {
+		return tournamentsRepository.getTournamentBattleGroupResults(
+			context,
+			tournamentId,
+			eventId,
+		);
+	},
+
+	getEntryH2HMatchResults(
+		context: GraphQLContext,
+		entryId: number,
+	): Promise<EntryH2HMatchResult[]> {
+		return tournamentsRepository.getEntryH2HMatchResults(context, entryId);
 	},
 };

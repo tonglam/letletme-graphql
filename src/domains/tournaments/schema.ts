@@ -90,6 +90,58 @@ export const tournamentsTypeDefs = /* GraphQL */ `
     tournamentAutoSubRank: Int
   }
 
+  type TournamentBattleGroupResult {
+    tournament: TournamentInfo!
+    event: Event
+    matchId: Int!
+    groupId: Int!
+    homeEntryId: Int!
+    homeEntryName: String
+    homePlayerName: String
+    homeNetPoints: Int
+    """Rank within the H2H battle group (tiebroken by FPL overall rank). Not global FPL rank."""
+    homeRank: Int
+    """H2H match points: 3 = win, 1 = draw, 0 = loss. Sums to 3 with awayMatchPoints when both non-null."""
+    homeMatchPoints: Int
+    awayEntryId: Int!
+    awayEntryName: String
+    awayPlayerName: String
+    awayNetPoints: Int
+    """Rank within the H2H battle group (tiebroken by FPL overall rank). Not global FPL rank."""
+    awayRank: Int
+    awayMatchPoints: Int
+  }
+
+  type EntryH2HMatchResult {
+    tournament: TournamentInfo!
+    event: Event
+    matchId: Int!
+    groupId: Int!
+    entryId: Int!
+    entryName: String
+    playerName: String
+    entryNetPoints: Int
+    """Rank within the H2H battle group. Not global FPL rank."""
+    entryRank: Int
+    """H2H match points for the queried entry: 3 = win, 1 = draw, 0 = loss."""
+    entryMatchPoints: Int
+    entryEventPoints: Int
+    entryTransferCost: Int
+    entryOverallRank: Int
+    entryChip: Chip
+    opponentEntryId: Int!
+    opponentEntryName: String
+    opponentPlayerName: String
+    opponentNetPoints: Int
+    """Rank within the H2H battle group. Not global FPL rank."""
+    opponentRank: Int
+    opponentMatchPoints: Int
+    opponentEventPoints: Int
+    opponentTransferCost: Int
+    opponentOverallRank: Int
+    opponentChip: Chip
+  }
+
   extend type Query {
     entryTournaments(entryId: Int!): [TournamentInfo!]!
     tournamentEntryIds(tournamentId: Int!): [Int!]!
@@ -99,5 +151,7 @@ export const tournamentsTypeDefs = /* GraphQL */ `
       eventId: Int!
       entryId: Int!
     ): TournamentEntryRankingSummary!
+    tournamentBattleGroupResults(tournamentId: Int!, eventId: Int!): [TournamentBattleGroupResult!]!
+    entryH2HMatchResults(entryId: Int!): [EntryH2HMatchResult!]!
   }
 `;

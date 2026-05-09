@@ -1,12 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { LeagueType } from "../../../src/domains/leagues/repository";
 import {
+	type DbTournamentBattleGroupResultRow,
 	type DbTournamentEntryRow,
 	type DbTournamentInfoRow,
 	type DbTournamentPointsGroupResultRow,
 	extractTournamentIds,
 	GroupMode,
 	KnockoutMode,
+	mapTournamentBattleGroupResult,
 	mapTournamentEventResult,
 	mapTournamentInfo,
 	TournamentMode,
@@ -985,5 +987,355 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		expect(result.tournamentBenchPointsRank).toBeNull();
 		expect(result.autoSubPoints).toBe(0);
 		expect(result.tournamentAutoSubRank).toBeNull();
+	});
+});
+
+describe("mapTournamentBattleGroupResult", () => {
+	const tournament = mapTournamentInfo({
+		id: 7,
+		name: "H2H League",
+		creator: "tong",
+		admin_entry_id: 100,
+		league_id: 24221,
+		league_type: "h2h",
+		total_team_num: 16,
+		tournament_mode: "normal",
+		group_mode: "battle_races",
+		group_team_num: 2,
+		group_num: 8,
+		group_started_event_id: 1,
+		group_ended_event_id: 38,
+		group_auto_averages: false,
+		group_rounds: null,
+		group_play_against_num: null,
+		group_qualify_num: null,
+		knockout_mode: null,
+		knockout_team_num: null,
+		knockout_rounds: null,
+		knockout_event_num: null,
+		knockout_started_event_id: null,
+		knockout_ended_event_id: null,
+		knockout_play_against_num: null,
+		state: "active",
+		created_at: "2026-04-21T00:00:00.000Z",
+		updated_at: "2026-04-21T00:00:00.000Z",
+	});
+
+	const row: DbTournamentBattleGroupResultRow = {
+		id: 501,
+		tournament_id: 7,
+		group_id: 3,
+		event_id: 15,
+		home_entry_id: 1001,
+		home_net_points: 72,
+		home_rank: 1,
+		home_match_points: 3,
+		away_entry_id: 2002,
+		away_net_points: 65,
+		away_rank: 2,
+		away_match_points: 0,
+	};
+
+	const nameMap = new Map([
+		[1001, { id: 1001, entry_name: "Home Team FC", player_name: "Alice" }],
+		[2002, { id: 2002, entry_name: "Away Side", player_name: "Bob" }],
+	]);
+
+	it("maps all fields correctly", () => {
+		expect(mapTournamentBattleGroupResult(tournament, row, nameMap)).toEqual({
+			tournament,
+			matchId: 501,
+			groupId: 3,
+			eventId: 15,
+			homeEntryId: 1001,
+			homeEntryName: "Home Team FC",
+			homePlayerName: "Alice",
+			homeNetPoints: 72,
+			homeRank: 1,
+			homeMatchPoints: 3,
+			awayEntryId: 2002,
+			awayEntryName: "Away Side",
+			awayPlayerName: "Bob",
+			awayNetPoints: 65,
+			awayRank: 2,
+			awayMatchPoints: 0,
+		});
+	});
+
+	it("falls back to null names when entry is absent from the map", () => {
+		const result = mapTournamentBattleGroupResult(tournament, row, new Map());
+		expect(result.homeEntryName).toBeNull();
+		expect(result.homePlayerName).toBeNull();
+		expect(result.awayEntryName).toBeNull();
+		expect(result.awayPlayerName).toBeNull();
+	});
+
+	it("handles null points and match points", () => {
+		const nullRow: DbTournamentBattleGroupResultRow = {
+			...row,
+			home_net_points: null,
+			home_rank: null,
+			home_match_points: null,
+			away_net_points: null,
+			away_rank: null,
+			away_match_points: null,
+		};
+		const result = mapTournamentBattleGroupResult(tournament, nullRow, nameMap);
+		expect(result.homeNetPoints).toBeNull();
+		expect(result.homeRank).toBeNull();
+		expect(result.homeMatchPoints).toBeNull();
+		expect(result.awayNetPoints).toBeNull();
+		expect(result.awayRank).toBeNull();
+		expect(result.awayMatchPoints).toBeNull();
+	});
+
+	it("homeMatchPoints + awayMatchPoints equals 3 for a win/loss row", () => {
+		const result = mapTournamentBattleGroupResult(tournament, row, nameMap);
+		expect(result.homeMatchPoints! + result.awayMatchPoints!).toBe(3);
+	});
+
+	it("homeMatchPoints + awayMatchPoints equals 2 for a draw row", () => {
+		const drawRow: DbTournamentBattleGroupResultRow = {
+			...row,
+			home_match_points: 1,
+			away_match_points: 1,
+		};
+		const result = mapTournamentBattleGroupResult(tournament, drawRow, nameMap);
+		expect(result.homeMatchPoints! + result.awayMatchPoints!).toBe(2);
+	});
+});
+
+describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
+	const buildContext = (options: {
+		battleGroupData?: unknown[];
+		tournamentData?: unknown[];
+		tournamentEntriesData?: unknown[];
+		entryInfosData?: unknown[];
+		battleGroupError?: unknown;
+		cacheSeed?: string | null;
+	}): GraphQLContext & { __redisState: Map<string, string> } => {
+		const redisState = new Map<string, string>();
+		if (options.cacheSeed !== undefined && options.cacheSeed !== null) {
+			redisState.set(
+				'tournaments:battle-results:{"eventId":15,"tournamentId":7}',
+				options.cacheSeed,
+			);
+		}
+
+		const makeBuilder = (table: string) => {
+			const actions: Array<{ type: string; args: unknown[] }> = [];
+
+			const resolveResult = () => {
+				if (table === "tournament_battle_group_results") {
+					return {
+						data: options.battleGroupData ?? [],
+						error: options.battleGroupError ?? null,
+					};
+				}
+				if (table === "tournament_infos") {
+					return { data: options.tournamentData ?? [], error: null };
+				}
+				if (table === "tournament_entries") {
+					return {
+						data: filterRowsByActions(
+							options.tournamentEntriesData ?? [],
+							actions,
+						),
+						error: null,
+					};
+				}
+				if (table === "entry_infos") {
+					return { data: options.entryInfosData ?? [], error: null };
+				}
+				return { data: [], error: null };
+			};
+
+			let resolvePromise!: (value: ReturnType<typeof resolveResult>) => void;
+			const promise = new Promise<ReturnType<typeof resolveResult>>(
+				(resolve) => {
+					resolvePromise = resolve;
+				},
+			);
+			queueMicrotask(() => resolvePromise(resolveResult()));
+
+			const builder = Object.assign(promise, {
+				select(...args: unknown[]) {
+					actions.push({ type: "select", args });
+					return builder;
+				},
+				eq(...args: unknown[]) {
+					actions.push({ type: "eq", args });
+					return builder;
+				},
+				in(...args: unknown[]) {
+					actions.push({ type: "in", args });
+					return builder;
+				},
+				order(...args: unknown[]) {
+					actions.push({ type: "order", args });
+					return builder;
+				},
+				async limit(...args: unknown[]) {
+					actions.push({ type: "limit", args });
+					return resolveResult();
+				},
+			});
+
+			return builder;
+		};
+
+		return {
+			supabase: { from: (table: string) => makeBuilder(table) } as never,
+			redis: {
+				async get(key: string) {
+					return redisState.get(key) ?? null;
+				},
+				async set(key: string, value: string) {
+					redisState.set(key, value);
+					return "OK";
+				},
+			} as never,
+			logger: {
+				error() {
+					return undefined;
+				},
+				warn() {
+					return undefined;
+				},
+			} as never,
+			user: undefined,
+			__redisState: redisState,
+		} as GraphQLContext & { __redisState: Map<string, string> };
+	};
+
+	const tournamentRow: DbTournamentInfoRow = {
+		id: 7,
+		name: "H2H League",
+		creator: "tong",
+		admin_entry_id: 100,
+		league_id: 24221,
+		league_type: "h2h",
+		total_team_num: 16,
+		tournament_mode: "normal",
+		group_mode: "battle_races",
+		group_team_num: 2,
+		group_num: 8,
+		group_started_event_id: 1,
+		group_ended_event_id: 38,
+		group_auto_averages: false,
+		group_rounds: null,
+		group_play_against_num: null,
+		group_qualify_num: null,
+		knockout_mode: null,
+		knockout_team_num: null,
+		knockout_rounds: null,
+		knockout_event_num: null,
+		knockout_started_event_id: null,
+		knockout_ended_event_id: null,
+		knockout_play_against_num: null,
+		state: "active",
+		created_at: "2026-04-21T00:00:00.000Z",
+		updated_at: "2026-04-21T00:00:00.000Z",
+	};
+
+	const matchRow: DbTournamentBattleGroupResultRow = {
+		id: 501,
+		tournament_id: 7,
+		group_id: 3,
+		event_id: 15,
+		home_entry_id: 1001,
+		home_net_points: 72,
+		home_rank: 1,
+		home_match_points: 3,
+		away_entry_id: 2002,
+		away_net_points: 65,
+		away_rank: 2,
+		away_match_points: 0,
+	};
+
+	it("returns cached results without hitting Supabase", async () => {
+		const cached = [
+			{
+				tournament: mapTournamentInfo(tournamentRow),
+				matchId: 501,
+				groupId: 3,
+				eventId: 15,
+				homeEntryId: 1001,
+				homeEntryName: "Cached Home",
+				homePlayerName: "Alice",
+				homeNetPoints: 72,
+				homeRank: 1,
+				homeMatchPoints: 3,
+				awayEntryId: 2002,
+				awayEntryName: "Cached Away",
+				awayPlayerName: "Bob",
+				awayNetPoints: 65,
+				awayRank: 2,
+				awayMatchPoints: 0,
+			},
+		];
+		const context = buildContext({ cacheSeed: JSON.stringify(cached) });
+		const result = await tournamentsRepository.getTournamentBattleGroupResults(
+			context,
+			7,
+			15,
+		);
+		expect(result).toEqual(cached);
+	});
+
+	it("returns empty array and caches it when no match rows exist", async () => {
+		const context = buildContext({
+			tournamentData: [tournamentRow],
+			tournamentEntriesData: [],
+			battleGroupData: [],
+		});
+		const result = await tournamentsRepository.getTournamentBattleGroupResults(
+			context,
+			7,
+			15,
+		);
+		expect(result).toEqual([]);
+		expect(
+			context.__redisState.get(
+				'tournaments:battle-results:{"eventId":15,"tournamentId":7}',
+			),
+		).toBe(JSON.stringify([]));
+	});
+
+	it("maps rows and enriches with entry names", async () => {
+		const context = buildContext({
+			tournamentData: [tournamentRow],
+			tournamentEntriesData: [
+				{ tournament_id: 7, entry_id: 1001 },
+				{ tournament_id: 7, entry_id: 2002 },
+			],
+			battleGroupData: [matchRow],
+			entryInfosData: [
+				{ id: 1001, entry_name: "Home Team FC", player_name: "Alice" },
+				{ id: 2002, entry_name: "Away Side", player_name: "Bob" },
+			],
+		});
+		const result = await tournamentsRepository.getTournamentBattleGroupResults(
+			context,
+			7,
+			15,
+		);
+		expect(result).toHaveLength(1);
+		expect(result[0].matchId).toBe(501);
+		expect(result[0].homeEntryName).toBe("Home Team FC");
+		expect(result[0].awayEntryName).toBe("Away Side");
+		expect(result[0].homeMatchPoints).toBe(3);
+		expect(result[0].awayMatchPoints).toBe(0);
+	});
+
+	it("throws on Supabase error fetching match rows", async () => {
+		const context = buildContext({
+			tournamentData: [tournamentRow],
+			tournamentEntriesData: [],
+			battleGroupError: { message: "db error" },
+		});
+		await expect(
+			tournamentsRepository.getTournamentBattleGroupResults(context, 7, 15),
+		).rejects.toThrow("Failed to fetch tournament battle group results");
 	});
 });

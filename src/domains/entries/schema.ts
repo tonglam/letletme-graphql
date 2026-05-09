@@ -63,6 +63,6 @@ export const entriesTypeDefs = /* GraphQL */ `
     entry(id: Int!): Entry
     entryHistory(entryId: Int!): EntryHistoryPayload!
     entryEventResult(entryId: Int!, eventId: Int!): EntryEventResult
-    entryTransferHistory(entryId: Int!): [EntryGameweekTransfers!]!
+    entryTransferHistory(entryId: Int!, live: Boolean = false): [EntryGameweekTransfers!]!
   }
 `;

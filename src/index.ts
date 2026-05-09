@@ -1,4 +1,8 @@
 import { ApolloServer, HeaderMap } from "@apollo/server";
+import {
+	authorizeGraphQLRequest,
+	graphQLErrorResponse,
+} from "./graphql/authorization";
 import type { GraphQLContext } from "./graphql/context";
 import { schema } from "./graphql/schema";
 import { auth, getUserFromSession } from "./infra/auth";
@@ -6,6 +10,10 @@ import { authenticateDevice, validateDeviceToken } from "./infra/device-auth";
 import { env } from "./infra/env";
 import { logger } from "./infra/logger";
 import { metrics, metricsResponse } from "./infra/metrics";
+import {
+	getPrincipalFromHeaders,
+	principalToAuthUser,
+} from "./infra/principal";
 import { connectRedis, getRedis } from "./infra/redis";
 import { supabase } from "./infra/supabase";
 
@@ -61,6 +69,15 @@ const startServer = async (): Promise<void> => {
 
 			// Prometheus metrics
 			if (url.pathname === "/metrics") {
+				const metricsToken =
+					request.headers.get("X-Metrics-Token") ??
+					request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "");
+				if (!env.METRICS_TOKEN || metricsToken !== env.METRICS_TOKEN) {
+					return new Response("Not Found", {
+						status: 404,
+						headers: corsHeaders,
+					});
+				}
 				return metricsResponse();
 			}
 
@@ -127,13 +144,45 @@ const startServer = async (): Promise<void> => {
 
 				// Parse GraphQL request
 				const body = await request.text();
+				let parsedBody: unknown = undefined;
+				if (body) {
+					try {
+						parsedBody = JSON.parse(body);
+					} catch {
+						return new Response(
+							JSON.stringify({ errors: [{ message: "Invalid JSON" }] }),
+							{
+								status: 400,
+								headers: {
+									"Content-Type": "application/json",
+									...corsHeaders,
+								},
+							},
+						);
+					}
+				}
 				const headers = new HeaderMap();
 				request.headers.forEach((value, key) => {
 					headers.set(key, value);
 				});
 
-				// Authenticate user (web session or mobile device token)
-				let user = await getUserFromSession(request.headers);
+				const principal = await getPrincipalFromHeaders(request.headers);
+				const authorization = await authorizeGraphQLRequest({
+					body: parsedBody,
+					searchParams: url.searchParams,
+					principal,
+					supabase,
+					logger,
+				});
+				if (!authorization.ok) {
+					return graphQLErrorResponse(authorization, corsHeaders);
+				}
+
+				// Keep legacy user context for the public `me` field and older resolvers.
+				let user = principal ? principalToAuthUser(principal) : null;
+				if (!user) {
+					user = await getUserFromSession(request.headers);
+				}
 
 				// If no web session, try mobile device token
 				if (!user) {
@@ -156,6 +205,7 @@ const startServer = async (): Promise<void> => {
 						supabase,
 						redis: getRedis(),
 						logger,
+						principal: principal ?? undefined,
 						user: user ?? undefined, // Convert null to undefined for GraphQLContext
 					}),
 				});

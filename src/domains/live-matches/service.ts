@@ -5,9 +5,13 @@ import { buildPlayerMap } from "../../infra/player-map";
 import { getCurrentSeason } from "../../infra/season";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player, Team } from "../../infra/types";
-import type { ElementEventResultData } from "../entry-live/calc-service";
+import {
+	calcElementLivePoints,
+	type ElementEventResultData,
+} from "../entry-live/calc-service";
 import type { Fixture } from "../fixtures/repository";
 import { fixturesRepository } from "../fixtures/repository";
+import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
 import type { LivePerformance } from "../live/repository";
 import { liveRepository } from "../live/repository";
 
@@ -275,6 +279,7 @@ const buildTeamDataMap = (
 	livePerformances: LivePerformance[],
 	playersById: Map<number, Player>,
 	teamsById: Map<number, Team>,
+	bonusByPlayerId: Map<number, number>,
 ): Map<number, ElementEventResultData[]> => {
 	const teamDataMap = new Map<number, ElementEventResultData[]>();
 
@@ -290,8 +295,9 @@ const buildTeamDataMap = (
 		}
 
 		const team = teamsById.get(player.teamId);
-		const bonus = perf.bonus ?? 0;
-		const totalPoints = perf.totalPoints ?? 0;
+		const bonus = bonusByPlayerId.get(perf.playerId) ?? perf.bonus ?? 0;
+		const perfWithLiveBonus: LivePerformance = { ...perf, bonus };
+		const totalPoints = calcElementLivePoints(player.position, perfWithLiveBonus);
 		const defensiveContribution: number = perf.defensiveContribution ?? 0;
 
 		const elementData: ElementEventResultData = {
@@ -557,6 +563,7 @@ export const liveMatchesService = {
 					filteredPerformances,
 					playersById,
 					teamsById,
+					await loadLiveBonusByPlayerId(context, currentEventId),
 				);
 			}
 

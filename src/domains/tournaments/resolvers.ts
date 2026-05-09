@@ -50,6 +50,8 @@ const getCaptainByIdMemoized = async (
 };
 
 import type {
+	EntryH2HMatchResult,
+	TournamentBattleGroupResult,
 	TournamentEntryRankingSummary,
 	TournamentEventResult,
 	TournamentInfo,
@@ -74,6 +76,15 @@ type TournamentEventResultsArgs = {
 type TournamentEntryRankingSummaryArgs = {
 	tournamentId: number;
 	eventId: number;
+	entryId: number;
+};
+
+type TournamentBattleGroupResultsArgs = {
+	tournamentId: number;
+	eventId: number;
+};
+
+type EntryH2HMatchResultsArgs = {
 	entryId: number;
 };
 
@@ -207,6 +218,24 @@ export const tournamentsResolvers = {
 				args.eventId,
 				args.entryId,
 			),
+
+		tournamentBattleGroupResults: async (
+			_parent: unknown,
+			args: TournamentBattleGroupResultsArgs,
+			context: GraphQLContext,
+		): Promise<TournamentBattleGroupResult[]> =>
+			tournamentsService.getTournamentBattleGroupResults(
+				context,
+				args.tournamentId,
+				args.eventId,
+			),
+
+		entryH2HMatchResults: async (
+			_parent: unknown,
+			args: EntryH2HMatchResultsArgs,
+			context: GraphQLContext,
+		): Promise<EntryH2HMatchResult[]> =>
+			tournamentsService.getEntryH2HMatchResults(context, args.entryId),
 	},
 	TournamentInfo: {
 		leagueType: (parent: TournamentInfo): string =>
@@ -240,5 +269,14 @@ export const tournamentsResolvers = {
 		},
 		eventChip: (parent: TournamentEventResult): string | null =>
 			tournamentResultChipToEnum(parent.eventChip),
+	},
+	TournamentBattleGroupResult: {
+		tournament: (parent: TournamentBattleGroupResult): TournamentInfo =>
+			parent.tournament,
+		event: async (
+			parent: TournamentBattleGroupResult,
+			_args: Record<string, never>,
+			context: GraphQLContext,
+		): Promise<Event | null> => getEventByIdMemoized(context, parent.eventId),
 	},
 };

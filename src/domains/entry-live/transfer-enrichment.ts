@@ -24,6 +24,7 @@ export type EntryEventTransfersData = {
 	elementOutTypeName: string;
 	elementOutCost: number;
 	elementOutPoints: number;
+	elementOutPlayed: boolean;
 	time: string;
 };
 
@@ -92,6 +93,7 @@ export const enrichTransferRows = (params: {
 			elementOutTypeName: elementTypeName(outPlayer?.position),
 			elementOutCost: outPlayer?.price ?? 0,
 			elementOutPoints: outLive?.totalPoints ?? 0,
+			elementOutPlayed: (outLive?.minutes ?? 0) > 0,
 			time: row.time ?? "",
 		};
 	});

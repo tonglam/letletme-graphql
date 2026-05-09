@@ -348,12 +348,13 @@ export const entriesService = {
 	async getEntryTransferHistory(
 		context: GraphQLContext,
 		entryId: number,
+		live = false,
 	): Promise<EntryGameweekTransfers[]> {
 		if (!Number.isFinite(entryId) || entryId <= 0) {
 			return [];
 		}
 
-		const enrichedCacheKey = `entries:transfer-history:enriched:${entryId}`;
+		const enrichedCacheKey = `entries:transfer-history:enriched:${entryId}${live ? ":live" : ""}`;
 		const innerCacheKey = `entries:transfers:history:${entryId}`;
 
 		// Check both cache keys simultaneously + pre-warm season + start team fetch in parallel
@@ -393,10 +394,14 @@ export const entriesService = {
 			playerIdsByEvent.set(row.eventId, ids);
 		}
 
+		const livePromise = live
+			? buildLiveMapForEvents(context, eventIds, playerIds, playerIdsByEvent)
+			: Promise.resolve(new Map<string, LivePerformance>());
+
 		const [playerMap, teamMap, liveByEventAndPlayer] = await Promise.all([
 			buildPlayerMap(context, playerIds),
 			teamMapPromise,
-			buildLiveMapForEvents(context, eventIds, playerIds, playerIdsByEvent),
+			livePromise,
 		]);
 
 		const rowsByEvent = new Map<number, EntryEventTransferRow[]>();

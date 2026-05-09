@@ -211,6 +211,76 @@ export type DbEntryInfoNameRow = {
 	player_name: string | null;
 };
 
+type DbEntryEventResultLiteRow = {
+	entry_id: number;
+	event_id: number;
+	event_points: number;
+	event_transfers_cost: number;
+	event_chip: string | null;
+	overall_rank: number;
+};
+
+export type EntryH2HMatchResult = {
+	tournament: TournamentInfo;
+	matchId: number;
+	groupId: number;
+	eventId: number;
+	entryId: number;
+	entryName: string | null;
+	playerName: string | null;
+	entryNetPoints: number | null;
+	entryRank: number | null;
+	entryMatchPoints: number | null;
+	entryEventPoints: number | null;
+	entryTransferCost: number | null;
+	entryOverallRank: number | null;
+	entryChip: string | null;
+	opponentEntryId: number;
+	opponentEntryName: string | null;
+	opponentPlayerName: string | null;
+	opponentNetPoints: number | null;
+	opponentRank: number | null;
+	opponentMatchPoints: number | null;
+	opponentEventPoints: number | null;
+	opponentTransferCost: number | null;
+	opponentOverallRank: number | null;
+	opponentChip: string | null;
+};
+
+export type DbTournamentBattleGroupResultRow = {
+	id: number;
+	tournament_id: number;
+	group_id: number;
+	event_id: number;
+	home_entry_id: number;
+	home_net_points: number | null;
+	home_rank: number | null;
+	home_match_points: number | null;
+	away_entry_id: number;
+	away_net_points: number | null;
+	away_rank: number | null;
+	away_match_points: number | null;
+};
+
+export type TournamentBattleGroupResult = {
+	tournament: TournamentInfo;
+	matchId: number;
+	groupId: number;
+	eventId: number;
+	homeEntryId: number;
+	homeEntryName: string | null;
+	homePlayerName: string | null;
+	homeNetPoints: number | null;
+	homeRank: number | null;
+	homeMatchPoints: number | null;
+	awayEntryId: number;
+	awayEntryName: string | null;
+	awayPlayerName: string | null;
+	awayNetPoints: number | null;
+	awayRank: number | null;
+	awayMatchPoints: number | null;
+};
+
 type DbTournamentEventSnapshotRow = {
 	tournament_id: number;
 	event_id: number;
@@ -418,6 +488,75 @@ export const mapTournamentEventResultFromView = (
 	bank: row.bank,
 });
 
+export const mapTournamentBattleGroupResult = (
+	tournament: TournamentInfo,
+	row: DbTournamentBattleGroupResultRow,
+	entryNames: Map<number, DbEntryInfoNameRow>,
+): TournamentBattleGroupResult => {
+	const home = entryNames.get(row.home_entry_id);
+	const away = entryNames.get(row.away_entry_id);
+	return {
+		tournament,
+		matchId: row.id,
+		groupId: row.group_id,
+		eventId: row.event_id,
+		homeEntryId: row.home_entry_id,
+		homeEntryName: home?.entry_name ?? null,
+		homePlayerName: home?.player_name ?? null,
+		homeNetPoints: row.home_net_points,
+		homeRank: row.home_rank,
+		homeMatchPoints: row.home_match_points,
+		awayEntryId: row.away_entry_id,
+		awayEntryName: away?.entry_name ?? null,
+		awayPlayerName: away?.player_name ?? null,
+		awayNetPoints: row.away_net_points,
+		awayRank: row.away_rank,
+		awayMatchPoints: row.away_match_points,
+	};
+};
+
+export const mapEntryH2HMatchResult = (
+	tournament: TournamentInfo,
+	row: DbTournamentBattleGroupResultRow,
+	entryId: number,
+	entryNames: Map<number, DbEntryInfoNameRow>,
+	eventResults: Map<string, DbEntryEventResultLiteRow>,
+): EntryH2HMatchResult => {
+	const isHome = row.home_entry_id === entryId;
+	const myEntryId = isHome ? row.home_entry_id : row.away_entry_id;
+	const oppEntryId = isHome ? row.away_entry_id : row.home_entry_id;
+	const myName = entryNames.get(myEntryId);
+	const oppName = entryNames.get(oppEntryId);
+	const myEvent = eventResults.get(`${myEntryId}-${row.event_id}`);
+	const oppEvent = eventResults.get(`${oppEntryId}-${row.event_id}`);
+	return {
+		tournament,
+		matchId: row.id,
+		groupId: row.group_id,
+		eventId: row.event_id,
+		entryId: myEntryId,
+		entryName: myName?.entry_name ?? null,
+		playerName: myName?.player_name ?? null,
+		entryNetPoints: isHome ? row.home_net_points : row.away_net_points,
+		entryRank: isHome ? row.home_rank : row.away_rank,
+		entryMatchPoints: isHome ? row.home_match_points : row.away_match_points,
+		entryEventPoints: myEvent?.event_points ?? null,
+		entryTransferCost: myEvent?.event_transfers_cost ?? null,
+		entryOverallRank: myEvent?.overall_rank ?? null,
+		entryChip: myEvent?.event_chip ?? null,
+		opponentEntryId: oppEntryId,
+		opponentEntryName: oppName?.entry_name ?? null,
+		opponentPlayerName: oppName?.player_name ?? null,
+		opponentNetPoints: isHome ? row.away_net_points : row.home_net_points,
+		opponentRank: isHome ? row.away_rank : row.home_rank,
+		opponentMatchPoints: isHome ? row.away_match_points : row.home_match_points,
+		opponentEventPoints: oppEvent?.event_points ?? null,
+		opponentTransferCost: oppEvent?.event_transfers_cost ?? null,
+		opponentOverallRank: oppEvent?.overall_rank ?? null,
+		opponentChip: oppEvent?.event_chip ?? null,
+	};
+};
+
 const getTournamentInfoById = async (
 	context: GraphQLContext,
 	tournamentId: number,
@@ -477,6 +616,15 @@ interface TournamentsRepository {
 		eventId: number,
 		entryId: number,
 	): Promise<TournamentEntryRankingSummary>;
+	getTournamentBattleGroupResults(
+		context: GraphQLContext,
+		tournamentId: number,
+		eventId: number,
+	): Promise<TournamentBattleGroupResult[]>;
+	getEntryH2HMatchResults(
+		context: GraphQLContext,
+		entryId: number,
+	): Promise<EntryH2HMatchResult[]>;
 }
 
 export const tournamentsRepository: TournamentsRepository = {
@@ -732,5 +880,170 @@ export const tournamentsRepository: TournamentsRepository = {
 			env.CACHE_TTL_SECONDS,
 		);
 		return summary;
+	},
+
+	async getTournamentBattleGroupResults(
+		context: GraphQLContext,
+		tournamentId: number,
+		eventId: number,
+	): Promise<TournamentBattleGroupResult[]> {
+		const cacheKey = `tournaments:battle-results:${stableStringify({ tournamentId, eventId })}`;
+		const cached = await context.redis.get(cacheKey);
+		if (cached) {
+			return JSON.parse(cached) as TournamentBattleGroupResult[];
+		}
+
+		const [tournamentResult, matchResult, entryIds] = await Promise.all([
+			getTournamentInfoById(context, tournamentId),
+			context.supabase
+				.from("tournament_battle_group_results")
+				.select(
+					"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points",
+				)
+				.eq("tournament_id", tournamentId)
+				.eq("event_id", eventId)
+				.order("group_id", { ascending: true })
+				.order("home_entry_id", { ascending: true }),
+			tournamentsRepository.getTournamentEntryIds(context, tournamentId),
+		]);
+
+		if (matchResult.error) {
+			context.logger.error(
+				{ err: matchResult.error, tournamentId, eventId },
+				"Failed to fetch tournament battle group results",
+			);
+			throw new Error("Failed to fetch tournament battle group results");
+		}
+
+		const rows =
+			(matchResult.data as DbTournamentBattleGroupResultRow[] | null) ?? [];
+		if (rows.length === 0 || !tournamentResult) {
+			await context.redis.set(
+				cacheKey,
+				JSON.stringify([]),
+				"EX",
+				env.CACHE_TTL_SECONDS,
+			);
+			return [];
+		}
+
+		const { data: nameData } = await context.supabase
+			.from("entry_infos")
+			.select("id, entry_name, player_name")
+			.in("id", entryIds);
+
+		const entryNameMap = new Map<number, DbEntryInfoNameRow>(
+			((nameData as DbEntryInfoNameRow[] | null) ?? []).map((r) => [r.id, r]),
+		);
+
+		const results = rows.map((row) =>
+			mapTournamentBattleGroupResult(tournamentResult, row, entryNameMap),
+		);
+
+		await context.redis.set(
+			cacheKey,
+			JSON.stringify(results),
+			"EX",
+			env.CACHE_TTL_SECONDS,
+		);
+		return results;
+	},
+
+	async getEntryH2HMatchResults(
+		context: GraphQLContext,
+		entryId: number,
+	): Promise<EntryH2HMatchResult[]> {
+		const cacheKey = `tournaments:entry-h2h:${entryId}`;
+		const cached = await context.redis.get(cacheKey);
+		if (cached) return JSON.parse(cached) as EntryH2HMatchResult[];
+
+		const { data: matchData, error: matchError } = await context.supabase
+			.from("tournament_battle_group_results")
+			.select(
+				"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points",
+			)
+			.or(`home_entry_id.eq.${entryId},away_entry_id.eq.${entryId}`)
+			.order("event_id", { ascending: true })
+			.order("tournament_id", { ascending: true });
+
+		if (matchError) {
+			context.logger.error(
+				{ err: matchError, entryId },
+				"Failed to fetch entry H2H match results",
+			);
+			throw new Error("Failed to fetch entry H2H match results");
+		}
+
+		const rows =
+			(matchData as DbTournamentBattleGroupResultRow[] | null) ?? [];
+		if (rows.length === 0) {
+			await context.redis.set(
+				cacheKey,
+				JSON.stringify([]),
+				"EX",
+				env.CACHE_TTL_SECONDS,
+			);
+			return [];
+		}
+
+		const tournamentIds = [...new Set(rows.map((r) => r.tournament_id))];
+		const eventIds = [...new Set(rows.map((r) => r.event_id))];
+		const allEntryIds = [
+			...new Set(rows.flatMap((r) => [r.home_entry_id, r.away_entry_id])),
+		];
+
+		const [tournamentInfos, nameResult, eventResultData] = await Promise.all([
+			Promise.all(tournamentIds.map((id) => getTournamentInfoById(context, id))),
+			context.supabase
+				.from("entry_infos")
+				.select("id, entry_name, player_name")
+				.in("id", allEntryIds),
+			context.supabase
+				.from("entry_event_results")
+				.select(
+					"entry_id, event_id, event_points, event_transfers_cost, event_chip, overall_rank",
+				)
+				.in("entry_id", allEntryIds)
+				.in("event_id", eventIds),
+		]);
+
+		const tournamentMap = new Map<number, TournamentInfo>(
+			tournamentInfos
+				.filter((t): t is TournamentInfo => t !== null)
+				.map((t) => [t.id, t]),
+		);
+
+		const entryNameMap = new Map<number, DbEntryInfoNameRow>(
+			((nameResult.data as DbEntryInfoNameRow[] | null) ?? []).map((r) => [
+				r.id,
+				r,
+			]),
+		);
+
+		const eventResultMap = new Map<string, DbEntryEventResultLiteRow>(
+			((eventResultData.data as DbEntryEventResultLiteRow[] | null) ?? []).map(
+				(r) => [`${r.entry_id}-${r.event_id}`, r],
+			),
+		);
+
+		const results = rows
+			.filter((row) => tournamentMap.has(row.tournament_id))
+			.map((row) =>
+				mapEntryH2HMatchResult(
+					tournamentMap.get(row.tournament_id)!,
+					row,
+					entryId,
+					entryNameMap,
+					eventResultMap,
+				),
+			);
+
+		await context.redis.set(
+			cacheKey,
+			JSON.stringify(results),
+			"EX",
+			env.CACHE_TTL_SECONDS,
+		);
+		return results;
 	},
 };

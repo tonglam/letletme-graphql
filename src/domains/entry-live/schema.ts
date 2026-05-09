@@ -173,6 +173,7 @@ export const entryLiveTypeDefs = /* GraphQL */ `
     elementOutTypeName: String!
     elementOutCost: Float!
     elementOutPoints: Int!
+    elementOutPlayed: Boolean!
     time: String!
   }
 
