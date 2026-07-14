@@ -1,6 +1,6 @@
 # letletme-graphql
 
-**Fantasy Football GraphQL API** - Production-ready Apollo Server with hybrid authentication strategy.
+**Fantasy Football GraphQL API** — typed Apollo Server with hybrid authentication flows.
 
 Business-domain GraphQL layer over Supabase Postgres with Redis caching, structured logging, and Prometheus metrics.
 
@@ -20,11 +20,11 @@ bun run dev
 
 - **Apollo Server 4** - Industry-standard GraphQL server
 - **Bun Runtime** - Fast JavaScript runtime
-- **Better Auth** - ✅ Hybrid authentication implemented (OAuth for web, device-based for mobile)
+- **Better Auth** - Hybrid authentication implemented (OAuth for web, device-based for mobile)
 - **Domain-Driven Design** - 7 business domains, 20 queries, 1 mutation
 - **Redis Cache** - Read-through caching (30-60s TTL)
 - **Supabase PostgreSQL** - Primary database with auth tables
-- **Strict TypeScript** - No `any` types allowed, 100% typed
+- **Strict TypeScript** - Strict compiler settings and typed domain boundaries
 - **Prometheus Metrics** - Performance monitoring built-in
 
 ## Documentation
@@ -59,7 +59,7 @@ bun run dev
 | Entries | ✅ Complete (read-only) | 3 queries | User data, history |
 | Tournaments | ⏭️ Deferred | - | Complex, 7 tables |
 
-**Total:** 7 domains, 20 queries, 1 mutation, ~5,500 lines of code
+**Current API surface:** 7 domains, 20 queries, and 1 mutation.
 
 ## 🔐 Authentication Strategy
 
@@ -185,6 +185,29 @@ bun run lint:fix      # Auto-fix issues
 bun run format        # Format all files
 bun run format:check  # Check formatting
 ```
+
+## Automated verification
+
+```bash
+bun run lint
+bun run format:check
+bun test
+```
+
+The test suite covers schema construction, authentication and device flows, domain resolvers, cache behaviour, error handling, and selected database/security boundaries. Integration tests that depend on PostgreSQL, Supabase, or Redis require the corresponding local test services.
+
+At the July 2026 employer-facing audit, lint passed and 121 of 122 tests passed. One transfer-history fixture expectation remains out of sync with the current enriched response, and the repository-wide formatting baseline is not yet clean. These are recorded engineering gaps rather than claimed green checks.
+
+## Design trade-offs and limitations
+
+- Redis read-through caching improves freshness-sensitive query latency but introduces invalidation and recovery work; short TTLs and explicit cache paths keep that behaviour bounded.
+- The API is intentionally read-heavy. Tournament writes and other complex mutation workflows remain deferred until their consistency rules are fully defined.
+- OAuth handlers are implemented, but a working deployment still requires provider credentials and redirect configuration outside this repository.
+- Device-based access reduces mobile sign-in friction, while account linking and token revocation remain explicit security boundaries that require testing.
+
+## Public repository boundary
+
+This repository contains application code, migrations, tests, and example configuration only. Environment files contain placeholders; production credentials, tokens, user records, and operational data must not be committed.
 
 ## Endpoints
 
