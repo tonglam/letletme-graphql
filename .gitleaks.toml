@@ -4,10 +4,27 @@ title = "letletme-graphql"
 useDefault = true
 
 [allowlist]
-description = "Local env files and dependencies"
+description = "Local env files, dependencies, and documentation placeholders"
 paths = [
   '''\.env$''',
   '''\.env\..*$''',
   '''node_modules/''',
   '''bun.lock$''',
+]
+regexes = [
+  '''YOUR_TOKEN(_HERE)?''',
+  '''YOUR_ANON_KEY''',
+  '''your_supabase_service_role_key''',
+  '''your_jwt_secret''',
+  '''your_better_auth_secret''',
+  '''your_wechat_app(id|secret)''',
+  '''dev-secret-change-in-production''',
+  '''dev-better-auth-secret-change-me''',
+]
+# Example UUID/token in AUTH_IMPLEMENTATION_SUMMARY docs (not a live secret)
+stopwords = [
+  "48024e75-3677-499a-b48e-90844f22d901",
+  "YOUR_TOKEN_HERE",
+  "YOUR_TOKEN",
+  "YOUR_ANON_KEY",
 ]
