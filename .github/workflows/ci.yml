@@ -7,6 +7,23 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      NODE_ENV: test
+      SUPABASE_URL: https://example.supabase.co
+      SUPABASE_KEY: test-supabase-key
+      DATABASE_URL: postgresql://user:pass@127.0.0.1:5432/testdb
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+      PORT: "4000"
+      LOG_LEVEL: info
+      CACHE_TTL_SECONDS: "60"
+      JWT_SECRET: test-jwt-secret
+      BETTER_AUTH_SECRET: test-better-auth-secret
+      BETTER_AUTH_URL: http://localhost:4000
+      GRAPHQL_AUTH_MODE: enforce
+      CORS_ORIGIN: http://localhost:3000
+      CORS_CREDENTIALS: "false"
     steps:
       - uses: actions/checkout@v4
 
