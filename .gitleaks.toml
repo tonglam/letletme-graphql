@@ -1,0 +1,13 @@
+title = "letletme-graphql"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Local env files and dependencies"
+paths = [
+  '''\.env$''',
+  '''\.env\..*$''',
+  '''node_modules/''',
+  '''bun.lock$''',
+]

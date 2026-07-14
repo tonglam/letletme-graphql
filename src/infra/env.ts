@@ -1,4 +1,5 @@
 type EnvKey =
+	| "NODE_ENV"
 	| "SUPABASE_URL"
 	| "SUPABASE_KEY"
 	| "DATABASE_URL"
@@ -11,6 +12,8 @@ type EnvKey =
 	| "JWT_SECRET"
 	| "JWT_ACCESS_EXPIRY"
 	| "JWT_REFRESH_EXPIRY"
+	| "BETTER_AUTH_SECRET"
+	| "BETTER_AUTH_URL"
 	| "BACKEND_PROXY_SECRET"
 	| "GRAPHQL_AUTH_MODE"
 	| "METRICS_TOKEN"
@@ -53,7 +56,50 @@ const readNumber = (key: EnvKey, fallback: number): number => {
 	return parsed;
 };
 
+const NODE_ENV = readEnv("NODE_ENV") ?? "development";
+const isProduction = NODE_ENV === "production";
+
+const requireInProduction = (key: EnvKey): string => {
+	const value = readEnv(key) ?? "";
+	if (isProduction && value.length === 0) {
+		throw new Error(`Missing required production env: ${key}`);
+	}
+	return value;
+};
+
+const GRAPHQL_AUTH_MODE = readEnv("GRAPHQL_AUTH_MODE") ?? "enforce";
+if (isProduction && GRAPHQL_AUTH_MODE === "report") {
+	throw new Error(
+		"GRAPHQL_AUTH_MODE=report is not allowed in production (fails open)",
+	);
+}
+
+const CORS_ORIGIN = readEnv("CORS_ORIGIN") ?? (isProduction ? "" : "*");
+const CORS_CREDENTIALS = readEnv("CORS_CREDENTIALS") === "true";
+if (isProduction && CORS_CREDENTIALS && (CORS_ORIGIN === "*" || !CORS_ORIGIN)) {
+	throw new Error(
+		"CORS_ORIGIN must be an explicit allowlist when CORS_CREDENTIALS=true in production",
+	);
+}
+if (isProduction && !CORS_ORIGIN) {
+	throw new Error("Missing required production env: CORS_ORIGIN");
+}
+
+const JWT_SECRET = isProduction
+	? requireInProduction("JWT_SECRET")
+	: (readEnv("JWT_SECRET") ?? "dev-secret-change-in-production");
+
+if (isProduction && JWT_SECRET === "dev-secret-change-in-production") {
+	throw new Error("JWT_SECRET must not use the development default in production");
+}
+
+const BETTER_AUTH_SECRET = isProduction
+	? requireInProduction("BETTER_AUTH_SECRET")
+	: (readEnv("BETTER_AUTH_SECRET") ?? "dev-better-auth-secret-change-me");
+
 export const env = {
+	NODE_ENV,
+	isProduction,
 	SUPABASE_URL: requireEnv("SUPABASE_URL"),
 	SUPABASE_KEY: requireEnv("SUPABASE_KEY"),
 	DATABASE_URL: requireEnv("DATABASE_URL"),
@@ -65,11 +111,13 @@ export const env = {
 	CACHE_TTL_SECONDS: readNumber("CACHE_TTL_SECONDS", 60),
 
 	// Authentication
-	JWT_SECRET: readEnv("JWT_SECRET") ?? "dev-secret-change-in-production",
+	JWT_SECRET,
 	JWT_ACCESS_EXPIRY: readEnv("JWT_ACCESS_EXPIRY") ?? "15m",
 	JWT_REFRESH_EXPIRY: readEnv("JWT_REFRESH_EXPIRY") ?? "7d",
+	BETTER_AUTH_SECRET,
+	BETTER_AUTH_URL: readEnv("BETTER_AUTH_URL") ?? readEnv("APP_URL") ?? "http://localhost:4000",
 	BACKEND_PROXY_SECRET: readEnv("BACKEND_PROXY_SECRET") ?? "",
-	GRAPHQL_AUTH_MODE: readEnv("GRAPHQL_AUTH_MODE") ?? "enforce",
+	GRAPHQL_AUTH_MODE,
 	METRICS_TOKEN: readEnv("METRICS_TOKEN") ?? "",
 
 	// OAuth Providers (optional)
@@ -80,8 +128,8 @@ export const env = {
 	APP_URL: readEnv("APP_URL") ?? "http://localhost:3000",
 
 	// CORS
-	CORS_ORIGIN: readEnv("CORS_ORIGIN") ?? "*",
-	CORS_CREDENTIALS: readEnv("CORS_CREDENTIALS") === "true",
+	CORS_ORIGIN,
+	CORS_CREDENTIALS,
 
 	// WeChat Mini Program
 	WECHAT_APPID: readEnv("WECHAT_APPID") ?? "",

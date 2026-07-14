@@ -6,6 +6,7 @@ import type { Fixture } from "../fixtures/repository";
 import { fixturesService } from "../fixtures/service";
 import type { LivePerformance } from "../live/repository";
 import { liveRepository } from "../live/repository";
+import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
 import { playersRepository } from "../players/repository";
 import {
 	type ActiveCaptainData,
@@ -498,7 +499,8 @@ export const entryLiveBatchService = {
 
 		// Phase 1: Load shared data — live, fixtures, teams, and entry data in parallel
 		const [
-			liveByPlayerMap,
+			liveByPlayerRaw,
+			bonusByPlayerId,
 			fixtures,
 			teams,
 			entriesById,
@@ -509,6 +511,9 @@ export const entryLiveBatchService = {
 				(includeLive
 					? liveRepository.getAllLivePerformances(context, eventId)
 					: Promise.resolve(new Map<number, LivePerformance>())),
+			includeLive
+				? loadLiveBonusByPlayerId(context, eventId)
+				: Promise.resolve(new Map<number, number>()),
 			prefetched?.fixtures ??
 				fixturesService.getEventFixtures(context, eventId),
 			prefetched?.teams ?? playersRepository.listTeamsFromRedis(context),
@@ -522,6 +527,15 @@ export const entryLiveBatchService = {
 				eventId,
 			),
 		]);
+
+		const liveByPlayerMap = new Map<number, LivePerformance>();
+		for (const [playerId, live] of liveByPlayerRaw) {
+			const bonusOverride = bonusByPlayerId.get(playerId);
+			liveByPlayerMap.set(
+				playerId,
+				bonusOverride !== undefined ? { ...live, bonus: bonusOverride } : live,
+			);
+		}
 
 		// Collect all unique player IDs from picks and transfers
 		const allPlayerIds = new Set<number>();

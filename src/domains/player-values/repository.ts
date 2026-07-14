@@ -275,41 +275,33 @@ async function getPlayerValuesFromDatabase(
 	context: GraphQLContext,
 	changeDate: Date,
 ): Promise<PlayerValue[]> {
-	try {
-		const targetDate = await resolveTargetDate(context, changeDate);
+	const targetDate = await resolveTargetDate(context, changeDate);
 
-		const { data, error } = await context.supabase
-			.from("player_values")
-			.select(
-				"element_id, element_type, event_id, value, last_value, change_date, change_type",
-			)
-			.eq("change_date", targetDate);
+	const { data, error } = await context.supabase
+		.from("player_values")
+		.select(
+			"element_id, element_type, event_id, value, last_value, change_date, change_type",
+		)
+		.eq("change_date", targetDate);
 
-		if (error) {
-			context.logger.error(
-				{ err: error, changeDate: changeDate.toISOString(), targetDate },
-				"Failed to fetch player values from database",
-			);
-			return [];
-		}
-
-		const rows = (data as DbPlayerValueRow[] | null) ?? [];
-		if (rows.length === 0) {
-			context.logger.warn(
-				{ changeDate: changeDate.toISOString(), targetDate },
-				"No player values found in database",
-			);
-			return [];
-		}
-
-		return rows.map(mapDbRowToPlayerValue);
-	} catch (error) {
+	if (error) {
 		context.logger.error(
-			{ err: error, changeDate: changeDate.toISOString() },
-			"Failed to query player values from database",
+			{ err: error, changeDate: changeDate.toISOString(), targetDate },
+			"Failed to fetch player values from database",
+		);
+		throw new Error(error.message, { cause: error });
+	}
+
+	const rows = (data as DbPlayerValueRow[] | null) ?? [];
+	if (rows.length === 0) {
+		context.logger.debug(
+			{ changeDate: changeDate.toISOString(), targetDate },
+			"No player values found in database",
 		);
 		return [];
 	}
+
+	return rows.map(mapDbRowToPlayerValue);
 }
 
 function parsePlayerValuesFromHashData(
@@ -399,6 +391,7 @@ function parsePlayerValuesFromHashData(
 async function writePlayerValuesToRedis(
 	context: GraphQLContext,
 	cacheKey: string,
+	missingCacheKey: string,
 	values: PlayerValue[],
 ): Promise<void> {
 	if (values.length === 0) {
@@ -410,10 +403,18 @@ async function writePlayerValuesToRedis(
 		hashEntries[String(pv.playerId)] = JSON.stringify(pv);
 	}
 
-	await context.redis.hset(cacheKey, hashEntries);
+	const pipeline = context.redis.pipeline();
+	pipeline.del(cacheKey, missingCacheKey);
+	pipeline.hset(cacheKey, hashEntries);
+	await pipeline.exec();
 }
 
 const NULL_SENTINEL = "__pv:null__";
+const MISSING_CACHE_TTL_SECONDS = 10 * 60;
+
+function getMissingDateKey(changeDate: Date): string {
+	return `PlayerValueMissing:${getCompactDateString(changeDate)}`;
+}
 
 export const playerValuesRepository: PlayerValuesRepository = {
 	async getPlayerValues(
@@ -421,46 +422,94 @@ export const playerValuesRepository: PlayerValuesRepository = {
 		changeDate: Date,
 	): Promise<PlayerValue[]> {
 		const cacheKey = getDateKey(changeDate);
+		const missingCacheKey = getMissingDateKey(changeDate);
+		const cacheType = await context.redis.type(cacheKey);
 
-		// 1. Try hash key first (external sync job format).
-		// Guarded: if the key exists as a string type (null sentinel or legacy JSON),
-		// HGETALL throws WRONGTYPE — catch it and fall through to the GET path.
-		try {
+		// The shared primary key is hash-only. String support is transitional for
+		// sentinels and JSON values written by older GraphQL deployments.
+		if (cacheType === "hash") {
 			const hashData = await context.redis.hgetall(cacheKey);
 			if (Object.keys(hashData).length > 0) {
 				return parsePlayerValuesFromHashData(context, cacheKey, hashData);
 			}
-		} catch (err) {
+		} else if (cacheType === "string") {
+			const stringVal = await context.redis.get(cacheKey);
+			if (stringVal === NULL_SENTINEL) {
+				const pipeline = context.redis.pipeline();
+				pipeline.del(cacheKey);
+				pipeline.set(missingCacheKey, "1", "EX", MISSING_CACHE_TTL_SECONDS);
+				await pipeline.exec();
+				return [];
+			}
+
+			try {
+				const parsed = JSON.parse(stringVal ?? "null") as PlayerValue[];
+				if (Array.isArray(parsed)) {
+					if (parsed.length > 0) {
+						const hashData: Record<string, string> = {};
+						for (const item of parsed) {
+							const id = item.playerId;
+							if (typeof id === "number" && Number.isFinite(id)) {
+								hashData[String(id)] = JSON.stringify(item);
+							}
+						}
+						const normalized = parsePlayerValuesFromHashData(
+							context,
+							cacheKey,
+							hashData,
+						);
+						await writePlayerValuesToRedis(
+							context,
+							cacheKey,
+							missingCacheKey,
+							normalized,
+						);
+						return normalized;
+					}
+					const pipeline = context.redis.pipeline();
+					pipeline.del(cacheKey);
+					pipeline.set(
+						missingCacheKey,
+						"1",
+						"EX",
+						MISSING_CACHE_TTL_SECONDS,
+					);
+					await pipeline.exec();
+					return [];
+				}
+			} catch (err) {
+				context.logger.warn(
+					{ cacheKey, err },
+					"Failed to parse legacy player values cache value",
+				);
+			}
+		} else if (cacheType !== "none") {
 			context.logger.warn(
-				{ cacheKey, err },
-				"HGETALL on player values key failed, trying GET",
+				{ cacheKey, cacheType },
+				"Unexpected Redis type for player values key",
 			);
 		}
 
-		// 2. Try string key (legacy / write-back format, one GET).
-		const stringVal = await context.redis.get(cacheKey);
-		if (stringVal) {
-			if (stringVal === NULL_SENTINEL) {
-				return [];
-			}
-			try {
-				const parsed = JSON.parse(stringVal) as PlayerValue[];
-				if (Array.isArray(parsed)) {
-					return parsed;
-				}
-			} catch {
-				// fall through to DB
-			}
+		if (await context.redis.get(missingCacheKey)) {
+			return [];
 		}
 
-		// 3. Cache miss — query database for exact date.
 		const values = await getPlayerValuesFromDatabase(context, changeDate);
 
-		// 4. Write back to Redis as hash (no TTL).
 		if (values.length === 0) {
-			await context.redis.set(cacheKey, NULL_SENTINEL);
+			await context.redis.set(
+				missingCacheKey,
+				"1",
+				"EX",
+				MISSING_CACHE_TTL_SECONDS,
+			);
 		} else {
-			await writePlayerValuesToRedis(context, cacheKey, values);
+			await writePlayerValuesToRedis(
+				context,
+				cacheKey,
+				missingCacheKey,
+				values,
+			);
 		}
 
 		return values;
@@ -505,7 +554,7 @@ export const playerValuesRepository: PlayerValuesRepository = {
 					{ err: error, playerId: args.playerId },
 					"Failed to fetch player value history from database",
 				);
-				return [];
+				throw new Error(error.message, { cause: error });
 			}
 
 			const rows = (data as DbPlayerValueHistoryRow[] | null) ?? [];
@@ -518,11 +567,16 @@ export const playerValuesRepository: PlayerValuesRepository = {
 			await context.redis.set(cacheKey, JSON.stringify(history), "EX", 3600);
 			return history;
 		} catch (error) {
+			if (error instanceof Error && error.cause) {
+				throw error;
+			}
 			context.logger.error(
 				{ err: error, playerId: args.playerId },
 				"Failed to query player value history",
 			);
-			return [];
+			throw error instanceof Error
+				? error
+				: new Error("Failed to query player value history", { cause: error });
 		}
 	},
 };

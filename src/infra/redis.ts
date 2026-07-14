@@ -25,3 +25,10 @@ export const connectRedis = async (): Promise<Redis> => {
 	}
 	return redis;
 };
+
+export const closeRedis = async (): Promise<void> => {
+	if (!client) return;
+	const current = client;
+	client = null;
+	await current.quit();
+};

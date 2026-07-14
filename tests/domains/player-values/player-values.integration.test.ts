@@ -34,7 +34,10 @@ type QueryResult<T> = {
 	error: { message: string } | null;
 };
 
-function createPlayerValuesQueryBuilder(rows: PlayerValueRow[]) {
+function createPlayerValuesQueryBuilder(
+	rows: PlayerValueRow[],
+	error: { message: string } | null = null,
+) {
 	const eqFilters: Record<string, string | number> = {};
 
 	const applyFilters = (): QueryResult<PlayerValueRow> => {
@@ -46,7 +49,7 @@ function createPlayerValuesQueryBuilder(rows: PlayerValueRow[]) {
 
 		return {
 			data,
-			error: null,
+			error,
 		};
 	};
 
@@ -75,30 +78,69 @@ function createPlayerValuesQueryBuilder(rows: PlayerValueRow[]) {
 
 type ContextOptions = {
 	redisHashData?: Record<string, string>;
+	redisStrings?: Record<string, string>;
+	redisType?: string;
 	rows?: PlayerValueRow[];
+	supabaseError?: { message: string };
 };
 
 function createGraphQLContext(
 	options: ContextOptions = {},
-): GraphQLContext & { calls: { supabaseFrom: number } } {
-	const calls = { supabaseFrom: 0 };
+): GraphQLContext & {
+	calls: { redisCommands: string[]; supabaseFrom: number };
+} {
+	const calls = { redisCommands: [] as string[], supabaseFrom: 0 };
 
 	const supabase = {
 		from: (_table: string) => {
 			calls.supabaseFrom += 1;
-			return createPlayerValuesQueryBuilder(options.rows ?? []);
+			return createPlayerValuesQueryBuilder(
+				options.rows ?? [],
+				options.supabaseError ?? null,
+			);
 		},
 	} as unknown as GraphQLContext["supabase"];
 
+	const pipeline = {
+		del: (...keys: string[]) => {
+			calls.redisCommands.push(`pipeline.del:${keys.join(",")}`);
+			return pipeline;
+		},
+		hset: (key: string) => {
+			calls.redisCommands.push(`pipeline.hset:${key}`);
+			return pipeline;
+		},
+		set: (key: string, value: string, mode: string, ttl: number) => {
+			calls.redisCommands.push(`pipeline.set:${key}:${value}:${mode}:${ttl}`);
+			return pipeline;
+		},
+		exec: async () => [],
+	};
+
 	const redis = {
-		get: async (): Promise<string | null> => null,
-		set: async (): Promise<string> => "OK",
+		type: async (): Promise<string> =>
+			options.redisType ??
+			(options.redisHashData && Object.keys(options.redisHashData).length > 0
+				? "hash"
+				: "none"),
+		get: async (key: string): Promise<string | null> =>
+			options.redisStrings?.[key] ?? null,
+		set: async (
+			key: string,
+			value: string,
+			mode?: string,
+			ttl?: number,
+		): Promise<string> => {
+			calls.redisCommands.push(`set:${key}:${value}:${mode}:${ttl}`);
+			return "OK";
+		},
 		hgetall: async (): Promise<Record<string, string>> =>
 			options.redisHashData ?? {},
-		hset: async (): Promise<number> => 1,
+		pipeline: () => pipeline,
 	} as unknown as GraphQLContext["redis"];
 
 	const logger = {
+		debug: (): void => {},
 		info: (): void => {},
 		warn: (): void => {},
 		error: (): void => {},
@@ -257,5 +299,59 @@ describe("playerValues integration", () => {
 			},
 		]);
 		expect(context.calls.supabaseFrom).toBe(0);
+	});
+
+	it("migrates the legacy null sentinel to a bounded negative-cache key", async () => {
+		const context = createGraphQLContext({
+			redisType: "string",
+			redisStrings: { "PlayerValue:20260421": "__pv:null__" },
+		});
+
+		const result = await graphql({
+			schema: testSchema,
+			source: playerValuesQuery,
+			contextValue: context,
+			variableValues: { changeDate: "2026-04-21" },
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data).toEqual({ playerValues: [] });
+		expect(context.calls.supabaseFrom).toBe(0);
+		expect(context.calls.redisCommands).toContain(
+			"pipeline.set:PlayerValueMissing:20260421:1:EX:600",
+		);
+	});
+
+	it("returns a negative-cache hit without querying Supabase", async () => {
+		const context = createGraphQLContext({
+			redisStrings: { "PlayerValueMissing:20260421": "1" },
+		});
+
+		const result = await graphql({
+			schema: testSchema,
+			source: playerValuesQuery,
+			contextValue: context,
+			variableValues: { changeDate: "2026-04-21" },
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data).toEqual({ playerValues: [] });
+		expect(context.calls.supabaseFrom).toBe(0);
+	});
+
+	it("does not negative-cache a Supabase failure", async () => {
+		const context = createGraphQLContext({
+			supabaseError: { message: "database unavailable" },
+		});
+
+		const result = await graphql({
+			schema: testSchema,
+			source: playerValuesQuery,
+			contextValue: context,
+			variableValues: { changeDate: "2026-04-21" },
+		});
+
+		expect(result.errors?.[0]?.message).toBe("database unavailable");
+		expect(context.calls.redisCommands).toEqual([]);
 	});
 });

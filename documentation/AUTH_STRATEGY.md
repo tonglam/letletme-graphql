@@ -2,11 +2,26 @@
 
 **Project**: Fantasy Football GraphQL API  
 **Date**: 2026-01-18  
-**Status**: Design Complete, Ready for Implementation  
+**Status**: Implemented (hybrid principals)
+
+### Implementation notes (current)
+
+GraphQL field authorization uses a unified `Principal` resolved in this order:
+
+1. Signed website proxy headers (`X-User-Context` + `X-User-Context-Sig`) when `BACKEND_PROXY_SECRET` is set
+2. WeChat Mini Program API session bearer token (`bauth.api_sessions`, hashed at rest)
+3. Better Auth cookie/session (mapped to `Principal` with `fpl_entry_id` from `bauth."user"`)
+4. Device bearer token (`device_sessions.token_hash`, hashed at rest)
+
+Protected entry-scoped fields (including `calcLivePointsByEntry`) require a principal whose bound `fplEntryId` matches the requested `entryId`.
+
+Public bootstrap mutations: `createWechatApiSession` only. `identifyWechatUser` requires authentication and no longer binds arbitrary FPL entry IDs.
+
+`GRAPHQL_AUTH_MODE=report` is rejected at startup in production.
 
 ---
 
-## 🎯 Overview
+## Overview
 
 Hybrid authentication system supporting:
 - **Website**: OAuth (Google, Apple) + Email/Password

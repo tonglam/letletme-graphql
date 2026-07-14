@@ -185,6 +185,7 @@ describe("entriesService.getEntryTransferHistory", () => {
 			const result = await entriesService.getEntryTransferHistory(
 				context,
 				84885,
+				true,
 			);
 			expect(result).toHaveLength(1);
 			expect(result[0].eventId).toBe(12);

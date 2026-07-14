@@ -5,16 +5,17 @@ import {
 	randomUUID,
 	timingSafeEqual,
 } from "crypto";
-import { Pool } from "pg";
 import type { AuthUser } from "./auth";
+import { dbPool } from "./db-pool";
 import { env } from "./env";
+import { logger } from "./logger";
 
-export type PrincipalSource = "website" | "wechat_miniprogram";
+export type PrincipalSource = "website" | "wechat_miniprogram" | "device";
 
 export type Principal = {
 	userId: string;
 	source: PrincipalSource;
-	provider: "better_auth" | "wechat_miniprogram";
+	provider: "better_auth" | "wechat_miniprogram" | "device";
 	fplEntryId: number | null;
 };
 
@@ -54,7 +55,6 @@ type UserIdentityRow = {
 	id: string;
 };
 
-const pool = new Pool({ connectionString: env.DATABASE_URL, max: 10 });
 const WECHAT_PROVIDER = "wechat_miniprogram";
 
 export const hashApiToken = (token: string): string =>
@@ -124,10 +124,8 @@ export const validateApiSessionToken = async (
 	token: string,
 ): Promise<Principal | null> => {
 	const tokenHash = hashApiToken(token);
-	const client = await pool.connect();
-	try {
-		const result = await client.query<ApiSessionRow>(
-			`SELECT s.user_id, u.fpl_entry_id
+	const result = await dbPool.query<ApiSessionRow>(
+		`SELECT s.user_id, u.fpl_entry_id
        FROM bauth.api_sessions s
        JOIN bauth."user" u ON u.id = s.user_id
        WHERE s.token_hash = $1
@@ -135,30 +133,29 @@ export const validateApiSessionToken = async (
          AND s.revoked_at IS NULL
          AND s.expires_at > NOW()
        LIMIT 1`,
-			[tokenHash, WECHAT_PROVIDER],
-		);
+		[tokenHash, WECHAT_PROVIDER],
+	);
 
-		const row = result.rows[0];
-		if (!row) return null;
+	const row = result.rows[0];
+	if (!row) return null;
 
-		void client
-			.query(
-				`UPDATE bauth.api_sessions
+	void dbPool
+		.query(
+			`UPDATE bauth.api_sessions
          SET last_active_at = NOW()
          WHERE token_hash = $1`,
-				[tokenHash],
-			)
-			.catch(() => {});
+			[tokenHash],
+		)
+		.catch((err: unknown) => {
+			logger.warn({ err }, "Failed to update api session last_active_at");
+		});
 
-		return {
-			userId: row.user_id,
-			source: "wechat_miniprogram",
-			provider: WECHAT_PROVIDER,
-			fplEntryId: row.fpl_entry_id,
-		};
-	} finally {
-		client.release();
-	}
+	return {
+		userId: row.user_id,
+		source: "wechat_miniprogram",
+		provider: WECHAT_PROVIDER,
+		fplEntryId: row.fpl_entry_id,
+	};
 };
 
 export const getPrincipalFromHeaders = async (
@@ -212,7 +209,7 @@ export const createWechatApiSession = async (
 ): Promise<ApiSession> => {
 	const openid = await exchangeWechatCode(code);
 	const effectiveEntryId = normalizeFplEntryId(fplEntryId);
-	const client = await pool.connect();
+	const client = await dbPool.connect();
 
 	try {
 		await client.query("BEGIN");
@@ -231,31 +228,51 @@ export const createWechatApiSession = async (
 				`SELECT id
          FROM bauth."user"
          WHERE openid = $1
-           AND ($2::INTEGER IS NULL OR fpl_entry_id = $2)
          ORDER BY email IS NULL ASC, created_at ASC
          LIMIT 1`,
-				[openid, effectiveEntryId],
+				[openid],
 			);
 
 			userId = existingUser.rows[0]?.id;
 		}
 
 		if (!userId) {
+			// Do not accept attacker-supplied fplEntryId on first create without
+			// ownership proof — bind entry later via authenticated bindFplEntry.
 			userId = randomUUID();
 			await client.query(
 				`INSERT INTO bauth."user"
          (id, openid, fpl_entry_id, email_verified, created_at, updated_at)
-         VALUES ($1, $2, $3, false, NOW(), NOW())`,
-				[userId, openid, effectiveEntryId],
+         VALUES ($1, $2, NULL, false, NOW(), NOW())`,
+				[userId, openid],
+			);
+		} else if (effectiveEntryId !== null) {
+			const conflict = await client.query<{ id: string }>(
+				`SELECT id FROM bauth."user"
+         WHERE fpl_entry_id = $1 AND id <> $2
+         LIMIT 1`,
+				[effectiveEntryId, userId],
+			);
+			if (conflict.rows[0]) {
+				throw new Error(
+					"FPL entry is already bound to another account",
+				);
+			}
+			await client.query(
+				`UPDATE bauth."user"
+         SET openid = COALESCE(NULLIF(openid, ''), $1),
+             fpl_entry_id = COALESCE(fpl_entry_id, $2),
+             updated_at = NOW()
+         WHERE id = $3`,
+				[openid, effectiveEntryId, userId],
 			);
 		} else {
 			await client.query(
 				`UPDATE bauth."user"
          SET openid = COALESCE(NULLIF(openid, ''), $1),
-             fpl_entry_id = COALESCE($2, fpl_entry_id),
              updated_at = NOW()
-         WHERE id = $3`,
-				[openid, effectiveEntryId, userId],
+         WHERE id = $2`,
+				[openid, userId],
 			);
 		}
 
@@ -286,7 +303,7 @@ export const createWechatApiSession = async (
 			`SELECT fpl_entry_id FROM bauth."user" WHERE id = $1`,
 			[userId],
 		);
-		const boundEntryId = userResult.rows[0]?.fpl_entry_id ?? effectiveEntryId;
+		const boundEntryId = userResult.rows[0]?.fpl_entry_id ?? null;
 
 		await client.query("COMMIT");
 
@@ -299,7 +316,11 @@ export const createWechatApiSession = async (
 			},
 		};
 	} catch (error) {
-		await client.query("ROLLBACK");
+		try {
+			await client.query("ROLLBACK");
+		} catch {
+			/* ignore */
+		}
 		throw error;
 	} finally {
 		client.release();

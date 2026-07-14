@@ -18,12 +18,11 @@ export const wechatAuthTypeDefs = `#graphql
     createWechatApiSession(code: String!, fplEntryId: Int): ApiSession!
 
     """
-    Called by the miniprogram on launch and on team ID change.
-    Exchanges wx.login() code for OpenID, ensures a user row exists,
-    and links to the first authenticated website user sharing the same fplEntryId.
-    Returns the stable OpenID.
+    Deprecated: prefer createWechatApiSession.
+    Exchanges wx.login() code for OpenID and ensures a user row exists.
+    Requires authentication. Does not bind fplEntryId (use bindFplEntry).
     """
-    identifyWechatUser(code: String!, fplEntryId: Int): String!
+    identifyWechatUser(code: String!): String!
 
     """
     Called by authenticated website users to set their FPL team ID.

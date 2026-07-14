@@ -17,8 +17,22 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Secret scan
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz \
+            | tar -xz gitleaks
+          # Scan the working tree only (not git history). Rotate any previously
+          # committed credentials separately; history rewrite is a manual ops step.
+          ./gitleaks detect --source . --no-git --verbose --config .gitleaks.toml
+
       - name: Lint
         run: bun run lint
+
+      - name: Typecheck
+        run: bunx tsc --noEmit
+
+      - name: Test
+        run: bun test
 
       - name: Build check
         run: bun build src/index.ts --target bun --outdir /tmp/build-check

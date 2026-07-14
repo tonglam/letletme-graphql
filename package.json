@@ -24,6 +24,7 @@
     "bcryptjs": "^3.0.3",
     "better-auth": "^1.4.15",
     "graphql": "^16.8.1",
+    "graphql-depth-limit": "^1.1.0",
     "graphql-scalars": "^1.24.0",
     "ioredis": "^5.4.1",
     "pg": "^8.17.1",
@@ -32,6 +33,7 @@
   },
   "devDependencies": {
     "@types/bcryptjs": "^3.0.0",
+    "@types/graphql-depth-limit": "^1.1.6",
     "@types/pg": "^8.16.0",
     "@typescript-eslint/eslint-plugin": "^8.18.2",
     "@typescript-eslint/parser": "^8.18.2",

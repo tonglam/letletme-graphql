@@ -590,6 +590,7 @@ describe('eventStatsRepository.getTournamentSelectionStats', () => {
         get: async (key: string): Promise<string | null> => {
           if (key.startsWith('tournament-selection-stats:') && !key.includes('captain-counts'))
             return null;
+          if (key.startsWith('tournament:info:league:')) return null;
           if (key.startsWith('tournament:info:')) return null;
           if (key.startsWith('tournaments:entry-ids:')) return null;
           if (key.startsWith('tournament-selection-stats:captain-counts:')) return null;

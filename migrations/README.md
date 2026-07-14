@@ -13,8 +13,8 @@
 ### Option 2: psql Command Line
 
 ```bash
-# Using the DATABASE_URL from your .env file
-psql "postgresql://postgres.gtwcfjoviibmtkevurjw:letletguanlaoshiPg@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true" -f migrations/001_auth_schema.sql
+# Using the DATABASE_URL from your .env file (never commit real credentials)
+psql "$DATABASE_URL" -f migrations/001_auth_schema.sql
 ```
 
 ### Option 3: Bun Script
@@ -134,6 +134,20 @@ After running the migration:
 2. ✅ Test device authentication: `POST /api/device/auth`
 3. ✅ Test GraphQL `me` query
 4. ✅ (Optional) Set up OAuth credentials for Google/Apple
+
+---
+
+### 024_device_sessions_token_hash.sql
+
+Stores device session tokens as SHA-256 hashes (`token_hash`) instead of plaintext.
+Existing plaintext tokens are cleared; mobile clients must re-authenticate after this migration.
+
+---
+
+## Credential hygiene
+
+Never paste real `DATABASE_URL` values into this README or other tracked files.
+Use `$DATABASE_URL` from your local `.env`. If a credential was ever committed, rotate it in Supabase immediately — scrubbing the file does not remove it from git history.
 
 ---
 

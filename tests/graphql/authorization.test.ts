@@ -58,17 +58,30 @@ describe("authorizeGraphQLRequest", () => {
 		expect(result.ok).toBe(true);
 	});
 
-	it("rejects own-entry fields for a different entry", async () => {
+	it("rejects calcLivePointsByEntry without a principal", async () => {
 		const result = await authorize(
-			`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
-			{ entryId: 456 },
-			websitePrincipal,
+			`query Calc($eventId: Int!, $entryId: Int!) {
+        calcLivePointsByEntry(eventId: $eventId, entryId: $entryId) { entry }
+      }`,
+			{ eventId: 1, entryId: 123 },
 		);
 
 		expect(result.ok).toBe(false);
 		if (!result.ok) {
-			expect(result.status).toBe(403);
-			expect(result.code).toBe("FORBIDDEN");
+			expect(result.status).toBe(401);
+			expect(result.code).toBe("UNAUTHENTICATED");
 		}
+	});
+
+	it("allows calcLivePointsByEntry for a matching bound entry", async () => {
+		const result = await authorize(
+			`query Calc($eventId: Int!, $entryId: Int!) {
+        calcLivePointsByEntry(eventId: $eventId, entryId: $entryId) { entry }
+      }`,
+			{ eventId: 1, entryId: 123 },
+			websitePrincipal,
+		);
+
+		expect(result.ok).toBe(true);
 	});
 });

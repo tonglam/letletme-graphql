@@ -28,7 +28,7 @@ export const leaguesTypeDefs = /* GraphQL */ `
 
   type LeagueEventResult {
     league: League!
-    event: Event!
+    event: Event
     entryId: Int!
     entryName: String
     playerName: String
