@@ -1,31 +1,22 @@
 import { betterAuth } from "better-auth";
-import { Pool } from "pg";
+import { dbPool } from "./db-pool";
 import { env } from "./env";
 import { logger } from "./logger";
 
-// PostgreSQL connection pool for Better Auth
-const pool = new Pool({
-	connectionString: env.DATABASE_URL,
-	max: 20,
-	idleTimeoutMillis: 30000,
-	connectionTimeoutMillis: 2000,
-});
-
-// Better Auth instance configuration with error handling
 let authInstance: ReturnType<typeof betterAuth>;
 
 try {
 	authInstance = betterAuth({
-		database: pool,
+		database: dbPool,
+		secret: env.BETTER_AUTH_SECRET,
+		baseURL: env.BETTER_AUTH_URL,
 
-		// Email and password authentication
 		emailAndPassword: {
 			enabled: true,
 			minPasswordLength: 8,
-			requireEmailVerification: false, // Enable later if needed
+			requireEmailVerification: false,
 		},
 
-		// OAuth providers
 		socialProviders: {
 			google: {
 				clientId: env.GOOGLE_CLIENT_ID,
@@ -39,19 +30,17 @@ try {
 			},
 		},
 
-		// Session configuration
 		session: {
-			expiresIn: 60 * 60 * 24 * 7, // 7 days
+			expiresIn: 60 * 60 * 24 * 7,
 			cookieCache: {
 				enabled: true,
-				maxAge: 60 * 5, // 5 minutes
+				maxAge: 60 * 5,
 			},
 		},
 	});
 
 	logger.info("Better Auth initialized successfully");
 } catch (error) {
-	// Log the actual error details for debugging
 	const errorMessage = error instanceof Error ? error.message : String(error);
 	const errorStack = error instanceof Error ? error.stack : undefined;
 
@@ -64,11 +53,17 @@ try {
 		"Better Auth initialization failed - check database connection and schema",
 	);
 
-	// Create a minimal instance to prevent crashes
-	// This will still fail on actual auth operations, but won't crash on import
+	if (env.isProduction) {
+		throw error instanceof Error
+			? error
+			: new Error("Better Auth initialization failed in production");
+	}
+
 	try {
 		authInstance = betterAuth({
-			database: pool,
+			database: dbPool,
+			secret: env.BETTER_AUTH_SECRET,
+			baseURL: env.BETTER_AUTH_URL,
 			emailAndPassword: {
 				enabled: false,
 			},
@@ -78,16 +73,16 @@ try {
 			{ err: fallbackError },
 			"Failed to create fallback auth instance - auth features will be unavailable",
 		);
-		// Create a no-op instance as last resort
 		authInstance = betterAuth({
-			database: pool,
+			database: dbPool,
+			secret: env.BETTER_AUTH_SECRET,
+			baseURL: env.BETTER_AUTH_URL,
 		});
 	}
 }
 
 export const auth = authInstance;
 
-// Type for authenticated user
 export interface AuthUser {
 	id: string;
 	email: string | null;
@@ -100,7 +95,6 @@ export interface AuthUser {
 	fplEntryId?: number | null;
 }
 
-// Helper to validate and extract user from Better Auth session
 export async function getUserFromSession(
 	headers: Headers,
 ): Promise<AuthUser | null> {
@@ -120,7 +114,20 @@ export async function getUserFromSession(
 			isAnonymous: false,
 		};
 	} catch (error) {
-		console.error("Failed to get user from session:", error);
+		logger.warn({ err: error }, "Failed to get user from session");
 		return null;
 	}
+}
+
+/**
+ * Look up fpl_entry_id for a Better Auth / website user id.
+ */
+export async function getFplEntryIdForUser(
+	userId: string,
+): Promise<number | null> {
+	const result = await dbPool.query<{ fpl_entry_id: number | null }>(
+		`SELECT fpl_entry_id FROM bauth."user" WHERE id = $1 LIMIT 1`,
+		[userId],
+	);
+	return result.rows[0]?.fpl_entry_id ?? null;
 }

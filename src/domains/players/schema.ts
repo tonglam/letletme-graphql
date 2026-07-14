@@ -33,7 +33,7 @@ export const playersTypeDefs = /* GraphQL */ `
     webName: String!
     firstName: String
     secondName: String
-    team: Team!
+    team: Team
     position: Position!
     price: Int!
     startPrice: Int!

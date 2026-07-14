@@ -98,3 +98,7 @@ __pycache__/
 .parcel-cache/
 .next/
 out/
+
+# Deploy secrets
+.env.deploy
+.env.deploy.local

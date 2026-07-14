@@ -16,9 +16,9 @@ export const wechatAuthResolvers = {
 
 		identifyWechatUser: (
 			_parent: unknown,
-			args: { code: string; fplEntryId?: number | null },
+			args: { code: string },
 			_context: GraphQLContext,
-		): Promise<string> => identifyWechatUser(args.code, args.fplEntryId),
+		): Promise<string> => identifyWechatUser(args.code),
 
 		bindFplEntry: async (
 			_parent: unknown,

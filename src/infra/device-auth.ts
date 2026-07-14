@@ -1,12 +1,7 @@
-import { Pool } from "pg";
+import { createHash } from "crypto";
 import type { AuthUser } from "./auth";
-import { env } from "./env";
-
-// Separate pool for device authentication
-const pool = new Pool({
-	connectionString: env.DATABASE_URL,
-	max: 10,
-});
+import { dbPool } from "./db-pool";
+import { logger } from "./logger";
 
 interface DeviceInfo {
 	name?: string;
@@ -47,20 +42,23 @@ type DeviceSessionRow = {
 	created_at: Date;
 };
 
+export const hashDeviceToken = (token: string): string =>
+	createHash("sha256").update(token).digest("hex");
+
 /**
- * Authenticate a device and return a session token
- * Creates anonymous user if device is new
+ * Authenticate a device and return a session token.
+ * Creates an anonymous user if the device is new.
+ * The plaintext token is returned once; only the SHA-256 hash is stored.
  */
 export async function authenticateDevice(
 	deviceId: string,
 	deviceInfo?: DeviceInfo,
 ): Promise<DeviceAuthResult> {
-	const client = await pool.connect();
+	const client = await dbPool.connect();
 
 	try {
 		await client.query("BEGIN");
 
-		// Check if device already has a user
 		const existingUser = await client.query<UserDeviceRow>(
 			'SELECT id, "isAnonymous" FROM "user" WHERE "deviceId" = $1',
 			[deviceId],
@@ -70,13 +68,11 @@ export async function authenticateDevice(
 		let isAnonymous: boolean;
 
 		if (existingUser.rows.length > 0) {
-			// Existing device - return existing user
 			const row = existingUser.rows[0];
 			if (!row) throw new Error("Expected row after length check");
 			userId = row.id;
 			isAnonymous = row.isAnonymous ?? false;
 		} else {
-			// New device - create anonymous user
 			userId = crypto.randomUUID();
 
 			await client.query(
@@ -88,18 +84,18 @@ export async function authenticateDevice(
 			isAnonymous = true;
 		}
 
-		// Generate new token
 		const token = crypto.randomUUID();
+		const tokenHash = hashDeviceToken(token);
 		const expiresAt = new Date();
-		expiresAt.setFullYear(expiresAt.getFullYear() + 1); // 1 year for mobile
+		expiresAt.setFullYear(expiresAt.getFullYear() + 1);
 
-		// Upsert device session
 		await client.query(
-			`INSERT INTO device_sessions 
-       (id, user_id, device_id, device_name, device_os, token, expires_at, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+			`INSERT INTO device_sessions
+       (id, user_id, device_id, device_name, device_os, token, token_hash, expires_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, NOW())
        ON CONFLICT (device_id) DO UPDATE SET
-         token = EXCLUDED.token,
+         token = NULL,
+         token_hash = EXCLUDED.token_hash,
          last_active = NOW(),
          expires_at = EXCLUDED.expires_at,
          device_name = COALESCE(EXCLUDED.device_name, device_sessions.device_name),
@@ -110,7 +106,7 @@ export async function authenticateDevice(
 				deviceId,
 				deviceInfo?.name ?? null,
 				deviceInfo?.os ?? null,
-				token,
+				tokenHash,
 				expiresAt,
 			],
 		);
@@ -119,7 +115,11 @@ export async function authenticateDevice(
 
 		return { token, userId, isAnonymous };
 	} catch (error) {
-		await client.query("ROLLBACK");
+		try {
+			await client.query("ROLLBACK");
+		} catch {
+			/* ignore rollback errors on broken connections */
+		}
 		throw error;
 	} finally {
 		client.release();
@@ -127,18 +127,16 @@ export async function authenticateDevice(
 }
 
 /**
- * Validate a device token and return user info
+ * Validate a device token and return user info.
  */
 export async function validateDeviceToken(
 	token: string,
 ): Promise<AuthUser | null> {
-	const client = await pool.connect();
-
-	try {
-		const result = await client.query<DeviceSessionUserRow>(
-			`SELECT 
-         ds.user_id, 
-         ds.device_id, 
+	const tokenHash = hashDeviceToken(token);
+	const result = await dbPool.query<DeviceSessionUserRow>(
+		`SELECT
+         ds.user_id,
+         ds.device_id,
          u.email,
          u.name,
          u."emailVerified",
@@ -146,51 +144,48 @@ export async function validateDeviceToken(
          u."isAnonymous"
        FROM device_sessions ds
        JOIN "user" u ON ds.user_id = u.id
-       WHERE ds.token = $1 AND ds.expires_at > NOW()`,
-			[token],
-		);
+       WHERE ds.token_hash = $1 AND ds.expires_at > NOW()`,
+		[tokenHash],
+	);
 
-		if (result.rows.length === 0) {
-			return null;
-		}
-
-		const row = result.rows[0];
-
-		// Update last active timestamp (fire and forget)
-		client
-			.query(
-				"UPDATE device_sessions SET last_active = NOW() WHERE token = $1",
-				[token],
-			)
-			.catch(console.error);
-
-		return {
-			id: row.user_id,
-			email: row.email,
-			name: row.name,
-			emailVerified: row.emailVerified ?? false,
-			image: row.image,
-			isAnonymous: row.isAnonymous ?? false,
-			deviceId: row.device_id,
-		};
-	} finally {
-		client.release();
+	if (result.rows.length === 0) {
+		return null;
 	}
+
+	const row = result.rows[0];
+
+	// Use pool.query (no checked-out client) so last_active updates never race release().
+	void dbPool
+		.query("UPDATE device_sessions SET last_active = NOW() WHERE token_hash = $1", [
+			tokenHash,
+		])
+		.catch((err: unknown) => {
+			logger.warn({ err }, "Failed to update device session last_active");
+		});
+
+	return {
+		id: row.user_id,
+		email: row.email,
+		name: row.name,
+		emailVerified: row.emailVerified ?? false,
+		image: row.image,
+		isAnonymous: row.isAnonymous ?? false,
+		deviceId: row.device_id,
+	};
 }
 
 /**
- * Link an anonymous device user to an email/OAuth account
+ * Link an anonymous device user to an email/OAuth account.
  */
 export async function linkDeviceToAccount(
 	deviceId: string,
 	email: string,
 ): Promise<void> {
-	const client = await pool.connect();
+	const client = await dbPool.connect();
 
 	try {
 		await client.query("BEGIN");
 
-		// Get the anonymous user
 		const deviceUser = await client.query<DeviceUserRow>(
 			'SELECT id FROM "user" WHERE "deviceId" = $1 AND "isAnonymous" = true',
 			[deviceId],
@@ -202,9 +197,8 @@ export async function linkDeviceToAccount(
 
 		const userId = deviceUser.rows[0].id;
 
-		// Update user to link with email
 		await client.query(
-			`UPDATE "user" 
+			`UPDATE "user"
        SET email = $1, "isAnonymous" = false, "linkedAt" = NOW(), "updatedAt" = NOW()
        WHERE id = $2`,
 			[email, userId],
@@ -212,7 +206,11 @@ export async function linkDeviceToAccount(
 
 		await client.query("COMMIT");
 	} catch (error) {
-		await client.query("ROLLBACK");
+		try {
+			await client.query("ROLLBACK");
+		} catch {
+			/* ignore */
+		}
 		throw error;
 	} finally {
 		client.release();
@@ -220,20 +218,17 @@ export async function linkDeviceToAccount(
 }
 
 /**
- * Revoke a device session
+ * Revoke a device session by plaintext token.
  */
 export async function revokeDeviceToken(token: string): Promise<void> {
-	const client = await pool.connect();
-
-	try {
-		await client.query("DELETE FROM device_sessions WHERE token = $1", [token]);
-	} finally {
-		client.release();
-	}
+	const tokenHash = hashDeviceToken(token);
+	await dbPool.query("DELETE FROM device_sessions WHERE token_hash = $1", [
+		tokenHash,
+	]);
 }
 
 /**
- * Get all device sessions for a user
+ * Get all device sessions for a user.
  */
 export async function getUserDevices(userId: string): Promise<
 	Array<{
@@ -245,26 +240,20 @@ export async function getUserDevices(userId: string): Promise<
 		createdAt: Date;
 	}>
 > {
-	const client = await pool.connect();
-
-	try {
-		const result = await client.query<DeviceSessionRow>(
-			`SELECT id, device_id, device_name, device_os, last_active, created_at
+	const result = await dbPool.query<DeviceSessionRow>(
+		`SELECT id, device_id, device_name, device_os, last_active, created_at
        FROM device_sessions
        WHERE user_id = $1 AND expires_at > NOW()
        ORDER BY last_active DESC`,
-			[userId],
-		);
+		[userId],
+	);
 
-		return result.rows.map((row) => ({
-			id: row.id,
-			deviceId: row.device_id,
-			deviceName: row.device_name,
-			deviceOs: row.device_os,
-			lastActive: row.last_active,
-			createdAt: row.created_at,
-		}));
-	} finally {
-		client.release();
-	}
+	return result.rows.map((row) => ({
+		id: row.id,
+		deviceId: row.device_id,
+		deviceName: row.device_name,
+		deviceOs: row.device_os,
+		lastActive: row.last_active,
+		createdAt: row.created_at,
+	}));
 }

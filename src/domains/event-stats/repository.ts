@@ -138,7 +138,8 @@ async function getTournamentInfo(
   context: GraphQLContext,
   tournamentId: number
 ): Promise<DbTournamentInfoRow | null> {
-  const cacheKey = `tournament:info:${tournamentId}`;
+  // Distinct from tournaments domain key `tournament:info:` (full TournamentInfo).
+  const cacheKey = `tournament:info:league:${tournamentId}`;
   const cached = await context.redis.get(cacheKey);
   if (cached) {
     return JSON.parse(cached) as DbTournamentInfoRow;

@@ -7,6 +7,7 @@ import type { Fixture } from "../fixtures/repository";
 import { fixturesService } from "../fixtures/service";
 import type { LivePerformance } from "../live/repository";
 import { liveRepository } from "../live/repository";
+import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
 import { playersRepository } from "../players/repository";
 import type {
 	EntryEventPick,
@@ -611,7 +612,7 @@ export const entryLiveCalcService = {
 		});
 
 		const playerIdList = Array.from(allPlayerIds);
-		const [playersList, livePerformances] = await Promise.all([
+		const [playersList, livePerformances, bonusByPlayerId] = await Promise.all([
 			playersRepository.getPlayersByIds(context, playerIdList),
 			includeLive
 				? liveRepository.getLivePerformancesByPlayerIds(
@@ -620,6 +621,9 @@ export const entryLiveCalcService = {
 						playerIdList,
 					)
 				: Promise.resolve([] as LivePerformance[]),
+			includeLive
+				? loadLiveBonusByPlayerId(context, eventId)
+				: Promise.resolve(new Map<number, number>()),
 		]);
 		const playersById: Map<number, Player> = new Map(
 			playersList.map((player) => [
@@ -649,21 +653,29 @@ export const entryLiveCalcService = {
 
 			const live = liveByPlayer.get(pick.element);
 			const elementType = player?.position ?? 0;
+			const bonusOverride = bonusByPlayerId.get(pick.element);
+			const liveWithBonus =
+				live !== undefined
+					? { ...live, bonus: bonusOverride ?? live.bonus }
+					: live;
 
 			// Extract live stats with safe defaults (reduced null coalescing)
-			const minutes = safeNull(live?.minutes, 0);
-			const yellowCards = safeNull(live?.yellowCards, 0);
-			const redCards = safeNull(live?.redCards, 0);
+			const minutes = safeNull(liveWithBonus?.minutes, 0);
+			const yellowCards = safeNull(liveWithBonus?.yellowCards, 0);
+			const redCards = safeNull(liveWithBonus?.redCards, 0);
 			const isPlayed = minutes > 0 || yellowCards > 0 || redCards > 0;
 
 			const defensiveContribution: number = safeNull(
-				live?.defensiveContribution,
+				liveWithBonus?.defensiveContribution,
 				0,
 			);
 
 			// Calculate live points from individual stats
 			// For DGW players (minutes > 90), pass fixture count so playing points are correct
-			const calculatedTotalPoints = calcElementLivePoints(elementType, live);
+			const calculatedTotalPoints = calcElementLivePoints(
+				elementType,
+				liveWithBonus,
+			);
 
 			return {
 				season: null,
@@ -695,28 +707,30 @@ export const entryLiveCalcService = {
 				isPlayed,
 				playStatus: matchInfo.playStatus,
 				minutes,
-				goalsScored: safeNull(live?.goalsScored, 0),
-				assists: safeNull(live?.assists, 0),
-				cleanSheets: safeNull(live?.cleanSheets, 0),
-				goalsConceded: safeNull(live?.goalsConceded, 0),
+				goalsScored: safeNull(liveWithBonus?.goalsScored, 0),
+				assists: safeNull(liveWithBonus?.assists, 0),
+				cleanSheets: safeNull(liveWithBonus?.cleanSheets, 0),
+				goalsConceded: safeNull(liveWithBonus?.goalsConceded, 0),
 				defensiveContribution,
-				ownGoals: safeNull(live?.ownGoals, 0),
-				penaltiesSaved: safeNull(live?.penaltiesSaved, 0),
-				penaltiesMissed: safeNull(live?.penaltiesMissed, 0),
+				ownGoals: safeNull(liveWithBonus?.ownGoals, 0),
+				penaltiesSaved: safeNull(liveWithBonus?.penaltiesSaved, 0),
+				penaltiesMissed: safeNull(liveWithBonus?.penaltiesMissed, 0),
 				yellowCards,
 				redCards,
-				saves: safeNull(live?.saves, 0),
-				bonus: safeNull(live?.bonus, 0),
-				bps: safeNull(live?.bps, 0),
+				saves: safeNull(liveWithBonus?.saves, 0),
+				bonus: safeNull(liveWithBonus?.bonus, 0),
+				bps: safeNull(liveWithBonus?.bps, 0),
 				totalPoints: calculatedTotalPoints,
-				starts: live?.starts ?? null,
-				expectedGoals: parseNullableFloat(live?.expectedGoals),
-				expectedAssists: parseNullableFloat(live?.expectedAssists),
+				starts: liveWithBonus?.starts ?? null,
+				expectedGoals: parseNullableFloat(liveWithBonus?.expectedGoals),
+				expectedAssists: parseNullableFloat(liveWithBonus?.expectedAssists),
 				expectedGoalInvolvements: parseNullableFloat(
-					live?.expectedGoalInvolvements,
+					liveWithBonus?.expectedGoalInvolvements,
 				),
-				expectedGoalsConceded: parseNullableFloat(live?.expectedGoalsConceded),
-				inDreamTeam: live?.inDreamTeam ?? null,
+				expectedGoalsConceded: parseNullableFloat(
+					liveWithBonus?.expectedGoalsConceded,
+				),
+				inDreamTeam: liveWithBonus?.inDreamTeam ?? null,
 				pickActive: false,
 				autoSub: false,
 				bgw: matchInfo.bgw,

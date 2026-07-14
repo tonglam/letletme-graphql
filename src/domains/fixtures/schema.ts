@@ -8,8 +8,8 @@ export const fixturesTypeDefs = /* GraphQL */ `
     kickoffTime: DateTime
     minutes: Int!
     started: Boolean
-    homeTeam: Team!
-    awayTeam: Team!
+    homeTeam: Team
+    awayTeam: Team
     homeScore: Int
     awayScore: Int
     homeTeamDifficulty: Int

@@ -970,18 +970,27 @@ export const liveRepository: LiveRepository = {
     }
 
     const results: LivePerformance[] = [];
-    let anyHit = false;
-    for (const value of values) {
+    const hitIds = new Set<number>();
+    for (let i = 0; i < uniqueIds.length; i++) {
+      const value = values[i];
       if (!value) continue;
-      anyHit = true;
       const parsed = parseJsonUnknown(value);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
       const perf = mapSyncJobLiveRow(parsed as Record<string, unknown>);
-      if (perf) results.push(perf);
+      if (perf) {
+        results.push(perf);
+        hitIds.add(uniqueIds[i]);
+      }
     }
 
-    if (!anyHit) {
-      return fetchLivePerformanceFromDbByEventsAndPlayerIds(context, [eventId], uniqueIds);
+    const missIds = uniqueIds.filter((id) => !hitIds.has(id));
+    if (missIds.length > 0) {
+      const fromDb = await fetchLivePerformanceFromDbByEventsAndPlayerIds(
+        context,
+        [eventId],
+        missIds
+      );
+      results.push(...fromDb);
     }
 
     return results;

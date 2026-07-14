@@ -1,7 +1,7 @@
 export const liveTypeDefs = /* GraphQL */ `
   type LivePerformance {
-    event: Event!
-    player: Player!
+    event: Event
+    player: Player
     minutes: Int
     goalsScored: Int
     assists: Int
@@ -32,7 +32,7 @@ export const liveTypeDefs = /* GraphQL */ `
   }
 
   type EventLive {
-    event: Event!
+    event: Event
     performances: [LivePerformance!]!
     dreamTeam: [LivePerformance!]!
     topPerformers(limit: Int = 10): [LivePerformance!]!
@@ -82,7 +82,7 @@ export const liveTypeDefs = /* GraphQL */ `
   }
 
   type LiveExplain {
-    event: Event!
+    event: Event
     eventId: Int!
     player: Player
     elementId: Int!
