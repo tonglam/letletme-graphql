@@ -85,7 +85,7 @@ jobs:
           script: |
             set -euo pipefail
             LOWER_USER=$(echo "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
-            docker login ghcr.io -u "$LOWER_USER" -p "$GHCR_TOKEN"
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
 
             # First-time setup: clone repo if workdir doesn't exist
             if [ ! -d "$VPS_WORKDIR/.git" ]; then
@@ -118,3 +118,7 @@ jobs:
             done
 
             APP_IMAGE="$IMAGE_REF" docker compose ps
+
+            # Commit-tagged images remain available in GHCR, so remove VPS copies
+            # that are no longer referenced by a container after a healthy deploy.
+            docker image prune --all --force
