@@ -18,13 +18,13 @@ export const eventStatsResolvers = {
 		tournamentSelectionStats: async (
 			_parent: unknown,
 			args: TournamentSelectionStatsArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<TournamentSelectionStats> =>
 			eventStatsService.getTournamentSelectionStats(
 				context,
 				args.tournamentId,
 				args.eventId,
-				args.limit ?? 10,
+				args.limit ?? 10
 			),
 	},
 	SelectionStatPlayer: {

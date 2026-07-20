@@ -50,7 +50,7 @@ describe("tournamentsService.getEntryTournaments", () => {
 		let capturedEntryId = -1;
 		tournamentsRepository.getEntryTournaments = async (
 			inputContext: GraphQLContext,
-			entryId: number,
+			entryId: number
 		): Promise<typeof expected> => {
 			expect(inputContext).toBe(context);
 			capturedEntryId = entryId;
@@ -58,10 +58,7 @@ describe("tournamentsService.getEntryTournaments", () => {
 		};
 
 		try {
-			const result = await tournamentsService.getEntryTournaments(
-				context,
-				12345,
-			);
+			const result = await tournamentsService.getEntryTournaments(context, 12345);
 			expect(capturedEntryId).toBe(12345);
 			expect(result).toEqual(expected);
 		} finally {
@@ -131,7 +128,7 @@ describe("tournamentsService.getTournamentEventResults", () => {
 		tournamentsRepository.getTournamentEventResults = async (
 			inputContext: GraphQLContext,
 			tournamentId: number,
-			eventId: number,
+			eventId: number
 		): Promise<TournamentEventResult[]> => {
 			expect(inputContext).toBe(context);
 			capturedTournamentId = tournamentId;
@@ -140,11 +137,7 @@ describe("tournamentsService.getTournamentEventResults", () => {
 		};
 
 		try {
-			const result = await tournamentsService.getTournamentEventResults(
-				context,
-				1,
-				33,
-			);
+			const result = await tournamentsService.getTournamentEventResults(context, 1, 33);
 			expect(capturedTournamentId).toBe(1);
 			expect(capturedEventId).toBe(33);
 			expect(result).toEqual(expected);
@@ -182,7 +175,7 @@ describe("tournamentsService.getTournamentEntryRankingSummary", () => {
 			inputContext: GraphQLContext,
 			tournamentId: number,
 			eventId: number,
-			entryId: number,
+			entryId: number
 		): Promise<TournamentEntryRankingSummary> => {
 			expect(inputContext).toBe(context);
 			capturedTournamentId = tournamentId;
@@ -192,12 +185,7 @@ describe("tournamentsService.getTournamentEntryRankingSummary", () => {
 		};
 
 		try {
-			const result = await tournamentsService.getTournamentEntryRankingSummary(
-				context,
-				1,
-				33,
-				123,
-			);
+			const result = await tournamentsService.getTournamentEntryRankingSummary(context, 1, 33, 123);
 			expect(capturedTournamentId).toBe(1);
 			expect(capturedEventId).toBe(33);
 			expect(capturedEntryId).toBe(123);
@@ -266,7 +254,7 @@ describe("tournamentsService.getTournamentBattleGroupResults", () => {
 		tournamentsRepository.getTournamentBattleGroupResults = async (
 			inputContext: GraphQLContext,
 			tournamentId: number,
-			eventId: number,
+			eventId: number
 		): Promise<TournamentBattleGroupResult[]> => {
 			expect(inputContext).toBe(context);
 			capturedTournamentId = tournamentId;
@@ -275,11 +263,7 @@ describe("tournamentsService.getTournamentBattleGroupResults", () => {
 		};
 
 		try {
-			const result = await tournamentsService.getTournamentBattleGroupResults(
-				context,
-				7,
-				15,
-			);
+			const result = await tournamentsService.getTournamentBattleGroupResults(context, 7, 15);
 			expect(capturedTournamentId).toBe(7);
 			expect(capturedEventId).toBe(15);
 			expect(result).toEqual(expected);

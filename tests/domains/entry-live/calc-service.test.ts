@@ -3,12 +3,11 @@ import type { ElementEventResultData } from "../../../src/domains/entry-live/cal
 import {
 	applyAutoSubs,
 	calcElementLivePoints,
+	calcOfficialTotalWithEffectiveBonus,
 } from "../../../src/domains/entry-live/calc-service";
 import type { LivePerformance } from "../../../src/domains/live/repository";
 
-const makeLive = (
-	overrides: Partial<LivePerformance> = {},
-): LivePerformance => ({
+const makeLive = (overrides: Partial<LivePerformance> = {}): LivePerformance => ({
 	eventId: 1,
 	playerId: 1,
 	minutes: 90,
@@ -35,9 +34,7 @@ const makeLive = (
 	...overrides,
 });
 
-const makePick = (
-	overrides: Partial<ElementEventResultData> = {},
-): ElementEventResultData => ({
+const makePick = (overrides: Partial<ElementEventResultData> = {}): ElementEventResultData => ({
 	season: null,
 	event: 1,
 	element: 1,
@@ -92,6 +89,11 @@ const makePick = (
 });
 
 describe("calcElementLivePoints", () => {
+	it("preserves official fixture rounding while replacing provisional bonus", () => {
+		const live = makeLive({ totalPoints: 11, bonus: 2, minutes: 180 });
+		expect(calcOfficialTotalWithEffectiveBonus(live, 5)).toBe(14);
+		expect(calcOfficialTotalWithEffectiveBonus(live)).toBe(11);
+	});
 	it("returns 0 for undefined live", () => {
 		expect(calcElementLivePoints(1, undefined)).toBe(0);
 	});

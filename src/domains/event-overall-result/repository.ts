@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { metrics } from "../../infra/metrics";
 import { getCurrentSeason } from "../../infra/season";
 
 export type ChipPlay = {
@@ -75,10 +76,7 @@ function mapEventResult(row: DbEventRow): EventResult {
 
 	// Parse topElementInfo
 	let topElementInfo: TopElementInfo = { element: 0, points: 0 };
-	if (
-		typeof row.top_element_info === "object" &&
-		row.top_element_info !== null
-	) {
+	if (typeof row.top_element_info === "object" && row.top_element_info !== null) {
 		const topElement = row.top_element_info as Record<string, unknown>;
 		topElementInfo = {
 			element: Number(topElement.element ?? 0),
@@ -116,21 +114,34 @@ export const eventOverallResultRepository: EventOverallResultRepository = {
 		const season = Number(await getCurrentSeason(context));
 		const cacheKey = `EventOverallResult:${season}`;
 		try {
-			const hashData = await context.redis.hgetall(cacheKey);
+			let hashData: Record<string, string> = {};
+			try {
+				hashData = await context.redis.hgetall(cacheKey);
+			} catch (error) {
+				context.logger.warn(
+					{ err: error, cacheKey, season },
+					"Failed to read event overall cache; falling back to database"
+				);
+				metrics.cacheRepositoryEvents.labels("event_overall", "cache_error").inc();
+			}
 
 			if (Object.keys(hashData).length > 0) {
 				const eventResults: EventResult[] = [];
+				let malformed = false;
 				for (const [eventId, jsonValue] of Object.entries(hashData)) {
 					try {
 						const parsed = JSON.parse(jsonValue) as unknown;
-						if (typeof parsed === "object" && parsed !== null) {
+						if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
 							const data = parsed as Record<string, unknown>;
+							const parsedEvent = Number(data.event ?? eventId);
+							if (!Number.isFinite(parsedEvent) || parsedEvent <= 0) {
+								malformed = true;
+								continue;
+							}
 							// Convert hash format to EventResult
 							const result: EventResult = {
-								event: Number(data.event ?? eventId),
-								averageScore: Number(
-									data.averageScore ?? data.averageEntryScore ?? 0,
-								),
+								event: parsedEvent,
+								averageScore: Number(data.averageScore ?? data.averageEntryScore ?? 0),
 								finished: Boolean(data.finished ?? false),
 								highestScoringEntry: Number(data.highestScoringEntry ?? 0),
 								highestScore: Number(data.highestScore ?? 0),
@@ -150,67 +161,50 @@ export const eventOverallResultRepository: EventOverallResultRepository = {
 								mostViceCaptainedPlayer: null,
 							};
 							eventResults.push(result);
+						} else {
+							malformed = true;
 						}
 					} catch (error) {
+						malformed = true;
 						context.logger.warn(
 							{ err: error, cacheKey, season, eventId },
-							"Failed to parse hash value as JSON",
+							"Failed to parse hash value as JSON"
 						);
 					}
 				}
-				eventResults.sort((a, b) => a.event - b.event);
-				return eventResults;
+				if (!malformed && eventResults.length > 0) {
+					eventResults.sort((a, b) => a.event - b.event);
+					return eventResults;
+				}
+				metrics.cacheRepositoryEvents.labels("event_overall", "malformed").inc();
+				context.logger.warn(
+					{ cacheKey, season },
+					"Event overall cache contains malformed rows; falling back to database"
+				);
 			}
 
 			const { data, error } = await context.supabase
 				.from("events")
 				.select(
-					"id, average_entry_score, finished, highest_scoring_entry, highest_score, chip_plays, most_selected, most_transferred_in, top_element, top_element_info, transfers_made, most_captained, most_vice_captained",
+					"id, average_entry_score, finished, highest_scoring_entry, highest_score, chip_plays, most_selected, most_transferred_in, top_element, top_element_info, transfers_made, most_captained, most_vice_captained"
 				)
 				.order("id", { ascending: true });
 
 			if (error) {
 				context.logger.error(
 					{ err: error, season },
-					"Failed to fetch event overall results from DB",
+					"Failed to fetch event overall results from DB"
 				);
 				throw new Error("Failed to fetch event overall results");
 			}
 
-			const eventResults =
-				(data as DbEventRow[] | null)?.map(mapEventResult) ?? [];
-
-			// Write back to Redis hash (no TTL)
-			if (eventResults.length > 0) {
-				const pipeline = context.redis.pipeline();
-				for (const result of eventResults) {
-					pipeline.hset(
-						cacheKey,
-						String(result.event),
-						JSON.stringify({
-							event: result.event,
-							averageScore: result.averageScore,
-							finished: result.finished,
-							highestScoringEntry: result.highestScoringEntry,
-							highestScore: result.highestScore,
-							chipPlays: result.chipPlays,
-							mostSelected: result.mostSelectedId,
-							mostCaptained: result.mostCaptainedId,
-							mostTransferredIn: result.mostTransferredInId,
-							topElementInfo: result.topElementInfo,
-							transfersMade: result.transfersMade,
-							mostViceCaptained: result.mostViceCaptainedId,
-						}),
-					);
-				}
-				await pipeline.exec();
-			}
+			const eventResults = (data as DbEventRow[] | null)?.map(mapEventResult) ?? [];
 
 			return eventResults;
 		} catch (error) {
 			context.logger.error(
 				{ err: error, cacheKey: `EventOverallResult:${season}`, season },
-				"Failed to get event overall result",
+				"Failed to get event overall result"
 			);
 			throw new Error("Failed to get event overall result");
 		}

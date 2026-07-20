@@ -39,12 +39,8 @@ describe("tournaments resolver enum mappers", () => {
 	it("maps knockout mode including null", () => {
 		expect(knockoutModeToEnum(null)).toBeNull();
 		expect(knockoutModeToEnum(KnockoutMode.NO_KNOCKOUT)).toBe("NO_KNOCKOUT");
-		expect(knockoutModeToEnum(KnockoutMode.SINGLE_ELIMINATION)).toBe(
-			"SINGLE_ELIMINATION",
-		);
-		expect(knockoutModeToEnum(KnockoutMode.DOUBLE_ELIMINATION)).toBe(
-			"DOUBLE_ELIMINATION",
-		);
+		expect(knockoutModeToEnum(KnockoutMode.SINGLE_ELIMINATION)).toBe("SINGLE_ELIMINATION");
+		expect(knockoutModeToEnum(KnockoutMode.DOUBLE_ELIMINATION)).toBe("DOUBLE_ELIMINATION");
 		expect(knockoutModeToEnum(KnockoutMode.HEAD_TO_HEAD)).toBe("HEAD_TO_HEAD");
 	});
 
@@ -114,12 +110,8 @@ describe("TournamentEventResult resolvers", () => {
 			bank: 25,
 		};
 
-		expect(tournamentsResolvers.TournamentEventResult.tournament(parent)).toBe(
-			parent.tournament,
-		);
-		expect(tournamentsResolvers.TournamentEventResult.eventChip(parent)).toBe(
-			"BENCH_BOOST",
-		);
+		expect(tournamentsResolvers.TournamentEventResult.tournament(parent)).toBe(parent.tournament);
+		expect(tournamentsResolvers.TournamentEventResult.eventChip(parent)).toBe("BENCH_BOOST");
 	});
 
 	it("resolves the event through eventsService", async () => {
@@ -129,7 +121,7 @@ describe("TournamentEventResult resolvers", () => {
 
 		eventsService.getEventById = async (
 			inputContext: GraphQLContext,
-			eventId: number,
+			eventId: number
 		): Promise<Event | null> => {
 			expect(inputContext).toBe(context);
 			expect(eventId).toBe(33);
@@ -143,7 +135,7 @@ describe("TournamentEventResult resolvers", () => {
 					eventId: 33,
 				} as unknown as TournamentEventResult,
 				{},
-				context,
+				context
 			);
 			expect(result).toBe(event);
 		} finally {
@@ -158,7 +150,7 @@ describe("TournamentEventResult resolvers", () => {
 
 		eventsService.getEventById = async (
 			inputContext: GraphQLContext,
-			eventId: number,
+			eventId: number
 		): Promise<Event | null> => {
 			expect(inputContext).toBe(context);
 			expect(eventId).toBe(15);
@@ -166,12 +158,11 @@ describe("TournamentEventResult resolvers", () => {
 		};
 
 		try {
-			const result =
-				await tournamentsResolvers.TournamentBattleGroupResult.event(
-					{ tournament: {} as never, eventId: 15 } as unknown as TournamentBattleGroupResult,
-					{},
-					context,
-				);
+			const result = await tournamentsResolvers.TournamentBattleGroupResult.event(
+				{ tournament: {} as never, eventId: 15 } as unknown as TournamentBattleGroupResult,
+				{},
+				context
+			);
 			expect(result).toBe(event);
 		} finally {
 			eventsService.getEventById = original;
@@ -195,10 +186,7 @@ describe("TournamentEventResult resolvers", () => {
 			selectedByPercent: 40.1,
 		};
 
-		playersService.getPlayerById = async (
-			inputContext: GraphQLContext,
-			playerId: number,
-		) => {
+		playersService.getPlayerById = async (inputContext: GraphQLContext, playerId: number) => {
 			expect(inputContext).toBe(context);
 			expect(playerId).toBe(430);
 			return captain;
@@ -212,7 +200,7 @@ describe("TournamentEventResult resolvers", () => {
 					captainId: 430,
 				} as unknown as TournamentEventResult,
 				{},
-				context,
+				context
 			);
 			expect(result).toEqual(captain);
 		} finally {
@@ -232,7 +220,7 @@ describe("tournamentBattleGroupResults query resolver", () => {
 		tournamentsService.getTournamentBattleGroupResults = async (
 			inputContext: GraphQLContext,
 			tournamentId: number,
-			eventId: number,
+			eventId: number
 		) => {
 			expect(inputContext).toBe(context);
 			capturedTournamentId = tournamentId;
@@ -241,12 +229,11 @@ describe("tournamentBattleGroupResults query resolver", () => {
 		};
 
 		try {
-			const result =
-				await tournamentsResolvers.Query.tournamentBattleGroupResults(
-					undefined,
-					{ tournamentId: 7, eventId: 15 },
-					context,
-				);
+			const result = await tournamentsResolvers.Query.tournamentBattleGroupResults(
+				undefined,
+				{ tournamentId: 7, eventId: 15 },
+				context
+			);
 			expect(capturedTournamentId).toBe(7);
 			expect(capturedEventId).toBe(15);
 			expect(result).toBe(expected);
@@ -261,8 +248,8 @@ describe("tournamentBattleGroupResults query resolver", () => {
 			tournament: tournamentStub,
 			eventId: 15,
 		} as unknown as TournamentBattleGroupResult;
-		expect(
-			tournamentsResolvers.TournamentBattleGroupResult.tournament(parent),
-		).toBe(tournamentStub);
+		expect(tournamentsResolvers.TournamentBattleGroupResult.tournament(parent)).toBe(
+			tournamentStub
+		);
 	});
 });

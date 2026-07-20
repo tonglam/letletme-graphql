@@ -1,4 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { env } from "../../infra/env";
+import { metrics } from "../../infra/metrics";
 import { buildTeamMapById } from "../../infra/team-map";
 import type { Player, Team } from "../../infra/types";
 import type { Entry } from "../entries/repository";
@@ -9,16 +11,10 @@ import type { LivePerformance } from "../live/repository";
 import { liveRepository } from "../live/repository";
 import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
 import { playersRepository } from "../players/repository";
-import type {
-	EntryEventPick,
-	EntryEventTransferRow,
-	Pick as EntryPick,
-} from "./repository";
+import type { Pick as EntryPick } from "./repository";
 import { entryLiveRepository } from "./repository";
-import {
-	type EntryEventTransfersData,
-	enrichTransferRows,
-} from "./transfer-enrichment";
+import { resolvePreviousEventBaseline } from "./baseline";
+import { type EntryEventTransfersData, enrichTransferRows } from "./transfer-enrichment";
 
 export type ActiveCaptainData = {
 	id: number;
@@ -124,8 +120,7 @@ const safeInt = (value: number | null | undefined): number =>
 const asScaled = (value: number | null | undefined, divisor: number): number =>
 	typeof value === "number" ? value / divisor : 0;
 
-const safeNull = <T>(value: T | null | undefined, defaultValue: T): T =>
-	value ?? defaultValue;
+const safeNull = <T>(value: T | null | undefined, defaultValue: T): T => value ?? defaultValue;
 
 /**
  * Build fixture index optimized to avoid array spread operations.
@@ -156,7 +151,7 @@ const buildFixtureIndex = (fixtures: Fixture[]): Map<number, Fixture[]> => {
 };
 
 const getPlayStatusForTeam = (
-	fixtures: Fixture[] | undefined,
+	fixtures: Fixture[] | undefined
 ): { started: boolean; finished: boolean; status: number } => {
 	if (!fixtures || fixtures.length === 0) {
 		return { started: true, finished: true, status: PLAY_STATUS.BLANK };
@@ -244,11 +239,7 @@ const buildTeamMatchInfo = (params: {
 
 		const teamScore = isHome ? fx.teamHScore : fx.teamAScore;
 		const againstScore = isHome ? fx.teamAScore : fx.teamHScore;
-		scores.push(
-			teamScore === null || againstScore === null
-				? ""
-				: `${teamScore}-${againstScore}`,
-		);
+		scores.push(teamScore === null || againstScore === null ? "" : `${teamScore}-${againstScore}`);
 	}
 
 	return {
@@ -268,22 +259,15 @@ const buildTeamMatchInfo = (params: {
 	};
 };
 
-const liveMapByPlayerId = (
-	performances: LivePerformance[],
-): Map<number, LivePerformance> =>
+const liveMapByPlayerId = (performances: LivePerformance[]): Map<number, LivePerformance> =>
 	new Map(performances.map((p: LivePerformance) => [p.playerId, p]));
 
-const getEventFixtures = async (
-	context: GraphQLContext,
-	eventId: number,
-): Promise<Fixture[]> => {
+const getEventFixtures = async (context: GraphQLContext, eventId: number): Promise<Fixture[]> => {
 	const data = await fixturesService.getEventFixtures(context, eventId);
 	return data as Fixture[];
 };
 
-const parseNullableFloat = (
-	value: string | null | undefined,
-): number | null => {
+const parseNullableFloat = (value: string | null | undefined): number | null => {
 	if (!value) {
 		return null;
 	}
@@ -316,21 +300,14 @@ const goalsScoredPoints = (elementType: number, goals: number): number => {
 	return 0;
 };
 
-const cleanSheetPoints = (
-	elementType: number,
-	minutes: number,
-	cleanSheets: number,
-): number => {
+const cleanSheetPoints = (elementType: number, minutes: number, cleanSheets: number): number => {
 	if (minutes < 60 || cleanSheets <= 0) return 0;
 	if (elementType === 1 || elementType === 2) return cleanSheets * 4;
 	if (elementType === 3) return cleanSheets;
 	return 0;
 };
 
-const goalsConcededPoints = (
-	elementType: number,
-	goalsConceded: number,
-): number => {
+const goalsConcededPoints = (elementType: number, goalsConceded: number): number => {
 	if (goalsConceded < 2) return 0;
 	if (elementType !== 1 && elementType !== 2) return 0;
 	return -Math.floor(goalsConceded / 2);
@@ -338,7 +315,7 @@ const goalsConcededPoints = (
 
 const defensiveContributionPoints = (
 	elementType: number,
-	defensiveContribution: number,
+	defensiveContribution: number
 ): number => {
 	if (elementType === 2 && defensiveContribution >= 10) return 2;
 	if ((elementType === 3 || elementType === 4) && defensiveContribution >= 12) {
@@ -354,9 +331,9 @@ const defensiveContributionPoints = (
  * matches, so live views calculate the total from the individual fields we
  * receive instead of trusting that precomputed value.
  */
-export const calcElementLivePoints = (
+const calcLegacyElementLivePoints = (
 	elementType: number,
-	live: LivePerformance | undefined,
+	live: LivePerformance | undefined
 ): number => {
 	if (!live) {
 		return 0;
@@ -394,6 +371,36 @@ export const calcElementLivePoints = (
 };
 
 /**
+ * Preserve FPL's official fixture-level scoring and rounding, replacing only
+ * the aggregate bonus while provisional BPS is being estimated.
+ */
+export const calcOfficialTotalWithEffectiveBonus = (
+	live: LivePerformance | undefined,
+	effectiveBonus?: number
+): number => {
+	if (!live) return 0;
+	const officialTotal = safeInt(live.totalPoints);
+	const officialBonus = safeInt(live.bonus);
+	return officialTotal - officialBonus + (effectiveBonus ?? officialBonus);
+};
+
+export const calcElementLivePoints = (
+	elementType: number,
+	live: LivePerformance | undefined,
+	effectiveBonus?: number
+): number => {
+	const legacy = calcLegacyElementLivePoints(
+		elementType,
+		live ? { ...live, bonus: effectiveBonus ?? live.bonus } : live
+	);
+	const official = calcOfficialTotalWithEffectiveBonus(live, effectiveBonus);
+	if (live && legacy !== official) {
+		metrics.livePointsShadowDifferences.labels(env.LIVE_POINTS_V2 ? "v2" : "legacy").inc();
+	}
+	return env.LIVE_POINTS_V2 ? official : legacy;
+};
+
+/**
  * Apply FPL automatic substitutions.
  *
  * Rules:
@@ -403,21 +410,16 @@ export const calcElementLivePoints = (
  * - Replaces a non-playing starter (0 minutes, multiplier > 0)
  * - Formation must remain valid after substitution
  */
-export const applyAutoSubs = (
-	pickList: ElementEventResultData[],
-	chip: string,
-): void => {
+export const applyAutoSubs = (pickList: ElementEventResultData[], chip: string): void => {
 	if (chip === "BENCH_BOOST") {
 		return;
 	}
 
 	const starters = pickList.filter((p) => p.position <= 11);
-	const bench = pickList
-		.filter((p) => p.position > 11)
-		.sort((a, b) => a.position - b.position);
+	const bench = pickList.filter((p) => p.position > 11).sort((a, b) => a.position - b.position);
 
 	const nonPlayingStarters = starters.filter(
-		(p) => p.minutes === 0 && p.multiplier > 0 && (p.isGwFinished || p.bgw),
+		(p) => p.minutes === 0 && p.multiplier > 0 && (p.isGwFinished || p.bgw)
 	);
 
 	if (nonPlayingStarters.length === 0) {
@@ -429,15 +431,7 @@ export const applyAutoSubs = (
 		const def = active.filter((p) => p.elementType === 2).length;
 		const mid = active.filter((p) => p.elementType === 3).length;
 		const fwd = active.filter((p) => p.elementType === 4).length;
-		return (
-			gk === 1 &&
-			def >= 3 &&
-			def <= 5 &&
-			mid >= 2 &&
-			mid <= 5 &&
-			fwd >= 1 &&
-			fwd <= 3
-		);
+		return gk === 1 && def >= 3 && def <= 5 && mid >= 2 && mid <= 5 && fwd >= 1 && fwd <= 3;
 	};
 
 	for (const benchPlayer of bench) {
@@ -475,7 +469,7 @@ const hasCompletedFixtures = (pick: ElementEventResultData): boolean =>
 	pick.isGwFinished || pick.playStatus === PLAY_STATUS.BLANK || pick.bgw;
 
 const selectCaptainForScoring = (
-	picks: ElementEventResultData[],
+	picks: ElementEventResultData[]
 ): ElementEventResultData | null => {
 	const captain = picks.find((p) => p.isCaptain) ?? null;
 	if (!captain) {
@@ -513,20 +507,11 @@ const normalizeChip = (raw: string | null | undefined): string => {
 	) {
 		return "TRIPLE_CAPTAIN";
 	}
-	if (
-		value === "FREE_HIT" ||
-		compactValue === "FREEHIT" ||
-		compactValue === "FH"
-	)
+	if (value === "FREE_HIT" || compactValue === "FREEHIT" || compactValue === "FH")
 		return "FREE_HIT";
-	if (
-		value === "WILDCARD" ||
-		compactValue === "WILDCARD" ||
-		compactValue === "WC"
-	)
+	if (value === "WILDCARD" || compactValue === "WILDCARD" || compactValue === "WC")
 		return "WILDCARD";
-	if (compactValue === "NONE" || compactValue === "NA" || compactValue === "")
-		return "NONE";
+	if (compactValue === "NONE" || compactValue === "NA" || compactValue === "") return "NONE";
 
 	// Unknown / legacy / placeholder values (e.g. "N/A") should never leak to GraphQL enums.
 	return "NONE";
@@ -537,14 +522,9 @@ export const entryLiveCalcService = {
 		context: GraphQLContext,
 		eventId: number,
 		entryId: number,
-		includeLive = true,
+		includeLive = true
 	): Promise<LiveCalcData> {
-		if (
-			!Number.isInteger(eventId) ||
-			!Number.isInteger(entryId) ||
-			eventId <= 0 ||
-			entryId <= 0
-		) {
+		if (!Number.isInteger(eventId) || !Number.isInteger(entryId) || eventId <= 0 || entryId <= 0) {
 			return {
 				rank: 0,
 				event: 0,
@@ -578,18 +558,15 @@ export const entryLiveCalcService = {
 		}
 
 		// Parallel fetch all initial data including transfers
-		const [entry, pickEntity, fixtures, teams, transferRows]: [
-			Entry | null,
-			EntryEventPick | null,
-			Fixture[],
-			Team[],
-			EntryEventTransferRow[],
-		] = await Promise.all([
+		const [entry, pickEntity, fixtures, teams, transferRows, previousResult] = await Promise.all([
 			entriesService.getEntryById(context, entryId),
 			entryLiveRepository.getEntryEventPick(context, entryId, eventId),
 			getEventFixtures(context, eventId),
 			playersRepository.listTeams(context),
 			entryLiveRepository.getEntryEventTransfers(context, entryId, eventId),
+			eventId > 1
+				? entriesService.getEntryEventResult(context, entryId, eventId - 1)
+				: Promise.resolve(null),
 		]);
 
 		const entryInfo: Entry | null = entry;
@@ -615,11 +592,7 @@ export const entryLiveCalcService = {
 		const [playersList, livePerformances, bonusByPlayerId] = await Promise.all([
 			playersRepository.getPlayersByIds(context, playerIdList),
 			includeLive
-				? liveRepository.getLivePerformancesByPlayerIds(
-						context,
-						eventId,
-						playerIdList,
-					)
+				? liveRepository.getLivePerformancesByPlayerIds(context, eventId, playerIdList)
 				: Promise.resolve([] as LivePerformance[]),
 			includeLive
 				? loadLiveBonusByPlayerId(context, eventId)
@@ -632,18 +605,15 @@ export const entryLiveCalcService = {
 					...player,
 					position: player.position as number,
 				},
-			]),
+			])
 		);
-		const liveByPlayer: Map<number, LivePerformance> =
-			liveMapByPlayerId(livePerformances);
+		const liveByPlayer: Map<number, LivePerformance> = liveMapByPlayerId(livePerformances);
 
 		// Static + live per pick (now purely CPU work, no I/O)
 		const pickList: ElementEventResultData[] = picks.map((pick) => {
 			const player = playersById.get(pick.element) ?? null;
 			const team = player ? teamsById.get(player.teamId) : undefined;
-			const teamFixtures = player
-				? fixturesByTeam.get(player.teamId)
-				: undefined;
+			const teamFixtures = player ? fixturesByTeam.get(player.teamId) : undefined;
 			const matchInfo = buildTeamMatchInfo({
 				teamId: player?.teamId ?? 0,
 				team,
@@ -655,9 +625,7 @@ export const entryLiveCalcService = {
 			const elementType = player?.position ?? 0;
 			const bonusOverride = bonusByPlayerId.get(pick.element);
 			const liveWithBonus =
-				live !== undefined
-					? { ...live, bonus: bonusOverride ?? live.bonus }
-					: live;
+				live !== undefined ? { ...live, bonus: bonusOverride ?? live.bonus } : live;
 
 			// Extract live stats with safe defaults (reduced null coalescing)
 			const minutes = safeNull(liveWithBonus?.minutes, 0);
@@ -665,17 +633,11 @@ export const entryLiveCalcService = {
 			const redCards = safeNull(liveWithBonus?.redCards, 0);
 			const isPlayed = minutes > 0 || yellowCards > 0 || redCards > 0;
 
-			const defensiveContribution: number = safeNull(
-				liveWithBonus?.defensiveContribution,
-				0,
-			);
+			const defensiveContribution: number = safeNull(liveWithBonus?.defensiveContribution, 0);
 
 			// Calculate live points from individual stats
 			// For DGW players (minutes > 90), pass fixture count so playing points are correct
-			const calculatedTotalPoints = calcElementLivePoints(
-				elementType,
-				liveWithBonus,
-			);
+			const calculatedTotalPoints = calcElementLivePoints(elementType, live, bonusOverride);
 
 			return {
 				season: null,
@@ -693,9 +655,7 @@ export const entryLiveCalcService = {
 				againstId: matchInfo.againstId,
 				againstName: matchInfo.againstName,
 				againstShortName:
-					matchInfo.againstShortName.length > 0
-						? matchInfo.againstShortName
-						: "BLANK",
+					matchInfo.againstShortName.length > 0 ? matchInfo.againstShortName : "BLANK",
 				wasHome: matchInfo.wasHome,
 				score: matchInfo.score,
 				position: pick.position,
@@ -724,12 +684,8 @@ export const entryLiveCalcService = {
 				starts: liveWithBonus?.starts ?? null,
 				expectedGoals: parseNullableFloat(liveWithBonus?.expectedGoals),
 				expectedAssists: parseNullableFloat(liveWithBonus?.expectedAssists),
-				expectedGoalInvolvements: parseNullableFloat(
-					liveWithBonus?.expectedGoalInvolvements,
-				),
-				expectedGoalsConceded: parseNullableFloat(
-					liveWithBonus?.expectedGoalsConceded,
-				),
+				expectedGoalInvolvements: parseNullableFloat(liveWithBonus?.expectedGoalInvolvements),
+				expectedGoalsConceded: parseNullableFloat(liveWithBonus?.expectedGoalsConceded),
 				inDreamTeam: liveWithBonus?.inDreamTeam ?? null,
 				pickActive: false,
 				autoSub: false,
@@ -747,8 +703,7 @@ export const entryLiveCalcService = {
 
 		for (const pick of pickList) {
 			const isActive = isBenchBoost ? true : pick.multiplier > 0;
-			const autoSub =
-				!isBenchBoost && pick.position > 11 && pick.multiplier > 0;
+			const autoSub = !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
 			pick.pickActive = isActive;
 			pick.autoSub = autoSub;
 			if (isActive) {
@@ -772,19 +727,15 @@ export const entryLiveCalcService = {
 		}, 0);
 
 		const liveNetPoints = livePoints - transferCost;
-		// Last overall = entry's overallPoints from entry_infos (previous GW baseline)
-		const lastOverallPoints = entryInfo?.overallPoints ?? 0;
-		const lastOverallRank = entryInfo?.overallRank ?? 0;
-		const lastValue = asScaled(entryInfo?.teamValue ?? null, 10);
+		const baseline = resolvePreviousEventBaseline(entryInfo, eventId, previousResult);
+		const lastOverallPoints = baseline.overallPoints;
+		const lastOverallRank = baseline.overallRank ?? 0;
+		const lastValue = asScaled(baseline.teamValue, 10);
 		// Live total = last overall + current live net points
 		const liveTotalPoints = lastOverallPoints + liveNetPoints;
 
-		const played = activePicks.filter(
-			(p) => p.isPlayed || p.bgw || p.isGwFinished,
-		).length;
-		const toPlay = activePicks.filter(
-			(p) => !p.isGwStarted && !p.isGwFinished && !p.bgw,
-		).length;
+		const played = activePicks.filter((p) => p.isPlayed || p.bgw || p.isGwFinished).length;
+		const toPlay = activePicks.filter((p) => !p.isGwStarted && !p.isGwFinished && !p.bgw).length;
 
 		const playedCaptain = captainForScoring?.element ?? 0;
 		const captainName = captainForScoring?.webName ?? "";
@@ -816,11 +767,10 @@ export const entryLiveCalcService = {
 			value: asScaled(entryInfo?.teamValue ?? null, 10),
 			bank: asScaled(entryInfo?.bank ?? null, 10),
 			teamValue: asScaled(
-				(entryInfo?.teamValue ?? null) !== null &&
-					(entryInfo?.bank ?? null) !== null
+				(entryInfo?.teamValue ?? null) !== null && (entryInfo?.bank ?? null) !== null
 					? safeInt(entryInfo?.teamValue) - safeInt(entryInfo?.bank)
 					: null,
-				10,
+				10
 			),
 			totalTransfers: safeInt(entryInfo?.totalTransfers),
 			lastOverallPoints,

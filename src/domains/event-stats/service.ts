@@ -7,13 +7,8 @@ export const eventStatsService = {
 		context: GraphQLContext,
 		tournamentId: number,
 		eventId: number,
-		limit: number,
+		limit: number
 	): Promise<TournamentSelectionStats> {
-		return eventStatsRepository.getTournamentSelectionStats(
-			context,
-			tournamentId,
-			eventId,
-			limit,
-		);
+		return eventStatsRepository.getTournamentSelectionStats(context, tournamentId, eventId, limit);
 	},
 };

@@ -1,5 +1,5 @@
 export const miniProgramTypeDefs = /* GraphQL */ `
-  extend type Query {
-    miniProgramNotice: String!
-  }
+	extend type Query {
+		miniProgramNotice: String!
+	}
 `;

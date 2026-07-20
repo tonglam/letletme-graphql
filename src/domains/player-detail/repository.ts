@@ -1,5 +1,43 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { gqlCacheKey } from "../../infra/cache-key";
 import { getCurrentSeason } from "../../infra/season";
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isPlayerDetail = (value: unknown): value is PlayerDetail =>
+	isRecord(value) &&
+	Number.isFinite(Number(value.id)) &&
+	typeof value.webName === "string" &&
+	Array.isArray(value.fixtures);
+
+const readJsonCache = async <T>(
+	context: GraphQLContext,
+	key: string,
+	validate: (value: unknown) => value is T
+): Promise<T | null> => {
+	let cached: string | null;
+	try {
+		cached = await context.redis.get(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to read player-detail cache");
+		return null;
+	}
+	if (cached === null) return null;
+	if (cached === NULL_SENTINEL) return null;
+	try {
+		const parsed: unknown = JSON.parse(cached);
+		if (validate(parsed)) return parsed;
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Malformed player-detail cache");
+	}
+	try {
+		await context.redis.del(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to evict malformed player-detail cache");
+	}
+	return null;
+};
 
 export type PlayerDetail = {
 	id: number;
@@ -119,7 +157,7 @@ const pickValue = (
 async function loadPlayerFromRedis(
 	context: GraphQLContext,
 	season: string,
-	playerId: number,
+	playerId: number
 ): Promise<{
 	webName: string;
 	elementType: number;
@@ -146,7 +184,7 @@ async function loadPlayerFromRedis(
 async function loadTeamShortNameFromRedis(
 	context: GraphQLContext,
 	season: string,
-	teamId: number,
+	teamId: number
 ): Promise<string> {
 	const raw = await context.redis.hget(`Team:${season}`, String(teamId));
 	if (!raw) return "";
@@ -157,12 +195,9 @@ async function loadTeamShortNameFromRedis(
 async function loadPlayerStatFromRedis(
 	context: GraphQLContext,
 	season: string,
-	playerId: number,
+	playerId: number
 ): Promise<Record<string, unknown> | null> {
-	const raw = await context.redis.hget(
-		`PlayerStat:${season}`,
-		String(playerId),
-	);
+	const raw = await context.redis.hget(`PlayerStat:${season}`, String(playerId));
 	if (!raw) return null;
 	return parseJson(raw);
 }
@@ -171,12 +206,9 @@ async function loadEventLiveFromRedis(
 	context: GraphQLContext,
 	season: string,
 	eventId: number,
-	playerId: number,
+	playerId: number
 ): Promise<Record<string, unknown> | null> {
-	const raw = await context.redis.hget(
-		`EventLive:${season}:${eventId}`,
-		String(playerId),
-	);
+	const raw = await context.redis.hget(`EventLive:${season}:${eventId}`, String(playerId));
 	if (!raw) return null;
 	return parseJson(raw);
 }
@@ -184,7 +216,7 @@ async function loadEventLiveFromRedis(
 async function loadTeamFixtures(
 	context: GraphQLContext,
 	season: string,
-	teamId: number,
+	teamId: number
 ): Promise<PlayerFixture[]> {
 	const hashKey = `FixturesByTeam:${season}:${teamId}`;
 	const hash = await context.redis.hgetall(hashKey);
@@ -200,9 +232,7 @@ async function loadTeamFixtures(
 
 		fixtures.push({
 			event,
-			againstTeamShortName: String(
-				f.againstTeamShortName ?? f.against_team_short_name ?? "",
-			),
+			againstTeamShortName: String(f.againstTeamShortName ?? f.against_team_short_name ?? ""),
 			wasHome: parseBool(f.wasHome ?? f.was_home),
 			finished: parseBool(f.finished),
 			kickoffTime: String(f.kickoffTime ?? f.kickoff_time ?? "") || null,
@@ -231,22 +261,20 @@ function mapPlayerDetail(
 	teamShortName: string,
 	playerStat: Record<string, unknown> | null,
 	eventLive: Record<string, unknown> | null,
-	fixtures: PlayerFixture[],
+	fixtures: PlayerFixture[]
 ): PlayerDetail {
 	const elementType = player.elementType;
 
 	// Season cumulative stats from PlayerStat
-	const totalPoints =
-		parseInt_(pickValue(playerStat ?? {}, "totalPoints", "total_points")) ?? 0;
+	const totalPoints = parseInt_(pickValue(playerStat ?? {}, "totalPoints", "total_points")) ?? 0;
 	const selectedByPercent = parseNum(
-		pickValue(playerStat ?? {}, "selectedByPercent", "selected_by_percent"),
+		pickValue(playerStat ?? {}, "selectedByPercent", "selected_by_percent")
 	);
 	const form = parseNum(pickValue(playerStat ?? {}, "form"));
 	const seasonTransfersIn =
 		parseInt_(pickValue(playerStat ?? {}, "transfersIn", "transfers_in")) ?? 0;
 	const seasonTransfersOut =
-		parseInt_(pickValue(playerStat ?? {}, "transfersOut", "transfers_out")) ??
-		0;
+		parseInt_(pickValue(playerStat ?? {}, "transfersOut", "transfers_out")) ?? 0;
 
 	// Event-specific stats from EventLive (preferred) or PlayerStat (fallback)
 	const eventSource = eventLive ?? playerStat ?? {};
@@ -256,21 +284,15 @@ function mapPlayerDetail(
 		: null;
 
 	const minutes = parseInt_(pickValue(eventSource, "minutes"));
-	const goalsScored =
-		parseInt_(pickValue(eventSource, "goalsScored", "goals_scored")) ?? 0;
+	const goalsScored = parseInt_(pickValue(eventSource, "goalsScored", "goals_scored")) ?? 0;
 	const assists = parseInt_(pickValue(eventSource, "assists")) ?? 0;
-	const cleanSheets =
-		parseInt_(pickValue(eventSource, "cleanSheets", "clean_sheets")) ?? 0;
-	const goalsConceded =
-		parseInt_(pickValue(eventSource, "goalsConceded", "goals_conceded")) ?? 0;
-	const ownGoals =
-		parseInt_(pickValue(eventSource, "ownGoals", "own_goals")) ?? 0;
+	const cleanSheets = parseInt_(pickValue(eventSource, "cleanSheets", "clean_sheets")) ?? 0;
+	const goalsConceded = parseInt_(pickValue(eventSource, "goalsConceded", "goals_conceded")) ?? 0;
+	const ownGoals = parseInt_(pickValue(eventSource, "ownGoals", "own_goals")) ?? 0;
 	const penaltiesSaved =
 		parseInt_(pickValue(eventSource, "penaltiesSaved", "penalties_saved")) ?? 0;
-	const yellowCards =
-		parseInt_(pickValue(eventSource, "yellowCards", "yellow_cards")) ?? 0;
-	const redCards =
-		parseInt_(pickValue(eventSource, "redCards", "red_cards")) ?? 0;
+	const yellowCards = parseInt_(pickValue(eventSource, "yellowCards", "yellow_cards")) ?? 0;
+	const redCards = parseInt_(pickValue(eventSource, "redCards", "red_cards")) ?? 0;
 	const saves = parseInt_(pickValue(eventSource, "saves")) ?? 0;
 	const bonus = parseInt_(pickValue(eventSource, "bonus")) ?? 0;
 	const bps = parseInt_(pickValue(eventSource, "bps")) ?? 0;
@@ -281,13 +303,9 @@ function mapPlayerDetail(
 	const ictIndex = parseNum(pickValue(eventSource, "ictIndex", "ict_index"));
 
 	const transfersInEvent =
-		parseInt_(
-			pickValue(eventSource, "transfersInEvent", "transfers_in_event"),
-		) ?? 0;
+		parseInt_(pickValue(eventSource, "transfersInEvent", "transfers_in_event")) ?? 0;
 	const transfersOutEvent =
-		parseInt_(
-			pickValue(eventSource, "transfersOutEvent", "transfers_out_event"),
-		) ?? 0;
+		parseInt_(pickValue(eventSource, "transfersOutEvent", "transfers_out_event")) ?? 0;
 
 	return {
 		id: playerId,
@@ -333,7 +351,7 @@ export interface PlayerDetailRepository {
 	getPlayerDetail(
 		context: GraphQLContext,
 		playerId: number,
-		eventId: number,
+		eventId: number
 	): Promise<PlayerDetail | null>;
 }
 
@@ -343,23 +361,15 @@ export const playerDetailRepository: PlayerDetailRepository = {
 	async getPlayerDetail(
 		context: GraphQLContext,
 		playerId: number,
-		eventId: number,
+		eventId: number
 	): Promise<PlayerDetail | null> {
 		if (!Number.isFinite(playerId) || playerId <= 0) return null;
 		if (!Number.isFinite(eventId) || eventId <= 0) return null;
 
-		const cacheKey = buildPlayerDetailCacheKey(playerId, eventId);
-		const cached = await context.redis.get(cacheKey);
-		if (cached !== null) {
-			if (cached === NULL_SENTINEL) return null;
-			try {
-				return JSON.parse(cached) as PlayerDetail;
-			} catch {
-				// fall through to fetch
-			}
-		}
-
 		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, buildPlayerDetailCacheKey(playerId, eventId));
+		const cached = await readJsonCache(context, cacheKey, isPlayerDetail);
+		if (cached) return cached;
 
 		// Parallel: load player info + stats/live/fixtures (stats/live need teamId so only player is first)
 		const [player, playerStat, eventLive] = await Promise.all([
@@ -385,7 +395,7 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			teamShortName,
 			playerStat,
 			eventLive,
-			fixtures,
+			fixtures
 		);
 
 		await context.redis.set(cacheKey, JSON.stringify(detail), "EX", 3600);

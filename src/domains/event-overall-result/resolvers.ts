@@ -1,11 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type { Player, Team } from "../players/repository";
 import { playersService } from "../players/service";
-import type {
-	EventResult,
-	EventResultPlayer,
-	TopElementInfo,
-} from "./repository";
+import type { EventResult, EventResultPlayer, TopElementInfo } from "./repository";
 import { eventOverallResultService } from "./service";
 
 /**
@@ -16,7 +12,7 @@ const playerMemo = new WeakMap<GraphQLContext, Map<number, Player | null>>();
 
 const getPlayerByIdMemoized = async (
 	context: GraphQLContext,
-	playerId: number,
+	playerId: number
 ): Promise<Player | null> => {
 	let memo = playerMemo.get(context);
 	if (!memo) {
@@ -40,7 +36,7 @@ const teamMemo = new WeakMap<GraphQLContext, Map<number, Team | null>>();
 
 const getTeamByIdMemoized = async (
 	context: GraphQLContext,
-	teamId: number,
+	teamId: number
 ): Promise<Team | null> => {
 	let memo = teamMemo.get(context);
 	if (!memo) {
@@ -68,15 +64,14 @@ export const eventOverallResultResolvers = {
 		eventOverallResult: async (
 			_parent: unknown,
 			_args: Record<string, never>,
-			context: GraphQLContext,
-		): Promise<EventResult[]> =>
-			eventOverallResultService.getEventOverallResult(context),
+			context: GraphQLContext
+		): Promise<EventResult[]> => eventOverallResultService.getEventOverallResult(context),
 	},
 	EventResult: {
 		mostSelectedPlayer: async (
 			parent: EventResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<EventResultPlayer | null> => {
 			if (parent.mostSelectedPlayer) {
 				return parent.mostSelectedPlayer;
@@ -86,16 +81,13 @@ export const eventOverallResultResolvers = {
 				return null;
 			}
 
-			const player = await getPlayerByIdMemoized(
-				context,
-				parent.mostSelectedId,
-			);
+			const player = await getPlayerByIdMemoized(context, parent.mostSelectedId);
 			return player ? toEventResultPlayer(player) : null;
 		},
 		mostCaptainedPlayer: async (
 			parent: EventResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<EventResultPlayer | null> => {
 			if (parent.mostCaptainedPlayer) {
 				return parent.mostCaptainedPlayer;
@@ -105,16 +97,13 @@ export const eventOverallResultResolvers = {
 				return null;
 			}
 
-			const player = await getPlayerByIdMemoized(
-				context,
-				parent.mostCaptainedId,
-			);
+			const player = await getPlayerByIdMemoized(context, parent.mostCaptainedId);
 			return player ? toEventResultPlayer(player) : null;
 		},
 		mostTransferInPlayer: async (
 			parent: EventResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<EventResultPlayer | null> => {
 			if (parent.mostTransferInPlayer) {
 				return parent.mostTransferInPlayer;
@@ -124,16 +113,13 @@ export const eventOverallResultResolvers = {
 				return null;
 			}
 
-			const player = await getPlayerByIdMemoized(
-				context,
-				parent.mostTransferredInId,
-			);
+			const player = await getPlayerByIdMemoized(context, parent.mostTransferredInId);
 			return player ? toEventResultPlayer(player) : null;
 		},
 		mostViceCaptainedPlayer: async (
 			parent: EventResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<EventResultPlayer | null> => {
 			if (parent.mostViceCaptainedPlayer) {
 				return parent.mostViceCaptainedPlayer;
@@ -143,10 +129,7 @@ export const eventOverallResultResolvers = {
 				return null;
 			}
 
-			const player = await getPlayerByIdMemoized(
-				context,
-				parent.mostViceCaptainedId,
-			);
+			const player = await getPlayerByIdMemoized(context, parent.mostViceCaptainedId);
 			return player ? toEventResultPlayer(player) : null;
 		},
 	},
@@ -154,7 +137,7 @@ export const eventOverallResultResolvers = {
 		player: async (
 			parent: TopElementInfo,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Player | null> => {
 			if (!parent.element || parent.element === 0) {
 				return null;
@@ -164,7 +147,7 @@ export const eventOverallResultResolvers = {
 		teamShortName: async (
 			parent: TopElementInfo,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<string | null> => {
 			if (!parent.element || parent.element === 0) {
 				return null;

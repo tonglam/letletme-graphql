@@ -36,7 +36,7 @@ type QueryResult<T> = {
 
 function createPlayerValuesQueryBuilder(
 	rows: PlayerValueRow[],
-	error: { message: string } | null = null,
+	error: { message: string } | null = null
 ) {
 	const eqFilters: Record<string, string | number> = {};
 
@@ -64,6 +64,9 @@ function createPlayerValuesQueryBuilder(
 		select(_columns: string) {
 			return builder;
 		},
+		in(_column: string, _values: unknown[]) {
+			return builder;
+		},
 		eq(column: string, value: string | number) {
 			eqFilters[column] = value;
 			return builder;
@@ -84,9 +87,7 @@ type ContextOptions = {
 	supabaseError?: { message: string };
 };
 
-function createGraphQLContext(
-	options: ContextOptions = {},
-): GraphQLContext & {
+function createGraphQLContext(options: ContextOptions = {}): GraphQLContext & {
 	calls: { redisCommands: string[]; supabaseFrom: number };
 } {
 	const calls = { redisCommands: [] as string[], supabaseFrom: 0 };
@@ -94,10 +95,7 @@ function createGraphQLContext(
 	const supabase = {
 		from: (_table: string) => {
 			calls.supabaseFrom += 1;
-			return createPlayerValuesQueryBuilder(
-				options.rows ?? [],
-				options.supabaseError ?? null,
-			);
+			return createPlayerValuesQueryBuilder(options.rows ?? [], options.supabaseError ?? null);
 		},
 	} as unknown as GraphQLContext["supabase"];
 
@@ -120,22 +118,14 @@ function createGraphQLContext(
 	const redis = {
 		type: async (): Promise<string> =>
 			options.redisType ??
-			(options.redisHashData && Object.keys(options.redisHashData).length > 0
-				? "hash"
-				: "none"),
+			(options.redisHashData && Object.keys(options.redisHashData).length > 0 ? "hash" : "none"),
 		get: async (key: string): Promise<string | null> =>
-			options.redisStrings?.[key] ?? null,
-		set: async (
-			key: string,
-			value: string,
-			mode?: string,
-			ttl?: number,
-		): Promise<string> => {
+			options.redisStrings?.[key] ?? (key === "Season:active" ? "2526" : null),
+		set: async (key: string, value: string, mode?: string, ttl?: number): Promise<string> => {
 			calls.redisCommands.push(`set:${key}:${value}:${mode}:${ttl}`);
 			return "OK";
 		},
-		hgetall: async (): Promise<Record<string, string>> =>
-			options.redisHashData ?? {},
+		hgetall: async (): Promise<Record<string, string>> => options.redisHashData ?? {},
 		pipeline: () => pipeline,
 	} as unknown as GraphQLContext["redis"];
 
@@ -317,9 +307,7 @@ describe("playerValues integration", () => {
 		expect(result.errors).toBeUndefined();
 		expect(result.data).toEqual({ playerValues: [] });
 		expect(context.calls.supabaseFrom).toBe(0);
-		expect(context.calls.redisCommands).toContain(
-			"pipeline.set:PlayerValueMissing:20260421:1:EX:600",
-		);
+		expect(context.calls.redisCommands).toContain("set:PlayerValueMissing:20260421:1:EX:600");
 	});
 
 	it("returns a negative-cache hit without querying Supabase", async () => {

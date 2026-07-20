@@ -15,16 +15,11 @@ const makeMockRedis = (data: {
 }) => {
 	const strings = new Map<string, string>();
 	if (data.season !== undefined) {
-		strings.set("season:current", data.season);
+		strings.set("Season:active", data.season);
 	}
 	return {
-		get: async (key: string): Promise<string | null> =>
-			strings.get(key) ?? null,
-		set: async (
-			_key: string,
-			_value: string,
-			..._args: unknown[]
-		): Promise<string> => "OK",
+		get: async (key: string): Promise<string | null> => strings.get(key) ?? null,
+		set: async (_key: string, _value: string, ..._args: unknown[]): Promise<string> => "OK",
 		hget: async (key: string, field: string): Promise<string | null> => {
 			if (key.startsWith("Player:") && data.players) {
 				return data.players[field] ?? null;
@@ -34,10 +29,7 @@ const makeMockRedis = (data: {
 			}
 			return null;
 		},
-		hmget: async (
-			key: string,
-			...fields: string[]
-		): Promise<(string | null)[]> => {
+		hmget: async (key: string, ...fields: string[]): Promise<(string | null)[]> => {
 			if (key.startsWith("Player:") && data.players) {
 				return fields.map((f) => data.players?.[f] ?? null);
 			}
@@ -143,8 +135,7 @@ const TEAM_2 = JSON.stringify({
 
 describe("entriesService.getEntryTransferHistory", () => {
 	it("builds transfer history from Redis player/team/live data", async () => {
-		const originalGetEntryTransferHistory =
-			entryLiveRepository.getEntryTransferHistory;
+		const originalGetEntryTransferHistory = entryLiveRepository.getEntryTransferHistory;
 		const transferRows: EntryEventTransferRow[] = [
 			{
 				entryId: 84885,
@@ -155,9 +146,8 @@ describe("entriesService.getEntryTransferHistory", () => {
 			},
 		];
 
-		entryLiveRepository.getEntryTransferHistory = async (): Promise<
-			EntryEventTransferRow[]
-		> => transferRows;
+		entryLiveRepository.getEntryTransferHistory = async (): Promise<EntryEventTransferRow[]> =>
+			transferRows;
 
 		const liveData: Record<string, string> = {
 			"1": JSON.stringify({
@@ -182,11 +172,7 @@ describe("entriesService.getEntryTransferHistory", () => {
 		});
 
 		try {
-			const result = await entriesService.getEntryTransferHistory(
-				context,
-				84885,
-				true,
-			);
+			const result = await entriesService.getEntryTransferHistory(context, 84885, true);
 			expect(result).toHaveLength(1);
 			expect(result[0].eventId).toBe(12);
 			expect(result[0].eventTransfers).toBe(1);
@@ -202,8 +188,7 @@ describe("entriesService.getEntryTransferHistory", () => {
 				elementOutPoints: 2,
 			});
 		} finally {
-			entryLiveRepository.getEntryTransferHistory =
-				originalGetEntryTransferHistory;
+			entryLiveRepository.getEntryTransferHistory = originalGetEntryTransferHistory;
 		}
 	});
 });
@@ -287,10 +272,7 @@ describe("entriesService.getEntryEventPicks", () => {
 			eventLive: { "EventLive:2526:34": liveData34 },
 		});
 
-		const result = await entriesService.getEntryEventPicks(
-			context,
-			eventResult,
-		);
+		const result = await entriesService.getEntryEventPicks(context, eventResult);
 		expect(result).toHaveLength(2);
 		expect(result[0]).toMatchObject({
 			webName: "Gyokeres",

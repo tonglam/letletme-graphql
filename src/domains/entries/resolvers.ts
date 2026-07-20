@@ -10,15 +10,12 @@ import { entriesService } from "./service";
  * Per-request memoization for player-event lookups to avoid N+1 Redis/DB round-trips
  * when resolving the `eventPlayedCaptain` field on multiple EntryEventResult rows.
  */
-const playersForEventMemo = new WeakMap<
-	GraphQLContext,
-	Map<string, Player | null>
->();
+const playersForEventMemo = new WeakMap<GraphQLContext, Map<string, Player | null>>();
 
 const getPlayerByIdForEventMemoized = async (
 	context: GraphQLContext,
 	playerId: number,
-	eventId: number,
+	eventId: number
 ): Promise<Player | null> => {
 	const key = `${playerId}:${eventId}`;
 	let memo = playersForEventMemo.get(context);
@@ -30,11 +27,7 @@ const getPlayerByIdForEventMemoized = async (
 	if (cached !== undefined) {
 		return cached;
 	}
-	const player = await playersService.getPlayerByIdForEvent(
-		context,
-		playerId,
-		eventId,
-	);
+	const player = await playersService.getPlayerByIdForEvent(context, playerId, eventId);
 	memo.set(key, player);
 	return player;
 };
@@ -85,25 +78,13 @@ export const entryResultChipToEnum = (raw: string | null): string => {
 	) {
 		return "TRIPLE_CAPTAIN";
 	}
-	if (
-		value === "FREE_HIT" ||
-		compactValue === "FREEHIT" ||
-		compactValue === "FH"
-	) {
+	if (value === "FREE_HIT" || compactValue === "FREEHIT" || compactValue === "FH") {
 		return "FREE_HIT";
 	}
-	if (
-		value === "WILDCARD" ||
-		compactValue === "WILDCARD" ||
-		compactValue === "WC"
-	) {
+	if (value === "WILDCARD" || compactValue === "WILDCARD" || compactValue === "WC") {
 		return "WILDCARD";
 	}
-	if (
-		value === "MANAGER" ||
-		compactValue === "MANAGER" ||
-		compactValue === "AM"
-	) {
+	if (value === "MANAGER" || compactValue === "MANAGER" || compactValue === "AM") {
 		return "MANAGER";
 	}
 	return "NONE";
@@ -114,13 +95,13 @@ export const entriesResolvers = {
 		entry: async (
 			_parent: unknown,
 			args: EntryArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Entry | null> => entriesService.getEntryById(context, args.id),
 
 		entryHistory: async (
 			_parent: unknown,
 			args: EntryHistoryArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<EntryHistoryPayload> => {
 			const [results, history] = await Promise.all([
 				entriesService.getEntryHistory(context, args.entryId),
@@ -132,14 +113,14 @@ export const entriesResolvers = {
 		entryEventResult: async (
 			_parent: unknown,
 			args: EntryEventResultArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<EntryEventResult | null> =>
 			entriesService.getEntryEventResult(context, args.entryId, args.eventId),
 
 		entryTransferHistory: async (
 			_parent: unknown,
 			args: EntryTransferHistoryArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<EntryGameweekTransfers[]> =>
 			entriesService.getEntryTransferHistory(context, args.entryId, args.live),
 	},
@@ -147,45 +128,31 @@ export const entriesResolvers = {
 		entry: async (
 			parent: EntryEventResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
-		): Promise<Entry | null> =>
-			entriesService.getEntryById(context, parent.entryId),
-		eventBenchPoints: (parent: EntryEventResult): number =>
-			parent.eventBenchPoints,
-		eventChip: (parent: EntryEventResult): string =>
-			entryResultChipToEnum(parent.eventChip),
+			context: GraphQLContext
+		): Promise<Entry | null> => entriesService.getEntryById(context, parent.entryId),
+		eventBenchPoints: (parent: EntryEventResult): number => parent.eventBenchPoints,
+		eventChip: (parent: EntryEventResult): string => entryResultChipToEnum(parent.eventChip),
 		eventPlayedCaptain: async (
 			parent: EntryEventResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Player | null> => {
-			if (
-				parent.eventPlayedCaptain === null ||
-				parent.eventPlayedCaptain <= 0
-			) {
+			if (parent.eventPlayedCaptain === null || parent.eventPlayedCaptain <= 0) {
 				return null;
 			}
-			return getPlayerByIdForEventMemoized(
-				context,
-				parent.eventPlayedCaptain,
-				parent.eventId,
-			);
+			return getPlayerByIdForEventMemoized(context, parent.eventPlayedCaptain, parent.eventId);
 		},
-		eventCaptainPoints: (parent: EntryEventResult): number =>
-			parent.eventCaptainPoints,
+		eventCaptainPoints: (parent: EntryEventResult): number => parent.eventCaptainPoints,
 		eventPicks: (
 			parent: EntryEventResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
-		): Promise<ElementEventResultData[]> =>
-			entriesService.getEntryEventPicks(context, parent),
+			context: GraphQLContext
+		): Promise<ElementEventResultData[]> => entriesService.getEntryEventPicks(context, parent),
 		eventAutoSub: async (
 			parent: EntryEventResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<ElementEventResultData[]> =>
-			(await entriesService.getEntryEventPicks(context, parent)).filter(
-				(pick) => pick.autoSub,
-			),
+			(await entriesService.getEntryEventPicks(context, parent)).filter((pick) => pick.autoSub),
 	},
 };

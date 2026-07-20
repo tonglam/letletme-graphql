@@ -3,6 +3,7 @@ import type { Entry, EntryEventResult } from "../entries/repository";
 import { entriesService } from "../entries/service";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
+import { resolvePreviousEventBaseline } from "./baseline";
 
 export type EntryLive = {
 	entry: Entry;
@@ -36,11 +37,16 @@ const toEntryLive = (params: {
 	entry: Entry;
 	event: Event;
 	current: RequiredEntryEventResult;
+	previous: EntryEventResult | null;
 }): EntryLive => {
-	const previousOverallPoints = params.entry.lastOverallPoints ?? null;
-	const previousOverallRank = params.entry.lastOverallRank ?? null;
-	const liveTotalPoints =
-		(previousOverallPoints ?? 0) + params.current.eventNetPoints;
+	const baseline = resolvePreviousEventBaseline(
+		params.entry,
+		params.current.eventId,
+		params.previous
+	);
+	const previousOverallPoints = baseline.overallPoints;
+	const previousOverallRank = baseline.overallRank;
+	const liveTotalPoints = (previousOverallPoints ?? 0) + params.current.eventNetPoints;
 
 	return {
 		entry: params.entry,
@@ -62,7 +68,7 @@ export const entryLiveService = {
 	async getEntryLive(
 		context: GraphQLContext,
 		entryId: number,
-		eventId: number,
+		eventId: number
 	): Promise<EntryLive | null> {
 		if (!Number.isInteger(entryId) || !Number.isInteger(eventId)) {
 			return null;
@@ -72,10 +78,13 @@ export const entryLiveService = {
 			return null;
 		}
 
-		const [entry, currentResult, event] = await Promise.all([
+		const [entry, currentResult, event, previousResult] = await Promise.all([
 			entriesService.getEntryById(context, entryId),
 			entriesService.getEntryEventResult(context, entryId, eventId),
 			eventsService.getEventById(context, eventId),
+			eventId > 1
+				? entriesService.getEntryEventResult(context, entryId, eventId - 1)
+				: Promise.resolve(null),
 		]);
 
 		if (!entry || !currentResult || !event) {
@@ -86,6 +95,7 @@ export const entryLiveService = {
 			entry,
 			event,
 			current: currentResult,
+			previous: previousResult,
 		});
 	},
 };

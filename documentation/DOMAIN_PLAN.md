@@ -1,5 +1,10 @@
 # GraphQL Domain Plan - Fantasy Football Platform
 
+> Historical domain-design reference. The deployed contract is documented in
+> the root [`README.md`](../README.md), [`documentation/API_CHANGELOG.md`](API_CHANGELOG.md),
+> and [`docs/ROLLOUT.md`](../docs/ROLLOUT.md). Do not use the old table/query
+> counts or deferred-auth notes below as migration or security instructions.
+
 ## Executive Summary
 
 This document outlines the business-domain GraphQL architecture for the Fantasy Football platform. Instead of exposing 27 database tables as-is, we design around **user journeys** and **business use cases**.

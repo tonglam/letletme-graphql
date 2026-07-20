@@ -54,14 +54,7 @@ export const enrichTransferRows = (params: {
 	teamsById: Map<number, Team>;
 	liveByPlayer: Map<number, LivePerformance>;
 }): EntryEventTransfersData[] => {
-	const {
-		entryId,
-		eventId,
-		transferRows,
-		playersById,
-		teamsById,
-		liveByPlayer,
-	} = params;
+	const { entryId, eventId, transferRows, playersById, teamsById, liveByPlayer } = params;
 
 	return transferRows.map((row) => {
 		const inPlayer = playersById.get(row.elementIn);

@@ -10,10 +10,7 @@ export type GetPlayerValueHistoryArgs = {
 	toDate?: Date;
 };
 
-export function calculatePriceChangeType(
-	oldValue: number,
-	newValue: number,
-): PriceChangeType {
+export function calculatePriceChangeType(oldValue: number, newValue: number): PriceChangeType {
 	if (newValue > oldValue) {
 		return "RISE";
 	}
@@ -24,21 +21,15 @@ export function calculatePriceChangeType(
 }
 
 export const playerValuesService = {
-	async getPlayerValues(
-		context: GraphQLContext,
-		changeDate: Date,
-	): Promise<PlayerValue[]> {
+	async getPlayerValues(context: GraphQLContext, changeDate: Date): Promise<PlayerValue[]> {
 		return playerValuesRepository.getPlayerValues(context, changeDate);
 	},
 
 	async getPlayerValueHistory(
 		context: GraphQLContext,
-		args: GetPlayerValueHistoryArgs,
+		args: GetPlayerValueHistoryArgs
 	): Promise<PlayerValueHistoryItem[]> {
-		const history = await playerValuesRepository.getPlayerValueHistory(
-			context,
-			args,
-		);
+		const history = await playerValuesRepository.getPlayerValueHistory(context, args);
 
 		return history.map((item) => ({
 			...item,

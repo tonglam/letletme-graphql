@@ -1,45 +1,8 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { gqlCacheKey } from "../../infra/cache-key";
+import { getCurrentSeason } from "../../infra/season";
 
 const NULL_SENTINEL = "__entry-live:null__";
-
-// Detected once at runtime; avoids 3 sequential retries on every cache miss.
-type TransferTimeCol = "time" | "created_at" | "none";
-let transferTimeCol: TransferTimeCol | null = null;
-let transferTimeColPromise: Promise<TransferTimeCol> | null = null;
-
-const detectTransferTimeCol = (
-	context: GraphQLContext,
-): Promise<TransferTimeCol> => {
-	if (transferTimeCol !== null) return Promise.resolve(transferTimeCol);
-	if (transferTimeColPromise) return transferTimeColPromise;
-
-	transferTimeColPromise = (async (): Promise<TransferTimeCol> => {
-		const { error: e1 } = await context.supabase
-			.from("entry_event_transfers")
-			.select("time")
-			.limit(0);
-		if (!e1) {
-			transferTimeCol = "time";
-			return "time";
-		}
-		if (
-			e1.message.includes("column entry_event_transfers.time does not exist")
-		) {
-			const { error: e2 } = await context.supabase
-				.from("entry_event_transfers")
-				.select("created_at")
-				.limit(0);
-			if (!e2) {
-				transferTimeCol = "created_at";
-				return "created_at";
-			}
-		}
-		transferTimeCol = "none";
-		return "none";
-	})();
-
-	return transferTimeColPromise;
-};
 
 export type EntryEventPick = {
 	eventId: number;
@@ -67,22 +30,102 @@ export type EntryEventTransferRow = {
 	time: string | null;
 };
 
+export class EntryTransferRepositoryError extends Error {
+	readonly code = "ENTRY_TRANSFER_STORAGE_UNAVAILABLE";
+	constructor(
+		message: string,
+		readonly cause?: unknown
+	) {
+		super(message);
+		this.name = "EntryTransferRepositoryError";
+	}
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
-const asNumber = (value: unknown): number | null =>
-	typeof value === "number" && Number.isFinite(value) ? value : null;
+const asNumber = (value: unknown): number | null => {
+	if (typeof value === "number") return Number.isFinite(value) ? value : null;
+	if (typeof value === "string" && value.trim().length > 0) {
+		const parsed = Number(value);
+		return Number.isFinite(parsed) ? parsed : null;
+	}
+	return null;
+};
 
-const asString = (value: unknown): string | null =>
-	typeof value === "string" ? value : null;
+const asString = (value: unknown): string | null => {
+	if (typeof value === "string") return value;
+	if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
+	return null;
+};
 
-const asBoolean = (value: unknown): boolean | null =>
-	typeof value === "boolean" ? value : null;
+const asBoolean = (value: unknown): boolean | null => (typeof value === "boolean" ? value : null);
 
-const parsePick = (
-	raw: unknown,
-	fallback: { eventId: number; entryId: number },
-): Pick | null => {
+const deleteMalformedCache = async (context: GraphQLContext, key: string): Promise<void> => {
+	try {
+		await context.redis.del(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to evict malformed entry-live cache");
+	}
+};
+
+const isEntryEventPick = (value: unknown): value is EntryEventPick => {
+	if (!isRecord(value) || !Array.isArray(value.picks)) return false;
+	return (
+		asNumber(value.entryId) !== null &&
+		asNumber(value.eventId) !== null &&
+		value.picks.every((pick) => isRecord(pick) && asNumber(pick.element) !== null)
+	);
+};
+
+const isEntryEventTransferRow = (value: unknown): value is EntryEventTransferRow => {
+	if (!isRecord(value)) return false;
+	return (
+		asNumber(value.entryId) !== null &&
+		asNumber(value.eventId) !== null &&
+		asNumber(value.elementIn) !== null &&
+		asNumber(value.elementOut) !== null &&
+		(value.time === null || typeof value.time === "string")
+	);
+};
+
+const parseCachedJson = async <T>(
+	context: GraphQLContext,
+	key: string,
+	validate: (value: unknown) => value is T
+): Promise<T | undefined> => {
+	let raw: string | null;
+	try {
+		raw = await context.redis.get(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to read entry-live cache");
+		return undefined;
+	}
+	if (raw === null) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (validate(parsed)) return parsed;
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Malformed entry-live cache");
+	}
+	await deleteMalformedCache(context, key);
+	return undefined;
+};
+
+const sortTransferRows = (rows: EntryEventTransferRow[]): EntryEventTransferRow[] => {
+	return rows.sort((a, b) => {
+		if (a.eventId !== b.eventId) return a.eventId - b.eventId;
+		if (a.time === b.time) return a.elementIn - b.elementIn || a.elementOut - b.elementOut;
+		if (a.time === null) return 1;
+		if (b.time === null) return -1;
+		const aTime = Date.parse(a.time);
+		const bTime = Date.parse(b.time);
+		if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) return aTime - bTime;
+		return a.time.localeCompare(b.time);
+	});
+};
+
+const parsePick = (raw: unknown, fallback: { eventId: number; entryId: number }): Pick | null => {
 	if (!isRecord(raw)) {
 		return null;
 	}
@@ -96,10 +139,7 @@ const parsePick = (
 	const multiplier = asNumber(raw.multiplier) ?? 1;
 
 	const isCaptain =
-		asBoolean(raw.isCaptain) ??
-		asBoolean(raw.is_captain) ??
-		asBoolean(raw.captain) ??
-		false;
+		asBoolean(raw.isCaptain) ?? asBoolean(raw.is_captain) ?? asBoolean(raw.captain) ?? false;
 	const isViceCaptain =
 		asBoolean(raw.isViceCaptain) ??
 		asBoolean(raw.is_vice_captain) ??
@@ -121,10 +161,7 @@ const parsePick = (
 	};
 };
 
-const parsePicks = (
-	raw: unknown,
-	fallback: { eventId: number; entryId: number },
-): Pick[] => {
+const parsePicks = (raw: unknown, fallback: { eventId: number; entryId: number }): Pick[] => {
 	if (typeof raw === "string") {
 		try {
 			const parsed = JSON.parse(raw) as unknown;
@@ -138,9 +175,7 @@ const parsePicks = (
 		return [];
 	}
 
-	return raw
-		.map((item) => parsePick(item, fallback))
-		.filter((p): p is Pick => p !== null);
+	return raw.map((item) => parsePick(item, fallback)).filter((p): p is Pick => p !== null);
 };
 
 type DbEntryEventPickRow = Record<string, unknown>;
@@ -150,44 +185,36 @@ interface EntryLiveRepository {
 	getEntryEventPick(
 		context: GraphQLContext,
 		entryId: number,
-		eventId: number,
+		eventId: number
 	): Promise<EntryEventPick | null>;
 	getEntryEventPicksByIds(
 		context: GraphQLContext,
 		entryIds: number[],
-		eventId: number,
+		eventId: number
 	): Promise<Map<number, EntryEventPick>>;
 	getEntryEventTransfers(
 		context: GraphQLContext,
 		entryId: number,
-		eventId: number,
+		eventId: number
 	): Promise<EntryEventTransferRow[]>;
 	getEntryEventTransfersByIds(
 		context: GraphQLContext,
 		entryIds: number[],
-		eventId: number,
+		eventId: number
 	): Promise<Map<number, EntryEventTransferRow[]>>;
 	getEntryTransferHistory(
 		context: GraphQLContext,
 		entryId: number,
-		prefetchedCacheValue?: string | null,
+		prefetchedCacheValue?: string | null
 	): Promise<EntryEventTransferRow[]>;
 }
 
 const mapTransferRow = (
 	row: DbEntryEventTransferRow,
-	fallback: { entryId: number; eventId: number | null },
+	fallback: { entryId: number; eventId: number | null }
 ): EntryEventTransferRow | null => {
-	const elementIn =
-		asNumber(row.element_in) ??
-		asNumber(row.element_in_id) ??
-		asNumber(row.player_in) ??
-		asNumber(row.in_element);
-	const elementOut =
-		asNumber(row.element_out) ??
-		asNumber(row.element_out_id) ??
-		asNumber(row.player_out) ??
-		asNumber(row.out_element);
+	const elementIn = asNumber(row.element_in_id);
+	const elementOut = asNumber(row.element_out_id);
 	const rowEventId = asNumber(row.event_id) ?? asNumber(row.event);
 	const rowEntryId = asNumber(row.entry_id) ?? asNumber(row.entry);
 	const eventId = rowEventId ?? fallback.eventId;
@@ -202,7 +229,7 @@ const mapTransferRow = (
 		eventId,
 		elementIn,
 		elementOut,
-		time: asString(row.time) ?? asString(row.created_at) ?? null,
+		time: asString(row.transfer_time),
 	};
 };
 
@@ -210,12 +237,13 @@ export const entryLiveRepository: EntryLiveRepository = {
 	async getEntryEventPick(
 		context: GraphQLContext,
 		entryId: number,
-		eventId: number,
+		eventId: number
 	): Promise<EntryEventPick | null> {
-		const cacheKey = `entries:picks:${entryId}:${eventId}`;
-		const cached = await context.redis.get(cacheKey);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:picks:${entryId}:${eventId}`);
+		const cached = await parseCachedJson(context, cacheKey, isEntryEventPick);
 		if (cached) {
-			return JSON.parse(cached) as EntryEventPick;
+			return cached;
 		}
 
 		const { data, error } = await context.supabase
@@ -227,10 +255,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 
 		if (error) {
 			// Graceful degradation: picks are optional for live calc.
-			context.logger.error(
-				{ err: error, entryId, eventId },
-				"Failed to fetch entry event picks",
-			);
+			context.logger.error({ err: error, entryId, eventId }, "Failed to fetch entry event picks");
 			return null;
 		}
 
@@ -259,29 +284,23 @@ export const entryLiveRepository: EntryLiveRepository = {
 
 		// Picks are locked after deadline — safe to cache for hours.
 		const PICKS_CACHE_TTL = 3600;
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(result),
-			"EX",
-			PICKS_CACHE_TTL,
-		);
+		await context.redis.set(cacheKey, JSON.stringify(result), "EX", PICKS_CACHE_TTL);
 		return result;
 	},
 
 	async getEntryEventPicksByIds(
 		context: GraphQLContext,
 		entryIds: number[],
-		eventId: number,
+		eventId: number
 	): Promise<Map<number, EntryEventPick>> {
-		const uniqueIds = Array.from(
-			new Set(entryIds.filter((id) => Number.isFinite(id) && id > 0)),
-		);
+		const uniqueIds = Array.from(new Set(entryIds.filter((id) => Number.isFinite(id) && id > 0)));
 		if (uniqueIds.length === 0) {
 			return new Map();
 		}
 
 		const PICKS_CACHE_TTL = 3600;
-		const cacheKeys = uniqueIds.map((id) => `entries:picks:${id}:${eventId}`);
+		const season = await getCurrentSeason(context);
+		const cacheKeys = uniqueIds.map((id) => gqlCacheKey(season, `entries:picks:${id}:${eventId}`));
 		const results = new Map<number, EntryEventPick>();
 		const missIds: number[] = [];
 
@@ -290,7 +309,20 @@ export const entryLiveRepository: EntryLiveRepository = {
 			for (let i = 0; i < uniqueIds.length; i++) {
 				const raw = cached[i];
 				if (raw) {
-					results.set(uniqueIds[i], JSON.parse(raw) as EntryEventPick);
+					try {
+						const parsed: unknown = JSON.parse(raw);
+						if (isEntryEventPick(parsed)) {
+							results.set(uniqueIds[i], parsed);
+							continue;
+						}
+					} catch (error) {
+						context.logger.warn(
+							{ err: error, key: cacheKeys[i] },
+							"Malformed entry-live picks cache"
+						);
+					}
+					await deleteMalformedCache(context, cacheKeys[i]);
+					missIds.push(uniqueIds[i]);
 				} else {
 					missIds.push(uniqueIds[i]);
 				}
@@ -312,7 +344,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 		if (error) {
 			context.logger.error(
 				{ err: error, entryIds: missIds, eventId },
-				"Failed to batch fetch entry event picks",
+				"Failed to batch fetch entry event picks"
 			);
 			return results;
 		}
@@ -343,10 +375,10 @@ export const entryLiveRepository: EntryLiveRepository = {
 
 			results.set(rowEntryId, pick);
 			pipeline.set(
-				`entries:picks:${rowEntryId}:${eventId}`,
+				gqlCacheKey(season, `entries:picks:${rowEntryId}:${eventId}`),
 				JSON.stringify(pick),
 				"EX",
-				PICKS_CACHE_TTL,
+				PICKS_CACHE_TTL
 			);
 		}
 
@@ -357,64 +389,69 @@ export const entryLiveRepository: EntryLiveRepository = {
 	async getEntryEventTransfers(
 		context: GraphQLContext,
 		entryId: number,
-		eventId: number,
+		eventId: number
 	): Promise<EntryEventTransferRow[]> {
-		const cacheKey = `entries:transfers:${entryId}:${eventId}`;
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:transfers:v2:${entryId}:${eventId}`);
 		const cached = await context.redis.get(cacheKey);
 		if (cached) {
-			return JSON.parse(cached) as EntryEventTransferRow[];
+			try {
+				const parsed: unknown = JSON.parse(cached);
+				if (Array.isArray(parsed) && parsed.every(isEntryEventTransferRow)) {
+					return sortTransferRows(parsed);
+				}
+			} catch (error) {
+				context.logger.warn({ err: error, key: cacheKey }, "Malformed entry-live transfer cache");
+			}
+			await deleteMalformedCache(context, cacheKey);
 		}
 
-		const timeCol = await detectTransferTimeCol(context);
-		let baseQuery = context.supabase
+		const baseQuery = context.supabase
 			.from("entry_event_transfers")
-			.select("*")
+			.select("entry_id, event_id, element_in_id, element_out_id, transfer_time")
 			.eq("entry_id", entryId)
-			.eq("event_id", eventId);
-		if (timeCol !== "none") {
-			baseQuery = baseQuery.order(timeCol, { ascending: true });
-		}
+			.eq("event_id", eventId)
+			.order("transfer_time", { ascending: true });
 		const { data, error } = await baseQuery;
 
 		if (error) {
 			context.logger.error(
 				{ err: error, entryId, eventId },
-				"Failed to fetch entry event transfers",
+				"Failed to fetch entry event transfers"
 			);
-			return [];
+			throw new EntryTransferRepositoryError("Failed to fetch entry event transfers", error);
 		}
 
 		const rows = (data as DbEntryEventTransferRow[] | null) ?? [];
 		const transfers: EntryEventTransferRow[] = rows
 			.map((row) => mapTransferRow(row, { entryId, eventId }))
 			.filter((t): t is EntryEventTransferRow => t !== null);
+		sortTransferRows(transfers);
 
 		// Transfers are locked after deadline — safe to cache for hours.
 		const TRANSFERS_CACHE_TTL = 3600;
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(transfers),
-			"EX",
-			TRANSFERS_CACHE_TTL,
-		);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(transfers), "EX", TRANSFERS_CACHE_TTL);
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to cache entry-live transfers");
+		}
 		return transfers;
 	},
 
 	async getEntryEventTransfersByIds(
 		context: GraphQLContext,
 		entryIds: number[],
-		eventId: number,
+		eventId: number
 	): Promise<Map<number, EntryEventTransferRow[]>> {
-		const uniqueIds = Array.from(
-			new Set(entryIds.filter((id) => Number.isFinite(id) && id > 0)),
-		);
+		const uniqueIds = Array.from(new Set(entryIds.filter((id) => Number.isFinite(id) && id > 0)));
 		if (uniqueIds.length === 0) {
 			return new Map();
 		}
 
 		const TRANSFERS_CACHE_TTL = 3600;
-		const cacheKeys = uniqueIds.map(
-			(id) => `entries:transfers:${id}:${eventId}`,
+		const season = await getCurrentSeason(context);
+		const cacheKeys = uniqueIds.map((id) =>
+			gqlCacheKey(season, `entries:transfers:v2:${id}:${eventId}`)
 		);
 		const results = new Map<number, EntryEventTransferRow[]>();
 		const missIds: number[] = [];
@@ -424,7 +461,20 @@ export const entryLiveRepository: EntryLiveRepository = {
 			for (let i = 0; i < uniqueIds.length; i++) {
 				const raw = cached[i];
 				if (raw) {
-					results.set(uniqueIds[i], JSON.parse(raw) as EntryEventTransferRow[]);
+					try {
+						const parsed: unknown = JSON.parse(raw);
+						if (Array.isArray(parsed) && parsed.every(isEntryEventTransferRow)) {
+							results.set(uniqueIds[i], sortTransferRows(parsed));
+							continue;
+						}
+					} catch (error) {
+						context.logger.warn(
+							{ err: error, key: cacheKeys[i] },
+							"Malformed entry-live transfer cache"
+						);
+					}
+					await deleteMalformedCache(context, cacheKeys[i]);
+					missIds.push(uniqueIds[i]);
 				} else {
 					missIds.push(uniqueIds[i]);
 				}
@@ -437,24 +487,21 @@ export const entryLiveRepository: EntryLiveRepository = {
 			return results;
 		}
 
-		const timeCol = await detectTransferTimeCol(context);
-		let batchQuery = context.supabase
+		const batchQuery = context.supabase
 			.from("entry_event_transfers")
-			.select("*")
+			.select("entry_id, event_id, element_in_id, element_out_id, transfer_time")
 			.in("entry_id", missIds)
 			.eq("event_id", eventId)
-			.order("entry_id", { ascending: true });
-		if (timeCol !== "none") {
-			batchQuery = batchQuery.order(timeCol, { ascending: true });
-		}
+			.order("entry_id", { ascending: true })
+			.order("transfer_time", { ascending: true });
 		const { data, error } = await batchQuery;
 
 		if (error) {
 			context.logger.error(
 				{ err: error, entryIds: missIds, eventId },
-				"Failed to batch fetch entry event transfers",
+				"Failed to batch fetch entry event transfers"
 			);
-			return results;
+			throw new EntryTransferRepositoryError("Failed to batch fetch entry event transfers", error);
 		}
 
 		const rows = (data as DbEntryEventTransferRow[] | null) ?? [];
@@ -471,19 +518,27 @@ export const entryLiveRepository: EntryLiveRepository = {
 				byEntry.set(transfer.entryId, [transfer]);
 			}
 		}
-
-		const pipeline = context.redis.pipeline();
-		for (const id of missIds) {
-			const transfers = byEntry.get(id) ?? [];
-			results.set(id, transfers);
-			pipeline.set(
-				`entries:transfers:${id}:${eventId}`,
-				JSON.stringify(transfers),
-				"EX",
-				TRANSFERS_CACHE_TTL,
-			);
+		for (const transfers of byEntry.values()) {
+			sortTransferRows(transfers);
 		}
-		await pipeline.exec();
+
+		try {
+			const pipeline = context.redis.pipeline();
+			for (const id of missIds) {
+				const transfers = byEntry.get(id) ?? [];
+				results.set(id, transfers);
+				pipeline.set(
+					gqlCacheKey(season, `entries:transfers:v2:${id}:${eventId}`),
+					JSON.stringify(transfers),
+					"EX",
+					TRANSFERS_CACHE_TTL
+				);
+			}
+			await pipeline.exec();
+		} catch (error) {
+			context.logger.warn({ err: error, eventId }, "Failed to cache batched entry-live transfers");
+			for (const id of missIds) results.set(id, byEntry.get(id) ?? []);
+		}
 
 		return results;
 	},
@@ -491,63 +546,60 @@ export const entryLiveRepository: EntryLiveRepository = {
 	async getEntryTransferHistory(
 		context: GraphQLContext,
 		entryId: number,
-		prefetchedCacheValue?: string | null,
+		prefetchedCacheValue?: string | null
 	): Promise<EntryEventTransferRow[]> {
 		if (!Number.isFinite(entryId) || entryId <= 0) {
 			return [];
 		}
 
-		const cacheKey = `entries:transfers:history:${entryId}`;
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:transfers:v2:history:${entryId}`);
 		const cached =
-			prefetchedCacheValue !== undefined
-				? prefetchedCacheValue
-				: await context.redis.get(cacheKey);
+			prefetchedCacheValue !== undefined ? prefetchedCacheValue : await context.redis.get(cacheKey);
 		if (cached !== null) {
 			if (cached === NULL_SENTINEL) {
 				return [];
 			}
-			return JSON.parse(cached) as EntryEventTransferRow[];
+			try {
+				const parsed: unknown = JSON.parse(cached);
+				if (Array.isArray(parsed) && parsed.every(isEntryEventTransferRow)) {
+					return sortTransferRows(parsed);
+				}
+			} catch (error) {
+				context.logger.warn(
+					{ err: error, key: cacheKey },
+					"Malformed entry transfer history cache"
+				);
+			}
+			if (prefetchedCacheValue === undefined) {
+				await deleteMalformedCache(context, cacheKey);
+			}
 		}
 
-		const timeCol = await detectTransferTimeCol(context);
-		let historyQuery = context.supabase
+		const historyQuery = context.supabase
 			.from("entry_event_transfers")
-			.select("*")
+			.select("entry_id, event_id, element_in_id, element_out_id, transfer_time")
 			.eq("entry_id", entryId)
-			.order("event_id", { ascending: true });
-		if (timeCol !== "none") {
-			historyQuery = historyQuery.order(timeCol, { ascending: true });
-		}
+			.order("event_id", { ascending: true })
+			.order("transfer_time", { ascending: true });
 		const { data, error } = await historyQuery;
 
 		if (error) {
-			context.logger.error(
-				{ err: error, entryId },
-				"Failed to fetch entry transfer history",
-			);
-			return [];
+			context.logger.error({ err: error, entryId }, "Failed to fetch entry transfer history");
+			throw new EntryTransferRepositoryError("Failed to fetch entry transfer history", error);
 		}
 
 		const rows = (data as DbEntryEventTransferRow[] | null) ?? [];
 		const transfers: EntryEventTransferRow[] = rows
 			.map((row) => mapTransferRow(row, { entryId, eventId: null }))
 			.filter((t): t is EntryEventTransferRow => t !== null);
+		sortTransferRows(transfers);
 
 		const TRANSFER_HISTORY_TTL = 3600;
 		if (transfers.length === 0) {
-			await context.redis.set(
-				cacheKey,
-				NULL_SENTINEL,
-				"EX",
-				TRANSFER_HISTORY_TTL,
-			);
+			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", TRANSFER_HISTORY_TTL);
 		} else {
-			await context.redis.set(
-				cacheKey,
-				JSON.stringify(transfers),
-				"EX",
-				TRANSFER_HISTORY_TTL,
-			);
+			await context.redis.set(cacheKey, JSON.stringify(transfers), "EX", TRANSFER_HISTORY_TTL);
 		}
 		return transfers;
 	},

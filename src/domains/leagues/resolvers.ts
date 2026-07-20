@@ -9,7 +9,7 @@ const eventsMemo = new WeakMap<GraphQLContext, Map<number, Event | null>>();
 
 const getEventByIdMemoized = async (
 	context: GraphQLContext,
-	eventId: number,
+	eventId: number
 ): Promise<Event | null> => {
 	let memo = eventsMemo.get(context);
 	if (!memo) {
@@ -43,20 +43,15 @@ export const leaguesResolvers = {
 		entryLeagues: async (
 			_parent: unknown,
 			args: EntryLeaguesArgs,
-			context: GraphQLContext,
-		): Promise<League[]> =>
-			leaguesService.getEntryLeagues(context, args.entryId),
+			context: GraphQLContext
+		): Promise<League[]> => leaguesService.getEntryLeagues(context, args.entryId),
 
 		leagueEventResults: async (
 			_parent: unknown,
 			args: LeagueEventResultsArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<LeagueEventResult[]> =>
-			leaguesService.getLeagueEventResults(
-				context,
-				args.leagueId,
-				args.eventId,
-			),
+			leaguesService.getLeagueEventResults(context, args.leagueId, args.eventId),
 	},
 	League: {
 		type: (parent: League): string => leagueTypeToEnum(parent.type),
@@ -66,7 +61,7 @@ export const leaguesResolvers = {
 		event: async (
 			parent: LeagueEventResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Event | null> => getEventByIdMemoized(context, parent.eventId),
 	},
 };

@@ -1,4 +1,4 @@
-import { collectDefaultMetrics, Histogram, Registry } from "prom-client";
+import { collectDefaultMetrics, Counter, Histogram, Registry } from "prom-client";
 
 const registry = new Registry();
 
@@ -13,9 +13,42 @@ const httpRequestDurationSeconds = new Histogram({
 
 registry.registerMetric(httpRequestDurationSeconds);
 
+const rateLimitStorageFailures = new Counter({
+	name: "rate_limit_storage_failures_total",
+	help: "Rate-limit storage failures by route scope and fallback mode",
+	labelNames: ["scope", "mode"] as const,
+});
+
+const authTokenValidations = new Counter({
+	name: "auth_token_validations_total",
+	help: "Successful authentication token validations by token family",
+	labelNames: ["family"] as const,
+});
+
+const livePointsShadowDifferences = new Counter({
+	name: "live_points_shadow_differences_total",
+	help: "Players whose legacy and official-total live calculations differ",
+	labelNames: ["selected"] as const,
+});
+
+const cacheRepositoryEvents = new Counter({
+	name: "cache_repository_events_total",
+	help: "Cache source, fallback, malformed, negative-hit, and suppressed-write events",
+	labelNames: ["domain", "event"] as const,
+});
+
+registry.registerMetric(rateLimitStorageFailures);
+registry.registerMetric(authTokenValidations);
+registry.registerMetric(livePointsShadowDifferences);
+registry.registerMetric(cacheRepositoryEvents);
+
 export const metrics = {
 	registry,
 	httpRequestDurationSeconds,
+	rateLimitStorageFailures,
+	authTokenValidations,
+	livePointsShadowDifferences,
+	cacheRepositoryEvents,
 };
 
 export const metricsResponse = async (): Promise<Response> => {

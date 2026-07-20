@@ -17,6 +17,8 @@ import {
 } from "./calc-service";
 import type { EntryEventPick, EntryEventTransferRow } from "./repository";
 import { entryLiveRepository } from "./repository";
+import { resolvePreviousEventBaseline } from "./baseline";
+import type { EntryEventResult } from "../entries/repository";
 import {
 	buildTeamMapById,
 	type EntryEventTransfersData,
@@ -36,6 +38,7 @@ export type BatchLiveCalcResult = {
 
 type SharedData = {
 	liveByPlayer: Map<number, LivePerformance>;
+	effectiveBonusByPlayer: Map<number, number>;
 	teamsById: Map<number, Team>;
 	playersById: Map<number, Player>;
 	fixturesByTeam: Map<number, Fixture[]>;
@@ -46,6 +49,7 @@ type PerEntryData = {
 	entry: Entry | null;
 	pickEntity: EntryEventPick | null;
 	transferRows: EntryEventTransferRow[];
+	previousResult: EntryEventResult | null;
 };
 
 const PLAY_STATUS = {
@@ -62,12 +66,9 @@ const safeInt = (value: number | null | undefined): number =>
 const asScaled = (value: number | null | undefined, divisor: number): number =>
 	typeof value === "number" ? value / divisor : 0;
 
-const safeNull = <T>(value: T | null | undefined, defaultValue: T): T =>
-	value ?? defaultValue;
+const safeNull = <T>(value: T | null | undefined, defaultValue: T): T => value ?? defaultValue;
 
-const parseNullableFloat = (
-	value: string | null | undefined,
-): number | null => {
+const parseNullableFloat = (value: string | null | undefined): number | null => {
 	if (!value) {
 		return null;
 	}
@@ -113,7 +114,7 @@ const buildFixtureIndex = (fixtures: Fixture[]): Map<number, Fixture[]> => {
 };
 
 const getPlayStatusForTeam = (
-	fixtures: Fixture[] | undefined,
+	fixtures: Fixture[] | undefined
 ): { started: boolean; finished: boolean; status: number } => {
 	if (!fixtures || fixtures.length === 0) {
 		return { started: true, finished: true, status: PLAY_STATUS.BLANK };
@@ -200,11 +201,7 @@ const buildTeamMatchInfo = (params: {
 
 		const teamScore = isHome ? fx.teamHScore : fx.teamAScore;
 		const againstScore = isHome ? fx.teamAScore : fx.teamHScore;
-		scores.push(
-			teamScore === null || againstScore === null
-				? ""
-				: `${teamScore}-${againstScore}`,
-		);
+		scores.push(teamScore === null || againstScore === null ? "" : `${teamScore}-${againstScore}`);
 	}
 
 	return {
@@ -228,7 +225,7 @@ const hasCompletedFixtures = (pick: ElementEventResultData): boolean =>
 	pick.isGwFinished || pick.playStatus === PLAY_STATUS.BLANK || pick.bgw;
 
 const selectCaptainForScoring = (
-	picks: ElementEventResultData[],
+	picks: ElementEventResultData[]
 ): ElementEventResultData | null => {
 	const captain = picks.find((p) => p.isCaptain) ?? null;
 	if (!captain) {
@@ -263,20 +260,11 @@ const normalizeChip = (raw: string | null | undefined): string => {
 	) {
 		return "TRIPLE_CAPTAIN";
 	}
-	if (
-		value === "FREE_HIT" ||
-		compactValue === "FREEHIT" ||
-		compactValue === "FH"
-	)
+	if (value === "FREE_HIT" || compactValue === "FREEHIT" || compactValue === "FH")
 		return "FREE_HIT";
-	if (
-		value === "WILDCARD" ||
-		compactValue === "WILDCARD" ||
-		compactValue === "WC"
-	)
+	if (value === "WILDCARD" || compactValue === "WILDCARD" || compactValue === "WC")
 		return "WILDCARD";
-	if (compactValue === "NONE" || compactValue === "NA" || compactValue === "")
-		return "NONE";
+	if (compactValue === "NONE" || compactValue === "NA" || compactValue === "") return "NONE";
 	return "NONE";
 };
 
@@ -284,10 +272,10 @@ const computeSingleEntry = (
 	entryId: number,
 	eventId: number,
 	perEntry: PerEntryData,
-	shared: SharedData,
+	shared: SharedData
 ): LiveCalcData => {
-	const { entry, pickEntity, transferRows } = perEntry;
-	const { liveByPlayer, fixturesByTeam, teamsById, playersById } = shared;
+	const { entry, pickEntity, transferRows, previousResult } = perEntry;
+	const { liveByPlayer, effectiveBonusByPlayer, fixturesByTeam, teamsById, playersById } = shared;
 
 	const chip = normalizeChip(pickEntity?.chip ?? null);
 	const transferCost = pickEntity?.transfersCost ?? 0;
@@ -313,11 +301,9 @@ const computeSingleEntry = (
 		const redCards = safeNull(live?.redCards, 0);
 		const isPlayed = minutes > 0 || yellowCards > 0 || redCards > 0;
 
-		const defensiveContribution: number = safeNull(
-			live?.defensiveContribution,
-			0,
-		);
-		const calculatedTotalPoints = calcElementLivePoints(elementType, live);
+		const defensiveContribution: number = safeNull(live?.defensiveContribution, 0);
+		const effectiveBonus = effectiveBonusByPlayer.get(pick.element);
+		const calculatedTotalPoints = calcElementLivePoints(elementType, live, effectiveBonus);
 
 		return {
 			season: null,
@@ -335,9 +321,7 @@ const computeSingleEntry = (
 			againstId: matchInfo.againstId,
 			againstName: matchInfo.againstName,
 			againstShortName:
-				matchInfo.againstShortName.length > 0
-					? matchInfo.againstShortName
-					: "BLANK",
+				matchInfo.againstShortName.length > 0 ? matchInfo.againstShortName : "BLANK",
 			wasHome: matchInfo.wasHome,
 			score: matchInfo.score,
 			position: pick.position,
@@ -360,15 +344,13 @@ const computeSingleEntry = (
 			yellowCards,
 			redCards,
 			saves: safeNull(live?.saves, 0),
-			bonus: safeNull(live?.bonus, 0),
+			bonus: effectiveBonus ?? safeNull(live?.bonus, 0),
 			bps: safeNull(live?.bps, 0),
 			totalPoints: calculatedTotalPoints,
 			starts: live?.starts ?? null,
 			expectedGoals: parseNullableFloat(live?.expectedGoals),
 			expectedAssists: parseNullableFloat(live?.expectedAssists),
-			expectedGoalInvolvements: parseNullableFloat(
-				live?.expectedGoalInvolvements,
-			),
+			expectedGoalInvolvements: parseNullableFloat(live?.expectedGoalInvolvements),
 			expectedGoalsConceded: parseNullableFloat(live?.expectedGoalsConceded),
 			inDreamTeam: live?.inDreamTeam ?? null,
 			pickActive: false,
@@ -408,18 +390,14 @@ const computeSingleEntry = (
 	}, 0);
 
 	const liveNetPoints = livePoints - transferCost;
-	// Last overall = entry's overallPoints from entry_infos (previous GW baseline)
-	const lastOverallPoints = entry?.overallPoints ?? 0;
-	const lastOverallRank = entry?.overallRank ?? 0;
-	const lastValue = asScaled(entry?.teamValue ?? null, 10);
+	const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
+	const lastOverallPoints = baseline.overallPoints;
+	const lastOverallRank = baseline.overallRank ?? 0;
+	const lastValue = asScaled(baseline.teamValue, 10);
 	const liveTotalPoints = lastOverallPoints + liveNetPoints;
 
-	const played = activePicks.filter(
-		(p) => p.isPlayed || p.bgw || p.isGwFinished,
-	).length;
-	const toPlay = activePicks.filter(
-		(p) => !p.isGwStarted && !p.isGwFinished && !p.bgw,
-	).length;
+	const played = activePicks.filter((p) => p.isPlayed || p.bgw || p.isGwFinished).length;
+	const toPlay = activePicks.filter((p) => !p.isGwStarted && !p.isGwFinished && !p.bgw).length;
 
 	const playedCaptain = captainForScoring?.element ?? 0;
 	const captainName = captainForScoring?.webName ?? "";
@@ -454,7 +432,7 @@ const computeSingleEntry = (
 			(entry?.teamValue ?? null) !== null && (entry?.bank ?? null) !== null
 				? safeInt(entry?.teamValue) - safeInt(entry?.bank)
 				: null,
-			10,
+			10
 		),
 		totalTransfers: safeInt(entry?.totalTransfers),
 		lastOverallPoints,
@@ -485,7 +463,7 @@ export const entryLiveBatchService = {
 			liveByPlayer?: Promise<Map<number, LivePerformance>>;
 			fixtures?: Promise<Fixture[]>;
 			teams?: Promise<Team[]>;
-		},
+		}
 	): Promise<BatchLiveCalcResult> {
 		const errors: Array<{ entryId: number; message: string }> = [];
 
@@ -506,6 +484,7 @@ export const entryLiveBatchService = {
 			entriesById,
 			picksByEntry,
 			transfersByEntry,
+			previousResultsByEntry,
 		] = await Promise.all([
 			prefetched?.liveByPlayer ??
 				(includeLive
@@ -514,28 +493,19 @@ export const entryLiveBatchService = {
 			includeLive
 				? loadLiveBonusByPlayerId(context, eventId)
 				: Promise.resolve(new Map<number, number>()),
-			prefetched?.fixtures ??
-				fixturesService.getEventFixtures(context, eventId),
+			prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
 			prefetched?.teams ?? playersRepository.listTeamsFromRedis(context),
 			// Phase 2 moved here: entry info HMGET
 			entriesService.getEntriesByIdsFromRedis(context, entryIds),
 			// Phase 3 moved here: picks + transfers (MGET cache or SQL)
 			entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
-			entryLiveRepository.getEntryEventTransfersByIds(
-				context,
-				entryIds,
-				eventId,
-			),
+			entryLiveRepository.getEntryEventTransfersByIds(context, entryIds, eventId),
+			eventId > 1
+				? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
+				: Promise.resolve(new Map<number, EntryEventResult>()),
 		]);
 
-		const liveByPlayerMap = new Map<number, LivePerformance>();
-		for (const [playerId, live] of liveByPlayerRaw) {
-			const bonusOverride = bonusByPlayerId.get(playerId);
-			liveByPlayerMap.set(
-				playerId,
-				bonusOverride !== undefined ? { ...live, bonus: bonusOverride } : live,
-			);
-		}
+		const liveByPlayerMap = new Map(liveByPlayerRaw);
 
 		// Collect all unique player IDs from picks and transfers
 		const allPlayerIds = new Set<number>();
@@ -550,10 +520,7 @@ export const entryLiveBatchService = {
 		}
 
 		// Load only the needed players via HMGET (not HGETALL of all 600+)
-		const playersList = await playersRepository.getPlayersByIds(
-			context,
-			Array.from(allPlayerIds),
-		);
+		const playersList = await playersRepository.getPlayersByIds(context, Array.from(allPlayerIds));
 
 		const playersById = new Map<number, Player>();
 		for (const p of playersList) {
@@ -577,6 +544,7 @@ export const entryLiveBatchService = {
 
 		const shared: SharedData = {
 			liveByPlayer: liveByPlayerMap,
+			effectiveBonusByPlayer: bonusByPlayerId,
 			teamsById,
 			playersById,
 			fixturesByTeam,
@@ -592,13 +560,13 @@ export const entryLiveBatchService = {
 					entry: entriesById.get(entryId) ?? null,
 					pickEntity: picksByEntry.get(entryId) ?? null,
 					transferRows: transfersByEntry.get(entryId) ?? [],
+					previousResult: previousResultsByEntry.get(entryId) ?? null,
 				};
 
 				const calcData = computeSingleEntry(entryId, eventId, perEntry, shared);
 				results.set(entryId, calcData);
 			} catch (err) {
-				const message =
-					err instanceof Error ? err.message : "Computation error";
+				const message = err instanceof Error ? err.message : "Computation error";
 				errors.push({ entryId, message });
 			}
 		}

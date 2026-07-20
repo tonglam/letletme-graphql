@@ -12,7 +12,7 @@ export const playerDetailResolvers = {
 		playerDetail: async (
 			_parent: unknown,
 			args: PlayerDetailArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<PlayerDetail | null> =>
 			playerDetailService.getPlayerDetail(context, args.playerId, args.eventId),
 	},

@@ -6,7 +6,7 @@ export const miniProgramResolvers = {
 		miniProgramNotice: async (
 			_parent: unknown,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<string> => miniProgramService.getMiniProgramNotice(context),
 	},
 };

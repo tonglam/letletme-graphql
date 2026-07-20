@@ -44,6 +44,8 @@ export type AuthorizationResult =
 const publicFields = new Set([
 	"_empty",
 	"__typename",
+	"__schema",
+	"__type",
 	"me",
 	"event",
 	"events",
@@ -68,10 +70,11 @@ const publicFields = new Set([
 	"miniProgramNotice",
 	"eventOverallResult",
 	"entry",
+	"calcLivePointsByEntry",
 	"createWechatApiSession",
 ]);
 
-const websiteOnlyFields = new Set(["myDevices", "revokeDevice", "bindFplEntry"]);
+const websiteOnlyFields = new Set<string>();
 
 const ownEntryArgFields = new Map([
 	["entryHistory", "entryId"],
@@ -82,7 +85,6 @@ const ownEntryArgFields = new Map([
 	["entryH2HMatchResults", "entryId"],
 	["entryTournaments", "entryId"],
 	["tournamentEntryRankingSummary", "entryId"],
-	["calcLivePointsByEntry", "entryId"],
 ]);
 
 const tournamentMembershipFields = new Set([
@@ -94,26 +96,32 @@ const tournamentMembershipFields = new Set([
 	"tournamentEntryRankingSummary",
 ]);
 
+const protectedFields = new Set([
+	...websiteOnlyFields,
+	...ownEntryArgFields.keys(),
+	...tournamentMembershipFields,
+	"calcLivePointsForEntries",
+	"leagueEventResults",
+]);
+
+export const isGraphQLRootFieldClassified = (fieldName: string): boolean =>
+	publicFields.has(fieldName) || protectedFields.has(fieldName);
+
 const getOperation = (
 	document: DocumentNode,
-	operationName: string | null,
+	operationName: string | null
 ): OperationDefinitionNode | null => {
 	const operations = document.definitions.filter(
 		(definition): definition is OperationDefinitionNode =>
-			definition.kind === Kind.OPERATION_DEFINITION,
+			definition.kind === Kind.OPERATION_DEFINITION
 	);
 	if (operationName) {
-		return (
-			operations.find((operation) => operation.name?.value === operationName) ??
-			null
-		);
+		return operations.find((operation) => operation.name?.value === operationName) ?? null;
 	}
 	return operations.length === 1 ? operations[0] : null;
 };
 
-const getFragments = (
-	document: DocumentNode,
-): Map<string, FragmentDefinitionNode> => {
+const getFragments = (document: DocumentNode): Map<string, FragmentDefinitionNode> => {
 	const fragments = new Map<string, FragmentDefinitionNode>();
 	for (const definition of document.definitions) {
 		if (definition.kind === Kind.FRAGMENT_DEFINITION) {
@@ -125,7 +133,7 @@ const getFragments = (
 
 const readArgs = (
 	args: readonly ArgumentNode[] | undefined,
-	variables: Record<string, unknown>,
+	variables: Record<string, unknown>
 ): Record<string, unknown> => {
 	const values: Record<string, unknown> = {};
 	for (const arg of args ?? []) {
@@ -139,7 +147,7 @@ const collectRootFields = (
 	fragments: Map<string, FragmentDefinitionNode>,
 	variables: Record<string, unknown>,
 	fields: RootField[] = [],
-	seenFragments = new Set<string>(),
+	seenFragments = new Set<string>()
 ): RootField[] => {
 	for (const selection of selectionSet.selections) {
 		if (selection.kind === Kind.FIELD) {
@@ -150,13 +158,7 @@ const collectRootFields = (
 			continue;
 		}
 		if (selection.kind === Kind.INLINE_FRAGMENT) {
-			collectRootFields(
-				selection.selectionSet,
-				fragments,
-				variables,
-				fields,
-				seenFragments,
-			);
+			collectRootFields(selection.selectionSet, fragments, variables, fields, seenFragments);
 			continue;
 		}
 		const fragmentName = selection.name.value;
@@ -164,20 +166,14 @@ const collectRootFields = (
 		const fragment = fragments.get(fragmentName);
 		if (!fragment) continue;
 		seenFragments.add(fragmentName);
-		collectRootFields(
-			fragment.selectionSet,
-			fragments,
-			variables,
-			fields,
-			seenFragments,
-		);
+		collectRootFields(fragment.selectionSet, fragments, variables, fields, seenFragments);
 	}
 	return fields;
 };
 
 const getRequestPayloads = (
 	body: unknown,
-	searchParams: URLSearchParams,
+	searchParams: URLSearchParams
 ): GraphQLRequestPayload[] => {
 	if (Array.isArray(body)) {
 		return body as GraphQLRequestPayload[];
@@ -204,9 +200,7 @@ const asVariables = (value: unknown): Record<string, unknown> =>
 		: {};
 
 const asPositiveInt = (value: unknown): number | null =>
-	typeof value === "number" && Number.isInteger(value) && value > 0
-		? value
-		: null;
+	typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 
 const requirePrincipal = (principal?: Principal | null): AuthorizationResult =>
 	principal
@@ -218,11 +212,16 @@ const requirePrincipal = (principal?: Principal | null): AuthorizationResult =>
 				message: "Authentication required",
 			};
 
-const requireBoundEntry = (
-	principal: Principal,
-	entryId: number | null,
-): AuthorizationResult => {
-	if (!entryId || !principal.fplEntryId || entryId !== principal.fplEntryId) {
+const hasVerifiedEntry = (principal: Principal): boolean =>
+	Boolean(principal.fplEntryId && principal.fplEntryVerifiedAt);
+
+const requireBoundEntry = (principal: Principal, entryId: number | null): AuthorizationResult => {
+	if (
+		!principal.fplEntryVerifiedAt ||
+		!entryId ||
+		!principal.fplEntryId ||
+		entryId !== principal.fplEntryId
+	) {
 		return {
 			ok: false,
 			status: 403,
@@ -236,7 +235,7 @@ const requireBoundEntry = (
 const hasTournamentMembership = async (
 	supabase: SupabaseClient,
 	tournamentId: number,
-	entryId: number,
+	entryId: number
 ): Promise<boolean> => {
 	const { data, error } = await supabase
 		.from("tournament_entries")
@@ -251,7 +250,7 @@ const hasTournamentMembership = async (
 const hasLeagueMembership = async (
 	supabase: SupabaseClient,
 	leagueId: number,
-	entryId: number,
+	entryId: number
 ): Promise<boolean> => {
 	const { data, error } = await supabase
 		.from("entry_league_infos")
@@ -266,9 +265,17 @@ const hasLeagueMembership = async (
 const authorizeRootField = async (
 	field: RootField,
 	principal: Principal | null | undefined,
-	supabase: SupabaseClient,
+	supabase: SupabaseClient
 ): Promise<AuthorizationResult> => {
 	if (publicFields.has(field.name)) return { ok: true };
+	if (!protectedFields.has(field.name)) {
+		return {
+			ok: false,
+			status: 403,
+			code: "FORBIDDEN",
+			message: "GraphQL operation has no authorization policy",
+		};
+	}
 
 	const principalResult = requirePrincipal(principal);
 	if (!principalResult.ok) return principalResult;
@@ -285,20 +292,15 @@ const authorizeRootField = async (
 
 	const entryArgName = ownEntryArgFields.get(field.name);
 	if (entryArgName) {
-		const ownResult = requireBoundEntry(
-			principal,
-			asPositiveInt(field.args[entryArgName]),
-		);
+		const ownResult = requireBoundEntry(principal, asPositiveInt(field.args[entryArgName]));
 		if (!ownResult.ok) return ownResult;
 	}
 
 	if (field.name === "calcLivePointsForEntries") {
-		const entryIds = Array.isArray(field.args.entryIds)
-			? field.args.entryIds
-			: [];
+		const entryIds = Array.isArray(field.args.entryIds) ? field.args.entryIds : [];
 		if (
 			entryIds.length === 0 ||
-			!principal.fplEntryId ||
+			!hasVerifiedEntry(principal) ||
 			entryIds.some((entryId) => entryId !== principal.fplEntryId)
 		) {
 			return {
@@ -314,12 +316,8 @@ const authorizeRootField = async (
 		const tournamentId = asPositiveInt(field.args.tournamentId);
 		if (
 			!tournamentId ||
-			!principal.fplEntryId ||
-			!(await hasTournamentMembership(
-				supabase,
-				tournamentId,
-				principal.fplEntryId,
-			))
+			!hasVerifiedEntry(principal) ||
+			!(await hasTournamentMembership(supabase, tournamentId, principal.fplEntryId!))
 		) {
 			return {
 				ok: false,
@@ -334,8 +332,8 @@ const authorizeRootField = async (
 		const leagueId = asPositiveInt(field.args.leagueId);
 		if (
 			!leagueId ||
-			!principal.fplEntryId ||
-			!(await hasLeagueMembership(supabase, leagueId, principal.fplEntryId))
+			!hasVerifiedEntry(principal) ||
+			!(await hasLeagueMembership(supabase, leagueId, principal.fplEntryId!))
 		) {
 			return {
 				ok: false,
@@ -361,17 +359,12 @@ const authorizePayload = async ({
 	if (typeof payload.query !== "string") return { ok: true };
 
 	const document = parse(payload.query);
-	const operationName =
-		typeof payload.operationName === "string" ? payload.operationName : null;
+	const operationName = typeof payload.operationName === "string" ? payload.operationName : null;
 	const operation = getOperation(document, operationName);
 	if (!operation) return { ok: true };
 
 	const variables = asVariables(payload.variables);
-	const fields = collectRootFields(
-		operation.selectionSet,
-		getFragments(document),
-		variables,
-	);
+	const fields = collectRootFields(operation.selectionSet, getFragments(document), variables);
 
 	for (const field of fields) {
 		const result = await authorizeRootField(field, principal, supabase);
@@ -382,7 +375,7 @@ const authorizePayload = async ({
 };
 
 export const authorizeGraphQLRequest = async (
-	input: AuthorizationInput,
+	input: AuthorizationInput
 ): Promise<AuthorizationResult> => {
 	let payloads: GraphQLRequestPayload[];
 	try {
@@ -407,7 +400,7 @@ export const authorizeGraphQLRequest = async (
 				if (env.GRAPHQL_AUTH_MODE === "report") {
 					input.logger.warn(
 						{ code: result.code, message: result.message },
-						"GraphQL auth report-only violation",
+						"GraphQL auth report-only violation"
 					);
 					continue;
 				}
@@ -429,7 +422,7 @@ export const authorizeGraphQLRequest = async (
 
 export const graphQLErrorResponse = (
 	result: Exclude<AuthorizationResult, { ok: true }>,
-	corsHeaders: Record<string, string>,
+	corsHeaders: Record<string, string>
 ): Response =>
 	new Response(
 		JSON.stringify({
@@ -446,5 +439,5 @@ export const graphQLErrorResponse = (
 				"Content-Type": "application/json",
 				...corsHeaders,
 			},
-		},
+		}
 	);

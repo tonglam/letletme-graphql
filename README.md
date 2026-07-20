@@ -1,718 +1,78 @@
 # letletme-graphql
 
-**Fantasy Football GraphQL API** — typed Apollo Server with hybrid authentication flows.
+Read-heavy Fantasy Premier League GraphQL API built with Bun, Apollo Server
+5.5.1, PostgreSQL/Supabase, and Redis.
 
-Business-domain GraphQL layer over Supabase Postgres with Redis caching, structured logging, and Prometheus metrics.
+## Ownership contracts
 
-## 🎯 Quick Start
+- `letletme-web` is the sole authentication authority and sole owner of the
+  `bauth` schema. Website requests use a signed, 60-second `v=2` envelope with
+  `aud=letletme-graphql`; Mini Program clients use web-issued hashed bearer
+  sessions.
+- Only verified FPL entry IDs authorize entry-scoped operations.
+- Legacy GraphQL WeChat and device tokens are validation-only until the
+  explicit `LEGACY_AUTH_VALIDATION_UNTIL` deadline. Issuance is disabled by
+  default. `/api/auth/*` is absent and `/api/device/auth` returns 410.
+- `letletme_data` owns domain tables and shared positive Redis hashes. GraphQL
+  reads those keys but never rebuilds them. GraphQL-shaped and negative caches
+  live under `gql:v2:{season}:...`, except the coordinated
+  `PlayerValueMissing:{date}` marker.
 
-```bash
-# Install dependencies
-bun install
-
-# Start development server
-bun run dev
-
-# Server runs at http://localhost:4000/graphql
-```
-
-## 🏗️ Architecture
-
-- **Apollo Server 4** - Industry-standard GraphQL server
-- **Bun Runtime** - Fast JavaScript runtime
-- **Better Auth** - Hybrid authentication implemented (OAuth for web, device-based for mobile)
-- **Domain-Driven Design** - 7 business domains, 20 queries, 1 mutation
-- **Redis Cache** - Read-through caching (30-60s TTL)
-- **Supabase PostgreSQL** - Primary database with auth tables
-- **Strict TypeScript** - Strict compiler settings and typed domain boundaries
-- **Prometheus Metrics** - Performance monitoring built-in
-
-## Documentation
-
-### 📄 Start Here
-- 📊 **[Project Summary](documentation/PROJECT_SUMMARY.md)** - Complete overview of what's built and what's next
-- 🏗️ **[Architecture Overview](documentation/ARCHITECTURE_OVERVIEW.md)** - System architecture diagrams and design principles
-
-### Architecture & Design
-- 📋 **[Domain Plan](documentation/DOMAIN_PLAN.md)** - Complete domain architecture and GraphQL schema design
-- 🔐 **[Auth Strategy](documentation/AUTH_STRATEGY.md)** - Hybrid authentication design (Better Auth + Device Auth)
-- 🔒 **[RLS Security](documentation/RLS_SECURITY.md)** - Row Level Security implementation (7 policies)
-
-### Implementation Tracking
-- ✅ **[Implementation Checklist](documentation/IMPLEMENTATION_CHECKLIST.md)** - Domain implementation progress (COMPLETE)
-- 📝 **[Auth Implementation Checklist](documentation/AUTH_IMPLEMENTATION_CHECKLIST.md)** - Auth implementation tasks (~87 tasks)
-- 📣 **[API Changelog](documentation/API_CHANGELOG.md)** - Contract-level API additions and rollout notes
-
-### Operations
-- 🚀 **[Deployment Summary](documentation/DEPLOYMENT_SUMMARY.md)** - Production deployment guide
-
-## Project Status
-
-| Domain | Status | Queries/Mutations | Notes |
-|--------|--------|-------------------|-------|
-| **Authentication** | ✅ Complete | 2 queries, 1 mutation | Device auth + OAuth ready |
-| Events | ✅ Complete | 3 queries | Game weeks, deadlines |
-| Players | ✅ Complete | 4 queries | Players, teams, filtering |
-| Fixtures | ✅ Complete | 3 queries | Match schedules, results |
-| Live Scores | ✅ Complete | 2 queries | 30s cache, real-time data |
-| Leagues | ✅ Complete | 3 queries | Standings, event results |
-| Entries | ✅ Complete (read-only) | 3 queries | User data, history |
-| Tournaments | ⏭️ Deferred | - | Complex, 7 tables |
-
-**Current API surface:** 7 domains, 20 queries, and 1 mutation.
-
-## 🔐 Authentication Strategy
-
-This API uses a **hybrid authentication approach**:
-
-### Website (OAuth + Email/Password)
-- ✅ Google OAuth
-- ✅ Apple OAuth  
-- ✅ Email/Password
-- 🍪 **HttpOnly cookies** (XSS-safe, automatic)
-
-### Mobile App (Device-Based)
-- ✅ **Auto-login** on first launch (frictionless UX)
-- ✅ Device ID based (no login screen needed)
-- ✅ Optional account linking for cross-device sync
-- 🔑 **Bearer tokens** stored in encrypted keychain
-
-See [Auth Strategy](documentation/AUTH_STRATEGY.md) for complete flow details.
-
----
-
-## Requirements
-- Bun (latest stable)
-- Supabase project with PostgreSQL
-- Redis instance
-- Node.js/npm (for frontend clients)
-
-## Environment
-Create a local `.env` file (do not commit it) with:
+## Local use
 
 ```bash
-# Database & Supabase
-DATABASE_URL=
-SUPABASE_URL=
-SUPABASE_KEY=
-
-# Redis
-REDIS_HOST=
-REDIS_PORT=6379
-REDIS_PASSWORD=
-
-# Server
-PORT=4000
-LOG_LEVEL=info
-CACHE_TTL_SECONDS=60
-
-# Authentication (Optional for development, defaults provided)
-JWT_SECRET=dev-secret-change-in-production
-JWT_ACCESS_EXPIRY=15m
-JWT_REFRESH_EXPIRY=7d
-
-# OAuth Providers (Optional - only needed for web OAuth)
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-APPLE_CLIENT_ID=
-APPLE_CLIENT_SECRET=
-APP_URL=http://localhost:3000
-```
-
-**Note**: For production, generate a strong JWT_SECRET: `openssl rand -base64 32`
-
-## Run
-```bash
-bun install
-
-# Run database migrations (first time only)
-bun run migrate        # Create auth tables
-bun run migrate:rls    # Apply RLS policies
-
-# Start development server
+bun install --frozen-lockfile
 bun run dev
 ```
 
-## Authentication Setup
+The server exposes:
 
-### Quick Start (Device Authentication)
+- `POST /graphql`
+- `GET /health` (503 when PostgreSQL, Redis, or `Season:active` is unavailable)
+- `GET /metrics` (requires `METRICS_TOKEN`)
 
-Device authentication works out of the box for mobile apps - no additional setup needed!
+Requests are limited to 256 KiB, depth 10, five root fields, 20 aliases, 200
+AST nodes, weighted complexity 500, and entry batches of 500. Rate limits are
+120 GraphQL requests/minute/IP and 5 legacy session attempts/minute/IP.
 
-```bash
-# Create an anonymous user with device authentication
-curl -X POST http://localhost:4000/api/device/auth \
-  -H "Content-Type: application/json" \
-  -d '{"device_id":"my-device-123","device_name":"iPhone 14","device_os":"iOS 17.2"}'
-
-# Response: { "token": "...", "userId": "...", "isAnonymous": true }
-```
-
-### GraphQL with Authentication
+## Verification
 
 ```bash
-# Query with device token
-curl -X POST http://localhost:4000/graphql \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_TOKEN_HERE" \
-  -d '{"query":"{ me { id email name isAnonymous } }"}'
-```
-
-### OAuth Setup (Optional - for web)
-
-1. Get Google OAuth credentials from [Google Cloud Console](https://console.cloud.google.com)
-2. Get Apple OAuth credentials from [Apple Developer](https://developer.apple.com)
-3. Add to `.env`:
-```bash
-GOOGLE_CLIENT_ID=your_client_id
-GOOGLE_CLIENT_SECRET=your_client_secret
-APPLE_CLIENT_ID=your_client_id
-APPLE_CLIENT_SECRET=your_client_secret
-```
-
-OAuth endpoints:
-- `GET /api/auth/sign-in/google` - Google OAuth
-- `GET /api/auth/sign-in/apple` - Apple OAuth
-- `POST /api/auth/sign-in/email` - Email/password login
-
-## Code Quality
-```bash
-# Linting
-bun run lint          # Check for issues
-bun run lint:fix      # Auto-fix issues
-
-# Formatting
-bun run format        # Format all files
-bun run format:check  # Check formatting
-```
-
-## Automated verification
-
-```bash
-bun run lint
 bun run format:check
+bun run lint
+bunx tsc --noEmit
 bun test
+bun build src/index.ts --target bun --outdir /tmp/build-check
+docker compose config --quiet
 ```
 
-The test suite covers schema construction, authentication and device flows, domain resolvers, cache behaviour, error handling, and selected database/security boundaries. Integration tests that depend on PostgreSQL, Supabase, or Redis require the corresponding local test services.
+## Migrations
 
-At the July 2026 employer-facing audit, lint passed and 121 of 122 tests passed. One transfer-history fixture expectation remains out of sync with the current enriched response, and the repository-wide formatting baseline is not yet clean. These are recorded engineering gaps rather than claimed green checks.
+`letletme_data` bootstraps domain tables, `letletme-web` migrates `bauth`, and
+this repository applies only `migrations/forward`. The runner uses an advisory
+lock, per-file SHA-256 checksums, and a transaction per migration.
 
-## Design trade-offs and limitations
-
-- Redis read-through caching improves freshness-sensitive query latency but introduces invalidation and recovery work; short TTLs and explicit cache paths keep that behaviour bounded.
-- The API is intentionally read-heavy. Tournament writes and other complex mutation workflows remain deferred until their consistency rules are fully defined.
-- OAuth handlers are implemented, but a working deployment still requires provider credentials and redirect configuration outside this repository.
-- Device-based access reduces mobile sign-in friction, while account linking and token revocation remain explicit security boundaries that require testing.
-
-## Public repository boundary
-
-This repository contains application code, migrations, tests, and example configuration only. Environment files contain placeholders; production credentials, tokens, user records, and operational data must not be committed.
-
-## Endpoints
-
-### GraphQL & Health
-- `POST /graphql` - Apollo Server GraphQL endpoint
-- `GET /health` - Health check
-- `GET /metrics` - Prometheus metrics
-
-### Authentication
-- `POST /api/device/auth` - Device authentication (mobile)
-- `GET /api/auth/sign-in/google` - Google OAuth (web)
-- `GET /api/auth/sign-in/apple` - Apple OAuth (web)
-- `POST /api/auth/sign-in/email` - Email/password login
-- `POST /api/auth/sign-up/email` - Email/password registration
-- `POST /api/auth/sign-out` - Logout
-
-## Testing the API
-
-### Apollo Sandbox (Recommended)
-Visit [Apollo Sandbox](https://studio.apollographql.com/sandbox/explorer) and connect to:
-```
-http://localhost:4000/graphql
-```
-
-### cURL
 ```bash
-curl -X POST http://localhost:4000/graphql \
-  -H "Content-Type: application/json" \
-  -d '{"query":"{ currentEventInfo { currentEvent nextUtcDeadline } }"}'
+bun run migrate
+bun run migrate:status
 ```
 
-### Other Clients
-- **Postman** - Native GraphQL support
-- **Insomnia** - Lightweight GraphQL client
-- **VS Code** - Apollo GraphQL extension
+Historical scripts are retained under `migrations/legacy` and are never
+replayed into fresh databases. See [migrations/README.md](migrations/README.md)
+and [docs/ROLLOUT.md](docs/ROLLOUT.md).
 
-## Example Queries
+## Rollback-sensitive flags
 
-### Authentication Domain
+- `LIVE_POINTS_V2=false`: shadow compare official-total scoring before enabling.
+- `LEGACY_WECHAT_ISSUANCE_ENABLED=false`: emergency-only rollback switch; keep
+  false after the web Mini Program release.
+- `LEGACY_AUTH_VALIDATION_UNTIL=`: exact dual-verifier deployment timestamp plus
+  30 days; empty disables old WeChat and device token validation.
+- `TRUSTED_PROXY_HOPS=0`: use the direct peer unless the deployment has an
+  explicitly reviewed proxy chain.
+- `REQUIRE_SIGNED_WEB_INGRESS=false`: compatibility phase. After web emits the
+  signed ingress envelope, set true so any request carrying a website user
+  envelope must also carry a valid 60-second opaque ingress subject.
 
-```graphql
-# Get current authenticated user
-query Me {
-  me {
-    id
-    email
-    name
-    emailVerified
-    isAnonymous
-  }
-}
-
-# Get all devices for current user
-query MyDevices {
-  myDevices {
-    id
-    deviceId
-    deviceName
-    deviceOs
-    lastActive
-    createdAt
-  }
-}
-
-# Revoke a device session
-mutation RevokeDevice {
-  revokeDevice(deviceId: "device-123")
-}
-```
-
-### Events Domain
-```graphql
-# Get a single event by ID
-query EventById {
-  event(id: 1) {
-    id
-    name
-    isCurrent
-    deadlineTime
-  }
-}
-
-# List events with filtering
-query EventsList {
-  events(filter: { isCurrent: true }, limit: 20, offset: 0) {
-    id
-    name
-    finished
-  }
-}
-
-# Get current event ID and next deadline
-query CurrentEventInfo {
-  currentEventInfo {
-    currentEvent
-    nextUtcDeadline
-  }
-}
-```
-
-### Players Domain
-```graphql
-# Get a single player with team info
-query PlayerById {
-  player(id: 350) {
-    id
-    webName
-    position
-    price
-    team {
-      name
-      shortName
-    }
-  }
-}
-
-# List all players with filtering
-query PlayersList {
-  players(filter: { position: MIDFIELDER, maxPrice: 8000 }, limit: 20) {
-    id
-    webName
-    position
-    price
-    team {
-      shortName
-    }
-  }
-}
-
-# Get all teams
-query AllTeams {
-  teams {
-    id
-    name
-    shortName
-    position
-    points
-  }
-}
-```
-
-### Fixtures Domain
-```graphql
-# Get current gameweek fixtures
-query CurrentFixtures {
-  currentFixtures {
-    id
-    kickoffTime
-    finished
-    homeTeam {
-      name
-    }
-    awayTeam {
-      name
-    }
-    homeScore
-    awayScore
-  }
-}
-
-# Filter fixtures by team
-query TeamFixtures {
-  fixtures(filter: { teamId: 1 }, limit: 10) {
-    kickoffTime
-    homeTeam {
-      shortName
-    }
-    awayTeam {
-      shortName
-    }
-    homeTeamDifficulty
-    awayTeamDifficulty
-  }
-}
-```
-
-### Live Scores Domain
-```graphql
-# Get live scores for current event
-query LiveScores {
-  liveScores {
-    player {
-      webName
-      team {
-        shortName
-      }
-    }
-    totalPoints
-    goalsScored
-    assists
-    bonus
-  }
-}
-
-# Get specific player's live performance
-query PlayerLive {
-  playerLive(playerId: 350) {
-    player {
-      webName
-    }
-    totalPoints
-    minutes
-    goalsScored
-    assists
-    cleanSheets
-    bonus
-    bps
-  }
-}
-```
-
-### Leagues Domain
-```graphql
-# Get all leagues for an entry
-query EntryLeagues {
-  entryLeagues(entryId: 12345) {
-    id
-    name
-    type
-    startedEvent
-  }
-}
-
-# Get league standings
-query LeagueStandings {
-  leagueStandings(leagueId: 123, limit: 20) {
-    league {
-      name
-      type
-    }
-    entryId
-    rank
-    lastRank
-    overallPoints
-  }
-}
-
-# Get league results for a specific event
-query LeagueEventResults {
-  leagueEventResults(leagueId: 123, eventId: 21) {
-    league {
-      name
-    }
-    event {
-      name
-    }
-    entryName
-    playerName
-    eventPoints
-    eventRank
-    overallPoints
-    overallRank
-  }
-}
-
-# Get tournaments joined by an entry
-query EntryTournaments {
-  entryTournaments(entryId: 12345) {
-    id
-    name
-    creator
-    leagueId
-    leagueType
-    tournamentMode
-    state
-    totalTeamNum
-  }
-}
-
-# Get event results for a points-race tournament
-# Note: v1 currently supports POINTS_RACES tournaments only.
-query TournamentEventResults {
-  tournamentEventResults(tournamentId: 1, eventId: 33) {
-    tournament {
-      id
-      name
-    }
-    event {
-      id
-      name
-    }
-    groupId
-    entryId
-    entryName
-    playerName
-    eventGroupRank
-    eventPoints
-    eventCost
-    eventNetPoints
-    eventRank
-    overallPoints
-    overallRank
-    eventChip
-    captainId
-    captainPoints
-    teamValue
-    bank
-  }
-}
-
-# Get tournament ranking summary for one entry in a points-race tournament
-# Note: v1 currently supports POINTS_RACES tournaments only.
-query TournamentEntryRankingSummary {
-  tournamentEntryRankingSummary(tournamentId: 1, eventId: 33, entryId: 15702) {
-    entryId
-    overallRank
-    tournamentOverallRank
-    teamValue
-    tournamentTeamValueRank
-    transfersNum
-    tournamentTransfersRank
-    totalCosts
-    tournamentCostsRank
-    totalBenchPoints
-    tournamentBenchPointsRank
-    autoSubPoints
-    tournamentAutoSubRank
-  }
-}
-```
-
-### Entries Domain
-```graphql
-# Get entry/team information
-query GetEntry {
-  entry(id: 12345) {
-    id
-    entryName
-    playerName
-    region
-    overallPoints
-    overallRank
-    bank
-    teamValue
-    totalTransfers
-  }
-}
-
-# Get entry history across all events
-query EntryHistory {
-  entryHistory(entryId: 12345) {
-    results {
-      eventId
-      eventPoints
-      eventRank
-      overallPoints
-      overallRank
-      eventTransfers
-      eventTransfersCost
-      eventNetPoints
-    }
-    history {
-      season
-      totalPoints
-      overallRank
-    }
-  }
-}
-
-# Get entry result for a specific event
-query EntryEventResult {
-  entryEventResult(entryId: 12345, eventId: 21) {
-    entry {
-      entryName
-    }
-    eventId
-    eventPoints
-    overallPoints
-    overallRank
-  }
-}
-
-# Get enriched transfer history grouped by gameweek
-query EntryTransferHistory {
-  entryTransferHistory(entryId: 12345) {
-    eventId
-    eventTransfers
-    eventTransfersCost
-    transfers {
-      elementIn
-      elementInWebName
-      elementInTeamName
-      elementInTypeName
-      elementInCost
-      elementInPoints
-      elementOut
-      elementOutWebName
-      elementOutTeamName
-      elementOutTypeName
-      elementOutCost
-      elementOutPoints
-      time
-    }
-  }
-}
-```
-
-### Entry Live Calculation (LiveCalcData)
-
-This query composes cached entry data + live performance to produce a single, client-friendly payload.
-
-```graphql
-query LiveCalcDataExample {
-  calcLivePointsByEntry(eventId: 22, entryId: 15702) {
-    entry
-    event
-    entryName
-    playerName
-    overallPoints
-    overallRank
-    chip
-    livePoints
-    transferCost
-    liveNetPoints
-    liveTotalPoints
-    played
-    toPlay
-    captainName
-    pickList {
-      element
-      webName
-      position
-      multiplier
-      pickActive
-      totalPoints
-      minutes
-      bonus
-      teamShortName
-      againstShortName
-      wasHome
-      score
-      isGwStarted
-      isGwFinished
-      bgw
-      dgw
-    }
-    transfersList {
-      elementIn
-      elementInWebName
-      elementOut
-      elementOutWebName
-      time
-    }
-  }
-}
-```
-
-### `entry_event_transfers` Table Schema (Inferred)
-
-This repository does not include a `CREATE TABLE` migration for `entry_event_transfers`.
-The schema below is inferred from runtime query and mapping logic in `entry-live` repository code.
-
-Expected database columns:
-
-- `entry_id` (used for filtering)
-- `event_id` (used for filtering)
-- incoming player column (one of): `element_in`, `element_in_id`, `player_in`, `in_element`
-- outgoing player column (one of): `element_out`, `element_out_id`, `player_out`, `out_element`
-- `time` (used for ordering and response timestamp)
-- `created_at` (optional fallback timestamp when `time` is null/missing)
-
-Normalized internal transfer row shape:
-
-```ts
-type EntryEventTransferRow = {
-  eventId: number;
-  entryId: number;
-  elementIn: number;
-  elementOut: number;
-  time: string | null;
-};
-```
-
-For GraphQL consumers, transfer details are exposed as enriched `EntryEventTransfersData`
-records (for example via `calcLivePointsByEntry(...).transfersList`).
-
-### Player Values Domain
-```graphql
-# Historical player value changes (descending by changeDate)
-query PlayerValueHistory {
-  playerValueHistory(playerId: 350, limit: 30, fromDate: "2026-03-01T00:00:00.000Z") {
-    playerId
-    changeDate
-    oldValue
-    newValue
-    changeType
-    transfersIn
-    transfersOut
-  }
-}
-
-# Latest snapshot with non-breaking payload extensions
-query PlayerValuesLatest {
-  playerValues {
-    playerId
-    playerName
-    teamName
-    teamShortName
-    position
-    positionEnum
-    value
-    lastValue
-  }
-}
-```
-
-`oldValue` and `newValue` are returned in tenths (same unit used by existing player values, e.g. `101` = `10.1`).
-`playerValueHistory` defaults to `limit: 30`, clamps at `365`, and returns `[]` when there is no data.
+Never enable legacy issuance or extend the validation deadline without a
+recorded rollback decision.

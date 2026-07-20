@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { gqlCacheKey } from "../../infra/cache-key";
 import { buildPlayerMap } from "../../infra/player-map";
 import { getCurrentSeason } from "../../infra/season";
 import { buildTeamMap } from "../../infra/team-map";
@@ -22,11 +23,59 @@ export type EntryGameweekTransfers = {
 	transfers: EntryEventTransfersData[];
 };
 
+const isEntryGameweekTransfersArray = (value: unknown): value is EntryGameweekTransfers[] =>
+	Array.isArray(value) &&
+	value.every(
+		(item) =>
+			isRecord(item) &&
+			typeof item.eventId === "number" &&
+			typeof item.eventTransfers === "number" &&
+			typeof item.eventTransfersCost === "number" &&
+			Array.isArray(item.transfers)
+	);
+
+const readEnrichedTransferCache = async (
+	context: GraphQLContext,
+	key: string
+): Promise<EntryGameweekTransfers[] | null> => {
+	let cached: string | null;
+	try {
+		cached = await context.redis.get(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to read enriched transfer cache");
+		return null;
+	}
+	if (cached === null) return null;
+	try {
+		const parsed: unknown = JSON.parse(cached);
+		if (isEntryGameweekTransfersArray(parsed)) return parsed;
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Malformed enriched transfer cache");
+	}
+	try {
+		await context.redis.del(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to evict enriched transfer cache");
+	}
+	return null;
+};
+
+const readRawTransferCache = async (
+	context: GraphQLContext,
+	key: string
+): Promise<string | null> => {
+	try {
+		return await context.redis.get(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to read transfer history cache");
+		return null;
+	}
+};
+
 const uniquePositiveIds = (ids: number[]): number[] =>
 	Array.from(new Set(ids.filter((id) => Number.isInteger(id) && id > 0)));
 
-const livePerformanceKey = (eventId: number, playerId: number): string =>
-	`${eventId}:${playerId}`;
+const livePerformanceKey = (eventId: number, playerId: number): string => `${eventId}:${playerId}`;
 
 type StoredEntryPick = {
 	element: number;
@@ -42,15 +91,12 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const asNumber = (value: unknown): number | null =>
 	typeof value === "number" && Number.isFinite(value) ? value : null;
 
-const asBoolean = (value: unknown): boolean | null =>
-	typeof value === "boolean" ? value : null;
+const asBoolean = (value: unknown): boolean | null => (typeof value === "boolean" ? value : null);
 
 const asScaled = (value: number | null | undefined, divisor: number): number =>
 	typeof value === "number" ? value / divisor : 0;
 
-const parseNullableFloat = (
-	value: string | null | undefined,
-): number | null => {
+const parseNullableFloat = (value: string | null | undefined): number | null => {
 	if (!value) {
 		return null;
 	}
@@ -89,8 +135,7 @@ const mapStoredEntryPick = (raw: unknown): StoredEntryPick | null => {
 		position,
 		multiplier: asNumber(raw.multiplier) ?? 0,
 		isCaptain: asBoolean(raw.isCaptain) ?? asBoolean(raw.is_captain) ?? false,
-		isViceCaptain:
-			asBoolean(raw.isViceCaptain) ?? asBoolean(raw.is_vice_captain) ?? false,
+		isViceCaptain: asBoolean(raw.isViceCaptain) ?? asBoolean(raw.is_vice_captain) ?? false,
 	};
 };
 
@@ -150,9 +195,7 @@ const mapEntryPick = (params: {
 		starts: live?.starts ?? null,
 		expectedGoals: parseNullableFloat(live?.expectedGoals),
 		expectedAssists: parseNullableFloat(live?.expectedAssists),
-		expectedGoalInvolvements: parseNullableFloat(
-			live?.expectedGoalInvolvements,
-		),
+		expectedGoalInvolvements: parseNullableFloat(live?.expectedGoalInvolvements),
 		expectedGoalsConceded: parseNullableFloat(live?.expectedGoalsConceded),
 		inDreamTeam: live?.inDreamTeam ?? null,
 		pickActive: pick.multiplier > 0,
@@ -192,7 +235,7 @@ async function buildLiveMapForEvents(
 	context: GraphQLContext,
 	eventIds: number[],
 	playerIds: number[],
-	playerIdsByEvent?: Map<number, number[]>,
+	playerIdsByEvent?: Map<number, number[]>
 ): Promise<Map<string, LivePerformance>> {
 	const result = new Map<string, LivePerformance>();
 	if (eventIds.length === 0 || playerIds.length === 0) return result;
@@ -206,24 +249,16 @@ async function buildLiveMapForEvents(
 	const pipeline = context.redis.pipeline();
 	for (const eventId of eventIds) {
 		const fields = playerIdsByEvent
-			? uniquePositiveIds(playerIdsByEvent.get(eventId) ?? uniquePlayerIds).map(
-					String,
-				)
+			? uniquePositiveIds(playerIdsByEvent.get(eventId) ?? uniquePlayerIds).map(String)
 			: uniquePlayerIds.map(String);
 		pipeline.hmget(`EventLive:${season}:${eventId}`, ...fields);
 	}
 
-	let pipelineResults: Array<[Error | null, (string | null)[] | null]> | null =
-		null;
+	let pipelineResults: Array<[Error | null, (string | null)[] | null]> | null = null;
 	try {
-		pipelineResults = (await pipeline.exec()) as Array<
-			[Error | null, (string | null)[] | null]
-		>;
+		pipelineResults = (await pipeline.exec()) as Array<[Error | null, (string | null)[] | null]>;
 	} catch (err) {
-		context.logger.warn(
-			{ err },
-			"EventLive pipeline failed, falling back to DB for all events",
-		);
+		context.logger.warn({ err }, "EventLive pipeline failed, falling back to DB for all events");
 	}
 
 	const dbFallbackEventIds: number[] = [];
@@ -240,8 +275,7 @@ async function buildLiveMapForEvents(
 				try {
 					const parsed = JSON.parse(value) as Record<string, unknown>;
 					const perf = mapSyncJobLiveRow(parsed);
-					if (perf)
-						result.set(livePerformanceKey(perf.eventId, perf.playerId), perf);
+					if (perf) result.set(livePerformanceKey(perf.eventId, perf.playerId), perf);
 				} catch {
 					/* skip malformed */
 				}
@@ -260,8 +294,7 @@ async function buildLiveMapForEvents(
 		if (!error && data) {
 			for (const row of data as unknown as Record<string, unknown>[]) {
 				const perf = mapSyncJobLiveRow(row);
-				if (perf)
-					result.set(livePerformanceKey(perf.eventId, perf.playerId), perf);
+				if (perf) result.set(livePerformanceKey(perf.eventId, perf.playerId), perf);
 			}
 		}
 	}
@@ -274,45 +307,41 @@ export const entriesService = {
 		return entriesRepository.getEntryById(context, id);
 	},
 
-	getEntriesByIds(
-		context: GraphQLContext,
-		ids: number[],
-	): Promise<Map<number, Entry>> {
+	getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
 		return entriesRepository.getEntriesByIds(context, ids);
 	},
 
-	getEntriesByIdsFromRedis(
-		context: GraphQLContext,
-		ids: number[],
-	): Promise<Map<number, Entry>> {
+	getEntriesByIdsFromRedis(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
 		return entriesRepository.getEntriesByIdsFromRedis(context, ids);
 	},
 
-	getEntryHistory(
-		context: GraphQLContext,
-		entryId: number,
-	): Promise<EntryEventResult[]> {
+	getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]> {
 		return entriesRepository.getEntryHistory(context, entryId);
 	},
 
-	getEntryHistoryInfo(
-		context: GraphQLContext,
-		entryId: number,
-	): Promise<EntryHistoryInfo[]> {
+	getEntryHistoryInfo(context: GraphQLContext, entryId: number): Promise<EntryHistoryInfo[]> {
 		return entriesRepository.getEntryHistoryInfo(context, entryId);
 	},
 
 	getEntryEventResult(
 		context: GraphQLContext,
 		entryId: number,
-		eventId: number,
+		eventId: number
 	): Promise<EntryEventResult | null> {
 		return entriesRepository.getEntryEventResult(context, entryId, eventId);
 	},
 
+	getEntryEventResultsByEntryIds(
+		context: GraphQLContext,
+		entryIds: number[],
+		eventId: number
+	): Promise<Map<number, EntryEventResult>> {
+		return entriesRepository.getEntryEventResultsByEntryIds(context, entryIds, eventId);
+	},
+
 	async getEntryEventPicks(
 		context: GraphQLContext,
-		result: EntryEventResult,
+		result: EntryEventResult
 	): Promise<ElementEventResultData[]> {
 		const picks = result.eventPicks
 			.map(mapStoredEntryPick)
@@ -332,9 +361,7 @@ export const entriesService = {
 		return picks.map((pick) => {
 			const player = playerMap.get(pick.element);
 			const team = player ? teamMap.get(player.teamId) : undefined;
-			const live = liveByPlayer.get(
-				livePerformanceKey(result.eventId, pick.element),
-			);
+			const live = liveByPlayer.get(livePerformanceKey(result.eventId, pick.element));
 			return mapEntryPick({
 				eventId: result.eventId,
 				pick,
@@ -348,42 +375,43 @@ export const entriesService = {
 	async getEntryTransferHistory(
 		context: GraphQLContext,
 		entryId: number,
-		live = false,
+		live = false
 	): Promise<EntryGameweekTransfers[]> {
 		if (!Number.isFinite(entryId) || entryId <= 0) {
 			return [];
 		}
 
-		const enrichedCacheKey = `entries:transfer-history:enriched:${entryId}${live ? ":live" : ""}`;
-		const innerCacheKey = `entries:transfers:history:${entryId}`;
+		const season = await getCurrentSeason(context);
+		const enrichedCacheKey = gqlCacheKey(
+			season,
+			`entries:transfer-history:enriched:${entryId}${live ? ":live" : ""}`
+		);
+		const innerCacheKey = gqlCacheKey(season, `entries:transfers:history:${entryId}`);
 
 		// Check both cache keys simultaneously + pre-warm season + start team fetch in parallel
 		const teamMapPromise = buildTeamMap(context);
 		const [cachedEnriched, cachedInner] = await Promise.all([
-			context.redis.get(enrichedCacheKey),
-			context.redis.get(innerCacheKey),
-			getCurrentSeason(context),
+			readEnrichedTransferCache(context, enrichedCacheKey),
+			readRawTransferCache(context, innerCacheKey),
 		]);
 
-		if (cachedEnriched !== null) {
-			return JSON.parse(cachedEnriched) as EntryGameweekTransfers[];
-		}
+		if (cachedEnriched !== null) return cachedEnriched;
 
 		const transferRows = await entryLiveRepository.getEntryTransferHistory(
 			context,
 			entryId,
-			cachedInner,
+			cachedInner
 		);
 		if (transferRows.length === 0) {
 			return [];
 		}
 
 		const playerIds = uniquePositiveIds(
-			transferRows.flatMap((row) => [row.elementIn, row.elementOut]),
+			transferRows.flatMap((row) => [row.elementIn, row.elementOut])
 		);
-		const eventIds = Array.from(
-			new Set(transferRows.map((row) => row.eventId)),
-		).sort((a, b) => a - b);
+		const eventIds = Array.from(new Set(transferRows.map((row) => row.eventId))).sort(
+			(a, b) => a - b
+		);
 
 		// Build per-event player map so the live pipeline only requests relevant players per event
 		const playerIdsByEvent = new Map<number, number[]>();
@@ -418,15 +446,11 @@ export const entriesService = {
 			const eventRows = rowsByEvent.get(eventId) ?? [];
 			const liveByPlayer = new Map<number, LivePerformance>();
 			for (const row of eventRows) {
-				const inLive = liveByEventAndPlayer.get(
-					livePerformanceKey(eventId, row.elementIn),
-				);
+				const inLive = liveByEventAndPlayer.get(livePerformanceKey(eventId, row.elementIn));
 				if (inLive) {
 					liveByPlayer.set(row.elementIn, inLive);
 				}
-				const outLive = liveByEventAndPlayer.get(
-					livePerformanceKey(eventId, row.elementOut),
-				);
+				const outLive = liveByEventAndPlayer.get(livePerformanceKey(eventId, row.elementOut));
 				if (outLive) {
 					liveByPlayer.set(row.elementOut, outLive);
 				}
@@ -444,18 +468,12 @@ export const entriesService = {
 			return {
 				eventId,
 				eventTransfers: eventRows.length,
-				eventTransfersCost:
-					eventRows.length > 1 ? (eventRows.length - 1) * 4 : 0,
+				eventTransfersCost: eventRows.length > 1 ? (eventRows.length - 1) * 4 : 0,
 				transfers,
 			};
 		});
 
-		await context.redis.set(
-			enrichedCacheKey,
-			JSON.stringify(enriched),
-			"EX",
-			3600,
-		);
+		await context.redis.set(enrichedCacheKey, JSON.stringify(enriched), "EX", 3600);
 		return enriched;
 	},
 };

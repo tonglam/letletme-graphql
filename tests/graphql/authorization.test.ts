@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { authorizeGraphQLRequest } from "../../src/graphql/authorization";
+import {
+	authorizeGraphQLRequest,
+	isGraphQLRootFieldClassified,
+} from "../../src/graphql/authorization";
+import { schema } from "../../src/graphql/schema";
 import type { Principal } from "../../src/infra/principal";
 
 const logger = {
@@ -13,12 +17,18 @@ const websitePrincipal: Principal = {
 	source: "website",
 	provider: "better_auth",
 	fplEntryId: 123,
+	fplEntryVerifiedAt: "2026-07-18T00:00:00.000Z",
+};
+
+const unverifiedWebsitePrincipal: Principal = {
+	...websitePrincipal,
+	fplEntryVerifiedAt: null,
 };
 
 const authorize = (
 	query: string,
 	variables?: Record<string, unknown>,
-	principal?: Principal | null,
+	principal?: Principal | null
 ) =>
 	authorizeGraphQLRequest({
 		body: { query, variables },
@@ -29,6 +39,24 @@ const authorize = (
 	});
 
 describe("authorizeGraphQLRequest", () => {
+	it("classifies every field exposed by the executable schema", () => {
+		const fields = [
+			...Object.keys(schema.getQueryType()?.getFields() ?? {}),
+			...Object.keys(schema.getMutationType()?.getFields() ?? {}),
+		];
+		expect(fields.filter((field) => !isGraphQLRootFieldClassified(field))).toEqual([]);
+	});
+
+	it("fails closed for a future root field without a policy", async () => {
+		const result = await authorize(`query { futureSensitiveField }`, undefined, websitePrincipal);
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.status).toBe(403);
+			expect(result.code).toBe("FORBIDDEN");
+		}
+	});
+
 	it("allows public root fields without a principal", async () => {
 		const result = await authorize(`query { currentEventInfo { currentEvent } }`);
 
@@ -38,7 +66,7 @@ describe("authorizeGraphQLRequest", () => {
 	it("rejects protected root fields without a principal", async () => {
 		const result = await authorize(
 			`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
-			{ entryId: 123 },
+			{ entryId: 123 }
 		);
 
 		expect(result.ok).toBe(false);
@@ -52,25 +80,21 @@ describe("authorizeGraphQLRequest", () => {
 		const result = await authorize(
 			`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
 			{ entryId: 123 },
-			websitePrincipal,
+			websitePrincipal
 		);
 
 		expect(result.ok).toBe(true);
 	});
 
-	it("rejects calcLivePointsByEntry without a principal", async () => {
+	it("allows public calcLivePointsByEntry pages without a principal", async () => {
 		const result = await authorize(
 			`query Calc($eventId: Int!, $entryId: Int!) {
         calcLivePointsByEntry(eventId: $eventId, entryId: $entryId) { entry }
       }`,
-			{ eventId: 1, entryId: 123 },
+			{ eventId: 1, entryId: 123 }
 		);
 
-		expect(result.ok).toBe(false);
-		if (!result.ok) {
-			expect(result.status).toBe(401);
-			expect(result.code).toBe("UNAUTHENTICATED");
-		}
+		expect(result.ok).toBe(true);
 	});
 
 	it("allows calcLivePointsByEntry for a matching bound entry", async () => {
@@ -79,9 +103,23 @@ describe("authorizeGraphQLRequest", () => {
         calcLivePointsByEntry(eventId: $eventId, entryId: $entryId) { entry }
       }`,
 			{ eventId: 1, entryId: 123 },
-			websitePrincipal,
+			websitePrincipal
 		);
 
 		expect(result.ok).toBe(true);
+	});
+
+	it("rejects a matching entry when the binding is not verified", async () => {
+		const result = await authorize(
+			`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
+			{ entryId: 123 },
+			unverifiedWebsitePrincipal
+		);
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.status).toBe(403);
+			expect(result.code).toBe("FORBIDDEN");
+		}
 	});
 });

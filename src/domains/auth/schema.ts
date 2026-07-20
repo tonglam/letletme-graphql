@@ -10,18 +10,7 @@ export const authTypeDefs = `#graphql
     image: String
     isAnonymous: Boolean!
     fplEntryId: Int
-  }
-
-  """
-  Device session information (for mobile)
-  """
-  type DeviceSession {
-    id: ID!
-    deviceId: String!
-    deviceName: String
-    deviceOs: String
-    lastActive: String!
-    createdAt: String!
+		fplEntryVerifiedAt: String
   }
 
   extend type Query {
@@ -30,19 +19,5 @@ export const authTypeDefs = `#graphql
     Returns null if not authenticated
     """
     me: User
-
-    """
-    Get all device sessions for current user
-    Requires authentication
-    """
-    myDevices: [DeviceSession!]!
-  }
-
-  extend type Mutation {
-    """
-    Revoke a device session (logout device)
-    Requires authentication
-    """
-    revokeDevice(deviceId: String!): Boolean!
   }
 `;

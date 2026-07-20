@@ -20,15 +20,13 @@ export type NormalizedPlayerValueHistoryArgs = {
 };
 
 export function normalizePlayerValueHistoryArgs(
-	args: PlayerValueHistoryArgs,
+	args: PlayerValueHistoryArgs
 ): NormalizedPlayerValueHistoryArgs {
 	const fromDate = args.fromDate ?? undefined;
 	const toDate = args.toDate ?? undefined;
 
 	if (fromDate && toDate && fromDate.getTime() > toDate.getTime()) {
-		throw new Error(
-			"Invalid date range: fromDate must be less than or equal to toDate",
-		);
+		throw new Error("Invalid date range: fromDate must be less than or equal to toDate");
 	}
 
 	return {
@@ -44,17 +42,13 @@ export const playerValuesResolvers = {
 		playerValues: async (
 			_parent: unknown,
 			args: PlayerValuesArgs,
-			context: GraphQLContext,
-		): Promise<PlayerValue[]> =>
-			playerValuesService.getPlayerValues(context, args.changeDate),
+			context: GraphQLContext
+		): Promise<PlayerValue[]> => playerValuesService.getPlayerValues(context, args.changeDate),
 		playerValueHistory: async (
 			_parent: unknown,
 			args: PlayerValueHistoryArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<PlayerValueHistoryItem[]> =>
-			playerValuesService.getPlayerValueHistory(
-				context,
-				normalizePlayerValueHistoryArgs(args),
-			),
+			playerValuesService.getPlayerValueHistory(context, normalizePlayerValueHistoryArgs(args)),
 	},
 };

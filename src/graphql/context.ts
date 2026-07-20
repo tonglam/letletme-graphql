@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type Redis from "ioredis";
-import type { AuthUser } from "../infra/auth";
+import type { AuthUser } from "../infra/principal";
 import type { Logger } from "../infra/logger";
 import type { Principal } from "../infra/principal";
 import type { Player } from "../domains/players/repository";

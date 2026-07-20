@@ -26,7 +26,7 @@ describe("normalizePlayerValueHistoryArgs", () => {
 				playerId: 7,
 				fromDate,
 				toDate,
-			}),
+			})
 		).toThrow("Invalid date range");
 	});
 });

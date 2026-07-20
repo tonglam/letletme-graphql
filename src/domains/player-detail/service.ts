@@ -6,7 +6,7 @@ export const playerDetailService = {
 	async getPlayerDetail(
 		context: GraphQLContext,
 		playerId: number,
-		eventId: number,
+		eventId: number
 	): Promise<PlayerDetail | null> {
 		return playerDetailRepository.getPlayerDetail(context, playerId, eventId);
 	},

@@ -13,7 +13,7 @@ const eventMemo = new WeakMap<GraphQLContext, Map<number, Event | null>>();
 
 const getEventByIdMemoized = async (
 	context: GraphQLContext,
-	eventId: number,
+	eventId: number
 ): Promise<Event | null> => {
 	let memo = eventMemo.get(context);
 	if (!memo) {
@@ -33,7 +33,7 @@ const captainMemo = new WeakMap<GraphQLContext, Map<number, Player | null>>();
 
 const getCaptainByIdMemoized = async (
 	context: GraphQLContext,
-	playerId: number,
+	playerId: number
 ): Promise<Player | null> => {
 	let memo = captainMemo.get(context);
 	if (!memo) {
@@ -109,9 +109,7 @@ export const groupModeToEnum = (mode: GroupMode | null): string | null => {
 	return "NO_GROUP";
 };
 
-export const knockoutModeToEnum = (
-	mode: KnockoutMode | null,
-): string | null => {
+export const knockoutModeToEnum = (mode: KnockoutMode | null): string | null => {
 	if (mode === null) {
 		return null;
 	}
@@ -137,9 +135,7 @@ export const tournamentStateToEnum = (state: TournamentState): string => {
 	return "ACTIVE";
 };
 
-export const tournamentResultChipToEnum = (
-	raw: string | null,
-): string | null => {
+export const tournamentResultChipToEnum = (raw: string | null): string | null => {
 	if (raw === null) {
 		return null;
 	}
@@ -162,18 +158,10 @@ export const tournamentResultChipToEnum = (
 	) {
 		return "TRIPLE_CAPTAIN";
 	}
-	if (
-		value === "FREE_HIT" ||
-		compactValue === "FREEHIT" ||
-		compactValue === "FH"
-	) {
+	if (value === "FREE_HIT" || compactValue === "FREEHIT" || compactValue === "FH") {
 		return "FREE_HIT";
 	}
-	if (
-		value === "WILDCARD" ||
-		compactValue === "WILDCARD" ||
-		compactValue === "WC"
-	) {
+	if (value === "WILDCARD" || compactValue === "WILDCARD" || compactValue === "WC") {
 		return "WILDCARD";
 	}
 
@@ -185,82 +173,67 @@ export const tournamentsResolvers = {
 		entryTournaments: async (
 			_parent: unknown,
 			args: EntryTournamentsArgs,
-			context: GraphQLContext,
-		): Promise<TournamentInfo[]> =>
-			tournamentsService.getEntryTournaments(context, args.entryId),
+			context: GraphQLContext
+		): Promise<TournamentInfo[]> => tournamentsService.getEntryTournaments(context, args.entryId),
 
 		tournamentEntryIds: async (
 			_parent: unknown,
 			args: TournamentEntryIdsArgs,
-			context: GraphQLContext,
-		): Promise<number[]> =>
-			tournamentsService.getTournamentEntryIds(context, args.tournamentId),
+			context: GraphQLContext
+		): Promise<number[]> => tournamentsService.getTournamentEntryIds(context, args.tournamentId),
 
 		tournamentEventResults: async (
 			_parent: unknown,
 			args: TournamentEventResultsArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<TournamentEventResult[]> =>
-			tournamentsService.getTournamentEventResults(
-				context,
-				args.tournamentId,
-				args.eventId,
-			),
+			tournamentsService.getTournamentEventResults(context, args.tournamentId, args.eventId),
 
 		tournamentEntryRankingSummary: async (
 			_parent: unknown,
 			args: TournamentEntryRankingSummaryArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<TournamentEntryRankingSummary> =>
 			tournamentsService.getTournamentEntryRankingSummary(
 				context,
 				args.tournamentId,
 				args.eventId,
-				args.entryId,
+				args.entryId
 			),
 
 		tournamentBattleGroupResults: async (
 			_parent: unknown,
 			args: TournamentBattleGroupResultsArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<TournamentBattleGroupResult[]> =>
-			tournamentsService.getTournamentBattleGroupResults(
-				context,
-				args.tournamentId,
-				args.eventId,
-			),
+			tournamentsService.getTournamentBattleGroupResults(context, args.tournamentId, args.eventId),
 
 		entryH2HMatchResults: async (
 			_parent: unknown,
 			args: EntryH2HMatchResultsArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<EntryH2HMatchResult[]> =>
 			tournamentsService.getEntryH2HMatchResults(context, args.entryId),
 	},
 	TournamentInfo: {
-		leagueType: (parent: TournamentInfo): string =>
-			leagueTypeToEnum(parent.leagueType),
-		tournamentMode: (parent: TournamentInfo): string =>
-			tournamentModeToEnum(parent.tournamentMode),
-		groupMode: (parent: TournamentInfo): string | null =>
-			groupModeToEnum(parent.groupMode),
+		leagueType: (parent: TournamentInfo): string => leagueTypeToEnum(parent.leagueType),
+		tournamentMode: (parent: TournamentInfo): string => tournamentModeToEnum(parent.tournamentMode),
+		groupMode: (parent: TournamentInfo): string | null => groupModeToEnum(parent.groupMode),
 		knockoutMode: (parent: TournamentInfo): string | null =>
 			knockoutModeToEnum(parent.knockoutMode),
-		state: (parent: TournamentInfo): string =>
-			tournamentStateToEnum(parent.state),
+		state: (parent: TournamentInfo): string => tournamentStateToEnum(parent.state),
 	},
 	TournamentEventResult: {
-		tournament: (parent: TournamentEventResult): TournamentInfo =>
-			parent.tournament,
+		tournament: (parent: TournamentEventResult): TournamentInfo => parent.tournament,
 		event: async (
 			parent: TournamentEventResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Event | null> => getEventByIdMemoized(context, parent.eventId),
 		captain: async (
 			parent: TournamentEventResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Player | null> => {
 			if (parent.captainId === null || parent.captainId <= 0) {
 				return null;
@@ -271,12 +244,11 @@ export const tournamentsResolvers = {
 			tournamentResultChipToEnum(parent.eventChip),
 	},
 	TournamentBattleGroupResult: {
-		tournament: (parent: TournamentBattleGroupResult): TournamentInfo =>
-			parent.tournament,
+		tournament: (parent: TournamentBattleGroupResult): TournamentInfo => parent.tournament,
 		event: async (
 			parent: TournamentBattleGroupResult,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Event | null> => getEventByIdMemoized(context, parent.eventId),
 	},
 };

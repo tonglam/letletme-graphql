@@ -1,3 +1,4 @@
+import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import type { Entry } from "../entries/repository";
 import { entriesService } from "../entries/service";
@@ -12,6 +13,16 @@ import type { LiveCalcData } from "./calc-service";
 import { entryLiveCalcService } from "./calc-service";
 import type { EntryLive as EntryLiveModel } from "./service";
 import { entryLiveService } from "./service";
+
+const MAX_ENTRY_BATCH = 500;
+
+const assertEntryBatchSize = (entryIds: readonly number[]): void => {
+	if (entryIds.length > MAX_ENTRY_BATCH) {
+		throw new GraphQLError(`Entry batch exceeds the ${MAX_ENTRY_BATCH} entry limit`, {
+			extensions: { code: "QUERY_TOO_COMPLEX" },
+		});
+	}
+};
 
 type EntryLiveArgs = {
 	entryId: number;
@@ -41,26 +52,26 @@ export const entryLiveResolvers = {
 		entryLive: async (
 			_parent: unknown,
 			args: EntryLiveArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<EntryLiveModel | null> =>
 			entryLiveService.getEntryLive(context, args.entryId, args.eventId),
 
 		calcLivePointsByEntry: async (
 			_parent: unknown,
 			args: CalcLivePointsByEntryArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<LiveCalcData> =>
 			entryLiveCalcService.calcLivePointsByEntry(
 				context,
 				args.eventId,
 				args.entryId,
-				args.includeLive ?? true,
+				args.includeLive ?? true
 			),
 
 		calcLivePointsForEntries: async (
 			_parent: unknown,
 			args: CalcLivePointsForEntriesArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<{
 			results: LiveCalcData[];
 			errors: Array<{ entryId: number; message: string }>;
@@ -71,11 +82,12 @@ export const entryLiveResolvers = {
 				failedCount: number;
 			};
 		}> => {
+			assertEntryBatchSize(args.entryIds);
 			const result = await entryLiveBatchService.calcLivePointsForEntries(
 				context,
 				args.eventId,
 				args.entryIds,
-				args.includeLive ?? true,
+				args.includeLive ?? true
 			);
 			return {
 				results: Array.from(result.results.values()),
@@ -87,7 +99,7 @@ export const entryLiveResolvers = {
 		calcLivePointsForTournament: async (
 			_parent: unknown,
 			args: CalcLivePointsForTournamentArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<{
 			results: LiveCalcData[];
 			errors: Array<{ entryId: number; message: string }>;
@@ -99,20 +111,16 @@ export const entryLiveResolvers = {
 			};
 		}> => {
 			const includeLive = args.includeLive ?? true;
-			// Start shared-data fetches in parallel with the entry-IDs lookup to hide one RTT
+			const entryIds = await tournamentsService.getTournamentEntryIds(context, args.tournamentId);
+			assertEntryBatchSize(entryIds);
+
+			// Load shared data only after the tournament size is accepted.
 			const liveByPlayerPromise = includeLive
 				? liveRepository.getAllLivePerformances(context, args.eventId)
 				: Promise.resolve(new Map());
-			const fixturesPromise = fixturesService.getEventFixtures(
-				context,
-				args.eventId,
-			);
+			const fixturesPromise = fixturesService.getEventFixtures(context, args.eventId);
 			const teamsPromise = playersRepository.listTeamsFromRedis(context);
 
-			const entryIds = await tournamentsService.getTournamentEntryIds(
-				context,
-				args.tournamentId,
-			);
 			const result = await entryLiveBatchService.calcLivePointsForEntries(
 				context,
 				args.eventId,
@@ -122,7 +130,7 @@ export const entryLiveResolvers = {
 					liveByPlayer: liveByPlayerPromise,
 					fixtures: fixturesPromise,
 					teams: teamsPromise,
-				},
+				}
 			);
 			return {
 				results: Array.from(result.results.values()),
@@ -135,14 +143,12 @@ export const entryLiveResolvers = {
 		entry: async (
 			parent: EntryLiveModel,
 			_args: Record<string, never>,
-			context: GraphQLContext,
-		): Promise<Entry | null> =>
-			entriesService.getEntryById(context, parent.entry.id),
+			context: GraphQLContext
+		): Promise<Entry | null> => entriesService.getEntryById(context, parent.entry.id),
 		event: async (
 			parent: EntryLiveModel,
 			_args: Record<string, never>,
-			context: GraphQLContext,
-		): Promise<Event | null> =>
-			eventsService.getEventById(context, parent.event.id),
+			context: GraphQLContext
+		): Promise<Event | null> => eventsService.getEventById(context, parent.event.id),
 	},
 };

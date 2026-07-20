@@ -1,21 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import type {
-	Entry,
-	EntryEventResult,
-} from "../../../src/domains/entries/repository";
-import {
-	entriesResolvers,
-	entryResultChipToEnum,
-} from "../../../src/domains/entries/resolvers";
+import type { Entry, EntryEventResult } from "../../../src/domains/entries/repository";
+import { entriesResolvers, entryResultChipToEnum } from "../../../src/domains/entries/resolvers";
 import { entriesService } from "../../../src/domains/entries/service";
 import type { ElementEventResultData } from "../../../src/domains/entry-live/calc-service";
 import { type Player, Position } from "../../../src/domains/players/repository";
 import { playersService } from "../../../src/domains/players/service";
 import type { GraphQLContext } from "../../../src/graphql/context";
 
-const makePick = (
-	overrides: Partial<ElementEventResultData>,
-): ElementEventResultData => ({
+const makePick = (overrides: Partial<ElementEventResultData>): ElementEventResultData => ({
 	season: "2025",
 	event: 33,
 	element: 1,
@@ -69,9 +61,7 @@ const makePick = (
 	...overrides,
 });
 
-const makeEntryEventResult = (
-	overrides: Partial<EntryEventResult> = {},
-): EntryEventResult => ({
+const makeEntryEventResult = (overrides: Partial<EntryEventResult> = {}): EntryEventResult => ({
 	entryId: 84885,
 	eventId: 33,
 	eventPoints: 82,
@@ -85,10 +75,7 @@ const makeEntryEventResult = (
 	eventChip: "bboost",
 	eventPlayedCaptain: 430,
 	eventCaptainPoints: 24,
-	eventPicks: [
-		makePick({ element: 1, autoSub: false }),
-		makePick({ element: 2, autoSub: true }),
-	],
+	eventPicks: [makePick({ element: 1, autoSub: false }), makePick({ element: 2, autoSub: true })],
 	teamValue: 1030,
 	bank: 10,
 	...overrides,
@@ -111,12 +98,8 @@ describe("EntryEventResult resolvers", () => {
 		const parent = makeEntryEventResult();
 
 		expect(entriesResolvers.EntryEventResult.eventBenchPoints(parent)).toBe(9);
-		expect(entriesResolvers.EntryEventResult.eventChip(parent)).toBe(
-			"BENCH_BOOST",
-		);
-		expect(entriesResolvers.EntryEventResult.eventCaptainPoints(parent)).toBe(
-			24,
-		);
+		expect(entriesResolvers.EntryEventResult.eventChip(parent)).toBe("BENCH_BOOST");
+		expect(entriesResolvers.EntryEventResult.eventCaptainPoints(parent)).toBe(24);
 	});
 
 	it("resolves event pick lists through entriesService", async () => {
@@ -130,7 +113,7 @@ describe("EntryEventResult resolvers", () => {
 
 		entriesService.getEntryEventPicks = async (
 			inputContext: GraphQLContext,
-			inputParent: EntryEventResult,
+			inputParent: EntryEventResult
 		): Promise<ElementEventResultData[]> => {
 			expect(inputContext).toBe(context);
 			expect(inputParent).toBe(parent);
@@ -139,10 +122,10 @@ describe("EntryEventResult resolvers", () => {
 
 		try {
 			await expect(
-				entriesResolvers.EntryEventResult.eventPicks(parent, {}, context),
+				entriesResolvers.EntryEventResult.eventPicks(parent, {}, context)
 			).resolves.toHaveLength(2);
 			await expect(
-				entriesResolvers.EntryEventResult.eventAutoSub(parent, {}, context),
+				entriesResolvers.EntryEventResult.eventAutoSub(parent, {}, context)
 			).resolves.toHaveLength(1);
 		} finally {
 			entriesService.getEntryEventPicks = original;
@@ -172,7 +155,7 @@ describe("EntryEventResult resolvers", () => {
 
 		entriesService.getEntryById = async (
 			inputContext: GraphQLContext,
-			entryId: number,
+			entryId: number
 		): Promise<Entry | null> => {
 			expect(inputContext).toBe(context);
 			expect(entryId).toBe(84885);
@@ -183,7 +166,7 @@ describe("EntryEventResult resolvers", () => {
 			const result = await entriesResolvers.EntryEventResult.entry(
 				makeEntryEventResult(),
 				{},
-				context,
+				context
 			);
 			expect(result).toBe(entry);
 		} finally {
@@ -211,7 +194,7 @@ describe("EntryEventResult resolvers", () => {
 		playersService.getPlayerByIdForEvent = async (
 			inputContext: GraphQLContext,
 			playerId: number,
-			eventId: number,
+			eventId: number
 		): Promise<Player | null> => {
 			expect(inputContext).toBe(context);
 			expect(playerId).toBe(430);
@@ -223,7 +206,7 @@ describe("EntryEventResult resolvers", () => {
 			const result = await entriesResolvers.EntryEventResult.eventPlayedCaptain(
 				makeEntryEventResult(),
 				{},
-				context,
+				context
 			);
 			expect(result).toBe(captain);
 		} finally {
