@@ -19,8 +19,9 @@ Do not commit snapshots or backups; they contain operational metadata.
 2. Apply the web Drizzle migration using `DIRECT_DATABASE_URL`; migration
    aborts on duplicate non-null `openid` values.
 3. Deploy web challenge, database rate limiting, and web-issued Mini Program sessions.
-4. Set `REQUIRE_SIGNED_WEB_INGRESS=true` after every web path emits ingress
-   signatures. Then deploy GraphQL with both the web Mini Program verifier and deadline-gated
+4. Set `REQUIRE_SIGNED_WEB_INGRESS=true` after every authenticated web path
+   that emits a user envelope also emits an ingress signature. Then deploy
+   GraphQL with both the web Mini Program verifier and deadline-gated
    legacy verifier. Set `LEGACY_AUTH_VALIDATION_UNTIL` to exactly 30 days after
    this deployment.
 5. Release the Mini Program client against `https://www.letletme.top`.

@@ -217,17 +217,6 @@ export const validateMiniProgramSessionToken = async (token: string): Promise<Pr
 	if (!row) return null;
 	metrics.authTokenValidations.labels("web_mini_program").inc();
 
-	void dbPool
-		.query(
-			`UPDATE bauth.mini_program_session
-			 SET last_used_at = NOW()
-			 WHERE token_hash = $1`,
-			[tokenHash]
-		)
-		.catch((err: unknown) => {
-			logger.warn({ err }, "Failed to update mini-program session last_used_at");
-		});
-
 	return {
 		userId: row.user_id,
 		source: "wechat_miniprogram",
