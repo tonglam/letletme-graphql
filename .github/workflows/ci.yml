@@ -70,6 +70,8 @@ jobs:
         run: bun build src/index.ts --target bun --outdir /tmp/build-check
 
       - name: Validate Compose
+        env:
+          APP_ENV_FILE: .env.example
         run: docker compose config --quiet
 
   integration:

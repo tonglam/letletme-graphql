@@ -11,7 +11,7 @@ services:
     build:
       context: .
       target: runner
-    env_file: .env.deploy
+    env_file: ${APP_ENV_FILE:-.env.deploy}
     environment:
       TZ: Asia/Shanghai
     logging: *default-logging
