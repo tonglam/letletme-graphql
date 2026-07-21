@@ -195,7 +195,7 @@ export const eventOverallResultRepository: EventOverallResultRepository = {
 					{ err: error, season },
 					"Failed to fetch event overall results from DB"
 				);
-				throw new Error("Failed to fetch event overall results");
+				throw new Error("Failed to fetch event overall results", { cause: error });
 			}
 
 			const eventResults = (data as DbEventRow[] | null)?.map(mapEventResult) ?? [];
@@ -206,7 +206,7 @@ export const eventOverallResultRepository: EventOverallResultRepository = {
 				{ err: error, cacheKey: `EventOverallResult:${season}`, season },
 				"Failed to get event overall result"
 			);
-			throw new Error("Failed to get event overall result");
+			throw new Error("Failed to get event overall result", { cause: error });
 		}
 	},
 };
