@@ -9,7 +9,7 @@ CREATE OR REPLACE FUNCTION public.get_players_for_picker(
 RETURNS TABLE (
   id integer,
   web_name text,
-  element_type integer,
+  element_type smallint,
   team_id integer,
   team_name text,
   team_short_name text

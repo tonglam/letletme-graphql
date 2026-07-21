@@ -162,6 +162,7 @@ const playerValuesQuery = `
       position
       lastValue
       value
+	  eventPoints
     }
   }
 `;
@@ -275,6 +276,7 @@ describe("playerValues integration", () => {
 				position: string;
 				lastValue: number;
 				value: number;
+				eventPoints: number | null;
 			}>;
 		} | null;
 
@@ -286,6 +288,7 @@ describe("playerValues integration", () => {
 				position: "FWD",
 				lastValue: 73,
 				value: 74,
+				eventPoints: null,
 			},
 		]);
 		expect(context.calls.supabaseFrom).toBe(0);

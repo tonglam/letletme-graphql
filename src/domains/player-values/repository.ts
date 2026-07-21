@@ -395,7 +395,9 @@ async function getPlayerValuesFromDatabase(
 			netTransfers: transfersIn - transfersOut,
 			form: parseNullableNumber(stat?.form ?? null),
 			totalPoints: stat?.total_points ?? 0,
-			eventPoints: stat?.total_points ?? null,
+			// player_stats.total_points is season-cumulative, not event-scoped.
+			// The value table has no authoritative per-event points fallback.
+			eventPoints: null,
 		};
 	});
 }

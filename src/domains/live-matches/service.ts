@@ -69,6 +69,18 @@ type MatchBucketsFromRedis = {
 	finished: LiveFixtureRedisRow[];
 };
 
+export const applyLiveFixtureScores = (
+	fixture: Fixture,
+	liveFixture: Pick<LiveFixtureRedisRow, "teamScore" | "againstTeamScore"> | null
+): Fixture =>
+	liveFixture
+		? {
+				...fixture,
+				teamHScore: liveFixture.teamScore,
+				teamAScore: liveFixture.againstTeamScore,
+			}
+		: fixture;
+
 const asRecord = (value: unknown): Record<string, unknown> | null => {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
 		return null;
@@ -479,6 +491,8 @@ export const liveMatchesService = {
 
 		const statusByFixtureId = new Map<number, MatchBucketStatus>();
 		const statusByPair = new Map<string, MatchBucketStatus>();
+		const liveFixtureById = new Map<number, LiveFixtureRedisRow>();
+		const liveFixtureByPair = new Map<string, LiveFixtureRedisRow>();
 		if (redisBuckets) {
 			for (const [status, fixtures] of [
 				["NOT_STARTED", redisBuckets.notStarted],
@@ -488,8 +502,11 @@ export const liveMatchesService = {
 				for (const fixture of fixtures) {
 					if (fixture.fixtureId !== null) {
 						statusByFixtureId.set(fixture.fixtureId, status);
+						liveFixtureById.set(fixture.fixtureId, fixture);
 					}
-					statusByPair.set(`${fixture.teamId}:${fixture.againstId}`, status);
+					const pairKey = `${fixture.teamId}:${fixture.againstId}`;
+					statusByPair.set(pairKey, status);
+					liveFixtureByPair.set(pairKey, fixture);
 				}
 			}
 		}
@@ -515,7 +532,15 @@ export const liveMatchesService = {
 
 		for (const fixture of currentFixtures) {
 			const status = resolveLiveMatchStatus(fixture, statusByFixtureId, statusByPair);
-			const match = buildMatch(fixture, fixture.id, status, teamDataMap, teamsById);
+			const pairKey = `${fixture.teamHId}:${fixture.teamAId}`;
+			const liveFixture = liveFixtureById.get(fixture.id) ?? liveFixtureByPair.get(pairKey) ?? null;
+			const match = buildMatch(
+				applyLiveFixtureScores(fixture, liveFixture),
+				fixture.id,
+				status,
+				teamDataMap,
+				teamsById
+			);
 			if (status === "FINISHED") finishedMatches.push(match);
 			else if (status === "PLAYING") playingMatches.push(match);
 			else notStartedMatches.push(match);

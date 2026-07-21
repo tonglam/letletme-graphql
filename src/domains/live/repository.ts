@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { getCurrentEventId } from "../../infra/event";
+import { isMissingPostgrestColumnError } from "../../infra/postgrest-error";
 import { getCurrentSeason } from "../../infra/season";
 
 export type LivePerformance = {
@@ -545,24 +546,40 @@ async function loadBreakdownFromEventLiveExplainRedis(
 	return out.length > 0 ? out : null;
 }
 
+type EventLiveExplainElementColumn = "element_id" | "element";
+const eventLiveExplainElementColumn = new WeakMap<object, EventLiveExplainElementColumn>();
+
 async function fetchEventLiveExplainFromSupabase(
 	context: GraphQLContext,
 	eventId: number,
 	elementId: number
 ): Promise<DbLiveExplainRow | null> {
-	const { data, error } = await context.supabase
-		.from("event_live_explains")
-		.select("*")
-		.eq("event_id", eventId)
-		.eq("element_id", elementId)
-		.limit(1);
+	const clientKey = context.supabase as object;
+	const cachedColumn = eventLiveExplainElementColumn.get(clientKey);
+	const candidates: EventLiveExplainElementColumn[] = cachedColumn
+		? [cachedColumn, cachedColumn === "element_id" ? "element" : "element_id"]
+		: ["element_id", "element"];
 
-	if (error) {
+	for (const column of candidates) {
+		const { data, error } = await context.supabase
+			.from("event_live_explains")
+			.select("*")
+			.eq("event_id", eventId)
+			.eq(column, elementId)
+			.limit(1);
+
+		if (!error) {
+			eventLiveExplainElementColumn.set(clientKey, column);
+			return (data?.[0] as DbLiveExplainRow | undefined) ?? null;
+		}
+		if (isMissingPostgrestColumnError(error, column)) {
+			continue;
+		}
 		context.logger.error({ err: error, eventId, elementId }, "event_live_explains query failed");
-		throw new Error("Failed to fetch event live explain");
+		throw new Error("Failed to fetch event live explain", { cause: error });
 	}
 
-	return (data?.[0] as DbLiveExplainRow | undefined) ?? null;
+	throw new Error("event_live_explains has no supported element column");
 }
 
 export type LiveScoresFilter = {

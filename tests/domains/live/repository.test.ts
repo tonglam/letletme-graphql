@@ -545,6 +545,60 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(result?.breakdown[0]?.fixtureId).toBe(9);
 	});
 
+	it("falls back to the historical element column", async () => {
+		const attemptedColumns: string[] = [];
+		const context = buildContext({}) as unknown as { supabase: unknown };
+		context.supabase = {
+			from: (table: string) => {
+				let elementColumn = "";
+				const builder = {
+					select: () => builder,
+					eq: (column: string) => {
+						if (table === "event_live_explains" && column !== "event_id") {
+							elementColumn = column;
+							attemptedColumns.push(column);
+						}
+						return builder;
+					},
+					limit: async () => {
+						if (table === "player_stats") {
+							return { data: [playerStatsRow34_526], error: null };
+						}
+						if (elementColumn === "element_id") {
+							return {
+								data: null,
+								error: {
+									code: "42703",
+									message: "column event_live_explains.element_id does not exist",
+								},
+							};
+						}
+						return {
+							data: [
+								{
+									event_id: 34,
+									element: 526,
+									explain: [
+										{
+											fixture: 10,
+											stats: [{ identifier: "bonus", points: 3, value: 3 }],
+										},
+									],
+								},
+							],
+							error: null,
+						};
+					},
+				};
+				return builder;
+			},
+		};
+
+		const result = await liveRepository.getEventLiveExplain(context as never, 34, 526);
+		expect(attemptedColumns).toEqual(["element_id", "element"]);
+		expect(result?.breakdown[0]?.fixtureId).toBe(10);
+	});
+
 	it("returns null when neither player_stats nor event_live_explain have a row", async () => {
 		const context = buildContext({
 			supabaseDataByTable: { player_stats: [], event_live_explains: [] },

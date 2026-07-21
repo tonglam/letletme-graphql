@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { resolveLiveMatchStatus } from "../../../src/domains/live-matches/service";
+import {
+	applyLiveFixtureScores,
+	resolveLiveMatchStatus,
+} from "../../../src/domains/live-matches/service";
 
 describe("resolveLiveMatchStatus", () => {
 	it("prefers the authoritative fixture ID over a stale pair status", () => {
@@ -16,5 +19,34 @@ describe("resolveLiveMatchStatus", () => {
 			"PLAYING"
 		);
 		expect(resolveLiveMatchStatus(fixture, new Map(), new Map())).toBe("NOT_STARTED");
+	});
+});
+
+describe("applyLiveFixtureScores", () => {
+	it("prefers Redis live scores when the database fixture is lagging", () => {
+		const fixture = {
+			id: 701,
+			code: 701,
+			eventId: 12,
+			finished: false,
+			finishedProvisional: false,
+			kickoffTime: null,
+			minutes: 0,
+			provisionalStartTime: false,
+			started: true,
+			teamAId: 2,
+			teamAScore: 0,
+			teamHId: 1,
+			teamHScore: 0,
+			stats: [],
+			teamHDifficulty: 3,
+			teamADifficulty: 3,
+			pulseId: null,
+		};
+
+		expect(applyLiveFixtureScores(fixture, { teamScore: 3, againstTeamScore: 2 })).toMatchObject({
+			teamHScore: 3,
+			teamAScore: 2,
+		});
 	});
 });

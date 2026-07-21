@@ -368,11 +368,16 @@ export const playersRepository: PlayersRepository = {
 		}
 
 		if (statsResult.error) {
-			context.logger.error(
+			context.logger.warn(
 				{ err: statsResult.error, eventId, playerId: id },
-				"Failed to fetch player event stats"
+				"Failed to fetch player event stats; returning base player"
 			);
-			throw new Error("Failed to fetch player event stats", { cause: statsResult.error });
+			try {
+				await context.redis.set(cacheKey, JSON.stringify(basePlayer), "EX", PLAYER_CACHE_TTL);
+			} catch (error) {
+				context.logger.warn({ err: error, cacheKey }, "Failed to cache base player fallback");
+			}
+			return basePlayer;
 		}
 
 		const row = statsResult.data?.[0] as

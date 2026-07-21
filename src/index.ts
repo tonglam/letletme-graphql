@@ -3,7 +3,7 @@ import { timingSafeEqual } from "crypto";
 import depthLimit from "graphql-depth-limit";
 import { authorizeGraphQLRequest, graphQLErrorResponse } from "./graphql/authorization";
 import type { GraphQLContext } from "./graphql/context";
-import { validateGraphQLRequestLimits } from "./graphql/limits";
+import { parseGraphQLGetLimitPayload, validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
 import { closeDbPool, dbPool } from "./infra/db-pool";
 import { validateDeviceToken } from "./infra/device-auth";
@@ -215,10 +215,17 @@ const startServer = async (): Promise<void> => {
 						}
 					}
 
-					const limitInput = parsedBody ?? {
-						query: url.searchParams.get("query"),
-						operationName: url.searchParams.get("operationName"),
-					};
+					const getPayload =
+						parsedBody === undefined ? parseGraphQLGetLimitPayload(url.searchParams) : null;
+					if (getPayload && !getPayload.ok) {
+						return jsonError(
+							400,
+							"INVALID_GRAPHQL_VARIABLES",
+							"GraphQL variables query parameter must be valid JSON",
+							corsHeaders
+						);
+					}
+					const limitInput = parsedBody ?? (getPayload?.ok ? getPayload.payload : undefined);
 					const limits = validateGraphQLRequestLimits(limitInput);
 					if (!limits.ok) {
 						return jsonError(400, limits.code, limits.message, corsHeaders);

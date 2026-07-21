@@ -70,7 +70,17 @@ type UserIdentityRow = {
 	id: string;
 };
 
+type PrincipalValidators = {
+	validateMiniProgramSessionToken: (token: string) => Promise<Principal | null>;
+	validateApiSessionToken: (token: string) => Promise<Principal | null>;
+};
+
 const WECHAT_PROVIDER = "wechat_miniprogram";
+
+export const isUndefinedTableError = (error: unknown): boolean => {
+	if (!error || typeof error !== "object") return false;
+	return "code" in error && (error as { code?: unknown }).code === "42P01";
+};
 
 export const isLegacyAuthValidationOpen = (
 	now = Date.now(),
@@ -228,15 +238,33 @@ export const validateMiniProgramSessionToken = async (token: string): Promise<Pr
 	};
 };
 
-export const getPrincipalFromHeaders = async (headers: Headers): Promise<Principal | null> => {
+export const getPrincipalFromHeaders = async (
+	headers: Headers,
+	validators: PrincipalValidators = {
+		validateMiniProgramSessionToken,
+		validateApiSessionToken,
+	}
+): Promise<Principal | null> => {
 	const websitePrincipal = verifyWebsitePrincipal(headers);
 	if (websitePrincipal) return websitePrincipal;
 
 	const token = getBearerToken(headers);
 	if (!token) return null;
 
-	const miniProgramPrincipal = await validateMiniProgramSessionToken(token);
-	return miniProgramPrincipal ?? validateApiSessionToken(token);
+	let miniProgramPrincipal: Principal | null = null;
+	try {
+		miniProgramPrincipal = await validators.validateMiniProgramSessionToken(token);
+	} catch (error) {
+		if (!isUndefinedTableError(error)) throw error;
+		// GraphQL is intentionally deployable before the Web migration that owns
+		// this table. During that bounded compatibility window, treat absence as a
+		// miss and continue to the deadline-gated legacy validator.
+		logger.warn(
+			{ err: error },
+			"Mini Program session table is not migrated; using legacy validation"
+		);
+	}
+	return miniProgramPrincipal ?? validators.validateApiSessionToken(token);
 };
 
 export const principalToAuthUser = (principal: Principal): AuthUser => ({

@@ -14,13 +14,38 @@ export const GRAPHQL_LIMITS = {
 	maxRootFields: 5,
 	maxAliases: 20,
 	maxAstNodes: 200,
-	maxComplexity: 500,
+	maxComplexity: 600,
 } as const;
 
 type GraphQLPayload = {
 	query?: unknown;
 	variables?: unknown;
 	operationName?: unknown;
+};
+
+export type GraphQLGetLimitPayloadResult = { ok: true; payload: GraphQLPayload } | { ok: false };
+
+export const parseGraphQLGetLimitPayload = (
+	searchParams: URLSearchParams
+): GraphQLGetLimitPayloadResult => {
+	const rawVariables = searchParams.get("variables");
+	let variables: unknown = undefined;
+	if (rawVariables !== null) {
+		try {
+			variables = JSON.parse(rawVariables) as unknown;
+		} catch {
+			return { ok: false };
+		}
+	}
+
+	return {
+		ok: true,
+		payload: {
+			query: searchParams.get("query"),
+			operationName: searchParams.get("operationName"),
+			variables,
+		},
+	};
 };
 
 export type GraphQLRequestShape = "query" | "mutation" | "subscription" | "unknown";
@@ -67,24 +92,56 @@ const fragmentsFor = (document: DocumentNode): Map<string, FragmentDefinitionNod
 			.map((fragment) => [fragment.name.value, fragment])
 	);
 
-const listMultiplier = (
+type ListWeight = {
+	multiplier: number;
+	propagateToChildren: boolean;
+	oversizedEntryBatch: boolean;
+};
+
+const listWeight = (
 	fieldArguments: readonly {
 		name: { value: string };
 		value: Parameters<typeof valueFromASTUntyped>[0];
 	}[],
 	variables: Record<string, unknown>
-): number => {
+): ListWeight => {
 	let multiplier = 1;
+	let hasEntryIds = false;
+	let oversizedEntryBatch = false;
 	for (const argument of fieldArguments) {
 		const value = valueFromASTUntyped(argument.value, variables);
 		if (argument.name.value === "entryIds" && Array.isArray(value)) {
+			hasEntryIds = true;
+			oversizedEntryBatch ||= value.length > 500;
 			multiplier = Math.max(multiplier, Math.min(value.length, 500));
 		}
 		if (["first", "last", "limit"].includes(argument.name.value) && typeof value === "number") {
 			multiplier = Math.max(multiplier, Math.min(Math.max(value, 1), 100));
 		}
 	}
-	return multiplier;
+	return {
+		multiplier,
+		// Batch resolver work is charged once at the root. Reapplying the full
+		// entry count to every selected response field makes the documented
+		// 500-entry limit impossible to use. Ordinary paginated lists continue
+		// propagating their multiplier through their child selection.
+		propagateToChildren: !hasEntryIds,
+		oversizedEntryBatch,
+	};
+};
+
+const variablesWithDefaults = (
+	operation: OperationDefinitionNode,
+	suppliedVariables: Record<string, unknown>
+): Record<string, unknown> => {
+	const variables = { ...suppliedVariables };
+	for (const definition of operation.variableDefinitions ?? []) {
+		const name = definition.variable.name.value;
+		if (!Object.hasOwn(variables, name) && definition.defaultValue) {
+			variables[name] = valueFromASTUntyped(definition.defaultValue);
+		}
+	}
+	return variables;
 };
 
 const inspectSelectionSet = ({
@@ -101,17 +158,26 @@ const inspectSelectionSet = ({
 	depth: number;
 	multiplier: number;
 	seenFragments: Set<string>;
-}): { maxDepth: number; aliases: number; complexity: number; rootFields: string[] } => {
+}): {
+	maxDepth: number;
+	aliases: number;
+	complexity: number;
+	rootFields: string[];
+	oversizedEntryBatch: boolean;
+} => {
 	let maxDepth = depth;
 	let aliases = 0;
 	let complexity = 0;
 	const rootFields: string[] = [];
+	let oversizedEntryBatch = false;
 
 	for (const selection of selectionSet.selections) {
 		if (selection.kind === Kind.FIELD) {
 			if (depth === 1) rootFields.push(selection.name.value);
 			if (selection.alias) aliases += 1;
-			const childMultiplier = multiplier * listMultiplier(selection.arguments ?? [], variables);
+			const weight = listWeight(selection.arguments ?? [], variables);
+			const childMultiplier = multiplier * weight.multiplier;
+			oversizedEntryBatch ||= weight.oversizedEntryBatch;
 			complexity += childMultiplier;
 			if (selection.selectionSet) {
 				const child = inspectSelectionSet({
@@ -119,12 +185,13 @@ const inspectSelectionSet = ({
 					fragments,
 					variables,
 					depth: depth + 1,
-					multiplier: childMultiplier,
+					multiplier: weight.propagateToChildren ? childMultiplier : multiplier,
 					seenFragments: new Set(seenFragments),
 				});
 				maxDepth = Math.max(maxDepth, child.maxDepth);
 				aliases += child.aliases;
 				complexity += child.complexity;
+				oversizedEntryBatch ||= child.oversizedEntryBatch;
 			}
 			continue;
 		}
@@ -140,6 +207,7 @@ const inspectSelectionSet = ({
 			maxDepth = Math.max(maxDepth, child.maxDepth);
 			aliases += child.aliases;
 			complexity += child.complexity;
+			oversizedEntryBatch ||= child.oversizedEntryBatch;
 			rootFields.push(...child.rootFields);
 			continue;
 		}
@@ -160,10 +228,11 @@ const inspectSelectionSet = ({
 		maxDepth = Math.max(maxDepth, child.maxDepth);
 		aliases += child.aliases;
 		complexity += child.complexity;
+		oversizedEntryBatch ||= child.oversizedEntryBatch;
 		rootFields.push(...child.rootFields);
 	}
 
-	return { maxDepth, aliases, complexity, rootFields };
+	return { maxDepth, aliases, complexity, rootFields, oversizedEntryBatch };
 };
 
 const reject = (message: string): GraphQLLimitResult => ({
@@ -198,10 +267,11 @@ export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLi
 		return { ok: true, shape: "unknown", securityOperation: false, securityOperationCount: 0 };
 	}
 
+	const variables = variablesWithDefaults(operation, asVariables(payload.variables));
 	const inspection = inspectSelectionSet({
 		selectionSet: operation.selectionSet,
 		fragments: fragmentsFor(document),
-		variables: asVariables(payload.variables),
+		variables,
 		depth: 1,
 		multiplier: 1,
 		seenFragments: new Set(),
@@ -214,6 +284,9 @@ export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLi
 	}
 	if (inspection.aliases > GRAPHQL_LIMITS.maxAliases) {
 		return reject(`GraphQL operation exceeds ${GRAPHQL_LIMITS.maxAliases} aliases`);
+	}
+	if (inspection.oversizedEntryBatch) {
+		return reject("GraphQL entryIds batch exceeds 500 entries");
 	}
 	if (inspection.complexity > GRAPHQL_LIMITS.maxComplexity) {
 		return reject(`GraphQL operation exceeds weighted complexity ${GRAPHQL_LIMITS.maxComplexity}`);

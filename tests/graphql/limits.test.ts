@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
+import {
+	parseGraphQLGetLimitPayload,
+	validateGraphQLRequestLimits,
+} from "../../src/graphql/limits";
 
 describe("GraphQL request limits", () => {
 	it("accepts an ordinary query", () => {
@@ -32,6 +35,47 @@ describe("GraphQL request limits", () => {
 			variables: { entryIds: Array.from({ length: 501 }, (_, index) => index + 1) },
 		});
 		expect(result).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+	});
+
+	it("accepts the documented 500-entry batch with a normal selection", () => {
+		const result = validateGraphQLRequestLimits({
+			query:
+				"query Batch($entryIds: [Int!]!) { calcLivePointsForEntries(eventId: 1, entryIds: $entryIds) { meta { totalEntries } } }",
+			variables: { entryIds: Array.from({ length: 500 }, (_, index) => index + 1) },
+		});
+		expect(result.ok).toBe(true);
+	});
+
+	it("applies variable defaults before enforcing the entry batch cap", () => {
+		const ids = Array.from({ length: 501 }, (_, index) => index + 1).join(",");
+		const result = validateGraphQLRequestLimits({
+			query: `query Batch($entryIds: [Int!]! = [${ids}]) { calcLivePointsForEntries(eventId: 1, entryIds: $entryIds) { meta { totalEntries } } }`,
+		});
+		expect(result).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+	});
+
+	it("includes GET variables in request-limit validation", () => {
+		const params = new URLSearchParams({
+			query:
+				"query Batch($entryIds: [Int!]!) { calcLivePointsForEntries(eventId: 1, entryIds: $entryIds) { meta { totalEntries } } }",
+			variables: JSON.stringify({
+				entryIds: Array.from({ length: 501 }, (_, index) => index + 1),
+			}),
+		});
+		const parsed = parseGraphQLGetLimitPayload(params);
+		expect(parsed.ok).toBe(true);
+		if (parsed.ok) {
+			expect(validateGraphQLRequestLimits(parsed.payload)).toMatchObject({
+				ok: false,
+				code: "QUERY_TOO_COMPLEX",
+			});
+		}
+	});
+
+	it("rejects malformed GET variables", () => {
+		expect(parseGraphQLGetLimitPayload(new URLSearchParams({ variables: "{" }))).toEqual({
+			ok: false,
+		});
 	});
 
 	it("classifies legacy session issuance as a security mutation", () => {

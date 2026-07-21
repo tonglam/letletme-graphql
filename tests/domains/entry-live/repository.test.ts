@@ -86,4 +86,67 @@ describe("entryLiveRepository transfers", () => {
 		expect(transfers).toHaveLength(1);
 		expect(transfers[0]?.elementIn).toBe(20);
 	});
+
+	it("falls back to a historical transfer time column", async () => {
+		const selected: string[] = [];
+		const redis = {
+			get: async (key: string) => (key === "Season:active" ? "2526" : null),
+			set: async () => "OK",
+			del: async () => 0,
+		};
+		const supabase = {
+			from: () => {
+				let projection = "";
+				const builder = {
+					select: (columns: string) => {
+						projection = columns;
+						selected.push(columns);
+						return builder;
+					},
+					eq: () => builder,
+					in: () => builder,
+					order: () => builder,
+					then: <TResult1 = unknown, TResult2 = never>(
+						onfulfilled?: ((value: unknown) => TResult1 | PromiseLike<TResult1>) | null,
+						onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+					) => {
+						const result = projection.includes("transfer_time")
+							? {
+									data: null,
+									error: {
+										code: "42703",
+										message: "column entry_event_transfers.transfer_time does not exist",
+									},
+								}
+							: {
+									data: [
+										{
+											entry_id: 1,
+											event_id: 3,
+											element_in_id: 20,
+											element_out_id: 10,
+											time: "2026-01-01T12:00:00Z",
+										},
+									],
+									error: null,
+								};
+						return Promise.resolve(result).then(onfulfilled, onrejected);
+					},
+				};
+				return builder;
+			},
+		};
+		const context = {
+			redis,
+			supabase,
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const transfers = await entryLiveRepository.getEntryEventTransfers(context, 1, 3);
+		expect(selected.slice(0, 2)).toEqual([
+			"entry_id, event_id, element_in_id, element_out_id, transfer_time",
+			"entry_id, event_id, element_in_id, element_out_id, time",
+		]);
+		expect(transfers[0]?.time).toBe("2026-01-01T12:00:00Z");
+	});
 });

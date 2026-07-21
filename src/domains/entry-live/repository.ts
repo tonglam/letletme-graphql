@@ -1,5 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
+import { isMissingPostgrestColumnError } from "../../infra/postgrest-error";
 import { getCurrentSeason } from "../../infra/season";
 
 const NULL_SENTINEL = "__entry-live:null__";
@@ -181,6 +182,61 @@ const parsePicks = (raw: unknown, fallback: { eventId: number; entryId: number }
 type DbEntryEventPickRow = Record<string, unknown>;
 type DbEntryEventTransferRow = Record<string, unknown>;
 
+type TransferTimeColumn = "transfer_time" | "time" | "created_at" | null;
+type TransferQueryResult = { data: unknown[] | null; error: unknown };
+type TransferQueryBuilder = PromiseLike<TransferQueryResult> & {
+	select: (columns: string) => TransferQueryBuilder;
+	eq: (column: string, value: unknown) => TransferQueryBuilder;
+	in: (column: string, values: readonly number[]) => TransferQueryBuilder;
+	order: (column: string, options: { ascending: boolean }) => TransferQueryBuilder;
+};
+
+const transferTimeColumnByClient = new WeakMap<object, TransferTimeColumn>();
+const transferTimeColumns: readonly TransferTimeColumn[] = [
+	"transfer_time",
+	"time",
+	"created_at",
+	null,
+];
+
+async function queryTransferRows(
+	context: GraphQLContext,
+	configure: (query: TransferQueryBuilder) => TransferQueryBuilder,
+	leadingOrderColumns: readonly string[]
+): Promise<TransferQueryResult> {
+	const clientKey = context.supabase as object;
+	const hasCachedColumn = transferTimeColumnByClient.has(clientKey);
+	const cachedColumn = transferTimeColumnByClient.get(clientKey);
+	const candidates = hasCachedColumn
+		? [cachedColumn ?? null, ...transferTimeColumns.filter((column) => column !== cachedColumn)]
+		: [...transferTimeColumns];
+
+	for (const timeColumn of candidates) {
+		const projection = ["entry_id", "event_id", "element_in_id", "element_out_id", timeColumn]
+			.filter((column): column is string => column !== null)
+			.join(", ");
+		let query = context.supabase.from("entry_event_transfers") as unknown as TransferQueryBuilder;
+		query = configure(query.select(projection));
+		for (const column of leadingOrderColumns) {
+			query = query.order(column, { ascending: true });
+		}
+		if (timeColumn) {
+			query = query.order(timeColumn, { ascending: true });
+		}
+		const result = await query;
+		if (!result.error) {
+			transferTimeColumnByClient.set(clientKey, timeColumn);
+			return result;
+		}
+		if (timeColumn && isMissingPostgrestColumnError(result.error, timeColumn)) {
+			continue;
+		}
+		return result;
+	}
+
+	return { data: null, error: new Error("No supported entry transfer projection") };
+}
+
 interface EntryLiveRepository {
 	getEntryEventPick(
 		context: GraphQLContext,
@@ -229,7 +285,7 @@ const mapTransferRow = (
 		eventId,
 		elementIn,
 		elementOut,
-		time: asString(row.transfer_time),
+		time: asString(row.transfer_time ?? row.time ?? row.created_at),
 	};
 };
 
@@ -406,13 +462,11 @@ export const entryLiveRepository: EntryLiveRepository = {
 			await deleteMalformedCache(context, cacheKey);
 		}
 
-		const baseQuery = context.supabase
-			.from("entry_event_transfers")
-			.select("entry_id, event_id, element_in_id, element_out_id, transfer_time")
-			.eq("entry_id", entryId)
-			.eq("event_id", eventId)
-			.order("transfer_time", { ascending: true });
-		const { data, error } = await baseQuery;
+		const { data, error } = await queryTransferRows(
+			context,
+			(query) => query.eq("entry_id", entryId).eq("event_id", eventId),
+			[]
+		);
 
 		if (error) {
 			context.logger.error(
@@ -487,14 +541,11 @@ export const entryLiveRepository: EntryLiveRepository = {
 			return results;
 		}
 
-		const batchQuery = context.supabase
-			.from("entry_event_transfers")
-			.select("entry_id, event_id, element_in_id, element_out_id, transfer_time")
-			.in("entry_id", missIds)
-			.eq("event_id", eventId)
-			.order("entry_id", { ascending: true })
-			.order("transfer_time", { ascending: true });
-		const { data, error } = await batchQuery;
+		const { data, error } = await queryTransferRows(
+			context,
+			(query) => query.in("entry_id", missIds).eq("event_id", eventId),
+			["entry_id"]
+		);
 
 		if (error) {
 			context.logger.error(
@@ -576,13 +627,11 @@ export const entryLiveRepository: EntryLiveRepository = {
 			}
 		}
 
-		const historyQuery = context.supabase
-			.from("entry_event_transfers")
-			.select("entry_id, event_id, element_in_id, element_out_id, transfer_time")
-			.eq("entry_id", entryId)
-			.order("event_id", { ascending: true })
-			.order("transfer_time", { ascending: true });
-		const { data, error } = await historyQuery;
+		const { data, error } = await queryTransferRows(
+			context,
+			(query) => query.eq("entry_id", entryId),
+			["event_id"]
+		);
 
 		if (error) {
 			context.logger.error({ err: error, entryId }, "Failed to fetch entry transfer history");
