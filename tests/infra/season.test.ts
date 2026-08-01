@@ -1,9 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { GraphQLError } from "graphql";
 import { getCurrentSeason } from "../../src/infra/season";
 
-const makeContext = (
-	seasonValue: string | null,
-): Parameters<typeof getCurrentSeason>[0] => ({
+const makeContext = (seasonValue: string | null): Parameters<typeof getCurrentSeason>[0] => ({
 	redis: {
 		get: async () => seasonValue,
 	} as never,
@@ -18,28 +17,33 @@ describe("getCurrentSeason", () => {
 		expect(result).toBe("2526");
 	});
 
-	it("returns default season when Redis returns null", async () => {
+	it("rejects when Redis returns null", async () => {
 		const context = makeContext(null);
-		const result = await getCurrentSeason(context);
-		expect(result).toBe("2526");
+		await expect(getCurrentSeason(context)).rejects.toBeInstanceOf(GraphQLError);
 	});
 
-	it("returns default season when Redis returns empty string", async () => {
+	it("rejects when Redis returns empty string", async () => {
 		const context = makeContext("");
-		const result = await getCurrentSeason(context);
-		expect(result).toBe("2526");
+		await expect(getCurrentSeason(context)).rejects.toBeInstanceOf(GraphQLError);
 	});
 
-	it("returns default season when Redis returns non-numeric value", async () => {
+	it("rejects when Redis returns a non-numeric value", async () => {
 		const context = makeContext("abc");
-		const result = await getCurrentSeason(context);
-		expect(result).toBe("2526");
+		await expect(getCurrentSeason(context)).rejects.toBeInstanceOf(GraphQLError);
 	});
 
-	it("returns default season when Redis returns value with wrong length", async () => {
+	it("rejects when Redis returns a value with the wrong length", async () => {
 		const context = makeContext("25261");
-		const result = await getCurrentSeason(context);
-		expect(result).toBe("2526");
+		await expect(getCurrentSeason(context)).rejects.toBeInstanceOf(GraphQLError);
+	});
+
+	it("rejects when Redis is unavailable", async () => {
+		const context = {
+			redis: { get: async () => Promise.reject(new Error("offline")) } as never,
+			supabase: {} as never,
+			logger: { warn: () => undefined } as never,
+		};
+		await expect(getCurrentSeason(context)).rejects.toBeInstanceOf(GraphQLError);
 	});
 
 	it("returns a 4-digit season when Redis has a valid one", async () => {

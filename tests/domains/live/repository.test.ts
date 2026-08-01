@@ -5,26 +5,23 @@ const makeMockRedis = (options: {
 	strings?: Record<string, string>;
 	hashes?: Record<string, Record<string, string>>;
 }) => {
-	const strings = new Map(Object.entries(options.strings ?? {}));
-	const hashes = new Map(
-		Object.entries(options.hashes ?? {}).map(([k, v]) => [k, v]),
-	);
+	const strings = new Map<string, string>([
+		["Season:active", "2526"],
+		...Object.entries(options.strings ?? {}),
+	]);
+	const hashes = new Map(Object.entries(options.hashes ?? {}).map(([k, v]) => [k, v]));
 
 	return {
-		get: async (key: string): Promise<string | null> =>
-			strings.get(key) ?? null,
+		get: async (key: string): Promise<string | null> => strings.get(key) ?? null,
 		set: async (key: string, value: string): Promise<string> => {
 			strings.set(key, value);
 			return "OK";
 		},
-		hgetall: async (key: string): Promise<Record<string, string>> =>
-			hashes.get(key) ?? {},
+		del: async (key: string): Promise<number> => (strings.delete(key) ? 1 : 0),
+		hgetall: async (key: string): Promise<Record<string, string>> => hashes.get(key) ?? {},
 		hget: async (key: string, field: string): Promise<string | null> =>
 			hashes.get(key)?.[field] ?? null,
-		hmget: async (
-			key: string,
-			...fields: string[]
-		): Promise<(string | null)[]> => {
+		hmget: async (key: string, ...fields: string[]): Promise<(string | null)[]> => {
 			const hash = hashes.get(key) ?? {};
 			return fields.map((f) => hash[f] ?? null);
 		},
@@ -192,7 +189,7 @@ describe("liveRepository.getAllLivePerformances", () => {
 		});
 
 		const context = buildContext({
-			redisStrings: { "season:current": "2526" },
+			redisStrings: { "Season:active": "2526" },
 			redisHashes: { "EventLive:2526:33": { "1": field1, "2": field2 } },
 		});
 
@@ -216,7 +213,7 @@ describe("liveRepository.getAllLivePerformances", () => {
 
 	it("falls back to DB when Redis hash is empty", async () => {
 		const context = buildContext({
-			redisStrings: { "season:current": "2526" },
+			redisStrings: { "Season:active": "2526" },
 			redisHashes: {},
 			supabaseData: [
 				{
@@ -260,7 +257,7 @@ describe("liveRepository.getAllLivePerformances", () => {
 		const missingFields = JSON.stringify({ id: 99 });
 
 		const context = buildContext({
-			redisStrings: { "season:current": "2526" },
+			redisStrings: { "Season:active": "2526" },
 			redisHashes: {
 				"EventLive:2526:33": {
 					"1": SAMPLE_SYNC_JOB_ROW,
@@ -274,6 +271,25 @@ describe("liveRepository.getAllLivePerformances", () => {
 		expect(result.size).toBe(1);
 		expect(result.get(1)).toBeDefined();
 		expect(result.get(1)?.playerId).toBe(1);
+	});
+
+	it("evicts malformed shaped cache and falls back to authoritative Redis data", async () => {
+		const context = buildContext({
+			redisStrings: {
+				"Season:active": "2526",
+				"gql:v2:2526:live:all:33": "not-json",
+			},
+			redisHashes: {
+				"EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW },
+			},
+		});
+
+		const result = await liveRepository.getAllLivePerformances(context, 33);
+		expect(result.get(1)?.playerId).toBe(1);
+		const redis = (
+			context as unknown as { redis: { get: (key: string) => Promise<string | null> } }
+		).redis;
+		expect(await redis.get("gql:v2:2526:live:all:33")).not.toBe("not-json");
 	});
 });
 
@@ -333,15 +349,11 @@ describe("liveRepository.getLivePerformancesByPlayerIds", () => {
 		});
 
 		const context = buildContext({
-			redisStrings: { "season:current": "2526" },
+			redisStrings: { "Season:active": "2526" },
 			redisHashes: { "EventLive:2526:33": { "1": field1, "2": field2 } },
 		});
 
-		const result = await liveRepository.getLivePerformancesByPlayerIds(
-			context,
-			33,
-			[2],
-		);
+		const result = await liveRepository.getLivePerformancesByPlayerIds(context, 33, [2]);
 		expect(result).toHaveLength(1);
 		expect(result[0].playerId).toBe(2);
 		expect(result[0].goalsScored).toBe(1);
@@ -349,11 +361,7 @@ describe("liveRepository.getLivePerformancesByPlayerIds", () => {
 
 	it("returns empty array for empty player IDs", async () => {
 		const context = buildContext({});
-		const result = await liveRepository.getLivePerformancesByPlayerIds(
-			context,
-			33,
-			[],
-		);
+		const result = await liveRepository.getLivePerformancesByPlayerIds(context, 33, []);
 		expect(result).toHaveLength(0);
 	});
 });
@@ -420,7 +428,7 @@ describe("liveRepository.getLivePerformancesForEventsAndPlayers", () => {
 		const result = await liveRepository.getLivePerformancesForEventsAndPlayers(
 			context,
 			[12, 13],
-			[1, 2],
+			[1, 2]
 		);
 
 		expect(result).toHaveLength(2);
@@ -463,7 +471,7 @@ describe("liveRepository.getEventLive", () => {
 		});
 
 		const context = buildContext({
-			redisStrings: { "season:current": "2526" },
+			redisStrings: { "Season:active": "2526" },
 			redisHashes: { "EventLive:2526:33": { "1": field1 } },
 		});
 
@@ -521,7 +529,7 @@ describe("liveRepository.getEventLiveExplain", () => {
 			],
 		};
 		const context = buildContext({
-			redisStrings: { "season:current": "2526" },
+			redisStrings: { "Season:active": "2526" },
 			redisHashes: {
 				"EventLiveExplain:2526:34": {
 					526: JSON.stringify(redisExplain),
@@ -535,6 +543,60 @@ describe("liveRepository.getEventLiveExplain", () => {
 		const result = await liveRepository.getEventLiveExplain(context, 34, 526);
 		expect(result?.stats.totalPoints).toBe(14);
 		expect(result?.breakdown[0]?.fixtureId).toBe(9);
+	});
+
+	it("falls back to the historical element column", async () => {
+		const attemptedColumns: string[] = [];
+		const context = buildContext({}) as unknown as { supabase: unknown };
+		context.supabase = {
+			from: (table: string) => {
+				let elementColumn = "";
+				const builder = {
+					select: () => builder,
+					eq: (column: string) => {
+						if (table === "event_live_explains" && column !== "event_id") {
+							elementColumn = column;
+							attemptedColumns.push(column);
+						}
+						return builder;
+					},
+					limit: async () => {
+						if (table === "player_stats") {
+							return { data: [playerStatsRow34_526], error: null };
+						}
+						if (elementColumn === "element_id") {
+							return {
+								data: null,
+								error: {
+									code: "42703",
+									message: "column event_live_explains.element_id does not exist",
+								},
+							};
+						}
+						return {
+							data: [
+								{
+									event_id: 34,
+									element: 526,
+									explain: [
+										{
+											fixture: 10,
+											stats: [{ identifier: "bonus", points: 3, value: 3 }],
+										},
+									],
+								},
+							],
+							error: null,
+						};
+					},
+				};
+				return builder;
+			},
+		};
+
+		const result = await liveRepository.getEventLiveExplain(context as never, 34, 526);
+		expect(attemptedColumns).toEqual(["element_id", "element"]);
+		expect(result?.breakdown[0]?.fixtureId).toBe(10);
 	});
 
 	it("returns null when neither player_stats nor event_live_explain have a row", async () => {

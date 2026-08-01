@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { gqlCacheKey } from "../../infra/cache-key";
 import { env } from "../../infra/env";
 import { getCurrentSeason } from "../../infra/season";
 
@@ -150,40 +151,84 @@ const mapEntryHistoryInfo = (row: DbEntryHistoryInfoRow): EntryHistoryInfo => ({
 	overallRank: row.overall_rank,
 });
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const evictMalformedCache = async (context: GraphQLContext, key: string): Promise<void> => {
+	try {
+		await context.redis.del(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to evict malformed entry cache");
+	}
+};
+
+const readJsonCache = async <T>(
+	context: GraphQLContext,
+	key: string,
+	validate: (value: unknown) => value is T
+): Promise<T | undefined> => {
+	let raw: string | null;
+	try {
+		raw = await context.redis.get(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to read entry cache");
+		return undefined;
+	}
+	if (raw === null) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (validate(parsed)) return parsed;
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Malformed entry cache");
+	}
+	await evictMalformedCache(context, key);
+	return undefined;
+};
+
+const isEntryEventResult = (value: unknown): value is EntryEventResult => {
+	if (!isRecord(value)) return false;
+	return (
+		typeof value.entryId === "number" &&
+		Number.isFinite(value.entryId) &&
+		typeof value.eventId === "number" &&
+		Number.isFinite(value.eventId)
+	);
+};
+
+const isEntryHistoryInfo = (value: unknown): value is EntryHistoryInfo => {
+	if (!isRecord(value)) return false;
+	return typeof value.season === "string" && typeof value.totalPoints === "number";
+};
+
 interface EntriesRepository {
 	getEntryById(context: GraphQLContext, id: number): Promise<Entry | null>;
-	getEntriesByIds(
-		context: GraphQLContext,
-		ids: number[],
-	): Promise<Map<number, Entry>>;
-	getEntriesByIdsFromRedis(
-		context: GraphQLContext,
-		ids: number[],
-	): Promise<Map<number, Entry>>;
-	getEntryHistory(
-		context: GraphQLContext,
-		entryId: number,
-	): Promise<EntryEventResult[]>;
-	getEntryHistoryInfo(
-		context: GraphQLContext,
-		entryId: number,
-	): Promise<EntryHistoryInfo[]>;
+	getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>>;
+	getEntriesByIdsFromRedis(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>>;
+	getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]>;
+	getEntryHistoryInfo(context: GraphQLContext, entryId: number): Promise<EntryHistoryInfo[]>;
 	getEntryEventResult(
 		context: GraphQLContext,
 		entryId: number,
-		eventId: number,
+		eventId: number
 	): Promise<EntryEventResult | null>;
+	getEntryEventResultsByEntryIds(
+		context: GraphQLContext,
+		entryIds: number[],
+		eventId: number
+	): Promise<Map<number, EntryEventResult>>;
 }
 
 export const entriesRepository: EntriesRepository = {
-	async getEntryById(
-		context: GraphQLContext,
-		id: number,
-	): Promise<Entry | null> {
+	async getEntryById(context: GraphQLContext, id: number): Promise<Entry | null> {
 		// Read from externally-maintained EntryInfo:{season} hash
 		const season = await getCurrentSeason(context);
 		const hashKey = `EntryInfo:${season}`;
-		const raw = await context.redis.hget(hashKey, String(id));
+		let raw: string | null = null;
+		try {
+			raw = await context.redis.hget(hashKey, String(id));
+		} catch (error) {
+			context.logger.warn({ err: error, hashKey, id }, "Failed to read EntryInfo hash");
+		}
 		if (raw) {
 			try {
 				const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -192,39 +237,19 @@ export const entriesRepository: EntriesRepository = {
 					entryName: String(parsed.entryName ?? ""),
 					playerName: String(parsed.playerName ?? ""),
 					region: parsed.region ? String(parsed.region) : null,
-					startedEvent:
-						typeof parsed.startedEvent === "number"
-							? parsed.startedEvent
-							: null,
-					overallPoints:
-						typeof parsed.overallPoints === "number"
-							? parsed.overallPoints
-							: null,
-					overallRank:
-						typeof parsed.overallRank === "number" ? parsed.overallRank : null,
+					startedEvent: typeof parsed.startedEvent === "number" ? parsed.startedEvent : null,
+					overallPoints: typeof parsed.overallPoints === "number" ? parsed.overallPoints : null,
+					overallRank: typeof parsed.overallRank === "number" ? parsed.overallRank : null,
 					bank: typeof parsed.bank === "number" ? parsed.bank : null,
-					teamValue:
-						typeof parsed.teamValue === "number" ? parsed.teamValue : null,
-					totalTransfers:
-						typeof parsed.totalTransfers === "number"
-							? parsed.totalTransfers
-							: null,
-					lastEventId:
-						typeof parsed.lastEventId === "number" ? parsed.lastEventId : null,
+					teamValue: typeof parsed.teamValue === "number" ? parsed.teamValue : null,
+					totalTransfers: typeof parsed.totalTransfers === "number" ? parsed.totalTransfers : null,
+					lastEventId: typeof parsed.lastEventId === "number" ? parsed.lastEventId : null,
 					lastOverallPoints:
-						typeof parsed.lastOverallPoints === "number"
-							? parsed.lastOverallPoints
-							: null,
+						typeof parsed.lastOverallPoints === "number" ? parsed.lastOverallPoints : null,
 					lastOverallRank:
-						typeof parsed.lastOverallRank === "number"
-							? parsed.lastOverallRank
-							: null,
-					lastTeamValue:
-						typeof parsed.lastTeamValue === "number"
-							? parsed.lastTeamValue
-							: null,
-					lastBank:
-						typeof parsed.lastBank === "number" ? parsed.lastBank : null,
+						typeof parsed.lastOverallRank === "number" ? parsed.lastOverallRank : null,
+					lastTeamValue: typeof parsed.lastTeamValue === "number" ? parsed.lastTeamValue : null,
+					lastBank: typeof parsed.lastBank === "number" ? parsed.lastBank : null,
 				};
 			} catch {
 				// Parse error — fall through to DB
@@ -234,7 +259,7 @@ export const entriesRepository: EntriesRepository = {
 		const { data, error } = await context.supabase
 			.from("entry_infos")
 			.select(
-				"id, entry_name, player_name, region, started_event, overall_points, overall_rank, bank, team_value, total_transfers, last_event_id, last_overall_points, last_overall_rank, last_team_value, last_bank",
+				"id, entry_name, player_name, region, started_event, overall_points, overall_rank, bank, team_value, total_transfers, last_event_id, last_overall_points, last_overall_rank, last_team_value, last_bank"
 			)
 			.eq("id", id)
 			.limit(1);
@@ -251,38 +276,11 @@ export const entriesRepository: EntriesRepository = {
 
 		const result = mapEntry(row);
 
-		// Write DB fallback back to the hash (no TTL — same as externally-maintained key)
-		await context.redis.hset(
-			hashKey,
-			String(id),
-			JSON.stringify({
-				entryName: result.entryName,
-				playerName: result.playerName,
-				region: result.region,
-				startedEvent: result.startedEvent,
-				overallPoints: result.overallPoints,
-				overallRank: result.overallRank,
-				bank: result.bank,
-				teamValue: result.teamValue,
-				totalTransfers: result.totalTransfers,
-				lastEventId: result.lastEventId,
-				lastOverallPoints: result.lastOverallPoints,
-				lastOverallRank: result.lastOverallRank,
-				lastTeamValue: result.lastTeamValue,
-				lastBank: result.lastBank,
-			}),
-		);
-
 		return result;
 	},
 
-	async getEntriesByIds(
-		context: GraphQLContext,
-		ids: number[],
-	): Promise<Map<number, Entry>> {
-		const uniqueIds = Array.from(
-			new Set(ids.filter((id) => Number.isFinite(id) && id > 0)),
-		);
+	async getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
+		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
 		if (uniqueIds.length === 0) {
 			return new Map();
 		}
@@ -290,15 +288,12 @@ export const entriesRepository: EntriesRepository = {
 		const { data, error } = await context.supabase
 			.from("entry_infos")
 			.select(
-				"id, entry_name, player_name, region, started_event, overall_points, overall_rank, bank, team_value, total_transfers, last_event_id, last_overall_points, last_overall_rank, last_team_value, last_bank",
+				"id, entry_name, player_name, region, started_event, overall_points, overall_rank, bank, team_value, total_transfers, last_event_id, last_overall_points, last_overall_rank, last_team_value, last_bank"
 			)
 			.in("id", uniqueIds);
 
 		if (error) {
-			context.logger.error(
-				{ err: error, ids: uniqueIds },
-				"Failed to batch fetch entries",
-			);
+			context.logger.error({ err: error, ids: uniqueIds }, "Failed to batch fetch entries");
 			throw new Error("Failed to batch fetch entries");
 		}
 
@@ -312,11 +307,9 @@ export const entriesRepository: EntriesRepository = {
 
 	async getEntriesByIdsFromRedis(
 		context: GraphQLContext,
-		ids: number[],
+		ids: number[]
 	): Promise<Map<number, Entry>> {
-		const uniqueIds = Array.from(
-			new Set(ids.filter((id) => Number.isFinite(id) && id > 0)),
-		);
+		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
 		if (uniqueIds.length === 0) {
 			return new Map();
 		}
@@ -326,10 +319,7 @@ export const entriesRepository: EntriesRepository = {
 
 		try {
 			// HMGET all requested IDs from the hash
-			const values = await context.redis.hmget(
-				hashKey,
-				...uniqueIds.map(String),
-			);
+			const values = await context.redis.hmget(hashKey, ...uniqueIds.map(String));
 			const results = new Map<number, Entry>();
 			const missingIds: number[] = [];
 
@@ -342,43 +332,20 @@ export const entriesRepository: EntriesRepository = {
 						entryName: String(parsed.entryName ?? ""),
 						playerName: String(parsed.playerName ?? ""),
 						region: parsed.region ? String(parsed.region) : null,
-						startedEvent:
-							typeof parsed.startedEvent === "number"
-								? parsed.startedEvent
-								: null,
-						overallPoints:
-							typeof parsed.overallPoints === "number"
-								? parsed.overallPoints
-								: null,
-						overallRank:
-							typeof parsed.overallRank === "number"
-								? parsed.overallRank
-								: null,
+						startedEvent: typeof parsed.startedEvent === "number" ? parsed.startedEvent : null,
+						overallPoints: typeof parsed.overallPoints === "number" ? parsed.overallPoints : null,
+						overallRank: typeof parsed.overallRank === "number" ? parsed.overallRank : null,
 						bank: typeof parsed.bank === "number" ? parsed.bank : null,
-						teamValue:
-							typeof parsed.teamValue === "number" ? parsed.teamValue : null,
+						teamValue: typeof parsed.teamValue === "number" ? parsed.teamValue : null,
 						totalTransfers:
-							typeof parsed.totalTransfers === "number"
-								? parsed.totalTransfers
-								: null,
-						lastEventId:
-							typeof parsed.lastEventId === "number"
-								? parsed.lastEventId
-								: null,
+							typeof parsed.totalTransfers === "number" ? parsed.totalTransfers : null,
+						lastEventId: typeof parsed.lastEventId === "number" ? parsed.lastEventId : null,
 						lastOverallPoints:
-							typeof parsed.lastOverallPoints === "number"
-								? parsed.lastOverallPoints
-								: null,
+							typeof parsed.lastOverallPoints === "number" ? parsed.lastOverallPoints : null,
 						lastOverallRank:
-							typeof parsed.lastOverallRank === "number"
-								? parsed.lastOverallRank
-								: null,
-						lastTeamValue:
-							typeof parsed.lastTeamValue === "number"
-								? parsed.lastTeamValue
-								: null,
-						lastBank:
-							typeof parsed.lastBank === "number" ? parsed.lastBank : null,
+							typeof parsed.lastOverallRank === "number" ? parsed.lastOverallRank : null,
+						lastTeamValue: typeof parsed.lastTeamValue === "number" ? parsed.lastTeamValue : null,
+						lastBank: typeof parsed.lastBank === "number" ? parsed.lastBank : null,
 					});
 				} else {
 					missingIds.push(uniqueIds[i]);
@@ -399,80 +366,84 @@ export const entriesRepository: EntriesRepository = {
 		} catch (err) {
 			context.logger.warn(
 				{ err, hashKey, ids: uniqueIds },
-				"Failed to read EntryInfo hash from Redis, falling back to DB",
+				"Failed to read EntryInfo hash from Redis, falling back to DB"
 			);
 			return this.getEntriesByIds(context, uniqueIds);
 		}
 	},
 
-	async getEntryHistory(
-		context: GraphQLContext,
-		entryId: number,
-	): Promise<EntryEventResult[]> {
+	async getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]> {
 		if (!Number.isFinite(entryId) || entryId <= 0) {
 			return [];
 		}
 
-		const cacheKey = `entries:history:${entryId}`;
-		const cached = await context.redis.get(cacheKey);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:history:${entryId}`);
+		let cached: string | null = null;
+		try {
+			cached = await context.redis.get(cacheKey);
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to read entry history cache");
+		}
 		if (cached !== null) {
-			if (cached === NULL_SENTINEL) {
-				return [];
+			if (cached === NULL_SENTINEL) return [];
+			try {
+				const parsed: unknown = JSON.parse(cached);
+				if (Array.isArray(parsed) && parsed.every(isEntryEventResult)) {
+					return parsed;
+				}
+			} catch (error) {
+				context.logger.warn({ err: error, cacheKey }, "Malformed entry history cache");
 			}
-			return JSON.parse(cached) as EntryEventResult[];
+			await evictMalformedCache(context, cacheKey);
 		}
 
 		const { data, error } = await context.supabase
 			.from("entry_event_results")
 			.select(
-				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank",
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
 			)
 			.eq("entry_id", entryId)
 			.order("event_id", { ascending: true });
 
 		if (error) {
-			context.logger.error(
-				{ err: error, entryId },
-				"Failed to fetch entry history",
-			);
+			context.logger.error({ err: error, entryId }, "Failed to fetch entry history");
 			throw new Error("Failed to fetch entry history");
 		}
 
-		const history =
-			(data as DbEntryEventResultRow[] | null)?.map(mapEntryEventResult) ?? [];
+		const history = (data as DbEntryEventResultRow[] | null)?.map(mapEntryEventResult) ?? [];
 		if (history.length === 0) {
-			await context.redis.set(
-				cacheKey,
-				NULL_SENTINEL,
-				"EX",
-				env.CACHE_TTL_SECONDS,
-			);
+			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", env.CACHE_TTL_SECONDS);
 		} else {
-			await context.redis.set(
-				cacheKey,
-				JSON.stringify(history),
-				"EX",
-				env.CACHE_TTL_SECONDS,
-			);
+			await context.redis.set(cacheKey, JSON.stringify(history), "EX", env.CACHE_TTL_SECONDS);
 		}
 		return history;
 	},
 
-	async getEntryHistoryInfo(
-		context: GraphQLContext,
-		entryId: number,
-	): Promise<EntryHistoryInfo[]> {
+	async getEntryHistoryInfo(context: GraphQLContext, entryId: number): Promise<EntryHistoryInfo[]> {
 		if (!Number.isFinite(entryId) || entryId <= 0) {
 			return [];
 		}
 
-		const cacheKey = `entries:history-info:${entryId}`;
-		const cached = await context.redis.get(cacheKey);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:history-info:${entryId}`);
+		let cached: string | null = null;
+		try {
+			cached = await context.redis.get(cacheKey);
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to read entry history-info cache");
+		}
 		if (cached !== null) {
-			if (cached === NULL_SENTINEL) {
-				return [];
+			if (cached === NULL_SENTINEL) return [];
+			try {
+				const parsed: unknown = JSON.parse(cached);
+				if (Array.isArray(parsed) && parsed.every(isEntryHistoryInfo)) {
+					return parsed;
+				}
+			} catch (error) {
+				context.logger.warn({ err: error, cacheKey }, "Malformed entry history-info cache");
 			}
-			return JSON.parse(cached) as EntryHistoryInfo[];
+			await evictMalformedCache(context, cacheKey);
 		}
 
 		const { data, error } = await context.supabase
@@ -482,29 +453,15 @@ export const entriesRepository: EntriesRepository = {
 			.order("season", { ascending: true });
 
 		if (error) {
-			context.logger.error(
-				{ err: error, entryId },
-				"Failed to fetch entry history info",
-			);
+			context.logger.error({ err: error, entryId }, "Failed to fetch entry history info");
 			throw new Error("Failed to fetch entry history info");
 		}
 
-		const historyInfo =
-			(data as DbEntryHistoryInfoRow[] | null)?.map(mapEntryHistoryInfo) ?? [];
+		const historyInfo = (data as DbEntryHistoryInfoRow[] | null)?.map(mapEntryHistoryInfo) ?? [];
 		if (historyInfo.length === 0) {
-			await context.redis.set(
-				cacheKey,
-				NULL_SENTINEL,
-				"EX",
-				env.CACHE_TTL_SECONDS,
-			);
+			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", env.CACHE_TTL_SECONDS);
 		} else {
-			await context.redis.set(
-				cacheKey,
-				JSON.stringify(historyInfo),
-				"EX",
-				env.CACHE_TTL_SECONDS,
-			);
+			await context.redis.set(cacheKey, JSON.stringify(historyInfo), "EX", env.CACHE_TTL_SECONDS);
 		}
 		return historyInfo;
 	},
@@ -512,37 +469,30 @@ export const entriesRepository: EntriesRepository = {
 	async getEntryEventResult(
 		context: GraphQLContext,
 		entryId: number,
-		eventId: number,
+		eventId: number
 	): Promise<EntryEventResult | null> {
-		if (
-			!Number.isFinite(entryId) ||
-			entryId <= 0 ||
-			!Number.isFinite(eventId) ||
-			eventId <= 0
-		) {
+		if (!Number.isFinite(entryId) || entryId <= 0 || !Number.isFinite(eventId) || eventId <= 0) {
 			return null;
 		}
 
-		const cacheKey = `entries:event-result:${entryId}:${eventId}`;
-		const cached = await context.redis.get(cacheKey);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:event-result:${entryId}:${eventId}`);
+		const cached = await readJsonCache(context, cacheKey, isEntryEventResult);
 		if (cached) {
-			return JSON.parse(cached) as EntryEventResult;
+			return cached;
 		}
 
 		const { data, error } = await context.supabase
 			.from("entry_event_results")
 			.select(
-				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank",
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
 			)
 			.eq("entry_id", entryId)
 			.eq("event_id", eventId)
 			.limit(1);
 
 		if (error) {
-			context.logger.error(
-				{ err: error, entryId, eventId },
-				"Failed to fetch entry event result",
-			);
+			context.logger.error({ err: error, entryId, eventId }, "Failed to fetch entry event result");
 			throw new Error("Failed to fetch entry event result");
 		}
 
@@ -552,12 +502,39 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const result = mapEntryEventResult(row);
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(result),
-			"EX",
-			env.CACHE_TTL_SECONDS,
-		);
+		await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
 		return result;
+	},
+
+	async getEntryEventResultsByEntryIds(
+		context: GraphQLContext,
+		entryIds: number[],
+		eventId: number
+	): Promise<Map<number, EntryEventResult>> {
+		const uniqueIds = Array.from(new Set(entryIds.filter((id) => Number.isInteger(id) && id > 0)));
+		if (uniqueIds.length === 0 || eventId <= 0) return new Map();
+
+		const { data, error } = await context.supabase
+			.from("entry_event_results")
+			.select(
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
+			)
+			.in("entry_id", uniqueIds)
+			.eq("event_id", eventId);
+
+		if (error) {
+			context.logger.error(
+				{ err: error, entryIds: uniqueIds, eventId },
+				"Failed to fetch entry event baselines"
+			);
+			throw new Error("Failed to fetch entry event baselines");
+		}
+
+		return new Map(
+			((data as DbEntryEventResultRow[] | null) ?? []).map((row) => {
+				const result = mapEntryEventResult(row);
+				return [result.entryId, result];
+			})
+		);
 	},
 };

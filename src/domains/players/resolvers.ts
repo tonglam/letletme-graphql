@@ -15,13 +15,13 @@ const teamsMemo = new WeakMap<GraphQLContext, Map<number, Team | null>>();
 
 const getTeamByIdMemoized = async (
 	context: GraphQLContext,
-	teamId: number,
+	teamId: number
 ): Promise<Team | null> => {
 	let memo = teamsMemo.get(context);
 	if (!memo) {
 		const map = await buildTeamMap(context);
 		const entries = Array.from(map.entries()).map(
-			([id, team]) => [id, team as Team | null] as [number, Team | null],
+			([id, team]) => [id, team as Team | null] as [number, Team | null]
 		);
 		memo = new Map(entries);
 		teamsMemo.set(context, memo);
@@ -29,15 +29,12 @@ const getTeamByIdMemoized = async (
 	return memo.get(teamId) ?? null;
 };
 
-const playersForEventMemo = new WeakMap<
-	GraphQLContext,
-	Map<string, Player | null>
->();
+const playersForEventMemo = new WeakMap<GraphQLContext, Map<string, Player | null>>();
 
 const getPlayerByIdForEventMemoized = async (
 	context: GraphQLContext,
 	playerId: number,
-	eventId: number,
+	eventId: number
 ): Promise<Player | null> => {
 	const key = `${playerId}:${eventId}`;
 	let memo = playersForEventMemo.get(context);
@@ -49,11 +46,7 @@ const getPlayerByIdForEventMemoized = async (
 	if (cached !== undefined) {
 		return cached;
 	}
-	const player = await playersService.getPlayerByIdForEvent(
-		context,
-		playerId,
-		eventId,
-	);
+	const player = await playersService.getPlayerByIdForEvent(context, playerId, eventId);
 	memo.set(key, player);
 	return player;
 };
@@ -61,7 +54,7 @@ const getPlayerByIdForEventMemoized = async (
 const loadPlayersIntoMemo = (
 	context: GraphQLContext,
 	eventId: number,
-	players: Record<number, Player>,
+	players: Record<number, Player>
 ): void => {
 	let memo = playersForEventMemo.get(context);
 	if (!memo) {
@@ -124,65 +117,51 @@ export const playersResolvers = {
 		player: async (
 			_parent: unknown,
 			args: PlayerArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Player | null> => playersService.getPlayerById(context, args.id),
 
 		players: async (
 			_parent: unknown,
 			args: PlayersArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Player[]> => {
 			const filter: PlayersFilter | undefined = args.filter
 				? {
-						position: args.filter.position
-							? stringToPosition(args.filter.position)
-							: undefined,
+						position: args.filter.position ? stringToPosition(args.filter.position) : undefined,
 						teamId: args.filter.teamId ?? undefined,
 						minPrice: args.filter.minPrice ?? undefined,
 						maxPrice: args.filter.maxPrice ?? undefined,
 					}
 				: undefined;
 
-			return playersService.listPlayers(
-				context,
-				filter,
-				args.limit ?? 50,
-				args.offset ?? 0,
-			);
+			return playersService.listPlayers(context, filter, args.limit ?? 50, args.offset ?? 0);
 		},
 
 		playersForPicker: async (
 			_parent: unknown,
 			args: PlayersForPickerArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<PlayersForPickerPayload> =>
-			playersService.getPlayersForPicker(
-				context,
-				args.limit ?? 20,
-				args.cursor ?? null,
-			),
+			playersService.getPlayersForPicker(context, args.limit ?? 20, args.cursor ?? null),
 
-		team: async (
-			_parent: unknown,
-			args: TeamArgs,
-			context: GraphQLContext,
-		): Promise<Team | null> => playersService.getTeamById(context, args.id),
+		team: async (_parent: unknown, args: TeamArgs, context: GraphQLContext): Promise<Team | null> =>
+			playersService.getTeamById(context, args.id),
 
 		teams: async (
 			_parent: unknown,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Team[]> => playersService.listTeams(context),
 
 		topTransfersIn: async (
 			_parent: unknown,
 			args: TopTransfersArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<PlayerTransferStats[]> => {
 			const { stats, players } = await playersService.getTopTransfersInEnriched(
 				context,
 				args.eventId,
-				args.limit ?? 10,
+				args.limit ?? 10
 			);
 			loadPlayersIntoMemo(context, args.eventId, players);
 			return stats;
@@ -191,14 +170,13 @@ export const playersResolvers = {
 		topTransfersOut: async (
 			_parent: unknown,
 			args: TopTransfersArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<PlayerTransferStats[]> => {
-			const { stats, players } =
-				await playersService.getTopTransfersOutEnriched(
-					context,
-					args.eventId,
-					args.limit ?? 10,
-				);
+			const { stats, players } = await playersService.getTopTransfersOutEnriched(
+				context,
+				args.eventId,
+				args.limit ?? 10
+			);
 			loadPlayersIntoMemo(context, args.eventId, players);
 			return stats;
 		},
@@ -207,7 +185,7 @@ export const playersResolvers = {
 		player: async (
 			parent: PlayerTransferStats,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Player | null> =>
 			getPlayerByIdForEventMemoized(context, parent.playerId, parent.eventId),
 	},
@@ -231,12 +209,11 @@ export const playersResolvers = {
 		team: async (
 			parent: Player,
 			_args: Record<string, never>,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<Team | null> => getTeamByIdMemoized(context, parent.teamId),
 		value: (parent: Player): number => parent.price,
 		totalPoints: (parent: Player): number => parent.totalPoints ?? 0,
-		selectedByPercent: (parent: Player): number | null =>
-			parent.selectedByPercent ?? null,
+		selectedByPercent: (parent: Player): number | null => parent.selectedByPercent ?? null,
 		position: (parent: Player): string => {
 			switch (parent.position) {
 				case Position.GOALKEEPER:

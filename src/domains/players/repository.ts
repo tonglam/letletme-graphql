@@ -1,11 +1,9 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { gqlCacheKey } from "../../infra/cache-key";
 import { getCurrentSeason } from "../../infra/season";
 import { stableStringify } from "../../infra/stringify";
 import { buildTeamMap } from "../../infra/team-map";
-import type {
-	Player as InfraPlayer,
-	Team as InfraTeam,
-} from "../../infra/types";
+import type { Player as InfraPlayer, Team as InfraTeam } from "../../infra/types";
 
 export enum Position {
 	GOALKEEPER = 1,
@@ -39,9 +37,7 @@ type DbPlayerRow = {
 	start_price: number;
 };
 
-const asNullableNumber = (
-	value: number | string | null | undefined,
-): number | null => {
+const asNullableNumber = (value: number | string | null | undefined): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) {
 		return value;
 	}
@@ -66,9 +62,69 @@ const mapPlayer = (row: DbPlayerRow): Player => ({
 	selectedByPercent: null,
 });
 
-const normalizeFilter = (
-	filter?: PlayersFilter | null,
-): PlayersFilter | undefined => {
+const evictMalformedCache = async (context: GraphQLContext, key: string): Promise<void> => {
+	try {
+		await context.redis.del(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to evict malformed player cache");
+	}
+};
+
+const isPlayer = (value: unknown): value is Player => {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const player = value as Record<string, unknown>;
+	return (
+		typeof player.id === "number" &&
+		Number.isFinite(player.id) &&
+		typeof player.teamId === "number" &&
+		Number.isFinite(player.teamId) &&
+		typeof player.position === "number" &&
+		Number.isFinite(player.position)
+	);
+};
+
+const isPlayerList = (value: unknown): value is Player[] =>
+	Array.isArray(value) && value.every((item) => isPlayer(item));
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isTopTransfersEnriched = (value: unknown): value is TopTransfersEnriched => {
+	if (!isObject(value) || !Array.isArray(value.stats) || !isObject(value.players)) return false;
+	return value.stats.every(
+		(stat) =>
+			isObject(stat) &&
+			typeof stat.playerId === "number" &&
+			typeof stat.eventId === "number" &&
+			typeof stat.transfersInEvent === "number" &&
+			typeof stat.transfersOutEvent === "number"
+	);
+};
+
+const readJsonCache = async <T>(
+	context: GraphQLContext,
+	key: string,
+	validate: (value: unknown) => value is T
+): Promise<T | undefined> => {
+	let raw: string | null;
+	try {
+		raw = await context.redis.get(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to read player cache");
+		return undefined;
+	}
+	if (raw === null) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (validate(parsed)) return parsed;
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Malformed player cache");
+	}
+	await evictMalformedCache(context, key);
+	return undefined;
+};
+
+const normalizeFilter = (filter?: PlayersFilter | null): PlayersFilter | undefined => {
 	if (!filter) {
 		return undefined;
 	}
@@ -142,25 +198,25 @@ interface PlayersRepository {
 	getPlayerByIdForEvent(
 		context: GraphQLContext,
 		id: number,
-		eventId: number,
+		eventId: number
 	): Promise<Player | null>;
 	getPlayersByIdsForEvent(
 		context: GraphQLContext,
 		ids: number[],
-		eventId: number,
+		eventId: number
 	): Promise<Map<number, Player>>;
 	getPlayersByIds(context: GraphQLContext, ids: number[]): Promise<Player[]>;
 	getPlayersFromRedis(context: GraphQLContext): Promise<Map<number, Player>>;
 	getPlayersForPicker(
 		context: GraphQLContext,
 		limit: number,
-		cursor: number | null | undefined,
+		cursor: number | null | undefined
 	): Promise<PlayersForPickerPayload>;
 	listPlayers(
 		context: GraphQLContext,
 		filter: PlayersFilter | null | undefined,
 		limit: number,
-		offset: number,
+		offset: number
 	): Promise<Player[]>;
 	getTeamById(context: GraphQLContext, id: number): Promise<Team | null>;
 	listTeams(context: GraphQLContext): Promise<Team[]>;
@@ -168,12 +224,12 @@ interface PlayersRepository {
 	getTopTransfersInEnriched(
 		context: GraphQLContext,
 		eventId: number,
-		limit: number,
+		limit: number
 	): Promise<TopTransfersEnriched>;
 	getTopTransfersOutEnriched(
 		context: GraphQLContext,
 		eventId: number,
-		limit: number,
+		limit: number
 	): Promise<TopTransfersEnriched>;
 }
 
@@ -193,7 +249,7 @@ const fetchTopTransferRows = async (
 	context: GraphQLContext,
 	eventId: number,
 	direction: "in" | "out",
-	limit: number,
+	limit: number
 ): Promise<RawTransferRow[]> => {
 	const col = direction === "in" ? "transfers_in_event" : "transfers_out_event";
 	const { data, error } = await context.supabase
@@ -205,10 +261,7 @@ const fetchTopTransferRows = async (
 		.limit(limit);
 
 	if (error) {
-		context.logger.error(
-			{ err: error, eventId, direction },
-			"Failed to fetch top transfer rows",
-		);
+		context.logger.error({ err: error, eventId, direction }, "Failed to fetch top transfer rows");
 		throw new Error("Failed to fetch top transfer rows");
 	}
 
@@ -216,19 +269,21 @@ const fetchTopTransferRows = async (
 };
 
 export const playersRepository: PlayersRepository = {
-	async getPlayerById(
-		context: GraphQLContext,
-		id: number,
-	): Promise<Player | null> {
-		const cacheKey = `players:id:${id}`;
-		const cached = await context.redis.get(cacheKey);
+	async getPlayerById(context: GraphQLContext, id: number): Promise<Player | null> {
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `players:id:${id}`);
+		const cached = await readJsonCache(context, cacheKey, isPlayer);
 		if (cached) {
-			return JSON.parse(cached) as Player;
+			return cached;
 		}
 
 		// Try externally-managed Player:{season} hash before hitting Supabase
-		const season = await getCurrentSeason(context);
-		const hashRaw = await context.redis.hget(`Player:${season}`, String(id));
+		let hashRaw: string | null = null;
+		try {
+			hashRaw = await context.redis.hget(`Player:${season}`, String(id));
+		} catch (error) {
+			context.logger.warn({ err: error, season, id }, "Failed to read Player hash");
+		}
 		if (hashRaw) {
 			try {
 				const parsed = JSON.parse(hashRaw) as Record<string, unknown>;
@@ -258,12 +313,7 @@ export const playersRepository: PlayersRepository = {
 								? parsed.selected_by_percent
 								: null,
 				};
-				await context.redis.set(
-					cacheKey,
-					JSON.stringify(player),
-					"EX",
-					PLAYER_CACHE_TTL,
-				);
+				await context.redis.set(cacheKey, JSON.stringify(player), "EX", PLAYER_CACHE_TTL);
 				return player;
 			} catch {
 				/* fall through to Supabase */
@@ -272,9 +322,7 @@ export const playersRepository: PlayersRepository = {
 
 		const { data, error } = await context.supabase
 			.from("players")
-			.select(
-				"id, code, web_name, first_name, second_name, team_id, type, price, start_price",
-			)
+			.select("id, code, web_name, first_name, second_name, team_id, type, price, start_price")
 			.eq("id", id)
 			.limit(1);
 
@@ -289,24 +337,20 @@ export const playersRepository: PlayersRepository = {
 		}
 
 		const player = mapPlayer(row);
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(player),
-			"EX",
-			PLAYER_CACHE_TTL,
-		);
+		await context.redis.set(cacheKey, JSON.stringify(player), "EX", PLAYER_CACHE_TTL);
 		return player;
 	},
 
 	async getPlayerByIdForEvent(
 		context: GraphQLContext,
 		id: number,
-		eventId: number,
+		eventId: number
 	): Promise<Player | null> {
-		const cacheKey = `players:id:${id}:event:${eventId}`;
-		const cached = await context.redis.get(cacheKey);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `players:id:${id}:event:${eventId}`);
+		const cached = await readJsonCache(context, cacheKey, isPlayer);
 		if (cached) {
-			return JSON.parse(cached) as Player;
+			return cached;
 		}
 
 		const [basePlayer, statsResult] = await Promise.all([
@@ -326,14 +370,13 @@ export const playersRepository: PlayersRepository = {
 		if (statsResult.error) {
 			context.logger.warn(
 				{ err: statsResult.error, eventId, playerId: id },
-				"Failed to fetch player event stats; falling back to base player",
+				"Failed to fetch player event stats; returning base player"
 			);
-			await context.redis.set(
-				cacheKey,
-				JSON.stringify(basePlayer),
-				"EX",
-				PLAYER_CACHE_TTL,
-			);
+			try {
+				await context.redis.set(cacheKey, JSON.stringify(basePlayer), "EX", PLAYER_CACHE_TTL);
+			} catch (error) {
+				context.logger.warn({ err: error, cacheKey }, "Failed to cache base player fallback");
+			}
 			return basePlayer;
 		}
 
@@ -347,37 +390,47 @@ export const playersRepository: PlayersRepository = {
 		const playerForEvent: Player = {
 			...basePlayer,
 			totalPoints: row?.total_points ?? basePlayer.totalPoints,
-			selectedByPercent:
-				asNullableNumber(row?.selected_by_percent) ??
-				basePlayer.selectedByPercent,
+			selectedByPercent: asNullableNumber(row?.selected_by_percent) ?? basePlayer.selectedByPercent,
 		};
 
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(playerForEvent),
-			"EX",
-			PLAYER_CACHE_TTL,
-		);
+		await context.redis.set(cacheKey, JSON.stringify(playerForEvent), "EX", PLAYER_CACHE_TTL);
 		return playerForEvent;
 	},
 
 	async getPlayersByIdsForEvent(
 		context: GraphQLContext,
 		ids: number[],
-		eventId: number,
+		eventId: number
 	): Promise<Map<number, Player>> {
 		if (ids.length === 0) return new Map();
+		const season = await getCurrentSeason(context);
 
 		// One MGET for all per-event keys instead of N sequential GETs
-		const keys = ids.map((id) => `players:id:${id}:event:${eventId}`);
-		const rawValues = await context.redis.mget(...keys);
+		const keys = ids.map((id) => gqlCacheKey(season, `players:id:${id}:event:${eventId}`));
+		let rawValues: (string | null)[];
+		try {
+			rawValues = await context.redis.mget(...keys);
+		} catch (error) {
+			context.logger.warn({ err: error, keys }, "Failed to read player event cache");
+			rawValues = Array.from({ length: ids.length }, () => null);
+		}
 
 		const result = new Map<number, Player>();
 		const missIds: number[] = [];
 		for (let i = 0; i < ids.length; i++) {
 			const raw = rawValues[i];
 			if (raw) {
-				result.set(ids[i], JSON.parse(raw) as Player);
+				try {
+					const parsed: unknown = JSON.parse(raw);
+					if (isPlayer(parsed)) {
+						result.set(ids[i], parsed);
+						continue;
+					}
+				} catch (error) {
+					context.logger.warn({ err: error, key: keys[i] }, "Malformed player event cache");
+				}
+				await evictMalformedCache(context, keys[i]);
+				missIds.push(ids[i]);
 			} else {
 				missIds.push(ids[i]);
 			}
@@ -396,6 +449,9 @@ export const playersRepository: PlayersRepository = {
 		]);
 
 		const basePlayersMap = new Map(basePlayers.map((p) => [p.id, p]));
+		if (statsResult.error) {
+			throw new Error("Failed to fetch player event stats", { cause: statsResult.error });
+		}
 
 		type StatsRow = {
 			element_id: number;
@@ -416,16 +472,14 @@ export const playersRepository: PlayersRepository = {
 			const player: Player = {
 				...base,
 				totalPoints: stats?.total_points ?? base.totalPoints,
-				selectedByPercent:
-					asNullableNumber(stats?.selected_by_percent) ??
-					base.selectedByPercent,
+				selectedByPercent: asNullableNumber(stats?.selected_by_percent) ?? base.selectedByPercent,
 			};
 			result.set(id, player);
 			pipeline.set(
-				`players:id:${id}:event:${eventId}`,
+				gqlCacheKey(season, `players:id:${id}:event:${eventId}`),
 				JSON.stringify(player),
 				"EX",
-				PLAYER_CACHE_TTL,
+				PLAYER_CACHE_TTL
 			);
 		}
 		await pipeline.exec();
@@ -433,13 +487,8 @@ export const playersRepository: PlayersRepository = {
 		return result;
 	},
 
-	async getPlayersByIds(
-		context: GraphQLContext,
-		ids: number[],
-	): Promise<Player[]> {
-		const uniqueIds = Array.from(
-			new Set(ids.filter((id) => Number.isFinite(id) && id > 0)),
-		);
+	async getPlayersByIds(context: GraphQLContext, ids: number[]): Promise<Player[]> {
+		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
 		if (uniqueIds.length === 0) {
 			return [];
 		}
@@ -447,7 +496,13 @@ export const playersRepository: PlayersRepository = {
 		// Use HMGET on Player:{season} to fetch only the needed IDs
 		const season = await getCurrentSeason(context);
 		const hashKey = `Player:${season}`;
-		const values = await context.redis.hmget(hashKey, ...uniqueIds.map(String));
+		let values: (string | null)[];
+		try {
+			values = await context.redis.hmget(hashKey, ...uniqueIds.map(String));
+		} catch (error) {
+			context.logger.warn({ err: error, hashKey }, "Failed to read Player hash fields");
+			values = Array.from({ length: uniqueIds.length }, () => null);
+		}
 
 		const result: Player[] = [];
 		const missIds: number[] = [];
@@ -497,16 +552,12 @@ export const playersRepository: PlayersRepository = {
 
 		const { data, error } = await context.supabase
 			.from("players")
-			.select(
-				"id, code, web_name, first_name, second_name, team_id, type, price, start_price",
-			)
+			.select("id, code, web_name, first_name, second_name, team_id, type, price, start_price")
 			.in("id", missIds);
 
 		if (error) {
-			context.logger.error(
-				{ err: error, ids: missIds },
-				"Failed to fetch players by ids",
-			);
+			context.logger.error({ err: error, ids: missIds }, "Failed to fetch players by ids");
+			throw new Error("Failed to fetch players by ids", { cause: error });
 		} else {
 			result.push(...((data as DbPlayerRow[] | null)?.map(mapPlayer) ?? []));
 		}
@@ -514,9 +565,7 @@ export const playersRepository: PlayersRepository = {
 		return result;
 	},
 
-	async getPlayersFromRedis(
-		context: GraphQLContext,
-	): Promise<Map<number, Player>> {
+	async getPlayersFromRedis(context: GraphQLContext): Promise<Map<number, Player>> {
 		try {
 			const season = await getCurrentSeason(context);
 			const hashKey = `Player:${season}`;
@@ -543,10 +592,7 @@ export const playersRepository: PlayersRepository = {
 				return players;
 			}
 		} catch (err) {
-			context.logger.warn(
-				{ err },
-				"Failed to read Player hash from Redis, falling back to DB",
-			);
+			context.logger.warn({ err }, "Failed to read Player hash from Redis, falling back to DB");
 		}
 
 		// Fallback to DB — do NOT write back to external hash
@@ -557,16 +603,29 @@ export const playersRepository: PlayersRepository = {
 	async getPlayersForPicker(
 		context: GraphQLContext,
 		limit: number,
-		cursor: number | null | undefined,
+		cursor: number | null | undefined
 	): Promise<PlayersForPickerPayload> {
 		const safeLimit = clampLimit(limit);
-		const safeCursor =
-			cursor && Number.isFinite(cursor) && cursor > 0 ? cursor : null;
-		const cacheKey = `players:picker:${safeLimit}:${safeCursor ?? 0}`;
+		const safeCursor = cursor && Number.isFinite(cursor) && cursor > 0 ? cursor : null;
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `players:picker:${safeLimit}:${safeCursor ?? 0}`);
 
-		const cached = await context.redis.get(cacheKey);
+		const cached = await readJsonCache(
+			context,
+			cacheKey,
+			(value): value is PlayersForPickerPayload => {
+				if (!isObject(value) || !Array.isArray(value.items)) return false;
+				return value.items.every(
+					(item) =>
+						isObject(item) &&
+						typeof item.id === "number" &&
+						typeof item.webName === "string" &&
+						isObject(item.team)
+				);
+			}
+		);
 		if (cached) {
-			return JSON.parse(cached) as PlayersForPickerPayload;
+			return cached;
 		}
 
 		const result = await context.supabase.rpc("get_players_for_picker", {
@@ -577,23 +636,17 @@ export const playersRepository: PlayersRepository = {
 		if (result.error) {
 			context.logger.error(
 				{ err: result.error, limit: safeLimit, cursor: safeCursor },
-				"Failed to fetch players for picker",
+				"Failed to fetch players for picker"
 			);
 			throw new Error("Failed to fetch players for picker");
 		}
 
 		const rows = (result.data as DbPickerRow[] | null) ?? [];
 		const items = rows.map(mapPickerRow);
-		const nextCursor =
-			items.length >= safeLimit ? items[items.length - 1].id : null;
+		const nextCursor = items.length >= safeLimit ? items[items.length - 1].id : null;
 		const payload: PlayersForPickerPayload = { items, nextCursor };
 
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(payload),
-			"EX",
-			PICKER_CACHE_TTL,
-		);
+		await context.redis.set(cacheKey, JSON.stringify(payload), "EX", PICKER_CACHE_TTL);
 		return payload;
 	},
 
@@ -601,27 +654,29 @@ export const playersRepository: PlayersRepository = {
 		context: GraphQLContext,
 		filter: PlayersFilter | null | undefined,
 		limit: number,
-		offset: number,
+		offset: number
 	): Promise<Player[]> {
 		const normalizedFilter = normalizeFilter(filter);
 		const safeLimit = clampLimit(limit);
 		const safeOffset = Math.max(Number.isFinite(offset) ? offset : 0, 0);
-		const cacheKey = `players:list:${stableStringify({
-			filter: normalizedFilter ?? null,
-			limit: safeLimit,
-			offset: safeOffset,
-		})}`;
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(
+			season,
+			`players:list:${stableStringify({
+				filter: normalizedFilter ?? null,
+				limit: safeLimit,
+				offset: safeOffset,
+			})}`
+		);
 
-		const cached = await context.redis.get(cacheKey);
+		const cached = await readJsonCache(context, cacheKey, isPlayerList);
 		if (cached) {
-			return JSON.parse(cached) as Player[];
+			return cached;
 		}
 
 		let query = context.supabase
 			.from("players")
-			.select(
-				"id, code, web_name, first_name, second_name, team_id, type, price, start_price",
-			);
+			.select("id, code, web_name, first_name, second_name, team_id, type, price, start_price");
 
 		if (normalizedFilter?.position !== undefined) {
 			query = query.eq("type", normalizedFilter.position);
@@ -641,20 +696,12 @@ export const playersRepository: PlayersRepository = {
 			.range(safeOffset, safeOffset + safeLimit - 1);
 
 		if (error) {
-			context.logger.error(
-				{ err: error, filter: normalizedFilter },
-				"Failed to fetch players",
-			);
+			context.logger.error({ err: error, filter: normalizedFilter }, "Failed to fetch players");
 			throw new Error("Failed to fetch players");
 		}
 
 		const players = (data as DbPlayerRow[] | null)?.map(mapPlayer) ?? [];
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(players),
-			"EX",
-			PLAYER_CACHE_TTL,
-		);
+		await context.redis.set(cacheKey, JSON.stringify(players), "EX", PLAYER_CACHE_TTL);
 		return players;
 	},
 
@@ -679,15 +726,16 @@ export const playersRepository: PlayersRepository = {
 	async getTopTransfersInEnriched(
 		context: GraphQLContext,
 		eventId: number,
-		limit: number,
+		limit: number
 	): Promise<TopTransfersEnriched> {
 		const empty: TopTransfersEnriched = { stats: [], players: {} };
 		if (!Number.isFinite(eventId) || eventId <= 0) return empty;
 		const safeLimit = Math.min(Math.max(limit, 1), 100);
-		const cacheKey = `players:top-transfers-in:${eventId}:${safeLimit}`;
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `players:top-transfers-in:${eventId}:${safeLimit}`);
 
-		const cached = await context.redis.get(cacheKey);
-		if (cached) return JSON.parse(cached) as TopTransfersEnriched;
+		const cached = await readJsonCache(context, cacheKey, isTopTransfersEnriched);
+		if (cached) return cached;
 
 		const rows = await fetchTopTransferRows(context, eventId, "in", safeLimit);
 		const stats = rows.map((row) => ({
@@ -700,31 +748,27 @@ export const playersRepository: PlayersRepository = {
 		const playerMap = await this.getPlayersByIdsForEvent(
 			context,
 			stats.map((s) => s.playerId),
-			eventId,
+			eventId
 		);
 		const players: Record<number, Player> = Object.fromEntries(playerMap);
 		const enriched: TopTransfersEnriched = { stats, players };
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(enriched),
-			"EX",
-			PLAYER_CACHE_TTL,
-		);
+		await context.redis.set(cacheKey, JSON.stringify(enriched), "EX", PLAYER_CACHE_TTL);
 		return enriched;
 	},
 
 	async getTopTransfersOutEnriched(
 		context: GraphQLContext,
 		eventId: number,
-		limit: number,
+		limit: number
 	): Promise<TopTransfersEnriched> {
 		const empty: TopTransfersEnriched = { stats: [], players: {} };
 		if (!Number.isFinite(eventId) || eventId <= 0) return empty;
 		const safeLimit = Math.min(Math.max(limit, 1), 100);
-		const cacheKey = `players:top-transfers-out:${eventId}:${safeLimit}`;
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `players:top-transfers-out:${eventId}:${safeLimit}`);
 
-		const cached = await context.redis.get(cacheKey);
-		if (cached) return JSON.parse(cached) as TopTransfersEnriched;
+		const cached = await readJsonCache(context, cacheKey, isTopTransfersEnriched);
+		if (cached) return cached;
 
 		const rows = await fetchTopTransferRows(context, eventId, "out", safeLimit);
 		const stats = rows.map((row) => ({
@@ -737,16 +781,11 @@ export const playersRepository: PlayersRepository = {
 		const playerMap = await this.getPlayersByIdsForEvent(
 			context,
 			stats.map((s) => s.playerId),
-			eventId,
+			eventId
 		);
 		const players: Record<number, Player> = Object.fromEntries(playerMap);
 		const enriched: TopTransfersEnriched = { stats, players };
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(enriched),
-			"EX",
-			PLAYER_CACHE_TTL,
-		);
+		await context.redis.set(cacheKey, JSON.stringify(enriched), "EX", PLAYER_CACHE_TTL);
 		return enriched;
 	},
 };

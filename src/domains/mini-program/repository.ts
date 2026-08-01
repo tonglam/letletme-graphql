@@ -27,7 +27,7 @@ export const miniProgramRepository: MiniProgramRepository = {
 		} catch (err) {
 			context.logger.warn(
 				{ err, key: MINI_PROGRAM_NOTICE_REDIS_KEY },
-				"Failed to read mini program notice from Redis",
+				"Failed to read mini program notice from Redis"
 			);
 			return "";
 		}

@@ -23,36 +23,28 @@ const makeContext = (hash: Record<string, string>): GraphQLContext =>
 describe("miniProgramRepository.getMiniProgramNotice", () => {
 	it("returns empty string when hash is empty", async () => {
 		const ctx = makeContext({});
-		await expect(miniProgramRepository.getMiniProgramNotice(ctx)).resolves.toBe(
-			"",
-		);
+		await expect(miniProgramRepository.getMiniProgramNotice(ctx)).resolves.toBe("");
 	});
 
 	it("returns empty string when switch is not ON (case-insensitive)", async () => {
 		const ctx = makeContext({ switch: "OFF", content: "hello" });
-		await expect(miniProgramRepository.getMiniProgramNotice(ctx)).resolves.toBe(
-			"",
-		);
+		await expect(miniProgramRepository.getMiniProgramNotice(ctx)).resolves.toBe("");
 	});
 
 	it("returns content when switch is ON", async () => {
 		const ctx = makeContext({ switch: "ON", content: "Maintenance tonight" });
 		await expect(miniProgramRepository.getMiniProgramNotice(ctx)).resolves.toBe(
-			"Maintenance tonight",
+			"Maintenance tonight"
 		);
 	});
 
 	it("treats switch as ON case-insensitively", async () => {
 		const ctx = makeContext({ switch: "on", content: "x" });
-		await expect(miniProgramRepository.getMiniProgramNotice(ctx)).resolves.toBe(
-			"x",
-		);
+		await expect(miniProgramRepository.getMiniProgramNotice(ctx)).resolves.toBe("x");
 	});
 
 	it("returns empty string when switch ON but content field missing", async () => {
 		const ctx = makeContext({ switch: "ON" });
-		await expect(miniProgramRepository.getMiniProgramNotice(ctx)).resolves.toBe(
-			"",
-		);
+		await expect(miniProgramRepository.getMiniProgramNotice(ctx)).resolves.toBe("");
 	});
 });

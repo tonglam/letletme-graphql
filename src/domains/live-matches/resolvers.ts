@@ -11,7 +11,7 @@ export const liveMatchesResolvers = {
 		liveMatches: async (
 			_parent: unknown,
 			args: LiveMatchesArgs,
-			context: GraphQLContext,
+			context: GraphQLContext
 		): Promise<LiveMatches> =>
 			liveMatchesService.getAllLiveMatches(context, args.upcoming ?? false),
 	},

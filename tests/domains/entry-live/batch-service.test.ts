@@ -20,7 +20,7 @@ const makeMockContext = (options: {
 	return {
 		redis: {
 			get: async (key: string) => {
-				if (key === "season:current") return "2526";
+				if (key === "Season:active") return "2526";
 				return redisState.get(key) ?? null;
 			},
 			set: async (key: string, value: string) => {
@@ -28,8 +28,7 @@ const makeMockContext = (options: {
 				return "OK";
 			},
 			hgetall: async (key: string) => redisHashes.get(key) ?? {},
-			hget: async (key: string, field: string) =>
-				redisHashes.get(key)?.[field] ?? null,
+			hget: async (key: string, field: string) => redisHashes.get(key)?.[field] ?? null,
 			hmget: async (key: string, ...fields: string[]) => {
 				const hash = redisHashes.get(key) ?? {};
 				return fields.map((f) => hash[f] ?? null);
@@ -61,11 +60,7 @@ const makeMockContext = (options: {
 describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 	it("returns empty results for empty entry IDs", async () => {
 		const context = makeMockContext({});
-		const result = await entryLiveBatchService.calcLivePointsForEntries(
-			context,
-			33,
-			[],
-		);
+		const result = await entryLiveBatchService.calcLivePointsForEntries(context, 33, []);
 		expect(result.results.size).toBe(0);
 		expect(result.errors).toHaveLength(0);
 		expect(result.meta.totalEntries).toBe(0);
@@ -74,11 +69,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 
 	it("populates meta correctly", async () => {
 		const context = makeMockContext({});
-		const result = await entryLiveBatchService.calcLivePointsForEntries(
-			context,
-			33,
-			[],
-		);
+		const result = await entryLiveBatchService.calcLivePointsForEntries(context, 33, []);
 		expect(result.meta.eventId).toBe(33);
 		expect(result.meta.totalEntries).toBe(0);
 		expect(result.meta.failedCount).toBe(0);

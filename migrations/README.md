@@ -1,166 +1,32 @@
-# Database Migrations
+# GraphQL migrations
 
-## How to Run Migrations
+Only SQL in `forward/` is applied by `bun run migrate`. Files are immutable once
+applied: the runner records a SHA-256 checksum, applies each migration in a
+transaction, and serializes runners with a PostgreSQL advisory lock. It also
+fails when an applied file is missing or when a newly added file sorts before
+the applied journal tail.
 
-### Option 1: Supabase SQL Editor (Recommended)
+Historical SQL lives in `legacy/` for audit and disaster recovery. It predates
+the checksum ledger and must never be replayed into a fresh database.
 
-1. Go to your Supabase project dashboard
-2. Navigate to **SQL Editor**
-3. Create a new query
-4. Copy the contents of `001_auth_schema.sql`
-5. Paste and run the SQL
+Bootstrap ownership is deliberately split:
 
-### Option 2: psql Command Line
+- `letletme_data` creates and migrates FPL domain tables and sync-owned caches.
+- `letletme-web` is the only owner of the `bauth` schema and its Drizzle ledger.
+- `letletme-graphql` applies only forward read-model, index, privilege, and RLS
+  additions from `migrations/forward`.
+
+The forward journal also owns the four read-only PostgreSQL RPCs called by the
+GraphQL repositories. They run as the caller and grant execution only to the
+Supabase `service_role`; browser `anon` and `authenticated` roles cannot invoke
+them.
+
+Commands:
 
 ```bash
-# Using the DATABASE_URL from your .env file (never commit real credentials)
-psql "$DATABASE_URL" -f migrations/001_auth_schema.sql
-```
-
-### Option 3: Bun Script
-
-```bash
-# Run migration using Bun
 bun run migrate
+bun run migrate:status
 ```
 
-(Note: You'll need to create a migration script in package.json)
-
----
-
-## Migration Files
-
-### 001_auth_schema.sql
-
-Creates the authentication tables required for Better Auth and device authentication:
-
-**Better Auth Standard Tables:**
-- `user` - User accounts (email, OAuth, anonymous)
-- `session` - Web sessions (cookie-based)
-- `account` - OAuth accounts and password storage
-- `verification` - Email verification codes
-
-**Custom Tables:**
-- `device_sessions` - Mobile device sessions (device-based auth)
-
-**Indexes:**
-- Performance indexes for all tables
-- Foreign key indexes for joins
-
-### 002_auth_rls_policies.sql
-
-Applies Row Level Security (RLS) policies to authentication tables:
-
-**Security Features:**
-- Enables RLS on all 5 auth tables
-- Users can only view/update their own data
-- Users can delete their own sessions/devices
-- Service role bypasses all policies (for GraphQL API)
-
-**Policies Applied:**
-- `user`: 2 policies (view own, update own)
-- `session`: 2 policies (view own, delete own)
-- `account`: 1 policy (view own)
-- `verification`: 0 policies (backend only)
-- `device_sessions`: 2 policies (view own, delete own)
-
-**Total**: 7 RLS policies
-
-### 005_tournament_summary_read_model.sql
-
-Adds a fast read model for tournament entry ranking summary:
-
-- Adds persisted cumulative columns to `tournament_points_group_results`:
-  - `cum_transfers_num`
-  - `cum_total_costs`
-  - `cum_total_bench_points`
-  - `cum_auto_sub_points`
-- Backfills cumulative data from `entry_event_results`
-- Creates indexes for summary lookup and incremental updates
-- Creates view `v_tournament_event_snapshot` with SQL-computed tournament ranks
-
-Run with:
-
-```bash
-bun run migrate:tournament-summary
-```
-
----
-
-## Verification
-
-After running the migration, verify the tables were created:
-
-```sql
--- List all auth tables
-SELECT table_name 
-FROM information_schema.tables 
-WHERE table_schema = 'public' 
-AND table_name IN ('user', 'session', 'account', 'verification', 'device_sessions');
-
--- Check user table structure
-\d "user"
-
--- Check device_sessions table structure
-\d device_sessions
-```
-
-Expected output: 5 tables should be listed.
-
----
-
-## Rollback (if needed)
-
-To rollback this migration:
-
-```sql
--- Drop tables in reverse order (respecting foreign keys)
-DROP TABLE IF EXISTS device_sessions CASCADE;
-DROP TABLE IF EXISTS verification CASCADE;
-DROP TABLE IF EXISTS account CASCADE;
-DROP TABLE IF EXISTS session CASCADE;
-DROP TABLE IF EXISTS "user" CASCADE;
-```
-
-**⚠️ WARNING**: This will delete all authentication data!
-
----
-
-## Next Steps
-
-After running the migration:
-
-1. ✅ Start the server: `bun run dev`
-2. ✅ Test device authentication: `POST /api/device/auth`
-3. ✅ Test GraphQL `me` query
-4. ✅ (Optional) Set up OAuth credentials for Google/Apple
-
----
-
-### 024_device_sessions_token_hash.sql
-
-Stores device session tokens as SHA-256 hashes (`token_hash`) instead of plaintext.
-Existing plaintext tokens are cleared; mobile clients must re-authenticate after this migration.
-
----
-
-## Credential hygiene
-
-Never paste real `DATABASE_URL` values into this README or other tracked files.
-Use `$DATABASE_URL` from your local `.env`. If a credential was ever committed, rotate it in Supabase immediately — scrubbing the file does not remove it from git history.
-
----
-
-## Troubleshooting
-
-### Error: relation "user" already exists
-
-The migration is idempotent and uses `IF NOT EXISTS`. If you see this error, it means the tables are already created. You can safely ignore it or run the rollback script first.
-
-### Error: permission denied
-
-Make sure you're using the service_role key or a user with sufficient permissions to create tables.
-
-### Error: syntax error near "user"
-
-PostgreSQL requires double quotes for reserved keywords. The migration uses `"user"` (with quotes) which is correct.
+Before every production schema or drop migration, take and test a restorable
+database backup. Never edit an applied forward migration; add a new one.

@@ -10,7 +10,7 @@ export const leaguesService = {
 	getLeagueEventResults(
 		context: GraphQLContext,
 		leagueId: number,
-		eventId: number,
+		eventId: number
 	): Promise<LeagueEventResult[]> {
 		return leaguesRepository.getLeagueEventResults(context, leagueId, eventId);
 	},

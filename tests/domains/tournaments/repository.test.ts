@@ -17,12 +17,11 @@ import {
 } from "../../../src/domains/tournaments/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
 
+const CACHE_PREFIX = "gql:v2:2526:";
+
 type QueryAction = { type: string; args: unknown[] };
 
-const filterRowsByActions = (
-	rows: unknown[],
-	actions: QueryAction[],
-): unknown[] =>
+const filterRowsByActions = (rows: unknown[], actions: QueryAction[]): unknown[] =>
 	rows.filter((row) => {
 		if (typeof row !== "object" || row === null) {
 			return false;
@@ -200,8 +199,8 @@ describe("mapTournamentEventResult", () => {
 					id: 12345,
 					entry_name: "Fallback Entry",
 					player_name: "Fallback Player",
-				},
-			),
+				}
+			)
 		).toEqual({
 			tournament,
 			eventId: 33,
@@ -287,7 +286,7 @@ describe("mapTournamentEventResult", () => {
 				id: 7,
 				entry_name: "Fallback Entry",
 				player_name: "Fallback Player",
-			},
+			}
 		);
 
 		expect(result.entryName).toBe("Fallback Entry");
@@ -307,11 +306,11 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 		entryEventResultsError?: unknown;
 		cacheSeed?: string | null;
 	}): GraphQLContext => {
-		const redisState = new Map<string, string>();
+		const redisState = new Map<string, string>([["Season:active", "2526"]]);
 		if (options.cacheSeed) {
 			redisState.set(
-				'tournaments:event-results:{"eventId":33,"tournamentId":1}',
-				options.cacheSeed,
+				`${CACHE_PREFIX}tournaments:event-results:{"eventId":33,"tournamentId":1}`,
+				options.cacheSeed
 			);
 		}
 
@@ -339,19 +338,13 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 				}
 				if (table === "tournament_entries") {
 					return {
-						data: filterRowsByActions(
-							options.tournamentEntriesData ?? [],
-							actions,
-						),
+						data: filterRowsByActions(options.tournamentEntriesData ?? [], actions),
 						error: options.tournamentEntriesError ?? null,
 					};
 				}
 				if (table === "entry_event_results") {
 					return {
-						data: filterRowsByActions(
-							options.entryEventResultsData ?? [],
-							actions,
-						),
+						data: filterRowsByActions(options.entryEventResultsData ?? [], actions),
 						error: options.entryEventResultsError ?? null,
 					};
 				}
@@ -483,21 +476,13 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 		];
 		const context = buildContext({ cacheSeed: JSON.stringify(cached) });
 
-		const result = await tournamentsRepository.getTournamentEventResults(
-			context,
-			1,
-			33,
-		);
+		const result = await tournamentsRepository.getTournamentEventResults(context, 1, 33);
 		expect(result).toEqual(cached);
 	});
 
 	it("returns empty array when the tournament has no results", async () => {
 		const context = buildContext({ resultData: [] });
-		const result = await tournamentsRepository.getTournamentEventResults(
-			context,
-			1,
-			33,
-		);
+		const result = await tournamentsRepository.getTournamentEventResults(context, 1, 33);
 		expect(result).toEqual([]);
 	});
 
@@ -553,11 +538,7 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 				},
 			],
 		});
-		const result = await tournamentsRepository.getTournamentEventResults(
-			context,
-			1,
-			33,
-		);
+		const result = await tournamentsRepository.getTournamentEventResults(context, 1, 33);
 		expect(result).toEqual([]);
 	});
 
@@ -662,11 +643,7 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 			],
 		});
 
-		const result = await tournamentsRepository.getTournamentEventResults(
-			context,
-			1,
-			33,
-		);
+		const result = await tournamentsRepository.getTournamentEventResults(context, 1, 33);
 
 		expect(result).toHaveLength(2);
 		expect(result[0].groupId).toBe(1);
@@ -678,7 +655,7 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 		expect(result[1].eventChip).toBe("freehit");
 
 		const cached = await context.redis.get(
-			'tournaments:event-results:{"eventId":33,"tournamentId":1}',
+			`${CACHE_PREFIX}tournaments:event-results:{"eventId":33,"tournamentId":1}`
 		);
 		expect(cached).not.toBeNull();
 	});
@@ -692,11 +669,11 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		snapshotError?: unknown;
 		cacheSeed?: string | null;
 	}): GraphQLContext => {
-		const redisState = new Map<string, string>();
+		const redisState = new Map<string, string>([["Season:active", "2526"]]);
 		if (options.cacheSeed) {
 			redisState.set(
-				'tournaments:ranking-summary:{"entryId":15702,"eventId":3,"tournamentId":1}',
-				options.cacheSeed,
+				`${CACHE_PREFIX}tournaments:ranking-summary:{"entryId":15702,"eventId":3,"tournamentId":1}`,
+				options.cacheSeed
 			);
 		}
 
@@ -839,7 +816,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 			context,
 			1,
 			3,
-			15702,
+			15702
 		);
 
 		expect(result).toEqual(cached);
@@ -854,7 +831,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 			context,
 			1,
 			3,
-			15702,
+			15702
 		);
 		expect(result.overallRank).toBeNull();
 		expect(result.tournamentOverallRank).toBeNull();
@@ -890,7 +867,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 			context,
 			1,
 			3,
-			15702,
+			15702
 		);
 		expect(result.overallRank).toBeNull();
 		expect(result.tournamentOverallRank).toBeNull();
@@ -945,7 +922,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 			context,
 			1,
 			3,
-			15702,
+			15702
 		);
 
 		expect(result.overallRank).toBe(1000);
@@ -972,7 +949,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 			context,
 			1,
 			3,
-			15702,
+			15702
 		);
 
 		expect(result.overallRank).toBeNull();
@@ -1114,11 +1091,11 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 		battleGroupError?: unknown;
 		cacheSeed?: string | null;
 	}): GraphQLContext & { __redisState: Map<string, string> } => {
-		const redisState = new Map<string, string>();
+		const redisState = new Map<string, string>([["Season:active", "2526"]]);
 		if (options.cacheSeed !== undefined && options.cacheSeed !== null) {
 			redisState.set(
-				'tournaments:battle-results:{"eventId":15,"tournamentId":7}',
-				options.cacheSeed,
+				`${CACHE_PREFIX}tournaments:battle-results:{"eventId":15,"tournamentId":7}`,
+				options.cacheSeed
 			);
 		}
 
@@ -1137,10 +1114,7 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 				}
 				if (table === "tournament_entries") {
 					return {
-						data: filterRowsByActions(
-							options.tournamentEntriesData ?? [],
-							actions,
-						),
+						data: filterRowsByActions(options.tournamentEntriesData ?? [], actions),
 						error: null,
 					};
 				}
@@ -1151,11 +1125,9 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 			};
 
 			let resolvePromise!: (value: ReturnType<typeof resolveResult>) => void;
-			const promise = new Promise<ReturnType<typeof resolveResult>>(
-				(resolve) => {
-					resolvePromise = resolve;
-				},
-			);
+			const promise = new Promise<ReturnType<typeof resolveResult>>((resolve) => {
+				resolvePromise = resolve;
+			});
 			queueMicrotask(() => resolvePromise(resolveResult()));
 
 			const builder = Object.assign(promise, {
@@ -1275,11 +1247,7 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 			},
 		];
 		const context = buildContext({ cacheSeed: JSON.stringify(cached) });
-		const result = await tournamentsRepository.getTournamentBattleGroupResults(
-			context,
-			7,
-			15,
-		);
+		const result = await tournamentsRepository.getTournamentBattleGroupResults(context, 7, 15);
 		expect(result).toEqual(cached);
 	});
 
@@ -1289,16 +1257,12 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 			tournamentEntriesData: [],
 			battleGroupData: [],
 		});
-		const result = await tournamentsRepository.getTournamentBattleGroupResults(
-			context,
-			7,
-			15,
-		);
+		const result = await tournamentsRepository.getTournamentBattleGroupResults(context, 7, 15);
 		expect(result).toEqual([]);
 		expect(
 			context.__redisState.get(
-				'tournaments:battle-results:{"eventId":15,"tournamentId":7}',
-			),
+				`${CACHE_PREFIX}tournaments:battle-results:{"eventId":15,"tournamentId":7}`
+			)
 		).toBe(JSON.stringify([]));
 	});
 
@@ -1315,11 +1279,7 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 				{ id: 2002, entry_name: "Away Side", player_name: "Bob" },
 			],
 		});
-		const result = await tournamentsRepository.getTournamentBattleGroupResults(
-			context,
-			7,
-			15,
-		);
+		const result = await tournamentsRepository.getTournamentBattleGroupResults(context, 7, 15);
 		expect(result).toHaveLength(1);
 		expect(result[0].matchId).toBe(501);
 		expect(result[0].homeEntryName).toBe("Home Team FC");
@@ -1335,7 +1295,7 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 			battleGroupError: { message: "db error" },
 		});
 		await expect(
-			tournamentsRepository.getTournamentBattleGroupResults(context, 7, 15),
+			tournamentsRepository.getTournamentBattleGroupResults(context, 7, 15)
 		).rejects.toThrow("Failed to fetch tournament battle group results");
 	});
 });

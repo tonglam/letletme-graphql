@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { getCurrentEventId } from "../../infra/event";
 import { getCurrentSeason } from "../../infra/season";
+import { metrics } from "../../infra/metrics";
 
 export type Fixture = {
 	id: number;
@@ -47,7 +48,8 @@ const toIso = (value: string | Date | null): string | null => {
 	if (!value) {
 		return null;
 	}
-	return new Date(value).toISOString();
+	const date = new Date(value);
+	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
 
 const mapFixture = (row: DbFixtureRow): Fixture => ({
@@ -67,9 +69,7 @@ const mapFixture = (row: DbFixtureRow): Fixture => ({
 	teamADifficulty: row.team_a_difficulty,
 });
 
-const normalizeFilter = (
-	filter?: FixturesFilter | null,
-): FixturesFilter | undefined => {
+const normalizeFilter = (filter?: FixturesFilter | null): FixturesFilter | undefined => {
 	if (!filter) {
 		return undefined;
 	}
@@ -112,8 +112,7 @@ const asBool = (value: unknown): boolean | null => {
 	return null;
 };
 
-const asStr = (value: unknown): string | null =>
-	typeof value === "string" ? value : null;
+const asStr = (value: unknown): string | null => (typeof value === "string" ? value : null);
 
 const parseJsonUnknown = (value: string): unknown | null => {
 	try {
@@ -140,20 +139,20 @@ const mapSyncJobFixture = (raw: unknown): Fixture | null => {
 	}
 
 	const finished = asBool(row.finished) ?? false;
-	const finishedProvisional =
-		asBool(row.finishedProvisional ?? row.finished_provisional) ?? false;
+	const finishedProvisional = asBool(row.finishedProvisional ?? row.finished_provisional) ?? false;
 	const kickoffTime = asStr(row.kickoffTime ?? row.kickoff_time);
 	const minutes = asNum(row.minutes) ?? 0;
 	const started = asBool(row.started);
 
-	const teamHScore = asNum(
-		row.teamHScore ?? row.team_h_score ?? row.teamHScore,
-	);
-	const teamAScore = asNum(
-		row.teamAScore ?? row.team_a_score ?? row.teamAScore,
-	);
+	const teamHScore = asNum(row.teamHScore ?? row.team_h_score ?? row.teamHScore);
+	const teamAScore = asNum(row.teamAScore ?? row.team_a_score ?? row.teamAScore);
 	const teamHDifficulty = asNum(row.teamHDifficulty ?? row.team_h_difficulty);
 	const teamADifficulty = asNum(row.teamADifficulty ?? row.team_a_difficulty);
+
+	// A present but invalid timestamp means this cache field is not authoritative.
+	if (kickoffTime !== null && toIso(kickoffTime) === null) {
+		return null;
+	}
 
 	return {
 		id: Math.trunc(id),
@@ -168,16 +167,14 @@ const mapSyncJobFixture = (raw: unknown): Fixture | null => {
 		teamAId: Math.trunc(teamA),
 		teamHScore: teamHScore !== null ? Math.trunc(teamHScore) : null,
 		teamAScore: teamAScore !== null ? Math.trunc(teamAScore) : null,
-		teamHDifficulty:
-			teamHDifficulty !== null ? Math.trunc(teamHDifficulty) : null,
-		teamADifficulty:
-			teamADifficulty !== null ? Math.trunc(teamADifficulty) : null,
+		teamHDifficulty: teamHDifficulty !== null ? Math.trunc(teamHDifficulty) : null,
+		teamADifficulty: teamADifficulty !== null ? Math.trunc(teamADifficulty) : null,
 	};
 };
 
 const loadEventFixturesFromRedis = async (
 	context: GraphQLContext,
-	eventId: number,
+	eventId: number
 ): Promise<Fixture[] | null> => {
 	const season = await getCurrentSeason(context);
 	const hashKey = `Fixtures:${season}:${eventId}`;
@@ -186,10 +183,7 @@ const loadEventFixturesFromRedis = async (
 	try {
 		hashEntries = await context.redis.hgetall(hashKey);
 	} catch (error) {
-		context.logger.warn(
-			{ err: error, hashKey },
-			"Failed to read Fixtures hash from Redis",
-		);
+		context.logger.warn({ err: error, hashKey }, "Failed to read Fixtures hash from Redis");
 		return null;
 	}
 
@@ -199,12 +193,20 @@ const loadEventFixturesFromRedis = async (
 	}
 
 	const fixtures: Fixture[] = [];
+	let malformed = false;
 	for (const fieldValue of fields) {
 		const parsed = parseJsonUnknown(fieldValue);
 		const fixture = mapSyncJobFixture(parsed);
 		if (fixture) {
 			fixtures.push(fixture);
+		} else {
+			malformed = true;
 		}
+	}
+	if (malformed) {
+		metrics.cacheRepositoryEvents.labels("fixtures", "malformed").inc();
+		context.logger.warn({ hashKey }, "Malformed Fixtures cache; falling back to database");
+		return null;
 	}
 
 	fixtures.sort((a, b) => {
@@ -225,12 +227,9 @@ interface FixturesRepository {
 		context: GraphQLContext,
 		filter: FixturesFilter | null | undefined,
 		limit: number,
-		offset: number,
+		offset: number
 	): Promise<Fixture[]>;
-	getEventFixtures(
-		context: GraphQLContext,
-		eventId: number,
-	): Promise<Fixture[]>;
+	getEventFixtures(context: GraphQLContext, eventId: number): Promise<Fixture[]>;
 	getCurrentFixtures(context: GraphQLContext): Promise<Fixture[]>;
 }
 
@@ -239,7 +238,7 @@ export const fixturesRepository: FixturesRepository = {
 		context: GraphQLContext,
 		filter: FixturesFilter | null | undefined,
 		limit: number,
-		offset: number,
+		offset: number
 	): Promise<Fixture[]> {
 		const normalizedFilter = normalizeFilter(filter);
 		const safeLimit = clampLimit(limit);
@@ -258,7 +257,7 @@ export const fixturesRepository: FixturesRepository = {
 		}
 		if (normalizedFilter?.teamId !== undefined) {
 			query = query.or(
-				`team_h_id.eq.${normalizedFilter.teamId},team_a_id.eq.${normalizedFilter.teamId}`,
+				`team_h_id.eq.${normalizedFilter.teamId},team_a_id.eq.${normalizedFilter.teamId}`
 			);
 		}
 
@@ -267,28 +266,24 @@ export const fixturesRepository: FixturesRepository = {
 			.range(safeOffset, safeOffset + safeLimit - 1);
 
 		if (error) {
-			context.logger.error(
-				{ err: error, filter: normalizedFilter },
-				"Failed to fetch fixtures",
-			);
+			context.logger.error({ err: error, filter: normalizedFilter }, "Failed to fetch fixtures");
 			throw new Error("Failed to fetch fixtures");
 		}
 
 		return (data as DbFixtureRow[] | null)?.map(mapFixture) ?? [];
 	},
 
-	async getEventFixtures(
-		context: GraphQLContext,
-		eventId: number,
-	): Promise<Fixture[]> {
+	async getEventFixtures(context: GraphQLContext, eventId: number): Promise<Fixture[]> {
 		if (!Number.isFinite(eventId) || eventId <= 0) {
 			return [];
 		}
 
 		const fromRedis = await loadEventFixturesFromRedis(context, eventId);
 		if (fromRedis) {
+			metrics.cacheRepositoryEvents.labels("fixtures", "redis").inc();
 			return fromRedis;
 		}
+		metrics.cacheRepositoryEvents.labels("fixtures", "database_fallback").inc();
 
 		const { data, error } = await context.supabase
 			.from("event_fixtures")
@@ -297,10 +292,7 @@ export const fixturesRepository: FixturesRepository = {
 			.order("kickoff_time", { ascending: true });
 
 		if (error) {
-			context.logger.error(
-				{ err: error, eventId },
-				"Failed to fetch event fixtures",
-			);
+			context.logger.error({ err: error, eventId }, "Failed to fetch event fixtures");
 			throw new Error("Failed to fetch event fixtures");
 		}
 

@@ -2,8 +2,8 @@ import { Pool } from "pg";
 import { env } from "./env";
 
 /**
- * Shared PostgreSQL pool for Better Auth, device auth, WeChat sessions,
- * and resolver queries. Prefer this over creating per-module pools.
+ * Shared PostgreSQL pool for token validation and resolver queries.
+ * Authentication tables are owned and migrated by letletme-web.
  */
 export const dbPool = new Pool({
 	connectionString: env.DATABASE_URL,

@@ -39,16 +39,12 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 
 		if (fromDateFilter !== null) {
 			const fromDate = fromDateFilter;
-			filtered = filtered.filter(
-				(row) => row.change_date.localeCompare(fromDate) >= 0,
-			);
+			filtered = filtered.filter((row) => row.change_date.localeCompare(fromDate) >= 0);
 		}
 
 		if (toDateFilter !== null) {
 			const toDate = toDateFilter;
-			filtered = filtered.filter(
-				(row) => row.change_date.localeCompare(toDate) <= 0,
-			);
+			filtered = filtered.filter((row) => row.change_date.localeCompare(toDate) <= 0);
 		}
 
 		filtered.sort((left, right) => {
@@ -104,7 +100,7 @@ function createGraphQLContext(rows: HistoryRow[]): GraphQLContext {
 
 	const redis = {
 		type: async (): Promise<string> => "none",
-		get: async (): Promise<string | null> => null,
+		get: async (key: string): Promise<string | null> => (key === "Season:active" ? "2526" : null),
 		set: async (): Promise<string> => "OK",
 		hgetall: async (): Promise<Record<string, string>> => ({}),
 		keys: async (): Promise<string[]> => [],
@@ -256,15 +252,15 @@ describe("playerValueHistory integration", () => {
 
 		expect(data).not.toBeNull();
 		expect(data?.playerValueHistory).toHaveLength(3);
-		expect(
-			new Date(data?.playerValueHistory[0].changeDate ?? "").toISOString(),
-		).toBe("2026-04-03T00:00:00.000Z");
-		expect(
-			new Date(data?.playerValueHistory[1].changeDate ?? "").toISOString(),
-		).toBe("2026-04-02T00:00:00.000Z");
-		expect(
-			new Date(data?.playerValueHistory[2].changeDate ?? "").toISOString(),
-		).toBe("2026-04-01T00:00:00.000Z");
+		expect(new Date(data?.playerValueHistory[0].changeDate ?? "").toISOString()).toBe(
+			"2026-04-03T00:00:00.000Z"
+		);
+		expect(new Date(data?.playerValueHistory[1].changeDate ?? "").toISOString()).toBe(
+			"2026-04-02T00:00:00.000Z"
+		);
+		expect(new Date(data?.playerValueHistory[2].changeDate ?? "").toISOString()).toBe(
+			"2026-04-01T00:00:00.000Z"
+		);
 	});
 
 	it("returns null transfer fields because player_values does not store them", async () => {

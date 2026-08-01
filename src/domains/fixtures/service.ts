@@ -7,15 +7,12 @@ export const fixturesService = {
 		context: GraphQLContext,
 		filter: FixturesFilter | null | undefined,
 		limit: number,
-		offset: number,
+		offset: number
 	): Promise<Fixture[]> {
 		return fixturesRepository.listFixtures(context, filter, limit, offset);
 	},
 
-	getEventFixtures(
-		context: GraphQLContext,
-		eventId: number,
-	): Promise<Fixture[]> {
+	getEventFixtures(context: GraphQLContext, eventId: number): Promise<Fixture[]> {
 		return fixturesRepository.getEventFixtures(context, eventId);
 	},
 

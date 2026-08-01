@@ -4,7 +4,7 @@ import type { Player } from "./types";
 
 export async function buildPlayerMap(
 	context: GraphQLContext,
-	playerIds: number[],
+	playerIds: number[]
 ): Promise<Map<number, Player>> {
 	const result = new Map<number, Player>();
 	if (playerIds.length === 0) return result;
@@ -33,12 +33,13 @@ export async function buildPlayerMap(
 		if (missingIds.length > 0) {
 			const { data, error } = await context.supabase
 				.from("players")
-				.select(
-					"id, web_name, first_name, second_name, team_id, type, code, price, start_price",
-				)
+				.select("id, web_name, first_name, second_name, team_id, type, code, price, start_price")
 				.in("id", missingIds);
 
-			if (!error && data) {
+			if (error) {
+				throw new Error("Failed to fetch players", { cause: error });
+			}
+			if (data) {
 				for (const row of data as Record<string, unknown>[]) {
 					const player = parsePlayerFromDb(row);
 					result.set(player.id, player);
@@ -50,18 +51,19 @@ export async function buildPlayerMap(
 	} catch (err) {
 		context.logger.warn(
 			{ err, hashKey },
-			"Failed to read Player hash from Redis, falling back to DB",
+			"Failed to read Player hash from Redis, falling back to DB"
 		);
 	}
 
 	const { data, error } = await context.supabase
 		.from("players")
-		.select(
-			"id, web_name, first_name, second_name, team_id, type, code, price, start_price",
-		)
+		.select("id, web_name, first_name, second_name, team_id, type, code, price, start_price")
 		.in("id", playerIds);
 
-	if (!error && data) {
+	if (error) {
+		throw new Error("Failed to fetch players", { cause: error });
+	}
+	if (data) {
 		for (const row of data as Record<string, unknown>[]) {
 			const player = parsePlayerFromDb(row);
 			result.set(player.id, player);
@@ -70,9 +72,7 @@ export async function buildPlayerMap(
 	return result;
 }
 
-const asNullableNumber = (
-	value: number | string | null | undefined,
-): number | null => {
+const asNullableNumber = (value: number | string | null | undefined): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) {
 		return value;
 	}
@@ -104,11 +104,7 @@ function parsePlayer(parsed: Record<string, unknown>, id: number): Player {
 		startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
 		totalPoints: Number(parsed.totalPoints ?? 0),
 		selectedByPercent: asNullableNumber(
-			(parsed.selectedByPercent ?? parsed.selected_by_percent) as
-				| number
-				| string
-				| null
-				| undefined,
+			(parsed.selectedByPercent ?? parsed.selected_by_percent) as number | string | null | undefined
 		),
 	};
 }

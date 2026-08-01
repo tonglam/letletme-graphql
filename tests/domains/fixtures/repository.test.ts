@@ -78,7 +78,7 @@ describe("fixturesRepository.getEventFixtures", () => {
 				"Fixtures:2526:33": { "328": fixtureJson },
 			},
 			redisData: {
-				"season:current": "2526",
+				"Season:active": "2526",
 			},
 		});
 
@@ -117,7 +117,7 @@ describe("fixturesRepository.getEventFixtures", () => {
 				"Fixtures:2526:5": { "100": fixtureJson },
 			},
 			redisData: {
-				"season:current": "2526",
+				"Season:active": "2526",
 			},
 		});
 
@@ -134,7 +134,7 @@ describe("fixturesRepository.getEventFixtures", () => {
 	it("returns empty array when Redis hash is missing and DB returns empty", async () => {
 		const context = buildContext({
 			redisData: {
-				"season:current": "2526",
+				"Season:active": "2526",
 			},
 		});
 
@@ -142,7 +142,7 @@ describe("fixturesRepository.getEventFixtures", () => {
 		expect(result).toEqual([]);
 	});
 
-	it("skips invalid rows in Redis hash", async () => {
+	it("falls back to the database when any Redis fixture is malformed", async () => {
 		const validFixture = JSON.stringify({
 			id: 328,
 			code: 2562222,
@@ -161,12 +161,30 @@ describe("fixturesRepository.getEventFixtures", () => {
 				"Fixtures:2526:33": { "328": validFixture, "999": invalidJson },
 			},
 			redisData: {
-				"season:current": "2526",
+				"Season:active": "2526",
 			},
+			supabaseData: [
+				{
+					id: 329,
+					code: 2562223,
+					event_id: 33,
+					finished: true,
+					finished_provisional: true,
+					kickoff_time: "2026-04-18T16:30:00.000Z",
+					minutes: 90,
+					started: true,
+					team_h_id: 8,
+					team_a_id: 12,
+					team_h_score: 2,
+					team_a_score: 0,
+					team_h_difficulty: 2,
+					team_a_difficulty: 4,
+				},
+			],
 		});
 
 		const result = await fixturesRepository.getEventFixtures(context, 33);
 		expect(result).toHaveLength(1);
-		expect(result[0].id).toBe(328);
+		expect(result[0].id).toBe(329);
 	});
 });

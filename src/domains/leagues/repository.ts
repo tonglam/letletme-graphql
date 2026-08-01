@@ -1,6 +1,51 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { gqlCacheKey } from "../../infra/cache-key";
 import { env } from "../../infra/env";
+import { getCurrentSeason } from "../../infra/season";
 import { stableStringify } from "../../infra/stringify";
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const readJsonCache = async <T>(
+	context: GraphQLContext,
+	key: string,
+	validate: (value: unknown) => value is T
+): Promise<T | null> => {
+	let cached: string | null;
+	try {
+		cached = await context.redis.get(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to read leagues cache");
+		return null;
+	}
+	if (cached === null) return null;
+	try {
+		const parsed: unknown = JSON.parse(cached);
+		if (validate(parsed)) return parsed;
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Malformed leagues cache");
+	}
+	try {
+		await context.redis.del(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to evict malformed leagues cache");
+	}
+	return null;
+};
+
+const isLeagueArray = (value: unknown): value is League[] =>
+	Array.isArray(value) && value.every((item) => isRecord(item) && Number.isFinite(Number(item.id)));
+
+const isLeagueEventResultArray = (value: unknown): value is LeagueEventResult[] =>
+	Array.isArray(value) &&
+	value.every(
+		(item) =>
+			isRecord(item) &&
+			Number.isFinite(Number(item.eventId)) &&
+			Number.isFinite(Number(item.entryId)) &&
+			isRecord(item.league)
+	);
 
 export enum LeagueType {
 	CLASSIC = "classic",
@@ -83,7 +128,7 @@ const mapLeagueType = (type: string): LeagueType => {
 
 const mapLeague = (
 	row: DbEntryLeagueRow,
-	tournament?: DbTournamentEnrichmentRow | null,
+	tournament?: DbTournamentEnrichmentRow | null
 ): League => ({
 	id: row.league_id,
 	name: row.league_name,
@@ -106,10 +151,7 @@ const mapLeague = (
 	state: tournament?.state ?? null,
 });
 
-const mapLeagueEventResult = (
-	row: DbLeagueEventResultRow,
-	league: League,
-): LeagueEventResult => ({
+const mapLeagueEventResult = (row: DbLeagueEventResultRow, league: League): LeagueEventResult => ({
 	league,
 	eventId: row.event_id,
 	entryId: row.entry_id,
@@ -123,19 +165,17 @@ const mapLeagueEventResult = (
 
 const fetchTournamentEnrichments = async (
 	context: GraphQLContext,
-	leagueKeys: string[],
+	leagueKeys: string[]
 ): Promise<Map<string, DbTournamentEnrichmentRow>> => {
 	const tournamentMap = new Map<string, DbTournamentEnrichmentRow>();
 	if (leagueKeys.length === 0) return tournamentMap;
 
-	const leagueIds = [
-		...new Set(leagueKeys.map((k) => parseInt(k.split(":")[0], 10))),
-	];
+	const leagueIds = [...new Set(leagueKeys.map((k) => parseInt(k.split(":")[0], 10)))];
 
 	const { data: tData } = await context.supabase
 		.from("tournament_infos")
 		.select(
-			"id, name, admin_entry_id, league_id, league_type, total_team_num, tournament_mode, group_mode, state, created_at",
+			"id, name, admin_entry_id, league_id, league_type, total_team_num, tournament_mode, group_mode, state, created_at"
 		)
 		.in("league_id", leagueIds);
 
@@ -154,13 +194,13 @@ const fetchTournamentEnrichments = async (
 const buildLeagueFromInfo = async (
 	context: GraphQLContext,
 	leagueId: number,
-	leagueType: string,
+	leagueType: string
 ): Promise<League> => {
 	const [lResult, tResult] = await Promise.all([
 		context.supabase
 			.from("entry_league_infos")
 			.select(
-				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event",
+				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event"
 			)
 			.eq("league_id", leagueId)
 			.eq("league_type", leagueType)
@@ -169,7 +209,7 @@ const buildLeagueFromInfo = async (
 		context.supabase
 			.from("tournament_infos")
 			.select(
-				"id, name, admin_entry_id, league_id, league_type, total_team_num, tournament_mode, group_mode, state, created_at",
+				"id, name, admin_entry_id, league_id, league_type, total_team_num, tournament_mode, group_mode, state, created_at"
 			)
 			.eq("league_id", leagueId)
 			.eq("league_type", leagueType)
@@ -212,42 +252,33 @@ interface LeaguesRepository {
 	getLeagueEventResults(
 		context: GraphQLContext,
 		leagueId: number,
-		eventId: number,
+		eventId: number
 	): Promise<LeagueEventResult[]>;
 }
 
 export const leaguesRepository: LeaguesRepository = {
-	async getEntryLeagues(
-		context: GraphQLContext,
-		entryId: number,
-	): Promise<League[]> {
-		const cacheKey = `leagues:entry:v2:${entryId}`;
-		const cached = await context.redis.get(cacheKey);
-		if (cached) {
-			return JSON.parse(cached) as League[];
-		}
+	async getEntryLeagues(context: GraphQLContext, entryId: number): Promise<League[]> {
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `leagues:entry:${entryId}`);
+		const cached = await readJsonCache(context, cacheKey, isLeagueArray);
+		if (cached) return cached;
 
 		const { data, error } = await context.supabase
 			.from("entry_league_infos")
 			.select(
-				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event",
+				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event"
 			)
 			.eq("entry_id", entryId)
 			.order("league_id", { ascending: true });
 
 		if (error) {
-			context.logger.error(
-				{ err: error, entryId },
-				"Failed to fetch entry leagues",
-			);
+			context.logger.error({ err: error, entryId }, "Failed to fetch entry leagues");
 			throw new Error("Failed to fetch entry leagues");
 		}
 
 		const rows = (data as DbEntryLeagueRow[] | null) ?? [];
 
-		const leagueKeys = [
-			...new Set(rows.map((r) => `${r.league_id}:${r.league_type}`)),
-		];
+		const leagueKeys = [...new Set(rows.map((r) => `${r.league_id}:${r.league_type}`))];
 		const tournamentMap = await fetchTournamentEnrichments(context, leagueKeys);
 
 		const leagues = rows.map((row) => {
@@ -256,30 +287,27 @@ export const leaguesRepository: LeaguesRepository = {
 			return mapLeague(row, tournament);
 		});
 
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(leagues),
-			"EX",
-			env.CACHE_TTL_SECONDS,
-		);
+		await context.redis.set(cacheKey, JSON.stringify(leagues), "EX", env.CACHE_TTL_SECONDS);
 		return leagues;
 	},
 
 	async getLeagueEventResults(
 		context: GraphQLContext,
 		leagueId: number,
-		eventId: number,
+		eventId: number
 	): Promise<LeagueEventResult[]> {
-		const cacheKey = `leagues:results:v2:${stableStringify({ leagueId, eventId })}`;
-		const cached = await context.redis.get(cacheKey);
-		if (cached) {
-			return JSON.parse(cached) as LeagueEventResult[];
-		}
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(
+			season,
+			`leagues:results:${stableStringify({ leagueId, eventId })}`
+		);
+		const cached = await readJsonCache(context, cacheKey, isLeagueEventResultArray);
+		if (cached) return cached;
 
 		const { data, error } = await context.supabase
 			.from("league_event_results")
 			.select(
-				"league_id, league_type, event_id, entry_id, entry_name, player_name, event_points, event_rank, overall_points, overall_rank",
+				"league_id, league_type, event_id, entry_id, entry_name, player_name, event_points, event_rank, overall_points, overall_rank"
 			)
 			.eq("league_id", leagueId)
 			.eq("event_id", eventId)
@@ -288,7 +316,7 @@ export const leaguesRepository: LeaguesRepository = {
 		if (error) {
 			context.logger.error(
 				{ err: error, leagueId, eventId },
-				"Failed to fetch league event results",
+				"Failed to fetch league event results"
 			);
 			throw new Error("Failed to fetch league event results");
 		}
@@ -303,12 +331,7 @@ export const leaguesRepository: LeaguesRepository = {
 
 		const results = rows.map((row) => mapLeagueEventResult(row, league));
 
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(results),
-			"EX",
-			env.CACHE_TTL_SECONDS,
-		);
+		await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
 		return results;
 	},
 };

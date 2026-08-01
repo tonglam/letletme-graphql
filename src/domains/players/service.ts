@@ -16,7 +16,7 @@ export const playersService = {
 	getPlayerByIdForEvent(
 		context: GraphQLContext,
 		id: number,
-		eventId: number,
+		eventId: number
 	): Promise<Player | null> {
 		return playersRepository.getPlayerByIdForEvent(context, id, eventId);
 	},
@@ -28,7 +28,7 @@ export const playersService = {
 	getPlayersByIdsForEvent(
 		context: GraphQLContext,
 		ids: number[],
-		eventId: number,
+		eventId: number
 	): Promise<Map<number, Player>> {
 		return playersRepository.getPlayersByIdsForEvent(context, ids, eventId);
 	},
@@ -37,7 +37,7 @@ export const playersService = {
 		context: GraphQLContext,
 		filter: PlayersFilter | null | undefined,
 		limit: number,
-		offset: number,
+		offset: number
 	): Promise<Player[]> {
 		return playersRepository.listPlayers(context, filter, limit, offset);
 	},
@@ -45,7 +45,7 @@ export const playersService = {
 	getPlayersForPicker(
 		context: GraphQLContext,
 		limit: number,
-		cursor: number | null | undefined,
+		cursor: number | null | undefined
 	): Promise<PlayersForPickerPayload> {
 		return playersRepository.getPlayersForPicker(context, limit, cursor);
 	},
@@ -61,7 +61,7 @@ export const playersService = {
 	getTopTransfersInEnriched(
 		context: GraphQLContext,
 		eventId: number,
-		limit: number,
+		limit: number
 	): Promise<TopTransfersEnriched> {
 		return playersRepository.getTopTransfersInEnriched(context, eventId, limit);
 	},
@@ -69,12 +69,8 @@ export const playersService = {
 	getTopTransfersOutEnriched(
 		context: GraphQLContext,
 		eventId: number,
-		limit: number,
+		limit: number
 	): Promise<TopTransfersEnriched> {
-		return playersRepository.getTopTransfersOutEnriched(
-			context,
-			eventId,
-			limit,
-		);
+		return playersRepository.getTopTransfersOutEnriched(context, eventId, limit);
 	},
 };

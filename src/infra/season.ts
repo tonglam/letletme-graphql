@@ -1,11 +1,11 @@
+import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../graphql/context";
 
-const SEASON_CURRENT_KEY = "season:current";
-const DEFAULT_SEASON = "2526";
+export const ACTIVE_SEASON_KEY = "Season:active";
 
 const seasonMemo = new WeakMap<GraphQLContext, string>();
 
-const parseSeason = (value: string | null): string | null => {
+export const parseSeason = (value: string | null): string | null => {
 	if (!value) {
 		return null;
 	}
@@ -13,17 +13,36 @@ const parseSeason = (value: string | null): string | null => {
 	return /^\d{4}$/.test(trimmed) ? trimmed : null;
 };
 
-export const getCurrentSeason = async (
-	context: GraphQLContext,
-): Promise<string> => {
+export const getCurrentSeason = async (context: GraphQLContext): Promise<string> => {
 	const cached = seasonMemo.get(context);
 	if (cached) {
 		return cached;
 	}
 
-	const raw = await context.redis.get(SEASON_CURRENT_KEY);
+	let raw: string | null;
+	try {
+		raw = await context.redis.get(ACTIVE_SEASON_KEY);
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, key: ACTIVE_SEASON_KEY },
+			"Failed to read current season metadata"
+		);
+		throw new GraphQLError("Current season metadata is unavailable", {
+			extensions: {
+				code: "CACHE_METADATA_UNAVAILABLE",
+				http: { status: 503 },
+			},
+		});
+	}
 	const parsed = parseSeason(raw);
-	const season = parsed ?? DEFAULT_SEASON;
-	seasonMemo.set(context, season);
-	return season;
+	if (!parsed) {
+		throw new GraphQLError("Current season metadata is unavailable", {
+			extensions: {
+				code: "CACHE_METADATA_UNAVAILABLE",
+				http: { status: 503 },
+			},
+		});
+	}
+	seasonMemo.set(context, parsed);
+	return parsed;
 };

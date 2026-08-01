@@ -9,11 +9,8 @@ export const eventsService = {
 		context: GraphQLContext,
 		filter: EventsFilter | null | undefined,
 		limit: number,
-		offset: number,
-	): Promise<Event[]> =>
-		eventsRepository.listEvents(context, filter, limit, offset),
-	getCurrentEventInfo: (
-		context: GraphQLContext,
-	): Promise<CurrentEventInfo | null> =>
+		offset: number
+	): Promise<Event[]> => eventsRepository.listEvents(context, filter, limit, offset),
+	getCurrentEventInfo: (context: GraphQLContext): Promise<CurrentEventInfo | null> =>
 		eventsRepository.getCurrentEventInfo(context),
 };

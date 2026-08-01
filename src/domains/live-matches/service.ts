@@ -5,10 +5,7 @@ import { buildPlayerMap } from "../../infra/player-map";
 import { getCurrentSeason } from "../../infra/season";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player, Team } from "../../infra/types";
-import {
-	calcElementLivePoints,
-	type ElementEventResultData,
-} from "../entry-live/calc-service";
+import { calcElementLivePoints, type ElementEventResultData } from "../entry-live/calc-service";
 import type { Fixture } from "../fixtures/repository";
 import { fixturesRepository } from "../fixtures/repository";
 import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
@@ -43,7 +40,17 @@ export type LiveMatches = {
 
 type MatchBucketStatus = Exclude<LiveMatchData["playStatus"], "NEXT_EVENT">;
 
+export const resolveLiveMatchStatus = (
+	fixture: Pick<Fixture, "id" | "teamHId" | "teamAId" | "finished" | "started">,
+	statusByFixtureId: ReadonlyMap<number, MatchBucketStatus>,
+	statusByPair: ReadonlyMap<string, MatchBucketStatus>
+): MatchBucketStatus =>
+	statusByFixtureId.get(fixture.id) ??
+	statusByPair.get(`${fixture.teamHId}:${fixture.teamAId}`) ??
+	(fixture.finished ? "FINISHED" : fixture.started ? "PLAYING" : "NOT_STARTED");
+
 type LiveFixtureRedisRow = {
+	fixtureId: number | null;
 	teamId: number;
 	teamName: string;
 	teamShortName: string;
@@ -61,6 +68,18 @@ type MatchBucketsFromRedis = {
 	playing: LiveFixtureRedisRow[];
 	finished: LiveFixtureRedisRow[];
 };
+
+export const applyLiveFixtureScores = (
+	fixture: Fixture,
+	liveFixture: Pick<LiveFixtureRedisRow, "teamScore" | "againstTeamScore"> | null
+): Fixture =>
+	liveFixture
+		? {
+				...fixture,
+				teamHScore: liveFixture.teamScore,
+				teamAScore: liveFixture.againstTeamScore,
+			}
+		: fixture;
 
 const asRecord = (value: unknown): Record<string, unknown> | null => {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -104,8 +123,7 @@ const asBoolean = (value: unknown): boolean | null => {
 	return null;
 };
 
-const asString = (value: unknown): string | null =>
-	typeof value === "string" ? value : null;
+const asString = (value: unknown): string | null => (typeof value === "string" ? value : null);
 
 const parseJsonUnknown = (value: string): unknown | null => {
 	try {
@@ -115,9 +133,7 @@ const parseJsonUnknown = (value: string): unknown | null => {
 	}
 };
 
-const normalizeLiveFixtureStatus = (
-	rawStatus: string,
-): MatchBucketStatus | null => {
+const normalizeLiveFixtureStatus = (rawStatus: string): MatchBucketStatus | null => {
 	const normalized = rawStatus
 		.trim()
 		.toUpperCase()
@@ -146,18 +162,18 @@ const parseLiveFixtureRow = (value: unknown): LiveFixtureRedisRow | null => {
 		return null;
 	}
 
+	const fixtureId = asNumber(row.fixtureId ?? row.fixture_id ?? row.fixture ?? row.id);
+
 	return {
+		fixtureId: fixtureId === null ? null : Math.trunc(fixtureId),
 		teamId: Math.trunc(teamId),
 		teamName: asString(row.teamName ?? row.team_name) ?? "",
 		teamShortName: asString(row.teamShortName ?? row.team_short_name) ?? "",
 		teamScore: Math.trunc(asNumber(row.teamScore ?? row.team_score) ?? 0),
 		againstId: Math.trunc(againstId),
 		againstName: asString(row.againstName ?? row.against_name) ?? "",
-		againstShortName:
-			asString(row.againstShortName ?? row.against_short_name) ?? "",
-		againstTeamScore: Math.trunc(
-			asNumber(row.againstTeamScore ?? row.against_team_score) ?? 0,
-		),
+		againstShortName: asString(row.againstShortName ?? row.against_short_name) ?? "",
+		againstTeamScore: Math.trunc(asNumber(row.againstTeamScore ?? row.against_team_score) ?? 0),
 		kickoffTime: asString(row.kickoffTime ?? row.kickoff_time),
 		wasHome: asBoolean(row.wasHome ?? row.was_home) ?? false,
 	};
@@ -181,9 +197,7 @@ const parseLiveFixtureList = (value: unknown): LiveFixtureRedisRow[] => {
 		.filter((row): row is LiveFixtureRedisRow => row !== null);
 };
 
-const parseLiveFixtureHashFieldValue = (
-	value: string,
-): MatchBucketsFromRedis => {
+const parseLiveFixtureHashFieldValue = (value: string): MatchBucketsFromRedis => {
 	const parsed = parseJsonUnknown(value);
 	const statusMap = asRecord(parsed);
 	const buckets: MatchBucketsFromRedis = {
@@ -218,7 +232,7 @@ const parseLiveFixtureHashFieldValue = (
 
 const mergeMatchBuckets = (
 	target: MatchBucketsFromRedis,
-	source: MatchBucketsFromRedis,
+	source: MatchBucketsFromRedis
 ): MatchBucketsFromRedis => ({
 	notStarted: [...target.notStarted, ...source.notStarted],
 	playing: [...target.playing, ...source.playing],
@@ -227,28 +241,29 @@ const mergeMatchBuckets = (
 
 const loadLiveFixtureBucketsFromRedis = async (
 	context: GraphQLContext,
-	eventId: number,
+	eventId: number
 ): Promise<MatchBucketsFromRedis | null> => {
 	const season = await getCurrentSeason(context);
 	const redisKey = `LiveFixture:${season}:${eventId}`;
 
-	const hashEntries = await context.redis.hgetall(redisKey);
+	let hashEntries: Record<string, string>;
+	try {
+		hashEntries = await context.redis.hgetall(redisKey);
+	} catch (error) {
+		context.logger.warn({ err: error, redisKey }, "Failed to read live fixtures from Redis");
+		return null;
+	}
 	const fields = Object.values(hashEntries);
 	if (fields.length === 0) {
 		return null;
 	}
 
 	const buckets = fields.reduce<MatchBucketsFromRedis>(
-		(acc, fieldValue) =>
-			mergeMatchBuckets(acc, parseLiveFixtureHashFieldValue(fieldValue)),
-		{ notStarted: [], playing: [], finished: [] },
+		(acc, fieldValue) => mergeMatchBuckets(acc, parseLiveFixtureHashFieldValue(fieldValue)),
+		{ notStarted: [], playing: [], finished: [] }
 	);
 
-	if (
-		buckets.notStarted.length > 0 ||
-		buckets.playing.length > 0 ||
-		buckets.finished.length > 0
-	) {
+	if (buckets.notStarted.length > 0 || buckets.playing.length > 0 || buckets.finished.length > 0) {
 		return buckets;
 	}
 
@@ -279,7 +294,7 @@ const buildTeamDataMap = (
 	livePerformances: LivePerformance[],
 	playersById: Map<number, Player>,
 	teamsById: Map<number, Team>,
-	bonusByPlayerId: Map<number, number>,
+	bonusByPlayerId: Map<number, number>
 ): Map<number, ElementEventResultData[]> => {
 	const teamDataMap = new Map<number, ElementEventResultData[]>();
 
@@ -296,8 +311,7 @@ const buildTeamDataMap = (
 
 		const team = teamsById.get(player.teamId);
 		const bonus = bonusByPlayerId.get(perf.playerId) ?? perf.bonus ?? 0;
-		const perfWithLiveBonus: LivePerformance = { ...perf, bonus };
-		const totalPoints = calcElementLivePoints(player.position, perfWithLiveBonus);
+		const totalPoints = calcElementLivePoints(player.position, perf, bonus);
 		const defensiveContribution: number = perf.defensiveContribution ?? 0;
 
 		const elementData: ElementEventResultData = {
@@ -342,12 +356,8 @@ const buildTeamDataMap = (
 			bps: perf.bps ?? 0,
 			totalPoints,
 			starts: perf.starts ?? null,
-			expectedGoals: perf.expectedGoals
-				? Number.parseFloat(perf.expectedGoals)
-				: null,
-			expectedAssists: perf.expectedAssists
-				? Number.parseFloat(perf.expectedAssists)
-				: null,
+			expectedGoals: perf.expectedGoals ? Number.parseFloat(perf.expectedGoals) : null,
+			expectedAssists: perf.expectedAssists ? Number.parseFloat(perf.expectedAssists) : null,
 			expectedGoalInvolvements: perf.expectedGoalInvolvements
 				? Number.parseFloat(perf.expectedGoalInvolvements)
 				: null,
@@ -371,7 +381,7 @@ const buildTeamDataMap = (
 	for (const [teamId, data] of teamDataMap.entries()) {
 		teamDataMap.set(
 			teamId,
-			data.sort((a, b) => b.totalPoints - a.totalPoints),
+			data.sort((a, b) => b.totalPoints - a.totalPoints)
 		);
 	}
 
@@ -396,7 +406,7 @@ const buildMatch = (
 	matchId: number,
 	playStatus: "NEXT_EVENT" | "NOT_STARTED" | "PLAYING" | "FINISHED",
 	teamDataMap: Map<number, ElementEventResultData[]>,
-	teamsById: Map<number, Team>,
+	teamsById: Map<number, Team>
 ): LiveMatchData => {
 	const homeTeam = teamsById.get(fixture.teamHId);
 	const awayTeam = teamsById.get(fixture.teamAId);
@@ -410,10 +420,7 @@ const buildMatch = (
 	const minutes =
 		playStatus === "NEXT_EVENT"
 			? 0
-			: Math.max(
-					getMaxMinutes(homeTeamDataList),
-					getMaxMinutes(awayTeamDataList),
-				);
+			: Math.max(getMaxMinutes(homeTeamDataList), getMaxMinutes(awayTeamDataList));
 
 	return {
 		matchId,
@@ -429,42 +436,6 @@ const buildMatch = (
 		awayTeamShortName: awayTeam?.shortName ?? "",
 		awayPosition: awayTeam?.position ?? 0,
 		awayScore: fixture.teamAScore ?? 0,
-		awayTeamDataList,
-		kickoffTime: fixture.kickoffTime,
-		playStatus,
-	};
-};
-
-const buildMatchFromRedis = (
-	fixture: LiveFixtureRedisRow,
-	matchId: number,
-	playStatus: MatchBucketStatus,
-	teamDataMap: Map<number, ElementEventResultData[]>,
-	teamsById: Map<number, Team>,
-): LiveMatchData => {
-	const homeTeam = teamsById.get(fixture.teamId);
-	const awayTeam = teamsById.get(fixture.againstId);
-	const homeTeamDataList = teamDataMap.get(fixture.teamId) ?? [];
-	const awayTeamDataList = teamDataMap.get(fixture.againstId) ?? [];
-	const minutes = Math.max(
-		getMaxMinutes(homeTeamDataList),
-		getMaxMinutes(awayTeamDataList),
-	);
-
-	return {
-		matchId,
-		minutes,
-		homeTeamId: fixture.teamId,
-		homeTeamName: fixture.teamName || homeTeam?.name || "",
-		homeTeamShortName: fixture.teamShortName || homeTeam?.shortName || "",
-		homePosition: homeTeam?.position ?? 0,
-		homeScore: fixture.teamScore,
-		homeTeamDataList,
-		awayTeamId: fixture.againstId,
-		awayTeamName: fixture.againstName || awayTeam?.name || "",
-		awayTeamShortName: fixture.againstShortName || awayTeam?.shortName || "",
-		awayPosition: awayTeam?.position ?? 0,
-		awayScore: fixture.againstTeamScore,
 		awayTeamDataList,
 		kickoffTime: fixture.kickoffTime,
 		playStatus,
@@ -495,10 +466,7 @@ const sortByKickoffTime = (matches: LiveMatchData[]): LiveMatchData[] => {
 };
 
 export const liveMatchesService = {
-	async getAllLiveMatches(
-		context: GraphQLContext,
-		upcoming = false,
-	): Promise<LiveMatches> {
+	async getAllLiveMatches(context: GraphQLContext, upcoming = false): Promise<LiveMatches> {
 		const currentEventId = await getCurrentEventId(context);
 
 		if (!currentEventId) {
@@ -510,88 +478,79 @@ export const liveMatchesService = {
 			};
 		}
 
-		const [teamsById, redisBuckets] = await Promise.all([
+		const [teamsById, redisBuckets, currentFixtures] = await Promise.all([
 			buildTeamMap(context),
 			loadLiveFixtureBucketsFromRedis(context, currentEventId),
+			fixturesRepository.getEventFixtures(context, currentEventId),
 		]);
 
-		let notStartedMatches: LiveMatchData[] = [];
-		let playingMatches: LiveMatchData[] = [];
-		let finishedMatches: LiveMatchData[] = [];
+		const notStartedMatches: LiveMatchData[] = [];
+		const playingMatches: LiveMatchData[] = [];
+		const finishedMatches: LiveMatchData[] = [];
 		let teamDataMap = new Map<number, ElementEventResultData[]>();
 
+		const statusByFixtureId = new Map<number, MatchBucketStatus>();
+		const statusByPair = new Map<string, MatchBucketStatus>();
+		const liveFixtureById = new Map<number, LiveFixtureRedisRow>();
+		const liveFixtureByPair = new Map<string, LiveFixtureRedisRow>();
 		if (redisBuckets) {
-			const needsLiveData =
-				redisBuckets.playing.length > 0 || redisBuckets.finished.length > 0;
-
-			if (needsLiveData) {
-				const livePerformancesMap = await liveRepository.getAllLivePerformances(
-					context,
-					currentEventId,
-				);
-				const livePerformances = Array.from(livePerformancesMap.values());
-
-				const relevantTeamIds = new Set<number>();
-				for (const fixture of [
-					...redisBuckets.playing,
-					...redisBuckets.finished,
-				]) {
-					relevantTeamIds.add(fixture.teamId);
-					relevantTeamIds.add(fixture.againstId);
-				}
-
-				const playerIds = new Set<number>();
-				for (const perf of livePerformances) {
-					if (perf.playerId) {
-						playerIds.add(perf.playerId);
+			for (const [status, fixtures] of [
+				["NOT_STARTED", redisBuckets.notStarted],
+				["PLAYING", redisBuckets.playing],
+				["FINISHED", redisBuckets.finished],
+			] as const) {
+				for (const fixture of fixtures) {
+					if (fixture.fixtureId !== null) {
+						statusByFixtureId.set(fixture.fixtureId, status);
+						liveFixtureById.set(fixture.fixtureId, fixture);
 					}
+					const pairKey = `${fixture.teamId}:${fixture.againstId}`;
+					statusByPair.set(pairKey, status);
+					liveFixtureByPair.set(pairKey, fixture);
 				}
-
-				const playersById =
-					playerIds.size > 0
-						? await buildPlayerMap(context, Array.from(playerIds))
-						: new Map<number, Player>();
-
-				const filteredPerformances = livePerformances.filter((p) => {
-					if (!p.playerId) return false;
-					const player = playersById.get(p.playerId);
-					return player && relevantTeamIds.has(player.teamId);
-				});
-
-				teamDataMap = buildTeamDataMap(
-					currentEventId,
-					filteredPerformances,
-					playersById,
-					teamsById,
-					await loadLiveBonusByPlayerId(context, currentEventId),
-				);
 			}
+		}
 
-			notStartedMatches = redisBuckets.notStarted.map((fixture, i) =>
-				buildMatchFromRedis(
-					fixture,
-					i + 1,
-					"NOT_STARTED",
-					teamDataMap,
-					teamsById,
-				),
+		const needsLiveData =
+			currentFixtures.some((fixture) => fixture.started || fixture.finished) ||
+			Boolean(redisBuckets?.playing.length || redisBuckets?.finished.length);
+		if (needsLiveData) {
+			const livePerformances = Array.from(
+				(await liveRepository.getAllLivePerformances(context, currentEventId)).values()
 			);
-			playingMatches = redisBuckets.playing.map((fixture, i) =>
-				buildMatchFromRedis(fixture, i + 1, "PLAYING", teamDataMap, teamsById),
-			);
-			finishedMatches = redisBuckets.finished.map((fixture, i) =>
-				buildMatchFromRedis(fixture, i + 1, "FINISHED", teamDataMap, teamsById),
+			const playerIds = livePerformances.map((performance) => performance.playerId);
+			const playersById =
+				playerIds.length > 0 ? await buildPlayerMap(context, playerIds) : new Map<number, Player>();
+			teamDataMap = buildTeamDataMap(
+				currentEventId,
+				livePerformances,
+				playersById,
+				teamsById,
+				await loadLiveBonusByPlayerId(context, currentEventId)
 			);
 		}
 
-		let nextEventMatches: LiveMatchData[] = [];
-		if (upcoming && currentEventId <= MAX_EVENT_ID) {
-			const nextFixtures = await fixturesRepository.getEventFixtures(
-				context,
-				currentEventId + 1,
+		for (const fixture of currentFixtures) {
+			const status = resolveLiveMatchStatus(fixture, statusByFixtureId, statusByPair);
+			const pairKey = `${fixture.teamHId}:${fixture.teamAId}`;
+			const liveFixture = liveFixtureById.get(fixture.id) ?? liveFixtureByPair.get(pairKey) ?? null;
+			const match = buildMatch(
+				applyLiveFixtureScores(fixture, liveFixture),
+				fixture.id,
+				status,
+				teamDataMap,
+				teamsById
 			);
-			nextEventMatches = nextFixtures.map((fixture, i) =>
-				buildMatch(fixture, i + 1, "NEXT_EVENT", teamDataMap, teamsById),
+			if (status === "FINISHED") finishedMatches.push(match);
+			else if (status === "PLAYING") playingMatches.push(match);
+			else notStartedMatches.push(match);
+		}
+
+		let nextEventMatches: LiveMatchData[] = [];
+		if (upcoming && currentEventId < MAX_EVENT_ID) {
+			const nextFixtures = await fixturesRepository.getEventFixtures(context, currentEventId + 1);
+			nextEventMatches = nextFixtures.map((fixture) =>
+				buildMatch(fixture, fixture.id, "NEXT_EVENT", teamDataMap, teamsById)
 			);
 		}
 
