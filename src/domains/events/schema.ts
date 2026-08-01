@@ -38,7 +38,8 @@ export const eventsTypeDefs = /* GraphQL */ `
 
 	type CurrentEventInfo {
 		season: String!
-		currentEvent: Int!
+		currentEvent: Int
+		nextEvent: Int
 		nextUtcDeadline: DateTime
 	}
 
