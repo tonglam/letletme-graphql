@@ -11,7 +11,7 @@ export const playersTypeDefs = /* GraphQL */ `
 		code: Int!
 		name: String!
 		shortName: String!
-		strength: Int!
+		strength: Int
 		position: Int!
 		points: Int!
 		played: Int!

@@ -17,7 +17,7 @@ export type Team = {
 	code: number;
 	name: string;
 	shortName: string;
-	strength: number;
+	strength: number | null;
 	position: number;
 	points: number;
 	played: number;

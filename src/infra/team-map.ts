@@ -46,13 +46,21 @@ export async function buildTeamMap(context: GraphQLContext): Promise<Map<number,
 export const buildTeamMapById = (teams: Team[]): Map<number, Team> =>
 	new Map(teams.map((team) => [team.id, team]));
 
+const parseNullableNumber = (value: unknown): number | null => {
+	if (value === null || value === undefined) {
+		return null;
+	}
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? parsed : null;
+};
+
 function parseTeam(parsed: Record<string, unknown>): Team {
 	return {
 		id: Number(parsed.id ?? 0),
 		code: Number(parsed.code ?? 0),
 		name: String(parsed.name ?? ""),
 		shortName: String(parsed.shortName ?? parsed.short_name ?? ""),
-		strength: Number(parsed.strength ?? 0),
+		strength: parseNullableNumber(parsed.strength),
 		position: Number(parsed.position ?? 0),
 		points: Number(parsed.points ?? 0),
 		played: Number(parsed.played ?? 0),
@@ -75,7 +83,7 @@ function parseTeamFromDb(row: Record<string, unknown>): Team {
 		code: Number(row.code ?? 0),
 		name: String(row.name ?? ""),
 		shortName: String(row.short_name ?? ""),
-		strength: Number(row.strength ?? 0),
+		strength: parseNullableNumber(row.strength),
 		position: Number(row.position ?? 0),
 		points: Number(row.points ?? 0),
 		played: Number(row.played ?? 0),
