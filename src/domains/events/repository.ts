@@ -76,7 +76,7 @@ type DbEventRow = {
 const mapEvent = (row: DbEventRow): Event => ({
 	id: row.id,
 	name: row.name,
-	deadlineTime: row.deadline_time, // Already ISO 8601 string from DB
+	deadlineTime: normalizeDeadlineTime(row.deadline_time, row.deadline_time_epoch),
 	averageEntryScore: row.average_entry_score,
 	finished: row.finished,
 	dataChecked: row.data_checked,
@@ -101,6 +101,34 @@ const mapEvent = (row: DbEventRow): Event => ({
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
+
+export const normalizeDeadlineTime = (
+	deadlineTime: unknown,
+	deadlineTimeEpoch: unknown
+): string | null => {
+	if (typeof deadlineTime === "string" && deadlineTime.trim().length > 0) {
+		const normalizedInput = deadlineTime
+			.trim()
+			.replace(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})/, "$1T$2")
+			.replace(/([+-]\d{2})$/, "$1:00");
+		const timestamp = Date.parse(normalizedInput);
+		if (Number.isFinite(timestamp)) {
+			const date = new Date(timestamp);
+			if (Number.isFinite(date.getTime())) return date.toISOString();
+		}
+	}
+
+	const epoch = Number(deadlineTimeEpoch);
+	if (deadlineTimeEpoch !== null && deadlineTimeEpoch !== undefined && Number.isFinite(epoch)) {
+		const timestamp = epoch * 1000;
+		if (Number.isFinite(timestamp)) {
+			const date = new Date(timestamp);
+			if (Number.isFinite(date.getTime())) return date.toISOString();
+		}
+	}
+
+	return null;
+};
 
 const parseChipPlays = (raw: unknown): ChipPlay[] | null => {
 	if (!Array.isArray(raw)) return null;
@@ -130,7 +158,7 @@ const parseEventFromRedisJson = (raw: string): Event | null => {
 		return {
 			id: Number(obj.id ?? 0),
 			name: String(obj.name ?? ""),
-			deadlineTime: obj.deadlineTime !== null ? String(obj.deadlineTime) : null,
+			deadlineTime: normalizeDeadlineTime(obj.deadlineTime, obj.deadlineTimeEpoch),
 			averageEntryScore: obj.averageEntryScore !== null ? Number(obj.averageEntryScore) : null,
 			finished: Boolean(obj.finished),
 			dataChecked: Boolean(obj.dataChecked),
@@ -179,8 +207,56 @@ const clampLimit = (limit: number): number => {
 
 export type CurrentEventInfo = {
 	season: string;
-	currentEvent: number;
+	currentEvent: number | null;
+	nextEvent: number | null;
 	nextUtcDeadline: string | null;
+};
+
+type EventMetadata = {
+	id: number;
+	deadlineTime: string | null;
+	deadlineTimeEpoch: number | null;
+	isCurrent: boolean;
+	isNext: boolean;
+};
+
+const toEventMetadata = (event: Event): EventMetadata => ({
+	id: event.id,
+	deadlineTime: event.deadlineTime,
+	deadlineTimeEpoch: event.deadlineTimeEpoch,
+	isCurrent: event.isCurrent,
+	isNext: event.isNext,
+});
+
+const resolveCurrentAndNext = (
+	events: EventMetadata[],
+	preferredCurrentId?: number | null
+): { current: EventMetadata | null; next: EventMetadata | null } => {
+	const sorted = [...events].sort((a, b) => a.id - b.id);
+	const nowEpoch = Math.floor(Date.now() / 1000);
+	const preferredCurrent = preferredCurrentId
+		? (sorted.find((event) => event.id === preferredCurrentId) ?? null)
+		: null;
+	const flaggedCurrent = sorted.find((event) => event.isCurrent) ?? null;
+	const derivedCurrent =
+		sorted
+			.filter((event) => event.deadlineTimeEpoch !== null && event.deadlineTimeEpoch <= nowEpoch)
+			.sort((a, b) => (b.deadlineTimeEpoch ?? 0) - (a.deadlineTimeEpoch ?? 0))[0] ?? null;
+	const current = preferredCurrent ?? flaggedCurrent ?? derivedCurrent;
+
+	if (current) {
+		return {
+			current,
+			next: sorted.find((event) => event.id === current.id + 1) ?? null,
+		};
+	}
+
+	const flaggedNext = sorted.find((event) => event.isNext) ?? null;
+	const derivedNext =
+		sorted
+			.filter((event) => event.deadlineTimeEpoch !== null && event.deadlineTimeEpoch > nowEpoch)
+			.sort((a, b) => (a.deadlineTimeEpoch ?? 0) - (b.deadlineTimeEpoch ?? 0))[0] ?? null;
+	return { current: null, next: flaggedNext ?? derivedNext };
 };
 
 interface EventsRepository {
@@ -231,52 +307,34 @@ export const eventsRepository: EventsRepository = {
 
 	async getCurrentEventInfo(context: GraphQLContext): Promise<CurrentEventInfo | null> {
 		const season = await getCurrentSeason(context);
-
-		// Try Redis: event:current is maintained by external sync
 		const current = await getCurrentEventFromRedis(context);
-		if (current) {
-			// Total gameweeks = hash field count
-			let totalGameweeks = 0;
-			try {
-				totalGameweeks = await context.redis.hlen(`Event:${season}`);
-			} catch (error) {
-				context.logger.warn({ err: error, season }, "Failed to read Event hash length");
-			}
 
-			// Next event = current + 1 (capped at total gameweeks)
-			const nextId = current.id + 1;
-			let nextDeadline: string | null = null;
-
-			if (nextId <= totalGameweeks) {
-				let nextRaw: string | null = null;
-				try {
-					nextRaw = await context.redis.hget(`Event:${season}`, String(nextId));
-				} catch (error) {
-					context.logger.warn({ err: error, season, nextId }, "Failed to read next event hash row");
-				}
-				if (nextRaw) {
-					try {
-						const nextEvent = JSON.parse(nextRaw) as Record<string, unknown>;
-						nextDeadline =
-							typeof nextEvent.deadlineTime === "string" ? nextEvent.deadlineTime : null;
-					} catch (error) {
-						context.logger.warn({ err: error, season, nextId }, "Malformed next event cache row");
+		try {
+			const rawEvents = await context.redis.hvals(`Event:${season}`);
+			if (rawEvents.length > 0) {
+				const parsedEvents = rawEvents.map(parseEventFromRedisJson);
+				if (parsedEvents.every((event): event is Event => event !== null)) {
+					const resolved = resolveCurrentAndNext(parsedEvents.map(toEventMetadata), current?.id);
+					if (resolved.current || resolved.next) {
+						return {
+							season,
+							currentEvent: resolved.current?.id ?? null,
+							nextEvent: resolved.next?.id ?? null,
+							nextUtcDeadline: resolved.next?.deadlineTime ?? null,
+						};
 					}
+				} else {
+					context.logger.warn({ season }, "Event hash contains malformed metadata rows");
 				}
 			}
-
-			return {
-				season,
-				currentEvent: current.id,
-				nextUtcDeadline: nextDeadline,
-			};
+		} catch (error) {
+			context.logger.warn({ err: error, season }, "Failed to read Event metadata hash");
 		}
 
-		// Fallback: Supabase query
 		const { data, error } = await context.supabase
 			.from("events")
-			.select("id,deadline_time,is_current,is_next")
-			.or("is_current.eq.true,is_next.eq.true");
+			.select("id,deadline_time,deadline_time_epoch,is_current,is_next")
+			.order("id", { ascending: true });
 
 		if (error) {
 			context.logger.error({ err: error }, "Failed to fetch current/next event");
@@ -291,21 +349,30 @@ export const eventsRepository: EventsRepository = {
 		const rows = (data ?? []) as Array<{
 			id: number;
 			deadline_time: string | null;
+			deadline_time_epoch: number | null;
 			is_current: boolean;
 			is_next: boolean;
 		}>;
+		const resolved = resolveCurrentAndNext(
+			rows.map((row) => ({
+				id: row.id,
+				deadlineTime: normalizeDeadlineTime(row.deadline_time, row.deadline_time_epoch),
+				deadlineTimeEpoch: row.deadline_time_epoch,
+				isCurrent: row.is_current,
+				isNext: row.is_next,
+			})),
+			current?.id
+		);
 
-		const currentRow = rows.find((r) => r.is_current);
-		if (!currentRow) {
+		if (!resolved.current && !resolved.next) {
 			return null;
 		}
 
-		const nextRow = rows.find((r) => r.is_next);
-
 		return {
 			season,
-			currentEvent: currentRow.id,
-			nextUtcDeadline: nextRow?.deadline_time ?? null,
+			currentEvent: resolved.current?.id ?? null,
+			nextEvent: resolved.next?.id ?? null,
+			nextUtcDeadline: resolved.next?.deadlineTime ?? null,
 		};
 	},
 
