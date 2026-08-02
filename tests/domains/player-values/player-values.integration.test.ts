@@ -411,7 +411,9 @@ describe("playerValues integration", () => {
 		});
 
 		expect(result.errors).toBeUndefined();
-		const data = result.data as { playerValues: Array<{ playerId: number; lastValue: number }> } | null;
+		const data = result.data as {
+			playerValues: Array<{ playerId: number; lastValue: number }>;
+		} | null;
 		expect(data?.playerValues).toHaveLength(1);
 		expect(data?.playerValues[0]).toMatchObject({ playerId: 136, lastValue: 73 });
 		expect(context.calls.supabaseFrom).toBe(0);

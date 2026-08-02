@@ -325,7 +325,9 @@ async function getPlayerValuesFromDatabase(
 	);
 	const eventIds = Array.from(
 		new Set(
-			changedRows.map((row) => row.event_id).filter((id): id is number => typeof id === "number" && id > 0)
+			changedRows
+				.map((row) => row.event_id)
+				.filter((id): id is number => typeof id === "number" && id > 0)
 		)
 	);
 
