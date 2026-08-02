@@ -495,4 +495,42 @@ describe("playerValues integration", () => {
 		expect(data?.playerValues).toHaveLength(1);
 		expect(data?.playerValues[0]?.playerId).toBe(136);
 	});
+
+	it("filters stale season-baseline rows from the private cache", async () => {
+		const context = createGraphQLContext({
+			redisStrings: {
+				"gql:v2:2526:player-values:20260421": JSON.stringify([
+					{
+						playerId: 19,
+						playerName: "Zubimendi",
+						teamName: "Arsenal",
+						position: "MID",
+						value: 55,
+						lastValue: 0,
+					},
+					{
+						playerId: 136,
+						playerName: "Thiago",
+						teamName: "Brentford",
+						position: "FWD",
+						value: 74,
+						lastValue: 73,
+					},
+				]),
+			},
+		});
+
+		const result = await graphql({
+			schema: testSchema,
+			source: playerValuesQuery,
+			contextValue: context,
+			variableValues: { changeDate: "2026-04-21" },
+		});
+
+		expect(result.errors).toBeUndefined();
+		const data = result.data as { playerValues: Array<{ playerId: number }> } | null;
+		expect(data?.playerValues).toHaveLength(1);
+		expect(data?.playerValues[0]?.playerId).toBe(136);
+		expect(context.calls.supabaseFrom).toBe(0);
+	});
 });

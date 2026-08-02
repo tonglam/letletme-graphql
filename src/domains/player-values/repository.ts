@@ -590,8 +590,13 @@ export const playerValuesRepository: PlayerValuesRepository = {
 				try {
 					const parsed = JSON.parse(privateCached) as unknown;
 					if (Array.isArray(parsed)) {
+						// Entries written by pre-fix code can still hold season-baseline
+						// rows until their TTL lapses; apply the same lastValue guard.
+						const changed = (parsed as PlayerValue[]).filter(
+							(item) => typeof item?.lastValue === "number" && item.lastValue > 0
+						);
 						metrics.cacheRepositoryEvents.labels("player_values", "private_hit").inc();
-						return parsed as PlayerValue[];
+						return changed;
 					}
 				} catch (error) {
 					context.logger.warn(
