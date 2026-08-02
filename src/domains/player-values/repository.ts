@@ -300,24 +300,32 @@ async function getPlayerValuesFromDatabase(
 	}
 
 	const rows = (data as DbPlayerValueRow[] | null) ?? [];
-	if (rows.length === 0) {
+	// Season-baseline rows ("start", last_value = 0) are not price changes.
+	// Filtered in JS rather than .neq("change_type", "start") so legacy rows
+	// with NULL change_type survive (SQL <> drops NULLs), mirroring
+	// mapDbRowToPlayerValue's last_value ?? value fallback.
+	const changedRows = rows.filter((row) => {
+		if (row.change_type === "start") return false;
+		return (row.last_value ?? row.value) > 0;
+	});
+	if (changedRows.length === 0) {
 		context.logger.debug(
 			{ changeDate: changeDate.toISOString(), targetDate },
-			"No player values found in database"
+			"No player value changes found in database"
 		);
 		return [];
 	}
 
 	const elementIds = Array.from(
 		new Set(
-			rows
+			changedRows
 				.map((row) => row.element_id)
 				.filter((id): id is number => typeof id === "number" && id > 0)
 		)
 	);
 	const eventIds = Array.from(
 		new Set(
-			rows.map((row) => row.event_id).filter((id): id is number => typeof id === "number" && id > 0)
+			changedRows.map((row) => row.event_id).filter((id): id is number => typeof id === "number" && id > 0)
 		)
 	);
 
@@ -367,7 +375,7 @@ async function getPlayerValuesFromDatabase(
 		]) as Array<[string, DbPlayerStatMetadataRow]>
 	);
 
-	return rows.map((row) => {
+	return changedRows.map((row) => {
 		const base = mapDbRowToPlayerValue(row);
 		const player = playerById.get(base.playerId);
 		const stat = row.event_id
@@ -434,7 +442,17 @@ function parsePlayerValuesFromHashData(
 			return null;
 		}
 
-		const playerValues: PlayerValue[] = rawData.map((item) => {
+		// Start rows are season baselines, not price changes. The lastValue
+		// predicate is the deciding filter because legacy cached JSON may not
+		// carry changeType at all; rows without a previous value normalize to 0
+		// and are dropped since they carry no change information.
+		const changedData = rawData.filter((item) => {
+			if (item.changeType === "Start") return false;
+			const lastValue = (item.lastValue as number | undefined) ?? 0;
+			return lastValue > 0;
+		});
+
+		const playerValues: PlayerValue[] = changedData.map((item) => {
 			const playerId = (item.playerId as number) ?? (item.elementId as number) ?? 0;
 			const playerName = (item.playerName as string) ?? (item.webName as string) ?? "";
 			const teamId = (item.teamId as number) ?? 0;
