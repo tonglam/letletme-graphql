@@ -27,7 +27,9 @@ export type EntryEventTransferRow = {
 	eventId: number;
 	entryId: number;
 	elementIn: number;
+	elementInCost: number;
 	elementOut: number;
+	elementOutCost: number;
 	time: string | null;
 };
 
@@ -85,7 +87,9 @@ const isEntryEventTransferRow = (value: unknown): value is EntryEventTransferRow
 		asNumber(value.entryId) !== null &&
 		asNumber(value.eventId) !== null &&
 		asNumber(value.elementIn) !== null &&
+		asNumber(value.elementInCost) !== null &&
 		asNumber(value.elementOut) !== null &&
+		asNumber(value.elementOutCost) !== null &&
 		(value.time === null || typeof value.time === "string")
 	);
 };
@@ -212,7 +216,15 @@ async function queryTransferRows(
 		: [...transferTimeColumns];
 
 	for (const timeColumn of candidates) {
-		const projection = ["entry_id", "event_id", "element_in_id", "element_out_id", timeColumn]
+		const projection = [
+			"entry_id",
+			"event_id",
+			"element_in_id",
+			"element_in_cost",
+			"element_out_id",
+			"element_out_cost",
+			timeColumn,
+		]
 			.filter((column): column is string => column !== null)
 			.join(", ");
 		let query = context.supabase.from("entry_event_transfers") as unknown as TransferQueryBuilder;
@@ -270,7 +282,9 @@ const mapTransferRow = (
 	fallback: { entryId: number; eventId: number | null }
 ): EntryEventTransferRow | null => {
 	const elementIn = asNumber(row.element_in_id);
+	const elementInCost = asNumber(row.element_in_cost);
 	const elementOut = asNumber(row.element_out_id);
+	const elementOutCost = asNumber(row.element_out_cost);
 	const rowEventId = asNumber(row.event_id) ?? asNumber(row.event);
 	const rowEntryId = asNumber(row.entry_id) ?? asNumber(row.entry);
 	const eventId = rowEventId ?? fallback.eventId;
@@ -279,12 +293,19 @@ const mapTransferRow = (
 	if (!elementIn || !elementOut || !eventId || !entryId) {
 		return null;
 	}
+	if (elementInCost === null || elementOutCost === null) {
+		throw new EntryTransferRepositoryError(
+			`Stored transfer costs are missing for entry ${entryId}, event ${eventId}`
+		);
+	}
 
 	return {
 		entryId,
 		eventId,
 		elementIn,
+		elementInCost,
 		elementOut,
+		elementOutCost,
 		time: asString(row.transfer_time ?? row.time ?? row.created_at),
 	};
 };
@@ -448,7 +469,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 		eventId: number
 	): Promise<EntryEventTransferRow[]> {
 		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `entries:transfers:v2:${entryId}:${eventId}`);
+		const cacheKey = gqlCacheKey(season, `entries:transfers:v3:${entryId}:${eventId}`);
 		const cached = await context.redis.get(cacheKey);
 		if (cached) {
 			try {
@@ -505,7 +526,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 		const TRANSFERS_CACHE_TTL = 3600;
 		const season = await getCurrentSeason(context);
 		const cacheKeys = uniqueIds.map((id) =>
-			gqlCacheKey(season, `entries:transfers:v2:${id}:${eventId}`)
+			gqlCacheKey(season, `entries:transfers:v3:${id}:${eventId}`)
 		);
 		const results = new Map<number, EntryEventTransferRow[]>();
 		const missIds: number[] = [];
@@ -579,7 +600,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 				const transfers = byEntry.get(id) ?? [];
 				results.set(id, transfers);
 				pipeline.set(
-					gqlCacheKey(season, `entries:transfers:v2:${id}:${eventId}`),
+					gqlCacheKey(season, `entries:transfers:v3:${id}:${eventId}`),
 					JSON.stringify(transfers),
 					"EX",
 					TRANSFERS_CACHE_TTL
@@ -604,7 +625,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 		}
 
 		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `entries:transfers:v2:history:${entryId}`);
+		const cacheKey = gqlCacheKey(season, `entries:transfers:v3:history:${entryId}`);
 		const cached =
 			prefetchedCacheValue !== undefined ? prefetchedCacheValue : await context.redis.get(cacheKey);
 		if (cached !== null) {

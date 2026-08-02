@@ -1,11 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
 
-const buildContext = (options: { cache?: string | null; rows?: unknown[] } = {}) => {
+const buildContext = (
+	options: { cache?: string | null; legacyCache?: string | null; rows?: unknown[] } = {}
+) => {
 	const strings = new Map<string, string>();
 	strings.set("Season:active", "2526");
 	if (options.cache !== undefined && options.cache !== null) {
-		strings.set("gql:v2:2526:entries:transfers:v2:1:3", options.cache);
+		strings.set("gql:v2:2526:entries:transfers:v3:1:3", options.cache);
+	}
+	if (options.legacyCache !== undefined && options.legacyCache !== null) {
+		strings.set("gql:v2:2526:entries:transfers:v2:1:3", options.legacyCache);
 	}
 
 	const redis = {
@@ -55,14 +60,18 @@ describe("entryLiveRepository transfers", () => {
 					entry_id: "1",
 					event_id: "3",
 					element_in_id: "20",
+					element_in_cost: "55",
 					element_out_id: "10",
+					element_out_cost: "60",
 					transfer_time: "2026-01-02T12:00:00Z",
 				},
 				{
 					entry_id: 1,
 					event_id: 3,
 					element_in_id: 30,
+					element_in_cost: 57,
 					element_out_id: 20,
+					element_out_cost: 55,
 					transfer_time: "2026-01-01T12:00:00Z",
 				},
 			],
@@ -78,7 +87,15 @@ describe("entryLiveRepository transfers", () => {
 		const context = buildContext({
 			cache: "not-json",
 			rows: [
-				{ entry_id: 1, event_id: 3, element_in_id: 20, element_out_id: 10, transfer_time: null },
+				{
+					entry_id: 1,
+					event_id: 3,
+					element_in_id: 20,
+					element_in_cost: 55,
+					element_out_id: 10,
+					element_out_cost: 60,
+					transfer_time: null,
+				},
 			],
 		});
 
@@ -124,7 +141,9 @@ describe("entryLiveRepository transfers", () => {
 											entry_id: 1,
 											event_id: 3,
 											element_in_id: 20,
+											element_in_cost: 55,
 											element_out_id: 10,
+											element_out_cost: 60,
 											time: "2026-01-01T12:00:00Z",
 										},
 									],
@@ -144,9 +163,55 @@ describe("entryLiveRepository transfers", () => {
 
 		const transfers = await entryLiveRepository.getEntryEventTransfers(context, 1, 3);
 		expect(selected.slice(0, 2)).toEqual([
-			"entry_id, event_id, element_in_id, element_out_id, transfer_time",
-			"entry_id, event_id, element_in_id, element_out_id, time",
+			"entry_id, event_id, element_in_id, element_in_cost, element_out_id, element_out_cost, transfer_time",
+			"entry_id, event_id, element_in_id, element_in_cost, element_out_id, element_out_cost, time",
 		]);
 		expect(transfers[0]?.time).toBe("2026-01-01T12:00:00Z");
+	});
+
+	it("rejects stored transfers that are missing official costs", async () => {
+		const context = buildContext({
+			rows: [
+				{
+					entry_id: 1,
+					event_id: 3,
+					element_in_id: 20,
+					element_in_cost: null,
+					element_out_id: 10,
+					element_out_cost: 60,
+					transfer_time: null,
+				},
+			],
+		});
+
+		await expect(entryLiveRepository.getEntryEventTransfers(context, 1, 3)).rejects.toThrow(
+			"Stored transfer costs are missing"
+		);
+	});
+
+	it("ignores legacy v2 transfer caches that did not contain official costs", async () => {
+		const context = buildContext({
+			legacyCache: JSON.stringify([
+				{ entryId: 1, eventId: 3, elementIn: 99, elementOut: 98, time: null },
+			]),
+			rows: [
+				{
+					entry_id: 1,
+					event_id: 3,
+					element_in_id: 20,
+					element_in_cost: 55,
+					element_out_id: 10,
+					element_out_cost: 60,
+					transfer_time: null,
+				},
+			],
+		});
+
+		const transfers = await entryLiveRepository.getEntryEventTransfers(context, 1, 3);
+		expect(transfers[0]).toMatchObject({
+			elementIn: 20,
+			elementInCost: 55,
+			elementOutCost: 60,
+		});
 	});
 });

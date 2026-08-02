@@ -1,7 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { getCurrentSeason } from "../../infra/season";
-import { stableStringify } from "../../infra/stringify";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player as InfraPlayer, Team as InfraTeam } from "../../infra/types";
 
@@ -70,36 +69,24 @@ const evictMalformedCache = async (context: GraphQLContext, key: string): Promis
 	}
 };
 
-const isPlayer = (value: unknown): value is Player => {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const player = value as Record<string, unknown>;
-	return (
-		typeof player.id === "number" &&
-		Number.isFinite(player.id) &&
-		typeof player.teamId === "number" &&
-		Number.isFinite(player.teamId) &&
-		typeof player.position === "number" &&
-		Number.isFinite(player.position)
-	);
-};
-
-const isPlayerList = (value: unknown): value is Player[] =>
-	Array.isArray(value) && value.every((item) => isPlayer(item));
-
 const isObject = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
-const isTopTransfersEnriched = (value: unknown): value is TopTransfersEnriched => {
-	if (!isObject(value) || !Array.isArray(value.stats) || !isObject(value.players)) return false;
-	return value.stats.every(
-		(stat) =>
-			isObject(stat) &&
-			typeof stat.playerId === "number" &&
-			typeof stat.eventId === "number" &&
-			typeof stat.transfersInEvent === "number" &&
-			typeof stat.transfersOutEvent === "number"
-	);
+type PlayerEventStatsOverlay = {
+	totalPoints: number | null;
+	selectedByPercent: number | null;
 };
+
+const isPlayerEventStatsOverlay = (value: unknown): value is PlayerEventStatsOverlay =>
+	isObject(value) &&
+	(value.totalPoints === null || typeof value.totalPoints === "number") &&
+	(value.selectedByPercent === null || typeof value.selectedByPercent === "number");
+
+const applyPlayerEventStats = (player: Player, stats: PlayerEventStatsOverlay): Player => ({
+	...player,
+	totalPoints: stats.totalPoints ?? player.totalPoints,
+	selectedByPercent: stats.selectedByPercent ?? player.selectedByPercent,
+});
 
 const readJsonCache = async <T>(
 	context: GraphQLContext,
@@ -233,8 +220,9 @@ interface PlayersRepository {
 	): Promise<TopTransfersEnriched>;
 }
 
-// Player data (base info + per-event stats) is stable historical data — 1h TTL.
-const PLAYER_CACHE_TTL = 3600;
+// Only event-stat overlays are cached. Base players contain mutable prices and
+// must always come from Player:{season} or PostgreSQL.
+const PLAYER_EVENT_STATS_CACHE_TTL = 3600;
 
 type RawTransferRow = {
 	element_id: number;
@@ -271,11 +259,6 @@ const fetchTopTransferRows = async (
 export const playersRepository: PlayersRepository = {
 	async getPlayerById(context: GraphQLContext, id: number): Promise<Player | null> {
 		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `players:id:${id}`);
-		const cached = await readJsonCache(context, cacheKey, isPlayer);
-		if (cached) {
-			return cached;
-		}
 
 		// Try externally-managed Player:{season} hash before hitting Supabase
 		let hashRaw: string | null = null;
@@ -313,7 +296,6 @@ export const playersRepository: PlayersRepository = {
 								? parsed.selected_by_percent
 								: null,
 				};
-				await context.redis.set(cacheKey, JSON.stringify(player), "EX", PLAYER_CACHE_TTL);
 				return player;
 			} catch {
 				/* fall through to Supabase */
@@ -337,7 +319,6 @@ export const playersRepository: PlayersRepository = {
 		}
 
 		const player = mapPlayer(row);
-		await context.redis.set(cacheKey, JSON.stringify(player), "EX", PLAYER_CACHE_TTL);
 		return player;
 	},
 
@@ -347,36 +328,32 @@ export const playersRepository: PlayersRepository = {
 		eventId: number
 	): Promise<Player | null> {
 		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `players:id:${id}:event:${eventId}`);
-		const cached = await readJsonCache(context, cacheKey, isPlayer);
-		if (cached) {
-			return cached;
-		}
+		const cacheKey = gqlCacheKey(season, `players:event-stats:v1:${id}:${eventId}`);
 
-		const [basePlayer, statsResult] = await Promise.all([
+		const [basePlayer, cachedStats] = await Promise.all([
 			this.getPlayerById(context, id),
-			context.supabase
-				.from("player_stats")
-				.select("total_points, selected_by_percent")
-				.eq("event_id", eventId)
-				.eq("element_id", id)
-				.limit(1),
+			readJsonCache(context, cacheKey, isPlayerEventStatsOverlay),
 		]);
 
 		if (!basePlayer) {
 			return null;
 		}
+		if (cachedStats) {
+			return applyPlayerEventStats(basePlayer, cachedStats);
+		}
+
+		const statsResult = await context.supabase
+			.from("player_stats")
+			.select("total_points, selected_by_percent")
+			.eq("event_id", eventId)
+			.eq("element_id", id)
+			.limit(1);
 
 		if (statsResult.error) {
 			context.logger.warn(
 				{ err: statsResult.error, eventId, playerId: id },
 				"Failed to fetch player event stats; returning base player"
 			);
-			try {
-				await context.redis.set(cacheKey, JSON.stringify(basePlayer), "EX", PLAYER_CACHE_TTL);
-			} catch (error) {
-				context.logger.warn({ err: error, cacheKey }, "Failed to cache base player fallback");
-			}
 			return basePlayer;
 		}
 
@@ -387,14 +364,22 @@ export const playersRepository: PlayersRepository = {
 			  }
 			| undefined;
 
-		const playerForEvent: Player = {
-			...basePlayer,
-			totalPoints: row?.total_points ?? basePlayer.totalPoints,
-			selectedByPercent: asNullableNumber(row?.selected_by_percent) ?? basePlayer.selectedByPercent,
+		const overlay: PlayerEventStatsOverlay = {
+			totalPoints: row?.total_points ?? null,
+			selectedByPercent: asNullableNumber(row?.selected_by_percent),
 		};
 
-		await context.redis.set(cacheKey, JSON.stringify(playerForEvent), "EX", PLAYER_CACHE_TTL);
-		return playerForEvent;
+		try {
+			await context.redis.set(
+				cacheKey,
+				JSON.stringify(overlay),
+				"EX",
+				PLAYER_EVENT_STATS_CACHE_TTL
+			);
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to cache player event stats");
+		}
+		return applyPlayerEventStats(basePlayer, overlay);
 	},
 
 	async getPlayersByIdsForEvent(
@@ -402,88 +387,95 @@ export const playersRepository: PlayersRepository = {
 		ids: number[],
 		eventId: number
 	): Promise<Map<number, Player>> {
-		if (ids.length === 0) return new Map();
+		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
+		if (uniqueIds.length === 0) return new Map();
 		const season = await getCurrentSeason(context);
-
-		// One MGET for all per-event keys instead of N sequential GETs
-		const keys = ids.map((id) => gqlCacheKey(season, `players:id:${id}:event:${eventId}`));
+		const keys = uniqueIds.map((id) =>
+			gqlCacheKey(season, `players:event-stats:v1:${id}:${eventId}`)
+		);
 		let rawValues: (string | null)[];
+		const basePlayersPromise = this.getPlayersByIds(context, uniqueIds);
 		try {
 			rawValues = await context.redis.mget(...keys);
 		} catch (error) {
-			context.logger.warn({ err: error, keys }, "Failed to read player event cache");
-			rawValues = Array.from({ length: ids.length }, () => null);
+			context.logger.warn({ err: error, keys }, "Failed to read player event-stat cache");
+			rawValues = Array.from({ length: uniqueIds.length }, () => null);
 		}
 
-		const result = new Map<number, Player>();
+		const basePlayers = await basePlayersPromise;
+		const baseById = new Map(basePlayers.map((player) => [player.id, player]));
+		const overlays = new Map<number, PlayerEventStatsOverlay>();
 		const missIds: number[] = [];
-		for (let i = 0; i < ids.length; i++) {
+		for (let i = 0; i < uniqueIds.length; i++) {
 			const raw = rawValues[i];
 			if (raw) {
 				try {
 					const parsed: unknown = JSON.parse(raw);
-					if (isPlayer(parsed)) {
-						result.set(ids[i], parsed);
+					if (isPlayerEventStatsOverlay(parsed)) {
+						overlays.set(uniqueIds[i], parsed);
 						continue;
 					}
 				} catch (error) {
-					context.logger.warn({ err: error, key: keys[i] }, "Malformed player event cache");
+					context.logger.warn({ err: error, key: keys[i] }, "Malformed player event-stat cache");
 				}
 				await evictMalformedCache(context, keys[i]);
-				missIds.push(ids[i]);
+				missIds.push(uniqueIds[i]);
 			} else {
-				missIds.push(ids[i]);
+				missIds.push(uniqueIds[i]);
 			}
 		}
 
-		if (missIds.length === 0) return result;
-
-		// Fetch base players (HMGET only miss IDs) and per-event stats in parallel
-		const [basePlayers, statsResult] = await Promise.all([
-			this.getPlayersByIds(context, missIds),
-			context.supabase
+		if (missIds.length > 0) {
+			const statsResult = await context.supabase
 				.from("player_stats")
 				.select("element_id, total_points, selected_by_percent")
 				.eq("event_id", eventId)
-				.in("element_id", missIds),
-		]);
+				.in("element_id", missIds);
 
-		const basePlayersMap = new Map(basePlayers.map((p) => [p.id, p]));
-		if (statsResult.error) {
-			throw new Error("Failed to fetch player event stats", { cause: statsResult.error });
+			if (statsResult.error) {
+				context.logger.warn(
+					{ err: statsResult.error, eventId, playerIds: missIds },
+					"Failed to fetch player event stats; returning fresh base players"
+				);
+			} else {
+				type StatsRow = {
+					element_id: number;
+					total_points: number | null;
+					selected_by_percent: number | string | null;
+				};
+				const statsById = new Map(
+					((statsResult.data ?? []) as StatsRow[]).map((row) => [row.element_id, row])
+				);
+				const pipeline = context.redis.pipeline();
+				for (const id of missIds) {
+					const row = statsById.get(id);
+					const overlay: PlayerEventStatsOverlay = {
+						totalPoints: row?.total_points ?? null,
+						selectedByPercent: asNullableNumber(row?.selected_by_percent),
+					};
+					overlays.set(id, overlay);
+					pipeline.set(
+						gqlCacheKey(season, `players:event-stats:v1:${id}:${eventId}`),
+						JSON.stringify(overlay),
+						"EX",
+						PLAYER_EVENT_STATS_CACHE_TTL
+					);
+				}
+				try {
+					await pipeline.exec();
+				} catch (error) {
+					context.logger.warn({ err: error, eventId }, "Failed to cache player event stats");
+				}
+			}
 		}
 
-		type StatsRow = {
-			element_id: number;
-			total_points: number | null;
-			selected_by_percent: number | string | null;
-		};
-		const statsMap = new Map<number, StatsRow>();
-		for (const row of (statsResult.data ?? []) as StatsRow[]) {
-			statsMap.set(row.element_id, row);
-		}
-
-		// Write all merged players in a single pipeline
-		const pipeline = context.redis.pipeline();
-		for (const id of missIds) {
-			const base = basePlayersMap.get(id);
+		const result = new Map<number, Player>();
+		for (const id of uniqueIds) {
+			const base = baseById.get(id);
 			if (!base) continue;
-			const stats = statsMap.get(id);
-			const player: Player = {
-				...base,
-				totalPoints: stats?.total_points ?? base.totalPoints,
-				selectedByPercent: asNullableNumber(stats?.selected_by_percent) ?? base.selectedByPercent,
-			};
-			result.set(id, player);
-			pipeline.set(
-				gqlCacheKey(season, `players:id:${id}:event:${eventId}`),
-				JSON.stringify(player),
-				"EX",
-				PLAYER_CACHE_TTL
-			);
+			const overlay = overlays.get(id);
+			result.set(id, overlay ? applyPlayerEventStats(base, overlay) : base);
 		}
-		await pipeline.exec();
-
 		return result;
 	},
 
@@ -659,20 +651,6 @@ export const playersRepository: PlayersRepository = {
 		const normalizedFilter = normalizeFilter(filter);
 		const safeLimit = clampLimit(limit);
 		const safeOffset = Math.max(Number.isFinite(offset) ? offset : 0, 0);
-		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(
-			season,
-			`players:list:${stableStringify({
-				filter: normalizedFilter ?? null,
-				limit: safeLimit,
-				offset: safeOffset,
-			})}`
-		);
-
-		const cached = await readJsonCache(context, cacheKey, isPlayerList);
-		if (cached) {
-			return cached;
-		}
 
 		let query = context.supabase
 			.from("players")
@@ -701,7 +679,6 @@ export const playersRepository: PlayersRepository = {
 		}
 
 		const players = (data as DbPlayerRow[] | null)?.map(mapPlayer) ?? [];
-		await context.redis.set(cacheKey, JSON.stringify(players), "EX", PLAYER_CACHE_TTL);
 		return players;
 	},
 
@@ -731,11 +708,6 @@ export const playersRepository: PlayersRepository = {
 		const empty: TopTransfersEnriched = { stats: [], players: {} };
 		if (!Number.isFinite(eventId) || eventId <= 0) return empty;
 		const safeLimit = Math.min(Math.max(limit, 1), 100);
-		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `players:top-transfers-in:${eventId}:${safeLimit}`);
-
-		const cached = await readJsonCache(context, cacheKey, isTopTransfersEnriched);
-		if (cached) return cached;
 
 		const rows = await fetchTopTransferRows(context, eventId, "in", safeLimit);
 		const stats = rows.map((row) => ({
@@ -751,9 +723,7 @@ export const playersRepository: PlayersRepository = {
 			eventId
 		);
 		const players: Record<number, Player> = Object.fromEntries(playerMap);
-		const enriched: TopTransfersEnriched = { stats, players };
-		await context.redis.set(cacheKey, JSON.stringify(enriched), "EX", PLAYER_CACHE_TTL);
-		return enriched;
+		return { stats, players };
 	},
 
 	async getTopTransfersOutEnriched(
@@ -764,11 +734,6 @@ export const playersRepository: PlayersRepository = {
 		const empty: TopTransfersEnriched = { stats: [], players: {} };
 		if (!Number.isFinite(eventId) || eventId <= 0) return empty;
 		const safeLimit = Math.min(Math.max(limit, 1), 100);
-		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `players:top-transfers-out:${eventId}:${safeLimit}`);
-
-		const cached = await readJsonCache(context, cacheKey, isTopTransfersEnriched);
-		if (cached) return cached;
 
 		const rows = await fetchTopTransferRows(context, eventId, "out", safeLimit);
 		const stats = rows.map((row) => ({
@@ -784,8 +749,6 @@ export const playersRepository: PlayersRepository = {
 			eventId
 		);
 		const players: Record<number, Player> = Object.fromEntries(playerMap);
-		const enriched: TopTransfersEnriched = { stats, players };
-		await context.redis.set(cacheKey, JSON.stringify(enriched), "EX", PLAYER_CACHE_TTL);
-		return enriched;
+		return { stats, players };
 	},
 };

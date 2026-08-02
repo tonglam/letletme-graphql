@@ -31,7 +31,15 @@ const isEntryGameweekTransfersArray = (value: unknown): value is EntryGameweekTr
 			typeof item.eventId === "number" &&
 			typeof item.eventTransfers === "number" &&
 			typeof item.eventTransfersCost === "number" &&
-			Array.isArray(item.transfers)
+			Array.isArray(item.transfers) &&
+			item.transfers.every(
+				(transfer) =>
+					isRecord(transfer) &&
+					typeof transfer.elementInCost === "number" &&
+					Number.isFinite(transfer.elementInCost) &&
+					typeof transfer.elementOutCost === "number" &&
+					Number.isFinite(transfer.elementOutCost)
+			)
 	);
 
 const readEnrichedTransferCache = async (
@@ -384,9 +392,9 @@ export const entriesService = {
 		const season = await getCurrentSeason(context);
 		const enrichedCacheKey = gqlCacheKey(
 			season,
-			`entries:transfer-history:enriched:${entryId}${live ? ":live" : ""}`
+			`entries:transfer-history:enriched:v3:${entryId}${live ? ":live" : ""}`
 		);
-		const innerCacheKey = gqlCacheKey(season, `entries:transfers:history:${entryId}`);
+		const innerCacheKey = gqlCacheKey(season, `entries:transfers:v3:history:${entryId}`);
 
 		// Check both cache keys simultaneously + pre-warm season + start team fetch in parallel
 		const teamMapPromise = buildTeamMap(context);

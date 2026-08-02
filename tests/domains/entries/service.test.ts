@@ -141,7 +141,9 @@ describe("entriesService.getEntryTransferHistory", () => {
 				entryId: 84885,
 				eventId: 12,
 				elementIn: 1,
+				elementInCost: 85,
 				elementOut: 2,
+				elementOutCost: 125,
 				time: "2026-01-01T00:00:00Z",
 			},
 		];
@@ -180,10 +182,12 @@ describe("entriesService.getEntryTransferHistory", () => {
 			expect(result[0].transfers[0]).toMatchObject({
 				event: 12,
 				elementInWebName: "Saka",
+				elementInCost: 8.5,
 				elementInTeamShortName: "ARS",
 				elementInPoints: 8,
 				elementInPlayed: true,
 				elementOutWebName: "Salah",
+				elementOutCost: 12.5,
 				elementOutTeamShortName: "LIV",
 				elementOutPoints: 2,
 			});
