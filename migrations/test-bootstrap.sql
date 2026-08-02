@@ -54,8 +54,17 @@ CREATE TABLE IF NOT EXISTS public.entry_event_transfers (
   entry_id INT NOT NULL,
   event_id INT NOT NULL,
   element_in_id INT,
-  element_out_id INT
+  element_in_cost INT,
+  element_out_id INT,
+  element_out_cost INT
 );
+
+-- Domain tables are owned by letletme_data; keep this migration-test fixture
+-- aligned with its existing entry_event_transfers cost columns. These ALTERs
+-- also repair a reused local test database created by an older bootstrap.
+ALTER TABLE public.entry_event_transfers
+  ADD COLUMN IF NOT EXISTS element_in_cost INT,
+  ADD COLUMN IF NOT EXISTS element_out_cost INT;
 
 -- Production databases may already have the historical picker function. The
 -- forward migration must preserve its SMALLINT row type so CREATE OR REPLACE
