@@ -17,7 +17,7 @@ type PlayerValueRow = {
 	position: string;
 	price: number;
 	value: number;
-	last_value: number;
+	last_value: number | null;
 	points: number;
 	selected_by: number;
 	transfers_in: number;
@@ -27,6 +27,7 @@ type PlayerValueRow = {
 	total_points: number;
 	event_points: number | null;
 	change_date: string;
+	change_type?: string | null;
 };
 
 type QueryResult<T> = {
@@ -344,5 +345,192 @@ describe("playerValues integration", () => {
 
 		expect(result.errors?.[0]?.message).toBe("database unavailable");
 		expect(context.calls.redisCommands).toEqual([]);
+	});
+
+	it("filters season-baseline Start rows out of cached hashes", async () => {
+		const context = createGraphQLContext({
+			redisHashData: {
+				"19": JSON.stringify({
+					elementId: 19,
+					webName: "Zubimendi",
+					teamName: "Arsenal",
+					elementTypeName: "MID",
+					value: 55,
+					lastValue: 0,
+					changeType: "Start",
+				}),
+			},
+		});
+
+		const result = await graphql({
+			schema: testSchema,
+			source: playerValuesQuery,
+			contextValue: context,
+			variableValues: { changeDate: "2026-04-21" },
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data).toEqual({ playerValues: [] });
+		expect(context.calls.supabaseFrom).toBe(0);
+		// No missing-marker write: the marker is only consulted when the shared
+		// key is absent, so writing it while a hash exists would be dead work.
+		expect(context.calls.redisCommands.some((cmd) => cmd.includes("PlayerValueMissing"))).toBe(
+			false
+		);
+	});
+
+	it("keeps real changes while dropping Start rows from cached hashes", async () => {
+		const context = createGraphQLContext({
+			redisHashData: {
+				"19": JSON.stringify({
+					elementId: 19,
+					webName: "Zubimendi",
+					teamName: "Arsenal",
+					elementTypeName: "MID",
+					value: 55,
+					lastValue: 0,
+					changeType: "Start",
+				}),
+				"136": JSON.stringify({
+					elementId: 136,
+					webName: "Thiago",
+					teamName: "Brentford",
+					teamShortName: "BRE",
+					elementTypeName: "FWD",
+					value: 74,
+					lastValue: 73,
+				}),
+			},
+		});
+
+		const result = await graphql({
+			schema: testSchema,
+			source: playerValuesQuery,
+			contextValue: context,
+			variableValues: { changeDate: "2026-04-21" },
+		});
+
+		expect(result.errors).toBeUndefined();
+		const data = result.data as {
+			playerValues: Array<{ playerId: number; lastValue: number }>;
+		} | null;
+		expect(data?.playerValues).toHaveLength(1);
+		expect(data?.playerValues[0]).toMatchObject({ playerId: 136, lastValue: 73 });
+		expect(context.calls.supabaseFrom).toBe(0);
+	});
+
+	it("filters Start rows from the database fallback and negative-caches the day", async () => {
+		const context = createGraphQLContext({
+			rows: [
+				{
+					player_id: 19,
+					player_name: "Zubimendi",
+					team_id: 1,
+					team_name: "Arsenal",
+					position: "MID",
+					price: 55,
+					value: 55,
+					last_value: 0,
+					points: 0,
+					selected_by: 10.1,
+					transfers_in: 0,
+					transfers_out: 0,
+					net_transfers: 0,
+					form: null,
+					total_points: 0,
+					event_points: null,
+					change_date: "20260421",
+					change_type: "start",
+				},
+			],
+		});
+
+		const result = await graphql({
+			schema: testSchema,
+			source: playerValuesQuery,
+			contextValue: context,
+			variableValues: { changeDate: "2026-04-21" },
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data).toEqual({ playerValues: [] });
+		expect(context.calls.redisCommands).toContain("set:PlayerValueMissing:20260421:1:EX:600");
+	});
+
+	it("keeps legacy database rows with NULL change_type and a positive last_value", async () => {
+		const context = createGraphQLContext({
+			rows: [
+				{
+					player_id: 136,
+					player_name: "Thiago",
+					team_id: 4,
+					team_name: "Brentford",
+					position: "FWD",
+					price: 74,
+					value: 74,
+					last_value: 73,
+					points: 0,
+					selected_by: 1.2,
+					transfers_in: 1000,
+					transfers_out: 500,
+					net_transfers: 500,
+					form: 2.1,
+					total_points: 40,
+					event_points: 0,
+					change_date: "20260421",
+					change_type: null,
+				},
+			],
+		});
+
+		const result = await graphql({
+			schema: testSchema,
+			source: playerValuesQuery,
+			contextValue: context,
+			variableValues: { changeDate: "2026-04-21" },
+		});
+
+		expect(result.errors).toBeUndefined();
+		const data = result.data as { playerValues: Array<{ playerId: number }> } | null;
+		expect(data?.playerValues).toHaveLength(1);
+		expect(data?.playerValues[0]?.playerId).toBe(136);
+	});
+
+	it("filters stale season-baseline rows from the private cache", async () => {
+		const context = createGraphQLContext({
+			redisStrings: {
+				"gql:v2:2526:player-values:20260421": JSON.stringify([
+					{
+						playerId: 19,
+						playerName: "Zubimendi",
+						teamName: "Arsenal",
+						position: "MID",
+						value: 55,
+						lastValue: 0,
+					},
+					{
+						playerId: 136,
+						playerName: "Thiago",
+						teamName: "Brentford",
+						position: "FWD",
+						value: 74,
+						lastValue: 73,
+					},
+				]),
+			},
+		});
+
+		const result = await graphql({
+			schema: testSchema,
+			source: playerValuesQuery,
+			contextValue: context,
+			variableValues: { changeDate: "2026-04-21" },
+		});
+
+		expect(result.errors).toBeUndefined();
+		const data = result.data as { playerValues: Array<{ playerId: number }> } | null;
+		expect(data?.playerValues).toHaveLength(1);
+		expect(data?.playerValues[0]?.playerId).toBe(136);
+		expect(context.calls.supabaseFrom).toBe(0);
 	});
 });
