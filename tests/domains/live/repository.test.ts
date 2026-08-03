@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { liveRepository } from "../../../src/domains/live/repository";
+import {
+	LiveSnapshotCoherenceError,
+	withLiveSnapshotConsistency,
+} from "../../../src/domains/live/snapshot-meta";
 
 const makeMockRedis = (options: {
 	strings?: Record<string, string>;
@@ -409,6 +413,52 @@ describe("liveRepository.getAllLivePerformances", () => {
 			"EX",
 			15,
 		]);
+	});
+
+	it("bypasses Redis and revision caches after a sibling forces database mode", async () => {
+		const revision = "9".repeat(24);
+		const context = buildContext({
+			redisStrings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 1) },
+			redisHashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
+			supabaseData: [
+				{
+					event_id: 33,
+					element_id: 1,
+					minutes: 90,
+					goals_scored: 1,
+					assists: 0,
+					clean_sheets: 0,
+					goals_conceded: 0,
+					own_goals: 0,
+					penalties_saved: 0,
+					penalties_missed: 0,
+					yellow_cards: 0,
+					red_cards: 0,
+					saves: 0,
+					bonus: 0,
+					bps: 20,
+					starts: true,
+					defensive_contribution: 0,
+					expected_goals: null,
+					expected_assists: null,
+					expected_goal_involvements: null,
+					expected_goals_conceded: null,
+					in_dream_team: false,
+					total_points: 9,
+				},
+			],
+		});
+		let runs = 0;
+		const result = await withLiveSnapshotConsistency(context, 33, async () => {
+			runs += 1;
+			if (runs === 1) {
+				throw new LiveSnapshotCoherenceError(33, "Fixtures", "fixture view incomplete");
+			}
+			return liveRepository.getAllLivePerformances(context, 33);
+		});
+
+		expect(result.get(1)?.totalPoints).toBe(9);
+		expect(runs).toBe(2);
 	});
 
 	it("evicts malformed shaped cache and falls back to authoritative Redis data", async () => {

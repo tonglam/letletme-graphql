@@ -19,6 +19,137 @@ export type LiveSnapshotMeta = {
 
 const snapshotMemo = new WeakMap<GraphQLContext, Map<string, Promise<LiveSnapshotMeta | null>>>();
 
+type LiveSnapshotOperationState = {
+	activeReaders: number;
+	databaseFallback: boolean;
+	finalMeta: LiveSnapshotMeta | null | undefined;
+	waiters: Set<() => void>;
+};
+
+const operationStates = new WeakMap<GraphQLContext, Map<number, LiveSnapshotOperationState>>();
+
+type LiveSnapshotRootState = {
+	activeResolvers: number;
+	waiters: Set<() => void>;
+};
+
+const rootStates = new WeakMap<GraphQLContext, LiveSnapshotRootState>();
+
+const getRootState = (context: GraphQLContext): LiveSnapshotRootState => {
+	let state = rootStates.get(context);
+	if (!state) {
+		state = { activeResolvers: 0, waiters: new Set() };
+		rootStates.set(context, state);
+	}
+	return state;
+};
+
+const getOperationState = (
+	context: GraphQLContext,
+	eventId: number
+): LiveSnapshotOperationState => {
+	let byEvent = operationStates.get(context);
+	if (!byEvent) {
+		byEvent = new Map();
+		operationStates.set(context, byEvent);
+	}
+	let state = byEvent.get(eventId);
+	if (!state) {
+		state = {
+			activeReaders: 0,
+			databaseFallback: false,
+			finalMeta: undefined,
+			waiters: new Set(),
+		};
+		byEvent.set(eventId, state);
+	}
+	return state;
+};
+
+export class LiveSnapshotCoherenceError extends Error {
+	readonly eventId: number;
+	readonly view: string;
+
+	constructor(eventId: number, view: string, message: string) {
+		super(message);
+		this.name = "LiveSnapshotCoherenceError";
+		this.eventId = eventId;
+		this.view = view;
+	}
+}
+
+export const isLiveSnapshotConsistencyActive = (
+	context: GraphQLContext,
+	eventId: number
+): boolean => getOperationState(context, eventId).activeReaders > 0;
+
+export const isLiveSnapshotDatabaseFallback = (context: GraphQLContext, eventId: number): boolean =>
+	getOperationState(context, eventId).databaseFallback;
+
+/**
+ * Register a live root field before it performs asynchronous current-event
+ * discovery. This closes the small window where the sibling liveSnapshot
+ * field could otherwise resolve metadata before the calculation registers its
+ * event-specific consistency reader.
+ */
+export const withLiveSnapshotRoot = async <T>(
+	context: GraphQLContext,
+	run: () => Promise<T>
+): Promise<T> => {
+	const state = getRootState(context);
+	state.activeResolvers += 1;
+	try {
+		return await run();
+	} finally {
+		state.activeResolvers -= 1;
+		if (state.activeResolvers === 0) {
+			for (const resolve of state.waiters) resolve();
+			state.waiters.clear();
+		}
+	}
+};
+
+const forceDatabaseFallback = (
+	context: GraphQLContext,
+	eventId: number,
+	error: LiveSnapshotCoherenceError
+): void => {
+	const state = getOperationState(context, eventId);
+	if (!state.databaseFallback) {
+		context.logger.warn(
+			{ eventId, view: error.view, err: error },
+			"Coordinated live view unavailable; retrying the operation from database fallbacks"
+		);
+	}
+	state.databaseFallback = true;
+	state.finalMeta = null;
+};
+
+const rememberOperationMeta = (
+	state: LiveSnapshotOperationState,
+	meta: LiveSnapshotMeta | null
+): void => {
+	if (state.databaseFallback) {
+		state.finalMeta = null;
+		return;
+	}
+	if (!meta) {
+		if (state.finalMeta === undefined) state.finalMeta = null;
+		return;
+	}
+	const currentCheckedAt = state.finalMeta ? Date.parse(state.finalMeta.checkedAt) : -1;
+	const nextCheckedAt = Date.parse(meta.checkedAt);
+	const currentPublishedAt = state.finalMeta ? Date.parse(state.finalMeta.publishedAt) : -1;
+	const nextPublishedAt = Date.parse(meta.publishedAt);
+	if (
+		!state.finalMeta ||
+		nextCheckedAt > currentCheckedAt ||
+		(nextCheckedAt === currentCheckedAt && nextPublishedAt >= currentPublishedAt)
+	) {
+		state.finalMeta = meta;
+	}
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -122,6 +253,31 @@ export const loadLiveSnapshotMeta = async (
 };
 
 /**
+ * Resolve metadata after every consistency-wrapped sibling root field for the
+ * event has settled. GraphQL invokes sibling root resolvers concurrently, so a
+ * one-microtask registration window lets this field join their shared
+ * operation decision instead of racing an independent metadata read.
+ */
+export const loadOperationLiveSnapshotMeta = async (
+	context: GraphQLContext,
+	eventId: number
+): Promise<LiveSnapshotMeta | null> => {
+	if (!Number.isInteger(eventId) || eventId <= 0) return null;
+	await Promise.resolve();
+	const rootState = getRootState(context);
+	if (rootState.activeResolvers > 0) {
+		await new Promise<void>((resolve) => rootState.waiters.add(resolve));
+	}
+	const state = getOperationState(context, eventId);
+	if (state.activeReaders > 0) {
+		await new Promise<void>((resolve) => state.waiters.add(resolve));
+	}
+	if (state.databaseFallback) return null;
+	if (state.finalMeta !== undefined) return state.finalMeta;
+	return loadLiveSnapshotMeta(context, eventId, { fresh: true });
+};
+
+/**
  * A producer publication is atomic, but a GraphQL operation may issue several
  * Redis reads. Compare the revision around those reads and retry once if the
  * producer committed between them, preventing mixed-minute calculations.
@@ -131,22 +287,80 @@ export const withLiveSnapshotConsistency = async <T>(
 	eventId: number,
 	run: () => Promise<T>
 ): Promise<T> => {
-	const before = await loadLiveSnapshotMeta(context, eventId, { fresh: true });
-	const first = await run();
-	const after = await loadLiveSnapshotMeta(context, eventId, { fresh: true });
-	if (!after || before?.revision === after.revision) return first;
+	const state = getOperationState(context, eventId);
+	state.activeReaders += 1;
+	let operationMeta: LiveSnapshotMeta | null = null;
 
-	context.logger.info(
-		{ eventId, beforeRevision: before?.revision ?? null, afterRevision: after.revision },
-		"Live snapshot advanced during request; retrying once"
-	);
-	const retried = await run();
-	const finalMeta = await loadLiveSnapshotMeta(context, eventId, { fresh: true });
-	if (finalMeta && finalMeta.revision !== after.revision) {
-		context.logger.warn(
-			{ eventId, retryRevision: after.revision, finalRevision: finalMeta.revision },
-			"Live snapshot advanced again during retry; returning newest completed calculation"
+	const runWithCoherentFallback = async (): Promise<T> => {
+		const startedInFallback = state.databaseFallback;
+		try {
+			const value = await run();
+			// A concurrent sibling may have found a broken coordinated view while
+			// this run was reading Redis. Discard that result and join its DB mode.
+			return !startedInFallback && state.databaseFallback ? run() : value;
+		} catch (error) {
+			if (!(error instanceof LiveSnapshotCoherenceError) || error.eventId !== eventId) {
+				throw error;
+			}
+			forceDatabaseFallback(context, eventId, error);
+			return run();
+		}
+	};
+
+	try {
+		const before = state.databaseFallback
+			? null
+			: await loadLiveSnapshotMeta(context, eventId, { fresh: true });
+		operationMeta = before;
+		const first = await runWithCoherentFallback();
+		if (state.databaseFallback) {
+			operationMeta = null;
+			return first;
+		}
+
+		const after = await loadLiveSnapshotMeta(context, eventId, { fresh: true });
+		if (state.databaseFallback) {
+			operationMeta = null;
+			return run();
+		}
+		operationMeta = after ?? operationMeta;
+		if (!after || before?.revision === after.revision) return first;
+
+		context.logger.info(
+			{ eventId, beforeRevision: before?.revision ?? null, afterRevision: after.revision },
+			"Live snapshot advanced during request; retrying once"
 		);
+		const retried = await runWithCoherentFallback();
+		if (state.databaseFallback) {
+			operationMeta = null;
+			return retried;
+		}
+		const finalMeta = await loadLiveSnapshotMeta(context, eventId, { fresh: true });
+		if (state.databaseFallback) {
+			operationMeta = null;
+			return run();
+		}
+		operationMeta = finalMeta ?? after;
+		if (finalMeta && finalMeta.revision !== after.revision) {
+			forceDatabaseFallback(
+				context,
+				eventId,
+				new LiveSnapshotCoherenceError(
+					eventId,
+					"LiveSnapshotMeta",
+					`Snapshot advanced from ${after.revision} to ${finalMeta.revision} during retry`
+				)
+			);
+			operationMeta = null;
+			return run();
+		}
+		return retried;
+	} finally {
+		rememberOperationMeta(state, operationMeta);
+		state.activeReaders -= 1;
+		if (state.activeReaders === 0) {
+			for (const resolve of state.waiters) resolve();
+			state.waiters.clear();
+		}
 	}
-	return retried;
 };

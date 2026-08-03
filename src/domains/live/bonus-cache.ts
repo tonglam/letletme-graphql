@@ -2,7 +2,7 @@ import type { GraphQLContext } from "../../graphql/context";
 import { env } from "../../infra/env";
 import { getCurrentSeason } from "../../infra/season";
 import { metrics } from "../../infra/metrics";
-import { loadLiveSnapshotMeta } from "./snapshot-meta";
+import { isLiveSnapshotDatabaseFallback, loadLiveSnapshotMeta } from "./snapshot-meta";
 
 const parseBonusValue = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isInteger(value)) {
@@ -34,6 +34,9 @@ export async function loadLiveBonusByPlayerId(
 	if (!Number.isFinite(eventId) || eventId <= 0) {
 		return new Map();
 	}
+	if (isLiveSnapshotDatabaseFallback(context, eventId)) {
+		return new Map();
+	}
 
 	const season = await getCurrentSeason(context);
 	const hashKey = `${env.LIVE_POINTS_V2 ? "LiveBonusV2" : "LiveBonus"}:${season}:${eventId}`;
@@ -41,12 +44,10 @@ export async function loadLiveBonusByPlayerId(
 	try {
 		const [entries, meta] = await Promise.all([
 			context.redis.hgetall(hashKey),
-			env.LIVE_POINTS_V2
-				? loadLiveSnapshotMeta(context, eventId, { season })
-				: Promise.resolve(null),
+			loadLiveSnapshotMeta(context, eventId, { season }),
 		]);
 		hashEntries = entries;
-		if (env.LIVE_POINTS_V2 && meta && Object.keys(hashEntries).length !== meta.bonusTeamCount) {
+		if (meta && Object.keys(hashEntries).length !== meta.bonusTeamCount) {
 			context.logger.warn(
 				{
 					hashKey,

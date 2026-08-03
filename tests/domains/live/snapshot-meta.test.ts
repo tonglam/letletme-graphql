@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import type { GraphQLContext } from "../../../src/graphql/context";
 import {
+	isLiveSnapshotDatabaseFallback,
+	LiveSnapshotCoherenceError,
 	loadLiveSnapshotMeta,
+	loadOperationLiveSnapshotMeta,
 	parseLiveSnapshotMeta,
 	withLiveSnapshotConsistency,
+	withLiveSnapshotRoot,
 } from "../../../src/domains/live/snapshot-meta";
 
 const meta = (revision: string, checkedAt = "2025-08-15T20:00:00.000Z") =>
@@ -83,6 +87,23 @@ describe("live snapshot metadata", () => {
 		expect(messages).toContain("Live snapshot advanced during request; retrying once");
 	});
 
+	it("uses database mode if publication advances again during the retry", async () => {
+		const { context } = contextWithMetaReads([
+			meta("5".repeat(24)),
+			meta("6".repeat(24), "2025-08-15T20:01:00.000Z"),
+			meta("7".repeat(24), "2025-08-15T20:02:00.000Z"),
+		]);
+		let runs = 0;
+		const result = await withLiveSnapshotConsistency(context, 33, async () => {
+			runs += 1;
+			return isLiveSnapshotDatabaseFallback(context, 33) ? "database" : "redis";
+		});
+
+		expect(result).toBe("database");
+		expect(runs).toBe(3);
+		expect(await loadOperationLiveSnapshotMeta(context, 33)).toBeNull();
+	});
+
 	it("runs once when metadata is stable or not deployed yet", async () => {
 		for (const reads of [
 			[meta("e".repeat(24)), meta("e".repeat(24))],
@@ -95,5 +116,111 @@ describe("live snapshot metadata", () => {
 			});
 			expect(runs).toBe(1);
 		}
+	});
+
+	it("waits for sibling live work and returns its final operation revision", async () => {
+		const firstRevision = "f".repeat(24);
+		const secondRevision = "1".repeat(24);
+		const { context } = contextWithMetaReads([
+			meta(firstRevision),
+			meta(secondRevision, "2025-08-15T20:01:00.000Z"),
+			meta(secondRevision, "2025-08-15T20:01:00.000Z"),
+		]);
+		let releaseFirstRun!: () => void;
+		const firstRunBlocked = new Promise<void>((resolve) => {
+			releaseFirstRun = resolve;
+		});
+		let runs = 0;
+		const liveResult = withLiveSnapshotConsistency(context, 33, async () => {
+			runs += 1;
+			if (runs === 1) await firstRunBlocked;
+			return runs;
+		});
+		const operationMeta = loadOperationLiveSnapshotMeta(context, 33);
+
+		releaseFirstRun();
+
+		expect(await liveResult).toBe(2);
+		expect((await operationMeta)?.revision).toBe(secondRevision);
+	});
+
+	it("waits while a sibling root resolver discovers its current event", async () => {
+		const revision = "4".repeat(24);
+		const { context } = contextWithMetaReads([meta(revision), meta(revision)]);
+		let releaseEventDiscovery!: () => void;
+		const eventDiscoveryBlocked = new Promise<void>((resolve) => {
+			releaseEventDiscovery = resolve;
+		});
+		let announceEventDiscovery!: () => void;
+		const eventDiscoveryStarted = new Promise<void>((resolve) => {
+			announceEventDiscovery = resolve;
+		});
+
+		const liveResult = withLiveSnapshotRoot(context, async () => {
+			announceEventDiscovery();
+			await eventDiscoveryBlocked;
+			return withLiveSnapshotConsistency(context, 33, async () => "live-data");
+		});
+		await eventDiscoveryStarted;
+		const operationMeta = loadOperationLiveSnapshotMeta(context, 33);
+
+		releaseEventDiscovery();
+
+		expect(await liveResult).toBe("live-data");
+		expect((await operationMeta)?.revision).toBe(revision);
+	});
+
+	it("retries every coordinated source in database mode after one view is invalid", async () => {
+		const { context } = contextWithMetaReads([meta("2".repeat(24))]);
+		let runs = 0;
+		const result = await withLiveSnapshotConsistency(context, 33, async () => {
+			runs += 1;
+			if (runs === 1) {
+				throw new LiveSnapshotCoherenceError(33, "Fixtures", "incomplete fixtures");
+			}
+			expect(isLiveSnapshotDatabaseFallback(context, 33)).toBe(true);
+			return "database";
+		});
+
+		expect(result).toBe("database");
+		expect(runs).toBe(2);
+		expect(await loadOperationLiveSnapshotMeta(context, 33)).toBeNull();
+	});
+
+	it("discards a concurrent Redis result when a sibling selects database mode", async () => {
+		const { context } = contextWithMetaReads([meta("3".repeat(24))]);
+		let releaseRedisRun!: () => void;
+		const redisRunBlocked = new Promise<void>((resolve) => {
+			releaseRedisRun = resolve;
+		});
+		let announceRedisRun!: () => void;
+		const redisRunStarted = new Promise<void>((resolve) => {
+			announceRedisRun = resolve;
+		});
+		let firstReaderRuns = 0;
+		const firstReader = withLiveSnapshotConsistency(context, 33, async () => {
+			firstReaderRuns += 1;
+			if (firstReaderRuns === 1) {
+				announceRedisRun();
+				await redisRunBlocked;
+				return "redis";
+			}
+			return "database";
+		});
+		await redisRunStarted;
+
+		let siblingRuns = 0;
+		const sibling = withLiveSnapshotConsistency(context, 33, async () => {
+			siblingRuns += 1;
+			if (siblingRuns === 1) {
+				throw new LiveSnapshotCoherenceError(33, "Fixtures", "incomplete fixtures");
+			}
+			return "database";
+		});
+		expect(await sibling).toBe("database");
+		releaseRedisRun();
+
+		expect(await firstReader).toBe("database");
+		expect(firstReaderRuns).toBe(2);
 	});
 });

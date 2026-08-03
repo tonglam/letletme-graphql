@@ -2,7 +2,12 @@ import type { GraphQLContext } from "../../graphql/context";
 import { getCurrentEventId } from "../../infra/event";
 import { getCurrentSeason } from "../../infra/season";
 import { metrics } from "../../infra/metrics";
-import { loadLiveSnapshotMeta } from "../live/snapshot-meta";
+import {
+	isLiveSnapshotConsistencyActive,
+	isLiveSnapshotDatabaseFallback,
+	LiveSnapshotCoherenceError,
+	loadLiveSnapshotMeta,
+} from "../live/snapshot-meta";
 
 export type Fixture = {
 	id: number;
@@ -179,14 +184,11 @@ const loadEventFixturesFromRedis = async (
 ): Promise<Fixture[] | null> => {
 	const season = await getCurrentSeason(context);
 	const hashKey = `Fixtures:${season}:${eventId}`;
+	const meta = await loadLiveSnapshotMeta(context, eventId, { season });
 
 	let hashEntries: Record<string, string>;
 	try {
-		const [entries, meta] = await Promise.all([
-			context.redis.hgetall(hashKey),
-			loadLiveSnapshotMeta(context, eventId, { season }),
-		]);
-		hashEntries = entries;
+		hashEntries = await context.redis.hgetall(hashKey);
 		if (meta && Object.keys(hashEntries).length !== meta.fixtureCount) {
 			context.logger.warn(
 				{
@@ -195,12 +197,27 @@ const loadEventFixturesFromRedis = async (
 					expectedCount: meta.fixtureCount,
 					actualCount: Object.keys(hashEntries).length,
 				},
-				"Incomplete Fixtures revision; falling back to database"
+				"Incomplete Fixtures revision"
 			);
+			if (isLiveSnapshotConsistencyActive(context, eventId)) {
+				throw new LiveSnapshotCoherenceError(
+					eventId,
+					"Fixtures",
+					`Incomplete Fixtures revision ${meta.revision}`
+				);
+			}
 			return null;
 		}
 	} catch (error) {
+		if (error instanceof LiveSnapshotCoherenceError) throw error;
 		context.logger.warn({ err: error, hashKey }, "Failed to read Fixtures hash from Redis");
+		if (meta && isLiveSnapshotConsistencyActive(context, eventId)) {
+			throw new LiveSnapshotCoherenceError(
+				eventId,
+				"Fixtures",
+				`Fixtures view unavailable for revision ${meta.revision}`
+			);
+		}
 		return null;
 	}
 
@@ -222,7 +239,14 @@ const loadEventFixturesFromRedis = async (
 	}
 	if (malformed) {
 		metrics.cacheRepositoryEvents.labels("fixtures", "malformed").inc();
-		context.logger.warn({ hashKey }, "Malformed Fixtures cache; falling back to database");
+		context.logger.warn({ hashKey }, "Malformed Fixtures cache");
+		if (meta && isLiveSnapshotConsistencyActive(context, eventId)) {
+			throw new LiveSnapshotCoherenceError(
+				eventId,
+				"Fixtures",
+				`Malformed Fixtures view for revision ${meta.revision}`
+			);
+		}
 		return null;
 	}
 
@@ -295,10 +319,12 @@ export const fixturesRepository: FixturesRepository = {
 			return [];
 		}
 
-		const fromRedis = await loadEventFixturesFromRedis(context, eventId);
-		if (fromRedis) {
-			metrics.cacheRepositoryEvents.labels("fixtures", "redis").inc();
-			return fromRedis;
+		if (!isLiveSnapshotDatabaseFallback(context, eventId)) {
+			const fromRedis = await loadEventFixturesFromRedis(context, eventId);
+			if (fromRedis) {
+				metrics.cacheRepositoryEvents.labels("fixtures", "redis").inc();
+				return fromRedis;
+			}
 		}
 		metrics.cacheRepositoryEvents.labels("fixtures", "database_fallback").inc();
 

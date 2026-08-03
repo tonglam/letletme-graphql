@@ -4,6 +4,9 @@ import { getCurrentEventId } from "../../infra/event";
 import { isMissingPostgrestColumnError } from "../../infra/postgrest-error";
 import { getCurrentSeason } from "../../infra/season";
 import {
+	isLiveSnapshotConsistencyActive,
+	isLiveSnapshotDatabaseFallback,
+	LiveSnapshotCoherenceError,
 	loadLiveSnapshotMeta,
 	liveSnapshotMetaKey,
 	parseLiveSnapshotMeta,
@@ -290,16 +293,17 @@ export const mapSyncJobLiveRow = (raw: unknown): LivePerformance | null => {
 };
 
 const parseEventLiveHashEntries = (
-	hashEntries: Record<string, string>
+	hashEntries: Record<string, string>,
+	eventId: number
 ): Map<number, LivePerformance> => {
 	const performances = new Map<number, LivePerformance>();
-	for (const fieldValue of Object.values(hashEntries)) {
+	for (const [field, fieldValue] of Object.entries(hashEntries)) {
 		const parsed = parseJsonUnknown(fieldValue);
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
 			continue;
 		}
 		const perf = mapSyncJobLiveRow(parsed);
-		if (perf) {
+		if (perf && String(perf.playerId) === field && perf.eventId === eventId) {
 			performances.set(perf.playerId, perf);
 		}
 	}
@@ -859,12 +863,20 @@ const loadEventLiveFromRedis = async (
 			{ err: error, hashKey, metaKey },
 			"Failed to read EventLive hash from Redis, falling back to DB"
 		);
+		const meta = await loadLiveSnapshotMeta(context, eventId, { season });
+		if (meta && isLiveSnapshotConsistencyActive(context, eventId)) {
+			throw new LiveSnapshotCoherenceError(
+				eventId,
+				"EventLive",
+				`EventLive view unavailable for revision ${meta.revision}`
+			);
+		}
 		return null;
 	}
 
 	const meta = parseLiveSnapshotMeta(rawMeta, { season, eventId });
 	rememberLiveSnapshotMeta(context, meta, season, eventId);
-	const performances = parseEventLiveHashEntries(hashEntries);
+	const performances = parseEventLiveHashEntries(hashEntries, eventId);
 	if (meta && performances.size !== meta.eventLiveCount) {
 		context.logger.warn(
 			{
@@ -873,8 +885,15 @@ const loadEventLiveFromRedis = async (
 				expectedCount: meta.eventLiveCount,
 				actualCount: performances.size,
 			},
-			"Incomplete EventLive revision; falling back to database"
+			"Incomplete EventLive revision"
 		);
+		if (isLiveSnapshotConsistencyActive(context, eventId)) {
+			throw new LiveSnapshotCoherenceError(
+				eventId,
+				"EventLive",
+				`Incomplete EventLive revision ${meta.revision}`
+			);
+		}
 		return { meta, performances: new Map() };
 	}
 	return { meta, performances };
@@ -965,6 +984,14 @@ export const liveRepository: LiveRepository = {
 	): Promise<Map<number, LivePerformance>> {
 		if (!eventId || !Number.isFinite(eventId) || eventId <= 0) {
 			return new Map();
+		}
+		if (isLiveSnapshotDatabaseFallback(context, eventId)) {
+			return new Map(
+				(await fetchAllLivePerformanceFromDb(context, eventId)).map((performance) => [
+					performance.playerId,
+					performance,
+				])
+			);
 		}
 
 		const season = await getCurrentSeason(context);
@@ -1160,6 +1187,9 @@ export const liveRepository: LiveRepository = {
 		const uniqueIds = Array.from(new Set(playerIds.filter((id) => Number.isFinite(id) && id > 0)));
 		if (uniqueIds.length === 0) {
 			return [];
+		}
+		if (isLiveSnapshotDatabaseFallback(context, eventId)) {
+			return fetchLivePerformanceFromDbByEventsAndPlayerIds(context, [eventId], uniqueIds);
 		}
 
 		// Use HMGET with specific player IDs — avoids loading all 700+ players via HGETALL.

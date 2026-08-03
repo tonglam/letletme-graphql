@@ -9,9 +9,10 @@ import { playersService } from "../players/service";
 import type { EventLive, LiveExplain, LivePerformance, LiveScoresFilter } from "./repository";
 import { liveService } from "./service";
 import {
-	loadLiveSnapshotMeta,
+	loadOperationLiveSnapshotMeta,
 	type LiveSnapshotMeta,
 	type LiveSnapshotState,
+	withLiveSnapshotRoot,
 } from "./snapshot-meta";
 
 /**
@@ -127,26 +128,29 @@ export const liveResolvers = {
 			args: LiveScoresArgs,
 			context: GraphQLContext,
 			info: GraphQLResolveInfo
-		): Promise<LivePerformance[]> => {
-			const scores = await liveService.getLiveScores(
-				context,
-				args.eventId ?? undefined,
-				args.filter ?? undefined
-			);
+		): Promise<LivePerformance[]> =>
+			withLiveSnapshotRoot(context, async () => {
+				const scores = await liveService.getLiveScores(
+					context,
+					args.eventId ?? undefined,
+					args.filter ?? undefined
+				);
 
-			if (scores.length > 0 && parentSelectionRequestsField(info, "player")) {
-				await preloadPlayersForLivePerformances(context, scores);
-			}
+				if (scores.length > 0 && parentSelectionRequestsField(info, "player")) {
+					await preloadPlayersForLivePerformances(context, scores);
+				}
 
-			return scores;
-		},
+				return scores;
+			}),
 
 		playerLive: async (
 			_parent: unknown,
 			args: PlayerLiveArgs,
 			context: GraphQLContext
 		): Promise<LivePerformance | null> =>
-			liveService.getPlayerLive(context, args.playerId, args.eventId ?? undefined),
+			withLiveSnapshotRoot(context, () =>
+				liveService.getPlayerLive(context, args.playerId, args.eventId ?? undefined)
+			),
 
 		eventLive: async (
 			_parent: unknown,
@@ -172,7 +176,7 @@ export const liveResolvers = {
 			context: GraphQLContext
 		): Promise<LiveSnapshotMeta | null> => {
 			const eventId = args.eventId ?? (await getCurrentEventId(context));
-			return eventId ? loadLiveSnapshotMeta(context, eventId) : null;
+			return eventId ? loadOperationLiveSnapshotMeta(context, eventId) : null;
 		},
 	},
 	LiveSnapshotMeta: {

@@ -11,7 +11,11 @@ import { fixturesRepository } from "../fixtures/repository";
 import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
 import type { LivePerformance } from "../live/repository";
 import { liveRepository } from "../live/repository";
-import { loadLiveSnapshotMeta, withLiveSnapshotConsistency } from "../live/snapshot-meta";
+import {
+	isLiveSnapshotDatabaseFallback,
+	loadLiveSnapshotMeta,
+	withLiveSnapshotConsistency,
+} from "../live/snapshot-meta";
 
 export type LiveMatchData = {
 	matchId: number;
@@ -244,6 +248,7 @@ export const loadLiveFixtureBucketsFromRedis = async (
 	context: GraphQLContext,
 	eventId: number
 ): Promise<MatchBucketsFromRedis | null> => {
+	if (isLiveSnapshotDatabaseFallback(context, eventId)) return null;
 	const season = await getCurrentSeason(context);
 	const meta = await loadLiveSnapshotMeta(context, eventId, { season });
 	for (const prefix of ["LiveFixtureV2", "LiveFixture"] as const) {

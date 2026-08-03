@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { fixturesRepository } from "../../../src/domains/fixtures/repository";
+import { withLiveSnapshotConsistency } from "../../../src/domains/live/snapshot-meta";
 import type { GraphQLContext } from "../../../src/graphql/context";
 
 const buildContext = (options: {
@@ -184,6 +185,65 @@ describe("fixturesRepository.getEventFixtures", () => {
 		});
 
 		const result = await fixturesRepository.getEventFixtures(context, 33);
+		expect(result).toHaveLength(1);
+		expect(result[0].id).toBe(329);
+	});
+
+	it("retries all consistency-wrapped reads in database mode for an incomplete revision", async () => {
+		const fixtureJson = JSON.stringify({
+			id: 328,
+			code: 2562222,
+			event: 33,
+			finished: false,
+			kickoffTime: "2026-04-18T14:00:00.000Z",
+			minutes: 60,
+			started: true,
+			teamH: 15,
+			teamA: 4,
+		});
+		const snapshotMeta = JSON.stringify({
+			schemaVersion: 1,
+			season: "2526",
+			eventId: 33,
+			revision: "a".repeat(24),
+			state: "live",
+			publishedAt: "2026-04-18T14:00:00.000Z",
+			checkedAt: "2026-04-18T15:00:00.000Z",
+			eventLiveCount: 700,
+			fixtureCount: 2,
+			fixtureTeamCount: 4,
+			bonusTeamCount: 2,
+		});
+		const context = buildContext({
+			redisHashes: { "Fixtures:2526:33": { "328": fixtureJson } },
+			redisData: {
+				"Season:active": "2526",
+				"LiveSnapshotMeta:2526:33": snapshotMeta,
+			},
+			supabaseData: [
+				{
+					id: 329,
+					code: 2562223,
+					event_id: 33,
+					finished: true,
+					finished_provisional: true,
+					kickoff_time: "2026-04-18T16:30:00.000Z",
+					minutes: 90,
+					started: true,
+					team_h_id: 8,
+					team_a_id: 12,
+					team_h_score: 2,
+					team_a_score: 0,
+					team_h_difficulty: 2,
+					team_a_difficulty: 4,
+				},
+			],
+		});
+
+		const result = await withLiveSnapshotConsistency(context, 33, () =>
+			fixturesRepository.getEventFixtures(context, 33)
+		);
+
 		expect(result).toHaveLength(1);
 		expect(result[0].id).toBe(329);
 	});
