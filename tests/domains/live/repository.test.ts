@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { liveRepository } from "../../../src/domains/live/repository";
 import {
+	isLiveSnapshotDatabaseFallback,
 	LiveSnapshotCoherenceError,
 	withLiveSnapshotConsistency,
 } from "../../../src/domains/live/snapshot-meta";
@@ -463,6 +464,50 @@ describe("liveRepository.getAllLivePerformances", () => {
 
 		expect(result.get(1)?.totalPoints).toBe(9);
 		expect(runs).toBe(2);
+	});
+
+	it("forces operation-wide database mode before serving a revision fallback cache", async () => {
+		const revision = "7".repeat(24);
+		const fallback = JSON.stringify([
+			{
+				eventId: 33,
+				playerId: 1,
+				minutes: 90,
+				goalsScored: 1,
+				assists: 0,
+				cleanSheets: 0,
+				goalsConceded: 0,
+				ownGoals: 0,
+				penaltiesSaved: 0,
+				penaltiesMissed: 0,
+				yellowCards: 0,
+				redCards: 0,
+				saves: 0,
+				bonus: 0,
+				bps: 20,
+				starts: true,
+				defensiveContribution: 0,
+				expectedGoals: null,
+				expectedAssists: null,
+				expectedGoalInvolvements: null,
+				expectedGoalsConceded: null,
+				inDreamTeam: false,
+				totalPoints: 9,
+			},
+		]);
+		const context = buildContext({
+			redisStrings: {
+				[`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 1),
+				[`gql:v2:2526:live:all:33:revision:${revision}:fallback15`]: fallback,
+			},
+		});
+
+		const result = await withLiveSnapshotConsistency(context, 33, () =>
+			liveRepository.getAllLivePerformances(context, 33)
+		);
+
+		expect(result.get(1)?.totalPoints).toBe(9);
+		expect(isLiveSnapshotDatabaseFallback(context, 33)).toBe(true);
 	});
 
 	it("coalesces concurrent coordinated database fallbacks and reuses them for 15 seconds", async () => {

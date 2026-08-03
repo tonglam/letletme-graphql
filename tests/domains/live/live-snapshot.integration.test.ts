@@ -280,4 +280,137 @@ describe("liveSnapshot GraphQL contract", () => {
 		expect(result.data?.eventFixtures).toEqual([{ id: 101, code: 101, minutes: 46, homeScore: 2 }]);
 		expect(result.data?.liveSnapshot).toBeNull();
 	});
+
+	it("does not report a Redis revision when live scores reuse its database fallback cache", async () => {
+		const revision = "2".repeat(24);
+		const metadata = JSON.stringify({
+			schemaVersion: 1,
+			season: "2526",
+			eventId: 33,
+			revision,
+			state: "live",
+			publishedAt: "2025-08-15T20:00:00.000Z",
+			checkedAt: "2025-08-15T20:01:00.000Z",
+			eventLiveCount: 1,
+			fixtureCount: 1,
+			fixtureTeamCount: 2,
+			bonusTeamCount: 0,
+		});
+		const fallback = JSON.stringify([
+			{
+				eventId: 33,
+				playerId: 1,
+				minutes: 90,
+				goalsScored: 1,
+				assists: 0,
+				cleanSheets: 0,
+				goalsConceded: 0,
+				ownGoals: 0,
+				penaltiesSaved: 0,
+				penaltiesMissed: 0,
+				yellowCards: 0,
+				redCards: 0,
+				saves: 0,
+				bonus: 0,
+				bps: 20,
+				starts: true,
+				defensiveContribution: 0,
+				expectedGoals: null,
+				expectedAssists: null,
+				expectedGoalInvolvements: null,
+				expectedGoalsConceded: null,
+				inDreamTeam: false,
+				totalPoints: 9,
+			},
+		]);
+		const context = {
+			redis: {
+				get: async (key: string): Promise<string | null> => {
+					if (key === "Season:active") return "2526";
+					if (key === "LiveSnapshotMeta:2526:33") return metadata;
+					if (key === `gql:v2:2526:live:all:33:revision:${revision}:fallback15`) {
+						return fallback;
+					}
+					return null;
+				},
+				hgetall: async (key: string): Promise<Record<string, string>> =>
+					key === "Fixtures:2526:33"
+						? {
+								"101": JSON.stringify({
+									id: 101,
+									code: 101,
+									event: 33,
+									finished: false,
+									finishedProvisional: false,
+									kickoffTime: null,
+									minutes: 45,
+									started: true,
+									teamH: 1,
+									teamA: 2,
+									teamHScore: 1,
+									teamAScore: 0,
+									teamHDifficulty: 2,
+									teamADifficulty: 4,
+								}),
+							}
+						: {},
+				hmget: async (): Promise<string[]> => [
+					JSON.stringify({
+						id: 1,
+						code: 1,
+						webName: "Player",
+						teamId: 1,
+						type: 3,
+						price: 50,
+						startPrice: 50,
+					}),
+				],
+			},
+			supabase: {
+				from: () => ({
+					select: () => ({
+						eq: () => ({
+							order: async () => ({
+								data: [
+									{
+										id: 101,
+										code: 101,
+										event_id: 33,
+										finished: false,
+										finished_provisional: false,
+										kickoff_time: null,
+										minutes: 46,
+										started: true,
+										team_h_id: 1,
+										team_a_id: 2,
+										team_h_score: 2,
+										team_a_score: 0,
+										team_h_difficulty: 2,
+										team_a_difficulty: 4,
+									},
+								],
+								error: null,
+							}),
+						}),
+					}),
+				}),
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+		} as unknown as GraphQLContext;
+
+		const result = await graphql({
+			schema,
+			source: `query {
+				liveScores(eventId: 33) { totalPoints }
+				eventFixtures(eventId: 33) { minutes homeScore }
+				liveSnapshot(eventId: 33) { revision }
+			}`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveScores).toEqual([{ totalPoints: 7 }]);
+		expect(result.data?.eventFixtures).toEqual([{ minutes: 46, homeScore: 2 }]);
+		expect(result.data?.liveSnapshot).toBeNull();
+	});
 });

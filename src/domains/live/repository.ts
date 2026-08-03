@@ -958,6 +958,28 @@ const readShapedLiveCache = async (
 	return null;
 };
 
+const readRequestedLiveCache = async (
+	context: GraphQLContext,
+	eventId: number,
+	meta: LiveSnapshotMeta | null,
+	cacheKey: string,
+	fallbackKey: string
+): Promise<Map<number, LivePerformance> | null> => {
+	const cached = await readShapedLiveCache(context, cacheKey);
+	if (cached) return cached;
+	if (fallbackKey === cacheKey) return null;
+
+	const fallback = await readShapedLiveCache(context, fallbackKey);
+	if (fallback && meta && isLiveSnapshotConsistencyActive(context, eventId)) {
+		throw new LiveSnapshotCoherenceError(
+			eventId,
+			"EventLive",
+			`Database fallback cache is active for EventLive revision ${meta.revision}`
+		);
+	}
+	return fallback;
+};
+
 const writeShapedLiveCache = async (
 	context: GraphQLContext,
 	cacheKey: string,
@@ -1029,11 +1051,13 @@ export const liveRepository: LiveRepository = {
 		}
 		const requestedCacheKey = shapedLiveCacheKey(season, eventId, requestedMeta);
 		const requestedFallbackKey = shapedLiveFallbackCacheKey(season, eventId, requestedMeta);
-		const cached =
-			(await readShapedLiveCache(context, requestedCacheKey)) ??
-			(requestedFallbackKey !== requestedCacheKey
-				? await readShapedLiveCache(context, requestedFallbackKey)
-				: null);
+		const cached = await readRequestedLiveCache(
+			context,
+			eventId,
+			requestedMeta,
+			requestedCacheKey,
+			requestedFallbackKey
+		);
 		if (cached) return cached;
 
 		const flightKey = `${season}:${eventId}:${requestedMeta?.revision ?? "fallback"}`;
@@ -1043,11 +1067,13 @@ export const liveRepository: LiveRepository = {
 
 		const flight = (async (): Promise<Map<number, LivePerformance>> => {
 			// A sibling request may have populated the cache before this flight won.
-			const cacheAfterFlightElection =
-				(await readShapedLiveCache(context, requestedCacheKey)) ??
-				(requestedFallbackKey !== requestedCacheKey
-					? await readShapedLiveCache(context, requestedFallbackKey)
-					: null);
+			const cacheAfterFlightElection = await readRequestedLiveCache(
+				context,
+				eventId,
+				requestedMeta,
+				requestedCacheKey,
+				requestedFallbackKey
+			);
 			if (cacheAfterFlightElection) return cacheAfterFlightElection;
 
 			const redisSnapshot = await loadEventLiveFromRedis(context, eventId, season);
