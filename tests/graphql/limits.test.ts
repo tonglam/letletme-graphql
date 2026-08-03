@@ -69,6 +69,31 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 50 });
 	});
 
+	it("charges every aliased liveScores full-event lookup", () => {
+		const result = validateGraphQLRequestLimits({
+			query:
+				"query { a: liveScores(eventId: 1) { totalPoints } b: liveScores(eventId: 1) { totalPoints } c: liveScores(eventId: 1) { totalPoints } d: liveScores(eventId: 1) { totalPoints } e: liveScores(eventId: 1) { totalPoints } }",
+		});
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 25 });
+	});
+
+	it("rejects negative list limits from literals and variables", () => {
+		for (const payload of [
+			{ query: "query { eventLive(eventId: 1) { topPerformers(limit: -1) { totalPoints } } }" },
+			{
+				query:
+					"query EventLive($limit: Int) { eventLive(eventId: 1) { topPerformers(limit: $limit) { totalPoints } } }",
+				variables: { limit: -1 },
+			},
+		]) {
+			expect(validateGraphQLRequestLimits(payload, schema)).toMatchObject({
+				ok: false,
+				code: "QUERY_TOO_COMPLEX",
+				message: "GraphQL list limits must not be negative",
+			});
+		}
+	});
+
 	it("rejects more than five root fields", () => {
 		const result = validateGraphQLRequestLimits({
 			query:

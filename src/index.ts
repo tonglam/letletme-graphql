@@ -35,6 +35,7 @@ import {
 	graphQLMethodFailure,
 	graphQLUsesSharedPublicBudget,
 	graphQLWeightedRateLimitSubject,
+	shouldPrechargeResolvedPrincipal,
 } from "./http/graphql-policy";
 
 const GRAPHQL_RATE_LIMIT = 120;
@@ -358,6 +359,25 @@ const startServer = async (): Promise<void> => {
 						request,
 						compatibilityPrincipal
 					);
+					const rateLimitSubject = graphQLWeightedRateLimitSubject({
+						ingress,
+						principal,
+						fallbackSubject: clientIp,
+					});
+					const rateLimit = graphQLUsesSharedPublicBudget(ingress)
+						? GRAPHQL_SERVICE_RATE_LIMIT
+						: GRAPHQL_RATE_LIMIT;
+					if (shouldPrechargeResolvedPrincipal(principal, weightedRatePrecharged)) {
+						const principalAdmissionFailure = await enforceGraphQLRateLimit({
+							scope: "graphql-preauthorization",
+							keyScope: "graphql",
+							subject: rateLimitSubject,
+							limit: rateLimit,
+							corsHeaders,
+						});
+						if (principalAdmissionFailure) return principalAdmissionFailure;
+						weightedRatePrecharged = true;
+					}
 					const authorization = await authorizeGraphQLRequest({
 						body: parsedBody,
 						searchParams: url.searchParams,
@@ -369,14 +389,6 @@ const startServer = async (): Promise<void> => {
 						return graphQLErrorResponse(authorization, corsHeaders);
 					}
 
-					const rateLimitSubject = graphQLWeightedRateLimitSubject({
-						ingress,
-						principal,
-						fallbackSubject: clientIp,
-					});
-					const rateLimit = graphQLUsesSharedPublicBudget(ingress)
-						? GRAPHQL_SERVICE_RATE_LIMIT
-						: GRAPHQL_RATE_LIMIT;
 					const remainingWeightedCost =
 						limits.rateLimitCostUnits - (weightedRatePrecharged ? 1 : 0);
 					if (remainingWeightedCost > 0) {

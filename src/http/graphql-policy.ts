@@ -79,6 +79,11 @@ export const GRAPHQL_COMPATIBILITY_PUBLIC_RATE_LIMIT_SUBJECT = "shared-public:co
 export const graphQLUsesSharedPublicBudget = (ingress: GraphQLIngress): boolean =>
 	ingress.class === "service" || ingress.class === "anonymous";
 
+export const shouldPrechargeResolvedPrincipal = (
+	principal: Principal | null,
+	weightedRatePrecharged: boolean
+): boolean => Boolean(principal) && !weightedRatePrecharged;
+
 export const graphQLAdmissionSubjects = ({
 	headers,
 	ingress,

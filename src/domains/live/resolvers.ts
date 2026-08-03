@@ -107,6 +107,9 @@ type TopPerformersArgs = {
 	limit?: number | null;
 };
 
+export const normalizeTopPerformersLimit = (limit?: number | null): number =>
+	Math.max(0, limit ?? 10);
+
 export const liveResolvers = {
 	Query: {
 		liveScores: async (
@@ -164,7 +167,7 @@ export const liveResolvers = {
 		dreamTeam: (parent: EventLive): LivePerformance[] =>
 			parent.performances.filter((p) => p.inDreamTeam === true),
 		topPerformers: (parent: EventLive, args: TopPerformersArgs): LivePerformance[] => {
-			const limit = args.limit ?? 10;
+			const limit = normalizeTopPerformersLimit(args.limit);
 			return [...parent.performances].sort((a, b) => b.totalPoints - a.totalPoints).slice(0, limit);
 		},
 	},

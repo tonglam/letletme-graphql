@@ -89,6 +89,7 @@ type ListWeight = {
 	propagateToChildren: boolean;
 	oversizedEntryBatch: boolean;
 	duplicateEntryIds: boolean;
+	negativeListLimit: boolean;
 	uniqueEntryCount: number | null;
 };
 
@@ -104,6 +105,7 @@ const listWeight = (
 	let hasEntryIds = false;
 	let oversizedEntryBatch = false;
 	let duplicateEntryIds = false;
+	let negativeListLimit = false;
 	let uniqueEntryCount: number | null = null;
 	const argumentValues = new Map<string, unknown>();
 	for (const argument of schemaArguments) {
@@ -134,6 +136,7 @@ const listWeight = (
 			multiplier = Math.max(multiplier, Math.min(value.length, 500));
 		}
 		if (["first", "last", "limit"].includes(name) && typeof value === "number") {
+			negativeListLimit ||= value < 0;
 			multiplier = Math.max(multiplier, Math.min(Math.max(value, 1), MAX_LIST_ARGUMENT_WEIGHT));
 		}
 	}
@@ -146,6 +149,7 @@ const listWeight = (
 		propagateToChildren: !hasEntryIds,
 		oversizedEntryBatch,
 		duplicateEntryIds,
+		negativeListLimit,
 		uniqueEntryCount,
 	};
 };
@@ -189,6 +193,7 @@ const inspectSelectionSet = ({
 	rootFields: Array<{ name: string; uniqueEntryCount: number | null }>;
 	oversizedEntryBatch: boolean;
 	duplicateEntryIds: boolean;
+	negativeListLimit: boolean;
 } => {
 	let maxDepth = depth;
 	let aliases = 0;
@@ -196,6 +201,7 @@ const inspectSelectionSet = ({
 	const rootFields: Array<{ name: string; uniqueEntryCount: number | null }> = [];
 	let oversizedEntryBatch = false;
 	let duplicateEntryIds = false;
+	let negativeListLimit = false;
 
 	for (const selection of selectionSet.selections) {
 		if (selection.kind === Kind.FIELD) {
@@ -214,6 +220,7 @@ const inspectSelectionSet = ({
 			const childMultiplier = multiplier * weight.multiplier;
 			oversizedEntryBatch ||= weight.oversizedEntryBatch;
 			duplicateEntryIds ||= weight.duplicateEntryIds;
+			negativeListLimit ||= weight.negativeListLimit;
 			complexity += childMultiplier;
 			if (selection.selectionSet) {
 				const namedChildType = fieldDefinition ? getNamedType(fieldDefinition.type) : null;
@@ -232,6 +239,7 @@ const inspectSelectionSet = ({
 				complexity += child.complexity;
 				oversizedEntryBatch ||= child.oversizedEntryBatch;
 				duplicateEntryIds ||= child.duplicateEntryIds;
+				negativeListLimit ||= child.negativeListLimit;
 			}
 			continue;
 		}
@@ -254,6 +262,7 @@ const inspectSelectionSet = ({
 			complexity += child.complexity;
 			oversizedEntryBatch ||= child.oversizedEntryBatch;
 			duplicateEntryIds ||= child.duplicateEntryIds;
+			negativeListLimit ||= child.negativeListLimit;
 			rootFields.push(...child.rootFields);
 			continue;
 		}
@@ -279,6 +288,7 @@ const inspectSelectionSet = ({
 		complexity += child.complexity;
 		oversizedEntryBatch ||= child.oversizedEntryBatch;
 		duplicateEntryIds ||= child.duplicateEntryIds;
+		negativeListLimit ||= child.negativeListLimit;
 		rootFields.push(...child.rootFields);
 	}
 
@@ -289,6 +299,7 @@ const inspectSelectionSet = ({
 		rootFields,
 		oversizedEntryBatch,
 		duplicateEntryIds,
+		negativeListLimit,
 	};
 };
 
@@ -302,6 +313,7 @@ const reject = (
 });
 
 const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
+	["liveScores", 5],
 	["eventLive", 5],
 	["eventOverallResult", 5],
 	["playerDetail", 5],
@@ -394,6 +406,9 @@ export const validateGraphQLPayloadLimits = (
 	}
 	if (inspection.aliases > GRAPHQL_LIMITS.maxAliases) {
 		return reject(`GraphQL operation exceeds ${GRAPHQL_LIMITS.maxAliases} aliases`);
+	}
+	if (inspection.negativeListLimit) {
+		return reject("GraphQL list limits must not be negative");
 	}
 	if (inspection.duplicateEntryIds) {
 		return reject("GraphQL entryIds must not contain duplicates", "DUPLICATE_ENTRY_IDS");

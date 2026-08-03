@@ -8,6 +8,7 @@ import {
 	graphQLUsesSharedPublicBudget,
 	graphQLWeightedRateLimitSubject,
 	requiresCompatibilityAdmission,
+	shouldPrechargeResolvedPrincipal,
 } from "../../src/http/graphql-policy";
 
 const ingress = (overrides: Partial<GraphQLIngress>): GraphQLIngress => ({
@@ -156,6 +157,19 @@ describe("GraphQL transport and ingress policy", () => {
 				fallbackSubject: "203.0.113.1",
 			})
 		).toBe("203.0.113.1");
+	});
+
+	it("precharges a principal resolved after compatibility admission", () => {
+		const resolvedPrincipal = {
+			userId: "user-1",
+			source: "wechat_miniprogram" as const,
+			provider: "wechat_miniprogram" as const,
+			fplEntryId: 7,
+			fplEntryVerifiedAt: "2026-08-03T00:00:00.000Z",
+		};
+		expect(shouldPrechargeResolvedPrincipal(resolvedPrincipal, false)).toBe(true);
+		expect(shouldPrechargeResolvedPrincipal(resolvedPrincipal, true)).toBe(false);
+		expect(shouldPrechargeResolvedPrincipal(null, false)).toBe(false);
 	});
 
 	it("isolates anonymous compatibility reads in a larger shared-public budget", () => {
