@@ -962,9 +962,10 @@ const writeShapedLiveCache = async (
 	context: GraphQLContext,
 	cacheKey: string,
 	performances: Map<number, LivePerformance>,
-	ttlSeconds: number
+	ttlSeconds: number,
+	cacheEmpty = false
 ): Promise<void> => {
-	if (performances.size === 0) return;
+	if (performances.size === 0 && !cacheEmpty) return;
 	try {
 		await context.redis.set(
 			cacheKey,
@@ -977,6 +978,42 @@ const writeShapedLiveCache = async (
 	}
 };
 
+const loadLivePerformanceDbFallback = async (
+	context: GraphQLContext,
+	eventId: number,
+	season: string,
+	meta: LiveSnapshotMeta | null
+): Promise<Map<number, LivePerformance>> => {
+	const cacheKey = shapedLiveFallbackCacheKey(season, eventId, meta);
+	const cached = await readShapedLiveCache(context, cacheKey);
+	if (cached) return cached;
+
+	const flights = getLiveAllFlightMap(context);
+	const flightKey = `database:${cacheKey}`;
+	const existingFlight = flights.get(flightKey);
+	if (existingFlight) return new Map(await existingFlight);
+
+	const flight = (async (): Promise<Map<number, LivePerformance>> => {
+		const cacheAfterFlightElection = await readShapedLiveCache(context, cacheKey);
+		if (cacheAfterFlightElection) return cacheAfterFlightElection;
+
+		const fromDb = new Map(
+			(await fetchAllLivePerformanceFromDb(context, eventId)).map((performance) => [
+				performance.playerId,
+				performance,
+			])
+		);
+		await writeShapedLiveCache(context, cacheKey, fromDb, LIVE_FALLBACK_CACHE_TTL_SEC, true);
+		return fromDb;
+	})();
+	flights.set(flightKey, flight);
+	try {
+		return new Map(await flight);
+	} finally {
+		if (flights.get(flightKey) === flight) flights.delete(flightKey);
+	}
+};
+
 export const liveRepository: LiveRepository = {
 	async getAllLivePerformances(
 		context: GraphQLContext,
@@ -985,17 +1022,11 @@ export const liveRepository: LiveRepository = {
 		if (!eventId || !Number.isFinite(eventId) || eventId <= 0) {
 			return new Map();
 		}
-		if (isLiveSnapshotDatabaseFallback(context, eventId)) {
-			return new Map(
-				(await fetchAllLivePerformanceFromDb(context, eventId)).map((performance) => [
-					performance.playerId,
-					performance,
-				])
-			);
-		}
-
 		const season = await getCurrentSeason(context);
 		const requestedMeta = await loadLiveSnapshotMeta(context, eventId, { season });
+		if (isLiveSnapshotDatabaseFallback(context, eventId)) {
+			return loadLivePerformanceDbFallback(context, eventId, season, requestedMeta);
+		}
 		const requestedCacheKey = shapedLiveCacheKey(season, eventId, requestedMeta);
 		const requestedFallbackKey = shapedLiveFallbackCacheKey(season, eventId, requestedMeta);
 		const cached =
@@ -1035,22 +1066,15 @@ export const liveRepository: LiveRepository = {
 				return redisSnapshot.performances;
 			}
 
-			const fromDb = new Map(
-				(await fetchAllLivePerformanceFromDb(context, eventId)).map((performance) => [
-					performance.playerId,
-					performance,
-				])
-			);
 			// A missing required Redis view means the metadata revision is not safe
 			// for caching. Keep DB recovery bounded to fifteen seconds so the Data
 			// producer's next repair is visible immediately through a revision key.
-			await writeShapedLiveCache(
+			return loadLivePerformanceDbFallback(
 				context,
-				shapedLiveFallbackCacheKey(season, eventId, redisSnapshot?.meta ?? requestedMeta),
-				fromDb,
-				LIVE_FALLBACK_CACHE_TTL_SEC
+				eventId,
+				season,
+				redisSnapshot?.meta ?? requestedMeta
 			);
-			return fromDb;
 		})();
 		flights.set(flightKey, flight);
 		try {
@@ -1189,7 +1213,10 @@ export const liveRepository: LiveRepository = {
 			return [];
 		}
 		if (isLiveSnapshotDatabaseFallback(context, eventId)) {
-			return fetchLivePerformanceFromDbByEventsAndPlayerIds(context, [eventId], uniqueIds);
+			const all = await this.getAllLivePerformances(context, eventId);
+			return uniqueIds
+				.map((playerId) => all.get(playerId))
+				.filter((performance): performance is LivePerformance => performance !== undefined);
 		}
 
 		// Use HMGET with specific player IDs — avoids loading all 700+ players via HGETALL.

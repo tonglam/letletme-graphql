@@ -63,8 +63,10 @@ const makeMockSupabase = (options: {
 	data?: unknown[];
 	dataByTable?: Record<string, unknown[]>;
 	error?: unknown;
+	fromCalls?: string[];
 }) => ({
 	from: (table: string) => {
+		options.fromCalls?.push(table);
 		const rows = (
 			options.dataByTable && Object.hasOwn(options.dataByTable, table)
 				? options.dataByTable[table]
@@ -101,6 +103,7 @@ const buildContext = (options: {
 	supabaseData?: unknown[];
 	supabaseDataByTable?: Record<string, unknown[]>;
 	supabaseError?: unknown;
+	supabaseFromCalls?: string[];
 	redis?: MockRedis;
 }) =>
 	({
@@ -114,6 +117,7 @@ const buildContext = (options: {
 			data: options.supabaseData,
 			dataByTable: options.supabaseDataByTable,
 			error: options.supabaseError,
+			fromCalls: options.supabaseFromCalls,
 		}),
 		logger: makeMockLogger(),
 		user: undefined,
@@ -415,7 +419,7 @@ describe("liveRepository.getAllLivePerformances", () => {
 		]);
 	});
 
-	it("bypasses Redis and revision caches after a sibling forces database mode", async () => {
+	it("uses a revision-bound database cache after a sibling forces database mode", async () => {
 		const revision = "9".repeat(24);
 		const context = buildContext({
 			redisStrings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 1) },
@@ -459,6 +463,62 @@ describe("liveRepository.getAllLivePerformances", () => {
 
 		expect(result.get(1)?.totalPoints).toBe(9);
 		expect(runs).toBe(2);
+	});
+
+	it("coalesces concurrent coordinated database fallbacks and reuses them for 15 seconds", async () => {
+		const revision = "8".repeat(24);
+		const redis = makeMockRedis({
+			strings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 2) },
+			hashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
+		});
+		const fromCalls: string[] = [];
+		const dbRow = {
+			event_id: 33,
+			element_id: 1,
+			minutes: 90,
+			goals_scored: 1,
+			assists: 0,
+			clean_sheets: 0,
+			goals_conceded: 0,
+			own_goals: 0,
+			penalties_saved: 0,
+			penalties_missed: 0,
+			yellow_cards: 0,
+			red_cards: 0,
+			saves: 0,
+			bonus: 0,
+			bps: 20,
+			starts: true,
+			defensive_contribution: 0,
+			expected_goals: null,
+			expected_assists: null,
+			expected_goal_involvements: null,
+			expected_goals_conceded: null,
+			in_dream_team: false,
+			total_points: 9,
+		};
+
+		const results = await Promise.all(
+			Array.from({ length: 25 }, () => {
+				const context = buildContext({
+					redis,
+					supabaseData: [dbRow],
+					supabaseFromCalls: fromCalls,
+				});
+				return withLiveSnapshotConsistency(context, 33, () =>
+					liveRepository.getAllLivePerformances(context, 33)
+				);
+			})
+		);
+
+		expect(results.every((result) => result.get(1)?.totalPoints === 9)).toBe(true);
+		expect(fromCalls.filter((table) => table === "event_lives")).toHaveLength(1);
+		expect(redis.setCalls).toContainEqual([
+			`gql:v2:2526:live:all:33:revision:${revision}:fallback15`,
+			expect.any(String),
+			"EX",
+			15,
+		]);
 	});
 
 	it("evicts malformed shaped cache and falls back to authoritative Redis data", async () => {

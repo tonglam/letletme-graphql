@@ -12,7 +12,9 @@ import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
 import type { LivePerformance } from "../live/repository";
 import { liveRepository } from "../live/repository";
 import {
+	isLiveSnapshotConsistencyActive,
 	isLiveSnapshotDatabaseFallback,
+	LiveSnapshotCoherenceError,
 	loadLiveSnapshotMeta,
 	withLiveSnapshotConsistency,
 } from "../live/snapshot-meta";
@@ -300,6 +302,13 @@ export const loadLiveFixtureBucketsFromRedis = async (
 		}
 	}
 
+	if (meta && isLiveSnapshotConsistencyActive(context, eventId)) {
+		throw new LiveSnapshotCoherenceError(
+			eventId,
+			"LiveFixture",
+			`No complete live fixture view remains for revision ${meta.revision}`
+		);
+	}
 	return null;
 };
 

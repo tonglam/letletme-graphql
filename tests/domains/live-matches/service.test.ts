@@ -4,6 +4,10 @@ import {
 	loadLiveFixtureBucketsFromRedis,
 	resolveLiveMatchStatus,
 } from "../../../src/domains/live-matches/service";
+import {
+	isLiveSnapshotDatabaseFallback,
+	withLiveSnapshotConsistency,
+} from "../../../src/domains/live/snapshot-meta";
 import type { GraphQLContext } from "../../../src/graphql/context";
 
 describe("resolveLiveMatchStatus", () => {
@@ -116,5 +120,44 @@ describe("loadLiveFixtureBucketsFromRedis", () => {
 		const buckets = await loadLiveFixtureBucketsFromRedis(context, 33);
 		expect(buckets?.playing[0]).toMatchObject({ fixtureId: null, teamScore: 1 });
 		expect(keys).toEqual(["LiveFixtureV2:2526:33", "LiveFixture:2526:33"]);
+	});
+
+	it("forces whole-operation database mode when metadata has no complete fixture view", async () => {
+		const hgetallKeys: string[] = [];
+		const metadata = JSON.stringify({
+			schemaVersion: 1,
+			season: "2526",
+			eventId: 33,
+			revision: "c".repeat(24),
+			state: "live",
+			publishedAt: "2025-08-15T20:00:00.000Z",
+			checkedAt: "2025-08-15T20:00:00.000Z",
+			eventLiveCount: 700,
+			fixtureCount: 10,
+			fixtureTeamCount: 20,
+			bonusTeamCount: 2,
+		});
+		const context = {
+			redis: {
+				get: async (key: string) => {
+					if (key === "Season:active") return "2526";
+					if (key === "LiveSnapshotMeta:2526:33") return metadata;
+					return null;
+				},
+				hgetall: async (key: string) => {
+					hgetallKeys.push(key);
+					return {};
+				},
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+		} as unknown as GraphQLContext;
+
+		const result = await withLiveSnapshotConsistency(context, 33, () =>
+			loadLiveFixtureBucketsFromRedis(context, 33)
+		);
+
+		expect(result).toBeNull();
+		expect(isLiveSnapshotDatabaseFallback(context, 33)).toBe(true);
+		expect(hgetallKeys).toEqual(["LiveFixtureV2:2526:33", "LiveFixture:2526:33"]);
 	});
 });

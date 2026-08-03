@@ -102,4 +102,50 @@ describe("liveSnapshot GraphQL contract", () => {
 			bonusTeamCount: 0,
 		});
 	});
+
+	it("pins one inferred current event across sibling root fields", async () => {
+		const metadata = JSON.stringify({
+			schemaVersion: 1,
+			season: "2526",
+			eventId: 33,
+			revision: "d".repeat(24),
+			state: "live",
+			publishedAt: "2025-08-15T20:00:00.000Z",
+			checkedAt: "2025-08-15T20:01:00.000Z",
+			eventLiveCount: 700,
+			fixtureCount: 10,
+			fixtureTeamCount: 20,
+			bonusTeamCount: 2,
+		});
+		let currentEventReads = 0;
+		const context = {
+			redis: {
+				get: async (key: string): Promise<string | null> => {
+					if (key === "event:current") {
+						currentEventReads += 1;
+						return JSON.stringify({ id: currentEventReads === 1 ? 33 : 34, isCurrent: true });
+					}
+					if (key === "Season:active") return "2526";
+					if (key === "LiveSnapshotMeta:2526:33") return metadata;
+					return null;
+				},
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+			supabase: {},
+		} as unknown as GraphQLContext;
+
+		const result = await graphql({
+			schema,
+			source: `query {
+				first: liveSnapshot { eventId revision }
+				second: liveSnapshot { eventId revision }
+			}`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.first).toEqual({ eventId: 33, revision: "d".repeat(24) });
+		expect(result.data?.second).toEqual({ eventId: 33, revision: "d".repeat(24) });
+		expect(currentEventReads).toBe(1);
+	});
 });

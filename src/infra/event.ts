@@ -2,6 +2,7 @@ import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../graphql/context";
 
 const EVENT_CURRENT_KEY = "event:current";
+const currentEventIdMemo = new WeakMap<GraphQLContext, Promise<number | null>>();
 
 export type CurrentEventCache = {
 	id: number;
@@ -104,8 +105,18 @@ const getCurrentEventFromDatabase = async (
 	};
 };
 
-export const getCurrentEventId = async (context: GraphQLContext): Promise<number | null> => {
-	const current =
-		(await getCurrentEventFromRedis(context)) ?? (await getCurrentEventFromDatabase(context));
-	return current?.id ?? null;
+export const getCurrentEventId = (context: GraphQLContext): Promise<number | null> => {
+	const cached = currentEventIdMemo.get(context);
+	if (cached) return cached;
+
+	// A GraphQL context is created per operation. Pin the first current-event
+	// lookup so sibling live roots cannot straddle a gameweek transition and
+	// label event N data with event N+1 snapshot metadata.
+	const loading = (async (): Promise<number | null> => {
+		const current =
+			(await getCurrentEventFromRedis(context)) ?? (await getCurrentEventFromDatabase(context));
+		return current?.id ?? null;
+	})();
+	currentEventIdMemo.set(context, loading);
+	return loading;
 };
