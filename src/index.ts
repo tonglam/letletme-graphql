@@ -29,17 +29,17 @@ import {
 	resolveClientIp,
 } from "./http/security";
 import {
+	graphQLAdmissionSubjects,
 	graphQLIngressFailure,
-	graphQLCompatibilityAdmissionSubject,
 	graphQLMethodFailure,
 	graphQLWeightedRateLimitSubject,
-	requiresCompatibilityAdmission,
 } from "./http/graphql-policy";
 
 const GRAPHQL_RATE_LIMIT = 120;
 const GRAPHQL_SERVICE_RATE_LIMIT = 600;
 const SECURITY_OPERATION_RATE_LIMIT = 5;
 const RATE_LIMIT_WINDOW_SECONDS = 60;
+const GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT = 25 * RATE_LIMIT_WINDOW_SECONDS;
 
 function getCorsHeaders(origin: string | null): Record<string, string> {
 	const configuredOrigins = env.CORS_ORIGIN.split(",")
@@ -118,6 +118,62 @@ const jsonError = (
 			...corsHeaders,
 		},
 	});
+
+const enforceGraphQLRateLimit = async ({
+	scope,
+	keyScope = scope,
+	subject,
+	limit,
+	cost = 1,
+	message = "Too many requests",
+	corsHeaders,
+}: {
+	scope: string;
+	keyScope?: string;
+	subject: string;
+	limit: number;
+	cost?: number;
+	message?: string;
+	corsHeaders: Record<string, string>;
+}): Promise<Response | null> => {
+	let decision;
+	try {
+		decision = await checkRateLimit(
+			getRedis(),
+			rateLimitKey(keyScope, subject),
+			limit,
+			RATE_LIMIT_WINDOW_SECONDS,
+			cost
+		);
+	} catch (error) {
+		metrics.graphqlRateLimitDecisions.labels(scope, "storage_unavailable").inc();
+		try {
+			decision = handleRateLimitStorageFailure({
+				error,
+				failClosed: true,
+				scope,
+				logger,
+			});
+		} catch {
+			return jsonError(
+				503,
+				"RATE_LIMIT_STORAGE_UNAVAILABLE",
+				"Request safety checks are temporarily unavailable",
+				corsHeaders
+			);
+		}
+	}
+
+	if (!decision.allowed) {
+		metrics.graphqlRateLimitDecisions.labels(scope, "limited").inc();
+		return jsonError(429, "RATE_LIMITED", message, corsHeaders, {
+			"Retry-After": String(decision.retryAfterSeconds),
+		});
+	}
+
+	metrics.graphqlRateLimitDecisions.labels(scope, "allowed").inc();
+	return null;
+};
 
 async function healthCheck(): Promise<{ ok: boolean; body: string }> {
 	const checks: Record<string, string> = {};
@@ -227,6 +283,53 @@ const startServer = async (): Promise<void> => {
 						);
 					}
 
+					const peerAddress = bunServer.requestIP(request)?.address;
+					const clientIp = resolveClientIp(request.headers, peerAddress, env.TRUSTED_PROXY_HOPS);
+					const ingress = classifyGraphQLIngress(request.headers);
+					metrics.graphqlIngressRequests.labels(ingress.class).inc();
+					const ingressFailure = graphQLIngressFailure(ingress, env.REQUIRE_SIGNED_WEB_INGRESS);
+					if (ingressFailure) {
+						return jsonError(
+							ingressFailure.status,
+							ingressFailure.code,
+							ingressFailure.message,
+							corsHeaders
+						);
+					}
+
+					const compatibilityPrincipal =
+						ingress.class === "unsigned_user_context"
+							? verifyWebsitePrincipal(request.headers)
+							: null;
+					const admissionSubjects = graphQLAdmissionSubjects({
+						headers: request.headers,
+						ingress,
+						principal: compatibilityPrincipal,
+						fallbackSubject: clientIp,
+					});
+					const globalAdmissionFailure = await enforceGraphQLRateLimit({
+						scope: "graphql-global-admission",
+						subject: admissionSubjects.global,
+						limit: GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
+						corsHeaders,
+					});
+					if (globalAdmissionFailure) return globalAdmissionFailure;
+
+					let weightedRatePrecharged = false;
+					if (admissionSubjects.ingress) {
+						const ingressAdmissionFailure = await enforceGraphQLRateLimit({
+							scope: admissionSubjects.prechargesWeightedBudget
+								? "graphql-preauthorization"
+								: "graphql-ingress-admission",
+							keyScope: admissionSubjects.prechargesWeightedBudget ? "graphql" : undefined,
+							subject: admissionSubjects.ingress,
+							limit: ingress.class === "service" ? GRAPHQL_SERVICE_RATE_LIMIT : GRAPHQL_RATE_LIMIT,
+							corsHeaders,
+						});
+						if (ingressAdmissionFailure) return ingressAdmissionFailure;
+						weightedRatePrecharged = admissionSubjects.prechargesWeightedBudget;
+					}
+
 					const body = await readRequestBody(request);
 					let parsedBody: unknown = undefined;
 					if (body) {
@@ -246,68 +349,6 @@ const startServer = async (): Promise<void> => {
 					const limits = validateGraphQLRequestLimits(parsedBody, schema);
 					if (!limits.ok) {
 						return jsonError(400, limits.code, limits.message, corsHeaders);
-					}
-
-					const peerAddress = bunServer.requestIP(request)?.address;
-					const clientIp = resolveClientIp(request.headers, peerAddress, env.TRUSTED_PROXY_HOPS);
-					const ingress = classifyGraphQLIngress(request.headers);
-					metrics.graphqlIngressRequests.labels(ingress.class).inc();
-					const ingressFailure = graphQLIngressFailure(ingress, env.REQUIRE_SIGNED_WEB_INGRESS);
-					if (ingressFailure) {
-						return jsonError(
-							ingressFailure.status,
-							ingressFailure.code,
-							ingressFailure.message,
-							corsHeaders
-						);
-					}
-					const compatibilityPrincipal =
-						ingress.class === "unsigned_user_context"
-							? verifyWebsitePrincipal(request.headers)
-							: null;
-
-					if (requiresCompatibilityAdmission(ingress)) {
-						const admissionSubject = graphQLCompatibilityAdmissionSubject({
-							headers: request.headers,
-							ingress,
-							principal: compatibilityPrincipal,
-							fallbackSubject: clientIp,
-						});
-						let admissionRate;
-						try {
-							admissionRate = await checkRateLimit(
-								getRedis(),
-								rateLimitKey("graphql-compat-admission", admissionSubject),
-								GRAPHQL_RATE_LIMIT,
-								RATE_LIMIT_WINDOW_SECONDS
-							);
-						} catch (error) {
-							metrics.graphqlRateLimitDecisions
-								.labels("compat-admission", "storage_unavailable")
-								.inc();
-							try {
-								admissionRate = handleRateLimitStorageFailure({
-									error,
-									failClosed: true,
-									scope: "graphql-compat-admission",
-									logger,
-								});
-							} catch {
-								return jsonError(
-									503,
-									"RATE_LIMIT_STORAGE_UNAVAILABLE",
-									"Request safety checks are temporarily unavailable",
-									corsHeaders
-								);
-							}
-						}
-						if (!admissionRate.allowed) {
-							metrics.graphqlRateLimitDecisions.labels("compat-admission", "limited").inc();
-							return jsonError(429, "RATE_LIMITED", "Too many requests", corsHeaders, {
-								"Retry-After": String(admissionRate.retryAfterSeconds),
-							});
-						}
-						metrics.graphqlRateLimitDecisions.labels("compat-admission", "allowed").inc();
 					}
 
 					const { principal, user } = await resolvePrincipalAndUser(
@@ -332,77 +373,29 @@ const startServer = async (): Promise<void> => {
 					});
 					const rateLimit =
 						ingress.class === "service" ? GRAPHQL_SERVICE_RATE_LIMIT : GRAPHQL_RATE_LIMIT;
-					let requestRate;
-					try {
-						requestRate = await checkRateLimit(
-							getRedis(),
-							rateLimitKey("graphql", rateLimitSubject),
-							rateLimit,
-							RATE_LIMIT_WINDOW_SECONDS,
-							limits.rateLimitCostUnits
-						);
-					} catch (error) {
-						metrics.graphqlRateLimitDecisions.labels("graphql", "storage_unavailable").inc();
-						try {
-							requestRate = handleRateLimitStorageFailure({
-								error,
-								failClosed: true,
-								scope: "graphql",
-								logger,
-							});
-						} catch {
-							return jsonError(
-								503,
-								"RATE_LIMIT_STORAGE_UNAVAILABLE",
-								"Request safety checks are temporarily unavailable",
-								corsHeaders
-							);
-						}
-					}
-					if (!requestRate.allowed) {
-						metrics.graphqlRateLimitDecisions.labels("graphql", "limited").inc();
-						return jsonError(429, "RATE_LIMITED", "Too many requests", corsHeaders, {
-							"Retry-After": String(requestRate.retryAfterSeconds),
+					const remainingWeightedCost =
+						limits.rateLimitCostUnits - (weightedRatePrecharged ? 1 : 0);
+					if (remainingWeightedCost > 0) {
+						const weightedRateFailure = await enforceGraphQLRateLimit({
+							scope: "graphql",
+							subject: rateLimitSubject,
+							limit: rateLimit,
+							cost: remainingWeightedCost,
+							corsHeaders,
 						});
+						if (weightedRateFailure) return weightedRateFailure;
 					}
-					metrics.graphqlRateLimitDecisions.labels("graphql", "allowed").inc();
 
 					if (limits.securityOperation) {
-						try {
-							const securityRate = await checkRateLimit(
-								getRedis(),
-								rateLimitKey("legacy-session", rateLimitSubject),
-								SECURITY_OPERATION_RATE_LIMIT,
-								RATE_LIMIT_WINDOW_SECONDS,
-								limits.securityOperationCount
-							);
-							if (!securityRate.allowed) {
-								metrics.graphqlRateLimitDecisions.labels("legacy-session", "limited").inc();
-								return jsonError(429, "RATE_LIMITED", "Too many session attempts", corsHeaders, {
-									"Retry-After": String(securityRate.retryAfterSeconds),
-								});
-							}
-							metrics.graphqlRateLimitDecisions.labels("legacy-session", "allowed").inc();
-						} catch (error) {
-							metrics.graphqlRateLimitDecisions
-								.labels("legacy-session", "storage_unavailable")
-								.inc();
-							try {
-								handleRateLimitStorageFailure({
-									error,
-									failClosed: true,
-									scope: "legacy-session",
-									logger,
-								});
-							} catch {
-								return jsonError(
-									503,
-									"RATE_LIMIT_STORAGE_UNAVAILABLE",
-									"Request safety checks are temporarily unavailable",
-									corsHeaders
-								);
-							}
-						}
+						const securityRateFailure = await enforceGraphQLRateLimit({
+							scope: "legacy-session",
+							subject: rateLimitSubject,
+							limit: SECURITY_OPERATION_RATE_LIMIT,
+							cost: limits.securityOperationCount,
+							message: "Too many session attempts",
+							corsHeaders,
+						});
+						if (securityRateFailure) return securityRateFailure;
 					}
 					const headers = new HeaderMap();
 					request.headers.forEach((value, key) => {

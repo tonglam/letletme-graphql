@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { GraphQLIngress } from "../../src/infra/ingress-context";
 import {
+	graphQLAdmissionSubjects,
 	graphQLIngressFailure,
 	graphQLCompatibilityAdmissionSubject,
 	graphQLMethodFailure,
@@ -78,6 +79,58 @@ describe("GraphQL transport and ingress policy", () => {
 		expect(firstSubject).not.toBe(secondSubject);
 		expect(firstSubject).not.toContain(firstToken);
 		expect(secondSubject).not.toContain(secondToken);
+	});
+
+	it("keeps a non-rotatable global ceiling alongside fair ingress subjects", () => {
+		const first = graphQLAdmissionSubjects({
+			headers: new Headers({ Authorization: "Bearer rotating-token-1" }),
+			ingress: ingress({ class: "unsigned_bearer" }),
+			principal: null,
+			fallbackSubject: "127.0.0.1",
+		});
+		const second = graphQLAdmissionSubjects({
+			headers: new Headers({ Authorization: "Bearer rotating-token-2" }),
+			ingress: ingress({ class: "unsigned_bearer" }),
+			principal: null,
+			fallbackSubject: "127.0.0.1",
+		});
+		expect(first.global).toBe(second.global);
+		expect(first.ingress).not.toBe(second.ingress);
+		expect(first.prechargesWeightedBudget).toBe(false);
+		expect(second.prechargesWeightedBudget).toBe(false);
+	});
+
+	it("admits trusted ingress by its signed subject before authorization", () => {
+		const signed = graphQLAdmissionSubjects({
+			headers: new Headers(),
+			ingress: ingress({ class: "signed", trusted: true, subject: "signed-client" }),
+			principal: null,
+			fallbackSubject: "127.0.0.1",
+		});
+		expect(signed.ingress).toBe("signed-client");
+		expect(signed.prechargesWeightedBudget).toBe(true);
+		const compatibleWebsite = graphQLAdmissionSubjects({
+			headers: new Headers(),
+			ingress: ingress({ class: "unsigned_user_context" }),
+			principal: {
+				userId: "user-1",
+				source: "website",
+				provider: "better_auth",
+				fplEntryId: 7,
+				fplEntryVerifiedAt: "2026-08-03T00:00:00.000Z",
+			},
+			fallbackSubject: "127.0.0.1",
+		});
+		expect(compatibleWebsite.ingress).toBe("principal:better_auth:user-1");
+		expect(compatibleWebsite.prechargesWeightedBudget).toBe(true);
+		const anonymous = graphQLAdmissionSubjects({
+			headers: new Headers(),
+			ingress: ingress({ class: "anonymous" }),
+			principal: null,
+			fallbackSubject: "127.0.0.1",
+		});
+		expect(anonymous.ingress).toBeNull();
+		expect(anonymous.prechargesWeightedBudget).toBe(false);
 	});
 
 	it("separates validated compatibility users from shared network subjects", () => {

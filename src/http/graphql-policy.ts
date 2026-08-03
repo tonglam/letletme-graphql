@@ -73,6 +73,39 @@ export const graphQLCompatibilityAdmissionSubject = ({
 	return `peer:${fallbackSubject}`;
 };
 
+export const GRAPHQL_GLOBAL_ADMISSION_SUBJECT = "all-graphql-traffic";
+
+export const graphQLAdmissionSubjects = ({
+	headers,
+	ingress,
+	principal,
+	fallbackSubject,
+}: {
+	headers: Headers;
+	ingress: GraphQLIngress;
+	principal: Principal | null;
+	fallbackSubject: string;
+}): { global: string; ingress: string | null; prechargesWeightedBudget: boolean } => {
+	const ingressSubject =
+		ingress.subject ??
+		(requiresCompatibilityAdmission(ingress)
+			? graphQLCompatibilityAdmissionSubject({
+					headers,
+					ingress,
+					principal,
+					fallbackSubject,
+				})
+			: null);
+	return {
+		global: GRAPHQL_GLOBAL_ADMISSION_SUBJECT,
+		ingress: ingressSubject,
+		// Signed/service subjects and validated website principals are also the
+		// eventual weighted subject, so their pre-authorization unit can be charged
+		// directly to that budget. Unvalidated bearer fingerprints cannot.
+		prechargesWeightedBudget: Boolean(ingress.subject || principal),
+	};
+};
+
 export const graphQLWeightedRateLimitSubject = ({
 	ingress,
 	principal,

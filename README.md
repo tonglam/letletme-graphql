@@ -38,12 +38,18 @@ IDs are rejected before resolver work. Rate limits are weighted: signed client
 subjects receive 120 units/minute, cached public Web reads receive 600
 units/minute, and legacy session attempts retain a separate five/minute limit.
 All GraphQL limits fail closed when Redis is unavailable.
-During compatibility mode, credential-bearing direct traffic first passes a
-separate 120-request/minute admission bucket keyed by a non-logging credential
-fingerprint or validated principal. Protected requests are authorized before
-weighted charging, and validated legacy users receive distinct weighted
-subjects instead of sharing a network bucket. Anonymous public reads skip the
-credential-validation admission bucket.
+Every GraphQL POST first passes a non-rotatable global 1,500-request/minute
+emergency ceiling (the planned 25 requests/second edge rate averaged over this
+window). Signed and credential-bearing traffic then passes a 120-request/minute
+admission bucket keyed by its trusted subject, non-logging credential
+fingerprint, or validated principal; the shared public Web service receives
+600 requests/minute. Both checks happen before body parsing or database-backed
+authorization. Weighted charging still happens after authorization, and
+validated legacy users receive distinct subjects instead of sharing a network
+bucket. For signed ingress and validated website principals, the admission unit
+is charged directly to the weighted budget, so an exhausted subject is rejected
+before membership authorization. Anonymous public reads use the global and
+weighted budgets but skip the credential-validation admission bucket.
 
 ## Verification
 
