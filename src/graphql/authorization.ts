@@ -66,6 +66,7 @@ const publicFields = new Set([
 	"topTransfersOut",
 	"playerValues",
 	"playerValueHistory",
+	"marketPulse",
 	"playerDetail",
 	"miniProgramNotice",
 	"eventOverallResult",

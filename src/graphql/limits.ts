@@ -206,6 +206,7 @@ const inspectSelectionSet = ({
 	for (const selection of selectionSet.selections) {
 		if (selection.kind === Kind.FIELD) {
 			if (selection.alias) aliases += 1;
+			const isIntrospectionField = selection.name.value.startsWith("__");
 			const fieldDefinition =
 				parentType && (isObjectType(parentType) || isInterfaceType(parentType))
 					? parentType.getFields()[selection.name.value]
@@ -222,6 +223,11 @@ const inspectSelectionSet = ({
 			duplicateEntryIds ||= weight.duplicateEntryIds;
 			negativeListLimit ||= weight.negativeListLimit;
 			complexity += childMultiplier;
+			// Apollo exposes introspection only outside production, and the
+			// graphql-depth-limit validator already treats __ fields as leaves.
+			// Mirror that behavior here so development schema verification is not
+			// rejected by the independent request guard before Apollo sees it.
+			if (isIntrospectionField) continue;
 			if (selection.selectionSet) {
 				const namedChildType = fieldDefinition ? getNamedType(fieldDefinition.type) : null;
 				const child = inspectSelectionSet({
@@ -318,6 +324,7 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["eventOverallResult", 5],
 	["playerDetail", 5],
 	["playerValueHistory", 5],
+	["marketPulse", 10],
 	["liveMatches", 10],
 	["calcLivePointsByEntry", 10],
 	["tournamentSelectionStats", 10],

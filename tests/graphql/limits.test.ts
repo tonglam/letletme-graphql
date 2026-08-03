@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { getIntrospectionQuery } from "graphql";
 import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
 import { schema } from "../../src/graphql/schema";
 
@@ -8,6 +9,15 @@ describe("GraphQL request limits", () => {
 			query: "query { events { id name } }",
 		});
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1 });
+	});
+
+	it("allows standard introspection where Apollo has enabled it", () => {
+		const result = validateGraphQLRequestLimits({ query: getIntrospectionQuery() }, schema);
+		expect(result).toMatchObject({
+			ok: true,
+			weightedComplexity: 1,
+			rateLimitCostUnits: 1,
+		});
 	});
 
 	it("charges weighted complexity in ten-point units", () => {
@@ -59,6 +69,47 @@ describe("GraphQL request limits", () => {
 			weightedComplexity: 400,
 			rateLimitCostUnits: 40,
 		});
+	});
+
+	it("keeps the fixed-size Market pulse below the public complexity guard", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query MarketPulse($days: Int = 14) {
+						marketPulse(days: $days) {
+							coverage {
+								requestedDays observedDays firstDate latestDate capturedAt complete stale
+							}
+							mostSelected { ...MarketPlayerFields }
+							ownershipMovers {
+								risers { player { ...MarketPlayerFields } previousSelectedByPercent selectedByPercent change }
+								fallers { player { ...MarketPlayerFields } previousSelectedByPercent selectedByPercent change }
+							}
+							transferMovers { player { ...MarketPlayerFields } transfersIn transfersOut netTransfers }
+							availabilityUpdates {
+								player { ...MarketPlayerFields }
+								status previousStatus news newsAdded observedDate
+								chanceOfPlayingThisRound chanceOfPlayingNextRound
+							}
+							newPlayers { player { ...MarketPlayerFields } firstObservedDate }
+							priceChanges {
+								player { ...MarketPlayerFields }
+								changeDate oldPrice newPrice change direction
+							}
+						}
+					}
+					fragment MarketPlayerFields on MarketPlayer {
+						playerId playerCode webName teamId teamName teamShortName position price selectedByPercent
+					}
+				`,
+				variables: { days: 14 },
+			},
+			schema
+		);
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error(result.message);
+		expect(result.weightedComplexity).toBeLessThan(600);
 	});
 
 	it("sums heavy root floors, including aliases", () => {
