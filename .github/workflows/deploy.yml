@@ -68,7 +68,7 @@ jobs:
           echo "IMAGE_REF=${IMAGE_NAME}:${DEPLOY_SHA}" >> $GITHUB_ENV
 
       - name: Deploy on VPS
-        uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17 # v1.2.0
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
           IMAGE_REF: ${{ env.IMAGE_REF }}
