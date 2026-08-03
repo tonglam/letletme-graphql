@@ -906,6 +906,15 @@ const shapedLiveCacheKey = (
 		? gqlCacheKey(season, `live:all:${eventId}:revision:${meta.revision}`)
 		: gqlCacheKey(season, `live:all:${eventId}:fallback15`);
 
+const shapedLiveFallbackCacheKey = (
+	season: string,
+	eventId: number,
+	meta: LiveSnapshotMeta | null
+): string =>
+	meta
+		? gqlCacheKey(season, `live:all:${eventId}:revision:${meta.revision}:fallback15`)
+		: shapedLiveCacheKey(season, eventId, null);
+
 const readShapedLiveCache = async (
 	context: GraphQLContext,
 	cacheKey: string
@@ -961,7 +970,12 @@ export const liveRepository: LiveRepository = {
 		const season = await getCurrentSeason(context);
 		const requestedMeta = await loadLiveSnapshotMeta(context, eventId, { season });
 		const requestedCacheKey = shapedLiveCacheKey(season, eventId, requestedMeta);
-		const cached = await readShapedLiveCache(context, requestedCacheKey);
+		const requestedFallbackKey = shapedLiveFallbackCacheKey(season, eventId, requestedMeta);
+		const cached =
+			(await readShapedLiveCache(context, requestedCacheKey)) ??
+			(requestedFallbackKey !== requestedCacheKey
+				? await readShapedLiveCache(context, requestedFallbackKey)
+				: null);
 		if (cached) return cached;
 
 		const flightKey = `${season}:${eventId}:${requestedMeta?.revision ?? "fallback"}`;
@@ -971,7 +985,11 @@ export const liveRepository: LiveRepository = {
 
 		const flight = (async (): Promise<Map<number, LivePerformance>> => {
 			// A sibling request may have populated the cache before this flight won.
-			const cacheAfterFlightElection = await readShapedLiveCache(context, requestedCacheKey);
+			const cacheAfterFlightElection =
+				(await readShapedLiveCache(context, requestedCacheKey)) ??
+				(requestedFallbackKey !== requestedCacheKey
+					? await readShapedLiveCache(context, requestedFallbackKey)
+					: null);
 			if (cacheAfterFlightElection) return cacheAfterFlightElection;
 
 			const redisSnapshot = await loadEventLiveFromRedis(context, eventId, season);
@@ -1001,7 +1019,7 @@ export const liveRepository: LiveRepository = {
 			// producer's next repair is visible immediately through a revision key.
 			await writeShapedLiveCache(
 				context,
-				shapedLiveCacheKey(season, eventId, null),
+				shapedLiveFallbackCacheKey(season, eventId, redisSnapshot?.meta ?? requestedMeta),
 				fromDb,
 				LIVE_FALLBACK_CACHE_TTL_SEC
 			);
@@ -1147,12 +1165,38 @@ export const liveRepository: LiveRepository = {
 		// Use HMGET with specific player IDs — avoids loading all 700+ players via HGETALL.
 		const season = await getCurrentSeason(context);
 		const hashKey = redisKey.eventLive(season, eventId);
+		const meta = await loadLiveSnapshotMeta(context, eventId, { season });
+		const readValidatedFallback = async (): Promise<LivePerformance[]> => {
+			const all = await this.getAllLivePerformances(context, eventId);
+			return uniqueIds
+				.map((playerId) => all.get(playerId))
+				.filter((performance): performance is LivePerformance => performance !== undefined);
+		};
 		let values: (string | null)[];
+		let hashLength: number;
 		try {
-			values = await context.redis.hmget(hashKey, ...uniqueIds.map(String));
+			[hashLength, values] = await Promise.all([
+				context.redis.hlen(hashKey),
+				context.redis.hmget(hashKey, ...uniqueIds.map(String)),
+			]);
 		} catch (err) {
 			context.logger.warn({ err, hashKey }, "EventLive HMGET failed, falling back to DB");
-			return fetchLivePerformanceFromDbByEventsAndPlayerIds(context, [eventId], uniqueIds);
+			return meta
+				? readValidatedFallback()
+				: fetchLivePerformanceFromDbByEventsAndPlayerIds(context, [eventId], uniqueIds);
+		}
+
+		if (meta && hashLength !== meta.eventLiveCount) {
+			context.logger.warn(
+				{
+					hashKey,
+					revision: meta.revision,
+					expectedCount: meta.eventLiveCount,
+					actualCount: hashLength,
+				},
+				"Incomplete EventLive revision during targeted read"
+			);
+			return readValidatedFallback();
 		}
 
 		const results: LivePerformance[] = [];
@@ -1163,13 +1207,20 @@ export const liveRepository: LiveRepository = {
 			const parsed = parseJsonUnknown(value);
 			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
 			const perf = mapSyncJobLiveRow(parsed as Record<string, unknown>);
-			if (perf) {
+			if (perf && perf.playerId === uniqueIds[i] && perf.eventId === eventId) {
 				results.push(perf);
 				hitIds.add(uniqueIds[i]);
 			}
 		}
 
 		const missIds = uniqueIds.filter((id) => !hitIds.has(id));
+		if (meta && missIds.length > 0) {
+			context.logger.warn(
+				{ hashKey, revision: meta.revision, missIds },
+				"Malformed or missing EventLive field during targeted read"
+			);
+			return readValidatedFallback();
+		}
 		if (missIds.length > 0) {
 			const fromDb = await fetchLivePerformanceFromDbByEventsAndPlayerIds(
 				context,

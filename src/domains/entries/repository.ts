@@ -514,12 +514,50 @@ export const entriesRepository: EntriesRepository = {
 		const uniqueIds = Array.from(new Set(entryIds.filter((id) => Number.isInteger(id) && id > 0)));
 		if (uniqueIds.length === 0 || eventId <= 0) return new Map();
 
+		const season = await getCurrentSeason(context);
+		const cacheKeys = uniqueIds.map((entryId) =>
+			gqlCacheKey(season, `entries:event-result:${entryId}:${eventId}`)
+		);
+		const results = new Map<number, EntryEventResult>();
+		const missIds: number[] = [];
+		try {
+			const cached = await context.redis.mget(...cacheKeys);
+			for (let index = 0; index < uniqueIds.length; index += 1) {
+				const raw = cached[index];
+				if (raw) {
+					try {
+						const parsed: unknown = JSON.parse(raw);
+						if (
+							isEntryEventResult(parsed) &&
+							parsed.entryId === uniqueIds[index] &&
+							parsed.eventId === eventId
+						) {
+							results.set(uniqueIds[index], parsed);
+							continue;
+						}
+					} catch (error) {
+						context.logger.warn(
+							{ err: error, key: cacheKeys[index] },
+							"Malformed batched entry event result cache"
+						);
+					}
+					await evictMalformedCache(context, cacheKeys[index]);
+				}
+				missIds.push(uniqueIds[index]);
+			}
+		} catch (error) {
+			context.logger.warn({ err: error, eventId }, "Failed to batch read entry event caches");
+			missIds.push(...uniqueIds);
+		}
+
+		if (missIds.length === 0) return results;
+
 		const { data, error } = await context.supabase
 			.from("entry_event_results")
 			.select(
 				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
 			)
-			.in("entry_id", uniqueIds)
+			.in("entry_id", missIds)
 			.eq("event_id", eventId);
 
 		if (error) {
@@ -530,11 +568,18 @@ export const entriesRepository: EntriesRepository = {
 			throw new Error("Failed to fetch entry event baselines");
 		}
 
-		return new Map(
-			((data as DbEntryEventResultRow[] | null) ?? []).map((row) => {
-				const result = mapEntryEventResult(row);
-				return [result.entryId, result];
-			})
-		);
+		const pipeline = context.redis.pipeline();
+		for (const row of (data as DbEntryEventResultRow[] | null) ?? []) {
+			const result = mapEntryEventResult(row);
+			results.set(result.entryId, result);
+			pipeline.set(
+				gqlCacheKey(season, `entries:event-result:${result.entryId}:${eventId}`),
+				JSON.stringify(result),
+				"EX",
+				env.CACHE_TTL_SECONDS
+			);
+		}
+		await pipeline.exec();
+		return results;
 	},
 };

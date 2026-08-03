@@ -414,7 +414,10 @@ export const entryLiveRepository: EntryLiveRepository = {
 
 		const { data, error } = await context.supabase
 			.from("entry_event_picks")
-			.select("entry_id, event_id, chip, transfers_cost, picks")
+			// Keep legacy column compatibility during rolling schema upgrades. The
+			// batch mapper below intentionally accepts picks/pick_list/elements,
+			// chip/active_chip, and all historical transfer-cost names.
+			.select("*")
 			.in("entry_id", missIds)
 			.eq("event_id", eventId);
 
