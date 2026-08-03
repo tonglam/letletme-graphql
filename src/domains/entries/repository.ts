@@ -579,7 +579,14 @@ export const entriesRepository: EntriesRepository = {
 				env.CACHE_TTL_SECONDS
 			);
 		}
-		await pipeline.exec();
+		try {
+			await pipeline.exec();
+		} catch (error) {
+			context.logger.warn(
+				{ err: error, entryIds: missIds, eventId },
+				"Failed to cache entry event baselines"
+			);
+		}
 		return results;
 	},
 };

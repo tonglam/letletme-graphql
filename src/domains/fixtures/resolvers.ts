@@ -3,6 +3,7 @@ import { buildTeamMap } from "../../infra/team-map";
 import type { Team } from "../../infra/types";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
+import { withLiveSnapshotConsistency, withLiveSnapshotRoot } from "../live/snapshot-meta";
 import type { Fixture, FixturesFilter } from "./repository";
 import { fixturesService } from "./service";
 
@@ -65,7 +66,12 @@ export const fixturesResolvers = {
 			_parent: unknown,
 			args: EventFixturesArgs,
 			context: GraphQLContext
-		): Promise<Fixture[]> => fixturesService.getEventFixtures(context, args.eventId),
+		): Promise<Fixture[]> =>
+			withLiveSnapshotRoot(context, () =>
+				withLiveSnapshotConsistency(context, args.eventId, () =>
+					fixturesService.getEventFixtures(context, args.eventId)
+				)
+			),
 	},
 	Fixture: {
 		event: async (

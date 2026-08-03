@@ -24,6 +24,7 @@ type LiveSnapshotOperationState = {
 	candidateRevision: string | null | undefined;
 	databaseFallback: boolean;
 	finalMeta: LiveSnapshotMeta | null | undefined;
+	finalMetaLoading: Promise<LiveSnapshotMeta | null> | null;
 	waiters: Set<() => void>;
 };
 
@@ -89,6 +90,7 @@ const getOperationState = (
 			candidateRevision: undefined,
 			databaseFallback: false,
 			finalMeta: undefined,
+			finalMetaLoading: null,
 			waiters: new Set(),
 		};
 		byEvent.set(eventId, state);
@@ -332,7 +334,18 @@ export const loadOperationLiveSnapshotMeta = async (
 	}
 	if (state.databaseFallback) return null;
 	if (state.finalMeta !== undefined) return state.finalMeta;
-	return loadLiveSnapshotMeta(context, eventId, { fresh: true });
+	if (!state.finalMetaLoading) {
+		state.finalMetaLoading = (async (): Promise<LiveSnapshotMeta | null> => {
+			const meta = await loadLiveSnapshotMeta(context, eventId, { fresh: true });
+			if (state.databaseFallback) {
+				state.finalMeta = null;
+				return null;
+			}
+			rememberOperationMeta(state, meta);
+			return state.finalMeta ?? null;
+		})();
+	}
+	return state.finalMetaLoading;
 };
 
 /**
