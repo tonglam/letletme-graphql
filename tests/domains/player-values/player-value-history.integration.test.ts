@@ -13,6 +13,7 @@ type HistoryRow = {
 	value: number;
 	last_value: number | null;
 	change_date: string;
+	change_type?: string | null;
 };
 
 type QueryError = {
@@ -143,6 +144,39 @@ const historyQuery = `
 `;
 
 describe("playerValueHistory integration", () => {
+	it("excludes the season baseline instead of reporting a false zero-price rise", async () => {
+		const rows: HistoryRow[] = [
+			{
+				element_id: 10,
+				value: 156,
+				last_value: 155,
+				change_date: "20260803",
+				change_type: "rise",
+			},
+			{
+				element_id: 10,
+				value: 155,
+				last_value: 0,
+				change_date: "20260802",
+				change_type: "start",
+			},
+		];
+
+		const result = await graphql({
+			schema: testSchema,
+			source: historyQuery,
+			contextValue: createGraphQLContext(rows),
+			variableValues: { playerId: 10 },
+		});
+
+		expect(result.errors).toBeUndefined();
+		const data = result.data as {
+			playerValueHistory: Array<{ oldValue: number; newValue: number }>;
+		} | null;
+		expect(data?.playerValueHistory).toHaveLength(1);
+		expect(data?.playerValueHistory[0]).toMatchObject({ oldValue: 155, newValue: 156 });
+	});
+
 	it("returns history rows with computed changeType", async () => {
 		const rows: HistoryRow[] = [
 			{

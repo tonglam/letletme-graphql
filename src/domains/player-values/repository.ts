@@ -87,6 +87,7 @@ type DbPlayerValueHistoryRow = {
 	value: number;
 	last_value: number | null;
 	change_date: string | Date;
+	change_type: string | null;
 };
 
 type DbPlayerMetadataRow = {
@@ -188,7 +189,7 @@ function toTenthsValue(value: number | null | undefined): number {
 function buildHistoryCacheKey(args: GetPlayerValueHistoryArgs): string {
 	const from = args.fromDate ? getDateKey(args.fromDate) : "none";
 	const to = args.toDate ? getDateKey(args.toDate) : "none";
-	return `player-value-history:${args.playerId}:${from}:${to}`;
+	return `player-value-history:v2:${args.playerId}:${from}:${to}`;
 }
 
 const mapDbRowToPlayerValue = (row: DbPlayerValueRow): PlayerValue => {
@@ -243,12 +244,12 @@ function mapHistoryRows(rows: DbPlayerValueHistoryRow[]): PlayerValueHistoryRepo
 	for (let index = 0; index < normalizedRows.length; index += 1) {
 		const current = normalizedRows[index];
 		const previous = normalizedRows[index + 1];
-		const fallbackOldValue = current.row.last_value ?? current.row.value;
+		const fallbackOldValue = current.row.last_value ?? previous?.row.value ?? current.row.value;
 
 		history.push({
 			playerId: current.row.element_id,
 			changeDate: current.parsedDate,
-			oldValue: toTenthsValue(previous?.row.value ?? fallbackOldValue),
+			oldValue: toTenthsValue(fallbackOldValue),
 			newValue: toTenthsValue(current.row.value),
 			transfersIn: null,
 			transfersOut: null,
@@ -655,7 +656,7 @@ export const playerValuesRepository: PlayerValuesRepository = {
 		try {
 			let query = context.supabase
 				.from("player_values")
-				.select("element_id, value, last_value, change_date")
+				.select("element_id, value, last_value, change_date, change_type")
 				.eq("element_id", args.playerId)
 				.order("change_date", { ascending: false });
 
@@ -677,7 +678,10 @@ export const playerValuesRepository: PlayerValuesRepository = {
 				throw new Error(error.message, { cause: error });
 			}
 
-			const rows = (data as DbPlayerValueHistoryRow[] | null) ?? [];
+			const rows = ((data as DbPlayerValueHistoryRow[] | null) ?? []).filter((row) => {
+				if (row.change_type?.toLowerCase() === "start") return false;
+				return row.last_value !== 0;
+			});
 			if (rows.length === 0) {
 				await context.redis.set(cacheKey, NULL_SENTINEL, "EX", 3600);
 				return [];

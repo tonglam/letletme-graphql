@@ -31,6 +31,7 @@ suite("forward migration security", () => {
 
 		const functions = [
 			"get_players_for_picker(integer,integer)",
+			"search_players_for_picker(text,integer,integer)",
 			"get_captain_counts(integer,text,integer)",
 			"get_pick_aggregation(integer,integer[])",
 			"get_transfer_aggregation(integer,integer[])",
@@ -68,10 +69,11 @@ suite("forward migration security", () => {
 		await expect(
 			Promise.all([
 				pool.query("SELECT * FROM public.get_players_for_picker(2, NULL)"),
+				pool.query("SELECT * FROM public.search_players_for_picker('a', 2, NULL)"),
 				pool.query("SELECT * FROM public.get_captain_counts(1, 'classic', 1)"),
 				pool.query("SELECT * FROM public.get_pick_aggregation(1, ARRAY[]::integer[])"),
 				pool.query("SELECT * FROM public.get_transfer_aggregation(1, ARRAY[]::integer[])"),
 			])
-		).resolves.toHaveLength(4);
+		).resolves.toHaveLength(5);
 	});
 });

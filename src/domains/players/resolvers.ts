@@ -1,3 +1,4 @@
+import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import { buildTeamMap } from "../../infra/team-map";
 import type {
@@ -93,9 +94,21 @@ type TopTransfersArgs = {
 };
 
 type PlayersForPickerArgs = {
+	search?: string | null;
 	limit?: number | null;
 	cursor?: number | null;
 };
+
+export function normalizePlayerPickerSearch(search: string | null | undefined): string | null {
+	const normalized = search?.trim() ?? "";
+	if (normalized.length === 0) return null;
+	if (normalized.length > 50) {
+		throw new GraphQLError("Player search must be 50 characters or fewer", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
+	return normalized;
+}
 
 const stringToPosition = (positionStr: string): Position => {
 	switch (positionStr) {
@@ -142,7 +155,12 @@ export const playersResolvers = {
 			args: PlayersForPickerArgs,
 			context: GraphQLContext
 		): Promise<PlayersForPickerPayload> =>
-			playersService.getPlayersForPicker(context, args.limit ?? 20, args.cursor ?? null),
+			playersService.getPlayersForPicker(
+				context,
+				args.limit ?? 20,
+				args.cursor ?? null,
+				normalizePlayerPickerSearch(args.search)
+			),
 
 		team: async (_parent: unknown, args: TeamArgs, context: GraphQLContext): Promise<Team | null> =>
 			playersService.getTeamById(context, args.id),

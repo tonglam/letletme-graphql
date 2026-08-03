@@ -197,7 +197,8 @@ interface PlayersRepository {
 	getPlayersForPicker(
 		context: GraphQLContext,
 		limit: number,
-		cursor: number | null | undefined
+		cursor: number | null | undefined,
+		search?: string | null
 	): Promise<PlayersForPickerPayload>;
 	listPlayers(
 		context: GraphQLContext,
@@ -253,7 +254,9 @@ const fetchTopTransferRows = async (
 		throw new Error("Failed to fetch top transfer rows");
 	}
 
-	return (data as RawTransferRow[] | null) ?? [];
+	return ((data as RawTransferRow[] | null) ?? []).filter((row) =>
+		direction === "in" ? (row.transfers_in_event ?? 0) > 0 : (row.transfers_out_event ?? 0) > 0
+	);
 };
 
 export const playersRepository: PlayersRepository = {
@@ -595,12 +598,18 @@ export const playersRepository: PlayersRepository = {
 	async getPlayersForPicker(
 		context: GraphQLContext,
 		limit: number,
-		cursor: number | null | undefined
+		cursor: number | null | undefined,
+		search?: string | null
 	): Promise<PlayersForPickerPayload> {
 		const safeLimit = clampLimit(limit);
 		const safeCursor = cursor && Number.isFinite(cursor) && cursor > 0 ? cursor : null;
+		const safeSearch = search?.trim().slice(0, 50) || null;
 		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `players:picker:${safeLimit}:${safeCursor ?? 0}`);
+		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
+		const cacheKey = gqlCacheKey(
+			season,
+			`players:picker:v2:${searchKey}:${safeLimit}:${safeCursor ?? 0}`
+		);
 
 		const cached = await readJsonCache(
 			context,
@@ -620,14 +629,20 @@ export const playersRepository: PlayersRepository = {
 			return cached;
 		}
 
-		const result = await context.supabase.rpc("get_players_for_picker", {
-			p_limit: safeLimit,
-			p_cursor: safeCursor,
-		});
+		const result = safeSearch
+			? await context.supabase.rpc("search_players_for_picker", {
+					p_query: safeSearch,
+					p_limit: safeLimit,
+					p_cursor: safeCursor,
+				})
+			: await context.supabase.rpc("get_players_for_picker", {
+					p_limit: safeLimit,
+					p_cursor: safeCursor,
+				});
 
 		if (result.error) {
 			context.logger.error(
-				{ err: result.error, limit: safeLimit, cursor: safeCursor },
+				{ err: result.error, limit: safeLimit, cursor: safeCursor, search: safeSearch },
 				"Failed to fetch players for picker"
 			);
 			throw new Error("Failed to fetch players for picker");
@@ -716,6 +731,7 @@ export const playersRepository: PlayersRepository = {
 			transfersInEvent: row.transfers_in_event ?? 0,
 			transfersOutEvent: row.transfers_out_event ?? 0,
 		}));
+		if (stats.length === 0) return empty;
 
 		const playerMap = await this.getPlayersByIdsForEvent(
 			context,
@@ -742,6 +758,7 @@ export const playersRepository: PlayersRepository = {
 			transfersInEvent: row.transfers_in_event ?? 0,
 			transfersOutEvent: row.transfers_out_event ?? 0,
 		}));
+		if (stats.length === 0) return empty;
 
 		const playerMap = await this.getPlayersByIdsForEvent(
 			context,

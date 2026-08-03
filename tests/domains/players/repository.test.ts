@@ -1,6 +1,84 @@
 import { describe, expect, it } from "bun:test";
 import { playersRepository } from "../../../src/domains/players/repository";
 
+describe("playersRepository.getPlayersForPicker", () => {
+	it("uses the bounded server-side search RPC when a query is present", async () => {
+		const calls: Array<{ name: string; params: Record<string, unknown> }> = [];
+		const context = {
+			redis: {
+				get: async (key: string) => (key === "Season:active" ? "2627" : null),
+				set: async () => "OK",
+				del: async () => 1,
+			},
+			supabase: {
+				rpc: async (name: string, params: Record<string, unknown>) => {
+					calls.push({ name, params });
+					return {
+						data: [
+							{
+								id: 9,
+								web_name: "Haaland",
+								element_type: 4,
+								team_id: 12,
+								team_name: "Manchester City",
+								team_short_name: "MCI",
+							},
+						],
+						error: null,
+					};
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const result = await playersRepository.getPlayersForPicker(context, 12, null, "Haal");
+
+		expect(result.items[0]).toMatchObject({ id: 9, webName: "Haaland" });
+		expect(calls).toEqual([
+			{
+				name: "search_players_for_picker",
+				params: { p_query: "Haal", p_limit: 12, p_cursor: null },
+			},
+		]);
+	});
+});
+
+describe("playersRepository top transfers", () => {
+	it("returns no rows when every event transfer count is zero", async () => {
+		const queryResult = {
+			data: [
+				{
+					element_id: 1,
+					event_id: 1,
+					transfers_in_event: 0,
+					transfers_out_event: 0,
+				},
+			],
+			error: null,
+		};
+		const builder = {
+			select: () => builder,
+			eq: () => builder,
+			not: () => builder,
+			order: () => builder,
+			limit: async () => queryResult,
+		};
+		const context = {
+			supabase: { from: () => builder },
+			logger: { error: () => undefined },
+		} as never;
+
+		expect(await playersRepository.getTopTransfersInEnriched(context, 1, 10)).toEqual({
+			stats: [],
+			players: {},
+		});
+		expect(await playersRepository.getTopTransfersOutEnriched(context, 1, 10)).toEqual({
+			stats: [],
+			players: {},
+		});
+	});
+});
+
 describe("playersRepository.getPlayerById", () => {
 	it("reads the latest Player hash price on every call", async () => {
 		let price = 75;

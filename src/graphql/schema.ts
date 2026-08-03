@@ -19,6 +19,8 @@ import { liveResolvers } from "../domains/live/resolvers";
 import { liveTypeDefs } from "../domains/live/schema";
 import { liveMatchesResolvers } from "../domains/live-matches/resolvers";
 import { liveMatchesTypeDefs } from "../domains/live-matches/schema";
+import { marketResolvers } from "../domains/market/resolvers";
+import { marketTypeDefs } from "../domains/market/schema";
 import { miniProgramResolvers } from "../domains/mini-program/resolvers";
 import { miniProgramTypeDefs } from "../domains/mini-program/schema";
 import { playerDetailResolvers } from "../domains/player-detail/resolvers";
@@ -46,6 +48,7 @@ export const schema = makeExecutableSchema({
 		miniProgramTypeDefs,
 		entryLiveTypeDefs,
 		liveMatchesTypeDefs,
+		marketTypeDefs,
 		leaguesTypeDefs,
 		tournamentsTypeDefs,
 		entriesTypeDefs,
@@ -64,6 +67,7 @@ export const schema = makeExecutableSchema({
 		liveResolvers,
 		miniProgramResolvers,
 		liveMatchesResolvers,
+		marketResolvers,
 		entryLiveResolvers,
 		leaguesResolvers,
 		tournamentsResolvers,

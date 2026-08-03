@@ -1,0 +1,284 @@
+import { describe, expect, it } from "bun:test";
+import {
+	buildMarketPulse,
+	createMarketRepository,
+	emptyMarketPulse,
+	type MarketSnapshotRow,
+} from "../../../src/domains/market/repository";
+
+const baseRow = (
+	date: string,
+	elementId: number,
+	overrides: Partial<MarketSnapshotRow> = {}
+): MarketSnapshotRow => ({
+	snapshot_date: date,
+	captured_at: `${date}T01:40:00.000Z`,
+	element_id: elementId,
+	player_code: 1000 + elementId,
+	web_name: `Player ${elementId}`,
+	team_id: 1,
+	team_name: "Arsenal",
+	team_short_name: "ARS",
+	element_type: 3,
+	position: "MID",
+	price: 70,
+	selected_by_percent: 10,
+	transfers_in: 0,
+	transfers_out: 0,
+	status: "a",
+	news: "",
+	news_added: null,
+	chance_of_playing_this_round: 100,
+	chance_of_playing_next_round: 100,
+	baseline_date: "2026-08-01",
+	first_observed_date: "2026-08-01",
+	previous_price: null,
+	previous_transfers_in: null,
+	previous_transfers_out: null,
+	previous_status: null,
+	previous_news: null,
+	previous_chance_this_round: null,
+	previous_chance_next_round: null,
+	...overrides,
+});
+
+const buildContext = (cacheSeed?: string) => {
+	const strings = new Map<string, string>([["Season:active", "2627"]]);
+	if (cacheSeed !== undefined) {
+		strings.set("gql:v2:2627:market-pulse:v1:14", cacheSeed);
+	}
+	const writes: Array<{ key: string; value: string; ttl: number }> = [];
+	const deletes: string[] = [];
+	return {
+		strings,
+		writes,
+		deletes,
+		context: {
+			redis: {
+				get: async (key: string) => strings.get(key) ?? null,
+				set: async (key: string, value: string, _mode: string, ttl: number) => {
+					strings.set(key, value);
+					writes.push({ key, value, ttl });
+					return "OK";
+				},
+				del: async (key: string) => {
+					strings.delete(key);
+					deletes.push(key);
+					return 1;
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+			supabase: {},
+		} as never,
+	};
+};
+
+describe("buildMarketPulse", () => {
+	it("returns an honest no-observation response", () => {
+		expect(buildMarketPulse([], 14)).toEqual(emptyMarketPulse(14));
+	});
+
+	it("builds movers without treating newcomers or counter resets as jumps", () => {
+		const rows: MarketSnapshotRow[] = [
+			baseRow("2026-08-01", 1, { selected_by_percent: 10 }),
+			baseRow("2026-08-01", 2, {
+				selected_by_percent: 20,
+				transfers_in: 10,
+				status: "d",
+				news: "Knock - 50% chance of playing",
+			}),
+			baseRow("2026-08-03", 1, {
+				selected_by_percent: 15,
+				price: 71,
+				previous_price: 70,
+				transfers_in: 10,
+				transfers_out: 2,
+				previous_transfers_in: 0,
+				previous_transfers_out: 0,
+				status: "d",
+				previous_status: "a",
+				news: "Hamstring injury",
+				previous_news: "",
+				news_added: "2026-08-02T08:00:00Z",
+				previous_chance_this_round: 100,
+				chance_of_playing_this_round: 25,
+			}),
+			baseRow("2026-08-03", 2, {
+				selected_by_percent: 15,
+				transfers_in: 1,
+				previous_transfers_in: 10,
+				previous_transfers_out: 0,
+				status: "a",
+				previous_status: "d",
+				news: "",
+				previous_news: "Knock - 50% chance of playing",
+				previous_chance_this_round: 50,
+				chance_of_playing_this_round: 100,
+			}),
+			baseRow("2026-08-03", 3, {
+				web_name: "New signing",
+				selected_by_percent: 30,
+				first_observed_date: "2026-08-03",
+			}),
+		];
+
+		const pulse = buildMarketPulse(rows, 3, new Date("2026-08-03T12:00:00Z"));
+
+		expect(pulse.coverage).toMatchObject({
+			requestedDays: 3,
+			observedDays: 2,
+			firstDate: "2026-08-01",
+			latestDate: "2026-08-03",
+			complete: false,
+			stale: false,
+		});
+		expect(pulse.mostSelected[0].playerId).toBe(3);
+		expect(pulse.ownershipMovers.risers).toHaveLength(1);
+		expect(pulse.ownershipMovers.risers[0]).toMatchObject({ change: 5 });
+		expect(pulse.ownershipMovers.fallers).toHaveLength(1);
+		expect(pulse.ownershipMovers.fallers[0]).toMatchObject({ change: -5 });
+		expect(pulse.ownershipMovers.risers.some((mover) => mover.player.playerId === 3)).toBe(false);
+		expect(pulse.transferMovers).toHaveLength(1);
+		expect(pulse.transferMovers[0]).toMatchObject({
+			transfersIn: 10,
+			transfersOut: 2,
+			netTransfers: 8,
+		});
+		expect(pulse.availabilityUpdates.map((update) => update.player.playerId).sort()).toEqual([
+			1, 2,
+		]);
+		expect(pulse.newPlayers).toHaveLength(1);
+		expect(pulse.newPlayers[0]).toMatchObject({ firstObservedDate: "2026-08-03" });
+		expect(pulse.priceChanges).toHaveLength(1);
+		expect(pulse.priceChanges[0]).toMatchObject({
+			oldPrice: 70,
+			newPrice: 71,
+			change: 1,
+			direction: "RISE",
+		});
+	});
+
+	it("marks fourteen observed calendar days complete and old captures stale", () => {
+		const rows = Array.from({ length: 14 }, (_, index) => {
+			const date = `2026-08-${String(index + 1).padStart(2, "0")}`;
+			return baseRow(date, 1, {
+				previous_price: index === 0 ? null : 70,
+				previous_transfers_in: index === 0 ? null : 0,
+				previous_transfers_out: index === 0 ? null : 0,
+				previous_status: index === 0 ? null : "a",
+				previous_news: index === 0 ? null : "",
+				previous_chance_this_round: index === 0 ? null : 100,
+				previous_chance_next_round: index === 0 ? null : 100,
+			});
+		});
+
+		const pulse = buildMarketPulse(rows, 14, new Date("2026-08-16T00:00:00Z"));
+		expect(pulse.coverage).toMatchObject({
+			observedDays: 14,
+			complete: true,
+			stale: true,
+		});
+	});
+
+	it("dates official news using the UTC+8 market calendar", () => {
+		const pulse = buildMarketPulse(
+			[
+				baseRow("2026-08-02", 1, {
+					news: "Late official update",
+					news_added: "2026-08-01T16:30:00.000Z",
+				}),
+			],
+			1,
+			new Date("2026-08-02T03:00:00.000Z")
+		);
+
+		expect(pulse.availabilityUpdates).toHaveLength(1);
+		expect(pulse.availabilityUpdates[0]?.observedDate).toBe("2026-08-02");
+	});
+
+	it("preserves PostgreSQL calendar dates without shifting them to UTC", () => {
+		const snapshotDate = new Date(2026, 7, 3);
+		const pulse = buildMarketPulse(
+			[
+				baseRow("2026-08-03", 1, {
+					snapshot_date: snapshotDate,
+					baseline_date: snapshotDate,
+					first_observed_date: snapshotDate,
+				}),
+			],
+			14,
+			new Date("2026-08-03T12:00:00.000Z")
+		);
+
+		expect(pulse.coverage.firstDate).toBe("2026-08-03");
+		expect(pulse.coverage.latestDate).toBe("2026-08-03");
+	});
+
+	it("does not let an out-of-window news timestamp override an observed status change", () => {
+		const pulse = buildMarketPulse(
+			[
+				baseRow("2026-08-03", 1, {
+					status: "d",
+					previous_status: "a",
+					news: "Future-dated upstream notice",
+					news_added: "2026-08-04T08:00:00.000Z",
+				}),
+			],
+			1,
+			new Date("2026-08-03T12:00:00.000Z")
+		);
+
+		expect(pulse.availabilityUpdates).toHaveLength(1);
+		expect(pulse.availabilityUpdates[0]?.observedDate).toBe("2026-08-03");
+	});
+});
+
+describe("market repository caching", () => {
+	it("caches a successful pulse for one hour", async () => {
+		const context = buildContext();
+		const repository = createMarketRepository({
+			query: async () => ({ rows: [baseRow("2026-08-03", 1)] }),
+		});
+
+		const result = await repository.getMarketPulse(context.context, 14);
+		expect(result.coverage.observedDays).toBe(1);
+		expect(context.writes[0]?.ttl).toBe(3600);
+	});
+
+	it("caches a no-data pulse for five minutes", async () => {
+		const context = buildContext();
+		const repository = createMarketRepository({ query: async () => ({ rows: [] }) });
+
+		const result = await repository.getMarketPulse(context.context, 14);
+		expect(result.coverage.observedDays).toBe(0);
+		expect(context.writes[0]?.ttl).toBe(300);
+	});
+
+	it("returns a shaped cache without querying the database", async () => {
+		const context = buildContext(JSON.stringify(emptyMarketPulse(14)));
+		let queries = 0;
+		const repository = createMarketRepository({
+			query: async () => {
+				queries += 1;
+				return { rows: [] };
+			},
+		});
+
+		expect(await repository.getMarketPulse(context.context, 14)).toEqual(emptyMarketPulse(14));
+		expect(queries).toBe(0);
+	});
+
+	it("propagates database failures instead of returning empty market data", async () => {
+		const context = buildContext();
+		const repository = createMarketRepository({
+			query: async () => {
+				throw new Error("database unavailable");
+			},
+		});
+
+		await expect(repository.getMarketPulse(context.context, 14)).rejects.toThrow(
+			"Failed to query market snapshots"
+		);
+		expect(context.writes).toHaveLength(0);
+	});
+});
