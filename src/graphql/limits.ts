@@ -25,6 +25,8 @@ export const GRAPHQL_LIMITS = {
 	maxComplexity: 600,
 } as const;
 
+const MAX_LIST_ARGUMENT_WEIGHT = 200;
+
 type GraphQLPayload = {
 	query?: unknown;
 	variables?: unknown;
@@ -132,7 +134,7 @@ const listWeight = (
 			multiplier = Math.max(multiplier, Math.min(value.length, 500));
 		}
 		if (["first", "last", "limit"].includes(name) && typeof value === "number") {
-			multiplier = Math.max(multiplier, Math.min(Math.max(value, 1), 100));
+			multiplier = Math.max(multiplier, Math.min(Math.max(value, 1), MAX_LIST_ARGUMENT_WEIGHT));
 		}
 	}
 	return {

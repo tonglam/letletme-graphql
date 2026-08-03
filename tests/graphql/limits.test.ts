@@ -51,6 +51,16 @@ describe("GraphQL request limits", () => {
 		}
 	});
 
+	it("charges the repositories' 200-row list maximum", () => {
+		expect(
+			validateGraphQLRequestLimits({ query: "query { players(limit: 200) { id } }" }, schema)
+		).toMatchObject({
+			ok: true,
+			weightedComplexity: 400,
+			rateLimitCostUnits: 40,
+		});
+	});
+
 	it("sums heavy root floors, including aliases", () => {
 		const result = validateGraphQLRequestLimits({
 			query:

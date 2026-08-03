@@ -74,6 +74,10 @@ export const graphQLCompatibilityAdmissionSubject = ({
 };
 
 export const GRAPHQL_GLOBAL_ADMISSION_SUBJECT = "all-graphql-traffic";
+export const GRAPHQL_COMPATIBILITY_PUBLIC_RATE_LIMIT_SUBJECT = "shared-public:compat-anonymous";
+
+export const graphQLUsesSharedPublicBudget = (ingress: GraphQLIngress): boolean =>
+	ingress.class === "service" || ingress.class === "anonymous";
 
 export const graphQLAdmissionSubjects = ({
 	headers,
@@ -114,4 +118,10 @@ export const graphQLWeightedRateLimitSubject = ({
 	ingress: GraphQLIngress;
 	principal: Principal | null;
 	fallbackSubject: string;
-}): string => ingress.subject ?? (principal ? principalSubject(principal) : fallbackSubject);
+}): string =>
+	ingress.subject ??
+	(ingress.class === "anonymous"
+		? GRAPHQL_COMPATIBILITY_PUBLIC_RATE_LIMIT_SUBJECT
+		: principal
+			? principalSubject(principal)
+			: fallbackSubject);

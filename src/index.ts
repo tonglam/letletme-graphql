@@ -29,9 +29,11 @@ import {
 	resolveClientIp,
 } from "./http/security";
 import {
+	GRAPHQL_GLOBAL_ADMISSION_SUBJECT,
 	graphQLAdmissionSubjects,
 	graphQLIngressFailure,
 	graphQLMethodFailure,
+	graphQLUsesSharedPublicBudget,
 	graphQLWeightedRateLimitSubject,
 } from "./http/graphql-policy";
 
@@ -285,6 +287,14 @@ const startServer = async (): Promise<void> => {
 
 					const peerAddress = bunServer.requestIP(request)?.address;
 					const clientIp = resolveClientIp(request.headers, peerAddress, env.TRUSTED_PROXY_HOPS);
+					const globalAdmissionFailure = await enforceGraphQLRateLimit({
+						scope: "graphql-global-admission",
+						subject: GRAPHQL_GLOBAL_ADMISSION_SUBJECT,
+						limit: GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
+						corsHeaders,
+					});
+					if (globalAdmissionFailure) return globalAdmissionFailure;
+
 					const ingress = classifyGraphQLIngress(request.headers);
 					metrics.graphqlIngressRequests.labels(ingress.class).inc();
 					const ingressFailure = graphQLIngressFailure(ingress, env.REQUIRE_SIGNED_WEB_INGRESS);
@@ -307,13 +317,6 @@ const startServer = async (): Promise<void> => {
 						principal: compatibilityPrincipal,
 						fallbackSubject: clientIp,
 					});
-					const globalAdmissionFailure = await enforceGraphQLRateLimit({
-						scope: "graphql-global-admission",
-						subject: admissionSubjects.global,
-						limit: GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
-						corsHeaders,
-					});
-					if (globalAdmissionFailure) return globalAdmissionFailure;
 
 					let weightedRatePrecharged = false;
 					if (admissionSubjects.ingress) {
@@ -371,8 +374,9 @@ const startServer = async (): Promise<void> => {
 						principal,
 						fallbackSubject: clientIp,
 					});
-					const rateLimit =
-						ingress.class === "service" ? GRAPHQL_SERVICE_RATE_LIMIT : GRAPHQL_RATE_LIMIT;
+					const rateLimit = graphQLUsesSharedPublicBudget(ingress)
+						? GRAPHQL_SERVICE_RATE_LIMIT
+						: GRAPHQL_RATE_LIMIT;
 					const remainingWeightedCost =
 						limits.rateLimitCostUnits - (weightedRatePrecharged ? 1 : 0);
 					if (remainingWeightedCost > 0) {

@@ -49,7 +49,10 @@ validated legacy users receive distinct subjects instead of sharing a network
 bucket. For signed ingress and validated website principals, the admission unit
 is charged directly to the weighted budget, so an exhausted subject is rejected
 before membership authorization. Anonymous public reads use the global and
-weighted budgets but skip the credential-validation admission bucket.
+weighted budgets but skip the credential-validation admission bucket. During
+compatibility they receive an isolated 600-unit shared-public budget, separate
+from the service-token budget, so Nginx's loopback peer cannot collapse them
+into the 120-unit client tier.
 
 ## Verification
 

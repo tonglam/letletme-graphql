@@ -5,6 +5,7 @@ import {
 	graphQLIngressFailure,
 	graphQLCompatibilityAdmissionSubject,
 	graphQLMethodFailure,
+	graphQLUsesSharedPublicBudget,
 	graphQLWeightedRateLimitSubject,
 	requiresCompatibilityAdmission,
 } from "../../src/http/graphql-policy";
@@ -155,5 +156,27 @@ describe("GraphQL transport and ingress policy", () => {
 				fallbackSubject: "203.0.113.1",
 			})
 		).toBe("203.0.113.1");
+	});
+
+	it("isolates anonymous compatibility reads in a larger shared-public budget", () => {
+		const anonymous = ingress({ class: "anonymous" });
+		const service = ingress({ class: "service", trusted: true, subject: "service-public" });
+		expect(
+			graphQLWeightedRateLimitSubject({
+				ingress: anonymous,
+				principal: null,
+				fallbackSubject: "127.0.0.1",
+			})
+		).toBe("shared-public:compat-anonymous");
+		expect(
+			graphQLWeightedRateLimitSubject({
+				ingress: service,
+				principal: null,
+				fallbackSubject: "127.0.0.1",
+			})
+		).toBe("service-public");
+		expect(graphQLUsesSharedPublicBudget(anonymous)).toBe(true);
+		expect(graphQLUsesSharedPublicBudget(service)).toBe(true);
+		expect(graphQLUsesSharedPublicBudget(ingress({ class: "signed", trusted: true }))).toBe(false);
 	});
 });
