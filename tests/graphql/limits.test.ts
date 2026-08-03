@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
+import { schema } from "../../src/graphql/schema";
 
 describe("GraphQL request limits", () => {
 	it("accepts an ordinary query", () => {
@@ -17,6 +18,20 @@ describe("GraphQL request limits", () => {
 			ok: true,
 			weightedComplexity: 200,
 			rateLimitCostUnits: 20,
+		});
+	});
+
+	it("charges schema-defaulted list sizes when callers omit the argument", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query: "query { players { id } }",
+			},
+			schema
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			weightedComplexity: 100,
+			rateLimitCostUnits: 10,
 		});
 	});
 

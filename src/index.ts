@@ -23,7 +23,12 @@ import {
 	readRequestBody,
 	resolveClientIp,
 } from "./http/security";
-import { graphQLIngressFailure, graphQLMethodFailure } from "./http/graphql-policy";
+import {
+	graphQLIngressFailure,
+	graphQLMethodFailure,
+	graphQLWeightedRateLimitSubject,
+	requiresCompatibilityAdmission,
+} from "./http/graphql-policy";
 
 const GRAPHQL_RATE_LIMIT = 120;
 const GRAPHQL_SERVICE_RATE_LIMIT = 600;
@@ -231,7 +236,7 @@ const startServer = async (): Promise<void> => {
 						}
 					}
 
-					const limits = validateGraphQLRequestLimits(parsedBody);
+					const limits = validateGraphQLRequestLimits(parsedBody, schema);
 					if (!limits.ok) {
 						return jsonError(400, limits.code, limits.message, corsHeaders);
 					}
@@ -249,7 +254,62 @@ const startServer = async (): Promise<void> => {
 							corsHeaders
 						);
 					}
-					const rateLimitSubject = ingress.subject ?? clientIp;
+
+					if (requiresCompatibilityAdmission(ingress)) {
+						let admissionRate;
+						try {
+							admissionRate = await checkRateLimit(
+								getRedis(),
+								rateLimitKey("graphql-compat-admission", clientIp),
+								GRAPHQL_RATE_LIMIT,
+								RATE_LIMIT_WINDOW_SECONDS
+							);
+						} catch (error) {
+							metrics.graphqlRateLimitDecisions
+								.labels("compat-admission", "storage_unavailable")
+								.inc();
+							try {
+								admissionRate = handleRateLimitStorageFailure({
+									error,
+									failClosed: true,
+									scope: "graphql-compat-admission",
+									logger,
+								});
+							} catch {
+								return jsonError(
+									503,
+									"RATE_LIMIT_STORAGE_UNAVAILABLE",
+									"Request safety checks are temporarily unavailable",
+									corsHeaders
+								);
+							}
+						}
+						if (!admissionRate.allowed) {
+							metrics.graphqlRateLimitDecisions.labels("compat-admission", "limited").inc();
+							return jsonError(429, "RATE_LIMITED", "Too many requests", corsHeaders, {
+								"Retry-After": String(admissionRate.retryAfterSeconds),
+							});
+						}
+						metrics.graphqlRateLimitDecisions.labels("compat-admission", "allowed").inc();
+					}
+
+					const { principal, user } = await resolvePrincipalAndUser(request);
+					const authorization = await authorizeGraphQLRequest({
+						body: parsedBody,
+						searchParams: url.searchParams,
+						principal,
+						supabase,
+						logger,
+					});
+					if (!authorization.ok) {
+						return graphQLErrorResponse(authorization, corsHeaders);
+					}
+
+					const rateLimitSubject = graphQLWeightedRateLimitSubject({
+						ingress,
+						principal,
+						fallbackSubject: clientIp,
+					});
 					const rateLimit =
 						ingress.class === "service" ? GRAPHQL_SERVICE_RATE_LIMIT : GRAPHQL_RATE_LIMIT;
 					let requestRate;
@@ -328,18 +388,6 @@ const startServer = async (): Promise<void> => {
 					request.headers.forEach((value, key) => {
 						headers.set(key, value);
 					});
-
-					const { principal, user } = await resolvePrincipalAndUser(request);
-					const authorization = await authorizeGraphQLRequest({
-						body: parsedBody,
-						searchParams: url.searchParams,
-						principal,
-						supabase,
-						logger,
-					});
-					if (!authorization.ok) {
-						return graphQLErrorResponse(authorization, corsHeaders);
-					}
 
 					const httpGraphQLResponse = await apollo.executeHTTPGraphQLRequest({
 						httpGraphQLRequest: {

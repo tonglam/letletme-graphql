@@ -1,8 +1,16 @@
 import {
 	Kind,
+	getNamedType,
+	isInterfaceType,
+	isObjectType,
+	isUnionType,
 	parse,
 	valueFromASTUntyped,
 	visit,
+	type GraphQLArgument,
+	type GraphQLCompositeType,
+	type GraphQLNamedType,
+	type GraphQLSchema,
 	type DocumentNode,
 	type FragmentDefinitionNode,
 	type OperationDefinitionNode,
@@ -69,6 +77,11 @@ const fragmentsFor = (document: DocumentNode): Map<string, FragmentDefinitionNod
 			.map((fragment) => [fragment.name.value, fragment])
 	);
 
+const asCompositeType = (
+	value: GraphQLNamedType | null | undefined
+): GraphQLCompositeType | null =>
+	value && (isObjectType(value) || isInterfaceType(value) || isUnionType(value)) ? value : null;
+
 type ListWeight = {
 	multiplier: number;
 	propagateToChildren: boolean;
@@ -82,23 +95,35 @@ const listWeight = (
 		name: { value: string };
 		value: Parameters<typeof valueFromASTUntyped>[0];
 	}[],
-	variables: Record<string, unknown>
+	variables: Record<string, unknown>,
+	schemaArguments: readonly GraphQLArgument[] = []
 ): ListWeight => {
 	let multiplier = 1;
 	let hasEntryIds = false;
 	let oversizedEntryBatch = false;
 	let duplicateEntryIds = false;
 	let uniqueEntryCount: number | null = null;
+	const argumentValues = new Map<string, unknown>();
+	for (const argument of schemaArguments) {
+		if (argument.defaultValue !== undefined) {
+			argumentValues.set(argument.name, argument.defaultValue);
+		}
+	}
 	for (const argument of fieldArguments) {
-		const value = valueFromASTUntyped(argument.value, variables);
-		if (argument.name.value === "entryIds" && Array.isArray(value)) {
+		const suppliedValue = valueFromASTUntyped(argument.value, variables);
+		if (suppliedValue !== undefined || !argumentValues.has(argument.name.value)) {
+			argumentValues.set(argument.name.value, suppliedValue);
+		}
+	}
+	for (const [name, value] of argumentValues) {
+		if (name === "entryIds" && Array.isArray(value)) {
 			hasEntryIds = true;
 			uniqueEntryCount = new Set(value).size;
 			duplicateEntryIds ||= uniqueEntryCount !== value.length;
 			oversizedEntryBatch ||= value.length > 500;
 			multiplier = Math.max(multiplier, Math.min(value.length, 500));
 		}
-		if (["first", "last", "limit"].includes(argument.name.value) && typeof value === "number") {
+		if (["first", "last", "limit"].includes(name) && typeof value === "number") {
 			multiplier = Math.max(multiplier, Math.min(Math.max(value, 1), 100));
 		}
 	}
@@ -136,6 +161,8 @@ const inspectSelectionSet = ({
 	depth,
 	multiplier,
 	seenFragments,
+	schema,
+	parentType,
 }: {
 	selectionSet: SelectionSetNode;
 	fragments: Map<string, FragmentDefinitionNode>;
@@ -143,6 +170,8 @@ const inspectSelectionSet = ({
 	depth: number;
 	multiplier: number;
 	seenFragments: Set<string>;
+	schema?: GraphQLSchema;
+	parentType: GraphQLCompositeType | null;
 }): {
 	maxDepth: number;
 	aliases: number;
@@ -161,7 +190,11 @@ const inspectSelectionSet = ({
 	for (const selection of selectionSet.selections) {
 		if (selection.kind === Kind.FIELD) {
 			if (selection.alias) aliases += 1;
-			const weight = listWeight(selection.arguments ?? [], variables);
+			const fieldDefinition =
+				parentType && (isObjectType(parentType) || isInterfaceType(parentType))
+					? parentType.getFields()[selection.name.value]
+					: undefined;
+			const weight = listWeight(selection.arguments ?? [], variables, fieldDefinition?.args ?? []);
 			if (depth === 1) {
 				rootFields.push({
 					name: selection.name.value,
@@ -173,6 +206,7 @@ const inspectSelectionSet = ({
 			duplicateEntryIds ||= weight.duplicateEntryIds;
 			complexity += childMultiplier;
 			if (selection.selectionSet) {
+				const namedChildType = fieldDefinition ? getNamedType(fieldDefinition.type) : null;
 				const child = inspectSelectionSet({
 					selectionSet: selection.selectionSet,
 					fragments,
@@ -180,6 +214,8 @@ const inspectSelectionSet = ({
 					depth: depth + 1,
 					multiplier: weight.propagateToChildren ? childMultiplier : multiplier,
 					seenFragments: new Set(seenFragments),
+					schema,
+					parentType: asCompositeType(namedChildType),
 				});
 				maxDepth = Math.max(maxDepth, child.maxDepth);
 				aliases += child.aliases;
@@ -190,6 +226,9 @@ const inspectSelectionSet = ({
 			continue;
 		}
 		if (selection.kind === Kind.INLINE_FRAGMENT) {
+			const fragmentType = selection.typeCondition
+				? schema?.getType(selection.typeCondition.name.value)
+				: parentType;
 			const child = inspectSelectionSet({
 				selectionSet: selection.selectionSet,
 				fragments,
@@ -197,6 +236,8 @@ const inspectSelectionSet = ({
 				depth,
 				multiplier,
 				seenFragments: new Set(seenFragments),
+				schema,
+				parentType: asCompositeType(fragmentType) ?? parentType,
 			});
 			maxDepth = Math.max(maxDepth, child.maxDepth);
 			aliases += child.aliases;
@@ -212,6 +253,7 @@ const inspectSelectionSet = ({
 		if (!fragment) continue;
 		const nextSeen = new Set(seenFragments);
 		nextSeen.add(fragmentName);
+		const fragmentType = schema?.getType(fragment.typeCondition.name.value);
 		const child = inspectSelectionSet({
 			selectionSet: fragment.selectionSet,
 			fragments,
@@ -219,6 +261,8 @@ const inspectSelectionSet = ({
 			depth,
 			multiplier,
 			seenFragments: nextSeen,
+			schema,
+			parentType: asCompositeType(fragmentType) ?? parentType,
 		});
 		maxDepth = Math.max(maxDepth, child.maxDepth);
 		aliases += child.aliases;
@@ -287,7 +331,10 @@ const accepted = ({
 	rateLimitCostUnits: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
 });
 
-export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLimitResult => {
+export const validateGraphQLPayloadLimits = (
+	payload: GraphQLPayload,
+	schema?: GraphQLSchema
+): GraphQLLimitResult => {
 	if (typeof payload.query !== "string") {
 		return accepted({ shape: "unknown" });
 	}
@@ -321,6 +368,13 @@ export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLi
 		depth: 1,
 		multiplier: 1,
 		seenFragments: new Set(),
+		schema,
+		parentType:
+			operation.operation === "query"
+				? (schema?.getQueryType() ?? null)
+				: operation.operation === "mutation"
+					? (schema?.getMutationType() ?? null)
+					: (schema?.getSubscriptionType() ?? null),
 	});
 	if (inspection.maxDepth > GRAPHQL_LIMITS.maxDepth) {
 		return reject(`GraphQL query depth exceeds ${GRAPHQL_LIMITS.maxDepth}`);
@@ -352,7 +406,10 @@ export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLi
 	});
 };
 
-export const validateGraphQLRequestLimits = (body: unknown): GraphQLLimitResult => {
+export const validateGraphQLRequestLimits = (
+	body: unknown,
+	schema?: GraphQLSchema
+): GraphQLLimitResult => {
 	const payloads = Array.isArray(body) ? body : [body];
 	let shape: GraphQLRequestShape = "unknown";
 	let securityOperation = false;
@@ -361,7 +418,7 @@ export const validateGraphQLRequestLimits = (body: unknown): GraphQLLimitResult 
 	let rateLimitCostUnits = 0;
 	for (const payload of payloads) {
 		if (!payload || typeof payload !== "object") continue;
-		const result = validateGraphQLPayloadLimits(payload as GraphQLPayload);
+		const result = validateGraphQLPayloadLimits(payload as GraphQLPayload, schema);
 		if (!result.ok) return result;
 		if (result.shape === "mutation") shape = "mutation";
 		else if (shape === "unknown") shape = result.shape;

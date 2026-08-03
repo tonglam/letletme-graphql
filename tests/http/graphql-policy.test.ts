@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { GraphQLIngress } from "../../src/infra/ingress-context";
-import { graphQLIngressFailure, graphQLMethodFailure } from "../../src/http/graphql-policy";
+import {
+	graphQLIngressFailure,
+	graphQLMethodFailure,
+	graphQLWeightedRateLimitSubject,
+	requiresCompatibilityAdmission,
+} from "../../src/http/graphql-policy";
 
 const ingress = (overrides: Partial<GraphQLIngress>): GraphQLIngress => ({
 	class: "anonymous",
@@ -38,9 +43,41 @@ describe("GraphQL transport and ingress policy", () => {
 		).toBeNull();
 	});
 
-	it("rejects an unsigned user envelope even in compatibility mode", () => {
-		expect(graphQLIngressFailure(ingress({ class: "unsigned_user_context" }), false)).toMatchObject(
-			{ status: 401, code: "INVALID_INGRESS_CONTEXT" }
-		);
+	it("allows legacy website envelopes only during compatibility mode", () => {
+		const legacyWebsite = ingress({ class: "unsigned_user_context" });
+		expect(graphQLIngressFailure(legacyWebsite, false)).toBeNull();
+		expect(graphQLIngressFailure(legacyWebsite, true)).toMatchObject({
+			status: 401,
+			code: "INVALID_INGRESS_CONTEXT",
+		});
+	});
+
+	it("admits untrusted compatibility traffic through a separate request bucket", () => {
+		expect(requiresCompatibilityAdmission(ingress({ class: "unsigned_bearer" }))).toBe(true);
+		expect(requiresCompatibilityAdmission(ingress({ class: "signed", trusted: true }))).toBe(false);
+	});
+
+	it("separates validated compatibility users from shared network subjects", () => {
+		const unsigned = ingress({ class: "unsigned_bearer" });
+		expect(
+			graphQLWeightedRateLimitSubject({
+				ingress: unsigned,
+				principal: {
+					userId: "user-1",
+					source: "wechat_miniprogram",
+					provider: "wechat_miniprogram",
+					fplEntryId: 7,
+					fplEntryVerifiedAt: "2026-08-03T00:00:00.000Z",
+				},
+				fallbackSubject: "203.0.113.1",
+			})
+		).toBe("principal:wechat_miniprogram:user-1");
+		expect(
+			graphQLWeightedRateLimitSubject({
+				ingress: unsigned,
+				principal: null,
+				fallbackSubject: "203.0.113.1",
+			})
+		).toBe("203.0.113.1");
 	});
 });

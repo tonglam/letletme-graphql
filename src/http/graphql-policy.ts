@@ -1,4 +1,5 @@
 import type { GraphQLIngress } from "../infra/ingress-context";
+import type { Principal } from "../infra/principal";
 
 export type GraphQLPolicyFailure = {
 	status: 401 | 405;
@@ -19,7 +20,7 @@ export const graphQLIngressFailure = (
 	ingress: GraphQLIngress,
 	requireTrustedIngress: boolean
 ): GraphQLPolicyFailure | null => {
-	if (ingress.class === "unsigned_user_context") {
+	if (requireTrustedIngress && ingress.class === "unsigned_user_context") {
 		return {
 			status: 401,
 			code: "INVALID_INGRESS_CONTEXT",
@@ -35,3 +36,18 @@ export const graphQLIngressFailure = (
 	}
 	return null;
 };
+
+export const requiresCompatibilityAdmission = (ingress: GraphQLIngress): boolean =>
+	!ingress.trusted;
+
+export const graphQLWeightedRateLimitSubject = ({
+	ingress,
+	principal,
+	fallbackSubject,
+}: {
+	ingress: GraphQLIngress;
+	principal: Principal | null;
+	fallbackSubject: string;
+}): string =>
+	ingress.subject ??
+	(principal ? `principal:${principal.provider}:${principal.userId}` : fallbackSubject);
