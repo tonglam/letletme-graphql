@@ -111,7 +111,15 @@ const listWeight = (
 	}
 	for (const argument of fieldArguments) {
 		const suppliedValue = valueFromASTUntyped(argument.value, variables);
-		if (suppliedValue !== undefined || !argumentValues.has(argument.name.value)) {
+		// GraphQL preserves an explicit null, but the list resolvers use nullish
+		// fallbacks that match their schema defaults. Keep that effective default
+		// for safety accounting so `limit: null` cannot make a large list look cheap.
+		const preservesEffectiveDefault =
+			suppliedValue === null && argumentValues.has(argument.name.value);
+		if (
+			!preservesEffectiveDefault &&
+			(suppliedValue !== undefined || !argumentValues.has(argument.name.value))
+		) {
 			argumentValues.set(argument.name.value, suppliedValue);
 		}
 	}

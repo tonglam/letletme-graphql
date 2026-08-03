@@ -11,7 +11,12 @@ import { env } from "./infra/env";
 import { logger } from "./infra/logger";
 import { classifyGraphQLIngress } from "./infra/ingress-context";
 import { metrics, metricsResponse } from "./infra/metrics";
-import { getPrincipalFromHeaders, principalToAuthUser, type Principal } from "./infra/principal";
+import {
+	getPrincipalFromHeaders,
+	principalToAuthUser,
+	verifyWebsitePrincipal,
+	type Principal,
+} from "./infra/principal";
 import { closeRedis, connectRedis, getRedis } from "./infra/redis";
 import { ACTIVE_SEASON_KEY, parseSeason } from "./infra/season";
 import { supabase } from "./infra/supabase";
@@ -25,6 +30,7 @@ import {
 } from "./http/security";
 import {
 	graphQLIngressFailure,
+	graphQLCompatibilityAdmissionSubject,
 	graphQLMethodFailure,
 	graphQLWeightedRateLimitSubject,
 	requiresCompatibilityAdmission,
@@ -69,9 +75,10 @@ function metricsTokenMatches(provided: string | undefined): boolean {
 }
 
 async function resolvePrincipalAndUser(
-	request: Request
+	request: Request,
+	prevalidatedPrincipal: Principal | null = null
 ): Promise<{ principal: Principal | null; user: ReturnType<typeof principalToAuthUser> | null }> {
-	let principal = await getPrincipalFromHeaders(request.headers);
+	let principal = prevalidatedPrincipal ?? (await getPrincipalFromHeaders(request.headers));
 	let user = principal ? principalToAuthUser(principal) : null;
 
 	if (!principal) {
@@ -254,13 +261,23 @@ const startServer = async (): Promise<void> => {
 							corsHeaders
 						);
 					}
+					const compatibilityPrincipal =
+						ingress.class === "unsigned_user_context"
+							? verifyWebsitePrincipal(request.headers)
+							: null;
 
 					if (requiresCompatibilityAdmission(ingress)) {
+						const admissionSubject = graphQLCompatibilityAdmissionSubject({
+							headers: request.headers,
+							ingress,
+							principal: compatibilityPrincipal,
+							fallbackSubject: clientIp,
+						});
 						let admissionRate;
 						try {
 							admissionRate = await checkRateLimit(
 								getRedis(),
-								rateLimitKey("graphql-compat-admission", clientIp),
+								rateLimitKey("graphql-compat-admission", admissionSubject),
 								GRAPHQL_RATE_LIMIT,
 								RATE_LIMIT_WINDOW_SECONDS
 							);
@@ -293,7 +310,10 @@ const startServer = async (): Promise<void> => {
 						metrics.graphqlRateLimitDecisions.labels("compat-admission", "allowed").inc();
 					}
 
-					const { principal, user } = await resolvePrincipalAndUser(request);
+					const { principal, user } = await resolvePrincipalAndUser(
+						request,
+						compatibilityPrincipal
+					);
 					const authorization = await authorizeGraphQLRequest({
 						body: parsedBody,
 						searchParams: url.searchParams,

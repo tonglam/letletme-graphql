@@ -38,10 +38,12 @@ IDs are rejected before resolver work. Rate limits are weighted: signed client
 subjects receive 120 units/minute, cached public Web reads receive 600
 units/minute, and legacy session attempts retain a separate five/minute limit.
 All GraphQL limits fail closed when Redis is unavailable.
-During compatibility mode, untrusted direct traffic first passes a separate
-120-request/minute admission bucket. Protected requests are authorized before
+During compatibility mode, credential-bearing direct traffic first passes a
+separate 120-request/minute admission bucket keyed by a non-logging credential
+fingerprint or validated principal. Protected requests are authorized before
 weighted charging, and validated legacy users receive distinct weighted
-subjects instead of sharing a network bucket.
+subjects instead of sharing a network bucket. Anonymous public reads skip the
+credential-validation admission bucket.
 
 ## Verification
 

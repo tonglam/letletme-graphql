@@ -35,6 +35,22 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("charges effective list defaults when a caller supplies null", () => {
+		for (const payload of [
+			{ query: "query { players(limit: null) { id } }" },
+			{
+				query: "query Players($limit: Int) { players(limit: $limit) { id } }",
+				variables: { limit: null },
+			},
+		]) {
+			expect(validateGraphQLRequestLimits(payload, schema)).toMatchObject({
+				ok: true,
+				weightedComplexity: 100,
+				rateLimitCostUnits: 10,
+			});
+		}
+	});
+
 	it("sums heavy root floors, including aliases", () => {
 		const result = validateGraphQLRequestLimits({
 			query:
