@@ -21,7 +21,7 @@
 		"@apollo/server": "5.5.1",
 		"@graphql-tools/schema": "^10.0.38",
 		"@supabase/supabase-js": "^2.110.7",
-		"graphql": "^16.14.2",
+		"graphql": "^17.0.2",
 		"graphql-depth-limit": "^1.1.0",
 		"graphql-scalars": "^1.25.0",
 		"ioredis": "^5.11.1",
