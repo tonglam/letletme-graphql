@@ -8,6 +8,12 @@ updates:
       time: "02:00"
       timezone: Australia/Perth
     open-pull-requests-limit: 5
+    # Re-enable major updates once Apollo Server and graphql-scalars declare
+    # support for the corresponding GraphQL major.
+    ignore:
+      - dependency-name: graphql
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
