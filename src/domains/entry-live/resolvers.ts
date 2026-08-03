@@ -1,4 +1,3 @@
-import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import type { Entry } from "../entries/repository";
 import { entriesService } from "../entries/service";
@@ -8,21 +7,11 @@ import { fixturesService } from "../fixtures/service";
 import { liveRepository } from "../live/repository";
 import { playersRepository } from "../players/repository";
 import { tournamentsService } from "../tournaments/service";
-import { entryLiveBatchService } from "./batch-service";
+import { assertValidEntryBatch, entryLiveBatchService } from "./batch-service";
 import type { LiveCalcData } from "./calc-service";
 import { entryLiveCalcService } from "./calc-service";
 import type { EntryLive as EntryLiveModel } from "./service";
 import { entryLiveService } from "./service";
-
-const MAX_ENTRY_BATCH = 500;
-
-const assertEntryBatchSize = (entryIds: readonly number[]): void => {
-	if (entryIds.length > MAX_ENTRY_BATCH) {
-		throw new GraphQLError(`Entry batch exceeds the ${MAX_ENTRY_BATCH} entry limit`, {
-			extensions: { code: "QUERY_TOO_COMPLEX" },
-		});
-	}
-};
 
 type EntryLiveArgs = {
 	entryId: number;
@@ -82,7 +71,7 @@ export const entryLiveResolvers = {
 				failedCount: number;
 			};
 		}> => {
-			assertEntryBatchSize(args.entryIds);
+			assertValidEntryBatch(args.entryIds);
 			const result = await entryLiveBatchService.calcLivePointsForEntries(
 				context,
 				args.eventId,
@@ -112,7 +101,7 @@ export const entryLiveResolvers = {
 		}> => {
 			const includeLive = args.includeLive ?? true;
 			const entryIds = await tournamentsService.getTournamentEntryIds(context, args.tournamentId);
-			assertEntryBatchSize(entryIds);
+			assertValidEntryBatch(entryIds);
 
 			// Load shared data only after the tournament size is accepted.
 			const liveByPlayerPromise = includeLive

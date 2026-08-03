@@ -14,23 +14,35 @@ Do not commit snapshots or backups; they contain operational metadata.
 
 ## Deployment order
 
-1. Deploy GraphQL with signed-ingress compatibility enabled and
+1. Provision the same independent `GRAPHQL_SERVICE_TOKEN` in GraphQL and Web.
+   Deploy GraphQL with signed-ingress compatibility enabled and
    `REQUIRE_SIGNED_WEB_INGRESS=false`.
 2. Apply the web Drizzle migration using `DIRECT_DATABASE_URL`; migration
    aborts on duplicate non-null `openid` values.
 3. Deploy web challenge, database rate limiting, and web-issued Mini Program sessions.
-4. Set `REQUIRE_SIGNED_WEB_INGRESS=true` after every authenticated web path
-   that emits a user envelope also emits an ingress signature. Then deploy
-   GraphQL with both the web Mini Program verifier and deadline-gated
-   legacy verifier. Set `LEGACY_AUTH_VALIDATION_UNTIL` to exactly 30 days after
-   this deployment.
-5. Release the Mini Program client against `https://www.letletme.top`.
+4. Confirm cached public RSC queries carry only `X-GraphQL-Service-Token`, and
+   authenticated Web traffic carries the signed ingress and user envelopes.
+   Then deploy GraphQL with both the Web Mini Program verifier and
+   deadline-gated legacy verifier. Set `LEGACY_AUTH_VALIDATION_UNTIL` to
+   exactly 30 days after this deployment.
+5. Release the Mini Program client against
+   `https://www.letletme.top/api/graphql`.
 6. Once the Mini Program release is accepted, keep
    `LEGACY_WECHAT_ISSUANCE_ENABLED=false`.
-7. After the deadline, require seven consecutive days where
+7. Require seven consecutive days where
+   `graphql_ingress_requests_total{class=~"unsigned_bearer|anonymous|unsigned_user_context"}`
+   has no supported-client traffic before setting
+   `REQUIRE_SIGNED_WEB_INGRESS=true`.
+8. After the legacy deadline, require seven consecutive days where
    `auth_token_validations_total{family="legacy_graphql_wechat"}` and
    `{family="legacy_device"}` stay at zero before dropping backed-up legacy
    tables.
+
+At the trusted-ingress cutover, apply the reviewed Nginx snippet under
+`ops/nginx/graphql-hardening.conf.example`, enable Cloudflare Authenticated
+Origin Pulls, and restrict origin ports 80/443 to Cloudflare's published IP
+ranges. Keep port 4000 blocked. Do not weaken the origin firewall when rolling
+back application behavior.
 
 For Data transfer persistence, first deploy the Data hardening PR with
 `TRANSFER_SYNC_MODE=latest`. Apply the stacked transfer migration `0034`, then

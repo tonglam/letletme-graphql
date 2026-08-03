@@ -23,31 +23,6 @@ type GraphQLPayload = {
 	operationName?: unknown;
 };
 
-export type GraphQLGetLimitPayloadResult = { ok: true; payload: GraphQLPayload } | { ok: false };
-
-export const parseGraphQLGetLimitPayload = (
-	searchParams: URLSearchParams
-): GraphQLGetLimitPayloadResult => {
-	const rawVariables = searchParams.get("variables");
-	let variables: unknown = undefined;
-	if (rawVariables !== null) {
-		try {
-			variables = JSON.parse(rawVariables) as unknown;
-		} catch {
-			return { ok: false };
-		}
-	}
-
-	return {
-		ok: true,
-		payload: {
-			query: searchParams.get("query"),
-			operationName: searchParams.get("operationName"),
-			variables,
-		},
-	};
-};
-
 export type GraphQLRequestShape = "query" | "mutation" | "subscription" | "unknown";
 
 export type GraphQLLimitResult =
@@ -56,11 +31,13 @@ export type GraphQLLimitResult =
 			shape: GraphQLRequestShape;
 			securityOperation: boolean;
 			securityOperationCount: number;
+			weightedComplexity: number;
+			rateLimitCostUnits: number;
 	  }
 	| {
 			ok: false;
 			message: string;
-			code: "QUERY_TOO_COMPLEX";
+			code: "QUERY_TOO_COMPLEX" | "DUPLICATE_ENTRY_IDS";
 	  };
 
 const asVariables = (value: unknown): Record<string, unknown> =>
@@ -96,6 +73,8 @@ type ListWeight = {
 	multiplier: number;
 	propagateToChildren: boolean;
 	oversizedEntryBatch: boolean;
+	duplicateEntryIds: boolean;
+	uniqueEntryCount: number | null;
 };
 
 const listWeight = (
@@ -108,10 +87,14 @@ const listWeight = (
 	let multiplier = 1;
 	let hasEntryIds = false;
 	let oversizedEntryBatch = false;
+	let duplicateEntryIds = false;
+	let uniqueEntryCount: number | null = null;
 	for (const argument of fieldArguments) {
 		const value = valueFromASTUntyped(argument.value, variables);
 		if (argument.name.value === "entryIds" && Array.isArray(value)) {
 			hasEntryIds = true;
+			uniqueEntryCount = new Set(value).size;
+			duplicateEntryIds ||= uniqueEntryCount !== value.length;
 			oversizedEntryBatch ||= value.length > 500;
 			multiplier = Math.max(multiplier, Math.min(value.length, 500));
 		}
@@ -127,6 +110,8 @@ const listWeight = (
 		// propagating their multiplier through their child selection.
 		propagateToChildren: !hasEntryIds,
 		oversizedEntryBatch,
+		duplicateEntryIds,
+		uniqueEntryCount,
 	};
 };
 
@@ -162,22 +147,30 @@ const inspectSelectionSet = ({
 	maxDepth: number;
 	aliases: number;
 	complexity: number;
-	rootFields: string[];
+	rootFields: Array<{ name: string; uniqueEntryCount: number | null }>;
 	oversizedEntryBatch: boolean;
+	duplicateEntryIds: boolean;
 } => {
 	let maxDepth = depth;
 	let aliases = 0;
 	let complexity = 0;
-	const rootFields: string[] = [];
+	const rootFields: Array<{ name: string; uniqueEntryCount: number | null }> = [];
 	let oversizedEntryBatch = false;
+	let duplicateEntryIds = false;
 
 	for (const selection of selectionSet.selections) {
 		if (selection.kind === Kind.FIELD) {
-			if (depth === 1) rootFields.push(selection.name.value);
 			if (selection.alias) aliases += 1;
 			const weight = listWeight(selection.arguments ?? [], variables);
+			if (depth === 1) {
+				rootFields.push({
+					name: selection.name.value,
+					uniqueEntryCount: weight.uniqueEntryCount,
+				});
+			}
 			const childMultiplier = multiplier * weight.multiplier;
 			oversizedEntryBatch ||= weight.oversizedEntryBatch;
+			duplicateEntryIds ||= weight.duplicateEntryIds;
 			complexity += childMultiplier;
 			if (selection.selectionSet) {
 				const child = inspectSelectionSet({
@@ -192,6 +185,7 @@ const inspectSelectionSet = ({
 				aliases += child.aliases;
 				complexity += child.complexity;
 				oversizedEntryBatch ||= child.oversizedEntryBatch;
+				duplicateEntryIds ||= child.duplicateEntryIds;
 			}
 			continue;
 		}
@@ -208,6 +202,7 @@ const inspectSelectionSet = ({
 			aliases += child.aliases;
 			complexity += child.complexity;
 			oversizedEntryBatch ||= child.oversizedEntryBatch;
+			duplicateEntryIds ||= child.duplicateEntryIds;
 			rootFields.push(...child.rootFields);
 			continue;
 		}
@@ -229,28 +224,79 @@ const inspectSelectionSet = ({
 		aliases += child.aliases;
 		complexity += child.complexity;
 		oversizedEntryBatch ||= child.oversizedEntryBatch;
+		duplicateEntryIds ||= child.duplicateEntryIds;
 		rootFields.push(...child.rootFields);
 	}
 
-	return { maxDepth, aliases, complexity, rootFields, oversizedEntryBatch };
+	return {
+		maxDepth,
+		aliases,
+		complexity,
+		rootFields,
+		oversizedEntryBatch,
+		duplicateEntryIds,
+	};
 };
 
-const reject = (message: string): GraphQLLimitResult => ({
+const reject = (
+	message: string,
+	code: "QUERY_TOO_COMPLEX" | "DUPLICATE_ENTRY_IDS" = "QUERY_TOO_COMPLEX"
+): GraphQLLimitResult => ({
 	ok: false,
-	code: "QUERY_TOO_COMPLEX",
+	code,
 	message,
+});
+
+const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
+	["eventLive", 5],
+	["eventOverallResult", 5],
+	["playerDetail", 5],
+	["playerValueHistory", 5],
+	["liveMatches", 10],
+	["calcLivePointsByEntry", 10],
+	["tournamentSelectionStats", 10],
+	["calcLivePointsForTournament", 30],
+]);
+
+const heavyRootCost = (
+	rootFields: Array<{ name: string; uniqueEntryCount: number | null }>
+): number =>
+	rootFields.reduce((total, field) => {
+		if (field.name === "calcLivePointsForEntries") {
+			return total + Math.max(10, field.uniqueEntryCount ?? 0);
+		}
+		return total + (ROOT_RATE_LIMIT_FLOORS.get(field.name) ?? 0);
+	}, 0);
+
+const accepted = ({
+	shape,
+	securityOperationCount = 0,
+	weightedComplexity = 0,
+	rootFields = [],
+}: {
+	shape: GraphQLRequestShape;
+	securityOperationCount?: number;
+	weightedComplexity?: number;
+	rootFields?: Array<{ name: string; uniqueEntryCount: number | null }>;
+}): GraphQLLimitResult => ({
+	ok: true,
+	shape,
+	securityOperation: securityOperationCount > 0,
+	securityOperationCount,
+	weightedComplexity,
+	rateLimitCostUnits: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
 });
 
 export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLimitResult => {
 	if (typeof payload.query !== "string") {
-		return { ok: true, shape: "unknown", securityOperation: false, securityOperationCount: 0 };
+		return accepted({ shape: "unknown" });
 	}
 
 	let document: DocumentNode;
 	try {
 		document = parse(payload.query);
 	} catch {
-		return { ok: true, shape: "unknown", securityOperation: false, securityOperationCount: 0 };
+		return accepted({ shape: "unknown" });
 	}
 
 	let astNodes = 0;
@@ -264,7 +310,7 @@ export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLi
 		typeof payload.operationName === "string" ? payload.operationName : null
 	);
 	if (!operation) {
-		return { ok: true, shape: "unknown", securityOperation: false, securityOperationCount: 0 };
+		return accepted({ shape: "unknown" });
 	}
 
 	const variables = variablesWithDefaults(operation, asVariables(payload.variables));
@@ -285,6 +331,9 @@ export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLi
 	if (inspection.aliases > GRAPHQL_LIMITS.maxAliases) {
 		return reject(`GraphQL operation exceeds ${GRAPHQL_LIMITS.maxAliases} aliases`);
 	}
+	if (inspection.duplicateEntryIds) {
+		return reject("GraphQL entryIds must not contain duplicates", "DUPLICATE_ENTRY_IDS");
+	}
 	if (inspection.oversizedEntryBatch) {
 		return reject("GraphQL entryIds batch exceeds 500 entries");
 	}
@@ -293,14 +342,14 @@ export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLi
 	}
 
 	const securityOperationCount = inspection.rootFields.filter(
-		(field) => field === "createWechatApiSession"
+		(field) => field.name === "createWechatApiSession"
 	).length;
-	return {
-		ok: true,
+	return accepted({
 		shape: operation.operation,
-		securityOperation: securityOperationCount > 0,
 		securityOperationCount,
-	};
+		weightedComplexity: inspection.complexity,
+		rootFields: inspection.rootFields,
+	});
 };
 
 export const validateGraphQLRequestLimits = (body: unknown): GraphQLLimitResult => {
@@ -308,6 +357,8 @@ export const validateGraphQLRequestLimits = (body: unknown): GraphQLLimitResult 
 	let shape: GraphQLRequestShape = "unknown";
 	let securityOperation = false;
 	let securityOperationCount = 0;
+	let weightedComplexity = 0;
+	let rateLimitCostUnits = 0;
 	for (const payload of payloads) {
 		if (!payload || typeof payload !== "object") continue;
 		const result = validateGraphQLPayloadLimits(payload as GraphQLPayload);
@@ -316,6 +367,15 @@ export const validateGraphQLRequestLimits = (body: unknown): GraphQLLimitResult 
 		else if (shape === "unknown") shape = result.shape;
 		securityOperation ||= result.securityOperation;
 		securityOperationCount += result.securityOperationCount;
+		weightedComplexity += result.weightedComplexity;
+		rateLimitCostUnits += result.rateLimitCostUnits;
 	}
-	return { ok: true, shape, securityOperation, securityOperationCount };
+	return {
+		ok: true,
+		shape,
+		securityOperation,
+		securityOperationCount,
+		weightedComplexity,
+		rateLimitCostUnits: Math.max(1, rateLimitCostUnits),
+	};
 };

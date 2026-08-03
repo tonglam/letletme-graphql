@@ -110,7 +110,7 @@ export const checkRateLimit = async (
 	const [count, ttl] = result;
 	return {
 		allowed: count <= limit,
-		retryAfterSeconds: ttl > 0 ? ttl : windowSeconds,
+		retryAfterSeconds: ttl >= 0 ? Math.max(1, ttl) : windowSeconds,
 	};
 };
 

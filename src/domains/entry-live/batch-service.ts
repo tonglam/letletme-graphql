@@ -1,3 +1,4 @@
+import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import type { Player, Team } from "../../infra/types";
 import type { Entry } from "../entries/repository";
@@ -34,6 +35,21 @@ export type BatchLiveCalcResult = {
 		succeededCount: number;
 		failedCount: number;
 	};
+};
+
+const MAX_ENTRY_BATCH = 500;
+
+export const assertValidEntryBatch = (entryIds: readonly number[]): void => {
+	if (entryIds.length > MAX_ENTRY_BATCH) {
+		throw new GraphQLError(`Entry batch exceeds the ${MAX_ENTRY_BATCH} entry limit`, {
+			extensions: { code: "QUERY_TOO_COMPLEX" },
+		});
+	}
+	if (new Set(entryIds).size !== entryIds.length) {
+		throw new GraphQLError("Entry batch must not contain duplicate entry IDs", {
+			extensions: { code: "DUPLICATE_ENTRY_IDS" },
+		});
+	}
 };
 
 type SharedData = {
@@ -465,6 +481,7 @@ export const entryLiveBatchService = {
 			teams?: Promise<Team[]>;
 		}
 	): Promise<BatchLiveCalcResult> {
+		assertValidEntryBatch(entryIds);
 		const errors: Array<{ entryId: number; message: string }> = [];
 
 		if (!entryIds.length) {

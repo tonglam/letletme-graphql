@@ -74,4 +74,11 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		expect(result.meta.totalEntries).toBe(0);
 		expect(result.meta.failedCount).toBe(0);
 	});
+
+	it("rejects duplicate entry IDs before loading shared data", async () => {
+		const context = makeMockContext({});
+		expect(
+			entryLiveBatchService.calcLivePointsForEntries(context, 33, [1001, 1001])
+		).rejects.toMatchObject({ extensions: { code: "DUPLICATE_ENTRY_IDS" } });
+	});
 });

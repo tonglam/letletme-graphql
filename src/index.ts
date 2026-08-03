@@ -3,13 +3,13 @@ import { timingSafeEqual } from "crypto";
 import depthLimit from "graphql-depth-limit";
 import { authorizeGraphQLRequest, graphQLErrorResponse } from "./graphql/authorization";
 import type { GraphQLContext } from "./graphql/context";
-import { parseGraphQLGetLimitPayload, validateGraphQLRequestLimits } from "./graphql/limits";
+import { validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
 import { closeDbPool, dbPool } from "./infra/db-pool";
 import { validateDeviceToken } from "./infra/device-auth";
 import { env } from "./infra/env";
 import { logger } from "./infra/logger";
-import { verifyIngressContext } from "./infra/ingress-context";
+import { classifyGraphQLIngress } from "./infra/ingress-context";
 import { metrics, metricsResponse } from "./infra/metrics";
 import { getPrincipalFromHeaders, principalToAuthUser, type Principal } from "./infra/principal";
 import { closeRedis, connectRedis, getRedis } from "./infra/redis";
@@ -23,8 +23,10 @@ import {
 	readRequestBody,
 	resolveClientIp,
 } from "./http/security";
+import { graphQLIngressFailure, graphQLMethodFailure } from "./http/graphql-policy";
 
 const GRAPHQL_RATE_LIMIT = 120;
+const GRAPHQL_SERVICE_RATE_LIMIT = 600;
 const SECURITY_OPERATION_RATE_LIMIT = 5;
 const RATE_LIMIT_WINDOW_SECONDS = 60;
 
@@ -41,7 +43,7 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
 	const headers: Record<string, string> = {
 		"Access-Control-Allow-Origin": allowedOrigin,
 		Vary: "Origin",
-		"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+		"Access-Control-Allow-Methods": "POST, OPTIONS",
 		"Access-Control-Allow-Headers":
 			"Content-Type, Authorization, X-User-Context, X-User-Context-Sig, X-Ingress-Context, X-Ingress-Context-Sig",
 		"Access-Control-Max-Age": "86400",
@@ -139,6 +141,9 @@ const startServer = async (): Promise<void> => {
 	if (!env.BACKEND_PROXY_SECRET) {
 		logger.warn("BACKEND_PROXY_SECRET is empty — website X-User-Context principals are disabled");
 	}
+	if (!env.GRAPHQL_SERVICE_TOKEN) {
+		logger.warn("GRAPHQL_SERVICE_TOKEN is empty — trusted public server reads are disabled");
+	}
 
 	const apollo = new ApolloServer<GraphQLContext>({
 		schema,
@@ -199,6 +204,17 @@ const startServer = async (): Promise<void> => {
 				const start = performance.now();
 
 				try {
+					const methodFailure = graphQLMethodFailure(request.method);
+					if (methodFailure) {
+						return jsonError(
+							methodFailure.status,
+							methodFailure.code,
+							methodFailure.message,
+							corsHeaders,
+							{ Allow: "POST, OPTIONS" }
+						);
+					}
+
 					const body = await readRequestBody(request);
 					let parsedBody: unknown = undefined;
 					if (body) {
@@ -215,54 +231,42 @@ const startServer = async (): Promise<void> => {
 						}
 					}
 
-					const getPayload =
-						parsedBody === undefined ? parseGraphQLGetLimitPayload(url.searchParams) : null;
-					if (getPayload && !getPayload.ok) {
-						return jsonError(
-							400,
-							"INVALID_GRAPHQL_VARIABLES",
-							"GraphQL variables query parameter must be valid JSON",
-							corsHeaders
-						);
-					}
-					const limitInput = parsedBody ?? (getPayload?.ok ? getPayload.payload : undefined);
-					const limits = validateGraphQLRequestLimits(limitInput);
+					const limits = validateGraphQLRequestLimits(parsedBody);
 					if (!limits.ok) {
 						return jsonError(400, limits.code, limits.message, corsHeaders);
 					}
 
 					const peerAddress = bunServer.requestIP(request)?.address;
 					const clientIp = resolveClientIp(request.headers, peerAddress, env.TRUSTED_PROXY_HOPS);
-					const ingressContext = verifyIngressContext(request.headers);
-					if (
-						env.REQUIRE_SIGNED_WEB_INGRESS &&
-						request.headers.has("X-User-Context") &&
-						!ingressContext
-					) {
+					const ingress = classifyGraphQLIngress(request.headers);
+					metrics.graphqlIngressRequests.labels(ingress.class).inc();
+					const ingressFailure = graphQLIngressFailure(ingress, env.REQUIRE_SIGNED_WEB_INGRESS);
+					if (ingressFailure) {
 						return jsonError(
-							401,
-							"INVALID_INGRESS_CONTEXT",
-							"Authenticated website requests require a valid ingress context",
+							ingressFailure.status,
+							ingressFailure.code,
+							ingressFailure.message,
 							corsHeaders
 						);
 					}
-					const rateLimitSubject = ingressContext?.subject ?? clientIp;
-					// Only a parsed, read-only query may fail open if Redis is unavailable.
-					// Malformed/unknown operations and mutations must fail closed.
-					const failClosed = limits.shape !== "query" || limits.securityOperation;
+					const rateLimitSubject = ingress.subject ?? clientIp;
+					const rateLimit =
+						ingress.class === "service" ? GRAPHQL_SERVICE_RATE_LIMIT : GRAPHQL_RATE_LIMIT;
 					let requestRate;
 					try {
 						requestRate = await checkRateLimit(
 							getRedis(),
 							rateLimitKey("graphql", rateLimitSubject),
-							GRAPHQL_RATE_LIMIT,
-							RATE_LIMIT_WINDOW_SECONDS
+							rateLimit,
+							RATE_LIMIT_WINDOW_SECONDS,
+							limits.rateLimitCostUnits
 						);
 					} catch (error) {
+						metrics.graphqlRateLimitDecisions.labels("graphql", "storage_unavailable").inc();
 						try {
 							requestRate = handleRateLimitStorageFailure({
 								error,
-								failClosed,
+								failClosed: true,
 								scope: "graphql",
 								logger,
 							});
@@ -276,10 +280,12 @@ const startServer = async (): Promise<void> => {
 						}
 					}
 					if (!requestRate.allowed) {
+						metrics.graphqlRateLimitDecisions.labels("graphql", "limited").inc();
 						return jsonError(429, "RATE_LIMITED", "Too many requests", corsHeaders, {
 							"Retry-After": String(requestRate.retryAfterSeconds),
 						});
 					}
+					metrics.graphqlRateLimitDecisions.labels("graphql", "allowed").inc();
 
 					if (limits.securityOperation) {
 						try {
@@ -291,11 +297,16 @@ const startServer = async (): Promise<void> => {
 								limits.securityOperationCount
 							);
 							if (!securityRate.allowed) {
+								metrics.graphqlRateLimitDecisions.labels("legacy-session", "limited").inc();
 								return jsonError(429, "RATE_LIMITED", "Too many session attempts", corsHeaders, {
 									"Retry-After": String(securityRate.retryAfterSeconds),
 								});
 							}
+							metrics.graphqlRateLimitDecisions.labels("legacy-session", "allowed").inc();
 						} catch (error) {
+							metrics.graphqlRateLimitDecisions
+								.labels("legacy-session", "storage_unavailable")
+								.inc();
 							try {
 								handleRateLimitStorageFailure({
 									error,
@@ -335,7 +346,7 @@ const startServer = async (): Promise<void> => {
 							method: request.method.toUpperCase(),
 							headers,
 							body: parsedBody,
-							search: url.search,
+							search: "",
 						},
 						context: async () => ({
 							supabase,

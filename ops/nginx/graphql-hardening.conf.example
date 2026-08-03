@@ -1,0 +1,30 @@
+# Add the zone in nginx's http context. The server_name key intentionally makes
+# this a shared emergency ceiling; application subjects provide fair limits.
+limit_req_zone $server_name zone=graphql_emergency:1m rate=25r/s;
+
+# Merge these directives into the existing API TLS server after the seven-day
+# compatibility gate. Keep the other service locations in that server intact.
+server_name api.letletme.top;
+
+# Cloudflare Authenticated Origin Pulls. Install Cloudflare's current origin
+# pull CA at this path before enabling verification.
+ssl_client_certificate /etc/nginx/ssl/cloudflare-origin-pull-ca.pem;
+ssl_verify_client on;
+
+location = /graphql {
+    limit_req zone=graphql_emergency burst=50 nodelay;
+    limit_req_status 429;
+
+    proxy_pass http://127.0.0.1:4000/graphql;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 15s;
+    proxy_send_timeout 15s;
+    proxy_read_timeout 15s;
+}
+
+# Also configure separate default_server blocks that return 444 for unknown
+# Host values. Do not make the api.letletme.top server the TLS default.

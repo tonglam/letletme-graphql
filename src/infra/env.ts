@@ -10,6 +10,7 @@ type EnvKey =
 	| "LOG_LEVEL"
 	| "CACHE_TTL_SECONDS"
 	| "BACKEND_PROXY_SECRET"
+	| "GRAPHQL_SERVICE_TOKEN"
 	| "REQUIRE_SIGNED_WEB_INGRESS"
 	| "GRAPHQL_AUTH_MODE"
 	| "METRICS_TOKEN"
@@ -53,6 +54,26 @@ const readNumber = (key: EnvKey, fallback: number): number => {
 
 const NODE_ENV = readEnv("NODE_ENV") ?? "development";
 const isProduction = NODE_ENV === "production";
+
+const REQUIRE_SIGNED_WEB_INGRESS_RAW = readEnv("REQUIRE_SIGNED_WEB_INGRESS");
+if (
+	REQUIRE_SIGNED_WEB_INGRESS_RAW !== undefined &&
+	!["true", "false"].includes(REQUIRE_SIGNED_WEB_INGRESS_RAW)
+) {
+	throw new Error("REQUIRE_SIGNED_WEB_INGRESS must be true or false");
+}
+if (isProduction && REQUIRE_SIGNED_WEB_INGRESS_RAW === undefined) {
+	throw new Error("Missing required production env: REQUIRE_SIGNED_WEB_INGRESS");
+}
+
+const BACKEND_PROXY_SECRET = readEnv("BACKEND_PROXY_SECRET") ?? "";
+const GRAPHQL_SERVICE_TOKEN = readEnv("GRAPHQL_SERVICE_TOKEN") ?? "";
+if (isProduction && Buffer.byteLength(BACKEND_PROXY_SECRET, "utf8") < 32) {
+	throw new Error("BACKEND_PROXY_SECRET must contain at least 32 bytes in production");
+}
+if (isProduction && Buffer.byteLength(GRAPHQL_SERVICE_TOKEN, "utf8") < 32) {
+	throw new Error("GRAPHQL_SERVICE_TOKEN must contain at least 32 bytes in production");
+}
 
 const GRAPHQL_AUTH_MODE = readEnv("GRAPHQL_AUTH_MODE") ?? "enforce";
 if (isProduction && GRAPHQL_AUTH_MODE === "report") {
@@ -100,8 +121,9 @@ export const env = {
 	CACHE_TTL_SECONDS: readNumber("CACHE_TTL_SECONDS", 60),
 
 	// Authentication (issued by letletme-web; GraphQL validates only)
-	BACKEND_PROXY_SECRET: readEnv("BACKEND_PROXY_SECRET") ?? "",
-	REQUIRE_SIGNED_WEB_INGRESS: readEnv("REQUIRE_SIGNED_WEB_INGRESS") === "true",
+	BACKEND_PROXY_SECRET,
+	GRAPHQL_SERVICE_TOKEN,
+	REQUIRE_SIGNED_WEB_INGRESS: REQUIRE_SIGNED_WEB_INGRESS_RAW === "true",
 	GRAPHQL_AUTH_MODE,
 	METRICS_TOKEN: readEnv("METRICS_TOKEN") ?? "",
 
