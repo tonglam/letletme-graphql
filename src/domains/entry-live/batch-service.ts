@@ -492,7 +492,11 @@ export const entryLiveBatchService = {
 			};
 		}
 
-		// Phase 1: Load shared data — live, fixtures, teams, and entry data in parallel
+		// Phase 1: Load reusable data and all entry data in parallel. A single-entry
+		// request defers live points until its 15 picks are known, avoiding a
+		// 700-player shaped-cache decode on every browser refresh.
+		const useTargetedLiveRead =
+			includeLive && entryIds.length === 1 && prefetched?.liveByPlayer === undefined;
 		const [
 			liveByPlayerRaw,
 			bonusByPlayerId,
@@ -504,7 +508,7 @@ export const entryLiveBatchService = {
 			previousResultsByEntry,
 		] = await Promise.all([
 			prefetched?.liveByPlayer ??
-				(includeLive
+				(includeLive && !useTargetedLiveRead
 					? liveRepository.getAllLivePerformances(context, eventId)
 					: Promise.resolve(new Map<number, LivePerformance>())),
 			includeLive
@@ -522,8 +526,6 @@ export const entryLiveBatchService = {
 				: Promise.resolve(new Map<number, EntryEventResult>()),
 		]);
 
-		const liveByPlayerMap = new Map(liveByPlayerRaw);
-
 		// Collect all unique player IDs from picks and transfers
 		const allPlayerIds = new Set<number>();
 		for (const [, picks] of picksByEntry) {
@@ -537,7 +539,16 @@ export const entryLiveBatchService = {
 		}
 
 		// Load only the needed players via HMGET (not HGETALL of all 600+)
-		const playersList = await playersRepository.getPlayersByIds(context, Array.from(allPlayerIds));
+		const playerIds = Array.from(allPlayerIds);
+		const [playersList, targetedLivePerformances] = await Promise.all([
+			playersRepository.getPlayersByIds(context, playerIds),
+			useTargetedLiveRead
+				? liveRepository.getLivePerformancesByPlayerIds(context, eventId, playerIds)
+				: Promise.resolve([] as LivePerformance[]),
+		]);
+		const liveByPlayerMap = useTargetedLiveRead
+			? new Map(targetedLivePerformances.map((performance) => [performance.playerId, performance]))
+			: new Map(liveByPlayerRaw);
 
 		const playersById = new Map<number, Player>();
 		for (const p of playersList) {

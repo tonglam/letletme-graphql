@@ -2,6 +2,7 @@ import type { GraphQLContext } from "../../graphql/context";
 import { env } from "../../infra/env";
 import { getCurrentSeason } from "../../infra/season";
 import { metrics } from "../../infra/metrics";
+import { loadLiveSnapshotMeta } from "./snapshot-meta";
 
 const parseBonusValue = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isInteger(value)) {
@@ -38,7 +39,25 @@ export async function loadLiveBonusByPlayerId(
 	const hashKey = `${env.LIVE_POINTS_V2 ? "LiveBonusV2" : "LiveBonus"}:${season}:${eventId}`;
 	let hashEntries: Record<string, string>;
 	try {
-		hashEntries = await context.redis.hgetall(hashKey);
+		const [entries, meta] = await Promise.all([
+			context.redis.hgetall(hashKey),
+			env.LIVE_POINTS_V2
+				? loadLiveSnapshotMeta(context, eventId, { season })
+				: Promise.resolve(null),
+		]);
+		hashEntries = entries;
+		if (env.LIVE_POINTS_V2 && meta && Object.keys(hashEntries).length !== meta.bonusTeamCount) {
+			context.logger.warn(
+				{
+					hashKey,
+					revision: meta.revision,
+					expectedCount: meta.bonusTeamCount,
+					actualCount: Object.keys(hashEntries).length,
+				},
+				"Incomplete live bonus revision; preserving official aggregate bonus"
+			);
+			return new Map();
+		}
 		metrics.cacheRepositoryEvents.labels("live_bonus", "redis").inc();
 	} catch (error) {
 		const wrongType = error instanceof Error && error.message.includes("WRONGTYPE");

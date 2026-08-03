@@ -10,15 +10,30 @@ const makeMockRedis = (options: {
 		...Object.entries(options.strings ?? {}),
 	]);
 	const hashes = new Map(Object.entries(options.hashes ?? {}).map(([k, v]) => [k, v]));
+	const getCalls: string[] = [];
+	const hgetallCalls: string[] = [];
+	const setCalls: Array<[string, string, ...unknown[]]> = [];
 
 	return {
-		get: async (key: string): Promise<string | null> => strings.get(key) ?? null,
-		set: async (key: string, value: string): Promise<string> => {
+		strings,
+		hashes,
+		getCalls,
+		hgetallCalls,
+		setCalls,
+		get: async (key: string): Promise<string | null> => {
+			getCalls.push(key);
+			return strings.get(key) ?? null;
+		},
+		set: async (key: string, value: string, ...args: unknown[]): Promise<string> => {
+			setCalls.push([key, value, ...args]);
 			strings.set(key, value);
 			return "OK";
 		},
 		del: async (key: string): Promise<number> => (strings.delete(key) ? 1 : 0),
-		hgetall: async (key: string): Promise<Record<string, string>> => hashes.get(key) ?? {},
+		hgetall: async (key: string): Promise<Record<string, string>> => {
+			hgetallCalls.push(key);
+			return hashes.get(key) ?? {};
+		},
 		hget: async (key: string, field: string): Promise<string | null> =>
 			hashes.get(key)?.[field] ?? null,
 		hmget: async (key: string, ...fields: string[]): Promise<(string | null)[]> => {
@@ -36,6 +51,8 @@ const makeMockRedis = (options: {
 		expire: async (): Promise<number> => 1,
 	};
 };
+
+type MockRedis = ReturnType<typeof makeMockRedis>;
 
 const makeMockSupabase = (options: {
 	data?: unknown[];
@@ -79,12 +96,15 @@ const buildContext = (options: {
 	supabaseData?: unknown[];
 	supabaseDataByTable?: Record<string, unknown[]>;
 	supabaseError?: unknown;
+	redis?: MockRedis;
 }) =>
 	({
-		redis: makeMockRedis({
-			strings: options.redisStrings,
-			hashes: options.redisHashes,
-		}),
+		redis:
+			options.redis ??
+			makeMockRedis({
+				strings: options.redisStrings,
+				hashes: options.redisHashes,
+			}),
 		supabase: makeMockSupabase({
 			data: options.supabaseData,
 			dataByTable: options.supabaseDataByTable,
@@ -120,6 +140,21 @@ const SAMPLE_SYNC_JOB_ROW = JSON.stringify({
 	inDreamTeam: false,
 	totalPoints: 1,
 });
+
+const snapshotMeta = (revision: string, eventLiveCount = 1): string =>
+	JSON.stringify({
+		schemaVersion: 1,
+		season: "2526",
+		eventId: 33,
+		revision,
+		state: "live",
+		publishedAt: "2025-08-15T20:00:00.000Z",
+		checkedAt: "2025-08-15T20:00:00.000Z",
+		eventLiveCount,
+		fixtureCount: 10,
+		fixtureTeamCount: 20,
+		bonusTeamCount: 2,
+	});
 
 describe("liveRepository.getAllLivePerformances", () => {
 	it("returns empty map for invalid eventId", async () => {
@@ -273,11 +308,64 @@ describe("liveRepository.getAllLivePerformances", () => {
 		expect(result.get(1)?.playerId).toBe(1);
 	});
 
+	it("keys the shaped cache by producer revision with a bounded immutable TTL", async () => {
+		const revision = "a".repeat(24);
+		const redis = makeMockRedis({
+			strings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision) },
+			hashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
+		});
+		const context = buildContext({ redis });
+
+		const result = await liveRepository.getAllLivePerformances(context, 33);
+		expect(result.get(1)?.totalPoints).toBe(1);
+		expect(redis.setCalls).toContainEqual([
+			`gql:v2:2526:live:all:33:revision:${revision}`,
+			expect.any(String),
+			"EX",
+			180,
+		]);
+	});
+
+	it("coalesces a 100-request revision miss into one EventLive load", async () => {
+		const revision = "b".repeat(24);
+		const redis = makeMockRedis({
+			strings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision) },
+			hashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
+		});
+		redis.hgetall = async (key: string): Promise<Record<string, string>> => {
+			redis.hgetallCalls.push(key);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			return redis.hashes.get(key) ?? {};
+		};
+		const results = await Promise.all(
+			Array.from({ length: 100 }, () =>
+				liveRepository.getAllLivePerformances(buildContext({ redis }), 33)
+			)
+		);
+
+		expect(results.every((result) => result.get(1)?.totalPoints === 1)).toBe(true);
+		expect(redis.hgetallCalls).toEqual(["EventLive:2526:33"]);
+		expect(redis.setCalls).toHaveLength(1);
+	});
+
+	it("rejects an incomplete EventLive hash instead of caching a partial revision", async () => {
+		const revision = "c".repeat(24);
+		const redis = makeMockRedis({
+			strings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 2) },
+			hashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
+		});
+		const context = buildContext({ redis });
+
+		const result = await liveRepository.getAllLivePerformances(context, 33);
+		expect(result.size).toBe(0);
+		expect(redis.setCalls.some(([key]) => key.includes(`revision:${revision}`))).toBe(false);
+	});
+
 	it("evicts malformed shaped cache and falls back to authoritative Redis data", async () => {
 		const context = buildContext({
 			redisStrings: {
 				"Season:active": "2526",
-				"gql:v2:2526:live:all:33": "not-json",
+				"gql:v2:2526:live:all:33:fallback15": "not-json",
 			},
 			redisHashes: {
 				"EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW },
@@ -289,7 +377,7 @@ describe("liveRepository.getAllLivePerformances", () => {
 		const redis = (
 			context as unknown as { redis: { get: (key: string) => Promise<string | null> } }
 		).redis;
-		expect(await redis.get("gql:v2:2526:live:all:33")).not.toBe("not-json");
+		expect(await redis.get("gql:v2:2526:live:all:33:fallback15")).not.toBe("not-json");
 	});
 });
 

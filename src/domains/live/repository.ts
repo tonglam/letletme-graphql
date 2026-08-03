@@ -3,6 +3,13 @@ import { gqlCacheKey } from "../../infra/cache-key";
 import { getCurrentEventId } from "../../infra/event";
 import { isMissingPostgrestColumnError } from "../../infra/postgrest-error";
 import { getCurrentSeason } from "../../infra/season";
+import {
+	loadLiveSnapshotMeta,
+	liveSnapshotMetaKey,
+	parseLiveSnapshotMeta,
+	rememberLiveSnapshotMeta,
+	type LiveSnapshotMeta,
+} from "./snapshot-meta";
 
 export type LivePerformance = {
 	eventId: number;
@@ -805,30 +812,141 @@ const fetchAllLivePerformanceFromDb = async (
 	return (data as unknown as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
 };
 
+type LiveRedisSnapshot = {
+	meta: LiveSnapshotMeta | null;
+	performances: Map<number, LivePerformance>;
+};
+
+const isStringRecord = (value: unknown): value is Record<string, string> =>
+	typeof value === "object" &&
+	value !== null &&
+	!Array.isArray(value) &&
+	Object.values(value).every((entry) => typeof entry === "string");
+
 const loadEventLiveFromRedis = async (
 	context: GraphQLContext,
-	eventId: number
-): Promise<Map<number, LivePerformance> | null> => {
-	const season = await getCurrentSeason(context);
+	eventId: number,
+	season: string
+): Promise<LiveRedisSnapshot | null> => {
 	const hashKey = redisKey.eventLive(season, eventId);
+	const metaKey = liveSnapshotMetaKey(season, eventId);
 
 	let hashEntries: Record<string, string>;
+	let rawMeta: string | null;
 	try {
-		hashEntries = await context.redis.hgetall(hashKey);
+		// MULTI makes the metadata revision and EventLive hash one read snapshot.
+		// Lightweight test doubles may not implement it, so preserve a sequential
+		// compatibility path for repository tests and non-ioredis adapters.
+		if (typeof context.redis.multi === "function") {
+			const result = await context.redis.multi().get(metaKey).hgetall(hashKey).exec();
+			if (!result || result.length !== 2) {
+				throw new Error("Live snapshot Redis read transaction was aborted");
+			}
+			const metaResult = result[0];
+			const hashResult = result[1];
+			if (metaResult[0]) throw metaResult[0];
+			if (hashResult[0]) throw hashResult[0];
+			rawMeta = typeof metaResult[1] === "string" ? metaResult[1] : null;
+			hashEntries = isStringRecord(hashResult[1]) ? hashResult[1] : {};
+		} else {
+			[rawMeta, hashEntries] = await Promise.all([
+				context.redis.get(metaKey),
+				context.redis.hgetall(hashKey),
+			]);
+		}
 	} catch (error) {
 		context.logger.warn(
-			{ err: error, hashKey },
+			{ err: error, hashKey, metaKey },
 			"Failed to read EventLive hash from Redis, falling back to DB"
 		);
 		return null;
 	}
 
-	if (Object.keys(hashEntries).length === 0) {
+	const meta = parseLiveSnapshotMeta(rawMeta, { season, eventId });
+	rememberLiveSnapshotMeta(context, meta, season, eventId);
+	const performances = parseEventLiveHashEntries(hashEntries);
+	if (meta && performances.size !== meta.eventLiveCount) {
+		context.logger.warn(
+			{
+				hashKey,
+				revision: meta.revision,
+				expectedCount: meta.eventLiveCount,
+				actualCount: performances.size,
+			},
+			"Incomplete EventLive revision; falling back to database"
+		);
+		return { meta, performances: new Map() };
+	}
+	return { meta, performances };
+};
+
+const LIVE_REVISION_CACHE_TTL_SEC = 180;
+const LIVE_FALLBACK_CACHE_TTL_SEC = 15;
+
+const liveAllFlights = new WeakMap<object, Map<string, Promise<Map<number, LivePerformance>>>>();
+
+const getLiveAllFlightMap = (
+	context: GraphQLContext
+): Map<string, Promise<Map<number, LivePerformance>>> => {
+	const redisIdentity = context.redis as object;
+	let flights = liveAllFlights.get(redisIdentity);
+	if (!flights) {
+		flights = new Map();
+		liveAllFlights.set(redisIdentity, flights);
+	}
+	return flights;
+};
+
+const shapedLiveCacheKey = (
+	season: string,
+	eventId: number,
+	meta: LiveSnapshotMeta | null
+): string =>
+	meta
+		? gqlCacheKey(season, `live:all:${eventId}:revision:${meta.revision}`)
+		: gqlCacheKey(season, `live:all:${eventId}:fallback15`);
+
+const readShapedLiveCache = async (
+	context: GraphQLContext,
+	cacheKey: string
+): Promise<Map<number, LivePerformance> | null> => {
+	let cached: string | null;
+	try {
+		cached = await context.redis.get(cacheKey);
+	} catch (error) {
+		context.logger.warn({ err: error, cacheKey }, "Failed to read shaped live cache");
 		return null;
 	}
+	if (cached === null) return null;
+	try {
+		const parsed: unknown = JSON.parse(cached);
+		if (Array.isArray(parsed) && parsed.every(isLivePerformance)) {
+			return new Map(parsed.map((performance) => [performance.playerId, performance]));
+		}
+	} catch (error) {
+		context.logger.warn({ err: error, cacheKey }, "Malformed shaped live cache");
+	}
+	await deleteMalformedCache(context, cacheKey);
+	return null;
+};
 
-	const performances = parseEventLiveHashEntries(hashEntries);
-	return performances.size > 0 ? performances : null;
+const writeShapedLiveCache = async (
+	context: GraphQLContext,
+	cacheKey: string,
+	performances: Map<number, LivePerformance>,
+	ttlSeconds: number
+): Promise<void> => {
+	if (performances.size === 0) return;
+	try {
+		await context.redis.set(
+			cacheKey,
+			JSON.stringify(Array.from(performances.values())),
+			"EX",
+			ttlSeconds
+		);
+	} catch (error) {
+		context.logger.warn({ err: error, cacheKey }, "Failed to write shaped live cache");
+	}
 };
 
 export const liveRepository: LiveRepository = {
@@ -841,40 +959,60 @@ export const liveRepository: LiveRepository = {
 		}
 
 		const season = await getCurrentSeason(context);
-		const shapedCacheKey = gqlCacheKey(season, `live:all:${eventId}`);
-		let shapedCached: string | null = null;
-		try {
-			shapedCached = await context.redis.get(shapedCacheKey);
-		} catch (error) {
-			context.logger.warn({ err: error, shapedCacheKey }, "Failed to read shaped live cache");
-		}
-		if (shapedCached !== null) {
-			try {
-				const parsed: unknown = JSON.parse(shapedCached);
-				if (Array.isArray(parsed) && parsed.every(isLivePerformance)) {
-					return new Map(parsed.map((p) => [p.playerId, p]));
+		const requestedMeta = await loadLiveSnapshotMeta(context, eventId, { season });
+		const requestedCacheKey = shapedLiveCacheKey(season, eventId, requestedMeta);
+		const cached = await readShapedLiveCache(context, requestedCacheKey);
+		if (cached) return cached;
+
+		const flightKey = `${season}:${eventId}:${requestedMeta?.revision ?? "fallback"}`;
+		const flights = getLiveAllFlightMap(context);
+		const existingFlight = flights.get(flightKey);
+		if (existingFlight) return new Map(await existingFlight);
+
+		const flight = (async (): Promise<Map<number, LivePerformance>> => {
+			// A sibling request may have populated the cache before this flight won.
+			const cacheAfterFlightElection = await readShapedLiveCache(context, requestedCacheKey);
+			if (cacheAfterFlightElection) return cacheAfterFlightElection;
+
+			const redisSnapshot = await loadEventLiveFromRedis(context, eventId, season);
+			if (redisSnapshot && redisSnapshot.performances.size > 0) {
+				const actualKey = shapedLiveCacheKey(season, eventId, redisSnapshot.meta);
+				if (actualKey !== requestedCacheKey) {
+					const actualCached = await readShapedLiveCache(context, actualKey);
+					if (actualCached) return actualCached;
 				}
-			} catch (error) {
-				context.logger.warn({ err: error, shapedCacheKey }, "Malformed shaped live cache");
+				await writeShapedLiveCache(
+					context,
+					actualKey,
+					redisSnapshot.performances,
+					redisSnapshot.meta ? LIVE_REVISION_CACHE_TTL_SEC : LIVE_FALLBACK_CACHE_TTL_SEC
+				);
+				return redisSnapshot.performances;
 			}
-			await deleteMalformedCache(context, shapedCacheKey);
-		}
 
-		const fromRedis = await loadEventLiveFromRedis(context, eventId);
-		const performances =
-			fromRedis ??
-			new Map((await fetchAllLivePerformanceFromDb(context, eventId)).map((p) => [p.playerId, p]));
-
-		if (performances.size > 0) {
-			await context.redis.set(
-				shapedCacheKey,
-				JSON.stringify(Array.from(performances.values())),
-				"EX",
-				300
+			const fromDb = new Map(
+				(await fetchAllLivePerformanceFromDb(context, eventId)).map((performance) => [
+					performance.playerId,
+					performance,
+				])
 			);
+			// A missing required Redis view means the metadata revision is not safe
+			// for caching. Keep DB recovery bounded to fifteen seconds so the Data
+			// producer's next repair is visible immediately through a revision key.
+			await writeShapedLiveCache(
+				context,
+				shapedLiveCacheKey(season, eventId, null),
+				fromDb,
+				LIVE_FALLBACK_CACHE_TTL_SEC
+			);
+			return fromDb;
+		})();
+		flights.set(flightKey, flight);
+		try {
+			return new Map(await flight);
+		} finally {
+			if (flights.get(flightKey) === flight) flights.delete(flightKey);
 		}
-
-		return performances;
 	},
 
 	async getLiveScores(

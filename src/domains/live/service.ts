@@ -5,6 +5,7 @@ import { playersRepository } from "../players/repository";
 import { loadLiveBonusByPlayerId } from "./bonus-cache";
 import type { EventLive, LiveExplain, LivePerformance, LiveScoresFilter } from "./repository";
 import { applyLiveScoresFilter, liveRepository } from "./repository";
+import { withLiveSnapshotConsistency } from "./snapshot-meta";
 
 const withCalculatedTotalPoints = (
 	live: LivePerformance,
@@ -56,9 +57,13 @@ export const liveService = {
 		eventId?: number,
 		filter?: LiveScoresFilter | null
 	): Promise<LivePerformance[]> {
-		const performances = await liveRepository.getLiveScores(context, eventId);
-		const calculated = await calculateTotalsForPerformances(context, performances, eventId);
-		return applyLiveScoresFilter(calculated, filter);
+		const targetEventId = eventId ?? (await getCurrentEventId(context));
+		if (!targetEventId) return [];
+		return withLiveSnapshotConsistency(context, targetEventId, async () => {
+			const performances = await liveRepository.getLiveScores(context, targetEventId);
+			const calculated = await calculateTotalsForPerformances(context, performances, targetEventId);
+			return applyLiveScoresFilter(calculated, filter);
+		});
 	},
 
 	async getPlayerLive(
@@ -67,24 +72,34 @@ export const liveService = {
 		eventId?: number
 	): Promise<LivePerformance | null> {
 		const targetEventId = eventId ?? (await getCurrentEventId(context)) ?? undefined;
-		const [performance, player] = await Promise.all([
-			liveRepository.getPlayerLive(context, playerId, targetEventId),
-			playersRepository.getPlayerById(context, playerId),
-		]);
-		if (!performance) return null;
-
-		const bonusByPlayerId = targetEventId
-			? await loadLiveBonusByPlayerId(context, targetEventId)
-			: new Map<number, number>();
-		return withCalculatedTotalPoints(performance, player?.position, bonusByPlayerId.get(playerId));
+		if (!targetEventId) return null;
+		return withLiveSnapshotConsistency(context, targetEventId, async () => {
+			const [performance, player, bonusByPlayerId] = await Promise.all([
+				liveRepository.getPlayerLive(context, playerId, targetEventId),
+				playersRepository.getPlayerById(context, playerId),
+				loadLiveBonusByPlayerId(context, targetEventId),
+			]);
+			if (!performance) return null;
+			return withCalculatedTotalPoints(
+				performance,
+				player?.position,
+				bonusByPlayerId.get(playerId)
+			);
+		});
 	},
 
 	async getEventLive(context: GraphQLContext, eventId: number): Promise<EventLive> {
-		const eventLive = await liveRepository.getEventLive(context, eventId);
-		return {
-			...eventLive,
-			performances: await calculateTotalsForPerformances(context, eventLive.performances, eventId),
-		};
+		return withLiveSnapshotConsistency(context, eventId, async () => {
+			const eventLive = await liveRepository.getEventLive(context, eventId);
+			return {
+				...eventLive,
+				performances: await calculateTotalsForPerformances(
+					context,
+					eventLive.performances,
+					eventId
+				),
+			};
+		});
 	},
 
 	getEventLiveExplain(

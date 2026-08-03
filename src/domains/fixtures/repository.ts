@@ -2,6 +2,7 @@ import type { GraphQLContext } from "../../graphql/context";
 import { getCurrentEventId } from "../../infra/event";
 import { getCurrentSeason } from "../../infra/season";
 import { metrics } from "../../infra/metrics";
+import { loadLiveSnapshotMeta } from "../live/snapshot-meta";
 
 export type Fixture = {
 	id: number;
@@ -181,7 +182,23 @@ const loadEventFixturesFromRedis = async (
 
 	let hashEntries: Record<string, string>;
 	try {
-		hashEntries = await context.redis.hgetall(hashKey);
+		const [entries, meta] = await Promise.all([
+			context.redis.hgetall(hashKey),
+			loadLiveSnapshotMeta(context, eventId, { season }),
+		]);
+		hashEntries = entries;
+		if (meta && Object.keys(hashEntries).length !== meta.fixtureCount) {
+			context.logger.warn(
+				{
+					hashKey,
+					revision: meta.revision,
+					expectedCount: meta.fixtureCount,
+					actualCount: Object.keys(hashEntries).length,
+				},
+				"Incomplete Fixtures revision; falling back to database"
+			);
+			return null;
+		}
 	} catch (error) {
 		context.logger.warn({ err: error, hashKey }, "Failed to read Fixtures hash from Redis");
 		return null;

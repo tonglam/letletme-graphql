@@ -1,12 +1,18 @@
 import type { GraphQLResolveInfo } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import { parentSelectionRequestsField } from "../../graphql/selection-set";
+import { getCurrentEventId } from "../../infra/event";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
 import type { Player } from "../players/repository";
 import { playersService } from "../players/service";
 import type { EventLive, LiveExplain, LivePerformance, LiveScoresFilter } from "./repository";
 import { liveService } from "./service";
+import {
+	loadLiveSnapshotMeta,
+	type LiveSnapshotMeta,
+	type LiveSnapshotState,
+} from "./snapshot-meta";
 
 /**
  * Per-request memoization for player lookups to avoid N+1 Redis/DB round-trips
@@ -98,6 +104,10 @@ type EventLiveArgs = {
 	eventId: number;
 };
 
+type LiveSnapshotArgs = {
+	eventId?: number | null;
+};
+
 type LiveExplainArgs = {
 	eventId: number;
 	elementId: number;
@@ -156,6 +166,18 @@ export const liveResolvers = {
 			context: GraphQLContext
 		): Promise<LiveExplain | null> =>
 			liveService.getEventLiveExplain(context, args.eventId, args.elementId),
+		liveSnapshot: async (
+			_parent: unknown,
+			args: LiveSnapshotArgs,
+			context: GraphQLContext
+		): Promise<LiveSnapshotMeta | null> => {
+			const eventId = args.eventId ?? (await getCurrentEventId(context));
+			return eventId ? loadLiveSnapshotMeta(context, eventId) : null;
+		},
+	},
+	LiveSnapshotMeta: {
+		state: (parent: LiveSnapshotMeta): Uppercase<LiveSnapshotState> =>
+			parent.state.toUpperCase() as Uppercase<LiveSnapshotState>,
 	},
 	EventLive: {
 		event: async (

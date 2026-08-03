@@ -56,6 +56,7 @@ const publicFields = new Set([
 	"playerLive",
 	"eventLive",
 	"eventLiveExplain",
+	"liveSnapshot",
 	"liveMatches",
 	"player",
 	"players",

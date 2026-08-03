@@ -31,6 +31,26 @@ export const liveTypeDefs = /* GraphQL */ `
 		maxTotalPoints: Int
 	}
 
+	enum LiveSnapshotState {
+		SCHEDULED
+		LIVE
+		SETTLED
+	}
+
+	type LiveSnapshotMeta {
+		schemaVersion: Int!
+		season: String!
+		eventId: Int!
+		revision: String!
+		state: LiveSnapshotState!
+		publishedAt: String!
+		checkedAt: String!
+		eventLiveCount: Int!
+		fixtureCount: Int!
+		fixtureTeamCount: Int!
+		bonusTeamCount: Int!
+	}
+
 	type EventLive {
 		event: Event
 		performances: [LivePerformance!]!
@@ -97,5 +117,6 @@ export const liveTypeDefs = /* GraphQL */ `
 		playerLive(playerId: Int!, eventId: Int): LivePerformance
 		eventLive(eventId: Int!): EventLive
 		eventLiveExplain(eventId: Int!, elementId: Int!): LiveExplain
+		liveSnapshot(eventId: Int): LiveSnapshotMeta
 	}
 `;
