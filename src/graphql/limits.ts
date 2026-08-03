@@ -1,8 +1,16 @@
 import {
 	Kind,
+	getNamedType,
+	isInterfaceType,
+	isObjectType,
+	isUnionType,
 	parse,
 	valueFromASTUntyped,
 	visit,
+	type GraphQLArgument,
+	type GraphQLCompositeType,
+	type GraphQLNamedType,
+	type GraphQLSchema,
 	type DocumentNode,
 	type FragmentDefinitionNode,
 	type OperationDefinitionNode,
@@ -17,35 +25,12 @@ export const GRAPHQL_LIMITS = {
 	maxComplexity: 600,
 } as const;
 
+const MAX_LIST_ARGUMENT_WEIGHT = 200;
+
 type GraphQLPayload = {
 	query?: unknown;
 	variables?: unknown;
 	operationName?: unknown;
-};
-
-export type GraphQLGetLimitPayloadResult = { ok: true; payload: GraphQLPayload } | { ok: false };
-
-export const parseGraphQLGetLimitPayload = (
-	searchParams: URLSearchParams
-): GraphQLGetLimitPayloadResult => {
-	const rawVariables = searchParams.get("variables");
-	let variables: unknown = undefined;
-	if (rawVariables !== null) {
-		try {
-			variables = JSON.parse(rawVariables) as unknown;
-		} catch {
-			return { ok: false };
-		}
-	}
-
-	return {
-		ok: true,
-		payload: {
-			query: searchParams.get("query"),
-			operationName: searchParams.get("operationName"),
-			variables,
-		},
-	};
 };
 
 export type GraphQLRequestShape = "query" | "mutation" | "subscription" | "unknown";
@@ -56,11 +41,13 @@ export type GraphQLLimitResult =
 			shape: GraphQLRequestShape;
 			securityOperation: boolean;
 			securityOperationCount: number;
+			weightedComplexity: number;
+			rateLimitCostUnits: number;
 	  }
 	| {
 			ok: false;
 			message: string;
-			code: "QUERY_TOO_COMPLEX";
+			code: "QUERY_TOO_COMPLEX" | "DUPLICATE_ENTRY_IDS";
 	  };
 
 const asVariables = (value: unknown): Record<string, unknown> =>
@@ -92,10 +79,18 @@ const fragmentsFor = (document: DocumentNode): Map<string, FragmentDefinitionNod
 			.map((fragment) => [fragment.name.value, fragment])
 	);
 
+const asCompositeType = (
+	value: GraphQLNamedType | null | undefined
+): GraphQLCompositeType | null =>
+	value && (isObjectType(value) || isInterfaceType(value) || isUnionType(value)) ? value : null;
+
 type ListWeight = {
 	multiplier: number;
 	propagateToChildren: boolean;
 	oversizedEntryBatch: boolean;
+	duplicateEntryIds: boolean;
+	negativeListLimit: boolean;
+	uniqueEntryCount: number | null;
 };
 
 const listWeight = (
@@ -103,20 +98,46 @@ const listWeight = (
 		name: { value: string };
 		value: Parameters<typeof valueFromASTUntyped>[0];
 	}[],
-	variables: Record<string, unknown>
+	variables: Record<string, unknown>,
+	schemaArguments: readonly GraphQLArgument[] = []
 ): ListWeight => {
 	let multiplier = 1;
 	let hasEntryIds = false;
 	let oversizedEntryBatch = false;
+	let duplicateEntryIds = false;
+	let negativeListLimit = false;
+	let uniqueEntryCount: number | null = null;
+	const argumentValues = new Map<string, unknown>();
+	for (const argument of schemaArguments) {
+		if (argument.defaultValue !== undefined) {
+			argumentValues.set(argument.name, argument.defaultValue);
+		}
+	}
 	for (const argument of fieldArguments) {
-		const value = valueFromASTUntyped(argument.value, variables);
-		if (argument.name.value === "entryIds" && Array.isArray(value)) {
+		const suppliedValue = valueFromASTUntyped(argument.value, variables);
+		// GraphQL preserves an explicit null, but the list resolvers use nullish
+		// fallbacks that match their schema defaults. Keep that effective default
+		// for safety accounting so `limit: null` cannot make a large list look cheap.
+		const preservesEffectiveDefault =
+			suppliedValue === null && argumentValues.has(argument.name.value);
+		if (
+			!preservesEffectiveDefault &&
+			(suppliedValue !== undefined || !argumentValues.has(argument.name.value))
+		) {
+			argumentValues.set(argument.name.value, suppliedValue);
+		}
+	}
+	for (const [name, value] of argumentValues) {
+		if (name === "entryIds" && Array.isArray(value)) {
 			hasEntryIds = true;
+			uniqueEntryCount = new Set(value).size;
+			duplicateEntryIds ||= uniqueEntryCount !== value.length;
 			oversizedEntryBatch ||= value.length > 500;
 			multiplier = Math.max(multiplier, Math.min(value.length, 500));
 		}
-		if (["first", "last", "limit"].includes(argument.name.value) && typeof value === "number") {
-			multiplier = Math.max(multiplier, Math.min(Math.max(value, 1), 100));
+		if (["first", "last", "limit"].includes(name) && typeof value === "number") {
+			negativeListLimit ||= value < 0;
+			multiplier = Math.max(multiplier, Math.min(Math.max(value, 1), MAX_LIST_ARGUMENT_WEIGHT));
 		}
 	}
 	return {
@@ -127,6 +148,9 @@ const listWeight = (
 		// propagating their multiplier through their child selection.
 		propagateToChildren: !hasEntryIds,
 		oversizedEntryBatch,
+		duplicateEntryIds,
+		negativeListLimit,
+		uniqueEntryCount,
 	};
 };
 
@@ -151,6 +175,8 @@ const inspectSelectionSet = ({
 	depth,
 	multiplier,
 	seenFragments,
+	schema,
+	parentType,
 }: {
 	selectionSet: SelectionSetNode;
 	fragments: Map<string, FragmentDefinitionNode>;
@@ -158,28 +184,46 @@ const inspectSelectionSet = ({
 	depth: number;
 	multiplier: number;
 	seenFragments: Set<string>;
+	schema?: GraphQLSchema;
+	parentType: GraphQLCompositeType | null;
 }): {
 	maxDepth: number;
 	aliases: number;
 	complexity: number;
-	rootFields: string[];
+	rootFields: Array<{ name: string; uniqueEntryCount: number | null }>;
 	oversizedEntryBatch: boolean;
+	duplicateEntryIds: boolean;
+	negativeListLimit: boolean;
 } => {
 	let maxDepth = depth;
 	let aliases = 0;
 	let complexity = 0;
-	const rootFields: string[] = [];
+	const rootFields: Array<{ name: string; uniqueEntryCount: number | null }> = [];
 	let oversizedEntryBatch = false;
+	let duplicateEntryIds = false;
+	let negativeListLimit = false;
 
 	for (const selection of selectionSet.selections) {
 		if (selection.kind === Kind.FIELD) {
-			if (depth === 1) rootFields.push(selection.name.value);
 			if (selection.alias) aliases += 1;
-			const weight = listWeight(selection.arguments ?? [], variables);
+			const fieldDefinition =
+				parentType && (isObjectType(parentType) || isInterfaceType(parentType))
+					? parentType.getFields()[selection.name.value]
+					: undefined;
+			const weight = listWeight(selection.arguments ?? [], variables, fieldDefinition?.args ?? []);
+			if (depth === 1) {
+				rootFields.push({
+					name: selection.name.value,
+					uniqueEntryCount: weight.uniqueEntryCount,
+				});
+			}
 			const childMultiplier = multiplier * weight.multiplier;
 			oversizedEntryBatch ||= weight.oversizedEntryBatch;
+			duplicateEntryIds ||= weight.duplicateEntryIds;
+			negativeListLimit ||= weight.negativeListLimit;
 			complexity += childMultiplier;
 			if (selection.selectionSet) {
+				const namedChildType = fieldDefinition ? getNamedType(fieldDefinition.type) : null;
 				const child = inspectSelectionSet({
 					selectionSet: selection.selectionSet,
 					fragments,
@@ -187,15 +231,22 @@ const inspectSelectionSet = ({
 					depth: depth + 1,
 					multiplier: weight.propagateToChildren ? childMultiplier : multiplier,
 					seenFragments: new Set(seenFragments),
+					schema,
+					parentType: asCompositeType(namedChildType),
 				});
 				maxDepth = Math.max(maxDepth, child.maxDepth);
 				aliases += child.aliases;
 				complexity += child.complexity;
 				oversizedEntryBatch ||= child.oversizedEntryBatch;
+				duplicateEntryIds ||= child.duplicateEntryIds;
+				negativeListLimit ||= child.negativeListLimit;
 			}
 			continue;
 		}
 		if (selection.kind === Kind.INLINE_FRAGMENT) {
+			const fragmentType = selection.typeCondition
+				? schema?.getType(selection.typeCondition.name.value)
+				: parentType;
 			const child = inspectSelectionSet({
 				selectionSet: selection.selectionSet,
 				fragments,
@@ -203,11 +254,15 @@ const inspectSelectionSet = ({
 				depth,
 				multiplier,
 				seenFragments: new Set(seenFragments),
+				schema,
+				parentType: asCompositeType(fragmentType) ?? parentType,
 			});
 			maxDepth = Math.max(maxDepth, child.maxDepth);
 			aliases += child.aliases;
 			complexity += child.complexity;
 			oversizedEntryBatch ||= child.oversizedEntryBatch;
+			duplicateEntryIds ||= child.duplicateEntryIds;
+			negativeListLimit ||= child.negativeListLimit;
 			rootFields.push(...child.rootFields);
 			continue;
 		}
@@ -217,6 +272,7 @@ const inspectSelectionSet = ({
 		if (!fragment) continue;
 		const nextSeen = new Set(seenFragments);
 		nextSeen.add(fragmentName);
+		const fragmentType = schema?.getType(fragment.typeCondition.name.value);
 		const child = inspectSelectionSet({
 			selectionSet: fragment.selectionSet,
 			fragments,
@@ -224,33 +280,92 @@ const inspectSelectionSet = ({
 			depth,
 			multiplier,
 			seenFragments: nextSeen,
+			schema,
+			parentType: asCompositeType(fragmentType) ?? parentType,
 		});
 		maxDepth = Math.max(maxDepth, child.maxDepth);
 		aliases += child.aliases;
 		complexity += child.complexity;
 		oversizedEntryBatch ||= child.oversizedEntryBatch;
+		duplicateEntryIds ||= child.duplicateEntryIds;
+		negativeListLimit ||= child.negativeListLimit;
 		rootFields.push(...child.rootFields);
 	}
 
-	return { maxDepth, aliases, complexity, rootFields, oversizedEntryBatch };
+	return {
+		maxDepth,
+		aliases,
+		complexity,
+		rootFields,
+		oversizedEntryBatch,
+		duplicateEntryIds,
+		negativeListLimit,
+	};
 };
 
-const reject = (message: string): GraphQLLimitResult => ({
+const reject = (
+	message: string,
+	code: "QUERY_TOO_COMPLEX" | "DUPLICATE_ENTRY_IDS" = "QUERY_TOO_COMPLEX"
+): GraphQLLimitResult => ({
 	ok: false,
-	code: "QUERY_TOO_COMPLEX",
+	code,
 	message,
 });
 
-export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLimitResult => {
+const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
+	["liveScores", 5],
+	["eventLive", 5],
+	["eventOverallResult", 5],
+	["playerDetail", 5],
+	["playerValueHistory", 5],
+	["liveMatches", 10],
+	["calcLivePointsByEntry", 10],
+	["tournamentSelectionStats", 10],
+	["calcLivePointsForTournament", 30],
+]);
+
+const heavyRootCost = (
+	rootFields: Array<{ name: string; uniqueEntryCount: number | null }>
+): number =>
+	rootFields.reduce((total, field) => {
+		if (field.name === "calcLivePointsForEntries") {
+			return total + Math.max(10, field.uniqueEntryCount ?? 0);
+		}
+		return total + (ROOT_RATE_LIMIT_FLOORS.get(field.name) ?? 0);
+	}, 0);
+
+const accepted = ({
+	shape,
+	securityOperationCount = 0,
+	weightedComplexity = 0,
+	rootFields = [],
+}: {
+	shape: GraphQLRequestShape;
+	securityOperationCount?: number;
+	weightedComplexity?: number;
+	rootFields?: Array<{ name: string; uniqueEntryCount: number | null }>;
+}): GraphQLLimitResult => ({
+	ok: true,
+	shape,
+	securityOperation: securityOperationCount > 0,
+	securityOperationCount,
+	weightedComplexity,
+	rateLimitCostUnits: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
+});
+
+export const validateGraphQLPayloadLimits = (
+	payload: GraphQLPayload,
+	schema?: GraphQLSchema
+): GraphQLLimitResult => {
 	if (typeof payload.query !== "string") {
-		return { ok: true, shape: "unknown", securityOperation: false, securityOperationCount: 0 };
+		return accepted({ shape: "unknown" });
 	}
 
 	let document: DocumentNode;
 	try {
 		document = parse(payload.query);
 	} catch {
-		return { ok: true, shape: "unknown", securityOperation: false, securityOperationCount: 0 };
+		return accepted({ shape: "unknown" });
 	}
 
 	let astNodes = 0;
@@ -264,7 +379,7 @@ export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLi
 		typeof payload.operationName === "string" ? payload.operationName : null
 	);
 	if (!operation) {
-		return { ok: true, shape: "unknown", securityOperation: false, securityOperationCount: 0 };
+		return accepted({ shape: "unknown" });
 	}
 
 	const variables = variablesWithDefaults(operation, asVariables(payload.variables));
@@ -275,6 +390,13 @@ export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLi
 		depth: 1,
 		multiplier: 1,
 		seenFragments: new Set(),
+		schema,
+		parentType:
+			operation.operation === "query"
+				? (schema?.getQueryType() ?? null)
+				: operation.operation === "mutation"
+					? (schema?.getMutationType() ?? null)
+					: (schema?.getSubscriptionType() ?? null),
 	});
 	if (inspection.maxDepth > GRAPHQL_LIMITS.maxDepth) {
 		return reject(`GraphQL query depth exceeds ${GRAPHQL_LIMITS.maxDepth}`);
@@ -285,6 +407,12 @@ export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLi
 	if (inspection.aliases > GRAPHQL_LIMITS.maxAliases) {
 		return reject(`GraphQL operation exceeds ${GRAPHQL_LIMITS.maxAliases} aliases`);
 	}
+	if (inspection.negativeListLimit) {
+		return reject("GraphQL list limits must not be negative");
+	}
+	if (inspection.duplicateEntryIds) {
+		return reject("GraphQL entryIds must not contain duplicates", "DUPLICATE_ENTRY_IDS");
+	}
 	if (inspection.oversizedEntryBatch) {
 		return reject("GraphQL entryIds batch exceeds 500 entries");
 	}
@@ -293,29 +421,43 @@ export const validateGraphQLPayloadLimits = (payload: GraphQLPayload): GraphQLLi
 	}
 
 	const securityOperationCount = inspection.rootFields.filter(
-		(field) => field === "createWechatApiSession"
+		(field) => field.name === "createWechatApiSession"
 	).length;
-	return {
-		ok: true,
+	return accepted({
 		shape: operation.operation,
-		securityOperation: securityOperationCount > 0,
 		securityOperationCount,
-	};
+		weightedComplexity: inspection.complexity,
+		rootFields: inspection.rootFields,
+	});
 };
 
-export const validateGraphQLRequestLimits = (body: unknown): GraphQLLimitResult => {
+export const validateGraphQLRequestLimits = (
+	body: unknown,
+	schema?: GraphQLSchema
+): GraphQLLimitResult => {
 	const payloads = Array.isArray(body) ? body : [body];
 	let shape: GraphQLRequestShape = "unknown";
 	let securityOperation = false;
 	let securityOperationCount = 0;
+	let weightedComplexity = 0;
+	let rateLimitCostUnits = 0;
 	for (const payload of payloads) {
 		if (!payload || typeof payload !== "object") continue;
-		const result = validateGraphQLPayloadLimits(payload as GraphQLPayload);
+		const result = validateGraphQLPayloadLimits(payload as GraphQLPayload, schema);
 		if (!result.ok) return result;
 		if (result.shape === "mutation") shape = "mutation";
 		else if (shape === "unknown") shape = result.shape;
 		securityOperation ||= result.securityOperation;
 		securityOperationCount += result.securityOperationCount;
+		weightedComplexity += result.weightedComplexity;
+		rateLimitCostUnits += result.rateLimitCostUnits;
 	}
-	return { ok: true, shape, securityOperation, securityOperationCount };
+	return {
+		ok: true,
+		shape,
+		securityOperation,
+		securityOperationCount,
+		weightedComplexity,
+		rateLimitCostUnits: Math.max(1, rateLimitCostUnits),
+	};
 };

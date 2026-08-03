@@ -82,6 +82,26 @@ describe("website principal envelope", () => {
 });
 
 describe("Mini Program session rollout compatibility", () => {
+	test("does not turn the GraphQL service token into a user principal", async () => {
+		let validationCalls = 0;
+		const principal = await getPrincipalFromHeaders(
+			new Headers({ "X-GraphQL-Service-Token": "s".repeat(43) }),
+			{
+				validateMiniProgramSessionToken: async () => {
+					validationCalls += 1;
+					return null;
+				},
+				validateApiSessionToken: async () => {
+					validationCalls += 1;
+					return null;
+				},
+			}
+		);
+
+		expect(principal).toBeNull();
+		expect(validationCalls).toBe(0);
+	});
+
 	test("falls back to legacy validation when the Web-owned session table is absent", async () => {
 		const legacyPrincipal = {
 			userId: "legacy-user",

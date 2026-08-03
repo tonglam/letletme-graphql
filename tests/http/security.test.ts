@@ -5,6 +5,8 @@ import {
 	readRequestBody,
 	resolveClientIp,
 	checkRateLimit,
+	handleRateLimitStorageFailure,
+	rateLimitKey,
 } from "../../src/http/security";
 
 describe("HTTP security boundaries", () => {
@@ -67,5 +69,38 @@ describe("HTTP security boundaries", () => {
 		const result = await checkRateLimit(redis, "security", 5, 60, 2);
 		expect(result.allowed).toBe(true);
 		expect(calls[0]?.slice(-2)).toEqual(["60", "2"]);
+	});
+
+	it("returns the Redis window TTL as an accurate retry delay", async () => {
+		const redis = { eval: async () => [121, 17] } as never;
+		expect(await checkRateLimit(redis, "security", 120, 60, 20)).toEqual({
+			allowed: false,
+			retryAfterSeconds: 17,
+		});
+	});
+
+	it("rounds the final partial second up instead of resetting the retry delay", async () => {
+		const redis = { eval: async () => [121, 0] } as never;
+		expect(await checkRateLimit(redis, "security", 120, 60)).toEqual({
+			allowed: false,
+			retryAfterSeconds: 1,
+		});
+	});
+
+	it("keeps signed client and shared service subjects in separate buckets", () => {
+		expect(rateLimitKey("graphql", "signed-client")).not.toBe(
+			rateLimitKey("graphql", "service:web-public-rsc")
+		);
+	});
+
+	it("fails closed when limiter storage is unavailable", () => {
+		expect(() =>
+			handleRateLimitStorageFailure({
+				error: new Error("redis unavailable"),
+				failClosed: true,
+				scope: "graphql",
+				logger: { warn: () => undefined } as never,
+			})
+		).toThrow("redis unavailable");
 	});
 });

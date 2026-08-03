@@ -1,15 +1,97 @@
 import { describe, expect, it } from "bun:test";
-import {
-	parseGraphQLGetLimitPayload,
-	validateGraphQLRequestLimits,
-} from "../../src/graphql/limits";
+import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
+import { schema } from "../../src/graphql/schema";
 
 describe("GraphQL request limits", () => {
 	it("accepts an ordinary query", () => {
 		const result = validateGraphQLRequestLimits({
 			query: "query { events { id name } }",
 		});
-		expect(result.ok).toBe(true);
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1 });
+	});
+
+	it("charges weighted complexity in ten-point units", () => {
+		const result = validateGraphQLRequestLimits({
+			query: "query { players(limit: 100) { id } }",
+		});
+		expect(result).toMatchObject({
+			ok: true,
+			weightedComplexity: 200,
+			rateLimitCostUnits: 20,
+		});
+	});
+
+	it("charges schema-defaulted list sizes when callers omit the argument", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query: "query { players { id } }",
+			},
+			schema
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			weightedComplexity: 100,
+			rateLimitCostUnits: 10,
+		});
+	});
+
+	it("charges effective list defaults when a caller supplies null", () => {
+		for (const payload of [
+			{ query: "query { players(limit: null) { id } }" },
+			{
+				query: "query Players($limit: Int) { players(limit: $limit) { id } }",
+				variables: { limit: null },
+			},
+		]) {
+			expect(validateGraphQLRequestLimits(payload, schema)).toMatchObject({
+				ok: true,
+				weightedComplexity: 100,
+				rateLimitCostUnits: 10,
+			});
+		}
+	});
+
+	it("charges the repositories' 200-row list maximum", () => {
+		expect(
+			validateGraphQLRequestLimits({ query: "query { players(limit: 200) { id } }" }, schema)
+		).toMatchObject({
+			ok: true,
+			weightedComplexity: 400,
+			rateLimitCostUnits: 40,
+		});
+	});
+
+	it("sums heavy root floors, including aliases", () => {
+		const result = validateGraphQLRequestLimits({
+			query:
+				"query { first: liveMatches { eventId } second: liveMatches { eventId } calcLivePointsForTournament(eventId: 1, tournamentId: 2) { meta { totalEntries } } }",
+		});
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 50 });
+	});
+
+	it("charges every aliased liveScores full-event lookup", () => {
+		const result = validateGraphQLRequestLimits({
+			query:
+				"query { a: liveScores(eventId: 1) { totalPoints } b: liveScores(eventId: 1) { totalPoints } c: liveScores(eventId: 1) { totalPoints } d: liveScores(eventId: 1) { totalPoints } e: liveScores(eventId: 1) { totalPoints } }",
+		});
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 25 });
+	});
+
+	it("rejects negative list limits from literals and variables", () => {
+		for (const payload of [
+			{ query: "query { eventLive(eventId: 1) { topPerformers(limit: -1) { totalPoints } } }" },
+			{
+				query:
+					"query EventLive($limit: Int) { eventLive(eventId: 1) { topPerformers(limit: $limit) { totalPoints } } }",
+				variables: { limit: -1 },
+			},
+		]) {
+			expect(validateGraphQLRequestLimits(payload, schema)).toMatchObject({
+				ok: false,
+				code: "QUERY_TOO_COMPLEX",
+				message: "GraphQL list limits must not be negative",
+			});
+		}
 	});
 
 	it("rejects more than five root fields", () => {
@@ -43,7 +125,16 @@ describe("GraphQL request limits", () => {
 				"query Batch($entryIds: [Int!]!) { calcLivePointsForEntries(eventId: 1, entryIds: $entryIds) { meta { totalEntries } } }",
 			variables: { entryIds: Array.from({ length: 500 }, (_, index) => index + 1) },
 		});
-		expect(result.ok).toBe(true);
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 500 });
+	});
+
+	it("rejects duplicate entry IDs before execution", () => {
+		const result = validateGraphQLRequestLimits({
+			query:
+				"query Batch($entryIds: [Int!]!) { calcLivePointsForEntries(eventId: 1, entryIds: $entryIds) { meta { totalEntries } } }",
+			variables: { entryIds: [7, 7] },
+		});
+		expect(result).toMatchObject({ ok: false, code: "DUPLICATE_ENTRY_IDS" });
 	});
 
 	it("applies variable defaults before enforcing the entry batch cap", () => {
@@ -52,30 +143,6 @@ describe("GraphQL request limits", () => {
 			query: `query Batch($entryIds: [Int!]! = [${ids}]) { calcLivePointsForEntries(eventId: 1, entryIds: $entryIds) { meta { totalEntries } } }`,
 		});
 		expect(result).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
-	});
-
-	it("includes GET variables in request-limit validation", () => {
-		const params = new URLSearchParams({
-			query:
-				"query Batch($entryIds: [Int!]!) { calcLivePointsForEntries(eventId: 1, entryIds: $entryIds) { meta { totalEntries } } }",
-			variables: JSON.stringify({
-				entryIds: Array.from({ length: 501 }, (_, index) => index + 1),
-			}),
-		});
-		const parsed = parseGraphQLGetLimitPayload(params);
-		expect(parsed.ok).toBe(true);
-		if (parsed.ok) {
-			expect(validateGraphQLRequestLimits(parsed.payload)).toMatchObject({
-				ok: false,
-				code: "QUERY_TOO_COMPLEX",
-			});
-		}
-	});
-
-	it("rejects malformed GET variables", () => {
-		expect(parseGraphQLGetLimitPayload(new URLSearchParams({ variables: "{" }))).toEqual({
-			ok: false,
-		});
 	});
 
 	it("classifies legacy session issuance as a security mutation", () => {
@@ -100,6 +167,7 @@ describe("GraphQL request limits", () => {
 			ok: true,
 			securityOperation: true,
 			securityOperationCount: 2,
+			rateLimitCostUnits: 2,
 		});
 	});
 });

@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "crypto";
+import { createHash, createHmac, timingSafeEqual } from "crypto";
 import { env } from "./env";
 
 type IngressEnvelope = {
@@ -11,11 +11,30 @@ type IngressEnvelope = {
 
 export type VerifiedIngressContext = { subject: string };
 
+export const GRAPHQL_SERVICE_TOKEN_HEADER = "X-GraphQL-Service-Token";
+export const GRAPHQL_SERVICE_RATE_LIMIT_SUBJECT = "service:web-public-rsc";
+
+export type GraphQLIngressClass =
+	"signed" | "service" | "unsigned_bearer" | "unsigned_user_context" | "anonymous";
+
+export type GraphQLIngress = {
+	class: GraphQLIngressClass;
+	trusted: boolean;
+	subject: string | null;
+	ingressContext: VerifiedIngressContext | null;
+};
+
 const equalBase64Url = (left: string, right: string): boolean => {
 	if (!/^[A-Za-z0-9_-]+$/.test(left) || !/^[A-Za-z0-9_-]+$/.test(right)) return false;
 	const actual = Buffer.from(left);
 	const expected = Buffer.from(right);
 	return actual.length === expected.length && timingSafeEqual(actual, expected);
+};
+
+const equalSecret = (left: string, right: string): boolean => {
+	const actual = createHash("sha256").update(left).digest();
+	const expected = createHash("sha256").update(right).digest();
+	return timingSafeEqual(actual, expected);
 };
 
 /** Verify the short-lived, opaque ingress subject signed by letletme-web. */
@@ -60,4 +79,65 @@ export const verifyIngressContext = (
 		return null;
 
 	return { subject: envelope.sub };
+};
+
+export const verifyGraphQLServiceToken = (
+	headers: Headers,
+	configuredToken = env.GRAPHQL_SERVICE_TOKEN
+): boolean => {
+	const provided = headers.get(GRAPHQL_SERVICE_TOKEN_HEADER);
+	return Boolean(configuredToken && provided && equalSecret(provided, configuredToken));
+};
+
+export const classifyGraphQLIngress = (
+	headers: Headers,
+	options: {
+		ingressContext?: VerifiedIngressContext | null;
+		serviceTokenValid?: boolean;
+	} = {}
+): GraphQLIngress => {
+	const ingressContext = options.ingressContext ?? verifyIngressContext(headers);
+	if (ingressContext) {
+		return {
+			class: "signed",
+			trusted: true,
+			subject: ingressContext.subject,
+			ingressContext,
+		};
+	}
+
+	if (headers.has("X-User-Context") || headers.has("X-User-Context-Sig")) {
+		return {
+			class: "unsigned_user_context",
+			trusted: false,
+			subject: null,
+			ingressContext: null,
+		};
+	}
+
+	if (/^bearer\s+\S+$/i.test(headers.get("Authorization") ?? "")) {
+		return {
+			class: "unsigned_bearer",
+			trusted: false,
+			subject: null,
+			ingressContext: null,
+		};
+	}
+
+	const serviceTokenValid = options.serviceTokenValid ?? verifyGraphQLServiceToken(headers);
+	if (serviceTokenValid) {
+		return {
+			class: "service",
+			trusted: true,
+			subject: GRAPHQL_SERVICE_RATE_LIMIT_SUBJECT,
+			ingressContext: null,
+		};
+	}
+
+	return {
+		class: "anonymous",
+		trusted: false,
+		subject: null,
+		ingressContext: null,
+	};
 };

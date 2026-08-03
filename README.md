@@ -27,13 +27,32 @@ bun run dev
 
 The server exposes:
 
-- `POST /graphql`
+- `POST /graphql` (internal service endpoint; clients use
+  `https://www.letletme.top/api/graphql`)
 - `GET /health` (503 when PostgreSQL, Redis, or `Season:active` is unavailable)
 - `GET /metrics` (requires `METRICS_TOKEN`)
 
 Requests are limited to 256 KiB, depth 10, five root fields, 20 aliases, 200
-AST nodes, weighted complexity 500, and entry batches of 500. Rate limits are
-120 GraphQL requests/minute/IP and 5 legacy session attempts/minute/IP.
+AST nodes, weighted complexity 600, and 500 unique entry IDs. Duplicate entry
+IDs are rejected before resolver work. Rate limits are weighted: signed client
+subjects receive 120 units/minute, cached public Web reads receive 600
+units/minute, and legacy session attempts retain a separate five/minute limit.
+All GraphQL limits fail closed when Redis is unavailable.
+Every GraphQL POST first passes a non-rotatable global 1,500-request/minute
+emergency ceiling (the planned 25 requests/second edge rate averaged over this
+window). Signed and credential-bearing traffic then passes a 120-request/minute
+admission bucket keyed by its trusted subject, non-logging credential
+fingerprint, or validated principal; the shared public Web service receives
+600 requests/minute. Both checks happen before body parsing or database-backed
+authorization. Weighted charging still happens after authorization, and
+validated legacy users receive distinct subjects instead of sharing a network
+bucket. For signed ingress and validated website principals, the admission unit
+is charged directly to the weighted budget, so an exhausted subject is rejected
+before membership authorization. Anonymous public reads use the global and
+weighted budgets but skip the credential-validation admission bucket. During
+compatibility they receive an isolated 600-unit shared-public budget, separate
+from the service-token budget, so Nginx's loopback peer cannot collapse them
+into the 120-unit client tier.
 
 ## Verification
 
@@ -71,8 +90,10 @@ and [docs/ROLLOUT.md](docs/ROLLOUT.md).
 - `TRUSTED_PROXY_HOPS=0`: use the direct peer unless the deployment has an
   explicitly reviewed proxy chain.
 - `REQUIRE_SIGNED_WEB_INGRESS=false`: compatibility phase. After web emits the
-  signed ingress envelope, set true so any request carrying a website user
-  envelope must also carry a valid 60-second opaque ingress subject.
+  signed ingress envelope, cached public reads send `GRAPHQL_SERVICE_TOKEN`,
+  and the accepted Mini Program release has seven days of zero unsigned
+  traffic, set true. Enforced mode rejects every request without either a
+  valid 60-second ingress signature or the service token.
 
 Never enable legacy issuance or extend the validation deadline without a
 recorded rollback decision.

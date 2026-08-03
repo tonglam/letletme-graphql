@@ -25,6 +25,18 @@ const authTokenValidations = new Counter({
 	labelNames: ["family"] as const,
 });
 
+const graphqlIngressRequests = new Counter({
+	name: "graphql_ingress_requests_total",
+	help: "GraphQL requests by trusted or compatibility ingress class",
+	labelNames: ["class"] as const,
+});
+
+const graphqlRateLimitDecisions = new Counter({
+	name: "graphql_rate_limit_decisions_total",
+	help: "GraphQL rate-limit outcomes by limiter scope",
+	labelNames: ["scope", "outcome"] as const,
+});
+
 const livePointsShadowDifferences = new Counter({
 	name: "live_points_shadow_differences_total",
 	help: "Players whose legacy and official-total live calculations differ",
@@ -39,6 +51,8 @@ const cacheRepositoryEvents = new Counter({
 
 registry.registerMetric(rateLimitStorageFailures);
 registry.registerMetric(authTokenValidations);
+registry.registerMetric(graphqlIngressRequests);
+registry.registerMetric(graphqlRateLimitDecisions);
 registry.registerMetric(livePointsShadowDifferences);
 registry.registerMetric(cacheRepositoryEvents);
 
@@ -47,6 +61,8 @@ export const metrics = {
 	httpRequestDurationSeconds,
 	rateLimitStorageFailures,
 	authTokenValidations,
+	graphqlIngressRequests,
+	graphqlRateLimitDecisions,
 	livePointsShadowDifferences,
 	cacheRepositoryEvents,
 };
