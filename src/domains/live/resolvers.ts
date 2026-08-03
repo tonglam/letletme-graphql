@@ -157,13 +157,14 @@ export const liveResolvers = {
 			args: EventLiveArgs,
 			context: GraphQLContext,
 			info: GraphQLResolveInfo
-		): Promise<EventLive> => {
-			const eventLive = await liveService.getEventLive(context, args.eventId);
-			if (parentSelectionRequestsField(info, "player")) {
-				await preloadPlayersForLivePerformances(context, eventLive.performances);
-			}
-			return eventLive;
-		},
+		): Promise<EventLive> =>
+			withLiveSnapshotRoot(context, async () => {
+				const eventLive = await liveService.getEventLive(context, args.eventId);
+				if (parentSelectionRequestsField(info, "player")) {
+					await preloadPlayersForLivePerformances(context, eventLive.performances);
+				}
+				return eventLive;
+			}),
 		eventLiveExplain: async (
 			_parent: unknown,
 			args: LiveExplainArgs,

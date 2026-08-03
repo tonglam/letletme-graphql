@@ -104,6 +104,19 @@ describe("live snapshot metadata", () => {
 		expect(await loadOperationLiveSnapshotMeta(context, 33)).toBeNull();
 	});
 
+	it("uses database mode when previously available metadata disappears", async () => {
+		const { context } = contextWithMetaReads([meta("8".repeat(24)), null]);
+		let runs = 0;
+		const result = await withLiveSnapshotConsistency(context, 33, async () => {
+			runs += 1;
+			return isLiveSnapshotDatabaseFallback(context, 33) ? "database" : "redis";
+		});
+
+		expect(result).toBe("database");
+		expect(runs).toBe(2);
+		expect(await loadOperationLiveSnapshotMeta(context, 33)).toBeNull();
+	});
+
 	it("runs once when metadata is stable or not deployed yet", async () => {
 		for (const reads of [
 			[meta("e".repeat(24)), meta("e".repeat(24))],
@@ -222,5 +235,84 @@ describe("live snapshot metadata", () => {
 
 		expect(await firstReader).toBe("database");
 		expect(firstReaderRuns).toBe(2);
+	});
+
+	it("holds a completed root until a slower sibling chooses database mode", async () => {
+		const { context } = contextWithMetaReads([meta("9".repeat(24))]);
+		let fastRuns = 0;
+		let fastResolved = false;
+		const fastRoot = withLiveSnapshotRoot(context, () =>
+			withLiveSnapshotConsistency(context, 33, async () => {
+				fastRuns += 1;
+				return isLiveSnapshotDatabaseFallback(context, 33) ? "database" : "redis";
+			})
+		);
+		void fastRoot.then(() => {
+			fastResolved = true;
+		});
+
+		let releaseSlowRoot!: () => void;
+		const slowRootBlocked = new Promise<void>((resolve) => {
+			releaseSlowRoot = resolve;
+		});
+		let announceSlowRoot!: () => void;
+		const slowRootStarted = new Promise<void>((resolve) => {
+			announceSlowRoot = resolve;
+		});
+		let slowRuns = 0;
+		const slowRoot = withLiveSnapshotRoot(context, () =>
+			withLiveSnapshotConsistency(context, 33, async () => {
+				slowRuns += 1;
+				if (slowRuns === 1) {
+					announceSlowRoot();
+					await slowRootBlocked;
+					throw new LiveSnapshotCoherenceError(33, "Fixtures", "incomplete fixtures");
+				}
+				return "database";
+			})
+		);
+
+		await slowRootStarted;
+		await Promise.resolve();
+		expect(fastResolved).toBe(false);
+		releaseSlowRoot();
+
+		expect(await fastRoot).toBe("database");
+		expect(await slowRoot).toBe("database");
+		expect(fastRuns).toBe(2);
+		expect(slowRuns).toBe(2);
+		expect(await loadOperationLiveSnapshotMeta(context, 33)).toBeNull();
+	});
+
+	it("degrades sibling roots that finish on different stable revisions", async () => {
+		const firstRevision = meta("a".repeat(24));
+		const secondRevision = meta("b".repeat(24), "2025-08-15T20:01:00.000Z");
+		const { context } = contextWithMetaReads([
+			firstRevision,
+			firstRevision,
+			firstRevision,
+			secondRevision,
+			secondRevision,
+		]);
+		let firstRuns = 0;
+		let secondRuns = 0;
+		const firstRoot = withLiveSnapshotRoot(context, () =>
+			withLiveSnapshotConsistency(context, 33, async () => {
+				firstRuns += 1;
+				return isLiveSnapshotDatabaseFallback(context, 33) ? "database" : "redis-a";
+			})
+		);
+		const secondRoot = withLiveSnapshotRoot(context, () =>
+			withLiveSnapshotConsistency(context, 33, async () => {
+				secondRuns += 1;
+				return isLiveSnapshotDatabaseFallback(context, 33) ? "database" : "redis-b";
+			})
+		);
+
+		expect(await firstRoot).toBe("database");
+		expect(await secondRoot).toBe("database");
+		expect(firstRuns).toBe(2);
+		expect(secondRuns).toBe(3);
+		expect(await loadOperationLiveSnapshotMeta(context, 33)).toBeNull();
 	});
 });

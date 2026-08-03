@@ -21,6 +21,7 @@ const snapshotMemo = new WeakMap<GraphQLContext, Map<string, Promise<LiveSnapsho
 
 type LiveSnapshotOperationState = {
 	activeReaders: number;
+	candidateRevision: string | null | undefined;
 	databaseFallback: boolean;
 	finalMeta: LiveSnapshotMeta | null | undefined;
 	waiters: Set<() => void>;
@@ -30,7 +31,9 @@ const operationStates = new WeakMap<GraphQLContext, Map<number, LiveSnapshotOper
 
 type LiveSnapshotRootState = {
 	activeResolvers: number;
-	waiters: Set<() => void>;
+	pendingFirstPasses: number;
+	barrierWaiters: Set<() => void>;
+	completionWaiters: Set<() => void>;
 };
 
 const rootStates = new WeakMap<GraphQLContext, LiveSnapshotRootState>();
@@ -38,10 +41,36 @@ const rootStates = new WeakMap<GraphQLContext, LiveSnapshotRootState>();
 const getRootState = (context: GraphQLContext): LiveSnapshotRootState => {
 	let state = rootStates.get(context);
 	if (!state) {
-		state = { activeResolvers: 0, waiters: new Set() };
+		state = {
+			activeResolvers: 0,
+			pendingFirstPasses: 0,
+			barrierWaiters: new Set(),
+			completionWaiters: new Set(),
+		};
 		rootStates.set(context, state);
 	}
 	return state;
+};
+
+const completeRootFirstPass = (state: LiveSnapshotRootState): void => {
+	if (state.pendingFirstPasses <= 0) return;
+	state.pendingFirstPasses -= 1;
+	if (state.pendingFirstPasses === 0) {
+		for (const resolve of state.barrierWaiters) resolve();
+		state.barrierWaiters.clear();
+	}
+};
+
+const waitForSiblingRootFirstPasses = async (context: GraphQLContext): Promise<void> => {
+	// GraphQL invokes every sibling root before promise continuations run. Yield
+	// once so even a cache-hot first reader observes the complete root set.
+	await Promise.resolve();
+	const state = getRootState(context);
+	if (state.pendingFirstPasses <= 0) return;
+	completeRootFirstPass(state);
+	if (state.pendingFirstPasses > 0) {
+		await new Promise<void>((resolve) => state.barrierWaiters.add(resolve));
+	}
 };
 
 const getOperationState = (
@@ -57,6 +86,7 @@ const getOperationState = (
 	if (!state) {
 		state = {
 			activeReaders: 0,
+			candidateRevision: undefined,
 			databaseFallback: false,
 			finalMeta: undefined,
 			waiters: new Set(),
@@ -98,13 +128,17 @@ export const withLiveSnapshotRoot = async <T>(
 ): Promise<T> => {
 	const state = getRootState(context);
 	state.activeResolvers += 1;
+	state.pendingFirstPasses += 1;
 	try {
 		return await run();
 	} finally {
+		// A root that returns or throws before entering snapshot consistency must
+		// still release siblings waiting at the first-pass barrier.
+		completeRootFirstPass(state);
 		state.activeResolvers -= 1;
 		if (state.activeResolvers === 0) {
-			for (const resolve of state.waiters) resolve();
-			state.waiters.clear();
+			for (const resolve of state.completionWaiters) resolve();
+			state.completionWaiters.clear();
 		}
 	}
 };
@@ -123,6 +157,30 @@ const forceDatabaseFallback = (
 	}
 	state.databaseFallback = true;
 	state.finalMeta = null;
+};
+
+const reconcileCandidateRevision = (
+	context: GraphQLContext,
+	eventId: number,
+	meta: LiveSnapshotMeta | null
+): void => {
+	const state = getOperationState(context, eventId);
+	const revision = meta?.revision ?? null;
+	if (state.candidateRevision === undefined) {
+		state.candidateRevision = revision;
+		return;
+	}
+	if (state.candidateRevision !== revision) {
+		forceDatabaseFallback(
+			context,
+			eventId,
+			new LiveSnapshotCoherenceError(
+				eventId,
+				"LiveSnapshotMeta",
+				`Sibling roots completed different revisions: ${state.candidateRevision ?? "none"} and ${revision ?? "none"}`
+			)
+		);
+	}
 };
 
 const rememberOperationMeta = (
@@ -266,7 +324,7 @@ export const loadOperationLiveSnapshotMeta = async (
 	await Promise.resolve();
 	const rootState = getRootState(context);
 	if (rootState.activeResolvers > 0) {
-		await new Promise<void>((resolve) => rootState.waiters.add(resolve));
+		await new Promise<void>((resolve) => rootState.completionWaiters.add(resolve));
 	}
 	const state = getOperationState(context, eventId);
 	if (state.activeReaders > 0) {
@@ -291,20 +349,42 @@ export const withLiveSnapshotConsistency = async <T>(
 	state.activeReaders += 1;
 	let operationMeta: LiveSnapshotMeta | null = null;
 
-	const runWithCoherentFallback = async (): Promise<T> => {
+	type RunResult = { value: T; databaseFallback: boolean };
+	const runWithCoherentFallback = async (): Promise<RunResult> => {
 		const startedInFallback = state.databaseFallback;
 		try {
 			const value = await run();
 			// A concurrent sibling may have found a broken coordinated view while
 			// this run was reading Redis. Discard that result and join its DB mode.
-			return !startedInFallback && state.databaseFallback ? run() : value;
+			if (!startedInFallback && state.databaseFallback) {
+				return { value: await run(), databaseFallback: true };
+			}
+			return { value, databaseFallback: startedInFallback };
 		} catch (error) {
 			if (!(error instanceof LiveSnapshotCoherenceError) || error.eventId !== eventId) {
 				throw error;
 			}
 			forceDatabaseFallback(context, eventId, error);
+			return { value: await run(), databaseFallback: true };
+		}
+	};
+
+	const finalize = async (result: RunResult, meta: LiveSnapshotMeta | null): Promise<T> => {
+		operationMeta = state.databaseFallback ? null : meta;
+		if (!state.databaseFallback) {
+			reconcileCandidateRevision(context, eventId, meta);
+			if (state.databaseFallback) operationMeta = null;
+		}
+
+		// No root may expose its candidate until every sibling live root has
+		// reached the same point. The last arrival reconciles revisions/fallback,
+		// then every earlier candidate can be discarded before GraphQL sees it.
+		await waitForSiblingRootFirstPasses(context);
+		if (state.databaseFallback && !result.databaseFallback) {
+			operationMeta = null;
 			return run();
 		}
+		return result.value;
 	};
 
 	try {
@@ -314,17 +394,29 @@ export const withLiveSnapshotConsistency = async <T>(
 		operationMeta = before;
 		const first = await runWithCoherentFallback();
 		if (state.databaseFallback) {
-			operationMeta = null;
-			return first;
+			return finalize(first, null);
 		}
 
 		const after = await loadLiveSnapshotMeta(context, eventId, { fresh: true });
 		if (state.databaseFallback) {
-			operationMeta = null;
-			return run();
+			return finalize(first, null);
+		}
+		if (before && !after) {
+			forceDatabaseFallback(
+				context,
+				eventId,
+				new LiveSnapshotCoherenceError(
+					eventId,
+					"LiveSnapshotMeta",
+					`Snapshot metadata for revision ${before.revision} disappeared during the read`
+				)
+			);
+			return finalize(first, null);
 		}
 		operationMeta = after ?? operationMeta;
-		if (!after || before?.revision === after.revision) return first;
+		if (!after || before?.revision === after.revision) {
+			return finalize(first, operationMeta);
+		}
 
 		context.logger.info(
 			{ eventId, beforeRevision: before?.revision ?? null, afterRevision: after.revision },
@@ -332,16 +424,26 @@ export const withLiveSnapshotConsistency = async <T>(
 		);
 		const retried = await runWithCoherentFallback();
 		if (state.databaseFallback) {
-			operationMeta = null;
-			return retried;
+			return finalize(retried, null);
 		}
 		const finalMeta = await loadLiveSnapshotMeta(context, eventId, { fresh: true });
 		if (state.databaseFallback) {
-			operationMeta = null;
-			return run();
+			return finalize(retried, null);
 		}
-		operationMeta = finalMeta ?? after;
-		if (finalMeta && finalMeta.revision !== after.revision) {
+		if (!finalMeta) {
+			forceDatabaseFallback(
+				context,
+				eventId,
+				new LiveSnapshotCoherenceError(
+					eventId,
+					"LiveSnapshotMeta",
+					`Snapshot metadata for revision ${after.revision} disappeared during retry`
+				)
+			);
+			return finalize(retried, null);
+		}
+		operationMeta = finalMeta;
+		if (finalMeta.revision !== after.revision) {
 			forceDatabaseFallback(
 				context,
 				eventId,
@@ -351,10 +453,9 @@ export const withLiveSnapshotConsistency = async <T>(
 					`Snapshot advanced from ${after.revision} to ${finalMeta.revision} during retry`
 				)
 			);
-			operationMeta = null;
-			return run();
+			return finalize(retried, null);
 		}
-		return retried;
+		return finalize(retried, finalMeta);
 	} finally {
 		rememberOperationMeta(state, operationMeta);
 		state.activeReaders -= 1;

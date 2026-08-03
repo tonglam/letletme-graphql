@@ -55,11 +55,13 @@ export const entryLiveResolvers = {
 			args: CalcLivePointsByEntryArgs,
 			context: GraphQLContext
 		): Promise<LiveCalcData> =>
-			entryLiveCalcService.calcLivePointsByEntry(
-				context,
-				args.eventId,
-				args.entryId,
-				args.includeLive ?? true
+			withLiveSnapshotRoot(context, () =>
+				entryLiveCalcService.calcLivePointsByEntry(
+					context,
+					args.eventId,
+					args.entryId,
+					args.includeLive ?? true
+				)
 			),
 
 		calcLivePointsForEntries: async (
@@ -75,25 +77,26 @@ export const entryLiveResolvers = {
 				succeededCount: number;
 				failedCount: number;
 			};
-		}> => {
-			assertValidEntryBatch(args.entryIds);
-			const includeLive = args.includeLive ?? true;
-			const calculate = (): Promise<BatchLiveCalcResult> =>
-				entryLiveBatchService.calcLivePointsForEntries(
-					context,
-					args.eventId,
-					args.entryIds,
-					includeLive
-				);
-			const result = await (includeLive
-				? withLiveSnapshotConsistency(context, args.eventId, calculate)
-				: calculate());
-			return {
-				results: Array.from(result.results.values()),
-				errors: result.errors,
-				meta: result.meta,
-			};
-		},
+		}> =>
+			withLiveSnapshotRoot(context, async () => {
+				assertValidEntryBatch(args.entryIds);
+				const includeLive = args.includeLive ?? true;
+				const calculate = (): Promise<BatchLiveCalcResult> =>
+					entryLiveBatchService.calcLivePointsForEntries(
+						context,
+						args.eventId,
+						args.entryIds,
+						includeLive
+					);
+				const result = await (includeLive
+					? withLiveSnapshotConsistency(context, args.eventId, calculate)
+					: calculate());
+				return {
+					results: Array.from(result.results.values()),
+					errors: result.errors,
+					meta: result.meta,
+				};
+			}),
 
 		calcLivePointsForTournament: async (
 			_parent: unknown,
