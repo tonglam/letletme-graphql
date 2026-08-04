@@ -1276,7 +1276,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		const membershipTournamentIds = extractTournamentIds(
 			(membershipResult.data as DbTournamentEntryRow[] | null) ?? []
 		);
-		if (rows.length === 0 || membershipTournamentIds.length === 0) {
+		if (rows.length === 0) {
 			// During setup the battle rows may not exist yet. Do not turn that
 			// transient absence into a cache entry that survives publication.
 			return [];

@@ -1541,6 +1541,18 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 			["id", [7, 8]],
 			["id", [7, 8]],
 		]);
-		expect(redisState.has(`${CACHE_PREFIX}tournaments:entry-h2h:v2:100`)).toBe(true);
+		const cacheKey = `${CACHE_PREFIX}tournaments:entry-h2h:v2:100`;
+		expect(redisState.has(cacheKey)).toBe(true);
+
+		// A participant may leave after their matches are finalized. Force a
+		// canonical read to prove persisted history remains visible even though
+		// there are no current tournament_entries rows for that entry.
+		redisState.delete(cacheKey);
+		state.tournamentEntries = [];
+		tournamentInCalls.length = 0;
+		const historical = await tournamentsRepository.getEntryH2HMatchResults(context, 100);
+		expect(historical.map((result) => result.tournament.id)).toEqual([7, 8]);
+		expect(tournamentInCalls).toEqual([["id", [7, 8]]]);
+		expect(redisState.has(cacheKey)).toBe(true);
 	});
 });
