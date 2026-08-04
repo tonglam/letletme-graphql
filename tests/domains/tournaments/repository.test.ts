@@ -147,6 +147,48 @@ describe("mapTournamentInfo", () => {
 			updatedAt: "2026-04-21T00:00:00.000Z",
 		});
 	});
+
+	it("treats nullable legacy setup status as an already-published tournament", () => {
+		const updatedAt = "2026-04-21T00:00:00.000Z";
+		const row: DbTournamentInfoRow = {
+			id: 12,
+			name: "Legacy League",
+			creator: "alice",
+			admin_entry_id: 1001,
+			league_id: 999,
+			league_type: "classic",
+			total_team_num: 2,
+			tournament_mode: "normal",
+			group_mode: null,
+			group_team_num: null,
+			group_num: null,
+			group_started_event_id: null,
+			group_ended_event_id: null,
+			group_auto_averages: false,
+			group_rounds: null,
+			group_play_against_num: null,
+			group_qualify_num: null,
+			knockout_mode: null,
+			knockout_team_num: null,
+			knockout_rounds: null,
+			knockout_event_num: null,
+			knockout_started_event_id: null,
+			knockout_ended_event_id: null,
+			knockout_play_against_num: null,
+			state: "active",
+			setup_status: null as unknown as string,
+			setup_phase: null as unknown as string,
+			standings_ready_at: null,
+			created_at: updatedAt,
+			updated_at: updatedAt,
+		};
+
+		expect(mapTournamentInfo(row)).toMatchObject({
+			setupStatus: TournamentSetupStatus.READY,
+			setupPhase: TournamentSetupPhase.READY,
+			standingsReadyAt: updatedAt,
+		});
+	});
 });
 
 describe("mapTournamentEventResult", () => {
@@ -1101,14 +1143,30 @@ describe("mapTournamentBattleGroupResult", () => {
 describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 	it("bypasses a stale cached roster", async () => {
 		let membershipReads = 0;
-		const query = {
+		let readinessReads = 0;
+		const membershipQuery = {
 			select() {
-				return query;
+				return membershipQuery;
 			},
 			async eq() {
 				membershipReads += 1;
 				return {
 					data: [{ entry_id: 101 }, { entry_id: 202 }],
+					error: null,
+				};
+			},
+		};
+		const readinessQuery = {
+			select() {
+				return readinessQuery;
+			},
+			eq() {
+				readinessReads += 1;
+				return readinessQuery;
+			},
+			async limit() {
+				return {
+					data: [{ standings_ready_at: "2026-04-21T00:00:00.000Z", setup_status: "ready" }],
 					error: null,
 				};
 			},
@@ -1119,8 +1177,8 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 		]);
 		const context = {
 			supabase: {
-				from() {
-					return query;
+				from(table: string) {
+					return table === "tournament_infos" ? readinessQuery : membershipQuery;
 				},
 			},
 			redis: {
@@ -1130,6 +1188,10 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 				async set(key: string, value: string) {
 					cache.set(key, value);
 					return "OK";
+				},
+				async del(key: string) {
+					cache.delete(key);
+					return 1;
 				},
 			},
 			logger: {
@@ -1144,10 +1206,165 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 
 		expect(await tournamentsRepository.getTournamentEntryIds(context, 7)).toEqual([999]);
 		expect(membershipReads).toBe(0);
+		expect(readinessReads).toBe(1);
 		expect(await tournamentsRepository.getTournamentEntryIdsUncached(context, 7)).toEqual([
 			101, 202,
 		]);
 		expect(membershipReads).toBe(1);
+	});
+
+	it("does not reuse or repopulate a roster cache before standings publish", async () => {
+		let membershipReads = 0;
+		const cache = new Map<string, string>([
+			["Season:active", "2526"],
+			[`${CACHE_PREFIX}tournaments:entry-ids:7`, JSON.stringify([999])],
+		]);
+		const membershipQuery = {
+			select() {
+				return membershipQuery;
+			},
+			async eq() {
+				membershipReads += 1;
+				return { data: [{ entry_id: 101 }, { entry_id: 202 }], error: null };
+			},
+		};
+		const readinessQuery = {
+			select() {
+				return readinessQuery;
+			},
+			eq() {
+				return readinessQuery;
+			},
+			async limit() {
+				return { data: [{ standings_ready_at: null, setup_status: "processing" }], error: null };
+			},
+		};
+		const context = {
+			supabase: {
+				from(table: string) {
+					return table === "tournament_infos" ? readinessQuery : membershipQuery;
+				},
+			},
+			redis: {
+				async get(key: string) {
+					return cache.get(key) ?? null;
+				},
+				async set(key: string, value: string) {
+					cache.set(key, value);
+					return "OK";
+				},
+				async del(key: string) {
+					cache.delete(key);
+					return 1;
+				},
+			},
+			logger: {
+				error() {
+					return undefined;
+				},
+				warn() {
+					return undefined;
+				},
+			},
+		} as unknown as GraphQLContext;
+
+		expect(await tournamentsRepository.getTournamentEntryIds(context, 7)).toEqual([101, 202]);
+		expect(membershipReads).toBe(1);
+		expect(cache.has(`${CACHE_PREFIX}tournaments:entry-ids:7`)).toBe(false);
+	});
+});
+
+describe("tournamentsRepository.getEntryTournaments", () => {
+	it("does not cache setup-era tournament metadata", async () => {
+		const updatedAt = "2026-04-21T00:00:00.000Z";
+		const row: DbTournamentInfoRow = {
+			id: 7,
+			name: "Setting Up League",
+			creator: "alice",
+			admin_entry_id: 1001,
+			league_id: 999,
+			league_type: "classic",
+			total_team_num: 2,
+			tournament_mode: "normal",
+			group_mode: null,
+			group_team_num: null,
+			group_num: null,
+			group_started_event_id: null,
+			group_ended_event_id: null,
+			group_auto_averages: false,
+			group_rounds: null,
+			group_play_against_num: null,
+			group_qualify_num: null,
+			knockout_mode: null,
+			knockout_team_num: null,
+			knockout_rounds: null,
+			knockout_event_num: null,
+			knockout_started_event_id: null,
+			knockout_ended_event_id: null,
+			knockout_play_against_num: null,
+			state: "active",
+			setup_status: "processing",
+			setup_phase: "syncing_entries",
+			standings_ready_at: null,
+			created_at: updatedAt,
+			updated_at: updatedAt,
+		};
+		const cache = new Map<string, string>([["Season:active", "2526"]]);
+		let cacheWrites = 0;
+		const membershipQuery = {
+			select() {
+				return membershipQuery;
+			},
+			async eq() {
+				return { data: [{ tournament_id: 7 }], error: null };
+			},
+		};
+		const infoQuery = {
+			select() {
+				return infoQuery;
+			},
+			in() {
+				return infoQuery;
+			},
+			async order() {
+				return { data: [row], error: null };
+			},
+		};
+		const context = {
+			supabase: {
+				from(table: string) {
+					return table === "tournament_infos" ? infoQuery : membershipQuery;
+				},
+			},
+			redis: {
+				async get(key: string) {
+					return cache.get(key) ?? null;
+				},
+				async set(key: string, value: string) {
+					cacheWrites += 1;
+					cache.set(key, value);
+					return "OK";
+				},
+				async del(key: string) {
+					cache.delete(key);
+					return 1;
+				},
+			},
+			logger: {
+				error() {
+					return undefined;
+				},
+				warn() {
+					return undefined;
+				},
+			},
+		} as unknown as GraphQLContext;
+
+		const result = await tournamentsRepository.getEntryTournaments(context, 55);
+		expect(result).toHaveLength(1);
+		expect(result[0]?.standingsReadyAt).toBeNull();
+		expect(cacheWrites).toBe(0);
+		expect(cache.has(`${CACHE_PREFIX}tournaments:entry:55`)).toBe(false);
 	});
 });
 

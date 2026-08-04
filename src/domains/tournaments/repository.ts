@@ -581,7 +581,8 @@ export const mapTournamentInfo = (row: DbTournamentInfoRow): TournamentInfo => (
 	setupTotalUnits: row.setup_total_units ?? 0,
 	setupProgressUpdatedAt: row.setup_progress_updated_at ?? null,
 	standingsReadyAt:
-		row.standings_ready_at ?? (row.setup_status === undefined ? row.updated_at : null),
+		row.standings_ready_at ??
+		(row.setup_status === null || row.setup_status === undefined ? row.updated_at : null),
 	setupHasWarnings: (row.setup_warning_count ?? 0) > 0,
 	setupStartedAt: row.setup_started_at ?? null,
 	setupFinishedAt: row.setup_finished_at ?? null,
@@ -813,6 +814,36 @@ const getTournamentInfoById = async (
 	return tournament;
 };
 
+const getTournamentCacheReadiness = async (
+	context: GraphQLContext,
+	tournamentId: number
+): Promise<boolean> => {
+	const { data, error } = await context.supabase
+		.from("tournament_infos")
+		.select("standings_ready_at, setup_status")
+		.eq("id", tournamentId)
+		.limit(1);
+
+	if (error) {
+		context.logger.error({ err: error, tournamentId }, "Failed to fetch tournament readiness");
+		throw new Error("Failed to fetch tournament readiness");
+	}
+
+	const row = (
+		data as Array<{ standings_ready_at?: string | null; setup_status?: string | null }> | null
+	)?.[0];
+	if (!row) return false;
+
+	// Legacy rows predate the lifecycle columns and are represented by NULL
+	// setup_status. Their existing standings remain usable and should not be
+	// treated as an unready shell solely because the new timestamp is absent.
+	return (
+		(row.standings_ready_at !== null && row.standings_ready_at !== undefined) ||
+		row.setup_status === null ||
+		row.setup_status === undefined
+	);
+};
+
 interface TournamentsRepository {
 	getTournamentInfoUncached(
 		context: GraphQLContext,
@@ -946,9 +977,15 @@ export const tournamentsRepository: TournamentsRepository = {
 		const cached = await readJsonCache(context, cacheKey, isTournamentInfoArrayCache);
 		if (
 			Array.isArray(cached) &&
-			cached.every((item) => isRecord(item) && Number.isFinite(Number(item.id)))
+			cached.every(
+				(item) =>
+					isRecord(item) && Number.isFinite(Number(item.id)) && item.standingsReadyAt !== null
+			)
 		) {
 			return cached as TournamentInfo[];
+		}
+		if (Array.isArray(cached)) {
+			await context.redis.del(cacheKey);
 		}
 
 		const { data: entryData, error: entryError } = await context.supabase
@@ -979,13 +1016,19 @@ export const tournamentsRepository: TournamentsRepository = {
 		}
 
 		const tournaments = ((infoData as DbTournamentInfoRow[] | null) ?? []).map(mapTournamentInfo);
-		await context.redis.set(cacheKey, JSON.stringify(tournaments), "EX", env.CACHE_TTL_SECONDS);
+		if (tournaments.every((tournament) => tournament.standingsReadyAt !== null)) {
+			await context.redis.set(cacheKey, JSON.stringify(tournaments), "EX", env.CACHE_TTL_SECONDS);
+		}
 		return tournaments;
 	},
 
 	async getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]> {
 		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(season, `tournaments:entry-ids:${tournamentId}`);
+		if (!(await getTournamentCacheReadiness(context, tournamentId))) {
+			await context.redis.del(cacheKey);
+			return tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
+		}
 		const cached = await readJsonCache(context, cacheKey, isEntryIdArrayCache);
 		if (Array.isArray(cached) && cached.every((item) => Number.isFinite(Number(item)))) {
 			return cached as number[];
