@@ -1237,8 +1237,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		entryId: number
 	): Promise<EntryH2HMatchResult[]> {
 		const season = await getCurrentSeason(context);
-		// v2 is populated only after every represented tournament has published
-		// standings. It deliberately bypasses partial/empty setup-era v1 values.
+		// v2 is populated only after every current tournament membership has
+		// published standings. It deliberately bypasses partial/empty setup-era v1 values.
 		const cacheKey = gqlCacheKey(season, `tournaments:entry-h2h:v2:${entryId}`);
 		const cached = await readJsonCache(context, cacheKey, isH2HResultArrayCache);
 		if (
@@ -1247,28 +1247,44 @@ export const tournamentsRepository: TournamentsRepository = {
 		)
 			return cached as EntryH2HMatchResult[];
 
-		const { data: matchData, error: matchError } = await context.supabase
-			.from("tournament_battle_group_results")
-			.select(
-				"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
-			)
-			.or(`home_entry_id.eq.${entryId},away_entry_id.eq.${entryId}`)
-			.order("event_id", { ascending: true })
-			.order("tournament_id", { ascending: true });
+		const [matchResult, membershipResult] = await Promise.all([
+			context.supabase
+				.from("tournament_battle_group_results")
+				.select(
+					"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
+				)
+				.or(`home_entry_id.eq.${entryId},away_entry_id.eq.${entryId}`)
+				.order("event_id", { ascending: true })
+				.order("tournament_id", { ascending: true }),
+			context.supabase.from("tournament_entries").select("tournament_id").eq("entry_id", entryId),
+		]);
+		const { data: matchData, error: matchError } = matchResult;
 
 		if (matchError) {
 			context.logger.error({ err: matchError, entryId }, "Failed to fetch entry H2H match results");
 			throw new Error("Failed to fetch entry H2H match results");
 		}
+		if (membershipResult.error) {
+			context.logger.error(
+				{ err: membershipResult.error, entryId },
+				"Failed to fetch entry tournament memberships"
+			);
+			throw new Error("Failed to fetch entry H2H match results");
+		}
 
 		const rows = (matchData as DbTournamentBattleGroupResultRow[] | null) ?? [];
-		if (rows.length === 0) {
+		const membershipTournamentIds = extractTournamentIds(
+			(membershipResult.data as DbTournamentEntryRow[] | null) ?? []
+		);
+		if (rows.length === 0 || membershipTournamentIds.length === 0) {
 			// During setup the battle rows may not exist yet. Do not turn that
 			// transient absence into a cache entry that survives publication.
 			return [];
 		}
 
-		const tournamentIds = [...new Set(rows.map((r) => r.tournament_id))];
+		const tournamentIds = [
+			...new Set([...membershipTournamentIds, ...rows.map((row) => row.tournament_id)]),
+		];
 		const tournamentInfos = await getTournamentInfosUncached(context, tournamentIds);
 		const readyTournamentIds = new Set(
 			tournamentInfos

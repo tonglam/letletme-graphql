@@ -1403,38 +1403,32 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 		updated_at: "2026-08-04T00:00:00.000Z",
 	});
 
-	it("batches readiness and caches only after every represented tournament is ready", async () => {
-		const matches: DbTournamentBattleGroupResultRow[] = [
-			{
-				id: 701,
-				tournament_id: 7,
-				group_id: 1,
-				event_id: 1,
-				home_entry_id: 100,
-				home_net_points: 70,
-				home_rank: 1,
-				home_match_points: 3,
-				away_entry_id: 200,
-				away_net_points: 60,
-				away_rank: 2,
-				away_match_points: 0,
-			},
-			{
-				id: 801,
-				tournament_id: 8,
-				group_id: 1,
-				event_id: 1,
-				home_entry_id: 100,
-				home_net_points: 65,
-				home_rank: 1,
-				home_match_points: 1,
-				away_entry_id: 300,
-				away_net_points: 65,
-				away_rank: 1,
-				away_match_points: 1,
-			},
-		];
-		const state = {
+	it("batches readiness and caches only after every tournament membership is ready", async () => {
+		const state: {
+			matches: DbTournamentBattleGroupResultRow[];
+			tournamentEntries: Array<{ tournament_id: number; entry_id: number }>;
+			tournaments: DbTournamentInfoRow[];
+		} = {
+			matches: [
+				{
+					id: 701,
+					tournament_id: 7,
+					group_id: 1,
+					event_id: 1,
+					home_entry_id: 100,
+					home_net_points: 70,
+					home_rank: 1,
+					home_match_points: 3,
+					away_entry_id: 200,
+					away_net_points: 60,
+					away_rank: 2,
+					away_match_points: 0,
+				},
+			],
+			tournamentEntries: [
+				{ tournament_id: 7, entry_id: 100 },
+				{ tournament_id: 8, entry_id: 100 },
+			],
 			tournaments: [tournamentRow(7, true), tournamentRow(8, false)],
 		};
 		const tournamentInCalls: unknown[][] = [];
@@ -1444,7 +1438,10 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 			const actions: QueryAction[] = [];
 			const resolveResult = () => {
 				if (table === "tournament_battle_group_results") {
-					return { data: matches, error: null };
+					return { data: state.matches, error: null };
+				}
+				if (table === "tournament_entries") {
+					return { data: filterRowsByActions(state.tournamentEntries, actions), error: null };
 				}
 				if (table === "tournament_infos") {
 					return { data: filterRowsByActions(state.tournaments, actions), error: null };
@@ -1468,6 +1465,10 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 				},
 				or(...args: unknown[]) {
 					actions.push({ type: "or", args });
+					return builder;
+				},
+				eq(...args: unknown[]) {
+					actions.push({ type: "eq", args });
 					return builder;
 				},
 				order(...args: unknown[]) {
@@ -1519,6 +1520,20 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 		expect(tournamentInCalls).toEqual([["id", [7, 8]]]);
 		expect(redisState.has(`${CACHE_PREFIX}tournaments:entry-h2h:v2:100`)).toBe(false);
 
+		state.matches.push({
+			id: 801,
+			tournament_id: 8,
+			group_id: 1,
+			event_id: 1,
+			home_entry_id: 100,
+			home_net_points: 65,
+			home_rank: 1,
+			home_match_points: 1,
+			away_entry_id: 300,
+			away_net_points: 65,
+			away_rank: 1,
+			away_match_points: 1,
+		});
 		state.tournaments = [tournamentRow(7, true), tournamentRow(8, true)];
 		const second = await tournamentsRepository.getEntryH2HMatchResults(context, 100);
 		expect(second.map((result) => result.tournament.id)).toEqual([7, 8]);
