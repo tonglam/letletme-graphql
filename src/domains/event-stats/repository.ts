@@ -391,16 +391,10 @@ async function getTransferAggregation(
 	return { transferInCounts, transferOutCounts };
 }
 
-async function getTournamentEntryIds(
+async function getTournamentEntryIdsUncached(
 	context: GraphQLContext,
 	tournamentId: number
 ): Promise<number[]> {
-	const cacheKey = await privateCacheKey(context, `tournaments:entry-ids:${tournamentId}`);
-	const cached = await readCachedJson(context, cacheKey);
-	if (Array.isArray(cached)) {
-		return cached as number[];
-	}
-
 	const { data, error } = await context.supabase
 		.from("tournament_entries")
 		.select("entry_id")
@@ -411,9 +405,7 @@ async function getTournamentEntryIds(
 		return [];
 	}
 
-	const entryIds = ((data as { entry_id: number }[] | null) ?? []).map((r) => r.entry_id);
-	await context.redis.set(cacheKey, JSON.stringify(entryIds), "EX", env.CACHE_TTL_SECONDS);
-	return entryIds;
+	return ((data as { entry_id: number }[] | null) ?? []).map((r) => r.entry_id);
 }
 
 const EMPTY_STATS: TournamentSelectionStats = {
@@ -666,10 +658,11 @@ export const eventStatsRepository: EventStatsRepository = {
 			return result;
 		}
 
-		// Fetch info and entry IDs in parallel — entryIds doesn't depend on tournamentInfo
+		// The resolver has crossed the insights barrier; reread membership so a
+		// setup-era roster cache cannot seed a partial aggregate.
 		const [tournamentInfo, entryIds] = await Promise.all([
 			getTournamentInfo(context, tournamentId),
-			getTournamentEntryIds(context, tournamentId),
+			getTournamentEntryIdsUncached(context, tournamentId),
 		]);
 		if (!tournamentInfo) return EMPTY_STATS;
 

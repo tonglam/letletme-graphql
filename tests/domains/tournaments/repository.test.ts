@@ -1188,7 +1188,10 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 					};
 				}
 				if (table === "entry_infos") {
-					return { data: options.entryInfosData ?? [], error: null };
+					return {
+						data: filterRowsByActions(options.entryInfosData ?? [], actions),
+						error: null,
+					};
 				}
 				return { data: [], error: null };
 			};
@@ -1357,6 +1360,27 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 		expect(result[0].awayMatchPoints).toBe(0);
 	});
 
+	it("derives battle-result name lookups from canonical match rows", async () => {
+		const context = buildContext({
+			tournamentData: [tournamentRow],
+			tournamentEntriesData: [
+				{ tournament_id: 7, entry_id: 1001 },
+				{ tournament_id: 7, entry_id: 2002 },
+			],
+			battleGroupData: [matchRow],
+			entryInfosData: [
+				{ id: 1001, entry_name: "Home Team FC", player_name: "Alice" },
+				{ id: 2002, entry_name: "Away Side", player_name: "Bob" },
+			],
+		});
+		context.__redisState.set(`${CACHE_PREFIX}tournaments:entry-ids:7`, JSON.stringify([1001]));
+
+		const result = await tournamentsRepository.getTournamentBattleGroupResults(context, 7, 15);
+
+		expect(result[0].homeEntryName).toBe("Home Team FC");
+		expect(result[0].awayEntryName).toBe("Away Side");
+	});
+
 	it("throws on Supabase error fetching match rows", async () => {
 		const context = buildContext({
 			tournamentData: [tournamentRow],
@@ -1403,7 +1427,7 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 		updated_at: "2026-08-04T00:00:00.000Z",
 	});
 
-	it("batches readiness and caches only after every tournament membership is ready", async () => {
+	it("revalidates memberships and caches only complete H2H histories", async () => {
 		const state: {
 			matches: DbTournamentBattleGroupResultRow[];
 			tournamentEntries: Array<{ tournament_id: number; entry_id: number }>;
@@ -1432,15 +1456,21 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 			tournaments: [tournamentRow(7, true), tournamentRow(8, false)],
 		};
 		const tournamentInCalls: unknown[][] = [];
+		let matchReads = 0;
+		let membershipReads = 0;
 		const redisState = new Map<string, string>([["Season:active", "2526"]]);
+		const h2hCacheKey = (tournamentIds: number[]) =>
+			`${CACHE_PREFIX}tournaments:entry-h2h:v3:100:${JSON.stringify(tournamentIds)}`;
 
 		const makeBuilder = (table: string) => {
 			const actions: QueryAction[] = [];
 			const resolveResult = () => {
 				if (table === "tournament_battle_group_results") {
+					matchReads += 1;
 					return { data: state.matches, error: null };
 				}
 				if (table === "tournament_entries") {
+					membershipReads += 1;
 					return { data: filterRowsByActions(state.tournamentEntries, actions), error: null };
 				}
 				if (table === "tournament_infos") {
@@ -1518,7 +1548,7 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 		const first = await tournamentsRepository.getEntryH2HMatchResults(context, 100);
 		expect(first.map((result) => result.tournament.id)).toEqual([7]);
 		expect(tournamentInCalls).toEqual([["id", [7, 8]]]);
-		expect(redisState.has(`${CACHE_PREFIX}tournaments:entry-h2h:v2:100`)).toBe(false);
+		expect(redisState.has(h2hCacheKey([7, 8]))).toBe(false);
 
 		state.matches.push({
 			id: 801,
@@ -1541,18 +1571,58 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 			["id", [7, 8]],
 			["id", [7, 8]],
 		]);
-		const cacheKey = `${CACHE_PREFIX}tournaments:entry-h2h:v2:100`;
-		expect(redisState.has(cacheKey)).toBe(true);
+		const readyCacheKey = h2hCacheKey([7, 8]);
+		expect(redisState.has(readyCacheKey)).toBe(true);
+		const matchReadsAfterPublication = matchReads;
+		const membershipReadsAfterPublication = membershipReads;
+		expect(
+			(await tournamentsRepository.getEntryH2HMatchResults(context, 100)).map(
+				(result) => result.tournament.id
+			)
+		).toEqual([7, 8]);
+		expect(matchReads).toBe(matchReadsAfterPublication);
+		expect(membershipReads).toBe(membershipReadsAfterPublication + 1);
+
+		// A new membership must bypass the populated cache immediately.
+		state.tournamentEntries.push({ tournament_id: 9, entry_id: 100 });
+		state.matches.push({
+			id: 901,
+			tournament_id: 9,
+			group_id: 1,
+			event_id: 1,
+			home_entry_id: 100,
+			home_net_points: 72,
+			home_rank: 1,
+			home_match_points: 3,
+			away_entry_id: 400,
+			away_net_points: 60,
+			away_rank: 2,
+			away_match_points: 0,
+		});
+		state.tournaments.push(tournamentRow(9, true));
+		const afterJoin = await tournamentsRepository.getEntryH2HMatchResults(context, 100);
+		expect(afterJoin.map((result) => result.tournament.id)).toEqual([7, 8, 9]);
+		expect(matchReads).toBe(matchReadsAfterPublication + 1);
+		expect(redisState.has(h2hCacheKey([7, 8, 9]))).toBe(true);
 
 		// A participant may leave after their matches are finalized. Force a
 		// canonical read to prove persisted history remains visible even though
 		// there are no current tournament_entries rows for that entry.
-		redisState.delete(cacheKey);
 		state.tournamentEntries = [];
 		tournamentInCalls.length = 0;
 		const historical = await tournamentsRepository.getEntryH2HMatchResults(context, 100);
-		expect(historical.map((result) => result.tournament.id)).toEqual([7, 8]);
-		expect(tournamentInCalls).toEqual([["id", [7, 8]]]);
-		expect(redisState.has(cacheKey)).toBe(true);
+		expect(historical.map((result) => result.tournament.id)).toEqual([7, 8, 9]);
+		expect(tournamentInCalls).toEqual([["id", [7, 8, 9]]]);
+		expect(redisState.has(h2hCacheKey([]))).toBe(true);
+
+		// A ready membership with no battle rows is a stable empty result.
+		state.matches = [];
+		state.tournamentEntries = [{ tournament_id: 7, entry_id: 100 }];
+		state.tournaments = [tournamentRow(7, true)];
+		expect(await tournamentsRepository.getEntryH2HMatchResults(context, 100)).toEqual([]);
+		expect(redisState.get(h2hCacheKey([7]))).toBe(JSON.stringify([]));
+		const matchReadsAfterEmptyPublication = matchReads;
+		expect(await tournamentsRepository.getEntryH2HMatchResults(context, 100)).toEqual([]);
+		expect(matchReads).toBe(matchReadsAfterEmptyPublication);
 	});
 });

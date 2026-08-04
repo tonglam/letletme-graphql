@@ -1187,7 +1187,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			return cached as TournamentBattleGroupResult[];
 		}
 
-		const [tournamentResult, matchResult, entryIds] = await Promise.all([
+		const [tournamentResult, matchResult] = await Promise.all([
 			getTournamentInfoById(context, tournamentId),
 			context.supabase
 				.from("tournament_battle_group_results")
@@ -1198,7 +1198,6 @@ export const tournamentsRepository: TournamentsRepository = {
 				.eq("event_id", eventId)
 				.order("group_id", { ascending: true })
 				.order("home_entry_id", { ascending: true }),
-			tournamentsRepository.getTournamentEntryIds(context, tournamentId),
 		]);
 
 		if (matchResult.error) {
@@ -1214,6 +1213,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
 			return [];
 		}
+		const entryIds = [...new Set(rows.flatMap((row) => [row.home_entry_id, row.away_entry_id]))];
 
 		const { data: nameData } = await context.supabase
 			.from("entry_infos")
@@ -1237,33 +1237,10 @@ export const tournamentsRepository: TournamentsRepository = {
 		entryId: number
 	): Promise<EntryH2HMatchResult[]> {
 		const season = await getCurrentSeason(context);
-		// v2 is populated only after every current tournament membership has
-		// published standings. It deliberately bypasses partial/empty setup-era v1 values.
-		const cacheKey = gqlCacheKey(season, `tournaments:entry-h2h:v2:${entryId}`);
-		const cached = await readJsonCache(context, cacheKey, isH2HResultArrayCache);
-		if (
-			Array.isArray(cached) &&
-			cached.every((item) => isRecord(item) && Number.isFinite(Number(item.eventId)))
-		)
-			return cached as EntryH2HMatchResult[];
-
-		const [matchResult, membershipResult] = await Promise.all([
-			context.supabase
-				.from("tournament_battle_group_results")
-				.select(
-					"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
-				)
-				.or(`home_entry_id.eq.${entryId},away_entry_id.eq.${entryId}`)
-				.order("event_id", { ascending: true })
-				.order("tournament_id", { ascending: true }),
-			context.supabase.from("tournament_entries").select("tournament_id").eq("entry_id", entryId),
-		]);
-		const { data: matchData, error: matchError } = matchResult;
-
-		if (matchError) {
-			context.logger.error({ err: matchError, entryId }, "Failed to fetch entry H2H match results");
-			throw new Error("Failed to fetch entry H2H match results");
-		}
+		const membershipResult = await context.supabase
+			.from("tournament_entries")
+			.select("tournament_id")
+			.eq("entry_id", entryId);
 		if (membershipResult.error) {
 			context.logger.error(
 				{ err: membershipResult.error, entryId },
@@ -1271,17 +1248,38 @@ export const tournamentsRepository: TournamentsRepository = {
 			);
 			throw new Error("Failed to fetch entry H2H match results");
 		}
-
-		const rows = (matchData as DbTournamentBattleGroupResultRow[] | null) ?? [];
 		const membershipTournamentIds = extractTournamentIds(
 			(membershipResult.data as DbTournamentEntryRow[] | null) ?? []
+		).sort((left, right) => left - right);
+		// Membership is read authoritatively before the cache. A roster change
+		// selects a new key, while a former entrant's persisted match history is
+		// still available under the empty-membership key.
+		const cacheKey = gqlCacheKey(
+			season,
+			`tournaments:entry-h2h:v3:${entryId}:${stableStringify(membershipTournamentIds)}`
 		);
-		if (rows.length === 0) {
-			// During setup the battle rows may not exist yet. Do not turn that
-			// transient absence into a cache entry that survives publication.
-			return [];
-		}
+		const cached = await readJsonCache(context, cacheKey, isH2HResultArrayCache);
+		if (
+			Array.isArray(cached) &&
+			cached.every((item) => isRecord(item) && Number.isFinite(Number(item.eventId)))
+		)
+			return cached as EntryH2HMatchResult[];
 
+		const matchResult = await context.supabase
+			.from("tournament_battle_group_results")
+			.select(
+				"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
+			)
+			.or(`home_entry_id.eq.${entryId},away_entry_id.eq.${entryId}`)
+			.order("event_id", { ascending: true })
+			.order("tournament_id", { ascending: true });
+		const { data: matchData, error: matchError } = matchResult;
+
+		if (matchError) {
+			context.logger.error({ err: matchError, entryId }, "Failed to fetch entry H2H match results");
+			throw new Error("Failed to fetch entry H2H match results");
+		}
+		const rows = (matchData as DbTournamentBattleGroupResultRow[] | null) ?? [];
 		const tournamentIds = [
 			...new Set([...membershipTournamentIds, ...rows.map((row) => row.tournament_id)]),
 		];
@@ -1291,6 +1289,12 @@ export const tournamentsRepository: TournamentsRepository = {
 				.filter((tournament) => tournament.standingsReadyAt)
 				.map((tournament) => tournament.id)
 		);
+		if (rows.length === 0) {
+			if (readyTournamentIds.size === tournamentIds.length) {
+				await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
+			}
+			return [];
+		}
 		const readyRows = rows.filter((row) => readyTournamentIds.has(row.tournament_id));
 		if (readyRows.length === 0) return [];
 
