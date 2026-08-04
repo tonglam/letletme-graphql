@@ -6,8 +6,10 @@ import type { GraphQLContext } from "../../../src/graphql/context";
 const buildContext = (options: {
 	redisData?: Record<string, string>;
 	redisHashes?: Record<string, Record<string, string>>;
+	redis?: GraphQLContext["redis"];
 	supabaseData?: unknown[];
 	supabaseError?: unknown;
+	supabaseFromCalls?: string[];
 }): GraphQLContext => {
 	const redisStrings = new Map<string, string>();
 	const redisHashes = new Map<string, Record<string, string>>();
@@ -24,17 +26,20 @@ const buildContext = (options: {
 	}
 
 	return {
-		redis: {
-			get: async (key: string) => redisStrings.get(key) ?? null,
-			set: async (key: string, value: string, ..._args: unknown[]) => {
-				redisStrings.set(key, value);
-				return "OK";
-			},
-			hgetall: async (key: string) => redisHashes.get(key) ?? {},
-			expire: async () => 1,
-		} as never,
+		redis:
+			options.redis ??
+			({
+				get: async (key: string) => redisStrings.get(key) ?? null,
+				set: async (key: string, value: string, ..._args: unknown[]) => {
+					redisStrings.set(key, value);
+					return "OK";
+				},
+				hgetall: async (key: string) => redisHashes.get(key) ?? {},
+				expire: async () => 1,
+			} as never),
 		supabase: {
 			from: () => {
+				options.supabaseFromCalls?.push("event_fixtures");
 				const builder = {
 					select: () => builder,
 					eq: () => builder,
@@ -321,5 +326,78 @@ describe("fixturesRepository.getEventFixtures", () => {
 
 		expect(result).toHaveLength(1);
 		expect(result[0].id).toBe(330);
+	});
+
+	it("coalesces and revision-caches coordinated fixture database fallback", async () => {
+		const revision = "c".repeat(24);
+		const fixtureJson = JSON.stringify({
+			id: 328,
+			code: 2562222,
+			event: 33,
+			finished: false,
+			kickoffTime: "2026-04-18T14:00:00.000Z",
+			minutes: 60,
+			started: true,
+			teamH: 15,
+			teamA: 4,
+		});
+		const snapshotMeta = JSON.stringify({
+			schemaVersion: 1,
+			season: "2526",
+			eventId: 33,
+			revision,
+			state: "live",
+			publishedAt: "2026-04-18T14:00:00.000Z",
+			checkedAt: "2026-04-18T15:00:00.000Z",
+			eventLiveCount: 700,
+			fixtureCount: 2,
+			fixtureTeamCount: 4,
+			bonusTeamCount: 2,
+		});
+		const seedContext = buildContext({
+			redisHashes: { "Fixtures:2526:33": { "328": fixtureJson } },
+			redisData: {
+				"Season:active": "2526",
+				"LiveSnapshotMeta:2526:33": snapshotMeta,
+			},
+		});
+		const sharedRedis = seedContext.redis;
+		const supabaseFromCalls: string[] = [];
+		const supabaseData = [
+			{
+				id: 329,
+				code: 2562223,
+				event_id: 33,
+				finished: true,
+				finished_provisional: true,
+				kickoff_time: "2026-04-18T16:30:00.000Z",
+				minutes: 90,
+				started: true,
+				team_h_id: 8,
+				team_a_id: 12,
+				team_h_score: 2,
+				team_a_score: 0,
+				team_h_difficulty: 2,
+				team_a_difficulty: 4,
+			},
+		];
+		const read = () => {
+			const context = buildContext({
+				redis: sharedRedis,
+				supabaseData,
+				supabaseFromCalls,
+			});
+			return withLiveSnapshotConsistency(context, 33, () =>
+				fixturesRepository.getEventFixtures(context, 33)
+			);
+		};
+
+		const firstWave = await Promise.all(Array.from({ length: 25 }, read));
+		expect(firstWave.every((fixtures) => fixtures[0]?.id === 329)).toBe(true);
+		expect(supabaseFromCalls).toEqual(["event_fixtures"]);
+
+		const cached = await read();
+		expect(cached[0]?.id).toBe(329);
+		expect(supabaseFromCalls).toEqual(["event_fixtures"]);
 	});
 });

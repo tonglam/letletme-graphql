@@ -1161,6 +1161,7 @@ const LIVE_FALLBACK_CACHE_TTL_SEC = 15;
 const LIVE_EXPLAIN_REVISION_CACHE_TTL_SEC = 300;
 const LIVE_EXPLAIN_FALLBACK_CACHE_TTL_SEC = 15;
 const LIVE_EXPLAIN_CACHE_SHAPE = "shape2";
+const LIVE_EXPLAIN_SINGLEFLIGHT_BATCH_SIZE = 100;
 
 const shapedLiveExplainCacheKey = (
 	season: string,
@@ -1396,8 +1397,11 @@ const loadLiveExplainsWithSingleflight = (
 			// this revision-scoped batch before the two durable reads begin.
 			await new Promise<void>((resolve) => setTimeout(resolve, 0));
 			while (flight.pendingIds.size > 0) {
-				const batchIds = Array.from(flight.pendingIds);
-				flight.pendingIds.clear();
+				const batchIds = Array.from(flight.pendingIds).slice(
+					0,
+					LIVE_EXPLAIN_SINGLEFLIGHT_BATCH_SIZE
+				);
+				for (const elementId of batchIds) flight.pendingIds.delete(elementId);
 				const loaded = await loadColdLiveExplainBatch(
 					context,
 					eventId,
@@ -1697,10 +1701,11 @@ export const liveRepository: LiveRepository = {
 
 		const season = await getCurrentSeason(context);
 		const databaseFallback = isLiveSnapshotDatabaseFallback(context, eventId);
-		const meta = await loadLiveSnapshotMeta(context, eventId, {
-			season,
-			fresh: isLiveSnapshotConsistencyActive(context, eventId),
-		});
+		// A consistency wrapper has already established the operation candidate
+		// and memoized it on this context. Reuse that decision so a transient
+		// second metadata GET cannot select an unversioned fallback cache while
+		// the outer before/after boundary still accepts the original revision.
+		const meta = await loadLiveSnapshotMeta(context, eventId, { season });
 		const resolved = await readLiveExplainCacheBatch(
 			context,
 			eventId,

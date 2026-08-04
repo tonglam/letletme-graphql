@@ -227,7 +227,7 @@ describe("liveSnapshot GraphQL contract", () => {
 					if (key === "Season:active") return "2526";
 					if (key === "LiveSnapshotMeta:2526:33") {
 						metadataReads += 1;
-						return metadata(metadataReads <= 2 ? revisions[0] : revisions[1]);
+						return metadata(metadataReads === 1 ? revisions[0] : revisions[1]);
 					}
 					if (key === `gql:v2:2526:live:explain:shape2:33:1:full:revision:${revisions[0]}`) {
 						return explain(7);
@@ -254,7 +254,7 @@ describe("liveSnapshot GraphQL contract", () => {
 		expect(result.errors).toBeUndefined();
 		expect(result.data?.eventLiveExplain).toEqual({ stats: { totalPoints: 14 } });
 		expect(result.data?.liveSnapshot).toEqual({ revision: revisions[1] });
-		expect(metadataReads).toBe(5);
+		expect(metadataReads).toBe(3);
 	});
 
 	it("serves a bounded explanation batch under one snapshot decision", async () => {
@@ -335,7 +335,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			},
 		]);
 		expect(result.data?.liveSnapshot).toEqual({ revision });
-		expect(metadataReads).toBe(3);
+		expect(metadataReads).toBe(2);
 	});
 
 	it("batches selectedBy without dropping player_stats-only explanations", async () => {

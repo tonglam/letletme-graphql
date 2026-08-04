@@ -68,6 +68,7 @@ const makeMockSupabase = (options: {
 	dataByTable?: Record<string, unknown[]>;
 	error?: unknown;
 	fromCalls?: string[];
+	inCalls?: Array<{ table: string; column: string; values: unknown[] }>;
 }) => ({
 	from: (table: string) => {
 		options.fromCalls?.push(table);
@@ -87,7 +88,10 @@ const makeMockSupabase = (options: {
 		const builder = Object.assign(promise, {
 			select: () => builder,
 			eq: () => builder,
-			in: () => builder,
+			in: (column: string, values: unknown[]) => {
+				options.inCalls?.push({ table, column, values });
+				return builder;
+			},
 			limit: async () => result,
 			order: () => builder,
 		});
@@ -108,6 +112,7 @@ const buildContext = (options: {
 	supabaseDataByTable?: Record<string, unknown[]>;
 	supabaseError?: unknown;
 	supabaseFromCalls?: string[];
+	supabaseInCalls?: Array<{ table: string; column: string; values: unknown[] }>;
 	redis?: MockRedis;
 }) =>
 	({
@@ -122,6 +127,7 @@ const buildContext = (options: {
 			dataByTable: options.supabaseDataByTable,
 			error: options.supabaseError,
 			fromCalls: options.supabaseFromCalls,
+			inCalls: options.supabaseInCalls,
 		}),
 		logger: makeMockLogger(),
 		user: undefined,
@@ -874,6 +880,53 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(redis.getCalls).not.toContain("gql:v2:2526:live:explain:34:526");
 	});
 
+	it("reuses the outer metadata decision when selecting an explanation cache", async () => {
+		const revision = "f".repeat(24);
+		const metaKey = "LiveSnapshotMeta:2526:33";
+		const revisionCacheKey = `gql:v2:2526:live:explain:shape2:33:1:full:revision:${revision}`;
+		const fallbackCacheKey = "gql:v2:2526:live:explain:shape2:33:1:full:fallback15";
+		const stale = {
+			eventId: 33,
+			elementId: 1,
+			modified: null,
+			stats: { totalPoints: 3 },
+			breakdown: [],
+			contributions: [],
+			selectedBy: null,
+		};
+		const current = { ...stale, stats: { totalPoints: 14 } };
+		const redis = makeMockRedis({
+			strings: {
+				[metaKey]: snapshotMeta(revision),
+				[revisionCacheKey]: JSON.stringify(current),
+				[fallbackCacheKey]: JSON.stringify(stale),
+			},
+		});
+		const originalGet = redis.get.bind(redis);
+		let metadataReads = 0;
+		let explanationCacheReadStarted = false;
+		redis.get = async (key: string): Promise<string | null> => {
+			if (key.startsWith("gql:v2:2526:live:explain:")) {
+				explanationCacheReadStarted = true;
+			}
+			if (key === metaKey) {
+				metadataReads += 1;
+				if (metadataReads > 1 && !explanationCacheReadStarted) return null;
+			}
+			return originalGet(key);
+		};
+		const context = buildContext({ redis });
+
+		const result = await withLiveSnapshotConsistency(context, 33, () =>
+			liveRepository.getEventLiveExplains(context, 33, [1])
+		);
+
+		expect(result[0]?.stats.totalPoints).toBe(14);
+		expect(metadataReads).toBe(2);
+		expect(redis.getCalls).toContain(revisionCacheKey);
+		expect(redis.getCalls).not.toContain(fallbackCacheKey);
+	});
+
 	it("loads a cold explanation batch with two database queries and versioned Redis reads", async () => {
 		const redis = makeMockRedis({});
 		const supabaseFromCalls: string[] = [];
@@ -1178,6 +1231,45 @@ describe("liveRepository.getEventLiveExplain", () => {
 			1
 		);
 		expect(redis.hmgetCalls.filter(([key]) => key === "EventLiveExplain:2526:33")).toHaveLength(1);
+	});
+
+	it("bounds a cross-request explanation union while retaining singleflight", async () => {
+		const revision = "6".repeat(24);
+		const elementIds = Array.from({ length: 300 }, (_, index) => index + 1);
+		const requestBatches = Array.from({ length: 20 }, (_, index) =>
+			elementIds.slice(index * 15, index * 15 + 15)
+		);
+		const redis = makeMockRedis({
+			strings: { "LiveSnapshotMeta:2526:33": snapshotMeta(revision, 300) },
+		});
+		const supabaseInCalls: Array<{ table: string; column: string; values: unknown[] }> = [];
+		const contextOptions = {
+			redis,
+			supabaseInCalls,
+			supabaseDataByTable: {
+				player_stats: elementIds.map((elementId) => ({
+					event_id: 33,
+					element_id: elementId,
+					total_points: elementId,
+				})),
+				event_live_explains: elementIds.map((elementId) => ({
+					event_id: 33,
+					element_id: elementId,
+					minutes: 45,
+					minutes_points: 1,
+				})),
+			},
+		};
+
+		const results = await Promise.all(
+			requestBatches.map((batch) =>
+				liveRepository.getEventLiveExplains(buildContext(contextOptions), 33, batch)
+			)
+		);
+
+		expect(results.map((batch) => batch.map((result) => result.elementId))).toEqual(requestBatches);
+		expect(supabaseInCalls.length).toBeGreaterThanOrEqual(6);
+		expect(supabaseInCalls.every((call) => call.values.length <= 100)).toBe(true);
 	});
 
 	it("falls back to the historical element column", async () => {
