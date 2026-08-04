@@ -1,6 +1,9 @@
 import type { GraphQLResolveInfo } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
-import { parentSelectionRequestsField } from "../../graphql/selection-set";
+import {
+	directSelectionRequestsField,
+	parentSelectionRequestsField,
+} from "../../graphql/selection-set";
 import { getCurrentEventId } from "../../infra/event";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
@@ -68,21 +71,14 @@ const getEventByIdMemoized = async (
 	return event;
 };
 
-const preloadPlayersForLivePerformances = async (
-	context: GraphQLContext,
-	performances: LivePerformance[]
-): Promise<void> => {
-	if (performances.length === 0) return;
-	const ids = [
-		...new Set(
-			performances
-				.map((performance) => performance.playerId)
-				.filter((id) => Number.isFinite(id) && id > 0)
-		),
-	];
-	const players = await playersService.getPlayersByIds(context, ids);
-	const preload = new Map<number, Player | null>();
-	for (const id of ids) {
+const preloadPlayersByIds = async (context: GraphQLContext, ids: number[]): Promise<void> => {
+	const uniqueIds = [...new Set(ids.filter((id) => Number.isFinite(id) && id > 0))];
+	if (uniqueIds.length === 0) return;
+	const players = await playersService.getPlayersByIds(context, uniqueIds);
+	// Sibling roots resolve concurrently. Merge after the bulk read so a later
+	// completion cannot discard player rows preloaded by another live root.
+	const preload = new Map(context.playersByIdPreload ?? []);
+	for (const id of uniqueIds) {
 		preload.set(id, null);
 	}
 	for (const player of players) {
@@ -90,6 +86,15 @@ const preloadPlayersForLivePerformances = async (
 	}
 	context.playersByIdPreload = preload;
 };
+
+const preloadPlayersForLivePerformances = (
+	context: GraphQLContext,
+	performances: LivePerformance[]
+): Promise<void> =>
+	preloadPlayersByIds(
+		context,
+		performances.map((performance) => performance.playerId)
+	);
 
 type LiveScoresArgs = {
 	eventId?: number | null;
@@ -112,6 +117,11 @@ type LiveSnapshotArgs = {
 type LiveExplainArgs = {
 	eventId: number;
 	elementId: number;
+};
+
+type LiveExplainsArgs = {
+	eventId: number;
+	elementIds: number[];
 };
 
 type TopPerformersArgs = {
@@ -170,7 +180,35 @@ export const liveResolvers = {
 			args: LiveExplainArgs,
 			context: GraphQLContext
 		): Promise<LiveExplain | null> =>
-			liveService.getEventLiveExplain(context, args.eventId, args.elementId),
+			withLiveSnapshotRoot(context, () =>
+				liveService.getEventLiveExplain(context, args.eventId, args.elementId)
+			),
+		eventLiveExplains: async (
+			_parent: unknown,
+			args: LiveExplainsArgs,
+			context: GraphQLContext,
+			info: GraphQLResolveInfo
+		): Promise<LiveExplain[]> =>
+			withLiveSnapshotRoot(context, async () => {
+				const mode = ["stats", "breakdown", "modified"].some((field) =>
+					directSelectionRequestsField(info, field)
+				)
+					? "full"
+					: "contributions";
+				const explains = await liveService.getEventLiveExplains(
+					context,
+					args.eventId,
+					args.elementIds,
+					mode
+				);
+				if (explains.length > 0 && parentSelectionRequestsField(info, "player")) {
+					await preloadPlayersByIds(
+						context,
+						explains.map((explain) => explain.elementId)
+					);
+				}
+				return explains;
+			}),
 		liveSnapshot: async (
 			_parent: unknown,
 			args: LiveSnapshotArgs,
@@ -219,6 +257,8 @@ export const liveResolvers = {
 			parent.expectedGoalsConceded ? parseFloat(parent.expectedGoalsConceded) : null,
 	},
 	LiveExplain: {
+		contributions: (parent: LiveExplain): NonNullable<LiveExplain["contributions"]> =>
+			parent.contributions ?? parent.breakdown.flatMap((entry) => entry.stats),
 		event: async (
 			parent: LiveExplain,
 			_args: Record<string, never>,

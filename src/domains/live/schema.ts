@@ -110,6 +110,7 @@ export const liveTypeDefs = /* GraphQL */ `
 		selectedBy: Float
 		stats: LiveExplainStats!
 		breakdown: [LiveExplainBreakdown!]!
+		contributions: [LiveExplainStatContribution!]!
 	}
 
 	extend type Query {
@@ -117,6 +118,7 @@ export const liveTypeDefs = /* GraphQL */ `
 		playerLive(playerId: Int!, eventId: Int): LivePerformance
 		eventLive(eventId: Int!): EventLive
 		eventLiveExplain(eventId: Int!, elementId: Int!): LiveExplain
+		eventLiveExplains(eventId: Int!, elementIds: [Int!]!): [LiveExplain!]!
 		liveSnapshot(eventId: Int): LiveSnapshotMeta
 	}
 `;

@@ -68,6 +68,31 @@ describe("live snapshot metadata", () => {
 		expect(second).toBe(first);
 	});
 
+	it("coalesces concurrent fresh metadata reads without reusing a completed poll", async () => {
+		const revision = "0".repeat(24);
+		let metadataReads = 0;
+		const context = {
+			redis: {
+				get: async (key: string): Promise<string | null> => {
+					if (key === "Season:active") return "2526";
+					metadataReads += 1;
+					await Promise.resolve();
+					return meta(revision);
+				},
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+		} as unknown as GraphQLContext;
+
+		const concurrent = await Promise.all(
+			Array.from({ length: 100 }, () => loadLiveSnapshotMeta(context, 33, { fresh: true }))
+		);
+		expect(concurrent.every((value) => value?.revision === revision)).toBe(true);
+		expect(metadataReads).toBe(1);
+
+		await loadLiveSnapshotMeta(context, 33, { fresh: true });
+		expect(metadataReads).toBe(2);
+	});
+
 	it("retries a calculation once when publication advances between reads", async () => {
 		const firstRevision = "c".repeat(24);
 		const secondRevision = "d".repeat(24);
@@ -287,13 +312,26 @@ describe("live snapshot metadata", () => {
 	it("degrades sibling roots that finish on different stable revisions", async () => {
 		const firstRevision = meta("a".repeat(24));
 		const secondRevision = meta("b".repeat(24), "2025-08-15T20:01:00.000Z");
-		const { context } = contextWithMetaReads([
-			firstRevision,
-			firstRevision,
-			firstRevision,
-			secondRevision,
-			secondRevision,
-		]);
+		let metadataReads = 0;
+		let announceFirstRevisionComplete!: () => void;
+		const firstRevisionComplete = new Promise<void>((resolve) => {
+			announceFirstRevisionComplete = resolve;
+		});
+		const context = {
+			redis: {
+				get: async (key: string): Promise<string | null> => {
+					if (key === "Season:active") return "2526";
+					metadataReads += 1;
+					if (metadataReads === 2) announceFirstRevisionComplete();
+					return metadataReads <= 2 ? firstRevision : secondRevision;
+				},
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+		} as unknown as GraphQLContext;
+		let releaseSecondRoot!: () => void;
+		const secondRootBlocked = new Promise<void>((resolve) => {
+			releaseSecondRoot = resolve;
+		});
 		let firstRuns = 0;
 		let secondRuns = 0;
 		const firstRoot = withLiveSnapshotRoot(context, () =>
@@ -302,17 +340,22 @@ describe("live snapshot metadata", () => {
 				return isLiveSnapshotDatabaseFallback(context, 33) ? "database" : "redis-a";
 			})
 		);
-		const secondRoot = withLiveSnapshotRoot(context, () =>
-			withLiveSnapshotConsistency(context, 33, async () => {
+		const secondRoot = withLiveSnapshotRoot(context, async () => {
+			await secondRootBlocked;
+			return withLiveSnapshotConsistency(context, 33, async () => {
 				secondRuns += 1;
 				return isLiveSnapshotDatabaseFallback(context, 33) ? "database" : "redis-b";
-			})
-		);
+			});
+		});
+
+		await firstRevisionComplete;
+		await Promise.resolve();
+		releaseSecondRoot();
 
 		expect(await firstRoot).toBe("database");
 		expect(await secondRoot).toBe("database");
 		expect(firstRuns).toBe(2);
-		expect(secondRuns).toBe(3);
+		expect(secondRuns).toBe(2);
 		expect(await loadOperationLiveSnapshotMeta(context, 33)).toBeNull();
 	});
 });

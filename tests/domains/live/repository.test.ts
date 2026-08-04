@@ -17,6 +17,7 @@ const makeMockRedis = (options: {
 	const hashes = new Map(Object.entries(options.hashes ?? {}).map(([k, v]) => [k, v]));
 	const getCalls: string[] = [];
 	const hgetallCalls: string[] = [];
+	const hmgetCalls: Array<[string, ...string[]]> = [];
 	const setCalls: Array<[string, string, ...unknown[]]> = [];
 
 	return {
@@ -24,6 +25,7 @@ const makeMockRedis = (options: {
 		hashes,
 		getCalls,
 		hgetallCalls,
+		hmgetCalls,
 		setCalls,
 		get: async (key: string): Promise<string | null> => {
 			getCalls.push(key);
@@ -43,6 +45,7 @@ const makeMockRedis = (options: {
 		hget: async (key: string, field: string): Promise<string | null> =>
 			hashes.get(key)?.[field] ?? null,
 		hmget: async (key: string, ...fields: string[]): Promise<(string | null)[]> => {
+			hmgetCalls.push([key, ...fields]);
 			const hash = hashes.get(key) ?? {};
 			return fields.map((f) => hash[f] ?? null);
 		},
@@ -826,6 +829,100 @@ describe("liveRepository.getEventLiveExplain", () => {
 		yellow_cards: 1,
 	};
 
+	it("reads only the cache scoped to the current live snapshot revision", async () => {
+		const revision = "a".repeat(24);
+		const stale = {
+			eventId: 34,
+			elementId: 526,
+			modified: null,
+			stats: { totalPoints: 7 },
+			breakdown: [],
+			selectedBy: null,
+		};
+		const current = {
+			...stale,
+			stats: { totalPoints: 14 },
+		};
+		const redis = makeMockRedis({
+			strings: {
+				"LiveSnapshotMeta:2526:34": JSON.stringify({
+					schemaVersion: 1,
+					season: "2526",
+					eventId: 34,
+					revision,
+					state: "live",
+					publishedAt: "2025-08-15T20:00:00.000Z",
+					checkedAt: "2025-08-15T20:01:00.000Z",
+					eventLiveCount: 700,
+					fixtureCount: 10,
+					fixtureTeamCount: 20,
+					bonusTeamCount: 2,
+				}),
+				"gql:v2:2526:live:explain:34:526": JSON.stringify(stale),
+				[`gql:v2:2526:live:explain:34:526:full:revision:${revision}`]: JSON.stringify(current),
+			},
+		});
+		const context = buildContext({ redis });
+
+		const result = await liveRepository.getEventLiveExplain(context, 34, 526);
+
+		expect(result?.stats.totalPoints).toBe(14);
+		expect(redis.getCalls).toContain(`gql:v2:2526:live:explain:34:526:full:revision:${revision}`);
+		expect(redis.getCalls).not.toContain("gql:v2:2526:live:explain:34:526");
+	});
+
+	it("loads a cold explanation batch with two database queries and one Redis hash read", async () => {
+		const redis = makeMockRedis({});
+		const supabaseFromCalls: string[] = [];
+		const context = buildContext({
+			redis,
+			supabaseFromCalls,
+			supabaseDataByTable: {
+				player_stats: [
+					playerStatsRow34_526,
+					{ ...playerStatsRow34_526, element_id: 527, total_points: 8 },
+				],
+				event_live_explains: [
+					{
+						event_id: 34,
+						element_id: 526,
+						minutes: 66,
+						minutes_points: 1,
+						goals_scored: 1,
+						goals_scored_points: 4,
+						assists: 2,
+						assists_points: 6,
+						bonus: 3,
+					},
+					{
+						event_id: 34,
+						element_id: 527,
+						minutes: 45,
+						minutes_points: 1,
+						assists: 1,
+						assists_points: 3,
+					},
+				],
+			},
+		});
+
+		const result = await liveRepository.getEventLiveExplains(context, 34, [526, 527]);
+
+		expect(result.map((explain) => [explain.elementId, explain.stats.totalPoints])).toEqual([
+			[526, 14],
+			[527, 8],
+		]);
+		expect(result[0]?.contributions).toEqual([
+			{ identifier: "minutes", value: 66, points: 1, pointsModification: null },
+			{ identifier: "goals_scored", value: 1, points: 4, pointsModification: null },
+			{ identifier: "assists", value: 2, points: 6, pointsModification: null },
+			{ identifier: "bonus", value: 3, points: 3, pointsModification: null },
+		]);
+		expect(supabaseFromCalls).toEqual(["player_stats", "event_live_explains"]);
+		expect(redis.hmgetCalls).toEqual([["EventLiveExplain:2526:34", "526", "527"]]);
+		expect(redis.setCalls).toHaveLength(2);
+	});
+
 	it("maps stats from player_stats and breakdown from event_live_explain", async () => {
 		const explainFixture = {
 			fixture: 8,
@@ -877,49 +974,89 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(result?.breakdown[0]?.fixtureId).toBe(9);
 	});
 
+	it("maps the producer's compact Redis contract without querying Postgres", async () => {
+		const supabaseFromCalls: string[] = [];
+		const context = buildContext({
+			supabaseFromCalls,
+			redisHashes: {
+				"EventLiveExplain:2526:34": {
+					526: JSON.stringify({
+						eventId: 34,
+						elementId: 526,
+						minutes: 66,
+						minutesPoints: 1,
+						goalsScored: 1,
+						goalsScoredPoints: 4,
+						goalsConceded: 2,
+						goalsConcededPoints: -1,
+						bonus: 3,
+					}),
+				},
+			},
+			supabaseDataByTable: {
+				player_stats: [playerStatsRow34_526],
+				event_live_explains: [],
+			},
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 34, [526], "contributions");
+
+		expect(result?.breakdown).toEqual([]);
+		expect(result?.contributions).toEqual([
+			{ identifier: "minutes", value: 66, points: 1, pointsModification: null },
+			{ identifier: "goals_scored", value: 1, points: 4, pointsModification: null },
+			{ identifier: "goals_conceded", value: 2, points: -1, pointsModification: null },
+			{ identifier: "bonus", value: 3, points: 3, pointsModification: null },
+		]);
+		expect(supabaseFromCalls).toEqual([]);
+	});
+
 	it("falls back to the historical element column", async () => {
 		const attemptedColumns: string[] = [];
 		const context = buildContext({}) as unknown as { supabase: unknown };
 		context.supabase = {
 			from: (table: string) => {
 				let elementColumn = "";
+				const resultForColumn = () => {
+					if (table === "player_stats") {
+						return { data: [playerStatsRow34_526], error: null };
+					}
+					if (elementColumn === "element_id") {
+						return {
+							data: null,
+							error: {
+								code: "42703",
+								message: "column event_live_explains.element_id does not exist",
+							},
+						};
+					}
+					return {
+						data: [
+							{
+								event_id: 34,
+								element: 526,
+								explain: [
+									{
+										fixture: 10,
+										stats: [{ identifier: "bonus", points: 3, value: 3 }],
+									},
+								],
+							},
+						],
+						error: null,
+					};
+				};
 				const builder = {
 					select: () => builder,
-					eq: (column: string) => {
-						if (table === "event_live_explains" && column !== "event_id") {
+					eq: (_column: string) => {
+						return builder;
+					},
+					in: async (column: string) => {
+						if (table === "event_live_explains") {
 							elementColumn = column;
 							attemptedColumns.push(column);
 						}
-						return builder;
-					},
-					limit: async () => {
-						if (table === "player_stats") {
-							return { data: [playerStatsRow34_526], error: null };
-						}
-						if (elementColumn === "element_id") {
-							return {
-								data: null,
-								error: {
-									code: "42703",
-									message: "column event_live_explains.element_id does not exist",
-								},
-							};
-						}
-						return {
-							data: [
-								{
-									event_id: 34,
-									element: 526,
-									explain: [
-										{
-											fixture: 10,
-											stats: [{ identifier: "bonus", points: 3, value: 3 }],
-										},
-									],
-								},
-							],
-							error: null,
-						};
+						return resultForColumn();
 					},
 				};
 				return builder;

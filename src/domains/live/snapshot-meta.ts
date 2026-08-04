@@ -18,6 +18,10 @@ export type LiveSnapshotMeta = {
 };
 
 const snapshotMemo = new WeakMap<GraphQLContext, Map<string, Promise<LiveSnapshotMeta | null>>>();
+const freshSnapshotFlights = new WeakMap<
+	GraphQLContext,
+	Map<string, Promise<LiveSnapshotMeta | null>>
+>();
 
 type LiveSnapshotOperationState = {
 	activeReaders: number;
@@ -290,8 +294,18 @@ export const loadLiveSnapshotMeta = async (
 		const cached = memo.get(memoKey);
 		if (cached) return cached;
 	}
+	let freshFlights: Map<string, Promise<LiveSnapshotMeta | null>> | undefined;
+	if (options.fresh) {
+		freshFlights = freshSnapshotFlights.get(context);
+		if (!freshFlights) {
+			freshFlights = new Map();
+			freshSnapshotFlights.set(context, freshFlights);
+		}
+		const existingFlight = freshFlights.get(memoKey);
+		if (existingFlight) return existingFlight;
+	}
 
-	const loading = (async (): Promise<LiveSnapshotMeta | null> => {
+	const load = (async (): Promise<LiveSnapshotMeta | null> => {
 		const key = liveSnapshotMetaKey(season, eventId);
 		try {
 			const raw = await context.redis.get(key);
@@ -308,7 +322,15 @@ export const loadLiveSnapshotMeta = async (
 			return null;
 		}
 	})();
+	const loading = options.fresh
+		? load.finally(() => {
+				if (freshFlights?.get(memoKey) === loading) {
+					freshFlights.delete(memoKey);
+				}
+			})
+		: load;
 	memo.set(memoKey, loading);
+	if (options.fresh) freshFlights?.set(memoKey, loading);
 	return loading;
 };
 

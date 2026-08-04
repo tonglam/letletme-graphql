@@ -179,6 +179,36 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 500 });
 	});
 
+	it("accepts and charges the bounded fifteen-player live explain batch", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query:
+					"query Batch($elementIds: [Int!]!) { eventLiveExplains(eventId: 1, elementIds: $elementIds) { elementId breakdown { fixtureId stats { identifier points } } } }",
+				variables: { elementIds: Array.from({ length: 15 }, (_, index) => index + 1) },
+			},
+			schema
+		);
+		expect(result).toMatchObject({ ok: true });
+		if (!result.ok) throw new Error(result.message);
+		expect(result.rateLimitCostUnits).toBeGreaterThanOrEqual(5);
+	});
+
+	it("rejects live explain batches over fifteen players before execution", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query:
+					"query Batch($elementIds: [Int!]!) { eventLiveExplains(eventId: 1, elementIds: $elementIds) { elementId } }",
+				variables: { elementIds: Array.from({ length: 16 }, (_, index) => index + 1) },
+			},
+			schema
+		);
+		expect(result).toMatchObject({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL elementIds batch exceeds 15 players",
+		});
+	});
+
 	it("rejects duplicate entry IDs before execution", () => {
 		const result = validateGraphQLRequestLimits({
 			query:

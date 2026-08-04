@@ -195,6 +195,149 @@ describe("liveSnapshot GraphQL contract", () => {
 		expect(metadataReads).toBe(1);
 	});
 
+	it("retries live explanations on the new revision before exposing snapshot metadata", async () => {
+		const revisions = ["1".repeat(24), "2".repeat(24)] as const;
+		let metadataReads = 0;
+		const metadata = (revision: string) =>
+			JSON.stringify({
+				schemaVersion: 1,
+				season: "2526",
+				eventId: 33,
+				revision,
+				state: "live",
+				publishedAt: "2025-08-15T20:00:00.000Z",
+				checkedAt: "2025-08-15T20:01:00.000Z",
+				eventLiveCount: 700,
+				fixtureCount: 10,
+				fixtureTeamCount: 20,
+				bonusTeamCount: 2,
+			});
+		const explain = (totalPoints: number) =>
+			JSON.stringify({
+				eventId: 33,
+				elementId: 1,
+				modified: null,
+				stats: { totalPoints },
+				breakdown: [],
+				selectedBy: null,
+			});
+		const context = {
+			redis: {
+				get: async (key: string): Promise<string | null> => {
+					if (key === "Season:active") return "2526";
+					if (key === "LiveSnapshotMeta:2526:33") {
+						metadataReads += 1;
+						return metadata(metadataReads <= 2 ? revisions[0] : revisions[1]);
+					}
+					if (key === `gql:v2:2526:live:explain:33:1:full:revision:${revisions[0]}`) {
+						return explain(7);
+					}
+					if (key === `gql:v2:2526:live:explain:33:1:full:revision:${revisions[1]}`) {
+						return explain(14);
+					}
+					return null;
+				},
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+			supabase: {},
+		} as unknown as GraphQLContext;
+
+		const result = await graphql({
+			schema,
+			source: `query {
+				eventLiveExplain(eventId: 33, elementId: 1) { stats { totalPoints } }
+				liveSnapshot(eventId: 33) { revision }
+			}`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.eventLiveExplain).toEqual({ stats: { totalPoints: 14 } });
+		expect(result.data?.liveSnapshot).toEqual({ revision: revisions[1] });
+		expect(metadataReads).toBe(5);
+	});
+
+	it("serves a bounded explanation batch under one snapshot decision", async () => {
+		const revision = "3".repeat(24);
+		let metadataReads = 0;
+		const metadata = JSON.stringify({
+			schemaVersion: 1,
+			season: "2526",
+			eventId: 33,
+			revision,
+			state: "live",
+			publishedAt: "2025-08-15T20:00:00.000Z",
+			checkedAt: "2025-08-15T20:01:00.000Z",
+			eventLiveCount: 700,
+			fixtureCount: 10,
+			fixtureTeamCount: 20,
+			bonusTeamCount: 2,
+		});
+		const explain = (elementId: number, totalPoints: number) =>
+			JSON.stringify({
+				eventId: 33,
+				elementId,
+				modified: null,
+				stats: { totalPoints },
+				breakdown: [],
+				contributions: [
+					{
+						identifier: "minutes",
+						value: 45,
+						points: 1,
+						pointsModification: null,
+					},
+				],
+				selectedBy: null,
+			});
+		const cache = new Map([
+			[`gql:v2:2526:live:explain:33:1:contributions:revision:${revision}`, explain(1, 6)],
+			[`gql:v2:2526:live:explain:33:2:contributions:revision:${revision}`, explain(2, 9)],
+		]);
+		const context = {
+			redis: {
+				get: async (key: string): Promise<string | null> => {
+					if (key === "Season:active") return "2526";
+					if (key === "LiveSnapshotMeta:2526:33") {
+						metadataReads += 1;
+						return metadata;
+					}
+					return cache.get(key) ?? null;
+				},
+				mget: async (...keys: string[]): Promise<Array<string | null>> =>
+					keys.map((key) => cache.get(key) ?? null),
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+			supabase: {},
+		} as unknown as GraphQLContext;
+
+		const result = await graphql({
+			schema,
+			source: `query {
+				eventLiveExplains(eventId: 33, elementIds: [1, 2]) {
+					elementId
+					contributions { identifier value points }
+				}
+				liveSnapshot(eventId: 33) { revision }
+			}`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.eventLiveExplains).toEqual([
+			{
+				elementId: 1,
+				contributions: [{ identifier: "minutes", value: 45, points: 1 }],
+			},
+			{
+				elementId: 2,
+				contributions: [{ identifier: "minutes", value: 45, points: 1 }],
+			},
+		]);
+		expect(result.data?.liveSnapshot).toEqual({ revision });
+		expect(metadataReads).toBe(3);
+	});
+
 	it("coordinates public event fixtures with snapshot fallback for the operation", async () => {
 		const metadata = JSON.stringify({
 			schemaVersion: 1,
