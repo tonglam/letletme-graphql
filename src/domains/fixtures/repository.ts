@@ -1,7 +1,15 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { gqlCacheKey } from "../../infra/cache-key";
 import { getCurrentEventId } from "../../infra/event";
 import { getCurrentSeason } from "../../infra/season";
 import { metrics } from "../../infra/metrics";
+import {
+	isLiveSnapshotConsistencyActive,
+	isLiveSnapshotDatabaseFallback,
+	LiveSnapshotCoherenceError,
+	loadLiveSnapshotMeta,
+	type LiveSnapshotMeta,
+} from "../live/snapshot-meta";
 
 export type Fixture = {
 	id: number;
@@ -130,7 +138,7 @@ const mapSyncJobFixture = (raw: unknown): Fixture | null => {
 
 	const id = asNum(row.id);
 	const code = asNum(row.code);
-	const eventId = asNum(row.event ?? row.event_id);
+	const eventId = asNum(row.eventId ?? row.event ?? row.event_id);
 	const teamH = asNum(row.teamH ?? row.team_h ?? row.teamHId ?? row.team_h_id);
 	const teamA = asNum(row.teamA ?? row.team_a ?? row.teamAId ?? row.team_a_id);
 
@@ -178,26 +186,61 @@ const loadEventFixturesFromRedis = async (
 ): Promise<Fixture[] | null> => {
 	const season = await getCurrentSeason(context);
 	const hashKey = `Fixtures:${season}:${eventId}`;
+	const meta = await loadLiveSnapshotMeta(context, eventId, { season });
 
 	let hashEntries: Record<string, string>;
 	try {
 		hashEntries = await context.redis.hgetall(hashKey);
+		if (meta && Object.keys(hashEntries).length !== meta.fixtureCount) {
+			context.logger.warn(
+				{
+					hashKey,
+					revision: meta.revision,
+					expectedCount: meta.fixtureCount,
+					actualCount: Object.keys(hashEntries).length,
+				},
+				"Incomplete Fixtures revision"
+			);
+			if (isLiveSnapshotConsistencyActive(context, eventId)) {
+				throw new LiveSnapshotCoherenceError(
+					eventId,
+					"Fixtures",
+					`Incomplete Fixtures revision ${meta.revision}`
+				);
+			}
+			return null;
+		}
 	} catch (error) {
+		if (error instanceof LiveSnapshotCoherenceError) throw error;
 		context.logger.warn({ err: error, hashKey }, "Failed to read Fixtures hash from Redis");
+		if (meta && isLiveSnapshotConsistencyActive(context, eventId)) {
+			throw new LiveSnapshotCoherenceError(
+				eventId,
+				"Fixtures",
+				`Fixtures view unavailable for revision ${meta.revision}`
+			);
+		}
 		return null;
 	}
 
-	const fields = Object.values(hashEntries);
+	const fields = Object.entries(hashEntries);
 	if (fields.length === 0) {
 		return null;
 	}
 
 	const fixtures: Fixture[] = [];
+	const seenFixtureIds = new Set<number>();
 	let malformed = false;
-	for (const fieldValue of fields) {
+	for (const [fieldName, fieldValue] of fields) {
 		const parsed = parseJsonUnknown(fieldValue);
 		const fixture = mapSyncJobFixture(parsed);
-		if (fixture) {
+		if (
+			fixture &&
+			fieldName === String(fixture.id) &&
+			fixture.eventId === eventId &&
+			!seenFixtureIds.has(fixture.id)
+		) {
+			seenFixtureIds.add(fixture.id);
 			fixtures.push(fixture);
 		} else {
 			malformed = true;
@@ -205,7 +248,14 @@ const loadEventFixturesFromRedis = async (
 	}
 	if (malformed) {
 		metrics.cacheRepositoryEvents.labels("fixtures", "malformed").inc();
-		context.logger.warn({ hashKey }, "Malformed Fixtures cache; falling back to database");
+		context.logger.warn({ hashKey }, "Malformed Fixtures cache");
+		if (meta && isLiveSnapshotConsistencyActive(context, eventId)) {
+			throw new LiveSnapshotCoherenceError(
+				eventId,
+				"Fixtures",
+				`Malformed Fixtures view for revision ${meta.revision}`
+			);
+		}
 		return null;
 	}
 
@@ -221,6 +271,107 @@ const loadEventFixturesFromRedis = async (
 
 const FIXTURE_COLUMNS =
 	"id, code, event_id, finished, finished_provisional, kickoff_time, minutes, started, team_h_id, team_a_id, team_h_score, team_a_score, team_h_difficulty, team_a_difficulty";
+
+const FIXTURE_FALLBACK_CACHE_TTL_SEC = 15;
+const fixtureFallbackFlights = new WeakMap<object, Map<string, Promise<Fixture[]>>>();
+
+const fixtureFallbackCacheKey = (
+	season: string,
+	eventId: number,
+	meta: LiveSnapshotMeta | null
+): string =>
+	meta
+		? gqlCacheKey(season, `fixtures:event:${eventId}:revision:${meta.revision}:fallback15`)
+		: gqlCacheKey(season, `fixtures:event:${eventId}:fallback15`);
+
+const parseFixtureFallbackCache = (raw: string, eventId: number): Fixture[] | null => {
+	const parsed = parseJsonUnknown(raw);
+	if (!Array.isArray(parsed)) return null;
+	const fixtures: Fixture[] = [];
+	const seenFixtureIds = new Set<number>();
+	for (const value of parsed) {
+		const fixture = mapSyncJobFixture(value);
+		if (!fixture || fixture.eventId !== eventId || seenFixtureIds.has(fixture.id)) return null;
+		seenFixtureIds.add(fixture.id);
+		fixtures.push(fixture);
+	}
+	return fixtures;
+};
+
+const readFixtureFallbackCache = async (
+	context: GraphQLContext,
+	cacheKey: string,
+	eventId: number
+): Promise<Fixture[] | null> => {
+	try {
+		const raw = await context.redis.get(cacheKey);
+		if (raw === null) return null;
+		const parsed = parseFixtureFallbackCache(raw, eventId);
+		if (parsed) return parsed;
+		context.logger.warn({ cacheKey, eventId }, "Ignoring malformed fixture fallback cache");
+	} catch (error) {
+		context.logger.warn({ err: error, cacheKey, eventId }, "Failed to read fixture fallback cache");
+	}
+	return null;
+};
+
+const loadEventFixturesFromDatabase = async (
+	context: GraphQLContext,
+	eventId: number
+): Promise<Fixture[]> => {
+	const season = await getCurrentSeason(context);
+	const meta = await loadLiveSnapshotMeta(context, eventId, { season });
+	const cacheKey = fixtureFallbackCacheKey(season, eventId, meta);
+	const cached = await readFixtureFallbackCache(context, cacheKey, eventId);
+	if (cached !== null) return cached;
+
+	const redisIdentity = context.redis as object;
+	let flights = fixtureFallbackFlights.get(redisIdentity);
+	if (!flights) {
+		flights = new Map();
+		fixtureFallbackFlights.set(redisIdentity, flights);
+	}
+	const existing = flights.get(cacheKey);
+	if (existing) return existing;
+
+	const flight = (async (): Promise<Fixture[]> => {
+		const cachedAfterElection = await readFixtureFallbackCache(context, cacheKey, eventId);
+		if (cachedAfterElection !== null) return cachedAfterElection;
+
+		const { data, error } = await context.supabase
+			.from("event_fixtures")
+			.select(FIXTURE_COLUMNS)
+			.eq("event_id", eventId)
+			.order("kickoff_time", { ascending: true });
+
+		if (error) {
+			context.logger.error({ err: error, eventId }, "Failed to fetch event fixtures");
+			throw new Error("Failed to fetch event fixtures");
+		}
+
+		const fixtures = (data as DbFixtureRow[] | null)?.map(mapFixture) ?? [];
+		try {
+			await context.redis.set(
+				cacheKey,
+				JSON.stringify(fixtures),
+				"EX",
+				FIXTURE_FALLBACK_CACHE_TTL_SEC
+			);
+		} catch (cacheError) {
+			context.logger.warn(
+				{ err: cacheError, cacheKey, eventId },
+				"Failed to cache fixture database fallback"
+			);
+		}
+		return fixtures;
+	})();
+	flights.set(cacheKey, flight);
+	try {
+		return await flight;
+	} finally {
+		if (flights.get(cacheKey) === flight) flights.delete(cacheKey);
+	}
+};
 
 interface FixturesRepository {
 	listFixtures(
@@ -278,25 +429,15 @@ export const fixturesRepository: FixturesRepository = {
 			return [];
 		}
 
-		const fromRedis = await loadEventFixturesFromRedis(context, eventId);
-		if (fromRedis) {
-			metrics.cacheRepositoryEvents.labels("fixtures", "redis").inc();
-			return fromRedis;
+		if (!isLiveSnapshotDatabaseFallback(context, eventId)) {
+			const fromRedis = await loadEventFixturesFromRedis(context, eventId);
+			if (fromRedis) {
+				metrics.cacheRepositoryEvents.labels("fixtures", "redis").inc();
+				return fromRedis;
+			}
 		}
 		metrics.cacheRepositoryEvents.labels("fixtures", "database_fallback").inc();
-
-		const { data, error } = await context.supabase
-			.from("event_fixtures")
-			.select(FIXTURE_COLUMNS)
-			.eq("event_id", eventId)
-			.order("kickoff_time", { ascending: true });
-
-		if (error) {
-			context.logger.error({ err: error, eventId }, "Failed to fetch event fixtures");
-			throw new Error("Failed to fetch event fixtures");
-		}
-
-		return (data as DbFixtureRow[] | null)?.map(mapFixture) ?? [];
+		return loadEventFixturesFromDatabase(context, eventId);
 	},
 
 	async getCurrentFixtures(context: GraphQLContext): Promise<Fixture[]> {

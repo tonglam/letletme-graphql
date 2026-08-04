@@ -88,6 +88,7 @@ type ListWeight = {
 	multiplier: number;
 	propagateToChildren: boolean;
 	oversizedEntryBatch: boolean;
+	oversizedLiveExplainBatch: boolean;
 	duplicateEntryIds: boolean;
 	negativeListLimit: boolean;
 	uniqueEntryCount: number | null;
@@ -104,6 +105,7 @@ const listWeight = (
 	let multiplier = 1;
 	let hasEntryIds = false;
 	let oversizedEntryBatch = false;
+	let oversizedLiveExplainBatch = false;
 	let duplicateEntryIds = false;
 	let negativeListLimit = false;
 	let uniqueEntryCount: number | null = null;
@@ -135,6 +137,10 @@ const listWeight = (
 			oversizedEntryBatch ||= value.length > 500;
 			multiplier = Math.max(multiplier, Math.min(value.length, 500));
 		}
+		if (name === "elementIds" && Array.isArray(value)) {
+			oversizedLiveExplainBatch ||= value.length > 15;
+			multiplier = Math.max(multiplier, Math.min(value.length, 15));
+		}
 		if (["first", "last", "limit"].includes(name) && typeof value === "number") {
 			negativeListLimit ||= value < 0;
 			multiplier = Math.max(multiplier, Math.min(Math.max(value, 1), MAX_LIST_ARGUMENT_WEIGHT));
@@ -148,6 +154,7 @@ const listWeight = (
 		// propagating their multiplier through their child selection.
 		propagateToChildren: !hasEntryIds,
 		oversizedEntryBatch,
+		oversizedLiveExplainBatch,
 		duplicateEntryIds,
 		negativeListLimit,
 		uniqueEntryCount,
@@ -192,6 +199,7 @@ const inspectSelectionSet = ({
 	complexity: number;
 	rootFields: Array<{ name: string; uniqueEntryCount: number | null }>;
 	oversizedEntryBatch: boolean;
+	oversizedLiveExplainBatch: boolean;
 	duplicateEntryIds: boolean;
 	negativeListLimit: boolean;
 } => {
@@ -200,6 +208,7 @@ const inspectSelectionSet = ({
 	let complexity = 0;
 	const rootFields: Array<{ name: string; uniqueEntryCount: number | null }> = [];
 	let oversizedEntryBatch = false;
+	let oversizedLiveExplainBatch = false;
 	let duplicateEntryIds = false;
 	let negativeListLimit = false;
 
@@ -220,6 +229,7 @@ const inspectSelectionSet = ({
 			}
 			const childMultiplier = multiplier * weight.multiplier;
 			oversizedEntryBatch ||= weight.oversizedEntryBatch;
+			oversizedLiveExplainBatch ||= weight.oversizedLiveExplainBatch;
 			duplicateEntryIds ||= weight.duplicateEntryIds;
 			negativeListLimit ||= weight.negativeListLimit;
 			complexity += childMultiplier;
@@ -244,6 +254,7 @@ const inspectSelectionSet = ({
 				aliases += child.aliases;
 				complexity += child.complexity;
 				oversizedEntryBatch ||= child.oversizedEntryBatch;
+				oversizedLiveExplainBatch ||= child.oversizedLiveExplainBatch;
 				duplicateEntryIds ||= child.duplicateEntryIds;
 				negativeListLimit ||= child.negativeListLimit;
 			}
@@ -267,6 +278,7 @@ const inspectSelectionSet = ({
 			aliases += child.aliases;
 			complexity += child.complexity;
 			oversizedEntryBatch ||= child.oversizedEntryBatch;
+			oversizedLiveExplainBatch ||= child.oversizedLiveExplainBatch;
 			duplicateEntryIds ||= child.duplicateEntryIds;
 			negativeListLimit ||= child.negativeListLimit;
 			rootFields.push(...child.rootFields);
@@ -293,6 +305,7 @@ const inspectSelectionSet = ({
 		aliases += child.aliases;
 		complexity += child.complexity;
 		oversizedEntryBatch ||= child.oversizedEntryBatch;
+		oversizedLiveExplainBatch ||= child.oversizedLiveExplainBatch;
 		duplicateEntryIds ||= child.duplicateEntryIds;
 		negativeListLimit ||= child.negativeListLimit;
 		rootFields.push(...child.rootFields);
@@ -304,6 +317,7 @@ const inspectSelectionSet = ({
 		complexity,
 		rootFields,
 		oversizedEntryBatch,
+		oversizedLiveExplainBatch,
 		duplicateEntryIds,
 		negativeListLimit,
 	};
@@ -321,6 +335,7 @@ const reject = (
 const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["liveScores", 5],
 	["eventLive", 5],
+	["eventLiveExplains", 5],
 	["eventOverallResult", 5],
 	["playerDetail", 5],
 	["playerValueHistory", 5],
@@ -422,6 +437,9 @@ export const validateGraphQLPayloadLimits = (
 	}
 	if (inspection.oversizedEntryBatch) {
 		return reject("GraphQL entryIds batch exceeds 500 entries");
+	}
+	if (inspection.oversizedLiveExplainBatch) {
+		return reject("GraphQL elementIds batch exceeds 15 players");
 	}
 	if (inspection.complexity > GRAPHQL_LIMITS.maxComplexity) {
 		return reject(`GraphQL operation exceeds weighted complexity ${GRAPHQL_LIMITS.maxComplexity}`);

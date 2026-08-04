@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { withLiveSnapshotRoot } from "../live/snapshot-meta";
 import type { LiveMatches } from "./service";
 import { liveMatchesService } from "./service";
 
@@ -13,6 +14,8 @@ export const liveMatchesResolvers = {
 			args: LiveMatchesArgs,
 			context: GraphQLContext
 		): Promise<LiveMatches> =>
-			liveMatchesService.getAllLiveMatches(context, args.upcoming ?? false),
+			withLiveSnapshotRoot(context, () =>
+				liveMatchesService.getAllLiveMatches(context, args.upcoming ?? false)
+			),
 	},
 };

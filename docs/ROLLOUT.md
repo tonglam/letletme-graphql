@@ -62,6 +62,21 @@ device-management fields. Legacy bearer validation is the only grace behavior.
 
 ## Live scoring gate
 
+Deploy the Data live-snapshot producer before this GraphQL consumer. Confirm
+`LiveSnapshotMeta:{season}:{event}`, `LiveFixtureV2:{season}:{event}`, and all
+four required snapshot hashes are populated from the same revision. GraphQL is
+backward-compatible while the producer rolls out: missing metadata uses a
+separate 15-second shaped cache and missing `LiveFixtureV2` falls back to the
+frozen `LiveFixture` hash. Do not leave that compatibility state as the normal
+match-day operating mode.
+
+After both services are deployed, verify that repeated reads of
+`liveSnapshot(eventId:)` advance `checkedAt` each accepted poll, advance
+`revision` only when football content changes, and that a revision change is
+visible to `liveScores`, single-entry, tournament, and live-match queries on
+their next request. A Data rollback must precede a GraphQL rollback if it would
+remove additive snapshot keys.
+
 Keep `LIVE_POINTS_V2=false` while comparing
 `live_points_shadow_differences_total` on sampled SGW and DGW traffic. Verify a
 completed SGW, completed DGW, provisional bonus, captain, triple captain, and

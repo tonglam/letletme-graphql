@@ -17,6 +17,13 @@ Read-heavy Fantasy Premier League GraphQL API built with Bun, Apollo Server
   reads those keys but never rebuilds them. GraphQL-shaped and negative caches
   live under `gql:v2:{season}:...`, except the coordinated
   `PlayerValueMissing:{date}` marker.
+- During matches, Data publishes `EventLive`, `Fixtures`, legacy/V2 fixture and
+  bonus hashes, and `LiveSnapshotMeta:{season}:{event}` as one Redis revision.
+  GraphQL keys its all-player shaped cache by that revision (180-second
+  cleanup TTL), coalesces concurrent misses, and retries a multi-read live
+  calculation once if the revision advances mid-request. Before Data is
+  upgraded or during Redis recovery, the legacy path uses a separate
+  15-second fallback cache.
 
 ## Local use
 
@@ -31,6 +38,10 @@ The server exposes:
   `https://www.letletme.top/api/graphql`)
 - `GET /health` (503 when PostgreSQL, Redis, or `Season:active` is unavailable)
 - `GET /metrics` (requires `METRICS_TOKEN`)
+
+The public `liveSnapshot(eventId:)` query exposes the producer revision,
+`publishedAt`, `checkedAt`, state, and completeness counts so clients can show
+honest freshness without bypassing GraphQL.
 
 Requests are limited to 256 KiB, depth 10, five root fields, 20 aliases, 200
 AST nodes, weighted complexity 600, and 500 unique entry IDs. Duplicate entry

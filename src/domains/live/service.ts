@@ -1,10 +1,37 @@
+import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import { getCurrentEventId } from "../../infra/event";
 import { calcElementLivePoints } from "../entry-live/calc-service";
 import { playersRepository } from "../players/repository";
 import { loadLiveBonusByPlayerId } from "./bonus-cache";
-import type { EventLive, LiveExplain, LivePerformance, LiveScoresFilter } from "./repository";
+import type {
+	EventLive,
+	LiveExplain,
+	LiveExplainReadMode,
+	LivePerformance,
+	LiveScoresFilter,
+} from "./repository";
 import { applyLiveScoresFilter, liveRepository } from "./repository";
+import { withLiveSnapshotConsistency } from "./snapshot-meta";
+
+export const MAX_LIVE_EXPLAIN_BATCH = 15;
+
+export const assertValidLiveExplainBatch = (elementIds: readonly number[]): void => {
+	if (elementIds.length > MAX_LIVE_EXPLAIN_BATCH) {
+		throw new GraphQLError(
+			`Live explain batch exceeds the ${MAX_LIVE_EXPLAIN_BATCH} player limit`,
+			{ extensions: { code: "QUERY_TOO_COMPLEX" } }
+		);
+	}
+	if (
+		elementIds.some((elementId) => !Number.isInteger(elementId) || elementId <= 0) ||
+		new Set(elementIds).size !== elementIds.length
+	) {
+		throw new GraphQLError("Live explain player IDs must be unique positive integers", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
+};
 
 const withCalculatedTotalPoints = (
 	live: LivePerformance,
@@ -56,9 +83,13 @@ export const liveService = {
 		eventId?: number,
 		filter?: LiveScoresFilter | null
 	): Promise<LivePerformance[]> {
-		const performances = await liveRepository.getLiveScores(context, eventId);
-		const calculated = await calculateTotalsForPerformances(context, performances, eventId);
-		return applyLiveScoresFilter(calculated, filter);
+		const targetEventId = eventId ?? (await getCurrentEventId(context));
+		if (!targetEventId) return [];
+		return withLiveSnapshotConsistency(context, targetEventId, async () => {
+			const performances = await liveRepository.getLiveScores(context, targetEventId);
+			const calculated = await calculateTotalsForPerformances(context, performances, targetEventId);
+			return applyLiveScoresFilter(calculated, filter);
+		});
 	},
 
 	async getPlayerLive(
@@ -67,32 +98,59 @@ export const liveService = {
 		eventId?: number
 	): Promise<LivePerformance | null> {
 		const targetEventId = eventId ?? (await getCurrentEventId(context)) ?? undefined;
-		const [performance, player] = await Promise.all([
-			liveRepository.getPlayerLive(context, playerId, targetEventId),
-			playersRepository.getPlayerById(context, playerId),
-		]);
-		if (!performance) return null;
-
-		const bonusByPlayerId = targetEventId
-			? await loadLiveBonusByPlayerId(context, targetEventId)
-			: new Map<number, number>();
-		return withCalculatedTotalPoints(performance, player?.position, bonusByPlayerId.get(playerId));
+		if (!targetEventId) return null;
+		return withLiveSnapshotConsistency(context, targetEventId, async () => {
+			const [performance, player, bonusByPlayerId] = await Promise.all([
+				liveRepository.getPlayerLive(context, playerId, targetEventId),
+				playersRepository.getPlayerById(context, playerId),
+				loadLiveBonusByPlayerId(context, targetEventId),
+			]);
+			if (!performance) return null;
+			return withCalculatedTotalPoints(
+				performance,
+				player?.position,
+				bonusByPlayerId.get(playerId)
+			);
+		});
 	},
 
 	async getEventLive(context: GraphQLContext, eventId: number): Promise<EventLive> {
-		const eventLive = await liveRepository.getEventLive(context, eventId);
-		return {
-			...eventLive,
-			performances: await calculateTotalsForPerformances(context, eventLive.performances, eventId),
-		};
+		return withLiveSnapshotConsistency(context, eventId, async () => {
+			const eventLive = await liveRepository.getEventLive(context, eventId);
+			return {
+				...eventLive,
+				performances: await calculateTotalsForPerformances(
+					context,
+					eventLive.performances,
+					eventId
+				),
+			};
+		});
 	},
 
-	getEventLiveExplain(
+	async getEventLiveExplain(
 		context: GraphQLContext,
 		eventId: number,
-		elementId: number
+		elementId: number,
+		includeSelectedBy = false
 	): Promise<LiveExplain | null> {
-		return liveRepository.getEventLiveExplain(context, eventId, elementId);
+		return withLiveSnapshotConsistency(context, eventId, () =>
+			liveRepository.getEventLiveExplain(context, eventId, elementId, includeSelectedBy)
+		);
+	},
+
+	async getEventLiveExplains(
+		context: GraphQLContext,
+		eventId: number,
+		elementIds: number[],
+		mode: LiveExplainReadMode = "full",
+		includeSelectedBy = false
+	): Promise<LiveExplain[]> {
+		assertValidLiveExplainBatch(elementIds);
+		if (elementIds.length === 0) return [];
+		return withLiveSnapshotConsistency(context, eventId, () =>
+			liveRepository.getEventLiveExplains(context, eventId, elementIds, mode, includeSelectedBy)
+		);
 	},
 
 	getSelectedByPercent(

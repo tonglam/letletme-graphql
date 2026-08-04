@@ -1,12 +1,22 @@
 import type { GraphQLResolveInfo } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
-import { parentSelectionRequestsField } from "../../graphql/selection-set";
+import {
+	directSelectionRequestsField,
+	parentSelectionRequestsField,
+} from "../../graphql/selection-set";
+import { getCurrentEventId } from "../../infra/event";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
 import type { Player } from "../players/repository";
 import { playersService } from "../players/service";
 import type { EventLive, LiveExplain, LivePerformance, LiveScoresFilter } from "./repository";
 import { liveService } from "./service";
+import {
+	loadOperationLiveSnapshotMeta,
+	type LiveSnapshotMeta,
+	type LiveSnapshotState,
+	withLiveSnapshotRoot,
+} from "./snapshot-meta";
 
 /**
  * Per-request memoization for player lookups to avoid N+1 Redis/DB round-trips
@@ -61,21 +71,14 @@ const getEventByIdMemoized = async (
 	return event;
 };
 
-const preloadPlayersForLivePerformances = async (
-	context: GraphQLContext,
-	performances: LivePerformance[]
-): Promise<void> => {
-	if (performances.length === 0) return;
-	const ids = [
-		...new Set(
-			performances
-				.map((performance) => performance.playerId)
-				.filter((id) => Number.isFinite(id) && id > 0)
-		),
-	];
-	const players = await playersService.getPlayersByIds(context, ids);
-	const preload = new Map<number, Player | null>();
-	for (const id of ids) {
+const preloadPlayersByIds = async (context: GraphQLContext, ids: number[]): Promise<void> => {
+	const uniqueIds = [...new Set(ids.filter((id) => Number.isFinite(id) && id > 0))];
+	if (uniqueIds.length === 0) return;
+	const players = await playersService.getPlayersByIds(context, uniqueIds);
+	// Sibling roots resolve concurrently. Merge after the bulk read so a later
+	// completion cannot discard player rows preloaded by another live root.
+	const preload = new Map(context.playersByIdPreload ?? []);
+	for (const id of uniqueIds) {
 		preload.set(id, null);
 	}
 	for (const player of players) {
@@ -83,6 +86,15 @@ const preloadPlayersForLivePerformances = async (
 	}
 	context.playersByIdPreload = preload;
 };
+
+const preloadPlayersForLivePerformances = (
+	context: GraphQLContext,
+	performances: LivePerformance[]
+): Promise<void> =>
+	preloadPlayersByIds(
+		context,
+		performances.map((performance) => performance.playerId)
+	);
 
 type LiveScoresArgs = {
 	eventId?: number | null;
@@ -98,9 +110,18 @@ type EventLiveArgs = {
 	eventId: number;
 };
 
+type LiveSnapshotArgs = {
+	eventId?: number | null;
+};
+
 type LiveExplainArgs = {
 	eventId: number;
 	elementId: number;
+};
+
+type LiveExplainsArgs = {
+	eventId: number;
+	elementIds: number[];
 };
 
 type TopPerformersArgs = {
@@ -117,45 +138,97 @@ export const liveResolvers = {
 			args: LiveScoresArgs,
 			context: GraphQLContext,
 			info: GraphQLResolveInfo
-		): Promise<LivePerformance[]> => {
-			const scores = await liveService.getLiveScores(
-				context,
-				args.eventId ?? undefined,
-				args.filter ?? undefined
-			);
+		): Promise<LivePerformance[]> =>
+			withLiveSnapshotRoot(context, async () => {
+				const scores = await liveService.getLiveScores(
+					context,
+					args.eventId ?? undefined,
+					args.filter ?? undefined
+				);
 
-			if (scores.length > 0 && parentSelectionRequestsField(info, "player")) {
-				await preloadPlayersForLivePerformances(context, scores);
-			}
+				if (scores.length > 0 && parentSelectionRequestsField(info, "player")) {
+					await preloadPlayersForLivePerformances(context, scores);
+				}
 
-			return scores;
-		},
+				return scores;
+			}),
 
 		playerLive: async (
 			_parent: unknown,
 			args: PlayerLiveArgs,
 			context: GraphQLContext
 		): Promise<LivePerformance | null> =>
-			liveService.getPlayerLive(context, args.playerId, args.eventId ?? undefined),
+			withLiveSnapshotRoot(context, () =>
+				liveService.getPlayerLive(context, args.playerId, args.eventId ?? undefined)
+			),
 
 		eventLive: async (
 			_parent: unknown,
 			args: EventLiveArgs,
 			context: GraphQLContext,
 			info: GraphQLResolveInfo
-		): Promise<EventLive> => {
-			const eventLive = await liveService.getEventLive(context, args.eventId);
-			if (parentSelectionRequestsField(info, "player")) {
-				await preloadPlayersForLivePerformances(context, eventLive.performances);
-			}
-			return eventLive;
-		},
+		): Promise<EventLive> =>
+			withLiveSnapshotRoot(context, async () => {
+				const eventLive = await liveService.getEventLive(context, args.eventId);
+				if (parentSelectionRequestsField(info, "player")) {
+					await preloadPlayersForLivePerformances(context, eventLive.performances);
+				}
+				return eventLive;
+			}),
 		eventLiveExplain: async (
 			_parent: unknown,
 			args: LiveExplainArgs,
-			context: GraphQLContext
+			context: GraphQLContext,
+			info: GraphQLResolveInfo
 		): Promise<LiveExplain | null> =>
-			liveService.getEventLiveExplain(context, args.eventId, args.elementId),
+			withLiveSnapshotRoot(context, () =>
+				liveService.getEventLiveExplain(
+					context,
+					args.eventId,
+					args.elementId,
+					directSelectionRequestsField(info, "selectedBy")
+				)
+			),
+		eventLiveExplains: async (
+			_parent: unknown,
+			args: LiveExplainsArgs,
+			context: GraphQLContext,
+			info: GraphQLResolveInfo
+		): Promise<LiveExplain[]> =>
+			withLiveSnapshotRoot(context, async () => {
+				const mode = ["stats", "breakdown", "modified"].some((field) =>
+					directSelectionRequestsField(info, field)
+				)
+					? "full"
+					: "contributions";
+				const includeSelectedBy = directSelectionRequestsField(info, "selectedBy");
+				const explains = await liveService.getEventLiveExplains(
+					context,
+					args.eventId,
+					args.elementIds,
+					mode,
+					includeSelectedBy
+				);
+				if (explains.length > 0 && parentSelectionRequestsField(info, "player")) {
+					await preloadPlayersByIds(
+						context,
+						explains.map((explain) => explain.elementId)
+					);
+				}
+				return explains;
+			}),
+		liveSnapshot: async (
+			_parent: unknown,
+			args: LiveSnapshotArgs,
+			context: GraphQLContext
+		): Promise<LiveSnapshotMeta | null> => {
+			const eventId = args.eventId ?? (await getCurrentEventId(context));
+			return eventId ? loadOperationLiveSnapshotMeta(context, eventId) : null;
+		},
+	},
+	LiveSnapshotMeta: {
+		state: (parent: LiveSnapshotMeta): Uppercase<LiveSnapshotState> =>
+			parent.state.toUpperCase() as Uppercase<LiveSnapshotState>,
 	},
 	EventLive: {
 		event: async (
@@ -192,6 +265,8 @@ export const liveResolvers = {
 			parent.expectedGoalsConceded ? parseFloat(parent.expectedGoalsConceded) : null,
 	},
 	LiveExplain: {
+		contributions: (parent: LiveExplain): NonNullable<LiveExplain["contributions"]> =>
+			parent.contributions ?? parent.breakdown.flatMap((entry) => entry.stats),
 		event: async (
 			parent: LiveExplain,
 			_args: Record<string, never>,
@@ -206,7 +281,12 @@ export const liveResolvers = {
 			parent: LiveExplain,
 			_args: Record<string, never>,
 			context: GraphQLContext
-		): Promise<number | null> =>
-			liveService.getSelectedByPercent(context, parent.eventId, parent.elementId),
+		): Promise<number | null> => {
+			const preloadKey = `${parent.eventId}:${parent.elementId}`;
+			if (context.liveSelectedByPreload?.has(preloadKey)) {
+				return context.liveSelectedByPreload.get(preloadKey) ?? null;
+			}
+			return liveService.getSelectedByPercent(context, parent.eventId, parent.elementId);
+		},
 	},
 };

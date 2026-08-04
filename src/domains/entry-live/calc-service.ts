@@ -11,6 +11,7 @@ import type { LivePerformance } from "../live/repository";
 import { liveRepository } from "../live/repository";
 import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
 import { playersRepository } from "../players/repository";
+import { withLiveSnapshotConsistency } from "../live/snapshot-meta";
 import type { Pick as EntryPick } from "./repository";
 import { entryLiveRepository } from "./repository";
 import { resolvePreviousEventBaseline } from "./baseline";
@@ -517,7 +518,7 @@ const normalizeChip = (raw: string | null | undefined): string => {
 	return "NONE";
 };
 
-export const entryLiveCalcService = {
+const legacyEntryLiveCalcService = {
 	async calcLivePointsByEntry(
 		context: GraphQLContext,
 		eventId: number,
@@ -789,5 +790,44 @@ export const entryLiveCalcService = {
 			transfersList,
 			activeCaptain,
 		};
+	},
+};
+
+/**
+ * The public single-entry path delegates to the same batch engine used by
+ * tournament calculations. This prevents scoring, auto-sub, DGW and transfer
+ * rules from drifting between two production implementations.
+ */
+export const entryLiveCalcService = {
+	async calcLivePointsByEntry(
+		context: GraphQLContext,
+		eventId: number,
+		entryId: number,
+		includeLive = true
+	): Promise<LiveCalcData> {
+		if (!Number.isInteger(eventId) || !Number.isInteger(entryId) || eventId <= 0 || entryId <= 0) {
+			return legacyEntryLiveCalcService.calcLivePointsByEntry(
+				context,
+				eventId,
+				entryId,
+				includeLive
+			);
+		}
+
+		const calculate = async (): Promise<LiveCalcData> => {
+			const { entryLiveBatchService } = await import("./batch-service");
+			const batch = await entryLiveBatchService.calcLivePointsForEntries(
+				context,
+				eventId,
+				[entryId],
+				includeLive
+			);
+			const result = batch.results.get(entryId);
+			if (result) return result;
+			const message = batch.errors.find((error) => error.entryId === entryId)?.message;
+			throw new Error(message ?? `Live points calculation failed for entry ${entryId}`);
+		};
+
+		return includeLive ? withLiveSnapshotConsistency(context, eventId, calculate) : calculate();
 	},
 };

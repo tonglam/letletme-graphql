@@ -215,3 +215,67 @@ describe("entryLiveRepository transfers", () => {
 		});
 	});
 });
+
+describe("entryLiveRepository batch picks", () => {
+	it("preserves legacy pick, chip, and transfer-cost columns", async () => {
+		let projection = "";
+		const pipelineWrites: unknown[][] = [];
+		const pipeline = {
+			set: (...args: unknown[]) => {
+				pipelineWrites.push(args);
+				return pipeline;
+			},
+			exec: async () => [],
+		};
+		const context = {
+			redis: {
+				get: async (key: string) => (key === "Season:active" ? "2526" : null),
+				mget: async () => [null],
+				del: async () => 0,
+				pipeline: () => pipeline,
+			},
+			supabase: {
+				from: () => {
+					const result = {
+						data: [
+							{
+								entry_id: 1,
+								event_id: 3,
+								pick_list: [
+									{
+										element: 10,
+										position: 1,
+										multiplier: 2,
+										is_captain: true,
+										is_vice_captain: false,
+									},
+								],
+								active_chip: "bboost",
+								event_transfers_cost: 4,
+							},
+						],
+						error: null,
+					};
+					const query = Promise.resolve(result);
+					const builder = Object.assign(query, {
+						select: (columns: string) => {
+							projection = columns;
+							return builder;
+						},
+						in: () => builder,
+						eq: () => builder,
+					});
+					return builder;
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const result = await entryLiveRepository.getEntryEventPicksByIds(context, [1], 3);
+
+		expect(projection).toBe("*");
+		expect(result.get(1)).toMatchObject({ chip: "bboost", transfersCost: 4 });
+		expect(result.get(1)?.picks[0]).toMatchObject({ element: 10, isCaptain: true });
+		expect(pipelineWrites).toHaveLength(1);
+	});
+});
