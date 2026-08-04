@@ -105,33 +105,21 @@ describe("tournament readiness", () => {
 		}
 	});
 
-	it("filters entry H2H rows whose tournaments have not published standings", async () => {
+	it("delegates entry H2H reads to the repository readiness barrier", async () => {
 		const originalResults = tournamentsRepository.getEntryH2HMatchResults;
-		const originalTournament = tournamentsRepository.getTournamentInfoUncached;
 		const context = {} as GraphQLContext;
-		const results = [
-			{ tournament: { id: 7 } },
-			{ tournament: { id: 7 } },
-			{ tournament: { id: 8 } },
-		] as EntryH2HMatchResult[];
-		const inspectedTournamentIds: number[] = [];
+		const results = [{ tournament: { id: 7 } }, { tournament: { id: 7 } }] as EntryH2HMatchResult[];
 
-		tournamentsRepository.getEntryH2HMatchResults = async () => results;
-		tournamentsRepository.getTournamentInfoUncached = async (_context, tournamentId) => {
-			inspectedTournamentIds.push(tournamentId);
-			return {
-				id: tournamentId,
-				standingsReadyAt: tournamentId === 7 ? "2026-08-04T00:00:00.000Z" : null,
-			} as never;
+		tournamentsRepository.getEntryH2HMatchResults = async (inputContext, entryId) => {
+			expect(inputContext).toBe(context);
+			expect(entryId).toBe(123);
+			return results;
 		};
 
 		try {
-			const filtered = await tournamentsService.getEntryH2HMatchResults(context, 123);
-			expect(filtered).toEqual(results.slice(0, 2));
-			expect(inspectedTournamentIds).toEqual([7, 8]);
+			expect(await tournamentsService.getEntryH2HMatchResults(context, 123)).toEqual(results);
 		} finally {
 			tournamentsRepository.getEntryH2HMatchResults = originalResults;
-			tournamentsRepository.getTournamentInfoUncached = originalTournament;
 		}
 	});
 });

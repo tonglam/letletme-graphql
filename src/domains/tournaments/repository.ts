@@ -773,6 +773,29 @@ const getTournamentInfoUncached = async (
 	return mapTournamentInfo(row);
 };
 
+const getTournamentInfosUncached = async (
+	context: GraphQLContext,
+	tournamentIds: readonly number[]
+): Promise<TournamentInfo[]> => {
+	const uniqueIds = [...new Set(tournamentIds)];
+	if (uniqueIds.length === 0) return [];
+
+	const { data, error } = await context.supabase
+		.from("tournament_infos")
+		.select(TOURNAMENT_INFO_COLUMNS)
+		.in("id", uniqueIds);
+
+	if (error) {
+		context.logger.error(
+			{ err: error, tournamentCount: uniqueIds.length },
+			"Failed to fetch tournaments"
+		);
+		throw new Error("Failed to fetch tournaments");
+	}
+
+	return ((data as DbTournamentInfoRow[] | null) ?? []).map(mapTournamentInfo);
+};
+
 const getTournamentInfoById = async (
 	context: GraphQLContext,
 	tournamentId: number
@@ -795,6 +818,10 @@ interface TournamentsRepository {
 		context: GraphQLContext,
 		tournamentId: number
 	): Promise<TournamentInfo | null>;
+	getTournamentInfosUncached(
+		context: GraphQLContext,
+		tournamentIds: readonly number[]
+	): Promise<TournamentInfo[]>;
 	getTournamentForMember(
 		context: GraphQLContext,
 		tournamentId: number,
@@ -833,6 +860,7 @@ interface TournamentsRepository {
 
 export const tournamentsRepository: TournamentsRepository = {
 	getTournamentInfoUncached,
+	getTournamentInfosUncached,
 
 	async getTournamentForMember(
 		context: GraphQLContext,
@@ -1209,7 +1237,9 @@ export const tournamentsRepository: TournamentsRepository = {
 		entryId: number
 	): Promise<EntryH2HMatchResult[]> {
 		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `tournaments:entry-h2h:${entryId}`);
+		// v2 is populated only after every represented tournament has published
+		// standings. It deliberately bypasses partial/empty setup-era v1 values.
+		const cacheKey = gqlCacheKey(season, `tournaments:entry-h2h:v2:${entryId}`);
 		const cached = await readJsonCache(context, cacheKey, isH2HResultArrayCache);
 		if (
 			Array.isArray(cached) &&
@@ -1233,16 +1263,25 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const rows = (matchData as DbTournamentBattleGroupResultRow[] | null) ?? [];
 		if (rows.length === 0) {
-			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
+			// During setup the battle rows may not exist yet. Do not turn that
+			// transient absence into a cache entry that survives publication.
 			return [];
 		}
 
 		const tournamentIds = [...new Set(rows.map((r) => r.tournament_id))];
-		const eventIds = [...new Set(rows.map((r) => r.event_id))];
-		const allEntryIds = [...new Set(rows.flatMap((r) => [r.home_entry_id, r.away_entry_id]))];
+		const tournamentInfos = await getTournamentInfosUncached(context, tournamentIds);
+		const readyTournamentIds = new Set(
+			tournamentInfos
+				.filter((tournament) => tournament.standingsReadyAt)
+				.map((tournament) => tournament.id)
+		);
+		const readyRows = rows.filter((row) => readyTournamentIds.has(row.tournament_id));
+		if (readyRows.length === 0) return [];
 
-		const [tournamentInfos, nameResult, eventResultData] = await Promise.all([
-			Promise.all(tournamentIds.map((id) => getTournamentInfoById(context, id))),
+		const eventIds = [...new Set(readyRows.map((r) => r.event_id))];
+		const allEntryIds = [...new Set(readyRows.flatMap((r) => [r.home_entry_id, r.away_entry_id]))];
+
+		const [nameResult, eventResultData] = await Promise.all([
 			context.supabase
 				.from("entry_infos")
 				.select("id, entry_name, player_name")
@@ -1255,7 +1294,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		]);
 
 		const tournamentMap = new Map<number, TournamentInfo>(
-			tournamentInfos.filter((t): t is TournamentInfo => t !== null).map((t) => [t.id, t])
+			tournamentInfos.map((tournament) => [tournament.id, tournament])
 		);
 
 		const entryNameMap = new Map<number, DbEntryInfoNameRow>(
@@ -1269,7 +1308,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			])
 		);
 
-		const results = rows
+		const results = readyRows
 			.filter((row) => tournamentMap.has(row.tournament_id))
 			.map((row) =>
 				mapEntryH2HMatchResult(
@@ -1281,7 +1320,9 @@ export const tournamentsRepository: TournamentsRepository = {
 				)
 			);
 
-		await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
+		if (readyTournamentIds.size === tournamentIds.length) {
+			await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
+		}
 		return results;
 	},
 };

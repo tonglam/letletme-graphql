@@ -1368,3 +1368,164 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 		).rejects.toThrow("Failed to fetch tournament battle group results");
 	});
 });
+
+describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => {
+	const tournamentRow = (id: number, ready: boolean): DbTournamentInfoRow => ({
+		id,
+		name: `Tournament ${id}`,
+		creator: "owner",
+		admin_entry_id: 100,
+		league_id: id,
+		league_type: "h2h",
+		total_team_num: 2,
+		tournament_mode: "normal",
+		group_mode: "battle_races",
+		group_team_num: 2,
+		group_num: 1,
+		group_started_event_id: 1,
+		group_ended_event_id: 38,
+		group_auto_averages: false,
+		group_rounds: null,
+		group_play_against_num: null,
+		group_qualify_num: null,
+		knockout_mode: "no_knockout",
+		knockout_team_num: null,
+		knockout_rounds: null,
+		knockout_event_num: null,
+		knockout_started_event_id: null,
+		knockout_ended_event_id: null,
+		knockout_play_against_num: null,
+		state: "active",
+		setup_status: ready ? "ready" : "processing",
+		setup_phase: ready ? "ready" : "calculating_standings",
+		standings_ready_at: ready ? "2026-08-04T00:00:00.000Z" : null,
+		created_at: "2026-08-04T00:00:00.000Z",
+		updated_at: "2026-08-04T00:00:00.000Z",
+	});
+
+	it("batches readiness and caches only after every represented tournament is ready", async () => {
+		const matches: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 701,
+				tournament_id: 7,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 100,
+				home_net_points: 70,
+				home_rank: 1,
+				home_match_points: 3,
+				away_entry_id: 200,
+				away_net_points: 60,
+				away_rank: 2,
+				away_match_points: 0,
+			},
+			{
+				id: 801,
+				tournament_id: 8,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 100,
+				home_net_points: 65,
+				home_rank: 1,
+				home_match_points: 1,
+				away_entry_id: 300,
+				away_net_points: 65,
+				away_rank: 1,
+				away_match_points: 1,
+			},
+		];
+		const state = {
+			tournaments: [tournamentRow(7, true), tournamentRow(8, false)],
+		};
+		const tournamentInCalls: unknown[][] = [];
+		const redisState = new Map<string, string>([["Season:active", "2526"]]);
+
+		const makeBuilder = (table: string) => {
+			const actions: QueryAction[] = [];
+			const resolveResult = () => {
+				if (table === "tournament_battle_group_results") {
+					return { data: matches, error: null };
+				}
+				if (table === "tournament_infos") {
+					return { data: filterRowsByActions(state.tournaments, actions), error: null };
+				}
+				if (table === "entry_infos") {
+					return {
+						data: [100, 200, 300].map((id) => ({
+							id,
+							entry_name: `Entry ${id}`,
+							player_name: `Player ${id}`,
+						})),
+						error: null,
+					};
+				}
+				return { data: [], error: null };
+			};
+			const builder = {
+				select(...args: unknown[]) {
+					actions.push({ type: "select", args });
+					return builder;
+				},
+				or(...args: unknown[]) {
+					actions.push({ type: "or", args });
+					return builder;
+				},
+				order(...args: unknown[]) {
+					actions.push({ type: "order", args });
+					return builder;
+				},
+				in(...args: unknown[]) {
+					actions.push({ type: "in", args });
+					if (table === "tournament_infos") tournamentInCalls.push(args);
+					return builder;
+				},
+				then<TResult1 = ReturnType<typeof resolveResult>, TResult2 = never>(
+					onfulfilled?:
+						((value: ReturnType<typeof resolveResult>) => TResult1 | PromiseLike<TResult1>) | null,
+					onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+				) {
+					return Promise.resolve(resolveResult()).then(onfulfilled, onrejected);
+				},
+			};
+			return builder;
+		};
+
+		const context = {
+			supabase: { from: (table: string) => makeBuilder(table) },
+			redis: {
+				async get(key: string) {
+					return redisState.get(key) ?? null;
+				},
+				async set(key: string, value: string) {
+					redisState.set(key, value);
+					return "OK";
+				},
+				async del(key: string) {
+					return redisState.delete(key) ? 1 : 0;
+				},
+			},
+			logger: {
+				error() {
+					return undefined;
+				},
+				warn() {
+					return undefined;
+				},
+			},
+		} as unknown as GraphQLContext;
+
+		const first = await tournamentsRepository.getEntryH2HMatchResults(context, 100);
+		expect(first.map((result) => result.tournament.id)).toEqual([7]);
+		expect(tournamentInCalls).toEqual([["id", [7, 8]]]);
+		expect(redisState.has(`${CACHE_PREFIX}tournaments:entry-h2h:v2:100`)).toBe(false);
+
+		state.tournaments = [tournamentRow(7, true), tournamentRow(8, true)];
+		const second = await tournamentsRepository.getEntryH2HMatchResults(context, 100);
+		expect(second.map((result) => result.tournament.id)).toEqual([7, 8]);
+		expect(tournamentInCalls).toEqual([
+			["id", [7, 8]],
+			["id", [7, 8]],
+		]);
+		expect(redisState.has(`${CACHE_PREFIX}tournaments:entry-h2h:v2:100`)).toBe(true);
+	});
+});

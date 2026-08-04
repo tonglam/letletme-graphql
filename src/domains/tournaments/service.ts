@@ -110,18 +110,6 @@ export const tournamentsService = {
 		context: GraphQLContext,
 		entryId: number
 	): Promise<EntryH2HMatchResult[]> {
-		const results = await tournamentsRepository.getEntryH2HMatchResults(context, entryId);
-		const tournamentIds = [...new Set(results.map((result) => result.tournament.id))];
-		const tournamentReadiness = await Promise.all(
-			tournamentIds.map((tournamentId) =>
-				tournamentsRepository.getTournamentInfoUncached(context, tournamentId)
-			)
-		);
-		const readyTournamentIds = new Set(
-			tournamentReadiness
-				.filter((tournament) => tournament?.standingsReadyAt)
-				.map((tournament) => tournament!.id)
-		);
-		return results.filter((result) => readyTournamentIds.has(result.tournament.id));
+		return tournamentsRepository.getEntryH2HMatchResults(context, entryId);
 	},
 };
