@@ -874,7 +874,7 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(redis.getCalls).not.toContain("gql:v2:2526:live:explain:34:526");
 	});
 
-	it("loads a cold explanation batch with two database queries and one Redis hash read", async () => {
+	it("loads a cold explanation batch with two database queries and versioned Redis reads", async () => {
 		const redis = makeMockRedis({});
 		const supabaseFromCalls: string[] = [];
 		const context = buildContext({
@@ -930,7 +930,10 @@ describe("liveRepository.getEventLiveExplain", () => {
 			{ identifier: "bonus", value: 3, points: 3, pointsModification: null },
 		]);
 		expect(supabaseFromCalls).toEqual(["player_stats", "event_live_explains"]);
-		expect(redis.hmgetCalls).toEqual([["EventLiveExplain:2526:34", "526", "527"]]);
+		expect(redis.hmgetCalls).toEqual([
+			["EventLiveExplainV2:2526:34", "526", "527"],
+			["EventLiveExplain:2526:34", "526", "527"],
+		]);
 		expect(redis.setCalls).toHaveLength(2);
 	});
 
@@ -985,12 +988,11 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(result?.breakdown[0]?.fixtureId).toBe(9);
 	});
 
-	it("maps the producer's compact Redis contract without querying Postgres", async () => {
+	it("maps the producer's additive V2 compact contract without querying Postgres", async () => {
 		const supabaseFromCalls: string[] = [];
-		const context = buildContext({
-			supabaseFromCalls,
-			redisHashes: {
-				"EventLiveExplain:2526:34": {
+		const redis = makeMockRedis({
+			hashes: {
+				"EventLiveExplainV2:2526:34": {
 					526: JSON.stringify({
 						eventId: 34,
 						elementId: 526,
@@ -1006,6 +1008,10 @@ describe("liveRepository.getEventLiveExplain", () => {
 					}),
 				},
 			},
+		});
+		const context = buildContext({
+			redis,
+			supabaseFromCalls,
 			supabaseDataByTable: {
 				player_stats: [playerStatsRow34_526],
 				event_live_explains: [],
@@ -1028,6 +1034,34 @@ describe("liveRepository.getEventLiveExplain", () => {
 			{ identifier: "bonus", value: 3, points: 3, pointsModification: null },
 		]);
 		expect(supabaseFromCalls).toEqual([]);
+		expect(redis.hmgetCalls).toEqual([["EventLiveExplainV2:2526:34", "526"]]);
+	});
+
+	it("falls back to the frozen legacy hash only for players missing from V2", async () => {
+		const compact = (elementId: number, minutes: number) =>
+			JSON.stringify({ eventId: 34, elementId, minutes, minutesPoints: 1 });
+		const redis = makeMockRedis({
+			hashes: {
+				"EventLiveExplainV2:2526:34": { 526: compact(526, 66) },
+				"EventLiveExplain:2526:34": { 527: compact(527, 45) },
+			},
+		});
+		const supabaseFromCalls: string[] = [];
+		const context = buildContext({ redis, supabaseFromCalls });
+
+		const result = await liveRepository.getEventLiveExplains(
+			context,
+			34,
+			[526, 527],
+			"contributions"
+		);
+
+		expect(result.map((explain) => explain.elementId)).toEqual([526, 527]);
+		expect(supabaseFromCalls).toEqual([]);
+		expect(redis.hmgetCalls).toEqual([
+			["EventLiveExplainV2:2526:34", "526", "527"],
+			["EventLiveExplain:2526:34", "527"],
+		]);
 	});
 
 	it("preserves player_stats-only members and batches selectedBy for 15 players", async () => {
@@ -1099,6 +1133,9 @@ describe("liveRepository.getEventLiveExplain", () => {
 			results.every((batch, index) => batch[0]?.elementId === elementIds[index % elementIds.length])
 		).toBe(true);
 		expect(supabaseFromCalls).toEqual(["player_stats", "event_live_explains"]);
+		expect(redis.hmgetCalls.filter(([key]) => key === "EventLiveExplainV2:2526:33")).toHaveLength(
+			1
+		);
 		expect(redis.hmgetCalls.filter(([key]) => key === "EventLiveExplain:2526:33")).toHaveLength(1);
 	});
 

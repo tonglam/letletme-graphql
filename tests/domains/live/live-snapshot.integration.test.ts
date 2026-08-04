@@ -414,7 +414,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			{ elementId: 2, selectedBy: 7.25 },
 		]);
 		expect(fromCalls).toEqual(["player_stats", "event_live_explains"]);
-		expect(hmgetCalls).toEqual(["EventLiveExplain:2526:33"]);
+		expect(hmgetCalls).toEqual(["EventLiveExplainV2:2526:33", "EventLiveExplain:2526:33"]);
 	});
 
 	it("coordinates public event fixtures with snapshot fallback for the operation", async () => {

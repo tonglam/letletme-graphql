@@ -147,6 +147,8 @@ const redisKey = {
 	eventLive: (season: string, eventId: number): string => `EventLive:${season}:${eventId}`,
 	eventLiveExplain: (season: string, eventId: number): string =>
 		`EventLiveExplain:${season}:${eventId}`,
+	eventLiveExplainV2: (season: string, eventId: number): string =>
+		`EventLiveExplainV2:${season}:${eventId}`,
 	playerSelectedBy: (season: string, eventId: number): string =>
 		gqlCacheKey(season, `live:selected-by:${eventId}`),
 } as const;
@@ -626,7 +628,12 @@ const parseEventLiveExplainRedisSupplement = (
 	return breakdown.length > 0 || contributions.length > 0 ? { breakdown, contributions } : null;
 };
 
-/** Read legacy fixture breakdowns or the producer's compact stat contributions from Redis. */
+/**
+ * Read the producer's additive V2 compact contributions first, with per-player
+ * fallback to the frozen legacy hash (which can also contain historical
+ * fixture breakdowns). This keeps rolling deployment compatible in either
+ * producer/consumer order.
+ */
 async function loadBreakdownsFromEventLiveExplainRedis(
 	context: GraphQLContext,
 	eventId: number,
@@ -635,20 +642,38 @@ async function loadBreakdownsFromEventLiveExplainRedis(
 ): Promise<Map<number, LiveExplainRedisSupplement>> {
 	if (elementIds.length === 0) return new Map();
 	const season = seasonOverride ?? (await getCurrentSeason(context));
-	const hashKey = redisKey.eventLiveExplain(season, eventId);
-	let values: Array<string | null>;
+	const v2HashKey = redisKey.eventLiveExplainV2(season, eventId);
+	let v2Values: Array<string | null>;
 	try {
-		values = await context.redis.hmget(hashKey, ...elementIds.map(String));
+		v2Values = await context.redis.hmget(v2HashKey, ...elementIds.map(String));
 	} catch (error) {
 		context.logger.warn(
-			{ err: error, hashKey, eventId, elementIds },
-			"Redis HMGET EventLiveExplain failed"
+			{ err: error, hashKey: v2HashKey, eventId, elementIds },
+			"Redis HMGET EventLiveExplainV2 failed"
 		);
-		return new Map();
+		v2Values = elementIds.map(() => null);
 	}
 	const supplements = new Map<number, LiveExplainRedisSupplement>();
 	for (const [index, elementId] of elementIds.entries()) {
-		const parsed = parseEventLiveExplainRedisSupplement(values[index] ?? null);
+		const parsed = parseEventLiveExplainRedisSupplement(v2Values[index] ?? null);
+		if (parsed) supplements.set(elementId, parsed);
+	}
+
+	const legacyElementIds = elementIds.filter((elementId) => !supplements.has(elementId));
+	if (legacyElementIds.length === 0) return supplements;
+	const legacyHashKey = redisKey.eventLiveExplain(season, eventId);
+	let legacyValues: Array<string | null>;
+	try {
+		legacyValues = await context.redis.hmget(legacyHashKey, ...legacyElementIds.map(String));
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, hashKey: legacyHashKey, eventId, elementIds: legacyElementIds },
+			"Redis HMGET EventLiveExplain failed"
+		);
+		return supplements;
+	}
+	for (const [index, elementId] of legacyElementIds.entries()) {
+		const parsed = parseEventLiveExplainRedisSupplement(legacyValues[index] ?? null);
 		if (parsed) supplements.set(elementId, parsed);
 	}
 	return supplements;
