@@ -113,13 +113,13 @@ export const entryLiveResolvers = {
 			};
 		}> =>
 			withLiveSnapshotRoot(context, async () => {
-			await assertTournamentStandingsReady(context, args.tournamentId);
-			const includeLive = args.includeLive ?? true;
-			const entryIds = await tournamentsService.getTournamentEntryIdsUncached(
-				context,
-				args.tournamentId
-			);
-			assertValidEntryBatch(entryIds);
+				await assertTournamentStandingsReady(context, args.tournamentId);
+				const includeLive = args.includeLive ?? true;
+				const entryIds = await tournamentsService.getTournamentEntryIdsUncached(
+					context,
+					args.tournamentId
+				);
+				assertValidEntryBatch(entryIds);
 
 				const calculate = (): Promise<BatchLiveCalcResult> => {
 					// Create fresh shared reads for a rare revision retry; reusing already
