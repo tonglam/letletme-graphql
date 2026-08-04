@@ -62,6 +62,29 @@ export enum TournamentState {
 	FINISHED = "finished",
 }
 
+export enum TournamentSetupStatus {
+	PENDING = "pending",
+	PROCESSING = "processing",
+	READY = "ready",
+	FAILED = "failed",
+}
+
+export enum TournamentSetupPhase {
+	QUEUED = "queued",
+	SYNCING_ENTRIES = "syncing_entries",
+	BUILDING_STRUCTURE = "building_structure",
+	CALCULATING_STANDINGS = "calculating_standings",
+	ENRICHING_HISTORY = "enriching_history",
+	FINALIZING = "finalizing",
+	READY = "ready",
+	FAILED = "failed",
+}
+
+export enum TournamentRosterMode {
+	SNAPSHOT = "snapshot",
+	OFFICIAL_SYNC = "official_sync",
+}
+
 export type TournamentInfo = {
 	id: number;
 	name: string;
@@ -69,6 +92,10 @@ export type TournamentInfo = {
 	adminEntryId: number;
 	leagueId: number;
 	leagueType: LeagueType;
+	sourceLeagueName?: string | null;
+	rosterMode?: TournamentRosterMode;
+	rosterSyncStatus?: TournamentSetupStatus | null;
+	rosterLastSyncedAt?: string | null;
 	totalTeamNum: number;
 	tournamentMode: TournamentMode;
 	groupMode: GroupMode | null;
@@ -88,12 +115,27 @@ export type TournamentInfo = {
 	knockoutEndedEventId: number | null;
 	knockoutPlayAgainstNum: number | null;
 	state: TournamentState;
+	setupStatus?: TournamentSetupStatus;
+	setupPhase?: TournamentSetupPhase;
+	setupCompletedUnits?: number;
+	setupTotalUnits?: number;
+	setupProgressUpdatedAt?: string | null;
+	standingsReadyAt?: string | null;
+	setupHasWarnings?: boolean;
+	setupStartedAt?: string | null;
+	setupFinishedAt?: string | null;
 	createdAt: string;
 	updatedAt: string;
 };
 
 export type DbTournamentEntryRow = {
 	tournament_id: number;
+};
+
+export type TournamentParticipant = {
+	entryId: number;
+	entryName: string | null;
+	playerName: string | null;
 };
 
 export type DbTournamentInfoRow = {
@@ -103,6 +145,10 @@ export type DbTournamentInfoRow = {
 	admin_entry_id: number;
 	league_id: number;
 	league_type: string;
+	source_league_name?: string | null;
+	roster_mode?: string;
+	roster_sync_status?: string | null;
+	roster_last_synced_at?: string | null;
 	total_team_num: number;
 	tournament_mode: string;
 	group_mode: string | null;
@@ -122,6 +168,15 @@ export type DbTournamentInfoRow = {
 	knockout_ended_event_id: number | null;
 	knockout_play_against_num: number | null;
 	state: string;
+	setup_status?: string;
+	setup_phase?: string;
+	setup_completed_units?: number;
+	setup_total_units?: number;
+	setup_progress_updated_at?: string | null;
+	standings_ready_at?: string | null;
+	setup_warning_count?: number;
+	setup_started_at?: string | null;
+	setup_finished_at?: string | null;
 	created_at: string;
 	updated_at: string;
 };
@@ -336,7 +391,16 @@ type DbTournamentEventSnapshotRow = {
 };
 
 const isTournamentInfoCache = (value: unknown): value is TournamentInfo =>
-	isRecord(value) && Number.isFinite(Number(value.id)) && typeof value.name === "string";
+	isRecord(value) &&
+	Number.isFinite(Number(value.id)) &&
+	typeof value.name === "string" &&
+	typeof value.setupStatus === "string" &&
+	typeof value.setupPhase === "string" &&
+	Number.isFinite(Number(value.setupCompletedUnits)) &&
+	Number.isFinite(Number(value.setupTotalUnits)) &&
+	typeof value.setupHasWarnings === "boolean" &&
+	"standingsReadyAt" in value &&
+	typeof value.rosterMode === "string";
 
 const isTournamentInfoArrayCache = (value: unknown): value is TournamentInfo[] =>
 	Array.isArray(value) && value.every(isTournamentInfoCache);
@@ -374,7 +438,7 @@ const isH2HResultArrayCache = (value: unknown): value is EntryH2HMatchResult[] =
 	value.every((item) => isRecord(item) && isTournamentInfoCache(item.tournament));
 
 const TOURNAMENT_INFO_COLUMNS =
-	"id, name, creator, admin_entry_id, league_id, league_type, total_team_num, tournament_mode, group_mode, group_team_num, group_num, group_started_event_id, group_ended_event_id, group_auto_averages, group_rounds, group_play_against_num, group_qualify_num, knockout_mode, knockout_team_num, knockout_rounds, knockout_event_num, knockout_started_event_id, knockout_ended_event_id, knockout_play_against_num, state, created_at, updated_at";
+	"id, name, creator, admin_entry_id, league_id, league_type, source_league_name, roster_mode, roster_sync_status, roster_last_synced_at, total_team_num, tournament_mode, group_mode, group_team_num, group_num, group_started_event_id, group_ended_event_id, group_auto_averages, group_rounds, group_play_against_num, group_qualify_num, knockout_mode, knockout_team_num, knockout_rounds, knockout_event_num, knockout_started_event_id, knockout_ended_event_id, knockout_play_against_num, state, setup_status, setup_phase, setup_completed_units, setup_total_units, setup_progress_updated_at, standings_ready_at, setup_warning_count, setup_started_at, setup_finished_at, created_at, updated_at";
 
 const TOURNAMENT_VIEW_COLUMNS =
 	"tournament_id, event_id, entry_id, group_id, event_group_rank, event_points, event_cost, event_net_points, event_rank, overall_points, overall_rank, event_chip, captain_id, captain_points, team_value, bank, entry_name, player_name, _tournament_id, _tournament_name, _tournament_creator, _tournament_admin_entry_id, _tournament_league_id, _tournament_league_type, _tournament_total_team_num, _tournament_tournament_mode, _tournament_group_mode, _tournament_group_team_num, _tournament_group_num, _tournament_group_started_event_id, _tournament_group_ended_event_id, _tournament_group_auto_averages, _tournament_group_rounds, _tournament_group_play_against_num, _tournament_group_qualify_num, _tournament_knockout_mode, _tournament_knockout_team_num, _tournament_knockout_rounds, _tournament_knockout_event_num, _tournament_knockout_started_event_id, _tournament_knockout_ended_event_id, _tournament_knockout_play_against_num, _tournament_state, _tournament_created_at, _tournament_updated_at";
@@ -438,6 +502,39 @@ const mapTournamentState = (state: string): TournamentState => {
 	throw new Error(`Unknown tournament state: ${state}`);
 };
 
+const mapTournamentSetupStatus = (status: string | null | undefined): TournamentSetupStatus => {
+	if (status === TournamentSetupStatus.PENDING) return TournamentSetupStatus.PENDING;
+	if (status === TournamentSetupStatus.PROCESSING) return TournamentSetupStatus.PROCESSING;
+	if (status === TournamentSetupStatus.FAILED) return TournamentSetupStatus.FAILED;
+	return TournamentSetupStatus.READY;
+};
+
+const mapTournamentSetupPhase = (phase: string | null | undefined): TournamentSetupPhase => {
+	switch (phase) {
+		case TournamentSetupPhase.QUEUED:
+			return TournamentSetupPhase.QUEUED;
+		case TournamentSetupPhase.SYNCING_ENTRIES:
+			return TournamentSetupPhase.SYNCING_ENTRIES;
+		case TournamentSetupPhase.BUILDING_STRUCTURE:
+			return TournamentSetupPhase.BUILDING_STRUCTURE;
+		case TournamentSetupPhase.CALCULATING_STANDINGS:
+			return TournamentSetupPhase.CALCULATING_STANDINGS;
+		case TournamentSetupPhase.ENRICHING_HISTORY:
+			return TournamentSetupPhase.ENRICHING_HISTORY;
+		case TournamentSetupPhase.FINALIZING:
+			return TournamentSetupPhase.FINALIZING;
+		case TournamentSetupPhase.FAILED:
+			return TournamentSetupPhase.FAILED;
+		default:
+			return TournamentSetupPhase.READY;
+	}
+};
+
+const mapTournamentRosterMode = (mode: string | null | undefined): TournamentRosterMode =>
+	mode === TournamentRosterMode.OFFICIAL_SYNC
+		? TournamentRosterMode.OFFICIAL_SYNC
+		: TournamentRosterMode.SNAPSHOT;
+
 export const extractTournamentIds = (rows: DbTournamentEntryRow[]): number[] => {
 	const unique = new Set<number>();
 	rows.forEach((row) => {
@@ -453,6 +550,12 @@ export const mapTournamentInfo = (row: DbTournamentInfoRow): TournamentInfo => (
 	adminEntryId: row.admin_entry_id,
 	leagueId: row.league_id,
 	leagueType: mapLeagueType(row.league_type),
+	sourceLeagueName: row.source_league_name ?? null,
+	rosterMode: mapTournamentRosterMode(row.roster_mode),
+	rosterSyncStatus: row.roster_sync_status
+		? mapTournamentSetupStatus(row.roster_sync_status)
+		: null,
+	rosterLastSyncedAt: row.roster_last_synced_at ?? null,
 	totalTeamNum: row.total_team_num,
 	tournamentMode: mapTournamentMode(row.tournament_mode),
 	groupMode: mapGroupMode(row.group_mode),
@@ -472,6 +575,17 @@ export const mapTournamentInfo = (row: DbTournamentInfoRow): TournamentInfo => (
 	knockoutEndedEventId: row.knockout_ended_event_id,
 	knockoutPlayAgainstNum: row.knockout_play_against_num,
 	state: mapTournamentState(row.state),
+	setupStatus: mapTournamentSetupStatus(row.setup_status),
+	setupPhase: mapTournamentSetupPhase(row.setup_phase),
+	setupCompletedUnits: row.setup_completed_units ?? 0,
+	setupTotalUnits: row.setup_total_units ?? 0,
+	setupProgressUpdatedAt: row.setup_progress_updated_at ?? null,
+	standingsReadyAt:
+		row.standings_ready_at ??
+		(row.setup_status === null || row.setup_status === undefined ? row.updated_at : null),
+	setupHasWarnings: (row.setup_warning_count ?? 0) > 0,
+	setupStartedAt: row.setup_started_at ?? null,
+	setupFinishedAt: row.setup_finished_at ?? null,
 	createdAt: row.created_at,
 	updatedAt: row.updated_at,
 });
@@ -509,6 +623,10 @@ export const mapTournamentInfoFromViewRow = (row: DbTournamentEventResultRow): T
 	adminEntryId: row._tournament_admin_entry_id,
 	leagueId: row._tournament_league_id,
 	leagueType: mapLeagueType(row._tournament_league_type),
+	sourceLeagueName: null,
+	rosterMode: TournamentRosterMode.SNAPSHOT,
+	rosterSyncStatus: null,
+	rosterLastSyncedAt: null,
 	totalTeamNum: row._tournament_total_team_num,
 	tournamentMode: mapTournamentMode(row._tournament_tournament_mode),
 	groupMode: mapGroupMode(row._tournament_group_mode),
@@ -528,6 +646,15 @@ export const mapTournamentInfoFromViewRow = (row: DbTournamentEventResultRow): T
 	knockoutEndedEventId: row._tournament_knockout_ended_event_id,
 	knockoutPlayAgainstNum: row._tournament_knockout_play_against_num,
 	state: mapTournamentState(row._tournament_state),
+	setupStatus: TournamentSetupStatus.READY,
+	setupPhase: TournamentSetupPhase.READY,
+	setupCompletedUnits: 0,
+	setupTotalUnits: 0,
+	setupProgressUpdatedAt: null,
+	standingsReadyAt: row._tournament_updated_at,
+	setupHasWarnings: false,
+	setupStartedAt: null,
+	setupFinishedAt: row._tournament_updated_at,
 	createdAt: row._tournament_created_at,
 	updatedAt: row._tournament_updated_at,
 });
@@ -625,17 +752,10 @@ export const mapEntryH2HMatchResult = (
 	};
 };
 
-const getTournamentInfoById = async (
+const getTournamentInfoUncached = async (
 	context: GraphQLContext,
 	tournamentId: number
 ): Promise<TournamentInfo | null> => {
-	const season = await getCurrentSeason(context);
-	const cacheKey = gqlCacheKey(season, `tournament:info:${tournamentId}`);
-	const cached = await readJsonCache(context, cacheKey, isTournamentInfoCache);
-	if (isRecord(cached) && Number.isFinite(Number(cached.id))) {
-		return cached as unknown as TournamentInfo;
-	}
-
 	const { data, error } = await context.supabase
 		.from("tournament_infos")
 		.select(TOURNAMENT_INFO_COLUMNS)
@@ -651,15 +771,105 @@ const getTournamentInfoById = async (
 	if (!row) {
 		return null;
 	}
+	return mapTournamentInfo(row);
+};
 
-	const tournament = mapTournamentInfo(row);
+const getTournamentInfosUncached = async (
+	context: GraphQLContext,
+	tournamentIds: readonly number[]
+): Promise<TournamentInfo[]> => {
+	const uniqueIds = [...new Set(tournamentIds)];
+	if (uniqueIds.length === 0) return [];
+
+	const { data, error } = await context.supabase
+		.from("tournament_infos")
+		.select(TOURNAMENT_INFO_COLUMNS)
+		.in("id", uniqueIds);
+
+	if (error) {
+		context.logger.error(
+			{ err: error, tournamentCount: uniqueIds.length },
+			"Failed to fetch tournaments"
+		);
+		throw new Error("Failed to fetch tournaments");
+	}
+
+	return ((data as DbTournamentInfoRow[] | null) ?? []).map(mapTournamentInfo);
+};
+
+const getTournamentInfoById = async (
+	context: GraphQLContext,
+	tournamentId: number
+): Promise<TournamentInfo | null> => {
+	const season = await getCurrentSeason(context);
+	const cacheKey = gqlCacheKey(season, `tournament:info:${tournamentId}`);
+	const cached = await readJsonCache(context, cacheKey, isTournamentInfoCache);
+	if (isRecord(cached) && Number.isFinite(Number(cached.id))) {
+		return cached as unknown as TournamentInfo;
+	}
+
+	const tournament = await getTournamentInfoUncached(context, tournamentId);
+	if (!tournament) return null;
 	await context.redis.set(cacheKey, JSON.stringify(tournament), "EX", env.CACHE_TTL_SECONDS);
 	return tournament;
 };
 
+const getTournamentCacheReadiness = async (
+	context: GraphQLContext,
+	tournamentId: number
+): Promise<boolean> => {
+	const { data, error } = await context.supabase
+		.from("tournament_infos")
+		.select("standings_ready_at, setup_status")
+		.eq("id", tournamentId)
+		.limit(1);
+
+	if (error) {
+		context.logger.error({ err: error, tournamentId }, "Failed to fetch tournament readiness");
+		throw new Error("Failed to fetch tournament readiness");
+	}
+
+	const row = (
+		data as Array<{ standings_ready_at?: string | null; setup_status?: string | null }> | null
+	)?.[0];
+	if (!row) return false;
+
+	// Legacy rows predate the lifecycle columns and are represented by NULL
+	// setup_status. Their existing standings remain usable and should not be
+	// treated as an unready shell solely because the new timestamp is absent.
+	return (
+		(row.standings_ready_at !== null && row.standings_ready_at !== undefined) ||
+		row.setup_status === null ||
+		row.setup_status === undefined
+	);
+};
+
 interface TournamentsRepository {
+	getTournamentInfoUncached(
+		context: GraphQLContext,
+		tournamentId: number
+	): Promise<TournamentInfo | null>;
+	getTournamentInfosUncached(
+		context: GraphQLContext,
+		tournamentIds: readonly number[]
+	): Promise<TournamentInfo[]>;
+	getTournamentForMember(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryId: number
+	): Promise<TournamentInfo | null>;
+	getManagedTournament(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryId: number
+	): Promise<TournamentInfo | null>;
+	getTournamentParticipants(
+		context: GraphQLContext,
+		tournamentId: number
+	): Promise<TournamentParticipant[]>;
 	getEntryTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]>;
 	getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]>;
+	getTournamentEntryIdsUncached(context: GraphQLContext, tournamentId: number): Promise<number[]>;
 	getTournamentEventResults(
 		context: GraphQLContext,
 		tournamentId: number,
@@ -680,15 +890,102 @@ interface TournamentsRepository {
 }
 
 export const tournamentsRepository: TournamentsRepository = {
+	getTournamentInfoUncached,
+	getTournamentInfosUncached,
+
+	async getTournamentForMember(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryId: number
+	): Promise<TournamentInfo | null> {
+		const { data, error } = await context.supabase
+			.from("tournament_entries")
+			.select("entry_id")
+			.eq("tournament_id", tournamentId)
+			.eq("entry_id", entryId)
+			.limit(1);
+		if (error) {
+			context.logger.error({ err: error, tournamentId, entryId }, "Failed to verify membership");
+			throw new Error("Failed to fetch tournament");
+		}
+		if (((data as { entry_id: number }[] | null) ?? []).length === 0) return null;
+		return getTournamentInfoUncached(context, tournamentId);
+	},
+
+	async getManagedTournament(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryId: number
+	): Promise<TournamentInfo | null> {
+		const { data, error } = await context.supabase
+			.from("tournament_infos")
+			.select(TOURNAMENT_INFO_COLUMNS)
+			.eq("id", tournamentId)
+			.eq("admin_entry_id", entryId)
+			.limit(1);
+		if (error) {
+			context.logger.error(
+				{ err: error, tournamentId, entryId },
+				"Failed to fetch managed tournament"
+			);
+			throw new Error("Failed to fetch tournament");
+		}
+		const row = data?.[0] as DbTournamentInfoRow | undefined;
+		return row ? mapTournamentInfo(row) : null;
+	},
+
+	async getTournamentParticipants(
+		context: GraphQLContext,
+		tournamentId: number
+	): Promise<TournamentParticipant[]> {
+		const { data: membershipData, error: membershipError } = await context.supabase
+			.from("tournament_entries")
+			.select("entry_id")
+			.eq("tournament_id", tournamentId)
+			.order("entry_id", { ascending: true });
+		if (membershipError) {
+			context.logger.error({ err: membershipError, tournamentId }, "Failed to fetch participants");
+			throw new Error("Failed to fetch tournament participants");
+		}
+		const entryIds = ((membershipData as { entry_id: number }[] | null) ?? []).map(
+			(row) => row.entry_id
+		);
+		if (entryIds.length === 0) return [];
+
+		const { data: entryData, error: entryError } = await context.supabase
+			.from("entry_infos")
+			.select("id, entry_name, player_name")
+			.in("id", entryIds)
+			.order("id", { ascending: true });
+		if (entryError) {
+			context.logger.error({ err: entryError, tournamentId }, "Failed to fetch participant names");
+			throw new Error("Failed to fetch tournament participants");
+		}
+		const entryById = new Map(
+			((entryData as DbEntryInfoNameRow[] | null) ?? []).map((entry) => [entry.id, entry])
+		);
+		return entryIds.map((entryId) => ({
+			entryId,
+			entryName: entryById.get(entryId)?.entry_name ?? null,
+			playerName: entryById.get(entryId)?.player_name ?? null,
+		}));
+	},
+
 	async getEntryTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]> {
 		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(season, `tournaments:entry:${entryId}`);
 		const cached = await readJsonCache(context, cacheKey, isTournamentInfoArrayCache);
 		if (
 			Array.isArray(cached) &&
-			cached.every((item) => isRecord(item) && Number.isFinite(Number(item.id)))
+			cached.every(
+				(item) =>
+					isRecord(item) && Number.isFinite(Number(item.id)) && item.standingsReadyAt !== null
+			)
 		) {
 			return cached as TournamentInfo[];
+		}
+		if (Array.isArray(cached)) {
+			await context.redis.del(cacheKey);
 		}
 
 		const { data: entryData, error: entryError } = await context.supabase
@@ -719,18 +1016,36 @@ export const tournamentsRepository: TournamentsRepository = {
 		}
 
 		const tournaments = ((infoData as DbTournamentInfoRow[] | null) ?? []).map(mapTournamentInfo);
-		await context.redis.set(cacheKey, JSON.stringify(tournaments), "EX", env.CACHE_TTL_SECONDS);
+		if (tournaments.every((tournament) => tournament.standingsReadyAt !== null)) {
+			await context.redis.set(cacheKey, JSON.stringify(tournaments), "EX", env.CACHE_TTL_SECONDS);
+		}
 		return tournaments;
 	},
 
 	async getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]> {
 		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(season, `tournaments:entry-ids:${tournamentId}`);
+		if (!(await getTournamentCacheReadiness(context, tournamentId))) {
+			await context.redis.del(cacheKey);
+			return tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
+		}
 		const cached = await readJsonCache(context, cacheKey, isEntryIdArrayCache);
 		if (Array.isArray(cached) && cached.every((item) => Number.isFinite(Number(item)))) {
 			return cached as number[];
 		}
 
+		const entryIds = await tournamentsRepository.getTournamentEntryIdsUncached(
+			context,
+			tournamentId
+		);
+		await context.redis.set(cacheKey, JSON.stringify(entryIds), "EX", env.CACHE_TTL_SECONDS);
+		return entryIds;
+	},
+
+	async getTournamentEntryIdsUncached(
+		context: GraphQLContext,
+		tournamentId: number
+	): Promise<number[]> {
 		const { data, error } = await context.supabase
 			.from("tournament_entries")
 			.select("entry_id")
@@ -741,9 +1056,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			throw new Error("Failed to fetch tournament entry IDs");
 		}
 
-		const entryIds = ((data as { entry_id: number }[] | null) ?? []).map((row) => row.entry_id);
-		await context.redis.set(cacheKey, JSON.stringify(entryIds), "EX", env.CACHE_TTL_SECONDS);
-		return entryIds;
+		return ((data as { entry_id: number }[] | null) ?? []).map((row) => row.entry_id);
 	},
 
 	async getTournamentEventResults(
@@ -792,7 +1105,8 @@ export const tournamentsRepository: TournamentsRepository = {
 			return [];
 		}
 
-		const tournament = mapTournamentInfoFromViewRow(rows[0]);
+		const tournament = await getTournamentInfoById(context, tournamentId);
+		if (!tournament) return [];
 		if (tournament.groupMode !== GroupMode.POINTS_RACES) {
 			context.logger.warn(
 				{ tournamentId, groupMode: tournament.groupMode },
@@ -916,7 +1230,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			return cached as TournamentBattleGroupResult[];
 		}
 
-		const [tournamentResult, matchResult, entryIds] = await Promise.all([
+		const [tournamentResult, matchResult] = await Promise.all([
 			getTournamentInfoById(context, tournamentId),
 			context.supabase
 				.from("tournament_battle_group_results")
@@ -927,7 +1241,6 @@ export const tournamentsRepository: TournamentsRepository = {
 				.eq("event_id", eventId)
 				.order("group_id", { ascending: true })
 				.order("home_entry_id", { ascending: true }),
-			tournamentsRepository.getTournamentEntryIds(context, tournamentId),
 		]);
 
 		if (matchResult.error) {
@@ -943,6 +1256,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
 			return [];
 		}
+		const entryIds = [...new Set(rows.flatMap((row) => [row.home_entry_id, row.away_entry_id]))];
 
 		const { data: nameData } = await context.supabase
 			.from("entry_infos")
@@ -966,7 +1280,27 @@ export const tournamentsRepository: TournamentsRepository = {
 		entryId: number
 	): Promise<EntryH2HMatchResult[]> {
 		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `tournaments:entry-h2h:${entryId}`);
+		const membershipResult = await context.supabase
+			.from("tournament_entries")
+			.select("tournament_id")
+			.eq("entry_id", entryId);
+		if (membershipResult.error) {
+			context.logger.error(
+				{ err: membershipResult.error, entryId },
+				"Failed to fetch entry tournament memberships"
+			);
+			throw new Error("Failed to fetch entry H2H match results");
+		}
+		const membershipTournamentIds = extractTournamentIds(
+			(membershipResult.data as DbTournamentEntryRow[] | null) ?? []
+		).sort((left, right) => left - right);
+		// Membership is read authoritatively before the cache. A roster change
+		// selects a new key, while a former entrant's persisted match history is
+		// still available under the empty-membership key.
+		const cacheKey = gqlCacheKey(
+			season,
+			`tournaments:entry-h2h:v3:${entryId}:${stableStringify(membershipTournamentIds)}`
+		);
 		const cached = await readJsonCache(context, cacheKey, isH2HResultArrayCache);
 		if (
 			Array.isArray(cached) &&
@@ -974,7 +1308,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		)
 			return cached as EntryH2HMatchResult[];
 
-		const { data: matchData, error: matchError } = await context.supabase
+		const matchResult = await context.supabase
 			.from("tournament_battle_group_results")
 			.select(
 				"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
@@ -982,24 +1316,35 @@ export const tournamentsRepository: TournamentsRepository = {
 			.or(`home_entry_id.eq.${entryId},away_entry_id.eq.${entryId}`)
 			.order("event_id", { ascending: true })
 			.order("tournament_id", { ascending: true });
+		const { data: matchData, error: matchError } = matchResult;
 
 		if (matchError) {
 			context.logger.error({ err: matchError, entryId }, "Failed to fetch entry H2H match results");
 			throw new Error("Failed to fetch entry H2H match results");
 		}
-
 		const rows = (matchData as DbTournamentBattleGroupResultRow[] | null) ?? [];
+		const tournamentIds = [
+			...new Set([...membershipTournamentIds, ...rows.map((row) => row.tournament_id)]),
+		];
+		const tournamentInfos = await getTournamentInfosUncached(context, tournamentIds);
+		const readyTournamentIds = new Set(
+			tournamentInfos
+				.filter((tournament) => tournament.standingsReadyAt)
+				.map((tournament) => tournament.id)
+		);
 		if (rows.length === 0) {
-			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
+			if (readyTournamentIds.size === tournamentIds.length) {
+				await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
+			}
 			return [];
 		}
+		const readyRows = rows.filter((row) => readyTournamentIds.has(row.tournament_id));
+		if (readyRows.length === 0) return [];
 
-		const tournamentIds = [...new Set(rows.map((r) => r.tournament_id))];
-		const eventIds = [...new Set(rows.map((r) => r.event_id))];
-		const allEntryIds = [...new Set(rows.flatMap((r) => [r.home_entry_id, r.away_entry_id]))];
+		const eventIds = [...new Set(readyRows.map((r) => r.event_id))];
+		const allEntryIds = [...new Set(readyRows.flatMap((r) => [r.home_entry_id, r.away_entry_id]))];
 
-		const [tournamentInfos, nameResult, eventResultData] = await Promise.all([
-			Promise.all(tournamentIds.map((id) => getTournamentInfoById(context, id))),
+		const [nameResult, eventResultData] = await Promise.all([
 			context.supabase
 				.from("entry_infos")
 				.select("id, entry_name, player_name")
@@ -1012,7 +1357,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		]);
 
 		const tournamentMap = new Map<number, TournamentInfo>(
-			tournamentInfos.filter((t): t is TournamentInfo => t !== null).map((t) => [t.id, t])
+			tournamentInfos.map((tournament) => [tournament.id, tournament])
 		);
 
 		const entryNameMap = new Map<number, DbEntryInfoNameRow>(
@@ -1026,7 +1371,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			])
 		);
 
-		const results = rows
+		const results = readyRows
 			.filter((row) => tournamentMap.has(row.tournament_id))
 			.map((row) =>
 				mapEntryH2HMatchResult(
@@ -1038,7 +1383,9 @@ export const tournamentsRepository: TournamentsRepository = {
 				)
 			);
 
-		await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
+		if (readyTournamentIds.size === tournamentIds.length) {
+			await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
+		}
 		return results;
 	},
 };

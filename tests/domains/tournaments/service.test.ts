@@ -2,13 +2,18 @@ import { describe, expect, it } from "bun:test";
 import { LeagueType } from "../../../src/domains/leagues/repository";
 import {
 	type TournamentBattleGroupResult,
+	type EntryH2HMatchResult,
 	type TournamentEntryRankingSummary,
 	type TournamentEventResult,
 	TournamentMode,
 	TournamentState,
 	tournamentsRepository,
 } from "../../../src/domains/tournaments/repository";
-import { tournamentsService } from "../../../src/domains/tournaments/service";
+import {
+	assertTournamentInsightsReady,
+	assertTournamentStandingsReady,
+	tournamentsService,
+} from "../../../src/domains/tournaments/service";
 import type { GraphQLContext } from "../../../src/graphql/context";
 
 describe("tournamentsService.getEntryTournaments", () => {
@@ -63,6 +68,78 @@ describe("tournamentsService.getEntryTournaments", () => {
 			expect(result).toEqual(expected);
 		} finally {
 			tournamentsRepository.getEntryTournaments = original;
+		}
+	});
+});
+
+describe("tournament readiness", () => {
+	it("rejects standings before core publication", async () => {
+		const original = tournamentsRepository.getTournamentInfoUncached;
+		tournamentsRepository.getTournamentInfoUncached = async () =>
+			({ id: 7, standingsReadyAt: null }) as never;
+		try {
+			await expect(assertTournamentStandingsReady({} as GraphQLContext, 7)).rejects.toMatchObject({
+				extensions: { code: "TOURNAMENT_STANDINGS_NOT_READY" },
+			});
+		} finally {
+			tournamentsRepository.getTournamentInfoUncached = original;
+		}
+	});
+
+	it("keeps insights gated while enrichment is incomplete", async () => {
+		const original = tournamentsRepository.getTournamentInfoUncached;
+		tournamentsRepository.getTournamentInfoUncached = async () =>
+			({
+				id: 7,
+				standingsReadyAt: "2026-08-04T00:00:00.000Z",
+				setupStatus: "processing",
+				setupPhase: "enriching_history",
+				setupHasWarnings: false,
+			}) as never;
+		try {
+			await expect(assertTournamentInsightsReady({} as GraphQLContext, 7)).rejects.toMatchObject({
+				extensions: { code: "TOURNAMENT_INSIGHTS_NOT_READY" },
+			});
+		} finally {
+			tournamentsRepository.getTournamentInfoUncached = original;
+		}
+	});
+
+	it("delegates entry H2H reads to the repository readiness barrier", async () => {
+		const originalResults = tournamentsRepository.getEntryH2HMatchResults;
+		const context = {} as GraphQLContext;
+		const results = [{ tournament: { id: 7 } }, { tournament: { id: 7 } }] as EntryH2HMatchResult[];
+
+		tournamentsRepository.getEntryH2HMatchResults = async (inputContext, entryId) => {
+			expect(inputContext).toBe(context);
+			expect(entryId).toBe(123);
+			return results;
+		};
+
+		try {
+			expect(await tournamentsService.getEntryH2HMatchResults(context, 123)).toEqual(results);
+		} finally {
+			tournamentsRepository.getEntryH2HMatchResults = originalResults;
+		}
+	});
+});
+
+describe("tournamentsService.getTournamentEntryIdsUncached", () => {
+	it("delegates to the uncached repository read", async () => {
+		const original = tournamentsRepository.getTournamentEntryIdsUncached;
+		const context = {} as GraphQLContext;
+		tournamentsRepository.getTournamentEntryIdsUncached = async (inputContext, tournamentId) => {
+			expect(inputContext).toBe(context);
+			expect(tournamentId).toBe(7);
+			return [101, 202];
+		};
+
+		try {
+			expect(await tournamentsService.getTournamentEntryIdsUncached(context, 7)).toEqual([
+				101, 202,
+			]);
+		} finally {
+			tournamentsRepository.getTournamentEntryIdsUncached = original;
 		}
 	});
 });

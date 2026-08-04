@@ -11,6 +11,7 @@ import {
 	type TournamentEventResult,
 	TournamentMode,
 	TournamentState,
+	tournamentsRepository,
 } from "../../../src/domains/tournaments/repository";
 import {
 	groupModeToEnum,
@@ -212,6 +213,7 @@ describe("TournamentEventResult resolvers", () => {
 describe("tournamentBattleGroupResults query resolver", () => {
 	it("delegates to tournamentsService with correct args", async () => {
 		const original = tournamentsService.getTournamentBattleGroupResults;
+		const originalReadiness = tournamentsRepository.getTournamentInfoUncached;
 		const context = {} as unknown as GraphQLContext;
 		const expected: TournamentBattleGroupResult[] = [];
 
@@ -227,6 +229,8 @@ describe("tournamentBattleGroupResults query resolver", () => {
 			capturedEventId = eventId;
 			return expected;
 		};
+		tournamentsRepository.getTournamentInfoUncached = async () =>
+			({ standingsReadyAt: "2026-08-04T00:00:00.000Z" }) as never;
 
 		try {
 			const result = await tournamentsResolvers.Query.tournamentBattleGroupResults(
@@ -239,6 +243,7 @@ describe("tournamentBattleGroupResults query resolver", () => {
 			expect(result).toBe(expected);
 		} finally {
 			tournamentsService.getTournamentBattleGroupResults = original;
+			tournamentsRepository.getTournamentInfoUncached = originalReadiness;
 		}
 	});
 

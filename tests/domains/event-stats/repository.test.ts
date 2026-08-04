@@ -24,6 +24,7 @@ const makeMockRedis = (options: { strings?: Record<string, string> }) => {
 const makeMockSupabase = (options: {
 	fromData?: Record<string, unknown[]>;
 	rpcResults?: Record<string, unknown[]>;
+	rpcCalls?: Array<{ fnName: string; params: Record<string, unknown> }>;
 	error?: unknown;
 }) => ({
 	from: (table: string) => {
@@ -45,10 +46,13 @@ const makeMockSupabase = (options: {
 		});
 		return builder;
 	},
-	rpc: async (fnName: string, _params: Record<string, unknown>) => ({
-		data: options.rpcResults?.[fnName] ?? null,
-		error: options.error ?? null,
-	}),
+	rpc: async (fnName: string, params: Record<string, unknown>) => {
+		options.rpcCalls?.push({ fnName, params });
+		return {
+			data: options.rpcResults?.[fnName] ?? null,
+			error: options.error ?? null,
+		};
+	},
 });
 
 const makeMockLogger = () => ({
@@ -61,6 +65,7 @@ const buildContext = (options: {
 	redisStrings?: Record<string, string>;
 	fromData?: Record<string, unknown[]>;
 	rpcResults?: Record<string, unknown[]>;
+	rpcCalls?: Array<{ fnName: string; params: Record<string, unknown> }>;
 	supabaseError?: unknown;
 }) =>
 	({
@@ -68,6 +73,7 @@ const buildContext = (options: {
 		supabase: makeMockSupabase({
 			fromData: options.fromData,
 			rpcResults: options.rpcResults,
+			rpcCalls: options.rpcCalls,
 			error: options.supabaseError,
 		}),
 		logger: makeMockLogger(),
@@ -541,6 +547,36 @@ describe("eventStatsRepository.getTournamentSelectionStats", () => {
 		);
 		expect(result).not.toBeNull();
 		expect(result?.totalEntries).toBe(5);
+	});
+
+	it("ignores a setup-era roster cache when running fallback aggregations", async () => {
+		const rpcCalls: Array<{ fnName: string; params: Record<string, unknown> }> = [];
+		const context = buildContext({
+			redisStrings: {
+				[`${CACHE_PREFIX}tournaments:entry-ids:${TOURNAMENT_ID}`]: JSON.stringify([1001]),
+			},
+			fromData: {
+				tournament_infos: [makeTournamentInfo()],
+				tournament_entries: makeEntryIds(),
+				players: makePlayers(),
+				teams: makeTeams(),
+			},
+			rpcResults: {
+				get_captain_counts: makeCaptainCounts(),
+				get_pick_aggregation: makePickAggregation(),
+				get_transfer_aggregation: makeTransferAggregation(),
+			},
+			rpcCalls,
+		});
+
+		await eventStatsRepository.getTournamentSelectionStats(context, TOURNAMENT_ID, EVENT_ID, LIMIT);
+
+		const expectedEntryIds = makeEntryIds().map((row) => row.entry_id);
+		for (const fnName of ["get_pick_aggregation", "get_transfer_aggregation"]) {
+			expect(rpcCalls.find((call) => call.fnName === fnName)?.params.p_entry_ids).toEqual(
+				expectedEntryIds
+			);
+		}
 	});
 
 	it("clamps limit to valid range", async () => {

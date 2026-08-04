@@ -22,6 +22,29 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		FINISHED
 	}
 
+	enum TournamentSetupStatus {
+		PENDING
+		PROCESSING
+		READY
+		FAILED
+	}
+
+	enum TournamentSetupPhase {
+		QUEUED
+		SYNCING_ENTRIES
+		BUILDING_STRUCTURE
+		CALCULATING_STANDINGS
+		ENRICHING_HISTORY
+		FINALIZING
+		READY
+		FAILED
+	}
+
+	enum TournamentRosterMode {
+		SNAPSHOT
+		OFFICIAL_SYNC
+	}
+
 	type TournamentInfo {
 		id: Int!
 		name: String!
@@ -29,6 +52,10 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		adminEntryId: Int!
 		leagueId: Int!
 		leagueType: LeagueType!
+		sourceLeagueName: String
+		rosterMode: TournamentRosterMode!
+		rosterSyncStatus: TournamentSetupStatus
+		rosterLastSyncedAt: DateTime
 		totalTeamNum: Int!
 		tournamentMode: TournamentMode!
 		groupMode: GroupMode
@@ -48,8 +75,23 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		knockoutEndedEventId: Int
 		knockoutPlayAgainstNum: Int
 		state: TournamentState!
+		setupStatus: TournamentSetupStatus!
+		setupPhase: TournamentSetupPhase!
+		setupCompletedUnits: Int!
+		setupTotalUnits: Int!
+		setupProgressUpdatedAt: DateTime
+		standingsReadyAt: DateTime
+		setupHasWarnings: Boolean!
+		setupStartedAt: DateTime
+		setupFinishedAt: DateTime
 		createdAt: DateTime!
 		updatedAt: DateTime!
+	}
+
+	type TournamentParticipant {
+		entryId: Int!
+		entryName: String
+		playerName: String
 	}
 
 	type TournamentEventResult {
@@ -156,6 +198,9 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 
 	extend type Query {
 		entryTournaments(entryId: Int!): [TournamentInfo!]!
+		tournament(tournamentId: Int!, entryId: Int!): TournamentInfo
+		managedTournament(tournamentId: Int!, entryId: Int!): TournamentInfo
+		tournamentParticipants(tournamentId: Int!): [TournamentParticipant!]!
 		tournamentEntryIds(tournamentId: Int!): [Int!]!
 		tournamentEventResults(tournamentId: Int!, eventId: Int!): [TournamentEventResult!]!
 		tournamentEntryRankingSummary(

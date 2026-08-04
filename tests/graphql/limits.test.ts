@@ -120,6 +120,14 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 50 });
 	});
 
+	it("charges each unpaginated tournament participant lookup", () => {
+		const result = validateGraphQLRequestLimits({
+			query:
+				"query { first: tournamentParticipants(tournamentId: 1) { entryId } second: tournamentParticipants(tournamentId: 2) { entryId } }",
+		});
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 60 });
+	});
+
 	it("charges every aliased liveScores full-event lookup", () => {
 		const result = validateGraphQLRequestLimits({
 			query:

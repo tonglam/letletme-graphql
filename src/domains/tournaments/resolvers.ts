@@ -56,9 +56,21 @@ import type {
 	TournamentEventResult,
 	TournamentInfo,
 	TournamentMode,
+	TournamentParticipant,
 } from "./repository";
-import { GroupMode, KnockoutMode, TournamentState } from "./repository";
-import { tournamentsService } from "./service";
+import {
+	GroupMode,
+	KnockoutMode,
+	TournamentRosterMode,
+	TournamentSetupPhase,
+	TournamentSetupStatus,
+	TournamentState,
+} from "./repository";
+import {
+	assertTournamentInsightsReady,
+	assertTournamentStandingsReady,
+	tournamentsService,
+} from "./service";
 
 type EntryTournamentsArgs = {
 	entryId: number;
@@ -66,6 +78,11 @@ type EntryTournamentsArgs = {
 
 type TournamentEntryIdsArgs = {
 	tournamentId: number;
+};
+
+type TournamentMetadataArgs = {
+	tournamentId: number;
+	entryId: number;
 };
 
 type TournamentEventResultsArgs = {
@@ -135,6 +152,15 @@ export const tournamentStateToEnum = (state: TournamentState): string => {
 	return "ACTIVE";
 };
 
+export const tournamentSetupStatusToEnum = (status: TournamentSetupStatus): string =>
+	status.toUpperCase();
+
+export const tournamentSetupPhaseToEnum = (phase: TournamentSetupPhase): string =>
+	phase.toUpperCase();
+
+export const tournamentRosterModeToEnum = (mode: TournamentRosterMode): string =>
+	mode.toUpperCase();
+
 export const tournamentResultChipToEnum = (raw: string | null): string | null => {
 	if (raw === null) {
 		return null;
@@ -176,6 +202,27 @@ export const tournamentsResolvers = {
 			context: GraphQLContext
 		): Promise<TournamentInfo[]> => tournamentsService.getEntryTournaments(context, args.entryId),
 
+		tournament: async (
+			_parent: unknown,
+			args: TournamentMetadataArgs,
+			context: GraphQLContext
+		): Promise<TournamentInfo | null> =>
+			tournamentsService.getTournamentForMember(context, args.tournamentId, args.entryId),
+
+		managedTournament: async (
+			_parent: unknown,
+			args: TournamentMetadataArgs,
+			context: GraphQLContext
+		): Promise<TournamentInfo | null> =>
+			tournamentsService.getManagedTournament(context, args.tournamentId, args.entryId),
+
+		tournamentParticipants: async (
+			_parent: unknown,
+			args: TournamentEntryIdsArgs,
+			context: GraphQLContext
+		): Promise<TournamentParticipant[]> =>
+			tournamentsService.getTournamentParticipants(context, args.tournamentId),
+
 		tournamentEntryIds: async (
 			_parent: unknown,
 			args: TournamentEntryIdsArgs,
@@ -186,27 +233,37 @@ export const tournamentsResolvers = {
 			_parent: unknown,
 			args: TournamentEventResultsArgs,
 			context: GraphQLContext
-		): Promise<TournamentEventResult[]> =>
-			tournamentsService.getTournamentEventResults(context, args.tournamentId, args.eventId),
+		): Promise<TournamentEventResult[]> => {
+			await assertTournamentStandingsReady(context, args.tournamentId);
+			return tournamentsService.getTournamentEventResults(context, args.tournamentId, args.eventId);
+		},
 
 		tournamentEntryRankingSummary: async (
 			_parent: unknown,
 			args: TournamentEntryRankingSummaryArgs,
 			context: GraphQLContext
-		): Promise<TournamentEntryRankingSummary> =>
-			tournamentsService.getTournamentEntryRankingSummary(
+		): Promise<TournamentEntryRankingSummary> => {
+			await assertTournamentInsightsReady(context, args.tournamentId);
+			return tournamentsService.getTournamentEntryRankingSummary(
 				context,
 				args.tournamentId,
 				args.eventId,
 				args.entryId
-			),
+			);
+		},
 
 		tournamentBattleGroupResults: async (
 			_parent: unknown,
 			args: TournamentBattleGroupResultsArgs,
 			context: GraphQLContext
-		): Promise<TournamentBattleGroupResult[]> =>
-			tournamentsService.getTournamentBattleGroupResults(context, args.tournamentId, args.eventId),
+		): Promise<TournamentBattleGroupResult[]> => {
+			await assertTournamentStandingsReady(context, args.tournamentId);
+			return tournamentsService.getTournamentBattleGroupResults(
+				context,
+				args.tournamentId,
+				args.eventId
+			);
+		},
 
 		entryH2HMatchResults: async (
 			_parent: unknown,
@@ -222,6 +279,14 @@ export const tournamentsResolvers = {
 		knockoutMode: (parent: TournamentInfo): string | null =>
 			knockoutModeToEnum(parent.knockoutMode),
 		state: (parent: TournamentInfo): string => tournamentStateToEnum(parent.state),
+		setupStatus: (parent: TournamentInfo): string =>
+			tournamentSetupStatusToEnum(parent.setupStatus ?? TournamentSetupStatus.READY),
+		setupPhase: (parent: TournamentInfo): string =>
+			tournamentSetupPhaseToEnum(parent.setupPhase ?? TournamentSetupPhase.READY),
+		rosterMode: (parent: TournamentInfo): string =>
+			tournamentRosterModeToEnum(parent.rosterMode ?? TournamentRosterMode.SNAPSHOT),
+		rosterSyncStatus: (parent: TournamentInfo): string | null =>
+			parent.rosterSyncStatus ? tournamentSetupStatusToEnum(parent.rosterSyncStatus) : null,
 	},
 	TournamentEventResult: {
 		tournament: (parent: TournamentEventResult): TournamentInfo => parent.tournament,

@@ -7,7 +7,7 @@ import { fixturesService } from "../fixtures/service";
 import { liveRepository } from "../live/repository";
 import { withLiveSnapshotConsistency, withLiveSnapshotRoot } from "../live/snapshot-meta";
 import { playersRepository } from "../players/repository";
-import { tournamentsService } from "../tournaments/service";
+import { assertTournamentStandingsReady, tournamentsService } from "../tournaments/service";
 import {
 	assertValidEntryBatch,
 	entryLiveBatchService,
@@ -113,8 +113,12 @@ export const entryLiveResolvers = {
 			};
 		}> =>
 			withLiveSnapshotRoot(context, async () => {
+				await assertTournamentStandingsReady(context, args.tournamentId);
 				const includeLive = args.includeLive ?? true;
-				const entryIds = await tournamentsService.getTournamentEntryIds(context, args.tournamentId);
+				const entryIds = await tournamentsService.getTournamentEntryIdsUncached(
+					context,
+					args.tournamentId
+				);
 				assertValidEntryBatch(entryIds);
 
 				const calculate = (): Promise<BatchLiveCalcResult> => {
