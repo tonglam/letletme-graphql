@@ -343,6 +343,7 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["liveMatches", 10],
 	["calcLivePointsByEntry", 10],
 	["tournamentSelectionStats", 10],
+	["tournamentParticipants", 30],
 	["calcLivePointsForTournament", 30],
 ]);
 

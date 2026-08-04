@@ -811,6 +811,7 @@ interface TournamentsRepository {
 	): Promise<TournamentParticipant[]>;
 	getEntryTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]>;
 	getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]>;
+	getTournamentEntryIdsUncached(context: GraphQLContext, tournamentId: number): Promise<number[]>;
 	getTournamentEventResults(
 		context: GraphQLContext,
 		tournamentId: number,
@@ -962,6 +963,18 @@ export const tournamentsRepository: TournamentsRepository = {
 			return cached as number[];
 		}
 
+		const entryIds = await tournamentsRepository.getTournamentEntryIdsUncached(
+			context,
+			tournamentId
+		);
+		await context.redis.set(cacheKey, JSON.stringify(entryIds), "EX", env.CACHE_TTL_SECONDS);
+		return entryIds;
+	},
+
+	async getTournamentEntryIdsUncached(
+		context: GraphQLContext,
+		tournamentId: number
+	): Promise<number[]> {
 		const { data, error } = await context.supabase
 			.from("tournament_entries")
 			.select("entry_id")
@@ -972,9 +985,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			throw new Error("Failed to fetch tournament entry IDs");
 		}
 
-		const entryIds = ((data as { entry_id: number }[] | null) ?? []).map((row) => row.entry_id);
-		await context.redis.set(cacheKey, JSON.stringify(entryIds), "EX", env.CACHE_TTL_SECONDS);
-		return entryIds;
+		return ((data as { entry_id: number }[] | null) ?? []).map((row) => row.entry_id);
 	},
 
 	async getTournamentEventResults(

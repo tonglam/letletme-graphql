@@ -336,16 +336,25 @@ const authorizeRootField = async (
 
 	if (tournamentMembershipFields.has(field.name)) {
 		const tournamentId = asPositiveInt(field.args.tournamentId);
-		if (
-			!tournamentId ||
-			!hasVerifiedEntry(principal) ||
-			!(await hasTournamentMembership(supabase, tournamentId, principal.fplEntryId!))
-		) {
+		if (!tournamentId || !hasVerifiedEntry(principal)) {
 			return {
 				ok: false,
 				status: 403,
 				code: "FORBIDDEN",
 				message: "User is not a member of this tournament",
+			};
+		}
+		const isMember = await hasTournamentMembership(supabase, tournamentId, principal.fplEntryId!);
+		const isRetainedAdmin =
+			field.name === "tournamentParticipants" &&
+			!isMember &&
+			(await isTournamentAdmin(supabase, tournamentId, principal.fplEntryId!));
+		if (!isMember && !isRetainedAdmin) {
+			return {
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+				message: "User is not a member or retained administrator of this tournament",
 			};
 		}
 	}

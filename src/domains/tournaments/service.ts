@@ -72,6 +72,10 @@ export const tournamentsService = {
 		return tournamentsRepository.getTournamentEntryIds(context, tournamentId);
 	},
 
+	getTournamentEntryIdsUncached(context: GraphQLContext, tournamentId: number): Promise<number[]> {
+		return tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
+	},
+
 	getTournamentEventResults(
 		context: GraphQLContext,
 		tournamentId: number,
@@ -102,10 +106,22 @@ export const tournamentsService = {
 		return tournamentsRepository.getTournamentBattleGroupResults(context, tournamentId, eventId);
 	},
 
-	getEntryH2HMatchResults(
+	async getEntryH2HMatchResults(
 		context: GraphQLContext,
 		entryId: number
 	): Promise<EntryH2HMatchResult[]> {
-		return tournamentsRepository.getEntryH2HMatchResults(context, entryId);
+		const results = await tournamentsRepository.getEntryH2HMatchResults(context, entryId);
+		const tournamentIds = [...new Set(results.map((result) => result.tournament.id))];
+		const tournamentReadiness = await Promise.all(
+			tournamentIds.map((tournamentId) =>
+				tournamentsRepository.getTournamentInfoUncached(context, tournamentId)
+			)
+		);
+		const readyTournamentIds = new Set(
+			tournamentReadiness
+				.filter((tournament) => tournament?.standingsReadyAt)
+				.map((tournament) => tournament!.id)
+		);
+		return results.filter((result) => readyTournamentIds.has(result.tournament.id));
 	},
 };

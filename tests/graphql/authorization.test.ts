@@ -29,7 +29,7 @@ const supabase = {
 				}
 				if (
 					table === "tournament_infos" &&
-					filters.get("id") === 7 &&
+					(filters.get("id") === 7 || filters.get("id") === 8) &&
 					filters.get("admin_entry_id") === 123
 				) {
 					return { data: [{ admin_entry_id: 123 }], error: null };
@@ -172,6 +172,28 @@ describe("authorizeGraphQLRequest", () => {
 			websitePrincipal
 		);
 		expect(result.ok).toBe(true);
+	});
+
+	it("allows a retained administrator to inspect participants after leaving the roster", async () => {
+		const result = await authorize(
+			`query Participants($tournamentId: Int!) {
+				tournamentParticipants(tournamentId: $tournamentId) { entryId }
+			}`,
+			{ tournamentId: 8 },
+			websitePrincipal
+		);
+		expect(result.ok).toBe(true);
+	});
+
+	it("rejects participant inspection by a non-member who is not the retained administrator", async () => {
+		const result = await authorize(
+			`query Participants($tournamentId: Int!) {
+				tournamentParticipants(tournamentId: $tournamentId) { entryId }
+			}`,
+			{ tournamentId: 9 },
+			websitePrincipal
+		);
+		expect(result).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
 	});
 
 	it("rejects managed tournament impersonation", async () => {

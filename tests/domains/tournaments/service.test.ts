@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { LeagueType } from "../../../src/domains/leagues/repository";
 import {
 	type TournamentBattleGroupResult,
+	type EntryH2HMatchResult,
 	type TournamentEntryRankingSummary,
 	type TournamentEventResult,
 	TournamentMode,
@@ -101,6 +102,56 @@ describe("tournament readiness", () => {
 			});
 		} finally {
 			tournamentsRepository.getTournamentInfoUncached = original;
+		}
+	});
+
+	it("filters entry H2H rows whose tournaments have not published standings", async () => {
+		const originalResults = tournamentsRepository.getEntryH2HMatchResults;
+		const originalTournament = tournamentsRepository.getTournamentInfoUncached;
+		const context = {} as GraphQLContext;
+		const results = [
+			{ tournament: { id: 7 } },
+			{ tournament: { id: 7 } },
+			{ tournament: { id: 8 } },
+		] as EntryH2HMatchResult[];
+		const inspectedTournamentIds: number[] = [];
+
+		tournamentsRepository.getEntryH2HMatchResults = async () => results;
+		tournamentsRepository.getTournamentInfoUncached = async (_context, tournamentId) => {
+			inspectedTournamentIds.push(tournamentId);
+			return {
+				id: tournamentId,
+				standingsReadyAt: tournamentId === 7 ? "2026-08-04T00:00:00.000Z" : null,
+			} as never;
+		};
+
+		try {
+			const filtered = await tournamentsService.getEntryH2HMatchResults(context, 123);
+			expect(filtered).toEqual(results.slice(0, 2));
+			expect(inspectedTournamentIds).toEqual([7, 8]);
+		} finally {
+			tournamentsRepository.getEntryH2HMatchResults = originalResults;
+			tournamentsRepository.getTournamentInfoUncached = originalTournament;
+		}
+	});
+});
+
+describe("tournamentsService.getTournamentEntryIdsUncached", () => {
+	it("delegates to the uncached repository read", async () => {
+		const original = tournamentsRepository.getTournamentEntryIdsUncached;
+		const context = {} as GraphQLContext;
+		tournamentsRepository.getTournamentEntryIdsUncached = async (inputContext, tournamentId) => {
+			expect(inputContext).toBe(context);
+			expect(tournamentId).toBe(7);
+			return [101, 202];
+		};
+
+		try {
+			expect(await tournamentsService.getTournamentEntryIdsUncached(context, 7)).toEqual([
+				101, 202,
+			]);
+		} finally {
+			tournamentsRepository.getTournamentEntryIdsUncached = original;
 		}
 	});
 });

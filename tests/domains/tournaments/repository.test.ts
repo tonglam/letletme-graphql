@@ -1098,6 +1098,59 @@ describe("mapTournamentBattleGroupResult", () => {
 	});
 });
 
+describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
+	it("bypasses a stale cached roster", async () => {
+		let membershipReads = 0;
+		const query = {
+			select() {
+				return query;
+			},
+			async eq() {
+				membershipReads += 1;
+				return {
+					data: [{ entry_id: 101 }, { entry_id: 202 }],
+					error: null,
+				};
+			},
+		};
+		const cache = new Map<string, string>([
+			["Season:active", "2526"],
+			[`${CACHE_PREFIX}tournaments:entry-ids:7`, JSON.stringify([999])],
+		]);
+		const context = {
+			supabase: {
+				from() {
+					return query;
+				},
+			},
+			redis: {
+				async get(key: string) {
+					return cache.get(key) ?? null;
+				},
+				async set(key: string, value: string) {
+					cache.set(key, value);
+					return "OK";
+				},
+			},
+			logger: {
+				error() {
+					return undefined;
+				},
+				warn() {
+					return undefined;
+				},
+			},
+		} as unknown as GraphQLContext;
+
+		expect(await tournamentsRepository.getTournamentEntryIds(context, 7)).toEqual([999]);
+		expect(membershipReads).toBe(0);
+		expect(await tournamentsRepository.getTournamentEntryIdsUncached(context, 7)).toEqual([
+			101, 202,
+		]);
+		expect(membershipReads).toBe(1);
+	});
+});
+
 describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 	const buildContext = (options: {
 		battleGroupData?: unknown[];

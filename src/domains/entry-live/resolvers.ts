@@ -115,7 +115,10 @@ export const entryLiveResolvers = {
 			withLiveSnapshotRoot(context, async () => {
 			await assertTournamentStandingsReady(context, args.tournamentId);
 			const includeLive = args.includeLive ?? true;
-			const entryIds = await tournamentsService.getTournamentEntryIds(context, args.tournamentId);
+			const entryIds = await tournamentsService.getTournamentEntryIdsUncached(
+				context,
+				args.tournamentId
+			);
 			assertValidEntryBatch(entryIds);
 
 				const calculate = (): Promise<BatchLiveCalcResult> => {
