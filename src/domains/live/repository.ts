@@ -610,12 +610,25 @@ type LiveExplainRedisSupplement = {
 };
 
 const parseEventLiveExplainRedisSupplement = (
-	raw: string | null
+	raw: string | null,
+	expected?: { eventId: number; elementId: number; requireIdentity?: boolean }
 ): LiveExplainRedisSupplement | null => {
 	if (raw === null || raw.length === 0) return null;
 	const parsed = parseJsonUnknown(raw);
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
 	const o = parsed as Record<string, unknown>;
+	if (expected) {
+		const rawEventId = pickRecordValue(o, "eventId", "event_id");
+		const rawElementId = pickRecordValue(o, "elementId", "element_id");
+		if (expected.requireIdentity) {
+			if (rawEventId !== expected.eventId || rawElementId !== expected.elementId) return null;
+		} else {
+			const embeddedEventId = parseIntegerValue(rawEventId);
+			const embeddedElementId = parseIntegerValue(rawElementId);
+			if (embeddedEventId !== null && embeddedEventId !== expected.eventId) return null;
+			if (embeddedElementId !== null && embeddedElementId !== expected.elementId) return null;
+		}
+	}
 	const ex = o.explain;
 	const arr: DbLiveExplainBreakdown[] | null =
 		ex === undefined || ex === null
@@ -655,7 +668,11 @@ async function loadBreakdownsFromEventLiveExplainRedis(
 	}
 	const supplements = new Map<number, LiveExplainRedisSupplement>();
 	for (const [index, elementId] of elementIds.entries()) {
-		const parsed = parseEventLiveExplainRedisSupplement(v2Values[index] ?? null);
+		const parsed = parseEventLiveExplainRedisSupplement(v2Values[index] ?? null, {
+			eventId,
+			elementId,
+			requireIdentity: true,
+		});
 		if (parsed) supplements.set(elementId, parsed);
 	}
 
@@ -673,7 +690,10 @@ async function loadBreakdownsFromEventLiveExplainRedis(
 		return supplements;
 	}
 	for (const [index, elementId] of legacyElementIds.entries()) {
-		const parsed = parseEventLiveExplainRedisSupplement(legacyValues[index] ?? null);
+		const parsed = parseEventLiveExplainRedisSupplement(legacyValues[index] ?? null, {
+			eventId,
+			elementId,
+		});
 		if (parsed) supplements.set(elementId, parsed);
 	}
 	return supplements;

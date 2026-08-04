@@ -18,10 +18,6 @@ export type LiveSnapshotMeta = {
 };
 
 const snapshotMemo = new WeakMap<GraphQLContext, Map<string, Promise<LiveSnapshotMeta | null>>>();
-const freshSnapshotFlights = new WeakMap<
-	GraphQLContext,
-	Map<string, Promise<LiveSnapshotMeta | null>>
->();
 
 type LiveSnapshotOperationState = {
 	activeReaders: number;
@@ -294,17 +290,6 @@ export const loadLiveSnapshotMeta = async (
 		const cached = memo.get(memoKey);
 		if (cached) return cached;
 	}
-	let freshFlights: Map<string, Promise<LiveSnapshotMeta | null>> | undefined;
-	if (options.fresh) {
-		freshFlights = freshSnapshotFlights.get(context);
-		if (!freshFlights) {
-			freshFlights = new Map();
-			freshSnapshotFlights.set(context, freshFlights);
-		}
-		const existingFlight = freshFlights.get(memoKey);
-		if (existingFlight) return existingFlight;
-	}
-
 	const load = (async (): Promise<LiveSnapshotMeta | null> => {
 		const key = liveSnapshotMetaKey(season, eventId);
 		try {
@@ -322,16 +307,12 @@ export const loadLiveSnapshotMeta = async (
 			return null;
 		}
 	})();
-	const loading = options.fresh
-		? load.finally(() => {
-				if (freshFlights?.get(memoKey) === loading) {
-					freshFlights.delete(memoKey);
-				}
-			})
-		: load;
-	memo.set(memoKey, loading);
-	if (options.fresh) freshFlights?.set(memoKey, loading);
-	return loading;
+	// A fresh read is a causal boundary around one calculation. Sharing its
+	// in-flight GET with a sibling that starts later can let that sibling reuse
+	// metadata captured before its own view reads and accept mixed revisions.
+	// Ordinary reads remain request-memoized; every fresh boundary reads Redis.
+	memo.set(memoKey, load);
+	return load;
 };
 
 /**

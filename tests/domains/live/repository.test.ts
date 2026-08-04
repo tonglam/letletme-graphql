@@ -1037,6 +1037,47 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(redis.hmgetCalls).toEqual([["EventLiveExplainV2:2526:34", "526"]]);
 	});
 
+	it("rejects V2 fields whose embedded identity does not match the hash field", async () => {
+		const compact = (eventId: number, elementId: number, minutes: number) =>
+			JSON.stringify({ eventId, elementId, minutes, minutesPoints: 1 });
+		const redis = makeMockRedis({
+			hashes: {
+				"EventLiveExplainV2:2526:34": {
+					526: compact(35, 526, 90),
+					527: compact(34, 999, 90),
+					528: JSON.stringify({ minutes: 90, minutesPoints: 1 }),
+				},
+				"EventLiveExplain:2526:34": {
+					526: compact(34, 526, 45),
+					527: compact(34, 527, 46),
+					528: compact(34, 528, 47),
+				},
+			},
+		});
+		const supabaseFromCalls: string[] = [];
+		const context = buildContext({ redis, supabaseFromCalls });
+
+		const result = await liveRepository.getEventLiveExplains(
+			context,
+			34,
+			[526, 527, 528],
+			"contributions"
+		);
+
+		expect(
+			result.map(
+				(explain) =>
+					explain.contributions?.find((contribution) => contribution.identifier === "minutes")
+						?.value
+			)
+		).toEqual([45, 46, 47]);
+		expect(supabaseFromCalls).toEqual([]);
+		expect(redis.hmgetCalls).toEqual([
+			["EventLiveExplainV2:2526:34", "526", "527", "528"],
+			["EventLiveExplain:2526:34", "526", "527", "528"],
+		]);
+	});
+
 	it("falls back to the frozen legacy hash only for players missing from V2", async () => {
 		const compact = (elementId: number, minutes: number) =>
 			JSON.stringify({ eventId: 34, elementId, minutes, minutesPoints: 1 });

@@ -68,7 +68,7 @@ describe("live snapshot metadata", () => {
 		expect(second).toBe(first);
 	});
 
-	it("coalesces concurrent fresh metadata reads without reusing a completed poll", async () => {
+	it("keeps every fresh metadata boundary independent", async () => {
 		const revision = "0".repeat(24);
 		let metadataReads = 0;
 		const context = {
@@ -87,10 +87,10 @@ describe("live snapshot metadata", () => {
 			Array.from({ length: 100 }, () => loadLiveSnapshotMeta(context, 33, { fresh: true }))
 		);
 		expect(concurrent.every((value) => value?.revision === revision)).toBe(true);
-		expect(metadataReads).toBe(1);
+		expect(metadataReads).toBe(100);
 
 		await loadLiveSnapshotMeta(context, 33, { fresh: true });
-		expect(metadataReads).toBe(2);
+		expect(metadataReads).toBe(101);
 	});
 
 	it("retries a calculation once when publication advances between reads", async () => {
@@ -306,6 +306,69 @@ describe("live snapshot metadata", () => {
 		expect(await slowRoot).toBe("database");
 		expect(fastRuns).toBe(2);
 		expect(slowRuns).toBe(2);
+		expect(await loadOperationLiveSnapshotMeta(context, 33)).toBeNull();
+	});
+
+	it("does not reuse an earlier sibling final poll after later view reads", async () => {
+		const firstRevision = meta("a".repeat(24));
+		const secondRevision = meta("b".repeat(24), "2025-08-15T20:01:00.000Z");
+		let metadataReads = 0;
+		let announceStaleFinalPoll!: () => void;
+		const staleFinalPollStarted = new Promise<void>((resolve) => {
+			announceStaleFinalPoll = resolve;
+		});
+		let releaseStaleFinalPoll!: () => void;
+		const staleFinalPollBlocked = new Promise<void>((resolve) => {
+			releaseStaleFinalPoll = resolve;
+		});
+		let announceLaterFinalPoll!: () => void;
+		const laterFinalPollStarted = new Promise<void>((resolve) => {
+			announceLaterFinalPoll = resolve;
+		});
+		const context = {
+			redis: {
+				get: async (key: string): Promise<string | null> => {
+					if (key === "Season:active") return "2526";
+					metadataReads += 1;
+					if (metadataReads <= 2) return firstRevision;
+					if (metadataReads === 3) {
+						announceStaleFinalPoll();
+						await staleFinalPollBlocked;
+						return firstRevision;
+					}
+					announceLaterFinalPoll();
+					return secondRevision;
+				},
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+		} as unknown as GraphQLContext;
+
+		let fastRuns = 0;
+		let slowRuns = 0;
+		const fastRoot = withLiveSnapshotRoot(context, () =>
+			withLiveSnapshotConsistency(context, 33, async () => {
+				fastRuns += 1;
+				return isLiveSnapshotDatabaseFallback(context, 33) ? "database" : "redis-r1";
+			})
+		);
+		const slowRoot = withLiveSnapshotRoot(context, () =>
+			withLiveSnapshotConsistency(context, 33, async () => {
+				slowRuns += 1;
+				if (slowRuns === 1) await staleFinalPollStarted;
+				return isLiveSnapshotDatabaseFallback(context, 33) ? "database" : "redis-r2";
+			})
+		);
+
+		await laterFinalPollStarted;
+		releaseStaleFinalPoll();
+
+		expect(await fastRoot).toBe("database");
+		expect(await slowRoot).toBe("database");
+		expect(fastRuns).toBe(2);
+		// The slow reader first retries its own R1 -> R2 advance, then joins the
+		// operation-wide database fallback when the sibling candidates differ.
+		expect(slowRuns).toBe(3);
+		expect(metadataReads).toBe(5);
 		expect(await loadOperationLiveSnapshotMeta(context, 33)).toBeNull();
 	});
 
