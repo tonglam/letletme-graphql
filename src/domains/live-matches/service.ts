@@ -594,8 +594,14 @@ export const loadUpcomingEventFixtures = (
 ): Promise<Fixture[]> => {
 	if (currentEventId >= MAX_EVENT_ID) return Promise.resolve([]);
 	const nextEventId = currentEventId + 1;
-	return withLiveSnapshotConsistency(context, nextEventId, () =>
-		fixturesRepository.getEventFixtures(context, nextEventId)
+	return withLiveSnapshotConsistency(
+		context,
+		nextEventId,
+		() => fixturesRepository.getEventFixtures(context, nextEventId),
+		// This read is nested inside the current-event liveMatches root. Its own
+		// revision remains coherent, but only the enclosing calculation may release
+		// sibling GraphQL roots from the request-wide first-pass barrier.
+		{ participateInRootBarrier: false }
 	);
 };
 

@@ -67,6 +67,7 @@ const makeMockSupabase = (options: {
 	data?: unknown[];
 	dataByTable?: Record<string, unknown[]>;
 	error?: unknown;
+	errorByTable?: Record<string, unknown>;
 	fromCalls?: string[];
 	inCalls?: Array<{ table: string; column: string; values: unknown[] }>;
 }) => ({
@@ -77,7 +78,13 @@ const makeMockSupabase = (options: {
 				? options.dataByTable[table]
 				: (options.data ?? [])
 		) as unknown[];
-		const result = { data: rows, error: options.error ?? null };
+		const result = {
+			data: rows,
+			error:
+				options.errorByTable && Object.hasOwn(options.errorByTable, table)
+					? options.errorByTable[table]
+					: (options.error ?? null),
+		};
 
 		let resolvePromise!: (value: typeof result) => void;
 		const promise = new Promise<typeof result>((resolve) => {
@@ -111,6 +118,7 @@ const buildContext = (options: {
 	supabaseData?: unknown[];
 	supabaseDataByTable?: Record<string, unknown[]>;
 	supabaseError?: unknown;
+	supabaseErrorByTable?: Record<string, unknown>;
 	supabaseFromCalls?: string[];
 	supabaseInCalls?: Array<{ table: string; column: string; values: unknown[] }>;
 	redis?: MockRedis;
@@ -126,6 +134,7 @@ const buildContext = (options: {
 			data: options.supabaseData,
 			dataByTable: options.supabaseDataByTable,
 			error: options.supabaseError,
+			errorByTable: options.supabaseErrorByTable,
 			fromCalls: options.supabaseFromCalls,
 			inCalls: options.supabaseInCalls,
 		}),
@@ -1013,6 +1022,38 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(result?.breakdown).toHaveLength(1);
 		expect(result?.breakdown[0]?.fixtureId).toBe(8);
 		expect(result?.breakdown[0]?.stats[0]?.identifier).toBe("goals_scored");
+	});
+
+	it("does not cache a partial explanation after player_stats recovers", async () => {
+		const revision = "c".repeat(24);
+		const redis = makeMockRedis({
+			strings: { "LiveSnapshotMeta:2526:33": snapshotMeta(revision) },
+		});
+		const errorByTable: Record<string, unknown> = {
+			player_stats: { code: "08006", message: "temporary connection failure" },
+		};
+		const fromCalls: string[] = [];
+		const context = buildContext({
+			redis,
+			supabaseFromCalls: fromCalls,
+			supabaseErrorByTable: errorByTable,
+			supabaseDataByTable: {
+				player_stats: [{ ...playerStatsRow34_526, event_id: 33, element_id: 1 }],
+				event_live_explains: [{ event_id: 33, element_id: 1, minutes: 66, minutes_points: 1 }],
+			},
+		});
+
+		const partial = await liveRepository.getEventLiveExplain(context, 33, 1);
+
+		expect(partial?.stats.totalPoints).toBeNull();
+		expect(redis.setCalls).toHaveLength(0);
+
+		delete errorByTable.player_stats;
+		const recovered = await liveRepository.getEventLiveExplain(context, 33, 1);
+
+		expect(recovered?.stats.totalPoints).toBe(14);
+		expect(redis.setCalls).toHaveLength(1);
+		expect(fromCalls.filter((table) => table === "player_stats")).toHaveLength(2);
 	});
 
 	it("uses Redis `explain` when event_live_explain has no explain JSON", async () => {

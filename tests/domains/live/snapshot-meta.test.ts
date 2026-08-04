@@ -421,4 +421,54 @@ describe("live snapshot metadata", () => {
 		expect(secondRuns).toBe(2);
 		expect(await loadOperationLiveSnapshotMeta(context, 33)).toBeNull();
 	});
+
+	it("keeps a nested event read from releasing the enclosing root barrier", async () => {
+		const currentMeta = meta("a".repeat(24));
+		const nextMeta = meta("b".repeat(24)).replace('"eventId":33', '"eventId":34');
+		const context = {
+			redis: {
+				get: async (key: string): Promise<string | null> => {
+					if (key === "Season:active") return "2526";
+					if (key === "LiveSnapshotMeta:2526:33") return currentMeta;
+					if (key === "LiveSnapshotMeta:2526:34") return nextMeta;
+					return null;
+				},
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+		} as unknown as GraphQLContext;
+		let releaseOuter!: () => void;
+		const outerBlocked = new Promise<void>((resolve) => {
+			releaseOuter = resolve;
+		});
+		let nestedFinished!: () => void;
+		const nestedComplete = new Promise<void>((resolve) => {
+			nestedFinished = resolve;
+		});
+		let siblingReturned = false;
+
+		const outer = withLiveSnapshotRoot(context, () =>
+			withLiveSnapshotConsistency(context, 33, async () => {
+				const next = await withLiveSnapshotConsistency(context, 34, async () => "next", {
+					participateInRootBarrier: false,
+				});
+				nestedFinished();
+				await outerBlocked;
+				return next;
+			})
+		);
+		const sibling = withLiveSnapshotRoot(context, () =>
+			withLiveSnapshotConsistency(context, 33, async () => "sibling").then((value) => {
+				siblingReturned = true;
+				return value;
+			})
+		);
+
+		await nestedComplete;
+		await Promise.resolve();
+		expect(siblingReturned).toBe(false);
+		releaseOuter();
+
+		expect(await outer).toBe("next");
+		expect(await sibling).toBe("sibling");
+	});
 });

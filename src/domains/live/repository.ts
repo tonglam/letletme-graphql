@@ -579,8 +579,8 @@ async function fetchPlayerStatsForLiveExplains(
 	context: GraphQLContext,
 	eventId: number,
 	elementIds: number[]
-): Promise<Map<number, DbLiveExplainStats>> {
-	if (elementIds.length === 0) return new Map();
+): Promise<{ rows: Map<number, DbLiveExplainStats>; failed: boolean }> {
+	if (elementIds.length === 0) return { rows: new Map(), failed: false };
 	const { data, error } = await context.supabase
 		.from("player_stats")
 		.select("*")
@@ -592,7 +592,7 @@ async function fetchPlayerStatsForLiveExplains(
 			{ err: error, eventId, elementIds },
 			"player_stats batch query failed for event live explains"
 		);
-		return new Map();
+		return { rows: new Map(), failed: true };
 	}
 	const rows = new Map<number, DbLiveExplainStats>();
 	for (const raw of (data ?? []) as unknown[]) {
@@ -601,7 +601,7 @@ async function fetchPlayerStatsForLiveExplains(
 		const elementId = parseIntegerValue(pickRecordValue(row, "element_id", "elementId"));
 		if (elementId !== null && elementIds.includes(elementId)) rows.set(elementId, row);
 	}
-	return rows;
+	return { rows, failed: false };
 }
 
 type LiveExplainRedisSupplement = {
@@ -1299,10 +1299,12 @@ const loadColdLiveExplainBatch = async (
 		: await loadBreakdownsFromEventLiveExplainRedis(context, eventId, coldIds, season);
 	const databaseIds =
 		mode === "full" ? coldIds : coldIds.filter((elementId) => !redisSupplementById.has(elementId));
-	const [playerStatsById, eventExplainById] = await Promise.all([
+	const [playerStatsResult, eventExplainById] = await Promise.all([
 		fetchPlayerStatsForLiveExplains(context, eventId, databaseIds),
 		fetchEventLiveExplainsFromSupabase(context, eventId, databaseIds),
 	]);
+	const playerStatsById = playerStatsResult.rows;
+	const playerStatsDatabaseIds = new Set(databaseIds);
 	for (const [elementId, row] of playerStatsById) {
 		selectedByById.set(
 			elementId,
@@ -1329,7 +1331,9 @@ const loadColdLiveExplainBatch = async (
 		);
 		if (!psRow && !elRow && !redisSupplement) {
 			resolved.set(elementId, null);
-			valuesToCache.set(cacheKey, "__null__");
+			if (!playerStatsResult.failed || !playerStatsDatabaseIds.has(elementId)) {
+				valuesToCache.set(cacheKey, "__null__");
+			}
 			continue;
 		}
 
@@ -1353,7 +1357,12 @@ const loadColdLiveExplainBatch = async (
 			selectedBy: null,
 		};
 		resolved.set(elementId, result);
-		valuesToCache.set(cacheKey, JSON.stringify(result));
+		// A transient player_stats failure can still yield useful fixture-level
+		// details. Return that partial response, but do not pin it to this revision;
+		// the next refresh should retry PostgreSQL immediately.
+		if (!playerStatsResult.failed || !playerStatsDatabaseIds.has(elementId)) {
+			valuesToCache.set(cacheKey, JSON.stringify(result));
+		}
 	}
 
 	await Promise.all(

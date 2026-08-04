@@ -359,7 +359,8 @@ export const loadOperationLiveSnapshotMeta = async (
 export const withLiveSnapshotConsistency = async <T>(
 	context: GraphQLContext,
 	eventId: number,
-	run: () => Promise<T>
+	run: () => Promise<T>,
+	options: { participateInRootBarrier?: boolean } = {}
 ): Promise<T> => {
 	const state = getOperationState(context, eventId);
 	state.activeReaders += 1;
@@ -395,7 +396,9 @@ export const withLiveSnapshotConsistency = async <T>(
 		// No root may expose its candidate until every sibling live root has
 		// reached the same point. The last arrival reconciles revisions/fallback,
 		// then every earlier candidate can be discarded before GraphQL sees it.
-		await waitForSiblingRootFirstPasses(context);
+		if (options.participateInRootBarrier !== false) {
+			await waitForSiblingRootFirstPasses(context);
+		}
 		if (state.databaseFallback && !result.databaseFallback) {
 			operationMeta = null;
 			return run();
