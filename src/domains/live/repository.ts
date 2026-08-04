@@ -538,6 +538,11 @@ const FLAT_LIVE_EXPLAIN_STATS = [
 		points: ["red_cards_points", "redCardsPoints"],
 	},
 	{ identifier: "saves", value: ["saves"], points: ["saves_points", "savesPoints"] },
+	{
+		identifier: "defensive_contribution",
+		value: ["defensive_contribution", "defensiveContribution"],
+		points: ["defensive_contribution_points", "defensiveContributionPoints"],
+	},
 ] as const;
 
 const mapFlatLiveExplainContributions = (
@@ -625,10 +630,11 @@ const parseEventLiveExplainRedisSupplement = (
 async function loadBreakdownsFromEventLiveExplainRedis(
 	context: GraphQLContext,
 	eventId: number,
-	elementIds: number[]
+	elementIds: number[],
+	seasonOverride?: string
 ): Promise<Map<number, LiveExplainRedisSupplement>> {
 	if (elementIds.length === 0) return new Map();
-	const season = await getCurrentSeason(context);
+	const season = seasonOverride ?? (await getCurrentSeason(context));
 	const hashKey = redisKey.eventLiveExplain(season, eventId);
 	let values: Array<string | null>;
 	try {
@@ -739,13 +745,15 @@ interface LiveRepository {
 	getEventLiveExplain(
 		context: GraphQLContext,
 		eventId: number,
-		elementId: number
+		elementId: number,
+		includeSelectedBy?: boolean
 	): Promise<LiveExplain | null>;
 	getEventLiveExplains(
 		context: GraphQLContext,
 		eventId: number,
 		elementIds: number[],
-		mode?: LiveExplainReadMode
+		mode?: LiveExplainReadMode,
+		includeSelectedBy?: boolean
 	): Promise<LiveExplain[]>;
 	getLivePerformancesByPlayerIds(
 		context: GraphQLContext,
@@ -770,55 +778,152 @@ interface LiveRepository {
 
 const SELECTED_BY_REDIS_TTL_SEC = 3600;
 
-async function resolveSelectedByPercent(
+const liveSelectedByPreloadKey = (eventId: number, elementId: number): string =>
+	`${eventId}:${elementId}`;
+
+const rememberSelectedByPercents = (
 	context: GraphQLContext,
 	eventId: number,
-	elementId: number
-): Promise<number | null> {
-	const season = await getCurrentSeason(context);
-	const hashKey = redisKey.playerSelectedBy(season, eventId);
-	const field = String(elementId);
+	selectedByById: Map<number, number | null>
+): void => {
+	if (selectedByById.size === 0) return;
+	// Sibling roots may finish in either order. Merge into the latest map so one
+	// batch cannot discard values preloaded by another live root.
+	const preload = new Map(context.liveSelectedByPreload ?? []);
+	for (const [elementId, selectedBy] of selectedByById) {
+		preload.set(liveSelectedByPreloadKey(eventId, elementId), selectedBy);
+	}
+	context.liveSelectedByPreload = preload;
+};
 
-	const cached = await context.redis.hget(hashKey, field);
-	if (cached) {
+async function resolveSelectedByPercents(
+	context: GraphQLContext,
+	eventId: number,
+	elementIds: number[],
+	seasonOverride?: string
+): Promise<Map<number, number | null>> {
+	const uniqueIds = Array.from(
+		new Set(elementIds.filter((elementId) => Number.isInteger(elementId) && elementId > 0))
+	);
+	const resolved = new Map<number, number | null>();
+	for (const elementId of uniqueIds) {
+		const key = liveSelectedByPreloadKey(eventId, elementId);
+		if (context.liveSelectedByPreload?.has(key)) {
+			resolved.set(elementId, context.liveSelectedByPreload.get(key) ?? null);
+		}
+	}
+	let missingIds = uniqueIds.filter((elementId) => !resolved.has(elementId));
+	if (missingIds.length === 0) return resolved;
+
+	const season = seasonOverride ?? (await getCurrentSeason(context));
+	const hashKey = redisKey.playerSelectedBy(season, eventId);
+	let cachedValues: Array<string | null> = missingIds.map(() => null);
+	try {
+		cachedValues =
+			typeof context.redis.hmget === "function"
+				? await context.redis.hmget(hashKey, ...missingIds.map(String))
+				: await Promise.all(
+						missingIds.map((elementId) => context.redis.hget(hashKey, String(elementId)))
+					);
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, hashKey, eventId, elementIds: missingIds },
+			"PlayerStatsSelected batch cache read failed"
+		);
+	}
+
+	for (const [index, elementId] of missingIds.entries()) {
+		const cached = cachedValues[index] ?? null;
+		if (cached === null) continue;
 		try {
-			const row = JSON.parse(cached) as SelectedByCacheRow;
-			return parseNumericValue(row.selected_by_percent);
+			const parsed: unknown = JSON.parse(cached);
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+				const row = parsed as Record<string, unknown>;
+				if (Object.hasOwn(row, "selected_by_percent") || Object.hasOwn(row, "selectedByPercent")) {
+					resolved.set(
+						elementId,
+						parseNumericValue(pickRecordValue(row, "selected_by_percent", "selectedByPercent"))
+					);
+				}
+			}
 		} catch (error) {
 			context.logger.warn(
-				{ err: error, hashKey, field },
+				{ err: error, hashKey, field: String(elementId) },
 				"Invalid JSON in PlayerStatsSelected cache"
 			);
 		}
 	}
 
-	const { data, error } = await context.supabase
-		.from("player_stats")
-		.select("selected_by_percent")
-		.eq("event_id", eventId)
-		.eq("element_id", elementId)
-		.limit(1);
+	missingIds = missingIds.filter((elementId) => !resolved.has(elementId));
+	if (missingIds.length > 0) {
+		const { data, error } = await context.supabase
+			.from("player_stats")
+			.select("element_id, selected_by_percent")
+			.eq("event_id", eventId)
+			.in("element_id", missingIds);
 
-	if (error) {
-		context.logger.warn(
-			{ err: error, eventId, elementId },
-			"player_stats selected_by_percent query failed"
-		);
-	} else {
-		const row = data?.[0] as { selected_by_percent?: number | string | null } | undefined;
-		const pct = parseNumericValue(row?.selected_by_percent ?? null);
-		if (pct !== null) {
-			const cacheRow: SelectedByCacheRow = {
-				selected_by_percent: row?.selected_by_percent,
-			};
-			await context.redis.hset(hashKey, field, JSON.stringify(cacheRow));
-			await context.redis.expire(hashKey, SELECTED_BY_REDIS_TTL_SEC);
-			return pct;
+		if (error) {
+			context.logger.warn(
+				{ err: error, eventId, elementIds: missingIds },
+				"player_stats selected_by_percent batch query failed"
+			);
+		} else {
+			const rowsById = new Map<number, SelectedByCacheRow>();
+			for (const raw of (data ?? []) as unknown[]) {
+				if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+				const row = raw as Record<string, unknown>;
+				const elementId = parseIntegerValue(pickRecordValue(row, "element_id", "elementId"));
+				if (elementId !== null && missingIds.includes(elementId)) {
+					rowsById.set(elementId, {
+						selected_by_percent: pickRecordValue(
+							row,
+							"selected_by_percent",
+							"selectedByPercent"
+						) as number | string | null | undefined,
+					});
+				}
+			}
+
+			const cachePairs: string[] = [];
+			for (const elementId of missingIds) {
+				const row = rowsById.get(elementId);
+				const selectedBy = parseNumericValue(row?.selected_by_percent ?? null);
+				resolved.set(elementId, selectedBy);
+				if (selectedBy !== null) {
+					cachePairs.push(
+						String(elementId),
+						JSON.stringify({ selected_by_percent: selectedBy } satisfies SelectedByCacheRow)
+					);
+				}
+			}
+			if (cachePairs.length > 0) {
+				try {
+					await context.redis.hset(hashKey, ...cachePairs);
+					await context.redis.expire(hashKey, SELECTED_BY_REDIS_TTL_SEC);
+				} catch (cacheError) {
+					context.logger.warn(
+						{ err: cacheError, hashKey, eventId, elementIds: missingIds },
+						"PlayerStatsSelected batch cache write failed"
+					);
+				}
+			}
 		}
 	}
 
-	// selected_by_percent does not exist on the players table; player_stats is the only source.
-	return null;
+	for (const elementId of uniqueIds) {
+		if (!resolved.has(elementId)) resolved.set(elementId, null);
+	}
+	rememberSelectedByPercents(context, eventId, resolved);
+	return resolved;
+}
+
+async function resolveSelectedByPercent(
+	context: GraphQLContext,
+	eventId: number,
+	elementId: number
+): Promise<number | null> {
+	const selectedBy = await resolveSelectedByPercents(context, eventId, [elementId]);
+	return selectedBy.get(elementId) ?? null;
 }
 
 const EVENT_LIVES_PROJECTION = [
@@ -1010,6 +1115,7 @@ const LIVE_REVISION_CACHE_TTL_SEC = 180;
 const LIVE_FALLBACK_CACHE_TTL_SEC = 15;
 const LIVE_EXPLAIN_REVISION_CACHE_TTL_SEC = 300;
 const LIVE_EXPLAIN_FALLBACK_CACHE_TTL_SEC = 15;
+const LIVE_EXPLAIN_CACHE_SHAPE = "shape2";
 
 const shapedLiveExplainCacheKey = (
 	season: string,
@@ -1022,9 +1128,12 @@ const shapedLiveExplainCacheKey = (
 	meta
 		? gqlCacheKey(
 				season,
-				`live:explain:${eventId}:${elementId}:${mode}:revision:${meta.revision}${databaseFallback ? ":fallback15" : ""}`
+				`live:explain:${LIVE_EXPLAIN_CACHE_SHAPE}:${eventId}:${elementId}:${mode}:revision:${meta.revision}${databaseFallback ? ":fallback15" : ""}`
 			)
-		: gqlCacheKey(season, `live:explain:${eventId}:${elementId}:${mode}:fallback15`);
+		: gqlCacheKey(
+				season,
+				`live:explain:${LIVE_EXPLAIN_CACHE_SHAPE}:${eventId}:${elementId}:${mode}:fallback15`
+			);
 
 const liveAllFlights = new WeakMap<object, Map<string, Promise<Map<number, LivePerformance>>>>();
 
@@ -1038,6 +1147,235 @@ const getLiveAllFlightMap = (
 		liveAllFlights.set(redisIdentity, flights);
 	}
 	return flights;
+};
+
+type LiveExplainBatchLoad = {
+	values: Map<number, LiveExplain | null>;
+	selectedByById: Map<number, number | null>;
+};
+
+type LiveExplainFlight = {
+	pendingIds: Set<number>;
+	result: LiveExplainBatchLoad;
+	promise: Promise<LiveExplainBatchLoad>;
+};
+
+const liveExplainFlights = new WeakMap<object, Map<string, LiveExplainFlight>>();
+
+const getLiveExplainFlightMap = (context: GraphQLContext): Map<string, LiveExplainFlight> => {
+	const redisIdentity = context.redis as object;
+	let flights = liveExplainFlights.get(redisIdentity);
+	if (!flights) {
+		flights = new Map();
+		liveExplainFlights.set(redisIdentity, flights);
+	}
+	return flights;
+};
+
+const readLiveExplainCacheBatch = async (
+	context: GraphQLContext,
+	eventId: number,
+	elementIds: number[],
+	season: string,
+	meta: LiveSnapshotMeta | null,
+	databaseFallback: boolean,
+	mode: LiveExplainReadMode
+): Promise<Map<number, LiveExplain | null>> => {
+	const cacheKeys = elementIds.map((elementId) =>
+		shapedLiveExplainCacheKey(season, eventId, elementId, meta, databaseFallback, mode)
+	);
+	let cachedValues: Array<string | null> = elementIds.map(() => null);
+	try {
+		cachedValues =
+			typeof context.redis.mget === "function"
+				? await context.redis.mget(...cacheKeys)
+				: await Promise.all(cacheKeys.map((cacheKey) => context.redis.get(cacheKey)));
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, eventId, elementIds },
+			"Failed to read live explain batch cache"
+		);
+	}
+
+	const resolved = new Map<number, LiveExplain | null>();
+	const malformedKeys: string[] = [];
+	for (const [index, elementId] of elementIds.entries()) {
+		const cachedRaw = cachedValues[index] ?? null;
+		if (cachedRaw === null) continue;
+		if (cachedRaw === "__null__") {
+			resolved.set(elementId, null);
+			continue;
+		}
+		try {
+			const parsed: unknown = JSON.parse(cachedRaw);
+			if (isLiveExplain(parsed) && parsed.eventId === eventId && parsed.elementId === elementId) {
+				resolved.set(elementId, parsed);
+				continue;
+			}
+		} catch (error) {
+			context.logger.warn(
+				{ err: error, cacheKey: cacheKeys[index] },
+				"Malformed live explain cache"
+			);
+		}
+		malformedKeys.push(cacheKeys[index]!);
+	}
+	await Promise.all(malformedKeys.map((cacheKey) => deleteMalformedCache(context, cacheKey)));
+	return resolved;
+};
+
+const loadColdLiveExplainBatch = async (
+	context: GraphQLContext,
+	eventId: number,
+	elementIds: number[],
+	season: string,
+	meta: LiveSnapshotMeta | null,
+	databaseFallback: boolean,
+	mode: LiveExplainReadMode
+): Promise<LiveExplainBatchLoad> => {
+	// Another process may have filled Redis while this process elected its
+	// singleflight. Recheck before touching PostgreSQL.
+	const resolved = await readLiveExplainCacheBatch(
+		context,
+		eventId,
+		elementIds,
+		season,
+		meta,
+		databaseFallback,
+		mode
+	);
+	const selectedByById = new Map<number, number | null>();
+	const coldIds = elementIds.filter((elementId) => !resolved.has(elementId));
+	if (coldIds.length === 0) return { values: resolved, selectedByById };
+
+	const redisSupplementById = databaseFallback
+		? new Map<number, LiveExplainRedisSupplement>()
+		: await loadBreakdownsFromEventLiveExplainRedis(context, eventId, coldIds, season);
+	const databaseIds =
+		mode === "full" ? coldIds : coldIds.filter((elementId) => !redisSupplementById.has(elementId));
+	const [playerStatsById, eventExplainById] = await Promise.all([
+		fetchPlayerStatsForLiveExplains(context, eventId, databaseIds),
+		fetchEventLiveExplainsFromSupabase(context, eventId, databaseIds),
+	]);
+	for (const [elementId, row] of playerStatsById) {
+		selectedByById.set(
+			elementId,
+			parseNumericValue(pickRecordValue(row, "selected_by_percent", "selectedByPercent"))
+		);
+	}
+
+	const cacheTtl =
+		databaseFallback || !meta
+			? LIVE_EXPLAIN_FALLBACK_CACHE_TTL_SEC
+			: LIVE_EXPLAIN_REVISION_CACHE_TTL_SEC;
+	const valuesToCache = new Map<string, string>();
+	for (const elementId of coldIds) {
+		const psRow = playerStatsById.get(elementId) ?? null;
+		const elRow = eventExplainById.get(elementId) ?? null;
+		const redisSupplement = redisSupplementById.get(elementId) ?? null;
+		const cacheKey = shapedLiveExplainCacheKey(
+			season,
+			eventId,
+			elementId,
+			meta,
+			databaseFallback,
+			mode
+		);
+		if (!psRow && !elRow && !redisSupplement) {
+			resolved.set(elementId, null);
+			valuesToCache.set(cacheKey, "__null__");
+			continue;
+		}
+
+		const stats = mapLiveExplainStats(psRow);
+		const databaseBreakdown = elRow ? mapBreakdownFromEventLiveRow(elRow) : [];
+		const breakdown =
+			redisSupplement && redisSupplement.breakdown.length > 0
+				? redisSupplement.breakdown
+				: databaseBreakdown;
+		let contributions = redisSupplement?.contributions ?? [];
+		if (contributions.length === 0) contributions = breakdown.flatMap((entry) => entry.stats);
+		if (contributions.length === 0) contributions = mapFlatLiveExplainContributions(elRow);
+
+		const result: LiveExplain = {
+			eventId,
+			elementId,
+			modified: elRow ? parseBooleanValue(elRow.modified) : null,
+			stats,
+			breakdown,
+			contributions,
+			selectedBy: null,
+		};
+		resolved.set(elementId, result);
+		valuesToCache.set(cacheKey, JSON.stringify(result));
+	}
+
+	await Promise.all(
+		Array.from(valuesToCache, async ([cacheKey, value]) => {
+			try {
+				await context.redis.set(cacheKey, value, "EX", cacheTtl);
+			} catch (error) {
+				context.logger.warn({ err: error, cacheKey }, "Failed to cache live explain");
+			}
+		})
+	);
+
+	return { values: resolved, selectedByById };
+};
+
+const loadLiveExplainsWithSingleflight = (
+	context: GraphQLContext,
+	eventId: number,
+	elementIds: number[],
+	season: string,
+	meta: LiveSnapshotMeta | null,
+	databaseFallback: boolean,
+	mode: LiveExplainReadMode
+): Promise<LiveExplainBatchLoad> => {
+	const flights = getLiveExplainFlightMap(context);
+	const scopeKey = `${season}:${eventId}:${mode}:${meta?.revision ?? "fallback"}:${databaseFallback ? "database" : "redis"}`;
+	const existing = flights.get(scopeKey);
+	if (existing) {
+		for (const elementId of elementIds) existing.pendingIds.add(elementId);
+		return existing.promise;
+	}
+
+	const flight: LiveExplainFlight = {
+		pendingIds: new Set(elementIds),
+		result: { values: new Map(), selectedByById: new Map() },
+		promise: Promise.resolve({ values: new Map(), selectedByById: new Map() }),
+	};
+	flight.promise = (async (): Promise<LiveExplainBatchLoad> => {
+		try {
+			// Yield once so simultaneous entry/tournament/browser refreshes can join
+			// this revision-scoped batch before the two durable reads begin.
+			await new Promise<void>((resolve) => setTimeout(resolve, 0));
+			while (flight.pendingIds.size > 0) {
+				const batchIds = Array.from(flight.pendingIds);
+				flight.pendingIds.clear();
+				const loaded = await loadColdLiveExplainBatch(
+					context,
+					eventId,
+					batchIds,
+					season,
+					meta,
+					databaseFallback,
+					mode
+				);
+				for (const [elementId, value] of loaded.values) {
+					flight.result.values.set(elementId, value);
+				}
+				for (const [elementId, selectedBy] of loaded.selectedByById) {
+					flight.result.selectedByById.set(elementId, selectedBy);
+				}
+			}
+			return flight.result;
+		} finally {
+			if (flights.get(scopeKey) === flight) flights.delete(scopeKey);
+		}
+	})();
+	flights.set(scopeKey, flight);
+	return flight.promise;
 };
 
 const shapedLiveCacheKey = (
@@ -1289,16 +1627,22 @@ export const liveRepository: LiveRepository = {
 	async getEventLiveExplain(
 		context: GraphQLContext,
 		eventId: number,
-		elementId: number
+		elementId: number,
+		includeSelectedBy = false
 	): Promise<LiveExplain | null> {
-		return (await this.getEventLiveExplains(context, eventId, [elementId]))[0] ?? null;
+		return (
+			(
+				await this.getEventLiveExplains(context, eventId, [elementId], "full", includeSelectedBy)
+			)[0] ?? null
+		);
 	},
 
 	async getEventLiveExplains(
 		context: GraphQLContext,
 		eventId: number,
 		elementIds: number[],
-		mode: LiveExplainReadMode = "full"
+		mode: LiveExplainReadMode = "full",
+		includeSelectedBy = false
 	): Promise<LiveExplain[]> {
 		if (!Number.isFinite(eventId) || eventId <= 0) return [];
 		const uniqueIds = Array.from(
@@ -1312,127 +1656,50 @@ export const liveRepository: LiveRepository = {
 			season,
 			fresh: isLiveSnapshotConsistencyActive(context, eventId),
 		});
-		const cacheKeys = uniqueIds.map((elementId) =>
-			shapedLiveExplainCacheKey(season, eventId, elementId, meta, databaseFallback, mode)
+		const resolved = await readLiveExplainCacheBatch(
+			context,
+			eventId,
+			uniqueIds,
+			season,
+			meta,
+			databaseFallback,
+			mode
 		);
-		const cacheTtl =
-			databaseFallback || !meta
-				? LIVE_EXPLAIN_FALLBACK_CACHE_TTL_SEC
-				: LIVE_EXPLAIN_REVISION_CACHE_TTL_SEC;
-		let cachedValues: Array<string | null> = uniqueIds.map(() => null);
-		try {
-			cachedValues =
-				typeof context.redis.mget === "function"
-					? await context.redis.mget(...cacheKeys)
-					: await Promise.all(cacheKeys.map((cacheKey) => context.redis.get(cacheKey)));
-		} catch (error) {
-			context.logger.warn(
-				{ err: error, eventId, elementIds: uniqueIds },
-				"Failed to read live explain batch cache"
-			);
-		}
-
-		const resolved = new Map<number, LiveExplain | null>();
-		const malformedKeys: string[] = [];
-		for (const [index, elementId] of uniqueIds.entries()) {
-			const cachedRaw = cachedValues[index] ?? null;
-			if (cachedRaw === null) continue;
-			if (cachedRaw === "__null__") {
-				resolved.set(elementId, null);
-				continue;
-			}
-			try {
-				const parsed: unknown = JSON.parse(cachedRaw);
-				if (isLiveExplain(parsed) && parsed.eventId === eventId && parsed.elementId === elementId) {
-					resolved.set(elementId, parsed);
-					continue;
-				}
-			} catch (error) {
-				context.logger.warn(
-					{ err: error, cacheKey: cacheKeys[index] },
-					"Malformed live explain cache"
-				);
-			}
-			malformedKeys.push(cacheKeys[index]!);
-		}
-		await Promise.all(malformedKeys.map((cacheKey) => deleteMalformedCache(context, cacheKey)));
 
 		const missingIds = uniqueIds.filter((elementId) => !resolved.has(elementId));
-		if (missingIds.length === 0) {
-			return uniqueIds
-				.map((elementId) => resolved.get(elementId) ?? null)
-				.filter((value): value is LiveExplain => value !== null);
-		}
-
-		const redisSupplementById = databaseFallback
-			? new Map<number, LiveExplainRedisSupplement>()
-			: await loadBreakdownsFromEventLiveExplainRedis(context, eventId, missingIds);
-		const eventExplainDatabaseIds =
-			mode === "full"
-				? missingIds
-				: missingIds.filter((elementId) => !redisSupplementById.has(elementId));
-		const [playerStatsById, eventExplainById] = await Promise.all([
-			mode === "full"
-				? fetchPlayerStatsForLiveExplains(context, eventId, missingIds)
-				: Promise.resolve(new Map<number, DbLiveExplainStats>()),
-			fetchEventLiveExplainsFromSupabase(context, eventId, eventExplainDatabaseIds),
-		]);
-
-		const valuesToCache = new Map<string, string>();
-		for (const elementId of missingIds) {
-			const psRow = playerStatsById.get(elementId) ?? null;
-			const elRow = eventExplainById.get(elementId) ?? null;
-			const redisSupplement = redisSupplementById.get(elementId) ?? null;
-			const cacheKey = shapedLiveExplainCacheKey(
-				season,
+		if (missingIds.length > 0) {
+			const loaded = await loadLiveExplainsWithSingleflight(
+				context,
 				eventId,
-				elementId,
+				missingIds,
+				season,
 				meta,
 				databaseFallback,
 				mode
 			);
-			if (!psRow && !elRow && !redisSupplement) {
-				resolved.set(elementId, null);
-				valuesToCache.set(cacheKey, "__null__");
-				continue;
+			for (const elementId of missingIds) {
+				if (loaded.values.has(elementId)) {
+					resolved.set(elementId, loaded.values.get(elementId) ?? null);
+				}
 			}
-
-			const stats = mapLiveExplainStats(psRow);
-			const databaseBreakdown = elRow ? mapBreakdownFromEventLiveRow(elRow) : [];
-			const breakdown =
-				redisSupplement && redisSupplement.breakdown.length > 0
-					? redisSupplement.breakdown
-					: databaseBreakdown;
-			let contributions = redisSupplement?.contributions ?? [];
-			if (contributions.length === 0) contributions = breakdown.flatMap((entry) => entry.stats);
-			if (contributions.length === 0) contributions = mapFlatLiveExplainContributions(elRow);
-
-			const result: LiveExplain = {
-				eventId,
-				elementId,
-				modified: elRow ? parseBooleanValue(elRow.modified) : null,
-				stats,
-				breakdown,
-				contributions,
-				selectedBy: null,
-			};
-			resolved.set(elementId, result);
-			valuesToCache.set(cacheKey, JSON.stringify(result));
+			rememberSelectedByPercents(context, eventId, loaded.selectedByById);
 		}
 
-		await Promise.all(
-			Array.from(valuesToCache, async ([cacheKey, value]) => {
-				try {
-					await context.redis.set(cacheKey, value, "EX", cacheTtl);
-				} catch (error) {
-					context.logger.warn({ err: error, cacheKey }, "Failed to cache live explain");
-				}
-			})
-		);
-
-		return uniqueIds
+		const results = uniqueIds
 			.map((elementId) => resolved.get(elementId) ?? null)
 			.filter((value): value is LiveExplain => value !== null);
+		if (!includeSelectedBy || results.length === 0) return results;
+
+		const selectedByById = await resolveSelectedByPercents(
+			context,
+			eventId,
+			results.map((result) => result.elementId),
+			season
+		);
+		return results.map((result) => ({
+			...result,
+			selectedBy: selectedByById.get(result.elementId) ?? null,
+		}));
 	},
 
 	async getLivePerformancesByPlayerIds(

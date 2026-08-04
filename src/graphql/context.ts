@@ -13,4 +13,6 @@ export type GraphQLContext = {
 	user?: AuthUser; // Authenticated user (web or mobile)
 	/** Set by batched queries (e.g. `liveScores`) so `LivePerformance.player` avoids per-row fetches. */
 	playersByIdPreload?: Map<number, Player | null>;
+	/** Event/player keyed percentages preloaded by batched live-explanation roots. */
+	liveSelectedByPreload?: Map<string, number | null>;
 };

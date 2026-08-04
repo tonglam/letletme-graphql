@@ -859,7 +859,8 @@ describe("liveRepository.getEventLiveExplain", () => {
 					bonusTeamCount: 2,
 				}),
 				"gql:v2:2526:live:explain:34:526": JSON.stringify(stale),
-				[`gql:v2:2526:live:explain:34:526:full:revision:${revision}`]: JSON.stringify(current),
+				[`gql:v2:2526:live:explain:shape2:34:526:full:revision:${revision}`]:
+					JSON.stringify(current),
 			},
 		});
 		const context = buildContext({ redis });
@@ -867,7 +868,9 @@ describe("liveRepository.getEventLiveExplain", () => {
 		const result = await liveRepository.getEventLiveExplain(context, 34, 526);
 
 		expect(result?.stats.totalPoints).toBe(14);
-		expect(redis.getCalls).toContain(`gql:v2:2526:live:explain:34:526:full:revision:${revision}`);
+		expect(redis.getCalls).toContain(
+			`gql:v2:2526:live:explain:shape2:34:526:full:revision:${revision}`
+		);
 		expect(redis.getCalls).not.toContain("gql:v2:2526:live:explain:34:526");
 	});
 
@@ -892,6 +895,8 @@ describe("liveRepository.getEventLiveExplain", () => {
 						goals_scored_points: 4,
 						assists: 2,
 						assists_points: 6,
+						defensive_contribution: 10,
+						defensive_contribution_points: 2,
 						bonus: 3,
 					},
 					{
@@ -916,6 +921,12 @@ describe("liveRepository.getEventLiveExplain", () => {
 			{ identifier: "minutes", value: 66, points: 1, pointsModification: null },
 			{ identifier: "goals_scored", value: 1, points: 4, pointsModification: null },
 			{ identifier: "assists", value: 2, points: 6, pointsModification: null },
+			{
+				identifier: "defensive_contribution",
+				value: 10,
+				points: 2,
+				pointsModification: null,
+			},
 			{ identifier: "bonus", value: 3, points: 3, pointsModification: null },
 		]);
 		expect(supabaseFromCalls).toEqual(["player_stats", "event_live_explains"]);
@@ -989,6 +1000,8 @@ describe("liveRepository.getEventLiveExplain", () => {
 						goalsScoredPoints: 4,
 						goalsConceded: 2,
 						goalsConcededPoints: -1,
+						defensiveContribution: 10,
+						defensiveContributionPoints: 2,
 						bonus: 3,
 					}),
 				},
@@ -1006,9 +1019,87 @@ describe("liveRepository.getEventLiveExplain", () => {
 			{ identifier: "minutes", value: 66, points: 1, pointsModification: null },
 			{ identifier: "goals_scored", value: 1, points: 4, pointsModification: null },
 			{ identifier: "goals_conceded", value: 2, points: -1, pointsModification: null },
+			{
+				identifier: "defensive_contribution",
+				value: 10,
+				points: 2,
+				pointsModification: null,
+			},
 			{ identifier: "bonus", value: 3, points: 3, pointsModification: null },
 		]);
 		expect(supabaseFromCalls).toEqual([]);
+	});
+
+	it("preserves player_stats-only members and batches selectedBy for 15 players", async () => {
+		const elementIds = Array.from({ length: 15 }, (_, index) => 601 + index);
+		const supabaseFromCalls: string[] = [];
+		const context = buildContext({
+			supabaseFromCalls,
+			supabaseDataByTable: {
+				player_stats: elementIds.map((elementId, index) => ({
+					event_id: 34,
+					element_id: elementId,
+					total_points: index,
+					selected_by_percent: index + 0.5,
+				})),
+				event_live_explains: [],
+			},
+		});
+
+		const result = await liveRepository.getEventLiveExplains(
+			context,
+			34,
+			elementIds,
+			"contributions",
+			true
+		);
+
+		expect(result).toHaveLength(15);
+		expect(result.map((explain) => explain.elementId)).toEqual(elementIds);
+		expect(result.map((explain) => explain.selectedBy)).toEqual(
+			elementIds.map((_elementId, index) => index + 0.5)
+		);
+		expect(supabaseFromCalls).toEqual(["player_stats", "event_live_explains"]);
+	});
+
+	it("coalesces 100 mixed-player revision misses into one durable batch", async () => {
+		const revision = "c".repeat(24);
+		const elementIds = Array.from({ length: 15 }, (_, index) => index + 1);
+		const redis = makeMockRedis({
+			strings: { "LiveSnapshotMeta:2526:33": snapshotMeta(revision, 15) },
+		});
+		const supabaseFromCalls: string[] = [];
+		const contextOptions = {
+			redis,
+			supabaseFromCalls,
+			supabaseDataByTable: {
+				player_stats: elementIds.map((elementId) => ({
+					event_id: 33,
+					element_id: elementId,
+					total_points: elementId,
+				})),
+				event_live_explains: elementIds.map((elementId) => ({
+					event_id: 33,
+					element_id: elementId,
+					minutes: 45,
+					minutes_points: 1,
+				})),
+			},
+		};
+
+		const results = await Promise.all(
+			Array.from({ length: 100 }, (_unused, index) => {
+				const elementId = elementIds[index % elementIds.length]!;
+				return liveRepository.getEventLiveExplains(buildContext(contextOptions), 33, [elementId]);
+			})
+		);
+
+		expect(results.every((batch) => batch.length === 1)).toBe(true);
+		expect(
+			results.every((batch, index) => batch[0]?.elementId === elementIds[index % elementIds.length])
+		).toBe(true);
+		expect(supabaseFromCalls).toEqual(["player_stats", "event_live_explains"]);
+		expect(redis.hmgetCalls.filter(([key]) => key === "EventLiveExplain:2526:33")).toHaveLength(1);
 	});
 
 	it("falls back to the historical element column", async () => {

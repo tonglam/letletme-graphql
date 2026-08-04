@@ -229,10 +229,10 @@ describe("liveSnapshot GraphQL contract", () => {
 						metadataReads += 1;
 						return metadata(metadataReads <= 2 ? revisions[0] : revisions[1]);
 					}
-					if (key === `gql:v2:2526:live:explain:33:1:full:revision:${revisions[0]}`) {
+					if (key === `gql:v2:2526:live:explain:shape2:33:1:full:revision:${revisions[0]}`) {
 						return explain(7);
 					}
-					if (key === `gql:v2:2526:live:explain:33:1:full:revision:${revisions[1]}`) {
+					if (key === `gql:v2:2526:live:explain:shape2:33:1:full:revision:${revisions[1]}`) {
 						return explain(14);
 					}
 					return null;
@@ -291,8 +291,8 @@ describe("liveSnapshot GraphQL contract", () => {
 				selectedBy: null,
 			});
 		const cache = new Map([
-			[`gql:v2:2526:live:explain:33:1:contributions:revision:${revision}`, explain(1, 6)],
-			[`gql:v2:2526:live:explain:33:2:contributions:revision:${revision}`, explain(2, 9)],
+			[`gql:v2:2526:live:explain:shape2:33:1:contributions:revision:${revision}`, explain(1, 6)],
+			[`gql:v2:2526:live:explain:shape2:33:2:contributions:revision:${revision}`, explain(2, 9)],
 		]);
 		const context = {
 			redis: {
@@ -336,6 +336,85 @@ describe("liveSnapshot GraphQL contract", () => {
 		]);
 		expect(result.data?.liveSnapshot).toEqual({ revision });
 		expect(metadataReads).toBe(3);
+	});
+
+	it("batches selectedBy without dropping player_stats-only explanations", async () => {
+		const revision = "4".repeat(24);
+		const metadata = JSON.stringify({
+			schemaVersion: 1,
+			season: "2526",
+			eventId: 33,
+			revision,
+			state: "live",
+			publishedAt: "2025-08-15T20:00:00.000Z",
+			checkedAt: "2025-08-15T20:01:00.000Z",
+			eventLiveCount: 700,
+			fixtureCount: 10,
+			fixtureTeamCount: 20,
+			bonusTeamCount: 2,
+		});
+		const fromCalls: string[] = [];
+		const hmgetCalls: string[] = [];
+		const supabase = {
+			from: (table: string) => {
+				fromCalls.push(table);
+				const result = {
+					data:
+						table === "player_stats"
+							? [
+									{ event_id: 33, element_id: 1, total_points: 3, selected_by_percent: 12.5 },
+									{ event_id: 33, element_id: 2, total_points: 4, selected_by_percent: 7.25 },
+								]
+							: [],
+					error: null,
+				};
+				const builder = {
+					select: () => builder,
+					eq: () => builder,
+					in: async () => result,
+				};
+				return builder;
+			},
+		};
+		const context = {
+			redis: {
+				get: async (key: string): Promise<string | null> => {
+					if (key === "Season:active") return "2526";
+					if (key === "LiveSnapshotMeta:2526:33") return metadata;
+					return null;
+				},
+				mget: async (...keys: string[]): Promise<Array<string | null>> => keys.map(() => null),
+				hmget: async (key: string, ...fields: string[]): Promise<Array<string | null>> => {
+					hmgetCalls.push(key);
+					return fields.map(() => null);
+				},
+				set: async (): Promise<"OK"> => "OK",
+				del: async (): Promise<number> => 0,
+				hset: async (): Promise<number> => 0,
+				expire: async (): Promise<number> => 1,
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+			supabase,
+		} as unknown as GraphQLContext;
+
+		const result = await graphql({
+			schema,
+			source: `query {
+				eventLiveExplains(eventId: 33, elementIds: [1, 2]) {
+					elementId
+					selectedBy
+				}
+			}`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.eventLiveExplains).toEqual([
+			{ elementId: 1, selectedBy: 12.5 },
+			{ elementId: 2, selectedBy: 7.25 },
+		]);
+		expect(fromCalls).toEqual(["player_stats", "event_live_explains"]);
+		expect(hmgetCalls).toEqual(["EventLiveExplain:2526:33"]);
 	});
 
 	it("coordinates public event fixtures with snapshot fallback for the operation", async () => {

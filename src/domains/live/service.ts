@@ -131,10 +131,11 @@ export const liveService = {
 	async getEventLiveExplain(
 		context: GraphQLContext,
 		eventId: number,
-		elementId: number
+		elementId: number,
+		includeSelectedBy = false
 	): Promise<LiveExplain | null> {
 		return withLiveSnapshotConsistency(context, eventId, () =>
-			liveRepository.getEventLiveExplain(context, eventId, elementId)
+			liveRepository.getEventLiveExplain(context, eventId, elementId, includeSelectedBy)
 		);
 	},
 
@@ -142,12 +143,13 @@ export const liveService = {
 		context: GraphQLContext,
 		eventId: number,
 		elementIds: number[],
-		mode: LiveExplainReadMode = "full"
+		mode: LiveExplainReadMode = "full",
+		includeSelectedBy = false
 	): Promise<LiveExplain[]> {
 		assertValidLiveExplainBatch(elementIds);
 		if (elementIds.length === 0) return [];
 		return withLiveSnapshotConsistency(context, eventId, () =>
-			liveRepository.getEventLiveExplains(context, eventId, elementIds, mode)
+			liveRepository.getEventLiveExplains(context, eventId, elementIds, mode, includeSelectedBy)
 		);
 	},
 

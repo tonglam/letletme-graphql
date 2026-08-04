@@ -178,10 +178,16 @@ export const liveResolvers = {
 		eventLiveExplain: async (
 			_parent: unknown,
 			args: LiveExplainArgs,
-			context: GraphQLContext
+			context: GraphQLContext,
+			info: GraphQLResolveInfo
 		): Promise<LiveExplain | null> =>
 			withLiveSnapshotRoot(context, () =>
-				liveService.getEventLiveExplain(context, args.eventId, args.elementId)
+				liveService.getEventLiveExplain(
+					context,
+					args.eventId,
+					args.elementId,
+					directSelectionRequestsField(info, "selectedBy")
+				)
 			),
 		eventLiveExplains: async (
 			_parent: unknown,
@@ -195,11 +201,13 @@ export const liveResolvers = {
 				)
 					? "full"
 					: "contributions";
+				const includeSelectedBy = directSelectionRequestsField(info, "selectedBy");
 				const explains = await liveService.getEventLiveExplains(
 					context,
 					args.eventId,
 					args.elementIds,
-					mode
+					mode,
+					includeSelectedBy
 				);
 				if (explains.length > 0 && parentSelectionRequestsField(info, "player")) {
 					await preloadPlayersByIds(
@@ -273,7 +281,12 @@ export const liveResolvers = {
 			parent: LiveExplain,
 			_args: Record<string, never>,
 			context: GraphQLContext
-		): Promise<number | null> =>
-			liveService.getSelectedByPercent(context, parent.eventId, parent.elementId),
+		): Promise<number | null> => {
+			const preloadKey = `${parent.eventId}:${parent.elementId}`;
+			if (context.liveSelectedByPreload?.has(preloadKey)) {
+				return context.liveSelectedByPreload.get(preloadKey) ?? null;
+			}
+			return liveService.getSelectedByPercent(context, parent.eventId, parent.elementId);
+		},
 	},
 };
