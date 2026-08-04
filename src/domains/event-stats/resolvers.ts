@@ -6,6 +6,7 @@ import type {
 	TransferStatPlayer,
 } from "./repository";
 import { eventStatsService } from "./service";
+import { assertTournamentInsightsReady } from "../tournaments/service";
 
 type TournamentSelectionStatsArgs = {
 	tournamentId: number;
@@ -19,13 +20,15 @@ export const eventStatsResolvers = {
 			_parent: unknown,
 			args: TournamentSelectionStatsArgs,
 			context: GraphQLContext
-		): Promise<TournamentSelectionStats> =>
-			eventStatsService.getTournamentSelectionStats(
+		): Promise<TournamentSelectionStats> => {
+			await assertTournamentInsightsReady(context, args.tournamentId);
+			return eventStatsService.getTournamentSelectionStats(
 				context,
 				args.tournamentId,
 				args.eventId,
 				args.limit ?? 10
-			),
+			);
+		},
 	},
 	SelectionStatPlayer: {
 		position: (parent: SelectionStatPlayer): string => parent.position,

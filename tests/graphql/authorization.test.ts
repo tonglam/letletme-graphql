@@ -10,7 +10,36 @@ const logger = {
 	warn: (): void => {},
 } as never;
 
-const supabase = {} as never;
+const supabase = {
+	from: (table: string) => {
+		const filters = new Map<string, unknown>();
+		const chain = {
+			select: () => chain,
+			eq: (column: string, value: unknown) => {
+				filters.set(column, value);
+				return chain;
+			},
+			limit: async () => {
+				if (
+					table === "tournament_entries" &&
+					filters.get("tournament_id") === 7 &&
+					filters.get("entry_id") === 123
+				) {
+					return { data: [{ entry_id: 123 }], error: null };
+				}
+				if (
+					table === "tournament_infos" &&
+					filters.get("id") === 7 &&
+					filters.get("admin_entry_id") === 123
+				) {
+					return { data: [{ admin_entry_id: 123 }], error: null };
+				}
+				return { data: [], error: null };
+			},
+		};
+		return chain;
+	},
+} as never;
 
 const websitePrincipal: Principal = {
 	userId: "user-1",
@@ -121,5 +150,38 @@ describe("authorizeGraphQLRequest", () => {
 			expect(result.status).toBe(403);
 			expect(result.code).toBe("FORBIDDEN");
 		}
+	});
+
+	it("allows the direct tournament shell for a verified member", async () => {
+		const result = await authorize(
+			`query Shell($tournamentId: Int!, $entryId: Int!) {
+				tournament(tournamentId: $tournamentId, entryId: $entryId) { id }
+			}`,
+			{ tournamentId: 7, entryId: 123 },
+			websitePrincipal
+		);
+		expect(result.ok).toBe(true);
+	});
+
+	it("allows a retained administrator to manage after leaving the roster", async () => {
+		const result = await authorize(
+			`query Managed($tournamentId: Int!, $entryId: Int!) {
+				managedTournament(tournamentId: $tournamentId, entryId: $entryId) { id }
+			}`,
+			{ tournamentId: 7, entryId: 123 },
+			websitePrincipal
+		);
+		expect(result.ok).toBe(true);
+	});
+
+	it("rejects managed tournament impersonation", async () => {
+		const result = await authorize(
+			`query Managed($tournamentId: Int!, $entryId: Int!) {
+				managedTournament(tournamentId: $tournamentId, entryId: $entryId) { id }
+			}`,
+			{ tournamentId: 7, entryId: 999 },
+			websitePrincipal
+		);
+		expect(result.ok).toBe(false);
 	});
 });

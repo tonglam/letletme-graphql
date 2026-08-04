@@ -87,16 +87,20 @@ const ownEntryArgFields = new Map([
 	["entryLeagues", "entryId"],
 	["entryH2HMatchResults", "entryId"],
 	["entryTournaments", "entryId"],
+	["tournament", "entryId"],
+	["managedTournament", "entryId"],
 	["tournamentEntryRankingSummary", "entryId"],
 ]);
 
 const tournamentMembershipFields = new Set([
+	"tournamentParticipants",
 	"tournamentEntryIds",
 	"tournamentEventResults",
 	"tournamentBattleGroupResults",
 	"tournamentSelectionStats",
 	"calcLivePointsForTournament",
 	"tournamentEntryRankingSummary",
+	"tournament",
 ]);
 
 const protectedFields = new Set([
@@ -265,6 +269,21 @@ const hasLeagueMembership = async (
 	return ((data as { entry_id: number }[] | null) ?? []).length > 0;
 };
 
+const isTournamentAdmin = async (
+	supabase: SupabaseClient,
+	tournamentId: number,
+	entryId: number
+): Promise<boolean> => {
+	const { data, error } = await supabase
+		.from("tournament_infos")
+		.select("admin_entry_id")
+		.eq("id", tournamentId)
+		.eq("admin_entry_id", entryId)
+		.limit(1);
+	if (error) return false;
+	return ((data as { admin_entry_id: number }[] | null) ?? []).length > 0;
+};
+
 const authorizeRootField = async (
 	field: RootField,
 	principal: Principal | null | undefined,
@@ -327,6 +346,22 @@ const authorizeRootField = async (
 				status: 403,
 				code: "FORBIDDEN",
 				message: "User is not a member of this tournament",
+			};
+		}
+	}
+
+	if (field.name === "managedTournament") {
+		const tournamentId = asPositiveInt(field.args.tournamentId);
+		if (
+			!tournamentId ||
+			!hasVerifiedEntry(principal) ||
+			!(await isTournamentAdmin(supabase, tournamentId, principal.fplEntryId!))
+		) {
+			return {
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+				message: "User is not the administrator of this tournament",
 			};
 		}
 	}

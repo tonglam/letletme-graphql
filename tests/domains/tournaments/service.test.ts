@@ -8,7 +8,11 @@ import {
 	TournamentState,
 	tournamentsRepository,
 } from "../../../src/domains/tournaments/repository";
-import { tournamentsService } from "../../../src/domains/tournaments/service";
+import {
+	assertTournamentInsightsReady,
+	assertTournamentStandingsReady,
+	tournamentsService,
+} from "../../../src/domains/tournaments/service";
 import type { GraphQLContext } from "../../../src/graphql/context";
 
 describe("tournamentsService.getEntryTournaments", () => {
@@ -63,6 +67,40 @@ describe("tournamentsService.getEntryTournaments", () => {
 			expect(result).toEqual(expected);
 		} finally {
 			tournamentsRepository.getEntryTournaments = original;
+		}
+	});
+});
+
+describe("tournament readiness", () => {
+	it("rejects standings before core publication", async () => {
+		const original = tournamentsRepository.getTournamentInfoUncached;
+		tournamentsRepository.getTournamentInfoUncached = async () =>
+			({ id: 7, standingsReadyAt: null }) as never;
+		try {
+			await expect(assertTournamentStandingsReady({} as GraphQLContext, 7)).rejects.toMatchObject({
+				extensions: { code: "TOURNAMENT_STANDINGS_NOT_READY" },
+			});
+		} finally {
+			tournamentsRepository.getTournamentInfoUncached = original;
+		}
+	});
+
+	it("keeps insights gated while enrichment is incomplete", async () => {
+		const original = tournamentsRepository.getTournamentInfoUncached;
+		tournamentsRepository.getTournamentInfoUncached = async () =>
+			({
+				id: 7,
+				standingsReadyAt: "2026-08-04T00:00:00.000Z",
+				setupStatus: "processing",
+				setupPhase: "enriching_history",
+				setupHasWarnings: false,
+			}) as never;
+		try {
+			await expect(assertTournamentInsightsReady({} as GraphQLContext, 7)).rejects.toMatchObject({
+				extensions: { code: "TOURNAMENT_INSIGHTS_NOT_READY" },
+			});
+		} finally {
+			tournamentsRepository.getTournamentInfoUncached = original;
 		}
 	});
 });
