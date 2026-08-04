@@ -588,6 +588,17 @@ const sortByKickoffTime = (matches: LiveMatchData[]): LiveMatchData[] => {
 	});
 };
 
+export const loadUpcomingEventFixtures = (
+	context: GraphQLContext,
+	currentEventId: number
+): Promise<Fixture[]> => {
+	if (currentEventId >= MAX_EVENT_ID) return Promise.resolve([]);
+	const nextEventId = currentEventId + 1;
+	return withLiveSnapshotConsistency(context, nextEventId, () =>
+		fixturesRepository.getEventFixtures(context, nextEventId)
+	);
+};
+
 export const liveMatchesService = {
 	async getAllLiveMatches(context: GraphQLContext, upcoming = false): Promise<LiveMatches> {
 		const currentEventId = await getCurrentEventId(context);
@@ -677,7 +688,7 @@ export const liveMatchesService = {
 
 			let nextEventMatches: LiveMatchData[] = [];
 			if (upcoming && currentEventId < MAX_EVENT_ID) {
-				const nextFixtures = await fixturesRepository.getEventFixtures(context, currentEventId + 1);
+				const nextFixtures = await loadUpcomingEventFixtures(context, currentEventId);
 				nextEventMatches = nextFixtures.map((fixture) =>
 					buildMatch(fixture, fixture.id, "NEXT_EVENT", teamDataMap, teamsById)
 				);

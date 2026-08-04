@@ -4,7 +4,8 @@ import type { GraphQLContext } from "../../../src/graphql/context";
 
 const contextWithRedis = (
 	hgetall: (key: string) => Promise<Record<string, string>>,
-	snapshotMeta: string | null = null
+	snapshotMeta: string | null = null,
+	playerTeams: Record<string, number> = { "101": 1, "102": 1, "201": 2 }
 ) =>
 	({
 		redis: {
@@ -14,6 +15,10 @@ const contextWithRedis = (
 				return null;
 			},
 			hgetall,
+			hmget: async (_key: string, ...fields: string[]) =>
+				fields.map((field) =>
+					playerTeams[field] ? JSON.stringify({ teamId: playerTeams[field] }) : null
+				),
 		},
 		logger: {
 			info: () => undefined,
@@ -74,6 +79,34 @@ describe("loadLiveBonusByPlayerId", () => {
 		});
 		const result = await loadLiveBonusByPlayerId(
 			contextWithRedis(async () => ({ "1": JSON.stringify({ "101": 3 }) }), snapshotMeta),
+			12
+		);
+
+		expect(result.size).toBe(0);
+	});
+
+	it("rejects a same-sized bonus hash whose players belong to different team fields", async () => {
+		const snapshotMeta = JSON.stringify({
+			schemaVersion: 1,
+			season: "2526",
+			eventId: 12,
+			revision: "c".repeat(24),
+			state: "live",
+			publishedAt: "2026-04-18T14:00:00.000Z",
+			checkedAt: "2026-04-18T15:00:00.000Z",
+			eventLiveCount: 700,
+			fixtureCount: 10,
+			fixtureTeamCount: 20,
+			bonusTeamCount: 2,
+		});
+		const result = await loadLiveBonusByPlayerId(
+			contextWithRedis(
+				async () => ({
+					"1": JSON.stringify({ "201": 3 }),
+					"2": JSON.stringify({ "101": 5 }),
+				}),
+				snapshotMeta
+			),
 			12
 		);
 

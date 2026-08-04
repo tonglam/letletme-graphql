@@ -72,11 +72,13 @@ export async function loadLiveBonusByPlayerId(
 		return new Map();
 	}
 	const bonusByPlayerId = new Map<number, number>();
+	const teamByPlayerId = new Map<number, number>();
 	let malformed = false;
 
-	for (const teamBonusRaw of Object.values(hashEntries)) {
+	for (const [teamIdRaw, teamBonusRaw] of Object.entries(hashEntries)) {
+		const teamId = /^\d+$/.test(teamIdRaw) ? Number(teamIdRaw) : Number.NaN;
 		const teamBonus = parseTeamBonus(teamBonusRaw);
-		if (!teamBonus) {
+		if (!Number.isInteger(teamId) || teamId <= 0 || teamIdRaw !== String(teamId) || !teamBonus) {
 			malformed = true;
 			continue;
 		}
@@ -84,11 +86,50 @@ export async function loadLiveBonusByPlayerId(
 		for (const [elementIdRaw, bonusRaw] of Object.entries(teamBonus)) {
 			const elementId = /^\d+$/.test(elementIdRaw) ? Number(elementIdRaw) : Number.NaN;
 			const bonus = parseBonusValue(bonusRaw);
-			if (Number.isInteger(elementId) && elementId > 0 && bonus !== null && bonus >= 0) {
+			if (
+				Number.isInteger(elementId) &&
+				elementId > 0 &&
+				elementIdRaw === String(elementId) &&
+				bonus !== null &&
+				bonus >= 0 &&
+				!teamByPlayerId.has(elementId)
+			) {
 				bonusByPlayerId.set(elementId, bonus);
+				teamByPlayerId.set(elementId, teamId);
 			} else {
 				malformed = true;
 			}
+		}
+	}
+	if (!malformed && teamByPlayerId.size > 0) {
+		const playerIds = [...teamByPlayerId.keys()];
+		try {
+			const playerRows = await context.redis.hmget(`Player:${season}`, ...playerIds.map(String));
+			for (const [index, elementId] of playerIds.entries()) {
+				const raw = playerRows[index];
+				if (!raw) {
+					malformed = true;
+					break;
+				}
+				const parsed = JSON.parse(raw) as unknown;
+				if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+					malformed = true;
+					break;
+				}
+				const row = parsed as Record<string, unknown>;
+				const playerTeamId = parseBonusValue(row.teamId ?? row.team_id);
+				if (playerTeamId !== teamByPlayerId.get(elementId)) {
+					malformed = true;
+					break;
+				}
+			}
+		} catch (error) {
+			metrics.cacheRepositoryEvents.labels("live_bonus", "identity_unavailable").inc();
+			context.logger.warn(
+				{ err: error, hashKey },
+				"Live bonus player identity unavailable; preserving official aggregate bonus"
+			);
+			return new Map();
 		}
 	}
 	if (malformed) {
