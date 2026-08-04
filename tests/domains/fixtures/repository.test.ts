@@ -247,4 +247,79 @@ describe("fixturesRepository.getEventFixtures", () => {
 		expect(result).toHaveLength(1);
 		expect(result[0].id).toBe(329);
 	});
+
+	it("rejects same-sized fixture hashes with foreign, mismatched, or duplicate identities", async () => {
+		const foreignFixture = JSON.stringify({
+			id: 328,
+			code: 2562222,
+			event: 34,
+			finished: false,
+			kickoffTime: "2026-04-18T14:00:00.000Z",
+			minutes: 60,
+			started: true,
+			teamH: 15,
+			teamA: 4,
+		});
+		const duplicateUnderWrongField = JSON.stringify({
+			id: 328,
+			code: 2562222,
+			event: 33,
+			finished: false,
+			kickoffTime: "2026-04-18T14:00:00.000Z",
+			minutes: 60,
+			started: true,
+			teamH: 15,
+			teamA: 4,
+		});
+		const snapshotMeta = JSON.stringify({
+			schemaVersion: 1,
+			season: "2526",
+			eventId: 33,
+			revision: "b".repeat(24),
+			state: "live",
+			publishedAt: "2026-04-18T14:00:00.000Z",
+			checkedAt: "2026-04-18T15:00:00.000Z",
+			eventLiveCount: 700,
+			fixtureCount: 2,
+			fixtureTeamCount: 4,
+			bonusTeamCount: 2,
+		});
+		const context = buildContext({
+			redisHashes: {
+				"Fixtures:2526:33": {
+					"328": foreignFixture,
+					"329": duplicateUnderWrongField,
+				},
+			},
+			redisData: {
+				"Season:active": "2526",
+				"LiveSnapshotMeta:2526:33": snapshotMeta,
+			},
+			supabaseData: [
+				{
+					id: 330,
+					code: 2562224,
+					event_id: 33,
+					finished: true,
+					finished_provisional: true,
+					kickoff_time: "2026-04-18T18:30:00.000Z",
+					minutes: 90,
+					started: true,
+					team_h_id: 6,
+					team_a_id: 9,
+					team_h_score: 1,
+					team_a_score: 1,
+					team_h_difficulty: 3,
+					team_a_difficulty: 3,
+				},
+			],
+		});
+
+		const result = await withLiveSnapshotConsistency(context, 33, () =>
+			fixturesRepository.getEventFixtures(context, 33)
+		);
+
+		expect(result).toHaveLength(1);
+		expect(result[0].id).toBe(330);
+	});
 });

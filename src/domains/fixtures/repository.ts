@@ -221,17 +221,24 @@ const loadEventFixturesFromRedis = async (
 		return null;
 	}
 
-	const fields = Object.values(hashEntries);
+	const fields = Object.entries(hashEntries);
 	if (fields.length === 0) {
 		return null;
 	}
 
 	const fixtures: Fixture[] = [];
+	const seenFixtureIds = new Set<number>();
 	let malformed = false;
-	for (const fieldValue of fields) {
+	for (const [fieldName, fieldValue] of fields) {
 		const parsed = parseJsonUnknown(fieldValue);
 		const fixture = mapSyncJobFixture(parsed);
-		if (fixture) {
+		if (
+			fixture &&
+			fieldName === String(fixture.id) &&
+			fixture.eventId === eventId &&
+			!seenFixtureIds.has(fixture.id)
+		) {
+			seenFixtureIds.add(fixture.id);
 			fixtures.push(fixture);
 		} else {
 			malformed = true;
