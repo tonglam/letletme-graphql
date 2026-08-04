@@ -76,6 +76,10 @@ type MatchBucketsFromRedis = {
 	finished: LiveFixtureRedisRow[];
 };
 
+type LiveFixtureIdentity = Pick<Fixture, "id" | "teamHId" | "teamAId">;
+type LiveFixtureIdentitySource =
+	readonly LiveFixtureIdentity[] | PromiseLike<readonly LiveFixtureIdentity[]>;
+
 export const applyLiveFixtureScores = (
 	fixture: Fixture,
 	liveFixture: Pick<LiveFixtureRedisRow, "teamScore" | "againstTeamScore"> | null
@@ -165,11 +169,21 @@ const parseLiveFixtureRow = (value: unknown): LiveFixtureRedisRow | null => {
 
 	const teamId = asNumber(row.teamId ?? row.team_id);
 	const againstId = asNumber(row.againstId ?? row.against_id);
-	if (teamId === null || againstId === null) {
+	if (
+		teamId === null ||
+		againstId === null ||
+		!Number.isInteger(teamId) ||
+		!Number.isInteger(againstId) ||
+		teamId <= 0 ||
+		againstId <= 0
+	) {
 		return null;
 	}
 
 	const fixtureId = asNumber(row.fixtureId ?? row.fixture_id ?? row.fixture ?? row.id);
+	if (fixtureId !== null && (!Number.isInteger(fixtureId) || fixtureId <= 0)) {
+		return null;
+	}
 
 	return {
 		fixtureId: fixtureId === null ? null : Math.trunc(fixtureId),
@@ -246,11 +260,65 @@ const mergeMatchBuckets = (
 	finished: [...target.finished, ...source.finished],
 });
 
+const liveFixtureRows = (buckets: MatchBucketsFromRedis): LiveFixtureRedisRow[] => [
+	...buckets.notStarted,
+	...buckets.playing,
+	...buckets.finished,
+];
+
+/**
+ * A cardinality match is not an identity match: a same-sized hash from another
+ * event can otherwise look complete. Bind every parsed home-side row to the
+ * coherent Fixtures sibling by fixture ID when available and always by the
+ * ordered home/away team pair. Legacy rows without IDs consume one unmatched
+ * expected pair, which also handles the unlikely duplicate-pair case safely.
+ */
+export const matchesLiveFixtureIdentities = (
+	buckets: MatchBucketsFromRedis,
+	expectedFixtures: readonly LiveFixtureIdentity[]
+): boolean => {
+	const rows = liveFixtureRows(buckets);
+	if (rows.length !== expectedFixtures.length) return false;
+
+	const expectedById = new Map(expectedFixtures.map((fixture) => [fixture.id, fixture]));
+	const expectedIdsByPair = new Map<string, number[]>();
+	for (const fixture of expectedFixtures) {
+		const pair = `${fixture.teamHId}:${fixture.teamAId}`;
+		const ids = expectedIdsByPair.get(pair) ?? [];
+		ids.push(fixture.id);
+		expectedIdsByPair.set(pair, ids);
+	}
+
+	const matchedFixtureIds = new Set<number>();
+	for (const row of rows) {
+		const pair = `${row.teamId}:${row.againstId}`;
+		const fixture =
+			row.fixtureId === null
+				? expectedById.get(
+						expectedIdsByPair.get(pair)?.find((id) => !matchedFixtureIds.has(id)) ?? -1
+					)
+				: expectedById.get(row.fixtureId);
+		if (
+			!fixture ||
+			matchedFixtureIds.has(fixture.id) ||
+			fixture.teamHId !== row.teamId ||
+			fixture.teamAId !== row.againstId
+		) {
+			return false;
+		}
+		matchedFixtureIds.add(fixture.id);
+	}
+
+	return matchedFixtureIds.size === expectedFixtures.length;
+};
+
 export const loadLiveFixtureBucketsFromRedis = async (
 	context: GraphQLContext,
-	eventId: number
+	eventId: number,
+	expectedFixturesSource: LiveFixtureIdentitySource
 ): Promise<MatchBucketsFromRedis | null> => {
 	if (isLiveSnapshotDatabaseFallback(context, eventId)) return null;
+	const expectedFixturesPromise = Promise.resolve(expectedFixturesSource);
 	const season = await getCurrentSeason(context);
 	const meta = await loadLiveSnapshotMeta(context, eventId, { season });
 	for (const prefix of ["LiveFixtureV2", "LiveFixture"] as const) {
@@ -293,6 +361,19 @@ export const loadLiveFixtureBucketsFromRedis = async (
 					actualCount: fixtureCount,
 				},
 				"Malformed live fixture revision; trying compatibility view"
+			);
+			continue;
+		}
+		const expectedFixtures = await expectedFixturesPromise;
+		if (!matchesLiveFixtureIdentities(buckets, expectedFixtures)) {
+			context.logger.warn(
+				{
+					redisKey,
+					revision: meta?.revision,
+					expectedCount: expectedFixtures.length,
+					actualCount: fixtureCount,
+				},
+				"Mismatched live fixture identities; trying compatibility view"
 			);
 			continue;
 		}
@@ -520,10 +601,11 @@ export const liveMatchesService = {
 			};
 		}
 		return withLiveSnapshotConsistency(context, currentEventId, async () => {
+			const currentFixturesPromise = fixturesRepository.getEventFixtures(context, currentEventId);
 			const [teamsById, redisBuckets, currentFixtures] = await Promise.all([
 				buildTeamMap(context),
-				loadLiveFixtureBucketsFromRedis(context, currentEventId),
-				fixturesRepository.getEventFixtures(context, currentEventId),
+				loadLiveFixtureBucketsFromRedis(context, currentEventId, currentFixturesPromise),
+				currentFixturesPromise,
 			]);
 
 			const notStartedMatches: LiveMatchData[] = [];

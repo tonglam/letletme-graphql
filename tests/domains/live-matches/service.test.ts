@@ -10,6 +10,8 @@ import {
 } from "../../../src/domains/live/snapshot-meta";
 import type { GraphQLContext } from "../../../src/graphql/context";
 
+const fixtureIdentity = [{ id: 701, teamHId: 1, teamAId: 2 }] as const;
+
 describe("resolveLiveMatchStatus", () => {
 	it("prefers the authoritative fixture ID over a stale pair status", () => {
 		const fixture = { id: 701, teamHId: 1, teamAId: 2, finished: false, started: true };
@@ -86,7 +88,7 @@ describe("loadLiveFixtureBucketsFromRedis", () => {
 			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
 		} as unknown as GraphQLContext;
 
-		const buckets = await loadLiveFixtureBucketsFromRedis(context, 33);
+		const buckets = await loadLiveFixtureBucketsFromRedis(context, 33, fixtureIdentity);
 		expect(buckets?.playing[0]).toMatchObject({ fixtureId: 701, teamScore: 3 });
 		expect(keys).toEqual(["LiveFixtureV2:2526:33"]);
 	});
@@ -117,7 +119,7 @@ describe("loadLiveFixtureBucketsFromRedis", () => {
 			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
 		} as unknown as GraphQLContext;
 
-		const buckets = await loadLiveFixtureBucketsFromRedis(context, 33);
+		const buckets = await loadLiveFixtureBucketsFromRedis(context, 33, fixtureIdentity);
 		expect(buckets?.playing[0]).toMatchObject({ fixtureId: null, teamScore: 1 });
 		expect(keys).toEqual(["LiveFixtureV2:2526:33", "LiveFixture:2526:33"]);
 	});
@@ -153,7 +155,62 @@ describe("loadLiveFixtureBucketsFromRedis", () => {
 		} as unknown as GraphQLContext;
 
 		const result = await withLiveSnapshotConsistency(context, 33, () =>
-			loadLiveFixtureBucketsFromRedis(context, 33)
+			loadLiveFixtureBucketsFromRedis(context, 33, fixtureIdentity)
+		);
+
+		expect(result).toBeNull();
+		expect(isLiveSnapshotDatabaseFallback(context, 33)).toBe(true);
+		expect(hgetallKeys).toEqual(["LiveFixtureV2:2526:33", "LiveFixture:2526:33"]);
+	});
+
+	it("rejects same-sized live views whose fixture identities belong to another event", async () => {
+		const hgetallKeys: string[] = [];
+		const metadata = JSON.stringify({
+			schemaVersion: 1,
+			season: "2526",
+			eventId: 33,
+			revision: "d".repeat(24),
+			state: "live",
+			publishedAt: "2025-08-15T20:00:00.000Z",
+			checkedAt: "2025-08-15T20:00:00.000Z",
+			eventLiveCount: 700,
+			fixtureCount: 1,
+			fixtureTeamCount: 2,
+			bonusTeamCount: 2,
+		});
+		const liveHash = (
+			home: { fixtureId?: number; teamId: number; againstId: number },
+			away: { fixtureId?: number; teamId: number; againstId: number }
+		) => ({
+			[String(home.teamId)]: JSON.stringify({
+				Playing: [{ ...home, teamScore: 3, againstTeamScore: 2, wasHome: true }],
+			}),
+			[String(away.teamId)]: JSON.stringify({
+				Playing: [{ ...away, teamScore: 2, againstTeamScore: 3, wasHome: false }],
+			}),
+		});
+		const context = {
+			redis: {
+				get: async (key: string) => {
+					if (key === "Season:active") return "2526";
+					if (key === "LiveSnapshotMeta:2526:33") return metadata;
+					return null;
+				},
+				hgetall: async (key: string) => {
+					hgetallKeys.push(key);
+					return key.startsWith("LiveFixtureV2:")
+						? liveHash(
+								{ fixtureId: 999, teamId: 1, againstId: 2 },
+								{ fixtureId: 999, teamId: 2, againstId: 1 }
+							)
+						: liveHash({ teamId: 9, againstId: 10 }, { teamId: 10, againstId: 9 });
+				},
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+		} as unknown as GraphQLContext;
+
+		const result = await withLiveSnapshotConsistency(context, 33, () =>
+			loadLiveFixtureBucketsFromRedis(context, 33, fixtureIdentity)
 		);
 
 		expect(result).toBeNull();
