@@ -526,6 +526,36 @@ const FLAT_LIVE_EXPLAIN_STATS = [
 	},
 ] as const;
 
+/**
+ * When producers store only raw counts (no `*_points` columns), fill scoring
+ * points from FPL rules so web clients can render a non-empty breakdown.
+ * Position-weighted events (goals, clean sheets) stay 0 unless the row has
+ * explicit points — those need element type, which is not always present here.
+ */
+const estimateFplPointsFromValue = (identifier: string, value: number): number | null => {
+	if (!Number.isFinite(value) || value === 0) return 0;
+	switch (identifier) {
+		case "minutes":
+			return value >= 60 ? 2 : value > 0 ? 1 : 0;
+		case "assists":
+			return value * 3;
+		case "saves":
+			return Math.floor(value / 3);
+		case "yellow_cards":
+			return value * -1;
+		case "red_cards":
+			return value * -3;
+		case "own_goals":
+			return value * -2;
+		case "penalties_missed":
+			return value * -2;
+		case "penalties_saved":
+			return value * 5;
+		default:
+			return null;
+	}
+};
+
 const mapFlatLiveExplainContributions = (
 	row: Record<string, unknown> | null
 ): LiveExplainStatContribution[] => {
@@ -533,12 +563,17 @@ const mapFlatLiveExplainContributions = (
 	const contributions: LiveExplainStatContribution[] = [];
 	for (const definition of FLAT_LIVE_EXPLAIN_STATS) {
 		const value = parseNumericValue(pickRecordValue(row, ...definition.value));
-		const points = parseIntegerValue(pickRecordValue(row, ...definition.points));
-		if ((value ?? 0) === 0 && (points ?? 0) === 0) continue;
+		const rawPoints = parseIntegerValue(pickRecordValue(row, ...definition.points));
+		if ((value ?? 0) === 0 && (rawPoints ?? 0) === 0) continue;
+		let points = rawPoints ?? 0;
+		if (points === 0 && value !== null && value !== 0) {
+			const estimated = estimateFplPointsFromValue(definition.identifier, value);
+			if (estimated !== null) points = estimated;
+		}
 		contributions.push({
 			identifier: definition.identifier,
 			value,
-			points: points ?? 0,
+			points,
 			pointsModification: null,
 		});
 	}
@@ -1123,6 +1158,7 @@ const loadColdLiveExplainBatch = async (
 			contributions = mapScoringItemContributions(elRow?.scoring_items ?? []);
 		}
 		if (contributions.length === 0) contributions = mapFlatLiveExplainContributions(elRow);
+		if (contributions.length === 0) contributions = mapFlatLiveExplainContributions(psRow);
 
 		const result: LiveExplain = {
 			eventId,

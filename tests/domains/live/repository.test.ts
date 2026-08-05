@@ -213,6 +213,50 @@ describe("liveRepository v3 explanation query cache", () => {
 		expect(queryCacheWrite?.slice(-2)).toEqual(["EX", 10]);
 	});
 
+	it("builds contributions from player stats when durable explain facts are empty", async () => {
+		const { context } = liveContext();
+		const calls: string[] = [];
+		withReadRows(
+			context,
+			{
+				"fpl.player_event_snapshots": [
+					{
+						event_id: 1,
+						element_id: 1,
+						minutes: 66,
+						goals_scored: 1,
+						assists: 2,
+						yellow_cards: 1,
+						bonus: 3,
+						total_points: 14,
+					},
+				],
+				"fpl.player_gameweek_stats": [],
+				"fpl.player_gameweek_scoring_items": [],
+				"fpl.player_fixture_stats": [],
+			},
+			calls
+		);
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [1]);
+
+		expect(result?.stats.totalPoints).toBe(14);
+		expect(result?.contributions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ identifier: "minutes", value: 66, points: 2 }),
+				expect.objectContaining({ identifier: "assists", value: 2, points: 6 }),
+				expect.objectContaining({ identifier: "yellow_cards", value: 1, points: -1 }),
+				expect.objectContaining({ identifier: "bonus", value: 3, points: 3 }),
+			])
+		);
+		expect(calls).toEqual([
+			"fpl.player_event_snapshots",
+			"fpl.player_gameweek_stats",
+			"fpl.player_gameweek_scoring_items",
+			"fpl.player_fixture_stats",
+		]);
+	});
+
 	it("loads a fifteen-player explanation batch with two bounded reporting reads", async () => {
 		const { context } = liveContext();
 		const elementIds = Array.from({ length: 15 }, (_, index) => index + 1);
