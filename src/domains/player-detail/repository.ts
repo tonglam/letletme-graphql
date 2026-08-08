@@ -142,6 +142,11 @@ type RecentGameweekRow = {
 	bps: number | null;
 };
 
+type ResolvedEventState = {
+	id: number;
+	finished: boolean;
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -268,6 +273,33 @@ async function loadLatestMarketSnapshot(
 	}
 }
 
+async function loadResolvedEventState(
+	context: GraphQLContext,
+	eventId: number | null,
+	currentEvent: CurrentEventCache | null
+): Promise<ResolvedEventState | null> {
+	if (eventId === null) return null;
+	if (currentEvent?.id === eventId) {
+		return { id: currentEvent.id, finished: currentEvent.finished };
+	}
+	try {
+		const { data, error } = await context.supabase
+			.from("events")
+			.select("id, finished")
+			.eq("id", eventId)
+			.limit(1);
+		if (error) {
+			context.logger.warn({ err: error, eventId }, "Failed to load resolved event state");
+			return null;
+		}
+		const row = data?.[0] as { id?: number; finished?: boolean | null } | undefined;
+		return row?.id === eventId ? { id: eventId, finished: Boolean(row.finished) } : null;
+	} catch (error) {
+		context.logger.warn({ err: error, eventId }, "Failed to load resolved event state");
+		return null;
+	}
+}
+
 const formatFixtureScore = (fixture: Fixture, wasHome: boolean): string | null => {
 	if (fixture.teamHScore === null || fixture.teamAScore === null) return null;
 	return wasHome
@@ -372,6 +404,7 @@ async function loadRecentGameweeks(
 	playerId: number,
 	statsContext: PlayerStatsContext,
 	currentEvent: CurrentEventCache | null,
+	resolvedEvent: ResolvedEventState | null,
 	fixtures: PlayerFixture[]
 ): Promise<PlayerRecentGameweek[]> {
 	if (statsContext.scope !== "CURRENT_SEASON" || statsContext.asOfEventId === null) return [];
@@ -390,9 +423,10 @@ async function loadRecentGameweeks(
 			return [];
 		}
 		const opponents = opponentsByEvent(fixtures);
+		const provisionalEvent = currentEvent ?? resolvedEvent;
 		return ((data ?? []) as RecentGameweekRow[]).map((row) => ({
 			eventId: row.event_id,
-			provisional: currentEvent?.id === row.event_id && !currentEvent.finished,
+			provisional: provisionalEvent?.id === row.event_id && !provisionalEvent.finished,
 			totalPoints: row.total_points,
 			minutes: row.minutes,
 			started: row.starts,
@@ -517,6 +551,11 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", PLAYER_DETAIL_NULL_CACHE_TTL);
 			return null;
 		}
+		const resolvedEvent = await loadResolvedEventState(
+			context,
+			statsContext.asOfEventId,
+			currentEvent
+		);
 
 		const [{ teamShortName, fixtures }, seasonStats] = await Promise.all([
 			loadTeamFixtureDesk(context, player.teamId, eventId),
@@ -527,6 +566,7 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			playerId,
 			statsContext,
 			currentEvent,
+			resolvedEvent,
 			fixtures
 		);
 		const detail = assemblePlayerDetail({

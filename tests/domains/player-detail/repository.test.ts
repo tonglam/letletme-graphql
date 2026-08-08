@@ -159,6 +159,48 @@ describe("playerDetailRepository", () => {
 		expect(fromCalls).not.toContain("event_lives");
 	});
 
+	it("marks live points provisional when Redis has no current-event row", async () => {
+		const context = createContext({
+			currentEvent: null,
+			tables: {
+				events: [
+					{
+						id: 3,
+						finished: false,
+						is_current: true,
+						deadline_time_epoch: Math.floor(Date.now() / 1000) - 60,
+					},
+				],
+				player_market_snapshots: [marketRow()],
+				player_stats: [{ element_id: 9, event_id: 3, total_points: 55 }],
+				event_lives: [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				event_fixtures: [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
+		expect(detail?.statsContext).toEqual({
+			scope: "CURRENT_SEASON",
+			season: "2627",
+			asOfEventId: 3,
+		});
+		expect(detail?.recentGameweeks[0]?.provisional).toBe(true);
+	});
+
 	it("returns nullable season stats, latest market data, recent GWs and every DGW fixture", async () => {
 		const context = createContext({
 			currentEvent: { id: 3, isCurrent: true, finished: false },

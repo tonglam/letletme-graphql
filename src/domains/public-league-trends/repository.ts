@@ -51,7 +51,7 @@ const CATALOG_SQL = `
 		catalog.updated_at,
 		snapshot.event_id AS latest_event_id,
 		snapshot.total_entries,
-		MAX(catalog.updated_at) OVER () AS catalog_revision
+		(SELECT MAX(updated_at) FROM public.public_league_trends_catalog) AS catalog_revision
 	FROM public.public_league_trends_catalog catalog
 	JOIN public.tournament_infos tournament
 		ON tournament.id = catalog.tournament_id
@@ -72,7 +72,7 @@ const CATALOG_SQL = `
 
 const ACCESS_SQL = `
 	SELECT
-		catalog.updated_at AS catalog_revision,
+		(SELECT MAX(updated_at) FROM public.public_league_trends_catalog) AS catalog_revision,
 		MAX(COALESCE(stats.updated_at, stats.created_at)) AS snapshot_revision
 	FROM public.public_league_trends_catalog catalog
 	JOIN public.tournament_infos tournament
@@ -83,7 +83,7 @@ const ACCESS_SQL = `
 		AND stats.event_id = $2
 	WHERE catalog.enabled = true
 		AND catalog.tournament_id = $1
-	GROUP BY catalog.updated_at
+	GROUP BY catalog.tournament_id
 `;
 
 const iso = (value: string | Date): string => {

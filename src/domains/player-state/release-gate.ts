@@ -2,16 +2,17 @@ import type { PlayerStateTrend } from "./types";
 
 export const PLAYER_STATE_RELEASE_EVIDENCE = {
 	engineVersion: "player-state-v1.1",
-	evaluatedAt: "2026-08-08",
+	evaluatedAt: "2026-08-09",
 	mode: "fpl-only",
-	seasons: ["1617", "1718", "1819", "1920", "2021", "2122", "2223", "2324", "2425", "2526"],
-	observations: 226_700,
+	seasons: [],
+	observations: 0,
 	futureFivePointMeans: {
-		RISING: 11.41,
-		STABLE: 13.53,
-		FALLING: 4.8,
+		RISING: null,
+		STABLE: null,
+		FALLING: null,
 	},
 	released: false,
+	reason: "FPL_HISTORY_STORAGE_UNAVAILABLE",
 } as const;
 
 const directionalTrends = new Set<PlayerStateTrend>(["RISING", "STABLE", "FALLING"]);
