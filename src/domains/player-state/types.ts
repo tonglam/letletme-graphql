@@ -49,6 +49,28 @@ export type PlayerStateMetric = {
 	capability: boolean;
 };
 
+export type PlayerRadarAxis = {
+	code: string;
+	value: number | null;
+	percentile: number | null;
+	unit: string;
+	direction: "HIGHER_IS_BETTER" | "LOWER_IS_BETTER" | "NEUTRAL";
+	sampleMinutes: number | null;
+	available: boolean;
+	capability: boolean;
+	reasonCode: string | null;
+};
+
+export type PlayerRadarProfile = {
+	source: "FPL";
+	position: number;
+	season: string;
+	asOfEventId: number | null;
+	sampleMinutes: number;
+	smallSample: boolean;
+	axes: PlayerRadarAxis[];
+};
+
 export type PlayerStateReason = {
 	code: string;
 	dimension: PlayerStateDimensionKind;
@@ -158,6 +180,7 @@ export type PlayerStateProfile = {
 	confidence: PlayerStateConfidence;
 	fplOnly: boolean;
 	reasons: PlayerStateReason[];
+	profileRadar: PlayerRadarProfile | null;
 	dimensions: PlayerStateDimension[];
 	ownBaseline: PlayerStateOwnBaseline;
 	peerBaseline: PlayerStatePeerBaseline;

@@ -88,6 +88,34 @@ export const playerStateTypeDefs = /* GraphQL */ `
 		capability: Boolean!
 	}
 
+	enum PlayerRadarDirection {
+		HIGHER_IS_BETTER
+		LOWER_IS_BETTER
+		NEUTRAL
+	}
+
+	type PlayerRadarAxis {
+		code: String!
+		value: Float
+		percentile: Float
+		unit: String!
+		direction: PlayerRadarDirection!
+		sampleMinutes: Int
+		available: Boolean!
+		capability: Boolean!
+		reasonCode: String
+	}
+
+	type PlayerRadarProfile {
+		source: PlayerStateProvider!
+		position: Int!
+		season: String!
+		asOfEventId: Int
+		sampleMinutes: Int!
+		smallSample: Boolean!
+		axes: [PlayerRadarAxis!]!
+	}
+
 	type PlayerStateReason {
 		code: String!
 		dimension: PlayerStateDimensionKind!
@@ -197,6 +225,7 @@ export const playerStateTypeDefs = /* GraphQL */ `
 		confidence: PlayerStateConfidence!
 		fplOnly: Boolean!
 		reasons: [PlayerStateReason!]!
+		profileRadar: PlayerRadarProfile
 		dimensions: [PlayerStateDimension!]!
 		ownBaseline: PlayerStateOwnBaseline!
 		peerBaseline: PlayerStatePeerBaseline!
