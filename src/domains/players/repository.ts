@@ -774,7 +774,8 @@ export const playersRepository: PlayersRepository = {
 		}
 
 		const hasPriceFilter = safeFilter?.minPrice !== undefined || safeFilter?.maxPrice !== undefined;
-		const scanLimit = hasPriceFilter ? PICKER_SCAN_BATCH_SIZE : safeLimit;
+		const hasTeamFilter = safeFilter?.teamId !== undefined;
+		const scanLimit = hasPriceFilter || hasTeamFilter ? PICKER_SCAN_BATCH_SIZE : safeLimit;
 		const teams = await buildTeamMap(context);
 		const fetchRows = async (pageCursor: number | null): Promise<DbPickerRow[]> => {
 			if (safeSearch) {
