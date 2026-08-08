@@ -133,6 +133,7 @@ const clampLimit = (limit: number): number => {
 };
 
 const PICKER_CACHE_TTL = 300;
+const PICKER_SCAN_BATCH_SIZE = 100;
 const MARKET_OWNERSHIP_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
 
 export type PlayerPickerTeam = {
@@ -759,12 +760,13 @@ export const playersRepository: PlayersRepository = {
 		}
 
 		const hasPriceFilter = safeFilter?.minPrice !== undefined || safeFilter?.maxPrice !== undefined;
+		const scanLimit = hasPriceFilter ? PICKER_SCAN_BATCH_SIZE : safeLimit;
 		const teams = safeSearch ? null : await buildTeamMap(context);
 		const fetchRows = async (pageCursor: number | null): Promise<DbPickerRow[]> => {
 			if (safeSearch) {
 				const result = await context.supabase.rpc("search_players_for_picker", {
 					p_query: safeSearch,
-					p_limit: safeLimit,
+					p_limit: scanLimit,
 					p_cursor: pageCursor,
 					p_position: safeFilter?.position ?? null,
 					p_team_id: safeFilter?.teamId ?? null,
@@ -785,7 +787,7 @@ export const playersRepository: PlayersRepository = {
 				.from("players")
 				.select("id, web_name, type, team_id, price")
 				.order("id", { ascending: true })
-				.limit(safeLimit);
+				.limit(scanLimit);
 			if (pageCursor !== null) query = query.gt("id", pageCursor);
 			if (safeFilter?.position !== undefined) query = query.eq("type", safeFilter.position);
 			if (safeFilter?.teamId !== undefined) query = query.eq("team_id", safeFilter.teamId);
@@ -833,26 +835,26 @@ export const playersRepository: PlayersRepository = {
 					matchesPickerFilter(item, safeFilter)
 				)
 			);
-			hasMoreRows = pageRows.length >= safeLimit;
+			hasMoreRows = pageRows.length >= scanLimit;
 			if (!hasPriceFilter || !hasMoreRows || items.length >= safeLimit || pageRows.length === 0) {
 				break;
 			}
 			const nextPageCursor = pageRows[pageRows.length - 1].id;
 			if (pageCursor !== null && nextPageCursor <= pageCursor) {
-				hasMoreRows = false;
 				break;
 			}
 			pageCursor = nextPageCursor;
 		}
 
+		const returnedItems = items.slice(0, safeLimit);
 		const nextCursor = hasPriceFilter
-			? hasMoreRows && rows.length > 0
-				? rows[rows.length - 1].id
+			? returnedItems.length >= safeLimit
+				? (returnedItems[returnedItems.length - 1]?.id ?? null)
 				: null
 			: rows.length >= safeLimit
 				? rows[rows.length - 1].id
 				: null;
-		const payload: PlayersForPickerPayload = { items: items.slice(0, safeLimit), nextCursor };
+		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
 
 		await context.redis.set(cacheKey, JSON.stringify(payload), "EX", PICKER_CACHE_TTL);
 		return payload;

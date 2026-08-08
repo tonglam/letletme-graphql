@@ -174,7 +174,7 @@ function samplesFor(
 			minutes: row?.minutes ?? 0,
 			started: Boolean(row?.started),
 			bonus: row?.bonus ?? 0,
-			covered: true,
+			covered: row !== undefined,
 		};
 	});
 }
@@ -235,15 +235,33 @@ async function main(): Promise<void> {
 		return;
 	}
 	const result = await pool.query<LiveRow>(sql);
+	const eventResult = await pool.query<{ season: string; event_id: number }>(`
+		SELECT event.season, event.id AS event_id
+		FROM fpl_event_history event
+		JOIN fpl_season_archives archive
+			ON archive.season = event.season AND archive.status = 'sealed'
+		ORDER BY event.season, event.id
+	`);
 	await pool.end();
 
-	const seasons = [...new Set(result.rows.map((row) => row.season))].sort();
+	const eventIdsBySeason = new Map<string, number[]>();
+	for (const row of eventResult.rows) {
+		const seasonEvents = eventIdsBySeason.get(row.season) ?? [];
+		seasonEvents.push(row.event_id);
+		eventIdsBySeason.set(row.season, seasonEvents);
+	}
+	const seasons = [
+		...new Set([
+			...result.rows.map((row) => row.season),
+			...eventResult.rows.map((row) => row.season),
+		]),
+	].sort();
 	const historyByCode = new Map<number, PlayerStateBaselineSeason[]>();
 	const observations: Observation[] = [];
 
 	for (const season of seasons) {
 		const rows = result.rows.filter((row) => row.season === season);
-		const eventIds = [...new Set(rows.map((row) => row.event_id))].sort((a, b) => a - b);
+		const eventIds = [...new Set(eventIdsBySeason.get(season) ?? [])].sort((a, b) => a - b);
 		const byPlayerEvent = new Map(rows.map((row) => [key(row.element_id, row.event_id), row]));
 		const playerMap = new Map(
 			rows.map((row) => [
@@ -304,16 +322,22 @@ async function main(): Promise<void> {
 				});
 				if (availability.unavailable) continue;
 				const ownBaseline = buildOwnBaseline(historyByCode.get(player.playerCode) ?? []);
+				const recentSamples = samplesFor(player.elementId, [...recentIds].reverse(), byPlayerEvent);
+				const previousSamples = samplesFor(
+					player.elementId,
+					[...previousIds].reverse(),
+					byPlayerEvent
+				);
+				const completeFplWindow =
+					recentSamples.length === 5 && recentSamples.every((sample) => sample.covered);
+				if (!completeFplWindow) continue;
 				const output = assessOutput({
 					currentPercentile,
 					recentPercentile,
 					seasonBaselinePercentile: currentPercentile,
 					ownBaselinePercentile: ownBaseline.weightedPercentile,
 				});
-				const role = assessRole(
-					samplesFor(player.elementId, [...recentIds].reverse(), byPlayerEvent),
-					samplesFor(player.elementId, [...previousIds].reverse(), byPlayerEvent)
-				);
+				const role = assessRole(recentSamples, previousSamples);
 				const state = composePlayerState({
 					availability,
 					role,
@@ -327,8 +351,8 @@ async function main(): Promise<void> {
 						reasonCodes: ["PROCESS_UNAVAILABLE_UNDERSTAT"],
 						metrics: [],
 					},
-					fplSufficient: true,
-					completeFplWindow: recentIds.length === 5,
+					fplSufficient: completeFplWindow,
+					completeFplWindow,
 					historySeasonCount: ownBaseline.seasons.length,
 				});
 				observations.push({
