@@ -34,6 +34,8 @@ import type {
 	PlayerStateMetric,
 	PlayerStateOutlookGameweek,
 	PlayerStateProfile,
+	PlayerRadarAxis,
+	PlayerRadarProfile,
 	PlayerStateProviderRevision,
 	ProcessAssessment,
 } from "./types";
@@ -104,6 +106,13 @@ type CurrentPeerRow = {
 	total_points: number | null;
 	minutes: number | null;
 	bonus: number | null;
+	starts: number | null;
+	goals_scored: number | null;
+	assists: number | null;
+	clean_sheets: number | null;
+	saves: number | null;
+	bps: number | null;
+	expected_goal_involvements: number | null;
 };
 
 type CurrentPeerGameweekRow = {
@@ -158,6 +167,13 @@ type CurrentMetricRow = {
 	bonusPer90: number | null;
 	minutes: number;
 	gameweeks: number;
+	starts: number | null;
+	goalsScored: number | null;
+	assists: number | null;
+	cleanSheets: number | null;
+	saves: number | null;
+	bps: number | null;
+	expectedGoalInvolvements: number | null;
 };
 
 type HistoryPayload = {
@@ -322,7 +338,10 @@ const recentGameweeksSql = `
 `;
 
 const currentPeersSql = `
-	SELECT element_id, total_points, minutes, bonus
+	SELECT
+		element_id, total_points, minutes, bonus, starts,
+		goals_scored, assists, clean_sheets, saves, bps,
+		expected_goal_involvements
 	FROM player_stats
 	WHERE event_id = $1
 		AND element_type = $2
@@ -482,8 +501,164 @@ const currentMetrics = (
 			bonusPer90: minutes > 0 && row.bonus !== null ? (row.bonus * 90) / minutes : null,
 			minutes,
 			gameweeks: eventIds.length,
+			starts: row.starts,
+			goalsScored: row.goals_scored,
+			assists: row.assists,
+			cleanSheets: row.clean_sheets,
+			saves: row.saves,
+			bps: row.bps,
+			expectedGoalInvolvements: row.expected_goal_involvements,
 		};
 	});
+};
+
+type RadarValue = {
+	value: (row: CurrentMetricRow) => number | null;
+	unit: string;
+	capability?: (season: string) => boolean;
+};
+
+const radarPer90 = (value: number | null, minutes: number): number | null =>
+	value === null || minutes < 180 ? null : (value * 90) / minutes;
+
+const radarSpecsForPosition = (position: number): Array<{ code: string; metric: RadarValue }> => {
+	const points: { code: string; metric: RadarValue } = {
+		code: "FPL_POINTS_PER_90",
+		metric: {
+			unit: "per90",
+			value: (row) =>
+				radarPer90(
+					row.pointsPer90 === null ? null : (row.pointsPer90 * row.minutes) / 90,
+					row.minutes
+				),
+		},
+	};
+	const cleanSheets: { code: string; metric: RadarValue } = {
+		code: "FPL_CLEAN_SHEETS_PER_START",
+		metric: {
+			unit: "rate",
+			value: (row) =>
+				row.minutes < 180 || !row.starts || row.cleanSheets === null
+					? null
+					: (row.cleanSheets / row.starts) * 100,
+		},
+	};
+	const bonus: { code: string; metric: RadarValue } = {
+		code: "FPL_BONUS_PER_90",
+		metric: {
+			unit: "per90",
+			value: (row) =>
+				radarPer90(
+					row.bonusPer90 === null ? null : (row.bonusPer90 * row.minutes) / 90,
+					row.minutes
+				),
+		},
+	};
+	const bps: { code: string; metric: RadarValue } = {
+		code: "FPL_BPS_PER_90",
+		metric: { unit: "per90", value: (row) => radarPer90(row.bps, row.minutes) },
+	};
+	const xgi: { code: string; metric: RadarValue } = {
+		code: "FPL_XGI_PER_90",
+		metric: {
+			unit: "per90",
+			value: (row) => radarPer90(row.expectedGoalInvolvements, row.minutes),
+			capability: expectedMetricsAvailableForSeason,
+		},
+	};
+	if (position === 1) {
+		return [
+			points,
+			cleanSheets,
+			{
+				code: "FPL_SAVES_PER_90",
+				metric: { unit: "per90", value: (row) => radarPer90(row.saves, row.minutes) },
+			},
+			bonus,
+			bps,
+		];
+	}
+	if (position === 2) {
+		return [points, xgi, cleanSheets, bonus, bps];
+	}
+	if (position === 3) {
+		return [
+			points,
+			xgi,
+			{
+				code: "FPL_ATTACKING_RETURNS_PER_90",
+				metric: {
+					unit: "per90",
+					value: (row) =>
+						radarPer90(
+							row.goalsScored === null || row.assists === null
+								? null
+								: row.goalsScored + row.assists,
+							row.minutes
+						),
+				},
+			},
+			cleanSheets,
+			bonus,
+		];
+	}
+	return [
+		points,
+		xgi,
+		{
+			code: "FPL_GOALS_PER_90",
+			metric: { unit: "per90", value: (row) => radarPer90(row.goalsScored, row.minutes) },
+		},
+		{
+			code: "FPL_ASSISTS_PER_90",
+			metric: { unit: "per90", value: (row) => radarPer90(row.assists, row.minutes) },
+		},
+		bonus,
+	];
+};
+
+const buildPlayerRadarProfile = (
+	position: number,
+	season: string,
+	asOfEventId: number | null,
+	player: CurrentMetricRow | null,
+	cohort: CurrentMetricRow[]
+): PlayerRadarProfile | null => {
+	if (player === null || asOfEventId === null) return null;
+	const specs = radarSpecsForPosition(position);
+	const sampleMinutes = player.minutes;
+	const axes: PlayerRadarAxis[] = specs.map(({ code, metric }) => {
+		const capability = metric.capability?.(season) ?? true;
+		const value = capability ? metric.value(player) : null;
+		const population = capability ? cohort.map((row) => metric.value(row)) : [];
+		return {
+			code,
+			value,
+			percentile: capability ? percentile(value, population) : null,
+			unit: metric.unit,
+			direction: "HIGHER_IS_BETTER",
+			sampleMinutes,
+			available: value !== null,
+			capability,
+			reasonCode:
+				value === null
+					? !capability
+						? "PROFILE_METRIC_CAPABILITY_UNAVAILABLE"
+						: sampleMinutes < 180
+							? "PROFILE_SAMPLE_BELOW_180_MINUTES"
+							: "PROFILE_METRIC_UNAVAILABLE"
+					: null,
+		};
+	});
+	return {
+		source: "FPL",
+		position,
+		season,
+		asOfEventId,
+		sampleMinutes,
+		smallSample: sampleMinutes >= 180 && sampleMinutes < 450,
+		axes,
+	};
 };
 
 const metricCompositePercentile = (
@@ -513,6 +688,32 @@ const metricCompositePercentile = (
 		),
 	]);
 
+const metricPercentiles = (
+	row: {
+		pointsPer90: number | null;
+		returnRate: number | null;
+		bonusPer90: number | null;
+	},
+	population: Array<{
+		pointsPer90: number | null;
+		returnRate: number | null;
+		bonusPer90: number | null;
+	}>
+): { pointsPer90: number | null; returnRate: number | null; bonusPer90: number | null } => ({
+	pointsPer90: percentile(
+		row.pointsPer90,
+		population.map((peer) => peer.pointsPer90)
+	),
+	returnRate: percentile(
+		row.returnRate,
+		population.map((peer) => peer.returnRate)
+	),
+	bonusPer90: percentile(
+		row.bonusPer90,
+		population.map((peer) => peer.bonusPer90)
+	),
+});
+
 const recentMetrics = (
 	peerIds: number[],
 	gameweekRows: CurrentPeerGameweekRow[],
@@ -535,6 +736,13 @@ const recentMetrics = (
 			bonusPer90: minutes > 0 ? (bonus * 90) / minutes : null,
 			minutes,
 			gameweeks: eventIds.length,
+			starts: null,
+			goalsScored: null,
+			assists: null,
+			cleanSheets: null,
+			saves: null,
+			bps: null,
+			expectedGoalInvolvements: null,
 		};
 		return result;
 	});
@@ -638,7 +846,8 @@ const buildOutlookGameweeks = (
 	coveredEventIds: Set<number>
 ): PlayerStateOutlookGameweek[] => {
 	const result: PlayerStateOutlookGameweek[] = [];
-	for (let eventId = startEventId; eventId < startEventId + horizon; eventId += 1) {
+	const effectiveHorizon = Math.min(horizon, Math.max(0, 38 - startEventId + 1));
+	for (let eventId = startEventId; eventId < startEventId + effectiveHorizon; eventId += 1) {
 		const eventRows = rows.filter((row) => row.event_id === eventId);
 		const fixtures = eventRows.map((row) => ({
 			id: row.id,
@@ -1004,6 +1213,7 @@ export const createPlayerStateRepository = (
 		if (cached !== undefined) return cached;
 
 		const outlookStart = Math.max(1, metadata.outlook_event_id ?? statsContext.asOfEventId ?? 1);
+		const outlookHorizon = Math.min(safeHorizon, Math.max(0, 38 - outlookStart + 1));
 		const gameweekPromise =
 			statsContext.scope === "CURRENT_SEASON" && statsContext.asOfEventId !== null
 				? executor.query<CurrentGameweekRow>(recentGameweeksSql, [
@@ -1016,18 +1226,21 @@ export const createPlayerStateRepository = (
 			executor.query<FixtureRow>(fixturesSql, [
 				metadata.team_id,
 				outlookStart,
-				outlookStart + safeHorizon - 1,
+				outlookStart + outlookHorizon - 1,
 			]),
 			executor.query<FixtureCoverageRow>(fixtureCoverageSql, [
 				outlookStart,
-				outlookStart + safeHorizon - 1,
+				outlookStart + outlookHorizon - 1,
 			]),
 		]);
 		const samples = toGameweekSamples(gameweekResult.rows);
-		const coveredSamples = samples.filter((sample) => sample.covered);
-		const recentSamples = coveredSamples.slice(0, 5);
-		const previousSamples = coveredSamples.slice(5, 10);
-		const recentEventIds = recentSamples.map((sample) => sample.eventId);
+		const recentWindow = samples.slice(0, 5);
+		const previousWindow = samples.slice(5, 10);
+		const recentSamples = recentWindow.filter((sample) => sample.covered);
+		const previousSamples = previousWindow.filter((sample) => sample.covered);
+		const recentEventIds = recentWindow.map((sample) => sample.eventId);
+		const recentWindowComplete =
+			recentWindow.length === 5 && recentWindow.every((sample) => sample.covered);
 		const role = assessRole(recentSamples, previousSamples);
 		const availability = assessAvailability(
 			metadata.market_status === null
@@ -1070,6 +1283,17 @@ export const createPlayerStateRepository = (
 		const recentPercentile = recentPlayer
 			? metricCompositePercentile(recentPlayer, recentRows)
 			: null;
+		const profileRadar =
+			statsContext.scope === "CURRENT_SEASON"
+				? buildPlayerRadarProfile(
+						metadata.position,
+						season,
+						statsContext.asOfEventId,
+						currentPlayer,
+						currentRows
+					)
+				: null;
+		const recentMetricRanks = recentPlayer ? metricPercentiles(recentPlayer, recentRows) : null;
 		const reliability = assessReliability(history.baselineSeasons, currentPlayer?.minutes ?? 0);
 		const output = assessOutput({
 			currentPercentile,
@@ -1096,7 +1320,8 @@ export const createPlayerStateRepository = (
 
 		const fplSufficient =
 			statsContext.scope === "CURRENT_SEASON" &&
-			coveredSamples.length >= MINIMUM_CURRENT_GAMEWEEKS &&
+			recentSamples.length >= MINIMUM_CURRENT_GAMEWEEKS &&
+			recentWindowComplete &&
 			currentPlayer !== null &&
 			currentPercentile !== null &&
 			recentPercentile !== null;
@@ -1106,7 +1331,7 @@ export const createPlayerStateRepository = (
 			output,
 			process,
 			fplSufficient,
-			completeFplWindow: recentSamples.length === 5,
+			completeFplWindow: recentWindowComplete,
 			historySeasonCount: reliability.baseline.seasons.length,
 		});
 		const releaseDecision = applyPlayerStateReleaseGate(composed.trend, process.available);
@@ -1115,18 +1340,18 @@ export const createPlayerStateRepository = (
 			fixtureResult.rows,
 			metadata.team_id,
 			outlookStart,
-			safeHorizon,
+			outlookHorizon,
 			new Set(
 				fixtureCoverageResult.rows
 					.filter((row) => Number(row.fixture_count) > 0)
 					.map((row) => row.event_id)
 			)
 		);
-		const outlook = assessOutlook(outlookGameweeks, safeHorizon);
+		const outlook = assessOutlook(outlookGameweeks, outlookHorizon);
 		const dgwCount = outlook.gameweeks.filter((gameweek) => gameweek.dgw).length;
 		const bgwCount = outlook.gameweeks.filter((gameweek) => gameweek.bgw).length;
 		const outlookCoverageComplete =
-			fixtureCoverageResult.rows.length === safeHorizon &&
+			fixtureCoverageResult.rows.length === outlookHorizon &&
 			fixtureCoverageResult.rows.every((row) => Number(row.fixture_count) > 0);
 		const outlookReasons = [
 			outlook.rating === "FAVOURABLE"
@@ -1143,7 +1368,7 @@ export const createPlayerStateRepository = (
 			metric("FPL_POINTS_PER_90", recentPlayer?.pointsPer90 ?? null, {
 				source: "FPL_CURRENT",
 				baseline: currentPlayer?.pointsPer90 ?? null,
-				percentile: recentPercentile,
+				percentile: recentMetricRanks?.pointsPer90 ?? null,
 				unit: "per90",
 				season,
 				sampleMinutes: recentPlayer?.minutes ?? 0,
@@ -1152,7 +1377,7 @@ export const createPlayerStateRepository = (
 			metric("FPL_RETURN_RATE", recentPlayer?.returnRate ?? null, {
 				source: "FPL_CURRENT",
 				baseline: currentPlayer?.returnRate ?? null,
-				percentile: recentPercentile,
+				percentile: recentMetricRanks?.returnRate ?? null,
 				unit: "percent",
 				season,
 				sampleMinutes: recentPlayer?.minutes ?? 0,
@@ -1161,7 +1386,7 @@ export const createPlayerStateRepository = (
 			metric("FPL_BONUS_PER_90", recentPlayer?.bonusPer90 ?? null, {
 				source: "FPL_CURRENT",
 				baseline: currentPlayer?.bonusPer90 ?? null,
-				percentile: recentPercentile,
+				percentile: recentMetricRanks?.bonusPer90 ?? null,
 				unit: "per90",
 				season,
 				sampleMinutes: recentPlayer?.minutes ?? 0,
@@ -1184,7 +1409,7 @@ export const createPlayerStateRepository = (
 				direction: role.direction,
 				confidence:
 					availability.authoritative && !availability.stale
-						? recentSamples.length >= 5
+						? recentWindowComplete
 							? "HIGH"
 							: "MEDIUM"
 						: "LOW",
@@ -1214,7 +1439,7 @@ export const createPlayerStateRepository = (
 				kind: "FPL_OUTPUT",
 				rating: output.rating,
 				direction: output.direction,
-				confidence: fplSufficient && recentSamples.length === 5 ? "HIGH" : "LOW",
+				confidence: fplSufficient && recentWindowComplete ? "HIGH" : "LOW",
 				reasonCodes: output.reasonCodes,
 				metrics: outputMetrics,
 			},
@@ -1254,7 +1479,7 @@ export const createPlayerStateRepository = (
 						source: "FPL_CURRENT",
 						unit: "fdr",
 						season,
-						sampleSize: safeHorizon,
+						sampleSize: outlookHorizon,
 					}),
 					metric("OUTLOOK_DGW_COUNT", dgwCount, {
 						source: "FPL_CURRENT",
@@ -1286,8 +1511,9 @@ export const createPlayerStateRepository = (
 		if (releaseDecision.withheld && releaseDecision.reasonCode) {
 			limitations.add(releaseDecision.reasonCode);
 		}
-		if (recentSamples.length > 0 && recentSamples.length < 5)
-			limitations.add("EARLY_SEASON_SAMPLE");
+		if (recentWindow.length > 0 && recentWindow.length < 5) limitations.add("EARLY_SEASON_SAMPLE");
+		if (recentWindow.length === 5 && !recentWindowComplete)
+			limitations.add("CURRENT_FPL_COVERAGE_INCOMPLETE");
 		if (!outlookCoverageComplete) limitations.add("OUTLOOK_FIXTURE_COVERAGE_UNKNOWN");
 		if (!understatPublished) limitations.add("UNDERSTAT_SEASON_UNAVAILABLE");
 		if (currentMappingStatus === "UNAVAILABLE") limitations.add("PLAYER_MAPPING_UNAVAILABLE");
@@ -1375,7 +1601,7 @@ export const createPlayerStateRepository = (
 			teamId: metadata.team_id,
 			position: metadata.position,
 			season,
-			horizon: safeHorizon,
+			horizon: outlookHorizon,
 			asOfEventId: statsContext.asOfEventId,
 			asOf,
 			trend: releaseDecision.trend,
@@ -1394,6 +1620,7 @@ export const createPlayerStateRepository = (
 							...composed.reasons.filter((reason) => reason.code === "FPL_ONLY"),
 						]
 					: composed.reasons,
+			profileRadar,
 			dimensions,
 			ownBaseline: reliability.baseline,
 			peerBaseline: {

@@ -106,11 +106,19 @@ describe("playersRepository.getPlayersForPicker", () => {
 					if (table === "player_market_snapshots") {
 						return {
 							select: (fields: string) =>
-								fields === "snapshot_date"
-									? chain({ data: [{ snapshot_date: "2026-08-08" }], error: null }, [
-											"order",
-											"limit",
-										])
+								fields === "snapshot_date, captured_at"
+									? chain(
+											{
+												data: [
+													{
+														snapshot_date: "2026-08-08",
+														captured_at: new Date().toISOString(),
+													},
+												],
+												error: null,
+											},
+											["order", "limit"]
+										)
 									: chain(
 											{
 												data: [{ element_id: 9, selected_by_percent: "74.6" }],

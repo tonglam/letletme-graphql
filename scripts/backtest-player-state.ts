@@ -194,17 +194,23 @@ async function main(): Promise<void> {
 	if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 	const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
 	const storage = await pool.query<{
+		season_archives: string | null;
 		player_history: string | null;
 		event_live_history: string | null;
+		event_history: string | null;
 		market_snapshot_history: string | null;
 	}>(`
 		SELECT
+			to_regclass('public.fpl_season_archives')::text AS season_archives,
 			to_regclass('public.fpl_player_history')::text AS player_history,
 			to_regclass('public.fpl_event_live_history')::text AS event_live_history,
+			to_regclass('public.fpl_event_history')::text AS event_history,
 			to_regclass('public.fpl_player_market_snapshot_history')::text AS market_snapshot_history
 	`);
 	const storageRow = storage.rows[0];
 	if (
+		!storageRow?.season_archives ||
+		!storageRow?.event_history ||
 		!storageRow?.player_history ||
 		!storageRow.event_live_history ||
 		!storageRow.market_snapshot_history

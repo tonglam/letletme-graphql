@@ -133,6 +133,7 @@ const clampLimit = (limit: number): number => {
 };
 
 const PICKER_CACHE_TTL = 300;
+const MARKET_OWNERSHIP_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
 
 export type PlayerPickerTeam = {
 	id: number;
@@ -193,7 +194,7 @@ const getLatestMarketOwnershipByIds = async (
 	try {
 		const latestResult = await context.supabase
 			.from("player_market_snapshots")
-			.select("snapshot_date")
+			.select("snapshot_date, captured_at")
 			.order("snapshot_date", { ascending: false })
 			.order("captured_at", { ascending: false })
 			.limit(1);
@@ -204,9 +205,18 @@ const getLatestMarketOwnershipByIds = async (
 			);
 			return new Map();
 		}
-		const snapshotDate = (latestResult.data?.[0] as { snapshot_date?: string } | undefined)
-			?.snapshot_date;
+		const latestSnapshot = latestResult.data?.[0] as
+			{ snapshot_date?: string; captured_at?: string | null } | undefined;
+		const snapshotDate = latestSnapshot?.snapshot_date;
 		if (!snapshotDate) return new Map();
+		const capturedAt = latestSnapshot?.captured_at;
+		if (
+			!capturedAt ||
+			!Number.isFinite(Date.parse(capturedAt)) ||
+			Date.now() - Date.parse(capturedAt) > MARKET_OWNERSHIP_STALE_AFTER_MS
+		) {
+			return new Map();
+		}
 
 		const ownershipResult = await context.supabase
 			.from("player_market_snapshots")
