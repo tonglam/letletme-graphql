@@ -775,7 +775,7 @@ export const playersRepository: PlayersRepository = {
 
 		const hasPriceFilter = safeFilter?.minPrice !== undefined || safeFilter?.maxPrice !== undefined;
 		const scanLimit = hasPriceFilter ? PICKER_SCAN_BATCH_SIZE : safeLimit;
-		const teams = safeSearch ? null : await buildTeamMap(context);
+		const teams = await buildTeamMap(context);
 		const fetchRows = async (pageCursor: number | null): Promise<DbPickerRow[]> => {
 			if (safeSearch) {
 				const result = await context.supabase.rpc("search_players_for_picker", {
@@ -783,7 +783,7 @@ export const playersRepository: PlayersRepository = {
 					p_limit: scanLimit,
 					p_cursor: pageCursor,
 					p_position: safeFilter?.position ?? null,
-					p_team_id: safeFilter?.teamId ?? null,
+					p_team_id: null,
 					p_min_price: hasPriceFilter ? null : (safeFilter?.minPrice ?? null),
 					p_max_price: hasPriceFilter ? null : (safeFilter?.maxPrice ?? null),
 				});

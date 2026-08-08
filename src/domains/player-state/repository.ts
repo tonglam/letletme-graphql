@@ -285,12 +285,15 @@ const availableArchiveSql = `
 			SELECT 1 FROM fpl_event_live_history live WHERE live.season = archive.season
 		)
 		AND NOT EXISTS (
-			SELECT 1 FROM fpl_player_history ph
-			WHERE ph.season = archive.season
-				AND NOT EXISTS (
-					SELECT 1 FROM fpl_event_live_history live
-					WHERE live.season = ph.season AND live.element_id = ph.id
-				)
+			SELECT 1 FROM (
+				SELECT ph.id, COUNT(DISTINCT live.event_id) AS event_count
+				FROM fpl_player_history ph
+				JOIN fpl_event_live_history live
+					ON live.season = ph.season AND live.element_id = ph.id
+				WHERE ph.season = archive.season
+				GROUP BY ph.id
+				HAVING COUNT(DISTINCT live.event_id) < (SELECT COUNT(*) FROM events)
+			) incomplete
 		)
 	ORDER BY archive.season DESC
 `;
