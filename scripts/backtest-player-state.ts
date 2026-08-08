@@ -210,15 +210,26 @@ async function main(): Promise<void> {
 			const eventId = eventIds[eventIndex];
 			if (eventId === undefined) continue;
 			const seasonToDateIds = eventIds.slice(0, eventIndex + 1);
+			const eligiblePlayers = players.filter((player) =>
+				byPlayerEvent.has(key(player.elementId, eventId))
+			);
 			const recentIds = seasonToDateIds.slice(-5);
 			const previousIds = seasonToDateIds.slice(-10, -5);
 			const targetIds = eventIds.slice(eventIndex + 1, eventIndex + 6);
-			const seasonMetrics = metricsForWindow({ players, byPlayerEvent, eventIds: seasonToDateIds });
-			const recentMetrics = metricsForWindow({ players, byPlayerEvent, eventIds: recentIds });
+			const seasonMetrics = metricsForWindow({
+				players: eligiblePlayers,
+				byPlayerEvent,
+				eventIds: seasonToDateIds,
+			});
+			const recentMetrics = metricsForWindow({
+				players: eligiblePlayers,
+				byPlayerEvent,
+				eventIds: recentIds,
+			});
 			const seasonPercentiles = compositePercentiles(seasonMetrics);
 			const recentPercentiles = compositePercentiles(recentMetrics);
 
-			for (const player of players) {
+			for (const player of eligiblePlayers) {
 				const currentPercentile = seasonPercentiles.get(player.elementId) ?? null;
 				const recentPercentile = recentPercentiles.get(player.elementId) ?? null;
 				if (currentPercentile === null || recentPercentile === null) continue;

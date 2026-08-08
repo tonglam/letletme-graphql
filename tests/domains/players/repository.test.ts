@@ -64,7 +64,15 @@ describe("playersRepository.getPlayersForPicker", () => {
 		expect(calls).toEqual([
 			{
 				name: "search_players_for_picker",
-				params: { p_query: "Haal", p_limit: 12, p_cursor: null },
+				params: {
+					p_query: "Haal",
+					p_limit: 12,
+					p_cursor: null,
+					p_position: null,
+					p_team_id: null,
+					p_min_price: null,
+					p_max_price: null,
+				},
 			},
 		]);
 	});

@@ -123,6 +123,17 @@ describe("Player State role and availability", () => {
 		).toBe(true);
 		expect(assessAvailability(null).authoritative).toBe(false);
 	});
+
+	it("does not let stale injury data override current FPL evidence", () => {
+		expect(assessAvailability({ status: "i", chanceOfPlayingThisRound: 0, stale: true })).toEqual({
+			unavailable: false,
+			authoritative: false,
+			stale: true,
+			status: "i",
+			chance: 0,
+			reasonCode: "AVAILABILITY_STALE",
+		});
+	});
 });
 
 describe("Player State output and history", () => {

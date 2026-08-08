@@ -754,6 +754,10 @@ export const playersRepository: PlayersRepository = {
 				p_query: safeSearch,
 				p_limit: safeLimit,
 				p_cursor: safeCursor,
+				p_position: safeFilter?.position ?? null,
+				p_team_id: safeFilter?.teamId ?? null,
+				p_min_price: safeFilter?.minPrice ?? null,
+				p_max_price: safeFilter?.maxPrice ?? null,
 			});
 			if (result.error) {
 				context.logger.error(

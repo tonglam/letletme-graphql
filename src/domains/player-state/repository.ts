@@ -125,6 +125,11 @@ type FixtureRow = {
 	opponent_short_name: string;
 };
 
+type FixtureCoverageRow = {
+	event_id: number;
+	fixture_count: string | number;
+};
+
 type HistoricalCohortRow = {
 	season: string;
 	player_code: number;
@@ -181,7 +186,9 @@ const metadataSql = `
 		c.committed_at AS core_committed_at,
 		source.fpl_snapshot_at,
 		COALESCE(
-			(SELECT id FROM events WHERE is_current = true ORDER BY id DESC LIMIT 1),
+			(SELECT id FROM events
+			 WHERE is_current = true AND COALESCE(finished, false) = false
+			 ORDER BY id DESC LIMIT 1),
 			(SELECT id FROM events WHERE is_next = true ORDER BY id ASC LIMIT 1),
 			(SELECT id FROM events WHERE finished = true ORDER BY id DESC LIMIT 1),
 			1
@@ -263,6 +270,17 @@ const understatSeasonsSql = `
 	ORDER BY season DESC
 `;
 
+const fixtureCoverageSql = `
+	SELECT
+		e.id AS event_id,
+		COUNT(f.id)::integer AS fixture_count
+	FROM events e
+	LEFT JOIN event_fixtures f ON f.event_id = e.id
+	WHERE e.id BETWEEN $1 AND $2
+	GROUP BY e.id
+	ORDER BY e.id
+`;
+
 const recentGameweeksSql = `
 	WITH candidate_events AS (
 		SELECT id, finished, is_current
@@ -299,7 +317,9 @@ const recentGameweeksSql = `
 const currentPeersSql = `
 	SELECT element_id, total_points, minutes, bonus
 	FROM player_stats
-	WHERE event_id = $1 AND element_type = $2
+	WHERE event_id = $1
+		AND element_type = $2
+		AND COALESCE(minutes, 0) >= ${HISTORY_PEER_MINUTES}
 `;
 
 const currentPeerGameweeksSql = `
@@ -607,7 +627,8 @@ const buildOutlookGameweeks = (
 	rows: FixtureRow[],
 	teamId: number,
 	startEventId: number,
-	horizon: number
+	horizon: number,
+	coveredEventIds: Set<number>
 ): PlayerStateOutlookGameweek[] => {
 	const result: PlayerStateOutlookGameweek[] = [];
 	for (let eventId = startEventId; eventId < startEventId + horizon; eventId += 1) {
@@ -622,10 +643,11 @@ const buildOutlookGameweeks = (
 		const difficulties = fixtures
 			.map((fixture) => fixture.difficulty)
 			.filter((difficulty) => difficulty >= 1 && difficulty <= 5);
+		const covered = coveredEventIds.has(eventId);
 		result.push({
 			eventId,
-			bgw: fixtures.length === 0,
-			dgw: fixtures.length > 1,
+			bgw: covered && fixtures.length === 0,
+			dgw: covered && fixtures.length > 1,
 			averageDifficulty:
 				difficulties.length === 0
 					? null
@@ -829,6 +851,28 @@ async function readUnderstatManifests(
 	}
 }
 
+const isMissingRelationError = (error: unknown): boolean =>
+	isRecord(error) && error.code === "42P01";
+
+async function loadUnderstatSeasons(
+	context: GraphQLContext,
+	executor: QueryExecutor
+): Promise<UnderstatSeasonRow[]> {
+	try {
+		const result = await executor.query<UnderstatSeasonRow>(understatSeasonsSql);
+		return result.rows;
+	} catch (error) {
+		if (isMissingRelationError(error)) {
+			context.logger.warn(
+				{ table: "understat_seasons" },
+				"Understat season storage is not provisioned; serving FPL-only state"
+			);
+			return [];
+		}
+		throw error;
+	}
+}
+
 export interface PlayerStateRepository {
 	getPlayerStateProfile(
 		context: GraphQLContext,
@@ -854,7 +898,7 @@ export const createPlayerStateRepository = (
 			[
 				executor.query<PlayerMetadataRow>(metadataSql, [playerId]),
 				executor.query<ArchiveRow>(archiveSql),
-				executor.query<UnderstatSeasonRow>(understatSeasonsSql),
+				loadUnderstatSeasons(context, executor),
 				statsContextPromise,
 			]
 		);
@@ -868,7 +912,7 @@ export const createPlayerStateRepository = (
 		const link = durableLink.rows[0] ?? null;
 		const manifests = await readUnderstatManifests(context, season);
 		const currentMappingStatus = resolvePlayerStateMappingStatus(link, season);
-		const currentUnderstatSeason = understatSeasonsResult.rows.find(
+		const currentUnderstatSeason = understatSeasonsResult.find(
 			(candidate) => candidate.season === season
 		);
 		const understatPublished =
@@ -910,10 +954,14 @@ export const createPlayerStateRepository = (
 						statsContext.asOfEventId,
 					])
 				: Promise.resolve({ rows: [] } as unknown as QueryResult<CurrentGameweekRow>);
-		const [gameweekResult, fixtureResult] = await Promise.all([
+		const [gameweekResult, fixtureResult, fixtureCoverageResult] = await Promise.all([
 			gameweekPromise,
 			executor.query<FixtureRow>(fixturesSql, [
 				metadata.team_id,
+				outlookStart,
+				outlookStart + safeHorizon - 1,
+			]),
+			executor.query<FixtureCoverageRow>(fixtureCoverageSql, [
 				outlookStart,
 				outlookStart + safeHorizon - 1,
 			]),
@@ -1010,11 +1058,19 @@ export const createPlayerStateRepository = (
 			fixtureResult.rows,
 			metadata.team_id,
 			outlookStart,
-			safeHorizon
+			safeHorizon,
+			new Set(
+				fixtureCoverageResult.rows
+					.filter((row) => Number(row.fixture_count) > 0)
+					.map((row) => row.event_id)
+			)
 		);
 		const outlook = assessOutlook(outlookGameweeks, safeHorizon);
 		const dgwCount = outlook.gameweeks.filter((gameweek) => gameweek.dgw).length;
 		const bgwCount = outlook.gameweeks.filter((gameweek) => gameweek.bgw).length;
+		const outlookCoverageComplete =
+			fixtureCoverageResult.rows.length === safeHorizon &&
+			fixtureCoverageResult.rows.every((row) => Number(row.fixture_count) > 0);
 		const outlookReasons = [
 			outlook.rating === "FAVOURABLE"
 				? "OUTLOOK_FAVOURABLE"
@@ -1023,6 +1079,7 @@ export const createPlayerStateRepository = (
 					: "OUTLOOK_NEUTRAL",
 			...(dgwCount > 0 ? ["OUTLOOK_DGW"] : []),
 			...(bgwCount > 0 ? ["OUTLOOK_BGW"] : []),
+			...(!outlookCoverageComplete ? ["OUTLOOK_FIXTURE_COVERAGE_UNKNOWN"] : []),
 		];
 
 		const outputMetrics: PlayerStateMetric[] = [
@@ -1130,7 +1187,10 @@ export const createPlayerStateRepository = (
 				kind: "OUTLOOK",
 				rating: outlook.rating,
 				direction: "STABLE",
-				confidence: fixtureResult.rows.length > 0 || bgwCount > 0 ? "HIGH" : "LOW",
+				confidence:
+					outlookCoverageComplete && (fixtureResult.rows.length > 0 || bgwCount > 0)
+						? "HIGH"
+						: "LOW",
 				reasonCodes: outlookReasons,
 				metrics: [
 					metric("OUTLOOK_AVERAGE_FDR", outlook.averageDifficulty, {
@@ -1154,7 +1214,7 @@ export const createPlayerStateRepository = (
 		];
 
 		const linkConfirmed = confirmedPlayerLinkSeasons(link?.evidence ?? null);
-		const understatHistorySeasons = understatSeasonsResult.rows
+		const understatHistorySeasons = understatSeasonsResult
 			.filter(
 				(candidate) => candidate.state === "complete" && linkConfirmed.includes(candidate.season)
 			)
@@ -1167,6 +1227,7 @@ export const createPlayerStateRepository = (
 		}
 		if (recentSamples.length > 0 && recentSamples.length < 5)
 			limitations.add("EARLY_SEASON_SAMPLE");
+		if (!outlookCoverageComplete) limitations.add("OUTLOOK_FIXTURE_COVERAGE_UNKNOWN");
 		if (!understatPublished) limitations.add("UNDERSTAT_SEASON_UNAVAILABLE");
 		if (currentMappingStatus === "UNAVAILABLE") limitations.add("PLAYER_MAPPING_UNAVAILABLE");
 		if (currentMappingStatus === "UNVERIFIED") limitations.add("PLAYER_MAPPING_UNVERIFIED");

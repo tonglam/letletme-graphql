@@ -141,6 +141,16 @@ export function assessAvailability(
 		};
 	}
 	const status = input.status.trim().toLowerCase();
+	if (input.stale) {
+		return {
+			unavailable: false,
+			authoritative: false,
+			stale: true,
+			status,
+			chance: input.chanceOfPlayingThisRound,
+			reasonCode: "AVAILABILITY_STALE",
+		};
+	}
 	const unavailableStatuses = new Set(["i", "s", "u", "n"]);
 	const unavailable = unavailableStatuses.has(status) || input.chanceOfPlayingThisRound === 0;
 	return {
