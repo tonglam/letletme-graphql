@@ -297,7 +297,9 @@ export function assessOutlook(
 		.slice(0, horizon);
 	const fixtures = window.flatMap((gameweek) => gameweek.fixtures);
 	const hasBgw = window.some((gameweek) => gameweek.bgw);
-	const favourableCount = fixtures.filter((fixture) => fixture.difficulty <= 2).length;
+	const favourableCount = fixtures.filter(
+		(fixture) => fixture.difficulty >= 1 && fixture.difficulty <= 2
+	).length;
 	const difficultCount = fixtures.filter((fixture) => fixture.difficulty >= 4).length;
 	const rating: PlayerStateDimensionRating =
 		hasBgw || difficultCount >= 3 ? "DIFFICULT" : favourableCount >= 3 ? "FAVOURABLE" : "NEUTRAL";

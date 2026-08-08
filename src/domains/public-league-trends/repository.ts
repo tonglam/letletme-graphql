@@ -31,6 +31,7 @@ type CatalogRow = {
 	latest_event_id: number;
 	total_entries: number;
 	catalog_revision: string | Date;
+	snapshot_revision?: string | Date | null;
 };
 
 type AccessRow = {
@@ -51,7 +52,8 @@ const CATALOG_SQL = `
 		catalog.updated_at,
 		snapshot.event_id AS latest_event_id,
 		snapshot.total_entries,
-		(SELECT MAX(updated_at) FROM public.public_league_trends_catalog) AS catalog_revision
+		(SELECT MAX(updated_at) FROM public.public_league_trends_catalog) AS catalog_revision,
+		MAX(snapshot.snapshot_revision) OVER () AS snapshot_revision
 	FROM public.public_league_trends_catalog catalog
 	JOIN public.tournament_infos tournament
 		ON tournament.id = catalog.tournament_id
@@ -59,7 +61,8 @@ const CATALOG_SQL = `
 	JOIN LATERAL (
 		SELECT
 			stats.event_id,
-			MAX(stats.total_entries)::integer AS total_entries
+			MAX(stats.total_entries)::integer AS total_entries,
+			MAX(COALESCE(stats.updated_at, stats.created_at)) AS snapshot_revision
 		FROM public.tournament_selection_stats stats
 		WHERE stats.tournament_id = catalog.tournament_id
 		GROUP BY stats.event_id
@@ -134,7 +137,19 @@ export const createPublicLeagueTrendsRepository = (
 		if (rows.length === 0) return [];
 		const revision = iso(rows[0]!.catalog_revision);
 		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `public-league-trends:v1:${revision}`);
+		const snapshotRevision = rows
+			.map((row) =>
+				row.snapshot_revision === undefined || row.snapshot_revision === null
+					? null
+					: iso(row.snapshot_revision)
+			)
+			.filter((value): value is string => value !== null)
+			.sort()
+			.at(-1);
+		const cacheKey = gqlCacheKey(
+			season,
+			`public-league-trends:v2:${revision}:${snapshotRevision ?? "none"}`
+		);
 		try {
 			const cached = await context.redis.get(cacheKey);
 			if (cached !== null) {

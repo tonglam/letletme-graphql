@@ -24,6 +24,9 @@ type LiveRow = {
 	minutes: number | null;
 	started: boolean | null;
 	bonus: number | null;
+	availability_status: string | null;
+	chance_of_playing_this_round: number | null;
+	availability_known: boolean;
 };
 
 type MetricRow = {
@@ -53,12 +56,29 @@ const sql = `
 		live.total_points,
 		live.minutes,
 		live.starts AS started,
-		live.bonus
+		live.bonus,
+		market.status AS availability_status,
+		market.chance_of_playing_this_round,
+		market.element_id IS NOT NULL AS availability_known
 	FROM fpl_event_live_history live
 	JOIN fpl_season_archives archive
 		ON archive.season = live.season AND archive.status = 'sealed'
+	JOIN fpl_event_history event
+		ON event.season = live.season AND event.id = live.event_id
 	JOIN fpl_player_history player
 		ON player.season = live.season AND player.id = live.element_id
+	LEFT JOIN LATERAL (
+		SELECT
+			market.element_id,
+			market.status,
+			market.chance_of_playing_this_round
+		FROM fpl_player_market_snapshot_history market
+		WHERE market.season = live.season
+			AND market.element_id = live.element_id
+			AND market.snapshot_date <= COALESCE(event.deadline_time, event.created_at)::date
+		ORDER BY market.snapshot_date DESC, market.captured_at DESC
+		LIMIT 1
+	) market ON true
 	ORDER BY live.season, live.event_id, live.element_id
 `;
 
@@ -95,11 +115,14 @@ function metricsForWindow(input: {
 	});
 }
 
-function compositePercentiles(rows: MetricRow[]): Map<number, number | null> {
+function compositePercentiles(
+	rows: MetricRow[],
+	population: MetricRow[] = rows
+): Map<number, number | null> {
 	const result = new Map<number, number | null>();
 	for (const position of [1, 2, 3, 4]) {
-		const peers = rows.filter((row) => row.position === position);
-		for (const row of peers) {
+		const peers = population.filter((row) => row.position === position);
+		for (const row of rows.filter((candidate) => candidate.position === position)) {
 			result.set(
 				row.elementId,
 				averagePercentiles([
@@ -157,13 +180,19 @@ async function main(): Promise<void> {
 	const storage = await pool.query<{
 		player_history: string | null;
 		event_live_history: string | null;
+		market_snapshot_history: string | null;
 	}>(`
 		SELECT
 			to_regclass('public.fpl_player_history')::text AS player_history,
-			to_regclass('public.fpl_event_live_history')::text AS event_live_history
+			to_regclass('public.fpl_event_live_history')::text AS event_live_history,
+			to_regclass('public.fpl_player_market_snapshot_history')::text AS market_snapshot_history
 	`);
 	const storageRow = storage.rows[0];
-	if (!storageRow?.player_history || !storageRow.event_live_history) {
+	if (
+		!storageRow?.player_history ||
+		!storageRow.event_live_history ||
+		!storageRow.market_snapshot_history
+	) {
 		await pool.end();
 		console.log(
 			JSON.stringify(
@@ -242,6 +271,14 @@ async function main(): Promise<void> {
 				const currentPercentile = seasonPercentiles.get(player.elementId) ?? null;
 				const recentPercentile = recentPercentiles.get(player.elementId) ?? null;
 				if (currentPercentile === null || recentPercentile === null) continue;
+				const currentRow = byPlayerEvent.get(key(player.elementId, eventId));
+				if (!currentRow?.availability_known) continue;
+				const availability = assessAvailability({
+					status: currentRow.availability_status,
+					chanceOfPlayingThisRound: currentRow.chance_of_playing_this_round,
+					stale: false,
+				});
+				if (availability.unavailable) continue;
 				const ownBaseline = buildOwnBaseline(historyByCode.get(player.playerCode) ?? []);
 				const output = assessOutput({
 					currentPercentile,
@@ -254,11 +291,7 @@ async function main(): Promise<void> {
 					samplesFor(player.elementId, [...previousIds].reverse(), byPlayerEvent)
 				);
 				const state = composePlayerState({
-					availability: assessAvailability({
-						status: "a",
-						chanceOfPlayingThisRound: 100,
-						stale: false,
-					}),
+					availability,
 					role,
 					output,
 					process: {
@@ -284,7 +317,10 @@ async function main(): Promise<void> {
 		}
 
 		const finalMetrics = metricsForWindow({ players, byPlayerEvent, eventIds });
-		const finalPercentiles = compositePercentiles(finalMetrics);
+		const finalPercentiles = compositePercentiles(
+			finalMetrics,
+			finalMetrics.filter((row) => row.minutes >= 900)
+		);
 		for (const row of finalMetrics) {
 			if (row.minutes < 450) continue;
 			const positionPercentile = finalPercentiles.get(row.elementId) ?? null;

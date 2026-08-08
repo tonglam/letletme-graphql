@@ -300,6 +300,42 @@ async function loadResolvedEventState(
 	}
 }
 
+async function loadHistoricalTeamId(
+	context: GraphQLContext,
+	season: string,
+	playerCode: number,
+	eventId: number | null,
+	fallbackTeamId: number
+): Promise<number> {
+	if (eventId === null) return fallbackTeamId;
+	try {
+		const { data, error } = await context.supabase
+			.from("fpl_player_fixture_stats")
+			.select("team_id")
+			.eq("season", season)
+			.eq("player_code", playerCode)
+			.lte("event_id", eventId)
+			.order("event_id", { ascending: false })
+			.order("fixture_id", { ascending: false })
+			.limit(1);
+		if (error) {
+			context.logger.warn(
+				{ err: error, playerCode, eventId },
+				"Failed to load historical player team"
+			);
+			return fallbackTeamId;
+		}
+		const teamId = asNullableNumber((data?.[0] as { team_id?: unknown } | undefined)?.team_id);
+		return teamId !== null && teamId > 0 ? teamId : fallbackTeamId;
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, playerCode, eventId },
+			"Failed to load historical player team"
+		);
+		return fallbackTeamId;
+	}
+}
+
 const formatFixtureScore = (fixture: Fixture, wasHome: boolean): string | null => {
 	if (fixture.teamHScore === null || fixture.teamAScore === null) return null;
 	return wasHome
@@ -556,9 +592,19 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			statsContext.asOfEventId,
 			currentEvent
 		);
+		const resolvedTeamId = await loadHistoricalTeamId(
+			context,
+			statsContext.season,
+			player.code,
+			statsContext.asOfEventId !== null &&
+				(currentEvent === null || statsContext.asOfEventId < currentEvent.id)
+				? statsContext.asOfEventId
+				: null,
+			player.teamId
+		);
 
 		const [{ teamShortName, fixtures }, seasonStats] = await Promise.all([
-			loadTeamFixtureDesk(context, player.teamId, eventId),
+			loadTeamFixtureDesk(context, resolvedTeamId, eventId),
 			getPlayerSeasonStatsForContext(context, playerId, statsContext),
 		]);
 		const recentGameweeks = await loadRecentGameweeks(

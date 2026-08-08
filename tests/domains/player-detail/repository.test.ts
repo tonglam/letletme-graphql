@@ -341,6 +341,7 @@ describe("playerDetailRepository", () => {
 						bps: 31,
 					},
 				],
+				fpl_player_fixture_stats: [{ team_id: 2, event_id: 2, fixture_id: 20 }],
 				event_fixtures: [fixtureRow()],
 			},
 		});
@@ -348,6 +349,7 @@ describe("playerDetailRepository", () => {
 		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
 
 		expect(detail?.statsContext.asOfEventId).toBe(3);
+		expect(detail?.teamShortName).toBe("BET");
 		expect(detail?.transfersInEvent).toBe(1);
 		expect(detail?.transfersOutEvent).toBe(2);
 	});

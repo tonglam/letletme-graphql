@@ -226,6 +226,46 @@ describe("Player State outlook", () => {
 		expect(result.gameweeks[0]?.fixtures).toHaveLength(2);
 		expect(result.rating).toBe("DIFFICULT");
 	});
+
+	it("does not treat unknown fixture difficulty as favourable", () => {
+		const result = assessOutlook(
+			[
+				{
+					eventId: 1,
+					bgw: false,
+					dgw: false,
+					averageDifficulty: null,
+					fixtures: [
+						{
+							id: 1,
+							opponentTeamShortName: "ARS",
+							wasHome: true,
+							difficulty: 0,
+							kickoffTime: null,
+						},
+						{
+							id: 2,
+							opponentTeamShortName: "CHE",
+							wasHome: false,
+							difficulty: 0,
+							kickoffTime: null,
+						},
+						{
+							id: 3,
+							opponentTeamShortName: "LIV",
+							wasHome: true,
+							difficulty: 0,
+							kickoffTime: null,
+						},
+					],
+				},
+			],
+			1
+		);
+
+		expect(result.rating).toBe("NEUTRAL");
+		expect(result.averageDifficulty).toBeNull();
+	});
 });
 
 describe("Player State top-level composition", () => {

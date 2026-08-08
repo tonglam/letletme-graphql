@@ -1213,7 +1213,11 @@ export const createPlayerStateRepository = (
 			},
 		];
 
-		const linkConfirmed = confirmedPlayerLinkSeasons(link?.evidence ?? null);
+		const linkIsVerified =
+			link !== null &&
+			(link.status === "auto_verified" || link.status === "manual_verified") &&
+			link.left_entity_id !== null;
+		const linkConfirmed = linkIsVerified ? confirmedPlayerLinkSeasons(link?.evidence ?? null) : [];
 		const understatHistorySeasons = understatSeasonsResult
 			.filter(
 				(candidate) => candidate.state === "complete" && linkConfirmed.includes(candidate.season)
