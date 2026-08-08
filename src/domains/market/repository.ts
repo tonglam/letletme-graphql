@@ -5,6 +5,8 @@ import { getCurrentSeason } from "../../infra/season";
 
 const MARKET_RESULT_LIMIT = 10;
 const PRICE_CHANGE_LIMIT = 20;
+const AVAILABILITY_UPDATE_LIMIT = 20;
+const AVAILABILITY_HIGHLIGHT_LIMIT = 5;
 const STALE_AFTER_MS = 36 * 60 * 60 * 1000;
 const MARKET_CACHE_TTL_SECONDS = 60 * 60;
 const MARKET_EMPTY_CACHE_TTL_SECONDS = 5 * 60;
@@ -33,6 +35,17 @@ export type MarketCoverage = {
 	stale: boolean;
 };
 
+export type MarketAvailabilityUpdate = {
+	player: MarketPlayer;
+	status: string;
+	previousStatus: string | null;
+	news: string;
+	newsAdded: string | null;
+	observedDate: string;
+	chanceOfPlayingThisRound: number | null;
+	chanceOfPlayingNextRound: number | null;
+};
+
 export type MarketPulse = {
 	coverage: MarketCoverage;
 	mostSelected: MarketPlayer[];
@@ -56,16 +69,8 @@ export type MarketPulse = {
 		transfersOut: number;
 		netTransfers: number;
 	}>;
-	availabilityUpdates: Array<{
-		player: MarketPlayer;
-		status: string;
-		previousStatus: string | null;
-		news: string;
-		newsAdded: string | null;
-		observedDate: string;
-		chanceOfPlayingThisRound: number | null;
-		chanceOfPlayingNextRound: number | null;
-	}>;
+	availabilityUpdates: MarketAvailabilityUpdate[];
+	availabilityHighlights: MarketAvailabilityUpdate[];
 	newPlayers: Array<{
 		player: MarketPlayer;
 		firstObservedDate: string;
@@ -271,6 +276,7 @@ export const emptyMarketPulse = (requestedDays: number): MarketPulse => ({
 	ownershipMovers: { risers: [], fallers: [] },
 	transferMovers: [],
 	availabilityUpdates: [],
+	availabilityHighlights: [],
 	newPlayers: [],
 	priceChanges: [],
 });
@@ -372,7 +378,7 @@ export function buildMarketPulse(
 			});
 		}
 	}
-	const availabilityUpdates = latestRows
+	const availabilityEvidence = latestRows
 		.flatMap((row) => {
 			const observedChange = changesByPlayer.get(row.element_id);
 			const newsDate = row.newsAdded ? toMarketCalendarDate(row.newsAdded) : null;
@@ -404,8 +410,49 @@ export function buildMarketPulse(
 				b.observedDate.localeCompare(a.observedDate) ||
 				b.player.selectedByPercent - a.player.selectedByPercent ||
 				comparePlayer(a.player, b.player)
+		);
+	const availabilityUpdates = availabilityEvidence.slice(0, AVAILABILITY_UPDATE_LIMIT);
+	const unavailableStatuses = new Set([
+		"0",
+		"i",
+		"injured",
+		"n",
+		"not-in-squad",
+		"not_in_squad",
+		"s",
+		"suspended",
+		"u",
+		"unavailable",
+	]);
+	const doubtfulStatuses = new Set(["d", "doubtful"]);
+	const availableStatuses = new Set(["a", "available"]);
+	const availabilityPriority = (update: MarketAvailabilityUpdate): number => {
+		const status = update.status.trim().toLowerCase();
+		const previousStatus = update.previousStatus?.trim().toLowerCase() ?? null;
+		const chance = update.chanceOfPlayingThisRound ?? update.chanceOfPlayingNextRound;
+		if (chance === 0 || unavailableStatuses.has(status)) return 0;
+		if ((chance !== null && chance >= 25 && chance <= 50) || doubtfulStatuses.has(status)) {
+			return 1;
+		}
+		if (chance === 75 || chance === null) return 2;
+		if (
+			availableStatuses.has(status) &&
+			previousStatus !== null &&
+			!availableStatuses.has(previousStatus)
+		) {
+			return 3;
+		}
+		return 4;
+	};
+	const availabilityHighlights = [...availabilityEvidence]
+		.sort(
+			(a, b) =>
+				availabilityPriority(a) - availabilityPriority(b) ||
+				b.player.selectedByPercent - a.player.selectedByPercent ||
+				b.observedDate.localeCompare(a.observedDate) ||
+				comparePlayer(a.player, b.player)
 		)
-		.slice(0, MARKET_RESULT_LIMIT);
+		.slice(0, AVAILABILITY_HIGHLIGHT_LIMIT);
 
 	const newPlayers = latestRows
 		.filter(
@@ -460,6 +507,7 @@ export function buildMarketPulse(
 		ownershipMovers: { risers, fallers },
 		transferMovers,
 		availabilityUpdates,
+		availabilityHighlights,
 		newPlayers,
 		priceChanges,
 	};
@@ -476,6 +524,7 @@ const isMarketPulse = (value: unknown): value is MarketPulse =>
 	Array.isArray(value.ownershipMovers.fallers) &&
 	Array.isArray(value.transferMovers) &&
 	Array.isArray(value.availabilityUpdates) &&
+	Array.isArray(value.availabilityHighlights) &&
 	Array.isArray(value.newPlayers) &&
 	Array.isArray(value.priceChanges);
 
@@ -484,7 +533,7 @@ export const createMarketRepository = (
 ): MarketRepository => ({
 	async getMarketPulse(context: GraphQLContext, requestedDays: number): Promise<MarketPulse> {
 		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `market-pulse:v1:${requestedDays}`);
+		const cacheKey = gqlCacheKey(season, `market-pulse:v2:${requestedDays}`);
 
 		try {
 			const cached = await context.redis.get(cacheKey);

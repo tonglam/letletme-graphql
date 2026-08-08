@@ -3,6 +3,10 @@ import { gqlCacheKey } from "../../infra/cache-key";
 import { getCurrentSeason } from "../../infra/season";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player as InfraPlayer, Team as InfraTeam } from "../../infra/types";
+import {
+	getPlayerSeasonStatsByIdsForContext,
+	resolvePlayerStatsContext,
+} from "./season-stats-at-event";
 
 export enum Position {
 	GOALKEEPER = 1,
@@ -36,7 +40,7 @@ type DbPlayerRow = {
 	start_price: number;
 };
 
-const asNullableNumber = (value: number | string | null | undefined): number | null => {
+const asNullableNumber = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) {
 		return value;
 	}
@@ -141,6 +145,10 @@ export type PlayerPickerItem = {
 	webName: string;
 	position: Position;
 	team: PlayerPickerTeam;
+	price: number;
+	selectedByPercent: number | null;
+	totalPoints: number | null;
+	form: number | null;
 };
 
 export type PlayersForPickerPayload = {
@@ -157,6 +165,11 @@ type DbPickerRow = {
 	team_short_name: string;
 };
 
+type MarketOwnershipRow = {
+	element_id: number;
+	selected_by_percent: number | string | null;
+};
+
 const mapPickerRow = (row: DbPickerRow): PlayerPickerItem => ({
 	id: row.id,
 	webName: row.web_name,
@@ -166,7 +179,112 @@ const mapPickerRow = (row: DbPickerRow): PlayerPickerItem => ({
 		name: row.team_name,
 		shortName: row.team_short_name,
 	},
+	price: 0,
+	selectedByPercent: null,
+	totalPoints: null,
+	form: null,
 });
+
+const getLatestMarketOwnershipByIds = async (
+	context: GraphQLContext,
+	ids: number[]
+): Promise<Map<number, number>> => {
+	if (ids.length === 0) return new Map();
+	try {
+		const latestResult = await context.supabase
+			.from("player_market_snapshots")
+			.select("snapshot_date")
+			.order("snapshot_date", { ascending: false })
+			.order("captured_at", { ascending: false })
+			.limit(1);
+		if (latestResult.error) {
+			context.logger.warn(
+				{ err: latestResult.error },
+				"Failed to load latest market snapshot date for player picker"
+			);
+			return new Map();
+		}
+		const snapshotDate = (latestResult.data?.[0] as { snapshot_date?: string } | undefined)
+			?.snapshot_date;
+		if (!snapshotDate) return new Map();
+
+		const ownershipResult = await context.supabase
+			.from("player_market_snapshots")
+			.select("element_id, selected_by_percent")
+			.eq("snapshot_date", snapshotDate)
+			.in("element_id", ids);
+		if (ownershipResult.error) {
+			context.logger.warn(
+				{ err: ownershipResult.error, snapshotDate },
+				"Failed to load market ownership for player picker"
+			);
+			return new Map();
+		}
+
+		return new Map(
+			((ownershipResult.data as MarketOwnershipRow[] | null) ?? []).flatMap((row) => {
+				const value = asNullableNumber(row.selected_by_percent);
+				return value === null ? [] : [[row.element_id, value] as const];
+			})
+		);
+	} catch (error) {
+		context.logger.warn({ err: error }, "Failed to load market ownership for player picker");
+		return new Map();
+	}
+};
+
+const enrichPickerItems = async (
+	context: GraphQLContext,
+	rows: DbPickerRow[],
+	statsContext: Awaited<ReturnType<typeof resolvePlayerStatsContext>>
+): Promise<PlayerPickerItem[]> => {
+	const items = rows.map(mapPickerRow);
+	if (items.length === 0) return items;
+
+	const ids = items.map((item) => item.id);
+	const [basePlayers, statsById, marketOwnershipById] = await Promise.all([
+		playersRepository.getPlayersByIds(context, ids),
+		getPlayerSeasonStatsByIdsForContext(context, ids, statsContext),
+		getLatestMarketOwnershipByIds(context, ids),
+	]);
+	const baseById = new Map(basePlayers.map((player) => [player.id, player]));
+
+	return items.map((item) => {
+		const base = baseById.get(item.id);
+		const stats = statsById.get(item.id);
+		return {
+			...item,
+			price: base?.price ?? item.price,
+			selectedByPercent:
+				marketOwnershipById.get(item.id) ??
+				base?.selectedByPercent ??
+				stats?.selectedByPercent ??
+				item.selectedByPercent,
+			totalPoints: stats?.available ? stats.totalPoints : null,
+			form: stats?.available ? stats.form : null,
+		};
+	});
+};
+
+const matchesPickerFilter = (
+	item: PlayerPickerItem,
+	filter: PlayersFilter | undefined
+): boolean => {
+	if (!filter) return true;
+	if (
+		filter.position !== undefined &&
+		filter.position !== null &&
+		item.position !== filter.position
+	)
+		return false;
+	if (filter.teamId !== undefined && filter.teamId !== null && item.team.id !== filter.teamId)
+		return false;
+	if (filter.minPrice !== undefined && filter.minPrice !== null && item.price < filter.minPrice)
+		return false;
+	if (filter.maxPrice !== undefined && filter.maxPrice !== null && item.price > filter.maxPrice)
+		return false;
+	return true;
+};
 
 export type PlayerTransferStats = {
 	playerId: number;
@@ -198,7 +316,8 @@ interface PlayersRepository {
 		context: GraphQLContext,
 		limit: number,
 		cursor: number | null | undefined,
-		search?: string | null
+		search?: string | null,
+		filter?: PlayersFilter | null
 	): Promise<PlayersForPickerPayload>;
 	listPlayers(
 		context: GraphQLContext,
@@ -292,12 +411,9 @@ export const playersRepository: PlayersRepository = {
 					price: Number(parsed.price ?? 0),
 					startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
 					totalPoints: Number(parsed.totalPoints ?? 0),
-					selectedByPercent:
-						typeof parsed.selectedByPercent === "number"
-							? parsed.selectedByPercent
-							: typeof parsed.selected_by_percent === "number"
-								? parsed.selected_by_percent
-								: null,
+					selectedByPercent: asNullableNumber(
+						parsed.selectedByPercent ?? parsed.selected_by_percent
+					),
 				};
 				return player;
 			} catch {
@@ -526,12 +642,9 @@ export const playersRepository: PlayersRepository = {
 						price: Number(parsed.price ?? 0),
 						startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
 						totalPoints: Number(parsed.totalPoints ?? 0),
-						selectedByPercent:
-							typeof parsed.selectedByPercent === "number"
-								? parsed.selectedByPercent
-								: typeof parsed.selected_by_percent === "number"
-									? parsed.selected_by_percent
-									: null,
+						selectedByPercent: asNullableNumber(
+							parsed.selectedByPercent ?? parsed.selected_by_percent
+						),
 					});
 				} catch {
 					missIds.push(uniqueIds[i]);
@@ -599,16 +712,19 @@ export const playersRepository: PlayersRepository = {
 		context: GraphQLContext,
 		limit: number,
 		cursor: number | null | undefined,
-		search?: string | null
+		search?: string | null,
+		filter?: PlayersFilter | null
 	): Promise<PlayersForPickerPayload> {
 		const safeLimit = clampLimit(limit);
 		const safeCursor = cursor && Number.isFinite(cursor) && cursor > 0 ? cursor : null;
 		const safeSearch = search?.trim().slice(0, 50) || null;
+		const safeFilter = normalizeFilter(filter);
 		const season = await getCurrentSeason(context);
+		const statsContext = await resolvePlayerStatsContext(context);
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
 		const cacheKey = gqlCacheKey(
 			season,
-			`players:picker:v2:${searchKey}:${safeLimit}:${safeCursor ?? 0}`
+			`players:picker:v6:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${safeLimit}:${safeCursor ?? 0}`
 		);
 
 		const cached = await readJsonCache(
@@ -621,6 +737,9 @@ export const playersRepository: PlayersRepository = {
 						isObject(item) &&
 						typeof item.id === "number" &&
 						typeof item.webName === "string" &&
+						typeof item.price === "number" &&
+						(item.totalPoints === null || typeof item.totalPoints === "number") &&
+						(item.form === null || typeof item.form === "number") &&
 						isObject(item.team)
 				);
 			}
@@ -629,28 +748,61 @@ export const playersRepository: PlayersRepository = {
 			return cached;
 		}
 
-		const result = safeSearch
-			? await context.supabase.rpc("search_players_for_picker", {
-					p_query: safeSearch,
-					p_limit: safeLimit,
-					p_cursor: safeCursor,
-				})
-			: await context.supabase.rpc("get_players_for_picker", {
-					p_limit: safeLimit,
-					p_cursor: safeCursor,
-				});
+		let rows: DbPickerRow[];
+		if (safeSearch) {
+			const result = await context.supabase.rpc("search_players_for_picker", {
+				p_query: safeSearch,
+				p_limit: safeLimit,
+				p_cursor: safeCursor,
+			});
+			if (result.error) {
+				context.logger.error(
+					{ err: result.error, limit: safeLimit, cursor: safeCursor, search: safeSearch },
+					"Failed to fetch players for picker"
+				);
+				throw new Error("Failed to fetch players for picker");
+			}
+			rows = (result.data as DbPickerRow[] | null) ?? [];
+		} else {
+			let query = context.supabase
+				.from("players")
+				.select("id, web_name, type, team_id, price")
+				.order("id", { ascending: true })
+				.limit(safeLimit);
+			if (safeCursor !== null) query = query.gt("id", safeCursor);
+			if (safeFilter?.position !== undefined) query = query.eq("type", safeFilter.position);
+			if (safeFilter?.teamId !== undefined) query = query.eq("team_id", safeFilter.teamId);
+			if (safeFilter?.minPrice !== undefined) query = query.gte("price", safeFilter.minPrice);
+			if (safeFilter?.maxPrice !== undefined) query = query.lte("price", safeFilter.maxPrice);
 
-		if (result.error) {
-			context.logger.error(
-				{ err: result.error, limit: safeLimit, cursor: safeCursor, search: safeSearch },
-				"Failed to fetch players for picker"
-			);
-			throw new Error("Failed to fetch players for picker");
+			const [result, teams] = await Promise.all([query, buildTeamMap(context)]);
+			if (result.error) {
+				context.logger.error(
+					{ err: result.error, limit: safeLimit, cursor: safeCursor, filter: safeFilter },
+					"Failed to browse players for picker"
+				);
+				throw new Error("Failed to fetch players for picker");
+			}
+			rows = (
+				(result.data ?? []) as Array<{
+					id: number;
+					web_name: string;
+					type: number;
+					team_id: number;
+				}>
+			).map((row) => ({
+				id: row.id,
+				web_name: row.web_name,
+				element_type: row.type,
+				team_id: row.team_id,
+				team_name: teams.get(row.team_id)?.name ?? "",
+				team_short_name: teams.get(row.team_id)?.shortName ?? "",
+			}));
 		}
-
-		const rows = (result.data as DbPickerRow[] | null) ?? [];
-		const items = rows.map(mapPickerRow);
-		const nextCursor = items.length >= safeLimit ? items[items.length - 1].id : null;
+		const items = (await enrichPickerItems(context, rows, statsContext)).filter((item) =>
+			matchesPickerFilter(item, safeFilter)
+		);
+		const nextCursor = rows.length >= safeLimit ? rows[rows.length - 1].id : null;
 		const payload: PlayersForPickerPayload = { items, nextCursor };
 
 		await context.redis.set(cacheKey, JSON.stringify(payload), "EX", PICKER_CACHE_TTL);

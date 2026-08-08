@@ -67,6 +67,10 @@ export const playersTypeDefs = /* GraphQL */ `
 		webName: String!
 		position: Position!
 		team: PlayerPickerTeam!
+		price: Int!
+		selectedByPercent: Float
+		totalPoints: Int
+		form: Float
 	}
 
 	type PlayersForPickerPayload {
@@ -77,7 +81,12 @@ export const playersTypeDefs = /* GraphQL */ `
 	extend type Query {
 		player(id: Int!): Player
 		players(filter: PlayersFilter, limit: Int = 50, offset: Int = 0): [Player!]!
-		playersForPicker(search: String, limit: Int = 20, cursor: Int): PlayersForPickerPayload!
+		playersForPicker(
+			search: String
+			filter: PlayersFilter
+			limit: Int = 20
+			cursor: Int
+		): PlayersForPickerPayload!
 		team(id: Int!): Team
 		teams: [Team!]!
 		topTransfersIn(eventId: Int!, limit: Int = 10): [PlayerTransferStats!]!

@@ -1,4 +1,47 @@
 export const playerDetailTypeDefs = /* GraphQL */ `
+	enum PlayerStatsScope {
+		CURRENT_SEASON
+		PREVIOUS_SEASON
+		UNAVAILABLE
+	}
+
+	type PlayerStatsContext {
+		scope: PlayerStatsScope!
+		season: String!
+		asOfEventId: Int
+	}
+
+	type PlayerAvailability {
+		status: String!
+		news: String!
+		newsAdded: DateTime
+		observedDate: Date!
+		capturedAt: DateTime!
+		chanceOfPlayingThisRound: Int
+		chanceOfPlayingNextRound: Int
+		stale: Boolean!
+	}
+
+	type PlayerRecentOpponent {
+		teamShortName: String!
+		wasHome: Boolean!
+	}
+
+	type PlayerRecentGameweek {
+		eventId: Int!
+		provisional: Boolean!
+		totalPoints: Int!
+		minutes: Int
+		started: Boolean
+		goalsScored: Int
+		assists: Int
+		cleanSheets: Int
+		saves: Int
+		bonus: Int
+		bps: Int
+		opponents: [PlayerRecentOpponent!]!
+	}
+
 	type PlayerDetail {
 		id: Int!
 		webName: String!
@@ -7,17 +50,20 @@ export const playerDetailTypeDefs = /* GraphQL */ `
 		elementTypeName: String!
 		price: Float!
 		startPrice: Float!
-		totalPoints: Int!
+		statsContext: PlayerStatsContext!
+		availability: PlayerAvailability
 
+		totalPoints: Int
 		selectedByPercent: Float
 		form: Float
-		seasonTransfersIn: Int!
-		seasonTransfersOut: Int!
-		transfersInEvent: Int!
-		transfersOutEvent: Int!
+		seasonTransfersIn: Int
+		seasonTransfersOut: Int
+		transfersInEvent: Int
+		transfersOutEvent: Int
 
 		eventPoints: Int
 		minutes: Int
+		starts: Int
 		goalsScored: Int
 		assists: Int
 		cleanSheets: Int
@@ -30,15 +76,21 @@ export const playerDetailTypeDefs = /* GraphQL */ `
 		bonus: Int
 		bps: Int
 
+		expectedGoals: Float
+		expectedAssists: Float
+		expectedGoalInvolvements: Float
+		expectedGoalsConceded: Float
 		influence: Float
 		creativity: Float
 		threat: Float
 		ictIndex: Float
 
+		recentGameweeks: [PlayerRecentGameweek!]!
 		fixtures: [PlayerFixture!]!
 	}
 
 	type PlayerFixture {
+		id: Int!
 		event: Int!
 		againstTeamShortName: String!
 		wasHome: Boolean!

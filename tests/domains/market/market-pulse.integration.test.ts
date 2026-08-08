@@ -17,6 +17,12 @@ const query = /* GraphQL */ `
 				position
 				selectedByPercent
 			}
+			availabilityHighlights {
+				status
+				player {
+					playerId
+				}
+			}
 		}
 	}
 `;
@@ -52,7 +58,7 @@ describe("marketPulse GraphQL contract", () => {
 			redis: {
 				get: async (key: string) => {
 					if (key === "Season:active") return "2627";
-					if (key === "gql:v2:2627:market-pulse:v1:14") return JSON.stringify(pulse);
+					if (key === "gql:v2:2627:market-pulse:v2:14") return JSON.stringify(pulse);
 					return null;
 				},
 				del: async () => 1,
@@ -80,6 +86,7 @@ describe("marketPulse GraphQL contract", () => {
 						selectedByPercent: 42.5,
 					},
 				],
+				availabilityHighlights: [],
 			},
 		});
 	});

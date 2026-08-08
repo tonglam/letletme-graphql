@@ -104,7 +104,7 @@ type RpcTransferAggregationRow = {
 	transfer_out_count: number | null;
 };
 
-type DbTournamentSelectionStatRow = {
+export type DbTournamentSelectionStatRow = {
 	element_id: number;
 	pick_count: number;
 	captain_count: number;
@@ -619,6 +619,25 @@ async function buildTournamentSelectionStats(
 		mostTransferIn,
 		mostTransferOut,
 	};
+}
+
+/**
+ * Public-safe path: consume only a published aggregate snapshot. It never
+ * falls back to entry IDs, picks, or the per-manager aggregation RPCs.
+ */
+export async function getTournamentSelectionStatsReadModel(
+	context: GraphQLContext,
+	tournamentId: number,
+	eventId: number,
+	limit: number
+): Promise<TournamentSelectionStats | null> {
+	if (!Number.isFinite(tournamentId) || tournamentId <= 0) return null;
+	if (!Number.isFinite(eventId) || eventId <= 0) return null;
+	const safeLimit = Math.min(Math.max(limit, 1), 12);
+	const rows = await getReadModelRows(context, tournamentId, eventId);
+	if (!rows || rows.length === 0) return null;
+	const { counts, totalEntries } = countsFromReadModel(rows);
+	return buildTournamentSelectionStats(context, counts, totalEntries, safeLimit);
 }
 
 export interface EventStatsRepository {

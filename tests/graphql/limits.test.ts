@@ -91,6 +91,11 @@ describe("GraphQL request limits", () => {
 								status previousStatus news newsAdded observedDate
 								chanceOfPlayingThisRound chanceOfPlayingNextRound
 							}
+							availabilityHighlights {
+								player { ...MarketPlayerFields }
+								status previousStatus news newsAdded observedDate
+								chanceOfPlayingThisRound chanceOfPlayingNextRound
+							}
 							newPlayers { player { ...MarketPlayerFields } firstObservedDate }
 							priceChanges {
 								player { ...MarketPlayerFields }

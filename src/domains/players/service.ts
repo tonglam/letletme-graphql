@@ -46,9 +46,10 @@ export const playersService = {
 		context: GraphQLContext,
 		limit: number,
 		cursor: number | null | undefined,
-		search: string | null = null
+		search: string | null = null,
+		filter?: PlayersFilter | null
 	): Promise<PlayersForPickerPayload> {
-		return playersRepository.getPlayersForPicker(context, limit, cursor, search);
+		return playersRepository.getPlayersForPicker(context, limit, cursor, search, filter);
 	},
 
 	getTeamById(context: GraphQLContext, id: number): Promise<Team | null> {

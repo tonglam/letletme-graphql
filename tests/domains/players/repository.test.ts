@@ -7,10 +7,37 @@ describe("playersRepository.getPlayersForPicker", () => {
 		const context = {
 			redis: {
 				get: async (key: string) => (key === "Season:active" ? "2627" : null),
+				hmget: async () => [
+					JSON.stringify({
+						code: 26686,
+						webName: "Haaland",
+						teamId: 12,
+						type: 4,
+						price: 145,
+						startPrice: 145,
+					}),
+				],
 				set: async () => "OK",
 				del: async () => 1,
 			},
 			supabase: {
+				from: () => {
+					const result = Promise.resolve({ data: [], error: null });
+					type Builder = typeof result & {
+						select: () => Builder;
+						lte: () => Builder;
+						order: () => Builder;
+						limit: () => Builder;
+					};
+					const builder = result as Builder;
+					Object.assign(builder, {
+						select: () => builder,
+						lte: () => builder,
+						order: () => builder,
+						limit: () => builder,
+					});
+					return builder;
+				},
 				rpc: async (name: string, params: Record<string, unknown>) => {
 					calls.push({ name, params });
 					return {
@@ -40,6 +67,77 @@ describe("playersRepository.getPlayersForPicker", () => {
 				params: { p_query: "Haal", p_limit: 12, p_cursor: null },
 			},
 		]);
+	});
+
+	it("uses the latest complete market snapshot for picker ownership", async () => {
+		const chain = <T>(result: T, methods: string[]) => {
+			const promise = Promise.resolve(result) as Promise<T> &
+				Record<string, (...args: unknown[]) => unknown>;
+			for (const method of methods) promise[method] = () => promise;
+			return promise;
+		};
+		const context = {
+			redis: {
+				get: async (key: string) => (key === "Season:active" ? "2627" : null),
+				hmget: async () => [
+					JSON.stringify({
+						code: 26686,
+						webName: "Haaland",
+						teamId: 12,
+						type: 4,
+						price: 155,
+						startPrice: 155,
+						selectedByPercent: 1.2,
+					}),
+				],
+				set: async () => "OK",
+				del: async () => 1,
+			},
+			supabase: {
+				from: (table: string) => {
+					if (table === "player_market_snapshots") {
+						return {
+							select: (fields: string) =>
+								fields === "snapshot_date"
+									? chain({ data: [{ snapshot_date: "2026-08-08" }], error: null }, [
+											"order",
+											"limit",
+										])
+									: chain(
+											{
+												data: [{ element_id: 9, selected_by_percent: "74.6" }],
+												error: null,
+											},
+											["eq", "in"]
+										),
+						};
+					}
+					return chain({ data: [], error: null }, ["select", "lte", "order", "limit"]);
+				},
+				rpc: async () => ({
+					data: [
+						{
+							id: 9,
+							web_name: "Haaland",
+							element_type: 4,
+							team_id: 12,
+							team_name: "Manchester City",
+							team_short_name: "MCI",
+						},
+					],
+					error: null,
+				}),
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const result = await playersRepository.getPlayersForPicker(context, 20, null, "Haaland");
+
+		expect(result.items[0]).toMatchObject({
+			id: 9,
+			price: 155,
+			selectedByPercent: 74.6,
+		});
 	});
 });
 

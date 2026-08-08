@@ -1,42 +1,65 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
+import { getCurrentEventFromRedis, type CurrentEventCache } from "../../infra/event";
 import { getCurrentSeason } from "../../infra/season";
+import { buildTeamMap } from "../../infra/team-map";
+import { fixturesRepository, type Fixture } from "../fixtures/repository";
+import { playersRepository } from "../players/repository";
+import {
+	getPlayerSeasonStatsForContext,
+	resolvePlayerStatsContext,
+	type PlayerSeasonStatsAtEvent,
+	type PlayerStatsContext,
+} from "../players/season-stats-at-event";
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
+const PLAYER_DETAIL_CACHE_TTL = 5 * 60;
+const PLAYER_DETAIL_NULL_CACHE_TTL = 60 * 60;
+const MARKET_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
+const RECENT_GAMEWEEK_LIMIT = 5;
+const UPCOMING_GAMEWEEK_LIMIT = 8;
+const NULL_SENTINEL = "__pd:null__";
 
-const isPlayerDetail = (value: unknown): value is PlayerDetail =>
-	isRecord(value) &&
-	Number.isFinite(Number(value.id)) &&
-	typeof value.webName === "string" &&
-	Array.isArray(value.fixtures);
+export type PlayerAvailability = {
+	status: string;
+	news: string;
+	newsAdded: string | null;
+	observedDate: string;
+	capturedAt: string;
+	chanceOfPlayingThisRound: number | null;
+	chanceOfPlayingNextRound: number | null;
+	stale: boolean;
+};
 
-const readJsonCache = async <T>(
-	context: GraphQLContext,
-	key: string,
-	validate: (value: unknown) => value is T
-): Promise<T | null> => {
-	let cached: string | null;
-	try {
-		cached = await context.redis.get(key);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to read player-detail cache");
-		return null;
-	}
-	if (cached === null) return null;
-	if (cached === NULL_SENTINEL) return null;
-	try {
-		const parsed: unknown = JSON.parse(cached);
-		if (validate(parsed)) return parsed;
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Malformed player-detail cache");
-	}
-	try {
-		await context.redis.del(key);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to evict malformed player-detail cache");
-	}
-	return null;
+export type PlayerRecentOpponent = {
+	teamShortName: string;
+	wasHome: boolean;
+};
+
+export type PlayerRecentGameweek = {
+	eventId: number;
+	provisional: boolean;
+	totalPoints: number;
+	minutes: number | null;
+	started: boolean | null;
+	goalsScored: number | null;
+	assists: number | null;
+	cleanSheets: number | null;
+	saves: number | null;
+	bonus: number | null;
+	bps: number | null;
+	opponents: PlayerRecentOpponent[];
+};
+
+export type PlayerFixture = {
+	id: number;
+	event: number;
+	againstTeamShortName: string;
+	wasHome: boolean;
+	finished: boolean;
+	kickoffTime: string | null;
+	score: string | null;
+	difficulty: number;
+	bgw: boolean;
 };
 
 export type PlayerDetail = {
@@ -47,46 +70,108 @@ export type PlayerDetail = {
 	elementTypeName: string;
 	price: number;
 	startPrice: number;
-	totalPoints: number;
-
+	statsContext: PlayerStatsContext;
+	availability: PlayerAvailability | null;
+	totalPoints: number | null;
 	selectedByPercent: number | null;
 	form: number | null;
-	seasonTransfersIn: number;
-	seasonTransfersOut: number;
-	transfersInEvent: number;
-	transfersOutEvent: number;
-
+	seasonTransfersIn: number | null;
+	seasonTransfersOut: number | null;
+	transfersInEvent: number | null;
+	transfersOutEvent: number | null;
 	eventPoints: number | null;
 	minutes: number | null;
-	goalsScored: number;
-	assists: number;
-	cleanSheets: number;
-	goalsConceded: number;
-	ownGoals: number;
-	penaltiesSaved: number;
-	yellowCards: number;
-	redCards: number;
-	saves: number;
-	bonus: number;
-	bps: number;
-
+	starts: number | null;
+	goalsScored: number | null;
+	assists: number | null;
+	cleanSheets: number | null;
+	goalsConceded: number | null;
+	ownGoals: number | null;
+	penaltiesSaved: number | null;
+	yellowCards: number | null;
+	redCards: number | null;
+	saves: number | null;
+	bonus: number | null;
+	bps: number | null;
+	expectedGoals: number | null;
+	expectedAssists: number | null;
+	expectedGoalInvolvements: number | null;
+	expectedGoalsConceded: number | null;
 	influence: number | null;
 	creativity: number | null;
 	threat: number | null;
 	ictIndex: number | null;
-
+	recentGameweeks: PlayerRecentGameweek[];
 	fixtures: PlayerFixture[];
 };
 
-export type PlayerFixture = {
-	event: number;
-	againstTeamShortName: string;
-	wasHome: boolean;
-	finished: boolean;
-	kickoffTime: string | null;
-	score: string | null;
-	difficulty: number;
-	bgw: boolean;
+type LatestMarketSnapshot = {
+	selectedByPercent: number;
+	seasonTransfersIn: number;
+	seasonTransfersOut: number;
+	transfersInEvent: number;
+	transfersOutEvent: number;
+	availability: PlayerAvailability;
+};
+
+type MarketSnapshotRow = {
+	snapshot_date: string | Date;
+	captured_at: string | Date;
+	selected_by_percent: string | number;
+	transfers_in: number;
+	transfers_out: number;
+	transfers_in_event: number;
+	transfers_out_event: number;
+	status: string;
+	news: string;
+	news_added: string | Date | null;
+	chance_of_playing_this_round: number | null;
+	chance_of_playing_next_round: number | null;
+};
+
+type RecentGameweekRow = {
+	event_id: number;
+	total_points: number;
+	minutes: number | null;
+	starts: boolean | null;
+	goals_scored: number | null;
+	assists: number | null;
+	clean_sheets: number | null;
+	saves: number | null;
+	bonus: number | null;
+	bps: number | null;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isPlayerDetail = (value: unknown): value is PlayerDetail =>
+	isRecord(value) &&
+	typeof value.id === "number" &&
+	typeof value.webName === "string" &&
+	isRecord(value.statsContext) &&
+	Array.isArray(value.recentGameweeks) &&
+	Array.isArray(value.fixtures);
+
+const asNullableNumber = (value: unknown): number | null => {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value === "string") {
+		const parsed = Number(value);
+		return Number.isFinite(parsed) ? parsed : null;
+	}
+	return null;
+};
+
+const toIsoTimestamp = (value: string | Date | null): string | null => {
+	if (value === null) return null;
+	const parsed = value instanceof Date ? value : new Date(value);
+	return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+};
+
+const toCalendarDate = (value: string | Date): string | null => {
+	if (value instanceof Date) return value.toISOString().slice(0, 10);
+	const match = /^(\d{4}-\d{2}-\d{2})/.exec(value);
+	return match?.[1] ?? null;
 };
 
 const elementTypeToName = (type: number): string => {
@@ -104,246 +189,269 @@ const elementTypeToName = (type: number): string => {
 	}
 };
 
-const parseNum = (value: unknown): number | null => {
-	if (typeof value === "number") return Number.isFinite(value) ? value : null;
-	if (typeof value === "string") {
-		const p = Number.parseFloat(value.trim());
-		return Number.isFinite(p) ? p : null;
-	}
-	return null;
-};
+const playerDetailCacheKey = (playerId: number, eventId: number): string =>
+	`player_detail:v3:${playerId}:${eventId}`;
 
-const parseInt_ = (value: unknown): number | null => {
-	const n = parseNum(value);
-	return n === null ? null : Math.trunc(n);
-};
-
-const parseBool = (value: unknown): boolean => {
-	if (typeof value === "boolean") return value;
-	if (typeof value === "number") return value === 1;
-	if (typeof value === "string") {
-		const v = value.trim().toLowerCase();
-		return v === "true" || v === "1";
-	}
-	return false;
-};
-
-const parseJson = (value: string): Record<string, unknown> | null => {
+async function readPlayerDetailCache(
+	context: GraphQLContext,
+	key: string
+): Promise<PlayerDetail | null | undefined> {
+	let cached: string | null;
 	try {
-		const p: unknown = JSON.parse(value);
-		if (typeof p !== "object" || p === null || Array.isArray(p)) return null;
-		return p as Record<string, unknown>;
-	} catch {
+		cached = await context.redis.get(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to read player-detail cache");
+		return undefined;
+	}
+	if (cached === null) return undefined;
+	if (cached === NULL_SENTINEL) return null;
+	try {
+		const parsed: unknown = JSON.parse(cached);
+		if (isPlayerDetail(parsed)) return parsed;
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Malformed player-detail cache");
+	}
+	try {
+		await context.redis.del(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to evict malformed player-detail cache");
+	}
+	return undefined;
+}
+
+async function loadLatestMarketSnapshot(
+	context: GraphQLContext,
+	playerId: number
+): Promise<LatestMarketSnapshot | null> {
+	try {
+		const { data, error } = await context.supabase
+			.from("player_market_snapshots")
+			.select(
+				"snapshot_date, captured_at, selected_by_percent, transfers_in, transfers_out, transfers_in_event, transfers_out_event, status, news, news_added, chance_of_playing_this_round, chance_of_playing_next_round"
+			)
+			.eq("element_id", playerId)
+			.order("snapshot_date", { ascending: false })
+			.order("captured_at", { ascending: false })
+			.limit(1);
+		if (error) {
+			context.logger.warn({ err: error, playerId }, "Failed to load latest player market snapshot");
+			return null;
+		}
+		const row = data?.[0] as MarketSnapshotRow | undefined;
+		if (!row) return null;
+
+		const capturedAt = toIsoTimestamp(row.captured_at);
+		const observedDate = toCalendarDate(row.snapshot_date);
+		const selectedByPercent = asNullableNumber(row.selected_by_percent);
+		if (capturedAt === null || observedDate === null || selectedByPercent === null) return null;
+
+		return {
+			selectedByPercent,
+			seasonTransfersIn: row.transfers_in,
+			seasonTransfersOut: row.transfers_out,
+			transfersInEvent: row.transfers_in_event,
+			transfersOutEvent: row.transfers_out_event,
+			availability: {
+				status: row.status,
+				news: row.news,
+				newsAdded: toIsoTimestamp(row.news_added),
+				observedDate,
+				capturedAt,
+				chanceOfPlayingThisRound: row.chance_of_playing_this_round,
+				chanceOfPlayingNextRound: row.chance_of_playing_next_round,
+				stale: Math.max(Date.now() - Date.parse(capturedAt), 0) > MARKET_STALE_AFTER_MS,
+			},
+		};
+	} catch (error) {
+		context.logger.warn({ err: error, playerId }, "Failed to load latest player market snapshot");
 		return null;
 	}
+}
+
+const formatFixtureScore = (fixture: Fixture, wasHome: boolean): string | null => {
+	if (fixture.teamHScore === null || fixture.teamAScore === null) return null;
+	return wasHome
+		? `${fixture.teamHScore}-${fixture.teamAScore}`
+		: `${fixture.teamAScore}-${fixture.teamHScore}`;
 };
 
-const pickValue = (
-	source: Record<string, unknown>,
-	primary: string,
-	...aliases: string[]
-): unknown => {
-	if (Object.hasOwn(source, primary) && source[primary] !== undefined) {
-		return source[primary];
-	}
-	for (const alias of aliases) {
-		if (Object.hasOwn(source, alias) && source[alias] !== undefined) {
-			return source[alias];
+async function loadTeamFixtureDesk(
+	context: GraphQLContext,
+	teamId: number,
+	fromEventId: number
+): Promise<{ teamShortName: string; fixtures: PlayerFixture[] }> {
+	try {
+		const [fixtures, teams] = await Promise.all([
+			fixturesRepository.listFixtures(context, { teamId }, 100, 0),
+			buildTeamMap(context),
+		]);
+		const mapped = fixtures
+			.filter((fixture) => fixture.eventId !== null)
+			.map((fixture): PlayerFixture => {
+				const wasHome = fixture.teamHId === teamId;
+				const opponentId = wasHome ? fixture.teamAId : fixture.teamHId;
+				return {
+					id: fixture.id,
+					event: fixture.eventId!,
+					againstTeamShortName: teams.get(opponentId)?.shortName ?? "",
+					wasHome,
+					finished: fixture.finished,
+					kickoffTime: fixture.kickoffTime,
+					score: formatFixtureScore(fixture, wasHome),
+					difficulty: (wasHome ? fixture.teamHDifficulty : fixture.teamADifficulty) ?? 0,
+					bgw: false,
+				};
+			});
+
+		const eventsWithFixtures = new Set(mapped.map((fixture) => fixture.event));
+		const lastEventId = Math.min(38, fromEventId + UPCOMING_GAMEWEEK_LIMIT - 1);
+		for (let event = fromEventId; event <= lastEventId; event += 1) {
+			if (eventsWithFixtures.has(event)) continue;
+			mapped.push({
+				id: -event,
+				event,
+				againstTeamShortName: "",
+				wasHome: false,
+				finished: false,
+				kickoffTime: null,
+				score: null,
+				difficulty: 0,
+				bgw: true,
+			});
 		}
+
+		mapped.sort(
+			(a, b) =>
+				a.event - b.event ||
+				(a.kickoffTime ?? "9999").localeCompare(b.kickoffTime ?? "9999") ||
+				a.id - b.id
+		);
+		return { teamShortName: teams.get(teamId)?.shortName ?? "", fixtures: mapped };
+	} catch (error) {
+		context.logger.warn({ err: error, teamId }, "Failed to load player fixture desk");
+		return { teamShortName: "", fixtures: [] };
 	}
-	return null;
+}
+
+const opponentsByEvent = (fixtures: PlayerFixture[]): Map<number, PlayerRecentOpponent[]> => {
+	const result = new Map<number, PlayerRecentOpponent[]>();
+	for (const fixture of fixtures) {
+		if (fixture.bgw || !fixture.againstTeamShortName) continue;
+		const opponents = result.get(fixture.event) ?? [];
+		opponents.push({ teamShortName: fixture.againstTeamShortName, wasHome: fixture.wasHome });
+		result.set(fixture.event, opponents);
+	}
+	return result;
 };
 
-async function loadPlayerFromRedis(
+async function loadRecentGameweeks(
 	context: GraphQLContext,
-	season: string,
-	playerId: number
-): Promise<{
-	webName: string;
-	elementType: number;
-	teamId: number;
-	price: number;
-	startPrice: number;
-} | null> {
-	const hashKey = `Player:${season}`;
-	const raw = await context.redis.hget(hashKey, String(playerId));
-	if (!raw) return null;
-
-	const p = parseJson(raw);
-	if (!p) return null;
-
-	return {
-		webName: String(p.webName ?? ""),
-		elementType: parseInt_(p.type ?? p.elementType) ?? 0,
-		teamId: parseInt_(p.teamId ?? p.team_id) ?? 0,
-		price: parseInt_(p.price ?? p.nowCost) ?? 0,
-		startPrice: parseInt_(p.startPrice ?? p.start_price) ?? 0,
-	};
-}
-
-async function loadTeamShortNameFromRedis(
-	context: GraphQLContext,
-	season: string,
-	teamId: number
-): Promise<string> {
-	const raw = await context.redis.hget(`Team:${season}`, String(teamId));
-	if (!raw) return "";
-	const t = parseJson(raw);
-	return t ? String(t.shortName ?? t.short_name ?? "") : "";
-}
-
-async function loadPlayerStatFromRedis(
-	context: GraphQLContext,
-	season: string,
-	playerId: number
-): Promise<Record<string, unknown> | null> {
-	const raw = await context.redis.hget(`PlayerStat:${season}`, String(playerId));
-	if (!raw) return null;
-	return parseJson(raw);
-}
-
-async function loadEventLiveFromRedis(
-	context: GraphQLContext,
-	season: string,
-	eventId: number,
-	playerId: number
-): Promise<Record<string, unknown> | null> {
-	const raw = await context.redis.hget(`EventLive:${season}:${eventId}`, String(playerId));
-	if (!raw) return null;
-	return parseJson(raw);
-}
-
-async function loadTeamFixtures(
-	context: GraphQLContext,
-	season: string,
-	teamId: number
-): Promise<PlayerFixture[]> {
-	const hashKey = `FixturesByTeam:${season}:${teamId}`;
-	const hash = await context.redis.hgetall(hashKey);
-
-	const fixtures: PlayerFixture[] = [];
-
-	for (const [eventStr, rawValue] of Object.entries(hash)) {
-		const f = parseJson(rawValue);
-		if (!f) continue;
-
-		const event = parseInt_(f.event ?? eventStr) ?? 0;
-		if (event <= 0) continue;
-
-		fixtures.push({
-			event,
-			againstTeamShortName: String(f.againstTeamShortName ?? f.against_team_short_name ?? ""),
-			wasHome: parseBool(f.wasHome ?? f.was_home),
-			finished: parseBool(f.finished),
-			kickoffTime: String(f.kickoffTime ?? f.kickoff_time ?? "") || null,
-			score: f.score ? String(f.score) : null,
-			difficulty: parseInt_(f.difficulty) ?? 0,
-			bgw: parseBool(f.bgw),
-		});
-	}
-
-	fixtures.sort((a, b) => a.event - b.event);
-	return fixtures;
-}
-
-function buildPlayerDetailCacheKey(playerId: number, eventId: number): string {
-	return `player_detail:${playerId}:${eventId}`;
-}
-
-function mapPlayerDetail(
 	playerId: number,
-	player: {
-		webName: string;
-		elementType: number;
-		price: number;
-		startPrice: number;
-	},
-	teamShortName: string,
-	playerStat: Record<string, unknown> | null,
-	eventLive: Record<string, unknown> | null,
+	statsContext: PlayerStatsContext,
+	currentEvent: CurrentEventCache | null,
 	fixtures: PlayerFixture[]
-): PlayerDetail {
-	const elementType = player.elementType;
+): Promise<PlayerRecentGameweek[]> {
+	if (statsContext.scope !== "CURRENT_SEASON" || statsContext.asOfEventId === null) return [];
+	try {
+		const { data, error } = await context.supabase
+			.from("event_lives")
+			.select(
+				"event_id, total_points, minutes, starts, goals_scored, assists, clean_sheets, saves, bonus, bps"
+			)
+			.eq("element_id", playerId)
+			.lte("event_id", statsContext.asOfEventId)
+			.order("event_id", { ascending: false })
+			.limit(RECENT_GAMEWEEK_LIMIT);
+		if (error) {
+			context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
+			return [];
+		}
+		const opponents = opponentsByEvent(fixtures);
+		return ((data ?? []) as RecentGameweekRow[]).map((row) => ({
+			eventId: row.event_id,
+			provisional: currentEvent?.id === row.event_id && !currentEvent.finished,
+			totalPoints: row.total_points,
+			minutes: row.minutes,
+			started: row.starts,
+			goalsScored: row.goals_scored,
+			assists: row.assists,
+			cleanSheets: row.clean_sheets,
+			saves: row.saves,
+			bonus: row.bonus,
+			bps: row.bps,
+			opponents: opponents.get(row.event_id) ?? [],
+		}));
+	} catch (error) {
+		context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
+		return [];
+	}
+}
 
-	// Season cumulative stats from PlayerStat
-	const totalPoints = parseInt_(pickValue(playerStat ?? {}, "totalPoints", "total_points")) ?? 0;
-	const selectedByPercent = parseNum(
-		pickValue(playerStat ?? {}, "selectedByPercent", "selected_by_percent")
-	);
-	const form = parseNum(pickValue(playerStat ?? {}, "form"));
-	const seasonTransfersIn =
-		parseInt_(pickValue(playerStat ?? {}, "transfersIn", "transfers_in")) ?? 0;
-	const seasonTransfersOut =
-		parseInt_(pickValue(playerStat ?? {}, "transfersOut", "transfers_out")) ?? 0;
+const currentSeasonStats = (
+	statsContext: PlayerStatsContext,
+	stats: PlayerSeasonStatsAtEvent | null
+): PlayerSeasonStatsAtEvent | null =>
+	statsContext.scope === "CURRENT_SEASON" && stats?.available ? stats : null;
 
-	// Event-specific stats from EventLive (preferred) or PlayerStat (fallback)
-	const eventSource = eventLive ?? playerStat ?? {};
-
-	const eventPoints = eventLive
-		? (parseInt_(pickValue(eventLive, "totalPoints", "total_points")) ?? null)
-		: null;
-
-	const minutes = parseInt_(pickValue(eventSource, "minutes"));
-	const goalsScored = parseInt_(pickValue(eventSource, "goalsScored", "goals_scored")) ?? 0;
-	const assists = parseInt_(pickValue(eventSource, "assists")) ?? 0;
-	const cleanSheets = parseInt_(pickValue(eventSource, "cleanSheets", "clean_sheets")) ?? 0;
-	const goalsConceded = parseInt_(pickValue(eventSource, "goalsConceded", "goals_conceded")) ?? 0;
-	const ownGoals = parseInt_(pickValue(eventSource, "ownGoals", "own_goals")) ?? 0;
-	const penaltiesSaved =
-		parseInt_(pickValue(eventSource, "penaltiesSaved", "penalties_saved")) ?? 0;
-	const yellowCards = parseInt_(pickValue(eventSource, "yellowCards", "yellow_cards")) ?? 0;
-	const redCards = parseInt_(pickValue(eventSource, "redCards", "red_cards")) ?? 0;
-	const saves = parseInt_(pickValue(eventSource, "saves")) ?? 0;
-	const bonus = parseInt_(pickValue(eventSource, "bonus")) ?? 0;
-	const bps = parseInt_(pickValue(eventSource, "bps")) ?? 0;
-
-	const influence = parseNum(pickValue(eventSource, "influence"));
-	const creativity = parseNum(pickValue(eventSource, "creativity"));
-	const threat = parseNum(pickValue(eventSource, "threat"));
-	const ictIndex = parseNum(pickValue(eventSource, "ictIndex", "ict_index"));
-
-	const transfersInEvent =
-		parseInt_(pickValue(eventSource, "transfersInEvent", "transfers_in_event")) ?? 0;
-	const transfersOutEvent =
-		parseInt_(pickValue(eventSource, "transfersOutEvent", "transfers_out_event")) ?? 0;
-
+function assemblePlayerDetail(args: {
+	playerId: number;
+	player: NonNullable<Awaited<ReturnType<typeof playersRepository.getPlayerById>>>;
+	statsContext: PlayerStatsContext;
+	seasonStats: PlayerSeasonStatsAtEvent | null;
+	market: LatestMarketSnapshot | null;
+	teamShortName: string;
+	fixtures: PlayerFixture[];
+	recentGameweeks: PlayerRecentGameweek[];
+}): PlayerDetail {
+	const stats = currentSeasonStats(args.statsContext, args.seasonStats);
+	const latestEventPoints =
+		args.recentGameweeks.find((row) => row.eventId === args.statsContext.asOfEventId)
+			?.totalPoints ?? null;
 	return {
-		id: playerId,
-		webName: player.webName,
-		teamShortName,
-		elementType,
-		elementTypeName: elementTypeToName(elementType),
-		price: player.price,
-		startPrice: player.startPrice,
-		totalPoints,
-
-		selectedByPercent,
-		form,
-		seasonTransfersIn,
-		seasonTransfersOut,
-		transfersInEvent,
-		transfersOutEvent,
-
-		eventPoints,
-		minutes,
-		goalsScored,
-		assists,
-		cleanSheets,
-		goalsConceded,
-		ownGoals,
-		penaltiesSaved,
-		yellowCards,
-		redCards,
-		saves,
-		bonus,
-		bps,
-
-		influence,
-		creativity,
-		threat,
-		ictIndex,
-
-		fixtures,
+		id: args.playerId,
+		webName: args.player.webName,
+		teamShortName: args.teamShortName,
+		elementType: args.player.position,
+		elementTypeName: elementTypeToName(args.player.position),
+		price: args.player.price,
+		startPrice: args.player.startPrice,
+		statsContext: args.statsContext,
+		availability: args.market?.availability ?? null,
+		totalPoints: stats?.totalPoints ?? null,
+		selectedByPercent:
+			args.market?.selectedByPercent ??
+			args.player.selectedByPercent ??
+			stats?.selectedByPercent ??
+			null,
+		form: stats?.form ?? null,
+		seasonTransfersIn: args.market?.seasonTransfersIn ?? stats?.seasonTransfersIn ?? null,
+		seasonTransfersOut: args.market?.seasonTransfersOut ?? stats?.seasonTransfersOut ?? null,
+		transfersInEvent: args.market?.transfersInEvent ?? stats?.transfersInEvent ?? null,
+		transfersOutEvent: args.market?.transfersOutEvent ?? stats?.transfersOutEvent ?? null,
+		eventPoints: latestEventPoints,
+		minutes: stats?.minutes ?? null,
+		starts: stats?.starts ?? null,
+		goalsScored: stats?.goalsScored ?? null,
+		assists: stats?.assists ?? null,
+		cleanSheets: stats?.cleanSheets ?? null,
+		goalsConceded: stats?.goalsConceded ?? null,
+		ownGoals: stats?.ownGoals ?? null,
+		penaltiesSaved: stats?.penaltiesSaved ?? null,
+		yellowCards: stats?.yellowCards ?? null,
+		redCards: stats?.redCards ?? null,
+		saves: stats?.saves ?? null,
+		bonus: stats?.bonus ?? null,
+		bps: stats?.bps ?? null,
+		expectedGoals: stats?.expectedGoals ?? null,
+		expectedAssists: stats?.expectedAssists ?? null,
+		expectedGoalInvolvements: stats?.expectedGoalInvolvements ?? null,
+		expectedGoalsConceded: stats?.expectedGoalsConceded ?? null,
+		influence: stats?.influence ?? null,
+		creativity: stats?.creativity ?? null,
+		threat: stats?.threat ?? null,
+		ictIndex: stats?.ictIndex ?? null,
+		recentGameweeks: args.recentGameweeks,
+		fixtures: args.fixtures,
 	};
 }
 
@@ -355,50 +463,53 @@ export interface PlayerDetailRepository {
 	): Promise<PlayerDetail | null>;
 }
 
-const NULL_SENTINEL = "__pd:null__";
-
 export const playerDetailRepository: PlayerDetailRepository = {
 	async getPlayerDetail(
 		context: GraphQLContext,
 		playerId: number,
 		eventId: number
 	): Promise<PlayerDetail | null> {
-		if (!Number.isFinite(playerId) || playerId <= 0) return null;
-		if (!Number.isFinite(eventId) || eventId <= 0) return null;
+		if (!Number.isInteger(playerId) || playerId <= 0) return null;
+		if (!Number.isInteger(eventId) || eventId <= 0) return null;
 
 		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, buildPlayerDetailCacheKey(playerId, eventId));
-		const cached = await readJsonCache(context, cacheKey, isPlayerDetail);
-		if (cached) return cached;
+		const cacheKey = gqlCacheKey(season, playerDetailCacheKey(playerId, eventId));
+		const cached = await readPlayerDetailCache(context, cacheKey);
+		if (cached !== undefined) return cached;
 
-		// Parallel: load player info + stats/live/fixtures (stats/live need teamId so only player is first)
-		const [player, playerStat, eventLive] = await Promise.all([
-			loadPlayerFromRedis(context, season, playerId),
-			loadPlayerStatFromRedis(context, season, playerId),
-			loadEventLiveFromRedis(context, season, eventId, playerId),
+		const [player, statsContext, market, currentEvent] = await Promise.all([
+			playersRepository.getPlayerById(context, playerId),
+			resolvePlayerStatsContext(context, eventId),
+			loadLatestMarketSnapshot(context, playerId),
+			getCurrentEventFromRedis(context),
 		]);
-
 		if (!player) {
-			context.logger.warn({ playerId }, "Player not found in Redis");
-			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", 3600);
+			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", PLAYER_DETAIL_NULL_CACHE_TTL);
 			return null;
 		}
 
-		const [teamShortName, fixtures] = await Promise.all([
-			loadTeamShortNameFromRedis(context, season, player.teamId),
-			loadTeamFixtures(context, season, player.teamId),
+		const [{ teamShortName, fixtures }, seasonStats] = await Promise.all([
+			loadTeamFixtureDesk(context, player.teamId, eventId),
+			getPlayerSeasonStatsForContext(context, playerId, statsContext),
 		]);
-
-		const detail = mapPlayerDetail(
+		const recentGameweeks = await loadRecentGameweeks(
+			context,
 			playerId,
-			player,
-			teamShortName,
-			playerStat,
-			eventLive,
+			statsContext,
+			currentEvent,
 			fixtures
 		);
-
-		await context.redis.set(cacheKey, JSON.stringify(detail), "EX", 3600);
+		const detail = assemblePlayerDetail({
+			playerId,
+			player,
+			statsContext,
+			seasonStats,
+			market,
+			teamShortName,
+			fixtures,
+			recentGameweeks,
+		});
+		await context.redis.set(cacheKey, JSON.stringify(detail), "EX", PLAYER_DETAIL_CACHE_TTL);
 		return detail;
 	},
 };
