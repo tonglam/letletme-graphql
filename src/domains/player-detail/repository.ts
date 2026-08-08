@@ -303,10 +303,33 @@ async function loadTeamFixtureDesk(
 				};
 			});
 
-		const eventsWithFixtures = new Set(mapped.map((fixture) => fixture.event));
 		const lastEventId = Math.min(38, fromEventId + UPCOMING_GAMEWEEK_LIMIT - 1);
+		const eventsWithTeamFixtures = new Set(mapped.map((fixture) => fixture.event));
+		const eventsWithAnyFixtures = new Set(eventsWithTeamFixtures);
+		const uncoveredEvents = Array.from(
+			{ length: Math.max(0, lastEventId - fromEventId + 1) },
+			(_, index) => fromEventId + index
+		).filter((event) => !eventsWithTeamFixtures.has(event));
+		const coverageResults = await Promise.all(
+			uncoveredEvents.map(async (event) => {
+				try {
+					const eventFixtures = await fixturesRepository.getEventFixtures(context, event);
+					return eventFixtures.some((fixture) => fixture.eventId === event) ? event : null;
+				} catch (error) {
+					context.logger.warn(
+						{ err: error, event },
+						"Failed to confirm fixture coverage for player fixture desk"
+					);
+					return null;
+				}
+			})
+		);
+		for (const event of coverageResults) {
+			if (event !== null) eventsWithAnyFixtures.add(event);
+		}
+
 		for (let event = fromEventId; event <= lastEventId; event += 1) {
-			if (eventsWithFixtures.has(event)) continue;
+			if (eventsWithTeamFixtures.has(event) || !eventsWithAnyFixtures.has(event)) continue;
 			mapped.push({
 				id: -event,
 				event,
@@ -399,6 +422,7 @@ function assemblePlayerDetail(args: {
 	statsContext: PlayerStatsContext;
 	seasonStats: PlayerSeasonStatsAtEvent | null;
 	market: LatestMarketSnapshot | null;
+	marketMatchesStatsEvent: boolean;
 	teamShortName: string;
 	fixtures: PlayerFixture[];
 	recentGameweeks: PlayerRecentGameweek[];
@@ -426,8 +450,14 @@ function assemblePlayerDetail(args: {
 		form: stats?.form ?? null,
 		seasonTransfersIn: args.market?.seasonTransfersIn ?? stats?.seasonTransfersIn ?? null,
 		seasonTransfersOut: args.market?.seasonTransfersOut ?? stats?.seasonTransfersOut ?? null,
-		transfersInEvent: args.market?.transfersInEvent ?? stats?.transfersInEvent ?? null,
-		transfersOutEvent: args.market?.transfersOutEvent ?? stats?.transfersOutEvent ?? null,
+		transfersInEvent:
+			(args.marketMatchesStatsEvent ? args.market?.transfersInEvent : null) ??
+			stats?.transfersInEvent ??
+			null,
+		transfersOutEvent:
+			(args.marketMatchesStatsEvent ? args.market?.transfersOutEvent : null) ??
+			stats?.transfersOutEvent ??
+			null,
 		eventPoints: latestEventPoints,
 		minutes: stats?.minutes ?? null,
 		starts: stats?.starts ?? null,
@@ -505,6 +535,8 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			statsContext,
 			seasonStats,
 			market,
+			marketMatchesStatsEvent:
+				statsContext.asOfEventId === null || currentEvent?.id === statsContext.asOfEventId,
 			teamShortName,
 			fixtures,
 			recentGameweeks,

@@ -153,7 +153,11 @@ export const createPublicLeagueTrendsRepository = (
 			latestAvailableEventId: Number(row.latest_event_id),
 			totalEntries: Number(row.total_entries),
 		}));
-		await context.redis.set(cacheKey, JSON.stringify(trends), "EX", env.CACHE_TTL_SECONDS);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(trends), "EX", env.CACHE_TTL_SECONDS);
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to write public league catalog cache");
+		}
 		return trends;
 	},
 
@@ -184,7 +188,11 @@ export const createPublicLeagueTrendsRepository = (
 			context.logger.warn({ err: error, cacheKey }, "Failed to read public league stats cache");
 		}
 		const stats = await readSelectionStats(context, tournamentId, eventId, safeLimit);
-		await context.redis.set(cacheKey, JSON.stringify(stats), "EX", env.CACHE_TTL_SECONDS);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(stats), "EX", env.CACHE_TTL_SECONDS);
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to write public league stats cache");
+		}
 		return stats;
 	},
 });

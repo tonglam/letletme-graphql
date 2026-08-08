@@ -210,23 +210,32 @@ async function main(): Promise<void> {
 			const eventId = eventIds[eventIndex];
 			if (eventId === undefined) continue;
 			const seasonToDateIds = eventIds.slice(0, eventIndex + 1);
-			const eligiblePlayers = players.filter((player) =>
-				byPlayerEvent.has(key(player.elementId, eventId))
-			);
 			const recentIds = seasonToDateIds.slice(-5);
 			const previousIds = seasonToDateIds.slice(-10, -5);
 			const targetIds = eventIds.slice(eventIndex + 1, eventIndex + 6);
 			const seasonMetrics = metricsForWindow({
-				players: eligiblePlayers,
+				players,
 				byPlayerEvent,
 				eventIds: seasonToDateIds,
 			});
+			// playerStateProfile only compares players with the production
+			// season-to-date minutes gate. Keep both the percentile cohort and
+			// sealed observations on that same gate.
+			const eligibleIds = new Set(
+				seasonMetrics.filter((row) => row.minutes >= 900).map((row) => row.elementId)
+			);
+			const eligiblePlayers = players.filter(
+				(player) =>
+					eligibleIds.has(player.elementId) && byPlayerEvent.has(key(player.elementId, eventId))
+			);
+			const cohortIds = new Set(eligiblePlayers.map((player) => player.elementId));
+			const cohortMetrics = seasonMetrics.filter((row) => cohortIds.has(row.elementId));
 			const recentMetrics = metricsForWindow({
 				players: eligiblePlayers,
 				byPlayerEvent,
 				eventIds: recentIds,
 			});
-			const seasonPercentiles = compositePercentiles(seasonMetrics);
+			const seasonPercentiles = compositePercentiles(cohortMetrics);
 			const recentPercentiles = compositePercentiles(recentMetrics);
 
 			for (const player of eligiblePlayers) {

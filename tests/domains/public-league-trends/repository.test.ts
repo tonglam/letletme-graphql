@@ -15,7 +15,7 @@ const emptyStats: TournamentSelectionStats = {
 	mostTransferOut: [],
 };
 
-const context = () => {
+const context = (options: { failRedisWrites?: boolean } = {}) => {
 	const strings = new Map<string, string>([["Season:active", "2627"]]);
 	return {
 		strings,
@@ -23,6 +23,7 @@ const context = () => {
 			redis: {
 				get: async (key: string) => strings.get(key) ?? null,
 				set: async (key: string, value: string) => {
+					if (options.failRedisWrites) throw new Error("redis unavailable");
 					strings.set(key, value);
 					return "OK";
 				},
@@ -120,5 +121,61 @@ describe("public league trends repository", () => {
 		revision = "2026-08-08T02:00:00.000Z";
 		expect(await repository.getSelectionStats(ctx.value, 7, 3, 12)).toEqual(emptyStats);
 		expect(reads).toBe(2);
+	});
+
+	it("returns public catalog rows when Redis cache writes fail", async () => {
+		const repository = createPublicLeagueTrendsRepository({
+			query: async (sql) => {
+				if (sql.includes("to_regclass")) {
+					return { rows: [{ catalog: "public_league_trends_catalog" }] };
+				}
+				return {
+					rows: [
+						{
+							tournament_id: 7,
+							display_name: "Perth FPL",
+							sort_order: 2,
+							published_at: "2026-08-01T00:00:00.000Z",
+							updated_at: "2026-08-08T00:00:00.000Z",
+							latest_event_id: 3,
+							total_entries: 125,
+							catalog_revision: "2026-08-08T00:00:00.000Z",
+						},
+					],
+				};
+			},
+		});
+
+		const result = await repository.list(context({ failRedisWrites: true }).value);
+		expect(result[0]?.tournamentId).toBe(7);
+	});
+
+	it("returns public selection stats when Redis cache writes fail", async () => {
+		const repository = createPublicLeagueTrendsRepository(
+			{
+				query: async (sql) => {
+					if (sql.includes("to_regclass")) {
+						return { rows: [{ catalog: "public_league_trends_catalog" }] };
+					}
+					return {
+						rows: [
+							{
+								catalog_revision: "2026-08-08T00:00:00.000Z",
+								snapshot_revision: "2026-08-08T01:00:00.000Z",
+							},
+						],
+					};
+				},
+			},
+			async () => emptyStats
+		);
+
+		const result = await repository.getSelectionStats(
+			context({ failRedisWrites: true }).value,
+			7,
+			3,
+			12
+		);
+		expect(result).toEqual(emptyStats);
 	});
 });

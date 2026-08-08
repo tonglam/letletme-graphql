@@ -10,6 +10,25 @@ CREATE TABLE IF NOT EXISTS public.public_league_trends_catalog (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE OR REPLACE FUNCTION public.touch_public_league_trends_catalog_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END
+$function$;
+
+DROP TRIGGER IF EXISTS public_league_trends_catalog_touch_updated_at
+  ON public.public_league_trends_catalog;
+
+CREATE TRIGGER public_league_trends_catalog_touch_updated_at
+BEFORE UPDATE ON public.public_league_trends_catalog
+FOR EACH ROW
+EXECUTE FUNCTION public.touch_public_league_trends_catalog_updated_at();
+
 CREATE INDEX IF NOT EXISTS idx_public_league_trends_catalog_enabled_order
   ON public.public_league_trends_catalog (enabled, sort_order, tournament_id);
 

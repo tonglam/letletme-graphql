@@ -153,8 +153,8 @@ describe("playerDetailRepository", () => {
 		expect(detail?.transfersInEvent).toBe(321);
 		expect(detail?.availability?.status).toBe("a");
 		expect(detail?.recentGameweeks).toEqual([]);
-		expect(detail?.fixtures).toHaveLength(8);
-		expect(detail?.fixtures.filter((fixture) => fixture.bgw)).toHaveLength(7);
+		expect(detail?.fixtures).toHaveLength(1);
+		expect(detail?.fixtures.filter((fixture) => fixture.bgw)).toHaveLength(0);
 		expect(fromCalls).not.toContain("player_stats");
 		expect(fromCalls).not.toContain("event_lives");
 	});
@@ -261,5 +261,52 @@ describe("playerDetailRepository", () => {
 		});
 		expect(detail?.recentGameweeks[0].opponents).toHaveLength(2);
 		expect(detail?.fixtures.filter((fixture) => fixture.event === 3)).toHaveLength(2);
+	});
+
+	it("keeps event-scoped transfer counts for a past event", async () => {
+		const context = createContext({
+			currentEvent: { id: 5, isCurrent: true, finished: false },
+			tables: {
+				events: [
+					{
+						id: 3,
+						finished: true,
+						is_current: false,
+						deadline_time_epoch: Math.floor(Date.now() / 1000) - 86_400,
+					},
+				],
+				player_market_snapshots: [marketRow()],
+				player_stats: [
+					{
+						element_id: 9,
+						event_id: 3,
+						total_points: 55,
+						transfers_in_event: 1,
+						transfers_out_event: 2,
+					},
+				],
+				event_lives: [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				event_fixtures: [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
+		expect(detail?.statsContext.asOfEventId).toBe(3);
+		expect(detail?.transfersInEvent).toBe(1);
+		expect(detail?.transfersOutEvent).toBe(2);
 	});
 });
