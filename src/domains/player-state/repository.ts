@@ -873,6 +873,44 @@ async function loadUnderstatSeasons(
 	}
 }
 
+async function loadSealedArchives(
+	context: GraphQLContext,
+	executor: QueryExecutor
+): Promise<ArchiveRow[]> {
+	try {
+		return (await executor.query<ArchiveRow>(archiveSql)).rows;
+	} catch (error) {
+		if (isMissingRelationError(error)) {
+			context.logger.warn(
+				{ table: "fpl_season_archives" },
+				"FPL archive storage is not provisioned; serving FPL-only state"
+			);
+			return [];
+		}
+		throw error;
+	}
+}
+
+async function loadProviderLink(
+	context: GraphQLContext,
+	executor: QueryExecutor,
+	playerCode: number
+): Promise<ProviderLinkRow | null> {
+	try {
+		const result = await executor.query<ProviderLinkRow>(providerLinkSql, [String(playerCode)]);
+		return result.rows[0] ?? null;
+	} catch (error) {
+		if (isMissingRelationError(error)) {
+			context.logger.warn(
+				{ table: "provider_entity_links" },
+				"Provider link storage is not provisioned; serving FPL-only state"
+			);
+			return null;
+		}
+		throw error;
+	}
+}
+
 export interface PlayerStateRepository {
 	getPlayerStateProfile(
 		context: GraphQLContext,
@@ -894,22 +932,17 @@ export const createPlayerStateRepository = (
 
 		const season = await getCurrentSeason(context);
 		const statsContextPromise = resolvePlayerStatsContext(context);
-		const [metadataResult, archiveResult, understatSeasonsResult, statsContext] = await Promise.all(
-			[
-				executor.query<PlayerMetadataRow>(metadataSql, [playerId]),
-				executor.query<ArchiveRow>(archiveSql),
-				loadUnderstatSeasons(context, executor),
-				statsContextPromise,
-			]
-		);
+		const [metadataResult, archiveRows, understatSeasonsResult, statsContext] = await Promise.all([
+			executor.query<PlayerMetadataRow>(metadataSql, [playerId]),
+			loadSealedArchives(context, executor),
+			loadUnderstatSeasons(context, executor),
+			statsContextPromise,
+		]);
 		const metadata = metadataResult.rows[0];
 		if (!metadata) return null;
 
 		// Provider links use durable FPL player.code, never the season-local element id.
-		const durableLink = await executor.query<ProviderLinkRow>(providerLinkSql, [
-			String(metadata.player_code),
-		]);
-		const link = durableLink.rows[0] ?? null;
+		const link = await loadProviderLink(context, executor, metadata.player_code);
 		const manifests = await readUnderstatManifests(context, season);
 		const currentMappingStatus = resolvePlayerStateMappingStatus(link, season);
 		const currentUnderstatSeason = understatSeasonsResult.find(
@@ -923,7 +956,7 @@ export const createPlayerStateRepository = (
 			manifests.player !== null;
 		const understatCurrent = understatPublished && currentMappingStatus === "VERIFIED";
 
-		const history = await loadHistory(context, executor, metadata.player_code, archiveResult.rows);
+		const history = await loadHistory(context, executor, metadata.player_code, archiveRows);
 		const sourceVector = {
 			engine: STATE_ENGINE_VERSION,
 			season,
@@ -1288,7 +1321,7 @@ export const createPlayerStateRepository = (
 				season: history.sealedSeasons.at(0) ?? season,
 				revision: history.archiveRevision,
 				asOf:
-					archiveResult.rows
+					archiveRows
 						.map((archive) => iso(archive.completed_at))
 						.filter((value): value is string => value !== null)
 						.sort()

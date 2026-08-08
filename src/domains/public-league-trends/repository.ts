@@ -32,6 +32,7 @@ type CatalogRow = {
 	total_entries: number;
 	catalog_revision: string | Date;
 	snapshot_revision?: string | Date | null;
+	readiness_revision?: string | Date | null;
 };
 
 type AccessRow = {
@@ -53,7 +54,13 @@ const CATALOG_SQL = `
 		snapshot.event_id AS latest_event_id,
 		snapshot.total_entries,
 		(SELECT MAX(updated_at) FROM public.public_league_trends_catalog) AS catalog_revision,
-		MAX(snapshot.snapshot_revision) OVER () AS snapshot_revision
+		MAX(snapshot.snapshot_revision) OVER () AS snapshot_revision,
+		(
+			SELECT MAX(COALESCE(tournament_revision.updated_at, tournament_revision.created_at))
+			FROM public.public_league_trends_catalog catalog_revision
+			JOIN public.tournament_infos tournament_revision
+				ON tournament_revision.id = catalog_revision.tournament_id
+		) AS readiness_revision
 	FROM public.public_league_trends_catalog catalog
 	JOIN public.tournament_infos tournament
 		ON tournament.id = catalog.tournament_id
@@ -146,9 +153,13 @@ export const createPublicLeagueTrendsRepository = (
 			.filter((value): value is string => value !== null)
 			.sort()
 			.at(-1);
+		const readinessRevision =
+			rows[0]!.readiness_revision === undefined || rows[0]!.readiness_revision === null
+				? "none"
+				: iso(rows[0]!.readiness_revision);
 		const cacheKey = gqlCacheKey(
 			season,
-			`public-league-trends:v2:${revision}:${snapshotRevision ?? "none"}`
+			`public-league-trends:v3:${revision}:${snapshotRevision ?? "none"}:${readinessRevision}`
 		);
 		try {
 			const cached = await context.redis.get(cacheKey);

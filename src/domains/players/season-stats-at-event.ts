@@ -52,8 +52,9 @@ type EventPhaseRow = {
 	deadline_time_epoch: number | null;
 };
 
-const SEASON_STATS_CACHE_VERSION = "v3";
+const SEASON_STATS_CACHE_VERSION = "v4";
 const SEASON_STATS_CACHE_TTL = 60 * 60;
+const SEASON_STATS_LIVE_CACHE_TTL = 5 * 60;
 const EMPTY_SEASON_STATS_CACHE_TTL = 5 * 60;
 const EVENT_PHASE_LOOKBACK = 40;
 
@@ -227,6 +228,27 @@ const isPlayerSeasonStatsAtEvent = (value: unknown): value is PlayerSeasonStatsA
 const cacheKey = (season: string, elementId: number, eventId: number): string =>
 	gqlCacheKey(season, `players:season-stats:${SEASON_STATS_CACHE_VERSION}:${elementId}:${eventId}`);
 
+async function isUnfinishedCurrentEvent(
+	context: GraphQLContext,
+	eventId: number
+): Promise<boolean> {
+	const current = await getCurrentEventFromRedis(context);
+	if (current) return current.id === eventId && !current.finished;
+	try {
+		const { data, error } = await context.supabase
+			.from("events")
+			.select("finished")
+			.eq("id", eventId)
+			.limit(1);
+		if (error) return false;
+		const row = data?.[0] as { finished?: boolean | null } | undefined;
+		return row?.finished === false;
+	} catch (error) {
+		context.logger.warn({ err: error, eventId }, "Failed to resolve season-stat cache freshness");
+		return false;
+	}
+}
+
 const SEASON_STATS_SELECT = [
 	"element_id",
 	"event_id",
@@ -303,6 +325,9 @@ export async function getPlayerSeasonStatsByIdsForContext(
 	}
 
 	if (missingIds.length === 0) return result;
+	const cacheTtl = (await isUnfinishedCurrentEvent(context, eventId))
+		? SEASON_STATS_LIVE_CACHE_TTL
+		: SEASON_STATS_CACHE_TTL;
 
 	const { data, error } = await context.supabase
 		.from("player_stats")
@@ -330,7 +355,7 @@ export async function getPlayerSeasonStatsByIdsForContext(
 			cacheKey(statsContext.season, mapped.elementId, eventId),
 			JSON.stringify(mapped),
 			"EX",
-			SEASON_STATS_CACHE_TTL
+			cacheTtl
 		);
 	}
 	for (const id of missingIds) {

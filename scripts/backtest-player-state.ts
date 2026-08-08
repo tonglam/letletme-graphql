@@ -17,6 +17,7 @@ import type {
 type LiveRow = {
 	season: string;
 	event_id: number;
+	event_cutoff_at: Date | string | null;
 	element_id: number;
 	player_code: number;
 	position: number;
@@ -26,6 +27,7 @@ type LiveRow = {
 	bonus: number | null;
 	availability_status: string | null;
 	chance_of_playing_this_round: number | null;
+	availability_captured_at: Date | string | null;
 	availability_known: boolean;
 };
 
@@ -46,10 +48,21 @@ type Observation = {
 	futureFivePoints: number;
 };
 
+const MARKET_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
+
+const ageAtCutoff = (cutoff: Date | string | null, capturedAt: Date | string | null): number => {
+	if (cutoff === null || capturedAt === null) return Number.POSITIVE_INFINITY;
+	const cutoffMs = cutoff instanceof Date ? cutoff.getTime() : Date.parse(cutoff);
+	const capturedMs = capturedAt instanceof Date ? capturedAt.getTime() : Date.parse(capturedAt);
+	if (!Number.isFinite(cutoffMs) || !Number.isFinite(capturedMs)) return Number.POSITIVE_INFINITY;
+	return Math.max(cutoffMs - capturedMs, 0);
+};
+
 const sql = `
 	SELECT
 		live.season,
 		live.event_id,
+		COALESCE(event.deadline_time, event.created_at) AS event_cutoff_at,
 		live.element_id,
 		player.code AS player_code,
 		player.type AS position,
@@ -59,6 +72,7 @@ const sql = `
 		live.bonus,
 		market.status AS availability_status,
 		market.chance_of_playing_this_round,
+		market.captured_at AS availability_captured_at,
 		market.element_id IS NOT NULL AS availability_known
 	FROM fpl_event_live_history live
 	JOIN fpl_season_archives archive
@@ -76,6 +90,7 @@ const sql = `
 		WHERE market.season = live.season
 			AND market.element_id = live.element_id
 			AND market.snapshot_date <= COALESCE(event.deadline_time, event.created_at)::date
+			AND market.captured_at <= COALESCE(event.deadline_time, event.created_at)
 		ORDER BY market.snapshot_date DESC, market.captured_at DESC
 		LIMIT 1
 	) market ON true
@@ -276,7 +291,9 @@ async function main(): Promise<void> {
 				const availability = assessAvailability({
 					status: currentRow.availability_status,
 					chanceOfPlayingThisRound: currentRow.chance_of_playing_this_round,
-					stale: false,
+					stale:
+						ageAtCutoff(currentRow.event_cutoff_at, currentRow.availability_captured_at) >
+						MARKET_STALE_AFTER_MS,
 				});
 				if (availability.unavailable) continue;
 				const ownBaseline = buildOwnBaseline(historyByCode.get(player.playerCode) ?? []);

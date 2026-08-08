@@ -438,10 +438,12 @@ const opponentsByEvent = (fixtures: PlayerFixture[]): Map<number, PlayerRecentOp
 async function loadRecentGameweeks(
 	context: GraphQLContext,
 	playerId: number,
+	playerCode: number,
 	statsContext: PlayerStatsContext,
 	currentEvent: CurrentEventCache | null,
 	resolvedEvent: ResolvedEventState | null,
-	fixtures: PlayerFixture[]
+	fallbackTeamId: number,
+	knownFixtures: PlayerFixture[]
 ): Promise<PlayerRecentGameweek[]> {
 	if (statsContext.scope !== "CURRENT_SEASON" || statsContext.asOfEventId === null) return [];
 	try {
@@ -458,9 +460,32 @@ async function loadRecentGameweeks(
 			context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
 			return [];
 		}
-		const opponents = opponentsByEvent(fixtures);
+		const rows = (data ?? []) as RecentGameweekRow[];
+		const teamIds = await Promise.all(
+			rows.map((row) =>
+				loadHistoricalTeamId(context, statsContext.season, playerCode, row.event_id, fallbackTeamId)
+			)
+		);
+		const uniqueTeamIds = Array.from(new Set(teamIds));
+		const deskEntries = await Promise.all(
+			uniqueTeamIds.map(async (teamId) => {
+				if (teamId === fallbackTeamId) return [teamId, knownFixtures] as const;
+				const desk = await loadTeamFixtureDesk(
+					context,
+					teamId,
+					Math.min(...rows.map((row) => row.event_id), statsContext.asOfEventId ?? 1)
+				);
+				return [teamId, desk.fixtures] as const;
+			})
+		);
+		const opponents = new Map<number, PlayerRecentOpponent[]>();
+		for (const [, teamFixtures] of deskEntries) {
+			for (const [eventId, eventOpponents] of opponentsByEvent(teamFixtures)) {
+				opponents.set(eventId, [...(opponents.get(eventId) ?? []), ...eventOpponents]);
+			}
+		}
 		const provisionalEvent = currentEvent ?? resolvedEvent;
-		return ((data ?? []) as RecentGameweekRow[]).map((row) => ({
+		return rows.map((row) => ({
 			eventId: row.event_id,
 			provisional: provisionalEvent?.id === row.event_id && !provisionalEvent.finished,
 			totalPoints: row.total_points,
@@ -610,9 +635,11 @@ export const playerDetailRepository: PlayerDetailRepository = {
 		const recentGameweeks = await loadRecentGameweeks(
 			context,
 			playerId,
+			player.code,
 			statsContext,
 			currentEvent,
 			resolvedEvent,
+			resolvedTeamId,
 			fixtures
 		);
 		const detail = assemblePlayerDetail({
