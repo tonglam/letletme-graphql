@@ -974,18 +974,14 @@ export const tournamentsRepository: TournamentsRepository = {
 	async getEntryTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]> {
 		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(season, `tournaments:entry:${entryId}`);
+		// Accept any well-shaped list cache. Previously we required every row to have
+		// standingsReadyAt, so one in-flight setup made the list cold on every request.
 		const cached = await readJsonCache(context, cacheKey, isTournamentInfoArrayCache);
 		if (
 			Array.isArray(cached) &&
-			cached.every(
-				(item) =>
-					isRecord(item) && Number.isFinite(Number(item.id)) && item.standingsReadyAt !== null
-			)
+			cached.every((item) => isRecord(item) && Number.isFinite(Number(item.id)))
 		) {
 			return cached as TournamentInfo[];
-		}
-		if (Array.isArray(cached)) {
-			await context.redis.del(cacheKey);
 		}
 
 		const { data: entryData, error: entryError } = await context.supabase
@@ -1016,9 +1012,14 @@ export const tournamentsRepository: TournamentsRepository = {
 		}
 
 		const tournaments = ((infoData as DbTournamentInfoRow[] | null) ?? []).map(mapTournamentInfo);
-		if (tournaments.every((tournament) => tournament.standingsReadyAt !== null)) {
-			await context.redis.set(cacheKey, JSON.stringify(tournaments), "EX", env.CACHE_TTL_SECONDS);
-		}
+		// Always write cache: full TTL when all standings ready, short TTL while any setup is open.
+		const allStandingsReady = tournaments.every(
+			(tournament) => tournament.standingsReadyAt !== null
+		);
+		const ttlSeconds = allStandingsReady
+			? env.CACHE_TTL_SECONDS
+			: Math.min(15, env.CACHE_TTL_SECONDS);
+		await context.redis.set(cacheKey, JSON.stringify(tournaments), "EX", ttlSeconds);
 		return tournaments;
 	},
 
