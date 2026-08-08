@@ -240,12 +240,12 @@ async function isUnfinishedCurrentEvent(
 			.select("finished")
 			.eq("id", eventId)
 			.limit(1);
-		if (error) return false;
+		if (error) return true;
 		const row = data?.[0] as { finished?: boolean | null } | undefined;
-		return row?.finished === false;
+		return row?.finished !== true;
 	} catch (error) {
 		context.logger.warn({ err: error, eventId }, "Failed to resolve season-stat cache freshness");
-		return false;
+		return true;
 	}
 }
 

@@ -478,27 +478,26 @@ async function loadRecentGameweeks(
 				return [teamId, desk.fixtures] as const;
 			})
 		);
-		const opponents = new Map<number, PlayerRecentOpponent[]>();
-		for (const [, teamFixtures] of deskEntries) {
-			for (const [eventId, eventOpponents] of opponentsByEvent(teamFixtures)) {
-				opponents.set(eventId, [...(opponents.get(eventId) ?? []), ...eventOpponents]);
-			}
-		}
+		const fixturesByTeam = new Map(deskEntries);
 		const provisionalEvent = currentEvent ?? resolvedEvent;
-		return rows.map((row) => ({
-			eventId: row.event_id,
-			provisional: provisionalEvent?.id === row.event_id && !provisionalEvent.finished,
-			totalPoints: row.total_points,
-			minutes: row.minutes,
-			started: row.starts,
-			goalsScored: row.goals_scored,
-			assists: row.assists,
-			cleanSheets: row.clean_sheets,
-			saves: row.saves,
-			bonus: row.bonus,
-			bps: row.bps,
-			opponents: opponents.get(row.event_id) ?? [],
-		}));
+		return rows.map((row, index) => {
+			const teamId = teamIds[index] ?? fallbackTeamId;
+			const opponents = opponentsByEvent(fixturesByTeam.get(teamId) ?? []).get(row.event_id) ?? [];
+			return {
+				eventId: row.event_id,
+				provisional: provisionalEvent?.id === row.event_id && !provisionalEvent.finished,
+				totalPoints: row.total_points,
+				minutes: row.minutes,
+				started: row.starts,
+				goalsScored: row.goals_scored,
+				assists: row.assists,
+				cleanSheets: row.clean_sheets,
+				saves: row.saves,
+				bonus: row.bonus,
+				bps: row.bps,
+				opponents,
+			};
+		});
 	} catch (error) {
 		context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
 		return [];

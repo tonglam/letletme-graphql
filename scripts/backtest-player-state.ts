@@ -85,7 +85,8 @@ const sql = `
 		SELECT
 			market.element_id,
 			market.status,
-			market.chance_of_playing_this_round
+			market.chance_of_playing_this_round,
+			market.captured_at
 		FROM fpl_player_market_snapshot_history market
 		WHERE market.season = live.season
 			AND market.element_id = live.element_id

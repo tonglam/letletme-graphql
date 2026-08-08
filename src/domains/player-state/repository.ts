@@ -217,6 +217,13 @@ const metadataSql = `
 	LIMIT 1
 `;
 
+const metadataSqlWithoutAuthority = metadataSql
+	.replace(
+		"\t\tc.season AS core_season,\n\t\tc.revision AS core_revision,\n\t\tc.publication_id::text,\n\t\tc.committed_at AS core_committed_at,",
+		"\t\tNULL::text AS core_season,\n\t\tNULL::text AS core_revision,\n\t\tNULL::text AS publication_id,\n\t\tNULL::timestamptz AS core_committed_at,"
+	)
+	.replace("\n\tLEFT JOIN core_snapshot_authority c ON c.singleton_id = 1", "");
+
 const archiveSql = `
 	SELECT season, status, source_core_revision, completed_at
 	FROM fpl_season_archives
@@ -911,6 +918,23 @@ async function loadProviderLink(
 	}
 }
 
+async function loadPlayerMetadata(
+	context: GraphQLContext,
+	executor: QueryExecutor,
+	playerId: number
+): Promise<QueryResult<PlayerMetadataRow>> {
+	try {
+		return await executor.query<PlayerMetadataRow>(metadataSql, [playerId]);
+	} catch (error) {
+		if (!isMissingRelationError(error)) throw error;
+		context.logger.warn(
+			{ table: "core_snapshot_authority" },
+			"Core snapshot authority is not provisioned; serving FPL-only state"
+		);
+		return executor.query<PlayerMetadataRow>(metadataSqlWithoutAuthority, [playerId]);
+	}
+}
+
 export interface PlayerStateRepository {
 	getPlayerStateProfile(
 		context: GraphQLContext,
@@ -933,7 +957,7 @@ export const createPlayerStateRepository = (
 		const season = await getCurrentSeason(context);
 		const statsContextPromise = resolvePlayerStatsContext(context);
 		const [metadataResult, archiveRows, understatSeasonsResult, statsContext] = await Promise.all([
-			executor.query<PlayerMetadataRow>(metadataSql, [playerId]),
+			loadPlayerMetadata(context, executor, playerId),
 			loadSealedArchives(context, executor),
 			loadUnderstatSeasons(context, executor),
 			statsContextPromise,
