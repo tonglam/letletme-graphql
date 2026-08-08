@@ -240,6 +240,23 @@ const metadataSqlWithoutAuthority = metadataSql
 	)
 	.replace("\n\tLEFT JOIN core_snapshot_authority c ON c.singleton_id = 1", "");
 
+const metadataSqlWithoutMarket = metadataSql
+	.replace(
+		"\t\tmarket.status AS market_status,\n\t\tmarket.chance_of_playing_this_round AS chance_this_round,\n\t\tmarket.captured_at AS market_captured_at",
+		"\t\tNULL::text AS market_status,\n\t\tNULL::integer AS chance_this_round,\n\t\tNULL::timestamptz AS market_captured_at"
+	)
+	.replace(
+		"\n\tLEFT JOIN LATERAL (\n\t\tSELECT status, chance_of_playing_this_round, captured_at\n\t\tFROM player_market_snapshots\n\t\tWHERE element_id = p.id\n\t\tORDER BY snapshot_date DESC, captured_at DESC\n\t\tLIMIT 1\n\t) market ON true",
+		""
+	);
+
+const metadataSqlWithoutAuthorityAndMarket = metadataSqlWithoutMarket
+	.replace(
+		"\t\tc.season AS core_season,\n\t\tc.revision AS core_revision,\n\t\tc.publication_id::text,\n\t\tc.committed_at AS core_committed_at,",
+		"\t\tNULL::text AS core_season,\n\t\tNULL::text AS core_revision,\n\t\tNULL::text AS publication_id,\n\t\tNULL::timestamptz AS core_committed_at,"
+	)
+	.replace("\n\tLEFT JOIN core_snapshot_authority c ON c.singleton_id = 1", "");
+
 const archiveSql = `
 	SELECT season, status, source_core_revision, completed_at
 	FROM fpl_season_archives
@@ -346,6 +363,16 @@ const currentPeersSql = `
 	WHERE event_id = $1
 		AND element_type = $2
 		AND COALESCE(minutes, 0) >= ${HISTORY_PEER_MINUTES}
+`;
+
+const currentPlayerSql = `
+	SELECT
+		element_id, total_points, minutes, bonus, starts,
+		goals_scored, assists, clean_sheets, saves, bps,
+		expected_goal_involvements
+	FROM player_stats
+	WHERE event_id = $1 AND element_id = $2
+	LIMIT 1
 `;
 
 const currentPeerGameweeksSql = `
@@ -526,11 +553,7 @@ const radarSpecsForPosition = (position: number): Array<{ code: string; metric: 
 		code: "FPL_POINTS_PER_90",
 		metric: {
 			unit: "per90",
-			value: (row) =>
-				radarPer90(
-					row.pointsPer90 === null ? null : (row.pointsPer90 * row.minutes) / 90,
-					row.minutes
-				),
+			value: (row) => (row.minutes < 180 ? null : row.pointsPer90),
 		},
 	};
 	const cleanSheets: { code: string; metric: RadarValue } = {
@@ -547,11 +570,7 @@ const radarSpecsForPosition = (position: number): Array<{ code: string; metric: 
 		code: "FPL_BONUS_PER_90",
 		metric: {
 			unit: "per90",
-			value: (row) =>
-				radarPer90(
-					row.bonusPer90 === null ? null : (row.bonusPer90 * row.minutes) / 90,
-					row.minutes
-				),
+			value: (row) => (row.minutes < 180 ? null : row.bonusPer90),
 		},
 	};
 	const bps: { code: string; metric: RadarValue } = {
@@ -1137,10 +1156,20 @@ async function loadPlayerMetadata(
 	} catch (error) {
 		if (!isMissingRelationError(error)) throw error;
 		context.logger.warn(
-			{ table: "core_snapshot_authority" },
-			"Core snapshot authority is not provisioned; serving FPL-only state"
+			{ table: "optional_player_state_storage" },
+			"Optional player-state storage is not fully provisioned; serving FPL-only state"
 		);
-		return executor.query<PlayerMetadataRow>(metadataSqlWithoutAuthority, [playerId]);
+		try {
+			return await executor.query<PlayerMetadataRow>(metadataSqlWithoutAuthority, [playerId]);
+		} catch (fallbackError) {
+			if (!isMissingRelationError(fallbackError)) throw fallbackError;
+			try {
+				return await executor.query<PlayerMetadataRow>(metadataSqlWithoutMarket, [playerId]);
+			} catch (marketError) {
+				if (!isMissingRelationError(marketError)) throw marketError;
+				return executor.query<PlayerMetadataRow>(metadataSqlWithoutAuthorityAndMarket, [playerId]);
+			}
+		}
 	}
 }
 
@@ -1256,24 +1285,31 @@ export const createPlayerStateRepository = (
 
 		let currentRows: CurrentMetricRow[] = [];
 		let recentRows: CurrentMetricRow[] = [];
+		let radarPlayer: CurrentMetricRow | null = null;
 		if (statsContext.asOfEventId !== null && recentEventIds.length > 0) {
-			const peersResult = await executor.query<CurrentPeerRow>(currentPeersSql, [
-				statsContext.asOfEventId,
-				metadata.position,
+			const [peersResult, subjectResult] = await Promise.all([
+				executor.query<CurrentPeerRow>(currentPeersSql, [
+					statsContext.asOfEventId,
+					metadata.position,
+				]),
+				executor.query<CurrentPeerRow>(currentPlayerSql, [statsContext.asOfEventId, playerId]),
 			]);
 			const peerIds = peersResult.rows.map((row) => row.element_id);
+			const gameweekIds = Array.from(new Set([...peerIds, playerId]));
 			const peerGameweeks =
-				peerIds.length === 0
+				gameweekIds.length === 0
 					? ({ rows: [] } as unknown as QueryResult<CurrentPeerGameweekRow>)
 					: await executor.query<CurrentPeerGameweekRow>(currentPeerGameweeksSql, [
 							statsContext.asOfEventId,
-							peerIds,
+							gameweekIds,
 						]);
 			const seasonEventIds = [...new Set(peerGameweeks.rows.map((row) => row.event_id))].sort(
 				(left, right) => left - right
 			);
 			currentRows = currentMetrics(peersResult.rows, peerGameweeks.rows, seasonEventIds);
 			recentRows = recentMetrics(peerIds, peerGameweeks.rows, recentEventIds);
+			radarPlayer =
+				currentMetrics(subjectResult.rows, peerGameweeks.rows, seasonEventIds)[0] ?? null;
 		}
 		const currentPlayer = currentRows.find((row) => row.elementId === playerId) ?? null;
 		const recentPlayer = recentRows.find((row) => row.elementId === playerId) ?? null;
@@ -1289,7 +1325,7 @@ export const createPlayerStateRepository = (
 						metadata.position,
 						season,
 						statsContext.asOfEventId,
-						currentPlayer,
+						radarPlayer,
 						currentRows
 					)
 				: null;

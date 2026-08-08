@@ -64,7 +64,7 @@ const CATALOG_SQL = `
 	FROM public.public_league_trends_catalog catalog
 	JOIN public.tournament_infos tournament
 		ON tournament.id = catalog.tournament_id
-		AND tournament.setup_status = 'READY'
+		AND (tournament.setup_status IS NULL OR tournament.standings_ready_at IS NOT NULL)
 	JOIN LATERAL (
 		SELECT
 			stats.event_id,
@@ -87,7 +87,7 @@ const ACCESS_SQL = `
 	FROM public.public_league_trends_catalog catalog
 	JOIN public.tournament_infos tournament
 		ON tournament.id = catalog.tournament_id
-		AND tournament.setup_status = 'READY'
+		AND (tournament.setup_status IS NULL OR tournament.standings_ready_at IS NOT NULL)
 	JOIN public.tournament_selection_stats stats
 		ON stats.tournament_id = catalog.tournament_id
 		AND stats.event_id = $2
