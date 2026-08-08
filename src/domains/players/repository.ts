@@ -247,7 +247,8 @@ const getLatestMarketOwnershipByIds = async (
 const enrichPickerItems = async (
 	context: GraphQLContext,
 	rows: DbPickerRow[],
-	statsContext: Awaited<ReturnType<typeof resolvePlayerStatsContext>>
+	statsContext: Awaited<ReturnType<typeof resolvePlayerStatsContext>>,
+	teams?: Map<number, InfraTeam>
 ): Promise<PlayerPickerItem[]> => {
 	const items = rows.map(mapPickerRow);
 	if (items.length === 0) return items;
@@ -263,8 +264,21 @@ const enrichPickerItems = async (
 	return items.map((item) => {
 		const base = baseById.get(item.id);
 		const stats = statsById.get(item.id);
+		// Update team from current Player hash when it differs from the DB row.
+		let team = item.team;
+		if (base && teams && base.teamId !== item.team.id) {
+			const current = teams.get(base.teamId);
+			if (current) {
+				team = {
+					id: current.id,
+					name: current.name,
+					shortName: current.shortName,
+				};
+			}
+		}
 		return {
 			...item,
+			team,
 			price: base?.price ?? item.price,
 			selectedByPercent:
 				marketOwnershipById.get(item.id) ??
@@ -790,7 +804,6 @@ export const playersRepository: PlayersRepository = {
 				.limit(scanLimit);
 			if (pageCursor !== null) query = query.gt("id", pageCursor);
 			if (safeFilter?.position !== undefined) query = query.eq("type", safeFilter.position);
-			if (safeFilter?.teamId !== undefined) query = query.eq("team_id", safeFilter.teamId);
 			if (!hasPriceFilter && safeFilter?.minPrice !== undefined) {
 				query = query.gte("price", safeFilter.minPrice);
 			}
@@ -831,8 +844,8 @@ export const playersRepository: PlayersRepository = {
 			const pageRows = await fetchRows(pageCursor);
 			rows.push(...pageRows);
 			items.push(
-				...(await enrichPickerItems(context, pageRows, statsContext)).filter((item) =>
-					matchesPickerFilter(item, safeFilter)
+				...(await enrichPickerItems(context, pageRows, statsContext, teams ?? undefined)).filter(
+					(item) => matchesPickerFilter(item, safeFilter)
 				)
 			);
 			hasMoreRows = pageRows.length >= scanLimit;
