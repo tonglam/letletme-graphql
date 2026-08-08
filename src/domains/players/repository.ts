@@ -758,46 +758,53 @@ export const playersRepository: PlayersRepository = {
 			return cached;
 		}
 
-		let rows: DbPickerRow[];
-		if (safeSearch) {
-			const result = await context.supabase.rpc("search_players_for_picker", {
-				p_query: safeSearch,
-				p_limit: safeLimit,
-				p_cursor: safeCursor,
-				p_position: safeFilter?.position ?? null,
-				p_team_id: safeFilter?.teamId ?? null,
-				p_min_price: safeFilter?.minPrice ?? null,
-				p_max_price: safeFilter?.maxPrice ?? null,
-			});
-			if (result.error) {
-				context.logger.error(
-					{ err: result.error, limit: safeLimit, cursor: safeCursor, search: safeSearch },
-					"Failed to fetch players for picker"
-				);
-				throw new Error("Failed to fetch players for picker");
+		const hasPriceFilter = safeFilter?.minPrice !== undefined || safeFilter?.maxPrice !== undefined;
+		const teams = safeSearch ? null : await buildTeamMap(context);
+		const fetchRows = async (pageCursor: number | null): Promise<DbPickerRow[]> => {
+			if (safeSearch) {
+				const result = await context.supabase.rpc("search_players_for_picker", {
+					p_query: safeSearch,
+					p_limit: safeLimit,
+					p_cursor: pageCursor,
+					p_position: safeFilter?.position ?? null,
+					p_team_id: safeFilter?.teamId ?? null,
+					p_min_price: hasPriceFilter ? null : (safeFilter?.minPrice ?? null),
+					p_max_price: hasPriceFilter ? null : (safeFilter?.maxPrice ?? null),
+				});
+				if (result.error) {
+					context.logger.error(
+						{ err: result.error, limit: safeLimit, cursor: pageCursor, search: safeSearch },
+						"Failed to fetch players for picker"
+					);
+					throw new Error("Failed to fetch players for picker");
+				}
+				return (result.data as DbPickerRow[] | null) ?? [];
 			}
-			rows = (result.data as DbPickerRow[] | null) ?? [];
-		} else {
+
 			let query = context.supabase
 				.from("players")
 				.select("id, web_name, type, team_id, price")
 				.order("id", { ascending: true })
 				.limit(safeLimit);
-			if (safeCursor !== null) query = query.gt("id", safeCursor);
+			if (pageCursor !== null) query = query.gt("id", pageCursor);
 			if (safeFilter?.position !== undefined) query = query.eq("type", safeFilter.position);
 			if (safeFilter?.teamId !== undefined) query = query.eq("team_id", safeFilter.teamId);
-			if (safeFilter?.minPrice !== undefined) query = query.gte("price", safeFilter.minPrice);
-			if (safeFilter?.maxPrice !== undefined) query = query.lte("price", safeFilter.maxPrice);
+			if (!hasPriceFilter && safeFilter?.minPrice !== undefined) {
+				query = query.gte("price", safeFilter.minPrice);
+			}
+			if (!hasPriceFilter && safeFilter?.maxPrice !== undefined) {
+				query = query.lte("price", safeFilter.maxPrice);
+			}
 
-			const [result, teams] = await Promise.all([query, buildTeamMap(context)]);
+			const result = await query;
 			if (result.error) {
 				context.logger.error(
-					{ err: result.error, limit: safeLimit, cursor: safeCursor, filter: safeFilter },
+					{ err: result.error, limit: safeLimit, cursor: pageCursor, filter: safeFilter },
 					"Failed to browse players for picker"
 				);
 				throw new Error("Failed to fetch players for picker");
 			}
-			rows = (
+			return (
 				(result.data ?? []) as Array<{
 					id: number;
 					web_name: string;
@@ -809,15 +816,43 @@ export const playersRepository: PlayersRepository = {
 				web_name: row.web_name,
 				element_type: row.type,
 				team_id: row.team_id,
-				team_name: teams.get(row.team_id)?.name ?? "",
-				team_short_name: teams.get(row.team_id)?.shortName ?? "",
+				team_name: teams?.get(row.team_id)?.name ?? "",
+				team_short_name: teams?.get(row.team_id)?.shortName ?? "",
 			}));
+		};
+
+		const rows: DbPickerRow[] = [];
+		const items: PlayerPickerItem[] = [];
+		let pageCursor = safeCursor;
+		let hasMoreRows: boolean;
+		for (;;) {
+			const pageRows = await fetchRows(pageCursor);
+			rows.push(...pageRows);
+			items.push(
+				...(await enrichPickerItems(context, pageRows, statsContext)).filter((item) =>
+					matchesPickerFilter(item, safeFilter)
+				)
+			);
+			hasMoreRows = pageRows.length >= safeLimit;
+			if (!hasPriceFilter || !hasMoreRows || items.length >= safeLimit || pageRows.length === 0) {
+				break;
+			}
+			const nextPageCursor = pageRows[pageRows.length - 1].id;
+			if (pageCursor !== null && nextPageCursor <= pageCursor) {
+				hasMoreRows = false;
+				break;
+			}
+			pageCursor = nextPageCursor;
 		}
-		const items = (await enrichPickerItems(context, rows, statsContext)).filter((item) =>
-			matchesPickerFilter(item, safeFilter)
-		);
-		const nextCursor = rows.length >= safeLimit ? rows[rows.length - 1].id : null;
-		const payload: PlayersForPickerPayload = { items, nextCursor };
+
+		const nextCursor = hasPriceFilter
+			? hasMoreRows && rows.length > 0
+				? rows[rows.length - 1].id
+				: null
+			: rows.length >= safeLimit
+				? rows[rows.length - 1].id
+				: null;
+		const payload: PlayersForPickerPayload = { items: items.slice(0, safeLimit), nextCursor };
 
 		await context.redis.set(cacheKey, JSON.stringify(payload), "EX", PICKER_CACHE_TTL);
 		return payload;

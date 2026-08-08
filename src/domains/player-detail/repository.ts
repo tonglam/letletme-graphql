@@ -522,6 +522,7 @@ function assemblePlayerDetail(args: {
 	recentGameweeks: PlayerRecentGameweek[];
 }): PlayerDetail {
 	const stats = currentSeasonStats(args.statsContext, args.seasonStats);
+	const freshMarket = args.market !== null && !args.market.availability.stale;
 	const latestEventPoints =
 		args.recentGameweeks.find((row) => row.eventId === args.statsContext.asOfEventId)
 			?.totalPoints ?? null;
@@ -537,19 +538,21 @@ function assemblePlayerDetail(args: {
 		availability: args.market?.availability ?? null,
 		totalPoints: stats?.totalPoints ?? null,
 		selectedByPercent:
-			args.market?.selectedByPercent ??
+			(freshMarket ? args.market?.selectedByPercent : null) ??
 			args.player.selectedByPercent ??
 			stats?.selectedByPercent ??
 			null,
 		form: stats?.form ?? null,
-		seasonTransfersIn: args.market?.seasonTransfersIn ?? stats?.seasonTransfersIn ?? null,
-		seasonTransfersOut: args.market?.seasonTransfersOut ?? stats?.seasonTransfersOut ?? null,
+		seasonTransfersIn:
+			(freshMarket ? args.market?.seasonTransfersIn : null) ?? stats?.seasonTransfersIn ?? null,
+		seasonTransfersOut:
+			(freshMarket ? args.market?.seasonTransfersOut : null) ?? stats?.seasonTransfersOut ?? null,
 		transfersInEvent:
-			(args.marketMatchesStatsEvent ? args.market?.transfersInEvent : null) ??
+			(freshMarket && args.marketMatchesStatsEvent ? args.market?.transfersInEvent : null) ??
 			stats?.transfersInEvent ??
 			null,
 		transfersOutEvent:
-			(args.marketMatchesStatsEvent ? args.market?.transfersOutEvent : null) ??
+			(freshMarket && args.marketMatchesStatsEvent ? args.market?.transfersOutEvent : null) ??
 			stats?.transfersOutEvent ??
 			null,
 		eventPoints: latestEventPoints,
