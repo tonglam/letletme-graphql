@@ -25,8 +25,12 @@ import { miniProgramResolvers } from "../domains/mini-program/resolvers";
 import { miniProgramTypeDefs } from "../domains/mini-program/schema";
 import { playerDetailResolvers } from "../domains/player-detail/resolvers";
 import { playerDetailTypeDefs } from "../domains/player-detail/schema";
+import { playerStateResolvers } from "../domains/player-state/resolvers";
+import { playerStateTypeDefs } from "../domains/player-state/schema";
 import { playerValuesResolvers } from "../domains/player-values/resolvers";
 import { playerValuesTypeDefs } from "../domains/player-values/schema";
+import { publicLeagueTrendsResolvers } from "../domains/public-league-trends/resolvers";
+import { publicLeagueTrendsTypeDefs } from "../domains/public-league-trends/schema";
 import { playersResolvers } from "../domains/players/resolvers";
 import { playersTypeDefs } from "../domains/players/schema";
 import { tournamentsResolvers } from "../domains/tournaments/resolvers";
@@ -54,7 +58,9 @@ export const schema = makeExecutableSchema({
 		entriesTypeDefs,
 		eventOverallResultTypeDefs,
 		eventStatsTypeDefs,
+		publicLeagueTrendsTypeDefs,
 		playerDetailTypeDefs,
+		playerStateTypeDefs,
 	],
 	resolvers: [
 		baseResolvers,
@@ -74,6 +80,8 @@ export const schema = makeExecutableSchema({
 		entriesResolvers,
 		eventOverallResultResolvers,
 		eventStatsResolvers,
+		publicLeagueTrendsResolvers,
 		playerDetailResolvers,
+		playerStateResolvers,
 	],
 });

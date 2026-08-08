@@ -71,6 +71,7 @@ export const marketTypeDefs = /* GraphQL */ `
 		ownershipMovers: MarketOwnershipMovers!
 		transferMovers: [MarketTransferMover!]!
 		availabilityUpdates: [MarketAvailabilityUpdate!]!
+		availabilityHighlights: [MarketAvailabilityUpdate!]!
 		newPlayers: [MarketNewPlayer!]!
 		priceChanges: [MarketPriceChange!]!
 	}

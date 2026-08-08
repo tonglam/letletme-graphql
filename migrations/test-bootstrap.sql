@@ -24,6 +24,13 @@ CREATE TABLE IF NOT EXISTS public.players (
   type SMALLINT NOT NULL,
   team_id INT NOT NULL REFERENCES public.teams(id)
 );
+
+-- The production player contract includes the current FPL price. Keep the
+-- migration-test fixture aligned so price-aware picker migrations can be
+-- applied against the minimal bootstrap schema as well.
+ALTER TABLE public.players
+  ADD COLUMN IF NOT EXISTS price INT NOT NULL DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS public.tournament_infos (id INT PRIMARY KEY);
 
 DO $types$

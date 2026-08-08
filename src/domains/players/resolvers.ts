@@ -95,6 +95,7 @@ type TopTransfersArgs = {
 
 type PlayersForPickerArgs = {
 	search?: string | null;
+	filter?: GraphQLPlayersFilter | null;
 	limit?: number | null;
 	cursor?: number | null;
 };
@@ -154,13 +155,23 @@ export const playersResolvers = {
 			_parent: unknown,
 			args: PlayersForPickerArgs,
 			context: GraphQLContext
-		): Promise<PlayersForPickerPayload> =>
-			playersService.getPlayersForPicker(
+		): Promise<PlayersForPickerPayload> => {
+			const filter: PlayersFilter | undefined = args.filter
+				? {
+						position: args.filter.position ? stringToPosition(args.filter.position) : undefined,
+						teamId: args.filter.teamId ?? undefined,
+						minPrice: args.filter.minPrice ?? undefined,
+						maxPrice: args.filter.maxPrice ?? undefined,
+					}
+				: undefined;
+			return playersService.getPlayersForPicker(
 				context,
 				args.limit ?? 20,
 				args.cursor ?? null,
-				normalizePlayerPickerSearch(args.search)
-			),
+				normalizePlayerPickerSearch(args.search),
+				filter
+			);
+		},
 
 		team: async (_parent: unknown, args: TeamArgs, context: GraphQLContext): Promise<Team | null> =>
 			playersService.getTeamById(context, args.id),

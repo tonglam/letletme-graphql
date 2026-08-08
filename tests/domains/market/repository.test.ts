@@ -45,7 +45,7 @@ const baseRow = (
 const buildContext = (cacheSeed?: string) => {
 	const strings = new Map<string, string>([["Season:active", "2627"]]);
 	if (cacheSeed !== undefined) {
-		strings.set("gql:v2:2627:market-pulse:v1:14", cacheSeed);
+		strings.set("gql:v2:2627:market-pulse:v2:14", cacheSeed);
 	}
 	const writes: Array<{ key: string; value: string; ttl: number }> = [];
 	const deletes: string[] = [];
@@ -230,6 +230,25 @@ describe("buildMarketPulse", () => {
 
 		expect(pulse.availabilityUpdates).toHaveLength(1);
 		expect(pulse.availabilityUpdates[0]?.observedDate).toBe("2026-08-03");
+	});
+
+	it("computes deterministic highlights before truncating the 20-row update list", () => {
+		const rows = Array.from({ length: 22 }, (_, index) => {
+			const elementId = index + 1;
+			return baseRow("2026-08-03", elementId, {
+				selected_by_percent: 100 - elementId,
+				status: elementId === 22 ? "i" : "a",
+				previous_status: elementId === 22 ? "a" : "d",
+				chance_of_playing_this_round: elementId === 22 ? 0 : 100,
+				previous_chance_this_round: elementId === 22 ? 100 : 50,
+			});
+		});
+
+		const pulse = buildMarketPulse(rows, 14, new Date("2026-08-03T12:00:00Z"));
+		expect(pulse.availabilityUpdates).toHaveLength(20);
+		expect(pulse.availabilityUpdates.some((item) => item.player.playerId === 22)).toBe(false);
+		expect(pulse.availabilityHighlights).toHaveLength(5);
+		expect(pulse.availabilityHighlights[0]?.player.playerId).toBe(22);
 	});
 });
 

@@ -104,7 +104,7 @@ type RpcTransferAggregationRow = {
 	transfer_out_count: number | null;
 };
 
-type DbTournamentSelectionStatRow = {
+export type DbTournamentSelectionStatRow = {
 	element_id: number;
 	pick_count: number;
 	captain_count: number;
@@ -131,7 +131,9 @@ const positionTypeToEnum = (type: number): string => {
 
 async function getPlayerAndTeamMaps(
 	context: GraphQLContext,
-	playerIds: number[]
+	playerIds: number[],
+	eventId?: number,
+	season?: string
 ): Promise<{
 	playerMap: Map<number, { id: number; web_name: string; team_id: number; type: number }>;
 	teamMap: Map<number, { id: number; short_name: string }>;
@@ -157,6 +159,48 @@ async function getPlayerAndTeamMaps(
 				team_id: player.teamId,
 				type: player.position,
 			});
+		}
+	}
+
+	// Resolve player teams at the requested event for historical accuracy.
+	if (eventId !== null && eventId !== undefined && season !== null && season !== undefined) {
+		try {
+			const playerCodes = [...filteredPlayerMap.values()].map((p) => {
+				const full = fullPlayerMap.get(p.id);
+				return full?.code ?? 0;
+			});
+			const validCodes = playerCodes.filter((c) => c > 0);
+			if (validCodes.length > 0) {
+				const { data, error } = await context.supabase
+					.from("fpl_player_fixture_stats")
+					.select("player_code, team_id")
+					.eq("season", season)
+					.in("player_code", validCodes)
+					.lte("event_id", eventId)
+					.order("event_id", { ascending: false })
+					.order("fixture_id", { ascending: false });
+				if (!error && data) {
+					const eventTeamMap = new Map<number, number>();
+					for (const row of data as { player_code: number; team_id: number }[]) {
+						if (!eventTeamMap.has(row.player_code)) {
+							eventTeamMap.set(row.player_code, row.team_id);
+						}
+					}
+					for (const [id, player] of filteredPlayerMap) {
+						const full = fullPlayerMap.get(id);
+						const code = full?.code ?? 0;
+						const eventTeamId = code > 0 ? eventTeamMap.get(code) : undefined;
+						if (eventTeamId !== undefined && eventTeamId > 0) {
+							filteredPlayerMap.set(id, { ...player, team_id: eventTeamId });
+						}
+					}
+				}
+			}
+		} catch (err) {
+			context.logger.warn(
+				{ err, eventId, season },
+				"Failed to resolve event-scoped player teams; using current data"
+			);
 		}
 	}
 
@@ -491,7 +535,9 @@ async function buildTournamentSelectionStats(
 	context: GraphQLContext,
 	counts: SelectionStatsCounts,
 	effectiveTotal: number,
-	safeLimit: number
+	safeLimit: number,
+	eventId?: number,
+	season?: string
 ): Promise<TournamentSelectionStats> {
 	const { pickCounts, captainCounts, viceCaptainCounts, transferInCounts, transferOutCounts } =
 		counts;
@@ -506,7 +552,7 @@ async function buildTournamentSelectionStats(
 		]),
 	];
 
-	const { playerMap, teamMap } = await getPlayerAndTeamMaps(context, allPlayerIds);
+	const { playerMap, teamMap } = await getPlayerAndTeamMaps(context, allPlayerIds, eventId, season);
 
 	const computeEoPercent = (playerId: number, selectedPct: number): number => {
 		const captainCount = captainCounts.get(playerId) ?? 0;
@@ -621,6 +667,26 @@ async function buildTournamentSelectionStats(
 	};
 }
 
+/**
+ * Public-safe path: consume only a published aggregate snapshot. It never
+ * falls back to entry IDs, picks, or the per-manager aggregation RPCs.
+ */
+export async function getTournamentSelectionStatsReadModel(
+	context: GraphQLContext,
+	tournamentId: number,
+	eventId: number,
+	limit: number
+): Promise<TournamentSelectionStats | null> {
+	if (!Number.isFinite(tournamentId) || tournamentId <= 0) return null;
+	if (!Number.isFinite(eventId) || eventId <= 0) return null;
+	const safeLimit = Math.min(Math.max(limit, 1), 12);
+	const rows = await getReadModelRows(context, tournamentId, eventId);
+	if (!rows || rows.length === 0) return null;
+	const { counts, totalEntries } = countsFromReadModel(rows);
+	const season = await getCurrentSeason(context);
+	return buildTournamentSelectionStats(context, counts, totalEntries, safeLimit, eventId, season);
+}
+
 export interface EventStatsRepository {
 	getTournamentSelectionStats(
 		context: GraphQLContext,
@@ -653,7 +719,15 @@ export const eventStatsRepository: EventStatsRepository = {
 		const readModelRows = await getReadModelRows(context, tournamentId, eventId);
 		if (readModelRows && readModelRows.length > 0) {
 			const { counts, totalEntries } = countsFromReadModel(readModelRows);
-			const result = await buildTournamentSelectionStats(context, counts, totalEntries, safeLimit);
+			const season = await getCurrentSeason(context);
+			const result = await buildTournamentSelectionStats(
+				context,
+				counts,
+				totalEntries,
+				safeLimit,
+				eventId,
+				season
+			);
 			await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
 			return result;
 		}
@@ -681,6 +755,7 @@ export const eventStatsRepository: EventStatsRepository = {
 
 		const effectiveTotal = totalEntries > 0 ? totalEntries : entryIds.length;
 
+		const season = await getCurrentSeason(context);
 		const result = await buildTournamentSelectionStats(
 			context,
 			{
@@ -691,7 +766,9 @@ export const eventStatsRepository: EventStatsRepository = {
 				transferOutCounts,
 			},
 			effectiveTotal,
-			safeLimit
+			safeLimit,
+			eventId,
+			season
 		);
 
 		await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
