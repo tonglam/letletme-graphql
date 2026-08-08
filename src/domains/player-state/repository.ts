@@ -281,9 +281,11 @@ const availableArchiveSql = `
 		AND EXISTS (
 			SELECT 1 FROM fpl_player_stat_history stats WHERE stats.season = archive.season
 		)
-		AND EXISTS (
-			SELECT 1 FROM fpl_event_live_history live WHERE live.season = archive.season
-		)
+		AND (
+			SELECT COUNT(DISTINCT live.event_id)
+			FROM fpl_event_live_history live
+			WHERE live.season = archive.season
+		) = (SELECT COUNT(*) FROM events)
 	ORDER BY archive.season DESC
 `;
 
@@ -1377,11 +1379,7 @@ export const createPlayerStateRepository = (
 			metadata.team_id,
 			outlookStart,
 			outlookHorizon,
-			new Set(
-				fixtureCoverageResult.rows
-					.filter((row) => Number(row.fixture_count) > 0)
-					.map((row) => row.event_id)
-			)
+			new Set(fixtureCoverageResult.rows.map((row) => row.event_id))
 		);
 		const outlook = assessOutlook(outlookGameweeks, outlookHorizon);
 		const dgwCount = outlook.gameweeks.filter((gameweek) => gameweek.dgw).length;
