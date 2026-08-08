@@ -1275,7 +1275,7 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 });
 
 describe("tournamentsRepository.getEntryTournaments", () => {
-	it("does not cache setup-era tournament metadata", async () => {
+	it("caches setup-era tournament metadata only for a short TTL", async () => {
 		const updatedAt = "2026-04-21T00:00:00.000Z";
 		const row: DbTournamentInfoRow = {
 			id: 7,
@@ -1311,6 +1311,7 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 		};
 		const cache = new Map<string, string>([["Season:active", "2526"]]);
 		let cacheWrites = 0;
+		let cacheTtl: number | undefined;
 		const membershipQuery = {
 			select() {
 				return membershipQuery;
@@ -1340,8 +1341,9 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 				async get(key: string) {
 					return cache.get(key) ?? null;
 				},
-				async set(key: string, value: string) {
+				async set(key: string, value: string, _mode?: string, ttl?: number) {
 					cacheWrites += 1;
+					cacheTtl = ttl;
 					cache.set(key, value);
 					return "OK";
 				},
@@ -1363,8 +1365,13 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 		const result = await tournamentsRepository.getEntryTournaments(context, 55);
 		expect(result).toHaveLength(1);
 		expect(result[0]?.standingsReadyAt).toBeNull();
-		expect(cacheWrites).toBe(0);
-		expect(cache.has(`${CACHE_PREFIX}tournaments:entry:55`)).toBe(false);
+		expect(cacheWrites).toBe(1);
+		expect(cacheTtl).toBe(15);
+		expect(cache.has(`${CACHE_PREFIX}tournaments:entry:55`)).toBe(true);
+
+		const cachedResult = await tournamentsRepository.getEntryTournaments(context, 55);
+		expect(cachedResult).toHaveLength(1);
+		expect(cacheWrites).toBe(1);
 	});
 });
 
