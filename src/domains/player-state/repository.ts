@@ -288,7 +288,7 @@ const availableArchiveSql = `
 			SELECT 1 FROM (
 				SELECT ph.id, COUNT(DISTINCT live.event_id) AS event_count
 				FROM fpl_player_history ph
-				JOIN fpl_event_live_history live
+				LEFT JOIN fpl_event_live_history live
 					ON live.season = ph.season AND live.element_id = ph.id
 				WHERE ph.season = archive.season
 				GROUP BY ph.id
@@ -1370,6 +1370,7 @@ export const createPlayerStateRepository = (
 
 		const fplSufficient =
 			statsContext.scope === "CURRENT_SEASON" &&
+			(metadata.core_season === null || metadata.core_season === season) &&
 			recentSamples.length >= MINIMUM_CURRENT_GAMEWEEKS &&
 			recentWindowComplete &&
 			currentPlayer !== null &&

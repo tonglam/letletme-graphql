@@ -849,7 +849,8 @@ export const playersRepository: PlayersRepository = {
 				)
 			);
 			hasMoreRows = pageRows.length >= scanLimit;
-			if (!hasPriceFilter || !hasMoreRows || items.length >= safeLimit || pageRows.length === 0) {
+			const hasTeamFilter = safeFilter?.teamId !== undefined;
+			if ((!hasPriceFilter && !hasTeamFilter) || !hasMoreRows || items.length >= safeLimit || pageRows.length === 0) {
 				break;
 			}
 			const nextPageCursor = pageRows[pageRows.length - 1].id;
