@@ -148,6 +148,30 @@ describe("fixturesRepository.getEventFixtures", () => {
 		expect(result).toEqual([]);
 	});
 
+	it("accepts an authoritative empty Redis hash for a confirmed blank gameweek", async () => {
+		const context = buildContext({
+			redisData: {
+				"Season:active": "2526",
+				"LiveSnapshotMeta:2526:33": JSON.stringify({
+					schemaVersion: 1,
+					season: "2526",
+					eventId: 33,
+					revision: "a".repeat(24),
+					state: "settled",
+					publishedAt: "2026-04-18T14:00:00.000Z",
+					checkedAt: "2026-04-18T15:00:00.000Z",
+					eventLiveCount: 1,
+					fixtureCount: 0,
+					fixtureTeamCount: 0,
+					bonusTeamCount: 0,
+				}),
+			},
+			supabaseError: new Error("database unavailable"),
+		});
+
+		expect(await fixturesRepository.getEventFixtures(context, 33)).toEqual([]);
+	});
+
 	it("falls back to the database when any Redis fixture is malformed", async () => {
 		const validFixture = JSON.stringify({
 			id: 328,

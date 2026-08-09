@@ -219,7 +219,8 @@ const metadataSql = `
 			COALESCE(p.updated_at, p.created_at),
 			(SELECT max(COALESCE(updated_at, created_at)) FROM events),
 			(SELECT max(COALESCE(updated_at, created_at)) FROM event_fixtures),
-			(SELECT max(COALESCE(updated_at, created_at)) FROM player_stats)
+			(SELECT max(COALESCE(updated_at, created_at)) FROM player_stats),
+			(SELECT max(COALESCE(updated_at, created_at)) FROM event_lives)
 		) AS fpl_snapshot_at
 	) source ON true
 	LEFT JOIN LATERAL (

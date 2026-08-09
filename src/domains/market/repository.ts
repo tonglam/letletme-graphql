@@ -142,7 +142,14 @@ export type MarketRepository = {
 };
 
 const MARKET_QUERY = `
-	WITH deduped AS (
+	WITH active_season AS (
+		SELECT
+			COALESCE((SELECT deadline_time FROM public.events WHERE id = 1), now())
+				- interval '60 days' AS season_start,
+			COALESCE((SELECT deadline_time FROM public.events WHERE id = 1), now())
+				+ interval '1 year' AS season_end
+	),
+	deduped AS (
 		SELECT snapshot.*
 		FROM (
 			SELECT
@@ -153,7 +160,10 @@ const MARKET_QUERY = `
 				) AS snapshot_day_rank
 			FROM public.player_market_snapshots snapshot
 		) snapshot
-		WHERE snapshot.snapshot_day_rank = 1
+		CROSS JOIN active_season
+		WHERE snapshot.snapshot_date >= active_season.season_start::date
+			AND snapshot.snapshot_date < active_season.season_end::date
+			AND snapshot.snapshot_day_rank = 1
 	),
 	annotated AS (
 		SELECT

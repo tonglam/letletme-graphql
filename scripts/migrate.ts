@@ -5,7 +5,8 @@ import { Pool, type PoolClient } from "pg";
 
 const nodeEnv = Bun.env.NODE_ENV ?? process.env.NODE_ENV ?? "development";
 const migrationDatabaseUrl = Bun.env.MIGRATIONS_DATABASE_URL ?? process.env.MIGRATIONS_DATABASE_URL;
-const databaseUrl = migrationDatabaseUrl ?? Bun.env.DATABASE_URL ?? process.env.DATABASE_URL;
+const runtimeDatabaseUrl = Bun.env.DATABASE_URL ?? process.env.DATABASE_URL;
+const databaseUrl = migrationDatabaseUrl ?? runtimeDatabaseUrl;
 if (!databaseUrl) {
 	throw new Error(
 		nodeEnv === "production"
@@ -24,6 +25,21 @@ if (
 	(Bun.env.DATABASE_URL ?? process.env.DATABASE_URL) === migrationDatabaseUrl
 ) {
 	throw new Error("MIGRATIONS_DATABASE_URL must not equal DATABASE_URL in production");
+}
+
+const databaseRoleFromUrl = (value: string | undefined): string | null => {
+	if (!value) return null;
+	try {
+		const username = new URL(value).username;
+		return username ? decodeURIComponent(username) : null;
+	} catch {
+		return null;
+	}
+};
+
+const runtimeDatabaseRole = databaseRoleFromUrl(runtimeDatabaseUrl ?? databaseUrl);
+if (nodeEnv === "production" && !runtimeDatabaseRole) {
+	throw new Error("DATABASE_URL must include the runtime PostgreSQL role in production");
 }
 
 const migrationsDir = resolve(
@@ -61,6 +77,14 @@ async function main(): Promise<void> {
 			);
 		}
 		await client.query("SELECT pg_advisory_lock(hashtext('letletme_graphql_migrations'))");
+		if (runtimeDatabaseRole) {
+			// The migration connection is intentionally separate from the runtime
+			// login.  Make the runtime role available to migrations that need to
+			// grant narrowly scoped read access without making the table public.
+			await client.query("SELECT set_config('letletme.runtime_db_role', $1, false)", [
+				runtimeDatabaseRole,
+			]);
+		}
 		await ensureLedger(client);
 
 		const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();

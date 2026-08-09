@@ -225,6 +225,12 @@ const loadEventFixturesFromRedis = async (
 
 	const fields = Object.entries(hashEntries);
 	if (fields.length === 0) {
+		// A confirmed blank gameweek is a complete, authoritative empty view.
+		// Do not turn it into a database fallback: the live snapshot may be
+		// available in Redis even when the relational read plane is unavailable.
+		if (meta?.fixtureCount === 0 && meta.fixtureTeamCount === 0) {
+			return [];
+		}
 		return null;
 	}
 
@@ -266,6 +272,9 @@ const loadEventFixturesFromRedis = async (
 		return a.kickoffTime.localeCompare(b.kickoffTime);
 	});
 
+	if (fixtures.length === 0 && meta?.fixtureCount === 0 && meta.fixtureTeamCount === 0) {
+		return [];
+	}
 	return fixtures.length > 0 ? fixtures : null;
 };
 
