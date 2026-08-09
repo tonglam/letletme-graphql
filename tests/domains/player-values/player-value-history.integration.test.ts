@@ -101,7 +101,7 @@ function createGraphQLContext(rows: HistoryRow[]): GraphQLContext {
 
 	const redis = {
 		type: async (): Promise<string> => "none",
-		get: async (key: string): Promise<string | null> => (key === "Season:active" ? "2526" : null),
+		get: async (): Promise<string | null> => null,
 		set: async (): Promise<string> => "OK",
 		hgetall: async (): Promise<Record<string, string>> => ({}),
 		keys: async (): Promise<string[]> => [],
@@ -120,6 +120,7 @@ function createGraphQLContext(rows: HistoryRow[]): GraphQLContext {
 			},
 		} as never,
 		currentSeason: { seasonId: 2025, seasonCode: "2526" },
+		dataRevision: "core-history-test",
 		data,
 		redis,
 		logger,

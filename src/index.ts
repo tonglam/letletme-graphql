@@ -7,6 +7,7 @@ import { validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
 import { validateDatabaseContract } from "./infra/database-contract";
 import { database } from "./infra/database";
+import { coreDatasetRevision, getCoreDataSnapshot } from "./infra/data-snapshot";
 import { closeDbPool } from "./infra/db-pool";
 import { validateDeviceToken } from "./infra/device-auth";
 import { env } from "./infra/env";
@@ -416,6 +417,29 @@ const startServer = async (): Promise<void> => {
 						return graphQLErrorResponse(authorization, corsHeaders);
 					}
 
+					const graphQLContext: GraphQLContext = {
+						data,
+						database,
+						currentSeason,
+						redis: getRedis(),
+						logger,
+						principal: principal ?? undefined,
+						user: user ?? undefined,
+					};
+					try {
+						graphQLContext.dataRevision = coreDatasetRevision(
+							await getCoreDataSnapshot(graphQLContext)
+						);
+					} catch (error) {
+						logger.error({ err: error }, "Data publication authority is unavailable");
+						return jsonError(
+							503,
+							"DATA_PUBLICATION_UNAVAILABLE",
+							"Data publication is temporarily unavailable",
+							corsHeaders
+						);
+					}
+
 					const remainingWeightedCost =
 						limits.rateLimitCostUnits - (weightedRatePrecharged ? 1 : 0);
 					if (remainingWeightedCost > 0) {
@@ -441,15 +465,7 @@ const startServer = async (): Promise<void> => {
 							body: parsedBody,
 							search: "",
 						},
-						context: async () => ({
-							data,
-							database,
-							currentSeason,
-							redis: getRedis(),
-							logger,
-							principal: principal ?? undefined,
-							user: user ?? undefined,
-						}),
+						context: async () => graphQLContext,
 					});
 
 					const durationMs = performance.now() - start;

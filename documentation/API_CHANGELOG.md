@@ -1,5 +1,19 @@
 # GraphQL API change log
 
+## Data Platform v3 G2 — 2026-08-09
+
+- Locked startup and Redis publication parsing to the exact Data contract:
+  schema `v3`, plan `3.2.4`, and an RFC-shaped publication UUID. Missing or
+  stale contract metadata fails closed.
+- Added strict typed readers for the immutable core and live Data publications.
+  Invalid Redis revisions fall back as a whole to one coherent PostgreSQL
+  statement; individual items are never mixed across sources or revisions.
+- GraphQL query caches now include GraphQL schema version plus the pinned Data
+  revision and use fixed 10/60/300/3600-second policy classes.
+- Removed legacy live scoring, aggregate-cache, reporting-view, and RPC
+  compatibility paths. Live scoring has one canonical implementation.
+- Redis query-cache failures are best-effort; PostgreSQL remains authoritative.
+
 ## Data Platform v3 G1 — 2026-08-09
 
 - Replaced Supabase Data API business reads with schema-qualified PostgreSQL 15
@@ -37,8 +51,9 @@
 
 ### Live data and transfers
 
-- Live totals use official FPL `total_points - official bonus + effective bonus`
-  under the `LIVE_POINTS_V2` rollout flag.
+- Live totals used official FPL
+  `total_points - official bonus + effective bonus`; Data Platform v3 later
+  made that the only implementation and removed its rollout path.
 - Historical baselines use event `N-1`; transfer history is ordered by the
   canonical `transfer_time` and includes every transfer.
 - Live match reconciliation prefers real fixture IDs and never synthesizes
@@ -46,10 +61,12 @@
 
 ### Historical cache and migration contracts
 
-- Data-owned Redis hashes remain read-only to GraphQL. GraphQL-shaped caches use
-  `gql:v2:{season}:...` with explicit TTLs and malformed-value eviction.
-- `PlayerValue:{date}` remains a shared hash; `PlayerValueMissing:{date}` is a
-  coordinated 600-second marker.
+- Data-owned Redis hashes remained read-only to GraphQL. GraphQL-shaped caches
+  used the now-retired season-keyed namespace with explicit TTLs and
+  malformed-value eviction.
+- At that date, `PlayerValue:{date}` was a shared hash and
+  `PlayerValueMissing:{date}` was a coordinated 600-second marker. Both keys are
+  retired by Data Platform v3 and are not read by current GraphQL code.
 - The migration behavior described in this 2026-07-18 entry was retired by
   Data Platform v3 G1 and must not be used as current deployment guidance.
 

@@ -1,7 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { env } from "../../infra/env";
-import { getCurrentSeason } from "../../infra/season";
+import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { stableStringify } from "../../infra/stringify";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -258,8 +257,7 @@ interface LeaguesRepository {
 
 export const leaguesRepository: LeaguesRepository = {
 	async getEntryLeagues(context: GraphQLContext, entryId: number): Promise<League[]> {
-		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `leagues:entry:${entryId}`);
+		const cacheKey = gqlCacheKey(context, `leagues:entry:${entryId}`);
 		const cached = await readJsonCache(context, cacheKey, isLeagueArray);
 		if (cached) return cached;
 
@@ -287,7 +285,12 @@ export const leaguesRepository: LeaguesRepository = {
 			return mapLeague(row, tournament);
 		});
 
-		await context.redis.set(cacheKey, JSON.stringify(leagues), "EX", env.CACHE_TTL_SECONDS);
+		await writeQueryCache(
+			context,
+			cacheKey,
+			JSON.stringify(leagues),
+			QUERY_CACHE_TTL_SECONDS.REPORTING
+		);
 		return leagues;
 	},
 
@@ -296,9 +299,8 @@ export const leaguesRepository: LeaguesRepository = {
 		leagueId: number,
 		eventId: number
 	): Promise<LeagueEventResult[]> {
-		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(
-			season,
+			context,
 			`leagues:results:${stableStringify({ leagueId, eventId })}`
 		);
 		const cached = await readJsonCache(context, cacheKey, isLeagueEventResultArray);
@@ -331,7 +333,12 @@ export const leaguesRepository: LeaguesRepository = {
 
 		const results = rows.map((row) => mapLeagueEventResult(row, league));
 
-		await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
+		await writeQueryCache(
+			context,
+			cacheKey,
+			JSON.stringify(results),
+			QUERY_CACHE_TTL_SECONDS.REPORTING
+		);
 		return results;
 	},
 };

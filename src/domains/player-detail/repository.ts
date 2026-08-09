@@ -1,7 +1,8 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCurrentEventFromRedis, type CurrentEventCache } from "../../infra/event";
-import { getCurrentSeason } from "../../infra/season";
+import { getCoreDataSnapshot } from "../../infra/data-snapshot";
+import { getCurrentEvent, type CurrentEventCache } from "../../infra/event";
+import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { buildTeamMap } from "../../infra/team-map";
 import { fixturesRepository, type Fixture } from "../fixtures/repository";
 import { playersRepository } from "../players/repository";
@@ -12,8 +13,6 @@ import {
 	type PlayerStatsContext,
 } from "../players/season-stats-at-event";
 
-const PLAYER_DETAIL_CACHE_TTL = 5 * 60;
-const PLAYER_DETAIL_NULL_CACHE_TTL = 60 * 60;
 const MARKET_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
 const RECENT_GAMEWEEK_LIMIT = 5;
 const UPCOMING_GAMEWEEK_LIMIT = 8;
@@ -275,29 +274,12 @@ async function loadLatestMarketSnapshot(
 
 async function loadResolvedEventState(
 	context: GraphQLContext,
-	eventId: number | null,
-	currentEvent: CurrentEventCache | null
+	eventId: number | null
 ): Promise<ResolvedEventState | null> {
 	if (eventId === null) return null;
-	if (currentEvent?.id === eventId) {
-		return { id: currentEvent.id, finished: currentEvent.finished };
-	}
-	try {
-		const { data, error } = await context.data
-			.read("fpl.events")
-			.select("id, finished")
-			.eq("id", eventId)
-			.limit(1);
-		if (error) {
-			context.logger.warn({ err: error, eventId }, "Failed to load resolved event state");
-			return null;
-		}
-		const row = data?.[0] as { id?: number; finished?: boolean | null } | undefined;
-		return row?.id === eventId ? { id: eventId, finished: Boolean(row.finished) } : null;
-	} catch (error) {
-		context.logger.warn({ err: error, eventId }, "Failed to load resolved event state");
-		return null;
-	}
+	const snapshot = await getCoreDataSnapshot(context);
+	const event = snapshot.events.find((candidate) => candidate.id === eventId);
+	return event ? { id: event.id, finished: event.finished } : null;
 }
 
 async function loadHistoricalTeamId(
@@ -596,11 +578,10 @@ export const playerDetailRepository: PlayerDetailRepository = {
 		playerId: number,
 		eventId: number
 	): Promise<PlayerDetail | null> {
-		if (!Number.isInteger(playerId) || playerId <= 0) return null;
-		if (!Number.isInteger(eventId) || eventId <= 0) return null;
+		if (!Number.isSafeInteger(playerId) || playerId <= 0) return null;
+		if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
 
-		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, playerDetailCacheKey(playerId, eventId));
+		const cacheKey = gqlCacheKey(context, playerDetailCacheKey(playerId, eventId));
 		const cached = await readPlayerDetailCache(context, cacheKey);
 		if (cached !== undefined) return cached;
 
@@ -608,17 +589,13 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			playersRepository.getPlayerById(context, playerId),
 			resolvePlayerStatsContext(context, eventId),
 			loadLatestMarketSnapshot(context, playerId),
-			getCurrentEventFromRedis(context),
+			getCurrentEvent(context),
 		]);
 		if (!player) {
-			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", PLAYER_DETAIL_NULL_CACHE_TTL);
+			await writeQueryCache(context, cacheKey, NULL_SENTINEL, QUERY_CACHE_TTL_SECONDS.METADATA);
 			return null;
 		}
-		const resolvedEvent = await loadResolvedEventState(
-			context,
-			statsContext.asOfEventId,
-			currentEvent
-		);
+		const resolvedEvent = await loadResolvedEventState(context, statsContext.asOfEventId);
 		const resolvedTeamId = await loadHistoricalTeamId(
 			context,
 			statsContext.season,
@@ -656,7 +633,12 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			fixtures,
 			recentGameweeks,
 		});
-		await context.redis.set(cacheKey, JSON.stringify(detail), "EX", PLAYER_DETAIL_CACHE_TTL);
+		await writeQueryCache(
+			context,
+			cacheKey,
+			JSON.stringify(detail),
+			QUERY_CACHE_TTL_SECONDS.REPORTING
+		);
 		return detail;
 	},
 };

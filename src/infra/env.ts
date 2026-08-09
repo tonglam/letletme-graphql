@@ -6,7 +6,6 @@ type EnvKey =
 	| "REDIS_PASSWORD"
 	| "PORT"
 	| "LOG_LEVEL"
-	| "CACHE_TTL_SECONDS"
 	| "BACKEND_PROXY_SECRET"
 	| "GRAPHQL_SERVICE_TOKEN"
 	| "REQUIRE_SIGNED_WEB_INGRESS"
@@ -15,7 +14,6 @@ type EnvKey =
 	| "CORS_ORIGIN"
 	| "CORS_CREDENTIALS"
 	| "TRUSTED_PROXY_HOPS"
-	| "LIVE_POINTS_V2"
 	| "LEGACY_AUTH_VALIDATION_UNTIL";
 
 const readEnv = (key: EnvKey): string | undefined => {
@@ -110,7 +108,6 @@ export const env = {
 	REDIS_PASSWORD: readEnv("REDIS_PASSWORD") ?? "",
 	PORT: readNumber("PORT", 4000),
 	LOG_LEVEL: readEnv("LOG_LEVEL") ?? "info",
-	CACHE_TTL_SECONDS: readNumber("CACHE_TTL_SECONDS", 60),
 
 	// Authentication (issued by letletme-web; GraphQL validates only)
 	BACKEND_PROXY_SECRET,
@@ -123,6 +120,5 @@ export const env = {
 	CORS_ORIGIN,
 	CORS_CREDENTIALS,
 	TRUSTED_PROXY_HOPS,
-	LIVE_POINTS_V2: readEnv("LIVE_POINTS_V2") === "true",
 	LEGACY_AUTH_VALIDATION_UNTIL,
 } as const;

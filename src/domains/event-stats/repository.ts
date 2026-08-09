@@ -1,12 +1,12 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { env } from "../../infra/env";
+import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { getCurrentSeason } from "../../infra/season";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
 
 const privateCacheKey = async (context: GraphQLContext, key: string): Promise<string> =>
-	gqlCacheKey(await getCurrentSeason(context), key);
+	gqlCacheKey(context, key);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -264,7 +264,7 @@ function snapshotFromReadModel(rows: DbTournamentSelectionStatRow[]): {
 
 	for (const row of rows) {
 		const playerId = Number(row.element_id);
-		if (!Number.isFinite(playerId) || playerId <= 0) continue;
+		if (!Number.isSafeInteger(playerId) || playerId <= 0) continue;
 
 		const pickCount = Number(row.pick_count) || 0;
 		const captainCount = Number(row.captain_count) || 0;
@@ -454,8 +454,8 @@ export async function getTournamentSelectionStatsReadModel(
 	eventId: number,
 	limit: number
 ): Promise<TournamentSelectionStats | null> {
-	if (!Number.isFinite(tournamentId) || tournamentId <= 0) return null;
-	if (!Number.isFinite(eventId) || eventId <= 0) return null;
+	if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) return null;
+	if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
 	const safeLimit = Math.min(Math.max(limit, 1), 12);
 	const rows = await getReadModelRows(context, tournamentId, eventId);
 	if (!rows || rows.length === 0) return null;
@@ -482,8 +482,8 @@ export const eventStatsRepository: EventStatsRepository = {
 		eventId: number,
 		limit: number
 	): Promise<TournamentSelectionStats> {
-		if (!Number.isFinite(tournamentId) || tournamentId <= 0) return EMPTY_STATS;
-		if (!Number.isFinite(eventId) || eventId <= 0) return EMPTY_STATS;
+		if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) return EMPTY_STATS;
+		if (!Number.isSafeInteger(eventId) || eventId <= 0) return EMPTY_STATS;
 		const safeLimit = Math.min(Math.max(limit, 1), 100);
 
 		const cacheKey = await privateCacheKey(
@@ -509,7 +509,12 @@ export const eventStatsRepository: EventStatsRepository = {
 				eventId,
 				season
 			);
-			await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
+			await writeQueryCache(
+				context,
+				cacheKey,
+				JSON.stringify(result),
+				QUERY_CACHE_TTL_SECONDS.REPORTING
+			);
 			return result;
 		}
 

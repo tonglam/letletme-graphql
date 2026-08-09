@@ -136,7 +136,7 @@ export const entryLiveResolvers = {
 						{
 							liveByPlayer: liveByPlayerPromise,
 							fixtures: fixturesService.getEventFixtures(context, args.eventId),
-							teams: playersRepository.listTeamsFromRedis(context),
+							teams: playersRepository.listTeams(context),
 						}
 					);
 				};

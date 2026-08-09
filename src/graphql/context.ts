@@ -11,6 +11,8 @@ export type GraphQLContext = {
 	data: V3ReadClient;
 	database: QueryExecutor;
 	currentSeason: CurrentSeason;
+	/** Core Data publication selected once for this GraphQL request. */
+	dataRevision?: string;
 	redis: Redis;
 	logger: Logger;
 	principal?: Principal;

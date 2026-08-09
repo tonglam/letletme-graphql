@@ -1,18 +1,12 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCurrentEventId } from "../../infra/event";
-import { isMissingPostgrestColumnError } from "../../infra/postgrest-error";
-import { getCurrentSeason } from "../../infra/season";
 import {
-	isLiveSnapshotConsistencyActive,
-	isLiveSnapshotDatabaseFallback,
-	LiveSnapshotCoherenceError,
-	loadLiveSnapshotMeta,
-	liveSnapshotMetaKey,
-	parseLiveSnapshotMeta,
-	rememberLiveSnapshotMeta,
-	type LiveSnapshotMeta,
-} from "./snapshot-meta";
+	getLiveDataSnapshot,
+	liveDatasetRevision,
+	type LivePerformanceData,
+} from "../../infra/data-snapshot";
+import { getCurrentEventId } from "../../infra/event";
+import { loadLiveSnapshotMeta, type LiveSnapshotMeta } from "./snapshot-meta";
 
 export type LivePerformance = {
 	eventId: number;
@@ -144,13 +138,8 @@ type SelectedByCacheRow = {
 };
 
 const redisKey = {
-	eventLive: (season: string, eventId: number): string => `EventLive:${season}:${eventId}`,
-	eventLiveExplain: (season: string, eventId: number): string =>
-		`EventLiveExplain:${season}:${eventId}`,
-	eventLiveExplainV2: (season: string, eventId: number): string =>
-		`EventLiveExplainV2:${season}:${eventId}`,
-	playerSelectedBy: (season: string, eventId: number): string =>
-		gqlCacheKey(season, `live:selected-by:${eventId}`),
+	playerSelectedBy: (context: GraphQLContext, eventId: number): string =>
+		gqlCacheKey(context, `live:selected-by:${eventId}`),
 } as const;
 
 const mapLivePerformance = (row: DbLiveRow): LivePerformance => ({
@@ -179,45 +168,7 @@ const mapLivePerformance = (row: DbLiveRow): LivePerformance => ({
 	totalPoints: row.total_points,
 });
 
-const asNumber = (value: unknown): number | null => {
-	if (typeof value === "number" && Number.isFinite(value)) {
-		return value;
-	}
-	if (typeof value === "string") {
-		const parsed = Number.parseFloat(value);
-		return Number.isFinite(parsed) ? parsed : null;
-	}
-	return null;
-};
-
-const asBoolean = (value: unknown): boolean | null => {
-	if (typeof value === "boolean") {
-		return value;
-	}
-	if (typeof value === "number") {
-		return value === 1 ? true : value === 0 ? false : null;
-	}
-	if (typeof value === "string") {
-		const normalized = value.trim().toLowerCase();
-		if (normalized === "true" || normalized === "1") {
-			return true;
-		}
-		if (normalized === "false" || normalized === "0") {
-			return false;
-		}
-	}
-	return null;
-};
-
-const asString = (value: unknown): string | null => (typeof value === "string" ? value : null);
-
-const parseJsonUnknown = (value: string): unknown | null => {
-	try {
-		return JSON.parse(value) as unknown;
-	} catch {
-		return null;
-	}
-};
+const mapPublishedLivePerformance = (row: LivePerformanceData): LivePerformance => ({ ...row });
 
 const deleteMalformedCache = async (context: GraphQLContext, key: string): Promise<void> => {
 	try {
@@ -225,18 +176,6 @@ const deleteMalformedCache = async (context: GraphQLContext, key: string): Promi
 	} catch (error) {
 		context.logger.warn({ err: error, key }, "Failed to evict malformed live cache");
 	}
-};
-
-const isLivePerformance = (value: unknown): value is LivePerformance => {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const row = value as Record<string, unknown>;
-	return (
-		typeof row.eventId === "number" &&
-		typeof row.playerId === "number" &&
-		Number.isFinite(row.eventId) &&
-		Number.isFinite(row.playerId) &&
-		typeof row.totalPoints === "number"
-	);
 };
 
 const isLiveExplain = (value: unknown): value is LiveExplain => {
@@ -251,68 +190,6 @@ const isLiveExplain = (value: unknown): value is LiveExplain => {
 		explain.stats !== null &&
 		Array.isArray(explain.breakdown)
 	);
-};
-
-export const mapSyncJobLiveRow = (raw: unknown): LivePerformance | null => {
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-		return null;
-	}
-	const row = raw as Record<string, unknown>;
-
-	const eventId = asNumber(row.eventId ?? row.event_id);
-	const elementId = asNumber(row.elementId ?? row.element_id);
-	if (eventId === null || elementId === null) {
-		return null;
-	}
-
-	const startsRaw = row.starts ?? row.starts;
-	const startsValue = asBoolean(startsRaw);
-
-	return {
-		eventId: Math.trunc(eventId),
-		playerId: Math.trunc(elementId),
-		minutes: asNumber(row.minutes),
-		goalsScored: asNumber(row.goalsScored ?? row.goals_scored),
-		assists: asNumber(row.assists),
-		cleanSheets: asNumber(row.cleanSheets ?? row.clean_sheets),
-		goalsConceded: asNumber(row.goalsConceded ?? row.goals_conceded),
-		ownGoals: asNumber(row.ownGoals ?? row.own_goals),
-		penaltiesSaved: asNumber(row.penaltiesSaved ?? row.penalties_saved),
-		penaltiesMissed: asNumber(row.penaltiesMissed ?? row.penalties_missed),
-		yellowCards: asNumber(row.yellowCards ?? row.yellow_cards),
-		redCards: asNumber(row.redCards ?? row.red_cards),
-		saves: asNumber(row.saves),
-		bonus: asNumber(row.bonus),
-		bps: asNumber(row.bps),
-		starts: startsValue,
-		defensiveContribution: asNumber(row.defensiveContribution ?? row.defensive_contribution),
-		expectedGoals: asString(row.expectedGoals ?? row.expected_goals) ?? null,
-		expectedAssists: asString(row.expectedAssists ?? row.expected_assists) ?? null,
-		expectedGoalInvolvements:
-			asString(row.expectedGoalInvolvements ?? row.expected_goal_involvements) ?? null,
-		expectedGoalsConceded:
-			asString(row.expectedGoalsConceded ?? row.expected_goals_conceded) ?? null,
-		inDreamTeam: asBoolean(row.inDreamTeam ?? row.in_dream_team),
-		totalPoints: asNumber(row.totalPoints ?? row.total_points) ?? 0,
-	};
-};
-
-const parseEventLiveHashEntries = (
-	hashEntries: Record<string, string>,
-	eventId: number
-): Map<number, LivePerformance> => {
-	const performances = new Map<number, LivePerformance>();
-	for (const [field, fieldValue] of Object.entries(hashEntries)) {
-		const parsed = parseJsonUnknown(fieldValue);
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-			continue;
-		}
-		const perf = mapSyncJobLiveRow(parsed);
-		if (perf && String(perf.playerId) === field && perf.eventId === eventId) {
-			performances.set(perf.playerId, perf);
-		}
-	}
-	return performances;
 };
 
 const parseNumericValue = (value: unknown): number | null => {
@@ -604,145 +481,32 @@ async function fetchPlayerStatsForLiveExplains(
 	return { rows, failed: false };
 }
 
-type LiveExplainRedisSupplement = {
-	breakdown: LiveExplainBreakdown[];
-	contributions: LiveExplainStatContribution[];
-};
-
-const parseEventLiveExplainRedisSupplement = (
-	raw: string | null,
-	expected?: { eventId: number; elementId: number; requireIdentity?: boolean }
-): LiveExplainRedisSupplement | null => {
-	if (raw === null || raw.length === 0) return null;
-	const parsed = parseJsonUnknown(raw);
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-	const o = parsed as Record<string, unknown>;
-	if (expected) {
-		const rawEventId = pickRecordValue(o, "eventId", "event_id");
-		const rawElementId = pickRecordValue(o, "elementId", "element_id");
-		if (expected.requireIdentity) {
-			if (rawEventId !== expected.eventId || rawElementId !== expected.elementId) return null;
-		} else {
-			const embeddedEventId = parseIntegerValue(rawEventId);
-			const embeddedElementId = parseIntegerValue(rawElementId);
-			if (embeddedEventId !== null && embeddedEventId !== expected.eventId) return null;
-			if (embeddedElementId !== null && embeddedElementId !== expected.elementId) return null;
-		}
-	}
-	const ex = o.explain;
-	const arr: DbLiveExplainBreakdown[] | null =
-		ex === undefined || ex === null
-			? null
-			: Array.isArray(ex)
-				? (ex as DbLiveExplainBreakdown[])
-				: parseArrayValue<DbLiveExplainBreakdown>(ex);
-	const breakdown = mapLiveExplainBreakdown(arr);
-	const contributions = mapFlatLiveExplainContributions(o);
-	return breakdown.length > 0 || contributions.length > 0 ? { breakdown, contributions } : null;
-};
-
-/**
- * Read the producer's additive V2 compact contributions first, with per-player
- * fallback to the frozen legacy hash (which can also contain historical
- * fixture breakdowns). This keeps rolling deployment compatible in either
- * producer/consumer order.
- */
-async function loadBreakdownsFromEventLiveExplainRedis(
-	context: GraphQLContext,
-	eventId: number,
-	elementIds: number[],
-	seasonOverride?: string
-): Promise<Map<number, LiveExplainRedisSupplement>> {
-	if (elementIds.length === 0) return new Map();
-	const season = seasonOverride ?? (await getCurrentSeason(context));
-	const v2HashKey = redisKey.eventLiveExplainV2(season, eventId);
-	let v2Values: Array<string | null>;
-	try {
-		v2Values = await context.redis.hmget(v2HashKey, ...elementIds.map(String));
-	} catch (error) {
-		context.logger.warn(
-			{ err: error, hashKey: v2HashKey, eventId, elementIds },
-			"Redis HMGET EventLiveExplainV2 failed"
-		);
-		v2Values = elementIds.map(() => null);
-	}
-	const supplements = new Map<number, LiveExplainRedisSupplement>();
-	for (const [index, elementId] of elementIds.entries()) {
-		const parsed = parseEventLiveExplainRedisSupplement(v2Values[index] ?? null, {
-			eventId,
-			elementId,
-			requireIdentity: true,
-		});
-		if (parsed) supplements.set(elementId, parsed);
-	}
-
-	const legacyElementIds = elementIds.filter((elementId) => !supplements.has(elementId));
-	if (legacyElementIds.length === 0) return supplements;
-	const legacyHashKey = redisKey.eventLiveExplain(season, eventId);
-	let legacyValues: Array<string | null>;
-	try {
-		legacyValues = await context.redis.hmget(legacyHashKey, ...legacyElementIds.map(String));
-	} catch (error) {
-		context.logger.warn(
-			{ err: error, hashKey: legacyHashKey, eventId, elementIds: legacyElementIds },
-			"Redis HMGET EventLiveExplain failed"
-		);
-		return supplements;
-	}
-	for (const [index, elementId] of legacyElementIds.entries()) {
-		const parsed = parseEventLiveExplainRedisSupplement(legacyValues[index] ?? null, {
-			eventId,
-			elementId,
-		});
-		if (parsed) supplements.set(elementId, parsed);
-	}
-	return supplements;
-}
-
-type EventLiveExplainElementColumn = "element_id" | "element";
-const eventLiveExplainElementColumn = new WeakMap<object, EventLiveExplainElementColumn>();
-
 async function fetchEventLiveExplainsFromDatabase(
 	context: GraphQLContext,
 	eventId: number,
 	elementIds: number[]
 ): Promise<Map<number, DbLiveExplainRow>> {
 	if (elementIds.length === 0) return new Map();
-	const clientKey = context.data as object;
-	const cachedColumn = eventLiveExplainElementColumn.get(clientKey);
-	const candidates: EventLiveExplainElementColumn[] = cachedColumn
-		? [cachedColumn, cachedColumn === "element_id" ? "element" : "element_id"]
-		: ["element_id", "element"];
-
-	for (const column of candidates) {
-		const { data, error } = await context.data
-			.read("fpl.player_gameweek_scoring_items")
-			.select("*")
-			.eq("event_id", eventId)
-			.in(column, elementIds);
-
-		if (!error) {
-			eventLiveExplainElementColumn.set(clientKey, column);
-			const rows = new Map<number, DbLiveExplainRow>();
-			for (const raw of (data ?? []) as unknown[]) {
-				if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-				const row = raw as DbLiveExplainRow;
-				const elementId = parseIntegerValue(pickRecordValue(row, "element_id", "element"));
-				if (elementId !== null && elementIds.includes(elementId)) rows.set(elementId, row);
-			}
-			return rows;
-		}
-		if (isMissingPostgrestColumnError(error, column)) {
-			continue;
-		}
+	const { data, error } = await context.data
+		.read("fpl.player_gameweek_scoring_items")
+		.select("*")
+		.eq("event_id", eventId)
+		.in("element_id", elementIds);
+	if (error) {
 		context.logger.error(
 			{ err: error, eventId, elementIds },
 			"player gameweek scoring-item batch query failed"
 		);
 		throw new Error("Failed to fetch event live explain", { cause: error });
 	}
-
-	throw new Error("player gameweek scoring items have no supported element column");
+	const rows = new Map<number, DbLiveExplainRow>();
+	for (const raw of (data ?? []) as unknown[]) {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+		const row = raw as DbLiveExplainRow;
+		const elementId = parseIntegerValue(pickRecordValue(row, "element_id"));
+		if (elementId !== null && elementIds.includes(elementId)) rows.set(elementId, row);
+	}
+	return rows;
 }
 
 export type LiveScoresFilter = {
@@ -821,7 +585,7 @@ interface LiveRepository {
 	): Promise<number | null>;
 }
 
-const SELECTED_BY_REDIS_TTL_SEC = 3600;
+const SELECTED_BY_CACHE_TTL_SEC = 3600;
 
 const liveSelectedByPreloadKey = (eventId: number, elementId: number): string =>
 	`${eventId}:${elementId}`;
@@ -844,11 +608,10 @@ const rememberSelectedByPercents = (
 async function resolveSelectedByPercents(
 	context: GraphQLContext,
 	eventId: number,
-	elementIds: number[],
-	seasonOverride?: string
+	elementIds: number[]
 ): Promise<Map<number, number | null>> {
 	const uniqueIds = Array.from(
-		new Set(elementIds.filter((elementId) => Number.isInteger(elementId) && elementId > 0))
+		new Set(elementIds.filter((elementId) => Number.isSafeInteger(elementId) && elementId > 0))
 	);
 	const resolved = new Map<number, number | null>();
 	for (const elementId of uniqueIds) {
@@ -860,8 +623,7 @@ async function resolveSelectedByPercents(
 	let missingIds = uniqueIds.filter((elementId) => !resolved.has(elementId));
 	if (missingIds.length === 0) return resolved;
 
-	const season = seasonOverride ?? (await getCurrentSeason(context));
-	const hashKey = redisKey.playerSelectedBy(season, eventId);
+	const hashKey = redisKey.playerSelectedBy(context, eventId);
 	let cachedValues: Array<string | null> = missingIds.map(() => null);
 	try {
 		cachedValues =
@@ -873,7 +635,7 @@ async function resolveSelectedByPercents(
 	} catch (error) {
 		context.logger.warn(
 			{ err: error, hashKey, eventId, elementIds: missingIds },
-			"PlayerStatsSelected batch cache read failed"
+			"Live selected-by query cache read failed"
 		);
 	}
 
@@ -894,7 +656,7 @@ async function resolveSelectedByPercents(
 		} catch (error) {
 			context.logger.warn(
 				{ err: error, hashKey, field: String(elementId) },
-				"Invalid JSON in PlayerStatsSelected cache"
+				"Invalid JSON in live selected-by query cache"
 			);
 		}
 	}
@@ -944,11 +706,11 @@ async function resolveSelectedByPercents(
 			if (cachePairs.length > 0) {
 				try {
 					await context.redis.hset(hashKey, ...cachePairs);
-					await context.redis.expire(hashKey, SELECTED_BY_REDIS_TTL_SEC);
+					await context.redis.expire(hashKey, SELECTED_BY_CACHE_TTL_SEC);
 				} catch (cacheError) {
 					context.logger.warn(
 						{ err: cacheError, hashKey, eventId, elementIds: missingIds },
-						"PlayerStatsSelected batch cache write failed"
+						"Live selected-by query cache write failed"
 					);
 				}
 			}
@@ -997,33 +759,6 @@ const EVENT_LIVES_PROJECTION = [
 	"total_points",
 ].join(", ");
 
-const _fetchLivePerformanceFromDbByPlayerIds = async (
-	context: GraphQLContext,
-	eventId: number,
-	playerIds: number[]
-): Promise<LivePerformance[]> => {
-	const uniqueIds = Array.from(new Set(playerIds.filter((id) => Number.isFinite(id) && id > 0)));
-	if (uniqueIds.length === 0) {
-		return [];
-	}
-
-	const { data, error } = await context.data
-		.read("fpl.player_gameweek_stats")
-		.select(EVENT_LIVES_PROJECTION)
-		.eq("event_id", eventId)
-		.in("element_id", uniqueIds);
-
-	if (error) {
-		context.logger.error(
-			{ err: error, eventId, playerIds: uniqueIds },
-			"Failed to fetch live performances by player IDs"
-		);
-		throw new Error("Failed to fetch live performances");
-	}
-
-	return (data as unknown as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
-};
-
 const fetchLivePerformanceFromDbByEventsAndPlayerIds = async (
 	context: GraphQLContext,
 	eventIds: number[],
@@ -1055,144 +790,25 @@ const fetchLivePerformanceFromDbByEventsAndPlayerIds = async (
 
 	return (data as unknown as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
 };
-
-const fetchAllLivePerformanceFromDb = async (
-	context: GraphQLContext,
-	eventId: number
-): Promise<LivePerformance[]> => {
-	const { data, error } = await context.data
-		.read("fpl.player_gameweek_stats")
-		.select(EVENT_LIVES_PROJECTION)
-		.eq("event_id", eventId);
-
-	if (error) {
-		context.logger.error({ err: error, eventId }, "Failed to fetch all live performances from DB");
-		throw new Error("Failed to fetch live performances");
-	}
-
-	return (data as unknown as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
-};
-
-type LiveRedisSnapshot = {
-	meta: LiveSnapshotMeta | null;
-	performances: Map<number, LivePerformance>;
-};
-
-const isStringRecord = (value: unknown): value is Record<string, string> =>
-	typeof value === "object" &&
-	value !== null &&
-	!Array.isArray(value) &&
-	Object.values(value).every((entry) => typeof entry === "string");
-
-const loadEventLiveFromRedis = async (
-	context: GraphQLContext,
-	eventId: number,
-	season: string
-): Promise<LiveRedisSnapshot | null> => {
-	const hashKey = redisKey.eventLive(season, eventId);
-	const metaKey = liveSnapshotMetaKey(season, eventId);
-
-	let hashEntries: Record<string, string>;
-	let rawMeta: string | null;
-	try {
-		// MULTI makes the metadata revision and EventLive hash one read snapshot.
-		// Lightweight test doubles may not implement it, so preserve a sequential
-		// compatibility path for repository tests and non-ioredis adapters.
-		if (typeof context.redis.multi === "function") {
-			const result = await context.redis.multi().get(metaKey).hgetall(hashKey).exec();
-			if (!result || result.length !== 2) {
-				throw new Error("Live snapshot Redis read transaction was aborted");
-			}
-			const metaResult = result[0];
-			const hashResult = result[1];
-			if (metaResult[0]) throw metaResult[0];
-			if (hashResult[0]) throw hashResult[0];
-			rawMeta = typeof metaResult[1] === "string" ? metaResult[1] : null;
-			hashEntries = isStringRecord(hashResult[1]) ? hashResult[1] : {};
-		} else {
-			[rawMeta, hashEntries] = await Promise.all([
-				context.redis.get(metaKey),
-				context.redis.hgetall(hashKey),
-			]);
-		}
-	} catch (error) {
-		context.logger.warn(
-			{ err: error, hashKey, metaKey },
-			"Failed to read EventLive hash from Redis, falling back to DB"
-		);
-		const meta = await loadLiveSnapshotMeta(context, eventId, { season });
-		if (meta && isLiveSnapshotConsistencyActive(context, eventId)) {
-			throw new LiveSnapshotCoherenceError(
-				eventId,
-				"EventLive",
-				`EventLive view unavailable for revision ${meta.revision}`
-			);
-		}
-		return null;
-	}
-
-	const meta = parseLiveSnapshotMeta(rawMeta, { season, eventId });
-	rememberLiveSnapshotMeta(context, meta, season, eventId);
-	const performances = parseEventLiveHashEntries(hashEntries, eventId);
-	if (meta && performances.size !== meta.eventLiveCount) {
-		context.logger.warn(
-			{
-				hashKey,
-				revision: meta.revision,
-				expectedCount: meta.eventLiveCount,
-				actualCount: performances.size,
-			},
-			"Incomplete EventLive revision"
-		);
-		if (isLiveSnapshotConsistencyActive(context, eventId)) {
-			throw new LiveSnapshotCoherenceError(
-				eventId,
-				"EventLive",
-				`Incomplete EventLive revision ${meta.revision}`
-			);
-		}
-		return { meta, performances: new Map() };
-	}
-	return { meta, performances };
-};
-
-const LIVE_REVISION_CACHE_TTL_SEC = 180;
-const LIVE_FALLBACK_CACHE_TTL_SEC = 15;
-const LIVE_EXPLAIN_REVISION_CACHE_TTL_SEC = 300;
-const LIVE_EXPLAIN_FALLBACK_CACHE_TTL_SEC = 15;
+const LIVE_EXPLAIN_CACHE_TTL_SEC = 10;
 const LIVE_EXPLAIN_CACHE_SHAPE = "shape2";
 const LIVE_EXPLAIN_SINGLEFLIGHT_BATCH_SIZE = 100;
 
 const shapedLiveExplainCacheKey = (
-	season: string,
+	context: GraphQLContext,
 	eventId: number,
 	elementId: number,
 	meta: LiveSnapshotMeta | null,
-	databaseFallback: boolean,
 	mode: LiveExplainReadMode
-): string =>
-	meta
-		? gqlCacheKey(
-				season,
-				`live:explain:${LIVE_EXPLAIN_CACHE_SHAPE}:${eventId}:${elementId}:${mode}:revision:${meta.revision}${databaseFallback ? ":fallback15" : ""}`
-			)
-		: gqlCacheKey(
-				season,
-				`live:explain:${LIVE_EXPLAIN_CACHE_SHAPE}:${eventId}:${elementId}:${mode}:fallback15`
-			);
-
-const liveAllFlights = new WeakMap<object, Map<string, Promise<Map<number, LivePerformance>>>>();
-
-const getLiveAllFlightMap = (
-	context: GraphQLContext
-): Map<string, Promise<Map<number, LivePerformance>>> => {
-	const redisIdentity = context.redis as object;
-	let flights = liveAllFlights.get(redisIdentity);
-	if (!flights) {
-		flights = new Map();
-		liveAllFlights.set(redisIdentity, flights);
-	}
-	return flights;
+): string => {
+	const revision = meta
+		? liveDatasetRevision(context.dataRevision!, eventId, meta.revision)
+		: context.dataRevision;
+	return gqlCacheKey(
+		context,
+		`live:explain:${LIVE_EXPLAIN_CACHE_SHAPE}:${eventId}:${elementId}:${mode}`,
+		revision
+	);
 };
 
 type LiveExplainBatchLoad = {
@@ -1222,13 +838,11 @@ const readLiveExplainCacheBatch = async (
 	context: GraphQLContext,
 	eventId: number,
 	elementIds: number[],
-	season: string,
 	meta: LiveSnapshotMeta | null,
-	databaseFallback: boolean,
 	mode: LiveExplainReadMode
 ): Promise<Map<number, LiveExplain | null>> => {
 	const cacheKeys = elementIds.map((elementId) =>
-		shapedLiveExplainCacheKey(season, eventId, elementId, meta, databaseFallback, mode)
+		shapedLiveExplainCacheKey(context, eventId, elementId, meta, mode)
 	);
 	let cachedValues: Array<string | null> = elementIds.map(() => null);
 	try {
@@ -1274,31 +888,17 @@ const loadColdLiveExplainBatch = async (
 	context: GraphQLContext,
 	eventId: number,
 	elementIds: number[],
-	season: string,
 	meta: LiveSnapshotMeta | null,
-	databaseFallback: boolean,
 	mode: LiveExplainReadMode
 ): Promise<LiveExplainBatchLoad> => {
 	// Another process may have filled Redis while this process elected its
 	// singleflight. Recheck before touching PostgreSQL.
-	const resolved = await readLiveExplainCacheBatch(
-		context,
-		eventId,
-		elementIds,
-		season,
-		meta,
-		databaseFallback,
-		mode
-	);
+	const resolved = await readLiveExplainCacheBatch(context, eventId, elementIds, meta, mode);
 	const selectedByById = new Map<number, number | null>();
 	const coldIds = elementIds.filter((elementId) => !resolved.has(elementId));
 	if (coldIds.length === 0) return { values: resolved, selectedByById };
 
-	const redisSupplementById = databaseFallback
-		? new Map<number, LiveExplainRedisSupplement>()
-		: await loadBreakdownsFromEventLiveExplainRedis(context, eventId, coldIds, season);
-	const databaseIds =
-		mode === "full" ? coldIds : coldIds.filter((elementId) => !redisSupplementById.has(elementId));
+	const databaseIds = coldIds;
 	const [playerStatsResult, eventExplainById] = await Promise.all([
 		fetchPlayerStatsForLiveExplains(context, eventId, databaseIds),
 		fetchEventLiveExplainsFromDatabase(context, eventId, databaseIds),
@@ -1312,24 +912,12 @@ const loadColdLiveExplainBatch = async (
 		);
 	}
 
-	const cacheTtl =
-		databaseFallback || !meta
-			? LIVE_EXPLAIN_FALLBACK_CACHE_TTL_SEC
-			: LIVE_EXPLAIN_REVISION_CACHE_TTL_SEC;
 	const valuesToCache = new Map<string, string>();
 	for (const elementId of coldIds) {
 		const psRow = playerStatsById.get(elementId) ?? null;
 		const elRow = eventExplainById.get(elementId) ?? null;
-		const redisSupplement = redisSupplementById.get(elementId) ?? null;
-		const cacheKey = shapedLiveExplainCacheKey(
-			season,
-			eventId,
-			elementId,
-			meta,
-			databaseFallback,
-			mode
-		);
-		if (!psRow && !elRow && !redisSupplement) {
+		const cacheKey = shapedLiveExplainCacheKey(context, eventId, elementId, meta, mode);
+		if (!psRow && !elRow) {
 			resolved.set(elementId, null);
 			if (!playerStatsResult.failed || !playerStatsDatabaseIds.has(elementId)) {
 				valuesToCache.set(cacheKey, "__null__");
@@ -1339,11 +927,8 @@ const loadColdLiveExplainBatch = async (
 
 		const stats = mapLiveExplainStats(psRow);
 		const databaseBreakdown = elRow ? mapBreakdownFromEventLiveRow(elRow) : [];
-		const breakdown =
-			redisSupplement && redisSupplement.breakdown.length > 0
-				? redisSupplement.breakdown
-				: databaseBreakdown;
-		let contributions = redisSupplement?.contributions ?? [];
+		const breakdown = databaseBreakdown;
+		let contributions: LiveExplainStatContribution[] = [];
 		if (contributions.length === 0) contributions = breakdown.flatMap((entry) => entry.stats);
 		if (contributions.length === 0) contributions = mapFlatLiveExplainContributions(elRow);
 
@@ -1368,7 +953,7 @@ const loadColdLiveExplainBatch = async (
 	await Promise.all(
 		Array.from(valuesToCache, async ([cacheKey, value]) => {
 			try {
-				await context.redis.set(cacheKey, value, "EX", cacheTtl);
+				await context.redis.set(cacheKey, value, "EX", LIVE_EXPLAIN_CACHE_TTL_SEC);
 			} catch (error) {
 				context.logger.warn({ err: error, cacheKey }, "Failed to cache live explain");
 			}
@@ -1382,13 +967,11 @@ const loadLiveExplainsWithSingleflight = (
 	context: GraphQLContext,
 	eventId: number,
 	elementIds: number[],
-	season: string,
 	meta: LiveSnapshotMeta | null,
-	databaseFallback: boolean,
 	mode: LiveExplainReadMode
 ): Promise<LiveExplainBatchLoad> => {
 	const flights = getLiveExplainFlightMap(context);
-	const scopeKey = `${season}:${eventId}:${mode}:${meta?.revision ?? "fallback"}:${databaseFallback ? "database" : "redis"}`;
+	const scopeKey = `${context.currentSeason.seasonCode}:${eventId}:${mode}:${meta?.revision ?? "postgres"}`;
 	const existing = flights.get(scopeKey);
 	if (existing) {
 		for (const elementId of elementIds) existing.pendingIds.add(elementId);
@@ -1411,15 +994,7 @@ const loadLiveExplainsWithSingleflight = (
 					LIVE_EXPLAIN_SINGLEFLIGHT_BATCH_SIZE
 				);
 				for (const elementId of batchIds) flight.pendingIds.delete(elementId);
-				const loaded = await loadColdLiveExplainBatch(
-					context,
-					eventId,
-					batchIds,
-					season,
-					meta,
-					databaseFallback,
-					mode
-				);
+				const loaded = await loadColdLiveExplainBatch(context, eventId, batchIds, meta, mode);
 				for (const [elementId, value] of loaded.values) {
 					flight.result.values.set(elementId, value);
 				}
@@ -1436,198 +1011,21 @@ const loadLiveExplainsWithSingleflight = (
 	return flight.promise;
 };
 
-const shapedLiveCacheKey = (
-	season: string,
-	eventId: number,
-	meta: LiveSnapshotMeta | null
-): string =>
-	meta
-		? gqlCacheKey(season, `live:all:${eventId}:revision:${meta.revision}`)
-		: gqlCacheKey(season, `live:all:${eventId}:fallback15`);
-
-const shapedLiveFallbackCacheKey = (
-	season: string,
-	eventId: number,
-	meta: LiveSnapshotMeta | null
-): string =>
-	meta
-		? gqlCacheKey(season, `live:all:${eventId}:revision:${meta.revision}:fallback15`)
-		: shapedLiveCacheKey(season, eventId, null);
-
-const readShapedLiveCache = async (
-	context: GraphQLContext,
-	cacheKey: string
-): Promise<Map<number, LivePerformance> | null> => {
-	let cached: string | null;
-	try {
-		cached = await context.redis.get(cacheKey);
-	} catch (error) {
-		context.logger.warn({ err: error, cacheKey }, "Failed to read shaped live cache");
-		return null;
-	}
-	if (cached === null) return null;
-	try {
-		const parsed: unknown = JSON.parse(cached);
-		if (Array.isArray(parsed) && parsed.every(isLivePerformance)) {
-			return new Map(parsed.map((performance) => [performance.playerId, performance]));
-		}
-	} catch (error) {
-		context.logger.warn({ err: error, cacheKey }, "Malformed shaped live cache");
-	}
-	await deleteMalformedCache(context, cacheKey);
-	return null;
-};
-
-const readRequestedLiveCache = async (
-	context: GraphQLContext,
-	eventId: number,
-	meta: LiveSnapshotMeta | null,
-	cacheKey: string,
-	fallbackKey: string
-): Promise<Map<number, LivePerformance> | null> => {
-	const cached = await readShapedLiveCache(context, cacheKey);
-	if (cached) return cached;
-	if (fallbackKey === cacheKey) return null;
-
-	const fallback = await readShapedLiveCache(context, fallbackKey);
-	if (fallback && meta && isLiveSnapshotConsistencyActive(context, eventId)) {
-		throw new LiveSnapshotCoherenceError(
-			eventId,
-			"EventLive",
-			`Database fallback cache is active for EventLive revision ${meta.revision}`
-		);
-	}
-	return fallback;
-};
-
-const writeShapedLiveCache = async (
-	context: GraphQLContext,
-	cacheKey: string,
-	performances: Map<number, LivePerformance>,
-	ttlSeconds: number,
-	cacheEmpty = false
-): Promise<void> => {
-	if (performances.size === 0 && !cacheEmpty) return;
-	try {
-		await context.redis.set(
-			cacheKey,
-			JSON.stringify(Array.from(performances.values())),
-			"EX",
-			ttlSeconds
-		);
-	} catch (error) {
-		context.logger.warn({ err: error, cacheKey }, "Failed to write shaped live cache");
-	}
-};
-
-const loadLivePerformanceDbFallback = async (
-	context: GraphQLContext,
-	eventId: number,
-	season: string,
-	meta: LiveSnapshotMeta | null
-): Promise<Map<number, LivePerformance>> => {
-	const cacheKey = shapedLiveFallbackCacheKey(season, eventId, meta);
-	const cached = await readShapedLiveCache(context, cacheKey);
-	if (cached) return cached;
-
-	const flights = getLiveAllFlightMap(context);
-	const flightKey = `database:${cacheKey}`;
-	const existingFlight = flights.get(flightKey);
-	if (existingFlight) return new Map(await existingFlight);
-
-	const flight = (async (): Promise<Map<number, LivePerformance>> => {
-		const cacheAfterFlightElection = await readShapedLiveCache(context, cacheKey);
-		if (cacheAfterFlightElection) return cacheAfterFlightElection;
-
-		const fromDb = new Map(
-			(await fetchAllLivePerformanceFromDb(context, eventId)).map((performance) => [
-				performance.playerId,
-				performance,
-			])
-		);
-		await writeShapedLiveCache(context, cacheKey, fromDb, LIVE_FALLBACK_CACHE_TTL_SEC, true);
-		return fromDb;
-	})();
-	flights.set(flightKey, flight);
-	try {
-		return new Map(await flight);
-	} finally {
-		if (flights.get(flightKey) === flight) flights.delete(flightKey);
-	}
-};
-
 export const liveRepository: LiveRepository = {
 	async getAllLivePerformances(
 		context: GraphQLContext,
 		eventId: number
 	): Promise<Map<number, LivePerformance>> {
-		if (!eventId || !Number.isFinite(eventId) || eventId <= 0) {
+		if (!Number.isSafeInteger(eventId) || eventId <= 0) {
 			return new Map();
 		}
-		const season = await getCurrentSeason(context);
-		const requestedMeta = await loadLiveSnapshotMeta(context, eventId, { season });
-		if (isLiveSnapshotDatabaseFallback(context, eventId)) {
-			return loadLivePerformanceDbFallback(context, eventId, season, requestedMeta);
-		}
-		const requestedCacheKey = shapedLiveCacheKey(season, eventId, requestedMeta);
-		const requestedFallbackKey = shapedLiveFallbackCacheKey(season, eventId, requestedMeta);
-		const cached = await readRequestedLiveCache(
-			context,
-			eventId,
-			requestedMeta,
-			requestedCacheKey,
-			requestedFallbackKey
+		const snapshot = await getLiveDataSnapshot(context, eventId);
+		return new Map(
+			snapshot.eventLives.map((row) => {
+				const performance = mapPublishedLivePerformance(row);
+				return [performance.playerId, performance];
+			})
 		);
-		if (cached) return cached;
-
-		const flightKey = `${season}:${eventId}:${requestedMeta?.revision ?? "fallback"}`;
-		const flights = getLiveAllFlightMap(context);
-		const existingFlight = flights.get(flightKey);
-		if (existingFlight) return new Map(await existingFlight);
-
-		const flight = (async (): Promise<Map<number, LivePerformance>> => {
-			// A sibling request may have populated the cache before this flight won.
-			const cacheAfterFlightElection = await readRequestedLiveCache(
-				context,
-				eventId,
-				requestedMeta,
-				requestedCacheKey,
-				requestedFallbackKey
-			);
-			if (cacheAfterFlightElection) return cacheAfterFlightElection;
-
-			const redisSnapshot = await loadEventLiveFromRedis(context, eventId, season);
-			if (redisSnapshot && redisSnapshot.performances.size > 0) {
-				const actualKey = shapedLiveCacheKey(season, eventId, redisSnapshot.meta);
-				if (actualKey !== requestedCacheKey) {
-					const actualCached = await readShapedLiveCache(context, actualKey);
-					if (actualCached) return actualCached;
-				}
-				await writeShapedLiveCache(
-					context,
-					actualKey,
-					redisSnapshot.performances,
-					redisSnapshot.meta ? LIVE_REVISION_CACHE_TTL_SEC : LIVE_FALLBACK_CACHE_TTL_SEC
-				);
-				return redisSnapshot.performances;
-			}
-
-			// A missing required Redis view means the metadata revision is not safe
-			// for caching. Keep DB recovery bounded to fifteen seconds so the Data
-			// producer's next repair is visible immediately through a revision key.
-			return loadLivePerformanceDbFallback(
-				context,
-				eventId,
-				season,
-				redisSnapshot?.meta ?? requestedMeta
-			);
-		})();
-		flights.set(flightKey, flight);
-		try {
-			return new Map(await flight);
-		} finally {
-			if (flights.get(flightKey) === flight) flights.delete(flightKey);
-		}
 	},
 
 	async getLiveScores(
@@ -1645,7 +1043,7 @@ export const liveRepository: LiveRepository = {
 			targetEventId = currentId;
 		}
 
-		if (!Number.isFinite(targetEventId) || targetEventId <= 0) {
+		if (!Number.isSafeInteger(targetEventId) || targetEventId <= 0) {
 			return [];
 		}
 
@@ -1702,28 +1100,14 @@ export const liveRepository: LiveRepository = {
 		mode: LiveExplainReadMode = "full",
 		includeSelectedBy = false
 	): Promise<LiveExplain[]> {
-		if (!Number.isFinite(eventId) || eventId <= 0) return [];
+		if (!Number.isSafeInteger(eventId) || eventId <= 0) return [];
 		const uniqueIds = Array.from(
-			new Set(elementIds.filter((id) => Number.isInteger(id) && id > 0))
+			new Set(elementIds.filter((id) => Number.isSafeInteger(id) && id > 0))
 		);
 		if (uniqueIds.length === 0) return [];
 
-		const season = await getCurrentSeason(context);
-		const databaseFallback = isLiveSnapshotDatabaseFallback(context, eventId);
-		// A consistency wrapper has already established the operation candidate
-		// and memoized it on this context. Reuse that decision so a transient
-		// second metadata GET cannot select an unversioned fallback cache while
-		// the outer before/after boundary still accepts the original revision.
-		const meta = await loadLiveSnapshotMeta(context, eventId, { season });
-		const resolved = await readLiveExplainCacheBatch(
-			context,
-			eventId,
-			uniqueIds,
-			season,
-			meta,
-			databaseFallback,
-			mode
-		);
+		const meta = await loadLiveSnapshotMeta(context, eventId);
+		const resolved = await readLiveExplainCacheBatch(context, eventId, uniqueIds, meta, mode);
 
 		const missingIds = uniqueIds.filter((elementId) => !resolved.has(elementId));
 		if (missingIds.length > 0) {
@@ -1731,9 +1115,7 @@ export const liveRepository: LiveRepository = {
 				context,
 				eventId,
 				missingIds,
-				season,
 				meta,
-				databaseFallback,
 				mode
 			);
 			for (const elementId of missingIds) {
@@ -1752,8 +1134,7 @@ export const liveRepository: LiveRepository = {
 		const selectedByById = await resolveSelectedByPercents(
 			context,
 			eventId,
-			results.map((result) => result.elementId),
-			season
+			results.map((result) => result.elementId)
 		);
 		return results.map((result) => ({
 			...result,
@@ -1766,90 +1147,20 @@ export const liveRepository: LiveRepository = {
 		eventId: number,
 		playerIds: number[]
 	): Promise<LivePerformance[]> {
-		if (!eventId || !Number.isFinite(eventId) || eventId <= 0) {
+		if (!Number.isSafeInteger(eventId) || eventId <= 0) {
 			throw new Error("eventId is required to fetch live performances");
 		}
 
-		const uniqueIds = Array.from(new Set(playerIds.filter((id) => Number.isFinite(id) && id > 0)));
+		const uniqueIds = Array.from(
+			new Set(playerIds.filter((id) => Number.isSafeInteger(id) && id > 0))
+		);
 		if (uniqueIds.length === 0) {
 			return [];
 		}
-		if (isLiveSnapshotDatabaseFallback(context, eventId)) {
-			const all = await this.getAllLivePerformances(context, eventId);
-			return uniqueIds
-				.map((playerId) => all.get(playerId))
-				.filter((performance): performance is LivePerformance => performance !== undefined);
-		}
-
-		// Use HMGET with specific player IDs — avoids loading all 700+ players via HGETALL.
-		const season = await getCurrentSeason(context);
-		const hashKey = redisKey.eventLive(season, eventId);
-		const meta = await loadLiveSnapshotMeta(context, eventId, { season });
-		const readValidatedFallback = async (): Promise<LivePerformance[]> => {
-			const all = await this.getAllLivePerformances(context, eventId);
-			return uniqueIds
-				.map((playerId) => all.get(playerId))
-				.filter((performance): performance is LivePerformance => performance !== undefined);
-		};
-		let values: (string | null)[];
-		let hashLength: number;
-		try {
-			[hashLength, values] = await Promise.all([
-				context.redis.hlen(hashKey),
-				context.redis.hmget(hashKey, ...uniqueIds.map(String)),
-			]);
-		} catch (err) {
-			context.logger.warn({ err, hashKey }, "EventLive HMGET failed, falling back to DB");
-			return meta
-				? readValidatedFallback()
-				: fetchLivePerformanceFromDbByEventsAndPlayerIds(context, [eventId], uniqueIds);
-		}
-
-		if (meta && hashLength !== meta.eventLiveCount) {
-			context.logger.warn(
-				{
-					hashKey,
-					revision: meta.revision,
-					expectedCount: meta.eventLiveCount,
-					actualCount: hashLength,
-				},
-				"Incomplete EventLive revision during targeted read"
-			);
-			return readValidatedFallback();
-		}
-
-		const results: LivePerformance[] = [];
-		const hitIds = new Set<number>();
-		for (let i = 0; i < uniqueIds.length; i++) {
-			const value = values[i];
-			if (!value) continue;
-			const parsed = parseJsonUnknown(value);
-			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-			const perf = mapSyncJobLiveRow(parsed as Record<string, unknown>);
-			if (perf && perf.playerId === uniqueIds[i] && perf.eventId === eventId) {
-				results.push(perf);
-				hitIds.add(uniqueIds[i]);
-			}
-		}
-
-		const missIds = uniqueIds.filter((id) => !hitIds.has(id));
-		if (meta && missIds.length > 0) {
-			context.logger.warn(
-				{ hashKey, revision: meta.revision, missIds },
-				"Malformed or missing EventLive field during targeted read"
-			);
-			return readValidatedFallback();
-		}
-		if (missIds.length > 0) {
-			const fromDb = await fetchLivePerformanceFromDbByEventsAndPlayerIds(
-				context,
-				[eventId],
-				missIds
-			);
-			results.push(...fromDb);
-		}
-
-		return results;
+		const all = await this.getAllLivePerformances(context, eventId);
+		return uniqueIds
+			.map((playerId) => all.get(playerId))
+			.filter((performance): performance is LivePerformance => performance !== undefined);
 	},
 
 	getLivePerformancesForEventsAndPlayers(
@@ -1866,9 +1177,9 @@ export const liveRepository: LiveRepository = {
 		elementId: number
 	): Promise<number | null> {
 		if (
-			!Number.isFinite(eventId) ||
+			!Number.isSafeInteger(eventId) ||
 			eventId <= 0 ||
-			!Number.isFinite(elementId) ||
+			!Number.isSafeInteger(elementId) ||
 			elementId <= 0
 		) {
 			return null;

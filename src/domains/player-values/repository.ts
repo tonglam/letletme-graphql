@@ -1,7 +1,8 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
+import { QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
+import { getCoreDataSnapshot } from "../../infra/data-snapshot";
 import { metrics } from "../../infra/metrics";
-import { getCurrentSeason } from "../../infra/season";
 
 export type PositionEnum = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
 
@@ -52,28 +53,15 @@ export interface PlayerValuesRepository {
 	): Promise<PlayerValueHistoryRepositoryItem[]>;
 }
 
-function formatDateKey(date: Date, options: { utc?: boolean } = {}): string {
-	const year = options.utc ? date.getUTCFullYear() : date.getFullYear();
-	const month = String((options.utc ? date.getUTCMonth() : date.getMonth()) + 1).padStart(2, "0");
-	const day = String(options.utc ? date.getUTCDate() : date.getDate()).padStart(2, "0");
-	return `PlayerValue:${year}${month}${day}`;
-}
-
-function getDateKey(changeDate: Date): string {
-	return formatDateKey(changeDate, { utc: true });
-}
-
 function getCompactDateString(date: Date): string {
-	return formatDateKey(date, { utc: true }).replace("PlayerValue:", "");
-}
-
-function getIsoDateString(date: Date): string {
-	return date.toISOString().split("T")[0];
+	const year = date.getUTCFullYear();
+	const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+	const day = String(date.getUTCDate()).padStart(2, "0");
+	return `${year}${month}${day}`;
 }
 
 type DbPlayerValueRow = {
 	element_id?: number;
-	player_id?: number;
 	element_type?: number | null;
 	event_id?: number | null;
 	value: number;
@@ -90,29 +78,9 @@ type DbPlayerValueHistoryRow = {
 	change_type: string | null;
 };
 
-type DbPlayerMetadataRow = {
-	id: number;
-	web_name: string;
-	team_id: number;
-	type: number;
-	price: number;
-};
-
-type DbTeamMetadataRow = {
-	id: number;
-	name: string;
-	short_name: string;
-};
-
 type DbPlayerStatMetadataRow = {
 	element_id: number;
 	event_id: number;
-	web_name: string;
-	element_type: number;
-	team_id: number;
-	team_name: string;
-	team_short_name: string;
-	value: number;
 	total_points: number | null;
 	form: string | number | null;
 	transfers_in_event: number | null;
@@ -124,7 +92,7 @@ const compactDatePattern = /^\d{8}$/;
 
 function toPositionEnum(position: string): PositionEnum | null {
 	const normalized = position.trim().toUpperCase();
-	if (normalized === "GOALKEEPER" || normalized === "GK") {
+	if (normalized === "GOALKEEPER" || normalized === "GK" || normalized === "GKP") {
 		return "GOALKEEPER";
 	}
 	if (normalized === "DEFENDER" || normalized === "DEF") {
@@ -139,27 +107,19 @@ function toPositionEnum(position: string): PositionEnum | null {
 	return null;
 }
 
-function buildTeamShortName(teamShortName: string | null | undefined, teamName: string): string {
-	if (teamShortName && teamShortName.trim().length > 0) {
-		return teamShortName.trim();
+function toPositionCode(elementType: number | null | undefined): string {
+	switch (elementType) {
+		case 1:
+			return "GKP";
+		case 2:
+			return "DEF";
+		case 3:
+			return "MID";
+		case 4:
+			return "FWD";
+		default:
+			return "";
 	}
-
-	const words = teamName
-		.split(/\s+/)
-		.map((word) => word.trim())
-		.filter((word) => word.length > 0);
-
-	if (words.length === 0) {
-		return "UNK";
-	}
-	if (words.length === 1) {
-		return words[0].slice(0, 3).toUpperCase();
-	}
-
-	return words
-		.slice(0, 3)
-		.map((word) => word[0].toUpperCase())
-		.join("");
 }
 
 function parseChangeDate(rawValue: string | Date): Date | null {
@@ -187,13 +147,13 @@ function toTenthsValue(value: number | null | undefined): number {
 }
 
 function buildHistoryCacheKey(args: GetPlayerValueHistoryArgs): string {
-	const from = args.fromDate ? getDateKey(args.fromDate) : "none";
-	const to = args.toDate ? getDateKey(args.toDate) : "none";
-	return `player-value-history:v2:${args.playerId}:${from}:${to}`;
+	const from = args.fromDate ? getCompactDateString(args.fromDate) : "none";
+	const to = args.toDate ? getCompactDateString(args.toDate) : "none";
+	return `player-value-history:${args.playerId}:${from}:${to}`;
 }
 
 const mapDbRowToPlayerValue = (row: DbPlayerValueRow): PlayerValue => {
-	const rawId = row.element_id ?? row.player_id;
+	const rawId = row.element_id;
 	const playerId = typeof rawId === "number" && Number.isFinite(rawId) ? rawId : 0;
 
 	return {
@@ -259,37 +219,11 @@ function mapHistoryRows(rows: DbPlayerValueHistoryRow[]): PlayerValueHistoryRepo
 	return history;
 }
 
-async function resolveTargetDate(context: GraphQLContext, changeDate: Date): Promise<string> {
-	const compactStr = getCompactDateString(changeDate);
-	const isoStr = getIsoDateString(changeDate);
-
-	const [exactResult, isoResult] = await Promise.all([
-		context.data
-			.read("reporting.player_value_changes")
-			.select("change_date")
-			.eq("change_date", compactStr)
-			.limit(1),
-		context.data
-			.read("reporting.player_value_changes")
-			.select("change_date")
-			.eq("change_date", isoStr)
-			.limit(1),
-	]);
-
-	if (exactResult.data && exactResult.data.length > 0) {
-		return compactStr;
-	}
-	if (isoResult.data && isoResult.data.length > 0) {
-		return isoStr;
-	}
-	return compactStr;
-}
-
 async function getPlayerValuesFromDatabase(
 	context: GraphQLContext,
 	changeDate: Date
 ): Promise<PlayerValue[]> {
-	const targetDate = await resolveTargetDate(context, changeDate);
+	const targetDate = getCompactDateString(changeDate);
 
 	const { data, error } = await context.data
 		.read("reporting.player_value_changes")
@@ -306,7 +240,7 @@ async function getPlayerValuesFromDatabase(
 
 	const rows = (data as DbPlayerValueRow[] | null) ?? [];
 	// Season-baseline rows ("start", last_value = 0) are not price changes.
-	// Filtered in JS rather than .neq("change_type", "start") so legacy rows
+	// Filtered in JS rather than .neq("change_type", "start") so provenance rows
 	// with NULL change_type survive (SQL <> drops NULLs), mirroring
 	// mapDbRowToPlayerValue's last_value ?? value fallback.
 	const changedRows = rows.filter((row) => {
@@ -336,45 +270,24 @@ async function getPlayerValuesFromDatabase(
 		)
 	);
 
-	const [playersResult, statsResult] = await Promise.all([
-		context.data
-			.read("fpl.players")
-			.select("id, web_name, team_id, type, price")
-			.in("id", elementIds),
+	const [core, statsResult] = await Promise.all([
+		getCoreDataSnapshot(context),
 		eventIds.length > 0
 			? context.data
 					.read("fpl.player_event_snapshots")
 					.select(
-						"element_id, event_id, web_name, element_type, team_id, team_name, team_short_name, value, total_points, form, transfers_in_event, transfers_out_event, selected_by_percent"
+						"element_id, event_id, total_points, form, transfers_in_event, transfers_out_event, selected_by_percent"
 					)
 					.in("element_id", elementIds)
 					.in("event_id", eventIds)
 			: Promise.resolve({ data: [], error: null }),
 	]);
-	if (playersResult.error || statsResult.error) {
-		const cause = playersResult.error ?? statsResult.error;
-		throw new Error("Failed to enrich player values", { cause });
+	if (statsResult.error) {
+		throw new Error("Failed to enrich player values", { cause: statsResult.error });
 	}
 
-	const players = (playersResult.data as DbPlayerMetadataRow[] | null) ?? [];
-	const teamIds = Array.from(new Set(players.map((player) => player.team_id)));
-	const teamsResult = await context.data
-		.read("fpl.teams")
-		.select("id, name, short_name")
-		.in("id", teamIds);
-	if (teamsResult.error) {
-		throw new Error("Failed to enrich player-value teams", {
-			cause: teamsResult.error,
-		});
-	}
-
-	const playerById = new Map(players.map((player) => [player.id, player]));
-	const teamById = new Map(
-		((teamsResult.data as DbTeamMetadataRow[] | null) ?? []).map((team) => [
-			team.id,
-			team,
-		]) as Array<[number, DbTeamMetadataRow]>
-	);
+	const playerById = new Map(core.players.map((player) => [player.id, player]));
+	const teamById = new Map(core.teams.map((team) => [team.id, team]));
 	const statsByPlayerEvent = new Map(
 		((statsResult.data as DbPlayerStatMetadataRow[] | null) ?? []).map((stat) => [
 			`${stat.element_id}:${stat.event_id}`,
@@ -388,252 +301,140 @@ async function getPlayerValuesFromDatabase(
 		const stat = row.event_id
 			? statsByPlayerEvent.get(`${base.playerId}:${row.event_id}`)
 			: undefined;
-		const teamId = stat?.team_id ?? player?.team_id ?? 0;
+		const teamId = player?.teamId ?? 0;
 		const team = teamById.get(teamId);
 		const transfersIn = stat?.transfers_in_event ?? 0;
 		const transfersOut = stat?.transfers_out_event ?? 0;
-		const position = String(stat?.element_type ?? player?.type ?? "");
+		const position = toPositionCode(row.element_type ?? player?.type);
 
 		return {
 			...base,
-			playerName: stat?.web_name ?? player?.web_name ?? "",
+			playerName: player?.webName ?? "",
 			teamId,
-			teamName: stat?.team_name ?? team?.name ?? "",
-			teamShortName: stat?.team_short_name ?? team?.short_name ?? base.teamShortName,
+			teamName: team?.name ?? "",
+			teamShortName: team?.shortName ?? base.teamShortName,
 			position,
 			positionEnum: toPositionEnum(position),
-			price: stat?.value ?? player?.price ?? 0,
+			price: player?.price ?? 0,
 			points: stat?.total_points ?? 0,
-			selectedBy: parseNullableNumber(stat?.selected_by_percent ?? null) ?? 0,
+			selectedBy:
+				parseNullableNumber(stat?.selected_by_percent ?? null) ?? player?.selectedByPercent ?? 0,
 			transfersIn,
 			transfersOut,
 			netTransfers: transfersIn - transfersOut,
 			form: parseNullableNumber(stat?.form ?? null),
 			totalPoints: stat?.total_points ?? 0,
 			// player_event_snapshots.total_points is season-cumulative, not event-scoped.
-			// The value table has no authoritative per-event points fallback.
+			// The reporting view has no authoritative per-event points fallback.
 			eventPoints: null,
 		};
 	});
 }
 
-function parsePlayerValuesFromHashData(
-	context: GraphQLContext,
-	cacheKey: string,
-	hashData: Record<string, string>
-): PlayerValue[] | null {
+const NULL_SENTINEL = "__pv:null__";
+
+const isFiniteNumber = (value: unknown): value is number =>
+	typeof value === "number" && Number.isFinite(value);
+
+const isPlayerValue = (value: unknown): value is PlayerValue => {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const row = value as Record<string, unknown>;
+	return (
+		isFiniteNumber(row.playerId) &&
+		row.playerId > 0 &&
+		typeof row.playerName === "string" &&
+		isFiniteNumber(row.teamId) &&
+		typeof row.teamName === "string" &&
+		typeof row.teamShortName === "string" &&
+		typeof row.position === "string" &&
+		isFiniteNumber(row.value) &&
+		isFiniteNumber(row.lastValue) &&
+		row.lastValue > 0
+	);
+};
+
+const parsePlayerValuesCache = (raw: string): PlayerValue[] | null => {
 	try {
-		let malformed = false;
-		const rawData = Object.values(hashData)
-			.map((value) => {
-				try {
-					const parsed: unknown = JSON.parse(value);
-					if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-						malformed = true;
-						return null;
-					}
-					return parsed as Record<string, unknown>;
-				} catch (error) {
-					malformed = true;
-					context.logger.warn({ err: error, cacheKey }, "Failed to parse hash value");
-					return null;
-				}
-			})
-			.filter((item): item is Record<string, unknown> => item !== null);
-		if (
-			rawData.some((item) => {
-				const playerId = item.playerId ?? item.elementId;
-				return typeof playerId !== "number" || !Number.isFinite(playerId) || playerId <= 0;
-			})
-		) {
-			return null;
-		}
-
-		// Start rows are season baselines, not price changes. The lastValue
-		// predicate is the deciding filter because legacy cached JSON may not
-		// carry changeType at all; rows without a previous value normalize to 0
-		// and are dropped since they carry no change information.
-		const changedData = rawData.filter((item) => {
-			if (item.changeType === "Start") return false;
-			const lastValue = (item.lastValue as number | undefined) ?? 0;
-			return lastValue > 0;
-		});
-
-		const playerValues: PlayerValue[] = changedData.map((item) => {
-			const playerId = (item.playerId as number) ?? (item.elementId as number) ?? 0;
-			const playerName = (item.playerName as string) ?? (item.webName as string) ?? "";
-			const teamId = (item.teamId as number) ?? 0;
-			const teamName = (item.teamName as string) ?? "";
-			const position = (item.position as string) ?? (item.elementTypeName as string) ?? "";
-			const price = (item.price as number) ?? (item.nowCost as number) ?? 0;
-			const value = (item.value as number) ?? 0;
-			const lastValue = (item.lastValue as number) ?? 0;
-			const points = (item.points as number) ?? (item.totalPoints as number) ?? 0;
-			const selectedBy = (item.selectedBy as number) ?? (item.selectedByPercent as number) ?? 0;
-			const transfersIn = (item.transfersIn as number) ?? (item.transfersInEvent as number) ?? 0;
-			const transfersOut = (item.transfersOut as number) ?? (item.transfersOutEvent as number) ?? 0;
-			const netTransfers = (item.netTransfers as number) ?? transfersIn - transfersOut;
-			const form = (item.form as number) ?? null;
-			const totalPoints = (item.totalPoints as number) ?? points;
-			const eventPoints = (item.eventPoints as number) ?? (item.points as number) ?? null;
-
-			return {
-				playerId,
-				playerName,
-				teamId,
-				teamName,
-				teamShortName: buildTeamShortName(
-					(item.teamShortName as string | undefined) ?? null,
-					teamName
-				),
-				position,
-				positionEnum: toPositionEnum(position),
-				price,
-				value,
-				lastValue,
-				points,
-				selectedBy,
-				transfersIn,
-				transfersOut,
-				netTransfers,
-				form,
-				totalPoints,
-				eventPoints,
-			};
-		});
-
-		return malformed ? null : playerValues;
-	} catch (error) {
-		context.logger.error({ err: error, cacheKey }, "Failed to parse player values from Redis hash");
+		const parsed: unknown = JSON.parse(raw);
+		return Array.isArray(parsed) && parsed.every(isPlayerValue) ? parsed : null;
+	} catch {
 		return null;
 	}
-}
+};
 
-async function writePrivatePlayerValuesCache(
-	context: GraphQLContext,
-	cacheKey: string,
-	values: PlayerValue[]
-): Promise<void> {
-	if (values.length === 0) {
-		return;
+const parseHistoryCache = (raw: string): PlayerValueHistoryRepositoryItem[] | null => {
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return null;
+		const result: PlayerValueHistoryRepositoryItem[] = [];
+		for (const value of parsed) {
+			if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+			const row = value as Record<string, unknown>;
+			const changeDate =
+				typeof row.changeDate === "string" || row.changeDate instanceof Date
+					? parseChangeDate(row.changeDate)
+					: null;
+			if (
+				!isFiniteNumber(row.playerId) ||
+				row.playerId <= 0 ||
+				!changeDate ||
+				!isFiniteNumber(row.oldValue) ||
+				!isFiniteNumber(row.newValue) ||
+				!(row.transfersIn === null || isFiniteNumber(row.transfersIn)) ||
+				!(row.transfersOut === null || isFiniteNumber(row.transfersOut))
+			) {
+				return null;
+			}
+			result.push({
+				playerId: row.playerId,
+				changeDate,
+				oldValue: row.oldValue,
+				newValue: row.newValue,
+				transfersIn: row.transfersIn,
+				transfersOut: row.transfersOut,
+			});
+		}
+		return result;
+	} catch {
+		return null;
 	}
-	await context.redis.set(cacheKey, JSON.stringify(values), "EX", 300);
-}
-
-const NULL_SENTINEL = "__pv:null__";
-const MISSING_CACHE_TTL_SECONDS = 10 * 60;
-
-function getMissingDateKey(changeDate: Date): string {
-	return `PlayerValueMissing:${getCompactDateString(changeDate)}`;
-}
+};
 
 export const playerValuesRepository: PlayerValuesRepository = {
 	async getPlayerValues(context: GraphQLContext, changeDate: Date): Promise<PlayerValue[]> {
-		const cacheKey = getDateKey(changeDate);
-		const missingCacheKey = getMissingDateKey(changeDate);
-		const season = await getCurrentSeason(context);
-		const privateCacheKey = `gql:v2:${season}:player-values:${getCompactDateString(changeDate)}`;
+		const cacheKey = gqlCacheKey(context, `player-values:${getCompactDateString(changeDate)}`);
 		try {
-			const cacheType = await context.redis.type(cacheKey);
-
-			// The shared primary key is hash-only. String support is transitional for
-			// sentinels and JSON values written by older GraphQL deployments.
-			if (cacheType === "hash") {
-				const hashData = await context.redis.hgetall(cacheKey);
-				if (Object.keys(hashData).length > 0) {
-					metrics.cacheRepositoryEvents.labels("player_values", "shared_hit").inc();
-					const parsed = parsePlayerValuesFromHashData(context, cacheKey, hashData);
-					if (parsed !== null) return parsed;
-					metrics.cacheRepositoryEvents.labels("player_values", "malformed").inc();
-				}
-			} else if (cacheType === "string") {
-				const stringVal = await context.redis.get(cacheKey);
-				if (stringVal === NULL_SENTINEL) {
-					await context.redis.set(missingCacheKey, "1", "EX", MISSING_CACHE_TTL_SECONDS);
-					metrics.cacheRepositoryEvents.labels("player_values", "suppressed_shared_write").inc();
-					return [];
-				}
-
-				try {
-					const parsed = JSON.parse(stringVal ?? "null") as PlayerValue[];
-					if (Array.isArray(parsed)) {
-						if (parsed.length > 0) {
-							const hashData: Record<string, string> = {};
-							for (const item of parsed) {
-								const id = item.playerId;
-								if (typeof id === "number" && Number.isFinite(id)) {
-									hashData[String(id)] = JSON.stringify(item);
-								}
-							}
-							const normalized = parsePlayerValuesFromHashData(context, cacheKey, hashData);
-							if (normalized !== null) {
-								await writePrivatePlayerValuesCache(context, privateCacheKey, normalized);
-								return normalized;
-							}
-							metrics.cacheRepositoryEvents.labels("player_values", "malformed").inc();
-						}
-						await context.redis.set(missingCacheKey, "1", "EX", MISSING_CACHE_TTL_SECONDS);
-						return [];
-					}
-				} catch (err) {
-					context.logger.warn(
-						{ cacheKey, err },
-						"Failed to parse legacy player values cache value"
-					);
-				}
-			} else if (cacheType !== "none") {
-				context.logger.warn({ cacheKey, cacheType }, "Unexpected Redis type for player values key");
-			}
-
-			if (await context.redis.get(missingCacheKey)) {
-				metrics.cacheRepositoryEvents.labels("player_values", "negative_hit").inc();
+			const cached = await context.redis.get(cacheKey);
+			if (cached === NULL_SENTINEL) {
+				metrics.cacheRepositoryEvents.labels("player_values", "query_hit").inc();
 				return [];
 			}
-
-			const privateCached = await context.redis.get(privateCacheKey);
-			if (privateCached) {
-				try {
-					const parsed = JSON.parse(privateCached) as unknown;
-					if (Array.isArray(parsed)) {
-						// Entries written by pre-fix code can still hold season-baseline
-						// rows until their TTL lapses; apply the same lastValue guard.
-						const changed = (parsed as PlayerValue[]).filter(
-							(item) => typeof item?.lastValue === "number" && item.lastValue > 0
-						);
-						metrics.cacheRepositoryEvents.labels("player_values", "private_hit").inc();
-						return changed;
-					}
-				} catch (error) {
-					context.logger.warn(
-						{ err: error, privateCacheKey },
-						"Malformed GraphQL player-values cache"
-					);
+			if (cached !== null) {
+				const parsed = parsePlayerValuesCache(cached);
+				if (parsed) {
+					metrics.cacheRepositoryEvents.labels("player_values", "query_hit").inc();
+					return parsed;
 				}
-				await context.redis.del(privateCacheKey);
+				await context.redis.del(cacheKey);
 				metrics.cacheRepositoryEvents.labels("player_values", "malformed").inc();
 			}
 		} catch (error) {
 			metrics.cacheRepositoryEvents.labels("player_values", "database_fallback").inc();
-			context.logger.warn(
-				{ err: error, cacheKey },
-				"Player-values cache unavailable; using database"
-			);
+			context.logger.warn({ err: error, cacheKey }, "Player-values query cache unavailable");
 		}
 
 		const values = await getPlayerValuesFromDatabase(context, changeDate);
-		metrics.cacheRepositoryEvents.labels("player_values", "db_fallback").inc();
+		metrics.cacheRepositoryEvents.labels("player_values", "database_read").inc();
 
 		try {
-			if (values.length === 0) {
-				await context.redis.set(missingCacheKey, "1", "EX", MISSING_CACHE_TTL_SECONDS);
-			} else {
-				await writePrivatePlayerValuesCache(context, privateCacheKey, values);
-			}
-		} catch (error) {
-			context.logger.warn(
-				{ err: error, privateCacheKey },
-				"Failed to cache player-values database fallback"
+			await context.redis.set(
+				cacheKey,
+				values.length === 0 ? NULL_SENTINEL : JSON.stringify(values),
+				"EX",
+				QUERY_CACHE_TTL_SECONDS.MARKET
 			);
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to write player-values query cache");
 		}
 
 		return values;
@@ -647,14 +448,17 @@ export const playerValuesRepository: PlayerValuesRepository = {
 			return [];
 		}
 
-		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, buildHistoryCacheKey(args));
-		const cached = await context.redis.get(cacheKey);
-		if (cached !== null) {
-			if (cached === NULL_SENTINEL) {
-				return [];
+		const cacheKey = gqlCacheKey(context, buildHistoryCacheKey(args));
+		try {
+			const cached = await context.redis.get(cacheKey);
+			if (cached === NULL_SENTINEL) return [];
+			if (cached !== null) {
+				const parsed = parseHistoryCache(cached);
+				if (parsed) return parsed;
+				await context.redis.del(cacheKey);
 			}
-			return JSON.parse(cached) as PlayerValueHistoryRepositoryItem[];
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Player-value history cache unavailable");
 		}
 
 		try {
@@ -687,12 +491,30 @@ export const playerValuesRepository: PlayerValuesRepository = {
 				return row.last_value !== 0;
 			});
 			if (rows.length === 0) {
-				await context.redis.set(cacheKey, NULL_SENTINEL, "EX", 3600);
+				try {
+					await context.redis.set(
+						cacheKey,
+						NULL_SENTINEL,
+						"EX",
+						QUERY_CACHE_TTL_SECONDS.HISTORICAL
+					);
+				} catch (cacheError) {
+					context.logger.warn({ err: cacheError, cacheKey }, "History cache write failed");
+				}
 				return [];
 			}
 
 			const history = mapHistoryRows(rows);
-			await context.redis.set(cacheKey, JSON.stringify(history), "EX", 3600);
+			try {
+				await context.redis.set(
+					cacheKey,
+					JSON.stringify(history),
+					"EX",
+					QUERY_CACHE_TTL_SECONDS.HISTORICAL
+				);
+			} catch (cacheError) {
+				context.logger.warn({ err: cacheError, cacheKey }, "History cache write failed");
+			}
 			return history;
 		} catch (error) {
 			if (error instanceof Error && error.cause) {

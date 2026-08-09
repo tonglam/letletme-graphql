@@ -1,729 +1,92 @@
 import { describe, expect, it } from "bun:test";
 import { liveRepository } from "../../../src/domains/live/repository";
+import type { GraphQLContext } from "../../../src/graphql/context";
 import {
-	isLiveSnapshotDatabaseFallback,
-	LiveSnapshotCoherenceError,
-	withLiveSnapshotConsistency,
-} from "../../../src/domains/live/snapshot-meta";
+	buildCorePublication,
+	buildLivePublication,
+	buildSnapshotContext,
+	buildTestCoreData,
+	buildTestEventLives,
+	TestRedis,
+} from "../../helpers/data-publication";
 
-const makeMockRedis = (options: {
-	strings?: Record<string, string>;
-	hashes?: Record<string, Record<string, string>>;
-}) => {
-	const strings = new Map<string, string>([
-		["Season:active", "2526"],
-		...Object.entries(options.strings ?? {}),
-	]);
-	const hashes = new Map(Object.entries(options.hashes ?? {}).map(([k, v]) => [k, v]));
-	const getCalls: string[] = [];
-	const hgetallCalls: string[] = [];
-	const hmgetCalls: Array<[string, ...string[]]> = [];
-	const setCalls: Array<[string, string, ...unknown[]]> = [];
-
-	return {
-		strings,
-		hashes,
-		getCalls,
-		hgetallCalls,
-		hmgetCalls,
-		setCalls,
-		get: async (key: string): Promise<string | null> => {
-			getCalls.push(key);
-			return strings.get(key) ?? null;
+const withReadRows = (
+	context: GraphQLContext,
+	rowsByModel: Record<string, unknown[]>,
+	calls: string[] = []
+): GraphQLContext => {
+	context.data = {
+		read: (model: string) => {
+			calls.push(model);
+			const result = Promise.resolve({ data: rowsByModel[model] ?? [], error: null });
+			const builder = {
+				select: () => builder,
+				eq: () => builder,
+				in: () => builder,
+				order: () => builder,
+				then: result.then.bind(result),
+			};
+			return builder;
 		},
-		set: async (key: string, value: string, ...args: unknown[]): Promise<string> => {
-			setCalls.push([key, value, ...args]);
-			strings.set(key, value);
-			return "OK";
-		},
-		del: async (key: string): Promise<number> => (strings.delete(key) ? 1 : 0),
-		hgetall: async (key: string): Promise<Record<string, string>> => {
-			hgetallCalls.push(key);
-			return hashes.get(key) ?? {};
-		},
-		hlen: async (key: string): Promise<number> => Object.keys(hashes.get(key) ?? {}).length,
-		hget: async (key: string, field: string): Promise<string | null> =>
-			hashes.get(key)?.[field] ?? null,
-		hmget: async (key: string, ...fields: string[]): Promise<(string | null)[]> => {
-			hmgetCalls.push([key, ...fields]);
-			const hash = hashes.get(key) ?? {};
-			return fields.map((f) => hash[f] ?? null);
-		},
-		hset: async (key: string, ...args: unknown[]): Promise<number> => {
-			if (!hashes.has(key)) hashes.set(key, {});
-			const pairs = args as string[];
-			for (let i = 0; i < pairs.length - 1; i += 2) {
-				(hashes.get(key) ?? {})[pairs[i]] = pairs[i + 1];
-			}
-			return 1;
-		},
-		expire: async (): Promise<number> => 1,
-	};
+	} as never;
+	return context;
 };
 
-type MockRedis = ReturnType<typeof makeMockRedis>;
+const liveContext = (eventLives = buildTestEventLives(buildTestCoreData(1), 1)) => {
+	const core = buildTestCoreData(1);
+	const redis = new TestRedis(
+		buildCorePublication("2627", 7, core),
+		buildLivePublication(core, 1, "2627", 8, { eventLives })
+	);
+	return { core, redis, context: buildSnapshotContext(redis) };
+};
 
-const makeMockData = (options: {
-	data?: unknown[];
-	dataByTable?: Record<string, unknown[]>;
-	error?: unknown;
-	errorByTable?: Record<string, unknown>;
-	fromCalls?: string[];
-	inCalls?: Array<{ table: string; column: string; values: unknown[] }>;
-}) => ({
-	read: (table: string) => {
-		options.fromCalls?.push(table);
-		const rows = (
-			options.dataByTable && Object.hasOwn(options.dataByTable, table)
-				? options.dataByTable[table]
-				: (options.data ?? [])
-		) as unknown[];
-		const result = {
-			data: rows,
-			error:
-				options.errorByTable && Object.hasOwn(options.errorByTable, table)
-					? options.errorByTable[table]
-					: (options.error ?? null),
-		};
-
-		let resolvePromise!: (value: typeof result) => void;
-		const promise = new Promise<typeof result>((resolve) => {
-			resolvePromise = resolve;
-		});
-		queueMicrotask(() => resolvePromise(result));
-
-		const builder = Object.assign(promise, {
-			select: () => builder,
-			eq: () => builder,
-			in: (column: string, values: unknown[]) => {
-				options.inCalls?.push({ table, column, values });
-				return builder;
-			},
-			limit: async () => result,
-			order: () => builder,
-		});
-		return builder;
-	},
-});
-
-const makeMockLogger = () => ({
-	info: () => undefined,
-	warn: () => undefined,
-	error: () => undefined,
-});
-
-const buildContext = (options: {
-	redisStrings?: Record<string, string>;
-	redisHashes?: Record<string, Record<string, string>>;
-	readData?: unknown[];
-	readDataByModel?: Record<string, unknown[]>;
-	readError?: unknown;
-	readErrorByModel?: Record<string, unknown>;
-	readModelCalls?: string[];
-	readInCalls?: Array<{ table: string; column: string; values: unknown[] }>;
-	redis?: MockRedis;
-}) =>
-	({
-		currentSeason: { seasonId: 2025, seasonCode: "2526" },
-		redis:
-			options.redis ??
-			makeMockRedis({
-				strings: options.redisStrings,
-				hashes: options.redisHashes,
-			}),
-		data: makeMockData({
-			data: options.readData,
-			dataByTable: options.readDataByModel,
-			error: options.readError,
-			errorByTable: options.readErrorByModel,
-			fromCalls: options.readModelCalls,
-			inCalls: options.readInCalls,
-		}),
-		logger: makeMockLogger(),
-		user: undefined,
-	}) as never;
-
-const SAMPLE_SYNC_JOB_ROW = JSON.stringify({
-	id: 24738,
-	eventId: 33,
-	elementId: 1,
-	minutes: 90,
-	goalsScored: 0,
-	assists: 0,
-	cleanSheets: 0,
-	goalsConceded: 2,
-	ownGoals: 0,
-	penaltiesSaved: 0,
-	penaltiesMissed: 0,
-	yellowCards: 0,
-	redCards: 0,
-	saves: 2,
-	bonus: 0,
-	bps: 8,
-	starts: true,
-	defensiveContribution: 0,
-	expectedGoals: "0.00",
-	expectedAssists: "0.00",
-	expectedGoalInvolvements: "0.00",
-	expectedGoalsConceded: "1.36",
-	inDreamTeam: false,
-	totalPoints: 1,
-});
-
-const snapshotMeta = (revision: string, eventLiveCount = 1): string =>
-	JSON.stringify({
-		schemaVersion: 1,
-		season: "2526",
-		eventId: 33,
-		revision,
-		state: "live",
-		publishedAt: "2025-08-15T20:00:00.000Z",
-		checkedAt: "2025-08-15T20:00:00.000Z",
-		eventLiveCount,
-		fixtureCount: 10,
-		fixtureTeamCount: 20,
-		bonusTeamCount: 2,
+describe("liveRepository v3 live publication reads", () => {
+	it("returns empty results for invalid event IDs", async () => {
+		const { context } = liveContext();
+		await expect(liveRepository.getAllLivePerformances(context, 0)).resolves.toEqual(new Map());
+		await expect(liveRepository.getLiveScores(context, -1)).resolves.toEqual([]);
 	});
 
-describe("liveRepository.getAllLivePerformances", () => {
-	it("returns empty map for invalid eventId", async () => {
-		const context = buildContext({});
-		const result = await liveRepository.getAllLivePerformances(context, 0);
-		expect(result.size).toBe(0);
-	});
-
-	it("returns empty map for negative eventId", async () => {
-		const context = buildContext({});
-		const result = await liveRepository.getAllLivePerformances(context, -1);
-		expect(result.size).toBe(0);
-	});
-
-	it("parses Performance data from Redis EventLive hash", async () => {
-		const field1 = JSON.stringify({
-			id: 100,
-			eventId: 33,
-			elementId: 1,
+	it("serves full and targeted player live data from one request-pinned revision", async () => {
+		const core = buildTestCoreData(1);
+		const lives = buildTestEventLives(core, 1);
+		lives[0] = {
+			...lives[0],
 			minutes: 90,
-			goalsScored: 2,
-			assists: 1,
-			cleanSheets: 0,
-			goalsConceded: 1,
-			ownGoals: 0,
-			penaltiesSaved: 0,
-			penaltiesMissed: 0,
-			yellowCards: 0,
-			redCards: 0,
-			saves: 3,
-			bonus: 2,
-			bps: 15,
-			starts: true,
-			defensiveContribution: 5,
-			expectedGoals: "1.20",
-			expectedAssists: "0.30",
-			expectedGoalInvolvements: "1.50",
-			expectedGoalsConceded: "0.80",
-			inDreamTeam: true,
+			goalsScored: 1,
+			bonus: 3,
 			totalPoints: 10,
-		});
-		const field2 = JSON.stringify({
-			id: 101,
-			eventId: 33,
-			elementId: 2,
-			minutes: 45,
+			inDreamTeam: true,
+		};
+		const { context } = liveContext(lives);
+
+		const all = await liveRepository.getAllLivePerformances(context, 1);
+		const targeted = await liveRepository.getLivePerformancesByPlayerIds(context, 1, [1, 2, 999]);
+		const eventLive = await liveRepository.getEventLive(context, 1);
+
+		expect(all.size).toBe(core.players.length);
+		expect(all.get(1)).toMatchObject({
+			playerId: 1,
+			minutes: 90,
 			goalsScored: 1,
-			assists: 0,
-			cleanSheets: 0,
-			goalsConceded: 0,
-			ownGoals: 0,
-			penaltiesSaved: 0,
-			penaltiesMissed: 0,
-			yellowCards: 1,
-			redCards: 0,
-			saves: 0,
-			bonus: 0,
-			bps: 5,
-			starts: true,
-			defensiveContribution: 3,
-			expectedGoals: "0.50",
-			expectedAssists: "0.10",
-			expectedGoalInvolvements: "0.60",
-			expectedGoalsConceded: "0.40",
-			inDreamTeam: false,
-			totalPoints: 3,
+			bonus: 3,
+			totalPoints: 10,
+			inDreamTeam: true,
 		});
-
-		const context = buildContext({
-			redisStrings: { "Season:active": "2526" },
-			redisHashes: { "EventLive:2526:33": { "1": field1, "2": field2 } },
-		});
-
-		const result = await liveRepository.getAllLivePerformances(context, 33);
-		expect(result.size).toBe(2);
-		expect(result.get(1)).toBeDefined();
-		expect(result.get(1)?.playerId).toBe(1);
-		expect(result.get(1)?.eventId).toBe(33);
-		expect(result.get(1)?.minutes).toBe(90);
-		expect(result.get(1)?.goalsScored).toBe(2);
-		expect(result.get(1)?.assists).toBe(1);
-		expect(result.get(1)?.bonus).toBe(2);
-		expect(result.get(1)?.totalPoints).toBe(10);
-		expect(result.get(1)?.inDreamTeam).toBe(true);
-
-		expect(result.get(2)).toBeDefined();
-		expect(result.get(2)?.playerId).toBe(2);
-		expect(result.get(2)?.minutes).toBe(45);
-		expect(result.get(2)?.yellowCards).toBe(1);
+		expect(targeted.map((row) => row.playerId)).toEqual([1, 2]);
+		expect(eventLive.performances).toHaveLength(core.players.length);
 	});
 
-	it("falls back to DB when Redis hash is empty", async () => {
-		const context = buildContext({
-			redisStrings: { "Season:active": "2526" },
-			redisHashes: {},
-			readData: [
-				{
-					event_id: 33,
-					element_id: 1,
-					minutes: 60,
-					goals_scored: 0,
-					assists: 0,
-					clean_sheets: 1,
-					goals_conceded: 0,
-					own_goals: 0,
-					penalties_saved: 0,
-					penalties_missed: 0,
-					yellow_cards: 0,
-					red_cards: 0,
-					saves: 0,
-					bonus: 0,
-					bps: 0,
-					starts: true,
-					defensive_contribution: 0,
-					expected_goals: null,
-					expected_assists: null,
-					expected_goal_involvements: null,
-					expected_goals_conceded: null,
-					in_dream_team: false,
-					total_points: 3,
-				},
-			],
-		});
-
-		const result = await liveRepository.getAllLivePerformances(context, 33);
-		expect(result.size).toBe(1);
-		expect(result.get(1)).toBeDefined();
-		expect(result.get(1)?.playerId).toBe(1);
-		expect(result.get(1)?.minutes).toBe(60);
-		expect(result.get(1)?.totalPoints).toBe(3);
-	});
-
-	it("skips invalid JSON rows in Redis hash", async () => {
-		const invalidJson = "not-valid-json{{{";
-		const missingFields = JSON.stringify({ id: 99 });
-
-		const context = buildContext({
-			redisStrings: { "Season:active": "2526" },
-			redisHashes: {
-				"EventLive:2526:33": {
-					"1": SAMPLE_SYNC_JOB_ROW,
-					"99": invalidJson,
-					"98": missingFields,
-				},
-			},
-		});
-
-		const result = await liveRepository.getAllLivePerformances(context, 33);
-		expect(result.size).toBe(1);
-		expect(result.get(1)).toBeDefined();
-		expect(result.get(1)?.playerId).toBe(1);
-	});
-
-	it("keys the shaped cache by producer revision with a bounded immutable TTL", async () => {
-		const revision = "a".repeat(24);
-		const redis = makeMockRedis({
-			strings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision) },
-			hashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
-		});
-		const context = buildContext({ redis });
-
-		const result = await liveRepository.getAllLivePerformances(context, 33);
-		expect(result.get(1)?.totalPoints).toBe(1);
-		expect(redis.setCalls).toContainEqual([
-			`gql:v2:2526:live:all:33:revision:${revision}`,
-			expect.any(String),
-			"EX",
-			180,
-		]);
-	});
-
-	it("coalesces a 100-request revision miss into one EventLive load", async () => {
-		const revision = "b".repeat(24);
-		const redis = makeMockRedis({
-			strings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision) },
-			hashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
-		});
-		redis.hgetall = async (key: string): Promise<Record<string, string>> => {
-			redis.hgetallCalls.push(key);
-			await new Promise((resolve) => setTimeout(resolve, 10));
-			return redis.hashes.get(key) ?? {};
-		};
-		const results = await Promise.all(
-			Array.from({ length: 100 }, () =>
-				liveRepository.getAllLivePerformances(buildContext({ redis }), 33)
-			)
-		);
-
-		expect(results.every((result) => result.get(1)?.totalPoints === 1)).toBe(true);
-		expect(redis.hgetallCalls).toEqual(["EventLive:2526:33"]);
-		expect(redis.setCalls).toHaveLength(1);
-	});
-
-	it("rejects an incomplete EventLive hash instead of caching a partial revision", async () => {
-		const revision = "c".repeat(24);
-		const redis = makeMockRedis({
-			strings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 2) },
-			hashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
-		});
-		const context = buildContext({ redis });
-
-		const result = await liveRepository.getAllLivePerformances(context, 33);
-		expect(result.size).toBe(0);
-		expect(
-			redis.setCalls.some(([key]) => key === `gql:v2:2526:live:all:33:revision:${revision}`)
-		).toBe(false);
-	});
-
-	it("reuses a revision-bound fallback while the published EventLive view is incomplete", async () => {
-		const revision = "d".repeat(24);
-		const redis = makeMockRedis({
-			strings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 2) },
-			hashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
-		});
-		const dbRow = {
-			event_id: 33,
-			element_id: 1,
-			minutes: 60,
-			goals_scored: 0,
-			assists: 0,
-			clean_sheets: 1,
-			goals_conceded: 0,
-			own_goals: 0,
-			penalties_saved: 0,
-			penalties_missed: 0,
-			yellow_cards: 0,
-			red_cards: 0,
-			saves: 0,
-			bonus: 0,
-			bps: 0,
-			starts: true,
-			defensive_contribution: 0,
-			expected_goals: null,
-			expected_assists: null,
-			expected_goal_involvements: null,
-			expected_goals_conceded: null,
-			in_dream_team: false,
-			total_points: 3,
-		};
-		const context = buildContext({ redis, readData: [dbRow] });
-
-		const first = await liveRepository.getAllLivePerformances(context, 33);
-		const second = await liveRepository.getAllLivePerformances(context, 33);
-
-		expect(first.get(1)?.totalPoints).toBe(3);
-		expect(second.get(1)?.totalPoints).toBe(3);
-		expect(redis.hgetallCalls).toEqual(["EventLive:2526:33"]);
-		expect(redis.setCalls).toContainEqual([
-			`gql:v2:2526:live:all:33:revision:${revision}:fallback15`,
-			expect.any(String),
-			"EX",
-			15,
-		]);
-	});
-
-	it("uses a revision-bound database cache after a sibling forces database mode", async () => {
-		const revision = "9".repeat(24);
-		const context = buildContext({
-			redisStrings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 1) },
-			redisHashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
-			readData: [
-				{
-					event_id: 33,
-					element_id: 1,
-					minutes: 90,
-					goals_scored: 1,
-					assists: 0,
-					clean_sheets: 0,
-					goals_conceded: 0,
-					own_goals: 0,
-					penalties_saved: 0,
-					penalties_missed: 0,
-					yellow_cards: 0,
-					red_cards: 0,
-					saves: 0,
-					bonus: 0,
-					bps: 20,
-					starts: true,
-					defensive_contribution: 0,
-					expected_goals: null,
-					expected_assists: null,
-					expected_goal_involvements: null,
-					expected_goals_conceded: null,
-					in_dream_team: false,
-					total_points: 9,
-				},
-			],
-		});
-		let runs = 0;
-		const result = await withLiveSnapshotConsistency(context, 33, async () => {
-			runs += 1;
-			if (runs === 1) {
-				throw new LiveSnapshotCoherenceError(33, "Fixtures", "fixture view incomplete");
-			}
-			return liveRepository.getAllLivePerformances(context, 33);
-		});
-
-		expect(result.get(1)?.totalPoints).toBe(9);
-		expect(runs).toBe(2);
-	});
-
-	it("forces operation-wide database mode before serving a revision fallback cache", async () => {
-		const revision = "7".repeat(24);
-		const fallback = JSON.stringify([
+	it("reads historical multi-event stats in one bounded PostgreSQL query", async () => {
+		const { context } = liveContext();
+		const calls: string[] = [];
+		withReadRows(
+			context,
 			{
-				eventId: 33,
-				playerId: 1,
-				minutes: 90,
-				goalsScored: 1,
-				assists: 0,
-				cleanSheets: 0,
-				goalsConceded: 0,
-				ownGoals: 0,
-				penaltiesSaved: 0,
-				penaltiesMissed: 0,
-				yellowCards: 0,
-				redCards: 0,
-				saves: 0,
-				bonus: 0,
-				bps: 20,
-				starts: true,
-				defensiveContribution: 0,
-				expectedGoals: null,
-				expectedAssists: null,
-				expectedGoalInvolvements: null,
-				expectedGoalsConceded: null,
-				inDreamTeam: false,
-				totalPoints: 9,
-			},
-		]);
-		const context = buildContext({
-			redisStrings: {
-				[`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 1),
-				[`gql:v2:2526:live:all:33:revision:${revision}:fallback15`]: fallback,
-			},
-		});
-
-		const result = await withLiveSnapshotConsistency(context, 33, () =>
-			liveRepository.getAllLivePerformances(context, 33)
-		);
-
-		expect(result.get(1)?.totalPoints).toBe(9);
-		expect(isLiveSnapshotDatabaseFallback(context, 33)).toBe(true);
-	});
-
-	it("coalesces concurrent coordinated database fallbacks and reuses them for 15 seconds", async () => {
-		const revision = "8".repeat(24);
-		const redis = makeMockRedis({
-			strings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 2) },
-			hashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
-		});
-		const fromCalls: string[] = [];
-		const dbRow = {
-			event_id: 33,
-			element_id: 1,
-			minutes: 90,
-			goals_scored: 1,
-			assists: 0,
-			clean_sheets: 0,
-			goals_conceded: 0,
-			own_goals: 0,
-			penalties_saved: 0,
-			penalties_missed: 0,
-			yellow_cards: 0,
-			red_cards: 0,
-			saves: 0,
-			bonus: 0,
-			bps: 20,
-			starts: true,
-			defensive_contribution: 0,
-			expected_goals: null,
-			expected_assists: null,
-			expected_goal_involvements: null,
-			expected_goals_conceded: null,
-			in_dream_team: false,
-			total_points: 9,
-		};
-
-		const results = await Promise.all(
-			Array.from({ length: 25 }, () => {
-				const context = buildContext({
-					redis,
-					readData: [dbRow],
-					readModelCalls: fromCalls,
-				});
-				return withLiveSnapshotConsistency(context, 33, () =>
-					liveRepository.getAllLivePerformances(context, 33)
-				);
-			})
-		);
-
-		expect(results.every((result) => result.get(1)?.totalPoints === 9)).toBe(true);
-		expect(fromCalls.filter((table) => table === "fpl.player_gameweek_stats")).toHaveLength(1);
-		expect(redis.setCalls).toContainEqual([
-			`gql:v2:2526:live:all:33:revision:${revision}:fallback15`,
-			expect.any(String),
-			"EX",
-			15,
-		]);
-	});
-
-	it("evicts malformed shaped cache and falls back to authoritative Redis data", async () => {
-		const context = buildContext({
-			redisStrings: {
-				"Season:active": "2526",
-				"gql:v2:2526:live:all:33:fallback15": "not-json",
-			},
-			redisHashes: {
-				"EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW },
-			},
-		});
-
-		const result = await liveRepository.getAllLivePerformances(context, 33);
-		expect(result.get(1)?.playerId).toBe(1);
-		const redis = (
-			context as unknown as { redis: { get: (key: string) => Promise<string | null> } }
-		).redis;
-		expect(await redis.get("gql:v2:2526:live:all:33:fallback15")).not.toBe("not-json");
-	});
-});
-
-describe("liveRepository.getLivePerformancesByPlayerIds", () => {
-	it("filters from getAllLivePerformances by player IDs", async () => {
-		const field1 = JSON.stringify({
-			id: 100,
-			eventId: 33,
-			elementId: 1,
-			minutes: 90,
-			goalsScored: 0,
-			assists: 0,
-			cleanSheets: 0,
-			goalsConceded: 2,
-			ownGoals: 0,
-			penaltiesSaved: 0,
-			penaltiesMissed: 0,
-			yellowCards: 0,
-			redCards: 0,
-			saves: 2,
-			bonus: 0,
-			bps: 8,
-			starts: true,
-			defensiveContribution: 0,
-			expectedGoals: "0.00",
-			expectedAssists: "0.00",
-			expectedGoalInvolvements: "0.00",
-			expectedGoalsConceded: "1.36",
-			inDreamTeam: false,
-			totalPoints: 1,
-		});
-		const field2 = JSON.stringify({
-			id: 101,
-			eventId: 33,
-			elementId: 2,
-			minutes: 45,
-			goalsScored: 1,
-			assists: 0,
-			cleanSheets: 0,
-			goalsConceded: 0,
-			ownGoals: 0,
-			penaltiesSaved: 0,
-			penaltiesMissed: 0,
-			yellowCards: 0,
-			redCards: 0,
-			saves: 0,
-			bonus: 0,
-			bps: 5,
-			starts: true,
-			defensiveContribution: 3,
-			expectedGoals: "0.50",
-			expectedAssists: "0.10",
-			expectedGoalInvolvements: "0.60",
-			expectedGoalsConceded: "0.40",
-			inDreamTeam: false,
-			totalPoints: 3,
-		});
-
-		const context = buildContext({
-			redisStrings: { "Season:active": "2526" },
-			redisHashes: { "EventLive:2526:33": { "1": field1, "2": field2 } },
-		});
-
-		const result = await liveRepository.getLivePerformancesByPlayerIds(context, 33, [2]);
-		expect(result).toHaveLength(1);
-		expect(result[0].playerId).toBe(2);
-		expect(result[0].goalsScored).toBe(1);
-	});
-
-	it("returns empty array for empty player IDs", async () => {
-		const context = buildContext({});
-		const result = await liveRepository.getLivePerformancesByPlayerIds(context, 33, []);
-		expect(result).toHaveLength(0);
-	});
-
-	it("degrades the whole targeted read when snapshot cardinality is incomplete", async () => {
-		const revision = "e".repeat(24);
-		const context = buildContext({
-			redisStrings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 2) },
-			redisHashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
-			readData: [
-				{
-					event_id: 33,
-					element_id: 1,
-					minutes: 90,
-					goals_scored: 1,
-					assists: 0,
-					clean_sheets: 0,
-					goals_conceded: 0,
-					own_goals: 0,
-					penalties_saved: 0,
-					penalties_missed: 0,
-					yellow_cards: 0,
-					red_cards: 0,
-					saves: 0,
-					bonus: 0,
-					bps: 20,
-					starts: true,
-					defensive_contribution: 0,
-					expected_goals: null,
-					expected_assists: null,
-					expected_goal_involvements: null,
-					expected_goals_conceded: null,
-					in_dream_team: false,
-					total_points: 9,
-				},
-			],
-		});
-
-		const result = await liveRepository.getLivePerformancesByPlayerIds(context, 33, [1]);
-		expect(result).toHaveLength(1);
-		expect(result[0].totalPoints).toBe(9);
-	});
-});
-
-describe("liveRepository.getLivePerformancesForEventsAndPlayers", () => {
-	it("reads historical gameweek stats in one bulk query", async () => {
-		const context = buildContext({
-			readDataByModel: {
 				"fpl.player_gameweek_stats": [
 					{
-						event_id: 12,
+						event_id: 2,
 						element_id: 1,
 						minutes: 90,
 						goals_scored: 1,
@@ -736,660 +99,144 @@ describe("liveRepository.getLivePerformancesForEventsAndPlayers", () => {
 						yellow_cards: 0,
 						red_cards: 0,
 						saves: 0,
-						bonus: 1,
-						bps: 20,
+						bonus: 3,
+						bps: 40,
 						starts: true,
 						defensive_contribution: 0,
-						expected_goals: null,
-						expected_assists: null,
-						expected_goal_involvements: null,
-						expected_goals_conceded: null,
-						in_dream_team: false,
-						total_points: 8,
-					},
-					{
-						event_id: 13,
-						element_id: 2,
-						minutes: 0,
-						goals_scored: 0,
-						assists: 0,
-						clean_sheets: 0,
-						goals_conceded: 0,
-						own_goals: 0,
-						penalties_saved: 0,
-						penalties_missed: 0,
-						yellow_cards: 0,
-						red_cards: 0,
-						saves: 0,
-						bonus: 0,
-						bps: 0,
-						starts: false,
-						defensive_contribution: 0,
-						expected_goals: null,
-						expected_assists: null,
-						expected_goal_involvements: null,
-						expected_goals_conceded: null,
-						in_dream_team: false,
-						total_points: 0,
+						expected_goals: "0.75",
+						expected_assists: "0.10",
+						expected_goal_involvements: "0.85",
+						expected_goals_conceded: "0.90",
+						in_dream_team: true,
+						total_points: 10,
 					},
 				],
 			},
-		});
+			calls
+		);
 
 		const result = await liveRepository.getLivePerformancesForEventsAndPlayers(
 			context,
-			[12, 13],
+			[1, 2],
 			[1, 2]
 		);
-
-		expect(result).toHaveLength(2);
-		expect(result[0]).toMatchObject({
-			eventId: 12,
-			playerId: 1,
-			totalPoints: 8,
-		});
-		expect(result[1]).toMatchObject({ eventId: 13, playerId: 2, minutes: 0 });
+		expect(result).toHaveLength(1);
+		expect(result[0]).toMatchObject({ eventId: 2, playerId: 1, totalPoints: 10 });
+		expect(calls).toEqual(["fpl.player_gameweek_stats"]);
 	});
 });
 
-describe("liveRepository.getEventLive", () => {
-	it("returns EventLive with all Performances from Redis", async () => {
-		const field1 = JSON.stringify({
-			id: 100,
-			eventId: 33,
-			elementId: 1,
-			minutes: 90,
-			goalsScored: 0,
-			assists: 0,
-			cleanSheets: 0,
-			goalsConceded: 2,
-			ownGoals: 0,
-			penaltiesSaved: 0,
-			penaltiesMissed: 0,
-			yellowCards: 0,
-			redCards: 0,
-			saves: 2,
-			bonus: 0,
-			bps: 8,
-			starts: true,
-			defensiveContribution: 0,
-			expectedGoals: "0.00",
-			expectedAssists: "0.00",
-			expectedGoalInvolvements: "0.00",
-			expectedGoalsConceded: "1.36",
-			inDreamTeam: false,
-			totalPoints: 1,
-		});
-
-		const context = buildContext({
-			redisStrings: { "Season:active": "2526" },
-			redisHashes: { "EventLive:2526:33": { "1": field1 } },
-		});
-
-		const result = await liveRepository.getEventLive(context, 33);
-		expect(result.eventId).toBe(33);
-		expect(result.performances).toHaveLength(1);
-		expect(result.performances[0].playerId).toBe(1);
-	});
-});
-
-describe("liveRepository.getEventLiveExplain", () => {
-	const playerStatsRow34_526 = {
-		event_id: 34,
-		element_id: 526,
-		total_points: 14,
-		minutes: 66,
-		goals_scored: 1,
-		assists: 2,
-		bonus: 3,
-		yellow_cards: 1,
-	};
-
-	it("reads only the cache scoped to the current live snapshot revision", async () => {
-		const revision = "a".repeat(24);
-		const stale = {
-			eventId: 34,
-			elementId: 526,
-			modified: null,
-			stats: { totalPoints: 7 },
-			breakdown: [],
-			selectedBy: null,
-		};
-		const current = {
-			...stale,
-			stats: { totalPoints: 14 },
-		};
-		const redis = makeMockRedis({
-			strings: {
-				"LiveSnapshotMeta:2526:34": JSON.stringify({
-					schemaVersion: 1,
-					season: "2526",
-					eventId: 34,
-					revision,
-					state: "live",
-					publishedAt: "2025-08-15T20:00:00.000Z",
-					checkedAt: "2025-08-15T20:01:00.000Z",
-					eventLiveCount: 700,
-					fixtureCount: 10,
-					fixtureTeamCount: 20,
-					bonusTeamCount: 2,
-				}),
-				"gql:v2:2526:live:explain:34:526": JSON.stringify(stale),
-				[`gql:v2:2526:live:explain:shape2:34:526:full:revision:${revision}`]:
-					JSON.stringify(current),
-			},
-		});
-		const context = buildContext({ redis });
-
-		const result = await liveRepository.getEventLiveExplain(context, 34, 526);
-
-		expect(result?.stats.totalPoints).toBe(14);
-		expect(redis.getCalls).toContain(
-			`gql:v2:2526:live:explain:shape2:34:526:full:revision:${revision}`
-		);
-		expect(redis.getCalls).not.toContain("gql:v2:2526:live:explain:34:526");
-	});
-
-	it("reuses the outer metadata decision when selecting an explanation cache", async () => {
-		const revision = "f".repeat(24);
-		const metaKey = "LiveSnapshotMeta:2526:33";
-		const revisionCacheKey = `gql:v2:2526:live:explain:shape2:33:1:full:revision:${revision}`;
-		const fallbackCacheKey = "gql:v2:2526:live:explain:shape2:33:1:full:fallback15";
-		const stale = {
-			eventId: 33,
-			elementId: 1,
-			modified: null,
-			stats: { totalPoints: 3 },
-			breakdown: [],
-			contributions: [],
-			selectedBy: null,
-		};
-		const current = { ...stale, stats: { totalPoints: 14 } };
-		const redis = makeMockRedis({
-			strings: {
-				[metaKey]: snapshotMeta(revision),
-				[revisionCacheKey]: JSON.stringify(current),
-				[fallbackCacheKey]: JSON.stringify(stale),
-			},
-		});
-		const originalGet = redis.get.bind(redis);
-		let metadataReads = 0;
-		let explanationCacheReadStarted = false;
-		redis.get = async (key: string): Promise<string | null> => {
-			if (key.startsWith("gql:v2:2526:live:explain:")) {
-				explanationCacheReadStarted = true;
-			}
-			if (key === metaKey) {
-				metadataReads += 1;
-				if (metadataReads > 1 && !explanationCacheReadStarted) return null;
-			}
-			return originalGet(key);
-		};
-		const context = buildContext({ redis });
-
-		const result = await withLiveSnapshotConsistency(context, 33, () =>
-			liveRepository.getEventLiveExplains(context, 33, [1])
-		);
-
-		expect(result[0]?.stats.totalPoints).toBe(14);
-		expect(metadataReads).toBe(2);
-		expect(redis.getCalls).toContain(revisionCacheKey);
-		expect(redis.getCalls).not.toContain(fallbackCacheKey);
-	});
-
-	it("loads a cold explanation batch with two database queries and versioned Redis reads", async () => {
-		const redis = makeMockRedis({});
-		const readModelCalls: string[] = [];
-		const context = buildContext({
-			redis,
-			readModelCalls,
-			readDataByModel: {
+describe("liveRepository v3 explanation query cache", () => {
+	it("loads one cold batch from reporting facts and caches it under core+live revision", async () => {
+		const { context, redis } = liveContext();
+		const calls: string[] = [];
+		withReadRows(
+			context,
+			{
 				"fpl.player_event_snapshots": [
-					playerStatsRow34_526,
-					{ ...playerStatsRow34_526, element_id: 527, total_points: 8 },
-				],
-				"fpl.player_gameweek_scoring_items": [
 					{
-						event_id: 34,
-						element_id: 526,
-						minutes: 66,
-						minutes_points: 1,
+						element_id: 1,
+						minutes: 90,
 						goals_scored: 1,
-						goals_scored_points: 4,
-						assists: 2,
-						assists_points: 6,
-						defensive_contribution: 10,
-						defensive_contribution_points: 2,
-						bonus: 3,
-					},
-					{
-						event_id: 34,
-						element_id: 527,
-						minutes: 45,
-						minutes_points: 1,
-						assists: 1,
-						assists_points: 3,
+						total_points: 10,
+						selected_by_percent: "12.5",
 					},
 				],
-			},
-		});
-
-		const result = await liveRepository.getEventLiveExplains(context, 34, [526, 527]);
-
-		expect(result.map((explain) => [explain.elementId, explain.stats.totalPoints])).toEqual([
-			[526, 14],
-			[527, 8],
-		]);
-		expect(result[0]?.contributions).toEqual([
-			{ identifier: "minutes", value: 66, points: 1, pointsModification: null },
-			{ identifier: "goals_scored", value: 1, points: 4, pointsModification: null },
-			{ identifier: "assists", value: 2, points: 6, pointsModification: null },
-			{
-				identifier: "defensive_contribution",
-				value: 10,
-				points: 2,
-				pointsModification: null,
-			},
-			{ identifier: "bonus", value: 3, points: 3, pointsModification: null },
-		]);
-		expect(readModelCalls).toEqual([
-			"fpl.player_event_snapshots",
-			"fpl.player_gameweek_scoring_items",
-		]);
-		expect(redis.hmgetCalls).toEqual([
-			["EventLiveExplainV2:2526:34", "526", "527"],
-			["EventLiveExplain:2526:34", "526", "527"],
-		]);
-		expect(redis.setCalls).toHaveLength(2);
-	});
-
-	it("maps cumulative event snapshots and gameweek scoring-item breakdowns", async () => {
-		const explainFixture = {
-			fixture: 8,
-			stats: [{ identifier: "goals_scored", points: 4, value: 1 }],
-		};
-		const context = buildContext({
-			readDataByModel: {
-				"fpl.player_event_snapshots": [playerStatsRow34_526],
 				"fpl.player_gameweek_scoring_items": [
 					{
-						event_id: 34,
-						element_id: 526,
-						explain: [explainFixture],
-					},
-				],
-			},
-		});
-		const result = await liveRepository.getEventLiveExplain(context, 34, 526);
-		expect(result).not.toBeNull();
-		expect(result?.stats.totalPoints).toBe(14);
-		expect(result?.breakdown).toHaveLength(1);
-		expect(result?.breakdown[0]?.fixtureId).toBe(8);
-		expect(result?.breakdown[0]?.stats[0]?.identifier).toBe("goals_scored");
-	});
-
-	it("does not cache a partial explanation after event snapshots recover", async () => {
-		const revision = "c".repeat(24);
-		const redis = makeMockRedis({
-			strings: { "LiveSnapshotMeta:2526:33": snapshotMeta(revision) },
-		});
-		const errorByTable: Record<string, unknown> = {
-			"fpl.player_event_snapshots": { code: "08006", message: "temporary connection failure" },
-		};
-		const fromCalls: string[] = [];
-		const context = buildContext({
-			redis,
-			readModelCalls: fromCalls,
-			readErrorByModel: errorByTable,
-			readDataByModel: {
-				"fpl.player_event_snapshots": [{ ...playerStatsRow34_526, event_id: 33, element_id: 1 }],
-				"fpl.player_gameweek_scoring_items": [
-					{ event_id: 33, element_id: 1, minutes: 66, minutes_points: 1 },
-				],
-			},
-		});
-
-		const partial = await liveRepository.getEventLiveExplain(context, 33, 1);
-
-		expect(partial?.stats.totalPoints).toBeNull();
-		expect(redis.setCalls).toHaveLength(0);
-
-		delete errorByTable["fpl.player_event_snapshots"];
-		const recovered = await liveRepository.getEventLiveExplain(context, 33, 1);
-
-		expect(recovered?.stats.totalPoints).toBe(14);
-		expect(redis.setCalls).toHaveLength(1);
-		expect(fromCalls.filter((table) => table === "fpl.player_event_snapshots")).toHaveLength(2);
-	});
-
-	it("uses Redis `explain` when event_live_explain has no explain JSON", async () => {
-		const redisExplain = {
-			explain: [
-				{
-					fixture: 9,
-					stats: [{ identifier: "minutes", points: 2, value: 66 }],
-				},
-			],
-		};
-		const context = buildContext({
-			redisStrings: { "Season:active": "2526" },
-			redisHashes: {
-				"EventLiveExplain:2526:34": {
-					526: JSON.stringify(redisExplain),
-				},
-			},
-			readDataByModel: {
-				"fpl.player_event_snapshots": [playerStatsRow34_526],
-				"fpl.player_gameweek_scoring_items": [{ event_id: 34, element_id: 526, explain: null }],
-			},
-		});
-		const result = await liveRepository.getEventLiveExplain(context, 34, 526);
-		expect(result?.stats.totalPoints).toBe(14);
-		expect(result?.breakdown[0]?.fixtureId).toBe(9);
-	});
-
-	it("maps the producer's additive V2 compact contract without querying Postgres", async () => {
-		const readModelCalls: string[] = [];
-		const redis = makeMockRedis({
-			hashes: {
-				"EventLiveExplainV2:2526:34": {
-					526: JSON.stringify({
-						eventId: 34,
-						elementId: 526,
-						minutes: 66,
-						minutesPoints: 1,
-						goalsScored: 1,
-						goalsScoredPoints: 4,
-						goalsConceded: 2,
-						goalsConcededPoints: -1,
-						defensiveContribution: 10,
-						defensiveContributionPoints: 2,
-						bonus: 3,
-					}),
-				},
-			},
-		});
-		const context = buildContext({
-			redis,
-			readModelCalls,
-			readDataByModel: {
-				"fpl.player_event_snapshots": [playerStatsRow34_526],
-				"fpl.player_gameweek_scoring_items": [],
-			},
-		});
-
-		const [result] = await liveRepository.getEventLiveExplains(context, 34, [526], "contributions");
-
-		expect(result?.breakdown).toEqual([]);
-		expect(result?.contributions).toEqual([
-			{ identifier: "minutes", value: 66, points: 1, pointsModification: null },
-			{ identifier: "goals_scored", value: 1, points: 4, pointsModification: null },
-			{ identifier: "goals_conceded", value: 2, points: -1, pointsModification: null },
-			{
-				identifier: "defensive_contribution",
-				value: 10,
-				points: 2,
-				pointsModification: null,
-			},
-			{ identifier: "bonus", value: 3, points: 3, pointsModification: null },
-		]);
-		expect(readModelCalls).toEqual([]);
-		expect(redis.hmgetCalls).toEqual([["EventLiveExplainV2:2526:34", "526"]]);
-	});
-
-	it("rejects V2 fields whose embedded identity does not match the hash field", async () => {
-		const compact = (eventId: number, elementId: number, minutes: number) =>
-			JSON.stringify({ eventId, elementId, minutes, minutesPoints: 1 });
-		const redis = makeMockRedis({
-			hashes: {
-				"EventLiveExplainV2:2526:34": {
-					526: compact(35, 526, 90),
-					527: compact(34, 999, 90),
-					528: JSON.stringify({ minutes: 90, minutesPoints: 1 }),
-				},
-				"EventLiveExplain:2526:34": {
-					526: compact(34, 526, 45),
-					527: compact(34, 527, 46),
-					528: compact(34, 528, 47),
-				},
-			},
-		});
-		const readModelCalls: string[] = [];
-		const context = buildContext({ redis, readModelCalls });
-
-		const result = await liveRepository.getEventLiveExplains(
-			context,
-			34,
-			[526, 527, 528],
-			"contributions"
-		);
-
-		expect(
-			result.map(
-				(explain) =>
-					explain.contributions?.find((contribution) => contribution.identifier === "minutes")
-						?.value
-			)
-		).toEqual([45, 46, 47]);
-		expect(readModelCalls).toEqual([]);
-		expect(redis.hmgetCalls).toEqual([
-			["EventLiveExplainV2:2526:34", "526", "527", "528"],
-			["EventLiveExplain:2526:34", "526", "527", "528"],
-		]);
-	});
-
-	it("falls back to the frozen legacy hash only for players missing from V2", async () => {
-		const compact = (elementId: number, minutes: number) =>
-			JSON.stringify({ eventId: 34, elementId, minutes, minutesPoints: 1 });
-		const redis = makeMockRedis({
-			hashes: {
-				"EventLiveExplainV2:2526:34": { 526: compact(526, 66) },
-				"EventLiveExplain:2526:34": { 527: compact(527, 45) },
-			},
-		});
-		const readModelCalls: string[] = [];
-		const context = buildContext({ redis, readModelCalls });
-
-		const result = await liveRepository.getEventLiveExplains(
-			context,
-			34,
-			[526, 527],
-			"contributions"
-		);
-
-		expect(result.map((explain) => explain.elementId)).toEqual([526, 527]);
-		expect(readModelCalls).toEqual([]);
-		expect(redis.hmgetCalls).toEqual([
-			["EventLiveExplainV2:2526:34", "526", "527"],
-			["EventLiveExplain:2526:34", "527"],
-		]);
-	});
-
-	it("preserves event-snapshot-only members and batches selectedBy for 15 players", async () => {
-		const elementIds = Array.from({ length: 15 }, (_, index) => 601 + index);
-		const readModelCalls: string[] = [];
-		const context = buildContext({
-			readModelCalls,
-			readDataByModel: {
-				"fpl.player_event_snapshots": elementIds.map((elementId, index) => ({
-					event_id: 34,
-					element_id: elementId,
-					total_points: index,
-					selected_by_percent: index + 0.5,
-				})),
-				"fpl.player_gameweek_scoring_items": [],
-			},
-		});
-
-		const result = await liveRepository.getEventLiveExplains(
-			context,
-			34,
-			elementIds,
-			"contributions",
-			true
-		);
-
-		expect(result).toHaveLength(15);
-		expect(result.map((explain) => explain.elementId)).toEqual(elementIds);
-		expect(result.map((explain) => explain.selectedBy)).toEqual(
-			elementIds.map((_elementId, index) => index + 0.5)
-		);
-		expect(readModelCalls).toEqual([
-			"fpl.player_event_snapshots",
-			"fpl.player_gameweek_scoring_items",
-		]);
-	});
-
-	it("coalesces 100 mixed-player revision misses into one durable batch", async () => {
-		const revision = "c".repeat(24);
-		const elementIds = Array.from({ length: 15 }, (_, index) => index + 1);
-		const redis = makeMockRedis({
-			strings: { "LiveSnapshotMeta:2526:33": snapshotMeta(revision, 15) },
-		});
-		const readModelCalls: string[] = [];
-		const contextOptions = {
-			redis,
-			readModelCalls,
-			readDataByModel: {
-				"fpl.player_event_snapshots": elementIds.map((elementId) => ({
-					event_id: 33,
-					element_id: elementId,
-					total_points: elementId,
-				})),
-				"fpl.player_gameweek_scoring_items": elementIds.map((elementId) => ({
-					event_id: 33,
-					element_id: elementId,
-					minutes: 45,
-					minutes_points: 1,
-				})),
-			},
-		};
-
-		const results = await Promise.all(
-			Array.from({ length: 100 }, (_unused, index) => {
-				const elementId = elementIds[index % elementIds.length]!;
-				return liveRepository.getEventLiveExplains(buildContext(contextOptions), 33, [elementId]);
-			})
-		);
-
-		expect(results.every((batch) => batch.length === 1)).toBe(true);
-		expect(
-			results.every((batch, index) => batch[0]?.elementId === elementIds[index % elementIds.length])
-		).toBe(true);
-		expect(readModelCalls).toEqual([
-			"fpl.player_event_snapshots",
-			"fpl.player_gameweek_scoring_items",
-		]);
-		expect(redis.hmgetCalls.filter(([key]) => key === "EventLiveExplainV2:2526:33")).toHaveLength(
-			1
-		);
-		expect(redis.hmgetCalls.filter(([key]) => key === "EventLiveExplain:2526:33")).toHaveLength(1);
-	});
-
-	it("bounds a cross-request explanation union while retaining singleflight", async () => {
-		const revision = "6".repeat(24);
-		const elementIds = Array.from({ length: 300 }, (_, index) => index + 1);
-		const requestBatches = Array.from({ length: 20 }, (_, index) =>
-			elementIds.slice(index * 15, index * 15 + 15)
-		);
-		const redis = makeMockRedis({
-			strings: { "LiveSnapshotMeta:2526:33": snapshotMeta(revision, 300) },
-		});
-		const readInCalls: Array<{ table: string; column: string; values: unknown[] }> = [];
-		const contextOptions = {
-			redis,
-			readInCalls,
-			readDataByModel: {
-				"fpl.player_event_snapshots": elementIds.map((elementId) => ({
-					event_id: 33,
-					element_id: elementId,
-					total_points: elementId,
-				})),
-				"fpl.player_gameweek_scoring_items": elementIds.map((elementId) => ({
-					event_id: 33,
-					element_id: elementId,
-					minutes: 45,
-					minutes_points: 1,
-				})),
-			},
-		};
-
-		const results = await Promise.all(
-			requestBatches.map((batch) =>
-				liveRepository.getEventLiveExplains(buildContext(contextOptions), 33, batch)
-			)
-		);
-
-		expect(results.map((batch) => batch.map((result) => result.elementId))).toEqual(requestBatches);
-		expect(readInCalls.length).toBeGreaterThanOrEqual(6);
-		expect(readInCalls.every((call) => call.values.length <= 100)).toBe(true);
-	});
-
-	it("falls back to the historical element column", async () => {
-		const attemptedColumns: string[] = [];
-		const context = buildContext({}) as unknown as { data: unknown };
-		context.data = {
-			read: (table: string) => {
-				let elementColumn = "";
-				const resultForColumn = () => {
-					if (table === "fpl.player_event_snapshots") {
-						return { data: [playerStatsRow34_526], error: null };
-					}
-					if (elementColumn === "element_id") {
-						return {
-							data: null,
-							error: {
-								code: "42703",
-								message: "column player_gameweek_scoring_items.element_id does not exist",
-							},
-						};
-					}
-					return {
-						data: [
+						event_id: 1,
+						element_id: 1,
+						modified: false,
+						explain: [
 							{
-								event_id: 34,
-								element: 526,
-								explain: [
-									{
-										fixture: 10,
-										stats: [{ identifier: "bonus", points: 3, value: 3 }],
-									},
-								],
+								fixture: 1,
+								stats: [{ identifier: "goals_scored", points: 5, value: 1 }],
 							},
 						],
-						error: null,
-					};
-				};
-				const builder = {
-					select: () => builder,
-					eq: (_column: string) => {
-						return builder;
 					},
-					in: async (column: string) => {
-						if (table === "fpl.player_gameweek_scoring_items") {
-							elementColumn = column;
-							attemptedColumns.push(column);
-						}
-						return resultForColumn();
-					},
-				};
-				return builder;
+				],
 			},
-		};
+			calls
+		);
 
-		const result = await liveRepository.getEventLiveExplain(context as never, 34, 526);
-		expect(attemptedColumns).toEqual(["element_id", "element"]);
-		expect(result?.breakdown[0]?.fixtureId).toBe(10);
+		const first = await liveRepository.getEventLiveExplains(context, 1, [1], "full", true);
+		const second = await liveRepository.getEventLiveExplains(context, 1, [1], "full", true);
+
+		expect(first).toHaveLength(1);
+		expect(first[0]).toMatchObject({
+			eventId: 1,
+			elementId: 1,
+			selectedBy: 12.5,
+			stats: { minutes: 90, goalsScored: 1, totalPoints: 10 },
+			breakdown: [
+				{
+					fixtureId: 1,
+					stats: [{ identifier: "goals_scored", points: 5, value: 1 }],
+				},
+			],
+		});
+		expect(second).toEqual(first);
+		expect(calls).toEqual(["fpl.player_event_snapshots", "fpl.player_gameweek_scoring_items"]);
+		const queryCacheWrite = redis.setCalls.find(([key]) => key.includes(":live-explain:"));
+		expect(queryCacheWrite?.[0]).toContain("llm:v3:gql:v3:core-7.live-1-8:");
+		expect(queryCacheWrite?.slice(-2)).toEqual(["EX", 10]);
 	});
 
-	it("returns null when neither event snapshots nor gameweek scoring items have a row", async () => {
-		const context = buildContext({
-			readDataByModel: {
-				"fpl.player_event_snapshots": [],
+	it("loads a fifteen-player explanation batch with two bounded reporting reads", async () => {
+		const { context } = liveContext();
+		const elementIds = Array.from({ length: 15 }, (_, index) => index + 1);
+		const calls: string[] = [];
+		withReadRows(
+			context,
+			{
+				"fpl.player_event_snapshots": elementIds.map((elementId) => ({
+					element_id: elementId,
+					total_points: elementId,
+					selected_by_percent: String(elementId / 10),
+				})),
 				"fpl.player_gameweek_scoring_items": [],
 			},
+			calls
+		);
+
+		const results = await liveRepository.getEventLiveExplains(context, 1, elementIds, "full", true);
+
+		expect(results).toHaveLength(15);
+		expect(results[14]).toMatchObject({ elementId: 15, selectedBy: 1.5 });
+		expect(calls).toEqual(["fpl.player_event_snapshots", "fpl.player_gameweek_scoring_items"]);
+	});
+
+	it("coalesces one hundred concurrent revision misses into one durable batch", async () => {
+		const { context } = liveContext();
+		const elementIds = Array.from({ length: 100 }, (_, index) => index + 1);
+		const calls: string[] = [];
+		withReadRows(
+			context,
+			{
+				"fpl.player_event_snapshots": elementIds.map((elementId) => ({
+					element_id: elementId,
+					total_points: elementId,
+					selected_by_percent: "1.0",
+				})),
+				"fpl.player_gameweek_scoring_items": [],
+			},
+			calls
+		);
+
+		const results = await Promise.all(
+			elementIds.map((elementId) => liveRepository.getEventLiveExplain(context, 1, elementId))
+		);
+
+		expect(results.every((result) => result !== null)).toBe(true);
+		expect(calls).toEqual(["fpl.player_event_snapshots", "fpl.player_gameweek_scoring_items"]);
+	});
+
+	it("returns null when neither durable explanation source has the player", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [],
+			"fpl.player_gameweek_scoring_items": [],
 		});
-		const result = await liveRepository.getEventLiveExplain(context, 34, 526);
-		expect(result).toBeNull();
+		await expect(liveRepository.getEventLiveExplain(context, 1, 1)).resolves.toBeNull();
 	});
 });

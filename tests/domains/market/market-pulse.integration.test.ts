@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { graphql } from "graphql";
 import { emptyMarketPulse, type MarketPulse } from "../../../src/domains/market/repository";
 import { schema } from "../../../src/graphql/schema";
+import { gqlCacheKey } from "../../../src/infra/cache-key";
 
 const query = /* GraphQL */ `
 	query MarketPulse {
@@ -54,19 +55,18 @@ describe("marketPulse GraphQL contract", () => {
 				},
 			],
 		};
+		const strings = new Map<string, string>();
 		const context = {
 			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: "core-test",
 			redis: {
-				get: async (key: string) => {
-					if (key === "Season:active") return "2627";
-					if (key === "gql:v2:2627:market-pulse:v2:14") return JSON.stringify(pulse);
-					return null;
-				},
+				get: async (key: string) => strings.get(key) ?? null,
 				del: async () => 1,
 			},
 			logger: { warn: () => undefined, error: () => undefined },
 			data: {},
 		} as never;
+		strings.set(gqlCacheKey(context, "market-pulse:v3:14"), JSON.stringify(pulse));
 
 		const result = await graphql({ schema, source: query, contextValue: context });
 

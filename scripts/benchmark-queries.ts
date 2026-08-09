@@ -362,8 +362,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 		name: string,
 		operation: string,
 		variables: Record<string, unknown>,
-		resultField: string,
-		_cacheKeyPatterns: string[]
+		resultField: string
 	): void => {
 		q.push({
 			domain,
@@ -381,20 +380,16 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"event",
 			"query Event($id: Int!) { event(id: $id) { id name } }",
 			{ id: ids.eventId },
-			"event",
-			["event:current"]
+			"event"
 		);
 	}
-	add("events", "events", "query Events { events(limit: 10) { id name } }", {}, "events", [
-		"event:current",
-	]);
+	add("events", "events", "query Events { events(limit: 10) { id name } }", {}, "events");
 	add(
 		"events",
 		"currentEventInfo",
 		"query CurrentEventInfo { currentEventInfo { currentEvent nextUtcDeadline } }",
 		{},
-		"currentEventInfo",
-		["event:current"]
+		"currentEventInfo"
 	);
 
 	/* players */
@@ -404,20 +399,16 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"player",
 			"query Player($id: Int!) { player(id: $id) { id webName } }",
 			{ id: ids.playerId },
-			"player",
-			["players:*"]
+			"player"
 		);
 	}
-	add("players", "players", "query Players { players(limit: 10) { id webName } }", {}, "players", [
-		"players:*",
-	]);
+	add("players", "players", "query Players { players(limit: 10) { id webName } }", {}, "players");
 	add(
 		"players",
 		"playersForPicker",
 		"query PlayersForPicker { playersForPicker(limit: 10) { items { id webName } nextCursor } }",
 		{},
-		"playersForPicker",
-		["players:picker:*"]
+		"playersForPicker"
 	);
 	if (ids.teamId) {
 		add(
@@ -425,27 +416,24 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"team",
 			"query Team($id: Int!) { team(id: $id) { id name } }",
 			{ id: ids.teamId },
-			"team",
-			[]
+			"team"
 		);
 	}
-	add("players", "teams", "query Teams { teams { id name } }", {}, "teams", []);
+	add("players", "teams", "query Teams { teams { id name } }", {}, "teams");
 	if (ids.playerStatEventId) {
 		add(
 			"players",
 			"topTransfersIn",
 			"query TopTransfersIn($eventId: Int!) { topTransfersIn(eventId: $eventId, limit: 5) { transfersInEvent transfersOutEvent player { id webName } } }",
 			{ eventId: ids.playerStatEventId },
-			"topTransfersIn",
-			["players:transfer-stats:raw:*", "players:top-transfers-in:*"]
+			"topTransfersIn"
 		);
 		add(
 			"players",
 			"topTransfersOut",
 			"query TopTransfersOut($eventId: Int!) { topTransfersOut(eventId: $eventId, limit: 5) { transfersInEvent transfersOutEvent player { id webName } } }",
 			{ eventId: ids.playerStatEventId },
-			"topTransfersOut",
-			["players:transfer-stats:raw:*", "players:top-transfers-out:*"]
+			"topTransfersOut"
 		);
 	}
 
@@ -455,8 +443,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 		"playerValues",
 		`query PlayerValues($changeDate: Date!) { playerValues(changeDate: $changeDate) { playerId playerName } }`,
 		{ changeDate: todayStr },
-		"playerValues",
-		["player-value-history:*"]
+		"playerValues"
 	);
 	if (ids.playerId) {
 		add(
@@ -464,8 +451,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"playerValueHistory",
 			"query PlayerValueHistory($playerId: Int!) { playerValueHistory(playerId: $playerId) { playerId changeDate } }",
 			{ playerId: ids.playerId },
-			"playerValueHistory",
-			["player-value-history:*"]
+			"playerValueHistory"
 		);
 	}
 
@@ -476,28 +462,19 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"playerDetail",
 			"query PlayerDetail($playerId: Int!, $eventId: Int!) { playerDetail(playerId: $playerId, eventId: $eventId) { id webName } }",
 			{ playerId: ids.playerId, eventId: ids.eventId },
-			"playerDetail",
-			["player_detail:*", "FixturesByTeam:*"]
+			"playerDetail"
 		);
 	}
 
 	/* fixtures */
-	add(
-		"fixtures",
-		"fixtures",
-		"query Fixtures { fixtures(limit: 10) { id code } }",
-		{},
-		"fixtures",
-		["fixtures:*"]
-	);
+	add("fixtures", "fixtures", "query Fixtures { fixtures(limit: 10) { id code } }", {}, "fixtures");
 	if (ids.fixtureEventId) {
 		add(
 			"fixtures",
 			"eventFixtures",
 			"query EventFixtures($eventId: Int!) { eventFixtures(eventId: $eventId) { id code } }",
 			{ eventId: ids.fixtureEventId },
-			"eventFixtures",
-			[]
+			"eventFixtures"
 		);
 	}
 
@@ -508,8 +485,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"liveScores",
 			"query LiveScores($eventId: Int!) { liveScores(eventId: $eventId) { totalPoints minutes } }",
 			{ eventId: ids.eventId },
-			"liveScores",
-			["PlayerStatsSelected:*"]
+			"liveScores"
 		);
 		if (ids.playerId) {
 			add(
@@ -517,8 +493,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 				"playerLive",
 				"query PlayerLive($playerId: Int!, $eventId: Int!) { playerLive(playerId: $playerId, eventId: $eventId) { totalPoints minutes } }",
 				{ playerId: ids.playerId, eventId: ids.eventId },
-				"playerLive",
-				[]
+				"playerLive"
 			);
 		}
 		add(
@@ -526,8 +501,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"eventLive",
 			"query EventLive($eventId: Int!) { eventLive(eventId: $eventId) { event { id } performances { totalPoints minutes } } }",
 			{ eventId: ids.eventId },
-			"eventLive",
-			[]
+			"eventLive"
 		);
 		if (ids.playerId) {
 			add(
@@ -535,8 +509,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 				"eventLiveExplain",
 				"query EventLiveExplain($eventId: Int!, $elementId: Int!) { eventLiveExplain(eventId: $eventId, elementId: $elementId) { elementId stats { totalPoints } } }",
 				{ eventId: ids.eventId, elementId: ids.playerId },
-				"eventLiveExplain",
-				["live:explain:*", "PlayerStatsSelected:*"]
+				"eventLiveExplain"
 			);
 		}
 	}
@@ -547,8 +520,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 		"liveMatches",
 		"query LiveMatches { liveMatches { playing { matchId } finished { matchId } } }",
 		{},
-		"liveMatches",
-		["LiveFixture:*", "live-matches:*"]
+		"liveMatches"
 	);
 	if (ids.nextFixtureEventId) {
 		add(
@@ -556,8 +528,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"nextEventFixtures",
 			"query NextEventFixtures($eventId: Int!) { eventFixtures(eventId: $eventId) { id code } }",
 			{ eventId: ids.nextFixtureEventId },
-			"eventFixtures",
-			[]
+			"eventFixtures"
 		);
 	}
 
@@ -568,16 +539,14 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"entry",
 			"query Entry($id: Int!) { entry(id: $id) { id entryName } }",
 			{ id: ids.entryId },
-			"entry",
-			["entries:*"]
+			"entry"
 		);
 		add(
 			"entries",
 			"entryHistory",
 			"query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { results { eventId } history { season } } }",
 			{ entryId: ids.entryId },
-			"entryHistory",
-			["entries:history:*", "entries:history-info:*"]
+			"entryHistory"
 		);
 	}
 	if (ids.entryEventEntryId && ids.entryEventId) {
@@ -586,16 +555,14 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"entryEventResult",
 			"query EntryEventResult($entryId: Int!, $eventId: Int!) { entryEventResult(entryId: $entryId, eventId: $eventId) { eventPoints eventRank } }",
 			{ entryId: ids.entryEventEntryId, eventId: ids.entryEventId },
-			"entryEventResult",
-			["entries:event-result:*"]
+			"entryEventResult"
 		);
 		add(
 			"entries",
 			"entryTransferHistory",
 			"query EntryTransferHistory($entryId: Int!) { entryTransferHistory(entryId: $entryId) { eventId transfers { elementIn elementOut } } }",
 			{ entryId: ids.entryEventEntryId },
-			"entryTransferHistory",
-			["entries:transfers:history:*", "entries:transfer-history:enriched:*"]
+			"entryTransferHistory"
 		);
 		if (ids.entryEventEntryId) {
 			add(
@@ -603,8 +570,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 				"entryTransferHistory_live",
 				"query EntryTransferHistoryLive($entryId: Int!, $live: Boolean!) { entryTransferHistory(entryId: $entryId, live: $live) { eventId transfers { elementIn elementOut elementInPoints elementOutPoints elementInPlayed elementOutPlayed } } }",
 				{ entryId: ids.entryEventEntryId, live: true },
-				"entryTransferHistory",
-				["entries:transfers:history:*", "entries:transfer-history:enriched:*"]
+				"entryTransferHistory"
 			);
 		}
 	}
@@ -616,24 +582,21 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"entryLive",
 			"query EntryLive($entryId: Int!, $eventId: Int!) { entryLive(entryId: $entryId, eventId: $eventId) { eventPoints overallPoints } }",
 			{ entryId: ids.entryEventEntryId, eventId: ids.entryEventId },
-			"entryLive",
-			["entry-live:*", "entries:picks:*", "entries:transfers:*"]
+			"entryLive"
 		);
 		add(
 			"entryLive",
 			"calcLivePointsByEntry",
 			"query CalcLivePointsByEntry($eventId: Int!, $entryId: Int!) { calcLivePointsByEntry(eventId: $eventId, entryId: $entryId) { rank livePoints pickList { element webName } } }",
 			{ eventId: ids.entryEventId, entryId: ids.entryEventEntryId },
-			"calcLivePointsByEntry",
-			["entry-live:*", "entries:picks:*", "entries:transfers:*"]
+			"calcLivePointsByEntry"
 		);
 		add(
 			"entryLive",
 			"calcLivePointsForEntries_single",
 			"query CalcLivePointsForEntries($eventId: Int!, $entryIds: [Int!]!) { calcLivePointsForEntries(eventId: $eventId, entryIds: $entryIds) { results { rank livePoints } meta { totalEntries succeededCount } } }",
 			{ eventId: ids.entryEventId, entryIds: [ids.entryEventEntryId] },
-			"calcLivePointsForEntries",
-			["entry-live:*", "entries:picks:*", "entries:transfers:*"]
+			"calcLivePointsForEntries"
 		);
 		if (ids.entryId && ids.entryId !== ids.entryEventEntryId) {
 			add(
@@ -644,8 +607,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 					eventId: ids.entryEventId,
 					entryIds: [ids.entryEventEntryId, ids.entryId],
 				},
-				"calcLivePointsForEntries",
-				["entry-live:*", "entries:picks:*", "entries:transfers:*"]
+				"calcLivePointsForEntries"
 			);
 		}
 	}
@@ -655,8 +617,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"calcLivePointsForTournament",
 			"query CalcLivePointsForTournament($eventId: Int!, $tournamentId: Int!) { calcLivePointsForTournament(eventId: $eventId, tournamentId: $tournamentId) { results { rank livePoints } meta { totalEntries succeededCount } } }",
 			{ eventId: ids.entryEventId, tournamentId: ids.tournamentId },
-			"calcLivePointsForTournament",
-			["entry-live:*", "entries:picks:*", "entries:transfers:*", "tournaments:entry-ids:*"]
+			"calcLivePointsForTournament"
 		);
 	}
 
@@ -667,8 +628,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"entryLeagues",
 			"query EntryLeagues($entryId: Int!) { entryLeagues(entryId: $entryId) { id name } }",
 			{ entryId: ids.entryId },
-			"entryLeagues",
-			["leagues:entry:v2:*", "League:*"]
+			"entryLeagues"
 		);
 	}
 	if (ids.leagueId && ids.eventId) {
@@ -677,8 +637,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"leagueEventResults",
 			"query LeagueEventResults($leagueId: Int!, $eventId: Int!) { leagueEventResults(leagueId: $leagueId, eventId: $eventId) { eventPoints overallPoints } }",
 			{ leagueId: ids.leagueId, eventId: ids.eventId },
-			"leagueEventResults",
-			["leagues:results:v2:*"]
+			"leagueEventResults"
 		);
 	}
 
@@ -689,8 +648,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"entryTournaments",
 			"query EntryTournaments($entryId: Int!) { entryTournaments(entryId: $entryId) { id name } }",
 			{ entryId: ids.entryId },
-			"entryTournaments",
-			["tournaments:entry:*", "tournament:info:*"]
+			"entryTournaments"
 		);
 	}
 	if (ids.tournamentId) {
@@ -699,8 +657,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"tournamentEntryIds",
 			"query TournamentEntryIds($tournamentId: Int!) { tournamentEntryIds(tournamentId: $tournamentId) }",
 			{ tournamentId: ids.tournamentId },
-			"tournamentEntryIds",
-			["tournaments:entry-ids:*"]
+			"tournamentEntryIds"
 		);
 	}
 	if (ids.tournamentId && ids.eventId) {
@@ -709,8 +666,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"tournamentEventResults",
 			"query TournamentEventResults($tournamentId: Int!, $eventId: Int!) { tournamentEventResults(tournamentId: $tournamentId, eventId: $eventId) { eventPoints overallPoints } }",
 			{ tournamentId: ids.tournamentId, eventId: ids.eventId },
-			"tournamentEventResults",
-			["tournaments:event-results:*"]
+			"tournamentEventResults"
 		);
 	}
 	if (ids.tournamentId && ids.eventId && ids.entryId) {
@@ -723,8 +679,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 				eventId: ids.eventId,
 				entryId: ids.entryId,
 			},
-			"tournamentEntryRankingSummary",
-			["tournaments:ranking-summary:*"]
+			"tournamentEntryRankingSummary"
 		);
 	}
 
@@ -734,8 +689,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 		"eventOverallResult",
 		"query EventOverallResult { eventOverallResult { event averageScore highestScore } }",
 		{},
-		"eventOverallResult",
-		[]
+		"eventOverallResult"
 	);
 
 	/* eventStats */
@@ -745,8 +699,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"tournamentSelectionStats",
 			"query TournamentSelectionStats($tournamentId: Int!, $eventId: Int!) { tournamentSelectionStats(tournamentId: $tournamentId, eventId: $eventId, limit: 5) { totalEntries goalkeepers { id } defenders { id } } }",
 			{ tournamentId: ids.tournamentId, eventId: ids.eventId },
-			"tournamentSelectionStats",
-			["tournament-selection-stats:*", "tournaments:entry-ids:*"]
+			"tournamentSelectionStats"
 		);
 	}
 
@@ -756,8 +709,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 		"miniProgramNotice",
 		"query MiniProgramNotice { miniProgramNotice }",
 		{},
-		"miniProgramNotice",
-		["mini-program:*", "notice:*"]
+		"miniProgramNotice"
 	);
 
 	return q;

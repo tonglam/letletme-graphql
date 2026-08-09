@@ -16,11 +16,12 @@ const emptyStats: TournamentSelectionStats = {
 };
 
 const context = (options: { failRedisWrites?: boolean } = {}) => {
-	const strings = new Map<string, string>([["Season:active", "2627"]]);
+	const strings = new Map<string, string>();
 	return {
 		strings,
 		value: {
 			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: "core-test",
 			redis: {
 				get: async (key: string) => strings.get(key) ?? null,
 				set: async (key: string, value: string) => {

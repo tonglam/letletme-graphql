@@ -6,139 +6,65 @@ import {
 	entryLiveRepository,
 } from "../../../src/domains/entry-live/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
+import {
+	buildCorePublication,
+	buildSnapshotContext,
+	buildTestCoreData,
+	TestRedis,
+} from "../../helpers/data-publication";
 
-const makeMockRedis = (data: {
-	season?: string;
-	players?: Record<string, string>;
-	teams?: Record<string, string>;
-	eventLive?: Record<string, Record<string, string>>;
-}) => {
-	const strings = new Map<string, string>();
-	if (data.season !== undefined) {
-		strings.set("Season:active", data.season);
-	}
-	return {
-		get: async (key: string): Promise<string | null> => strings.get(key) ?? null,
-		set: async (_key: string, _value: string, ..._args: unknown[]): Promise<string> => "OK",
-		hget: async (key: string, field: string): Promise<string | null> => {
-			if (key.startsWith("Player:") && data.players) {
-				return data.players[field] ?? null;
+const liveRow = (eventId: number, elementId: number, totalPoints: number, minutes: number) => ({
+	event_id: eventId,
+	element_id: elementId,
+	minutes,
+	goals_scored: 0,
+	assists: 0,
+	clean_sheets: 0,
+	goals_conceded: 0,
+	own_goals: 0,
+	penalties_saved: 0,
+	penalties_missed: 0,
+	yellow_cards: 0,
+	red_cards: 0,
+	saves: 0,
+	bonus: 0,
+	bps: 0,
+	starts: minutes > 0,
+	defensive_contribution: 0,
+	expected_goals: "0.00",
+	expected_assists: "0.00",
+	expected_goal_involvements: "0.00",
+	expected_goals_conceded: "0.00",
+	in_dream_team: false,
+	total_points: totalPoints,
+});
+
+const makeContext = (
+	core: ReturnType<typeof buildTestCoreData>,
+	liveRows: Array<ReturnType<typeof liveRow>>
+): GraphQLContext => {
+	const context = buildSnapshotContext(new TestRedis(buildCorePublication("2526", 7, core)), {
+		seasonId: 2025,
+		seasonCode: "2526",
+		dataRevision: "core-7",
+	});
+	context.data = {
+		read: (table: string) => {
+			if (table !== "fpl.player_gameweek_stats") {
+				throw new Error(`Unexpected read model ${table}`);
 			}
-			if (key.startsWith("Team:") && data.teams) {
-				return data.teams[field] ?? null;
-			}
-			return null;
+			const promise = Promise.resolve({ data: liveRows, error: null });
+			type Builder = typeof promise & { select: () => Builder; in: () => Builder };
+			const builder = promise as Builder;
+			Object.assign(builder, { select: () => builder, in: () => builder });
+			return builder;
 		},
-		hmget: async (key: string, ...fields: string[]): Promise<(string | null)[]> => {
-			if (key.startsWith("Player:") && data.players) {
-				return fields.map((f) => data.players?.[f] ?? null);
-			}
-			return fields.map(() => null);
-		},
-		hgetall: async (key: string): Promise<Record<string, string>> => {
-			if (key.startsWith("Player:") && data.players) {
-				return data.players;
-			}
-			if (key.startsWith("Team:") && data.teams) {
-				return data.teams;
-			}
-			if (data.eventLive) {
-				for (const [liveKey, liveData] of Object.entries(data.eventLive)) {
-					if (key === liveKey) {
-						return liveData;
-					}
-				}
-			}
-			return {};
-		},
-		hset: async (..._args: unknown[]): Promise<number> => 1,
-		expire: async (..._args: unknown[]): Promise<number> => 1,
-		pipeline: () => {
-			const queued: Array<[string, string[]]> = [];
-			const p: {
-				exec: () => Promise<Array<[null, (string | null)[]]>>;
-			} & Record<string, unknown> = {
-				hmget: (key: string, ...fields: string[]) => {
-					queued.push([key, fields]);
-					return p;
-				},
-				exec: async () =>
-					queued.map(([key, fields]) => {
-						const hash = data.eventLive?.[key] ?? {};
-						return [null, fields.map((f) => hash[f] ?? null)];
-					}),
-			};
-			return p;
-		},
-	};
+	} as never;
+	return context;
 };
 
-const makeMockData = () => ({
-	read: (_table: string) => {
-		const builder = {
-			select: () => builder,
-			eq: () => builder,
-			in: () => builder,
-			limit: async () => ({ data: [], error: null }),
-			order: () => builder,
-		};
-		return builder;
-	},
-	rpc: async () => ({ data: null, error: null }),
-});
-
-const makeMockLogger = () => ({
-	info: () => undefined,
-	warn: () => undefined,
-	error: () => undefined,
-});
-
-const makeContext = (data: {
-	season?: string;
-	players?: Record<string, string>;
-	teams?: Record<string, string>;
-	eventLive?: Record<string, Record<string, string>>;
-}): GraphQLContext =>
-	({
-		currentSeason: {
-			seasonId: 2000 + Number((data.season ?? "2526").slice(0, 2)),
-			seasonCode: data.season ?? "2526",
-		},
-		redis: makeMockRedis(data),
-		data: makeMockData(),
-		logger: makeMockLogger(),
-		user: undefined,
-	}) as unknown as GraphQLContext;
-
-const PLAYER_1 = JSON.stringify({
-	webName: "Saka",
-	type: 3,
-	teamId: 1,
-	code: 101,
-	price: 75,
-});
-const PLAYER_2 = JSON.stringify({
-	webName: "Salah",
-	type: 3,
-	teamId: 2,
-	code: 102,
-	price: 130,
-});
-const TEAM_1 = JSON.stringify({
-	id: 1,
-	code: 3,
-	name: "Arsenal",
-	shortName: "ARS",
-});
-const TEAM_2 = JSON.stringify({
-	id: 2,
-	code: 14,
-	name: "Liverpool",
-	shortName: "LIV",
-});
-
 describe("entriesService.getEntryTransferHistory", () => {
-	it("builds transfer history from Redis player/team/live data", async () => {
+	it("joins canonical transfers with the core revision and historical live facts", async () => {
 		const originalGetEntryTransferHistory = entryLiveRepository.getEntryTransferHistory;
 		const transferRows: EntryEventTransferRow[] = [
 			{
@@ -146,45 +72,39 @@ describe("entriesService.getEntryTransferHistory", () => {
 				eventId: 12,
 				elementIn: 1,
 				elementInCost: 85,
-				elementOut: 2,
+				elementOut: 12,
 				elementOutCost: 125,
 				time: "2026-01-01T00:00:00Z",
 			},
 		];
-
 		entryLiveRepository.getEntryTransferHistory = async (): Promise<EntryEventTransferRow[]> =>
 			transferRows;
 
-		const liveData: Record<string, string> = {
-			"1": JSON.stringify({
-				eventId: 12,
-				element_id: 1,
-				totalPoints: 8,
-				minutes: 90,
-			}),
-			"2": JSON.stringify({
-				eventId: 12,
-				element_id: 2,
-				totalPoints: 2,
-				minutes: 0,
-			}),
+		const base = buildTestCoreData(12);
+		const core = {
+			...base,
+			teams: base.teams.map((team) =>
+				team.id === 1
+					? { ...team, name: "Arsenal", shortName: "ARS" }
+					: team.id === 2
+						? { ...team, name: "Liverpool", shortName: "LIV" }
+						: team
+			),
+			players: base.players.map((player) =>
+				player.id === 1
+					? { ...player, webName: "Saka", type: 3, code: 101, price: 75 }
+					: player.id === 12
+						? { ...player, webName: "Salah", type: 3, code: 102, price: 130 }
+						: player
+			),
 		};
-
-		const context = makeContext({
-			season: "2526",
-			players: { "1": PLAYER_1, "2": PLAYER_2 },
-			teams: { "1": TEAM_1, "2": TEAM_2 },
-			eventLive: { "EventLive:2526:12": liveData },
-		});
+		const context = makeContext(core, [liveRow(12, 1, 8, 90), liveRow(12, 12, 2, 0)]);
 
 		try {
 			const result = await entriesService.getEntryTransferHistory(context, 84885, true);
 			expect(result).toHaveLength(1);
-			expect(result[0].eventId).toBe(12);
-			expect(result[0].eventTransfers).toBe(1);
-			expect(result[0].eventTransfersCost).toBe(0);
+			expect(result[0]).toMatchObject({ eventId: 12, eventTransfers: 1, eventTransfersCost: 0 });
 			expect(result[0].transfers[0]).toMatchObject({
-				event: 12,
 				elementInWebName: "Saka",
 				elementInCost: 8.5,
 				elementInTeamShortName: "ARS",
@@ -202,7 +122,7 @@ describe("entriesService.getEntryTransferHistory", () => {
 });
 
 describe("entriesService.getEntryEventPicks", () => {
-	it("enriches stored compact picks from Redis player/team/live data", async () => {
+	it("enriches compact picks from the core revision and historical live facts", async () => {
 		const eventResult: EntryEventResult = {
 			entryId: 84885,
 			eventId: 34,
@@ -215,18 +135,18 @@ describe("entriesService.getEntryEventPicks", () => {
 			eventNetPoints: 65,
 			eventBenchPoints: 6,
 			eventChip: null,
-			eventPlayedCaptain: 449,
+			eventPlayedCaptain: 4,
 			eventCaptainPoints: 20,
 			eventPicks: [
 				{
-					element: 449,
+					element: 4,
 					position: 7,
 					multiplier: 2,
 					is_captain: true,
 					is_vice_captain: false,
 				},
 				{
-					element: 470,
+					element: 1,
 					position: 12,
 					multiplier: 0,
 					is_captain: false,
@@ -236,51 +156,24 @@ describe("entriesService.getEntryEventPicks", () => {
 			teamValue: 1020,
 			bank: 5,
 		};
-
-		const PLAYER_449 = JSON.stringify({
-			webName: "Gyokeres",
-			type: 4,
-			teamId: 1,
-			code: 449,
-			price: 75,
-		});
-		const PLAYER_470 = JSON.stringify({
-			webName: "Dubravka",
-			type: 1,
-			teamId: 1,
-			code: 470,
-			price: 50,
-		});
-		const TEAM_1_FOR_PICKS = JSON.stringify({
-			id: 1,
-			code: 3,
-			name: "Arsenal",
-			shortName: "ARS",
-		});
-
-		const liveData34: Record<string, string> = {
-			"449": JSON.stringify({
-				eventId: 34,
-				element_id: 449,
-				totalPoints: 10,
-				minutes: 90,
-			}),
-			"470": JSON.stringify({
-				eventId: 34,
-				element_id: 470,
-				totalPoints: 2,
-				minutes: 0,
-			}),
+		const base = buildTestCoreData(34);
+		const core = {
+			...base,
+			teams: base.teams.map((team) =>
+				team.id === 1 ? { ...team, name: "Arsenal", shortName: "ARS" } : team
+			),
+			players: base.players.map((player) =>
+				player.id === 4
+					? { ...player, webName: "Gyokeres", type: 4, code: 449, price: 75 }
+					: player.id === 1
+						? { ...player, webName: "Dubravka", type: 1, code: 470, price: 50 }
+						: player
+			),
 		};
-
-		const context = makeContext({
-			season: "2526",
-			players: { "449": PLAYER_449, "470": PLAYER_470 },
-			teams: { "1": TEAM_1_FOR_PICKS },
-			eventLive: { "EventLive:2526:34": liveData34 },
-		});
+		const context = makeContext(core, [liveRow(34, 4, 10, 90), liveRow(34, 1, 2, 0)]);
 
 		const result = await entriesService.getEntryEventPicks(context, eventResult);
+
 		expect(result).toHaveLength(2);
 		expect(result[0]).toMatchObject({
 			webName: "Gyokeres",

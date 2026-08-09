@@ -1,116 +1,83 @@
 import { describe, expect, it } from "bun:test";
 import { loadLiveBonusByPlayerId } from "../../../src/domains/live/bonus-cache";
-import type { GraphQLContext } from "../../../src/graphql/context";
-
-const contextWithRedis = (
-	hgetall: (key: string) => Promise<Record<string, string>>,
-	snapshotMeta: string | null = null,
-	playerTeams: Record<string, number> = { "101": 1, "102": 1, "201": 2 }
-) =>
-	({
-		currentSeason: { seasonId: 2025, seasonCode: "2526" },
-		redis: {
-			get: async (key: string) => {
-				if (key === "Season:active") return "2526";
-				if (key === "LiveSnapshotMeta:2526:12") return snapshotMeta;
-				return null;
-			},
-			hgetall,
-			hmget: async (_key: string, ...fields: string[]) =>
-				fields.map((field) =>
-					playerTeams[field] ? JSON.stringify({ teamId: playerTeams[field] }) : null
-				),
-		},
-		logger: {
-			info: () => undefined,
-			warn: () => undefined,
-			error: () => undefined,
-		},
-	}) as unknown as GraphQLContext;
+import {
+	buildCorePublication,
+	buildLivePublication,
+	buildSnapshotContext,
+	buildTestCoreData,
+	buildTestEventLives,
+	TestRedis,
+	toPublicationFixture,
+} from "../../helpers/data-publication";
 
 describe("loadLiveBonusByPlayerId", () => {
-	it("returns all fixture-summed overrides from a valid hash", async () => {
-		const result = await loadLiveBonusByPlayerId(
-			contextWithRedis(async () => ({
-				"1": JSON.stringify({ "101": 5, "102": 0 }),
-				"2": JSON.stringify({ "201": 3 }),
-			})),
-			12
+	it("returns every player override from the validated live publication", async () => {
+		const core = buildTestCoreData(1);
+		const liveBonus = { "1": { "1": 5, "2": 0 }, "2": { "12": 3 } };
+		const context = buildSnapshotContext(
+			new TestRedis(
+				buildCorePublication("2627", 7, core),
+				buildLivePublication(core, 1, "2627", 8, {
+					liveBonus,
+				})
+			)
 		);
 
-		expect(Object.fromEntries(result)).toEqual({ 101: 5, 102: 0, 201: 3 });
+		const result = await loadLiveBonusByPlayerId(context, 1);
+		expect(Object.fromEntries(result)).toEqual({ 1: 5, 2: 0, 12: 3 });
 	});
 
-	it("returns no override when any cached value is malformed", async () => {
-		const result = await loadLiveBonusByPlayerId(
-			contextWithRedis(async () => ({
-				"1": JSON.stringify({ "101": 3 }),
-				"2": JSON.stringify({ "201": "3oops" }),
-			})),
-			12
-		);
-
-		expect(result.size).toBe(0);
-	});
-
-	it("returns no override on Redis WRONGTYPE failures", async () => {
-		const result = await loadLiveBonusByPlayerId(
-			contextWithRedis(async () => {
-				throw new Error("WRONGTYPE Operation against a key holding the wrong kind of value");
-			}),
-			12
-		);
-
-		expect(result.size).toBe(0);
-	});
-
-	it("rejects an incomplete legacy bonus view against snapshot metadata", async () => {
-		const snapshotMeta = JSON.stringify({
-			schemaVersion: 1,
-			season: "2526",
-			eventId: 12,
-			revision: "b".repeat(24),
-			state: "live",
-			publishedAt: "2026-04-18T14:00:00.000Z",
-			checkedAt: "2026-04-18T15:00:00.000Z",
-			eventLiveCount: 700,
-			fixtureCount: 10,
-			fixtureTeamCount: 20,
-			bonusTeamCount: 2,
+	it("rejects a cross-team sibling and rebuilds bonus only from PostgreSQL fixture stats", async () => {
+		const core = buildTestCoreData(1);
+		const invalid = buildLivePublication(core, 1, "2627", 8, {
+			liveBonus: { "1": { "12": 9 } },
 		});
-		const result = await loadLiveBonusByPlayerId(
-			contextWithRedis(async () => ({ "1": JSON.stringify({ "101": 3 }) }), snapshotMeta),
-			12
-		);
-
-		expect(result.size).toBe(0);
-	});
-
-	it("rejects a same-sized bonus hash whose players belong to different team fields", async () => {
-		const snapshotMeta = JSON.stringify({
-			schemaVersion: 1,
-			season: "2526",
-			eventId: 12,
-			revision: "c".repeat(24),
-			state: "live",
-			publishedAt: "2026-04-18T14:00:00.000Z",
-			checkedAt: "2026-04-18T15:00:00.000Z",
-			eventLiveCount: 700,
-			fixtureCount: 10,
-			fixtureTeamCount: 20,
-			bonusTeamCount: 2,
-		});
-		const result = await loadLiveBonusByPlayerId(
-			contextWithRedis(
-				async () => ({
-					"1": JSON.stringify({ "201": 3 }),
-					"2": JSON.stringify({ "101": 5 }),
+		const databaseLives = buildTestEventLives(core, 1);
+		const eventFixtures = core.fixtures.filter((fixture) => fixture.eventId === 1);
+		const targetFixture = eventFixtures[0]!;
+		const homePlayers = core.players.filter((player) => player.teamId === targetFixture.teamHId);
+		const awayPlayer = core.players.find((player) => player.teamId === targetFixture.teamAId)!;
+		const databaseFixtures = eventFixtures.map((fixture) => ({
+			...toPublicationFixture(fixture),
+			started: fixture.id === targetFixture.id,
+			stats:
+				fixture.id === targetFixture.id
+					? [
+							{
+								identifier: "bps",
+								h: [
+									{ element: homePlayers[0]!.id, value: 50 },
+									{ element: homePlayers[1]!.id, value: 30 },
+								],
+								a: [{ element: awayPlayer.id, value: 40 }],
+							},
+						]
+					: [],
+		}));
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), invalid),
+			{
+				databaseQuery: async () => ({
+					rows: [
+						{
+							authority_count: "0",
+							publication_id: null,
+							revision: null,
+							source_checked_at: null,
+							published_at: null,
+							event_checked_at: "2026-08-09T01:02:03.000Z",
+							event_lives: databaseLives,
+							fixtures: databaseFixtures,
+						},
+					],
 				}),
-				snapshotMeta
-			),
-			12
+			}
 		);
 
-		expect(result.size).toBe(0);
+		const result = await loadLiveBonusByPlayerId(context, 1);
+		expect(result.get(homePlayers[0]!.id)).toBe(3);
+		expect(result.get(awayPlayer.id)).toBe(2);
+		expect(result.get(homePlayers[1]!.id)).toBe(1);
+		expect(result.size).toBe(3);
 	});
 });

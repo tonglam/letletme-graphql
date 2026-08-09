@@ -6,6 +6,13 @@ import {
 	type TournamentSelectionStats,
 } from "../../../src/domains/event-stats/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
+import { gqlCacheKey } from "../../../src/infra/cache-key";
+import {
+	buildCorePublication,
+	buildSnapshotContext,
+	buildTestCoreData,
+	TestRedis,
+} from "../../helpers/data-publication";
 
 const EMPTY_STATS: TournamentSelectionStats = {
 	totalEntries: 0,
@@ -19,13 +26,6 @@ const EMPTY_STATS: TournamentSelectionStats = {
 	mostTransferIn: [],
 	mostTransferOut: [],
 };
-
-const PLAYERS = new Map([
-	[1, { code: 101, webName: "Keeper", teamId: 1, type: 1 }],
-	[2, { code: 102, webName: "Defender", teamId: 1, type: 2 }],
-	[3, { code: 103, webName: "Midfielder", teamId: 2, type: 3 }],
-	[4, { code: 104, webName: "Forward", teamId: 2, type: 4 }],
-]);
 
 const ROWS: DbTournamentSelectionStatRow[] = [
 	{
@@ -117,51 +117,40 @@ function createContext(
 		cached?: TournamentSelectionStats;
 	} = {}
 ): TestContext {
-	const cacheKey = "gql:v2:2526:tournament-selection-stats:1:10:10";
-	const strings = new Map<string, string>();
-	if (options.cached) strings.set(cacheKey, JSON.stringify(options.cached));
+	const core = buildTestCoreData(10);
+	const redis = new TestRedis(buildCorePublication("2526", 7, core));
 	const readModels: string[] = [];
 	let directDatabaseReads = 0;
-
-	return {
-		currentSeason: { seasonId: 2025, seasonCode: "2526" },
-		database: {
-			query: async () => {
-				directDatabaseReads += 1;
-				throw new Error("Tournament selections must not aggregate source tables at read time");
-			},
+	const context = buildSnapshotContext(redis, {
+		seasonId: 2025,
+		seasonCode: "2526",
+		dataRevision: "core-test",
+	}) as TestContext;
+	context.database = {
+		query: async () => {
+			directDatabaseReads += 1;
+			throw new Error("Tournament selections must not aggregate source tables at read time");
 		},
-		redis: {
-			get: async (key: string) => strings.get(key) ?? null,
-			set: async (key: string, value: string) => {
-				strings.set(key, value);
-				return "OK";
-			},
-			del: async (key: string) => (strings.delete(key) ? 1 : 0),
-			hmget: async (_key: string, ...ids: string[]) =>
-				ids.map((id) => {
-					const player = PLAYERS.get(Number(id));
-					return player ? JSON.stringify(player) : null;
-				}),
-			hgetall: async () => ({
-				"1": JSON.stringify({ id: 1, name: "Alpha", shortName: "ALP" }),
-				"2": JSON.stringify({ id: 2, name: "Beta", shortName: "BET" }),
-			}),
+	} as never;
+	context.data = {
+		read: (model: string) => {
+			readModels.push(model);
+			if (model === "reporting.tournament_selection_stats") {
+				return makeQuery({ data: options.rows ?? [], error: options.error ?? null });
+			}
+			return makeQuery({ data: [], error: null });
 		},
-		data: {
-			read: (model: string) => {
-				readModels.push(model);
-				if (model === "reporting.tournament_selection_stats") {
-					return makeQuery({ data: options.rows ?? [], error: options.error ?? null });
-				}
-				return makeQuery({ data: [], error: null });
-			},
-		},
-		logger: { warn: () => undefined, error: () => undefined },
-		__cache: strings,
-		__readModels: readModels,
-		__directDatabaseReads: () => directDatabaseReads,
-	} as unknown as TestContext;
+	} as never;
+	context.__cache = redis.values;
+	context.__readModels = readModels;
+	context.__directDatabaseReads = () => directDatabaseReads;
+	if (options.cached) {
+		redis.values.set(
+			gqlCacheKey(context, "tournament-selection-stats:1:10:10"),
+			JSON.stringify(options.cached)
+		);
+	}
+	return context;
 }
 
 describe("eventStatsRepository tournament selection materialized view", () => {

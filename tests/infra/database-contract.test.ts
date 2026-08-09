@@ -9,6 +9,7 @@ type ContractOptions = Readonly<{
 	probeFailure?: boolean;
 	schemaVersion?: string;
 	planVersion?: string;
+	publicationId?: string;
 	serverVersionNum?: number;
 	unsafeRole?: boolean;
 }>;
@@ -74,11 +75,11 @@ const makeContractExecutor = (
 				return {
 					rows: [
 						{
-							publication_id: "publication-1",
+							publication_id: options.publicationId ?? "00000000-0000-4000-8000-000000000007",
 							revision: "7",
 							manifest: {
 								schemaVersion: options.schemaVersion ?? "v3",
-								planVersion: options.planVersion ?? "3.2.3",
+								planVersion: options.planVersion ?? "3.2.4",
 							},
 						},
 					],
@@ -100,10 +101,10 @@ describe("GraphQL startup database contract", () => {
 		await expect(validateDatabaseContract(executor)).resolves.toEqual({
 			roleName: "graphql_runtime",
 			currentSeason: { seasonId: 2026, seasonCode: "2627" },
-			publicationId: "publication-1",
+			publicationId: "00000000-0000-4000-8000-000000000007",
 			datasetRevision: "7",
 			schemaVersion: "v3",
-			planVersion: "3.2.3",
+			planVersion: "3.2.4",
 		});
 
 		expect(queries.length).toBeGreaterThan(20);
@@ -125,9 +126,16 @@ describe("GraphQL startup database contract", () => {
 	});
 
 	it("fails closed for an unsupported Data publication contract", async () => {
-		const { executor } = makeContractExecutor({ planVersion: "3.2.2" });
+		const { executor } = makeContractExecutor({ planVersion: "3.2.3" });
 		await expect(validateDatabaseContract(executor)).rejects.toThrow(
-			"Unsupported Data Platform contract v3/3.2.2"
+			"Unsupported Data Platform contract v3/3.2.3"
+		);
+	});
+
+	it("fails closed for a non-RFC active publication identity", async () => {
+		const { executor } = makeContractExecutor({ publicationId: "publication-1" });
+		await expect(validateDatabaseContract(executor)).rejects.toThrow(
+			"active Data publication has an invalid RFC UUID"
 		);
 	});
 

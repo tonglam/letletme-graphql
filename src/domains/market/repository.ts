@@ -1,14 +1,12 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCurrentSeason } from "../../infra/season";
+import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 
 const MARKET_RESULT_LIMIT = 10;
 const PRICE_CHANGE_LIMIT = 20;
 const AVAILABILITY_UPDATE_LIMIT = 20;
 const AVAILABILITY_HIGHLIGHT_LIMIT = 5;
 const STALE_AFTER_MS = 36 * 60 * 60 * 1000;
-const MARKET_CACHE_TTL_SECONDS = 60 * 60;
-const MARKET_EMPTY_CACHE_TTL_SECONDS = 5 * 60;
 
 export type MarketPosition = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
 
@@ -531,8 +529,7 @@ const isMarketPulse = (value: unknown): value is MarketPulse =>
 
 export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRepository => ({
 	async getMarketPulse(context: GraphQLContext, requestedDays: number): Promise<MarketPulse> {
-		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `market-pulse:v2:${requestedDays}`);
+		const cacheKey = gqlCacheKey(context, `market-pulse:v3:${requestedDays}`);
 
 		try {
 			const cached = await context.redis.get(cacheKey);
@@ -562,13 +559,7 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 		}
 
 		const pulse = buildMarketPulse(rows, requestedDays);
-		const ttl =
-			pulse.coverage.observedDays > 0 ? MARKET_CACHE_TTL_SECONDS : MARKET_EMPTY_CACHE_TTL_SECONDS;
-		try {
-			await context.redis.set(cacheKey, JSON.stringify(pulse), "EX", ttl);
-		} catch (error) {
-			context.logger.warn({ err: error, cacheKey }, "Failed to cache market pulse");
-		}
+		await writeQueryCache(context, cacheKey, JSON.stringify(pulse), QUERY_CACHE_TTL_SECONDS.MARKET);
 		return pulse;
 	},
 });

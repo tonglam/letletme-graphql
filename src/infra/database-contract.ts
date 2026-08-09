@@ -2,9 +2,12 @@ import type { QueryResultRow } from "pg";
 import type { QueryExecutor } from "./database";
 import { loadCurrentSeason, type CurrentSeason } from "./season";
 import { V3ReadClient } from "./v3-read-client";
+import {
+	DATA_PLATFORM_PLAN_VERSION,
+	DATA_PUBLICATION_SCHEMA_VERSION,
+	isDataPublicationId,
+} from "./data-publication";
 
-const REQUIRED_SCHEMA_VERSION = "v3";
-const REQUIRED_PLAN_VERSION = "3.2.3";
 const DATA_SCHEMAS = ["fpl", "competition", "reporting", "ops", "understat", "bridge"] as const;
 
 type RoleRow = QueryResultRow & {
@@ -194,7 +197,13 @@ export const validateDatabaseContract = async (
 	);
 	const schemaVersion = publication.manifest.schemaVersion;
 	const planVersion = publication.manifest.planVersion;
-	if (schemaVersion !== REQUIRED_SCHEMA_VERSION || planVersion !== REQUIRED_PLAN_VERSION) {
+	if (!isDataPublicationId(publication.publication_id)) {
+		throw new DatabaseContractError("The active Data publication has an invalid RFC UUID");
+	}
+	if (
+		schemaVersion !== DATA_PUBLICATION_SCHEMA_VERSION ||
+		planVersion !== DATA_PLATFORM_PLAN_VERSION
+	) {
 		throw new DatabaseContractError(
 			`Unsupported Data Platform contract ${String(schemaVersion)}/${String(planVersion)}`
 		);

@@ -1,7 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { env } from "../../infra/env";
-import { getCurrentSeason } from "../../infra/season";
+import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import {
 	getTournamentSelectionStatsReadModel,
 	type TournamentSelectionStats,
@@ -140,7 +139,6 @@ export const createPublicLeagueTrendsRepository = (
 		const rows = result.rows as CatalogRow[];
 		if (rows.length === 0) return [];
 		const revision = iso(rows[0]!.catalog_revision);
-		const season = await getCurrentSeason(context);
 		const snapshotRevision = rows
 			.map((row) =>
 				row.snapshot_revision === undefined || row.snapshot_revision === null
@@ -155,7 +153,7 @@ export const createPublicLeagueTrendsRepository = (
 				? "none"
 				: iso(rows[0]!.readiness_revision);
 		const cacheKey = gqlCacheKey(
-			season,
+			context,
 			`public-league-trends:v3:${revision}:${snapshotRevision ?? "none"}:${readinessRevision}`
 		);
 		try {
@@ -176,11 +174,12 @@ export const createPublicLeagueTrendsRepository = (
 			latestAvailableEventId: Number(row.latest_event_id),
 			totalEntries: Number(row.total_entries),
 		}));
-		try {
-			await context.redis.set(cacheKey, JSON.stringify(trends), "EX", env.CACHE_TTL_SECONDS);
-		} catch (error) {
-			context.logger.warn({ err: error, cacheKey }, "Failed to write public league catalog cache");
-		}
+		await writeQueryCache(
+			context,
+			cacheKey,
+			JSON.stringify(trends),
+			QUERY_CACHE_TTL_SECONDS.REPORTING
+		);
 		return trends;
 	},
 
@@ -197,10 +196,9 @@ export const createPublicLeagueTrendsRepository = (
 		]);
 		const access = accessResult.rows[0] as AccessRow | undefined;
 		if (!access?.catalog_revision || !access.snapshot_revision) return null;
-		const season = await getCurrentSeason(context);
 		const safeLimit = Math.min(Math.max(limit, 1), 12);
 		const cacheKey = gqlCacheKey(
-			season,
+			context,
 			`public-league-selection:v1:${iso(access.catalog_revision)}:${tournamentId}:${eventId}:${safeLimit}:${iso(access.snapshot_revision)}`
 		);
 		try {
@@ -214,11 +212,12 @@ export const createPublicLeagueTrendsRepository = (
 			context.logger.warn({ err: error, cacheKey }, "Failed to read public league stats cache");
 		}
 		const stats = await readSelectionStats(context, tournamentId, eventId, safeLimit);
-		try {
-			await context.redis.set(cacheKey, JSON.stringify(stats), "EX", env.CACHE_TTL_SECONDS);
-		} catch (error) {
-			context.logger.warn({ err: error, cacheKey }, "Failed to write public league stats cache");
-		}
+		await writeQueryCache(
+			context,
+			cacheKey,
+			JSON.stringify(stats),
+			QUERY_CACHE_TTL_SECONDS.REPORTING
+		);
 		return stats;
 	},
 });

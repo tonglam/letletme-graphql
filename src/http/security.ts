@@ -116,7 +116,7 @@ export const checkRateLimit = async (
 
 export const rateLimitKey = (scope: string, ip: string): string => {
 	const ipHash = createHash("sha256").update(ip).digest("hex").slice(0, 32);
-	return `gql:v2:security:rate:${scope}:${ipHash}`;
+	return `llm:v3:gql:security:rate:${scope}:${ipHash}`;
 };
 
 export const handleRateLimitStorageFailure = ({

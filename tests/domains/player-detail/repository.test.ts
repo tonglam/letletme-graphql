@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { playerDetailRepository } from "../../../src/domains/player-detail/repository";
+import {
+	buildCorePublication,
+	buildSnapshotContext,
+	buildTestCoreData,
+	TestRedis,
+} from "../../helpers/data-publication";
 
 type TableRows = Record<string, unknown[]>;
 
@@ -28,62 +34,68 @@ function createContext(args: {
 	fromCalls?: string[];
 }) {
 	const fromCalls = args.fromCalls ?? [];
-	const cache = new Map<string, string>([["Season:active", "2627"]]);
-	const redis = {
-		get: async (key: string) => {
-			if (key === "event:current") {
-				return args.currentEvent ? JSON.stringify(args.currentEvent) : null;
-			}
-			return cache.get(key) ?? null;
-		},
-		hget: async (key: string, field: string) => {
-			if (key === "Player:2627" && field === "9") {
-				return JSON.stringify({
-					code: 900,
-					webName: "Test Player",
-					teamId: 1,
-					type: 3,
-					price: 75,
-					startPrice: 70,
-					selectedByPercent: "8.5",
-				});
-			}
-			return null;
-		},
-		hgetall: async (key: string) => {
-			if (key === "Team:2627") {
-				return {
-					"1": JSON.stringify({ id: 1, code: 1, name: "Alpha", shortName: "ALP" }),
-					"2": JSON.stringify({ id: 2, code: 2, name: "Beta", shortName: "BET" }),
-					"3": JSON.stringify({ id: 3, code: 3, name: "Gamma", shortName: "GAM" }),
-				};
-			}
-			return {};
-		},
-		mget: async (...keys: string[]) => keys.map(() => null),
-		set: async (key: string, value: string) => {
-			cache.set(key, value);
-			return "OK";
-		},
-		del: async (key: string) => (cache.delete(key) ? 1 : 0),
-		pipeline: () => ({
-			set: (key: string, value: string) => {
-				cache.set(key, value);
-			},
-			exec: async () => [],
-		}),
+	const explicitCurrent = Number(args.currentEvent?.id);
+	const tableCurrent = (args.tables["fpl.events"] ?? []).find(
+		(row) => (row as { is_current?: boolean }).is_current === true
+	) as { id?: number } | undefined;
+	const currentEventId =
+		Number.isInteger(explicitCurrent) && explicitCurrent > 0
+			? explicitCurrent
+			: (tableCurrent?.id ?? null);
+	const base = buildTestCoreData(currentEventId);
+	let fixtures = base.fixtures;
+	if ((args.tables["fpl.fixtures"]?.length ?? 0) > 1) {
+		const teamFixture = fixtures.find(
+			(fixture) => fixture.eventId === 4 && (fixture.teamHId === 1 || fixture.teamAId === 1)
+		)!;
+		const swapFixture = fixtures.find(
+			(fixture) => fixture.eventId === 3 && fixture.teamHId !== 1 && fixture.teamAId !== 1
+		)!;
+		fixtures = fixtures.map((fixture) =>
+			fixture.id === teamFixture.id
+				? { ...fixture, eventId: 3 }
+				: fixture.id === swapFixture.id
+					? { ...fixture, eventId: 4 }
+					: fixture
+		);
+	}
+	const core = {
+		...base,
+		fixtures,
+		players: base.players.map((player) =>
+			player.id === 9
+				? {
+						...player,
+						code: 900,
+						webName: "Test Player",
+						teamId: 1,
+						type: 3,
+						price: 75,
+						startPrice: 70,
+						selectedByPercent: 8.5,
+					}
+				: player
+		),
+		teams: base.teams.map((team) =>
+			team.id === 1
+				? { ...team, code: 1, name: "Alpha", shortName: "ALP" }
+				: team.id === 2
+					? { ...team, code: 2, name: "Beta", shortName: "BET" }
+					: team.id === 3
+						? { ...team, code: 3, name: "Gamma", shortName: "GAM" }
+						: team
+		),
 	};
-	return {
-		currentSeason: { seasonId: 2026, seasonCode: "2627" },
-		redis,
-		data: {
-			read: (table: string) => {
-				fromCalls.push(table);
-				return queryBuilder(args.tables[table] ?? []);
-			},
+	const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
+		dataRevision: "core-7",
+	});
+	context.data = {
+		read: (table: string) => {
+			fromCalls.push(table);
+			return queryBuilder(args.tables[table] ?? []);
 		},
-		logger: { warn: () => undefined, error: () => undefined },
 	} as never;
+	return context;
 }
 
 const marketRow = (overrides: Partial<Record<string, unknown>> = {}) => ({
@@ -154,13 +166,13 @@ describe("playerDetailRepository", () => {
 		expect(detail?.transfersInEvent).toBe(321);
 		expect(detail?.availability?.status).toBe("a");
 		expect(detail?.recentGameweeks).toEqual([]);
-		expect(detail?.fixtures).toHaveLength(1);
+		expect(detail?.fixtures).toHaveLength(38);
 		expect(detail?.fixtures.filter((fixture) => fixture.bgw)).toHaveLength(0);
 		expect(fromCalls).not.toContain("fpl.player_event_snapshots");
 		expect(fromCalls).not.toContain("fpl.player_gameweek_stats");
 	});
 
-	it("marks live points provisional when Redis has no current-event row", async () => {
+	it("marks current-GW points provisional from the core event state", async () => {
 		const context = createContext({
 			currentEvent: null,
 			tables: {

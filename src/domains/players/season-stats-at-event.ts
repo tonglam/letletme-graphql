@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCurrentEventFromRedis } from "../../infra/event";
+import { getCoreDataSnapshot } from "../../infra/data-snapshot";
+import { QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
 import { getCurrentSeason } from "../../infra/season";
 
 export type PlayerStatsScope = "CURRENT_SEASON" | "PREVIOUS_SEASON" | "UNAVAILABLE";
@@ -45,18 +46,7 @@ export type PlayerSeasonStatsAtEvent = {
 	ictIndex: number | null;
 };
 
-type EventPhaseRow = {
-	id: number;
-	finished: boolean | null;
-	is_current: boolean | null;
-	deadline_time_epoch: number | null;
-};
-
 const SEASON_STATS_CACHE_VERSION = "v4";
-const SEASON_STATS_CACHE_TTL = 60 * 60;
-const SEASON_STATS_LIVE_CACHE_TTL = 5 * 60;
-const EMPTY_SEASON_STATS_CACHE_TTL = 5 * 60;
-const EVENT_PHASE_LOOKBACK = 40;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -81,61 +71,40 @@ const unavailableContext = (season: string): PlayerStatsContext => ({
 	asOfEventId: null,
 });
 
-const isStartedEvent = (event: EventPhaseRow, nowEpoch: number): boolean =>
-	Boolean(event.finished) ||
-	Boolean(event.is_current) ||
-	(typeof event.deadline_time_epoch === "number" && event.deadline_time_epoch <= nowEpoch);
-
 /**
- * Resolve the latest event whose current-season statistics are safe to label.
- * A future GW1 is deliberately not accepted: FPL can expose reference totals
- * before the new season starts, but those are not current-season production.
+ * Resolve the latest event whose current-season statistics are safe to label
+ * from the same request-pinned core snapshot. GraphQL deliberately does not
+ * re-derive event state from its local clock.
  */
 export async function resolvePlayerStatsContext(
 	context: GraphQLContext,
 	requestedEventId?: number | null
 ): Promise<PlayerStatsContext> {
-	const season = await getCurrentSeason(context);
+	const [season, snapshot] = await Promise.all([
+		getCurrentSeason(context),
+		getCoreDataSnapshot(context),
+	]);
 	const upperBound =
 		typeof requestedEventId === "number" &&
-		Number.isFinite(requestedEventId) &&
+		Number.isSafeInteger(requestedEventId) &&
 		requestedEventId > 0
-			? Math.trunc(requestedEventId)
+			? requestedEventId
 			: null;
 
-	const current = await getCurrentEventFromRedis(context);
-	if (current?.isCurrent && (upperBound === null || current.id <= upperBound)) {
-		return { scope: "CURRENT_SEASON", season, asOfEventId: current.id };
+	if (
+		snapshot.currentEventId !== null &&
+		(upperBound === null || snapshot.currentEventId <= upperBound)
+	) {
+		return { scope: "CURRENT_SEASON", season, asOfEventId: snapshot.currentEventId };
 	}
 
-	try {
-		let query = context.data
-			.read("fpl.events")
-			.select("id, finished, is_current, deadline_time_epoch");
-		if (upperBound !== null) query = query.lte("id", upperBound);
-		const { data, error } = await query
-			.order("id", { ascending: false })
-			.limit(EVENT_PHASE_LOOKBACK);
-		if (error) {
-			context.logger.warn(
-				{ err: error, requestedEventId: upperBound },
-				"Failed to resolve player-stats season phase"
-			);
-			return unavailableContext(season);
-		}
-
-		const nowEpoch = Math.floor(Date.now() / 1000);
-		const row = ((data ?? []) as EventPhaseRow[]).find((event) => isStartedEvent(event, nowEpoch));
-		return row
-			? { scope: "CURRENT_SEASON", season, asOfEventId: row.id }
-			: unavailableContext(season);
-	} catch (error) {
-		context.logger.warn(
-			{ err: error, requestedEventId: upperBound },
-			"Failed to resolve player-stats season phase"
-		);
-		return unavailableContext(season);
-	}
+	const latestStarted = [...snapshot.events]
+		.filter((event) => upperBound === null || event.id <= upperBound)
+		.filter((event) => event.finished || event.isCurrent)
+		.sort((left, right) => right.id - left.id)[0];
+	return latestStarted
+		? { scope: "CURRENT_SEASON", season, asOfEventId: latestStarted.id }
+		: unavailableContext(season);
 }
 
 const emptySeasonStats = (elementId: number, eventId: number): PlayerSeasonStatsAtEvent => ({
@@ -225,28 +194,19 @@ const isPlayerSeasonStatsAtEvent = (value: unknown): value is PlayerSeasonStatsA
 	(value.totalPoints === null || typeof value.totalPoints === "number") &&
 	(value.form === null || typeof value.form === "number");
 
-const cacheKey = (season: string, elementId: number, eventId: number): string =>
-	gqlCacheKey(season, `players:season-stats:${SEASON_STATS_CACHE_VERSION}:${elementId}:${eventId}`);
+const cacheKey = (context: GraphQLContext, elementId: number, eventId: number): string =>
+	gqlCacheKey(
+		context,
+		`players:season-stats:${SEASON_STATS_CACHE_VERSION}:${elementId}:${eventId}`
+	);
 
 async function isUnfinishedCurrentEvent(
 	context: GraphQLContext,
 	eventId: number
 ): Promise<boolean> {
-	const current = await getCurrentEventFromRedis(context);
-	if (current) return current.id === eventId && !current.finished;
-	try {
-		const { data, error } = await context.data
-			.read("fpl.events")
-			.select("finished")
-			.eq("id", eventId)
-			.limit(1);
-		if (error) return true;
-		const row = data?.[0] as { finished?: boolean | null } | undefined;
-		return row?.finished !== true;
-	} catch (error) {
-		context.logger.warn({ err: error, eventId }, "Failed to resolve season-stat cache freshness");
-		return true;
-	}
+	const snapshot = await getCoreDataSnapshot(context);
+	const event = snapshot.events.find((candidate) => candidate.id === eventId);
+	return event?.finished !== true;
 }
 
 const SEASON_STATS_SELECT = [
@@ -287,14 +247,16 @@ export async function getPlayerSeasonStatsByIdsForContext(
 	elementIds: number[],
 	statsContext: PlayerStatsContext
 ): Promise<Map<number, PlayerSeasonStatsAtEvent>> {
-	const uniqueIds = Array.from(new Set(elementIds.filter((id) => Number.isInteger(id) && id > 0)));
+	const uniqueIds = Array.from(
+		new Set(elementIds.filter((id) => Number.isSafeInteger(id) && id > 0))
+	);
 	const result = new Map<number, PlayerSeasonStatsAtEvent>();
 	const eventId = statsContext.asOfEventId;
 	if (uniqueIds.length === 0 || statsContext.scope !== "CURRENT_SEASON" || eventId === null) {
 		return result;
 	}
 
-	const keys = uniqueIds.map((id) => cacheKey(statsContext.season, id, eventId));
+	const keys = uniqueIds.map((id) => cacheKey(context, id, eventId));
 	let cachedRows: Array<string | null> = uniqueIds.map(() => null);
 	try {
 		cachedRows = await context.redis.mget(...keys);
@@ -326,8 +288,8 @@ export async function getPlayerSeasonStatsByIdsForContext(
 
 	if (missingIds.length === 0) return result;
 	const cacheTtl = (await isUnfinishedCurrentEvent(context, eventId))
-		? SEASON_STATS_LIVE_CACHE_TTL
-		: SEASON_STATS_CACHE_TTL;
+		? QUERY_CACHE_TTL_SECONDS.REPORTING
+		: QUERY_CACHE_TTL_SECONDS.HISTORICAL;
 
 	const { data, error } = await context.data
 		.read("fpl.player_event_snapshots")
@@ -352,7 +314,7 @@ export async function getPlayerSeasonStatsByIdsForContext(
 		found.add(mapped.elementId);
 		result.set(mapped.elementId, mapped);
 		pipeline.set(
-			cacheKey(statsContext.season, mapped.elementId, eventId),
+			cacheKey(context, mapped.elementId, eventId),
 			JSON.stringify(mapped),
 			"EX",
 			cacheTtl
@@ -363,10 +325,10 @@ export async function getPlayerSeasonStatsByIdsForContext(
 		const empty = emptySeasonStats(id, eventId);
 		result.set(id, empty);
 		pipeline.set(
-			cacheKey(statsContext.season, id, eventId),
+			cacheKey(context, id, eventId),
 			JSON.stringify(empty),
 			"EX",
-			EMPTY_SEASON_STATS_CACHE_TTL
+			QUERY_CACHE_TTL_SECONDS.METADATA
 		);
 	}
 	try {
@@ -383,7 +345,7 @@ export async function getPlayerSeasonStatsForContext(
 	elementId: number,
 	statsContext: PlayerStatsContext
 ): Promise<PlayerSeasonStatsAtEvent | null> {
-	if (!Number.isInteger(elementId) || elementId <= 0) return null;
+	if (!Number.isSafeInteger(elementId) || elementId <= 0) return null;
 	const stats = await getPlayerSeasonStatsByIdsForContext(context, [elementId], statsContext);
 	return stats.get(elementId) ?? null;
 }

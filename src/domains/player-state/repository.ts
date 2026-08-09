@@ -1246,7 +1246,7 @@ export const createPlayerStateRepository = (
 			horizon: safeHorizon,
 		};
 		const profileKey = gqlCacheKey(
-			season,
+			context,
 			`player_state:profile:${playerId}:${stableHash(sourceVector)}`
 		);
 		const cached = await readCache(context, profileKey, profileGuard);

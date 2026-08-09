@@ -19,8 +19,16 @@ import {
 	tournamentsRepository,
 } from "../../../src/domains/tournaments/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
+import { gqlCacheKey } from "../../../src/infra/cache-key";
 
-const CACHE_PREFIX = "gql:v2:2526:";
+const testCacheKey = (key: string): string =>
+	gqlCacheKey(
+		{
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
+		} as GraphQLContext,
+		key
+	);
 
 type QueryAction = { type: string; args: unknown[] };
 
@@ -364,10 +372,10 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 		entryEventResultsError?: unknown;
 		cacheSeed?: string | null;
 	}): GraphQLContext => {
-		const redisState = new Map<string, string>([["Season:active", "2526"]]);
+		const redisState = new Map<string, string>();
 		if (options.cacheSeed) {
 			redisState.set(
-				`${CACHE_PREFIX}tournaments:event-results:{"eventId":33,"tournamentId":1}`,
+				testCacheKey(`tournaments:event-results:{"eventId":33,"tournamentId":1}`),
 				options.cacheSeed
 			);
 		}
@@ -456,6 +464,7 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 				},
 			} as never,
 			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
 			data: {
 				read(table: string) {
 					return makeBuilder(table);
@@ -719,7 +728,7 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 		expect(result[1].eventChip).toBe("freehit");
 
 		const cached = await context.redis.get(
-			`${CACHE_PREFIX}tournaments:event-results:{"eventId":33,"tournamentId":1}`
+			testCacheKey(`tournaments:event-results:{"eventId":33,"tournamentId":1}`)
 		);
 		expect(cached).not.toBeNull();
 	});
@@ -733,10 +742,10 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		snapshotError?: unknown;
 		cacheSeed?: string | null;
 	}): GraphQLContext => {
-		const redisState = new Map<string, string>([["Season:active", "2526"]]);
+		const redisState = new Map<string, string>();
 		if (options.cacheSeed) {
 			redisState.set(
-				`${CACHE_PREFIX}tournaments:ranking-summary:{"entryId":15702,"eventId":3,"tournamentId":1}`,
+				testCacheKey(`tournaments:ranking-summary:{"entryId":15702,"eventId":3,"tournamentId":1}`),
 				options.cacheSeed
 			);
 		}
@@ -807,6 +816,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 				},
 			} as never,
 			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
 			data: {
 				read(table: string) {
 					return makeBuilder(table);
@@ -1184,8 +1194,7 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 			},
 		};
 		const cache = new Map<string, string>([
-			["Season:active", "2526"],
-			[`${CACHE_PREFIX}tournaments:entry-ids:7`, JSON.stringify([999])],
+			[testCacheKey("tournaments:entry-ids:7"), JSON.stringify([999])],
 		]);
 		const context = {
 			database: {
@@ -1194,6 +1203,7 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 				},
 			} as never,
 			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
 			data: {
 				read(table: string) {
 					return table === "competition.tournaments" ? readinessQuery : membershipQuery;
@@ -1234,8 +1244,7 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 	it("does not reuse or repopulate a roster cache before standings publish", async () => {
 		let membershipReads = 0;
 		const cache = new Map<string, string>([
-			["Season:active", "2526"],
-			[`${CACHE_PREFIX}tournaments:entry-ids:7`, JSON.stringify([999])],
+			[testCacheKey("tournaments:entry-ids:7"), JSON.stringify([999])],
 		]);
 		const membershipQuery = {
 			select() {
@@ -1264,6 +1273,7 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 				},
 			} as never,
 			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
 			data: {
 				read(table: string) {
 					return table === "competition.tournaments" ? readinessQuery : membershipQuery;
@@ -1294,7 +1304,7 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 
 		expect(await tournamentsRepository.getTournamentEntryIds(context, 7)).toEqual([101, 202]);
 		expect(membershipReads).toBe(1);
-		expect(cache.has(`${CACHE_PREFIX}tournaments:entry-ids:7`)).toBe(false);
+		expect(cache.has(testCacheKey("tournaments:entry-ids:7"))).toBe(false);
 	});
 });
 
@@ -1333,7 +1343,7 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 			created_at: updatedAt,
 			updated_at: updatedAt,
 		};
-		const cache = new Map<string, string>([["Season:active", "2526"]]);
+		const cache = new Map<string, string>();
 		let cacheWrites = 0;
 		let cacheTtl: number | undefined;
 		const membershipQuery = {
@@ -1362,6 +1372,7 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 				},
 			} as never,
 			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
 			data: {
 				read(table: string) {
 					return table === "competition.tournaments" ? infoQuery : membershipQuery;
@@ -1397,7 +1408,7 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 		expect(result[0]?.standingsReadyAt).toBeNull();
 		expect(cacheWrites).toBe(1);
 		expect(cacheTtl).toBe(15);
-		expect(cache.has(`${CACHE_PREFIX}tournaments:entry:55`)).toBe(true);
+		expect(cache.has(testCacheKey("tournaments:entry:55"))).toBe(true);
 
 		const cachedResult = await tournamentsRepository.getEntryTournaments(context, 55);
 		expect(cachedResult).toHaveLength(1);
@@ -1414,10 +1425,10 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 		battleGroupError?: unknown;
 		cacheSeed?: string | null;
 	}): GraphQLContext & { __redisState: Map<string, string> } => {
-		const redisState = new Map<string, string>([["Season:active", "2526"]]);
+		const redisState = new Map<string, string>();
 		if (options.cacheSeed !== undefined && options.cacheSeed !== null) {
 			redisState.set(
-				`${CACHE_PREFIX}tournaments:battle-results:{"eventId":15,"tournamentId":7}`,
+				testCacheKey(`tournaments:battle-results:{"eventId":15,"tournamentId":7}`),
 				options.cacheSeed
 			);
 		}
@@ -1489,6 +1500,7 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 				},
 			} as never,
 			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
 			data: { read: (table: string) => makeBuilder(table) } as never,
 			redis: {
 				async get(key: string) {
@@ -1593,7 +1605,7 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 		expect(result).toEqual([]);
 		expect(
 			context.__redisState.get(
-				`${CACHE_PREFIX}tournaments:battle-results:{"eventId":15,"tournamentId":7}`
+				testCacheKey(`tournaments:battle-results:{"eventId":15,"tournamentId":7}`)
 			)
 		).toBe(JSON.stringify([]));
 	});
@@ -1633,7 +1645,7 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 				{ id: 2002, entry_name: "Away Side", player_name: "Bob" },
 			],
 		});
-		context.__redisState.set(`${CACHE_PREFIX}tournaments:entry-ids:7`, JSON.stringify([1001]));
+		context.__redisState.set(testCacheKey("tournaments:entry-ids:7"), JSON.stringify([1001]));
 
 		const result = await tournamentsRepository.getTournamentBattleGroupResults(context, 7, 15);
 
@@ -1718,9 +1730,9 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 		const tournamentInCalls: unknown[][] = [];
 		let matchReads = 0;
 		let membershipReads = 0;
-		const redisState = new Map<string, string>([["Season:active", "2526"]]);
+		const redisState = new Map<string, string>();
 		const h2hCacheKey = (tournamentIds: number[]) =>
-			`${CACHE_PREFIX}tournaments:entry-h2h:v3:100:${JSON.stringify(tournamentIds)}`;
+			testCacheKey(`tournaments:entry-h2h:v3:100:${JSON.stringify(tournamentIds)}`);
 
 		const makeBuilder = (table: string) => {
 			const actions: QueryAction[] = [];
@@ -1788,6 +1800,7 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 				},
 			} as never,
 			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
 			data: { read: (table: string) => makeBuilder(table) },
 			redis: {
 				async get(key: string) {
