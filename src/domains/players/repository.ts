@@ -319,7 +319,8 @@ interface PlayersRepository {
 		limit: number,
 		cursor: number | null | undefined,
 		search?: string | null,
-		filter?: PlayersFilter | null
+		filter?: PlayersFilter | null,
+		sort?: PlayerPickerSort
 	): Promise<PlayersForPickerPayload>;
 	listPlayers(
 		context: GraphQLContext,
