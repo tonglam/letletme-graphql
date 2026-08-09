@@ -99,13 +99,18 @@ jobs:
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
 
-            # Write env file from secret
-            printf '%s' "$GRAPHQL_ENV" > .env.deploy
+            # Keep the deployment-only DDL URL out of the long-lived runtime
+            # container. The migration container receives the complete file;
+            # the service starts from a copy with that one variable removed.
+            printf '%s' "$GRAPHQL_ENV" > .env.migrations
+            awk -F= '$1 != "MIGRATIONS_DATABASE_URL"' .env.migrations > .env.runtime
+            rm -f .env.deploy
+            trap 'rm -f .env.migrations' EXIT
 
-            APP_IMAGE="$IMAGE_REF" docker compose pull graphql
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run migrate
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run migrate:status
-            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build
+            APP_ENV_FILE=.env.runtime APP_IMAGE="$IMAGE_REF" docker compose pull graphql
+            APP_ENV_FILE=.env.migrations APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run migrate
+            APP_ENV_FILE=.env.migrations APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run migrate:status
+            APP_ENV_FILE=.env.runtime APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build
 
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
@@ -113,14 +118,14 @@ jobs:
               fi
               if [ "$attempt" -eq 30 ]; then
                 echo "Health check failed"
-                APP_IMAGE="$IMAGE_REF" docker compose ps
-                APP_IMAGE="$IMAGE_REF" docker compose logs --tail 100 graphql || true
+                APP_ENV_FILE=.env.runtime APP_IMAGE="$IMAGE_REF" docker compose ps
+                APP_ENV_FILE=.env.runtime APP_IMAGE="$IMAGE_REF" docker compose logs --tail 100 graphql || true
                 exit 1
               fi
               sleep 2
             done
 
-            APP_IMAGE="$IMAGE_REF" docker compose ps
+            APP_ENV_FILE=.env.runtime APP_IMAGE="$IMAGE_REF" docker compose ps
 
             # Retain the current and previous two repository images. Never prune
             # unrelated images on this shared VPS.

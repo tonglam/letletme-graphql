@@ -64,6 +64,41 @@ async function ensureLedger(client: PoolClient): Promise<void> {
   `);
 }
 
+async function reconcileRuntimeCatalogRead(client: PoolClient): Promise<void> {
+	// Migrations are ledgered and therefore skipped on later deploys. Reconcile
+	// this role-dependent ACL/policy on every run so a rotated DATABASE_URL role
+	// can read the catalog without making the table public.
+	await client.query(`
+    DO $reconcile$
+    DECLARE
+      runtime_role text := current_setting('letletme.runtime_db_role', true);
+    BEGIN
+      IF runtime_role IS NULL OR btrim(runtime_role) = '' THEN
+        RETURN;
+      END IF;
+      IF to_regclass('public.public_league_trends_catalog') IS NULL THEN
+        RETURN;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = runtime_role) THEN
+        RAISE EXCEPTION 'runtime database role % does not exist', runtime_role;
+      END IF;
+      EXECUTE format(
+        'GRANT SELECT ON TABLE public.public_league_trends_catalog TO %I',
+        runtime_role
+      );
+      EXECUTE 'DROP POLICY IF EXISTS public_league_trends_catalog_runtime_read
+        ON public.public_league_trends_catalog';
+      EXECUTE format(
+        'CREATE POLICY public_league_trends_catalog_runtime_read
+           ON public.public_league_trends_catalog
+           FOR SELECT TO %I USING (enabled = true)',
+        runtime_role
+      );
+    END
+    $reconcile$
+  `);
+}
+
 async function main(): Promise<void> {
 	const client = await pool.connect();
 	try {
@@ -153,6 +188,7 @@ async function main(): Promise<void> {
 			}
 		}
 		if (statusOnly && (pending > 0 || invalid)) process.exitCode = 1;
+		if (!statusOnly) await reconcileRuntimeCatalogRead(client);
 	} finally {
 		await client
 			.query("SELECT pg_advisory_unlock(hashtext('letletme_graphql_migrations'))")

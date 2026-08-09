@@ -130,6 +130,16 @@ const asBool = (value: unknown): boolean | null => {
 
 const asStr = (value: unknown): string | null => (typeof value === "string" ? value : null);
 
+const hasOwn = (row: Record<string, unknown>, key: string): boolean =>
+	Object.prototype.hasOwnProperty.call(row, key);
+
+const pickField = (row: Record<string, unknown>, keys: string[]): unknown => {
+	for (const key of keys) {
+		if (hasOwn(row, key)) return row[key];
+	}
+	return undefined;
+};
+
 const parseJsonUnknown = (value: string): unknown | null => {
 	try {
 		return JSON.parse(value) as unknown;
@@ -144,11 +154,11 @@ const mapSyncJobFixture = (raw: unknown): Fixture | null => {
 	}
 	const row = raw as Record<string, unknown>;
 
-	const id = asNum(row.id);
-	const code = asNum(row.code);
-	const eventId = asNum(row.eventId ?? row.event ?? row.event_id);
-	const teamH = asNum(row.teamH ?? row.team_h ?? row.teamHId ?? row.team_h_id);
-	const teamA = asNum(row.teamA ?? row.team_a ?? row.teamAId ?? row.team_a_id);
+	const id = asNum(pickField(row, ["id"]));
+	const code = asNum(pickField(row, ["code"]));
+	const eventId = asNum(pickField(row, ["eventId", "event", "event_id"]));
+	const teamH = asNum(pickField(row, ["teamH", "team_h", "teamHId", "team_h_id"]));
+	const teamA = asNum(pickField(row, ["teamA", "team_a", "teamAId", "team_a_id"]));
 
 	const normalizedId = asPositiveInt(id);
 	const normalizedEventId = asPositiveInt(eventId);
@@ -165,16 +175,48 @@ const mapSyncJobFixture = (raw: unknown): Fixture | null => {
 		return null;
 	}
 
-	const finished = asBool(row.finished) ?? false;
-	const finishedProvisional = asBool(row.finishedProvisional ?? row.finished_provisional) ?? false;
-	const kickoffTime = asStr(row.kickoffTime ?? row.kickoff_time);
-	const minutes = asNum(row.minutes) ?? 0;
-	const started = asBool(row.started);
+	const finishedRaw = pickField(row, ["finished"]);
+	const finished = finishedRaw === undefined ? false : asBool(finishedRaw);
+	const finishedProvisionalRaw = pickField(row, ["finishedProvisional", "finished_provisional"]);
+	const finishedProvisional =
+		finishedProvisionalRaw === undefined ? false : asBool(finishedProvisionalRaw);
+	const kickoffRaw = pickField(row, ["kickoffTime", "kickoff_time"]);
+	const kickoffTime = asStr(kickoffRaw);
+	const minutesRaw = pickField(row, ["minutes"]);
+	const minutes = minutesRaw === undefined ? 0 : asNum(minutesRaw);
+	const startedRaw = pickField(row, ["started"]);
+	const started = startedRaw === undefined ? null : asBool(startedRaw);
 
-	const teamHScore = asNum(row.teamHScore ?? row.team_h_score ?? row.teamHScore);
-	const teamAScore = asNum(row.teamAScore ?? row.team_a_score ?? row.teamAScore);
-	const teamHDifficulty = asNum(row.teamHDifficulty ?? row.team_h_difficulty);
-	const teamADifficulty = asNum(row.teamADifficulty ?? row.team_a_difficulty);
+	const teamHScoreRaw = pickField(row, ["teamHScore", "team_h_score"]);
+	const teamAScoreRaw = pickField(row, ["teamAScore", "team_a_score"]);
+	const teamHDifficultyRaw = pickField(row, ["teamHDifficulty", "team_h_difficulty"]);
+	const teamADifficultyRaw = pickField(row, ["teamADifficulty", "team_a_difficulty"]);
+	const teamHScore =
+		teamHScoreRaw === undefined || teamHScoreRaw === null ? null : asNum(teamHScoreRaw);
+	const teamAScore =
+		teamAScoreRaw === undefined || teamAScoreRaw === null ? null : asNum(teamAScoreRaw);
+	const teamHDifficulty =
+		teamHDifficultyRaw === undefined || teamHDifficultyRaw === null
+			? null
+			: asNum(teamHDifficultyRaw);
+	const teamADifficulty =
+		teamADifficultyRaw === undefined || teamADifficultyRaw === null
+			? null
+			: asNum(teamADifficultyRaw);
+
+	if (
+		finished === null ||
+		finishedProvisional === null ||
+		minutes === null ||
+		(startedRaw !== undefined && startedRaw !== null && started === null) ||
+		(kickoffRaw !== undefined && kickoffRaw !== null && kickoffTime === null) ||
+		(teamHScoreRaw !== undefined && teamHScoreRaw !== null && teamHScore === null) ||
+		(teamAScoreRaw !== undefined && teamAScoreRaw !== null && teamAScore === null) ||
+		(teamHDifficultyRaw !== undefined && teamHDifficultyRaw !== null && teamHDifficulty === null) ||
+		(teamADifficultyRaw !== undefined && teamADifficultyRaw !== null && teamADifficulty === null)
+	) {
+		return null;
+	}
 
 	// A present but invalid timestamp means this cache field is not authoritative.
 	if (kickoffTime !== null && toIso(kickoffTime) === null) {

@@ -7,6 +7,7 @@ describe("public league trends catalog permissions", () => {
 			"migrations/forward/202608100003_public_league_trends_catalog_runtime_read.sql",
 			"utf8"
 		);
+		const runner = readFileSync("scripts/migrate.ts", "utf8");
 
 		expect(migration).toContain("current_setting('letletme.runtime_db_role', true)");
 		expect(migration).toContain("GRANT SELECT ON TABLE public.public_league_trends_catalog TO %I");
@@ -15,5 +16,8 @@ describe("public league trends catalog permissions", () => {
 		expect(migration).not.toContain(
 			"GRANT SELECT ON TABLE public.public_league_trends_catalog TO PUBLIC"
 		);
+		expect(runner).toContain("reconcileRuntimeCatalogRead");
+		expect(runner).toContain("to_regclass('public.public_league_trends_catalog')");
+		expect(runner).toContain("GRANT SELECT ON TABLE public.public_league_trends_catalog TO %I");
 	});
 });

@@ -115,6 +115,15 @@ const parseCachedName = (value: unknown): string | null => {
 	return name.length > 0 ? name : null;
 };
 
+const GRAPHQL_INT_MIN = -2_147_483_648;
+const GRAPHQL_INT_MAX = 2_147_483_647;
+
+const parseCachedInt = (value: unknown): number | null => {
+	if (value === null || value === undefined) return null;
+	if (typeof value !== "number" || !Number.isInteger(value)) return null;
+	return value >= GRAPHQL_INT_MIN && value <= GRAPHQL_INT_MAX ? value : null;
+};
+
 const mapEntryEventResult = (row: DbEntryEventResultRow): EntryEventResult => ({
 	entryId: row.entry_id,
 	eventId: row.event_id,
@@ -243,13 +252,11 @@ export const entriesRepository: EntriesRepository = {
 				if (!entryName || !playerName) {
 					throw new Error("Invalid EntryInfo names");
 				}
-				const hasValidLastEventId =
-					parsed.lastEventId === null ||
-					(typeof parsed.lastEventId === "number" && Number.isFinite(parsed.lastEventId));
+				const lastEventId = parseCachedInt(parsed.lastEventId);
+				const overallPoints = parseCachedInt(parsed.overallPoints);
+				const hasValidLastEventId = parsed.lastEventId === null || lastEventId !== null;
 				const hasValidBaseline =
-					hasValidLastEventId &&
-					(typeof parsed.lastEventId !== "number" ||
-						(typeof parsed.overallPoints === "number" && Number.isFinite(parsed.overallPoints)));
+					hasValidLastEventId && (typeof parsed.lastEventId !== "number" || overallPoints !== null);
 				if (!hasValidBaseline) {
 					// A malformed current baseline can corrupt live point deltas. Let the
 					// authoritative database row provide the complete entry instead.
@@ -260,19 +267,17 @@ export const entriesRepository: EntriesRepository = {
 					entryName,
 					playerName,
 					region: parsed.region ? String(parsed.region) : null,
-					startedEvent: typeof parsed.startedEvent === "number" ? parsed.startedEvent : null,
-					overallPoints: typeof parsed.overallPoints === "number" ? parsed.overallPoints : null,
-					overallRank: typeof parsed.overallRank === "number" ? parsed.overallRank : null,
-					bank: typeof parsed.bank === "number" ? parsed.bank : null,
-					teamValue: typeof parsed.teamValue === "number" ? parsed.teamValue : null,
-					totalTransfers: typeof parsed.totalTransfers === "number" ? parsed.totalTransfers : null,
-					lastEventId: typeof parsed.lastEventId === "number" ? parsed.lastEventId : null,
-					lastOverallPoints:
-						typeof parsed.lastOverallPoints === "number" ? parsed.lastOverallPoints : null,
-					lastOverallRank:
-						typeof parsed.lastOverallRank === "number" ? parsed.lastOverallRank : null,
-					lastTeamValue: typeof parsed.lastTeamValue === "number" ? parsed.lastTeamValue : null,
-					lastBank: typeof parsed.lastBank === "number" ? parsed.lastBank : null,
+					startedEvent: parseCachedInt(parsed.startedEvent),
+					overallPoints,
+					overallRank: parseCachedInt(parsed.overallRank),
+					bank: parseCachedInt(parsed.bank),
+					teamValue: parseCachedInt(parsed.teamValue),
+					totalTransfers: parseCachedInt(parsed.totalTransfers),
+					lastEventId,
+					lastOverallPoints: parseCachedInt(parsed.lastOverallPoints),
+					lastOverallRank: parseCachedInt(parsed.lastOverallRank),
+					lastTeamValue: parseCachedInt(parsed.lastTeamValue),
+					lastBank: parseCachedInt(parsed.lastBank),
 				};
 			} catch {
 				// Parse error — fall through to DB
@@ -352,13 +357,12 @@ export const entriesRepository: EntriesRepository = {
 					const parsed = JSON.parse(value) as Record<string, unknown>;
 					const entryName = parseCachedName(parsed.entryName);
 					const playerName = parseCachedName(parsed.playerName);
-					const hasValidLastEventId =
-						parsed.lastEventId === null ||
-						(typeof parsed.lastEventId === "number" && Number.isFinite(parsed.lastEventId));
+					const lastEventId = parseCachedInt(parsed.lastEventId);
+					const overallPoints = parseCachedInt(parsed.overallPoints);
+					const hasValidLastEventId = parsed.lastEventId === null || lastEventId !== null;
 					const hasValidBaseline =
 						hasValidLastEventId &&
-						(typeof parsed.lastEventId !== "number" ||
-							(typeof parsed.overallPoints === "number" && Number.isFinite(parsed.overallPoints)));
+						(typeof parsed.lastEventId !== "number" || overallPoints !== null);
 					if (!entryName || !playerName || !hasValidBaseline) {
 						missingIds.push(uniqueIds[i]);
 						continue;
@@ -369,19 +373,16 @@ export const entriesRepository: EntriesRepository = {
 						playerName,
 						region: parsed.region ? String(parsed.region) : null,
 						startedEvent: typeof parsed.startedEvent === "number" ? parsed.startedEvent : null,
-						overallPoints: typeof parsed.overallPoints === "number" ? parsed.overallPoints : null,
-						overallRank: typeof parsed.overallRank === "number" ? parsed.overallRank : null,
-						bank: typeof parsed.bank === "number" ? parsed.bank : null,
-						teamValue: typeof parsed.teamValue === "number" ? parsed.teamValue : null,
-						totalTransfers:
-							typeof parsed.totalTransfers === "number" ? parsed.totalTransfers : null,
-						lastEventId: typeof parsed.lastEventId === "number" ? parsed.lastEventId : null,
-						lastOverallPoints:
-							typeof parsed.lastOverallPoints === "number" ? parsed.lastOverallPoints : null,
-						lastOverallRank:
-							typeof parsed.lastOverallRank === "number" ? parsed.lastOverallRank : null,
-						lastTeamValue: typeof parsed.lastTeamValue === "number" ? parsed.lastTeamValue : null,
-						lastBank: typeof parsed.lastBank === "number" ? parsed.lastBank : null,
+						overallPoints,
+						overallRank: parseCachedInt(parsed.overallRank),
+						bank: parseCachedInt(parsed.bank),
+						teamValue: parseCachedInt(parsed.teamValue),
+						totalTransfers: parseCachedInt(parsed.totalTransfers),
+						lastEventId,
+						lastOverallPoints: parseCachedInt(parsed.lastOverallPoints),
+						lastOverallRank: parseCachedInt(parsed.lastOverallRank),
+						lastTeamValue: parseCachedInt(parsed.lastTeamValue),
+						lastBank: parseCachedInt(parsed.lastBank),
 					});
 				} else {
 					missingIds.push(uniqueIds[i]);

@@ -51,14 +51,16 @@ const parseNullableNumber = (value: unknown): number | null => {
 	if (value === null || value === undefined) {
 		return null;
 	}
-	const parsed = typeof value === "string" ? Number(value.trim()) : Number(value);
+	if (typeof value !== "number" && typeof value !== "string") return null;
+	const parsed = typeof value === "string" ? Number(value.trim()) : value;
 	return Number.isInteger(parsed) && Number.isFinite(parsed) ? parsed : null;
 };
 
 const parseRequiredInteger = (value: unknown): number | null => {
 	if (value === null || value === undefined) return null;
 	if (typeof value === "string" && value.trim().length === 0) return null;
-	const parsed = typeof value === "string" ? Number(value.trim()) : Number(value);
+	if (typeof value !== "number" && typeof value !== "string") return null;
+	const parsed = typeof value === "string" ? Number(value.trim()) : value;
 	return Number.isInteger(parsed) && Number.isFinite(parsed) ? parsed : null;
 };
 
