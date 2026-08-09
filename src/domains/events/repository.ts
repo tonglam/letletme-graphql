@@ -227,6 +227,15 @@ const filterAndSliceEvents = (
 		})
 		.slice(offset, offset + limit);
 
+const applyCurrentEventPointer = (events: Event[], currentEventId: number | null): Event[] => {
+	if (!currentEventId) return events;
+	return events.map((event) => ({
+		...event,
+		isCurrent: event.id === currentEventId,
+		isNext: event.id === currentEventId + 1,
+	}));
+};
+
 export type CurrentEventInfo = {
 	season: string;
 	currentEvent: number | null;
@@ -407,12 +416,12 @@ export const eventsRepository: EventsRepository = {
 		const normalizedFilter = normalizeFilter(filter);
 		const safeLimit = clampLimit(limit);
 		const safeOffset = Math.max(Number.isFinite(offset) ? offset : 0, 0);
+		const currentEvent = await getCurrentEventFromRedis(context);
 
 		// For isCurrent/isNext filters, derive the answer from event:current rather than
 		// trusting the flags stored in Event:{season}. The sync writes event:current first
 		// and updates the hash flags separately, so the hash can lag behind.
 		if (normalizedFilter?.isCurrent === true || normalizedFilter?.isNext === true) {
-			const currentEvent = await getCurrentEventFromRedis(context);
 			if (currentEvent) {
 				const season = await getCurrentSeason(context);
 
@@ -477,9 +486,10 @@ export const eventsRepository: EventsRepository = {
 					"Event hash contains malformed rows; falling back to database"
 				);
 			} else {
-				const events = parsedEvents
-					.filter((e): e is Event => e !== null)
-					.sort((a, b) => a.id - b.id);
+				const events = applyCurrentEventPointer(
+					parsedEvents.filter((e): e is Event => e !== null).sort((a, b) => a.id - b.id),
+					currentEvent?.id ?? null
+				);
 
 				return filterAndSliceEvents(events, normalizedFilter, safeOffset, safeLimit);
 			}
@@ -513,6 +523,9 @@ export const eventsRepository: EventsRepository = {
 			throw new Error("Failed to fetch events");
 		}
 
-		return (data as DbEventRow[] | null)?.map(mapEvent) ?? [];
+		return applyCurrentEventPointer(
+			(data as DbEventRow[] | null)?.map(mapEvent) ?? [],
+			currentEvent?.id ?? null
+		);
 	},
 };

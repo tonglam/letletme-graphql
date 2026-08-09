@@ -1168,7 +1168,12 @@ export const tournamentsRepository: TournamentsRepository = {
 				{ tournamentId, groupMode: tournament.groupMode },
 				"Tournament event results only supported for POINTS_RACES; returning empty"
 			);
-			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
+			await writeCacheBestEffort(
+				context,
+				cacheKey,
+				JSON.stringify([]),
+				"Failed to write tournament event results cache"
+			);
 			return [];
 		}
 

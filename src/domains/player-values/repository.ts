@@ -707,19 +707,10 @@ export const playerValuesRepository: PlayerValuesRepository = {
 		}
 
 		try {
-			let query = context.supabase
+			const query = context.supabase
 				.from("player_values")
 				.select("element_id, value, last_value, change_date, change_type")
-				.eq("element_id", args.playerId)
-				.order("change_date", { ascending: false });
-
-			if (args.fromDate) {
-				query = query.gte("change_date", getCompactDateString(args.fromDate));
-			}
-
-			if (args.toDate) {
-				query = query.lte("change_date", getCompactDateString(args.toDate));
-			}
+				.eq("element_id", args.playerId);
 
 			const { data, error } = await query;
 
@@ -731,10 +722,20 @@ export const playerValuesRepository: PlayerValuesRepository = {
 				throw new Error(error.message, { cause: error });
 			}
 
-			const rows = ((data as DbPlayerValueHistoryRow[] | null) ?? []).filter((row) => {
-				if (row.change_type?.toLowerCase() === "start") return false;
-				return row.last_value !== 0;
-			});
+			const fromEpoch = args.fromDate?.getTime() ?? null;
+			const toEpoch = args.toDate?.getTime() ?? null;
+			const rows = ((data as DbPlayerValueHistoryRow[] | null) ?? [])
+				.map((row) => ({ row, parsedDate: parseChangeDate(row.change_date) }))
+				.filter(
+					(item): item is { row: DbPlayerValueHistoryRow; parsedDate: Date } =>
+						item.parsedDate !== null &&
+						(fromEpoch === null || item.parsedDate.getTime() >= fromEpoch) &&
+						(toEpoch === null || item.parsedDate.getTime() <= toEpoch) &&
+						item.row.change_type?.toLowerCase() !== "start" &&
+						item.row.last_value !== 0
+				)
+				.sort((a, b) => b.parsedDate.getTime() - a.parsedDate.getTime())
+				.map((item) => item.row);
 			if (rows.length === 0) {
 				try {
 					await context.redis.set(cacheKey, NULL_SENTINEL, "EX", 3600);
