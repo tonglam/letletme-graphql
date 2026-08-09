@@ -158,6 +158,9 @@ export type PlayersForPickerPayload = {
 	nextCursor: number | null;
 };
 
+export type PlayerPickerSort =
+	"NAME_ASC" | "TOTAL_POINTS_DESC" | "FORM_DESC" | "PRICE_ASC" | "PRICE_DESC" | "OWNERSHIP_DESC";
+
 type DbPickerRow = {
 	id: number;
 	web_name: string;
@@ -342,7 +345,8 @@ interface PlayersRepository {
 		limit: number,
 		cursor: number | null | undefined,
 		search?: string | null,
-		filter?: PlayersFilter | null
+		filter?: PlayersFilter | null,
+		sort?: PlayerPickerSort
 	): Promise<PlayersForPickerPayload>;
 	listPlayers(
 		context: GraphQLContext,
@@ -738,10 +742,11 @@ export const playersRepository: PlayersRepository = {
 		limit: number,
 		cursor: number | null | undefined,
 		search?: string | null,
-		filter?: PlayersFilter | null
+		filter?: PlayersFilter | null,
+		sort: PlayerPickerSort = "TOTAL_POINTS_DESC"
 	): Promise<PlayersForPickerPayload> {
 		const safeLimit = clampLimit(limit);
-		const safeCursor = cursor && Number.isFinite(cursor) && cursor > 0 ? cursor : null;
+		const safeCursor = cursor && Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0;
 		const safeSearch = search?.trim().slice(0, 50) || null;
 		const safeFilter = normalizeFilter(filter);
 		const season = await getCurrentSeason(context);
@@ -749,7 +754,7 @@ export const playersRepository: PlayersRepository = {
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
 		const cacheKey = gqlCacheKey(
 			season,
-			`players:picker:v6:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${safeLimit}:${safeCursor ?? 0}`
+			`players:picker:v7:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${safeCursor}`
 		);
 
 		const cached = await readJsonCache(
@@ -839,7 +844,10 @@ export const playersRepository: PlayersRepository = {
 
 		const rows: DbPickerRow[] = [];
 		const items: PlayerPickerItem[] = [];
-		let pageCursor = safeCursor;
+		// The public cursor is an offset in the globally sorted result. Always
+		// scan the source from its beginning so changing sort order cannot skip
+		// rows based on the old player-ID keyset cursor.
+		let pageCursor: number | null = null;
 		let hasMoreRows: boolean;
 		for (;;) {
 			const pageRows = await fetchRows(pageCursor);
@@ -850,13 +858,7 @@ export const playersRepository: PlayersRepository = {
 				)
 			);
 			hasMoreRows = pageRows.length >= scanLimit;
-			const hasTeamFilter = safeFilter?.teamId !== undefined;
-			if (
-				(!hasPriceFilter && !hasTeamFilter) ||
-				!hasMoreRows ||
-				items.length >= safeLimit ||
-				pageRows.length === 0
-			) {
+			if (!hasMoreRows || pageRows.length === 0) {
 				break;
 			}
 			const nextPageCursor = pageRows[pageRows.length - 1].id;
@@ -866,14 +868,33 @@ export const playersRepository: PlayersRepository = {
 			pageCursor = nextPageCursor;
 		}
 
-		const returnedItems = items.slice(0, safeLimit);
-		const nextCursor = hasPriceFilter
-			? returnedItems.length >= safeLimit
-				? (returnedItems[returnedItems.length - 1]?.id ?? null)
-				: null
-			: rows.length >= safeLimit
-				? rows[rows.length - 1].id
-				: null;
+		const numberDesc = (left: number | null, right: number | null): number =>
+			(right ?? -Infinity) - (left ?? -Infinity);
+		const sortedItems = [...items].sort((left, right) => {
+			const byName = left.webName.localeCompare(right.webName);
+			switch (sort) {
+				case "NAME_ASC":
+					return byName || left.id - right.id;
+				case "FORM_DESC":
+					return numberDesc(left.form, right.form) || byName || left.id - right.id;
+				case "PRICE_ASC":
+					return left.price - right.price || byName || left.id - right.id;
+				case "PRICE_DESC":
+					return right.price - left.price || byName || left.id - right.id;
+				case "OWNERSHIP_DESC":
+					return (
+						numberDesc(left.selectedByPercent, right.selectedByPercent) ||
+						byName ||
+						left.id - right.id
+					);
+				case "TOTAL_POINTS_DESC":
+				default:
+					return numberDesc(left.totalPoints, right.totalPoints) || byName || left.id - right.id;
+			}
+		});
+		const returnedItems = sortedItems.slice(safeCursor, safeCursor + safeLimit);
+		const nextOffset = safeCursor + returnedItems.length;
+		const nextCursor = nextOffset < sortedItems.length ? nextOffset : null;
 		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
 
 		await context.redis.set(cacheKey, JSON.stringify(payload), "EX", PICKER_CACHE_TTL);

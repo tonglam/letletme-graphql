@@ -4,6 +4,7 @@ import { buildTeamMap } from "../../infra/team-map";
 import type {
 	Player,
 	PlayerPickerItem,
+	PlayerPickerSort,
 	PlayersFilter,
 	PlayersForPickerPayload,
 	PlayerTransferStats,
@@ -96,6 +97,7 @@ type TopTransfersArgs = {
 type PlayersForPickerArgs = {
 	search?: string | null;
 	filter?: GraphQLPlayersFilter | null;
+	sort?: PlayerPickerSort | null;
 	limit?: number | null;
 	cursor?: number | null;
 };
@@ -169,7 +171,8 @@ export const playersResolvers = {
 				args.limit ?? 20,
 				args.cursor ?? null,
 				normalizePlayerPickerSearch(args.search),
-				filter
+				filter,
+				args.sort ?? "TOTAL_POINTS_DESC"
 			);
 		},
 
