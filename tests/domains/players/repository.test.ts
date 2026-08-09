@@ -66,7 +66,7 @@ describe("playersRepository.getPlayersForPicker", () => {
 				name: "search_players_for_picker",
 				params: {
 					p_query: "Haal",
-					p_limit: 12,
+					p_limit: 100,
 					p_cursor: null,
 					p_position: null,
 					p_team_id: null,

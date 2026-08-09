@@ -440,6 +440,10 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 					actions.push({ type: "order", args });
 					return builder;
 				},
+				range(...args: unknown[]) {
+					actions.push({ type: "range", args });
+					return builder;
+				},
 				async limit(...args: unknown[]) {
 					actions.push({ type: "limit", args });
 					return resolveResult();
@@ -790,6 +794,10 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 				},
 				order(...args: unknown[]) {
 					actions.push({ type: "order", args });
+					return builder;
+				},
+				range(...args: unknown[]) {
+					actions.push({ type: "range", args });
 					return builder;
 				},
 				async limit(...args: unknown[]) {

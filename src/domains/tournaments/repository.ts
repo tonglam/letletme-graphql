@@ -400,6 +400,8 @@ type DbLeagueEventPointsRow = {
 	overall_points: number | null;
 };
 
+const TOURNAMENT_SUMMARY_PAGE_SIZE = 1000;
+
 const isTournamentInfoCache = (value: unknown): value is TournamentInfo =>
 	isRecord(value) &&
 	Number.isFinite(Number(value.id)) &&
@@ -1184,24 +1186,54 @@ export const tournamentsRepository: TournamentsRepository = {
 			return emptySummary;
 		}
 
-		// Read the complete tournament snapshot so the point deltas can be derived
-		// from the same tournament ordering as the displayed rank. The snapshot
-		// intentionally does not carry overall_points, so join the public FPL
-		// league result rows by entry id below.
+		// Read complete, paginated tournament and FPL result sets so a large
+		// tournament cannot silently lose rows at PostgREST's row cap. The
+		// snapshot intentionally does not carry overall_points, so join the
+		// public FPL league result rows by entry id below.
 		const [snapshotResponse, pointsResponse] = await Promise.all([
-			context.supabase
-				.from("mv_tournament_event_snapshot")
-				.select(
-					"tournament_id, event_id, entry_id, tournament_overall_rank, overall_rank, team_value, cum_transfers_num, cum_total_costs, cum_total_bench_points, cum_auto_sub_points, tournament_team_value_rank, tournament_transfers_rank, tournament_costs_rank, tournament_bench_points_rank, tournament_auto_sub_rank"
-				)
-				.eq("tournament_id", tournamentId)
-				.eq("event_id", eventId),
-			context.supabase
-				.from("league_event_results")
-				.select("entry_id, overall_points")
-				.eq("league_id", tournament.leagueId)
-				.eq("league_type", tournament.leagueType)
-				.eq("event_id", eventId),
+			(async (): Promise<{
+				data: DbTournamentEventSnapshotRow[];
+				error: unknown | null;
+			}> => {
+				const data: DbTournamentEventSnapshotRow[] = [];
+				for (let from = 0; ; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
+					const response = await context.supabase
+						.from("mv_tournament_event_snapshot")
+						.select(
+							"tournament_id, event_id, entry_id, tournament_overall_rank, overall_rank, team_value, cum_transfers_num, cum_total_costs, cum_total_bench_points, cum_auto_sub_points, tournament_team_value_rank, tournament_transfers_rank, tournament_costs_rank, tournament_bench_points_rank, tournament_auto_sub_rank"
+						)
+						.eq("tournament_id", tournamentId)
+						.eq("event_id", eventId)
+						.order("entry_id", { ascending: true })
+						.range(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE - 1);
+					if (response.error) return { data, error: response.error };
+					const page = (response.data as DbTournamentEventSnapshotRow[] | null) ?? [];
+					data.push(...page);
+					if (page.length < TOURNAMENT_SUMMARY_PAGE_SIZE) break;
+				}
+				return { data, error: null };
+			})(),
+			(async (): Promise<{
+				data: DbLeagueEventPointsRow[];
+				error: unknown | null;
+			}> => {
+				const data: DbLeagueEventPointsRow[] = [];
+				for (let from = 0; ; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
+					const response = await context.supabase
+						.from("league_event_results")
+						.select("entry_id, overall_points")
+						.eq("league_id", tournament.leagueId)
+						.eq("league_type", tournament.leagueType)
+						.eq("event_id", eventId)
+						.order("entry_id", { ascending: true })
+						.range(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE - 1);
+					if (response.error) return { data, error: response.error };
+					const page = (response.data as DbLeagueEventPointsRow[] | null) ?? [];
+					data.push(...page);
+					if (page.length < TOURNAMENT_SUMMARY_PAGE_SIZE) break;
+				}
+				return { data, error: null };
+			})(),
 		]);
 
 		if (snapshotResponse.error) {
@@ -1218,11 +1250,9 @@ export const tournamentsRepository: TournamentsRepository = {
 			);
 		}
 
-		const snapshotRows = (snapshotResponse.data as DbTournamentEventSnapshotRow[] | null) ?? [];
+		const snapshotRows = snapshotResponse.data;
 		const snapshotRow = snapshotRows.find((row) => row.entry_id === entryId);
-		const pointRows = pointsResponse.error
-			? []
-			: ((pointsResponse.data as DbLeagueEventPointsRow[] | null) ?? []);
+		const pointRows = pointsResponse.error ? [] : pointsResponse.data;
 		const pointsByEntryId = new Map(
 			pointRows.map((row) => [row.entry_id, row.overall_points] as const)
 		);
@@ -1236,20 +1266,15 @@ export const tournamentsRepository: TournamentsRepository = {
 					(a.tournament_overall_rank as number) - (b.tournament_overall_rank as number) ||
 					a.entry_id - b.entry_id
 			);
-		const leaderOverallPoints = rankedRows.reduce<number | null>((leader, row) => {
-			const points = pointsByEntryId.get(row.entry_id);
-			if (points === null || points === undefined) return leader;
-			return leader === null || leader === undefined ? points : Math.max(leader, points);
-		}, null);
+		const leaderOverallPoints = rankedRows[0]
+			? (pointsByEntryId.get(rankedRows[0].entry_id) ?? null)
+			: null;
 		const myRank = snapshotRow?.tournament_overall_rank ?? null;
-		const aboveRow =
-			myRank !== null
-				? rankedRows.find((row) => (row.tournament_overall_rank as number) < myRank)
-				: undefined;
-		const belowRow =
-			myRank !== null
-				? [...rankedRows].find((row) => (row.tournament_overall_rank as number) > myRank)
-				: undefined;
+		const myIndex = snapshotRow
+			? rankedRows.findIndex((row) => row.entry_id === snapshotRow.entry_id)
+			: -1;
+		const aboveRow = myIndex > 0 ? rankedRows[myIndex - 1] : undefined;
+		const belowRow = myIndex >= 0 ? rankedRows[myIndex + 1] : undefined;
 		const abovePoints = aboveRow ? (pointsByEntryId.get(aboveRow.entry_id) ?? null) : null;
 		const belowPoints = belowRow ? (pointsByEntryId.get(belowRow.entry_id) ?? null) : null;
 

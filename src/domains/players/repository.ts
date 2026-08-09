@@ -779,8 +779,11 @@ export const playersRepository: PlayersRepository = {
 		}
 
 		const hasPriceFilter = safeFilter?.minPrice !== undefined || safeFilter?.maxPrice !== undefined;
-		const hasTeamFilter = safeFilter?.teamId !== undefined;
-		const scanLimit = hasPriceFilter || hasTeamFilter ? PICKER_SCAN_BATCH_SIZE : safeLimit;
+		// Sorting is applied after enrichment, so every source page must use the
+		// same fixed batch size. Using the requested page size here would make a
+		// `limit: 1` browse return the first database row rather than the first
+		// globally sorted player.
+		const scanLimit = PICKER_SCAN_BATCH_SIZE;
 		const teams = await buildTeamMap(context);
 		const fetchRows = async (pageCursor: number | null): Promise<DbPickerRow[]> => {
 			if (safeSearch) {
