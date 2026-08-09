@@ -264,12 +264,16 @@ async function resolveTargetDate(context: GraphQLContext, changeDate: Date): Pro
 	const isoStr = getIsoDateString(changeDate);
 
 	const [exactResult, isoResult] = await Promise.all([
-		context.supabase
-			.from("player_values")
+		context.data
+			.read("reporting.player_value_changes")
 			.select("change_date")
 			.eq("change_date", compactStr)
 			.limit(1),
-		context.supabase.from("player_values").select("change_date").eq("change_date", isoStr).limit(1),
+		context.data
+			.read("reporting.player_value_changes")
+			.select("change_date")
+			.eq("change_date", isoStr)
+			.limit(1),
 	]);
 
 	if (exactResult.data && exactResult.data.length > 0) {
@@ -287,8 +291,8 @@ async function getPlayerValuesFromDatabase(
 ): Promise<PlayerValue[]> {
 	const targetDate = await resolveTargetDate(context, changeDate);
 
-	const { data, error } = await context.supabase
-		.from("player_values")
+	const { data, error } = await context.data
+		.read("reporting.player_value_changes")
 		.select("element_id, element_type, event_id, value, last_value, change_date, change_type")
 		.eq("change_date", targetDate);
 
@@ -333,13 +337,13 @@ async function getPlayerValuesFromDatabase(
 	);
 
 	const [playersResult, statsResult] = await Promise.all([
-		context.supabase
-			.from("players")
+		context.data
+			.read("fpl.players")
 			.select("id, web_name, team_id, type, price")
 			.in("id", elementIds),
 		eventIds.length > 0
-			? context.supabase
-					.from("player_stats")
+			? context.data
+					.read("fpl.player_event_snapshots")
 					.select(
 						"element_id, event_id, web_name, element_type, team_id, team_name, team_short_name, value, total_points, form, transfers_in_event, transfers_out_event, selected_by_percent"
 					)
@@ -354,8 +358,8 @@ async function getPlayerValuesFromDatabase(
 
 	const players = (playersResult.data as DbPlayerMetadataRow[] | null) ?? [];
 	const teamIds = Array.from(new Set(players.map((player) => player.team_id)));
-	const teamsResult = await context.supabase
-		.from("teams")
+	const teamsResult = await context.data
+		.read("fpl.teams")
 		.select("id, name, short_name")
 		.in("id", teamIds);
 	if (teamsResult.error) {
@@ -406,7 +410,7 @@ async function getPlayerValuesFromDatabase(
 			netTransfers: transfersIn - transfersOut,
 			form: parseNullableNumber(stat?.form ?? null),
 			totalPoints: stat?.total_points ?? 0,
-			// player_stats.total_points is season-cumulative, not event-scoped.
+			// player_event_snapshots.total_points is season-cumulative, not event-scoped.
 			// The value table has no authoritative per-event points fallback.
 			eventPoints: null,
 		};
@@ -654,8 +658,8 @@ export const playerValuesRepository: PlayerValuesRepository = {
 		}
 
 		try {
-			let query = context.supabase
-				.from("player_values")
+			let query = context.data
+				.read("reporting.player_value_changes")
 				.select("element_id, value, last_value, change_date, change_type")
 				.eq("element_id", args.playerId)
 				.order("change_date", { ascending: false });

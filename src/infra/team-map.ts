@@ -24,8 +24,8 @@ export async function buildTeamMap(context: GraphQLContext): Promise<Map<number,
 		);
 	}
 
-	const { data, error } = await context.supabase
-		.from("teams")
+	const { data, error } = await context.data
+		.read("fpl.teams")
 		.select(
 			"id, code, name, short_name, strength, position, points, played, win, draw, loss, form, strength_overall_home, strength_overall_away, strength_attack_home, strength_attack_away, strength_defence_home, strength_defence_away"
 		)

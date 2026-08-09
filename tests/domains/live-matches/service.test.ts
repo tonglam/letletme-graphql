@@ -65,6 +65,7 @@ describe("loadLiveFixtureBucketsFromRedis", () => {
 	it("prefers fixture-identified V2 rows without reading the legacy hash", async () => {
 		const keys: string[] = [];
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string) => (key === "Season:active" ? "2526" : null),
 				hgetall: async (key: string) => {
@@ -98,6 +99,7 @@ describe("loadLiveFixtureBucketsFromRedis", () => {
 	it("falls back to the frozen legacy hash during a producer rollout", async () => {
 		const keys: string[] = [];
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string) => (key === "Season:active" ? "2526" : null),
 				hgetall: async (key: string) => {
@@ -142,6 +144,7 @@ describe("loadLiveFixtureBucketsFromRedis", () => {
 			bonusTeamCount: 2,
 		});
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string) => {
 					if (key === "Season:active") return "2526";
@@ -192,6 +195,7 @@ describe("loadLiveFixtureBucketsFromRedis", () => {
 			}),
 		});
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string) => {
 					if (key === "Season:active") return "2526";
@@ -237,6 +241,7 @@ describe("loadUpcomingEventFixtures", () => {
 			bonusTeamCount: 0,
 		});
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";
@@ -258,8 +263,8 @@ describe("loadUpcomingEventFixtures", () => {
 					}),
 				}),
 			},
-			supabase: {
-				from: () => {
+			data: {
+				read: () => {
 					const result = {
 						data: [
 							{

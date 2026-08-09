@@ -382,25 +382,25 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 			queryLog.push({ table, actions });
 
 			const resolveResult = () => {
-				if (table === "tournament_infos") {
+				if (table === "competition.tournaments") {
 					return {
 						data: options.tournamentData ?? [],
 						error: options.tournamentError ?? null,
 					};
 				}
-				if (table === "v_tournament_event_result") {
+				if (table === "reporting.tournament_event_results") {
 					return {
 						data: options.resultData ?? [],
 						error: options.resultError ?? null,
 					};
 				}
-				if (table === "tournament_entries") {
+				if (table === "competition.tournament_entries") {
 					return {
 						data: filterRowsByActions(options.tournamentEntriesData ?? [], actions),
 						error: options.tournamentEntriesError ?? null,
 					};
 				}
-				if (table === "entry_event_results") {
+				if (table === "competition.entry_event_results") {
 					return {
 						data: filterRowsByActions(options.entryEventResultsData ?? [], actions),
 						error: options.entryEventResultsError ?? null,
@@ -450,8 +450,14 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 		};
 
 		return {
-			supabase: {
-				from(table: string) {
+			database: {
+				query: async () => {
+					throw new Error("Unexpected database query");
+				},
+			} as never,
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			data: {
+				read(table: string) {
 					return makeBuilder(table);
 				},
 			} as never,
@@ -739,13 +745,13 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 			const actions: QueryAction[] = [];
 
 			const resolveResult = () => {
-				if (table === "tournament_infos") {
+				if (table === "competition.tournaments") {
 					return {
 						data: options.tournamentData ?? [],
 						error: options.tournamentError ?? null,
 					};
 				}
-				if (table === "mv_tournament_event_snapshot") {
+				if (table === "reporting.tournament_entry_event_summaries") {
 					return {
 						data: filterRowsByActions(options.snapshotData ?? [], actions),
 						error: options.snapshotError ?? null,
@@ -795,8 +801,14 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		};
 
 		return {
-			supabase: {
-				from(table: string) {
+			database: {
+				query: async () => {
+					throw new Error("Unexpected database query");
+				},
+			} as never,
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			data: {
+				read(table: string) {
 					return makeBuilder(table);
 				},
 			} as never,
@@ -880,7 +892,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		expect(result).toEqual(cached);
 	});
 
-	it("returns empty summary for non-points-race tournaments (fallback via tournament_infos)", async () => {
+	it("returns empty summary for non-points-race tournaments from the v3 tournament model", async () => {
 		const context = buildContext({
 			tournamentData: [{ ...tournamentRow, group_mode: "battle_races" }],
 		});
@@ -1176,9 +1188,15 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 			[`${CACHE_PREFIX}tournaments:entry-ids:7`, JSON.stringify([999])],
 		]);
 		const context = {
-			supabase: {
-				from(table: string) {
-					return table === "tournament_infos" ? readinessQuery : membershipQuery;
+			database: {
+				query: async () => {
+					throw new Error("Unexpected database query");
+				},
+			} as never,
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			data: {
+				read(table: string) {
+					return table === "competition.tournaments" ? readinessQuery : membershipQuery;
 				},
 			},
 			redis: {
@@ -1240,9 +1258,15 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 			},
 		};
 		const context = {
-			supabase: {
-				from(table: string) {
-					return table === "tournament_infos" ? readinessQuery : membershipQuery;
+			database: {
+				query: async () => {
+					throw new Error("Unexpected database query");
+				},
+			} as never,
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			data: {
+				read(table: string) {
+					return table === "competition.tournaments" ? readinessQuery : membershipQuery;
 				},
 			},
 			redis: {
@@ -1332,9 +1356,15 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 			},
 		};
 		const context = {
-			supabase: {
-				from(table: string) {
-					return table === "tournament_infos" ? infoQuery : membershipQuery;
+			database: {
+				query: async () => {
+					throw new Error("Unexpected database query");
+				},
+			} as never,
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			data: {
+				read(table: string) {
+					return table === "competition.tournaments" ? infoQuery : membershipQuery;
 				},
 			},
 			redis: {
@@ -1396,22 +1426,22 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 			const actions: Array<{ type: string; args: unknown[] }> = [];
 
 			const resolveResult = () => {
-				if (table === "tournament_battle_group_results") {
+				if (table === "competition.tournament_battle_group_results") {
 					return {
 						data: options.battleGroupData ?? [],
 						error: options.battleGroupError ?? null,
 					};
 				}
-				if (table === "tournament_infos") {
+				if (table === "competition.tournaments") {
 					return { data: options.tournamentData ?? [], error: null };
 				}
-				if (table === "tournament_entries") {
+				if (table === "competition.tournament_entries") {
 					return {
 						data: filterRowsByActions(options.tournamentEntriesData ?? [], actions),
 						error: null,
 					};
 				}
-				if (table === "entry_infos") {
+				if (table === "competition.entries") {
 					return {
 						data: filterRowsByActions(options.entryInfosData ?? [], actions),
 						error: null,
@@ -1453,7 +1483,13 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 		};
 
 		return {
-			supabase: { from: (table: string) => makeBuilder(table) } as never,
+			database: {
+				query: async () => {
+					throw new Error("Unexpected database query");
+				},
+			} as never,
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			data: { read: (table: string) => makeBuilder(table) } as never,
 			redis: {
 				async get(key: string) {
 					return redisState.get(key) ?? null;
@@ -1521,7 +1557,7 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 		away_match_points: 0,
 	};
 
-	it("returns cached results without hitting Supabase", async () => {
+	it("returns cached results without hitting PostgreSQL", async () => {
 		const cached = [
 			{
 				tournament: mapTournamentInfo(tournamentRow),
@@ -1605,7 +1641,7 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 		expect(result[0].awayEntryName).toBe("Away Side");
 	});
 
-	it("throws on Supabase error fetching match rows", async () => {
+	it("throws on PostgreSQL error fetching match rows", async () => {
 		const context = buildContext({
 			tournamentData: [tournamentRow],
 			tournamentEntriesData: [],
@@ -1689,18 +1725,18 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 		const makeBuilder = (table: string) => {
 			const actions: QueryAction[] = [];
 			const resolveResult = () => {
-				if (table === "tournament_battle_group_results") {
+				if (table === "competition.tournament_battle_group_results") {
 					matchReads += 1;
 					return { data: state.matches, error: null };
 				}
-				if (table === "tournament_entries") {
+				if (table === "competition.tournament_entries") {
 					membershipReads += 1;
 					return { data: filterRowsByActions(state.tournamentEntries, actions), error: null };
 				}
-				if (table === "tournament_infos") {
+				if (table === "competition.tournaments") {
 					return { data: filterRowsByActions(state.tournaments, actions), error: null };
 				}
-				if (table === "entry_infos") {
+				if (table === "competition.entries") {
 					return {
 						data: [100, 200, 300].map((id) => ({
 							id,
@@ -1731,7 +1767,7 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 				},
 				in(...args: unknown[]) {
 					actions.push({ type: "in", args });
-					if (table === "tournament_infos") tournamentInCalls.push(args);
+					if (table === "competition.tournaments") tournamentInCalls.push(args);
 					return builder;
 				},
 				then<TResult1 = ReturnType<typeof resolveResult>, TResult2 = never>(
@@ -1746,7 +1782,13 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 		};
 
 		const context = {
-			supabase: { from: (table: string) => makeBuilder(table) },
+			database: {
+				query: async () => {
+					throw new Error("Unexpected database query");
+				},
+			} as never,
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			data: { read: (table: string) => makeBuilder(table) },
 			redis: {
 				async get(key: string) {
 					return redisState.get(key) ?? null;

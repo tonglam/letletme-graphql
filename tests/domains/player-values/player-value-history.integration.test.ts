@@ -95,9 +95,9 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 }
 
 function createGraphQLContext(rows: HistoryRow[]): GraphQLContext {
-	const supabase = {
-		from: (_table: string) => createHistoryQueryBuilder(rows),
-	} as unknown as GraphQLContext["supabase"];
+	const data = {
+		read: (_table: string) => createHistoryQueryBuilder(rows),
+	} as unknown as GraphQLContext["data"];
 
 	const redis = {
 		type: async (): Promise<string> => "none",
@@ -114,7 +114,13 @@ function createGraphQLContext(rows: HistoryRow[]): GraphQLContext {
 	} as unknown as GraphQLContext["logger"];
 
 	return {
-		supabase,
+		database: {
+			query: async () => {
+				throw new Error("Unexpected database query");
+			},
+		} as never,
+		currentSeason: { seasonId: 2025, seasonCode: "2526" },
+		data,
 		redis,
 		logger,
 	};

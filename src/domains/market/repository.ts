@@ -1,6 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { dbPool } from "../../infra/db-pool";
 import { getCurrentSeason } from "../../infra/season";
 
 const MARKET_RESULT_LIMIT = 10;
@@ -154,7 +153,8 @@ const MARKET_QUERY = `
 			LAG(snapshot.news) OVER player_days AS previous_news,
 			LAG(snapshot.chance_of_playing_this_round) OVER player_days AS previous_chance_this_round,
 			LAG(snapshot.chance_of_playing_next_round) OVER player_days AS previous_chance_next_round
-		FROM public.player_market_snapshots snapshot
+		FROM fpl.player_market_snapshots snapshot
+		WHERE snapshot.season_id = $1
 		WINDOW player_days AS (
 			PARTITION BY snapshot.element_id
 			ORDER BY snapshot.snapshot_date ASC
@@ -162,13 +162,14 @@ const MARKET_QUERY = `
 	),
 	latest AS (
 		SELECT MAX(snapshot_date) AS latest_date
-		FROM public.player_market_snapshots
+		FROM fpl.player_market_snapshots
+		WHERE season_id = $1
 	)
 	SELECT annotated.*
 	FROM annotated
 	CROSS JOIN latest
 	WHERE latest.latest_date IS NOT NULL
-		AND annotated.snapshot_date >= latest.latest_date - ($1::integer - 1)
+		AND annotated.snapshot_date >= latest.latest_date - ($2::integer - 1)
 		AND annotated.snapshot_date <= latest.latest_date
 	ORDER BY annotated.snapshot_date ASC, annotated.element_id ASC
 `;
@@ -528,9 +529,7 @@ const isMarketPulse = (value: unknown): value is MarketPulse =>
 	Array.isArray(value.newPlayers) &&
 	Array.isArray(value.priceChanges);
 
-export const createMarketRepository = (
-	queryExecutor: QueryExecutor = dbPool as unknown as QueryExecutor
-): MarketRepository => ({
+export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRepository => ({
 	async getMarketPulse(context: GraphQLContext, requestedDays: number): Promise<MarketPulse> {
 		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(season, `market-pulse:v2:${requestedDays}`);
@@ -552,7 +551,10 @@ export const createMarketRepository = (
 
 		let rows: MarketSnapshotRow[];
 		try {
-			const result = await queryExecutor.query(MARKET_QUERY, [requestedDays]);
+			const result = await (queryExecutor ?? context.database).query(MARKET_QUERY, [
+				context.currentSeason.seasonId,
+				requestedDays,
+			]);
 			rows = result.rows as MarketSnapshotRow[];
 		} catch (error) {
 			context.logger.error({ err: error, requestedDays }, "Failed to query market snapshots");

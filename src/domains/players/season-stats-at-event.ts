@@ -109,8 +109,8 @@ export async function resolvePlayerStatsContext(
 	}
 
 	try {
-		let query = context.supabase
-			.from("events")
+		let query = context.data
+			.read("fpl.events")
 			.select("id, finished, is_current, deadline_time_epoch");
 		if (upperBound !== null) query = query.lte("id", upperBound);
 		const { data, error } = await query
@@ -235,8 +235,8 @@ async function isUnfinishedCurrentEvent(
 	const current = await getCurrentEventFromRedis(context);
 	if (current) return current.id === eventId && !current.finished;
 	try {
-		const { data, error } = await context.supabase
-			.from("events")
+		const { data, error } = await context.data
+			.read("fpl.events")
 			.select("finished")
 			.eq("id", eventId)
 			.limit(1);
@@ -329,8 +329,8 @@ export async function getPlayerSeasonStatsByIdsForContext(
 		? SEASON_STATS_LIVE_CACHE_TTL
 		: SEASON_STATS_CACHE_TTL;
 
-	const { data, error } = await context.supabase
-		.from("player_stats")
+	const { data, error } = await context.data
+		.read("fpl.player_event_snapshots")
 		.select(SEASON_STATS_SELECT)
 		.eq("event_id", eventId)
 		.in("element_id", missingIds);

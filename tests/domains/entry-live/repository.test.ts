@@ -23,8 +23,8 @@ const buildContext = (
 	};
 
 	const result = { data: options.rows ?? [], error: null };
-	const supabase = {
-		from: () => {
+	const data = {
+		read: () => {
 			const query = Promise.resolve(result);
 			type Builder = typeof query & {
 				select: () => Builder;
@@ -46,8 +46,9 @@ const buildContext = (
 	};
 
 	return {
+		currentSeason: { seasonId: 2025, seasonCode: "2526" },
 		redis,
-		supabase,
+		data,
 		logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
 	} as never;
 };
@@ -111,8 +112,8 @@ describe("entryLiveRepository transfers", () => {
 			set: async () => "OK",
 			del: async () => 0,
 		};
-		const supabase = {
-			from: () => {
+		const data = {
+			read: () => {
 				let projection = "";
 				const builder = {
 					select: (columns: string) => {
@@ -156,8 +157,9 @@ describe("entryLiveRepository transfers", () => {
 			},
 		};
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis,
-			supabase,
+			data,
 			logger: { warn: () => undefined, error: () => undefined },
 		} as never;
 
@@ -228,14 +230,15 @@ describe("entryLiveRepository batch picks", () => {
 			exec: async () => [],
 		};
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string) => (key === "Season:active" ? "2526" : null),
 				mget: async () => [null],
 				del: async () => 0,
 				pipeline: () => pipeline,
 			},
-			supabase: {
-				from: () => {
+			data: {
+				read: () => {
 					const result = {
 						data: [
 							{

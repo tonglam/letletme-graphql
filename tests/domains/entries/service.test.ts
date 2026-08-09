@@ -73,8 +73,8 @@ const makeMockRedis = (data: {
 	};
 };
 
-const makeMockSupabase = () => ({
-	from: (_table: string) => {
+const makeMockData = () => ({
+	read: (_table: string) => {
 		const builder = {
 			select: () => builder,
 			eq: () => builder,
@@ -100,8 +100,12 @@ const makeContext = (data: {
 	eventLive?: Record<string, Record<string, string>>;
 }): GraphQLContext =>
 	({
+		currentSeason: {
+			seasonId: 2000 + Number((data.season ?? "2526").slice(0, 2)),
+			seasonCode: data.season ?? "2526",
+		},
 		redis: makeMockRedis(data),
-		supabase: makeMockSupabase(),
+		data: makeMockData(),
 		logger: makeMockLogger(),
 		user: undefined,
 	}) as unknown as GraphQLContext;

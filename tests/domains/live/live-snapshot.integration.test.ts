@@ -19,6 +19,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			bonusTeamCount: 4,
 		});
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";
@@ -27,7 +28,7 @@ describe("liveSnapshot GraphQL contract", () => {
 				},
 			},
 			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
+			data: {},
 		} as unknown as GraphQLContext;
 
 		const result = await graphql({
@@ -76,6 +77,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			bonusTeamCount: 0,
 		});
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "event:current") return JSON.stringify({ id: 33, isCurrent: true });
@@ -85,7 +87,7 @@ describe("liveSnapshot GraphQL contract", () => {
 				},
 			},
 			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
+			data: {},
 		} as unknown as GraphQLContext;
 
 		const result = await graphql({
@@ -119,6 +121,7 @@ describe("liveSnapshot GraphQL contract", () => {
 		});
 		let currentEventReads = 0;
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "event:current") {
@@ -131,7 +134,7 @@ describe("liveSnapshot GraphQL contract", () => {
 				},
 			},
 			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
+			data: {},
 		} as unknown as GraphQLContext;
 
 		const result = await graphql({
@@ -166,6 +169,7 @@ describe("liveSnapshot GraphQL contract", () => {
 				bonusTeamCount: 2,
 			});
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";
@@ -177,7 +181,7 @@ describe("liveSnapshot GraphQL contract", () => {
 				},
 			},
 			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
+			data: {},
 		} as unknown as GraphQLContext;
 
 		const result = await graphql({
@@ -222,6 +226,7 @@ describe("liveSnapshot GraphQL contract", () => {
 				selectedBy: null,
 			});
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";
@@ -239,7 +244,7 @@ describe("liveSnapshot GraphQL contract", () => {
 				},
 			},
 			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
+			data: {},
 		} as unknown as GraphQLContext;
 
 		const result = await graphql({
@@ -295,6 +300,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			[`gql:v2:2526:live:explain:shape2:33:2:contributions:revision:${revision}`, explain(2, 9)],
 		]);
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";
@@ -308,7 +314,7 @@ describe("liveSnapshot GraphQL contract", () => {
 					keys.map((key) => cache.get(key) ?? null),
 			},
 			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
+			data: {},
 		} as unknown as GraphQLContext;
 
 		const result = await graphql({
@@ -338,7 +344,7 @@ describe("liveSnapshot GraphQL contract", () => {
 		expect(metadataReads).toBe(2);
 	});
 
-	it("batches selectedBy without dropping player_stats-only explanations", async () => {
+	it("batches selectedBy without dropping event-snapshot-only explanations", async () => {
 		const revision = "4".repeat(24);
 		const metadata = JSON.stringify({
 			schemaVersion: 1,
@@ -355,12 +361,12 @@ describe("liveSnapshot GraphQL contract", () => {
 		});
 		const fromCalls: string[] = [];
 		const hmgetCalls: string[] = [];
-		const supabase = {
-			from: (table: string) => {
+		const data = {
+			read: (table: string) => {
 				fromCalls.push(table);
 				const result = {
 					data:
-						table === "player_stats"
+						table === "fpl.player_event_snapshots"
 							? [
 									{ event_id: 33, element_id: 1, total_points: 3, selected_by_percent: 12.5 },
 									{ event_id: 33, element_id: 2, total_points: 4, selected_by_percent: 7.25 },
@@ -377,6 +383,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			},
 		};
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";
@@ -394,7 +401,7 @@ describe("liveSnapshot GraphQL contract", () => {
 				expire: async (): Promise<number> => 1,
 			},
 			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase,
+			data,
 		} as unknown as GraphQLContext;
 
 		const result = await graphql({
@@ -413,7 +420,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			{ elementId: 1, selectedBy: 12.5 },
 			{ elementId: 2, selectedBy: 7.25 },
 		]);
-		expect(fromCalls).toEqual(["player_stats", "event_live_explains"]);
+		expect(fromCalls).toEqual(["fpl.player_event_snapshots", "fpl.player_gameweek_scoring_items"]);
 		expect(hmgetCalls).toEqual(["EventLiveExplainV2:2526:33", "EventLiveExplain:2526:33"]);
 	});
 
@@ -432,6 +439,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			bonusTeamCount: 2,
 		});
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";
@@ -457,8 +465,8 @@ describe("liveSnapshot GraphQL contract", () => {
 					}),
 				}),
 			},
-			supabase: {
-				from: () => ({
+			data: {
+				read: () => ({
 					select: () => ({
 						eq: () => ({
 							order: async () => ({
@@ -546,6 +554,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			},
 		]);
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";
@@ -588,8 +597,8 @@ describe("liveSnapshot GraphQL contract", () => {
 					}),
 				],
 			},
-			supabase: {
-				from: () => ({
+			data: {
+				read: () => ({
 					select: () => ({
 						eq: () => ({
 							order: async () => ({

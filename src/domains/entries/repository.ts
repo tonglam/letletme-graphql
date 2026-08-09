@@ -256,8 +256,8 @@ export const entriesRepository: EntriesRepository = {
 			}
 		}
 
-		const { data, error } = await context.supabase
-			.from("entry_infos")
+		const { data, error } = await context.data
+			.read("competition.entries")
 			.select(
 				"id, entry_name, player_name, region, started_event, overall_points, overall_rank, bank, team_value, total_transfers, last_event_id, last_overall_points, last_overall_rank, last_team_value, last_bank"
 			)
@@ -285,8 +285,8 @@ export const entriesRepository: EntriesRepository = {
 			return new Map();
 		}
 
-		const { data, error } = await context.supabase
-			.from("entry_infos")
+		const { data, error } = await context.data
+			.read("competition.entries")
 			.select(
 				"id, entry_name, player_name, region, started_event, overall_points, overall_rank, bank, team_value, total_transfers, last_event_id, last_overall_points, last_overall_rank, last_team_value, last_bank"
 			)
@@ -398,8 +398,8 @@ export const entriesRepository: EntriesRepository = {
 			await evictMalformedCache(context, cacheKey);
 		}
 
-		const { data, error } = await context.supabase
-			.from("entry_event_results")
+		const { data, error } = await context.data
+			.read("competition.entry_event_results")
 			.select(
 				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
 			)
@@ -446,8 +446,8 @@ export const entriesRepository: EntriesRepository = {
 			await evictMalformedCache(context, cacheKey);
 		}
 
-		const { data, error } = await context.supabase
-			.from("entry_history_infos")
+		const { data, error } = await context.data
+			.read("competition.entry_season_histories")
 			.select("season,total_points,overall_rank")
 			.eq("entry_id", entryId)
 			.order("season", { ascending: true });
@@ -482,8 +482,8 @@ export const entriesRepository: EntriesRepository = {
 			return cached;
 		}
 
-		const { data, error } = await context.supabase
-			.from("entry_event_results")
+		const { data, error } = await context.data
+			.read("competition.entry_event_results")
 			.select(
 				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
 			)
@@ -552,8 +552,8 @@ export const entriesRepository: EntriesRepository = {
 
 		if (missIds.length === 0) return results;
 
-		const { data, error } = await context.supabase
-			.from("entry_event_results")
+		const { data, error } = await context.data
+			.read("competition.entry_event_results")
 			.select(
 				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
 			)

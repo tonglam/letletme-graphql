@@ -1,5 +1,17 @@
 # GraphQL API change log
 
+## Data Platform v3 G1 — 2026-08-09
+
+- Replaced Supabase Data API business reads with schema-qualified PostgreSQL 15
+  readers over the Data-owned `fpl`, `competition`, and `reporting` contracts.
+- Removed the Supabase dependency/env and all GraphQL-owned business migrations.
+- Added a SELECT-only startup contract for exact v3 columns, publication
+  version, current season, and read-only ACLs.
+- Current season now comes only from `fpl.seasons.is_current`.
+- Deployment runs `contract:check`; Data and Web remain the only schema owners.
+- G1 is not a production cutover build. Revision-coherent Redis and query-cache
+  changes follow in G2.
+
 ## Coordinated remediation — 2026-07-18
 
 ### Authentication
@@ -32,14 +44,14 @@
 - Live match reconciliation prefers real fixture IDs and never synthesizes
   event 39 matches.
 
-### Cache and migration contracts
+### Historical cache and migration contracts
 
 - Data-owned Redis hashes remain read-only to GraphQL. GraphQL-shaped caches use
   `gql:v2:{season}:...` with explicit TTLs and malformed-value eviction.
 - `PlayerValue:{date}` remains a shared hash; `PlayerValueMissing:{date}` is a
   coordinated 600-second marker.
-- Only `migrations/forward` is applied by GraphQL's advisory-lock/checksum
-  migration runner. Historical SQL remains under `migrations/legacy`.
+- The migration behavior described in this 2026-07-18 entry was retired by
+  Data Platform v3 G1 and must not be used as current deployment guidance.
 
 Older entries below are historical context only and must not be replayed as
 deployment instructions.

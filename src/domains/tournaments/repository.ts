@@ -756,8 +756,8 @@ const getTournamentInfoUncached = async (
 	context: GraphQLContext,
 	tournamentId: number
 ): Promise<TournamentInfo | null> => {
-	const { data, error } = await context.supabase
-		.from("tournament_infos")
+	const { data, error } = await context.data
+		.read("competition.tournaments")
 		.select(TOURNAMENT_INFO_COLUMNS)
 		.eq("id", tournamentId)
 		.limit(1);
@@ -781,8 +781,8 @@ const getTournamentInfosUncached = async (
 	const uniqueIds = [...new Set(tournamentIds)];
 	if (uniqueIds.length === 0) return [];
 
-	const { data, error } = await context.supabase
-		.from("tournament_infos")
+	const { data, error } = await context.data
+		.read("competition.tournaments")
 		.select(TOURNAMENT_INFO_COLUMNS)
 		.in("id", uniqueIds);
 
@@ -818,8 +818,8 @@ const getTournamentCacheReadiness = async (
 	context: GraphQLContext,
 	tournamentId: number
 ): Promise<boolean> => {
-	const { data, error } = await context.supabase
-		.from("tournament_infos")
+	const { data, error } = await context.data
+		.read("competition.tournaments")
 		.select("standings_ready_at, setup_status")
 		.eq("id", tournamentId)
 		.limit(1);
@@ -898,8 +898,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		entryId: number
 	): Promise<TournamentInfo | null> {
-		const { data, error } = await context.supabase
-			.from("tournament_entries")
+		const { data, error } = await context.data
+			.read("competition.tournament_entries")
 			.select("entry_id")
 			.eq("tournament_id", tournamentId)
 			.eq("entry_id", entryId)
@@ -917,8 +917,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		entryId: number
 	): Promise<TournamentInfo | null> {
-		const { data, error } = await context.supabase
-			.from("tournament_infos")
+		const { data, error } = await context.data
+			.read("competition.tournaments")
 			.select(TOURNAMENT_INFO_COLUMNS)
 			.eq("id", tournamentId)
 			.eq("admin_entry_id", entryId)
@@ -938,8 +938,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		context: GraphQLContext,
 		tournamentId: number
 	): Promise<TournamentParticipant[]> {
-		const { data: membershipData, error: membershipError } = await context.supabase
-			.from("tournament_entries")
+		const { data: membershipData, error: membershipError } = await context.data
+			.read("competition.tournament_entries")
 			.select("entry_id")
 			.eq("tournament_id", tournamentId)
 			.order("entry_id", { ascending: true });
@@ -952,8 +952,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		);
 		if (entryIds.length === 0) return [];
 
-		const { data: entryData, error: entryError } = await context.supabase
-			.from("entry_infos")
+		const { data: entryData, error: entryError } = await context.data
+			.read("competition.entries")
 			.select("id, entry_name, player_name")
 			.in("id", entryIds)
 			.order("id", { ascending: true });
@@ -984,8 +984,8 @@ export const tournamentsRepository: TournamentsRepository = {
 			return cached as TournamentInfo[];
 		}
 
-		const { data: entryData, error: entryError } = await context.supabase
-			.from("tournament_entries")
+		const { data: entryData, error: entryError } = await context.data
+			.read("competition.tournament_entries")
 			.select("tournament_id")
 			.eq("entry_id", entryId);
 
@@ -1000,8 +1000,8 @@ export const tournamentsRepository: TournamentsRepository = {
 			return [];
 		}
 
-		const { data: infoData, error: infoError } = await context.supabase
-			.from("tournament_infos")
+		const { data: infoData, error: infoError } = await context.data
+			.read("competition.tournaments")
 			.select(TOURNAMENT_INFO_COLUMNS)
 			.in("id", tournamentIds)
 			.order("id", { ascending: true });
@@ -1047,8 +1047,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		context: GraphQLContext,
 		tournamentId: number
 	): Promise<number[]> {
-		const { data, error } = await context.supabase
-			.from("tournament_entries")
+		const { data, error } = await context.data
+			.read("competition.tournament_entries")
 			.select("entry_id")
 			.eq("tournament_id", tournamentId);
 
@@ -1083,8 +1083,8 @@ export const tournamentsRepository: TournamentsRepository = {
 			return cached as TournamentEventResult[];
 		}
 
-		const { data: resultData, error: resultError } = await context.supabase
-			.from("v_tournament_event_result")
+		const { data: resultData, error: resultError } = await context.data
+			.read("reporting.tournament_event_results")
 			.select(TOURNAMENT_VIEW_COLUMNS)
 			.eq("tournament_id", tournamentId)
 			.eq("event_id", eventId)
@@ -1166,8 +1166,8 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const [tournament, snapshotResponse] = await Promise.all([
 			getTournamentInfoById(context, tournamentId),
-			context.supabase
-				.from("mv_tournament_event_snapshot")
+			context.data
+				.read("reporting.tournament_entry_event_summaries")
 				.select(
 					"tournament_id, event_id, entry_id, tournament_overall_rank, overall_rank, team_value, cum_transfers_num, cum_total_costs, cum_total_bench_points, cum_auto_sub_points, tournament_team_value_rank, tournament_transfers_rank, tournament_costs_rank, tournament_bench_points_rank, tournament_auto_sub_rank"
 				)
@@ -1233,8 +1233,8 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const [tournamentResult, matchResult] = await Promise.all([
 			getTournamentInfoById(context, tournamentId),
-			context.supabase
-				.from("tournament_battle_group_results")
+			context.data
+				.read("competition.tournament_battle_group_results")
 				.select(
 					"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
 				)
@@ -1259,8 +1259,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		}
 		const entryIds = [...new Set(rows.flatMap((row) => [row.home_entry_id, row.away_entry_id]))];
 
-		const { data: nameData } = await context.supabase
-			.from("entry_infos")
+		const { data: nameData } = await context.data
+			.read("competition.entries")
 			.select("id, entry_name, player_name")
 			.in("id", entryIds);
 
@@ -1281,8 +1281,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		entryId: number
 	): Promise<EntryH2HMatchResult[]> {
 		const season = await getCurrentSeason(context);
-		const membershipResult = await context.supabase
-			.from("tournament_entries")
+		const membershipResult = await context.data
+			.read("competition.tournament_entries")
 			.select("tournament_id")
 			.eq("entry_id", entryId);
 		if (membershipResult.error) {
@@ -1309,8 +1309,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		)
 			return cached as EntryH2HMatchResult[];
 
-		const matchResult = await context.supabase
-			.from("tournament_battle_group_results")
+		const matchResult = await context.data
+			.read("competition.tournament_battle_group_results")
 			.select(
 				"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
 			)
@@ -1346,12 +1346,12 @@ export const tournamentsRepository: TournamentsRepository = {
 		const allEntryIds = [...new Set(readyRows.flatMap((r) => [r.home_entry_id, r.away_entry_id]))];
 
 		const [nameResult, eventResultData] = await Promise.all([
-			context.supabase
-				.from("entry_infos")
+			context.data
+				.read("competition.entries")
 				.select("id, entry_name, player_name")
 				.in("id", allEntryIds),
-			context.supabase
-				.from("entry_event_results")
+			context.data
+				.read("competition.entry_event_results")
 				.select("entry_id, event_id, event_points, event_transfers_cost, event_chip, overall_rank")
 				.in("entry_id", allEntryIds)
 				.in("event_id", eventIds),

@@ -63,7 +63,7 @@ const makeMockRedis = (options: {
 
 type MockRedis = ReturnType<typeof makeMockRedis>;
 
-const makeMockSupabase = (options: {
+const makeMockData = (options: {
 	data?: unknown[];
 	dataByTable?: Record<string, unknown[]>;
 	error?: unknown;
@@ -71,7 +71,7 @@ const makeMockSupabase = (options: {
 	fromCalls?: string[];
 	inCalls?: Array<{ table: string; column: string; values: unknown[] }>;
 }) => ({
-	from: (table: string) => {
+	read: (table: string) => {
 		options.fromCalls?.push(table);
 		const rows = (
 			options.dataByTable && Object.hasOwn(options.dataByTable, table)
@@ -115,28 +115,29 @@ const makeMockLogger = () => ({
 const buildContext = (options: {
 	redisStrings?: Record<string, string>;
 	redisHashes?: Record<string, Record<string, string>>;
-	supabaseData?: unknown[];
-	supabaseDataByTable?: Record<string, unknown[]>;
-	supabaseError?: unknown;
-	supabaseErrorByTable?: Record<string, unknown>;
-	supabaseFromCalls?: string[];
-	supabaseInCalls?: Array<{ table: string; column: string; values: unknown[] }>;
+	readData?: unknown[];
+	readDataByModel?: Record<string, unknown[]>;
+	readError?: unknown;
+	readErrorByModel?: Record<string, unknown>;
+	readModelCalls?: string[];
+	readInCalls?: Array<{ table: string; column: string; values: unknown[] }>;
 	redis?: MockRedis;
 }) =>
 	({
+		currentSeason: { seasonId: 2025, seasonCode: "2526" },
 		redis:
 			options.redis ??
 			makeMockRedis({
 				strings: options.redisStrings,
 				hashes: options.redisHashes,
 			}),
-		supabase: makeMockSupabase({
-			data: options.supabaseData,
-			dataByTable: options.supabaseDataByTable,
-			error: options.supabaseError,
-			errorByTable: options.supabaseErrorByTable,
-			fromCalls: options.supabaseFromCalls,
-			inCalls: options.supabaseInCalls,
+		data: makeMockData({
+			data: options.readData,
+			dataByTable: options.readDataByModel,
+			error: options.readError,
+			errorByTable: options.readErrorByModel,
+			fromCalls: options.readModelCalls,
+			inCalls: options.readInCalls,
 		}),
 		logger: makeMockLogger(),
 		user: undefined,
@@ -278,7 +279,7 @@ describe("liveRepository.getAllLivePerformances", () => {
 		const context = buildContext({
 			redisStrings: { "Season:active": "2526" },
 			redisHashes: {},
-			supabaseData: [
+			readData: [
 				{
 					event_id: 33,
 					element_id: 1,
@@ -422,7 +423,7 @@ describe("liveRepository.getAllLivePerformances", () => {
 			in_dream_team: false,
 			total_points: 3,
 		};
-		const context = buildContext({ redis, supabaseData: [dbRow] });
+		const context = buildContext({ redis, readData: [dbRow] });
 
 		const first = await liveRepository.getAllLivePerformances(context, 33);
 		const second = await liveRepository.getAllLivePerformances(context, 33);
@@ -443,7 +444,7 @@ describe("liveRepository.getAllLivePerformances", () => {
 		const context = buildContext({
 			redisStrings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 1) },
 			redisHashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
-			supabaseData: [
+			readData: [
 				{
 					event_id: 33,
 					element_id: 1,
@@ -565,8 +566,8 @@ describe("liveRepository.getAllLivePerformances", () => {
 			Array.from({ length: 25 }, () => {
 				const context = buildContext({
 					redis,
-					supabaseData: [dbRow],
-					supabaseFromCalls: fromCalls,
+					readData: [dbRow],
+					readModelCalls: fromCalls,
 				});
 				return withLiveSnapshotConsistency(context, 33, () =>
 					liveRepository.getAllLivePerformances(context, 33)
@@ -575,7 +576,7 @@ describe("liveRepository.getAllLivePerformances", () => {
 		);
 
 		expect(results.every((result) => result.get(1)?.totalPoints === 9)).toBe(true);
-		expect(fromCalls.filter((table) => table === "event_lives")).toHaveLength(1);
+		expect(fromCalls.filter((table) => table === "fpl.player_gameweek_stats")).toHaveLength(1);
 		expect(redis.setCalls).toContainEqual([
 			`gql:v2:2526:live:all:33:revision:${revision}:fallback15`,
 			expect.any(String),
@@ -681,7 +682,7 @@ describe("liveRepository.getLivePerformancesByPlayerIds", () => {
 		const context = buildContext({
 			redisStrings: { [`LiveSnapshotMeta:2526:33`]: snapshotMeta(revision, 2) },
 			redisHashes: { "EventLive:2526:33": { "1": SAMPLE_SYNC_JOB_ROW } },
-			supabaseData: [
+			readData: [
 				{
 					event_id: 33,
 					element_id: 1,
@@ -717,10 +718,10 @@ describe("liveRepository.getLivePerformancesByPlayerIds", () => {
 });
 
 describe("liveRepository.getLivePerformancesForEventsAndPlayers", () => {
-	it("reads historical live rows from event_lives in one bulk query", async () => {
+	it("reads historical gameweek stats in one bulk query", async () => {
 		const context = buildContext({
-			supabaseDataByTable: {
-				event_lives: [
+			readDataByModel: {
+				"fpl.player_gameweek_stats": [
 					{
 						event_id: 12,
 						element_id: 1,
@@ -938,16 +939,16 @@ describe("liveRepository.getEventLiveExplain", () => {
 
 	it("loads a cold explanation batch with two database queries and versioned Redis reads", async () => {
 		const redis = makeMockRedis({});
-		const supabaseFromCalls: string[] = [];
+		const readModelCalls: string[] = [];
 		const context = buildContext({
 			redis,
-			supabaseFromCalls,
-			supabaseDataByTable: {
-				player_stats: [
+			readModelCalls,
+			readDataByModel: {
+				"fpl.player_event_snapshots": [
 					playerStatsRow34_526,
 					{ ...playerStatsRow34_526, element_id: 527, total_points: 8 },
 				],
-				event_live_explains: [
+				"fpl.player_gameweek_scoring_items": [
 					{
 						event_id: 34,
 						element_id: 526,
@@ -991,7 +992,10 @@ describe("liveRepository.getEventLiveExplain", () => {
 			},
 			{ identifier: "bonus", value: 3, points: 3, pointsModification: null },
 		]);
-		expect(supabaseFromCalls).toEqual(["player_stats", "event_live_explains"]);
+		expect(readModelCalls).toEqual([
+			"fpl.player_event_snapshots",
+			"fpl.player_gameweek_scoring_items",
+		]);
 		expect(redis.hmgetCalls).toEqual([
 			["EventLiveExplainV2:2526:34", "526", "527"],
 			["EventLiveExplain:2526:34", "526", "527"],
@@ -999,15 +1003,15 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(redis.setCalls).toHaveLength(2);
 	});
 
-	it("maps stats from player_stats and breakdown from event_live_explain", async () => {
+	it("maps cumulative event snapshots and gameweek scoring-item breakdowns", async () => {
 		const explainFixture = {
 			fixture: 8,
 			stats: [{ identifier: "goals_scored", points: 4, value: 1 }],
 		};
 		const context = buildContext({
-			supabaseDataByTable: {
-				player_stats: [playerStatsRow34_526],
-				event_live_explains: [
+			readDataByModel: {
+				"fpl.player_event_snapshots": [playerStatsRow34_526],
+				"fpl.player_gameweek_scoring_items": [
 					{
 						event_id: 34,
 						element_id: 526,
@@ -1024,22 +1028,24 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(result?.breakdown[0]?.stats[0]?.identifier).toBe("goals_scored");
 	});
 
-	it("does not cache a partial explanation after player_stats recovers", async () => {
+	it("does not cache a partial explanation after event snapshots recover", async () => {
 		const revision = "c".repeat(24);
 		const redis = makeMockRedis({
 			strings: { "LiveSnapshotMeta:2526:33": snapshotMeta(revision) },
 		});
 		const errorByTable: Record<string, unknown> = {
-			player_stats: { code: "08006", message: "temporary connection failure" },
+			"fpl.player_event_snapshots": { code: "08006", message: "temporary connection failure" },
 		};
 		const fromCalls: string[] = [];
 		const context = buildContext({
 			redis,
-			supabaseFromCalls: fromCalls,
-			supabaseErrorByTable: errorByTable,
-			supabaseDataByTable: {
-				player_stats: [{ ...playerStatsRow34_526, event_id: 33, element_id: 1 }],
-				event_live_explains: [{ event_id: 33, element_id: 1, minutes: 66, minutes_points: 1 }],
+			readModelCalls: fromCalls,
+			readErrorByModel: errorByTable,
+			readDataByModel: {
+				"fpl.player_event_snapshots": [{ ...playerStatsRow34_526, event_id: 33, element_id: 1 }],
+				"fpl.player_gameweek_scoring_items": [
+					{ event_id: 33, element_id: 1, minutes: 66, minutes_points: 1 },
+				],
 			},
 		});
 
@@ -1048,12 +1054,12 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(partial?.stats.totalPoints).toBeNull();
 		expect(redis.setCalls).toHaveLength(0);
 
-		delete errorByTable.player_stats;
+		delete errorByTable["fpl.player_event_snapshots"];
 		const recovered = await liveRepository.getEventLiveExplain(context, 33, 1);
 
 		expect(recovered?.stats.totalPoints).toBe(14);
 		expect(redis.setCalls).toHaveLength(1);
-		expect(fromCalls.filter((table) => table === "player_stats")).toHaveLength(2);
+		expect(fromCalls.filter((table) => table === "fpl.player_event_snapshots")).toHaveLength(2);
 	});
 
 	it("uses Redis `explain` when event_live_explain has no explain JSON", async () => {
@@ -1072,9 +1078,9 @@ describe("liveRepository.getEventLiveExplain", () => {
 					526: JSON.stringify(redisExplain),
 				},
 			},
-			supabaseDataByTable: {
-				player_stats: [playerStatsRow34_526],
-				event_live_explains: [{ event_id: 34, element_id: 526, explain: null }],
+			readDataByModel: {
+				"fpl.player_event_snapshots": [playerStatsRow34_526],
+				"fpl.player_gameweek_scoring_items": [{ event_id: 34, element_id: 526, explain: null }],
 			},
 		});
 		const result = await liveRepository.getEventLiveExplain(context, 34, 526);
@@ -1083,7 +1089,7 @@ describe("liveRepository.getEventLiveExplain", () => {
 	});
 
 	it("maps the producer's additive V2 compact contract without querying Postgres", async () => {
-		const supabaseFromCalls: string[] = [];
+		const readModelCalls: string[] = [];
 		const redis = makeMockRedis({
 			hashes: {
 				"EventLiveExplainV2:2526:34": {
@@ -1105,10 +1111,10 @@ describe("liveRepository.getEventLiveExplain", () => {
 		});
 		const context = buildContext({
 			redis,
-			supabaseFromCalls,
-			supabaseDataByTable: {
-				player_stats: [playerStatsRow34_526],
-				event_live_explains: [],
+			readModelCalls,
+			readDataByModel: {
+				"fpl.player_event_snapshots": [playerStatsRow34_526],
+				"fpl.player_gameweek_scoring_items": [],
 			},
 		});
 
@@ -1127,7 +1133,7 @@ describe("liveRepository.getEventLiveExplain", () => {
 			},
 			{ identifier: "bonus", value: 3, points: 3, pointsModification: null },
 		]);
-		expect(supabaseFromCalls).toEqual([]);
+		expect(readModelCalls).toEqual([]);
 		expect(redis.hmgetCalls).toEqual([["EventLiveExplainV2:2526:34", "526"]]);
 	});
 
@@ -1148,8 +1154,8 @@ describe("liveRepository.getEventLiveExplain", () => {
 				},
 			},
 		});
-		const supabaseFromCalls: string[] = [];
-		const context = buildContext({ redis, supabaseFromCalls });
+		const readModelCalls: string[] = [];
+		const context = buildContext({ redis, readModelCalls });
 
 		const result = await liveRepository.getEventLiveExplains(
 			context,
@@ -1165,7 +1171,7 @@ describe("liveRepository.getEventLiveExplain", () => {
 						?.value
 			)
 		).toEqual([45, 46, 47]);
-		expect(supabaseFromCalls).toEqual([]);
+		expect(readModelCalls).toEqual([]);
 		expect(redis.hmgetCalls).toEqual([
 			["EventLiveExplainV2:2526:34", "526", "527", "528"],
 			["EventLiveExplain:2526:34", "526", "527", "528"],
@@ -1181,8 +1187,8 @@ describe("liveRepository.getEventLiveExplain", () => {
 				"EventLiveExplain:2526:34": { 527: compact(527, 45) },
 			},
 		});
-		const supabaseFromCalls: string[] = [];
-		const context = buildContext({ redis, supabaseFromCalls });
+		const readModelCalls: string[] = [];
+		const context = buildContext({ redis, readModelCalls });
 
 		const result = await liveRepository.getEventLiveExplains(
 			context,
@@ -1192,26 +1198,26 @@ describe("liveRepository.getEventLiveExplain", () => {
 		);
 
 		expect(result.map((explain) => explain.elementId)).toEqual([526, 527]);
-		expect(supabaseFromCalls).toEqual([]);
+		expect(readModelCalls).toEqual([]);
 		expect(redis.hmgetCalls).toEqual([
 			["EventLiveExplainV2:2526:34", "526", "527"],
 			["EventLiveExplain:2526:34", "527"],
 		]);
 	});
 
-	it("preserves player_stats-only members and batches selectedBy for 15 players", async () => {
+	it("preserves event-snapshot-only members and batches selectedBy for 15 players", async () => {
 		const elementIds = Array.from({ length: 15 }, (_, index) => 601 + index);
-		const supabaseFromCalls: string[] = [];
+		const readModelCalls: string[] = [];
 		const context = buildContext({
-			supabaseFromCalls,
-			supabaseDataByTable: {
-				player_stats: elementIds.map((elementId, index) => ({
+			readModelCalls,
+			readDataByModel: {
+				"fpl.player_event_snapshots": elementIds.map((elementId, index) => ({
 					event_id: 34,
 					element_id: elementId,
 					total_points: index,
 					selected_by_percent: index + 0.5,
 				})),
-				event_live_explains: [],
+				"fpl.player_gameweek_scoring_items": [],
 			},
 		});
 
@@ -1228,7 +1234,10 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(result.map((explain) => explain.selectedBy)).toEqual(
 			elementIds.map((_elementId, index) => index + 0.5)
 		);
-		expect(supabaseFromCalls).toEqual(["player_stats", "event_live_explains"]);
+		expect(readModelCalls).toEqual([
+			"fpl.player_event_snapshots",
+			"fpl.player_gameweek_scoring_items",
+		]);
 	});
 
 	it("coalesces 100 mixed-player revision misses into one durable batch", async () => {
@@ -1237,17 +1246,17 @@ describe("liveRepository.getEventLiveExplain", () => {
 		const redis = makeMockRedis({
 			strings: { "LiveSnapshotMeta:2526:33": snapshotMeta(revision, 15) },
 		});
-		const supabaseFromCalls: string[] = [];
+		const readModelCalls: string[] = [];
 		const contextOptions = {
 			redis,
-			supabaseFromCalls,
-			supabaseDataByTable: {
-				player_stats: elementIds.map((elementId) => ({
+			readModelCalls,
+			readDataByModel: {
+				"fpl.player_event_snapshots": elementIds.map((elementId) => ({
 					event_id: 33,
 					element_id: elementId,
 					total_points: elementId,
 				})),
-				event_live_explains: elementIds.map((elementId) => ({
+				"fpl.player_gameweek_scoring_items": elementIds.map((elementId) => ({
 					event_id: 33,
 					element_id: elementId,
 					minutes: 45,
@@ -1267,7 +1276,10 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(
 			results.every((batch, index) => batch[0]?.elementId === elementIds[index % elementIds.length])
 		).toBe(true);
-		expect(supabaseFromCalls).toEqual(["player_stats", "event_live_explains"]);
+		expect(readModelCalls).toEqual([
+			"fpl.player_event_snapshots",
+			"fpl.player_gameweek_scoring_items",
+		]);
 		expect(redis.hmgetCalls.filter(([key]) => key === "EventLiveExplainV2:2526:33")).toHaveLength(
 			1
 		);
@@ -1283,17 +1295,17 @@ describe("liveRepository.getEventLiveExplain", () => {
 		const redis = makeMockRedis({
 			strings: { "LiveSnapshotMeta:2526:33": snapshotMeta(revision, 300) },
 		});
-		const supabaseInCalls: Array<{ table: string; column: string; values: unknown[] }> = [];
+		const readInCalls: Array<{ table: string; column: string; values: unknown[] }> = [];
 		const contextOptions = {
 			redis,
-			supabaseInCalls,
-			supabaseDataByTable: {
-				player_stats: elementIds.map((elementId) => ({
+			readInCalls,
+			readDataByModel: {
+				"fpl.player_event_snapshots": elementIds.map((elementId) => ({
 					event_id: 33,
 					element_id: elementId,
 					total_points: elementId,
 				})),
-				event_live_explains: elementIds.map((elementId) => ({
+				"fpl.player_gameweek_scoring_items": elementIds.map((elementId) => ({
 					event_id: 33,
 					element_id: elementId,
 					minutes: 45,
@@ -1309,18 +1321,18 @@ describe("liveRepository.getEventLiveExplain", () => {
 		);
 
 		expect(results.map((batch) => batch.map((result) => result.elementId))).toEqual(requestBatches);
-		expect(supabaseInCalls.length).toBeGreaterThanOrEqual(6);
-		expect(supabaseInCalls.every((call) => call.values.length <= 100)).toBe(true);
+		expect(readInCalls.length).toBeGreaterThanOrEqual(6);
+		expect(readInCalls.every((call) => call.values.length <= 100)).toBe(true);
 	});
 
 	it("falls back to the historical element column", async () => {
 		const attemptedColumns: string[] = [];
-		const context = buildContext({}) as unknown as { supabase: unknown };
-		context.supabase = {
-			from: (table: string) => {
+		const context = buildContext({}) as unknown as { data: unknown };
+		context.data = {
+			read: (table: string) => {
 				let elementColumn = "";
 				const resultForColumn = () => {
-					if (table === "player_stats") {
+					if (table === "fpl.player_event_snapshots") {
 						return { data: [playerStatsRow34_526], error: null };
 					}
 					if (elementColumn === "element_id") {
@@ -1328,7 +1340,7 @@ describe("liveRepository.getEventLiveExplain", () => {
 							data: null,
 							error: {
 								code: "42703",
-								message: "column event_live_explains.element_id does not exist",
+								message: "column player_gameweek_scoring_items.element_id does not exist",
 							},
 						};
 					}
@@ -1354,7 +1366,7 @@ describe("liveRepository.getEventLiveExplain", () => {
 						return builder;
 					},
 					in: async (column: string) => {
-						if (table === "event_live_explains") {
+						if (table === "fpl.player_gameweek_scoring_items") {
 							elementColumn = column;
 							attemptedColumns.push(column);
 						}
@@ -1370,9 +1382,12 @@ describe("liveRepository.getEventLiveExplain", () => {
 		expect(result?.breakdown[0]?.fixtureId).toBe(10);
 	});
 
-	it("returns null when neither player_stats nor event_live_explain have a row", async () => {
+	it("returns null when neither event snapshots nor gameweek scoring items have a row", async () => {
 		const context = buildContext({
-			supabaseDataByTable: { player_stats: [], event_live_explains: [] },
+			readDataByModel: {
+				"fpl.player_event_snapshots": [],
+				"fpl.player_gameweek_scoring_items": [],
+			},
 		});
 		const result = await liveRepository.getEventLiveExplain(context, 34, 526);
 		expect(result).toBeNull();

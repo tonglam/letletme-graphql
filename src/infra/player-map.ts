@@ -31,8 +31,8 @@ export async function buildPlayerMap(
 		}
 
 		if (missingIds.length > 0) {
-			const { data, error } = await context.supabase
-				.from("players")
+			const { data, error } = await context.data
+				.read("fpl.players")
 				.select("id, web_name, first_name, second_name, team_id, type, code, price, start_price")
 				.in("id", missingIds);
 
@@ -55,8 +55,8 @@ export async function buildPlayerMap(
 		);
 	}
 
-	const { data, error } = await context.supabase
-		.from("players")
+	const { data, error } = await context.data
+		.read("fpl.players")
 		.select("id, web_name, first_name, second_name, team_id, type, code, price, start_price")
 		.in("id", playerIds);
 

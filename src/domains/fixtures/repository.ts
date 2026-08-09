@@ -338,8 +338,8 @@ const loadEventFixturesFromDatabase = async (
 		const cachedAfterElection = await readFixtureFallbackCache(context, cacheKey, eventId);
 		if (cachedAfterElection !== null) return cachedAfterElection;
 
-		const { data, error } = await context.supabase
-			.from("event_fixtures")
+		const { data, error } = await context.data
+			.read("fpl.fixtures")
 			.select(FIXTURE_COLUMNS)
 			.eq("event_id", eventId)
 			.order("kickoff_time", { ascending: true });
@@ -395,7 +395,7 @@ export const fixturesRepository: FixturesRepository = {
 		const safeLimit = clampLimit(limit);
 		const safeOffset = Math.max(Number.isFinite(offset) ? offset : 0, 0);
 
-		let query = context.supabase.from("event_fixtures").select(FIXTURE_COLUMNS);
+		let query = context.data.read("fpl.fixtures").select(FIXTURE_COLUMNS);
 
 		if (normalizedFilter?.id !== undefined) {
 			query = query.eq("id", normalizedFilter.id);

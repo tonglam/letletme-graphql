@@ -11,12 +11,15 @@
 
 import { ApolloServer } from "@apollo/server";
 import type Redis from "ioredis";
+import type { QueryResultRow } from "pg";
 import type { GraphQLContext } from "../src/graphql/context";
 import { schema } from "../src/graphql/schema";
+import { validateDatabaseContract } from "../src/infra/database-contract";
+import { database } from "../src/infra/database";
 import { env } from "../src/infra/env";
 import { logger } from "../src/infra/logger";
 import { connectRedis, getRedis } from "../src/infra/redis";
-import { supabase } from "../src/infra/supabase";
+import { V3ReadClient } from "../src/infra/v3-read-client";
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -195,7 +198,7 @@ class QueryTimeoutError extends Error {
 
 async function runTimedOperation(
 	apollo: ApolloServer<GraphQLContext>,
-	redis: Redis,
+	context: GraphQLContext,
 	query: QueryDefinition
 ): Promise<TimedOperationResult> {
 	let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -210,7 +213,7 @@ async function runTimedOperation(
 		const response = await Promise.race([
 			apollo.executeOperation(
 				{ query: query.operation, variables: query.variables },
-				{ contextValue: { supabase, redis, logger } }
+				{ contextValue: context }
 			),
 			timeout,
 		]);
@@ -258,7 +261,21 @@ async function runTimedOperation(
 /* ID Discovery (real data from DB)                                    */
 /* ------------------------------------------------------------------ */
 
-async function discoverIds(): Promise<{
+type DiscoveryRow = QueryResultRow & {
+	event_id: number | null;
+	player_id: number | null;
+	entry_id: number | null;
+	team_id: number | null;
+	league_id: number | null;
+	tournament_id: number | null;
+	fixture_event_id: number | null;
+	next_fixture_event_id: number | null;
+	entry_event_id: number | null;
+	entry_event_entry_id: number | null;
+	player_stat_event_id: number | null;
+};
+
+async function discoverIds(seasonId: number): Promise<{
 	eventId: number | null;
 	playerId: number | null;
 	entryId: number | null;
@@ -271,123 +288,59 @@ async function discoverIds(): Promise<{
 	entryEventEntryId: number | null;
 	playerStatEventId: number | null;
 }> {
+	const row = (
+		await database.query<DiscoveryRow>(
+			`WITH chosen_event AS (
+				SELECT COALESCE(
+					MAX(event_id) FILTER (WHERE is_current),
+					MIN(event_id)
+				) AS event_id
+				FROM fpl.events
+				WHERE season_id = $1
+			), entry_event AS (
+				SELECT entry_id, event_id
+				FROM competition.entry_event_results
+				WHERE season_id = $1
+				ORDER BY event_id DESC, entry_id
+				LIMIT 1
+			)
+			SELECT
+				(SELECT event_id FROM chosen_event) AS event_id,
+				(SELECT MIN(element_id) FROM fpl.players WHERE season_id = $1) AS player_id,
+				(SELECT MIN(entry_id) FROM competition.entries WHERE season_id = $1) AS entry_id,
+				(SELECT MIN(team_id) FROM fpl.teams WHERE season_id = $1) AS team_id,
+				(SELECT MIN(league_id) FROM competition.entry_leagues WHERE season_id = $1) AS league_id,
+				(SELECT MIN(tournament_id) FROM competition.tournaments WHERE season_id = $1) AS tournament_id,
+				(SELECT MIN(event_id) FROM fpl.fixtures WHERE season_id = $1) AS fixture_event_id,
+				(
+					SELECT MIN(event_id)
+					FROM fpl.fixtures
+					WHERE season_id = $1
+					  AND event_id > (SELECT event_id FROM chosen_event)
+				) AS next_fixture_event_id,
+				(SELECT event_id FROM entry_event) AS entry_event_id,
+				(SELECT entry_id FROM entry_event) AS entry_event_entry_id,
+				(SELECT MAX(event_id) FROM fpl.player_event_snapshots WHERE season_id = $1)
+					AS player_stat_event_id`,
+			[seasonId]
+		)
+	).rows[0];
+	if (!row) throw new Error("Unable to discover benchmark identifiers");
+	const numberOrNull = (value: number | null): number | null =>
+		value === null ? null : Number(value);
 	const result = {
-		eventId: null as number | null,
-		playerId: null as number | null,
-		entryId: null as number | null,
-		teamId: null as number | null,
-		leagueId: null as number | null,
-		tournamentId: null as number | null,
-		fixtureEventId: null as number | null,
-		nextFixtureEventId: null as number | null,
-		entryEventId: null as number | null,
-		entryEventEntryId: null as number | null,
-		playerStatEventId: null as number | null,
+		eventId: numberOrNull(row.event_id),
+		playerId: numberOrNull(row.player_id),
+		entryId: numberOrNull(row.entry_id),
+		teamId: numberOrNull(row.team_id),
+		leagueId: numberOrNull(row.league_id),
+		tournamentId: numberOrNull(row.tournament_id),
+		fixtureEventId: numberOrNull(row.fixture_event_id),
+		nextFixtureEventId: numberOrNull(row.next_fixture_event_id),
+		entryEventId: numberOrNull(row.entry_event_id),
+		entryEventEntryId: numberOrNull(row.entry_event_entry_id),
+		playerStatEventId: numberOrNull(row.player_stat_event_id),
 	};
-
-	// Current event
-	try {
-		const { data } = await supabase.from("events").select("id").eq("is_current", true).limit(1);
-		if (data && data.length > 0) result.eventId = (data[0] as { id: number }).id;
-	} catch (e) {
-		logger.warn({ err: e }, "Failed to discover current event");
-	}
-
-	// Fallback: any event
-	if (!result.eventId) {
-		try {
-			const { data } = await supabase.from("events").select("id").limit(1);
-			if (data && data.length > 0) result.eventId = (data[0] as { id: number }).id;
-		} catch (e) {
-			logger.warn({ err: e }, "Failed to discover any event");
-		}
-	}
-
-	// Player
-	try {
-		const { data } = await supabase.from("players").select("id").limit(1);
-		if (data && data.length > 0) result.playerId = (data[0] as { id: number }).id;
-	} catch (e) {
-		logger.warn({ err: e }, "Failed to discover player");
-	}
-
-	// Entry
-	try {
-		const { data } = await supabase.from("entry_infos").select("id").limit(1);
-		if (data && data.length > 0) result.entryId = (data[0] as { id: number }).id;
-	} catch (e) {
-		logger.warn({ err: e }, "Failed to discover entry");
-	}
-
-	// Team
-	try {
-		const { data } = await supabase.from("teams").select("id").limit(1);
-		if (data && data.length > 0) result.teamId = (data[0] as { id: number }).id;
-	} catch (e) {
-		logger.warn({ err: e }, "Failed to discover team");
-	}
-
-	// League
-	try {
-		const { data } = await supabase.from("entry_league_infos").select("league_id").limit(1);
-		if (data && data.length > 0) result.leagueId = (data[0] as { league_id: number }).league_id;
-	} catch (e) {
-		logger.warn({ err: e }, "Failed to discover league");
-	}
-
-	// Tournament
-	try {
-		const { data } = await supabase.from("tournament_infos").select("id").limit(1);
-		if (data && data.length > 0) result.tournamentId = (data[0] as { id: number }).id;
-	} catch (e) {
-		logger.warn({ err: e }, "Failed to discover tournament");
-	}
-
-	// Fixture event
-	try {
-		const { data } = await supabase.from("event_fixtures").select("event_id").limit(1);
-		if (data && data.length > 0) result.fixtureEventId = (data[0] as { event_id: number }).event_id;
-	} catch (e) {
-		logger.warn({ err: e }, "Failed to discover fixture event");
-	}
-
-	if (result.eventId && result.eventId < 38) {
-		try {
-			const { data } = await supabase
-				.from("event_fixtures")
-				.select("event_id")
-				.eq("event_id", result.eventId + 1)
-				.limit(1);
-			if (data && data.length > 0)
-				result.nextFixtureEventId = (data[0] as { event_id: number }).event_id;
-		} catch (e) {
-			logger.warn({ err: e }, "Failed to discover next fixture event");
-		}
-	}
-
-	// Entry-event pair
-	try {
-		const { data } = await supabase
-			.from("entry_event_results")
-			.select("entry_id,event_id")
-			.limit(1);
-		if (data && data.length > 0) {
-			const row = data[0] as { entry_id: number; event_id: number };
-			result.entryEventEntryId = row.entry_id;
-			result.entryEventId = row.event_id;
-		}
-	} catch (e) {
-		logger.warn({ err: e }, "Failed to discover entry-event pair");
-	}
-
-	// Player stat event
-	try {
-		const { data } = await supabase.from("player_stats").select("event_id").limit(1);
-		if (data && data.length > 0)
-			result.playerStatEventId = (data[0] as { event_id: number }).event_id;
-	} catch (e) {
-		logger.warn({ err: e }, "Failed to discover player stat event");
-	}
 
 	logger.info(result, "Discovered sample IDs");
 	return result;
@@ -429,12 +382,11 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			"query Event($id: Int!) { event(id: $id) { id name } }",
 			{ id: ids.eventId },
 			"event",
-			["event:current", "Season:active"]
+			["event:current"]
 		);
 	}
 	add("events", "events", "query Events { events(limit: 10) { id name } }", {}, "events", [
 		"event:current",
-		"Season:active",
 	]);
 	add(
 		"events",
@@ -442,7 +394,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 		"query CurrentEventInfo { currentEventInfo { currentEvent nextUtcDeadline } }",
 		{},
 		"currentEventInfo",
-		["event:current", "Season:active"]
+		["event:current"]
 	);
 
 	/* players */
@@ -819,13 +771,21 @@ async function runBenchmark(): Promise<void> {
 	logger.info("Starting benchmark...");
 
 	// Bootstrap
+	const contract = await validateDatabaseContract(database);
 	await connectRedis();
 	const redis = createReadOnlyRedis(getRedis());
+	const context: GraphQLContext = {
+		data: new V3ReadClient(database, contract.currentSeason),
+		database,
+		currentSeason: contract.currentSeason,
+		redis,
+		logger,
+	};
 
 	const apollo = new ApolloServer<GraphQLContext>({ schema });
 	await apollo.start();
 
-	const ids = await discoverIds();
+	const ids = await discoverIds(contract.currentSeason.seasonId);
 	const queries = buildQueries(ids);
 
 	const results: BenchmarkResult[] = [];
@@ -835,7 +795,7 @@ async function runBenchmark(): Promise<void> {
 	try {
 		await apollo.executeOperation(
 			{ query: "query Warmup { currentEventInfo { currentEvent } }" },
-			{ contextValue: { supabase, redis, logger } }
+			{ contextValue: context }
 		);
 	} catch {
 		// ignore
@@ -862,7 +822,7 @@ async function runBenchmark(): Promise<void> {
 
 		const failures: TimedOperationResult[] = [];
 		for (let i = 0; i < BENCHMARK_ITERATIONS; i++) {
-			const sample = await runTimedOperation(apollo, redis, q);
+			const sample = await runTimedOperation(apollo, context, q);
 			if (sample.status === "OK") {
 				result.samplesMs.push(sample.ms);
 				result.resultCount = sample.resultCount;
@@ -906,7 +866,7 @@ async function runBenchmark(): Promise<void> {
 	console.log("GRAPHQL QUERY BENCHMARK RESULTS");
 	console.log(`Timestamp: ${nowIso()}`);
 	console.log(`Redis:     ${env.REDIS_HOST}:${env.REDIS_PORT}`);
-	console.log(`Supabase:  ${env.SUPABASE_URL}`);
+	console.log(`Postgres:  read-only Data Platform ${contract.schemaVersion}`);
 	console.log(`Mode:      read-only Redis, ${BENCHMARK_ITERATIONS} samples/query`);
 	console.log(`Timeout:   ${QUERY_TIMEOUT_MS} ms/query sample`);
 	console.log("=".repeat(100));
@@ -960,7 +920,8 @@ async function runBenchmark(): Promise<void> {
 			timestamp: nowIso(),
 			redisHost: env.REDIS_HOST,
 			redisPort: env.REDIS_PORT,
-			supabaseUrl: env.SUPABASE_URL,
+			databaseMode: "read-only-v3",
+			datasetRevision: contract.datasetRevision,
 			totalQueries: results.length,
 			iterations: BENCHMARK_ITERATIONS,
 			timeoutMs: QUERY_TIMEOUT_MS,

@@ -172,8 +172,8 @@ const fetchTournamentEnrichments = async (
 
 	const leagueIds = [...new Set(leagueKeys.map((k) => parseInt(k.split(":")[0], 10)))];
 
-	const { data: tData } = await context.supabase
-		.from("tournament_infos")
+	const { data: tData } = await context.data
+		.read("competition.tournaments")
 		.select(
 			"id, name, admin_entry_id, league_id, league_type, total_team_num, tournament_mode, group_mode, state, created_at"
 		)
@@ -197,8 +197,8 @@ const buildLeagueFromInfo = async (
 	leagueType: string
 ): Promise<League> => {
 	const [lResult, tResult] = await Promise.all([
-		context.supabase
-			.from("entry_league_infos")
+		context.data
+			.read("competition.entry_leagues")
 			.select(
 				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event"
 			)
@@ -206,8 +206,8 @@ const buildLeagueFromInfo = async (
 			.eq("league_type", leagueType)
 			.limit(1)
 			.maybeSingle(),
-		context.supabase
-			.from("tournament_infos")
+		context.data
+			.read("competition.tournaments")
 			.select(
 				"id, name, admin_entry_id, league_id, league_type, total_team_num, tournament_mode, group_mode, state, created_at"
 			)
@@ -263,8 +263,8 @@ export const leaguesRepository: LeaguesRepository = {
 		const cached = await readJsonCache(context, cacheKey, isLeagueArray);
 		if (cached) return cached;
 
-		const { data, error } = await context.supabase
-			.from("entry_league_infos")
+		const { data, error } = await context.data
+			.read("competition.entry_leagues")
 			.select(
 				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event"
 			)
@@ -304,8 +304,8 @@ export const leaguesRepository: LeaguesRepository = {
 		const cached = await readJsonCache(context, cacheKey, isLeagueEventResultArray);
 		if (cached) return cached;
 
-		const { data, error } = await context.supabase
-			.from("league_event_results")
+		const { data, error } = await context.data
+			.read("competition.league_event_results")
 			.select(
 				"league_id, league_type, event_id, entry_id, entry_name, player_name, event_points, event_rank, overall_points, overall_rank"
 			)

@@ -1,9 +1,8 @@
-import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "crypto";
-import { dbPool } from "./db-pool";
+import { createHash, createHmac, timingSafeEqual } from "crypto";
+import { database } from "./database";
 import { env } from "./env";
 import { logger } from "./logger";
 import { metrics } from "./metrics";
-import { getRedis } from "./redis";
 
 export interface AuthUser {
 	id: string;
@@ -28,15 +27,6 @@ export type Principal = {
 	fplEntryVerifiedAt: string | null;
 };
 
-export type ApiSession = {
-	token: string;
-	expiresAt: string;
-	user: {
-		id: string;
-		fplEntryId: number | null;
-	};
-};
-
 type WebsiteEnvelope = {
 	v?: unknown;
 	aud?: unknown;
@@ -47,13 +37,6 @@ type WebsiteEnvelope = {
 	exp?: unknown;
 };
 
-type WechatResponse = {
-	openid?: string;
-	session_key?: string;
-	errcode?: number;
-	errmsg?: string;
-};
-
 type ApiSessionRow = {
 	user_id: string;
 	fpl_entry_id: number | null;
@@ -61,14 +44,6 @@ type ApiSessionRow = {
 };
 
 type MiniProgramSessionRow = ApiSessionRow;
-
-type IdentityRow = {
-	user_id: string;
-};
-
-type UserIdentityRow = {
-	id: string;
-};
 
 type PrincipalValidators = {
 	validateMiniProgramSessionToken: (token: string) => Promise<Principal | null>;
@@ -169,7 +144,7 @@ const getBearerToken = (headers: Headers): string | null => {
 export const validateApiSessionToken = async (token: string): Promise<Principal | null> => {
 	if (!isLegacyAuthValidationOpen()) return null;
 	const tokenHash = hashApiToken(token);
-	const result = await dbPool.query<ApiSessionRow>(
+	const result = await database.query<ApiSessionRow>(
 		`SELECT s.user_id,
 		        CASE WHEN u.fpl_entry_verified_at IS NOT NULL THEN u.fpl_entry_id END AS fpl_entry_id,
 		        u.fpl_entry_verified_at
@@ -187,17 +162,6 @@ export const validateApiSessionToken = async (token: string): Promise<Principal 
 	if (!row) return null;
 	metrics.authTokenValidations.labels("legacy_graphql_wechat").inc();
 
-	void dbPool
-		.query(
-			`UPDATE bauth.api_sessions
-         SET last_active_at = NOW()
-         WHERE token_hash = $1`,
-			[tokenHash]
-		)
-		.catch((err: unknown) => {
-			logger.warn({ err }, "Failed to update api session last_active_at");
-		});
-
 	return {
 		userId: row.user_id,
 		source: "wechat_miniprogram",
@@ -211,7 +175,7 @@ export const validateApiSessionToken = async (token: string): Promise<Principal 
 
 export const validateMiniProgramSessionToken = async (token: string): Promise<Principal | null> => {
 	const tokenHash = hashApiToken(token);
-	const result = await dbPool.query<MiniProgramSessionRow>(
+	const result = await database.query<MiniProgramSessionRow>(
 		`SELECT s.user_id,
 		        CASE WHEN u.fpl_entry_verified_at IS NOT NULL THEN u.fpl_entry_id END AS fpl_entry_id,
 		        u.fpl_entry_verified_at
@@ -276,140 +240,3 @@ export const principalToAuthUser = (principal: Principal): AuthUser => ({
 	fplEntryId: principal.fplEntryId,
 	fplEntryVerifiedAt: principal.fplEntryVerifiedAt,
 });
-
-const exchangeWechatCode = async (code: string): Promise<string> => {
-	if (!env.WECHAT_APPID || !env.WECHAT_APPSECRET) {
-		throw new Error("WeChat Mini Program credentials are not configured");
-	}
-
-	const url =
-		`https://api.weixin.qq.com/sns/jscode2session` +
-		`?appid=${encodeURIComponent(env.WECHAT_APPID)}` +
-		`&secret=${encodeURIComponent(env.WECHAT_APPSECRET)}` +
-		`&js_code=${encodeURIComponent(code)}` +
-		`&grant_type=authorization_code`;
-	const response = await fetch(url);
-	const data = (await response.json()) as WechatResponse;
-	if (!data.openid) {
-		throw new Error(`WeChat auth failed: ${data.errmsg ?? "unknown"}`);
-	}
-	return data.openid;
-};
-
-export const createWechatApiSession = async (
-	code: string,
-	_fplEntryId?: number | null
-): Promise<ApiSession> => {
-	if (!env.LEGACY_WECHAT_ISSUANCE_ENABLED) {
-		throw new Error(
-			"Legacy WeChat session issuance is disabled; authenticate through letletme-web"
-		);
-	}
-	const codeHash = hashApiToken(code);
-	const claimed = await getRedis().set(
-		`gql:v2:security:wechat-code:${codeHash}`,
-		"1",
-		"EX",
-		10 * 60,
-		"NX"
-	);
-	if (claimed !== "OK") {
-		throw new Error("WeChat login code has already been used");
-	}
-	const openid = await exchangeWechatCode(code);
-	const client = await dbPool.connect();
-
-	try {
-		await client.query("BEGIN");
-
-		const existingIdentity = await client.query<IdentityRow>(
-			`SELECT user_id
-       FROM bauth.external_identities
-       WHERE provider = $1 AND provider_subject = $2
-       LIMIT 1`,
-			[WECHAT_PROVIDER, openid]
-		);
-
-		let userId = existingIdentity.rows[0]?.user_id;
-		if (!userId) {
-			const existingUser = await client.query<UserIdentityRow>(
-				`SELECT id
-         FROM bauth."user"
-         WHERE openid = $1
-         ORDER BY email IS NULL ASC, created_at ASC
-         LIMIT 1`,
-				[openid]
-			);
-
-			userId = existingUser.rows[0]?.id;
-		}
-
-		if (!userId) {
-			// Entry binding is exclusively owned by letletme-web and is never
-			// accepted from this legacy exchange.
-			userId = randomUUID();
-			await client.query(
-				`INSERT INTO bauth."user"
-         (id, openid, fpl_entry_id, email_verified, created_at, updated_at)
-         VALUES ($1, $2, NULL, false, NOW(), NOW())`,
-				[userId, openid]
-			);
-		} else {
-			await client.query(
-				`UPDATE bauth."user"
-         SET openid = COALESCE(NULLIF(openid, ''), $1),
-             updated_at = NOW()
-         WHERE id = $2`,
-				[openid, userId]
-			);
-		}
-
-		if (!existingIdentity.rows[0]) {
-			await client.query(
-				`INSERT INTO bauth.external_identities
-         (id, user_id, provider, provider_subject, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, NOW(), NOW())
-         ON CONFLICT (provider, provider_subject) DO NOTHING`,
-				[randomUUID(), userId, WECHAT_PROVIDER, openid]
-			);
-		}
-
-		const token = `llm_wx_${randomBytes(32).toString("base64url")}`;
-		const tokenHash = hashApiToken(token);
-		const expiresAt = new Date(Date.now() + env.WECHAT_API_SESSION_TTL_SECONDS * 1000);
-
-		await client.query(
-			`INSERT INTO bauth.api_sessions
-       (id, user_id, client_type, provider, token_hash, expires_at, created_at, last_active_at)
-       VALUES ($1, $2, 'wechat_miniprogram', $3, $4, $5, NOW(), NOW())`,
-			[randomUUID(), userId, WECHAT_PROVIDER, tokenHash, expiresAt]
-		);
-
-		const userResult = await client.query<{ fpl_entry_id: number | null }>(
-			`SELECT CASE WHEN fpl_entry_verified_at IS NOT NULL THEN fpl_entry_id END AS fpl_entry_id
-			 FROM bauth."user" WHERE id = $1`,
-			[userId]
-		);
-		const boundEntryId = userResult.rows[0]?.fpl_entry_id ?? null;
-
-		await client.query("COMMIT");
-
-		return {
-			token,
-			expiresAt: expiresAt.toISOString(),
-			user: {
-				id: userId,
-				fplEntryId: boundEntryId,
-			},
-		};
-	} catch (error) {
-		try {
-			await client.query("ROLLBACK");
-		} catch {
-			/* ignore */
-		}
-		throw error;
-	} finally {
-		client.release();
-	}
-};

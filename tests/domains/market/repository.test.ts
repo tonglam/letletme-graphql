@@ -54,6 +54,7 @@ const buildContext = (cacheSeed?: string) => {
 		writes,
 		deletes,
 		context: {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
 			redis: {
 				get: async (key: string) => strings.get(key) ?? null,
 				set: async (key: string, value: string, _mode: string, ttl: number) => {
@@ -68,7 +69,7 @@ const buildContext = (cacheSeed?: string) => {
 				},
 			},
 			logger: { warn: () => undefined, error: () => undefined },
-			supabase: {},
+			data: {},
 		} as never,
 	};
 };

@@ -20,6 +20,7 @@ const context = (options: { failRedisWrites?: boolean } = {}) => {
 	return {
 		strings,
 		value: {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
 			redis: {
 				get: async (key: string) => strings.get(key) ?? null,
 				set: async (key: string, value: string) => {
@@ -30,17 +31,17 @@ const context = (options: { failRedisWrites?: boolean } = {}) => {
 				del: async (key: string) => (strings.delete(key) ? 1 : 0),
 			},
 			logger: { warn: () => undefined, error: () => undefined },
-			supabase: {},
+			data: {},
 		} as never,
 	};
 };
 
 describe("public league trends repository", () => {
-	it("safely returns an empty catalog while its migration is unavailable", async () => {
+	it("returns an empty catalog when no public league is enabled", async () => {
 		let reads = 0;
 		const repository = createPublicLeagueTrendsRepository(
 			{
-				query: async () => ({ rows: [{ catalog: null }] }),
+				query: async () => ({ rows: [] }),
 			},
 			async () => {
 				reads += 1;

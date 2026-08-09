@@ -1,3 +1,4 @@
+import type { QueryResultRow } from "pg";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { getCurrentSeason } from "../../infra/season";
@@ -158,7 +159,7 @@ export type PlayersForPickerPayload = {
 	nextCursor: number | null;
 };
 
-type DbPickerRow = {
+type DbPickerRow = QueryResultRow & {
 	id: number;
 	web_name: string;
 	element_type: number;
@@ -193,8 +194,8 @@ const getLatestMarketOwnershipByIds = async (
 ): Promise<Map<number, number>> => {
 	if (ids.length === 0) return new Map();
 	try {
-		const latestResult = await context.supabase
-			.from("player_market_snapshots")
+		const latestResult = await context.data
+			.read("fpl.player_market_snapshots")
 			.select("snapshot_date, captured_at")
 			.order("snapshot_date", { ascending: false })
 			.order("captured_at", { ascending: false })
@@ -219,8 +220,8 @@ const getLatestMarketOwnershipByIds = async (
 			return new Map();
 		}
 
-		const ownershipResult = await context.supabase
-			.from("player_market_snapshots")
+		const ownershipResult = await context.data
+			.read("fpl.player_market_snapshots")
 			.select("element_id, selected_by_percent")
 			.eq("snapshot_date", snapshotDate)
 			.in("element_id", ids);
@@ -385,8 +386,8 @@ const fetchTopTransferRows = async (
 	limit: number
 ): Promise<RawTransferRow[]> => {
 	const col = direction === "in" ? "transfers_in_event" : "transfers_out_event";
-	const { data, error } = await context.supabase
-		.from("player_stats")
+	const { data, error } = await context.data
+		.read("fpl.player_event_snapshots")
 		.select("element_id, event_id, transfers_in_event, transfers_out_event")
 		.eq("event_id", eventId)
 		.not(col, "is", null)
@@ -407,7 +408,7 @@ export const playersRepository: PlayersRepository = {
 	async getPlayerById(context: GraphQLContext, id: number): Promise<Player | null> {
 		const season = await getCurrentSeason(context);
 
-		// Try externally-managed Player:{season} hash before hitting Supabase
+		// Try externally managed Player:{season} hash before hitting PostgreSQL.
 		let hashRaw: string | null = null;
 		try {
 			hashRaw = await context.redis.hget(`Player:${season}`, String(id));
@@ -442,12 +443,12 @@ export const playersRepository: PlayersRepository = {
 				};
 				return player;
 			} catch {
-				/* fall through to Supabase */
+				/* fall through to PostgreSQL */
 			}
 		}
 
-		const { data, error } = await context.supabase
-			.from("players")
+		const { data, error } = await context.data
+			.read("fpl.players")
 			.select("id, code, web_name, first_name, second_name, team_id, type, price, start_price")
 			.eq("id", id)
 			.limit(1);
@@ -486,8 +487,8 @@ export const playersRepository: PlayersRepository = {
 			return applyPlayerEventStats(basePlayer, cachedStats);
 		}
 
-		const statsResult = await context.supabase
-			.from("player_stats")
+		const statsResult = await context.data
+			.read("fpl.player_event_snapshots")
 			.select("total_points, selected_by_percent")
 			.eq("event_id", eventId)
 			.eq("element_id", id)
@@ -570,8 +571,8 @@ export const playersRepository: PlayersRepository = {
 		}
 
 		if (missIds.length > 0) {
-			const statsResult = await context.supabase
-				.from("player_stats")
+			const statsResult = await context.data
+				.read("fpl.player_event_snapshots")
 				.select("element_id, total_points, selected_by_percent")
 				.eq("event_id", eventId)
 				.in("element_id", missIds);
@@ -683,8 +684,8 @@ export const playersRepository: PlayersRepository = {
 			return result;
 		}
 
-		const { data, error } = await context.supabase
-			.from("players")
+		const { data, error } = await context.data
+			.read("fpl.players")
 			.select("id, code, web_name, first_name, second_name, team_id, type, price, start_price")
 			.in("id", missIds);
 
@@ -779,27 +780,46 @@ export const playersRepository: PlayersRepository = {
 		const teams = await buildTeamMap(context);
 		const fetchRows = async (pageCursor: number | null): Promise<DbPickerRow[]> => {
 			if (safeSearch) {
-				const result = await context.supabase.rpc("search_players_for_picker", {
-					p_query: safeSearch,
-					p_limit: scanLimit,
-					p_cursor: pageCursor,
-					p_position: safeFilter?.position ?? null,
-					p_team_id: null,
-					p_min_price: hasPriceFilter ? null : (safeFilter?.minPrice ?? null),
-					p_max_price: hasPriceFilter ? null : (safeFilter?.maxPrice ?? null),
-				});
-				if (result.error) {
+				try {
+					return (
+						await context.database.query<DbPickerRow>(
+							`SELECT
+								player.element_id AS id,
+								player.web_name,
+								player.element_type,
+								player.team_id,
+								team.name AS team_name,
+								team.short_name AS team_short_name
+							 FROM fpl.players player
+							 JOIN fpl.teams team
+							   ON team.season_id = player.season_id
+							  AND team.team_id = player.team_id
+							 WHERE player.season_id = $1
+							   AND player.element_id > COALESCE($2::integer, 0)
+							   AND STRPOS(LOWER(player.web_name), LOWER($3)) > 0
+							   AND ($4::integer IS NULL OR player.element_type = $4)
+							 ORDER BY player.element_id
+							 LIMIT $5`,
+							[
+								context.currentSeason.seasonId,
+								pageCursor,
+								safeSearch,
+								safeFilter?.position ?? null,
+								scanLimit,
+							]
+						)
+					).rows;
+				} catch (error) {
 					context.logger.error(
-						{ err: result.error, limit: safeLimit, cursor: pageCursor, search: safeSearch },
+						{ err: error, limit: safeLimit, cursor: pageCursor, search: safeSearch },
 						"Failed to fetch players for picker"
 					);
-					throw new Error("Failed to fetch players for picker");
+					throw new Error("Failed to fetch players for picker", { cause: error });
 				}
-				return (result.data as DbPickerRow[] | null) ?? [];
 			}
 
-			let query = context.supabase
-				.from("players")
+			let query = context.data
+				.read("fpl.players")
 				.select("id, web_name, type, team_id, price")
 				.order("id", { ascending: true })
 				.limit(scanLimit);
@@ -890,8 +910,8 @@ export const playersRepository: PlayersRepository = {
 		const safeLimit = clampLimit(limit);
 		const safeOffset = Math.max(Number.isFinite(offset) ? offset : 0, 0);
 
-		let query = context.supabase
-			.from("players")
+		let query = context.data
+			.read("fpl.players")
 			.select("id, code, web_name, first_name, second_name, team_id, type, price, start_price");
 
 		if (normalizedFilter?.position !== undefined) {

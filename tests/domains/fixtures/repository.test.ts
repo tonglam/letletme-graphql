@@ -7,9 +7,9 @@ const buildContext = (options: {
 	redisData?: Record<string, string>;
 	redisHashes?: Record<string, Record<string, string>>;
 	redis?: GraphQLContext["redis"];
-	supabaseData?: unknown[];
-	supabaseError?: unknown;
-	supabaseFromCalls?: string[];
+	databaseData?: unknown[];
+	databaseError?: unknown;
+	readModelCalls?: string[];
 }): GraphQLContext => {
 	const redisStrings = new Map<string, string>();
 	const redisHashes = new Map<string, Record<string, string>>();
@@ -26,6 +26,12 @@ const buildContext = (options: {
 	}
 
 	return {
+		database: {
+			query: async () => {
+				throw new Error("Unexpected database query");
+			},
+		} as never,
+		currentSeason: { seasonId: 2025, seasonCode: "2526" },
 		redis:
 			options.redis ??
 			({
@@ -37,15 +43,15 @@ const buildContext = (options: {
 				hgetall: async (key: string) => redisHashes.get(key) ?? {},
 				expire: async () => 1,
 			} as never),
-		supabase: {
-			from: () => {
-				options.supabaseFromCalls?.push("event_fixtures");
+		data: {
+			read: () => {
+				options.readModelCalls?.push("fpl.fixtures");
 				const builder = {
 					select: () => builder,
 					eq: () => builder,
 					order: async () => ({
-						data: options.supabaseData ?? [],
-						error: options.supabaseError ?? null,
+						data: options.databaseData ?? [],
+						error: options.databaseError ?? null,
 					}),
 				};
 				return builder;
@@ -169,7 +175,7 @@ describe("fixturesRepository.getEventFixtures", () => {
 			redisData: {
 				"Season:active": "2526",
 			},
-			supabaseData: [
+			databaseData: [
 				{
 					id: 329,
 					code: 2562223,
@@ -225,7 +231,7 @@ describe("fixturesRepository.getEventFixtures", () => {
 				"Season:active": "2526",
 				"LiveSnapshotMeta:2526:33": snapshotMeta,
 			},
-			supabaseData: [
+			databaseData: [
 				{
 					id: 329,
 					code: 2562223,
@@ -300,7 +306,7 @@ describe("fixturesRepository.getEventFixtures", () => {
 				"Season:active": "2526",
 				"LiveSnapshotMeta:2526:33": snapshotMeta,
 			},
-			supabaseData: [
+			databaseData: [
 				{
 					id: 330,
 					code: 2562224,
@@ -362,8 +368,8 @@ describe("fixturesRepository.getEventFixtures", () => {
 			},
 		});
 		const sharedRedis = seedContext.redis;
-		const supabaseFromCalls: string[] = [];
-		const supabaseData = [
+		const readModelCalls: string[] = [];
+		const databaseData = [
 			{
 				id: 329,
 				code: 2562223,
@@ -384,8 +390,8 @@ describe("fixturesRepository.getEventFixtures", () => {
 		const read = () => {
 			const context = buildContext({
 				redis: sharedRedis,
-				supabaseData,
-				supabaseFromCalls,
+				databaseData,
+				readModelCalls,
 			});
 			return withLiveSnapshotConsistency(context, 33, () =>
 				fixturesRepository.getEventFixtures(context, 33)
@@ -394,10 +400,10 @@ describe("fixturesRepository.getEventFixtures", () => {
 
 		const firstWave = await Promise.all(Array.from({ length: 25 }, read));
 		expect(firstWave.every((fixtures) => fixtures[0]?.id === 329)).toBe(true);
-		expect(supabaseFromCalls).toEqual(["event_fixtures"]);
+		expect(readModelCalls).toEqual(["fpl.fixtures"]);
 
 		const cached = await read();
 		expect(cached[0]?.id).toBe(329);
-		expect(supabaseFromCalls).toEqual(["event_fixtures"]);
+		expect(readModelCalls).toEqual(["fpl.fixtures"]);
 	});
 });

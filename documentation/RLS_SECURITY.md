@@ -1,22 +1,21 @@
 # Database security boundary
 
-`letletme-web` owns the `bauth` schema, its Better Auth tables, FPL binding
-challenge table, and related RLS/migrations. GraphQL must not replay or mutate
-those migrations.
+`letletme_data` owns Data Platform schemas and grants
+`letletme_graphql_reader` schema usage plus relation `SELECT` only.
+`letletme-web` owns `bauth` and any required auth-reader grant. GraphQL owns no
+database objects or migrations.
 
-The GraphQL repository owns only read-model additions. The forward migration
-enables RLS on `public.tournament_selection_stats`, revokes `anon` and
-`authenticated` table privileges where those roles exist, and adds the lookup
-indexes used by tournament selection statistics. The GraphQL service connects
-through its server-side database role and applies authorization before reading
-membership-scoped fields.
+The runtime login must be non-superuser, non-createdb, non-createrole, and
+non-bypassrls. It must have no `CREATE` privilege in a Data schema and no
+`INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, or `TRIGGER` privilege on
+any Data-owned relation. Startup checks these invariants and probes every
+registered read model with `LIMIT 0`.
 
-Verify this contract with the optional PostgreSQL integration test after
-bootstrapping domain tables:
+Run the unit fail-closed cases with:
 
 ```bash
-RUN_MIGRATION_INTEGRATION=true bun test tests/migrations/security.integration.test.ts
+bun test tests/infra/database-contract.test.ts tests/infra/v3-read-client.test.ts
 ```
 
-Do not grant browser-facing roles direct access to read-model tables. Changes
-to web-owned authentication privileges belong in the web repository.
+CI additionally replays the accepted Data commit into a disposable PostgreSQL
+15 database and runs `bun run contract:check` as a real read-only login.

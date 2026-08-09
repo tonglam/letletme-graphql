@@ -29,6 +29,7 @@ const contextWithMetaReads = (reads: Array<string | null>) => {
 	let index = 0;
 	const messages: string[] = [];
 	const context = {
+		currentSeason: { seasonId: 2025, seasonCode: "2526" },
 		redis: {
 			get: async (key: string): Promise<string | null> => {
 				if (key === "Season:active") return "2526";
@@ -72,6 +73,7 @@ describe("live snapshot metadata", () => {
 		const revision = "0".repeat(24);
 		let metadataReads = 0;
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";
@@ -326,6 +328,7 @@ describe("live snapshot metadata", () => {
 			announceLaterFinalPoll = resolve;
 		});
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";
@@ -381,6 +384,7 @@ describe("live snapshot metadata", () => {
 			announceFirstRevisionComplete = resolve;
 		});
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";
@@ -426,6 +430,7 @@ describe("live snapshot metadata", () => {
 		const currentMeta = meta("a".repeat(24));
 		const nextMeta = meta("b".repeat(24)).replace('"eventId":33', '"eventId":34');
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string): Promise<string | null> => {
 					if (key === "Season:active") return "2526";

@@ -74,8 +74,8 @@ export const getCurrentEventFromRedis = async (
 const getCurrentEventFromDatabase = async (
 	context: GraphQLContext
 ): Promise<CurrentEventCache | null> => {
-	const { data, error } = await context.supabase
-		.from("events")
+	const { data, error } = await context.data
+		.read("fpl.events")
 		.select(
 			"id, name, deadline_time, deadline_time_epoch, is_current, is_next, finished, data_checked"
 		)

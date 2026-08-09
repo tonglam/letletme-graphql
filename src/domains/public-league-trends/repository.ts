@@ -1,6 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { dbPool } from "../../infra/db-pool";
 import { env } from "../../infra/env";
 import { getCurrentSeason } from "../../infra/season";
 import {
@@ -40,10 +39,6 @@ type AccessRow = {
 	snapshot_revision: string | Date;
 };
 
-const CATALOG_EXISTS_SQL = `
-	SELECT to_regclass('public.public_league_trends_catalog') AS catalog
-`;
-
 const CATALOG_SQL = `
 	SELECT
 		catalog.tournament_id,
@@ -53,59 +48,60 @@ const CATALOG_SQL = `
 		catalog.updated_at,
 		snapshot.event_id AS latest_event_id,
 		snapshot.total_entries,
-		(SELECT MAX(updated_at) FROM public.public_league_trends_catalog) AS catalog_revision,
-		MAX(snapshot.snapshot_revision) OVER () AS snapshot_revision,
+		MAX(catalog.updated_at) OVER () AS catalog_revision,
+		MAX(tournament.updated_at) OVER () AS snapshot_revision,
 		(
-			SELECT MAX(COALESCE(tournament_revision.updated_at, tournament_revision.created_at))
-			FROM public.public_league_trends_catalog catalog_revision
-			JOIN public.tournament_infos tournament_revision
-				ON tournament_revision.id = catalog_revision.tournament_id
+			SELECT MAX(tournament_revision.updated_at)
+			FROM competition.public_league_trends catalog_revision
+			JOIN competition.tournaments tournament_revision
+				ON tournament_revision.season_id = catalog_revision.season_id
+				AND tournament_revision.tournament_id = catalog_revision.tournament_id
+			WHERE catalog_revision.season_id = $1
 		) AS readiness_revision
-	FROM public.public_league_trends_catalog catalog
-	JOIN public.tournament_infos tournament
-		ON tournament.id = catalog.tournament_id
+	FROM competition.public_league_trends catalog
+	JOIN competition.tournaments tournament
+		ON tournament.season_id = catalog.season_id
+		AND tournament.tournament_id = catalog.tournament_id
 		AND (tournament.setup_status IS NULL OR tournament.standings_ready_at IS NOT NULL)
 	JOIN LATERAL (
 		SELECT
 			stats.event_id,
-			MAX(stats.total_entries)::integer AS total_entries,
-			MAX(COALESCE(stats.updated_at, stats.created_at)) AS snapshot_revision
-		FROM public.tournament_selection_stats stats
-		WHERE stats.tournament_id = catalog.tournament_id
+			MAX(stats.total_entries)::integer AS total_entries
+		FROM reporting.tournament_selection_stats stats
+		WHERE stats.season_id = catalog.season_id
+			AND stats.tournament_id = catalog.tournament_id
 		GROUP BY stats.event_id
 		ORDER BY stats.event_id DESC
 		LIMIT 1
 	) snapshot ON true
-	WHERE catalog.enabled = true
+	WHERE catalog.season_id = $1
+		AND catalog.enabled = true
 	ORDER BY catalog.sort_order ASC, catalog.display_name ASC, catalog.tournament_id ASC
 `;
 
 const ACCESS_SQL = `
 	SELECT
-		(SELECT MAX(updated_at) FROM public.public_league_trends_catalog) AS catalog_revision,
-		MAX(COALESCE(stats.updated_at, stats.created_at)) AS snapshot_revision
-	FROM public.public_league_trends_catalog catalog
-	JOIN public.tournament_infos tournament
-		ON tournament.id = catalog.tournament_id
+		catalog.updated_at AS catalog_revision,
+		GREATEST(catalog.updated_at, tournament.updated_at) AS snapshot_revision
+	FROM competition.public_league_trends catalog
+	JOIN competition.tournaments tournament
+		ON tournament.season_id = catalog.season_id
+		AND tournament.tournament_id = catalog.tournament_id
 		AND (tournament.setup_status IS NULL OR tournament.standings_ready_at IS NOT NULL)
-	JOIN public.tournament_selection_stats stats
-		ON stats.tournament_id = catalog.tournament_id
-		AND stats.event_id = $2
+	JOIN reporting.tournament_selection_stats stats
+		ON stats.season_id = catalog.season_id
+		AND stats.tournament_id = catalog.tournament_id
+		AND stats.event_id = $3
 	WHERE catalog.enabled = true
-		AND catalog.tournament_id = $1
-	GROUP BY catalog.tournament_id
+		AND catalog.season_id = $1
+		AND catalog.tournament_id = $2
+	GROUP BY catalog.updated_at, tournament.updated_at
 `;
 
 const iso = (value: string | Date): string => {
 	const date = value instanceof Date ? value : new Date(value);
 	if (Number.isNaN(date.getTime())) throw new Error("Invalid public league revision timestamp");
 	return date.toISOString();
-};
-
-const catalogAvailable = async (executor: QueryExecutor): Promise<boolean> => {
-	const result = await executor.query(CATALOG_EXISTS_SQL);
-	const row = result.rows[0] as { catalog?: unknown } | undefined;
-	return typeof row?.catalog === "string" && row.catalog.length > 0;
 };
 
 const parseCachedStats = (value: string): TournamentSelectionStats | null | undefined => {
@@ -134,12 +130,13 @@ export type PublicLeagueTrendsRepository = {
 type ReadSelectionStats = typeof getTournamentSelectionStatsReadModel;
 
 export const createPublicLeagueTrendsRepository = (
-	executor: QueryExecutor = dbPool as unknown as QueryExecutor,
+	executor?: QueryExecutor,
 	readSelectionStats: ReadSelectionStats = getTournamentSelectionStatsReadModel
 ): PublicLeagueTrendsRepository => ({
 	async list(context): Promise<PublicLeagueTrend[]> {
-		if (!(await catalogAvailable(executor))) return [];
-		const result = await executor.query(CATALOG_SQL);
+		const result = await (executor ?? context.database).query(CATALOG_SQL, [
+			context.currentSeason.seasonId,
+		]);
 		const rows = result.rows as CatalogRow[];
 		if (rows.length === 0) return [];
 		const revision = iso(rows[0]!.catalog_revision);
@@ -193,8 +190,11 @@ export const createPublicLeagueTrendsRepository = (
 		eventId,
 		limit
 	): Promise<TournamentSelectionStats | null> {
-		if (!(await catalogAvailable(executor))) return null;
-		const accessResult = await executor.query(ACCESS_SQL, [tournamentId, eventId]);
+		const accessResult = await (executor ?? context.database).query(ACCESS_SQL, [
+			context.currentSeason.seasonId,
+			tournamentId,
+			eventId,
+		]);
 		const access = accessResult.rows[0] as AccessRow | undefined;
 		if (!access?.catalog_revision || !access.snapshot_revision) return null;
 		const season = await getCurrentSeason(context);

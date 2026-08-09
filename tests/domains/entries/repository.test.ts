@@ -24,6 +24,7 @@ describe("entriesRepository.getEntryEventResultsByEntryIds", () => {
 	it("reuses the per-entry baseline cache before querying PostgreSQL", async () => {
 		let databaseReads = 0;
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string) => (key === "Season:active" ? "2526" : null),
 				mget: async () => [JSON.stringify(cachedResult)],
@@ -35,8 +36,8 @@ describe("entriesRepository.getEntryEventResultsByEntryIds", () => {
 					exec: async () => [],
 				}),
 			},
-			supabase: {
-				from: () => {
+			data: {
+				read: () => {
 					databaseReads += 1;
 					throw new Error("database should not be read");
 				},
@@ -53,6 +54,7 @@ describe("entriesRepository.getEntryEventResultsByEntryIds", () => {
 	it("returns PostgreSQL baselines when the best-effort cache write fails", async () => {
 		const warnings: string[] = [];
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {
 				get: async (key: string) => (key === "Season:active" ? "2526" : null),
 				mget: async () => {
@@ -67,8 +69,8 @@ describe("entriesRepository.getEntryEventResultsByEntryIds", () => {
 					},
 				}),
 			},
-			supabase: {
-				from: () => ({
+			data: {
+				read: () => ({
 					select: () => ({
 						in: () => ({
 							eq: async () => ({

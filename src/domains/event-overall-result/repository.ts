@@ -183,8 +183,8 @@ export const eventOverallResultRepository: EventOverallResultRepository = {
 				);
 			}
 
-			const { data, error } = await context.supabase
-				.from("events")
+			const { data, error } = await context.data
+				.read("fpl.events")
 				.select(
 					"id, average_entry_score, finished, highest_scoring_entry, highest_score, chip_plays, most_selected, most_transferred_in, top_element, top_element_info, transfers_made, most_captained, most_vice_captained"
 				)

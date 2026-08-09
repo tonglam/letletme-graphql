@@ -11,7 +11,7 @@ const makeContext = (hash: Record<string, string>): GraphQLContext =>
 			hgetall: async (key: string): Promise<Record<string, string>> =>
 				key === MINI_PROGRAM_NOTICE_REDIS_KEY ? hash : {},
 		},
-		supabase: {} as GraphQLContext["supabase"],
+		data: {} as GraphQLContext["data"],
 		logger: {
 			info: () => undefined,
 			warn: () => undefined,

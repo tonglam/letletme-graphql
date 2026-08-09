@@ -2,9 +2,27 @@ import { describe, expect, it } from "bun:test";
 import { playersRepository } from "../../../src/domains/players/repository";
 
 describe("playersRepository.getPlayersForPicker", () => {
-	it("uses the bounded server-side search RPC when a query is present", async () => {
-		const calls: Array<{ name: string; params: Record<string, unknown> }> = [];
+	it("uses bounded parameterized PostgreSQL search when a query is present", async () => {
+		const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
 		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			database: {
+				query: async (sql: string, params: readonly unknown[] = []) => {
+					calls.push({ sql, params });
+					return {
+						rows: [
+							{
+								id: 9,
+								web_name: "Haaland",
+								element_type: 4,
+								team_id: 12,
+								team_name: "Manchester City",
+								team_short_name: "MCI",
+							},
+						],
+					} as never;
+				},
+			} as never,
 			redis: {
 				get: async (key: string) => (key === "Season:active" ? "2627" : null),
 				hmget: async () => [
@@ -20,8 +38,8 @@ describe("playersRepository.getPlayersForPicker", () => {
 				set: async () => "OK",
 				del: async () => 1,
 			},
-			supabase: {
-				from: () => {
+			data: {
+				read: () => {
 					const result = Promise.resolve({ data: [], error: null });
 					type Builder = typeof result & {
 						select: () => Builder;
@@ -38,22 +56,6 @@ describe("playersRepository.getPlayersForPicker", () => {
 					});
 					return builder;
 				},
-				rpc: async (name: string, params: Record<string, unknown>) => {
-					calls.push({ name, params });
-					return {
-						data: [
-							{
-								id: 9,
-								web_name: "Haaland",
-								element_type: 4,
-								team_id: 12,
-								team_name: "Manchester City",
-								team_short_name: "MCI",
-							},
-						],
-						error: null,
-					};
-				},
 			},
 			logger: { warn: () => undefined, error: () => undefined },
 		} as never;
@@ -61,20 +63,9 @@ describe("playersRepository.getPlayersForPicker", () => {
 		const result = await playersRepository.getPlayersForPicker(context, 12, null, "Haal");
 
 		expect(result.items[0]).toMatchObject({ id: 9, webName: "Haaland" });
-		expect(calls).toEqual([
-			{
-				name: "search_players_for_picker",
-				params: {
-					p_query: "Haal",
-					p_limit: 12,
-					p_cursor: null,
-					p_position: null,
-					p_team_id: null,
-					p_min_price: null,
-					p_max_price: null,
-				},
-			},
-		]);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.sql).toContain("FROM fpl.players player");
+		expect(calls[0]?.params).toEqual([2026, null, "Haal", null, 12]);
 	});
 
 	it("uses the latest complete market snapshot for picker ownership", async () => {
@@ -85,6 +76,22 @@ describe("playersRepository.getPlayersForPicker", () => {
 			return promise;
 		};
 		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			database: {
+				query: async () =>
+					({
+						rows: [
+							{
+								id: 9,
+								web_name: "Haaland",
+								element_type: 4,
+								team_id: 12,
+								team_name: "Manchester City",
+								team_short_name: "MCI",
+							},
+						],
+					}) as never,
+			} as never,
 			redis: {
 				get: async (key: string) => (key === "Season:active" ? "2627" : null),
 				hmget: async () => [
@@ -101,9 +108,9 @@ describe("playersRepository.getPlayersForPicker", () => {
 				set: async () => "OK",
 				del: async () => 1,
 			},
-			supabase: {
-				from: (table: string) => {
-					if (table === "player_market_snapshots") {
+			data: {
+				read: (table: string) => {
+					if (table === "fpl.player_market_snapshots") {
 						return {
 							select: (fields: string) =>
 								fields === "snapshot_date, captured_at"
@@ -178,7 +185,8 @@ describe("playersRepository top transfers", () => {
 			limit: async () => queryResult,
 		};
 		const context = {
-			supabase: { from: () => builder },
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			data: { read: () => builder },
 			logger: { error: () => undefined },
 		} as never;
 
@@ -209,8 +217,9 @@ describe("playersRepository.getPlayerById", () => {
 				}),
 		};
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis,
-			supabase: { from: () => Promise.reject(new Error("unexpected database query")) },
+			data: { read: () => Promise.reject(new Error("unexpected database query")) },
 			logger: { warn: () => undefined, error: () => undefined },
 		} as never;
 
@@ -225,8 +234,8 @@ describe("playersRepository.listPlayers", () => {
 		let price = 75;
 		let queryCount = 0;
 		const filters: Array<[string, number]> = [];
-		const supabase = {
-			from: () => {
+		const data = {
+			read: () => {
 				queryCount += 1;
 				const builder = {
 					select: () => builder,
@@ -261,8 +270,9 @@ describe("playersRepository.listPlayers", () => {
 			},
 		};
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis: {},
-			supabase,
+			data,
 			logger: { warn: () => undefined, error: () => undefined },
 		} as never;
 
@@ -316,9 +326,9 @@ describe("playersRepository.getPlayerByIdForEvent", () => {
 			del: async () => 0,
 		};
 
-		const queryResult = { data: null, error: { message: "player_stats unavailable" } };
-		const supabase = {
-			from: () => {
+		const queryResult = { data: null, error: { message: "player snapshots unavailable" } };
+		const data = {
+			read: () => {
 				const query = Promise.resolve(queryResult);
 				type Builder = typeof query & {
 					select: () => Builder;
@@ -336,8 +346,9 @@ describe("playersRepository.getPlayerByIdForEvent", () => {
 		};
 
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis,
-			supabase,
+			data,
 			logger: { warn: () => undefined, error: () => undefined },
 		} as never;
 
@@ -367,8 +378,8 @@ describe("playersRepository.getPlayerByIdForEvent", () => {
 			del: async () => 0,
 		};
 		const result = { data: [{ total_points: 9, selected_by_percent: "4.2" }], error: null };
-		const supabase = {
-			from: () => {
+		const data = {
+			read: () => {
 				const query = Promise.resolve(result);
 				type Builder = typeof query & {
 					select: () => Builder;
@@ -385,8 +396,9 @@ describe("playersRepository.getPlayerByIdForEvent", () => {
 			},
 		};
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis,
-			supabase,
+			data,
 			logger: { warn: () => undefined, error: () => undefined },
 		} as never;
 
@@ -426,8 +438,9 @@ describe("playersRepository.getPlayersByIdsForEvent", () => {
 			del: async () => 0,
 		};
 		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			redis,
-			supabase: { from: () => Promise.reject(new Error("unexpected database query")) },
+			data: { read: () => Promise.reject(new Error("unexpected database query")) },
 			logger: { warn: () => undefined, error: () => undefined },
 		} as never;
 

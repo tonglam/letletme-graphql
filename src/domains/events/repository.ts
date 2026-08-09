@@ -289,8 +289,8 @@ export const eventsRepository: EventsRepository = {
 			if (event) return event;
 		}
 
-		// Fallback: Supabase query
-		const { data, error } = await context.supabase.from("events").select("*").eq("id", id).limit(1);
+		// Fallback: PostgreSQL query
+		const { data, error } = await context.data.read("fpl.events").select("*").eq("id", id).limit(1);
 
 		if (error) {
 			context.logger.error({ err: error, id }, "Failed to fetch event");
@@ -331,8 +331,8 @@ export const eventsRepository: EventsRepository = {
 			context.logger.warn({ err: error, season }, "Failed to read Event metadata hash");
 		}
 
-		const { data, error } = await context.supabase
-			.from("events")
+		const { data, error } = await context.data
+			.read("fpl.events")
 			.select("id,deadline_time,deadline_time_epoch,is_current,is_next")
 			.order("id", { ascending: true });
 
@@ -474,8 +474,8 @@ export const eventsRepository: EventsRepository = {
 			}
 		}
 
-		// Fallback: Supabase query
-		let query = context.supabase.from("events").select("*");
+		// Fallback: PostgreSQL query
+		let query = context.data.read("fpl.events").select("*");
 
 		if (normalizedFilter?.isPrevious !== undefined) {
 			query = query.eq("is_previous", normalizedFilter.isPrevious);

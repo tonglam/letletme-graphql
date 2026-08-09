@@ -74,9 +74,10 @@ function createContext(args: {
 		}),
 	};
 	return {
+		currentSeason: { seasonId: 2026, seasonCode: "2627" },
 		redis,
-		supabase: {
-			from: (table: string) => {
+		data: {
+			read: (table: string) => {
 				fromCalls.push(table);
 				return queryBuilder(args.tables[table] ?? []);
 			},
@@ -126,7 +127,7 @@ describe("playerDetailRepository", () => {
 			currentEvent: null,
 			fromCalls,
 			tables: {
-				events: [
+				"fpl.events": [
 					{
 						id: 1,
 						finished: false,
@@ -134,9 +135,9 @@ describe("playerDetailRepository", () => {
 						deadline_time_epoch: Math.floor(Date.now() / 1000) + 86_400,
 					},
 				],
-				player_market_snapshots: [marketRow()],
-				event_fixtures: [fixtureRow({ event_id: 1 })],
-				player_stats: [{ element_id: 9, event_id: 1, total_points: 200 }],
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.fixtures": [fixtureRow({ event_id: 1 })],
+				"fpl.player_event_snapshots": [{ element_id: 9, event_id: 1, total_points: 200 }],
 			},
 		});
 
@@ -155,15 +156,15 @@ describe("playerDetailRepository", () => {
 		expect(detail?.recentGameweeks).toEqual([]);
 		expect(detail?.fixtures).toHaveLength(1);
 		expect(detail?.fixtures.filter((fixture) => fixture.bgw)).toHaveLength(0);
-		expect(fromCalls).not.toContain("player_stats");
-		expect(fromCalls).not.toContain("event_lives");
+		expect(fromCalls).not.toContain("fpl.player_event_snapshots");
+		expect(fromCalls).not.toContain("fpl.player_gameweek_stats");
 	});
 
 	it("marks live points provisional when Redis has no current-event row", async () => {
 		const context = createContext({
 			currentEvent: null,
 			tables: {
-				events: [
+				"fpl.events": [
 					{
 						id: 3,
 						finished: false,
@@ -171,9 +172,9 @@ describe("playerDetailRepository", () => {
 						deadline_time_epoch: Math.floor(Date.now() / 1000) - 60,
 					},
 				],
-				player_market_snapshots: [marketRow()],
-				player_stats: [{ element_id: 9, event_id: 3, total_points: 55 }],
-				event_lives: [
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshots": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
 					{
 						event_id: 3,
 						total_points: 9,
@@ -187,7 +188,7 @@ describe("playerDetailRepository", () => {
 						bps: 31,
 					},
 				],
-				event_fixtures: [fixtureRow()],
+				"fpl.fixtures": [fixtureRow()],
 			},
 		});
 
@@ -205,8 +206,8 @@ describe("playerDetailRepository", () => {
 		const context = createContext({
 			currentEvent: { id: 3, isCurrent: true, finished: false },
 			tables: {
-				player_market_snapshots: [marketRow({ status: "d", news: "Knock" })],
-				player_stats: [
+				"fpl.player_market_snapshots": [marketRow({ status: "d", news: "Knock" })],
+				"fpl.player_event_snapshots": [
 					{
 						element_id: 9,
 						event_id: 3,
@@ -240,7 +241,7 @@ describe("playerDetailRepository", () => {
 						ict_index: "27",
 					},
 				],
-				event_lives: [
+				"fpl.player_gameweek_stats": [
 					{
 						event_id: 3,
 						total_points: 9,
@@ -266,7 +267,7 @@ describe("playerDetailRepository", () => {
 						bps: 5,
 					},
 				],
-				event_fixtures: [
+				"fpl.fixtures": [
 					fixtureRow({ id: 30, team_a_id: 2 }),
 					fixtureRow({
 						id: 31,
@@ -309,7 +310,7 @@ describe("playerDetailRepository", () => {
 		const context = createContext({
 			currentEvent: { id: 5, isCurrent: true, finished: false },
 			tables: {
-				events: [
+				"fpl.events": [
 					{
 						id: 3,
 						finished: true,
@@ -317,8 +318,8 @@ describe("playerDetailRepository", () => {
 						deadline_time_epoch: Math.floor(Date.now() / 1000) - 86_400,
 					},
 				],
-				player_market_snapshots: [marketRow()],
-				player_stats: [
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshots": [
 					{
 						element_id: 9,
 						event_id: 3,
@@ -327,7 +328,7 @@ describe("playerDetailRepository", () => {
 						transfers_out_event: 2,
 					},
 				],
-				event_lives: [
+				"fpl.player_gameweek_stats": [
 					{
 						event_id: 3,
 						total_points: 9,
@@ -341,8 +342,8 @@ describe("playerDetailRepository", () => {
 						bps: 31,
 					},
 				],
-				fpl_player_fixture_stats: [{ team_id: 2, event_id: 2, fixture_id: 20 }],
-				event_fixtures: [fixtureRow()],
+				"fpl.player_fixture_stats": [{ team_id: 2, event_id: 2, fixture_id: 20 }],
+				"fpl.fixtures": [fixtureRow()],
 			},
 		});
 

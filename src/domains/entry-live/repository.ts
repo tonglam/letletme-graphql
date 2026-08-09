@@ -208,7 +208,7 @@ async function queryTransferRows(
 	configure: (query: TransferQueryBuilder) => TransferQueryBuilder,
 	leadingOrderColumns: readonly string[]
 ): Promise<TransferQueryResult> {
-	const clientKey = context.supabase as object;
+	const clientKey = context.data as object;
 	const hasCachedColumn = transferTimeColumnByClient.has(clientKey);
 	const cachedColumn = transferTimeColumnByClient.get(clientKey);
 	const candidates = hasCachedColumn
@@ -227,7 +227,9 @@ async function queryTransferRows(
 		]
 			.filter((column): column is string => column !== null)
 			.join(", ");
-		let query = context.supabase.from("entry_event_transfers") as unknown as TransferQueryBuilder;
+		let query = context.data.read(
+			"competition.entry_event_transfers"
+		) as unknown as TransferQueryBuilder;
 		query = configure(query.select(projection));
 		for (const column of leadingOrderColumns) {
 			query = query.order(column, { ascending: true });
@@ -323,8 +325,8 @@ export const entryLiveRepository: EntryLiveRepository = {
 			return cached;
 		}
 
-		const { data, error } = await context.supabase
-			.from("entry_event_picks")
+		const { data, error } = await context.data
+			.read("competition.entry_event_picks")
 			.select("*")
 			.eq("entry_id", entryId)
 			.eq("event_id", eventId)
@@ -412,8 +414,8 @@ export const entryLiveRepository: EntryLiveRepository = {
 			return results;
 		}
 
-		const { data, error } = await context.supabase
-			.from("entry_event_picks")
+		const { data, error } = await context.data
+			.read("competition.entry_event_picks")
 			// Keep legacy column compatibility during rolling schema upgrades. The
 			// batch mapper below intentionally accepts picks/pick_list/elements,
 			// chip/active_chip, and all historical transfer-cost names.

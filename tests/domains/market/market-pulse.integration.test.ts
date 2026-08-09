@@ -55,6 +55,7 @@ describe("marketPulse GraphQL contract", () => {
 			],
 		};
 		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
 			redis: {
 				get: async (key: string) => {
 					if (key === "Season:active") return "2627";
@@ -64,7 +65,7 @@ describe("marketPulse GraphQL contract", () => {
 				del: async () => 1,
 			},
 			logger: { warn: () => undefined, error: () => undefined },
-			supabase: {},
+			data: {},
 		} as never;
 
 		const result = await graphql({ schema, source: query, contextValue: context });

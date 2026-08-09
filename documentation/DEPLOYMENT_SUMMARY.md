@@ -1,42 +1,34 @@
 # Deployment summary
 
-This repository is the read-heavy GraphQL runtime. Authentication is owned by
-`letletme-web`; FPL domain tables and shared sync caches are owned by
-`letletme_data`.
+This repository is the read-heavy GraphQL runtime. `letletme_data` owns every
+Data Platform business schema and publication; `letletme-web` owns `bauth`.
 
-## Current runtime contract
+## Runtime contract
 
-- Bun with Apollo Server 5.5.1, PostgreSQL/Supabase, and Redis.
+- Bun, Apollo Server 5, PostgreSQL 15, and Redis.
 - `POST /graphql`, `GET /health`, and token-protected `GET /metrics`.
-- Website v2 signed envelopes and web Mini Program bearer sessions are valid;
-  legacy GraphQL WeChat/device tokens are deadline-gated validation only.
-- Readiness is degraded when PostgreSQL, Redis, or `Season:active`
-  metadata is unavailable.
+- A dedicated read-only PostgreSQL login inherits
+  `letletme_graphql_reader`; it is never the Data migration login.
+- Startup runs `bun run contract:check` and fails closed unless the exact v3
+  catalog, current season, active publication, and read-only ACL contract are
+  present.
+- GraphQL has no business migration command. Data migrations run only from the
+  accepted `letletme_data` build before GraphQL deployment.
 
-## Required rollout order
+G1 is an integration branch, not a standalone production cutover candidate.
+Production deployment waits for accepted G2, G3, W1, and two complete P5
+rehearsals.
 
-1. Snapshot schema, duplicate bindings, legacy sessions, Redis key types,
-   current season/event, and deployed image; take a restorable backup.
-2. Apply the web Drizzle migration and deploy web identity/challenge routes.
-3. Deploy GraphQL dual verification and set the 30-day legacy validation
-   deadline.
-4. Release the Mini Program after the WeChat request-domain allowlist is
-   configured.
-5. Observe scoring shadow metrics, cache fallback metrics, and smoke tests.
-6. Retire legacy token validation only after the deadline and seven consecutive
-   zero-use days.
-
-## Verification commands
+## Verification
 
 ```bash
 bun run format:check
 bun run lint
 bunx tsc --noEmit
 bun test
-bun run migrate:status
+bun run contract:check
 docker compose config --quiet
 ```
 
-See [`docs/ROLLOUT.md`](../docs/ROLLOUT.md) for rollback and post-deploy
-smoke-test gates. This document is not evidence that production deployment or
-the 30-day retirement gate has completed.
+See [`docs/ROLLOUT.md`](../docs/ROLLOUT.md). This document is not production
+activation evidence.

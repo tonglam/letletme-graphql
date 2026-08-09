@@ -131,7 +131,7 @@ type DbLiveExplainBreakdown = JsonRecord & {
 	stats?: DbLiveExplainBreakdownStat[] | string | null;
 };
 
-/** Per-element GW row: `explain` JSON = fixture-level breakdown; not used for `stats` (use `player_stats`). */
+/** Per-element GW row: `explain` JSON = fixture-level breakdown; cumulative stats use event snapshots. */
 type DbLiveExplainRow = {
 	event_id: number;
 	element_id: number;
@@ -581,8 +581,8 @@ async function fetchPlayerStatsForLiveExplains(
 	elementIds: number[]
 ): Promise<{ rows: Map<number, DbLiveExplainStats>; failed: boolean }> {
 	if (elementIds.length === 0) return { rows: new Map(), failed: false };
-	const { data, error } = await context.supabase
-		.from("player_stats")
+	const { data, error } = await context.data
+		.read("fpl.player_event_snapshots")
 		.select("*")
 		.eq("event_id", eventId)
 		.in("element_id", elementIds);
@@ -590,7 +590,7 @@ async function fetchPlayerStatsForLiveExplains(
 	if (error) {
 		context.logger.warn(
 			{ err: error, eventId, elementIds },
-			"player_stats batch query failed for event live explains"
+			"player event snapshot batch query failed for live explanations"
 		);
 		return { rows: new Map(), failed: true };
 	}
@@ -702,21 +702,21 @@ async function loadBreakdownsFromEventLiveExplainRedis(
 type EventLiveExplainElementColumn = "element_id" | "element";
 const eventLiveExplainElementColumn = new WeakMap<object, EventLiveExplainElementColumn>();
 
-async function fetchEventLiveExplainsFromSupabase(
+async function fetchEventLiveExplainsFromDatabase(
 	context: GraphQLContext,
 	eventId: number,
 	elementIds: number[]
 ): Promise<Map<number, DbLiveExplainRow>> {
 	if (elementIds.length === 0) return new Map();
-	const clientKey = context.supabase as object;
+	const clientKey = context.data as object;
 	const cachedColumn = eventLiveExplainElementColumn.get(clientKey);
 	const candidates: EventLiveExplainElementColumn[] = cachedColumn
 		? [cachedColumn, cachedColumn === "element_id" ? "element" : "element_id"]
 		: ["element_id", "element"];
 
 	for (const column of candidates) {
-		const { data, error } = await context.supabase
-			.from("event_live_explains")
+		const { data, error } = await context.data
+			.read("fpl.player_gameweek_scoring_items")
 			.select("*")
 			.eq("event_id", eventId)
 			.in(column, elementIds);
@@ -737,12 +737,12 @@ async function fetchEventLiveExplainsFromSupabase(
 		}
 		context.logger.error(
 			{ err: error, eventId, elementIds },
-			"event_live_explains batch query failed"
+			"player gameweek scoring-item batch query failed"
 		);
 		throw new Error("Failed to fetch event live explain", { cause: error });
 	}
 
-	throw new Error("event_live_explains has no supported element column");
+	throw new Error("player gameweek scoring items have no supported element column");
 }
 
 export type LiveScoresFilter = {
@@ -901,8 +901,8 @@ async function resolveSelectedByPercents(
 
 	missingIds = missingIds.filter((elementId) => !resolved.has(elementId));
 	if (missingIds.length > 0) {
-		const { data, error } = await context.supabase
-			.from("player_stats")
+		const { data, error } = await context.data
+			.read("fpl.player_event_snapshots")
 			.select("element_id, selected_by_percent")
 			.eq("event_id", eventId)
 			.in("element_id", missingIds);
@@ -910,7 +910,7 @@ async function resolveSelectedByPercents(
 		if (error) {
 			context.logger.warn(
 				{ err: error, eventId, elementIds: missingIds },
-				"player_stats selected_by_percent batch query failed"
+				"player event snapshot ownership batch query failed"
 			);
 		} else {
 			const rowsById = new Map<number, SelectedByCacheRow>();
@@ -1007,8 +1007,8 @@ const _fetchLivePerformanceFromDbByPlayerIds = async (
 		return [];
 	}
 
-	const { data, error } = await context.supabase
-		.from("event_lives")
+	const { data, error } = await context.data
+		.read("fpl.player_gameweek_stats")
 		.select(EVENT_LIVES_PROJECTION)
 		.eq("event_id", eventId)
 		.in("element_id", uniqueIds);
@@ -1039,8 +1039,8 @@ const fetchLivePerformanceFromDbByEventsAndPlayerIds = async (
 		return [];
 	}
 
-	const { data, error } = await context.supabase
-		.from("event_lives")
+	const { data, error } = await context.data
+		.read("fpl.player_gameweek_stats")
 		.select(EVENT_LIVES_PROJECTION)
 		.in("event_id", uniqueEventIds)
 		.in("element_id", uniquePlayerIds);
@@ -1060,8 +1060,8 @@ const fetchAllLivePerformanceFromDb = async (
 	context: GraphQLContext,
 	eventId: number
 ): Promise<LivePerformance[]> => {
-	const { data, error } = await context.supabase
-		.from("event_lives")
+	const { data, error } = await context.data
+		.read("fpl.player_gameweek_stats")
 		.select(EVENT_LIVES_PROJECTION)
 		.eq("event_id", eventId);
 
@@ -1301,7 +1301,7 @@ const loadColdLiveExplainBatch = async (
 		mode === "full" ? coldIds : coldIds.filter((elementId) => !redisSupplementById.has(elementId));
 	const [playerStatsResult, eventExplainById] = await Promise.all([
 		fetchPlayerStatsForLiveExplains(context, eventId, databaseIds),
-		fetchEventLiveExplainsFromSupabase(context, eventId, databaseIds),
+		fetchEventLiveExplainsFromDatabase(context, eventId, databaseIds),
 	]);
 	const playerStatsById = playerStatsResult.rows;
 	const playerStatsDatabaseIds = new Set(databaseIds);
@@ -1357,7 +1357,7 @@ const loadColdLiveExplainBatch = async (
 			selectedBy: null,
 		};
 		resolved.set(elementId, result);
-		// A transient player_stats failure can still yield useful fixture-level
+		// A transient event-snapshot failure can still yield useful fixture-level
 		// details. Return that partial response, but do not pin it to this revision;
 		// the next refresh should retry PostgreSQL immediately.
 		if (!playerStatsResult.failed || !playerStatsDatabaseIds.has(elementId)) {

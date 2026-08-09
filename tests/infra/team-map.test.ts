@@ -5,6 +5,7 @@ import type { GraphQLContext } from "../../src/graphql/context";
 describe("team map preseason compatibility", () => {
 	it("preserves a nullable team strength from Redis", async () => {
 		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
 			redis: {
 				get: async () => "2627",
 				hgetall: async () => ({

@@ -85,20 +85,20 @@ type ContextOptions = {
 	redisStrings?: Record<string, string>;
 	redisType?: string;
 	rows?: PlayerValueRow[];
-	supabaseError?: { message: string };
+	databaseError?: { message: string };
 };
 
 function createGraphQLContext(options: ContextOptions = {}): GraphQLContext & {
-	calls: { redisCommands: string[]; supabaseFrom: number };
+	calls: { redisCommands: string[]; dataReads: number };
 } {
-	const calls = { redisCommands: [] as string[], supabaseFrom: 0 };
+	const calls = { redisCommands: [] as string[], dataReads: 0 };
 
-	const supabase = {
-		from: (_table: string) => {
-			calls.supabaseFrom += 1;
-			return createPlayerValuesQueryBuilder(options.rows ?? [], options.supabaseError ?? null);
+	const data = {
+		read: (_table: string) => {
+			calls.dataReads += 1;
+			return createPlayerValuesQueryBuilder(options.rows ?? [], options.databaseError ?? null);
 		},
-	} as unknown as GraphQLContext["supabase"];
+	} as unknown as GraphQLContext["data"];
 
 	const pipeline = {
 		del: (...keys: string[]) => {
@@ -138,7 +138,13 @@ function createGraphQLContext(options: ContextOptions = {}): GraphQLContext & {
 	} as unknown as GraphQLContext["logger"];
 
 	return {
-		supabase,
+		database: {
+			query: async () => {
+				throw new Error("Unexpected database query");
+			},
+		} as never,
+		currentSeason: { seasonId: 2025, seasonCode: "2526" },
+		data,
 		redis,
 		logger,
 		calls,
@@ -243,7 +249,7 @@ describe("playerValues integration", () => {
 		expect(result.errors).toBeUndefined();
 		const data = result.data as { playerValues: unknown[] } | null;
 		expect(data?.playerValues).toEqual([]);
-		expect(context.calls.supabaseFrom).toBeGreaterThan(0);
+		expect(context.calls.dataReads).toBeGreaterThan(0);
 	});
 
 	it("still returns cached rows when the requested cache key exists", async () => {
@@ -292,7 +298,7 @@ describe("playerValues integration", () => {
 				eventPoints: null,
 			},
 		]);
-		expect(context.calls.supabaseFrom).toBe(0);
+		expect(context.calls.dataReads).toBe(0);
 	});
 
 	it("migrates the legacy null sentinel to a bounded negative-cache key", async () => {
@@ -310,11 +316,11 @@ describe("playerValues integration", () => {
 
 		expect(result.errors).toBeUndefined();
 		expect(result.data).toEqual({ playerValues: [] });
-		expect(context.calls.supabaseFrom).toBe(0);
+		expect(context.calls.dataReads).toBe(0);
 		expect(context.calls.redisCommands).toContain("set:PlayerValueMissing:20260421:1:EX:600");
 	});
 
-	it("returns a negative-cache hit without querying Supabase", async () => {
+	it("returns a negative-cache hit without querying PostgreSQL", async () => {
 		const context = createGraphQLContext({
 			redisStrings: { "PlayerValueMissing:20260421": "1" },
 		});
@@ -328,12 +334,12 @@ describe("playerValues integration", () => {
 
 		expect(result.errors).toBeUndefined();
 		expect(result.data).toEqual({ playerValues: [] });
-		expect(context.calls.supabaseFrom).toBe(0);
+		expect(context.calls.dataReads).toBe(0);
 	});
 
-	it("does not negative-cache a Supabase failure", async () => {
+	it("does not negative-cache a PostgreSQL failure", async () => {
 		const context = createGraphQLContext({
-			supabaseError: { message: "database unavailable" },
+			databaseError: { message: "database unavailable" },
 		});
 
 		const result = await graphql({
@@ -371,7 +377,7 @@ describe("playerValues integration", () => {
 
 		expect(result.errors).toBeUndefined();
 		expect(result.data).toEqual({ playerValues: [] });
-		expect(context.calls.supabaseFrom).toBe(0);
+		expect(context.calls.dataReads).toBe(0);
 		// No missing-marker write: the marker is only consulted when the shared
 		// key is absent, so writing it while a hash exists would be dead work.
 		expect(context.calls.redisCommands.some((cmd) => cmd.includes("PlayerValueMissing"))).toBe(
@@ -416,7 +422,7 @@ describe("playerValues integration", () => {
 		} | null;
 		expect(data?.playerValues).toHaveLength(1);
 		expect(data?.playerValues[0]).toMatchObject({ playerId: 136, lastValue: 73 });
-		expect(context.calls.supabaseFrom).toBe(0);
+		expect(context.calls.dataReads).toBe(0);
 	});
 
 	it("filters Start rows from the database fallback and negative-caches the day", async () => {
@@ -531,6 +537,6 @@ describe("playerValues integration", () => {
 		const data = result.data as { playerValues: Array<{ playerId: number }> } | null;
 		expect(data?.playerValues).toHaveLength(1);
 		expect(data?.playerValues[0]?.playerId).toBe(136);
-		expect(context.calls.supabaseFrom).toBe(0);
+		expect(context.calls.dataReads).toBe(0);
 	});
 });

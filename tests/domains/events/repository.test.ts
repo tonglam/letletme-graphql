@@ -38,6 +38,12 @@ const event = (id: number, overrides: Record<string, unknown> = {}): Record<stri
 const buildContext = (options: ContextOptions = {}): GraphQLContext => {
 	const events = options.events ?? [];
 	return {
+		database: {
+			query: async () => {
+				throw new Error("Unexpected database query");
+			},
+		} as never,
+		currentSeason: { seasonId: 2026, seasonCode: "2627" },
 		redis: {
 			get: async (key: string) => {
 				if (key === "Season:active") return "2627";
@@ -54,8 +60,8 @@ const buildContext = (options: ContextOptions = {}): GraphQLContext => {
 				return row ? JSON.stringify(row) : null;
 			},
 		} as never,
-		supabase: {
-			from: () => ({
+		data: {
+			read: () => ({
 				select: () => ({
 					order: async () => ({
 						data: options.databaseRows ?? [],

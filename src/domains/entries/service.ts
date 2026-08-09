@@ -294,8 +294,8 @@ async function buildLiveMapForEvents(
 	}
 
 	if (dbFallbackEventIds.length > 0) {
-		const { data, error } = await context.supabase
-			.from("event_lives")
+		const { data, error } = await context.data
+			.read("fpl.player_gameweek_stats")
 			.select(EVENT_LIVES_COLS)
 			.in("event_id", dbFallbackEventIds)
 			.in("element_id", uniquePlayerIds);

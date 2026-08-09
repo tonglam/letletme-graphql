@@ -229,8 +229,8 @@ async function loadLatestMarketSnapshot(
 	playerId: number
 ): Promise<LatestMarketSnapshot | null> {
 	try {
-		const { data, error } = await context.supabase
-			.from("player_market_snapshots")
+		const { data, error } = await context.data
+			.read("fpl.player_market_snapshots")
 			.select(
 				"snapshot_date, captured_at, selected_by_percent, transfers_in, transfers_out, transfers_in_event, transfers_out_event, status, news, news_added, chance_of_playing_this_round, chance_of_playing_next_round"
 			)
@@ -283,8 +283,8 @@ async function loadResolvedEventState(
 		return { id: currentEvent.id, finished: currentEvent.finished };
 	}
 	try {
-		const { data, error } = await context.supabase
-			.from("events")
+		const { data, error } = await context.data
+			.read("fpl.events")
 			.select("id, finished")
 			.eq("id", eventId)
 			.limit(1);
@@ -309,8 +309,8 @@ async function loadHistoricalTeamId(
 ): Promise<number> {
 	if (eventId === null) return fallbackTeamId;
 	try {
-		const { data, error } = await context.supabase
-			.from("fpl_player_fixture_stats")
+		const { data, error } = await context.data
+			.read("fpl.player_fixture_stats")
 			.select("team_id")
 			.eq("season", season)
 			.eq("player_code", playerCode)
@@ -447,8 +447,8 @@ async function loadRecentGameweeks(
 ): Promise<PlayerRecentGameweek[]> {
 	if (statsContext.scope !== "CURRENT_SEASON" || statsContext.asOfEventId === null) return [];
 	try {
-		const { data, error } = await context.supabase
-			.from("event_lives")
+		const { data, error } = await context.data
+			.read("fpl.player_gameweek_stats")
 			.select(
 				"event_id, total_points, minutes, starts, goals_scored, assists, clean_sheets, saves, bonus, bps"
 			)

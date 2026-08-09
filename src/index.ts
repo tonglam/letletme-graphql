@@ -5,7 +5,9 @@ import { authorizeGraphQLRequest, graphQLErrorResponse } from "./graphql/authori
 import type { GraphQLContext } from "./graphql/context";
 import { validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
-import { closeDbPool, dbPool } from "./infra/db-pool";
+import { validateDatabaseContract } from "./infra/database-contract";
+import { database } from "./infra/database";
+import { closeDbPool } from "./infra/db-pool";
 import { validateDeviceToken } from "./infra/device-auth";
 import { env } from "./infra/env";
 import { logger } from "./infra/logger";
@@ -18,8 +20,8 @@ import {
 	type Principal,
 } from "./infra/principal";
 import { closeRedis, connectRedis, getRedis } from "./infra/redis";
-import { ACTIVE_SEASON_KEY, parseSeason } from "./infra/season";
-import { supabase } from "./infra/supabase";
+import { CurrentSeasonProvider } from "./infra/season";
+import { V3ReadClient } from "./infra/v3-read-client";
 import {
 	checkRateLimit,
 	handleRateLimitStorageFailure,
@@ -40,9 +42,9 @@ import {
 
 const GRAPHQL_RATE_LIMIT = 120;
 const GRAPHQL_SERVICE_RATE_LIMIT = 600;
-const SECURITY_OPERATION_RATE_LIMIT = 5;
 const RATE_LIMIT_WINDOW_SECONDS = 60;
 const GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT = 25 * RATE_LIMIT_WINDOW_SECONDS;
+const currentSeasonProvider = new CurrentSeasonProvider(database);
 
 function getCorsHeaders(origin: string | null): Record<string, string> {
 	const configuredOrigins = env.CORS_ORIGIN.split(",")
@@ -185,18 +187,18 @@ async function healthCheck(): Promise<{ ok: boolean; body: string }> {
 		const redis = getRedis();
 		const pong = await redis.ping();
 		checks.redis = pong === "PONG" ? "ok" : "fail";
-		const season = parseSeason(await redis.get(ACTIVE_SEASON_KEY));
-		checks.season = season ? "ok" : "fail";
 	} catch {
 		checks.redis = "fail";
-		checks.season = "fail";
 	}
 
 	try {
-		await dbPool.query("SELECT 1");
+		await database.query("SELECT 1");
 		checks.postgres = "ok";
+		await currentSeasonProvider.get({ force: true });
+		checks.season = "ok";
 	} catch {
 		checks.postgres = "fail";
+		checks.season = "fail";
 	}
 
 	const ok = Object.values(checks).every((v) => v === "ok");
@@ -204,7 +206,19 @@ async function healthCheck(): Promise<{ ok: boolean; body: string }> {
 }
 
 const startServer = async (): Promise<void> => {
+	const contract = await validateDatabaseContract(database);
+	currentSeasonProvider.seed(contract.currentSeason);
 	await connectRedis();
+	logger.info(
+		{
+			role: contract.roleName,
+			season: contract.currentSeason.seasonCode,
+			datasetRevision: contract.datasetRevision,
+			schemaVersion: contract.schemaVersion,
+			planVersion: contract.planVersion,
+		},
+		"Data Platform database contract accepted"
+	);
 
 	if (!env.METRICS_TOKEN) {
 		logger.warn("METRICS_TOKEN is empty — /metrics scraping is disabled");
@@ -359,6 +373,19 @@ const startServer = async (): Promise<void> => {
 						request,
 						compatibilityPrincipal
 					);
+					let currentSeason;
+					try {
+						currentSeason = await currentSeasonProvider.get();
+					} catch (error) {
+						logger.error({ err: error }, "Current season authority is unavailable");
+						return jsonError(
+							503,
+							"DATABASE_METADATA_UNAVAILABLE",
+							"Current season metadata is unavailable",
+							corsHeaders
+						);
+					}
+					const data = new V3ReadClient(database, currentSeason);
 					const rateLimitSubject = graphQLWeightedRateLimitSubject({
 						ingress,
 						principal,
@@ -382,7 +409,7 @@ const startServer = async (): Promise<void> => {
 						body: parsedBody,
 						searchParams: url.searchParams,
 						principal,
-						supabase,
+						data,
 						logger,
 					});
 					if (!authorization.ok) {
@@ -402,17 +429,6 @@ const startServer = async (): Promise<void> => {
 						if (weightedRateFailure) return weightedRateFailure;
 					}
 
-					if (limits.securityOperation) {
-						const securityRateFailure = await enforceGraphQLRateLimit({
-							scope: "legacy-session",
-							subject: rateLimitSubject,
-							limit: SECURITY_OPERATION_RATE_LIMIT,
-							cost: limits.securityOperationCount,
-							message: "Too many session attempts",
-							corsHeaders,
-						});
-						if (securityRateFailure) return securityRateFailure;
-					}
 					const headers = new HeaderMap();
 					request.headers.forEach((value, key) => {
 						headers.set(key, value);
@@ -426,7 +442,9 @@ const startServer = async (): Promise<void> => {
 							search: "",
 						},
 						context: async () => ({
-							supabase,
+							data,
+							database,
+							currentSeason,
 							redis: getRedis(),
 							logger,
 							principal: principal ?? undefined,

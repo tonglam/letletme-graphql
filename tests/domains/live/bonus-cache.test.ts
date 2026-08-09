@@ -8,6 +8,7 @@ const contextWithRedis = (
 	playerTeams: Record<string, number> = { "101": 1, "102": 1, "201": 2 }
 ) =>
 	({
+		currentSeason: { seasonId: 2025, seasonCode: "2526" },
 		redis: {
 			get: async (key: string) => {
 				if (key === "Season:active") return "2526";
