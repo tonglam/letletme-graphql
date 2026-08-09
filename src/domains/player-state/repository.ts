@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
-import type { QueryResult } from "pg";
+import type { QueryResultRow } from "pg";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { dbPool } from "../../infra/db-pool";
-import { getCurrentSeason } from "../../infra/season";
-import { resolvePlayerStatsContext } from "../players/season-stats-at-event";
+import type { QueryExecutor as DatabaseQueryExecutor } from "../../infra/database";
+import {
+	getCoreDataSnapshot,
+	type CoreDataSnapshot,
+	type CoreFixtureData,
+} from "../../infra/data-snapshot";
+import { deleteQueryCache, writeQueryCache } from "../../infra/query-cache";
 import {
 	assessAvailability,
 	assessOutlook,
@@ -15,93 +19,55 @@ import {
 	composePlayerState,
 	expectedMetricsAvailableForSeason,
 	percentile,
+	PLAYER_STATE_ENGINE_VERSION,
 } from "./engine";
 import {
 	buildPlayerStateProviderRevision,
 	confirmedPlayerLinkSeasons,
 	PLAYER_STATE_FRESHNESS_STALE_SECONDS,
-	playerStateHistoryStorageAvailable,
 	resolvePlayerStateMappingStatus,
-	type PlayerStateHistoryStorage,
 	type ProviderLinkRow,
 } from "./coverage";
 import { applyPlayerStateReleaseGate } from "./release-gate";
 import type {
 	PlayerGameweekSample,
+	PlayerRadarAxis,
+	PlayerRadarProfile,
 	PlayerStateBaselineSeason,
 	PlayerStateCareerPoint,
+	PlayerStateCoverage,
 	PlayerStateDimension,
 	PlayerStateMetric,
 	PlayerStateOutlookGameweek,
 	PlayerStateProfile,
-	PlayerRadarAxis,
-	PlayerRadarProfile,
 	PlayerStateProviderRevision,
 	ProcessAssessment,
 } from "./types";
 
-const STATE_ENGINE_VERSION = "player-state-v1.1";
-const PROFILE_CACHE_TTL_SECONDS = 15 * 60;
-const HISTORY_CACHE_TTL_SECONDS = 24 * 60 * 60;
+export const PLAYER_STATE_SUCCESS_CACHE_TTL_SECONDS = 15 * 60;
+export const PLAYER_STATE_NULL_CACHE_TTL_SECONDS = 60;
 const NULL_SENTINEL = "__player_state:null__";
 const MINIMUM_CURRENT_GAMEWEEKS = 3;
+const CURRENT_PEER_MINUTES = 900;
 const HISTORY_PLAYER_MINUTES = 450;
 const HISTORY_PEER_MINUTES = 900;
+const PROCESS_MINIMUM_MINUTES = 180;
+const PROCESS_PEER_MINUTES = 450;
 
-export type QueryExecutor = {
-	query<T extends object>(text: string, values?: unknown[]): Promise<QueryResult<T>>;
-};
+export type QueryExecutor = DatabaseQueryExecutor;
 
-type PlayerMetadataRow = {
-	player_id: number;
-	player_code: number;
-	position: number;
-	team_id: number;
-	core_season: string | null;
-	core_revision: string | number | null;
-	publication_id: string | null;
-	core_committed_at: Date | string | null;
-	fpl_snapshot_at: Date | string | null;
-	outlook_event_id: number | null;
-	market_status: string | null;
-	chance_this_round: number | null;
-	market_captured_at: Date | string | null;
-};
+type PlayerStateRepositoryDependencies = Readonly<{
+	executor?: QueryExecutor;
+	loadCoreSnapshot?: (context: GraphQLContext) => Promise<CoreDataSnapshot>;
+}>;
 
-type ArchiveRow = {
-	season: string;
+type MarketRow = QueryResultRow & {
 	status: string;
-	source_core_revision: string | null;
-	completed_at: Date | string | null;
+	chance_this_round: number | null;
+	captured_at: Date | string;
 };
 
-type UnderstatSeasonRow = {
-	season: string;
-	state: string;
-	last_seen_at: Date | string;
-};
-
-type UnderstatManifest = {
-	schemaVersion: 1;
-	season: string;
-	lane: "team" | "player";
-	revision: string;
-	publishedAt: string;
-	counts: Record<string, number>;
-};
-
-type CurrentGameweekRow = {
-	event_id: number;
-	finished: boolean;
-	is_current: boolean;
-	coverage_count: string | number;
-	total_points: number | null;
-	minutes: number | null;
-	started: boolean | null;
-	bonus: number | null;
-};
-
-type CurrentPeerRow = {
+type CurrentPeerRow = QueryResultRow & {
 	element_id: number;
 	total_points: number | null;
 	minutes: number | null;
@@ -115,31 +81,16 @@ type CurrentPeerRow = {
 	expected_goal_involvements: number | null;
 };
 
-type CurrentPeerGameweekRow = {
+type CurrentPeerGameweekRow = QueryResultRow & {
 	element_id: number;
 	event_id: number;
 	total_points: number;
 	minutes: number | null;
+	started: boolean | null;
 	bonus: number | null;
 };
 
-type FixtureRow = {
-	id: number;
-	event_id: number;
-	team_h_id: number;
-	team_a_id: number;
-	team_h_difficulty: number | null;
-	team_a_difficulty: number | null;
-	kickoff_time: Date | string | null;
-	opponent_short_name: string;
-};
-
-type FixtureCoverageRow = {
-	event_id: number;
-	fixture_count: string | number;
-};
-
-type HistoricalCohortRow = {
+type HistoricalCohortRow = QueryResultRow & {
 	season: string;
 	player_code: number;
 	position: number;
@@ -148,6 +99,7 @@ type HistoricalCohortRow = {
 	bonus: number | null;
 	return_count: string | number | null;
 	gameweek_count: string | number | null;
+	as_of: Date | string | null;
 };
 
 type HistoricalMetricRow = {
@@ -176,291 +128,233 @@ type CurrentMetricRow = {
 	expectedGoalInvolvements: number | null;
 };
 
-type HistoryPayload = {
-	rows: HistoricalCohortRow[];
-};
-
 type PlayerHistory = {
 	baselineSeasons: PlayerStateBaselineSeason[];
 	careerTrajectory: PlayerStateCareerPoint[];
-	sealedSeasons: string[];
-	declaredSealedSeasons: string[];
-	unavailableSealedSeasons: string[];
-	storageAvailable: boolean;
-	archiveRevision: string;
+	seasons: string[];
+	revision: string;
+	asOf: string | null;
 };
 
-const metadataSql = `
-	SELECT
-		p.id AS player_id,
-		p.code AS player_code,
-		p.type AS position,
-		p.team_id,
-		c.season AS core_season,
-		c.revision AS core_revision,
-		c.publication_id::text,
-		c.committed_at AS core_committed_at,
-		source.fpl_snapshot_at,
-		COALESCE(
-			(SELECT id FROM events
-			 WHERE is_current = true AND COALESCE(finished, false) = false
-			 ORDER BY id DESC LIMIT 1),
-			(SELECT id FROM events WHERE is_next = true ORDER BY id ASC LIMIT 1),
-			(SELECT id FROM events WHERE finished = true ORDER BY id DESC LIMIT 1),
-			1
-		) AS outlook_event_id,
-		market.status AS market_status,
-		market.chance_of_playing_this_round AS chance_this_round,
-		market.captured_at AS market_captured_at
-	FROM players p
-	LEFT JOIN core_snapshot_authority c ON c.singleton_id = 1
-	LEFT JOIN LATERAL (
-		SELECT GREATEST(
-			COALESCE(p.updated_at, p.created_at),
-			(SELECT max(COALESCE(updated_at, created_at)) FROM events),
-			(SELECT max(COALESCE(updated_at, created_at)) FROM event_fixtures),
-			(SELECT max(COALESCE(updated_at, created_at)) FROM player_stats)
-		) AS fpl_snapshot_at
-	) source ON true
-	LEFT JOIN LATERAL (
-		SELECT status, chance_of_playing_this_round, captured_at
-		FROM player_market_snapshots
-		WHERE element_id = p.id
-		ORDER BY snapshot_date DESC, captured_at DESC
-		LIMIT 1
-	) market ON true
-	WHERE p.id = $1
+type UnderstatCohortRow = QueryResultRow & {
+	season: string;
+	season_state: string;
+	season_last_seen_at: Date | string;
+	player_code: number;
+	player_id: number;
+	is_subject: boolean;
+	minutes: number;
+	position: string;
+	non_penalty_xg: number | string;
+	xa: number | string;
+	shots: number;
+	key_passes: number;
+	xg_chain: number | string;
+	xg_buildup: number | string;
+	source_hash: string;
+	updated_at: Date | string;
+};
+
+type UnderstatValues = {
+	npxgPer90: number | null;
+	xaPer90: number | null;
+	shotsPer90: number | null;
+	keyPassesPer90: number | null;
+	xgChainPer90: number | null;
+	xgBuildupPer90: number | null;
+};
+
+type UnderstatProcessResult = {
+	assessment: ProcessAssessment;
+	currentSubject: UnderstatCohortRow | null;
+	historyPercentiles: Map<string, number>;
+	historySeasons: string[];
+};
+
+const marketSql = `
+	/* player-state:market */
+	SELECT status, chance_of_playing_this_round AS chance_this_round, captured_at
+	FROM fpl.player_market_snapshots
+	WHERE season_id = $1 AND element_id = $2
+	ORDER BY snapshot_date DESC, captured_at DESC
 	LIMIT 1
 `;
 
-const metadataSqlWithoutAuthority = metadataSql
-	.replace(
-		"\t\tc.season AS core_season,\n\t\tc.revision AS core_revision,\n\t\tc.publication_id::text,\n\t\tc.committed_at AS core_committed_at,",
-		"\t\tNULL::text AS core_season,\n\t\tNULL::text AS core_revision,\n\t\tNULL::text AS publication_id,\n\t\tNULL::timestamptz AS core_committed_at,"
-	)
-	.replace("\n\tLEFT JOIN core_snapshot_authority c ON c.singleton_id = 1", "");
-
-const metadataSqlWithoutMarket = metadataSql
-	.replace(
-		"\t\tmarket.status AS market_status,\n\t\tmarket.chance_of_playing_this_round AS chance_this_round,\n\t\tmarket.captured_at AS market_captured_at",
-		"\t\tNULL::text AS market_status,\n\t\tNULL::integer AS chance_this_round,\n\t\tNULL::timestamptz AS market_captured_at"
-	)
-	.replace(
-		"\n\tLEFT JOIN LATERAL (\n\t\tSELECT status, chance_of_playing_this_round, captured_at\n\t\tFROM player_market_snapshots\n\t\tWHERE element_id = p.id\n\t\tORDER BY snapshot_date DESC, captured_at DESC\n\t\tLIMIT 1\n\t) market ON true",
-		""
-	);
-
-const metadataSqlWithoutAuthorityAndMarket = metadataSqlWithoutMarket
-	.replace(
-		"\t\tc.season AS core_season,\n\t\tc.revision AS core_revision,\n\t\tc.publication_id::text,\n\t\tc.committed_at AS core_committed_at,",
-		"\t\tNULL::text AS core_season,\n\t\tNULL::text AS core_revision,\n\t\tNULL::text AS publication_id,\n\t\tNULL::timestamptz AS core_committed_at,"
-	)
-	.replace("\n\tLEFT JOIN core_snapshot_authority c ON c.singleton_id = 1", "");
-
-const archiveSql = `
-	SELECT season, status, source_core_revision, completed_at
-	FROM fpl_season_archives
-	WHERE status = 'sealed'
-	ORDER BY season DESC
-`;
-
-const historyStorageSql = `
+const currentPeersSql = `
+	/* player-state:current-peers */
 	SELECT
-		to_regclass('public.fpl_player_history')::text AS player_history,
-		to_regclass('public.fpl_player_stat_history')::text AS player_stat_history,
-		to_regclass('public.fpl_event_live_history')::text AS event_live_history
+		summary.element_id,
+		summary.total_points,
+		summary.minutes,
+		summary.bonus,
+		summary.gameweeks_started AS starts,
+		summary.goals_scored,
+		summary.assists,
+		summary.clean_sheets,
+		summary.saves,
+		summary.bps,
+		summary.expected_goal_involvements
+	FROM reporting.player_season_summaries summary
+	JOIN fpl.players player
+		ON player.season_id = summary.season_id
+		AND player.element_id = summary.element_id
+	WHERE summary.season_id = $1 AND player.element_type = $2
+	ORDER BY summary.element_id
 `;
 
-const availableArchiveSql = `
-	SELECT archive.season, archive.status, archive.source_core_revision, archive.completed_at
-	FROM fpl_season_archives archive
-	WHERE archive.status = 'sealed'
-		AND EXISTS (
-			SELECT 1 FROM fpl_player_history player WHERE player.season = archive.season
-		)
-		AND EXISTS (
-			SELECT 1 FROM fpl_player_stat_history stats WHERE stats.season = archive.season
-		)
-		AND EXISTS (
-			SELECT 1 FROM fpl_event_live_history live WHERE live.season = archive.season
-		)
-		AND NOT EXISTS (
-			SELECT 1 FROM (
-				SELECT ph.id, COUNT(DISTINCT live.event_id) AS event_count
-				FROM fpl_player_history ph
-				LEFT JOIN fpl_event_live_history live
-					ON live.season = ph.season AND live.element_id = ph.id
-				WHERE ph.season = archive.season
-				GROUP BY ph.id
-				HAVING COUNT(DISTINCT live.event_id) < (SELECT COUNT(*) FROM events)
-			) incomplete
-		)
-	ORDER BY archive.season DESC
+const currentPeerGameweeksSql = `
+	/* player-state:current-gameweeks */
+	SELECT
+		stats.element_id,
+		stats.event_id,
+		stats.total_points,
+		stats.minutes,
+		stats.starts AS started,
+		stats.bonus
+	FROM fpl.player_gameweek_stats stats
+	JOIN fpl.players player
+		ON player.season_id = stats.season_id
+		AND player.element_id = stats.element_id
+	WHERE stats.season_id = $1
+		AND player.element_type = $2
+		AND stats.event_id = ANY($3::integer[])
+	ORDER BY stats.event_id, stats.element_id
 `;
 
-const providerLinkSql = `
-	SELECT status, rule_version, left_entity_id, evidence
-	FROM provider_entity_links
+const historicalCohortsSql = `
+	/* player-state:fpl-history */
+	WITH requested AS (
+		SELECT season.season_id, season.season_code, subject.element_type AS position
+		FROM fpl.seasons season
+		JOIN fpl.players subject
+			ON subject.season_id = season.season_id
+			AND subject.code = $1
+		WHERE season.lifecycle_state = 'completed'
+	), peers AS (
+		SELECT
+			requested.season_id,
+			requested.season_code,
+			player.element_id,
+			player.code AS player_code,
+			player.element_type AS position,
+			player.updated_at AS player_updated_at
+		FROM requested
+		JOIN fpl.players player
+			ON player.season_id = requested.season_id
+			AND player.element_type = requested.position
+	), summaries AS (
+		SELECT
+			stats.season_id,
+			stats.element_id,
+			COALESCE(sum(stats.minutes), 0)::integer AS minutes,
+			COALESCE(sum(stats.total_points), 0)::integer AS total_points,
+			COALESCE(sum(stats.bonus), 0)::integer AS bonus,
+			count(*) FILTER (WHERE stats.total_points >= 5)::integer AS return_count,
+			count(stats.event_id)::integer AS gameweek_count,
+			max(stats.updated_at) AS as_of
+		FROM fpl.player_gameweek_stats stats
+		JOIN requested ON requested.season_id = stats.season_id
+		GROUP BY stats.season_id, stats.element_id
+	)
+	SELECT
+		peers.season_code AS season,
+		peers.player_code,
+		peers.position,
+		COALESCE(summaries.minutes, 0)::integer AS minutes,
+		COALESCE(summaries.total_points, 0)::integer AS total_points,
+		COALESCE(summaries.bonus, 0)::integer AS bonus,
+		COALESCE(summaries.return_count, 0)::integer AS return_count,
+		COALESCE(summaries.gameweek_count, 0)::integer AS gameweek_count,
+		GREATEST(peers.player_updated_at, summaries.as_of) AS as_of
+	FROM peers
+	LEFT JOIN summaries
+		ON summaries.season_id = peers.season_id
+		AND summaries.element_id = peers.element_id
+	ORDER BY peers.season_code, peers.player_code
+`;
+
+const verifiedProviderLinkSql = `
+	/* player-state:provider-link-verified */
+	SELECT status::text, rule_version, left_entity_id, evidence
+	FROM bridge.entity_links
 	WHERE entity_type = 'player'
 		AND left_provider = 'understat'
 		AND right_provider = 'fpl'
 		AND right_entity_id = $1
-	ORDER BY CASE status
-		WHEN 'manual_verified' THEN 1
-		WHEN 'auto_verified' THEN 2
-		WHEN 'quarantined' THEN 3
-		WHEN 'ambiguous' THEN 4
-		ELSE 5
-	END, updated_at DESC NULLS LAST, created_at DESC
+		AND status IN ('auto_verified', 'manual_verified')
 	LIMIT 1
 `;
 
-const understatSeasonsSql = `
-	SELECT season, state, last_seen_at
-	FROM understat_seasons
-	ORDER BY season DESC
-`;
-
-const fixtureCoverageSql = `
-	SELECT
-		e.id AS event_id,
-		COUNT(f.id)::integer AS fixture_count
-	FROM events e
-	LEFT JOIN event_fixtures f ON f.event_id = e.id
-	WHERE e.id BETWEEN $1 AND $2
-	GROUP BY e.id
-	ORDER BY e.id
-`;
-
-const recentGameweeksSql = `
-	WITH candidate_events AS (
-		SELECT id, finished, is_current
-		FROM events
-		WHERE id <= $2
-			AND (
-				finished = true
-				OR is_current = true
-				OR deadline_time IS NOT NULL AND deadline_time <= now()
-			)
-		ORDER BY id DESC
-		LIMIT 10
-	), coverage AS (
-		SELECT event_id, count(*) AS row_count
-		FROM event_lives
-		WHERE event_id IN (SELECT id FROM candidate_events)
-		GROUP BY event_id
-	)
-	SELECT
-		e.id AS event_id,
-		e.finished,
-		e.is_current,
-		COALESCE(c.row_count, 0) AS coverage_count,
-		l.total_points,
-		l.minutes,
-		l.starts AS started,
-		l.bonus
-	FROM candidate_events e
-	LEFT JOIN coverage c ON c.event_id = e.id
-	LEFT JOIN event_lives l ON l.event_id = e.id AND l.element_id = $1
-	ORDER BY e.id DESC
-`;
-
-const currentPeersSql = `
-	SELECT
-		element_id, total_points, minutes, bonus, starts,
-		goals_scored, assists, clean_sheets, saves, bps,
-		expected_goal_involvements
-	FROM player_stats
-	WHERE event_id = $1
-		AND element_type = $2
-		AND COALESCE(minutes, 0) >= ${HISTORY_PEER_MINUTES}
-`;
-
-const currentPlayerSql = `
-	SELECT
-		element_id, total_points, minutes, bonus, starts,
-		goals_scored, assists, clean_sheets, saves, bps,
-		expected_goal_involvements
-	FROM player_stats
-	WHERE event_id = $1 AND element_id = $2
+const unresolvedProviderLinkSql = `
+	/* player-state:provider-link-unresolved */
+	SELECT status::text, rule_version, left_entity_id, evidence
+	FROM bridge.entity_links
+	WHERE entity_type = 'player'
+		AND left_provider = 'understat'
+		AND right_provider = 'fpl'
+		AND right_entity_id = $1
+		AND status NOT IN ('auto_verified', 'manual_verified')
+	ORDER BY CASE status::text
+		WHEN 'quarantined' THEN 1
+		WHEN 'ambiguous' THEN 2
+		ELSE 3
+	END, updated_at DESC, created_at DESC
 	LIMIT 1
 `;
 
-const currentPeerGameweeksSql = `
-	SELECT element_id, event_id, total_points, minutes, bonus
-	FROM event_lives
-	WHERE event_id <= $1 AND element_id = ANY($2::integer[])
-`;
-
-const fixturesSql = `
-	SELECT
-		f.id,
-		f.event_id,
-		f.team_h_id,
-		f.team_a_id,
-		f.team_h_difficulty,
-		f.team_a_difficulty,
-		f.kickoff_time,
-		CASE WHEN f.team_h_id = $1 THEN away.short_name ELSE home.short_name END AS opponent_short_name
-	FROM event_fixtures f
-	JOIN teams home ON home.id = f.team_h_id
-	JOIN teams away ON away.id = f.team_a_id
-	WHERE f.event_id BETWEEN $2 AND $3
-		AND (f.team_h_id = $1 OR f.team_a_id = $1)
-	ORDER BY f.event_id, f.kickoff_time NULLS LAST, f.id
-`;
-
-const historicalCohortsSql = `
-	WITH sealed AS (
-		SELECT unnest($2::text[]) AS season
-	), requested AS (
-		SELECT player.season, player.type AS position
-		FROM fpl_player_history player
-		JOIN sealed ON sealed.season = player.season
-		WHERE player.code = $1
-	), peer_players AS (
-		SELECT player.season, player.id AS element_id, player.code AS player_code, player.type AS position
-		FROM fpl_player_history player
-		JOIN requested
-			ON requested.season = player.season
-			AND requested.position = player.type
-	), final_stats AS (
-		SELECT DISTINCT ON (stats.season, stats.element_id)
-			stats.season,
-			player.player_code,
-			player.position,
-			stats.element_id,
-			stats.minutes,
-			stats.total_points,
-			stats.bonus
-		FROM fpl_player_stat_history stats
-		JOIN peer_players player
-			ON player.season = stats.season AND player.element_id = stats.element_id
-		ORDER BY stats.season, stats.element_id, stats.event_id DESC
-	), returns AS (
+const understatCohortsSql = `
+	/* player-state:understat-cohorts */
+	WITH requested AS (
+		SELECT season.season_id, season.season_code, subject.element_type AS position
+		FROM fpl.seasons season
+		JOIN fpl.players subject
+			ON subject.season_id = season.season_id
+			AND subject.code = $1
+		WHERE season.season_code = ANY($2::text[])
+	), linked_peers AS (
 		SELECT
-			live.season,
-			live.element_id,
-			count(*) FILTER (WHERE live.total_points >= 5) AS return_count,
-			count(DISTINCT live.event_id) AS gameweek_count
-		FROM fpl_event_live_history live
-		JOIN peer_players player
-			ON player.season = live.season AND player.element_id = live.element_id
-		GROUP BY live.season, live.element_id
+			requested.season_code,
+			player.code AS player_code,
+			CASE
+				WHEN link.left_entity_id ~ '^[0-9]+$' THEN link.left_entity_id::integer
+			END AS player_id
+		FROM requested
+		JOIN fpl.players player
+			ON player.season_id = requested.season_id
+			AND player.element_type = requested.position
+		JOIN bridge.entity_links link
+			ON link.entity_type = 'player'
+			AND link.left_provider = 'understat'
+			AND link.right_provider = 'fpl'
+			AND link.right_entity_id = player.code::text
+			AND link.status IN ('auto_verified', 'manual_verified')
+			AND link.evidence -> 'confirmedSeasons' ? requested.season_code
 	)
 	SELECT
-		final_stats.season,
-		final_stats.player_code,
-		final_stats.position,
-		final_stats.minutes,
-		final_stats.total_points,
-		final_stats.bonus,
-		returns.return_count,
-		returns.gameweek_count
-	FROM final_stats
-	LEFT JOIN returns
-		ON returns.season = final_stats.season
-		AND returns.element_id = final_stats.element_id
+		linked.season_code AS season,
+		provider_season.state::text AS season_state,
+		provider_season.last_seen_at AS season_last_seen_at,
+		linked.player_code,
+		metrics.player_id,
+		(linked.player_code = $1) AS is_subject,
+		metrics.time_minutes AS minutes,
+		metrics.position,
+		metrics.non_penalty_xg,
+		metrics.xa,
+		metrics.shots,
+		metrics.key_passes,
+		metrics.xg_chain,
+		metrics.xg_buildup,
+		metrics.source_hash,
+		metrics.updated_at
+	FROM linked_peers linked
+	JOIN understat.player_seasons metrics
+		ON metrics.season_code = linked.season_code
+		AND metrics.player_id = linked.player_id
+	JOIN understat.seasons provider_season
+		ON provider_season.season_code = metrics.season_code
+	WHERE linked.player_id IS NOT NULL
+	ORDER BY linked.season_code, linked.player_code
 `;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -468,7 +362,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const asNumber = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) return value;
-	if (typeof value === "string") {
+	if (typeof value === "string" && value.trim() !== "") {
 		const parsed = Number(value);
 		return Number.isFinite(parsed) ? parsed : null;
 	}
@@ -486,36 +380,65 @@ const iso = (value: Date | string | null): string | null => {
 	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
 
+const latestIso = (values: Array<string | null>): string | null =>
+	values
+		.filter((value): value is string => value !== null)
+		.sort()
+		.at(-1) ?? null;
+
 const freshness = (timestamp: string | null): number | null =>
 	timestamp === null ? null : Math.max(0, Math.floor((Date.now() - Date.parse(timestamp)) / 1000));
 
 const stableHash = (value: unknown): string =>
 	createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 20);
 
-const parseManifest = (
-	raw: string | null,
-	season: string,
-	lane: "team" | "player"
-): UnderstatManifest | null => {
-	if (!raw) return null;
+const profileGuard = (value: unknown): value is PlayerStateProfile =>
+	isRecord(value) &&
+	typeof value.playerId === "number" &&
+	typeof value.playerCode === "number" &&
+	typeof value.season === "string" &&
+	typeof value.trend === "string" &&
+	Array.isArray(value.dimensions) &&
+	isRecord(value.coverage);
+
+const profileCacheKey = (context: GraphQLContext, playerId: number, horizon: number): string =>
+	gqlCacheKey(
+		context,
+		`player-state-profile:${PLAYER_STATE_ENGINE_VERSION}:${playerId}:${horizon}`
+	);
+
+async function readProfileCache(
+	context: GraphQLContext,
+	key: string
+): Promise<PlayerStateProfile | null | undefined> {
 	try {
-		const value: unknown = JSON.parse(raw);
-		if (
-			!isRecord(value) ||
-			value.schemaVersion !== 1 ||
-			value.season !== season ||
-			value.lane !== lane ||
-			typeof value.revision !== "string" ||
-			typeof value.publishedAt !== "string" ||
-			!Number.isFinite(Date.parse(value.publishedAt)) ||
-			!isRecord(value.counts)
-		) {
-			return null;
-		}
-		return value as UnderstatManifest;
-	} catch {
-		return null;
+		const raw = await context.redis.get(key);
+		if (raw === null) return undefined;
+		if (raw === NULL_SENTINEL) return null;
+		const parsed: unknown = JSON.parse(raw);
+		if (profileGuard(parsed)) return parsed;
+		await deleteQueryCache(context, key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to read player-state query cache");
 	}
+	return undefined;
+}
+
+const writeNullCache = async (context: GraphQLContext, key: string): Promise<void> => {
+	await writeQueryCache(context, key, NULL_SENTINEL, PLAYER_STATE_NULL_CACHE_TTL_SECONDS);
+};
+
+const writeProfileCache = async (
+	context: GraphQLContext,
+	key: string,
+	profile: PlayerStateProfile
+): Promise<void> => {
+	await writeQueryCache(
+		context,
+		key,
+		JSON.stringify(profile),
+		PLAYER_STATE_SUCCESS_CACHE_TTL_SECONDS
+	);
 };
 
 const currentMetrics = (
@@ -545,150 +468,42 @@ const currentMetrics = (
 			cleanSheets: row.clean_sheets,
 			saves: row.saves,
 			bps: row.bps,
-			expectedGoalInvolvements: row.expected_goal_involvements,
+			expectedGoalInvolvements: asNumber(row.expected_goal_involvements),
 		};
 	});
 };
 
-type RadarValue = {
-	value: (row: CurrentMetricRow) => number | null;
-	unit: string;
-	capability?: (season: string) => boolean;
-};
-
-const radarPer90 = (value: number | null, minutes: number): number | null =>
-	value === null || minutes < 180 ? null : (value * 90) / minutes;
-
-const radarSpecsForPosition = (position: number): Array<{ code: string; metric: RadarValue }> => {
-	const points: { code: string; metric: RadarValue } = {
-		code: "FPL_POINTS_PER_90",
-		metric: {
-			unit: "per90",
-			value: (row) => (row.minutes < 180 ? null : row.pointsPer90),
-		},
-	};
-	const cleanSheets: { code: string; metric: RadarValue } = {
-		code: "FPL_CLEAN_SHEETS_PER_START",
-		metric: {
-			unit: "rate",
-			value: (row) =>
-				row.minutes < 180 || !row.starts || row.cleanSheets === null
-					? null
-					: (row.cleanSheets / row.starts) * 100,
-		},
-	};
-	const bonus: { code: string; metric: RadarValue } = {
-		code: "FPL_BONUS_PER_90",
-		metric: {
-			unit: "per90",
-			value: (row) => (row.minutes < 180 ? null : row.bonusPer90),
-		},
-	};
-	const bps: { code: string; metric: RadarValue } = {
-		code: "FPL_BPS_PER_90",
-		metric: { unit: "per90", value: (row) => radarPer90(row.bps, row.minutes) },
-	};
-	const xgi: { code: string; metric: RadarValue } = {
-		code: "FPL_XGI_PER_90",
-		metric: {
-			unit: "per90",
-			value: (row) => radarPer90(row.expectedGoalInvolvements, row.minutes),
-			capability: expectedMetricsAvailableForSeason,
-		},
-	};
-	if (position === 1) {
-		return [
-			points,
-			cleanSheets,
-			{
-				code: "FPL_SAVES_PER_90",
-				metric: { unit: "per90", value: (row) => radarPer90(row.saves, row.minutes) },
-			},
-			bonus,
-			bps,
-		];
-	}
-	if (position === 2) {
-		return [points, xgi, cleanSheets, bonus, bps];
-	}
-	if (position === 3) {
-		return [
-			points,
-			xgi,
-			{
-				code: "FPL_ATTACKING_RETURNS_PER_90",
-				metric: {
-					unit: "per90",
-					value: (row) =>
-						radarPer90(
-							row.goalsScored === null || row.assists === null
-								? null
-								: row.goalsScored + row.assists,
-							row.minutes
-						),
-				},
-			},
-			cleanSheets,
-			bonus,
-		];
-	}
-	return [
-		points,
-		xgi,
-		{
-			code: "FPL_GOALS_PER_90",
-			metric: { unit: "per90", value: (row) => radarPer90(row.goalsScored, row.minutes) },
-		},
-		{
-			code: "FPL_ASSISTS_PER_90",
-			metric: { unit: "per90", value: (row) => radarPer90(row.assists, row.minutes) },
-		},
-		bonus,
-	];
-};
-
-const buildPlayerRadarProfile = (
-	position: number,
-	season: string,
-	asOfEventId: number | null,
-	player: CurrentMetricRow | null,
-	cohort: CurrentMetricRow[]
-): PlayerRadarProfile | null => {
-	if (player === null || asOfEventId === null) return null;
-	const specs = radarSpecsForPosition(position);
-	const sampleMinutes = player.minutes;
-	const axes: PlayerRadarAxis[] = specs.map(({ code, metric }) => {
-		const capability = metric.capability?.(season) ?? true;
-		const value = capability ? metric.value(player) : null;
-		const population = capability ? cohort.map((row) => metric.value(row)) : [];
+const recentMetrics = (
+	peerIds: number[],
+	gameweekRows: CurrentPeerGameweekRow[],
+	eventIds: number[]
+): CurrentMetricRow[] => {
+	const byPlayerEvent = new Map<string, CurrentPeerGameweekRow>();
+	for (const row of gameweekRows) byPlayerEvent.set(`${row.element_id}:${row.event_id}`, row);
+	return peerIds.map((elementId) => {
+		const rows = eventIds.map((eventId) => byPlayerEvent.get(`${elementId}:${eventId}`) ?? null);
+		const minutes = rows.reduce((sum, row) => sum + (row?.minutes ?? 0), 0);
+		const points = rows.reduce((sum, row) => sum + (row?.total_points ?? 0), 0);
+		const bonus = rows.reduce((sum, row) => sum + (row?.bonus ?? 0), 0);
 		return {
-			code,
-			value,
-			percentile: capability ? percentile(value, population) : null,
-			unit: metric.unit,
-			direction: "HIGHER_IS_BETTER",
-			sampleMinutes,
-			available: value !== null,
-			capability,
-			reasonCode:
-				value === null
-					? !capability
-						? "PROFILE_METRIC_CAPABILITY_UNAVAILABLE"
-						: sampleMinutes < 180
-							? "PROFILE_SAMPLE_BELOW_180_MINUTES"
-							: "PROFILE_METRIC_UNAVAILABLE"
-					: null,
+			elementId,
+			pointsPer90: minutes > 0 ? (points * 90) / minutes : null,
+			returnRate:
+				eventIds.length === 0
+					? 0
+					: (rows.filter((row) => (row?.total_points ?? 0) >= 5).length / eventIds.length) * 100,
+			bonusPer90: minutes > 0 ? (bonus * 90) / minutes : null,
+			minutes,
+			gameweeks: eventIds.length,
+			starts: null,
+			goalsScored: null,
+			assists: null,
+			cleanSheets: null,
+			saves: null,
+			bps: null,
+			expectedGoalInvolvements: null,
 		};
 	});
-	return {
-		source: "FPL",
-		position,
-		season,
-		asOfEventId,
-		sampleMinutes,
-		smallSample: sampleMinutes >= 180 && sampleMinutes < 450,
-		axes,
-	};
 };
 
 const metricCompositePercentile = (
@@ -744,38 +559,156 @@ const metricPercentiles = (
 	),
 });
 
-const recentMetrics = (
-	peerIds: number[],
-	gameweekRows: CurrentPeerGameweekRow[],
-	eventIds: number[]
-): CurrentMetricRow[] => {
-	const byPlayerEvent = new Map<string, CurrentPeerGameweekRow>();
-	for (const row of gameweekRows) byPlayerEvent.set(`${row.element_id}:${row.event_id}`, row);
-	return peerIds.map((elementId) => {
-		const rows = eventIds.map((eventId) => byPlayerEvent.get(`${elementId}:${eventId}`) ?? null);
-		const minutes = rows.reduce((sum, row) => sum + (row?.minutes ?? 0), 0);
-		const points = rows.reduce((sum, row) => sum + (row?.total_points ?? 0), 0);
-		const bonus = rows.reduce((sum, row) => sum + (row?.bonus ?? 0), 0);
-		const result: CurrentMetricRow = {
-			elementId,
-			pointsPer90: minutes > 0 ? (points * 90) / minutes : null,
-			returnRate:
-				eventIds.length === 0
-					? 0
-					: (rows.filter((row) => (row?.total_points ?? 0) >= 5).length / eventIds.length) * 100,
-			bonusPer90: minutes > 0 ? (bonus * 90) / minutes : null,
-			minutes,
-			gameweeks: eventIds.length,
-			starts: null,
-			goalsScored: null,
-			assists: null,
-			cleanSheets: null,
-			saves: null,
-			bps: null,
-			expectedGoalInvolvements: null,
+type RadarValue = {
+	value: (row: CurrentMetricRow) => number | null;
+	unit: string;
+	capability?: (season: string) => boolean;
+};
+
+const radarPer90 = (value: number | null, minutes: number): number | null =>
+	value === null || minutes < PROCESS_MINIMUM_MINUTES ? null : (value * 90) / minutes;
+
+const radarSpecsForPosition = (position: number): Array<{ code: string; metric: RadarValue }> => {
+	const points: { code: string; metric: RadarValue } = {
+		code: "FPL_POINTS_PER_90",
+		metric: {
+			unit: "per90",
+			value: (row: CurrentMetricRow) =>
+				row.minutes < PROCESS_MINIMUM_MINUTES ? null : row.pointsPer90,
+		},
+	};
+	const cleanSheets: { code: string; metric: RadarValue } = {
+		code: "FPL_CLEAN_SHEETS_PER_START",
+		metric: {
+			unit: "rate",
+			value: (row: CurrentMetricRow) =>
+				row.minutes < PROCESS_MINIMUM_MINUTES || !row.starts || row.cleanSheets === null
+					? null
+					: (row.cleanSheets / row.starts) * 100,
+		},
+	};
+	const bonus: { code: string; metric: RadarValue } = {
+		code: "FPL_BONUS_PER_90",
+		metric: {
+			unit: "per90",
+			value: (row: CurrentMetricRow) =>
+				row.minutes < PROCESS_MINIMUM_MINUTES ? null : row.bonusPer90,
+		},
+	};
+	const bps: { code: string; metric: RadarValue } = {
+		code: "FPL_BPS_PER_90",
+		metric: {
+			unit: "per90",
+			value: (row: CurrentMetricRow) => radarPer90(row.bps, row.minutes),
+		},
+	};
+	const xgi: { code: string; metric: RadarValue } = {
+		code: "FPL_XGI_PER_90",
+		metric: {
+			unit: "per90",
+			value: (row: CurrentMetricRow) => radarPer90(row.expectedGoalInvolvements, row.minutes),
+			capability: expectedMetricsAvailableForSeason,
+		},
+	};
+	if (position === 1) {
+		return [
+			points,
+			cleanSheets,
+			{
+				code: "FPL_SAVES_PER_90",
+				metric: {
+					unit: "per90",
+					value: (row: CurrentMetricRow) => radarPer90(row.saves, row.minutes),
+				},
+			},
+			bonus,
+			bps,
+		];
+	}
+	if (position === 2) return [points, xgi, cleanSheets, bonus, bps];
+	if (position === 3) {
+		return [
+			points,
+			xgi,
+			{
+				code: "FPL_ATTACKING_RETURNS_PER_90",
+				metric: {
+					unit: "per90",
+					value: (row: CurrentMetricRow) =>
+						radarPer90(
+							row.goalsScored === null || row.assists === null
+								? null
+								: row.goalsScored + row.assists,
+							row.minutes
+						),
+				},
+			},
+			cleanSheets,
+			bonus,
+		];
+	}
+	return [
+		points,
+		xgi,
+		{
+			code: "FPL_GOALS_PER_90",
+			metric: {
+				unit: "per90",
+				value: (row: CurrentMetricRow) => radarPer90(row.goalsScored, row.minutes),
+			},
+		},
+		{
+			code: "FPL_ASSISTS_PER_90",
+			metric: {
+				unit: "per90",
+				value: (row: CurrentMetricRow) => radarPer90(row.assists, row.minutes),
+			},
+		},
+		bonus,
+	];
+};
+
+const buildPlayerRadarProfile = (
+	position: number,
+	season: string,
+	asOfEventId: number | null,
+	player: CurrentMetricRow | null,
+	cohort: CurrentMetricRow[]
+): PlayerRadarProfile | null => {
+	if (player === null || asOfEventId === null) return null;
+	const axes: PlayerRadarAxis[] = radarSpecsForPosition(position).map(({ code, metric }) => {
+		const capability = metric.capability?.(season) ?? true;
+		const value = capability ? metric.value(player) : null;
+		const population = capability ? cohort.map((row) => metric.value(row)) : [];
+		return {
+			code,
+			value,
+			percentile: capability ? percentile(value, population) : null,
+			unit: metric.unit,
+			direction: "HIGHER_IS_BETTER",
+			sampleMinutes: player.minutes,
+			available: value !== null,
+			capability,
+			reasonCode:
+				value !== null
+					? null
+					: !capability
+						? "PROFILE_METRIC_CAPABILITY_UNAVAILABLE"
+						: player.minutes < PROCESS_MINIMUM_MINUTES
+							? "PROFILE_SAMPLE_BELOW_180_MINUTES"
+							: "PROFILE_METRIC_UNAVAILABLE",
 		};
-		return result;
 	});
+	return {
+		source: "FPL",
+		position,
+		season,
+		asOfEventId,
+		sampleMinutes: player.minutes,
+		smallSample:
+			player.minutes >= PROCESS_MINIMUM_MINUTES && player.minutes < HISTORY_PLAYER_MINUTES,
+		axes,
+	};
 };
 
 const historicalMetric = (row: HistoricalCohortRow): HistoricalMetricRow | null => {
@@ -799,15 +732,7 @@ const historicalMetric = (row: HistoricalCohortRow): HistoricalMetricRow | null 
 	};
 };
 
-const historyForPlayer = (
-	rows: HistoricalCohortRow[],
-	playerCode: number,
-	archiveRevision: string,
-	sealedSeasons: string[],
-	declaredSealedSeasons: string[],
-	unavailableSealedSeasons: string[],
-	storageAvailable: boolean
-): PlayerHistory => {
+const historyForPlayer = (rows: HistoricalCohortRow[], playerCode: number): PlayerHistory => {
 	const metrics = rows
 		.map(historicalMetric)
 		.filter((row): row is HistoricalMetricRow => row !== null);
@@ -844,64 +769,141 @@ const historyForPlayer = (
 			expectedMetricsAvailable: season.expectedMetricsAvailable,
 		}))
 		.sort((left, right) => left.season.localeCompare(right.season));
+	const seasons = [
+		...new Set(metrics.filter((row) => row.playerCode === playerCode).map((row) => row.season)),
+	]
+		.sort()
+		.reverse();
+	const asOf = latestIso(rows.map((row) => iso(row.as_of)));
 	return {
 		baselineSeasons,
 		careerTrajectory,
-		sealedSeasons,
-		declaredSealedSeasons,
-		unavailableSealedSeasons,
-		storageAvailable,
-		archiveRevision,
+		seasons,
+		revision: stableHash(
+			rows.map((row) => [
+				row.season,
+				row.player_code,
+				row.minutes,
+				row.total_points,
+				row.bonus,
+				row.return_count,
+				row.gameweek_count,
+				iso(row.as_of),
+			])
+		),
+		asOf,
 	};
 };
 
-const toGameweekSamples = (rows: CurrentGameweekRow[]): PlayerGameweekSample[] =>
-	rows.map((row) => {
-		const covered = asInt(row.coverage_count) !== null && (asInt(row.coverage_count) ?? 0) > 0;
-		return {
-			eventId: row.event_id,
-			totalPoints: covered ? (row.total_points ?? 0) : 0,
-			minutes: covered ? (row.minutes ?? 0) : 0,
-			started: covered ? Boolean(row.started) : false,
-			bonus: covered ? (row.bonus ?? 0) : 0,
-			covered,
-		};
-	});
+const addUnderstatHistory = (
+	history: PlayerHistory,
+	processPercentiles: Map<string, number>
+): PlayerHistory => {
+	const baselineSeasons = history.baselineSeasons.map((season) => ({
+		...season,
+		understatProcessPercentile: processPercentiles.get(season.season) ?? null,
+	}));
+	return {
+		...history,
+		baselineSeasons,
+		careerTrajectory: baselineSeasons
+			.map((season): PlayerStateCareerPoint => ({
+				season: season.season,
+				position: season.position,
+				minutes: season.minutes,
+				fplPositionPercentile: season.positionPercentile,
+				understatProcessPercentile: season.understatProcessPercentile,
+				expectedMetricsAvailable: season.expectedMetricsAvailable,
+			}))
+			.sort((left, right) => left.season.localeCompare(right.season)),
+	};
+};
+
+const toGameweekSamples = (
+	eventIds: number[],
+	rows: CurrentPeerGameweekRow[],
+	playerId: number
+): PlayerGameweekSample[] => {
+	const coveredEvents = new Set(rows.map((row) => row.event_id));
+	const subjectRows = new Map(
+		rows.filter((row) => row.element_id === playerId).map((row) => [row.event_id, row] as const)
+	);
+	return [...eventIds]
+		.sort((left, right) => right - left)
+		.map((eventId) => {
+			const row = subjectRows.get(eventId);
+			const covered = coveredEvents.has(eventId);
+			return {
+				eventId,
+				totalPoints: covered ? (row?.total_points ?? 0) : 0,
+				minutes: covered ? (row?.minutes ?? 0) : 0,
+				started: covered ? Boolean(row?.started) : false,
+				bonus: covered ? (row?.bonus ?? 0) : 0,
+				covered,
+			};
+		});
+};
+
+const resolveAsOfEventId = (snapshot: CoreDataSnapshot): number | null => {
+	if (snapshot.currentEventId !== null) return snapshot.currentEventId;
+	return (
+		[...snapshot.events]
+			.filter((event) => event.finished || event.isCurrent)
+			.sort((left, right) => right.id - left.id)[0]?.id ?? null
+	);
+};
+
+const resolveOutlookStart = (snapshot: CoreDataSnapshot, asOfEventId: number | null): number =>
+	[...snapshot.events]
+		.filter((event) => event.isCurrent && !event.finished)
+		.sort((left, right) => left.id - right.id)[0]?.id ??
+	[...snapshot.events].filter((event) => event.isNext).sort((left, right) => left.id - right.id)[0]
+		?.id ??
+	Math.min(38, Math.max(1, (asOfEventId ?? 0) + 1));
 
 const buildOutlookGameweeks = (
-	rows: FixtureRow[],
+	snapshot: CoreDataSnapshot,
 	teamId: number,
 	startEventId: number,
-	horizon: number,
-	coveredEventIds: Set<number>
+	horizon: number
 ): PlayerStateOutlookGameweek[] => {
-	const result: PlayerStateOutlookGameweek[] = [];
-	const effectiveHorizon = Math.min(horizon, Math.max(0, 38 - startEventId + 1));
-	for (let eventId = startEventId; eventId < startEventId + effectiveHorizon; eventId += 1) {
-		const eventRows = rows.filter((row) => row.event_id === eventId);
-		const fixtures = eventRows.map((row) => ({
-			id: row.id,
-			opponentTeamShortName: row.opponent_short_name,
-			wasHome: row.team_h_id === teamId,
-			difficulty: (row.team_h_id === teamId ? row.team_h_difficulty : row.team_a_difficulty) ?? 0,
-			kickoffTime: iso(row.kickoff_time),
-		}));
+	const eventIds = snapshot.events
+		.map((event) => event.id)
+		.filter((eventId) => eventId >= startEventId)
+		.sort((left, right) => left - right)
+		.slice(0, horizon);
+	const teamById = new Map(snapshot.teams.map((team) => [team.id, team] as const));
+	return eventIds.map((eventId) => {
+		const fixtures = snapshot.fixtures
+			.filter(
+				(fixture) =>
+					fixture.eventId === eventId && (fixture.teamHId === teamId || fixture.teamAId === teamId)
+			)
+			.map((fixture: CoreFixtureData) => {
+				const wasHome = fixture.teamHId === teamId;
+				const opponent = teamById.get(wasHome ? fixture.teamAId : fixture.teamHId);
+				return {
+					id: fixture.id,
+					opponentTeamShortName: opponent?.shortName ?? "UNK",
+					wasHome,
+					difficulty: (wasHome ? fixture.teamHDifficulty : fixture.teamADifficulty) ?? 0,
+					kickoffTime: fixture.kickoffTime,
+				};
+			});
 		const difficulties = fixtures
 			.map((fixture) => fixture.difficulty)
 			.filter((difficulty) => difficulty >= 1 && difficulty <= 5);
-		const covered = coveredEventIds.has(eventId);
-		result.push({
+		return {
 			eventId,
-			bgw: covered && fixtures.length === 0,
-			dgw: covered && fixtures.length > 1,
+			bgw: fixtures.length === 0,
+			dgw: fixtures.length > 1,
 			averageDifficulty:
 				difficulties.length === 0
 					? null
 					: difficulties.reduce((sum, difficulty) => sum + difficulty, 0) / difficulties.length,
 			fixtures,
-		});
-	}
-	return result;
+		};
+	});
 };
 
 const metric = (
@@ -922,267 +924,223 @@ const metric = (
 	capability: options.capability ?? true,
 });
 
-const profileGuard = (value: unknown): value is PlayerStateProfile =>
-	isRecord(value) &&
-	typeof value.playerId === "number" &&
-	typeof value.trend === "string" &&
-	Array.isArray(value.dimensions) &&
-	isRecord(value.coverage);
+const per90 = (value: unknown, minutes: number): number | null => {
+	const number = asNumber(value);
+	return number === null || minutes <= 0 ? null : (number * 90) / minutes;
+};
 
-const historyGuard = (value: unknown): value is HistoryPayload =>
-	isRecord(value) && Array.isArray(value.rows);
+const understatValues = (row: UnderstatCohortRow): UnderstatValues => ({
+	npxgPer90: per90(row.non_penalty_xg, row.minutes),
+	xaPer90: per90(row.xa, row.minutes),
+	shotsPer90: per90(row.shots, row.minutes),
+	keyPassesPer90: per90(row.key_passes, row.minutes),
+	xgChainPer90: per90(row.xg_chain, row.minutes),
+	xgBuildupPer90: per90(row.xg_buildup, row.minutes),
+});
 
-async function readCache<T>(
-	context: GraphQLContext,
-	key: string,
-	guard: (value: unknown) => value is T
-): Promise<T | null | undefined> {
-	try {
-		const raw = await context.redis.get(key);
-		if (raw === null) return undefined;
-		if (raw === NULL_SENTINEL) return null;
-		const parsed: unknown = JSON.parse(raw);
-		if (guard(parsed)) return parsed;
-		await context.redis.del(key);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to read player-state cache");
-	}
-	return undefined;
-}
+const understatCompositePercentile = (
+	row: UnderstatCohortRow,
+	cohort: UnderstatCohortRow[]
+): number | null => {
+	const subject = understatValues(row);
+	const peers = cohort.map(understatValues);
+	return averagePercentiles([
+		percentile(
+			subject.npxgPer90,
+			peers.map((peer) => peer.npxgPer90)
+		),
+		percentile(
+			subject.xaPer90,
+			peers.map((peer) => peer.xaPer90)
+		),
+		percentile(
+			subject.shotsPer90,
+			peers.map((peer) => peer.shotsPer90)
+		),
+		percentile(
+			subject.keyPassesPer90,
+			peers.map((peer) => peer.keyPassesPer90)
+		),
+		percentile(
+			subject.xgChainPer90,
+			peers.map((peer) => peer.xgChainPer90)
+		),
+		percentile(
+			subject.xgBuildupPer90,
+			peers.map((peer) => peer.xgBuildupPer90)
+		),
+	]);
+};
 
-async function writeCache(
-	context: GraphQLContext,
-	key: string,
-	value: unknown,
-	ttl: number
-): Promise<void> {
-	try {
-		await context.redis.set(key, JSON.stringify(value), "EX", ttl);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to write player-state cache");
-	}
-}
+const unavailableProcess = (
+	rating: ProcessAssessment["rating"],
+	reasonCode: string
+): ProcessAssessment => ({
+	rating,
+	direction: "UNKNOWN" as const,
+	available: false,
+	sampleMinutes: 0,
+	smallSample: false,
+	reasonCodes: [reasonCode],
+	metrics: [],
+});
 
-async function loadHistory(
-	context: GraphQLContext,
-	executor: QueryExecutor,
-	playerCode: number,
-	archives: ArchiveRow[]
-): Promise<PlayerHistory> {
-	const declaredSealedSeasons = archives.map((archive) => archive.season);
-	let storage: PlayerStateHistoryStorage | null = null;
-	try {
-		const storageResult = await executor.query<{
-			player_history: string | null;
-			player_stat_history: string | null;
-			event_live_history: string | null;
-		}>(historyStorageSql);
-		const row = storageResult.rows[0];
-		storage = row
-			? {
-					playerHistory: row.player_history,
-					playerStatHistory: row.player_stat_history,
-					eventLiveHistory: row.event_live_history,
-				}
-			: null;
-	} catch (error) {
-		context.logger.warn({ err: error }, "Failed to inspect FPL history storage");
-	}
-
-	if (!playerStateHistoryStorageAvailable(storage)) {
-		const archiveRevision = stableHash({
-			declared: archives.map((archive) => [
-				archive.season,
-				archive.source_core_revision,
-				iso(archive.completed_at),
-			]),
-			storage: "unavailable",
-		});
-		return historyForPlayer(
-			[],
-			playerCode,
-			archiveRevision,
-			[],
-			declaredSealedSeasons,
-			declaredSealedSeasons,
-			false
+const buildUnderstatProcess = (
+	position: number,
+	season: string,
+	mappingStatus: PlayerStateCoverage["mappingStatus"],
+	rows: UnderstatCohortRow[]
+): UnderstatProcessResult => {
+	const subjects = rows.filter((row) => row.is_subject);
+	const historyPercentiles = new Map<string, number>();
+	for (const subject of subjects.filter((row) => row.season !== season)) {
+		const cohort = rows.filter(
+			(row) => row.season === subject.season && row.minutes >= PROCESS_PEER_MINUTES
 		);
+		const rank = understatCompositePercentile(subject, cohort);
+		if (rank !== null) historyPercentiles.set(subject.season, rank);
 	}
-
-	let availableArchives: ArchiveRow[] = [];
-	try {
-		availableArchives = (await executor.query<ArchiveRow>(availableArchiveSql)).rows;
-	} catch (error) {
-		context.logger.warn({ err: error }, "Failed to reconcile sealed FPL history storage");
-	}
-	const sealedSeasons = availableArchives.map((archive) => archive.season);
-	const availableSet = new Set(sealedSeasons);
-	const unavailableSealedSeasons = declaredSealedSeasons.filter(
-		(season) => !availableSet.has(season)
-	);
-	const archiveRevision = stableHash({
-		declared: archives.map((archive) => [
-			archive.season,
-			archive.source_core_revision,
-			iso(archive.completed_at),
-		]),
-		available: availableArchives.map((archive) => [
-			archive.season,
-			archive.source_core_revision,
-			iso(archive.completed_at),
-		]),
-		storage: "available",
-	});
-	if (sealedSeasons.length === 0) {
-		return historyForPlayer(
-			[],
-			playerCode,
-			archiveRevision,
-			[],
-			declaredSealedSeasons,
-			unavailableSealedSeasons,
-			true
-		);
-	}
-	const key = `player_state:history-cohorts:${STATE_ENGINE_VERSION}:${playerCode}:${archiveRevision}`;
-	let payload = await readCache(context, key, historyGuard);
-	if (payload === undefined || payload === null) {
-		try {
-			const result = await executor.query<HistoricalCohortRow>(historicalCohortsSql, [
-				playerCode,
-				sealedSeasons,
-			]);
-			payload = { rows: result.rows };
-			await writeCache(context, key, payload, HISTORY_CACHE_TTL_SECONDS);
-		} catch (error) {
-			context.logger.warn({ err: error }, "Failed to load sealed FPL history cohorts");
-			return historyForPlayer(
-				[],
-				playerCode,
-				stableHash({ archiveRevision, query: "unavailable" }),
-				[],
-				declaredSealedSeasons,
-				declaredSealedSeasons,
-				false
-			);
-		}
-	}
-	return historyForPlayer(
-		payload.rows,
-		playerCode,
-		archiveRevision,
-		sealedSeasons,
-		declaredSealedSeasons,
-		unavailableSealedSeasons,
-		true
-	);
-}
-
-async function readUnderstatManifests(
-	context: GraphQLContext,
-	season: string
-): Promise<{ team: UnderstatManifest | null; player: UnderstatManifest | null }> {
-	try {
-		const [teamRaw, playerRaw] = await context.redis.mget(
-			`Understat:Snapshot:${season}:team`,
-			`Understat:Snapshot:${season}:player`
-		);
+	const historySeasons = subjects
+		.filter((row) => row.season_state === "complete")
+		.map((row) => row.season)
+		.sort();
+	const currentSubject = subjects.find((row) => row.season === season) ?? null;
+	if (position === 1) {
 		return {
-			team: parseManifest(teamRaw ?? null, season, "team"),
-			player: parseManifest(playerRaw ?? null, season, "player"),
+			assessment: unavailableProcess("TEAM_CONTEXT_ONLY", "PROCESS_GKP_TEAM_CONTEXT_ONLY"),
+			currentSubject,
+			historyPercentiles,
+			historySeasons,
 		};
-	} catch (error) {
-		context.logger.warn({ err: error, season }, "Failed to read Understat manifests");
-		return { team: null, player: null };
 	}
-}
-
-const isMissingRelationError = (error: unknown): boolean =>
-	isRecord(error) && error.code === "42P01";
-
-async function loadUnderstatSeasons(
-	context: GraphQLContext,
-	executor: QueryExecutor
-): Promise<UnderstatSeasonRow[]> {
-	try {
-		const result = await executor.query<UnderstatSeasonRow>(understatSeasonsSql);
-		return result.rows;
-	} catch (error) {
-		if (isMissingRelationError(error)) {
-			context.logger.warn(
-				{ table: "understat_seasons" },
-				"Understat season storage is not provisioned; serving FPL-only state"
-			);
-			return [];
-		}
-		throw error;
+	if (mappingStatus !== "VERIFIED") {
+		return {
+			assessment: unavailableProcess("UNAVAILABLE", "PROCESS_MAPPING_UNAVAILABLE"),
+			currentSubject: null,
+			historyPercentiles,
+			historySeasons,
+		};
 	}
-}
-
-async function loadSealedArchives(
-	context: GraphQLContext,
-	executor: QueryExecutor
-): Promise<ArchiveRow[]> {
-	try {
-		return (await executor.query<ArchiveRow>(archiveSql)).rows;
-	} catch (error) {
-		if (isMissingRelationError(error)) {
-			context.logger.warn(
-				{ table: "fpl_season_archives" },
-				"FPL archive storage is not provisioned; serving FPL-only state"
-			);
-			return [];
-		}
-		throw error;
+	if (
+		currentSubject === null ||
+		(currentSubject.season_state !== "active" && currentSubject.season_state !== "complete")
+	) {
+		return {
+			assessment: unavailableProcess("UNAVAILABLE", "PROCESS_UNAVAILABLE_UNDERSTAT"),
+			currentSubject,
+			historyPercentiles,
+			historySeasons,
+		};
 	}
-}
+	if (currentSubject.minutes < PROCESS_MINIMUM_MINUTES) {
+		return {
+			assessment: {
+				...unavailableProcess("INSUFFICIENT", "PROCESS_SAMPLE_BELOW_180_MINUTES"),
+				sampleMinutes: currentSubject.minutes,
+				smallSample: true,
+			},
+			currentSubject,
+			historyPercentiles,
+			historySeasons,
+		};
+	}
+	const cohort = rows.filter((row) => row.season === season && row.minutes >= PROCESS_PEER_MINUTES);
+	const currentPercentile = understatCompositePercentile(currentSubject, cohort);
+	if (currentPercentile === null) {
+		return {
+			assessment: {
+				...unavailableProcess("UNAVAILABLE", "PROCESS_COHORT_UNAVAILABLE"),
+				sampleMinutes: currentSubject.minutes,
+			},
+			currentSubject,
+			historyPercentiles,
+			historySeasons,
+		};
+	}
+	const historicalSubjects = subjects
+		.filter((row) => row.season < season && row.minutes >= HISTORY_PLAYER_MINUTES)
+		.sort((left, right) => right.season.localeCompare(left.season))
+		.slice(0, 3);
+	const baselinePercentile = averagePercentiles(
+		historicalSubjects.map((row) => historyPercentiles.get(row.season) ?? null)
+	);
+	const direction =
+		baselinePercentile === null
+			? "UNKNOWN"
+			: currentPercentile - baselinePercentile >= 15
+				? "RISING"
+				: currentPercentile - baselinePercentile <= -15
+					? "FALLING"
+					: "STABLE";
+	const rating = currentPercentile >= 70 ? "STRONG" : currentPercentile >= 30 ? "TYPICAL" : "WEAK";
+	const values = understatValues(currentSubject);
+	const historicalValues = historicalSubjects.map(understatValues);
+	const metricSpecs: Array<{
+		code: string;
+		value: keyof UnderstatValues;
+	}> = [
+		{ code: "UNDERSTAT_NPXG_PER_90", value: "npxgPer90" },
+		{ code: "UNDERSTAT_XA_PER_90", value: "xaPer90" },
+		{ code: "UNDERSTAT_SHOTS_PER_90", value: "shotsPer90" },
+		{ code: "UNDERSTAT_KEY_PASSES_PER_90", value: "keyPassesPer90" },
+		{ code: "UNDERSTAT_XG_CHAIN_PER_90", value: "xgChainPer90" },
+		{ code: "UNDERSTAT_XG_BUILDUP_PER_90", value: "xgBuildupPer90" },
+	];
+	const metrics = metricSpecs.map(({ code, value }) =>
+		metric(code, values[value], {
+			source: "UNDERSTAT_CURRENT",
+			baseline:
+				historicalValues.length === 0
+					? null
+					: averagePercentiles(historicalValues.map((candidate) => candidate[value])),
+			percentile: percentile(
+				values[value],
+				cohort.map((row) => understatValues(row)[value])
+			),
+			unit: "per90",
+			season,
+			sampleMinutes: currentSubject.minutes,
+			sampleSize: cohort.length,
+			smallSample: currentSubject.minutes < HISTORY_PLAYER_MINUTES,
+		})
+	);
+	return {
+		assessment: {
+			rating,
+			direction,
+			available: true,
+			sampleMinutes: currentSubject.minutes,
+			smallSample: currentSubject.minutes < HISTORY_PLAYER_MINUTES,
+			reasonCodes: [
+				rating === "STRONG"
+					? "PROCESS_STRONG"
+					: rating === "TYPICAL"
+						? "PROCESS_TYPICAL"
+						: "PROCESS_WEAK",
+				direction === "UNKNOWN" ? "PROCESS_BASELINE_UNAVAILABLE" : `PROCESS_${direction}`,
+			],
+			metrics,
+		},
+		currentSubject,
+		historyPercentiles,
+		historySeasons,
+	};
+};
 
-async function loadProviderLink(
-	context: GraphQLContext,
+const isDurableVerifiedLink = (link: ProviderLinkRow | null): boolean =>
+	link !== null &&
+	(link.status === "auto_verified" || link.status === "manual_verified") &&
+	link.left_entity_id !== null;
+
+const loadProviderLink = async (
 	executor: QueryExecutor,
 	playerCode: number
-): Promise<ProviderLinkRow | null> {
-	try {
-		const result = await executor.query<ProviderLinkRow>(providerLinkSql, [String(playerCode)]);
-		return result.rows[0] ?? null;
-	} catch (error) {
-		if (isMissingRelationError(error)) {
-			context.logger.warn(
-				{ table: "provider_entity_links" },
-				"Provider link storage is not provisioned; serving FPL-only state"
-			);
-			return null;
-		}
-		throw error;
-	}
-}
-
-async function loadPlayerMetadata(
-	context: GraphQLContext,
-	executor: QueryExecutor,
-	playerId: number
-): Promise<QueryResult<PlayerMetadataRow>> {
-	try {
-		return await executor.query<PlayerMetadataRow>(metadataSql, [playerId]);
-	} catch (error) {
-		if (!isMissingRelationError(error)) throw error;
-		context.logger.warn(
-			{ table: "optional_player_state_storage" },
-			"Optional player-state storage is not fully provisioned; serving FPL-only state"
-		);
-		try {
-			return await executor.query<PlayerMetadataRow>(metadataSqlWithoutAuthority, [playerId]);
-		} catch (fallbackError) {
-			if (!isMissingRelationError(fallbackError)) throw fallbackError;
-			try {
-				return await executor.query<PlayerMetadataRow>(metadataSqlWithoutMarket, [playerId]);
-			} catch (marketError) {
-				if (!isMissingRelationError(marketError)) throw marketError;
-				return executor.query<PlayerMetadataRow>(metadataSqlWithoutAuthorityAndMarket, [playerId]);
-			}
-		}
-	}
-}
+): Promise<ProviderLinkRow | null> => {
+	const values = [String(playerCode)];
+	const verified = await executor.query<ProviderLinkRow>(verifiedProviderLinkSql, values);
+	if (verified.rows[0]) return verified.rows[0];
+	return (await executor.query<ProviderLinkRow>(unresolvedProviderLinkSql, values)).rows[0] ?? null;
+};
 
 export interface PlayerStateRepository {
 	getPlayerStateProfile(
@@ -1193,87 +1151,76 @@ export interface PlayerStateRepository {
 }
 
 export const createPlayerStateRepository = (
-	executor: QueryExecutor = dbPool as unknown as QueryExecutor
+	dependencies: PlayerStateRepositoryDependencies = {}
 ): PlayerStateRepository => ({
 	async getPlayerStateProfile(
 		context: GraphQLContext,
 		playerId: number,
 		horizon: number
 	): Promise<PlayerStateProfile | null> {
-		if (!Number.isInteger(playerId) || playerId <= 0) return null;
-		const safeHorizon = Number.isInteger(horizon) ? Math.min(8, Math.max(1, horizon)) : 5;
-
-		const season = await getCurrentSeason(context);
-		const statsContextPromise = resolvePlayerStatsContext(context);
-		const [metadataResult, archiveRows, understatSeasonsResult, statsContext] = await Promise.all([
-			loadPlayerMetadata(context, executor, playerId),
-			loadSealedArchives(context, executor),
-			loadUnderstatSeasons(context, executor),
-			statsContextPromise,
-		]);
-		const metadata = metadataResult.rows[0];
-		if (!metadata) return null;
-
-		// Provider links use durable FPL player.code, never the season-local element id.
-		const link = await loadProviderLink(context, executor, metadata.player_code);
-		const manifests = await readUnderstatManifests(context, season);
-		const currentMappingStatus = resolvePlayerStateMappingStatus(link, season);
-		const currentUnderstatSeason = understatSeasonsResult.find(
-			(candidate) => candidate.season === season
-		);
-		const understatPublished =
-			Boolean(currentUnderstatSeason) &&
-			(currentUnderstatSeason?.state === "active" ||
-				currentUnderstatSeason?.state === "complete") &&
-			manifests.team !== null &&
-			manifests.player !== null;
-		const understatCurrent = understatPublished && currentMappingStatus === "VERIFIED";
-
-		const history = await loadHistory(context, executor, metadata.player_code, archiveRows);
-		const sourceVector = {
-			engine: STATE_ENGINE_VERSION,
-			season,
-			eventId: statsContext.asOfEventId,
-			coreRevision: metadata.core_revision,
-			publicationId: metadata.publication_id,
-			fplSnapshotAt: iso(metadata.fpl_snapshot_at),
-			marketCapturedAt: iso(metadata.market_captured_at),
-			understatTeamRevision: manifests.team?.revision ?? null,
-			understatPlayerRevision: manifests.player?.revision ?? null,
-			linkRuleVersion: link?.rule_version ?? "none",
-			mappingStatus: currentMappingStatus,
-			archiveRevision: history.archiveRevision,
-			horizon: safeHorizon,
-		};
-		const profileKey = gqlCacheKey(
-			season,
-			`player_state:profile:${playerId}:${stableHash(sourceVector)}`
-		);
-		const cached = await readCache(context, profileKey, profileGuard);
+		if (!Number.isSafeInteger(playerId) || playerId <= 0) return null;
+		const safeHorizon = Number.isSafeInteger(horizon) ? Math.min(8, Math.max(1, horizon)) : 5;
+		const key = profileCacheKey(context, playerId, safeHorizon);
+		const cached = await readProfileCache(context, key);
 		if (cached !== undefined) return cached;
 
-		const outlookStart = Math.max(1, metadata.outlook_event_id ?? statsContext.asOfEventId ?? 1);
-		const outlookHorizon = Math.min(safeHorizon, Math.max(0, 38 - outlookStart + 1));
-		const gameweekPromise =
-			statsContext.scope === "CURRENT_SEASON" && statsContext.asOfEventId !== null
-				? executor.query<CurrentGameweekRow>(recentGameweeksSql, [
-						playerId,
-						statsContext.asOfEventId,
-					])
-				: Promise.resolve({ rows: [] } as unknown as QueryResult<CurrentGameweekRow>);
-		const [gameweekResult, fixtureResult, fixtureCoverageResult] = await Promise.all([
-			gameweekPromise,
-			executor.query<FixtureRow>(fixturesSql, [
-				metadata.team_id,
-				outlookStart,
-				outlookStart + outlookHorizon - 1,
-			]),
-			executor.query<FixtureCoverageRow>(fixtureCoverageSql, [
-				outlookStart,
-				outlookStart + outlookHorizon - 1,
-			]),
+		const loadSnapshot = dependencies.loadCoreSnapshot ?? getCoreDataSnapshot;
+		const snapshot = await loadSnapshot(context);
+		const player = snapshot.players.find((candidate) => candidate.id === playerId);
+		if (!player) {
+			await writeNullCache(context, key);
+			return null;
+		}
+		const executor = dependencies.executor ?? context.database;
+		const seasonId = context.currentSeason.seasonId;
+		const season = context.currentSeason.seasonCode;
+		const asOfEventId = resolveAsOfEventId(snapshot);
+		const startedEventIds = snapshot.events
+			.filter(
+				(event) =>
+					asOfEventId !== null && event.id <= asOfEventId && (event.finished || event.isCurrent)
+			)
+			.map((event) => event.id)
+			.sort((left, right) => left - right);
+
+		const linkPromise = loadProviderLink(executor, player.code);
+		const fplPromise = Promise.all([
+			executor.query<MarketRow>(marketSql, [seasonId, playerId]),
+			asOfEventId === null
+				? Promise.resolve({ rows: [] as CurrentPeerRow[] })
+				: executor.query<CurrentPeerRow>(currentPeersSql, [seasonId, player.type]),
+			startedEventIds.length === 0
+				? Promise.resolve({ rows: [] as CurrentPeerGameweekRow[] })
+				: executor.query<CurrentPeerGameweekRow>(currentPeerGameweeksSql, [
+						seasonId,
+						player.type,
+						startedEventIds,
+					]),
+			executor.query<HistoricalCohortRow>(historicalCohortsSql, [player.code]),
 		]);
-		const samples = toGameweekSamples(gameweekResult.rows);
+
+		const link = await linkPromise;
+		const mappingStatus = resolvePlayerStateMappingStatus(link, season);
+		const confirmedSeasons = isDurableVerifiedLink(link)
+			? confirmedPlayerLinkSeasons(link?.evidence ?? null)
+			: [];
+		const understatRows =
+			confirmedSeasons.length === 0
+				? []
+				: (
+						await executor.query<UnderstatCohortRow>(understatCohortsSql, [
+							player.code,
+							confirmedSeasons,
+						])
+					).rows;
+		const [marketResult, currentPeersResult, gameweeksResult, historyResult] = await fplPromise;
+
+		const processResult = buildUnderstatProcess(player.type, season, mappingStatus, understatRows);
+		const history = addUnderstatHistory(
+			historyForPlayer(historyResult.rows, player.code),
+			processResult.historyPercentiles
+		);
+		const samples = toGameweekSamples(startedEventIds, gameweeksResult.rows, playerId);
 		const recentWindow = samples.slice(0, 5);
 		const previousWindow = samples.slice(5, 10);
 		const recentSamples = recentWindow.filter((sample) => sample.covered);
@@ -1282,95 +1229,57 @@ export const createPlayerStateRepository = (
 		const recentWindowComplete =
 			recentWindow.length === 5 && recentWindow.every((sample) => sample.covered);
 		const role = assessRole(recentSamples, previousSamples);
+		const market = marketResult.rows[0] ?? null;
+		const marketCapturedAt = iso(market?.captured_at ?? null);
 		const availability = assessAvailability(
-			metadata.market_status === null
+			market === null
 				? null
 				: {
-						status: metadata.market_status,
-						chanceOfPlayingThisRound: metadata.chance_this_round,
+						status: market.status,
+						chanceOfPlayingThisRound: market.chance_this_round,
 						stale:
-							(freshness(iso(metadata.market_captured_at)) ?? Number.POSITIVE_INFINITY) >
+							(freshness(marketCapturedAt) ?? Number.POSITIVE_INFINITY) >
 							PLAYER_STATE_FRESHNESS_STALE_SECONDS,
 					}
 		);
 
-		let currentRows: CurrentMetricRow[] = [];
-		let recentRows: CurrentMetricRow[] = [];
-		let radarPlayer: CurrentMetricRow | null = null;
-		if (statsContext.asOfEventId !== null && recentEventIds.length > 0) {
-			const [peersResult, subjectResult] = await Promise.all([
-				executor.query<CurrentPeerRow>(currentPeersSql, [
-					statsContext.asOfEventId,
-					metadata.position,
-				]),
-				executor.query<CurrentPeerRow>(currentPlayerSql, [statsContext.asOfEventId, playerId]),
-			]);
-			const peerIds = peersResult.rows.map((row) => row.element_id);
-			const gameweekIds = Array.from(new Set([...peerIds, playerId]));
-			const peerGameweeks =
-				gameweekIds.length === 0
-					? ({ rows: [] } as unknown as QueryResult<CurrentPeerGameweekRow>)
-					: await executor.query<CurrentPeerGameweekRow>(currentPeerGameweeksSql, [
-							statsContext.asOfEventId,
-							gameweekIds,
-						]);
-			const seasonEventIds = [...new Set(peerGameweeks.rows.map((row) => row.event_id))].sort(
-				(left, right) => left - right
-			);
-			currentRows = currentMetrics(peersResult.rows, peerGameweeks.rows, seasonEventIds);
-			recentRows = recentMetrics(peerIds, peerGameweeks.rows, recentEventIds);
-			radarPlayer =
-				currentMetrics(subjectResult.rows, peerGameweeks.rows, seasonEventIds)[0] ?? null;
-		}
-		const currentPlayer = currentRows.find((row) => row.elementId === playerId) ?? null;
-		const recentPlayer = recentRows.find((row) => row.elementId === playerId) ?? null;
+		const allCurrentRows = currentMetrics(
+			currentPeersResult.rows,
+			gameweeksResult.rows,
+			startedEventIds
+		);
+		const currentCohort = allCurrentRows.filter((row) => row.minutes >= CURRENT_PEER_MINUTES);
+		const currentSubject = allCurrentRows.find((row) => row.elementId === playerId) ?? null;
+		const currentPlayer =
+			currentSubject !== null && currentSubject.minutes >= CURRENT_PEER_MINUTES
+				? currentSubject
+				: null;
 		const currentPercentile = currentPlayer
-			? metricCompositePercentile(currentPlayer, currentRows)
+			? metricCompositePercentile(currentPlayer, currentCohort)
 			: null;
+		const peerIds = currentCohort.map((row) => row.elementId);
+		const recentRows = recentMetrics(peerIds, gameweeksResult.rows, recentEventIds);
+		const recentPlayer = recentRows.find((row) => row.elementId === playerId) ?? null;
 		const recentPercentile = recentPlayer
 			? metricCompositePercentile(recentPlayer, recentRows)
 			: null;
-		const profileRadar =
-			statsContext.scope === "CURRENT_SEASON"
-				? buildPlayerRadarProfile(
-						metadata.position,
-						season,
-						statsContext.asOfEventId,
-						radarPlayer,
-						currentRows
-					)
-				: null;
 		const recentMetricRanks = recentPlayer ? metricPercentiles(recentPlayer, recentRows) : null;
-		const reliability = assessReliability(
-			history.baselineSeasons,
-			radarPlayer?.minutes ?? currentPlayer?.minutes ?? 0
+		const profileRadar = buildPlayerRadarProfile(
+			player.type,
+			season,
+			asOfEventId,
+			currentSubject,
+			currentCohort
 		);
+		const reliability = assessReliability(history.baselineSeasons, currentSubject?.minutes ?? 0);
 		const output = assessOutput({
 			currentPercentile,
 			recentPercentile,
 			seasonBaselinePercentile: currentPercentile,
 			ownBaselinePercentile: reliability.baseline.weightedPercentile,
 		});
-
-		const process: ProcessAssessment = {
-			rating: metadata.position === 1 ? "TEAM_CONTEXT_ONLY" : "UNAVAILABLE",
-			direction: "UNKNOWN",
-			available: false,
-			sampleMinutes: 0,
-			smallSample: false,
-			reasonCodes: [
-				metadata.position === 1
-					? "PROCESS_GKP_TEAM_CONTEXT_ONLY"
-					: understatCurrent
-						? "PROCESS_METRIC_CAPABILITY_UNAVAILABLE"
-						: "PROCESS_UNAVAILABLE_UNDERSTAT",
-			],
-			metrics: [],
-		};
-
+		const process = processResult.assessment;
 		const fplSufficient =
-			statsContext.scope === "CURRENT_SEASON" &&
-			(metadata.core_season === null || metadata.core_season === season) &&
 			recentSamples.length >= MINIMUM_CURRENT_GAMEWEEKS &&
 			recentWindowComplete &&
 			currentPlayer !== null &&
@@ -1387,23 +1296,17 @@ export const createPlayerStateRepository = (
 		});
 		const releaseDecision = applyPlayerStateReleaseGate(composed.trend, process.available);
 
+		const outlookStart = resolveOutlookStart(snapshot, asOfEventId);
 		const outlookGameweeks = buildOutlookGameweeks(
-			fixtureResult.rows,
-			metadata.team_id,
+			snapshot,
+			player.teamId,
 			outlookStart,
-			outlookHorizon,
-			new Set(
-				fixtureCoverageResult.rows
-					.filter((row) => Number(row.fixture_count) > 0)
-					.map((row) => row.event_id)
-			)
+			safeHorizon
 		);
-		const outlook = assessOutlook(outlookGameweeks, outlookHorizon);
+		const outlook = assessOutlook(outlookGameweeks, outlookGameweeks.length);
 		const dgwCount = outlook.gameweeks.filter((gameweek) => gameweek.dgw).length;
 		const bgwCount = outlook.gameweeks.filter((gameweek) => gameweek.bgw).length;
-		const outlookCoverageComplete =
-			fixtureCoverageResult.rows.length === outlookHorizon &&
-			fixtureCoverageResult.rows.every((row) => Number(row.fixture_count) > 0);
+		const outlookCoverageComplete = outlook.gameweeks.length === safeHorizon;
 		const outlookReasons = [
 			outlook.rating === "FAVOURABLE"
 				? "OUTLOOK_FAVOURABLE"
@@ -1498,7 +1401,7 @@ export const createPlayerStateRepository = (
 				kind: "REAL_WORLD_PROCESS",
 				rating: process.rating,
 				direction: process.direction,
-				confidence: "LOW",
+				confidence: process.available ? (process.smallSample ? "MEDIUM" : "HIGH") : "LOW",
 				reasonCodes: process.reasonCodes,
 				metrics: process.metrics,
 			},
@@ -1520,17 +1423,14 @@ export const createPlayerStateRepository = (
 				kind: "OUTLOOK",
 				rating: outlook.rating,
 				direction: "STABLE",
-				confidence:
-					outlookCoverageComplete && (fixtureResult.rows.length > 0 || bgwCount > 0)
-						? "HIGH"
-						: "LOW",
+				confidence: outlookCoverageComplete ? "HIGH" : "LOW",
 				reasonCodes: outlookReasons,
 				metrics: [
 					metric("OUTLOOK_AVERAGE_FDR", outlook.averageDifficulty, {
 						source: "FPL_CURRENT",
 						unit: "fdr",
 						season,
-						sampleSize: outlookHorizon,
+						sampleSize: outlook.gameweeks.length,
 					}),
 					metric("OUTLOOK_DGW_COUNT", dgwCount, {
 						source: "FPL_CURRENT",
@@ -1546,114 +1446,82 @@ export const createPlayerStateRepository = (
 			},
 		];
 
-		const linkIsVerified =
-			link !== null &&
-			(link.status === "auto_verified" || link.status === "manual_verified") &&
-			link.left_entity_id !== null;
-		const linkConfirmed = linkIsVerified ? confirmedPlayerLinkSeasons(link?.evidence ?? null) : [];
-		const understatHistorySeasons = understatSeasonsResult
-			.filter(
-				(candidate) => candidate.state === "complete" && linkConfirmed.includes(candidate.season)
-			)
-			.map((candidate) => candidate.season)
-			.sort();
 		const limitations = new Set<string>();
 		if (!fplSufficient) limitations.add("CURRENT_FPL_INSUFFICIENT");
 		if (releaseDecision.withheld && releaseDecision.reasonCode) {
 			limitations.add(releaseDecision.reasonCode);
 		}
-		if (recentWindow.length > 0 && recentWindow.length < 5) limitations.add("EARLY_SEASON_SAMPLE");
-		if (recentWindow.length === 5 && !recentWindowComplete)
+		if (recentWindow.length > 0 && recentWindow.length < 5) {
+			limitations.add("EARLY_SEASON_SAMPLE");
+		}
+		if (recentWindow.length === 5 && !recentWindowComplete) {
 			limitations.add("CURRENT_FPL_COVERAGE_INCOMPLETE");
+		}
 		if (!outlookCoverageComplete) limitations.add("OUTLOOK_FIXTURE_COVERAGE_UNKNOWN");
-		if (!understatPublished) limitations.add("UNDERSTAT_SEASON_UNAVAILABLE");
-		if (currentMappingStatus === "UNAVAILABLE") limitations.add("PLAYER_MAPPING_UNAVAILABLE");
-		if (currentMappingStatus === "UNVERIFIED") limitations.add("PLAYER_MAPPING_UNVERIFIED");
-		if (currentMappingStatus === "AMBIGUOUS") limitations.add("PLAYER_MAPPING_AMBIGUOUS");
-		if (currentMappingStatus === "QUARANTINED") limitations.add("PLAYER_MAPPING_QUARANTINED");
-		limitations.add(
-			metadata.position === 1
-				? "GKP_PERSONAL_PROCESS_UNAVAILABLE"
-				: "REAL_WORLD_PROCESS_UNAVAILABLE"
-		);
-		if (understatHistorySeasons.length === 0) limitations.add("HISTORICAL_UNDERSTAT_UNAVAILABLE");
-		if (!history.storageAvailable && history.declaredSealedSeasons.length > 0) {
-			limitations.add("FPL_HISTORY_STORAGE_UNAVAILABLE");
-		} else if (history.unavailableSealedSeasons.length > 0) {
-			limitations.add("FPL_HISTORY_ARCHIVE_INCOMPLETE");
+		if (mappingStatus === "UNAVAILABLE") limitations.add("PLAYER_MAPPING_UNAVAILABLE");
+		if (mappingStatus === "UNVERIFIED") limitations.add("PLAYER_MAPPING_UNVERIFIED");
+		if (mappingStatus === "AMBIGUOUS") limitations.add("PLAYER_MAPPING_AMBIGUOUS");
+		if (mappingStatus === "QUARANTINED") limitations.add("PLAYER_MAPPING_QUARANTINED");
+		if (mappingStatus === "VERIFIED" && processResult.currentSubject === null) {
+			limitations.add("UNDERSTAT_PLAYER_DATA_UNAVAILABLE");
+		}
+		if (!process.available) {
+			limitations.add(
+				player.type === 1 ? "GKP_PERSONAL_PROCESS_UNAVAILABLE" : "REAL_WORLD_PROCESS_UNAVAILABLE"
+			);
+		}
+		if (processResult.historySeasons.length === 0) {
+			limitations.add("HISTORICAL_UNDERSTAT_UNAVAILABLE");
 		}
 		if (history.careerTrajectory.some((point) => !point.expectedMetricsAvailable)) {
 			limitations.add("OLD_FPL_EXPECTED_METRICS_MASKED");
 		}
-		if (metadata.core_season !== null && metadata.core_season !== season) {
-			limitations.add("FPL_SEASON_AUTHORITY_MISMATCH");
-		}
-		if (metadata.core_revision === null) limitations.add("FPL_CORE_REVISION_UNAVAILABLE");
 
-		const coreAsOf = iso(metadata.core_committed_at) ?? iso(metadata.fpl_snapshot_at);
-		const marketAsOf = iso(metadata.market_captured_at);
-		const understatAsOf =
-			[manifests.team?.publishedAt, manifests.player?.publishedAt]
-				.filter((value): value is string => typeof value === "string")
-				.sort()
-				.at(-1) ?? null;
+		const understatAsOf = latestIso([
+			iso(processResult.currentSubject?.updated_at ?? null),
+			iso(processResult.currentSubject?.season_last_seen_at ?? null),
+		]);
 		const asOf =
-			[coreAsOf, marketAsOf, understatAsOf]
-				.filter((value): value is string => value !== null)
-				.sort()
-				.at(-1) ?? new Date(0).toISOString();
+			latestIso([snapshot.sourceCheckedAt, marketCapturedAt, understatAsOf]) ??
+			new Date(0).toISOString();
 		const providers: PlayerStateProviderRevision[] = [
 			buildPlayerStateProviderRevision({
 				provider: "FPL",
 				scope: "CURRENT",
 				season,
-				revision:
-					metadata.core_revision === null
-						? coreAsOf === null
-							? null
-							: `fallback:${stableHash(coreAsOf)}`
-						: `${metadata.core_revision}:${metadata.publication_id ?? "unknown"}`,
-				asOf: coreAsOf,
-				available: metadata.core_season === null || metadata.core_season === season,
+				revision: `${snapshot.revision}:${snapshot.publicationId}`,
+				asOf: snapshot.sourceCheckedAt,
+				available: true,
 			}),
 			buildPlayerStateProviderRevision({
 				provider: "FPL",
 				scope: "HISTORY",
-				season: history.sealedSeasons.at(0) ?? season,
-				revision: history.archiveRevision,
-				asOf:
-					archiveRows
-						.map((archive) => iso(archive.completed_at))
-						.filter((value): value is string => value !== null)
-						.sort()
-						.at(-1) ?? null,
-				available: history.sealedSeasons.length > 0,
+				season: history.seasons[0] ?? season,
+				revision: history.revision,
+				asOf: history.asOf,
+				available: history.seasons.length > 0,
 			}),
 			buildPlayerStateProviderRevision({
 				provider: "UNDERSTAT",
 				scope: "CURRENT",
 				season,
-				revision:
-					manifests.team && manifests.player
-						? `team:${manifests.team.revision}|player:${manifests.player.revision}`
-						: null,
+				revision: processResult.currentSubject?.source_hash ?? null,
 				asOf: understatAsOf,
-				available: understatCurrent,
+				available: mappingStatus === "VERIFIED" && processResult.currentSubject !== null,
 			}),
 		];
-
 		const metricCoverage = dimensions
 			.flatMap((dimension) => dimension.metrics)
 			.filter((candidate) => candidate.capability && candidate.value !== null)
 			.map((candidate) => candidate.code);
 		const profile: PlayerStateProfile = {
 			playerId,
-			playerCode: metadata.player_code,
-			teamId: metadata.team_id,
-			position: metadata.position,
+			playerCode: player.code,
+			teamId: player.teamId,
+			position: player.type,
 			season,
-			horizon: outlookHorizon,
-			asOfEventId: statsContext.asOfEventId,
+			horizon: outlook.gameweeks.length,
+			asOfEventId,
 			asOf,
 			trend: releaseDecision.trend,
 			confidence: releaseDecision.withheld ? "LOW" : composed.confidence,
@@ -1675,9 +1543,9 @@ export const createPlayerStateRepository = (
 			dimensions,
 			ownBaseline: reliability.baseline,
 			peerBaseline: {
-				position: metadata.position,
+				position: player.type,
 				minimumMinutes: HISTORY_PEER_MINUTES,
-				cohortSize: currentRows.length,
+				cohortSize: currentCohort.length,
 				currentPercentile,
 			},
 			careerTrajectory: history.careerTrajectory,
@@ -1685,15 +1553,15 @@ export const createPlayerStateRepository = (
 			coverage: {
 				fplCurrent: fplSufficient,
 				understatCurrent: process.available,
-				fplHistorySeasons: history.sealedSeasons,
-				understatHistorySeasons,
-				mappingStatus: currentMappingStatus,
+				fplHistorySeasons: history.seasons,
+				understatHistorySeasons: processResult.historySeasons,
+				mappingStatus,
 				metricCoverage: [...new Set(metricCoverage)],
 				limitations: [...limitations],
 				providers,
 			},
 		};
-		await writeCache(context, profileKey, profile, PROFILE_CACHE_TTL_SECONDS);
+		await writeProfileCache(context, key, profile);
 		return profile;
 	},
 });

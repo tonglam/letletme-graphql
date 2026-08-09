@@ -7,143 +7,79 @@ import { playerValuesTypeDefs } from "../../../src/domains/player-values/schema"
 import { playersTypeDefs } from "../../../src/domains/players/schema";
 import { baseResolvers, baseTypeDefs } from "../../../src/graphql/base-schema";
 import type { GraphQLContext } from "../../../src/graphql/context";
+import { gqlCacheKey } from "../../../src/infra/cache-key";
+import {
+	buildCorePublication,
+	buildSnapshotContext,
+	buildTestCoreData,
+	TestRedis,
+} from "../../helpers/data-publication";
 
-type PlayerValueRow = {
-	player_id: number;
-	player_name: string;
-	team_id: number;
-	team_name: string;
-	team_short_name?: string | null;
-	position: string;
-	price: number;
-	value: number;
-	last_value: number | null;
-	points: number;
-	selected_by: number;
-	transfers_in: number;
-	transfers_out: number;
-	net_transfers: number;
-	form: number | null;
-	total_points: number;
-	event_points: number | null;
-	change_date: string;
-	change_type?: string | null;
-};
+type Row = Record<string, unknown>;
+type QueryError = { message: string } | null;
 
-type QueryResult<T> = {
-	data: T[] | null;
-	error: { message: string } | null;
-};
-
-function createPlayerValuesQueryBuilder(
-	rows: PlayerValueRow[],
-	error: { message: string } | null = null
-) {
-	const eqFilters: Record<string, string | number> = {};
-
-	const applyFilters = (): QueryResult<PlayerValueRow> => {
-		let data = [...rows];
-
-		if (eqFilters.change_date) {
-			data = data.filter((row) => row.change_date === eqFilters.change_date);
-		}
-
-		return {
-			data,
-			error,
-		};
-	};
-
-	let resolvePromise!: (value: QueryResult<PlayerValueRow>) => void;
-	const promise = new Promise<QueryResult<PlayerValueRow>>((resolve) => {
-		resolvePromise = resolve;
+const createQueryBuilder = (sourceRows: readonly Row[], error: QueryError = null) => {
+	const equals = new Map<string, unknown>();
+	const members = new Map<string, readonly unknown[]>();
+	const applyFilters = () => ({
+		data: sourceRows.filter((row) => {
+			for (const [column, value] of equals) if (row[column] !== value) return false;
+			for (const [column, values] of members) if (!values.includes(row[column])) return false;
+			return true;
+		}),
+		error,
 	});
-
-	queueMicrotask(() => resolvePromise(applyFilters()));
-
+	let resolve!: (value: ReturnType<typeof applyFilters>) => void;
+	const promise = new Promise<ReturnType<typeof applyFilters>>((done) => {
+		resolve = done;
+	});
+	queueMicrotask(() => resolve(applyFilters()));
 	const builder = Object.assign(promise, {
-		select(_columns: string) {
+		select: () => builder,
+		eq: (column: string, value: unknown) => {
+			equals.set(column, value);
 			return builder;
 		},
-		in(_column: string, _values: unknown[]) {
+		in: (column: string, values: readonly unknown[]) => {
+			members.set(column, values);
 			return builder;
 		},
-		eq(column: string, value: string | number) {
-			eqFilters[column] = value;
-			return builder;
-		},
-		async limit(_value: number) {
-			return applyFilters();
-		},
+		limit: async () => applyFilters(),
 	});
-
 	return builder;
-}
-
-type ContextOptions = {
-	redisHashData?: Record<string, string>;
-	redisStrings?: Record<string, string>;
-	redisType?: string;
-	rows?: PlayerValueRow[];
-	supabaseError?: { message: string };
 };
 
-function createGraphQLContext(options: ContextOptions = {}): GraphQLContext & {
-	calls: { redisCommands: string[]; supabaseFrom: number };
-} {
-	const calls = { redisCommands: [] as string[], supabaseFrom: 0 };
+type ReportingFixture = {
+	changes: Row[];
+	stats?: Row[];
+	fixtureTeams?: Row[];
+	error?: QueryError;
+};
 
-	const supabase = {
-		from: (_table: string) => {
-			calls.supabaseFrom += 1;
-			return createPlayerValuesQueryBuilder(options.rows ?? [], options.supabaseError ?? null);
+const createContext = (
+	redis: TestRedis,
+	fixture: ReportingFixture,
+	dataRevision = "core-7"
+): { context: GraphQLContext; reads: string[] } => {
+	const reads: string[] = [];
+	const context = buildSnapshotContext(redis, { dataRevision });
+	context.data = {
+		read: (table: string) => {
+			reads.push(table);
+			if (table === "reporting.player_value_changes") {
+				return createQueryBuilder(fixture.changes, fixture.error);
+			}
+			if (table === "fpl.player_event_snapshots") {
+				return createQueryBuilder(fixture.stats ?? []);
+			}
+			if (table === "fpl.player_fixture_stats") {
+				return createQueryBuilder(fixture.fixtureTeams ?? []);
+			}
+			throw new Error(`Unexpected v3 read model ${table}`);
 		},
-	} as unknown as GraphQLContext["supabase"];
-
-	const pipeline = {
-		del: (...keys: string[]) => {
-			calls.redisCommands.push(`pipeline.del:${keys.join(",")}`);
-			return pipeline;
-		},
-		hset: (key: string) => {
-			calls.redisCommands.push(`pipeline.hset:${key}`);
-			return pipeline;
-		},
-		set: (key: string, value: string, mode: string, ttl: number) => {
-			calls.redisCommands.push(`pipeline.set:${key}:${value}:${mode}:${ttl}`);
-			return pipeline;
-		},
-		exec: async () => [],
-	};
-
-	const redis = {
-		type: async (): Promise<string> =>
-			options.redisType ??
-			(options.redisHashData && Object.keys(options.redisHashData).length > 0 ? "hash" : "none"),
-		get: async (key: string): Promise<string | null> =>
-			options.redisStrings?.[key] ?? (key === "Season:active" ? "2526" : null),
-		set: async (key: string, value: string, mode?: string, ttl?: number): Promise<string> => {
-			calls.redisCommands.push(`set:${key}:${value}:${mode}:${ttl}`);
-			return "OK";
-		},
-		hgetall: async (): Promise<Record<string, string>> => options.redisHashData ?? {},
-		pipeline: () => pipeline,
-	} as unknown as GraphQLContext["redis"];
-
-	const logger = {
-		debug: (): void => {},
-		info: (): void => {},
-		warn: (): void => {},
-		error: (): void => {},
-	} as unknown as GraphQLContext["logger"];
-
-	return {
-		supabase,
-		redis,
-		logger,
-		calls,
-	};
-}
+	} as never;
+	return { context, reads };
+};
 
 const testSchema = makeExecutableSchema({
 	typeDefs: [baseTypeDefs, playersTypeDefs, playerValuesTypeDefs],
@@ -155,382 +91,178 @@ const testSchema = makeExecutableSchema({
 });
 
 const playerValuesQuery = `
-  query PlayerValues($changeDate: Date!) {
-    playerValues(changeDate: $changeDate) {
-      playerId
-      playerName
-      teamName
-      position
-      lastValue
-      value
-	  eventPoints
-    }
-  }
+	query PlayerValues($changeDate: Date!) {
+		playerValues(changeDate: $changeDate) {
+			playerId playerName teamId teamName teamShortName position positionEnum
+			price lastValue value points selectedBy transfersIn transfersOut
+			netTransfers form totalPoints eventPoints
+		}
+	}
 `;
 
-describe("playerValues integration", () => {
-	it("accepts a date-only changeDate value", async () => {
-		const context = createGraphQLContext({
-			rows: [
+const execute = (context: GraphQLContext) =>
+	graphql({
+		schema: testSchema,
+		source: playerValuesQuery,
+		contextValue: context,
+		variableValues: { changeDate: "2026-08-09" },
+	});
+
+const changedRow = (value = 46, lastValue = 45): Row => ({
+	season_id: 2026,
+	change_date: "20260809",
+	element_id: 1,
+	element_type: 1,
+	event_id: 1,
+	value,
+	last_value: lastValue,
+	change_type: "rise",
+});
+
+const statsRow: Row = {
+	season_id: 2026,
+	event_id: 1,
+	element_id: 1,
+	total_points: 40,
+	form: "2.1",
+	transfers_in_event: 1000,
+	transfers_out_event: 500,
+	selected_by_percent: "12.5",
+};
+
+describe("playerValues GraphQL v3 reporting contract", () => {
+	it("reads the season-scoped reporting view, filters the baseline, and normally expires", async () => {
+		const core = buildTestCoreData(1);
+		core.players[0] = { ...core.players[0]!, teamId: 2 };
+		core.players[11] = { ...core.players[11]!, teamId: 1 };
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
+		const { context, reads } = createContext(redis, {
+			changes: [
+				changedRow(),
 				{
-					player_id: 136,
-					player_name: "Thiago",
-					team_id: 4,
-					team_name: "Brentford",
-					team_short_name: "BRE",
-					position: "FWD",
-					price: 74,
-					value: 74,
-					last_value: 73,
-					points: 0,
-					selected_by: 1.2,
-					transfers_in: 1000,
-					transfers_out: 500,
-					net_transfers: 500,
-					form: 2.1,
-					total_points: 40,
-					event_points: 0,
-					change_date: "20260421",
-				},
-			],
-		});
-
-		const result = await graphql({
-			schema: testSchema,
-			source: playerValuesQuery,
-			contextValue: context,
-			variableValues: { changeDate: "2026-04-21" },
-		});
-
-		expect(result.errors).toBeUndefined();
-		const data = result.data as { playerValues: unknown[] } | null;
-		expect(data?.playerValues).toHaveLength(1);
-	});
-
-	it("returns empty array when no rows match the exact changeDate", async () => {
-		const context = createGraphQLContext({
-			rows: [
-				{
-					player_id: 136,
-					player_name: "Thiago",
-					team_id: 4,
-					team_name: "Brentford",
-					team_short_name: "BRE",
-					position: "FWD",
-					price: 74,
-					value: 74,
-					last_value: 73,
-					points: 0,
-					selected_by: 1.2,
-					transfers_in: 1000,
-					transfers_out: 500,
-					net_transfers: 500,
-					form: 2.1,
-					total_points: 40,
-					event_points: 0,
-					change_date: "20260421",
-				},
-			],
-		});
-
-		const result = await graphql({
-			schema: testSchema,
-			source: playerValuesQuery,
-			contextValue: context,
-			variableValues: { changeDate: "2026-04-22" },
-		});
-
-		expect(result.errors).toBeUndefined();
-		const data = result.data as { playerValues: unknown[] } | null;
-		expect(data?.playerValues).toEqual([]);
-		expect(context.calls.supabaseFrom).toBeGreaterThan(0);
-	});
-
-	it("still returns cached rows when the requested cache key exists", async () => {
-		const context = createGraphQLContext({
-			redisHashData: {
-				"136": JSON.stringify({
-					elementId: 136,
-					webName: "Thiago",
-					teamName: "Brentford",
-					teamShortName: "BRE",
-					elementTypeName: "FWD",
-					value: 74,
-					lastValue: 73,
-				}),
-			},
-		});
-
-		const result = await graphql({
-			schema: testSchema,
-			source: playerValuesQuery,
-			contextValue: context,
-			variableValues: { changeDate: "2026-04-21" },
-		});
-
-		expect(result.errors).toBeUndefined();
-		const data = result.data as {
-			playerValues: Array<{
-				playerId: number;
-				playerName: string;
-				teamName: string;
-				position: string;
-				lastValue: number;
-				value: number;
-				eventPoints: number | null;
-			}>;
-		} | null;
-
-		expect(data?.playerValues).toEqual([
-			{
-				playerId: 136,
-				playerName: "Thiago",
-				teamName: "Brentford",
-				position: "FWD",
-				lastValue: 73,
-				value: 74,
-				eventPoints: null,
-			},
-		]);
-		expect(context.calls.supabaseFrom).toBe(0);
-	});
-
-	it("migrates the legacy null sentinel to a bounded negative-cache key", async () => {
-		const context = createGraphQLContext({
-			redisType: "string",
-			redisStrings: { "PlayerValue:20260421": "__pv:null__" },
-		});
-
-		const result = await graphql({
-			schema: testSchema,
-			source: playerValuesQuery,
-			contextValue: context,
-			variableValues: { changeDate: "2026-04-21" },
-		});
-
-		expect(result.errors).toBeUndefined();
-		expect(result.data).toEqual({ playerValues: [] });
-		expect(context.calls.supabaseFrom).toBe(0);
-		expect(context.calls.redisCommands).toContain("set:PlayerValueMissing:20260421:1:EX:600");
-	});
-
-	it("returns a negative-cache hit without querying Supabase", async () => {
-		const context = createGraphQLContext({
-			redisStrings: { "PlayerValueMissing:20260421": "1" },
-		});
-
-		const result = await graphql({
-			schema: testSchema,
-			source: playerValuesQuery,
-			contextValue: context,
-			variableValues: { changeDate: "2026-04-21" },
-		});
-
-		expect(result.errors).toBeUndefined();
-		expect(result.data).toEqual({ playerValues: [] });
-		expect(context.calls.supabaseFrom).toBe(0);
-	});
-
-	it("does not negative-cache a Supabase failure", async () => {
-		const context = createGraphQLContext({
-			supabaseError: { message: "database unavailable" },
-		});
-
-		const result = await graphql({
-			schema: testSchema,
-			source: playerValuesQuery,
-			contextValue: context,
-			variableValues: { changeDate: "2026-04-21" },
-		});
-
-		expect(result.errors?.[0]?.message).toBe("database unavailable");
-		expect(context.calls.redisCommands).toEqual([]);
-	});
-
-	it("filters season-baseline Start rows out of cached hashes", async () => {
-		const context = createGraphQLContext({
-			redisHashData: {
-				"19": JSON.stringify({
-					elementId: 19,
-					webName: "Zubimendi",
-					teamName: "Arsenal",
-					elementTypeName: "MID",
-					value: 55,
-					lastValue: 0,
-					changeType: "Start",
-				}),
-			},
-		});
-
-		const result = await graphql({
-			schema: testSchema,
-			source: playerValuesQuery,
-			contextValue: context,
-			variableValues: { changeDate: "2026-04-21" },
-		});
-
-		expect(result.errors).toBeUndefined();
-		expect(result.data).toEqual({ playerValues: [] });
-		expect(context.calls.supabaseFrom).toBe(0);
-		// No missing-marker write: the marker is only consulted when the shared
-		// key is absent, so writing it while a hash exists would be dead work.
-		expect(context.calls.redisCommands.some((cmd) => cmd.includes("PlayerValueMissing"))).toBe(
-			false
-		);
-	});
-
-	it("keeps real changes while dropping Start rows from cached hashes", async () => {
-		const context = createGraphQLContext({
-			redisHashData: {
-				"19": JSON.stringify({
-					elementId: 19,
-					webName: "Zubimendi",
-					teamName: "Arsenal",
-					elementTypeName: "MID",
-					value: 55,
-					lastValue: 0,
-					changeType: "Start",
-				}),
-				"136": JSON.stringify({
-					elementId: 136,
-					webName: "Thiago",
-					teamName: "Brentford",
-					teamShortName: "BRE",
-					elementTypeName: "FWD",
-					value: 74,
-					lastValue: 73,
-				}),
-			},
-		});
-
-		const result = await graphql({
-			schema: testSchema,
-			source: playerValuesQuery,
-			contextValue: context,
-			variableValues: { changeDate: "2026-04-21" },
-		});
-
-		expect(result.errors).toBeUndefined();
-		const data = result.data as {
-			playerValues: Array<{ playerId: number; lastValue: number }>;
-		} | null;
-		expect(data?.playerValues).toHaveLength(1);
-		expect(data?.playerValues[0]).toMatchObject({ playerId: 136, lastValue: 73 });
-		expect(context.calls.supabaseFrom).toBe(0);
-	});
-
-	it("filters Start rows from the database fallback and negative-caches the day", async () => {
-		const context = createGraphQLContext({
-			rows: [
-				{
-					player_id: 19,
-					player_name: "Zubimendi",
-					team_id: 1,
-					team_name: "Arsenal",
-					position: "MID",
-					price: 55,
-					value: 55,
+					season_id: 2026,
+					change_date: "20260809",
+					element_id: 2,
+					element_type: 2,
+					event_id: 1,
+					value: 50,
 					last_value: 0,
-					points: 0,
-					selected_by: 10.1,
-					transfers_in: 0,
-					transfers_out: 0,
-					net_transfers: 0,
-					form: null,
-					total_points: 0,
-					event_points: null,
-					change_date: "20260421",
 					change_type: "start",
 				},
 			],
+			stats: [statsRow],
+			fixtureTeams: [{ element_id: 1, event_id: 1, team_id: 1 }],
 		});
 
-		const result = await graphql({
-			schema: testSchema,
-			source: playerValuesQuery,
-			contextValue: context,
-			variableValues: { changeDate: "2026-04-21" },
-		});
+		const first = await execute(context);
+		const readsAfterFirst = [...reads];
+		const second = await execute(context);
 
-		expect(result.errors).toBeUndefined();
-		expect(result.data).toEqual({ playerValues: [] });
-		expect(context.calls.redisCommands).toContain("set:PlayerValueMissing:20260421:1:EX:600");
-	});
-
-	it("keeps legacy database rows with NULL change_type and a positive last_value", async () => {
-		const context = createGraphQLContext({
-			rows: [
-				{
-					player_id: 136,
-					player_name: "Thiago",
-					team_id: 4,
-					team_name: "Brentford",
-					position: "FWD",
-					price: 74,
-					value: 74,
-					last_value: 73,
-					points: 0,
-					selected_by: 1.2,
-					transfers_in: 1000,
-					transfers_out: 500,
-					net_transfers: 500,
-					form: 2.1,
-					total_points: 40,
-					event_points: 0,
-					change_date: "20260421",
-					change_type: null,
-				},
-			],
-		});
-
-		const result = await graphql({
-			schema: testSchema,
-			source: playerValuesQuery,
-			contextValue: context,
-			variableValues: { changeDate: "2026-04-21" },
-		});
-
-		expect(result.errors).toBeUndefined();
-		const data = result.data as { playerValues: Array<{ playerId: number }> } | null;
-		expect(data?.playerValues).toHaveLength(1);
-		expect(data?.playerValues[0]?.playerId).toBe(136);
-	});
-
-	it("filters stale season-baseline rows from the private cache", async () => {
-		const context = createGraphQLContext({
-			redisStrings: {
-				"gql:v2:2526:player-values:20260421": JSON.stringify([
-					{
-						playerId: 19,
-						playerName: "Zubimendi",
-						teamName: "Arsenal",
-						position: "MID",
-						value: 55,
-						lastValue: 0,
-					},
-					{
-						playerId: 136,
-						playerName: "Thiago",
-						teamName: "Brentford",
-						position: "FWD",
-						value: 74,
-						lastValue: 73,
-					},
-				]),
+		expect(first.errors).toBeUndefined();
+		expect(first.data?.playerValues).toEqual([
+			{
+				playerId: 1,
+				playerName: "Player 1",
+				teamId: 1,
+				teamName: "Team 1",
+				teamShortName: "T01",
+				position: "GKP",
+				positionEnum: "GOALKEEPER",
+				price: 45,
+				lastValue: 45,
+				value: 46,
+				points: 40,
+				selectedBy: 12.5,
+				transfersIn: 1000,
+				transfersOut: 500,
+				netTransfers: 500,
+				form: 2.1,
+				totalPoints: 40,
+				eventPoints: null,
 			},
-		});
+		]);
+		expect(second.data).toEqual(first.data);
+		expect(readsAfterFirst).toEqual([
+			"reporting.player_value_changes",
+			"fpl.player_event_snapshots",
+			"fpl.player_fixture_stats",
+		]);
+		expect(reads).toEqual(readsAfterFirst);
+		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":player-values-"));
+		expect(cacheWrite?.[0]).toMatch(/^llm:v3:gql:v3:core-7:player-values-20260809:/);
+		expect(cacheWrite?.slice(-2)).toEqual(["EX", 300]);
+	});
 
-		const result = await graphql({
-			schema: testSchema,
-			source: playerValuesQuery,
-			contextValue: context,
-			variableValues: { changeDate: "2026-04-21" },
+	it("caches an empty reporting result only as a revisioned query result", async () => {
+		const core = buildTestCoreData(1);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
+		const { context, reads } = createContext(redis, { changes: [] });
+
+		const first = await execute(context);
+		const second = await execute(context);
+
+		expect(first.errors).toBeUndefined();
+		expect(first.data).toEqual({ playerValues: [] });
+		expect(second.data).toEqual(first.data);
+		expect(reads).toEqual(["reporting.player_value_changes"]);
+		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":player-values-"));
+		expect(cacheWrite?.[1]).toBe("__pv:null__");
+		expect(cacheWrite?.slice(-2)).toEqual(["EX", 300]);
+		expect([...redis.values.keys()].some((key) => key.startsWith("PlayerValue"))).toBe(false);
+	});
+
+	it("evicts malformed query data and rebuilds it from the reporting source", async () => {
+		const core = buildTestCoreData(1);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
+		const { context, reads } = createContext(redis, {
+			changes: [changedRow()],
+			stats: [statsRow],
 		});
+		const key = gqlCacheKey(context, "player-values:20260809");
+		redis.values.set(key, JSON.stringify([{ playerId: 1, lastValue: 0 }]));
+
+		const result = await execute(context);
 
 		expect(result.errors).toBeUndefined();
-		const data = result.data as { playerValues: Array<{ playerId: number }> } | null;
-		expect(data?.playerValues).toHaveLength(1);
-		expect(data?.playerValues[0]?.playerId).toBe(136);
-		expect(context.calls.supabaseFrom).toBe(0);
+		expect((result.data?.playerValues as unknown[]).length).toBe(1);
+		expect(reads).toContain("reporting.player_value_changes");
+		expect(JSON.parse(redis.values.get(key) ?? "[]")).toEqual(
+			expect.arrayContaining([expect.objectContaining({ playerId: 1, lastValue: 45 })])
+		);
+	});
+
+	it("does not reuse a player-values query cache across core dataset revisions", async () => {
+		const core7 = buildTestCoreData(1);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core7));
+		const first = createContext(redis, {
+			changes: [changedRow(46, 45)],
+			stats: [statsRow],
+		});
+		const firstResult = await execute(first.context);
+
+		const core8 = {
+			...core7,
+			players: core7.players.map((player) => (player.id === 1 ? { ...player, price: 46 } : player)),
+		};
+		const publication8 = buildCorePublication("2627", 8, core8);
+		for (const [key, value] of publication8.store) redis.values.set(key, value);
+		const second = createContext(
+			redis,
+			{ changes: [changedRow(47, 46)], stats: [statsRow] },
+			"core-8"
+		);
+		const secondResult = await execute(second.context);
+
+		expect(firstResult.data?.playerValues).toEqual([
+			expect.objectContaining({ price: 45, value: 46, lastValue: 45 }),
+		]);
+		expect(secondResult.data?.playerValues).toEqual([
+			expect.objectContaining({ price: 46, value: 47, lastValue: 46 }),
+		]);
+		const keys = redis.setCalls
+			.map(([key]) => key)
+			.filter((key) => key.includes(":player-values-"));
+		expect(keys.some((key) => key.includes(":core-7:"))).toBe(true);
+		expect(keys.some((key) => key.includes(":core-8:"))).toBe(true);
 	});
 });

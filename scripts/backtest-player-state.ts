@@ -7,6 +7,7 @@ import {
 	buildOwnBaseline,
 	composePlayerState,
 	percentile,
+	PLAYER_STATE_ENGINE_VERSION,
 } from "../src/domains/player-state/engine";
 import type {
 	PlayerGameweekSample,
@@ -60,12 +61,12 @@ const ageAtCutoff = (cutoff: Date | string | null, capturedAt: Date | string | n
 
 const sql = `
 	SELECT
-		live.season,
+		season.season_code AS season,
 		live.event_id,
 		COALESCE(event.deadline_time, event.created_at) AS event_cutoff_at,
 		live.element_id,
 		player.code AS player_code,
-		player.type AS position,
+		player.element_type AS position,
 		live.total_points,
 		live.minutes,
 		live.starts AS started,
@@ -74,28 +75,28 @@ const sql = `
 		market.chance_of_playing_this_round,
 		market.captured_at AS availability_captured_at,
 		market.element_id IS NOT NULL AS availability_known
-	FROM fpl_event_live_history live
-	JOIN fpl_season_archives archive
-		ON archive.season = live.season AND archive.status = 'sealed'
-	JOIN fpl_event_history event
-		ON event.season = live.season AND event.id = live.event_id
-	JOIN fpl_player_history player
-		ON player.season = live.season AND player.id = live.element_id
+	FROM fpl.player_gameweek_stats live
+	JOIN fpl.seasons season
+		ON season.season_id = live.season_id AND season.lifecycle_state = 'completed'
+	JOIN fpl.events event
+		ON event.season_id = live.season_id AND event.event_id = live.event_id
+	JOIN fpl.players player
+		ON player.season_id = live.season_id AND player.element_id = live.element_id
 	LEFT JOIN LATERAL (
 		SELECT
 			market.element_id,
 			market.status,
 			market.chance_of_playing_this_round,
 			market.captured_at
-		FROM fpl_player_market_snapshot_history market
-		WHERE market.season = live.season
+		FROM fpl.player_market_snapshots market
+		WHERE market.season_id = live.season_id
 			AND market.element_id = live.element_id
 			AND market.snapshot_date <= COALESCE(event.deadline_time, event.created_at)::date
 			AND market.captured_at <= COALESCE(event.deadline_time, event.created_at)
 		ORDER BY market.snapshot_date DESC, market.captured_at DESC
 		LIMIT 1
 	) market ON true
-	ORDER BY live.season, live.event_id, live.element_id
+	ORDER BY season.season_code, live.event_id, live.element_id
 `;
 
 const round = (value: number, places = 2): number => {
@@ -194,38 +195,38 @@ async function main(): Promise<void> {
 	if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 	const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
 	const storage = await pool.query<{
-		season_archives: string | null;
-		player_history: string | null;
-		event_live_history: string | null;
-		event_history: string | null;
-		market_snapshot_history: string | null;
+		seasons: string | null;
+		players: string | null;
+		player_gameweek_stats: string | null;
+		events: string | null;
+		player_market_snapshots: string | null;
 	}>(`
 		SELECT
-			to_regclass('public.fpl_season_archives')::text AS season_archives,
-			to_regclass('public.fpl_player_history')::text AS player_history,
-			to_regclass('public.fpl_event_live_history')::text AS event_live_history,
-			to_regclass('public.fpl_event_history')::text AS event_history,
-			to_regclass('public.fpl_player_market_snapshot_history')::text AS market_snapshot_history
+			to_regclass('fpl.seasons')::text AS seasons,
+			to_regclass('fpl.players')::text AS players,
+			to_regclass('fpl.player_gameweek_stats')::text AS player_gameweek_stats,
+			to_regclass('fpl.events')::text AS events,
+			to_regclass('fpl.player_market_snapshots')::text AS player_market_snapshots
 	`);
 	const storageRow = storage.rows[0];
 	if (
-		!storageRow?.season_archives ||
-		!storageRow?.event_history ||
-		!storageRow?.player_history ||
-		!storageRow.event_live_history ||
-		!storageRow.market_snapshot_history
+		!storageRow?.seasons ||
+		!storageRow?.events ||
+		!storageRow?.players ||
+		!storageRow.player_gameweek_stats ||
+		!storageRow.player_market_snapshots
 	) {
 		await pool.end();
 		console.log(
 			JSON.stringify(
 				{
-					engineVersion: "player-state-v1.1",
+					engineVersion: PLAYER_STATE_ENGINE_VERSION,
 					mode: "fpl-only",
-					method: "sealed-season walk-forward; features through GW N; target GW N+1..N+5",
+					method: "completed-season walk-forward; features through GW N; target GW N+1..N+5",
 					seasons: [],
 					observations: 0,
 					releaseGate: "WITHHOLD",
-					reason: "FPL_HISTORY_STORAGE_UNAVAILABLE",
+					reason: "FPL_V3_HISTORY_STORAGE_UNAVAILABLE",
 				},
 				null,
 				2
@@ -236,11 +237,11 @@ async function main(): Promise<void> {
 	}
 	const result = await pool.query<LiveRow>(sql);
 	const eventResult = await pool.query<{ season: string; event_id: number }>(`
-		SELECT event.season, event.id AS event_id
-		FROM fpl_event_history event
-		JOIN fpl_season_archives archive
-			ON archive.season = event.season AND archive.status = 'sealed'
-		ORDER BY event.season, event.id
+		SELECT season.season_code AS season, event.event_id
+		FROM fpl.events event
+		JOIN fpl.seasons season
+			ON season.season_id = event.season_id AND season.lifecycle_state = 'completed'
+		ORDER BY season.season_code, event.event_id
 	`);
 	await pool.end();
 
@@ -289,7 +290,7 @@ async function main(): Promise<void> {
 			});
 			// playerStateProfile only compares players with the production
 			// season-to-date minutes gate. Keep both the percentile cohort and
-			// sealed observations on that same gate.
+			// completed-season observations on that same gate.
 			const eligibleIds = new Set(
 				seasonMetrics.filter((row) => row.minutes >= 900).map((row) => row.elementId)
 			);
@@ -428,9 +429,9 @@ async function main(): Promise<void> {
 	console.log(
 		JSON.stringify(
 			{
-				engineVersion: "player-state-v1.1",
+				engineVersion: PLAYER_STATE_ENGINE_VERSION,
 				mode: "fpl-only",
-				method: "sealed-season walk-forward; features through GW N; target GW N+1..N+5",
+				method: "completed-season walk-forward; features through GW N; target GW N+1..N+5",
 				seasons,
 				observations: observations.length,
 				summary,

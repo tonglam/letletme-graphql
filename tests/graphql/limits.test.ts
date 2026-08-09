@@ -238,30 +238,4 @@ describe("GraphQL request limits", () => {
 		});
 		expect(result).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
 	});
-
-	it("classifies legacy session issuance as a security mutation", () => {
-		const result = validateGraphQLRequestLimits({
-			query: 'mutation { createWechatApiSession(code: "single-use-code") { token } }',
-		});
-		expect(result).toMatchObject({
-			ok: true,
-			shape: "mutation",
-			securityOperation: true,
-			securityOperationCount: 1,
-		});
-	});
-
-	it("counts every legacy session mutation in a GraphQL batch", () => {
-		const result = validateGraphQLRequestLimits([
-			{ query: 'mutation { createWechatApiSession(code: "one") { token } }' },
-			{ query: 'mutation { createWechatApiSession(code: "two") { token } }' },
-		]);
-
-		expect(result).toMatchObject({
-			ok: true,
-			securityOperation: true,
-			securityOperationCount: 2,
-			rateLimitCostUnits: 2,
-		});
-	});
 });

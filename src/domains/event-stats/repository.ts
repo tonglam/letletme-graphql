@@ -1,12 +1,12 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { env } from "../../infra/env";
+import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { getCurrentSeason } from "../../infra/season";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
 
 const privateCacheKey = async (context: GraphQLContext, key: string): Promise<string> =>
-	gqlCacheKey(await getCurrentSeason(context), key);
+	gqlCacheKey(context, key);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -81,29 +81,6 @@ export type TournamentSelectionStats = {
 	mostTransferOut: TransferStatPlayer[];
 };
 
-type DbTournamentInfoRow = {
-	league_id: number;
-	league_type: string;
-};
-
-type RpcCaptainCountRow = {
-	captain_id: number;
-	count: number;
-	total_entries: number;
-};
-
-type RpcPickAggregationRow = {
-	element_id: number;
-	pick_count: number;
-	vice_captain_count: number;
-};
-
-type RpcTransferAggregationRow = {
-	element_id: number;
-	transfer_in_count: number | null;
-	transfer_out_count: number | null;
-};
-
 export type DbTournamentSelectionStatRow = {
 	element_id: number;
 	pick_count: number;
@@ -112,6 +89,10 @@ export type DbTournamentSelectionStatRow = {
 	transfer_in_count: number;
 	transfer_out_count: number;
 	total_entries: number;
+	selection_percentage: number | string;
+	captain_percentage: number | string;
+	vice_captain_percentage: number | string;
+	effective_ownership_percentage: number | string;
 };
 
 const positionTypeToEnum = (type: number): string => {
@@ -171,8 +152,8 @@ async function getPlayerAndTeamMaps(
 			});
 			const validCodes = playerCodes.filter((c) => c > 0);
 			if (validCodes.length > 0) {
-				const { data, error } = await context.supabase
-					.from("fpl_player_fixture_stats")
+				const { data, error } = await context.data
+					.read("fpl.player_fixture_stats")
 					.select("player_code, team_id")
 					.eq("season", season)
 					.in("player_code", validCodes)
@@ -215,243 +196,6 @@ async function getPlayerAndTeamMaps(
 	return { playerMap: filteredPlayerMap, teamMap: filteredTeamMap };
 }
 
-async function getTournamentInfo(
-	context: GraphQLContext,
-	tournamentId: number
-): Promise<DbTournamentInfoRow | null> {
-	// Distinct from tournaments domain key `tournament:info:` (full TournamentInfo).
-	const cacheKey = await privateCacheKey(context, `tournament:info:league:${tournamentId}`);
-	const cached = await readCachedJson(context, cacheKey);
-	if (isRecord(cached)) {
-		return cached as unknown as DbTournamentInfoRow;
-	}
-
-	const { data, error } = await context.supabase
-		.from("tournament_infos")
-		.select("league_id, league_type")
-		.eq("id", tournamentId)
-		.limit(1);
-
-	if (error || !data?.[0]) {
-		context.logger.error({ err: error, tournamentId }, "Failed to fetch tournament info");
-		return null;
-	}
-
-	const row = data[0] as DbTournamentInfoRow;
-	await context.redis.set(cacheKey, JSON.stringify(row), "EX", env.CACHE_TTL_SECONDS);
-	return row;
-}
-
-async function getCaptainCounts(
-	context: GraphQLContext,
-	leagueId: number,
-	leagueType: string,
-	eventId: number
-): Promise<{ captainCounts: Map<number, number>; totalEntries: number }> {
-	const cacheKey = await privateCacheKey(
-		context,
-		`tournament-selection-stats:captain-counts:${leagueId}:${leagueType}:${eventId}`
-	);
-	const cached = await readCachedJson(context, cacheKey);
-	if (isRecord(cached)) {
-		const parsed = cached as {
-			captainCounts: [number, number][];
-			totalEntries: number;
-		};
-		return {
-			captainCounts: new Map(parsed.captainCounts),
-			totalEntries: parsed.totalEntries,
-		};
-	}
-
-	const rpcResult = await context.supabase.rpc("get_captain_counts", {
-		p_league_id: leagueId,
-		p_league_type: leagueType,
-		p_event_id: eventId,
-	});
-
-	if (rpcResult.error) {
-		context.logger.error(
-			{ err: rpcResult.error, leagueId, leagueType, eventId },
-			"Failed to fetch captain counts via RPC"
-		);
-		return { captainCounts: new Map(), totalEntries: 0 };
-	}
-
-	const rows = (rpcResult.data as RpcCaptainCountRow[] | null) ?? [];
-	const captainCounts = new Map<number, number>();
-	let totalEntries = 0;
-
-	for (const row of rows) {
-		captainCounts.set(row.captain_id, Number(row.count));
-		totalEntries = Number(row.total_entries);
-	}
-
-	const result = { captainCounts, totalEntries };
-	await context.redis.set(
-		cacheKey,
-		JSON.stringify({
-			captainCounts: [...captainCounts.entries()],
-			totalEntries,
-		}),
-		"EX",
-		env.CACHE_TTL_SECONDS
-	);
-
-	return result;
-}
-
-async function getPickAggregation(
-	context: GraphQLContext,
-	tournamentId: number,
-	entryIds: number[],
-	eventId: number
-): Promise<{
-	pickCounts: Map<number, number>;
-	viceCaptainCounts: Map<number, number>;
-}> {
-	if (entryIds.length === 0) {
-		return { pickCounts: new Map(), viceCaptainCounts: new Map() };
-	}
-
-	const cacheKey = await privateCacheKey(
-		context,
-		`tournament-selection-stats:pick-aggregation:${tournamentId}:${eventId}`
-	);
-	const cached = await readCachedJson(context, cacheKey);
-	if (isRecord(cached)) {
-		const parsed = cached as {
-			pickCounts: [number, number][];
-			viceCaptainCounts: [number, number][];
-		};
-		return {
-			pickCounts: new Map(parsed.pickCounts),
-			viceCaptainCounts: new Map(parsed.viceCaptainCounts),
-		};
-	}
-
-	const result = await context.supabase.rpc("get_pick_aggregation", {
-		p_event_id: eventId,
-		p_entry_ids: entryIds,
-	});
-
-	if (result.error) {
-		context.logger.error(
-			{ err: result.error, eventId, entryCount: entryIds.length },
-			"Failed to fetch pick aggregation via RPC"
-		);
-		return { pickCounts: new Map(), viceCaptainCounts: new Map() };
-	}
-
-	const rows = (result.data as RpcPickAggregationRow[] | null) ?? [];
-	const pickCounts = new Map<number, number>();
-	const viceCaptainCounts = new Map<number, number>();
-
-	for (const row of rows) {
-		pickCounts.set(row.element_id, Number(row.pick_count));
-		if (Number(row.vice_captain_count) > 0) {
-			viceCaptainCounts.set(row.element_id, Number(row.vice_captain_count));
-		}
-	}
-
-	await context.redis.set(
-		cacheKey,
-		JSON.stringify({
-			pickCounts: [...pickCounts.entries()],
-			viceCaptainCounts: [...viceCaptainCounts.entries()],
-		}),
-		"EX",
-		env.CACHE_TTL_SECONDS
-	);
-
-	return { pickCounts, viceCaptainCounts };
-}
-
-async function getTransferAggregation(
-	context: GraphQLContext,
-	tournamentId: number,
-	entryIds: number[],
-	eventId: number
-): Promise<{
-	transferInCounts: Map<number, number>;
-	transferOutCounts: Map<number, number>;
-}> {
-	if (entryIds.length === 0) {
-		return { transferInCounts: new Map(), transferOutCounts: new Map() };
-	}
-
-	const cacheKey = await privateCacheKey(
-		context,
-		`tournament-selection-stats:transfer-aggregation:${tournamentId}:${eventId}`
-	);
-	const cached = await readCachedJson(context, cacheKey);
-	if (isRecord(cached)) {
-		const parsed = cached as {
-			transferInCounts: [number, number][];
-			transferOutCounts: [number, number][];
-		};
-		return {
-			transferInCounts: new Map(parsed.transferInCounts),
-			transferOutCounts: new Map(parsed.transferOutCounts),
-		};
-	}
-
-	const result = await context.supabase.rpc("get_transfer_aggregation", {
-		p_event_id: eventId,
-		p_entry_ids: entryIds,
-	});
-
-	if (result.error) {
-		context.logger.error(
-			{ err: result.error, eventId, entryCount: entryIds.length },
-			"Failed to fetch transfer aggregation via RPC"
-		);
-		return { transferInCounts: new Map(), transferOutCounts: new Map() };
-	}
-
-	const rows = (result.data as RpcTransferAggregationRow[] | null) ?? [];
-	const transferInCounts = new Map<number, number>();
-	const transferOutCounts = new Map<number, number>();
-
-	for (const row of rows) {
-		if (row.transfer_in_count !== null && Number(row.transfer_in_count) > 0) {
-			transferInCounts.set(row.element_id, Number(row.transfer_in_count));
-		}
-		if (row.transfer_out_count !== null && Number(row.transfer_out_count) > 0) {
-			transferOutCounts.set(row.element_id, Number(row.transfer_out_count));
-		}
-	}
-
-	await context.redis.set(
-		cacheKey,
-		JSON.stringify({
-			transferInCounts: [...transferInCounts.entries()],
-			transferOutCounts: [...transferOutCounts.entries()],
-		}),
-		"EX",
-		env.CACHE_TTL_SECONDS
-	);
-
-	return { transferInCounts, transferOutCounts };
-}
-
-async function getTournamentEntryIdsUncached(
-	context: GraphQLContext,
-	tournamentId: number
-): Promise<number[]> {
-	const { data, error } = await context.supabase
-		.from("tournament_entries")
-		.select("entry_id")
-		.eq("tournament_id", tournamentId);
-
-	if (error) {
-		context.logger.error({ err: error, tournamentId }, "Failed to fetch tournament entry IDs");
-		return [];
-	}
-
-	return ((data as { entry_id: number }[] | null) ?? []).map((r) => r.entry_id);
-}
-
 const EMPTY_STATS: TournamentSelectionStats = {
 	totalEntries: 0,
 	goalkeepers: [],
@@ -465,12 +209,16 @@ const EMPTY_STATS: TournamentSelectionStats = {
 	mostTransferOut: [],
 };
 
-type SelectionStatsCounts = {
+type SelectionStatsSnapshot = {
 	pickCounts: Map<number, number>;
 	captainCounts: Map<number, number>;
 	viceCaptainCounts: Map<number, number>;
 	transferInCounts: Map<number, number>;
 	transferOutCounts: Map<number, number>;
+	selectionPercentages: Map<number, number>;
+	captainPercentages: Map<number, number>;
+	viceCaptainPercentages: Map<number, number>;
+	effectiveOwnershipPercentages: Map<number, number>;
 };
 
 async function getReadModelRows(
@@ -478,69 +226,103 @@ async function getReadModelRows(
 	tournamentId: number,
 	eventId: number
 ): Promise<DbTournamentSelectionStatRow[] | null> {
-	const { data, error } = await context.supabase
-		.from("tournament_selection_stats")
+	const { data, error } = await context.data
+		.read("reporting.tournament_selection_stats")
 		.select(
-			"element_id,pick_count,captain_count,vice_captain_count,transfer_in_count,transfer_out_count,total_entries"
+			"element_id,pick_count,captain_count,vice_captain_count,transfer_in_count,transfer_out_count,total_entries,selection_percentage,captain_percentage,vice_captain_percentage,effective_ownership_percentage"
 		)
 		.eq("tournament_id", tournamentId)
 		.eq("event_id", eventId);
 
 	if (error) {
-		context.logger.warn(
-			{ err: error, tournamentId, eventId },
-			"Failed to fetch tournament selection stats read model; falling back to RPC aggregation"
+		throw new Error(
+			`Failed to fetch tournament selection stats read model for tournament ${tournamentId}, event ${eventId}`,
+			{ cause: error }
 		);
-		return null;
 	}
 
 	return (data as DbTournamentSelectionStatRow[] | null) ?? [];
 }
 
-function countsFromReadModel(rows: DbTournamentSelectionStatRow[]): {
-	counts: SelectionStatsCounts;
+function snapshotFromReadModel(rows: DbTournamentSelectionStatRow[]): {
+	snapshot: SelectionStatsSnapshot;
 	totalEntries: number;
-} {
-	const counts: SelectionStatsCounts = {
+} | null {
+	const snapshot: SelectionStatsSnapshot = {
 		pickCounts: new Map(),
 		captainCounts: new Map(),
 		viceCaptainCounts: new Map(),
 		transferInCounts: new Map(),
 		transferOutCounts: new Map(),
+		selectionPercentages: new Map(),
+		captainPercentages: new Map(),
+		viceCaptainPercentages: new Map(),
+		effectiveOwnershipPercentages: new Map(),
 	};
 	let totalEntries = 0;
 
 	for (const row of rows) {
 		const playerId = Number(row.element_id);
-		if (!Number.isFinite(playerId) || playerId <= 0) continue;
+		if (!Number.isSafeInteger(playerId) || playerId <= 0) continue;
 
 		const pickCount = Number(row.pick_count) || 0;
 		const captainCount = Number(row.captain_count) || 0;
 		const viceCaptainCount = Number(row.vice_captain_count) || 0;
 		const transferInCount = Number(row.transfer_in_count) || 0;
 		const transferOutCount = Number(row.transfer_out_count) || 0;
-		totalEntries = Math.max(totalEntries, Number(row.total_entries) || 0);
+		const rowTotalEntries = Number(row.total_entries);
+		const selectionPercentage = Number(row.selection_percentage);
+		const captainPercentage = Number(row.captain_percentage);
+		const viceCaptainPercentage = Number(row.vice_captain_percentage);
+		const effectiveOwnershipPercentage = Number(row.effective_ownership_percentage);
+		if (
+			!Number.isInteger(rowTotalEntries) ||
+			rowTotalEntries <= 0 ||
+			(totalEntries !== 0 && totalEntries !== rowTotalEntries) ||
+			![
+				selectionPercentage,
+				captainPercentage,
+				viceCaptainPercentage,
+				effectiveOwnershipPercentage,
+			].every(Number.isFinite)
+		) {
+			return null;
+		}
+		totalEntries = rowTotalEntries;
 
-		if (pickCount > 0) counts.pickCounts.set(playerId, pickCount);
-		if (captainCount > 0) counts.captainCounts.set(playerId, captainCount);
-		if (viceCaptainCount > 0) counts.viceCaptainCounts.set(playerId, viceCaptainCount);
-		if (transferInCount > 0) counts.transferInCounts.set(playerId, transferInCount);
-		if (transferOutCount > 0) counts.transferOutCounts.set(playerId, transferOutCount);
+		if (pickCount > 0) snapshot.pickCounts.set(playerId, pickCount);
+		if (captainCount > 0) snapshot.captainCounts.set(playerId, captainCount);
+		if (viceCaptainCount > 0) snapshot.viceCaptainCounts.set(playerId, viceCaptainCount);
+		if (transferInCount > 0) snapshot.transferInCounts.set(playerId, transferInCount);
+		if (transferOutCount > 0) snapshot.transferOutCounts.set(playerId, transferOutCount);
+		snapshot.selectionPercentages.set(playerId, selectionPercentage);
+		snapshot.captainPercentages.set(playerId, captainPercentage);
+		snapshot.viceCaptainPercentages.set(playerId, viceCaptainPercentage);
+		snapshot.effectiveOwnershipPercentages.set(playerId, effectiveOwnershipPercentage);
 	}
 
-	return { counts, totalEntries };
+	return totalEntries > 0 ? { snapshot, totalEntries } : null;
 }
 
 async function buildTournamentSelectionStats(
 	context: GraphQLContext,
-	counts: SelectionStatsCounts,
+	snapshot: SelectionStatsSnapshot,
 	effectiveTotal: number,
 	safeLimit: number,
 	eventId?: number,
 	season?: string
 ): Promise<TournamentSelectionStats> {
-	const { pickCounts, captainCounts, viceCaptainCounts, transferInCounts, transferOutCounts } =
-		counts;
+	const {
+		pickCounts,
+		captainCounts,
+		viceCaptainCounts,
+		transferInCounts,
+		transferOutCounts,
+		selectionPercentages,
+		captainPercentages,
+		viceCaptainPercentages,
+		effectiveOwnershipPercentages,
+	} = snapshot;
 
 	const allPlayerIds = [
 		...new Set([
@@ -554,27 +336,19 @@ async function buildTournamentSelectionStats(
 
 	const { playerMap, teamMap } = await getPlayerAndTeamMaps(context, allPlayerIds, eventId, season);
 
-	const computeEoPercent = (playerId: number, selectedPct: number): number => {
-		const captainCount = captainCounts.get(playerId) ?? 0;
-		const captainPct = effectiveTotal > 0 ? (captainCount / effectiveTotal) * 100 : 0;
-		return selectedPct + captainPct;
-	};
-
-	const buildSelectionPlayer = (
-		playerId: number,
-		pickCount: number
-	): SelectionStatPlayer | null => {
+	const buildSelectionPlayer = (playerId: number): SelectionStatPlayer | null => {
 		const player = playerMap.get(playerId);
 		if (!player) return null;
 		const team = teamMap.get(player.team_id);
-		const selectedPct = effectiveTotal > 0 ? (pickCount / effectiveTotal) * 100 : 0;
+		const selectedPct = selectionPercentages.get(playerId) ?? 0;
+		const effectiveOwnershipPct = effectiveOwnershipPercentages.get(playerId) ?? 0;
 		return {
 			id: player.id,
 			webName: player.web_name,
 			teamShortName: team?.short_name ?? "",
 			position: positionTypeToEnum(player.type),
 			selectedByPercent: Math.round(selectedPct * 100) / 100,
-			eoByPercent: Math.round(computeEoPercent(playerId, selectedPct) * 100) / 100,
+			eoByPercent: Math.round(effectiveOwnershipPct * 100) / 100,
 		};
 	};
 
@@ -584,16 +358,19 @@ async function buildTournamentSelectionStats(
 		sortedByPick
 			.filter(([playerId]) => playerMap.get(playerId)?.type === type)
 			.slice(0, safeLimit)
-			.map(([playerId, count]) => buildSelectionPlayer(playerId, count))
+			.map(([playerId]) => buildSelectionPlayer(playerId))
 			.filter((p): p is SelectionStatPlayer => p !== null);
 
-	const buildCaptainPlayer = (playerId: number, roleCount: number): CaptainStatPlayer | null => {
+	const buildCaptainPlayer = (
+		playerId: number,
+		rolePercentage: number
+	): CaptainStatPlayer | null => {
 		const player = playerMap.get(playerId);
 		if (!player) return null;
 		const team = teamMap.get(player.team_id);
-		const rolePct = effectiveTotal > 0 ? (roleCount / effectiveTotal) * 100 : 0;
-		const pickCount = pickCounts.get(playerId) ?? 0;
-		const selectedPct = effectiveTotal > 0 ? (pickCount / effectiveTotal) * 100 : 0;
+		const rolePct = rolePercentage;
+		const selectedPct = selectionPercentages.get(playerId) ?? 0;
+		const effectiveOwnershipPct = effectiveOwnershipPercentages.get(playerId) ?? 0;
 		return {
 			id: player.id,
 			webName: player.web_name,
@@ -601,25 +378,25 @@ async function buildTournamentSelectionStats(
 			position: positionTypeToEnum(player.type),
 			captainByPercent: Math.round(rolePct * 100) / 100,
 			selectedByPercent: Math.round(selectedPct * 100) / 100,
-			eoByPercent: Math.round(computeEoPercent(playerId, selectedPct) * 100) / 100,
+			eoByPercent: Math.round(effectiveOwnershipPct * 100) / 100,
 		};
 	};
 
 	const captainSelect: CaptainStatPlayer[] = [...captainCounts.entries()]
 		.sort((a, b) => b[1] - a[1])
 		.slice(0, safeLimit)
-		.map(([playerId, count]) => buildCaptainPlayer(playerId, count))
+		.map(([playerId]) => buildCaptainPlayer(playerId, captainPercentages.get(playerId) ?? 0))
 		.filter((p): p is CaptainStatPlayer => p !== null);
 
 	const viceCaptainSelect: CaptainStatPlayer[] = [...viceCaptainCounts.entries()]
 		.sort((a, b) => b[1] - a[1])
 		.slice(0, safeLimit)
-		.map(([playerId, count]) => buildCaptainPlayer(playerId, count))
+		.map(([playerId]) => buildCaptainPlayer(playerId, viceCaptainPercentages.get(playerId) ?? 0))
 		.filter((p): p is CaptainStatPlayer => p !== null);
 
 	const mostSelectedPlayers: SelectionStatPlayer[] = sortedByPick
 		.slice(0, safeLimit)
-		.map(([playerId, count]) => buildSelectionPlayer(playerId, count))
+		.map(([playerId]) => buildSelectionPlayer(playerId))
 		.filter((p): p is SelectionStatPlayer => p !== null);
 
 	const buildTransferPlayer = (
@@ -629,8 +406,7 @@ async function buildTournamentSelectionStats(
 		const player = playerMap.get(playerId);
 		if (!player) return null;
 		const team = teamMap.get(player.team_id);
-		const pickCount = pickCounts.get(playerId) ?? 0;
-		const selectedPct = effectiveTotal > 0 ? (pickCount / effectiveTotal) * 100 : 0;
+		const selectedPct = selectionPercentages.get(playerId) ?? 0;
 		return {
 			id: player.id,
 			webName: player.web_name,
@@ -677,14 +453,16 @@ export async function getTournamentSelectionStatsReadModel(
 	eventId: number,
 	limit: number
 ): Promise<TournamentSelectionStats | null> {
-	if (!Number.isFinite(tournamentId) || tournamentId <= 0) return null;
-	if (!Number.isFinite(eventId) || eventId <= 0) return null;
+	if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) return null;
+	if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
 	const safeLimit = Math.min(Math.max(limit, 1), 12);
 	const rows = await getReadModelRows(context, tournamentId, eventId);
 	if (!rows || rows.length === 0) return null;
-	const { counts, totalEntries } = countsFromReadModel(rows);
+	const parsed = snapshotFromReadModel(rows);
+	if (!parsed) return null;
+	const { snapshot, totalEntries } = parsed;
 	const season = await getCurrentSeason(context);
-	return buildTournamentSelectionStats(context, counts, totalEntries, safeLimit, eventId, season);
+	return buildTournamentSelectionStats(context, snapshot, totalEntries, safeLimit, eventId, season);
 }
 
 export interface EventStatsRepository {
@@ -703,8 +481,8 @@ export const eventStatsRepository: EventStatsRepository = {
 		eventId: number,
 		limit: number
 	): Promise<TournamentSelectionStats> {
-		if (!Number.isFinite(tournamentId) || tournamentId <= 0) return EMPTY_STATS;
-		if (!Number.isFinite(eventId) || eventId <= 0) return EMPTY_STATS;
+		if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) return EMPTY_STATS;
+		if (!Number.isSafeInteger(eventId) || eventId <= 0) return EMPTY_STATS;
 		const safeLimit = Math.min(Math.max(limit, 1), 100);
 
 		const cacheKey = await privateCacheKey(
@@ -718,60 +496,27 @@ export const eventStatsRepository: EventStatsRepository = {
 
 		const readModelRows = await getReadModelRows(context, tournamentId, eventId);
 		if (readModelRows && readModelRows.length > 0) {
-			const { counts, totalEntries } = countsFromReadModel(readModelRows);
+			const parsed = snapshotFromReadModel(readModelRows);
+			if (!parsed) return EMPTY_STATS;
+			const { snapshot, totalEntries } = parsed;
 			const season = await getCurrentSeason(context);
 			const result = await buildTournamentSelectionStats(
 				context,
-				counts,
+				snapshot,
 				totalEntries,
 				safeLimit,
 				eventId,
 				season
 			);
-			await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
+			await writeQueryCache(
+				context,
+				cacheKey,
+				JSON.stringify(result),
+				QUERY_CACHE_TTL_SECONDS.REPORTING
+			);
 			return result;
 		}
 
-		// The resolver has crossed the insights barrier; reread membership so a
-		// setup-era roster cache cannot seed a partial aggregate.
-		const [tournamentInfo, entryIds] = await Promise.all([
-			getTournamentInfo(context, tournamentId),
-			getTournamentEntryIdsUncached(context, tournamentId),
-		]);
-		if (!tournamentInfo) return EMPTY_STATS;
-
-		// Now fan out all three aggregations in one round-trip group
-		const [
-			{ captainCounts, totalEntries },
-			{ pickCounts, viceCaptainCounts },
-			{ transferInCounts, transferOutCounts },
-		] = await Promise.all([
-			getCaptainCounts(context, tournamentInfo.league_id, tournamentInfo.league_type, eventId),
-			getPickAggregation(context, tournamentId, entryIds, eventId),
-			getTransferAggregation(context, tournamentId, entryIds, eventId),
-		]);
-
-		if (totalEntries === 0 && entryIds.length === 0) return EMPTY_STATS;
-
-		const effectiveTotal = totalEntries > 0 ? totalEntries : entryIds.length;
-
-		const season = await getCurrentSeason(context);
-		const result = await buildTournamentSelectionStats(
-			context,
-			{
-				pickCounts,
-				captainCounts,
-				viceCaptainCounts,
-				transferInCounts,
-				transferOutCounts,
-			},
-			effectiveTotal,
-			safeLimit,
-			eventId,
-			season
-		);
-
-		await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
-		return result;
+		return EMPTY_STATS;
 	},
 };

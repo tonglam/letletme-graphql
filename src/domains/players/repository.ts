@@ -1,6 +1,9 @@
+import type { QueryResultRow } from "pg";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCurrentSeason } from "../../infra/season";
+import { getCoreDataSnapshot } from "../../infra/data-snapshot";
+import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player as InfraPlayer, Team as InfraTeam } from "../../infra/types";
 import {
@@ -28,18 +31,6 @@ export type PlayersFilter = {
 	maxPrice?: number | null;
 };
 
-type DbPlayerRow = {
-	id: number;
-	code: number;
-	web_name: string;
-	first_name: string | null;
-	second_name: string | null;
-	team_id: number;
-	type: number;
-	price: number;
-	start_price: number;
-};
-
 const asNullableNumber = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) {
 		return value;
@@ -50,20 +41,6 @@ const asNullableNumber = (value: unknown): number | null => {
 	}
 	return null;
 };
-
-const mapPlayer = (row: DbPlayerRow): Player => ({
-	id: row.id,
-	code: row.code,
-	webName: row.web_name,
-	firstName: row.first_name,
-	secondName: row.second_name,
-	teamId: row.team_id,
-	position: row.type as Position,
-	price: row.price,
-	startPrice: row.start_price,
-	totalPoints: 0,
-	selectedByPercent: null,
-});
 
 const evictMalformedCache = async (context: GraphQLContext, key: string): Promise<void> => {
 	try {
@@ -132,8 +109,6 @@ const clampLimit = (limit: number): number => {
 	return Math.min(Math.max(safeLimit, 1), 200);
 };
 
-const PICKER_CACHE_TTL = 300;
-const PICKER_SCAN_BATCH_SIZE = 100;
 const MARKET_OWNERSHIP_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
 
 export type PlayerPickerTeam = {
@@ -158,7 +133,49 @@ export type PlayersForPickerPayload = {
 	nextCursor: number | null;
 };
 
-type DbPickerRow = {
+export type PlayerPickerSort =
+	"NAME_ASC" | "TOTAL_POINTS_DESC" | "FORM_DESC" | "PRICE_ASC" | "PRICE_DESC" | "OWNERSHIP_DESC";
+
+// Keep the GraphQL cursor as an Int for existing clients. New cursors are
+// negative, versioned offsets tied to the active sort; positive cursors retain
+// the legacy player-ID threshold semantics during a rolling deployment.
+const PICKER_CURSOR_VERSION = 1;
+const PICKER_CURSOR_VERSION_STRIDE = 1_000_000;
+const PICKER_CURSOR_SORT_STRIDE = 100_000;
+const PICKER_SORT_CODES: Record<PlayerPickerSort, number> = {
+	NAME_ASC: 1,
+	TOTAL_POINTS_DESC: 2,
+	FORM_DESC: 3,
+	PRICE_ASC: 4,
+	PRICE_DESC: 5,
+	OWNERSHIP_DESC: 6,
+};
+
+const encodePickerCursor = (sort: PlayerPickerSort, offset: number): number =>
+	-(
+		PICKER_CURSOR_VERSION * PICKER_CURSOR_VERSION_STRIDE +
+		PICKER_SORT_CODES[sort] * PICKER_CURSOR_SORT_STRIDE +
+		offset +
+		1
+	);
+
+const decodePickerCursor = (
+	cursor: number | null,
+	sort: PlayerPickerSort
+): { offset: number; legacyId: number | null } => {
+	if (cursor === null || cursor === 0) return { offset: 0, legacyId: null };
+	if (cursor > 0) return { offset: 0, legacyId: cursor };
+	const encoded = -cursor - 1;
+	const version = Math.floor(encoded / PICKER_CURSOR_VERSION_STRIDE);
+	const sortCode = Math.floor((encoded % PICKER_CURSOR_VERSION_STRIDE) / PICKER_CURSOR_SORT_STRIDE);
+	const offset = encoded % PICKER_CURSOR_SORT_STRIDE;
+	if (version !== PICKER_CURSOR_VERSION || sortCode !== PICKER_SORT_CODES[sort] || offset < 0) {
+		return { offset: 0, legacyId: null };
+	}
+	return { offset, legacyId: null };
+};
+
+type DbPickerRow = QueryResultRow & {
 	id: number;
 	web_name: string;
 	element_type: number;
@@ -193,8 +210,8 @@ const getLatestMarketOwnershipByIds = async (
 ): Promise<Map<number, number>> => {
 	if (ids.length === 0) return new Map();
 	try {
-		const latestResult = await context.supabase
-			.from("player_market_snapshots")
+		const latestResult = await context.data
+			.read("fpl.player_market_snapshots")
 			.select("snapshot_date, captured_at")
 			.order("snapshot_date", { ascending: false })
 			.order("captured_at", { ascending: false })
@@ -219,10 +236,11 @@ const getLatestMarketOwnershipByIds = async (
 			return new Map();
 		}
 
-		const ownershipResult = await context.supabase
-			.from("player_market_snapshots")
+		const ownershipResult = await context.data
+			.read("fpl.player_market_snapshots")
 			.select("element_id, selected_by_percent")
 			.eq("snapshot_date", snapshotDate)
+			.eq("captured_at", capturedAt)
 			.in("element_id", ids);
 		if (ownershipResult.error) {
 			context.logger.warn(
@@ -336,13 +354,13 @@ interface PlayersRepository {
 		eventId: number
 	): Promise<Map<number, Player>>;
 	getPlayersByIds(context: GraphQLContext, ids: number[]): Promise<Player[]>;
-	getPlayersFromRedis(context: GraphQLContext): Promise<Map<number, Player>>;
 	getPlayersForPicker(
 		context: GraphQLContext,
 		limit: number,
 		cursor: number | null | undefined,
 		search?: string | null,
-		filter?: PlayersFilter | null
+		filter?: PlayersFilter | null,
+		sort?: PlayerPickerSort
 	): Promise<PlayersForPickerPayload>;
 	listPlayers(
 		context: GraphQLContext,
@@ -352,7 +370,6 @@ interface PlayersRepository {
 	): Promise<Player[]>;
 	getTeamById(context: GraphQLContext, id: number): Promise<Team | null>;
 	listTeams(context: GraphQLContext): Promise<Team[]>;
-	listTeamsFromRedis(context: GraphQLContext): Promise<Team[]>;
 	getTopTransfersInEnriched(
 		context: GraphQLContext,
 		eventId: number,
@@ -365,9 +382,8 @@ interface PlayersRepository {
 	): Promise<TopTransfersEnriched>;
 }
 
-// Only event-stat overlays are cached. Base players contain mutable prices and
-// must always come from Player:{season} or PostgreSQL.
-const PLAYER_EVENT_STATS_CACHE_TTL = 3600;
+// Only event-stat overlays are query-cached. Base players always come from the
+// request-pinned immutable Data v3 core publication.
 
 type RawTransferRow = {
 	element_id: number;
@@ -385,8 +401,8 @@ const fetchTopTransferRows = async (
 	limit: number
 ): Promise<RawTransferRow[]> => {
 	const col = direction === "in" ? "transfers_in_event" : "transfers_out_event";
-	const { data, error } = await context.supabase
-		.from("player_stats")
+	const { data, error } = await context.data
+		.read("fpl.player_event_snapshots")
 		.select("element_id, event_id, transfers_in_event, transfers_out_event")
 		.eq("event_id", eventId)
 		.not(col, "is", null)
@@ -405,65 +421,9 @@ const fetchTopTransferRows = async (
 
 export const playersRepository: PlayersRepository = {
 	async getPlayerById(context: GraphQLContext, id: number): Promise<Player | null> {
-		const season = await getCurrentSeason(context);
-
-		// Try externally-managed Player:{season} hash before hitting Supabase
-		let hashRaw: string | null = null;
-		try {
-			hashRaw = await context.redis.hget(`Player:${season}`, String(id));
-		} catch (error) {
-			context.logger.warn({ err: error, season, id }, "Failed to read Player hash");
-		}
-		if (hashRaw) {
-			try {
-				const parsed = JSON.parse(hashRaw) as Record<string, unknown>;
-				const player: Player = {
-					id,
-					code: Number(parsed.code ?? 0),
-					webName: String(parsed.webName ?? parsed.web_name ?? ""),
-					firstName: parsed.firstName
-						? String(parsed.firstName)
-						: parsed.first_name
-							? String(parsed.first_name)
-							: null,
-					secondName: parsed.secondName
-						? String(parsed.secondName)
-						: parsed.second_name
-							? String(parsed.second_name)
-							: null,
-					teamId: Number(parsed.teamId ?? parsed.team_id ?? 0),
-					position: Number(parsed.type ?? parsed.position ?? 0) as Position,
-					price: Number(parsed.price ?? 0),
-					startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
-					totalPoints: Number(parsed.totalPoints ?? 0),
-					selectedByPercent: asNullableNumber(
-						parsed.selectedByPercent ?? parsed.selected_by_percent
-					),
-				};
-				return player;
-			} catch {
-				/* fall through to Supabase */
-			}
-		}
-
-		const { data, error } = await context.supabase
-			.from("players")
-			.select("id, code, web_name, first_name, second_name, team_id, type, price, start_price")
-			.eq("id", id)
-			.limit(1);
-
-		if (error) {
-			context.logger.error({ err: error, id }, "Failed to fetch player");
-			throw new Error("Failed to fetch player");
-		}
-
-		const row = data?.[0] as DbPlayerRow | undefined;
-		if (!row) {
-			return null;
-		}
-
-		const player = mapPlayer(row);
-		return player;
+		if (!Number.isSafeInteger(id) || id <= 0) return null;
+		const players = await buildPlayerMap(context, [id]);
+		return (players.get(id) as Player | undefined) ?? null;
 	},
 
 	async getPlayerByIdForEvent(
@@ -471,8 +431,9 @@ export const playersRepository: PlayersRepository = {
 		id: number,
 		eventId: number
 	): Promise<Player | null> {
-		const season = await getCurrentSeason(context);
-		const cacheKey = gqlCacheKey(season, `players:event-stats:v1:${id}:${eventId}`);
+		if (!Number.isSafeInteger(id) || id <= 0) return null;
+		if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
+		const cacheKey = gqlCacheKey(context, `players:event-stats:v1:${id}:${eventId}`);
 
 		const [basePlayer, cachedStats] = await Promise.all([
 			this.getPlayerById(context, id),
@@ -486,8 +447,8 @@ export const playersRepository: PlayersRepository = {
 			return applyPlayerEventStats(basePlayer, cachedStats);
 		}
 
-		const statsResult = await context.supabase
-			.from("player_stats")
+		const statsResult = await context.data
+			.read("fpl.player_event_snapshots")
 			.select("total_points, selected_by_percent")
 			.eq("event_id", eventId)
 			.eq("element_id", id)
@@ -518,7 +479,7 @@ export const playersRepository: PlayersRepository = {
 				cacheKey,
 				JSON.stringify(overlay),
 				"EX",
-				PLAYER_EVENT_STATS_CACHE_TTL
+				QUERY_CACHE_TTL_SECONDS.HISTORICAL
 			);
 		} catch (error) {
 			context.logger.warn({ err: error, cacheKey }, "Failed to cache player event stats");
@@ -531,11 +492,11 @@ export const playersRepository: PlayersRepository = {
 		ids: number[],
 		eventId: number
 	): Promise<Map<number, Player>> {
-		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
+		if (!Number.isSafeInteger(eventId) || eventId <= 0) return new Map();
+		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0)));
 		if (uniqueIds.length === 0) return new Map();
-		const season = await getCurrentSeason(context);
 		const keys = uniqueIds.map((id) =>
-			gqlCacheKey(season, `players:event-stats:v1:${id}:${eventId}`)
+			gqlCacheKey(context, `players:event-stats:v1:${id}:${eventId}`)
 		);
 		let rawValues: (string | null)[];
 		const basePlayersPromise = this.getPlayersByIds(context, uniqueIds);
@@ -570,8 +531,8 @@ export const playersRepository: PlayersRepository = {
 		}
 
 		if (missIds.length > 0) {
-			const statsResult = await context.supabase
-				.from("player_stats")
+			const statsResult = await context.data
+				.read("fpl.player_event_snapshots")
 				.select("element_id, total_points, selected_by_percent")
 				.eq("event_id", eventId)
 				.in("element_id", missIds);
@@ -599,10 +560,10 @@ export const playersRepository: PlayersRepository = {
 					};
 					overlays.set(id, overlay);
 					pipeline.set(
-						gqlCacheKey(season, `players:event-stats:v1:${id}:${eventId}`),
+						gqlCacheKey(context, `players:event-stats:v1:${id}:${eventId}`),
 						JSON.stringify(overlay),
 						"EX",
-						PLAYER_EVENT_STATS_CACHE_TTL
+						QUERY_CACHE_TTL_SECONDS.HISTORICAL
 					);
 				}
 				try {
@@ -624,113 +585,12 @@ export const playersRepository: PlayersRepository = {
 	},
 
 	async getPlayersByIds(context: GraphQLContext, ids: number[]): Promise<Player[]> {
-		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
-		if (uniqueIds.length === 0) {
-			return [];
-		}
-
-		// Use HMGET on Player:{season} to fetch only the needed IDs
-		const season = await getCurrentSeason(context);
-		const hashKey = `Player:${season}`;
-		let values: (string | null)[];
-		try {
-			values = await context.redis.hmget(hashKey, ...uniqueIds.map(String));
-		} catch (error) {
-			context.logger.warn({ err: error, hashKey }, "Failed to read Player hash fields");
-			values = Array.from({ length: uniqueIds.length }, () => null);
-		}
-
-		const result: Player[] = [];
-		const missIds: number[] = [];
-
-		for (let i = 0; i < uniqueIds.length; i++) {
-			const raw = values[i];
-			if (raw) {
-				try {
-					const parsed = JSON.parse(raw) as Record<string, unknown>;
-					result.push({
-						id: uniqueIds[i],
-						code: Number(parsed.code ?? 0),
-						webName: String(parsed.webName ?? parsed.web_name ?? ""),
-						firstName: parsed.firstName
-							? String(parsed.firstName)
-							: parsed.first_name
-								? String(parsed.first_name)
-								: null,
-						secondName: parsed.secondName
-							? String(parsed.secondName)
-							: parsed.second_name
-								? String(parsed.second_name)
-								: null,
-						teamId: Number(parsed.teamId ?? parsed.team_id ?? 0),
-						position: Number(parsed.type ?? parsed.position ?? 0) as Position,
-						price: Number(parsed.price ?? 0),
-						startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
-						totalPoints: Number(parsed.totalPoints ?? 0),
-						selectedByPercent: asNullableNumber(
-							parsed.selectedByPercent ?? parsed.selected_by_percent
-						),
-					});
-				} catch {
-					missIds.push(uniqueIds[i]);
-				}
-			} else {
-				missIds.push(uniqueIds[i]);
-			}
-		}
-
-		if (missIds.length === 0) {
-			return result;
-		}
-
-		const { data, error } = await context.supabase
-			.from("players")
-			.select("id, code, web_name, first_name, second_name, team_id, type, price, start_price")
-			.in("id", missIds);
-
-		if (error) {
-			context.logger.error({ err: error, ids: missIds }, "Failed to fetch players by ids");
-			throw new Error("Failed to fetch players by ids", { cause: error });
-		} else {
-			result.push(...((data as DbPlayerRow[] | null)?.map(mapPlayer) ?? []));
-		}
-
-		return result;
-	},
-
-	async getPlayersFromRedis(context: GraphQLContext): Promise<Map<number, Player>> {
-		try {
-			const season = await getCurrentSeason(context);
-			const hashKey = `Player:${season}`;
-			const hash = await context.redis.hgetall(hashKey);
-
-			if (hash && Object.keys(hash).length > 0) {
-				const players = new Map<number, Player>();
-				for (const [fieldKey, value] of Object.entries(hash)) {
-					const parsed = JSON.parse(value) as Record<string, unknown>;
-					players.set(Number(fieldKey), {
-						id: Number(fieldKey),
-						code: Number(parsed.code ?? 0),
-						webName: String(parsed.webName ?? ""),
-						firstName: parsed.firstName ? String(parsed.firstName) : null,
-						secondName: parsed.secondName ? String(parsed.secondName) : null,
-						teamId: Number(parsed.teamId ?? 0),
-						position: Number(parsed.type ?? 0) as Position,
-						price: Number(parsed.price ?? 0),
-						startPrice: Number(parsed.startPrice ?? 0),
-						totalPoints: 0,
-						selectedByPercent: null,
-					});
-				}
-				return players;
-			}
-		} catch (err) {
-			context.logger.warn({ err }, "Failed to read Player hash from Redis, falling back to DB");
-		}
-
-		// Fallback to DB — do NOT write back to external hash
-		const dbPlayers = await this.listPlayers(context, null, 1000, 0);
-		return new Map(dbPlayers.map((p) => [p.id, p]));
+		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0)));
+		if (uniqueIds.length === 0) return [];
+		const players = await buildPlayerMap(context, uniqueIds);
+		return uniqueIds
+			.map((id) => players.get(id) as Player | undefined)
+			.filter((player): player is Player => player !== undefined);
 	},
 
 	async getPlayersForPicker(
@@ -738,18 +598,21 @@ export const playersRepository: PlayersRepository = {
 		limit: number,
 		cursor: number | null | undefined,
 		search?: string | null,
-		filter?: PlayersFilter | null
+		filter?: PlayersFilter | null,
+		sort: PlayerPickerSort = "TOTAL_POINTS_DESC"
 	): Promise<PlayersForPickerPayload> {
 		const safeLimit = clampLimit(limit);
-		const safeCursor = cursor && Number.isFinite(cursor) && cursor > 0 ? cursor : null;
+		const decodedCursor = decodePickerCursor(
+			cursor && Number.isSafeInteger(cursor) ? cursor : null,
+			sort
+		);
 		const safeSearch = search?.trim().slice(0, 50) || null;
 		const safeFilter = normalizeFilter(filter);
-		const season = await getCurrentSeason(context);
 		const statsContext = await resolvePlayerStatsContext(context);
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
 		const cacheKey = gqlCacheKey(
-			season,
-			`players:picker:v6:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${safeLimit}:${safeCursor ?? 0}`
+			context,
+			`players:picker:v9:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`
 		);
 
 		const cached = await readJsonCache(
@@ -773,110 +636,77 @@ export const playersRepository: PlayersRepository = {
 			return cached;
 		}
 
-		const hasPriceFilter = safeFilter?.minPrice !== undefined || safeFilter?.maxPrice !== undefined;
-		const hasTeamFilter = safeFilter?.teamId !== undefined;
-		const scanLimit = hasPriceFilter || hasTeamFilter ? PICKER_SCAN_BATCH_SIZE : safeLimit;
-		const teams = await buildTeamMap(context);
-		const fetchRows = async (pageCursor: number | null): Promise<DbPickerRow[]> => {
-			if (safeSearch) {
-				const result = await context.supabase.rpc("search_players_for_picker", {
-					p_query: safeSearch,
-					p_limit: scanLimit,
-					p_cursor: pageCursor,
-					p_position: safeFilter?.position ?? null,
-					p_team_id: null,
-					p_min_price: hasPriceFilter ? null : (safeFilter?.minPrice ?? null),
-					p_max_price: hasPriceFilter ? null : (safeFilter?.maxPrice ?? null),
-				});
-				if (result.error) {
-					context.logger.error(
-						{ err: result.error, limit: safeLimit, cursor: pageCursor, search: safeSearch },
-						"Failed to fetch players for picker"
-					);
-					throw new Error("Failed to fetch players for picker");
-				}
-				return (result.data as DbPickerRow[] | null) ?? [];
-			}
-
-			let query = context.supabase
-				.from("players")
-				.select("id, web_name, type, team_id, price")
-				.order("id", { ascending: true })
-				.limit(scanLimit);
-			if (pageCursor !== null) query = query.gt("id", pageCursor);
-			if (safeFilter?.position !== undefined) query = query.eq("type", safeFilter.position);
-			if (!hasPriceFilter && safeFilter?.minPrice !== undefined) {
-				query = query.gte("price", safeFilter.minPrice);
-			}
-			if (!hasPriceFilter && safeFilter?.maxPrice !== undefined) {
-				query = query.lte("price", safeFilter.maxPrice);
-			}
-
-			const result = await query;
-			if (result.error) {
-				context.logger.error(
-					{ err: result.error, limit: safeLimit, cursor: pageCursor, filter: safeFilter },
-					"Failed to browse players for picker"
-				);
-				throw new Error("Failed to fetch players for picker");
-			}
-			return (
-				(result.data ?? []) as Array<{
-					id: number;
-					web_name: string;
-					type: number;
-					team_id: number;
-				}>
-			).map((row) => ({
-				id: row.id,
-				web_name: row.web_name,
-				element_type: row.type,
-				team_id: row.team_id,
-				team_name: teams?.get(row.team_id)?.name ?? "",
-				team_short_name: teams?.get(row.team_id)?.shortName ?? "",
-			}));
-		};
-
-		const rows: DbPickerRow[] = [];
-		const items: PlayerPickerItem[] = [];
-		let pageCursor = safeCursor;
-		let hasMoreRows: boolean;
-		for (;;) {
-			const pageRows = await fetchRows(pageCursor);
-			rows.push(...pageRows);
-			items.push(
-				...(await enrichPickerItems(context, pageRows, statsContext, teams ?? undefined)).filter(
-					(item) => matchesPickerFilter(item, safeFilter)
-				)
+		const [snapshot, teams] = await Promise.all([
+			getCoreDataSnapshot(context),
+			buildTeamMap(context),
+		]);
+		const candidates = snapshot.players
+			.filter((player) => decodedCursor.legacyId === null || player.id > decodedCursor.legacyId)
+			.filter(
+				(player) => !safeSearch || player.webName.toLowerCase().includes(safeSearch.toLowerCase())
+			)
+			.filter((player) => safeFilter?.position === undefined || player.type === safeFilter.position)
+			.filter((player) => safeFilter?.teamId === undefined || player.teamId === safeFilter.teamId)
+			.filter(
+				(player) =>
+					safeFilter?.minPrice === undefined ||
+					safeFilter.minPrice === null ||
+					player.price >= safeFilter.minPrice
+			)
+			.filter(
+				(player) =>
+					safeFilter?.maxPrice === undefined ||
+					safeFilter.maxPrice === null ||
+					player.price <= safeFilter.maxPrice
 			);
-			hasMoreRows = pageRows.length >= scanLimit;
-			const hasTeamFilter = safeFilter?.teamId !== undefined;
-			if (
-				(!hasPriceFilter && !hasTeamFilter) ||
-				!hasMoreRows ||
-				items.length >= safeLimit ||
-				pageRows.length === 0
-			) {
-				break;
+		const allRows: DbPickerRow[] = candidates.map((player) => ({
+			id: player.id,
+			web_name: player.webName,
+			element_type: player.type,
+			team_id: player.teamId,
+			team_name: teams.get(player.teamId)?.name ?? "",
+			team_short_name: teams.get(player.teamId)?.shortName ?? "",
+		}));
+		const allItems = (await enrichPickerItems(context, allRows, statsContext, teams)).filter(
+			(item) => matchesPickerFilter(item, safeFilter)
+		);
+		const sortNumberDesc = (left: number | null, right: number | null): number =>
+			(right ?? -1) - (left ?? -1);
+		const sortedItems = [...allItems].sort((left, right) => {
+			switch (sort) {
+				case "NAME_ASC":
+					return left.webName.localeCompare(right.webName);
+				case "FORM_DESC":
+					return sortNumberDesc(left.form, right.form) || left.webName.localeCompare(right.webName);
+				case "PRICE_ASC":
+					return left.price - right.price || left.webName.localeCompare(right.webName);
+				case "PRICE_DESC":
+					return right.price - left.price || left.webName.localeCompare(right.webName);
+				case "OWNERSHIP_DESC":
+					return (
+						sortNumberDesc(left.selectedByPercent, right.selectedByPercent) ||
+						left.webName.localeCompare(right.webName)
+					);
+				case "TOTAL_POINTS_DESC":
+				default:
+					return (
+						sortNumberDesc(left.totalPoints, right.totalPoints) ||
+						left.webName.localeCompare(right.webName)
+					);
 			}
-			const nextPageCursor = pageRows[pageRows.length - 1].id;
-			if (pageCursor !== null && nextPageCursor <= pageCursor) {
-				break;
-			}
-			pageCursor = nextPageCursor;
-		}
-
-		const returnedItems = items.slice(0, safeLimit);
-		const nextCursor = hasPriceFilter
-			? returnedItems.length >= safeLimit
-				? (returnedItems[returnedItems.length - 1]?.id ?? null)
-				: null
-			: rows.length >= safeLimit
-				? rows[rows.length - 1].id
-				: null;
+		});
+		const returnedItems = sortedItems.slice(decodedCursor.offset, decodedCursor.offset + safeLimit);
+		const nextOffset = decodedCursor.offset + returnedItems.length;
+		const nextCursor =
+			nextOffset < sortedItems.length ? encodePickerCursor(sort, nextOffset) : null;
 		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
 
-		await context.redis.set(cacheKey, JSON.stringify(payload), "EX", PICKER_CACHE_TTL);
+		await writeQueryCache(
+			context,
+			cacheKey,
+			JSON.stringify(payload),
+			QUERY_CACHE_TTL_SECONDS.REPORTING
+		);
 		return payload;
 	},
 
@@ -889,39 +719,35 @@ export const playersRepository: PlayersRepository = {
 		const normalizedFilter = normalizeFilter(filter);
 		const safeLimit = clampLimit(limit);
 		const safeOffset = Math.max(Number.isFinite(offset) ? offset : 0, 0);
-
-		let query = context.supabase
-			.from("players")
-			.select("id, code, web_name, first_name, second_name, team_id, type, price, start_price");
-
-		if (normalizedFilter?.position !== undefined) {
-			query = query.eq("type", normalizedFilter.position);
-		}
-		if (normalizedFilter?.teamId !== undefined) {
-			query = query.eq("team_id", normalizedFilter.teamId);
-		}
-		if (normalizedFilter?.minPrice !== undefined) {
-			query = query.gte("price", normalizedFilter.minPrice);
-		}
-		if (normalizedFilter?.maxPrice !== undefined) {
-			query = query.lte("price", normalizedFilter.maxPrice);
-		}
-
-		const { data, error } = await query
-			.order("id", { ascending: true })
-			.range(safeOffset, safeOffset + safeLimit - 1);
-
-		if (error) {
-			context.logger.error({ err: error, filter: normalizedFilter }, "Failed to fetch players");
-			throw new Error("Failed to fetch players");
-		}
-
-		const players = (data as DbPlayerRow[] | null)?.map(mapPlayer) ?? [];
-		return players;
+		const snapshot = await getCoreDataSnapshot(context);
+		return snapshot.players
+			.filter(
+				(player) =>
+					normalizedFilter?.position === undefined || player.type === normalizedFilter.position
+			)
+			.filter(
+				(player) =>
+					normalizedFilter?.teamId === undefined || player.teamId === normalizedFilter.teamId
+			)
+			.filter(
+				(player) =>
+					normalizedFilter?.minPrice === undefined ||
+					normalizedFilter.minPrice === null ||
+					player.price >= normalizedFilter.minPrice
+			)
+			.filter(
+				(player) =>
+					normalizedFilter?.maxPrice === undefined ||
+					normalizedFilter.maxPrice === null ||
+					player.price <= normalizedFilter.maxPrice
+			)
+			.sort((left, right) => left.id - right.id)
+			.slice(safeOffset, safeOffset + safeLimit)
+			.map((player) => ({ ...player, position: player.type as Position }));
 	},
 
 	async getTeamById(context: GraphQLContext, id: number): Promise<Team | null> {
-		if (!Number.isFinite(id) || id <= 0) {
+		if (!Number.isSafeInteger(id) || id <= 0) {
 			return null;
 		}
 		const map = await buildTeamMap(context);
@@ -933,18 +759,13 @@ export const playersRepository: PlayersRepository = {
 		return Array.from(map.values()).sort((a, b) => a.position - b.position);
 	},
 
-	async listTeamsFromRedis(context: GraphQLContext): Promise<Team[]> {
-		const map = await buildTeamMap(context);
-		return Array.from(map.values()).sort((a, b) => a.position - b.position);
-	},
-
 	async getTopTransfersInEnriched(
 		context: GraphQLContext,
 		eventId: number,
 		limit: number
 	): Promise<TopTransfersEnriched> {
 		const empty: TopTransfersEnriched = { stats: [], players: {} };
-		if (!Number.isFinite(eventId) || eventId <= 0) return empty;
+		if (!Number.isSafeInteger(eventId) || eventId <= 0) return empty;
 		const safeLimit = Math.min(Math.max(limit, 1), 100);
 
 		const rows = await fetchTopTransferRows(context, eventId, "in", safeLimit);
@@ -971,7 +792,7 @@ export const playersRepository: PlayersRepository = {
 		limit: number
 	): Promise<TopTransfersEnriched> {
 		const empty: TopTransfersEnriched = { stats: [], players: {} };
-		if (!Number.isFinite(eventId) || eventId <= 0) return empty;
+		if (!Number.isSafeInteger(eventId) || eventId <= 0) return empty;
 		const safeLimit = Math.min(Math.max(limit, 1), 100);
 
 		const rows = await fetchTopTransferRows(context, eventId, "out", safeLimit);

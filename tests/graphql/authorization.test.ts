@@ -10,8 +10,8 @@ const logger = {
 	warn: (): void => {},
 } as never;
 
-const supabase = {
-	from: (table: string) => {
+const data = {
+	read: (table: string) => {
 		const filters = new Map<string, unknown>();
 		const chain = {
 			select: () => chain,
@@ -21,14 +21,14 @@ const supabase = {
 			},
 			limit: async () => {
 				if (
-					table === "tournament_entries" &&
+					table === "competition.tournament_entries" &&
 					filters.get("tournament_id") === 7 &&
 					filters.get("entry_id") === 123
 				) {
 					return { data: [{ entry_id: 123 }], error: null };
 				}
 				if (
-					table === "tournament_infos" &&
+					table === "competition.tournaments" &&
 					(filters.get("id") === 7 || filters.get("id") === 8) &&
 					filters.get("admin_entry_id") === 123
 				) {
@@ -63,7 +63,7 @@ const authorize = (
 		body: { query, variables },
 		searchParams: new URLSearchParams(),
 		principal,
-		supabase,
+		data,
 		logger,
 	});
 

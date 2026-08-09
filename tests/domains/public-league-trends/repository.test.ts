@@ -16,10 +16,12 @@ const emptyStats: TournamentSelectionStats = {
 };
 
 const context = (options: { failRedisWrites?: boolean } = {}) => {
-	const strings = new Map<string, string>([["Season:active", "2627"]]);
+	const strings = new Map<string, string>();
 	return {
 		strings,
 		value: {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: "core-test",
 			redis: {
 				get: async (key: string) => strings.get(key) ?? null,
 				set: async (key: string, value: string) => {
@@ -30,17 +32,17 @@ const context = (options: { failRedisWrites?: boolean } = {}) => {
 				del: async (key: string) => (strings.delete(key) ? 1 : 0),
 			},
 			logger: { warn: () => undefined, error: () => undefined },
-			supabase: {},
+			data: {},
 		} as never,
 	};
 };
 
 describe("public league trends repository", () => {
-	it("safely returns an empty catalog while its migration is unavailable", async () => {
+	it("returns an empty catalog when no public league is enabled", async () => {
 		let reads = 0;
 		const repository = createPublicLeagueTrendsRepository(
 			{
-				query: async () => ({ rows: [{ catalog: null }] }),
+				query: async () => ({ rows: [] }),
 			},
 			async () => {
 				reads += 1;
@@ -68,6 +70,7 @@ describe("public league trends repository", () => {
 							updated_at: "2026-08-08T00:00:00.000Z",
 							latest_event_id: 3,
 							total_entries: 125,
+							selection_revision: "2026-08-08T00:30:00.000Z",
 							catalog_revision: "2026-08-08T00:00:00.000Z",
 						},
 					],
@@ -121,6 +124,38 @@ describe("public league trends repository", () => {
 		revision = "2026-08-08T02:00:00.000Z";
 		expect(await repository.getSelectionStats(ctx.value, 7, 3, 12)).toEqual(emptyStats);
 		expect(reads).toBe(2);
+	});
+
+	it("invalidates the catalog when selection data is republished", async () => {
+		let selectionRevision = "2026-08-08T01:00:00.000Z";
+		const repository = createPublicLeagueTrendsRepository({
+			query: async (sql) => {
+				if (sql.includes("to_regclass"))
+					return { rows: [{ catalog: "public_league_trends_catalog" }] };
+				return {
+					rows: [
+						{
+							tournament_id: 7,
+							display_name: "Perth FPL",
+							sort_order: 1,
+							published_at: "2026-08-01T00:00:00.000Z",
+							updated_at: "2026-08-08T00:00:00.000Z",
+							latest_event_id: 3,
+							total_entries: 125,
+							catalog_revision: "2026-08-08T00:00:00.000Z",
+							selection_revision: selectionRevision,
+						},
+					],
+				};
+			},
+		});
+		const ctx = context();
+		expect(await repository.list(ctx.value)).toHaveLength(1);
+		expect(await repository.list(ctx.value)).toHaveLength(1);
+		selectionRevision = "2026-08-08T02:00:00.000Z";
+		expect(await repository.list(ctx.value)).toHaveLength(1);
+		// The third call must write a second cache entry under the new selection revision.
+		expect(ctx.strings.size).toBe(2);
 	});
 
 	it("returns public catalog rows when Redis cache writes fail", async () => {

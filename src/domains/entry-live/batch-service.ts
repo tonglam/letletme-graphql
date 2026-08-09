@@ -319,7 +319,7 @@ const computeSingleEntry = (
 
 		const defensiveContribution: number = safeNull(live?.defensiveContribution, 0);
 		const effectiveBonus = effectiveBonusByPlayer.get(pick.element);
-		const calculatedTotalPoints = calcElementLivePoints(elementType, live, effectiveBonus);
+		const calculatedTotalPoints = calcElementLivePoints(live, effectiveBonus);
 
 		return {
 			season: null,
@@ -515,9 +515,9 @@ export const entryLiveBatchService = {
 				? loadLiveBonusByPlayerId(context, eventId)
 				: Promise.resolve(new Map<number, number>()),
 			prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
-			prefetched?.teams ?? playersRepository.listTeamsFromRedis(context),
+			prefetched?.teams ?? playersRepository.listTeams(context),
 			// Phase 2 moved here: entry info HMGET
-			entriesService.getEntriesByIdsFromRedis(context, entryIds),
+			entriesService.getEntriesByIds(context, entryIds),
 			// Phase 3 moved here: picks + transfers (MGET cache or SQL)
 			entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
 			entryLiveRepository.getEntryEventTransfersByIds(context, entryIds, eventId),

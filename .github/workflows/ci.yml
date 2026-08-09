@@ -9,9 +9,7 @@ permissions:
 
 env:
   NODE_ENV: test
-  SUPABASE_URL: https://example.supabase.co
-  SUPABASE_KEY: test-supabase-key
-  DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+  DATABASE_URL: postgresql://graphql_ci:graphql_ci@127.0.0.1:5432/testdb
   REDIS_HOST: 127.0.0.1
   REDIS_PORT: "6379"
   REDIS_PASSWORD: ""
@@ -25,7 +23,7 @@ env:
   CORS_ORIGIN: http://localhost:3000
   CORS_CREDENTIALS: "false"
   TRUSTED_PROXY_HOPS: "0"
-  LEGACY_WECHAT_ISSUANCE_ENABLED: "false"
+  LEGACY_AUTH_VALIDATION_UNTIL: ""
 
 jobs:
   verify:
@@ -76,12 +74,22 @@ jobs:
           APP_ENV_FILE: .env.example
         run: docker compose config --quiet
 
-  integration:
+      - name: Verify GraphQL owns no business migrations
+        shell: bash
+        run: |
+          test ! -d migrations
+          ! grep -Eiq 'bun run (migrate|db:migrate|db:apply-sql)' \
+            .github/workflows/deploy.yml Dockerfile docker-compose.yml
+          ! grep -Eiq 'supabase|@supabase' package.json src/infra/env.ts src/infra/database.ts
+
+  database-contract:
     runs-on: ubuntu-latest
+    needs: verify
     services:
       postgres:
-        image: postgres:16.9-alpine@sha256:7c688148e5e156d0e86df7ba8ae5a05a2386aaec1e2ad8e6d11bdf10504b1fb7
+        image: postgres:15@sha256:6eb0add3b77c081df18aa518ce43df58fdcc40f2e6d868a6fd08038dc7acd425
         env:
+          POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: testdb
         ports:
@@ -101,31 +109,74 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout GraphQL
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - name: Checkout accepted Data Platform contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tonglam/letletme_data
+          ref: f509d2dcfac8e57d9bd5fb47fd0e90901e61789a
+          path: data-platform
           persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
 
-      - run: bun install --frozen-lockfile
+      - name: Install GraphQL dependencies
+        run: bun install --frozen-lockfile
 
-      - name: Bootstrap domain-owned dependencies
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/test-bootstrap.sql
+      - name: Install accepted Data Platform dependencies
+        working-directory: data-platform
+        run: bun install --frozen-lockfile
 
-      - name: Apply migrations twice
-        run: |
-          bun run migrate
-          bun run migrate
-          bun run migrate:status
-
-      - name: Exercise migration, auth, cache, and request boundaries
+      - name: Apply accepted Data Platform Drizzle baseline
+        working-directory: data-platform
         env:
-          RUN_MIGRATION_INTEGRATION: "true"
-        run: >-
-          bun test
-          tests/migrations/security.integration.test.ts
-          tests/http/security.test.ts
-          tests/graphql/limits.test.ts
-          tests/infra/season.test.ts
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: bun run db:migrate
+
+      - name: Provide plain-PG Supabase compatibility identities
+        env:
+          DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: |
+          psql "$DATA_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+          DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+          DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+          CREATE SCHEMA IF NOT EXISTS auth;
+          CREATE OR REPLACE FUNCTION auth.role()
+          RETURNS text
+          LANGUAGE sql
+          STABLE
+          AS $fn$ SELECT current_setting('request.jwt.claim.role', true) $fn$;
+          SQL
+
+      - name: Replay accepted Data Platform SQL contract twice
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: |
+          bun run db:apply-sql
+          bun run db:apply-sql
+          bun run db:migrate:status
+
+      - name: Create disposable read-only GraphQL login
+        env:
+          DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: |
+          psql "$DATA_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE graphql_ci
+            LOGIN PASSWORD 'graphql_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOBYPASSRLS;
+          GRANT letletme_graphql_reader TO graphql_ci;
+          SQL
+
+      - name: Validate startup against the real PG15 v3 catalog
+        run: bun run contract:check
+
+      - name: Exercise reader and fail-closed contract cases
+        run: bun test tests/infra/v3-read-client.test.ts tests/infra/database-contract.test.ts

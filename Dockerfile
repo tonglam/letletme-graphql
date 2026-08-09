@@ -16,8 +16,7 @@ COPY --from=deps --chown=bun:bun /app/package.json ./
 COPY --from=deps --chown=bun:bun /app/bun.lock ./
 COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
 COPY --chown=bun:bun src ./src
-COPY --chown=bun:bun scripts/migrate.ts ./scripts/migrate.ts
-COPY --chown=bun:bun migrations/forward ./migrations/forward
+COPY --chown=bun:bun scripts/check-database-contract.ts ./scripts/check-database-contract.ts
 
 USER bun
 

@@ -95,13 +95,13 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 }
 
 function createGraphQLContext(rows: HistoryRow[]): GraphQLContext {
-	const supabase = {
-		from: (_table: string) => createHistoryQueryBuilder(rows),
-	} as unknown as GraphQLContext["supabase"];
+	const data = {
+		read: (_table: string) => createHistoryQueryBuilder(rows),
+	} as unknown as GraphQLContext["data"];
 
 	const redis = {
 		type: async (): Promise<string> => "none",
-		get: async (key: string): Promise<string | null> => (key === "Season:active" ? "2526" : null),
+		get: async (): Promise<string | null> => null,
 		set: async (): Promise<string> => "OK",
 		hgetall: async (): Promise<Record<string, string>> => ({}),
 		keys: async (): Promise<string[]> => [],
@@ -114,7 +114,14 @@ function createGraphQLContext(rows: HistoryRow[]): GraphQLContext {
 	} as unknown as GraphQLContext["logger"];
 
 	return {
-		supabase,
+		database: {
+			query: async () => {
+				throw new Error("Unexpected database query");
+			},
+		} as never,
+		currentSeason: { seasonId: 2025, seasonCode: "2526" },
+		dataRevision: "core-history-test",
+		data,
 		redis,
 		logger,
 	};

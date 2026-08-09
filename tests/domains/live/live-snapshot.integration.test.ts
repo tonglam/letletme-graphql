@@ -1,638 +1,205 @@
 import { describe, expect, it } from "bun:test";
 import { graphql } from "graphql";
 import { schema } from "../../../src/graphql/schema";
-import type { GraphQLContext } from "../../../src/graphql/context";
+import {
+	buildCorePublication,
+	buildLivePublication,
+	buildSnapshotContext,
+	buildTestCoreData,
+	buildTestEventLives,
+	TestRedis,
+} from "../../helpers/data-publication";
 
-describe("liveSnapshot GraphQL contract", () => {
-	it("exposes revision, freshness, state, and completeness without reshaping metadata", async () => {
-		const metadata = JSON.stringify({
-			schemaVersion: 1,
-			season: "2526",
-			eventId: 33,
-			revision: "a".repeat(24),
+const buildLiveCore = () => {
+	const base = buildTestCoreData(1);
+	const fixtures = base.fixtures.map((fixture, index) =>
+		fixture.eventId === 1 && index === 0
+			? {
+					...fixture,
+					started: true,
+					minutes: 45,
+					teamHScore: 1,
+					teamAScore: 0,
+				}
+			: fixture
+	);
+	return { ...base, fixtures };
+};
+
+const buildLiveEventRows = (core: ReturnType<typeof buildLiveCore>) =>
+	buildTestEventLives(core, 1).map((row) =>
+		row.elementId === 1
+			? { ...row, minutes: 45, goalsScored: 1, starts: true, totalPoints: 8 }
+			: row
+	);
+
+const buildPartiallySettledLiveCore = () => {
+	const core = buildLiveCore();
+	const firstFixture = core.fixtures.find((fixture) => fixture.eventId === 1);
+	return {
+		...core,
+		fixtures: core.fixtures.map((fixture) =>
+			fixture.id === firstFixture?.id
+				? { ...fixture, started: true, finished: true, finishedProvisional: false }
+				: fixture
+		),
+	};
+};
+
+describe("liveSnapshot GraphQL v3 contract", () => {
+	it("exposes the validated publication metadata and event-live data", async () => {
+		const core = buildLiveCore();
+		const live = buildLivePublication(core, 1, "2627", 8, {
+			eventLives: buildLiveEventRows(core),
 			state: "live",
-			publishedAt: "2025-08-15T20:00:00.000Z",
-			checkedAt: "2025-08-15T20:01:00.000Z",
-			eventLiveCount: 700,
-			fixtureCount: 10,
-			fixtureTeamCount: 20,
-			bonusTeamCount: 4,
 		});
-		const context = {
-			redis: {
-				get: async (key: string): Promise<string | null> => {
-					if (key === "Season:active") return "2526";
-					if (key === "LiveSnapshotMeta:2526:33") return metadata;
-					return null;
-				},
-			},
-			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
-		} as unknown as GraphQLContext;
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), live)
+		);
 
 		const result = await graphql({
 			schema,
 			source: `
 				query Snapshot($eventId: Int!) {
-					liveSnapshot(eventId: $eventId) {
-						schemaVersion season eventId revision state
-						publishedAt checkedAt eventLiveCount fixtureCount
+			liveSnapshot(eventId: $eventId) {
+				schemaVersion season eventId revision state
+				publishedAt checkedAt eventLiveCount fixtureCount
 						fixtureTeamCount bonusTeamCount
+					}
+					eventLive(eventId: $eventId) {
+						performances { totalPoints }
+						topPerformers(limit: 1) { totalPoints }
 					}
 				}
 			`,
-			variableValues: { eventId: 33 },
+			variableValues: { eventId: 1 },
 			contextValue: context,
 		});
 
 		expect(result.errors).toBeUndefined();
 		expect(result.data?.liveSnapshot).toEqual({
-			schemaVersion: 1,
-			season: "2526",
-			eventId: 33,
-			revision: "a".repeat(24),
+			schemaVersion: 3,
+			season: "2627",
+			eventId: 1,
+			revision: "8",
 			state: "LIVE",
-			publishedAt: "2025-08-15T20:00:00.000Z",
-			checkedAt: "2025-08-15T20:01:00.000Z",
-			eventLiveCount: 700,
-			fixtureCount: 10,
-			fixtureTeamCount: 20,
-			bonusTeamCount: 4,
-		});
-	});
-
-	it("infers the current event when the optional eventId is omitted", async () => {
-		const metadata = JSON.stringify({
-			schemaVersion: 1,
-			season: "2526",
-			eventId: 33,
-			revision: "b".repeat(24),
-			state: "scheduled",
-			publishedAt: "2025-08-15T18:00:00.000Z",
-			checkedAt: "2025-08-15T18:01:00.000Z",
-			eventLiveCount: 700,
+			publishedAt: "2026-08-09T01:00:00.000Z",
+			checkedAt: "2026-08-09T01:00:00.000Z",
+			eventLiveCount: 220,
 			fixtureCount: 10,
 			fixtureTeamCount: 20,
 			bonusTeamCount: 0,
 		});
-		const context = {
-			redis: {
-				get: async (key: string): Promise<string | null> => {
-					if (key === "event:current") return JSON.stringify({ id: 33, isCurrent: true });
-					if (key === "Season:active") return "2526";
-					if (key === "LiveSnapshotMeta:2526:33") return metadata;
-					return null;
-				},
-			},
-			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
-		} as unknown as GraphQLContext;
-
-		const result = await graphql({
-			schema,
-			source: `query { liveSnapshot { eventId revision state bonusTeamCount } }`,
-			contextValue: context,
-		});
-
-		expect(result.errors).toBeUndefined();
-		expect(result.data?.liveSnapshot).toEqual({
-			eventId: 33,
-			revision: "b".repeat(24),
-			state: "SCHEDULED",
-			bonusTeamCount: 0,
-		});
+		const eventLive = result.data?.eventLive as {
+			performances: Array<{ totalPoints: number }>;
+			topPerformers: Array<{ totalPoints: number }>;
+		};
+		expect(eventLive.performances).toHaveLength(220);
+		expect(eventLive.topPerformers[0]?.totalPoints).toBeGreaterThan(0);
 	});
 
-	it("pins one inferred current event across sibling root fields", async () => {
-		const metadata = JSON.stringify({
-			schemaVersion: 1,
-			season: "2526",
-			eventId: 33,
-			revision: "d".repeat(24),
+	it("pins one current event and one live publication across sibling roots", async () => {
+		const core = buildLiveCore();
+		const live = buildLivePublication(core, 1, "2627", 8, {
+			eventLives: buildLiveEventRows(core),
 			state: "live",
-			publishedAt: "2025-08-15T20:00:00.000Z",
-			checkedAt: "2025-08-15T20:01:00.000Z",
-			eventLiveCount: 700,
-			fixtureCount: 10,
-			fixtureTeamCount: 20,
-			bonusTeamCount: 2,
 		});
-		let currentEventReads = 0;
-		const context = {
-			redis: {
-				get: async (key: string): Promise<string | null> => {
-					if (key === "event:current") {
-						currentEventReads += 1;
-						return JSON.stringify({ id: currentEventReads === 1 ? 33 : 34, isCurrent: true });
-					}
-					if (key === "Season:active") return "2526";
-					if (key === "LiveSnapshotMeta:2526:33") return metadata;
-					return null;
-				},
-			},
-			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
-		} as unknown as GraphQLContext;
+		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
+		const originalGet = redis.get;
+		let liveManifestReads = 0;
+		redis.get = async (key: string) => {
+			if (key === `llm:v3:data:fpl:live:2627:1:active`) liveManifestReads += 1;
+			return originalGet(key);
+		};
+		const context = buildSnapshotContext(redis);
 
 		const result = await graphql({
 			schema,
 			source: `query {
 				first: liveSnapshot { eventId revision }
 				second: liveSnapshot { eventId revision }
+				eventLive(eventId: 1) { topPerformers(limit: 1) { totalPoints } }
 			}`,
 			contextValue: context,
 		});
 
 		expect(result.errors).toBeUndefined();
-		expect(result.data?.first).toEqual({ eventId: 33, revision: "d".repeat(24) });
-		expect(result.data?.second).toEqual({ eventId: 33, revision: "d".repeat(24) });
-		expect(currentEventReads).toBe(1);
+		expect(result.data?.first).toEqual({ eventId: 1, revision: "8" });
+		expect(result.data?.second).toEqual({ eventId: 1, revision: "8" });
+		expect(liveManifestReads).toBe(1);
 	});
 
-	it("shares one final metadata read across explicit snapshot aliases", async () => {
-		let metadataReads = 0;
-		const metadata = (revision: string) =>
-			JSON.stringify({
-				schemaVersion: 1,
-				season: "2526",
-				eventId: 33,
-				revision,
-				state: "live",
-				publishedAt: "2025-08-15T20:00:00.000Z",
-				checkedAt: "2025-08-15T20:01:00.000Z",
-				eventLiveCount: 700,
-				fixtureCount: 10,
-				fixtureTeamCount: 20,
-				bonusTeamCount: 2,
-			});
-		const context = {
-			redis: {
-				get: async (key: string): Promise<string | null> => {
-					if (key === "Season:active") return "2526";
-					if (key === "LiveSnapshotMeta:2526:33") {
-						metadataReads += 1;
-						return metadata(metadataReads === 1 ? "e".repeat(24) : "f".repeat(24));
-					}
-					return null;
-				},
-			},
-			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
-		} as unknown as GraphQLContext;
-
-		const result = await graphql({
-			schema,
-			source: `query {
-				first: liveSnapshot(eventId: 33) { revision }
-				second: liveSnapshot(eventId: 33) { revision }
-			}`,
-			contextValue: context,
-		});
-
-		expect(result.errors).toBeUndefined();
-		expect(result.data?.first).toEqual({ revision: "e".repeat(24) });
-		expect(result.data?.second).toEqual({ revision: "e".repeat(24) });
-		expect(metadataReads).toBe(1);
-	});
-
-	it("retries live explanations on the new revision before exposing snapshot metadata", async () => {
-		const revisions = ["1".repeat(24), "2".repeat(24)] as const;
-		let metadataReads = 0;
-		const metadata = (revision: string) =>
-			JSON.stringify({
-				schemaVersion: 1,
-				season: "2526",
-				eventId: 33,
-				revision,
-				state: "live",
-				publishedAt: "2025-08-15T20:00:00.000Z",
-				checkedAt: "2025-08-15T20:01:00.000Z",
-				eventLiveCount: 700,
-				fixtureCount: 10,
-				fixtureTeamCount: 20,
-				bonusTeamCount: 2,
-			});
-		const explain = (totalPoints: number) =>
-			JSON.stringify({
-				eventId: 33,
-				elementId: 1,
-				modified: null,
-				stats: { totalPoints },
-				breakdown: [],
-				selectedBy: null,
-			});
-		const context = {
-			redis: {
-				get: async (key: string): Promise<string | null> => {
-					if (key === "Season:active") return "2526";
-					if (key === "LiveSnapshotMeta:2526:33") {
-						metadataReads += 1;
-						return metadata(metadataReads === 1 ? revisions[0] : revisions[1]);
-					}
-					if (key === `gql:v2:2526:live:explain:shape2:33:1:full:revision:${revisions[0]}`) {
-						return explain(7);
-					}
-					if (key === `gql:v2:2526:live:explain:shape2:33:1:full:revision:${revisions[1]}`) {
-						return explain(14);
-					}
-					return null;
-				},
-			},
-			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
-		} as unknown as GraphQLContext;
-
-		const result = await graphql({
-			schema,
-			source: `query {
-				eventLiveExplain(eventId: 33, elementId: 1) { stats { totalPoints } }
-				liveSnapshot(eventId: 33) { revision }
-			}`,
-			contextValue: context,
-		});
-
-		expect(result.errors).toBeUndefined();
-		expect(result.data?.eventLiveExplain).toEqual({ stats: { totalPoints: 14 } });
-		expect(result.data?.liveSnapshot).toEqual({ revision: revisions[1] });
-		expect(metadataReads).toBe(3);
-	});
-
-	it("serves a bounded explanation batch under one snapshot decision", async () => {
-		const revision = "3".repeat(24);
-		let metadataReads = 0;
-		const metadata = JSON.stringify({
-			schemaVersion: 1,
-			season: "2526",
-			eventId: 33,
-			revision,
+	it("keeps a gameweek live after one fixture settles while another is pending", async () => {
+		const core = buildPartiallySettledLiveCore();
+		const live = buildLivePublication(core, 1, "2627", 8, {
+			eventLives: buildLiveEventRows(core),
 			state: "live",
-			publishedAt: "2025-08-15T20:00:00.000Z",
-			checkedAt: "2025-08-15T20:01:00.000Z",
-			eventLiveCount: 700,
-			fixtureCount: 10,
-			fixtureTeamCount: 20,
-			bonusTeamCount: 2,
 		});
-		const explain = (elementId: number, totalPoints: number) =>
-			JSON.stringify({
-				eventId: 33,
-				elementId,
-				modified: null,
-				stats: { totalPoints },
-				breakdown: [],
-				contributions: [
-					{
-						identifier: "minutes",
-						value: 45,
-						points: 1,
-						pointsModification: null,
-					},
-				],
-				selectedBy: null,
-			});
-		const cache = new Map([
-			[`gql:v2:2526:live:explain:shape2:33:1:contributions:revision:${revision}`, explain(1, 6)],
-			[`gql:v2:2526:live:explain:shape2:33:2:contributions:revision:${revision}`, explain(2, 9)],
-		]);
-		const context = {
-			redis: {
-				get: async (key: string): Promise<string | null> => {
-					if (key === "Season:active") return "2526";
-					if (key === "LiveSnapshotMeta:2526:33") {
-						metadataReads += 1;
-						return metadata;
-					}
-					return cache.get(key) ?? null;
-				},
-				mget: async (...keys: string[]): Promise<Array<string | null>> =>
-					keys.map((key) => cache.get(key) ?? null),
-			},
-			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase: {},
-		} as unknown as GraphQLContext;
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), live)
+		);
 
 		const result = await graphql({
 			schema,
-			source: `query {
-				eventLiveExplains(eventId: 33, elementIds: [1, 2]) {
-					elementId
-					contributions { identifier value points }
-				}
-				liveSnapshot(eventId: 33) { revision }
-			}`,
+			source: `query { liveSnapshot(eventId: 1) { state } }`,
 			contextValue: context,
 		});
 
 		expect(result.errors).toBeUndefined();
-		expect(result.data?.eventLiveExplains).toEqual([
-			{
-				elementId: 1,
-				contributions: [{ identifier: "minutes", value: 45, points: 1 }],
-			},
-			{
-				elementId: 2,
-				contributions: [{ identifier: "minutes", value: 45, points: 1 }],
-			},
-		]);
-		expect(result.data?.liveSnapshot).toEqual({ revision });
-		expect(metadataReads).toBe(2);
+		expect(result.data?.liveSnapshot).toEqual({ state: "LIVE" });
 	});
 
-	it("batches selectedBy without dropping player_stats-only explanations", async () => {
-		const revision = "4".repeat(24);
-		const metadata = JSON.stringify({
-			schemaVersion: 1,
-			season: "2526",
-			eventId: 33,
-			revision,
+	it("falls the whole live dataset back to one coherent PostgreSQL snapshot", async () => {
+		const core = buildLiveCore();
+		const eventLives = buildLiveEventRows(core);
+		const live = buildLivePublication(core, 1, "2627", 8, {
+			eventLives,
 			state: "live",
-			publishedAt: "2025-08-15T20:00:00.000Z",
-			checkedAt: "2025-08-15T20:01:00.000Z",
-			eventLiveCount: 700,
-			fixtureCount: 10,
-			fixtureTeamCount: 20,
-			bonusTeamCount: 2,
 		});
-		const fromCalls: string[] = [];
-		const hmgetCalls: string[] = [];
-		const supabase = {
-			from: (table: string) => {
-				fromCalls.push(table);
-				const result = {
-					data:
-						table === "player_stats"
-							? [
-									{ event_id: 33, element_id: 1, total_points: 3, selected_by_percent: 12.5 },
-									{ event_id: 33, element_id: 2, total_points: 4, selected_by_percent: 7.25 },
-								]
-							: [],
-					error: null,
+		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
+		const brokenSibling = live.manifest.items.find((item) => item.name === "liveFixtures")!;
+		redis.values.delete(brokenSibling.key);
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return {
+					rows: [
+						{
+							authority_count: "1",
+							publication_id: "00000000-0000-4000-8000-000000000044",
+							revision: "44",
+							schema_version: "v3",
+							plan_version: "3.2.5",
+							source_checked_at: "2026-08-09T01:02:00.000Z",
+							published_at: "2026-08-09T01:03:00.000Z",
+							event_checked_at: "2026-08-09T01:02:00.000Z",
+							event_lives: eventLives,
+							fixtures: live.values.fixtures,
+						},
+					],
 				};
-				const builder = {
-					select: () => builder,
-					eq: () => builder,
-					in: async () => result,
-				};
-				return builder;
 			},
-		};
-		const context = {
-			redis: {
-				get: async (key: string): Promise<string | null> => {
-					if (key === "Season:active") return "2526";
-					if (key === "LiveSnapshotMeta:2526:33") return metadata;
-					return null;
-				},
-				mget: async (...keys: string[]): Promise<Array<string | null>> => keys.map(() => null),
-				hmget: async (key: string, ...fields: string[]): Promise<Array<string | null>> => {
-					hmgetCalls.push(key);
-					return fields.map(() => null);
-				},
-				set: async (): Promise<"OK"> => "OK",
-				del: async (): Promise<number> => 0,
-				hset: async (): Promise<number> => 0,
-				expire: async (): Promise<number> => 1,
-			},
-			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-			supabase,
-		} as unknown as GraphQLContext;
+		});
 
 		const result = await graphql({
 			schema,
 			source: `query {
-				eventLiveExplains(eventId: 33, elementIds: [1, 2]) {
-					elementId
-					selectedBy
-				}
+			liveSnapshot(eventId: 1) { revision state publishedAt eventLiveCount fixtureCount }
+				eventLive(eventId: 1) { performances { totalPoints } }
 			}`,
 			contextValue: context,
 		});
 
 		expect(result.errors).toBeUndefined();
-		expect(result.data?.eventLiveExplains).toEqual([
-			{ elementId: 1, selectedBy: 12.5 },
-			{ elementId: 2, selectedBy: 7.25 },
-		]);
-		expect(fromCalls).toEqual(["player_stats", "event_live_explains"]);
-		expect(hmgetCalls).toEqual(["EventLiveExplainV2:2526:33", "EventLiveExplain:2526:33"]);
-	});
-
-	it("coordinates public event fixtures with snapshot fallback for the operation", async () => {
-		const metadata = JSON.stringify({
-			schemaVersion: 1,
-			season: "2526",
-			eventId: 33,
-			revision: "1".repeat(24),
-			state: "live",
-			publishedAt: "2025-08-15T20:00:00.000Z",
-			checkedAt: "2025-08-15T20:01:00.000Z",
-			eventLiveCount: 700,
-			fixtureCount: 2,
-			fixtureTeamCount: 4,
-			bonusTeamCount: 2,
+		expect(result.data?.liveSnapshot).toEqual({
+			revision: `db-${Date.parse("2026-08-09T01:02:00.000Z")}`,
+			state: "LIVE",
+			publishedAt: "2026-08-09T01:03:00.000Z",
+			eventLiveCount: 220,
+			fixtureCount: 10,
 		});
-		const context = {
-			redis: {
-				get: async (key: string): Promise<string | null> => {
-					if (key === "Season:active") return "2526";
-					if (key === "LiveSnapshotMeta:2526:33") return metadata;
-					return null;
-				},
-				hgetall: async () => ({
-					"101": JSON.stringify({
-						id: 101,
-						code: 101,
-						event: 33,
-						finished: false,
-						finishedProvisional: false,
-						kickoffTime: null,
-						minutes: 45,
-						started: true,
-						teamH: 1,
-						teamA: 2,
-						teamHScore: 1,
-						teamAScore: 0,
-						teamHDifficulty: 2,
-						teamADifficulty: 4,
-					}),
-				}),
-			},
-			supabase: {
-				from: () => ({
-					select: () => ({
-						eq: () => ({
-							order: async () => ({
-								data: [
-									{
-										id: 101,
-										code: 101,
-										event_id: 33,
-										finished: false,
-										finished_provisional: false,
-										kickoff_time: null,
-										minutes: 46,
-										started: true,
-										team_h_id: 1,
-										team_a_id: 2,
-										team_h_score: 2,
-										team_a_score: 0,
-										team_h_difficulty: 2,
-										team_a_difficulty: 4,
-									},
-								],
-								error: null,
-							}),
-						}),
-					}),
-				}),
-			},
-			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-		} as unknown as GraphQLContext;
-
-		const result = await graphql({
-			schema,
-			source: `query {
-				eventFixtures(eventId: 33) { id code minutes homeScore }
-				liveSnapshot(eventId: 33) { revision }
-			}`,
-			contextValue: context,
-		});
-
-		expect(result.errors).toBeUndefined();
-		expect(result.data?.eventFixtures).toEqual([{ id: 101, code: 101, minutes: 46, homeScore: 2 }]);
-		expect(result.data?.liveSnapshot).toBeNull();
-	});
-
-	it("does not report a Redis revision when live scores reuse its database fallback cache", async () => {
-		const revision = "2".repeat(24);
-		const metadata = JSON.stringify({
-			schemaVersion: 1,
-			season: "2526",
-			eventId: 33,
-			revision,
-			state: "live",
-			publishedAt: "2025-08-15T20:00:00.000Z",
-			checkedAt: "2025-08-15T20:01:00.000Z",
-			eventLiveCount: 1,
-			fixtureCount: 1,
-			fixtureTeamCount: 2,
-			bonusTeamCount: 0,
-		});
-		const fallback = JSON.stringify([
-			{
-				eventId: 33,
-				playerId: 1,
-				minutes: 90,
-				goalsScored: 1,
-				assists: 0,
-				cleanSheets: 0,
-				goalsConceded: 0,
-				ownGoals: 0,
-				penaltiesSaved: 0,
-				penaltiesMissed: 0,
-				yellowCards: 0,
-				redCards: 0,
-				saves: 0,
-				bonus: 0,
-				bps: 20,
-				starts: true,
-				defensiveContribution: 0,
-				expectedGoals: null,
-				expectedAssists: null,
-				expectedGoalInvolvements: null,
-				expectedGoalsConceded: null,
-				inDreamTeam: false,
-				totalPoints: 9,
-			},
-		]);
-		const context = {
-			redis: {
-				get: async (key: string): Promise<string | null> => {
-					if (key === "Season:active") return "2526";
-					if (key === "LiveSnapshotMeta:2526:33") return metadata;
-					if (key === `gql:v2:2526:live:all:33:revision:${revision}:fallback15`) {
-						return fallback;
-					}
-					return null;
-				},
-				hgetall: async (key: string): Promise<Record<string, string>> =>
-					key === "Fixtures:2526:33"
-						? {
-								"101": JSON.stringify({
-									id: 101,
-									code: 101,
-									event: 33,
-									finished: false,
-									finishedProvisional: false,
-									kickoffTime: null,
-									minutes: 45,
-									started: true,
-									teamH: 1,
-									teamA: 2,
-									teamHScore: 1,
-									teamAScore: 0,
-									teamHDifficulty: 2,
-									teamADifficulty: 4,
-								}),
-							}
-						: {},
-				hmget: async (): Promise<string[]> => [
-					JSON.stringify({
-						id: 1,
-						code: 1,
-						webName: "Player",
-						teamId: 1,
-						type: 3,
-						price: 50,
-						startPrice: 50,
-					}),
-				],
-			},
-			supabase: {
-				from: () => ({
-					select: () => ({
-						eq: () => ({
-							order: async () => ({
-								data: [
-									{
-										id: 101,
-										code: 101,
-										event_id: 33,
-										finished: false,
-										finished_provisional: false,
-										kickoff_time: null,
-										minutes: 46,
-										started: true,
-										team_h_id: 1,
-										team_a_id: 2,
-										team_h_score: 2,
-										team_a_score: 0,
-										team_h_difficulty: 2,
-										team_a_difficulty: 4,
-									},
-								],
-								error: null,
-							}),
-						}),
-					}),
-				}),
-			},
-			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-		} as unknown as GraphQLContext;
-
-		const result = await graphql({
-			schema,
-			source: `query {
-				liveScores(eventId: 33) { totalPoints }
-				eventFixtures(eventId: 33) { minutes homeScore }
-				liveSnapshot(eventId: 33) { revision }
-			}`,
-			contextValue: context,
-		});
-
-		expect(result.errors).toBeUndefined();
-		expect(result.data?.liveScores).toEqual([{ totalPoints: 7 }]);
-		expect(result.data?.eventFixtures).toEqual([{ minutes: 46, homeScore: 2 }]);
-		expect(result.data?.liveSnapshot).toBeNull();
+		expect((result.data?.eventLive as { performances: unknown[] }).performances).toHaveLength(220);
+		expect(databaseReads).toBe(1);
 	});
 });
