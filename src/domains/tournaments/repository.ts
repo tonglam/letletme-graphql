@@ -1084,7 +1084,12 @@ export const tournamentsRepository: TournamentsRepository = {
 			context,
 			tournamentId
 		);
-		await context.redis.set(cacheKey, JSON.stringify(entryIds), "EX", env.CACHE_TTL_SECONDS);
+		await writeCacheBestEffort(
+			context,
+			cacheKey,
+			JSON.stringify(entryIds),
+			"Failed to write tournament entry IDs cache"
+		);
 		return entryIds;
 	},
 
@@ -1367,7 +1372,12 @@ export const tournamentsRepository: TournamentsRepository = {
 			tournamentAutoSubRank: snapshotRow?.tournament_auto_sub_rank ?? null,
 		};
 
-		await context.redis.set(cacheKey, JSON.stringify(summary), "EX", env.CACHE_TTL_SECONDS);
+		await writeCacheBestEffort(
+			context,
+			cacheKey,
+			JSON.stringify(summary),
+			"Failed to write tournament ranking summary cache"
+		);
 		return summary;
 	},
 
@@ -1592,7 +1602,12 @@ export const tournamentsRepository: TournamentsRepository = {
 			);
 
 		if (readyTournamentIds.size === tournamentIds.length) {
-			await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
+			await writeCacheBestEffort(
+				context,
+				cacheKey,
+				JSON.stringify(results),
+				"Failed to write entry H2H results cache"
+			);
 		}
 		return results;
 	},

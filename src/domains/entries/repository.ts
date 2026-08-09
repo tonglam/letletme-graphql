@@ -327,6 +327,17 @@ export const entriesRepository: EntriesRepository = {
 				const value = values[i];
 				if (value) {
 					const parsed = JSON.parse(value) as Record<string, unknown>;
+					const hasValidLastEventId =
+						parsed.lastEventId === null ||
+						(typeof parsed.lastEventId === "number" && Number.isFinite(parsed.lastEventId));
+					const hasValidBaseline =
+						hasValidLastEventId &&
+						(typeof parsed.lastEventId !== "number" ||
+							(typeof parsed.overallPoints === "number" && Number.isFinite(parsed.overallPoints)));
+					if (!hasValidBaseline) {
+						missingIds.push(uniqueIds[i]);
+						continue;
+					}
 					results.set(uniqueIds[i], {
 						id: uniqueIds[i],
 						entryName: String(parsed.entryName ?? ""),

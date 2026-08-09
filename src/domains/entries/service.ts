@@ -320,7 +320,14 @@ async function buildLiveMapForEvents(
 			.select(EVENT_LIVES_COLS)
 			.eq("event_id", eventId)
 			.in("element_id", requestedIds);
-		if (!error && data) {
+		if (error) {
+			context.logger.error(
+				{ err: error, eventId, entryPlayerIds: requestedIds },
+				"Failed to fetch live transfer performance fallback"
+			);
+			throw new Error("Failed to fetch live transfer performance fallback", { cause: error });
+		}
+		if (data) {
 			for (const row of data as unknown as Record<string, unknown>[]) {
 				const perf = mapSyncJobLiveRow(row);
 				if (perf) result.set(livePerformanceKey(perf.eventId, perf.playerId), perf);

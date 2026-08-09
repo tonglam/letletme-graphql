@@ -10,9 +10,10 @@ export async function buildTeamMap(context: GraphQLContext): Promise<Map<number,
 	try {
 		const hash = await context.redis.hgetall(hashKey);
 		if (hash && Object.keys(hash).length > 0) {
-			for (const value of Object.values(hash)) {
+			for (const [hashField, value] of Object.entries(hash)) {
 				const parsed = JSON.parse(value) as Record<string, unknown>;
-				const team = parseTeam(parsed);
+				const team = parseTeam(parsed, hashField);
+				if (!team) throw new Error("Malformed Team hash row");
 				result.set(team.id, team);
 			}
 			return result;
@@ -54,12 +55,24 @@ const parseNullableNumber = (value: unknown): number | null => {
 	return Number.isFinite(parsed) ? parsed : null;
 };
 
-function parseTeam(parsed: Record<string, unknown>): Team {
+function parseTeam(parsed: Record<string, unknown>, hashField?: string): Team | null {
+	const id = Number(parsed.id ?? 0);
+	const name = String(parsed.name ?? "").trim();
+	const shortName = String(parsed.shortName ?? parsed.short_name ?? "").trim();
+	if (
+		!Number.isInteger(id) ||
+		id <= 0 ||
+		(hashField !== undefined && hashField !== String(id)) ||
+		name.length === 0 ||
+		shortName.length === 0
+	) {
+		return null;
+	}
 	return {
-		id: Number(parsed.id ?? 0),
+		id,
 		code: Number(parsed.code ?? 0),
-		name: String(parsed.name ?? ""),
-		shortName: String(parsed.shortName ?? parsed.short_name ?? ""),
+		name,
+		shortName,
 		strength: parseNullableNumber(parsed.strength),
 		position: Number(parsed.position ?? 0),
 		points: Number(parsed.points ?? 0),

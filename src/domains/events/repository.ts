@@ -1,5 +1,6 @@
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
+import { MAX_EVENT_ID } from "../../infra/config";
 import { getCurrentEventFromRedis } from "../../infra/event";
 import { getCurrentSeason } from "../../infra/season";
 
@@ -349,14 +350,21 @@ export const eventsRepository: EventsRepository = {
 			if (rawEvents.length > 0) {
 				const parsedEvents = rawEvents.map(parseEventFromRedisJson);
 				if (parsedEvents.every((event): event is Event => event !== null)) {
-					const resolved = resolveCurrentAndNext(parsedEvents.map(toEventMetadata), current?.id);
-					if (resolved.current || resolved.next) {
-						return {
-							season,
-							currentEvent: resolved.current?.id ?? null,
-							nextEvent: resolved.next?.id ?? null,
-							nextUtcDeadline: resolved.next?.deadlineTime ?? null,
-						};
+					const pointerCovered =
+						current === null ||
+						(parsedEvents.some((event) => event.id === current.id) &&
+							(current.id >= MAX_EVENT_ID ||
+								parsedEvents.some((event) => event.id === current.id + 1)));
+					if (pointerCovered) {
+						const resolved = resolveCurrentAndNext(parsedEvents.map(toEventMetadata), current?.id);
+						if (resolved.current || resolved.next) {
+							return {
+								season,
+								currentEvent: resolved.current?.id ?? null,
+								nextEvent: resolved.next?.id ?? null,
+								nextUtcDeadline: resolved.next?.deadlineTime ?? null,
+							};
+						}
 					}
 				} else {
 					context.logger.warn({ season }, "Event hash contains malformed metadata rows");
