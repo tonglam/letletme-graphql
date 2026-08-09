@@ -5,10 +5,7 @@ import {
 } from "../../../src/domains/player-state/release-gate";
 
 describe("Player State release gate", () => {
-	it("withholds directional FPL-only trends after the v3 completed-season walk-forward", () => {
-		expect(PLAYER_STATE_RELEASE_EVIDENCE.engineVersion).toBe("player-state-v3");
-		expect(PLAYER_STATE_RELEASE_EVIDENCE.observations).toBe(41_425);
-		expect(PLAYER_STATE_RELEASE_EVIDENCE.reason).toBe("FPL_V3_WALK_FORWARD_ORDERING_FAILED");
+	it("withholds directional FPL-only trends after a failed sealed walk-forward", () => {
 		expect(PLAYER_STATE_RELEASE_EVIDENCE.released).toBe(false);
 		expect(applyPlayerStateReleaseGate("RISING", false)).toEqual({
 			trend: "UNKNOWN",

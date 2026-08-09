@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
-import { database } from "./database";
+import { dbPool } from "./db-pool";
+import { logger } from "./logger";
 import { isLegacyAuthValidationOpen, type AuthUser } from "./principal";
 
 type DeviceSessionUserRow = {
@@ -20,7 +21,7 @@ export async function validateDeviceToken(token: string): Promise<AuthUser | nul
 	if (!isLegacyAuthValidationOpen()) return null;
 
 	const tokenHash = hashDeviceToken(token);
-	const result = await database.query<DeviceSessionUserRow>(
+	const result = await dbPool.query<DeviceSessionUserRow>(
 		`SELECT
          ds.user_id,
          ds.device_id,
@@ -37,6 +38,12 @@ export async function validateDeviceToken(token: string): Promise<AuthUser | nul
 
 	const row = result.rows[0];
 	if (!row) return null;
+
+	void dbPool
+		.query("UPDATE device_sessions SET last_active = NOW() WHERE token_hash = $1", [tokenHash])
+		.catch((err: unknown) => {
+			logger.warn({ err }, "Failed to update device session last_active");
+		});
 
 	return {
 		id: row.user_id,

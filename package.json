@@ -8,7 +8,9 @@
 		"start": "bun src/index.ts",
 		"test": "bun test",
 		"test:watch": "bun test --watch src",
-		"contract:check": "bun scripts/check-database-contract.ts",
+		"migrate": "bun scripts/migrate.ts",
+		"migrate:status": "bun scripts/migrate.ts --status",
+		"preflight:snapshot": "bun scripts/preflight-snapshot.ts",
 		"seed:mini-program-notice": "bun scripts/seed-mini-program-notice-redis.ts",
 		"lint": "eslint src tests scripts",
 		"lint:fix": "eslint src tests scripts --fix",
@@ -18,6 +20,7 @@
 	"dependencies": {
 		"@apollo/server": "5.5.1",
 		"@graphql-tools/schema": "^10.0.38",
+		"@supabase/supabase-js": "^2.110.7",
 		"graphql": "^16.14.2",
 		"graphql-depth-limit": "^1.1.0",
 		"graphql-scalars": "^1.25.0",

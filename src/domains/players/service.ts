@@ -3,7 +3,6 @@ import type {
 	Player,
 	PlayersFilter,
 	PlayersForPickerPayload,
-	PlayerPickerSort,
 	Team,
 	TopTransfersEnriched,
 } from "./repository";
@@ -48,10 +47,9 @@ export const playersService = {
 		limit: number,
 		cursor: number | null | undefined,
 		search: string | null = null,
-		filter?: PlayersFilter | null,
-		sort: PlayerPickerSort = "TOTAL_POINTS_DESC"
+		filter?: PlayersFilter | null
 	): Promise<PlayersForPickerPayload> {
-		return playersRepository.getPlayersForPicker(context, limit, cursor, search, filter, sort);
+		return playersRepository.getPlayersForPicker(context, limit, cursor, search, filter);
 	},
 
 	getTeamById(context: GraphQLContext, id: number): Promise<Team | null> {

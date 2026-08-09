@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	buildPlayerStateProviderRevision,
+	playerStateHistoryStorageAvailable,
 	resolvePlayerStateMappingStatus,
 	type ProviderLinkRow,
 } from "../../../src/domains/player-state/coverage";
@@ -51,5 +52,23 @@ describe("Player State provider contract", () => {
 
 		expect(missing.stale).toBe(false);
 		expect(old.stale).toBe(true);
+	});
+
+	it("requires every FPL history parent before reading sealed cohorts", () => {
+		expect(
+			playerStateHistoryStorageAvailable({
+				playerHistory: "fpl_player_history",
+				playerStatHistory: "fpl_player_stat_history",
+				eventLiveHistory: "fpl_event_live_history",
+			})
+		).toBe(true);
+		expect(
+			playerStateHistoryStorageAvailable({
+				playerHistory: "fpl_player_history",
+				playerStatHistory: "fpl_player_stat_history",
+				eventLiveHistory: null,
+			})
+		).toBe(false);
+		expect(playerStateHistoryStorageAvailable(null)).toBe(false);
 	});
 });

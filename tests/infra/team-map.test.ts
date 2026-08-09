@@ -1,23 +1,32 @@
 import { describe, expect, it } from "bun:test";
 import { buildTeamMap } from "../../src/infra/team-map";
-import {
-	buildCorePublication,
-	buildSnapshotContext,
-	buildTestCoreData,
-	TestRedis,
-} from "../helpers/data-publication";
+import type { GraphQLContext } from "../../src/graphql/context";
 
-describe("team map v3 core publication", () => {
-	it("preserves nullable preseason strength and request-pins the map", async () => {
-		const core = buildTestCoreData(1);
-		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
+describe("team map preseason compatibility", () => {
+	it("preserves a nullable team strength from Redis", async () => {
+		const context = {
+			redis: {
+				get: async () => "2627",
+				hgetall: async () => ({
+					"1": JSON.stringify({
+						id: 1,
+						code: 3,
+						name: "Arsenal",
+						shortName: "ARS",
+						strength: null,
+						position: 0,
+					}),
+				}),
+			} as never,
+			logger: {
+				warn: () => undefined,
+				error: () => undefined,
+			} as never,
+		} as unknown as GraphQLContext;
 
-		const first = await buildTeamMap(context);
-		const second = await buildTeamMap(context);
+		const teams = await buildTeamMap(context);
 
-		expect(first).toEqual(second);
-		expect(first.size).toBe(20);
-		expect(first.get(1)?.strength).toBeNull();
-		expect(first.get(1)?.position).toBe(1);
+		expect(teams.get(1)?.strength).toBeNull();
+		expect(teams.get(1)?.position).toBe(0);
 	});
 });

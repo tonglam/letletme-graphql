@@ -1,12 +1,15 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import { dbPool } from "../../infra/db-pool";
+import { getCurrentSeason } from "../../infra/season";
 
 const MARKET_RESULT_LIMIT = 10;
 const PRICE_CHANGE_LIMIT = 20;
 const AVAILABILITY_UPDATE_LIMIT = 20;
 const AVAILABILITY_HIGHLIGHT_LIMIT = 5;
 const STALE_AFTER_MS = 36 * 60 * 60 * 1000;
+const MARKET_CACHE_TTL_SECONDS = 60 * 60;
+const MARKET_EMPTY_CACHE_TTL_SECONDS = 5 * 60;
 
 export type MarketPosition = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
 
@@ -139,14 +142,7 @@ export type MarketRepository = {
 };
 
 const MARKET_QUERY = `
-	WITH daily AS (
-		SELECT DISTINCT ON (snapshot.element_id, snapshot.snapshot_date)
-			snapshot.*
-		FROM fpl.player_market_snapshots snapshot
-		WHERE snapshot.season_id = $1
-		ORDER BY snapshot.element_id, snapshot.snapshot_date, snapshot.captured_at DESC
-	),
-	annotated AS (
+	WITH annotated AS (
 		SELECT
 			snapshot.*,
 			MIN(snapshot.snapshot_date) OVER () AS baseline_date,
@@ -158,7 +154,7 @@ const MARKET_QUERY = `
 			LAG(snapshot.news) OVER player_days AS previous_news,
 			LAG(snapshot.chance_of_playing_this_round) OVER player_days AS previous_chance_this_round,
 			LAG(snapshot.chance_of_playing_next_round) OVER player_days AS previous_chance_next_round
-		FROM daily snapshot
+		FROM public.player_market_snapshots snapshot
 		WINDOW player_days AS (
 			PARTITION BY snapshot.element_id
 			ORDER BY snapshot.snapshot_date ASC
@@ -166,13 +162,13 @@ const MARKET_QUERY = `
 	),
 	latest AS (
 		SELECT MAX(snapshot_date) AS latest_date
-		FROM daily
+		FROM public.player_market_snapshots
 	)
 	SELECT annotated.*
 	FROM annotated
 	CROSS JOIN latest
 	WHERE latest.latest_date IS NOT NULL
-		AND annotated.snapshot_date >= latest.latest_date - ($2::integer - 1)
+		AND annotated.snapshot_date >= latest.latest_date - ($1::integer - 1)
 		AND annotated.snapshot_date <= latest.latest_date
 	ORDER BY annotated.snapshot_date ASC, annotated.element_id ASC
 `;
@@ -292,13 +288,7 @@ export function buildMarketPulse(
 ): MarketPulse {
 	if (rawRows.length === 0) return emptyMarketPulse(requestedDays);
 
-	const rowsByPlayerDay = new Map<string, NormalizedMarketRow>();
-	for (const row of rawRows.map(normalizeRow)) {
-		const key = `${row.element_id}:${row.snapshotDate}`;
-		const existing = rowsByPlayerDay.get(key);
-		if (!existing || row.capturedAt > existing.capturedAt) rowsByPlayerDay.set(key, row);
-	}
-	const rows = Array.from(rowsByPlayerDay.values());
+	const rows = rawRows.map(normalizeRow);
 	const observedDates = Array.from(new Set(rows.map((row) => row.snapshotDate))).sort();
 	const firstDate = observedDates[0];
 	const latestDate = observedDates.at(-1)!;
@@ -538,9 +528,12 @@ const isMarketPulse = (value: unknown): value is MarketPulse =>
 	Array.isArray(value.newPlayers) &&
 	Array.isArray(value.priceChanges);
 
-export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRepository => ({
+export const createMarketRepository = (
+	queryExecutor: QueryExecutor = dbPool as unknown as QueryExecutor
+): MarketRepository => ({
 	async getMarketPulse(context: GraphQLContext, requestedDays: number): Promise<MarketPulse> {
-		const cacheKey = gqlCacheKey(context, `market-pulse:v4:${requestedDays}`);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `market-pulse:v2:${requestedDays}`);
 
 		try {
 			const cached = await context.redis.get(cacheKey);
@@ -559,10 +552,7 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 
 		let rows: MarketSnapshotRow[];
 		try {
-			const result = await (queryExecutor ?? context.database).query(MARKET_QUERY, [
-				context.currentSeason.seasonId,
-				requestedDays,
-			]);
+			const result = await queryExecutor.query(MARKET_QUERY, [requestedDays]);
 			rows = result.rows as MarketSnapshotRow[];
 		} catch (error) {
 			context.logger.error({ err: error, requestedDays }, "Failed to query market snapshots");
@@ -570,7 +560,13 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 		}
 
 		const pulse = buildMarketPulse(rows, requestedDays);
-		await writeQueryCache(context, cacheKey, JSON.stringify(pulse), QUERY_CACHE_TTL_SECONDS.MARKET);
+		const ttl =
+			pulse.coverage.observedDays > 0 ? MARKET_CACHE_TTL_SECONDS : MARKET_EMPTY_CACHE_TTL_SECONDS;
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(pulse), "EX", ttl);
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to cache market pulse");
+		}
 		return pulse;
 	},
 });

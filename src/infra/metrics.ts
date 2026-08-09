@@ -37,6 +37,12 @@ const graphqlRateLimitDecisions = new Counter({
 	labelNames: ["scope", "outcome"] as const,
 });
 
+const livePointsShadowDifferences = new Counter({
+	name: "live_points_shadow_differences_total",
+	help: "Players whose legacy and official-total live calculations differ",
+	labelNames: ["selected"] as const,
+});
+
 const cacheRepositoryEvents = new Counter({
 	name: "cache_repository_events_total",
 	help: "Cache source, fallback, malformed, negative-hit, and suppressed-write events",
@@ -59,6 +65,7 @@ registry.registerMetric(rateLimitStorageFailures);
 registry.registerMetric(authTokenValidations);
 registry.registerMetric(graphqlIngressRequests);
 registry.registerMetric(graphqlRateLimitDecisions);
+registry.registerMetric(livePointsShadowDifferences);
 registry.registerMetric(cacheRepositoryEvents);
 registry.registerMetric(playerStateProfiles);
 registry.registerMetric(playerStateProviderStale);
@@ -70,6 +77,7 @@ export const metrics = {
 	authTokenValidations,
 	graphqlIngressRequests,
 	graphqlRateLimitDecisions,
+	livePointsShadowDifferences,
 	cacheRepositoryEvents,
 	playerStateProfiles,
 	playerStateProviderStale,

@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import { env } from "../../infra/env";
+import { getCurrentSeason } from "../../infra/season";
 import { stableStringify } from "../../infra/stringify";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -171,8 +172,8 @@ const fetchTournamentEnrichments = async (
 
 	const leagueIds = [...new Set(leagueKeys.map((k) => parseInt(k.split(":")[0], 10)))];
 
-	const { data: tData } = await context.data
-		.read("competition.tournaments")
+	const { data: tData } = await context.supabase
+		.from("tournament_infos")
 		.select(
 			"id, name, admin_entry_id, league_id, league_type, total_team_num, tournament_mode, group_mode, state, created_at"
 		)
@@ -196,8 +197,8 @@ const buildLeagueFromInfo = async (
 	leagueType: string
 ): Promise<League> => {
 	const [lResult, tResult] = await Promise.all([
-		context.data
-			.read("competition.entry_leagues")
+		context.supabase
+			.from("entry_league_infos")
 			.select(
 				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event"
 			)
@@ -205,8 +206,8 @@ const buildLeagueFromInfo = async (
 			.eq("league_type", leagueType)
 			.limit(1)
 			.maybeSingle(),
-		context.data
-			.read("competition.tournaments")
+		context.supabase
+			.from("tournament_infos")
 			.select(
 				"id, name, admin_entry_id, league_id, league_type, total_team_num, tournament_mode, group_mode, state, created_at"
 			)
@@ -257,12 +258,13 @@ interface LeaguesRepository {
 
 export const leaguesRepository: LeaguesRepository = {
 	async getEntryLeagues(context: GraphQLContext, entryId: number): Promise<League[]> {
-		const cacheKey = gqlCacheKey(context, `leagues:entry:${entryId}`);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `leagues:entry:${entryId}`);
 		const cached = await readJsonCache(context, cacheKey, isLeagueArray);
 		if (cached) return cached;
 
-		const { data, error } = await context.data
-			.read("competition.entry_leagues")
+		const { data, error } = await context.supabase
+			.from("entry_league_infos")
 			.select(
 				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event"
 			)
@@ -285,12 +287,7 @@ export const leaguesRepository: LeaguesRepository = {
 			return mapLeague(row, tournament);
 		});
 
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(leagues),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		await context.redis.set(cacheKey, JSON.stringify(leagues), "EX", env.CACHE_TTL_SECONDS);
 		return leagues;
 	},
 
@@ -299,15 +296,16 @@ export const leaguesRepository: LeaguesRepository = {
 		leagueId: number,
 		eventId: number
 	): Promise<LeagueEventResult[]> {
+		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(
-			context,
+			season,
 			`leagues:results:${stableStringify({ leagueId, eventId })}`
 		);
 		const cached = await readJsonCache(context, cacheKey, isLeagueEventResultArray);
 		if (cached) return cached;
 
-		const { data, error } = await context.data
-			.read("competition.league_event_results")
+		const { data, error } = await context.supabase
+			.from("league_event_results")
 			.select(
 				"league_id, league_type, event_id, entry_id, entry_name, player_name, event_points, event_rank, overall_points, overall_rank"
 			)
@@ -333,12 +331,7 @@ export const leaguesRepository: LeaguesRepository = {
 
 		const results = rows.map((row) => mapLeagueEventResult(row, league));
 
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(results),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
 		return results;
 	},
 };

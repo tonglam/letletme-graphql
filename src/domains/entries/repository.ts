@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import { env } from "../../infra/env";
+import { getCurrentSeason } from "../../infra/season";
 
 const NULL_SENTINEL = "__entries:null__";
 
@@ -153,32 +154,6 @@ const mapEntryHistoryInfo = (row: DbEntryHistoryInfoRow): EntryHistoryInfo => ({
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
-const isNullableFiniteNumber = (value: unknown): boolean =>
-	value === null || (typeof value === "number" && Number.isFinite(value));
-
-const isEntry = (value: unknown): value is Entry => {
-	if (!isRecord(value)) return false;
-	return (
-		typeof value.id === "number" &&
-		Number.isSafeInteger(value.id) &&
-		value.id > 0 &&
-		typeof value.entryName === "string" &&
-		typeof value.playerName === "string" &&
-		(value.region === null || typeof value.region === "string") &&
-		isNullableFiniteNumber(value.startedEvent) &&
-		isNullableFiniteNumber(value.overallPoints) &&
-		isNullableFiniteNumber(value.overallRank) &&
-		isNullableFiniteNumber(value.bank) &&
-		isNullableFiniteNumber(value.teamValue) &&
-		isNullableFiniteNumber(value.totalTransfers) &&
-		isNullableFiniteNumber(value.lastEventId) &&
-		isNullableFiniteNumber(value.lastOverallPoints) &&
-		isNullableFiniteNumber(value.lastOverallRank) &&
-		isNullableFiniteNumber(value.lastTeamValue) &&
-		isNullableFiniteNumber(value.lastBank)
-	);
-};
-
 const evictMalformedCache = async (context: GraphQLContext, key: string): Promise<void> => {
 	try {
 		await context.redis.del(key);
@@ -228,6 +203,7 @@ const isEntryHistoryInfo = (value: unknown): value is EntryHistoryInfo => {
 interface EntriesRepository {
 	getEntryById(context: GraphQLContext, id: number): Promise<Entry | null>;
 	getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>>;
+	getEntriesByIdsFromRedis(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>>;
 	getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]>;
 	getEntryHistoryInfo(context: GraphQLContext, entryId: number): Promise<EntryHistoryInfo[]>;
 	getEntryEventResult(
@@ -244,88 +220,165 @@ interface EntriesRepository {
 
 export const entriesRepository: EntriesRepository = {
 	async getEntryById(context: GraphQLContext, id: number): Promise<Entry | null> {
-		if (!Number.isSafeInteger(id) || id <= 0) return null;
-		return (await this.getEntriesByIds(context, [id])).get(id) ?? null;
-	},
-
-	async getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
-		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0)));
-		if (uniqueIds.length === 0) {
-			return new Map();
-		}
-		const cacheKeys = uniqueIds.map((id) => gqlCacheKey(context, `entries:info:${id}`));
-		const entries = new Map<number, Entry>();
-		const missingIds: number[] = [];
-
+		// Read from externally-maintained EntryInfo:{season} hash
+		const season = await getCurrentSeason(context);
+		const hashKey = `EntryInfo:${season}`;
+		let raw: string | null = null;
 		try {
-			const values = await context.redis.mget(...cacheKeys);
-			for (let index = 0; index < uniqueIds.length; index += 1) {
-				const value = values[index];
-				if (value === null) {
-					missingIds.push(uniqueIds[index]);
-					continue;
-				}
-				try {
-					const parsed: unknown = JSON.parse(value);
-					if (isEntry(parsed) && parsed.id === uniqueIds[index]) {
-						entries.set(parsed.id, parsed);
-						continue;
-					}
-				} catch (error) {
-					context.logger.warn({ err: error, key: cacheKeys[index] }, "Malformed entry cache");
-				}
-				await evictMalformedCache(context, cacheKeys[index]);
-				missingIds.push(uniqueIds[index]);
-			}
+			raw = await context.redis.hget(hashKey, String(id));
 		} catch (error) {
-			context.logger.warn({ err: error, ids: uniqueIds }, "Failed to batch read entry caches");
-			missingIds.push(...uniqueIds);
+			context.logger.warn({ err: error, hashKey, id }, "Failed to read EntryInfo hash");
+		}
+		if (raw) {
+			try {
+				const parsed = JSON.parse(raw) as Record<string, unknown>;
+				return {
+					id,
+					entryName: String(parsed.entryName ?? ""),
+					playerName: String(parsed.playerName ?? ""),
+					region: parsed.region ? String(parsed.region) : null,
+					startedEvent: typeof parsed.startedEvent === "number" ? parsed.startedEvent : null,
+					overallPoints: typeof parsed.overallPoints === "number" ? parsed.overallPoints : null,
+					overallRank: typeof parsed.overallRank === "number" ? parsed.overallRank : null,
+					bank: typeof parsed.bank === "number" ? parsed.bank : null,
+					teamValue: typeof parsed.teamValue === "number" ? parsed.teamValue : null,
+					totalTransfers: typeof parsed.totalTransfers === "number" ? parsed.totalTransfers : null,
+					lastEventId: typeof parsed.lastEventId === "number" ? parsed.lastEventId : null,
+					lastOverallPoints:
+						typeof parsed.lastOverallPoints === "number" ? parsed.lastOverallPoints : null,
+					lastOverallRank:
+						typeof parsed.lastOverallRank === "number" ? parsed.lastOverallRank : null,
+					lastTeamValue: typeof parsed.lastTeamValue === "number" ? parsed.lastTeamValue : null,
+					lastBank: typeof parsed.lastBank === "number" ? parsed.lastBank : null,
+				};
+			} catch {
+				// Parse error — fall through to DB
+			}
 		}
 
-		if (missingIds.length === 0) return entries;
-
-		const { data, error } = await context.data
-			.read("competition.entries")
+		const { data, error } = await context.supabase
+			.from("entry_infos")
 			.select(
 				"id, entry_name, player_name, region, started_event, overall_points, overall_rank, bank, team_value, total_transfers, last_event_id, last_overall_points, last_overall_rank, last_team_value, last_bank"
 			)
-			.in("id", missingIds);
+			.eq("id", id)
+			.limit(1);
 
 		if (error) {
-			context.logger.error({ err: error, ids: missingIds }, "Failed to batch fetch entries");
+			context.logger.error({ err: error, id }, "Failed to fetch entry");
+			throw new Error("Failed to fetch entry");
+		}
+
+		const row = data?.[0] as DbEntryRow | undefined;
+		if (!row) {
+			return null;
+		}
+
+		const result = mapEntry(row);
+
+		return result;
+	},
+
+	async getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
+		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
+		if (uniqueIds.length === 0) {
+			return new Map();
+		}
+
+		const { data, error } = await context.supabase
+			.from("entry_infos")
+			.select(
+				"id, entry_name, player_name, region, started_event, overall_points, overall_rank, bank, team_value, total_transfers, last_event_id, last_overall_points, last_overall_rank, last_team_value, last_bank"
+			)
+			.in("id", uniqueIds);
+
+		if (error) {
+			context.logger.error({ err: error, ids: uniqueIds }, "Failed to batch fetch entries");
 			throw new Error("Failed to batch fetch entries");
 		}
 
 		const rows = (data as DbEntryRow[] | null) ?? [];
-		const fetched: Entry[] = [];
+		const entries = new Map<number, Entry>();
 		for (const row of rows) {
-			const entry = mapEntry(row);
-			entries.set(entry.id, entry);
-			fetched.push(entry);
-		}
-		try {
-			const pipeline = context.redis.pipeline();
-			for (const entry of fetched) {
-				pipeline.set(
-					gqlCacheKey(context, `entries:info:${entry.id}`),
-					JSON.stringify(entry),
-					"EX",
-					QUERY_CACHE_TTL_SECONDS.METADATA
-				);
-			}
-			await pipeline.exec();
-		} catch (error) {
-			context.logger.warn({ err: error, ids: missingIds }, "Failed to cache entries");
+			entries.set(row.id, mapEntry(row));
 		}
 		return entries;
 	},
 
+	async getEntriesByIdsFromRedis(
+		context: GraphQLContext,
+		ids: number[]
+	): Promise<Map<number, Entry>> {
+		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
+		if (uniqueIds.length === 0) {
+			return new Map();
+		}
+
+		const season = await getCurrentSeason(context);
+		const hashKey = `EntryInfo:${season}`;
+
+		try {
+			// HMGET all requested IDs from the hash
+			const values = await context.redis.hmget(hashKey, ...uniqueIds.map(String));
+			const results = new Map<number, Entry>();
+			const missingIds: number[] = [];
+
+			for (let i = 0; i < uniqueIds.length; i++) {
+				const value = values[i];
+				if (value) {
+					const parsed = JSON.parse(value) as Record<string, unknown>;
+					results.set(uniqueIds[i], {
+						id: uniqueIds[i],
+						entryName: String(parsed.entryName ?? ""),
+						playerName: String(parsed.playerName ?? ""),
+						region: parsed.region ? String(parsed.region) : null,
+						startedEvent: typeof parsed.startedEvent === "number" ? parsed.startedEvent : null,
+						overallPoints: typeof parsed.overallPoints === "number" ? parsed.overallPoints : null,
+						overallRank: typeof parsed.overallRank === "number" ? parsed.overallRank : null,
+						bank: typeof parsed.bank === "number" ? parsed.bank : null,
+						teamValue: typeof parsed.teamValue === "number" ? parsed.teamValue : null,
+						totalTransfers:
+							typeof parsed.totalTransfers === "number" ? parsed.totalTransfers : null,
+						lastEventId: typeof parsed.lastEventId === "number" ? parsed.lastEventId : null,
+						lastOverallPoints:
+							typeof parsed.lastOverallPoints === "number" ? parsed.lastOverallPoints : null,
+						lastOverallRank:
+							typeof parsed.lastOverallRank === "number" ? parsed.lastOverallRank : null,
+						lastTeamValue: typeof parsed.lastTeamValue === "number" ? parsed.lastTeamValue : null,
+						lastBank: typeof parsed.lastBank === "number" ? parsed.lastBank : null,
+					});
+				} else {
+					missingIds.push(uniqueIds[i]);
+				}
+			}
+
+			// Fallback to DB for any IDs not found in Redis
+			if (missingIds.length > 0) {
+				const dbEntries = await this.getEntriesByIds(context, missingIds);
+				for (const [id, entry] of dbEntries) {
+					results.set(id, entry);
+				}
+				// Note: we do NOT write DB fallback back to EntryInfo:{season} hash
+				// — it is maintained externally by the sync project.
+			}
+
+			return results;
+		} catch (err) {
+			context.logger.warn(
+				{ err, hashKey, ids: uniqueIds },
+				"Failed to read EntryInfo hash from Redis, falling back to DB"
+			);
+			return this.getEntriesByIds(context, uniqueIds);
+		}
+	},
+
 	async getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]> {
-		if (!Number.isSafeInteger(entryId) || entryId <= 0) {
+		if (!Number.isFinite(entryId) || entryId <= 0) {
 			return [];
 		}
 
-		const cacheKey = gqlCacheKey(context, `entries:history:${entryId}`);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:history:${entryId}`);
 		let cached: string | null = null;
 		try {
 			cached = await context.redis.get(cacheKey);
@@ -345,8 +398,8 @@ export const entriesRepository: EntriesRepository = {
 			await evictMalformedCache(context, cacheKey);
 		}
 
-		const { data, error } = await context.data
-			.read("competition.entry_event_results")
+		const { data, error } = await context.supabase
+			.from("entry_event_results")
 			.select(
 				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
 			)
@@ -359,21 +412,21 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const history = (data as DbEntryEventResultRow[] | null)?.map(mapEntryEventResult) ?? [];
-		await writeQueryCache(
-			context,
-			cacheKey,
-			history.length === 0 ? NULL_SENTINEL : JSON.stringify(history),
-			QUERY_CACHE_TTL_SECONDS.HISTORICAL
-		);
+		if (history.length === 0) {
+			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", env.CACHE_TTL_SECONDS);
+		} else {
+			await context.redis.set(cacheKey, JSON.stringify(history), "EX", env.CACHE_TTL_SECONDS);
+		}
 		return history;
 	},
 
 	async getEntryHistoryInfo(context: GraphQLContext, entryId: number): Promise<EntryHistoryInfo[]> {
-		if (!Number.isSafeInteger(entryId) || entryId <= 0) {
+		if (!Number.isFinite(entryId) || entryId <= 0) {
 			return [];
 		}
 
-		const cacheKey = gqlCacheKey(context, `entries:history-info:${entryId}`);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:history-info:${entryId}`);
 		let cached: string | null = null;
 		try {
 			cached = await context.redis.get(cacheKey);
@@ -393,8 +446,8 @@ export const entriesRepository: EntriesRepository = {
 			await evictMalformedCache(context, cacheKey);
 		}
 
-		const { data, error } = await context.data
-			.read("competition.entry_season_histories")
+		const { data, error } = await context.supabase
+			.from("entry_history_infos")
 			.select("season,total_points,overall_rank")
 			.eq("entry_id", entryId)
 			.order("season", { ascending: true });
@@ -405,12 +458,11 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const historyInfo = (data as DbEntryHistoryInfoRow[] | null)?.map(mapEntryHistoryInfo) ?? [];
-		await writeQueryCache(
-			context,
-			cacheKey,
-			historyInfo.length === 0 ? NULL_SENTINEL : JSON.stringify(historyInfo),
-			QUERY_CACHE_TTL_SECONDS.HISTORICAL
-		);
+		if (historyInfo.length === 0) {
+			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", env.CACHE_TTL_SECONDS);
+		} else {
+			await context.redis.set(cacheKey, JSON.stringify(historyInfo), "EX", env.CACHE_TTL_SECONDS);
+		}
 		return historyInfo;
 	},
 
@@ -419,23 +471,19 @@ export const entriesRepository: EntriesRepository = {
 		entryId: number,
 		eventId: number
 	): Promise<EntryEventResult | null> {
-		if (
-			!Number.isSafeInteger(entryId) ||
-			entryId <= 0 ||
-			!Number.isSafeInteger(eventId) ||
-			eventId <= 0
-		) {
+		if (!Number.isFinite(entryId) || entryId <= 0 || !Number.isFinite(eventId) || eventId <= 0) {
 			return null;
 		}
 
-		const cacheKey = gqlCacheKey(context, `entries:event-result:${entryId}:${eventId}`);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:event-result:${entryId}:${eventId}`);
 		const cached = await readJsonCache(context, cacheKey, isEntryEventResult);
 		if (cached) {
 			return cached;
 		}
 
-		const { data, error } = await context.data
-			.read("competition.entry_event_results")
+		const { data, error } = await context.supabase
+			.from("entry_event_results")
 			.select(
 				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
 			)
@@ -454,12 +502,7 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const result = mapEntryEventResult(row);
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(result),
-			QUERY_CACHE_TTL_SECONDS.METADATA
-		);
+		await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
 		return result;
 	},
 
@@ -468,15 +511,12 @@ export const entriesRepository: EntriesRepository = {
 		entryIds: number[],
 		eventId: number
 	): Promise<Map<number, EntryEventResult>> {
-		const uniqueIds = Array.from(
-			new Set(entryIds.filter((id) => Number.isSafeInteger(id) && id > 0))
-		);
-		if (uniqueIds.length === 0 || !Number.isSafeInteger(eventId) || eventId <= 0) {
-			return new Map();
-		}
+		const uniqueIds = Array.from(new Set(entryIds.filter((id) => Number.isInteger(id) && id > 0)));
+		if (uniqueIds.length === 0 || eventId <= 0) return new Map();
 
+		const season = await getCurrentSeason(context);
 		const cacheKeys = uniqueIds.map((entryId) =>
-			gqlCacheKey(context, `entries:event-result:${entryId}:${eventId}`)
+			gqlCacheKey(season, `entries:event-result:${entryId}:${eventId}`)
 		);
 		const results = new Map<number, EntryEventResult>();
 		const missIds: number[] = [];
@@ -512,8 +552,8 @@ export const entriesRepository: EntriesRepository = {
 
 		if (missIds.length === 0) return results;
 
-		const { data, error } = await context.data
-			.read("competition.entry_event_results")
+		const { data, error } = await context.supabase
+			.from("entry_event_results")
 			.select(
 				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
 			)
@@ -533,10 +573,10 @@ export const entriesRepository: EntriesRepository = {
 			const result = mapEntryEventResult(row);
 			results.set(result.entryId, result);
 			pipeline.set(
-				gqlCacheKey(context, `entries:event-result:${result.entryId}:${eventId}`),
+				gqlCacheKey(season, `entries:event-result:${result.entryId}:${eventId}`),
 				JSON.stringify(result),
 				"EX",
-				QUERY_CACHE_TTL_SECONDS.METADATA
+				env.CACHE_TTL_SECONDS
 			);
 		}
 		try {

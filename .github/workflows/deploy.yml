@@ -103,7 +103,8 @@ jobs:
             printf '%s' "$GRAPHQL_ENV" > .env.deploy
 
             APP_IMAGE="$IMAGE_REF" docker compose pull graphql
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run contract:check
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run migrate
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run migrate:status
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build
 
             for attempt in $(seq 1 30); do

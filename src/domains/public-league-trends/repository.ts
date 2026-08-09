@@ -1,6 +1,8 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import { dbPool } from "../../infra/db-pool";
+import { env } from "../../infra/env";
+import { getCurrentSeason } from "../../infra/season";
 import {
 	getTournamentSelectionStatsReadModel,
 	type TournamentSelectionStats,
@@ -28,7 +30,6 @@ type CatalogRow = {
 	updated_at: string | Date;
 	latest_event_id: number;
 	total_entries: number;
-	selection_revision?: string | Date | null;
 	catalog_revision: string | Date;
 	snapshot_revision?: string | Date | null;
 	readiness_revision?: string | Date | null;
@@ -39,6 +40,10 @@ type AccessRow = {
 	snapshot_revision: string | Date;
 };
 
+const CATALOG_EXISTS_SQL = `
+	SELECT to_regclass('public.public_league_trends_catalog') AS catalog
+`;
+
 const CATALOG_SQL = `
 	SELECT
 		catalog.tournament_id,
@@ -48,62 +53,59 @@ const CATALOG_SQL = `
 		catalog.updated_at,
 		snapshot.event_id AS latest_event_id,
 		snapshot.total_entries,
-		snapshot.selection_revision,
-		MAX(catalog.updated_at) OVER () AS catalog_revision,
-		MAX(tournament.updated_at) OVER () AS snapshot_revision,
+		(SELECT MAX(updated_at) FROM public.public_league_trends_catalog) AS catalog_revision,
+		MAX(snapshot.snapshot_revision) OVER () AS snapshot_revision,
 		(
-			SELECT MAX(tournament_revision.updated_at)
-			FROM competition.public_league_trends catalog_revision
-			JOIN competition.tournaments tournament_revision
-				ON tournament_revision.season_id = catalog_revision.season_id
-				AND tournament_revision.tournament_id = catalog_revision.tournament_id
-			WHERE catalog_revision.season_id = $1
+			SELECT MAX(COALESCE(tournament_revision.updated_at, tournament_revision.created_at))
+			FROM public.public_league_trends_catalog catalog_revision
+			JOIN public.tournament_infos tournament_revision
+				ON tournament_revision.id = catalog_revision.tournament_id
 		) AS readiness_revision
-	FROM competition.public_league_trends catalog
-	JOIN competition.tournaments tournament
-		ON tournament.season_id = catalog.season_id
-		AND tournament.tournament_id = catalog.tournament_id
+	FROM public.public_league_trends_catalog catalog
+	JOIN public.tournament_infos tournament
+		ON tournament.id = catalog.tournament_id
 		AND (tournament.setup_status IS NULL OR tournament.standings_ready_at IS NOT NULL)
 	JOIN LATERAL (
 		SELECT
 			stats.event_id,
 			MAX(stats.total_entries)::integer AS total_entries,
-			MAX(stats.updated_at) AS selection_revision
-		FROM reporting.tournament_selection_stats stats
-		WHERE stats.season_id = catalog.season_id
-			AND stats.tournament_id = catalog.tournament_id
+			MAX(COALESCE(stats.updated_at, stats.created_at)) AS snapshot_revision
+		FROM public.tournament_selection_stats stats
+		WHERE stats.tournament_id = catalog.tournament_id
 		GROUP BY stats.event_id
 		ORDER BY stats.event_id DESC
 		LIMIT 1
 	) snapshot ON true
-	WHERE catalog.season_id = $1
-		AND catalog.enabled = true
+	WHERE catalog.enabled = true
 	ORDER BY catalog.sort_order ASC, catalog.display_name ASC, catalog.tournament_id ASC
 `;
 
 const ACCESS_SQL = `
 	SELECT
-		catalog.updated_at AS catalog_revision,
-		GREATEST(catalog.updated_at, tournament.updated_at) AS snapshot_revision
-	FROM competition.public_league_trends catalog
-	JOIN competition.tournaments tournament
-		ON tournament.season_id = catalog.season_id
-		AND tournament.tournament_id = catalog.tournament_id
+		(SELECT MAX(updated_at) FROM public.public_league_trends_catalog) AS catalog_revision,
+		MAX(COALESCE(stats.updated_at, stats.created_at)) AS snapshot_revision
+	FROM public.public_league_trends_catalog catalog
+	JOIN public.tournament_infos tournament
+		ON tournament.id = catalog.tournament_id
 		AND (tournament.setup_status IS NULL OR tournament.standings_ready_at IS NOT NULL)
-	JOIN reporting.tournament_selection_stats stats
-		ON stats.season_id = catalog.season_id
-		AND stats.tournament_id = catalog.tournament_id
-		AND stats.event_id = $3
+	JOIN public.tournament_selection_stats stats
+		ON stats.tournament_id = catalog.tournament_id
+		AND stats.event_id = $2
 	WHERE catalog.enabled = true
-		AND catalog.season_id = $1
-		AND catalog.tournament_id = $2
-	GROUP BY catalog.updated_at, tournament.updated_at
+		AND catalog.tournament_id = $1
+	GROUP BY catalog.tournament_id
 `;
 
 const iso = (value: string | Date): string => {
 	const date = value instanceof Date ? value : new Date(value);
 	if (Number.isNaN(date.getTime())) throw new Error("Invalid public league revision timestamp");
 	return date.toISOString();
+};
+
+const catalogAvailable = async (executor: QueryExecutor): Promise<boolean> => {
+	const result = await executor.query(CATALOG_EXISTS_SQL);
+	const row = result.rows[0] as { catalog?: unknown } | undefined;
+	return typeof row?.catalog === "string" && row.catalog.length > 0;
 };
 
 const parseCachedStats = (value: string): TournamentSelectionStats | null | undefined => {
@@ -132,16 +134,16 @@ export type PublicLeagueTrendsRepository = {
 type ReadSelectionStats = typeof getTournamentSelectionStatsReadModel;
 
 export const createPublicLeagueTrendsRepository = (
-	executor?: QueryExecutor,
+	executor: QueryExecutor = dbPool as unknown as QueryExecutor,
 	readSelectionStats: ReadSelectionStats = getTournamentSelectionStatsReadModel
 ): PublicLeagueTrendsRepository => ({
 	async list(context): Promise<PublicLeagueTrend[]> {
-		const result = await (executor ?? context.database).query(CATALOG_SQL, [
-			context.currentSeason.seasonId,
-		]);
+		if (!(await catalogAvailable(executor))) return [];
+		const result = await executor.query(CATALOG_SQL);
 		const rows = result.rows as CatalogRow[];
 		if (rows.length === 0) return [];
 		const revision = iso(rows[0]!.catalog_revision);
+		const season = await getCurrentSeason(context);
 		const snapshotRevision = rows
 			.map((row) =>
 				row.snapshot_revision === undefined || row.snapshot_revision === null
@@ -151,22 +153,13 @@ export const createPublicLeagueTrendsRepository = (
 			.filter((value): value is string => value !== null)
 			.sort()
 			.at(-1);
-		const selectionRevision = rows
-			.map((row) =>
-				row.selection_revision === undefined || row.selection_revision === null
-					? null
-					: iso(row.selection_revision)
-			)
-			.filter((value): value is string => value !== null)
-			.sort()
-			.at(-1);
 		const readinessRevision =
 			rows[0]!.readiness_revision === undefined || rows[0]!.readiness_revision === null
 				? "none"
 				: iso(rows[0]!.readiness_revision);
 		const cacheKey = gqlCacheKey(
-			context,
-			`public-league-trends:v4:${revision}:${snapshotRevision ?? "none"}:${selectionRevision ?? "none"}:${readinessRevision}`
+			season,
+			`public-league-trends:v3:${revision}:${snapshotRevision ?? "none"}:${readinessRevision}`
 		);
 		try {
 			const cached = await context.redis.get(cacheKey);
@@ -186,12 +179,11 @@ export const createPublicLeagueTrendsRepository = (
 			latestAvailableEventId: Number(row.latest_event_id),
 			totalEntries: Number(row.total_entries),
 		}));
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(trends),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(trends), "EX", env.CACHE_TTL_SECONDS);
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to write public league catalog cache");
+		}
 		return trends;
 	},
 
@@ -201,16 +193,14 @@ export const createPublicLeagueTrendsRepository = (
 		eventId,
 		limit
 	): Promise<TournamentSelectionStats | null> {
-		const accessResult = await (executor ?? context.database).query(ACCESS_SQL, [
-			context.currentSeason.seasonId,
-			tournamentId,
-			eventId,
-		]);
+		if (!(await catalogAvailable(executor))) return null;
+		const accessResult = await executor.query(ACCESS_SQL, [tournamentId, eventId]);
 		const access = accessResult.rows[0] as AccessRow | undefined;
 		if (!access?.catalog_revision || !access.snapshot_revision) return null;
+		const season = await getCurrentSeason(context);
 		const safeLimit = Math.min(Math.max(limit, 1), 12);
 		const cacheKey = gqlCacheKey(
-			context,
+			season,
 			`public-league-selection:v1:${iso(access.catalog_revision)}:${tournamentId}:${eventId}:${safeLimit}:${iso(access.snapshot_revision)}`
 		);
 		try {
@@ -224,12 +214,11 @@ export const createPublicLeagueTrendsRepository = (
 			context.logger.warn({ err: error, cacheKey }, "Failed to read public league stats cache");
 		}
 		const stats = await readSelectionStats(context, tournamentId, eventId, safeLimit);
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(stats),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(stats), "EX", env.CACHE_TTL_SECONDS);
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to write public league stats cache");
+		}
 		return stats;
 	},
 });

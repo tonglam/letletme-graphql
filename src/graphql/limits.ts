@@ -39,6 +39,8 @@ export type GraphQLLimitResult =
 	| {
 			ok: true;
 			shape: GraphQLRequestShape;
+			securityOperation: boolean;
+			securityOperationCount: number;
 			weightedComplexity: number;
 			rateLimitCostUnits: number;
 	  }
@@ -360,15 +362,19 @@ const heavyRootCost = (
 
 const accepted = ({
 	shape,
+	securityOperationCount = 0,
 	weightedComplexity = 0,
 	rootFields = [],
 }: {
 	shape: GraphQLRequestShape;
+	securityOperationCount?: number;
 	weightedComplexity?: number;
 	rootFields?: Array<{ name: string; uniqueEntryCount: number | null }>;
 }): GraphQLLimitResult => ({
 	ok: true,
 	shape,
+	securityOperation: securityOperationCount > 0,
+	securityOperationCount,
 	weightedComplexity,
 	rateLimitCostUnits: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
 });
@@ -443,8 +449,12 @@ export const validateGraphQLPayloadLimits = (
 		return reject(`GraphQL operation exceeds weighted complexity ${GRAPHQL_LIMITS.maxComplexity}`);
 	}
 
+	const securityOperationCount = inspection.rootFields.filter(
+		(field) => field.name === "createWechatApiSession"
+	).length;
 	return accepted({
 		shape: operation.operation,
+		securityOperationCount,
 		weightedComplexity: inspection.complexity,
 		rootFields: inspection.rootFields,
 	});
@@ -456,6 +466,8 @@ export const validateGraphQLRequestLimits = (
 ): GraphQLLimitResult => {
 	const payloads = Array.isArray(body) ? body : [body];
 	let shape: GraphQLRequestShape = "unknown";
+	let securityOperation = false;
+	let securityOperationCount = 0;
 	let weightedComplexity = 0;
 	let rateLimitCostUnits = 0;
 	for (const payload of payloads) {
@@ -464,12 +476,16 @@ export const validateGraphQLRequestLimits = (
 		if (!result.ok) return result;
 		if (result.shape === "mutation") shape = "mutation";
 		else if (shape === "unknown") shape = result.shape;
+		securityOperation ||= result.securityOperation;
+		securityOperationCount += result.securityOperationCount;
 		weightedComplexity += result.weightedComplexity;
 		rateLimitCostUnits += result.rateLimitCostUnits;
 	}
 	return {
 		ok: true,
 		shape,
+		securityOperation,
+		securityOperationCount,
 		weightedComplexity,
 		rateLimitCostUnits: Math.max(1, rateLimitCostUnits),
 	};

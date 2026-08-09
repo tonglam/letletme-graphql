@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import { isMissingPostgrestColumnError } from "../../infra/postgrest-error";
+import { getCurrentSeason } from "../../infra/season";
 
 const NULL_SENTINEL = "__entry-live:null__";
 
@@ -134,12 +135,21 @@ const parsePick = (raw: unknown, fallback: { eventId: number; entryId: number })
 		return null;
 	}
 
-	const element = asNumber(raw.element);
+	const element =
+		asNumber(raw.element) ??
+		asNumber(raw.element_id) ??
+		asNumber(raw.playerId) ??
+		asNumber(raw.player_id);
 	const position = asNumber(raw.position);
 	const multiplier = asNumber(raw.multiplier) ?? 1;
 
-	const isCaptain = asBoolean(raw.is_captain) ?? false;
-	const isViceCaptain = asBoolean(raw.is_vice_captain) ?? false;
+	const isCaptain =
+		asBoolean(raw.isCaptain) ?? asBoolean(raw.is_captain) ?? asBoolean(raw.captain) ?? false;
+	const isViceCaptain =
+		asBoolean(raw.isViceCaptain) ??
+		asBoolean(raw.is_vice_captain) ??
+		asBoolean(raw.viceCaptain) ??
+		false;
 
 	if (!element || !position) {
 		return null;
@@ -176,6 +186,7 @@ const parsePicks = (raw: unknown, fallback: { eventId: number; entryId: number }
 type DbEntryEventPickRow = Record<string, unknown>;
 type DbEntryEventTransferRow = Record<string, unknown>;
 
+type TransferTimeColumn = "transfer_time" | "time" | "created_at" | null;
 type TransferQueryResult = { data: unknown[] | null; error: unknown };
 type TransferQueryBuilder = PromiseLike<TransferQueryResult> & {
 	select: (columns: string) => TransferQueryBuilder;
@@ -184,23 +195,58 @@ type TransferQueryBuilder = PromiseLike<TransferQueryResult> & {
 	order: (column: string, options: { ascending: boolean }) => TransferQueryBuilder;
 };
 
+const transferTimeColumnByClient = new WeakMap<object, TransferTimeColumn>();
+const transferTimeColumns: readonly TransferTimeColumn[] = [
+	"transfer_time",
+	"time",
+	"created_at",
+	null,
+];
+
 async function queryTransferRows(
 	context: GraphQLContext,
 	configure: (query: TransferQueryBuilder) => TransferQueryBuilder,
 	leadingOrderColumns: readonly string[]
 ): Promise<TransferQueryResult> {
-	let query = context.data.read(
-		"competition.entry_event_transfers"
-	) as unknown as TransferQueryBuilder;
-	query = configure(
-		query.select(
-			"entry_id, event_id, element_in_id, element_in_cost, element_out_id, element_out_cost, transfer_time"
-		)
-	);
-	for (const column of leadingOrderColumns) {
-		query = query.order(column, { ascending: true });
+	const clientKey = context.supabase as object;
+	const hasCachedColumn = transferTimeColumnByClient.has(clientKey);
+	const cachedColumn = transferTimeColumnByClient.get(clientKey);
+	const candidates = hasCachedColumn
+		? [cachedColumn ?? null, ...transferTimeColumns.filter((column) => column !== cachedColumn)]
+		: [...transferTimeColumns];
+
+	for (const timeColumn of candidates) {
+		const projection = [
+			"entry_id",
+			"event_id",
+			"element_in_id",
+			"element_in_cost",
+			"element_out_id",
+			"element_out_cost",
+			timeColumn,
+		]
+			.filter((column): column is string => column !== null)
+			.join(", ");
+		let query = context.supabase.from("entry_event_transfers") as unknown as TransferQueryBuilder;
+		query = configure(query.select(projection));
+		for (const column of leadingOrderColumns) {
+			query = query.order(column, { ascending: true });
+		}
+		if (timeColumn) {
+			query = query.order(timeColumn, { ascending: true });
+		}
+		const result = await query;
+		if (!result.error) {
+			transferTimeColumnByClient.set(clientKey, timeColumn);
+			return result;
+		}
+		if (timeColumn && isMissingPostgrestColumnError(result.error, timeColumn)) {
+			continue;
+		}
+		return result;
 	}
-	return query.order("transfer_time", { ascending: true });
+
+	return { data: null, error: new Error("No supported entry transfer projection") };
 }
 
 interface EntryLiveRepository {
@@ -260,7 +306,7 @@ const mapTransferRow = (
 		elementInCost,
 		elementOut,
 		elementOutCost,
-		time: asString(row.transfer_time),
+		time: asString(row.transfer_time ?? row.time ?? row.created_at),
 	};
 };
 
@@ -270,17 +316,16 @@ export const entryLiveRepository: EntryLiveRepository = {
 		entryId: number,
 		eventId: number
 	): Promise<EntryEventPick | null> {
-		if (!Number.isSafeInteger(entryId) || entryId <= 0) return null;
-		if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
-		const cacheKey = gqlCacheKey(context, `entries:picks:${entryId}:${eventId}`);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:picks:${entryId}:${eventId}`);
 		const cached = await parseCachedJson(context, cacheKey, isEntryEventPick);
 		if (cached) {
 			return cached;
 		}
 
-		const { data, error } = await context.data
-			.read("competition.entry_event_picks")
-			.select("entry_id, event_id, chip, picks, transfers_cost")
+		const { data, error } = await context.supabase
+			.from("entry_event_picks")
+			.select("*")
 			.eq("entry_id", entryId)
 			.eq("event_id", eventId)
 			.limit(1);
@@ -296,9 +341,13 @@ export const entryLiveRepository: EntryLiveRepository = {
 			return null;
 		}
 
-		const picksRaw = row.picks ?? null;
-		const chip = asString(row.chip);
-		const transfersCost = asNumber(row.transfers_cost) ?? 0;
+		const picksRaw = row.picks ?? row.pick_list ?? row.elements ?? null;
+		const chip = asString(row.chip) ?? asString(row.active_chip) ?? null;
+		const transfersCost =
+			asNumber(row.transfers_cost) ??
+			asNumber(row.event_transfers_cost) ??
+			asNumber(row.transfer_cost) ??
+			0;
 
 		const picks = parsePicks(picksRaw, { entryId, eventId });
 
@@ -310,17 +359,9 @@ export const entryLiveRepository: EntryLiveRepository = {
 			picks,
 		};
 
-		// Picks are locked after deadline — safe to use the historical TTL class.
-		try {
-			await context.redis.set(
-				cacheKey,
-				JSON.stringify(result),
-				"EX",
-				QUERY_CACHE_TTL_SECONDS.HISTORICAL
-			);
-		} catch (error) {
-			context.logger.warn({ err: error, cacheKey }, "Failed to cache entry-live picks");
-		}
+		// Picks are locked after deadline — safe to cache for hours.
+		const PICKS_CACHE_TTL = 3600;
+		await context.redis.set(cacheKey, JSON.stringify(result), "EX", PICKS_CACHE_TTL);
 		return result;
 	},
 
@@ -329,15 +370,14 @@ export const entryLiveRepository: EntryLiveRepository = {
 		entryIds: number[],
 		eventId: number
 	): Promise<Map<number, EntryEventPick>> {
-		if (!Number.isSafeInteger(eventId) || eventId <= 0) return new Map();
-		const uniqueIds = Array.from(
-			new Set(entryIds.filter((id) => Number.isSafeInteger(id) && id > 0))
-		);
+		const uniqueIds = Array.from(new Set(entryIds.filter((id) => Number.isFinite(id) && id > 0)));
 		if (uniqueIds.length === 0) {
 			return new Map();
 		}
 
-		const cacheKeys = uniqueIds.map((id) => gqlCacheKey(context, `entries:picks:${id}:${eventId}`));
+		const PICKS_CACHE_TTL = 3600;
+		const season = await getCurrentSeason(context);
+		const cacheKeys = uniqueIds.map((id) => gqlCacheKey(season, `entries:picks:${id}:${eventId}`));
 		const results = new Map<number, EntryEventPick>();
 		const missIds: number[] = [];
 
@@ -372,9 +412,12 @@ export const entryLiveRepository: EntryLiveRepository = {
 			return results;
 		}
 
-		const { data, error } = await context.data
-			.read("competition.entry_event_picks")
-			.select("entry_id, event_id, chip, picks, transfers_cost")
+		const { data, error } = await context.supabase
+			.from("entry_event_picks")
+			// Keep legacy column compatibility during rolling schema upgrades. The
+			// batch mapper below intentionally accepts picks/pick_list/elements,
+			// chip/active_chip, and all historical transfer-cost names.
+			.select("*")
 			.in("entry_id", missIds)
 			.eq("event_id", eventId);
 
@@ -393,9 +436,13 @@ export const entryLiveRepository: EntryLiveRepository = {
 			const rowEntryId = asNumber(row.entry_id) ?? 0;
 			if (rowEntryId === 0) continue;
 
-			const picksRaw = row.picks ?? null;
-			const chip = asString(row.chip);
-			const transfersCost = asNumber(row.transfers_cost) ?? 0;
+			const picksRaw = row.picks ?? row.pick_list ?? row.elements ?? null;
+			const chip = asString(row.chip) ?? asString(row.active_chip) ?? null;
+			const transfersCost =
+				asNumber(row.transfers_cost) ??
+				asNumber(row.event_transfers_cost) ??
+				asNumber(row.transfer_cost) ??
+				0;
 
 			const picks = parsePicks(picksRaw, { entryId: rowEntryId, eventId });
 			const pick: EntryEventPick = {
@@ -408,18 +455,14 @@ export const entryLiveRepository: EntryLiveRepository = {
 
 			results.set(rowEntryId, pick);
 			pipeline.set(
-				gqlCacheKey(context, `entries:picks:${rowEntryId}:${eventId}`),
+				gqlCacheKey(season, `entries:picks:${rowEntryId}:${eventId}`),
 				JSON.stringify(pick),
 				"EX",
-				QUERY_CACHE_TTL_SECONDS.HISTORICAL
+				PICKS_CACHE_TTL
 			);
 		}
 
-		try {
-			await pipeline.exec();
-		} catch (error) {
-			context.logger.warn({ err: error, eventId }, "Failed to cache entry-live picks batch");
-		}
+		await pipeline.exec();
 		return results;
 	},
 
@@ -428,9 +471,8 @@ export const entryLiveRepository: EntryLiveRepository = {
 		entryId: number,
 		eventId: number
 	): Promise<EntryEventTransferRow[]> {
-		if (!Number.isSafeInteger(entryId) || entryId <= 0) return [];
-		if (!Number.isSafeInteger(eventId) || eventId <= 0) return [];
-		const cacheKey = gqlCacheKey(context, `entries:transfers:v3:${entryId}:${eventId}`);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:transfers:v3:${entryId}:${eventId}`);
 		const cached = await context.redis.get(cacheKey);
 		if (cached) {
 			try {
@@ -464,14 +506,10 @@ export const entryLiveRepository: EntryLiveRepository = {
 			.filter((t): t is EntryEventTransferRow => t !== null);
 		sortTransferRows(transfers);
 
-		// Transfers are locked after deadline — safe to use the historical TTL class.
+		// Transfers are locked after deadline — safe to cache for hours.
+		const TRANSFERS_CACHE_TTL = 3600;
 		try {
-			await context.redis.set(
-				cacheKey,
-				JSON.stringify(transfers),
-				"EX",
-				QUERY_CACHE_TTL_SECONDS.HISTORICAL
-			);
+			await context.redis.set(cacheKey, JSON.stringify(transfers), "EX", TRANSFERS_CACHE_TTL);
 		} catch (error) {
 			context.logger.warn({ err: error, cacheKey }, "Failed to cache entry-live transfers");
 		}
@@ -483,16 +521,15 @@ export const entryLiveRepository: EntryLiveRepository = {
 		entryIds: number[],
 		eventId: number
 	): Promise<Map<number, EntryEventTransferRow[]>> {
-		if (!Number.isSafeInteger(eventId) || eventId <= 0) return new Map();
-		const uniqueIds = Array.from(
-			new Set(entryIds.filter((id) => Number.isSafeInteger(id) && id > 0))
-		);
+		const uniqueIds = Array.from(new Set(entryIds.filter((id) => Number.isFinite(id) && id > 0)));
 		if (uniqueIds.length === 0) {
 			return new Map();
 		}
 
+		const TRANSFERS_CACHE_TTL = 3600;
+		const season = await getCurrentSeason(context);
 		const cacheKeys = uniqueIds.map((id) =>
-			gqlCacheKey(context, `entries:transfers:v3:${id}:${eventId}`)
+			gqlCacheKey(season, `entries:transfers:v3:${id}:${eventId}`)
 		);
 		const results = new Map<number, EntryEventTransferRow[]>();
 		const missIds: number[] = [];
@@ -566,10 +603,10 @@ export const entryLiveRepository: EntryLiveRepository = {
 				const transfers = byEntry.get(id) ?? [];
 				results.set(id, transfers);
 				pipeline.set(
-					gqlCacheKey(context, `entries:transfers:v3:${id}:${eventId}`),
+					gqlCacheKey(season, `entries:transfers:v3:${id}:${eventId}`),
 					JSON.stringify(transfers),
 					"EX",
-					QUERY_CACHE_TTL_SECONDS.HISTORICAL
+					TRANSFERS_CACHE_TTL
 				);
 			}
 			await pipeline.exec();
@@ -586,22 +623,14 @@ export const entryLiveRepository: EntryLiveRepository = {
 		entryId: number,
 		prefetchedCacheValue?: string | null
 	): Promise<EntryEventTransferRow[]> {
-		if (!Number.isSafeInteger(entryId) || entryId <= 0) {
+		if (!Number.isFinite(entryId) || entryId <= 0) {
 			return [];
 		}
 
-		const cacheKey = gqlCacheKey(context, `entries:transfers:v3:history:${entryId}`);
-		let cached = prefetchedCacheValue ?? null;
-		if (prefetchedCacheValue === undefined) {
-			try {
-				cached = await context.redis.get(cacheKey);
-			} catch (error) {
-				context.logger.warn(
-					{ err: error, cacheKey },
-					"Failed to read entry transfer history cache"
-				);
-			}
-		}
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `entries:transfers:v3:history:${entryId}`);
+		const cached =
+			prefetchedCacheValue !== undefined ? prefetchedCacheValue : await context.redis.get(cacheKey);
 		if (cached !== null) {
 			if (cached === NULL_SENTINEL) {
 				return [];
@@ -639,12 +668,12 @@ export const entryLiveRepository: EntryLiveRepository = {
 			.filter((t): t is EntryEventTransferRow => t !== null);
 		sortTransferRows(transfers);
 
-		await writeQueryCache(
-			context,
-			cacheKey,
-			transfers.length === 0 ? NULL_SENTINEL : JSON.stringify(transfers),
-			QUERY_CACHE_TTL_SECONDS.HISTORICAL
-		);
+		const TRANSFER_HISTORY_TTL = 3600;
+		if (transfers.length === 0) {
+			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", TRANSFER_HISTORY_TTL);
+		} else {
+			await context.redis.set(cacheKey, JSON.stringify(transfers), "EX", TRANSFER_HISTORY_TTL);
+		}
 		return transfers;
 	},
 };

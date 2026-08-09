@@ -14,7 +14,7 @@ describe("calcLivePointsForTournament resolver", () => {
 		const originalFreshIds = tournamentsService.getTournamentEntryIdsUncached;
 		const originalCalculate = entryLiveBatchService.calcLivePointsForEntries;
 		const originalFixtures = fixturesService.getEventFixtures;
-		const originalTeams = playersRepository.listTeams;
+		const originalTeams = playersRepository.listTeamsFromRedis;
 		const context = {} as GraphQLContext;
 		let usedCachedIds = false;
 
@@ -26,7 +26,7 @@ describe("calcLivePointsForTournament resolver", () => {
 		};
 		tournamentsService.getTournamentEntryIdsUncached = async () => [101, 202];
 		fixturesService.getEventFixtures = async () => [];
-		playersRepository.listTeams = async () => [];
+		playersRepository.listTeamsFromRedis = async () => [];
 		entryLiveBatchService.calcLivePointsForEntries = async (_inputContext, eventId, entryIds) => {
 			expect(eventId).toBe(15);
 			expect(entryIds).toEqual([101, 202]);
@@ -56,7 +56,7 @@ describe("calcLivePointsForTournament resolver", () => {
 			tournamentsService.getTournamentEntryIdsUncached = originalFreshIds;
 			entryLiveBatchService.calcLivePointsForEntries = originalCalculate;
 			fixturesService.getEventFixtures = originalFixtures;
-			playersRepository.listTeams = originalTeams;
+			playersRepository.listTeamsFromRedis = originalTeams;
 		}
 	});
 });

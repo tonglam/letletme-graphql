@@ -1,11 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
-import { gqlCacheKey } from "../../../src/infra/cache-key";
 
 const buildContext = (
 	options: { cache?: string | null; legacyCache?: string | null; rows?: unknown[] } = {}
 ) => {
 	const strings = new Map<string, string>();
+	strings.set("Season:active", "2526");
+	if (options.cache !== undefined && options.cache !== null) {
+		strings.set("gql:v2:2526:entries:transfers:v3:1:3", options.cache);
+	}
 	if (options.legacyCache !== undefined && options.legacyCache !== null) {
 		strings.set("gql:v2:2526:entries:transfers:v2:1:3", options.legacyCache);
 	}
@@ -20,8 +23,8 @@ const buildContext = (
 	};
 
 	const result = { data: options.rows ?? [], error: null };
-	const data = {
-		read: () => {
+	const supabase = {
+		from: () => {
 			const query = Promise.resolve(result);
 			type Builder = typeof query & {
 				select: () => Builder;
@@ -42,17 +45,11 @@ const buildContext = (
 		},
 	};
 
-	const context = {
-		currentSeason: { seasonId: 2025, seasonCode: "2526" },
-		dataRevision: "core-test",
+	return {
 		redis,
-		data,
+		supabase,
 		logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
 	} as never;
-	if (options.cache !== undefined && options.cache !== null) {
-		strings.set(gqlCacheKey(context, "entries:transfers:v3:1:3"), options.cache);
-	}
-	return context;
 };
 
 describe("entryLiveRepository transfers", () => {
@@ -107,17 +104,19 @@ describe("entryLiveRepository transfers", () => {
 		expect(transfers[0]?.elementIn).toBe(20);
 	});
 
-	it("reads only the canonical v3 transfer_time projection", async () => {
+	it("falls back to a historical transfer time column", async () => {
 		const selected: string[] = [];
 		const redis = {
-			get: async () => null,
+			get: async (key: string) => (key === "Season:active" ? "2526" : null),
 			set: async () => "OK",
 			del: async () => 0,
 		};
-		const data = {
-			read: () => {
+		const supabase = {
+			from: () => {
+				let projection = "";
 				const builder = {
 					select: (columns: string) => {
+						projection = columns;
 						selected.push(columns);
 						return builder;
 					},
@@ -128,20 +127,28 @@ describe("entryLiveRepository transfers", () => {
 						onfulfilled?: ((value: unknown) => TResult1 | PromiseLike<TResult1>) | null,
 						onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
 					) => {
-						const result = {
-							data: [
-								{
-									entry_id: 1,
-									event_id: 3,
-									element_in_id: 20,
-									element_in_cost: 55,
-									element_out_id: 10,
-									element_out_cost: 60,
-									transfer_time: "2026-01-01T12:00:00Z",
-								},
-							],
-							error: null,
-						};
+						const result = projection.includes("transfer_time")
+							? {
+									data: null,
+									error: {
+										code: "42703",
+										message: "column entry_event_transfers.transfer_time does not exist",
+									},
+								}
+							: {
+									data: [
+										{
+											entry_id: 1,
+											event_id: 3,
+											element_in_id: 20,
+											element_in_cost: 55,
+											element_out_id: 10,
+											element_out_cost: 60,
+											time: "2026-01-01T12:00:00Z",
+										},
+									],
+									error: null,
+								};
 						return Promise.resolve(result).then(onfulfilled, onrejected);
 					},
 				};
@@ -149,16 +156,15 @@ describe("entryLiveRepository transfers", () => {
 			},
 		};
 		const context = {
-			currentSeason: { seasonId: 2025, seasonCode: "2526" },
-			dataRevision: "core-test",
 			redis,
-			data,
+			supabase,
 			logger: { warn: () => undefined, error: () => undefined },
 		} as never;
 
 		const transfers = await entryLiveRepository.getEntryEventTransfers(context, 1, 3);
-		expect(selected).toEqual([
+		expect(selected.slice(0, 2)).toEqual([
 			"entry_id, event_id, element_in_id, element_in_cost, element_out_id, element_out_cost, transfer_time",
+			"entry_id, event_id, element_in_id, element_in_cost, element_out_id, element_out_cost, time",
 		]);
 		expect(transfers[0]?.time).toBe("2026-01-01T12:00:00Z");
 	});
@@ -211,7 +217,7 @@ describe("entryLiveRepository transfers", () => {
 });
 
 describe("entryLiveRepository batch picks", () => {
-	it("reads the canonical v3 pick, chip, and transfer-cost columns", async () => {
+	it("preserves legacy pick, chip, and transfer-cost columns", async () => {
 		let projection = "";
 		const pipelineWrites: unknown[][] = [];
 		const pipeline = {
@@ -222,22 +228,20 @@ describe("entryLiveRepository batch picks", () => {
 			exec: async () => [],
 		};
 		const context = {
-			currentSeason: { seasonId: 2025, seasonCode: "2526" },
-			dataRevision: "core-test",
 			redis: {
-				get: async () => null,
+				get: async (key: string) => (key === "Season:active" ? "2526" : null),
 				mget: async () => [null],
 				del: async () => 0,
 				pipeline: () => pipeline,
 			},
-			data: {
-				read: () => {
+			supabase: {
+				from: () => {
 					const result = {
 						data: [
 							{
 								entry_id: 1,
 								event_id: 3,
-								picks: [
+								pick_list: [
 									{
 										element: 10,
 										position: 1,
@@ -246,8 +250,8 @@ describe("entryLiveRepository batch picks", () => {
 										is_vice_captain: false,
 									},
 								],
-								chip: "bboost",
-								transfers_cost: 4,
+								active_chip: "bboost",
+								event_transfers_cost: 4,
 							},
 						],
 						error: null,
@@ -269,7 +273,7 @@ describe("entryLiveRepository batch picks", () => {
 
 		const result = await entryLiveRepository.getEntryEventPicksByIds(context, [1], 3);
 
-		expect(projection).toBe("entry_id, event_id, chip, picks, transfers_cost");
+		expect(projection).toBe("*");
 		expect(result.get(1)).toMatchObject({ chip: "bboost", transfersCost: 4 });
 		expect(result.get(1)?.picks[0]).toMatchObject({ element: 10, isCaptain: true });
 		expect(pipelineWrites).toHaveLength(1);

@@ -1,7 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { buildPlayerMap } from "../../infra/player-map";
+import { getCurrentSeason } from "../../infra/season";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player, Team } from "../../infra/types";
 import type { ElementEventResultData } from "../entry-live/calc-service";
@@ -12,7 +12,7 @@ import {
 	enrichTransferRows,
 } from "../entry-live/transfer-enrichment";
 import type { LivePerformance } from "../live/repository";
-import { liveRepository } from "../live/repository";
+import { mapSyncJobLiveRow } from "../live/repository";
 import type { Entry, EntryEventResult, EntryHistoryInfo } from "./repository";
 import { entriesRepository } from "./repository";
 
@@ -81,7 +81,7 @@ const readRawTransferCache = async (
 };
 
 const uniquePositiveIds = (ids: number[]): number[] =>
-	Array.from(new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0)));
+	Array.from(new Set(ids.filter((id) => Number.isInteger(id) && id > 0)));
 
 const livePerformanceKey = (eventId: number, playerId: number): string => `${eventId}:${playerId}`;
 
@@ -213,6 +213,32 @@ const mapEntryPick = (params: {
 	};
 };
 
+const EVENT_LIVES_COLS = [
+	"event_id",
+	"element_id",
+	"minutes",
+	"goals_scored",
+	"assists",
+	"clean_sheets",
+	"goals_conceded",
+	"own_goals",
+	"penalties_saved",
+	"penalties_missed",
+	"yellow_cards",
+	"red_cards",
+	"saves",
+	"bonus",
+	"bps",
+	"starts",
+	"defensive_contribution",
+	"expected_goals",
+	"expected_assists",
+	"expected_goal_involvements",
+	"expected_goals_conceded",
+	"in_dream_team",
+	"total_points",
+].join(", ");
+
 async function buildLiveMapForEvents(
 	context: GraphQLContext,
 	eventIds: number[],
@@ -222,28 +248,63 @@ async function buildLiveMapForEvents(
 	const result = new Map<string, LivePerformance>();
 	if (eventIds.length === 0 || playerIds.length === 0) return result;
 
+	const season = await getCurrentSeason(context);
 	const uniquePlayerIds = uniquePositiveIds(playerIds);
-	const allowedPlayersByEvent = playerIdsByEvent
-		? new Map(
-				eventIds.map((eventId) => [
-					eventId,
-					new Set(uniquePositiveIds(playerIdsByEvent.get(eventId) ?? uniquePlayerIds)),
-				])
-			)
-		: null;
-	const performances = await liveRepository.getLivePerformancesForEventsAndPlayers(
-		context,
-		eventIds,
-		uniquePlayerIds
-	);
-	for (const performance of performances) {
-		if (
-			allowedPlayersByEvent &&
-			!allowedPlayersByEvent.get(performance.eventId)?.has(performance.playerId)
-		) {
-			continue;
+
+	// Pipeline all HMGET commands — one RTT for all events.
+	// When playerIdsByEvent is provided, each event only requests its own players
+	// (e.g. 4 fields per event instead of 38), greatly reducing response payload.
+	const pipeline = context.redis.pipeline();
+	for (const eventId of eventIds) {
+		const fields = playerIdsByEvent
+			? uniquePositiveIds(playerIdsByEvent.get(eventId) ?? uniquePlayerIds).map(String)
+			: uniquePlayerIds.map(String);
+		pipeline.hmget(`EventLive:${season}:${eventId}`, ...fields);
+	}
+
+	let pipelineResults: Array<[Error | null, (string | null)[] | null]> | null = null;
+	try {
+		pipelineResults = (await pipeline.exec()) as Array<[Error | null, (string | null)[] | null]>;
+	} catch (err) {
+		context.logger.warn({ err }, "EventLive pipeline failed, falling back to DB for all events");
+	}
+
+	const dbFallbackEventIds: number[] = [];
+
+	if (pipelineResults) {
+		for (let i = 0; i < eventIds.length; i++) {
+			const [err, values] = pipelineResults[i];
+			if (err || !values || !values.some((v) => v !== null)) {
+				dbFallbackEventIds.push(eventIds[i]);
+				continue;
+			}
+			for (const value of values) {
+				if (!value) continue;
+				try {
+					const parsed = JSON.parse(value) as Record<string, unknown>;
+					const perf = mapSyncJobLiveRow(parsed);
+					if (perf) result.set(livePerformanceKey(perf.eventId, perf.playerId), perf);
+				} catch {
+					/* skip malformed */
+				}
+			}
 		}
-		result.set(livePerformanceKey(performance.eventId, performance.playerId), performance);
+	} else {
+		dbFallbackEventIds.push(...eventIds);
+	}
+
+	if (dbFallbackEventIds.length > 0) {
+		const { data, error } = await context.supabase
+			.from("event_lives")
+			.select(EVENT_LIVES_COLS)
+			.in("event_id", dbFallbackEventIds)
+			.in("element_id", uniquePlayerIds);
+		if (!error && data) {
+			for (const row of data as unknown as Record<string, unknown>[]) {
+				const perf = mapSyncJobLiveRow(row);
+				if (perf) result.set(livePerformanceKey(perf.eventId, perf.playerId), perf);
+			}
+		}
 	}
 
 	return result;
@@ -256,6 +317,10 @@ export const entriesService = {
 
 	getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
 		return entriesRepository.getEntriesByIds(context, ids);
+	},
+
+	getEntriesByIdsFromRedis(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
+		return entriesRepository.getEntriesByIdsFromRedis(context, ids);
 	},
 
 	getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]> {
@@ -320,15 +385,16 @@ export const entriesService = {
 		entryId: number,
 		live = false
 	): Promise<EntryGameweekTransfers[]> {
-		if (!Number.isSafeInteger(entryId) || entryId <= 0) {
+		if (!Number.isFinite(entryId) || entryId <= 0) {
 			return [];
 		}
 
+		const season = await getCurrentSeason(context);
 		const enrichedCacheKey = gqlCacheKey(
-			context,
+			season,
 			`entries:transfer-history:enriched:v3:${entryId}${live ? ":live" : ""}`
 		);
-		const innerCacheKey = gqlCacheKey(context, `entries:transfers:v3:history:${entryId}`);
+		const innerCacheKey = gqlCacheKey(season, `entries:transfers:v3:history:${entryId}`);
 
 		// Check both cache keys simultaneously + pre-warm season + start team fetch in parallel
 		const teamMapPromise = buildTeamMap(context);
@@ -415,12 +481,7 @@ export const entriesService = {
 			};
 		});
 
-		await writeQueryCache(
-			context,
-			enrichedCacheKey,
-			JSON.stringify(enriched),
-			QUERY_CACHE_TTL_SECONDS.HISTORICAL
-		);
+		await context.redis.set(enrichedCacheKey, JSON.stringify(enriched), "EX", 3600);
 		return enriched;
 	},
 };

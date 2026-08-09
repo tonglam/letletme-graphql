@@ -1,228 +1,159 @@
 import { describe, expect, it } from "bun:test";
 import { playersRepository } from "../../../src/domains/players/repository";
-import {
-	buildCorePublication,
-	buildSnapshotContext,
-	buildTestCoreData,
-	TestRedis,
-} from "../../helpers/data-publication";
-
-const queryChain = <T>(result: T, methods: string[]) => {
-	const promise = Promise.resolve(result) as Promise<T> &
-		Record<string, (...args: unknown[]) => unknown>;
-	for (const method of methods) promise[method] = () => promise;
-	return promise;
-};
-
-describe("playersRepository v3 core reads", () => {
-	it("pins one immutable core revision per request and exposes a newer revision to a new request", async () => {
-		const core = buildTestCoreData(1);
-		const redis = new TestRedis(buildCorePublication("2627", 7, core));
-		const firstContext = buildSnapshotContext(redis, { dataRevision: "core-7" });
-
-		expect(await playersRepository.getPlayerById(firstContext, 1)).toMatchObject({
-			id: 1,
-			price: 45,
-		});
-
-		const nextCore = {
-			...core,
-			players: core.players.map((player) => (player.id === 1 ? { ...player, price: 99 } : player)),
-		};
-		const nextPublication = buildCorePublication("2627", 8, nextCore);
-		for (const [key, value] of nextPublication.store) redis.values.set(key, value);
-
-		expect(await playersRepository.getPlayerById(firstContext, 1)).toMatchObject({ price: 45 });
-
-		const nextContext = buildSnapshotContext(redis, { dataRevision: "core-8" });
-		expect(await playersRepository.getPlayerById(nextContext, 1)).toMatchObject({ price: 99 });
-		expect(
-			await playersRepository.listPlayers(
-				nextContext,
-				{ teamId: 1, minPrice: 99, maxPrice: 99 },
-				10,
-				0
-			)
-		).toMatchObject([{ id: 1, price: 99 }]);
-	});
-
-	it("query-caches only the event-stat overlay under the core dataset revision", async () => {
-		const core = buildTestCoreData(1);
-		const redis = new TestRedis(buildCorePublication("2627", 7, core));
-		const context = buildSnapshotContext(redis);
-		let readCount = 0;
-		context.data = {
-			read: () => {
-				readCount += 1;
-				return queryChain(
-					{ data: [{ total_points: 9, selected_by_percent: "4.2" }], error: null },
-					["select", "eq", "limit"]
-				);
-			},
-		} as never;
-
-		const first = await playersRepository.getPlayerByIdForEvent(context, 1, 1);
-		const second = await playersRepository.getPlayerByIdForEvent(context, 1, 1);
-
-		expect(first).toMatchObject({ id: 1, price: 45, totalPoints: 9, selectedByPercent: 4.2 });
-		expect(second).toEqual(first);
-		expect(readCount).toBe(1);
-		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":players-event-stats:"));
-		expect(cacheWrite?.[0]).toMatch(/^llm:v3:gql:v3:core-7:players-event-stats:/);
-		expect(cacheWrite?.slice(-2)).toEqual(["EX", 3600]);
-	});
-});
 
 describe("playersRepository.getPlayersForPicker", () => {
-	it("uses the core publication, reporting stats, and a normally expiring query cache", async () => {
-		const core = buildTestCoreData(null);
-		const redis = new TestRedis(buildCorePublication("2627", 7, core));
-		const context = buildSnapshotContext(redis);
-		let marketReads = 0;
-		context.data = {
-			read: (table: string) => {
-				if (table === "fpl.events") {
-					return queryChain({ data: [], error: null }, ["select", "lte", "order", "limit"]);
-				}
-				if (table === "fpl.player_market_snapshots") {
-					return {
-						select: (fields: string) => {
-							marketReads += 1;
-							return fields === "snapshot_date, captured_at"
-								? queryChain(
-										{
-											data: [
-												{
-													snapshot_date: "2026-08-09",
-													captured_at: new Date().toISOString(),
-												},
-											],
-											error: null,
-										},
-										["order", "limit"]
-									)
-								: queryChain(
-										{ data: [{ element_id: 1, selected_by_percent: "74.6" }], error: null },
-										["eq", "in"]
-									);
-						},
-					};
-				}
-				throw new Error(`Unexpected reporting table ${table}`);
+	it("uses the bounded server-side search RPC when a query is present", async () => {
+		const calls: Array<{ name: string; params: Record<string, unknown> }> = [];
+		const context = {
+			redis: {
+				get: async (key: string) => (key === "Season:active" ? "2627" : null),
+				hmget: async () => [
+					JSON.stringify({
+						code: 26686,
+						webName: "Haaland",
+						teamId: 12,
+						type: 4,
+						price: 145,
+						startPrice: 145,
+					}),
+				],
+				set: async () => "OK",
+				del: async () => 1,
 			},
+			supabase: {
+				from: () => {
+					const result = Promise.resolve({ data: [], error: null });
+					type Builder = typeof result & {
+						select: () => Builder;
+						lte: () => Builder;
+						order: () => Builder;
+						limit: () => Builder;
+					};
+					const builder = result as Builder;
+					Object.assign(builder, {
+						select: () => builder,
+						lte: () => builder,
+						order: () => builder,
+						limit: () => builder,
+					});
+					return builder;
+				},
+				rpc: async (name: string, params: Record<string, unknown>) => {
+					calls.push({ name, params });
+					return {
+						data: [
+							{
+								id: 9,
+								web_name: "Haaland",
+								element_type: 4,
+								team_id: 12,
+								team_name: "Manchester City",
+								team_short_name: "MCI",
+							},
+						],
+						error: null,
+					};
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
 		} as never;
 
-		const first = await playersRepository.getPlayersForPicker(context, 1, null, "Player 1");
-		const second = await playersRepository.getPlayersForPicker(context, 1, null, "Player 1");
+		const result = await playersRepository.getPlayersForPicker(context, 12, null, "Haal");
 
-		expect(first.items).toEqual([
-			expect.objectContaining({ id: 1, price: 45, selectedByPercent: 74.6 }),
+		expect(result.items[0]).toMatchObject({ id: 9, webName: "Haaland" });
+		expect(calls).toEqual([
+			{
+				name: "search_players_for_picker",
+				params: {
+					p_query: "Haal",
+					p_limit: 12,
+					p_cursor: null,
+					p_position: null,
+					p_team_id: null,
+					p_min_price: null,
+					p_max_price: null,
+				},
+			},
 		]);
-		expect(second).toEqual(first);
-		expect(marketReads).toBe(2);
-		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":players-picker:"));
-		expect(cacheWrite?.[0]).toMatch(/^llm:v3:gql:v3:core-7:players-picker:/);
-		expect(cacheWrite?.slice(-2)).toEqual(["EX", 300]);
 	});
 
-	it("applies the requested sort before taking the page", async () => {
-		const core = buildTestCoreData(null, {
-			players: buildTestCoreData(null).players.map((player) =>
-				player.id === 1
-					? { ...player, webName: "Zed Player" }
-					: player.id === 2
-						? { ...player, webName: "Alpha Player" }
-						: player
-			),
-		});
-		const redis = new TestRedis(buildCorePublication("2627", 7, core));
-		const context = buildSnapshotContext(redis);
-		context.data = {
-			read: (table: string) => {
-				if (table === "fpl.events") {
-					return queryChain({ data: [], error: null }, ["select", "lte", "order", "limit"]);
-				}
-				if (table === "fpl.player_market_snapshots") {
-					return {
-						select: (fields: string) =>
-							fields === "snapshot_date, captured_at"
-								? queryChain(
-										{
-											data: [
-												{ snapshot_date: "2026-08-09", captured_at: new Date().toISOString() },
-											],
-											error: null,
-										},
-										["order", "limit"]
-									)
-								: queryChain({ data: [], error: null }, ["eq", "in"]),
-					};
-				}
-				throw new Error(`Unexpected reporting table ${table}`);
+	it("uses the latest complete market snapshot for picker ownership", async () => {
+		const chain = <T>(result: T, methods: string[]) => {
+			const promise = Promise.resolve(result) as Promise<T> &
+				Record<string, (...args: unknown[]) => unknown>;
+			for (const method of methods) promise[method] = () => promise;
+			return promise;
+		};
+		const context = {
+			redis: {
+				get: async (key: string) => (key === "Season:active" ? "2627" : null),
+				hmget: async () => [
+					JSON.stringify({
+						code: 26686,
+						webName: "Haaland",
+						teamId: 12,
+						type: 4,
+						price: 155,
+						startPrice: 155,
+						selectedByPercent: 1.2,
+					}),
+				],
+				set: async () => "OK",
+				del: async () => 1,
 			},
+			supabase: {
+				from: (table: string) => {
+					if (table === "player_market_snapshots") {
+						return {
+							select: (fields: string) =>
+								fields === "snapshot_date, captured_at"
+									? chain(
+											{
+												data: [
+													{
+														snapshot_date: "2026-08-08",
+														captured_at: new Date().toISOString(),
+													},
+												],
+												error: null,
+											},
+											["order", "limit"]
+										)
+									: chain(
+											{
+												data: [{ element_id: 9, selected_by_percent: "74.6" }],
+												error: null,
+											},
+											["eq", "in"]
+										),
+						};
+					}
+					return chain({ data: [], error: null }, ["select", "lte", "order", "limit"]);
+				},
+				rpc: async () => ({
+					data: [
+						{
+							id: 9,
+							web_name: "Haaland",
+							element_type: 4,
+							team_id: 12,
+							team_name: "Manchester City",
+							team_short_name: "MCI",
+						},
+					],
+					error: null,
+				}),
+			},
+			logger: { warn: () => undefined, error: () => undefined },
 		} as never;
 
-		const result = await playersRepository.getPlayersForPicker(
-			context,
-			1,
-			null,
-			null,
-			null,
-			"NAME_ASC"
-		);
+		const result = await playersRepository.getPlayersForPicker(context, 20, null, "Haaland");
 
-		expect(result.items).toHaveLength(1);
-		expect(result.items[0]).toMatchObject({ id: 2, webName: "Alpha Player" });
-		expect(result.nextCursor).toBeLessThan(0);
-
-		const nextPage = await playersRepository.getPlayersForPicker(
-			context,
-			1,
-			result.nextCursor,
-			null,
-			null,
-			"NAME_ASC"
-		);
-		// The cursor encodes the next offset and selected sort; it must not depend on player IDs.
-		expect(nextPage.items[0]).toMatchObject({ id: 10, webName: "Player 10" });
-		const thirdPage = await playersRepository.getPlayersForPicker(
-			context,
-			1,
-			nextPage.nextCursor,
-			null,
-			null,
-			"NAME_ASC"
-		);
-		expect(thirdPage.items[0]).toMatchObject({ id: 100, webName: "Player 100" });
-		let cursorForPage = thirdPage.nextCursor;
-		let foundZed = thirdPage.items.some((item) => item.id === 1);
-		for (
-			let pageNumber = 0;
-			pageNumber < 20 && cursorForPage !== null && !foundZed;
-			pageNumber += 1
-		) {
-			const page = await playersRepository.getPlayersForPicker(
-				context,
-				200,
-				cursorForPage,
-				null,
-				null,
-				"NAME_ASC"
-			);
-			foundZed = page.items.some((item) => item.id === 1 && item.webName === "Zed Player");
-			cursorForPage = page.nextCursor;
-		}
-		expect(foundZed).toBe(true);
-
-		const resumedByThreshold = await playersRepository.getPlayersForPicker(
-			context,
-			1,
-			1,
-			null,
-			null,
-			"NAME_ASC"
-		);
-		expect(resumedByThreshold.items[0]).toMatchObject({ id: 2, webName: "Alpha Player" });
+		expect(result.items[0]).toMatchObject({
+			id: 9,
+			price: 155,
+			selectedByPercent: 74.6,
+		});
 	});
 });
 
@@ -247,9 +178,7 @@ describe("playersRepository top transfers", () => {
 			limit: async () => queryResult,
 		};
 		const context = {
-			currentSeason: { seasonId: 2026, seasonCode: "2627" },
-			dataRevision: "core-7",
-			data: { read: () => builder },
+			supabase: { from: () => builder },
 			logger: { error: () => undefined },
 		} as never;
 
@@ -261,5 +190,257 @@ describe("playersRepository top transfers", () => {
 			stats: [],
 			players: {},
 		});
+	});
+});
+
+describe("playersRepository.getPlayerById", () => {
+	it("reads the latest Player hash price on every call", async () => {
+		let price = 75;
+		const redis = {
+			get: async (key: string) => (key === "Season:active" ? "2526" : null),
+			hget: async () =>
+				JSON.stringify({
+					code: 101,
+					webName: "Fresh Player",
+					teamId: 1,
+					type: 3,
+					price,
+					startPrice: 70,
+				}),
+		};
+		const context = {
+			redis,
+			supabase: { from: () => Promise.reject(new Error("unexpected database query")) },
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		expect(await playersRepository.getPlayerById(context, 10)).toMatchObject({ price: 75 });
+		price = 76;
+		expect(await playersRepository.getPlayerById(context, 10)).toMatchObject({ price: 76 });
+	});
+});
+
+describe("playersRepository.listPlayers", () => {
+	it("queries PostgreSQL for each price-filtered read", async () => {
+		let price = 75;
+		let queryCount = 0;
+		const filters: Array<[string, number]> = [];
+		const supabase = {
+			from: () => {
+				queryCount += 1;
+				const builder = {
+					select: () => builder,
+					eq: () => builder,
+					gte: (column: string, value: number) => {
+						filters.push([column, value]);
+						return builder;
+					},
+					lte: (column: string, value: number) => {
+						filters.push([column, value]);
+						return builder;
+					},
+					order: () => builder,
+					range: async () => ({
+						data: [
+							{
+								id: 10,
+								code: 101,
+								web_name: "Listed Player",
+								first_name: "Listed",
+								second_name: "Player",
+								team_id: 1,
+								type: 3,
+								price,
+								start_price: 70,
+							},
+						],
+						error: null,
+					}),
+				};
+				return builder;
+			},
+		};
+		const context = {
+			redis: {},
+			supabase,
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const first = await playersRepository.listPlayers(
+			context,
+			{ minPrice: 70, maxPrice: 80 },
+			10,
+			0
+		);
+		price = 76;
+		const second = await playersRepository.listPlayers(
+			context,
+			{ minPrice: 70, maxPrice: 80 },
+			10,
+			0
+		);
+
+		expect(first[0].price).toBe(75);
+		expect(second[0].price).toBe(76);
+		expect(queryCount).toBe(2);
+		expect(filters).toEqual([
+			["price", 70],
+			["price", 80],
+			["price", 70],
+			["price", 80],
+		]);
+	});
+});
+
+describe("playersRepository.getPlayerByIdForEvent", () => {
+	it("returns the fresh base player without caching it when event-stat enrichment fails", async () => {
+		const cache = new Map<string, string>([["Season:active", "2526"]]);
+		const writes: string[] = [];
+		const redis = {
+			get: async (key: string) => cache.get(key) ?? null,
+			hget: async () =>
+				JSON.stringify({
+					code: 101,
+					webName: "Base Player",
+					teamId: 1,
+					type: 3,
+					price: 75,
+					startPrice: 70,
+					totalPoints: 42,
+				}),
+			set: async (key: string, value: string) => {
+				cache.set(key, value);
+				writes.push(key);
+				return "OK";
+			},
+			del: async () => 0,
+		};
+
+		const queryResult = { data: null, error: { message: "player_stats unavailable" } };
+		const supabase = {
+			from: () => {
+				const query = Promise.resolve(queryResult);
+				type Builder = typeof query & {
+					select: () => Builder;
+					eq: () => Builder;
+					limit: () => Builder;
+				};
+				const builder = query as Builder;
+				Object.assign(builder, {
+					select: () => builder,
+					eq: () => builder,
+					limit: () => builder,
+				});
+				return builder;
+			},
+		};
+
+		const context = {
+			redis,
+			supabase,
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const player = await playersRepository.getPlayerByIdForEvent(context, 10, 12);
+		expect(player).toMatchObject({ id: 10, webName: "Base Player", totalPoints: 42 });
+		expect(writes).toEqual([]);
+	});
+
+	it("combines a cached event-stat overlay with the latest Player hash price", async () => {
+		const cache = new Map<string, string>([["Season:active", "2526"]]);
+		let price = 75;
+		const redis = {
+			get: async (key: string) => cache.get(key) ?? null,
+			hget: async () =>
+				JSON.stringify({
+					code: 101,
+					webName: "Fresh Price",
+					teamId: 1,
+					type: 3,
+					price,
+					startPrice: 70,
+				}),
+			set: async (key: string, value: string) => {
+				cache.set(key, value);
+				return "OK";
+			},
+			del: async () => 0,
+		};
+		const result = { data: [{ total_points: 9, selected_by_percent: "4.2" }], error: null };
+		const supabase = {
+			from: () => {
+				const query = Promise.resolve(result);
+				type Builder = typeof query & {
+					select: () => Builder;
+					eq: () => Builder;
+					limit: () => Builder;
+				};
+				const builder = query as Builder;
+				Object.assign(builder, {
+					select: () => builder,
+					eq: () => builder,
+					limit: () => builder,
+				});
+				return builder;
+			},
+		};
+		const context = {
+			redis,
+			supabase,
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const first = await playersRepository.getPlayerByIdForEvent(context, 10, 12);
+		expect(first).toMatchObject({ price: 75, totalPoints: 9, selectedByPercent: 4.2 });
+		expect(cache.has("gql:v2:2526:players:event-stats:v1:10:12")).toBe(true);
+
+		price = 76;
+		const second = await playersRepository.getPlayerByIdForEvent(context, 10, 12);
+		expect(second).toMatchObject({ price: 76, totalPoints: 9, selectedByPercent: 4.2 });
+	});
+});
+
+describe("playersRepository.getPlayersByIdsForEvent", () => {
+	it("reuses cached stats but always reads the current base prices", async () => {
+		let prices = new Map([
+			[1, 50],
+			[2, 60],
+		]);
+		const overlay = (id: number) =>
+			JSON.stringify({ totalPoints: id * 3, selectedByPercent: id / 10 });
+		const redis = {
+			get: async (key: string) => (key === "Season:active" ? "2526" : null),
+			hmget: async (_key: string, ...ids: string[]) =>
+				ids.map((rawId) => {
+					const id = Number(rawId);
+					return JSON.stringify({
+						code: 1000 + id,
+						webName: `Player ${id}`,
+						teamId: 1,
+						type: 3,
+						price: prices.get(id),
+						startPrice: 50,
+					});
+				}),
+			mget: async (...keys: string[]) => keys.map((key) => overlay(Number(key.split(":").at(-2)))),
+			del: async () => 0,
+		};
+		const context = {
+			redis,
+			supabase: { from: () => Promise.reject(new Error("unexpected database query")) },
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const first = await playersRepository.getPlayersByIdsForEvent(context, [1, 2], 4);
+		expect(first.get(1)).toMatchObject({ price: 50, totalPoints: 3 });
+		expect(first.get(2)).toMatchObject({ price: 60, totalPoints: 6 });
+
+		prices = new Map([
+			[1, 51],
+			[2, 59],
+		]);
+		const second = await playersRepository.getPlayersByIdsForEvent(context, [1, 2], 4);
+		expect(second.get(1)).toMatchObject({ price: 51, totalPoints: 3 });
+		expect(second.get(2)).toMatchObject({ price: 59, totalPoints: 6 });
 	});
 });

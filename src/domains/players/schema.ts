@@ -78,22 +78,12 @@ export const playersTypeDefs = /* GraphQL */ `
 		nextCursor: Int
 	}
 
-	enum PlayerPickerSort {
-		NAME_ASC
-		TOTAL_POINTS_DESC
-		FORM_DESC
-		PRICE_ASC
-		PRICE_DESC
-		OWNERSHIP_DESC
-	}
-
 	extend type Query {
 		player(id: Int!): Player
 		players(filter: PlayersFilter, limit: Int = 50, offset: Int = 0): [Player!]!
 		playersForPicker(
 			search: String
 			filter: PlayersFilter
-			sort: PlayerPickerSort = TOTAL_POINTS_DESC
 			limit: Int = 20
 			cursor: Int
 		): PlayersForPickerPayload!

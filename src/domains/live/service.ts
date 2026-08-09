@@ -24,7 +24,7 @@ export const assertValidLiveExplainBatch = (elementIds: readonly number[]): void
 		);
 	}
 	if (
-		elementIds.some((elementId) => !Number.isSafeInteger(elementId) || elementId <= 0) ||
+		elementIds.some((elementId) => !Number.isInteger(elementId) || elementId <= 0) ||
 		new Set(elementIds).size !== elementIds.length
 	) {
 		throw new GraphQLError("Live explain player IDs must be unique positive integers", {
@@ -40,7 +40,7 @@ const withCalculatedTotalPoints = (
 ): LivePerformance => ({
 	...live,
 	bonus: bonusOverride ?? live.bonus,
-	totalPoints: calcElementLivePoints(live, bonusOverride),
+	totalPoints: calcElementLivePoints(elementType ?? 0, live, bonusOverride),
 });
 
 const calculateTotalsForPerformances = async (
@@ -57,7 +57,7 @@ const calculateTotalsForPerformances = async (
 		...new Set(
 			performances
 				.map((performance) => performance.playerId)
-				.filter((id) => Number.isSafeInteger(id) && id > 0)
+				.filter((id) => Number.isFinite(id) && id > 0)
 		),
 	];
 	const [bonusByPlayerId, players] = await Promise.all([

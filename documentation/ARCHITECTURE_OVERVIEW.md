@@ -1,35 +1,43 @@
 # Current architecture
 
 ```text
-letletme-web  -- signed identity/session --> letletme-graphql
-letletme_data -- PostgreSQL v3 + Redis ----> letletme-graphql --> Web/clients
+letletme-web ── signed website envelope ─┐
+letletme-web ── hashed Mini Program token ├─> letletme-graphql ──> PostgreSQL/Supabase
+                                         │                    └─> Redis
+letletme_data ── domain tables/hashes ───┘
 ```
 
-`letletme_data` is the only writer of `fpl`, `competition`, `reporting`,
-`understat`, `bridge`, and `ops`. `letletme-web` is the only writer of `bauth`.
-GraphQL uses schema-qualified PostgreSQL reads and owns only query shaping,
-authorization, and its Redis query-cache namespace.
+`letletme-web` is the sole identity authority and owns the `bauth` schema.
+`letletme_data` owns FPL domain tables and sync-maintained positive Redis
+hashes. GraphQL is a read-heavy API and owns only its shaped/negative cache
+namespace and forward read-model/RLS migrations.
 
 ## Request path
 
-1. Startup validates the v3 catalog, one current season, active Data
-   publication, and read-only runtime ACLs using `SELECT` only.
-2. Bun receives `/graphql`, `/health`, or `/metrics`.
-3. Request size, shape, complexity, batch size, ingress, and Redis-backed rate
-   limits are checked before resolver work.
-4. Web envelopes or Web-issued Mini Program sessions resolve a principal;
-   deadline-gated legacy tokens are validation-only.
-5. Protected entry, league, tournament, and calculation fields require the
-   verified entry contract.
-6. G1 repositories read schema-qualified v3 PostgreSQL models. G2 adds the
-   typed, revision-coherent Data Redis reader and revision-keyed GraphQL cache.
+1. Bun receives `/graphql`, `/health`, or `/metrics`.
+2. GraphQL bodies are capped at 256 KiB. Queries are bounded by depth 10, five
+   root fields, 20 aliases, 200 AST nodes, weighted complexity 500, and entry
+   batches of 500.
+3. The client IP is derived from the direct peer unless a reviewed proxy hop
+   count is configured. Redis enforces 120 requests/minute/IP and stricter
+   security-operation limits. Security checks fail closed when Redis is down.
+4. A principal is resolved from the website envelope or hashed web Mini Program
+   session; legacy token families are deadline-gated validation-only bridges.
+5. Root-field authorization requires a verified entry for protected entry,
+   league, tournament, and calculation operations.
+6. Repositories read sync-owned Redis data first, then authoritative database
+   rows. GraphQL-shaped caches use `gql:v2:{season}:...` and explicit TTLs.
 
 ## Reliability boundaries
 
-- Exactly one `fpl.seasons.is_current = true` row is required. Redis and wall
-  clock time never select a season.
-- A missing relation, column, publication, or safe privilege boundary prevents
-  startup.
-- GraphQL deploys never execute business DDL or reporting refreshes.
-- PostgreSQL remains authoritative when a Redis publication or query cache is
-  absent or rejected.
+- `Season:active` is mandatory; missing or malformed metadata
+  produces a degraded health response and a typed 503 GraphQL error.
+- `event:current` falls back to the events table.
+- Malformed shaped caches are evicted and retried from authoritative storage;
+  database errors are not converted into empty collections.
+- Live scoring can shadow-compare the official-total implementation behind
+  `LIVE_POINTS_V2` before global enablement.
+- Deploys retain the current and previous two repository image tags.
+
+See the root README and [`docs/ROLLOUT.md`](../docs/ROLLOUT.md) for ownership,
+migration, smoke-test, and rollback contracts.

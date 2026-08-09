@@ -1,8 +1,8 @@
 import type { GraphQLContext } from "../../graphql/context";
-import { getLiveDataSnapshot, type LiveFixtureData } from "../../infra/data-snapshot";
 import { MAX_EVENT_ID } from "../../infra/config";
 import { getCurrentEventId } from "../../infra/event";
 import { buildPlayerMap } from "../../infra/player-map";
+import { getCurrentSeason } from "../../infra/season";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player, Team } from "../../infra/types";
 import { calcElementLivePoints, type ElementEventResultData } from "../entry-live/calc-service";
@@ -11,7 +11,13 @@ import { fixturesRepository } from "../fixtures/repository";
 import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
 import type { LivePerformance } from "../live/repository";
 import { liveRepository } from "../live/repository";
-import { LiveSnapshotCoherenceError, withLiveSnapshotConsistency } from "../live/snapshot-meta";
+import {
+	isLiveSnapshotConsistencyActive,
+	isLiveSnapshotDatabaseFallback,
+	LiveSnapshotCoherenceError,
+	loadLiveSnapshotMeta,
+	withLiveSnapshotConsistency,
+} from "../live/snapshot-meta";
 
 export type LiveMatchData = {
 	matchId: number;
@@ -86,6 +92,174 @@ export const applyLiveFixtureScores = (
 			}
 		: fixture;
 
+const asRecord = (value: unknown): Record<string, unknown> | null => {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return null;
+	}
+	return value as Record<string, unknown>;
+};
+
+const asNumber = (value: unknown): number | null => {
+	if (typeof value === "number" && Number.isFinite(value)) {
+		return value;
+	}
+	if (typeof value === "string") {
+		const parsed = Number.parseFloat(value);
+		return Number.isFinite(parsed) ? parsed : null;
+	}
+	return null;
+};
+
+const asBoolean = (value: unknown): boolean | null => {
+	if (typeof value === "boolean") {
+		return value;
+	}
+	if (typeof value === "string") {
+		const normalized = value.trim().toLowerCase();
+		if (normalized === "true" || normalized === "1") {
+			return true;
+		}
+		if (normalized === "false" || normalized === "0") {
+			return false;
+		}
+	}
+	if (typeof value === "number") {
+		if (value === 1) {
+			return true;
+		}
+		if (value === 0) {
+			return false;
+		}
+	}
+	return null;
+};
+
+const asString = (value: unknown): string | null => (typeof value === "string" ? value : null);
+
+const parseJsonUnknown = (value: string): unknown | null => {
+	try {
+		return JSON.parse(value) as unknown;
+	} catch {
+		return null;
+	}
+};
+
+const normalizeLiveFixtureStatus = (rawStatus: string): MatchBucketStatus | null => {
+	const normalized = rawStatus
+		.trim()
+		.toUpperCase()
+		.replace(/[\s-]+/g, "_");
+	if (normalized === "NOT_STARTED" || normalized === "NOT_START") {
+		return "NOT_STARTED";
+	}
+	if (normalized === "PLAYING" || normalized === "EVENT_NOT_FINISHED") {
+		return "PLAYING";
+	}
+	if (normalized === "FINISHED") {
+		return "FINISHED";
+	}
+	return null;
+};
+
+const parseLiveFixtureRow = (value: unknown): LiveFixtureRedisRow | null => {
+	const row = asRecord(value);
+	if (!row) {
+		return null;
+	}
+
+	const teamId = asNumber(row.teamId ?? row.team_id);
+	const againstId = asNumber(row.againstId ?? row.against_id);
+	if (
+		teamId === null ||
+		againstId === null ||
+		!Number.isInteger(teamId) ||
+		!Number.isInteger(againstId) ||
+		teamId <= 0 ||
+		againstId <= 0
+	) {
+		return null;
+	}
+
+	const fixtureId = asNumber(row.fixtureId ?? row.fixture_id ?? row.fixture ?? row.id);
+	if (fixtureId !== null && (!Number.isInteger(fixtureId) || fixtureId <= 0)) {
+		return null;
+	}
+
+	return {
+		fixtureId: fixtureId === null ? null : Math.trunc(fixtureId),
+		teamId: Math.trunc(teamId),
+		teamName: asString(row.teamName ?? row.team_name) ?? "",
+		teamShortName: asString(row.teamShortName ?? row.team_short_name) ?? "",
+		teamScore: Math.trunc(asNumber(row.teamScore ?? row.team_score) ?? 0),
+		againstId: Math.trunc(againstId),
+		againstName: asString(row.againstName ?? row.against_name) ?? "",
+		againstShortName: asString(row.againstShortName ?? row.against_short_name) ?? "",
+		againstTeamScore: Math.trunc(asNumber(row.againstTeamScore ?? row.against_team_score) ?? 0),
+		kickoffTime: asString(row.kickoffTime ?? row.kickoff_time),
+		wasHome: asBoolean(row.wasHome ?? row.was_home) ?? false,
+	};
+};
+
+const parseLiveFixtureList = (value: unknown): LiveFixtureRedisRow[] => {
+	let list: unknown[] | null = null;
+	if (Array.isArray(value)) {
+		list = value;
+	} else if (typeof value === "string") {
+		const parsed = parseJsonUnknown(value);
+		if (Array.isArray(parsed)) {
+			list = parsed;
+		}
+	}
+	if (!list) {
+		return [];
+	}
+	return list
+		.map((item) => parseLiveFixtureRow(item))
+		.filter((row): row is LiveFixtureRedisRow => row !== null);
+};
+
+const parseLiveFixtureHashFieldValue = (value: string): MatchBucketsFromRedis => {
+	const parsed = parseJsonUnknown(value);
+	const statusMap = asRecord(parsed);
+	const buckets: MatchBucketsFromRedis = {
+		notStarted: [],
+		playing: [],
+		finished: [],
+	};
+
+	if (!statusMap) {
+		return buckets;
+	}
+
+	Object.entries(statusMap).forEach(([rawStatus, rawList]) => {
+		const status = normalizeLiveFixtureStatus(rawStatus);
+		if (!status) {
+			return;
+		}
+		const fixtures = parseLiveFixtureList(rawList).filter((row) => row.wasHome);
+		if (status === "NOT_STARTED") {
+			buckets.notStarted.push(...fixtures);
+			return;
+		}
+		if (status === "PLAYING") {
+			buckets.playing.push(...fixtures);
+			return;
+		}
+		buckets.finished.push(...fixtures);
+	});
+
+	return buckets;
+};
+
+const mergeMatchBuckets = (
+	target: MatchBucketsFromRedis,
+	source: MatchBucketsFromRedis
+): MatchBucketsFromRedis => ({
+	notStarted: [...target.notStarted, ...source.notStarted],
+	playing: [...target.playing, ...source.playing],
+	finished: [...target.finished, ...source.finished],
+});
+
 const liveFixtureRows = (buckets: MatchBucketsFromRedis): LiveFixtureRedisRow[] => [
 	...buckets.notStarted,
 	...buckets.playing,
@@ -143,48 +317,80 @@ export const loadLiveFixtureBucketsFromRedis = async (
 	eventId: number,
 	expectedFixturesSource: LiveFixtureIdentitySource
 ): Promise<MatchBucketsFromRedis | null> => {
-	const [snapshot, expectedFixtures] = await Promise.all([
-		getLiveDataSnapshot(context, eventId),
-		Promise.resolve(expectedFixturesSource),
-	]);
-	const mapRow = (fixture: LiveFixtureData): LiveFixtureRedisRow => ({
-		fixtureId: fixture.fixtureId,
-		teamId: fixture.teamId,
-		teamName: fixture.teamName,
-		teamShortName: fixture.teamShortName,
-		teamScore: fixture.teamScore,
-		againstId: fixture.againstId,
-		againstName: fixture.againstName,
-		againstShortName: fixture.againstShortName,
-		againstTeamScore: fixture.againstTeamScore,
-		kickoffTime: fixture.kickoffTime,
-		wasHome: fixture.wasHome,
-	});
-	const buckets = Object.values(snapshot.liveFixtures).reduce<MatchBucketsFromRedis>(
-		(result, value) => ({
-			notStarted: [
-				...result.notStarted,
-				...value.Not_Start.filter((fixture) => fixture.wasHome).map(mapRow),
-			],
-			playing: [
-				...result.playing,
-				...value.Playing.filter((fixture) => fixture.wasHome).map(mapRow),
-			],
-			finished: [
-				...result.finished,
-				...value.Finished.filter((fixture) => fixture.wasHome).map(mapRow),
-			],
-		}),
-		{ notStarted: [], playing: [], finished: [] }
-	);
-	if (!matchesLiveFixtureIdentities(buckets, expectedFixtures)) {
+	if (isLiveSnapshotDatabaseFallback(context, eventId)) return null;
+	const expectedFixturesPromise = Promise.resolve(expectedFixturesSource);
+	const season = await getCurrentSeason(context);
+	const meta = await loadLiveSnapshotMeta(context, eventId, { season });
+	for (const prefix of ["LiveFixtureV2", "LiveFixture"] as const) {
+		const redisKey = `${prefix}:${season}:${eventId}`;
+		let hashEntries: Record<string, string>;
+		try {
+			hashEntries = await context.redis.hgetall(redisKey);
+		} catch (error) {
+			context.logger.warn({ err: error, redisKey }, "Failed to read live fixtures from Redis");
+			continue;
+		}
+		const fields = Object.values(hashEntries);
+		if (fields.length === 0) continue;
+		if (meta && fields.length !== meta.fixtureTeamCount) {
+			context.logger.warn(
+				{
+					redisKey,
+					revision: meta.revision,
+					expectedCount: meta.fixtureTeamCount,
+					actualCount: fields.length,
+				},
+				"Incomplete live fixture revision; trying compatibility view"
+			);
+			continue;
+		}
+
+		const buckets = fields.reduce<MatchBucketsFromRedis>(
+			(acc, fieldValue) => mergeMatchBuckets(acc, parseLiveFixtureHashFieldValue(fieldValue)),
+			{ notStarted: [], playing: [], finished: [] }
+		);
+
+		const fixtureCount =
+			buckets.notStarted.length + buckets.playing.length + buckets.finished.length;
+		if (meta && fixtureCount !== meta.fixtureCount) {
+			context.logger.warn(
+				{
+					redisKey,
+					revision: meta.revision,
+					expectedCount: meta.fixtureCount,
+					actualCount: fixtureCount,
+				},
+				"Malformed live fixture revision; trying compatibility view"
+			);
+			continue;
+		}
+		const expectedFixtures = await expectedFixturesPromise;
+		if (!matchesLiveFixtureIdentities(buckets, expectedFixtures)) {
+			context.logger.warn(
+				{
+					redisKey,
+					revision: meta?.revision,
+					expectedCount: expectedFixtures.length,
+					actualCount: fixtureCount,
+				},
+				"Mismatched live fixture identities; trying compatibility view"
+			);
+			continue;
+		}
+
+		if (fixtureCount > 0) {
+			return buckets;
+		}
+	}
+
+	if (meta && isLiveSnapshotConsistencyActive(context, eventId)) {
 		throw new LiveSnapshotCoherenceError(
 			eventId,
-			"liveFixtures",
-			`Live fixture identities do not match revision ${snapshot.revision}`
+			"LiveFixture",
+			`No complete live fixture view remains for revision ${meta.revision}`
 		);
 	}
-	return buckets;
+	return null;
 };
 
 const elementTypeName = (position: number): string => {
@@ -228,7 +434,7 @@ const buildTeamDataMap = (
 
 		const team = teamsById.get(player.teamId);
 		const bonus = bonusByPlayerId.get(perf.playerId) ?? perf.bonus ?? 0;
-		const totalPoints = calcElementLivePoints(perf, bonus);
+		const totalPoints = calcElementLivePoints(player.position, perf, bonus);
 		const defensiveContribution: number = perf.defensiveContribution ?? 0;
 
 		const elementData: ElementEventResultData = {

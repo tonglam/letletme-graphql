@@ -70,7 +70,7 @@ export const entryLiveService = {
 		entryId: number,
 		eventId: number
 	): Promise<EntryLive | null> {
-		if (!Number.isSafeInteger(entryId) || !Number.isSafeInteger(eventId)) {
+		if (!Number.isInteger(entryId) || !Number.isInteger(eventId)) {
 			return null;
 		}
 

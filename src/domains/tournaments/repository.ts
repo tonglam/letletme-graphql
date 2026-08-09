@@ -1,10 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import {
-	deleteQueryCache,
-	QUERY_CACHE_TTL_SECONDS,
-	writeQueryCache,
-} from "../../infra/query-cache";
+import { env } from "../../infra/env";
+import { getCurrentSeason } from "../../infra/season";
 import { stableStringify } from "../../infra/stringify";
 import { LeagueType } from "../leagues/repository";
 
@@ -759,8 +756,8 @@ const getTournamentInfoUncached = async (
 	context: GraphQLContext,
 	tournamentId: number
 ): Promise<TournamentInfo | null> => {
-	const { data, error } = await context.data
-		.read("competition.tournaments")
+	const { data, error } = await context.supabase
+		.from("tournament_infos")
 		.select(TOURNAMENT_INFO_COLUMNS)
 		.eq("id", tournamentId)
 		.limit(1);
@@ -784,8 +781,8 @@ const getTournamentInfosUncached = async (
 	const uniqueIds = [...new Set(tournamentIds)];
 	if (uniqueIds.length === 0) return [];
 
-	const { data, error } = await context.data
-		.read("competition.tournaments")
+	const { data, error } = await context.supabase
+		.from("tournament_infos")
 		.select(TOURNAMENT_INFO_COLUMNS)
 		.in("id", uniqueIds);
 
@@ -804,7 +801,8 @@ const getTournamentInfoById = async (
 	context: GraphQLContext,
 	tournamentId: number
 ): Promise<TournamentInfo | null> => {
-	const cacheKey = gqlCacheKey(context, `tournament:info:${tournamentId}`);
+	const season = await getCurrentSeason(context);
+	const cacheKey = gqlCacheKey(season, `tournament:info:${tournamentId}`);
 	const cached = await readJsonCache(context, cacheKey, isTournamentInfoCache);
 	if (isRecord(cached) && Number.isFinite(Number(cached.id))) {
 		return cached as unknown as TournamentInfo;
@@ -812,12 +810,7 @@ const getTournamentInfoById = async (
 
 	const tournament = await getTournamentInfoUncached(context, tournamentId);
 	if (!tournament) return null;
-	await writeQueryCache(
-		context,
-		cacheKey,
-		JSON.stringify(tournament),
-		QUERY_CACHE_TTL_SECONDS.REPORTING
-	);
+	await context.redis.set(cacheKey, JSON.stringify(tournament), "EX", env.CACHE_TTL_SECONDS);
 	return tournament;
 };
 
@@ -825,8 +818,8 @@ const getTournamentCacheReadiness = async (
 	context: GraphQLContext,
 	tournamentId: number
 ): Promise<boolean> => {
-	const { data, error } = await context.data
-		.read("competition.tournaments")
+	const { data, error } = await context.supabase
+		.from("tournament_infos")
 		.select("standings_ready_at, setup_status")
 		.eq("id", tournamentId)
 		.limit(1);
@@ -905,8 +898,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		entryId: number
 	): Promise<TournamentInfo | null> {
-		const { data, error } = await context.data
-			.read("competition.tournament_entries")
+		const { data, error } = await context.supabase
+			.from("tournament_entries")
 			.select("entry_id")
 			.eq("tournament_id", tournamentId)
 			.eq("entry_id", entryId)
@@ -924,8 +917,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		entryId: number
 	): Promise<TournamentInfo | null> {
-		const { data, error } = await context.data
-			.read("competition.tournaments")
+		const { data, error } = await context.supabase
+			.from("tournament_infos")
 			.select(TOURNAMENT_INFO_COLUMNS)
 			.eq("id", tournamentId)
 			.eq("admin_entry_id", entryId)
@@ -945,8 +938,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		context: GraphQLContext,
 		tournamentId: number
 	): Promise<TournamentParticipant[]> {
-		const { data: membershipData, error: membershipError } = await context.data
-			.read("competition.tournament_entries")
+		const { data: membershipData, error: membershipError } = await context.supabase
+			.from("tournament_entries")
 			.select("entry_id")
 			.eq("tournament_id", tournamentId)
 			.order("entry_id", { ascending: true });
@@ -959,8 +952,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		);
 		if (entryIds.length === 0) return [];
 
-		const { data: entryData, error: entryError } = await context.data
-			.read("competition.entries")
+		const { data: entryData, error: entryError } = await context.supabase
+			.from("entry_infos")
 			.select("id, entry_name, player_name")
 			.in("id", entryIds)
 			.order("id", { ascending: true });
@@ -979,7 +972,8 @@ export const tournamentsRepository: TournamentsRepository = {
 	},
 
 	async getEntryTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]> {
-		const cacheKey = gqlCacheKey(context, `tournaments:entry:${entryId}`);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `tournaments:entry:${entryId}`);
 		// Accept any well-shaped list cache. Previously we required every row to have
 		// standingsReadyAt, so one in-flight setup made the list cold on every request.
 		const cached = await readJsonCache(context, cacheKey, isTournamentInfoArrayCache);
@@ -990,8 +984,8 @@ export const tournamentsRepository: TournamentsRepository = {
 			return cached as TournamentInfo[];
 		}
 
-		const { data: entryData, error: entryError } = await context.data
-			.read("competition.tournament_entries")
+		const { data: entryData, error: entryError } = await context.supabase
+			.from("tournament_entries")
 			.select("tournament_id")
 			.eq("entry_id", entryId);
 
@@ -1002,17 +996,12 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const tournamentIds = extractTournamentIds((entryData as DbTournamentEntryRow[] | null) ?? []);
 		if (tournamentIds.length === 0) {
-			await writeQueryCache(
-				context,
-				cacheKey,
-				JSON.stringify([]),
-				QUERY_CACHE_TTL_SECONDS.REPORTING
-			);
+			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
 			return [];
 		}
 
-		const { data: infoData, error: infoError } = await context.data
-			.read("competition.tournaments")
+		const { data: infoData, error: infoError } = await context.supabase
+			.from("tournament_infos")
 			.select(TOURNAMENT_INFO_COLUMNS)
 			.in("id", tournamentIds)
 			.order("id", { ascending: true });
@@ -1028,16 +1017,17 @@ export const tournamentsRepository: TournamentsRepository = {
 			(tournament) => tournament.standingsReadyAt !== null
 		);
 		const ttlSeconds = allStandingsReady
-			? QUERY_CACHE_TTL_SECONDS.REPORTING
-			: Math.min(15, QUERY_CACHE_TTL_SECONDS.REPORTING);
-		await writeQueryCache(context, cacheKey, JSON.stringify(tournaments), ttlSeconds);
+			? env.CACHE_TTL_SECONDS
+			: Math.min(15, env.CACHE_TTL_SECONDS);
+		await context.redis.set(cacheKey, JSON.stringify(tournaments), "EX", ttlSeconds);
 		return tournaments;
 	},
 
 	async getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]> {
-		const cacheKey = gqlCacheKey(context, `tournaments:entry-ids:${tournamentId}`);
+		const season = await getCurrentSeason(context);
+		const cacheKey = gqlCacheKey(season, `tournaments:entry-ids:${tournamentId}`);
 		if (!(await getTournamentCacheReadiness(context, tournamentId))) {
-			await deleteQueryCache(context, cacheKey);
+			await context.redis.del(cacheKey);
 			return tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
 		}
 		const cached = await readJsonCache(context, cacheKey, isEntryIdArrayCache);
@@ -1049,12 +1039,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			context,
 			tournamentId
 		);
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(entryIds),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		await context.redis.set(cacheKey, JSON.stringify(entryIds), "EX", env.CACHE_TTL_SECONDS);
 		return entryIds;
 	},
 
@@ -1062,8 +1047,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		context: GraphQLContext,
 		tournamentId: number
 	): Promise<number[]> {
-		const { data, error } = await context.data
-			.read("competition.tournament_entries")
+		const { data, error } = await context.supabase
+			.from("tournament_entries")
 			.select("entry_id")
 			.eq("tournament_id", tournamentId);
 
@@ -1080,8 +1065,9 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		eventId: number
 	): Promise<TournamentEventResult[]> {
+		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(
-			context,
+			season,
 			`tournaments:event-results:${stableStringify({ tournamentId, eventId })}`
 		);
 		const cached = await readJsonCache(context, cacheKey, isTournamentEventResultArrayCache);
@@ -1097,8 +1083,8 @@ export const tournamentsRepository: TournamentsRepository = {
 			return cached as TournamentEventResult[];
 		}
 
-		const { data: resultData, error: resultError } = await context.data
-			.read("reporting.tournament_event_results")
+		const { data: resultData, error: resultError } = await context.supabase
+			.from("v_tournament_event_result")
 			.select(TOURNAMENT_VIEW_COLUMNS)
 			.eq("tournament_id", tournamentId)
 			.eq("event_id", eventId)
@@ -1116,12 +1102,7 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const rows = (resultData as DbTournamentEventResultRow[] | null) ?? [];
 		if (rows.length === 0) {
-			await writeQueryCache(
-				context,
-				cacheKey,
-				JSON.stringify([]),
-				QUERY_CACHE_TTL_SECONDS.REPORTING
-			);
+			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
 			return [];
 		}
 
@@ -1132,23 +1113,13 @@ export const tournamentsRepository: TournamentsRepository = {
 				{ tournamentId, groupMode: tournament.groupMode },
 				"Tournament event results only supported for POINTS_RACES; returning empty"
 			);
-			await writeQueryCache(
-				context,
-				cacheKey,
-				JSON.stringify([]),
-				QUERY_CACHE_TTL_SECONDS.REPORTING
-			);
+			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
 			return [];
 		}
 
 		const results = rows.map((row) => mapTournamentEventResultFromView(tournament, row));
 
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(results),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
 		return results;
 	},
 
@@ -1158,8 +1129,9 @@ export const tournamentsRepository: TournamentsRepository = {
 		eventId: number,
 		entryId: number
 	): Promise<TournamentEntryRankingSummary> {
+		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(
-			context,
+			season,
 			`tournaments:ranking-summary:${stableStringify({
 				tournamentId,
 				eventId,
@@ -1194,8 +1166,8 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const [tournament, snapshotResponse] = await Promise.all([
 			getTournamentInfoById(context, tournamentId),
-			context.data
-				.read("reporting.tournament_entry_event_summaries")
+			context.supabase
+				.from("mv_tournament_event_snapshot")
 				.select(
 					"tournament_id, event_id, entry_id, tournament_overall_rank, overall_rank, team_value, cum_transfers_num, cum_total_costs, cum_total_bench_points, cum_auto_sub_points, tournament_team_value_rank, tournament_transfers_rank, tournament_costs_rank, tournament_bench_points_rank, tournament_auto_sub_rank"
 				)
@@ -1237,12 +1209,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			tournamentAutoSubRank: snapshotRow?.tournament_auto_sub_rank ?? null,
 		};
 
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(summary),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		await context.redis.set(cacheKey, JSON.stringify(summary), "EX", env.CACHE_TTL_SECONDS);
 		return summary;
 	},
 
@@ -1251,8 +1218,9 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		eventId: number
 	): Promise<TournamentBattleGroupResult[]> {
+		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(
-			context,
+			season,
 			`tournaments:battle-results:${stableStringify({ tournamentId, eventId })}`
 		);
 		const cached = await readJsonCache(context, cacheKey, isBattleResultArrayCache);
@@ -1265,8 +1233,8 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const [tournamentResult, matchResult] = await Promise.all([
 			getTournamentInfoById(context, tournamentId),
-			context.data
-				.read("competition.tournament_battle_group_results")
+			context.supabase
+				.from("tournament_battle_group_results")
 				.select(
 					"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
 				)
@@ -1286,18 +1254,13 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const rows = (matchResult.data as DbTournamentBattleGroupResultRow[] | null) ?? [];
 		if (rows.length === 0 || !tournamentResult) {
-			await writeQueryCache(
-				context,
-				cacheKey,
-				JSON.stringify([]),
-				QUERY_CACHE_TTL_SECONDS.REPORTING
-			);
+			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
 			return [];
 		}
 		const entryIds = [...new Set(rows.flatMap((row) => [row.home_entry_id, row.away_entry_id]))];
 
-		const { data: nameData } = await context.data
-			.read("competition.entries")
+		const { data: nameData } = await context.supabase
+			.from("entry_infos")
 			.select("id, entry_name, player_name")
 			.in("id", entryIds);
 
@@ -1309,12 +1272,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			mapTournamentBattleGroupResult(tournamentResult, row, entryNameMap)
 		);
 
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(results),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
 		return results;
 	},
 
@@ -1322,8 +1280,9 @@ export const tournamentsRepository: TournamentsRepository = {
 		context: GraphQLContext,
 		entryId: number
 	): Promise<EntryH2HMatchResult[]> {
-		const membershipResult = await context.data
-			.read("competition.tournament_entries")
+		const season = await getCurrentSeason(context);
+		const membershipResult = await context.supabase
+			.from("tournament_entries")
 			.select("tournament_id")
 			.eq("entry_id", entryId);
 		if (membershipResult.error) {
@@ -1340,7 +1299,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		// selects a new key, while a former entrant's persisted match history is
 		// still available under the empty-membership key.
 		const cacheKey = gqlCacheKey(
-			context,
+			season,
 			`tournaments:entry-h2h:v3:${entryId}:${stableStringify(membershipTournamentIds)}`
 		);
 		const cached = await readJsonCache(context, cacheKey, isH2HResultArrayCache);
@@ -1350,8 +1309,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		)
 			return cached as EntryH2HMatchResult[];
 
-		const matchResult = await context.data
-			.read("competition.tournament_battle_group_results")
+		const matchResult = await context.supabase
+			.from("tournament_battle_group_results")
 			.select(
 				"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
 			)
@@ -1376,12 +1335,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		);
 		if (rows.length === 0) {
 			if (readyTournamentIds.size === tournamentIds.length) {
-				await writeQueryCache(
-					context,
-					cacheKey,
-					JSON.stringify([]),
-					QUERY_CACHE_TTL_SECONDS.REPORTING
-				);
+				await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
 			}
 			return [];
 		}
@@ -1392,12 +1346,12 @@ export const tournamentsRepository: TournamentsRepository = {
 		const allEntryIds = [...new Set(readyRows.flatMap((r) => [r.home_entry_id, r.away_entry_id]))];
 
 		const [nameResult, eventResultData] = await Promise.all([
-			context.data
-				.read("competition.entries")
+			context.supabase
+				.from("entry_infos")
 				.select("id, entry_name, player_name")
 				.in("id", allEntryIds),
-			context.data
-				.read("competition.entry_event_results")
+			context.supabase
+				.from("entry_event_results")
 				.select("entry_id, event_id, event_points, event_transfers_cost, event_chip, overall_rank")
 				.in("entry_id", allEntryIds)
 				.in("event_id", eventIds),
@@ -1431,12 +1385,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			);
 
 		if (readyTournamentIds.size === tournamentIds.length) {
-			await writeQueryCache(
-				context,
-				cacheKey,
-				JSON.stringify(results),
-				QUERY_CACHE_TTL_SECONDS.REPORTING
-			);
+			await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
 		}
 		return results;
 	},

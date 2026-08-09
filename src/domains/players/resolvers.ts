@@ -6,7 +6,6 @@ import type {
 	PlayerPickerItem,
 	PlayersFilter,
 	PlayersForPickerPayload,
-	PlayerPickerSort,
 	PlayerTransferStats,
 	Team,
 } from "./repository";
@@ -97,7 +96,6 @@ type TopTransfersArgs = {
 type PlayersForPickerArgs = {
 	search?: string | null;
 	filter?: GraphQLPlayersFilter | null;
-	sort?: PlayerPickerSort | null;
 	limit?: number | null;
 	cursor?: number | null;
 };
@@ -171,8 +169,7 @@ export const playersResolvers = {
 				args.limit ?? 20,
 				args.cursor ?? null,
 				normalizePlayerPickerSearch(args.search),
-				filter,
-				args.sort ?? "TOTAL_POINTS_DESC"
+				filter
 			);
 		},
 

@@ -5,7 +5,6 @@ import {
 	emptyMarketPulse,
 	type MarketSnapshotRow,
 } from "../../../src/domains/market/repository";
-import { gqlCacheKey } from "../../../src/infra/cache-key";
 
 const baseRow = (
 	date: string,
@@ -44,36 +43,33 @@ const baseRow = (
 });
 
 const buildContext = (cacheSeed?: string) => {
-	const strings = new Map<string, string>();
+	const strings = new Map<string, string>([["Season:active", "2627"]]);
+	if (cacheSeed !== undefined) {
+		strings.set("gql:v2:2627:market-pulse:v2:14", cacheSeed);
+	}
 	const writes: Array<{ key: string; value: string; ttl: number }> = [];
 	const deletes: string[] = [];
-	const context = {
-		currentSeason: { seasonId: 2026, seasonCode: "2627" },
-		dataRevision: "core-test",
-		redis: {
-			get: async (key: string) => strings.get(key) ?? null,
-			set: async (key: string, value: string, _mode: string, ttl: number) => {
-				strings.set(key, value);
-				writes.push({ key, value, ttl });
-				return "OK";
-			},
-			del: async (key: string) => {
-				strings.delete(key);
-				deletes.push(key);
-				return 1;
-			},
-		},
-		logger: { warn: () => undefined, error: () => undefined },
-		data: {},
-	} as never;
-	if (cacheSeed !== undefined) {
-		strings.set(gqlCacheKey(context, "market-pulse:v4:14"), cacheSeed);
-	}
 	return {
 		strings,
 		writes,
 		deletes,
-		context,
+		context: {
+			redis: {
+				get: async (key: string) => strings.get(key) ?? null,
+				set: async (key: string, value: string, _mode: string, ttl: number) => {
+					strings.set(key, value);
+					writes.push({ key, value, ttl });
+					return "OK";
+				},
+				del: async (key: string) => {
+					strings.delete(key);
+					deletes.push(key);
+					return 1;
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+			supabase: {},
+		} as never,
 	};
 };
 
@@ -254,30 +250,10 @@ describe("buildMarketPulse", () => {
 		expect(pulse.availabilityHighlights).toHaveLength(5);
 		expect(pulse.availabilityHighlights[0]?.player.playerId).toBe(22);
 	});
-
-	it("uses only the latest capture when a player has multiple snapshots on one day", () => {
-		const pulse = buildMarketPulse(
-			[
-				baseRow("2026-08-03", 1, {
-					captured_at: "2026-08-03T01:00:00.000Z",
-					selected_by_percent: 80,
-				}),
-				baseRow("2026-08-03", 1, {
-					captured_at: "2026-08-03T02:00:00.000Z",
-					selected_by_percent: 12,
-				}),
-			],
-			14
-		);
-
-		expect(pulse.mostSelected).toHaveLength(1);
-		expect(pulse.mostSelected[0]).toMatchObject({ playerId: 1, selectedByPercent: 12 });
-		expect(pulse.coverage.capturedAt).toBe("2026-08-03T02:00:00.000Z");
-	});
 });
 
 describe("market repository caching", () => {
-	it("caches a successful pulse for the five-minute market policy", async () => {
+	it("caches a successful pulse for one hour", async () => {
 		const context = buildContext();
 		const repository = createMarketRepository({
 			query: async () => ({ rows: [baseRow("2026-08-03", 1)] }),
@@ -285,7 +261,7 @@ describe("market repository caching", () => {
 
 		const result = await repository.getMarketPulse(context.context, 14);
 		expect(result.coverage.observedDays).toBe(1);
-		expect(context.writes[0]?.ttl).toBe(300);
+		expect(context.writes[0]?.ttl).toBe(3600);
 	});
 
 	it("caches a no-data pulse for five minutes", async () => {

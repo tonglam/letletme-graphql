@@ -16,8 +16,6 @@ import type {
 	RoleAssessment,
 } from "./types";
 
-export const PLAYER_STATE_ENGINE_VERSION = "player-state-v3";
-
 const HISTORY_WEIGHTS = [0.55, 0.3, 0.15] as const;
 const EXPECTED_METRICS_FIRST_SEASON = "2223";
 

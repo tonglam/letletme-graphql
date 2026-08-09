@@ -1,3 +1,4 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import {
 	Kind,
 	parse,
@@ -11,7 +12,6 @@ import {
 import { env } from "../infra/env";
 import type { Logger } from "../infra/logger";
 import type { Principal } from "../infra/principal";
-import type { V3ReadClient } from "../infra/v3-read-client";
 
 type GraphQLRequestPayload = {
 	query?: unknown;
@@ -28,7 +28,7 @@ type AuthorizationInput = {
 	body: unknown;
 	searchParams: URLSearchParams;
 	principal?: Principal | null;
-	data: V3ReadClient;
+	supabase: SupabaseClient;
 	logger: Logger;
 };
 
@@ -77,6 +77,7 @@ const publicFields = new Set([
 	"eventOverallResult",
 	"entry",
 	"calcLivePointsByEntry",
+	"createWechatApiSession",
 ]);
 
 const websiteOnlyFields = new Set<string>();
@@ -242,12 +243,12 @@ const requireBoundEntry = (principal: Principal, entryId: number | null): Author
 };
 
 const hasTournamentMembership = async (
-	dataClient: V3ReadClient,
+	supabase: SupabaseClient,
 	tournamentId: number,
 	entryId: number
 ): Promise<boolean> => {
-	const { data, error } = await dataClient
-		.read("competition.tournament_entries")
+	const { data, error } = await supabase
+		.from("tournament_entries")
 		.select("entry_id")
 		.eq("tournament_id", tournamentId)
 		.eq("entry_id", entryId)
@@ -257,12 +258,12 @@ const hasTournamentMembership = async (
 };
 
 const hasLeagueMembership = async (
-	dataClient: V3ReadClient,
+	supabase: SupabaseClient,
 	leagueId: number,
 	entryId: number
 ): Promise<boolean> => {
-	const { data, error } = await dataClient
-		.read("competition.entry_leagues")
+	const { data, error } = await supabase
+		.from("entry_league_infos")
 		.select("entry_id")
 		.eq("league_id", leagueId)
 		.eq("entry_id", entryId)
@@ -272,12 +273,12 @@ const hasLeagueMembership = async (
 };
 
 const isTournamentAdmin = async (
-	dataClient: V3ReadClient,
+	supabase: SupabaseClient,
 	tournamentId: number,
 	entryId: number
 ): Promise<boolean> => {
-	const { data, error } = await dataClient
-		.read("competition.tournaments")
+	const { data, error } = await supabase
+		.from("tournament_infos")
 		.select("admin_entry_id")
 		.eq("id", tournamentId)
 		.eq("admin_entry_id", entryId)
@@ -289,7 +290,7 @@ const isTournamentAdmin = async (
 const authorizeRootField = async (
 	field: RootField,
 	principal: Principal | null | undefined,
-	dataClient: V3ReadClient
+	supabase: SupabaseClient
 ): Promise<AuthorizationResult> => {
 	if (publicFields.has(field.name)) return { ok: true };
 	if (!protectedFields.has(field.name)) {
@@ -346,11 +347,11 @@ const authorizeRootField = async (
 				message: "User is not a member of this tournament",
 			};
 		}
-		const isMember = await hasTournamentMembership(dataClient, tournamentId, principal.fplEntryId!);
+		const isMember = await hasTournamentMembership(supabase, tournamentId, principal.fplEntryId!);
 		const isRetainedAdmin =
 			field.name === "tournamentParticipants" &&
 			!isMember &&
-			(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!));
+			(await isTournamentAdmin(supabase, tournamentId, principal.fplEntryId!));
 		if (!isMember && !isRetainedAdmin) {
 			return {
 				ok: false,
@@ -366,7 +367,7 @@ const authorizeRootField = async (
 		if (
 			!tournamentId ||
 			!hasVerifiedEntry(principal) ||
-			!(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!))
+			!(await isTournamentAdmin(supabase, tournamentId, principal.fplEntryId!))
 		) {
 			return {
 				ok: false,
@@ -382,7 +383,7 @@ const authorizeRootField = async (
 		if (
 			!leagueId ||
 			!hasVerifiedEntry(principal) ||
-			!(await hasLeagueMembership(dataClient, leagueId, principal.fplEntryId!))
+			!(await hasLeagueMembership(supabase, leagueId, principal.fplEntryId!))
 		) {
 			return {
 				ok: false,
@@ -399,11 +400,11 @@ const authorizeRootField = async (
 const authorizePayload = async ({
 	payload,
 	principal,
-	data,
+	supabase,
 }: {
 	payload: GraphQLRequestPayload;
 	principal?: Principal | null;
-	data: V3ReadClient;
+	supabase: SupabaseClient;
 }): Promise<AuthorizationResult> => {
 	if (typeof payload.query !== "string") return { ok: true };
 
@@ -416,7 +417,7 @@ const authorizePayload = async ({
 	const fields = collectRootFields(operation.selectionSet, getFragments(document), variables);
 
 	for (const field of fields) {
-		const result = await authorizeRootField(field, principal, data);
+		const result = await authorizeRootField(field, principal, supabase);
 		if (!result.ok) return result;
 	}
 
@@ -443,7 +444,7 @@ export const authorizeGraphQLRequest = async (
 			const result = await authorizePayload({
 				payload,
 				principal: input.principal,
-				data: input.data,
+				supabase: input.supabase,
 			});
 			if (!result.ok) {
 				if (env.GRAPHQL_AUTH_MODE === "report") {

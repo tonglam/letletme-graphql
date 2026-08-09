@@ -18,14 +18,11 @@ const makeMockContext = (options: {
 	const livePerformances = options.livePerformances ?? new Map();
 
 	return {
-		database: {
-			query: async () => {
-				throw new Error("Unexpected database query");
-			},
-		} as never,
-		currentSeason: { seasonId: 2025, seasonCode: "2526" },
 		redis: {
-			get: async (key: string) => redisState.get(key) ?? null,
+			get: async (key: string) => {
+				if (key === "Season:active") return "2526";
+				return redisState.get(key) ?? null;
+			},
 			set: async (key: string, value: string) => {
 				redisState.set(key, value);
 				return "OK";
@@ -38,8 +35,8 @@ const makeMockContext = (options: {
 			},
 			expire: async () => 1,
 		} as never,
-		data: {
-			read: () => {
+		supabase: {
+			from: () => {
 				const builder = {
 					select: () => builder,
 					eq: () => builder,
