@@ -231,6 +231,7 @@ const applyCurrentEventPointer = (events: Event[], currentEventId: number | null
 	if (!currentEventId) return events;
 	return events.map((event) => ({
 		...event,
+		isPrevious: event.id === currentEventId - 1,
 		isCurrent: event.id === currentEventId,
 		isNext: event.id === currentEventId + 1,
 	}));
@@ -309,6 +310,7 @@ export const eventsRepository: EventsRepository = {
 
 		// Try Redis hash first — Event:{season} is maintained by external sync
 		const season = await getCurrentSeason(context);
+		const currentEvent = await getCurrentEventFromRedis(context);
 		let raw: string | null = null;
 		try {
 			raw = await context.redis.hget(`Event:${season}`, String(id));
@@ -317,7 +319,9 @@ export const eventsRepository: EventsRepository = {
 		}
 		if (raw) {
 			const event = parseEventFromRedisJson(raw);
-			if (event) return event;
+			if (event) {
+				return applyCurrentEventPointer([event], currentEvent?.id ?? null)[0] ?? null;
+			}
 		}
 
 		// Fallback: Supabase query
@@ -333,7 +337,7 @@ export const eventsRepository: EventsRepository = {
 			return null;
 		}
 
-		return mapEvent(row);
+		return applyCurrentEventPointer([mapEvent(row)], currentEvent?.id ?? null)[0] ?? null;
 	},
 
 	async getCurrentEventInfo(context: GraphQLContext): Promise<CurrentEventInfo | null> {

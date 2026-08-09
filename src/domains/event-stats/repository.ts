@@ -197,6 +197,7 @@ async function getPlayerAndTeamMaps(
 						.lte("event_id", eventId)
 						.order("event_id", { ascending: false })
 						.order("fixture_id", { ascending: false })
+						.order("player_code", { ascending: false })
 						.range(offset, offset + PLAYER_TEAM_PAGE_SIZE - 1);
 					if (error) {
 						throw new Error(error.message, { cause: error });

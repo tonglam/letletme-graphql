@@ -21,7 +21,12 @@ export async function buildPlayerMap(
 			if (value) {
 				try {
 					const parsed = JSON.parse(value) as Record<string, unknown>;
-					result.set(playerIds[i], parsePlayer(parsed, playerIds[i]));
+					const player = parsePlayer(parsed, playerIds[i]);
+					if (!player) {
+						missingIds.push(playerIds[i]);
+						continue;
+					}
+					result.set(playerIds[i], player);
 				} catch {
 					missingIds.push(playerIds[i]);
 				}
@@ -83,7 +88,18 @@ const asNullableNumber = (value: number | string | null | undefined): number | n
 	return null;
 };
 
-function parsePlayer(parsed: Record<string, unknown>, id: number): Player {
+function parsePlayer(parsed: Record<string, unknown>, id: number): Player | null {
+	const teamId = Number(parsed.teamId ?? parsed.team_id ?? 0);
+	const position = Number(parsed.type ?? parsed.position ?? 0);
+	if (
+		!Number.isInteger(teamId) ||
+		teamId <= 0 ||
+		!Number.isInteger(position) ||
+		position < 1 ||
+		position > 4
+	) {
+		return null;
+	}
 	return {
 		id,
 		code: Number(parsed.code ?? 0),
@@ -98,8 +114,8 @@ function parsePlayer(parsed: Record<string, unknown>, id: number): Player {
 			: parsed.second_name
 				? String(parsed.second_name)
 				: null,
-		teamId: Number(parsed.teamId ?? parsed.team_id ?? 0),
-		position: Number(parsed.type ?? parsed.position ?? 0),
+		teamId,
+		position,
 		price: Number(parsed.price ?? 0),
 		startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
 		totalPoints: Number(parsed.totalPoints ?? 0),

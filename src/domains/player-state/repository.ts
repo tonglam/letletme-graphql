@@ -1393,18 +1393,16 @@ export const createPlayerStateRepository = (
 			metadata.team_id,
 			outlookStart,
 			outlookHorizon,
-			new Set(
-				fixtureCoverageResult.rows
-					.filter((row) => Number(row.fixture_count) > 0)
-					.map((row) => row.event_id)
-			)
+			// A returned event row with zero fixtures is authoritative blank-GW
+			// coverage. Only an absent event row should be treated as unknown.
+			new Set(fixtureCoverageResult.rows.map((row) => row.event_id))
 		);
 		const outlook = assessOutlook(outlookGameweeks, outlookHorizon);
 		const dgwCount = outlook.gameweeks.filter((gameweek) => gameweek.dgw).length;
 		const bgwCount = outlook.gameweeks.filter((gameweek) => gameweek.bgw).length;
 		const outlookCoverageComplete =
 			fixtureCoverageResult.rows.length === outlookHorizon &&
-			fixtureCoverageResult.rows.every((row) => Number(row.fixture_count) > 0);
+			fixtureCoverageResult.rows.every((row) => Number.isInteger(Number(row.event_id)));
 		const outlookReasons = [
 			outlook.rating === "FAVOURABLE"
 				? "OUTLOOK_FAVOURABLE"

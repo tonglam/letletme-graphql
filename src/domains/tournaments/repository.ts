@@ -1414,7 +1414,12 @@ export const tournamentsRepository: TournamentsRepository = {
 			if (page.length < TOURNAMENT_SUMMARY_PAGE_SIZE) break;
 		}
 		if (rows.length === 0 || !tournamentResult) {
-			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
+			await writeCacheBestEffort(
+				context,
+				cacheKey,
+				JSON.stringify([]),
+				"Failed to write tournament battle group results cache"
+			);
 			return [];
 		}
 		const entryIds = [...new Set(rows.flatMap((row) => [row.home_entry_id, row.away_entry_id]))];
@@ -1442,7 +1447,12 @@ export const tournamentsRepository: TournamentsRepository = {
 			mapTournamentBattleGroupResult(tournamentResult, row, entryNameMap)
 		);
 
-		await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
+		await writeCacheBestEffort(
+			context,
+			cacheKey,
+			JSON.stringify(results),
+			"Failed to write tournament battle group results cache"
+		);
 		return results;
 	},
 

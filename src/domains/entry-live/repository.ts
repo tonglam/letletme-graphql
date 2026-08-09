@@ -474,7 +474,14 @@ export const entryLiveRepository: EntryLiveRepository = {
 			);
 		}
 
-		await pipeline.exec();
+		try {
+			await pipeline.exec();
+		} catch (cacheError) {
+			context.logger.warn(
+				{ err: cacheError, entryIds: missIds, eventId },
+				"Failed to cache batched entry event picks"
+			);
+		}
 		return results;
 	},
 
@@ -689,10 +696,17 @@ export const entryLiveRepository: EntryLiveRepository = {
 		sortTransferRows(transfers);
 
 		const TRANSFER_HISTORY_TTL = 3600;
-		if (transfers.length === 0) {
-			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", TRANSFER_HISTORY_TTL);
-		} else {
-			await context.redis.set(cacheKey, JSON.stringify(transfers), "EX", TRANSFER_HISTORY_TTL);
+		try {
+			if (transfers.length === 0) {
+				await context.redis.set(cacheKey, NULL_SENTINEL, "EX", TRANSFER_HISTORY_TTL);
+			} else {
+				await context.redis.set(cacheKey, JSON.stringify(transfers), "EX", TRANSFER_HISTORY_TTL);
+			}
+		} catch (cacheError) {
+			context.logger.warn(
+				{ err: cacheError, cacheKey, entryId },
+				"Failed to cache entry transfer history"
+			);
 		}
 		return transfers;
 	},
