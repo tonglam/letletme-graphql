@@ -274,20 +274,33 @@ async function buildLiveMapForEvents(
 	if (pipelineResults) {
 		for (let i = 0; i < eventIds.length; i++) {
 			const [err, values] = pipelineResults[i];
-			if (err || !values || !values.some((v) => v !== null)) {
+			const requestedIds = playerIdsByEvent
+				? uniquePositiveIds(playerIdsByEvent.get(eventIds[i]) ?? uniquePlayerIds)
+				: uniquePlayerIds;
+			if (err || !values || values.length !== requestedIds.length) {
 				dbFallbackEventIds.push(eventIds[i]);
 				continue;
 			}
-			for (const value of values) {
-				if (!value) continue;
+			let hasUnresolvedField = false;
+			for (const [valueIndex, value] of values.entries()) {
+				if (!value) {
+					hasUnresolvedField = true;
+					continue;
+				}
 				try {
 					const parsed = JSON.parse(value) as Record<string, unknown>;
 					const perf = mapSyncJobLiveRow(parsed);
-					if (perf) result.set(livePerformanceKey(perf.eventId, perf.playerId), perf);
+					if (perf) {
+						result.set(livePerformanceKey(perf.eventId, perf.playerId), perf);
+					} else {
+						hasUnresolvedField = true;
+					}
 				} catch {
-					/* skip malformed */
+					hasUnresolvedField = true;
 				}
+				if (valueIndex >= requestedIds.length) hasUnresolvedField = true;
 			}
+			if (hasUnresolvedField) dbFallbackEventIds.push(eventIds[i]);
 		}
 	} else {
 		dbFallbackEventIds.push(...eventIds);

@@ -950,32 +950,36 @@ export const tournamentsRepository: TournamentsRepository = {
 		context: GraphQLContext,
 		tournamentId: number
 	): Promise<TournamentParticipant[]> {
-		const { data: membershipData, error: membershipError } = await context.supabase
-			.from("tournament_entries")
-			.select("entry_id")
-			.eq("tournament_id", tournamentId)
-			.order("entry_id", { ascending: true });
-		if (membershipError) {
-			context.logger.error({ err: membershipError, tournamentId }, "Failed to fetch participants");
-			throw new Error("Failed to fetch tournament participants");
-		}
-		const entryIds = ((membershipData as { entry_id: number }[] | null) ?? []).map(
-			(row) => row.entry_id
+		// Use the same paginated membership read as the ranking and selection
+		// paths. PostgREST may cap an unbounded query at 1,000 rows.
+		const entryIds = await tournamentsRepository.getTournamentEntryIdsUncached(
+			context,
+			tournamentId
 		);
 		if (entryIds.length === 0) return [];
 
-		const { data: entryData, error: entryError } = await context.supabase
-			.from("entry_infos")
-			.select("id, entry_name, player_name")
-			.in("id", entryIds)
-			.order("id", { ascending: true });
-		if (entryError) {
-			context.logger.error({ err: entryError, tournamentId }, "Failed to fetch participant names");
-			throw new Error("Failed to fetch tournament participants");
+		// Keep each .in() bounded as well; large tournaments can exceed the
+		// PostgREST URL/request limits even after membership pagination.
+		const entryById = new Map<number, DbEntryInfoNameRow>();
+		for (let from = 0; from < entryIds.length; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
+			const batch = entryIds.slice(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE);
+			const { data: entryData, error: entryError } = await context.supabase
+				.from("entry_infos")
+				.select("id, entry_name, player_name")
+				.in("id", batch)
+				.order("id", { ascending: true });
+			if (entryError) {
+				context.logger.error(
+					{ err: entryError, tournamentId },
+					"Failed to fetch participant names"
+				);
+				throw new Error("Failed to fetch tournament participants");
+			}
+			for (const entry of (entryData as DbEntryInfoNameRow[] | null) ?? []) {
+				entryById.set(entry.id, entry);
+			}
 		}
-		const entryById = new Map(
-			((entryData as DbEntryInfoNameRow[] | null) ?? []).map((entry) => [entry.id, entry])
-		);
+
 		return entryIds.map((entryId) => ({
 			entryId,
 			entryName: entryById.get(entryId)?.entry_name ?? null,

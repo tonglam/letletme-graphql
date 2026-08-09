@@ -331,7 +331,14 @@ export const leaguesRepository: LeaguesRepository = {
 
 		const results = rows.map((row) => mapLeagueEventResult(row, league));
 
-		await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
+		} catch (cacheError) {
+			context.logger.warn(
+				{ err: cacheError, leagueId, eventId },
+				"Failed to cache league event results"
+			);
+		}
 		return results;
 	},
 };

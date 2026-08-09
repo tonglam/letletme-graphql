@@ -454,7 +454,8 @@ export const eventsRepository: EventsRepository = {
 							safeLimit
 						);
 					}
-					return [];
+					// The current pointer can be readable while the next row is still
+					// missing from Redis. Fall through to the complete hash/DB path.
 				}
 			}
 			// Fall through to hash scan if event:current is unavailable
