@@ -203,9 +203,21 @@ export const validateDatabaseContract = async (
 	const authContractPresence = (
 		await database.query<AuthContractPresenceRow>(
 			`SELECT
-					to_regnamespace('bauth') IS NOT NULL AS schema_exists,
-					to_regclass('bauth."user"') IS NOT NULL AS user_exists,
-					to_regclass('bauth.mini_program_session') IS NOT NULL AS mini_program_session_exists`
+					EXISTS (
+						SELECT 1 FROM pg_namespace WHERE nspname = 'bauth'
+					) AS schema_exists,
+					EXISTS (
+						SELECT 1
+						FROM pg_class relation
+						JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+						WHERE namespace.nspname = 'bauth' AND relation.relname = 'user'
+					) AS user_exists,
+					EXISTS (
+						SELECT 1
+						FROM pg_class relation
+						JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+						WHERE namespace.nspname = 'bauth' AND relation.relname = 'mini_program_session'
+					) AS mini_program_session_exists`
 		)
 	).rows[0];
 	const authContractPresent =

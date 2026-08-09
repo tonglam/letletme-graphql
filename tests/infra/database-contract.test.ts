@@ -91,7 +91,7 @@ const makeContractExecutor = (
 					rowCount: schemas.length,
 				} as never;
 			}
-			if (text.includes("to_regnamespace('bauth')")) {
+			if (text.includes("nspname = 'bauth'")) {
 				return {
 					rows: [
 						{
