@@ -22,6 +22,19 @@ const evictMalformedCache = async (context: GraphQLContext, key: string): Promis
 	}
 };
 
+const writeCacheBestEffort = async (
+	context: GraphQLContext,
+	key: string,
+	value: string,
+	message: string
+): Promise<void> => {
+	try {
+		await context.redis.set(key, value, "EX", env.CACHE_TTL_SECONDS);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, message);
+	}
+};
+
 const readCachedJson = async (
 	context: GraphQLContext,
 	key: string
@@ -250,7 +263,12 @@ async function getTournamentInfo(
 	}
 
 	const row = data[0] as DbTournamentInfoRow;
-	await context.redis.set(cacheKey, JSON.stringify(row), "EX", env.CACHE_TTL_SECONDS);
+	await writeCacheBestEffort(
+		context,
+		cacheKey,
+		JSON.stringify(row),
+		"Failed to write tournament info cache"
+	);
 	return row;
 }
 
@@ -303,14 +321,14 @@ async function getCaptainCounts(
 	}
 
 	const result = { captainCounts, totalEntries };
-	await context.redis.set(
+	await writeCacheBestEffort(
+		context,
 		cacheKey,
 		JSON.stringify({
 			captainCounts: [...captainCounts.entries()],
 			totalEntries,
 		}),
-		"EX",
-		env.CACHE_TTL_SECONDS
+		"Failed to write captain aggregation cache"
 	);
 
 	return result;
@@ -369,14 +387,14 @@ async function getPickAggregation(
 		}
 	}
 
-	await context.redis.set(
+	await writeCacheBestEffort(
+		context,
 		cacheKey,
 		JSON.stringify({
 			pickCounts: [...pickCounts.entries()],
 			viceCaptainCounts: [...viceCaptainCounts.entries()],
 		}),
-		"EX",
-		env.CACHE_TTL_SECONDS
+		"Failed to write pick aggregation cache"
 	);
 
 	return { pickCounts, viceCaptainCounts };
@@ -437,14 +455,14 @@ async function getTransferAggregation(
 		}
 	}
 
-	await context.redis.set(
+	await writeCacheBestEffort(
+		context,
 		cacheKey,
 		JSON.stringify({
 			transferInCounts: [...transferInCounts.entries()],
 			transferOutCounts: [...transferOutCounts.entries()],
 		}),
-		"EX",
-		env.CACHE_TTL_SECONDS
+		"Failed to write transfer aggregation cache"
 	);
 
 	return { transferInCounts, transferOutCounts };

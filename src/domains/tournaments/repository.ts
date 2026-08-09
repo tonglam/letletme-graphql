@@ -39,6 +39,19 @@ const readJsonCache = async (
 	}
 };
 
+const writeCacheBestEffort = async (
+	context: GraphQLContext,
+	key: string,
+	value: string,
+	message: string
+): Promise<void> => {
+	try {
+		await context.redis.set(key, value, "EX", env.CACHE_TTL_SECONDS);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, message);
+	}
+};
+
 export enum TournamentMode {
 	NORMAL = "normal",
 }
@@ -1016,7 +1029,12 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const tournamentIds = extractTournamentIds((entryData as DbTournamentEntryRow[] | null) ?? []);
 		if (tournamentIds.length === 0) {
-			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
+			await writeCacheBestEffort(
+				context,
+				cacheKey,
+				JSON.stringify([]),
+				"Failed to write tournament event results cache"
+			);
 			return [];
 		}
 
@@ -1134,7 +1152,12 @@ export const tournamentsRepository: TournamentsRepository = {
 			if (page.length < TOURNAMENT_SUMMARY_PAGE_SIZE) break;
 		}
 		if (rows.length === 0) {
-			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
+			await writeCacheBestEffort(
+				context,
+				cacheKey,
+				JSON.stringify([]),
+				"Failed to write tournament event results cache"
+			);
 			return [];
 		}
 
@@ -1151,7 +1174,12 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const results = rows.map((row) => mapTournamentEventResultFromView(tournament, row));
 
-		await context.redis.set(cacheKey, JSON.stringify(results), "EX", env.CACHE_TTL_SECONDS);
+		await writeCacheBestEffort(
+			context,
+			cacheKey,
+			JSON.stringify(results),
+			"Failed to write tournament event results cache"
+		);
 		return results;
 	},
 
