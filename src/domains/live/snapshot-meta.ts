@@ -244,8 +244,8 @@ export const parseLiveSnapshotMeta = (
 		!isIsoTimestamp(parsed.publishedAt) ||
 		!isIsoTimestamp(parsed.checkedAt) ||
 		!isCount(parsed.eventLiveCount, true) ||
-		!isCount(parsed.fixtureCount, true) ||
-		!isCount(parsed.fixtureTeamCount, true) ||
+		!isCount(parsed.fixtureCount) ||
+		!isCount(parsed.fixtureTeamCount) ||
 		!isCount(parsed.bonusTeamCount)
 	) {
 		return null;

@@ -541,7 +541,7 @@ async function getReadModelRows(
 function countsFromReadModel(rows: DbTournamentSelectionStatRow[]): {
 	counts: SelectionStatsCounts;
 	totalEntries: number;
-} {
+} | null {
 	const counts: SelectionStatsCounts = {
 		pickCounts: new Map(),
 		captainCounts: new Map(),
@@ -549,7 +549,7 @@ function countsFromReadModel(rows: DbTournamentSelectionStatRow[]): {
 		transferInCounts: new Map(),
 		transferOutCounts: new Map(),
 	};
-	let totalEntries = 0;
+	let totalEntries: number | null = null;
 
 	for (const row of rows) {
 		const playerId = Number(row.element_id);
@@ -560,7 +560,10 @@ function countsFromReadModel(rows: DbTournamentSelectionStatRow[]): {
 		const viceCaptainCount = Number(row.vice_captain_count) || 0;
 		const transferInCount = Number(row.transfer_in_count) || 0;
 		const transferOutCount = Number(row.transfer_out_count) || 0;
-		totalEntries = Math.max(totalEntries, Number(row.total_entries) || 0);
+		const rowTotalEntries = Number(row.total_entries);
+		if (!Number.isInteger(rowTotalEntries) || rowTotalEntries <= 0) return null;
+		if (totalEntries === null) totalEntries = rowTotalEntries;
+		if (rowTotalEntries !== totalEntries) return null;
 
 		if (pickCount > 0) counts.pickCounts.set(playerId, pickCount);
 		if (captainCount > 0) counts.captainCounts.set(playerId, captainCount);
@@ -569,7 +572,7 @@ function countsFromReadModel(rows: DbTournamentSelectionStatRow[]): {
 		if (transferOutCount > 0) counts.transferOutCounts.set(playerId, transferOutCount);
 	}
 
-	return { counts, totalEntries };
+	return totalEntries === null ? null : { counts, totalEntries };
 }
 
 async function buildTournamentSelectionStats(
@@ -723,7 +726,9 @@ export async function getTournamentSelectionStatsReadModel(
 	const safeLimit = Math.min(Math.max(limit, 1), 12);
 	const rows = await getReadModelRows(context, tournamentId, eventId);
 	if (!rows || rows.length === 0) return null;
-	const { counts, totalEntries } = countsFromReadModel(rows);
+	const parsed = countsFromReadModel(rows);
+	if (!parsed) return null;
+	const { counts, totalEntries } = parsed;
 	const season = await getCurrentSeason(context);
 	return buildTournamentSelectionStats(context, counts, totalEntries, safeLimit, eventId, season);
 }
@@ -759,25 +764,31 @@ export const eventStatsRepository: EventStatsRepository = {
 
 		const readModelRows = await getReadModelRows(context, tournamentId, eventId);
 		if (readModelRows && readModelRows.length > 0) {
-			const { counts, totalEntries } = countsFromReadModel(readModelRows);
-			const season = await getCurrentSeason(context);
-			const result = await buildTournamentSelectionStats(
-				context,
-				counts,
-				totalEntries,
-				safeLimit,
-				eventId,
-				season
-			);
-			try {
-				await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
-			} catch (error) {
-				context.logger.warn(
-					{ err: error, key: cacheKey },
-					"Failed to write tournament selection stats cache"
+			const parsed = countsFromReadModel(readModelRows);
+			if (parsed) {
+				const season = await getCurrentSeason(context);
+				const result = await buildTournamentSelectionStats(
+					context,
+					parsed.counts,
+					parsed.totalEntries,
+					safeLimit,
+					eventId,
+					season
 				);
+				try {
+					await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
+				} catch (error) {
+					context.logger.warn(
+						{ err: error, key: cacheKey },
+						"Failed to write tournament selection stats cache"
+					);
+				}
+				return result;
 			}
-			return result;
+			context.logger.warn(
+				{ tournamentId, eventId },
+				"Selection stats read model has mixed or invalid totals; falling back to source aggregation"
+			);
 		}
 
 		// The resolver has crossed the insights barrier; reread membership so a

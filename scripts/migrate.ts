@@ -3,8 +3,28 @@ import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Pool, type PoolClient } from "pg";
 
-const databaseUrl = Bun.env.DATABASE_URL ?? process.env.DATABASE_URL;
-if (!databaseUrl) throw new Error("DATABASE_URL is required");
+const nodeEnv = Bun.env.NODE_ENV ?? process.env.NODE_ENV ?? "development";
+const migrationDatabaseUrl = Bun.env.MIGRATIONS_DATABASE_URL ?? process.env.MIGRATIONS_DATABASE_URL;
+const databaseUrl = migrationDatabaseUrl ?? Bun.env.DATABASE_URL ?? process.env.DATABASE_URL;
+if (!databaseUrl) {
+	throw new Error(
+		nodeEnv === "production"
+			? "MIGRATIONS_DATABASE_URL is required in production"
+			: "DATABASE_URL is required"
+	);
+}
+if (nodeEnv === "production" && !migrationDatabaseUrl) {
+	throw new Error(
+		"MIGRATIONS_DATABASE_URL is required in production and must be separate from DATABASE_URL"
+	);
+}
+if (
+	nodeEnv === "production" &&
+	migrationDatabaseUrl &&
+	(Bun.env.DATABASE_URL ?? process.env.DATABASE_URL) === migrationDatabaseUrl
+) {
+	throw new Error("MIGRATIONS_DATABASE_URL must not equal DATABASE_URL in production");
+}
 
 const migrationsDir = resolve(
 	Bun.env.MIGRATIONS_DIR ??

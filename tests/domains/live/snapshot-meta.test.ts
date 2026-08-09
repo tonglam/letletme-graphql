@@ -53,9 +53,13 @@ describe("live snapshot metadata", () => {
 			eventLiveCount: 700,
 		});
 		expect(parseLiveSnapshotMeta(meta(revision), { eventId: 34 })).toBeNull();
-		expect(
-			parseLiveSnapshotMeta(meta(revision).replace('"fixtureCount":10', '"fixtureCount":0'))
-		).toBeNull();
+		const blank = meta(revision)
+			.replace('"fixtureCount":10', '"fixtureCount":0')
+			.replace('"fixtureTeamCount":20', '"fixtureTeamCount":0');
+		expect(parseLiveSnapshotMeta(blank, { season: "2526", eventId: 33 })).toMatchObject({
+			fixtureCount: 0,
+			fixtureTeamCount: 0,
+		});
 		expect(parseLiveSnapshotMeta("not-json")).toBeNull();
 	});
 

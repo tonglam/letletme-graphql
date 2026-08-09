@@ -448,7 +448,7 @@ export const eventsRepository: EventsRepository = {
 					} catch (error) {
 						context.logger.warn({ err: error, season }, "Failed to read current Event hash row");
 					}
-					const event = raw ? parseEventFromRedisJson(raw) : null;
+					const event = raw ? parseEventFromRedisJson(raw, currentEvent.id) : null;
 					if (event) {
 						return filterAndSliceEvents(
 							[{ ...event, isCurrent: true, isNext: false }],
@@ -470,7 +470,7 @@ export const eventsRepository: EventsRepository = {
 							"Failed to read next Event hash row"
 						);
 					}
-					const event = raw ? parseEventFromRedisJson(raw) : null;
+					const event = raw ? parseEventFromRedisJson(raw, nextId) : null;
 					if (event) {
 						return filterAndSliceEvents(
 							[{ ...event, isNext: true, isCurrent: false }],

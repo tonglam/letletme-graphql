@@ -774,7 +774,7 @@ export const playersRepository: PlayersRepository = {
 			result.push(...((data as DbPlayerRow[] | null)?.map(mapPlayer) ?? []));
 		}
 
-		return result;
+		return missIds.length > 0 ? enrichCurrentSeasonTotals(context, result) : result;
 	},
 
 	async getPlayersFromRedis(context: GraphQLContext): Promise<Map<number, Player>> {
