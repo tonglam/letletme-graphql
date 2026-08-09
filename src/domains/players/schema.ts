@@ -76,6 +76,7 @@ export const playersTypeDefs = /* GraphQL */ `
 	type PlayersForPickerPayload {
 		items: [PlayerPickerItem!]!
 		nextCursor: Int
+		totalCount: Int!
 	}
 
 	enum PlayerPickerSort {

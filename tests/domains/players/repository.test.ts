@@ -118,6 +118,8 @@ describe("playersRepository.getPlayersForPicker", () => {
 		expect(first.items).toEqual([
 			expect.objectContaining({ id: 1, price: 45, selectedByPercent: 74.6 }),
 		]);
+		expect(first.totalCount).toBeGreaterThan(first.items.length);
+		expect(first.nextCursor).toBe(1);
 		expect(second).toEqual(first);
 		expect(marketReads).toBe(2);
 		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":players-picker:"));

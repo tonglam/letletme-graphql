@@ -131,6 +131,7 @@ export type PlayerPickerItem = {
 export type PlayersForPickerPayload = {
 	items: PlayerPickerItem[];
 	nextCursor: number | null;
+	totalCount: number;
 };
 
 export type PlayerPickerSort =
@@ -619,7 +620,14 @@ export const playersRepository: PlayersRepository = {
 			context,
 			cacheKey,
 			(value): value is PlayersForPickerPayload => {
-				if (!isObject(value) || !Array.isArray(value.items)) return false;
+				if (
+					!isObject(value) ||
+					!Array.isArray(value.items) ||
+					!Number.isSafeInteger(value.totalCount) ||
+					(value.totalCount as number) < value.items.length
+				) {
+					return false;
+				}
 				return value.items.every(
 					(item) =>
 						isObject(item) &&
@@ -699,7 +707,11 @@ export const playersRepository: PlayersRepository = {
 		const nextOffset = decodedCursor.offset + returnedItems.length;
 		const nextCursor =
 			nextOffset < sortedItems.length ? encodePickerCursor(sort, nextOffset) : null;
-		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
+		const payload: PlayersForPickerPayload = {
+			items: returnedItems,
+			nextCursor,
+			totalCount: sortedItems.length,
+		};
 
 		await writeQueryCache(
 			context,
