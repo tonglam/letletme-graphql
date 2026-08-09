@@ -414,6 +414,7 @@ export const fixturesRepository: FixturesRepository = {
 
 		const { data, error } = await query
 			.order("kickoff_time", { ascending: true })
+			.order("id", { ascending: true })
 			.range(safeOffset, safeOffset + safeLimit - 1);
 
 		if (error) {

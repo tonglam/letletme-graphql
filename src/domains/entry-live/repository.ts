@@ -193,6 +193,7 @@ type TransferQueryBuilder = PromiseLike<TransferQueryResult> & {
 	eq: (column: string, value: unknown) => TransferQueryBuilder;
 	in: (column: string, values: readonly number[]) => TransferQueryBuilder;
 	order: (column: string, options: { ascending: boolean }) => TransferQueryBuilder;
+	range: (from: number, to: number) => TransferQueryBuilder;
 };
 
 const transferTimeColumnByClient = new WeakMap<object, TransferTimeColumn>();
@@ -206,7 +207,8 @@ const transferTimeColumns: readonly TransferTimeColumn[] = [
 async function queryTransferRows(
 	context: GraphQLContext,
 	configure: (query: TransferQueryBuilder) => TransferQueryBuilder,
-	leadingOrderColumns: readonly string[]
+	leadingOrderColumns: readonly string[],
+	range?: { from: number; to: number }
 ): Promise<TransferQueryResult> {
 	const clientKey = context.supabase as object;
 	const hasCachedColumn = transferTimeColumnByClient.has(clientKey);
@@ -234,6 +236,9 @@ async function queryTransferRows(
 		}
 		if (timeColumn) {
 			query = query.order(timeColumn, { ascending: true });
+		}
+		if (range) {
+			query = query.range(range.from, range.to);
 		}
 		const result = await query;
 		if (!result.error) {
@@ -565,21 +570,29 @@ export const entryLiveRepository: EntryLiveRepository = {
 			return results;
 		}
 
-		const { data, error } = await queryTransferRows(
-			context,
-			(query) => query.in("entry_id", missIds).eq("event_id", eventId),
-			["entry_id"]
-		);
-
-		if (error) {
-			context.logger.error(
-				{ err: error, entryIds: missIds, eventId },
-				"Failed to batch fetch entry event transfers"
+		const TRANSFER_PAGE_SIZE = 1000;
+		const rows: DbEntryEventTransferRow[] = [];
+		for (let from = 0; ; from += TRANSFER_PAGE_SIZE) {
+			const { data, error } = await queryTransferRows(
+				context,
+				(query) => query.in("entry_id", missIds).eq("event_id", eventId),
+				["entry_id", "element_in_id", "element_out_id"],
+				{ from, to: from + TRANSFER_PAGE_SIZE - 1 }
 			);
-			throw new EntryTransferRepositoryError("Failed to batch fetch entry event transfers", error);
+			if (error) {
+				context.logger.error(
+					{ err: error, entryIds: missIds, eventId },
+					"Failed to batch fetch entry event transfers"
+				);
+				throw new EntryTransferRepositoryError(
+					"Failed to batch fetch entry event transfers",
+					error
+				);
+			}
+			const page = (data as DbEntryEventTransferRow[] | null) ?? [];
+			rows.push(...page);
+			if (page.length < TRANSFER_PAGE_SIZE) break;
 		}
-
-		const rows = (data as DbEntryEventTransferRow[] | null) ?? [];
 		const byEntry = new Map<number, EntryEventTransferRow[]>();
 
 		for (const row of rows) {

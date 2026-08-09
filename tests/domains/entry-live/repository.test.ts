@@ -31,6 +31,7 @@ const buildContext = (
 				eq: () => Builder;
 				in: () => Builder;
 				order: () => Builder;
+				range: () => Builder;
 				limit: () => Builder;
 			};
 			const builder = query as Builder;
@@ -39,6 +40,7 @@ const buildContext = (
 				eq: () => builder,
 				in: () => builder,
 				order: () => builder,
+				range: () => builder,
 				limit: () => builder,
 			});
 			return builder;

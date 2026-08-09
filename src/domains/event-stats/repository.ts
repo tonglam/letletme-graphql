@@ -454,7 +454,7 @@ async function getTournamentEntryIdsUncached(
 			.range(from, from + SELECTION_STATS_PAGE_SIZE - 1);
 		if (error) {
 			context.logger.error({ err: error, tournamentId }, "Failed to fetch tournament entry IDs");
-			return [];
+			throw new Error("Failed to fetch tournament entry IDs");
 		}
 		const page = ((data as { entry_id: number }[] | null) ?? []).map((r) => r.entry_id);
 		entryIds.push(...page);

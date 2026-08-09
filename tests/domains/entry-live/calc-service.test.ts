@@ -102,6 +102,9 @@ describe("calcElementLivePoints", () => {
 			bonus: 1,
 		});
 		expect(calcElementLivePoints(4, live)).toBe(7);
+		expect(calcElementLivePoints(4, { ...live, minutes: 90, totalPoints: 6 }, undefined, 2)).toBe(
+			6
+		);
 	});
 	it("returns 0 for undefined live", () => {
 		expect(calcElementLivePoints(1, undefined)).toBe(0);

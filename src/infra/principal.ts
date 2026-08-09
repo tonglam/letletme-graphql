@@ -331,6 +331,7 @@ export const createWechatApiSession = async (
 		);
 
 		let userId = existingIdentity.rows[0]?.user_id;
+		let provisionalUserId: string | null = null;
 		if (!userId) {
 			const existingUser = await client.query<UserIdentityRow>(
 				`SELECT id
@@ -348,6 +349,7 @@ export const createWechatApiSession = async (
 			// Entry binding is exclusively owned by letletme-web and is never
 			// accepted from this legacy exchange.
 			userId = randomUUID();
+			provisionalUserId = userId;
 			await client.query(
 				`INSERT INTO bauth."user"
          (id, openid, fpl_entry_id, email_verified, created_at, updated_at)
@@ -383,6 +385,19 @@ export const createWechatApiSession = async (
 				const canonicalUserId = owner.rows[0]?.user_id;
 				if (!canonicalUserId) {
 					throw new Error("External identity conflict did not expose its owner");
+				}
+				if (provisionalUserId && provisionalUserId !== canonicalUserId) {
+					await client.query(
+						`DELETE FROM bauth."user"
+						 WHERE id = $1 AND openid = $2
+						   AND NOT EXISTS (
+							 SELECT 1 FROM bauth.external_identities WHERE user_id = $1
+						   )
+						   AND NOT EXISTS (
+							 SELECT 1 FROM bauth.api_sessions WHERE user_id = $1
+						   )`,
+						[provisionalUserId, openid]
+					);
 				}
 				userId = canonicalUserId;
 			}

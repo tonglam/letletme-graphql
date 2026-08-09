@@ -269,7 +269,10 @@ async function buildLiveMapForEvents(
 		context.logger.warn({ err }, "EventLive pipeline failed, falling back to DB for all events");
 	}
 
-	const dbFallbackEventIds: number[] = [];
+	const dbFallbackPlayerIdsByEvent = new Map<number, number[]>();
+	const addDbFallback = (eventId: number, requestedIds: number[]): void => {
+		if (requestedIds.length > 0) dbFallbackPlayerIdsByEvent.set(eventId, requestedIds);
+	};
 
 	if (pipelineResults) {
 		for (let i = 0; i < eventIds.length; i++) {
@@ -278,7 +281,7 @@ async function buildLiveMapForEvents(
 				? uniquePositiveIds(playerIdsByEvent.get(eventIds[i]) ?? uniquePlayerIds)
 				: uniquePlayerIds;
 			if (err || !values || values.length !== requestedIds.length) {
-				dbFallbackEventIds.push(eventIds[i]);
+				addDbFallback(eventIds[i], requestedIds);
 				continue;
 			}
 			let hasUnresolvedField = false;
@@ -300,18 +303,23 @@ async function buildLiveMapForEvents(
 				}
 				if (valueIndex >= requestedIds.length) hasUnresolvedField = true;
 			}
-			if (hasUnresolvedField) dbFallbackEventIds.push(eventIds[i]);
+			if (hasUnresolvedField) addDbFallback(eventIds[i], requestedIds);
 		}
 	} else {
-		dbFallbackEventIds.push(...eventIds);
+		for (const eventId of eventIds) {
+			const requestedIds = playerIdsByEvent
+				? uniquePositiveIds(playerIdsByEvent.get(eventId) ?? uniquePlayerIds)
+				: uniquePlayerIds;
+			addDbFallback(eventId, requestedIds);
+		}
 	}
 
-	if (dbFallbackEventIds.length > 0) {
+	for (const [eventId, requestedIds] of dbFallbackPlayerIdsByEvent) {
 		const { data, error } = await context.supabase
 			.from("event_lives")
 			.select(EVENT_LIVES_COLS)
-			.in("event_id", dbFallbackEventIds)
-			.in("element_id", uniquePlayerIds);
+			.eq("event_id", eventId)
+			.in("element_id", requestedIds);
 		if (!error && data) {
 			for (const row of data as unknown as Record<string, unknown>[]) {
 				const perf = mapSyncJobLiveRow(row);

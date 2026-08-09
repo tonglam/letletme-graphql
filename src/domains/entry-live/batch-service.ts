@@ -319,7 +319,12 @@ const computeSingleEntry = (
 
 		const defensiveContribution: number = safeNull(live?.defensiveContribution, 0);
 		const effectiveBonus = effectiveBonusByPlayer.get(pick.element);
-		const calculatedTotalPoints = calcElementLivePoints(elementType, live, effectiveBonus);
+		const calculatedTotalPoints = calcElementLivePoints(
+			elementType,
+			live,
+			effectiveBonus,
+			teamFixtures?.length
+		);
 
 		return {
 			season: null,

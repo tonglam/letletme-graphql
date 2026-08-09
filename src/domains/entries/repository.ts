@@ -412,10 +412,14 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const history = (data as DbEntryEventResultRow[] | null)?.map(mapEntryEventResult) ?? [];
-		if (history.length === 0) {
-			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", env.CACHE_TTL_SECONDS);
-		} else {
-			await context.redis.set(cacheKey, JSON.stringify(history), "EX", env.CACHE_TTL_SECONDS);
+		try {
+			if (history.length === 0) {
+				await context.redis.set(cacheKey, NULL_SENTINEL, "EX", env.CACHE_TTL_SECONDS);
+			} else {
+				await context.redis.set(cacheKey, JSON.stringify(history), "EX", env.CACHE_TTL_SECONDS);
+			}
+		} catch (cacheError) {
+			context.logger.warn({ err: cacheError, cacheKey }, "Failed to cache entry history");
 		}
 		return history;
 	},
@@ -458,10 +462,14 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const historyInfo = (data as DbEntryHistoryInfoRow[] | null)?.map(mapEntryHistoryInfo) ?? [];
-		if (historyInfo.length === 0) {
-			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", env.CACHE_TTL_SECONDS);
-		} else {
-			await context.redis.set(cacheKey, JSON.stringify(historyInfo), "EX", env.CACHE_TTL_SECONDS);
+		try {
+			if (historyInfo.length === 0) {
+				await context.redis.set(cacheKey, NULL_SENTINEL, "EX", env.CACHE_TTL_SECONDS);
+			} else {
+				await context.redis.set(cacheKey, JSON.stringify(historyInfo), "EX", env.CACHE_TTL_SECONDS);
+			}
+		} catch (cacheError) {
+			context.logger.warn({ err: cacheError, cacheKey }, "Failed to cache entry history info");
 		}
 		return historyInfo;
 	},
@@ -502,7 +510,11 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const result = mapEntryEventResult(row);
-		await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
+		} catch (cacheError) {
+			context.logger.warn({ err: cacheError, cacheKey }, "Failed to cache entry event result");
+		}
 		return result;
 	},
 

@@ -388,7 +388,8 @@ export const calcOfficialTotalWithEffectiveBonus = (
 export const calcElementLivePoints = (
 	elementType: number,
 	live: LivePerformance | undefined,
-	effectiveBonus?: number
+	effectiveBonus?: number,
+	fixtureCount?: number
 ): number => {
 	const legacy = calcLegacyElementLivePoints(
 		elementType,
@@ -402,8 +403,8 @@ export const calcElementLivePoints = (
 	// has logged more than 90 minutes, the gameweek is necessarily a DGW and
 	// appearance, saves, and goals-conceded scoring must use FPL's per-fixture
 	// rounding from the official total even while the V2 flag is disabled.
-	const hasMultipleFixtureMinutes = (live?.minutes ?? 0) > 90;
-	return env.LIVE_POINTS_V2 || hasMultipleFixtureMinutes ? official : legacy;
+	const hasMultipleFixtures = (fixtureCount ?? 0) > 1 || (live?.minutes ?? 0) > 90;
+	return env.LIVE_POINTS_V2 || hasMultipleFixtures ? official : legacy;
 };
 
 /**
@@ -643,7 +644,12 @@ const legacyEntryLiveCalcService = {
 
 			// Calculate live points from individual stats
 			// For DGW players (minutes > 90), pass fixture count so playing points are correct
-			const calculatedTotalPoints = calcElementLivePoints(elementType, live, bonusOverride);
+			const calculatedTotalPoints = calcElementLivePoints(
+				elementType,
+				live,
+				bonusOverride,
+				teamFixtures?.length
+			);
 
 			return {
 				season: null,
