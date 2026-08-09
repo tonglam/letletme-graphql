@@ -71,7 +71,7 @@ docker compose config --quiet
 ```
 
 CI checks out the accepted `letletme_data` contract at
-`cb49317ad04ac9a1a727f079acacfb12493a0004`, replays it twice into a disposable
+`f509d2dcfac8e57d9bd5fb47fd0e90901e61789a`, replays it twice into a disposable
 PostgreSQL 15 database, creates a read-only runtime login, and runs the real
 startup contract. There is no duplicated GraphQL schema fixture.
 

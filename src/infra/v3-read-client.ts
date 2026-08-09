@@ -153,6 +153,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 				snapshot.goals_conceded,
 				snapshot.own_goals,
 				snapshot.penalties_saved,
+				snapshot.penalties_missed,
 				snapshot.yellow_cards,
 				snapshot.red_cards,
 				snapshot.saves,

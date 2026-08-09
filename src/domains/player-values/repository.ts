@@ -88,6 +88,12 @@ type DbPlayerStatMetadataRow = {
 	selected_by_percent: string | number | null;
 };
 
+type DbPlayerFixtureTeamRow = {
+	element_id: number;
+	event_id: number;
+	team_id: number;
+};
+
 const compactDatePattern = /^\d{8}$/;
 
 function toPositionEnum(position: string): PositionEnum | null {
@@ -270,7 +276,7 @@ async function getPlayerValuesFromDatabase(
 		)
 	);
 
-	const [core, statsResult] = await Promise.all([
+	const [core, statsResult, fixtureTeamsResult] = await Promise.all([
 		getCoreDataSnapshot(context),
 		eventIds.length > 0
 			? context.data
@@ -281,8 +287,15 @@ async function getPlayerValuesFromDatabase(
 					.in("element_id", elementIds)
 					.in("event_id", eventIds)
 			: Promise.resolve({ data: [], error: null }),
+		eventIds.length > 0
+			? context.data
+					.read("fpl.player_fixture_stats")
+					.select("element_id, event_id, team_id")
+					.in("element_id", elementIds)
+					.in("event_id", eventIds)
+			: Promise.resolve({ data: [], error: null }),
 	]);
-	if (statsResult.error) {
+	if (statsResult.error || fixtureTeamsResult.error) {
 		throw new Error("Failed to enrich player values", { cause: statsResult.error });
 	}
 
@@ -294,6 +307,16 @@ async function getPlayerValuesFromDatabase(
 			stat,
 		]) as Array<[string, DbPlayerStatMetadataRow]>
 	);
+	const fixtureTeamByPlayerEvent = new Map(
+		((fixtureTeamsResult.data as DbPlayerFixtureTeamRow[] | null) ?? [])
+			.filter(
+				(row) =>
+					typeof row.element_id === "number" &&
+					typeof row.event_id === "number" &&
+					typeof row.team_id === "number"
+			)
+			.map((row) => [`${row.element_id}:${row.event_id}`, row.team_id] as const)
+	);
 
 	return changedRows.map((row) => {
 		const base = mapDbRowToPlayerValue(row);
@@ -301,7 +324,12 @@ async function getPlayerValuesFromDatabase(
 		const stat = row.event_id
 			? statsByPlayerEvent.get(`${base.playerId}:${row.event_id}`)
 			: undefined;
-		const teamId = player?.teamId ?? 0;
+		const teamId =
+			(row.event_id
+				? fixtureTeamByPlayerEvent.get(`${base.playerId}:${row.event_id}`)
+				: undefined) ??
+			player?.teamId ??
+			0;
 		const team = teamById.get(teamId);
 		const transfersIn = stat?.transfers_in_event ?? 0;
 		const transfersOut = stat?.transfers_out_event ?? 0;

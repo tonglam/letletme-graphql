@@ -52,6 +52,7 @@ const createQueryBuilder = (sourceRows: readonly Row[], error: QueryError = null
 type ReportingFixture = {
 	changes: Row[];
 	stats?: Row[];
+	fixtureTeams?: Row[];
 	error?: QueryError;
 };
 
@@ -70,6 +71,9 @@ const createContext = (
 			}
 			if (table === "fpl.player_event_snapshots") {
 				return createQueryBuilder(fixture.stats ?? []);
+			}
+			if (table === "fpl.player_fixture_stats") {
+				return createQueryBuilder(fixture.fixtureTeams ?? []);
 			}
 			throw new Error(`Unexpected v3 read model ${table}`);
 		},
@@ -129,6 +133,8 @@ const statsRow: Row = {
 describe("playerValues GraphQL v3 reporting contract", () => {
 	it("reads the season-scoped reporting view, filters the baseline, and normally expires", async () => {
 		const core = buildTestCoreData(1);
+		core.players[0] = { ...core.players[0]!, teamId: 2 };
+		core.players[11] = { ...core.players[11]!, teamId: 1 };
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
 		const { context, reads } = createContext(redis, {
 			changes: [
@@ -145,6 +151,7 @@ describe("playerValues GraphQL v3 reporting contract", () => {
 				},
 			],
 			stats: [statsRow],
+			fixtureTeams: [{ element_id: 1, event_id: 1, team_id: 1 }],
 		});
 
 		const first = await execute(context);
@@ -178,6 +185,7 @@ describe("playerValues GraphQL v3 reporting contract", () => {
 		expect(readsAfterFirst).toEqual([
 			"reporting.player_value_changes",
 			"fpl.player_event_snapshots",
+			"fpl.player_fixture_stats",
 		]);
 		expect(reads).toEqual(readsAfterFirst);
 		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":player-values-"));

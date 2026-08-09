@@ -1076,6 +1076,7 @@ const validateLiveBonus = (
 };
 
 const liveStateFromFixtures = (fixtures: readonly CoreFixtureData[]): LiveSnapshotState => {
+	if (fixtures.length === 0) return "scheduled";
 	if (
 		fixtures.some(
 			(fixture) => fixture.started === true && !fixture.finished && !fixture.finishedProvisional
