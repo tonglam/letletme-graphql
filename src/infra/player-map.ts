@@ -89,9 +89,14 @@ const asNullableNumber = (value: number | string | null | undefined): number | n
 };
 
 function parsePlayer(parsed: Record<string, unknown>, id: number): Player | null {
+	const code = Number(parsed.code ?? 0);
+	const webName = String(parsed.webName ?? parsed.web_name ?? "").trim();
 	const teamId = Number(parsed.teamId ?? parsed.team_id ?? 0);
 	const position = Number(parsed.type ?? parsed.position ?? 0);
 	if (
+		!Number.isInteger(code) ||
+		code <= 0 ||
+		webName.length === 0 ||
 		!Number.isInteger(teamId) ||
 		teamId <= 0 ||
 		!Number.isInteger(position) ||
@@ -102,8 +107,8 @@ function parsePlayer(parsed: Record<string, unknown>, id: number): Player | null
 	}
 	return {
 		id,
-		code: Number(parsed.code ?? 0),
-		webName: String(parsed.webName ?? parsed.web_name ?? ""),
+		code,
+		webName,
 		firstName: parsed.firstName
 			? String(parsed.firstName)
 			: parsed.first_name

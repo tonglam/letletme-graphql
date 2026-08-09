@@ -81,6 +81,9 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 			ascending = options.ascending;
 			return builder;
 		},
+		range(_from: number, _to: number) {
+			return builder;
+		},
 		gte(_column: string, value: string) {
 			fromDateFilter = value;
 			return builder;

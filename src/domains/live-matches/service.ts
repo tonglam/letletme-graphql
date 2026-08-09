@@ -331,7 +331,18 @@ export const loadLiveFixtureBucketsFromRedis = async (
 			continue;
 		}
 		const fields = Object.values(hashEntries);
-		if (fields.length === 0) continue;
+		if (fields.length === 0) {
+			// A confirmed blank gameweek is a complete, intentionally empty
+			// publication. Do not turn it into a database fallback just because
+			// its Redis hash has no team buckets.
+			if (meta?.fixtureCount === 0 && meta.fixtureTeamCount === 0) {
+				const expectedFixtures = await expectedFixturesPromise;
+				if (expectedFixtures.length === 0) {
+					return { notStarted: [], playing: [], finished: [] };
+				}
+			}
+			continue;
+		}
 		if (meta && fields.length !== meta.fixtureTeamCount) {
 			context.logger.warn(
 				{

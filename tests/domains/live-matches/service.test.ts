@@ -126,6 +126,36 @@ describe("loadLiveFixtureBucketsFromRedis", () => {
 		expect(keys).toEqual(["LiveFixtureV2:2526:33", "LiveFixture:2526:33"]);
 	});
 
+	it("accepts an intentionally empty Redis fixture view for a confirmed blank gameweek", async () => {
+		const metadata = JSON.stringify({
+			schemaVersion: 1,
+			season: "2526",
+			eventId: 33,
+			revision: "b".repeat(24),
+			state: "settled",
+			publishedAt: "2025-08-15T20:00:00.000Z",
+			checkedAt: "2025-08-15T20:00:00.000Z",
+			eventLiveCount: 700,
+			fixtureCount: 0,
+			fixtureTeamCount: 0,
+			bonusTeamCount: 0,
+		});
+		const context = {
+			redis: {
+				get: async (key: string) =>
+					key === "Season:active" ? "2526" : key === "LiveSnapshotMeta:2526:33" ? metadata : null,
+				hgetall: async () => ({}),
+			},
+			logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+		} as unknown as GraphQLContext;
+
+		expect(await loadLiveFixtureBucketsFromRedis(context, 33, [])).toEqual({
+			notStarted: [],
+			playing: [],
+			finished: [],
+		});
+	});
+
 	it("forces whole-operation database mode when metadata has no complete fixture view", async () => {
 		const hgetallKeys: string[] = [];
 		const metadata = JSON.stringify({

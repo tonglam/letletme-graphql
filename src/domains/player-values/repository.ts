@@ -121,6 +121,7 @@ type DbPlayerStatMetadataRow = {
 };
 
 const compactDatePattern = /^\d{8}$/;
+const PLAYER_VALUE_HISTORY_PAGE_SIZE = 1000;
 
 function normalizePositionLabel(position: unknown): string {
 	if (typeof position === "number" && Number.isInteger(position)) {
@@ -730,24 +731,31 @@ export const playerValuesRepository: PlayerValuesRepository = {
 		}
 
 		try {
-			const query = context.supabase
-				.from("player_values")
-				.select("element_id, value, last_value, change_date, change_type")
-				.eq("element_id", args.playerId);
+			const databaseRows: DbPlayerValueHistoryRow[] = [];
+			for (let from = 0; ; from += PLAYER_VALUE_HISTORY_PAGE_SIZE) {
+				const { data, error } = await context.supabase
+					.from("player_values")
+					.select("element_id, value, last_value, change_date, change_type")
+					.eq("element_id", args.playerId)
+					.order("change_date", { ascending: true })
+					.range(from, from + PLAYER_VALUE_HISTORY_PAGE_SIZE - 1);
 
-			const { data, error } = await query;
+				if (error) {
+					context.logger.error(
+						{ err: error, playerId: args.playerId, from },
+						"Failed to fetch player value history from database"
+					);
+					throw new Error(error.message, { cause: error });
+				}
 
-			if (error) {
-				context.logger.error(
-					{ err: error, playerId: args.playerId },
-					"Failed to fetch player value history from database"
-				);
-				throw new Error(error.message, { cause: error });
+				const page = (data as DbPlayerValueHistoryRow[] | null) ?? [];
+				databaseRows.push(...page);
+				if (page.length < PLAYER_VALUE_HISTORY_PAGE_SIZE) break;
 			}
 
 			const fromEpoch = args.fromDate?.getTime() ?? null;
 			const toEpoch = args.toDate?.getTime() ?? null;
-			const rows = ((data as DbPlayerValueHistoryRow[] | null) ?? [])
+			const rows = databaseRows
 				.map((row) => ({ row, parsedDate: parseChangeDate(row.change_date) }))
 				.filter(
 					(item): item is { row: DbPlayerValueHistoryRow; parsedDate: Date } =>

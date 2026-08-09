@@ -199,6 +199,28 @@ async function healthCheck(): Promise<{ ok: boolean; body: string }> {
 		checks.postgres = "fail";
 	}
 
+	try {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 2_000);
+		try {
+			const response = await fetch(
+				`${env.SUPABASE_URL.replace(/\/$/, "")}/rest/v1/events?select=id&limit=1`,
+				{
+					headers: {
+						apikey: env.SUPABASE_KEY,
+						Authorization: `Bearer ${env.SUPABASE_KEY}`,
+					},
+					signal: controller.signal,
+				}
+			);
+			checks.supabase = response.ok ? "ok" : "fail";
+		} finally {
+			clearTimeout(timeout);
+		}
+	} catch {
+		checks.supabase = "fail";
+	}
+
 	const ok = Object.values(checks).every((v) => v === "ok");
 	return { ok, body: JSON.stringify({ status: ok ? "ok" : "degraded", checks }) };
 }
