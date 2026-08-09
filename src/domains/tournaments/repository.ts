@@ -43,10 +43,11 @@ const writeCacheBestEffort = async (
 	context: GraphQLContext,
 	key: string,
 	value: string,
-	message: string
+	message: string,
+	ttlSeconds = env.CACHE_TTL_SECONDS
 ): Promise<void> => {
 	try {
-		await context.redis.set(key, value, "EX", env.CACHE_TTL_SECONDS);
+		await context.redis.set(key, value, "EX", ttlSeconds);
 	} catch (error) {
 		context.logger.warn({ err: error, key }, message);
 	}
@@ -1057,7 +1058,13 @@ export const tournamentsRepository: TournamentsRepository = {
 		const ttlSeconds = allStandingsReady
 			? env.CACHE_TTL_SECONDS
 			: Math.min(15, env.CACHE_TTL_SECONDS);
-		await context.redis.set(cacheKey, JSON.stringify(tournaments), "EX", ttlSeconds);
+		await writeCacheBestEffort(
+			context,
+			cacheKey,
+			JSON.stringify(tournaments),
+			"Failed to write entry tournaments cache",
+			ttlSeconds
+		);
 		return tournaments;
 	},
 
@@ -1472,21 +1479,29 @@ export const tournamentsRepository: TournamentsRepository = {
 		)
 			return cached as EntryH2HMatchResult[];
 
-		const matchResult = await context.supabase
-			.from("tournament_battle_group_results")
-			.select(
-				"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
-			)
-			.or(`home_entry_id.eq.${entryId},away_entry_id.eq.${entryId}`)
-			.order("event_id", { ascending: true })
-			.order("tournament_id", { ascending: true });
-		const { data: matchData, error: matchError } = matchResult;
-
-		if (matchError) {
-			context.logger.error({ err: matchError, entryId }, "Failed to fetch entry H2H match results");
-			throw new Error("Failed to fetch entry H2H match results");
+		const rows: DbTournamentBattleGroupResultRow[] = [];
+		for (let from = 0; ; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
+			const { data: matchData, error: matchError } = await context.supabase
+				.from("tournament_battle_group_results")
+				.select(
+					"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
+				)
+				.or(`home_entry_id.eq.${entryId},away_entry_id.eq.${entryId}`)
+				.order("event_id", { ascending: true })
+				.order("tournament_id", { ascending: true })
+				.order("id", { ascending: true })
+				.range(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE - 1);
+			if (matchError) {
+				context.logger.error(
+					{ err: matchError, entryId },
+					"Failed to fetch entry H2H match results"
+				);
+				throw new Error("Failed to fetch entry H2H match results");
+			}
+			const page = (matchData as DbTournamentBattleGroupResultRow[] | null) ?? [];
+			rows.push(...page);
+			if (page.length < TOURNAMENT_SUMMARY_PAGE_SIZE) break;
 		}
-		const rows = (matchData as DbTournamentBattleGroupResultRow[] | null) ?? [];
 		const tournamentIds = [
 			...new Set([...membershipTournamentIds, ...rows.map((row) => row.tournament_id)]),
 		];

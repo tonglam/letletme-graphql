@@ -1791,7 +1791,12 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 			const resolveResult = () => {
 				if (table === "tournament_battle_group_results") {
 					matchReads += 1;
-					return { data: state.matches, error: null };
+					const range = actions.find((action) => action.type === "range")?.args as
+						[number, number] | undefined;
+					return {
+						data: range ? state.matches.slice(range[0], range[1] + 1) : state.matches,
+						error: null,
+					};
 				}
 				if (table === "tournament_entries") {
 					membershipReads += 1;
@@ -1827,6 +1832,10 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 				},
 				order(...args: unknown[]) {
 					actions.push({ type: "order", args });
+					return builder;
+				},
+				range(...args: unknown[]) {
+					actions.push({ type: "range", args });
 					return builder;
 				},
 				in(...args: unknown[]) {

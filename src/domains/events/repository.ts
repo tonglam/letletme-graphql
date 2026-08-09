@@ -496,36 +496,23 @@ export const eventsRepository: EventsRepository = {
 		}
 
 		// Fallback: Supabase query
-		let query = context.supabase.from("events").select("*");
+		const query = context.supabase.from("events").select("*");
 
-		if (normalizedFilter?.isPrevious !== undefined) {
-			query = query.eq("is_previous", normalizedFilter.isPrevious);
-		}
-		if (normalizedFilter?.isCurrent !== undefined) {
-			query = query.eq("is_current", normalizedFilter.isCurrent);
-		}
-		if (normalizedFilter?.isNext !== undefined) {
-			query = query.eq("is_next", normalizedFilter.isNext);
-		}
-		if (normalizedFilter?.finished !== undefined) {
-			query = query.eq("finished", normalizedFilter.finished);
-		}
-		if (normalizedFilter?.dataChecked !== undefined) {
-			query = query.eq("data_checked", normalizedFilter.dataChecked);
-		}
-
-		const { data, error } = await query
-			.order("id", { ascending: true })
-			.range(safeOffset, safeOffset + safeLimit - 1);
+		const { data, error } = await query.order("id", { ascending: true });
 
 		if (error) {
 			context.logger.error({ err: error, filter: normalizedFilter }, "Failed to fetch events");
 			throw new Error("Failed to fetch events");
 		}
 
-		return applyCurrentEventPointer(
-			(data as DbEventRow[] | null)?.map(mapEvent) ?? [],
-			currentEvent?.id ?? null
+		return filterAndSliceEvents(
+			applyCurrentEventPointer(
+				(data as DbEventRow[] | null)?.map(mapEvent) ?? [],
+				currentEvent?.id ?? null
+			),
+			normalizedFilter,
+			safeOffset,
+			safeLimit
 		);
 	},
 };

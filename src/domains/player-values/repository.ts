@@ -213,9 +213,9 @@ function toTenthsValue(value: number | null | undefined): number {
 }
 
 function buildHistoryCacheKey(args: GetPlayerValueHistoryArgs): string {
-	const from = args.fromDate ? getDateKey(args.fromDate) : "none";
-	const to = args.toDate ? getDateKey(args.toDate) : "none";
-	return `player-value-history:v2:${args.playerId}:${from}:${to}`;
+	const from = args.fromDate ? String(args.fromDate.getTime()) : "none";
+	const to = args.toDate ? String(args.toDate.getTime()) : "none";
+	return `player-value-history:v3:${args.playerId}:${from}:${to}`;
 }
 
 const mapDbRowToPlayerValue = (row: DbPlayerValueRow): PlayerValue => {
