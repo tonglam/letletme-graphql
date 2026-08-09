@@ -1555,10 +1555,23 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const allEntryIds = [...new Set(readyRows.flatMap((r) => [r.home_entry_id, r.away_entry_id]))];
 
-		const nameResultPromise = context.supabase
-			.from("entry_infos")
-			.select("id, entry_name, player_name")
-			.in("id", allEntryIds);
+		const nameResultPromise = (async (): Promise<{
+			data: DbEntryInfoNameRow[];
+			error: unknown;
+		}> => {
+			const nameRows: DbEntryInfoNameRow[] = [];
+			for (let from = 0; from < allEntryIds.length; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
+				const entryBatch = allEntryIds.slice(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE);
+				const { data, error } = await context.supabase
+					.from("entry_infos")
+					.select("id, entry_name, player_name")
+					.in("id", entryBatch)
+					.order("id", { ascending: true });
+				if (error) return { data: nameRows, error };
+				nameRows.push(...((data as DbEntryInfoNameRow[] | null) ?? []));
+			}
+			return { data: nameRows, error: null };
+		})();
 		const eventResultRows: DbEntryEventResultLiteRow[] = [];
 		const entriesByEvent = new Map<number, number[]>();
 		for (const row of readyRows) {
@@ -1589,6 +1602,13 @@ export const tournamentsRepository: TournamentsRepository = {
 			}
 		});
 		const [nameResult] = await Promise.all([nameResultPromise, ...eventResultPromises]);
+		if (nameResult.error) {
+			context.logger.error(
+				{ err: nameResult.error, entryIds: allEntryIds },
+				"Failed to fetch H2H participant names"
+			);
+			throw new Error("Failed to fetch entry H2H match results");
+		}
 
 		const tournamentMap = new Map<number, TournamentInfo>(
 			tournamentInfos.map((tournament) => [tournament.id, tournament])

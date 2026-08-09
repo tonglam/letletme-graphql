@@ -581,16 +581,21 @@ export const playerValuesRepository: PlayerValuesRepository = {
 					if (Array.isArray(parsed)) {
 						if (parsed.length > 0) {
 							const hashData: Record<string, string> = {};
+							let malformedLegacyRow = false;
 							for (const item of parsed) {
 								const id = item.playerId;
 								if (typeof id === "number" && Number.isFinite(id)) {
 									hashData[String(id)] = JSON.stringify(item);
+								} else {
+									malformedLegacyRow = true;
 								}
 							}
-							const normalized = parsePlayerValuesFromHashData(context, cacheKey, hashData);
-							if (normalized !== null) {
-								await writePrivatePlayerValuesCache(context, privateCacheKey, normalized);
-								return normalized;
+							if (!malformedLegacyRow) {
+								const normalized = parsePlayerValuesFromHashData(context, cacheKey, hashData);
+								if (normalized !== null) {
+									await writePrivatePlayerValuesCache(context, privateCacheKey, normalized);
+									return normalized;
+								}
 							}
 							metrics.cacheRepositoryEvents.labels("player_values", "malformed").inc();
 						}

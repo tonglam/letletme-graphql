@@ -546,35 +546,8 @@ export const playersRepository: PlayersRepository = {
 			context.logger.warn({ err: error, season, id }, "Failed to read Player hash");
 		}
 		if (hashRaw) {
-			try {
-				const parsed = JSON.parse(hashRaw) as Record<string, unknown>;
-				const player: Player = {
-					id,
-					code: Number(parsed.code ?? 0),
-					webName: String(parsed.webName ?? parsed.web_name ?? ""),
-					firstName: parsed.firstName
-						? String(parsed.firstName)
-						: parsed.first_name
-							? String(parsed.first_name)
-							: null,
-					secondName: parsed.secondName
-						? String(parsed.secondName)
-						: parsed.second_name
-							? String(parsed.second_name)
-							: null,
-					teamId: Number(parsed.teamId ?? parsed.team_id ?? 0),
-					position: Number(parsed.type ?? parsed.position ?? 0) as Position,
-					price: Number(parsed.price ?? 0),
-					startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
-					totalPoints: Number(parsed.totalPoints ?? parsed.total_points ?? 0),
-					selectedByPercent: asNullableNumber(
-						parsed.selectedByPercent ?? parsed.selected_by_percent
-					),
-				};
-				return player;
-			} catch {
-				/* fall through to Supabase */
-			}
+			const player = parseCachedPlayer(hashRaw, id);
+			if (player) return player;
 		}
 
 		const { data, error } = await context.supabase
