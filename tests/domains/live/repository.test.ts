@@ -146,9 +146,10 @@ describe("liveRepository v3 explanation query cache", () => {
 					{
 						event_id: 1,
 						element_id: 1,
-						scoring_identifier: "goals_scored",
-						scoring_value: 1,
-						points: 5,
+						minutes: 90,
+						minutes_points: 2,
+						goals_scored: 1,
+						goals_scored_points: 5,
 					},
 				],
 				"fpl.player_fixture_stats": [
@@ -177,7 +178,10 @@ describe("liveRepository v3 explanation query cache", () => {
 			breakdown: [
 				{
 					fixtureId: 1,
-					stats: [{ identifier: "goals_scored", points: 5, value: 1 }],
+					stats: [
+						{ identifier: "minutes", points: 2, value: 90 },
+						{ identifier: "goals_scored", points: 5, value: 1 },
+					],
 				},
 			],
 		});

@@ -231,8 +231,11 @@ const nullableBoolean = (value: unknown): boolean | null | undefined =>
 
 const string = (value: unknown): string | null => (typeof value === "string" ? value : null);
 
-const nullableString = (value: unknown): string | null | undefined =>
-	value === null ? null : (string(value) ?? undefined);
+const nullableString = (value: unknown): string | null | undefined => {
+	if (value === null) return null;
+	if (typeof value === "number" && Number.isFinite(value)) return String(value);
+	return string(value) ?? undefined;
+};
 
 const isoDate = (value: unknown): string | null => {
 	if (!(typeof value === "string" || value instanceof Date)) return null;
@@ -1050,15 +1053,23 @@ const validateLiveFixtureView = (
 	);
 };
 
-const validateLiveBonus = (bonus: LiveBonusByTeam, core: CoreDataSnapshot): boolean => {
-	const teamIds = new Set(core.teams.map((team) => team.id));
+const validateLiveBonus = (
+	bonus: LiveBonusByTeam,
+	core: CoreDataSnapshot,
+	eventId: number
+): boolean => {
+	const eventTeamIds = new Set(
+		core.fixtures
+			.filter((fixture) => fixture.eventId === eventId)
+			.flatMap((fixture) => [fixture.teamHId, fixture.teamAId])
+	);
 	const players = new Map(core.players.map((player) => [player.id, player]));
 	for (const [teamIdRaw, teamBonus] of Object.entries(bonus)) {
 		const teamId = Number(teamIdRaw);
-		if (!teamIds.has(teamId)) return false;
+		if (!eventTeamIds.has(teamId)) return false;
 		for (const playerIdRaw of Object.keys(teamBonus)) {
 			const playerId = Number(playerIdRaw);
-			if (players.get(playerId)?.teamId !== teamId) return false;
+			if (!players.has(playerId)) return false;
 		}
 	}
 	return true;
@@ -1110,7 +1121,7 @@ const publicationLiveSnapshot = (
 			(fixture) => fixture.id
 		) ||
 		!validateLiveFixtureView(liveFixtures, fixtures, core) ||
-		!validateLiveBonus(liveBonus, core) ||
+		!validateLiveBonus(liveBonus, core, eventId) ||
 		state !== liveStateFromFixtures(fixtures)
 	) {
 		return null;
@@ -1369,13 +1380,16 @@ const loadLiveSnapshotFromPostgres = async (
 		fixtures.some((fixture) => fixture.eventId !== eventId) ||
 		!hasUniquePositiveIds(eventLives, (live) => live.playerId) ||
 		!hasUniquePositiveIds(fixtures, (fixture) => fixture.id) ||
-		(eventLives.length > 0 &&
-			!hasSameIds(
-				eventLives,
-				core.players,
-				(live) => live.playerId,
-				(player) => player.id
-			)) ||
+		(eventLives.length > 0
+			? !hasSameIds(
+					eventLives,
+					core.players,
+					(live) => live.playerId,
+					(player) => player.id
+				)
+			: fixtures.some(
+					(fixture) => fixture.started === true || fixture.finished || fixture.finishedProvisional
+				)) ||
 		!hasSameIds(
 			fixtures,
 			coreEventFixtures,
@@ -1394,7 +1408,7 @@ const loadLiveSnapshotFromPostgres = async (
 	const liveBonus = buildLiveBonus(row.fixtures, fixtures);
 	if (
 		!validateLiveFixtureView(liveFixtures, fixtures, core) ||
-		!validateLiveBonus(liveBonus, core)
+		!validateLiveBonus(liveBonus, core, eventId)
 	) {
 		throw new Error(`Coherent PostgreSQL live derivatives are unavailable for event ${eventId}`);
 	}

@@ -27,7 +27,7 @@ Before opening a port, GraphQL performs `SELECT`-only checks that require:
 
 - PostgreSQL 15 Data Platform v3 relations and columns used by every reader;
 - exactly one current FPL season;
-- exactly one active `fpl:core` publication with schema `v3` and plan `3.2.3`;
+- exactly one active `fpl:core` publication with schema `v3` and plan `3.2.5`;
 - a runtime login with schema usage and relation select privileges, but no
   unsafe role attributes, schema create privilege, or write privilege on any
   Data-owned relation.

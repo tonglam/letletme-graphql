@@ -27,10 +27,10 @@ describe("loadLiveBonusByPlayerId", () => {
 		expect(Object.fromEntries(result)).toEqual({ 1: 5, 2: 0, 12: 3 });
 	});
 
-	it("rejects a cross-team sibling and rebuilds bonus only from PostgreSQL fixture stats", async () => {
+	it("rejects a bonus bucket for a team not playing the event and rebuilds from PostgreSQL fixture stats", async () => {
 		const core = buildTestCoreData(1);
 		const invalid = buildLivePublication(core, 1, "2627", 8, {
-			liveBonus: { "1": { "12": 9 } },
+			liveBonus: { "999": { "12": 9 } },
 		});
 		const databaseLives = buildTestEventLives(core, 1);
 		const eventFixtures = core.fixtures.filter((fixture) => fixture.eventId === 1);

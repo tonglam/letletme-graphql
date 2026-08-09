@@ -152,7 +152,17 @@ describe("typed Data snapshots", () => {
 							source_checked_at: null,
 							published_at: null,
 							event_checked_at: "2026-08-09T01:02:03.000Z",
-							event_lives: databaseLives,
+							event_lives: databaseLives.map((row, index) =>
+								index === 0
+									? {
+											...row,
+											expected_goals: 0.75,
+											expected_assists: 0.1,
+											expected_goal_involvements: 0.85,
+											expected_goals_conceded: 0.9,
+										}
+									: row
+							),
 							fixtures: databaseFixtures,
 						},
 					],
@@ -173,6 +183,57 @@ describe("typed Data snapshots", () => {
 			)?.score
 		).toBe("1-2");
 		expect(calls).toBe(1);
+	});
+
+	it("rejects an empty fallback live row once any fixture has started", async () => {
+		const core = buildTestCoreData(1);
+		const corePublication = buildCorePublication("2627", 7, core);
+		const invalidLivePublication = buildLivePublication(core, 1, "2627", 8, {
+			eventLives: [],
+		});
+		const databaseFixtures = core.fixtures
+			.filter((fixture) => fixture.eventId === 1)
+			.map((fixture, index) => ({
+				...toPublicationFixture(fixture),
+				...(index === 0 ? { started: true, teamHScore: 1, teamAScore: 0 } : {}),
+			}));
+		const context = buildSnapshotContext(new TestRedis(corePublication, invalidLivePublication), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						authority_count: "0",
+						publication_id: null,
+						revision: null,
+						source_checked_at: null,
+						published_at: null,
+						event_checked_at: "2026-08-09T01:02:03.000Z",
+						event_lives: [],
+						fixtures: databaseFixtures,
+					},
+				],
+			}),
+		});
+
+		await expect(getLiveDataSnapshot(context, 1)).rejects.toThrow(
+			"Coherent PostgreSQL live publication is unavailable"
+		);
+	});
+
+	it("validates live bonus teams against the requested event, not current player teams", async () => {
+		const core = buildTestCoreData(1);
+		const firstPlayer = core.players[0]!;
+		const secondTeamPlayer = core.players[11]!;
+		core.players[0] = { ...firstPlayer, teamId: 2 };
+		core.players[11] = { ...secondTeamPlayer, teamId: 1 };
+		const corePublication = buildCorePublication("2627", 7, core);
+		const livePublication = buildLivePublication(core, 1, "2627", 8, {
+			liveBonus: { "1": { "1": 3 } },
+		});
+		const context = buildSnapshotContext(new TestRedis(corePublication, livePublication));
+
+		await expect(getLiveDataSnapshot(context, 1)).resolves.toMatchObject({
+			liveBonus: { "1": { "1": 3 } },
+		});
 	});
 
 	it("fails closed when neither Redis nor PostgreSQL has one coherent core authority", async () => {

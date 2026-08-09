@@ -129,6 +129,31 @@ type DbLiveScoringItem = JsonRecord & {
 	scoring_identifier?: string | null;
 	scoring_value?: number | string | null;
 	points?: number | string | null;
+	minutes?: number | string | null;
+	minutes_points?: number | string | null;
+	goals_scored?: number | string | null;
+	goals_scored_points?: number | string | null;
+	assists?: number | string | null;
+	assists_points?: number | string | null;
+	clean_sheets?: number | string | null;
+	clean_sheets_points?: number | string | null;
+	goals_conceded?: number | string | null;
+	goals_conceded_points?: number | string | null;
+	own_goals?: number | string | null;
+	own_goals_points?: number | string | null;
+	penalties_saved?: number | string | null;
+	penalties_saved_points?: number | string | null;
+	penalties_missed?: number | string | null;
+	penalties_missed_points?: number | string | null;
+	yellow_cards?: number | string | null;
+	yellow_cards_points?: number | string | null;
+	red_cards?: number | string | null;
+	red_cards_points?: number | string | null;
+	saves?: number | string | null;
+	saves_points?: number | string | null;
+	bonus?: number | string | null;
+	defensive_contribution?: number | string | null;
+	defensive_contribution_points?: number | string | null;
 };
 
 type DbLiveFixtureStat = JsonRecord & {
@@ -532,15 +557,39 @@ const mapScoringItemContributions = (
 ): LiveExplainStatContribution[] =>
 	items.flatMap((item) => {
 		const identifier = pickRecordValue(item, "scoring_identifier", "scoringIdentifier");
-		if (typeof identifier !== "string" || identifier.trim().length === 0) return [];
-		return [
-			{
-				identifier,
-				points: parseIntegerValue(pickRecordValue(item, "points")) ?? 0,
-				value: parseNumericValue(pickRecordValue(item, "scoring_value", "scoringValue")),
-				pointsModification: null,
-			},
-		];
+		if (typeof identifier === "string" && identifier.trim().length > 0) {
+			return [
+				{
+					identifier,
+					points: parseIntegerValue(pickRecordValue(item, "points")) ?? 0,
+					value: parseNumericValue(pickRecordValue(item, "scoring_value", "scoringValue")),
+					pointsModification: null,
+				},
+			];
+		}
+		const pivotedDefinitions = [
+			["minutes", "minutes_points"],
+			["goals_scored", "goals_scored_points"],
+			["assists", "assists_points"],
+			["clean_sheets", "clean_sheets_points"],
+			["goals_conceded", "goals_conceded_points"],
+			["own_goals", "own_goals_points"],
+			["penalties_saved", "penalties_saved_points"],
+			["penalties_missed", "penalties_missed_points"],
+			["yellow_cards", "yellow_cards_points"],
+			["red_cards", "red_cards_points"],
+			["saves", "saves_points"],
+			["bonus", "bonus"],
+			["defensive_contribution", "defensive_contribution_points"],
+		] as const;
+		return pivotedDefinitions.flatMap(([pivotedIdentifier, pointsKey]) => {
+			const value = parseNumericValue(pickRecordValue(item, pivotedIdentifier));
+			const points = parseIntegerValue(pickRecordValue(item, pointsKey));
+			if ((value ?? 0) === 0 && (points ?? 0) === 0) return [];
+			return [
+				{ identifier: pivotedIdentifier, points: points ?? 0, value, pointsModification: null },
+			];
+		});
 	});
 
 async function fetchPlayerStatsForLiveExplains(
