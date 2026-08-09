@@ -1,5 +1,11 @@
 # GraphQL API change log
 
+## Data Platform v3 plan 3.2.5 — 2026-08-09
+
+- Advanced the fail-closed database and Redis publication contract to plan
+  `3.2.5` after the Data core-cache publisher's least-privilege preflight was
+  corrected. A stale 3.2.4 database or Redis pointer cannot serve this build.
+
 ## Data Platform v3 G2 — 2026-08-09
 
 - Locked startup and Redis publication parsing to the exact Data contract:
