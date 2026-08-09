@@ -593,9 +593,9 @@ export const playerValuesRepository: PlayerValuesRepository = {
 				try {
 					const parsed = JSON.parse(stringVal ?? "null") as PlayerValue[];
 					if (Array.isArray(parsed)) {
+						let malformedLegacyRow = false;
 						if (parsed.length > 0) {
 							const hashData: Record<string, string> = {};
-							let malformedLegacyRow = false;
 							for (const item of parsed) {
 								const id = item.playerId;
 								if (typeof id === "number" && Number.isFinite(id)) {
