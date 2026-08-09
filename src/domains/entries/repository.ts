@@ -232,6 +232,18 @@ export const entriesRepository: EntriesRepository = {
 		if (raw) {
 			try {
 				const parsed = JSON.parse(raw) as Record<string, unknown>;
+				const hasValidLastEventId =
+					parsed.lastEventId === null ||
+					(typeof parsed.lastEventId === "number" && Number.isFinite(parsed.lastEventId));
+				const hasValidBaseline =
+					hasValidLastEventId &&
+					(typeof parsed.lastEventId !== "number" ||
+						(typeof parsed.overallPoints === "number" && Number.isFinite(parsed.overallPoints)));
+				if (!hasValidBaseline) {
+					// A malformed current baseline can corrupt live point deltas. Let the
+					// authoritative database row provide the complete entry instead.
+					throw new Error("Invalid EntryInfo baseline");
+				}
 				return {
 					id,
 					entryName: String(parsed.entryName ?? ""),

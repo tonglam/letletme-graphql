@@ -159,11 +159,15 @@ const parseNullableFiniteNumber = (raw: unknown): number | null => {
 	return Number.isFinite(parsed) ? parsed : null;
 };
 
-const parseEventFromRedisJson = (raw: string): Event | null => {
+const parseEventFromRedisJson = (raw: string, expectedId?: number): Event | null => {
 	try {
 		const obj = JSON.parse(raw) as Record<string, unknown>;
+		const id = Number(obj.id ?? 0);
+		if (!Number.isInteger(id) || id <= 0 || (expectedId !== undefined && id !== expectedId)) {
+			return null;
+		}
 		return {
-			id: Number(obj.id ?? 0),
+			id,
 			name: String(obj.name ?? ""),
 			deadlineTime: normalizeDeadlineTime(obj.deadlineTime, obj.deadlineTimeEpoch),
 			averageEntryScore: parseNullableFiniteNumber(obj.averageEntryScore),
@@ -319,7 +323,7 @@ export const eventsRepository: EventsRepository = {
 			context.logger.warn({ err: error, season, id }, "Failed to read Event hash");
 		}
 		if (raw) {
-			const event = parseEventFromRedisJson(raw);
+			const event = parseEventFromRedisJson(raw, id);
 			if (event) {
 				return applyCurrentEventPointer([event], currentEvent?.id ?? null)[0] ?? null;
 			}
@@ -348,7 +352,7 @@ export const eventsRepository: EventsRepository = {
 		try {
 			const rawEvents = await context.redis.hvals(`Event:${season}`);
 			if (rawEvents.length > 0) {
-				const parsedEvents = rawEvents.map(parseEventFromRedisJson);
+				const parsedEvents = rawEvents.map((raw) => parseEventFromRedisJson(raw));
 				if (parsedEvents.every((event): event is Event => event !== null)) {
 					const pointerCovered =
 						current === null ||
@@ -491,7 +495,7 @@ export const eventsRepository: EventsRepository = {
 			context.logger.warn({ err: error, season }, "Failed to read Event hash values");
 		}
 		if (rawList.length > 0) {
-			const parsedEvents = rawList.map(parseEventFromRedisJson);
+			const parsedEvents = rawList.map((raw) => parseEventFromRedisJson(raw));
 			if (parsedEvents.some((event) => event === null)) {
 				context.logger.warn(
 					{ season, count: rawList.length },

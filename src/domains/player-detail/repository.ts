@@ -611,7 +611,14 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			getCurrentEventFromRedis(context),
 		]);
 		if (!player) {
-			await context.redis.set(cacheKey, NULL_SENTINEL, "EX", PLAYER_DETAIL_NULL_CACHE_TTL);
+			try {
+				await context.redis.set(cacheKey, NULL_SENTINEL, "EX", PLAYER_DETAIL_NULL_CACHE_TTL);
+			} catch (error) {
+				context.logger.warn(
+					{ err: error, cacheKey, playerId, eventId },
+					"Failed to cache missing player detail"
+				);
+			}
 			return null;
 		}
 		const resolvedEvent = await loadResolvedEventState(

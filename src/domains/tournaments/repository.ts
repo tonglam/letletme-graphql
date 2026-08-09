@@ -1533,7 +1533,12 @@ export const tournamentsRepository: TournamentsRepository = {
 		);
 		if (rows.length === 0) {
 			if (readyTournamentIds.size === tournamentIds.length) {
-				await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
+				await writeCacheBestEffort(
+					context,
+					cacheKey,
+					JSON.stringify([]),
+					"Failed to cache empty entry H2H results"
+				);
 			}
 			return [];
 		}
