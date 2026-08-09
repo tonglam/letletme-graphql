@@ -1,5 +1,6 @@
 import type { QueryResultRow } from "pg";
 import type { QueryExecutor } from "./database";
+import { env } from "./env";
 import { loadCurrentSeason, type CurrentSeason } from "./season";
 import { V3ReadClient } from "./v3-read-client";
 import {
@@ -10,6 +11,11 @@ import {
 
 const DATA_SCHEMAS = ["fpl", "competition", "reporting", "ops", "understat", "bridge"] as const;
 const GRAPHQL_RUNTIME_CAPABILITY_ROLE = "letletme_graphql_reader";
+
+export const isLegacyAuthValidationRequired = (
+	deadline: number | null | undefined,
+	now = Date.now()
+): boolean => typeof deadline === "number" && Number.isFinite(deadline) && now <= deadline;
 
 type RoleRow = QueryResultRow & {
 	session_user: string;
@@ -224,9 +230,12 @@ export const validateDatabaseContract = async (
 		authContractPresence?.schema_exists === true &&
 		(authContractPresence.user_exists === true ||
 			authContractPresence.mini_program_session_exists === true);
+	const legacyAuthValidationOpen = isLegacyAuthValidationRequired(env.LEGACY_AUTH_VALIDATION_UNTIL);
+	const authSchemasRequired = authContractPresent || legacyAuthValidationOpen;
 	const requiredSchemas = [
 		...DATA_SCHEMAS,
-		...(authContractPresent ? ["bauth" as const] : []),
+		...(authSchemasRequired ? ["bauth" as const] : []),
+		...(legacyAuthValidationOpen ? ["public" as const] : []),
 	].sort();
 	const schemaPrivileges = (
 		await database.query<SchemaPrivilegeRow>(
@@ -254,6 +263,9 @@ export const validateDatabaseContract = async (
 			"competition.public_league_trends",
 			"ops.dataset_publications",
 			...(authContractPresent ? ['bauth."user"', "bauth.mini_program_session"] : []),
+			...(legacyAuthValidationOpen
+				? ['bauth."user"', "bauth.api_sessions", 'public."user"', "public.device_sessions"]
+				: []),
 		]),
 	].sort();
 	const relationPrivileges = (
@@ -304,7 +316,13 @@ export const validateDatabaseContract = async (
 				 JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
 				 WHERE namespace.nspname = ANY($1::text[])
 				   AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')`,
-				[DATA_SCHEMAS]
+				[
+					[
+						...DATA_SCHEMAS,
+						...(authSchemasRequired ? ["bauth"] : []),
+						...(legacyAuthValidationOpen ? ["public"] : []),
+					],
+				]
 			)
 		).rows,
 		"The PostgreSQL write boundary cannot be resolved"

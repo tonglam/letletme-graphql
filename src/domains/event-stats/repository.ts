@@ -235,11 +235,10 @@ async function getReadModelRows(
 		.eq("event_id", eventId);
 
 	if (error) {
-		context.logger.warn(
-			{ err: error, tournamentId, eventId },
-			"Failed to fetch tournament selection stats materialized view"
+		throw new Error(
+			`Failed to fetch tournament selection stats read model for tournament ${tournamentId}, event ${eventId}`,
+			{ cause: error }
 		);
-		return null;
 	}
 
 	return (data as DbTournamentSelectionStatRow[] | null) ?? [];

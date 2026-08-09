@@ -562,14 +562,16 @@ export const playersRepository: PlayersRepository = {
 		sort: PlayerPickerSort = "TOTAL_POINTS_DESC"
 	): Promise<PlayersForPickerPayload> {
 		const safeLimit = clampLimit(limit);
-		const safeCursor = cursor && Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : null;
+		// Cursor values are public player IDs, not offsets. Keeping this keyset-style
+		// contract lets clients carry a cursor across rolling deployments safely.
+		const safeCursor = cursor && Number.isSafeInteger(cursor) && cursor > 0 ? cursor : null;
 		const safeSearch = search?.trim().slice(0, 50) || null;
 		const safeFilter = normalizeFilter(filter);
 		const statsContext = await resolvePlayerStatsContext(context);
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
 		const cacheKey = gqlCacheKey(
 			context,
-			`players:picker:v7:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${safeCursor ?? 0}`
+			`players:picker:v8:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${safeCursor ?? 0}`
 		);
 
 		const cached = await readJsonCache(
@@ -651,9 +653,12 @@ export const playersRepository: PlayersRepository = {
 					);
 			}
 		});
-		const offset = safeCursor ?? 0;
-		const returnedItems = sortedItems.slice(offset, offset + safeLimit);
-		const nextCursor = sortedItems.length > offset + safeLimit ? offset + safeLimit : null;
+		const cursorIndex =
+			safeCursor === null ? -1 : sortedItems.findIndex((item) => item.id === safeCursor);
+		const start = cursorIndex >= 0 ? cursorIndex + 1 : 0;
+		const returnedItems = sortedItems.slice(start, start + safeLimit);
+		const nextCursor =
+			start + returnedItems.length < sortedItems.length ? (returnedItems.at(-1)?.id ?? null) : null;
 		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
 
 		await writeQueryCache(

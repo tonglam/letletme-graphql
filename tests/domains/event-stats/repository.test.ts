@@ -208,6 +208,15 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 		expect(context.__directDatabaseReads()).toBe(0);
 	});
 
+	it("propagates read-model failures instead of presenting a populated league as empty", async () => {
+		const context = createContext({ error: { code: "PGRST000", message: "temporary outage" } });
+
+		await expect(
+			eventStatsRepository.getTournamentSelectionStats(context, 1, 10, 10)
+		).rejects.toThrow("Failed to fetch tournament selection stats read model");
+		expect(context.__directDatabaseReads()).toBe(0);
+	});
+
 	it("rejects an MV row with invalid precomputed percentages instead of recomputing it", async () => {
 		const rows = ROWS.map((row, index) =>
 			index === 0 ? { ...row, effective_ownership_percentage: Number.NaN } : row

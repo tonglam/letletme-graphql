@@ -48,9 +48,9 @@ describe("liveSnapshot GraphQL v3 contract", () => {
 			schema,
 			source: `
 				query Snapshot($eventId: Int!) {
-					liveSnapshot(eventId: $eventId) {
-						schemaVersion season eventId revision state
-						publishedAt checkedAt eventLiveCount fixtureCount
+			liveSnapshot(eventId: $eventId) {
+				schemaVersion season eventId revision state
+				publishedAt checkedAt eventLiveCount fixtureCount
 						fixtureTeamCount bonusTeamCount
 					}
 					eventLive(eventId: $eventId) {
@@ -152,7 +152,7 @@ describe("liveSnapshot GraphQL v3 contract", () => {
 		const result = await graphql({
 			schema,
 			source: `query {
-				liveSnapshot(eventId: 1) { revision state eventLiveCount fixtureCount }
+			liveSnapshot(eventId: 1) { revision state publishedAt eventLiveCount fixtureCount }
 				eventLive(eventId: 1) { performances { totalPoints } }
 			}`,
 			contextValue: context,
@@ -162,6 +162,7 @@ describe("liveSnapshot GraphQL v3 contract", () => {
 		expect(result.data?.liveSnapshot).toEqual({
 			revision: `db-${Date.parse("2026-08-09T01:02:00.000Z")}`,
 			state: "LIVE",
+			publishedAt: "2026-08-09T01:03:00.000Z",
 			eventLiveCount: 220,
 			fixtureCount: 10,
 		});

@@ -173,7 +173,18 @@ describe("playersRepository.getPlayersForPicker", () => {
 
 		expect(result.items).toHaveLength(1);
 		expect(result.items[0]).toMatchObject({ id: 2, webName: "Alpha Player" });
-		expect(result.nextCursor).toBe(1);
+		expect(result.nextCursor).toBe(2);
+
+		const nextPage = await playersRepository.getPlayersForPicker(
+			context,
+			1,
+			result.nextCursor,
+			null,
+			null,
+			"NAME_ASC"
+		);
+		// The cursor is the last returned player ID (2), not an array offset.
+		expect(nextPage.items[0]).toMatchObject({ id: 10, webName: "Player 10" });
 	});
 });
 

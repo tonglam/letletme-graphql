@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { QueryExecutor } from "../../src/infra/database";
-import { DatabaseContractError, validateDatabaseContract } from "../../src/infra/database-contract";
+import {
+	DatabaseContractError,
+	isLegacyAuthValidationRequired,
+	validateDatabaseContract,
+} from "../../src/infra/database-contract";
 
 type ContractOptions = Readonly<{
 	missingRelation?: string;
@@ -161,6 +165,13 @@ describe("GraphQL startup database contract", () => {
 
 		expect(queries.length).toBeGreaterThan(20);
 		expect(queries.every((query) => query.trimStart().startsWith("SELECT"))).toBe(true);
+	});
+
+	it("keeps the legacy auth validation window deadline-gated", () => {
+		const now = Date.parse("2026-08-09T12:00:00.000Z");
+		expect(isLegacyAuthValidationRequired(now + 1, now)).toBe(true);
+		expect(isLegacyAuthValidationRequired(now - 1, now)).toBe(false);
+		expect(isLegacyAuthValidationRequired(null, now)).toBe(false);
 	});
 
 	it("fails closed when a required relation is missing", async () => {

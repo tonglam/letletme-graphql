@@ -1387,7 +1387,8 @@ const loadLiveSnapshotFromPostgres = async (
 	const authorityCount = integer(row?.authority_count) ?? 0;
 	const eventCheckedAt = isoDate(row?.event_checked_at);
 	const sourceCheckedAt = eventCheckedAt ?? isoDate(row?.source_checked_at) ?? core.sourceCheckedAt;
-	const publishedAt = sourceCheckedAt;
+	const publishedAt =
+		authorityCount === 1 ? (isoDate(row?.published_at) ?? sourceCheckedAt) : sourceCheckedAt;
 	const eventLives = mapArray(row?.event_lives, mapLivePerformance);
 	const fixtures = mapArray(row?.fixtures, mapCoreFixture);
 	const coreEventFixtures = core.fixtures.filter((fixture) => fixture.eventId === eventId);
