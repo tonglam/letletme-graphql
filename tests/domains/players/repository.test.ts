@@ -124,6 +124,57 @@ describe("playersRepository.getPlayersForPicker", () => {
 		expect(cacheWrite?.[0]).toMatch(/^llm:v3:gql:v3:core-7:players-picker:/);
 		expect(cacheWrite?.slice(-2)).toEqual(["EX", 300]);
 	});
+
+	it("applies the requested sort before taking the page", async () => {
+		const core = buildTestCoreData(null, {
+			players: buildTestCoreData(null).players.map((player) =>
+				player.id === 1
+					? { ...player, webName: "Zed Player" }
+					: player.id === 2
+						? { ...player, webName: "Alpha Player" }
+						: player
+			),
+		});
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
+		const context = buildSnapshotContext(redis);
+		context.data = {
+			read: (table: string) => {
+				if (table === "fpl.events") {
+					return queryChain({ data: [], error: null }, ["select", "lte", "order", "limit"]);
+				}
+				if (table === "fpl.player_market_snapshots") {
+					return {
+						select: (fields: string) =>
+							fields === "snapshot_date, captured_at"
+								? queryChain(
+										{
+											data: [
+												{ snapshot_date: "2026-08-09", captured_at: new Date().toISOString() },
+											],
+											error: null,
+										},
+										["order", "limit"]
+									)
+								: queryChain({ data: [], error: null }, ["eq", "in"]),
+					};
+				}
+				throw new Error(`Unexpected reporting table ${table}`);
+			},
+		} as never;
+
+		const result = await playersRepository.getPlayersForPicker(
+			context,
+			1,
+			null,
+			null,
+			null,
+			"NAME_ASC"
+		);
+
+		expect(result.items).toHaveLength(1);
+		expect(result.items[0]).toMatchObject({ id: 2, webName: "Alpha Player" });
+		expect(result.nextCursor).toBe(1);
+	});
 });
 
 describe("playersRepository top transfers", () => {

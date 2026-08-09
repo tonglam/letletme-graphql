@@ -133,6 +133,9 @@ export type PlayersForPickerPayload = {
 	nextCursor: number | null;
 };
 
+export type PlayerPickerSort =
+	"NAME_ASC" | "TOTAL_POINTS_DESC" | "FORM_DESC" | "PRICE_ASC" | "PRICE_DESC" | "OWNERSHIP_DESC";
+
 type DbPickerRow = QueryResultRow & {
 	id: number;
 	web_name: string;
@@ -554,17 +557,18 @@ export const playersRepository: PlayersRepository = {
 		limit: number,
 		cursor: number | null | undefined,
 		search?: string | null,
-		filter?: PlayersFilter | null
+		filter?: PlayersFilter | null,
+		sort: PlayerPickerSort = "TOTAL_POINTS_DESC"
 	): Promise<PlayersForPickerPayload> {
 		const safeLimit = clampLimit(limit);
-		const safeCursor = cursor && Number.isSafeInteger(cursor) && cursor > 0 ? cursor : null;
+		const safeCursor = cursor && Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : null;
 		const safeSearch = search?.trim().slice(0, 50) || null;
 		const safeFilter = normalizeFilter(filter);
 		const statsContext = await resolvePlayerStatsContext(context);
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
 		const cacheKey = gqlCacheKey(
 			context,
-			`players:picker:v6:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${safeLimit}:${safeCursor ?? 0}`
+			`players:picker:v7:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${safeCursor ?? 0}`
 		);
 
 		const cached = await readJsonCache(
@@ -593,7 +597,6 @@ export const playersRepository: PlayersRepository = {
 			buildTeamMap(context),
 		]);
 		const candidates = snapshot.players
-			.filter((player) => safeCursor === null || player.id > safeCursor)
 			.filter(
 				(player) => !safeSearch || player.webName.toLowerCase().includes(safeSearch.toLowerCase())
 			)
@@ -610,9 +613,8 @@ export const playersRepository: PlayersRepository = {
 					safeFilter?.maxPrice === undefined ||
 					safeFilter.maxPrice === null ||
 					player.price <= safeFilter.maxPrice
-			)
-			.sort((left, right) => left.id - right.id);
-		const pageRows: DbPickerRow[] = candidates.slice(0, safeLimit).map((player) => ({
+			);
+		const allRows: DbPickerRow[] = candidates.map((player) => ({
 			id: player.id,
 			web_name: player.webName,
 			element_type: player.type,
@@ -620,11 +622,37 @@ export const playersRepository: PlayersRepository = {
 			team_name: teams.get(player.teamId)?.name ?? "",
 			team_short_name: teams.get(player.teamId)?.shortName ?? "",
 		}));
-		const returnedItems = (await enrichPickerItems(context, pageRows, statsContext, teams)).filter(
+		const allItems = (await enrichPickerItems(context, allRows, statsContext, teams)).filter(
 			(item) => matchesPickerFilter(item, safeFilter)
 		);
-		const nextCursor =
-			candidates.length > safeLimit ? (pageRows[pageRows.length - 1]?.id ?? null) : null;
+		const sortNumberDesc = (left: number | null, right: number | null): number =>
+			(right ?? -1) - (left ?? -1);
+		const sortedItems = [...allItems].sort((left, right) => {
+			switch (sort) {
+				case "NAME_ASC":
+					return left.webName.localeCompare(right.webName);
+				case "FORM_DESC":
+					return sortNumberDesc(left.form, right.form) || left.webName.localeCompare(right.webName);
+				case "PRICE_ASC":
+					return left.price - right.price || left.webName.localeCompare(right.webName);
+				case "PRICE_DESC":
+					return right.price - left.price || left.webName.localeCompare(right.webName);
+				case "OWNERSHIP_DESC":
+					return (
+						sortNumberDesc(left.selectedByPercent, right.selectedByPercent) ||
+						left.webName.localeCompare(right.webName)
+					);
+				case "TOTAL_POINTS_DESC":
+				default:
+					return (
+						sortNumberDesc(left.totalPoints, right.totalPoints) ||
+						left.webName.localeCompare(right.webName)
+					);
+			}
+		});
+		const offset = safeCursor ?? 0;
+		const returnedItems = sortedItems.slice(offset, offset + safeLimit);
+		const nextCursor = sortedItems.length > offset + safeLimit ? offset + safeLimit : null;
 		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
 
 		await writeQueryCache(
