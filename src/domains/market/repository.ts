@@ -144,9 +144,15 @@ export type MarketRepository = {
 const MARKET_QUERY = `
 	WITH active_season AS (
 		SELECT
-			COALESCE((SELECT deadline_time FROM public.events WHERE id = 1), now())
+			COALESCE(
+				NULLIF((SELECT deadline_time::text FROM public.events WHERE id = 1), '')::timestamptz,
+				now()
+			)
 				- interval '60 days' AS season_start,
-			COALESCE((SELECT deadline_time FROM public.events WHERE id = 1), now())
+			COALESCE(
+				NULLIF((SELECT deadline_time::text FROM public.events WHERE id = 1), '')::timestamptz,
+				now()
+			)
 				+ interval '1 year' AS season_end
 	),
 	deduped AS (

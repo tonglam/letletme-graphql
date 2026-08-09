@@ -288,7 +288,14 @@ const exchangeWechatCode = async (code: string): Promise<string> => {
 		`&secret=${encodeURIComponent(env.WECHAT_APPSECRET)}` +
 		`&js_code=${encodeURIComponent(code)}` +
 		`&grant_type=authorization_code`;
-	const response = await fetch(url);
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), 8_000);
+	let response: Response;
+	try {
+		response = await fetch(url, { signal: controller.signal });
+	} finally {
+		clearTimeout(timeout);
+	}
 	const data = (await response.json()) as WechatResponse;
 	if (!data.openid) {
 		throw new Error(`WeChat auth failed: ${data.errmsg ?? "unknown"}`);

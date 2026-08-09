@@ -18,5 +18,14 @@ BEGIN
     'GRANT SELECT ON TABLE public.public_league_trends_catalog TO %I',
     runtime_role
   );
+
+  EXECUTE 'DROP POLICY IF EXISTS public_league_trends_catalog_runtime_read
+    ON public.public_league_trends_catalog';
+  EXECUTE format(
+    'CREATE POLICY public_league_trends_catalog_runtime_read
+       ON public.public_league_trends_catalog
+       FOR SELECT TO %I USING (enabled = true)',
+    runtime_role
+  );
 END
 $grant$;

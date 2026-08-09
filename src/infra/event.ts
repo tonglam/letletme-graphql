@@ -18,6 +18,14 @@ export type CurrentEventCache = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
+const parseBooleanFlag = (value: unknown): boolean | null => {
+	if (value === undefined || value === null) return false;
+	if (typeof value === "boolean") return value;
+	if (value === 1 || value === "1" || value === "true") return true;
+	if (value === 0 || value === "0" || value === "false") return false;
+	return null;
+};
+
 const parseCurrentEvent = (raw: string | null): CurrentEventCache | null => {
 	if (!raw) {
 		return null;
@@ -38,6 +46,13 @@ const parseCurrentEvent = (raw: string | null): CurrentEventCache | null => {
 	if (!Number.isFinite(idValue) || idValue <= 0) {
 		return null;
 	}
+	const isCurrent = parseBooleanFlag(parsed.isCurrent);
+	const isNext = parseBooleanFlag(parsed.isNext);
+	const finished = parseBooleanFlag(parsed.finished);
+	const dataChecked = parseBooleanFlag(parsed.dataChecked);
+	if (isCurrent === null || isNext === null || finished === null || dataChecked === null) {
+		return null;
+	}
 
 	return {
 		id: idValue,
@@ -45,10 +60,10 @@ const parseCurrentEvent = (raw: string | null): CurrentEventCache | null => {
 		deadlineTime: typeof parsed.deadlineTime === "string" ? parsed.deadlineTime : null,
 		deadlineTimeEpoch:
 			typeof parsed.deadlineTimeEpoch === "number" ? parsed.deadlineTimeEpoch : null,
-		isCurrent: Boolean(parsed.isCurrent),
-		isNext: Boolean(parsed.isNext),
-		finished: Boolean(parsed.finished),
-		dataChecked: Boolean(parsed.dataChecked),
+		isCurrent,
+		isNext,
+		finished,
+		dataChecked,
 	};
 };
 
