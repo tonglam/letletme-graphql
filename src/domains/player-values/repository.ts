@@ -709,12 +709,23 @@ export const playerValuesRepository: PlayerValuesRepository = {
 				return row.last_value !== 0;
 			});
 			if (rows.length === 0) {
-				await context.redis.set(cacheKey, NULL_SENTINEL, "EX", 3600);
+				try {
+					await context.redis.set(cacheKey, NULL_SENTINEL, "EX", 3600);
+				} catch (error) {
+					context.logger.warn(
+						{ err: error, cacheKey },
+						"Failed to cache empty player-value history"
+					);
+				}
 				return [];
 			}
 
 			const history = mapHistoryRows(rows);
-			await context.redis.set(cacheKey, JSON.stringify(history), "EX", 3600);
+			try {
+				await context.redis.set(cacheKey, JSON.stringify(history), "EX", 3600);
+			} catch (error) {
+				context.logger.warn({ err: error, cacheKey }, "Failed to cache player-value history");
+			}
 			return history;
 		} catch (error) {
 			if (error instanceof Error && error.cause) {

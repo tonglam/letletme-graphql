@@ -1102,24 +1102,29 @@ export const tournamentsRepository: TournamentsRepository = {
 			return cached as TournamentEventResult[];
 		}
 
-		const { data: resultData, error: resultError } = await context.supabase
-			.from("v_tournament_event_result")
-			.select(TOURNAMENT_VIEW_COLUMNS)
-			.eq("tournament_id", tournamentId)
-			.eq("event_id", eventId)
-			.order("group_id", { ascending: true })
-			.order("event_group_rank", { ascending: true, nullsFirst: false })
-			.order("entry_id", { ascending: true });
+		const rows: DbTournamentEventResultRow[] = [];
+		for (let from = 0; ; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
+			const { data: resultData, error: resultError } = await context.supabase
+				.from("v_tournament_event_result")
+				.select(TOURNAMENT_VIEW_COLUMNS)
+				.eq("tournament_id", tournamentId)
+				.eq("event_id", eventId)
+				.order("group_id", { ascending: true })
+				.order("event_group_rank", { ascending: true, nullsFirst: false })
+				.order("entry_id", { ascending: true })
+				.range(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE - 1);
 
-		if (resultError) {
-			context.logger.error(
-				{ err: resultError, tournamentId, eventId },
-				"Failed to fetch tournament event results"
-			);
-			throw new Error("Failed to fetch tournament event results");
+			if (resultError) {
+				context.logger.error(
+					{ err: resultError, tournamentId, eventId },
+					"Failed to fetch tournament event results"
+				);
+				throw new Error("Failed to fetch tournament event results");
+			}
+			const page = (resultData as DbTournamentEventResultRow[] | null) ?? [];
+			rows.push(...page);
+			if (page.length < TOURNAMENT_SUMMARY_PAGE_SIZE) break;
 		}
-
-		const rows = (resultData as DbTournamentEventResultRow[] | null) ?? [];
 		if (rows.length === 0) {
 			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
 			return [];

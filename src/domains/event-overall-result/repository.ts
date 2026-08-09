@@ -65,8 +65,8 @@ function mapEventResult(row: DbEventRow): EventResult {
 				if (typeof chip === "object" && chip !== null) {
 					const chipObj = chip as Record<string, unknown>;
 					return {
-						chipName: String(chipObj.chipName ?? ""),
-						numberPlayed: Number(chipObj.numberPlayed ?? 0),
+						chipName: String(chipObj.chipName ?? chipObj.chip_name ?? ""),
+						numberPlayed: Number(chipObj.numberPlayed ?? chipObj.num_played ?? 0),
 					};
 				}
 				return null;

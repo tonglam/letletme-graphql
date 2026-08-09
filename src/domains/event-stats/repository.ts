@@ -8,6 +8,8 @@ import { buildTeamMap } from "../../infra/team-map";
 const privateCacheKey = async (context: GraphQLContext, key: string): Promise<string> =>
 	gqlCacheKey(await getCurrentSeason(context), key);
 
+const SELECTION_STATS_PAGE_SIZE = 1000;
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -245,6 +247,8 @@ async function getTournamentInfo(
 async function getCaptainCounts(
 	context: GraphQLContext,
 	tournamentId: number,
+	leagueId: number,
+	leagueType: string,
 	eventId: number,
 	entryIds: number[]
 ): Promise<{ captainCounts: Map<number, number>; totalEntries: number }> {
@@ -265,6 +269,8 @@ async function getCaptainCounts(
 	}
 
 	const rpcResult = await context.supabase.rpc("get_captain_counts_for_entries", {
+		p_league_id: leagueId,
+		p_league_type: leagueType,
 		p_event_id: eventId,
 		p_entry_ids: entryIds,
 	});
@@ -438,17 +444,24 @@ async function getTournamentEntryIdsUncached(
 	context: GraphQLContext,
 	tournamentId: number
 ): Promise<number[]> {
-	const { data, error } = await context.supabase
-		.from("tournament_entries")
-		.select("entry_id")
-		.eq("tournament_id", tournamentId);
-
-	if (error) {
-		context.logger.error({ err: error, tournamentId }, "Failed to fetch tournament entry IDs");
-		return [];
+	const entryIds: number[] = [];
+	for (let from = 0; ; from += SELECTION_STATS_PAGE_SIZE) {
+		const { data, error } = await context.supabase
+			.from("tournament_entries")
+			.select("entry_id")
+			.eq("tournament_id", tournamentId)
+			.order("entry_id", { ascending: true })
+			.range(from, from + SELECTION_STATS_PAGE_SIZE - 1);
+		if (error) {
+			context.logger.error({ err: error, tournamentId }, "Failed to fetch tournament entry IDs");
+			return [];
+		}
+		const page = ((data as { entry_id: number }[] | null) ?? []).map((r) => r.entry_id);
+		entryIds.push(...page);
+		if (page.length < SELECTION_STATS_PAGE_SIZE) break;
 	}
 
-	return ((data as { entry_id: number }[] | null) ?? []).map((r) => r.entry_id);
+	return entryIds;
 }
 
 const EMPTY_STATS: TournamentSelectionStats = {
@@ -745,7 +758,14 @@ export const eventStatsRepository: EventStatsRepository = {
 			{ pickCounts, viceCaptainCounts },
 			{ transferInCounts, transferOutCounts },
 		] = await Promise.all([
-			getCaptainCounts(context, tournamentId, eventId, entryIds),
+			getCaptainCounts(
+				context,
+				tournamentId,
+				tournamentInfo.league_id,
+				tournamentInfo.league_type,
+				eventId,
+				entryIds
+			),
 			getPickAggregation(context, tournamentId, entryIds, eventId),
 			getTransferAggregation(context, tournamentId, entryIds, eventId),
 		]);

@@ -43,6 +43,7 @@ const makeMockSupabase = (options: {
 			in: () => builder,
 			limit: async () => result,
 			order: () => builder,
+			range: async () => result,
 		});
 		return builder;
 	},
@@ -443,6 +444,7 @@ describe("eventStatsRepository.getTournamentSelectionStats", () => {
 						in: () => builder,
 						limit: async () => result,
 						order: () => builder,
+						range: async () => result,
 					});
 					return builder;
 				},
@@ -450,6 +452,7 @@ describe("eventStatsRepository.getTournamentSelectionStats", () => {
 					rpcCallCount++;
 					const rpcData: Record<string, unknown[]> = {
 						get_captain_counts: makeCaptainCounts(),
+						get_captain_counts_for_entries: makeCaptainCounts(),
 						get_pick_aggregation: makePickAggregation(),
 						get_transfer_aggregation: makeTransferAggregation(),
 					};
@@ -710,12 +713,14 @@ describe("eventStatsRepository.getTournamentSelectionStats", () => {
 						in: () => builder,
 						limit: async () => result,
 						order: () => builder,
+						range: async () => result,
 					});
 					return builder;
 				},
 				rpc: async (fnName: string, _params: Record<string, unknown>) => {
 					const rpcData: Record<string, unknown[]> = {
 						get_captain_counts: makeCaptainCounts(),
+						get_captain_counts_for_entries: makeCaptainCounts(),
 						get_pick_aggregation: makePickAggregation(),
 						get_transfer_aggregation: makeTransferAggregation(),
 					};
@@ -781,6 +786,7 @@ describe("eventStatsRepository.getTournamentSelectionStats", () => {
 						in: () => builder,
 						limit: async () => result,
 						order: () => builder,
+						range: async () => result,
 					});
 					return builder;
 				},

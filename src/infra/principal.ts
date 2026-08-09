@@ -365,13 +365,27 @@ export const createWechatApiSession = async (
 		}
 
 		if (!existingIdentity.rows[0]) {
-			await client.query(
+			const identityInsert = await client.query(
 				`INSERT INTO bauth.external_identities
          (id, user_id, provider, provider_subject, created_at, updated_at)
          VALUES ($1, $2, $3, $4, NOW(), NOW())
          ON CONFLICT (provider, provider_subject) DO NOTHING`,
 				[randomUUID(), userId, WECHAT_PROVIDER, openid]
 			);
+			if (identityInsert.rowCount === 0) {
+				const owner = await client.query<IdentityRow>(
+					`SELECT user_id
+					 FROM bauth.external_identities
+					 WHERE provider = $1 AND provider_subject = $2
+					 LIMIT 1`,
+					[WECHAT_PROVIDER, openid]
+				);
+				const canonicalUserId = owner.rows[0]?.user_id;
+				if (!canonicalUserId) {
+					throw new Error("External identity conflict did not expose its owner");
+				}
+				userId = canonicalUserId;
+			}
 		}
 
 		const token = `llm_wx_${randomBytes(32).toString("base64url")}`;

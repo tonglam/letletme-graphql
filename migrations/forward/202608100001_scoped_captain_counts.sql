@@ -1,6 +1,8 @@
 -- Scope tournament captain exposure to the tournament's membership rather
 -- than aggregating every manager in the underlying FPL league.
 CREATE OR REPLACE FUNCTION public.get_captain_counts_for_entries(
+  p_league_id integer,
+  p_league_type text,
   p_event_id integer,
   p_entry_ids integer[]
 )
@@ -17,7 +19,9 @@ AS $function$
   WITH matched AS (
     SELECT result.captain_id
     FROM public.league_event_results result
-    WHERE result.event_id = p_event_id
+    WHERE result.league_id = p_league_id
+      AND result.league_type::text = p_league_type
+      AND result.event_id = p_event_id
       AND result.entry_id = ANY(COALESCE(p_entry_ids, ARRAY[]::integer[]))
   ),
   totals AS (
@@ -30,7 +34,7 @@ AS $function$
   GROUP BY matched.captain_id, totals.total_entries;
 $function$;
 
-REVOKE ALL ON FUNCTION public.get_captain_counts_for_entries(integer, integer[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.get_captain_counts_for_entries(integer, text, integer, integer[]) FROM PUBLIC;
 
 DO $permissions$
 DECLARE
@@ -40,14 +44,14 @@ BEGIN
   LOOP
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = client_role) THEN
       EXECUTE format(
-        'REVOKE ALL ON FUNCTION public.get_captain_counts_for_entries(integer, integer[]) FROM %I',
+        'REVOKE ALL ON FUNCTION public.get_captain_counts_for_entries(integer, text, integer, integer[]) FROM %I',
         client_role
       );
     END IF;
   END LOOP;
 
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
-    GRANT EXECUTE ON FUNCTION public.get_captain_counts_for_entries(integer, integer[]) TO service_role;
+    GRANT EXECUTE ON FUNCTION public.get_captain_counts_for_entries(integer, text, integer, integer[]) TO service_role;
   END IF;
 END
 $permissions$;

@@ -38,6 +38,7 @@ type DbPlayerRow = {
 	type: number;
 	price: number;
 	start_price: number;
+	total_points?: number | null;
 };
 
 const asNullableNumber = (value: unknown): number | null => {
@@ -61,9 +62,37 @@ const mapPlayer = (row: DbPlayerRow): Player => ({
 	position: row.type as Position,
 	price: row.price,
 	startPrice: row.start_price,
-	totalPoints: 0,
+	totalPoints: row.total_points ?? 0,
 	selectedByPercent: null,
 });
+
+const enrichCurrentSeasonTotals = async (
+	context: GraphQLContext,
+	players: Player[]
+): Promise<Player[]> => {
+	if (players.length === 0) return players;
+	try {
+		const statsContext = await resolvePlayerStatsContext(context);
+		const stats = await getPlayerSeasonStatsByIdsForContext(
+			context,
+			players.map((player) => player.id),
+			statsContext
+		);
+		return players.map((player) => {
+			const current = stats.get(player.id);
+			return current
+				? {
+						...player,
+						totalPoints: current.totalPoints ?? player.totalPoints,
+						selectedByPercent: current.selectedByPercent ?? player.selectedByPercent,
+					}
+				: player;
+		});
+	} catch (error) {
+		context.logger.warn({ err: error }, "Failed to enrich players with current season totals");
+		return players;
+	}
+};
 
 const evictMalformedCache = async (context: GraphQLContext, key: string): Promise<void> => {
 	try {
@@ -212,6 +241,7 @@ type DbPickerRow = {
 type MarketOwnershipRow = {
 	element_id: number;
 	selected_by_percent: number | string | null;
+	captured_at: string | Date | null;
 };
 
 const mapPickerRow = (row: DbPickerRow): PlayerPickerItem => ({
@@ -263,9 +293,10 @@ const getLatestMarketOwnershipByIds = async (
 
 		const ownershipResult = await context.supabase
 			.from("player_market_snapshots")
-			.select("element_id, selected_by_percent")
+			.select("element_id, selected_by_percent, captured_at")
 			.eq("snapshot_date", snapshotDate)
-			.in("element_id", ids);
+			.in("element_id", ids)
+			.order("captured_at", { ascending: false, nullsFirst: false });
 		if (ownershipResult.error) {
 			context.logger.warn(
 				{ err: ownershipResult.error, snapshotDate },
@@ -274,12 +305,14 @@ const getLatestMarketOwnershipByIds = async (
 			return new Map();
 		}
 
-		return new Map(
-			((ownershipResult.data as MarketOwnershipRow[] | null) ?? []).flatMap((row) => {
-				const value = asNullableNumber(row.selected_by_percent);
-				return value === null ? [] : [[row.element_id, value] as const];
-			})
-		);
+		const ownershipById = new Map<number, number>();
+		for (const row of (ownershipResult.data as MarketOwnershipRow[] | null) ?? []) {
+			const value = asNullableNumber(row.selected_by_percent);
+			if (value !== null && !ownershipById.has(row.element_id)) {
+				ownershipById.set(row.element_id, value);
+			}
+		}
+		return ownershipById;
 	} catch (error) {
 		context.logger.warn({ err: error }, "Failed to load market ownership for player picker");
 		return new Map();
@@ -478,7 +511,7 @@ export const playersRepository: PlayersRepository = {
 					position: Number(parsed.type ?? parsed.position ?? 0) as Position,
 					price: Number(parsed.price ?? 0),
 					startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
-					totalPoints: Number(parsed.totalPoints ?? 0),
+					totalPoints: Number(parsed.totalPoints ?? parsed.total_points ?? 0),
 					selectedByPercent: asNullableNumber(
 						parsed.selectedByPercent ?? parsed.selected_by_percent
 					),
@@ -506,7 +539,7 @@ export const playersRepository: PlayersRepository = {
 		}
 
 		const player = mapPlayer(row);
-		return player;
+		return (await enrichCurrentSeasonTotals(context, [player]))[0] ?? player;
 	},
 
 	async getPlayerByIdForEvent(
@@ -709,7 +742,7 @@ export const playersRepository: PlayersRepository = {
 						position: Number(parsed.type ?? parsed.position ?? 0) as Position,
 						price: Number(parsed.price ?? 0),
 						startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
-						totalPoints: Number(parsed.totalPoints ?? 0),
+						totalPoints: Number(parsed.totalPoints ?? parsed.total_points ?? 0),
 						selectedByPercent: asNullableNumber(
 							parsed.selectedByPercent ?? parsed.selected_by_percent
 						),
@@ -761,8 +794,10 @@ export const playersRepository: PlayersRepository = {
 						position: Number(parsed.type ?? 0) as Position,
 						price: Number(parsed.price ?? 0),
 						startPrice: Number(parsed.startPrice ?? 0),
-						totalPoints: 0,
-						selectedByPercent: null,
+						totalPoints: Number(parsed.totalPoints ?? parsed.total_points ?? 0),
+						selectedByPercent: asNullableNumber(
+							parsed.selectedByPercent ?? parsed.selected_by_percent
+						),
 					});
 				}
 				return players;
@@ -984,7 +1019,7 @@ export const playersRepository: PlayersRepository = {
 		}
 
 		const players = (data as DbPlayerRow[] | null)?.map(mapPlayer) ?? [];
-		return players;
+		return enrichCurrentSeasonTotals(context, players);
 	},
 
 	async getTeamById(context: GraphQLContext, id: number): Promise<Team | null> {

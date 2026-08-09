@@ -121,10 +121,16 @@ describe("playersRepository.getPlayersForPicker", () => {
 										)
 									: chain(
 											{
-												data: [{ element_id: 9, selected_by_percent: "74.6" }],
+												data: [
+													{
+														element_id: 9,
+														selected_by_percent: "74.6",
+														captured_at: new Date().toISOString(),
+													},
+												],
 												error: null,
 											},
-											["eq", "in"]
+											["eq", "in", "order"]
 										),
 						};
 					}
