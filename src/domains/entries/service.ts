@@ -293,7 +293,7 @@ async function buildLiveMapForEvents(
 				try {
 					const parsed = JSON.parse(value) as Record<string, unknown>;
 					const perf = mapSyncJobLiveRow(parsed);
-					if (perf) {
+					if (perf && perf.eventId === eventIds[i] && perf.playerId === requestedIds[valueIndex]) {
 						result.set(livePerformanceKey(perf.eventId, perf.playerId), perf);
 					} else {
 						hasUnresolvedField = true;

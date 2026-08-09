@@ -1072,7 +1072,14 @@ export const tournamentsRepository: TournamentsRepository = {
 		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(season, `tournaments:entry-ids:${tournamentId}`);
 		if (!(await getTournamentCacheReadiness(context, tournamentId))) {
-			await context.redis.del(cacheKey);
+			try {
+				await context.redis.del(cacheKey);
+			} catch (error) {
+				context.logger.warn(
+					{ err: error, cacheKey, tournamentId },
+					"Failed to evict setup-era tournament entry IDs cache"
+				);
+			}
 			return tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
 		}
 		const cached = await readJsonCache(context, cacheKey, isEntryIdArrayCache);
@@ -1411,6 +1418,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				.eq("event_id", eventId)
 				.order("group_id", { ascending: true })
 				.order("home_entry_id", { ascending: true })
+				.order("id", { ascending: true })
 				.range(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE - 1);
 			if (error) {
 				context.logger.error(

@@ -678,18 +678,26 @@ export const entryLiveRepository: EntryLiveRepository = {
 			}
 		}
 
-		const { data, error } = await queryTransferRows(
-			context,
-			(query) => query.eq("entry_id", entryId),
-			["event_id"]
-		);
+		const TRANSFER_HISTORY_PAGE_SIZE = 1000;
+		const rows: DbEntryEventTransferRow[] = [];
+		for (let from = 0; ; from += TRANSFER_HISTORY_PAGE_SIZE) {
+			const { data, error } = await queryTransferRows(
+				context,
+				(query) => query.eq("entry_id", entryId),
+				["event_id", "element_in_id", "element_out_id"],
+				{ from, to: from + TRANSFER_HISTORY_PAGE_SIZE - 1 }
+			);
 
-		if (error) {
-			context.logger.error({ err: error, entryId }, "Failed to fetch entry transfer history");
-			throw new EntryTransferRepositoryError("Failed to fetch entry transfer history", error);
+			if (error) {
+				context.logger.error({ err: error, entryId }, "Failed to fetch entry transfer history");
+				throw new EntryTransferRepositoryError("Failed to fetch entry transfer history", error);
+			}
+
+			const page = (data as DbEntryEventTransferRow[] | null) ?? [];
+			rows.push(...page);
+			if (page.length < TRANSFER_HISTORY_PAGE_SIZE) break;
 		}
 
-		const rows = (data as DbEntryEventTransferRow[] | null) ?? [];
 		const transfers: EntryEventTransferRow[] = rows
 			.map((row) => mapTransferRow(row, { entryId, eventId: null }))
 			.filter((t): t is EntryEventTransferRow => t !== null);
