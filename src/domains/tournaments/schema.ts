@@ -120,6 +120,26 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		entryId: Int!
 		overallRank: Int
 		tournamentOverallRank: Int
+		"""
+		Cumulative official FPL points for this entry at the selected event.
+		"""
+		overallPoints: Int
+		"""
+		Cumulative official FPL points of the tournament leader at the selected event.
+		"""
+		leaderOverallPoints: Int
+		"""
+		Points separating this entry from the leader (zero when leading).
+		"""
+		gapToLeader: Int
+		"""
+		Points separating this entry from the next higher-ranked entry.
+		"""
+		pointsBehindNext: Int
+		"""
+		Points separating this entry from the next lower-ranked entry.
+		"""
+		pointsAheadOfPrev: Int
 		teamValue: Int
 		tournamentTeamValueRank: Int
 		transfersNum: Int

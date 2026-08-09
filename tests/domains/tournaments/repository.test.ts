@@ -723,6 +723,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 	const buildContext = (options: {
 		tournamentData?: unknown[];
 		snapshotData?: unknown[];
+		pointsData?: unknown[];
 		tournamentError?: unknown;
 		snapshotError?: unknown;
 		cacheSeed?: string | null;
@@ -749,6 +750,12 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 					return {
 						data: filterRowsByActions(options.snapshotData ?? [], actions),
 						error: options.snapshotError ?? null,
+					};
+				}
+				if (table === "league_event_results") {
+					return {
+						data: filterRowsByActions(options.pointsData ?? [], actions),
+						error: null,
 					};
 				}
 				return { data: [], error: null };
@@ -857,6 +864,11 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 			entryId: 15702,
 			overallRank: 500,
 			tournamentOverallRank: 2,
+			overallPoints: 2000,
+			leaderOverallPoints: 2100,
+			gapToLeader: 100,
+			pointsBehindNext: 50,
+			pointsAheadOfPrev: 50,
 			teamValue: 1020,
 			tournamentTeamValueRank: 1,
 			transfersNum: 3,
@@ -958,6 +970,24 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 				{
 					tournament_id: 1,
 					event_id: 3,
+					entry_id: 900,
+					group_mode: "points_races",
+					tournament_overall_rank: 1,
+					overall_rank: 900,
+					team_value: 1025,
+					cum_transfers_num: 1,
+					cum_total_costs: 0,
+					cum_total_bench_points: 8,
+					cum_auto_sub_points: 6,
+					tournament_team_value_rank: 2,
+					tournament_transfers_rank: 1,
+					tournament_costs_rank: 1,
+					tournament_bench_points_rank: 2,
+					tournament_auto_sub_rank: 2,
+				},
+				{
+					tournament_id: 1,
+					event_id: 3,
 					entry_id: 15702,
 					group_mode: "points_races",
 					tournament_overall_rank: 2,
@@ -972,6 +1002,47 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 					tournament_costs_rank: 2,
 					tournament_bench_points_rank: 1,
 					tournament_auto_sub_rank: 1,
+				},
+				{
+					tournament_id: 1,
+					event_id: 3,
+					entry_id: 901,
+					group_mode: "points_races",
+					tournament_overall_rank: 3,
+					overall_rank: 1100,
+					team_value: 1010,
+					cum_transfers_num: 4,
+					cum_total_costs: 4,
+					cum_total_bench_points: 10,
+					cum_auto_sub_points: 5,
+					tournament_team_value_rank: 3,
+					tournament_transfers_rank: 3,
+					tournament_costs_rank: 2,
+					tournament_bench_points_rank: 3,
+					tournament_auto_sub_rank: 3,
+				},
+			],
+			pointsData: [
+				{
+					league_id: 12121,
+					league_type: "classic",
+					event_id: 3,
+					entry_id: 900,
+					overall_points: 2200,
+				},
+				{
+					league_id: 12121,
+					league_type: "classic",
+					event_id: 3,
+					entry_id: 15702,
+					overall_points: 2100,
+				},
+				{
+					league_id: 12121,
+					league_type: "classic",
+					event_id: 3,
+					entry_id: 901,
+					overall_points: 2050,
 				},
 			],
 		});
@@ -995,6 +1066,11 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		expect(result.tournamentBenchPointsRank).toBe(1);
 		expect(result.autoSubPoints).toBe(7);
 		expect(result.tournamentAutoSubRank).toBe(1);
+		expect(result.overallPoints).toBe(2100);
+		expect(result.leaderOverallPoints).toBe(2200);
+		expect(result.gapToLeader).toBe(100);
+		expect(result.pointsBehindNext).toBe(100);
+		expect(result.pointsAheadOfPrev).toBe(50);
 	});
 
 	it("returns null ranks and zero cumulative metrics when snapshot row is missing", async () => {

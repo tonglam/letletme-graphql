@@ -207,6 +207,11 @@ export type TournamentEntryRankingSummary = {
 	entryId: number;
 	overallRank: number | null;
 	tournamentOverallRank: number | null;
+	overallPoints: number | null;
+	leaderOverallPoints: number | null;
+	gapToLeader: number | null;
+	pointsBehindNext: number | null;
+	pointsAheadOfPrev: number | null;
 	teamValue: number | null;
 	tournamentTeamValueRank: number | null;
 	transfersNum: number | null;
@@ -388,6 +393,11 @@ type DbTournamentEventSnapshotRow = {
 	tournament_costs_rank: number | null;
 	tournament_bench_points_rank: number | null;
 	tournament_auto_sub_rank: number | null;
+};
+
+type DbLeagueEventPointsRow = {
+	entry_id: number;
+	overall_points: number | null;
 };
 
 const isTournamentInfoCache = (value: unknown): value is TournamentInfo =>
@@ -1152,6 +1162,11 @@ export const tournamentsRepository: TournamentsRepository = {
 			entryId,
 			overallRank: null,
 			tournamentOverallRank: null,
+			overallPoints: null,
+			leaderOverallPoints: null,
+			gapToLeader: null,
+			pointsBehindNext: null,
+			pointsAheadOfPrev: null,
 			teamValue: null,
 			tournamentTeamValueRank: null,
 			transfersNum: 0,
@@ -1164,22 +1179,30 @@ export const tournamentsRepository: TournamentsRepository = {
 			tournamentAutoSubRank: null,
 		};
 
-		const [tournament, snapshotResponse] = await Promise.all([
-			getTournamentInfoById(context, tournamentId),
+		const tournament = await getTournamentInfoById(context, tournamentId);
+		if (!tournament || tournament.groupMode !== GroupMode.POINTS_RACES) {
+			return emptySummary;
+		}
+
+		// Read the complete tournament snapshot so the point deltas can be derived
+		// from the same tournament ordering as the displayed rank. The snapshot
+		// intentionally does not carry overall_points, so join the public FPL
+		// league result rows by entry id below.
+		const [snapshotResponse, pointsResponse] = await Promise.all([
 			context.supabase
 				.from("mv_tournament_event_snapshot")
 				.select(
 					"tournament_id, event_id, entry_id, tournament_overall_rank, overall_rank, team_value, cum_transfers_num, cum_total_costs, cum_total_bench_points, cum_auto_sub_points, tournament_team_value_rank, tournament_transfers_rank, tournament_costs_rank, tournament_bench_points_rank, tournament_auto_sub_rank"
 				)
 				.eq("tournament_id", tournamentId)
-				.eq("event_id", eventId)
-				.eq("entry_id", entryId)
-				.limit(1),
+				.eq("event_id", eventId),
+			context.supabase
+				.from("league_event_results")
+				.select("entry_id, overall_points")
+				.eq("league_id", tournament.leagueId)
+				.eq("league_type", tournament.leagueType)
+				.eq("event_id", eventId),
 		]);
-
-		if (!tournament || tournament.groupMode !== GroupMode.POINTS_RACES) {
-			return emptySummary;
-		}
 
 		if (snapshotResponse.error) {
 			context.logger.warn(
@@ -1188,15 +1211,71 @@ export const tournamentsRepository: TournamentsRepository = {
 			);
 			return emptySummary;
 		}
+		if (pointsResponse.error) {
+			context.logger.warn(
+				{ err: pointsResponse.error, tournamentId, eventId, entryId },
+				"Failed to fetch FPL points for tournament summary — returning ranking metrics without point deltas"
+			);
+		}
 
-		const snapshotRow =
-			(snapshotResponse.data?.[0] as DbTournamentEventSnapshotRow | undefined) ?? undefined;
+		const snapshotRows = (snapshotResponse.data as DbTournamentEventSnapshotRow[] | null) ?? [];
+		const snapshotRow = snapshotRows.find((row) => row.entry_id === entryId);
+		const pointRows = pointsResponse.error
+			? []
+			: ((pointsResponse.data as DbLeagueEventPointsRow[] | null) ?? []);
+		const pointsByEntryId = new Map(
+			pointRows.map((row) => [row.entry_id, row.overall_points] as const)
+		);
+		const overallPoints = pointsByEntryId.get(entryId) ?? null;
+		const rankedRows = [...snapshotRows]
+			.filter(
+				(row) => row.tournament_overall_rank !== null && row.tournament_overall_rank !== undefined
+			)
+			.sort(
+				(a, b) =>
+					(a.tournament_overall_rank as number) - (b.tournament_overall_rank as number) ||
+					a.entry_id - b.entry_id
+			);
+		const leaderOverallPoints = rankedRows.reduce<number | null>((leader, row) => {
+			const points = pointsByEntryId.get(row.entry_id);
+			if (points === null || points === undefined) return leader;
+			return leader === null || leader === undefined ? points : Math.max(leader, points);
+		}, null);
+		const myRank = snapshotRow?.tournament_overall_rank ?? null;
+		const aboveRow =
+			myRank !== null
+				? rankedRows.find((row) => (row.tournament_overall_rank as number) < myRank)
+				: undefined;
+		const belowRow =
+			myRank !== null
+				? [...rankedRows].find((row) => (row.tournament_overall_rank as number) > myRank)
+				: undefined;
+		const abovePoints = aboveRow ? (pointsByEntryId.get(aboveRow.entry_id) ?? null) : null;
+		const belowPoints = belowRow ? (pointsByEntryId.get(belowRow.entry_id) ?? null) : null;
 
 		const summary: TournamentEntryRankingSummary = {
 			eventId,
 			entryId,
 			overallRank: snapshotRow?.overall_rank ?? null,
 			tournamentOverallRank: snapshotRow?.tournament_overall_rank ?? null,
+			overallPoints,
+			leaderOverallPoints,
+			gapToLeader:
+				overallPoints !== null && leaderOverallPoints !== null
+					? Math.max(0, leaderOverallPoints - overallPoints)
+					: null,
+			pointsBehindNext:
+				overallPoints !== null && abovePoints !== null
+					? Math.max(0, abovePoints - overallPoints)
+					: myRank === 1
+						? 0
+						: null,
+			pointsAheadOfPrev:
+				overallPoints !== null && belowPoints !== null
+					? Math.max(0, overallPoints - belowPoints)
+					: belowRow === undefined && myRank !== null
+						? 0
+						: null,
 			teamValue: snapshotRow?.team_value ?? null,
 			tournamentTeamValueRank: snapshotRow?.tournament_team_value_rank ?? null,
 			transfersNum: snapshotRow?.cum_transfers_num ?? 0,
