@@ -2,10 +2,47 @@ name: Deploy
 
 on:
   workflow_run:
-    workflows: ['CI']
+    workflows: ["CI"]
     types: [completed]
-    branches: ['main']
+    branches: ["main"]
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Deployment or one explicit Data Platform v3 GraphQL operation.
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - v3-publish-image
+          - v3-preflight
+          - v3-stop
+          - v3-start
+          - v3-status
+      sha:
+        description: Exact GraphQL commit SHA or ref; required for v3 image/start operations.
+        required: false
+        type: string
+      v3_cutover_run_id:
+        description: Exact v3 cutover run ID.
+        required: false
+        type: string
+      v3_image_ref:
+        description: Immutable lowercase GHCR GraphQL image reference pinned by sha256 digest.
+        required: false
+        type: string
+      v3_release_manifest_base64:
+        description: Canonical base64 of the approved external v3 release manifest.
+        required: false
+        type: string
+      v3_release_manifest_sha256:
+        description: SHA-256 of the approved v3 release manifest.
+        required: false
+        type: string
+      v3_cutover_approval:
+        description: Exact APPROVE_V3_ACTIVATION phrase for the cutover run.
+        required: false
+        type: string
 
 concurrency:
   group: deploy-main
@@ -14,7 +51,7 @@ concurrency:
 jobs:
   deploy:
     if: |
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy') ||
       (
         github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success' &&
@@ -36,13 +73,15 @@ jobs:
       - name: Checkout manual dispatch ref
         if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha || github.sha }}
 
       - name: Set deployment metadata
         run: |
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
             DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"
           else
-            DEPLOY_SHA="${GITHUB_SHA}"
+            DEPLOY_SHA="$(git rev-parse HEAD)"
           fi
           IMAGE_NAME=$(echo "${REGISTRY}/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
           echo "DEPLOY_SHA=${DEPLOY_SHA}" >> $GITHUB_ENV
@@ -137,3 +176,380 @@ jobs:
               fi
               docker image rm "$REF" || true
             done
+
+  v3_publish_image:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-publish-image'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - name: Checkout frozen GraphQL candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+
+      - name: Resolve immutable image metadata
+        run: |
+          set -euo pipefail
+          DEPLOY_SHA=$(git rev-parse HEAD)
+          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          IMAGE_NAME=$(printf '%s' "${REGISTRY}/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
+          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${IMAGE_NAME}:v3-${DEPLOY_SHA}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish exact amd64 candidate
+        run: |
+          set -euo pipefail
+          metadata_file=$(mktemp)
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag "$IMAGE_TAG" \
+            --provenance=false \
+            --push \
+            --metadata-file "$metadata_file" \
+            .
+          digest=$(jq -r '."containerimage.digest"' "$metadata_file")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "${IMAGE_NAME}@${digest}"
+          {
+            echo "### Frozen GraphQL image"
+            echo
+            echo "- Commit: \`$DEPLOY_SHA\`"
+            echo "- Tag: \`$IMAGE_TAG\`"
+            echo "- Immutable ref: \`${IMAGE_NAME}@${digest}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  v3_preflight:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-preflight'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Inspect GraphQL production without changing checkout or service state
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: false
+          envs: VPS_WORKDIR
+          script: |
+            set -euo pipefail
+            test -d "$VPS_WORKDIR/.git"
+            cd "$VPS_WORKDIR"
+            echo "V3_GRAPHQL_PREFLIGHT_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "V3_GRAPHQL_PREFLIGHT_HOST=$(hostname)"
+            echo "V3_GRAPHQL_PREFLIGHT_COMMIT=$(git rev-parse HEAD)"
+            echo "V3_GRAPHQL_PREFLIGHT_BRANCH=$(git symbolic-ref --short -q HEAD || echo detached)"
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+              echo "V3_GRAPHQL_PREFLIGHT_TRACKED=dirty"
+            else
+              echo "V3_GRAPHQL_PREFLIGHT_TRACKED=clean"
+            fi
+            echo "V3_GRAPHQL_PREFLIGHT_UNTRACKED"
+            git ls-files --others --exclude-standard
+            echo "V3_GRAPHQL_PREFLIGHT_DISK"
+            df -h "$VPS_WORKDIR"
+            echo "V3_GRAPHQL_PREFLIGHT_SERVICES"
+            docker compose config --services
+            docker compose ps --all
+            cid=$(docker compose ps -q --all graphql)
+            if [ -n "$cid" ]; then
+              docker inspect --format \
+                'V3_GRAPHQL_PREFLIGHT_CONTAINER={{.Name}} image={{.Config.Image}} image_id={{.Image}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                "$cid"
+            fi
+            if [ -f .env.deploy ]; then
+              echo "V3_GRAPHQL_PREFLIGHT_ENV=present mode=$(stat -c '%a' .env.deploy 2>/dev/null || echo unknown)"
+              while IFS='=' read -r key _; do
+                case "$key" in
+                  NODE_ENV|DATABASE_URL|REDIS_HOST|REDIS_PORT|REDIS_PASSWORD|PORT|BACKEND_PROXY_SECRET|GRAPHQL_SERVICE_TOKEN|REQUIRE_SIGNED_WEB_INGRESS|GRAPHQL_AUTH_MODE|METRICS_TOKEN|CORS_ORIGIN|CORS_CREDENTIALS|TRUSTED_PROXY_HOPS|LEGACY_AUTH_VALIDATION_UNTIL)
+                    echo "V3_GRAPHQL_PREFLIGHT_ENV_KEY=$key"
+                    ;;
+                esac
+              done < .env.deploy
+              python3 - .env.deploy <<'PY'
+            import sys
+            from urllib.parse import unquote, urlsplit
+
+            value = None
+            with open(sys.argv[1], encoding='utf-8') as source:
+                for line in source.read().splitlines():
+                    if line.startswith('DATABASE_URL='):
+                        value = line.split('=', 1)[1]
+                        break
+            if value is None:
+                print('V3_GRAPHQL_PREFLIGHT_DATABASE_URL=missing')
+                raise SystemExit(0)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            parsed = urlsplit(value)
+            username = unquote(parsed.username or '')
+            print(f'V3_GRAPHQL_PREFLIGHT_DATABASE_SCHEME={parsed.scheme}')
+            print(f'V3_GRAPHQL_PREFLIGHT_DATABASE_PORT={parsed.port or 0}')
+            print(f'V3_GRAPHQL_PREFLIGHT_DATABASE_HOST_PRESENT={str(bool(parsed.hostname)).lower()}')
+            print(f'V3_GRAPHQL_PREFLIGHT_DATABASE_ADMIN={str(username.startswith("postgres.")).lower()}')
+            print(
+                'V3_GRAPHQL_PREFLIGHT_DATABASE_RUNTIME='
+                + str(username.startswith('letletme_graphql_runtime.')).lower()
+            )
+            PY
+            else
+              echo "V3_GRAPHQL_PREFLIGHT_ENV=missing"
+            fi
+            echo "V3_GRAPHQL_PREFLIGHT_DATA_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/health || true)"
+            echo "V3_GRAPHQL_PREFLIGHT_GRAPHQL_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)"
+
+  v3_stop:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-stop'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Stop only GraphQL for the approved hard cut
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          V3_CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
+          V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: false
+          envs: VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_CUTOVER_APPROVAL
+          script: |
+            set -euo pipefail
+            [[ "$V3_CUTOVER_RUN_ID" =~ ^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$ ]]
+            test "$V3_CUTOVER_APPROVAL" = "APPROVE_V3_ACTIVATION $V3_CUTOVER_RUN_ID"
+            test -d "$VPS_WORKDIR/.git"
+            cd "$VPS_WORKDIR"
+            docker compose stop -t 30 graphql
+            test -z "$(docker compose ps -q graphql)"
+            graphql_http=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)
+            test "$graphql_http" = "000"
+            echo "V3_GRAPHQL_SERVICE=stopped"
+
+  v3_start:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-start'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout frozen GraphQL candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+
+      - name: Resolve exact candidate commit and image
+        env:
+          V3_IMAGE_REF_INPUT: ${{ inputs.v3_image_ref }}
+        run: |
+          set -euo pipefail
+          DEPLOY_SHA=$(git rev-parse HEAD)
+          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$V3_IMAGE_REF_INPUT" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+          echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
+          echo "IMAGE_REF=$V3_IMAGE_REF_INPUT" >> "$GITHUB_ENV"
+          echo "DEPLOY_IMAGE_DIGEST=${V3_IMAGE_REF_INPUT##*@}" >> "$GITHUB_ENV"
+
+      - name: Install runtime config, verify contract, and start GraphQL
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
+          IMAGE_REF: ${{ env.IMAGE_REF }}
+          DEPLOY_IMAGE_DIGEST: ${{ env.DEPLOY_IMAGE_DIGEST }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          V3_CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
+          V3_RELEASE_MANIFEST_BASE64: ${{ inputs.v3_release_manifest_base64 }}
+          V3_RELEASE_MANIFEST_SHA256: ${{ inputs.v3_release_manifest_sha256 }}
+          V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval }}
+          V3_GRAPHQL_DB_PASSWORD: ${{ secrets.V3_GRAPHQL_DB_PASSWORD }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: false
+          envs: DEPLOY_SHA,IMAGE_REF,DEPLOY_IMAGE_DIGEST,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_RELEASE_MANIFEST_BASE64,V3_RELEASE_MANIFEST_SHA256,V3_CUTOVER_APPROVAL,V3_GRAPHQL_DB_PASSWORD
+          script: |
+            set -euo pipefail
+            [[ "$V3_CUTOVER_RUN_ID" =~ ^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$ ]]
+            test "$V3_CUTOVER_APPROVAL" = "APPROVE_V3_ACTIVATION $V3_CUTOVER_RUN_ID"
+            [[ "$V3_GRAPHQL_DB_PASSWORD" =~ ^[A-Za-z0-9_-]{64}$ ]]
+            test -d "$VPS_WORKDIR/.git"
+            cd "$VPS_WORKDIR"
+            git diff --quiet || { echo "GraphQL VPS checkout has tracked modifications"; exit 1; }
+            git diff --cached --quiet || { echo "GraphQL VPS index has staged modifications"; exit 1; }
+            test -f .env.deploy || { echo "Missing .env.deploy"; exit 1; }
+            test -z "$(docker compose ps -q graphql)" || { echo "GraphQL must be stopped before v3 start"; exit 1; }
+            curl --fail --silent http://127.0.0.1:3000/health >/dev/null
+            LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
+            docker pull "$IMAGE_REF"
+            docker run --rm \
+              -e DEPLOY_SHA="$DEPLOY_SHA" \
+              -e DEPLOY_IMAGE_DIGEST="$DEPLOY_IMAGE_DIGEST" \
+              -e V3_CUTOVER_RUN_ID="$V3_CUTOVER_RUN_ID" \
+              -e V3_RELEASE_MANIFEST_BASE64="$V3_RELEASE_MANIFEST_BASE64" \
+              -e V3_RELEASE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256" \
+              -e V3_CUTOVER_APPROVAL="$V3_CUTOVER_APPROVAL" \
+              "$IMAGE_REF" bun scripts/v3-release-gate.ts
+            config_backup_dir="$(dirname "$VPS_WORKDIR")/v3-cutover/$V3_CUTOVER_RUN_ID/graphql"
+            install -d -m 700 "$config_backup_dir"
+            install -m 600 .env.deploy "$config_backup_dir/env.deploy.before-v3"
+            sha256sum "$config_backup_dir/env.deploy.before-v3" > "$config_backup_dir/env.deploy.before-v3.sha256"
+            git fetch --all
+            untracked_file=$(mktemp)
+            target_file=$(mktemp)
+            conflict_file=$(mktemp)
+            git ls-files --others --exclude-standard | sort -u > "$untracked_file"
+            git ls-tree -r --name-only "$DEPLOY_SHA" | sort -u > "$target_file"
+            comm -12 "$untracked_file" "$target_file" > "$conflict_file"
+            if [ -s "$conflict_file" ]; then
+              echo "Untracked production files conflict with the frozen GraphQL candidate:"
+              cat "$conflict_file"
+              exit 1
+            fi
+            git checkout --force main
+            git reset --hard "$DEPLOY_SHA"
+            env_tmp=$(mktemp "$VPS_WORKDIR/.env.deploy.v3.XXXXXX")
+            python3 - .env.deploy "$env_tmp" <<'PY'
+            import os
+            import re
+            import sys
+            from urllib.parse import quote, unquote, urlsplit, urlunsplit
+
+            source_path, target_path = sys.argv[1:]
+            with open(source_path, encoding='utf-8') as source:
+                lines = source.read().splitlines()
+
+            values = {}
+            for line in lines:
+                if not line or line.lstrip().startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                values[key] = value
+            if not values.get('DATABASE_URL'):
+                raise SystemExit('Missing DATABASE_URL')
+
+            password = os.environ.get('V3_GRAPHQL_DB_PASSWORD', '')
+            if not re.fullmatch(r'[A-Za-z0-9_-]{64}', password):
+                raise SystemExit('Invalid V3_GRAPHQL_DB_PASSWORD')
+
+            source_database_url = values['DATABASE_URL']
+            if (
+                len(source_database_url) >= 2
+                and source_database_url[0] == source_database_url[-1]
+                and source_database_url[0] in ('"', "'")
+            ):
+                source_database_url = source_database_url[1:-1]
+            parsed = urlsplit(source_database_url)
+            current_user = unquote(parsed.username or '')
+            match = re.fullmatch(
+                r'(?:postgres|letletme_graphql_runtime)\.([a-z0-9]{8,64})',
+                current_user,
+            )
+            if (
+                parsed.scheme not in ('postgres', 'postgresql')
+                or not parsed.hostname
+                or not match
+            ):
+                raise SystemExit('DATABASE_URL is not the expected Supabase pooler URL')
+            project_ref = match.group(1)
+            runtime_user = f'letletme_graphql_runtime.{project_ref}'
+            host = parsed.hostname
+            if ':' in host:
+                host = f'[{host}]'
+            if parsed.port is not None:
+                host = f'{host}:{parsed.port}'
+            runtime_url = urlunsplit(
+                (
+                    parsed.scheme,
+                    f'{quote(runtime_user, safe="")}:{quote(password, safe="")}@{host}',
+                    parsed.path,
+                    parsed.query,
+                    parsed.fragment,
+                )
+            )
+
+            output = [
+                line
+                for line in lines
+                if not ('=' in line and line.split('=', 1)[0] == 'DATABASE_URL')
+            ]
+            output.append(f'DATABASE_URL={runtime_url}')
+            descriptor = os.open(target_path, os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as target:
+                target.write('\n'.join(output) + '\n')
+            PY
+            chmod 600 "$env_tmp"
+            mv "$env_tmp" .env.deploy
+            APP_IMAGE="$IMAGE_REF" docker compose pull graphql
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run contract:check
+            APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build graphql
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                APP_IMAGE="$IMAGE_REF" docker compose logs --tail 100 graphql || true
+                exit 1
+              fi
+              sleep 2
+            done
+            curl --fail --silent http://127.0.0.1:3000/health >/dev/null
+            state_tmp=$(mktemp "$config_backup_dir/activation-state.XXXXXX")
+            {
+              printf 'run_id=%s\n' "$V3_CUTOVER_RUN_ID"
+              printf 'deploy_sha=%s\n' "$DEPLOY_SHA"
+              printf 'image_ref=%s\n' "$IMAGE_REF"
+              printf 'manifest_sha256=%s\n' "$V3_RELEASE_MANIFEST_SHA256"
+              printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            } > "$state_tmp"
+            chmod 600 "$state_tmp"
+            mv "$state_tmp" "$config_backup_dir/activation-state.env"
+            APP_IMAGE="$IMAGE_REF" docker compose ps graphql
+
+  v3_status:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-status'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Read GraphQL production status
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: false
+          envs: VPS_WORKDIR
+          script: |
+            set -euo pipefail
+            test -d "$VPS_WORKDIR/.git"
+            cd "$VPS_WORKDIR"
+            echo "V3_GRAPHQL_STATUS_COMMIT=$(git rev-parse HEAD)"
+            docker compose ps --all
+            echo "V3_GRAPHQL_STATUS_DATA_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/health || true)"
+            echo "V3_GRAPHQL_STATUS_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)"
