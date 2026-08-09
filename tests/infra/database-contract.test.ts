@@ -12,6 +12,12 @@ type ContractOptions = Readonly<{
 	publicationId?: string;
 	serverVersionNum?: number;
 	unsafeRole?: boolean;
+	sessionUser?: string;
+	runtimeCanLogin?: boolean;
+	runtimeInherit?: boolean;
+	runtimeReplication?: boolean;
+	unsafeCapability?: boolean;
+	inheritedRoles?: readonly string[];
 }>;
 
 const makeContractExecutor = (
@@ -27,19 +33,47 @@ const makeContractExecutor = (
 					rowCount: 1,
 				} as never;
 			}
-			if (text.includes("FROM pg_roles")) {
+			if (text.includes("WHERE rolname = current_user")) {
 				return {
 					rows: [
 						{
+							session_user: options.sessionUser ?? "graphql_runtime",
 							role_name: "graphql_runtime",
 							server_version_num: options.serverVersionNum ?? 150_000,
+							rolcanlogin: options.runtimeCanLogin ?? true,
 							rolsuper: options.unsafeRole ?? false,
 							rolcreatedb: false,
 							rolcreaterole: false,
+							rolinherit: options.runtimeInherit ?? true,
+							rolreplication: options.runtimeReplication ?? false,
 							rolbypassrls: false,
 						},
 					],
 					rowCount: 1,
+				} as never;
+			}
+			if (text.includes("WHERE rolname = 'letletme_graphql_reader'")) {
+				return {
+					rows: [
+						{
+							role_name: "letletme_graphql_reader",
+							rolcanlogin: options.unsafeCapability ?? false,
+							rolsuper: false,
+							rolcreatedb: false,
+							rolcreaterole: false,
+							rolinherit: false,
+							rolreplication: false,
+							rolbypassrls: false,
+						},
+					],
+					rowCount: 1,
+				} as never;
+			}
+			if (text.includes("WITH RECURSIVE inherited")) {
+				const inheritedRoles = options.inheritedRoles ?? ["letletme_graphql_reader"];
+				return {
+					rows: inheritedRoles.map((role_name) => ({ role_name })),
+					rowCount: inheritedRoles.length,
 				} as never;
 			}
 			if (text.includes("has_schema_privilege")) {
@@ -155,6 +189,25 @@ describe("GraphQL startup database contract", () => {
 		const writer = makeContractExecutor({ writableRelations: ["fpl.events"] });
 		await expect(validateDatabaseContract(writer.executor)).rejects.toThrow(
 			"can mutate Data-owned relations: fpl.events"
+		);
+	});
+
+	it("rejects assumed identities and any runtime membership beyond the GraphQL reader", async () => {
+		const assumedIdentity = makeContractExecutor({ sessionUser: "postgres" });
+		await expect(validateDatabaseContract(assumedIdentity.executor)).rejects.toThrow(
+			"must not assume another PostgreSQL role"
+		);
+
+		const extraMembership = makeContractExecutor({
+			inheritedRoles: ["letletme_graphql_reader", "pg_read_all_data"],
+		});
+		await expect(validateDatabaseContract(extraMembership.executor)).rejects.toThrow(
+			"must inherit only letletme_graphql_reader"
+		);
+
+		const unsafeCapability = makeContractExecutor({ unsafeCapability: true });
+		await expect(validateDatabaseContract(unsafeCapability.executor)).rejects.toThrow(
+			"capability role has unsafe attributes"
 		);
 	});
 });

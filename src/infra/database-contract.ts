@@ -9,14 +9,34 @@ import {
 } from "./data-publication";
 
 const DATA_SCHEMAS = ["fpl", "competition", "reporting", "ops", "understat", "bridge"] as const;
+const GRAPHQL_RUNTIME_CAPABILITY_ROLE = "letletme_graphql_reader";
 
 type RoleRow = QueryResultRow & {
+	session_user: string;
 	role_name: string;
 	server_version_num: number;
+	rolcanlogin: boolean;
 	rolsuper: boolean;
 	rolcreatedb: boolean;
 	rolcreaterole: boolean;
+	rolinherit: boolean;
+	rolreplication: boolean;
 	rolbypassrls: boolean;
+};
+
+type CapabilityRoleRow = QueryResultRow & {
+	role_name: string;
+	rolcanlogin: boolean;
+	rolsuper: boolean;
+	rolcreatedb: boolean;
+	rolcreaterole: boolean;
+	rolinherit: boolean;
+	rolreplication: boolean;
+	rolbypassrls: boolean;
+};
+
+type InheritedRoleRow = QueryResultRow & {
+	role_name: string;
 };
 
 type SchemaPrivilegeRow = QueryResultRow & {
@@ -72,11 +92,15 @@ export const validateDatabaseContract = async (
 		(
 			await database.query<RoleRow>(`
 				SELECT
+					session_user::text AS session_user,
 					current_user AS role_name,
 					current_setting('server_version_num')::integer AS server_version_num,
+					rolcanlogin,
 					rolsuper,
 					rolcreatedb,
 					rolcreaterole,
+					rolinherit,
+					rolreplication,
 					rolbypassrls
 				FROM pg_roles
 				WHERE rolname = current_user
@@ -84,14 +108,89 @@ export const validateDatabaseContract = async (
 		).rows,
 		"The PostgreSQL runtime role cannot be resolved"
 	);
+	if (role.session_user !== role.role_name) {
+		throw new DatabaseContractError(
+			"The GraphQL runtime connection must not assume another PostgreSQL role"
+		);
+	}
 	if (Math.floor(role.server_version_num / 10_000) !== 15) {
 		throw new DatabaseContractError(
 			`Data Platform v3 requires PostgreSQL 15; connected major is ${Math.floor(role.server_version_num / 10_000)}`
 		);
 	}
-	if (role.rolsuper || role.rolcreatedb || role.rolcreaterole || role.rolbypassrls) {
+	if (
+		!role.rolcanlogin ||
+		!role.rolinherit ||
+		role.rolsuper ||
+		role.rolcreatedb ||
+		role.rolcreaterole ||
+		role.rolreplication ||
+		role.rolbypassrls
+	) {
 		throw new DatabaseContractError(
-			`PostgreSQL runtime role ${role.role_name} has unsafe role attributes`
+			`PostgreSQL runtime role ${role.role_name} is not a dedicated non-admin LOGIN with INHERIT`
+		);
+	}
+
+	const capabilityRole = expectOne(
+		(
+			await database.query<CapabilityRoleRow>(`
+				SELECT
+					rolname AS role_name,
+					rolcanlogin,
+					rolsuper,
+					rolcreatedb,
+					rolcreaterole,
+					rolinherit,
+					rolreplication,
+					rolbypassrls
+				FROM pg_roles
+				WHERE rolname = '${GRAPHQL_RUNTIME_CAPABILITY_ROLE}'
+			`)
+		).rows,
+		"The GraphQL runtime capability role cannot be resolved"
+	);
+	if (
+		capabilityRole.role_name !== GRAPHQL_RUNTIME_CAPABILITY_ROLE ||
+		capabilityRole.rolcanlogin ||
+		capabilityRole.rolinherit ||
+		capabilityRole.rolsuper ||
+		capabilityRole.rolcreatedb ||
+		capabilityRole.rolcreaterole ||
+		capabilityRole.rolreplication ||
+		capabilityRole.rolbypassrls
+	) {
+		throw new DatabaseContractError("The GraphQL runtime capability role has unsafe attributes");
+	}
+
+	const inheritedRoles = (
+		await database.query<InheritedRoleRow>(`
+			SELECT inherited_roles.role_name
+			FROM (
+				WITH RECURSIVE inherited(role_oid, role_name, path) AS (
+					SELECT granted_role.oid, granted_role.rolname, ARRAY[member_role.oid, granted_role.oid]
+					FROM pg_auth_members membership
+					JOIN pg_roles member_role ON member_role.oid = membership.member
+					JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+					WHERE member_role.rolname = current_user
+
+					UNION ALL
+
+					SELECT granted_role.oid, granted_role.rolname, inherited.path || granted_role.oid
+					FROM inherited
+					JOIN pg_auth_members membership ON membership.member = inherited.role_oid
+					JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+					WHERE NOT granted_role.oid = ANY(inherited.path)
+				)
+				SELECT DISTINCT role_name
+				FROM inherited
+			) inherited_roles
+			ORDER BY inherited_roles.role_name
+		`)
+	).rows.map((row) => row.role_name);
+	if (inheritedRoles.length !== 1 || inheritedRoles[0] !== GRAPHQL_RUNTIME_CAPABILITY_ROLE) {
+		throw new DatabaseContractError(
+			`The GraphQL runtime LOGIN must inherit only ${GRAPHQL_RUNTIME_CAPABILITY_ROLE}`
 		);
 	}
 
