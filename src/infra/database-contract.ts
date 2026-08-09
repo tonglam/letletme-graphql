@@ -215,6 +215,8 @@ export const validateDatabaseContract = async (
 	const requiredRelations = [
 		...new Set([
 			...V3ReadClient.sourceRelations(),
+			// Used only when Redis has no coherent core publication.
+			"fpl.phases",
 			"competition.public_league_trends",
 			"ops.dataset_publications",
 		]),

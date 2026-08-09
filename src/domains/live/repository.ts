@@ -125,12 +125,31 @@ type DbLiveExplainBreakdown = JsonRecord & {
 	stats?: DbLiveExplainBreakdownStat[] | string | null;
 };
 
+type DbLiveScoringItem = JsonRecord & {
+	scoring_identifier?: string | null;
+	scoring_value?: number | string | null;
+	points?: number | string | null;
+};
+
+type DbLiveFixtureStat = JsonRecord & {
+	fixture_id?: number | string | null;
+	element_type?: number | string | null;
+	minutes?: number | string | null;
+	goals?: number | string | null;
+	assists?: number | string | null;
+	own_goals?: number | string | null;
+	yellow_cards?: number | string | null;
+	red_cards?: number | string | null;
+};
+
 /** Per-element GW row: `explain` JSON = fixture-level breakdown; cumulative stats use event snapshots. */
 type DbLiveExplainRow = {
 	event_id: number;
 	element_id: number;
 	explain?: DbLiveExplainBreakdown[] | string | null;
 	modified?: boolean | number | string | null;
+	scoring_items?: DbLiveScoringItem[];
+	fixture_stats?: DbLiveFixtureStat[];
 } & Record<string, unknown>;
 
 type SelectedByCacheRow = {
@@ -370,7 +389,63 @@ const mapLiveExplainBreakdown = (
 
 const mapBreakdownFromEventLiveRow = (row: DbLiveExplainRow): LiveExplainBreakdown[] => {
 	const arr = parseArrayValue<DbLiveExplainBreakdown>(row.explain ?? null);
-	return mapLiveExplainBreakdown(arr);
+	if (arr) return mapLiveExplainBreakdown(arr);
+	const scoringItems = mapScoringItemContributions(row.scoring_items ?? []);
+	const fixtureStats = row.fixture_stats ?? [];
+	return (row.fixture_stats ?? [])
+		.map((fixture) => {
+			const fixtureId = parseIntegerValue(pickRecordValue(fixture, "fixture_id", "fixtureId"));
+			if (fixtureId === null) return null;
+			return {
+				fixtureId,
+				// The normalized scoring facts are GW-grain. When there is one
+				// fixture, retain their exact point attribution; for DGWs use
+				// fixture-grain facts with only the metrics that have a
+				// deterministic FPL scoring rule at this grain.
+				stats:
+					fixtureStats.length === 1 && scoringItems.length > 0
+						? scoringItems
+						: mapFixtureStatContributions(fixture),
+			};
+		})
+		.filter((breakdown): breakdown is LiveExplainBreakdown => breakdown !== null);
+};
+
+const mapFixtureStatContributions = (row: DbLiveFixtureStat): LiveExplainStatContribution[] => {
+	const definitions = [
+		{ identifier: "minutes", value: "minutes" },
+		{ identifier: "goals_scored", value: "goals" },
+		{ identifier: "assists", value: "assists" },
+		{ identifier: "own_goals", value: "own_goals" },
+		{ identifier: "yellow_cards", value: "yellow_cards" },
+		{ identifier: "red_cards", value: "red_cards" },
+	] as const;
+	return definitions.flatMap(({ identifier, value }) => {
+		const count = parseIntegerValue(pickRecordValue(row, value));
+		if (count === null || count === 0) return [];
+		const elementType = parseIntegerValue(pickRecordValue(row, "element_type", "elementType"));
+		const points =
+			identifier === "minutes"
+				? count >= 60
+					? 2
+					: 1
+				: identifier === "goals_scored"
+					? elementType === 1
+						? count * 10
+						: elementType === 2
+							? count * 6
+							: elementType === 3
+								? count * 5
+								: count * 4
+					: identifier === "assists"
+						? count * 3
+						: identifier === "own_goals"
+							? count * -2
+							: identifier === "yellow_cards"
+								? count * -1
+								: count * -3;
+		return [{ identifier, points, value: count, pointsModification: null }];
+	});
 };
 
 const FLAT_LIVE_EXPLAIN_STATS = [
@@ -452,6 +527,22 @@ const mapFlatLiveExplainContributions = (
 	return contributions;
 };
 
+const mapScoringItemContributions = (
+	items: readonly DbLiveScoringItem[]
+): LiveExplainStatContribution[] =>
+	items.flatMap((item) => {
+		const identifier = pickRecordValue(item, "scoring_identifier", "scoringIdentifier");
+		if (typeof identifier !== "string" || identifier.trim().length === 0) return [];
+		return [
+			{
+				identifier,
+				points: parseIntegerValue(pickRecordValue(item, "points")) ?? 0,
+				value: parseNumericValue(pickRecordValue(item, "scoring_value", "scoringValue")),
+				pointsModification: null,
+			},
+		];
+	});
+
 async function fetchPlayerStatsForLiveExplains(
 	context: GraphQLContext,
 	eventId: number,
@@ -487,24 +578,44 @@ async function fetchEventLiveExplainsFromDatabase(
 	elementIds: number[]
 ): Promise<Map<number, DbLiveExplainRow>> {
 	if (elementIds.length === 0) return new Map();
-	const { data, error } = await context.data
-		.read("fpl.player_gameweek_scoring_items")
-		.select("*")
-		.eq("event_id", eventId)
-		.in("element_id", elementIds);
-	if (error) {
+	const [scoringItemsResult, fixtureStatsResult] = await Promise.all([
+		context.data
+			.read("fpl.player_gameweek_scoring_items")
+			.select("*")
+			.eq("event_id", eventId)
+			.in("element_id", elementIds),
+		context.data
+			.read("fpl.player_fixture_stats")
+			.select("*")
+			.eq("event_id", eventId)
+			.in("element_id", elementIds),
+	]);
+	if (scoringItemsResult.error || fixtureStatsResult.error) {
+		const error = scoringItemsResult.error ?? fixtureStatsResult.error;
 		context.logger.error(
 			{ err: error, eventId, elementIds },
-			"player gameweek scoring-item batch query failed"
+			"player gameweek explain facts batch query failed"
 		);
 		throw new Error("Failed to fetch event live explain", { cause: error });
 	}
 	const rows = new Map<number, DbLiveExplainRow>();
-	for (const raw of (data ?? []) as unknown[]) {
+	for (const raw of (scoringItemsResult.data ?? []) as unknown[]) {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-		const row = raw as DbLiveExplainRow;
-		const elementId = parseIntegerValue(pickRecordValue(row, "element_id"));
-		if (elementId !== null && elementIds.includes(elementId)) rows.set(elementId, row);
+		const record = raw as JsonRecord;
+		const elementId = parseIntegerValue(pickRecordValue(record, "element_id"));
+		if (elementId === null || !elementIds.includes(elementId)) continue;
+		const row = rows.get(elementId) ?? { event_id: eventId, element_id: elementId };
+		row.scoring_items = [...(row.scoring_items ?? []), record as DbLiveScoringItem];
+		rows.set(elementId, row);
+	}
+	for (const raw of (fixtureStatsResult.data ?? []) as unknown[]) {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+		const record = raw as JsonRecord;
+		const elementId = parseIntegerValue(pickRecordValue(record, "element_id"));
+		if (elementId === null || !elementIds.includes(elementId)) continue;
+		const row = rows.get(elementId) ?? { event_id: eventId, element_id: elementId };
+		row.fixture_stats = [...(row.fixture_stats ?? []), record as DbLiveFixtureStat];
+		rows.set(elementId, row);
 	}
 	return rows;
 }
@@ -930,6 +1041,9 @@ const loadColdLiveExplainBatch = async (
 		const breakdown = databaseBreakdown;
 		let contributions: LiveExplainStatContribution[] = [];
 		if (contributions.length === 0) contributions = breakdown.flatMap((entry) => entry.stats);
+		if (contributions.length === 0) {
+			contributions = mapScoringItemContributions(elRow?.scoring_items ?? []);
+		}
 		if (contributions.length === 0) contributions = mapFlatLiveExplainContributions(elRow);
 
 		const result: LiveExplain = {

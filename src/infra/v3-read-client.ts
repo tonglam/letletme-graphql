@@ -864,23 +864,23 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 				summary.cumulative_auto_sub_points AS cum_auto_sub_points,
 				RANK() OVER (
 					PARTITION BY summary.tournament_id, summary.event_id
-					ORDER BY summary.team_value DESC NULLS LAST, summary.entry_id
+					ORDER BY summary.team_value DESC NULLS LAST
 				) AS tournament_team_value_rank,
 				RANK() OVER (
 					PARTITION BY summary.tournament_id, summary.event_id
-					ORDER BY summary.cumulative_transfers ASC NULLS LAST, summary.entry_id
+					ORDER BY summary.cumulative_transfers ASC NULLS LAST
 				) AS tournament_transfers_rank,
 				RANK() OVER (
 					PARTITION BY summary.tournament_id, summary.event_id
-					ORDER BY summary.cumulative_transfer_cost ASC NULLS LAST, summary.entry_id
+					ORDER BY summary.cumulative_transfer_cost ASC NULLS LAST
 				) AS tournament_costs_rank,
 				RANK() OVER (
 					PARTITION BY summary.tournament_id, summary.event_id
-					ORDER BY summary.cumulative_bench_points DESC NULLS LAST, summary.entry_id
+					ORDER BY summary.cumulative_bench_points DESC NULLS LAST
 				) AS tournament_bench_points_rank,
 				RANK() OVER (
 					PARTITION BY summary.tournament_id, summary.event_id
-					ORDER BY summary.cumulative_auto_sub_points DESC NULLS LAST, summary.entry_id
+					ORDER BY summary.cumulative_auto_sub_points DESC NULLS LAST
 				) AS tournament_auto_sub_rank,
 				summary.cumulative_captain_points AS cum_total_captain_points
 			FROM reporting.tournament_entry_event_summaries summary

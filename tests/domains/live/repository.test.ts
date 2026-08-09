@@ -146,13 +146,19 @@ describe("liveRepository v3 explanation query cache", () => {
 					{
 						event_id: 1,
 						element_id: 1,
-						modified: false,
-						explain: [
-							{
-								fixture: 1,
-								stats: [{ identifier: "goals_scored", points: 5, value: 1 }],
-							},
-						],
+						scoring_identifier: "goals_scored",
+						scoring_value: 1,
+						points: 5,
+					},
+				],
+				"fpl.player_fixture_stats": [
+					{
+						event_id: 1,
+						element_id: 1,
+						fixture_id: 1,
+						element_type: 3,
+						minutes: 90,
+						goals: 1,
 					},
 				],
 			},
@@ -176,7 +182,11 @@ describe("liveRepository v3 explanation query cache", () => {
 			],
 		});
 		expect(second).toEqual(first);
-		expect(calls).toEqual(["fpl.player_event_snapshots", "fpl.player_gameweek_scoring_items"]);
+		expect(calls).toEqual([
+			"fpl.player_event_snapshots",
+			"fpl.player_gameweek_scoring_items",
+			"fpl.player_fixture_stats",
+		]);
 		const queryCacheWrite = redis.setCalls.find(([key]) => key.includes(":live-explain:"));
 		expect(queryCacheWrite?.[0]).toContain("llm:v3:gql:v3:core-7.live-1-8:");
 		expect(queryCacheWrite?.slice(-2)).toEqual(["EX", 10]);
@@ -195,6 +205,7 @@ describe("liveRepository v3 explanation query cache", () => {
 					selected_by_percent: String(elementId / 10),
 				})),
 				"fpl.player_gameweek_scoring_items": [],
+				"fpl.player_fixture_stats": [],
 			},
 			calls
 		);
@@ -203,7 +214,11 @@ describe("liveRepository v3 explanation query cache", () => {
 
 		expect(results).toHaveLength(15);
 		expect(results[14]).toMatchObject({ elementId: 15, selectedBy: 1.5 });
-		expect(calls).toEqual(["fpl.player_event_snapshots", "fpl.player_gameweek_scoring_items"]);
+		expect(calls).toEqual([
+			"fpl.player_event_snapshots",
+			"fpl.player_gameweek_scoring_items",
+			"fpl.player_fixture_stats",
+		]);
 	});
 
 	it("coalesces one hundred concurrent revision misses into one durable batch", async () => {
@@ -219,6 +234,7 @@ describe("liveRepository v3 explanation query cache", () => {
 					selected_by_percent: "1.0",
 				})),
 				"fpl.player_gameweek_scoring_items": [],
+				"fpl.player_fixture_stats": [],
 			},
 			calls
 		);
@@ -228,7 +244,11 @@ describe("liveRepository v3 explanation query cache", () => {
 		);
 
 		expect(results.every((result) => result !== null)).toBe(true);
-		expect(calls).toEqual(["fpl.player_event_snapshots", "fpl.player_gameweek_scoring_items"]);
+		expect(calls).toEqual([
+			"fpl.player_event_snapshots",
+			"fpl.player_gameweek_scoring_items",
+			"fpl.player_fixture_stats",
+		]);
 	});
 
 	it("returns null when neither durable explanation source has the player", async () => {

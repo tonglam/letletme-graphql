@@ -29,7 +29,7 @@ G1, G2, or G3 alone must not be deployed as the production hard cutover.
 ## GraphQL smoke tests
 
 - Startup reports the expected role, season, dataset revision, schema `v3`, and
-  plan `3.2.3`.
+  plan `3.2.5`.
 - `/health` reports Redis, PostgreSQL, and current-season metadata healthy.
 - Representative selections, player detail, live points, market, tournament,
   profile, and verified-binding journeys pass through Web.
