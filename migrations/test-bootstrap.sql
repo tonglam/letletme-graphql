@@ -50,8 +50,11 @@ CREATE TABLE IF NOT EXISTS public.league_event_results (
   league_id INT NOT NULL,
   league_type public.league_type NOT NULL,
   event_id INT NOT NULL,
-  captain_id INT
+  captain_id INT,
+  entry_id INT
 );
+ALTER TABLE public.league_event_results
+  ADD COLUMN IF NOT EXISTS entry_id INT;
 CREATE TABLE IF NOT EXISTS public.entry_event_results (
   entry_id INT NOT NULL,
   event_id INT NOT NULL,
