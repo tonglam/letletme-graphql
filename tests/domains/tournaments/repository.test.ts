@@ -731,7 +731,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		const redisState = new Map<string, string>([["Season:active", "2526"]]);
 		if (options.cacheSeed) {
 			redisState.set(
-				`${CACHE_PREFIX}tournaments:ranking-summary:{"entryId":15702,"eventId":3,"tournamentId":1}`,
+				`${CACHE_PREFIX}tournaments:ranking-summary:v2:{"entryId":15702,"eventId":3,"tournamentId":1}`,
 				options.cacheSeed
 			);
 		}

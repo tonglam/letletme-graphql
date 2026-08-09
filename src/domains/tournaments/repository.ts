@@ -1142,7 +1142,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(
 			season,
-			`tournaments:ranking-summary:${stableStringify({
+			`tournaments:ranking-summary:v2:${stableStringify({
 				tournamentId,
 				eventId,
 				entryId,
