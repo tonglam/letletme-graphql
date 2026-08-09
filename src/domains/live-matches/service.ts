@@ -417,7 +417,8 @@ const buildTeamDataMap = (
 	livePerformances: LivePerformance[],
 	playersById: Map<number, Player>,
 	teamsById: Map<number, Team>,
-	bonusByPlayerId: Map<number, number>
+	bonusByPlayerId: Map<number, number>,
+	fixtureCountByTeam: ReadonlyMap<number, number>
 ): Map<number, ElementEventResultData[]> => {
 	const teamDataMap = new Map<number, ElementEventResultData[]>();
 
@@ -434,7 +435,12 @@ const buildTeamDataMap = (
 
 		const team = teamsById.get(player.teamId);
 		const bonus = bonusByPlayerId.get(perf.playerId) ?? perf.bonus ?? 0;
-		const totalPoints = calcElementLivePoints(player.position, perf, bonus);
+		const totalPoints = calcElementLivePoints(
+			player.position,
+			perf,
+			bonus,
+			fixtureCountByTeam.get(player.teamId) ?? 1
+		);
 		const defensiveContribution: number = perf.defensiveContribution ?? 0;
 
 		const elementData: ElementEventResultData = {
@@ -628,6 +634,11 @@ export const liveMatchesService = {
 			const notStartedMatches: LiveMatchData[] = [];
 			const playingMatches: LiveMatchData[] = [];
 			const finishedMatches: LiveMatchData[] = [];
+			const fixtureCountByTeam = new Map<number, number>();
+			for (const fixture of currentFixtures) {
+				fixtureCountByTeam.set(fixture.teamHId, (fixtureCountByTeam.get(fixture.teamHId) ?? 0) + 1);
+				fixtureCountByTeam.set(fixture.teamAId, (fixtureCountByTeam.get(fixture.teamAId) ?? 0) + 1);
+			}
 			let teamDataMap = new Map<number, ElementEventResultData[]>();
 
 			const statusByFixtureId = new Map<number, MatchBucketStatus>();
@@ -671,7 +682,8 @@ export const liveMatchesService = {
 					livePerformances,
 					playersById,
 					teamsById,
-					bonusByPlayerId
+					bonusByPlayerId,
+					fixtureCountByTeam
 				);
 			}
 

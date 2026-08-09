@@ -978,7 +978,11 @@ export const playersRepository: PlayersRepository = {
 			nextOffset < sortedItems.length ? encodePickerCursor(sort, nextOffset) : null;
 		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
 
-		await context.redis.set(cacheKey, JSON.stringify(payload), "EX", PICKER_CACHE_TTL);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(payload), "EX", PICKER_CACHE_TTL);
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to cache players-for-picker result");
+		}
 		return payload;
 	},
 

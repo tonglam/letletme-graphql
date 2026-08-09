@@ -9,6 +9,7 @@ const privateCacheKey = async (context: GraphQLContext, key: string): Promise<st
 	gqlCacheKey(await getCurrentSeason(context), key);
 
 const SELECTION_STATS_PAGE_SIZE = 1000;
+const PLAYER_TEAM_PAGE_SIZE = 1000;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -173,28 +174,37 @@ async function getPlayerAndTeamMaps(
 			});
 			const validCodes = playerCodes.filter((c) => c > 0);
 			if (validCodes.length > 0) {
-				const { data, error } = await context.supabase
-					.from("fpl_player_fixture_stats")
-					.select("player_code, team_id")
-					.eq("season", season)
-					.in("player_code", validCodes)
-					.lte("event_id", eventId)
-					.order("event_id", { ascending: false })
-					.order("fixture_id", { ascending: false });
-				if (!error && data) {
-					const eventTeamMap = new Map<number, number>();
-					for (const row of data as { player_code: number; team_id: number }[]) {
-						if (!eventTeamMap.has(row.player_code)) {
-							eventTeamMap.set(row.player_code, row.team_id);
-						}
+				const eventTeamRows: { player_code: number; team_id: number }[] = [];
+				for (let offset = 0; ; offset += PLAYER_TEAM_PAGE_SIZE) {
+					const { data, error } = await context.supabase
+						.from("fpl_player_fixture_stats")
+						.select("player_code, team_id")
+						.eq("season", season)
+						.in("player_code", validCodes)
+						.lte("event_id", eventId)
+						.order("event_id", { ascending: false })
+						.order("fixture_id", { ascending: false })
+						.range(offset, offset + PLAYER_TEAM_PAGE_SIZE - 1);
+					if (error) {
+						throw new Error(error.message, { cause: error });
 					}
-					for (const [id, player] of filteredPlayerMap) {
-						const full = fullPlayerMap.get(id);
-						const code = full?.code ?? 0;
-						const eventTeamId = code > 0 ? eventTeamMap.get(code) : undefined;
-						if (eventTeamId !== undefined && eventTeamId > 0) {
-							filteredPlayerMap.set(id, { ...player, team_id: eventTeamId });
-						}
+					const page = (data as { player_code: number; team_id: number }[] | null) ?? [];
+					eventTeamRows.push(...page);
+					if (page.length < PLAYER_TEAM_PAGE_SIZE) break;
+				}
+
+				const eventTeamMap = new Map<number, number>();
+				for (const row of eventTeamRows) {
+					if (!eventTeamMap.has(row.player_code)) {
+						eventTeamMap.set(row.player_code, row.team_id);
+					}
+				}
+				for (const [id, player] of filteredPlayerMap) {
+					const full = fullPlayerMap.get(id);
+					const code = full?.code ?? 0;
+					const eventTeamId = code > 0 ? eventTeamMap.get(code) : undefined;
+					if (eventTeamId !== undefined && eventTeamId > 0) {
+						filteredPlayerMap.set(id, { ...player, team_id: eventTeamId });
 					}
 				}
 			}

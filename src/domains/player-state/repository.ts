@@ -340,7 +340,8 @@ const recentGameweeksSql = `
 			AND (
 				finished = true
 				OR is_current = true
-				OR deadline_time IS NOT NULL AND deadline_time <= now()
+				OR deadline_time_epoch IS NOT NULL
+					AND deadline_time_epoch <= EXTRACT(EPOCH FROM now())::bigint
 			)
 		ORDER BY id DESC
 		LIMIT 10

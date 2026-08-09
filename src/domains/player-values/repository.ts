@@ -671,12 +671,39 @@ export const playerValuesRepository: PlayerValuesRepository = {
 
 		const season = await getCurrentSeason(context);
 		const cacheKey = gqlCacheKey(season, buildHistoryCacheKey(args));
-		const cached = await context.redis.get(cacheKey);
+		let cached: string | null = null;
+		try {
+			cached = await context.redis.get(cacheKey);
+		} catch (error) {
+			context.logger.warn(
+				{ err: error, cacheKey },
+				"Player-value history cache unavailable; using database"
+			);
+		}
 		if (cached !== null) {
-			if (cached === NULL_SENTINEL) {
-				return [];
+			try {
+				if (cached === NULL_SENTINEL) {
+					return [];
+				}
+				const parsed = JSON.parse(cached) as unknown;
+				if (!Array.isArray(parsed)) {
+					throw new Error("Cached player-value history is not an array");
+				}
+				return parsed as PlayerValueHistoryRepositoryItem[];
+			} catch (error) {
+				context.logger.warn(
+					{ err: error, cacheKey },
+					"Malformed player-value history cache; using database"
+				);
+				try {
+					await context.redis.del(cacheKey);
+				} catch (deleteError) {
+					context.logger.warn(
+						{ err: deleteError, cacheKey },
+						"Failed to evict malformed player-value history cache"
+					);
+				}
 			}
-			return JSON.parse(cached) as PlayerValueHistoryRepositoryItem[];
 		}
 
 		try {
