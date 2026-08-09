@@ -49,7 +49,11 @@ const makeMockSupabase = (options: {
 	rpc: async (fnName: string, params: Record<string, unknown>) => {
 		options.rpcCalls?.push({ fnName, params });
 		return {
-			data: options.rpcResults?.[fnName] ?? null,
+			data:
+				options.rpcResults?.[fnName] ??
+				(fnName === "get_captain_counts_for_entries"
+					? (options.rpcResults?.get_captain_counts ?? null)
+					: null),
 			error: options.error ?? null,
 		};
 	},

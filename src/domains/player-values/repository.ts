@@ -122,18 +122,44 @@ type DbPlayerStatMetadataRow = {
 
 const compactDatePattern = /^\d{8}$/;
 
-function toPositionEnum(position: string): PositionEnum | null {
-	const normalized = position.trim().toUpperCase();
-	if (normalized === "GOALKEEPER" || normalized === "GK") {
+function normalizePositionLabel(position: unknown): string {
+	if (typeof position === "number" && Number.isInteger(position)) {
+		switch (position) {
+			case 1:
+				return "GKP";
+			case 2:
+				return "DEF";
+			case 3:
+				return "MID";
+			case 4:
+				return "FWD";
+		}
+	}
+	return typeof position === "string" ? position.trim() : "";
+}
+
+function toPositionEnum(position: unknown): PositionEnum | null {
+	const normalized = normalizePositionLabel(position).toUpperCase();
+	if (
+		normalized === "GOALKEEPER" ||
+		normalized === "GK" ||
+		normalized === "GKP" ||
+		normalized === "1"
+	) {
 		return "GOALKEEPER";
 	}
-	if (normalized === "DEFENDER" || normalized === "DEF") {
+	if (normalized === "DEFENDER" || normalized === "DEF" || normalized === "2") {
 		return "DEFENDER";
 	}
-	if (normalized === "MIDFIELDER" || normalized === "MID") {
+	if (normalized === "MIDFIELDER" || normalized === "MID" || normalized === "3") {
 		return "MIDFIELDER";
 	}
-	if (normalized === "FORWARD" || normalized === "FWD" || normalized === "STRIKER") {
+	if (
+		normalized === "FORWARD" ||
+		normalized === "FWD" ||
+		normalized === "STRIKER" ||
+		normalized === "4"
+	) {
 		return "FORWARD";
 	}
 	return null;
@@ -388,7 +414,7 @@ async function getPlayerValuesFromDatabase(
 		const team = teamById.get(teamId);
 		const transfersIn = stat?.transfers_in_event ?? 0;
 		const transfersOut = stat?.transfers_out_event ?? 0;
-		const position = String(stat?.element_type ?? player?.type ?? "");
+		const position = normalizePositionLabel(stat?.element_type ?? player?.type ?? "");
 
 		return {
 			...base,
@@ -460,7 +486,7 @@ function parsePlayerValuesFromHashData(
 			const playerName = (item.playerName as string) ?? (item.webName as string) ?? "";
 			const teamId = (item.teamId as number) ?? 0;
 			const teamName = (item.teamName as string) ?? "";
-			const position = (item.position as string) ?? (item.elementTypeName as string) ?? "";
+			const position = normalizePositionLabel(item.position ?? item.elementTypeName ?? "");
 			const price = (item.price as number) ?? (item.nowCost as number) ?? 0;
 			const value = (item.value as number) ?? 0;
 			const lastValue = (item.lastValue as number) ?? 0;

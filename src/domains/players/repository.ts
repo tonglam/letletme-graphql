@@ -136,6 +136,45 @@ const PICKER_CACHE_TTL = 300;
 const PICKER_SCAN_BATCH_SIZE = 100;
 const MARKET_OWNERSHIP_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
 
+// Keep the GraphQL cursor as an Int for existing clients. New cursors are
+// negative, versioned offsets tied to the active sort; positive cursors retain
+// the legacy player-ID threshold semantics during a rolling deployment.
+const PICKER_CURSOR_VERSION = 1;
+const PICKER_CURSOR_VERSION_STRIDE = 1_000_000;
+const PICKER_CURSOR_SORT_STRIDE = 100_000;
+const PICKER_SORT_CODES: Record<PlayerPickerSort, number> = {
+	NAME_ASC: 1,
+	TOTAL_POINTS_DESC: 2,
+	FORM_DESC: 3,
+	PRICE_ASC: 4,
+	PRICE_DESC: 5,
+	OWNERSHIP_DESC: 6,
+};
+
+const encodePickerCursor = (sort: PlayerPickerSort, offset: number): number =>
+	-(
+		PICKER_CURSOR_VERSION * PICKER_CURSOR_VERSION_STRIDE +
+		PICKER_SORT_CODES[sort] * PICKER_CURSOR_SORT_STRIDE +
+		offset +
+		1
+	);
+
+const decodePickerCursor = (
+	cursor: number | null,
+	sort: PlayerPickerSort
+): { offset: number; legacyId: number | null } => {
+	if (cursor === null || cursor === 0) return { offset: 0, legacyId: null };
+	if (cursor > 0) return { offset: 0, legacyId: cursor };
+	const encoded = -cursor - 1;
+	const version = Math.floor(encoded / PICKER_CURSOR_VERSION_STRIDE);
+	const sortCode = Math.floor((encoded % PICKER_CURSOR_VERSION_STRIDE) / PICKER_CURSOR_SORT_STRIDE);
+	const offset = encoded % PICKER_CURSOR_SORT_STRIDE;
+	if (version !== PICKER_CURSOR_VERSION || sortCode !== PICKER_SORT_CODES[sort] || offset < 0) {
+		return { offset: 0, legacyId: null };
+	}
+	return { offset, legacyId: null };
+};
+
 export type PlayerPickerTeam = {
 	id: number;
 	name: string;
@@ -746,7 +785,8 @@ export const playersRepository: PlayersRepository = {
 		sort: PlayerPickerSort = "TOTAL_POINTS_DESC"
 	): Promise<PlayersForPickerPayload> {
 		const safeLimit = clampLimit(limit);
-		const safeCursor = cursor && Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0;
+		const safeCursorValue = cursor && Number.isSafeInteger(cursor) ? cursor : null;
+		const decodedCursor = decodePickerCursor(safeCursorValue, sort);
 		const safeSearch = search?.trim().slice(0, 50) || null;
 		const safeFilter = normalizeFilter(filter);
 		const season = await getCurrentSeason(context);
@@ -754,7 +794,7 @@ export const playersRepository: PlayersRepository = {
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
 		const cacheKey = gqlCacheKey(
 			season,
-			`players:picker:v7:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${safeCursor}`
+			`players:picker:v8:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${safeCursorValue ?? 0}`
 		);
 
 		const cached = await readJsonCache(
@@ -857,7 +897,9 @@ export const playersRepository: PlayersRepository = {
 			rows.push(...pageRows);
 			items.push(
 				...(await enrichPickerItems(context, pageRows, statsContext, teams ?? undefined)).filter(
-					(item) => matchesPickerFilter(item, safeFilter)
+					(item) =>
+						(decodedCursor.legacyId === null || item.id > decodedCursor.legacyId) &&
+						matchesPickerFilter(item, safeFilter)
 				)
 			);
 			hasMoreRows = pageRows.length >= scanLimit;
@@ -895,9 +937,10 @@ export const playersRepository: PlayersRepository = {
 					return numberDesc(left.totalPoints, right.totalPoints) || byName || left.id - right.id;
 			}
 		});
-		const returnedItems = sortedItems.slice(safeCursor, safeCursor + safeLimit);
-		const nextOffset = safeCursor + returnedItems.length;
-		const nextCursor = nextOffset < sortedItems.length ? nextOffset : null;
+		const returnedItems = sortedItems.slice(decodedCursor.offset, decodedCursor.offset + safeLimit);
+		const nextOffset = decodedCursor.offset + returnedItems.length;
+		const nextCursor =
+			nextOffset < sortedItems.length ? encodePickerCursor(sort, nextOffset) : null;
 		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
 
 		await context.redis.set(cacheKey, JSON.stringify(payload), "EX", PICKER_CACHE_TTL);

@@ -244,13 +244,13 @@ async function getTournamentInfo(
 
 async function getCaptainCounts(
 	context: GraphQLContext,
-	leagueId: number,
-	leagueType: string,
-	eventId: number
+	tournamentId: number,
+	eventId: number,
+	entryIds: number[]
 ): Promise<{ captainCounts: Map<number, number>; totalEntries: number }> {
 	const cacheKey = await privateCacheKey(
 		context,
-		`tournament-selection-stats:captain-counts:${leagueId}:${leagueType}:${eventId}`
+		`tournament-selection-stats:captain-counts:${tournamentId}:${eventId}`
 	);
 	const cached = await readCachedJson(context, cacheKey);
 	if (isRecord(cached)) {
@@ -264,15 +264,14 @@ async function getCaptainCounts(
 		};
 	}
 
-	const rpcResult = await context.supabase.rpc("get_captain_counts", {
-		p_league_id: leagueId,
-		p_league_type: leagueType,
+	const rpcResult = await context.supabase.rpc("get_captain_counts_for_entries", {
 		p_event_id: eventId,
+		p_entry_ids: entryIds,
 	});
 
 	if (rpcResult.error) {
 		context.logger.error(
-			{ err: rpcResult.error, leagueId, leagueType, eventId },
+			{ err: rpcResult.error, tournamentId, eventId },
 			"Failed to fetch captain counts via RPC"
 		);
 		return { captainCounts: new Map(), totalEntries: 0 };
@@ -746,7 +745,7 @@ export const eventStatsRepository: EventStatsRepository = {
 			{ pickCounts, viceCaptainCounts },
 			{ transferInCounts, transferOutCounts },
 		] = await Promise.all([
-			getCaptainCounts(context, tournamentInfo.league_id, tournamentInfo.league_type, eventId),
+			getCaptainCounts(context, tournamentId, eventId, entryIds),
 			getPickAggregation(context, tournamentId, entryIds, eventId),
 			getTransferAggregation(context, tournamentId, entryIds, eventId),
 		]);

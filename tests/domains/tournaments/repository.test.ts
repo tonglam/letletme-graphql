@@ -1232,8 +1232,14 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 			select() {
 				return membershipQuery;
 			},
-			async eq() {
+			eq() {
 				membershipReads += 1;
+				return membershipQuery;
+			},
+			order() {
+				return membershipQuery;
+			},
+			async range() {
 				return {
 					data: [{ entry_id: 101 }, { entry_id: 202 }],
 					error: null,
@@ -1307,8 +1313,14 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 			select() {
 				return membershipQuery;
 			},
-			async eq() {
+			eq() {
 				membershipReads += 1;
+				return membershipQuery;
+			},
+			order() {
+				return membershipQuery;
+			},
+			async range() {
 				return { data: [{ entry_id: 101 }, { entry_id: 202 }], error: null };
 			},
 		};

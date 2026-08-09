@@ -142,7 +142,20 @@ export type MarketRepository = {
 };
 
 const MARKET_QUERY = `
-	WITH annotated AS (
+	WITH deduped AS (
+		SELECT snapshot.*
+		FROM (
+			SELECT
+				snapshot.*,
+				ROW_NUMBER() OVER (
+					PARTITION BY snapshot.element_id, snapshot.snapshot_date
+					ORDER BY snapshot.captured_at DESC NULLS LAST
+				) AS snapshot_day_rank
+			FROM public.player_market_snapshots snapshot
+		) snapshot
+		WHERE snapshot.snapshot_day_rank = 1
+	),
+	annotated AS (
 		SELECT
 			snapshot.*,
 			MIN(snapshot.snapshot_date) OVER () AS baseline_date,
@@ -154,15 +167,15 @@ const MARKET_QUERY = `
 			LAG(snapshot.news) OVER player_days AS previous_news,
 			LAG(snapshot.chance_of_playing_this_round) OVER player_days AS previous_chance_this_round,
 			LAG(snapshot.chance_of_playing_next_round) OVER player_days AS previous_chance_next_round
-		FROM public.player_market_snapshots snapshot
+		FROM deduped snapshot
 		WINDOW player_days AS (
 			PARTITION BY snapshot.element_id
-			ORDER BY snapshot.snapshot_date ASC
+			ORDER BY snapshot.snapshot_date ASC, snapshot.captured_at ASC
 		)
 	),
 	latest AS (
 		SELECT MAX(snapshot_date) AS latest_date
-		FROM public.player_market_snapshots
+		FROM deduped
 	)
 	SELECT annotated.*
 	FROM annotated

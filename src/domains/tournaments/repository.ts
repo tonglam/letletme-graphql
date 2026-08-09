@@ -1059,17 +1059,24 @@ export const tournamentsRepository: TournamentsRepository = {
 		context: GraphQLContext,
 		tournamentId: number
 	): Promise<number[]> {
-		const { data, error } = await context.supabase
-			.from("tournament_entries")
-			.select("entry_id")
-			.eq("tournament_id", tournamentId);
-
-		if (error) {
-			context.logger.error({ err: error, tournamentId }, "Failed to fetch tournament entry IDs");
-			throw new Error("Failed to fetch tournament entry IDs");
+		const entryIds: number[] = [];
+		for (let from = 0; ; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
+			const { data, error } = await context.supabase
+				.from("tournament_entries")
+				.select("entry_id")
+				.eq("tournament_id", tournamentId)
+				.order("entry_id", { ascending: true })
+				.range(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE - 1);
+			if (error) {
+				context.logger.error({ err: error, tournamentId }, "Failed to fetch tournament entry IDs");
+				throw new Error("Failed to fetch tournament entry IDs");
+			}
+			const page = ((data as { entry_id: number }[] | null) ?? []).map((row) => row.entry_id);
+			entryIds.push(...page);
+			if (page.length < TOURNAMENT_SUMMARY_PAGE_SIZE) break;
 		}
 
-		return ((data as { entry_id: number }[] | null) ?? []).map((row) => row.entry_id);
+		return entryIds;
 	},
 
 	async getTournamentEventResults(
@@ -1186,55 +1193,31 @@ export const tournamentsRepository: TournamentsRepository = {
 			return emptySummary;
 		}
 
-		// Read complete, paginated tournament and FPL result sets so a large
-		// tournament cannot silently lose rows at PostgREST's row cap. The
-		// snapshot intentionally does not carry overall_points, so join the
-		// public FPL league result rows by entry id below.
-		const [snapshotResponse, pointsResponse] = await Promise.all([
-			(async (): Promise<{
-				data: DbTournamentEventSnapshotRow[];
-				error: unknown | null;
-			}> => {
-				const data: DbTournamentEventSnapshotRow[] = [];
-				for (let from = 0; ; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
-					const response = await context.supabase
-						.from("mv_tournament_event_snapshot")
-						.select(
-							"tournament_id, event_id, entry_id, tournament_overall_rank, overall_rank, team_value, cum_transfers_num, cum_total_costs, cum_total_bench_points, cum_auto_sub_points, tournament_team_value_rank, tournament_transfers_rank, tournament_costs_rank, tournament_bench_points_rank, tournament_auto_sub_rank"
-						)
-						.eq("tournament_id", tournamentId)
-						.eq("event_id", eventId)
-						.order("entry_id", { ascending: true })
-						.range(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE - 1);
-					if (response.error) return { data, error: response.error };
-					const page = (response.data as DbTournamentEventSnapshotRow[] | null) ?? [];
-					data.push(...page);
-					if (page.length < TOURNAMENT_SUMMARY_PAGE_SIZE) break;
-				}
-				return { data, error: null };
-			})(),
-			(async (): Promise<{
-				data: DbLeagueEventPointsRow[];
-				error: unknown | null;
-			}> => {
-				const data: DbLeagueEventPointsRow[] = [];
-				for (let from = 0; ; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
-					const response = await context.supabase
-						.from("league_event_results")
-						.select("entry_id, overall_points")
-						.eq("league_id", tournament.leagueId)
-						.eq("league_type", tournament.leagueType)
-						.eq("event_id", eventId)
-						.order("entry_id", { ascending: true })
-						.range(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE - 1);
-					if (response.error) return { data, error: response.error };
-					const page = (response.data as DbLeagueEventPointsRow[] | null) ?? [];
-					data.push(...page);
-					if (page.length < TOURNAMENT_SUMMARY_PAGE_SIZE) break;
-				}
-				return { data, error: null };
-			})(),
-		]);
+		// Read the tournament snapshot first, then fetch FPL points only for its
+		// member entry IDs. The old league-wide scan was both expensive and
+		// capable of joining points from managers outside this tournament.
+		const snapshotResponse = await (async (): Promise<{
+			data: DbTournamentEventSnapshotRow[];
+			error: unknown | null;
+		}> => {
+			const data: DbTournamentEventSnapshotRow[] = [];
+			for (let from = 0; ; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
+				const response = await context.supabase
+					.from("mv_tournament_event_snapshot")
+					.select(
+						"tournament_id, event_id, entry_id, tournament_overall_rank, overall_rank, team_value, cum_transfers_num, cum_total_costs, cum_total_bench_points, cum_auto_sub_points, tournament_team_value_rank, tournament_transfers_rank, tournament_costs_rank, tournament_bench_points_rank, tournament_auto_sub_rank"
+					)
+					.eq("tournament_id", tournamentId)
+					.eq("event_id", eventId)
+					.order("entry_id", { ascending: true })
+					.range(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE - 1);
+				if (response.error) return { data, error: response.error };
+				const page = (response.data as DbTournamentEventSnapshotRow[] | null) ?? [];
+				data.push(...page);
+				if (page.length < TOURNAMENT_SUMMARY_PAGE_SIZE) break;
+			}
+			return { data, error: null };
+		})();
 
 		if (snapshotResponse.error) {
 			context.logger.warn(
@@ -1243,16 +1226,34 @@ export const tournamentsRepository: TournamentsRepository = {
 			);
 			return emptySummary;
 		}
-		if (pointsResponse.error) {
-			context.logger.warn(
-				{ err: pointsResponse.error, tournamentId, eventId, entryId },
-				"Failed to fetch FPL points for tournament summary — returning ranking metrics without point deltas"
-			);
-		}
-
 		const snapshotRows = snapshotResponse.data;
 		const snapshotRow = snapshotRows.find((row) => row.entry_id === entryId);
-		const pointRows = pointsResponse.error ? [] : pointsResponse.data;
+		const snapshotEntryIds = snapshotRows.map((row) => row.entry_id);
+		const pointRows: DbLeagueEventPointsRow[] = [];
+		let pointsError: unknown | null = null;
+		for (let offset = 0; offset < snapshotEntryIds.length; offset += 500) {
+			const entryIdChunk = snapshotEntryIds.slice(offset, offset + 500);
+			const response = await context.supabase
+				.from("league_event_results")
+				.select("entry_id, overall_points")
+				.eq("league_id", tournament.leagueId)
+				.eq("league_type", tournament.leagueType)
+				.eq("event_id", eventId)
+				.in("entry_id", entryIdChunk)
+				.order("entry_id", { ascending: true });
+			if (response.error) {
+				pointsError = response.error;
+				break;
+			}
+			pointRows.push(...((response.data as DbLeagueEventPointsRow[] | null) ?? []));
+		}
+		if (pointsError) {
+			context.logger.warn(
+				{ err: pointsError, tournamentId, eventId, entryId },
+				"Failed to fetch FPL points for tournament summary — returning ranking metrics without point deltas"
+			);
+			pointRows.length = 0;
+		}
 		const pointsByEntryId = new Map(
 			pointRows.map((row) => [row.entry_id, row.overall_points] as const)
 		);

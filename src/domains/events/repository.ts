@@ -152,6 +152,12 @@ const parseTopElementInfo = (raw: unknown): TopElementInfo | null => {
 	};
 };
 
+const parseNullableFiniteNumber = (raw: unknown): number | null => {
+	if (raw === null || raw === undefined || raw === "") return null;
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) ? parsed : null;
+};
+
 const parseEventFromRedisJson = (raw: string): Event | null => {
 	try {
 		const obj = JSON.parse(raw) as Record<string, unknown>;
@@ -159,28 +165,26 @@ const parseEventFromRedisJson = (raw: string): Event | null => {
 			id: Number(obj.id ?? 0),
 			name: String(obj.name ?? ""),
 			deadlineTime: normalizeDeadlineTime(obj.deadlineTime, obj.deadlineTimeEpoch),
-			averageEntryScore: obj.averageEntryScore !== null ? Number(obj.averageEntryScore) : null,
+			averageEntryScore: parseNullableFiniteNumber(obj.averageEntryScore),
 			finished: Boolean(obj.finished),
 			dataChecked: Boolean(obj.dataChecked),
-			highestScoringEntry:
-				obj.highestScoringEntry !== null ? Number(obj.highestScoringEntry) : null,
-			deadlineTimeEpoch: obj.deadlineTimeEpoch !== null ? Number(obj.deadlineTimeEpoch) : null,
-			deadlineTimeGameOffset:
-				obj.deadlineTimeGameOffset !== null ? Number(obj.deadlineTimeGameOffset) : null,
-			highestScore: obj.highestScore !== null ? Number(obj.highestScore) : null,
+			highestScoringEntry: parseNullableFiniteNumber(obj.highestScoringEntry),
+			deadlineTimeEpoch: parseNullableFiniteNumber(obj.deadlineTimeEpoch),
+			deadlineTimeGameOffset: parseNullableFiniteNumber(obj.deadlineTimeGameOffset),
+			highestScore: parseNullableFiniteNumber(obj.highestScore),
 			isPrevious: Boolean(obj.isPrevious),
 			isCurrent: Boolean(obj.isCurrent),
 			isNext: Boolean(obj.isNext),
 			cupLeagueCreate: Boolean(obj.cupLeagueCreate),
 			h2hKoMatchesCreated: Boolean(obj.h2hKoMatchesCreated),
 			chipPlays: parseChipPlays(obj.chipPlays),
-			mostSelected: obj.mostSelected !== null ? Number(obj.mostSelected) : null,
-			mostTransferredIn: obj.mostTransferredIn !== null ? Number(obj.mostTransferredIn) : null,
-			topElement: obj.topElement !== null ? Number(obj.topElement) : null,
+			mostSelected: parseNullableFiniteNumber(obj.mostSelected),
+			mostTransferredIn: parseNullableFiniteNumber(obj.mostTransferredIn),
+			topElement: parseNullableFiniteNumber(obj.topElement),
 			topElementInfo: parseTopElementInfo(obj.topElementInfo),
-			transfersMade: obj.transfersMade !== null ? Number(obj.transfersMade) : null,
-			mostCaptained: obj.mostCaptained !== null ? Number(obj.mostCaptained) : null,
-			mostViceCaptained: obj.mostViceCaptained !== null ? Number(obj.mostViceCaptained) : null,
+			transfersMade: parseNullableFiniteNumber(obj.transfersMade),
+			mostCaptained: parseNullableFiniteNumber(obj.mostCaptained),
+			mostViceCaptained: parseNullableFiniteNumber(obj.mostViceCaptained),
 		};
 	} catch {
 		return null;
@@ -204,6 +208,24 @@ const clampLimit = (limit: number): number => {
 	const safeLimit = Number.isFinite(limit) ? limit : 50;
 	return Math.min(Math.max(safeLimit, 1), 200);
 };
+
+const filterAndSliceEvents = (
+	events: Event[],
+	filter: EventsFilter | undefined,
+	offset: number,
+	limit: number
+): Event[] =>
+	events
+		.filter((event) => {
+			if (filter?.isPrevious !== undefined && event.isPrevious !== filter.isPrevious) return false;
+			if (filter?.isCurrent !== undefined && event.isCurrent !== filter.isCurrent) return false;
+			if (filter?.isNext !== undefined && event.isNext !== filter.isNext) return false;
+			if (filter?.finished !== undefined && event.finished !== filter.finished) return false;
+			if (filter?.dataChecked !== undefined && event.dataChecked !== filter.dataChecked)
+				return false;
+			return true;
+		})
+		.slice(offset, offset + limit);
 
 export type CurrentEventInfo = {
 	season: string;
@@ -402,7 +424,14 @@ export const eventsRepository: EventsRepository = {
 						context.logger.warn({ err: error, season }, "Failed to read current Event hash row");
 					}
 					const event = raw ? parseEventFromRedisJson(raw) : null;
-					if (event) return [{ ...event, isCurrent: true, isNext: false }];
+					if (event) {
+						return filterAndSliceEvents(
+							[{ ...event, isCurrent: true, isNext: false }],
+							normalizedFilter,
+							safeOffset,
+							safeLimit
+						);
+					}
 				}
 
 				if (normalizedFilter.isNext === true) {
@@ -417,7 +446,14 @@ export const eventsRepository: EventsRepository = {
 						);
 					}
 					const event = raw ? parseEventFromRedisJson(raw) : null;
-					if (event) return [{ ...event, isNext: true, isCurrent: false }];
+					if (event) {
+						return filterAndSliceEvents(
+							[{ ...event, isNext: true, isCurrent: false }],
+							normalizedFilter,
+							safeOffset,
+							safeLimit
+						);
+					}
 					return [];
 				}
 			}
@@ -444,33 +480,7 @@ export const eventsRepository: EventsRepository = {
 					.filter((e): e is Event => e !== null)
 					.sort((a, b) => a.id - b.id);
 
-				const filtered = events.filter((event) => {
-					if (
-						normalizedFilter?.isPrevious !== undefined &&
-						event.isPrevious !== normalizedFilter.isPrevious
-					)
-						return false;
-					if (
-						normalizedFilter?.isCurrent !== undefined &&
-						event.isCurrent !== normalizedFilter.isCurrent
-					)
-						return false;
-					if (normalizedFilter?.isNext !== undefined && event.isNext !== normalizedFilter.isNext)
-						return false;
-					if (
-						normalizedFilter?.finished !== undefined &&
-						event.finished !== normalizedFilter.finished
-					)
-						return false;
-					if (
-						normalizedFilter?.dataChecked !== undefined &&
-						event.dataChecked !== normalizedFilter.dataChecked
-					)
-						return false;
-					return true;
-				});
-
-				return filtered.slice(safeOffset, safeOffset + safeLimit);
+				return filterAndSliceEvents(events, normalizedFilter, safeOffset, safeLimit);
 			}
 		}
 
