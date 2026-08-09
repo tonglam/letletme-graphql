@@ -598,25 +598,45 @@ async function fetchPlayerStatsForLiveExplains(
 	elementIds: number[]
 ): Promise<{ rows: Map<number, DbLiveExplainStats>; failed: boolean }> {
 	if (elementIds.length === 0) return { rows: new Map(), failed: false };
-	const { data, error } = await context.data
-		.read("fpl.player_event_snapshots")
-		.select("*")
-		.eq("event_id", eventId)
-		.in("element_id", elementIds);
+	const [snapshotResult, gameweekStatsResult] = await Promise.all([
+		context.data
+			.read("fpl.player_event_snapshots")
+			.select("*")
+			.eq("event_id", eventId)
+			.in("element_id", elementIds),
+		context.data
+			.read("fpl.player_gameweek_stats")
+			.select("*")
+			.eq("event_id", eventId)
+			.in("element_id", elementIds),
+	]);
 
-	if (error) {
+	if (snapshotResult.error || gameweekStatsResult.error) {
+		const error = snapshotResult.error ?? gameweekStatsResult.error;
 		context.logger.warn(
 			{ err: error, eventId, elementIds },
-			"player event snapshot batch query failed for live explanations"
+			"player live stats batch query failed for live explanations"
 		);
 		return { rows: new Map(), failed: true };
 	}
 	const rows = new Map<number, DbLiveExplainStats>();
-	for (const raw of (data ?? []) as unknown[]) {
+	for (const raw of (snapshotResult.data ?? []) as unknown[]) {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
 		const row = raw as DbLiveExplainStats;
 		const elementId = parseIntegerValue(pickRecordValue(row, "element_id", "elementId"));
 		if (elementId !== null && elementIds.includes(elementId)) rows.set(elementId, row);
+	}
+	// The v3 snapshot projection intentionally excludes penalties_missed because
+	// that legacy column is not present in every accepted snapshot archive. The
+	// gameweek stats projection is the canonical nullable source for this field.
+	for (const raw of (gameweekStatsResult.data ?? []) as unknown[]) {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+		const gameweekRow = raw as DbLiveExplainStats;
+		const elementId = parseIntegerValue(pickRecordValue(gameweekRow, "element_id", "elementId"));
+		if (elementId === null || !elementIds.includes(elementId)) continue;
+		const current = rows.get(elementId) ?? { event_id: eventId, element_id: elementId };
+		current.penalties_missed = pickRecordValue(gameweekRow, "penalties_missed", "penaltiesMissed");
+		rows.set(elementId, current);
 	}
 	return { rows, failed: false };
 }

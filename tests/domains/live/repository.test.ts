@@ -142,6 +142,9 @@ describe("liveRepository v3 explanation query cache", () => {
 						selected_by_percent: "12.5",
 					},
 				],
+				"fpl.player_gameweek_stats": [
+					{ event_id: 1, element_id: 1, penalties_missed: 1 },
+				],
 				"fpl.player_gameweek_scoring_items": [
 					{
 						event_id: 1,
@@ -174,7 +177,7 @@ describe("liveRepository v3 explanation query cache", () => {
 			eventId: 1,
 			elementId: 1,
 			selectedBy: 12.5,
-			stats: { minutes: 90, goalsScored: 1, totalPoints: 10 },
+			stats: { minutes: 90, goalsScored: 1, penaltiesMissed: 1, totalPoints: 10 },
 			breakdown: [
 				{
 					fixtureId: 1,
@@ -188,6 +191,7 @@ describe("liveRepository v3 explanation query cache", () => {
 		expect(second).toEqual(first);
 		expect(calls).toEqual([
 			"fpl.player_event_snapshots",
+			"fpl.player_gameweek_stats",
 			"fpl.player_gameweek_scoring_items",
 			"fpl.player_fixture_stats",
 		]);
@@ -208,6 +212,7 @@ describe("liveRepository v3 explanation query cache", () => {
 					total_points: elementId,
 					selected_by_percent: String(elementId / 10),
 				})),
+				"fpl.player_gameweek_stats": [],
 				"fpl.player_gameweek_scoring_items": [],
 				"fpl.player_fixture_stats": [],
 			},
@@ -220,6 +225,7 @@ describe("liveRepository v3 explanation query cache", () => {
 		expect(results[14]).toMatchObject({ elementId: 15, selectedBy: 1.5 });
 		expect(calls).toEqual([
 			"fpl.player_event_snapshots",
+			"fpl.player_gameweek_stats",
 			"fpl.player_gameweek_scoring_items",
 			"fpl.player_fixture_stats",
 		]);
@@ -237,6 +243,7 @@ describe("liveRepository v3 explanation query cache", () => {
 					total_points: elementId,
 					selected_by_percent: "1.0",
 				})),
+				"fpl.player_gameweek_stats": [],
 				"fpl.player_gameweek_scoring_items": [],
 				"fpl.player_fixture_stats": [],
 			},
@@ -250,6 +257,7 @@ describe("liveRepository v3 explanation query cache", () => {
 		expect(results.every((result) => result !== null)).toBe(true);
 		expect(calls).toEqual([
 			"fpl.player_event_snapshots",
+			"fpl.player_gameweek_stats",
 			"fpl.player_gameweek_scoring_items",
 			"fpl.player_fixture_stats",
 		]);
