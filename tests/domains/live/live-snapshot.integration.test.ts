@@ -33,6 +33,19 @@ const buildLiveEventRows = (core: ReturnType<typeof buildLiveCore>) =>
 			: row
 	);
 
+const buildPartiallySettledLiveCore = () => {
+	const core = buildLiveCore();
+	const firstFixture = core.fixtures.find((fixture) => fixture.eventId === 1);
+	return {
+		...core,
+		fixtures: core.fixtures.map((fixture) =>
+			fixture.id === firstFixture?.id
+				? { ...fixture, started: true, finished: true, finishedProvisional: false }
+				: fixture
+		),
+	};
+};
+
 describe("liveSnapshot GraphQL v3 contract", () => {
 	it("exposes the validated publication metadata and event-live data", async () => {
 		const core = buildLiveCore();
@@ -114,6 +127,26 @@ describe("liveSnapshot GraphQL v3 contract", () => {
 		expect(result.data?.first).toEqual({ eventId: 1, revision: "8" });
 		expect(result.data?.second).toEqual({ eventId: 1, revision: "8" });
 		expect(liveManifestReads).toBe(1);
+	});
+
+	it("keeps a gameweek live after one fixture settles while another is pending", async () => {
+		const core = buildPartiallySettledLiveCore();
+		const live = buildLivePublication(core, 1, "2627", 8, {
+			eventLives: buildLiveEventRows(core),
+			state: "live",
+		});
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), live)
+		);
+
+		const result = await graphql({
+			schema,
+			source: `query { liveSnapshot(eventId: 1) { state } }`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveSnapshot).toEqual({ state: "LIVE" });
 	});
 
 	it("falls the whole live dataset back to one coherent PostgreSQL snapshot", async () => {

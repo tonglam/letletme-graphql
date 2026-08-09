@@ -185,6 +185,16 @@ describe("playersRepository.getPlayersForPicker", () => {
 		);
 		// The cursor is the last returned player ID (2), not an array offset.
 		expect(nextPage.items[0]).toMatchObject({ id: 10, webName: "Player 10" });
+
+		const resumedByThreshold = await playersRepository.getPlayersForPicker(
+			context,
+			1,
+			1,
+			null,
+			null,
+			"NAME_ASC"
+		);
+		expect(resumedByThreshold.items[0]).toMatchObject({ id: 2, webName: "Alpha Player" });
 	});
 });
 

@@ -201,6 +201,7 @@ const getLatestMarketOwnershipByIds = async (
 			.read("fpl.player_market_snapshots")
 			.select("element_id, selected_by_percent")
 			.eq("snapshot_date", snapshotDate)
+			.eq("captured_at", capturedAt)
 			.in("element_id", ids);
 		if (ownershipResult.error) {
 			context.logger.warn(
@@ -600,6 +601,7 @@ export const playersRepository: PlayersRepository = {
 			buildTeamMap(context),
 		]);
 		const candidates = snapshot.players
+			.filter((player) => safeCursor === null || player.id > safeCursor)
 			.filter(
 				(player) => !safeSearch || player.webName.toLowerCase().includes(safeSearch.toLowerCase())
 			)
@@ -653,12 +655,8 @@ export const playersRepository: PlayersRepository = {
 					);
 			}
 		});
-		const cursorIndex =
-			safeCursor === null ? -1 : sortedItems.findIndex((item) => item.id === safeCursor);
-		const start = cursorIndex >= 0 ? cursorIndex + 1 : 0;
-		const returnedItems = sortedItems.slice(start, start + safeLimit);
-		const nextCursor =
-			start + returnedItems.length < sortedItems.length ? (returnedItems.at(-1)?.id ?? null) : null;
+		const returnedItems = sortedItems.slice(0, safeLimit);
+		const nextCursor = sortedItems.length > safeLimit ? (returnedItems.at(-1)?.id ?? null) : null;
 		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
 
 		await writeQueryCache(

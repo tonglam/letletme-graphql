@@ -1091,15 +1091,12 @@ const validateLiveBonus = (
 
 const liveStateFromFixtures = (fixtures: readonly CoreFixtureData[]): LiveSnapshotState => {
 	if (fixtures.length === 0) return "scheduled";
-	if (
-		fixtures.some(
-			(fixture) => fixture.started === true && !fixture.finished && !fixture.finishedProvisional
-		)
-	) {
-		return "live";
-	}
-	return fixtures.every((fixture) => fixture.finished || fixture.finishedProvisional)
-		? "settled"
+	const settled = fixtures.every((fixture) => fixture.finished || fixture.finishedProvisional);
+	if (settled) return "settled";
+	return fixtures.some(
+		(fixture) => fixture.started || fixture.finished || fixture.finishedProvisional
+	)
+		? "live"
 		: "scheduled";
 };
 
