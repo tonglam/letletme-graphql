@@ -111,3 +111,54 @@ describe("entriesRepository.getEntryEventResultsByEntryIds", () => {
 		expect(warnings).toContain("Failed to cache entry event baselines");
 	});
 });
+
+describe("entriesRepository EntryInfo cache validation", () => {
+	it("falls back when a cached entry name is missing", async () => {
+		const context = {
+			redis: {
+				get: async () => "2526",
+				hget: async () =>
+					JSON.stringify({
+						entryName: "",
+						playerName: "Manager",
+						lastEventId: null,
+					}),
+			},
+			supabase: {
+				from: () => ({
+					select: () => ({
+						eq: () => ({
+							limit: async () => ({
+								data: [
+									{
+										id: 101,
+										entry_name: "Authoritative Team",
+										player_name: "Manager",
+										region: null,
+										started_event: null,
+										overall_points: null,
+										overall_rank: null,
+										bank: null,
+										team_value: null,
+										total_transfers: null,
+										last_event_id: null,
+										last_overall_points: null,
+										last_overall_rank: null,
+										last_team_value: null,
+										last_bank: null,
+									},
+								],
+								error: null,
+							}),
+						}),
+					}),
+				}),
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const result = await entriesRepository.getEntryById(context, 101);
+
+		expect(result?.entryName).toBe("Authoritative Team");
+	});
+});

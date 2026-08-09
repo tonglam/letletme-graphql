@@ -51,42 +51,90 @@ const parseNullableNumber = (value: unknown): number | null => {
 	if (value === null || value === undefined) {
 		return null;
 	}
-	const parsed = Number(value);
-	return Number.isFinite(parsed) ? parsed : null;
+	const parsed = typeof value === "string" ? Number(value.trim()) : Number(value);
+	return Number.isInteger(parsed) && Number.isFinite(parsed) ? parsed : null;
 };
 
+const parseRequiredInteger = (value: unknown): number | null => {
+	if (value === null || value === undefined) return null;
+	if (typeof value === "string" && value.trim().length === 0) return null;
+	const parsed = typeof value === "string" ? Number(value.trim()) : Number(value);
+	return Number.isInteger(parsed) && Number.isFinite(parsed) ? parsed : null;
+};
+
+const parseCachedInteger = (value: unknown, fallback = 0): number | null =>
+	value === undefined || value === null ? fallback : parseRequiredInteger(value);
+
 function parseTeam(parsed: Record<string, unknown>, hashField?: string): Team | null {
-	const id = Number(parsed.id ?? 0);
+	const id = parseRequiredInteger(parsed.id);
 	const name = String(parsed.name ?? "").trim();
 	const shortName = String(parsed.shortName ?? parsed.short_name ?? "").trim();
+	const code = parseCachedInteger(parsed.code);
+	const position = parseCachedInteger(parsed.position);
+	const points = parseCachedInteger(parsed.points);
+	const played = parseCachedInteger(parsed.played);
+	const win = parseCachedInteger(parsed.win);
+	const draw = parseCachedInteger(parsed.draw);
+	const loss = parseCachedInteger(parsed.loss);
+	const strengthOverallHome = parseCachedInteger(
+		parsed.strengthOverallHome ?? parsed.strength_overall_home
+	);
+	const strengthOverallAway = parseCachedInteger(
+		parsed.strengthOverallAway ?? parsed.strength_overall_away
+	);
+	const strengthAttackHome = parseCachedInteger(
+		parsed.strengthAttackHome ?? parsed.strength_attack_home
+	);
+	const strengthAttackAway = parseCachedInteger(
+		parsed.strengthAttackAway ?? parsed.strength_attack_away
+	);
+	const strengthDefenceHome = parseCachedInteger(
+		parsed.strengthDefenceHome ?? parsed.strength_defence_home
+	);
+	const strengthDefenceAway = parseCachedInteger(
+		parsed.strengthDefenceAway ?? parsed.strength_defence_away
+	);
 	if (
-		!Number.isInteger(id) ||
+		id === null ||
 		id <= 0 ||
 		(hashField !== undefined && hashField !== String(id)) ||
 		name.length === 0 ||
-		shortName.length === 0
+		shortName.length === 0 ||
+		code === null ||
+		position === null ||
+		points === null ||
+		played === null ||
+		win === null ||
+		draw === null ||
+		loss === null ||
+		strengthOverallHome === null ||
+		strengthOverallAway === null ||
+		strengthAttackHome === null ||
+		strengthAttackAway === null ||
+		strengthDefenceHome === null ||
+		strengthDefenceAway === null
 	) {
 		return null;
 	}
 	return {
 		id,
-		code: Number(parsed.code ?? 0),
+		code,
 		name,
 		shortName,
 		strength: parseNullableNumber(parsed.strength),
-		position: Number(parsed.position ?? 0),
-		points: Number(parsed.points ?? 0),
-		played: Number(parsed.played ?? 0),
-		win: Number(parsed.win ?? 0),
-		draw: Number(parsed.draw ?? 0),
-		loss: Number(parsed.loss ?? 0),
+		position,
+		points,
+		played,
+		win,
+		draw,
+		loss,
 		form: parsed.form ? String(parsed.form) : null,
-		strengthOverallHome: Number(parsed.strengthOverallHome ?? parsed.strength_overall_home ?? 0),
-		strengthOverallAway: Number(parsed.strengthOverallAway ?? parsed.strength_overall_away ?? 0),
-		strengthAttackHome: Number(parsed.strengthAttackHome ?? parsed.strength_attack_home ?? 0),
-		strengthAttackAway: Number(parsed.strengthAttackAway ?? parsed.strength_attack_away ?? 0),
-		strengthDefenceHome: Number(parsed.strengthDefenceHome ?? parsed.strength_defence_home ?? 0),
-		strengthDefenceAway: Number(parsed.strengthDefenceAway ?? parsed.strength_defence_away ?? 0),
+		strengthOverallHome,
+		strengthOverallAway,
+		strengthAttackHome,
+		strengthAttackAway,
+		strengthDefenceHome,
+		strengthDefenceAway,
 	};
 }
 

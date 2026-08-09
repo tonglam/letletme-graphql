@@ -109,6 +109,12 @@ const mapEntry = (row: DbEntryRow): Entry => ({
 	lastBank: row.last_bank,
 });
 
+const parseCachedName = (value: unknown): string | null => {
+	if (typeof value !== "string") return null;
+	const name = value.trim();
+	return name.length > 0 ? name : null;
+};
+
 const mapEntryEventResult = (row: DbEntryEventResultRow): EntryEventResult => ({
 	entryId: row.entry_id,
 	eventId: row.event_id,
@@ -232,6 +238,11 @@ export const entriesRepository: EntriesRepository = {
 		if (raw) {
 			try {
 				const parsed = JSON.parse(raw) as Record<string, unknown>;
+				const entryName = parseCachedName(parsed.entryName);
+				const playerName = parseCachedName(parsed.playerName);
+				if (!entryName || !playerName) {
+					throw new Error("Invalid EntryInfo names");
+				}
 				const hasValidLastEventId =
 					parsed.lastEventId === null ||
 					(typeof parsed.lastEventId === "number" && Number.isFinite(parsed.lastEventId));
@@ -246,8 +257,8 @@ export const entriesRepository: EntriesRepository = {
 				}
 				return {
 					id,
-					entryName: String(parsed.entryName ?? ""),
-					playerName: String(parsed.playerName ?? ""),
+					entryName,
+					playerName,
 					region: parsed.region ? String(parsed.region) : null,
 					startedEvent: typeof parsed.startedEvent === "number" ? parsed.startedEvent : null,
 					overallPoints: typeof parsed.overallPoints === "number" ? parsed.overallPoints : null,
@@ -339,6 +350,8 @@ export const entriesRepository: EntriesRepository = {
 				const value = values[i];
 				if (value) {
 					const parsed = JSON.parse(value) as Record<string, unknown>;
+					const entryName = parseCachedName(parsed.entryName);
+					const playerName = parseCachedName(parsed.playerName);
 					const hasValidLastEventId =
 						parsed.lastEventId === null ||
 						(typeof parsed.lastEventId === "number" && Number.isFinite(parsed.lastEventId));
@@ -346,14 +359,14 @@ export const entriesRepository: EntriesRepository = {
 						hasValidLastEventId &&
 						(typeof parsed.lastEventId !== "number" ||
 							(typeof parsed.overallPoints === "number" && Number.isFinite(parsed.overallPoints)));
-					if (!hasValidBaseline) {
+					if (!entryName || !playerName || !hasValidBaseline) {
 						missingIds.push(uniqueIds[i]);
 						continue;
 					}
 					results.set(uniqueIds[i], {
 						id: uniqueIds[i],
-						entryName: String(parsed.entryName ?? ""),
-						playerName: String(parsed.playerName ?? ""),
+						entryName,
+						playerName,
 						region: parsed.region ? String(parsed.region) : null,
 						startedEvent: typeof parsed.startedEvent === "number" ? parsed.startedEvent : null,
 						overallPoints: typeof parsed.overallPoints === "number" ? parsed.overallPoints : null,

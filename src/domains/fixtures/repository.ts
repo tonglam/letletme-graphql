@@ -99,11 +99,19 @@ const asNum = (value: unknown): number | null => {
 		return value;
 	}
 	if (typeof value === "string") {
-		const parsed = Number.parseFloat(value);
+		const trimmed = value.trim();
+		if (trimmed.length === 0) return null;
+		const parsed = Number(trimmed);
 		return Number.isFinite(parsed) ? parsed : null;
 	}
 	return null;
 };
+
+const asPositiveInt = (value: number | null): number | null =>
+	value !== null && Number.isInteger(value) && value > 0 ? value : null;
+
+const asNonNegativeInt = (value: number | null): number | null =>
+	value !== null && Number.isInteger(value) && value >= 0 ? value : null;
 
 const asBool = (value: unknown): boolean | null => {
 	if (typeof value === "boolean") {
@@ -142,7 +150,18 @@ const mapSyncJobFixture = (raw: unknown): Fixture | null => {
 	const teamH = asNum(row.teamH ?? row.team_h ?? row.teamHId ?? row.team_h_id);
 	const teamA = asNum(row.teamA ?? row.team_a ?? row.teamAId ?? row.team_a_id);
 
-	if (id === null || eventId === null || teamH === null || teamA === null) {
+	const normalizedId = asPositiveInt(id);
+	const normalizedEventId = asPositiveInt(eventId);
+	const normalizedTeamH = asPositiveInt(teamH);
+	const normalizedTeamA = asPositiveInt(teamA);
+	const normalizedCode = asNonNegativeInt(code);
+	if (
+		normalizedId === null ||
+		normalizedEventId === null ||
+		normalizedTeamH === null ||
+		normalizedTeamA === null ||
+		normalizedCode === null
+	) {
 		return null;
 	}
 
@@ -163,16 +182,16 @@ const mapSyncJobFixture = (raw: unknown): Fixture | null => {
 	}
 
 	return {
-		id: Math.trunc(id),
-		code: Math.trunc(code ?? 0),
-		eventId: Math.trunc(eventId),
+		id: normalizedId,
+		code: normalizedCode,
+		eventId: normalizedEventId,
 		finished,
 		finishedProvisional,
 		kickoffTime: toIso(kickoffTime),
 		minutes: Math.trunc(minutes),
 		started,
-		teamHId: Math.trunc(teamH),
-		teamAId: Math.trunc(teamA),
+		teamHId: normalizedTeamH,
+		teamAId: normalizedTeamA,
 		teamHScore: teamHScore !== null ? Math.trunc(teamHScore) : null,
 		teamAScore: teamAScore !== null ? Math.trunc(teamAScore) : null,
 		teamHDifficulty: teamHDifficulty !== null ? Math.trunc(teamHDifficulty) : null,

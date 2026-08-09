@@ -137,6 +137,46 @@ describe("fixturesRepository.getEventFixtures", () => {
 		expect(result[0].teamHScore).toBeNull();
 	});
 
+	it("falls back when a Redis fixture contains partially numeric fields", async () => {
+		const context = buildContext({
+			redisHashes: {
+				"Fixtures:2526:5": {
+					"100": JSON.stringify({
+						id: 100,
+						code: 12345,
+						event: "5junk",
+						teamH: 10,
+						teamA: 20,
+					}),
+				},
+			},
+			redisData: { "Season:active": "2526" },
+			supabaseData: [
+				{
+					id: 101,
+					code: 12346,
+					event_id: 5,
+					finished: false,
+					finished_provisional: false,
+					kickoff_time: null,
+					minutes: 0,
+					started: false,
+					team_h_id: 11,
+					team_a_id: 21,
+					team_h_score: null,
+					team_a_score: null,
+					team_h_difficulty: 3,
+					team_a_difficulty: 4,
+				},
+			],
+		});
+
+		const result = await fixturesRepository.getEventFixtures(context, 5);
+
+		expect(result).toHaveLength(1);
+		expect(result[0].id).toBe(101);
+	});
+
 	it("returns empty array when Redis hash is missing and DB returns empty", async () => {
 		const context = buildContext({
 			redisData: {
