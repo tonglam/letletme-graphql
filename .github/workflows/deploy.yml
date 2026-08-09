@@ -139,7 +139,9 @@ jobs:
             git reset --hard "$DEPLOY_SHA"
 
             # Write env file from secret
+            umask 077
             printf '%s' "$GRAPHQL_ENV" > .env.deploy
+            chmod 600 .env.deploy
 
             APP_IMAGE="$IMAGE_REF" docker compose pull graphql
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run contract:check

@@ -30,6 +30,16 @@ function runtimeEnvPython(): string {
 }
 
 describe("v3 GraphQL production hard-cut workflow", () => {
+	it("keeps the standard deploy environment file private", () => {
+		const deploy = job("deploy", "v3_publish_image");
+		const umask = deploy.indexOf("umask 077");
+		const write = deploy.indexOf(`printf '%s' "$GRAPHQL_ENV" > .env.deploy`);
+		const chmod = deploy.indexOf("chmod 600 .env.deploy");
+		expect(umask).toBeGreaterThan(0);
+		expect(write).toBeGreaterThan(umask);
+		expect(chmod).toBeGreaterThan(write);
+	});
+
 	it("keeps read-only inspection separate from stop and start", () => {
 		const preflight = job("v3_preflight", "v3_stop");
 		const status = job("v3_status");
