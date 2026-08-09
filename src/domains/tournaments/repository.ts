@@ -822,7 +822,11 @@ const getTournamentInfoById = async (
 
 	const tournament = await getTournamentInfoUncached(context, tournamentId);
 	if (!tournament) return null;
-	await context.redis.set(cacheKey, JSON.stringify(tournament), "EX", env.CACHE_TTL_SECONDS);
+	try {
+		await context.redis.set(cacheKey, JSON.stringify(tournament), "EX", env.CACHE_TTL_SECONDS);
+	} catch (error) {
+		context.logger.warn({ err: error, cacheKey, tournamentId }, "Failed to cache tournament info");
+	}
 	return tournament;
 };
 

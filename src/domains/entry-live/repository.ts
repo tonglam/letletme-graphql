@@ -366,7 +366,14 @@ export const entryLiveRepository: EntryLiveRepository = {
 
 		// Picks are locked after deadline — safe to cache for hours.
 		const PICKS_CACHE_TTL = 3600;
-		await context.redis.set(cacheKey, JSON.stringify(result), "EX", PICKS_CACHE_TTL);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(result), "EX", PICKS_CACHE_TTL);
+		} catch (cacheError) {
+			context.logger.warn(
+				{ err: cacheError, cacheKey, entryId, eventId },
+				"Failed to cache entry event picks"
+			);
+		}
 		return result;
 	},
 

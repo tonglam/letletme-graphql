@@ -305,6 +305,11 @@ export const createWechatApiSession = async (
 			"Legacy WeChat session issuance is disabled; authenticate through letletme-web"
 		);
 	}
+	const now = Date.now();
+	const validationDeadline = env.LEGACY_AUTH_VALIDATION_UNTIL;
+	if (!isLegacyAuthValidationOpen(now, validationDeadline)) {
+		throw new Error("Legacy WeChat session issuance window is closed");
+	}
 	const codeHash = hashApiToken(code);
 	const claimed = await getRedis().set(
 		`gql:v2:security:wechat-code:${codeHash}`,
@@ -405,7 +410,12 @@ export const createWechatApiSession = async (
 
 		const token = `llm_wx_${randomBytes(32).toString("base64url")}`;
 		const tokenHash = hashApiToken(token);
-		const expiresAt = new Date(Date.now() + env.WECHAT_API_SESSION_TTL_SECONDS * 1000);
+		const configuredExpiry = now + env.WECHAT_API_SESSION_TTL_SECONDS * 1000;
+		const expiresAtMillis = Math.min(configuredExpiry, validationDeadline as number);
+		if (!Number.isFinite(expiresAtMillis) || expiresAtMillis <= now) {
+			throw new Error("Legacy WeChat session issuance window is closed");
+		}
+		const expiresAt = new Date(expiresAtMillis);
 
 		await client.query(
 			`INSERT INTO bauth.api_sessions

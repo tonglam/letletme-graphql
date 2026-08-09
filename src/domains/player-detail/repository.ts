@@ -656,7 +656,14 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			fixtures,
 			recentGameweeks,
 		});
-		await context.redis.set(cacheKey, JSON.stringify(detail), "EX", PLAYER_DETAIL_CACHE_TTL);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(detail), "EX", PLAYER_DETAIL_CACHE_TTL);
+		} catch (error) {
+			context.logger.warn(
+				{ err: error, cacheKey, playerId, eventId },
+				"Failed to cache player detail"
+			);
+		}
 		return detail;
 	},
 };

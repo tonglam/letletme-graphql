@@ -52,6 +52,61 @@ const asNullableNumber = (value: unknown): number | null => {
 	return null;
 };
 
+const parseCachedPlayer = (raw: string, id: number): Player | null => {
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		if (!isObject(parsed)) return null;
+
+		const code = Number(parsed.code);
+		const webName =
+			typeof parsed.webName === "string"
+				? parsed.webName.trim()
+				: typeof parsed.web_name === "string"
+					? parsed.web_name.trim()
+					: "";
+		const teamId = Number(parsed.teamId ?? parsed.team_id);
+		const position = Number(parsed.type ?? parsed.position);
+		if (
+			!Number.isInteger(code) ||
+			code <= 0 ||
+			webName.length === 0 ||
+			!Number.isInteger(teamId) ||
+			teamId <= 0 ||
+			!Number.isInteger(position) ||
+			position < Position.GOALKEEPER ||
+			position > Position.FORWARD
+		) {
+			return null;
+		}
+
+		return {
+			id,
+			code,
+			webName,
+			firstName:
+				typeof parsed.firstName === "string"
+					? parsed.firstName
+					: typeof parsed.first_name === "string"
+						? parsed.first_name
+						: null,
+			secondName:
+				typeof parsed.secondName === "string"
+					? parsed.secondName
+					: typeof parsed.second_name === "string"
+						? parsed.second_name
+						: null,
+			teamId,
+			position: position as Position,
+			price: Number(parsed.price ?? 0),
+			startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
+			totalPoints: Number(parsed.totalPoints ?? parsed.total_points ?? 0),
+			selectedByPercent: asNullableNumber(parsed.selectedByPercent ?? parsed.selected_by_percent),
+		};
+	} catch {
+		return null;
+	}
+};
+
 const mapPlayer = (row: DbPlayerRow): Player => ({
 	id: row.id,
 	code: row.code,
@@ -722,34 +777,9 @@ export const playersRepository: PlayersRepository = {
 		for (let i = 0; i < uniqueIds.length; i++) {
 			const raw = values[i];
 			if (raw) {
-				try {
-					const parsed = JSON.parse(raw) as Record<string, unknown>;
-					result.push({
-						id: uniqueIds[i],
-						code: Number(parsed.code ?? 0),
-						webName: String(parsed.webName ?? parsed.web_name ?? ""),
-						firstName: parsed.firstName
-							? String(parsed.firstName)
-							: parsed.first_name
-								? String(parsed.first_name)
-								: null,
-						secondName: parsed.secondName
-							? String(parsed.secondName)
-							: parsed.second_name
-								? String(parsed.second_name)
-								: null,
-						teamId: Number(parsed.teamId ?? parsed.team_id ?? 0),
-						position: Number(parsed.type ?? parsed.position ?? 0) as Position,
-						price: Number(parsed.price ?? 0),
-						startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
-						totalPoints: Number(parsed.totalPoints ?? parsed.total_points ?? 0),
-						selectedByPercent: asNullableNumber(
-							parsed.selectedByPercent ?? parsed.selected_by_percent
-						),
-					});
-				} catch {
-					missIds.push(uniqueIds[i]);
-				}
+				const player = parseCachedPlayer(raw, uniqueIds[i]);
+				if (player) result.push(player);
+				else missIds.push(uniqueIds[i]);
 			} else {
 				missIds.push(uniqueIds[i]);
 			}
