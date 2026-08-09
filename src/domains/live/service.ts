@@ -2,6 +2,7 @@ import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import { getCurrentEventId } from "../../infra/event";
 import { calcElementLivePoints } from "../entry-live/calc-service";
+import { fixturesService } from "../fixtures/service";
 import { playersRepository } from "../players/repository";
 import { loadLiveBonusByPlayerId } from "./bonus-cache";
 import type {
@@ -36,12 +37,24 @@ export const assertValidLiveExplainBatch = (elementIds: readonly number[]): void
 const withCalculatedTotalPoints = (
 	live: LivePerformance,
 	elementType: number | undefined,
-	bonusOverride?: number
+	bonusOverride?: number,
+	fixtureCount?: number
 ): LivePerformance => ({
 	...live,
 	bonus: bonusOverride ?? live.bonus,
-	totalPoints: calcElementLivePoints(elementType ?? 0, live, bonusOverride),
+	totalPoints: calcElementLivePoints(elementType ?? 0, live, bonusOverride, fixtureCount),
 });
+
+const buildFixtureCountByTeam = (
+	fixtures: Awaited<ReturnType<typeof fixturesService.getEventFixtures>>
+): Map<number, number> => {
+	const counts = new Map<number, number>();
+	for (const fixture of fixtures) {
+		counts.set(fixture.teamHId, (counts.get(fixture.teamHId) ?? 0) + 1);
+		counts.set(fixture.teamAId, (counts.get(fixture.teamAId) ?? 0) + 1);
+	}
+	return counts;
+};
 
 const calculateTotalsForPerformances = async (
 	context: GraphQLContext,
@@ -60,19 +73,22 @@ const calculateTotalsForPerformances = async (
 				.filter((id) => Number.isFinite(id) && id > 0)
 		),
 	];
-	const [bonusByPlayerId, players] = await Promise.all([
+	const [bonusByPlayerId, players, fixtures] = await Promise.all([
 		targetEventId
 			? loadLiveBonusByPlayerId(context, targetEventId)
 			: Promise.resolve(new Map<number, number>()),
 		playersRepository.getPlayersByIds(context, playerIds),
+		targetEventId ? fixturesService.getEventFixtures(context, targetEventId) : Promise.resolve([]),
 	]);
 	const playersById = new Map(players.map((player) => [player.id, player]));
+	const fixtureCountByTeam = buildFixtureCountByTeam(fixtures);
 
 	return performances.map((performance) =>
 		withCalculatedTotalPoints(
 			performance,
 			playersById.get(performance.playerId)?.position,
-			bonusByPlayerId.get(performance.playerId)
+			bonusByPlayerId.get(performance.playerId),
+			fixtureCountByTeam.get(playersById.get(performance.playerId)?.teamId ?? 0)
 		)
 	);
 };
@@ -100,16 +116,19 @@ export const liveService = {
 		const targetEventId = eventId ?? (await getCurrentEventId(context)) ?? undefined;
 		if (!targetEventId) return null;
 		return withLiveSnapshotConsistency(context, targetEventId, async () => {
-			const [performance, player, bonusByPlayerId] = await Promise.all([
+			const [performance, player, bonusByPlayerId, fixtures] = await Promise.all([
 				liveRepository.getPlayerLive(context, playerId, targetEventId),
 				playersRepository.getPlayerById(context, playerId),
 				loadLiveBonusByPlayerId(context, targetEventId),
+				fixturesService.getEventFixtures(context, targetEventId),
 			]);
 			if (!performance) return null;
+			const fixtureCountByTeam = buildFixtureCountByTeam(fixtures);
 			return withCalculatedTotalPoints(
 				performance,
 				player?.position,
-				bonusByPlayerId.get(playerId)
+				bonusByPlayerId.get(playerId),
+				fixtureCountByTeam.get(player?.teamId ?? 0)
 			);
 		});
 	},

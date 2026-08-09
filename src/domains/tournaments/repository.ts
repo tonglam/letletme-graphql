@@ -1472,20 +1472,42 @@ export const tournamentsRepository: TournamentsRepository = {
 		const readyRows = rows.filter((row) => readyTournamentIds.has(row.tournament_id));
 		if (readyRows.length === 0) return [];
 
-		const eventIds = [...new Set(readyRows.map((r) => r.event_id))];
 		const allEntryIds = [...new Set(readyRows.flatMap((r) => [r.home_entry_id, r.away_entry_id]))];
 
-		const [nameResult, eventResultData] = await Promise.all([
-			context.supabase
-				.from("entry_infos")
-				.select("id, entry_name, player_name")
-				.in("id", allEntryIds),
-			context.supabase
-				.from("entry_event_results")
-				.select("entry_id, event_id, event_points, event_transfers_cost, event_chip, overall_rank")
-				.in("entry_id", allEntryIds)
-				.in("event_id", eventIds),
-		]);
+		const nameResultPromise = context.supabase
+			.from("entry_infos")
+			.select("id, entry_name, player_name")
+			.in("id", allEntryIds);
+		const eventResultRows: DbEntryEventResultLiteRow[] = [];
+		const entriesByEvent = new Map<number, number[]>();
+		for (const row of readyRows) {
+			const entries = entriesByEvent.get(row.event_id) ?? [];
+			entries.push(row.home_entry_id, row.away_entry_id);
+			entriesByEvent.set(row.event_id, entries);
+		}
+		const eventResultPromises = [...entriesByEvent.entries()].map(async ([eventId, entryIds]) => {
+			const uniqueEntryIds = [...new Set(entryIds)];
+			for (let from = 0; from < uniqueEntryIds.length; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
+				const entryBatch = uniqueEntryIds.slice(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE);
+				const { data, error } = await context.supabase
+					.from("entry_event_results")
+					.select(
+						"entry_id, event_id, event_points, event_transfers_cost, event_chip, overall_rank"
+					)
+					.eq("event_id", eventId)
+					.in("entry_id", entryBatch)
+					.order("entry_id", { ascending: true });
+				if (error) {
+					context.logger.error(
+						{ err: error, eventId, entryIds: entryBatch },
+						"Failed to fetch entry event results"
+					);
+					throw new Error("Failed to fetch entry H2H match results");
+				}
+				eventResultRows.push(...((data as DbEntryEventResultLiteRow[] | null) ?? []));
+			}
+		});
+		const [nameResult] = await Promise.all([nameResultPromise, ...eventResultPromises]);
 
 		const tournamentMap = new Map<number, TournamentInfo>(
 			tournamentInfos.map((tournament) => [tournament.id, tournament])
@@ -1496,10 +1518,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		);
 
 		const eventResultMap = new Map<string, DbEntryEventResultLiteRow>(
-			((eventResultData.data as DbEntryEventResultLiteRow[] | null) ?? []).map((r) => [
-				`${r.entry_id}-${r.event_id}`,
-				r,
-			])
+			eventResultRows.map((r) => [`${r.entry_id}-${r.event_id}`, r])
 		);
 
 		const results = readyRows

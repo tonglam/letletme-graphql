@@ -750,7 +750,14 @@ export const eventStatsRepository: EventStatsRepository = {
 				eventId,
 				season
 			);
-			await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
+			try {
+				await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
+			} catch (error) {
+				context.logger.warn(
+					{ err: error, key: cacheKey },
+					"Failed to write tournament selection stats cache"
+				);
+			}
 			return result;
 		}
 
@@ -800,7 +807,14 @@ export const eventStatsRepository: EventStatsRepository = {
 			season
 		);
 
-		await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(result), "EX", env.CACHE_TTL_SECONDS);
+		} catch (error) {
+			context.logger.warn(
+				{ err: error, key: cacheKey },
+				"Failed to write tournament selection stats cache"
+			);
+		}
 		return result;
 	},
 };

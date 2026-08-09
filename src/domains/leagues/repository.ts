@@ -289,7 +289,11 @@ export const leaguesRepository: LeaguesRepository = {
 			return mapLeague(row, tournament);
 		});
 
-		await context.redis.set(cacheKey, JSON.stringify(leagues), "EX", env.CACHE_TTL_SECONDS);
+		try {
+			await context.redis.set(cacheKey, JSON.stringify(leagues), "EX", env.CACHE_TTL_SECONDS);
+		} catch (error) {
+			context.logger.warn({ err: error, key: cacheKey }, "Failed to write entry leagues cache");
+		}
 		return leagues;
 	},
 
