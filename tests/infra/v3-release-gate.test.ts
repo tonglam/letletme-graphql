@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "bun:test";
 
@@ -40,6 +41,12 @@ function validInput(overrides: Partial<V3GraphqlReleaseGateInput> = {}): V3Graph
 }
 
 describe("v3 GraphQL release gate", () => {
+	it("ships the release gate in the production image", () => {
+		expect(readFileSync("Dockerfile", "utf8")).toContain(
+			"scripts/v3-release-gate.ts ./scripts/v3-release-gate.ts"
+		);
+	});
+
 	it("accepts the exact approved GraphQL SHA and image digest", () => {
 		expect(evaluateV3GraphqlReleaseGate(validInput())).toEqual({
 			runId,
