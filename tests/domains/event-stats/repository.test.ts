@@ -645,10 +645,10 @@ describe("eventStatsRepository.getTournamentSelectionStats", () => {
 	it("uses player/team lookup from Redis hash when available", async () => {
 		let playersTableHit = false;
 		const playerHashData: Record<string, string> = {
-			"1": JSON.stringify({ id: 1, webName: "Player1", teamId: 1, type: 1 }),
-			"2": JSON.stringify({ id: 2, webName: "Player2", teamId: 1, type: 2 }),
-			"3": JSON.stringify({ id: 3, webName: "Player3", teamId: 2, type: 3 }),
-			"4": JSON.stringify({ id: 4, webName: "Player4", teamId: 2, type: 4 }),
+			"1": JSON.stringify({ id: 1, code: 1001, webName: "Player1", teamId: 1, type: 1 }),
+			"2": JSON.stringify({ id: 2, code: 1002, webName: "Player2", teamId: 1, type: 2 }),
+			"3": JSON.stringify({ id: 3, code: 1003, webName: "Player3", teamId: 2, type: 3 }),
+			"4": JSON.stringify({ id: 4, code: 1004, webName: "Player4", teamId: 2, type: 4 }),
 		};
 		const context = {
 			redis: {
