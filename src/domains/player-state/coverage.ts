@@ -9,12 +9,6 @@ export type ProviderLinkRow = {
 	evidence: unknown;
 };
 
-export type PlayerStateHistoryStorage = {
-	playerHistory: string | null;
-	playerStatHistory: string | null;
-	eventLiveHistory: string | null;
-};
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -41,14 +35,6 @@ export function resolvePlayerStateMappingStatus(
 	}
 	return "UNVERIFIED";
 }
-
-export const playerStateHistoryStorageAvailable = (
-	storage: PlayerStateHistoryStorage | null
-): boolean =>
-	storage !== null &&
-	storage.playerHistory !== null &&
-	storage.playerStatHistory !== null &&
-	storage.eventLiveHistory !== null;
 
 const freshness = (timestamp: string | null): number | null =>
 	timestamp === null ? null : Math.max(0, Math.floor((Date.now() - Date.parse(timestamp)) / 1000));

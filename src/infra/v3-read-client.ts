@@ -10,9 +10,13 @@ export const V3_READ_MODELS = {
 	fixtures: "fpl.fixtures",
 	playerGameweekStats: "fpl.player_gameweek_stats",
 	playerGameweekScoringItems: "fpl.player_gameweek_scoring_items",
+	playerSeasonSummaries: "reporting.player_season_summaries",
 	playerValueChanges: "reporting.player_value_changes",
 	playerMarketSnapshots: "fpl.player_market_snapshots",
 	playerFixtureStats: "fpl.player_fixture_stats",
+	understatSeasons: "understat.seasons",
+	understatPlayerSeasons: "understat.player_seasons",
+	bridgeEntityLinks: "bridge.entity_links",
 	entries: "competition.entries",
 	entryEventResults: "competition.entry_event_results",
 	entryEventPicks: "competition.entry_event_picks",
@@ -285,6 +289,39 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			GROUP BY event_id, element_id
 		`,
 	},
+	[V3_READ_MODELS.playerSeasonSummaries]: {
+		sourceRelations: ["reporting.player_season_summaries"],
+		sql: `
+			SELECT
+				season_id,
+				element_id,
+				element_type,
+				gameweeks_available,
+				gameweeks_started,
+				minutes,
+				goals_scored,
+				assists,
+				clean_sheets,
+				goals_conceded,
+				own_goals,
+				penalties_saved,
+				penalties_missed,
+				yellow_cards,
+				red_cards,
+				saves,
+				bonus,
+				bps,
+				total_points,
+				defensive_contribution,
+				expected_goals,
+				expected_assists,
+				expected_goal_involvements,
+				expected_goals_conceded,
+				dream_team_appearances
+			FROM reporting.player_season_summaries
+			WHERE season_id = $1
+		`,
+	},
 	[V3_READ_MODELS.playerValueChanges]: {
 		sourceRelations: ["reporting.player_value_changes"],
 		sql: `
@@ -360,6 +397,78 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			FROM fpl.player_fixture_stats stats
 			JOIN fpl.seasons season ON season.season_id = stats.season_id
 			WHERE stats.season_id = $1
+		`,
+	},
+	[V3_READ_MODELS.understatSeasons]: {
+		sourceRelations: ["understat.seasons", "fpl.seasons"],
+		sql: `
+			SELECT
+				provider.season_code,
+				provider.source_year,
+				provider.league,
+				provider.state,
+				provider.first_seen_at,
+				provider.last_seen_at,
+				provider.created_at,
+				provider.updated_at
+			FROM understat.seasons provider
+			JOIN fpl.seasons season ON season.season_code = provider.season_code
+			WHERE season.season_id = $1
+		`,
+	},
+	[V3_READ_MODELS.understatPlayerSeasons]: {
+		sourceRelations: ["understat.player_seasons", "fpl.seasons"],
+		sql: `
+			SELECT
+				metrics.season_code,
+				metrics.player_id,
+				metrics.source_name,
+				metrics.source_team_title,
+				metrics.games,
+				metrics.time_minutes,
+				metrics.goals,
+				metrics.non_penalty_goals,
+				metrics.assists,
+				metrics.shots,
+				metrics.key_passes,
+				metrics.yellow_cards,
+				metrics.red_cards,
+				metrics.xg,
+				metrics.non_penalty_xg,
+				metrics.xa,
+				metrics.xg_chain,
+				metrics.xg_buildup,
+				metrics.position,
+				metrics.source_hash,
+				metrics.created_at,
+				metrics.updated_at
+			FROM understat.player_seasons metrics
+			JOIN fpl.seasons season ON season.season_code = metrics.season_code
+			WHERE season.season_id = $1
+		`,
+	},
+	[V3_READ_MODELS.bridgeEntityLinks]: {
+		sourceRelations: ["bridge.entity_links"],
+		sql: `
+			SELECT
+				link_id,
+				entity_type,
+				left_provider,
+				left_entity_id,
+				right_provider,
+				right_entity_id,
+				status,
+				method,
+				rule_version,
+				evidence,
+				first_seen_season,
+				last_seen_season,
+				reviewed_by,
+				reviewed_at,
+				created_at,
+				updated_at
+			FROM bridge.entity_links
+			WHERE $1::smallint IS NOT NULL
 		`,
 	},
 	[V3_READ_MODELS.entries]: {

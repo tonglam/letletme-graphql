@@ -118,6 +118,10 @@ describe("Data Platform v3 read client", () => {
 		expect(relations).toEqual([...relations].sort());
 		expect(new Set(relations).size).toBe(relations.length);
 		expect(relations).toContain("fpl.players");
+		expect(relations).toContain("reporting.player_season_summaries");
 		expect(relations).toContain("reporting.tournament_selection_stats");
+		expect(relations).toContain("understat.seasons");
+		expect(relations).toContain("understat.player_seasons");
+		expect(relations).toContain("bridge.entity_links");
 	});
 });
