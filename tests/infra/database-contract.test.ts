@@ -7,6 +7,8 @@ type ContractOptions = Readonly<{
 	writableRelation?: string;
 	writableRelations?: readonly string[];
 	probeFailure?: boolean;
+	authSchemaPresent?: boolean;
+	authMissingRelation?: string;
 	schemaVersion?: string;
 	planVersion?: string;
 	publicationId?: string;
@@ -87,13 +89,20 @@ const makeContractExecutor = (
 					rowCount: schemas.length,
 				} as never;
 			}
+			if (text.includes("to_regnamespace('bauth')")) {
+				return {
+					rows: [{ schema_exists: options.authSchemaPresent ?? false }],
+					rowCount: 1,
+				} as never;
+			}
 			if (text.includes("to_regclass(relation_name)")) {
 				const relations = values[0] as readonly string[];
+				const missingRelation = options.authMissingRelation ?? options.missingRelation;
 				return {
 					rows: relations.map((relation_name) => ({
 						relation_name,
-						relation_exists: relation_name !== options.missingRelation,
-						readable: relation_name !== options.missingRelation,
+						relation_exists: relation_name !== missingRelation,
+						readable: relation_name !== missingRelation,
 						writable: relation_name === options.writableRelation,
 					})),
 					rowCount: relations.length,
@@ -149,6 +158,16 @@ describe("GraphQL startup database contract", () => {
 		const { executor } = makeContractExecutor({ missingRelation: "fpl.players" });
 		await expect(validateDatabaseContract(executor)).rejects.toThrow(
 			"invalid fpl.players relation boundary"
+		);
+	});
+
+	it("requires read access to Web Mini Program auth relations when bauth exists", async () => {
+		const { executor } = makeContractExecutor({
+			authSchemaPresent: true,
+			authMissingRelation: "bauth.mini_program_session",
+		});
+		await expect(validateDatabaseContract(executor)).rejects.toThrow(
+			"invalid bauth.mini_program_session relation boundary"
 		);
 	});
 

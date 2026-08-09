@@ -55,6 +55,8 @@ describe("typed Data snapshots", () => {
 							authority_count: "1",
 							publication_id: uuid,
 							revision: "9",
+							schema_version: "v3",
+							plan_version: "3.2.5",
 							source_checked_at: "2026-08-09T01:00:00.000Z",
 							events: complete.events,
 							teams: complete.teams,
@@ -72,6 +74,32 @@ describe("typed Data snapshots", () => {
 		expect(snapshot.revision).toBe("9");
 		expect(snapshot.fixtures).toHaveLength(380);
 		expect(calls).toBe(1);
+	});
+
+	it("rejects an unsupported active core publication during PostgreSQL fallback", async () => {
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						authority_count: "1",
+						publication_id: uuid,
+						revision: "9",
+						schema_version: "v3",
+						plan_version: "3.2.4",
+						source_checked_at: "2026-08-09T01:00:00.000Z",
+						events: [],
+						teams: [],
+						players: [],
+						phases: [],
+						fixtures: [],
+					},
+				],
+			}),
+		});
+
+		await expect(getCoreDataSnapshot(context)).rejects.toThrow(
+			"Coherent PostgreSQL core publication is unavailable"
+		);
 	});
 
 	it("accepts one complete live revision and validates every identity against core", async () => {
@@ -209,6 +237,36 @@ describe("typed Data snapshots", () => {
 						event_checked_at: "2026-08-09T01:02:03.000Z",
 						event_lives: [],
 						fixtures: databaseFixtures,
+					},
+				],
+			}),
+		});
+
+		await expect(getLiveDataSnapshot(context, 1)).rejects.toThrow(
+			"Coherent PostgreSQL live publication is unavailable"
+		);
+	});
+
+	it("rejects an unsupported active live publication during PostgreSQL fallback", async () => {
+		const core = buildTestCoreData(1);
+		const live = buildLivePublication(core, 1, "2627", 8);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
+		const brokenSibling = live.manifest.items.find((item) => item.name === "liveFixtures")!;
+		redis.values.delete(brokenSibling.key);
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						authority_count: "1",
+						publication_id: uuid,
+						revision: "9",
+						schema_version: "v3",
+						plan_version: "3.2.4",
+						source_checked_at: "2026-08-09T01:00:00.000Z",
+						published_at: "2026-08-09T01:00:00.000Z",
+						event_checked_at: "2026-08-09T01:00:00.000Z",
+						event_lives: [],
+						fixtures: [],
 					},
 				],
 			}),

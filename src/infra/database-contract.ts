@@ -45,6 +45,10 @@ type SchemaPrivilegeRow = QueryResultRow & {
 	has_create: boolean;
 };
 
+type SchemaPresenceRow = QueryResultRow & {
+	schema_exists: boolean;
+};
+
 type RelationPrivilegeRow = QueryResultRow & {
 	relation_name: string;
 	relation_exists: boolean;
@@ -194,6 +198,13 @@ export const validateDatabaseContract = async (
 		);
 	}
 
+	const authSchemaExists =
+		(
+			await database.query<SchemaPresenceRow>(
+				`SELECT to_regnamespace('bauth') IS NOT NULL AS schema_exists`
+			)
+		).rows[0]?.schema_exists === true;
+	const requiredSchemas = [...DATA_SCHEMAS, ...(authSchemaExists ? ["bauth" as const] : [])].sort();
 	const schemaPrivileges = (
 		await database.query<SchemaPrivilegeRow>(
 			`SELECT
@@ -202,7 +213,7 @@ export const validateDatabaseContract = async (
 				has_schema_privilege(current_user, schema_name, 'CREATE') AS has_create
 			 FROM unnest($1::text[]) AS schema_name
 			 ORDER BY schema_name`,
-			[DATA_SCHEMAS]
+			[requiredSchemas]
 		)
 	).rows;
 	const unsafeSchema = schemaPrivileges.find((row) => !row.has_usage || row.has_create);
@@ -219,6 +230,7 @@ export const validateDatabaseContract = async (
 			"fpl.phases",
 			"competition.public_league_trends",
 			"ops.dataset_publications",
+			...(authSchemaExists ? ['bauth."user"', "bauth.mini_program_session"] : []),
 		]),
 	].sort();
 	const relationPrivileges = (

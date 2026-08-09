@@ -361,7 +361,9 @@ const mapLiveExplainStats = (statsValue: DbLiveExplainStats | null): LiveExplain
 			pickRecordValue(stats, "expected_goals_conceded", "expectedGoalsConceded")
 		),
 		totalPoints: parseIntegerValue(pickRecordValue(stats, "total_points", "totalPoints")),
-		inDreamTeam: parseBooleanValue(pickRecordValue(stats, "in_dreamteam", "inDreamTeam")),
+		inDreamTeam: parseBooleanValue(
+			pickRecordValue(stats, "in_dream_team", "in_dreamteam", "inDreamTeam")
+		),
 	};
 };
 
@@ -626,16 +628,23 @@ async function fetchPlayerStatsForLiveExplains(
 		const elementId = parseIntegerValue(pickRecordValue(row, "element_id", "elementId"));
 		if (elementId !== null && elementIds.includes(elementId)) rows.set(elementId, row);
 	}
-	// The v3 snapshot projection intentionally excludes penalties_missed because
-	// that legacy column is not present in every accepted snapshot archive. The
-	// gameweek stats projection is the canonical nullable source for this field.
+	// The v3 snapshot projection intentionally excludes some canonical gameweek
+	// fields because those legacy columns are not present in every accepted
+	// snapshot archive. The gameweek stats projection is the nullable source for
+	// these fields.
 	for (const raw of (gameweekStatsResult.data ?? []) as unknown[]) {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
 		const gameweekRow = raw as DbLiveExplainStats;
 		const elementId = parseIntegerValue(pickRecordValue(gameweekRow, "element_id", "elementId"));
 		if (elementId === null || !elementIds.includes(elementId)) continue;
 		const current = rows.get(elementId) ?? { event_id: eventId, element_id: elementId };
-		current.penalties_missed = pickRecordValue(gameweekRow, "penalties_missed", "penaltiesMissed");
+		for (const [target, keys] of [
+			["penalties_missed", ["penalties_missed", "penaltiesMissed"]],
+			["defensive_contribution", ["defensive_contribution", "defensiveContribution"]],
+			["in_dream_team", ["in_dream_team", "inDreamTeam"]],
+		] as const) {
+			current[target] = pickRecordValue(gameweekRow, ...keys);
+		}
 		rows.set(elementId, current);
 	}
 	return { rows, failed: false };

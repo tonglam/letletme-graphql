@@ -1,6 +1,11 @@
 import type { QueryResultRow } from "pg";
 import type { GraphQLContext } from "../graphql/context";
-import { readDataPublication, type DataPublication } from "./data-publication";
+import {
+	DATA_PLATFORM_PLAN_VERSION,
+	DATA_PUBLICATION_SCHEMA_VERSION,
+	readDataPublication,
+	type DataPublication,
+} from "./data-publication";
 
 export const CORE_PUBLICATION_ITEMS = [
 	"events",
@@ -773,6 +778,8 @@ type CoreFallbackRow = QueryResultRow & {
 	authority_count: string | number;
 	publication_id: string | null;
 	revision: string | number | null;
+	schema_version: string | null;
+	plan_version: string | null;
 	source_checked_at: string | Date | null;
 	events: unknown;
 	teams: unknown;
@@ -786,6 +793,8 @@ const CORE_FALLBACK_SQL = `
 		SELECT
 			publication_id::text,
 			revision::text,
+			manifest ->> 'schemaVersion' AS schema_version,
+			manifest ->> 'planVersion' AS plan_version,
 			COALESCE(manifest ->> 'sourceCheckedAt', activated_at::text) AS source_checked_at
 		FROM ops.dataset_publications
 		WHERE dataset = 'fpl:core'
@@ -797,6 +806,8 @@ const CORE_FALLBACK_SQL = `
 			count(*)::text AS authority_count,
 			min(publication_id) AS publication_id,
 			min(revision) AS revision,
+			min(schema_version) AS schema_version,
+			min(plan_version) AS plan_version,
 			min(source_checked_at) AS source_checked_at
 		FROM active_publication
 	)
@@ -850,6 +861,9 @@ const loadCoreSnapshotFromPostgres = async (context: GraphQLContext): Promise<Co
 		typeof row.publication_id !== "string" ||
 		revision === null ||
 		revision <= 0 ||
+		(integer(row.authority_count) === 1 &&
+			(row.schema_version !== DATA_PUBLICATION_SCHEMA_VERSION ||
+				row.plan_version !== DATA_PLATFORM_PLAN_VERSION)) ||
 		!sourceCheckedAt ||
 		!events ||
 		!teams ||
@@ -1147,6 +1161,8 @@ type LiveFallbackRow = QueryResultRow & {
 	authority_count: string | number;
 	publication_id: string | null;
 	revision: string | number | null;
+	schema_version: string | null;
+	plan_version: string | null;
 	source_checked_at: string | Date | null;
 	published_at: string | Date | null;
 	event_checked_at: string | Date | null;
@@ -1159,6 +1175,8 @@ const LIVE_FALLBACK_SQL = `
 		SELECT
 			publication_id::text,
 			revision::text,
+			manifest ->> 'schemaVersion' AS schema_version,
+			manifest ->> 'planVersion' AS plan_version,
 			COALESCE(manifest ->> 'sourceCheckedAt', activated_at::text) AS source_checked_at,
 			activated_at::text AS published_at
 		FROM ops.dataset_publications
@@ -1171,6 +1189,8 @@ const LIVE_FALLBACK_SQL = `
 			count(*)::text AS authority_count,
 			min(publication_id) AS publication_id,
 			min(revision) AS revision,
+			min(schema_version) AS schema_version,
+			min(plan_version) AS plan_version,
 			min(source_checked_at) AS source_checked_at,
 			min(published_at) AS published_at
 		FROM active_publication
@@ -1375,6 +1395,9 @@ const loadLiveSnapshotFromPostgres = async (
 	if (
 		!row ||
 		authorityCount > 1 ||
+		(authorityCount === 1 &&
+			(row.schema_version !== DATA_PUBLICATION_SCHEMA_VERSION ||
+				row.plan_version !== DATA_PLATFORM_PLAN_VERSION)) ||
 		!eventLives ||
 		!fixtures ||
 		eventLives.some((live) => live.eventId !== eventId) ||

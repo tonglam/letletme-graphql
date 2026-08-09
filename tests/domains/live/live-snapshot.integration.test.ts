@@ -136,6 +136,8 @@ describe("liveSnapshot GraphQL v3 contract", () => {
 							authority_count: "1",
 							publication_id: "00000000-0000-4000-8000-000000000044",
 							revision: "44",
+							schema_version: "v3",
+							plan_version: "3.2.5",
 							source_checked_at: "2026-08-09T01:02:00.000Z",
 							published_at: "2026-08-09T01:03:00.000Z",
 							event_checked_at: "2026-08-09T01:02:00.000Z",

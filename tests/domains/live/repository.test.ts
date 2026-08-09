@@ -142,7 +142,15 @@ describe("liveRepository v3 explanation query cache", () => {
 						selected_by_percent: "12.5",
 					},
 				],
-				"fpl.player_gameweek_stats": [{ event_id: 1, element_id: 1, penalties_missed: 1 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 1,
+						element_id: 1,
+						penalties_missed: 1,
+						defensive_contribution: 2,
+						in_dream_team: true,
+					},
+				],
 				"fpl.player_gameweek_scoring_items": [
 					{
 						event_id: 1,
@@ -175,7 +183,14 @@ describe("liveRepository v3 explanation query cache", () => {
 			eventId: 1,
 			elementId: 1,
 			selectedBy: 12.5,
-			stats: { minutes: 90, goalsScored: 1, penaltiesMissed: 1, totalPoints: 10 },
+			stats: {
+				minutes: 90,
+				goalsScored: 1,
+				penaltiesMissed: 1,
+				defensiveContribution: 2,
+				inDreamTeam: true,
+				totalPoints: 10,
+			},
 			breakdown: [
 				{
 					fixtureId: 1,
