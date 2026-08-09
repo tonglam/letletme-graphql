@@ -113,7 +113,7 @@ const makeContractExecutor = (
 							revision: "7",
 							manifest: {
 								schemaVersion: options.schemaVersion ?? "v3",
-								planVersion: options.planVersion ?? "3.2.4",
+								planVersion: options.planVersion ?? "3.2.5",
 							},
 						},
 					],
@@ -138,7 +138,7 @@ describe("GraphQL startup database contract", () => {
 			publicationId: "00000000-0000-4000-8000-000000000007",
 			datasetRevision: "7",
 			schemaVersion: "v3",
-			planVersion: "3.2.4",
+			planVersion: "3.2.5",
 		});
 
 		expect(queries.length).toBeGreaterThan(20);

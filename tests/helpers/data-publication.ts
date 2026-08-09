@@ -67,7 +67,7 @@ export const createTestPublication = (
 	});
 	const manifest: DataPublicationManifest = {
 		schemaVersion: "v3",
-		planVersion: "3.2.4",
+		planVersion: "3.2.5",
 		dataset: scope.dataset,
 		seasonCode: scope.seasonCode,
 		eventId: scope.eventId ?? null,

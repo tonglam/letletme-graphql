@@ -3,7 +3,7 @@
 ## Data Platform v3 G2 — 2026-08-09
 
 - Locked startup and Redis publication parsing to the exact Data contract:
-  schema `v3`, plan `3.2.4`, and an RFC-shaped publication UUID. Missing or
+  schema `v3`, plan `3.2.5`, and an RFC-shaped publication UUID. Missing or
   stale contract metadata fails closed.
 - Added strict typed readers for the immutable core and live Data publications.
   Invalid Redis revisions fall back as a whole to one coherent PostgreSQL
