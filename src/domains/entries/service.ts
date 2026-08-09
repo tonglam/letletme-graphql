@@ -494,7 +494,14 @@ export const entriesService = {
 			};
 		});
 
-		await context.redis.set(enrichedCacheKey, JSON.stringify(enriched), "EX", 3600);
+		try {
+			await context.redis.set(enrichedCacheKey, JSON.stringify(enriched), "EX", 3600);
+		} catch (cacheError) {
+			context.logger.warn(
+				{ err: cacheError, entryId },
+				"Failed to cache enriched entry transfer history"
+			);
+		}
 		return enriched;
 	},
 };

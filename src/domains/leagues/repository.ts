@@ -122,6 +122,8 @@ type DbLeagueEventResultRow = {
 	overall_rank: number;
 };
 
+const LEAGUE_EVENT_RESULTS_PAGE_SIZE = 1000;
+
 const mapLeagueType = (type: string): LeagueType => {
 	return type === "h2h" ? LeagueType.H2H : LeagueType.CLASSIC;
 };
@@ -304,24 +306,29 @@ export const leaguesRepository: LeaguesRepository = {
 		const cached = await readJsonCache(context, cacheKey, isLeagueEventResultArray);
 		if (cached) return cached;
 
-		const { data, error } = await context.supabase
-			.from("league_event_results")
-			.select(
-				"league_id, league_type, event_id, entry_id, entry_name, player_name, event_points, event_rank, overall_points, overall_rank"
-			)
-			.eq("league_id", leagueId)
-			.eq("event_id", eventId)
-			.order("event_rank", { ascending: true });
-
-		if (error) {
-			context.logger.error(
-				{ err: error, leagueId, eventId },
-				"Failed to fetch league event results"
-			);
-			throw new Error("Failed to fetch league event results");
+		const rows: DbLeagueEventResultRow[] = [];
+		for (let from = 0; ; from += LEAGUE_EVENT_RESULTS_PAGE_SIZE) {
+			const { data, error } = await context.supabase
+				.from("league_event_results")
+				.select(
+					"league_id, league_type, event_id, entry_id, entry_name, player_name, event_points, event_rank, overall_points, overall_rank"
+				)
+				.eq("league_id", leagueId)
+				.eq("event_id", eventId)
+				.order("event_rank", { ascending: true })
+				.order("entry_id", { ascending: true })
+				.range(from, from + LEAGUE_EVENT_RESULTS_PAGE_SIZE - 1);
+			if (error) {
+				context.logger.error(
+					{ err: error, leagueId, eventId },
+					"Failed to fetch league event results"
+				);
+				throw new Error("Failed to fetch league event results");
+			}
+			const page = (data as DbLeagueEventResultRow[] | null) ?? [];
+			rows.push(...page);
+			if (page.length < LEAGUE_EVENT_RESULTS_PAGE_SIZE) break;
 		}
-
-		const rows = (data as DbLeagueEventResultRow[] | null) ?? [];
 		if (rows.length === 0) {
 			return [];
 		}

@@ -94,6 +94,15 @@ describe("calcElementLivePoints", () => {
 		expect(calcOfficialTotalWithEffectiveBonus(live, 5)).toBe(14);
 		expect(calcOfficialTotalWithEffectiveBonus(live)).toBe(11);
 	});
+	it("uses official fixture totals for double-gameweek minutes", () => {
+		const live = makeLive({
+			totalPoints: 7,
+			minutes: 180,
+			goalsScored: 1,
+			bonus: 1,
+		});
+		expect(calcElementLivePoints(4, live)).toBe(7);
+	});
 	it("returns 0 for undefined live", () => {
 		expect(calcElementLivePoints(1, undefined)).toBe(0);
 	});

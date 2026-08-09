@@ -398,7 +398,12 @@ export const calcElementLivePoints = (
 	if (live && legacy !== official) {
 		metrics.livePointsShadowDifferences.labels(env.LIVE_POINTS_V2 ? "v2" : "legacy").inc();
 	}
-	return env.LIVE_POINTS_V2 ? official : legacy;
+	// Aggregate EventLive stats span every fixture in a gameweek. Once a player
+	// has logged more than 90 minutes, the gameweek is necessarily a DGW and
+	// appearance, saves, and goals-conceded scoring must use FPL's per-fixture
+	// rounding from the official total even while the V2 flag is disabled.
+	const hasMultipleFixtureMinutes = (live?.minutes ?? 0) > 90;
+	return env.LIVE_POINTS_V2 || hasMultipleFixtureMinutes ? official : legacy;
 };
 
 /**

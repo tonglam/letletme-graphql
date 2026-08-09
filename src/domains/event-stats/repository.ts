@@ -280,7 +280,7 @@ async function getCaptainCounts(
 			{ err: rpcResult.error, tournamentId, eventId },
 			"Failed to fetch captain counts via RPC"
 		);
-		return { captainCounts: new Map(), totalEntries: 0 };
+		throw new Error("Failed to fetch captain counts");
 	}
 
 	const rows = (rpcResult.data as RpcCaptainCountRow[] | null) ?? [];
@@ -345,7 +345,7 @@ async function getPickAggregation(
 			{ err: result.error, eventId, entryCount: entryIds.length },
 			"Failed to fetch pick aggregation via RPC"
 		);
-		return { pickCounts: new Map(), viceCaptainCounts: new Map() };
+		throw new Error("Failed to fetch pick aggregation");
 	}
 
 	const rows = (result.data as RpcPickAggregationRow[] | null) ?? [];
@@ -411,7 +411,7 @@ async function getTransferAggregation(
 			{ err: result.error, eventId, entryCount: entryIds.length },
 			"Failed to fetch transfer aggregation via RPC"
 		);
-		return { transferInCounts: new Map(), transferOutCounts: new Map() };
+		throw new Error("Failed to fetch transfer aggregation");
 	}
 
 	const rows = (result.data as RpcTransferAggregationRow[] | null) ?? [];

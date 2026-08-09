@@ -1345,9 +1345,10 @@ export const tournamentsRepository: TournamentsRepository = {
 			return cached as TournamentBattleGroupResult[];
 		}
 
-		const [tournamentResult, matchResult] = await Promise.all([
-			getTournamentInfoById(context, tournamentId),
-			context.supabase
+		const tournamentResult = await getTournamentInfoById(context, tournamentId);
+		const rows: DbTournamentBattleGroupResultRow[] = [];
+		for (let from = 0; ; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
+			const { data, error } = await context.supabase
 				.from("tournament_battle_group_results")
 				.select(
 					"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points"
@@ -1355,32 +1356,43 @@ export const tournamentsRepository: TournamentsRepository = {
 				.eq("tournament_id", tournamentId)
 				.eq("event_id", eventId)
 				.order("group_id", { ascending: true })
-				.order("home_entry_id", { ascending: true }),
-		]);
-
-		if (matchResult.error) {
-			context.logger.error(
-				{ err: matchResult.error, tournamentId, eventId },
-				"Failed to fetch tournament battle group results"
-			);
-			throw new Error("Failed to fetch tournament battle group results");
+				.order("home_entry_id", { ascending: true })
+				.range(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE - 1);
+			if (error) {
+				context.logger.error(
+					{ err: error, tournamentId, eventId },
+					"Failed to fetch tournament battle group results"
+				);
+				throw new Error("Failed to fetch tournament battle group results");
+			}
+			const page = (data as DbTournamentBattleGroupResultRow[] | null) ?? [];
+			rows.push(...page);
+			if (page.length < TOURNAMENT_SUMMARY_PAGE_SIZE) break;
 		}
-
-		const rows = (matchResult.data as DbTournamentBattleGroupResultRow[] | null) ?? [];
 		if (rows.length === 0 || !tournamentResult) {
 			await context.redis.set(cacheKey, JSON.stringify([]), "EX", env.CACHE_TTL_SECONDS);
 			return [];
 		}
 		const entryIds = [...new Set(rows.flatMap((row) => [row.home_entry_id, row.away_entry_id]))];
 
-		const { data: nameData } = await context.supabase
-			.from("entry_infos")
-			.select("id, entry_name, player_name")
-			.in("id", entryIds);
-
-		const entryNameMap = new Map<number, DbEntryInfoNameRow>(
-			((nameData as DbEntryInfoNameRow[] | null) ?? []).map((r) => [r.id, r])
-		);
+		const entryNameMap = new Map<number, DbEntryInfoNameRow>();
+		for (let from = 0; from < entryIds.length; from += TOURNAMENT_SUMMARY_PAGE_SIZE) {
+			const batch = entryIds.slice(from, from + TOURNAMENT_SUMMARY_PAGE_SIZE);
+			const { data: nameData, error: nameError } = await context.supabase
+				.from("entry_infos")
+				.select("id, entry_name, player_name")
+				.in("id", batch);
+			if (nameError) {
+				context.logger.error(
+					{ err: nameError, tournamentId, eventId },
+					"Failed to fetch tournament battle group participant names"
+				);
+				throw new Error("Failed to fetch tournament battle group results");
+			}
+			for (const row of (nameData as DbEntryInfoNameRow[] | null) ?? []) {
+				entryNameMap.set(row.id, row);
+			}
+		}
 
 		const results = rows.map((row) =>
 			mapTournamentBattleGroupResult(tournamentResult, row, entryNameMap)

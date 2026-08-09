@@ -403,9 +403,13 @@ const startServer = async (): Promise<void> => {
 					}
 
 					if (limits.securityOperation) {
+						// Anonymous compatibility calls share the normal public budget,
+						// but legacy WeChat issuance needs a per-caller security bucket.
+						const securityRateLimitSubject =
+							ingress.class === "anonymous" ? `compat-anonymous:${clientIp}` : rateLimitSubject;
 						const securityRateFailure = await enforceGraphQLRateLimit({
 							scope: "legacy-session",
-							subject: rateLimitSubject,
+							subject: securityRateLimitSubject,
 							limit: SECURITY_OPERATION_RATE_LIMIT,
 							cost: limits.securityOperationCount,
 							message: "Too many session attempts",

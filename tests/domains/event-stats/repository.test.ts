@@ -26,6 +26,7 @@ const makeMockSupabase = (options: {
 	rpcResults?: Record<string, unknown[]>;
 	rpcCalls?: Array<{ fnName: string; params: Record<string, unknown> }>;
 	error?: unknown;
+	rpcError?: unknown;
 }) => ({
 	from: (table: string) => {
 		const rows = options.fromData?.[table] ?? [];
@@ -55,7 +56,7 @@ const makeMockSupabase = (options: {
 				(fnName === "get_captain_counts_for_entries"
 					? (options.rpcResults?.get_captain_counts ?? null)
 					: null),
-			error: options.error ?? null,
+			error: options.rpcError ?? null,
 		};
 	},
 });
@@ -72,6 +73,7 @@ const buildContext = (options: {
 	rpcResults?: Record<string, unknown[]>;
 	rpcCalls?: Array<{ fnName: string; params: Record<string, unknown> }>;
 	supabaseError?: unknown;
+	rpcError?: unknown;
 }) =>
 	({
 		redis: makeMockRedis({ strings: options.redisStrings }),
@@ -80,6 +82,7 @@ const buildContext = (options: {
 			rpcResults: options.rpcResults,
 			rpcCalls: options.rpcCalls,
 			error: options.supabaseError,
+			rpcError: options.rpcError,
 		}),
 		logger: makeMockLogger(),
 		user: undefined,
@@ -496,6 +499,20 @@ describe("eventStatsRepository.getTournamentSelectionStats", () => {
 		expect(result?.captainSelect).toHaveLength(0);
 		expect(result?.viceCaptainSelect).toHaveLength(2);
 		expect(result?.totalEntries).toBe(5);
+	});
+
+	it("does not cache incomplete stats when an aggregation RPC fails", async () => {
+		const context = buildContext({
+			fromData: {
+				tournament_infos: [makeTournamentInfo()],
+				tournament_entries: makeEntryIds(),
+			},
+			rpcError: new Error("temporary RPC failure"),
+		});
+
+		await expect(
+			eventStatsRepository.getTournamentSelectionStats(context, TOURNAMENT_ID, EVENT_ID, LIMIT)
+		).rejects.toThrow("Failed to fetch captain counts");
 	});
 
 	it("handles empty pick and transfer data", async () => {
