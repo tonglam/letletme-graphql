@@ -8,6 +8,8 @@ type ContractOptions = Readonly<{
 	writableRelations?: readonly string[];
 	probeFailure?: boolean;
 	authSchemaPresent?: boolean;
+	authUserPresent?: boolean;
+	authMiniProgramSessionPresent?: boolean;
 	authMissingRelation?: string;
 	schemaVersion?: string;
 	planVersion?: string;
@@ -91,7 +93,14 @@ const makeContractExecutor = (
 			}
 			if (text.includes("to_regnamespace('bauth')")) {
 				return {
-					rows: [{ schema_exists: options.authSchemaPresent ?? false }],
+					rows: [
+						{
+							schema_exists: options.authSchemaPresent ?? false,
+							user_exists: options.authUserPresent ?? options.authSchemaPresent ?? false,
+							mini_program_session_exists:
+								options.authMiniProgramSessionPresent ?? options.authSchemaPresent ?? false,
+						},
+					],
 					rowCount: 1,
 				} as never;
 			}
@@ -164,6 +173,8 @@ describe("GraphQL startup database contract", () => {
 	it("requires read access to Web Mini Program auth relations when bauth exists", async () => {
 		const { executor } = makeContractExecutor({
 			authSchemaPresent: true,
+			authUserPresent: true,
+			authMiniProgramSessionPresent: true,
 			authMissingRelation: "bauth.mini_program_session",
 		});
 		await expect(validateDatabaseContract(executor)).rejects.toThrow(

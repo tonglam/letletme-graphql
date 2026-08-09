@@ -45,8 +45,10 @@ type SchemaPrivilegeRow = QueryResultRow & {
 	has_create: boolean;
 };
 
-type SchemaPresenceRow = QueryResultRow & {
+type AuthContractPresenceRow = QueryResultRow & {
 	schema_exists: boolean;
+	user_exists: boolean;
+	mini_program_session_exists: boolean;
 };
 
 type RelationPrivilegeRow = QueryResultRow & {
@@ -198,13 +200,22 @@ export const validateDatabaseContract = async (
 		);
 	}
 
-	const authSchemaExists =
-		(
-			await database.query<SchemaPresenceRow>(
-				`SELECT to_regnamespace('bauth') IS NOT NULL AS schema_exists`
-			)
-		).rows[0]?.schema_exists === true;
-	const requiredSchemas = [...DATA_SCHEMAS, ...(authSchemaExists ? ["bauth" as const] : [])].sort();
+	const authContractPresence = (
+		await database.query<AuthContractPresenceRow>(
+			`SELECT
+					to_regnamespace('bauth') IS NOT NULL AS schema_exists,
+					to_regclass('bauth."user"') IS NOT NULL AS user_exists,
+					to_regclass('bauth.mini_program_session') IS NOT NULL AS mini_program_session_exists`
+		)
+	).rows[0];
+	const authContractPresent =
+		authContractPresence?.schema_exists === true &&
+		(authContractPresence.user_exists === true ||
+			authContractPresence.mini_program_session_exists === true);
+	const requiredSchemas = [
+		...DATA_SCHEMAS,
+		...(authContractPresent ? ["bauth" as const] : []),
+	].sort();
 	const schemaPrivileges = (
 		await database.query<SchemaPrivilegeRow>(
 			`SELECT
@@ -230,7 +241,7 @@ export const validateDatabaseContract = async (
 			"fpl.phases",
 			"competition.public_league_trends",
 			"ops.dataset_publications",
-			...(authSchemaExists ? ['bauth."user"', "bauth.mini_program_session"] : []),
+			...(authContractPresent ? ['bauth."user"', "bauth.mini_program_session"] : []),
 		]),
 	].sort();
 	const relationPrivileges = (
