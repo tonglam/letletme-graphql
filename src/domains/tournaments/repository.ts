@@ -1292,13 +1292,13 @@ export const tournamentsRepository: TournamentsRepository = {
 			pointsBehindNext:
 				overallPoints !== null && abovePoints !== null
 					? Math.max(0, abovePoints - overallPoints)
-					: myRank === 1
+					: myRank === 1 && overallPoints !== null
 						? 0
 						: null,
 			pointsAheadOfPrev:
 				overallPoints !== null && belowPoints !== null
 					? Math.max(0, overallPoints - belowPoints)
-					: belowRow === undefined && myRank !== null
+					: belowRow === undefined && myRank !== null && overallPoints !== null
 						? 0
 						: null,
 			teamValue: snapshotRow?.team_value ?? null,
