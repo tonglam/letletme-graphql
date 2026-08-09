@@ -446,15 +446,29 @@ function parsePlayerValuesFromHashData(
 ): PlayerValue[] | null {
 	try {
 		let malformed = false;
-		const rawData = Object.values(hashData)
-			.map((value) => {
+		const rawData = Object.entries(hashData)
+			.map(([field, value]) => {
 				try {
 					const parsed: unknown = JSON.parse(value);
 					if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 						malformed = true;
 						return null;
 					}
-					return parsed as Record<string, unknown>;
+					const row = parsed as Record<string, unknown>;
+					const fieldId = Number(field);
+					const playerId = row.playerId ?? row.elementId;
+					if (
+						!Number.isInteger(fieldId) ||
+						fieldId <= 0 ||
+						typeof playerId !== "number" ||
+						!Number.isInteger(playerId) ||
+						playerId <= 0 ||
+						playerId !== fieldId
+					) {
+						malformed = true;
+						return null;
+					}
+					return row;
 				} catch (error) {
 					malformed = true;
 					context.logger.warn({ err: error, cacheKey }, "Failed to parse hash value");
@@ -596,11 +610,15 @@ export const playerValuesRepository: PlayerValuesRepository = {
 									await writePrivatePlayerValuesCache(context, privateCacheKey, normalized);
 									return normalized;
 								}
+								metrics.cacheRepositoryEvents.labels("player_values", "malformed").inc();
+							} else {
+								metrics.cacheRepositoryEvents.labels("player_values", "malformed").inc();
 							}
-							metrics.cacheRepositoryEvents.labels("player_values", "malformed").inc();
 						}
-						await context.redis.set(missingCacheKey, "1", "EX", MISSING_CACHE_TTL_SECONDS);
-						return [];
+						if (!malformedLegacyRow) {
+							await context.redis.set(missingCacheKey, "1", "EX", MISSING_CACHE_TTL_SECONDS);
+							return [];
+						}
 					}
 				} catch (err) {
 					context.logger.warn(
