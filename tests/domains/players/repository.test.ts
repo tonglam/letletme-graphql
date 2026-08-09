@@ -173,7 +173,7 @@ describe("playersRepository.getPlayersForPicker", () => {
 
 		expect(result.items).toHaveLength(1);
 		expect(result.items[0]).toMatchObject({ id: 2, webName: "Alpha Player" });
-		expect(result.nextCursor).toBe(2);
+		expect(result.nextCursor).toBeLessThan(0);
 
 		const nextPage = await playersRepository.getPlayersForPicker(
 			context,
@@ -183,8 +183,36 @@ describe("playersRepository.getPlayersForPicker", () => {
 			null,
 			"NAME_ASC"
 		);
-		// The cursor is the last returned player ID (2), not an array offset.
+		// The cursor encodes the next offset and selected sort; it must not depend on player IDs.
 		expect(nextPage.items[0]).toMatchObject({ id: 10, webName: "Player 10" });
+		const thirdPage = await playersRepository.getPlayersForPicker(
+			context,
+			1,
+			nextPage.nextCursor,
+			null,
+			null,
+			"NAME_ASC"
+		);
+		expect(thirdPage.items[0]).toMatchObject({ id: 100, webName: "Player 100" });
+		let cursorForPage = thirdPage.nextCursor;
+		let foundZed = thirdPage.items.some((item) => item.id === 1);
+		for (
+			let pageNumber = 0;
+			pageNumber < 20 && cursorForPage !== null && !foundZed;
+			pageNumber += 1
+		) {
+			const page = await playersRepository.getPlayersForPicker(
+				context,
+				200,
+				cursorForPage,
+				null,
+				null,
+				"NAME_ASC"
+			);
+			foundZed = page.items.some((item) => item.id === 1 && item.webName === "Zed Player");
+			cursorForPage = page.nextCursor;
+		}
+		expect(foundZed).toBe(true);
 
 		const resumedByThreshold = await playersRepository.getPlayersForPicker(
 			context,

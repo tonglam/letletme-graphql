@@ -139,7 +139,14 @@ export type MarketRepository = {
 };
 
 const MARKET_QUERY = `
-	WITH annotated AS (
+	WITH daily AS (
+		SELECT DISTINCT ON (snapshot.element_id, snapshot.snapshot_date)
+			snapshot.*
+		FROM fpl.player_market_snapshots snapshot
+		WHERE snapshot.season_id = $1
+		ORDER BY snapshot.element_id, snapshot.snapshot_date, snapshot.captured_at DESC
+	),
+	annotated AS (
 		SELECT
 			snapshot.*,
 			MIN(snapshot.snapshot_date) OVER () AS baseline_date,
@@ -151,8 +158,7 @@ const MARKET_QUERY = `
 			LAG(snapshot.news) OVER player_days AS previous_news,
 			LAG(snapshot.chance_of_playing_this_round) OVER player_days AS previous_chance_this_round,
 			LAG(snapshot.chance_of_playing_next_round) OVER player_days AS previous_chance_next_round
-		FROM fpl.player_market_snapshots snapshot
-		WHERE snapshot.season_id = $1
+		FROM daily snapshot
 		WINDOW player_days AS (
 			PARTITION BY snapshot.element_id
 			ORDER BY snapshot.snapshot_date ASC
@@ -160,8 +166,7 @@ const MARKET_QUERY = `
 	),
 	latest AS (
 		SELECT MAX(snapshot_date) AS latest_date
-		FROM fpl.player_market_snapshots
-		WHERE season_id = $1
+		FROM daily
 	)
 	SELECT annotated.*
 	FROM annotated
@@ -287,7 +292,13 @@ export function buildMarketPulse(
 ): MarketPulse {
 	if (rawRows.length === 0) return emptyMarketPulse(requestedDays);
 
-	const rows = rawRows.map(normalizeRow);
+	const rowsByPlayerDay = new Map<string, NormalizedMarketRow>();
+	for (const row of rawRows.map(normalizeRow)) {
+		const key = `${row.element_id}:${row.snapshotDate}`;
+		const existing = rowsByPlayerDay.get(key);
+		if (!existing || row.capturedAt > existing.capturedAt) rowsByPlayerDay.set(key, row);
+	}
+	const rows = Array.from(rowsByPlayerDay.values());
 	const observedDates = Array.from(new Set(rows.map((row) => row.snapshotDate))).sort();
 	const firstDate = observedDates[0];
 	const latestDate = observedDates.at(-1)!;
@@ -529,7 +540,7 @@ const isMarketPulse = (value: unknown): value is MarketPulse =>
 
 export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRepository => ({
 	async getMarketPulse(context: GraphQLContext, requestedDays: number): Promise<MarketPulse> {
-		const cacheKey = gqlCacheKey(context, `market-pulse:v3:${requestedDays}`);
+		const cacheKey = gqlCacheKey(context, `market-pulse:v4:${requestedDays}`);
 
 		try {
 			const cached = await context.redis.get(cacheKey);

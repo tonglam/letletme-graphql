@@ -67,7 +67,7 @@ const buildContext = (cacheSeed?: string) => {
 		data: {},
 	} as never;
 	if (cacheSeed !== undefined) {
-		strings.set(gqlCacheKey(context, "market-pulse:v3:14"), cacheSeed);
+		strings.set(gqlCacheKey(context, "market-pulse:v4:14"), cacheSeed);
 	}
 	return {
 		strings,
@@ -253,6 +253,26 @@ describe("buildMarketPulse", () => {
 		expect(pulse.availabilityUpdates.some((item) => item.player.playerId === 22)).toBe(false);
 		expect(pulse.availabilityHighlights).toHaveLength(5);
 		expect(pulse.availabilityHighlights[0]?.player.playerId).toBe(22);
+	});
+
+	it("uses only the latest capture when a player has multiple snapshots on one day", () => {
+		const pulse = buildMarketPulse(
+			[
+				baseRow("2026-08-03", 1, {
+					captured_at: "2026-08-03T01:00:00.000Z",
+					selected_by_percent: 80,
+				}),
+				baseRow("2026-08-03", 1, {
+					captured_at: "2026-08-03T02:00:00.000Z",
+					selected_by_percent: 12,
+				}),
+			],
+			14
+		);
+
+		expect(pulse.mostSelected).toHaveLength(1);
+		expect(pulse.mostSelected[0]).toMatchObject({ playerId: 1, selectedByPercent: 12 });
+		expect(pulse.coverage.capturedAt).toBe("2026-08-03T02:00:00.000Z");
 	});
 });
 

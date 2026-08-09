@@ -48,6 +48,7 @@ const CATALOG_SQL = `
 		catalog.updated_at,
 		snapshot.event_id AS latest_event_id,
 		snapshot.total_entries,
+		snapshot.selection_revision,
 		MAX(catalog.updated_at) OVER () AS catalog_revision,
 		MAX(tournament.updated_at) OVER () AS snapshot_revision,
 		(

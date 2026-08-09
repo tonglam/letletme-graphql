@@ -136,6 +136,45 @@ export type PlayersForPickerPayload = {
 export type PlayerPickerSort =
 	"NAME_ASC" | "TOTAL_POINTS_DESC" | "FORM_DESC" | "PRICE_ASC" | "PRICE_DESC" | "OWNERSHIP_DESC";
 
+// Keep the GraphQL cursor as an Int for existing clients. New cursors are
+// negative, versioned offsets tied to the active sort; positive cursors retain
+// the legacy player-ID threshold semantics during a rolling deployment.
+const PICKER_CURSOR_VERSION = 1;
+const PICKER_CURSOR_VERSION_STRIDE = 1_000_000;
+const PICKER_CURSOR_SORT_STRIDE = 100_000;
+const PICKER_SORT_CODES: Record<PlayerPickerSort, number> = {
+	NAME_ASC: 1,
+	TOTAL_POINTS_DESC: 2,
+	FORM_DESC: 3,
+	PRICE_ASC: 4,
+	PRICE_DESC: 5,
+	OWNERSHIP_DESC: 6,
+};
+
+const encodePickerCursor = (sort: PlayerPickerSort, offset: number): number =>
+	-(
+		PICKER_CURSOR_VERSION * PICKER_CURSOR_VERSION_STRIDE +
+		PICKER_SORT_CODES[sort] * PICKER_CURSOR_SORT_STRIDE +
+		offset +
+		1
+	);
+
+const decodePickerCursor = (
+	cursor: number | null,
+	sort: PlayerPickerSort
+): { offset: number; legacyId: number | null } => {
+	if (cursor === null || cursor === 0) return { offset: 0, legacyId: null };
+	if (cursor > 0) return { offset: 0, legacyId: cursor };
+	const encoded = -cursor - 1;
+	const version = Math.floor(encoded / PICKER_CURSOR_VERSION_STRIDE);
+	const sortCode = Math.floor((encoded % PICKER_CURSOR_VERSION_STRIDE) / PICKER_CURSOR_SORT_STRIDE);
+	const offset = encoded % PICKER_CURSOR_SORT_STRIDE;
+	if (version !== PICKER_CURSOR_VERSION || sortCode !== PICKER_SORT_CODES[sort] || offset < 0) {
+		return { offset: 0, legacyId: null };
+	}
+	return { offset, legacyId: null };
+};
+
 type DbPickerRow = QueryResultRow & {
 	id: number;
 	web_name: string;
@@ -563,16 +602,17 @@ export const playersRepository: PlayersRepository = {
 		sort: PlayerPickerSort = "TOTAL_POINTS_DESC"
 	): Promise<PlayersForPickerPayload> {
 		const safeLimit = clampLimit(limit);
-		// Cursor values are public player IDs, not offsets. Keeping this keyset-style
-		// contract lets clients carry a cursor across rolling deployments safely.
-		const safeCursor = cursor && Number.isSafeInteger(cursor) && cursor > 0 ? cursor : null;
+		const decodedCursor = decodePickerCursor(
+			cursor && Number.isSafeInteger(cursor) ? cursor : null,
+			sort
+		);
 		const safeSearch = search?.trim().slice(0, 50) || null;
 		const safeFilter = normalizeFilter(filter);
 		const statsContext = await resolvePlayerStatsContext(context);
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
 		const cacheKey = gqlCacheKey(
 			context,
-			`players:picker:v8:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${safeCursor ?? 0}`
+			`players:picker:v9:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`
 		);
 
 		const cached = await readJsonCache(
@@ -601,7 +641,7 @@ export const playersRepository: PlayersRepository = {
 			buildTeamMap(context),
 		]);
 		const candidates = snapshot.players
-			.filter((player) => safeCursor === null || player.id > safeCursor)
+			.filter((player) => decodedCursor.legacyId === null || player.id > decodedCursor.legacyId)
 			.filter(
 				(player) => !safeSearch || player.webName.toLowerCase().includes(safeSearch.toLowerCase())
 			)
@@ -655,8 +695,10 @@ export const playersRepository: PlayersRepository = {
 					);
 			}
 		});
-		const returnedItems = sortedItems.slice(0, safeLimit);
-		const nextCursor = sortedItems.length > safeLimit ? (returnedItems.at(-1)?.id ?? null) : null;
+		const returnedItems = sortedItems.slice(decodedCursor.offset, decodedCursor.offset + safeLimit);
+		const nextOffset = decodedCursor.offset + returnedItems.length;
+		const nextCursor =
+			nextOffset < sortedItems.length ? encodePickerCursor(sort, nextOffset) : null;
 		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
 
 		await writeQueryCache(
