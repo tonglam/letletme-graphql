@@ -59,6 +59,14 @@ jobs:
           test "$(git rev-parse HEAD)" = "$main_sha"
           echo "GRAPHQL_TRUSTED_MAIN_SHA=$main_sha"
 
+      - name: Reject legacy deployment after v3 activation
+        run: |
+          set -euo pipefail
+          if [ -f scripts/v3-release-gate.ts ]; then
+            echo "::error::Activated v3 releases require v3-publish-image followed by v3-redeploy"
+            exit 1
+          fi
+
       - name: Set deployment metadata
         run: |
           if [ "${{ github.event_name }}" = "workflow_run" ]; then

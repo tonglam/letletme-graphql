@@ -37,17 +37,19 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(workflow).not.toContain("inputs.");
 	});
 
-	it("keeps the standard deploy environment file private", () => {
+	it("blocks the legacy deploy before registry or environment secret use", () => {
 		const deploy = job("deploy", "v3_publish_image");
 		const checkout = deploy.indexOf("actions/checkout@");
 		const trustedMain = deploy.indexOf('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
+		const v3Block = deploy.indexOf("Activated v3 releases require v3-publish-image");
 		const registryLogin = deploy.indexOf("docker/login-action@");
 		const candidateBuild = deploy.indexOf("docker buildx build");
 		const umask = deploy.indexOf("umask 077");
 		const write = deploy.indexOf(`printf '%s' "$GRAPHQL_ENV" > .env.deploy`);
 		const chmod = deploy.indexOf("chmod 600 .env.deploy");
 		expect(trustedMain).toBeGreaterThan(checkout);
-		expect(registryLogin).toBeGreaterThan(trustedMain);
+		expect(v3Block).toBeGreaterThan(trustedMain);
+		expect(registryLogin).toBeGreaterThan(v3Block);
 		expect(candidateBuild).toBeGreaterThan(registryLogin);
 		expect(umask).toBeGreaterThan(candidateBuild);
 		expect(write).toBeGreaterThan(umask);
