@@ -715,6 +715,10 @@ export const playerValuesRepository: PlayerValuesRepository = {
 									await writePrivatePlayerValuesCache(context, privateCacheKey, normalized);
 									return normalized;
 								}
+								// A syntactically valid legacy array can still contain a
+								// malformed payload. Do not turn that into a negative cache hit;
+								// let the authoritative database path repair it.
+								malformedLegacyRow = true;
 								metrics.cacheRepositoryEvents.labels("player_values", "malformed").inc();
 							} else {
 								metrics.cacheRepositoryEvents.labels("player_values", "malformed").inc();

@@ -5,13 +5,15 @@ import { metrics } from "../../infra/metrics";
 import { isLiveSnapshotDatabaseFallback, loadLiveSnapshotMeta } from "./snapshot-meta";
 
 const parseBonusValue = (value: unknown): number | null => {
-	if (typeof value === "number" && Number.isInteger(value)) {
+	const isInRange = (parsed: number): boolean =>
+		Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 2_147_483_647;
+	if (typeof value === "number" && isInRange(value)) {
 		return value;
 	}
 	if (typeof value === "string") {
 		if (!/^\d+$/.test(value)) return null;
 		const parsed = Number(value);
-		return Number.isInteger(parsed) ? parsed : null;
+		return isInRange(parsed) ? parsed : null;
 	}
 	return null;
 };

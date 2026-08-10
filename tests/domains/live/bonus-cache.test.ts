@@ -52,6 +52,17 @@ describe("loadLiveBonusByPlayerId", () => {
 		expect(result.size).toBe(0);
 	});
 
+	it("rejects bonus values outside the GraphQL integer range", async () => {
+		const result = await loadLiveBonusByPlayerId(
+			contextWithRedis(async () => ({
+				"1": JSON.stringify({ "101": 2_147_483_648 }),
+			})),
+			12
+		);
+
+		expect(result.size).toBe(0);
+	});
+
 	it("returns no override on Redis WRONGTYPE failures", async () => {
 		const result = await loadLiveBonusByPlayerId(
 			contextWithRedis(async () => {
