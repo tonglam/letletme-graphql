@@ -57,6 +57,7 @@ import type {
 	TournamentInfo,
 	TournamentMode,
 	TournamentParticipant,
+	TournamentSeasonSnapshot,
 } from "./repository";
 import {
 	GroupMode,
@@ -94,6 +95,11 @@ type TournamentEntryRankingSummaryArgs = {
 	tournamentId: number;
 	eventId: number;
 	entryId: number;
+};
+
+type TournamentSeasonSnapshotArgs = {
+	tournamentId: number;
+	eventId: number;
 };
 
 type TournamentBattleGroupResultsArgs = {
@@ -249,6 +255,19 @@ export const tournamentsResolvers = {
 				args.tournamentId,
 				args.eventId,
 				args.entryId
+			);
+		},
+
+		tournamentSeasonSnapshot: async (
+			_parent: unknown,
+			args: TournamentSeasonSnapshotArgs,
+			context: GraphQLContext
+		): Promise<TournamentSeasonSnapshot> => {
+			await assertTournamentStandingsReady(context, args.tournamentId);
+			return tournamentsService.getTournamentSeasonSnapshot(
+				context,
+				args.tournamentId,
+				args.eventId
 			);
 		},
 

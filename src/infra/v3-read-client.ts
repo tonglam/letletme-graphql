@@ -848,14 +848,18 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 		`,
 	},
 	[V3_READ_MODELS.tournamentEntryEventSummaries]: {
-		sourceRelations: ["reporting.tournament_entry_event_summaries", "competition.tournaments"],
+		sourceRelations: [
+			"reporting.tournament_entry_event_summaries",
+			"competition.tournament_points_group_results",
+			"competition.tournaments",
+		],
 		sql: `
 			SELECT
 				summary.tournament_id,
 				summary.event_id,
 				summary.entry_id,
 				tournament.group_mode,
-				summary.tournament_event_rank AS tournament_overall_rank,
+				group_result.event_group_rank AS tournament_overall_rank,
 				summary.overall_rank,
 				summary.team_value,
 				summary.cumulative_transfers AS cum_transfers_num,
@@ -884,6 +888,11 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 				) AS tournament_auto_sub_rank,
 				summary.cumulative_captain_points AS cum_total_captain_points
 			FROM reporting.tournament_entry_event_summaries summary
+			LEFT JOIN competition.tournament_points_group_results group_result
+			  ON group_result.season_id = summary.season_id
+			 AND group_result.tournament_id = summary.tournament_id
+			 AND group_result.event_id = summary.event_id
+			 AND group_result.entry_id = summary.entry_id
 			JOIN competition.tournaments tournament
 			  ON tournament.season_id = summary.season_id
 			 AND tournament.tournament_id = summary.tournament_id

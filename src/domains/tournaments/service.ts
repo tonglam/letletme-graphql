@@ -7,6 +7,7 @@ import type {
 	TournamentEventResult,
 	TournamentInfo,
 	TournamentParticipant,
+	TournamentSeasonSnapshot,
 } from "./repository";
 import { tournamentsRepository } from "./repository";
 
@@ -96,6 +97,14 @@ export const tournamentsService = {
 			eventId,
 			entryId
 		);
+	},
+
+	getTournamentSeasonSnapshot(
+		context: GraphQLContext,
+		tournamentId: number,
+		eventId: number
+	): Promise<TournamentSeasonSnapshot> {
+		return tournamentsRepository.getTournamentSeasonSnapshot(context, tournamentId, eventId);
 	},
 
 	getTournamentBattleGroupResults(

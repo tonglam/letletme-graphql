@@ -5,6 +5,7 @@ import {
 	type EntryH2HMatchResult,
 	type TournamentEntryRankingSummary,
 	type TournamentEventResult,
+	type TournamentSeasonSnapshot,
 	TournamentMode,
 	TournamentState,
 	tournamentsRepository,
@@ -243,6 +244,11 @@ describe("tournamentsService.getTournamentEntryRankingSummary", () => {
 			tournamentBenchPointsRank: 1,
 			autoSubPoints: 10,
 			tournamentAutoSubRank: 2,
+			overallPoints: 1100,
+			leaderOverallPoints: 1180,
+			gapToLeader: 80,
+			pointsBehindNext: 40,
+			pointsAheadOfPrev: 15,
 		};
 
 		let capturedTournamentId = -1;
@@ -269,6 +275,40 @@ describe("tournamentsService.getTournamentEntryRankingSummary", () => {
 			expect(result).toEqual(expected);
 		} finally {
 			tournamentsRepository.getTournamentEntryRankingSummary = original;
+		}
+	});
+});
+
+describe("tournamentsService.getTournamentSeasonSnapshot", () => {
+	it("delegates to tournamentsRepository with the same args", async () => {
+		const original = tournamentsRepository.getTournamentSeasonSnapshot;
+		const context = {} as unknown as GraphQLContext;
+		const expected: TournamentSeasonSnapshot = {
+			asOfEventId: 33,
+			entryCount: 0,
+			leaderOverallPoints: null,
+			secondOverallPoints: null,
+			gapFirstSecond: null,
+			averageOverallPoints: null,
+			metrics: [],
+			standings: [],
+		};
+
+		tournamentsRepository.getTournamentSeasonSnapshot = async (
+			inputContext,
+			tournamentId,
+			eventId
+		) => {
+			expect(inputContext).toBe(context);
+			expect(tournamentId).toBe(7);
+			expect(eventId).toBe(33);
+			return expected;
+		};
+
+		try {
+			expect(await tournamentsService.getTournamentSeasonSnapshot(context, 7, 33)).toBe(expected);
+		} finally {
+			tournamentsRepository.getTournamentSeasonSnapshot = original;
 		}
 	});
 });

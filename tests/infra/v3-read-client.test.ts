@@ -124,4 +124,23 @@ describe("Data Platform v3 read client", () => {
 		expect(relations).toContain("understat.player_seasons");
 		expect(relations).toContain("bridge.entity_links");
 	});
+
+	it("projects tournament season rank from the canonical points-group result", async () => {
+		const { executor, queries } = makeExecutor();
+
+		await clientFor(executor)
+			.read("reporting.tournament_entry_event_summaries")
+			.select("tournament_id, tournament_overall_rank")
+			.eq("tournament_id", 7)
+			.eq("event_id", 3);
+
+		expect(queries).toHaveLength(1);
+		expect(queries[0].text).toContain("group_result.event_group_rank AS tournament_overall_rank");
+		expect(queries[0].text).toContain(
+			"LEFT JOIN competition.tournament_points_group_results group_result"
+		);
+		expect(queries[0].text).not.toContain(
+			"summary.tournament_event_rank AS tournament_overall_rank"
+		);
+	});
 });

@@ -220,6 +220,54 @@ export type TournamentEntryRankingSummary = {
 	tournamentBenchPointsRank: number | null;
 	autoSubPoints: number | null;
 	tournamentAutoSubRank: number | null;
+	/** FPL cumulative total points as of eventId */
+	overallPoints: number | null;
+	leaderOverallPoints: number | null;
+	/** Points behind leader (0 if leading) */
+	gapToLeader: number | null;
+	/** Points behind the entry immediately above (0 if #1) */
+	pointsBehindNext: number | null;
+	/** Points ahead of the entry immediately below (0 if last) */
+	pointsAheadOfPrev: number | null;
+};
+
+export type TournamentSeasonStandingRow = {
+	entryId: number;
+	rank: number | null;
+	entryName: string | null;
+	playerName: string | null;
+	overallPoints: number | null;
+	overallRank: number | null;
+	teamValue: number | null;
+};
+
+export type TournamentSeasonMetricKey =
+	| "OVERALL_POINTS"
+	| "TEAM_VALUE"
+	| "TRANSFERS"
+	| "TOTAL_COSTS"
+	| "BENCH_POINTS"
+	| "AUTO_SUB_POINTS";
+
+export type TournamentSeasonMetric = {
+	key: TournamentSeasonMetricKey;
+	leaderValue: number | null;
+	leaderEntryId: number | null;
+	leaderEntryName: string | null;
+	leaderPlayerName: string | null;
+	averageValue: number | null;
+	higherIsBetter: boolean;
+};
+
+export type TournamentSeasonSnapshot = {
+	asOfEventId: number;
+	entryCount: number;
+	leaderOverallPoints: number | null;
+	secondOverallPoints: number | null;
+	gapFirstSecond: number | null;
+	averageOverallPoints: number | null;
+	metrics: TournamentSeasonMetric[];
+	standings: TournamentSeasonStandingRow[];
 };
 
 export type DbTournamentPointsGroupResultRow = {
@@ -888,6 +936,11 @@ interface TournamentsRepository {
 		eventId: number,
 		entryId: number
 	): Promise<TournamentEntryRankingSummary>;
+	getTournamentSeasonSnapshot(
+		context: GraphQLContext,
+		tournamentId: number,
+		eventId: number
+	): Promise<TournamentSeasonSnapshot>;
 	getTournamentBattleGroupResults(
 		context: GraphQLContext,
 		tournamentId: number,
@@ -895,6 +948,233 @@ interface TournamentsRepository {
 	): Promise<TournamentBattleGroupResult[]>;
 	getEntryH2HMatchResults(context: GraphQLContext, entryId: number): Promise<EntryH2HMatchResult[]>;
 }
+
+const emptyRankingGaps = {
+	overallPoints: null as number | null,
+	leaderOverallPoints: null as number | null,
+	gapToLeader: null as number | null,
+	pointsBehindNext: null as number | null,
+	pointsAheadOfPrev: null as number | null,
+};
+
+function isDefined<T>(value: T | null | undefined): value is T {
+	return value !== null && value !== undefined;
+}
+
+function computeRankingGapsFromStandings(
+	standings: TournamentSeasonStandingRow[],
+	entryId: number
+): typeof emptyRankingGaps {
+	if (standings.length === 0) return { ...emptyRankingGaps };
+
+	const myIndex = standings.findIndex((row) => row.entryId === entryId);
+	const my = myIndex >= 0 ? standings[myIndex] : undefined;
+	const leader = standings[0];
+	const above = myIndex > 0 ? standings[myIndex - 1] : undefined;
+	const below = myIndex >= 0 && myIndex < standings.length - 1 ? standings[myIndex + 1] : undefined;
+
+	const overallPoints = my?.overallPoints ?? null;
+	const leaderOverallPoints = leader?.overallPoints ?? null;
+	const gapToLeader =
+		isDefined(overallPoints) && isDefined(leaderOverallPoints)
+			? Math.max(0, leaderOverallPoints - overallPoints)
+			: null;
+	const pointsBehindNext =
+		myIndex === 0
+			? 0
+			: isDefined(overallPoints) && isDefined(above?.overallPoints)
+				? Math.max(0, above.overallPoints - overallPoints)
+				: null;
+	const pointsAheadOfPrev =
+		myIndex >= 0 && myIndex === standings.length - 1
+			? 0
+			: isDefined(overallPoints) && isDefined(below?.overallPoints)
+				? Math.max(0, overallPoints - below.overallPoints)
+				: null;
+
+	return {
+		overallPoints,
+		leaderOverallPoints,
+		gapToLeader,
+		pointsBehindNext,
+		pointsAheadOfPrev,
+	};
+}
+
+type NamedMetricSample = {
+	entryId: number;
+	value: number;
+	entryName: string | null;
+	playerName: string | null;
+};
+
+function averageOf(values: number[]): number | null {
+	if (values.length === 0) return null;
+	return values.reduce((sum, v) => sum + v, 0) / values.length;
+}
+
+/**
+ * Pick leader: higherIsBetter → max value, else min value (transfers/costs ranks).
+ * Tie-break: lower entryId.
+ */
+function pickMetricLeader(
+	samples: NamedMetricSample[],
+	higherIsBetter: boolean
+): NamedMetricSample | null {
+	if (samples.length === 0) return null;
+	return samples.reduce((best, cur) => {
+		if (higherIsBetter) {
+			if (cur.value > best.value) return cur;
+			if (cur.value < best.value) return best;
+		} else {
+			if (cur.value < best.value) return cur;
+			if (cur.value > best.value) return best;
+		}
+		return cur.entryId < best.entryId ? cur : best;
+	});
+}
+
+function buildMetric(
+	key: TournamentSeasonMetricKey,
+	samples: NamedMetricSample[],
+	higherIsBetter: boolean
+): TournamentSeasonMetric {
+	const leader = pickMetricLeader(samples, higherIsBetter);
+	const avg = averageOf(samples.map((s) => s.value));
+	return {
+		key,
+		leaderValue: leader?.value ?? null,
+		leaderEntryId: leader?.entryId ?? null,
+		leaderEntryName: leader?.entryName ?? null,
+		leaderPlayerName: leader?.playerName ?? null,
+		averageValue: avg === null ? null : Math.round(avg * 100) / 100,
+		higherIsBetter,
+	};
+}
+
+function buildSeasonSnapshotFromEventResults(
+	eventId: number,
+	results: TournamentEventResult[],
+	snapshotRows: DbTournamentEventSnapshotRow[] = []
+): TournamentSeasonSnapshot {
+	const ordered = [...results].sort((a, b) => {
+		const rankA = a.eventGroupRank;
+		const rankB = b.eventGroupRank;
+		if (isDefined(rankA) && isDefined(rankB)) return rankA - rankB;
+		if (isDefined(rankA)) return -1;
+		if (isDefined(rankB)) return 1;
+		const ptsA = a.overallPoints ?? -1;
+		const ptsB = b.overallPoints ?? -1;
+		return ptsB - ptsA;
+	});
+
+	const standings: TournamentSeasonStandingRow[] = ordered.map((row, index) => ({
+		entryId: row.entryId,
+		rank: row.eventGroupRank ?? index + 1,
+		entryName: row.entryName,
+		playerName: row.playerName,
+		overallPoints: row.overallPoints,
+		overallRank: row.overallRank,
+		teamValue: row.teamValue,
+	}));
+
+	const nameByEntry = new Map<number, { entryName: string | null; playerName: string | null }>();
+	for (const row of results) {
+		nameByEntry.set(row.entryId, {
+			entryName: row.entryName,
+			playerName: row.playerName,
+		});
+	}
+
+	const withPoints = standings.filter(
+		(s) => isDefined(s.overallPoints) && Number.isFinite(s.overallPoints)
+	);
+	const leaderOverallPoints = withPoints[0]?.overallPoints ?? null;
+	const secondOverallPoints = withPoints[1]?.overallPoints ?? null;
+	const gapFirstSecond =
+		isDefined(leaderOverallPoints) && isDefined(secondOverallPoints)
+			? leaderOverallPoints - secondOverallPoints
+			: null;
+	const averageOverallPoints =
+		withPoints.length > 0
+			? Math.round(
+					withPoints.reduce((sum, s) => sum + (s.overallPoints as number), 0) / withPoints.length
+				)
+			: null;
+
+	const pointsSamples: NamedMetricSample[] = results
+		.filter((r) => isDefined(r.overallPoints) && Number.isFinite(r.overallPoints))
+		.map((r) => ({
+			entryId: r.entryId,
+			value: r.overallPoints as number,
+			entryName: r.entryName,
+			playerName: r.playerName,
+		}));
+
+	const teamValueSamples: NamedMetricSample[] = results
+		.filter((r) => isDefined(r.teamValue) && Number.isFinite(r.teamValue))
+		.map((r) => ({
+			entryId: r.entryId,
+			value: r.teamValue as number,
+			entryName: r.entryName,
+			playerName: r.playerName,
+		}));
+
+	const snapNamed = (entryId: number, value: number): NamedMetricSample => {
+		const names = nameByEntry.get(entryId);
+		return {
+			entryId,
+			value,
+			entryName: names?.entryName ?? null,
+			playerName: names?.playerName ?? null,
+		};
+	};
+
+	const transferSamples: NamedMetricSample[] = [];
+	const costSamples: NamedMetricSample[] = [];
+	const benchSamples: NamedMetricSample[] = [];
+	const autoSubSamples: NamedMetricSample[] = [];
+
+	for (const row of snapshotRows) {
+		transferSamples.push(snapNamed(row.entry_id, row.cum_transfers_num ?? 0));
+		costSamples.push(snapNamed(row.entry_id, row.cum_total_costs ?? 0));
+		benchSamples.push(snapNamed(row.entry_id, row.cum_total_bench_points ?? 0));
+		autoSubSamples.push(snapNamed(row.entry_id, row.cum_auto_sub_points ?? 0));
+		// Prefer MV team value when present (authoritative cumulative snapshot)
+		if (isDefined(row.team_value) && Number.isFinite(row.team_value)) {
+			const existing = teamValueSamples.find((s) => s.entryId === row.entry_id);
+			if (existing) existing.value = row.team_value;
+			else teamValueSamples.push(snapNamed(row.entry_id, row.team_value));
+		}
+	}
+
+	const metrics: TournamentSeasonMetric[] = [
+		buildMetric("OVERALL_POINTS", pointsSamples, true),
+		buildMetric("TEAM_VALUE", teamValueSamples, true),
+		buildMetric("TRANSFERS", transferSamples, false),
+		buildMetric("TOTAL_COSTS", costSamples, false),
+		buildMetric("BENCH_POINTS", benchSamples, true),
+		buildMetric("AUTO_SUB_POINTS", autoSubSamples, true),
+	];
+
+	return {
+		asOfEventId: eventId,
+		entryCount: standings.length,
+		leaderOverallPoints,
+		secondOverallPoints,
+		gapFirstSecond,
+		averageOverallPoints,
+		metrics,
+		standings,
+	};
+}
+
+const isSeasonSnapshotCache = (value: unknown): value is TournamentSeasonSnapshot =>
+	isRecord(value) &&
+	Number.isFinite(Number(value.asOfEventId)) &&
+	Number.isFinite(Number(value.entryCount)) &&
+	Array.isArray(value.standings) &&
+	Array.isArray(value.metrics);
 
 export const tournamentsRepository: TournamentsRepository = {
 	getTournamentInfoUncached,
@@ -1160,7 +1440,7 @@ export const tournamentsRepository: TournamentsRepository = {
 	): Promise<TournamentEntryRankingSummary> {
 		const cacheKey = gqlCacheKey(
 			context,
-			`tournaments:ranking-summary:${stableStringify({
+			`tournaments:ranking-summary:v2:${stableStringify({
 				tournamentId,
 				eventId,
 				entryId,
@@ -1190,9 +1470,10 @@ export const tournamentsRepository: TournamentsRepository = {
 			tournamentBenchPointsRank: null,
 			autoSubPoints: 0,
 			tournamentAutoSubRank: null,
+			...emptyRankingGaps,
 		};
 
-		const [tournament, snapshotResponse] = await Promise.all([
+		const [tournament, snapshotResponse, fieldResults] = await Promise.all([
 			getTournamentInfoById(context, tournamentId),
 			context.data
 				.read("reporting.tournament_entry_event_summaries")
@@ -1203,6 +1484,8 @@ export const tournamentsRepository: TournamentsRepository = {
 				.eq("event_id", eventId)
 				.eq("entry_id", entryId)
 				.limit(1),
+			// Shared with season snapshot / event results cache — gaps need full field
+			tournamentsRepository.getTournamentEventResults(context, tournamentId, eventId),
 		]);
 
 		if (!tournament || tournament.groupMode !== GroupMode.POINTS_RACES) {
@@ -1220,6 +1503,9 @@ export const tournamentsRepository: TournamentsRepository = {
 		const snapshotRow =
 			(snapshotResponse.data?.[0] as DbTournamentEventSnapshotRow | undefined) ?? undefined;
 
+		const fieldSnapshot = buildSeasonSnapshotFromEventResults(eventId, fieldResults);
+		const gaps = computeRankingGapsFromStandings(fieldSnapshot.standings, entryId);
+
 		const summary: TournamentEntryRankingSummary = {
 			eventId,
 			entryId,
@@ -1235,6 +1521,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			tournamentBenchPointsRank: snapshotRow?.tournament_bench_points_rank ?? null,
 			autoSubPoints: snapshotRow?.cum_auto_sub_points ?? 0,
 			tournamentAutoSubRank: snapshotRow?.tournament_auto_sub_rank ?? null,
+			...gaps,
 		};
 
 		await writeQueryCache(
@@ -1244,6 +1531,65 @@ export const tournamentsRepository: TournamentsRepository = {
 			QUERY_CACHE_TTL_SECONDS.REPORTING
 		);
 		return summary;
+	},
+
+	async getTournamentSeasonSnapshot(
+		context: GraphQLContext,
+		tournamentId: number,
+		eventId: number
+	): Promise<TournamentSeasonSnapshot> {
+		const cacheKey = gqlCacheKey(
+			context,
+			`tournaments:season-snapshot:v1:${stableStringify({ tournamentId, eventId })}`
+		);
+		const cached = await readJsonCache(context, cacheKey, isSeasonSnapshotCache);
+		if (isSeasonSnapshotCache(cached)) {
+			return cached;
+		}
+
+		const empty: TournamentSeasonSnapshot = {
+			asOfEventId: eventId,
+			entryCount: 0,
+			leaderOverallPoints: null,
+			secondOverallPoints: null,
+			gapFirstSecond: null,
+			averageOverallPoints: null,
+			metrics: [],
+			standings: [],
+		};
+
+		if (eventId <= 0) {
+			return empty;
+		}
+
+		const [results, snapshotResponse] = await Promise.all([
+			tournamentsRepository.getTournamentEventResults(context, tournamentId, eventId),
+			context.data
+				.read("reporting.tournament_entry_event_summaries")
+				.select(
+					"tournament_id, event_id, entry_id, tournament_overall_rank, overall_rank, team_value, cum_transfers_num, cum_total_costs, cum_total_bench_points, cum_auto_sub_points, tournament_team_value_rank, tournament_transfers_rank, tournament_costs_rank, tournament_bench_points_rank, tournament_auto_sub_rank"
+				)
+				.eq("tournament_id", tournamentId)
+				.eq("event_id", eventId),
+		]);
+
+		if (snapshotResponse.error) {
+			context.logger.warn(
+				{ err: snapshotResponse.error, tournamentId, eventId },
+				"Failed to fetch tournament event snapshots for season metrics — building points-only snapshot"
+			);
+		}
+
+		const snapshotRows = (snapshotResponse.data as DbTournamentEventSnapshotRow[] | null) ?? [];
+
+		const snapshot = buildSeasonSnapshotFromEventResults(eventId, results, snapshotRows);
+		await writeQueryCache(
+			context,
+			cacheKey,
+			JSON.stringify(snapshot),
+			QUERY_CACHE_TTL_SECONDS.REPORTING
+		);
+		return snapshot;
 	},
 
 	async getTournamentBattleGroupResults(
