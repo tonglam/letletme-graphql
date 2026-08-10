@@ -447,9 +447,19 @@ const mapFixtureStatContributions = (row: DbLiveFixtureStat): LiveExplainStatCon
 		{ identifier: "yellow_cards", value: "yellow_cards" },
 		{ identifier: "red_cards", value: "red_cards" },
 	] as const;
+	const yellowCards = parseNumericValue(pickRecordValue(row, "yellow_cards", "yellowCards"));
+	const redCards = parseNumericValue(pickRecordValue(row, "red_cards", "redCards"));
 	return definitions.flatMap(({ identifier, value }) => {
 		const count = parseIntegerValue(pickRecordValue(row, value));
 		if (count === null || count === 0) return [];
+		if (
+			identifier === "yellow_cards" &&
+			yellowCards !== null &&
+			redCards !== null &&
+			redCards !== 0
+		) {
+			return [];
+		}
 		const elementType = parseIntegerValue(pickRecordValue(row, "element_type", "elementType"));
 		const points =
 			identifier === "minutes"
@@ -595,19 +605,10 @@ const mapFlatLiveExplainContributions = (
 	if (!row) return [];
 	const contributions: LiveExplainStatContribution[] = [];
 	const minutes = parseNumericValue(pickRecordValue(row, "minutes"));
-	const redCards = parseNumericValue(pickRecordValue(row, "red_cards", "redCards"));
 	for (const definition of FLAT_LIVE_EXPLAIN_STATS) {
 		const value = parseNumericValue(pickRecordValue(row, ...definition.value));
 		const rawPoints = parseIntegerValue(pickRecordValue(row, ...definition.points));
 		if ((value ?? 0) === 0 && (rawPoints ?? 0) === 0) continue;
-		if (
-			definition.identifier === "yellow_cards" &&
-			rawPoints === null &&
-			redCards !== null &&
-			redCards !== 0
-		) {
-			continue;
-		}
 		let points = rawPoints ?? 0;
 		if (rawPoints === null && value !== null && value !== 0) {
 			const estimated = estimateFplPointsFromValue(
@@ -1224,6 +1225,8 @@ const loadColdLiveExplainBatch = async (
 		const stats = mapLiveExplainStats(psRow);
 		const databaseBreakdown = elRow ? mapBreakdownFromEventLiveRow(elRow) : [];
 		const breakdown = databaseBreakdown;
+		const fixtureStats = elRow?.fixture_stats ?? [];
+		const fixtureCount = elRow?.fixture_stats?.length ?? null;
 		const fixtureContributions = breakdown.flatMap((entry) => entry.stats);
 		const scoringItemContributions = mapScoringItemContributions(elRow?.scoring_items ?? []);
 		let contributions =
@@ -1231,15 +1234,35 @@ const loadColdLiveExplainBatch = async (
 				? fixtureContributions
 				: scoringItemContributions.length > 0
 					? scoringItemContributions
-					: mapFlatLiveExplainContributions(elRow, null, elRow?.fixture_stats?.length ?? null);
+					: mapFlatLiveExplainContributions(elRow, null, fixtureCount);
 		const eventStats = eventStatsById.get(elementId) ?? null;
 		const elementType = parseIntegerValue(pickRecordValue(psRow, "element_type", "elementType"));
 		const eventStatContributions = mapFlatLiveExplainContributions(
 			eventStats,
 			elementType,
-			elRow?.fixture_stats?.length ?? null
+			fixtureCount
 		);
-		contributions = mergeNonDuplicateContributions(contributions, eventStatContributions);
+		const eventRedCards = parseNumericValue(pickRecordValue(eventStats, "red_cards", "redCards"));
+		const eventHasRedCard = eventRedCards !== null && eventRedCards !== 0;
+		const hasSameFixtureCard = fixtureStats.some((fixture) => {
+			const yellowCards = parseNumericValue(
+				pickRecordValue(fixture, "yellow_cards", "yellowCards")
+			);
+			const redCards = parseNumericValue(pickRecordValue(fixture, "red_cards", "redCards"));
+			return yellowCards !== null && yellowCards !== 0 && redCards !== null && redCards !== 0;
+		});
+		const hasFixtureCardData = fixtureStats.some(
+			(fixture) =>
+				parseNumericValue(pickRecordValue(fixture, "yellow_cards", "yellowCards")) !== null ||
+				parseNumericValue(pickRecordValue(fixture, "red_cards", "redCards")) !== null
+		);
+		const suppressAmbiguousYellowCard =
+			eventHasRedCard &&
+			(fixtureCount === 1 || hasSameFixtureCard || (fixtureCount !== 1 && !hasFixtureCardData));
+		const safeEventStatContributions = suppressAmbiguousYellowCard
+			? eventStatContributions.filter((contribution) => contribution.identifier !== "yellow_cards")
+			: eventStatContributions;
+		contributions = mergeNonDuplicateContributions(contributions, safeEventStatContributions);
 
 		const result: LiveExplain = {
 			eventId,

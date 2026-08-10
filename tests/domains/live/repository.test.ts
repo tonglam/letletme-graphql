@@ -422,7 +422,16 @@ describe("liveRepository v3 explanation query cache", () => {
 				},
 			],
 			"fpl.player_gameweek_scoring_items": [],
-			"fpl.player_fixture_stats": [],
+			"fpl.player_fixture_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 101,
+					element_type: 3,
+					yellow_cards: 1,
+					red_cards: 1,
+				},
+			],
 		});
 
 		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
@@ -430,6 +439,50 @@ describe("liveRepository v3 explanation query cache", () => {
 		expect(result?.contributions).toEqual([
 			expect.objectContaining({ identifier: "red_cards", value: 1, points: -3 }),
 		]);
+	});
+
+	it("preserves cards from separate double-gameweek fixtures", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 3, minutes: 180, total_points: -4 },
+			],
+			"fpl.player_gameweek_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					yellow_cards: 1,
+					red_cards: 1,
+					total_points: -4,
+				},
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 101,
+					element_type: 3,
+					yellow_cards: 1,
+				},
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 102,
+					element_type: 3,
+					red_cards: 1,
+				},
+			],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ identifier: "yellow_cards", value: 1, points: -1 }),
+				expect.objectContaining({ identifier: "red_cards", value: 1, points: -3 }),
+			])
+		);
 	});
 
 	it("omits defensive-contribution counts when their points are unavailable", async () => {
