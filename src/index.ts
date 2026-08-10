@@ -77,6 +77,14 @@ const REQUIRED_DATA_RELATIONS: Record<string, readonly string[]> = {
 	"public.league_event_results": ["league_id", "league_type", "event_id", "entry_id"],
 	"public.tournament_battle_group_results": ["tournament_id", "event_id", "entry_id"],
 	"public.tournament_selection_stats": ["tournament_id", "event_id", "element_id"],
+	"public.public_league_trends_catalog": [
+		"tournament_id",
+		"display_name",
+		"sort_order",
+		"enabled",
+		"published_at",
+		"updated_at",
+	],
 };
 
 const REQUIRED_DATA_FUNCTIONS = [
@@ -110,12 +118,14 @@ async function validateRuntimeDataContract(): Promise<boolean> {
 		const columnRelations = requiredColumns.map(({ relation }) => relation);
 		const columnNames = requiredColumns.map(({ column }) => column);
 		const columns = await dbPool.query<{ relation_name: string; column_name: string }>(
-			`SELECT format('%s.%s', table_schema, table_name) AS relation_name, column_name
-			 FROM information_schema.columns
-			 WHERE (format('%s.%s', table_schema, table_name), column_name) IN (
-				 SELECT relation_name, column_name
-				 FROM unnest($1::text[], $2::text[]) AS required(relation_name, column_name)
-			 )`,
+			`SELECT required.relation_name, required.column_name
+			 FROM unnest($1::text[], $2::text[]) AS required(relation_name, column_name)
+			 JOIN pg_class relation ON relation.oid = to_regclass(required.relation_name)
+			 JOIN pg_attribute attribute
+			   ON attribute.attrelid = relation.oid
+			  AND attribute.attname = required.column_name
+			  AND attribute.attnum > 0
+			  AND NOT attribute.attisdropped`,
 			[columnRelations, columnNames]
 		);
 		const presentColumns = new Set(

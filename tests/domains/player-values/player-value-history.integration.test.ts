@@ -95,16 +95,16 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 			return builder;
 		},
 		gte(_column: string, value: string) {
-			fromDateFilter = value;
+			fromDateFilter = normalizedDate(value);
 			return builder;
 		},
 		lte(_column: string, value: string) {
-			toDateFilter = value;
+			toDateFilter = normalizedDate(value);
 			toDateExclusive = false;
 			return builder;
 		},
 		lt(_column: string, value: string) {
-			toDateFilter = value;
+			toDateFilter = normalizedDate(value);
 			toDateExclusive = true;
 			return builder;
 		},

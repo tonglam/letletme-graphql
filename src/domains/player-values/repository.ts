@@ -124,6 +124,8 @@ type DbPlayerStatMetadataRow = {
 const compactDatePattern = /^\d{8}$/;
 const PLAYER_VALUE_HISTORY_PAGE_SIZE = 1000;
 
+const toCompactDate = (date: string): string => date.replace(/-/g, "");
+
 function normalizePositionLabel(position: unknown): string {
 	if (typeof position === "number" && Number.isInteger(position)) {
 		switch (position) {
@@ -790,14 +792,16 @@ export const playerValuesRepository: PlayerValuesRepository = {
 
 		try {
 			const seasonWindow = await getActiveSeasonDateWindow(context, season);
+			const fromDate = toCompactDate(seasonWindow.fromDate);
+			const untilDate = toCompactDate(seasonWindow.untilDate);
 			const databaseRows: DbPlayerValueHistoryRow[] = [];
 			for (let from = 0; ; from += PLAYER_VALUE_HISTORY_PAGE_SIZE) {
 				const { data, error } = await context.supabase
 					.from("player_values")
 					.select("element_id, value, last_value, change_date, change_type")
 					.eq("element_id", args.playerId)
-					.gte("change_date", seasonWindow.fromDate)
-					.lt("change_date", seasonWindow.untilDate)
+					.gte("change_date", fromDate)
+					.lt("change_date", untilDate)
 					.order("change_date", { ascending: true })
 					.range(from, from + PLAYER_VALUE_HISTORY_PAGE_SIZE - 1);
 
