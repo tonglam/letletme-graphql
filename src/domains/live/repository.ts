@@ -541,10 +541,9 @@ const estimateFplPointsFromValue = (
 	if (!Number.isFinite(value) || value === 0) return 0;
 	switch (identifier) {
 		case "minutes":
-			// A gameweek aggregate can contain a double gameweek. Without fixture
-			// boundaries, estimating 180 minutes as one appearance undercounts the
-			// official 2+2 minutes points, so leave the points unspecified.
-			if (value > 90) return null;
+			// Minutes points are awarded per fixture. Without exactly one fixture
+			// boundary, even a short double-gameweek aggregate can be wrong.
+			if (fixtureCount !== 1) return null;
 			return value >= 60 ? 2 : value > 0 ? 1 : 0;
 		case "goals_scored":
 			return elementType === 1
@@ -559,7 +558,9 @@ const estimateFplPointsFromValue = (
 		case "clean_sheets":
 			return elementType === 1 || elementType === 2 ? value * 4 : elementType === 3 ? value : null;
 		case "goals_conceded":
-			return elementType === 1 || elementType === 2 ? -Math.floor(value / 2) : null;
+			return fixtureCount === 1 && (elementType === 1 || elementType === 2)
+				? -Math.floor(value / 2)
+				: null;
 		case "assists":
 			return value * 3;
 		case "saves":

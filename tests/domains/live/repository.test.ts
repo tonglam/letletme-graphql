@@ -243,7 +243,9 @@ describe("liveRepository v3 explanation query cache", () => {
 					},
 				],
 				"fpl.player_gameweek_scoring_items": [],
-				"fpl.player_fixture_stats": [],
+				"fpl.player_fixture_stats": [
+					{ event_id: 1, element_id: 1, fixture_id: 101, element_type: 3 },
+				],
 			},
 			calls
 		);
@@ -281,6 +283,44 @@ describe("liveRepository v3 explanation query cache", () => {
 		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
 
 		expect(result?.contributions?.some((item) => item.identifier === "minutes")).toBe(false);
+	});
+
+	it("does not estimate short double-gameweek minutes or goals conceded", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 1, minutes: 90, total_points: 42 },
+			],
+			"fpl.player_gameweek_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					minutes: 90,
+					goals_conceded: 2,
+					total_points: 4,
+				},
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 101,
+					element_type: 1,
+				},
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 102,
+					element_type: 1,
+				},
+			],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions?.some((item) => item.identifier === "minutes")).toBe(false);
+		expect(result?.contributions?.some((item) => item.identifier === "goals_conceded")).toBe(false);
 	});
 
 	it("does not estimate saves across fixture boundaries", async () => {
