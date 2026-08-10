@@ -550,18 +550,35 @@ function countsFromReadModel(rows: DbTournamentSelectionStatRow[]): {
 		transferOutCounts: new Map(),
 	};
 	let totalEntries: number | null = null;
+	const parseNonNegativeInteger = (value: unknown): number | null => {
+		const parsed = Number(value);
+		return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+	};
 
 	for (const row of rows) {
 		const playerId = Number(row.element_id);
 		if (!Number.isFinite(playerId) || playerId <= 0) continue;
 
-		const pickCount = Number(row.pick_count) || 0;
-		const captainCount = Number(row.captain_count) || 0;
-		const viceCaptainCount = Number(row.vice_captain_count) || 0;
-		const transferInCount = Number(row.transfer_in_count) || 0;
-		const transferOutCount = Number(row.transfer_out_count) || 0;
+		const pickCount = parseNonNegativeInteger(row.pick_count);
+		const captainCount = parseNonNegativeInteger(row.captain_count);
+		const viceCaptainCount = parseNonNegativeInteger(row.vice_captain_count);
+		const transferInCount = parseNonNegativeInteger(row.transfer_in_count);
+		const transferOutCount = parseNonNegativeInteger(row.transfer_out_count);
 		const rowTotalEntries = Number(row.total_entries);
-		if (!Number.isInteger(rowTotalEntries) || rowTotalEntries <= 0) return null;
+		if (
+			pickCount === null ||
+			captainCount === null ||
+			viceCaptainCount === null ||
+			transferInCount === null ||
+			transferOutCount === null ||
+			!Number.isInteger(rowTotalEntries) ||
+			rowTotalEntries <= 0 ||
+			pickCount > rowTotalEntries ||
+			captainCount > pickCount ||
+			viceCaptainCount > pickCount
+		) {
+			return null;
+		}
 		if (totalEntries === null) totalEntries = rowTotalEntries;
 		if (rowTotalEntries !== totalEntries) return null;
 

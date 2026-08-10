@@ -49,7 +49,14 @@ const GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT = 25 * RATE_LIMIT_WINDOW_SECONDS;
 // exists: a partially migrated Data schema would fail immediately on picker,
 // live, or tournament reads.
 const REQUIRED_DATA_RELATIONS: Record<string, readonly string[]> = {
-	"public.events": ["id", "finished", "is_current", "is_next", "deadline_time"],
+	"public.events": [
+		"id",
+		"finished",
+		"is_current",
+		"is_next",
+		"deadline_time",
+		"deadline_time_epoch",
+	],
 	"public.players": ["id", "web_name", "team_id", "type", "price"],
 	"public.teams": ["id", "name", "short_name"],
 	"public.event_fixtures": ["id", "event_id", "team_h_id", "team_a_id"],

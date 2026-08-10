@@ -11,6 +11,30 @@ const makeContext = (seasonValue: string | null): Parameters<typeof getCurrentSe
 });
 
 describe("getCurrentSeason", () => {
+	it("shares one in-flight Redis read across concurrent callers", async () => {
+		let reads = 0;
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const context = {
+			redis: {
+				get: async () => {
+					reads += 1;
+					await gate;
+					return "2526";
+				},
+			} as never,
+			supabase: {} as never,
+			logger: {} as never,
+		};
+		const first = getCurrentSeason(context);
+		const second = getCurrentSeason(context);
+		release();
+		await expect(Promise.all([first, second])).resolves.toEqual(["2526", "2526"]);
+		expect(reads).toBe(1);
+	});
+
 	it("returns the season value from Redis when valid", async () => {
 		const context = makeContext("2526");
 		const result = await getCurrentSeason(context);

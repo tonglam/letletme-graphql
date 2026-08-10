@@ -880,4 +880,37 @@ describe("eventStatsRepository.getTournamentSelectionStats", () => {
 		expect(result.totalEntries).toBe(5);
 		expect(result.midfielders[0].selectedByPercent).toBe(80);
 	});
+
+	it("falls back when persisted selection counters are impossible", async () => {
+		const rpcCalls: Array<{ fnName: string; params: Record<string, unknown> }> = [];
+		const context = buildContext({
+			fromData: {
+				tournament_selection_stats: [
+					{
+						element_id: 3,
+						pick_count: 5,
+						captain_count: 6,
+						vice_captain_count: 0,
+						transfer_in_count: 0,
+						transfer_out_count: 0,
+						total_entries: 5,
+					},
+				],
+				tournament_infos: [makeTournamentInfo()],
+				tournament_entries: makeEntryIds(),
+				players: makePlayers(),
+				teams: makeTeams(),
+			},
+			rpcResults: {
+				get_captain_counts_for_entries: makeCaptainCounts(),
+				get_pick_aggregation: makePickAggregation(),
+				get_transfer_aggregation: makeTransferAggregation(),
+			},
+			rpcCalls,
+		});
+
+		await eventStatsRepository.getTournamentSelectionStats(context, TOURNAMENT_ID, EVENT_ID, LIMIT);
+
+		expect(rpcCalls.map(({ fnName }) => fnName)).toContain("get_captain_counts_for_entries");
+	});
 });

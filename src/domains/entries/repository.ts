@@ -118,11 +118,31 @@ const parseCachedName = (value: unknown): string | null => {
 const GRAPHQL_INT_MIN = -2_147_483_648;
 const GRAPHQL_INT_MAX = 2_147_483_647;
 
+const ENTRY_INFO_NUMERIC_FIELDS = [
+	"lastEventId",
+	"overallPoints",
+	"startedEvent",
+	"overallRank",
+	"bank",
+	"teamValue",
+	"totalTransfers",
+	"lastOverallPoints",
+	"lastOverallRank",
+	"lastTeamValue",
+	"lastBank",
+] as const;
+
 const parseCachedInt = (value: unknown): number | null => {
 	if (value === null || value === undefined) return null;
 	if (typeof value !== "number" || !Number.isInteger(value)) return null;
 	return value >= GRAPHQL_INT_MIN && value <= GRAPHQL_INT_MAX ? value : null;
 };
+
+const hasValidEntryInfoNumericFields = (parsed: Record<string, unknown>): boolean =>
+	ENTRY_INFO_NUMERIC_FIELDS.every((key) => {
+		if (!(key in parsed) || parsed[key] === null || parsed[key] === undefined) return true;
+		return parseCachedInt(parsed[key]) !== null;
+	});
 
 const mapEntryEventResult = (row: DbEntryEventResultRow): EntryEventResult => ({
 	entryId: row.entry_id,
@@ -247,6 +267,9 @@ export const entriesRepository: EntriesRepository = {
 		if (raw) {
 			try {
 				const parsed = JSON.parse(raw) as Record<string, unknown>;
+				if (!isRecord(parsed) || !hasValidEntryInfoNumericFields(parsed)) {
+					throw new Error("Invalid EntryInfo numeric fields");
+				}
 				const entryName = parseCachedName(parsed.entryName);
 				const playerName = parseCachedName(parsed.playerName);
 				if (!entryName || !playerName) {
@@ -362,6 +385,10 @@ export const entriesRepository: EntriesRepository = {
 				const value = values[i];
 				if (value) {
 					const parsed = JSON.parse(value) as Record<string, unknown>;
+					if (!isRecord(parsed) || !hasValidEntryInfoNumericFields(parsed)) {
+						missingIds.push(uniqueIds[i]);
+						continue;
+					}
 					const entryName = parseCachedName(parsed.entryName);
 					const playerName = parseCachedName(parsed.playerName);
 					const lastEventId = parseCachedInt(parsed.lastEventId);
