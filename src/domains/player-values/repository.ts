@@ -2,6 +2,7 @@ import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { metrics } from "../../infra/metrics";
 import { getCurrentSeason } from "../../infra/season";
+import { getActiveSeasonDateWindow } from "../../infra/season-window";
 
 export type PositionEnum = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
 
@@ -788,12 +789,15 @@ export const playerValuesRepository: PlayerValuesRepository = {
 		}
 
 		try {
+			const seasonWindow = await getActiveSeasonDateWindow(context, season);
 			const databaseRows: DbPlayerValueHistoryRow[] = [];
 			for (let from = 0; ; from += PLAYER_VALUE_HISTORY_PAGE_SIZE) {
 				const { data, error } = await context.supabase
 					.from("player_values")
 					.select("element_id, value, last_value, change_date, change_type")
 					.eq("element_id", args.playerId)
+					.gte("change_date", seasonWindow.fromDate)
+					.lt("change_date", seasonWindow.untilDate)
 					.order("change_date", { ascending: true })
 					.range(from, from + PLAYER_VALUE_HISTORY_PAGE_SIZE - 1);
 

@@ -25,10 +25,14 @@ type QueryResult<T> = {
 	error: QueryError | null;
 };
 
+const normalizedDate = (value: string): string =>
+	/^\d{8}$/.test(value) ? `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}` : value;
+
 function createHistoryQueryBuilder(rows: HistoryRow[]) {
 	let playerIdFilter: number | null = null;
 	let fromDateFilter: string | null = null;
 	let toDateFilter: string | null = null;
+	let toDateExclusive = false;
 	let ascending = false;
 
 	const applyFilters = (): QueryResult<HistoryRow> => {
@@ -40,12 +44,18 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 
 		if (fromDateFilter !== null) {
 			const fromDate = fromDateFilter;
-			filtered = filtered.filter((row) => row.change_date.localeCompare(fromDate) >= 0);
+			filtered = filtered.filter(
+				(row) => normalizedDate(row.change_date).localeCompare(fromDate) >= 0
+			);
 		}
 
 		if (toDateFilter !== null) {
 			const toDate = toDateFilter;
-			filtered = filtered.filter((row) => row.change_date.localeCompare(toDate) <= 0);
+			filtered = filtered.filter((row) =>
+				toDateExclusive
+					? normalizedDate(row.change_date).localeCompare(toDate) < 0
+					: normalizedDate(row.change_date).localeCompare(toDate) <= 0
+			);
 		}
 
 		filtered.sort((left, right) => {
@@ -90,6 +100,12 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 		},
 		lte(_column: string, value: string) {
 			toDateFilter = value;
+			toDateExclusive = false;
+			return builder;
+		},
+		lt(_column: string, value: string) {
+			toDateFilter = value;
+			toDateExclusive = true;
 			return builder;
 		},
 	});

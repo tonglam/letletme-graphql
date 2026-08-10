@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { getCurrentSeason } from "../../infra/season";
+import { getActiveSeasonDateWindow } from "../../infra/season-window";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player as InfraPlayer, Team as InfraTeam } from "../../infra/types";
 import {
@@ -364,13 +365,17 @@ const mapPickerRow = (row: DbPickerRow): PlayerPickerItem => ({
 
 const getLatestMarketOwnershipByIds = async (
 	context: GraphQLContext,
-	ids: number[]
+	ids: number[],
+	season: string
 ): Promise<Map<number, number>> => {
 	if (ids.length === 0) return new Map();
 	try {
+		const seasonWindow = await getActiveSeasonDateWindow(context, season);
 		const latestResult = await context.supabase
 			.from("player_market_snapshots")
 			.select("snapshot_date, captured_at")
+			.gte("snapshot_date", seasonWindow.fromDate)
+			.lt("snapshot_date", seasonWindow.untilDate)
 			.order("snapshot_date", { ascending: false })
 			.order("captured_at", { ascending: false })
 			.limit(1);
@@ -398,6 +403,8 @@ const getLatestMarketOwnershipByIds = async (
 			.from("player_market_snapshots")
 			.select("element_id, selected_by_percent, captured_at")
 			.eq("snapshot_date", snapshotDate)
+			.gte("snapshot_date", seasonWindow.fromDate)
+			.lt("snapshot_date", seasonWindow.untilDate)
 			.in("element_id", ids)
 			.order("captured_at", { ascending: false, nullsFirst: false });
 		if (ownershipResult.error) {
@@ -435,7 +442,7 @@ const enrichPickerItems = async (
 	const [basePlayers, statsById, marketOwnershipById] = await Promise.all([
 		playersRepository.getPlayersByIds(context, ids),
 		getPlayerSeasonStatsByIdsForContext(context, ids, statsContext),
-		getLatestMarketOwnershipByIds(context, ids),
+		getLatestMarketOwnershipByIds(context, ids, statsContext.season),
 	]);
 	const baseById = new Map(basePlayers.map((player) => [player.id, player]));
 

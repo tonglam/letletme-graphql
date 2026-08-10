@@ -100,8 +100,16 @@ errors mean no override, preserving FPL's official aggregate total. The legacy
 ## Rollback
 
 Every deploy keeps the current and previous two repository images. Roll back by
-setting `APP_IMAGE` to one of those reviewed tags and running
-`docker compose up -d --no-build`. Feature behavior can be rolled back with
+setting `APP_IMAGE` to one of those reviewed tags and running the service with
+the runtime environment file that the deploy created:
+
+```bash
+APP_ENV_FILE=.env.runtime APP_IMAGE=ghcr.io/tonglam/letletme-graphql:<reviewed-sha> \
+  docker compose up -d --no-build
+```
+
+Do not omit `APP_ENV_FILE`: `.env.deploy` is intentionally removed after a
+successful deployment. Feature behavior can be rolled back with
 `LIVE_POINTS_V2=false`; never roll back a consumed FPL challenge or applied
 forward migration by editing history. Use a new migration or restore the tested
 backup.

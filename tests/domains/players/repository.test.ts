@@ -25,6 +25,9 @@ describe("playersRepository.getPlayersForPicker", () => {
 					const result = Promise.resolve({ data: [], error: null });
 					type Builder = typeof result & {
 						select: () => Builder;
+						eq: () => Builder;
+						gte: () => Builder;
+						lt: () => Builder;
 						lte: () => Builder;
 						order: () => Builder;
 						limit: () => Builder;
@@ -32,6 +35,9 @@ describe("playersRepository.getPlayersForPicker", () => {
 					const builder = result as Builder;
 					Object.assign(builder, {
 						select: () => builder,
+						eq: () => builder,
+						gte: () => builder,
+						lt: () => builder,
 						lte: () => builder,
 						order: () => builder,
 						limit: () => builder,
@@ -117,7 +123,7 @@ describe("playersRepository.getPlayersForPicker", () => {
 												],
 												error: null,
 											},
-											["order", "limit"]
+											["eq", "gte", "lt", "order", "limit"]
 										)
 									: chain(
 											{
@@ -130,7 +136,7 @@ describe("playersRepository.getPlayersForPicker", () => {
 												],
 												error: null,
 											},
-											["eq", "in", "order"]
+											["eq", "gte", "lt", "in", "order"]
 										),
 						};
 					}

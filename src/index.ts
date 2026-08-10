@@ -44,6 +44,115 @@ const SECURITY_OPERATION_RATE_LIMIT = 5;
 const RATE_LIMIT_WINDOW_SECONDS = 60;
 const GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT = 25 * RATE_LIMIT_WINDOW_SECONDS;
 
+// These are the public-schema relations and RPCs used by the GraphQL roots in
+// this release. Health must not report a green container when only `events`
+// exists: a partially migrated Data schema would fail immediately on picker,
+// live, or tournament reads.
+const REQUIRED_DATA_RELATIONS: Record<string, readonly string[]> = {
+	"public.events": ["id", "finished", "is_current", "is_next", "deadline_time"],
+	"public.players": ["id", "web_name", "team_id", "type", "price"],
+	"public.teams": ["id", "name", "short_name"],
+	"public.event_fixtures": ["id", "event_id", "team_h_id", "team_a_id"],
+	"public.player_stats": ["element_id", "event_id", "total_points"],
+	"public.player_market_snapshots": [
+		"element_id",
+		"snapshot_date",
+		"captured_at",
+		"selected_by_percent",
+	],
+	"public.fpl_player_fixture_stats": ["player_code", "event_id", "fixture_id", "team_id"],
+	"public.event_lives": ["event_id", "element_id", "total_points"],
+	"public.event_live_explains": ["event_id", "element_id"],
+	"public.player_values": ["element_id", "value", "last_value", "change_date"],
+	"public.entry_infos": ["id", "entry_name", "player_name"],
+	"public.entry_event_results": ["entry_id", "event_id"],
+	"public.entry_event_picks": ["entry_id", "event_id"],
+	"public.entry_event_transfers": ["entry_id", "event_id"],
+	"public.entry_history_infos": ["entry_id", "event_id"],
+	"public.entry_league_infos": ["entry_id", "league_id"],
+	"public.tournament_infos": ["id", "league_id", "league_type"],
+	"public.tournament_entries": ["tournament_id", "entry_id"],
+	"public.v_tournament_event_result": ["tournament_id", "event_id", "entry_id"],
+	"public.mv_tournament_event_snapshot": ["tournament_id", "event_id", "entry_id"],
+	"public.league_event_results": ["league_id", "league_type", "event_id", "entry_id"],
+	"public.tournament_battle_group_results": ["tournament_id", "event_id", "entry_id"],
+	"public.tournament_selection_stats": ["tournament_id", "event_id", "element_id"],
+};
+
+const REQUIRED_DATA_FUNCTIONS = [
+	"public.search_players_for_picker(text,integer,integer,integer,integer,integer,integer)",
+	"public.get_captain_counts_for_entries(integer,text,integer,integer[])",
+	"public.get_pick_aggregation(integer,integer[])",
+	"public.get_transfer_aggregation(integer,integer[])",
+] as const;
+
+async function validateRuntimeDataContract(): Promise<boolean> {
+	try {
+		const relationNames = Object.keys(REQUIRED_DATA_RELATIONS);
+		const relations = await dbPool.query<{ relation_name: string; relation_exists: boolean }>(
+			`SELECT required.relation_name,
+					to_regclass(required.relation_name) IS NOT NULL AS relation_exists
+				 FROM unnest($1::text[]) AS required(relation_name)`,
+			[relationNames]
+		);
+		const missingRelation = relations.rows.find((row) => !row.relation_exists);
+		if (missingRelation) {
+			logger.warn(
+				{ relation: missingRelation.relation_name },
+				"GraphQL data contract relation is missing"
+			);
+			return false;
+		}
+
+		const requiredColumns = relationNames.flatMap((relation) =>
+			REQUIRED_DATA_RELATIONS[relation].map((column) => ({ relation, column }))
+		);
+		const columnRelations = requiredColumns.map(({ relation }) => relation);
+		const columnNames = requiredColumns.map(({ column }) => column);
+		const columns = await dbPool.query<{ relation_name: string; column_name: string }>(
+			`SELECT format('%s.%s', table_schema, table_name) AS relation_name, column_name
+			 FROM information_schema.columns
+			 WHERE (format('%s.%s', table_schema, table_name), column_name) IN (
+				 SELECT relation_name, column_name
+				 FROM unnest($1::text[], $2::text[]) AS required(relation_name, column_name)
+			 )`,
+			[columnRelations, columnNames]
+		);
+		const presentColumns = new Set(
+			columns.rows.map((row) => `${row.relation_name}:${row.column_name}`)
+		);
+		const missingColumn = requiredColumns.find(
+			({ relation, column }) => !presentColumns.has(`${relation}:${column}`)
+		);
+		if (missingColumn) {
+			logger.warn(
+				{ relation: missingColumn.relation, column: missingColumn.column },
+				"GraphQL data contract column is missing"
+			);
+			return false;
+		}
+
+		const functions = await dbPool.query<{ signature: string; function_exists: boolean }>(
+			`SELECT required.signature,
+					to_regprocedure(required.signature) IS NOT NULL AS function_exists
+				 FROM unnest($1::text[]) AS required(signature)`,
+			[REQUIRED_DATA_FUNCTIONS]
+		);
+		const missingFunction = functions.rows.find((row) => !row.function_exists);
+		if (missingFunction) {
+			logger.warn(
+				{ signature: missingFunction.signature },
+				"GraphQL data contract function is missing"
+			);
+			return false;
+		}
+		return true;
+	} catch (error) {
+		logger.warn({ err: error }, "Failed to validate GraphQL data contract");
+		return false;
+	}
+}
+
 function getCorsHeaders(origin: string | null): Record<string, string> {
 	const configuredOrigins = env.CORS_ORIGIN.split(",")
 		.map((value) => value.trim())
@@ -198,6 +307,8 @@ async function healthCheck(): Promise<{ ok: boolean; body: string }> {
 	} catch {
 		checks.postgres = "fail";
 	}
+
+	checks.dataContract = (await validateRuntimeDataContract()) ? "ok" : "fail";
 
 	try {
 		const controller = new AbortController();
