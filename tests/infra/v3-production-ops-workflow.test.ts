@@ -30,6 +30,13 @@ function runtimeEnvPython(): string {
 }
 
 describe("v3 GraphQL production hard-cut workflow", () => {
+	it("resolves manual production operations only from protected main", () => {
+		expect(workflow).toContain("repository_dispatch:");
+		expect(workflow).toContain("- v3-graphql-production-operation");
+		expect(workflow).not.toContain("workflow_dispatch:");
+		expect(workflow).not.toContain("inputs.");
+	});
+
 	it("keeps the standard deploy environment file private", () => {
 		const deploy = job("deploy", "v3_publish_image");
 		const checkout = deploy.indexOf("actions/checkout@");
@@ -179,11 +186,11 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 	);
 
 	it("does not expose legacy cleanup as a GraphQL operation", () => {
-		const operations = workflow.slice(
-			workflow.indexOf("      operation:"),
-			workflow.indexOf("      sha:")
+		const operations = Array.from(
+			workflow.matchAll(/client_payload\.operation == '([^']+)'/g),
+			(match) => match[1]
 		);
-		expect(operations).not.toContain("cleanup");
+		expect(operations.some((operation) => operation.includes("cleanup"))).toBe(false);
 		expect(workflow).not.toContain("APPROVE_V3_LEGACY_DROP");
 	});
 });

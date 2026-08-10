@@ -5,44 +5,10 @@ on:
     workflows: ["CI"]
     types: [completed]
     branches: ["main"]
-  workflow_dispatch:
-    inputs:
-      operation:
-        description: Deployment or one explicit Data Platform v3 GraphQL operation.
-        required: true
-        default: deploy
-        type: choice
-        options:
-          - deploy
-          - v3-publish-image
-          - v3-preflight
-          - v3-stop
-          - v3-start
-          - v3-status
-      sha:
-        description: Exact GraphQL commit SHA or ref; required for v3 image/start operations.
-        required: false
-        type: string
-      v3_cutover_run_id:
-        description: Exact v3 cutover run ID.
-        required: false
-        type: string
-      v3_image_ref:
-        description: Immutable lowercase GHCR GraphQL image reference pinned by sha256 digest.
-        required: false
-        type: string
-      v3_release_manifest_base64:
-        description: Canonical base64 of the approved external v3 release manifest.
-        required: false
-        type: string
-      v3_release_manifest_sha256:
-        description: SHA-256 of the approved v3 release manifest.
-        required: false
-        type: string
-      v3_cutover_approval:
-        description: Exact APPROVE_V3_ACTIVATION phrase for the cutover run.
-        required: false
-        type: string
+  # repository_dispatch resolves the workflow and GITHUB_SHA from protected main.
+  repository_dispatch:
+    types:
+      - v3-graphql-production-operation
 
 concurrency:
   group: deploy-main
@@ -51,7 +17,7 @@ concurrency:
 jobs:
   deploy:
     if: |
-      (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy') ||
+      (github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'deploy') ||
       (
         github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success' &&
@@ -72,10 +38,10 @@ jobs:
           persist-credentials: false
 
       - name: Checkout manual dispatch ref
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'repository_dispatch'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.sha || github.sha }}
+          ref: ${{ github.event.client_payload.sha || github.sha }}
           persist-credentials: false
 
       - name: Require exact protected main commit
@@ -83,7 +49,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TARGET_SHA: >-
             ${{ github.event_name == 'workflow_run' &&
-                github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+                github.event.workflow_run.head_sha || github.event.client_payload.sha || github.sha }}
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -197,7 +163,7 @@ jobs:
             done
 
   v3_publish_image:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-publish-image'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-publish-image'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -208,13 +174,13 @@ jobs:
       - name: Checkout frozen GraphQL candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.sha }}
+          ref: ${{ github.event.client_payload.sha }}
           persist-credentials: false
 
       - name: Require exact protected main commit
         env:
           GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: ${{ inputs.sha }}
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -267,7 +233,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   v3_preflight:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-preflight'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-preflight'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -350,7 +316,7 @@ jobs:
             echo "V3_GRAPHQL_PREFLIGHT_GRAPHQL_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)"
 
   v3_stop:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-stop'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-stop'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -359,8 +325,8 @@ jobs:
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
-          V3_CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
-          V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval }}
+          V3_CUTOVER_RUN_ID: ${{ github.event.client_payload.v3_cutover_run_id }}
+          V3_CUTOVER_APPROVAL: ${{ github.event.client_payload.v3_cutover_approval }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
@@ -380,7 +346,7 @@ jobs:
             echo "V3_GRAPHQL_SERVICE=stopped"
 
   v3_start:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-start'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-start'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -389,13 +355,13 @@ jobs:
       - name: Checkout frozen GraphQL candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.sha }}
+          ref: ${{ github.event.client_payload.sha }}
           persist-credentials: false
 
       - name: Require exact protected main commit
         env:
           GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: ${{ inputs.sha }}
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -407,7 +373,7 @@ jobs:
 
       - name: Resolve exact candidate commit and image
         env:
-          V3_IMAGE_REF_INPUT: ${{ inputs.v3_image_ref }}
+          V3_IMAGE_REF_INPUT: ${{ github.event.client_payload.v3_image_ref }}
         run: |
           set -euo pipefail
           DEPLOY_SHA=$(git rev-parse HEAD)
@@ -428,10 +394,10 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
-          V3_CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
-          V3_RELEASE_MANIFEST_BASE64: ${{ inputs.v3_release_manifest_base64 }}
-          V3_RELEASE_MANIFEST_SHA256: ${{ inputs.v3_release_manifest_sha256 }}
-          V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval }}
+          V3_CUTOVER_RUN_ID: ${{ github.event.client_payload.v3_cutover_run_id }}
+          V3_RELEASE_MANIFEST_BASE64: ${{ github.event.client_payload.v3_release_manifest_base64 }}
+          V3_RELEASE_MANIFEST_SHA256: ${{ github.event.client_payload.v3_release_manifest_sha256 }}
+          V3_CUTOVER_APPROVAL: ${{ github.event.client_payload.v3_cutover_approval }}
           V3_GRAPHQL_DB_PASSWORD: ${{ secrets.V3_GRAPHQL_DB_PASSWORD }}
         with:
           host: ${{ vars.VPS_HOST }}
@@ -665,7 +631,7 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose ps graphql
 
   v3_status:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-status'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-status'
     runs-on: ubuntu-latest
     permissions:
       contents: read
