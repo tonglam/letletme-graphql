@@ -88,6 +88,13 @@ export const playersTypeDefs = /* GraphQL */ `
 		OWNERSHIP_DESC
 	}
 
+	enum PlayerPickerOwnershipBand {
+		LE5
+		GT5_LE15
+		GT15_LE40
+		GT40
+	}
+
 	extend type Query {
 		player(id: Int!): Player
 		players(filter: PlayersFilter, limit: Int = 50, offset: Int = 0): [Player!]!
@@ -95,6 +102,7 @@ export const playersTypeDefs = /* GraphQL */ `
 			search: String
 			filter: PlayersFilter
 			sort: PlayerPickerSort = TOTAL_POINTS_DESC
+			ownershipBand: PlayerPickerOwnershipBand
 			limit: Int = 20
 			cursor: Int
 		): PlayersForPickerPayload!

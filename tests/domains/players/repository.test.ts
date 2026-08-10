@@ -228,6 +228,62 @@ describe("playersRepository.getPlayersForPicker", () => {
 		expect(resumedByThreshold.items[0]).toMatchObject({ id: 2, webName: "Alpha Player" });
 		expect(resumedByThreshold.totalCount).toBe(result.totalCount);
 	});
+
+	it("applies ownership bands before counting and paginating", async () => {
+		const baseline = buildTestCoreData(null);
+		const ownershipById = new Map([
+			[1, 5],
+			[2, 5.1],
+			[3, 15],
+			[4, 15.1],
+			[5, 40],
+			[6, 40.1],
+		]);
+		const core = buildTestCoreData(null, {
+			players: baseline.players.map((player) => ({
+				...player,
+				selectedByPercent: ownershipById.get(player.id) ?? null,
+			})),
+		});
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
+		const context = buildSnapshotContext(redis);
+		context.data = {
+			read: (table: string) => {
+				if (table === "fpl.events") {
+					return queryChain({ data: [], error: null }, ["select", "lte", "order", "limit"]);
+				}
+				if (table === "fpl.player_market_snapshots") {
+					return {
+						select: () => queryChain({ data: [], error: null }, ["order", "limit"]),
+					};
+				}
+				throw new Error(`Unexpected reporting table ${table}`);
+			},
+		} as never;
+
+		const expectedIds = {
+			LE5: [1],
+			GT5_LE15: [2, 3],
+			GT15_LE40: [4, 5],
+			GT40: [6],
+		} as const;
+		for (const [band, ids] of Object.entries(expectedIds)) {
+			const result = await playersRepository.getPlayersForPicker(
+				context,
+				20,
+				null,
+				null,
+				null,
+				"NAME_ASC",
+				band as keyof typeof expectedIds
+			);
+			expect(result.items.map((item) => item.id).sort((left, right) => left - right)).toEqual([
+				...ids,
+			]);
+			expect(result.totalCount).toBe(ids.length);
+			expect(result.nextCursor).toBeNull();
+		}
+	});
 });
 
 describe("playersRepository top transfers", () => {

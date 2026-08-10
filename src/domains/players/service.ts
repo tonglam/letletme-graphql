@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type {
 	Player,
+	PlayerPickerOwnershipBand,
 	PlayersFilter,
 	PlayersForPickerPayload,
 	PlayerPickerSort,
@@ -49,9 +50,18 @@ export const playersService = {
 		cursor: number | null | undefined,
 		search: string | null = null,
 		filter?: PlayersFilter | null,
-		sort: PlayerPickerSort = "TOTAL_POINTS_DESC"
+		sort: PlayerPickerSort = "TOTAL_POINTS_DESC",
+		ownershipBand: PlayerPickerOwnershipBand | null = null
 	): Promise<PlayersForPickerPayload> {
-		return playersRepository.getPlayersForPicker(context, limit, cursor, search, filter, sort);
+		return playersRepository.getPlayersForPicker(
+			context,
+			limit,
+			cursor,
+			search,
+			filter,
+			sort,
+			ownershipBand
+		);
 	},
 
 	getTeamById(context: GraphQLContext, id: number): Promise<Team | null> {
