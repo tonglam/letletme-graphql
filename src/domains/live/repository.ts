@@ -718,17 +718,23 @@ async function fetchPlayerStatsForLiveExplains(
 			.in("element_id", elementIds),
 	]);
 
-	if (snapshotResult.error || gameweekStatsResult.error) {
-		const error = snapshotResult.error ?? gameweekStatsResult.error;
+	const snapshotQueryFailed = snapshotResult.error !== null;
+	const gameweekQueryFailed = gameweekStatsResult.error !== null;
+	if (snapshotQueryFailed || gameweekQueryFailed) {
 		context.logger.warn(
-			{ err: error, eventId, elementIds },
+			{
+				err: snapshotResult.error ?? gameweekStatsResult.error,
+				eventId,
+				elementIds,
+				snapshotQueryFailed,
+				gameweekQueryFailed,
+			},
 			"player live stats batch query failed for live explanations"
 		);
-		return { rows: new Map(), eventRows: new Map(), failed: true };
 	}
 	const rows = new Map<number, DbLiveExplainStats>();
 	const eventRows = new Map<number, DbLiveExplainStats>();
-	for (const raw of (snapshotResult.data ?? []) as unknown[]) {
+	for (const raw of (snapshotQueryFailed ? [] : (snapshotResult.data ?? [])) as unknown[]) {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
 		const row = raw as DbLiveExplainStats;
 		const elementId = parseIntegerValue(pickRecordValue(row, "element_id", "elementId"));
@@ -738,13 +744,17 @@ async function fetchPlayerStatsForLiveExplains(
 	// fields because those legacy columns are not present in every accepted
 	// snapshot archive. The gameweek stats projection is the nullable source for
 	// these fields.
-	for (const raw of (gameweekStatsResult.data ?? []) as unknown[]) {
+	for (const raw of (gameweekQueryFailed ? [] : (gameweekStatsResult.data ?? [])) as unknown[]) {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
 		const gameweekRow = raw as DbLiveExplainStats;
 		const elementId = parseIntegerValue(pickRecordValue(gameweekRow, "element_id", "elementId"));
 		if (elementId === null || !elementIds.includes(elementId)) continue;
 		eventRows.set(elementId, gameweekRow);
-		const current = rows.get(elementId) ?? { event_id: eventId, element_id: elementId };
+		const current = rows.get(elementId) ?? gameweekRow;
+		if (snapshotQueryFailed || !rows.has(elementId)) {
+			rows.set(elementId, current);
+			continue;
+		}
 		for (const [target, keys] of [
 			["penalties_missed", ["penalties_missed", "penaltiesMissed"]],
 			["defensive_contribution", ["defensive_contribution", "defensiveContribution"]],
@@ -754,7 +764,7 @@ async function fetchPlayerStatsForLiveExplains(
 		}
 		rows.set(elementId, current);
 	}
-	return { rows, eventRows, failed: false };
+	return { rows, eventRows, failed: snapshotQueryFailed || gameweekQueryFailed };
 }
 
 async function fetchEventLiveExplainsFromDatabase(

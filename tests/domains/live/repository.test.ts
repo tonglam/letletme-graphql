@@ -13,12 +13,16 @@ import {
 const withReadRows = (
 	context: GraphQLContext,
 	rowsByModel: Record<string, unknown[]>,
-	calls: string[] = []
+	calls: string[] = [],
+	errorsByModel: Record<string, Error | null> = {}
 ): GraphQLContext => {
 	context.data = {
 		read: (model: string) => {
 			calls.push(model);
-			const result = Promise.resolve({ data: rowsByModel[model] ?? [], error: null });
+			const result = Promise.resolve({
+				data: rowsByModel[model] ?? [],
+				error: errorsByModel[model] ?? null,
+			});
 			const builder = {
 				select: () => builder,
 				eq: () => builder,
@@ -581,5 +585,34 @@ describe("liveRepository v3 explanation query cache", () => {
 			"fpl.player_gameweek_scoring_items": [],
 		});
 		await expect(liveRepository.getEventLiveExplain(context, 1, 1)).resolves.toBeNull();
+	});
+
+	it("preserves snapshot stats when the gameweek stats query fails", async () => {
+		const { context, redis } = liveContext();
+		withReadRows(
+			context,
+			{
+				"fpl.player_event_snapshots": [
+					{
+						event_id: 1,
+						element_id: 1,
+						minutes: 90,
+						total_points: 6,
+					},
+				],
+				"fpl.player_gameweek_scoring_items": [],
+				"fpl.player_fixture_stats": [],
+			},
+			[],
+			{ "fpl.player_gameweek_stats": new Error("gameweek stats unavailable") }
+		);
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [1]);
+
+		expect(result).toMatchObject({
+			elementId: 1,
+			stats: { minutes: 90, totalPoints: 6 },
+		});
+		expect(redis.setCalls.some(([key]) => key.includes(":live-explain:"))).toBe(false);
 	});
 });
