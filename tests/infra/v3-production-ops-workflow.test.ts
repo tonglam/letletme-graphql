@@ -97,7 +97,7 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 	});
 
 	it("gates the exact image before changing checkout or runtime config", () => {
-		const start = job("v3_start", "v3_status");
+		const start = job("v3_start", "v3_redeploy");
 		const trustedMain = start.indexOf('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
 		const dataHealth = start.indexOf("http://127.0.0.1:3000/health");
 		const manifestDigest = start.indexOf("actual_manifest_sha");
@@ -141,6 +141,45 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(start).toContain('V3_RELEASE_MANIFEST_SHA256="$GATE_MANIFEST_SHA256"');
 		expect(start).not.toContain("GRAPHQL_ENV");
 		expect(start).not.toContain("git clean");
+	});
+
+	it("redeploys merged main by immutable digest without changing runtime config", () => {
+		const redeploy = job("v3_redeploy", "v3_status");
+		const trustedMain = redeploy.indexOf('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
+		const exactRepository = redeploy.indexOf('test "${IMAGE_REF%@*}" = "$IMAGE_NAME"');
+		const dataHealth = redeploy.indexOf("http://127.0.0.1:3000/health");
+		const exactRemote = redeploy.indexOf('test "$(git rev-parse origin/main)" = "$EXPECTED_SHA"');
+		const expectedTag = redeploy.indexOf('EXPECTED_TAG="${IMAGE_NAME}:v3-${EXPECTED_SHA}"');
+		const digestBinding = redeploy.indexOf('grep -Fx "$IMAGE_REF"');
+		const stop = redeploy.indexOf("docker compose stop -t 30 graphql");
+		const reset = redeploy.indexOf('git reset --hard "$EXPECTED_SHA"');
+		const contract = redeploy.indexOf("bun run contract:check");
+		const start = redeploy.indexOf("docker compose up -d --no-deps --no-build graphql");
+		const anonymousAuth = redeploy.indexOf("test \"$anonymous_status\" = '401'");
+		const functionalSmoke = redeploy.indexOf("v3_graphql_redeploy_contract_passed");
+		const imageReadback = redeploy.indexOf("{{.Config.Image}}");
+
+		expect(trustedMain).toBeGreaterThan(0);
+		expect(exactRepository).toBeGreaterThan(trustedMain);
+		expect(dataHealth).toBeGreaterThan(exactRepository);
+		expect(exactRemote).toBeGreaterThan(dataHealth);
+		expect(expectedTag).toBeGreaterThan(exactRemote);
+		expect(digestBinding).toBeGreaterThan(expectedTag);
+		expect(stop).toBeGreaterThan(digestBinding);
+		expect(reset).toBeGreaterThan(stop);
+		expect(contract).toBeGreaterThan(reset);
+		expect(start).toBeGreaterThan(contract);
+		expect(anonymousAuth).toBeGreaterThan(start);
+		expect(functionalSmoke).toBeGreaterThan(anonymousAuth);
+		expect(imageReadback).toBeGreaterThan(functionalSmoke);
+		expect(redeploy).toContain("currentEventInfo { season currentEvent nextEvent }");
+		expect(redeploy).toContain("players(limit: 1)");
+		expect(redeploy).toContain("marketPulse(days: 14)");
+		expect(redeploy).toContain("liveSnapshot(eventId: 1)");
+		expect(redeploy).not.toContain("GRAPHQL_ENV");
+		expect(redeploy).not.toContain("V3_GRAPHQL_DB_PASSWORD");
+		expect(redeploy).not.toContain("V3_CUTOVER_APPROVAL");
+		expect(redeploy).not.toContain("git clean");
 	});
 
 	it.each(["postgres", "letletme_graphql_runtime"])(
