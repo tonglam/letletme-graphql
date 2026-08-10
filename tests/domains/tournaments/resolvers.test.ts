@@ -11,6 +11,7 @@ import {
 	type TournamentEventResult,
 	type TournamentSeasonSnapshot,
 	TournamentMode,
+	TournamentSetupStatus,
 	TournamentState,
 	tournamentsRepository,
 } from "../../../src/domains/tournaments/repository";
@@ -90,6 +91,7 @@ describe("TournamentEventResult resolvers", () => {
 				knockoutEndedEventId: null,
 				knockoutPlayAgainstNum: null,
 				state: TournamentState.ACTIVE,
+				setupStatus: TournamentSetupStatus.READY,
 				createdAt: "2026-04-21T00:00:00.000Z",
 				updatedAt: "2026-04-21T00:00:00.000Z",
 			},

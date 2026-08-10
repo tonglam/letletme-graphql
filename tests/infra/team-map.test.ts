@@ -7,7 +7,7 @@ import {
 	TestRedis,
 } from "../helpers/data-publication";
 
-describe("team map v3 core publication", () => {
+describe("team map core publication", () => {
 	it("preserves nullable preseason strength and request-pins the map", async () => {
 		const core = buildTestCoreData(1);
 		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));

@@ -14,7 +14,7 @@ registered read model with `LIMIT 0`.
 Run the unit fail-closed cases with:
 
 ```bash
-bun test tests/infra/database-contract.test.ts tests/infra/v3-read-client.test.ts
+bun test tests/infra/database-contract.test.ts tests/infra/read-model-client.test.ts
 ```
 
 CI additionally replays the accepted Data commit into a disposable PostgreSQL

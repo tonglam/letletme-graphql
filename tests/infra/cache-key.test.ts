@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-	GRAPHQL_CACHE_NAMESPACE,
-	GRAPHQL_CACHE_SCHEMA_VERSION,
-	gqlCacheKey,
-} from "../../src/infra/cache-key";
+import { GRAPHQL_CACHE_NAMESPACE, gqlCacheKey } from "../../src/infra/cache-key";
 import type { GraphQLContext } from "../../src/graphql/context";
 
 const context = (seasonCode = "2627", dataRevision: string | null = "core-7") =>
@@ -13,12 +9,10 @@ const context = (seasonCode = "2627", dataRevision: string | null = "core-7") =>
 	}) as GraphQLContext;
 
 describe("gqlCacheKey", () => {
-	test("namespaces every query by GraphQL schema and Data dataset revision", () => {
+	test("namespaces every query by Data dataset revision", () => {
 		const key = gqlCacheKey(context(), "players:list:all");
 
-		expect(
-			key.startsWith(`${GRAPHQL_CACHE_NAMESPACE}:${GRAPHQL_CACHE_SCHEMA_VERSION}:core-7:`)
-		).toBe(true);
+		expect(key.startsWith(`${GRAPHQL_CACHE_NAMESPACE}:core-7:`)).toBe(true);
 	});
 
 	test("isolates cache entries by revision, season and raw query arguments", () => {

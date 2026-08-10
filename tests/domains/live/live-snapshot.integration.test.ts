@@ -46,7 +46,7 @@ const buildPartiallySettledLiveCore = () => {
 	};
 };
 
-describe("liveSnapshot GraphQL v3 contract", () => {
+describe("liveSnapshot GraphQL contract", () => {
 	it("exposes the validated publication metadata and event-live data", async () => {
 		const core = buildLiveCore();
 		const live = buildLivePublication(core, 1, "2627", 8, {
@@ -61,9 +61,9 @@ describe("liveSnapshot GraphQL v3 contract", () => {
 			schema,
 			source: `
 				query Snapshot($eventId: Int!) {
-			liveSnapshot(eventId: $eventId) {
-				schemaVersion season eventId revision state
-				publishedAt checkedAt eventLiveCount fixtureCount
+					liveSnapshot(eventId: $eventId) {
+						season eventId revision state
+						publishedAt checkedAt eventLiveCount fixtureCount
 						fixtureTeamCount bonusTeamCount
 					}
 					eventLive(eventId: $eventId) {
@@ -78,7 +78,6 @@ describe("liveSnapshot GraphQL v3 contract", () => {
 
 		expect(result.errors).toBeUndefined();
 		expect(result.data?.liveSnapshot).toEqual({
-			schemaVersion: 3,
 			season: "2627",
 			eventId: 1,
 			revision: "8",
@@ -108,7 +107,7 @@ describe("liveSnapshot GraphQL v3 contract", () => {
 		const originalGet = redis.get;
 		let liveManifestReads = 0;
 		redis.get = async (key: string) => {
-			if (key === `llm:v3:data:fpl:live:2627:1:active`) liveManifestReads += 1;
+			if (key === `llm:data:fpl:live:2627:1:active`) liveManifestReads += 1;
 			return originalGet(key);
 		};
 		const context = buildSnapshotContext(redis);
@@ -159,6 +158,13 @@ describe("liveSnapshot GraphQL v3 contract", () => {
 		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
 		const brokenSibling = live.manifest.items.find((item) => item.name === "liveFixtures")!;
 		redis.values.delete(brokenSibling.key);
+		const fallbackManifest = {
+			...buildLivePublication(core, 1, "2627", 44, {
+				eventLives,
+				state: "live",
+			}).manifest,
+			publicationId: "00000000-0000-4000-8000-000000000044",
+		};
 		let databaseReads = 0;
 		const context = buildSnapshotContext(redis, {
 			databaseQuery: async () => {
@@ -169,8 +175,7 @@ describe("liveSnapshot GraphQL v3 contract", () => {
 							authority_count: "1",
 							publication_id: "00000000-0000-4000-8000-000000000044",
 							revision: "44",
-							schema_version: "v3",
-							plan_version: "3.2.5",
+							manifest: fallbackManifest,
 							source_checked_at: "2026-08-09T01:02:00.000Z",
 							published_at: "2026-08-09T01:03:00.000Z",
 							event_checked_at: "2026-08-09T01:02:00.000Z",

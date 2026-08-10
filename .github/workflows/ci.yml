@@ -15,15 +15,11 @@ env:
   REDIS_PASSWORD: ""
   PORT: "4000"
   LOG_LEVEL: info
-  CACHE_TTL_SECONDS: "60"
   BACKEND_PROXY_SECRET: test-backend-proxy-secret
   GRAPHQL_SERVICE_TOKEN: test-graphql-service-token-at-least-32-characters
-  REQUIRE_SIGNED_WEB_INGRESS: "false"
-  GRAPHQL_AUTH_MODE: enforce
   CORS_ORIGIN: http://localhost:3000
   CORS_CREDENTIALS: "false"
   TRUSTED_PROXY_HOPS: "0"
-  LEGACY_AUTH_VALIDATION_UNTIL: ""
 
 jobs:
   verify:
@@ -118,7 +114,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tonglam/letletme_data
-          ref: 21f466d410c15e96d9f84e2c96ffeba66a36fbf2
+          ref: 4a8e30ecb211ebf92f6f93893eed0887cf8a5fb4
           path: data-platform
           persist-credentials: false
 
@@ -139,7 +135,7 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: bun run db:migrate
 
-      - name: Provide plain-PG Supabase compatibility identities
+      - name: Provide plain-PG Supabase identities
         env:
           DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: |
@@ -155,12 +151,69 @@ jobs:
           AS $fn$ SELECT current_setting('request.jwt.claim.role', true) $fn$;
           SQL
 
-      - name: Replay accepted Data Platform SQL contract twice
+      - name: Apply SQL migrations through the GraphQL ledger boundary
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: >-
+          bun scripts/apply-sql-migrations.ts
+          --through 0079_create_v3_ops_and_roles.sql
+
+      - name: Install the historical GraphQL ledger fixture
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: >-
+          bun -e 'import postgres from "postgres";
+          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+          const ddl = await Bun.file("tests/fixtures/graphql-migration-ledger.sql").text();
+          await sql.unsafe(ddl);
+          await sql.end();'
+
+      - name: Apply SQL migrations through the production import boundary
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: >-
+          bun scripts/apply-sql-migrations.ts
+          --through 0089_prepare_v3_publications.sql
+
+      - name: Install the optional public-league source fixture
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: >-
+          bun -e 'import postgres from "postgres";
+          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+          const ddl = await Bun.file("tests/fixtures/public-league-trends-catalog.sql").text();
+          await sql.unsafe(ddl);
+          await sql.end();'
+
+      - name: Apply SQL migrations through the historical cutover boundary
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: >-
+          bun scripts/apply-sql-migrations.ts
+          --through 0090_zzzz_integrate_understat_runtime.sql
+
+      - name: Apply the historical cutover tail fixture
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: bun tests/helpers/apply-historical-cutover-tail.ts
+
+      - name: Apply canonical SQL migrations
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: bun run db:apply-sql
+
+      - name: Verify SQL migrations are idempotent and complete
         working-directory: data-platform
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: |
-          bun run db:apply-sql
           bun run db:apply-sql
           bun run db:migrate:status
 
@@ -204,8 +257,8 @@ jobs:
           GRANT letletme_graphql_reader TO graphql_ci;
           SQL
 
-      - name: Validate startup against the real PG15 v3 catalog
+      - name: Validate startup against the real PG15 catalog
         run: bun run contract:check
 
       - name: Exercise reader and fail-closed contract cases
-        run: bun test tests/infra/v3-read-client.test.ts tests/infra/database-contract.test.ts
+        run: bun test tests/infra/read-model-client.test.ts tests/infra/database-contract.test.ts

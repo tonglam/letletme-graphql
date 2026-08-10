@@ -5,15 +5,16 @@ Auth, serve `/api/auth/*`, issue device sessions, or accept cookie sessions.
 
 ## Accepted request credentials
 
-1. Website requests carry `X-User-Context` and `X-User-Context-Sig`. The
-   signed base64url envelope is version 2, has audience `letletme-graphql`,
-   includes `uid`, `iat`, and `exp`, and expires within 60 seconds. An FPL
-   entry is included only when `fpl_entry_verified_at` is non-null.
-2. Mini Program requests carry a web-issued bearer token. GraphQL hashes the
-   token and validates it against `bauth.mini_program_session`.
-3. Old GraphQL WeChat and device tokens are validation-only during the explicit
-   `LEGACY_AUTH_VALIDATION_UNTIL` grace window. They are never issued by this
-   service and are removed after the seven-day zero-use retirement gate.
+1. Every browser or Mini Program request arrives through a valid, short-lived
+   Web-signed ingress context.
+2. Website users additionally carry `X-User-Context` and
+   `X-User-Context-Sig`. The exact base64url envelope contains `aud`, `uid`,
+   `eid`, `evat`, `iat`, and `exp` and expires within 60 seconds. An FPL entry
+   is trusted only when `evat` is non-null.
+3. Mini Program requests carry a Web-issued bearer token. GraphQL hashes the
+   token and validates it against `bauth.mini_program_session` only after the
+   ingress signature succeeds.
+4. Public server-rendered Web reads use the independent GraphQL service token.
 
 Every entry-scoped field requires a verified entry binding. The `fpl_entry_id`
 column alone is not sufficient; existing bindings are intentionally unverified
@@ -43,5 +44,5 @@ Entry, league, tournament, and calculation fields are authorized against the
 resolved principal. Removed fields include `myDevices`, `revokeDevice`,
 `identifyWechatUser`, and `bindFplEntry`.
 
-See [README](../README.md), [rollout contract](../docs/ROLLOUT.md), and the
-web repository's Better Auth and binding migration for deployment details.
+See [README](../README.md) and the Web repository's authentication contract for
+deployment details.

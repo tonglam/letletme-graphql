@@ -93,7 +93,7 @@ const historyRows: QueryResultRow[] = [
 
 const verifiedLink: QueryResultRow = {
 	status: "auto_verified",
-	rule_version: "understat-fpl-player-name-v3",
+	rule_id: "understat-fpl-player-name",
 	left_entity_id: "1000",
 	evidence: { confirmedSeasons: ["2425", "2526"] },
 };
@@ -294,7 +294,7 @@ const makeContext = (redis: TestRedis): GraphQLContext =>
 		data: {},
 	}) as unknown as GraphQLContext;
 
-describe("Player State v3 repository", () => {
+describe("Player State repository", () => {
 	it("uses a season-confirmed bridge link and direct Understat PostgreSQL cohort", async () => {
 		const redis = new TestRedis();
 		const { executor, queries } = makeExecutor();
@@ -319,7 +319,7 @@ describe("Player State v3 repository", () => {
 		expect(queries.some((query) => query.includes("bridge.entity_links"))).toBe(true);
 		expect(queries.some((query) => query.includes("understat.player_seasons"))).toBe(true);
 		expect(redis.setCalls[0]?.slice(2)).toEqual(["EX", PLAYER_STATE_SUCCESS_CACHE_TTL_SECONDS]);
-		expect(redis.setCalls[0]?.[0]).toStartWith("llm:v3:gql:v3:9:");
+		expect(redis.setCalls[0]?.[0]).toStartWith("llm:gql:9:");
 
 		const queryCount = queries.length;
 		const second = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
@@ -363,7 +363,7 @@ describe("Player State v3 repository", () => {
 		const { executor, queries } = makeExecutor({
 			link: {
 				status: "ambiguous",
-				rule_version: "understat-fpl-player-name-v3",
+				rule_id: "understat-fpl-player-name",
 				left_entity_id: "1000",
 				evidence: { confirmedSeasons: ["2526"] },
 			},

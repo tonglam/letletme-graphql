@@ -7,7 +7,6 @@ import {
 	buildOwnBaseline,
 	composePlayerState,
 	percentile,
-	PLAYER_STATE_ENGINE_VERSION,
 } from "../src/domains/player-state/engine";
 import type {
 	PlayerGameweekSample,
@@ -220,13 +219,12 @@ async function main(): Promise<void> {
 		console.log(
 			JSON.stringify(
 				{
-					engineVersion: PLAYER_STATE_ENGINE_VERSION,
 					mode: "fpl-only",
 					method: "completed-season walk-forward; features through GW N; target GW N+1..N+5",
 					seasons: [],
 					observations: 0,
 					releaseGate: "WITHHOLD",
-					reason: "FPL_V3_HISTORY_STORAGE_UNAVAILABLE",
+					reason: "FPL_HISTORY_STORAGE_UNAVAILABLE",
 				},
 				null,
 				2
@@ -429,7 +427,6 @@ async function main(): Promise<void> {
 	console.log(
 		JSON.stringify(
 			{
-				engineVersion: PLAYER_STATE_ENGINE_VERSION,
 				mode: "fpl-only",
 				method: "completed-season walk-forward; features through GW N; target GW N+1..N+5",
 				seasons,

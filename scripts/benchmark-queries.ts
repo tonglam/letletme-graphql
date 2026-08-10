@@ -19,7 +19,7 @@ import { database } from "../src/infra/database";
 import { env } from "../src/infra/env";
 import { logger } from "../src/infra/logger";
 import { connectRedis, getRedis } from "../src/infra/redis";
-import { V3ReadClient } from "../src/infra/v3-read-client";
+import { ReadModelClient } from "../src/infra/read-model-client";
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -727,7 +727,7 @@ async function runBenchmark(): Promise<void> {
 	await connectRedis();
 	const redis = createReadOnlyRedis(getRedis());
 	const context: GraphQLContext = {
-		data: new V3ReadClient(database, contract.currentSeason),
+		data: new ReadModelClient(database, contract.currentSeason),
 		database,
 		currentSeason: contract.currentSeason,
 		redis,
@@ -818,7 +818,7 @@ async function runBenchmark(): Promise<void> {
 	console.log("GRAPHQL QUERY BENCHMARK RESULTS");
 	console.log(`Timestamp: ${nowIso()}`);
 	console.log(`Redis:     ${env.REDIS_HOST}:${env.REDIS_PORT}`);
-	console.log(`Postgres:  read-only Data Platform ${contract.schemaVersion}`);
+	console.log("Postgres:  read-only Data Platform");
 	console.log(`Mode:      read-only Redis, ${BENCHMARK_ITERATIONS} samples/query`);
 	console.log(`Timeout:   ${QUERY_TIMEOUT_MS} ms/query sample`);
 	console.log("=".repeat(100));
@@ -872,7 +872,7 @@ async function runBenchmark(): Promise<void> {
 			timestamp: nowIso(),
 			redisHost: env.REDIS_HOST,
 			redisPort: env.REDIS_PORT,
-			databaseMode: "read-only-v3",
+			databaseMode: "read-only",
 			datasetRevision: contract.datasetRevision,
 			totalQueries: results.length,
 			iterations: BENCHMARK_ITERATIONS,

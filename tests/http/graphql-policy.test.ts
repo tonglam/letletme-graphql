@@ -3,16 +3,14 @@ import type { GraphQLIngress } from "../../src/infra/ingress-context";
 import {
 	graphQLAdmissionSubjects,
 	graphQLIngressFailure,
-	graphQLCompatibilityAdmissionSubject,
 	graphQLMethodFailure,
 	graphQLUsesSharedPublicBudget,
 	graphQLWeightedRateLimitSubject,
-	requiresCompatibilityAdmission,
 	shouldPrechargeResolvedPrincipal,
 } from "../../src/http/graphql-policy";
 
 const ingress = (overrides: Partial<GraphQLIngress>): GraphQLIngress => ({
-	class: "anonymous",
+	class: "untrusted",
 	trusted: false,
 	subject: null,
 	ingressContext: null,
@@ -29,168 +27,51 @@ describe("GraphQL transport and ingress policy", () => {
 		});
 	});
 
-	it("allows compatibility traffic only before trusted ingress enforcement", () => {
-		const anonymous = ingress({});
-		expect(graphQLIngressFailure(anonymous, false)).toBeNull();
-		expect(graphQLIngressFailure(anonymous, true)).toMatchObject({
+	it("rejects every untrusted request", () => {
+		expect(graphQLIngressFailure(ingress({}))).toMatchObject({
 			status: 401,
 			code: "UNTRUSTED_INGRESS",
 		});
 	});
 
-	it("accepts signed and service ingress without treating the service as a user", () => {
+	it("accepts signed and service ingress", () => {
 		expect(
-			graphQLIngressFailure(ingress({ class: "signed", trusted: true, subject: "signed" }), true)
+			graphQLIngressFailure(ingress({ class: "signed", trusted: true, subject: "signed" }))
 		).toBeNull();
 		expect(
-			graphQLIngressFailure(ingress({ class: "service", trusted: true, subject: "service" }), true)
+			graphQLIngressFailure(ingress({ class: "service", trusted: true, subject: "service" }))
 		).toBeNull();
 	});
 
-	it("allows legacy website envelopes only during compatibility mode", () => {
-		const legacyWebsite = ingress({ class: "unsigned_user_context" });
-		expect(graphQLIngressFailure(legacyWebsite, false)).toBeNull();
-		expect(graphQLIngressFailure(legacyWebsite, true)).toMatchObject({
-			status: 401,
-			code: "INVALID_INGRESS_CONTEXT",
+	it("uses the trusted ingress subject for admission and weighted limits", () => {
+		const signed = ingress({ class: "signed", trusted: true, subject: "signed-client" });
+		expect(graphQLAdmissionSubjects({ ingress: signed, principal: null })).toEqual({
+			global: "all-graphql-traffic",
+			ingress: "signed-client",
+			prechargesWeightedBudget: true,
 		});
+		expect(graphQLWeightedRateLimitSubject({ ingress: signed, principal: null })).toBe(
+			"signed-client"
+		);
 	});
 
-	it("admits untrusted compatibility traffic through a separate request bucket", () => {
-		expect(requiresCompatibilityAdmission(ingress({ class: "unsigned_bearer" }))).toBe(true);
-		expect(requiresCompatibilityAdmission(ingress({ class: "unsigned_user_context" }))).toBe(true);
-		expect(requiresCompatibilityAdmission(ingress({ class: "anonymous" }))).toBe(false);
-		expect(requiresCompatibilityAdmission(ingress({ class: "signed", trusted: true }))).toBe(false);
-	});
-
-	it("separates compatibility admission without exposing credentials", () => {
-		const firstToken = "first-secret-token";
-		const secondToken = "second-secret-token";
-		const firstSubject = graphQLCompatibilityAdmissionSubject({
-			headers: new Headers({ Authorization: `Bearer ${firstToken}` }),
-			ingress: ingress({ class: "unsigned_bearer" }),
-			principal: null,
-			fallbackSubject: "127.0.0.1",
-		});
-		const secondSubject = graphQLCompatibilityAdmissionSubject({
-			headers: new Headers({ Authorization: `Bearer ${secondToken}` }),
-			ingress: ingress({ class: "unsigned_bearer" }),
-			principal: null,
-			fallbackSubject: "127.0.0.1",
-		});
-		expect(firstSubject).not.toBe(secondSubject);
-		expect(firstSubject).not.toContain(firstToken);
-		expect(secondSubject).not.toContain(secondToken);
-	});
-
-	it("keeps a non-rotatable global ceiling alongside fair ingress subjects", () => {
-		const first = graphQLAdmissionSubjects({
-			headers: new Headers({ Authorization: "Bearer rotating-token-1" }),
-			ingress: ingress({ class: "unsigned_bearer" }),
-			principal: null,
-			fallbackSubject: "127.0.0.1",
-		});
-		const second = graphQLAdmissionSubjects({
-			headers: new Headers({ Authorization: "Bearer rotating-token-2" }),
-			ingress: ingress({ class: "unsigned_bearer" }),
-			principal: null,
-			fallbackSubject: "127.0.0.1",
-		});
-		expect(first.global).toBe(second.global);
-		expect(first.ingress).not.toBe(second.ingress);
-		expect(first.prechargesWeightedBudget).toBe(false);
-		expect(second.prechargesWeightedBudget).toBe(false);
-	});
-
-	it("admits trusted ingress by its signed subject before authorization", () => {
-		const signed = graphQLAdmissionSubjects({
-			headers: new Headers(),
-			ingress: ingress({ class: "signed", trusted: true, subject: "signed-client" }),
-			principal: null,
-			fallbackSubject: "127.0.0.1",
-		});
-		expect(signed.ingress).toBe("signed-client");
-		expect(signed.prechargesWeightedBudget).toBe(true);
-		const compatibleWebsite = graphQLAdmissionSubjects({
-			headers: new Headers(),
-			ingress: ingress({ class: "unsigned_user_context" }),
-			principal: {
-				userId: "user-1",
-				source: "website",
-				provider: "better_auth",
-				fplEntryId: 7,
-				fplEntryVerifiedAt: "2026-08-03T00:00:00.000Z",
-			},
-			fallbackSubject: "127.0.0.1",
-		});
-		expect(compatibleWebsite.ingress).toBe("principal:better_auth:user-1");
-		expect(compatibleWebsite.prechargesWeightedBudget).toBe(true);
-		const anonymous = graphQLAdmissionSubjects({
-			headers: new Headers(),
-			ingress: ingress({ class: "anonymous" }),
-			principal: null,
-			fallbackSubject: "127.0.0.1",
-		});
-		expect(anonymous.ingress).toBeNull();
-		expect(anonymous.prechargesWeightedBudget).toBe(false);
-	});
-
-	it("separates validated compatibility users from shared network subjects", () => {
-		const unsigned = ingress({ class: "unsigned_bearer" });
-		expect(
-			graphQLWeightedRateLimitSubject({
-				ingress: unsigned,
-				principal: {
-					userId: "user-1",
-					source: "wechat_miniprogram",
-					provider: "wechat_miniprogram",
-					fplEntryId: 7,
-					fplEntryVerifiedAt: "2026-08-03T00:00:00.000Z",
-				},
-				fallbackSubject: "203.0.113.1",
-			})
-		).toBe("principal:wechat_miniprogram:user-1");
-		expect(
-			graphQLWeightedRateLimitSubject({
-				ingress: unsigned,
-				principal: null,
-				fallbackSubject: "203.0.113.1",
-			})
-		).toBe("203.0.113.1");
-	});
-
-	it("precharges a principal resolved after compatibility admission", () => {
-		const resolvedPrincipal = {
+	it("precharges a principal only when the ingress did not already consume a unit", () => {
+		const principal = {
 			userId: "user-1",
 			source: "wechat_miniprogram" as const,
 			provider: "wechat_miniprogram" as const,
 			fplEntryId: 7,
 			fplEntryVerifiedAt: "2026-08-03T00:00:00.000Z",
 		};
-		expect(shouldPrechargeResolvedPrincipal(resolvedPrincipal, false)).toBe(true);
-		expect(shouldPrechargeResolvedPrincipal(resolvedPrincipal, true)).toBe(false);
+		expect(shouldPrechargeResolvedPrincipal(principal, false)).toBe(true);
+		expect(shouldPrechargeResolvedPrincipal(principal, true)).toBe(false);
 		expect(shouldPrechargeResolvedPrincipal(null, false)).toBe(false);
 	});
 
-	it("isolates anonymous compatibility reads in a larger shared-public budget", () => {
-		const anonymous = ingress({ class: "anonymous" });
+	it("assigns the larger shared-public budget only to the Web service token", () => {
 		const service = ingress({ class: "service", trusted: true, subject: "service-public" });
-		expect(
-			graphQLWeightedRateLimitSubject({
-				ingress: anonymous,
-				principal: null,
-				fallbackSubject: "127.0.0.1",
-			})
-		).toBe("shared-public:compat-anonymous");
-		expect(
-			graphQLWeightedRateLimitSubject({
-				ingress: service,
-				principal: null,
-				fallbackSubject: "127.0.0.1",
-			})
-		).toBe("service-public");
-		expect(graphQLUsesSharedPublicBudget(anonymous)).toBe(true);
+		const signed = ingress({ class: "signed", trusted: true, subject: "signed-public" });
 		expect(graphQLUsesSharedPublicBudget(service)).toBe(true);
-		expect(graphQLUsesSharedPublicBudget(ingress({ class: "signed", trusted: true }))).toBe(false);
+		expect(graphQLUsesSharedPublicBudget(signed)).toBe(false);
 	});
 });

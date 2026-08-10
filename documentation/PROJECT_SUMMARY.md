@@ -6,16 +6,15 @@ identity provider.
 
 Operational contracts:
 
-- Data business reads use the schema-qualified Data Platform v3 PostgreSQL
+- Data business reads use the schema-qualified PostgreSQL
   contract through a fail-closed, read-only login.
 - `fpl.seasons.is_current` is the sole current-season authority.
 - `letletme-web` owns authentication and `bauth`; `letletme_data` owns facts,
   reporting models, sync state, and Data publications.
 - Request size, GraphQL complexity, entry batches, ingress, and rate limits are
   bounded before expensive work.
-- PostgreSQL is authoritative. G2 owns the revision-coherent Redis publication
-  and GraphQL query-cache cut.
+- PostgreSQL is authoritative. Data owns revision-coherent Redis publications;
+  GraphQL owns expiring revision-keyed query results.
 
-Use [README](../README.md), [architecture](ARCHITECTURE_OVERVIEW.md), and
-[rollout](../docs/ROLLOUT.md) as current instructions. Older design documents
-are historical context only.
+Use [README](../README.md) and [architecture](ARCHITECTURE_OVERVIEW.md) as the
+current instructions.

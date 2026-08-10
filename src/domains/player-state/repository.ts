@@ -19,7 +19,6 @@ import {
 	composePlayerState,
 	expectedMetricsAvailableForSeason,
 	percentile,
-	PLAYER_STATE_ENGINE_VERSION,
 } from "./engine";
 import {
 	buildPlayerStateProviderRevision,
@@ -275,7 +274,7 @@ const historicalCohortsSql = `
 
 const verifiedProviderLinkSql = `
 	/* player-state:provider-link-verified */
-	SELECT status::text, rule_version, left_entity_id, evidence
+	SELECT status::text, rule_id, left_entity_id, evidence
 	FROM bridge.entity_links
 	WHERE entity_type = 'player'
 		AND left_provider = 'understat'
@@ -287,7 +286,7 @@ const verifiedProviderLinkSql = `
 
 const unresolvedProviderLinkSql = `
 	/* player-state:provider-link-unresolved */
-	SELECT status::text, rule_version, left_entity_id, evidence
+	SELECT status::text, rule_id, left_entity_id, evidence
 	FROM bridge.entity_links
 	WHERE entity_type = 'player'
 		AND left_provider = 'understat'
@@ -402,10 +401,7 @@ const profileGuard = (value: unknown): value is PlayerStateProfile =>
 	isRecord(value.coverage);
 
 const profileCacheKey = (context: GraphQLContext, playerId: number, horizon: number): string =>
-	gqlCacheKey(
-		context,
-		`player-state-profile:${PLAYER_STATE_ENGINE_VERSION}:${playerId}:${horizon}`
-	);
+	gqlCacheKey(context, `player-state-profile:${playerId}:${horizon}`);
 
 async function readProfileCache(
 	context: GraphQLContext,

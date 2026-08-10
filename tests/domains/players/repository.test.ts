@@ -14,7 +14,7 @@ const queryChain = <T>(result: T, methods: string[]) => {
 	return promise;
 };
 
-describe("playersRepository v3 core reads", () => {
+describe("playersRepository core reads", () => {
 	it("pins one immutable core revision per request and exposes a newer revision to a new request", async () => {
 		const core = buildTestCoreData(1);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
@@ -68,7 +68,7 @@ describe("playersRepository v3 core reads", () => {
 		expect(second).toEqual(first);
 		expect(readCount).toBe(1);
 		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":players-event-stats:"));
-		expect(cacheWrite?.[0]).toMatch(/^llm:v3:gql:v3:core-7:players-event-stats:/);
+		expect(cacheWrite?.[0]).toMatch(/^llm:gql:core-7:players-event-stats:/);
 		expect(cacheWrite?.slice(-2)).toEqual(["EX", 3600]);
 	});
 });
@@ -124,7 +124,7 @@ describe("playersRepository.getPlayersForPicker", () => {
 		expect(second).toEqual(first);
 		expect(marketReads).toBe(2);
 		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":players-picker:"));
-		expect(cacheWrite?.[0]).toMatch(/^llm:v3:gql:v3:core-7:players-picker:/);
+		expect(cacheWrite?.[0]).toMatch(/^llm:gql:core-7:players-picker:/);
 		expect(cacheWrite?.slice(-2)).toEqual(["EX", 300]);
 	});
 
@@ -217,16 +217,9 @@ describe("playersRepository.getPlayersForPicker", () => {
 		}
 		expect(foundZed).toBe(true);
 
-		const resumedByThreshold = await playersRepository.getPlayersForPicker(
-			context,
-			1,
-			1,
-			null,
-			null,
-			"NAME_ASC"
-		);
-		expect(resumedByThreshold.items[0]).toMatchObject({ id: 2, webName: "Alpha Player" });
-		expect(resumedByThreshold.totalCount).toBe(result.totalCount);
+		await expect(
+			playersRepository.getPlayersForPicker(context, 1, 1, null, null, "NAME_ASC")
+		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
 	});
 
 	it("applies ownership bands before counting and paginating", async () => {

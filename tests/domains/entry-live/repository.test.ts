@@ -2,13 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
 import { gqlCacheKey } from "../../../src/infra/cache-key";
 
-const buildContext = (
-	options: { cache?: string | null; legacyCache?: string | null; rows?: unknown[] } = {}
-) => {
+const buildContext = (options: { cache?: string | null; rows?: unknown[] } = {}) => {
 	const strings = new Map<string, string>();
-	if (options.legacyCache !== undefined && options.legacyCache !== null) {
-		strings.set("gql:v2:2526:entries:transfers:v2:1:3", options.legacyCache);
-	}
 
 	const redis = {
 		get: async (key: string) => strings.get(key) ?? null,
@@ -50,7 +45,7 @@ const buildContext = (
 		logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
 	} as never;
 	if (options.cache !== undefined && options.cache !== null) {
-		strings.set(gqlCacheKey(context, "entries:transfers:v3:1:3"), options.cache);
+		strings.set(gqlCacheKey(context, "entries:transfers:1:3"), options.cache);
 	}
 	return context;
 };
@@ -107,7 +102,7 @@ describe("entryLiveRepository transfers", () => {
 		expect(transfers[0]?.elementIn).toBe(20);
 	});
 
-	it("reads only the canonical v3 transfer_time projection", async () => {
+	it("reads only the canonical transfer_time projection", async () => {
 		const selected: string[] = [];
 		const redis = {
 			get: async () => null,
@@ -182,36 +177,10 @@ describe("entryLiveRepository transfers", () => {
 			"Stored transfer costs are missing"
 		);
 	});
-
-	it("ignores legacy v2 transfer caches that did not contain official costs", async () => {
-		const context = buildContext({
-			legacyCache: JSON.stringify([
-				{ entryId: 1, eventId: 3, elementIn: 99, elementOut: 98, time: null },
-			]),
-			rows: [
-				{
-					entry_id: 1,
-					event_id: 3,
-					element_in_id: 20,
-					element_in_cost: 55,
-					element_out_id: 10,
-					element_out_cost: 60,
-					transfer_time: null,
-				},
-			],
-		});
-
-		const transfers = await entryLiveRepository.getEntryEventTransfers(context, 1, 3);
-		expect(transfers[0]).toMatchObject({
-			elementIn: 20,
-			elementInCost: 55,
-			elementOutCost: 60,
-		});
-	});
 });
 
 describe("entryLiveRepository batch picks", () => {
-	it("reads the canonical v3 pick, chip, and transfer-cost columns", async () => {
+	it("reads the canonical pick, chip, and transfer-cost columns", async () => {
 		let projection = "";
 		const pipelineWrites: unknown[][] = [];
 		const pipeline = {

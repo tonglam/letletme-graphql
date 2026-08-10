@@ -1,13 +1,8 @@
 import type { QueryResultRow } from "pg";
 import type { QueryExecutor } from "./database";
-import { env } from "./env";
 import { loadCurrentSeason, type CurrentSeason } from "./season";
-import { V3ReadClient } from "./v3-read-client";
-import {
-	DATA_PLATFORM_PLAN_VERSION,
-	DATA_PUBLICATION_SCHEMA_VERSION,
-	isDataPublicationId,
-} from "./data-publication";
+import { ReadModelClient } from "./read-model-client";
+import { isDataPublicationId, parseDataPublicationManifest } from "./data-publication";
 
 const DATA_SCHEMAS = ["fpl", "competition", "reporting", "ops", "understat", "bridge"] as const;
 const GRAPHQL_RUNTIME_CAPABILITY_ROLE = "letletme_graphql_reader";
@@ -27,11 +22,6 @@ const GRAPHQL_AUTH_COLUMN_KEYS = new Set(
 		columnNames.map((columnName) => `${relationName}.${columnName}`)
 	)
 );
-
-export const isLegacyAuthValidationRequired = (
-	deadline: number | null | undefined,
-	now = Date.now()
-): boolean => typeof deadline === "number" && Number.isFinite(deadline) && now <= deadline;
 
 type RoleRow = QueryResultRow & {
 	session_user: string;
@@ -67,12 +57,6 @@ type SchemaPrivilegeRow = QueryResultRow & {
 	has_create: boolean;
 };
 
-type AuthContractPresenceRow = QueryResultRow & {
-	schema_exists: boolean;
-	user_exists: boolean;
-	mini_program_session_exists: boolean;
-};
-
 type RelationPrivilegeRow = QueryResultRow & {
 	relation_name: string;
 	relation_exists: boolean;
@@ -102,8 +86,6 @@ export type DatabaseContractSnapshot = Readonly<{
 	currentSeason: CurrentSeason;
 	publicationId: string;
 	datasetRevision: string;
-	schemaVersion: string;
-	planVersion: string;
 }>;
 
 export class DatabaseContractError extends Error {
@@ -150,7 +132,7 @@ export const validateDatabaseContract = async (
 	}
 	if (Math.floor(role.server_version_num / 10_000) !== 15) {
 		throw new DatabaseContractError(
-			`Data Platform v3 requires PostgreSQL 15; connected major is ${Math.floor(role.server_version_num / 10_000)}`
+			`Data Platform requires PostgreSQL 15; connected major is ${Math.floor(role.server_version_num / 10_000)}`
 		);
 	}
 	if (
@@ -229,37 +211,7 @@ export const validateDatabaseContract = async (
 		);
 	}
 
-	const authContractPresence = (
-		await database.query<AuthContractPresenceRow>(
-			`SELECT
-					EXISTS (
-						SELECT 1 FROM pg_namespace WHERE nspname = 'bauth'
-					) AS schema_exists,
-					EXISTS (
-						SELECT 1
-						FROM pg_class relation
-						JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-						WHERE namespace.nspname = 'bauth' AND relation.relname = 'user'
-					) AS user_exists,
-					EXISTS (
-						SELECT 1
-						FROM pg_class relation
-						JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-						WHERE namespace.nspname = 'bauth' AND relation.relname = 'mini_program_session'
-					) AS mini_program_session_exists`
-		)
-	).rows[0];
-	const authContractPresent =
-		authContractPresence?.schema_exists === true &&
-		(authContractPresence.user_exists === true ||
-			authContractPresence.mini_program_session_exists === true);
-	const legacyAuthValidationOpen = isLegacyAuthValidationRequired(env.LEGACY_AUTH_VALIDATION_UNTIL);
-	const authSchemasRequired = authContractPresent || legacyAuthValidationOpen;
-	const requiredSchemas = [
-		...DATA_SCHEMAS,
-		...(authSchemasRequired ? ["bauth" as const] : []),
-		...(legacyAuthValidationOpen ? ["public" as const] : []),
-	].sort();
+	const requiredSchemas = [...DATA_SCHEMAS, "bauth"].sort();
 	const schemaPrivileges = (
 		await database.query<SchemaPrivilegeRow>(
 			`SELECT
@@ -280,19 +232,11 @@ export const validateDatabaseContract = async (
 
 	const requiredRelations = [
 		...new Set([
-			...V3ReadClient.sourceRelations(),
+			...ReadModelClient.sourceRelations(),
 			// Used only when Redis has no coherent core publication.
 			"fpl.phases",
 			"competition.public_league_trends",
 			"ops.dataset_publications",
-			...(legacyAuthValidationOpen
-				? [
-						...(authContractPresent ? [] : ['bauth."user"']),
-						"bauth.api_sessions",
-						'public."user"',
-						"public.device_sessions",
-					]
-				: []),
 		]),
 	].sort();
 	const relationPrivileges = (
@@ -327,7 +271,7 @@ export const validateDatabaseContract = async (
 		);
 	}
 
-	if (authContractPresent) {
+	{
 		const authRelationPrivileges = (
 			await database.query<RelationPrivilegeRow>(
 				`SELECT
@@ -424,13 +368,7 @@ export const validateDatabaseContract = async (
 				 JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
 				 WHERE namespace.nspname = ANY($1::text[])
 				   AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')`,
-				[
-					[
-						...DATA_SCHEMAS,
-						...(authSchemasRequired ? ["bauth"] : []),
-						...(legacyAuthValidationOpen ? ["public"] : []),
-					],
-				]
+				[[...DATA_SCHEMAS, "bauth"]]
 			)
 		).rows,
 		"The PostgreSQL write boundary cannot be resolved"
@@ -457,28 +395,27 @@ export const validateDatabaseContract = async (
 		).rows,
 		"Exactly one active fpl:core publication is required"
 	);
-	const schemaVersion = publication.manifest.schemaVersion;
-	const planVersion = publication.manifest.planVersion;
 	if (!isDataPublicationId(publication.publication_id)) {
 		throw new DatabaseContractError("The active Data publication has an invalid RFC UUID");
 	}
+	const manifest = parseDataPublicationManifest(JSON.stringify(publication.manifest), {
+		dataset: "fpl:core",
+		seasonCode: currentSeason.seasonCode,
+	});
 	if (
-		schemaVersion !== DATA_PUBLICATION_SCHEMA_VERSION ||
-		planVersion !== DATA_PLATFORM_PLAN_VERSION
+		!manifest ||
+		manifest.publicationId !== publication.publication_id ||
+		String(manifest.revision) !== publication.revision
 	) {
-		throw new DatabaseContractError(
-			`Unsupported Data Platform contract ${String(schemaVersion)}/${String(planVersion)}`
-		);
+		throw new DatabaseContractError("The active Data publication manifest is not canonical");
 	}
 
-	await new V3ReadClient(database, currentSeason).probe();
+	await new ReadModelClient(database, currentSeason).probe();
 
 	return {
 		roleName: role.role_name,
 		currentSeason,
 		publicationId: publication.publication_id,
 		datasetRevision: publication.revision,
-		schemaVersion,
-		planVersion,
 	};
 };

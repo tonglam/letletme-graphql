@@ -746,8 +746,8 @@ async function fetchPlayerStatsForLiveExplains(
 		const elementId = parseIntegerValue(pickRecordValue(row, "element_id", "elementId"));
 		if (elementId !== null && elementIds.includes(elementId)) rows.set(elementId, row);
 	}
-	// The v3 snapshot projection intentionally excludes some canonical gameweek
-	// fields because those legacy columns are not present in every accepted
+	// The snapshot projection intentionally excludes some canonical gameweek
+	// fields because those columns are not present in every accepted
 	// snapshot archive. The gameweek stats projection is the nullable source for
 	// these fields.
 	for (const raw of (gameweekQueryFailed ? [] : (gameweekStatsResult.data ?? [])) as unknown[]) {

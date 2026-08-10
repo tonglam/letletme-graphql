@@ -109,6 +109,9 @@ describe("mapTournamentInfo", () => {
 			knockout_ended_event_id: 12,
 			knockout_play_against_num: 1,
 			state: "active",
+			setup_status: "ready",
+			setup_phase: "ready",
+			standings_ready_at: "2026-04-21T00:00:00.000Z",
 			created_at: "2026-04-21T00:00:00.000Z",
 			updated_at: "2026-04-21T00:00:00.000Z",
 		};
@@ -157,11 +160,11 @@ describe("mapTournamentInfo", () => {
 		});
 	});
 
-	it("treats nullable legacy setup status as an already-published tournament", () => {
+	it("rejects a missing setup status", () => {
 		const updatedAt = "2026-04-21T00:00:00.000Z";
 		const row: DbTournamentInfoRow = {
 			id: 12,
-			name: "Legacy League",
+			name: "Published League",
 			creator: "alice",
 			admin_entry_id: 1001,
 			league_id: 999,
@@ -192,11 +195,7 @@ describe("mapTournamentInfo", () => {
 			updated_at: updatedAt,
 		};
 
-		expect(mapTournamentInfo(row)).toMatchObject({
-			setupStatus: TournamentSetupStatus.READY,
-			setupPhase: TournamentSetupPhase.READY,
-			standingsReadyAt: updatedAt,
-		});
+		expect(() => mapTournamentInfo(row)).toThrow("Unknown tournament setup status");
 	});
 });
 
@@ -228,6 +227,7 @@ describe("mapTournamentEventResult", () => {
 			knockout_ended_event_id: null,
 			knockout_play_against_num: null,
 			state: "active",
+			setup_status: "ready",
 			created_at: "2026-04-21T00:00:00.000Z",
 			updated_at: "2026-04-21T00:00:00.000Z",
 		});
@@ -317,6 +317,7 @@ describe("mapTournamentEventResult", () => {
 			knockout_ended_event_id: null,
 			knockout_play_against_num: null,
 			state: "active",
+			setup_status: "ready",
 			created_at: "2026-04-21T00:00:00.000Z",
 			updated_at: "2026-04-21T00:00:00.000Z",
 		});
@@ -520,6 +521,7 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 		knockout_ended_event_id: null,
 		knockout_play_against_num: null,
 		state: "active",
+		setup_status: "ready",
 		created_at: "2026-04-21T00:00:00.000Z",
 		updated_at: "2026-04-21T00:00:00.000Z",
 	};
@@ -747,9 +749,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		const redisState = new Map<string, string>();
 		if (options.cacheSeed) {
 			redisState.set(
-				testCacheKey(
-					`tournaments:ranking-summary:v2:{"entryId":15702,"eventId":3,"tournamentId":1}`
-				),
+				testCacheKey(`tournaments:ranking-summary:{"entryId":15702,"eventId":3,"tournamentId":1}`),
 				options.cacheSeed
 			);
 		}
@@ -885,6 +885,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		knockout_ended_event_id: null,
 		knockout_play_against_num: null,
 		state: "active",
+		setup_status: "ready",
 		created_at: "2026-04-21T00:00:00.000Z",
 		updated_at: "2026-04-21T00:00:00.000Z",
 	};
@@ -923,7 +924,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		expect(result).toEqual(cached);
 	});
 
-	it("returns empty summary for non-points-race tournaments from the v3 tournament model", async () => {
+	it("returns empty summary for non-points-race tournaments from the canonical model", async () => {
 		const context = buildContext({
 			tournamentData: [{ ...tournamentRow, group_mode: "battle_races" }],
 		});
@@ -1137,7 +1138,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		bank: 10,
 	});
 
-	it("builds one tournament season snapshot from v3 reporting rows", async () => {
+	it("builds one tournament season snapshot from reporting rows", async () => {
 		const context = buildContext({
 			tournamentData: [tournamentRow],
 			eventResults: [
@@ -1270,6 +1271,7 @@ describe("mapTournamentBattleGroupResult", () => {
 		knockout_ended_event_id: null,
 		knockout_play_against_num: null,
 		state: "active",
+		setup_status: "ready",
 		created_at: "2026-04-21T00:00:00.000Z",
 		updated_at: "2026-04-21T00:00:00.000Z",
 	});
@@ -1746,6 +1748,7 @@ describe("tournamentsRepository.getTournamentBattleGroupResults", () => {
 		knockout_ended_event_id: null,
 		knockout_play_against_num: null,
 		state: "active",
+		setup_status: "ready",
 		created_at: "2026-04-21T00:00:00.000Z",
 		updated_at: "2026-04-21T00:00:00.000Z",
 	};
@@ -1928,7 +1931,7 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 		let membershipReads = 0;
 		const redisState = new Map<string, string>();
 		const h2hCacheKey = (tournamentIds: number[]) =>
-			testCacheKey(`tournaments:entry-h2h:v3:100:${JSON.stringify(tournamentIds)}`);
+			testCacheKey(`tournaments:entry-h2h:100:${JSON.stringify(tournamentIds)}`);
 
 		const makeBuilder = (table: string) => {
 			const actions: QueryAction[] = [];

@@ -12,7 +12,6 @@ import {
 export type { LiveSnapshotState };
 
 export type LiveSnapshotMeta = {
-	schemaVersion: 3;
 	season: string;
 	eventId: number;
 	revision: string;
@@ -94,7 +93,6 @@ export const parseLiveSnapshotMeta = (
 		return null;
 	}
 	return {
-		schemaVersion: 3,
 		season: manifest.seasonCode,
 		eventId: manifest.eventId!,
 		revision: String(manifest.revision),
@@ -134,7 +132,6 @@ export const loadLiveSnapshotMeta = async (
 	if (memoized) return memoized;
 	const snapshot = await getLiveDataSnapshot(context, eventId);
 	const meta: LiveSnapshotMeta = {
-		schemaVersion: 3,
 		season: snapshot.seasonCode,
 		eventId,
 		revision: snapshot.revision,

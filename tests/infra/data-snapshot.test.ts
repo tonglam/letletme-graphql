@@ -41,6 +41,10 @@ describe("typed Data snapshots", () => {
 		const complete = buildTestCoreData(1);
 		const truncated = buildTestCoreData(1, { fixtures: complete.fixtures.slice(0, 379) });
 		const publication = buildCorePublication("2627", 7, truncated);
+		const fallbackManifest = {
+			...buildCorePublication("2627", 9, complete).manifest,
+			publicationId: uuid,
+		};
 		let calls = 0;
 		const context = buildSnapshotContext(new TestRedis(publication), {
 			databaseQuery: async (sql: unknown, values: unknown) => {
@@ -55,8 +59,7 @@ describe("typed Data snapshots", () => {
 							authority_count: "1",
 							publication_id: uuid,
 							revision: "9",
-							schema_version: "v3",
-							plan_version: "3.2.5",
+							manifest: fallbackManifest,
 							source_checked_at: "2026-08-09T01:00:00.000Z",
 							events: complete.events,
 							teams: complete.teams,
@@ -76,7 +79,12 @@ describe("typed Data snapshots", () => {
 		expect(calls).toBe(1);
 	});
 
-	it("rejects an unsupported active core publication during PostgreSQL fallback", async () => {
+	it("rejects a non-canonical active core publication during PostgreSQL fallback", async () => {
+		const invalidManifest = {
+			...buildCorePublication("2627", 9, buildTestCoreData(1)).manifest,
+			publicationId: uuid,
+			unexpectedField: true,
+		};
 		const context = buildSnapshotContext(new TestRedis(), {
 			databaseQuery: async () => ({
 				rows: [
@@ -84,8 +92,7 @@ describe("typed Data snapshots", () => {
 						authority_count: "1",
 						publication_id: uuid,
 						revision: "9",
-						schema_version: "v3",
-						plan_version: "3.2.4",
+						manifest: invalidManifest,
 						source_checked_at: "2026-08-09T01:00:00.000Z",
 						events: [],
 						teams: [],
@@ -247,12 +254,17 @@ describe("typed Data snapshots", () => {
 		);
 	});
 
-	it("rejects an unsupported active live publication during PostgreSQL fallback", async () => {
+	it("rejects a non-canonical active live publication during PostgreSQL fallback", async () => {
 		const core = buildTestCoreData(1);
 		const live = buildLivePublication(core, 1, "2627", 8);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
 		const brokenSibling = live.manifest.items.find((item) => item.name === "liveFixtures")!;
 		redis.values.delete(brokenSibling.key);
+		const invalidManifest = {
+			...buildLivePublication(core, 1, "2627", 9).manifest,
+			publicationId: uuid,
+			unexpectedField: true,
+		};
 		const context = buildSnapshotContext(redis, {
 			databaseQuery: async () => ({
 				rows: [
@@ -260,8 +272,7 @@ describe("typed Data snapshots", () => {
 						authority_count: "1",
 						publication_id: uuid,
 						revision: "9",
-						schema_version: "v3",
-						plan_version: "3.2.4",
+						manifest: invalidManifest,
 						source_checked_at: "2026-08-09T01:00:00.000Z",
 						published_at: "2026-08-09T01:00:00.000Z",
 						event_checked_at: "2026-08-09T01:00:00.000Z",

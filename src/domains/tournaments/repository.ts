@@ -118,7 +118,7 @@ export type TournamentInfo = {
 	knockoutEndedEventId: number | null;
 	knockoutPlayAgainstNum: number | null;
 	state: TournamentState;
-	setupStatus?: TournamentSetupStatus;
+	setupStatus: TournamentSetupStatus;
 	setupPhase?: TournamentSetupPhase;
 	setupCompletedUnits?: number;
 	setupTotalUnits?: number;
@@ -171,7 +171,7 @@ export type DbTournamentInfoRow = {
 	knockout_ended_event_id: number | null;
 	knockout_play_against_num: number | null;
 	state: string;
-	setup_status?: string;
+	setup_status: string;
 	setup_phase?: string;
 	setup_completed_units?: number;
 	setup_total_units?: number;
@@ -553,11 +553,12 @@ const mapTournamentState = (state: string): TournamentState => {
 	throw new Error(`Unknown tournament state: ${state}`);
 };
 
-const mapTournamentSetupStatus = (status: string | null | undefined): TournamentSetupStatus => {
+const mapTournamentSetupStatus = (status: string): TournamentSetupStatus => {
 	if (status === TournamentSetupStatus.PENDING) return TournamentSetupStatus.PENDING;
 	if (status === TournamentSetupStatus.PROCESSING) return TournamentSetupStatus.PROCESSING;
 	if (status === TournamentSetupStatus.FAILED) return TournamentSetupStatus.FAILED;
-	return TournamentSetupStatus.READY;
+	if (status === TournamentSetupStatus.READY) return TournamentSetupStatus.READY;
+	throw new Error(`Unknown tournament setup status: ${status}`);
 };
 
 const mapTournamentSetupPhase = (phase: string | null | undefined): TournamentSetupPhase => {
@@ -631,9 +632,7 @@ export const mapTournamentInfo = (row: DbTournamentInfoRow): TournamentInfo => (
 	setupCompletedUnits: row.setup_completed_units ?? 0,
 	setupTotalUnits: row.setup_total_units ?? 0,
 	setupProgressUpdatedAt: row.setup_progress_updated_at ?? null,
-	standingsReadyAt:
-		row.standings_ready_at ??
-		(row.setup_status === null || row.setup_status === undefined ? row.updated_at : null),
+	standingsReadyAt: row.standings_ready_at ?? null,
 	setupHasWarnings: (row.setup_warning_count ?? 0) > 0,
 	setupStartedAt: row.setup_started_at ?? null,
 	setupFinishedAt: row.setup_finished_at ?? null,
@@ -885,18 +884,10 @@ const getTournamentCacheReadiness = async (
 	}
 
 	const row = (
-		data as Array<{ standings_ready_at?: string | null; setup_status?: string | null }> | null
+		data as Array<{ standings_ready_at: string | null; setup_status: string }> | null
 	)?.[0];
 	if (!row) return false;
-
-	// Legacy rows predate the lifecycle columns and are represented by NULL
-	// setup_status. Their existing standings remain usable and should not be
-	// treated as an unready shell solely because the new timestamp is absent.
-	return (
-		(row.standings_ready_at !== null && row.standings_ready_at !== undefined) ||
-		row.setup_status === null ||
-		row.setup_status === undefined
-	);
+	return row.setup_status === TournamentSetupStatus.READY;
 };
 
 interface TournamentsRepository {
@@ -1457,7 +1448,7 @@ export const tournamentsRepository: TournamentsRepository = {
 	): Promise<TournamentEntryRankingSummary> {
 		const cacheKey = gqlCacheKey(
 			context,
-			`tournaments:ranking-summary:v2:${stableStringify({
+			`tournaments:ranking-summary:${stableStringify({
 				tournamentId,
 				eventId,
 				entryId,
@@ -1590,7 +1581,7 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const cacheKey = gqlCacheKey(
 			context,
-			`tournaments:season-snapshot:v2:${stableStringify({ tournamentId, eventId })}`
+			`tournaments:season-snapshot:${stableStringify({ tournamentId, eventId })}`
 		);
 		const cached = await readJsonCache(context, cacheKey, isSeasonSnapshotCache);
 		if (isSeasonSnapshotCache(cached)) {
@@ -1741,7 +1732,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		// still available under the empty-membership key.
 		const cacheKey = gqlCacheKey(
 			context,
-			`tournaments:entry-h2h:v3:${entryId}:${stableStringify(membershipTournamentIds)}`
+			`tournaments:entry-h2h:${entryId}:${stableStringify(membershipTournamentIds)}`
 		);
 		const cached = await readJsonCache(context, cacheKey, isH2HResultArrayCache);
 		if (

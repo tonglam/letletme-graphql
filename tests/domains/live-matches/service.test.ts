@@ -2,15 +2,10 @@ import { describe, expect, it } from "bun:test";
 import {
 	applyLiveFixtureScores,
 	loadLiveFixtureBucketsFromRedis,
-	loadUpcomingEventFixtures,
 	liveMatchesService,
 	resolveLiveMatchStatus,
 } from "../../../src/domains/live-matches/service";
-import {
-	isLiveSnapshotConsistencyActive,
-	LiveSnapshotCoherenceError,
-	loadOperationLiveSnapshotMeta,
-} from "../../../src/domains/live/snapshot-meta";
+import { LiveSnapshotCoherenceError } from "../../../src/domains/live/snapshot-meta";
 import {
 	buildCorePublication,
 	buildLivePublication,
@@ -20,20 +15,12 @@ import {
 } from "../../helpers/data-publication";
 
 describe("resolveLiveMatchStatus", () => {
-	it("prefers the authoritative fixture ID over a stale pair status", () => {
+	it("uses the fixture ID status before database fixture flags", () => {
 		const fixture = { id: 701, teamHId: 1, teamAId: 2, finished: false, started: true };
 		const byFixtureId = new Map([[701, "FINISHED" as const]]);
-		const byPair = new Map([["1:2", "PLAYING" as const]]);
 
-		expect(resolveLiveMatchStatus(fixture, byFixtureId, byPair)).toBe("FINISHED");
-	});
-
-	it("falls back to the home-away pair and then database fixture flags", () => {
-		const fixture = { id: 702, teamHId: 3, teamAId: 4, finished: false, started: false };
-		expect(resolveLiveMatchStatus(fixture, new Map(), new Map([["3:4", "PLAYING" as const]]))).toBe(
-			"PLAYING"
-		);
-		expect(resolveLiveMatchStatus(fixture, new Map(), new Map())).toBe("NOT_STARTED");
+		expect(resolveLiveMatchStatus(fixture, byFixtureId)).toBe("FINISHED");
+		expect(resolveLiveMatchStatus(fixture, new Map())).toBe("PLAYING");
 	});
 });
 
@@ -67,20 +54,17 @@ describe("applyLiveFixtureScores", () => {
 });
 
 describe("loadLiveFixtureBucketsFromRedis", () => {
-	it("reads the complete v3 live publication and keeps one home row per fixture", async () => {
+	it("binds every live row to its fixture ID", async () => {
 		const core = buildTestCoreData(1);
-		const corePublication = buildCorePublication("2627", 7, core);
-		const livePublication = buildLivePublication(core, 1, "2627", 8);
-		const context = buildSnapshotContext(new TestRedis(corePublication, livePublication));
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), buildLivePublication(core, 1, "2627", 8))
+		);
 		const expectedFixtures = core.fixtures.filter((fixture) => fixture.eventId === 1);
 
 		const buckets = await loadLiveFixtureBucketsFromRedis(context, 1, expectedFixtures);
 
-		expect(buckets).not.toBeNull();
 		expect(buckets?.notStarted).toHaveLength(10);
-		expect(buckets?.playing).toEqual([]);
-		expect(buckets?.finished).toEqual([]);
-		expect(buckets?.notStarted.map((fixture) => fixture.fixtureId).sort((a, b) => a! - b!)).toEqual(
+		expect(buckets?.notStarted.map((fixture) => fixture.fixtureId).sort((a, b) => a - b)).toEqual(
 			expectedFixtures.map((fixture) => fixture.id).sort((a, b) => a - b)
 		);
 	});
@@ -100,70 +84,25 @@ describe("loadLiveFixtureBucketsFromRedis", () => {
 	});
 });
 
-describe("loadUpcomingEventFixtures", () => {
-	it("pins the next event publication while reading fixtures from the same core revision", async () => {
+describe("liveMatchesService.getAllLiveMatches", () => {
+	it("returns only current-event buckets", async () => {
 		const core = buildTestCoreData(1);
 		const context = buildSnapshotContext(
-			new TestRedis(
-				buildCorePublication("2627", 7, core),
-				buildLivePublication(core, 1, "2627", 8),
-				buildLivePublication(core, 2, "2627", 9)
-			)
-		);
-
-		const fixtures = await loadUpcomingEventFixtures(context, 1);
-
-		expect(fixtures).toHaveLength(10);
-		expect(fixtures.every((fixture) => fixture.eventId === 2)).toBe(true);
-		expect(await loadOperationLiveSnapshotMeta(context, 2)).toMatchObject({
-			eventId: 2,
-			revision: "9",
-		});
-		expect(isLiveSnapshotConsistencyActive(context, 2)).toBe(true);
-	});
-
-	it("uses the flagged next event when there is no current event in preseason", async () => {
-		const core = buildTestCoreData(null);
-		const context = buildSnapshotContext(
 			new TestRedis(buildCorePublication("2627", 7, core), buildLivePublication(core, 1, "2627", 8))
 		);
 
-		const fixtures = await loadUpcomingEventFixtures(context, null);
+		const result = await liveMatchesService.getAllLiveMatches(context);
 
-		expect(fixtures).toHaveLength(10);
-		expect(fixtures.every((fixture) => fixture.eventId === 1)).toBe(true);
-		expect(await loadOperationLiveSnapshotMeta(context, 1)).toMatchObject({
-			eventId: 1,
-			revision: "8",
-		});
-	});
-});
-
-describe("liveMatchesService.getAllLiveMatches", () => {
-	it("returns GW1 as nextEvent during preseason when upcoming is requested", async () => {
-		const core = buildTestCoreData(null);
-		const context = buildSnapshotContext(
-			new TestRedis(buildCorePublication("2627", 7, core), buildLivePublication(core, 1, "2627", 8))
-		);
-
-		const result = await liveMatchesService.getAllLiveMatches(context, true);
-
-		expect(result.nextEvent).toHaveLength(10);
-		expect(result.nextEvent.every((match) => match.playStatus === "NEXT_EVENT")).toBe(true);
-		expect(result.nextEvent.map((match) => match.matchId)).toEqual(
-			core.fixtures.filter((fixture) => fixture.eventId === 1).map((fixture) => fixture.id)
-		);
-		expect(result.notStarted).toEqual([]);
+		expect(result.notStarted).toHaveLength(10);
 		expect(result.playing).toEqual([]);
 		expect(result.finished).toEqual([]);
 	});
 
-	it("keeps preseason empty when upcoming is not requested", async () => {
+	it("returns empty buckets during preseason", async () => {
 		const core = buildTestCoreData(null);
 		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
 
 		await expect(liveMatchesService.getAllLiveMatches(context)).resolves.toEqual({
-			nextEvent: [],
 			notStarted: [],
 			playing: [],
 			finished: [],

@@ -2,7 +2,6 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import Redis from "ioredis";
 import { Pool, type QueryResultRow } from "pg";
 import type { GraphQLContext } from "../../../src/graphql/context";
-import { PLAYER_STATE_ENGINE_VERSION } from "../../../src/domains/player-state/engine";
 import {
 	createPlayerStateRepository,
 	type PlayerStateRepository,
@@ -13,7 +12,7 @@ import {
 	type CoreDataSnapshot,
 } from "../../../src/infra/data-snapshot";
 import { gqlCacheKey } from "../../../src/infra/cache-key";
-import { V3ReadClient } from "../../../src/infra/v3-read-client";
+import { ReadModelClient } from "../../../src/infra/read-model-client";
 import { TestRedis, testLogger } from "../../helpers/data-publication";
 
 const enabled = process.env.RUN_B0_PLAYER_STATE === "1";
@@ -172,7 +171,7 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 				data: {},
 			}) as unknown as GraphQLContext;
 
-		it("returns a cross-provider profile from v3 relations", async () => {
+		it("returns a cross-provider profile from canonical relations", async () => {
 			const profile = await repository.getPlayerStateProfile(
 				context(new TestRedis()),
 				subject.element_id,
@@ -229,7 +228,7 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 					redis,
 					logger: testLogger,
 					database: pool,
-					data: new V3ReadClient(pool, {
+					data: new ReadModelClient(pool, {
 						seasonId: currentSeason.season_id,
 						seasonCode: currentSeason.season_code,
 					}),
@@ -244,7 +243,7 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 					currentContext.dataRevision = coreDatasetRevision(currentCore);
 					cacheKey = gqlCacheKey(
 						currentContext,
-						`player-state-profile:${PLAYER_STATE_ENGINE_VERSION}:${currentSubject.element_id}:5`
+						`player-state-profile:${currentSubject.element_id}:5`
 					);
 					await redis.del(cacheKey);
 					const currentRepository = createPlayerStateRepository({ executor: pool });
@@ -274,12 +273,9 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 				const redisContext = context(redis);
 				const successKey = gqlCacheKey(
 					redisContext,
-					`player-state-profile:${PLAYER_STATE_ENGINE_VERSION}:${subject.element_id}:5`
+					`player-state-profile:${subject.element_id}:5`
 				);
-				const nullKey = gqlCacheKey(
-					redisContext,
-					`player-state-profile:${PLAYER_STATE_ENGINE_VERSION}:999999:5`
-				);
+				const nullKey = gqlCacheKey(redisContext, `player-state-profile:999999:5`);
 				try {
 					await redis.del(successKey, nullKey);
 					await repository.getPlayerStateProfile(redisContext, subject.element_id, 5);

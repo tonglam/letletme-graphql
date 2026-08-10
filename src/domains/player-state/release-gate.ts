@@ -1,8 +1,6 @@
-import { PLAYER_STATE_ENGINE_VERSION } from "./engine";
 import type { PlayerStateTrend } from "./types";
 
 export const PLAYER_STATE_RELEASE_EVIDENCE = {
-	engineVersion: PLAYER_STATE_ENGINE_VERSION,
 	evaluatedAt: "2026-08-09",
 	mode: "fpl-only",
 	seasons: ["1617", "1718", "1819", "1920", "2021", "2122", "2223", "2324", "2425", "2526"],
@@ -13,7 +11,7 @@ export const PLAYER_STATE_RELEASE_EVIDENCE = {
 		FALLING: 11.92,
 	},
 	released: false,
-	reason: "FPL_V3_WALK_FORWARD_ORDERING_FAILED",
+	reason: "FPL_WALK_FORWARD_ORDERING_FAILED",
 } as const;
 
 const directionalTrends = new Set<PlayerStateTrend>(["RISING", "STABLE", "FALLING"]);

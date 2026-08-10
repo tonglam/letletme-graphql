@@ -1,3 +1,4 @@
+import { GraphQLError } from "graphql";
 import type { QueryResultRow } from "pg";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
@@ -139,11 +140,8 @@ export type PlayersForPickerPayload = {
 export type PlayerPickerSort =
 	"NAME_ASC" | "TOTAL_POINTS_DESC" | "FORM_DESC" | "PRICE_ASC" | "PRICE_DESC" | "OWNERSHIP_DESC";
 
-// Keep the GraphQL cursor as an Int for existing clients. New cursors are
-// negative, versioned offsets tied to the active sort; positive cursors retain
-// the legacy player-ID threshold semantics during a rolling deployment.
-const PICKER_CURSOR_VERSION = 1;
-const PICKER_CURSOR_VERSION_STRIDE = 1_000_000;
+// Keep the GraphQL cursor as an Int. Canonical cursors are negative values that
+// bind an offset to the active sort without carrying an internal version.
 const PICKER_CURSOR_SORT_STRIDE = 100_000;
 const PICKER_SORT_CODES: Record<PlayerPickerSort, number> = {
 	NAME_ASC: 1,
@@ -155,27 +153,24 @@ const PICKER_SORT_CODES: Record<PlayerPickerSort, number> = {
 };
 
 const encodePickerCursor = (sort: PlayerPickerSort, offset: number): number =>
-	-(
-		PICKER_CURSOR_VERSION * PICKER_CURSOR_VERSION_STRIDE +
-		PICKER_SORT_CODES[sort] * PICKER_CURSOR_SORT_STRIDE +
-		offset +
-		1
-	);
+	-(PICKER_SORT_CODES[sort] * PICKER_CURSOR_SORT_STRIDE + offset + 1);
 
-const decodePickerCursor = (
-	cursor: number | null,
-	sort: PlayerPickerSort
-): { offset: number; legacyId: number | null } => {
-	if (cursor === null || cursor === 0) return { offset: 0, legacyId: null };
-	if (cursor > 0) return { offset: 0, legacyId: cursor };
-	const encoded = -cursor - 1;
-	const version = Math.floor(encoded / PICKER_CURSOR_VERSION_STRIDE);
-	const sortCode = Math.floor((encoded % PICKER_CURSOR_VERSION_STRIDE) / PICKER_CURSOR_SORT_STRIDE);
-	const offset = encoded % PICKER_CURSOR_SORT_STRIDE;
-	if (version !== PICKER_CURSOR_VERSION || sortCode !== PICKER_SORT_CODES[sort] || offset < 0) {
-		return { offset: 0, legacyId: null };
+const decodePickerCursor = (cursor: number | null, sort: PlayerPickerSort): { offset: number } => {
+	if (cursor === null || cursor === 0) return { offset: 0 };
+	if (cursor > 0) {
+		throw new GraphQLError("Positive player cursors are not supported", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
 	}
-	return { offset, legacyId: null };
+	const encoded = -cursor - 1;
+	const sortCode = Math.floor(encoded / PICKER_CURSOR_SORT_STRIDE);
+	const offset = encoded % PICKER_CURSOR_SORT_STRIDE;
+	if (sortCode !== PICKER_SORT_CODES[sort] || offset < 0) {
+		throw new GraphQLError("Player cursor does not match the requested sort", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
+	return { offset };
 };
 
 type DbPickerRow = QueryResultRow & {
@@ -405,7 +400,7 @@ interface PlayersRepository {
 }
 
 // Only event-stat overlays are query-cached. Base players always come from the
-// request-pinned immutable Data v3 core publication.
+// request-pinned immutable Data core publication.
 
 type RawTransferRow = {
 	element_id: number;
@@ -455,7 +450,7 @@ export const playersRepository: PlayersRepository = {
 	): Promise<Player | null> {
 		if (!Number.isSafeInteger(id) || id <= 0) return null;
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
-		const cacheKey = gqlCacheKey(context, `players:event-stats:v1:${id}:${eventId}`);
+		const cacheKey = gqlCacheKey(context, `players:event-stats:${id}:${eventId}`);
 
 		const [basePlayer, cachedStats] = await Promise.all([
 			this.getPlayerById(context, id),
@@ -518,7 +513,7 @@ export const playersRepository: PlayersRepository = {
 		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0)));
 		if (uniqueIds.length === 0) return new Map();
 		const keys = uniqueIds.map((id) =>
-			gqlCacheKey(context, `players:event-stats:v1:${id}:${eventId}`)
+			gqlCacheKey(context, `players:event-stats:${id}:${eventId}`)
 		);
 		let rawValues: (string | null)[];
 		const basePlayersPromise = this.getPlayersByIds(context, uniqueIds);
@@ -582,7 +577,7 @@ export const playersRepository: PlayersRepository = {
 					};
 					overlays.set(id, overlay);
 					pipeline.set(
-						gqlCacheKey(context, `players:event-stats:v1:${id}:${eventId}`),
+						gqlCacheKey(context, `players:event-stats:${id}:${eventId}`),
 						JSON.stringify(overlay),
 						"EX",
 						QUERY_CACHE_TTL_SECONDS.HISTORICAL
@@ -635,7 +630,7 @@ export const playersRepository: PlayersRepository = {
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
 		const cacheKey = gqlCacheKey(
 			context,
-			`players:picker:v11:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${ownershipBand ?? "ANY"}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`
+			`players:picker:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${ownershipBand ?? "ANY"}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`
 		);
 
 		const cached = await readJsonCache(
@@ -724,19 +719,13 @@ export const playersRepository: PlayersRepository = {
 					);
 			}
 		});
-		const cursorItems = sortedItems.filter(
-			(item) => decodedCursor.legacyId === null || item.id > decodedCursor.legacyId
-		);
-		const returnedItems = cursorItems.slice(decodedCursor.offset, decodedCursor.offset + safeLimit);
+		const returnedItems = sortedItems.slice(decodedCursor.offset, decodedCursor.offset + safeLimit);
 		const nextOffset = decodedCursor.offset + returnedItems.length;
 		const nextCursor =
-			nextOffset < cursorItems.length ? encodePickerCursor(sort, nextOffset) : null;
+			nextOffset < sortedItems.length ? encodePickerCursor(sort, nextOffset) : null;
 		const payload: PlayersForPickerPayload = {
 			items: returnedItems,
 			nextCursor,
-			// Positive cursors are a rolling-deployment compatibility path. Keep
-			// the directory count independent from that page threshold, matching
-			// the stable count returned by the versioned offset cursors.
 			totalCount: sortedItems.length,
 		};
 

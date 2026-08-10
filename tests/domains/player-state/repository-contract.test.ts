@@ -7,7 +7,7 @@ import {
 
 const link = (status: string, confirmedSeasons: string[] = ["2627"]): ProviderLinkRow => ({
 	status,
-	rule_version: "player-link-v1",
+	rule_id: "player-link",
 	left_entity_id: "understat-player-1",
 	evidence: { confirmedSeasons },
 });

@@ -2,7 +2,6 @@ import { createHash, createHmac, timingSafeEqual } from "crypto";
 import { env } from "./env";
 
 type IngressEnvelope = {
-	v?: unknown;
 	aud?: unknown;
 	sub?: unknown;
 	iat?: unknown;
@@ -14,8 +13,7 @@ export type VerifiedIngressContext = { subject: string };
 export const GRAPHQL_SERVICE_TOKEN_HEADER = "X-GraphQL-Service-Token";
 export const GRAPHQL_SERVICE_RATE_LIMIT_SUBJECT = "service:web-public-rsc";
 
-export type GraphQLIngressClass =
-	"signed" | "service" | "unsigned_bearer" | "unsigned_user_context" | "anonymous";
+export type GraphQLIngressClass = "signed" | "service" | "untrusted";
 
 export type GraphQLIngress = {
 	class: GraphQLIngressClass;
@@ -35,6 +33,14 @@ const equalSecret = (left: string, right: string): boolean => {
 	const actual = createHash("sha256").update(left).digest();
 	const expected = createHash("sha256").update(right).digest();
 	return timingSafeEqual(actual, expected);
+};
+
+const hasExactFields = (value: object, fields: readonly string[]): boolean => {
+	const actual = Object.keys(value).sort();
+	const expected = [...fields].sort();
+	return (
+		actual.length === expected.length && actual.every((field, index) => field === expected[index])
+	);
 };
 
 /** Verify the short-lived, opaque ingress subject signed by letletme-web. */
@@ -66,7 +72,7 @@ export const verifyIngressContext = (
 	const expiresAt =
 		typeof envelope.exp === "number" && Number.isSafeInteger(envelope.exp) ? envelope.exp : null;
 	if (
-		envelope.v !== 1 ||
+		!hasExactFields(envelope, ["aud", "sub", "iat", "exp"]) ||
 		envelope.aud !== "letletme-graphql" ||
 		typeof envelope.sub !== "string" ||
 		!/^[a-f0-9]{64}$/.test(envelope.sub) ||
@@ -105,19 +111,13 @@ export const classifyGraphQLIngress = (
 			ingressContext,
 		};
 	}
-
-	if (headers.has("X-User-Context") || headers.has("X-User-Context-Sig")) {
+	if (
+		headers.has("X-User-Context") ||
+		headers.has("X-User-Context-Sig") ||
+		/^bearer\s+\S+$/i.test(headers.get("Authorization") ?? "")
+	) {
 		return {
-			class: "unsigned_user_context",
-			trusted: false,
-			subject: null,
-			ingressContext: null,
-		};
-	}
-
-	if (/^bearer\s+\S+$/i.test(headers.get("Authorization") ?? "")) {
-		return {
-			class: "unsigned_bearer",
+			class: "untrusted",
 			trusted: false,
 			subject: null,
 			ingressContext: null,
@@ -135,7 +135,7 @@ export const classifyGraphQLIngress = (
 	}
 
 	return {
-		class: "anonymous",
+		class: "untrusted",
 		trusted: false,
 		subject: null,
 		ingressContext: null,

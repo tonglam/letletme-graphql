@@ -46,8 +46,6 @@ export type PlayerSeasonStatsAtEvent = {
 	ictIndex: number | null;
 };
 
-const SEASON_STATS_CACHE_VERSION = "v4";
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -195,10 +193,7 @@ const isPlayerSeasonStatsAtEvent = (value: unknown): value is PlayerSeasonStatsA
 	(value.form === null || typeof value.form === "number");
 
 const cacheKey = (context: GraphQLContext, elementId: number, eventId: number): string =>
-	gqlCacheKey(
-		context,
-		`players:season-stats:${SEASON_STATS_CACHE_VERSION}:${elementId}:${eventId}`
-	);
+	gqlCacheKey(context, `players:season-stats:${elementId}:${eventId}`);
 
 async function isUnfinishedCurrentEvent(
 	context: GraphQLContext,

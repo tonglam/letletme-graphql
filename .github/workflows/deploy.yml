@@ -5,10 +5,7 @@ on:
     workflows: ["CI"]
     types: [completed]
     branches: ["main"]
-  # repository_dispatch resolves the workflow and GITHUB_SHA from protected main.
-  repository_dispatch:
-    types:
-      - v3-graphql-production-operation
+  workflow_dispatch:
 
 concurrency:
   group: deploy-main
@@ -16,13 +13,10 @@ concurrency:
 
 jobs:
   deploy:
-    if: |
-      (github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'deploy') ||
-      (
-        github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.head_branch == 'main'
-      )
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -30,53 +24,28 @@ jobs:
     env:
       REGISTRY: ghcr.io
     steps:
-      - name: Checkout workflow run commit
-        if: github.event_name == 'workflow_run'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-          persist-credentials: false
-
-      - name: Checkout manual dispatch ref
-        if: github.event_name == 'repository_dispatch'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.client_payload.sha || github.sha }}
-          persist-credentials: false
-
-      - name: Require exact protected main commit
+      - name: Resolve protected main
+        id: target
         env:
           GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: >-
-            ${{ github.event_name == 'workflow_run' &&
-                github.event.workflow_run.head_sha || github.event.client_payload.sha || github.sha }}
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
-          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
-          test "$TARGET_SHA" = "$main_sha"
-          test "$(git rev-parse HEAD)" = "$main_sha"
-          echo "GRAPHQL_TRUSTED_MAIN_SHA=$main_sha"
+          test "$main_sha" = "${WORKFLOW_SHA:-$main_sha}"
+          echo "sha=$main_sha" >> "$GITHUB_OUTPUT"
 
-      - name: Reject legacy deployment after v3 activation
+      - name: Checkout protected main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set image name
         run: |
           set -euo pipefail
-          if [ -f scripts/v3-release-gate.ts ]; then
-            echo "::error::Activated v3 releases require v3-publish-image followed by v3-redeploy"
-            exit 1
-          fi
-
-      - name: Set deployment metadata
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"
-          else
-            DEPLOY_SHA="$(git rev-parse HEAD)"
-          fi
-          IMAGE_NAME=$(echo "${REGISTRY}/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
-          echo "DEPLOY_SHA=${DEPLOY_SHA}" >> $GITHUB_ENV
-          echo "IMAGE_NAME=${IMAGE_NAME}" >> $GITHUB_ENV
+          image_name=$(printf '%s' "${REGISTRY}/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_NAME=$image_name" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -88,21 +57,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image
+      - name: Build and push once
         run: |
+          set -euo pipefail
           docker buildx build \
             --platform linux/amd64 \
-            --tag ${IMAGE_NAME}:${DEPLOY_SHA} \
-            --tag ${IMAGE_NAME}:latest \
+            --tag "${IMAGE_NAME}:${{ steps.target.outputs.sha }}" \
+            --tag "${IMAGE_NAME}:latest" \
+            --metadata-file build-metadata.json \
             --push .
-          echo "IMAGE_REF=${IMAGE_NAME}:${DEPLOY_SHA}" >> $GITHUB_ENV
+          digest=$(jq -r '.["containerimage.digest"]' build-metadata.json)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "IMAGE_REF=${IMAGE_NAME}@${digest}" >> "$GITHUB_ENV"
 
-      - name: Deploy on VPS
+      - name: Deploy exact image digest
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
-          DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
+          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
           IMAGE_REF: ${{ env.IMAGE_REF }}
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
@@ -112,934 +84,46 @@ jobs:
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: true
-          envs: DEPLOY_SHA,IMAGE_REF,IMAGE_NAME,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV
           script: |
             set -euo pipefail
-            LOWER_USER=$(echo "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
-            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
-
-            # First-time setup: clone repo if workdir doesn't exist
-            if [ ! -d "$VPS_WORKDIR/.git" ]; then
-              mkdir -p "$VPS_WORKDIR"
-              git clone https://github.com/tonglam/letletme-graphql.git "$VPS_WORKDIR"
-            fi
-
+            lower_user=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$lower_user" --password-stdin
             cd "$VPS_WORKDIR"
-            git fetch --all
+            git fetch origin main
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
+            test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
 
-            # Write env file from secret
             umask 077
             printf '%s' "$GRAPHQL_ENV" > .env.deploy
             chmod 600 .env.deploy
 
+            old_container=$(docker compose ps -q graphql)
+            if [ -n "$old_container" ]; then
+              old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
+              test -n "$old_image"
+              printf '%s\n' "$old_image" > /home/workspace/.letletme-graphql-previous-image
+            fi
+
             APP_IMAGE="$IMAGE_REF" docker compose pull graphql
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run contract:check
-            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build
+            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build graphql
 
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
                 break
               fi
               if [ "$attempt" -eq 30 ]; then
-                echo "Health check failed"
-                APP_IMAGE="$IMAGE_REF" docker compose ps
-                APP_IMAGE="$IMAGE_REF" docker compose logs --tail 100 graphql || true
+                docker compose ps
+                docker logs --tail 100 "$(docker compose ps -q graphql)" || true
                 exit 1
               fi
               sleep 2
             done
 
-            APP_IMAGE="$IMAGE_REF" docker compose ps
-
-            # Retain the current and previous two repository images. Never prune
-            # unrelated images on this shared VPS.
-            KEEP_FILE=.deployed-graphql-images
-            KEEP_TMP=$(mktemp)
-            {
-              printf '%s\n' "$IMAGE_REF"
-              if [ -f "$KEEP_FILE" ]; then cat "$KEEP_FILE"; fi
-            } | awk '!seen[$0]++' | head -n 3 > "$KEEP_TMP"
-            mv "$KEEP_TMP" "$KEEP_FILE"
-
-            docker image ls "$IMAGE_NAME" --format '{{.Repository}}:{{.Tag}}' | while read -r REF; do
-              if [ "$REF" = "$IMAGE_NAME:latest" ] || grep -Fxq "$REF" "$KEEP_FILE"; then
-                continue
-              fi
-              docker image rm "$REF" || true
-            done
-
-  v3_publish_image:
-    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-publish-image'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    env:
-      REGISTRY: ghcr.io
-    steps:
-      - name: Checkout frozen GraphQL candidate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.client_payload.sha }}
-          persist-credentials: false
-
-      - name: Require exact protected main commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
-          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
-          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
-          test "$TARGET_SHA" = "$main_sha"
-          test "$(git rev-parse HEAD)" = "$main_sha"
-          echo "V3_GRAPHQL_TRUSTED_MAIN_SHA=$main_sha"
-
-      - name: Resolve immutable image metadata
-        run: |
-          set -euo pipefail
-          DEPLOY_SHA=$(git rev-parse HEAD)
-          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          IMAGE_NAME=$(printf '%s' "${REGISTRY}/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
-          echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
-          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
-          echo "IMAGE_TAG=${IMAGE_NAME}:v3-${DEPLOY_SHA}" >> "$GITHUB_ENV"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and publish exact amd64 candidate
-        run: |
-          set -euo pipefail
-          metadata_file=$(mktemp)
-          docker buildx build \
-            --platform linux/amd64 \
-            --tag "$IMAGE_TAG" \
-            --provenance=false \
-            --push \
-            --metadata-file "$metadata_file" \
-            .
-          digest=$(jq -r '."containerimage.digest"' "$metadata_file")
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          docker buildx imagetools inspect "${IMAGE_NAME}@${digest}"
-          {
-            echo "### Frozen GraphQL image"
-            echo
-            echo "- Commit: \`$DEPLOY_SHA\`"
-            echo "- Tag: \`$IMAGE_TAG\`"
-            echo "- Immutable ref: \`${IMAGE_NAME}@${digest}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  v3_preflight:
-    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-preflight'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Inspect GraphQL production without changing checkout or service state
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
-        env:
-          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
-        with:
-          host: ${{ vars.VPS_HOST }}
-          username: ${{ vars.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
-          envs: VPS_WORKDIR
-          script: |
-            set -euo pipefail
-            test -d "$VPS_WORKDIR/.git"
-            cd "$VPS_WORKDIR"
-            echo "V3_GRAPHQL_PREFLIGHT_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "V3_GRAPHQL_PREFLIGHT_HOST=$(hostname)"
-            echo "V3_GRAPHQL_PREFLIGHT_COMMIT=$(git rev-parse HEAD)"
-            echo "V3_GRAPHQL_PREFLIGHT_BRANCH=$(git symbolic-ref --short -q HEAD || echo detached)"
-            if ! git diff --quiet || ! git diff --cached --quiet; then
-              echo "V3_GRAPHQL_PREFLIGHT_TRACKED=dirty"
-            else
-              echo "V3_GRAPHQL_PREFLIGHT_TRACKED=clean"
-            fi
-            echo "V3_GRAPHQL_PREFLIGHT_UNTRACKED"
-            git ls-files --others --exclude-standard
-            echo "V3_GRAPHQL_PREFLIGHT_DISK"
-            df -h "$VPS_WORKDIR"
-            echo "V3_GRAPHQL_PREFLIGHT_SERVICES"
-            docker compose config --services
-            docker compose ps --all
-            cid=$(docker compose ps -q --all graphql)
-            if [ -n "$cid" ]; then
-              docker inspect --format \
-                'V3_GRAPHQL_PREFLIGHT_CONTAINER={{.Name}} image={{.Config.Image}} image_id={{.Image}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
-                "$cid"
-            fi
-            if [ -f .env.deploy ]; then
-              echo "V3_GRAPHQL_PREFLIGHT_ENV=present mode=$(stat -c '%a' .env.deploy 2>/dev/null || echo unknown)"
-              while IFS='=' read -r key _; do
-                case "$key" in
-                  NODE_ENV|DATABASE_URL|REDIS_HOST|REDIS_PORT|REDIS_PASSWORD|PORT|BACKEND_PROXY_SECRET|GRAPHQL_SERVICE_TOKEN|REQUIRE_SIGNED_WEB_INGRESS|GRAPHQL_AUTH_MODE|METRICS_TOKEN|CORS_ORIGIN|CORS_CREDENTIALS|TRUSTED_PROXY_HOPS|LEGACY_AUTH_VALIDATION_UNTIL)
-                    echo "V3_GRAPHQL_PREFLIGHT_ENV_KEY=$key"
-                    ;;
-                esac
-              done < .env.deploy
-              python3 - .env.deploy <<'PY'
-            import sys
-            from urllib.parse import unquote, urlsplit
-
-            value = None
-            with open(sys.argv[1], encoding='utf-8') as source:
-                for line in source.read().splitlines():
-                    if line.startswith('DATABASE_URL='):
-                        value = line.split('=', 1)[1]
-                        break
-            if value is None:
-                print('V3_GRAPHQL_PREFLIGHT_DATABASE_URL=missing')
-                raise SystemExit(0)
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-                value = value[1:-1]
-            parsed = urlsplit(value)
-            username = unquote(parsed.username or '')
-            print(f'V3_GRAPHQL_PREFLIGHT_DATABASE_SCHEME={parsed.scheme}')
-            print(f'V3_GRAPHQL_PREFLIGHT_DATABASE_PORT={parsed.port or 0}')
-            print(f'V3_GRAPHQL_PREFLIGHT_DATABASE_HOST_PRESENT={str(bool(parsed.hostname)).lower()}')
-            print(f'V3_GRAPHQL_PREFLIGHT_DATABASE_ADMIN={str(username.startswith("postgres.")).lower()}')
-            print(
-                'V3_GRAPHQL_PREFLIGHT_DATABASE_RUNTIME='
-                + str(username.startswith('letletme_graphql_runtime.')).lower()
-            )
-            PY
-            else
-              echo "V3_GRAPHQL_PREFLIGHT_ENV=missing"
-            fi
-            echo "V3_GRAPHQL_PREFLIGHT_DATA_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/health || true)"
-            echo "V3_GRAPHQL_PREFLIGHT_GRAPHQL_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)"
-
-  v3_stop:
-    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-stop'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Stop only GraphQL for the approved hard cut
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
-        env:
-          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
-          V3_CUTOVER_RUN_ID: ${{ github.event.client_payload.v3_cutover_run_id }}
-          V3_CUTOVER_APPROVAL: ${{ github.event.client_payload.v3_cutover_approval }}
-        with:
-          host: ${{ vars.VPS_HOST }}
-          username: ${{ vars.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
-          envs: VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_CUTOVER_APPROVAL
-          script: |
-            set -euo pipefail
-            [[ "$V3_CUTOVER_RUN_ID" =~ ^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$ ]]
-            test "$V3_CUTOVER_APPROVAL" = "APPROVE_V3_ACTIVATION $V3_CUTOVER_RUN_ID"
-            test -d "$VPS_WORKDIR/.git"
-            cd "$VPS_WORKDIR"
-            docker compose stop -t 30 graphql
-            test -z "$(docker compose ps -q graphql)"
-            graphql_http=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)
-            test "$graphql_http" = "000"
-            echo "V3_GRAPHQL_SERVICE=stopped"
-
-  v3_start:
-    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-start'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
-    steps:
-      - name: Checkout frozen GraphQL candidate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.client_payload.sha }}
-          persist-credentials: false
-
-      - name: Require exact protected main commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
-          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
-          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
-          test "$TARGET_SHA" = "$main_sha"
-          test "$(git rev-parse HEAD)" = "$main_sha"
-          echo "V3_GRAPHQL_TRUSTED_MAIN_SHA=$main_sha"
-
-      - name: Resolve exact candidate commit and image
-        env:
-          V3_IMAGE_REF_INPUT: ${{ github.event.client_payload.v3_image_ref }}
-        run: |
-          set -euo pipefail
-          DEPLOY_SHA=$(git rev-parse HEAD)
-          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$V3_IMAGE_REF_INPUT" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
-          IMAGE_NAME=$(printf '%s' "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
-          test "${V3_IMAGE_REF_INPUT%@*}" = "$IMAGE_NAME"
-          echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
-          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
-          echo "IMAGE_REF=$V3_IMAGE_REF_INPUT" >> "$GITHUB_ENV"
-          echo "DEPLOY_IMAGE_DIGEST=${V3_IMAGE_REF_INPUT##*@}" >> "$GITHUB_ENV"
-
-      - name: Install runtime config, verify contract, and start GraphQL
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
-        env:
-          DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          IMAGE_REF: ${{ env.IMAGE_REF }}
-          DEPLOY_IMAGE_DIGEST: ${{ env.DEPLOY_IMAGE_DIGEST }}
-          GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
-          V3_CUTOVER_RUN_ID: ${{ github.event.client_payload.v3_cutover_run_id }}
-          V3_RELEASE_MANIFEST_BASE64: ${{ github.event.client_payload.v3_release_manifest_base64 }}
-          V3_RELEASE_MANIFEST_SHA256: ${{ github.event.client_payload.v3_release_manifest_sha256 }}
-          V3_CUTOVER_APPROVAL: ${{ github.event.client_payload.v3_cutover_approval }}
-          V3_GRAPHQL_DB_PASSWORD: ${{ secrets.V3_GRAPHQL_DB_PASSWORD }}
-        with:
-          host: ${{ vars.VPS_HOST }}
-          username: ${{ vars.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
-          envs: DEPLOY_SHA,IMAGE_NAME,IMAGE_REF,DEPLOY_IMAGE_DIGEST,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_RELEASE_MANIFEST_BASE64,V3_RELEASE_MANIFEST_SHA256,V3_CUTOVER_APPROVAL,V3_GRAPHQL_DB_PASSWORD
-          script: |
-            set -euo pipefail
-            [[ "$V3_CUTOVER_RUN_ID" =~ ^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$ ]]
-            test "$V3_CUTOVER_APPROVAL" = "APPROVE_V3_ACTIVATION $V3_CUTOVER_RUN_ID"
-            [[ "$V3_GRAPHQL_DB_PASSWORD" =~ ^[A-Za-z0-9_-]{64}$ ]]
-            [[ "$IMAGE_NAME" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]]
-            [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
-            test "${IMAGE_REF%@*}" = "$IMAGE_NAME"
-            test -d "$VPS_WORKDIR/.git"
-            cd "$VPS_WORKDIR"
-            git diff --quiet || { echo "GraphQL VPS checkout has tracked modifications"; exit 1; }
-            git diff --cached --quiet || { echo "GraphQL VPS index has staged modifications"; exit 1; }
-            test -f .env.deploy || { echo "Missing .env.deploy"; exit 1; }
-            test -z "$(docker compose ps -q graphql)" || { echo "GraphQL must be stopped before v3 start"; exit 1; }
-            curl --fail --silent http://127.0.0.1:3000/health >/dev/null
-            LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
-            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
-            EXPECTED_TAG="${IMAGE_NAME}:v3-${DEPLOY_SHA}"
-            docker pull "$EXPECTED_TAG"
-            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
-              "$EXPECTED_TAG" | grep -Fx "$IMAGE_REF"
-            docker pull "$IMAGE_REF"
-            manifest_tmp=$(mktemp)
-            normalized_tmp=$(mktemp)
-            trap 'rm -f "$manifest_tmp" "$normalized_tmp"' EXIT
-            printf '%s' "$V3_RELEASE_MANIFEST_BASE64" | base64 --decode > "$manifest_tmp"
-            actual_manifest_sha=$(sha256sum "$manifest_tmp" | awk '{print $1}')
-            test "$actual_manifest_sha" = "$V3_RELEASE_MANIFEST_SHA256"
-            test "$(jq -r '.schemaVersion // empty' "$manifest_tmp")" = 'v3'
-            test "$(jq -r '.status // empty' "$manifest_tmp")" = 'approved'
-            test "$(jq -r '.cutoverRunId // empty' "$manifest_tmp")" = "$V3_CUTOVER_RUN_ID"
-            test "$(jq -r '.graphqlSha // empty' "$manifest_tmp")" = "$DEPLOY_SHA"
-            test "$(jq -r '.graphqlImageDigest // empty' "$manifest_tmp")" = "$DEPLOY_IMAGE_DIGEST"
-            plan_version=$(jq -r '.planVersion // empty' "$manifest_tmp")
-            GATE_MANIFEST_BASE64="$V3_RELEASE_MANIFEST_BASE64"
-            GATE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256"
-            if [ "$plan_version" = '3.2.5-r3' ]; then
-              jq '.planVersion = "3.2.5"' "$manifest_tmp" > "$normalized_tmp"
-              GATE_MANIFEST_BASE64=$(base64 < "$normalized_tmp" | tr -d '\n')
-              GATE_MANIFEST_SHA256=$(sha256sum "$normalized_tmp" | awk '{print $1}')
-              echo 'V3_GRAPHQL_RELEASE_PLAN=3.2.5-r3-normalized-to-3.2.5'
-            elif [ "$plan_version" != '3.2.5' ]; then
-              echo 'Unsupported GraphQL release plan version'
-              exit 1
-            fi
-            docker run --rm \
-              -e DEPLOY_SHA="$DEPLOY_SHA" \
-              -e DEPLOY_IMAGE_DIGEST="$DEPLOY_IMAGE_DIGEST" \
-              -e V3_CUTOVER_RUN_ID="$V3_CUTOVER_RUN_ID" \
-              -e V3_RELEASE_MANIFEST_BASE64="$GATE_MANIFEST_BASE64" \
-              -e V3_RELEASE_MANIFEST_SHA256="$GATE_MANIFEST_SHA256" \
-              -e V3_CUTOVER_APPROVAL="$V3_CUTOVER_APPROVAL" \
-              "$IMAGE_REF" bun scripts/v3-release-gate.ts
-            config_backup_dir="$(dirname "$VPS_WORKDIR")/v3-cutover/$V3_CUTOVER_RUN_ID/graphql"
-            install -d -m 700 "$config_backup_dir"
-            config_backup="$config_backup_dir/env.deploy.before-v3"
-            config_backup_checksum="$config_backup.sha256"
-            if [ -e "$config_backup" ] || [ -e "$config_backup_checksum" ]; then
-              test -f "$config_backup" && test -f "$config_backup_checksum" || {
-                echo "Incomplete original GraphQL environment backup"; exit 1;
-              }
-              expected_config_sha=$(awk 'NR == 1 { print $1 }' "$config_backup_checksum")
-              actual_config_sha=$(sha256sum "$config_backup" | awk '{ print $1 }')
-              [[ "$expected_config_sha" =~ ^[0-9a-f]{64}$ ]]
-              test "$actual_config_sha" = "$expected_config_sha"
-              echo "Reusing verified original GraphQL environment backup"
-            else
-              config_backup_tmp=$(mktemp "$config_backup_dir/env.deploy.before-v3.XXXXXX")
-              config_checksum_tmp=$(mktemp "$config_backup_dir/env.deploy.before-v3.sha256.XXXXXX")
-              install -m 600 .env.deploy "$config_backup_tmp"
-              config_sha=$(sha256sum "$config_backup_tmp" | awk '{ print $1 }')
-              printf '%s  %s\n' "$config_sha" "$config_backup" > "$config_checksum_tmp"
-              chmod 600 "$config_checksum_tmp"
-              # Hard links publish both files without ever replacing an earlier backup.
-              ln "$config_backup_tmp" "$config_backup"
-              ln "$config_checksum_tmp" "$config_backup_checksum"
-              rm -f "$config_backup_tmp" "$config_checksum_tmp"
-            fi
-            git fetch --all
-            untracked_file=$(mktemp)
-            target_file=$(mktemp)
-            conflict_file=$(mktemp)
-            git ls-files --others --exclude-standard | sort -u > "$untracked_file"
-            git ls-tree -r --name-only "$DEPLOY_SHA" | sort -u > "$target_file"
-            awk '
-              NR == FNR { untracked[++count] = $0; next }
-              {
-                target = $0
-                for (i = 1; i <= count; i += 1) {
-                  if (untracked[i] == target ||
-                    index(target, untracked[i] "/") == 1 ||
-                    index(untracked[i], target "/") == 1) {
-                    print untracked[i] " -> " target
-                  }
-                }
-              }
-            ' "$untracked_file" "$target_file" > "$conflict_file"
-            if [ -s "$conflict_file" ]; then
-              echo "Untracked production files conflict with the frozen GraphQL candidate:"
-              cat "$conflict_file"
-              exit 1
-            fi
-            git checkout --force main
-            git reset --hard "$DEPLOY_SHA"
-            env_tmp=$(mktemp "$VPS_WORKDIR/.env.deploy.v3.XXXXXX")
-            python3 - .env.deploy "$env_tmp" <<'PY'
-            import os
-            import re
-            import sys
-            from urllib.parse import quote, unquote, urlsplit, urlunsplit
-
-            source_path, target_path = sys.argv[1:]
-            with open(source_path, encoding='utf-8') as source:
-                lines = source.read().splitlines()
-
-            values = {}
-            for line in lines:
-                if not line or line.lstrip().startswith('#') or '=' not in line:
-                    continue
-                key, value = line.split('=', 1)
-                values[key] = value
-            if not values.get('DATABASE_URL'):
-                raise SystemExit('Missing DATABASE_URL')
-
-            password = os.environ.get('V3_GRAPHQL_DB_PASSWORD', '')
-            if not re.fullmatch(r'[A-Za-z0-9_-]{64}', password):
-                raise SystemExit('Invalid V3_GRAPHQL_DB_PASSWORD')
-
-            source_database_url = values['DATABASE_URL']
-            if (
-                len(source_database_url) >= 2
-                and source_database_url[0] == source_database_url[-1]
-                and source_database_url[0] in ('"', "'")
-            ):
-                source_database_url = source_database_url[1:-1]
-            parsed = urlsplit(source_database_url)
-            current_user = unquote(parsed.username or '')
-            match = re.fullmatch(
-                r'(?:postgres|letletme_graphql_runtime)\.([a-z0-9]{8,64})',
-                current_user,
-            )
-            if (
-                parsed.scheme not in ('postgres', 'postgresql')
-                or not parsed.hostname
-                or not match
-            ):
-                raise SystemExit('DATABASE_URL is not the expected Supabase pooler URL')
-            project_ref = match.group(1)
-            runtime_user = f'letletme_graphql_runtime.{project_ref}'
-            host = parsed.hostname
-            if ':' in host:
-                host = f'[{host}]'
-            if parsed.port is not None:
-                host = f'{host}:{parsed.port}'
-            runtime_url = urlunsplit(
-                (
-                    parsed.scheme,
-                    f'{quote(runtime_user, safe="")}:{quote(password, safe="")}@{host}',
-                    parsed.path,
-                    parsed.query,
-                    parsed.fragment,
-                )
-            )
-
-            output = [
-                line
-                for line in lines
-                if not (
-                    '=' in line
-                    and line.split('=', 1)[0]
-                    in ('DATABASE_URL', 'REQUIRE_SIGNED_WEB_INGRESS', 'GRAPHQL_AUTH_MODE')
-                )
-            ]
-            output.append(f'DATABASE_URL={runtime_url}')
-            output.append('REQUIRE_SIGNED_WEB_INGRESS=true')
-            output.append('GRAPHQL_AUTH_MODE=enforce')
-            descriptor = os.open(target_path, os.O_WRONLY | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, 'w', encoding='utf-8') as target:
-                target.write('\n'.join(output) + '\n')
-            PY
-            chmod 600 "$env_tmp"
-            mv "$env_tmp" .env.deploy
-            APP_IMAGE="$IMAGE_REF" docker compose pull graphql
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run contract:check
-            APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build graphql
-            for attempt in $(seq 1 30); do
-              if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
-                break
-              fi
-              if [ "$attempt" -eq 30 ]; then
-                APP_IMAGE="$IMAGE_REF" docker compose logs --tail 100 graphql || true
-                exit 1
-              fi
-              sleep 2
-            done
-            curl --fail --silent http://127.0.0.1:3000/health >/dev/null
-            anonymous_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-              --header 'Content-Type: application/json' \
-              --data '{"query":"query { currentEventInfo { season } }"}' \
-              http://127.0.0.1:4000/graphql)
-            echo "V3_GRAPHQL_ANONYMOUS_STATUS=$anonymous_status"
-            test "$anonymous_status" = '401'
-            APP_IMAGE="$IMAGE_REF" docker compose exec -T graphql bun -e '
-              const token = process.env.GRAPHQL_SERVICE_TOKEN;
-              if (!token) throw new Error("Missing GRAPHQL_SERVICE_TOKEN");
-              const request = async (query, variables = {}) => {
-                const response = await fetch("http://127.0.0.1:4000/graphql", {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "X-GraphQL-Service-Token": token,
-                  },
-                  body: JSON.stringify({ query, variables }),
-                });
-                const payload = await response.json();
-                if (response.status !== 200 || payload.errors) {
-                  throw new Error(
-                    "GraphQL production smoke failed: " + JSON.stringify(payload.errors),
-                  );
-                }
-                return payload.data;
-              };
-              const data = await request(`query ProductionSmoke {
-                me { id }
-                currentEventInfo { season currentEvent nextEvent }
-                players(limit: 1) { id webName price }
-                marketPulse(days: 14) {
-                  coverage { requestedDays observedDays complete stale }
-                  mostSelected { playerId }
-                }
-              }`);
-              const info = data?.currentEventInfo;
-              if (
-                data?.me !== null ||
-                !/^[0-9]{4}$/.test(info?.season ?? "") ||
-                !Array.isArray(data?.players) ||
-                data.players.length !== 1 ||
-                data?.marketPulse?.coverage?.requestedDays !== 14 ||
-                !Array.isArray(data?.marketPulse?.mostSelected)
-              ) {
-                throw new Error("GraphQL production smoke payload contract failed");
-              }
-              const smokeEventId =
-                Number.isInteger(info.currentEvent) && info.currentEvent > 0
-                  ? info.currentEvent
-                  : Number.isInteger(info.nextEvent) && info.nextEvent > 0
-                    ? info.nextEvent
-                    : null;
-              if (!smokeEventId) {
-                throw new Error("GraphQL production smoke has no current or next event");
-              }
-              const liveData = await request(
-                `query LiveSmoke($eventId: Int!) {
-                  liveSnapshot(eventId: $eventId) {
-                    schemaVersion season eventId state eventLiveCount fixtureCount
-                  }
-                }`,
-                { eventId: smokeEventId },
-              );
-              const snapshot = liveData?.liveSnapshot;
-              if (
-                snapshot?.schemaVersion !== 3 ||
-                snapshot?.season !== info.season ||
-                snapshot?.eventId !== smokeEventId
-              ) {
-                throw new Error("GraphQL production live snapshot contract failed");
-              }
-              console.log(JSON.stringify({
-                status: "v3_graphql_http_contract_passed",
-                auth: "service-token-accepted-anonymous-user-null",
-                season: info.season,
-                eventId: smokeEventId,
-                playerCount: data.players.length,
-                marketObservedDays: data.marketPulse.coverage.observedDays,
-                liveSnapshotState: snapshot.state,
-                liveFixtureCount: snapshot.fixtureCount,
-              }));
-            '
-            state_tmp=$(mktemp "$config_backup_dir/activation-state.XXXXXX")
-            {
-              printf 'run_id=%s\n' "$V3_CUTOVER_RUN_ID"
-              printf 'deploy_sha=%s\n' "$DEPLOY_SHA"
-              printf 'image_ref=%s\n' "$IMAGE_REF"
-              printf 'manifest_sha256=%s\n' "$V3_RELEASE_MANIFEST_SHA256"
-              printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            } > "$state_tmp"
-            chmod 600 "$state_tmp"
-            mv "$state_tmp" "$config_backup_dir/activation-state.env"
-            APP_IMAGE="$IMAGE_REF" docker compose ps graphql
-
-  v3_redeploy:
-    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-redeploy'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
-    steps:
-      - name: Checkout merged GraphQL release
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.client_payload.sha }}
-          persist-credentials: false
-
-      - name: Require exact protected main commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
-          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
-          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
-          test "$TARGET_SHA" = "$main_sha"
-          test "$(git rev-parse HEAD)" = "$main_sha"
-          echo "V3_GRAPHQL_REDEPLOY_TRUSTED_MAIN_SHA=$main_sha"
-
-      - name: Resolve exact merged image
-        env:
-          V3_IMAGE_REF_INPUT: ${{ github.event.client_payload.v3_image_ref }}
-        run: |
-          set -euo pipefail
-          DEPLOY_SHA=$(git rev-parse HEAD)
-          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$V3_IMAGE_REF_INPUT" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
-          IMAGE_NAME=$(printf '%s' "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
-          test "${V3_IMAGE_REF_INPUT%@*}" = "$IMAGE_NAME"
-          echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
-          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
-          echo "IMAGE_REF=$V3_IMAGE_REF_INPUT" >> "$GITHUB_ENV"
-
-      - name: Redeploy activated GraphQL without changing runtime config
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
-        env:
-          EXPECTED_SHA: ${{ env.DEPLOY_SHA }}
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          IMAGE_REF: ${{ env.IMAGE_REF }}
-          GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
-        with:
-          host: ${{ vars.VPS_HOST }}
-          username: ${{ vars.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
-          envs: EXPECTED_SHA,IMAGE_NAME,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
-          command_timeout: 15m
-          script: |
-            set -euo pipefail
-            [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
-            [[ "$IMAGE_NAME" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]]
-            [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
-            test "${IMAGE_REF%@*}" = "$IMAGE_NAME"
-            test -d "$VPS_WORKDIR/.git"
-            cd "$VPS_WORKDIR"
-            test -f .env.deploy
-            git diff --quiet || { echo "GraphQL VPS checkout has tracked modifications"; exit 1; }
-            git diff --cached --quiet || { echo "GraphQL VPS index has staged modifications"; exit 1; }
-            curl --fail --silent http://127.0.0.1:3000/health >/dev/null
-
-            ROLLBACK_TAG=""
-            ROLLBACK_IMAGE_REF=""
-            current_graphql_cid=$(docker compose ps --all -q graphql | head -n 1)
-            if [ -n "$current_graphql_cid" ]; then
-              ROLLBACK_IMAGE_REF=$(docker inspect --format '{{.Config.Image}}' "$current_graphql_cid")
-              if [[ "$ROLLBACK_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]; then
-                test "${ROLLBACK_IMAGE_REF%@*}" = "$IMAGE_NAME"
-              elif [[ "$ROLLBACK_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+:v3-[0-9a-f]{40}$ ]]; then
-                test "${ROLLBACK_IMAGE_REF%:v3-*}" = "$IMAGE_NAME"
-              else
-                echo "Current GraphQL image is not an immutable v3 release: $ROLLBACK_IMAGE_REF"
-                exit 1
-              fi
-              current_image_id=$(docker inspect --format '{{.Image}}' "$current_graphql_cid")
-              for candidate_tag in $(docker image ls "$IMAGE_NAME" --format '{{.Repository}}:{{.Tag}}'); do
-                case "$candidate_tag" in
-                  "$IMAGE_NAME":v3-*) ;;
-                  *) continue ;;
-                esac
-                if [ "$(docker image inspect --format '{{.Id}}' "$candidate_tag")" = "$current_image_id" ]; then
-                  ROLLBACK_TAG="$candidate_tag"
-                  break
-                fi
-              done
-            fi
-
-            git fetch origin main
-            test "$(git rev-parse origin/main)" = "$EXPECTED_SHA"
-            untracked_file=$(mktemp)
-            target_file=$(mktemp)
-            conflict_file=$(mktemp)
-            trap 'rm -f "$untracked_file" "$target_file" "$conflict_file"' EXIT
-            git ls-files --others --exclude-standard | sort -u > "$untracked_file"
-            git ls-tree -r --name-only "$EXPECTED_SHA" | sort -u > "$target_file"
-            awk '
-              NR == FNR { untracked[++count] = $0; next }
-              {
-                target = $0
-                for (i = 1; i <= count; i += 1) {
-                  if (untracked[i] == target ||
-                    index(target, untracked[i] "/") == 1 ||
-                    index(untracked[i], target "/") == 1) {
-                    print untracked[i] " -> " target
-                  }
-                }
-              }
-            ' "$untracked_file" "$target_file" > "$conflict_file"
-            if [ -s "$conflict_file" ]; then
-              echo "Untracked production files conflict with the merged GraphQL target:"
-              cat "$conflict_file"
-              exit 1
-            fi
-            rm -f "$untracked_file" "$target_file" "$conflict_file"
-            trap - EXIT
-
-            LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
-            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
-            EXPECTED_TAG="${IMAGE_NAME}:v3-${EXPECTED_SHA}"
-            docker pull "$EXPECTED_TAG"
-            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
-              "$EXPECTED_TAG" | grep -Fx "$IMAGE_REF"
-            docker pull "$IMAGE_REF"
-
-            git checkout --force main
-            git reset --hard "$EXPECTED_SHA"
-            test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-
-            APP_IMAGE="$IMAGE_REF" docker compose pull graphql
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run contract:check
-
-            rollback_armed=false
-            rollback_graphql_on_exit() {
-              original_status=$?
-              trap - EXIT
-              if [ "$rollback_armed" != true ]; then
-                exit "$original_status"
-              fi
-              if [ -z "$ROLLBACK_IMAGE_REF" ]; then
-                echo "GraphQL redeploy failed and no previous image is available"
-                exit "$original_status"
-              fi
-              echo "GraphQL redeploy failed; restoring $ROLLBACK_IMAGE_REF"
-              rollback_restored=false
-              if APP_IMAGE="$ROLLBACK_IMAGE_REF" docker compose up \
-                -d --no-deps --no-build --force-recreate graphql; then
-                for rollback_attempt in $(seq 1 30); do
-                  if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
-                    rollback_restored=true
-                    break
-                  fi
-                  sleep 2
-                done
-              fi
-              if [ "$rollback_restored" = true ]; then
-                echo "V3_GRAPHQL_ROLLBACK=restored image=$ROLLBACK_IMAGE_REF"
-              else
-                echo "V3_GRAPHQL_ROLLBACK=failed image=$ROLLBACK_IMAGE_REF"
-                APP_IMAGE="$ROLLBACK_IMAGE_REF" docker compose logs --tail 100 graphql || true
-              fi
-              exit "$original_status"
-            }
-            trap rollback_graphql_on_exit EXIT
-            rollback_armed=true
-            docker compose stop -t 30 graphql
-            test -z "$(docker compose ps -q graphql)"
-            APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build graphql
-            for attempt in $(seq 1 30); do
-              if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
-                break
-              fi
-              if [ "$attempt" -eq 30 ]; then
-                APP_IMAGE="$IMAGE_REF" docker compose logs --tail 100 graphql || true
-                exit 1
-              fi
-              sleep 2
-            done
-            curl --fail --silent http://127.0.0.1:3000/health >/dev/null
-
-            anonymous_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-              --header 'Content-Type: application/json' \
-              --data '{"query":"query { currentEventInfo { season } }"}' \
-              http://127.0.0.1:4000/graphql)
-            test "$anonymous_status" = '401'
-            APP_IMAGE="$IMAGE_REF" docker compose exec -T graphql bun -e '
-              const token = process.env.GRAPHQL_SERVICE_TOKEN;
-              if (!token) throw new Error("Missing GRAPHQL_SERVICE_TOKEN");
-              const request = async (query, variables = {}) => {
-                const response = await fetch("http://127.0.0.1:4000/graphql", {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "X-GraphQL-Service-Token": token,
-                  },
-                  body: JSON.stringify({ query, variables }),
-                });
-                const payload = await response.json();
-                if (response.status !== 200 || payload.errors) {
-                  throw new Error(
-                    "Merged GraphQL release smoke failed: " + JSON.stringify(payload.errors),
-                  );
-                }
-                return payload.data;
-              };
-              const data = await request(`query MergedReleaseSmoke {
-                me { id }
-                currentEventInfo { season currentEvent nextEvent }
-                players(limit: 1) { id webName price }
-                marketPulse(days: 14) {
-                  coverage { requestedDays observedDays }
-                  mostSelected { playerId }
-                }
-              }`);
-              const info = data?.currentEventInfo;
-              if (
-                data?.me !== null ||
-                !/^[0-9]{4}$/.test(info?.season ?? "") ||
-                !Array.isArray(data?.players) ||
-                data.players.length !== 1 ||
-                data?.marketPulse?.coverage?.requestedDays !== 14 ||
-                !Array.isArray(data?.marketPulse?.mostSelected)
-              ) {
-                throw new Error("Merged GraphQL release smoke payload contract failed");
-              }
-              const smokeEventId =
-                Number.isInteger(info.currentEvent) && info.currentEvent > 0
-                  ? info.currentEvent
-                  : Number.isInteger(info.nextEvent) && info.nextEvent > 0
-                    ? info.nextEvent
-                    : null;
-              if (!smokeEventId) {
-                throw new Error("Merged GraphQL release smoke has no current or next event");
-              }
-              const liveData = await request(
-                `query LiveSmoke($eventId: Int!) {
-                  liveSnapshot(eventId: $eventId) {
-                    schemaVersion season eventId state eventLiveCount fixtureCount
-                  }
-                }`,
-                { eventId: smokeEventId },
-              );
-              const snapshot = liveData?.liveSnapshot;
-              if (
-                snapshot?.schemaVersion !== 3 ||
-                snapshot?.season !== info.season ||
-                snapshot?.eventId !== smokeEventId
-              ) {
-                throw new Error("Merged GraphQL release live snapshot contract failed");
-              }
-              console.log(JSON.stringify({
-                status: "v3_graphql_redeploy_contract_passed",
-                season: info.season,
-                eventId: smokeEventId,
-                marketObservedDays: data.marketPulse.coverage.observedDays,
-                liveSnapshotState: snapshot.state,
-                liveFixtureCount: snapshot.fixtureCount,
-              }));
-            '
-
-            graphql_cid=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q graphql)
-            test -n "$graphql_cid"
-            test "$(docker inspect --format '{{.Config.Image}}' "$graphql_cid")" = "$IMAGE_REF"
-            for attempt in $(seq 1 20); do
-              graphql_health=$(docker inspect --format '{{.State.Health.Status}}' "$graphql_cid")
-              if [ "$graphql_health" = 'healthy' ]; then
-                break
-              fi
-              if [ "$attempt" -eq 20 ]; then
-                echo "GraphQL Docker health did not settle: $graphql_health"
-                APP_IMAGE="$IMAGE_REF" docker compose logs --tail 100 graphql || true
-                exit 1
-              fi
-              sleep 3
-            done
-            rollback_armed=false
-            trap - EXIT
-
-            KEEP_FILE=.deployed-graphql-images
-            keep_tmp=$(mktemp)
-            {
-              printf '%s\n' "$EXPECTED_TAG"
-              if [ -n "$ROLLBACK_TAG" ]; then
-                printf '%s\n' "$ROLLBACK_TAG"
-              fi
-              if [ -f "$KEEP_FILE" ]; then
-                while IFS= read -r saved_tag; do
-                  case "$saved_tag" in
-                    "$IMAGE_NAME":v3-*) printf '%s\n' "$saved_tag" ;;
-                  esac
-                done < "$KEEP_FILE"
-              fi
-            } | awk '!seen[$0]++ && kept < 3 { print; kept++ }' > "$keep_tmp"
-            mv "$keep_tmp" "$KEEP_FILE"
-            docker image ls "$IMAGE_NAME" --format '{{.Repository}}:{{.Tag}}' | while IFS= read -r old_tag; do
-              case "$old_tag" in
-                "$IMAGE_NAME":v3-*) ;;
-                *) continue ;;
-              esac
-              if grep -Fxq "$old_tag" "$KEEP_FILE"; then
-                continue
-              fi
-              docker image rm "$old_tag" || true
-            done
-            echo "V3_GRAPHQL_REDEPLOY=passed sha=$EXPECTED_SHA image=$IMAGE_REF"
-            APP_IMAGE="$IMAGE_REF" docker compose ps graphql
-
-  v3_status:
-    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-status'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Read GraphQL production status
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
-        env:
-          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
-        with:
-          host: ${{ vars.VPS_HOST }}
-          username: ${{ vars.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
-          envs: VPS_WORKDIR
-          script: |
-            set -euo pipefail
-            test -d "$VPS_WORKDIR/.git"
-            cd "$VPS_WORKDIR"
-            echo "V3_GRAPHQL_STATUS_COMMIT=$(git rev-parse HEAD)"
-            docker compose ps --all
-            echo "V3_GRAPHQL_STATUS_DATA_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/health || true)"
-            echo "V3_GRAPHQL_STATUS_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)"
+            container=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q graphql)
+            test -n "$container"
+            test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "$IMAGE_REF"
+            docker compose ps graphql
+            docker image prune --force

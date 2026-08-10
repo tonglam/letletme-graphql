@@ -4,10 +4,6 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
 	"""
 	enum MatchPlayStatus {
 		"""
-		Next event's fixtures (not yet started)
-		"""
-		NEXT_EVENT
-		"""
 		Matches that have not started
 		"""
 		NOT_STARTED
@@ -48,10 +44,6 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
 	"""
 	type LiveMatches {
 		"""
-		Next event's fixtures (not yet started)
-		"""
-		nextEvent: [LiveMatchData!]!
-		"""
 		Matches scheduled but not started
 		"""
 		notStarted: [LiveMatchData!]!
@@ -68,11 +60,7 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
 	extend type Query {
 		"""
 		Query live matches grouped by play status.
-
-		When upcoming is false (default), returns only current event matches.
-		Deprecated: upcoming true returns both current event matches and next event fixtures.
-		New clients should query current live matches and eventFixtures separately.
 		"""
-		liveMatches(upcoming: Boolean = false): LiveMatches!
+		liveMatches: LiveMatches!
 	}
 `;

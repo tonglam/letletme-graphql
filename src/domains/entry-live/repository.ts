@@ -430,7 +430,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 	): Promise<EntryEventTransferRow[]> {
 		if (!Number.isSafeInteger(entryId) || entryId <= 0) return [];
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) return [];
-		const cacheKey = gqlCacheKey(context, `entries:transfers:v3:${entryId}:${eventId}`);
+		const cacheKey = gqlCacheKey(context, `entries:transfers:${entryId}:${eventId}`);
 		const cached = await context.redis.get(cacheKey);
 		if (cached) {
 			try {
@@ -492,7 +492,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 		}
 
 		const cacheKeys = uniqueIds.map((id) =>
-			gqlCacheKey(context, `entries:transfers:v3:${id}:${eventId}`)
+			gqlCacheKey(context, `entries:transfers:${id}:${eventId}`)
 		);
 		const results = new Map<number, EntryEventTransferRow[]>();
 		const missIds: number[] = [];
@@ -566,7 +566,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 				const transfers = byEntry.get(id) ?? [];
 				results.set(id, transfers);
 				pipeline.set(
-					gqlCacheKey(context, `entries:transfers:v3:${id}:${eventId}`),
+					gqlCacheKey(context, `entries:transfers:${id}:${eventId}`),
 					JSON.stringify(transfers),
 					"EX",
 					QUERY_CACHE_TTL_SECONDS.HISTORICAL
@@ -590,7 +590,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 			return [];
 		}
 
-		const cacheKey = gqlCacheKey(context, `entries:transfers:v3:history:${entryId}`);
+		const cacheKey = gqlCacheKey(context, `entries:transfers:history:${entryId}`);
 		let cached = prefetchedCacheValue ?? null;
 		if (prefetchedCacheValue === undefined) {
 			try {

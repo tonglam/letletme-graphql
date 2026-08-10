@@ -8,10 +8,9 @@ import {
 	type OperationDefinitionNode,
 	type SelectionSetNode,
 } from "graphql";
-import { env } from "../infra/env";
 import type { Logger } from "../infra/logger";
 import type { Principal } from "../infra/principal";
-import type { V3ReadClient } from "../infra/v3-read-client";
+import type { ReadModelClient } from "../infra/read-model-client";
 
 type GraphQLRequestPayload = {
 	query?: unknown;
@@ -28,7 +27,7 @@ type AuthorizationInput = {
 	body: unknown;
 	searchParams: URLSearchParams;
 	principal?: Principal | null;
-	data: V3ReadClient;
+	data: ReadModelClient;
 	logger: Logger;
 };
 
@@ -243,7 +242,7 @@ const requireBoundEntry = (principal: Principal, entryId: number | null): Author
 };
 
 const hasTournamentMembership = async (
-	dataClient: V3ReadClient,
+	dataClient: ReadModelClient,
 	tournamentId: number,
 	entryId: number
 ): Promise<boolean> => {
@@ -258,7 +257,7 @@ const hasTournamentMembership = async (
 };
 
 const hasLeagueMembership = async (
-	dataClient: V3ReadClient,
+	dataClient: ReadModelClient,
 	leagueId: number,
 	entryId: number
 ): Promise<boolean> => {
@@ -273,7 +272,7 @@ const hasLeagueMembership = async (
 };
 
 const isTournamentAdmin = async (
-	dataClient: V3ReadClient,
+	dataClient: ReadModelClient,
 	tournamentId: number,
 	entryId: number
 ): Promise<boolean> => {
@@ -290,7 +289,7 @@ const isTournamentAdmin = async (
 const authorizeRootField = async (
 	field: RootField,
 	principal: Principal | null | undefined,
-	dataClient: V3ReadClient
+	dataClient: ReadModelClient
 ): Promise<AuthorizationResult> => {
 	if (publicFields.has(field.name)) return { ok: true };
 	if (!protectedFields.has(field.name)) {
@@ -404,7 +403,7 @@ const authorizePayload = async ({
 }: {
 	payload: GraphQLRequestPayload;
 	principal?: Principal | null;
-	data: V3ReadClient;
+	data: ReadModelClient;
 }): Promise<AuthorizationResult> => {
 	if (typeof payload.query !== "string") return { ok: true };
 
@@ -446,16 +445,7 @@ export const authorizeGraphQLRequest = async (
 				principal: input.principal,
 				data: input.data,
 			});
-			if (!result.ok) {
-				if (env.GRAPHQL_AUTH_MODE === "report") {
-					input.logger.warn(
-						{ code: result.code, message: result.message },
-						"GraphQL auth report-only violation"
-					);
-					continue;
-				}
-				return result;
-			}
+			if (!result.ok) return result;
 		} catch (error) {
 			input.logger.warn({ err: error }, "GraphQL authorization failed");
 			return {

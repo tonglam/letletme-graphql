@@ -8,7 +8,7 @@ import {
 	TestRedis,
 } from "../../helpers/data-publication";
 
-describe("fixturesRepository over v3 snapshots", () => {
+describe("fixturesRepository over canonical snapshots", () => {
 	it("filters and paginates the full 380-fixture core dataset", async () => {
 		const core = buildTestCoreData(1);
 		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
