@@ -217,6 +217,94 @@ jobs:
           bun run db:apply-sql
           bun run db:migrate:status
 
+      - name: Install canonical core publication contract fixture
+        env:
+          DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: |
+          psql "$DATA_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          WITH current_publication AS (
+            SELECT
+              publication.publication_id,
+              publication.revision,
+              publication.season_id,
+              season.season_code,
+              coalesce(
+                publication.activated_at,
+                publication.created_at
+              ) AS published_at
+            FROM ops.dataset_publications publication
+            JOIN fpl.seasons season ON season.season_id = publication.season_id
+            WHERE publication.dataset = 'fpl:core'
+              AND publication.event_id IS NULL
+              AND publication.status = 'active'
+              AND season.is_current
+          ), item_names(name, ordinal) AS (
+            VALUES
+              ('events', 1),
+              ('teams', 2),
+              ('players', 3),
+              ('phases', 4),
+              ('fixtures', 5),
+              ('currentEventId', 6)
+          ), canonical_manifest AS (
+            SELECT
+              publication.publication_id,
+              jsonb_build_object(
+                'dataset', 'fpl:core',
+                'seasonCode', publication.season_code,
+                'eventId', NULL,
+                'revision', publication.revision,
+                'publicationId', publication.publication_id::text,
+                'sourceCheckedAt', publication.published_at,
+                'publishedAt', publication.published_at,
+                'state', 'active',
+                'items', jsonb_agg(
+                  jsonb_build_object(
+                    'name', item.name,
+                    'key', format(
+                      'llm:data:fpl:core:%s:%s:%s',
+                      publication.season_code,
+                      publication.revision,
+                      item.name
+                    ),
+                    'type', 'string',
+                    'count', 0,
+                    'bytes', 2,
+                    'sha256', repeat('0', 64)
+                  ) ORDER BY item.ordinal
+                )
+              ) AS manifest
+            FROM current_publication publication
+            CROSS JOIN item_names item
+            GROUP BY
+              publication.publication_id,
+              publication.revision,
+              publication.season_code,
+              publication.published_at
+          )
+          UPDATE ops.dataset_publications publication
+          SET manifest = fixture.manifest, updated_at = now()
+          FROM canonical_manifest fixture
+          WHERE publication.publication_id = fixture.publication_id;
+
+          DO $$
+          BEGIN
+            IF (
+              SELECT count(*)
+              FROM ops.dataset_publications publication
+              JOIN fpl.seasons season ON season.season_id = publication.season_id
+              WHERE publication.dataset = 'fpl:core'
+                AND publication.event_id IS NULL
+                AND publication.status = 'active'
+                AND season.is_current
+                AND jsonb_array_length(publication.manifest -> 'items') = 6
+            ) <> 1 THEN
+              RAISE EXCEPTION 'expected one canonical core publication fixture';
+            END IF;
+          END
+          $$;
+          SQL
+
       - name: Create exact Web auth reader fixture
         env:
           DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
