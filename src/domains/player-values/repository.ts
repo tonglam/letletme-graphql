@@ -446,6 +446,53 @@ function parsePlayerValuesFromHashData(
 	hashData: Record<string, string>
 ): PlayerValue[] | null {
 	try {
+		const parseFiniteNumber = (value: unknown): number | null => {
+			if (typeof value === "number") {
+				return Number.isFinite(value) ? value : null;
+			}
+			if (typeof value === "string" && value.trim() !== "") {
+				const parsed = Number(value.trim());
+				return Number.isFinite(parsed) ? parsed : null;
+			}
+			return null;
+		};
+		const isValidOptionalNumber = (row: Record<string, unknown>, key: string): boolean => {
+			if (!(key in row) || row[key] === null || row[key] === undefined) return true;
+			return parseFiniteNumber(row[key]) !== null;
+		};
+		const isValidOptionalString = (row: Record<string, unknown>, key: string): boolean => {
+			if (!(key in row) || row[key] === null || row[key] === undefined) return true;
+			return typeof row[key] === "string";
+		};
+		const numericFields = [
+			"playerId",
+			"elementId",
+			"teamId",
+			"price",
+			"nowCost",
+			"value",
+			"lastValue",
+			"points",
+			"totalPoints",
+			"eventPoints",
+			"selectedBy",
+			"selectedByPercent",
+			"transfersIn",
+			"transfersInEvent",
+			"transfersOut",
+			"transfersOutEvent",
+			"netTransfers",
+			"form",
+		];
+		const stringFields = [
+			"playerName",
+			"webName",
+			"teamName",
+			"teamShortName",
+			"position",
+			"elementTypeName",
+			"changeType",
+		];
 		let malformed = false;
 		const rawData = Object.entries(hashData)
 			.map(([field, value]) => {
@@ -465,6 +512,13 @@ function parsePlayerValuesFromHashData(
 						!Number.isInteger(playerId) ||
 						playerId <= 0 ||
 						playerId !== fieldId
+					) {
+						malformed = true;
+						return null;
+					}
+					if (
+						numericFields.some((key) => !isValidOptionalNumber(row, key)) ||
+						stringFields.some((key) => !isValidOptionalString(row, key))
 					) {
 						malformed = true;
 						return null;
@@ -492,27 +546,30 @@ function parsePlayerValuesFromHashData(
 		// and are dropped since they carry no change information.
 		const changedData = rawData.filter((item) => {
 			if (item.changeType === "Start") return false;
-			const lastValue = (item.lastValue as number | undefined) ?? 0;
+			const lastValue = parseFiniteNumber(item.lastValue) ?? 0;
 			return lastValue > 0;
 		});
 
 		const playerValues: PlayerValue[] = changedData.map((item) => {
-			const playerId = (item.playerId as number) ?? (item.elementId as number) ?? 0;
+			const playerId = parseFiniteNumber(item.playerId) ?? parseFiniteNumber(item.elementId) ?? 0;
 			const playerName = (item.playerName as string) ?? (item.webName as string) ?? "";
-			const teamId = (item.teamId as number) ?? 0;
+			const teamId = parseFiniteNumber(item.teamId) ?? 0;
 			const teamName = (item.teamName as string) ?? "";
 			const position = normalizePositionLabel(item.position ?? item.elementTypeName ?? "");
-			const price = (item.price as number) ?? (item.nowCost as number) ?? 0;
-			const value = (item.value as number) ?? 0;
-			const lastValue = (item.lastValue as number) ?? 0;
-			const points = (item.points as number) ?? (item.totalPoints as number) ?? 0;
-			const selectedBy = (item.selectedBy as number) ?? (item.selectedByPercent as number) ?? 0;
-			const transfersIn = (item.transfersIn as number) ?? (item.transfersInEvent as number) ?? 0;
-			const transfersOut = (item.transfersOut as number) ?? (item.transfersOutEvent as number) ?? 0;
-			const netTransfers = (item.netTransfers as number) ?? transfersIn - transfersOut;
-			const form = (item.form as number) ?? null;
-			const totalPoints = (item.totalPoints as number) ?? points;
-			const eventPoints = (item.eventPoints as number) ?? (item.points as number) ?? null;
+			const price = parseFiniteNumber(item.price) ?? parseFiniteNumber(item.nowCost) ?? 0;
+			const value = parseFiniteNumber(item.value) ?? 0;
+			const lastValue = parseFiniteNumber(item.lastValue) ?? 0;
+			const points = parseFiniteNumber(item.points) ?? parseFiniteNumber(item.totalPoints) ?? 0;
+			const selectedBy =
+				parseFiniteNumber(item.selectedBy) ?? parseFiniteNumber(item.selectedByPercent) ?? 0;
+			const transfersIn =
+				parseFiniteNumber(item.transfersIn) ?? parseFiniteNumber(item.transfersInEvent) ?? 0;
+			const transfersOut =
+				parseFiniteNumber(item.transfersOut) ?? parseFiniteNumber(item.transfersOutEvent) ?? 0;
+			const netTransfers = parseFiniteNumber(item.netTransfers) ?? transfersIn - transfersOut;
+			const form = parseFiniteNumber(item.form);
+			const totalPoints = parseFiniteNumber(item.totalPoints) ?? points;
+			const eventPoints = parseFiniteNumber(item.eventPoints) ?? parseFiniteNumber(item.points);
 
 			return {
 				playerId,

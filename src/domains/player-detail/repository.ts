@@ -599,25 +599,39 @@ export const playerDetailRepository: PlayerDetailRepository = {
 		if (!Number.isInteger(playerId) || playerId <= 0) return null;
 		if (!Number.isInteger(eventId) || eventId <= 0) return null;
 
-		const season = await getCurrentSeason(context);
+		const [season, currentEvent] = await Promise.all([
+			getCurrentSeason(context),
+			getCurrentEventFromRedis(context),
+		]);
 		const cacheKey = gqlCacheKey(season, playerDetailCacheKey(playerId, eventId));
-		const cached = await readPlayerDetailCache(context, cacheKey);
-		if (cached !== undefined) return cached;
+		// A shaped detail cache is safe for settled events, but not while the
+		// selected current event is live: event_lives and player_stats can advance
+		// during the five-minute TTL. Bypass both reads and writes for that window.
+		const selectedEventState =
+			currentEvent === null ? await loadResolvedEventState(context, eventId, null) : null;
+		const selectedEventIsLive =
+			(currentEvent?.id === eventId && !currentEvent.finished) ||
+			(selectedEventState?.id === eventId && !selectedEventState.finished);
+		if (!selectedEventIsLive) {
+			const cached = await readPlayerDetailCache(context, cacheKey);
+			if (cached !== undefined) return cached;
+		}
 
-		const [player, statsContext, market, currentEvent] = await Promise.all([
+		const [player, statsContext, market] = await Promise.all([
 			playersRepository.getPlayerById(context, playerId),
 			resolvePlayerStatsContext(context, eventId),
 			loadLatestMarketSnapshot(context, playerId),
-			getCurrentEventFromRedis(context),
 		]);
 		if (!player) {
-			try {
-				await context.redis.set(cacheKey, NULL_SENTINEL, "EX", PLAYER_DETAIL_NULL_CACHE_TTL);
-			} catch (error) {
-				context.logger.warn(
-					{ err: error, cacheKey, playerId, eventId },
-					"Failed to cache missing player detail"
-				);
+			if (!selectedEventIsLive) {
+				try {
+					await context.redis.set(cacheKey, NULL_SENTINEL, "EX", PLAYER_DETAIL_NULL_CACHE_TTL);
+				} catch (error) {
+					context.logger.warn(
+						{ err: error, cacheKey, playerId, eventId },
+						"Failed to cache missing player detail"
+					);
+				}
 			}
 			return null;
 		}
@@ -663,13 +677,15 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			fixtures,
 			recentGameweeks,
 		});
-		try {
-			await context.redis.set(cacheKey, JSON.stringify(detail), "EX", PLAYER_DETAIL_CACHE_TTL);
-		} catch (error) {
-			context.logger.warn(
-				{ err: error, cacheKey, playerId, eventId },
-				"Failed to cache player detail"
-			);
+		if (!selectedEventIsLive) {
+			try {
+				await context.redis.set(cacheKey, JSON.stringify(detail), "EX", PLAYER_DETAIL_CACHE_TTL);
+			} catch (error) {
+				context.logger.warn(
+					{ err: error, cacheKey, playerId, eventId },
+					"Failed to cache player detail"
+				);
+			}
 		}
 		return detail;
 	},

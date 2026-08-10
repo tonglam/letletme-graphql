@@ -533,4 +533,55 @@ describe("playerValues integration", () => {
 		expect(data?.playerValues[0]?.playerId).toBe(136);
 		expect(context.calls.supabaseFrom).toBe(0);
 	});
+
+	it("falls back when a shared hash row contains invalid numeric fields", async () => {
+		const context = createGraphQLContext({
+			redisHashData: {
+				"136": JSON.stringify({
+					playerId: 136,
+					playerName: "Thiago",
+					teamName: "Brentford",
+					position: "FWD",
+					price: "unknown",
+					value: 74,
+					lastValue: 73,
+				}),
+			},
+			rows: [
+				{
+					player_id: 136,
+					player_name: "Thiago",
+					team_id: 4,
+					team_name: "Brentford",
+					team_short_name: "BRE",
+					position: "FWD",
+					price: 74,
+					value: 74,
+					last_value: 73,
+					points: 0,
+					selected_by: 0,
+					transfers_in: 0,
+					transfers_out: 0,
+					net_transfers: 0,
+					form: null,
+					total_points: 0,
+					event_points: null,
+					change_date: "20260421",
+				},
+			],
+		});
+
+		const result = await graphql({
+			schema: testSchema,
+			source: playerValuesQuery,
+			contextValue: context,
+			variableValues: { changeDate: "2026-04-21" },
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect((result.data as { playerValues: Array<{ playerId: number }> }).playerValues).toEqual([
+			expect.objectContaining({ playerId: 136 }),
+		]);
+		expect(context.calls.supabaseFrom).toBeGreaterThan(0);
+	});
 });

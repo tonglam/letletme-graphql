@@ -1336,10 +1336,14 @@ export const tournamentsRepository: TournamentsRepository = {
 			? (pointsByEntryId.get(rankedRows[0].entry_id) ?? null)
 			: null;
 		const myRank = snapshotRow?.tournament_overall_rank ?? null;
-		const aboveRow =
+		// `rankedRows` is ascending by rank. The nearest higher-ranked distinct
+		// row is therefore the last row below my rank, not the first one (which
+		// would incorrectly jump straight to the leader for rank 4+).
+		const aboveRows =
 			myRank === null
-				? undefined
-				: rankedRows.find((row) => (row.tournament_overall_rank as number) < myRank);
+				? []
+				: rankedRows.filter((row) => (row.tournament_overall_rank as number) < myRank);
+		const aboveRow = aboveRows.at(-1);
 		const belowRow =
 			myRank === null
 				? undefined
