@@ -562,11 +562,7 @@ const estimateFplPointsFromValue = (
 							? value * 4
 							: null;
 		case "clean_sheets":
-			return elementType === 1 || elementType === 2
-				? value * 4
-				: elementType === 3
-					? value
-					: null;
+			return elementType === 1 || elementType === 2 ? value * 4 : elementType === 3 ? value : null;
 		case "goals_conceded":
 			return elementType === 1 || elementType === 2 ? -Math.floor(value / 2) : null;
 		case "assists":
@@ -603,7 +599,7 @@ const mapFlatLiveExplainContributions = (
 			const estimated = estimateFplPointsFromValue(definition.identifier, value, elementType);
 			if (
 				estimated === null &&
-				(definition.identifier === "minutes" && value > 90 ||
+				((definition.identifier === "minutes" && value > 90) ||
 					(POSITION_WEIGHTED_LIVE_EXPLAIN_STATS.has(definition.identifier) && elementType === null))
 			) {
 				continue;

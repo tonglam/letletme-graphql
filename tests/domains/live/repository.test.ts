@@ -273,9 +273,7 @@ describe("liveRepository v3 explanation query cache", () => {
 			"fpl.player_event_snapshots": [
 				{ event_id: 1, element_id: 2, element_type: 3, minutes: 180, total_points: 42 },
 			],
-			"fpl.player_gameweek_stats": [
-				{ event_id: 1, element_id: 2, minutes: 180, total_points: 4 },
-			],
+			"fpl.player_gameweek_stats": [{ event_id: 1, element_id: 2, minutes: 180, total_points: 4 }],
 			"fpl.player_gameweek_scoring_items": [],
 			"fpl.player_fixture_stats": [],
 		});
