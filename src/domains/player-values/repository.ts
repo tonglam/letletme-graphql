@@ -126,6 +126,48 @@ const PLAYER_VALUE_HISTORY_PAGE_SIZE = 1000;
 
 const toCompactDate = (date: string): string => date.replace(/-/g, "");
 
+type StoredDateEncoding = "compact" | "iso";
+
+/**
+ * The legacy player-values table has existed with both YYYYMMDD and ISO date
+ * storage.  Keep the range predicate in the same representation as the rows
+ * instead of relying on a lexical comparison between the two formats.
+ */
+async function resolveHistoryDateEncoding(
+	context: GraphQLContext,
+	playerId: number
+): Promise<StoredDateEncoding> {
+	try {
+		const { data, error } = await context.supabase
+			.from("player_values")
+			.select("change_date")
+			.eq("element_id", playerId)
+			.order("change_date", { ascending: false })
+			.limit(1);
+		if (error) {
+			context.logger.warn(
+				{ err: error, playerId },
+				"Failed to resolve player-value history date encoding; using compact dates"
+			);
+			return "compact";
+		}
+
+		const rawDate = (data?.[0] as { change_date?: unknown } | undefined)?.change_date;
+		if (typeof rawDate === "string" && compactDatePattern.test(rawDate)) {
+			return "compact";
+		}
+		if (rawDate instanceof Date || typeof rawDate === "string") {
+			return "iso";
+		}
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, playerId },
+			"Failed to resolve player-value history date encoding; using compact dates"
+		);
+	}
+	return "compact";
+}
+
 function normalizePositionLabel(position: unknown): string {
 	if (typeof position === "number" && Number.isInteger(position)) {
 		switch (position) {
@@ -792,8 +834,11 @@ export const playerValuesRepository: PlayerValuesRepository = {
 
 		try {
 			const seasonWindow = await getActiveSeasonDateWindow(context, season);
-			const fromDate = toCompactDate(seasonWindow.fromDate);
-			const untilDate = toCompactDate(seasonWindow.untilDate);
+			const dateEncoding = await resolveHistoryDateEncoding(context, args.playerId);
+			const fromDate =
+				dateEncoding === "compact" ? toCompactDate(seasonWindow.fromDate) : seasonWindow.fromDate;
+			const untilDate =
+				dateEncoding === "compact" ? toCompactDate(seasonWindow.untilDate) : seasonWindow.untilDate;
 			const databaseRows: DbPlayerValueHistoryRow[] = [];
 			for (let from = 0; ; from += PLAYER_VALUE_HISTORY_PAGE_SIZE) {
 				const { data, error } = await context.supabase

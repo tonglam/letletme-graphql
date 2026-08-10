@@ -94,6 +94,9 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 		range(_from: number, _to: number) {
 			return builder;
 		},
+		limit(_count: number) {
+			return builder;
+		},
 		gte(_column: string, value: string) {
 			fromDateFilter = normalizedDate(value);
 			return builder;
@@ -243,6 +246,35 @@ describe("playerValueHistory integration", () => {
 		expect(data?.playerValueHistory[0].changeType).toBe("RISE");
 		expect(data?.playerValueHistory[0].oldValue).toBe(1000);
 		expect(data?.playerValueHistory[0].newValue).toBe(1010);
+	});
+
+	it("keeps ISO date bounds when player values are stored as ISO dates", async () => {
+		const rows: HistoryRow[] = [
+			{
+				element_id: 10,
+				value: 156,
+				last_value: 155,
+				change_date: "2026-08-03",
+				change_type: "rise",
+			},
+			{
+				element_id: 10,
+				value: 155,
+				last_value: 154,
+				change_date: "2026-08-02",
+				change_type: "fall",
+			},
+		];
+
+		const result = await graphql({
+			schema: testSchema,
+			source: historyQuery,
+			contextValue: createGraphQLContext(rows),
+			variableValues: { playerId: 10 },
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.playerValueHistory).toHaveLength(2);
 	});
 
 	it("returns empty array when player has no history", async () => {
