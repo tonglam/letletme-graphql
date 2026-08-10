@@ -169,7 +169,7 @@ jobs:
           DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: |
           psql "$DATA_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
-          CREATE SCHEMA bauth;
+          CREATE SCHEMA IF NOT EXISTS bauth;
           CREATE TABLE bauth."user" (
             id text PRIMARY KEY,
             email text,
