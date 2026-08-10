@@ -529,14 +529,46 @@ const FLAT_LIVE_EXPLAIN_STATS = [
 /**
  * When producers store only raw counts (no `*_points` columns), fill scoring
  * points from FPL rules so web clients can render a non-empty breakdown.
- * Position-weighted events (goals, clean sheets) stay 0 unless the row has
- * explicit points — those need element type, which is not always present here.
+ * Position-weighted events (goals, clean sheets) are estimated only when the
+ * snapshot supplies element type; otherwise the contribution is omitted.
  */
-const estimateFplPointsFromValue = (identifier: string, value: number): number | null => {
+const POSITION_WEIGHTED_LIVE_EXPLAIN_STATS = new Set([
+	"goals_scored",
+	"clean_sheets",
+	"goals_conceded",
+]);
+
+const estimateFplPointsFromValue = (
+	identifier: string,
+	value: number,
+	elementType: number | null = null
+): number | null => {
 	if (!Number.isFinite(value) || value === 0) return 0;
 	switch (identifier) {
 		case "minutes":
+			// A gameweek aggregate can contain a double gameweek. Without fixture
+			// boundaries, estimating 180 minutes as one appearance undercounts the
+			// official 2+2 minutes points, so leave the points unspecified.
+			if (value > 90) return null;
 			return value >= 60 ? 2 : value > 0 ? 1 : 0;
+		case "goals_scored":
+			return elementType === 1
+				? value * 10
+				: elementType === 2
+					? value * 6
+					: elementType === 3
+						? value * 5
+						: elementType === 4
+							? value * 4
+							: null;
+		case "clean_sheets":
+			return elementType === 1 || elementType === 2
+				? value * 4
+				: elementType === 3
+					? value
+					: null;
+		case "goals_conceded":
+			return elementType === 1 || elementType === 2 ? -Math.floor(value / 2) : null;
 		case "assists":
 			return value * 3;
 		case "saves":
@@ -557,7 +589,8 @@ const estimateFplPointsFromValue = (identifier: string, value: number): number |
 };
 
 const mapFlatLiveExplainContributions = (
-	row: Record<string, unknown> | null
+	row: Record<string, unknown> | null,
+	elementType: number | null = null
 ): LiveExplainStatContribution[] => {
 	if (!row) return [];
 	const contributions: LiveExplainStatContribution[] = [];
@@ -567,7 +600,14 @@ const mapFlatLiveExplainContributions = (
 		if ((value ?? 0) === 0 && (rawPoints ?? 0) === 0) continue;
 		let points = rawPoints ?? 0;
 		if (points === 0 && value !== null && value !== 0) {
-			const estimated = estimateFplPointsFromValue(definition.identifier, value);
+			const estimated = estimateFplPointsFromValue(definition.identifier, value, elementType);
+			if (
+				estimated === null &&
+				(definition.identifier === "minutes" && value > 90 ||
+					(POSITION_WEIGHTED_LIVE_EXPLAIN_STATS.has(definition.identifier) && elementType === null))
+			) {
+				continue;
+			}
 			if (estimated !== null) points = estimated;
 		}
 		contributions.push({
@@ -633,8 +673,12 @@ async function fetchPlayerStatsForLiveExplains(
 	context: GraphQLContext,
 	eventId: number,
 	elementIds: number[]
-): Promise<{ rows: Map<number, DbLiveExplainStats>; failed: boolean }> {
-	if (elementIds.length === 0) return { rows: new Map(), failed: false };
+): Promise<{
+	rows: Map<number, DbLiveExplainStats>;
+	eventRows: Map<number, DbLiveExplainStats>;
+	failed: boolean;
+}> {
+	if (elementIds.length === 0) return { rows: new Map(), eventRows: new Map(), failed: false };
 	const [snapshotResult, gameweekStatsResult] = await Promise.all([
 		context.data
 			.read("fpl.player_event_snapshots")
@@ -654,9 +698,10 @@ async function fetchPlayerStatsForLiveExplains(
 			{ err: error, eventId, elementIds },
 			"player live stats batch query failed for live explanations"
 		);
-		return { rows: new Map(), failed: true };
+		return { rows: new Map(), eventRows: new Map(), failed: true };
 	}
 	const rows = new Map<number, DbLiveExplainStats>();
+	const eventRows = new Map<number, DbLiveExplainStats>();
 	for (const raw of (snapshotResult.data ?? []) as unknown[]) {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
 		const row = raw as DbLiveExplainStats;
@@ -672,6 +717,7 @@ async function fetchPlayerStatsForLiveExplains(
 		const gameweekRow = raw as DbLiveExplainStats;
 		const elementId = parseIntegerValue(pickRecordValue(gameweekRow, "element_id", "elementId"));
 		if (elementId === null || !elementIds.includes(elementId)) continue;
+		eventRows.set(elementId, gameweekRow);
 		const current = rows.get(elementId) ?? { event_id: eventId, element_id: elementId };
 		for (const [target, keys] of [
 			["penalties_missed", ["penalties_missed", "penaltiesMissed"]],
@@ -682,7 +728,7 @@ async function fetchPlayerStatsForLiveExplains(
 		}
 		rows.set(elementId, current);
 	}
-	return { rows, failed: false };
+	return { rows, eventRows, failed: false };
 }
 
 async function fetchEventLiveExplainsFromDatabase(
@@ -1128,6 +1174,7 @@ const loadColdLiveExplainBatch = async (
 		fetchEventLiveExplainsFromDatabase(context, eventId, databaseIds),
 	]);
 	const playerStatsById = playerStatsResult.rows;
+	const eventStatsById = playerStatsResult.eventRows;
 	const playerStatsDatabaseIds = new Set(databaseIds);
 	for (const [elementId, row] of playerStatsById) {
 		selectedByById.set(
@@ -1158,7 +1205,11 @@ const loadColdLiveExplainBatch = async (
 			contributions = mapScoringItemContributions(elRow?.scoring_items ?? []);
 		}
 		if (contributions.length === 0) contributions = mapFlatLiveExplainContributions(elRow);
-		if (contributions.length === 0) contributions = mapFlatLiveExplainContributions(psRow);
+		if (contributions.length === 0) {
+			const eventStats = eventStatsById.get(elementId) ?? null;
+			const elementType = parseIntegerValue(pickRecordValue(psRow, "element_type", "elementType"));
+			contributions = mapFlatLiveExplainContributions(eventStats, elementType);
+		}
 
 		const result: LiveExplain = {
 			eventId,

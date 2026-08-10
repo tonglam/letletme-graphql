@@ -223,6 +223,17 @@ describe("liveRepository v3 explanation query cache", () => {
 					{
 						event_id: 1,
 						element_id: 1,
+						element_type: 3,
+						minutes: 120,
+						goals_scored: 1,
+						assists: 5,
+						total_points: 42,
+					},
+				],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 1,
+						element_id: 1,
 						minutes: 66,
 						goals_scored: 1,
 						assists: 2,
@@ -231,7 +242,6 @@ describe("liveRepository v3 explanation query cache", () => {
 						total_points: 14,
 					},
 				],
-				"fpl.player_gameweek_stats": [],
 				"fpl.player_gameweek_scoring_items": [],
 				"fpl.player_fixture_stats": [],
 			},
@@ -240,7 +250,7 @@ describe("liveRepository v3 explanation query cache", () => {
 
 		const [result] = await liveRepository.getEventLiveExplains(context, 1, [1]);
 
-		expect(result?.stats.totalPoints).toBe(14);
+		expect(result?.stats.totalPoints).toBe(42);
 		expect(result?.contributions).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({ identifier: "minutes", value: 66, points: 2 }),
@@ -255,6 +265,24 @@ describe("liveRepository v3 explanation query cache", () => {
 			"fpl.player_gameweek_scoring_items",
 			"fpl.player_fixture_stats",
 		]);
+	});
+
+	it("does not estimate one minutes score across a double gameweek aggregate", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 3, minutes: 180, total_points: 42 },
+			],
+			"fpl.player_gameweek_stats": [
+				{ event_id: 1, element_id: 2, minutes: 180, total_points: 4 },
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions?.some((item) => item.identifier === "minutes")).toBe(false);
 	});
 
 	it("loads a fifteen-player explanation batch with two bounded reporting reads", async () => {
