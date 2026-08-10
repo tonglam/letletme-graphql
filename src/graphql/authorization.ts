@@ -102,6 +102,7 @@ const tournamentMembershipFields = new Set([
 	"tournamentSelectionStats",
 	"calcLivePointsForTournament",
 	"tournamentEntryRankingSummary",
+	"tournamentSeasonSnapshot",
 	"tournament",
 ]);
 

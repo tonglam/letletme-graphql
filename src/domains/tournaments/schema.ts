@@ -130,6 +130,92 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		tournamentBenchPointsRank: Int
 		autoSubPoints: Int
 		tournamentAutoSubRank: Int
+		"""
+		FPL cumulative total points for this entry as of eventId.
+		"""
+		overallPoints: Int
+		"""
+		Leader's cumulative total points in the tournament as of eventId.
+		"""
+		leaderOverallPoints: Int
+		"""
+		Points behind the tournament leader (0 if leading).
+		"""
+		gapToLeader: Int
+		"""
+		Points behind the entry immediately above (0 if rank 1).
+		"""
+		pointsBehindNext: Int
+		"""
+		Points ahead of the entry immediately below (0 if last).
+		"""
+		pointsAheadOfPrev: Int
+	}
+
+	"""
+	One row in the season (as-of event) tournament table.
+	"""
+	type TournamentSeasonStandingRow {
+		entryId: Int!
+		rank: Int
+		entryName: String
+		playerName: String
+		overallPoints: Int
+		"""
+		Global FPL overall rank as of this event (not tournament rank).
+		"""
+		overallRank: Int
+		"""
+		Team value in 0.1m FPL units as of this event.
+		"""
+		teamValue: Int
+	}
+
+	"""
+	Main tournament metrics used for field leadership / averages.
+	"""
+	enum TournamentSeasonMetricKey {
+		OVERALL_POINTS
+		TEAM_VALUE
+		TRANSFERS
+		TOTAL_COSTS
+		BENCH_POINTS
+		AUTO_SUB_POINTS
+	}
+
+	"""
+	Field-level leader + average for one season metric (as-of event).
+	Leader is rank-1 for that metric inside the tournament (not always max raw value).
+	"""
+	type TournamentSeasonMetric {
+		key: TournamentSeasonMetricKey!
+		leaderValue: Float
+		leaderEntryId: Int
+		leaderEntryName: String
+		leaderPlayerName: String
+		averageValue: Float
+		"""
+		True if higher raw values rank better (points, team value, bench, auto-sub).
+		"""
+		higherIsBetter: Boolean!
+	}
+
+	"""
+	Tournament-level season snapshot (dimension A): field size, leader/average points,
+	metric leadership board, and cumulative standings as of a given event. POINTS_RACES only.
+	"""
+	type TournamentSeasonSnapshot {
+		asOfEventId: Int!
+		entryCount: Int!
+		leaderOverallPoints: Int
+		secondOverallPoints: Int
+		gapFirstSecond: Int
+		averageOverallPoints: Int
+		"""
+		Leaders + averages for overall points, team value, transfers, costs, bench, auto-sub.
+		"""
+		metrics: [TournamentSeasonMetric!]!
+		standings: [TournamentSeasonStandingRow!]!
 	}
 
 	type TournamentBattleGroupResult {
@@ -208,6 +294,11 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 			eventId: Int!
 			entryId: Int!
 		): TournamentEntryRankingSummary!
+		"""
+		Season field overview for a tournament as of eventId (standings + aggregates).
+		POINTS_RACES only; empty standings when unsupported or no data.
+		"""
+		tournamentSeasonSnapshot(tournamentId: Int!, eventId: Int!): TournamentSeasonSnapshot!
 		tournamentBattleGroupResults(tournamentId: Int!, eventId: Int!): [TournamentBattleGroupResult!]!
 		entryH2HMatchResults(entryId: Int!): [EntryH2HMatchResult!]!
 	}

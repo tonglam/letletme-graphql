@@ -9,6 +9,7 @@ import {
 	KnockoutMode,
 	type TournamentBattleGroupResult,
 	type TournamentEventResult,
+	type TournamentSeasonSnapshot,
 	TournamentMode,
 	TournamentState,
 	tournamentsRepository,
@@ -256,5 +257,58 @@ describe("tournamentBattleGroupResults query resolver", () => {
 		expect(tournamentsResolvers.TournamentBattleGroupResult.tournament(parent)).toBe(
 			tournamentStub
 		);
+	});
+});
+
+describe("tournamentSeasonSnapshot query resolver", () => {
+	it("checks insights readiness and delegates to tournamentsService", async () => {
+		const original = tournamentsService.getTournamentSeasonSnapshot;
+		const originalReadiness = tournamentsRepository.getTournamentInfoUncached;
+		const context = {} as unknown as GraphQLContext;
+		const expected: TournamentSeasonSnapshot = {
+			asOfEventId: 15,
+			entryCount: 0,
+			leaderOverallPoints: null,
+			secondOverallPoints: null,
+			gapFirstSecond: null,
+			averageOverallPoints: null,
+			metrics: [],
+			standings: [],
+		};
+
+		tournamentsRepository.getTournamentInfoUncached = async (inputContext, tournamentId) => {
+			expect(inputContext).toBe(context);
+			expect(tournamentId).toBe(7);
+			return {
+				id: 7,
+				standingsReadyAt: "2026-08-04T00:00:00.000Z",
+				setupStatus: "ready",
+				setupPhase: "ready",
+				setupHasWarnings: false,
+			} as never;
+		};
+		tournamentsService.getTournamentSeasonSnapshot = async (
+			inputContext,
+			tournamentId,
+			eventId
+		) => {
+			expect(inputContext).toBe(context);
+			expect(tournamentId).toBe(7);
+			expect(eventId).toBe(15);
+			return expected;
+		};
+
+		try {
+			expect(
+				await tournamentsResolvers.Query.tournamentSeasonSnapshot(
+					undefined,
+					{ tournamentId: 7, eventId: 15 },
+					context
+				)
+			).toBe(expected);
+		} finally {
+			tournamentsService.getTournamentSeasonSnapshot = original;
+			tournamentsRepository.getTournamentInfoUncached = originalReadiness;
+		}
 	});
 });

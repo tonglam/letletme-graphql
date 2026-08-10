@@ -5,6 +5,7 @@ import {
 	type DbTournamentEntryRow,
 	type DbTournamentInfoRow,
 	type DbTournamentPointsGroupResultRow,
+	type TournamentEventResult,
 	extractTournamentIds,
 	GroupMode,
 	KnockoutMode,
@@ -379,7 +380,6 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 				options.cacheSeed
 			);
 		}
-
 		const queryLog: Array<{
 			table: string;
 			actions: Array<{ type: string; args: unknown[] }>;
@@ -740,13 +740,23 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		snapshotData?: unknown[];
 		tournamentError?: unknown;
 		snapshotError?: unknown;
+		eventResultsError?: unknown;
 		cacheSeed?: string | null;
+		eventResults?: TournamentEventResult[];
 	}): GraphQLContext => {
 		const redisState = new Map<string, string>();
 		if (options.cacheSeed) {
 			redisState.set(
-				testCacheKey(`tournaments:ranking-summary:{"entryId":15702,"eventId":3,"tournamentId":1}`),
+				testCacheKey(
+					`tournaments:ranking-summary:v2:{"entryId":15702,"eventId":3,"tournamentId":1}`
+				),
 				options.cacheSeed
+			);
+		}
+		if (options.eventResults) {
+			redisState.set(
+				testCacheKey(`tournaments:event-results:{"eventId":3,"tournamentId":1}`),
+				JSON.stringify(options.eventResults)
 			);
 		}
 
@@ -764,6 +774,12 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 					return {
 						data: filterRowsByActions(options.snapshotData ?? [], actions),
 						error: options.snapshotError ?? null,
+					};
+				}
+				if (table === "reporting.tournament_event_results") {
+					return {
+						data: [],
+						error: options.eventResultsError ?? null,
 					};
 				}
 				return { data: [], error: null };
@@ -889,6 +905,11 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 			tournamentBenchPointsRank: 1,
 			autoSubPoints: 5,
 			tournamentAutoSubRank: 1,
+			overallPoints: 1120,
+			leaderOverallPoints: 1200,
+			gapToLeader: 80,
+			pointsBehindNext: 40,
+			pointsAheadOfPrev: 12,
 		};
 		const context = buildContext({ cacheSeed: JSON.stringify(cached) });
 
@@ -1017,6 +1038,50 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		expect(result.tournamentBenchPointsRank).toBe(1);
 		expect(result.autoSubPoints).toBe(7);
 		expect(result.tournamentAutoSubRank).toBe(1);
+		// Gaps come from event results (empty in this unit fixture → nulls)
+		expect(result.overallPoints).toBeNull();
+		expect(result.leaderOverallPoints).toBeNull();
+		expect(result.gapToLeader).toBeNull();
+		expect(result.pointsBehindNext).toBeNull();
+		expect(result.pointsAheadOfPrev).toBeNull();
+	});
+
+	it("preserves the ranking summary when the optional field gap lookup fails", async () => {
+		const context = buildContext({
+			tournamentData: [tournamentRow],
+			eventResultsError: new Error("event results unavailable"),
+			snapshotData: [
+				{
+					tournament_id: 1,
+					event_id: 3,
+					entry_id: 15702,
+					tournament_overall_rank: 2,
+					overall_rank: 1000,
+					team_value: 1020,
+					cum_transfers_num: 3,
+					cum_total_costs: 4,
+					cum_total_bench_points: 11,
+					cum_auto_sub_points: 7,
+					tournament_team_value_rank: 1,
+					tournament_transfers_rank: 2,
+					tournament_costs_rank: 2,
+					tournament_bench_points_rank: 1,
+					tournament_auto_sub_rank: 1,
+				},
+			],
+		});
+
+		const result = await tournamentsRepository.getTournamentEntryRankingSummary(
+			context,
+			1,
+			3,
+			15702
+		);
+
+		expect(result.overallRank).toBe(1000);
+		expect(result.transfersNum).toBe(3);
+		expect(result.gapToLeader).toBeNull();
+		expect(result.pointsBehindNext).toBeNull();
 	});
 
 	it("returns null ranks and zero cumulative metrics when snapshot row is missing", async () => {
@@ -1044,6 +1109,137 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		expect(result.tournamentBenchPointsRank).toBeNull();
 		expect(result.autoSubPoints).toBe(0);
 		expect(result.tournamentAutoSubRank).toBeNull();
+	});
+
+	const seasonEventResult = (
+		entryId: number,
+		groupRank: number,
+		overallPoints: number,
+		teamValue: number
+	): TournamentEventResult => ({
+		tournament: mapTournamentInfo(tournamentRow),
+		eventId: 3,
+		groupId: 1,
+		entryId,
+		entryName: `Entry ${entryId}`,
+		playerName: `Manager ${entryId}`,
+		eventGroupRank: groupRank,
+		eventPoints: 70,
+		eventCost: 0,
+		eventNetPoints: 70,
+		eventRank: 100,
+		overallPoints,
+		overallRank: 1000 + groupRank,
+		eventChip: null,
+		captainId: null,
+		captainPoints: null,
+		teamValue,
+		bank: 10,
+	});
+
+	it("builds one tournament season snapshot from v3 reporting rows", async () => {
+		const context = buildContext({
+			tournamentData: [tournamentRow],
+			eventResults: [
+				seasonEventResult(15702, 1, 1120, 1020),
+				seasonEventResult(20002, 1, 1200, 1030),
+				seasonEventResult(30003, 1, 1090, 1010),
+			],
+			snapshotData: [
+				{
+					tournament_id: 1,
+					event_id: 3,
+					entry_id: 15702,
+					team_value: 1020,
+					cum_transfers_num: 2,
+					cum_total_costs: 0,
+					cum_total_bench_points: 12,
+					cum_auto_sub_points: 3,
+				},
+				{
+					tournament_id: 1,
+					event_id: 3,
+					entry_id: 20002,
+					team_value: 1030,
+					cum_transfers_num: null,
+					cum_total_costs: 4,
+					cum_total_bench_points: 10,
+					cum_auto_sub_points: 7,
+				},
+				{
+					tournament_id: 1,
+					event_id: 3,
+					entry_id: 30003,
+					team_value: 1010,
+					cum_transfers_num: 3,
+					cum_total_costs: 8,
+					cum_total_bench_points: 18,
+					cum_auto_sub_points: 1,
+				},
+			],
+		});
+
+		const result = await tournamentsRepository.getTournamentSeasonSnapshot(context, 1, 3);
+
+		expect(result).toMatchObject({
+			asOfEventId: 3,
+			entryCount: 3,
+			leaderOverallPoints: 1200,
+			secondOverallPoints: 1120,
+			gapFirstSecond: 80,
+			averageOverallPoints: 1137,
+		});
+		expect(result.standings.map((row) => row.entryId)).toEqual([20002, 15702, 30003]);
+		expect(result.standings.map((row) => row.rank)).toEqual([1, 2, 3]);
+		expect(result.metrics.find((metric) => metric.key === "TEAM_VALUE")).toMatchObject({
+			leaderEntryId: 20002,
+			leaderValue: 1030,
+		});
+		expect(result.metrics.find((metric) => metric.key === "TRANSFERS")).toMatchObject({
+			leaderEntryId: 15702,
+			leaderValue: 2,
+			averageValue: 2.5,
+			higherIsBetter: false,
+		});
+	});
+
+	it("returns an empty season snapshot for unsupported tournament modes", async () => {
+		const context = buildContext({
+			tournamentData: [{ ...tournamentRow, group_mode: "battle_races" }],
+			snapshotData: [
+				{
+					tournament_id: 1,
+					event_id: 3,
+					entry_id: 15702,
+					cum_transfers_num: 2,
+				},
+			],
+		});
+
+		const result = await tournamentsRepository.getTournamentSeasonSnapshot(context, 1, 3);
+		expect(result).toMatchObject({ entryCount: 0, metrics: [], standings: [] });
+	});
+
+	it("fails closed when the cumulative metric scope is incomplete", async () => {
+		const context = buildContext({
+			tournamentData: [tournamentRow],
+			eventResults: [
+				seasonEventResult(15702, 1, 1120, 1020),
+				seasonEventResult(20002, 1, 1200, 1030),
+			],
+			snapshotData: [
+				{
+					tournament_id: 1,
+					event_id: 3,
+					entry_id: 15702,
+					cum_transfers_num: 2,
+				},
+			],
+		});
+
+		await expect(tournamentsRepository.getTournamentSeasonSnapshot(context, 1, 3)).rejects.toThrow(
+			"Tournament season metrics are incomplete"
+		);
 	});
 });
 
