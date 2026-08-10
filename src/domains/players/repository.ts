@@ -52,29 +52,52 @@ const asNullableNumber = (value: unknown): number | null => {
 	return null;
 };
 
+const GRAPHQL_INT_MIN = -2_147_483_648;
+const GRAPHQL_INT_MAX = 2_147_483_647;
+
+const parseCachedInt = (value: unknown, fallback?: number): number | null => {
+	if (value === null || value === undefined) return fallback ?? null;
+	if (typeof value !== "number" && typeof value !== "string") return null;
+	if (typeof value === "string" && value.trim().length === 0) return null;
+	const parsed = typeof value === "string" ? Number(value.trim()) : value;
+	if (!Number.isInteger(parsed) || parsed < GRAPHQL_INT_MIN || parsed > GRAPHQL_INT_MAX) {
+		return null;
+	}
+	return parsed;
+};
+
 const parseCachedPlayer = (raw: string, id: number): Player | null => {
 	try {
 		const parsed = JSON.parse(raw) as unknown;
 		if (!isObject(parsed)) return null;
 
-		const code = Number(parsed.code);
+		const code = parseCachedInt(parsed.code);
 		const webName =
 			typeof parsed.webName === "string"
 				? parsed.webName.trim()
 				: typeof parsed.web_name === "string"
 					? parsed.web_name.trim()
 					: "";
-		const teamId = Number(parsed.teamId ?? parsed.team_id);
-		const position = Number(parsed.type ?? parsed.position);
+		const teamId = parseCachedInt(parsed.teamId ?? parsed.team_id);
+		const position = parseCachedInt(parsed.type ?? parsed.position);
+		const price = parseCachedInt(parsed.price, 0);
+		const startPrice = parseCachedInt(parsed.startPrice ?? parsed.start_price, 0);
+		const totalPoints = parseCachedInt(parsed.totalPoints ?? parsed.total_points, 0);
+		const selectedRaw = parsed.selectedByPercent ?? parsed.selected_by_percent;
+		const selectedByPercent = asNullableNumber(selectedRaw);
 		if (
-			!Number.isInteger(code) ||
+			code === null ||
 			code <= 0 ||
 			webName.length === 0 ||
-			!Number.isInteger(teamId) ||
+			teamId === null ||
 			teamId <= 0 ||
-			!Number.isInteger(position) ||
+			position === null ||
 			position < Position.GOALKEEPER ||
-			position > Position.FORWARD
+			position > Position.FORWARD ||
+			price === null ||
+			startPrice === null ||
+			totalPoints === null ||
+			(selectedRaw !== undefined && selectedRaw !== null && selectedByPercent === null)
 		) {
 			return null;
 		}
@@ -97,10 +120,10 @@ const parseCachedPlayer = (raw: string, id: number): Player | null => {
 						: null,
 			teamId,
 			position: position as Position,
-			price: Number(parsed.price ?? 0),
-			startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
-			totalPoints: Number(parsed.totalPoints ?? parsed.total_points ?? 0),
-			selectedByPercent: asNullableNumber(parsed.selectedByPercent ?? parsed.selected_by_percent),
+			price,
+			startPrice,
+			totalPoints,
+			selectedByPercent,
 		};
 	} catch {
 		return null;
@@ -786,22 +809,10 @@ export const playersRepository: PlayersRepository = {
 			if (hash && Object.keys(hash).length > 0) {
 				const players = new Map<number, Player>();
 				for (const [fieldKey, value] of Object.entries(hash)) {
-					const parsed = JSON.parse(value) as Record<string, unknown>;
-					players.set(Number(fieldKey), {
-						id: Number(fieldKey),
-						code: Number(parsed.code ?? 0),
-						webName: String(parsed.webName ?? ""),
-						firstName: parsed.firstName ? String(parsed.firstName) : null,
-						secondName: parsed.secondName ? String(parsed.secondName) : null,
-						teamId: Number(parsed.teamId ?? 0),
-						position: Number(parsed.type ?? 0) as Position,
-						price: Number(parsed.price ?? 0),
-						startPrice: Number(parsed.startPrice ?? 0),
-						totalPoints: Number(parsed.totalPoints ?? parsed.total_points ?? 0),
-						selectedByPercent: asNullableNumber(
-							parsed.selectedByPercent ?? parsed.selected_by_percent
-						),
-					});
+					const id = Number(fieldKey);
+					const player = parseCachedPlayer(value, id);
+					if (!player) throw new Error("Malformed Player hash row");
+					players.set(id, player);
 				}
 				return players;
 			}

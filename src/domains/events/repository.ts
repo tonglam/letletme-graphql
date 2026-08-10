@@ -159,6 +159,14 @@ const parseNullableFiniteNumber = (raw: unknown): number | null => {
 	return Number.isFinite(parsed) ? parsed : null;
 };
 
+const parseBooleanFlag = (value: unknown): boolean | null => {
+	if (value === undefined || value === null) return false;
+	if (typeof value === "boolean") return value;
+	if (value === 1 || value === "1" || value === "true") return true;
+	if (value === 0 || value === "0" || value === "false") return false;
+	return null;
+};
+
 const parseEventFromRedisJson = (raw: string, expectedId?: number): Event | null => {
 	try {
 		const obj = JSON.parse(raw) as Record<string, unknown>;
@@ -166,22 +174,40 @@ const parseEventFromRedisJson = (raw: string, expectedId?: number): Event | null
 		if (!Number.isInteger(id) || id <= 0 || (expectedId !== undefined && id !== expectedId)) {
 			return null;
 		}
+		const finished = parseBooleanFlag(obj.finished);
+		const dataChecked = parseBooleanFlag(obj.dataChecked);
+		const isPrevious = parseBooleanFlag(obj.isPrevious);
+		const isCurrent = parseBooleanFlag(obj.isCurrent);
+		const isNext = parseBooleanFlag(obj.isNext);
+		const cupLeagueCreate = parseBooleanFlag(obj.cupLeagueCreate);
+		const h2hKoMatchesCreated = parseBooleanFlag(obj.h2hKoMatchesCreated);
+		if (
+			finished === null ||
+			dataChecked === null ||
+			isPrevious === null ||
+			isCurrent === null ||
+			isNext === null ||
+			cupLeagueCreate === null ||
+			h2hKoMatchesCreated === null
+		) {
+			return null;
+		}
 		return {
 			id,
 			name: String(obj.name ?? ""),
 			deadlineTime: normalizeDeadlineTime(obj.deadlineTime, obj.deadlineTimeEpoch),
 			averageEntryScore: parseNullableFiniteNumber(obj.averageEntryScore),
-			finished: Boolean(obj.finished),
-			dataChecked: Boolean(obj.dataChecked),
+			finished,
+			dataChecked,
 			highestScoringEntry: parseNullableFiniteNumber(obj.highestScoringEntry),
 			deadlineTimeEpoch: parseNullableFiniteNumber(obj.deadlineTimeEpoch),
 			deadlineTimeGameOffset: parseNullableFiniteNumber(obj.deadlineTimeGameOffset),
 			highestScore: parseNullableFiniteNumber(obj.highestScore),
-			isPrevious: Boolean(obj.isPrevious),
-			isCurrent: Boolean(obj.isCurrent),
-			isNext: Boolean(obj.isNext),
-			cupLeagueCreate: Boolean(obj.cupLeagueCreate),
-			h2hKoMatchesCreated: Boolean(obj.h2hKoMatchesCreated),
+			isPrevious,
+			isCurrent,
+			isNext,
+			cupLeagueCreate,
+			h2hKoMatchesCreated,
 			chipPlays: parseChipPlays(obj.chipPlays),
 			mostSelected: parseNullableFiniteNumber(obj.mostSelected),
 			mostTransferredIn: parseNullableFiniteNumber(obj.mostTransferredIn),

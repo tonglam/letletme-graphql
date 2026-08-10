@@ -184,10 +184,39 @@ const asNumber = (value: unknown): number | null => {
 		return value;
 	}
 	if (typeof value === "string") {
-		const parsed = Number.parseFloat(value);
+		const trimmed = value.trim();
+		if (trimmed.length === 0) return null;
+		const parsed = Number(trimmed);
 		return Number.isFinite(parsed) ? parsed : null;
 	}
 	return null;
+};
+
+const pickLiveField = (row: JsonRecord, keys: string[]): { present: boolean; value: unknown } => {
+	for (const key of keys) {
+		if (Object.hasOwn(row, key)) return { present: true, value: row[key] };
+	}
+	return { present: false, value: undefined };
+};
+
+const parseOptionalNumber = (
+	row: JsonRecord,
+	keys: string[]
+): { value: number | null; valid: boolean } => {
+	const field = pickLiveField(row, keys);
+	if (!field.present || field.value === null) return { value: null, valid: true };
+	const value = asNumber(field.value);
+	return { value, valid: value !== null };
+};
+
+const parseOptionalBoolean = (
+	row: JsonRecord,
+	keys: string[]
+): { value: boolean | null; valid: boolean } => {
+	const field = pickLiveField(row, keys);
+	if (!field.present || field.value === null) return { value: null, valid: true };
+	const value = asBoolean(field.value);
+	return { value, valid: value !== null };
 };
 
 const asBoolean = (value: unknown): boolean | null => {
@@ -259,41 +288,79 @@ export const mapSyncJobLiveRow = (raw: unknown): LivePerformance | null => {
 	}
 	const row = raw as Record<string, unknown>;
 
-	const eventId = asNumber(row.eventId ?? row.event_id);
-	const elementId = asNumber(row.elementId ?? row.element_id);
-	if (eventId === null || elementId === null) {
+	const eventId = asNumber(pickLiveField(row, ["eventId", "event_id"]).value);
+	const elementId = asNumber(pickLiveField(row, ["elementId", "element_id"]).value);
+	if (
+		eventId === null ||
+		elementId === null ||
+		!Number.isInteger(eventId) ||
+		!Number.isInteger(elementId) ||
+		eventId <= 0 ||
+		elementId <= 0
+	) {
 		return null;
 	}
 
-	const startsRaw = row.starts ?? row.starts;
-	const startsValue = asBoolean(startsRaw);
+	const numericFields = {
+		minutes: parseOptionalNumber(row, ["minutes"]),
+		goalsScored: parseOptionalNumber(row, ["goalsScored", "goals_scored"]),
+		assists: parseOptionalNumber(row, ["assists"]),
+		cleanSheets: parseOptionalNumber(row, ["cleanSheets", "clean_sheets"]),
+		goalsConceded: parseOptionalNumber(row, ["goalsConceded", "goals_conceded"]),
+		ownGoals: parseOptionalNumber(row, ["ownGoals", "own_goals"]),
+		penaltiesSaved: parseOptionalNumber(row, ["penaltiesSaved", "penalties_saved"]),
+		penaltiesMissed: parseOptionalNumber(row, ["penaltiesMissed", "penalties_missed"]),
+		yellowCards: parseOptionalNumber(row, ["yellowCards", "yellow_cards"]),
+		redCards: parseOptionalNumber(row, ["redCards", "red_cards"]),
+		saves: parseOptionalNumber(row, ["saves"]),
+		bonus: parseOptionalNumber(row, ["bonus"]),
+		bps: parseOptionalNumber(row, ["bps"]),
+		defensiveContribution: parseOptionalNumber(row, [
+			"defensiveContribution",
+			"defensive_contribution",
+		]),
+	};
+	if (Object.values(numericFields).some((field) => !field.valid)) return null;
+	const starts = parseOptionalBoolean(row, ["starts"]);
+	const inDreamTeam = parseOptionalBoolean(row, ["inDreamTeam", "in_dream_team"]);
+	if (!starts.valid || !inDreamTeam.valid) return null;
+	const totalPointsField = pickLiveField(row, ["totalPoints", "total_points"]);
+	const totalPoints = !totalPointsField.present ? 0 : asNumber(totalPointsField.value);
+	if (
+		totalPoints === null ||
+		!Number.isInteger(totalPoints) ||
+		totalPoints < -2_147_483_648 ||
+		totalPoints > 2_147_483_647
+	) {
+		return null;
+	}
 
 	return {
-		eventId: Math.trunc(eventId),
-		playerId: Math.trunc(elementId),
-		minutes: asNumber(row.minutes),
-		goalsScored: asNumber(row.goalsScored ?? row.goals_scored),
-		assists: asNumber(row.assists),
-		cleanSheets: asNumber(row.cleanSheets ?? row.clean_sheets),
-		goalsConceded: asNumber(row.goalsConceded ?? row.goals_conceded),
-		ownGoals: asNumber(row.ownGoals ?? row.own_goals),
-		penaltiesSaved: asNumber(row.penaltiesSaved ?? row.penalties_saved),
-		penaltiesMissed: asNumber(row.penaltiesMissed ?? row.penalties_missed),
-		yellowCards: asNumber(row.yellowCards ?? row.yellow_cards),
-		redCards: asNumber(row.redCards ?? row.red_cards),
-		saves: asNumber(row.saves),
-		bonus: asNumber(row.bonus),
-		bps: asNumber(row.bps),
-		starts: startsValue,
-		defensiveContribution: asNumber(row.defensiveContribution ?? row.defensive_contribution),
+		eventId,
+		playerId: elementId,
+		minutes: numericFields.minutes.value,
+		goalsScored: numericFields.goalsScored.value,
+		assists: numericFields.assists.value,
+		cleanSheets: numericFields.cleanSheets.value,
+		goalsConceded: numericFields.goalsConceded.value,
+		ownGoals: numericFields.ownGoals.value,
+		penaltiesSaved: numericFields.penaltiesSaved.value,
+		penaltiesMissed: numericFields.penaltiesMissed.value,
+		yellowCards: numericFields.yellowCards.value,
+		redCards: numericFields.redCards.value,
+		saves: numericFields.saves.value,
+		bonus: numericFields.bonus.value,
+		bps: numericFields.bps.value,
+		starts: starts.value,
+		defensiveContribution: numericFields.defensiveContribution.value,
 		expectedGoals: asString(row.expectedGoals ?? row.expected_goals) ?? null,
 		expectedAssists: asString(row.expectedAssists ?? row.expected_assists) ?? null,
 		expectedGoalInvolvements:
 			asString(row.expectedGoalInvolvements ?? row.expected_goal_involvements) ?? null,
 		expectedGoalsConceded:
 			asString(row.expectedGoalsConceded ?? row.expected_goals_conceded) ?? null,
-		inDreamTeam: asBoolean(row.inDreamTeam ?? row.in_dream_team),
-		totalPoints: asNumber(row.totalPoints ?? row.total_points) ?? 0,
+		inDreamTeam: inDreamTeam.value,
+		totalPoints,
 	};
 };
 

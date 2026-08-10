@@ -254,9 +254,16 @@ export const entriesRepository: EntriesRepository = {
 				}
 				const lastEventId = parseCachedInt(parsed.lastEventId);
 				const overallPoints = parseCachedInt(parsed.overallPoints);
+				const startedEvent = parseCachedInt(parsed.startedEvent);
 				const hasValidLastEventId = parsed.lastEventId === null || lastEventId !== null;
+				const hasValidStartedEvent =
+					parsed.startedEvent === undefined ||
+					parsed.startedEvent === null ||
+					startedEvent !== null;
 				const hasValidBaseline =
-					hasValidLastEventId && (typeof parsed.lastEventId !== "number" || overallPoints !== null);
+					hasValidLastEventId &&
+					hasValidStartedEvent &&
+					(typeof parsed.lastEventId !== "number" || overallPoints !== null);
 				if (!hasValidBaseline) {
 					// A malformed current baseline can corrupt live point deltas. Let the
 					// authoritative database row provide the complete entry instead.
@@ -267,7 +274,7 @@ export const entriesRepository: EntriesRepository = {
 					entryName,
 					playerName,
 					region: parsed.region ? String(parsed.region) : null,
-					startedEvent: parseCachedInt(parsed.startedEvent),
+					startedEvent,
 					overallPoints,
 					overallRank: parseCachedInt(parsed.overallRank),
 					bank: parseCachedInt(parsed.bank),
@@ -359,9 +366,15 @@ export const entriesRepository: EntriesRepository = {
 					const playerName = parseCachedName(parsed.playerName);
 					const lastEventId = parseCachedInt(parsed.lastEventId);
 					const overallPoints = parseCachedInt(parsed.overallPoints);
+					const startedEvent = parseCachedInt(parsed.startedEvent);
 					const hasValidLastEventId = parsed.lastEventId === null || lastEventId !== null;
+					const hasValidStartedEvent =
+						parsed.startedEvent === undefined ||
+						parsed.startedEvent === null ||
+						startedEvent !== null;
 					const hasValidBaseline =
 						hasValidLastEventId &&
+						hasValidStartedEvent &&
 						(typeof parsed.lastEventId !== "number" || overallPoints !== null);
 					if (!entryName || !playerName || !hasValidBaseline) {
 						missingIds.push(uniqueIds[i]);
@@ -372,7 +385,7 @@ export const entriesRepository: EntriesRepository = {
 						entryName,
 						playerName,
 						region: parsed.region ? String(parsed.region) : null,
-						startedEvent: typeof parsed.startedEvent === "number" ? parsed.startedEvent : null,
+						startedEvent,
 						overallPoints,
 						overallRank: parseCachedInt(parsed.overallRank),
 						bank: parseCachedInt(parsed.bank),

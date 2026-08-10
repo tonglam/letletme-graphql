@@ -40,6 +40,49 @@ export interface EventOverallResultRepository {
 	getEventOverallResult(context: GraphQLContext): Promise<EventResult[]>;
 }
 
+const GRAPHQL_INT_MIN = -2_147_483_648;
+const GRAPHQL_INT_MAX = 2_147_483_647;
+
+const parseIntOrDefault = (value: unknown, fallback = 0): number | null => {
+	if (value === null || value === undefined) return fallback;
+	if (typeof value !== "number" || !Number.isInteger(value)) return null;
+	return value >= GRAPHQL_INT_MIN && value <= GRAPHQL_INT_MAX ? value : null;
+};
+
+const parseBoolOrDefault = (value: unknown, fallback = false): boolean | null => {
+	if (value === null || value === undefined) return fallback;
+	if (typeof value === "boolean") return value;
+	if (value === 1 || value === "1" || value === "true") return true;
+	if (value === 0 || value === "0" || value === "false") return false;
+	return null;
+};
+
+const parseCachedChipPlays = (value: unknown): ChipPlay[] | null => {
+	if (value === null || value === undefined) return [];
+	if (!Array.isArray(value)) return null;
+	const result: ChipPlay[] = [];
+	for (const item of value) {
+		if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
+		const row = item as Record<string, unknown>;
+		const chipName = row.chipName ?? row.chip_name;
+		const numberPlayed = parseIntOrDefault(row.numberPlayed ?? row.num_played);
+		if (typeof chipName !== "string" || chipName.trim().length === 0 || numberPlayed === null) {
+			return null;
+		}
+		result.push({ chipName: chipName.trim(), numberPlayed });
+	}
+	return result;
+};
+
+const parseCachedTopElementInfo = (value: unknown): TopElementInfo | null => {
+	if (value === null || value === undefined) return { element: 0, points: 0 };
+	if (typeof value !== "object" || Array.isArray(value)) return null;
+	const row = value as Record<string, unknown>;
+	const element = parseIntOrDefault(row.element ?? row.id);
+	const points = parseIntOrDefault(row.points);
+	return element === null || points === null ? null : { element, points };
+};
+
 type DbEventRow = {
 	id: number;
 	average_entry_score: number | null;
@@ -133,11 +176,34 @@ export const eventOverallResultRepository: EventOverallResultRepository = {
 						const parsed = JSON.parse(jsonValue) as unknown;
 						if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
 							const data = parsed as Record<string, unknown>;
-							const parsedEvent = Number(data.event ?? eventId);
+							const parsedEvent = parseIntOrDefault(data.event ?? eventId, Number(eventId));
+							if (parsedEvent === null || parsedEvent <= 0 || parsedEvent !== Number(eventId)) {
+								malformed = true;
+								continue;
+							}
+							const averageScore = parseIntOrDefault(data.averageScore ?? data.averageEntryScore);
+							const finished = parseBoolOrDefault(data.finished);
+							const highestScoringEntry = parseIntOrDefault(data.highestScoringEntry);
+							const highestScore = parseIntOrDefault(data.highestScore);
+							const chipPlays = parseCachedChipPlays(data.chipPlays);
+							const mostSelectedId = parseIntOrDefault(data.mostSelected);
+							const mostCaptainedId = parseIntOrDefault(data.mostCaptained);
+							const mostTransferredInId = parseIntOrDefault(data.mostTransferredIn);
+							const topElementInfo = parseCachedTopElementInfo(data.topElementInfo);
+							const transfersMade = parseIntOrDefault(data.transfersMade);
+							const mostViceCaptainedId = parseIntOrDefault(data.mostViceCaptained);
 							if (
-								!Number.isInteger(parsedEvent) ||
-								parsedEvent <= 0 ||
-								parsedEvent !== Number(eventId)
+								averageScore === null ||
+								finished === null ||
+								highestScoringEntry === null ||
+								highestScore === null ||
+								chipPlays === null ||
+								mostSelectedId === null ||
+								mostCaptainedId === null ||
+								mostTransferredInId === null ||
+								topElementInfo === null ||
+								transfersMade === null ||
+								mostViceCaptainedId === null
 							) {
 								malformed = true;
 								continue;
@@ -145,23 +211,20 @@ export const eventOverallResultRepository: EventOverallResultRepository = {
 							// Convert hash format to EventResult
 							const result: EventResult = {
 								event: parsedEvent,
-								averageScore: Number(data.averageScore ?? data.averageEntryScore ?? 0),
-								finished: Boolean(data.finished ?? false),
-								highestScoringEntry: Number(data.highestScoringEntry ?? 0),
-								highestScore: Number(data.highestScore ?? 0),
-								chipPlays: (data.chipPlays as ChipPlay[]) ?? [],
-								mostSelectedId: Number(data.mostSelected ?? 0),
+								averageScore,
+								finished,
+								highestScoringEntry,
+								highestScore,
+								chipPlays,
+								mostSelectedId,
 								mostSelectedPlayer: null,
-								mostCaptainedId: Number(data.mostCaptained ?? 0),
+								mostCaptainedId,
 								mostCaptainedPlayer: null,
-								mostTransferredInId: Number(data.mostTransferredIn ?? 0),
+								mostTransferredInId,
 								mostTransferInPlayer: null,
-								topElementInfo: (data.topElementInfo as TopElementInfo) ?? {
-									element: 0,
-									points: 0,
-								},
-								transfersMade: Number(data.transfersMade ?? 0),
-								mostViceCaptainedId: Number(data.mostViceCaptained ?? 0),
+								topElementInfo,
+								transfersMade,
+								mostViceCaptainedId,
 								mostViceCaptainedPlayer: null,
 							};
 							eventResults.push(result);

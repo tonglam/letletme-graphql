@@ -113,6 +113,9 @@ const asPositiveInt = (value: number | null): number | null =>
 const asNonNegativeInt = (value: number | null): number | null =>
 	value !== null && Number.isInteger(value) && value >= 0 ? value : null;
 
+const asInt = (value: number | null): number | null =>
+	value !== null && Number.isInteger(value) ? value : null;
+
 const asBool = (value: unknown): boolean | null => {
 	if (typeof value === "boolean") {
 		return value;
@@ -203,17 +206,26 @@ const mapSyncJobFixture = (raw: unknown): Fixture | null => {
 		teamADifficultyRaw === undefined || teamADifficultyRaw === null
 			? null
 			: asNum(teamADifficultyRaw);
+	const normalizedMinutes = asNonNegativeInt(minutes);
+	const normalizedTeamHScore = asNonNegativeInt(teamHScore);
+	const normalizedTeamAScore = asNonNegativeInt(teamAScore);
+	const normalizedTeamHDifficulty = asInt(teamHDifficulty);
+	const normalizedTeamADifficulty = asInt(teamADifficulty);
 
 	if (
 		finished === null ||
 		finishedProvisional === null ||
-		minutes === null ||
+		normalizedMinutes === null ||
 		(startedRaw !== undefined && startedRaw !== null && started === null) ||
 		(kickoffRaw !== undefined && kickoffRaw !== null && kickoffTime === null) ||
-		(teamHScoreRaw !== undefined && teamHScoreRaw !== null && teamHScore === null) ||
-		(teamAScoreRaw !== undefined && teamAScoreRaw !== null && teamAScore === null) ||
-		(teamHDifficultyRaw !== undefined && teamHDifficultyRaw !== null && teamHDifficulty === null) ||
-		(teamADifficultyRaw !== undefined && teamADifficultyRaw !== null && teamADifficulty === null)
+		(teamHScoreRaw !== undefined && teamHScoreRaw !== null && normalizedTeamHScore === null) ||
+		(teamAScoreRaw !== undefined && teamAScoreRaw !== null && normalizedTeamAScore === null) ||
+		(teamHDifficultyRaw !== undefined &&
+			teamHDifficultyRaw !== null &&
+			normalizedTeamHDifficulty === null) ||
+		(teamADifficultyRaw !== undefined &&
+			teamADifficultyRaw !== null &&
+			normalizedTeamADifficulty === null)
 	) {
 		return null;
 	}
@@ -230,14 +242,14 @@ const mapSyncJobFixture = (raw: unknown): Fixture | null => {
 		finished,
 		finishedProvisional,
 		kickoffTime: toIso(kickoffTime),
-		minutes: Math.trunc(minutes),
+		minutes: normalizedMinutes,
 		started,
 		teamHId: normalizedTeamH,
 		teamAId: normalizedTeamA,
-		teamHScore: teamHScore !== null ? Math.trunc(teamHScore) : null,
-		teamAScore: teamAScore !== null ? Math.trunc(teamAScore) : null,
-		teamHDifficulty: teamHDifficulty !== null ? Math.trunc(teamHDifficulty) : null,
-		teamADifficulty: teamADifficulty !== null ? Math.trunc(teamADifficulty) : null,
+		teamHScore: normalizedTeamHScore,
+		teamAScore: normalizedTeamAScore,
+		teamHDifficulty: normalizedTeamHDifficulty,
+		teamADifficulty: normalizedTeamADifficulty,
 	};
 };
 
