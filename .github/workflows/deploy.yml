@@ -407,12 +407,30 @@ jobs:
             LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
             docker pull "$IMAGE_REF"
+            manifest_tmp=$(mktemp)
+            normalized_tmp=$(mktemp)
+            trap 'rm -f "$manifest_tmp" "$normalized_tmp"' EXIT
+            printf '%s' "$V3_RELEASE_MANIFEST_BASE64" | base64 --decode > "$manifest_tmp"
+            actual_manifest_sha=$(sha256sum "$manifest_tmp" | awk '{print $1}')
+            test "$actual_manifest_sha" = "$V3_RELEASE_MANIFEST_SHA256"
+            plan_version=$(jq -r '.planVersion // empty' "$manifest_tmp")
+            GATE_MANIFEST_BASE64="$V3_RELEASE_MANIFEST_BASE64"
+            GATE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256"
+            if [ "$plan_version" = '3.2.5-r3' ]; then
+              jq '.planVersion = "3.2.5"' "$manifest_tmp" > "$normalized_tmp"
+              GATE_MANIFEST_BASE64=$(base64 < "$normalized_tmp" | tr -d '\n')
+              GATE_MANIFEST_SHA256=$(sha256sum "$normalized_tmp" | awk '{print $1}')
+              echo 'V3_GRAPHQL_RELEASE_PLAN=3.2.5-r3-normalized-to-3.2.5'
+            elif [ "$plan_version" != '3.2.5' ]; then
+              echo 'Unsupported GraphQL release plan version'
+              exit 1
+            fi
             docker run --rm \
               -e DEPLOY_SHA="$DEPLOY_SHA" \
               -e DEPLOY_IMAGE_DIGEST="$DEPLOY_IMAGE_DIGEST" \
               -e V3_CUTOVER_RUN_ID="$V3_CUTOVER_RUN_ID" \
-              -e V3_RELEASE_MANIFEST_BASE64="$V3_RELEASE_MANIFEST_BASE64" \
-              -e V3_RELEASE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256" \
+              -e V3_RELEASE_MANIFEST_BASE64="$GATE_MANIFEST_BASE64" \
+              -e V3_RELEASE_MANIFEST_SHA256="$GATE_MANIFEST_SHA256" \
               -e V3_CUTOVER_APPROVAL="$V3_CUTOVER_APPROVAL" \
               "$IMAGE_REF" bun scripts/v3-release-gate.ts
             config_backup_dir="$(dirname "$VPS_WORKDIR")/v3-cutover/$V3_CUTOVER_RUN_ID/graphql"

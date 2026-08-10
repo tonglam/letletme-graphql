@@ -85,6 +85,13 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(contract).toBeGreaterThan(reset);
 		expect(serviceStart).toBeGreaterThan(contract);
 		expect(start).toContain("V3_GRAPHQL_DB_PASSWORD: ${{ secrets.V3_GRAPHQL_DB_PASSWORD }}");
+		expect(start).toContain("actual_manifest_sha");
+		expect(start).toContain("plan_version");
+		expect(start).toContain("3.2.5-r3");
+		expect(start).toContain('jq \'.planVersion = "3.2.5"\'');
+		expect(start).toContain("V3_GRAPHQL_RELEASE_PLAN=3.2.5-r3-normalized-to-3.2.5");
+		expect(start).toContain('V3_RELEASE_MANIFEST_BASE64="$GATE_MANIFEST_BASE64"');
+		expect(start).toContain('V3_RELEASE_MANIFEST_SHA256="$GATE_MANIFEST_SHA256"');
 		expect(start).not.toContain("GRAPHQL_ENV");
 		expect(start).not.toContain("git clean");
 	});
