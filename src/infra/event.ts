@@ -26,6 +26,17 @@ const parseBooleanFlag = (value: unknown): boolean | null => {
 	return null;
 };
 
+const parsePositiveIntegerId = (value: unknown): number | null => {
+	if (typeof value === "number") {
+		return Number.isSafeInteger(value) && value > 0 ? value : null;
+	}
+	if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+		const parsed = Number(value);
+		return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+	}
+	return null;
+};
+
 const parseCurrentEvent = (raw: string | null): CurrentEventCache | null => {
 	if (!raw) {
 		return null;
@@ -42,8 +53,8 @@ const parseCurrentEvent = (raw: string | null): CurrentEventCache | null => {
 		return null;
 	}
 
-	const idValue = Number(parsed.id);
-	if (!Number.isFinite(idValue) || idValue <= 0) {
+	const idValue = parsePositiveIntegerId(parsed.id);
+	if (idValue === null) {
 		return null;
 	}
 	const isCurrent = parseBooleanFlag(parsed.isCurrent);

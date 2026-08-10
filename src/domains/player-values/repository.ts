@@ -130,42 +130,44 @@ type StoredDateEncoding = "compact" | "iso";
 
 /**
  * The legacy player-values table has existed with both YYYYMMDD and ISO date
- * storage.  Keep the range predicate in the same representation as the rows
- * instead of relying on a lexical comparison between the two formats.
+ * storage. Detect all encodings present for this player so a publisher format
+ * change mid-season does not make one half of the history invisible.
  */
-async function resolveHistoryDateEncoding(
+async function resolveHistoryDateEncodings(
 	context: GraphQLContext,
 	playerId: number
-): Promise<StoredDateEncoding> {
+): Promise<StoredDateEncoding[]> {
 	try {
 		const { data, error } = await context.supabase
 			.from("player_values")
 			.select("change_date")
 			.eq("element_id", playerId)
-			.order("change_date", { ascending: false })
-			.limit(1);
+			.range(0, PLAYER_VALUE_HISTORY_PAGE_SIZE - 1);
 		if (error) {
 			context.logger.warn(
 				{ err: error, playerId },
 				"Failed to resolve player-value history date encoding; using compact dates"
 			);
-			return "compact";
+			return ["compact"];
 		}
 
-		const rawDate = (data?.[0] as { change_date?: unknown } | undefined)?.change_date;
-		if (typeof rawDate === "string" && compactDatePattern.test(rawDate)) {
-			return "compact";
+		const encodings = new Set<StoredDateEncoding>();
+		for (const row of data ?? []) {
+			const rawDate = (row as { change_date?: unknown }).change_date;
+			if (typeof rawDate === "string" && compactDatePattern.test(rawDate)) {
+				encodings.add("compact");
+			} else if (rawDate instanceof Date || typeof rawDate === "string") {
+				encodings.add("iso");
+			}
 		}
-		if (rawDate instanceof Date || typeof rawDate === "string") {
-			return "iso";
-		}
+		return encodings.size > 0 ? [...encodings] : ["compact"];
 	} catch (error) {
 		context.logger.warn(
 			{ err: error, playerId },
 			"Failed to resolve player-value history date encoding; using compact dates"
 		);
 	}
-	return "compact";
+	return ["compact"];
 }
 
 function normalizePositionLabel(position: unknown): string {
@@ -834,34 +836,49 @@ export const playerValuesRepository: PlayerValuesRepository = {
 
 		try {
 			const seasonWindow = await getActiveSeasonDateWindow(context, season);
-			const dateEncoding = await resolveHistoryDateEncoding(context, args.playerId);
-			const fromDate =
-				dateEncoding === "compact" ? toCompactDate(seasonWindow.fromDate) : seasonWindow.fromDate;
-			const untilDate =
-				dateEncoding === "compact" ? toCompactDate(seasonWindow.untilDate) : seasonWindow.untilDate;
-			const databaseRows: DbPlayerValueHistoryRow[] = [];
-			for (let from = 0; ; from += PLAYER_VALUE_HISTORY_PAGE_SIZE) {
-				const { data, error } = await context.supabase
-					.from("player_values")
-					.select("element_id, value, last_value, change_date, change_type")
-					.eq("element_id", args.playerId)
-					.gte("change_date", fromDate)
-					.lt("change_date", untilDate)
-					.order("change_date", { ascending: true })
-					.range(from, from + PLAYER_VALUE_HISTORY_PAGE_SIZE - 1);
+			const encodings = await resolveHistoryDateEncodings(context, args.playerId);
+			const databaseRowsByEncoding = await Promise.all(
+				encodings.map(async (encoding) => {
+					const fromDate =
+						encoding === "compact" ? toCompactDate(seasonWindow.fromDate) : seasonWindow.fromDate;
+					const untilDate =
+						encoding === "compact" ? toCompactDate(seasonWindow.untilDate) : seasonWindow.untilDate;
+					const rows: DbPlayerValueHistoryRow[] = [];
+					for (let from = 0; ; from += PLAYER_VALUE_HISTORY_PAGE_SIZE) {
+						const { data, error } = await context.supabase
+							.from("player_values")
+							.select("element_id, value, last_value, change_date, change_type")
+							.eq("element_id", args.playerId)
+							.gte("change_date", fromDate)
+							.lt("change_date", untilDate)
+							.order("change_date", { ascending: true })
+							.range(from, from + PLAYER_VALUE_HISTORY_PAGE_SIZE - 1);
 
-				if (error) {
-					context.logger.error(
-						{ err: error, playerId: args.playerId, from },
-						"Failed to fetch player value history from database"
-					);
-					throw new Error(error.message, { cause: error });
-				}
+						if (error) {
+							context.logger.error(
+								{ err: error, playerId: args.playerId, from, encoding },
+								"Failed to fetch player value history from database"
+							);
+							throw new Error(error.message, { cause: error });
+						}
 
-				const page = (data as DbPlayerValueHistoryRow[] | null) ?? [];
-				databaseRows.push(...page);
-				if (page.length < PLAYER_VALUE_HISTORY_PAGE_SIZE) break;
-			}
+						const page = (data as DbPlayerValueHistoryRow[] | null) ?? [];
+						rows.push(...page);
+						if (page.length < PLAYER_VALUE_HISTORY_PAGE_SIZE) break;
+					}
+					return rows;
+				})
+			);
+			const databaseRows = Array.from(
+				new Map(
+					databaseRowsByEncoding
+						.flat()
+						.map((row) => [
+							`${row.element_id}:${row.change_date}:${row.value}:${row.last_value ?? "null"}:${row.change_type ?? ""}`,
+							row,
+						])
+				).values()
+			);
 
 			const fromEpoch = args.fromDate?.getTime() ?? null;
 			const toEpoch = args.toDate?.getTime() ?? null;

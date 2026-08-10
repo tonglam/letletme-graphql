@@ -277,6 +277,35 @@ describe("playerValueHistory integration", () => {
 		expect(result.data?.playerValueHistory).toHaveLength(2);
 	});
 
+	it("merges compact and ISO rows when a publisher changes date encoding", async () => {
+		const rows: HistoryRow[] = [
+			{
+				element_id: 10,
+				value: 156,
+				last_value: 155,
+				change_date: "20260803",
+				change_type: "rise",
+			},
+			{
+				element_id: 10,
+				value: 155,
+				last_value: 154,
+				change_date: "2026-08-02",
+				change_type: "fall",
+			},
+		];
+
+		const result = await graphql({
+			schema: testSchema,
+			source: historyQuery,
+			contextValue: createGraphQLContext(rows),
+			variableValues: { playerId: 10 },
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.playerValueHistory).toHaveLength(2);
+	});
+
 	it("returns empty array when player has no history", async () => {
 		const rows: HistoryRow[] = [
 			{

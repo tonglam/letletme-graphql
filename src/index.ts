@@ -85,7 +85,7 @@ const REQUIRED_DATA_RELATIONS: Record<string, readonly string[]> = {
 	],
 	"public.entry_event_picks": ["entry_id", "event_id"],
 	"public.entry_event_transfers": ["entry_id", "event_id"],
-	"public.entry_history_infos": ["entry_id", "event_id"],
+	"public.entry_history_infos": ["entry_id", "season", "total_points", "overall_rank"],
 	"public.entry_league_infos": ["entry_id", "league_id"],
 	"public.tournament_infos": ["id", "league_id", "league_type"],
 	"public.tournament_entries": ["tournament_id", "entry_id"],
