@@ -138,27 +138,32 @@ async function resolveHistoryDateEncodings(
 	playerId: number
 ): Promise<StoredDateEncoding[]> {
 	try {
-		const { data, error } = await context.supabase
-			.from("player_values")
-			.select("change_date")
-			.eq("element_id", playerId)
-			.range(0, PLAYER_VALUE_HISTORY_PAGE_SIZE - 1);
-		if (error) {
-			context.logger.warn(
-				{ err: error, playerId },
-				"Failed to resolve player-value history date encoding; using compact dates"
-			);
-			return ["compact"];
-		}
-
 		const encodings = new Set<StoredDateEncoding>();
-		for (const row of data ?? []) {
-			const rawDate = (row as { change_date?: unknown }).change_date;
-			if (typeof rawDate === "string" && compactDatePattern.test(rawDate)) {
-				encodings.add("compact");
-			} else if (rawDate instanceof Date || typeof rawDate === "string") {
-				encodings.add("iso");
+		for (let from = 0; ; from += PLAYER_VALUE_HISTORY_PAGE_SIZE) {
+			const { data, error } = await context.supabase
+				.from("player_values")
+				.select("change_date")
+				.eq("element_id", playerId)
+				.order("change_date", { ascending: true })
+				.range(from, from + PLAYER_VALUE_HISTORY_PAGE_SIZE - 1);
+			if (error) {
+				context.logger.warn(
+					{ err: error, playerId, from },
+					"Failed to resolve player-value history date encoding; using compact dates"
+				);
+				return ["compact"];
 			}
+
+			const page = data ?? [];
+			for (const row of page) {
+				const rawDate = (row as { change_date?: unknown }).change_date;
+				if (typeof rawDate === "string" && compactDatePattern.test(rawDate)) {
+					encodings.add("compact");
+				} else if (rawDate instanceof Date || typeof rawDate === "string") {
+					encodings.add("iso");
+				}
+			}
+			if (page.length < PLAYER_VALUE_HISTORY_PAGE_SIZE) break;
 		}
 		return encodings.size > 0 ? [...encodings] : ["compact"];
 	} catch (error) {
@@ -333,48 +338,40 @@ function mapHistoryRows(rows: DbPlayerValueHistoryRow[]): PlayerValueHistoryRepo
 	return history;
 }
 
-async function resolveTargetDate(context: GraphQLContext, changeDate: Date): Promise<string> {
-	const compactStr = getCompactDateString(changeDate);
-	const isoStr = getIsoDateString(changeDate);
-
-	const [exactResult, isoResult] = await Promise.all([
-		context.supabase
-			.from("player_values")
-			.select("change_date")
-			.eq("change_date", compactStr)
-			.limit(1),
-		context.supabase.from("player_values").select("change_date").eq("change_date", isoStr).limit(1),
-	]);
-
-	if (exactResult.data && exactResult.data.length > 0) {
-		return compactStr;
-	}
-	if (isoResult.data && isoResult.data.length > 0) {
-		return isoStr;
-	}
-	return compactStr;
-}
-
 async function getPlayerValuesFromDatabase(
 	context: GraphQLContext,
 	changeDate: Date
 ): Promise<PlayerValue[]> {
-	const targetDate = await resolveTargetDate(context, changeDate);
+	const targetDates = [getCompactDateString(changeDate), getIsoDateString(changeDate)];
+	const results = await Promise.all(
+		targetDates.map((targetDate) =>
+			context.supabase
+				.from("player_values")
+				.select("element_id, element_type, event_id, value, last_value, change_date, change_type")
+				.eq("change_date", targetDate)
+		)
+	);
 
-	const { data, error } = await context.supabase
-		.from("player_values")
-		.select("element_id, element_type, event_id, value, last_value, change_date, change_type")
-		.eq("change_date", targetDate);
-
-	if (error) {
-		context.logger.error(
-			{ err: error, changeDate: changeDate.toISOString(), targetDate },
-			"Failed to fetch player values from database"
-		);
-		throw new Error(error.message, { cause: error });
+	for (const [index, result] of results.entries()) {
+		if (result.error) {
+			context.logger.error(
+				{ err: result.error, changeDate: changeDate.toISOString(), targetDate: targetDates[index] },
+				"Failed to fetch player values from database"
+			);
+			throw new Error(result.error.message, { cause: result.error });
+		}
 	}
 
-	const rows = (data as DbPlayerValueRow[] | null) ?? [];
+	const rows = Array.from(
+		new Map(
+			results
+				.flatMap((result) => (result.data as DbPlayerValueRow[] | null) ?? [])
+				.map((row) => [
+					`${row.element_id ?? row.player_id}:${row.change_date}:${row.value}:${row.last_value ?? "null"}:${row.change_type ?? ""}`,
+					row,
+				])
+		).values()
+	);
 	// Season-baseline rows ("start", last_value = 0) are not price changes.
 	// Filtered in JS rather than .neq("change_type", "start") so legacy rows
 	// with NULL change_type survive (SQL <> drops NULLs), mirroring
@@ -385,7 +382,7 @@ async function getPlayerValuesFromDatabase(
 	});
 	if (changedRows.length === 0) {
 		context.logger.debug(
-			{ changeDate: changeDate.toISOString(), targetDate },
+			{ changeDate: changeDate.toISOString(), targetDates },
 			"No player value changes found in database"
 		);
 		return [];

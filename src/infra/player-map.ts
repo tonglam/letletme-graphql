@@ -89,19 +89,42 @@ const asNullableNumber = (value: number | string | null | undefined): number | n
 };
 
 function parsePlayer(parsed: Record<string, unknown>, id: number): Player | null {
-	const code = Number(parsed.code ?? 0);
+	const parseCachedNumber = (keys: string[], fallback: number | null): number | null => {
+		const key = keys.find((candidate) => Object.prototype.hasOwnProperty.call(parsed, candidate));
+		if (!key) return fallback;
+		const value = parsed[key];
+		if (value === null || value === undefined || value === "") return null;
+		if (typeof value === "number") return Number.isFinite(value) ? value : null;
+		if (typeof value === "string") {
+			const number = Number(value.trim());
+			return Number.isFinite(number) ? number : null;
+		}
+		return null;
+	};
+
+	const code = parseCachedNumber(["code"], 0);
 	const webName = String(parsed.webName ?? parsed.web_name ?? "").trim();
-	const teamId = Number(parsed.teamId ?? parsed.team_id ?? 0);
-	const position = Number(parsed.type ?? parsed.position ?? 0);
+	const teamId = parseCachedNumber(["teamId", "team_id"], 0);
+	const position = parseCachedNumber(["type", "position"], 0);
+	const price = parseCachedNumber(["price"], 0);
+	const startPrice = parseCachedNumber(["startPrice", "start_price"], 0);
+	const totalPoints = parseCachedNumber(["totalPoints", "total_points"], 0);
+	const selectedByPercent = parseCachedNumber(["selectedByPercent", "selected_by_percent"], null);
 	if (
+		code === null ||
 		!Number.isInteger(code) ||
 		code <= 0 ||
 		webName.length === 0 ||
+		teamId === null ||
 		!Number.isInteger(teamId) ||
 		teamId <= 0 ||
+		position === null ||
 		!Number.isInteger(position) ||
 		position < 1 ||
-		position > 4
+		position > 4 ||
+		price === null ||
+		startPrice === null ||
+		totalPoints === null
 	) {
 		return null;
 	}
@@ -121,12 +144,10 @@ function parsePlayer(parsed: Record<string, unknown>, id: number): Player | null
 				: null,
 		teamId,
 		position,
-		price: Number(parsed.price ?? 0),
-		startPrice: Number(parsed.startPrice ?? parsed.start_price ?? 0),
-		totalPoints: Number(parsed.totalPoints ?? 0),
-		selectedByPercent: asNullableNumber(
-			(parsed.selectedByPercent ?? parsed.selected_by_percent) as number | string | null | undefined
-		),
+		price,
+		startPrice,
+		totalPoints,
+		selectedByPercent: asNullableNumber(selectedByPercent),
 	};
 }
 

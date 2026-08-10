@@ -41,4 +41,51 @@ describe("player map cache validation", () => {
 		const players = await buildPlayerMap(context, [10]);
 		expect(players.get(10)).toMatchObject({ id: 10, code: 10010, webName: "Haaland" });
 	});
+
+	it("falls back when a cached player contains a malformed numeric field", async () => {
+		const dbResult = {
+			data: [
+				{
+					id: 10,
+					code: 10010,
+					web_name: "Haaland",
+					first_name: "Erling",
+					second_name: "Haaland",
+					team_id: 13,
+					type: 4,
+					price: 150,
+					start_price: 145,
+				},
+			],
+			error: null,
+		};
+		const context = {
+			redis: {
+				get: async () => "2627",
+				hmget: async () => [
+					JSON.stringify({
+						teamId: 13,
+						type: 4,
+						code: 10010,
+						webName: "Haaland",
+						price: "not-a-number",
+					}),
+				],
+			},
+			supabase: {
+				from: () => {
+					const promise = Promise.resolve(dbResult);
+					const builder = Object.assign(promise, {
+						select: () => builder,
+						in: () => builder,
+					});
+					return builder;
+				},
+			},
+			logger: { warn: () => undefined },
+		} as unknown as GraphQLContext;
+
+		const players = await buildPlayerMap(context, [10]);
+		expect(players.get(10)).toMatchObject({ id: 10, price: 150, startPrice: 145 });
+	});
 });

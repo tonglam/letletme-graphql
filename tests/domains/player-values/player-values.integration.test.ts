@@ -207,6 +207,55 @@ describe("playerValues integration", () => {
 		expect(data?.playerValues).toHaveLength(1);
 	});
 
+	it("merges compact and ISO rows for the same change date", async () => {
+		const baseRow = {
+			team_id: 4,
+			team_name: "Brentford",
+			team_short_name: "BRE",
+			position: "FWD",
+			price: 74,
+			last_value: 73,
+			points: 0,
+			selected_by: 1.2,
+			transfers_in: 1000,
+			transfers_out: 500,
+			net_transfers: 500,
+			form: 2.1,
+			total_points: 40,
+			event_points: 0,
+			change_type: "rise",
+		};
+		const context = createGraphQLContext({
+			rows: [
+				{
+					...baseRow,
+					player_id: 136,
+					player_name: "Thiago",
+					value: 74,
+					change_date: "20260421",
+				},
+				{
+					...baseRow,
+					player_id: 351,
+					player_name: "Salah",
+					value: 125,
+					change_date: "2026-04-21",
+				},
+			],
+		});
+
+		const result = await graphql({
+			schema: testSchema,
+			source: playerValuesQuery,
+			contextValue: context,
+			variableValues: { changeDate: "2026-04-21" },
+		});
+
+		expect(result.errors).toBeUndefined();
+		const data = result.data as { playerValues: Array<{ playerId: number }> } | null;
+		expect(data?.playerValues.map((row) => row.playerId).sort()).toEqual([136, 351]);
+	});
+
 	it("returns empty array when no rows match the exact changeDate", async () => {
 		const context = createGraphQLContext({
 			rows: [

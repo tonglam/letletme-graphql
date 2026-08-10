@@ -35,6 +35,8 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 	let toDateExclusive = false;
 	let ascending = false;
 	let encodingFilter: "compact" | "iso" | null = null;
+	let rangeFrom = 0;
+	let rangeTo = Number.POSITIVE_INFINITY;
 
 	const applyFilters = (): QueryResult<HistoryRow> => {
 		let filtered = [...rows];
@@ -70,6 +72,7 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 				? left.change_date.localeCompare(right.change_date)
 				: right.change_date.localeCompare(left.change_date);
 		});
+		filtered = filtered.slice(rangeFrom, rangeTo + 1);
 
 		return {
 			data: filtered,
@@ -98,7 +101,9 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 			ascending = options.ascending;
 			return builder;
 		},
-		range(_from: number, _to: number) {
+		range(from: number, to: number) {
+			rangeFrom = from;
+			rangeTo = to;
 			return builder;
 		},
 		limit(_count: number) {
@@ -315,6 +320,41 @@ describe("playerValueHistory integration", () => {
 
 		expect(result.errors).toBeUndefined();
 		expect(result.data?.playerValueHistory).toHaveLength(2);
+	});
+
+	it("detects an encoding introduced after the first metadata page", async () => {
+		const compactRows: HistoryRow[] = Array.from({ length: 1000 }, (_, index) => ({
+			element_id: 10,
+			value: 2000 + index,
+			last_value: 1999 + index,
+			change_date: "20250602",
+			change_type: "rise",
+		}));
+		const rows: HistoryRow[] = [
+			...compactRows,
+			{
+				element_id: 10,
+				value: 4000,
+				last_value: 3999,
+				change_date: "2026-08-02",
+				change_type: "rise",
+			},
+		];
+
+		const result = await graphql({
+			schema: testSchema,
+			source: historyQuery,
+			contextValue: createGraphQLContext(rows),
+			variableValues: { playerId: 10 },
+		});
+
+		expect(result.errors).toBeUndefined();
+		const history = result.data?.playerValueHistory as Array<{
+			changeDate: string;
+			newValue: number;
+		}>;
+		expect(history).toHaveLength(1001);
+		expect(history.some((item) => item.newValue === 4000)).toBe(true);
 	});
 
 	it("returns empty array when player has no history", async () => {
