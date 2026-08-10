@@ -29,6 +29,22 @@ function runtimeEnvPython(): string {
 		.join("\n");
 }
 
+function untrackedPathConflictAwk(): string {
+	const anchorIndex = workflow.indexOf('git ls-tree -r --name-only "$DEPLOY_SHA"');
+	if (anchorIndex < 0) throw new Error("Missing activation target-file marker");
+	const marker = "            awk '\n";
+	const start = workflow.indexOf(marker, anchorIndex);
+	if (start < 0) throw new Error("Missing path-conflict awk start marker");
+	const bodyStart = start + marker.length;
+	const end = workflow.indexOf(`\n            ' "$untracked_file"`, bodyStart);
+	if (end < 0) throw new Error("Missing path-conflict awk end marker");
+	return workflow
+		.slice(bodyStart, end)
+		.split("\n")
+		.map((line) => (line.startsWith("            ") ? line.slice(12) : line))
+		.join("\n");
+}
+
 describe("v3 GraphQL production hard-cut workflow", () => {
 	it("resolves manual production operations only from protected main", () => {
 		expect(workflow).toContain("repository_dispatch:");
@@ -98,6 +114,28 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(stop).not.toContain(".env.deploy.before-v3");
 	});
 
+	it("blocks exact and file-directory collisions with untracked production paths", () => {
+		const directory = mkdtempSync(join(tmpdir(), "letletme-v3-graphql-paths-"));
+		try {
+			const untracked = join(directory, "untracked");
+			const target = join(directory, "target");
+			writeFileSync(
+				untracked,
+				["directory/file", "exact", "file-prefix", "safe"].join("\n") + "\n"
+			);
+			writeFileSync(target, ["directory", "exact", "file-prefix/child", "other"].join("\n") + "\n");
+			const output = execFileSync("awk", [untrackedPathConflictAwk(), untracked, target], {
+				encoding: "utf8",
+			});
+			expect(output.trim().split("\n").sort()).toEqual(
+				["directory/file -> directory", "exact -> exact", "file-prefix -> file-prefix/child"].sort()
+			);
+			expect(output).not.toContain("safe");
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("gates the exact image before changing checkout or runtime config", () => {
 		const start = job("v3_start", "v3_redeploy");
 		const trustedMain = start.indexOf('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
@@ -110,7 +148,7 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		const configBackup = start.indexOf("env.deploy.before-v3");
 		const existingBackupGuard = start.indexOf('[ -e "$config_backup" ]');
 		const atomicBackupPublish = start.indexOf('ln "$config_backup_tmp" "$config_backup"');
-		const conflictGuard = start.indexOf("comm -12");
+		const conflictGuard = start.indexOf('index(target, untracked[i] "/") == 1');
 		const reset = start.indexOf("git reset --hard");
 		const contract = start.indexOf("bun run contract:check");
 		const serviceStart = start.indexOf("docker compose up -d --no-deps --no-build graphql");
@@ -154,6 +192,8 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(start).not.toContain("GRAPHQL_ENV");
 		expect(start).not.toContain('"2627"');
 		expect(start).not.toContain("liveSnapshot(eventId: 1)");
+		expect(start).toContain('index(untracked[i], target "/") == 1');
+		expect(start).not.toContain("comm -12");
 		expect(start).not.toContain(
 			'install -m 600 .env.deploy "$config_backup_dir/env.deploy.before-v3"'
 		);
@@ -166,17 +206,26 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		const exactRepository = redeploy.indexOf('test "${IMAGE_REF%@*}" = "$IMAGE_NAME"');
 		const dataHealth = redeploy.indexOf("http://127.0.0.1:3000/health");
 		const exactRemote = redeploy.indexOf('test "$(git rev-parse origin/main)" = "$EXPECTED_SHA"');
+		const conflictGuard = redeploy.indexOf('index(target, untracked[i] "/") == 1');
 		const expectedTag = redeploy.indexOf('EXPECTED_TAG="${IMAGE_NAME}:v3-${EXPECTED_SHA}"');
 		const digestBinding = redeploy.indexOf('grep -Fx "$IMAGE_REF"');
 		const stop = redeploy.indexOf("docker compose stop -t 30 graphql");
 		const reset = redeploy.indexOf('git reset --hard "$EXPECTED_SHA"');
 		const contract = redeploy.indexOf("bun run contract:check");
-		const start = redeploy.indexOf("docker compose up -d --no-deps --no-build graphql");
-		const graphqlHealth = redeploy.indexOf("curl --fail --silent http://127.0.0.1:4000/health");
+		const rollbackRestore = redeploy.indexOf('APP_IMAGE="$ROLLBACK_IMAGE_REF" docker compose up');
+		const rollbackArm = redeploy.indexOf("rollback_armed=true");
+		const start = redeploy.indexOf(
+			'APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build graphql'
+		);
+		const graphqlHealth = redeploy.indexOf(
+			"curl --fail --silent http://127.0.0.1:4000/health",
+			start
+		);
 		const anonymousAuth = redeploy.indexOf("test \"$anonymous_status\" = '401'");
 		const functionalSmoke = redeploy.indexOf("v3_graphql_redeploy_contract_passed");
-		const imageReadback = redeploy.indexOf("{{.Config.Image}}");
+		const imageReadback = redeploy.indexOf("{{.Config.Image}}", functionalSmoke);
 		const dockerHealthPoll = redeploy.indexOf("graphql_health=$(docker inspect");
+		const rollbackDisarm = redeploy.lastIndexOf("rollback_armed=false");
 		const retention = redeploy.indexOf("KEEP_FILE=.deployed-graphql-images");
 		const prune = redeploy.indexOf('docker image rm "$old_tag"');
 
@@ -184,18 +233,22 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(exactRepository).toBeGreaterThan(trustedMain);
 		expect(dataHealth).toBeGreaterThan(exactRepository);
 		expect(exactRemote).toBeGreaterThan(dataHealth);
-		expect(expectedTag).toBeGreaterThan(exactRemote);
+		expect(conflictGuard).toBeGreaterThan(exactRemote);
+		expect(expectedTag).toBeGreaterThan(conflictGuard);
 		expect(digestBinding).toBeGreaterThan(expectedTag);
 		expect(reset).toBeGreaterThan(digestBinding);
 		expect(contract).toBeGreaterThan(reset);
-		expect(stop).toBeGreaterThan(contract);
+		expect(rollbackRestore).toBeGreaterThan(contract);
+		expect(rollbackArm).toBeGreaterThan(rollbackRestore);
+		expect(stop).toBeGreaterThan(rollbackArm);
 		expect(start).toBeGreaterThan(stop);
 		expect(graphqlHealth).toBeGreaterThan(start);
 		expect(anonymousAuth).toBeGreaterThan(start);
 		expect(functionalSmoke).toBeGreaterThan(anonymousAuth);
 		expect(imageReadback).toBeGreaterThan(functionalSmoke);
 		expect(dockerHealthPoll).toBeGreaterThan(imageReadback);
-		expect(retention).toBeGreaterThan(dockerHealthPoll);
+		expect(rollbackDisarm).toBeGreaterThan(dockerHealthPoll);
+		expect(retention).toBeGreaterThan(rollbackDisarm);
 		expect(prune).toBeGreaterThan(retention);
 		expect(redeploy).toContain("currentEventInfo { season currentEvent nextEvent }");
 		expect(redeploy).toContain("players(limit: 1)");
@@ -203,11 +256,16 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(redeploy).toContain("query LiveSmoke($eventId: Int!)");
 		expect(redeploy).toContain("liveSnapshot(eventId: $eventId)");
 		expect(redeploy).toContain('ROLLBACK_TAG=""');
+		expect(redeploy).toContain('ROLLBACK_IMAGE_REF=""');
+		expect(redeploy).toContain("trap rollback_graphql_on_exit EXIT");
+		expect(redeploy).toContain("V3_GRAPHQL_ROLLBACK=restored");
 		expect(redeploy).toContain("for attempt in $(seq 1 20)");
 		expect(redeploy).toContain("GraphQL Docker health did not settle");
 		expect(redeploy).toContain("kept < 3");
 		expect(redeploy).toContain('"$IMAGE_NAME":v3-*');
-		expect(redeploy.match(/http:\/\/127\.0\.0\.1:4000\/health/g)).toHaveLength(1);
+		expect(redeploy).toContain('index(untracked[i], target "/") == 1');
+		expect(redeploy).not.toContain("comm -12");
+		expect(redeploy.match(/http:\/\/127\.0\.0\.1:4000\/health/g)).toHaveLength(2);
 		expect(redeploy).not.toContain("GRAPHQL_ENV");
 		expect(redeploy).not.toContain('"2627"');
 		expect(redeploy).not.toContain("liveSnapshot(eventId: 1)");

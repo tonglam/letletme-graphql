@@ -499,7 +499,19 @@ jobs:
             conflict_file=$(mktemp)
             git ls-files --others --exclude-standard | sort -u > "$untracked_file"
             git ls-tree -r --name-only "$DEPLOY_SHA" | sort -u > "$target_file"
-            comm -12 "$untracked_file" "$target_file" > "$conflict_file"
+            awk '
+              NR == FNR { untracked[++count] = $0; next }
+              {
+                target = $0
+                for (i = 1; i <= count; i += 1) {
+                  if (untracked[i] == target ||
+                    index(target, untracked[i] "/") == 1 ||
+                    index(untracked[i], target "/") == 1) {
+                    print untracked[i] " -> " target
+                  }
+                }
+              }
+            ' "$untracked_file" "$target_file" > "$conflict_file"
             if [ -s "$conflict_file" ]; then
               echo "Untracked production files conflict with the frozen GraphQL candidate:"
               cat "$conflict_file"
@@ -763,8 +775,18 @@ jobs:
             curl --fail --silent http://127.0.0.1:3000/health >/dev/null
 
             ROLLBACK_TAG=""
+            ROLLBACK_IMAGE_REF=""
             current_graphql_cid=$(docker compose ps --all -q graphql | head -n 1)
             if [ -n "$current_graphql_cid" ]; then
+              ROLLBACK_IMAGE_REF=$(docker inspect --format '{{.Config.Image}}' "$current_graphql_cid")
+              if [[ "$ROLLBACK_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]; then
+                test "${ROLLBACK_IMAGE_REF%@*}" = "$IMAGE_NAME"
+              elif [[ "$ROLLBACK_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+:v3-[0-9a-f]{40}$ ]]; then
+                test "${ROLLBACK_IMAGE_REF%:v3-*}" = "$IMAGE_NAME"
+              else
+                echo "Current GraphQL image is not an immutable v3 release: $ROLLBACK_IMAGE_REF"
+                exit 1
+              fi
               current_image_id=$(docker inspect --format '{{.Image}}' "$current_graphql_cid")
               for candidate_tag in $(docker image ls "$IMAGE_NAME" --format '{{.Repository}}:{{.Tag}}'); do
                 case "$candidate_tag" in
@@ -786,12 +808,26 @@ jobs:
             trap 'rm -f "$untracked_file" "$target_file" "$conflict_file"' EXIT
             git ls-files --others --exclude-standard | sort -u > "$untracked_file"
             git ls-tree -r --name-only "$EXPECTED_SHA" | sort -u > "$target_file"
-            comm -12 "$untracked_file" "$target_file" > "$conflict_file"
+            awk '
+              NR == FNR { untracked[++count] = $0; next }
+              {
+                target = $0
+                for (i = 1; i <= count; i += 1) {
+                  if (untracked[i] == target ||
+                    index(target, untracked[i] "/") == 1 ||
+                    index(untracked[i], target "/") == 1) {
+                    print untracked[i] " -> " target
+                  }
+                }
+              }
+            ' "$untracked_file" "$target_file" > "$conflict_file"
             if [ -s "$conflict_file" ]; then
               echo "Untracked production files conflict with the merged GraphQL target:"
               cat "$conflict_file"
               exit 1
             fi
+            rm -f "$untracked_file" "$target_file" "$conflict_file"
+            trap - EXIT
 
             LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
@@ -807,6 +843,40 @@ jobs:
 
             APP_IMAGE="$IMAGE_REF" docker compose pull graphql
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run contract:check
+
+            rollback_armed=false
+            rollback_graphql_on_exit() {
+              original_status=$?
+              trap - EXIT
+              if [ "$rollback_armed" != true ]; then
+                exit "$original_status"
+              fi
+              if [ -z "$ROLLBACK_IMAGE_REF" ]; then
+                echo "GraphQL redeploy failed and no previous image is available"
+                exit "$original_status"
+              fi
+              echo "GraphQL redeploy failed; restoring $ROLLBACK_IMAGE_REF"
+              rollback_restored=false
+              if APP_IMAGE="$ROLLBACK_IMAGE_REF" docker compose up \
+                -d --no-deps --no-build --force-recreate graphql; then
+                for rollback_attempt in $(seq 1 30); do
+                  if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
+                    rollback_restored=true
+                    break
+                  fi
+                  sleep 2
+                done
+              fi
+              if [ "$rollback_restored" = true ]; then
+                echo "V3_GRAPHQL_ROLLBACK=restored image=$ROLLBACK_IMAGE_REF"
+              else
+                echo "V3_GRAPHQL_ROLLBACK=failed image=$ROLLBACK_IMAGE_REF"
+                APP_IMAGE="$ROLLBACK_IMAGE_REF" docker compose logs --tail 100 graphql || true
+              fi
+              exit "$original_status"
+            }
+            trap rollback_graphql_on_exit EXIT
+            rollback_armed=true
             docker compose stop -t 30 graphql
             test -z "$(docker compose ps -q graphql)"
             APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build graphql
@@ -917,6 +987,8 @@ jobs:
               fi
               sleep 3
             done
+            rollback_armed=false
+            trap - EXIT
 
             KEEP_FILE=.deployed-graphql-images
             keep_tmp=$(mktemp)
