@@ -57,6 +57,12 @@ const buildContext = (options: ContextOptions = {}): GraphQLContext => {
 		supabase: {
 			from: () => ({
 				select: () => ({
+					eq: () => ({
+						limit: async () => ({
+							data: options.databaseRows ?? [],
+							error: options.databaseError ?? null,
+						}),
+					}),
 					order: async () => ({
 						data: options.databaseRows ?? [],
 						error: options.databaseError ?? null,
@@ -187,5 +193,15 @@ describe("event deadline serialization", () => {
 				nextUtcDeadline: "2030-08-01T17:30:00.000Z",
 			},
 		});
+	});
+});
+
+describe("event Redis cache validation", () => {
+	it("falls back when a GraphQL Int event field is fractional", async () => {
+		const context = buildContext({
+			events: [event(1, { averageEntryScore: 12.5 })],
+		});
+
+		await expect(eventsRepository.getEventById(context, 1)).resolves.toBeNull();
 	});
 });

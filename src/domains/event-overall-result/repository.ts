@@ -176,7 +176,7 @@ export const eventOverallResultRepository: EventOverallResultRepository = {
 						const parsed = JSON.parse(jsonValue) as unknown;
 						if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
 							const data = parsed as Record<string, unknown>;
-							const parsedEvent = parseIntOrDefault(data.event ?? eventId, Number(eventId));
+							const parsedEvent = parseIntOrDefault(data.event, Number(eventId));
 							if (parsedEvent === null || parsedEvent <= 0 || parsedEvent !== Number(eventId)) {
 								malformed = true;
 								continue;

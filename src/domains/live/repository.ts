@@ -192,6 +192,9 @@ const asNumber = (value: unknown): number | null => {
 	return null;
 };
 
+const GRAPHQL_INT_MIN = -2_147_483_648;
+const GRAPHQL_INT_MAX = 2_147_483_647;
+
 const pickLiveField = (row: JsonRecord, keys: string[]): { present: boolean; value: unknown } => {
 	for (const key of keys) {
 		if (Object.hasOwn(row, key)) return { present: true, value: row[key] };
@@ -206,7 +209,14 @@ const parseOptionalNumber = (
 	const field = pickLiveField(row, keys);
 	if (!field.present || field.value === null) return { value: null, valid: true };
 	const value = asNumber(field.value);
-	return { value, valid: value !== null };
+	return {
+		value,
+		valid:
+			value !== null &&
+			Number.isInteger(value) &&
+			value >= GRAPHQL_INT_MIN &&
+			value <= GRAPHQL_INT_MAX,
+	};
 };
 
 const parseOptionalBoolean = (
@@ -329,8 +339,8 @@ export const mapSyncJobLiveRow = (raw: unknown): LivePerformance | null => {
 	if (
 		totalPoints === null ||
 		!Number.isInteger(totalPoints) ||
-		totalPoints < -2_147_483_648 ||
-		totalPoints > 2_147_483_647
+		totalPoints < GRAPHQL_INT_MIN ||
+		totalPoints > GRAPHQL_INT_MAX
 	) {
 		return null;
 	}

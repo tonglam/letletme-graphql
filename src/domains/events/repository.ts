@@ -153,10 +153,24 @@ const parseTopElementInfo = (raw: unknown): TopElementInfo | null => {
 	};
 };
 
-const parseNullableFiniteNumber = (raw: unknown): number | null => {
+const GRAPHQL_INT_MIN = -2_147_483_648;
+const GRAPHQL_INT_MAX = 2_147_483_647;
+
+const parseNullableInt = (raw: unknown): number | null => {
 	if (raw === null || raw === undefined || raw === "") return null;
 	const parsed = Number(raw);
-	return Number.isFinite(parsed) ? parsed : null;
+	return Number.isInteger(parsed) && parsed >= GRAPHQL_INT_MIN && parsed <= GRAPHQL_INT_MAX
+		? parsed
+		: null;
+};
+
+const parseOptionalIntField = (
+	obj: Record<string, unknown>,
+	key: string
+): { value: number | null; valid: boolean } => {
+	if (!Object.hasOwn(obj, key) || obj[key] === null) return { value: null, valid: true };
+	const value = parseNullableInt(obj[key]);
+	return { value, valid: value !== null };
 };
 
 const parseBooleanFlag = (value: unknown): boolean | null => {
@@ -192,30 +206,44 @@ const parseEventFromRedisJson = (raw: string, expectedId?: number): Event | null
 		) {
 			return null;
 		}
+		const numericFields = {
+			averageEntryScore: parseOptionalIntField(obj, "averageEntryScore"),
+			highestScoringEntry: parseOptionalIntField(obj, "highestScoringEntry"),
+			deadlineTimeEpoch: parseOptionalIntField(obj, "deadlineTimeEpoch"),
+			deadlineTimeGameOffset: parseOptionalIntField(obj, "deadlineTimeGameOffset"),
+			highestScore: parseOptionalIntField(obj, "highestScore"),
+			mostSelected: parseOptionalIntField(obj, "mostSelected"),
+			mostTransferredIn: parseOptionalIntField(obj, "mostTransferredIn"),
+			topElement: parseOptionalIntField(obj, "topElement"),
+			transfersMade: parseOptionalIntField(obj, "transfersMade"),
+			mostCaptained: parseOptionalIntField(obj, "mostCaptained"),
+			mostViceCaptained: parseOptionalIntField(obj, "mostViceCaptained"),
+		};
+		if (Object.values(numericFields).some((field) => !field.valid)) return null;
 		return {
 			id,
 			name: String(obj.name ?? ""),
 			deadlineTime: normalizeDeadlineTime(obj.deadlineTime, obj.deadlineTimeEpoch),
-			averageEntryScore: parseNullableFiniteNumber(obj.averageEntryScore),
+			averageEntryScore: numericFields.averageEntryScore.value,
 			finished,
 			dataChecked,
-			highestScoringEntry: parseNullableFiniteNumber(obj.highestScoringEntry),
-			deadlineTimeEpoch: parseNullableFiniteNumber(obj.deadlineTimeEpoch),
-			deadlineTimeGameOffset: parseNullableFiniteNumber(obj.deadlineTimeGameOffset),
-			highestScore: parseNullableFiniteNumber(obj.highestScore),
+			highestScoringEntry: numericFields.highestScoringEntry.value,
+			deadlineTimeEpoch: numericFields.deadlineTimeEpoch.value,
+			deadlineTimeGameOffset: numericFields.deadlineTimeGameOffset.value,
+			highestScore: numericFields.highestScore.value,
 			isPrevious,
 			isCurrent,
 			isNext,
 			cupLeagueCreate,
 			h2hKoMatchesCreated,
 			chipPlays: parseChipPlays(obj.chipPlays),
-			mostSelected: parseNullableFiniteNumber(obj.mostSelected),
-			mostTransferredIn: parseNullableFiniteNumber(obj.mostTransferredIn),
-			topElement: parseNullableFiniteNumber(obj.topElement),
+			mostSelected: numericFields.mostSelected.value,
+			mostTransferredIn: numericFields.mostTransferredIn.value,
+			topElement: numericFields.topElement.value,
 			topElementInfo: parseTopElementInfo(obj.topElementInfo),
-			transfersMade: parseNullableFiniteNumber(obj.transfersMade),
-			mostCaptained: parseNullableFiniteNumber(obj.mostCaptained),
-			mostViceCaptained: parseNullableFiniteNumber(obj.mostViceCaptained),
+			transfersMade: numericFields.transfersMade.value,
+			mostCaptained: numericFields.mostCaptained.value,
+			mostViceCaptained: numericFields.mostViceCaptained.value,
 		};
 	} catch {
 		return null;

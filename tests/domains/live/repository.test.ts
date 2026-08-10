@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { liveRepository } from "../../../src/domains/live/repository";
+import { liveRepository, mapSyncJobLiveRow } from "../../../src/domains/live/repository";
 import {
 	isLiveSnapshotDatabaseFallback,
 	LiveSnapshotCoherenceError,
@@ -167,6 +167,20 @@ const SAMPLE_SYNC_JOB_ROW = JSON.stringify({
 	expectedGoalsConceded: "1.36",
 	inDreamTeam: false,
 	totalPoints: 1,
+});
+
+describe("mapSyncJobLiveRow cache validation", () => {
+	it("rejects fractional GraphQL Int statistics", () => {
+		const row = JSON.parse(SAMPLE_SYNC_JOB_ROW) as Record<string, unknown>;
+		row.minutes = 59.9;
+		expect(mapSyncJobLiveRow(row)).toBeNull();
+	});
+
+	it("rejects out-of-range GraphQL Int statistics", () => {
+		const row = JSON.parse(SAMPLE_SYNC_JOB_ROW) as Record<string, unknown>;
+		row.bps = 2_147_483_648;
+		expect(mapSyncJobLiveRow(row)).toBeNull();
+	});
 });
 
 const snapshotMeta = (revision: string, eventLiveCount = 1): string =>
