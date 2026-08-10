@@ -740,6 +740,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		snapshotData?: unknown[];
 		tournamentError?: unknown;
 		snapshotError?: unknown;
+		eventResultsError?: unknown;
 		cacheSeed?: string | null;
 		eventResults?: TournamentEventResult[];
 	}): GraphQLContext => {
@@ -773,6 +774,12 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 					return {
 						data: filterRowsByActions(options.snapshotData ?? [], actions),
 						error: options.snapshotError ?? null,
+					};
+				}
+				if (table === "reporting.tournament_event_results") {
+					return {
+						data: [],
+						error: options.eventResultsError ?? null,
 					};
 				}
 				return { data: [], error: null };
@@ -1039,6 +1046,44 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		expect(result.pointsAheadOfPrev).toBeNull();
 	});
 
+	it("preserves the ranking summary when the optional field gap lookup fails", async () => {
+		const context = buildContext({
+			tournamentData: [tournamentRow],
+			eventResultsError: new Error("event results unavailable"),
+			snapshotData: [
+				{
+					tournament_id: 1,
+					event_id: 3,
+					entry_id: 15702,
+					tournament_overall_rank: 2,
+					overall_rank: 1000,
+					team_value: 1020,
+					cum_transfers_num: 3,
+					cum_total_costs: 4,
+					cum_total_bench_points: 11,
+					cum_auto_sub_points: 7,
+					tournament_team_value_rank: 1,
+					tournament_transfers_rank: 2,
+					tournament_costs_rank: 2,
+					tournament_bench_points_rank: 1,
+					tournament_auto_sub_rank: 1,
+				},
+			],
+		});
+
+		const result = await tournamentsRepository.getTournamentEntryRankingSummary(
+			context,
+			1,
+			3,
+			15702
+		);
+
+		expect(result.overallRank).toBe(1000);
+		expect(result.transfersNum).toBe(3);
+		expect(result.gapToLeader).toBeNull();
+		expect(result.pointsBehindNext).toBeNull();
+	});
+
 	it("returns null ranks and zero cumulative metrics when snapshot row is missing", async () => {
 		const context = buildContext({
 			tournamentData: [tournamentRow],
@@ -1116,7 +1161,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 					event_id: 3,
 					entry_id: 20002,
 					team_value: 1030,
-					cum_transfers_num: 4,
+					cum_transfers_num: null,
 					cum_total_costs: 4,
 					cum_total_bench_points: 10,
 					cum_auto_sub_points: 7,
@@ -1153,6 +1198,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		expect(result.metrics.find((metric) => metric.key === "TRANSFERS")).toMatchObject({
 			leaderEntryId: 15702,
 			leaderValue: 2,
+			averageValue: 2.5,
 			higherIsBetter: false,
 		});
 	});

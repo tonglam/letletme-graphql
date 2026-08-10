@@ -430,10 +430,10 @@ type DbTournamentEventSnapshotRow = {
 	tournament_overall_rank: number | null;
 	overall_rank: number | null;
 	team_value: number | null;
-	cum_transfers_num: number;
-	cum_total_costs: number;
-	cum_total_bench_points: number;
-	cum_auto_sub_points: number;
+	cum_transfers_num: number | null;
+	cum_total_costs: number | null;
+	cum_total_bench_points: number | null;
+	cum_auto_sub_points: number | null;
 	tournament_team_value_rank: number | null;
 	tournament_transfers_rank: number | null;
 	tournament_costs_rank: number | null;
@@ -1145,10 +1145,18 @@ function buildSeasonSnapshotFromEventResults(
 	const autoSubSamples: NamedMetricSample[] = [];
 
 	for (const row of snapshotRows) {
-		transferSamples.push(snapNamed(row.entry_id, row.cum_transfers_num ?? 0));
-		costSamples.push(snapNamed(row.entry_id, row.cum_total_costs ?? 0));
-		benchSamples.push(snapNamed(row.entry_id, row.cum_total_bench_points ?? 0));
-		autoSubSamples.push(snapNamed(row.entry_id, row.cum_auto_sub_points ?? 0));
+		if (isDefined(row.cum_transfers_num) && Number.isFinite(row.cum_transfers_num)) {
+			transferSamples.push(snapNamed(row.entry_id, row.cum_transfers_num));
+		}
+		if (isDefined(row.cum_total_costs) && Number.isFinite(row.cum_total_costs)) {
+			costSamples.push(snapNamed(row.entry_id, row.cum_total_costs));
+		}
+		if (isDefined(row.cum_total_bench_points) && Number.isFinite(row.cum_total_bench_points)) {
+			benchSamples.push(snapNamed(row.entry_id, row.cum_total_bench_points));
+		}
+		if (isDefined(row.cum_auto_sub_points) && Number.isFinite(row.cum_auto_sub_points)) {
+			autoSubSamples.push(snapNamed(row.entry_id, row.cum_auto_sub_points));
+		}
 		// Prefer MV team value when present (authoritative cumulative snapshot)
 		if (isDefined(row.team_value) && Number.isFinite(row.team_value)) {
 			const existing = teamValueSamples.find((s) => s.entryId === row.entry_id);
@@ -1494,7 +1502,15 @@ export const tournamentsRepository: TournamentsRepository = {
 				.eq("entry_id", entryId)
 				.limit(1),
 			// Shared with season snapshot / event results cache — gaps need full field
-			tournamentsRepository.getTournamentEventResults(context, tournamentId, eventId),
+			tournamentsRepository
+				.getTournamentEventResults(context, tournamentId, eventId)
+				.catch((error: unknown) => {
+					context.logger.warn(
+						{ err: error, tournamentId, eventId, entryId },
+						"Tournament field unavailable for optional ranking gaps"
+					);
+					return null;
+				}),
 		]);
 
 		if (!tournament || tournament.groupMode !== GroupMode.POINTS_RACES) {
@@ -1512,8 +1528,12 @@ export const tournamentsRepository: TournamentsRepository = {
 		const snapshotRow =
 			(snapshotResponse.data?.[0] as DbTournamentEventSnapshotRow | undefined) ?? undefined;
 
-		const fieldSnapshot = buildSeasonSnapshotFromEventResults(eventId, fieldResults);
-		const gaps = computeRankingGapsFromStandings(fieldSnapshot.standings, entryId);
+		const gaps = fieldResults
+			? computeRankingGapsFromStandings(
+					buildSeasonSnapshotFromEventResults(eventId, fieldResults).standings,
+					entryId
+				)
+			: { ...emptyRankingGaps };
 
 		const summary: TournamentEntryRankingSummary = {
 			eventId,
@@ -1533,12 +1553,14 @@ export const tournamentsRepository: TournamentsRepository = {
 			...gaps,
 		};
 
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(summary),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		if (fieldResults !== null) {
+			await writeQueryCache(
+				context,
+				cacheKey,
+				JSON.stringify(summary),
+				QUERY_CACHE_TTL_SECONDS.REPORTING
+			);
+		}
 		return summary;
 	},
 
