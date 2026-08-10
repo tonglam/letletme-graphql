@@ -615,4 +615,25 @@ describe("liveRepository v3 explanation query cache", () => {
 		});
 		expect(redis.setCalls.some(([key]) => key.includes(":live-explain:"))).toBe(false);
 	});
+
+	it("does not promote gameweek stats to snapshot stats when the snapshot row is missing", async () => {
+		const { context, redis } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [],
+			"fpl.player_gameweek_stats": [
+				{ event_id: 1, element_id: 1, minutes: 90, assists: 1, total_points: 3 },
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [1]);
+
+		expect(result).toMatchObject({
+			elementId: 1,
+			stats: { minutes: null, totalPoints: null },
+			contributions: [expect.objectContaining({ identifier: "assists", value: 1, points: 3 })],
+		});
+		expect(redis.setCalls.some(([key]) => key.includes(":live-explain:"))).toBe(false);
+	});
 });

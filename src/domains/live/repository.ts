@@ -750,11 +750,8 @@ async function fetchPlayerStatsForLiveExplains(
 		const elementId = parseIntegerValue(pickRecordValue(gameweekRow, "element_id", "elementId"));
 		if (elementId === null || !elementIds.includes(elementId)) continue;
 		eventRows.set(elementId, gameweekRow);
-		const current = rows.get(elementId) ?? gameweekRow;
-		if (snapshotQueryFailed || !rows.has(elementId)) {
-			rows.set(elementId, current);
-			continue;
-		}
+		const current = rows.get(elementId);
+		if (!current) continue;
 		for (const [target, keys] of [
 			["penalties_missed", ["penalties_missed", "penaltiesMissed"]],
 			["defensive_contribution", ["defensive_contribution", "defensiveContribution"]],
@@ -764,7 +761,12 @@ async function fetchPlayerStatsForLiveExplains(
 		}
 		rows.set(elementId, current);
 	}
-	return { rows, eventRows, failed: snapshotQueryFailed || gameweekQueryFailed };
+	const snapshotRowsMissing = elementIds.some((elementId) => !rows.has(elementId));
+	return {
+		rows,
+		eventRows,
+		failed: snapshotQueryFailed || gameweekQueryFailed || snapshotRowsMissing,
+	};
 }
 
 async function fetchEventLiveExplainsFromDatabase(
@@ -1223,8 +1225,9 @@ const loadColdLiveExplainBatch = async (
 	for (const elementId of coldIds) {
 		const psRow = playerStatsById.get(elementId) ?? null;
 		const elRow = eventExplainById.get(elementId) ?? null;
+		const eventStats = eventStatsById.get(elementId) ?? null;
 		const cacheKey = shapedLiveExplainCacheKey(context, eventId, elementId, meta, mode);
-		if (!psRow && !elRow) {
+		if (!psRow && !elRow && !eventStats) {
 			resolved.set(elementId, null);
 			if (!playerStatsResult.failed || !playerStatsDatabaseIds.has(elementId)) {
 				valuesToCache.set(cacheKey, "__null__");
@@ -1245,7 +1248,6 @@ const loadColdLiveExplainBatch = async (
 				: scoringItemContributions.length > 0
 					? scoringItemContributions
 					: mapFlatLiveExplainContributions(elRow, null, fixtureCount);
-		const eventStats = eventStatsById.get(elementId) ?? null;
 		const elementType = parseIntegerValue(pickRecordValue(psRow, "element_type", "elementType"));
 		const eventStatContributions = mapFlatLiveExplainContributions(
 			eventStats,
