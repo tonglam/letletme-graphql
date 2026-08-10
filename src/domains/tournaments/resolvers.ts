@@ -263,7 +263,7 @@ export const tournamentsResolvers = {
 			args: TournamentSeasonSnapshotArgs,
 			context: GraphQLContext
 		): Promise<TournamentSeasonSnapshot> => {
-			await assertTournamentStandingsReady(context, args.tournamentId);
+			await assertTournamentInsightsReady(context, args.tournamentId);
 			return tournamentsService.getTournamentSeasonSnapshot(
 				context,
 				args.tournamentId,

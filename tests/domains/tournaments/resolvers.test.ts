@@ -261,7 +261,7 @@ describe("tournamentBattleGroupResults query resolver", () => {
 });
 
 describe("tournamentSeasonSnapshot query resolver", () => {
-	it("checks readiness and delegates to tournamentsService", async () => {
+	it("checks insights readiness and delegates to tournamentsService", async () => {
 		const original = tournamentsService.getTournamentSeasonSnapshot;
 		const originalReadiness = tournamentsRepository.getTournamentInfoUncached;
 		const context = {} as unknown as GraphQLContext;
@@ -279,7 +279,13 @@ describe("tournamentSeasonSnapshot query resolver", () => {
 		tournamentsRepository.getTournamentInfoUncached = async (inputContext, tournamentId) => {
 			expect(inputContext).toBe(context);
 			expect(tournamentId).toBe(7);
-			return { id: 7, standingsReadyAt: "2026-08-04T00:00:00.000Z" } as never;
+			return {
+				id: 7,
+				standingsReadyAt: "2026-08-04T00:00:00.000Z",
+				setupStatus: "ready",
+				setupPhase: "ready",
+				setupHasWarnings: false,
+			} as never;
 		};
 		tournamentsService.getTournamentSeasonSnapshot = async (
 			inputContext,

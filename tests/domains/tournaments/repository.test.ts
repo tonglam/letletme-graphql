@@ -1066,38 +1066,39 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		expect(result.tournamentAutoSubRank).toBeNull();
 	});
 
+	const seasonEventResult = (
+		entryId: number,
+		groupRank: number,
+		overallPoints: number,
+		teamValue: number
+	): TournamentEventResult => ({
+		tournament: mapTournamentInfo(tournamentRow),
+		eventId: 3,
+		groupId: 1,
+		entryId,
+		entryName: `Entry ${entryId}`,
+		playerName: `Manager ${entryId}`,
+		eventGroupRank: groupRank,
+		eventPoints: 70,
+		eventCost: 0,
+		eventNetPoints: 70,
+		eventRank: 100,
+		overallPoints,
+		overallRank: 1000 + groupRank,
+		eventChip: null,
+		captainId: null,
+		captainPoints: null,
+		teamValue,
+		bank: 10,
+	});
+
 	it("builds one tournament season snapshot from v3 reporting rows", async () => {
-		const tournament = mapTournamentInfo(tournamentRow);
-		const eventResult = (
-			entryId: number,
-			rank: number,
-			overallPoints: number,
-			teamValue: number
-		): TournamentEventResult => ({
-			tournament,
-			eventId: 3,
-			groupId: 1,
-			entryId,
-			entryName: `Entry ${entryId}`,
-			playerName: `Manager ${entryId}`,
-			eventGroupRank: rank,
-			eventPoints: 70,
-			eventCost: 0,
-			eventNetPoints: 70,
-			eventRank: 100,
-			overallPoints,
-			overallRank: 1000 + rank,
-			eventChip: null,
-			captainId: null,
-			captainPoints: null,
-			teamValue,
-			bank: 10,
-		});
 		const context = buildContext({
+			tournamentData: [tournamentRow],
 			eventResults: [
-				eventResult(15702, 2, 1120, 1020),
-				eventResult(20002, 1, 1200, 1030),
-				eventResult(30003, 3, 1090, 1010),
+				seasonEventResult(15702, 1, 1120, 1020),
+				seasonEventResult(20002, 1, 1200, 1030),
+				seasonEventResult(30003, 1, 1090, 1010),
 			],
 			snapshotData: [
 				{
@@ -1144,6 +1145,7 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 			averageOverallPoints: 1137,
 		});
 		expect(result.standings.map((row) => row.entryId)).toEqual([20002, 15702, 30003]);
+		expect(result.standings.map((row) => row.rank)).toEqual([1, 2, 3]);
 		expect(result.metrics.find((metric) => metric.key === "TEAM_VALUE")).toMatchObject({
 			leaderEntryId: 20002,
 			leaderValue: 1030,
@@ -1153,6 +1155,45 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 			leaderValue: 2,
 			higherIsBetter: false,
 		});
+	});
+
+	it("returns an empty season snapshot for unsupported tournament modes", async () => {
+		const context = buildContext({
+			tournamentData: [{ ...tournamentRow, group_mode: "battle_races" }],
+			snapshotData: [
+				{
+					tournament_id: 1,
+					event_id: 3,
+					entry_id: 15702,
+					cum_transfers_num: 2,
+				},
+			],
+		});
+
+		const result = await tournamentsRepository.getTournamentSeasonSnapshot(context, 1, 3);
+		expect(result).toMatchObject({ entryCount: 0, metrics: [], standings: [] });
+	});
+
+	it("fails closed when the cumulative metric scope is incomplete", async () => {
+		const context = buildContext({
+			tournamentData: [tournamentRow],
+			eventResults: [
+				seasonEventResult(15702, 1, 1120, 1020),
+				seasonEventResult(20002, 1, 1200, 1030),
+			],
+			snapshotData: [
+				{
+					tournament_id: 1,
+					event_id: 3,
+					entry_id: 15702,
+					cum_transfers_num: 2,
+				},
+			],
+		});
+
+		await expect(tournamentsRepository.getTournamentSeasonSnapshot(context, 1, 3)).rejects.toThrow(
+			"Tournament season metrics are incomplete"
+		);
 	});
 });
 

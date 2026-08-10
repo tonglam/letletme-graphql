@@ -965,13 +965,17 @@ function computeRankingGapsFromStandings(
 	standings: TournamentSeasonStandingRow[],
 	entryId: number
 ): typeof emptyRankingGaps {
-	if (standings.length === 0) return { ...emptyRankingGaps };
+	const rankedStandings = standings.filter(
+		(row) => isDefined(row.overallPoints) && Number.isFinite(row.overallPoints)
+	);
+	if (rankedStandings.length === 0) return { ...emptyRankingGaps };
 
-	const myIndex = standings.findIndex((row) => row.entryId === entryId);
-	const my = myIndex >= 0 ? standings[myIndex] : undefined;
-	const leader = standings[0];
-	const above = myIndex > 0 ? standings[myIndex - 1] : undefined;
-	const below = myIndex >= 0 && myIndex < standings.length - 1 ? standings[myIndex + 1] : undefined;
+	const myIndex = rankedStandings.findIndex((row) => row.entryId === entryId);
+	const my = myIndex >= 0 ? rankedStandings[myIndex] : undefined;
+	const leader = rankedStandings[0];
+	const above = myIndex > 0 ? rankedStandings[myIndex - 1] : undefined;
+	const below =
+		myIndex >= 0 && myIndex < rankedStandings.length - 1 ? rankedStandings[myIndex + 1] : undefined;
 
 	const overallPoints = my?.overallPoints ?? null;
 	const leaderOverallPoints = leader?.overallPoints ?? null;
@@ -986,7 +990,7 @@ function computeRankingGapsFromStandings(
 				? Math.max(0, above.overallPoints - overallPoints)
 				: null;
 	const pointsAheadOfPrev =
-		myIndex >= 0 && myIndex === standings.length - 1
+		myIndex >= 0 && myIndex === rankedStandings.length - 1
 			? 0
 			: isDefined(overallPoints) && isDefined(below?.overallPoints)
 				? Math.max(0, overallPoints - below.overallPoints)
@@ -1058,19 +1062,24 @@ function buildSeasonSnapshotFromEventResults(
 	snapshotRows: DbTournamentEventSnapshotRow[] = []
 ): TournamentSeasonSnapshot {
 	const ordered = [...results].sort((a, b) => {
-		const rankA = a.eventGroupRank;
-		const rankB = b.eventGroupRank;
-		if (isDefined(rankA) && isDefined(rankB)) return rankA - rankB;
-		if (isDefined(rankA)) return -1;
-		if (isDefined(rankB)) return 1;
-		const ptsA = a.overallPoints ?? -1;
-		const ptsB = b.overallPoints ?? -1;
-		return ptsB - ptsA;
+		const pointsA =
+			isDefined(a.overallPoints) && Number.isFinite(a.overallPoints) ? a.overallPoints : null;
+		const pointsB =
+			isDefined(b.overallPoints) && Number.isFinite(b.overallPoints) ? b.overallPoints : null;
+		if (isDefined(pointsA) && isDefined(pointsB) && pointsA !== pointsB) {
+			return pointsB - pointsA;
+		}
+		if (isDefined(pointsA) && !isDefined(pointsB)) return -1;
+		if (!isDefined(pointsA) && isDefined(pointsB)) return 1;
+		const overallRankA = a.overallRank ?? Number.MAX_SAFE_INTEGER;
+		const overallRankB = b.overallRank ?? Number.MAX_SAFE_INTEGER;
+		if (overallRankA !== overallRankB) return overallRankA - overallRankB;
+		return a.entryId - b.entryId;
 	});
 
 	const standings: TournamentSeasonStandingRow[] = ordered.map((row, index) => ({
 		entryId: row.entryId,
-		rank: row.eventGroupRank ?? index + 1,
+		rank: isDefined(row.overallPoints) && Number.isFinite(row.overallPoints) ? index + 1 : null,
 		entryName: row.entryName,
 		playerName: row.playerName,
 		overallPoints: row.overallPoints,
@@ -1538,15 +1547,6 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		eventId: number
 	): Promise<TournamentSeasonSnapshot> {
-		const cacheKey = gqlCacheKey(
-			context,
-			`tournaments:season-snapshot:v1:${stableStringify({ tournamentId, eventId })}`
-		);
-		const cached = await readJsonCache(context, cacheKey, isSeasonSnapshotCache);
-		if (isSeasonSnapshotCache(cached)) {
-			return cached;
-		}
-
 		const empty: TournamentSeasonSnapshot = {
 			asOfEventId: eventId,
 			entryCount: 0,
@@ -1561,6 +1561,19 @@ export const tournamentsRepository: TournamentsRepository = {
 		if (eventId <= 0) {
 			return empty;
 		}
+		const tournament = await getTournamentInfoById(context, tournamentId);
+		if (!tournament || tournament.groupMode !== GroupMode.POINTS_RACES) {
+			return empty;
+		}
+
+		const cacheKey = gqlCacheKey(
+			context,
+			`tournaments:season-snapshot:v2:${stableStringify({ tournamentId, eventId })}`
+		);
+		const cached = await readJsonCache(context, cacheKey, isSeasonSnapshotCache);
+		if (isSeasonSnapshotCache(cached)) {
+			return cached;
+		}
 
 		const [results, snapshotResponse] = await Promise.all([
 			tournamentsRepository.getTournamentEventResults(context, tournamentId, eventId),
@@ -1574,13 +1587,32 @@ export const tournamentsRepository: TournamentsRepository = {
 		]);
 
 		if (snapshotResponse.error) {
-			context.logger.warn(
+			context.logger.error(
 				{ err: snapshotResponse.error, tournamentId, eventId },
-				"Failed to fetch tournament event snapshots for season metrics — building points-only snapshot"
+				"Failed to fetch tournament event snapshots for season metrics"
 			);
+			throw new Error("Failed to fetch tournament season metrics");
 		}
 
 		const snapshotRows = (snapshotResponse.data as DbTournamentEventSnapshotRow[] | null) ?? [];
+		const resultEntryIds = new Set(results.map((row) => row.entryId));
+		const snapshotEntryIds = new Set(snapshotRows.map((row) => row.entry_id));
+		if (
+			snapshotRows.length !== resultEntryIds.size ||
+			snapshotEntryIds.size !== resultEntryIds.size ||
+			[...snapshotEntryIds].some((entryId) => !resultEntryIds.has(entryId))
+		) {
+			context.logger.error(
+				{
+					tournamentId,
+					eventId,
+					resultEntryCount: resultEntryIds.size,
+					snapshotEntryCount: snapshotEntryIds.size,
+				},
+				"Tournament season metric scope is incomplete"
+			);
+			throw new Error("Tournament season metrics are incomplete");
+		}
 
 		const snapshot = buildSeasonSnapshotFromEventResults(eventId, results, snapshotRows);
 		await writeQueryCache(
