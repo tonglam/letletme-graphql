@@ -11,6 +11,22 @@ import {
 
 const DATA_SCHEMAS = ["fpl", "competition", "reporting", "ops", "understat", "bridge"] as const;
 const GRAPHQL_RUNTIME_CAPABILITY_ROLE = "letletme_graphql_reader";
+const GRAPHQL_AUTH_READ_COLUMNS = [
+	{
+		relationName: 'bauth."user"',
+		columnNames: ["id", "fpl_entry_id", "fpl_entry_verified_at"],
+	},
+	{
+		relationName: "bauth.mini_program_session",
+		columnNames: ["user_id", "token_hash", "revoked_at", "expires_at"],
+	},
+] as const;
+const GRAPHQL_AUTH_RELATIONS = GRAPHQL_AUTH_READ_COLUMNS.map(({ relationName }) => relationName);
+const GRAPHQL_AUTH_COLUMN_KEYS = new Set(
+	GRAPHQL_AUTH_READ_COLUMNS.flatMap(({ relationName, columnNames }) =>
+		columnNames.map((columnName) => `${relationName}.${columnName}`)
+	)
+);
 
 export const isLegacyAuthValidationRequired = (
 	deadline: number | null | undefined,
@@ -66,6 +82,13 @@ type RelationPrivilegeRow = QueryResultRow & {
 
 type WritePrivilegeRow = QueryResultRow & {
 	writable_relations: string[] | null;
+};
+
+type ColumnPrivilegeRow = QueryResultRow & {
+	relation_name: string;
+	column_name: string;
+	readable: boolean;
+	writable: boolean;
 };
 
 type PublicationRow = QueryResultRow & {
@@ -262,9 +285,13 @@ export const validateDatabaseContract = async (
 			"fpl.phases",
 			"competition.public_league_trends",
 			"ops.dataset_publications",
-			...(authContractPresent ? ['bauth."user"', "bauth.mini_program_session"] : []),
 			...(legacyAuthValidationOpen
-				? ['bauth."user"', "bauth.api_sessions", 'public."user"', "public.device_sessions"]
+				? [
+						...(authContractPresent ? [] : ['bauth."user"']),
+						"bauth.api_sessions",
+						'public."user"',
+						"public.device_sessions",
+					]
 				: []),
 		]),
 	].sort();
@@ -298,6 +325,87 @@ export const validateDatabaseContract = async (
 		throw new DatabaseContractError(
 			`PostgreSQL runtime role has an invalid ${invalidRelation.relation_name} relation boundary`
 		);
+	}
+
+	if (authContractPresent) {
+		const authRelationPrivileges = (
+			await database.query<RelationPrivilegeRow>(
+				`SELECT
+					relation_name,
+					to_regclass(relation_name) IS NOT NULL AS relation_exists,
+					CASE
+						WHEN to_regclass(relation_name) IS NULL THEN FALSE
+						ELSE has_table_privilege(current_user, relation_name, 'SELECT')
+					END AS readable,
+					CASE
+						WHEN to_regclass(relation_name) IS NULL THEN FALSE
+						ELSE has_table_privilege(current_user, relation_name, 'INSERT')
+						  OR has_table_privilege(current_user, relation_name, 'UPDATE')
+						  OR has_table_privilege(current_user, relation_name, 'DELETE')
+						  OR has_table_privilege(current_user, relation_name, 'TRUNCATE')
+						  OR has_table_privilege(current_user, relation_name, 'REFERENCES')
+						  OR has_table_privilege(current_user, relation_name, 'TRIGGER')
+					END AS writable
+				 FROM unnest($1::text[]) AS relation_name
+				 ORDER BY relation_name`,
+				[GRAPHQL_AUTH_RELATIONS]
+			)
+		).rows;
+		const invalidAuthRelation = authRelationPrivileges.find(
+			(row) => !row.relation_exists || row.readable || row.writable
+		);
+		if (invalidAuthRelation) {
+			throw new DatabaseContractError(
+				`PostgreSQL runtime role has an invalid ${invalidAuthRelation.relation_name} auth relation boundary`
+			);
+		}
+
+		const authColumnPrivileges = (
+			await database.query<ColumnPrivilegeRow>(
+				`SELECT
+					target.relation_name,
+					attribute.attname AS column_name,
+					has_column_privilege(
+						current_user, to_regclass(target.relation_name), attribute.attnum, 'SELECT'
+					) AS readable,
+					(
+						has_column_privilege(
+							current_user, to_regclass(target.relation_name), attribute.attnum, 'INSERT'
+						)
+						OR has_column_privilege(
+							current_user, to_regclass(target.relation_name), attribute.attnum, 'UPDATE'
+						)
+						OR has_column_privilege(
+							current_user, to_regclass(target.relation_name), attribute.attnum, 'REFERENCES'
+						)
+					) AS writable
+				 FROM unnest($1::text[]) AS target(relation_name)
+				 JOIN pg_attribute attribute
+				   ON attribute.attrelid = to_regclass(target.relation_name)
+				  AND attribute.attnum > 0
+				  AND NOT attribute.attisdropped
+				 ORDER BY target.relation_name, attribute.attnum`,
+				[GRAPHQL_AUTH_RELATIONS]
+			)
+		).rows;
+		const actualAuthColumnKeys = new Set(
+			authColumnPrivileges.map((row) => `${row.relation_name}.${row.column_name}`)
+		);
+		const invalidAuthColumn = authColumnPrivileges.find((row) => {
+			const key = `${row.relation_name}.${row.column_name}`;
+			return row.writable || row.readable !== GRAPHQL_AUTH_COLUMN_KEYS.has(key);
+		});
+		const missingAuthColumn = [...GRAPHQL_AUTH_COLUMN_KEYS].find(
+			(key) => !actualAuthColumnKeys.has(key)
+		);
+		if (invalidAuthColumn || missingAuthColumn) {
+			const boundary = invalidAuthColumn
+				? `${invalidAuthColumn.relation_name}.${invalidAuthColumn.column_name}`
+				: missingAuthColumn;
+			throw new DatabaseContractError(
+				`PostgreSQL runtime role has an invalid ${boundary} auth column boundary`
+			);
+		}
 	}
 
 	const writePrivileges = expectOne(

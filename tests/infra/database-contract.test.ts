@@ -15,6 +15,10 @@ type ContractOptions = Readonly<{
 	authUserPresent?: boolean;
 	authMiniProgramSessionPresent?: boolean;
 	authMissingRelation?: string;
+	authTableReadable?: string;
+	authMissingColumn?: string;
+	authExtraReadableColumn?: string;
+	authWritableColumn?: string;
 	schemaVersion?: string;
 	planVersion?: string;
 	publicationId?: string;
@@ -108,6 +112,56 @@ const makeContractExecutor = (
 					rowCount: 1,
 				} as never;
 			}
+			if (
+				text.includes("to_regclass(relation_name)") &&
+				(values[0] as readonly string[]).includes('bauth."user"')
+			) {
+				const relations = values[0] as readonly string[];
+				return {
+					rows: relations.map((relation_name) => ({
+						relation_name,
+						relation_exists: relation_name !== options.authMissingRelation,
+						readable: relation_name === options.authTableReadable,
+						writable: relation_name === options.writableRelation,
+					})),
+					rowCount: relations.length,
+				} as never;
+			}
+			if (text.includes("has_column_privilege")) {
+				const expectedColumns = new Set([
+					'bauth."user".id',
+					'bauth."user".fpl_entry_id',
+					'bauth."user".fpl_entry_verified_at',
+					"bauth.mini_program_session.user_id",
+					"bauth.mini_program_session.token_hash",
+					"bauth.mini_program_session.revoked_at",
+					"bauth.mini_program_session.expires_at",
+				]);
+				const physicalColumns = [
+					['bauth."user"', "id"],
+					['bauth."user"', "email"],
+					['bauth."user"', "fpl_entry_id"],
+					['bauth."user"', "fpl_entry_verified_at"],
+					["bauth.mini_program_session", "id"],
+					["bauth.mini_program_session", "user_id"],
+					["bauth.mini_program_session", "token_hash"],
+					["bauth.mini_program_session", "revoked_at"],
+					["bauth.mini_program_session", "expires_at"],
+					["bauth.mini_program_session", "device_id"],
+				] as const;
+				const rows = physicalColumns
+					.map(([relation_name, column_name]) => {
+						const key = `${relation_name}.${column_name}`;
+						return {
+							relation_name,
+							column_name,
+							readable: expectedColumns.has(key) || key === options.authExtraReadableColumn,
+							writable: key === options.authWritableColumn,
+						};
+					})
+					.filter((row) => `${row.relation_name}.${row.column_name}` !== options.authMissingColumn);
+				return { rows, rowCount: rows.length } as never;
+			}
 			if (text.includes("to_regclass(relation_name)")) {
 				const relations = values[0] as readonly string[];
 				const missingRelation = options.authMissingRelation ?? options.missingRelation;
@@ -189,7 +243,50 @@ describe("GraphQL startup database contract", () => {
 			authMissingRelation: "bauth.mini_program_session",
 		});
 		await expect(validateDatabaseContract(executor)).rejects.toThrow(
-			"invalid bauth.mini_program_session relation boundary"
+			"invalid bauth.mini_program_session auth relation boundary"
+		);
+	});
+
+	it("accepts only the seven Web auth columns used by GraphQL", async () => {
+		const { executor } = makeContractExecutor({ authSchemaPresent: true });
+		await expect(validateDatabaseContract(executor)).resolves.toMatchObject({
+			roleName: "graphql_runtime",
+		});
+	});
+
+	it("rejects broad or extra Web auth read access", async () => {
+		const tableReader = makeContractExecutor({
+			authSchemaPresent: true,
+			authTableReadable: 'bauth."user"',
+		});
+		await expect(validateDatabaseContract(tableReader.executor)).rejects.toThrow(
+			'invalid bauth."user" auth relation boundary'
+		);
+
+		const extraColumnReader = makeContractExecutor({
+			authSchemaPresent: true,
+			authExtraReadableColumn: 'bauth."user".email',
+		});
+		await expect(validateDatabaseContract(extraColumnReader.executor)).rejects.toThrow(
+			'invalid bauth."user".email auth column boundary'
+		);
+	});
+
+	it("rejects missing or writable Web auth columns", async () => {
+		const missingColumn = makeContractExecutor({
+			authSchemaPresent: true,
+			authMissingColumn: "bauth.mini_program_session.expires_at",
+		});
+		await expect(validateDatabaseContract(missingColumn.executor)).rejects.toThrow(
+			"invalid bauth.mini_program_session.expires_at auth column boundary"
+		);
+
+		const writableColumn = makeContractExecutor({
+			authSchemaPresent: true,
+			authWritableColumn: "bauth.mini_program_session.revoked_at",
+		});
+		await expect(validateDatabaseContract(writableColumn.executor)).rejects.toThrow(
+			"invalid bauth.mini_program_session.revoked_at auth column boundary"
 		);
 	});
 
