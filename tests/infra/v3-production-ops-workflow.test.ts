@@ -120,6 +120,7 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 						`DATABASE_URL="postgresql://${sourceRole}.${projectRef}:old@pooler.example.com:6543/postgres?pgbouncer=true"`,
 						"REDIS_HOST=cache.example.com",
 						"REDIS_PORT=6379",
+						"REQUIRE_SIGNED_WEB_INGRESS=false",
 						"GRAPHQL_AUTH_MODE=enforce",
 					].join("\n")
 				);
@@ -136,7 +137,10 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 					`DATABASE_URL=postgresql://letletme_graphql_runtime.${projectRef}:${password}@pooler.example.com:6543/postgres?pgbouncer=true`
 				);
 				expect(output).toContain("GRAPHQL_AUTH_MODE=enforce");
+				expect(output).toContain("REQUIRE_SIGNED_WEB_INGRESS=true");
 				expect(output.match(/^DATABASE_URL=/gm)).toHaveLength(1);
+				expect(output.match(/^REQUIRE_SIGNED_WEB_INGRESS=/gm)).toHaveLength(1);
+				expect(output.match(/^GRAPHQL_AUTH_MODE=/gm)).toHaveLength(1);
 			} finally {
 				rmSync(directory, { recursive: true, force: true });
 			}

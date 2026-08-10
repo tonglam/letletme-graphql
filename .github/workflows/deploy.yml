@@ -514,9 +514,15 @@ jobs:
             output = [
                 line
                 for line in lines
-                if not ('=' in line and line.split('=', 1)[0] == 'DATABASE_URL')
+                if not (
+                    '=' in line
+                    and line.split('=', 1)[0]
+                    in ('DATABASE_URL', 'REQUIRE_SIGNED_WEB_INGRESS', 'GRAPHQL_AUTH_MODE')
+                )
             ]
             output.append(f'DATABASE_URL={runtime_url}')
+            output.append('REQUIRE_SIGNED_WEB_INGRESS=true')
+            output.append('GRAPHQL_AUTH_MODE=enforce')
             descriptor = os.open(target_path, os.O_WRONLY | os.O_TRUNC, 0o600)
             with os.fdopen(descriptor, 'w', encoding='utf-8') as target:
                 target.write('\n'.join(output) + '\n')
@@ -541,6 +547,7 @@ jobs:
               --header 'Content-Type: application/json' \
               --data '{"query":"query { currentEventInfo { season } }"}' \
               http://127.0.0.1:4000/graphql)
+            echo "V3_GRAPHQL_ANONYMOUS_STATUS=$anonymous_status"
             test "$anonymous_status" = '401'
             APP_IMAGE="$IMAGE_REF" docker compose exec -T graphql bun -e '
               const token = process.env.GRAPHQL_SERVICE_TOKEN;
@@ -596,7 +603,6 @@ jobs:
                 liveFixtureCount: data.liveSnapshot.fixtureCount,
               }));
             '
-            echo 'V3_GRAPHQL_ANONYMOUS_STATUS=401'
             state_tmp=$(mktemp "$config_backup_dir/activation-state.XXXXXX")
             {
               printf 'run_id=%s\n' "$V3_CUTOVER_RUN_ID"
