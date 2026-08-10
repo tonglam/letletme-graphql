@@ -536,7 +536,8 @@ const estimateFplPointsFromValue = (
 	identifier: string,
 	value: number,
 	elementType: number | null = null,
-	fixtureCount: number | null = null
+	fixtureCount: number | null = null,
+	minutes: number | null = null
 ): number | null => {
 	if (!Number.isFinite(value) || value === 0) return 0;
 	switch (identifier) {
@@ -556,6 +557,7 @@ const estimateFplPointsFromValue = (
 							? value * 4
 							: null;
 		case "clean_sheets":
+			if (fixtureCount !== 1 || minutes === null || minutes < 60) return null;
 			return elementType === 1 || elementType === 2 ? value * 4 : elementType === 3 ? value : null;
 		case "goals_conceded":
 			return fixtureCount === 1 && (elementType === 1 || elementType === 2)
@@ -592,17 +594,28 @@ const mapFlatLiveExplainContributions = (
 ): LiveExplainStatContribution[] => {
 	if (!row) return [];
 	const contributions: LiveExplainStatContribution[] = [];
+	const minutes = parseNumericValue(pickRecordValue(row, "minutes"));
+	const redCards = parseNumericValue(pickRecordValue(row, "red_cards", "redCards"));
 	for (const definition of FLAT_LIVE_EXPLAIN_STATS) {
 		const value = parseNumericValue(pickRecordValue(row, ...definition.value));
 		const rawPoints = parseIntegerValue(pickRecordValue(row, ...definition.points));
 		if ((value ?? 0) === 0 && (rawPoints ?? 0) === 0) continue;
+		if (
+			definition.identifier === "yellow_cards" &&
+			rawPoints === null &&
+			redCards !== null &&
+			redCards !== 0
+		) {
+			continue;
+		}
 		let points = rawPoints ?? 0;
 		if (rawPoints === null && value !== null && value !== 0) {
 			const estimated = estimateFplPointsFromValue(
 				definition.identifier,
 				value,
 				elementType,
-				fixtureCount
+				fixtureCount,
+				minutes
 			);
 			if (estimated === null) continue;
 			points = estimated;

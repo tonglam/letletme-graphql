@@ -386,6 +386,52 @@ describe("liveRepository v3 explanation query cache", () => {
 		expect(result?.contributions?.filter((item) => item.identifier === "minutes")).toHaveLength(1);
 	});
 
+	it("does not estimate clean-sheet points without sixty eligible minutes", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 1, minutes: 45, total_points: 1 },
+			],
+			"fpl.player_gameweek_stats": [
+				{ event_id: 1, element_id: 2, minutes: 45, clean_sheets: 1, total_points: 1 },
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [
+				{ event_id: 1, element_id: 2, fixture_id: 101, element_type: 1, minutes: 45 },
+			],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions?.some((item) => item.identifier === "clean_sheets")).toBe(false);
+	});
+
+	it("does not double-count a yellow card with a red card", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 3, minutes: 90, total_points: -3 },
+			],
+			"fpl.player_gameweek_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					yellow_cards: 1,
+					red_cards: 1,
+					total_points: -3,
+				},
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions).toEqual([
+			expect.objectContaining({ identifier: "red_cards", value: 1, points: -3 }),
+		]);
+	});
+
 	it("omits defensive-contribution counts when their points are unavailable", async () => {
 		const { context } = liveContext();
 		withReadRows(context, {
