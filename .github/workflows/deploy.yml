@@ -390,6 +390,7 @@ jobs:
           IMAGE_NAME=$(printf '%s' "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
           test "${V3_IMAGE_REF_INPUT%@*}" = "$IMAGE_NAME"
           echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
+          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
           echo "IMAGE_REF=$V3_IMAGE_REF_INPUT" >> "$GITHUB_ENV"
           echo "DEPLOY_IMAGE_DIGEST=${V3_IMAGE_REF_INPUT##*@}" >> "$GITHUB_ENV"
 
@@ -397,6 +398,7 @@ jobs:
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
           IMAGE_REF: ${{ env.IMAGE_REF }}
           DEPLOY_IMAGE_DIGEST: ${{ env.DEPLOY_IMAGE_DIGEST }}
           GHCR_USER: ${{ github.actor }}
@@ -412,12 +414,15 @@ jobs:
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: false
-          envs: DEPLOY_SHA,IMAGE_REF,DEPLOY_IMAGE_DIGEST,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_RELEASE_MANIFEST_BASE64,V3_RELEASE_MANIFEST_SHA256,V3_CUTOVER_APPROVAL,V3_GRAPHQL_DB_PASSWORD
+          envs: DEPLOY_SHA,IMAGE_NAME,IMAGE_REF,DEPLOY_IMAGE_DIGEST,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_RELEASE_MANIFEST_BASE64,V3_RELEASE_MANIFEST_SHA256,V3_CUTOVER_APPROVAL,V3_GRAPHQL_DB_PASSWORD
           script: |
             set -euo pipefail
             [[ "$V3_CUTOVER_RUN_ID" =~ ^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$ ]]
             test "$V3_CUTOVER_APPROVAL" = "APPROVE_V3_ACTIVATION $V3_CUTOVER_RUN_ID"
             [[ "$V3_GRAPHQL_DB_PASSWORD" =~ ^[A-Za-z0-9_-]{64}$ ]]
+            [[ "$IMAGE_NAME" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]]
+            [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            test "${IMAGE_REF%@*}" = "$IMAGE_NAME"
             test -d "$VPS_WORKDIR/.git"
             cd "$VPS_WORKDIR"
             git diff --quiet || { echo "GraphQL VPS checkout has tracked modifications"; exit 1; }
@@ -427,6 +432,10 @@ jobs:
             curl --fail --silent http://127.0.0.1:3000/health >/dev/null
             LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
+            EXPECTED_TAG="${IMAGE_NAME}:v3-${DEPLOY_SHA}"
+            docker pull "$EXPECTED_TAG"
+            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+              "$EXPECTED_TAG" | grep -Fx "$IMAGE_REF"
             docker pull "$IMAGE_REF"
             manifest_tmp=$(mktemp)
             normalized_tmp=$(mktemp)
@@ -599,7 +608,24 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose exec -T graphql bun -e '
               const token = process.env.GRAPHQL_SERVICE_TOKEN;
               if (!token) throw new Error("Missing GRAPHQL_SERVICE_TOKEN");
-              const query = `query ProductionSmoke {
+              const request = async (query, variables = {}) => {
+                const response = await fetch("http://127.0.0.1:4000/graphql", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-GraphQL-Service-Token": token,
+                  },
+                  body: JSON.stringify({ query, variables }),
+                });
+                const payload = await response.json();
+                if (response.status !== 200 || payload.errors) {
+                  throw new Error(
+                    "GraphQL production smoke failed: " + JSON.stringify(payload.errors),
+                  );
+                }
+                return payload.data;
+              };
+              const data = await request(`query ProductionSmoke {
                 me { id }
                 currentEventInfo { season currentEvent nextEvent }
                 players(limit: 1) { id webName price }
@@ -607,44 +633,52 @@ jobs:
                   coverage { requestedDays observedDays complete stale }
                   mostSelected { playerId }
                 }
-                liveSnapshot(eventId: 1) {
-                  schemaVersion season eventId state eventLiveCount fixtureCount
-                }
-              }`;
-              const response = await fetch("http://127.0.0.1:4000/graphql", {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "X-GraphQL-Service-Token": token,
-                },
-                body: JSON.stringify({ query }),
-              });
-              const payload = await response.json();
-              if (response.status !== 200 || payload.errors) {
-                throw new Error("GraphQL production smoke failed: " + JSON.stringify(payload.errors));
-              }
-              const data = payload.data;
+              }`);
+              const info = data?.currentEventInfo;
               if (
                 data?.me !== null ||
-                data?.currentEventInfo?.season !== "2627" ||
+                !/^[0-9]{4}$/.test(info?.season ?? "") ||
                 !Array.isArray(data?.players) ||
                 data.players.length !== 1 ||
                 data?.marketPulse?.coverage?.requestedDays !== 14 ||
-                !Array.isArray(data?.marketPulse?.mostSelected) ||
-                data?.liveSnapshot?.schemaVersion !== 3 ||
-                data?.liveSnapshot?.season !== "2627" ||
-                data?.liveSnapshot?.eventId !== 1
+                !Array.isArray(data?.marketPulse?.mostSelected)
               ) {
                 throw new Error("GraphQL production smoke payload contract failed");
+              }
+              const smokeEventId =
+                Number.isInteger(info.currentEvent) && info.currentEvent > 0
+                  ? info.currentEvent
+                  : Number.isInteger(info.nextEvent) && info.nextEvent > 0
+                    ? info.nextEvent
+                    : null;
+              if (!smokeEventId) {
+                throw new Error("GraphQL production smoke has no current or next event");
+              }
+              const liveData = await request(
+                `query LiveSmoke($eventId: Int!) {
+                  liveSnapshot(eventId: $eventId) {
+                    schemaVersion season eventId state eventLiveCount fixtureCount
+                  }
+                }`,
+                { eventId: smokeEventId },
+              );
+              const snapshot = liveData?.liveSnapshot;
+              if (
+                snapshot?.schemaVersion !== 3 ||
+                snapshot?.season !== info.season ||
+                snapshot?.eventId !== smokeEventId
+              ) {
+                throw new Error("GraphQL production live snapshot contract failed");
               }
               console.log(JSON.stringify({
                 status: "v3_graphql_http_contract_passed",
                 auth: "service-token-accepted-anonymous-user-null",
-                season: data.currentEventInfo.season,
+                season: info.season,
+                eventId: smokeEventId,
                 playerCount: data.players.length,
                 marketObservedDays: data.marketPulse.coverage.observedDays,
-                liveSnapshotState: data.liveSnapshot.state,
-                liveFixtureCount: data.liveSnapshot.fixtureCount,
+                liveSnapshotState: snapshot.state,
+                liveFixtureCount: snapshot.fixtureCount,
               }));
             '
             state_tmp=$(mktemp "$config_backup_dir/activation-state.XXXXXX")
@@ -727,7 +761,22 @@ jobs:
             git diff --quiet || { echo "GraphQL VPS checkout has tracked modifications"; exit 1; }
             git diff --cached --quiet || { echo "GraphQL VPS index has staged modifications"; exit 1; }
             curl --fail --silent http://127.0.0.1:3000/health >/dev/null
-            curl --fail --silent http://127.0.0.1:4000/health >/dev/null
+
+            ROLLBACK_TAG=""
+            current_graphql_cid=$(docker compose ps --all -q graphql | head -n 1)
+            if [ -n "$current_graphql_cid" ]; then
+              current_image_id=$(docker inspect --format '{{.Image}}' "$current_graphql_cid")
+              for candidate_tag in $(docker image ls "$IMAGE_NAME" --format '{{.Repository}}:{{.Tag}}'); do
+                case "$candidate_tag" in
+                  "$IMAGE_NAME":v3-*) ;;
+                  *) continue ;;
+                esac
+                if [ "$(docker image inspect --format '{{.Id}}' "$candidate_tag")" = "$current_image_id" ]; then
+                  ROLLBACK_TAG="$candidate_tag"
+                  break
+                fi
+              done
+            fi
 
             git fetch origin main
             test "$(git rev-parse origin/main)" = "$EXPECTED_SHA"
@@ -781,40 +830,75 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose exec -T graphql bun -e '
               const token = process.env.GRAPHQL_SERVICE_TOKEN;
               if (!token) throw new Error("Missing GRAPHQL_SERVICE_TOKEN");
-              const query = `query MergedReleaseSmoke {
+              const request = async (query, variables = {}) => {
+                const response = await fetch("http://127.0.0.1:4000/graphql", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-GraphQL-Service-Token": token,
+                  },
+                  body: JSON.stringify({ query, variables }),
+                });
+                const payload = await response.json();
+                if (response.status !== 200 || payload.errors) {
+                  throw new Error(
+                    "Merged GraphQL release smoke failed: " + JSON.stringify(payload.errors),
+                  );
+                }
+                return payload.data;
+              };
+              const data = await request(`query MergedReleaseSmoke {
+                me { id }
                 currentEventInfo { season currentEvent nextEvent }
                 players(limit: 1) { id webName price }
-                marketPulse(days: 14) { coverage { requestedDays observedDays } }
-                liveSnapshot(eventId: 1) { schemaVersion season eventId state }
-              }`;
-              const response = await fetch("http://127.0.0.1:4000/graphql", {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "X-GraphQL-Service-Token": token,
-                },
-                body: JSON.stringify({ query }),
-              });
-              const payload = await response.json();
-              const data = payload.data;
+                marketPulse(days: 14) {
+                  coverage { requestedDays observedDays }
+                  mostSelected { playerId }
+                }
+              }`);
+              const info = data?.currentEventInfo;
               if (
-                response.status !== 200 ||
-                payload.errors ||
-                data?.currentEventInfo?.season !== "2627" ||
+                data?.me !== null ||
+                !/^[0-9]{4}$/.test(info?.season ?? "") ||
                 !Array.isArray(data?.players) ||
                 data.players.length !== 1 ||
                 data?.marketPulse?.coverage?.requestedDays !== 14 ||
-                data?.liveSnapshot?.schemaVersion !== 3 ||
-                data?.liveSnapshot?.season !== "2627" ||
-                data?.liveSnapshot?.eventId !== 1
+                !Array.isArray(data?.marketPulse?.mostSelected)
               ) {
-                throw new Error("Merged GraphQL release smoke failed");
+                throw new Error("Merged GraphQL release smoke payload contract failed");
+              }
+              const smokeEventId =
+                Number.isInteger(info.currentEvent) && info.currentEvent > 0
+                  ? info.currentEvent
+                  : Number.isInteger(info.nextEvent) && info.nextEvent > 0
+                    ? info.nextEvent
+                    : null;
+              if (!smokeEventId) {
+                throw new Error("Merged GraphQL release smoke has no current or next event");
+              }
+              const liveData = await request(
+                `query LiveSmoke($eventId: Int!) {
+                  liveSnapshot(eventId: $eventId) {
+                    schemaVersion season eventId state eventLiveCount fixtureCount
+                  }
+                }`,
+                { eventId: smokeEventId },
+              );
+              const snapshot = liveData?.liveSnapshot;
+              if (
+                snapshot?.schemaVersion !== 3 ||
+                snapshot?.season !== info.season ||
+                snapshot?.eventId !== smokeEventId
+              ) {
+                throw new Error("Merged GraphQL release live snapshot contract failed");
               }
               console.log(JSON.stringify({
                 status: "v3_graphql_redeploy_contract_passed",
-                season: data.currentEventInfo.season,
+                season: info.season,
+                eventId: smokeEventId,
                 marketObservedDays: data.marketPulse.coverage.observedDays,
-                liveSnapshotState: data.liveSnapshot.state,
+                liveSnapshotState: snapshot.state,
+                liveFixtureCount: snapshot.fixtureCount,
               }));
             '
 
@@ -822,6 +906,33 @@ jobs:
             test -n "$graphql_cid"
             test "$(docker inspect --format '{{.Config.Image}}' "$graphql_cid")" = "$IMAGE_REF"
             test "$(docker inspect --format '{{.State.Health.Status}}' "$graphql_cid")" = 'healthy'
+
+            KEEP_FILE=.deployed-graphql-images
+            keep_tmp=$(mktemp)
+            {
+              printf '%s\n' "$EXPECTED_TAG"
+              if [ -n "$ROLLBACK_TAG" ]; then
+                printf '%s\n' "$ROLLBACK_TAG"
+              fi
+              if [ -f "$KEEP_FILE" ]; then
+                while IFS= read -r saved_tag; do
+                  case "$saved_tag" in
+                    "$IMAGE_NAME":v3-*) printf '%s\n' "$saved_tag" ;;
+                  esac
+                done < "$KEEP_FILE"
+              fi
+            } | awk '!seen[$0]++ && kept < 3 { print; kept++ }' > "$keep_tmp"
+            mv "$keep_tmp" "$KEEP_FILE"
+            docker image ls "$IMAGE_NAME" --format '{{.Repository}}:{{.Tag}}' | while IFS= read -r old_tag; do
+              case "$old_tag" in
+                "$IMAGE_NAME":v3-*) ;;
+                *) continue ;;
+              esac
+              if grep -Fxq "$old_tag" "$KEEP_FILE"; then
+                continue
+              fi
+              docker image rm "$old_tag" || true
+            done
             echo "V3_GRAPHQL_REDEPLOY=passed sha=$EXPECTED_SHA image=$IMAGE_REF"
             APP_IMAGE="$IMAGE_REF" docker compose ps graphql
 

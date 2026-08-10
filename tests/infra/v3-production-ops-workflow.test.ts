@@ -102,6 +102,8 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		const start = job("v3_start", "v3_redeploy");
 		const trustedMain = start.indexOf('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
 		const dataHealth = start.indexOf("http://127.0.0.1:3000/health");
+		const expectedTag = start.indexOf('EXPECTED_TAG="${IMAGE_NAME}:v3-${DEPLOY_SHA}"');
+		const digestBinding = start.indexOf('grep -Fx "$IMAGE_REF"');
 		const manifestDigest = start.indexOf("actual_manifest_sha");
 		const trustedManifestImage = start.indexOf(".graphqlImageDigest // empty");
 		const releaseGate = start.indexOf("bun scripts/v3-release-gate.ts");
@@ -117,9 +119,11 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 
 		expect(trustedMain).toBeGreaterThan(0);
 		expect(dataHealth).toBeGreaterThan(trustedMain);
-		expect(manifestDigest).toBeGreaterThan(dataHealth);
+		expect(expectedTag).toBeGreaterThan(dataHealth);
+		expect(digestBinding).toBeGreaterThan(expectedTag);
+		expect(manifestDigest).toBeGreaterThan(digestBinding);
 		expect(trustedManifestImage).toBeGreaterThan(manifestDigest);
-		expect(releaseGate).toBeGreaterThan(dataHealth);
+		expect(releaseGate).toBeGreaterThan(digestBinding);
 		expect(releaseGate).toBeGreaterThan(trustedManifestImage);
 		expect(configBackup).toBeGreaterThan(releaseGate);
 		expect(existingBackupGuard).toBeGreaterThan(configBackup);
@@ -133,8 +137,10 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(start).toContain("currentEventInfo { season currentEvent nextEvent }");
 		expect(start).toContain("players(limit: 1)");
 		expect(start).toContain("marketPulse(days: 14)");
-		expect(start).toContain("liveSnapshot(eventId: 1)");
+		expect(start).toContain("query LiveSmoke($eventId: Int!)");
+		expect(start).toContain("liveSnapshot(eventId: $eventId)");
 		expect(start).toContain("X-GraphQL-Service-Token");
+		expect(start).toContain("IMAGE_NAME: ${{ env.IMAGE_NAME }}");
 		expect(start).toContain("V3_GRAPHQL_DB_PASSWORD: ${{ secrets.V3_GRAPHQL_DB_PASSWORD }}");
 		expect(start).toContain("actual_manifest_sha");
 		expect(start).toContain(".graphqlSha // empty");
@@ -146,6 +152,8 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(start).toContain('V3_RELEASE_MANIFEST_BASE64="$GATE_MANIFEST_BASE64"');
 		expect(start).toContain('V3_RELEASE_MANIFEST_SHA256="$GATE_MANIFEST_SHA256"');
 		expect(start).not.toContain("GRAPHQL_ENV");
+		expect(start).not.toContain('"2627"');
+		expect(start).not.toContain("liveSnapshot(eventId: 1)");
 		expect(start).not.toContain(
 			'install -m 600 .env.deploy "$config_backup_dir/env.deploy.before-v3"'
 		);
@@ -164,9 +172,12 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		const reset = redeploy.indexOf('git reset --hard "$EXPECTED_SHA"');
 		const contract = redeploy.indexOf("bun run contract:check");
 		const start = redeploy.indexOf("docker compose up -d --no-deps --no-build graphql");
+		const graphqlHealth = redeploy.indexOf("curl --fail --silent http://127.0.0.1:4000/health");
 		const anonymousAuth = redeploy.indexOf("test \"$anonymous_status\" = '401'");
 		const functionalSmoke = redeploy.indexOf("v3_graphql_redeploy_contract_passed");
 		const imageReadback = redeploy.indexOf("{{.Config.Image}}");
+		const retention = redeploy.indexOf("KEEP_FILE=.deployed-graphql-images");
+		const prune = redeploy.indexOf('docker image rm "$old_tag"');
 
 		expect(trustedMain).toBeGreaterThan(0);
 		expect(exactRepository).toBeGreaterThan(trustedMain);
@@ -178,14 +189,24 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(contract).toBeGreaterThan(reset);
 		expect(stop).toBeGreaterThan(contract);
 		expect(start).toBeGreaterThan(stop);
+		expect(graphqlHealth).toBeGreaterThan(start);
 		expect(anonymousAuth).toBeGreaterThan(start);
 		expect(functionalSmoke).toBeGreaterThan(anonymousAuth);
 		expect(imageReadback).toBeGreaterThan(functionalSmoke);
+		expect(retention).toBeGreaterThan(imageReadback);
+		expect(prune).toBeGreaterThan(retention);
 		expect(redeploy).toContain("currentEventInfo { season currentEvent nextEvent }");
 		expect(redeploy).toContain("players(limit: 1)");
 		expect(redeploy).toContain("marketPulse(days: 14)");
-		expect(redeploy).toContain("liveSnapshot(eventId: 1)");
+		expect(redeploy).toContain("query LiveSmoke($eventId: Int!)");
+		expect(redeploy).toContain("liveSnapshot(eventId: $eventId)");
+		expect(redeploy).toContain('ROLLBACK_TAG=""');
+		expect(redeploy).toContain("kept < 3");
+		expect(redeploy).toContain('"$IMAGE_NAME":v3-*');
+		expect(redeploy.match(/http:\/\/127\.0\.0\.1:4000\/health/g)).toHaveLength(1);
 		expect(redeploy).not.toContain("GRAPHQL_ENV");
+		expect(redeploy).not.toContain('"2627"');
+		expect(redeploy).not.toContain("liveSnapshot(eventId: 1)");
 		expect(redeploy).not.toContain("V3_GRAPHQL_DB_PASSWORD");
 		expect(redeploy).not.toContain("V3_CUTOVER_APPROVAL");
 		expect(redeploy).not.toContain("git clean");
