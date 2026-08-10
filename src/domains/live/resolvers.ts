@@ -265,8 +265,14 @@ export const liveResolvers = {
 			parent.expectedGoalsConceded ? parseFloat(parent.expectedGoalsConceded) : null,
 	},
 	LiveExplain: {
-		contributions: (parent: LiveExplain): NonNullable<LiveExplain["contributions"]> =>
-			parent.contributions ?? parent.breakdown.flatMap((entry) => entry.stats),
+		// Treat empty arrays as missing so fixture breakdown still surfaces when
+		// producers cached `contributions: []` without compact stats.
+		contributions: (parent: LiveExplain): NonNullable<LiveExplain["contributions"]> => {
+			if (parent.contributions && parent.contributions.length > 0) {
+				return parent.contributions;
+			}
+			return parent.breakdown.flatMap((entry) => entry.stats);
+		},
 		event: async (
 			parent: LiveExplain,
 			_args: Record<string, never>,

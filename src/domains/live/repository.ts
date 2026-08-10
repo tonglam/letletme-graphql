@@ -447,9 +447,19 @@ const mapFixtureStatContributions = (row: DbLiveFixtureStat): LiveExplainStatCon
 		{ identifier: "yellow_cards", value: "yellow_cards" },
 		{ identifier: "red_cards", value: "red_cards" },
 	] as const;
+	const yellowCards = parseNumericValue(pickRecordValue(row, "yellow_cards", "yellowCards"));
+	const redCards = parseNumericValue(pickRecordValue(row, "red_cards", "redCards"));
 	return definitions.flatMap(({ identifier, value }) => {
 		const count = parseIntegerValue(pickRecordValue(row, value));
 		if (count === null || count === 0) return [];
+		if (
+			identifier === "yellow_cards" &&
+			yellowCards !== null &&
+			redCards !== null &&
+			redCards !== 0
+		) {
+			return [];
+		}
 		const elementType = parseIntegerValue(pickRecordValue(row, "element_type", "elementType"));
 		const points =
 			identifier === "minutes"
@@ -526,19 +536,95 @@ const FLAT_LIVE_EXPLAIN_STATS = [
 	},
 ] as const;
 
+/**
+ * When producers store only raw counts (no `*_points` columns), fill scoring
+ * points from FPL rules so web clients can render a non-empty breakdown.
+ * Position-weighted events (goals, clean sheets) are estimated only when the
+ * snapshot supplies element type; otherwise the contribution is omitted.
+ */
+const estimateFplPointsFromValue = (
+	identifier: string,
+	value: number,
+	elementType: number | null = null,
+	fixtureCount: number | null = null,
+	minutes: number | null = null
+): number | null => {
+	if (!Number.isFinite(value) || value === 0) return 0;
+	switch (identifier) {
+		case "minutes":
+			// Minutes points are awarded per fixture. Without exactly one fixture
+			// boundary, even a short double-gameweek aggregate can be wrong.
+			if (fixtureCount !== 1) return null;
+			return value >= 60 ? 2 : value > 0 ? 1 : 0;
+		case "goals_scored":
+			return elementType === 1
+				? value * 10
+				: elementType === 2
+					? value * 6
+					: elementType === 3
+						? value * 5
+						: elementType === 4
+							? value * 4
+							: null;
+		case "clean_sheets":
+			if (fixtureCount !== 1 || minutes === null || minutes < 60) return null;
+			return elementType === 1 || elementType === 2 ? value * 4 : elementType === 3 ? value : null;
+		case "goals_conceded":
+			return fixtureCount === 1 && (elementType === 1 || elementType === 2)
+				? -Math.floor(value / 2)
+				: null;
+		case "assists":
+			return value * 3;
+		case "saves":
+			// Save points are awarded per fixture. An event aggregate cannot be
+			// scored safely without exactly one fixture boundary.
+			return fixtureCount === 1 ? Math.floor(value / 3) : null;
+		case "defensive_contribution":
+			// The event projection exposes the count but not the thresholded points.
+			return null;
+		case "yellow_cards":
+			return value * -1;
+		case "red_cards":
+			return value * -3;
+		case "own_goals":
+			return value * -2;
+		case "penalties_missed":
+			return value * -2;
+		case "penalties_saved":
+			return value * 5;
+		default:
+			return null;
+	}
+};
+
 const mapFlatLiveExplainContributions = (
-	row: Record<string, unknown> | null
+	row: Record<string, unknown> | null,
+	elementType: number | null = null,
+	fixtureCount: number | null = null
 ): LiveExplainStatContribution[] => {
 	if (!row) return [];
 	const contributions: LiveExplainStatContribution[] = [];
+	const minutes = parseNumericValue(pickRecordValue(row, "minutes"));
 	for (const definition of FLAT_LIVE_EXPLAIN_STATS) {
 		const value = parseNumericValue(pickRecordValue(row, ...definition.value));
-		const points = parseIntegerValue(pickRecordValue(row, ...definition.points));
-		if ((value ?? 0) === 0 && (points ?? 0) === 0) continue;
+		const rawPoints = parseIntegerValue(pickRecordValue(row, ...definition.points));
+		if ((value ?? 0) === 0 && (rawPoints ?? 0) === 0) continue;
+		let points = rawPoints ?? 0;
+		if (rawPoints === null && value !== null && value !== 0) {
+			const estimated = estimateFplPointsFromValue(
+				definition.identifier,
+				value,
+				elementType,
+				fixtureCount,
+				minutes
+			);
+			if (estimated === null) continue;
+			points = estimated;
+		}
 		contributions.push({
 			identifier: definition.identifier,
 			value,
-			points: points ?? 0,
+			points,
 			pointsModification: null,
 		});
 	}
@@ -594,12 +680,33 @@ const mapScoringItemContributions = (
 		});
 	});
 
+const mergeNonDuplicateContributions = (
+	primary: readonly LiveExplainStatContribution[],
+	secondary: readonly LiveExplainStatContribution[]
+): LiveExplainStatContribution[] => {
+	const identifiers = new Set(primary.map((contribution) => contribution.identifier));
+	return [
+		...primary,
+		...secondary.filter((contribution) => {
+			if (identifiers.has(contribution.identifier)) return false;
+			identifiers.add(contribution.identifier);
+			return true;
+		}),
+	];
+};
+
 async function fetchPlayerStatsForLiveExplains(
 	context: GraphQLContext,
 	eventId: number,
 	elementIds: number[]
-): Promise<{ rows: Map<number, DbLiveExplainStats>; failed: boolean }> {
-	if (elementIds.length === 0) return { rows: new Map(), failed: false };
+): Promise<{
+	rows: Map<number, DbLiveExplainStats>;
+	eventRows: Map<number, DbLiveExplainStats>;
+	uncacheableElementIds: Set<number>;
+}> {
+	if (elementIds.length === 0) {
+		return { rows: new Map(), eventRows: new Map(), uncacheableElementIds: new Set() };
+	}
 	const [snapshotResult, gameweekStatsResult] = await Promise.all([
 		context.data
 			.read("fpl.player_event_snapshots")
@@ -613,16 +720,27 @@ async function fetchPlayerStatsForLiveExplains(
 			.in("element_id", elementIds),
 	]);
 
-	if (snapshotResult.error || gameweekStatsResult.error) {
-		const error = snapshotResult.error ?? gameweekStatsResult.error;
+	const snapshotQueryFailed = snapshotResult.error !== null;
+	const gameweekQueryFailed = gameweekStatsResult.error !== null;
+	if (snapshotQueryFailed || gameweekQueryFailed) {
 		context.logger.warn(
-			{ err: error, eventId, elementIds },
+			{
+				err: snapshotResult.error ?? gameweekStatsResult.error,
+				eventId,
+				elementIds,
+				snapshotQueryFailed,
+				gameweekQueryFailed,
+			},
 			"player live stats batch query failed for live explanations"
 		);
-		return { rows: new Map(), failed: true };
 	}
 	const rows = new Map<number, DbLiveExplainStats>();
-	for (const raw of (snapshotResult.data ?? []) as unknown[]) {
+	const eventRows = new Map<number, DbLiveExplainStats>();
+	const uncacheableElementIds = new Set<number>();
+	if (snapshotQueryFailed || gameweekQueryFailed) {
+		for (const elementId of elementIds) uncacheableElementIds.add(elementId);
+	}
+	for (const raw of (snapshotQueryFailed ? [] : (snapshotResult.data ?? [])) as unknown[]) {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
 		const row = raw as DbLiveExplainStats;
 		const elementId = parseIntegerValue(pickRecordValue(row, "element_id", "elementId"));
@@ -632,12 +750,14 @@ async function fetchPlayerStatsForLiveExplains(
 	// fields because those legacy columns are not present in every accepted
 	// snapshot archive. The gameweek stats projection is the nullable source for
 	// these fields.
-	for (const raw of (gameweekStatsResult.data ?? []) as unknown[]) {
+	for (const raw of (gameweekQueryFailed ? [] : (gameweekStatsResult.data ?? [])) as unknown[]) {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
 		const gameweekRow = raw as DbLiveExplainStats;
 		const elementId = parseIntegerValue(pickRecordValue(gameweekRow, "element_id", "elementId"));
 		if (elementId === null || !elementIds.includes(elementId)) continue;
-		const current = rows.get(elementId) ?? { event_id: eventId, element_id: elementId };
+		eventRows.set(elementId, gameweekRow);
+		const current = rows.get(elementId);
+		if (!current) continue;
 		for (const [target, keys] of [
 			["penalties_missed", ["penalties_missed", "penaltiesMissed"]],
 			["defensive_contribution", ["defensive_contribution", "defensiveContribution"]],
@@ -647,7 +767,14 @@ async function fetchPlayerStatsForLiveExplains(
 		}
 		rows.set(elementId, current);
 	}
-	return { rows, failed: false };
+	for (const elementId of elementIds) {
+		if (!rows.has(elementId)) uncacheableElementIds.add(elementId);
+	}
+	return {
+		rows,
+		eventRows,
+		uncacheableElementIds,
+	};
 }
 
 async function fetchEventLiveExplainsFromDatabase(
@@ -1093,7 +1220,7 @@ const loadColdLiveExplainBatch = async (
 		fetchEventLiveExplainsFromDatabase(context, eventId, databaseIds),
 	]);
 	const playerStatsById = playerStatsResult.rows;
-	const playerStatsDatabaseIds = new Set(databaseIds);
+	const eventStatsById = playerStatsResult.eventRows;
 	for (const [elementId, row] of playerStatsById) {
 		selectedByById.set(
 			elementId,
@@ -1105,10 +1232,11 @@ const loadColdLiveExplainBatch = async (
 	for (const elementId of coldIds) {
 		const psRow = playerStatsById.get(elementId) ?? null;
 		const elRow = eventExplainById.get(elementId) ?? null;
+		const eventStats = eventStatsById.get(elementId) ?? null;
 		const cacheKey = shapedLiveExplainCacheKey(context, eventId, elementId, meta, mode);
-		if (!psRow && !elRow) {
+		if (!psRow && !elRow && !eventStats) {
 			resolved.set(elementId, null);
-			if (!playerStatsResult.failed || !playerStatsDatabaseIds.has(elementId)) {
+			if (!playerStatsResult.uncacheableElementIds.has(elementId)) {
 				valuesToCache.set(cacheKey, "__null__");
 			}
 			continue;
@@ -1117,12 +1245,43 @@ const loadColdLiveExplainBatch = async (
 		const stats = mapLiveExplainStats(psRow);
 		const databaseBreakdown = elRow ? mapBreakdownFromEventLiveRow(elRow) : [];
 		const breakdown = databaseBreakdown;
-		let contributions: LiveExplainStatContribution[] = [];
-		if (contributions.length === 0) contributions = breakdown.flatMap((entry) => entry.stats);
-		if (contributions.length === 0) {
-			contributions = mapScoringItemContributions(elRow?.scoring_items ?? []);
-		}
-		if (contributions.length === 0) contributions = mapFlatLiveExplainContributions(elRow);
+		const fixtureStats = elRow?.fixture_stats ?? [];
+		const fixtureCount = elRow?.fixture_stats?.length ?? null;
+		const fixtureContributions = breakdown.flatMap((entry) => entry.stats);
+		const scoringItemContributions = mapScoringItemContributions(elRow?.scoring_items ?? []);
+		let contributions =
+			fixtureContributions.length > 0
+				? fixtureContributions
+				: scoringItemContributions.length > 0
+					? scoringItemContributions
+					: mapFlatLiveExplainContributions(elRow, null, fixtureCount);
+		const elementType = parseIntegerValue(pickRecordValue(psRow, "element_type", "elementType"));
+		const eventStatContributions = mapFlatLiveExplainContributions(
+			eventStats,
+			elementType,
+			fixtureCount
+		);
+		const eventRedCards = parseNumericValue(pickRecordValue(eventStats, "red_cards", "redCards"));
+		const eventHasRedCard = eventRedCards !== null && eventRedCards !== 0;
+		const hasSameFixtureCard = fixtureStats.some((fixture) => {
+			const yellowCards = parseNumericValue(
+				pickRecordValue(fixture, "yellow_cards", "yellowCards")
+			);
+			const redCards = parseNumericValue(pickRecordValue(fixture, "red_cards", "redCards"));
+			return yellowCards !== null && yellowCards !== 0 && redCards !== null && redCards !== 0;
+		});
+		const hasFixtureCardData = fixtureStats.some(
+			(fixture) =>
+				parseNumericValue(pickRecordValue(fixture, "yellow_cards", "yellowCards")) !== null ||
+				parseNumericValue(pickRecordValue(fixture, "red_cards", "redCards")) !== null
+		);
+		const suppressAmbiguousYellowCard =
+			eventHasRedCard &&
+			(fixtureCount === 1 || hasSameFixtureCard || (fixtureCount !== 1 && !hasFixtureCardData));
+		const safeEventStatContributions = suppressAmbiguousYellowCard
+			? eventStatContributions.filter((contribution) => contribution.identifier !== "yellow_cards")
+			: eventStatContributions;
+		contributions = mergeNonDuplicateContributions(contributions, safeEventStatContributions);
 
 		const result: LiveExplain = {
 			eventId,
@@ -1137,7 +1296,7 @@ const loadColdLiveExplainBatch = async (
 		// A transient event-snapshot failure can still yield useful fixture-level
 		// details. Return that partial response, but do not pin it to this revision;
 		// the next refresh should retry PostgreSQL immediately.
-		if (!playerStatsResult.failed || !playerStatsDatabaseIds.has(elementId)) {
+		if (!playerStatsResult.uncacheableElementIds.has(elementId)) {
 			valuesToCache.set(cacheKey, JSON.stringify(result));
 		}
 	}

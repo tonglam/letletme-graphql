@@ -13,12 +13,16 @@ import {
 const withReadRows = (
 	context: GraphQLContext,
 	rowsByModel: Record<string, unknown[]>,
-	calls: string[] = []
+	calls: string[] = [],
+	errorsByModel: Record<string, Error | null> = {}
 ): GraphQLContext => {
 	context.data = {
 		read: (model: string) => {
 			calls.push(model);
-			const result = Promise.resolve({ data: rowsByModel[model] ?? [], error: null });
+			const result = Promise.resolve({
+				data: rowsByModel[model] ?? [],
+				error: errorsByModel[model] ?? null,
+			});
 			const builder = {
 				select: () => builder,
 				eq: () => builder,
@@ -213,6 +217,304 @@ describe("liveRepository v3 explanation query cache", () => {
 		expect(queryCacheWrite?.slice(-2)).toEqual(["EX", 10]);
 	});
 
+	it("builds contributions from player stats when durable explain facts are empty", async () => {
+		const { context } = liveContext();
+		const calls: string[] = [];
+		withReadRows(
+			context,
+			{
+				"fpl.player_event_snapshots": [
+					{
+						event_id: 1,
+						element_id: 1,
+						element_type: 3,
+						minutes: 120,
+						goals_scored: 1,
+						assists: 5,
+						total_points: 42,
+					},
+				],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 1,
+						element_id: 1,
+						minutes: 66,
+						goals_scored: 1,
+						assists: 2,
+						yellow_cards: 1,
+						bonus: 3,
+						total_points: 14,
+					},
+				],
+				"fpl.player_gameweek_scoring_items": [],
+				"fpl.player_fixture_stats": [
+					{ event_id: 1, element_id: 1, fixture_id: 101, element_type: 3 },
+				],
+			},
+			calls
+		);
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [1]);
+
+		expect(result?.stats.totalPoints).toBe(42);
+		expect(result?.contributions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ identifier: "minutes", value: 66, points: 2 }),
+				expect.objectContaining({ identifier: "assists", value: 2, points: 6 }),
+				expect.objectContaining({ identifier: "yellow_cards", value: 1, points: -1 }),
+				expect.objectContaining({ identifier: "bonus", value: 3, points: 3 }),
+			])
+		);
+		expect(calls).toEqual([
+			"fpl.player_event_snapshots",
+			"fpl.player_gameweek_stats",
+			"fpl.player_gameweek_scoring_items",
+			"fpl.player_fixture_stats",
+		]);
+	});
+
+	it("does not estimate one minutes score across a double gameweek aggregate", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 3, minutes: 180, total_points: 42 },
+			],
+			"fpl.player_gameweek_stats": [{ event_id: 1, element_id: 2, minutes: 180, total_points: 4 }],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions?.some((item) => item.identifier === "minutes")).toBe(false);
+	});
+
+	it("does not estimate short double-gameweek minutes or goals conceded", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 1, minutes: 90, total_points: 42 },
+			],
+			"fpl.player_gameweek_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					minutes: 90,
+					goals_conceded: 2,
+					total_points: 4,
+				},
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 101,
+					element_type: 1,
+				},
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 102,
+					element_type: 1,
+				},
+			],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions?.some((item) => item.identifier === "minutes")).toBe(false);
+		expect(result?.contributions?.some((item) => item.identifier === "goals_conceded")).toBe(false);
+	});
+
+	it("does not estimate saves across fixture boundaries", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 1, minutes: 180, total_points: 42 },
+			],
+			"fpl.player_gameweek_stats": [
+				{ event_id: 1, element_id: 2, minutes: 180, saves: 4, total_points: 4 },
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [
+				{ event_id: 1, element_id: 2, fixture_id: 101, element_type: 1, minutes: 90, saves: 2 },
+				{ event_id: 1, element_id: 2, fixture_id: 102, element_type: 1, minutes: 90, saves: 2 },
+			],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions?.some((item) => item.identifier === "saves")).toBe(false);
+	});
+
+	it("merges nonduplicate gameweek stats into partial fixture contributions", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 1, minutes: 90, total_points: 16 },
+			],
+			"fpl.player_gameweek_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					minutes: 90,
+					clean_sheets: 1,
+					saves: 3,
+					bonus: 3,
+					total_points: 16,
+				},
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 101,
+					element_type: 1,
+					minutes: 90,
+				},
+			],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ identifier: "minutes", value: 90, points: 2 }),
+				expect.objectContaining({ identifier: "clean_sheets", value: 1, points: 4 }),
+				expect.objectContaining({ identifier: "saves", value: 3, points: 1 }),
+				expect.objectContaining({ identifier: "bonus", value: 3, points: 3 }),
+			])
+		);
+		expect(result?.contributions?.filter((item) => item.identifier === "minutes")).toHaveLength(1);
+	});
+
+	it("does not estimate clean-sheet points without sixty eligible minutes", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 1, minutes: 45, total_points: 1 },
+			],
+			"fpl.player_gameweek_stats": [
+				{ event_id: 1, element_id: 2, minutes: 45, clean_sheets: 1, total_points: 1 },
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [
+				{ event_id: 1, element_id: 2, fixture_id: 101, element_type: 1, minutes: 45 },
+			],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions?.some((item) => item.identifier === "clean_sheets")).toBe(false);
+	});
+
+	it("does not double-count a yellow card with a red card", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 3, minutes: 90, total_points: -3 },
+			],
+			"fpl.player_gameweek_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					yellow_cards: 1,
+					red_cards: 1,
+					total_points: -3,
+				},
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 101,
+					element_type: 3,
+					yellow_cards: 1,
+					red_cards: 1,
+				},
+			],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions).toEqual([
+			expect.objectContaining({ identifier: "red_cards", value: 1, points: -3 }),
+		]);
+	});
+
+	it("preserves cards from separate double-gameweek fixtures", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 3, minutes: 180, total_points: -4 },
+			],
+			"fpl.player_gameweek_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					yellow_cards: 1,
+					red_cards: 1,
+					total_points: -4,
+				},
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 101,
+					element_type: 3,
+					yellow_cards: 1,
+				},
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 102,
+					element_type: 3,
+					red_cards: 1,
+				},
+			],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ identifier: "yellow_cards", value: 1, points: -1 }),
+				expect.objectContaining({ identifier: "red_cards", value: 1, points: -3 }),
+			])
+		);
+	});
+
+	it("omits defensive-contribution counts when their points are unavailable", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 3, minutes: 90, total_points: 12 },
+			],
+			"fpl.player_gameweek_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					minutes: 90,
+					defensive_contribution: 10,
+					total_points: 12,
+				},
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(
+			result?.contributions?.some((item) => item.identifier === "defensive_contribution")
+		).toBe(false);
+	});
+
 	it("loads a fifteen-player explanation batch with two bounded reporting reads", async () => {
 		const { context } = liveContext();
 		const elementIds = Array.from({ length: 15 }, (_, index) => index + 1);
@@ -283,5 +585,71 @@ describe("liveRepository v3 explanation query cache", () => {
 			"fpl.player_gameweek_scoring_items": [],
 		});
 		await expect(liveRepository.getEventLiveExplain(context, 1, 1)).resolves.toBeNull();
+	});
+
+	it("preserves snapshot stats when the gameweek stats query fails", async () => {
+		const { context, redis } = liveContext();
+		withReadRows(
+			context,
+			{
+				"fpl.player_event_snapshots": [
+					{
+						event_id: 1,
+						element_id: 1,
+						minutes: 90,
+						total_points: 6,
+					},
+				],
+				"fpl.player_gameweek_scoring_items": [],
+				"fpl.player_fixture_stats": [],
+			},
+			[],
+			{ "fpl.player_gameweek_stats": new Error("gameweek stats unavailable") }
+		);
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [1]);
+
+		expect(result).toMatchObject({
+			elementId: 1,
+			stats: { minutes: 90, totalPoints: 6 },
+		});
+		expect(redis.setCalls.some(([key]) => key.includes(":live-explain:"))).toBe(false);
+	});
+
+	it("does not promote gameweek stats to snapshot stats when the snapshot row is missing", async () => {
+		const { context, redis } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [],
+			"fpl.player_gameweek_stats": [
+				{ event_id: 1, element_id: 1, minutes: 90, assists: 1, total_points: 3 },
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [1]);
+
+		expect(result).toMatchObject({
+			elementId: 1,
+			stats: { minutes: null, totalPoints: null },
+			contributions: [expect.objectContaining({ identifier: "assists", value: 1, points: 3 })],
+		});
+		expect(redis.setCalls.some(([key]) => key.includes(":live-explain:"))).toBe(false);
+	});
+
+	it("caches complete elements when another element is missing its snapshot row", async () => {
+		const { context, redis } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [{ event_id: 1, element_id: 1, minutes: 90, total_points: 6 }],
+			"fpl.player_gameweek_stats": [],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [],
+		});
+
+		const results = await liveRepository.getEventLiveExplains(context, 1, [1, 2]);
+
+		expect(results).toHaveLength(1);
+		expect(results[0]).toMatchObject({ elementId: 1, stats: { minutes: 90, totalPoints: 6 } });
+		expect(redis.setCalls.filter(([key]) => key.includes(":live-explain:")).length).toBe(1);
 	});
 });
