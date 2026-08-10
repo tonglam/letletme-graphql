@@ -845,12 +845,17 @@ export const playerValuesRepository: PlayerValuesRepository = {
 						encoding === "compact" ? toCompactDate(seasonWindow.untilDate) : seasonWindow.untilDate;
 					const rows: DbPlayerValueHistoryRow[] = [];
 					for (let from = 0; ; from += PLAYER_VALUE_HISTORY_PAGE_SIZE) {
-						const { data, error } = await context.supabase
+						let query = context.supabase
 							.from("player_values")
 							.select("element_id, value, last_value, change_date, change_type")
 							.eq("element_id", args.playerId)
 							.gte("change_date", fromDate)
-							.lt("change_date", untilDate)
+							.lt("change_date", untilDate);
+						// The column is text in legacy deployments. A format predicate is
+						// required in mixed histories because lexical bounds alone can
+						// admit the other representation from outside this season.
+						query = query.like("change_date", encoding === "compact" ? "________" : "____-__-__%");
+						const { data, error } = await query
 							.order("change_date", { ascending: true })
 							.range(from, from + PLAYER_VALUE_HISTORY_PAGE_SIZE - 1);
 

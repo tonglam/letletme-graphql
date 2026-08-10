@@ -34,6 +34,7 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 	let toDateFilter: string | null = null;
 	let toDateExclusive = false;
 	let ascending = false;
+	let encodingFilter: "compact" | "iso" | null = null;
 
 	const applyFilters = (): QueryResult<HistoryRow> => {
 		let filtered = [...rows];
@@ -56,6 +57,12 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 					? normalizedDate(row.change_date).localeCompare(toDate) < 0
 					: normalizedDate(row.change_date).localeCompare(toDate) <= 0
 			);
+		}
+
+		if (encodingFilter === "compact") {
+			filtered = filtered.filter((row) => /^\d{8}$/.test(row.change_date));
+		} else if (encodingFilter === "iso") {
+			filtered = filtered.filter((row) => /^\d{4}-\d{2}-\d{2}/.test(row.change_date));
 		}
 
 		filtered.sort((left, right) => {
@@ -109,6 +116,10 @@ function createHistoryQueryBuilder(rows: HistoryRow[]) {
 		lt(_column: string, value: string) {
 			toDateFilter = normalizedDate(value);
 			toDateExclusive = true;
+			return builder;
+		},
+		like(_column: string, pattern: string) {
+			encodingFilter = pattern === "________" ? "compact" : "iso";
 			return builder;
 		},
 	});
