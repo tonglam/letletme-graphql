@@ -1,7 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { getLiveDataSnapshot, type LiveFixtureData } from "../../infra/data-snapshot";
 import { MAX_EVENT_ID } from "../../infra/config";
-import { getCurrentEventId } from "../../infra/event";
+import { getCurrentEventId, getNextEventId } from "../../infra/event";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player, Team } from "../../infra/types";
@@ -382,12 +382,17 @@ const sortByKickoffTime = (matches: LiveMatchData[]): LiveMatchData[] => {
 	});
 };
 
-export const loadUpcomingEventFixtures = (
+export const loadUpcomingEventFixtures = async (
 	context: GraphQLContext,
-	currentEventId: number
+	currentEventId: number | null
 ): Promise<Fixture[]> => {
-	if (currentEventId >= MAX_EVENT_ID) return Promise.resolve([]);
-	const nextEventId = currentEventId + 1;
+	const nextEventId =
+		currentEventId === null
+			? await getNextEventId(context)
+			: currentEventId < MAX_EVENT_ID
+				? currentEventId + 1
+				: null;
+	if (nextEventId === null) return [];
 	return withLiveSnapshotConsistency(
 		context,
 		nextEventId,
@@ -399,16 +404,30 @@ export const loadUpcomingEventFixtures = (
 	);
 };
 
+const emptyLiveMatches = (): LiveMatches => ({
+	nextEvent: [],
+	notStarted: [],
+	playing: [],
+	finished: [],
+});
+
 export const liveMatchesService = {
 	async getAllLiveMatches(context: GraphQLContext, upcoming = false): Promise<LiveMatches> {
 		const currentEventId = await getCurrentEventId(context);
 
-		if (!currentEventId) {
+		if (currentEventId === null) {
+			if (!upcoming) return emptyLiveMatches();
+			const [teamsById, nextFixtures] = await Promise.all([
+				buildTeamMap(context),
+				loadUpcomingEventFixtures(context, null),
+			]);
 			return {
-				nextEvent: [],
-				notStarted: [],
-				playing: [],
-				finished: [],
+				...emptyLiveMatches(),
+				nextEvent: sortByKickoffTime(
+					nextFixtures.map((fixture) =>
+						buildMatch(fixture, fixture.id, "NEXT_EVENT", new Map(), teamsById)
+					)
+				),
 			};
 		}
 		return withLiveSnapshotConsistency(context, currentEventId, async () => {

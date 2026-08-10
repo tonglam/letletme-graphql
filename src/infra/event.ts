@@ -2,6 +2,7 @@ import type { GraphQLContext } from "../graphql/context";
 import { getCoreDataSnapshot } from "./data-snapshot";
 
 const currentEventIdMemo = new WeakMap<GraphQLContext, Promise<number | null>>();
+const nextEventIdMemo = new WeakMap<GraphQLContext, Promise<number | null>>();
 
 export type CurrentEventCache = {
 	id: number;
@@ -38,5 +39,19 @@ export const getCurrentEventId = (context: GraphQLContext): Promise<number | nul
 	if (cached) return cached;
 	const loading = getCoreDataSnapshot(context).then((snapshot) => snapshot.currentEventId);
 	currentEventIdMemo.set(context, loading);
+	return loading;
+};
+
+export const getNextEventId = (context: GraphQLContext): Promise<number | null> => {
+	const cached = nextEventIdMemo.get(context);
+	if (cached) return cached;
+	const loading = getCoreDataSnapshot(context).then((snapshot) => {
+		const currentEventId = snapshot.currentEventId;
+		if (currentEventId !== null) {
+			return snapshot.events.find((event) => event.id === currentEventId + 1)?.id ?? null;
+		}
+		return snapshot.events.find((event) => event.isNext)?.id ?? null;
+	});
+	nextEventIdMemo.set(context, loading);
 	return loading;
 };

@@ -31,6 +31,8 @@ export type PlayersFilter = {
 	maxPrice?: number | null;
 };
 
+export type PlayerPickerOwnershipBand = "LE5" | "GT5_LE15" | "GT15_LE40" | "GT40";
+
 const asNullableNumber = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) {
 		return value;
@@ -131,6 +133,7 @@ export type PlayerPickerItem = {
 export type PlayersForPickerPayload = {
 	items: PlayerPickerItem[];
 	nextCursor: number | null;
+	totalCount: number;
 };
 
 export type PlayerPickerSort =
@@ -329,6 +332,24 @@ const matchesPickerFilter = (
 	return true;
 };
 
+const matchesPickerOwnershipBand = (
+	selectedByPercent: number | null,
+	band: PlayerPickerOwnershipBand | null | undefined
+): boolean => {
+	if (!band) return true;
+	if (selectedByPercent === null) return false;
+	switch (band) {
+		case "LE5":
+			return selectedByPercent <= 5;
+		case "GT5_LE15":
+			return selectedByPercent > 5 && selectedByPercent <= 15;
+		case "GT15_LE40":
+			return selectedByPercent > 15 && selectedByPercent <= 40;
+		case "GT40":
+			return selectedByPercent > 40;
+	}
+};
+
 export type PlayerTransferStats = {
 	playerId: number;
 	eventId: number;
@@ -360,7 +381,8 @@ interface PlayersRepository {
 		cursor: number | null | undefined,
 		search?: string | null,
 		filter?: PlayersFilter | null,
-		sort?: PlayerPickerSort
+		sort?: PlayerPickerSort,
+		ownershipBand?: PlayerPickerOwnershipBand | null
 	): Promise<PlayersForPickerPayload>;
 	listPlayers(
 		context: GraphQLContext,
@@ -599,7 +621,8 @@ export const playersRepository: PlayersRepository = {
 		cursor: number | null | undefined,
 		search?: string | null,
 		filter?: PlayersFilter | null,
-		sort: PlayerPickerSort = "TOTAL_POINTS_DESC"
+		sort: PlayerPickerSort = "TOTAL_POINTS_DESC",
+		ownershipBand: PlayerPickerOwnershipBand | null = null
 	): Promise<PlayersForPickerPayload> {
 		const safeLimit = clampLimit(limit);
 		const decodedCursor = decodePickerCursor(
@@ -612,14 +635,21 @@ export const playersRepository: PlayersRepository = {
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
 		const cacheKey = gqlCacheKey(
 			context,
-			`players:picker:v9:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`
+			`players:picker:v11:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${ownershipBand ?? "ANY"}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`
 		);
 
 		const cached = await readJsonCache(
 			context,
 			cacheKey,
 			(value): value is PlayersForPickerPayload => {
-				if (!isObject(value) || !Array.isArray(value.items)) return false;
+				if (
+					!isObject(value) ||
+					!Array.isArray(value.items) ||
+					!Number.isSafeInteger(value.totalCount) ||
+					(value.totalCount as number) < value.items.length
+				) {
+					return false;
+				}
 				return value.items.every(
 					(item) =>
 						isObject(item) &&
@@ -640,8 +670,7 @@ export const playersRepository: PlayersRepository = {
 			getCoreDataSnapshot(context),
 			buildTeamMap(context),
 		]);
-		const candidates = snapshot.players
-			.filter((player) => decodedCursor.legacyId === null || player.id > decodedCursor.legacyId)
+		const filteredPlayers = snapshot.players
 			.filter(
 				(player) => !safeSearch || player.webName.toLowerCase().includes(safeSearch.toLowerCase())
 			)
@@ -659,7 +688,7 @@ export const playersRepository: PlayersRepository = {
 					safeFilter.maxPrice === null ||
 					player.price <= safeFilter.maxPrice
 			);
-		const allRows: DbPickerRow[] = candidates.map((player) => ({
+		const allRows: DbPickerRow[] = filteredPlayers.map((player) => ({
 			id: player.id,
 			web_name: player.webName,
 			element_type: player.type,
@@ -667,9 +696,9 @@ export const playersRepository: PlayersRepository = {
 			team_name: teams.get(player.teamId)?.name ?? "",
 			team_short_name: teams.get(player.teamId)?.shortName ?? "",
 		}));
-		const allItems = (await enrichPickerItems(context, allRows, statsContext, teams)).filter(
-			(item) => matchesPickerFilter(item, safeFilter)
-		);
+		const allItems = (await enrichPickerItems(context, allRows, statsContext, teams))
+			.filter((item) => matchesPickerFilter(item, safeFilter))
+			.filter((item) => matchesPickerOwnershipBand(item.selectedByPercent, ownershipBand));
 		const sortNumberDesc = (left: number | null, right: number | null): number =>
 			(right ?? -1) - (left ?? -1);
 		const sortedItems = [...allItems].sort((left, right) => {
@@ -695,11 +724,21 @@ export const playersRepository: PlayersRepository = {
 					);
 			}
 		});
-		const returnedItems = sortedItems.slice(decodedCursor.offset, decodedCursor.offset + safeLimit);
+		const cursorItems = sortedItems.filter(
+			(item) => decodedCursor.legacyId === null || item.id > decodedCursor.legacyId
+		);
+		const returnedItems = cursorItems.slice(decodedCursor.offset, decodedCursor.offset + safeLimit);
 		const nextOffset = decodedCursor.offset + returnedItems.length;
 		const nextCursor =
-			nextOffset < sortedItems.length ? encodePickerCursor(sort, nextOffset) : null;
-		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
+			nextOffset < cursorItems.length ? encodePickerCursor(sort, nextOffset) : null;
+		const payload: PlayersForPickerPayload = {
+			items: returnedItems,
+			nextCursor,
+			// Positive cursors are a rolling-deployment compatibility path. Keep
+			// the directory count independent from that page threshold, matching
+			// the stable count returned by the versioned offset cursors.
+			totalCount: sortedItems.length,
+		};
 
 		await writeQueryCache(
 			context,

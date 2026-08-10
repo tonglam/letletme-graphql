@@ -71,6 +71,30 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("accepts the bounded player picker and rejects a roster-sized page", () => {
+		const query = `
+			query PlayerPicker($limit: Int!) {
+				playersForPicker(search: "Gabriel", limit: $limit) {
+					items { id webName position team { id name shortName } }
+					nextCursor
+					totalCount
+				}
+			}
+		`;
+		expect(validateGraphQLRequestLimits({ query, variables: { limit: 20 } }, schema)).toMatchObject(
+			{
+				ok: true,
+				weightedComplexity: 220,
+				rateLimitCostUnits: 22,
+			}
+		);
+		expect(validateGraphQLRequestLimits({ query, variables: { limit: 100 } }, schema)).toEqual({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL operation exceeds weighted complexity 600",
+		});
+	});
+
 	it("keeps the fixed-size Market pulse below the public complexity guard", () => {
 		const result = validateGraphQLRequestLimits(
 			{

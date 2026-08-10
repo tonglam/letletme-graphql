@@ -4,6 +4,7 @@ import { buildTeamMap } from "../../infra/team-map";
 import type {
 	Player,
 	PlayerPickerItem,
+	PlayerPickerOwnershipBand,
 	PlayersFilter,
 	PlayersForPickerPayload,
 	PlayerPickerSort,
@@ -100,6 +101,7 @@ type PlayersForPickerArgs = {
 	sort?: PlayerPickerSort | null;
 	limit?: number | null;
 	cursor?: number | null;
+	ownershipBand?: PlayerPickerOwnershipBand | null;
 };
 
 export function normalizePlayerPickerSearch(search: string | null | undefined): string | null {
@@ -172,7 +174,8 @@ export const playersResolvers = {
 				args.cursor ?? null,
 				normalizePlayerPickerSearch(args.search),
 				filter,
-				args.sort ?? "TOTAL_POINTS_DESC"
+				args.sort ?? "TOTAL_POINTS_DESC",
+				args.ownershipBand ?? null
 			);
 		},
 

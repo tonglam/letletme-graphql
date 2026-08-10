@@ -3,6 +3,7 @@ import {
 	applyLiveFixtureScores,
 	loadLiveFixtureBucketsFromRedis,
 	loadUpcomingEventFixtures,
+	liveMatchesService,
 	resolveLiveMatchStatus,
 } from "../../../src/domains/live-matches/service";
 import {
@@ -119,5 +120,53 @@ describe("loadUpcomingEventFixtures", () => {
 			revision: "9",
 		});
 		expect(isLiveSnapshotConsistencyActive(context, 2)).toBe(true);
+	});
+
+	it("uses the flagged next event when there is no current event in preseason", async () => {
+		const core = buildTestCoreData(null);
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), buildLivePublication(core, 1, "2627", 8))
+		);
+
+		const fixtures = await loadUpcomingEventFixtures(context, null);
+
+		expect(fixtures).toHaveLength(10);
+		expect(fixtures.every((fixture) => fixture.eventId === 1)).toBe(true);
+		expect(await loadOperationLiveSnapshotMeta(context, 1)).toMatchObject({
+			eventId: 1,
+			revision: "8",
+		});
+	});
+});
+
+describe("liveMatchesService.getAllLiveMatches", () => {
+	it("returns GW1 as nextEvent during preseason when upcoming is requested", async () => {
+		const core = buildTestCoreData(null);
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), buildLivePublication(core, 1, "2627", 8))
+		);
+
+		const result = await liveMatchesService.getAllLiveMatches(context, true);
+
+		expect(result.nextEvent).toHaveLength(10);
+		expect(result.nextEvent.every((match) => match.playStatus === "NEXT_EVENT")).toBe(true);
+		expect(result.nextEvent.map((match) => match.matchId)).toEqual(
+			core.fixtures.filter((fixture) => fixture.eventId === 1).map((fixture) => fixture.id)
+		);
+		expect(result.notStarted).toEqual([]);
+		expect(result.playing).toEqual([]);
+		expect(result.finished).toEqual([]);
+	});
+
+	it("keeps preseason empty when upcoming is not requested", async () => {
+		const core = buildTestCoreData(null);
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
+
+		await expect(liveMatchesService.getAllLiveMatches(context)).resolves.toEqual({
+			nextEvent: [],
+			notStarted: [],
+			playing: [],
+			finished: [],
+		});
 	});
 });
