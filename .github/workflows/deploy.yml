@@ -560,7 +560,6 @@ jobs:
                   coverage { requestedDays observedDays complete stale }
                   mostSelected { playerId }
                 }
-                liveScores(eventId: 1) { totalPoints }
                 liveSnapshot(eventId: 1) {
                   schemaVersion season eventId state eventLiveCount fixtureCount
                 }
@@ -585,7 +584,6 @@ jobs:
                 data.players.length !== 1 ||
                 data?.marketPulse?.coverage?.requestedDays !== 14 ||
                 !Array.isArray(data?.marketPulse?.mostSelected) ||
-                !Array.isArray(data?.liveScores) ||
                 data?.liveSnapshot?.schemaVersion !== 3 ||
                 data?.liveSnapshot?.season !== "2627" ||
                 data?.liveSnapshot?.eventId !== 1
@@ -598,7 +596,6 @@ jobs:
                 season: data.currentEventInfo.season,
                 playerCount: data.players.length,
                 marketObservedDays: data.marketPulse.coverage.observedDays,
-                liveScoreCount: data.liveScores.length,
                 liveSnapshotState: data.liveSnapshot.state,
                 liveFixtureCount: data.liveSnapshot.fixtureCount,
               }));
