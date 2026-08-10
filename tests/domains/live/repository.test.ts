@@ -344,6 +344,48 @@ describe("liveRepository v3 explanation query cache", () => {
 		expect(result?.contributions?.some((item) => item.identifier === "saves")).toBe(false);
 	});
 
+	it("merges nonduplicate gameweek stats into partial fixture contributions", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 1, minutes: 90, total_points: 16 },
+			],
+			"fpl.player_gameweek_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					minutes: 90,
+					clean_sheets: 1,
+					saves: 3,
+					bonus: 3,
+					total_points: 16,
+				},
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					fixture_id: 101,
+					element_type: 1,
+					minutes: 90,
+				},
+			],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ identifier: "minutes", value: 90, points: 2 }),
+				expect.objectContaining({ identifier: "clean_sheets", value: 1, points: 4 }),
+				expect.objectContaining({ identifier: "saves", value: 3, points: 1 }),
+				expect.objectContaining({ identifier: "bonus", value: 3, points: 3 }),
+			])
+		);
+		expect(result?.contributions?.filter((item) => item.identifier === "minutes")).toHaveLength(1);
+	});
+
 	it("omits defensive-contribution counts when their points are unavailable", async () => {
 		const { context } = liveContext();
 		withReadRows(context, {

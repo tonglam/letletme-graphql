@@ -666,6 +666,21 @@ const mapScoringItemContributions = (
 		});
 	});
 
+const mergeNonDuplicateContributions = (
+	primary: readonly LiveExplainStatContribution[],
+	secondary: readonly LiveExplainStatContribution[]
+): LiveExplainStatContribution[] => {
+	const identifiers = new Set(primary.map((contribution) => contribution.identifier));
+	return [
+		...primary,
+		...secondary.filter((contribution) => {
+			if (identifiers.has(contribution.identifier)) return false;
+			identifiers.add(contribution.identifier);
+			return true;
+		}),
+	];
+};
+
 async function fetchPlayerStatsForLiveExplains(
 	context: GraphQLContext,
 	eventId: number,
@@ -1196,27 +1211,22 @@ const loadColdLiveExplainBatch = async (
 		const stats = mapLiveExplainStats(psRow);
 		const databaseBreakdown = elRow ? mapBreakdownFromEventLiveRow(elRow) : [];
 		const breakdown = databaseBreakdown;
-		let contributions: LiveExplainStatContribution[] = [];
-		if (contributions.length === 0) contributions = breakdown.flatMap((entry) => entry.stats);
-		if (contributions.length === 0) {
-			contributions = mapScoringItemContributions(elRow?.scoring_items ?? []);
-		}
-		if (contributions.length === 0) {
-			contributions = mapFlatLiveExplainContributions(
-				elRow,
-				null,
-				elRow?.fixture_stats?.length ?? null
-			);
-		}
-		if (contributions.length === 0) {
-			const eventStats = eventStatsById.get(elementId) ?? null;
-			const elementType = parseIntegerValue(pickRecordValue(psRow, "element_type", "elementType"));
-			contributions = mapFlatLiveExplainContributions(
-				eventStats,
-				elementType,
-				elRow?.fixture_stats?.length ?? null
-			);
-		}
+		const fixtureContributions = breakdown.flatMap((entry) => entry.stats);
+		const scoringItemContributions = mapScoringItemContributions(elRow?.scoring_items ?? []);
+		let contributions =
+			fixtureContributions.length > 0
+				? fixtureContributions
+				: scoringItemContributions.length > 0
+					? scoringItemContributions
+					: mapFlatLiveExplainContributions(elRow, null, elRow?.fixture_stats?.length ?? null);
+		const eventStats = eventStatsById.get(elementId) ?? null;
+		const elementType = parseIntegerValue(pickRecordValue(psRow, "element_type", "elementType"));
+		const eventStatContributions = mapFlatLiveExplainContributions(
+			eventStats,
+			elementType,
+			elRow?.fixture_stats?.length ?? null
+		);
+		contributions = mergeNonDuplicateContributions(contributions, eventStatContributions);
 
 		const result: LiveExplain = {
 			eventId,
