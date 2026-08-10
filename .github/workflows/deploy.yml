@@ -69,12 +69,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
 
       - name: Checkout manual dispatch ref
         if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Require exact protected main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: >-
+            ${{ github.event_name == 'workflow_run' &&
+                github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
+          test "$TARGET_SHA" = "$main_sha"
+          test "$(git rev-parse HEAD)" = "$main_sha"
+          echo "GRAPHQL_TRUSTED_MAIN_SHA=$main_sha"
 
       - name: Set deployment metadata
         run: |
@@ -192,6 +209,20 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.sha }}
+          persist-credentials: false
+
+      - name: Require exact protected main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
+          test "$TARGET_SHA" = "$main_sha"
+          test "$(git rev-parse HEAD)" = "$main_sha"
+          echo "V3_GRAPHQL_TRUSTED_MAIN_SHA=$main_sha"
 
       - name: Resolve immutable image metadata
         run: |
@@ -359,6 +390,20 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.sha }}
+          persist-credentials: false
+
+      - name: Require exact protected main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
+          test "$TARGET_SHA" = "$main_sha"
+          test "$(git rev-parse HEAD)" = "$main_sha"
+          echo "V3_GRAPHQL_TRUSTED_MAIN_SHA=$main_sha"
 
       - name: Resolve exact candidate commit and image
         env:
@@ -368,6 +413,8 @@ jobs:
           DEPLOY_SHA=$(git rev-parse HEAD)
           [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$V3_IMAGE_REF_INPUT" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+          IMAGE_NAME=$(printf '%s' "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          test "${V3_IMAGE_REF_INPUT%@*}" = "$IMAGE_NAME"
           echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
           echo "IMAGE_REF=$V3_IMAGE_REF_INPUT" >> "$GITHUB_ENV"
           echo "DEPLOY_IMAGE_DIGEST=${V3_IMAGE_REF_INPUT##*@}" >> "$GITHUB_ENV"
@@ -413,6 +460,11 @@ jobs:
             printf '%s' "$V3_RELEASE_MANIFEST_BASE64" | base64 --decode > "$manifest_tmp"
             actual_manifest_sha=$(sha256sum "$manifest_tmp" | awk '{print $1}')
             test "$actual_manifest_sha" = "$V3_RELEASE_MANIFEST_SHA256"
+            test "$(jq -r '.schemaVersion // empty' "$manifest_tmp")" = 'v3'
+            test "$(jq -r '.status // empty' "$manifest_tmp")" = 'approved'
+            test "$(jq -r '.cutoverRunId // empty' "$manifest_tmp")" = "$V3_CUTOVER_RUN_ID"
+            test "$(jq -r '.graphqlSha // empty' "$manifest_tmp")" = "$DEPLOY_SHA"
+            test "$(jq -r '.graphqlImageDigest // empty' "$manifest_tmp")" = "$DEPLOY_IMAGE_DIGEST"
             plan_version=$(jq -r '.planVersion // empty' "$manifest_tmp")
             GATE_MANIFEST_BASE64="$V3_RELEASE_MANIFEST_BASE64"
             GATE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256"

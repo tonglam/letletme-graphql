@@ -32,12 +32,34 @@ function runtimeEnvPython(): string {
 describe("v3 GraphQL production hard-cut workflow", () => {
 	it("keeps the standard deploy environment file private", () => {
 		const deploy = job("deploy", "v3_publish_image");
+		const checkout = deploy.indexOf("actions/checkout@");
+		const trustedMain = deploy.indexOf('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
+		const registryLogin = deploy.indexOf("docker/login-action@");
+		const candidateBuild = deploy.indexOf("docker buildx build");
 		const umask = deploy.indexOf("umask 077");
 		const write = deploy.indexOf(`printf '%s' "$GRAPHQL_ENV" > .env.deploy`);
 		const chmod = deploy.indexOf("chmod 600 .env.deploy");
-		expect(umask).toBeGreaterThan(0);
+		expect(trustedMain).toBeGreaterThan(checkout);
+		expect(registryLogin).toBeGreaterThan(trustedMain);
+		expect(candidateBuild).toBeGreaterThan(registryLogin);
+		expect(umask).toBeGreaterThan(candidateBuild);
 		expect(write).toBeGreaterThan(umask);
 		expect(chmod).toBeGreaterThan(write);
+		expect(deploy).toContain('test "$TARGET_SHA" = "$main_sha"');
+		expect(deploy).toContain('test "$(git rev-parse HEAD)" = "$main_sha"');
+	});
+
+	it("publishes only protected main before registry login or candidate execution", () => {
+		const publish = job("v3_publish_image", "v3_preflight");
+		const checkout = publish.indexOf("actions/checkout@");
+		const trustedMain = publish.indexOf('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
+		const registryLogin = publish.indexOf("docker/login-action@");
+		const candidateBuild = publish.indexOf("docker buildx build");
+
+		expect(trustedMain).toBeGreaterThan(checkout);
+		expect(registryLogin).toBeGreaterThan(trustedMain);
+		expect(candidateBuild).toBeGreaterThan(registryLogin);
+		expect(publish).toContain("persist-credentials: false");
 	});
 
 	it("keeps read-only inspection separate from stop and start", () => {
@@ -69,7 +91,10 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 
 	it("gates the exact image before changing checkout or runtime config", () => {
 		const start = job("v3_start", "v3_status");
+		const trustedMain = start.indexOf('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
 		const dataHealth = start.indexOf("http://127.0.0.1:3000/health");
+		const manifestDigest = start.indexOf("actual_manifest_sha");
+		const trustedManifestImage = start.indexOf(".graphqlImageDigest // empty");
 		const releaseGate = start.indexOf("bun scripts/v3-release-gate.ts");
 		const configBackup = start.indexOf("env.deploy.before-v3");
 		const conflictGuard = start.indexOf("comm -12");
@@ -79,8 +104,12 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		const anonymousAuth = start.indexOf("test \"$anonymous_status\" = '401'");
 		const functionalSmoke = start.indexOf("v3_graphql_http_contract_passed");
 
-		expect(dataHealth).toBeGreaterThan(0);
+		expect(trustedMain).toBeGreaterThan(0);
+		expect(dataHealth).toBeGreaterThan(trustedMain);
+		expect(manifestDigest).toBeGreaterThan(dataHealth);
+		expect(trustedManifestImage).toBeGreaterThan(manifestDigest);
 		expect(releaseGate).toBeGreaterThan(dataHealth);
+		expect(releaseGate).toBeGreaterThan(trustedManifestImage);
 		expect(configBackup).toBeGreaterThan(releaseGate);
 		expect(conflictGuard).toBeGreaterThan(configBackup);
 		expect(reset).toBeGreaterThan(conflictGuard);
@@ -95,6 +124,8 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(start).toContain("X-GraphQL-Service-Token");
 		expect(start).toContain("V3_GRAPHQL_DB_PASSWORD: ${{ secrets.V3_GRAPHQL_DB_PASSWORD }}");
 		expect(start).toContain("actual_manifest_sha");
+		expect(start).toContain(".graphqlSha // empty");
+		expect(start).toContain('test "${V3_IMAGE_REF_INPUT%@*}" = "$IMAGE_NAME"');
 		expect(start).toContain("plan_version");
 		expect(start).toContain("3.2.5-r3");
 		expect(start).toContain("jq '.planVersion = \"3.2.5\"'");
