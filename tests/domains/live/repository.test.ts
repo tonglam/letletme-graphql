@@ -636,4 +636,20 @@ describe("liveRepository v3 explanation query cache", () => {
 		});
 		expect(redis.setCalls.some(([key]) => key.includes(":live-explain:"))).toBe(false);
 	});
+
+	it("caches complete elements when another element is missing its snapshot row", async () => {
+		const { context, redis } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [{ event_id: 1, element_id: 1, minutes: 90, total_points: 6 }],
+			"fpl.player_gameweek_stats": [],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [],
+		});
+
+		const results = await liveRepository.getEventLiveExplains(context, 1, [1, 2]);
+
+		expect(results).toHaveLength(1);
+		expect(results[0]).toMatchObject({ elementId: 1, stats: { minutes: 90, totalPoints: 6 } });
+		expect(redis.setCalls.filter(([key]) => key.includes(":live-explain:")).length).toBe(1);
+	});
 });

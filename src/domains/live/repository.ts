@@ -702,9 +702,11 @@ async function fetchPlayerStatsForLiveExplains(
 ): Promise<{
 	rows: Map<number, DbLiveExplainStats>;
 	eventRows: Map<number, DbLiveExplainStats>;
-	failed: boolean;
+	uncacheableElementIds: Set<number>;
 }> {
-	if (elementIds.length === 0) return { rows: new Map(), eventRows: new Map(), failed: false };
+	if (elementIds.length === 0) {
+		return { rows: new Map(), eventRows: new Map(), uncacheableElementIds: new Set() };
+	}
 	const [snapshotResult, gameweekStatsResult] = await Promise.all([
 		context.data
 			.read("fpl.player_event_snapshots")
@@ -734,6 +736,10 @@ async function fetchPlayerStatsForLiveExplains(
 	}
 	const rows = new Map<number, DbLiveExplainStats>();
 	const eventRows = new Map<number, DbLiveExplainStats>();
+	const uncacheableElementIds = new Set<number>();
+	if (snapshotQueryFailed || gameweekQueryFailed) {
+		for (const elementId of elementIds) uncacheableElementIds.add(elementId);
+	}
 	for (const raw of (snapshotQueryFailed ? [] : (snapshotResult.data ?? [])) as unknown[]) {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
 		const row = raw as DbLiveExplainStats;
@@ -761,11 +767,13 @@ async function fetchPlayerStatsForLiveExplains(
 		}
 		rows.set(elementId, current);
 	}
-	const snapshotRowsMissing = elementIds.some((elementId) => !rows.has(elementId));
+	for (const elementId of elementIds) {
+		if (!rows.has(elementId)) uncacheableElementIds.add(elementId);
+	}
 	return {
 		rows,
 		eventRows,
-		failed: snapshotQueryFailed || gameweekQueryFailed || snapshotRowsMissing,
+		uncacheableElementIds,
 	};
 }
 
@@ -1213,7 +1221,6 @@ const loadColdLiveExplainBatch = async (
 	]);
 	const playerStatsById = playerStatsResult.rows;
 	const eventStatsById = playerStatsResult.eventRows;
-	const playerStatsDatabaseIds = new Set(databaseIds);
 	for (const [elementId, row] of playerStatsById) {
 		selectedByById.set(
 			elementId,
@@ -1229,7 +1236,7 @@ const loadColdLiveExplainBatch = async (
 		const cacheKey = shapedLiveExplainCacheKey(context, eventId, elementId, meta, mode);
 		if (!psRow && !elRow && !eventStats) {
 			resolved.set(elementId, null);
-			if (!playerStatsResult.failed || !playerStatsDatabaseIds.has(elementId)) {
+			if (!playerStatsResult.uncacheableElementIds.has(elementId)) {
 				valuesToCache.set(cacheKey, "__null__");
 			}
 			continue;
@@ -1289,7 +1296,7 @@ const loadColdLiveExplainBatch = async (
 		// A transient event-snapshot failure can still yield useful fixture-level
 		// details. Return that partial response, but do not pin it to this revision;
 		// the next refresh should retry PostgreSQL immediately.
-		if (!playerStatsResult.failed || !playerStatsDatabaseIds.has(elementId)) {
+		if (!playerStatsResult.uncacheableElementIds.has(elementId)) {
 			valuesToCache.set(cacheKey, JSON.stringify(result));
 		}
 	}
