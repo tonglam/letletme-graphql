@@ -157,8 +157,10 @@ const GRAPHQL_INT_MIN = -2_147_483_648;
 const GRAPHQL_INT_MAX = 2_147_483_647;
 
 const parseNullableInt = (raw: unknown): number | null => {
-	if (raw === null || raw === undefined || raw === "") return null;
-	const parsed = Number(raw);
+	if (raw === null || raw === undefined) return null;
+	if (typeof raw !== "number" && typeof raw !== "string") return null;
+	if (typeof raw === "string" && raw.trim().length === 0) return null;
+	const parsed = typeof raw === "string" ? Number(raw.trim()) : raw;
 	return Number.isInteger(parsed) && parsed >= GRAPHQL_INT_MIN && parsed <= GRAPHQL_INT_MAX
 		? parsed
 		: null;
@@ -184,7 +186,7 @@ const parseBooleanFlag = (value: unknown): boolean | null => {
 const parseEventFromRedisJson = (raw: string, expectedId?: number): Event | null => {
 	try {
 		const obj = JSON.parse(raw) as Record<string, unknown>;
-		const id = Number(obj.id ?? 0);
+		const id = parseNullableInt(obj.id) ?? 0;
 		if (!Number.isInteger(id) || id <= 0 || (expectedId !== undefined && id !== expectedId)) {
 			return null;
 		}

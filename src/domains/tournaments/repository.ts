@@ -1336,11 +1336,14 @@ export const tournamentsRepository: TournamentsRepository = {
 			? (pointsByEntryId.get(rankedRows[0].entry_id) ?? null)
 			: null;
 		const myRank = snapshotRow?.tournament_overall_rank ?? null;
-		const myIndex = snapshotRow
-			? rankedRows.findIndex((row) => row.entry_id === snapshotRow.entry_id)
-			: -1;
-		const aboveRow = myIndex > 0 ? rankedRows[myIndex - 1] : undefined;
-		const belowRow = myIndex >= 0 ? rankedRows[myIndex + 1] : undefined;
+		const aboveRow =
+			myRank === null
+				? undefined
+				: rankedRows.find((row) => (row.tournament_overall_rank as number) < myRank);
+		const belowRow =
+			myRank === null
+				? undefined
+				: rankedRows.find((row) => (row.tournament_overall_rank as number) > myRank);
 		const abovePoints = aboveRow ? (pointsByEntryId.get(aboveRow.entry_id) ?? null) : null;
 		const belowPoints = belowRow ? (pointsByEntryId.get(belowRow.entry_id) ?? null) : null;
 

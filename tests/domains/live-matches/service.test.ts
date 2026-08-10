@@ -3,6 +3,7 @@ import {
 	applyLiveFixtureScores,
 	loadLiveFixtureBucketsFromRedis,
 	loadUpcomingEventFixtures,
+	parseLiveFixtureRow,
 	resolveLiveMatchStatus,
 } from "../../../src/domains/live-matches/service";
 import {
@@ -29,6 +30,31 @@ describe("resolveLiveMatchStatus", () => {
 			"PLAYING"
 		);
 		expect(resolveLiveMatchStatus(fixture, new Map(), new Map())).toBe("NOT_STARTED");
+	});
+});
+
+describe("parseLiveFixtureRow cache validation", () => {
+	it("rejects partially numeric IDs and fractional scores", () => {
+		expect(
+			parseLiveFixtureRow({
+				fixtureId: "701junk",
+				teamId: 1,
+				againstId: 2,
+				teamScore: 1,
+				againstTeamScore: 0,
+				wasHome: true,
+			})
+		).toBeNull();
+		expect(
+			parseLiveFixtureRow({
+				fixtureId: 701,
+				teamId: 1,
+				againstId: 2,
+				teamScore: 1.5,
+				againstTeamScore: 0,
+				wasHome: true,
+			})
+		).toBeNull();
 	});
 });
 

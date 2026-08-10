@@ -45,8 +45,11 @@ const GRAPHQL_INT_MAX = 2_147_483_647;
 
 const parseIntOrDefault = (value: unknown, fallback = 0): number | null => {
 	if (value === null || value === undefined) return fallback;
-	if (typeof value !== "number" || !Number.isInteger(value)) return null;
-	return value >= GRAPHQL_INT_MIN && value <= GRAPHQL_INT_MAX ? value : null;
+	if (typeof value !== "number" && typeof value !== "string") return null;
+	if (typeof value === "string" && value.trim().length === 0) return null;
+	const parsed = typeof value === "string" ? Number(value.trim()) : value;
+	if (!Number.isInteger(parsed)) return null;
+	return parsed >= GRAPHQL_INT_MIN && parsed <= GRAPHQL_INT_MAX ? parsed : null;
 };
 
 const parseBoolOrDefault = (value: unknown, fallback = false): boolean | null => {

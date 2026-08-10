@@ -246,9 +246,11 @@ const MARKET_OWNERSHIP_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
 // Keep the GraphQL cursor as an Int for existing clients. New cursors are
 // negative, versioned offsets tied to the active sort; positive cursors retain
 // the legacy player-ID threshold semantics during a rolling deployment.
-const PICKER_CURSOR_VERSION = 1;
-const PICKER_CURSOR_VERSION_STRIDE = 1_000_000;
-const PICKER_CURSOR_SORT_STRIDE = 100_000;
+const PICKER_CURSOR_VERSION = 2;
+const PICKER_CURSOR_VERSION_STRIDE = 200_000_000;
+const PICKER_CURSOR_SORT_STRIDE = 20_000_000;
+const PICKER_CURSOR_LEGACY_STRIDE = 4_096;
+const PICKER_CURSOR_OFFSET_STRIDE = 4_096;
 const PICKER_SORT_CODES: Record<PlayerPickerSort, number> = {
 	NAME_ASC: 1,
 	TOTAL_POINTS_DESC: 2,
@@ -258,10 +260,15 @@ const PICKER_SORT_CODES: Record<PlayerPickerSort, number> = {
 	OWNERSHIP_DESC: 6,
 };
 
-const encodePickerCursor = (sort: PlayerPickerSort, offset: number): number =>
+const encodePickerCursor = (
+	sort: PlayerPickerSort,
+	offset: number,
+	legacyId: number | null
+): number =>
 	-(
 		PICKER_CURSOR_VERSION * PICKER_CURSOR_VERSION_STRIDE +
 		PICKER_SORT_CODES[sort] * PICKER_CURSOR_SORT_STRIDE +
+		(legacyId ?? 0) * PICKER_CURSOR_LEGACY_STRIDE +
 		offset +
 		1
 	);
@@ -274,12 +281,30 @@ const decodePickerCursor = (
 	if (cursor > 0) return { offset: 0, legacyId: cursor };
 	const encoded = -cursor - 1;
 	const version = Math.floor(encoded / PICKER_CURSOR_VERSION_STRIDE);
-	const sortCode = Math.floor((encoded % PICKER_CURSOR_VERSION_STRIDE) / PICKER_CURSOR_SORT_STRIDE);
-	const offset = encoded % PICKER_CURSOR_SORT_STRIDE;
-	if (version !== PICKER_CURSOR_VERSION || sortCode !== PICKER_SORT_CODES[sort] || offset < 0) {
+	if (version === PICKER_CURSOR_VERSION) {
+		const remainder = encoded % PICKER_CURSOR_VERSION_STRIDE;
+		const sortCode = Math.floor(remainder / PICKER_CURSOR_SORT_STRIDE);
+		const payload = remainder % PICKER_CURSOR_SORT_STRIDE;
+		const legacyId = Math.floor(payload / PICKER_CURSOR_LEGACY_STRIDE);
+		const offset = payload % PICKER_CURSOR_OFFSET_STRIDE;
+		if (
+			sortCode !== PICKER_SORT_CODES[sort] ||
+			legacyId < 0 ||
+			offset < 0 ||
+			(legacyId > 0 && !Number.isSafeInteger(legacyId))
+		) {
+			return { offset: 0, legacyId: null };
+		}
+		return { offset, legacyId: legacyId === 0 ? null : legacyId };
+	}
+	// Accept the previous offset-only cursor format during a rolling deployment.
+	const legacyVersion = Math.floor(encoded / 1_000_000);
+	const legacySortCode = Math.floor((encoded % 1_000_000) / 100_000);
+	const legacyOffset = encoded % 100_000;
+	if (legacyVersion !== 1 || legacySortCode !== PICKER_SORT_CODES[sort] || legacyOffset < 0) {
 		return { offset: 0, legacyId: null };
 	}
-	return { offset, legacyId: null };
+	return { offset: legacyOffset, legacyId: null };
 };
 
 export type PlayerPickerTeam = {
@@ -989,7 +1014,9 @@ export const playersRepository: PlayersRepository = {
 		const returnedItems = sortedItems.slice(decodedCursor.offset, decodedCursor.offset + safeLimit);
 		const nextOffset = decodedCursor.offset + returnedItems.length;
 		const nextCursor =
-			nextOffset < sortedItems.length ? encodePickerCursor(sort, nextOffset) : null;
+			nextOffset < sortedItems.length
+				? encodePickerCursor(sort, nextOffset, decodedCursor.legacyId)
+				: null;
 		const payload: PlayersForPickerPayload = { items: returnedItems, nextCursor };
 
 		try {

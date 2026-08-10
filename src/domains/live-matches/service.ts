@@ -104,10 +104,38 @@ const asNumber = (value: unknown): number | null => {
 		return value;
 	}
 	if (typeof value === "string") {
-		const parsed = Number.parseFloat(value);
+		const trimmed = value.trim();
+		if (trimmed.length === 0) return null;
+		const parsed = Number(trimmed);
 		return Number.isFinite(parsed) ? parsed : null;
 	}
 	return null;
+};
+
+const pickField = (
+	row: Record<string, unknown>,
+	keys: string[]
+): { present: boolean; value: unknown } => {
+	for (const key of keys) {
+		if (Object.hasOwn(row, key)) return { present: true, value: row[key] };
+	}
+	return { present: false, value: undefined };
+};
+
+const parseOptionalInt = (
+	field: { present: boolean; value: unknown },
+	defaultValue: number
+): { value: number; valid: boolean } => {
+	if (!field.present || field.value === null) return { value: defaultValue, valid: true };
+	const value = asNumber(field.value);
+	return {
+		value: value ?? defaultValue,
+		valid:
+			value !== null &&
+			Number.isInteger(value) &&
+			value >= -2_147_483_648 &&
+			value <= 2_147_483_647,
+	};
 };
 
 const asBoolean = (value: unknown): boolean | null => {
@@ -161,14 +189,14 @@ const normalizeLiveFixtureStatus = (rawStatus: string): MatchBucketStatus | null
 	return null;
 };
 
-const parseLiveFixtureRow = (value: unknown): LiveFixtureRedisRow | null => {
+export const parseLiveFixtureRow = (value: unknown): LiveFixtureRedisRow | null => {
 	const row = asRecord(value);
 	if (!row) {
 		return null;
 	}
 
-	const teamId = asNumber(row.teamId ?? row.team_id);
-	const againstId = asNumber(row.againstId ?? row.against_id);
+	const teamId = asNumber(pickField(row, ["teamId", "team_id"]).value);
+	const againstId = asNumber(pickField(row, ["againstId", "against_id"]).value);
 	if (
 		teamId === null ||
 		againstId === null ||
@@ -180,23 +208,37 @@ const parseLiveFixtureRow = (value: unknown): LiveFixtureRedisRow | null => {
 		return null;
 	}
 
-	const fixtureId = asNumber(row.fixtureId ?? row.fixture_id ?? row.fixture ?? row.id);
+	const fixtureField = pickField(row, ["fixtureId", "fixture_id", "fixture", "id"]);
+	const fixtureId = asNumber(fixtureField.value);
+	if (fixtureField.present && fixtureField.value !== null && fixtureId === null) {
+		return null;
+	}
 	if (fixtureId !== null && (!Number.isInteger(fixtureId) || fixtureId <= 0)) {
 		return null;
 	}
 
+	const teamScore = parseOptionalInt(pickField(row, ["teamScore", "team_score"]), 0);
+	const againstTeamScore = parseOptionalInt(
+		pickField(row, ["againstTeamScore", "against_team_score"]),
+		0
+	);
+	if (!teamScore.valid || !againstTeamScore.valid) return null;
+	const wasHomeField = pickField(row, ["wasHome", "was_home"]);
+	const wasHome = asBoolean(wasHomeField.value);
+	if (wasHomeField.present && wasHomeField.value !== null && wasHome === null) return null;
+
 	return {
-		fixtureId: fixtureId === null ? null : Math.trunc(fixtureId),
-		teamId: Math.trunc(teamId),
+		fixtureId: fixtureId === null ? null : fixtureId,
+		teamId,
 		teamName: asString(row.teamName ?? row.team_name) ?? "",
 		teamShortName: asString(row.teamShortName ?? row.team_short_name) ?? "",
-		teamScore: Math.trunc(asNumber(row.teamScore ?? row.team_score) ?? 0),
-		againstId: Math.trunc(againstId),
+		teamScore: teamScore.value,
+		againstId: againstId,
 		againstName: asString(row.againstName ?? row.against_name) ?? "",
 		againstShortName: asString(row.againstShortName ?? row.against_short_name) ?? "",
-		againstTeamScore: Math.trunc(asNumber(row.againstTeamScore ?? row.against_team_score) ?? 0),
+		againstTeamScore: againstTeamScore.value,
 		kickoffTime: asString(row.kickoffTime ?? row.kickoff_time),
-		wasHome: asBoolean(row.wasHome ?? row.was_home) ?? false,
+		wasHome: wasHome ?? false,
 	};
 };
 
