@@ -1,6 +1,6 @@
 import type { PlayerStateTrend } from "./types";
 
-export const PLAYER_STATE_RELEASE_EVIDENCE = {
+export const PLAYER_STATE_TREND_EVIDENCE = {
 	evaluatedAt: "2026-08-09",
 	mode: "fpl-only",
 	seasons: ["1617", "1718", "1819", "1920", "2021", "2122", "2223", "2324", "2425", "2526"],
@@ -10,13 +10,13 @@ export const PLAYER_STATE_RELEASE_EVIDENCE = {
 		STABLE: 13.87,
 		FALLING: 11.92,
 	},
-	released: false,
+	directionalTrendAccepted: false,
 	reason: "FPL_WALK_FORWARD_ORDERING_FAILED",
 } as const;
 
 const directionalTrends = new Set<PlayerStateTrend>(["RISING", "STABLE", "FALLING"]);
 
-export function applyPlayerStateReleaseGate(
+export function applyPlayerStateEvidencePolicy(
 	candidate: PlayerStateTrend,
 	processAvailable: boolean
 ): { trend: PlayerStateTrend; withheld: boolean; reasonCode: string | null } {
@@ -32,7 +32,7 @@ export function applyPlayerStateReleaseGate(
 			reasonCode: "TREND_WITHHELD_CROSS_PROVIDER_BACKTEST",
 		};
 	}
-	if (!PLAYER_STATE_RELEASE_EVIDENCE.released) {
+	if (!PLAYER_STATE_TREND_EVIDENCE.directionalTrendAccepted) {
 		return {
 			trend: "UNKNOWN",
 			withheld: true,
