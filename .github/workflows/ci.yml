@@ -164,6 +164,35 @@ jobs:
           bun run db:apply-sql
           bun run db:migrate:status
 
+      - name: Create exact Web auth reader fixture
+        env:
+          DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: |
+          psql "$DATA_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE SCHEMA IF NOT EXISTS bauth;
+          CREATE TABLE bauth."user" (
+            id text PRIMARY KEY,
+            email text,
+            fpl_entry_id integer,
+            fpl_entry_verified_at timestamptz
+          );
+          CREATE TABLE bauth.mini_program_session (
+            id text PRIMARY KEY,
+            user_id text NOT NULL,
+            token_hash text NOT NULL,
+            revoked_at timestamptz,
+            expires_at timestamptz NOT NULL,
+            device_id text
+          );
+          REVOKE ALL ON SCHEMA bauth FROM PUBLIC;
+          REVOKE ALL ON ALL TABLES IN SCHEMA bauth FROM PUBLIC;
+          GRANT USAGE ON SCHEMA bauth TO letletme_graphql_reader;
+          GRANT SELECT (id, fpl_entry_id, fpl_entry_verified_at)
+            ON bauth."user" TO letletme_graphql_reader;
+          GRANT SELECT (user_id, token_hash, revoked_at, expires_at)
+            ON bauth.mini_program_session TO letletme_graphql_reader;
+          SQL
+
       - name: Create disposable read-only GraphQL login
         env:
           DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
