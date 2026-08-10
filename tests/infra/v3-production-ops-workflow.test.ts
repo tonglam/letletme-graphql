@@ -176,6 +176,7 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		const anonymousAuth = redeploy.indexOf("test \"$anonymous_status\" = '401'");
 		const functionalSmoke = redeploy.indexOf("v3_graphql_redeploy_contract_passed");
 		const imageReadback = redeploy.indexOf("{{.Config.Image}}");
+		const dockerHealthPoll = redeploy.indexOf("graphql_health=$(docker inspect");
 		const retention = redeploy.indexOf("KEEP_FILE=.deployed-graphql-images");
 		const prune = redeploy.indexOf('docker image rm "$old_tag"');
 
@@ -193,7 +194,8 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(anonymousAuth).toBeGreaterThan(start);
 		expect(functionalSmoke).toBeGreaterThan(anonymousAuth);
 		expect(imageReadback).toBeGreaterThan(functionalSmoke);
-		expect(retention).toBeGreaterThan(imageReadback);
+		expect(dockerHealthPoll).toBeGreaterThan(imageReadback);
+		expect(retention).toBeGreaterThan(dockerHealthPoll);
 		expect(prune).toBeGreaterThan(retention);
 		expect(redeploy).toContain("currentEventInfo { season currentEvent nextEvent }");
 		expect(redeploy).toContain("players(limit: 1)");
@@ -201,6 +203,8 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(redeploy).toContain("query LiveSmoke($eventId: Int!)");
 		expect(redeploy).toContain("liveSnapshot(eventId: $eventId)");
 		expect(redeploy).toContain('ROLLBACK_TAG=""');
+		expect(redeploy).toContain("for attempt in $(seq 1 20)");
+		expect(redeploy).toContain("GraphQL Docker health did not settle");
 		expect(redeploy).toContain("kept < 3");
 		expect(redeploy).toContain('"$IMAGE_NAME":v3-*');
 		expect(redeploy.match(/http:\/\/127\.0\.0\.1:4000\/health/g)).toHaveLength(1);

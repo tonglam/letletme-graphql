@@ -905,7 +905,18 @@ jobs:
             graphql_cid=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q graphql)
             test -n "$graphql_cid"
             test "$(docker inspect --format '{{.Config.Image}}' "$graphql_cid")" = "$IMAGE_REF"
-            test "$(docker inspect --format '{{.State.Health.Status}}' "$graphql_cid")" = 'healthy'
+            for attempt in $(seq 1 20); do
+              graphql_health=$(docker inspect --format '{{.State.Health.Status}}' "$graphql_cid")
+              if [ "$graphql_health" = 'healthy' ]; then
+                break
+              fi
+              if [ "$attempt" -eq 20 ]; then
+                echo "GraphQL Docker health did not settle: $graphql_health"
+                APP_IMAGE="$IMAGE_REF" docker compose logs --tail 100 graphql || true
+                exit 1
+              fi
+              sleep 3
+            done
 
             KEEP_FILE=.deployed-graphql-images
             keep_tmp=$(mktemp)
