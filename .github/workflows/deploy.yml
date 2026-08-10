@@ -461,8 +461,29 @@ jobs:
               "$IMAGE_REF" bun scripts/v3-release-gate.ts
             config_backup_dir="$(dirname "$VPS_WORKDIR")/v3-cutover/$V3_CUTOVER_RUN_ID/graphql"
             install -d -m 700 "$config_backup_dir"
-            install -m 600 .env.deploy "$config_backup_dir/env.deploy.before-v3"
-            sha256sum "$config_backup_dir/env.deploy.before-v3" > "$config_backup_dir/env.deploy.before-v3.sha256"
+            config_backup="$config_backup_dir/env.deploy.before-v3"
+            config_backup_checksum="$config_backup.sha256"
+            if [ -e "$config_backup" ] || [ -e "$config_backup_checksum" ]; then
+              test -f "$config_backup" && test -f "$config_backup_checksum" || {
+                echo "Incomplete original GraphQL environment backup"; exit 1;
+              }
+              expected_config_sha=$(awk 'NR == 1 { print $1 }' "$config_backup_checksum")
+              actual_config_sha=$(sha256sum "$config_backup" | awk '{ print $1 }')
+              [[ "$expected_config_sha" =~ ^[0-9a-f]{64}$ ]]
+              test "$actual_config_sha" = "$expected_config_sha"
+              echo "Reusing verified original GraphQL environment backup"
+            else
+              config_backup_tmp=$(mktemp "$config_backup_dir/env.deploy.before-v3.XXXXXX")
+              config_checksum_tmp=$(mktemp "$config_backup_dir/env.deploy.before-v3.sha256.XXXXXX")
+              install -m 600 .env.deploy "$config_backup_tmp"
+              config_sha=$(sha256sum "$config_backup_tmp" | awk '{ print $1 }')
+              printf '%s  %s\n' "$config_sha" "$config_backup" > "$config_checksum_tmp"
+              chmod 600 "$config_checksum_tmp"
+              # Hard links publish both files without ever replacing an earlier backup.
+              ln "$config_backup_tmp" "$config_backup"
+              ln "$config_checksum_tmp" "$config_backup_checksum"
+              rm -f "$config_backup_tmp" "$config_checksum_tmp"
+            fi
             git fetch --all
             untracked_file=$(mktemp)
             target_file=$(mktemp)
@@ -731,14 +752,14 @@ jobs:
               "$EXPECTED_TAG" | grep -Fx "$IMAGE_REF"
             docker pull "$IMAGE_REF"
 
-            docker compose stop -t 30 graphql
-            test -z "$(docker compose ps -q graphql)"
             git checkout --force main
             git reset --hard "$EXPECTED_SHA"
             test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
             APP_IMAGE="$IMAGE_REF" docker compose pull graphql
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run contract:check
+            docker compose stop -t 30 graphql
+            test -z "$(docker compose ps -q graphql)"
             APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build graphql
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then

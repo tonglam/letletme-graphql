@@ -226,6 +226,7 @@ describe("playersRepository.getPlayersForPicker", () => {
 			"NAME_ASC"
 		);
 		expect(resumedByThreshold.items[0]).toMatchObject({ id: 2, webName: "Alpha Player" });
+		expect(resumedByThreshold.totalCount).toBe(result.totalCount);
 	});
 });
 

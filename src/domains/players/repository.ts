@@ -613,7 +613,7 @@ export const playersRepository: PlayersRepository = {
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
 		const cacheKey = gqlCacheKey(
 			context,
-			`players:picker:v9:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`
+			`players:picker:v10:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`
 		);
 
 		const cached = await readJsonCache(
@@ -648,8 +648,7 @@ export const playersRepository: PlayersRepository = {
 			getCoreDataSnapshot(context),
 			buildTeamMap(context),
 		]);
-		const candidates = snapshot.players
-			.filter((player) => decodedCursor.legacyId === null || player.id > decodedCursor.legacyId)
+		const filteredPlayers = snapshot.players
 			.filter(
 				(player) => !safeSearch || player.webName.toLowerCase().includes(safeSearch.toLowerCase())
 			)
@@ -667,6 +666,9 @@ export const playersRepository: PlayersRepository = {
 					safeFilter.maxPrice === null ||
 					player.price <= safeFilter.maxPrice
 			);
+		const candidates = filteredPlayers.filter(
+			(player) => decodedCursor.legacyId === null || player.id > decodedCursor.legacyId
+		);
 		const allRows: DbPickerRow[] = candidates.map((player) => ({
 			id: player.id,
 			web_name: player.webName,
@@ -710,7 +712,10 @@ export const playersRepository: PlayersRepository = {
 		const payload: PlayersForPickerPayload = {
 			items: returnedItems,
 			nextCursor,
-			totalCount: sortedItems.length,
+			// Positive cursors are a rolling-deployment compatibility path. Keep
+			// the directory count independent from that page threshold, matching
+			// the stable count returned by the versioned offset cursors.
+			totalCount: filteredPlayers.length,
 		};
 
 		await writeQueryCache(

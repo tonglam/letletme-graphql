@@ -106,6 +106,8 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		const trustedManifestImage = start.indexOf(".graphqlImageDigest // empty");
 		const releaseGate = start.indexOf("bun scripts/v3-release-gate.ts");
 		const configBackup = start.indexOf("env.deploy.before-v3");
+		const existingBackupGuard = start.indexOf('[ -e "$config_backup" ]');
+		const atomicBackupPublish = start.indexOf('ln "$config_backup_tmp" "$config_backup"');
 		const conflictGuard = start.indexOf("comm -12");
 		const reset = start.indexOf("git reset --hard");
 		const contract = start.indexOf("bun run contract:check");
@@ -120,6 +122,8 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(releaseGate).toBeGreaterThan(dataHealth);
 		expect(releaseGate).toBeGreaterThan(trustedManifestImage);
 		expect(configBackup).toBeGreaterThan(releaseGate);
+		expect(existingBackupGuard).toBeGreaterThan(configBackup);
+		expect(atomicBackupPublish).toBeGreaterThan(existingBackupGuard);
 		expect(conflictGuard).toBeGreaterThan(configBackup);
 		expect(reset).toBeGreaterThan(conflictGuard);
 		expect(contract).toBeGreaterThan(reset);
@@ -142,6 +146,9 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(start).toContain('V3_RELEASE_MANIFEST_BASE64="$GATE_MANIFEST_BASE64"');
 		expect(start).toContain('V3_RELEASE_MANIFEST_SHA256="$GATE_MANIFEST_SHA256"');
 		expect(start).not.toContain("GRAPHQL_ENV");
+		expect(start).not.toContain(
+			'install -m 600 .env.deploy "$config_backup_dir/env.deploy.before-v3"'
+		);
 		expect(start).not.toContain("git clean");
 	});
 
@@ -167,10 +174,10 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(exactRemote).toBeGreaterThan(dataHealth);
 		expect(expectedTag).toBeGreaterThan(exactRemote);
 		expect(digestBinding).toBeGreaterThan(expectedTag);
-		expect(stop).toBeGreaterThan(digestBinding);
-		expect(reset).toBeGreaterThan(stop);
+		expect(reset).toBeGreaterThan(digestBinding);
 		expect(contract).toBeGreaterThan(reset);
-		expect(start).toBeGreaterThan(contract);
+		expect(stop).toBeGreaterThan(contract);
+		expect(start).toBeGreaterThan(stop);
 		expect(anonymousAuth).toBeGreaterThan(start);
 		expect(functionalSmoke).toBeGreaterThan(anonymousAuth);
 		expect(imageReadback).toBeGreaterThan(functionalSmoke);
