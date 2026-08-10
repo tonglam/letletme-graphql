@@ -532,16 +532,11 @@ const FLAT_LIVE_EXPLAIN_STATS = [
  * Position-weighted events (goals, clean sheets) are estimated only when the
  * snapshot supplies element type; otherwise the contribution is omitted.
  */
-const POSITION_WEIGHTED_LIVE_EXPLAIN_STATS = new Set([
-	"goals_scored",
-	"clean_sheets",
-	"goals_conceded",
-]);
-
 const estimateFplPointsFromValue = (
 	identifier: string,
 	value: number,
-	elementType: number | null = null
+	elementType: number | null = null,
+	fixtureCount: number | null = null
 ): number | null => {
 	if (!Number.isFinite(value) || value === 0) return 0;
 	switch (identifier) {
@@ -568,7 +563,12 @@ const estimateFplPointsFromValue = (
 		case "assists":
 			return value * 3;
 		case "saves":
-			return Math.floor(value / 3);
+			// Save points are awarded per fixture. An event aggregate cannot be
+			// scored safely without exactly one fixture boundary.
+			return fixtureCount === 1 ? Math.floor(value / 3) : null;
+		case "defensive_contribution":
+			// The event projection exposes the count but not the thresholded points.
+			return null;
 		case "yellow_cards":
 			return value * -1;
 		case "red_cards":
@@ -586,7 +586,8 @@ const estimateFplPointsFromValue = (
 
 const mapFlatLiveExplainContributions = (
 	row: Record<string, unknown> | null,
-	elementType: number | null = null
+	elementType: number | null = null,
+	fixtureCount: number | null = null
 ): LiveExplainStatContribution[] => {
 	if (!row) return [];
 	const contributions: LiveExplainStatContribution[] = [];
@@ -595,16 +596,15 @@ const mapFlatLiveExplainContributions = (
 		const rawPoints = parseIntegerValue(pickRecordValue(row, ...definition.points));
 		if ((value ?? 0) === 0 && (rawPoints ?? 0) === 0) continue;
 		let points = rawPoints ?? 0;
-		if (points === 0 && value !== null && value !== 0) {
-			const estimated = estimateFplPointsFromValue(definition.identifier, value, elementType);
-			if (
-				estimated === null &&
-				((definition.identifier === "minutes" && value > 90) ||
-					(POSITION_WEIGHTED_LIVE_EXPLAIN_STATS.has(definition.identifier) && elementType === null))
-			) {
-				continue;
-			}
-			if (estimated !== null) points = estimated;
+		if (rawPoints === null && value !== null && value !== 0) {
+			const estimated = estimateFplPointsFromValue(
+				definition.identifier,
+				value,
+				elementType,
+				fixtureCount
+			);
+			if (estimated === null) continue;
+			points = estimated;
 		}
 		contributions.push({
 			identifier: definition.identifier,
@@ -1200,11 +1200,21 @@ const loadColdLiveExplainBatch = async (
 		if (contributions.length === 0) {
 			contributions = mapScoringItemContributions(elRow?.scoring_items ?? []);
 		}
-		if (contributions.length === 0) contributions = mapFlatLiveExplainContributions(elRow);
+		if (contributions.length === 0) {
+			contributions = mapFlatLiveExplainContributions(
+				elRow,
+				null,
+				elRow?.fixture_stats?.length ?? null
+			);
+		}
 		if (contributions.length === 0) {
 			const eventStats = eventStatsById.get(elementId) ?? null;
 			const elementType = parseIntegerValue(pickRecordValue(psRow, "element_type", "elementType"));
-			contributions = mapFlatLiveExplainContributions(eventStats, elementType);
+			contributions = mapFlatLiveExplainContributions(
+				eventStats,
+				elementType,
+				elRow?.fixture_stats?.length ?? null
+			);
 		}
 
 		const result: LiveExplain = {

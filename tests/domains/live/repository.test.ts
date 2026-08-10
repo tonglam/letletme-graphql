@@ -283,6 +283,53 @@ describe("liveRepository v3 explanation query cache", () => {
 		expect(result?.contributions?.some((item) => item.identifier === "minutes")).toBe(false);
 	});
 
+	it("does not estimate saves across fixture boundaries", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 1, minutes: 180, total_points: 42 },
+			],
+			"fpl.player_gameweek_stats": [
+				{ event_id: 1, element_id: 2, minutes: 180, saves: 4, total_points: 4 },
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [
+				{ event_id: 1, element_id: 2, fixture_id: 101, element_type: 1, minutes: 90, saves: 2 },
+				{ event_id: 1, element_id: 2, fixture_id: 102, element_type: 1, minutes: 90, saves: 2 },
+			],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(result?.contributions?.some((item) => item.identifier === "saves")).toBe(false);
+	});
+
+	it("omits defensive-contribution counts when their points are unavailable", async () => {
+		const { context } = liveContext();
+		withReadRows(context, {
+			"fpl.player_event_snapshots": [
+				{ event_id: 1, element_id: 2, element_type: 3, minutes: 90, total_points: 12 },
+			],
+			"fpl.player_gameweek_stats": [
+				{
+					event_id: 1,
+					element_id: 2,
+					minutes: 90,
+					defensive_contribution: 10,
+					total_points: 12,
+				},
+			],
+			"fpl.player_gameweek_scoring_items": [],
+			"fpl.player_fixture_stats": [],
+		});
+
+		const [result] = await liveRepository.getEventLiveExplains(context, 1, [2]);
+
+		expect(
+			result?.contributions?.some((item) => item.identifier === "defensive_contribution")
+		).toBe(false);
+	});
+
 	it("loads a fifteen-player explanation batch with two bounded reporting reads", async () => {
 		const { context } = liveContext();
 		const elementIds = Array.from({ length: 15 }, (_, index) => index + 1);
