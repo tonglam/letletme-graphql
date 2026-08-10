@@ -537,6 +537,66 @@ jobs:
               sleep 2
             done
             curl --fail --silent http://127.0.0.1:3000/health >/dev/null
+            anonymous_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              --header 'Content-Type: application/json' \
+              --data '{"query":"query { currentEventInfo { season } }"}' \
+              http://127.0.0.1:4000/graphql)
+            test "$anonymous_status" = '401'
+            APP_IMAGE="$IMAGE_REF" docker compose exec -T graphql bun -e '
+              const token = process.env.GRAPHQL_SERVICE_TOKEN;
+              if (!token) throw new Error("Missing GRAPHQL_SERVICE_TOKEN");
+              const query = `query ProductionSmoke {
+                me { id }
+                currentEventInfo { season currentEvent nextEvent }
+                players(limit: 1) { id webName price }
+                marketPulse(days: 14) {
+                  coverage { requestedDays observedDays complete stale }
+                  mostSelected { playerId }
+                }
+                liveScores(eventId: 1) { totalPoints }
+                liveSnapshot(eventId: 1) {
+                  schemaVersion season eventId state eventLiveCount fixtureCount
+                }
+              }`;
+              const response = await fetch("http://127.0.0.1:4000/graphql", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-GraphQL-Service-Token": token,
+                },
+                body: JSON.stringify({ query }),
+              });
+              const payload = await response.json();
+              if (response.status !== 200 || payload.errors) {
+                throw new Error("GraphQL production smoke failed: " + JSON.stringify(payload.errors));
+              }
+              const data = payload.data;
+              if (
+                data?.me !== null ||
+                data?.currentEventInfo?.season !== "2627" ||
+                !Array.isArray(data?.players) ||
+                data.players.length !== 1 ||
+                data?.marketPulse?.coverage?.requestedDays !== 14 ||
+                !Array.isArray(data?.marketPulse?.mostSelected) ||
+                !Array.isArray(data?.liveScores) ||
+                data?.liveSnapshot?.schemaVersion !== 3 ||
+                data?.liveSnapshot?.season !== "2627" ||
+                data?.liveSnapshot?.eventId !== 1
+              ) {
+                throw new Error("GraphQL production smoke payload contract failed");
+              }
+              console.log(JSON.stringify({
+                status: "v3_graphql_http_contract_passed",
+                auth: "service-token-accepted-anonymous-user-null",
+                season: data.currentEventInfo.season,
+                playerCount: data.players.length,
+                marketObservedDays: data.marketPulse.coverage.observedDays,
+                liveScoreCount: data.liveScores.length,
+                liveSnapshotState: data.liveSnapshot.state,
+                liveFixtureCount: data.liveSnapshot.fixtureCount,
+              }));
+            '
+            echo 'V3_GRAPHQL_ANONYMOUS_STATUS=401'
             state_tmp=$(mktemp "$config_backup_dir/activation-state.XXXXXX")
             {
               printf 'run_id=%s\n' "$V3_CUTOVER_RUN_ID"

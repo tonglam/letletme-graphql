@@ -76,6 +76,8 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		const reset = start.indexOf("git reset --hard");
 		const contract = start.indexOf("bun run contract:check");
 		const serviceStart = start.indexOf("docker compose up -d --no-deps --no-build graphql");
+		const anonymousAuth = start.indexOf("test \"$anonymous_status\" = '401'");
+		const functionalSmoke = start.indexOf("v3_graphql_http_contract_passed");
 
 		expect(dataHealth).toBeGreaterThan(0);
 		expect(releaseGate).toBeGreaterThan(dataHealth);
@@ -84,6 +86,13 @@ describe("v3 GraphQL production hard-cut workflow", () => {
 		expect(reset).toBeGreaterThan(conflictGuard);
 		expect(contract).toBeGreaterThan(reset);
 		expect(serviceStart).toBeGreaterThan(contract);
+		expect(anonymousAuth).toBeGreaterThan(serviceStart);
+		expect(functionalSmoke).toBeGreaterThan(anonymousAuth);
+		expect(start).toContain("currentEventInfo { season currentEvent nextEvent }");
+		expect(start).toContain("players(limit: 1)");
+		expect(start).toContain("marketPulse(days: 14)");
+		expect(start).toContain("liveSnapshot(eventId: 1)");
+		expect(start).toContain("X-GraphQL-Service-Token");
 		expect(start).toContain("V3_GRAPHQL_DB_PASSWORD: ${{ secrets.V3_GRAPHQL_DB_PASSWORD }}");
 		expect(start).toContain("actual_manifest_sha");
 		expect(start).toContain("plan_version");
