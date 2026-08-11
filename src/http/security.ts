@@ -75,19 +75,86 @@ export const readRequestBody = async (
 };
 
 const RATE_LIMIT_SCRIPT = `
-local existed = redis.call('EXISTS', KEYS[1])
-local count = redis.call('INCRBY', KEYS[1], ARGV[2])
-local ttl = redis.call('TTL', KEYS[1])
-if existed == 0 or ttl < 0 then
-  redis.call('EXPIRE', KEYS[1], ARGV[1])
+local results = {}
+local offset = 1
+for index, key in ipairs(KEYS) do
+  local window = ARGV[offset]
+  local cost = ARGV[offset + 1]
+  local existed = redis.call('EXISTS', key)
+  local count = redis.call('INCRBY', key, cost)
+  local ttl = redis.call('TTL', key)
+  if existed == 0 or ttl < 0 then
+    redis.call('EXPIRE', key, window)
+  end
+  ttl = redis.call('TTL', key)
+  table.insert(results, count)
+  table.insert(results, ttl)
+  offset = offset + 2
 end
-ttl = redis.call('TTL', KEYS[1])
-return {count, ttl}
+return results
 `;
 
 export type RateLimitResult = {
 	allowed: boolean;
 	retryAfterSeconds: number;
+};
+
+export type RateLimitCheck = {
+	scope: string;
+	key: string;
+	limit: number;
+	windowSeconds: number;
+	cost?: number;
+};
+
+export type RateLimitBatchResult = RateLimitResult & {
+	deniedScope?: string;
+};
+
+export const checkRateLimits = async (
+	redis: Redis,
+	checks: readonly RateLimitCheck[]
+): Promise<RateLimitBatchResult> => {
+	if (checks.length === 0) {
+		throw new Error("At least one rate-limit check is required");
+	}
+
+	for (const check of checks) {
+		const cost = check.cost ?? 1;
+		if (!Number.isInteger(cost) || cost < 1) {
+			throw new Error("Rate-limit cost must be a positive integer");
+		}
+		if (!Number.isInteger(check.limit) || check.limit < 1) {
+			throw new Error("Rate-limit limit must be a positive integer");
+		}
+		if (!Number.isInteger(check.windowSeconds) || check.windowSeconds < 1) {
+			throw new Error("Rate-limit window must be a positive integer");
+		}
+	}
+
+	const result = (await redis.eval(
+		RATE_LIMIT_SCRIPT,
+		checks.length,
+		...checks.map((check) => check.key),
+		...checks.flatMap((check) => [String(check.windowSeconds), String(check.cost ?? 1)])
+	)) as number[];
+
+	const decisions = checks.map((check, index) => {
+		const count = Number(result[index * 2]);
+		const ttl = Number(result[index * 2 + 1]);
+		return {
+			scope: check.scope,
+			allowed: count <= check.limit,
+			retryAfterSeconds: Number.isFinite(ttl) && ttl >= 0 ? Math.max(1, ttl) : check.windowSeconds,
+		};
+	});
+	const denied = decisions.filter((decision) => !decision.allowed);
+	return {
+		allowed: denied.length === 0,
+		retryAfterSeconds:
+			denied.length > 0 ? Math.max(...denied.map((decision) => decision.retryAfterSeconds)) : 0,
+		...(denied[0] ? { deniedScope: denied[0].scope } : {}),
+	};
 };
 
 export const checkRateLimit = async (
@@ -97,21 +164,10 @@ export const checkRateLimit = async (
 	windowSeconds: number,
 	cost = 1
 ): Promise<RateLimitResult> => {
-	if (!Number.isInteger(cost) || cost < 1) {
-		throw new Error("Rate-limit cost must be a positive integer");
-	}
-	const result = (await redis.eval(
-		RATE_LIMIT_SCRIPT,
-		1,
-		key,
-		String(windowSeconds),
-		String(cost)
-	)) as [number, number];
-	const [count, ttl] = result;
-	return {
-		allowed: count <= limit,
-		retryAfterSeconds: ttl >= 0 ? Math.max(1, ttl) : windowSeconds,
-	};
+	const { allowed, retryAfterSeconds } = await checkRateLimits(redis, [
+		{ scope: key, key, limit, windowSeconds, cost },
+	]);
+	return { allowed, retryAfterSeconds };
 };
 
 export const rateLimitKey = (scope: string, ip: string): string => {
