@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { fixturesResolvers } from "../../../src/domains/fixtures/resolvers";
 import { fixturesRepository } from "../../../src/domains/fixtures/repository";
 import {
 	buildCorePublication,
-	buildLivePublication,
 	buildSnapshotContext,
 	buildTestCoreData,
 	TestRedis,
@@ -24,41 +24,23 @@ describe("fixturesRepository over canonical snapshots", () => {
 		);
 	});
 
-	it("reads current-event fixture state from the one pinned live revision", async () => {
+	it("reads the event schedule from the pinned core revision without a live publication", async () => {
 		const core = buildTestCoreData(1);
-		const liveFixtures = core.fixtures
-			.filter((fixture) => fixture.eventId === 1)
-			.map((fixture, index) =>
-				index === 0
-					? {
-							...fixture,
-							started: true,
-							minutes: 34,
-							teamHScore: 2,
-							teamAScore: 1,
-						}
-					: fixture
-			);
-		const redis = new TestRedis(
-			buildCorePublication("2627", 7, core),
-			buildLivePublication(core, 1, "2627", 8, {
-				fixtures: liveFixtures,
-				state: "live",
-			})
-		);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
 		const context = buildSnapshotContext(redis);
 
 		const explicit = await fixturesRepository.getEventFixtures(context, 1);
 		const current = await fixturesRepository.getCurrentFixtures(context);
+		const resolved = await fixturesResolvers.Query.eventFixtures(
+			undefined,
+			{ eventId: 1 },
+			context
+		);
 
 		expect(explicit).toEqual(current);
+		expect(resolved).toEqual(explicit);
 		expect(explicit).toHaveLength(10);
-		expect(explicit[0]).toMatchObject({
-			started: true,
-			minutes: 34,
-			teamHScore: 2,
-			teamAScore: 1,
-		});
+		expect(explicit.every((fixture) => fixture.eventId === 1)).toBe(true);
 	});
 
 	it("returns an empty list for invalid event IDs without reading Redis", async () => {
