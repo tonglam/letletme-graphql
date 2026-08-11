@@ -114,7 +114,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tonglam/letletme_data
-          ref: bcb16cb877b509c7aed1f8ae097cfb8002315418
+          ref: 1845de6405a5ce7d77eebc58035765d97eee5b14
           path: data-platform
           persist-credentials: false
 
