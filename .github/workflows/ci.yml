@@ -156,8 +156,9 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: >-
+          ledger_boundary=$(ls migrations/0079_*.sql | sort | head -n 1)
           bun scripts/apply-sql-migrations.ts
-          --through 0079_create_v3_ops_and_roles.sql
+          --through ${ledger_boundary#*/}
 
       - name: Install the historical GraphQL ledger fixture
         working-directory: data-platform
@@ -175,8 +176,9 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: >-
+          publication_boundary=$(ls migrations/0089_*.sql | sort | head -n 1)
           bun scripts/apply-sql-migrations.ts
-          --through 0089_prepare_v3_publications.sql
+          --through ${publication_boundary#*/}
 
       - name: Install the optional public-league source fixture
         working-directory: data-platform
@@ -194,8 +196,9 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: >-
+          cutover_boundary=$(ls migrations/0090_*.sql | sort | tail -n 1)
           bun scripts/apply-sql-migrations.ts
-          --through 0090_zzzz_integrate_understat_runtime.sql
+          --through ${cutover_boundary#*/}
 
       - name: Apply the historical cutover tail fixture
         working-directory: data-platform
