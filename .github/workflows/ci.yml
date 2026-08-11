@@ -110,11 +110,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Checkout accepted Data Platform contract
+      - name: Checkout current Data Platform contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tonglam/letletme_data
-          ref: 9713eb18670c67cda5d37c2afa1ac2f30d55e078
+          ref: 2c4691c5112d8bf3133264f999cb5bf50644a91e
           path: data-platform
           persist-credentials: false
 
@@ -125,11 +125,11 @@ jobs:
       - name: Install GraphQL dependencies
         run: bun install --frozen-lockfile
 
-      - name: Install accepted Data Platform dependencies
+      - name: Install current Data Platform dependencies
         working-directory: data-platform
         run: bun install --frozen-lockfile
 
-      - name: Apply accepted Data Platform Drizzle baseline
+      - name: Apply current Data Platform baseline
         working-directory: data-platform
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
@@ -151,73 +151,12 @@ jobs:
           AS $fn$ SELECT current_setting('request.jwt.claim.role', true) $fn$;
           SQL
 
-      - name: Apply SQL migrations through the GraphQL ledger boundary
-        working-directory: data-platform
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
-        run: >-
-          ledger_boundary=$(ls migrations/0079_*.sql | sort | head -n 1)
-          bun scripts/apply-sql-migrations.ts
-          --through ${ledger_boundary#*/}
-
-      - name: Install the historical GraphQL ledger fixture
-        working-directory: data-platform
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
-        run: >-
-          bun -e 'import postgres from "postgres";
-          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-          const ddl = await Bun.file("tests/fixtures/graphql-migration-ledger.sql").text();
-          await sql.unsafe(ddl);
-          await sql.end();'
-
-      - name: Apply SQL migrations through the production import boundary
-        working-directory: data-platform
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
-        run: >-
-          publication_boundary=$(ls migrations/0089_*.sql | sort | head -n 1)
-          bun scripts/apply-sql-migrations.ts
-          --through ${publication_boundary#*/}
-
-      - name: Install the optional public-league source fixture
-        working-directory: data-platform
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
-        run: >-
-          bun -e 'import postgres from "postgres";
-          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-          const ddl = await Bun.file("tests/fixtures/public-league-trends-catalog.sql").text();
-          await sql.unsafe(ddl);
-          await sql.end();'
-
-      - name: Apply SQL migrations through the historical cutover boundary
-        working-directory: data-platform
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
-        run: >-
-          cutover_boundary=$(ls migrations/0090_*.sql | sort | tail -n 1)
-          bun scripts/apply-sql-migrations.ts
-          --through ${cutover_boundary#*/}
-
-      - name: Apply the historical cutover tail fixture
-        working-directory: data-platform
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
-        run: bun tests/helpers/apply-historical-cutover-tail.ts
-
-      - name: Apply canonical SQL migrations
-        working-directory: data-platform
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
-        run: bun run db:apply-sql
-
-      - name: Verify SQL migrations are idempotent and complete
+      - name: Verify current Data Platform migration is repeatable
         working-directory: data-platform
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: |
-          bun run db:apply-sql
+          bun run db:migrate
           bun run db:migrate:status
 
       - name: Install canonical core publication contract fixture
@@ -225,70 +164,64 @@ jobs:
           DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: |
           psql "$DATA_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
-          WITH current_publication AS (
-            SELECT
-              publication.publication_id,
-              publication.revision,
-              publication.season_id,
-              season.season_code,
-              coalesce(
-                publication.activated_at,
-                publication.created_at
-              ) AS published_at
-            FROM ops.dataset_publications publication
-            JOIN fpl.seasons season ON season.season_id = publication.season_id
-            WHERE publication.dataset = 'fpl:core'
-              AND publication.event_id IS NULL
-              AND publication.status = 'active'
-              AND season.is_current
-          ), item_names(name, ordinal) AS (
-            VALUES
-              ('events', 1),
-              ('teams', 2),
-              ('players', 3),
-              ('phases', 4),
-              ('fixtures', 5),
-              ('currentEventId', 6)
-          ), canonical_manifest AS (
-            SELECT
-              publication.publication_id,
-              jsonb_build_object(
-                'dataset', 'fpl:core',
-                'seasonCode', publication.season_code,
-                'eventId', NULL,
-                'revision', publication.revision,
-                'publicationId', publication.publication_id::text,
-                'sourceCheckedAt', publication.published_at,
-                'publishedAt', publication.published_at,
-                'state', 'active',
-                'items', jsonb_agg(
-                  jsonb_build_object(
-                    'name', item.name,
-                    'key', format(
-                      'llm:data:fpl:core:%s:%s:%s',
-                      publication.season_code,
-                      publication.revision,
-                      item.name
-                    ),
-                    'type', 'string',
-                    'count', 0,
-                    'bytes', 2,
-                    'sha256', repeat('0', 64)
-                  ) ORDER BY item.ordinal
-                )
-              ) AS manifest
-            FROM current_publication publication
-            CROSS JOIN item_names item
-            GROUP BY
-              publication.publication_id,
-              publication.revision,
-              publication.season_code,
-              publication.published_at
+          INSERT INTO fpl.seasons (
+            season_id,
+            season_code,
+            display_name,
+            start_year,
+            end_year,
+            lifecycle_state,
+            is_current
+          ) VALUES (
+            2026,
+            '2627',
+            '2026/27',
+            2026,
+            2027,
+            'preseason',
+            TRUE
           )
-          UPDATE ops.dataset_publications publication
-          SET manifest = fixture.manifest, updated_at = now()
-          FROM canonical_manifest fixture
-          WHERE publication.publication_id = fixture.publication_id;
+          ON CONFLICT (season_id) DO UPDATE
+          SET is_current = TRUE, lifecycle_state = 'preseason', updated_at = now();
+
+          INSERT INTO ops.dataset_publications (
+            publication_id,
+            dataset,
+            season_id,
+            event_id,
+            revision,
+            status,
+            manifest,
+            activated_at
+          ) VALUES (
+            '00000000-0000-4000-8000-000000000007',
+            'fpl:core',
+            2026,
+            NULL,
+            7,
+            'active',
+            jsonb_build_object(
+              'dataset', 'fpl:core',
+              'seasonCode', '2627',
+              'eventId', NULL,
+              'revision', 7,
+              'publicationId', '00000000-0000-4000-8000-000000000007',
+              'sourceCheckedAt', '2026-08-10T00:00:00.000Z',
+              'publishedAt', '2026-08-10T00:00:01.000Z',
+              'state', 'active',
+              'items', jsonb_build_array(
+                jsonb_build_object('name', 'events', 'key', 'llm:data:fpl:core:2627:7:events', 'type', 'string', 'count', 0, 'bytes', 2, 'sha256', repeat('0', 64)),
+                jsonb_build_object('name', 'teams', 'key', 'llm:data:fpl:core:2627:7:teams', 'type', 'string', 'count', 0, 'bytes', 2, 'sha256', repeat('0', 64)),
+                jsonb_build_object('name', 'players', 'key', 'llm:data:fpl:core:2627:7:players', 'type', 'string', 'count', 0, 'bytes', 2, 'sha256', repeat('0', 64)),
+                jsonb_build_object('name', 'phases', 'key', 'llm:data:fpl:core:2627:7:phases', 'type', 'string', 'count', 0, 'bytes', 2, 'sha256', repeat('0', 64)),
+                jsonb_build_object('name', 'fixtures', 'key', 'llm:data:fpl:core:2627:7:fixtures', 'type', 'string', 'count', 0, 'bytes', 2, 'sha256', repeat('0', 64)),
+                jsonb_build_object('name', 'currentEventId', 'key', 'llm:data:fpl:core:2627:7:currentEventId', 'type', 'string', 'count', 0, 'bytes', 2, 'sha256', repeat('0', 64))
+              )
+            ),
+            now()
+          )
+          ON CONFLICT (publication_id) DO UPDATE
+          SET status = 'active', manifest = EXCLUDED.manifest, activated_at = now(), updated_at = now();
 
           DO $$
           BEGIN
@@ -306,6 +239,15 @@ jobs:
             END IF;
           END
           $$;
+          SQL
+
+      - name: Refresh canonical reporting models
+        env:
+          DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: |
+          psql "$DATA_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries;
+          REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats;
           SQL
 
       - name: Create exact Web auth reader fixture
