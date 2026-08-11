@@ -84,7 +84,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: true
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,GRAPHQL_RUNTIME_DB_PASSWORD
           script: |
             set -euo pipefail
