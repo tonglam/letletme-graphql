@@ -122,6 +122,10 @@ jobs:
 
             umask 077
             next_env=$(mktemp "$VPS_WORKDIR/.env.deploy.next.XXXXXX")
+            cleanup_env() {
+              rm -f "$next_env"
+            }
+            trap cleanup_env EXIT
             printf '%s' "$GRAPHQL_ENV" > "$next_env"
             chmod 600 "$next_env"
             V3_GRAPHQL_DB_PASSWORD="$V3_GRAPHQL_DB_PASSWORD" python3 - "$next_env" <<'PY'
@@ -175,11 +179,6 @@ jobs:
               test -n "$old_image"
               docker image inspect "$old_image" >/dev/null
             fi
-
-            cleanup_env() {
-              rm -f "$next_env"
-            }
-            trap cleanup_env EXIT
 
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose pull graphql
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
