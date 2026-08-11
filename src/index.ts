@@ -1,4 +1,11 @@
-import { ApolloServer, HeaderMap } from "@apollo/server";
+import {
+	ApolloServer,
+	HeaderMap,
+	type GraphQLRequestExecutionListener,
+	type GraphQLRequestListener,
+	type GraphQLRequestListenerParsingDidEnd,
+	type GraphQLRequestListenerValidationDidEnd,
+} from "@apollo/server";
 import { timingSafeEqual } from "crypto";
 import depthLimit from "graphql-depth-limit";
 import { authorizeGraphQLRequest, graphQLErrorResponse } from "./graphql/authorization";
@@ -33,6 +40,11 @@ import {
 	graphQLWeightedRateLimitSubject,
 	shouldPrechargeResolvedPrincipal,
 } from "./http/graphql-policy";
+import {
+	extractGraphQLOperationName,
+	RequestTiming,
+	resolveRequestId,
+} from "./http/request-timing";
 
 const GRAPHQL_RATE_LIMIT = 120;
 const GRAPHQL_SERVICE_RATE_LIMIT = 600;
@@ -55,7 +67,7 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
 		Vary: "Origin",
 		"Access-Control-Allow-Methods": "POST, OPTIONS",
 		"Access-Control-Allow-Headers":
-			"Content-Type, Authorization, X-User-Context, X-User-Context-Sig, X-Ingress-Context, X-Ingress-Context-Sig",
+			"Content-Type, Authorization, X-Request-Id, X-User-Context, X-User-Context-Sig, X-Ingress-Context, X-Ingress-Context-Sig",
 		"Access-Control-Max-Age": "86400",
 	};
 
@@ -205,6 +217,38 @@ const startServer = async (): Promise<void> => {
 		schema,
 		introspection: !env.isProduction,
 		validationRules: [depthLimit(10)],
+		plugins: [
+			{
+				async requestDidStart(): Promise<GraphQLRequestListener<GraphQLContext>> {
+					return {
+						async parsingDidStart(requestContext): Promise<GraphQLRequestListenerParsingDidEnd> {
+							const stop = requestContext.contextValue.requestTiming?.start("apolloParse");
+							return async (): Promise<void> => {
+								stop?.();
+							};
+						},
+						async validationDidStart(
+							requestContext
+						): Promise<GraphQLRequestListenerValidationDidEnd> {
+							const stop = requestContext.contextValue.requestTiming?.start("apolloValidate");
+							return async (): Promise<void> => {
+								stop?.();
+							};
+						},
+						async executionDidStart(
+							requestContext
+						): Promise<GraphQLRequestExecutionListener<GraphQLContext>> {
+							const stop = requestContext.contextValue.requestTiming?.start("apolloExecute");
+							return {
+								async executionDidEnd(): Promise<void> {
+									stop?.();
+								},
+							};
+						},
+					};
+				},
+			},
+		],
 	});
 
 	await apollo.start();
@@ -249,6 +293,9 @@ const startServer = async (): Promise<void> => {
 
 			if (url.pathname === "/graphql") {
 				const start = performance.now();
+				const requestTiming = new RequestTiming();
+				const requestId = resolveRequestId(request.headers.get("X-Request-Id"));
+				let operationName = "anonymous";
 
 				try {
 					const methodFailure = graphQLMethodFailure(request.method);
@@ -262,15 +309,19 @@ const startServer = async (): Promise<void> => {
 						);
 					}
 
-					const globalAdmissionFailure = await enforceGraphQLRateLimit({
-						scope: "graphql-global-admission",
-						subject: GRAPHQL_GLOBAL_ADMISSION_SUBJECT,
-						limit: GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
-						corsHeaders,
-					});
+					const globalAdmissionFailure = await requestTiming.measure("globalAdmission", () =>
+						enforceGraphQLRateLimit({
+							scope: "graphql-global-admission",
+							subject: GRAPHQL_GLOBAL_ADMISSION_SUBJECT,
+							limit: GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
+							corsHeaders,
+						})
+					);
 					if (globalAdmissionFailure) return globalAdmissionFailure;
 
-					const ingress = classifyGraphQLIngress(request.headers);
+					const ingress = requestTiming.measureSync("ingressClassification", () =>
+						classifyGraphQLIngress(request.headers)
+					);
 					metrics.graphqlIngressRequests.labels(ingress.class).inc();
 					const ingressFailure = graphQLIngressFailure(ingress);
 					if (ingressFailure) {
@@ -288,25 +339,32 @@ const startServer = async (): Promise<void> => {
 					});
 
 					let weightedRatePrecharged = false;
-					if (admissionSubjects.ingress) {
-						const ingressAdmissionFailure = await enforceGraphQLRateLimit({
-							scope: admissionSubjects.prechargesWeightedBudget
-								? "graphql-preauthorization"
-								: "graphql-ingress-admission",
-							keyScope: admissionSubjects.prechargesWeightedBudget ? "graphql" : undefined,
-							subject: admissionSubjects.ingress,
-							limit: ingress.class === "service" ? GRAPHQL_SERVICE_RATE_LIMIT : GRAPHQL_RATE_LIMIT,
-							corsHeaders,
-						});
+					const ingressAdmissionSubject = admissionSubjects.ingress;
+					if (ingressAdmissionSubject) {
+						const ingressAdmissionFailure = await requestTiming.measure("ingressAdmission", () =>
+							enforceGraphQLRateLimit({
+								scope: admissionSubjects.prechargesWeightedBudget
+									? "graphql-preauthorization"
+									: "graphql-ingress-admission",
+								keyScope: admissionSubjects.prechargesWeightedBudget ? "graphql" : undefined,
+								subject: ingressAdmissionSubject,
+								limit:
+									ingress.class === "service" ? GRAPHQL_SERVICE_RATE_LIMIT : GRAPHQL_RATE_LIMIT,
+								corsHeaders,
+							})
+						);
 						if (ingressAdmissionFailure) return ingressAdmissionFailure;
 						weightedRatePrecharged = admissionSubjects.prechargesWeightedBudget;
 					}
 
-					const body = await readRequestBody(request);
+					const body = await requestTiming.measure("bodyRead", () => readRequestBody(request));
 					let parsedBody: unknown = undefined;
 					if (body) {
 						try {
-							parsedBody = JSON.parse(body);
+							parsedBody = requestTiming.measureSync(
+								"jsonParse",
+								() => JSON.parse(body) as unknown
+							);
 						} catch {
 							return new Response(JSON.stringify({ errors: [{ message: "Invalid JSON" }] }), {
 								status: 400,
@@ -317,13 +375,18 @@ const startServer = async (): Promise<void> => {
 							});
 						}
 					}
+					operationName = extractGraphQLOperationName(parsedBody);
 
-					const limits = validateGraphQLRequestLimits(parsedBody, schema);
+					const limits = requestTiming.measureSync("requestLimits", () =>
+						validateGraphQLRequestLimits(parsedBody, schema)
+					);
 					if (!limits.ok) {
 						return jsonError(400, limits.code, limits.message, corsHeaders);
 					}
 
-					const { principal, user } = await resolvePrincipalAndUser(request);
+					const { principal, user } = await requestTiming.measure("principal", () =>
+						resolvePrincipalAndUser(request)
+					);
 					const hasBearer = /^bearer\s+\S+$/i.test(request.headers.get("Authorization") ?? "");
 					const hasUserContext =
 						request.headers.has("X-User-Context") || request.headers.has("X-User-Context-Sig");
@@ -337,7 +400,9 @@ const startServer = async (): Promise<void> => {
 					}
 					let currentSeason;
 					try {
-						currentSeason = await currentSeasonProvider.get();
+						currentSeason = await requestTiming.measure("season", () =>
+							currentSeasonProvider.get()
+						);
 					} catch (error) {
 						logger.error({ err: error }, "Current season authority is unavailable");
 						return jsonError(
@@ -356,23 +421,29 @@ const startServer = async (): Promise<void> => {
 						? GRAPHQL_SERVICE_RATE_LIMIT
 						: GRAPHQL_RATE_LIMIT;
 					if (shouldPrechargeResolvedPrincipal(principal, weightedRatePrecharged)) {
-						const principalAdmissionFailure = await enforceGraphQLRateLimit({
-							scope: "graphql-preauthorization",
-							keyScope: "graphql",
-							subject: rateLimitSubject,
-							limit: rateLimit,
-							corsHeaders,
-						});
+						const principalAdmissionFailure = await requestTiming.measure(
+							"principalAdmission",
+							() =>
+								enforceGraphQLRateLimit({
+									scope: "graphql-preauthorization",
+									keyScope: "graphql",
+									subject: rateLimitSubject,
+									limit: rateLimit,
+									corsHeaders,
+								})
+						);
 						if (principalAdmissionFailure) return principalAdmissionFailure;
 						weightedRatePrecharged = true;
 					}
-					const authorization = await authorizeGraphQLRequest({
-						body: parsedBody,
-						searchParams: url.searchParams,
-						principal,
-						data,
-						logger,
-					});
+					const authorization = await requestTiming.measure("authorization", () =>
+						authorizeGraphQLRequest({
+							body: parsedBody,
+							searchParams: url.searchParams,
+							principal,
+							data,
+							logger,
+						})
+					);
 					if (!authorization.ok) {
 						return graphQLErrorResponse(authorization, corsHeaders);
 					}
@@ -383,12 +454,16 @@ const startServer = async (): Promise<void> => {
 						currentSeason,
 						redis: getRedis(),
 						logger,
+						requestId,
+						operationName,
+						requestTiming,
+						requestScope: {},
 						principal: principal ?? undefined,
 						user: user ?? undefined,
 					};
 					try {
-						graphQLContext.dataRevision = coreDatasetRevision(
-							await getCoreDataSnapshot(graphQLContext)
+						graphQLContext.dataRevision = await requestTiming.measure("publication", async () =>
+							coreDatasetRevision(await getCoreDataSnapshot(graphQLContext))
 						);
 					} catch (error) {
 						logger.error({ err: error }, "Data publication authority is unavailable");
@@ -403,13 +478,15 @@ const startServer = async (): Promise<void> => {
 					const remainingWeightedCost =
 						limits.rateLimitCostUnits - (weightedRatePrecharged ? 1 : 0);
 					if (remainingWeightedCost > 0) {
-						const weightedRateFailure = await enforceGraphQLRateLimit({
-							scope: "graphql",
-							subject: rateLimitSubject,
-							limit: rateLimit,
-							cost: remainingWeightedCost,
-							corsHeaders,
-						});
+						const weightedRateFailure = await requestTiming.measure("weightedAdmission", () =>
+							enforceGraphQLRateLimit({
+								scope: "graphql",
+								subject: rateLimitSubject,
+								limit: rateLimit,
+								cost: remainingWeightedCost,
+								corsHeaders,
+							})
+						);
 						if (weightedRateFailure) return weightedRateFailure;
 					}
 
@@ -418,17 +495,20 @@ const startServer = async (): Promise<void> => {
 						headers.set(key, value);
 					});
 
-					const httpGraphQLResponse = await apollo.executeHTTPGraphQLRequest({
-						httpGraphQLRequest: {
-							method: request.method.toUpperCase(),
-							headers,
-							body: parsedBody,
-							search: "",
-						},
-						context: async () => graphQLContext,
-					});
+					const httpGraphQLResponse = await requestTiming.measure("apollo", () =>
+						apollo.executeHTTPGraphQLRequest({
+							httpGraphQLRequest: {
+								method: request.method.toUpperCase(),
+								headers,
+								body: parsedBody,
+								search: "",
+							},
+							context: async () => graphQLContext,
+						})
+					);
 
 					const durationMs = performance.now() - start;
+					const stopResponseBuild = requestTiming.start("responseBuild");
 
 					const responseHeaders: Record<string, string> = {};
 					for (const [key, value] of httpGraphQLResponse.headers) {
@@ -453,12 +533,14 @@ const startServer = async (): Promise<void> => {
 					const finalHeaders = {
 						...responseHeaders,
 						...corsHeaders,
+						"X-Request-Id": requestId,
 					};
 
 					const response = new Response(responseBody, {
 						status: httpGraphQLResponse.status || 200,
 						headers: finalHeaders,
 					});
+					stopResponseBuild();
 
 					metrics.httpRequestDurationSeconds
 						.labels(request.method, url.pathname, String(response.status))
@@ -466,12 +548,16 @@ const startServer = async (): Promise<void> => {
 
 					logger.info(
 						{
+							requestId,
+							operationName,
+							ingressClass: ingress.class,
 							method: request.method,
 							path: url.pathname,
 							status: response.status,
 							durationMs: Number(durationMs.toFixed(2)),
+							timings: requestTiming.snapshot(),
 						},
-						"request"
+						"GraphQL request timing"
 					);
 
 					return response;
@@ -479,7 +565,16 @@ const startServer = async (): Promise<void> => {
 					if (error instanceof PayloadTooLargeError) {
 						return jsonError(413, error.code, error.message, corsHeaders);
 					}
-					logger.error({ err: error }, "GraphQL request failed");
+					logger.error(
+						{
+							err: error,
+							requestId,
+							operationName,
+							durationMs: Number(requestTiming.elapsedMs().toFixed(2)),
+							timings: requestTiming.snapshot(),
+						},
+						"GraphQL request failed"
+					);
 					return new Response(
 						JSON.stringify({
 							errors: [{ message: "Internal server error" }],

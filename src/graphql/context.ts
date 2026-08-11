@@ -6,6 +6,7 @@ import type { QueryExecutor } from "../infra/database";
 import type { CurrentSeason } from "../infra/season";
 import type { ReadModelClient } from "../infra/read-model-client";
 import type { Player } from "../domains/players/repository";
+import type { RequestTiming } from "../http/request-timing";
 
 export type GraphQLContext = {
 	data: ReadModelClient;
@@ -15,6 +16,16 @@ export type GraphQLContext = {
 	dataRevision?: string;
 	redis: Redis;
 	logger: Logger;
+	/** Opaque request correlation identifier; never derived from user identity. */
+	requestId?: string;
+	/** Named GraphQL operation only; variables and query text are never logged. */
+	operationName?: string;
+	/** Request-local low-cardinality stage timings. */
+	requestTiming?: RequestTiming;
+	/** Stable identity shared by Apollo's shallow context clone for request-local memoization. */
+	requestScope?: object;
+	/** Whether the latest Core snapshot lookup reused the request-pinned promise. */
+	coreSnapshotMemoStatus?: "hit" | "miss";
 	principal?: Principal;
 	user?: AuthUser; // Authenticated Web or Mini Program user
 	/** Set by batched queries (e.g. `liveScores`) so `LivePerformance.player` avoids per-row fetches. */

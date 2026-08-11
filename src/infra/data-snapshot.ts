@@ -194,7 +194,7 @@ export type LiveDataSnapshot = Readonly<{
 	liveBonus: LiveBonusByTeam;
 }>;
 
-const coreSnapshotMemo = new WeakMap<GraphQLContext, Promise<CoreDataSnapshot>>();
+const coreSnapshotMemo = new WeakMap<object, Promise<CoreDataSnapshot>>();
 const liveSnapshotMemo = new WeakMap<GraphQLContext, Map<number, Promise<LiveDataSnapshot>>>();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -1458,8 +1458,13 @@ const loadLiveSnapshotFromPostgres = async (
 };
 
 export const getCoreDataSnapshot = (context: GraphQLContext): Promise<CoreDataSnapshot> => {
-	const existing = coreSnapshotMemo.get(context);
-	if (existing) return existing;
+	const requestScope = context.requestScope ?? context;
+	const existing = coreSnapshotMemo.get(requestScope);
+	if (existing) {
+		context.coreSnapshotMemoStatus = "hit";
+		return existing;
+	}
+	context.coreSnapshotMemoStatus = "miss";
 	const load = (async (): Promise<CoreDataSnapshot> => {
 		const publication = await readDataPublication(
 			context.redis,
@@ -1474,7 +1479,7 @@ export const getCoreDataSnapshot = (context: GraphQLContext): Promise<CoreDataSn
 		);
 		return loadCoreSnapshotFromPostgres(context);
 	})();
-	coreSnapshotMemo.set(context, load);
+	coreSnapshotMemo.set(requestScope, load);
 	return load;
 };
 
