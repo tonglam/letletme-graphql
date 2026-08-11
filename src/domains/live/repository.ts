@@ -1107,7 +1107,6 @@ const fetchLivePerformanceFromDbByEventsAndPlayerIds = async (
 	return (data as unknown as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
 };
 const LIVE_EXPLAIN_CACHE_TTL_SEC = 10;
-const LIVE_EXPLAIN_CACHE_SHAPE = "shape2";
 const LIVE_EXPLAIN_SINGLEFLIGHT_BATCH_SIZE = 100;
 
 const shapedLiveExplainCacheKey = (
@@ -1120,11 +1119,7 @@ const shapedLiveExplainCacheKey = (
 	const revision = meta
 		? liveDatasetRevision(context.dataRevision!, eventId, meta.revision)
 		: context.dataRevision;
-	return gqlCacheKey(
-		context,
-		`live:explain:${LIVE_EXPLAIN_CACHE_SHAPE}:${eventId}:${elementId}:${mode}`,
-		revision
-	);
+	return gqlCacheKey(context, `live:explain:${eventId}:${elementId}:${mode}`, revision);
 };
 
 type LiveExplainBatchLoad = {
