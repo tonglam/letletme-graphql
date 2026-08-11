@@ -45,7 +45,7 @@ const liveContext = (eventLives = buildTestEventLives(buildTestCoreData(1), 1)) 
 	return { core, redis, context: buildSnapshotContext(redis) };
 };
 
-describe("liveRepository v3 live publication reads", () => {
+describe("liveRepository live publication reads", () => {
 	it("returns empty results for invalid event IDs", async () => {
 		const { context } = liveContext();
 		await expect(liveRepository.getAllLivePerformances(context, 0)).resolves.toEqual(new Map());
@@ -130,7 +130,7 @@ describe("liveRepository v3 live publication reads", () => {
 	});
 });
 
-describe("liveRepository v3 explanation query cache", () => {
+describe("liveRepository explanation query cache", () => {
 	it("loads one cold batch from reporting facts and caches it under core+live revision", async () => {
 		const { context, redis } = liveContext();
 		const calls: string[] = [];
@@ -213,7 +213,7 @@ describe("liveRepository v3 explanation query cache", () => {
 			"fpl.player_fixture_stats",
 		]);
 		const queryCacheWrite = redis.setCalls.find(([key]) => key.includes(":live-explain:"));
-		expect(queryCacheWrite?.[0]).toContain("llm:v3:gql:v3:core-7.live-1-8:");
+		expect(queryCacheWrite?.[0]).toContain("llm:gql:core-7.live-1-8:");
 		expect(queryCacheWrite?.slice(-2)).toEqual(["EX", 10]);
 	});
 

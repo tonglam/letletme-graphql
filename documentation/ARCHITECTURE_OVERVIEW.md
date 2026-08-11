@@ -2,7 +2,7 @@
 
 ```text
 letletme-web  -- signed identity/session --> letletme-graphql
-letletme_data -- PostgreSQL v3 + Redis ----> letletme-graphql --> Web/clients
+letletme_data -- PostgreSQL + Redis -------> letletme-graphql --> Web/clients
 ```
 
 `letletme_data` is the only writer of `fpl`, `competition`, `reporting`,
@@ -12,17 +12,17 @@ authorization, and its Redis query-cache namespace.
 
 ## Request path
 
-1. Startup validates the v3 catalog, one current season, active Data
+1. Startup validates the canonical catalog, one current season, active Data
    publication, and read-only runtime ACLs using `SELECT` only.
 2. Bun receives `/graphql`, `/health`, or `/metrics`.
 3. Request size, shape, complexity, batch size, ingress, and Redis-backed rate
    limits are checked before resolver work.
-4. Web envelopes or Web-issued Mini Program sessions resolve a principal;
-   deadline-gated legacy tokens are validation-only.
+4. A verified Web ingress plus an optional Web user context or Mini Program
+   session resolves a principal. Public Web reads use the service token.
 5. Protected entry, league, tournament, and calculation fields require the
    verified entry contract.
-6. G1 repositories read schema-qualified v3 PostgreSQL models. G2 adds the
-   typed, revision-coherent Data Redis reader and revision-keyed GraphQL cache.
+6. Repositories read schema-qualified PostgreSQL models and use validated,
+   revision-coherent Data publications plus revision-keyed query caches.
 
 ## Reliability boundaries
 

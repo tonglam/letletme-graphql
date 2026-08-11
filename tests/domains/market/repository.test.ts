@@ -67,7 +67,7 @@ const buildContext = (cacheSeed?: string) => {
 		data: {},
 	} as never;
 	if (cacheSeed !== undefined) {
-		strings.set(gqlCacheKey(context, "market-pulse:v4:14"), cacheSeed);
+		strings.set(gqlCacheKey(context, "market-pulse:14"), cacheSeed);
 	}
 	return {
 		strings,

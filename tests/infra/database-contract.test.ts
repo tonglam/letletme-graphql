@@ -1,26 +1,18 @@
 import { describe, expect, it } from "bun:test";
 import type { QueryExecutor } from "../../src/infra/database";
-import {
-	DatabaseContractError,
-	isLegacyAuthValidationRequired,
-	validateDatabaseContract,
-} from "../../src/infra/database-contract";
+import { DatabaseContractError, validateDatabaseContract } from "../../src/infra/database-contract";
 
 type ContractOptions = Readonly<{
 	missingRelation?: string;
 	writableRelation?: string;
 	writableRelations?: readonly string[];
 	probeFailure?: boolean;
-	authSchemaPresent?: boolean;
-	authUserPresent?: boolean;
-	authMiniProgramSessionPresent?: boolean;
 	authMissingRelation?: string;
 	authTableReadable?: string;
 	authMissingColumn?: string;
 	authExtraReadableColumn?: string;
 	authWritableColumn?: string;
-	schemaVersion?: string;
-	planVersion?: string;
+	invalidManifest?: boolean;
 	publicationId?: string;
 	serverVersionNum?: number;
 	unsafeRole?: boolean;
@@ -31,6 +23,28 @@ type ContractOptions = Readonly<{
 	unsafeCapability?: boolean;
 	inheritedRoles?: readonly string[];
 }>;
+
+const CORE_ITEM_NAMES = ["events", "teams", "players", "phases", "fixtures", "currentEventId"];
+
+const makeCoreManifest = (invalid = false): Record<string, unknown> => ({
+	dataset: "fpl:core",
+	seasonCode: "2627",
+	eventId: null,
+	revision: 7,
+	publicationId: "00000000-0000-4000-8000-000000000007",
+	sourceCheckedAt: "2026-08-10T00:00:00.000Z",
+	publishedAt: "2026-08-10T00:00:01.000Z",
+	state: "active",
+	items: CORE_ITEM_NAMES.map((name) => ({
+		name,
+		key: `llm:data:fpl:core:2627:7:${name}`,
+		type: "string",
+		count: 0,
+		bytes: 2,
+		sha256: "0".repeat(64),
+	})),
+	...(invalid ? { unexpectedField: true } : {}),
+});
 
 const makeContractExecutor = (
 	options: ContractOptions = {}
@@ -97,19 +111,6 @@ const makeContractExecutor = (
 						has_create: false,
 					})),
 					rowCount: schemas.length,
-				} as never;
-			}
-			if (text.includes("nspname = 'bauth'")) {
-				return {
-					rows: [
-						{
-							schema_exists: options.authSchemaPresent ?? false,
-							user_exists: options.authUserPresent ?? options.authSchemaPresent ?? false,
-							mini_program_session_exists:
-								options.authMiniProgramSessionPresent ?? options.authSchemaPresent ?? false,
-						},
-					],
-					rowCount: 1,
 				} as never;
 			}
 			if (
@@ -182,15 +183,15 @@ const makeContractExecutor = (
 				} as never;
 			}
 			if (text.includes("FROM ops.dataset_publications")) {
+				const publicationId = options.publicationId ?? "00000000-0000-4000-8000-000000000007";
+				const manifest = makeCoreManifest(options.invalidManifest);
+				manifest.publicationId = publicationId;
 				return {
 					rows: [
 						{
-							publication_id: options.publicationId ?? "00000000-0000-4000-8000-000000000007",
+							publication_id: publicationId,
 							revision: "7",
-							manifest: {
-								schemaVersion: options.schemaVersion ?? "v3",
-								planVersion: options.planVersion ?? "3.2.5",
-							},
+							manifest,
 						},
 					],
 					rowCount: 1,
@@ -206,26 +207,17 @@ const makeContractExecutor = (
 };
 
 describe("GraphQL startup database contract", () => {
-	it("accepts the exact v3 publication through SELECT-only startup queries", async () => {
+	it("accepts the exact canonical publication through SELECT-only startup queries", async () => {
 		const { executor, queries } = makeContractExecutor();
 		await expect(validateDatabaseContract(executor)).resolves.toEqual({
 			roleName: "graphql_runtime",
 			currentSeason: { seasonId: 2026, seasonCode: "2627" },
 			publicationId: "00000000-0000-4000-8000-000000000007",
 			datasetRevision: "7",
-			schemaVersion: "v3",
-			planVersion: "3.2.5",
 		});
 
 		expect(queries.length).toBeGreaterThan(20);
 		expect(queries.every((query) => query.trimStart().startsWith("SELECT"))).toBe(true);
-	});
-
-	it("keeps the legacy auth validation window deadline-gated", () => {
-		const now = Date.parse("2026-08-09T12:00:00.000Z");
-		expect(isLegacyAuthValidationRequired(now + 1, now)).toBe(true);
-		expect(isLegacyAuthValidationRequired(now - 1, now)).toBe(false);
-		expect(isLegacyAuthValidationRequired(null, now)).toBe(false);
 	});
 
 	it("fails closed when a required relation is missing", async () => {
@@ -235,11 +227,8 @@ describe("GraphQL startup database contract", () => {
 		);
 	});
 
-	it("requires read access to Web Mini Program auth relations when bauth exists", async () => {
+	it("requires read access to Web Mini Program auth relations", async () => {
 		const { executor } = makeContractExecutor({
-			authSchemaPresent: true,
-			authUserPresent: true,
-			authMiniProgramSessionPresent: true,
 			authMissingRelation: "bauth.mini_program_session",
 		});
 		await expect(validateDatabaseContract(executor)).rejects.toThrow(
@@ -248,7 +237,7 @@ describe("GraphQL startup database contract", () => {
 	});
 
 	it("accepts only the seven Web auth columns used by GraphQL", async () => {
-		const { executor } = makeContractExecutor({ authSchemaPresent: true });
+		const { executor } = makeContractExecutor();
 		await expect(validateDatabaseContract(executor)).resolves.toMatchObject({
 			roleName: "graphql_runtime",
 		});
@@ -256,7 +245,6 @@ describe("GraphQL startup database contract", () => {
 
 	it("rejects broad or extra Web auth read access", async () => {
 		const tableReader = makeContractExecutor({
-			authSchemaPresent: true,
 			authTableReadable: 'bauth."user"',
 		});
 		await expect(validateDatabaseContract(tableReader.executor)).rejects.toThrow(
@@ -264,7 +252,6 @@ describe("GraphQL startup database contract", () => {
 		);
 
 		const extraColumnReader = makeContractExecutor({
-			authSchemaPresent: true,
 			authExtraReadableColumn: 'bauth."user".email',
 		});
 		await expect(validateDatabaseContract(extraColumnReader.executor)).rejects.toThrow(
@@ -274,7 +261,6 @@ describe("GraphQL startup database contract", () => {
 
 	it("rejects missing or writable Web auth columns", async () => {
 		const missingColumn = makeContractExecutor({
-			authSchemaPresent: true,
 			authMissingColumn: "bauth.mini_program_session.expires_at",
 		});
 		await expect(validateDatabaseContract(missingColumn.executor)).rejects.toThrow(
@@ -282,7 +268,6 @@ describe("GraphQL startup database contract", () => {
 		);
 
 		const writableColumn = makeContractExecutor({
-			authSchemaPresent: true,
 			authWritableColumn: "bauth.mini_program_session.revoked_at",
 		});
 		await expect(validateDatabaseContract(writableColumn.executor)).rejects.toThrow(
@@ -293,14 +278,14 @@ describe("GraphQL startup database contract", () => {
 	it("fails closed when a required read-model column is missing", async () => {
 		const { executor } = makeContractExecutor({ probeFailure: true });
 		await expect(validateDatabaseContract(executor)).rejects.toThrow(
-			"Data Platform v3 read model is unavailable"
+			"Data Platform read model is unavailable"
 		);
 	});
 
-	it("fails closed for an unsupported Data publication contract", async () => {
-		const { executor } = makeContractExecutor({ planVersion: "3.2.3" });
+	it("fails closed for a non-canonical Data publication contract", async () => {
+		const { executor } = makeContractExecutor({ invalidManifest: true });
 		await expect(validateDatabaseContract(executor)).rejects.toThrow(
-			"Unsupported Data Platform contract v3/3.2.3"
+			"active Data publication manifest is not canonical"
 		);
 	});
 
@@ -314,7 +299,7 @@ describe("GraphQL startup database contract", () => {
 	it("fails closed on a PostgreSQL major other than 15", async () => {
 		const { executor } = makeContractExecutor({ serverVersionNum: 160_000 });
 		await expect(validateDatabaseContract(executor)).rejects.toThrow(
-			"Data Platform v3 requires PostgreSQL 15; connected major is 16"
+			"Data Platform requires PostgreSQL 15; connected major is 16"
 		);
 	});
 

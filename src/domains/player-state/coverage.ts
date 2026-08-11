@@ -4,7 +4,7 @@ export const PLAYER_STATE_FRESHNESS_STALE_SECONDS = 36 * 60 * 60;
 
 export type ProviderLinkRow = {
 	status: string;
-	rule_version: string;
+	rule_id: string;
 	left_entity_id: string | null;
 	evidence: unknown;
 };

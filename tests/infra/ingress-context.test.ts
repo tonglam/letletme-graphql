@@ -19,21 +19,22 @@ const signed = (envelope: Record<string, unknown>, secret = env.BACKEND_PROXY_SE
 };
 
 describe("signed web ingress context", () => {
-	test("accepts an opaque subject for at most sixty seconds", () => {
-		const headers = signed({ v: 1, aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 });
+	test("accepts the exact canonical envelope for at most sixty seconds", () => {
+		const headers = signed({ aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 });
 		expect(verifyIngressContext(headers, 120)).toEqual({ subject });
 	});
 
-	test("rejects spoofed, expired, overlong, and wrong-audience envelopes", () => {
-		const base = { v: 1, aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 };
+	test("rejects spoofed, expired, overlong, wrong-audience, and extra-field envelopes", () => {
+		const base = { aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 };
 		expect(verifyIngressContext(signed(base, "attacker-secret"), 120)).toBeNull();
 		expect(verifyIngressContext(signed(base), 161)).toBeNull();
 		expect(verifyIngressContext(signed({ ...base, exp: 161 }), 120)).toBeNull();
 		expect(verifyIngressContext(signed({ ...base, aud: "other" }), 120)).toBeNull();
+		expect(verifyIngressContext(signed({ ...base, unexpectedField: true }), 120)).toBeNull();
 	});
 
-	test("classifies signed ingress ahead of other credentials", () => {
-		const headers = signed({ v: 1, aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 });
+	test("classifies signed ingress ahead of forwarded user credentials", () => {
+		const headers = signed({ aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 });
 		headers.set("Authorization", `Bearer ${"b".repeat(43)}`);
 		expect(
 			classifyGraphQLIngress(headers, {
@@ -49,10 +50,7 @@ describe("signed web ingress context", () => {
 		expect(verifyGraphQLServiceToken(headers, token)).toBe(true);
 		expect(verifyGraphQLServiceToken(headers, `${token}x`)).toBe(false);
 		expect(
-			classifyGraphQLIngress(headers, {
-				ingressContext: null,
-				serviceTokenValid: true,
-			})
+			classifyGraphQLIngress(headers, { ingressContext: null, serviceTokenValid: true })
 		).toEqual({
 			class: "service",
 			trusted: true,
@@ -61,37 +59,25 @@ describe("signed web ingress context", () => {
 		});
 	});
 
-	test("distinguishes compatibility traffic without recording its credentials", () => {
-		expect(
-			classifyGraphQLIngress(new Headers({ Authorization: `Bearer ${"b".repeat(43)}` }), {
-				ingressContext: null,
-				serviceTokenValid: false,
-			})
-		).toMatchObject({ class: "unsigned_bearer", trusted: false, subject: null });
-		expect(
-			classifyGraphQLIngress(new Headers({ "X-User-Context": "spoofed" }), {
-				ingressContext: null,
-				serviceTokenValid: false,
-			})
-		).toMatchObject({ class: "unsigned_user_context", trusted: false, subject: null });
-		expect(
-			classifyGraphQLIngress(new Headers(), {
-				ingressContext: null,
-				serviceTokenValid: false,
-			})
-		).toMatchObject({ class: "anonymous", trusted: false, subject: null });
+	test("classifies every unsigned request as untrusted", () => {
+		for (const headers of [
+			new Headers({ Authorization: `Bearer ${"b".repeat(43)}` }),
+			new Headers({ "X-User-Context": "spoofed" }),
+			new Headers(),
+		]) {
+			expect(
+				classifyGraphQLIngress(headers, { ingressContext: null, serviceTokenValid: false })
+			).toMatchObject({ class: "untrusted", trusted: false, subject: null });
+		}
 	});
 
-	test("does not let the public service token carry a user credential", () => {
+	test("does not let a service token carry unsigned user credentials", () => {
 		const headers = new Headers({
 			Authorization: `Bearer ${"b".repeat(43)}`,
 			"X-GraphQL-Service-Token": "s".repeat(43),
 		});
 		expect(
-			classifyGraphQLIngress(headers, {
-				ingressContext: null,
-				serviceTokenValid: true,
-			})
-		).toMatchObject({ class: "unsigned_bearer", trusted: false });
+			classifyGraphQLIngress(headers, { ingressContext: null, serviceTokenValid: true })
+		).toMatchObject({ class: "untrusted", trusted: false });
 	});
 });

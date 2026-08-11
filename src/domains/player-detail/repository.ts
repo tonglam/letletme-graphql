@@ -194,7 +194,7 @@ const elementTypeToName = (type: number): string => {
 };
 
 const playerDetailCacheKey = (playerId: number, eventId: number): string =>
-	`player_detail:v3:${playerId}:${eventId}`;
+	`player-detail:${playerId}:${eventId}`;
 
 async function readPlayerDetailCache(
 	context: GraphQLContext,

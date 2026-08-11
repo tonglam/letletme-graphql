@@ -1,7 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "crypto";
 import { database } from "./database";
 import { env } from "./env";
-import { logger } from "./logger";
+import { verifyIngressContext } from "./ingress-context";
 import { metrics } from "./metrics";
 
 export interface AuthUser {
@@ -10,25 +10,21 @@ export interface AuthUser {
 	name: string | null;
 	emailVerified: boolean;
 	image?: string | null;
-	isAnonymous?: boolean;
-	deviceId?: string | null;
-	openid?: string | null;
 	fplEntryId?: number | null;
 	fplEntryVerifiedAt?: string | null;
 }
 
-export type PrincipalSource = "website" | "wechat_miniprogram" | "device";
+export type PrincipalSource = "website" | "wechat_miniprogram";
 
 export type Principal = {
 	userId: string;
 	source: PrincipalSource;
-	provider: "better_auth" | "wechat_miniprogram" | "device";
+	provider: "better_auth" | "wechat_miniprogram";
 	fplEntryId: number | null;
 	fplEntryVerifiedAt: string | null;
 };
 
 type WebsiteEnvelope = {
-	v?: unknown;
 	aud?: unknown;
 	uid?: unknown;
 	eid?: unknown;
@@ -37,32 +33,19 @@ type WebsiteEnvelope = {
 	exp?: unknown;
 };
 
-type ApiSessionRow = {
+type MiniProgramSessionRow = {
 	user_id: string;
 	fpl_entry_id: number | null;
 	fpl_entry_verified_at: Date | string | null;
 };
 
-type MiniProgramSessionRow = ApiSessionRow;
-
 type PrincipalValidators = {
 	validateMiniProgramSessionToken: (token: string) => Promise<Principal | null>;
-	validateApiSessionToken: (token: string) => Promise<Principal | null>;
 };
 
 const WECHAT_PROVIDER = "wechat_miniprogram";
 
-export const isUndefinedTableError = (error: unknown): boolean => {
-	if (!error || typeof error !== "object") return false;
-	return "code" in error && (error as { code?: unknown }).code === "42P01";
-};
-
-export const isLegacyAuthValidationOpen = (
-	now = Date.now(),
-	deadline = env.LEGACY_AUTH_VALIDATION_UNTIL
-): boolean => typeof deadline === "number" && now <= deadline;
-
-export const hashApiToken = (token: string): string =>
+export const hashMiniProgramSessionToken = (token: string): string =>
 	createHash("sha256").update(token).digest("hex");
 
 const equalBase64Url = (left: string, right: string): boolean => {
@@ -70,6 +53,14 @@ const equalBase64Url = (left: string, right: string): boolean => {
 	const leftBytes = Buffer.from(left);
 	const rightBytes = Buffer.from(right);
 	return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+};
+
+const hasExactFields = (value: object, fields: readonly string[]): boolean => {
+	const actual = Object.keys(value).sort();
+	const expected = [...fields].sort();
+	return (
+		actual.length === expected.length && actual.every((field, index) => field === expected[index])
+	);
 };
 
 export const verifyWebsitePrincipal = (headers: Headers): Principal | null => {
@@ -99,7 +90,7 @@ export const verifyWebsitePrincipal = (headers: Headers): Principal | null => {
 	const expiresAt =
 		typeof envelope.exp === "number" && Number.isSafeInteger(envelope.exp) ? envelope.exp : null;
 	if (
-		envelope.v !== 2 ||
+		!hasExactFields(envelope, ["aud", "uid", "eid", "evat", "iat", "exp"]) ||
 		envelope.aud !== "letletme-graphql" ||
 		typeof envelope.uid !== "string" ||
 		envelope.uid.length === 0 ||
@@ -141,40 +132,8 @@ const getBearerToken = (headers: Headers): string | null => {
 	return match?.[1]?.trim() || null;
 };
 
-export const validateApiSessionToken = async (token: string): Promise<Principal | null> => {
-	if (!isLegacyAuthValidationOpen()) return null;
-	const tokenHash = hashApiToken(token);
-	const result = await database.query<ApiSessionRow>(
-		`SELECT s.user_id,
-		        CASE WHEN u.fpl_entry_verified_at IS NOT NULL THEN u.fpl_entry_id END AS fpl_entry_id,
-		        u.fpl_entry_verified_at
-       FROM bauth.api_sessions s
-       JOIN bauth."user" u ON u.id = s.user_id
-       WHERE s.token_hash = $1
-         AND s.provider = $2
-         AND s.revoked_at IS NULL
-         AND s.expires_at > NOW()
-       LIMIT 1`,
-		[tokenHash, WECHAT_PROVIDER]
-	);
-
-	const row = result.rows[0];
-	if (!row) return null;
-	metrics.authTokenValidations.labels("legacy_graphql_wechat").inc();
-
-	return {
-		userId: row.user_id,
-		source: "wechat_miniprogram",
-		provider: WECHAT_PROVIDER,
-		fplEntryId: row.fpl_entry_id,
-		fplEntryVerifiedAt: row.fpl_entry_verified_at
-			? new Date(row.fpl_entry_verified_at).toISOString()
-			: null,
-	};
-};
-
 export const validateMiniProgramSessionToken = async (token: string): Promise<Principal | null> => {
-	const tokenHash = hashApiToken(token);
+	const tokenHash = hashMiniProgramSessionToken(token);
 	const result = await database.query<MiniProgramSessionRow>(
 		`SELECT s.user_id,
 		        CASE WHEN u.fpl_entry_verified_at IS NOT NULL THEN u.fpl_entry_id END AS fpl_entry_id,
@@ -206,29 +165,16 @@ export const getPrincipalFromHeaders = async (
 	headers: Headers,
 	validators: PrincipalValidators = {
 		validateMiniProgramSessionToken,
-		validateApiSessionToken,
 	}
 ): Promise<Principal | null> => {
+	if (!verifyIngressContext(headers)) return null;
 	const websitePrincipal = verifyWebsitePrincipal(headers);
 	if (websitePrincipal) return websitePrincipal;
 
 	const token = getBearerToken(headers);
 	if (!token) return null;
 
-	let miniProgramPrincipal: Principal | null = null;
-	try {
-		miniProgramPrincipal = await validators.validateMiniProgramSessionToken(token);
-	} catch (error) {
-		if (!isUndefinedTableError(error)) throw error;
-		// GraphQL is intentionally deployable before the Web migration that owns
-		// this table. During that bounded compatibility window, treat absence as a
-		// miss and continue to the deadline-gated legacy validator.
-		logger.warn(
-			{ err: error },
-			"Mini Program session table is not migrated; using legacy validation"
-		);
-	}
-	return miniProgramPrincipal ?? validators.validateApiSessionToken(token);
+	return validators.validateMiniProgramSessionToken(token);
 };
 
 export const principalToAuthUser = (principal: Principal): AuthUser => ({
@@ -236,7 +182,6 @@ export const principalToAuthUser = (principal: Principal): AuthUser => ({
 	email: null,
 	name: null,
 	emailVerified: false,
-	isAnonymous: principal.source !== "website",
 	fplEntryId: principal.fplEntryId,
 	fplEntryVerifiedAt: principal.fplEntryVerifiedAt,
 });

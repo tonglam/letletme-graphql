@@ -166,7 +166,7 @@ export const createPublicLeagueTrendsRepository = (
 				: iso(rows[0]!.readiness_revision);
 		const cacheKey = gqlCacheKey(
 			context,
-			`public-league-trends:v4:${revision}:${snapshotRevision ?? "none"}:${selectionRevision ?? "none"}:${readinessRevision}`
+			`public-league-trends:${revision}:${snapshotRevision ?? "none"}:${selectionRevision ?? "none"}:${readinessRevision}`
 		);
 		try {
 			const cached = await context.redis.get(cacheKey);
@@ -211,7 +211,7 @@ export const createPublicLeagueTrendsRepository = (
 		const safeLimit = Math.min(Math.max(limit, 1), 12);
 		const cacheKey = gqlCacheKey(
 			context,
-			`public-league-selection:v1:${iso(access.catalog_revision)}:${tournamentId}:${eventId}:${safeLimit}:${iso(access.snapshot_revision)}`
+			`public-league-selection:${iso(access.catalog_revision)}:${tournamentId}:${eventId}:${safeLimit}:${iso(access.snapshot_revision)}`
 		);
 		try {
 			const cached = await context.redis.get(cacheKey);

@@ -9,27 +9,20 @@ import { validateDatabaseContract } from "./infra/database-contract";
 import { database } from "./infra/database";
 import { coreDatasetRevision, getCoreDataSnapshot } from "./infra/data-snapshot";
 import { closeDbPool } from "./infra/db-pool";
-import { validateDeviceToken } from "./infra/device-auth";
 import { env } from "./infra/env";
 import { logger } from "./infra/logger";
 import { classifyGraphQLIngress } from "./infra/ingress-context";
 import { metrics, metricsResponse } from "./infra/metrics";
-import {
-	getPrincipalFromHeaders,
-	principalToAuthUser,
-	verifyWebsitePrincipal,
-	type Principal,
-} from "./infra/principal";
+import { getPrincipalFromHeaders, principalToAuthUser, type Principal } from "./infra/principal";
 import { closeRedis, connectRedis, getRedis } from "./infra/redis";
 import { CurrentSeasonProvider } from "./infra/season";
-import { V3ReadClient } from "./infra/v3-read-client";
+import { ReadModelClient } from "./infra/read-model-client";
 import {
 	checkRateLimit,
 	handleRateLimitStorageFailure,
 	PayloadTooLargeError,
 	rateLimitKey,
 	readRequestBody,
-	resolveClientIp,
 } from "./http/security";
 import {
 	GRAPHQL_GLOBAL_ADMISSION_SUBJECT,
@@ -81,31 +74,10 @@ function metricsTokenMatches(provided: string | undefined): boolean {
 }
 
 async function resolvePrincipalAndUser(
-	request: Request,
-	prevalidatedPrincipal: Principal | null = null
+	request: Request
 ): Promise<{ principal: Principal | null; user: ReturnType<typeof principalToAuthUser> | null }> {
-	let principal = prevalidatedPrincipal ?? (await getPrincipalFromHeaders(request.headers));
-	let user = principal ? principalToAuthUser(principal) : null;
-
-	if (!principal) {
-		const authHeader = request.headers.get("Authorization");
-		const token = authHeader?.match(/^bearer\s+(.+)$/i)?.[1]?.trim();
-		if (token) {
-			const deviceUser = await validateDeviceToken(token);
-			if (deviceUser) {
-				principal = {
-					userId: deviceUser.id,
-					source: "device",
-					provider: "device",
-					fplEntryId: null,
-					fplEntryVerifiedAt: null,
-				};
-				user = deviceUser;
-				metrics.authTokenValidations.labels("legacy_device").inc();
-			}
-		}
-	}
-
+	const principal = await getPrincipalFromHeaders(request.headers);
+	const user = principal ? principalToAuthUser(principal) : null;
 	return { principal, user };
 }
 
@@ -215,8 +187,6 @@ const startServer = async (): Promise<void> => {
 			role: contract.roleName,
 			season: contract.currentSeason.seasonCode,
 			datasetRevision: contract.datasetRevision,
-			schemaVersion: contract.schemaVersion,
-			planVersion: contract.planVersion,
 		},
 		"Data Platform database contract accepted"
 	);
@@ -241,7 +211,7 @@ const startServer = async (): Promise<void> => {
 
 	const server = Bun.serve({
 		port: env.PORT,
-		fetch: async (request: Request, bunServer) => {
+		fetch: async (request: Request) => {
 			const url = new URL(request.url);
 			const origin = request.headers.get("Origin");
 			const corsHeaders = getCorsHeaders(origin);
@@ -277,15 +247,6 @@ const startServer = async (): Promise<void> => {
 				return metricsResponse();
 			}
 
-			if (url.pathname === "/api/device/auth" && request.method === "POST") {
-				return jsonError(
-					410,
-					"DEVICE_AUTH_RETIRED",
-					"New device sessions are no longer issued; authenticate through letletme-web",
-					corsHeaders
-				);
-			}
-
 			if (url.pathname === "/graphql") {
 				const start = performance.now();
 
@@ -301,8 +262,6 @@ const startServer = async (): Promise<void> => {
 						);
 					}
 
-					const peerAddress = bunServer.requestIP(request)?.address;
-					const clientIp = resolveClientIp(request.headers, peerAddress, env.TRUSTED_PROXY_HOPS);
 					const globalAdmissionFailure = await enforceGraphQLRateLimit({
 						scope: "graphql-global-admission",
 						subject: GRAPHQL_GLOBAL_ADMISSION_SUBJECT,
@@ -313,7 +272,7 @@ const startServer = async (): Promise<void> => {
 
 					const ingress = classifyGraphQLIngress(request.headers);
 					metrics.graphqlIngressRequests.labels(ingress.class).inc();
-					const ingressFailure = graphQLIngressFailure(ingress, env.REQUIRE_SIGNED_WEB_INGRESS);
+					const ingressFailure = graphQLIngressFailure(ingress);
 					if (ingressFailure) {
 						return jsonError(
 							ingressFailure.status,
@@ -323,15 +282,9 @@ const startServer = async (): Promise<void> => {
 						);
 					}
 
-					const compatibilityPrincipal =
-						ingress.class === "unsigned_user_context"
-							? verifyWebsitePrincipal(request.headers)
-							: null;
 					const admissionSubjects = graphQLAdmissionSubjects({
-						headers: request.headers,
 						ingress,
-						principal: compatibilityPrincipal,
-						fallbackSubject: clientIp,
+						principal: null,
 					});
 
 					let weightedRatePrecharged = false;
@@ -370,10 +323,18 @@ const startServer = async (): Promise<void> => {
 						return jsonError(400, limits.code, limits.message, corsHeaders);
 					}
 
-					const { principal, user } = await resolvePrincipalAndUser(
-						request,
-						compatibilityPrincipal
-					);
+					const { principal, user } = await resolvePrincipalAndUser(request);
+					const hasBearer = /^bearer\s+\S+$/i.test(request.headers.get("Authorization") ?? "");
+					const hasUserContext =
+						request.headers.has("X-User-Context") || request.headers.has("X-User-Context-Sig");
+					if (!principal && (hasBearer || hasUserContext)) {
+						return jsonError(
+							401,
+							"INVALID_AUTH_CONTEXT",
+							"Authentication context is invalid or expired",
+							corsHeaders
+						);
+					}
 					let currentSeason;
 					try {
 						currentSeason = await currentSeasonProvider.get();
@@ -386,11 +347,10 @@ const startServer = async (): Promise<void> => {
 							corsHeaders
 						);
 					}
-					const data = new V3ReadClient(database, currentSeason);
+					const data = new ReadModelClient(database, currentSeason);
 					const rateLimitSubject = graphQLWeightedRateLimitSubject({
 						ingress,
 						principal,
-						fallbackSubject: clientIp,
 					});
 					const rateLimit = graphQLUsesSharedPublicBudget(ingress)
 						? GRAPHQL_SERVICE_RATE_LIMIT

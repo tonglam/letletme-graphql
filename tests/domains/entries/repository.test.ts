@@ -72,7 +72,7 @@ describe("entriesRepository.getEntriesByIds", () => {
 		expect(readKeys).toHaveLength(2);
 		expect(writtenKeys).toHaveLength(2);
 		for (const key of [...readKeys, ...writtenKeys]) {
-			expect(key.startsWith("llm:v3:gql:v3:core-17:entries-info:")).toBe(true);
+			expect(key.startsWith("llm:gql:core-17:entries-info:")).toBe(true);
 			expect(key).not.toContain("EntryInfo:");
 		}
 	});

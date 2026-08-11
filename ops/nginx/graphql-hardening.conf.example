@@ -2,8 +2,8 @@
 # this a shared emergency ceiling; application subjects provide fair limits.
 limit_req_zone $server_name zone=graphql_emergency:1m rate=25r/s;
 
-# Merge these directives into the existing API TLS server after the seven-day
-# compatibility gate. Keep the other service locations in that server intact.
+# Merge these directives into the existing API TLS server. Keep the other
+# service locations in that server intact.
 server_name api.letletme.top;
 
 # Cloudflare Authenticated Origin Pulls. Install Cloudflare's current origin

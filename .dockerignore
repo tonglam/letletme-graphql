@@ -17,5 +17,3 @@ tmp
 *.key
 *.crt
 tests
-migrations/legacy
-migrations/test-bootstrap.sql

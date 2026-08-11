@@ -540,7 +540,7 @@ const isMarketPulse = (value: unknown): value is MarketPulse =>
 
 export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRepository => ({
 	async getMarketPulse(context: GraphQLContext, requestedDays: number): Promise<MarketPulse> {
-		const cacheKey = gqlCacheKey(context, `market-pulse:v4:${requestedDays}`);
+		const cacheKey = gqlCacheKey(context, `market-pulse:${requestedDays}`);
 
 		try {
 			const cached = await context.redis.get(cacheKey);

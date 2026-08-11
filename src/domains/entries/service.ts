@@ -326,9 +326,9 @@ export const entriesService = {
 
 		const enrichedCacheKey = gqlCacheKey(
 			context,
-			`entries:transfer-history:enriched:v3:${entryId}${live ? ":live" : ""}`
+			`entries:transfer-history:enriched:${entryId}${live ? ":live" : ""}`
 		);
-		const innerCacheKey = gqlCacheKey(context, `entries:transfers:v3:history:${entryId}`);
+		const innerCacheKey = gqlCacheKey(context, `entries:transfers:history:${entryId}`);
 
 		// Check both cache keys simultaneously + pre-warm season + start team fetch in parallel
 		const teamMapPromise = buildTeamMap(context);

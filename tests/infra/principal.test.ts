@@ -1,43 +1,47 @@
 import { createHmac } from "crypto";
 import { describe, expect, test } from "bun:test";
 import { env } from "../../src/infra/env";
-import {
-	getPrincipalFromHeaders,
-	isLegacyAuthValidationOpen,
-	verifyWebsitePrincipal,
-} from "../../src/infra/principal";
+import { getPrincipalFromHeaders, verifyWebsitePrincipal } from "../../src/infra/principal";
 
-describe("legacy authentication grace window", () => {
-	test("is closed when no explicit deadline is configured", () => {
-		expect(isLegacyAuthValidationOpen(1_000, null)).toBe(false);
-	});
+const addSignedHeader = (
+	headers: Headers,
+	name: "X-Ingress-Context" | "X-User-Context",
+	envelope: Record<string, unknown>
+): void => {
+	const payload = JSON.stringify(envelope);
+	headers.set(name, Buffer.from(payload).toString("base64url"));
+	headers.set(
+		`${name}-Sig`,
+		createHmac("sha256", env.BACKEND_PROXY_SECRET).update(payload).digest("base64url")
+	);
+};
 
-	test("accepts validation through the deadline and rejects it afterward", () => {
-		expect(isLegacyAuthValidationOpen(1_000, 1_000)).toBe(true);
-		expect(isLegacyAuthValidationOpen(1_001, 1_000)).toBe(false);
+const canonicalIngress = (headers = new Headers()): Headers => {
+	const now = Math.floor(Date.now() / 1000);
+	addSignedHeader(headers, "X-Ingress-Context", {
+		aud: "letletme-graphql",
+		sub: "a".repeat(64),
+		iat: now,
+		exp: now + 60,
 	});
-});
+	return headers;
+};
+
+const websiteHeaders = (envelope: Record<string, unknown>): Headers => {
+	const headers = canonicalIngress();
+	addSignedHeader(headers, "X-User-Context", envelope);
+	return headers;
+};
 
 describe("website principal envelope", () => {
-	const signedHeaders = (envelope: Record<string, unknown>): Headers => {
-		const payload = JSON.stringify(envelope);
-		const signature = createHmac("sha256", env.BACKEND_PROXY_SECRET)
-			.update(payload)
-			.digest("base64url");
-		return new Headers({
-			"X-User-Context": Buffer.from(payload).toString("base64url"),
-			"X-User-Context-Sig": signature,
-		});
-	};
-
 	test("does not expose an entry id without a verified-at timestamp", () => {
 		const now = Math.floor(Date.now() / 1000);
 		const principal = verifyWebsitePrincipal(
-			signedHeaders({
-				v: 2,
+			websiteHeaders({
 				aud: "letletme-graphql",
 				uid: "user-1",
 				eid: 123,
+				evat: null,
 				iat: now,
 				exp: now + 60,
 			})
@@ -47,92 +51,88 @@ describe("website principal envelope", () => {
 		expect(principal?.fplEntryVerifiedAt).toBeNull();
 	});
 
-	test("accepts only a verified positive entry id", () => {
+	test("accepts only an exact canonical envelope with a verified positive entry id", () => {
 		const now = Math.floor(Date.now() / 1000);
-		const principal = verifyWebsitePrincipal(
-			signedHeaders({
-				v: 2,
-				aud: "letletme-graphql",
-				uid: "user-1",
-				eid: 123,
-				evat: "2026-07-18T00:00:00.000Z",
-				iat: now,
-				exp: now + 60,
-			})
-		);
+		const headers = websiteHeaders({
+			aud: "letletme-graphql",
+			uid: "user-1",
+			eid: 123,
+			evat: "2026-07-18T00:00:00.000Z",
+			iat: now,
+			exp: now + 60,
+		});
+		expect(verifyWebsitePrincipal(headers)?.fplEntryId).toBe(123);
 
-		expect(principal?.fplEntryId).toBe(123);
-		expect(principal?.fplEntryVerifiedAt).toBe("2026-07-18T00:00:00.000Z");
+		const payload = {
+			aud: "letletme-graphql",
+			uid: "user-1",
+			eid: null,
+			evat: null,
+			iat: now,
+			exp: now + 60,
+			unexpectedField: true,
+		};
+		expect(verifyWebsitePrincipal(websiteHeaders(payload))).toBeNull();
 	});
 
 	test("rejects envelopes whose expiry is not after issuance", () => {
 		const now = Math.floor(Date.now() / 1000);
-		const principal = verifyWebsitePrincipal(
-			signedHeaders({
-				v: 2,
-				aud: "letletme-graphql",
-				uid: "user-1",
-				iat: now,
-				exp: now,
-			})
-		);
-
-		expect(principal).toBeNull();
+		expect(
+			verifyWebsitePrincipal(
+				websiteHeaders({
+					aud: "letletme-graphql",
+					uid: "user-1",
+					eid: null,
+					evat: null,
+					iat: now,
+					exp: now,
+				})
+			)
+		).toBeNull();
 	});
 });
 
-describe("Mini Program session rollout compatibility", () => {
-	test("does not turn the GraphQL service token into a user principal", async () => {
+describe("Mini Program session authentication", () => {
+	test("does not validate a bearer outside signed ingress", async () => {
 		let validationCalls = 0;
 		const principal = await getPrincipalFromHeaders(
-			new Headers({ "X-GraphQL-Service-Token": "s".repeat(43) }),
+			new Headers({ Authorization: "Bearer token" }),
 			{
 				validateMiniProgramSessionToken: async () => {
 					validationCalls += 1;
 					return null;
 				},
-				validateApiSessionToken: async () => {
-					validationCalls += 1;
-					return null;
-				},
 			}
 		);
-
 		expect(principal).toBeNull();
 		expect(validationCalls).toBe(0);
 	});
 
-	test("falls back to legacy validation when the Web-owned session table is absent", async () => {
-		const legacyPrincipal = {
-			userId: "legacy-user",
+	test("validates the canonical Mini Program session inside signed ingress", async () => {
+		const expected = {
+			userId: "mini-user",
 			source: "wechat_miniprogram" as const,
 			provider: "wechat_miniprogram" as const,
 			fplEntryId: 123,
 			fplEntryVerifiedAt: "2026-07-18T00:00:00.000Z",
 		};
-		const principal = await getPrincipalFromHeaders(
-			new Headers({ Authorization: "Bearer rollout-token" }),
-			{
-				validateMiniProgramSessionToken: async () => {
-					throw Object.assign(new Error("relation does not exist"), { code: "42P01" });
-				},
-				validateApiSessionToken: async (token) => {
-					expect(token).toBe("rollout-token");
-					return legacyPrincipal;
-				},
-			}
-		);
-
-		expect(principal).toEqual(legacyPrincipal);
+		const headers = canonicalIngress(new Headers({ Authorization: "Bearer canonical-token" }));
+		const principal = await getPrincipalFromHeaders(headers, {
+			validateMiniProgramSessionToken: async (token) => {
+				expect(token).toBe("canonical-token");
+				return expected;
+			},
+		});
+		expect(principal).toEqual(expected);
 	});
 
-	test("does not hide unrelated session lookup failures", async () => {
+	test("does not hide session lookup failures", async () => {
+		const headers = canonicalIngress(new Headers({ Authorization: "Bearer token" }));
 		await expect(
-			getPrincipalFromHeaders(new Headers({ Authorization: "Bearer token" }), {
+			getPrincipalFromHeaders(headers, {
 				validateMiniProgramSessionToken: async () => {
-					throw Object.assign(new Error("database unavailable"), { code: "08006" });
+					throw new Error("database unavailable");
 				},
-				validateApiSessionToken: async () => null,
 			})
 		).rejects.toThrow("database unavailable");
 	});

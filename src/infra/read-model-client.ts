@@ -2,7 +2,7 @@ import type { QueryResultRow } from "pg";
 import type { QueryExecutor } from "./database";
 import type { CurrentSeason } from "./season";
 
-export const V3_READ_MODELS = {
+export const READ_MODELS = {
 	events: "fpl.events",
 	teams: "fpl.teams",
 	players: "fpl.players",
@@ -32,15 +32,15 @@ export const V3_READ_MODELS = {
 	tournamentEntryEventSummaries: "reporting.tournament_entry_event_summaries",
 } as const;
 
-export type V3ReadModel = (typeof V3_READ_MODELS)[keyof typeof V3_READ_MODELS];
+export type ReadModel = (typeof READ_MODELS)[keyof typeof READ_MODELS];
 
 type ReadModelDefinition = Readonly<{
 	sql: string;
 	sourceRelations: readonly string[];
 }>;
 
-const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>> = {
-	[V3_READ_MODELS.events]: {
+const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> = {
+	[READ_MODELS.events]: {
 		sourceRelations: ["fpl.events"],
 		sql: `
 			SELECT
@@ -76,7 +76,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.teams]: {
+	[READ_MODELS.teams]: {
 		sourceRelations: ["fpl.teams"],
 		sql: `
 			SELECT
@@ -107,7 +107,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.players]: {
+	[READ_MODELS.players]: {
 		sourceRelations: ["fpl.players"],
 		sql: `
 			SELECT
@@ -128,7 +128,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.playerEventSnapshots]: {
+	[READ_MODELS.playerEventSnapshots]: {
 		sourceRelations: ["fpl.player_event_snapshots", "fpl.players", "fpl.teams"],
 		sql: `
 			SELECT
@@ -189,7 +189,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE snapshot.season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.fixtures]: {
+	[READ_MODELS.fixtures]: {
 		sourceRelations: ["fpl.fixtures"],
 		sql: `
 			SELECT
@@ -216,7 +216,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.playerGameweekStats]: {
+	[READ_MODELS.playerGameweekStats]: {
 		sourceRelations: ["fpl.player_gameweek_stats"],
 		sql: `
 			SELECT
@@ -250,7 +250,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.playerGameweekScoringItems]: {
+	[READ_MODELS.playerGameweekScoringItems]: {
 		sourceRelations: ["fpl.player_gameweek_scoring_items"],
 		sql: `
 			SELECT
@@ -289,7 +289,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			GROUP BY event_id, element_id
 		`,
 	},
-	[V3_READ_MODELS.playerSeasonSummaries]: {
+	[READ_MODELS.playerSeasonSummaries]: {
 		sourceRelations: ["reporting.player_season_summaries"],
 		sql: `
 			SELECT
@@ -322,7 +322,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.playerValueChanges]: {
+	[READ_MODELS.playerValueChanges]: {
 		sourceRelations: ["reporting.player_value_changes"],
 		sql: `
 			SELECT
@@ -338,7 +338,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.playerMarketSnapshots]: {
+	[READ_MODELS.playerMarketSnapshots]: {
 		sourceRelations: ["fpl.player_market_snapshots"],
 		sql: `
 			SELECT
@@ -370,7 +370,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.playerFixtureStats]: {
+	[READ_MODELS.playerFixtureStats]: {
 		sourceRelations: ["fpl.player_fixture_stats", "fpl.seasons"],
 		sql: `
 			SELECT
@@ -399,7 +399,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE stats.season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.understatSeasons]: {
+	[READ_MODELS.understatSeasons]: {
 		sourceRelations: ["understat.seasons", "fpl.seasons"],
 		sql: `
 			SELECT
@@ -416,7 +416,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season.season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.understatPlayerSeasons]: {
+	[READ_MODELS.understatPlayerSeasons]: {
 		sourceRelations: ["understat.player_seasons", "fpl.seasons"],
 		sql: `
 			SELECT
@@ -447,7 +447,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season.season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.bridgeEntityLinks]: {
+	[READ_MODELS.bridgeEntityLinks]: {
 		sourceRelations: ["bridge.entity_links"],
 		sql: `
 			SELECT
@@ -459,7 +459,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 				right_entity_id,
 				status,
 				method,
-				rule_version,
+				rule_id,
 				evidence,
 				first_seen_season,
 				last_seen_season,
@@ -471,7 +471,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE $1::smallint IS NOT NULL
 		`,
 	},
-	[V3_READ_MODELS.entries]: {
+	[READ_MODELS.entries]: {
 		sourceRelations: ["competition.entries"],
 		sql: `
 			SELECT
@@ -501,7 +501,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.entryEventResults]: {
+	[READ_MODELS.entryEventResults]: {
 		sourceRelations: ["competition.entry_event_results", "competition.entry_event_picks"],
 		sql: `
 			SELECT
@@ -547,7 +547,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE result.season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.entryEventPicks]: {
+	[READ_MODELS.entryEventPicks]: {
 		sourceRelations: ["competition.entry_event_picks"],
 		sql: `
 			SELECT
@@ -574,7 +574,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			GROUP BY entry_id, event_id
 		`,
 	},
-	[V3_READ_MODELS.entryEventTransfers]: {
+	[READ_MODELS.entryEventTransfers]: {
 		sourceRelations: ["competition.entry_event_transfers"],
 		sql: `
 			SELECT
@@ -595,7 +595,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.entrySeasonHistories]: {
+	[READ_MODELS.entrySeasonHistories]: {
 		sourceRelations: ["competition.entry_season_histories"],
 		sql: `
 			SELECT
@@ -610,7 +610,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.entryLeagues]: {
+	[READ_MODELS.entryLeagues]: {
 		sourceRelations: ["competition.entry_leagues"],
 		sql: `
 			SELECT
@@ -628,7 +628,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.leagueEventResults]: {
+	[READ_MODELS.leagueEventResults]: {
 		sourceRelations: ["competition.league_event_results"],
 		sql: `
 			SELECT
@@ -668,7 +668,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.tournaments]: {
+	[READ_MODELS.tournaments]: {
 		sourceRelations: ["competition.tournaments"],
 		sql: `
 			SELECT
@@ -718,7 +718,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.tournamentEntries]: {
+	[READ_MODELS.tournamentEntries]: {
 		sourceRelations: ["competition.tournament_entries"],
 		sql: `
 			SELECT
@@ -731,7 +731,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.tournamentBattleGroupResults]: {
+	[READ_MODELS.tournamentBattleGroupResults]: {
 		sourceRelations: ["competition.tournament_battle_group_results"],
 		sql: `
 			SELECT
@@ -755,7 +755,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.tournamentSelectionStats]: {
+	[READ_MODELS.tournamentSelectionStats]: {
 		sourceRelations: ["reporting.tournament_selection_stats"],
 		sql: `
 			SELECT
@@ -778,7 +778,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.tournamentEventResults]: {
+	[READ_MODELS.tournamentEventResults]: {
 		sourceRelations: [
 			"reporting.tournament_entry_event_summaries",
 			"competition.tournament_points_group_results",
@@ -847,7 +847,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<V3ReadModel, ReadModelDefinition>>
 			WHERE summary.season_id = $1
 		`,
 	},
-	[V3_READ_MODELS.tournamentEntryEventSummaries]: {
+	[READ_MODELS.tournamentEntryEventSummaries]: {
 		sourceRelations: [
 			"reporting.tournament_entry_event_summaries",
 			"competition.tournament_points_group_results",
@@ -921,15 +921,15 @@ const parseProjection = (projection: string): string => {
 	return columns.map(quoteIdentifier).join(", ");
 };
 
-export type V3ReadError = Readonly<{
+export type ReadError = Readonly<{
 	message: string;
 	code?: string;
 	details?: string;
 }>;
 
-export type V3ReadResult<Row> = Readonly<{
+export type ReadResult<Row> = Readonly<{
 	data: Row[] | null;
-	error: V3ReadError | null;
+	error: ReadError | null;
 }>;
 
 type ComparisonFilter = Readonly<{
@@ -948,7 +948,7 @@ type Filter = ComparisonFilter | OrFilter;
 
 type Order = Readonly<{ column: string; ascending: boolean; nullsFirst?: boolean }>;
 
-const asReadError = (error: unknown): V3ReadError => {
+const asReadError = (error: unknown): ReadError => {
 	if (error instanceof Error) {
 		const withCode = error as Error & { code?: unknown; detail?: unknown };
 		return {
@@ -960,8 +960,8 @@ const asReadError = (error: unknown): V3ReadError => {
 	return { message: "Unknown PostgreSQL read failure" };
 };
 
-class V3ReadQuery<Row extends QueryResultRow = QueryResultRow> implements PromiseLike<
-	V3ReadResult<Row>
+class ReadQuery<Row extends QueryResultRow = QueryResultRow> implements PromiseLike<
+	ReadResult<Row>
 > {
 	private projection = "*";
 	private readonly filters: Filter[] = [];
@@ -1056,7 +1056,7 @@ class V3ReadQuery<Row extends QueryResultRow = QueryResultRow> implements Promis
 		return this;
 	}
 
-	async maybeSingle(): Promise<Readonly<{ data: Row | null; error: V3ReadError | null }>> {
+	async maybeSingle(): Promise<Readonly<{ data: Row | null; error: ReadError | null }>> {
 		const result = await this.execute();
 		if (result.error || !result.data) return { data: null, error: result.error };
 		if (result.data.length > 1) {
@@ -1068,8 +1068,8 @@ class V3ReadQuery<Row extends QueryResultRow = QueryResultRow> implements Promis
 		return { data: result.data[0] ?? null, error: null };
 	}
 
-	then<TResult1 = V3ReadResult<Row>, TResult2 = never>(
-		onfulfilled?: ((value: V3ReadResult<Row>) => TResult1 | PromiseLike<TResult1>) | null,
+	then<TResult1 = ReadResult<Row>, TResult2 = never>(
+		onfulfilled?: ((value: ReadResult<Row>) => TResult1 | PromiseLike<TResult1>) | null,
 		onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
 	): PromiseLike<TResult1 | TResult2> {
 		return this.execute().then(onfulfilled, onrejected);
@@ -1081,7 +1081,7 @@ class V3ReadQuery<Row extends QueryResultRow = QueryResultRow> implements Promis
 		return this;
 	}
 
-	private async execute(): Promise<V3ReadResult<Row>> {
+	private async execute(): Promise<ReadResult<Row>> {
 		const values: unknown[] = [this.seasonId];
 		const where: string[] = [];
 		for (const filter of this.filters) {
@@ -1138,16 +1138,16 @@ class V3ReadQuery<Row extends QueryResultRow = QueryResultRow> implements Promis
 	}
 }
 
-export class V3ReadClient {
+export class ReadModelClient {
 	constructor(
 		private readonly executor: QueryExecutor,
 		readonly currentSeason: CurrentSeason
 	) {}
 
-	read<Row extends QueryResultRow = QueryResultRow>(model: V3ReadModel): V3ReadQuery<Row> {
+	read<Row extends QueryResultRow = QueryResultRow>(model: ReadModel): ReadQuery<Row> {
 		const definition = READ_MODEL_DEFINITIONS[model];
-		if (!definition) throw new Error(`Unknown Data Platform v3 read model: ${String(model)}`);
-		return new V3ReadQuery<Row>(this.executor, this.currentSeason.seasonId, definition);
+		if (!definition) throw new Error(`Unknown Data Platform read model: ${String(model)}`);
+		return new ReadQuery<Row>(this.executor, this.currentSeason.seasonId, definition);
 	}
 
 	async probe(): Promise<void> {
@@ -1157,7 +1157,7 @@ export class V3ReadClient {
 					this.currentSeason.seasonId,
 				]);
 			} catch (error) {
-				throw new Error(`Data Platform v3 read model is unavailable: ${model}`, { cause: error });
+				throw new Error(`Data Platform read model is unavailable: ${model}`, { cause: error });
 			}
 		}
 	}

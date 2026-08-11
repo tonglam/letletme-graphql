@@ -19,7 +19,6 @@ import {
 	composePlayerState,
 	expectedMetricsAvailableForSeason,
 	percentile,
-	PLAYER_STATE_ENGINE_VERSION,
 } from "./engine";
 import {
 	buildPlayerStateProviderRevision,
@@ -28,7 +27,7 @@ import {
 	resolvePlayerStateMappingStatus,
 	type ProviderLinkRow,
 } from "./coverage";
-import { applyPlayerStateReleaseGate } from "./release-gate";
+import { applyPlayerStateEvidencePolicy } from "./trend-evidence-policy";
 import type {
 	PlayerGameweekSample,
 	PlayerRadarAxis,
@@ -275,7 +274,7 @@ const historicalCohortsSql = `
 
 const verifiedProviderLinkSql = `
 	/* player-state:provider-link-verified */
-	SELECT status::text, rule_version, left_entity_id, evidence
+	SELECT status::text, rule_id, left_entity_id, evidence
 	FROM bridge.entity_links
 	WHERE entity_type = 'player'
 		AND left_provider = 'understat'
@@ -287,7 +286,7 @@ const verifiedProviderLinkSql = `
 
 const unresolvedProviderLinkSql = `
 	/* player-state:provider-link-unresolved */
-	SELECT status::text, rule_version, left_entity_id, evidence
+	SELECT status::text, rule_id, left_entity_id, evidence
 	FROM bridge.entity_links
 	WHERE entity_type = 'player'
 		AND left_provider = 'understat'
@@ -402,10 +401,7 @@ const profileGuard = (value: unknown): value is PlayerStateProfile =>
 	isRecord(value.coverage);
 
 const profileCacheKey = (context: GraphQLContext, playerId: number, horizon: number): string =>
-	gqlCacheKey(
-		context,
-		`player-state-profile:${PLAYER_STATE_ENGINE_VERSION}:${playerId}:${horizon}`
-	);
+	gqlCacheKey(context, `player-state-profile:${playerId}:${horizon}`);
 
 async function readProfileCache(
 	context: GraphQLContext,
@@ -1294,7 +1290,7 @@ export const createPlayerStateRepository = (
 			completeFplWindow: recentWindowComplete,
 			historySeasonCount: reliability.baseline.seasons.length,
 		});
-		const releaseDecision = applyPlayerStateReleaseGate(composed.trend, process.available);
+		const evidenceDecision = applyPlayerStateEvidencePolicy(composed.trend, process.available);
 
 		const outlookStart = resolveOutlookStart(snapshot, asOfEventId);
 		const outlookGameweeks = buildOutlookGameweeks(
@@ -1448,8 +1444,8 @@ export const createPlayerStateRepository = (
 
 		const limitations = new Set<string>();
 		if (!fplSufficient) limitations.add("CURRENT_FPL_INSUFFICIENT");
-		if (releaseDecision.withheld && releaseDecision.reasonCode) {
-			limitations.add(releaseDecision.reasonCode);
+		if (evidenceDecision.withheld && evidenceDecision.reasonCode) {
+			limitations.add(evidenceDecision.reasonCode);
 		}
 		if (recentWindow.length > 0 && recentWindow.length < 5) {
 			limitations.add("EARLY_SEASON_SAMPLE");
@@ -1523,14 +1519,14 @@ export const createPlayerStateRepository = (
 			horizon: outlook.gameweeks.length,
 			asOfEventId,
 			asOf,
-			trend: releaseDecision.trend,
-			confidence: releaseDecision.withheld ? "LOW" : composed.confidence,
+			trend: evidenceDecision.trend,
+			confidence: evidenceDecision.withheld ? "LOW" : composed.confidence,
 			fplOnly: !process.available,
 			reasons:
-				releaseDecision.withheld && releaseDecision.reasonCode
+				evidenceDecision.withheld && evidenceDecision.reasonCode
 					? [
 							{
-								code: releaseDecision.reasonCode,
+								code: evidenceDecision.reasonCode,
 								dimension: "FPL_OUTPUT",
 								current: output.recentPercentile,
 								baseline: output.baselinePercentile,

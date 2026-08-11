@@ -1,8 +1,7 @@
 import { createHash } from "crypto";
 import type { GraphQLContext } from "../graphql/context";
 
-export const GRAPHQL_CACHE_NAMESPACE = "llm:v3:gql";
-export const GRAPHQL_CACHE_SCHEMA_VERSION = "v3";
+export const GRAPHQL_CACHE_NAMESPACE = "llm:gql";
 
 const safeRevision = (value: string): string => {
 	if (!/^[a-zA-Z0-9.-]+$/.test(value)) throw new Error("Invalid Data dataset revision");
@@ -28,5 +27,5 @@ export const gqlCacheKey = (
 		.update(`${context.currentSeason.seasonCode}:${key}`, "utf8")
 		.digest("hex")
 		.slice(0, 32);
-	return `${GRAPHQL_CACHE_NAMESPACE}:${GRAPHQL_CACHE_SCHEMA_VERSION}:${safeRevision(datasetRevision)}:${queryName(key)}:${argsHash}`;
+	return `${GRAPHQL_CACHE_NAMESPACE}:${safeRevision(datasetRevision)}:${queryName(key)}:${argsHash}`;
 };

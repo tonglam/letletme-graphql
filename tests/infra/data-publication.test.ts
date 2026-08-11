@@ -12,10 +12,24 @@ import {
 } from "../helpers/data-publication";
 
 const scope = { dataset: "fpl:core" as const, seasonCode: "2627" };
-const expectedItems = ["events", "teams"] as const;
+const expectedItems = [
+	"events",
+	"teams",
+	"players",
+	"phases",
+	"fixtures",
+	"currentEventId",
+] as const;
 
 const publication = (): TestPublication =>
-	createTestPublication(scope, 7, { events: [{ id: 1 }], teams: [{ id: 2 }] });
+	createTestPublication(scope, 7, {
+		events: [{ id: 1 }],
+		teams: [{ id: 2 }],
+		players: [],
+		phases: [],
+		fixtures: [],
+		currentEventId: 1,
+	});
 
 type MutableManifestItem = Omit<
 	{
@@ -27,8 +41,8 @@ type MutableManifestItem = Omit<
 > & { type: string };
 type MutableManifest = Omit<
 	{ -readonly [Key in keyof DataPublicationManifest]: DataPublicationManifest[Key] },
-	"items" | "planVersion"
-> & { items: MutableManifestItem[]; planVersion: string };
+	"items"
+> & { items: MutableManifestItem[] };
 
 const replaceManifest = (
 	redis: TestRedis,
@@ -65,6 +79,10 @@ describe("Data publication reader", () => {
 		const next = createTestPublication(scope, 8, {
 			events: [{ id: 3 }],
 			teams: [{ id: 4 }],
+			players: [],
+			phases: [],
+			fixtures: [],
+			currentEventId: 1,
 		});
 		for (const [key, value] of next.store) redis.values.set(key, value);
 		const nextRead = await readDataPublication(redis as never, scope, expectedItems);
@@ -76,7 +94,7 @@ describe("Data publication reader", () => {
 	it("rejects wrong scope, missing/extra items, duplicate names, and noncanonical item keys", async () => {
 		const cases: Array<(manifest: MutableManifest) => void> = [
 			(manifest) => {
-				manifest.planVersion = "3.2.3";
+				(manifest as unknown as Record<string, unknown>).unexpected = true;
 			},
 			(manifest) => {
 				manifest.seasonCode = "2526";
@@ -85,13 +103,13 @@ describe("Data publication reader", () => {
 				manifest.items.pop();
 			},
 			(manifest) => {
-				manifest.items.push({ ...manifest.items[0]!, name: "players" });
+				manifest.items.push({ ...manifest.items[0]!, name: "unknownItem" });
 			},
 			(manifest) => {
 				manifest.items[1]!.name = "events";
 			},
 			(manifest) => {
-				manifest.items[0]!.key = "llm:v3:data:foreign";
+				manifest.items[0]!.key = "llm:data:foreign";
 			},
 		];
 		for (const mutate of cases) {

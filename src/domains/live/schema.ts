@@ -38,7 +38,6 @@ export const liveTypeDefs = /* GraphQL */ `
 	}
 
 	type LiveSnapshotMeta {
-		schemaVersion: Int!
 		season: String!
 		eventId: Int!
 		revision: String!

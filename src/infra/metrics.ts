@@ -27,7 +27,7 @@ const authTokenValidations = new Counter({
 
 const graphqlIngressRequests = new Counter({
 	name: "graphql_ingress_requests_total",
-	help: "GraphQL requests by trusted or compatibility ingress class",
+	help: "GraphQL requests by trusted ingress class",
 	labelNames: ["class"] as const,
 });
 

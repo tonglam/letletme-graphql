@@ -1,9 +1,7 @@
 import { createHash } from "crypto";
 import type Redis from "ioredis";
 
-export const DATA_CACHE_NAMESPACE = "llm:v3:data";
-export const DATA_PUBLICATION_SCHEMA_VERSION = "v3";
-export const DATA_PLATFORM_PLAN_VERSION = "3.2.5";
+export const DATA_CACHE_NAMESPACE = "llm:data";
 
 export type DataPublicationDataset = "fpl:core" | "fpl:live";
 
@@ -23,8 +21,6 @@ export type DataPublicationManifestItem = Readonly<{
 }>;
 
 export type DataPublicationManifest = Readonly<{
-	schemaVersion: typeof DATA_PUBLICATION_SCHEMA_VERSION;
-	planVersion: typeof DATA_PLATFORM_PLAN_VERSION;
 	dataset: DataPublicationDataset;
 	seasonCode: string;
 	eventId: number | null;
@@ -32,7 +28,7 @@ export type DataPublicationManifest = Readonly<{
 	publicationId: string;
 	sourceCheckedAt: string;
 	publishedAt: string;
-	state?: string;
+	state: "active" | "scheduled" | "live" | "settled";
 	items: readonly DataPublicationManifestItem[];
 }>;
 
@@ -50,6 +46,47 @@ const publicationCache = new WeakMap<object, Map<string, CachedPublication>>();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const MANIFEST_FIELDS = [
+	"dataset",
+	"seasonCode",
+	"eventId",
+	"revision",
+	"publicationId",
+	"sourceCheckedAt",
+	"publishedAt",
+	"state",
+	"items",
+] as const;
+const MANIFEST_ITEM_FIELDS = ["name", "key", "type", "count", "bytes", "sha256"] as const;
+const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
+	"fpl:core": ["events", "teams", "players", "phases", "fixtures", "currentEventId"],
+	"fpl:live": ["eventLives", "fixtures", "liveFixtures", "liveBonus"],
+};
+
+const hasExactFields = (value: Record<string, unknown>, fields: readonly string[]): boolean => {
+	const actual = Object.keys(value).sort();
+	const expected = [...fields].sort();
+	return (
+		actual.length === expected.length && actual.every((field, index) => field === expected[index])
+	);
+};
+
+const hasExactItemNames = (dataset: DataPublicationDataset, names: readonly string[]): boolean => {
+	const actual = [...names].sort();
+	const expected = [...DATASET_ITEM_NAMES[dataset]].sort();
+	return (
+		actual.length === expected.length && actual.every((name, index) => name === expected[index])
+	);
+};
+
+const isCanonicalState = (
+	dataset: DataPublicationDataset,
+	state: unknown
+): state is DataPublicationManifest["state"] =>
+	dataset === "fpl:core"
+		? state === "active"
+		: state === "scheduled" || state === "live" || state === "settled";
 
 export const isDataPublicationId = (value: unknown): value is string =>
 	typeof value === "string" &&
@@ -115,11 +152,10 @@ export const parseDataPublicationManifest = (
 	if (!raw) return null;
 	try {
 		const value: unknown = JSON.parse(raw);
-		if (!isRecord(value)) return null;
+		if (!isRecord(value) || !hasExactFields(value, MANIFEST_FIELDS)) return null;
+		if (value.dataset !== "fpl:core" && value.dataset !== "fpl:live") return null;
+		const dataset = value.dataset;
 		if (
-			value.schemaVersion !== DATA_PUBLICATION_SCHEMA_VERSION ||
-			value.planVersion !== DATA_PLATFORM_PLAN_VERSION ||
-			(value.dataset !== "fpl:core" && value.dataset !== "fpl:live") ||
 			typeof value.seasonCode !== "string" ||
 			!/^\d{4}$/.test(value.seasonCode) ||
 			!Number.isSafeInteger(value.revision) ||
@@ -127,13 +163,14 @@ export const parseDataPublicationManifest = (
 			!isDataPublicationId(value.publicationId) ||
 			!isIsoDate(value.sourceCheckedAt) ||
 			!isIsoDate(value.publishedAt) ||
+			!isCanonicalState(dataset, value.state) ||
 			!Array.isArray(value.items)
 		) {
 			return null;
 		}
 
 		const manifestScope: DataPublicationScope = {
-			dataset: value.dataset,
+			dataset,
 			seasonCode: value.seasonCode,
 			...(value.eventId === null ? {} : { eventId: value.eventId as number }),
 		};
@@ -141,7 +178,7 @@ export const parseDataPublicationManifest = (
 		const revision = value.revision as number;
 		const names = new Set<string>();
 		for (const candidate of value.items) {
-			if (!isRecord(candidate)) return null;
+			if (!isRecord(candidate) || !hasExactFields(candidate, MANIFEST_ITEM_FIELDS)) return null;
 			const name = candidate.name;
 			if (
 				typeof name !== "string" ||
@@ -160,6 +197,7 @@ export const parseDataPublicationManifest = (
 			}
 			names.add(name);
 		}
+		if (!hasExactItemNames(dataset, [...names])) return null;
 
 		const manifest = value as DataPublicationManifest;
 		if (scope && !matchesScope(manifest, scope)) return null;

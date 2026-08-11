@@ -66,7 +66,7 @@ describe("marketPulse GraphQL contract", () => {
 			logger: { warn: () => undefined, error: () => undefined },
 			data: {},
 		} as never;
-		strings.set(gqlCacheKey(context, "market-pulse:v4:14"), JSON.stringify(pulse));
+		strings.set(gqlCacheKey(context, "market-pulse:14"), JSON.stringify(pulse));
 
 		const result = await graphql({ schema, source: query, contextValue: context });
 

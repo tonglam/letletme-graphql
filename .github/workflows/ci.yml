@@ -15,15 +15,11 @@ env:
   REDIS_PASSWORD: ""
   PORT: "4000"
   LOG_LEVEL: info
-  CACHE_TTL_SECONDS: "60"
   BACKEND_PROXY_SECRET: test-backend-proxy-secret
   GRAPHQL_SERVICE_TOKEN: test-graphql-service-token-at-least-32-characters
-  REQUIRE_SIGNED_WEB_INGRESS: "false"
-  GRAPHQL_AUTH_MODE: enforce
   CORS_ORIGIN: http://localhost:3000
   CORS_CREDENTIALS: "false"
   TRUSTED_PROXY_HOPS: "0"
-  LEGACY_AUTH_VALIDATION_UNTIL: ""
 
 jobs:
   verify:
@@ -118,7 +114,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tonglam/letletme_data
-          ref: 21f466d410c15e96d9f84e2c96ffeba66a36fbf2
+          ref: 9713eb18670c67cda5d37c2afa1ac2f30d55e078
           path: data-platform
           persist-credentials: false
 
@@ -139,7 +135,7 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: bun run db:migrate
 
-      - name: Provide plain-PG Supabase compatibility identities
+      - name: Provide plain-PG Supabase identities
         env:
           DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: |
@@ -155,14 +151,159 @@ jobs:
           AS $fn$ SELECT current_setting('request.jwt.claim.role', true) $fn$;
           SQL
 
-      - name: Replay accepted Data Platform SQL contract twice
+      - name: Apply SQL migrations through the GraphQL ledger boundary
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: >-
+          bun scripts/apply-sql-migrations.ts
+          --through 0079_create_v3_ops_and_roles.sql
+
+      - name: Install the historical GraphQL ledger fixture
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: >-
+          bun -e 'import postgres from "postgres";
+          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+          const ddl = await Bun.file("tests/fixtures/graphql-migration-ledger.sql").text();
+          await sql.unsafe(ddl);
+          await sql.end();'
+
+      - name: Apply SQL migrations through the production import boundary
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: >-
+          bun scripts/apply-sql-migrations.ts
+          --through 0089_prepare_v3_publications.sql
+
+      - name: Install the optional public-league source fixture
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: >-
+          bun -e 'import postgres from "postgres";
+          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+          const ddl = await Bun.file("tests/fixtures/public-league-trends-catalog.sql").text();
+          await sql.unsafe(ddl);
+          await sql.end();'
+
+      - name: Apply SQL migrations through the historical cutover boundary
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: >-
+          bun scripts/apply-sql-migrations.ts
+          --through 0090_zzzz_integrate_understat_runtime.sql
+
+      - name: Apply the historical cutover tail fixture
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: bun tests/helpers/apply-historical-cutover-tail.ts
+
+      - name: Apply canonical SQL migrations
+        working-directory: data-platform
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: bun run db:apply-sql
+
+      - name: Verify SQL migrations are idempotent and complete
         working-directory: data-platform
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: |
           bun run db:apply-sql
-          bun run db:apply-sql
           bun run db:migrate:status
+
+      - name: Install canonical core publication contract fixture
+        env:
+          DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: |
+          psql "$DATA_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          WITH current_publication AS (
+            SELECT
+              publication.publication_id,
+              publication.revision,
+              publication.season_id,
+              season.season_code,
+              coalesce(
+                publication.activated_at,
+                publication.created_at
+              ) AS published_at
+            FROM ops.dataset_publications publication
+            JOIN fpl.seasons season ON season.season_id = publication.season_id
+            WHERE publication.dataset = 'fpl:core'
+              AND publication.event_id IS NULL
+              AND publication.status = 'active'
+              AND season.is_current
+          ), item_names(name, ordinal) AS (
+            VALUES
+              ('events', 1),
+              ('teams', 2),
+              ('players', 3),
+              ('phases', 4),
+              ('fixtures', 5),
+              ('currentEventId', 6)
+          ), canonical_manifest AS (
+            SELECT
+              publication.publication_id,
+              jsonb_build_object(
+                'dataset', 'fpl:core',
+                'seasonCode', publication.season_code,
+                'eventId', NULL,
+                'revision', publication.revision,
+                'publicationId', publication.publication_id::text,
+                'sourceCheckedAt', publication.published_at,
+                'publishedAt', publication.published_at,
+                'state', 'active',
+                'items', jsonb_agg(
+                  jsonb_build_object(
+                    'name', item.name,
+                    'key', format(
+                      'llm:data:fpl:core:%s:%s:%s',
+                      publication.season_code,
+                      publication.revision,
+                      item.name
+                    ),
+                    'type', 'string',
+                    'count', 0,
+                    'bytes', 2,
+                    'sha256', repeat('0', 64)
+                  ) ORDER BY item.ordinal
+                )
+              ) AS manifest
+            FROM current_publication publication
+            CROSS JOIN item_names item
+            GROUP BY
+              publication.publication_id,
+              publication.revision,
+              publication.season_code,
+              publication.published_at
+          )
+          UPDATE ops.dataset_publications publication
+          SET manifest = fixture.manifest, updated_at = now()
+          FROM canonical_manifest fixture
+          WHERE publication.publication_id = fixture.publication_id;
+
+          DO $$
+          BEGIN
+            IF (
+              SELECT count(*)
+              FROM ops.dataset_publications publication
+              JOIN fpl.seasons season ON season.season_id = publication.season_id
+              WHERE publication.dataset = 'fpl:core'
+                AND publication.event_id IS NULL
+                AND publication.status = 'active'
+                AND season.is_current
+                AND jsonb_array_length(publication.manifest -> 'items') = 6
+            ) <> 1 THEN
+              RAISE EXCEPTION 'expected one canonical core publication fixture';
+            END IF;
+          END
+          $$;
+          SQL
 
       - name: Create exact Web auth reader fixture
         env:
@@ -204,8 +345,8 @@ jobs:
           GRANT letletme_graphql_reader TO graphql_ci;
           SQL
 
-      - name: Validate startup against the real PG15 v3 catalog
+      - name: Validate startup against the real PG15 catalog
         run: bun run contract:check
 
       - name: Exercise reader and fail-closed contract cases
-        run: bun test tests/infra/v3-read-client.test.ts tests/infra/database-contract.test.ts
+        run: bun test tests/infra/read-model-client.test.ts tests/infra/database-contract.test.ts

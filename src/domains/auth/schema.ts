@@ -8,7 +8,6 @@ export const authTypeDefs = `#graphql
     name: String
     emailVerified: Boolean!
     image: String
-    isAnonymous: Boolean!
     fplEntryId: Int
 		fplEntryVerifiedAt: String
   }

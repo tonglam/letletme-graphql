@@ -22,7 +22,7 @@ const contextForEvent = (currentEventId: number | null) => {
 	return buildSnapshotContext(new TestRedis(publication));
 };
 
-describe("eventsRepository over the v3 core publication", () => {
+describe("eventsRepository over the core publication", () => {
 	it("returns pre-season GW1 as next without inventing a current event", async () => {
 		await expect(eventsRepository.getCurrentEventInfo(contextForEvent(null))).resolves.toEqual({
 			season: "2627",

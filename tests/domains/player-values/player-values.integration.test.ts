@@ -75,7 +75,7 @@ const createContext = (
 			if (table === "fpl.player_fixture_stats") {
 				return createQueryBuilder(fixture.fixtureTeams ?? []);
 			}
-			throw new Error(`Unexpected v3 read model ${table}`);
+			throw new Error(`Unexpected read model ${table}`);
 		},
 	} as never;
 	return { context, reads };
@@ -130,7 +130,7 @@ const statsRow: Row = {
 	selected_by_percent: "12.5",
 };
 
-describe("playerValues GraphQL v3 reporting contract", () => {
+describe("playerValues GraphQL reporting contract", () => {
 	it("reads the season-scoped reporting view, filters the baseline, and normally expires", async () => {
 		const core = buildTestCoreData(1);
 		core.players[0] = { ...core.players[0]!, teamId: 2 };
@@ -189,7 +189,7 @@ describe("playerValues GraphQL v3 reporting contract", () => {
 		]);
 		expect(reads).toEqual(readsAfterFirst);
 		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":player-values-"));
-		expect(cacheWrite?.[0]).toMatch(/^llm:v3:gql:v3:core-7:player-values-20260809:/);
+		expect(cacheWrite?.[0]).toMatch(/^llm:gql:core-7:player-values-20260809:/);
 		expect(cacheWrite?.slice(-2)).toEqual(["EX", 300]);
 	});
 

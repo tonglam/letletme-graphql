@@ -40,7 +40,7 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 		"""
 		Full live calculation for an entry and event.
 
-		This is the GraphQL-native equivalent of the legacy LiveCalcData payload:
+		This is the GraphQL-native equivalent of the LiveCalcData payload:
 		- static data (entry/player/team/fixtures) comes from cached repositories
 		- dynamic data (event live points) comes from Live domain (short TTL)
 		- calculation is performed server-side for fast client consumption

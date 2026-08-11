@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { QueryResultRow } from "pg";
 import type { QueryExecutor } from "../../src/infra/database";
-import { V3_READ_MODELS, V3ReadClient, type V3ReadModel } from "../../src/infra/v3-read-client";
+import { READ_MODELS, ReadModelClient, type ReadModel } from "../../src/infra/read-model-client";
 
 type RecordedQuery = Readonly<{
 	text: string;
@@ -21,10 +21,10 @@ const makeExecutor = (
 	return { executor, queries };
 };
 
-const clientFor = (executor: QueryExecutor): V3ReadClient =>
-	new V3ReadClient(executor, { seasonId: 2026, seasonCode: "2627" });
+const clientFor = (executor: QueryExecutor): ReadModelClient =>
+	new ReadModelClient(executor, { seasonId: 2026, seasonCode: "2627" });
 
-describe("Data Platform v3 read client", () => {
+describe("Data Platform read client", () => {
 	it("binds season, filters, and OR values without interpolating caller input", async () => {
 		const { executor, queries } = makeExecutor([{ id: 1 }]);
 		const maliciousValue = "1 OR TRUE --";
@@ -55,8 +55,8 @@ describe("Data Platform v3 read client", () => {
 		const { executor, queries } = makeExecutor();
 		const client = clientFor(executor);
 
-		expect(() => client.read("fpl.players; DROP TABLE fpl.players" as V3ReadModel)).toThrow(
-			"Unknown Data Platform v3 read model"
+		expect(() => client.read("fpl.players; DROP TABLE fpl.players" as ReadModel)).toThrow(
+			"Unknown Data Platform read model"
 		);
 		expect(() => client.read("fpl.players").select("id, now()")).toThrow(
 			"Invalid read-model identifier"
@@ -110,11 +110,11 @@ describe("Data Platform v3 read client", () => {
 		const { executor, queries } = makeExecutor();
 		await clientFor(executor).probe();
 
-		expect(queries).toHaveLength(Object.keys(V3_READ_MODELS).length);
+		expect(queries).toHaveLength(Object.keys(READ_MODELS).length);
 		expect(queries.every((query) => query.values[0] === 2026)).toBe(true);
 		expect(queries.every((query) => query.text.includes("LIMIT 0"))).toBe(true);
 
-		const relations = V3ReadClient.sourceRelations();
+		const relations = ReadModelClient.sourceRelations();
 		expect(relations).toEqual([...relations].sort());
 		expect(new Set(relations).size).toBe(relations.length);
 		expect(relations).toContain("fpl.players");

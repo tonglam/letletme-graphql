@@ -1,7 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { getLiveDataSnapshot, type LiveFixtureData } from "../../infra/data-snapshot";
-import { MAX_EVENT_ID } from "../../infra/config";
-import { getCurrentEventId, getNextEventId } from "../../infra/event";
+import { getCurrentEventId } from "../../infra/event";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player, Team } from "../../infra/types";
@@ -29,29 +28,26 @@ export type LiveMatchData = {
 	awayScore: number;
 	awayTeamDataList: ElementEventResultData[];
 	kickoffTime: string | null;
-	playStatus: "NEXT_EVENT" | "NOT_STARTED" | "PLAYING" | "FINISHED";
+	playStatus: "NOT_STARTED" | "PLAYING" | "FINISHED";
 };
 
 export type LiveMatches = {
-	nextEvent: LiveMatchData[];
 	notStarted: LiveMatchData[];
 	playing: LiveMatchData[];
 	finished: LiveMatchData[];
 };
 
-type MatchBucketStatus = Exclude<LiveMatchData["playStatus"], "NEXT_EVENT">;
+type MatchBucketStatus = LiveMatchData["playStatus"];
 
 export const resolveLiveMatchStatus = (
 	fixture: Pick<Fixture, "id" | "teamHId" | "teamAId" | "finished" | "started">,
-	statusByFixtureId: ReadonlyMap<number, MatchBucketStatus>,
-	statusByPair: ReadonlyMap<string, MatchBucketStatus>
+	statusByFixtureId: ReadonlyMap<number, MatchBucketStatus>
 ): MatchBucketStatus =>
 	statusByFixtureId.get(fixture.id) ??
-	statusByPair.get(`${fixture.teamHId}:${fixture.teamAId}`) ??
 	(fixture.finished ? "FINISHED" : fixture.started ? "PLAYING" : "NOT_STARTED");
 
 type LiveFixtureRedisRow = {
-	fixtureId: number | null;
+	fixtureId: number;
 	teamId: number;
 	teamName: string;
 	teamShortName: string;
@@ -95,9 +91,8 @@ const liveFixtureRows = (buckets: MatchBucketsFromRedis): LiveFixtureRedisRow[] 
 /**
  * A cardinality match is not an identity match: a same-sized hash from another
  * event can otherwise look complete. Bind every parsed home-side row to the
- * coherent Fixtures sibling by fixture ID when available and always by the
- * ordered home/away team pair. Legacy rows without IDs consume one unmatched
- * expected pair, which also handles the unlikely duplicate-pair case safely.
+ * coherent Fixtures sibling by fixture ID and confirm its ordered home/away
+ * team identity.
  */
 export const matchesLiveFixtureIdentities = (
 	buckets: MatchBucketsFromRedis,
@@ -107,23 +102,9 @@ export const matchesLiveFixtureIdentities = (
 	if (rows.length !== expectedFixtures.length) return false;
 
 	const expectedById = new Map(expectedFixtures.map((fixture) => [fixture.id, fixture]));
-	const expectedIdsByPair = new Map<string, number[]>();
-	for (const fixture of expectedFixtures) {
-		const pair = `${fixture.teamHId}:${fixture.teamAId}`;
-		const ids = expectedIdsByPair.get(pair) ?? [];
-		ids.push(fixture.id);
-		expectedIdsByPair.set(pair, ids);
-	}
-
 	const matchedFixtureIds = new Set<number>();
 	for (const row of rows) {
-		const pair = `${row.teamId}:${row.againstId}`;
-		const fixture =
-			row.fixtureId === null
-				? expectedById.get(
-						expectedIdsByPair.get(pair)?.find((id) => !matchedFixtureIds.has(id)) ?? -1
-					)
-				: expectedById.get(row.fixtureId);
+		const fixture = expectedById.get(row.fixtureId);
 		if (
 			!fixture ||
 			matchedFixtureIds.has(fixture.id) ||
@@ -321,23 +302,17 @@ const getMaxMinutes = (teamDataList: ElementEventResultData[]): number => {
 const buildMatch = (
 	fixture: Fixture,
 	matchId: number,
-	playStatus: "NEXT_EVENT" | "NOT_STARTED" | "PLAYING" | "FINISHED",
+	playStatus: "NOT_STARTED" | "PLAYING" | "FINISHED",
 	teamDataMap: Map<number, ElementEventResultData[]>,
 	teamsById: Map<number, Team>
 ): LiveMatchData => {
 	const homeTeam = teamsById.get(fixture.teamHId);
 	const awayTeam = teamsById.get(fixture.teamAId);
 
-	// Get team data lists from pre-built map (empty for NEXT_EVENT)
-	const homeTeamDataList =
-		playStatus === "NEXT_EVENT" ? [] : (teamDataMap.get(fixture.teamHId) ?? []);
-	const awayTeamDataList =
-		playStatus === "NEXT_EVENT" ? [] : (teamDataMap.get(fixture.teamAId) ?? []);
+	const homeTeamDataList = teamDataMap.get(fixture.teamHId) ?? [];
+	const awayTeamDataList = teamDataMap.get(fixture.teamAId) ?? [];
 
-	const minutes =
-		playStatus === "NEXT_EVENT"
-			? 0
-			: Math.max(getMaxMinutes(homeTeamDataList), getMaxMinutes(awayTeamDataList));
+	const minutes = Math.max(getMaxMinutes(homeTeamDataList), getMaxMinutes(awayTeamDataList));
 
 	return {
 		matchId,
@@ -382,54 +357,17 @@ const sortByKickoffTime = (matches: LiveMatchData[]): LiveMatchData[] => {
 	});
 };
 
-export const loadUpcomingEventFixtures = async (
-	context: GraphQLContext,
-	currentEventId: number | null
-): Promise<Fixture[]> => {
-	const nextEventId =
-		currentEventId === null
-			? await getNextEventId(context)
-			: currentEventId < MAX_EVENT_ID
-				? currentEventId + 1
-				: null;
-	if (nextEventId === null) return [];
-	return withLiveSnapshotConsistency(
-		context,
-		nextEventId,
-		() => fixturesRepository.getEventFixtures(context, nextEventId),
-		// This read is nested inside the current-event liveMatches root. Its own
-		// revision remains coherent, but only the enclosing calculation may release
-		// sibling GraphQL roots from the request-wide first-pass barrier.
-		{ participateInRootBarrier: false }
-	);
-};
-
 const emptyLiveMatches = (): LiveMatches => ({
-	nextEvent: [],
 	notStarted: [],
 	playing: [],
 	finished: [],
 });
 
 export const liveMatchesService = {
-	async getAllLiveMatches(context: GraphQLContext, upcoming = false): Promise<LiveMatches> {
+	async getAllLiveMatches(context: GraphQLContext): Promise<LiveMatches> {
 		const currentEventId = await getCurrentEventId(context);
 
-		if (currentEventId === null) {
-			if (!upcoming) return emptyLiveMatches();
-			const [teamsById, nextFixtures] = await Promise.all([
-				buildTeamMap(context),
-				loadUpcomingEventFixtures(context, null),
-			]);
-			return {
-				...emptyLiveMatches(),
-				nextEvent: sortByKickoffTime(
-					nextFixtures.map((fixture) =>
-						buildMatch(fixture, fixture.id, "NEXT_EVENT", new Map(), teamsById)
-					)
-				),
-			};
-		}
+		if (currentEventId === null) return emptyLiveMatches();
 		return withLiveSnapshotConsistency(context, currentEventId, async () => {
 			const currentFixturesPromise = fixturesRepository.getEventFixtures(context, currentEventId);
 			const [teamsById, redisBuckets, currentFixtures] = await Promise.all([
@@ -444,9 +382,7 @@ export const liveMatchesService = {
 			let teamDataMap = new Map<number, ElementEventResultData[]>();
 
 			const statusByFixtureId = new Map<number, MatchBucketStatus>();
-			const statusByPair = new Map<string, MatchBucketStatus>();
 			const liveFixtureById = new Map<number, LiveFixtureRedisRow>();
-			const liveFixtureByPair = new Map<string, LiveFixtureRedisRow>();
 			if (redisBuckets) {
 				for (const [status, fixtures] of [
 					["NOT_STARTED", redisBuckets.notStarted],
@@ -454,13 +390,8 @@ export const liveMatchesService = {
 					["FINISHED", redisBuckets.finished],
 				] as const) {
 					for (const fixture of fixtures) {
-						if (fixture.fixtureId !== null) {
-							statusByFixtureId.set(fixture.fixtureId, status);
-							liveFixtureById.set(fixture.fixtureId, fixture);
-						}
-						const pairKey = `${fixture.teamId}:${fixture.againstId}`;
-						statusByPair.set(pairKey, status);
-						liveFixtureByPair.set(pairKey, fixture);
+						statusByFixtureId.set(fixture.fixtureId, status);
+						liveFixtureById.set(fixture.fixtureId, fixture);
 					}
 				}
 			}
@@ -489,10 +420,8 @@ export const liveMatchesService = {
 			}
 
 			for (const fixture of currentFixtures) {
-				const status = resolveLiveMatchStatus(fixture, statusByFixtureId, statusByPair);
-				const pairKey = `${fixture.teamHId}:${fixture.teamAId}`;
-				const liveFixture =
-					liveFixtureById.get(fixture.id) ?? liveFixtureByPair.get(pairKey) ?? null;
+				const status = resolveLiveMatchStatus(fixture, statusByFixtureId);
+				const liveFixture = liveFixtureById.get(fixture.id) ?? null;
 				const match = buildMatch(
 					applyLiveFixtureScores(fixture, liveFixture),
 					fixture.id,
@@ -505,16 +434,7 @@ export const liveMatchesService = {
 				else notStartedMatches.push(match);
 			}
 
-			let nextEventMatches: LiveMatchData[] = [];
-			if (upcoming && currentEventId < MAX_EVENT_ID) {
-				const nextFixtures = await loadUpcomingEventFixtures(context, currentEventId);
-				nextEventMatches = nextFixtures.map((fixture) =>
-					buildMatch(fixture, fixture.id, "NEXT_EVENT", teamDataMap, teamsById)
-				);
-			}
-
 			return {
-				nextEvent: sortByKickoffTime(nextEventMatches),
 				notStarted: sortByKickoffTime(notStartedMatches),
 				playing: sortByKickoffTime(playingMatches),
 				finished: sortByKickoffTime(finishedMatches),

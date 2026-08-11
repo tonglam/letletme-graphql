@@ -18,7 +18,7 @@ import {
 	toPublicationFixture,
 } from "../../helpers/data-publication";
 
-describe("v3 live snapshot metadata", () => {
+describe("live snapshot metadata", () => {
 	it("parses the exact live manifest scope, state, revision, and item counts", () => {
 		const core = buildTestCoreData(1);
 		const publication = buildLivePublication(core, 1, "2627", 8);
@@ -28,7 +28,6 @@ describe("v3 live snapshot metadata", () => {
 		});
 
 		expect(parsed).toEqual({
-			schemaVersion: 3,
 			season: "2627",
 			eventId: 1,
 			revision: "8",
@@ -74,7 +73,7 @@ describe("v3 live snapshot metadata", () => {
 		expect(first).toMatchObject({ revision: "8", eventLiveCount: 220, fixtureCount: 10 });
 		expect(isLiveSnapshotConsistencyActive(context, 1)).toBe(true);
 		expect(isLiveSnapshotDatabaseFallback(context, 1)).toBe(false);
-		expect(liveSnapshotMetaKey("2627", 1)).toBe("llm:v3:data:fpl:live:2627:1:active");
+		expect(liveSnapshotMetaKey("2627", 1)).toBe("llm:data:fpl:live:2627:1:active");
 	});
 
 	it("runs each consistency/root operation once over the immutable request snapshot", async () => {

@@ -66,8 +66,6 @@ export const createTestPublication = (
 		};
 	});
 	const manifest: DataPublicationManifest = {
-		schemaVersion: "v3",
-		planVersion: "3.2.5",
 		dataset: scope.dataset,
 		seasonCode: scope.seasonCode,
 		eventId: scope.eventId ?? null,
@@ -75,7 +73,7 @@ export const createTestPublication = (
 		publicationId: publicationId(revision),
 		sourceCheckedAt: options.sourceCheckedAt ?? publishedAt,
 		publishedAt,
-		...(options.state ? { state: options.state } : {}),
+		state: scope.dataset === "fpl:core" ? "active" : (options.state ?? "scheduled"),
 		items,
 	};
 	store.set(activeDataPublicationKey(scope), JSON.stringify(manifest));

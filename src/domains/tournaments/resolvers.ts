@@ -58,13 +58,13 @@ import type {
 	TournamentMode,
 	TournamentParticipant,
 	TournamentSeasonSnapshot,
+	TournamentSetupStatus,
 } from "./repository";
 import {
 	GroupMode,
 	KnockoutMode,
 	TournamentRosterMode,
 	TournamentSetupPhase,
-	TournamentSetupStatus,
 	TournamentState,
 } from "./repository";
 import {
@@ -298,8 +298,10 @@ export const tournamentsResolvers = {
 		knockoutMode: (parent: TournamentInfo): string | null =>
 			knockoutModeToEnum(parent.knockoutMode),
 		state: (parent: TournamentInfo): string => tournamentStateToEnum(parent.state),
-		setupStatus: (parent: TournamentInfo): string =>
-			tournamentSetupStatusToEnum(parent.setupStatus ?? TournamentSetupStatus.READY),
+		setupStatus: (parent: TournamentInfo): string => {
+			if (!parent.setupStatus) throw new Error("Tournament setup status is unavailable");
+			return tournamentSetupStatusToEnum(parent.setupStatus);
+		},
 		setupPhase: (parent: TournamentInfo): string =>
 			tournamentSetupPhaseToEnum(parent.setupPhase ?? TournamentSetupPhase.READY),
 		rosterMode: (parent: TournamentInfo): string =>
