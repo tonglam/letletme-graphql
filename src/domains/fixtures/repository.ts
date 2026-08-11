@@ -1,9 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
-import {
-	getCoreDataSnapshot,
-	getLiveDataSnapshot,
-	type CoreFixtureData,
-} from "../../infra/data-snapshot";
+import { getCoreDataSnapshot, type CoreFixtureData } from "../../infra/data-snapshot";
 import { getCurrentEventId } from "../../infra/event";
 import { metrics } from "../../infra/metrics";
 
@@ -92,9 +88,22 @@ export const fixturesRepository: FixturesRepository = {
 
 	async getEventFixtures(context, eventId) {
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) return [];
-		const snapshot = await getLiveDataSnapshot(context, eventId);
+		const snapshot = await getCoreDataSnapshot(context);
+		const fixtures = snapshot.fixtures
+			.map(mapFixture)
+			.filter((fixture) => fixture.eventId === eventId)
+			.sort(kickoffOrder);
 		metrics.cacheRepositoryEvents.labels("fixtures", snapshot.source).inc();
-		return snapshot.fixtures.map(mapFixture).sort(kickoffOrder);
+		context.logger.debug(
+			{
+				eventId,
+				fixtureCount: fixtures.length,
+				fixtureSource: snapshot.source,
+				fixtureRevision: snapshot.revision,
+			},
+			"Core fixture schedule loaded"
+		);
+		return fixtures;
 	},
 
 	async getCurrentFixtures(context) {
