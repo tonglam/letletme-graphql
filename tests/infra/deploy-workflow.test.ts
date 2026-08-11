@@ -39,4 +39,11 @@ describe("production deployment workflow", () => {
 		expect(workflow).not.toContain("docker image prune");
 		expect(workflow).not.toContain("schemaVersion");
 	});
+
+	test("does not hardcode legacy v-prefixed migration filenames", () => {
+		expect(workflow).not.toMatch(/--through\s+\d{4}_create_v[0-9]+_/);
+		expect(workflow).not.toMatch(/--through\s+\d{4}_prepare_v[0-9]+_/);
+		expect(workflow).not.toMatch(/--through\s+\d{4}_activate_v[0-9]+_/);
+		expect(workflow).not.toMatch(/--through\s+\d{4}_freeze_v[0-9]+_/);
+	});
 });
