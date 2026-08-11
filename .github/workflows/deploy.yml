@@ -79,16 +79,18 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
           GRAPHQL_ENV: ${{ secrets.GRAPHQL_ENV }}
+          V3_GRAPHQL_DB_PASSWORD: ${{ secrets.V3_GRAPHQL_DB_PASSWORD }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: true
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,V3_GRAPHQL_DB_PASSWORD
           script: |
             set -euo pipefail
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            [[ "$V3_GRAPHQL_DB_PASSWORD" =~ ^[A-Za-z0-9_-]{64}$ ]]
             image_name=${IMAGE_REF%@*}
             [[ "$image_name" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]]
             case "$VPS_WORKDIR" in
@@ -120,8 +122,54 @@ jobs:
 
             umask 077
             next_env=$(mktemp "$VPS_WORKDIR/.env.deploy.next.XXXXXX")
+            cleanup_env() {
+              rm -f "$next_env"
+            }
+            trap cleanup_env EXIT
             printf '%s' "$GRAPHQL_ENV" > "$next_env"
             chmod 600 "$next_env"
+            V3_GRAPHQL_DB_PASSWORD="$V3_GRAPHQL_DB_PASSWORD" python3 - "$next_env" <<'PY'
+            import os
+            import sys
+            from pathlib import Path
+            from urllib.parse import quote, unquote, urlsplit, urlunsplit
+
+            env_path = Path(sys.argv[1])
+            password = os.environ["V3_GRAPHQL_DB_PASSWORD"]
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+            database_url_indexes = [
+                index for index, line in enumerate(lines) if line.startswith("DATABASE_URL=")
+            ]
+            if len(database_url_indexes) != 1:
+                raise SystemExit("GRAPHQL_ENV must contain exactly one DATABASE_URL")
+
+            index = database_url_indexes[0]
+            raw_value = lines[index].split("=", 1)[1]
+            quote_char = ""
+            value = raw_value
+            if len(raw_value) >= 2 and raw_value[0] == raw_value[-1] and raw_value[0] in ("'", '"'):
+                quote_char = raw_value[0]
+                value = raw_value[1:-1]
+
+            parsed = urlsplit(value)
+            username = unquote(parsed.username or "")
+            if not username.startswith("letletme_graphql_runtime."):
+                raise SystemExit("DATABASE_URL must use letletme_graphql_runtime")
+            if not parsed.hostname:
+                raise SystemExit("DATABASE_URL must include a host")
+
+            host = parsed.hostname
+            if ":" in host:
+                host = f"[{host}]"
+            port = f":{parsed.port}" if parsed.port else ""
+            netloc = f"{quote(username, safe='')}:{quote(password, safe='')}@{host}{port}"
+            normalized = urlunsplit(
+                (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+            )
+            wrapped = f"{quote_char}{normalized}{quote_char}" if quote_char else normalized
+            lines[index] = f"DATABASE_URL={wrapped}"
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            PY
 
             old_container=$(APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
               docker compose ps --all -q graphql | head -n 1)
@@ -131,11 +179,6 @@ jobs:
               test -n "$old_image"
               docker image inspect "$old_image" >/dev/null
             fi
-
-            cleanup_env() {
-              rm -f "$next_env"
-            }
-            trap cleanup_env EXIT
 
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose pull graphql
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
