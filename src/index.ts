@@ -25,7 +25,7 @@ import { closeRedis, connectRedis, getRedis } from "./infra/redis";
 import { CurrentSeasonProvider } from "./infra/season";
 import { ReadModelClient } from "./infra/read-model-client";
 import {
-	checkRateLimit,
+	checkRateLimits,
 	handleRateLimitStorageFailure,
 	PayloadTooLargeError,
 	rateLimitKey,
@@ -33,12 +33,9 @@ import {
 } from "./http/security";
 import {
 	GRAPHQL_GLOBAL_ADMISSION_SUBJECT,
-	graphQLAdmissionSubjects,
 	graphQLIngressFailure,
 	graphQLMethodFailure,
 	graphQLUsesSharedPublicBudget,
-	graphQLWeightedRateLimitSubject,
-	shouldPrechargeResolvedPrincipal,
 } from "./http/graphql-policy";
 import {
 	extractGraphQLOperationName,
@@ -50,7 +47,7 @@ const GRAPHQL_RATE_LIMIT = 120;
 const GRAPHQL_SERVICE_RATE_LIMIT = 600;
 const RATE_LIMIT_WINDOW_SECONDS = 60;
 const GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT = 25 * RATE_LIMIT_WINDOW_SECONDS;
-const currentSeasonProvider = new CurrentSeasonProvider(database);
+const currentSeasonProvider = new CurrentSeasonProvider();
 
 function getCorsHeaders(origin: string | null): Record<string, string> {
 	const configuredOrigins = env.CORS_ORIGIN.split(",")
@@ -109,39 +106,42 @@ const jsonError = (
 		},
 	});
 
-const enforceGraphQLRateLimit = async ({
-	scope,
-	keyScope = scope,
+const enforceGraphQLAdmission = async ({
 	subject,
 	limit,
-	cost = 1,
-	message = "Too many requests",
+	cost,
 	corsHeaders,
 }: {
-	scope: string;
-	keyScope?: string;
 	subject: string;
 	limit: number;
-	cost?: number;
-	message?: string;
+	cost: number;
 	corsHeaders: Record<string, string>;
 }): Promise<Response | null> => {
-	let decision;
+	let decision: Awaited<ReturnType<typeof checkRateLimits>>;
 	try {
-		decision = await checkRateLimit(
-			getRedis(),
-			rateLimitKey(keyScope, subject),
-			limit,
-			RATE_LIMIT_WINDOW_SECONDS,
-			cost
-		);
+		decision = await checkRateLimits(getRedis(), [
+			{
+				scope: "graphql-global-admission",
+				key: rateLimitKey("graphql-global-admission", GRAPHQL_GLOBAL_ADMISSION_SUBJECT),
+				limit: GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
+				windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+				cost: 1,
+			},
+			{
+				scope: "graphql",
+				key: rateLimitKey("graphql", subject),
+				limit,
+				windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+				cost,
+			},
+		]);
 	} catch (error) {
-		metrics.graphqlRateLimitDecisions.labels(scope, "storage_unavailable").inc();
+		metrics.graphqlRateLimitDecisions.labels("graphql-admission", "storage_unavailable").inc();
 		try {
 			decision = handleRateLimitStorageFailure({
 				error,
 				failClosed: true,
-				scope,
+				scope: "graphql-admission",
 				logger,
 			});
 		} catch {
@@ -155,13 +155,16 @@ const enforceGraphQLRateLimit = async ({
 	}
 
 	if (!decision.allowed) {
-		metrics.graphqlRateLimitDecisions.labels(scope, "limited").inc();
-		return jsonError(429, "RATE_LIMITED", message, corsHeaders, {
+		metrics.graphqlRateLimitDecisions
+			.labels(decision.deniedScope ?? "graphql-admission", "limited")
+			.inc();
+		return jsonError(429, "RATE_LIMITED", "Too many requests", corsHeaders, {
 			"Retry-After": String(decision.retryAfterSeconds),
 		});
 	}
 
-	metrics.graphqlRateLimitDecisions.labels(scope, "allowed").inc();
+	metrics.graphqlRateLimitDecisions.labels("graphql-global-admission", "allowed").inc();
+	metrics.graphqlRateLimitDecisions.labels("graphql", "allowed").inc();
 	return null;
 };
 
@@ -179,7 +182,7 @@ async function healthCheck(): Promise<{ ok: boolean; body: string }> {
 	try {
 		await database.query("SELECT 1");
 		checks.postgres = "ok";
-		await currentSeasonProvider.get({ force: true });
+		currentSeasonProvider.get();
 		checks.season = "ok";
 	} catch {
 		checks.postgres = "fail";
@@ -309,16 +312,6 @@ const startServer = async (): Promise<void> => {
 						);
 					}
 
-					const globalAdmissionFailure = await requestTiming.measure("globalAdmission", () =>
-						enforceGraphQLRateLimit({
-							scope: "graphql-global-admission",
-							subject: GRAPHQL_GLOBAL_ADMISSION_SUBJECT,
-							limit: GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
-							corsHeaders,
-						})
-					);
-					if (globalAdmissionFailure) return globalAdmissionFailure;
-
 					const ingress = requestTiming.measureSync("ingressClassification", () =>
 						classifyGraphQLIngress(request.headers)
 					);
@@ -331,30 +324,6 @@ const startServer = async (): Promise<void> => {
 							ingressFailure.message,
 							corsHeaders
 						);
-					}
-
-					const admissionSubjects = graphQLAdmissionSubjects({
-						ingress,
-						principal: null,
-					});
-
-					let weightedRatePrecharged = false;
-					const ingressAdmissionSubject = admissionSubjects.ingress;
-					if (ingressAdmissionSubject) {
-						const ingressAdmissionFailure = await requestTiming.measure("ingressAdmission", () =>
-							enforceGraphQLRateLimit({
-								scope: admissionSubjects.prechargesWeightedBudget
-									? "graphql-preauthorization"
-									: "graphql-ingress-admission",
-								keyScope: admissionSubjects.prechargesWeightedBudget ? "graphql" : undefined,
-								subject: ingressAdmissionSubject,
-								limit:
-									ingress.class === "service" ? GRAPHQL_SERVICE_RATE_LIMIT : GRAPHQL_RATE_LIMIT,
-								corsHeaders,
-							})
-						);
-						if (ingressAdmissionFailure) return ingressAdmissionFailure;
-						weightedRatePrecharged = admissionSubjects.prechargesWeightedBudget;
 					}
 
 					const body = await requestTiming.measure("bodyRead", () => readRequestBody(request));
@@ -383,6 +352,18 @@ const startServer = async (): Promise<void> => {
 					if (!limits.ok) {
 						return jsonError(400, limits.code, limits.message, corsHeaders);
 					}
+					const rateLimit = graphQLUsesSharedPublicBudget(ingress)
+						? GRAPHQL_SERVICE_RATE_LIMIT
+						: GRAPHQL_RATE_LIMIT;
+					const admissionFailure = await requestTiming.measure("admission", () =>
+						enforceGraphQLAdmission({
+							subject: ingress.subject ?? "trusted-ingress",
+							limit: rateLimit,
+							cost: Math.max(1, limits.rateLimitCostUnits),
+							corsHeaders,
+						})
+					);
+					if (admissionFailure) return admissionFailure;
 
 					const { principal, user } = await requestTiming.measure("principal", () =>
 						resolvePrincipalAndUser(request)
@@ -398,43 +379,8 @@ const startServer = async (): Promise<void> => {
 							corsHeaders
 						);
 					}
-					let currentSeason;
-					try {
-						currentSeason = await requestTiming.measure("season", () =>
-							currentSeasonProvider.get()
-						);
-					} catch (error) {
-						logger.error({ err: error }, "Current season authority is unavailable");
-						return jsonError(
-							503,
-							"DATABASE_METADATA_UNAVAILABLE",
-							"Current season metadata is unavailable",
-							corsHeaders
-						);
-					}
+					const currentSeason = currentSeasonProvider.get();
 					const data = new ReadModelClient(database, currentSeason);
-					const rateLimitSubject = graphQLWeightedRateLimitSubject({
-						ingress,
-						principal,
-					});
-					const rateLimit = graphQLUsesSharedPublicBudget(ingress)
-						? GRAPHQL_SERVICE_RATE_LIMIT
-						: GRAPHQL_RATE_LIMIT;
-					if (shouldPrechargeResolvedPrincipal(principal, weightedRatePrecharged)) {
-						const principalAdmissionFailure = await requestTiming.measure(
-							"principalAdmission",
-							() =>
-								enforceGraphQLRateLimit({
-									scope: "graphql-preauthorization",
-									keyScope: "graphql",
-									subject: rateLimitSubject,
-									limit: rateLimit,
-									corsHeaders,
-								})
-						);
-						if (principalAdmissionFailure) return principalAdmissionFailure;
-						weightedRatePrecharged = true;
-					}
 					const authorization = await requestTiming.measure("authorization", () =>
 						authorizeGraphQLRequest({
 							body: parsedBody,
@@ -473,21 +419,6 @@ const startServer = async (): Promise<void> => {
 							"Data publication is temporarily unavailable",
 							corsHeaders
 						);
-					}
-
-					const remainingWeightedCost =
-						limits.rateLimitCostUnits - (weightedRatePrecharged ? 1 : 0);
-					if (remainingWeightedCost > 0) {
-						const weightedRateFailure = await requestTiming.measure("weightedAdmission", () =>
-							enforceGraphQLRateLimit({
-								scope: "graphql",
-								subject: rateLimitSubject,
-								limit: rateLimit,
-								cost: remainingWeightedCost,
-								corsHeaders,
-							})
-						);
-						if (weightedRateFailure) return weightedRateFailure;
 					}
 
 					const headers = new HeaderMap();

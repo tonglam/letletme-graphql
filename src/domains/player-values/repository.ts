@@ -53,6 +53,28 @@ export interface PlayerValuesRepository {
 	): Promise<PlayerValueHistoryRepositoryItem[]>;
 }
 
+async function measureRequestStage<T>(
+	context: GraphQLContext,
+	stage: string,
+	task: () => PromiseLike<T> | T
+): Promise<T> {
+	const stop = context.requestTiming?.start(stage);
+	try {
+		return await task();
+	} finally {
+		stop?.();
+	}
+}
+
+function measureRequestStageSync<T>(context: GraphQLContext, stage: string, task: () => T): T {
+	const stop = context.requestTiming?.start(stage);
+	try {
+		return task();
+	} finally {
+		stop?.();
+	}
+}
+
 function getCompactDateString(date: Date): string {
 	const year = date.getUTCFullYear();
 	const month = String(date.getUTCMonth() + 1).padStart(2, "0");
@@ -231,10 +253,12 @@ async function getPlayerValuesFromDatabase(
 ): Promise<PlayerValue[]> {
 	const targetDate = getCompactDateString(changeDate);
 
-	const { data, error } = await context.data
-		.read("reporting.player_value_changes")
-		.select("element_id, element_type, event_id, value, last_value, change_date, change_type")
-		.eq("change_date", targetDate);
+	const { data, error } = await measureRequestStage(context, "playerValues.databaseChanges", () =>
+		context.data
+			.read("reporting.player_value_changes")
+			.select("element_id, element_type, event_id, value, last_value, change_date, change_type")
+			.eq("change_date", targetDate)
+	);
 
 	if (error) {
 		context.logger.error(
@@ -277,22 +301,26 @@ async function getPlayerValuesFromDatabase(
 	);
 
 	const [core, statsResult, fixtureTeamsResult] = await Promise.all([
-		getCoreDataSnapshot(context),
+		measureRequestStage(context, "playerValues.coreSnapshot", () => getCoreDataSnapshot(context)),
 		eventIds.length > 0
-			? context.data
-					.read("fpl.player_event_snapshots")
-					.select(
-						"element_id, event_id, total_points, form, transfers_in_event, transfers_out_event, selected_by_percent"
-					)
-					.in("element_id", elementIds)
-					.in("event_id", eventIds)
+			? measureRequestStage(context, "playerValues.statsEnrichment", () =>
+					context.data
+						.read("fpl.player_event_snapshots")
+						.select(
+							"element_id, event_id, total_points, form, transfers_in_event, transfers_out_event, selected_by_percent"
+						)
+						.in("element_id", elementIds)
+						.in("event_id", eventIds)
+				)
 			: Promise.resolve({ data: [], error: null }),
 		eventIds.length > 0
-			? context.data
-					.read("fpl.player_fixture_stats")
-					.select("element_id, event_id, team_id")
-					.in("element_id", elementIds)
-					.in("event_id", eventIds)
+			? measureRequestStage(context, "playerValues.fixtureTeamEnrichment", () =>
+					context.data
+						.read("fpl.player_fixture_stats")
+						.select("element_id, event_id, team_id")
+						.in("element_id", elementIds)
+						.in("event_id", eventIds)
+				)
 			: Promise.resolve({ data: [], error: null }),
 	]);
 	if (statsResult.error || fixtureTeamsResult.error) {
@@ -318,45 +346,47 @@ async function getPlayerValuesFromDatabase(
 			.map((row) => [`${row.element_id}:${row.event_id}`, row.team_id] as const)
 	);
 
-	return changedRows.map((row) => {
-		const base = mapDbRowToPlayerValue(row);
-		const player = playerById.get(base.playerId);
-		const stat = row.event_id
-			? statsByPlayerEvent.get(`${base.playerId}:${row.event_id}`)
-			: undefined;
-		const teamId =
-			(row.event_id
-				? fixtureTeamByPlayerEvent.get(`${base.playerId}:${row.event_id}`)
-				: undefined) ??
-			player?.teamId ??
-			0;
-		const team = teamById.get(teamId);
-		const transfersIn = stat?.transfers_in_event ?? 0;
-		const transfersOut = stat?.transfers_out_event ?? 0;
-		const position = toPositionCode(row.element_type ?? player?.type);
+	return measureRequestStageSync(context, "playerValues.transform", () =>
+		changedRows.map((row) => {
+			const base = mapDbRowToPlayerValue(row);
+			const player = playerById.get(base.playerId);
+			const stat = row.event_id
+				? statsByPlayerEvent.get(`${base.playerId}:${row.event_id}`)
+				: undefined;
+			const teamId =
+				(row.event_id
+					? fixtureTeamByPlayerEvent.get(`${base.playerId}:${row.event_id}`)
+					: undefined) ??
+				player?.teamId ??
+				0;
+			const team = teamById.get(teamId);
+			const transfersIn = stat?.transfers_in_event ?? 0;
+			const transfersOut = stat?.transfers_out_event ?? 0;
+			const position = toPositionCode(row.element_type ?? player?.type);
 
-		return {
-			...base,
-			playerName: player?.webName ?? "",
-			teamId,
-			teamName: team?.name ?? "",
-			teamShortName: team?.shortName ?? base.teamShortName,
-			position,
-			positionEnum: toPositionEnum(position),
-			price: player?.price ?? 0,
-			points: stat?.total_points ?? 0,
-			selectedBy:
-				parseNullableNumber(stat?.selected_by_percent ?? null) ?? player?.selectedByPercent ?? 0,
-			transfersIn,
-			transfersOut,
-			netTransfers: transfersIn - transfersOut,
-			form: parseNullableNumber(stat?.form ?? null),
-			totalPoints: stat?.total_points ?? 0,
-			// player_event_snapshots.total_points is season-cumulative, not event-scoped.
-			// The reporting view has no authoritative per-event points fallback.
-			eventPoints: null,
-		};
-	});
+			return {
+				...base,
+				playerName: player?.webName ?? "",
+				teamId,
+				teamName: team?.name ?? "",
+				teamShortName: team?.shortName ?? base.teamShortName,
+				position,
+				positionEnum: toPositionEnum(position),
+				price: player?.price ?? 0,
+				points: stat?.total_points ?? 0,
+				selectedBy:
+					parseNullableNumber(stat?.selected_by_percent ?? null) ?? player?.selectedByPercent ?? 0,
+				transfersIn,
+				transfersOut,
+				netTransfers: transfersIn - transfersOut,
+				form: parseNullableNumber(stat?.form ?? null),
+				totalPoints: stat?.total_points ?? 0,
+				// player_event_snapshots.total_points is season-cumulative, not event-scoped.
+				// The reporting view has no authoritative per-event points fallback.
+				eventPoints: null,
+			};
+		})
+	);
 }
 
 const NULL_SENTINEL = "__pv:null__";
@@ -432,15 +462,37 @@ export const playerValuesRepository: PlayerValuesRepository = {
 	async getPlayerValues(context: GraphQLContext, changeDate: Date): Promise<PlayerValue[]> {
 		const cacheKey = gqlCacheKey(context, `player-values:${getCompactDateString(changeDate)}`);
 		try {
-			const cached = await context.redis.get(cacheKey);
+			const cached = await measureRequestStage(context, "playerValues.cacheRead", () =>
+				context.redis.get(cacheKey)
+			);
 			if (cached === NULL_SENTINEL) {
 				metrics.cacheRepositoryEvents.labels("player_values", "query_hit").inc();
+				context.logger.debug(
+					{
+						requestId: context.requestId,
+						operationName: context.operationName,
+						source: "negative-hit",
+						resultCount: 0,
+					},
+					"Player values loaded"
+				);
 				return [];
 			}
 			if (cached !== null) {
-				const parsed = parsePlayerValuesCache(cached);
+				const parsed = measureRequestStageSync(context, "playerValues.cacheParse", () =>
+					parsePlayerValuesCache(cached)
+				);
 				if (parsed) {
 					metrics.cacheRepositoryEvents.labels("player_values", "query_hit").inc();
+					context.logger.debug(
+						{
+							requestId: context.requestId,
+							operationName: context.operationName,
+							source: "cache-hit",
+							resultCount: parsed.length,
+						},
+						"Player values loaded"
+					);
 					return parsed;
 				}
 				await context.redis.del(cacheKey);
@@ -455,16 +507,27 @@ export const playerValuesRepository: PlayerValuesRepository = {
 		metrics.cacheRepositoryEvents.labels("player_values", "database_read").inc();
 
 		try {
-			await context.redis.set(
-				cacheKey,
-				values.length === 0 ? NULL_SENTINEL : JSON.stringify(values),
-				"EX",
-				QUERY_CACHE_TTL_SECONDS.MARKET
+			await measureRequestStage(context, "playerValues.cacheWrite", () =>
+				context.redis.set(
+					cacheKey,
+					values.length === 0 ? NULL_SENTINEL : JSON.stringify(values),
+					"EX",
+					QUERY_CACHE_TTL_SECONDS.MARKET
+				)
 			);
 		} catch (error) {
 			context.logger.warn({ err: error, cacheKey }, "Failed to write player-values query cache");
 		}
 
+		context.logger.debug(
+			{
+				requestId: context.requestId,
+				operationName: context.operationName,
+				source: "database",
+				resultCount: values.length,
+			},
+			"Player values loaded"
+		);
 		return values;
 	},
 

@@ -45,19 +45,12 @@ describe("PostgreSQL current-season authority", () => {
 		await expect(loadCurrentSeason(database)).rejects.toBeInstanceOf(GraphQLError);
 	});
 
-	it("memoizes a database-authoritative season for the bounded provider TTL", async () => {
-		let queries = 0;
-		const provider = new CurrentSeasonProvider(
-			executorWithRows([{ season_id: 2026, season_code: "2627" }], () => {
-				queries += 1;
-			}),
-			60_000
-		);
-		await expect(provider.get()).resolves.toEqual({ seasonId: 2026, seasonCode: "2627" });
-		await expect(provider.get()).resolves.toEqual({ seasonId: 2026, seasonCode: "2627" });
-		expect(queries).toBe(1);
-		await provider.get({ force: true });
-		expect(queries).toBe(2);
+	it("holds an immutable startup-authoritative season without database refresh", () => {
+		const provider = new CurrentSeasonProvider();
+		expect(() => provider.get()).toThrow(GraphQLError);
+		provider.seed({ seasonId: 2026, seasonCode: "2627" });
+		expect(provider.get()).toEqual({ seasonId: 2026, seasonCode: "2627" });
+		expect(provider.get()).toEqual({ seasonId: 2026, seasonCode: "2627" });
 	});
 
 	it("reads request context season metadata without a Redis fallback", async () => {

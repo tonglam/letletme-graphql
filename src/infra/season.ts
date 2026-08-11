@@ -52,33 +52,15 @@ export const loadCurrentSeason = async (database: QueryExecutor): Promise<Curren
 };
 
 export class CurrentSeasonProvider {
-	private cached: { value: CurrentSeason; expiresAt: number } | null = null;
-	private inFlight: Promise<CurrentSeason> | null = null;
+	private value: CurrentSeason | null = null;
 
-	constructor(
-		private readonly database: QueryExecutor,
-		private readonly ttlMs = 30_000
-	) {}
-
-	async get(options: { force?: boolean } = {}): Promise<CurrentSeason> {
-		const now = Date.now();
-		if (!options.force && this.cached && this.cached.expiresAt > now) return this.cached.value;
-		if (!options.force && this.inFlight) return this.inFlight;
-
-		const request = loadCurrentSeason(this.database).then((value) => {
-			this.cached = { value, expiresAt: Date.now() + this.ttlMs };
-			return value;
-		});
-		this.inFlight = request;
-		try {
-			return await request;
-		} finally {
-			if (this.inFlight === request) this.inFlight = null;
-		}
+	get(): CurrentSeason {
+		if (!this.value) throw unavailable();
+		return this.value;
 	}
 
 	seed(value: CurrentSeason): void {
-		this.cached = { value, expiresAt: Date.now() + this.ttlMs };
+		this.value = Object.freeze({ ...value });
 	}
 }
 
