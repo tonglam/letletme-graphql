@@ -87,43 +87,209 @@ jobs:
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV
           script: |
             set -euo pipefail
+            [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            case "$VPS_WORKDIR" in
+              /*) ;;
+              *) echo "VPS_WORKDIR must be an absolute path"; exit 1 ;;
+            esac
+            test "$VPS_WORKDIR" != "/"
+
             lower_user=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$lower_user" --password-stdin
+
+            if [ ! -d "$VPS_WORKDIR/.git" ]; then
+              if [ -d "$VPS_WORKDIR" ] && [ -n "$(find "$VPS_WORKDIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+                echo "GraphQL VPS workdir exists but is not an empty Git checkout"
+                exit 1
+              fi
+              mkdir -p "$(dirname "$VPS_WORKDIR")"
+              git clone https://github.com/tonglam/letletme-graphql.git "$VPS_WORKDIR"
+            fi
+
             cd "$VPS_WORKDIR"
+            git diff --quiet || { echo "GraphQL VPS checkout has tracked modifications"; exit 1; }
+            git diff --cached --quiet || { echo "GraphQL VPS index has staged modifications"; exit 1; }
             git fetch origin main
+            test "$(git rev-parse origin/main)" = "$DEPLOY_SHA"
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
 
             umask 077
-            printf '%s' "$GRAPHQL_ENV" > .env.deploy
-            chmod 600 .env.deploy
+            next_env=$(mktemp "$VPS_WORKDIR/.env.deploy.next.XXXXXX")
+            printf '%s' "$GRAPHQL_ENV" > "$next_env"
+            chmod 600 "$next_env"
 
-            old_container=$(docker compose ps -q graphql)
+            old_container=$(APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
+              docker compose ps --all -q graphql | head -n 1)
+            old_image=""
             if [ -n "$old_container" ]; then
               old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
               test -n "$old_image"
-              printf '%s\n' "$old_image" > /home/workspace/.letletme-graphql-previous-image
+              docker image inspect "$old_image" >/dev/null
             fi
 
-            APP_IMAGE="$IMAGE_REF" docker compose pull graphql
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T graphql bun run contract:check
-            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build graphql
+            cleanup_env() {
+              rm -f "$next_env"
+            }
+            trap cleanup_env EXIT
+
+            APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose pull graphql
+            APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
+              docker compose run --rm -T graphql bun run contract:check
+            curl --fail --silent http://127.0.0.1:3000/health >/dev/null
+
+            rollback_armed=false
+            rollback_graphql_on_exit() {
+              original_status=$?
+              trap - EXIT
+              set +e
+              if [ "$rollback_armed" = true ]; then
+                if [ -n "$old_image" ]; then
+                  echo "GraphQL deployment failed; restoring the previous image"
+                  rollback_env="$next_env"
+                  if [ -f .env.deploy ]; then
+                    rollback_env=.env.deploy
+                  fi
+                  APP_ENV_FILE="$rollback_env" APP_IMAGE="$old_image" docker compose up \
+                    -d --no-deps --no-build --force-recreate graphql
+                  rollback_restored=false
+                  for rollback_attempt in $(seq 1 30); do
+                    if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
+                      rollback_restored=true
+                      break
+                    fi
+                    sleep 2
+                  done
+                  if [ "$rollback_restored" = true ]; then
+                    echo "GraphQL rollback restored the previous image"
+                  else
+                    echo "GraphQL rollback failed to restore a healthy service"
+                    APP_ENV_FILE="$rollback_env" APP_IMAGE="$old_image" \
+                      docker compose logs --tail 100 graphql || true
+                  fi
+                else
+                  echo "GraphQL deployment failed without a previous image; removing the failed container"
+                  APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
+                    docker compose rm --stop --force graphql || true
+                fi
+              fi
+              rm -f "$next_env"
+              exit "$original_status"
+            }
+            trap rollback_graphql_on_exit EXIT
+            rollback_armed=true
+
+            APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose stop -t 30 graphql
+            test -z "$(APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose ps -q graphql)"
+            APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose up \
+              -d --remove-orphans --no-build --force-recreate graphql
 
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
                 break
               fi
               if [ "$attempt" -eq 30 ]; then
-                docker compose ps
-                docker logs --tail 100 "$(docker compose ps -q graphql)" || true
+                APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose ps
+                APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
+                  docker compose logs --tail 100 graphql || true
                 exit 1
               fi
               sleep 2
             done
 
-            container=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q graphql)
+            anonymous_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              --header 'Content-Type: application/json' \
+              --data '{"query":"query { currentEventInfo { season } }"}' \
+              http://127.0.0.1:4000/graphql)
+            test "$anonymous_status" = '401'
+
+            APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose exec -T graphql bun -e '
+              const token = process.env.GRAPHQL_SERVICE_TOKEN;
+              if (!token) throw new Error("Missing GRAPHQL_SERVICE_TOKEN");
+              const request = async (query, variables = {}) => {
+                const response = await fetch("http://127.0.0.1:4000/graphql", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-GraphQL-Service-Token": token,
+                  },
+                  body: JSON.stringify({ query, variables }),
+                });
+                const payload = await response.json();
+                if (response.status !== 200 || payload.errors) {
+                  throw new Error("GraphQL deployment smoke failed: " + JSON.stringify(payload.errors));
+                }
+                return payload.data;
+              };
+              const data = await request(`query DeploymentSmoke {
+                currentEventInfo { season currentEvent nextEvent }
+                players(limit: 1) { id webName price }
+              }`);
+              const info = data?.currentEventInfo;
+              if (
+                !/^[0-9]{4}$/.test(info?.season ?? "") ||
+                !Array.isArray(data?.players) ||
+                data.players.length !== 1
+              ) {
+                throw new Error("GraphQL deployment core contract failed");
+              }
+              const eventId =
+                Number.isInteger(info.currentEvent) && info.currentEvent > 0
+                  ? info.currentEvent
+                  : Number.isInteger(info.nextEvent) && info.nextEvent > 0
+                    ? info.nextEvent
+                    : null;
+              if (!eventId) throw new Error("GraphQL deployment has no current or next event");
+              const live = await request(
+                `query LiveDeploymentSmoke($eventId: Int!) {
+                  liveSnapshot(eventId: $eventId) {
+                    season eventId revision state eventLiveCount fixtureCount
+                  }
+                }`,
+                { eventId },
+              );
+              const snapshot = live?.liveSnapshot;
+              if (snapshot?.season !== info.season || snapshot?.eventId !== eventId) {
+                throw new Error("GraphQL deployment live contract failed");
+              }
+              console.log(JSON.stringify({
+                status: "graphql_deployment_contract_passed",
+                season: info.season,
+                eventId,
+                liveState: snapshot.state,
+              }));
+            '
+
+            container=$(APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose ps -q graphql)
             test -n "$container"
             test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "$IMAGE_REF"
-            docker compose ps graphql
+            for attempt in $(seq 1 20); do
+              container_health=$(docker inspect --format '{{.State.Health.Status}}' "$container")
+              if [ "$container_health" = 'healthy' ]; then
+                break
+              fi
+              if [ "$attempt" -eq 20 ]; then
+                echo "GraphQL container health did not settle: $container_health"
+                APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
+                  docker compose logs --tail 100 graphql || true
+                exit 1
+              fi
+              sleep 3
+            done
+
+            mv "$next_env" .env.deploy
+            chmod 600 .env.deploy
+            if [ -n "$old_image" ]; then
+              printf '%s\n' "$old_image" > "$HOME/.letletme-graphql-previous-image"
+              chmod 600 "$HOME/.letletme-graphql-previous-image"
+            fi
+
+            rollback_armed=false
+            trap - EXIT
             docker image prune --force
+            if [ -n "$old_image" ]; then
+              docker image inspect "$old_image" >/dev/null
+            fi
+            APP_IMAGE="$IMAGE_REF" docker compose ps graphql
