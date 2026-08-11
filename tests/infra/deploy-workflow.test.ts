@@ -37,6 +37,22 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain('--filter "reference=${image_name}:*"');
 		expect(workflow).toContain("--filter dangling=true");
 		expect(workflow).not.toContain("docker image prune");
-		expect(workflow).not.toContain("schemaVersion");
+		expect(workflow).not.toContain("schema" + "Version");
+	});
+
+	test("does not hardcode retired generation-prefixed migration filenames", () => {
+		const generationPrefix = "v";
+		expect(workflow).not.toMatch(
+			new RegExp(`--through\\s+\\d{4}_create_${generationPrefix}[0-9]+_`)
+		);
+		expect(workflow).not.toMatch(
+			new RegExp(`--through\\s+\\d{4}_prepare_${generationPrefix}[0-9]+_`)
+		);
+		expect(workflow).not.toMatch(
+			new RegExp(`--through\\s+\\d{4}_activate_${generationPrefix}[0-9]+_`)
+		);
+		expect(workflow).not.toMatch(
+			new RegExp(`--through\\s+\\d{4}_freeze_${generationPrefix}[0-9]+_`)
+		);
 	});
 });
