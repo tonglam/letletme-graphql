@@ -89,6 +89,8 @@ jobs:
             set -euo pipefail
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            image_name=${IMAGE_REF%@*}
+            [[ "$image_name" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]]
             case "$VPS_WORKDIR" in
               /*) ;;
               *) echo "VPS_WORKDIR must be an absolute path"; exit 1 ;;
@@ -288,7 +290,14 @@ jobs:
 
             rollback_armed=false
             trap - EXIT
-            docker image prune --force
+            scoped_dangling_images=$(docker image ls --quiet \
+              --filter "reference=${image_name}:*" \
+              --filter dangling=true | sort -u)
+            while IFS= read -r dangling_image; do
+              if [ -n "$dangling_image" ]; then
+                docker image rm "$dangling_image"
+              fi
+            done <<< "$scoped_dangling_images"
             if [ -n "$old_image" ]; then
               docker image inspect "$old_image" >/dev/null
             fi
