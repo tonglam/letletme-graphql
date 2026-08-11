@@ -88,18 +88,27 @@ export const fixturesRepository: FixturesRepository = {
 
 	async getEventFixtures(context, eventId) {
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) return [];
+		const acquisitionStartedAt = performance.now();
 		const snapshot = await getCoreDataSnapshot(context);
+		const coreFixtureAcquisitionMs = performance.now() - acquisitionStartedAt;
+		const transformStartedAt = performance.now();
 		const fixtures = snapshot.fixtures
 			.map(mapFixture)
 			.filter((fixture) => fixture.eventId === eventId)
 			.sort(kickoffOrder);
+		const fixtureTransformMs = performance.now() - transformStartedAt;
 		metrics.cacheRepositoryEvents.labels("fixtures", snapshot.source).inc();
 		context.logger.debug(
 			{
+				requestId: context.requestId,
+				operationName: context.operationName,
 				eventId,
 				fixtureCount: fixtures.length,
 				fixtureSource: snapshot.source,
 				fixtureRevision: snapshot.revision,
+				coreFixtureAcquisitionMs: Number(coreFixtureAcquisitionMs.toFixed(2)),
+				fixtureTransformMs: Number(fixtureTransformMs.toFixed(2)),
+				coreSnapshotMemoStatus: context.coreSnapshotMemoStatus,
 			},
 			"Core fixture schedule loaded"
 		);

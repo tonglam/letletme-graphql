@@ -37,6 +37,20 @@ describe("typed Data snapshots", () => {
 		expect(coreDatasetRevision(first)).toBe("core-7");
 	});
 
+	it("preserves the request pin across Apollo's shallow context clone", async () => {
+		const core = buildTestCoreData(1);
+		const publication = buildCorePublication("2627", 7, core);
+		const context = buildSnapshotContext(new TestRedis(publication));
+		context.requestScope = {};
+
+		const first = await getCoreDataSnapshot(context);
+		const clonedContext = { ...context };
+		const second = await getCoreDataSnapshot(clonedContext);
+
+		expect(second).toBe(first);
+		expect(clonedContext.coreSnapshotMemoStatus).toBe("hit");
+	});
+
 	it("rejects a truncated core revision and falls back through one PostgreSQL statement", async () => {
 		const complete = buildTestCoreData(1);
 		const truncated = buildTestCoreData(1, { fixtures: complete.fixtures.slice(0, 379) });
