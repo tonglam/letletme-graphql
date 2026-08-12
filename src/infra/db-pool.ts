@@ -8,6 +8,9 @@ import { env } from "./env";
 export const dbPool = new Pool({
 	connectionString: env.DATABASE_URL,
 	max: env.DATABASE_POOL_MAX,
+	// Keep one cross-region pooler connection available for low-frequency reads.
+	// Additional connections still retire after idleTimeoutMillis.
+	min: 1,
 	idleTimeoutMillis: 30_000,
 	connectionTimeoutMillis: 2_000,
 });
