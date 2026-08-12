@@ -37,6 +37,11 @@ export type DataPublication = Readonly<{
 	items: Readonly<Record<string, unknown>>;
 }>;
 
+export type DataPublicationRead = Readonly<{
+	publication: DataPublication | null;
+	observedManifest: DataPublicationManifest | null;
+}>;
+
 type CachedPublication = Readonly<{
 	rawManifest: string;
 	publication: DataPublication;
@@ -364,16 +369,19 @@ export const readDataPublicationItemsAtManifest = async (
 	}
 };
 
-export const readDataPublicationItems = async (
+export const readDataPublicationItemsObserved = async (
 	redis: Redis,
 	scope: DataPublicationScope,
 	requiredItemNames: readonly string[]
-): Promise<DataPublication | null> => {
+): Promise<DataPublicationRead> => {
 	assertScope(scope);
 	const uniqueItemNames = [...new Set(requiredItemNames)];
-	if (uniqueItemNames.length === 0) return null;
+	if (uniqueItemNames.length === 0) {
+		return { publication: null, observedManifest: null };
+	}
 	const activeKey = activeDataPublicationKey(scope);
 	const cache = getPublicationCache(redis);
+	let observedManifest: DataPublicationManifest | null = null;
 	try {
 		const cached = cache.get(activeKey);
 		if (cached) {
@@ -381,27 +389,29 @@ export const readDataPublicationItems = async (
 			const manifest = parseDataPublicationManifest(rawManifest, scope);
 			if (!rawManifest || !manifest || !hasRequiredItems(manifest, uniqueItemNames)) {
 				cache.delete(activeKey);
-				return null;
+				return { publication: null, observedManifest: null };
 			}
+			observedManifest = manifest;
 			const cachedItems = cached.rawManifest === rawManifest ? cached.publication.items : {};
 			if (
 				cached.rawManifest === rawManifest &&
 				uniqueItemNames.every((name) => name in cachedItems)
 			) {
-				return cached.publication;
+				return { publication: cached.publication, observedManifest: manifest };
 			}
 		}
 
 		const fetched = await readPublicationPayloads(redis, activeKey, scope, uniqueItemNames);
 		if (!fetched) {
 			cache.delete(activeKey);
-			return null;
+			return { publication: null, observedManifest };
 		}
 		const manifest = parseDataPublicationManifest(fetched.rawManifest, scope);
 		if (!manifest || !hasRequiredItems(manifest, uniqueItemNames)) {
 			cache.delete(activeKey);
-			return null;
+			return { publication: null, observedManifest };
 		}
+		observedManifest = manifest;
 		const cachedItems =
 			cache.get(activeKey)?.rawManifest === fetched.rawManifest
 				? (cache.get(activeKey)?.publication.items ?? {})
@@ -409,18 +419,25 @@ export const readDataPublicationItems = async (
 		const decoded = decodePublicationItems(manifest, uniqueItemNames, fetched.payloads);
 		if (!decoded) {
 			cache.delete(activeKey);
-			return null;
+			return { publication: null, observedManifest: manifest };
 		}
 		const publication = {
 			manifest,
 			items: { ...cachedItems, ...decoded },
 		} satisfies DataPublication;
 		cache.set(activeKey, { rawManifest: fetched.rawManifest, publication });
-		return publication;
+		return { publication, observedManifest: manifest };
 	} catch {
 		cache.delete(activeKey);
-		return null;
+		return { publication: null, observedManifest };
 	}
 };
+
+export const readDataPublicationItems = async (
+	redis: Redis,
+	scope: DataPublicationScope,
+	requiredItemNames: readonly string[]
+): Promise<DataPublication | null> =>
+	(await readDataPublicationItemsObserved(redis, scope, requiredItemNames)).publication;
 
 export const readDataPublication = readDataPublicationItems;
