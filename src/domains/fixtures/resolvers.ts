@@ -65,7 +65,14 @@ export const fixturesResolvers = {
 			_parent: unknown,
 			args: EventFixturesArgs,
 			context: GraphQLContext
-		): Promise<Fixture[]> => fixturesService.getEventFixtures(context, args.eventId),
+		): Promise<Fixture[]> => {
+			const stop = context.requestTiming?.start("fixtures.coreAcquisition");
+			try {
+				return await fixturesService.getEventFixtures(context, args.eventId);
+			} finally {
+				stop?.();
+			}
+		},
 	},
 	Fixture: {
 		event: async (

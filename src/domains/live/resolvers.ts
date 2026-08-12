@@ -1,4 +1,5 @@
 import type { GraphQLResolveInfo } from "graphql";
+import { measureRequestStage } from "../../http/request-timing";
 import type { GraphQLContext } from "../../graphql/context";
 import {
 	directSelectionRequestsField,
@@ -168,13 +169,15 @@ export const liveResolvers = {
 			context: GraphQLContext,
 			info: GraphQLResolveInfo
 		): Promise<EventLive> =>
-			withLiveSnapshotRoot(context, async () => {
-				const eventLive = await liveService.getEventLive(context, args.eventId);
-				if (parentSelectionRequestsField(info, "player")) {
-					await preloadPlayersForLivePerformances(context, eventLive.performances);
-				}
-				return eventLive;
-			}),
+			measureRequestStage(context.requestTiming, "gwSummary.eventLive", () =>
+				withLiveSnapshotRoot(context, async () => {
+					const eventLive = await liveService.getEventLive(context, args.eventId);
+					if (parentSelectionRequestsField(info, "player")) {
+						await preloadPlayersForLivePerformances(context, eventLive.performances);
+					}
+					return eventLive;
+				})
+			),
 		eventLiveExplain: async (
 			_parent: unknown,
 			args: LiveExplainArgs,

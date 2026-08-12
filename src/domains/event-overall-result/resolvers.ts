@@ -3,6 +3,7 @@ import type { Player, Team } from "../players/repository";
 import { playersService } from "../players/service";
 import type { EventResult, EventResultPlayer, TopElementInfo } from "./repository";
 import { eventOverallResultService } from "./service";
+import { measureRequestStage } from "../../http/request-timing";
 
 /**
  * Per-request memoization for player lookups to avoid N+1 Redis/DB round-trips
@@ -65,7 +66,10 @@ export const eventOverallResultResolvers = {
 			_parent: unknown,
 			_args: Record<string, never>,
 			context: GraphQLContext
-		): Promise<EventResult[]> => eventOverallResultService.getEventOverallResult(context),
+		): Promise<EventResult[]> =>
+			measureRequestStage(context.requestTiming, "gwSummary.eventOverallResult", () =>
+				eventOverallResultService.getEventOverallResult(context)
+			),
 	},
 	EventResult: {
 		mostSelectedPlayer: async (
