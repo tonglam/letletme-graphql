@@ -193,7 +193,7 @@ describe("playerValues GraphQL reporting contract", () => {
 		expect(cacheWrite?.slice(-2)).toEqual(["EX", 300]);
 	});
 
-	it("caches an empty reporting result only as a revisioned query result", async () => {
+	it("caches an empty reporting result in an independent revisioned marker", async () => {
 		const core = buildTestCoreData(1);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
 		const { context, reads } = createContext(redis, { changes: [] });
@@ -205,10 +205,30 @@ describe("playerValues GraphQL reporting contract", () => {
 		expect(first.data).toEqual({ playerValues: [] });
 		expect(second.data).toEqual(first.data);
 		expect(reads).toEqual(["reporting.player_value_changes"]);
-		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":player-values-"));
-		expect(cacheWrite?.[1]).toBe("__pv:null__");
+		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":player-values-missing-"));
+		expect(cacheWrite?.[1]).toBe("1");
 		expect(cacheWrite?.slice(-2)).toEqual(["EX", 300]);
-		expect([...redis.values.keys()].some((key) => key.startsWith("PlayerValue"))).toBe(false);
+		expect(
+			[...redis.values.keys()].some(
+				(key) => key.includes(":player-values-20260809:") && !key.includes("-missing-")
+			)
+		).toBe(false);
+	});
+
+	it("does not turn a reporting database error into a negative marker", async () => {
+		const core = buildTestCoreData(1);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
+		const { context } = createContext(redis, {
+			changes: [],
+			error: { message: "reporting unavailable" },
+		});
+
+		const result = await execute(context);
+
+		expect(result.errors?.[0]?.message).toContain("reporting unavailable");
+		expect(
+			[...redis.values.keys()].some((key) => key.includes(":player-values-missing-20260809:"))
+		).toBe(false);
 	});
 
 	it("evicts malformed query data and rebuilds it from the reporting source", async () => {
