@@ -4,6 +4,13 @@ import { entryLiveRepository } from "../../../src/domains/entry-live/repository"
 import { entriesService } from "../../../src/domains/entries/service";
 import type { LivePerformance } from "../../../src/domains/live/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
+import {
+	buildCorePublication,
+	buildLivePublication,
+	buildSnapshotContext,
+	buildTestCoreData,
+	TestRedis,
+} from "../../helpers/data-publication";
 
 const makeMockContext = (options: {
 	livePerformances?: Map<number, LivePerformance>;
@@ -133,6 +140,79 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		} finally {
 			entriesService.getEntriesByIds = originalEntries;
 			entryLiveRepository.getEntryEventPicksByIds = originalPicks;
+		}
+	});
+
+	it("propagates the pinned live revision to every ready batch result", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		const originalTransfers = entryLiveRepository.getEntryEventTransfersByIds;
+		const core = buildTestCoreData(1);
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), buildLivePublication(core, 1, "2627", 8))
+		);
+		const entry = (id: number) => ({
+			id,
+			entryName: `Team ${id}`,
+			playerName: `Player ${id}`,
+			region: null,
+			startedEvent: 1,
+			overallPoints: 0,
+			overallRank: null,
+			bank: 0,
+			teamValue: 1000,
+			totalTransfers: 0,
+			lastEventId: null,
+			lastOverallPoints: null,
+			lastOverallRank: null,
+			lastTeamValue: null,
+			lastBank: null,
+		});
+		entriesService.getEntriesByIds = async () =>
+			new Map([
+				[101, entry(101)],
+				[202, entry(202)],
+			]);
+		entryLiveRepository.getEntryEventTransfersByIds = async () => new Map();
+		const pick = (element: number) => ({
+			chip: null,
+			transfersCost: 0,
+			picks: [
+				{
+					element,
+					position: 1,
+					multiplier: 1,
+					isCaptain: false,
+					isViceCaptain: false,
+				},
+			],
+		});
+
+		try {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(
+				context,
+				1,
+				[101, 202],
+				true,
+				{
+					liveByPlayer: Promise.resolve(new Map()),
+					fixtures: Promise.resolve([]),
+					teams: Promise.resolve(core.teams as never),
+					picksByEntry: Promise.resolve(
+						new Map([
+							[101, pick(1)],
+							[202, pick(2)],
+						]) as never
+					),
+				}
+			);
+
+			expect([...result.results.values()].map((value) => value.snapshot?.revision)).toEqual([
+				"8",
+				"8",
+			]);
+		} finally {
+			entriesService.getEntriesByIds = originalEntries;
+			entryLiveRepository.getEntryEventTransfersByIds = originalTransfers;
 		}
 	});
 });

@@ -8,6 +8,7 @@ import { fixturesService } from "../fixtures/service";
 import type { LivePerformance, TargetedLiveRead } from "../live/repository";
 import { liveRepository } from "../live/repository";
 import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
+import { loadLiveSnapshotMeta } from "../live/snapshot-meta";
 import { playersRepository } from "../players/repository";
 import {
 	type ActiveCaptainData,
@@ -538,6 +539,7 @@ export const entryLiveBatchService = {
 			teams,
 			transfersByEntry,
 			previousResultsByEntry,
+			fullSnapshotMeta,
 		] = await Promise.all([
 			prefetched?.liveByPlayer ??
 				(includeLive && !useTargetedLiveRead
@@ -552,6 +554,9 @@ export const entryLiveBatchService = {
 			eventId > 1
 				? entriesService.getEntryEventResultsByEntryIds(context, readyEntryIds, eventId - 1)
 				: Promise.resolve(new Map<number, EntryEventResult>()),
+			includeLive && !useTargetedLiveRead
+				? loadLiveSnapshotMeta(context, eventId)
+				: Promise.resolve(null),
 		]);
 
 		// Collect all unique player IDs from picks and transfers
@@ -631,7 +636,7 @@ export const entryLiveBatchService = {
 
 				const calcData = {
 					...computeSingleEntry(entryId, eventId, perEntry, shared),
-					snapshot: targetedLive?.meta ?? null,
+					snapshot: targetedLive?.meta ?? fullSnapshotMeta,
 				};
 				results.set(entryId, calcData);
 			} catch (err) {
