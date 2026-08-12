@@ -70,7 +70,6 @@ describe("public league trends repository", () => {
 							updated_at: "2026-08-08T00:00:00.000Z",
 							latest_event_id: 3,
 							total_entries: 125,
-							selection_revision: "2026-08-08T00:30:00.000Z",
 							catalog_revision: "2026-08-08T00:00:00.000Z",
 						},
 					],
@@ -126,8 +125,8 @@ describe("public league trends repository", () => {
 		expect(reads).toBe(2);
 	});
 
-	it("invalidates the catalog when selection data is republished", async () => {
-		let selectionRevision = "2026-08-08T01:00:00.000Z";
+	it("invalidates the catalog when its visible selection snapshot changes", async () => {
+		let totalEntries = 125;
 		const repository = createPublicLeagueTrendsRepository({
 			query: async (sql) => {
 				if (sql.includes("to_regclass"))
@@ -141,9 +140,8 @@ describe("public league trends repository", () => {
 							published_at: "2026-08-01T00:00:00.000Z",
 							updated_at: "2026-08-08T00:00:00.000Z",
 							latest_event_id: 3,
-							total_entries: 125,
+							total_entries: totalEntries,
 							catalog_revision: "2026-08-08T00:00:00.000Z",
-							selection_revision: selectionRevision,
 						},
 					],
 				};
@@ -152,9 +150,9 @@ describe("public league trends repository", () => {
 		const ctx = context();
 		expect(await repository.list(ctx.value)).toHaveLength(1);
 		expect(await repository.list(ctx.value)).toHaveLength(1);
-		selectionRevision = "2026-08-08T02:00:00.000Z";
-		expect(await repository.list(ctx.value)).toHaveLength(1);
-		// The third call must write a second cache entry under the new selection revision.
+		totalEntries = 126;
+		expect((await repository.list(ctx.value))[0]?.totalEntries).toBe(126);
+		// The third call writes under the new visible-snapshot fingerprint.
 		expect(ctx.strings.size).toBe(2);
 	});
 
