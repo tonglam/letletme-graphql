@@ -43,7 +43,9 @@ describe("production deployment workflow", () => {
 	test("uses the complete GraphQL environment URL without password rewriting", () => {
 		expect(workflow).toContain("GRAPHQL_ENV: ${{ secrets.GRAPHQL_ENV }}");
 		expect(workflow).toContain('printf \'%s\' "$GRAPHQL_ENV" > "$next_env"');
-		expect(workflow).toContain('username == "letletme_graphql_runtime"');
+		expect(workflow).toContain('username != "letletme_graphql_runtime"');
+		expect(workflow).toContain("pooler\\.supabase\\.com");
+		expect(workflow).toContain("letletme_graphql_runtime\\.[^.]+");
 		expect(workflow).toContain("if not parsed.password:");
 		expect(workflow).not.toContain("GRAPHQL_RUNTIME_DB_PASSWORD");
 		expect(workflow).not.toContain("env_path.write_text");
@@ -65,6 +67,7 @@ describe("production deployment workflow", () => {
 		}
 		expect(workflow).toContain('"event":"deploy_stage_timing"');
 		expect(workflow).toContain('"outcome":"failed"');
+		expect(workflow).toContain("date +%s%3N");
 	});
 
 	test("does not hardcode retired generation-prefixed migration filenames", () => {

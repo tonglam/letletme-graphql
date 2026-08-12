@@ -92,11 +92,11 @@ jobs:
             stage_started_at=0
             start_stage() {
               active_stage="$1"
-              stage_started_at=$(date +%s)
+              stage_started_at=$(date +%s%3N)
             }
             finish_stage() {
-              finished_at=$(date +%s)
-              duration_ms=$(( (finished_at - stage_started_at) * 1000 ))
+              finished_at=$(date +%s%3N)
+              duration_ms=$(( finished_at - stage_started_at ))
               printf '{"event":"deploy_stage_timing","service":"graphql","stage":"%s","outcome":"passed","durationMs":%s}\n' \
                 "$active_stage" "$duration_ms"
               active_stage=""
@@ -142,6 +142,7 @@ jobs:
             printf '%s' "$GRAPHQL_ENV" > "$next_env"
             chmod 600 "$next_env"
             python3 - "$next_env" <<'PY'
+            import re
             import sys
             from pathlib import Path
             from urllib.parse import unquote, urlsplit
@@ -162,14 +163,16 @@ jobs:
 
             parsed = urlsplit(value)
             username = unquote(parsed.username or "")
+            hostname = (parsed.hostname or "").lower()
             if parsed.scheme not in ("postgres", "postgresql"):
                 raise SystemExit("DATABASE_URL must use the postgres or postgresql scheme")
-            if not (
-                username == "letletme_graphql_runtime"
-                or username.startswith("letletme_graphql_runtime.")
-            ):
+            pooler_role = (
+                re.fullmatch(r"[^.]+\.pooler\.supabase\.com", hostname)
+                and re.fullmatch(r"letletme_graphql_runtime\.[^.]+", username)
+            )
+            if username != "letletme_graphql_runtime" and not pooler_role:
                 raise SystemExit("DATABASE_URL must use letletme_graphql_runtime")
-            if not parsed.hostname:
+            if not hostname:
                 raise SystemExit("DATABASE_URL must include a host")
             if not parsed.password:
                 raise SystemExit("DATABASE_URL must include the GraphQL runtime credential")
@@ -200,8 +203,8 @@ jobs:
               trap - EXIT
               set +e
               if [ -n "$active_stage" ]; then
-                failed_at=$(date +%s)
-                failed_duration_ms=$(( (failed_at - stage_started_at) * 1000 ))
+                failed_at=$(date +%s%3N)
+                failed_duration_ms=$(( failed_at - stage_started_at ))
                 printf '{"event":"deploy_stage_timing","service":"graphql","stage":"%s","outcome":"failed","durationMs":%s}\n' \
                   "$active_stage" "$failed_duration_ms"
                 active_stage=""
