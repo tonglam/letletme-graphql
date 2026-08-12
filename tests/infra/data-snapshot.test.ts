@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import type { DataPublicationManifest } from "../../src/infra/data-publication";
 import {
 	coreDatasetRevision,
 	getCoreEventSnapshot,
@@ -22,21 +23,49 @@ const uuid = "10000000-0000-4000-8000-000000000009";
 describe("typed Data snapshots", () => {
 	it("loads the fixture schedule from only the Core teams and fixtures items", async () => {
 		const core = buildTestCoreData(1);
-		const redis = new TestRedis(buildCorePublication("2627", 7, core));
-		const requested: string[][] = [];
+		const publication = buildCorePublication("2627", 7, core);
+		const redis = new TestRedis(publication);
+		let evalCalls = 0;
+		let getCalls = 0;
+		let mgetCalls = 0;
+		const originalGet = redis.get;
 		const originalMget = redis.mget;
+		redis.get = async (key: string) => {
+			getCalls += 1;
+			return originalGet(key);
+		};
 		redis.mget = async (...keys: string[]) => {
-			requested.push(keys);
+			mgetCalls += 1;
 			return originalMget(...keys);
 		};
+		Object.assign(redis, {
+			eval: async (
+				_script: string,
+				numberOfKeys: number,
+				activeKey: string,
+				...names: string[]
+			) => {
+				evalCalls += 1;
+				expect(numberOfKeys).toBe(1);
+				const rawManifest = await originalGet(activeKey);
+				if (!rawManifest) return [];
+				const manifest = JSON.parse(rawManifest) as DataPublicationManifest;
+				const payloads = names.map((name) => {
+					const item = manifest.items.find((candidate) => candidate.name === name);
+					return item ? (publication.store.get(item.key) ?? null) : null;
+				});
+				return [rawManifest, ...payloads];
+			},
+		});
 
 		const snapshot = await getCoreFixtureSnapshot(buildSnapshotContext(redis));
 
 		expect(snapshot.source).toBe("redis");
 		expect(snapshot.teams).toHaveLength(20);
 		expect(snapshot.fixtures).toHaveLength(380);
-		expect(requested).toHaveLength(1);
-		expect(requested[0]?.map((key) => key.split(":").at(-1)).sort()).toEqual(["fixtures", "teams"]);
+		expect(evalCalls).toBe(1);
+		expect(getCalls).toBe(0);
+		expect(mgetCalls).toBe(0);
 	});
 
 	it("loads current-event context from only Core events and currentEventId", async () => {
