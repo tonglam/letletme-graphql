@@ -70,6 +70,8 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 	}
 
 	type LiveCalcData {
+		availability: EntryLiveAvailability!
+		snapshot: LiveSnapshotMeta
 		rank: Int!
 		event: Int!
 		entry: Int!
@@ -98,6 +100,11 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 		pickList: [ElementEventResultData!]!
 		transfersList: [EntryEventTransfersData!]!
 		activeCaptain: ActiveCaptain!
+	}
+
+	enum EntryLiveAvailability {
+		READY
+		NO_PICKS
 	}
 
 	type ActiveCaptain {

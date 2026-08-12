@@ -390,6 +390,7 @@ async function getPlayerValuesFromDatabase(
 }
 
 const NULL_SENTINEL = "__pv:null__";
+const MISSING_SENTINEL = "1";
 
 const isFiniteNumber = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value);
@@ -460,24 +461,13 @@ const parseHistoryCache = (raw: string): PlayerValueHistoryRepositoryItem[] | nu
 
 export const playerValuesRepository: PlayerValuesRepository = {
 	async getPlayerValues(context: GraphQLContext, changeDate: Date): Promise<PlayerValue[]> {
-		const cacheKey = gqlCacheKey(context, `player-values:${getCompactDateString(changeDate)}`);
+		const compactDate = getCompactDateString(changeDate);
+		const cacheKey = gqlCacheKey(context, `player-values:${compactDate}`);
+		const missingCacheKey = gqlCacheKey(context, `player-values-missing:${compactDate}`);
 		try {
-			const cached = await measureRequestStage(context, "playerValues.cacheRead", () =>
-				context.redis.get(cacheKey)
+			const [cached, missing] = await measureRequestStage(context, "playerValues.cacheRead", () =>
+				context.redis.mget(cacheKey, missingCacheKey)
 			);
-			if (cached === NULL_SENTINEL) {
-				metrics.cacheRepositoryEvents.labels("player_values", "query_hit").inc();
-				context.logger.debug(
-					{
-						requestId: context.requestId,
-						operationName: context.operationName,
-						source: "negative-hit",
-						resultCount: 0,
-					},
-					"Player values loaded"
-				);
-				return [];
-			}
 			if (cached !== null) {
 				const parsed = measureRequestStageSync(context, "playerValues.cacheParse", () =>
 					parsePlayerValuesCache(cached)
@@ -498,9 +488,23 @@ export const playerValuesRepository: PlayerValuesRepository = {
 				await context.redis.del(cacheKey);
 				metrics.cacheRepositoryEvents.labels("player_values", "malformed").inc();
 			}
+			if (missing === MISSING_SENTINEL) {
+				metrics.cacheRepositoryEvents.labels("player_values", "query_hit").inc();
+				context.logger.debug(
+					{
+						requestId: context.requestId,
+						operationName: context.operationName,
+						source: "negative-hit",
+						resultCount: 0,
+					},
+					"Player values loaded"
+				);
+				return [];
+			}
+			if (missing !== null) await context.redis.del(missingCacheKey);
 		} catch (error) {
 			metrics.cacheRepositoryEvents.labels("player_values", "database_fallback").inc();
-			context.logger.warn({ err: error, cacheKey }, "Player-values query cache unavailable");
+			context.logger.warn({ err: error }, "Player-values query cache unavailable");
 		}
 
 		const values = await getPlayerValuesFromDatabase(context, changeDate);
@@ -508,15 +512,28 @@ export const playerValuesRepository: PlayerValuesRepository = {
 
 		try {
 			await measureRequestStage(context, "playerValues.cacheWrite", () =>
-				context.redis.set(
-					cacheKey,
-					values.length === 0 ? NULL_SENTINEL : JSON.stringify(values),
-					"EX",
-					QUERY_CACHE_TTL_SECONDS.MARKET
-				)
+				values.length === 0
+					? Promise.all([
+							context.redis.set(
+								missingCacheKey,
+								MISSING_SENTINEL,
+								"EX",
+								QUERY_CACHE_TTL_SECONDS.MARKET
+							),
+							context.redis.del(cacheKey),
+						])
+					: Promise.all([
+							context.redis.set(
+								cacheKey,
+								JSON.stringify(values),
+								"EX",
+								QUERY_CACHE_TTL_SECONDS.MARKET
+							),
+							context.redis.del(missingCacheKey),
+						])
 			);
 		} catch (error) {
-			context.logger.warn({ err: error, cacheKey }, "Failed to write player-values query cache");
+			context.logger.warn({ err: error }, "Failed to write player-values query cache");
 		}
 
 		context.logger.debug(

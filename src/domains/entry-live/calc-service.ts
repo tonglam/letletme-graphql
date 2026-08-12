@@ -1,7 +1,10 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type { LivePerformance } from "../live/repository";
-import { withLiveSnapshotConsistency } from "../live/snapshot-meta";
+import { loadLiveSnapshotMeta, type LiveSnapshotMeta } from "../live/snapshot-meta";
 import type { EntryEventTransfersData } from "./transfer-enrichment";
+import { entryLiveRepository } from "./repository";
+
+export type EntryLiveAvailability = "READY" | "NO_PICKS";
 
 export type ActiveCaptainData = {
 	id: number;
@@ -10,6 +13,8 @@ export type ActiveCaptainData = {
 };
 
 export type LiveCalcData = {
+	availability: EntryLiveAvailability;
+	snapshot: LiveSnapshotMeta | null;
 	rank: number;
 	event: number;
 	entry: number;
@@ -175,9 +180,11 @@ export const applyAutoSubs = (pickList: ElementEventResultData[], chip: string):
 	}
 };
 
-const emptyLiveCalcData = (entryId: number): LiveCalcData => ({
+const emptyLiveCalcData = (entryId: number, eventId = 0): LiveCalcData => ({
+	availability: "NO_PICKS",
+	snapshot: null,
 	rank: 0,
-	event: 0,
+	event: eventId,
 	entry: entryId,
 	entryName: "",
 	playerName: "",
@@ -226,20 +233,40 @@ export const entryLiveCalcService = {
 			return emptyLiveCalcData(entryId);
 		}
 
+		const stopPicks = context.requestTiming?.start("entryLive.picks");
+		const pickEntity = await entryLiveRepository
+			.getEntryEventPick(context, entryId, eventId)
+			.finally(() => stopPicks?.());
+		if (!pickEntity || pickEntity.picks.length === 0) {
+			return emptyLiveCalcData(entryId, eventId);
+		}
+
+		let snapshot: LiveSnapshotMeta | null = null;
+		if (includeLive) {
+			const stopSnapshot = context.requestTiming?.start("entryLive.liveSnapshot");
+			snapshot = await loadLiveSnapshotMeta(context, eventId).finally(() => stopSnapshot?.());
+		}
+
 		const calculate = async (): Promise<LiveCalcData> => {
 			const { entryLiveBatchService } = await import("./batch-service");
-			const batch = await entryLiveBatchService.calcLivePointsForEntries(
-				context,
-				eventId,
-				[entryId],
-				includeLive
-			);
+			const stopAggregate = context.requestTiming?.start("entryLive.aggregate");
+			const batch = await entryLiveBatchService
+				.calcLivePointsForEntries(context, eventId, [entryId], includeLive, {
+					picksByEntry: Promise.resolve(new Map([[entryId, pickEntity]])),
+				})
+				.finally(() => stopAggregate?.());
 			const result = batch.results.get(entryId);
-			if (result) return result;
+			if (result) {
+				return {
+					...result,
+					availability: "READY",
+					snapshot,
+				};
+			}
 			const message = batch.errors.find((error) => error.entryId === entryId)?.message;
 			throw new Error(message ?? `Live points calculation failed for entry ${entryId}`);
 		};
 
-		return includeLive ? withLiveSnapshotConsistency(context, eventId, calculate) : calculate();
+		return calculate();
 	},
 };

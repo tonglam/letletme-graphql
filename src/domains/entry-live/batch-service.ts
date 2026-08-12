@@ -433,6 +433,8 @@ const computeSingleEntry = (
 	});
 
 	return {
+		availability: "READY",
+		snapshot: null,
 		rank: 0,
 		event: eventId,
 		entry: entryId,
@@ -479,6 +481,7 @@ export const entryLiveBatchService = {
 			liveByPlayer?: Promise<Map<number, LivePerformance>>;
 			fixtures?: Promise<Fixture[]>;
 			teams?: Promise<Team[]>;
+			picksByEntry?: Promise<Map<number, EntryEventPick>>;
 		}
 	): Promise<BatchLiveCalcResult> {
 		assertValidEntryBatch(entryIds);
@@ -519,7 +522,8 @@ export const entryLiveBatchService = {
 			// Phase 2 moved here: entry info HMGET
 			entriesService.getEntriesByIds(context, entryIds),
 			// Phase 3 moved here: picks + transfers (MGET cache or SQL)
-			entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
+			prefetched?.picksByEntry ??
+				entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
 			entryLiveRepository.getEntryEventTransfersByIds(context, entryIds, eventId),
 			eventId > 1
 				? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)

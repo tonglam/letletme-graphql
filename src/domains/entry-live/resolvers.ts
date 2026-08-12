@@ -55,13 +55,11 @@ export const entryLiveResolvers = {
 			args: CalcLivePointsByEntryArgs,
 			context: GraphQLContext
 		): Promise<LiveCalcData> =>
-			withLiveSnapshotRoot(context, () =>
-				entryLiveCalcService.calcLivePointsByEntry(
-					context,
-					args.eventId,
-					args.entryId,
-					args.includeLive ?? true
-				)
+			entryLiveCalcService.calcLivePointsByEntry(
+				context,
+				args.eventId,
+				args.entryId,
+				args.includeLive ?? true
 			),
 
 		calcLivePointsForEntries: async (
