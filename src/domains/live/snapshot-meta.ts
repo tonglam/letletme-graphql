@@ -4,6 +4,7 @@ import {
 	parseDataPublicationManifest,
 } from "../../infra/data-publication";
 import {
+	getLiveDataPublicationManifest,
 	getLiveDataSnapshot,
 	LIVE_PUBLICATION_ITEMS,
 	type LiveSnapshotState,
@@ -126,7 +127,7 @@ export const rememberLiveSnapshotMeta = (
 		values = new Map();
 		metaMemo.set(identity, values);
 	}
-	values.set(eventId, Promise.resolve(meta));
+	if (!values.has(eventId)) values.set(eventId, Promise.resolve(meta));
 	if (source) rememberSource(context, eventId, source);
 };
 
@@ -189,15 +190,12 @@ export const loadLivePublicationMeta = (
 	if (existing) return existing;
 
 	const load = (async (): Promise<LiveSnapshotMeta | null> => {
-		const raw = await context.redis
-			.get(liveSnapshotMetaKey(context.currentSeason.seasonCode, eventId))
-			.catch(() => null);
-		const published = parseLiveSnapshotMeta(raw, {
+		const manifest = await getLiveDataPublicationManifest(context, eventId);
+		const published = parseLiveSnapshotMeta(manifest ? JSON.stringify(manifest) : null, {
 			season: context.currentSeason.seasonCode,
 			eventId,
 		});
 		if (published) {
-			rememberLiveSnapshotMeta(context, published, published.season, eventId);
 			rememberSource(context, eventId, "redis");
 			return published;
 		}

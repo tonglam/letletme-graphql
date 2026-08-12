@@ -207,6 +207,18 @@ export const parseDataPublicationManifest = (
 	}
 };
 
+export const readDataPublicationManifest = async (
+	redis: Redis,
+	scope: DataPublicationScope
+): Promise<DataPublicationManifest | null> => {
+	assertScope(scope);
+	try {
+		return parseDataPublicationManifest(await redis.get(activeDataPublicationKey(scope)), scope);
+	} catch {
+		return null;
+	}
+};
+
 const hasRequiredItems = (
 	manifest: DataPublicationManifest,
 	requiredItemNames: readonly string[]
@@ -319,6 +331,37 @@ const decodePublicationItems = (
 		}
 	}
 	return items;
+};
+
+/**
+ * Load immutable payload keys from a manifest already pinned by the caller.
+ * This deliberately does not re-read the active pointer, so a request cannot
+ * drift to a newer revision between a bounded manifest read and a full read.
+ */
+export const readDataPublicationItemsAtManifest = async (
+	redis: Redis,
+	manifest: DataPublicationManifest,
+	requiredItemNames: readonly string[]
+): Promise<DataPublication | null> => {
+	const scope: DataPublicationScope = {
+		dataset: manifest.dataset,
+		seasonCode: manifest.seasonCode,
+		...(manifest.eventId === null ? {} : { eventId: manifest.eventId }),
+	};
+	assertScope(scope);
+	const uniqueItemNames = [...new Set(requiredItemNames)];
+	if (uniqueItemNames.length === 0 || !hasRequiredItems(manifest, uniqueItemNames)) return null;
+
+	try {
+		const keys = uniqueItemNames.map(
+			(name) => manifest.items.find((item) => item.name === name)?.key ?? ""
+		);
+		if (keys.some((key) => key.length === 0)) return null;
+		const decoded = decodePublicationItems(manifest, uniqueItemNames, await redis.mget(...keys));
+		return decoded ? { manifest, items: decoded } : null;
+	} catch {
+		return null;
+	}
 };
 
 export const readDataPublicationItems = async (

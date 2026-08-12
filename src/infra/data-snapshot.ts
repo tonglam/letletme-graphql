@@ -3,8 +3,11 @@ import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
 	readDataPublication,
+	readDataPublicationItemsAtManifest,
+	readDataPublicationManifest,
 	readDataPublicationItems,
 	type DataPublication,
+	type DataPublicationManifest,
 } from "./data-publication";
 
 export const CORE_PUBLICATION_ITEMS = [
@@ -236,6 +239,67 @@ const coreSnapshotMemo = new WeakMap<object, Promise<CoreDataSnapshot>>();
 const coreFixtureSnapshotMemo = new WeakMap<object, Promise<CoreFixtureSnapshot>>();
 const coreEventSnapshotMemo = new WeakMap<object, Promise<CoreEventSnapshot>>();
 const liveSnapshotMemo = new WeakMap<object, Map<number, Promise<LiveDataSnapshot>>>();
+
+type LivePublicationPin = {
+	manifest: Promise<DataPublicationManifest | null>;
+	publication?: Promise<DataPublication | null>;
+};
+
+const livePublicationPinMemo = new WeakMap<object, Map<number, LivePublicationPin>>();
+
+const reserveLivePublicationPin = (
+	context: GraphQLContext,
+	eventId: number,
+	mode: "manifest" | "publication"
+): LivePublicationPin => {
+	const requestScope = context.requestScope ?? context;
+	let eventPins = livePublicationPinMemo.get(requestScope);
+	if (!eventPins) {
+		eventPins = new Map();
+		livePublicationPinMemo.set(requestScope, eventPins);
+	}
+
+	const existing = eventPins.get(eventId);
+	if (existing) {
+		if (mode === "publication" && !existing.publication) {
+			existing.publication = existing.manifest.then((manifest) =>
+				manifest
+					? readDataPublicationItemsAtManifest(context.redis, manifest, LIVE_PUBLICATION_ITEMS)
+					: null
+			);
+		}
+		return existing;
+	}
+
+	const scope = {
+		dataset: "fpl:live" as const,
+		seasonCode: context.currentSeason.seasonCode,
+		eventId,
+	};
+	if (mode === "publication") {
+		const publication = readDataPublication(context.redis, scope, LIVE_PUBLICATION_ITEMS);
+		const pin: LivePublicationPin = {
+			publication,
+			manifest: publication.then((value) => value?.manifest ?? null),
+		};
+		eventPins.set(eventId, pin);
+		return pin;
+	}
+
+	const pin: LivePublicationPin = {
+		manifest: readDataPublicationManifest(context.redis, scope),
+	};
+	eventPins.set(eventId, pin);
+	return pin;
+};
+
+export const getLiveDataPublicationManifest = (
+	context: GraphQLContext,
+	eventId: number
+): Promise<DataPublicationManifest | null> => {
+	if (!Number.isSafeInteger(eventId) || eventId <= 0) return Promise.resolve(null);
+	return reserveLivePublicationPin(context, eventId, "manifest").manifest;
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1676,20 +1740,10 @@ export const getLiveDataSnapshot = (
 	}
 	const existing = eventSnapshots.get(eventId);
 	if (existing) return existing;
+	const publication = reserveLivePublicationPin(context, eventId, "publication").publication!;
 	const load = (async (): Promise<LiveDataSnapshot> => {
-		const [publication, core] = await Promise.all([
-			readDataPublication(
-				context.redis,
-				{
-					dataset: "fpl:live",
-					seasonCode: context.currentSeason.seasonCode,
-					eventId,
-				},
-				LIVE_PUBLICATION_ITEMS
-			),
-			getCoreDataSnapshot(context),
-		]);
-		const snapshot = publication ? publicationLiveSnapshot(publication, eventId, core) : null;
+		const [published, core] = await Promise.all([publication, getCoreDataSnapshot(context)]);
+		const snapshot = published ? publicationLiveSnapshot(published, eventId, core) : null;
 		if (snapshot) return snapshot;
 		context.logger.warn(
 			{ season: context.currentSeason.seasonCode, eventId },

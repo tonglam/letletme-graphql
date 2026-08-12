@@ -91,6 +91,43 @@ describe("live snapshot metadata", () => {
 		expect(meta).toMatchObject({ revision: "8", eventLiveCount: 220, fixtureCount: 10 });
 	});
 
+	it("shares one publication pin when bounded and full reads overlap", async () => {
+		const core = buildTestCoreData(1);
+		const revisionEight = buildLivePublication(core, 1, "2627", 8);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core), revisionEight);
+		const originalGet = redis.get;
+		let releaseActiveRead!: () => void;
+		let markActiveReadStarted!: () => void;
+		const activeReadStarted = new Promise<void>((resolve) => {
+			markActiveReadStarted = resolve;
+		});
+		const activeReadGate = new Promise<void>((resolve) => {
+			releaseActiveRead = resolve;
+		});
+		let delayFirstActiveRead = true;
+		redis.get = async (key: string) => {
+			const value = await originalGet(key);
+			if (key === liveSnapshotMetaKey("2627", 1) && delayFirstActiveRead) {
+				delayFirstActiveRead = false;
+				markActiveReadStarted();
+				await activeReadGate;
+			}
+			return value;
+		};
+		const context = buildSnapshotContext(redis);
+		const bounded = loadLivePublicationMeta(context, 1);
+		await activeReadStarted;
+
+		const revisionNine = buildLivePublication(core, 1, "2627", 9);
+		for (const [key, value] of revisionNine.store) redis.values.set(key, value);
+		const full = loadLiveSnapshotMeta(context, 1);
+		releaseActiveRead();
+
+		const [boundedMeta, fullMeta] = await Promise.all([bounded, full]);
+		expect(boundedMeta?.revision).toBe("8");
+		expect(fullMeta?.revision).toBe("8");
+	});
+
 	it("runs each consistency/root operation once over the immutable request snapshot", async () => {
 		const core = buildTestCoreData(1);
 		const context = buildSnapshotContext(

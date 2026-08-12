@@ -99,19 +99,17 @@ export const liveService = {
 	): Promise<LivePerformance | null> {
 		const targetEventId = eventId ?? (await getCurrentEventId(context)) ?? undefined;
 		if (!targetEventId) return null;
-		return withLiveSnapshotConsistency(context, targetEventId, async () => {
-			const [performance, player, bonusByPlayerId] = await Promise.all([
-				liveRepository.getPlayerLive(context, playerId, targetEventId),
-				playersRepository.getPlayerById(context, playerId),
-				loadLiveBonusByPlayerId(context, targetEventId),
-			]);
-			if (!performance) return null;
-			return withCalculatedTotalPoints(
-				performance,
-				player?.position,
-				bonusByPlayerId.get(playerId)
-			);
-		});
+		const [targeted, player] = await Promise.all([
+			liveRepository.getTargetedLiveRead(context, targetEventId, [playerId]),
+			playersRepository.getPlayerById(context, playerId),
+		]);
+		const performance = targeted.performances.find((value) => value.playerId === playerId);
+		if (!performance) return null;
+		return withCalculatedTotalPoints(
+			performance,
+			player?.position,
+			targeted.effectiveBonusByPlayer.get(playerId)
+		);
 	},
 
 	async getEventLive(context: GraphQLContext, eventId: number): Promise<EventLive> {
