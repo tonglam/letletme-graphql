@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import type { GraphQLIngress } from "../../src/infra/ingress-context";
+import {
+	type GraphQLIngress,
+	WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT,
+} from "../../src/infra/ingress-context";
 import {
 	graphQLAdmissionSubjects,
 	graphQLIngressFailure,
@@ -68,10 +71,16 @@ describe("GraphQL transport and ingress policy", () => {
 		expect(shouldPrechargeResolvedPrincipal(null, false)).toBe(false);
 	});
 
-	it("assigns the larger shared-public budget only to the Web service token", () => {
+	it("assigns the larger shared-public budget only to trusted Web public ingress", () => {
 		const service = ingress({ class: "service", trusted: true, subject: "service-public" });
-		const signed = ingress({ class: "signed", trusted: true, subject: "signed-public" });
+		const publicRsc = ingress({
+			class: "signed",
+			trusted: true,
+			subject: WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT,
+		});
+		const otherSigned = ingress({ class: "signed", trusted: true, subject: "signed-client" });
 		expect(graphQLUsesSharedPublicBudget(service)).toBe(true);
-		expect(graphQLUsesSharedPublicBudget(signed)).toBe(false);
+		expect(graphQLUsesSharedPublicBudget(publicRsc)).toBe(true);
+		expect(graphQLUsesSharedPublicBudget(otherSigned)).toBe(false);
 	});
 });

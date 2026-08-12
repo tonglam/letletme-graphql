@@ -1,4 +1,4 @@
-import type { GraphQLIngress } from "../infra/ingress-context";
+import { type GraphQLIngress, WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT } from "../infra/ingress-context";
 import type { Principal } from "../infra/principal";
 
 export type GraphQLPolicyFailure = {
@@ -33,7 +33,8 @@ const principalSubject = (principal: Principal): string =>
 export const GRAPHQL_GLOBAL_ADMISSION_SUBJECT = "all-graphql-traffic";
 
 export const graphQLUsesSharedPublicBudget = (ingress: GraphQLIngress): boolean =>
-	ingress.class === "service";
+	ingress.class === "service" ||
+	(ingress.class === "signed" && ingress.subject === WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT);
 
 export const shouldPrechargeResolvedPrincipal = (
 	principal: Principal | null,

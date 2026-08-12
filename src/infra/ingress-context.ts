@@ -12,6 +12,11 @@ export type VerifiedIngressContext = { subject: string };
 
 export const GRAPHQL_SERVICE_TOKEN_HEADER = "X-GraphQL-Service-Token";
 export const GRAPHQL_SERVICE_RATE_LIMIT_SUBJECT = "service:web-public-rsc";
+// Must mirror letletme-web's fixed public RSC ingress purpose. The HMAC keeps
+// this shared budget unavailable to arbitrary signed user/client subjects.
+export const WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT = createHmac("sha256", env.BACKEND_PROXY_SECRET)
+	.update("rate-limit:web-public-rsc")
+	.digest("hex");
 
 export type GraphQLIngressClass = "signed" | "service" | "untrusted";
 
