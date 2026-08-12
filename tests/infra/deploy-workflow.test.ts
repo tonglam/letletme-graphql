@@ -68,6 +68,12 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain('"event":"deploy_stage_timing"');
 		expect(workflow).toContain('"outcome":"failed"');
 		expect(workflow).toContain("date +%s%3N");
+		expect(workflow.indexOf("trap fail_without_rollback_on_exit EXIT")).toBeLessThan(
+			workflow.indexOf("start_stage checkout")
+		);
+		expect(workflow.indexOf("trap rollback_graphql_on_exit EXIT")).toBeGreaterThan(
+			workflow.indexOf("start_stage preflight")
+		);
 	});
 
 	test("does not hardcode retired generation-prefixed migration filenames", () => {

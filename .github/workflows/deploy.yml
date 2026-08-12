@@ -101,6 +101,22 @@ jobs:
                 "$active_stage" "$duration_ms"
               active_stage=""
             }
+            fail_without_rollback_on_exit() {
+              original_status=$?
+              trap - EXIT
+              set +e
+              if [ "$original_status" -ne 0 ] && [ -n "$active_stage" ]; then
+                failed_at=$(date +%s%3N)
+                failed_duration_ms=$(( failed_at - stage_started_at ))
+                printf '{"event":"deploy_stage_timing","service":"graphql","stage":"%s","outcome":"failed","durationMs":%s}\n' \
+                  "$active_stage" "$failed_duration_ms"
+              fi
+              if [ -n "${next_env:-}" ]; then
+                rm -f "$next_env"
+              fi
+              exit "$original_status"
+            }
+            trap fail_without_rollback_on_exit EXIT
             image_name=${IMAGE_REF%@*}
             [[ "$image_name" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]]
             case "$VPS_WORKDIR" in
@@ -135,10 +151,6 @@ jobs:
             start_stage envValidate
             umask 077
             next_env=$(mktemp "$VPS_WORKDIR/.env.deploy.next.XXXXXX")
-            cleanup_env() {
-              rm -f "$next_env"
-            }
-            trap cleanup_env EXIT
             printf '%s' "$GRAPHQL_ENV" > "$next_env"
             chmod 600 "$next_env"
             python3 - "$next_env" <<'PY'
@@ -202,7 +214,7 @@ jobs:
               original_status=$?
               trap - EXIT
               set +e
-              if [ -n "$active_stage" ]; then
+              if [ "$original_status" -ne 0 ] && [ -n "$active_stage" ]; then
                 failed_at=$(date +%s%3N)
                 failed_duration_ms=$(( failed_at - stage_started_at ))
                 printf '{"event":"deploy_stage_timing","service":"graphql","stage":"%s","outcome":"failed","durationMs":%s}\n' \
