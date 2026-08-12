@@ -1031,7 +1031,10 @@ const CORE_FALLBACK_SQL = `
 	FROM authority
 `;
 
-const loadCoreSnapshotFromPostgres = async (context: GraphQLContext): Promise<CoreDataSnapshot> => {
+const loadCoreSnapshotFromPostgres = async (
+	context: GraphQLContext,
+	expectedManifest?: DataPublicationManifest | null
+): Promise<CoreDataSnapshot> => {
 	const result = await context.database.query<CoreFallbackRow>(CORE_FALLBACK_SQL, [
 		context.currentSeason.seasonId,
 	]);
@@ -1049,6 +1052,11 @@ const loadCoreSnapshotFromPostgres = async (context: GraphQLContext): Promise<Co
 				seasonCode: context.currentSeason.seasonCode,
 			})
 		: null;
+	const preservesPinnedPublication =
+		expectedManifest !== null &&
+		expectedManifest !== undefined &&
+		manifest?.publicationId === expectedManifest.publicationId &&
+		manifest.revision === expectedManifest.revision;
 	const coreIdentityComplete =
 		events !== null &&
 		teams !== null &&
@@ -1065,6 +1073,7 @@ const loadCoreSnapshotFromPostgres = async (context: GraphQLContext): Promise<Co
 		!manifest ||
 		manifest.publicationId !== row.publication_id ||
 		manifest.revision !== revision ||
+		(expectedManifest !== null && expectedManifest !== undefined && !preservesPinnedPublication) ||
 		!sourceCheckedAt ||
 		!events ||
 		!teams ||
@@ -1733,11 +1742,12 @@ export const getCoreDataSnapshot = (context: GraphQLContext): Promise<CoreDataSn
 		const published = await publication;
 		const snapshot = published ? publicationCoreSnapshot(published) : null;
 		if (snapshot) return snapshot;
+		const expectedManifest = await reserveCorePublicationPin(context, "manifest").manifest;
 		context.logger.warn(
 			{ season: context.currentSeason.seasonCode },
 			"Core Data publication unavailable; using one coherent PostgreSQL snapshot"
 		);
-		return loadCoreSnapshotFromPostgres(context);
+		return loadCoreSnapshotFromPostgres(context, expectedManifest);
 	})();
 	coreSnapshotMemo.set(requestScope, load);
 	return load;
