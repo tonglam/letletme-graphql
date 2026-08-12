@@ -499,10 +499,13 @@ export const entryLiveBatchService = {
 
 		// Phase 1: resolve identity and picks. Entries without picks must not enter
 		// Live, fixture, player, transfer or bonus acquisition.
-		const [entriesById, picksByEntry] = await Promise.all([
+		const [entriesById, picksByEntry, previousResultsByEntry] = await Promise.all([
 			entriesService.getEntriesByIds(context, entryIds),
 			prefetched?.picksByEntry ??
 				entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
+			eventId > 1
+				? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
+				: Promise.resolve(new Map<number, EntryEventResult>()),
 		]);
 		const readyEntryIds = entryIds.filter(
 			(entryId) => (picksByEntry.get(entryId)?.picks.length ?? 0) > 0
@@ -512,7 +515,12 @@ export const entryLiveBatchService = {
 			if (!readyEntryIds.includes(entryId)) {
 				results.set(
 					entryId,
-					buildNoPicksLiveCalcData(entryId, eventId, entriesById.get(entryId) ?? null)
+					buildNoPicksLiveCalcData(
+						entryId,
+						eventId,
+						entriesById.get(entryId) ?? null,
+						previousResultsByEntry.get(entryId) ?? null
+					)
 				);
 			}
 		}
@@ -532,32 +540,22 @@ export const entryLiveBatchService = {
 		// Phase 2: load reusable data only for entries that actually have picks.
 		const useTargetedLiveRead =
 			includeLive && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
-		const [
-			liveByPlayerRaw,
-			bonusByPlayerId,
-			fixtures,
-			teams,
-			transfersByEntry,
-			previousResultsByEntry,
-			fullSnapshotMeta,
-		] = await Promise.all([
-			prefetched?.liveByPlayer ??
-				(includeLive && !useTargetedLiveRead
-					? liveRepository.getAllLivePerformances(context, eventId)
-					: Promise.resolve(new Map<number, LivePerformance>())),
-			includeLive && !useTargetedLiveRead
-				? loadLiveBonusByPlayerId(context, eventId)
-				: Promise.resolve(new Map<number, number>()),
-			prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
-			prefetched?.teams ?? playersRepository.listTeams(context),
-			entryLiveRepository.getEntryEventTransfersByIds(context, readyEntryIds, eventId),
-			eventId > 1
-				? entriesService.getEntryEventResultsByEntryIds(context, readyEntryIds, eventId - 1)
-				: Promise.resolve(new Map<number, EntryEventResult>()),
-			includeLive && !useTargetedLiveRead
-				? loadLiveSnapshotMeta(context, eventId)
-				: Promise.resolve(null),
-		]);
+		const [liveByPlayerRaw, bonusByPlayerId, fixtures, teams, transfersByEntry, fullSnapshotMeta] =
+			await Promise.all([
+				prefetched?.liveByPlayer ??
+					(includeLive && !useTargetedLiveRead
+						? liveRepository.getAllLivePerformances(context, eventId)
+						: Promise.resolve(new Map<number, LivePerformance>())),
+				includeLive && !useTargetedLiveRead
+					? loadLiveBonusByPlayerId(context, eventId)
+					: Promise.resolve(new Map<number, number>()),
+				prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
+				prefetched?.teams ?? playersRepository.listTeams(context),
+				entryLiveRepository.getEntryEventTransfersByIds(context, readyEntryIds, eventId),
+				includeLive && !useTargetedLiveRead
+					? loadLiveSnapshotMeta(context, eventId)
+					: Promise.resolve(null),
+			]);
 
 		// Collect all unique player IDs from picks and transfers
 		const allPlayerIds = new Set<number>();
@@ -645,13 +643,19 @@ export const entryLiveBatchService = {
 			}
 		}
 
+		const orderedResults = new Map<number, LiveCalcData>();
+		for (const entryId of entryIds) {
+			const result = results.get(entryId);
+			if (result) orderedResults.set(entryId, result);
+		}
+
 		return {
-			results,
+			results: orderedResults,
 			errors,
 			meta: {
 				eventId,
 				totalEntries: entryIds.length,
-				succeededCount: results.size,
+				succeededCount: orderedResults.size,
 				failedCount: errors.length,
 			},
 		};

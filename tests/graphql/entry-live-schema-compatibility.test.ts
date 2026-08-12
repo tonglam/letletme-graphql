@@ -2,17 +2,24 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { graphql } from "graphql";
 import type { GraphQLContext } from "../../src/graphql/context";
 import { entryLiveRepository } from "../../src/domains/entry-live/repository";
+import { entriesService } from "../../src/domains/entries/service";
 import { schema } from "../../src/graphql/schema";
 
 const originalGetPick = entryLiveRepository.getEntryEventPick;
+const originalGetEntry = entriesService.getEntryById;
+const originalGetPrevious = entriesService.getEntryEventResult;
 
 afterEach(() => {
 	entryLiveRepository.getEntryEventPick = originalGetPick;
+	entriesService.getEntryById = originalGetEntry;
+	entriesService.getEntryEventResult = originalGetPrevious;
 });
 
 describe("calcLivePointsByEntry additive schema compatibility", () => {
 	it("keeps the legacy selection executable and exposes explicit no-picks availability", async () => {
 		entryLiveRepository.getEntryEventPick = async () => null;
+		entriesService.getEntryById = async () => null;
+		entriesService.getEntryEventResult = async () => null;
 		const context = {} as GraphQLContext;
 
 		const legacy = await graphql({

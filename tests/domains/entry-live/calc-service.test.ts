@@ -301,6 +301,7 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 	it("returns NO_PICKS before acquiring a live snapshot or enrichment", async () => {
 		const originalGetPick = entryLiveRepository.getEntryEventPick;
 		const originalGetEntry = entriesService.getEntryById;
+		const originalGetPrevious = entriesService.getEntryEventResult;
 		const stages: string[] = [];
 		entryLiveRepository.getEntryEventPick = async () => null;
 		entriesService.getEntryById = async () => ({
@@ -314,12 +315,19 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 			bank: 15,
 			teamValue: 1005,
 			totalTransfers: 7,
-			lastEventId: 6,
+			lastEventId: 8,
 			lastOverallPoints: 300,
 			lastOverallRank: 500,
 			lastTeamValue: 995,
 			lastBank: 10,
 		});
+		entriesService.getEntryEventResult = async () =>
+			({
+				eventId: 6,
+				overallPoints: 300,
+				overallRank: 500,
+				teamValue: 995,
+			}) as never;
 		const context = {
 			requestTiming: {
 				start: (stage: string) => {
@@ -341,11 +349,16 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 				overallPoints: 321,
 				overallRank: 456,
 				value: 100.5,
+				lastOverallPoints: 300,
+				lastOverallRank: 500,
+				lastValue: 99.5,
+				liveTotalPoints: 300,
 			});
 			expect(stages).toEqual(["entryLive.picks"]);
 		} finally {
 			entryLiveRepository.getEntryEventPick = originalGetPick;
 			entriesService.getEntryById = originalGetEntry;
+			entriesService.getEntryEventResult = originalGetPrevious;
 		}
 	});
 

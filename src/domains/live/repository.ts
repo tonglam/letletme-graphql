@@ -1535,6 +1535,8 @@ export const liveRepository: LiveRepository = {
 				? await getTargetedLiveDataSnapshot(context, eventId, playerIds, {
 						publicationId: publishedMeta.publicationId,
 						revision: publishedMeta.revision,
+						sourceCheckedAt: publishedMeta.checkedAt,
+						publishedAt: publishedMeta.publishedAt,
 						state: publishedMeta.state,
 						eventLiveCount: publishedMeta.eventLiveCount,
 						fixtureCount: publishedMeta.fixtureCount,
@@ -1544,6 +1546,8 @@ export const liveRepository: LiveRepository = {
 				: await getTargetedLiveDataSnapshot(context, eventId, playerIds, {
 						publicationId: "unavailable",
 						revision: "unavailable",
+						sourceCheckedAt: publishedMeta?.checkedAt ?? "",
+						publishedAt: publishedMeta?.publishedAt ?? "",
 						state: publishedMeta?.state ?? "scheduled",
 						eventLiveCount: publishedMeta?.eventLiveCount ?? 0,
 						fixtureCount: publishedMeta?.fixtureCount ?? 0,

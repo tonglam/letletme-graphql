@@ -1,5 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
-import type { Entry } from "../entries/repository";
+import type { Entry, EntryEventResult } from "../entries/repository";
 import { entriesService } from "../entries/service";
 import type { LivePerformance } from "../live/repository";
 import type { LiveSnapshotMeta } from "../live/snapshot-meta";
@@ -189,9 +189,10 @@ const scaledEntryValue = (value: number | null | undefined): number =>
 export const buildNoPicksLiveCalcData = (
 	entryId: number,
 	eventId = 0,
-	entry: Entry | null = null
+	entry: Entry | null = null,
+	previousResult: EntryEventResult | null = null
 ): LiveCalcData => {
-	const baseline = resolvePreviousEventBaseline(entry, eventId, null);
+	const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
 	return {
 		availability: "NO_PICKS",
 		snapshot: null,
@@ -255,14 +256,19 @@ export const entryLiveCalcService = {
 			.getEntryEventPick(context, entryId, eventId)
 			.finally(() => stopPicks?.());
 		if (!pickEntity || pickEntity.picks.length === 0) {
-			const entry = await entriesService.getEntryById(context, entryId).catch((error) => {
-				context.logger?.warn(
-					{ err: error, entryId, eventId },
-					"Entry metadata unavailable for no-picks response"
-				);
-				return null;
-			});
-			return buildNoPicksLiveCalcData(entryId, eventId, entry);
+			const [entry, previousResult] = await Promise.all([
+				entriesService.getEntryById(context, entryId).catch((error) => {
+					context.logger?.warn(
+						{ err: error, entryId, eventId },
+						"Entry metadata unavailable for no-picks response"
+					);
+					return null;
+				}),
+				eventId > 1
+					? entriesService.getEntryEventResult(context, entryId, eventId - 1)
+					: Promise.resolve(null),
+			]);
+			return buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
 		}
 
 		const calculate = async (): Promise<LiveCalcData> => {

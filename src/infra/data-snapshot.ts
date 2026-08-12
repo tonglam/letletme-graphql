@@ -1782,6 +1782,8 @@ export const getTargetedLiveDataSnapshot = async (
 	expected: {
 		publicationId: string;
 		revision: string;
+		sourceCheckedAt: string;
+		publishedAt: string;
 		state: LiveSnapshotState;
 		eventLiveCount: number;
 		fixtureCount: number;
@@ -1855,8 +1857,8 @@ export const getTargetedLiveDataSnapshot = async (
 			eventId,
 			revision: expected.revision,
 			publicationId: expected.publicationId,
-			sourceCheckedAt: String(row.source_checked_at),
-			publishedAt: String(row.published_at),
+			sourceCheckedAt: expected.sourceCheckedAt,
+			publishedAt: expected.publishedAt,
 			state: expected.state,
 			eventLiveCount: expected.eventLiveCount,
 			fixtureCount: expected.fixtureCount,

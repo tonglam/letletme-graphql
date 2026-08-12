@@ -127,7 +127,7 @@ describe("liveRepository live publication reads", () => {
 							publication_id: publicationManifest.publicationId,
 							revision: String(publicationManifest.revision),
 							source_checked_at: publicationManifest.sourceCheckedAt,
-							published_at: publicationManifest.publishedAt,
+							published_at: "2030-01-01T00:00:00.000Z",
 							event_lives: [
 								{
 									event_id: 1,
@@ -164,11 +164,12 @@ describe("liveRepository live publication reads", () => {
 			},
 		} as never;
 
-		const targeted = await liveRepository.getLivePerformancesByPlayerIds(context, 1, [1]);
+		const targeted = await liveRepository.getTargetedLiveRead(context, 1, [1]);
 
-		expect(targeted).toEqual([
+		expect(targeted.performances).toEqual([
 			expect.objectContaining({ playerId: 1, minutes: 90, totalPoints: 10 }),
 		]);
+		expect(targeted.meta.publishedAt).toBe(publicationManifest.publishedAt);
 		expect(queryCount).toBe(1);
 	});
 
