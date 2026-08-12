@@ -79,17 +79,44 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
           GRAPHQL_ENV: ${{ secrets.GRAPHQL_ENV }}
-          GRAPHQL_RUNTIME_DB_PASSWORD: ${{ secrets.GRAPHQL_RUNTIME_DB_PASSWORD }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,GRAPHQL_RUNTIME_DB_PASSWORD
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV
           script: |
             set -euo pipefail
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
-            [[ "$GRAPHQL_RUNTIME_DB_PASSWORD" =~ ^[A-Za-z0-9_-]{64}$ ]]
+            active_stage=""
+            stage_started_at=0
+            start_stage() {
+              active_stage="$1"
+              stage_started_at=$(date +%s%3N)
+            }
+            finish_stage() {
+              finished_at=$(date +%s%3N)
+              duration_ms=$(( finished_at - stage_started_at ))
+              printf '{"event":"deploy_stage_timing","service":"graphql","stage":"%s","outcome":"passed","durationMs":%s}\n' \
+                "$active_stage" "$duration_ms"
+              active_stage=""
+            }
+            fail_without_rollback_on_exit() {
+              original_status=$?
+              trap - EXIT
+              set +e
+              if [ "$original_status" -ne 0 ] && [ -n "$active_stage" ]; then
+                failed_at=$(date +%s%3N)
+                failed_duration_ms=$(( failed_at - stage_started_at ))
+                printf '{"event":"deploy_stage_timing","service":"graphql","stage":"%s","outcome":"failed","durationMs":%s}\n' \
+                  "$active_stage" "$failed_duration_ms"
+              fi
+              if [ -n "${next_env:-}" ]; then
+                rm -f "$next_env"
+              fi
+              exit "$original_status"
+            }
+            trap fail_without_rollback_on_exit EXIT
             image_name=${IMAGE_REF%@*}
             [[ "$image_name" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]]
             case "$VPS_WORKDIR" in
@@ -98,6 +125,7 @@ jobs:
             esac
             test "$VPS_WORKDIR" != "/"
 
+            start_stage checkout
             lower_user=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$lower_user" --password-stdin
 
@@ -118,23 +146,20 @@ jobs:
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+            finish_stage
 
+            start_stage envValidate
             umask 077
             next_env=$(mktemp "$VPS_WORKDIR/.env.deploy.next.XXXXXX")
-            cleanup_env() {
-              rm -f "$next_env"
-            }
-            trap cleanup_env EXIT
             printf '%s' "$GRAPHQL_ENV" > "$next_env"
             chmod 600 "$next_env"
-            GRAPHQL_RUNTIME_DB_PASSWORD="$GRAPHQL_RUNTIME_DB_PASSWORD" python3 - "$next_env" <<'PY'
-            import os
+            python3 - "$next_env" <<'PY'
+            import re
             import sys
             from pathlib import Path
-            from urllib.parse import quote, unquote, urlsplit, urlunsplit
+            from urllib.parse import unquote, urlsplit
 
             env_path = Path(sys.argv[1])
-            password = os.environ["GRAPHQL_RUNTIME_DB_PASSWORD"]
             lines = env_path.read_text(encoding="utf-8").splitlines()
             database_url_indexes = [
                 index for index, line in enumerate(lines) if line.startswith("DATABASE_URL=")
@@ -144,31 +169,27 @@ jobs:
 
             index = database_url_indexes[0]
             raw_value = lines[index].split("=", 1)[1]
-            quote_char = ""
             value = raw_value
             if len(raw_value) >= 2 and raw_value[0] == raw_value[-1] and raw_value[0] in ("'", '"'):
-                quote_char = raw_value[0]
                 value = raw_value[1:-1]
 
             parsed = urlsplit(value)
             username = unquote(parsed.username or "")
-            if not username.startswith("letletme_graphql_runtime."):
-                raise SystemExit("DATABASE_URL must use letletme_graphql_runtime")
-            if not parsed.hostname:
-                raise SystemExit("DATABASE_URL must include a host")
-
-            host = parsed.hostname
-            if ":" in host:
-                host = f"[{host}]"
-            port = f":{parsed.port}" if parsed.port else ""
-            netloc = f"{quote(username, safe='')}:{quote(password, safe='')}@{host}{port}"
-            normalized = urlunsplit(
-                (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+            hostname = (parsed.hostname or "").lower()
+            if parsed.scheme not in ("postgres", "postgresql"):
+                raise SystemExit("DATABASE_URL must use the postgres or postgresql scheme")
+            pooler_role = (
+                re.fullmatch(r"[^.]+\.pooler\.supabase\.com", hostname)
+                and re.fullmatch(r"letletme_graphql_runtime\.[^.]+", username)
             )
-            wrapped = f"{quote_char}{normalized}{quote_char}" if quote_char else normalized
-            lines[index] = f"DATABASE_URL={wrapped}"
-            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            if username != "letletme_graphql_runtime" and not pooler_role:
+                raise SystemExit("DATABASE_URL must use letletme_graphql_runtime")
+            if not hostname:
+                raise SystemExit("DATABASE_URL must include a host")
+            if not parsed.password:
+                raise SystemExit("DATABASE_URL must include the GraphQL runtime credential")
             PY
+            finish_stage
 
             old_container=$(APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
               docker compose ps --all -q graphql | head -n 1)
@@ -179,16 +200,27 @@ jobs:
               docker image inspect "$old_image" >/dev/null
             fi
 
+            start_stage pull
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose pull graphql
+            finish_stage
+            start_stage preflight
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
               docker compose run --rm -T graphql bun run contract:check
             curl --fail --silent http://127.0.0.1:3000/health >/dev/null
+            finish_stage
 
             rollback_armed=false
             rollback_graphql_on_exit() {
               original_status=$?
               trap - EXIT
               set +e
+              if [ "$original_status" -ne 0 ] && [ -n "$active_stage" ]; then
+                failed_at=$(date +%s%3N)
+                failed_duration_ms=$(( failed_at - stage_started_at ))
+                printf '{"event":"deploy_stage_timing","service":"graphql","stage":"%s","outcome":"failed","durationMs":%s}\n' \
+                  "$active_stage" "$failed_duration_ms"
+                active_stage=""
+              fi
               if [ "$rollback_armed" = true ]; then
                 if [ -n "$old_image" ]; then
                   echo "GraphQL deployment failed; restoring the previous image"
@@ -225,11 +257,14 @@ jobs:
             trap rollback_graphql_on_exit EXIT
             rollback_armed=true
 
+            start_stage replace
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose stop -t 30 graphql
             test -z "$(APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose ps -q graphql)"
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose up \
               -d --remove-orphans --no-build --force-recreate graphql
+            finish_stage
 
+            start_stage serviceReady
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:4000/health >/dev/null; then
                 break
@@ -242,7 +277,9 @@ jobs:
               fi
               sleep 2
             done
+            finish_stage
 
+            start_stage smoke
             anonymous_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
               --header 'Content-Type: application/json' \
               --data '{"query":"query { currentEventInfo { season } }"}' \
@@ -322,13 +359,16 @@ jobs:
               fi
               sleep 3
             done
+            finish_stage
 
+            start_stage finalize
             mv "$next_env" .env.deploy
             chmod 600 .env.deploy
             if [ -n "$old_image" ]; then
               printf '%s\n' "$old_image" > "$HOME/.letletme-graphql-previous-image"
               chmod 600 "$HOME/.letletme-graphql-previous-image"
             fi
+            finish_stage
 
             rollback_armed=false
             trap - EXIT

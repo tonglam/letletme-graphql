@@ -1,6 +1,9 @@
+import { parseDatabasePoolMax } from "./database-pool-config";
+
 type EnvKey =
 	| "NODE_ENV"
 	| "DATABASE_URL"
+	| "DATABASE_POOL_MAX"
 	| "REDIS_HOST"
 	| "REDIS_PORT"
 	| "REDIS_PASSWORD"
@@ -76,6 +79,7 @@ export const env = {
 	NODE_ENV,
 	isProduction,
 	DATABASE_URL: requireEnv("DATABASE_URL"),
+	DATABASE_POOL_MAX: parseDatabasePoolMax(readEnv("DATABASE_POOL_MAX")),
 	REDIS_HOST: requireEnv("REDIS_HOST"),
 	REDIS_PORT: readNumber("REDIS_PORT", 6379),
 	REDIS_PASSWORD: readEnv("REDIS_PASSWORD") ?? "",

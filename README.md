@@ -64,6 +64,9 @@ bun run contract:check
 bun run dev
 ```
 
+`DATABASE_POOL_MAX` defaults to `5` and accepts only `1` through `10`. Keep the production value at
+`5` unless the shared PostgreSQL connection budget is deliberately rebalanced.
+
 The service exposes:
 
 - `POST /graphql` for trusted Web traffic;
