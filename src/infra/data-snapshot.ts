@@ -3,6 +3,7 @@ import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
 	readDataPublication,
+	readDataPublicationItemsObserved,
 	readDataPublicationItemsAtManifest,
 	readDataPublicationManifest,
 	type DataPublication,
@@ -295,10 +296,11 @@ const readPinnedCorePublicationItems = async (
 			dataset: "fpl:core" as const,
 			seasonCode: context.currentSeason.seasonCode,
 		};
-		const publication = readDataPublication(context.redis, scope, requiredItemNames);
+		const read = readDataPublicationItemsObserved(context.redis, scope, requiredItemNames);
+		const publication = read.then((value) => value.publication);
 		pin = {
-			manifest: publication.then(
-				(value) => value?.manifest ?? readDataPublicationManifest(context.redis, scope)
+			manifest: read.then(
+				(value) => value.observedManifest ?? readDataPublicationManifest(context.redis, scope)
 			),
 		};
 		corePublicationPinMemo.set(requestScope, pin);

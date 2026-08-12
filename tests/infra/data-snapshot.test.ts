@@ -225,6 +225,47 @@ describe("typed Data snapshots", () => {
 		);
 	});
 
+	it("retains the observed manifest when an atomic targeted payload read fails", async () => {
+		const complete = buildTestCoreData(1);
+		const pinnedPublication = buildCorePublication("2627", 7, complete);
+		const advancedPublication = buildCorePublication("2627", 9, complete);
+		const redis = new TestRedis(pinnedPublication);
+		Object.assign(redis, {
+			eval: async (_script: string, numberOfKeys: number, activeKey: string) => {
+				expect(numberOfKeys).toBe(1);
+				const rawManifest = redis.values.get(activeKey);
+				const missingItem = pinnedPublication.manifest.items.find(
+					(item) => item.name === "fixtures"
+				);
+				if (missingItem) redis.values.delete(missingItem.key);
+				for (const [key, value] of advancedPublication.store) redis.values.set(key, value);
+				return rawManifest ? [rawManifest, null, null] : [];
+			},
+		});
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						authority_count: "1",
+						publication_id: advancedPublication.manifest.publicationId,
+						revision: "9",
+						manifest: advancedPublication.manifest,
+						source_checked_at: "2026-08-09T01:00:00.000Z",
+						events: complete.events,
+						teams: complete.teams,
+						players: complete.players,
+						phases: complete.phases,
+						fixtures: complete.fixtures.map(toPublicationFixture),
+					},
+				],
+			}),
+		});
+
+		await expect(getCoreFixtureSnapshot(context)).rejects.toThrow(
+			"Coherent PostgreSQL core publication is unavailable"
+		);
+	});
+
 	it("rejects a non-canonical active core publication during PostgreSQL fallback", async () => {
 		const invalidManifest = {
 			...buildCorePublication("2627", 9, buildTestCoreData(1)).manifest,
