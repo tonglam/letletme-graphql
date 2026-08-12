@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { entryLiveBatchService } from "../../../src/domains/entry-live/batch-service";
+import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
+import { entriesService } from "../../../src/domains/entries/service";
 import type { LivePerformance } from "../../../src/domains/live/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
 
@@ -83,5 +85,54 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		expect(
 			entryLiveBatchService.calcLivePointsForEntries(context, 33, [1001, 1001])
 		).rejects.toMatchObject({ extensions: { code: "DUPLICATE_ENTRY_IDS" } });
+	});
+
+	it("returns NO_PICKS with entry metadata before heavy acquisition", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		const originalPicks = entryLiveRepository.getEntryEventPicksByIds;
+		entriesService.getEntriesByIds = async () =>
+			new Map([
+				[
+					1001,
+					{
+						id: 1001,
+						entryName: "Batch Team",
+						playerName: "Batch Player",
+						region: null,
+						startedEvent: 1,
+						overallPoints: 99,
+						overallRank: 100,
+						bank: 10,
+						teamValue: 1000,
+						totalTransfers: 3,
+						lastEventId: 32,
+						lastOverallPoints: 90,
+						lastOverallRank: 110,
+						lastTeamValue: 990,
+						lastBank: 10,
+					},
+				],
+			]);
+		entryLiveRepository.getEntryEventPicksByIds = async () => new Map();
+
+		try {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(
+				makeMockContext({}),
+				33,
+				[1001]
+			);
+			expect(result.results.get(1001)).toMatchObject({
+				availability: "NO_PICKS",
+				snapshot: null,
+				entryName: "Batch Team",
+				playerName: "Batch Player",
+				overallPoints: 99,
+				pickList: [],
+			});
+			expect(result.meta.succeededCount).toBe(1);
+		} finally {
+			entriesService.getEntriesByIds = originalEntries;
+			entryLiveRepository.getEntryEventPicksByIds = originalPicks;
+		}
 	});
 });

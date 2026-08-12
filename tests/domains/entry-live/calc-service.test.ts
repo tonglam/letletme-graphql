@@ -6,6 +6,7 @@ import {
 	type LiveCalcData,
 } from "../../../src/domains/entry-live/calc-service";
 import { entryLiveBatchService } from "../../../src/domains/entry-live/batch-service";
+import { entriesService } from "../../../src/domains/entries/service";
 import {
 	applyAutoSubs,
 	calcElementLivePoints,
@@ -299,8 +300,26 @@ describe("applyAutoSubs", () => {
 describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 	it("returns NO_PICKS before acquiring a live snapshot or enrichment", async () => {
 		const originalGetPick = entryLiveRepository.getEntryEventPick;
+		const originalGetEntry = entriesService.getEntryById;
 		const stages: string[] = [];
 		entryLiveRepository.getEntryEventPick = async () => null;
+		entriesService.getEntryById = async () => ({
+			id: 123,
+			entryName: "Legacy Team",
+			playerName: "Legacy Player",
+			region: "AU",
+			startedEvent: 1,
+			overallPoints: 321,
+			overallRank: 456,
+			bank: 15,
+			teamValue: 1005,
+			totalTransfers: 7,
+			lastEventId: 6,
+			lastOverallPoints: 300,
+			lastOverallRank: 500,
+			lastTeamValue: 995,
+			lastBank: 10,
+		});
 		const context = {
 			requestTiming: {
 				start: (stage: string) => {
@@ -316,9 +335,17 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 			expect(result.snapshot).toBeNull();
 			expect(result.event).toBe(7);
 			expect(result.pickList).toEqual([]);
+			expect(result).toMatchObject({
+				entryName: "Legacy Team",
+				playerName: "Legacy Player",
+				overallPoints: 321,
+				overallRank: 456,
+				value: 100.5,
+			});
 			expect(stages).toEqual(["entryLive.picks"]);
 		} finally {
 			entryLiveRepository.getEntryEventPick = originalGetPick;
+			entriesService.getEntryById = originalGetEntry;
 		}
 	});
 
@@ -350,6 +377,7 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 						{
 							entry: entryIds[0]!,
 							event: eventId,
+							snapshot: batchSnapshot,
 						} as LiveCalcData,
 					],
 				]),
@@ -368,9 +396,9 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 			const observedSnapshot = batchSnapshot;
 			if (!observedSnapshot) throw new Error("Batch did not observe the request-scoped snapshot");
 			expect(result.availability).toBe("READY");
-			expect(result.snapshot).toBe(observedSnapshot);
+			expect(result.snapshot).toEqual(observedSnapshot);
 			expect(result.snapshot).toMatchObject({ revision: "8", eventId: 1 });
-			expect(stages).toEqual(["entryLive.picks", "entryLive.liveSnapshot", "entryLive.aggregate"]);
+			expect(stages).toEqual(["entryLive.picks", "entryLive.aggregate"]);
 		} finally {
 			entryLiveRepository.getEntryEventPick = originalGetPick;
 			entryLiveBatchService.calcLivePointsForEntries = originalBatchCalc;

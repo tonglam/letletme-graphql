@@ -8,6 +8,7 @@ import {
 	buildTestCoreData,
 	buildTestEventLives,
 	TestRedis,
+	toPublicationFixture,
 } from "../../helpers/data-publication";
 
 const withReadRows = (
@@ -80,6 +81,95 @@ describe("liveRepository live publication reads", () => {
 		});
 		expect(targeted.map((row) => row.playerId)).toEqual([1, 2]);
 		expect(eventLive.performances).toHaveLength(core.players.length);
+	});
+
+	it("reads a targeted player set without hydrating the full live publication", async () => {
+		const { context, redis, core } = liveContext();
+		const activeManifest = [...redis.values.entries()].find(
+			([key]) => key.includes(":fpl:live:") && key.endsWith(":active")
+		);
+		if (!activeManifest) throw new Error("Missing live publication manifest");
+		const publicationManifest = JSON.parse(activeManifest[1]) as {
+			publicationId: string;
+			revision: number;
+			sourceCheckedAt: string;
+			publishedAt: string;
+			items: Array<{ name: string; key: string }>;
+		};
+		if (activeManifest) {
+			const eventLivesKey = publicationManifest.items.find(
+				(item) => item.name === "eventLives"
+			)?.key;
+			if (eventLivesKey) redis.values.delete(eventLivesKey);
+		}
+		let queryCount = 0;
+		context.logger = {
+			...context.logger,
+			warn: (details: unknown) => {
+				if (
+					details &&
+					typeof details === "object" &&
+					"err" in details &&
+					details.err instanceof Error
+				) {
+					throw details.err;
+				}
+			},
+		};
+		context.database = {
+			query: async (sql: unknown) => {
+				queryCount += 1;
+				expect(String(sql)).toContain("element_id = ANY($3::integer[])");
+				return {
+					rows: [
+						{
+							authority_count: "1",
+							publication_id: publicationManifest.publicationId,
+							revision: String(publicationManifest.revision),
+							source_checked_at: publicationManifest.sourceCheckedAt,
+							published_at: publicationManifest.publishedAt,
+							event_lives: [
+								{
+									event_id: 1,
+									element_id: 1,
+									minutes: 90,
+									goals_scored: 1,
+									assists: 0,
+									clean_sheets: 0,
+									goals_conceded: 0,
+									own_goals: 0,
+									penalties_saved: 0,
+									penalties_missed: 0,
+									yellow_cards: 0,
+									red_cards: 0,
+									saves: 0,
+									bonus: 3,
+									bps: 40,
+									starts: true,
+									defensive_contribution: 0,
+									expected_goals: "0.75",
+									expected_assists: "0.10",
+									expected_goal_involvements: "0.85",
+									expected_goals_conceded: "0.90",
+									in_dream_team: true,
+									total_points: 10,
+								},
+							],
+							fixtures: core.fixtures
+								.filter((fixture) => fixture.eventId === 1)
+								.map(toPublicationFixture),
+						},
+					],
+				};
+			},
+		} as never;
+
+		const targeted = await liveRepository.getLivePerformancesByPlayerIds(context, 1, [1]);
+
+		expect(targeted).toEqual([
+			expect.objectContaining({ playerId: 1, minutes: 90, totalPoints: 10 }),
+		]);
+		expect(queryCount).toBe(1);
 	});
 
 	it("reads historical multi-event stats in one bounded PostgreSQL query", async () => {

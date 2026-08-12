@@ -5,13 +5,14 @@ import type { Entry } from "../entries/repository";
 import { entriesService } from "../entries/service";
 import type { Fixture } from "../fixtures/repository";
 import { fixturesService } from "../fixtures/service";
-import type { LivePerformance } from "../live/repository";
+import type { LivePerformance, TargetedLiveRead } from "../live/repository";
 import { liveRepository } from "../live/repository";
 import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
 import { playersRepository } from "../players/repository";
 import {
 	type ActiveCaptainData,
 	applyAutoSubs,
+	buildNoPicksLiveCalcData,
 	calcElementLivePoints,
 	type ElementEventResultData,
 	type LiveCalcData,
@@ -433,7 +434,7 @@ const computeSingleEntry = (
 	});
 
 	return {
-		availability: "READY",
+		availability: pickEntity && pickEntity.picks.length > 0 ? "READY" : "NO_PICKS",
 		snapshot: null,
 		rank: 0,
 		event: eventId,
@@ -495,18 +496,46 @@ export const entryLiveBatchService = {
 			};
 		}
 
-		// Phase 1: Load reusable data and all entry data in parallel. A single-entry
-		// request defers live points until its 15 picks are known, avoiding a
-		// 700-player shaped-cache decode on every browser refresh.
+		// Phase 1: resolve identity and picks. Entries without picks must not enter
+		// Live, fixture, player, transfer or bonus acquisition.
+		const [entriesById, picksByEntry] = await Promise.all([
+			entriesService.getEntriesByIds(context, entryIds),
+			prefetched?.picksByEntry ??
+				entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
+		]);
+		const readyEntryIds = entryIds.filter(
+			(entryId) => (picksByEntry.get(entryId)?.picks.length ?? 0) > 0
+		);
+		const results = new Map<number, LiveCalcData>();
+		for (const entryId of entryIds) {
+			if (!readyEntryIds.includes(entryId)) {
+				results.set(
+					entryId,
+					buildNoPicksLiveCalcData(entryId, eventId, entriesById.get(entryId) ?? null)
+				);
+			}
+		}
+		if (readyEntryIds.length === 0) {
+			return {
+				results,
+				errors,
+				meta: {
+					eventId,
+					totalEntries: entryIds.length,
+					succeededCount: results.size,
+					failedCount: 0,
+				},
+			};
+		}
+
+		// Phase 2: load reusable data only for entries that actually have picks.
 		const useTargetedLiveRead =
-			includeLive && entryIds.length === 1 && prefetched?.liveByPlayer === undefined;
+			includeLive && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
 		const [
 			liveByPlayerRaw,
 			bonusByPlayerId,
 			fixtures,
 			teams,
-			entriesById,
-			picksByEntry,
 			transfersByEntry,
 			previousResultsByEntry,
 		] = await Promise.all([
@@ -514,19 +543,14 @@ export const entryLiveBatchService = {
 				(includeLive && !useTargetedLiveRead
 					? liveRepository.getAllLivePerformances(context, eventId)
 					: Promise.resolve(new Map<number, LivePerformance>())),
-			includeLive
+			includeLive && !useTargetedLiveRead
 				? loadLiveBonusByPlayerId(context, eventId)
 				: Promise.resolve(new Map<number, number>()),
 			prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
 			prefetched?.teams ?? playersRepository.listTeams(context),
-			// Phase 2 moved here: entry info HMGET
-			entriesService.getEntriesByIds(context, entryIds),
-			// Phase 3 moved here: picks + transfers (MGET cache or SQL)
-			prefetched?.picksByEntry ??
-				entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
-			entryLiveRepository.getEntryEventTransfersByIds(context, entryIds, eventId),
+			entryLiveRepository.getEntryEventTransfersByIds(context, readyEntryIds, eventId),
 			eventId > 1
-				? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
+				? entriesService.getEntryEventResultsByEntryIds(context, readyEntryIds, eventId - 1)
 				: Promise.resolve(new Map<number, EntryEventResult>()),
 		]);
 
@@ -544,14 +568,26 @@ export const entryLiveBatchService = {
 
 		// Load only the needed players via HMGET (not HGETALL of all 600+)
 		const playerIds = Array.from(allPlayerIds);
-		const [playersList, targetedLivePerformances] = await Promise.all([
+		const loadTargetedLive = async (): Promise<TargetedLiveRead | null> => {
+			if (!useTargetedLiveRead) return null;
+			const stopSnapshot = context.requestTiming?.start("entryLive.liveSnapshot");
+			try {
+				return await liveRepository.getTargetedLiveRead(context, eventId, playerIds);
+			} finally {
+				stopSnapshot?.();
+			}
+		};
+		const [playersList, targetedLive] = await Promise.all([
 			playersRepository.getPlayersByIds(context, playerIds),
-			useTargetedLiveRead
-				? liveRepository.getLivePerformancesByPlayerIds(context, eventId, playerIds)
-				: Promise.resolve([] as LivePerformance[]),
+			loadTargetedLive(),
 		]);
 		const liveByPlayerMap = useTargetedLiveRead
-			? new Map(targetedLivePerformances.map((performance) => [performance.playerId, performance]))
+			? new Map(
+					(targetedLive?.performances ?? []).map((performance) => [
+						performance.playerId,
+						performance,
+					])
+				)
 			: new Map(liveByPlayerRaw);
 
 		const playersById = new Map<number, Player>();
@@ -576,16 +612,14 @@ export const entryLiveBatchService = {
 
 		const shared: SharedData = {
 			liveByPlayer: liveByPlayerMap,
-			effectiveBonusByPlayer: bonusByPlayerId,
+			effectiveBonusByPlayer: targetedLive?.effectiveBonusByPlayer ?? bonusByPlayerId,
 			teamsById,
 			playersById,
 			fixturesByTeam,
 		};
 
 		// Phase 4: Compute per-entry (pure CPU, zero I/O)
-		const results = new Map<number, LiveCalcData>();
-
-		for (const entryId of entryIds) {
+		for (const entryId of readyEntryIds) {
 			try {
 				const perEntry: PerEntryData = {
 					entryId,
@@ -595,7 +629,10 @@ export const entryLiveBatchService = {
 					previousResult: previousResultsByEntry.get(entryId) ?? null,
 				};
 
-				const calcData = computeSingleEntry(entryId, eventId, perEntry, shared);
+				const calcData = {
+					...computeSingleEntry(entryId, eventId, perEntry, shared),
+					snapshot: targetedLive?.meta ?? null,
+				};
 				results.set(entryId, calcData);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : "Computation error";

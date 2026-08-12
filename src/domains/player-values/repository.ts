@@ -392,6 +392,38 @@ async function getPlayerValuesFromDatabase(
 const NULL_SENTINEL = "__pv:null__";
 const MISSING_SENTINEL = "1";
 
+const REPLACE_PLAYER_VALUES_CACHE_SCRIPT = `
+-- player-values-cache-replace-v1
+if ARGV[1] == 'positive' then
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+  redis.call('DEL', KEYS[2])
+  return 1
+end
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  redis.call('DEL', KEYS[2])
+  return 0
+end
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+return 1
+`;
+
+export const replacePlayerValuesQueryCache = async (
+	context: GraphQLContext,
+	cacheKey: string,
+	missingCacheKey: string,
+	values: PlayerValue[]
+): Promise<void> => {
+	await context.redis.eval(
+		REPLACE_PLAYER_VALUES_CACHE_SCRIPT,
+		2,
+		cacheKey,
+		missingCacheKey,
+		values.length === 0 ? "negative" : "positive",
+		values.length === 0 ? MISSING_SENTINEL : JSON.stringify(values),
+		String(QUERY_CACHE_TTL_SECONDS.MARKET)
+	);
+};
+
 const isFiniteNumber = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value);
 
@@ -512,25 +544,7 @@ export const playerValuesRepository: PlayerValuesRepository = {
 
 		try {
 			await measureRequestStage(context, "playerValues.cacheWrite", () =>
-				values.length === 0
-					? Promise.all([
-							context.redis.set(
-								missingCacheKey,
-								MISSING_SENTINEL,
-								"EX",
-								QUERY_CACHE_TTL_SECONDS.MARKET
-							),
-							context.redis.del(cacheKey),
-						])
-					: Promise.all([
-							context.redis.set(
-								cacheKey,
-								JSON.stringify(values),
-								"EX",
-								QUERY_CACHE_TTL_SECONDS.MARKET
-							),
-							context.redis.del(missingCacheKey),
-						])
+				replacePlayerValuesQueryCache(context, cacheKey, missingCacheKey, values)
 			);
 		} catch (error) {
 			context.logger.warn({ err: error }, "Failed to write player-values query cache");

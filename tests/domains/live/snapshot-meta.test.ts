@@ -3,6 +3,7 @@ import {
 	isLiveSnapshotConsistencyActive,
 	isLiveSnapshotDatabaseFallback,
 	liveSnapshotMetaKey,
+	loadLivePublicationMeta,
 	loadLiveSnapshotMeta,
 	parseLiveSnapshotMeta,
 	withLiveSnapshotConsistency,
@@ -31,6 +32,7 @@ describe("live snapshot metadata", () => {
 			season: "2627",
 			eventId: 1,
 			revision: "8",
+			publicationId: publication.manifest.publicationId,
 			state: "scheduled",
 			publishedAt: "2026-08-09T01:00:00.000Z",
 			checkedAt: "2026-08-09T01:00:00.000Z",
@@ -74,6 +76,19 @@ describe("live snapshot metadata", () => {
 		expect(isLiveSnapshotConsistencyActive(context, 1)).toBe(true);
 		expect(isLiveSnapshotDatabaseFallback(context, 1)).toBe(false);
 		expect(liveSnapshotMetaKey("2627", 1)).toBe("llm:data:fpl:live:2627:1:active");
+	});
+
+	it("reads bounded-path metadata without hydrating the eventLives payload", async () => {
+		const core = buildTestCoreData(1);
+		const live = buildLivePublication(core, 1, "2627", 8);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
+		const eventLivesKey = live.manifest.items.find((item) => item.name === "eventLives")?.key;
+		if (eventLivesKey) redis.values.delete(eventLivesKey);
+		const context = buildSnapshotContext(redis);
+
+		const meta = await loadLivePublicationMeta(context, 1);
+
+		expect(meta).toMatchObject({ revision: "8", eventLiveCount: 220, fixtureCount: 10 });
 	});
 
 	it("runs each consistency/root operation once over the immutable request snapshot", async () => {
