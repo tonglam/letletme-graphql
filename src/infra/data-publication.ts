@@ -207,13 +207,12 @@ export const parseDataPublicationManifest = (
 	}
 };
 
-const hasExactItems = (
+const hasRequiredItems = (
 	manifest: DataPublicationManifest,
-	expectedItemNames: readonly string[]
+	requiredItemNames: readonly string[]
 ): boolean => {
-	if (manifest.items.length !== expectedItemNames.length) return false;
 	const actual = new Set(manifest.items.map((item) => item.name));
-	return expectedItemNames.every((name) => actual.has(name));
+	return requiredItemNames.every((name) => actual.has(name));
 };
 
 const getPublicationCache = (redis: Redis): Map<string, CachedPublication> => {
@@ -226,50 +225,159 @@ const getPublicationCache = (redis: Redis): Map<string, CachedPublication> => {
 	return cache;
 };
 
-export const readDataPublication = async (
+const READ_PUBLICATION_ITEMS_SCRIPT = `
+local raw_manifest = redis.call('GET', KEYS[1])
+if not raw_manifest then
+  return {}
+end
+local manifest = cjson.decode(raw_manifest)
+local keys_by_name = {}
+for _, item in ipairs(manifest.items or {}) do
+  keys_by_name[item.name] = item.key
+end
+local payload_keys = {}
+for _, name in ipairs(ARGV) do
+  local key = keys_by_name[name]
+  if not key then
+    return {}
+  end
+  table.insert(payload_keys, key)
+end
+local payloads = redis.call('MGET', unpack(payload_keys))
+local result = { raw_manifest }
+for _, payload in ipairs(payloads) do
+  table.insert(result, payload)
+end
+return result
+`;
+
+type PublicationPayloadRead = Readonly<{
+	rawManifest: string;
+	payloads: readonly (string | null)[];
+}>;
+
+const readPublicationPayloads = async (
+	redis: Redis,
+	activeKey: string,
+	manifestScope: DataPublicationScope,
+	requiredItemNames: readonly string[]
+): Promise<PublicationPayloadRead | null> => {
+	const evaluator = (
+		redis as Redis & {
+			eval?: (...args: unknown[]) => Promise<unknown>;
+		}
+	).eval;
+	if (typeof evaluator === "function") {
+		const result = await evaluator.call(
+			redis,
+			READ_PUBLICATION_ITEMS_SCRIPT,
+			1,
+			activeKey,
+			...requiredItemNames
+		);
+		if (!Array.isArray(result) || typeof result[0] !== "string") return null;
+		return {
+			rawManifest: result[0],
+			payloads: result.slice(1).map((value) => (typeof value === "string" ? value : null)),
+		};
+	}
+
+	const rawManifest = await redis.get(activeKey);
+	const manifest = parseDataPublicationManifest(rawManifest, manifestScope);
+	if (!rawManifest || !manifest || !hasRequiredItems(manifest, requiredItemNames)) return null;
+	const keys = requiredItemNames.map(
+		(name) => manifest.items.find((item) => item.name === name)?.key ?? ""
+	);
+	if (keys.some((key) => key.length === 0)) return null;
+	return { rawManifest, payloads: await redis.mget(...keys) };
+};
+
+const decodePublicationItems = (
+	manifest: DataPublicationManifest,
+	requiredItemNames: readonly string[],
+	payloads: readonly (string | null)[]
+): Record<string, unknown> | null => {
+	if (payloads.length !== requiredItemNames.length) return null;
+	const items: Record<string, unknown> = {};
+	for (const [index, name] of requiredItemNames.entries()) {
+		const item = manifest.items.find((candidate) => candidate.name === name);
+		const payload = payloads[index];
+		if (
+			!item ||
+			payload === null ||
+			Buffer.byteLength(payload, "utf8") !== item.bytes ||
+			sha256(payload) !== item.sha256
+		) {
+			return null;
+		}
+		try {
+			const parsed: unknown = JSON.parse(payload);
+			if (itemCount(parsed) !== item.count) return null;
+			items[name] = parsed;
+		} catch {
+			return null;
+		}
+	}
+	return items;
+};
+
+export const readDataPublicationItems = async (
 	redis: Redis,
 	scope: DataPublicationScope,
-	expectedItemNames: readonly string[]
+	requiredItemNames: readonly string[]
 ): Promise<DataPublication | null> => {
 	assertScope(scope);
+	const uniqueItemNames = [...new Set(requiredItemNames)];
+	if (uniqueItemNames.length === 0) return null;
 	const activeKey = activeDataPublicationKey(scope);
 	const cache = getPublicationCache(redis);
 	try {
-		const rawManifest = await redis.get(activeKey);
-		const manifest = parseDataPublicationManifest(rawManifest, scope);
-		if (!rawManifest || !manifest || !hasExactItems(manifest, expectedItemNames)) {
+		const cached = cache.get(activeKey);
+		if (cached) {
+			const rawManifest = await redis.get(activeKey);
+			const manifest = parseDataPublicationManifest(rawManifest, scope);
+			if (!rawManifest || !manifest || !hasRequiredItems(manifest, uniqueItemNames)) {
+				cache.delete(activeKey);
+				return null;
+			}
+			const cachedItems = cached.rawManifest === rawManifest ? cached.publication.items : {};
+			if (
+				cached.rawManifest === rawManifest &&
+				uniqueItemNames.every((name) => name in cachedItems)
+			) {
+				return cached.publication;
+			}
+		}
+
+		const fetched = await readPublicationPayloads(redis, activeKey, scope, uniqueItemNames);
+		if (!fetched) {
 			cache.delete(activeKey);
 			return null;
 		}
-
-		const cached = cache.get(activeKey);
-		if (cached?.rawManifest === rawManifest) return cached.publication;
-
-		const payloads = await redis.mget(...manifest.items.map((item) => item.key));
-		const items: Record<string, unknown> = {};
-		for (const [index, item] of manifest.items.entries()) {
-			const payload = payloads[index];
-			if (
-				payload === null ||
-				Buffer.byteLength(payload, "utf8") !== item.bytes ||
-				sha256(payload) !== item.sha256
-			) {
-				cache.delete(activeKey);
-				return null;
-			}
-			const parsed: unknown = JSON.parse(payload);
-			if (itemCount(parsed) !== item.count) {
-				cache.delete(activeKey);
-				return null;
-			}
-			items[item.name] = parsed;
+		const manifest = parseDataPublicationManifest(fetched.rawManifest, scope);
+		if (!manifest || !hasRequiredItems(manifest, uniqueItemNames)) {
+			cache.delete(activeKey);
+			return null;
 		}
-
-		const publication = { manifest, items } satisfies DataPublication;
-		cache.set(activeKey, { rawManifest, publication });
+		const cachedItems =
+			cache.get(activeKey)?.rawManifest === fetched.rawManifest
+				? (cache.get(activeKey)?.publication.items ?? {})
+				: {};
+		const decoded = decodePublicationItems(manifest, uniqueItemNames, fetched.payloads);
+		if (!decoded) {
+			cache.delete(activeKey);
+			return null;
+		}
+		const publication = {
+			manifest,
+			items: { ...cachedItems, ...decoded },
+		} satisfies DataPublication;
+		cache.set(activeKey, { rawManifest: fetched.rawManifest, publication });
 		return publication;
 	} catch {
 		cache.delete(activeKey);
 		return null;
 	}
 };
+
+export const readDataPublication = readDataPublicationItems;

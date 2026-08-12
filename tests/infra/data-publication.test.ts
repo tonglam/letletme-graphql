@@ -91,6 +91,29 @@ describe("Data publication reader", () => {
 		expect(mgetCalls).toBe(2);
 	});
 
+	it("loads only the requested items and fills the same cached revision on demand", async () => {
+		const base = publication();
+		const redis = new TestRedis(base);
+		const requested: string[][] = [];
+		const originalMget = redis.mget;
+		redis.mget = async (...keys: string[]) => {
+			requested.push(keys);
+			return originalMget(...keys);
+		};
+
+		const fixtureOnly = await readDataPublication(redis as never, scope, ["teams", "fixtures"]);
+		const complete = await readDataPublication(redis as never, scope, expectedItems);
+
+		expect(fixtureOnly?.items.players).toBeUndefined();
+		expect(fixtureOnly?.items.teams).toBeDefined();
+		expect(fixtureOnly?.items.fixtures).toBeDefined();
+		expect(complete?.items.players).toBeDefined();
+		expect(requested).toHaveLength(2);
+		expect(requested[0]?.every((key) => key.endsWith(":teams") || key.endsWith(":fixtures"))).toBe(
+			true
+		);
+	});
+
 	it("rejects wrong scope, missing/extra items, duplicate names, and noncanonical item keys", async () => {
 		const cases: Array<(manifest: MutableManifest) => void> = [
 			(manifest) => {

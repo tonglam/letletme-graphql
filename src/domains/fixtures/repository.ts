@@ -1,5 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
-import { getCoreDataSnapshot, type CoreFixtureData } from "../../infra/data-snapshot";
+import { getCoreFixtureSnapshot, type CoreFixtureData } from "../../infra/data-snapshot";
 import { getCurrentEventId } from "../../infra/event";
 import { metrics } from "../../infra/metrics";
 
@@ -77,7 +77,7 @@ interface FixturesRepository {
 
 export const fixturesRepository: FixturesRepository = {
 	async listFixtures(context, filter, limit, offset) {
-		const snapshot = await getCoreDataSnapshot(context);
+		const snapshot = await getCoreFixtureSnapshot(context);
 		const safeOffset = Math.max(Number.isFinite(offset) ? offset : 0, 0);
 		return snapshot.fixtures
 			.map(mapFixture)
@@ -89,7 +89,7 @@ export const fixturesRepository: FixturesRepository = {
 	async getEventFixtures(context, eventId) {
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) return [];
 		const acquisitionStartedAt = performance.now();
-		const snapshot = await getCoreDataSnapshot(context);
+		const snapshot = await getCoreFixtureSnapshot(context);
 		const coreFixtureAcquisitionMs = performance.now() - acquisitionStartedAt;
 		const transformStartedAt = performance.now();
 		const fixtures = snapshot.fixtures

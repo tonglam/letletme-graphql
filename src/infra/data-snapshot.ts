@@ -3,6 +3,7 @@ import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
 	readDataPublication,
+	readDataPublicationItems,
 	type DataPublication,
 } from "./data-publication";
 
@@ -179,6 +180,26 @@ export type CoreDataSnapshot = Readonly<{
 	currentEventId: number | null;
 }>;
 
+export type CoreFixtureSnapshot = Readonly<{
+	source: DataSnapshotSource;
+	seasonCode: string;
+	revision: string;
+	publicationId: string;
+	sourceCheckedAt: string;
+	teams: readonly CoreTeamData[];
+	fixtures: readonly CoreFixtureData[];
+}>;
+
+export type CoreEventSnapshot = Readonly<{
+	source: DataSnapshotSource;
+	seasonCode: string;
+	revision: string;
+	publicationId: string;
+	sourceCheckedAt: string;
+	events: readonly CoreEventData[];
+	currentEventId: number | null;
+}>;
+
 export type LiveDataSnapshot = Readonly<{
 	source: DataSnapshotSource;
 	seasonCode: string;
@@ -195,6 +216,8 @@ export type LiveDataSnapshot = Readonly<{
 }>;
 
 const coreSnapshotMemo = new WeakMap<object, Promise<CoreDataSnapshot>>();
+const coreFixtureSnapshotMemo = new WeakMap<object, Promise<CoreFixtureSnapshot>>();
+const coreEventSnapshotMemo = new WeakMap<object, Promise<CoreEventSnapshot>>();
 const liveSnapshotMemo = new WeakMap<GraphQLContext, Map<number, Promise<LiveDataSnapshot>>>();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -769,6 +792,42 @@ const publicationCoreSnapshot = (publication: DataPublication): CoreDataSnapshot
 		players,
 		phases,
 		fixtures,
+		currentEventId,
+	};
+};
+
+const publicationCoreFixtureSnapshot = (
+	publication: DataPublication
+): CoreFixtureSnapshot | null => {
+	const teams = mapArray(publication.items.teams, mapCoreTeam);
+	const fixtures = mapArray(publication.items.fixtures, mapCoreFixture);
+	if (!teams || !fixtures || teams.length === 0) return null;
+	const teamIds = new Set(teams.map((team) => team.id));
+	if (fixtures.some((fixture) => !teamIds.has(fixture.teamHId) || !teamIds.has(fixture.teamAId))) {
+		return null;
+	}
+	return {
+		source: "redis",
+		seasonCode: publication.manifest.seasonCode,
+		revision: String(publication.manifest.revision),
+		publicationId: publication.manifest.publicationId,
+		sourceCheckedAt: publication.manifest.sourceCheckedAt,
+		teams,
+		fixtures,
+	};
+};
+
+const publicationCoreEventSnapshot = (publication: DataPublication): CoreEventSnapshot | null => {
+	const events = mapArray(publication.items.events, mapCoreEvent);
+	const currentEventId = integer(publication.items.currentEventId);
+	if (!events) return null;
+	return {
+		source: "redis",
+		seasonCode: publication.manifest.seasonCode,
+		revision: String(publication.manifest.revision),
+		publicationId: publication.manifest.publicationId,
+		sourceCheckedAt: publication.manifest.sourceCheckedAt,
+		events,
 		currentEventId,
 	};
 };
@@ -1480,6 +1539,70 @@ export const getCoreDataSnapshot = (context: GraphQLContext): Promise<CoreDataSn
 		return loadCoreSnapshotFromPostgres(context);
 	})();
 	coreSnapshotMemo.set(requestScope, load);
+	return load;
+};
+
+const projectCoreFixtureSnapshot = (snapshot: CoreDataSnapshot): CoreFixtureSnapshot => ({
+	source: snapshot.source,
+	seasonCode: snapshot.seasonCode,
+	revision: snapshot.revision,
+	publicationId: snapshot.publicationId,
+	sourceCheckedAt: snapshot.sourceCheckedAt,
+	teams: snapshot.teams,
+	fixtures: snapshot.fixtures,
+});
+
+const projectCoreEventSnapshot = (snapshot: CoreDataSnapshot): CoreEventSnapshot => ({
+	source: snapshot.source,
+	seasonCode: snapshot.seasonCode,
+	revision: snapshot.revision,
+	publicationId: snapshot.publicationId,
+	sourceCheckedAt: snapshot.sourceCheckedAt,
+	events: snapshot.events,
+	currentEventId: snapshot.currentEventId,
+});
+
+export const getCoreFixtureSnapshot = (context: GraphQLContext): Promise<CoreFixtureSnapshot> => {
+	const requestScope = context.requestScope ?? context;
+	const existing = coreFixtureSnapshotMemo.get(requestScope);
+	if (existing) return existing;
+	const load = (async (): Promise<CoreFixtureSnapshot> => {
+		const publication = await readDataPublicationItems(
+			context.redis,
+			{ dataset: "fpl:core", seasonCode: context.currentSeason.seasonCode },
+			["teams", "fixtures"]
+		);
+		const snapshot = publication ? publicationCoreFixtureSnapshot(publication) : null;
+		if (snapshot) return snapshot;
+		context.logger.warn(
+			{ season: context.currentSeason.seasonCode },
+			"Core fixture publication unavailable; using the coherent PostgreSQL core snapshot"
+		);
+		return projectCoreFixtureSnapshot(await getCoreDataSnapshot(context));
+	})();
+	coreFixtureSnapshotMemo.set(requestScope, load);
+	return load;
+};
+
+export const getCoreEventSnapshot = (context: GraphQLContext): Promise<CoreEventSnapshot> => {
+	const requestScope = context.requestScope ?? context;
+	const existing = coreEventSnapshotMemo.get(requestScope);
+	if (existing) return existing;
+	const load = (async (): Promise<CoreEventSnapshot> => {
+		const publication = await readDataPublicationItems(
+			context.redis,
+			{ dataset: "fpl:core", seasonCode: context.currentSeason.seasonCode },
+			["events", "currentEventId"]
+		);
+		const snapshot = publication ? publicationCoreEventSnapshot(publication) : null;
+		if (snapshot) return snapshot;
+		context.logger.warn(
+			{ season: context.currentSeason.seasonCode },
+			"Core event publication unavailable; using the coherent PostgreSQL core snapshot"
+		);
+		return projectCoreEventSnapshot(await getCoreDataSnapshot(context));
+	})();
+	coreEventSnapshotMemo.set(requestScope, load);
 	return load;
 };
 

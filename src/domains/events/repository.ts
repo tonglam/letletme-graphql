@@ -1,5 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
-import { getCoreDataSnapshot, type CoreEventData } from "../../infra/data-snapshot";
+import { getCoreEventSnapshot, type CoreEventData } from "../../infra/data-snapshot";
 import { getCurrentSeason } from "../../infra/season";
 
 export type ChipPlay = {
@@ -187,7 +187,7 @@ interface EventsRepository {
 export const eventsRepository: EventsRepository = {
 	async getEventById(context, id) {
 		if (!Number.isSafeInteger(id) || id <= 0) return null;
-		const snapshot = await getCoreDataSnapshot(context);
+		const snapshot = await getCoreEventSnapshot(context);
 		const event = snapshot.events.find((candidate) => candidate.id === id);
 		return event ? mapEvent(event) : null;
 	},
@@ -195,7 +195,7 @@ export const eventsRepository: EventsRepository = {
 	async getCurrentEventInfo(context) {
 		const [season, snapshot] = await Promise.all([
 			getCurrentSeason(context),
-			getCoreDataSnapshot(context),
+			getCoreEventSnapshot(context),
 		]);
 		const resolved = resolveCurrentAndNext(snapshot.events.map(mapEvent), snapshot.currentEventId);
 		if (!resolved.current && !resolved.next) return null;
@@ -208,7 +208,7 @@ export const eventsRepository: EventsRepository = {
 	},
 
 	async listEvents(context, filter, limit, offset) {
-		const snapshot = await getCoreDataSnapshot(context);
+		const snapshot = await getCoreEventSnapshot(context);
 		const normalizedFilter = normalizeFilter(filter);
 		const safeOffset = Math.max(Number.isFinite(offset) ? offset : 0, 0);
 		return snapshot.events

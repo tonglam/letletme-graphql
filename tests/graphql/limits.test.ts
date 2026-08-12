@@ -8,7 +8,14 @@ describe("GraphQL request limits", () => {
 		const result = validateGraphQLRequestLimits({
 			query: "query { events { id name } }",
 		});
-		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1 });
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1, rootFields: ["events"] });
+	});
+
+	it("identifies a fixture-only read before resolver execution", () => {
+		const result = validateGraphQLRequestLimits({
+			query: "query CoreEventFixtureSchedule { eventFixtures(eventId: 1) { id } }",
+		});
+		expect(result).toMatchObject({ ok: true, rootFields: ["eventFixtures"] });
 	});
 
 	it("allows standard introspection where Apollo has enabled it", () => {

@@ -407,18 +407,25 @@ const startServer = async (): Promise<void> => {
 						principal: principal ?? undefined,
 						user: user ?? undefined,
 					};
-					try {
-						graphQLContext.dataRevision = await requestTiming.measure("publication", async () =>
-							coreDatasetRevision(await getCoreDataSnapshot(graphQLContext))
-						);
-					} catch (error) {
-						logger.error({ err: error }, "Data publication authority is unavailable");
-						return jsonError(
-							503,
-							"DATA_PUBLICATION_UNAVAILABLE",
-							"Data publication is temporarily unavailable",
-							corsHeaders
-						);
+					const lightweightCoreRead =
+						limits.shape === "query" &&
+						limits.rootFields.length === 1 &&
+						(limits.rootFields[0] === "eventFixtures" ||
+							limits.rootFields[0] === "currentEventInfo");
+					if (!lightweightCoreRead) {
+						try {
+							graphQLContext.dataRevision = await requestTiming.measure("publication", async () =>
+								coreDatasetRevision(await getCoreDataSnapshot(graphQLContext))
+							);
+						} catch (error) {
+							logger.error({ err: error }, "Data publication authority is unavailable");
+							return jsonError(
+								503,
+								"DATA_PUBLICATION_UNAVAILABLE",
+								"Data publication is temporarily unavailable",
+								corsHeaders
+							);
+						}
 					}
 
 					const headers = new HeaderMap();
