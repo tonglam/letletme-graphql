@@ -1,5 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
-import { buildTeamMap } from "../../infra/team-map";
+import { buildFixtureTeamMap } from "../../infra/team-map";
 import type { Team } from "../../infra/types";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
@@ -31,7 +31,7 @@ const teamsMemo = new WeakMap<GraphQLContext, Map<number, Team>>();
 const getTeamById = async (context: GraphQLContext, teamId: number): Promise<Team | null> => {
 	let memo = teamsMemo.get(context);
 	if (!memo) {
-		memo = await buildTeamMap(context);
+		memo = await buildFixtureTeamMap(context);
 		teamsMemo.set(context, memo);
 	}
 	return memo.get(teamId) ?? null;

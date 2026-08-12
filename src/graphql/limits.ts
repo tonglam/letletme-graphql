@@ -41,6 +41,7 @@ export type GraphQLLimitResult =
 			shape: GraphQLRequestShape;
 			weightedComplexity: number;
 			rateLimitCostUnits: number;
+			rootFields: readonly string[];
 	  }
 	| {
 			ok: false;
@@ -373,6 +374,7 @@ const accepted = ({
 	shape,
 	weightedComplexity,
 	rateLimitCostUnits: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
+	rootFields: rootFields.map((field) => field.name),
 });
 
 export const validateGraphQLPayloadLimits = (
@@ -460,6 +462,7 @@ export const validateGraphQLRequestLimits = (
 	let shape: GraphQLRequestShape = "unknown";
 	let weightedComplexity = 0;
 	let rateLimitCostUnits = 0;
+	const rootFields: string[] = [];
 	for (const payload of payloads) {
 		if (!payload || typeof payload !== "object") continue;
 		const result = validateGraphQLPayloadLimits(payload as GraphQLPayload, schema);
@@ -468,11 +471,13 @@ export const validateGraphQLRequestLimits = (
 		else if (shape === "unknown") shape = result.shape;
 		weightedComplexity += result.weightedComplexity;
 		rateLimitCostUnits += result.rateLimitCostUnits;
+		rootFields.push(...result.rootFields);
 	}
 	return {
 		ok: true,
 		shape,
 		weightedComplexity,
 		rateLimitCostUnits: Math.max(1, rateLimitCostUnits),
+		rootFields,
 	};
 };

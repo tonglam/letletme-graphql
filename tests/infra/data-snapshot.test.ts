@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
 	coreDatasetRevision,
+	getCoreEventSnapshot,
+	getCoreFixtureSnapshot,
 	getCoreDataSnapshot,
 	getLiveDataSnapshot,
 	liveDatasetRevision,
@@ -18,6 +20,47 @@ import {
 const uuid = "10000000-0000-4000-8000-000000000009";
 
 describe("typed Data snapshots", () => {
+	it("loads the fixture schedule from only the Core teams and fixtures items", async () => {
+		const core = buildTestCoreData(1);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
+		const requested: string[][] = [];
+		const originalMget = redis.mget;
+		redis.mget = async (...keys: string[]) => {
+			requested.push(keys);
+			return originalMget(...keys);
+		};
+
+		const snapshot = await getCoreFixtureSnapshot(buildSnapshotContext(redis));
+
+		expect(snapshot.source).toBe("redis");
+		expect(snapshot.teams).toHaveLength(20);
+		expect(snapshot.fixtures).toHaveLength(380);
+		expect(requested).toHaveLength(1);
+		expect(requested[0]?.map((key) => key.split(":").at(-1)).sort()).toEqual(["fixtures", "teams"]);
+	});
+
+	it("loads current-event context from only Core events and currentEventId", async () => {
+		const core = buildTestCoreData(1);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
+		const requested: string[][] = [];
+		const originalMget = redis.mget;
+		redis.mget = async (...keys: string[]) => {
+			requested.push(keys);
+			return originalMget(...keys);
+		};
+
+		const snapshot = await getCoreEventSnapshot(buildSnapshotContext(redis));
+
+		expect(snapshot.source).toBe("redis");
+		expect(snapshot.events).toHaveLength(38);
+		expect(snapshot.currentEventId).toBe(1);
+		expect(requested).toHaveLength(1);
+		expect(requested[0]?.map((key) => key.split(":").at(-1)).sort()).toEqual([
+			"currentEventId",
+			"events",
+		]);
+	});
+
 	it("accepts and request-pins one complete core publication", async () => {
 		const core = buildTestCoreData(1);
 		const publication = buildCorePublication("2627", 7, core);
