@@ -3,8 +3,10 @@ import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
 	readDataPublication,
-	readDataPublicationItems,
+	readDataPublicationItemsAtManifest,
+	readDataPublicationManifest,
 	type DataPublication,
+	type DataPublicationManifest,
 } from "./data-publication";
 
 export const CORE_PUBLICATION_ITEMS = [
@@ -215,10 +217,148 @@ export type LiveDataSnapshot = Readonly<{
 	liveBonus: LiveBonusByTeam;
 }>;
 
+export type TargetedLiveDataSnapshot = Readonly<{
+	source: DataSnapshotSource;
+	seasonCode: string;
+	eventId: number;
+	revision: string;
+	publicationId: string | null;
+	sourceCheckedAt: string;
+	publishedAt: string;
+	state: LiveSnapshotState;
+	eventLiveCount: number;
+	fixtureCount: number;
+	fixtureTeamCount: number;
+	bonusTeamCount: number;
+	eventLives: readonly LivePerformanceData[];
+	liveBonus: LiveBonusByTeam;
+}>;
+
 const coreSnapshotMemo = new WeakMap<object, Promise<CoreDataSnapshot>>();
 const coreFixtureSnapshotMemo = new WeakMap<object, Promise<CoreFixtureSnapshot>>();
 const coreEventSnapshotMemo = new WeakMap<object, Promise<CoreEventSnapshot>>();
-const liveSnapshotMemo = new WeakMap<GraphQLContext, Map<number, Promise<LiveDataSnapshot>>>();
+const liveSnapshotMemo = new WeakMap<object, Map<number, Promise<LiveDataSnapshot>>>();
+
+type CorePublicationPin = {
+	manifest: Promise<DataPublicationManifest | null>;
+	publication?: Promise<DataPublication | null>;
+};
+
+const corePublicationPinMemo = new WeakMap<object, CorePublicationPin>();
+
+const reserveCorePublicationPin = (
+	context: GraphQLContext,
+	mode: "manifest" | "publication"
+): CorePublicationPin => {
+	const requestScope = context.requestScope ?? context;
+	const existing = corePublicationPinMemo.get(requestScope);
+	if (existing) {
+		if (mode === "publication" && !existing.publication) {
+			existing.publication = existing.manifest.then((manifest) =>
+				manifest
+					? readDataPublicationItemsAtManifest(context.redis, manifest, CORE_PUBLICATION_ITEMS)
+					: null
+			);
+		}
+		return existing;
+	}
+
+	const scope = {
+		dataset: "fpl:core" as const,
+		seasonCode: context.currentSeason.seasonCode,
+	};
+	if (mode === "publication") {
+		const publication = readDataPublication(context.redis, scope, CORE_PUBLICATION_ITEMS);
+		const pin: CorePublicationPin = {
+			publication,
+			manifest: publication.then((value) => value?.manifest ?? null),
+		};
+		corePublicationPinMemo.set(requestScope, pin);
+		return pin;
+	}
+
+	const pin: CorePublicationPin = {
+		manifest: readDataPublicationManifest(context.redis, scope),
+	};
+	corePublicationPinMemo.set(requestScope, pin);
+	return pin;
+};
+
+const readPinnedCorePublicationItems = async (
+	context: GraphQLContext,
+	requiredItemNames: readonly string[]
+): Promise<DataPublication | null> => {
+	const pin = reserveCorePublicationPin(context, "manifest");
+	if (pin.publication) {
+		const publication = await pin.publication;
+		if (publication) return publication;
+	}
+	const manifest = await pin.manifest;
+	return manifest
+		? readDataPublicationItemsAtManifest(context.redis, manifest, requiredItemNames)
+		: null;
+};
+
+type LivePublicationPin = {
+	manifest: Promise<DataPublicationManifest | null>;
+	publication?: Promise<DataPublication | null>;
+};
+
+const livePublicationPinMemo = new WeakMap<object, Map<number, LivePublicationPin>>();
+
+const reserveLivePublicationPin = (
+	context: GraphQLContext,
+	eventId: number,
+	mode: "manifest" | "publication"
+): LivePublicationPin => {
+	const requestScope = context.requestScope ?? context;
+	let eventPins = livePublicationPinMemo.get(requestScope);
+	if (!eventPins) {
+		eventPins = new Map();
+		livePublicationPinMemo.set(requestScope, eventPins);
+	}
+
+	const existing = eventPins.get(eventId);
+	if (existing) {
+		if (mode === "publication" && !existing.publication) {
+			existing.publication = existing.manifest.then((manifest) =>
+				manifest
+					? readDataPublicationItemsAtManifest(context.redis, manifest, LIVE_PUBLICATION_ITEMS)
+					: null
+			);
+		}
+		return existing;
+	}
+
+	const scope = {
+		dataset: "fpl:live" as const,
+		seasonCode: context.currentSeason.seasonCode,
+		eventId,
+	};
+	if (mode === "publication") {
+		const publication = readDataPublication(context.redis, scope, LIVE_PUBLICATION_ITEMS);
+		const pin: LivePublicationPin = {
+			publication,
+			manifest: publication.then((value) => value?.manifest ?? null),
+		};
+		eventPins.set(eventId, pin);
+		return pin;
+	}
+
+	const pin: LivePublicationPin = {
+		manifest: readDataPublicationManifest(context.redis, scope),
+	};
+	eventPins.set(eventId, pin);
+	return pin;
+};
+
+export const getLiveDataPublicationManifest = (
+	context: GraphQLContext,
+	eventId: number
+): Promise<DataPublicationManifest | null> => {
+	if (!Number.isSafeInteger(eventId) || eventId <= 0) return Promise.resolve(null);
+	return reserveLivePublicationPin(context, eventId, "manifest").manifest;
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -891,7 +1031,10 @@ const CORE_FALLBACK_SQL = `
 	FROM authority
 `;
 
-const loadCoreSnapshotFromPostgres = async (context: GraphQLContext): Promise<CoreDataSnapshot> => {
+const loadCoreSnapshotFromPostgres = async (
+	context: GraphQLContext,
+	expectedManifest?: DataPublicationManifest | null
+): Promise<CoreDataSnapshot> => {
 	const result = await context.database.query<CoreFallbackRow>(CORE_FALLBACK_SQL, [
 		context.currentSeason.seasonId,
 	]);
@@ -909,6 +1052,11 @@ const loadCoreSnapshotFromPostgres = async (context: GraphQLContext): Promise<Co
 				seasonCode: context.currentSeason.seasonCode,
 			})
 		: null;
+	const preservesPinnedPublication =
+		expectedManifest !== null &&
+		expectedManifest !== undefined &&
+		manifest?.publicationId === expectedManifest.publicationId &&
+		manifest.revision === expectedManifest.revision;
 	const coreIdentityComplete =
 		events !== null &&
 		teams !== null &&
@@ -925,6 +1073,7 @@ const loadCoreSnapshotFromPostgres = async (context: GraphQLContext): Promise<Co
 		!manifest ||
 		manifest.publicationId !== row.publication_id ||
 		manifest.revision !== revision ||
+		(expectedManifest !== null && expectedManifest !== undefined && !preservesPinnedPublication) ||
 		!sourceCheckedAt ||
 		!events ||
 		!teams ||
@@ -1217,6 +1366,8 @@ const publicationLiveSnapshot = (
 
 type LiveFallbackRow = QueryResultRow & {
 	authority_count: string | number;
+	event_live_count?: string | number | null;
+	known_player_count?: string | number | null;
 	publication_id: string | null;
 	revision: string | number | null;
 	manifest: unknown;
@@ -1258,6 +1409,50 @@ const LIVE_FALLBACK_SQL = `
 			SELECT jsonb_agg((to_jsonb(live_row) - 'season_id') ORDER BY element_id)
 			FROM fpl.player_gameweek_stats live_row
 			WHERE season_id = $1 AND event_id = $2
+		), '[]'::jsonb) AS event_lives,
+		COALESCE((
+			SELECT jsonb_agg((to_jsonb(fixture_row) - 'season_id') ORDER BY fixture_id)
+			FROM fpl.fixtures fixture_row
+			WHERE season_id = $1 AND event_id = $2
+		), '[]'::jsonb) AS fixtures
+	FROM authority
+`;
+
+const TARGETED_LIVE_SQL = `
+	WITH active_publication AS MATERIALIZED (
+		SELECT
+			publication_id::text,
+			revision::text,
+			COALESCE(manifest ->> 'sourceCheckedAt', activated_at::text) AS source_checked_at,
+			activated_at::text AS published_at
+		FROM ops.dataset_publications
+		WHERE dataset = 'fpl:live'
+		  AND season_id = $1
+		  AND event_id = $2
+		  AND status = 'active'
+	), authority AS (
+		SELECT
+			count(*)::text AS authority_count,
+			min(publication_id) AS publication_id,
+			min(revision) AS revision,
+			min(source_checked_at) AS source_checked_at,
+			min(published_at) AS published_at
+		FROM active_publication
+	)
+		SELECT
+			authority.*,
+			(SELECT count(*)::text
+			 FROM fpl.player_gameweek_stats
+			 WHERE season_id = $1 AND event_id = $2) AS event_live_count,
+			(SELECT count(*)::text
+			 FROM fpl.players
+			 WHERE season_id = $1 AND element_id = ANY($3::integer[])) AS known_player_count,
+			COALESCE((
+			SELECT jsonb_agg((to_jsonb(live_row) - 'season_id') ORDER BY element_id)
+			FROM fpl.player_gameweek_stats live_row
+			WHERE season_id = $1
+			  AND event_id = $2
+			  AND element_id = ANY($3::integer[])
 		), '[]'::jsonb) AS event_lives,
 		COALESCE((
 			SELECT jsonb_agg((to_jsonb(fixture_row) - 'season_id') ORDER BY fixture_id)
@@ -1429,7 +1624,8 @@ const buildLiveBonus = (
 
 const loadLiveSnapshotFromPostgres = async (
 	context: GraphQLContext,
-	eventId: number
+	eventId: number,
+	expectedManifest?: DataPublicationManifest | null
 ): Promise<LiveDataSnapshot> => {
 	const [core, result] = await Promise.all([
 		getCoreDataSnapshot(context),
@@ -1453,11 +1649,21 @@ const loadLiveSnapshotFromPostgres = async (
 				eventId,
 			})
 		: null;
+	const preservesPinnedPublication =
+		authorityCount === 1 &&
+		expectedManifest !== null &&
+		expectedManifest !== undefined &&
+		manifest?.publicationId === expectedManifest.publicationId &&
+		manifest.revision === expectedManifest.revision;
 	const coreEventFixtures = core.fixtures.filter((fixture) => fixture.eventId === eventId);
 	const coreTeamIds = new Set(core.teams.map((team) => team.id));
 	if (
 		!row ||
 		authorityCount > 1 ||
+		(expectedManifest !== null &&
+			expectedManifest !== undefined &&
+			authorityCount === 1 &&
+			!preservesPinnedPublication) ||
 		(authorityCount === 1 &&
 			(!manifest ||
 				manifest.publicationId !== row.publication_id ||
@@ -1490,8 +1696,13 @@ const loadLiveSnapshotFromPostgres = async (
 	) {
 		throw new Error(`Coherent PostgreSQL live publication is unavailable for event ${eventId}`);
 	}
-	const revision = `db-${sourceCheckedAt ? Date.parse(sourceCheckedAt) : core.revision}`;
+	const revision = preservesPinnedPublication
+		? String(expectedManifest.revision)
+		: `db-${sourceCheckedAt ? Date.parse(sourceCheckedAt) : core.revision}`;
 	const state = liveStateFromFixtures(fixtures);
+	if (preservesPinnedPublication && expectedManifest.state !== state) {
+		throw new Error(`Pinned live publication state is unavailable for event ${eventId}`);
+	}
 	const liveFixtures = buildLiveFixtureView(fixtures, core);
 	const liveBonus = buildLiveBonus(row.fixtures, fixtures);
 	if (
@@ -1501,13 +1712,15 @@ const loadLiveSnapshotFromPostgres = async (
 		throw new Error(`Coherent PostgreSQL live derivatives are unavailable for event ${eventId}`);
 	}
 	return {
-		source: "postgres",
+		source: preservesPinnedPublication ? "redis" : "postgres",
 		seasonCode: context.currentSeason.seasonCode,
 		eventId,
 		revision,
-		publicationId: null,
-		sourceCheckedAt,
-		publishedAt,
+		publicationId: preservesPinnedPublication ? expectedManifest.publicationId : null,
+		sourceCheckedAt: preservesPinnedPublication
+			? expectedManifest.sourceCheckedAt
+			: sourceCheckedAt,
+		publishedAt: preservesPinnedPublication ? expectedManifest.publishedAt : publishedAt,
 		state,
 		eventLives,
 		fixtures,
@@ -1524,19 +1737,17 @@ export const getCoreDataSnapshot = (context: GraphQLContext): Promise<CoreDataSn
 		return existing;
 	}
 	context.coreSnapshotMemoStatus = "miss";
+	const publication = reserveCorePublicationPin(context, "publication").publication!;
 	const load = (async (): Promise<CoreDataSnapshot> => {
-		const publication = await readDataPublication(
-			context.redis,
-			{ dataset: "fpl:core", seasonCode: context.currentSeason.seasonCode },
-			CORE_PUBLICATION_ITEMS
-		);
-		const snapshot = publication ? publicationCoreSnapshot(publication) : null;
+		const published = await publication;
+		const snapshot = published ? publicationCoreSnapshot(published) : null;
 		if (snapshot) return snapshot;
+		const expectedManifest = await reserveCorePublicationPin(context, "manifest").manifest;
 		context.logger.warn(
 			{ season: context.currentSeason.seasonCode },
 			"Core Data publication unavailable; using one coherent PostgreSQL snapshot"
 		);
-		return loadCoreSnapshotFromPostgres(context);
+		return loadCoreSnapshotFromPostgres(context, expectedManifest);
 	})();
 	coreSnapshotMemo.set(requestScope, load);
 	return load;
@@ -1567,11 +1778,7 @@ export const getCoreFixtureSnapshot = (context: GraphQLContext): Promise<CoreFix
 	const existing = coreFixtureSnapshotMemo.get(requestScope);
 	if (existing) return existing;
 	const load = (async (): Promise<CoreFixtureSnapshot> => {
-		const publication = await readDataPublicationItems(
-			context.redis,
-			{ dataset: "fpl:core", seasonCode: context.currentSeason.seasonCode },
-			["teams", "fixtures"]
-		);
+		const publication = await readPinnedCorePublicationItems(context, ["teams", "fixtures"]);
 		const snapshot = publication ? publicationCoreFixtureSnapshot(publication) : null;
 		if (snapshot) return snapshot;
 		context.logger.warn(
@@ -1589,11 +1796,7 @@ export const getCoreEventSnapshot = (context: GraphQLContext): Promise<CoreEvent
 	const existing = coreEventSnapshotMemo.get(requestScope);
 	if (existing) return existing;
 	const load = (async (): Promise<CoreEventSnapshot> => {
-		const publication = await readDataPublicationItems(
-			context.redis,
-			{ dataset: "fpl:core", seasonCode: context.currentSeason.seasonCode },
-			["events", "currentEventId"]
-		);
+		const publication = await readPinnedCorePublicationItems(context, ["events", "currentEventId"]);
 		const snapshot = publication ? publicationCoreEventSnapshot(publication) : null;
 		if (snapshot) return snapshot;
 		context.logger.warn(
@@ -1613,36 +1816,154 @@ export const getLiveDataSnapshot = (
 	if (!Number.isSafeInteger(eventId) || eventId <= 0) {
 		return Promise.reject(new Error("Live Data snapshot requires a positive event ID"));
 	}
-	let eventSnapshots = liveSnapshotMemo.get(context);
+	const requestScope = context.requestScope ?? context;
+	let eventSnapshots = liveSnapshotMemo.get(requestScope);
 	if (!eventSnapshots) {
 		eventSnapshots = new Map();
-		liveSnapshotMemo.set(context, eventSnapshots);
+		liveSnapshotMemo.set(requestScope, eventSnapshots);
 	}
 	const existing = eventSnapshots.get(eventId);
 	if (existing) return existing;
+	const pin = reserveLivePublicationPin(context, eventId, "publication");
+	const publication = pin.publication!;
 	const load = (async (): Promise<LiveDataSnapshot> => {
-		const [publication, core] = await Promise.all([
-			readDataPublication(
-				context.redis,
-				{
-					dataset: "fpl:live",
-					seasonCode: context.currentSeason.seasonCode,
-					eventId,
-				},
-				LIVE_PUBLICATION_ITEMS
-			),
+		const [published, manifest, core] = await Promise.all([
+			publication,
+			pin.manifest,
 			getCoreDataSnapshot(context),
 		]);
-		const snapshot = publication ? publicationLiveSnapshot(publication, eventId, core) : null;
+		const snapshot = published ? publicationLiveSnapshot(published, eventId, core) : null;
 		if (snapshot) return snapshot;
 		context.logger.warn(
 			{ season: context.currentSeason.seasonCode, eventId },
 			"Live Data publication unavailable; using one coherent PostgreSQL snapshot"
 		);
-		return loadLiveSnapshotFromPostgres(context, eventId);
+		return loadLiveSnapshotFromPostgres(context, eventId, manifest);
 	})();
 	eventSnapshots.set(eventId, load);
 	return load;
+};
+
+const projectTargetedLiveSnapshot = (
+	snapshot: LiveDataSnapshot,
+	playerIds: ReadonlySet<number>
+): TargetedLiveDataSnapshot => ({
+	source: snapshot.source,
+	seasonCode: snapshot.seasonCode,
+	eventId: snapshot.eventId,
+	revision: snapshot.revision,
+	publicationId: snapshot.publicationId,
+	sourceCheckedAt: snapshot.sourceCheckedAt,
+	publishedAt: snapshot.publishedAt,
+	state: snapshot.state,
+	eventLiveCount: snapshot.eventLives.length,
+	fixtureCount: snapshot.fixtures.length,
+	fixtureTeamCount: Object.keys(snapshot.liveFixtures).length,
+	bonusTeamCount: Object.keys(snapshot.liveBonus).length,
+	eventLives: snapshot.eventLives.filter((row) => playerIds.has(row.playerId)),
+	liveBonus: snapshot.liveBonus,
+});
+
+export const getTargetedLiveDataSnapshot = async (
+	context: GraphQLContext,
+	eventId: number,
+	playerIds: number[],
+	expected: {
+		publicationId: string;
+		revision: string;
+		sourceCheckedAt: string;
+		publishedAt: string;
+		state: LiveSnapshotState;
+		eventLiveCount: number;
+		fixtureCount: number;
+		fixtureTeamCount: number;
+		bonusTeamCount: number;
+	}
+): Promise<TargetedLiveDataSnapshot> => {
+	const uniquePlayerIds = Array.from(
+		new Set(playerIds.filter((playerId) => Number.isSafeInteger(playerId) && playerId > 0))
+	);
+	const requestedPlayerIds = new Set(uniquePlayerIds);
+	try {
+		const [core, result] = await Promise.all([
+			getCoreFixtureSnapshot(context),
+			context.database.query<LiveFallbackRow>(TARGETED_LIVE_SQL, [
+				context.currentSeason.seasonId,
+				eventId,
+				uniquePlayerIds,
+			]),
+		]);
+		const row = result.rows[0];
+		const authorityCount = integer(row?.authority_count) ?? 0;
+		const eventLiveCount = integer(row?.event_live_count);
+		const knownPlayerCount = integer(row?.known_player_count);
+		const eventLives = mapArray(row?.event_lives, mapLivePerformance);
+		const fixtures = mapArray(row?.fixtures, mapCoreFixture);
+		const coreEventFixtures = core.fixtures.filter((fixture) => fixture.eventId === eventId);
+		const coreTeamIds = new Set(core.teams.map((team) => team.id));
+		if (
+			!row ||
+			authorityCount !== 1 ||
+			row.publication_id !== expected.publicationId ||
+			String(row.revision) !== expected.revision ||
+			eventLiveCount !== expected.eventLiveCount ||
+			knownPlayerCount === null ||
+			!eventLives ||
+			!fixtures ||
+			eventLives.some(
+				(live) => live.eventId !== eventId || !requestedPlayerIds.has(live.playerId)
+			) ||
+			!hasUniquePositiveIds(eventLives, (live) => live.playerId) ||
+			(expected.eventLiveCount > 0 && eventLives.length !== knownPlayerCount) ||
+			(expected.eventLiveCount === 0 && eventLives.length > 0) ||
+			fixtures.some((fixture) => fixture.eventId !== eventId) ||
+			!hasUniquePositiveIds(fixtures, (fixture) => fixture.id) ||
+			!hasSameIds(
+				fixtures,
+				coreEventFixtures,
+				(fixture) => fixture.id,
+				(fixture) => fixture.id
+			) ||
+			fixtures.some(
+				(fixture) => !coreTeamIds.has(fixture.teamHId) || !coreTeamIds.has(fixture.teamAId)
+			) ||
+			fixtures.length !== expected.fixtureCount ||
+			new Set(fixtures.flatMap((fixture) => [fixture.teamHId, fixture.teamAId])).size !==
+				expected.fixtureTeamCount ||
+			liveStateFromFixtures(fixtures) !== expected.state
+		) {
+			throw new Error(`Targeted live publication is unavailable for event ${eventId}`);
+		}
+		const liveBonus = buildLiveBonus(row.fixtures, fixtures);
+		if (Object.keys(liveBonus).length !== expected.bonusTeamCount) {
+			throw new Error(`Targeted live bonus is incoherent for event ${eventId}`);
+		}
+		return {
+			source: "redis",
+			seasonCode: context.currentSeason.seasonCode,
+			eventId,
+			revision: expected.revision,
+			publicationId: expected.publicationId,
+			sourceCheckedAt: expected.sourceCheckedAt,
+			publishedAt: expected.publishedAt,
+			state: expected.state,
+			eventLiveCount: expected.eventLiveCount,
+			fixtureCount: expected.fixtureCount,
+			fixtureTeamCount: expected.fixtureTeamCount,
+			bonusTeamCount: expected.bonusTeamCount,
+			eventLives,
+			liveBonus,
+		};
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, eventId, playerCount: uniquePlayerIds.length },
+			"Targeted live read unavailable; using the coherent full snapshot"
+		);
+		return projectTargetedLiveSnapshot(
+			await getLiveDataSnapshot(context, eventId),
+			requestedPlayerIds
+		);
+	}
 };
 
 export const coreDatasetRevision = (snapshot: CoreDataSnapshot): string =>

@@ -1,5 +1,6 @@
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
+import { measureRequestStage } from "../../http/request-timing";
 import { buildTeamMap } from "../../infra/team-map";
 import type {
 	Player,
@@ -193,10 +194,10 @@ export const playersResolvers = {
 			args: TopTransfersArgs,
 			context: GraphQLContext
 		): Promise<PlayerTransferStats[]> => {
-			const { stats, players } = await playersService.getTopTransfersInEnriched(
-				context,
-				args.eventId,
-				args.limit ?? 10
+			const { stats, players } = await measureRequestStage(
+				context.requestTiming,
+				"gwSummary.topTransfersIn",
+				() => playersService.getTopTransfersInEnriched(context, args.eventId, args.limit ?? 10)
 			);
 			loadPlayersIntoMemo(context, args.eventId, players);
 			return stats;
@@ -207,10 +208,10 @@ export const playersResolvers = {
 			args: TopTransfersArgs,
 			context: GraphQLContext
 		): Promise<PlayerTransferStats[]> => {
-			const { stats, players } = await playersService.getTopTransfersOutEnriched(
-				context,
-				args.eventId,
-				args.limit ?? 10
+			const { stats, players } = await measureRequestStage(
+				context.requestTiming,
+				"gwSummary.topTransfersOut",
+				() => playersService.getTopTransfersOutEnriched(context, args.eventId, args.limit ?? 10)
 			);
 			loadPlayersIntoMemo(context, args.eventId, players);
 			return stats;

@@ -2,11 +2,18 @@ import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import {
 	getLiveDataSnapshot,
+	getTargetedLiveDataSnapshot,
 	liveDatasetRevision,
 	type LivePerformanceData,
 } from "../../infra/data-snapshot";
 import { getCurrentEventId } from "../../infra/event";
-import { loadLiveSnapshotMeta, type LiveSnapshotMeta } from "./snapshot-meta";
+import {
+	isLiveSnapshotDatabaseFallback,
+	loadLivePublicationMeta,
+	loadLiveSnapshotMeta,
+	rememberLiveSnapshotMeta,
+	type LiveSnapshotMeta,
+} from "./snapshot-meta";
 
 export type LivePerformance = {
 	eventId: number;
@@ -855,6 +862,12 @@ export type EventLive = {
 	performances: LivePerformance[];
 };
 
+export type TargetedLiveRead = {
+	performances: LivePerformance[];
+	effectiveBonusByPlayer: Map<number, number>;
+	meta: LiveSnapshotMeta;
+};
+
 interface LiveRepository {
 	getLiveScores(
 		context: GraphQLContext,
@@ -885,6 +898,11 @@ interface LiveRepository {
 		eventId: number,
 		playerIds: number[]
 	): Promise<LivePerformance[]>;
+	getTargetedLiveRead(
+		context: GraphQLContext,
+		eventId: number,
+		playerIds: number[]
+	): Promise<TargetedLiveRead>;
 	getLivePerformancesForEventsAndPlayers(
 		context: GraphQLContext,
 		eventIds: number[],
@@ -1503,10 +1521,66 @@ export const liveRepository: LiveRepository = {
 		if (uniqueIds.length === 0) {
 			return [];
 		}
-		const all = await this.getAllLivePerformances(context, eventId);
-		return uniqueIds
-			.map((playerId) => all.get(playerId))
-			.filter((performance): performance is LivePerformance => performance !== undefined);
+		return (await this.getTargetedLiveRead(context, eventId, uniqueIds)).performances;
+	},
+
+	async getTargetedLiveRead(
+		context: GraphQLContext,
+		eventId: number,
+		playerIds: number[]
+	): Promise<TargetedLiveRead> {
+		const publishedMeta = await loadLivePublicationMeta(context, eventId);
+		const snapshot =
+			publishedMeta?.publicationId && !isLiveSnapshotDatabaseFallback(context, eventId)
+				? await getTargetedLiveDataSnapshot(context, eventId, playerIds, {
+						publicationId: publishedMeta.publicationId,
+						revision: publishedMeta.revision,
+						sourceCheckedAt: publishedMeta.checkedAt,
+						publishedAt: publishedMeta.publishedAt,
+						state: publishedMeta.state,
+						eventLiveCount: publishedMeta.eventLiveCount,
+						fixtureCount: publishedMeta.fixtureCount,
+						fixtureTeamCount: publishedMeta.fixtureTeamCount,
+						bonusTeamCount: publishedMeta.bonusTeamCount,
+					})
+				: await getTargetedLiveDataSnapshot(context, eventId, playerIds, {
+						publicationId: "unavailable",
+						revision: "unavailable",
+						sourceCheckedAt: publishedMeta?.checkedAt ?? "",
+						publishedAt: publishedMeta?.publishedAt ?? "",
+						state: publishedMeta?.state ?? "scheduled",
+						eventLiveCount: publishedMeta?.eventLiveCount ?? 0,
+						fixtureCount: publishedMeta?.fixtureCount ?? 0,
+						fixtureTeamCount: publishedMeta?.fixtureTeamCount ?? 0,
+						bonusTeamCount: publishedMeta?.bonusTeamCount ?? 0,
+					});
+		const requested = new Set(playerIds);
+		const effectiveBonusByPlayer = new Map<number, number>();
+		for (const teamBonus of Object.values(snapshot.liveBonus)) {
+			for (const [playerIdRaw, bonus] of Object.entries(teamBonus)) {
+				const playerId = Number(playerIdRaw);
+				if (requested.has(playerId)) effectiveBonusByPlayer.set(playerId, bonus);
+			}
+		}
+		const meta: LiveSnapshotMeta = {
+			season: snapshot.seasonCode,
+			eventId,
+			revision: snapshot.revision,
+			publicationId: snapshot.publicationId,
+			state: snapshot.state,
+			publishedAt: snapshot.publishedAt,
+			checkedAt: snapshot.sourceCheckedAt,
+			eventLiveCount: snapshot.eventLiveCount,
+			fixtureCount: snapshot.fixtureCount,
+			fixtureTeamCount: snapshot.fixtureTeamCount,
+			bonusTeamCount: snapshot.bonusTeamCount,
+		};
+		rememberLiveSnapshotMeta(context, meta, snapshot.seasonCode, eventId, snapshot.source);
+		return {
+			performances: snapshot.eventLives.map(mapPublishedLivePerformance),
+			effectiveBonusByPlayer,
+			meta,
+		};
 	},
 
 	getLivePerformancesForEventsAndPlayers(

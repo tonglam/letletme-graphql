@@ -1,7 +1,13 @@
 import type { GraphQLContext } from "../../graphql/context";
+import type { Entry, EntryEventResult } from "../entries/repository";
+import { entriesService } from "../entries/service";
 import type { LivePerformance } from "../live/repository";
-import { withLiveSnapshotConsistency } from "../live/snapshot-meta";
+import type { LiveSnapshotMeta } from "../live/snapshot-meta";
+import { resolvePreviousEventBaseline } from "./baseline";
 import type { EntryEventTransfersData } from "./transfer-enrichment";
+import { entryLiveRepository } from "./repository";
+
+export type EntryLiveAvailability = "READY" | "NO_PICKS";
 
 export type ActiveCaptainData = {
 	id: number;
@@ -10,6 +16,8 @@ export type ActiveCaptainData = {
 };
 
 export type LiveCalcData = {
+	availability: EntryLiveAvailability;
+	snapshot: LiveSnapshotMeta | null;
 	rank: number;
 	event: number;
 	entry: number;
@@ -175,36 +183,53 @@ export const applyAutoSubs = (pickList: ElementEventResultData[], chip: string):
 	}
 };
 
-const emptyLiveCalcData = (entryId: number): LiveCalcData => ({
-	rank: 0,
-	event: 0,
-	entry: entryId,
-	entryName: "",
-	playerName: "",
-	region: null,
-	startedEvent: 0,
-	overallPoints: 0,
-	overallRank: 0,
-	value: 0,
-	bank: 0,
-	teamValue: 0,
-	totalTransfers: 0,
-	lastOverallPoints: 0,
-	lastOverallRank: 0,
-	lastValue: 0,
-	chip: "NONE",
-	livePoints: 0,
-	transferCost: 0,
-	liveNetPoints: 0,
-	liveTotalPoints: 0,
-	played: 0,
-	toPlay: 0,
-	playedCaptain: 0,
-	captainName: "",
-	pickList: [],
-	transfersList: [],
-	activeCaptain: { id: 0, name: "", points: 0 },
-});
+const scaledEntryValue = (value: number | null | undefined): number =>
+	typeof value === "number" ? value / 10 : 0;
+
+export const buildNoPicksLiveCalcData = (
+	entryId: number,
+	eventId = 0,
+	entry: Entry | null = null,
+	previousResult: EntryEventResult | null = null
+): LiveCalcData => {
+	const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
+	return {
+		availability: "NO_PICKS",
+		snapshot: null,
+		rank: 0,
+		event: eventId,
+		entry: entryId,
+		entryName: entry?.entryName ?? "",
+		playerName: entry?.playerName ?? "",
+		region: entry?.region ?? null,
+		startedEvent: entry?.startedEvent ?? 0,
+		overallPoints: entry?.overallPoints ?? 0,
+		overallRank: entry?.overallRank ?? 0,
+		value: scaledEntryValue(entry?.teamValue),
+		bank: scaledEntryValue(entry?.bank),
+		teamValue: scaledEntryValue(
+			entry?.teamValue !== null && entry?.teamValue !== undefined && entry.bank !== null
+				? entry.teamValue - (entry.bank ?? 0)
+				: null
+		),
+		totalTransfers: entry?.totalTransfers ?? 0,
+		lastOverallPoints: baseline.overallPoints,
+		lastOverallRank: baseline.overallRank ?? 0,
+		lastValue: scaledEntryValue(baseline.teamValue),
+		chip: "NONE",
+		livePoints: 0,
+		transferCost: 0,
+		liveNetPoints: 0,
+		liveTotalPoints: baseline.overallPoints,
+		played: 0,
+		toPlay: 0,
+		playedCaptain: 0,
+		captainName: "",
+		pickList: [],
+		transfersList: [],
+		activeCaptain: { id: 0, name: "", points: 0 },
+	};
+};
 
 /**
  * Single-entry requests delegate to the batch engine used by tournament
@@ -223,23 +248,48 @@ export const entryLiveCalcService = {
 			eventId <= 0 ||
 			entryId <= 0
 		) {
-			return emptyLiveCalcData(entryId);
+			return buildNoPicksLiveCalcData(entryId);
+		}
+
+		const stopPicks = context.requestTiming?.start("entryLive.picks");
+		const pickEntity = await entryLiveRepository
+			.getEntryEventPick(context, entryId, eventId)
+			.finally(() => stopPicks?.());
+		if (!pickEntity || pickEntity.picks.length === 0) {
+			const [entry, previousResult] = await Promise.all([
+				entriesService.getEntryById(context, entryId).catch((error) => {
+					context.logger?.warn(
+						{ err: error, entryId, eventId },
+						"Entry metadata unavailable for no-picks response"
+					);
+					return null;
+				}),
+				eventId > 1
+					? entriesService.getEntryEventResult(context, entryId, eventId - 1)
+					: Promise.resolve(null),
+			]);
+			return buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
 		}
 
 		const calculate = async (): Promise<LiveCalcData> => {
 			const { entryLiveBatchService } = await import("./batch-service");
-			const batch = await entryLiveBatchService.calcLivePointsForEntries(
-				context,
-				eventId,
-				[entryId],
-				includeLive
-			);
+			const stopAggregate = context.requestTiming?.start("entryLive.aggregate");
+			const batch = await entryLiveBatchService
+				.calcLivePointsForEntries(context, eventId, [entryId], includeLive, {
+					picksByEntry: Promise.resolve(new Map([[entryId, pickEntity]])),
+				})
+				.finally(() => stopAggregate?.());
 			const result = batch.results.get(entryId);
-			if (result) return result;
+			if (result) {
+				return {
+					...result,
+					availability: "READY",
+				};
+			}
 			const message = batch.errors.find((error) => error.entryId === entryId)?.message;
 			throw new Error(message ?? `Live points calculation failed for entry ${entryId}`);
 		};
 
-		return includeLive ? withLiveSnapshotConsistency(context, eventId, calculate) : calculate();
+		return calculate();
 	},
 };

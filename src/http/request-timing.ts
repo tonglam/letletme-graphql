@@ -55,6 +55,12 @@ export class RequestTiming {
 	}
 }
 
+export const measureRequestStage = async <T>(
+	timing: RequestTiming | undefined,
+	stage: string,
+	task: () => Promise<T>
+): Promise<T> => (timing ? timing.measure(stage, task) : task());
+
 export const resolveRequestId = (
 	provided: string | null,
 	generate: () => string = randomUUID

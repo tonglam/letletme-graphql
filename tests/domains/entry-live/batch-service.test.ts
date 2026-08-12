@@ -1,7 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import { entryLiveBatchService } from "../../../src/domains/entry-live/batch-service";
+import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
+import { entriesService } from "../../../src/domains/entries/service";
 import type { LivePerformance } from "../../../src/domains/live/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
+import {
+	buildCorePublication,
+	buildLivePublication,
+	buildSnapshotContext,
+	buildTestCoreData,
+	TestRedis,
+} from "../../helpers/data-publication";
 
 const makeMockContext = (options: {
 	livePerformances?: Map<number, LivePerformance>;
@@ -83,5 +92,142 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		expect(
 			entryLiveBatchService.calcLivePointsForEntries(context, 33, [1001, 1001])
 		).rejects.toMatchObject({ extensions: { code: "DUPLICATE_ENTRY_IDS" } });
+	});
+
+	it("returns NO_PICKS with entry metadata before heavy acquisition", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		const originalPrevious = entriesService.getEntryEventResultsByEntryIds;
+		const originalPicks = entryLiveRepository.getEntryEventPicksByIds;
+		entriesService.getEntriesByIds = async () =>
+			new Map([
+				[
+					1001,
+					{
+						id: 1001,
+						entryName: "Batch Team",
+						playerName: "Batch Player",
+						region: null,
+						startedEvent: 1,
+						overallPoints: 99,
+						overallRank: 100,
+						bank: 10,
+						teamValue: 1000,
+						totalTransfers: 3,
+						lastEventId: 34,
+						lastOverallPoints: 90,
+						lastOverallRank: 110,
+						lastTeamValue: 990,
+						lastBank: 10,
+					},
+				],
+			]);
+		entriesService.getEntryEventResultsByEntryIds = async () =>
+			new Map([
+				[
+					1001,
+					{
+						eventId: 32,
+						overallPoints: 90,
+						overallRank: 110,
+						teamValue: 990,
+					},
+				],
+			]) as never;
+		entryLiveRepository.getEntryEventPicksByIds = async () => new Map();
+
+		try {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(
+				makeMockContext({}),
+				33,
+				[1001]
+			);
+			expect(result.results.get(1001)).toMatchObject({
+				availability: "NO_PICKS",
+				snapshot: null,
+				entryName: "Batch Team",
+				playerName: "Batch Player",
+				overallPoints: 99,
+				lastOverallPoints: 90,
+				lastOverallRank: 110,
+				lastValue: 99,
+				pickList: [],
+			});
+			expect(result.meta.succeededCount).toBe(1);
+		} finally {
+			entriesService.getEntriesByIds = originalEntries;
+			entriesService.getEntryEventResultsByEntryIds = originalPrevious;
+			entryLiveRepository.getEntryEventPicksByIds = originalPicks;
+		}
+	});
+
+	it("preserves input order while propagating the pinned revision to ready results", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		const originalTransfers = entryLiveRepository.getEntryEventTransfersByIds;
+		const core = buildTestCoreData(1);
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), buildLivePublication(core, 1, "2627", 8))
+		);
+		const entry = (id: number) => ({
+			id,
+			entryName: `Team ${id}`,
+			playerName: `Player ${id}`,
+			region: null,
+			startedEvent: 1,
+			overallPoints: 0,
+			overallRank: null,
+			bank: 0,
+			teamValue: 1000,
+			totalTransfers: 0,
+			lastEventId: null,
+			lastOverallPoints: null,
+			lastOverallRank: null,
+			lastTeamValue: null,
+			lastBank: null,
+		});
+		entriesService.getEntriesByIds = async () =>
+			new Map([
+				[101, entry(101)],
+				[202, entry(202)],
+			]);
+		entryLiveRepository.getEntryEventTransfersByIds = async () => new Map();
+		const pick = (element: number) => ({
+			chip: null,
+			transfersCost: 0,
+			picks: [
+				{
+					element,
+					position: 1,
+					multiplier: 1,
+					isCaptain: false,
+					isViceCaptain: false,
+				},
+			],
+		});
+
+		try {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(
+				context,
+				1,
+				[101, 202],
+				true,
+				{
+					liveByPlayer: Promise.resolve(new Map()),
+					fixtures: Promise.resolve([]),
+					teams: Promise.resolve(core.teams as never),
+					picksByEntry: Promise.resolve(new Map([[101, pick(1)]]) as never),
+				}
+			);
+
+			expect([...result.results.keys()]).toEqual([101, 202]);
+			expect([...result.results.values()].map((value) => value.availability)).toEqual([
+				"READY",
+				"NO_PICKS",
+			]);
+			expect(result.results.get(101)?.snapshot?.revision).toBe("8");
+			expect(result.results.get(202)?.snapshot).toBeNull();
+		} finally {
+			entriesService.getEntriesByIds = originalEntries;
+			entryLiveRepository.getEntryEventTransfersByIds = originalTransfers;
+		}
 	});
 });

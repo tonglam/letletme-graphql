@@ -94,14 +94,44 @@ describe("typed Data snapshots", () => {
 		expect(clonedContext.coreSnapshotMemoStatus).toBe("hit");
 	});
 
+	it("shares one core publication pin across full, fixture, and event reads", async () => {
+		const revisionSevenData = buildTestCoreData(1);
+		const revisionEightData = buildTestCoreData(2);
+		const revisionSeven = buildCorePublication("2627", 7, revisionSevenData);
+		const revisionEight = buildCorePublication("2627", 8, revisionEightData);
+
+		const fullFirstRedis = new TestRedis(revisionSeven);
+		const fullFirstContext = buildSnapshotContext(fullFirstRedis);
+		const full = await getCoreDataSnapshot(fullFirstContext);
+		for (const [key, value] of revisionEight.store) fullFirstRedis.values.set(key, value);
+		const fixtureAfterFull = await getCoreFixtureSnapshot(fullFirstContext);
+		const eventAfterFull = await getCoreEventSnapshot(fullFirstContext);
+		expect([full.revision, fixtureAfterFull.revision, eventAfterFull.revision]).toEqual([
+			"7",
+			"7",
+			"7",
+		]);
+		expect(eventAfterFull.currentEventId).toBe(1);
+
+		const partialFirstRedis = new TestRedis(revisionSeven);
+		const partialFirstContext = buildSnapshotContext(partialFirstRedis);
+		const fixture = await getCoreFixtureSnapshot(partialFirstContext);
+		for (const [key, value] of revisionEight.store) partialFirstRedis.values.set(key, value);
+		const fullAfterPartial = await getCoreDataSnapshot(partialFirstContext);
+		const eventAfterPartial = await getCoreEventSnapshot(partialFirstContext);
+		expect([fixture.revision, fullAfterPartial.revision, eventAfterPartial.revision]).toEqual([
+			"7",
+			"7",
+			"7",
+		]);
+		expect(fullAfterPartial.currentEventId).toBe(1);
+		expect(eventAfterPartial.currentEventId).toBe(1);
+	});
+
 	it("rejects a truncated core revision and falls back through one PostgreSQL statement", async () => {
 		const complete = buildTestCoreData(1);
 		const truncated = buildTestCoreData(1, { fixtures: complete.fixtures.slice(0, 379) });
 		const publication = buildCorePublication("2627", 7, truncated);
-		const fallbackManifest = {
-			...buildCorePublication("2627", 9, complete).manifest,
-			publicationId: uuid,
-		};
 		let calls = 0;
 		const context = buildSnapshotContext(new TestRedis(publication), {
 			databaseQuery: async (sql: unknown, values: unknown) => {
@@ -114,9 +144,9 @@ describe("typed Data snapshots", () => {
 					rows: [
 						{
 							authority_count: "1",
-							publication_id: uuid,
-							revision: "9",
-							manifest: fallbackManifest,
+							publication_id: publication.manifest.publicationId,
+							revision: "7",
+							manifest: publication.manifest,
 							source_checked_at: "2026-08-09T01:00:00.000Z",
 							events: complete.events,
 							teams: complete.teams,
@@ -131,9 +161,39 @@ describe("typed Data snapshots", () => {
 
 		const snapshot = await getCoreDataSnapshot(context);
 		expect(snapshot.source).toBe("postgres");
-		expect(snapshot.revision).toBe("9");
+		expect(snapshot.revision).toBe("7");
 		expect(snapshot.fixtures).toHaveLength(380);
 		expect(calls).toBe(1);
+	});
+
+	it("rejects a Core fallback that no longer matches a partial request pin", async () => {
+		const complete = buildTestCoreData(1);
+		const truncated = buildTestCoreData(1, { players: complete.players.slice(0, 219) });
+		const pinnedPublication = buildCorePublication("2627", 7, truncated);
+		const advancedPublication = buildCorePublication("2627", 9, complete);
+		const context = buildSnapshotContext(new TestRedis(pinnedPublication), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						authority_count: "1",
+						publication_id: advancedPublication.manifest.publicationId,
+						revision: "9",
+						manifest: advancedPublication.manifest,
+						source_checked_at: "2026-08-09T01:00:00.000Z",
+						events: complete.events,
+						teams: complete.teams,
+						players: complete.players,
+						phases: complete.phases,
+						fixtures: complete.fixtures.map(toPublicationFixture),
+					},
+				],
+			}),
+		});
+
+		expect((await getCoreFixtureSnapshot(context)).revision).toBe("7");
+		await expect(getCoreDataSnapshot(context)).rejects.toThrow(
+			"Coherent PostgreSQL core publication is unavailable"
+		);
 	});
 
 	it("rejects a non-canonical active core publication during PostgreSQL fallback", async () => {

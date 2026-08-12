@@ -4,6 +4,7 @@ import {
 	parseDataPublicationManifest,
 } from "../../infra/data-publication";
 import {
+	getLiveDataPublicationManifest,
 	getLiveDataSnapshot,
 	LIVE_PUBLICATION_ITEMS,
 	type LiveSnapshotState,
@@ -15,6 +16,7 @@ export type LiveSnapshotMeta = {
 	season: string;
 	eventId: number;
 	revision: string;
+	publicationId: string | null;
 	state: LiveSnapshotState;
 	publishedAt: string;
 	checkedAt: string;
@@ -24,18 +26,22 @@ export type LiveSnapshotMeta = {
 	bonusTeamCount: number;
 };
 
-const metaMemo = new WeakMap<GraphQLContext, Map<number, LiveSnapshotMeta>>();
-const sourceMemo = new WeakMap<GraphQLContext, Map<number, "redis" | "postgres">>();
+const metaMemo = new WeakMap<object, Map<number, Promise<LiveSnapshotMeta | null>>>();
+const sourceMemo = new WeakMap<object, Map<number, "redis" | "postgres">>();
+const publicationMetaMemo = new WeakMap<object, Map<number, Promise<LiveSnapshotMeta | null>>>();
+
+const memoIdentity = (context: GraphQLContext): object => context.requestScope ?? context;
 
 const rememberSource = (
 	context: GraphQLContext,
 	eventId: number,
 	source: "redis" | "postgres"
 ): void => {
-	let sources = sourceMemo.get(context);
+	const identity = memoIdentity(context);
+	let sources = sourceMemo.get(identity);
 	if (!sources) {
 		sources = new Map();
-		sourceMemo.set(context, sources);
+		sourceMemo.set(identity, sources);
 	}
 	sources.set(eventId, source);
 };
@@ -96,6 +102,7 @@ export const parseLiveSnapshotMeta = (
 		season: manifest.seasonCode,
 		eventId: manifest.eventId!,
 		revision: String(manifest.revision),
+		publicationId: manifest.publicationId,
 		state: manifest.state,
 		publishedAt: manifest.publishedAt,
 		checkedAt: manifest.sourceCheckedAt,
@@ -110,15 +117,18 @@ export const rememberLiveSnapshotMeta = (
 	context: GraphQLContext,
 	meta: LiveSnapshotMeta | null,
 	_season: string,
-	eventId: number
+	eventId: number,
+	source?: "redis" | "postgres"
 ): void => {
 	if (!meta) return;
-	let values = metaMemo.get(context);
+	const identity = memoIdentity(context);
+	let values = metaMemo.get(identity);
 	if (!values) {
 		values = new Map();
-		metaMemo.set(context, values);
+		metaMemo.set(identity, values);
 	}
-	values.set(eventId, meta);
+	if (!values.has(eventId)) values.set(eventId, Promise.resolve(meta));
+	if (source) rememberSource(context, eventId, source);
 };
 
 export const loadLiveSnapshotMeta = async (
@@ -128,24 +138,70 @@ export const loadLiveSnapshotMeta = async (
 ): Promise<LiveSnapshotMeta | null> => {
 	if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
 	if (options.season && options.season !== context.currentSeason.seasonCode) return null;
-	const memoized = metaMemo.get(context)?.get(eventId);
+	const identity = memoIdentity(context);
+	let eventMeta = metaMemo.get(identity);
+	if (!eventMeta) {
+		eventMeta = new Map();
+		metaMemo.set(identity, eventMeta);
+	}
+	const memoized = eventMeta.get(eventId);
 	if (memoized) return memoized;
-	const snapshot = await getLiveDataSnapshot(context, eventId);
-	const meta: LiveSnapshotMeta = {
-		season: snapshot.seasonCode,
-		eventId,
-		revision: snapshot.revision,
-		state: snapshot.state,
-		publishedAt: snapshot.publishedAt,
-		checkedAt: snapshot.sourceCheckedAt,
-		eventLiveCount: snapshot.eventLives.length,
-		fixtureCount: snapshot.fixtures.length,
-		fixtureTeamCount: Object.keys(snapshot.liveFixtures).length,
-		bonusTeamCount: Object.keys(snapshot.liveBonus).length,
-	};
-	rememberLiveSnapshotMeta(context, meta, snapshot.seasonCode, eventId);
-	rememberSource(context, eventId, snapshot.source);
-	return meta;
+	const load = (async (): Promise<LiveSnapshotMeta> => {
+		const snapshot = await getLiveDataSnapshot(context, eventId);
+		const meta: LiveSnapshotMeta = {
+			season: snapshot.seasonCode,
+			eventId,
+			revision: snapshot.revision,
+			publicationId: snapshot.publicationId,
+			state: snapshot.state,
+			publishedAt: snapshot.publishedAt,
+			checkedAt: snapshot.sourceCheckedAt,
+			eventLiveCount: snapshot.eventLives.length,
+			fixtureCount: snapshot.fixtures.length,
+			fixtureTeamCount: Object.keys(snapshot.liveFixtures).length,
+			bonusTeamCount: Object.keys(snapshot.liveBonus).length,
+		};
+		rememberSource(context, eventId, snapshot.source);
+		return meta;
+	})();
+	eventMeta.set(eventId, load);
+	return load;
+};
+
+/**
+ * Read only the active publication manifest for paths that fetch a bounded
+ * player set from PostgreSQL. Invalid or unavailable manifests retain the
+ * existing coherent full-snapshot fallback.
+ */
+export const loadLivePublicationMeta = (
+	context: GraphQLContext,
+	eventId: number
+): Promise<LiveSnapshotMeta | null> => {
+	if (!Number.isSafeInteger(eventId) || eventId <= 0) return Promise.resolve(null);
+	const identity = memoIdentity(context);
+	const pinned = metaMemo.get(identity)?.get(eventId);
+	if (pinned) return pinned;
+	let eventMeta = publicationMetaMemo.get(identity);
+	if (!eventMeta) {
+		eventMeta = new Map();
+		publicationMetaMemo.set(identity, eventMeta);
+	}
+	const existing = eventMeta.get(eventId);
+	if (existing) return existing;
+
+	const load = (async (): Promise<LiveSnapshotMeta | null> => {
+		const manifest = await getLiveDataPublicationManifest(context, eventId);
+		const published = parseLiveSnapshotMeta(manifest ? JSON.stringify(manifest) : null, {
+			season: context.currentSeason.seasonCode,
+			eventId,
+		});
+		if (published) {
+			return published;
+		}
+		return loadLiveSnapshotMeta(context, eventId);
+	})();
+	eventMeta.set(eventId, load);
+	return load;
 };
 
 export const loadOperationLiveSnapshotMeta = (
@@ -154,12 +210,12 @@ export const loadOperationLiveSnapshotMeta = (
 ): Promise<LiveSnapshotMeta | null> => loadLiveSnapshotMeta(context, eventId);
 
 export const isLiveSnapshotDatabaseFallback = (context: GraphQLContext, eventId: number): boolean =>
-	sourceMemo.get(context)?.get(eventId) === "postgres";
+	sourceMemo.get(memoIdentity(context))?.get(eventId) === "postgres";
 
 export const isLiveSnapshotConsistencyActive = (
 	context: GraphQLContext,
 	eventId: number
-): boolean => sourceMemo.get(context)?.get(eventId) === "redis";
+): boolean => sourceMemo.get(memoIdentity(context))?.get(eventId) === "redis";
 
 export const withLiveSnapshotConsistency = async <T>(
 	context: GraphQLContext,

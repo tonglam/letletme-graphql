@@ -390,6 +390,39 @@ async function getPlayerValuesFromDatabase(
 }
 
 const NULL_SENTINEL = "__pv:null__";
+const MISSING_SENTINEL = "1";
+
+const REPLACE_PLAYER_VALUES_CACHE_SCRIPT = `
+-- player-values-cache-replace-v1
+if ARGV[1] == 'positive' then
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+  redis.call('DEL', KEYS[2])
+  return 1
+end
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  redis.call('DEL', KEYS[2])
+  return 0
+end
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+return 1
+`;
+
+export const replacePlayerValuesQueryCache = async (
+	context: GraphQLContext,
+	cacheKey: string,
+	missingCacheKey: string,
+	values: PlayerValue[]
+): Promise<void> => {
+	await context.redis.eval(
+		REPLACE_PLAYER_VALUES_CACHE_SCRIPT,
+		2,
+		cacheKey,
+		missingCacheKey,
+		values.length === 0 ? "negative" : "positive",
+		values.length === 0 ? MISSING_SENTINEL : JSON.stringify(values),
+		String(QUERY_CACHE_TTL_SECONDS.MARKET)
+	);
+};
 
 const isFiniteNumber = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value);
@@ -460,24 +493,13 @@ const parseHistoryCache = (raw: string): PlayerValueHistoryRepositoryItem[] | nu
 
 export const playerValuesRepository: PlayerValuesRepository = {
 	async getPlayerValues(context: GraphQLContext, changeDate: Date): Promise<PlayerValue[]> {
-		const cacheKey = gqlCacheKey(context, `player-values:${getCompactDateString(changeDate)}`);
+		const compactDate = getCompactDateString(changeDate);
+		const cacheKey = gqlCacheKey(context, `player-values:${compactDate}`);
+		const missingCacheKey = gqlCacheKey(context, `player-values-missing:${compactDate}`);
 		try {
-			const cached = await measureRequestStage(context, "playerValues.cacheRead", () =>
-				context.redis.get(cacheKey)
+			const [cached, missing] = await measureRequestStage(context, "playerValues.cacheRead", () =>
+				context.redis.mget(cacheKey, missingCacheKey)
 			);
-			if (cached === NULL_SENTINEL) {
-				metrics.cacheRepositoryEvents.labels("player_values", "query_hit").inc();
-				context.logger.debug(
-					{
-						requestId: context.requestId,
-						operationName: context.operationName,
-						source: "negative-hit",
-						resultCount: 0,
-					},
-					"Player values loaded"
-				);
-				return [];
-			}
 			if (cached !== null) {
 				const parsed = measureRequestStageSync(context, "playerValues.cacheParse", () =>
 					parsePlayerValuesCache(cached)
@@ -498,9 +520,23 @@ export const playerValuesRepository: PlayerValuesRepository = {
 				await context.redis.del(cacheKey);
 				metrics.cacheRepositoryEvents.labels("player_values", "malformed").inc();
 			}
+			if (missing === MISSING_SENTINEL) {
+				metrics.cacheRepositoryEvents.labels("player_values", "query_hit").inc();
+				context.logger.debug(
+					{
+						requestId: context.requestId,
+						operationName: context.operationName,
+						source: "negative-hit",
+						resultCount: 0,
+					},
+					"Player values loaded"
+				);
+				return [];
+			}
+			if (missing !== null) await context.redis.del(missingCacheKey);
 		} catch (error) {
 			metrics.cacheRepositoryEvents.labels("player_values", "database_fallback").inc();
-			context.logger.warn({ err: error, cacheKey }, "Player-values query cache unavailable");
+			context.logger.warn({ err: error }, "Player-values query cache unavailable");
 		}
 
 		const values = await getPlayerValuesFromDatabase(context, changeDate);
@@ -508,15 +544,10 @@ export const playerValuesRepository: PlayerValuesRepository = {
 
 		try {
 			await measureRequestStage(context, "playerValues.cacheWrite", () =>
-				context.redis.set(
-					cacheKey,
-					values.length === 0 ? NULL_SENTINEL : JSON.stringify(values),
-					"EX",
-					QUERY_CACHE_TTL_SECONDS.MARKET
-				)
+				replacePlayerValuesQueryCache(context, cacheKey, missingCacheKey, values)
 			);
 		} catch (error) {
-			context.logger.warn({ err: error, cacheKey }, "Failed to write player-values query cache");
+			context.logger.warn({ err: error }, "Failed to write player-values query cache");
 		}
 
 		context.logger.debug(

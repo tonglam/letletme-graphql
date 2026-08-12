@@ -28,6 +28,15 @@ describe("fixturesRepository over canonical snapshots", () => {
 		const core = buildTestCoreData(1);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
 		const context = buildSnapshotContext(redis);
+		const stages: string[] = [];
+		Object.assign(context, {
+			requestTiming: {
+				start: (stage: string) => {
+					stages.push(stage);
+					return () => undefined;
+				},
+			},
+		});
 
 		const explicit = await fixturesRepository.getEventFixtures(context, 1);
 		const current = await fixturesRepository.getCurrentFixtures(context);
@@ -41,6 +50,7 @@ describe("fixturesRepository over canonical snapshots", () => {
 		expect(resolved).toEqual(explicit);
 		expect(explicit).toHaveLength(10);
 		expect(explicit.every((fixture) => fixture.eventId === 1)).toBe(true);
+		expect(stages).toEqual(["fixtures.coreAcquisition"]);
 	});
 
 	it("returns an empty list for invalid event IDs without reading Redis", async () => {

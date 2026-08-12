@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { liveRepository } from "../../../src/domains/live/repository";
+import { loadLiveSnapshotMeta } from "../../../src/domains/live/snapshot-meta";
 import type { GraphQLContext } from "../../../src/graphql/context";
 import {
 	buildCorePublication,
@@ -8,6 +9,7 @@ import {
 	buildTestCoreData,
 	buildTestEventLives,
 	TestRedis,
+	toPublicationFixture,
 } from "../../helpers/data-publication";
 
 const withReadRows = (
@@ -80,6 +82,163 @@ describe("liveRepository live publication reads", () => {
 		});
 		expect(targeted.map((row) => row.playerId)).toEqual([1, 2]);
 		expect(eventLive.performances).toHaveLength(core.players.length);
+	});
+
+	it("reads a targeted player set without hydrating the full live publication", async () => {
+		const { context, redis, core } = liveContext();
+		const activeManifest = [...redis.values.entries()].find(
+			([key]) => key.includes(":fpl:live:") && key.endsWith(":active")
+		);
+		if (!activeManifest) throw new Error("Missing live publication manifest");
+		const publicationManifest = JSON.parse(activeManifest[1]) as {
+			publicationId: string;
+			revision: number;
+			sourceCheckedAt: string;
+			publishedAt: string;
+			items: Array<{ name: string; key: string }>;
+		};
+		if (activeManifest) {
+			const eventLivesKey = publicationManifest.items.find(
+				(item) => item.name === "eventLives"
+			)?.key;
+			if (eventLivesKey) redis.values.delete(eventLivesKey);
+		}
+		let queryCount = 0;
+		context.logger = {
+			...context.logger,
+			warn: (details: unknown) => {
+				if (
+					details &&
+					typeof details === "object" &&
+					"err" in details &&
+					details.err instanceof Error
+				) {
+					throw details.err;
+				}
+			},
+		};
+		context.database = {
+			query: async (sql: unknown) => {
+				queryCount += 1;
+				const targeted = String(sql).includes("element_id = ANY($3::integer[])");
+				return {
+					rows: [
+						{
+							authority_count: "1",
+							event_live_count: String(core.players.length),
+							known_player_count: "1",
+							publication_id: publicationManifest.publicationId,
+							revision: String(publicationManifest.revision),
+							manifest: publicationManifest,
+							source_checked_at: publicationManifest.sourceCheckedAt,
+							published_at: "2030-01-01T00:00:00.000Z",
+							event_checked_at: publicationManifest.sourceCheckedAt,
+							event_lives: targeted
+								? [
+										{
+											event_id: 1,
+											element_id: 1,
+											minutes: 90,
+											goals_scored: 1,
+											assists: 0,
+											clean_sheets: 0,
+											goals_conceded: 0,
+											own_goals: 0,
+											penalties_saved: 0,
+											penalties_missed: 0,
+											yellow_cards: 0,
+											red_cards: 0,
+											saves: 0,
+											bonus: 3,
+											bps: 40,
+											starts: true,
+											defensive_contribution: 0,
+											expected_goals: "0.75",
+											expected_assists: "0.10",
+											expected_goal_involvements: "0.85",
+											expected_goals_conceded: "0.90",
+											in_dream_team: true,
+											total_points: 10,
+										},
+									]
+								: buildTestEventLives(core, 1),
+							fixtures: core.fixtures
+								.filter((fixture) => fixture.eventId === 1)
+								.map(toPublicationFixture),
+						},
+					],
+				};
+			},
+		} as never;
+
+		const targeted = await liveRepository.getTargetedLiveRead(context, 1, [1]);
+		const full = await liveRepository.getAllLivePerformances(context, 1);
+		const fullMeta = await loadLiveSnapshotMeta(context, 1);
+
+		expect(targeted.performances).toEqual([
+			expect.objectContaining({ playerId: 1, minutes: 90, totalPoints: 10 }),
+		]);
+		expect(targeted.meta.publishedAt).toBe(publicationManifest.publishedAt);
+		expect(full).toHaveLength(core.players.length);
+		expect(fullMeta).toMatchObject({
+			revision: targeted.meta.revision,
+			publicationId: targeted.meta.publicationId,
+			publishedAt: targeted.meta.publishedAt,
+		});
+		expect(queryCount).toBe(2);
+	});
+
+	it("returns no targeted rows for an unknown player without hydrating the full snapshot", async () => {
+		const { context, redis, core } = liveContext();
+		const activeManifest = [...redis.values.entries()].find(
+			([key]) => key.includes(":fpl:live:") && key.endsWith(":active")
+		);
+		if (!activeManifest) throw new Error("Missing live publication manifest");
+		const manifest = JSON.parse(activeManifest[1]) as {
+			publicationId: string;
+			revision: number;
+			sourceCheckedAt: string;
+			publishedAt: string;
+			items: Array<{ name: string; key: string }>;
+		};
+		const eventLivesKey = manifest.items.find((item) => item.name === "eventLives")?.key;
+		if (eventLivesKey) redis.values.delete(eventLivesKey);
+		let queryCount = 0;
+		context.logger = {
+			...context.logger,
+			warn: (details: unknown) => {
+				if (details && typeof details === "object" && "err" in details) {
+					throw new Error("Unknown player triggered full-snapshot fallback");
+				}
+			},
+		};
+		context.database = {
+			query: async () => {
+				queryCount += 1;
+				return {
+					rows: [
+						{
+							authority_count: "1",
+							event_live_count: String(core.players.length),
+							known_player_count: "0",
+							publication_id: manifest.publicationId,
+							revision: String(manifest.revision),
+							source_checked_at: manifest.sourceCheckedAt,
+							published_at: manifest.publishedAt,
+							event_lives: [],
+							fixtures: core.fixtures
+								.filter((fixture) => fixture.eventId === 1)
+								.map(toPublicationFixture),
+						},
+					],
+				};
+			},
+		} as never;
+
+		const targeted = await liveRepository.getTargetedLiveRead(context, 1, [999_999]);
+
+		expect(targeted.performances).toEqual([]);
+		expect(queryCount).toBe(1);
 	});
 
 	it("reads historical multi-event stats in one bounded PostgreSQL query", async () => {

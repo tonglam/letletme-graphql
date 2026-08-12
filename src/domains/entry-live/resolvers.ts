@@ -3,10 +3,7 @@ import type { Entry } from "../entries/repository";
 import { entriesService } from "../entries/service";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
-import { fixturesService } from "../fixtures/service";
-import { liveRepository } from "../live/repository";
-import { withLiveSnapshotConsistency, withLiveSnapshotRoot } from "../live/snapshot-meta";
-import { playersRepository } from "../players/repository";
+import { withLiveSnapshotRoot } from "../live/snapshot-meta";
 import { assertTournamentStandingsReady, tournamentsService } from "../tournaments/service";
 import {
 	assertValidEntryBatch,
@@ -55,13 +52,11 @@ export const entryLiveResolvers = {
 			args: CalcLivePointsByEntryArgs,
 			context: GraphQLContext
 		): Promise<LiveCalcData> =>
-			withLiveSnapshotRoot(context, () =>
-				entryLiveCalcService.calcLivePointsByEntry(
-					context,
-					args.eventId,
-					args.entryId,
-					args.includeLive ?? true
-				)
+			entryLiveCalcService.calcLivePointsByEntry(
+				context,
+				args.eventId,
+				args.entryId,
+				args.includeLive ?? true
 			),
 
 		calcLivePointsForEntries: async (
@@ -88,9 +83,7 @@ export const entryLiveResolvers = {
 						args.entryIds,
 						includeLive
 					);
-				const result = await (includeLive
-					? withLiveSnapshotConsistency(context, args.eventId, calculate)
-					: calculate());
+				const result = await calculate();
 				return {
 					results: Array.from(result.results.values()),
 					errors: result.errors,
@@ -121,29 +114,12 @@ export const entryLiveResolvers = {
 				);
 				assertValidEntryBatch(entryIds);
 
-				const calculate = (): Promise<BatchLiveCalcResult> => {
-					// Create fresh shared reads for a rare revision retry; reusing already
-					// resolved promises would preserve the mixed revision we detected.
-					const liveByPlayerPromise =
-						includeLive && entryIds.length > 1
-							? liveRepository.getAllLivePerformances(context, args.eventId)
-							: undefined;
-					return entryLiveBatchService.calcLivePointsForEntries(
-						context,
-						args.eventId,
-						entryIds,
-						includeLive,
-						{
-							liveByPlayer: liveByPlayerPromise,
-							fixtures: fixturesService.getEventFixtures(context, args.eventId),
-							teams: playersRepository.listTeams(context),
-						}
-					);
-				};
-
-				const result = await (includeLive
-					? withLiveSnapshotConsistency(context, args.eventId, calculate)
-					: calculate());
+				const result = await entryLiveBatchService.calcLivePointsForEntries(
+					context,
+					args.eventId,
+					entryIds,
+					includeLive
+				);
 				return {
 					results: Array.from(result.results.values()),
 					errors: result.errors,

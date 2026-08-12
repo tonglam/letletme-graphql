@@ -5,13 +5,15 @@ import type { Entry } from "../entries/repository";
 import { entriesService } from "../entries/service";
 import type { Fixture } from "../fixtures/repository";
 import { fixturesService } from "../fixtures/service";
-import type { LivePerformance } from "../live/repository";
+import type { LivePerformance, TargetedLiveRead } from "../live/repository";
 import { liveRepository } from "../live/repository";
 import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
+import { loadLiveSnapshotMeta } from "../live/snapshot-meta";
 import { playersRepository } from "../players/repository";
 import {
 	type ActiveCaptainData,
 	applyAutoSubs,
+	buildNoPicksLiveCalcData,
 	calcElementLivePoints,
 	type ElementEventResultData,
 	type LiveCalcData,
@@ -433,6 +435,8 @@ const computeSingleEntry = (
 	});
 
 	return {
+		availability: pickEntity && pickEntity.picks.length > 0 ? "READY" : "NO_PICKS",
+		snapshot: null,
 		rank: 0,
 		event: eventId,
 		entry: entryId,
@@ -479,6 +483,7 @@ export const entryLiveBatchService = {
 			liveByPlayer?: Promise<Map<number, LivePerformance>>;
 			fixtures?: Promise<Fixture[]>;
 			teams?: Promise<Team[]>;
+			picksByEntry?: Promise<Map<number, EntryEventPick>>;
 		}
 	): Promise<BatchLiveCalcResult> {
 		assertValidEntryBatch(entryIds);
@@ -492,39 +497,65 @@ export const entryLiveBatchService = {
 			};
 		}
 
-		// Phase 1: Load reusable data and all entry data in parallel. A single-entry
-		// request defers live points until its 15 picks are known, avoiding a
-		// 700-player shaped-cache decode on every browser refresh.
-		const useTargetedLiveRead =
-			includeLive && entryIds.length === 1 && prefetched?.liveByPlayer === undefined;
-		const [
-			liveByPlayerRaw,
-			bonusByPlayerId,
-			fixtures,
-			teams,
-			entriesById,
-			picksByEntry,
-			transfersByEntry,
-			previousResultsByEntry,
-		] = await Promise.all([
-			prefetched?.liveByPlayer ??
-				(includeLive && !useTargetedLiveRead
-					? liveRepository.getAllLivePerformances(context, eventId)
-					: Promise.resolve(new Map<number, LivePerformance>())),
-			includeLive
-				? loadLiveBonusByPlayerId(context, eventId)
-				: Promise.resolve(new Map<number, number>()),
-			prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
-			prefetched?.teams ?? playersRepository.listTeams(context),
-			// Phase 2 moved here: entry info HMGET
+		// Phase 1: resolve identity and picks. Entries without picks must not enter
+		// Live, fixture, player, transfer or bonus acquisition.
+		const [entriesById, picksByEntry, previousResultsByEntry] = await Promise.all([
 			entriesService.getEntriesByIds(context, entryIds),
-			// Phase 3 moved here: picks + transfers (MGET cache or SQL)
-			entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
-			entryLiveRepository.getEntryEventTransfersByIds(context, entryIds, eventId),
+			prefetched?.picksByEntry ??
+				entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
 			eventId > 1
 				? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
 				: Promise.resolve(new Map<number, EntryEventResult>()),
 		]);
+		const readyEntryIds = entryIds.filter(
+			(entryId) => (picksByEntry.get(entryId)?.picks.length ?? 0) > 0
+		);
+		const results = new Map<number, LiveCalcData>();
+		for (const entryId of entryIds) {
+			if (!readyEntryIds.includes(entryId)) {
+				results.set(
+					entryId,
+					buildNoPicksLiveCalcData(
+						entryId,
+						eventId,
+						entriesById.get(entryId) ?? null,
+						previousResultsByEntry.get(entryId) ?? null
+					)
+				);
+			}
+		}
+		if (readyEntryIds.length === 0) {
+			return {
+				results,
+				errors,
+				meta: {
+					eventId,
+					totalEntries: entryIds.length,
+					succeededCount: results.size,
+					failedCount: 0,
+				},
+			};
+		}
+
+		// Phase 2: load reusable data only for entries that actually have picks.
+		const useTargetedLiveRead =
+			includeLive && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
+		const [liveByPlayerRaw, bonusByPlayerId, fixtures, teams, transfersByEntry, fullSnapshotMeta] =
+			await Promise.all([
+				prefetched?.liveByPlayer ??
+					(includeLive && !useTargetedLiveRead
+						? liveRepository.getAllLivePerformances(context, eventId)
+						: Promise.resolve(new Map<number, LivePerformance>())),
+				includeLive && !useTargetedLiveRead
+					? loadLiveBonusByPlayerId(context, eventId)
+					: Promise.resolve(new Map<number, number>()),
+				prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
+				prefetched?.teams ?? playersRepository.listTeams(context),
+				entryLiveRepository.getEntryEventTransfersByIds(context, readyEntryIds, eventId),
+				includeLive && !useTargetedLiveRead
+					? loadLiveSnapshotMeta(context, eventId)
+					: Promise.resolve(null),
+			]);
 
 		// Collect all unique player IDs from picks and transfers
 		const allPlayerIds = new Set<number>();
@@ -540,14 +571,26 @@ export const entryLiveBatchService = {
 
 		// Load only the needed players via HMGET (not HGETALL of all 600+)
 		const playerIds = Array.from(allPlayerIds);
-		const [playersList, targetedLivePerformances] = await Promise.all([
+		const loadTargetedLive = async (): Promise<TargetedLiveRead | null> => {
+			if (!useTargetedLiveRead) return null;
+			const stopSnapshot = context.requestTiming?.start("entryLive.liveSnapshot");
+			try {
+				return await liveRepository.getTargetedLiveRead(context, eventId, playerIds);
+			} finally {
+				stopSnapshot?.();
+			}
+		};
+		const [playersList, targetedLive] = await Promise.all([
 			playersRepository.getPlayersByIds(context, playerIds),
-			useTargetedLiveRead
-				? liveRepository.getLivePerformancesByPlayerIds(context, eventId, playerIds)
-				: Promise.resolve([] as LivePerformance[]),
+			loadTargetedLive(),
 		]);
 		const liveByPlayerMap = useTargetedLiveRead
-			? new Map(targetedLivePerformances.map((performance) => [performance.playerId, performance]))
+			? new Map(
+					(targetedLive?.performances ?? []).map((performance) => [
+						performance.playerId,
+						performance,
+					])
+				)
 			: new Map(liveByPlayerRaw);
 
 		const playersById = new Map<number, Player>();
@@ -572,16 +615,14 @@ export const entryLiveBatchService = {
 
 		const shared: SharedData = {
 			liveByPlayer: liveByPlayerMap,
-			effectiveBonusByPlayer: bonusByPlayerId,
+			effectiveBonusByPlayer: targetedLive?.effectiveBonusByPlayer ?? bonusByPlayerId,
 			teamsById,
 			playersById,
 			fixturesByTeam,
 		};
 
 		// Phase 4: Compute per-entry (pure CPU, zero I/O)
-		const results = new Map<number, LiveCalcData>();
-
-		for (const entryId of entryIds) {
+		for (const entryId of readyEntryIds) {
 			try {
 				const perEntry: PerEntryData = {
 					entryId,
@@ -591,7 +632,10 @@ export const entryLiveBatchService = {
 					previousResult: previousResultsByEntry.get(entryId) ?? null,
 				};
 
-				const calcData = computeSingleEntry(entryId, eventId, perEntry, shared);
+				const calcData = {
+					...computeSingleEntry(entryId, eventId, perEntry, shared),
+					snapshot: targetedLive?.meta ?? fullSnapshotMeta,
+				};
 				results.set(entryId, calcData);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : "Computation error";
@@ -599,13 +643,19 @@ export const entryLiveBatchService = {
 			}
 		}
 
+		const orderedResults = new Map<number, LiveCalcData>();
+		for (const entryId of entryIds) {
+			const result = results.get(entryId);
+			if (result) orderedResults.set(entryId, result);
+		}
+
 		return {
-			results,
+			results: orderedResults,
 			errors,
 			meta: {
 				eventId,
 				totalEntries: entryIds.length,
-				succeededCount: results.size,
+				succeededCount: orderedResults.size,
 				failedCount: errors.length,
 			},
 		};
