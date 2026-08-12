@@ -288,7 +288,22 @@ const readPinnedCorePublicationItems = async (
 	context: GraphQLContext,
 	requiredItemNames: readonly string[]
 ): Promise<DataPublication | null> => {
-	const pin = reserveCorePublicationPin(context, "manifest");
+	const requestScope = context.requestScope ?? context;
+	let pin = corePublicationPinMemo.get(requestScope);
+	if (!pin) {
+		const scope = {
+			dataset: "fpl:core" as const,
+			seasonCode: context.currentSeason.seasonCode,
+		};
+		const publication = readDataPublication(context.redis, scope, requiredItemNames);
+		pin = {
+			manifest: publication.then(
+				(value) => value?.manifest ?? readDataPublicationManifest(context.redis, scope)
+			),
+		};
+		corePublicationPinMemo.set(requestScope, pin);
+		return publication;
+	}
 	if (pin.publication) {
 		const publication = await pin.publication;
 		if (publication) return publication;
