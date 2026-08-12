@@ -1298,6 +1298,8 @@ const publicationLiveSnapshot = (
 
 type LiveFallbackRow = QueryResultRow & {
 	authority_count: string | number;
+	event_live_count?: string | number | null;
+	known_player_count?: string | number | null;
 	publication_id: string | null;
 	revision: string | number | null;
 	manifest: unknown;
@@ -1369,9 +1371,15 @@ const TARGETED_LIVE_SQL = `
 			min(published_at) AS published_at
 		FROM active_publication
 	)
-	SELECT
-		authority.*,
-		COALESCE((
+		SELECT
+			authority.*,
+			(SELECT count(*)::text
+			 FROM fpl.player_gameweek_stats
+			 WHERE season_id = $1 AND event_id = $2) AS event_live_count,
+			(SELECT count(*)::text
+			 FROM fpl.players
+			 WHERE season_id = $1 AND element_id = ANY($3::integer[])) AS known_player_count,
+			COALESCE((
 			SELECT jsonb_agg((to_jsonb(live_row) - 'season_id') ORDER BY element_id)
 			FROM fpl.player_gameweek_stats live_row
 			WHERE season_id = $1
@@ -1548,7 +1556,8 @@ const buildLiveBonus = (
 
 const loadLiveSnapshotFromPostgres = async (
 	context: GraphQLContext,
-	eventId: number
+	eventId: number,
+	expectedManifest?: DataPublicationManifest | null
 ): Promise<LiveDataSnapshot> => {
 	const [core, result] = await Promise.all([
 		getCoreDataSnapshot(context),
@@ -1572,11 +1581,21 @@ const loadLiveSnapshotFromPostgres = async (
 				eventId,
 			})
 		: null;
+	const preservesPinnedPublication =
+		authorityCount === 1 &&
+		expectedManifest !== null &&
+		expectedManifest !== undefined &&
+		manifest?.publicationId === expectedManifest.publicationId &&
+		manifest.revision === expectedManifest.revision;
 	const coreEventFixtures = core.fixtures.filter((fixture) => fixture.eventId === eventId);
 	const coreTeamIds = new Set(core.teams.map((team) => team.id));
 	if (
 		!row ||
 		authorityCount > 1 ||
+		(expectedManifest !== null &&
+			expectedManifest !== undefined &&
+			authorityCount === 1 &&
+			!preservesPinnedPublication) ||
 		(authorityCount === 1 &&
 			(!manifest ||
 				manifest.publicationId !== row.publication_id ||
@@ -1609,8 +1628,13 @@ const loadLiveSnapshotFromPostgres = async (
 	) {
 		throw new Error(`Coherent PostgreSQL live publication is unavailable for event ${eventId}`);
 	}
-	const revision = `db-${sourceCheckedAt ? Date.parse(sourceCheckedAt) : core.revision}`;
+	const revision = preservesPinnedPublication
+		? String(expectedManifest.revision)
+		: `db-${sourceCheckedAt ? Date.parse(sourceCheckedAt) : core.revision}`;
 	const state = liveStateFromFixtures(fixtures);
+	if (preservesPinnedPublication && expectedManifest.state !== state) {
+		throw new Error(`Pinned live publication state is unavailable for event ${eventId}`);
+	}
 	const liveFixtures = buildLiveFixtureView(fixtures, core);
 	const liveBonus = buildLiveBonus(row.fixtures, fixtures);
 	if (
@@ -1620,13 +1644,15 @@ const loadLiveSnapshotFromPostgres = async (
 		throw new Error(`Coherent PostgreSQL live derivatives are unavailable for event ${eventId}`);
 	}
 	return {
-		source: "postgres",
+		source: preservesPinnedPublication ? "redis" : "postgres",
 		seasonCode: context.currentSeason.seasonCode,
 		eventId,
 		revision,
-		publicationId: null,
-		sourceCheckedAt,
-		publishedAt,
+		publicationId: preservesPinnedPublication ? expectedManifest.publicationId : null,
+		sourceCheckedAt: preservesPinnedPublication
+			? expectedManifest.sourceCheckedAt
+			: sourceCheckedAt,
+		publishedAt: preservesPinnedPublication ? expectedManifest.publishedAt : publishedAt,
 		state,
 		eventLives,
 		fixtures,
@@ -1740,16 +1766,21 @@ export const getLiveDataSnapshot = (
 	}
 	const existing = eventSnapshots.get(eventId);
 	if (existing) return existing;
-	const publication = reserveLivePublicationPin(context, eventId, "publication").publication!;
+	const pin = reserveLivePublicationPin(context, eventId, "publication");
+	const publication = pin.publication!;
 	const load = (async (): Promise<LiveDataSnapshot> => {
-		const [published, core] = await Promise.all([publication, getCoreDataSnapshot(context)]);
+		const [published, manifest, core] = await Promise.all([
+			publication,
+			pin.manifest,
+			getCoreDataSnapshot(context),
+		]);
 		const snapshot = published ? publicationLiveSnapshot(published, eventId, core) : null;
 		if (snapshot) return snapshot;
 		context.logger.warn(
 			{ season: context.currentSeason.seasonCode, eventId },
 			"Live Data publication unavailable; using one coherent PostgreSQL snapshot"
 		);
-		return loadLiveSnapshotFromPostgres(context, eventId);
+		return loadLiveSnapshotFromPostgres(context, eventId, manifest);
 	})();
 	eventSnapshots.set(eventId, load);
 	return load;
@@ -1806,6 +1837,8 @@ export const getTargetedLiveDataSnapshot = async (
 		]);
 		const row = result.rows[0];
 		const authorityCount = integer(row?.authority_count) ?? 0;
+		const eventLiveCount = integer(row?.event_live_count);
+		const knownPlayerCount = integer(row?.known_player_count);
 		const eventLives = mapArray(row?.event_lives, mapLivePerformance);
 		const fixtures = mapArray(row?.fixtures, mapCoreFixture);
 		const coreEventFixtures = core.fixtures.filter((fixture) => fixture.eventId === eventId);
@@ -1815,19 +1848,15 @@ export const getTargetedLiveDataSnapshot = async (
 			authorityCount !== 1 ||
 			row.publication_id !== expected.publicationId ||
 			String(row.revision) !== expected.revision ||
+			eventLiveCount !== expected.eventLiveCount ||
+			knownPlayerCount === null ||
 			!eventLives ||
 			!fixtures ||
 			eventLives.some(
 				(live) => live.eventId !== eventId || !requestedPlayerIds.has(live.playerId)
 			) ||
 			!hasUniquePositiveIds(eventLives, (live) => live.playerId) ||
-			(expected.eventLiveCount > 0 &&
-				!hasSameIds(
-					eventLives,
-					uniquePlayerIds,
-					(live) => live.playerId,
-					(playerId) => playerId
-				)) ||
+			(expected.eventLiveCount > 0 && eventLives.length !== knownPlayerCount) ||
 			(expected.eventLiveCount === 0 && eventLives.length > 0) ||
 			fixtures.some((fixture) => fixture.eventId !== eventId) ||
 			!hasUniquePositiveIds(fixtures, (fixture) => fixture.id) ||

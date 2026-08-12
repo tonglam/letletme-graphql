@@ -196,7 +196,6 @@ export const loadLivePublicationMeta = (
 			eventId,
 		});
 		if (published) {
-			rememberSource(context, eventId, "redis");
 			return published;
 		}
 		return loadLiveSnapshotMeta(context, eventId);
