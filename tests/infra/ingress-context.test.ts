@@ -6,6 +6,7 @@ import {
 	GRAPHQL_SERVICE_RATE_LIMIT_SUBJECT,
 	verifyGraphQLServiceToken,
 	verifyIngressContext,
+	WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT,
 } from "../../src/infra/ingress-context";
 
 const subject = "a".repeat(64);
@@ -19,6 +20,14 @@ const signed = (envelope: Record<string, unknown>, secret = env.BACKEND_PROXY_SE
 };
 
 describe("signed web ingress context", () => {
+	test("derives the shared public RSC subject from the Web contract", () => {
+		expect(WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT).toBe(
+			createHmac("sha256", env.BACKEND_PROXY_SECRET)
+				.update("rate-limit:web-public-rsc")
+				.digest("hex")
+		);
+	});
+
 	test("accepts the exact canonical envelope for at most sixty seconds", () => {
 		const headers = signed({ aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 });
 		expect(verifyIngressContext(headers, 120)).toEqual({ subject });
