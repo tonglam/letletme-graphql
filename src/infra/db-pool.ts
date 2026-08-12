@@ -7,7 +7,7 @@ import { env } from "./env";
  */
 export const dbPool = new Pool({
 	connectionString: env.DATABASE_URL,
-	max: 20,
+	max: env.DATABASE_POOL_MAX,
 	idleTimeoutMillis: 30_000,
 	connectionTimeoutMillis: 2_000,
 });
