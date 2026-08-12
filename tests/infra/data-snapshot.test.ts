@@ -94,6 +94,40 @@ describe("typed Data snapshots", () => {
 		expect(clonedContext.coreSnapshotMemoStatus).toBe("hit");
 	});
 
+	it("shares one core publication pin across full, fixture, and event reads", async () => {
+		const revisionSevenData = buildTestCoreData(1);
+		const revisionEightData = buildTestCoreData(2);
+		const revisionSeven = buildCorePublication("2627", 7, revisionSevenData);
+		const revisionEight = buildCorePublication("2627", 8, revisionEightData);
+
+		const fullFirstRedis = new TestRedis(revisionSeven);
+		const fullFirstContext = buildSnapshotContext(fullFirstRedis);
+		const full = await getCoreDataSnapshot(fullFirstContext);
+		for (const [key, value] of revisionEight.store) fullFirstRedis.values.set(key, value);
+		const fixtureAfterFull = await getCoreFixtureSnapshot(fullFirstContext);
+		const eventAfterFull = await getCoreEventSnapshot(fullFirstContext);
+		expect([full.revision, fixtureAfterFull.revision, eventAfterFull.revision]).toEqual([
+			"7",
+			"7",
+			"7",
+		]);
+		expect(eventAfterFull.currentEventId).toBe(1);
+
+		const partialFirstRedis = new TestRedis(revisionSeven);
+		const partialFirstContext = buildSnapshotContext(partialFirstRedis);
+		const fixture = await getCoreFixtureSnapshot(partialFirstContext);
+		for (const [key, value] of revisionEight.store) partialFirstRedis.values.set(key, value);
+		const fullAfterPartial = await getCoreDataSnapshot(partialFirstContext);
+		const eventAfterPartial = await getCoreEventSnapshot(partialFirstContext);
+		expect([fixture.revision, fullAfterPartial.revision, eventAfterPartial.revision]).toEqual([
+			"7",
+			"7",
+			"7",
+		]);
+		expect(fullAfterPartial.currentEventId).toBe(1);
+		expect(eventAfterPartial.currentEventId).toBe(1);
+	});
+
 	it("rejects a truncated core revision and falls back through one PostgreSQL statement", async () => {
 		const complete = buildTestCoreData(1);
 		const truncated = buildTestCoreData(1, { fixtures: complete.fixtures.slice(0, 379) });

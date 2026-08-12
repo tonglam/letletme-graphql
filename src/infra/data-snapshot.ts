@@ -5,7 +5,6 @@ import {
 	readDataPublication,
 	readDataPublicationItemsAtManifest,
 	readDataPublicationManifest,
-	readDataPublicationItems,
 	type DataPublication,
 	type DataPublicationManifest,
 } from "./data-publication";
@@ -239,6 +238,66 @@ const coreSnapshotMemo = new WeakMap<object, Promise<CoreDataSnapshot>>();
 const coreFixtureSnapshotMemo = new WeakMap<object, Promise<CoreFixtureSnapshot>>();
 const coreEventSnapshotMemo = new WeakMap<object, Promise<CoreEventSnapshot>>();
 const liveSnapshotMemo = new WeakMap<object, Map<number, Promise<LiveDataSnapshot>>>();
+
+type CorePublicationPin = {
+	manifest: Promise<DataPublicationManifest | null>;
+	publication?: Promise<DataPublication | null>;
+};
+
+const corePublicationPinMemo = new WeakMap<object, CorePublicationPin>();
+
+const reserveCorePublicationPin = (
+	context: GraphQLContext,
+	mode: "manifest" | "publication"
+): CorePublicationPin => {
+	const requestScope = context.requestScope ?? context;
+	const existing = corePublicationPinMemo.get(requestScope);
+	if (existing) {
+		if (mode === "publication" && !existing.publication) {
+			existing.publication = existing.manifest.then((manifest) =>
+				manifest
+					? readDataPublicationItemsAtManifest(context.redis, manifest, CORE_PUBLICATION_ITEMS)
+					: null
+			);
+		}
+		return existing;
+	}
+
+	const scope = {
+		dataset: "fpl:core" as const,
+		seasonCode: context.currentSeason.seasonCode,
+	};
+	if (mode === "publication") {
+		const publication = readDataPublication(context.redis, scope, CORE_PUBLICATION_ITEMS);
+		const pin: CorePublicationPin = {
+			publication,
+			manifest: publication.then((value) => value?.manifest ?? null),
+		};
+		corePublicationPinMemo.set(requestScope, pin);
+		return pin;
+	}
+
+	const pin: CorePublicationPin = {
+		manifest: readDataPublicationManifest(context.redis, scope),
+	};
+	corePublicationPinMemo.set(requestScope, pin);
+	return pin;
+};
+
+const readPinnedCorePublicationItems = async (
+	context: GraphQLContext,
+	requiredItemNames: readonly string[]
+): Promise<DataPublication | null> => {
+	const pin = reserveCorePublicationPin(context, "manifest");
+	if (pin.publication) {
+		const publication = await pin.publication;
+		if (publication) return publication;
+	}
+	const manifest = await pin.manifest;
+	return manifest
+		? readDataPublicationItemsAtManifest(context.redis, manifest, requiredItemNames)
+		: null;
+};
 
 type LivePublicationPin = {
 	manifest: Promise<DataPublicationManifest | null>;
@@ -1669,13 +1728,10 @@ export const getCoreDataSnapshot = (context: GraphQLContext): Promise<CoreDataSn
 		return existing;
 	}
 	context.coreSnapshotMemoStatus = "miss";
+	const publication = reserveCorePublicationPin(context, "publication").publication!;
 	const load = (async (): Promise<CoreDataSnapshot> => {
-		const publication = await readDataPublication(
-			context.redis,
-			{ dataset: "fpl:core", seasonCode: context.currentSeason.seasonCode },
-			CORE_PUBLICATION_ITEMS
-		);
-		const snapshot = publication ? publicationCoreSnapshot(publication) : null;
+		const published = await publication;
+		const snapshot = published ? publicationCoreSnapshot(published) : null;
 		if (snapshot) return snapshot;
 		context.logger.warn(
 			{ season: context.currentSeason.seasonCode },
@@ -1712,11 +1768,7 @@ export const getCoreFixtureSnapshot = (context: GraphQLContext): Promise<CoreFix
 	const existing = coreFixtureSnapshotMemo.get(requestScope);
 	if (existing) return existing;
 	const load = (async (): Promise<CoreFixtureSnapshot> => {
-		const publication = await readDataPublicationItems(
-			context.redis,
-			{ dataset: "fpl:core", seasonCode: context.currentSeason.seasonCode },
-			["teams", "fixtures"]
-		);
+		const publication = await readPinnedCorePublicationItems(context, ["teams", "fixtures"]);
 		const snapshot = publication ? publicationCoreFixtureSnapshot(publication) : null;
 		if (snapshot) return snapshot;
 		context.logger.warn(
@@ -1734,11 +1786,7 @@ export const getCoreEventSnapshot = (context: GraphQLContext): Promise<CoreEvent
 	const existing = coreEventSnapshotMemo.get(requestScope);
 	if (existing) return existing;
 	const load = (async (): Promise<CoreEventSnapshot> => {
-		const publication = await readDataPublicationItems(
-			context.redis,
-			{ dataset: "fpl:core", seasonCode: context.currentSeason.seasonCode },
-			["events", "currentEventId"]
-		);
+		const publication = await readPinnedCorePublicationItems(context, ["events", "currentEventId"]);
 		const snapshot = publication ? publicationCoreEventSnapshot(publication) : null;
 		if (snapshot) return snapshot;
 		context.logger.warn(
