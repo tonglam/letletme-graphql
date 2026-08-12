@@ -28,7 +28,6 @@ type CatalogRow = {
 	updated_at: string | Date;
 	latest_event_id: number;
 	total_entries: number;
-	selection_revision?: string | Date | null;
 	catalog_revision: string | Date;
 	snapshot_revision?: string | Date | null;
 	readiness_revision?: string | Date | null;
@@ -48,7 +47,6 @@ const CATALOG_SQL = `
 		catalog.updated_at,
 		snapshot.event_id AS latest_event_id,
 		snapshot.total_entries,
-		snapshot.selection_revision,
 		MAX(catalog.updated_at) OVER () AS catalog_revision,
 		MAX(tournament.updated_at) OVER () AS snapshot_revision,
 		(
@@ -67,8 +65,7 @@ const CATALOG_SQL = `
 	JOIN LATERAL (
 		SELECT
 			stats.event_id,
-			MAX(stats.total_entries)::integer AS total_entries,
-			MAX(stats.updated_at) AS selection_revision
+			MAX(stats.total_entries)::integer AS total_entries
 		FROM reporting.tournament_selection_stats stats
 		WHERE stats.season_id = catalog.season_id
 			AND stats.tournament_id = catalog.tournament_id
@@ -105,6 +102,15 @@ const iso = (value: string | Date): string => {
 	if (Number.isNaN(date.getTime())) throw new Error("Invalid public league revision timestamp");
 	return date.toISOString();
 };
+
+const catalogSnapshotRevision = (rows: readonly CatalogRow[]): string =>
+	rows
+		.map(
+			(row) =>
+				`${Number(row.tournament_id)}:${Number(row.latest_event_id)}:${Number(row.total_entries)}`
+		)
+		.sort()
+		.join(",");
 
 const parseCachedStats = (value: string): TournamentSelectionStats | null | undefined => {
 	try {
@@ -151,22 +157,13 @@ export const createPublicLeagueTrendsRepository = (
 			.filter((value): value is string => value !== null)
 			.sort()
 			.at(-1);
-		const selectionRevision = rows
-			.map((row) =>
-				row.selection_revision === undefined || row.selection_revision === null
-					? null
-					: iso(row.selection_revision)
-			)
-			.filter((value): value is string => value !== null)
-			.sort()
-			.at(-1);
 		const readinessRevision =
 			rows[0]!.readiness_revision === undefined || rows[0]!.readiness_revision === null
 				? "none"
 				: iso(rows[0]!.readiness_revision);
 		const cacheKey = gqlCacheKey(
 			context,
-			`public-league-trends:${revision}:${snapshotRevision ?? "none"}:${selectionRevision ?? "none"}:${readinessRevision}`
+			`public-league-trends:${revision}:${snapshotRevision ?? "none"}:${catalogSnapshotRevision(rows)}:${readinessRevision}`
 		);
 		try {
 			const cached = await context.redis.get(cacheKey);

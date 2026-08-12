@@ -293,5 +293,11 @@ jobs:
       - name: Validate startup against the real PG15 catalog
         run: bun run contract:check
 
-      - name: Exercise reader and fail-closed contract cases
-        run: bun test tests/infra/read-model-client.test.ts tests/infra/database-contract.test.ts
+      - name: Exercise reader, resolver, and fail-closed contract cases
+        env:
+          RUN_DATABASE_CONTRACT_INTEGRATION: "1"
+        run: >-
+          bun test
+          tests/infra/read-model-client.test.ts
+          tests/infra/database-contract.test.ts
+          tests/domains/public-league-trends/database-contract.integration.test.ts
