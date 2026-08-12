@@ -40,6 +40,42 @@ describe("production deployment workflow", () => {
 		expect(workflow).not.toContain("schema" + "Version");
 	});
 
+	test("uses the complete GraphQL environment URL without password rewriting", () => {
+		expect(workflow).toContain("GRAPHQL_ENV: ${{ secrets.GRAPHQL_ENV }}");
+		expect(workflow).toContain('printf \'%s\' "$GRAPHQL_ENV" > "$next_env"');
+		expect(workflow).toContain('username != "letletme_graphql_runtime"');
+		expect(workflow).toContain("pooler\\.supabase\\.com");
+		expect(workflow).toContain("letletme_graphql_runtime\\.[^.]+");
+		expect(workflow).toContain("if not parsed.password:");
+		expect(workflow).not.toContain("GRAPHQL_RUNTIME_DB_PASSWORD");
+		expect(workflow).not.toContain("env_path.write_text");
+		expect(workflow).not.toContain("urlunsplit");
+	});
+
+	test("emits structured timing for every remote deployment phase", () => {
+		for (const stage of [
+			"checkout",
+			"envValidate",
+			"pull",
+			"preflight",
+			"replace",
+			"serviceReady",
+			"smoke",
+			"finalize",
+		]) {
+			expect(workflow).toContain(`start_stage ${stage}`);
+		}
+		expect(workflow).toContain('"event":"deploy_stage_timing"');
+		expect(workflow).toContain('"outcome":"failed"');
+		expect(workflow).toContain("date +%s%3N");
+		expect(workflow.indexOf("trap fail_without_rollback_on_exit EXIT")).toBeLessThan(
+			workflow.indexOf("start_stage checkout")
+		);
+		expect(workflow.indexOf("trap rollback_graphql_on_exit EXIT")).toBeGreaterThan(
+			workflow.indexOf("start_stage preflight")
+		);
+	});
+
 	test("does not hardcode retired generation-prefixed migration filenames", () => {
 		const generationPrefix = "v";
 		expect(workflow).not.toMatch(
