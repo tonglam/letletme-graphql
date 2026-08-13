@@ -125,8 +125,6 @@ jobs:
               if [ -n "${previous_env:-}" ]; then
                 rm -f "$previous_env"
               fi
-              if [ "$original_status" -ne 0 ] && [ "${deployment_started:-false}" = true ] && [ "${deployment_committed:-false}" = false ]; then
-              fi
               exit "$original_status"
             }
             trap fail_without_rollback_on_exit EXIT
