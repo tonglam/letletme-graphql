@@ -97,6 +97,7 @@ jobs:
             env_promoted=false
             previous_env=""
             deployment_run_id="${RUN_ID:-graphql-${DEPLOY_SHA}}-${RUN_ATTEMPT:-1}"
+            maintenance_controller="$VPS_WORKDIR/scripts/vps-maintenance.sh"
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
             active_stage=""
@@ -129,7 +130,7 @@ jobs:
                 rm -f "$previous_env"
               fi
               if [ "$original_status" -ne 0 ] && [ "${deployment_started:-false}" = true ] && [ "${deployment_committed:-false}" = false ]; then
-                VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment fail \
+                VPS_MAINTENANCE_LOCK_HELD=1 "$maintenance_controller" deployment fail \
                   --service=graphql --run-id="$deployment_run_id" --reason="deploy exit $original_status" >/dev/null || true
               fi
               exit "$original_status"
@@ -164,6 +165,7 @@ jobs:
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+            test -x "$maintenance_controller"
             finish_stage
 
             start_stage envValidate
@@ -226,7 +228,7 @@ jobs:
               docker image inspect "$old_image" >/dev/null
             fi
 
-            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment begin \
+            VPS_MAINTENANCE_LOCK_HELD=1 "$maintenance_controller" deployment begin \
               --service=graphql --run-id="$deployment_run_id" --old-image="$old_image" --new-image="$IMAGE_REF" >/dev/null
             deployment_started=true
 
@@ -298,7 +300,7 @@ jobs:
                 rm -f "$previous_env"
               fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ] && [ "$controller_committed" = false ]; then
-                VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment fail \
+                VPS_MAINTENANCE_LOCK_HELD=1 "$maintenance_controller" deployment fail \
                   --service=graphql --run-id="$deployment_run_id" --reason="deploy exit $original_status" >/dev/null || true
               fi
               rm -f "$next_env"
@@ -416,7 +418,7 @@ jobs:
             chmod 600 .env.deploy
             env_promoted=true
 
-            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment commit \
+            VPS_MAINTENANCE_LOCK_HELD=1 "$maintenance_controller" deployment commit \
               --service=graphql --run-id="$deployment_run_id" >/dev/null
             controller_committed=true
             deployment_committed=true
@@ -428,7 +430,7 @@ jobs:
               rm -f "$previous_env"
             fi
             finish_stage
-            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance cleanup \
+            VPS_MAINTENANCE_LOCK_HELD=1 "$maintenance_controller" cleanup \
               --mode=deploy --service=graphql || true
             docker system df || true
             rollback_armed=false
