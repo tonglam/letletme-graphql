@@ -86,6 +86,11 @@ jobs:
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV
           script: |
             set -euo pipefail
+            exec 9>/run/letletme-vps-ops/maintenance.lock
+            flock -n 9 || { echo "another VPS deployment or cleanup is running" >&2; exit 75; }
+            deployment_started=false
+            deployment_committed=false
+            deployment_run_id="${GITHUB_RUN_ID:-graphql-${DEPLOY_SHA}}"
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
             active_stage=""
@@ -146,6 +151,9 @@ jobs:
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+            APP_ENV_FILE=.env.deploy APP_IMAGE="$IMAGE_REF" docker compose config --quiet
+            APP_ENV_FILE=.env.deploy APP_IMAGE="$IMAGE_REF" docker compose config | grep -q 'max-size: 20m'
+            APP_ENV_FILE=.env.deploy APP_IMAGE="$IMAGE_REF" docker compose config | grep -q 'max-file: "5"\|max-file: '\''5'\''\|max-file: 5'
             finish_stage
 
             start_stage envValidate
@@ -200,6 +208,10 @@ jobs:
               docker image inspect "$old_image" >/dev/null
             fi
 
+            deployment_started=true
+            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment begin \
+              --service=graphql --run-id="$deployment_run_id" --old-image="$old_image" --new-image="$IMAGE_REF" >/dev/null
+
             start_stage pull
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose pull graphql
             finish_stage
@@ -249,6 +261,10 @@ jobs:
                   APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
                     docker compose rm --stop --force graphql || true
                 fi
+              fi
+              if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
+                VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment fail \
+                  --service=graphql --run-id="$deployment_run_id" --reason="deploy exit $original_status" >/dev/null || true
               fi
               rm -f "$next_env"
               exit "$original_status"
@@ -369,6 +385,12 @@ jobs:
             fi
             finish_stage
 
+            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment commit \
+              --service=graphql --run-id="$deployment_run_id" >/dev/null
+            deployment_committed=true
+            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance cleanup \
+              --mode=deploy --service=graphql || true
+            docker system df
             rollback_armed=false
             trap - EXIT
             scoped_dangling_images=$(docker image ls --quiet \
