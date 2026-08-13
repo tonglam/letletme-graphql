@@ -15,14 +15,35 @@ const deskQuery = `
 		gameweekDesk(eventId: $eventId) {
 			season coreRevision liveRevision anchorEventId eventId currentEventId nextEventId
 			isPreseason lifecycle deadlineTime publishedAt overviewState boardsState
-			overview { averagePoints highestPoints }
-			dreamTeam { id position totalPoints }
+			overview { averagePoints highestPoints mostSelected { id teamShortName } }
+			dreamTeam { id position teamShortName totalPoints }
 			hauls { id position totalPoints }
 		}
 	}
 `;
 
 describe("gameweekDesk", () => {
+	it("keeps the current gameweek scheduled until a fixture starts", async () => {
+		const core = buildTestCoreData(1);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
+		const result = await graphql({
+			schema,
+			source: deskQuery,
+			variableValues: { eventId: 1 },
+			contextValue: buildSnapshotContext(redis),
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.gameweekDesk).toMatchObject({
+			eventId: 1,
+			lifecycle: "SCHEDULED",
+			overviewState: "PENDING",
+			boardsState: "PENDING",
+			dreamTeam: [],
+			hauls: [],
+		});
+	});
+
 	it("returns a scheduled preseason desk without live reads or false unavailable boards", async () => {
 		const core = buildTestCoreData(null);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
@@ -87,6 +108,48 @@ describe("gameweekDesk", () => {
 			overviewState: "PENDING",
 			boardsState: "AVAILABLE",
 			dreamTeam: [{ id: core.players[0]!.id, position: "GOALKEEPER" }],
+		});
+	});
+
+	it("uses historical player teams for an earlier gameweek", async () => {
+		const baseCore = buildTestCoreData(2);
+		const player = baseCore.players[0]!;
+		const core = buildTestCoreData(2, {
+			events: baseCore.events.map((event) =>
+				event.id === 1
+					? {
+							...event,
+							averageEntryScore: 48,
+							mostSelected: player.id,
+						}
+					: event
+			),
+			fixtures: baseCore.fixtures.map((fixture, index) =>
+				fixture.eventId === 1 && index === 0 ? { ...fixture, started: true } : fixture
+			),
+		});
+		const eventLives = buildTestEventLives(core, 1).map((row, index) =>
+			index === 0 ? { ...row, inDreamTeam: true } : row
+		);
+		const redis = new TestRedis(
+			buildCorePublication("2627", 7, core),
+			buildLivePublication(core, 1, "2627", 8, { state: "live", eventLives })
+		);
+		const result = await graphql({
+			schema,
+			source: deskQuery,
+			variableValues: { eventId: 1 },
+			contextValue: buildSnapshotContext(redis, {
+				databaseQuery: async () => ({
+					rows: [{ player_code: player.code, team_id: 2 }],
+				}),
+			}),
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.gameweekDesk).toMatchObject({
+			overview: { mostSelected: { id: player.id, teamShortName: "T02" } },
+			dreamTeam: [{ id: player.id, teamShortName: "T02" }],
 		});
 	});
 

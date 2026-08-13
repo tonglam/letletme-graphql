@@ -95,7 +95,7 @@ const isScheduledLifecycle = (
 ): boolean => {
 	if (event.finished || hasStartedFixture(fixtures)) return false;
 	const nextEventId = positiveEventId(context.nextEventId);
-	return event.isNext || (nextEventId !== null && eventId >= nextEventId);
+	return event.isCurrent || event.isNext || (nextEventId !== null && eventId >= nextEventId);
 };
 
 const lifecycleFromLiveState = (
@@ -105,6 +105,7 @@ const lifecycleFromLiveState = (
 	context: CoreEventContext,
 	eventId: number
 ): GameweekLifecycleState => {
+	if (meta?.state === "scheduled") return "SCHEDULED";
 	if (meta?.state === "settled" || (event.finished && event.dataChecked)) return "SETTLED";
 	if (meta?.state === "live") return "PROVISIONAL";
 	if (isScheduledLifecycle(event, fixtures, context, eventId)) return "SCHEDULED";
@@ -128,7 +129,8 @@ const overviewFactsPresent = (event: Event): boolean =>
 const mapOverviewPlayer = (
 	playerId: number | null,
 	playersById: ReadonlyMap<number, Player>,
-	teamNames: ReadonlyMap<number, string>
+	teamNames: ReadonlyMap<number, string>,
+	eventTeamIds: ReadonlyMap<number, number>
 ): GameweekOverviewPlayer | null => {
 	if (playerId === null) return null;
 	const player = playersById.get(playerId);
@@ -136,21 +138,32 @@ const mapOverviewPlayer = (
 	return {
 		id: player.id,
 		webName: player.webName,
-		teamShortName: teamNames.get(player.teamId) ?? null,
+		teamShortName: teamNames.get(eventTeamIds.get(player.id) ?? player.teamId) ?? null,
 	};
 };
 
 const mapOverview = (
 	event: Event,
 	playersById: ReadonlyMap<number, Player>,
-	teamNames: ReadonlyMap<number, string>
+	teamNames: ReadonlyMap<number, string>,
+	eventTeamIds: ReadonlyMap<number, number>
 ): GameweekOverview => ({
 	averagePoints: event.averageEntryScore,
 	highestPoints: event.highestScore,
-	mostCaptained: mapOverviewPlayer(event.mostCaptained, playersById, teamNames),
-	mostViceCaptained: mapOverviewPlayer(event.mostViceCaptained, playersById, teamNames),
-	mostSelected: mapOverviewPlayer(event.mostSelected, playersById, teamNames),
-	mostTransferredIn: mapOverviewPlayer(event.mostTransferredIn, playersById, teamNames),
+	mostCaptained: mapOverviewPlayer(event.mostCaptained, playersById, teamNames, eventTeamIds),
+	mostViceCaptained: mapOverviewPlayer(
+		event.mostViceCaptained,
+		playersById,
+		teamNames,
+		eventTeamIds
+	),
+	mostSelected: mapOverviewPlayer(event.mostSelected, playersById, teamNames, eventTeamIds),
+	mostTransferredIn: mapOverviewPlayer(
+		event.mostTransferredIn,
+		playersById,
+		teamNames,
+		eventTeamIds
+	),
 	chipsPlayed: event.chipPlays
 		? {
 				benchBoost: chipCount(event.chipPlays, "bboost"),
@@ -164,7 +177,8 @@ const mapOverview = (
 const mapBoardPlayer = (
 	performance: LivePerformance,
 	playersById: ReadonlyMap<number, Player>,
-	teamNames: ReadonlyMap<number, string>
+	teamNames: ReadonlyMap<number, string>,
+	eventTeamIds: ReadonlyMap<number, number>
 ): GameweekBoardPlayer | null => {
 	const player = playersById.get(performance.playerId);
 	if (!player) return null;
@@ -179,7 +193,7 @@ const mapBoardPlayer = (
 					: player.position === Position.MIDFIELDER
 						? "MIDFIELDER"
 						: "FORWARD",
-		teamShortName: teamNames.get(player.teamId) ?? "—",
+		teamShortName: teamNames.get(eventTeamIds.get(player.id) ?? player.teamId) ?? "—",
 		price: player.price,
 		minutes: performance.minutes,
 		goalsScored: performance.goalsScored,
@@ -194,7 +208,8 @@ const mapAndSortBoards = (
 	performances: readonly LivePerformance[],
 	order: "position" | "points",
 	playersById: ReadonlyMap<number, Player>,
-	teamNames: ReadonlyMap<number, string>
+	teamNames: ReadonlyMap<number, string>,
+	eventTeamIds: ReadonlyMap<number, number>
 ): GameweekBoardPlayer[] => {
 	const positionOrder: Record<GameweekBoardPlayer["position"], number> = {
 		GOALKEEPER: 0,
@@ -203,7 +218,7 @@ const mapAndSortBoards = (
 		FORWARD: 3,
 	};
 	return performances
-		.map((performance) => mapBoardPlayer(performance, playersById, teamNames))
+		.map((performance) => mapBoardPlayer(performance, playersById, teamNames, eventTeamIds))
 		.filter((player): player is GameweekBoardPlayer => player !== null)
 		.sort((left, right) => {
 			if (order === "points") {
@@ -219,6 +234,54 @@ const mapAndSortBoards = (
 
 const uniquePositiveIds = (ids: Array<number | null>): number[] =>
 	Array.from(new Set(ids.filter((id): id is number => positiveEventId(id) !== null)));
+
+const resolveHistoricalTeamIds = async (
+	context: GraphQLContext,
+	playersById: ReadonlyMap<number, Player>,
+	eventId: number,
+	currentEventId: number | null
+): Promise<Map<number, number>> => {
+	const fallback = new Map(
+		Array.from(playersById.values()).map((player) => [player.id, player.teamId] as const)
+	);
+	if (playersById.size === 0 || currentEventId === null || eventId >= currentEventId)
+		return fallback;
+	const playerCodes = Array.from(playersById.values())
+		.map((player) => player.code)
+		.filter((code) => Number.isSafeInteger(code) && code > 0);
+	if (playerCodes.length === 0) return fallback;
+	try {
+		const result = await context.database.query<{ player_code: number; team_id: number }>(
+			`SELECT DISTINCT ON (player_code) player_code, team_id
+			 FROM fpl.player_fixture_stats
+			 WHERE season_id = $1
+			   AND player_code = ANY($2::integer[])
+			   AND event_id <= $3
+			 ORDER BY player_code, event_id DESC, fixture_id DESC`,
+			[context.currentSeason.seasonId, playerCodes, eventId]
+		);
+		const teamByCode = new Map(
+			result.rows
+				.filter(
+					(row) =>
+						Number.isSafeInteger(row.player_code) &&
+						Number.isSafeInteger(row.team_id) &&
+						row.team_id > 0
+				)
+				.map((row) => [row.player_code, row.team_id] as const)
+		);
+		for (const player of playersById.values()) {
+			const eventTeamId = teamByCode.get(player.code);
+			if (eventTeamId !== undefined) fallback.set(player.id, eventTeamId);
+		}
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, eventId },
+			"Failed to resolve historical gameweek player teams"
+		);
+	}
+	return fallback;
+};
 
 const toGraphQLError = (message: string, code: string): GraphQLError =>
 	new GraphQLError(message, { extensions: { code } });
@@ -277,7 +340,13 @@ export const gameweekService = {
 				]);
 				const players = await playersService.getPlayersByIds(context, ids);
 				const playersById = new Map(players.map((player) => [player.id, player] as const));
-				overview = mapOverview(event, playersById, teamNames);
+				const eventTeamIds = await resolveHistoricalTeamIds(
+					context,
+					playersById,
+					eventId,
+					eventContext.currentEventId
+				);
+				overview = mapOverview(event, playersById, teamNames, eventTeamIds);
 				overviewState = "AVAILABLE";
 			} catch (error) {
 				context.logger.warn({ err: error, eventId }, "Gameweek overview is unavailable");
@@ -300,8 +369,20 @@ export const gameweekService = {
 				);
 				const players = await playersService.getPlayersByIds(context, playerIds);
 				const playersById = new Map(players.map((player) => [player.id, player] as const));
-				dreamTeam = mapAndSortBoards(boards.dreamTeam, "position", playersById, teamNames);
-				hauls = mapAndSortBoards(boards.hauls, "points", playersById, teamNames);
+				const eventTeamIds = await resolveHistoricalTeamIds(
+					context,
+					playersById,
+					eventId,
+					eventContext.currentEventId
+				);
+				dreamTeam = mapAndSortBoards(
+					boards.dreamTeam,
+					"position",
+					playersById,
+					teamNames,
+					eventTeamIds
+				);
+				hauls = mapAndSortBoards(boards.hauls, "points", playersById, teamNames, eventTeamIds);
 				const meta = boards.meta;
 				liveRevision = meta.revision;
 				publishedAt = meta.publishedAt;
