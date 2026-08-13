@@ -156,9 +156,6 @@ jobs:
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
             test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
-            APP_ENV_FILE=.env.deploy APP_IMAGE="$IMAGE_REF" docker compose config --quiet
-            APP_ENV_FILE=.env.deploy APP_IMAGE="$IMAGE_REF" docker compose config | grep -q 'max-size: 20m'
-            APP_ENV_FILE=.env.deploy APP_IMAGE="$IMAGE_REF" docker compose config | grep -Eq 'max-file: "5"$'
             finish_stage
 
             start_stage envValidate
@@ -202,6 +199,9 @@ jobs:
             if not parsed.password:
                 raise SystemExit("DATABASE_URL must include the GraphQL runtime credential")
             PY
+            APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose config --quiet
+            APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose config | grep -q 'max-size: 20m'
+            APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose config | grep -Eq 'max-file: "5"$'
             finish_stage
 
             old_container=$(APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
@@ -237,7 +237,7 @@ jobs:
                   "$active_stage" "$failed_duration_ms"
                 active_stage=""
               fi
-              if [ "$rollback_armed" = true ]; then
+              if [ "$rollback_armed" = true ] && [ "$deployment_committed" = false ]; then
                 if [ -n "$old_image" ]; then
                   echo "GraphQL deployment failed; restoring the previous image"
                   rollback_env="$next_env"
@@ -382,8 +382,6 @@ jobs:
             finish_stage
 
             start_stage finalize
-            mv "$next_env" .env.deploy
-            chmod 600 .env.deploy
             if [ -n "$old_image" ]; then
               printf '%s\n' "$old_image" > "$HOME/.letletme-graphql-previous-image"
               chmod 600 "$HOME/.letletme-graphql-previous-image"
@@ -393,6 +391,8 @@ jobs:
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment commit \
               --service=graphql --run-id="$deployment_run_id" >/dev/null
             deployment_committed=true
+            mv "$next_env" .env.deploy
+            chmod 600 .env.deploy
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance cleanup \
               --mode=deploy --service=graphql || true
             docker system df || true
