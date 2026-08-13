@@ -37,6 +37,8 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain('--filter "reference=${image_name}:*"');
 		expect(workflow).toContain("--filter dangling=true");
 		expect(workflow).not.toContain("docker image prune");
+		expect(workflow).toContain("flock -w 300 9");
+		expect(workflow).not.toContain("/usr/local/libexec/vps-maintenance");
 		expect(workflow).not.toContain("schema" + "Version");
 	});
 
