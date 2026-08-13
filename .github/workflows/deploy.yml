@@ -213,9 +213,9 @@ jobs:
               docker image inspect "$old_image" >/dev/null
             fi
 
-            deployment_started=true
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment begin \
               --service=graphql --run-id="$deployment_run_id" --old-image="$old_image" --new-image="$IMAGE_REF" >/dev/null
+            deployment_started=true
 
             start_stage pull
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose pull graphql
