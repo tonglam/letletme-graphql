@@ -33,6 +33,7 @@ import {
 } from "./http/security";
 import {
 	GRAPHQL_GLOBAL_ADMISSION_SUBJECT,
+	GRAPHQL_SHARED_PUBLIC_RATE_LIMIT,
 	graphQLIngressFailure,
 	graphQLMethodFailure,
 	graphQLUsesSharedPublicBudget,
@@ -44,7 +45,6 @@ import {
 } from "./http/request-timing";
 
 const GRAPHQL_RATE_LIMIT = 120;
-const GRAPHQL_SERVICE_RATE_LIMIT = 600;
 const RATE_LIMIT_WINDOW_SECONDS = 60;
 const GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT = 25 * RATE_LIMIT_WINDOW_SECONDS;
 const currentSeasonProvider = new CurrentSeasonProvider();
@@ -353,7 +353,7 @@ const startServer = async (): Promise<void> => {
 						return jsonError(400, limits.code, limits.message, corsHeaders);
 					}
 					const rateLimit = graphQLUsesSharedPublicBudget(ingress)
-						? GRAPHQL_SERVICE_RATE_LIMIT
+						? GRAPHQL_SHARED_PUBLIC_RATE_LIMIT
 						: GRAPHQL_RATE_LIMIT;
 					const admissionFailure = await requestTiming.measure("admission", () =>
 						enforceGraphQLAdmission({
