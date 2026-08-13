@@ -304,6 +304,9 @@ jobs:
               elif [ "$env_promoted" = false ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
                 rm -f "$previous_env"
               fi
+              if [ "$controller_committed" = true ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
+                rm -f "$previous_env"
+              fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ] && [ "$controller_committed" = false ]; then
                 VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment fail \
                   --service=graphql --run-id="$deployment_run_id" --reason="deploy exit $original_status" >/dev/null || true
