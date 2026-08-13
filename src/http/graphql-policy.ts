@@ -59,8 +59,8 @@ export const graphQLUsesSharedPublicBudget = (ingress: GraphQLIngress): boolean 
 	(ingress.class === "signed" && ingress.subject === WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT);
 
 /**
- * Request-count admission runs before any principal verification. The global
- * and caller buckets are charged atomically with a fixed cost of one.
+ * Request-count buckets are charged atomically with a fixed cost of one.
+ * The caller-specific weighted bucket is added after principal resolution.
  */
 export const graphQLPreAuthRateLimitChecks = (
 	ingress: GraphQLIngress,
