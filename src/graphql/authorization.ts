@@ -52,6 +52,7 @@ const publicFields = new Set([
 	"coreEventContext",
 	"playerStatsBootstrap",
 	"playerStatsDesk",
+	"gameweekDesk",
 	"fixtures",
 	"eventFixtures",
 	"liveScores",

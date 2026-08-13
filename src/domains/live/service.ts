@@ -2,7 +2,6 @@ import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import { getCurrentEventId } from "../../infra/event";
 import { calcElementLivePoints } from "../entry-live/calc-service";
-import { playersRepository } from "../players/repository";
 import { loadLiveBonusByPlayerId } from "./bonus-cache";
 import type {
 	EventLive,
@@ -12,9 +11,15 @@ import type {
 	LiveScoresFilter,
 } from "./repository";
 import { applyLiveScoresFilter, liveRepository } from "./repository";
-import { withLiveSnapshotConsistency } from "./snapshot-meta";
+import { loadLiveSnapshotMeta, withLiveSnapshotConsistency } from "./snapshot-meta";
 
 export const MAX_LIVE_EXPLAIN_BATCH = 15;
+
+export type GameweekBoards = {
+	dreamTeam: LivePerformance[];
+	hauls: LivePerformance[];
+	meta: NonNullable<Awaited<ReturnType<typeof loadLiveSnapshotMeta>>>;
+};
 
 export const assertValidLiveExplainBatch = (elementIds: readonly number[]): void => {
 	if (elementIds.length > MAX_LIVE_EXPLAIN_BATCH) {
@@ -35,7 +40,6 @@ export const assertValidLiveExplainBatch = (elementIds: readonly number[]): void
 
 const withCalculatedTotalPoints = (
 	live: LivePerformance,
-	elementType: number | undefined,
 	bonusOverride?: number
 ): LivePerformance => ({
 	...live,
@@ -53,27 +57,12 @@ const calculateTotalsForPerformances = async (
 	}
 
 	const targetEventId = eventId ?? performances[0]?.eventId;
-	const playerIds = [
-		...new Set(
-			performances
-				.map((performance) => performance.playerId)
-				.filter((id) => Number.isSafeInteger(id) && id > 0)
-		),
-	];
-	const [bonusByPlayerId, players] = await Promise.all([
-		targetEventId
-			? loadLiveBonusByPlayerId(context, targetEventId)
-			: Promise.resolve(new Map<number, number>()),
-		playersRepository.getPlayersByIds(context, playerIds),
-	]);
-	const playersById = new Map(players.map((player) => [player.id, player]));
+	const bonusByPlayerId = targetEventId
+		? await loadLiveBonusByPlayerId(context, targetEventId)
+		: new Map<number, number>();
 
 	return performances.map((performance) =>
-		withCalculatedTotalPoints(
-			performance,
-			playersById.get(performance.playerId)?.position,
-			bonusByPlayerId.get(performance.playerId)
-		)
+		withCalculatedTotalPoints(performance, bonusByPlayerId.get(performance.playerId))
 	);
 };
 
@@ -99,17 +88,10 @@ export const liveService = {
 	): Promise<LivePerformance | null> {
 		const targetEventId = eventId ?? (await getCurrentEventId(context)) ?? undefined;
 		if (!targetEventId) return null;
-		const [targeted, player] = await Promise.all([
-			liveRepository.getTargetedLiveRead(context, targetEventId, [playerId]),
-			playersRepository.getPlayerById(context, playerId),
-		]);
+		const targeted = await liveRepository.getTargetedLiveRead(context, targetEventId, [playerId]);
 		const performance = targeted.performances.find((value) => value.playerId === playerId);
 		if (!performance) return null;
-		return withCalculatedTotalPoints(
-			performance,
-			player?.position,
-			targeted.effectiveBonusByPlayer.get(playerId)
-		);
+		return withCalculatedTotalPoints(performance, targeted.effectiveBonusByPlayer.get(playerId));
 	},
 
 	async getEventLive(context: GraphQLContext, eventId: number): Promise<EventLive> {
@@ -122,6 +104,24 @@ export const liveService = {
 					eventLive.performances,
 					eventId
 				),
+			};
+		});
+	},
+
+	async getGameweekBoards(context: GraphQLContext, eventId: number): Promise<GameweekBoards> {
+		return withLiveSnapshotConsistency(context, eventId, async () => {
+			const meta = await loadLiveSnapshotMeta(context, eventId);
+			if (!meta) throw new Error(`Live snapshot metadata is unavailable for event ${eventId}`);
+			const performances = await liveRepository.getAllLivePerformances(context, eventId);
+			const calculated = await calculateTotalsForPerformances(
+				context,
+				Array.from(performances.values()),
+				eventId
+			);
+			return {
+				meta,
+				dreamTeam: applyLiveScoresFilter(calculated, { inDreamTeam: true }),
+				hauls: applyLiveScoresFilter(calculated, { minTotalPoints: 10 }),
 			};
 		});
 	},

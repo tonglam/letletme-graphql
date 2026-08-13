@@ -18,6 +18,13 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rootFields: ["eventFixtures"] });
 	});
 
+	it("charges one bounded gameweek desk root instead of separate live roots", () => {
+		const result = validateGraphQLRequestLimits({
+			query: "query { gameweekDesk(eventId: 1) { eventId dreamTeam { id } hauls { id } } }",
+		});
+		expect(result).toMatchObject({ ok: true, rootFields: ["gameweekDesk"], rateLimitCostUnits: 5 });
+	});
+
 	it("allows standard introspection where Apollo has enabled it", () => {
 		const result = validateGraphQLRequestLimits({ query: getIntrospectionQuery() }, schema);
 		expect(result).toMatchObject({

@@ -459,6 +459,7 @@ const startServer = async (): Promise<void> => {
 						"playerStatsBootstrap",
 						"playersForPicker",
 						"playerStatsDesk",
+						"gameweekDesk",
 					]);
 					const lightweightCoreRead =
 						limits.shape === "query" &&
