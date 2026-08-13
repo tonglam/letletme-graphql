@@ -11,6 +11,8 @@ describe("production deployment workflow", () => {
 			workflow.indexOf("git clone https://github.com/tonglam/letletme-graphql.git")
 		).toBeLessThan(workflow.indexOf("git fetch origin main"));
 		expect(workflow).toContain('test "$(git rev-parse origin/main)" = "$DEPLOY_SHA"');
+		expect(workflow).toContain("flock -w 300 9");
+		expect(workflow).not.toContain("/usr/local/libexec/vps-maintenance");
 	});
 
 	test("arms rollback before replacing the running container", () => {
@@ -36,6 +38,9 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain("image_name=${IMAGE_REF%@*}");
 		expect(workflow).toContain('--filter "reference=${image_name}:*"');
 		expect(workflow).toContain("--filter dangling=true");
+		expect(workflow).toContain("docker image ls --digests");
+		expect(workflow).toContain("previous_image");
+		expect(workflow).toContain('docker image rm "$digest_ref"');
 		expect(workflow).not.toContain("docker image prune");
 		expect(workflow).not.toContain("letletme-vps-ops");
 		expect(workflow).not.toContain("flock -w 300 9");
