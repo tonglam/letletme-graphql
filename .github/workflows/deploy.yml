@@ -282,7 +282,12 @@ jobs:
                   APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
                     docker compose rm --stop --force graphql || true
                   if [ "$env_promoted" = true ]; then
-                    rm -f .env.deploy
+                    if [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
+                      mv "$previous_env" .env.deploy
+                      chmod 600 .env.deploy
+                    else
+                      rm -f .env.deploy
+                    fi
                   fi
                 fi
               fi
