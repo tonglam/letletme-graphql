@@ -32,6 +32,12 @@ const principalSubject = (principal: Principal): string =>
 
 export const GRAPHQL_GLOBAL_ADMISSION_SUBJECT = "all-graphql-traffic";
 
+// One uncached Home render currently costs 41 weighted units. The production
+// acceptance contract sends 20 concurrent renders (820 units), so the trusted
+// Web public ingress needs bounded burst headroom without changing the smaller
+// per-user budget or the separate global request-admission ceiling.
+export const GRAPHQL_SHARED_PUBLIC_RATE_LIMIT = 1_200;
+
 export const graphQLUsesSharedPublicBudget = (ingress: GraphQLIngress): boolean =>
 	ingress.class === "service" ||
 	(ingress.class === "signed" && ingress.subject === WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT);

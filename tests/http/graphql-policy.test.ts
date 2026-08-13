@@ -5,6 +5,7 @@ import {
 } from "../../src/infra/ingress-context";
 import {
 	graphQLAdmissionSubjects,
+	GRAPHQL_SHARED_PUBLIC_RATE_LIMIT,
 	graphQLIngressFailure,
 	graphQLMethodFailure,
 	graphQLUsesSharedPublicBudget,
@@ -82,5 +83,11 @@ describe("GraphQL transport and ingress policy", () => {
 		expect(graphQLUsesSharedPublicBudget(service)).toBe(true);
 		expect(graphQLUsesSharedPublicBudget(publicRsc)).toBe(true);
 		expect(graphQLUsesSharedPublicBudget(otherSigned)).toBe(false);
+	});
+
+	it("keeps enough bounded shared-public budget for twenty uncached Home renders", () => {
+		const homeWeightedCost = 41;
+		expect(GRAPHQL_SHARED_PUBLIC_RATE_LIMIT).toBeGreaterThanOrEqual(homeWeightedCost * 20);
+		expect(GRAPHQL_SHARED_PUBLIC_RATE_LIMIT).toBe(1_200);
 	});
 });
