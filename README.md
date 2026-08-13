@@ -76,6 +76,14 @@ The service exposes:
 Requests are bounded by body size, depth, root-field count, aliases, AST nodes,
 weighted complexity, unique entry IDs, and Redis-backed rate limits.
 
+GraphQL admission has two stages: a fixed-cost global plus browser-ingress
+request gate before principal verification, followed by complexity-weighted
+authenticated, anonymous, or shared-public admission. Defaults are 120 browser
+requests/minute, 300 authenticated units/minute, 120 anonymous units/minute,
+and a fixed 1200-unit shared public budget. The deploy-tunable values are
+`GRAPHQL_BROWSER_INGRESS_RATE_LIMIT`, `GRAPHQL_AUTHENTICATED_RATE_LIMIT`, and
+`GRAPHQL_ANONYMOUS_RATE_LIMIT`; every value must be a positive integer.
+
 ## Verification
 
 ```bash
@@ -92,5 +100,7 @@ auth read boundary, provisions a disposable read-only login, and runs the real
 startup contract. GraphQL has no business migration command; Data schema
 changes land in `letletme_data`, while `bauth` changes land in `letletme-web`.
 
-`TRUSTED_PROXY_HOPS` remains the only deployment-sensitive request-boundary
-setting: leave it at `0` unless the complete proxy chain has been reviewed.
+Leave `TRUSTED_PROXY_HOPS` at `0` unless the complete proxy chain has been
+reviewed. Rate-limit overrides should be changed only with matching production
+traffic evidence; the versioned Redis scopes intentionally do not reuse old
+counters.

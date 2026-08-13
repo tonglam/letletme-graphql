@@ -28,15 +28,15 @@ import {
 	checkRateLimits,
 	handleRateLimitStorageFailure,
 	PayloadTooLargeError,
-	rateLimitKey,
 	readRequestBody,
 } from "./http/security";
 import {
-	GRAPHQL_GLOBAL_ADMISSION_SUBJECT,
-	GRAPHQL_SHARED_PUBLIC_RATE_LIMIT,
+	graphQLPreAuthRateLimitChecks,
+	graphQLPrincipalAdmission,
 	graphQLIngressFailure,
 	graphQLMethodFailure,
-	graphQLUsesSharedPublicBudget,
+	hasAuthenticationMaterial,
+	type GraphQLRateLimitConfig,
 } from "./http/graphql-policy";
 import {
 	extractGraphQLOperationName,
@@ -44,10 +44,12 @@ import {
 	resolveRequestId,
 } from "./http/request-timing";
 
-const GRAPHQL_RATE_LIMIT = 120;
-const RATE_LIMIT_WINDOW_SECONDS = 60;
-const GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT = 25 * RATE_LIMIT_WINDOW_SECONDS;
 const currentSeasonProvider = new CurrentSeasonProvider();
+const graphQLRateLimitConfig: GraphQLRateLimitConfig = {
+	browserIngress: env.GRAPHQL_BROWSER_INGRESS_RATE_LIMIT,
+	authenticated: env.GRAPHQL_AUTHENTICATED_RATE_LIMIT,
+	anonymous: env.GRAPHQL_ANONYMOUS_RATE_LIMIT,
+};
 
 function getCorsHeaders(origin: string | null): Record<string, string> {
 	const configuredOrigins = env.CORS_ORIGIN.split(",")
@@ -106,42 +108,24 @@ const jsonError = (
 		},
 	});
 
-const enforceGraphQLAdmission = async ({
-	subject,
-	limit,
-	cost,
+const enforceGraphQLRateLimits = async ({
+	checks,
 	corsHeaders,
 }: {
-	subject: string;
-	limit: number;
-	cost: number;
+	checks: Parameters<typeof checkRateLimits>[1];
 	corsHeaders: Record<string, string>;
 }): Promise<Response | null> => {
 	let decision: Awaited<ReturnType<typeof checkRateLimits>>;
 	try {
-		decision = await checkRateLimits(getRateLimitRedis(), [
-			{
-				scope: "graphql-global-admission",
-				key: rateLimitKey("graphql-global-admission", GRAPHQL_GLOBAL_ADMISSION_SUBJECT),
-				limit: GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
-				windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
-				cost: 1,
-			},
-			{
-				scope: "graphql",
-				key: rateLimitKey("graphql", subject),
-				limit,
-				windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
-				cost,
-			},
-		]);
+		decision = await checkRateLimits(getRateLimitRedis(), checks);
 	} catch (error) {
-		metrics.graphqlRateLimitDecisions.labels("graphql-admission", "storage_unavailable").inc();
+		const storageScope = checks[0]?.scope ?? "graphql-ingress-v2";
+		metrics.graphqlRateLimitDecisions.labels(storageScope, "storage_unavailable").inc();
 		try {
 			decision = handleRateLimitStorageFailure({
 				error,
 				failClosed: true,
-				scope: "graphql-admission",
+				scope: storageScope,
 				logger,
 			});
 		} catch {
@@ -163,8 +147,9 @@ const enforceGraphQLAdmission = async ({
 		});
 	}
 
-	metrics.graphqlRateLimitDecisions.labels("graphql-global-admission", "allowed").inc();
-	metrics.graphqlRateLimitDecisions.labels("graphql", "allowed").inc();
+	for (const scope of new Set(checks.map((check) => check.scope))) {
+		metrics.graphqlRateLimitDecisions.labels(scope, "allowed").inc();
+	}
 	return null;
 };
 
@@ -295,35 +280,76 @@ const startServer = async (): Promise<void> => {
 			}
 
 			if (url.pathname === "/graphql") {
-				const start = performance.now();
 				const requestTiming = new RequestTiming();
 				const requestId = resolveRequestId(request.headers.get("X-Request-Id"));
 				let operationName = "anonymous";
+				let ingressClass = "unclassified";
+				let rateLimitAudience = "unresolved";
+				const finalizeGraphQLResponse = (response: Response, outcome: string): Response => {
+					const durationMs = requestTiming.elapsedMs();
+					response.headers.set("X-Request-Id", requestId);
+					metrics.httpRequestDurationSeconds
+						.labels(request.method, url.pathname, String(response.status))
+						.observe(durationMs / 1000);
+					logger.info(
+						{
+							requestId,
+							operationName,
+							ingressClass,
+							rateLimitAudience,
+							outcome,
+							method: request.method,
+							path: url.pathname,
+							status: response.status,
+							durationMs: Number(durationMs.toFixed(2)),
+							timings: requestTiming.snapshot(),
+						},
+						"GraphQL request timing"
+					);
+					return response;
+				};
 
 				try {
 					const methodFailure = graphQLMethodFailure(request.method);
 					if (methodFailure) {
-						return jsonError(
-							methodFailure.status,
-							methodFailure.code,
-							methodFailure.message,
-							corsHeaders,
-							{ Allow: "POST, OPTIONS" }
+						return finalizeGraphQLResponse(
+							jsonError(
+								methodFailure.status,
+								methodFailure.code,
+								methodFailure.message,
+								corsHeaders,
+								{ Allow: "POST, OPTIONS" }
+							),
+							"method_rejected"
 						);
 					}
 
 					const ingress = requestTiming.measureSync("ingressClassification", () =>
 						classifyGraphQLIngress(request.headers)
 					);
+					ingressClass = ingress.class;
 					metrics.graphqlIngressRequests.labels(ingress.class).inc();
 					const ingressFailure = graphQLIngressFailure(ingress);
 					if (ingressFailure) {
-						return jsonError(
-							ingressFailure.status,
-							ingressFailure.code,
-							ingressFailure.message,
-							corsHeaders
+						return finalizeGraphQLResponse(
+							jsonError(
+								ingressFailure.status,
+								ingressFailure.code,
+								ingressFailure.message,
+								corsHeaders
+							),
+							"ingress_rejected"
 						);
+					}
+
+					const preAuthAdmissionFailure = await requestTiming.measure("preAuthAdmission", () =>
+						enforceGraphQLRateLimits({
+							checks: graphQLPreAuthRateLimitChecks(ingress, graphQLRateLimitConfig),
+							corsHeaders,
+						})
+					);
+					if (preAuthAdmissionFailure) {
+						return finalizeGraphQLResponse(preAuthAdmissionFailure, "pre_auth_admission_rejected");
 					}
 
 					const body = await requestTiming.measure("bodyRead", () => readRequestBody(request));
@@ -335,13 +361,16 @@ const startServer = async (): Promise<void> => {
 								() => JSON.parse(body) as unknown
 							);
 						} catch {
-							return new Response(JSON.stringify({ errors: [{ message: "Invalid JSON" }] }), {
-								status: 400,
-								headers: {
-									"Content-Type": "application/json",
-									...corsHeaders,
-								},
-							});
+							return finalizeGraphQLResponse(
+								new Response(JSON.stringify({ errors: [{ message: "Invalid JSON" }] }), {
+									status: 400,
+									headers: {
+										"Content-Type": "application/json",
+										...corsHeaders,
+									},
+								}),
+								"invalid_json"
+							);
 						}
 					}
 					operationName = extractGraphQLOperationName(parsedBody);
@@ -350,35 +379,46 @@ const startServer = async (): Promise<void> => {
 						validateGraphQLRequestLimits(parsedBody, schema)
 					);
 					if (!limits.ok) {
-						return jsonError(400, limits.code, limits.message, corsHeaders);
+						return finalizeGraphQLResponse(
+							jsonError(400, limits.code, limits.message, corsHeaders),
+							"request_limits_rejected"
+						);
 					}
-					const rateLimit = graphQLUsesSharedPublicBudget(ingress)
-						? GRAPHQL_SHARED_PUBLIC_RATE_LIMIT
-						: GRAPHQL_RATE_LIMIT;
-					const admissionFailure = await requestTiming.measure("admission", () =>
-						enforceGraphQLAdmission({
-							subject: ingress.subject ?? "trusted-ingress",
-							limit: rateLimit,
-							cost: Math.max(1, limits.rateLimitCostUnits),
-							corsHeaders,
-						})
-					);
-					if (admissionFailure) return admissionFailure;
-
 					const { principal, user } = await requestTiming.measure("principal", () =>
 						resolvePrincipalAndUser(request)
 					);
-					const hasBearer = /^bearer\s+\S+$/i.test(request.headers.get("Authorization") ?? "");
-					const hasUserContext =
-						request.headers.has("X-User-Context") || request.headers.has("X-User-Context-Sig");
-					if (!principal && (hasBearer || hasUserContext)) {
-						return jsonError(
-							401,
-							"INVALID_AUTH_CONTEXT",
-							"Authentication context is invalid or expired",
-							corsHeaders
+					if (!principal && hasAuthenticationMaterial(request.headers)) {
+						return finalizeGraphQLResponse(
+							jsonError(
+								401,
+								"INVALID_AUTH_CONTEXT",
+								"Authentication context is invalid or expired",
+								corsHeaders
+							),
+							"authentication_rejected"
 						);
 					}
+
+					const principalAdmission = graphQLPrincipalAdmission({
+						ingress,
+						principal,
+						cost: limits.rateLimitCostUnits,
+						config: graphQLRateLimitConfig,
+					});
+					rateLimitAudience = principalAdmission.audience;
+					const principalAdmissionFailure = await requestTiming.measure("principalAdmission", () =>
+						enforceGraphQLRateLimits({
+							checks: [principalAdmission.check],
+							corsHeaders,
+						})
+					);
+					if (principalAdmissionFailure) {
+						return finalizeGraphQLResponse(
+							principalAdmissionFailure,
+							"principal_admission_rejected"
+						);
+					}
+
 					const currentSeason = currentSeasonProvider.get();
 					const data = new ReadModelClient(database, currentSeason);
 					const authorization = await requestTiming.measure("authorization", () =>
@@ -391,7 +431,10 @@ const startServer = async (): Promise<void> => {
 						})
 					);
 					if (!authorization.ok) {
-						return graphQLErrorResponse(authorization, corsHeaders);
+						return finalizeGraphQLResponse(
+							graphQLErrorResponse(authorization, corsHeaders),
+							"authorization_rejected"
+						);
 					}
 
 					const graphQLContext: GraphQLContext = {
@@ -419,11 +462,14 @@ const startServer = async (): Promise<void> => {
 							);
 						} catch (error) {
 							logger.error({ err: error }, "Data publication authority is unavailable");
-							return jsonError(
-								503,
-								"DATA_PUBLICATION_UNAVAILABLE",
-								"Data publication is temporarily unavailable",
-								corsHeaders
+							return finalizeGraphQLResponse(
+								jsonError(
+									503,
+									"DATA_PUBLICATION_UNAVAILABLE",
+									"Data publication is temporarily unavailable",
+									corsHeaders
+								),
+								"publication_unavailable"
 							);
 						}
 					}
@@ -445,7 +491,6 @@ const startServer = async (): Promise<void> => {
 						})
 					);
 
-					const durationMs = performance.now() - start;
 					const stopResponseBuild = requestTiming.start("responseBuild");
 
 					const responseHeaders: Record<string, string> = {};
@@ -480,28 +525,16 @@ const startServer = async (): Promise<void> => {
 					});
 					stopResponseBuild();
 
-					metrics.httpRequestDurationSeconds
-						.labels(request.method, url.pathname, String(response.status))
-						.observe(durationMs / 1000);
-
-					logger.info(
-						{
-							requestId,
-							operationName,
-							ingressClass: ingress.class,
-							method: request.method,
-							path: url.pathname,
-							status: response.status,
-							durationMs: Number(durationMs.toFixed(2)),
-							timings: requestTiming.snapshot(),
-						},
-						"GraphQL request timing"
+					return finalizeGraphQLResponse(
+						response,
+						response.status >= 400 ? "graphql_error" : "completed"
 					);
-
-					return response;
 				} catch (error) {
 					if (error instanceof PayloadTooLargeError) {
-						return jsonError(413, error.code, error.message, corsHeaders);
+						return finalizeGraphQLResponse(
+							jsonError(413, error.code, error.message, corsHeaders),
+							"payload_too_large"
+						);
 					}
 					logger.error(
 						{
@@ -513,17 +546,20 @@ const startServer = async (): Promise<void> => {
 						},
 						"GraphQL request failed"
 					);
-					return new Response(
-						JSON.stringify({
-							errors: [{ message: "Internal server error" }],
-						}),
-						{
-							status: 500,
-							headers: {
-								"Content-Type": "application/json",
-								...corsHeaders,
-							},
-						}
+					return finalizeGraphQLResponse(
+						new Response(
+							JSON.stringify({
+								errors: [{ message: "Internal server error" }],
+							}),
+							{
+								status: 500,
+								headers: {
+									"Content-Type": "application/json",
+									...corsHeaders,
+								},
+							}
+						),
+						"internal_error"
 					);
 				}
 			}
