@@ -37,6 +37,8 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain('--filter "reference=${image_name}:*"');
 		expect(workflow).toContain("--filter dangling=true");
 		expect(workflow).not.toContain("docker image prune");
+		expect(workflow).toContain("flock -w 300 9");
+		expect(workflow).not.toContain("/usr/local/libexec/vps-maintenance");
 		expect(workflow).not.toContain("schema" + "Version");
 	});
 
@@ -74,6 +76,7 @@ describe("production deployment workflow", () => {
 		expect(workflow.indexOf("trap rollback_graphql_on_exit EXIT")).toBeGreaterThan(
 			workflow.indexOf("start_stage preflight")
 		);
+		expect(workflow).not.toMatch(/if \[ .*deployment_started.*\]; then\s*fi/);
 	});
 
 	test("does not hardcode retired generation-prefixed migration filenames", () => {
