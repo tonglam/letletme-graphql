@@ -280,7 +280,11 @@ jobs:
                   fi
                 else
                   echo "GraphQL deployment failed without a previous image; removing the failed container"
-                  APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
+                  rollback_env=.env.deploy
+                  if [ ! -f "$rollback_env" ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
+                    rollback_env="$previous_env"
+                  fi
+                  APP_ENV_FILE="$rollback_env" APP_IMAGE="$IMAGE_REF" \
                     docker compose rm --stop --force graphql || true
                   if [ "$env_promoted" = true ]; then
                     if [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
