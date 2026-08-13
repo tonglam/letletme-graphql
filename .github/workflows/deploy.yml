@@ -92,6 +92,9 @@ jobs:
             flock -w 300 9 || { echo "another VPS deployment or cleanup is running" >&2; exit 75; }
             deployment_started=false
             deployment_committed=false
+            controller_committed=false
+            env_promoted=false
+            previous_env=""
             deployment_run_id="${RUN_ID:-graphql-${DEPLOY_SHA}}-${RUN_ATTEMPT:-1}"
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
@@ -120,6 +123,9 @@ jobs:
               fi
               if [ -n "${next_env:-}" ]; then
                 rm -f "$next_env"
+              fi
+              if [ -n "${previous_env:-}" ]; then
+                rm -f "$previous_env"
               fi
               if [ "$original_status" -ne 0 ] && [ "${deployment_started:-false}" = true ] && [ "${deployment_committed:-false}" = false ]; then
                 VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment fail \
@@ -203,6 +209,11 @@ jobs:
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose config --quiet
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose config | grep -q 'max-size: 20m'
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" docker compose config | grep -Eq 'max-file: "5"$'
+            if [ -f .env.deploy ]; then
+              previous_env=$(mktemp "$VPS_WORKDIR/.env.deploy.previous.XXXXXX")
+              cp .env.deploy "$previous_env"
+              chmod 600 "$previous_env"
+            fi
             finish_stage
 
             old_container=$(APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
@@ -238,12 +249,16 @@ jobs:
                   "$active_stage" "$failed_duration_ms"
                 active_stage=""
               fi
-              if [ "$rollback_armed" = true ] && [ "$deployment_committed" = false ]; then
+              if [ "$rollback_armed" = true ] && [ "$deployment_committed" = false ] && [ "$controller_committed" = false ]; then
                 if [ -n "$old_image" ]; then
                   echo "GraphQL deployment failed; restoring the previous image"
                   rollback_env="$next_env"
-                  if [ -f .env.deploy ]; then
+                  if [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
+                    mv "$previous_env" .env.deploy
+                    chmod 600 .env.deploy
                     rollback_env=.env.deploy
+                  elif [ "$env_promoted" = true ]; then
+                    rm -f .env.deploy
                   fi
                   APP_ENV_FILE="$rollback_env" APP_IMAGE="$old_image" docker compose up \
                     -d --no-deps --no-build --force-recreate graphql
@@ -266,6 +281,9 @@ jobs:
                   echo "GraphQL deployment failed without a previous image; removing the failed container"
                   APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
                     docker compose rm --stop --force graphql || true
+                  if [ "$env_promoted" = true ]; then
+                    rm -f .env.deploy
+                  fi
                 fi
               fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
@@ -383,17 +401,22 @@ jobs:
             finish_stage
 
             start_stage finalize
-            finish_stage
+            mv "$next_env" .env.deploy
+            chmod 600 .env.deploy
+            env_promoted=true
 
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment commit \
               --service=graphql --run-id="$deployment_run_id" >/dev/null
+            controller_committed=true
             deployment_committed=true
-            mv "$next_env" .env.deploy
-            chmod 600 .env.deploy
             if [ -n "$old_image" ]; then
               printf '%s\n' "$old_image" > "$HOME/.letletme-graphql-previous-image"
               chmod 600 "$HOME/.letletme-graphql-previous-image"
             fi
+            if [ -n "$previous_env" ]; then
+              rm -f "$previous_env"
+            fi
+            finish_stage
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance cleanup \
               --mode=deploy --service=graphql || true
             docker system df || true
