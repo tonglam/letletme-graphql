@@ -21,7 +21,7 @@ import { logger } from "./infra/logger";
 import { classifyGraphQLIngress } from "./infra/ingress-context";
 import { metrics, metricsResponse } from "./infra/metrics";
 import { getPrincipalFromHeaders, principalToAuthUser, type Principal } from "./infra/principal";
-import { closeRedis, connectRedis, getRedis } from "./infra/redis";
+import { closeRedis, connectRedis, getRateLimitRedis, getRedis } from "./infra/redis";
 import { CurrentSeasonProvider } from "./infra/season";
 import { ReadModelClient } from "./infra/read-model-client";
 import {
@@ -119,7 +119,7 @@ const enforceGraphQLAdmission = async ({
 }): Promise<Response | null> => {
 	let decision: Awaited<ReturnType<typeof checkRateLimits>>;
 	try {
-		decision = await checkRateLimits(getRedis(), [
+		decision = await checkRateLimits(getRateLimitRedis(), [
 			{
 				scope: "graphql-global-admission",
 				key: rateLimitKey("graphql-global-admission", GRAPHQL_GLOBAL_ADMISSION_SUBJECT),
