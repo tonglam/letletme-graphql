@@ -60,4 +60,14 @@ describe("eventOverallResultRepository", () => {
 		});
 		expect(oldHashReads).toBe(0);
 	});
+
+	it("filters to one event when an event id is provided", async () => {
+		const redis = new TestRedis(buildCorePublication("2627", 17, buildTestCoreData(1)));
+		const context = buildSnapshotContext(redis, { dataRevision: "core-17" });
+
+		const results = await eventOverallResultRepository.getEventOverallResult(context, 2);
+
+		expect(results).toHaveLength(1);
+		expect(results[0]?.event).toBe(2);
+	});
 });
