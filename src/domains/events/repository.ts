@@ -138,6 +138,16 @@ export type CurrentEventInfo = {
 	nextUtcDeadline: string | null;
 };
 
+export type CoreEventContext = {
+	season: string;
+	revision: string;
+	sourceCheckedAt: string;
+	currentEventId: number | null;
+	nextEventId: number | null;
+	nextDeadlineTime: string | null;
+	latestFinishedEventId: number | null;
+};
+
 type EventMetadata = Pick<
 	Event,
 	"id" | "deadlineTime" | "deadlineTimeEpoch" | "isCurrent" | "isNext"
@@ -182,6 +192,7 @@ interface EventsRepository {
 		offset: number
 	): Promise<Event[]>;
 	getCurrentEventInfo(context: GraphQLContext): Promise<CurrentEventInfo | null>;
+	getCoreEventContext(context: GraphQLContext): Promise<CoreEventContext>;
 }
 
 export const eventsRepository: EventsRepository = {
@@ -204,6 +215,24 @@ export const eventsRepository: EventsRepository = {
 			currentEvent: resolved.current?.id ?? null,
 			nextEvent: resolved.next?.id ?? null,
 			nextUtcDeadline: resolved.next?.deadlineTime ?? null,
+		};
+	},
+
+	async getCoreEventContext(context) {
+		const snapshot = await getCoreEventSnapshot(context);
+		const events = snapshot.events.map(mapEvent).sort((left, right) => left.id - right.id);
+		const resolved = resolveCurrentAndNext(events, snapshot.currentEventId);
+		const latestFinishedEventId =
+			[...events].filter((event) => event.finished).sort((left, right) => right.id - left.id)[0]
+				?.id ?? null;
+		return {
+			season: snapshot.seasonCode,
+			revision: snapshot.revision,
+			sourceCheckedAt: snapshot.sourceCheckedAt,
+			currentEventId: resolved.current?.id ?? null,
+			nextEventId: resolved.next?.id ?? null,
+			nextDeadlineTime: resolved.next?.deadlineTime ?? null,
+			latestFinishedEventId,
 		};
 	},
 

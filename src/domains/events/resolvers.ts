@@ -1,6 +1,6 @@
 import { DateTimeResolver, JSONResolver } from "graphql-scalars";
 import type { GraphQLContext } from "../../graphql/context";
-import type { CurrentEventInfo, Event, EventsFilter } from "./repository";
+import type { CoreEventContext, CurrentEventInfo, Event, EventsFilter } from "./repository";
 import { eventsService } from "./service";
 
 type EventArgs = {
@@ -34,5 +34,10 @@ export const eventsResolvers = {
 			_args: Record<string, never>,
 			context: GraphQLContext
 		): Promise<CurrentEventInfo | null> => eventsService.getCurrentEventInfo(context),
+		coreEventContext: async (
+			_parent: unknown,
+			_args: Record<string, never>,
+			context: GraphQLContext
+		): Promise<CoreEventContext> => eventsService.getCoreEventContext(context),
 	},
 };

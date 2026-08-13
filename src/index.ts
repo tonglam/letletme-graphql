@@ -342,6 +342,16 @@ const startServer = async (): Promise<void> => {
 						);
 					}
 
+					const preAuthAdmissionFailure = await requestTiming.measure("preAuthAdmission", () =>
+						enforceGraphQLRateLimits({
+							checks: graphQLPreAuthRateLimitChecks(ingress, graphQLRateLimitConfig),
+							corsHeaders,
+						})
+					);
+					if (preAuthAdmissionFailure) {
+						return finalizeGraphQLResponse(preAuthAdmissionFailure, "pre_auth_admission_rejected");
+					}
+
 					const body = await requestTiming.measure("bodyRead", () => readRequestBody(request));
 					let parsedBody: unknown = undefined;
 					if (body) {
@@ -389,24 +399,24 @@ const startServer = async (): Promise<void> => {
 						);
 					}
 
-					const admissionPolicy = graphQLPrincipalAdmission({
+					const principalAdmission = graphQLPrincipalAdmission({
 						ingress,
 						principal,
 						cost: limits.rateLimitCostUnits,
 						config: graphQLRateLimitConfig,
 					});
-					rateLimitAudience = admissionPolicy.audience;
-					const admissionFailure = await requestTiming.measure("admission", () =>
+					rateLimitAudience = principalAdmission.audience;
+					const principalAdmissionFailure = await requestTiming.measure("principalAdmission", () =>
 						enforceGraphQLRateLimits({
-							checks: [
-								...graphQLPreAuthRateLimitChecks(ingress, graphQLRateLimitConfig),
-								admissionPolicy.check,
-							],
+							checks: [principalAdmission.check],
 							corsHeaders,
 						})
 					);
-					if (admissionFailure) {
-						return finalizeGraphQLResponse(admissionFailure, "admission_rejected");
+					if (principalAdmissionFailure) {
+						return finalizeGraphQLResponse(
+							principalAdmissionFailure,
+							"principal_admission_rejected"
+						);
 					}
 
 					const currentSeason = currentSeasonProvider.get();
@@ -440,11 +450,20 @@ const startServer = async (): Promise<void> => {
 						principal: principal ?? undefined,
 						user: user ?? undefined,
 					};
+					const lightweightCoreFields = new Set([
+						"event",
+						"events",
+						"eventFixtures",
+						"currentEventInfo",
+						"coreEventContext",
+						"playerStatsBootstrap",
+						"playersForPicker",
+						"playerStatsDesk",
+					]);
 					const lightweightCoreRead =
 						limits.shape === "query" &&
-						limits.rootFields.length === 1 &&
-						(limits.rootFields[0] === "eventFixtures" ||
-							limits.rootFields[0] === "currentEventInfo");
+						limits.rootFields.length > 0 &&
+						limits.rootFields.every((field) => lightweightCoreFields.has(field));
 					if (!lightweightCoreRead) {
 						try {
 							graphQLContext.dataRevision = await requestTiming.measure("publication", async () =>

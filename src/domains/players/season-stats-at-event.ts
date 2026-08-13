@@ -1,6 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCoreDataSnapshot } from "../../infra/data-snapshot";
+import { getCoreEventSnapshot } from "../../infra/data-snapshot";
 import { QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
 import { getCurrentSeason } from "../../infra/season";
 
@@ -80,7 +80,7 @@ export async function resolvePlayerStatsContext(
 ): Promise<PlayerStatsContext> {
 	const [season, snapshot] = await Promise.all([
 		getCurrentSeason(context),
-		getCoreDataSnapshot(context),
+		getCoreEventSnapshot(context),
 	]);
 	const upperBound =
 		typeof requestedEventId === "number" &&
@@ -199,7 +199,7 @@ async function isUnfinishedCurrentEvent(
 	context: GraphQLContext,
 	eventId: number
 ): Promise<boolean> {
-	const snapshot = await getCoreDataSnapshot(context);
+	const snapshot = await getCoreEventSnapshot(context);
 	const event = snapshot.events.find((candidate) => candidate.id === eventId);
 	return event?.finished !== true;
 }

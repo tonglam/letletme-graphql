@@ -78,6 +78,8 @@ type CurrentPeerRow = QueryResultRow & {
 	saves: number | null;
 	bps: number | null;
 	expected_goal_involvements: number | null;
+	return_count: number | null;
+	gameweeks_available: number | null;
 };
 
 type CurrentPeerGameweekRow = QueryResultRow & {
@@ -192,8 +194,10 @@ const currentPeersSql = `
 		summary.clean_sheets,
 		summary.saves,
 		summary.bps,
-		summary.expected_goal_involvements
-	FROM reporting.player_season_summaries summary
+		summary.expected_goal_involvements,
+		summary.return_count,
+		summary.gameweeks_available
+	FROM reporting.player_season_summary_rows summary
 	JOIN fpl.players player
 		ON player.season_id = summary.season_id
 		AND player.element_id = summary.element_id
@@ -222,54 +226,32 @@ const currentPeerGameweeksSql = `
 
 const historicalCohortsSql = `
 	/* player-state:fpl-history */
-	WITH requested AS (
+	WITH requested AS MATERIALIZED (
 		SELECT season.season_id, season.season_code, subject.element_type AS position
 		FROM fpl.seasons season
 		JOIN fpl.players subject
 			ON subject.season_id = season.season_id
 			AND subject.code = $1
 		WHERE season.lifecycle_state = 'completed'
-	), peers AS (
-		SELECT
-			requested.season_id,
-			requested.season_code,
-			player.element_id,
-			player.code AS player_code,
-			player.element_type AS position,
-			player.updated_at AS player_updated_at
-		FROM requested
-		JOIN fpl.players player
-			ON player.season_id = requested.season_id
-			AND player.element_type = requested.position
-	), summaries AS (
-		SELECT
-			stats.season_id,
-			stats.element_id,
-			COALESCE(sum(stats.minutes), 0)::integer AS minutes,
-			COALESCE(sum(stats.total_points), 0)::integer AS total_points,
-			COALESCE(sum(stats.bonus), 0)::integer AS bonus,
-			count(*) FILTER (WHERE stats.total_points >= 5)::integer AS return_count,
-			count(stats.event_id)::integer AS gameweek_count,
-			max(stats.updated_at) AS as_of
-		FROM fpl.player_gameweek_stats stats
-		JOIN requested ON requested.season_id = stats.season_id
-		GROUP BY stats.season_id, stats.element_id
 	)
 	SELECT
-		peers.season_code AS season,
-		peers.player_code,
-		peers.position,
-		COALESCE(summaries.minutes, 0)::integer AS minutes,
-		COALESCE(summaries.total_points, 0)::integer AS total_points,
-		COALESCE(summaries.bonus, 0)::integer AS bonus,
-		COALESCE(summaries.return_count, 0)::integer AS return_count,
-		COALESCE(summaries.gameweek_count, 0)::integer AS gameweek_count,
-		GREATEST(peers.player_updated_at, summaries.as_of) AS as_of
-	FROM peers
-	LEFT JOIN summaries
-		ON summaries.season_id = peers.season_id
-		AND summaries.element_id = peers.element_id
-	ORDER BY peers.season_code, peers.player_code
+		requested.season_code AS season,
+		player.code AS player_code,
+		player.element_type AS position,
+		COALESCE(summary.minutes, 0)::integer AS minutes,
+		COALESCE(summary.total_points, 0)::integer AS total_points,
+		COALESCE(summary.bonus, 0)::integer AS bonus,
+		COALESCE(summary.return_count, 0)::integer AS return_count,
+		COALESCE(summary.gameweeks_available, 0)::integer AS gameweek_count,
+		GREATEST(player.updated_at, summary.source_updated_at) AS as_of
+	FROM requested
+	JOIN fpl.players player
+		ON player.season_id = requested.season_id
+		AND player.element_type = requested.position
+	LEFT JOIN reporting.player_season_summary_rows summary
+		ON summary.season_id = player.season_id
+		AND summary.element_id = player.element_id
+	ORDER BY requested.season_code, player.code
 `;
 
 const verifiedProviderLinkSql = `
@@ -303,14 +285,14 @@ const unresolvedProviderLinkSql = `
 
 const understatCohortsSql = `
 	/* player-state:understat-cohorts */
-	WITH requested AS (
+	WITH requested AS MATERIALIZED (
 		SELECT season.season_id, season.season_code, subject.element_type AS position
 		FROM fpl.seasons season
 		JOIN fpl.players subject
 			ON subject.season_id = season.season_id
 			AND subject.code = $1
 		WHERE season.season_code = ANY($2::text[])
-	), linked_peers AS (
+	), linked_peers AS MATERIALIZED (
 		SELECT
 			requested.season_code,
 			player.code AS player_code,
@@ -403,25 +385,135 @@ const profileGuard = (value: unknown): value is PlayerStateProfile =>
 const profileCacheKey = (context: GraphQLContext, playerId: number, horizon: number): string =>
 	gqlCacheKey(context, `player-state-profile:${playerId}:${horizon}`);
 
+const profileCacheReadMemo = new WeakMap<
+	object,
+	Map<string, PlayerStateProfile | null | undefined>
+>();
+
+type CurrentCohort = Readonly<{
+	peerRows: CurrentPeerRow[];
+	gameweekRows: CurrentPeerGameweekRow[];
+}>;
+
+const currentCohortMemo = new WeakMap<object, Map<string, Promise<CurrentCohort>>>();
+
+const loadCurrentCohort = (
+	context: GraphQLContext,
+	executor: QueryExecutor,
+	seasonId: number,
+	position: number,
+	includeCurrent: boolean,
+	eventIds: number[]
+): Promise<CurrentCohort> => {
+	const scope = context.requestScope ?? context;
+	let memo = currentCohortMemo.get(scope);
+	if (!memo) {
+		memo = new Map();
+		currentCohortMemo.set(scope, memo);
+	}
+	const key = `${seasonId}:${position}:${includeCurrent ? "current" : "preseason"}:${eventIds.join(",")}`;
+	const existing = memo.get(key);
+	if (existing) return existing;
+	const loading = Promise.all([
+		!includeCurrent
+			? Promise.resolve({ rows: [] as CurrentPeerRow[] })
+			: executor.query<CurrentPeerRow>(currentPeersSql, [seasonId, position]),
+		eventIds.length === 0
+			? Promise.resolve({ rows: [] as CurrentPeerGameweekRow[] })
+			: executor.query<CurrentPeerGameweekRow>(currentPeerGameweeksSql, [
+					seasonId,
+					position,
+					eventIds,
+				]),
+	]).then(([peers, gameweeks]) => ({
+		peerRows: peers.rows,
+		gameweekRows: gameweeks.rows,
+	}));
+	memo.set(key, loading);
+	void loading.catch(() => {
+		if (memo?.get(key) === loading) memo.delete(key);
+	});
+	return loading;
+};
+
+const requestProfileCacheMemo = (
+	context: GraphQLContext
+): Map<string, PlayerStateProfile | null | undefined> => {
+	const scope = context.requestScope ?? context;
+	let memo = profileCacheReadMemo.get(scope);
+	if (!memo) {
+		memo = new Map();
+		profileCacheReadMemo.set(scope, memo);
+	}
+	return memo;
+};
+
+const parseProfileCacheValue = (
+	raw: string | null
+): PlayerStateProfile | null | undefined | "malformed" => {
+	if (raw === null) return undefined;
+	if (raw === NULL_SENTINEL) return null;
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		return profileGuard(parsed) ? parsed : "malformed";
+	} catch {
+		return "malformed";
+	}
+};
+
 async function readProfileCache(
 	context: GraphQLContext,
 	key: string
 ): Promise<PlayerStateProfile | null | undefined> {
+	const memo = requestProfileCacheMemo(context);
+	if (memo.has(key)) return memo.get(key);
 	try {
 		const raw = await context.redis.get(key);
-		if (raw === null) return undefined;
-		if (raw === NULL_SENTINEL) return null;
-		const parsed: unknown = JSON.parse(raw);
-		if (profileGuard(parsed)) return parsed;
+		const parsed = parseProfileCacheValue(raw);
+		if (parsed !== "malformed") {
+			memo.set(key, parsed);
+			return parsed;
+		}
 		await deleteQueryCache(context, key);
 	} catch (error) {
 		context.logger.warn({ err: error, key }, "Failed to read player-state query cache");
 	}
+	memo.set(key, undefined);
 	return undefined;
+}
+
+async function readProfileCaches(context: GraphQLContext, keys: string[]): Promise<void> {
+	const memo = requestProfileCacheMemo(context);
+	const missingKeys = keys.filter((key) => !memo.has(key));
+	if (missingKeys.length === 0) return;
+	let values: Array<string | null>;
+	try {
+		values = await context.redis.mget(...missingKeys);
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, keyCount: missingKeys.length },
+			"Failed to batch-read player-state query cache"
+		);
+		for (const key of missingKeys) memo.set(key, undefined);
+		return;
+	}
+	const malformedKeys: string[] = [];
+	for (let index = 0; index < missingKeys.length; index += 1) {
+		const key = missingKeys[index]!;
+		const parsed = parseProfileCacheValue(values[index] ?? null);
+		if (parsed === "malformed") {
+			memo.set(key, undefined);
+			malformedKeys.push(key);
+		} else {
+			memo.set(key, parsed);
+		}
+	}
+	await Promise.all(malformedKeys.map((key) => deleteQueryCache(context, key)));
 }
 
 const writeNullCache = async (context: GraphQLContext, key: string): Promise<void> => {
 	await writeQueryCache(context, key, NULL_SENTINEL, PLAYER_STATE_NULL_CACHE_TTL_SECONDS);
+	requestProfileCacheMemo(context).set(key, null);
 };
 
 const writeProfileCache = async (
@@ -435,29 +527,22 @@ const writeProfileCache = async (
 		JSON.stringify(profile),
 		PLAYER_STATE_SUCCESS_CACHE_TTL_SECONDS
 	);
+	requestProfileCacheMemo(context).set(key, profile);
 };
 
-const currentMetrics = (
-	peerRows: CurrentPeerRow[],
-	gameweekRows: CurrentPeerGameweekRow[],
-	eventIds: number[]
-): CurrentMetricRow[] => {
-	const byPlayerEvent = new Map<string, CurrentPeerGameweekRow>();
-	for (const row of gameweekRows) byPlayerEvent.set(`${row.element_id}:${row.event_id}`, row);
+const currentMetrics = (peerRows: CurrentPeerRow[]): CurrentMetricRow[] => {
 	return peerRows.map((row) => {
 		const minutes = row.minutes ?? 0;
-		const eventRows = eventIds.map(
-			(eventId) => byPlayerEvent.get(`${row.element_id}:${eventId}`) ?? null
-		);
-		const returnCount = eventRows.filter((event) => (event?.total_points ?? 0) >= 5).length;
+		const gameweeks = row.gameweeks_available ?? 0;
+		const returnCount = row.return_count ?? 0;
 		return {
 			elementId: row.element_id,
 			pointsPer90:
 				minutes > 0 && row.total_points !== null ? (row.total_points * 90) / minutes : null,
-			returnRate: eventIds.length === 0 ? 0 : (returnCount / eventIds.length) * 100,
+			returnRate: gameweeks === 0 ? 0 : (returnCount / gameweeks) * 100,
 			bonusPer90: minutes > 0 && row.bonus !== null ? (row.bonus * 90) / minutes : null,
 			minutes,
-			gameweeks: eventIds.length,
+			gameweeks,
 			starts: row.starts,
 			goalsScored: row.goals_scored,
 			assists: row.assists,
@@ -1144,11 +1229,34 @@ export interface PlayerStateRepository {
 		playerId: number,
 		horizon: number
 	): Promise<PlayerStateProfile | null>;
+	getPlayerStateProfiles(
+		context: GraphQLContext,
+		playerIds: number[],
+		horizon: number
+	): Promise<Map<number, PlayerStateProfile | null>>;
 }
 
 export const createPlayerStateRepository = (
 	dependencies: PlayerStateRepositoryDependencies = {}
 ): PlayerStateRepository => ({
+	async getPlayerStateProfiles(
+		context: GraphQLContext,
+		playerIds: number[],
+		horizon: number
+	): Promise<Map<number, PlayerStateProfile | null>> {
+		const uniqueIds = Array.from(
+			new Set(playerIds.filter((id) => Number.isSafeInteger(id) && id > 0))
+		);
+		const safeHorizon = Number.isSafeInteger(horizon) ? Math.min(8, Math.max(1, horizon)) : 5;
+		await readProfileCaches(
+			context,
+			uniqueIds.map((playerId) => profileCacheKey(context, playerId, safeHorizon))
+		);
+		const profiles = await Promise.all(
+			uniqueIds.map((playerId) => this.getPlayerStateProfile(context, playerId, safeHorizon))
+		);
+		return new Map(uniqueIds.map((playerId, index) => [playerId, profiles[index] ?? null]));
+	},
 	async getPlayerStateProfile(
 		context: GraphQLContext,
 		playerId: number,
@@ -1177,21 +1285,21 @@ export const createPlayerStateRepository = (
 					asOfEventId !== null && event.id <= asOfEventId && (event.finished || event.isCurrent)
 			)
 			.map((event) => event.id)
+			.sort((left, right) => right - left)
+			.slice(0, 10)
 			.sort((left, right) => left - right);
 
 		const linkPromise = loadProviderLink(executor, player.code);
 		const fplPromise = Promise.all([
 			executor.query<MarketRow>(marketSql, [seasonId, playerId]),
-			asOfEventId === null
-				? Promise.resolve({ rows: [] as CurrentPeerRow[] })
-				: executor.query<CurrentPeerRow>(currentPeersSql, [seasonId, player.type]),
-			startedEventIds.length === 0
-				? Promise.resolve({ rows: [] as CurrentPeerGameweekRow[] })
-				: executor.query<CurrentPeerGameweekRow>(currentPeerGameweeksSql, [
-						seasonId,
-						player.type,
-						startedEventIds,
-					]),
+			loadCurrentCohort(
+				context,
+				executor,
+				seasonId,
+				player.type,
+				asOfEventId !== null,
+				startedEventIds
+			),
 			executor.query<HistoricalCohortRow>(historicalCohortsSql, [player.code]),
 		]);
 
@@ -1209,14 +1317,14 @@ export const createPlayerStateRepository = (
 							confirmedSeasons,
 						])
 					).rows;
-		const [marketResult, currentPeersResult, gameweeksResult, historyResult] = await fplPromise;
+		const [marketResult, currentCohortRows, historyResult] = await fplPromise;
 
 		const processResult = buildUnderstatProcess(player.type, season, mappingStatus, understatRows);
 		const history = addUnderstatHistory(
 			historyForPlayer(historyResult.rows, player.code),
 			processResult.historyPercentiles
 		);
-		const samples = toGameweekSamples(startedEventIds, gameweeksResult.rows, playerId);
+		const samples = toGameweekSamples(startedEventIds, currentCohortRows.gameweekRows, playerId);
 		const recentWindow = samples.slice(0, 5);
 		const previousWindow = samples.slice(5, 10);
 		const recentSamples = recentWindow.filter((sample) => sample.covered);
@@ -1239,11 +1347,7 @@ export const createPlayerStateRepository = (
 					}
 		);
 
-		const allCurrentRows = currentMetrics(
-			currentPeersResult.rows,
-			gameweeksResult.rows,
-			startedEventIds
-		);
+		const allCurrentRows = currentMetrics(currentCohortRows.peerRows);
 		const currentCohort = allCurrentRows.filter((row) => row.minutes >= CURRENT_PEER_MINUTES);
 		const currentSubject = allCurrentRows.find((row) => row.elementId === playerId) ?? null;
 		const currentPlayer =
@@ -1254,7 +1358,7 @@ export const createPlayerStateRepository = (
 			? metricCompositePercentile(currentPlayer, currentCohort)
 			: null;
 		const peerIds = currentCohort.map((row) => row.elementId);
-		const recentRows = recentMetrics(peerIds, gameweeksResult.rows, recentEventIds);
+		const recentRows = recentMetrics(peerIds, currentCohortRows.gameweekRows, recentEventIds);
 		const recentPlayer = recentRows.find((row) => row.elementId === playerId) ?? null;
 		const recentPercentile = recentPlayer
 			? metricCompositePercentile(recentPlayer, recentRows)

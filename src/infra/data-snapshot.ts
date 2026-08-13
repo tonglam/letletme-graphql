@@ -193,6 +193,15 @@ export type CoreFixtureSnapshot = Readonly<{
 	fixtures: readonly CoreFixtureData[];
 }>;
 
+export type CoreTeamSnapshot = Readonly<{
+	source: DataSnapshotSource;
+	seasonCode: string;
+	revision: string;
+	publicationId: string;
+	sourceCheckedAt: string;
+	teams: readonly CoreTeamData[];
+}>;
+
 export type CoreEventSnapshot = Readonly<{
 	source: DataSnapshotSource;
 	seasonCode: string;
@@ -238,6 +247,7 @@ export type TargetedLiveDataSnapshot = Readonly<{
 const coreSnapshotMemo = new WeakMap<object, Promise<CoreDataSnapshot>>();
 const coreFixtureSnapshotMemo = new WeakMap<object, Promise<CoreFixtureSnapshot>>();
 const coreEventSnapshotMemo = new WeakMap<object, Promise<CoreEventSnapshot>>();
+const coreTeamSnapshotMemo = new WeakMap<object, Promise<CoreTeamSnapshot>>();
 const liveSnapshotMemo = new WeakMap<object, Map<number, Promise<LiveDataSnapshot>>>();
 
 type CorePublicationPin = {
@@ -246,6 +256,15 @@ type CorePublicationPin = {
 };
 
 const corePublicationPinMemo = new WeakMap<object, CorePublicationPin>();
+
+const bindCoreRevision = <T extends { revision: string }>(
+	context: GraphQLContext,
+	loading: Promise<T>
+): Promise<T> =>
+	loading.then((snapshot) => {
+		context.dataRevision ??= `core-${snapshot.revision}`;
+		return snapshot;
+	});
 
 const reserveCorePublicationPin = (
 	context: GraphQLContext,
@@ -989,6 +1008,19 @@ const publicationCoreEventSnapshot = (publication: DataPublication): CoreEventSn
 	};
 };
 
+const publicationCoreTeamSnapshot = (publication: DataPublication): CoreTeamSnapshot | null => {
+	const teams = mapArray(publication.items.teams, mapCoreTeam);
+	if (!teams || teams.length === 0 || !hasUniquePositiveIds(teams, (team) => team.id)) return null;
+	return {
+		source: "redis",
+		seasonCode: publication.manifest.seasonCode,
+		revision: String(publication.manifest.revision),
+		publicationId: publication.manifest.publicationId,
+		sourceCheckedAt: publication.manifest.sourceCheckedAt,
+		teams,
+	};
+};
+
 type CoreFallbackRow = QueryResultRow & {
 	authority_count: string | number;
 	publication_id: string | null;
@@ -1047,6 +1079,164 @@ const CORE_FALLBACK_SQL = `
 		), '[]'::jsonb) AS fixtures
 	FROM authority
 `;
+
+type CoreEventFallbackRow = QueryResultRow & {
+	authority_count: string | number;
+	publication_id: string | null;
+	revision: string | number | null;
+	manifest: unknown;
+	source_checked_at: string | Date | null;
+	events: unknown;
+};
+
+type CoreTeamFallbackRow = QueryResultRow & {
+	authority_count: string | number;
+	publication_id: string | null;
+	revision: string | number | null;
+	manifest: unknown;
+	source_checked_at: string | Date | null;
+	teams: unknown;
+};
+
+const CORE_EVENT_FALLBACK_SQL = `
+	WITH active_publication AS MATERIALIZED (
+		SELECT
+			publication_id::text,
+			revision::text,
+			manifest,
+			COALESCE(manifest ->> 'sourceCheckedAt', activated_at::text) AS source_checked_at
+		FROM ops.dataset_publications
+		WHERE dataset = 'fpl:core'
+		  AND season_id = $1
+		  AND event_id IS NULL
+		  AND status = 'active'
+	), authority AS (
+		SELECT
+			count(*)::text AS authority_count,
+			min(publication_id) AS publication_id,
+			min(revision) AS revision,
+			min(manifest::text)::jsonb AS manifest,
+			min(source_checked_at) AS source_checked_at
+		FROM active_publication
+	)
+	SELECT
+		authority.*,
+		COALESCE((
+			SELECT jsonb_agg((to_jsonb(event_row) - 'season_id') ORDER BY event_id)
+			FROM fpl.events event_row WHERE season_id = $1
+		), '[]'::jsonb) AS events
+	FROM authority
+`;
+
+const CORE_TEAM_FALLBACK_SQL = `
+	WITH active_publication AS MATERIALIZED (
+		SELECT
+			publication_id::text,
+			revision::text,
+			manifest,
+			COALESCE(manifest ->> 'sourceCheckedAt', activated_at::text) AS source_checked_at
+		FROM ops.dataset_publications
+		WHERE dataset = 'fpl:core'
+		  AND season_id = $1
+		  AND event_id IS NULL
+		  AND status = 'active'
+	), authority AS (
+		SELECT
+			count(*)::text AS authority_count,
+			min(publication_id) AS publication_id,
+			min(revision) AS revision,
+			min(manifest::text)::jsonb AS manifest,
+			min(source_checked_at) AS source_checked_at
+		FROM active_publication
+	)
+	SELECT
+		authority.*,
+		COALESCE((
+			SELECT jsonb_agg((to_jsonb(team_row) - 'season_id') ORDER BY team_id)
+			FROM fpl.teams team_row WHERE season_id = $1
+		), '[]'::jsonb) AS teams
+	FROM authority
+`;
+
+const validateTargetedCoreAuthority = (
+	context: GraphQLContext,
+	row: CoreEventFallbackRow | CoreTeamFallbackRow | undefined,
+	expectedManifest: DataPublicationManifest | null | undefined
+): { revision: number; sourceCheckedAt: string; publicationId: string } | null => {
+	const revision = integer(row?.revision);
+	const sourceCheckedAt = isoDate(row?.source_checked_at);
+	const manifest = row?.manifest
+		? parseDataPublicationManifest(JSON.stringify(row.manifest), {
+				dataset: "fpl:core",
+				seasonCode: context.currentSeason.seasonCode,
+			})
+		: null;
+	if (
+		!row ||
+		integer(row.authority_count) !== 1 ||
+		typeof row.publication_id !== "string" ||
+		revision === null ||
+		revision <= 0 ||
+		!sourceCheckedAt ||
+		!manifest ||
+		manifest.publicationId !== row.publication_id ||
+		manifest.revision !== revision ||
+		(expectedManifest !== null &&
+			expectedManifest !== undefined &&
+			(manifest.publicationId !== expectedManifest.publicationId ||
+				manifest.revision !== expectedManifest.revision))
+	) {
+		return null;
+	}
+	return { revision, sourceCheckedAt, publicationId: row.publication_id };
+};
+
+const loadCoreEventSnapshotFromPostgres = async (
+	context: GraphQLContext,
+	expectedManifest?: DataPublicationManifest | null
+): Promise<CoreEventSnapshot> => {
+	const result = await context.database.query<CoreEventFallbackRow>(CORE_EVENT_FALLBACK_SQL, [
+		context.currentSeason.seasonId,
+	]);
+	const row = result.rows[0];
+	const authority = validateTargetedCoreAuthority(context, row, expectedManifest);
+	const events = mapArray(row?.events, mapCoreEvent);
+	if (!authority || !events) {
+		throw new Error("Coherent PostgreSQL core event publication is unavailable");
+	}
+	return {
+		source: "postgres",
+		seasonCode: context.currentSeason.seasonCode,
+		revision: String(authority.revision),
+		publicationId: authority.publicationId,
+		sourceCheckedAt: authority.sourceCheckedAt,
+		events,
+		currentEventId: resolveCurrentEventId(events, undefined, authority.sourceCheckedAt),
+	};
+};
+
+const loadCoreTeamSnapshotFromPostgres = async (
+	context: GraphQLContext,
+	expectedManifest?: DataPublicationManifest | null
+): Promise<CoreTeamSnapshot> => {
+	const result = await context.database.query<CoreTeamFallbackRow>(CORE_TEAM_FALLBACK_SQL, [
+		context.currentSeason.seasonId,
+	]);
+	const row = result.rows[0];
+	const authority = validateTargetedCoreAuthority(context, row, expectedManifest);
+	const teams = mapArray(row?.teams, mapCoreTeam);
+	if (!authority || !teams || teams.length === 0) {
+		throw new Error("Coherent PostgreSQL core team publication is unavailable");
+	}
+	return {
+		source: "postgres",
+		seasonCode: context.currentSeason.seasonCode,
+		revision: String(authority.revision),
+		publicationId: authority.publicationId,
+		sourceCheckedAt: authority.sourceCheckedAt,
+		teams,
+	};
+};
 
 const loadCoreSnapshotFromPostgres = async (
 	context: GraphQLContext,
@@ -1751,7 +1941,7 @@ export const getCoreDataSnapshot = (context: GraphQLContext): Promise<CoreDataSn
 	const existing = coreSnapshotMemo.get(requestScope);
 	if (existing) {
 		context.coreSnapshotMemoStatus = "hit";
-		return existing;
+		return bindCoreRevision(context, existing);
 	}
 	context.coreSnapshotMemoStatus = "miss";
 	const publication = reserveCorePublicationPin(context, "publication").publication!;
@@ -1767,7 +1957,7 @@ export const getCoreDataSnapshot = (context: GraphQLContext): Promise<CoreDataSn
 		return loadCoreSnapshotFromPostgres(context, expectedManifest);
 	})();
 	coreSnapshotMemo.set(requestScope, load);
-	return load;
+	return bindCoreRevision(context, load);
 };
 
 const projectCoreFixtureSnapshot = (snapshot: CoreDataSnapshot): CoreFixtureSnapshot => ({
@@ -1780,20 +1970,10 @@ const projectCoreFixtureSnapshot = (snapshot: CoreDataSnapshot): CoreFixtureSnap
 	fixtures: snapshot.fixtures,
 });
 
-const projectCoreEventSnapshot = (snapshot: CoreDataSnapshot): CoreEventSnapshot => ({
-	source: snapshot.source,
-	seasonCode: snapshot.seasonCode,
-	revision: snapshot.revision,
-	publicationId: snapshot.publicationId,
-	sourceCheckedAt: snapshot.sourceCheckedAt,
-	events: snapshot.events,
-	currentEventId: snapshot.currentEventId,
-});
-
 export const getCoreFixtureSnapshot = (context: GraphQLContext): Promise<CoreFixtureSnapshot> => {
 	const requestScope = context.requestScope ?? context;
 	const existing = coreFixtureSnapshotMemo.get(requestScope);
-	if (existing) return existing;
+	if (existing) return bindCoreRevision(context, existing);
 	const load = (async (): Promise<CoreFixtureSnapshot> => {
 		const publication = await readPinnedCorePublicationItems(context, ["teams", "fixtures"]);
 		const snapshot = publication ? publicationCoreFixtureSnapshot(publication) : null;
@@ -1805,25 +1985,45 @@ export const getCoreFixtureSnapshot = (context: GraphQLContext): Promise<CoreFix
 		return projectCoreFixtureSnapshot(await getCoreDataSnapshot(context));
 	})();
 	coreFixtureSnapshotMemo.set(requestScope, load);
-	return load;
+	return bindCoreRevision(context, load);
 };
 
 export const getCoreEventSnapshot = (context: GraphQLContext): Promise<CoreEventSnapshot> => {
 	const requestScope = context.requestScope ?? context;
 	const existing = coreEventSnapshotMemo.get(requestScope);
-	if (existing) return existing;
+	if (existing) return bindCoreRevision(context, existing);
 	const load = (async (): Promise<CoreEventSnapshot> => {
 		const publication = await readPinnedCorePublicationItems(context, ["events", "currentEventId"]);
 		const snapshot = publication ? publicationCoreEventSnapshot(publication) : null;
 		if (snapshot) return snapshot;
 		context.logger.warn(
 			{ season: context.currentSeason.seasonCode },
-			"Core event publication unavailable; using the coherent PostgreSQL core snapshot"
+			"Core event publication unavailable; using the targeted PostgreSQL event snapshot"
 		);
-		return projectCoreEventSnapshot(await getCoreDataSnapshot(context));
+		const expectedManifest = await reserveCorePublicationPin(context, "manifest").manifest;
+		return loadCoreEventSnapshotFromPostgres(context, expectedManifest);
 	})();
 	coreEventSnapshotMemo.set(requestScope, load);
-	return load;
+	return bindCoreRevision(context, load);
+};
+
+export const getCoreTeamSnapshot = (context: GraphQLContext): Promise<CoreTeamSnapshot> => {
+	const requestScope = context.requestScope ?? context;
+	const existing = coreTeamSnapshotMemo.get(requestScope);
+	if (existing) return bindCoreRevision(context, existing);
+	const load = (async (): Promise<CoreTeamSnapshot> => {
+		const publication = await readPinnedCorePublicationItems(context, ["teams"]);
+		const snapshot = publication ? publicationCoreTeamSnapshot(publication) : null;
+		if (snapshot) return snapshot;
+		context.logger.warn(
+			{ season: context.currentSeason.seasonCode },
+			"Core team publication unavailable; using the targeted PostgreSQL team snapshot"
+		);
+		const expectedManifest = await reserveCorePublicationPin(context, "manifest").manifest;
+		return loadCoreTeamSnapshotFromPostgres(context, expectedManifest);
+	})();
+	coreTeamSnapshotMemo.set(requestScope, load);
+	return bindCoreRevision(context, load);
 };
 
 export const getLiveDataSnapshot = (

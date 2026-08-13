@@ -43,9 +43,20 @@ export const eventsTypeDefs = /* GraphQL */ `
 		nextUtcDeadline: DateTime
 	}
 
+	type CoreEventContext {
+		season: String!
+		revision: String!
+		sourceCheckedAt: DateTime!
+		currentEventId: Int
+		nextEventId: Int
+		nextDeadlineTime: DateTime
+		latestFinishedEventId: Int
+	}
+
 	type Query {
 		event(id: Int!): Event
 		events(filter: EventsFilter, limit: Int = 50, offset: Int = 0): [Event!]!
 		currentEventInfo: CurrentEventInfo
+		coreEventContext: CoreEventContext!
 	}
 `;

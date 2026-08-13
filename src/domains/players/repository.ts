@@ -7,10 +7,7 @@ import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cach
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player as InfraPlayer, Team as InfraTeam } from "../../infra/types";
-import {
-	getPlayerSeasonStatsByIdsForContext,
-	resolvePlayerStatsContext,
-} from "./season-stats-at-event";
+import { resolvePlayerStatsContext } from "./season-stats-at-event";
 
 export enum Position {
 	GOALKEEPER = 1,
@@ -112,8 +109,6 @@ const clampLimit = (limit: number): number => {
 	return Math.min(Math.max(safeLimit, 1), 200);
 };
 
-const MARKET_OWNERSHIP_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
-
 export type PlayerPickerTeam = {
 	id: number;
 	name: string;
@@ -138,12 +133,19 @@ export type PlayersForPickerPayload = {
 };
 
 export type PlayerPickerSort =
-	"NAME_ASC" | "TOTAL_POINTS_DESC" | "FORM_DESC" | "PRICE_ASC" | "PRICE_DESC" | "OWNERSHIP_DESC";
+	| "AUTO"
+	| "NAME_ASC"
+	| "TOTAL_POINTS_DESC"
+	| "FORM_DESC"
+	| "PRICE_ASC"
+	| "PRICE_DESC"
+	| "OWNERSHIP_DESC";
 
 // Keep the GraphQL cursor as an Int. Canonical cursors are negative values that
 // bind an offset to the active sort without carrying an internal version.
 const PICKER_CURSOR_SORT_STRIDE = 100_000;
 const PICKER_SORT_CODES: Record<PlayerPickerSort, number> = {
+	AUTO: 7,
 	NAME_ASC: 1,
 	TOTAL_POINTS_DESC: 2,
 	FORM_DESC: 3,
@@ -151,6 +153,47 @@ const PICKER_SORT_CODES: Record<PlayerPickerSort, number> = {
 	PRICE_DESC: 5,
 	OWNERSHIP_DESC: 6,
 };
+
+const clampPickerLimit = (limit: number): number =>
+	Math.min(Math.max(Number.isFinite(limit) ? Math.trunc(limit) : 20, 1), 50);
+
+type SqlPickerRow = QueryResultRow & {
+	id: number;
+	web_name: string;
+	element_type: number;
+	team_id: number;
+	team_name: string;
+	team_short_name: string;
+	price: number;
+	selected_by_percent: number | string | null;
+	total_points: number | string | null;
+	form: number | string | null;
+	total_count: number | string;
+};
+
+const pickerOrderSql: Record<Exclude<PlayerPickerSort, "AUTO">, string> = {
+	NAME_ASC: "lower(web_name) ASC, id ASC",
+	TOTAL_POINTS_DESC: "total_points DESC NULLS LAST, lower(web_name) ASC, id ASC",
+	FORM_DESC: "form DESC NULLS LAST, lower(web_name) ASC, id ASC",
+	PRICE_ASC: "price ASC, lower(web_name) ASC, id ASC",
+	PRICE_DESC: "price DESC, lower(web_name) ASC, id ASC",
+	OWNERSHIP_DESC: "selected_by_percent DESC NULLS LAST, lower(web_name) ASC, id ASC",
+};
+
+const mapSqlPickerRow = (row: SqlPickerRow): PlayerPickerItem => ({
+	id: Number(row.id),
+	webName: row.web_name,
+	position: Number(row.element_type) as Position,
+	team: {
+		id: Number(row.team_id),
+		name: row.team_name,
+		shortName: row.team_short_name,
+	},
+	price: Number(row.price),
+	selectedByPercent: asNullableNumber(row.selected_by_percent),
+	totalPoints: asNullableNumber(row.total_points),
+	form: asNullableNumber(row.form),
+});
 
 const encodePickerCursor = (sort: PlayerPickerSort, offset: number): number =>
 	-(PICKER_SORT_CODES[sort] * PICKER_CURSOR_SORT_STRIDE + offset + 1);
@@ -171,178 +214,6 @@ const decodePickerCursor = (cursor: number | null, sort: PlayerPickerSort): { of
 		});
 	}
 	return { offset };
-};
-
-type DbPickerRow = QueryResultRow & {
-	id: number;
-	web_name: string;
-	element_type: number;
-	team_id: number;
-	team_name: string;
-	team_short_name: string;
-};
-
-type MarketOwnershipRow = {
-	element_id: number;
-	selected_by_percent: number | string | null;
-};
-
-const mapPickerRow = (row: DbPickerRow): PlayerPickerItem => ({
-	id: row.id,
-	webName: row.web_name,
-	position: row.element_type as Position,
-	team: {
-		id: row.team_id,
-		name: row.team_name,
-		shortName: row.team_short_name,
-	},
-	price: 0,
-	selectedByPercent: null,
-	totalPoints: null,
-	form: null,
-});
-
-const getLatestMarketOwnershipByIds = async (
-	context: GraphQLContext,
-	ids: number[]
-): Promise<Map<number, number>> => {
-	if (ids.length === 0) return new Map();
-	try {
-		const latestResult = await context.data
-			.read("fpl.player_market_snapshots")
-			.select("snapshot_date, captured_at")
-			.order("snapshot_date", { ascending: false })
-			.order("captured_at", { ascending: false })
-			.limit(1);
-		if (latestResult.error) {
-			context.logger.warn(
-				{ err: latestResult.error },
-				"Failed to load latest market snapshot date for player picker"
-			);
-			return new Map();
-		}
-		const latestSnapshot = latestResult.data?.[0] as
-			{ snapshot_date?: string; captured_at?: string | null } | undefined;
-		const snapshotDate = latestSnapshot?.snapshot_date;
-		if (!snapshotDate) return new Map();
-		const capturedAt = latestSnapshot?.captured_at;
-		if (
-			!capturedAt ||
-			!Number.isFinite(Date.parse(capturedAt)) ||
-			Date.now() - Date.parse(capturedAt) > MARKET_OWNERSHIP_STALE_AFTER_MS
-		) {
-			return new Map();
-		}
-
-		const ownershipResult = await context.data
-			.read("fpl.player_market_snapshots")
-			.select("element_id, selected_by_percent")
-			.eq("snapshot_date", snapshotDate)
-			.eq("captured_at", capturedAt)
-			.in("element_id", ids);
-		if (ownershipResult.error) {
-			context.logger.warn(
-				{ err: ownershipResult.error, snapshotDate },
-				"Failed to load market ownership for player picker"
-			);
-			return new Map();
-		}
-
-		return new Map(
-			((ownershipResult.data as MarketOwnershipRow[] | null) ?? []).flatMap((row) => {
-				const value = asNullableNumber(row.selected_by_percent);
-				return value === null ? [] : [[row.element_id, value] as const];
-			})
-		);
-	} catch (error) {
-		context.logger.warn({ err: error }, "Failed to load market ownership for player picker");
-		return new Map();
-	}
-};
-
-const enrichPickerItems = async (
-	context: GraphQLContext,
-	rows: DbPickerRow[],
-	statsContext: Awaited<ReturnType<typeof resolvePlayerStatsContext>>,
-	teams?: Map<number, InfraTeam>
-): Promise<PlayerPickerItem[]> => {
-	const items = rows.map(mapPickerRow);
-	if (items.length === 0) return items;
-
-	const ids = items.map((item) => item.id);
-	const [basePlayers, statsById, marketOwnershipById] = await Promise.all([
-		playersRepository.getPlayersByIds(context, ids),
-		getPlayerSeasonStatsByIdsForContext(context, ids, statsContext),
-		getLatestMarketOwnershipByIds(context, ids),
-	]);
-	const baseById = new Map(basePlayers.map((player) => [player.id, player]));
-
-	return items.map((item) => {
-		const base = baseById.get(item.id);
-		const stats = statsById.get(item.id);
-		// Update team from current Player hash when it differs from the DB row.
-		let team = item.team;
-		if (base && teams && base.teamId !== item.team.id) {
-			const current = teams.get(base.teamId);
-			if (current) {
-				team = {
-					id: current.id,
-					name: current.name,
-					shortName: current.shortName,
-				};
-			}
-		}
-		return {
-			...item,
-			team,
-			price: base?.price ?? item.price,
-			selectedByPercent:
-				marketOwnershipById.get(item.id) ??
-				base?.selectedByPercent ??
-				stats?.selectedByPercent ??
-				item.selectedByPercent,
-			totalPoints: stats?.available ? stats.totalPoints : null,
-			form: stats?.available ? stats.form : null,
-		};
-	});
-};
-
-const matchesPickerFilter = (
-	item: PlayerPickerItem,
-	filter: PlayersFilter | undefined
-): boolean => {
-	if (!filter) return true;
-	if (
-		filter.position !== undefined &&
-		filter.position !== null &&
-		item.position !== filter.position
-	)
-		return false;
-	if (filter.teamId !== undefined && filter.teamId !== null && item.team.id !== filter.teamId)
-		return false;
-	if (filter.minPrice !== undefined && filter.minPrice !== null && item.price < filter.minPrice)
-		return false;
-	if (filter.maxPrice !== undefined && filter.maxPrice !== null && item.price > filter.maxPrice)
-		return false;
-	return true;
-};
-
-const matchesPickerOwnershipBand = (
-	selectedByPercent: number | null,
-	band: PlayerPickerOwnershipBand | null | undefined
-): boolean => {
-	if (!band) return true;
-	if (selectedByPercent === null) return false;
-	switch (band) {
-		case "LE5":
-			return selectedByPercent <= 5;
-		case "GT5_LE15":
-			return selectedByPercent > 5 && selectedByPercent <= 15;
-		case "GT15_LE40":
-			return selectedByPercent > 15 && selectedByPercent <= 40;
-		case "GT40":
-			return selectedByPercent > 40;
-	}
 };
 
 export type PlayerTransferStats = {
@@ -616,17 +487,23 @@ export const playersRepository: PlayersRepository = {
 		cursor: number | null | undefined,
 		search?: string | null,
 		filter?: PlayersFilter | null,
-		sort: PlayerPickerSort = "TOTAL_POINTS_DESC",
+		sort: PlayerPickerSort = "AUTO",
 		ownershipBand: PlayerPickerOwnershipBand | null = null
 	): Promise<PlayersForPickerPayload> {
-		const safeLimit = clampLimit(limit);
+		const safeLimit = clampPickerLimit(limit);
+		const statsContext = await resolvePlayerStatsContext(context);
+		const effectiveSort: Exclude<PlayerPickerSort, "AUTO"> =
+			sort === "AUTO"
+				? statsContext.asOfEventId === null
+					? "OWNERSHIP_DESC"
+					: "TOTAL_POINTS_DESC"
+				: sort;
 		const decodedCursor = decodePickerCursor(
 			cursor && Number.isSafeInteger(cursor) ? cursor : null,
 			sort
 		);
 		const safeSearch = search?.trim().slice(0, 50) || null;
 		const safeFilter = normalizeFilter(filter);
-		const statsContext = await resolvePlayerStatsContext(context);
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
 		const cacheKey = gqlCacheKey(
 			context,
@@ -661,72 +538,78 @@ export const playersRepository: PlayersRepository = {
 			return cached;
 		}
 
-		const [snapshot, teams] = await Promise.all([
-			getCoreDataSnapshot(context),
-			buildTeamMap(context),
+		const sql = `
+			WITH latest_market AS MATERIALIZED (
+				SELECT snapshot_date, captured_at
+				FROM fpl.player_market_snapshots
+				WHERE season_id = $1
+				ORDER BY snapshot_date DESC, captured_at DESC
+				LIMIT 1
+			), picker_rows AS MATERIALIZED (
+				SELECT
+					player.element_id AS id,
+					player.web_name,
+					player.element_type,
+					player.team_id,
+					team.name AS team_name,
+					team.short_name AS team_short_name,
+					player.price,
+					COALESCE(market.selected_by_percent, event_stats.selected_by_percent) AS selected_by_percent,
+					COALESCE(event_stats.total_points, player.total_points) AS total_points,
+					event_stats.form
+				FROM fpl.players player
+				JOIN fpl.teams team
+				  ON team.season_id = player.season_id AND team.team_id = player.team_id
+				LEFT JOIN fpl.player_event_snapshots event_stats
+				  ON event_stats.season_id = player.season_id
+				 AND event_stats.element_id = player.element_id
+				 AND event_stats.event_id = $2
+				LEFT JOIN latest_market latest ON TRUE
+				LEFT JOIN fpl.player_market_snapshots market
+				  ON market.season_id = player.season_id
+				 AND market.element_id = player.element_id
+				 AND market.snapshot_date = latest.snapshot_date
+				 AND market.captured_at = latest.captured_at
+				WHERE player.season_id = $1
+				  AND ($3::text IS NULL OR player.web_name ILIKE '%' || $3 || '%')
+				  AND ($4::integer IS NULL OR player.element_type = $4)
+				  AND ($5::integer IS NULL OR player.team_id = $5)
+				  AND ($6::integer IS NULL OR player.price >= $6)
+				  AND ($7::integer IS NULL OR player.price <= $7)
+			), filtered AS (
+				SELECT *
+				FROM picker_rows
+				WHERE $8::text IS NULL
+				   OR ($8 = 'LE5' AND selected_by_percent <= 5)
+				   OR ($8 = 'GT5_LE15' AND selected_by_percent > 5 AND selected_by_percent <= 15)
+				   OR ($8 = 'GT15_LE40' AND selected_by_percent > 15 AND selected_by_percent <= 40)
+				   OR ($8 = 'GT40' AND selected_by_percent > 40)
+			)
+			SELECT filtered.*, count(*) OVER ()::integer AS total_count
+			FROM filtered
+			ORDER BY ${pickerOrderSql[effectiveSort]}
+			LIMIT $9 OFFSET $10
+		`;
+		const result = await context.database.query<SqlPickerRow>(sql, [
+			context.currentSeason.seasonId,
+			statsContext.asOfEventId ?? 0,
+			safeSearch,
+			safeFilter?.position ?? null,
+			safeFilter?.teamId ?? null,
+			safeFilter?.minPrice ?? null,
+			safeFilter?.maxPrice ?? null,
+			ownershipBand,
+			safeLimit,
+			decodedCursor.offset,
 		]);
-		const filteredPlayers = snapshot.players
-			.filter(
-				(player) => !safeSearch || player.webName.toLowerCase().includes(safeSearch.toLowerCase())
-			)
-			.filter((player) => safeFilter?.position === undefined || player.type === safeFilter.position)
-			.filter((player) => safeFilter?.teamId === undefined || player.teamId === safeFilter.teamId)
-			.filter(
-				(player) =>
-					safeFilter?.minPrice === undefined ||
-					safeFilter.minPrice === null ||
-					player.price >= safeFilter.minPrice
-			)
-			.filter(
-				(player) =>
-					safeFilter?.maxPrice === undefined ||
-					safeFilter.maxPrice === null ||
-					player.price <= safeFilter.maxPrice
-			);
-		const allRows: DbPickerRow[] = filteredPlayers.map((player) => ({
-			id: player.id,
-			web_name: player.webName,
-			element_type: player.type,
-			team_id: player.teamId,
-			team_name: teams.get(player.teamId)?.name ?? "",
-			team_short_name: teams.get(player.teamId)?.shortName ?? "",
-		}));
-		const allItems = (await enrichPickerItems(context, allRows, statsContext, teams))
-			.filter((item) => matchesPickerFilter(item, safeFilter))
-			.filter((item) => matchesPickerOwnershipBand(item.selectedByPercent, ownershipBand));
-		const sortNumberDesc = (left: number | null, right: number | null): number =>
-			(right ?? -1) - (left ?? -1);
-		const sortedItems = [...allItems].sort((left, right) => {
-			switch (sort) {
-				case "NAME_ASC":
-					return left.webName.localeCompare(right.webName);
-				case "FORM_DESC":
-					return sortNumberDesc(left.form, right.form) || left.webName.localeCompare(right.webName);
-				case "PRICE_ASC":
-					return left.price - right.price || left.webName.localeCompare(right.webName);
-				case "PRICE_DESC":
-					return right.price - left.price || left.webName.localeCompare(right.webName);
-				case "OWNERSHIP_DESC":
-					return (
-						sortNumberDesc(left.selectedByPercent, right.selectedByPercent) ||
-						left.webName.localeCompare(right.webName)
-					);
-				case "TOTAL_POINTS_DESC":
-				default:
-					return (
-						sortNumberDesc(left.totalPoints, right.totalPoints) ||
-						left.webName.localeCompare(right.webName)
-					);
-			}
-		});
-		const returnedItems = sortedItems.slice(decodedCursor.offset, decodedCursor.offset + safeLimit);
+		const returnedItems = result.rows.map(mapSqlPickerRow);
+		const totalCount = Number(result.rows[0]?.total_count ?? 0);
 		const nextOffset = decodedCursor.offset + returnedItems.length;
-		const nextCursor =
-			nextOffset < sortedItems.length ? encodePickerCursor(sort, nextOffset) : null;
+		const nextCursor = nextOffset < totalCount ? encodePickerCursor(sort, nextOffset) : null;
 		const payload: PlayersForPickerPayload = {
 			items: returnedItems,
 			nextCursor,
-			totalCount: sortedItems.length,
+			totalCount,
 		};
 
 		await writeQueryCache(

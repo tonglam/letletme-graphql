@@ -14,6 +14,73 @@ const queryChain = <T>(result: T, methods: string[]) => {
 	return promise;
 };
 
+const installPickerDatabase = (
+	context: ReturnType<typeof buildSnapshotContext>,
+	core: ReturnType<typeof buildTestCoreData>,
+	ownershipById: Map<number, number> = new Map()
+): (() => number) => {
+	let queryCount = 0;
+	context.database = {
+		query: async (sql: string, values: readonly unknown[] = []) => {
+			queryCount += 1;
+			const search = typeof values[2] === "string" ? values[2].toLowerCase() : null;
+			const position = typeof values[3] === "number" ? values[3] : null;
+			const teamId = typeof values[4] === "number" ? values[4] : null;
+			const minPrice = typeof values[5] === "number" ? values[5] : null;
+			const maxPrice = typeof values[6] === "number" ? values[6] : null;
+			const band = typeof values[7] === "string" ? values[7] : null;
+			const limit = Number(values[8] ?? 20);
+			const offset = Number(values[9] ?? 0);
+			const teams = new Map(core.teams.map((team) => [team.id, team] as const));
+			const bandMatches = (ownership: number | null): boolean => {
+				if (band === null) return true;
+				if (ownership === null) return false;
+				if (band === "LE5") return ownership <= 5;
+				if (band === "GT5_LE15") return ownership > 5 && ownership <= 15;
+				if (band === "GT15_LE40") return ownership > 15 && ownership <= 40;
+				return ownership > 40;
+			};
+			const rows = core.players
+				.map((player) => ({
+					id: player.id,
+					web_name: player.webName,
+					element_type: player.type,
+					team_id: player.teamId,
+					team_name: teams.get(player.teamId)?.name ?? "",
+					team_short_name: teams.get(player.teamId)?.shortName ?? "",
+					price: player.price,
+					selected_by_percent: ownershipById.get(player.id) ?? player.selectedByPercent ?? null,
+					total_points: player.totalPoints,
+					form: null,
+				}))
+				.filter((row) => search === null || row.web_name.toLowerCase().includes(search))
+				.filter((row) => position === null || row.element_type === position)
+				.filter((row) => teamId === null || row.team_id === teamId)
+				.filter((row) => minPrice === null || row.price >= minPrice)
+				.filter((row) => maxPrice === null || row.price <= maxPrice)
+				.filter((row) => bandMatches(row.selected_by_percent));
+			if (sql.includes("lower(web_name) ASC")) {
+				rows.sort((left, right) =>
+					left.web_name.localeCompare(right.web_name, "en", { sensitivity: "base" })
+				);
+			} else if (sql.includes("selected_by_percent DESC")) {
+				rows.sort(
+					(left, right) => (right.selected_by_percent ?? -1) - (left.selected_by_percent ?? -1)
+				);
+			} else {
+				rows.sort((left, right) => right.total_points - left.total_points);
+			}
+			return {
+				rows: rows.slice(offset, offset + limit).map((row) => ({
+					...row,
+					total_count: rows.length,
+				})),
+			};
+		},
+	} as never;
+	return () => queryCount;
+};
+
 describe("playersRepository core reads", () => {
 	it("pins one immutable core revision per request and exposes a newer revision to a new request", async () => {
 		const core = buildTestCoreData(1);
@@ -78,39 +145,7 @@ describe("playersRepository.getPlayersForPicker", () => {
 		const core = buildTestCoreData(null);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
 		const context = buildSnapshotContext(redis);
-		let marketReads = 0;
-		context.data = {
-			read: (table: string) => {
-				if (table === "fpl.events") {
-					return queryChain({ data: [], error: null }, ["select", "lte", "order", "limit"]);
-				}
-				if (table === "fpl.player_market_snapshots") {
-					return {
-						select: (fields: string) => {
-							marketReads += 1;
-							return fields === "snapshot_date, captured_at"
-								? queryChain(
-										{
-											data: [
-												{
-													snapshot_date: "2026-08-09",
-													captured_at: new Date().toISOString(),
-												},
-											],
-											error: null,
-										},
-										["order", "limit"]
-									)
-								: queryChain(
-										{ data: [{ element_id: 1, selected_by_percent: "74.6" }], error: null },
-										["eq", "in"]
-									);
-						},
-					};
-				}
-				throw new Error(`Unexpected reporting table ${table}`);
-			},
-		} as never;
+		const queryCount = installPickerDatabase(context, core, new Map([[1, 74.6]]));
 
 		const first = await playersRepository.getPlayersForPicker(context, 1, null, "Player 1");
 		const second = await playersRepository.getPlayersForPicker(context, 1, null, "Player 1");
@@ -122,7 +157,7 @@ describe("playersRepository.getPlayersForPicker", () => {
 		expect(first.nextCursor).toEqual(expect.any(Number));
 		expect(first.nextCursor).toBeLessThan(0);
 		expect(second).toEqual(first);
-		expect(marketReads).toBe(2);
+		expect(queryCount()).toBe(1);
 		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":players-picker:"));
 		expect(cacheWrite?.[0]).toMatch(/^llm:gql:core-7:players-picker:/);
 		expect(cacheWrite?.slice(-2)).toEqual(["EX", 300]);
@@ -140,30 +175,7 @@ describe("playersRepository.getPlayersForPicker", () => {
 		});
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
 		const context = buildSnapshotContext(redis);
-		context.data = {
-			read: (table: string) => {
-				if (table === "fpl.events") {
-					return queryChain({ data: [], error: null }, ["select", "lte", "order", "limit"]);
-				}
-				if (table === "fpl.player_market_snapshots") {
-					return {
-						select: (fields: string) =>
-							fields === "snapshot_date, captured_at"
-								? queryChain(
-										{
-											data: [
-												{ snapshot_date: "2026-08-09", captured_at: new Date().toISOString() },
-											],
-											error: null,
-										},
-										["order", "limit"]
-									)
-								: queryChain({ data: [], error: null }, ["eq", "in"]),
-					};
-				}
-				throw new Error(`Unexpected reporting table ${table}`);
-			},
-		} as never;
+		installPickerDatabase(context, core);
 
 		const result = await playersRepository.getPlayersForPicker(
 			context,
@@ -240,19 +252,7 @@ describe("playersRepository.getPlayersForPicker", () => {
 		});
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
 		const context = buildSnapshotContext(redis);
-		context.data = {
-			read: (table: string) => {
-				if (table === "fpl.events") {
-					return queryChain({ data: [], error: null }, ["select", "lte", "order", "limit"]);
-				}
-				if (table === "fpl.player_market_snapshots") {
-					return {
-						select: () => queryChain({ data: [], error: null }, ["order", "limit"]),
-					};
-				}
-				throw new Error(`Unexpected reporting table ${table}`);
-			},
-		} as never;
+		installPickerDatabase(context, core, ownershipById);
 
 		const expectedIds = {
 			LE5: [1],
