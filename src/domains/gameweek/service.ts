@@ -253,11 +253,11 @@ const resolveHistoricalTeamIds = async (
 	try {
 		const result = await context.database.query<{ player_code: number; team_id: number }>(
 			`SELECT DISTINCT ON (player_code) player_code, team_id
-			 FROM fpl.player_fixture_stats
-			 WHERE season_id = $1
-			   AND player_code = ANY($2::integer[])
-			   AND event_id <= $3
-			 ORDER BY player_code, event_id DESC, fixture_id DESC`,
+				 FROM fpl.player_fixture_stats
+				 WHERE season_id = $1
+				   AND player_code = ANY($2::integer[])
+				   AND event_id ${eventId === currentEventId ? "= $3" : "<= $3"}
+				 ORDER BY player_code, event_id DESC, fixture_id DESC`,
 			[context.currentSeason.seasonId, playerCodes, eventId]
 		);
 		const teamByCode = new Map(
@@ -391,6 +391,18 @@ export const gameweekService = {
 			} catch (error) {
 				context.logger.warn({ err: error, eventId }, "Gameweek boards are unavailable");
 			}
+		}
+
+		// Core fixtures can advance before the independently published live snapshot.
+		// Keep the public desk internally consistent until the live publication catches up.
+		if (lifecycle === "SCHEDULED") {
+			overviewState = "PENDING";
+			overview = null;
+			boardsState = "PENDING";
+			dreamTeam = [];
+			hauls = [];
+			liveRevision = null;
+			publishedAt = null;
 		}
 
 		return {

@@ -99,9 +99,12 @@ describe("gameweekDesk", () => {
 			source: deskQuery,
 			variableValues: { eventId: 1 },
 			contextValue: buildSnapshotContext(redis, {
-				databaseQuery: async () => ({
-					rows: [{ player_code: core.players[0]!.code, team_id: 2 }],
-				}),
+				databaseQuery: async (query) => {
+					expect(String(query)).toContain("event_id = $3");
+					return {
+						rows: [{ player_code: core.players[0]!.code, team_id: 2 }],
+					};
+				},
 			}),
 		});
 
@@ -112,6 +115,44 @@ describe("gameweekDesk", () => {
 			overviewState: "PENDING",
 			boardsState: "AVAILABLE",
 			dreamTeam: [{ id: core.players[0]!.id, position: "GOALKEEPER", teamShortName: "T02" }],
+		});
+	});
+
+	it("keeps scheduled sections pending when live metadata lags core fixtures", async () => {
+		const baseCore = buildTestCoreData(1);
+		const core = buildTestCoreData(1, {
+			fixtures: baseCore.fixtures.map((fixture, index) =>
+				index === 0 ? { ...fixture, started: true } : fixture
+			),
+		});
+		const eventLives = buildTestEventLives(core, 1).map((row, index) =>
+			index === 0 ? { ...row, inDreamTeam: true } : row
+		);
+		const redis = new TestRedis(
+			buildCorePublication("2627", 7, core),
+			buildLivePublication(core, 1, "2627", 8, {
+				state: "scheduled",
+				eventLives,
+				fixtures: baseCore.fixtures.filter((fixture) => fixture.eventId === 1),
+			})
+		);
+		const result = await graphql({
+			schema,
+			source: deskQuery,
+			variableValues: { eventId: 1 },
+			contextValue: buildSnapshotContext(redis, {
+				databaseQuery: async () => ({ rows: [] }),
+			}),
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.gameweekDesk).toMatchObject({
+			lifecycle: "SCHEDULED",
+			overviewState: "PENDING",
+			boardsState: "PENDING",
+			overview: null,
+			dreamTeam: [],
+			hauls: [],
 		});
 	});
 
