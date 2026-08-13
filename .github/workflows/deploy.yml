@@ -299,9 +299,7 @@ jobs:
                     docker compose rm --stop --force graphql || true
                 fi
               fi
-              if [ "${controller_committed:-false}" = true ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
-                rm -f "$previous_env"
-              elif [ "$env_promoted" = false ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
+              if [ "$env_promoted" = false ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
                 rm -f "$previous_env"
               fi
               if [ "$controller_committed" = true ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
