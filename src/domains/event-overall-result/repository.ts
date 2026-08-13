@@ -36,7 +36,7 @@ export type EventResult = {
 };
 
 export interface EventOverallResultRepository {
-	getEventOverallResult(context: GraphQLContext): Promise<EventResult[]>;
+	getEventOverallResult(context: GraphQLContext, eventId?: number | null): Promise<EventResult[]>;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -78,8 +78,15 @@ function mapEventResult(row: CoreEventData): EventResult {
 }
 
 export const eventOverallResultRepository: EventOverallResultRepository = {
-	async getEventOverallResult(context: GraphQLContext): Promise<EventResult[]> {
+	async getEventOverallResult(
+		context: GraphQLContext,
+		eventId?: number | null
+	): Promise<EventResult[]> {
 		const snapshot = await getCoreDataSnapshot(context);
-		return snapshot.events.map(mapEventResult).sort((left, right) => left.event - right.event);
+		const results = snapshot.events
+			.map(mapEventResult)
+			.sort((left, right) => left.event - right.event);
+		if (eventId === undefined || eventId === null) return results;
+		return results.filter((result) => result.event === eventId);
 	},
 };

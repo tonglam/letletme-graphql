@@ -71,11 +71,11 @@ export const eventOverallResultResolvers = {
 	Query: {
 		eventOverallResult: async (
 			_parent: unknown,
-			_args: Record<string, never>,
+			_args: { eventId?: number | null },
 			context: GraphQLContext
 		): Promise<EventResult[]> =>
 			measureEventOverallResultStage(context, () =>
-				eventOverallResultService.getEventOverallResult(context)
+				eventOverallResultService.getEventOverallResult(context, _args.eventId)
 			),
 	},
 	EventResult: {
