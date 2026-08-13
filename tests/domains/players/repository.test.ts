@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 import { playersRepository } from "../../../src/domains/players/repository";
 import {
 	buildCorePublication,
@@ -141,6 +142,11 @@ describe("playersRepository core reads", () => {
 });
 
 describe("playersRepository.getPlayersForPicker", () => {
+	it("keeps the pinned picker CTE chain syntactically flat", () => {
+		const source = readFileSync("src/domains/players/repository.ts", "utf8");
+		expect(source.match(/latest_market AS MATERIALIZED/g)).toHaveLength(1);
+	});
+
 	it("uses the core publication, reporting stats, and a normally expiring query cache", async () => {
 		const core = buildTestCoreData(null);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
