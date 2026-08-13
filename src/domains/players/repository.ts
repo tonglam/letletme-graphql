@@ -243,7 +243,7 @@ const isPinnedCoreRevisionBackedByPostgres = async (context: GraphQLContext): Pr
 };
 
 const pickerItemFromCore = (
-	player: InfraPlayer,
+	player: Awaited<ReturnType<typeof getCoreDataSnapshot>>["players"][number],
 	team: InfraTeam | undefined
 ): PlayerPickerItem | null => {
 	if (!team) return null;
@@ -284,8 +284,8 @@ const getPlayersForPickerFromPinnedCore = async (
 		.filter((player) => !safeSearch || player.webName.toLowerCase().includes(safeSearch))
 		.filter((player) => safeFilter?.position === undefined || player.type === safeFilter.position)
 		.filter((player) => safeFilter?.teamId === undefined || player.teamId === safeFilter.teamId)
-		.filter((player) => safeFilter?.minPrice === undefined || player.price >= safeFilter.minPrice)
-		.filter((player) => safeFilter?.maxPrice === undefined || player.price <= safeFilter.maxPrice)
+		.filter((player) => safeFilter?.minPrice == null || player.price >= safeFilter.minPrice)
+		.filter((player) => safeFilter?.maxPrice == null || player.price <= safeFilter.maxPrice)
 		.filter((player) => matchesBand(player.selectedByPercent))
 		.map((player) => pickerItemFromCore(player, teams.get(player.teamId)))
 		.filter((item): item is PlayerPickerItem => item !== null);
