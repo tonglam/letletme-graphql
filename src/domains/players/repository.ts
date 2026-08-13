@@ -680,7 +680,6 @@ export const playersRepository: PlayersRepository = {
 				  AND revision::text = $11
 				LIMIT 1
 			), latest_market AS MATERIALIZED (
-			WITH latest_market AS MATERIALIZED (
 				SELECT snapshot_date, captured_at
 				FROM fpl.player_market_snapshots
 				WHERE season_id = $1
