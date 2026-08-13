@@ -87,9 +87,6 @@ jobs:
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV
           script: |
             set -euo pipefail
-            # The host maintenance controller is handled separately; keep the deployment lock and rollback local.
-            exec 9>/run/letletme-vps-ops/maintenance.lock
-            flock -w 300 9 || { echo "another VPS deployment or cleanup is running" >&2; exit 75; }
             deployment_started=false
             deployment_committed=false
             env_promoted=false
