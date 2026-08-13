@@ -3,15 +3,25 @@ import {
 	type GraphQLIngress,
 	WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT,
 } from "../../src/infra/ingress-context";
+import type { Principal } from "../../src/infra/principal";
 import {
-	graphQLAdmissionSubjects,
+	GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
+	GRAPHQL_RATE_LIMIT_SCOPES,
 	GRAPHQL_SHARED_PUBLIC_RATE_LIMIT,
 	graphQLIngressFailure,
 	graphQLMethodFailure,
+	graphQLPreAuthRateLimitChecks,
+	graphQLPrincipalAdmission,
 	graphQLUsesSharedPublicBudget,
-	graphQLWeightedRateLimitSubject,
-	shouldPrechargeResolvedPrincipal,
+	hasAuthenticationMaterial,
+	type GraphQLRateLimitConfig,
 } from "../../src/http/graphql-policy";
+
+const config: GraphQLRateLimitConfig = {
+	browserIngress: 120,
+	authenticated: 300,
+	anonymous: 120,
+};
 
 const ingress = (overrides: Partial<GraphQLIngress>): GraphQLIngress => ({
 	class: "untrusted",
@@ -21,7 +31,15 @@ const ingress = (overrides: Partial<GraphQLIngress>): GraphQLIngress => ({
 	...overrides,
 });
 
-describe("GraphQL transport and ingress policy", () => {
+const principal = (userId: string): Principal => ({
+	userId,
+	source: "website",
+	provider: "better_auth",
+	fplEntryId: null,
+	fplEntryVerifiedAt: null,
+});
+
+describe("GraphQL transport and two-stage admission policy", () => {
 	it("accepts POST and preflight but rejects GET", () => {
 		expect(graphQLMethodFailure("POST")).toBeNull();
 		expect(graphQLMethodFailure("OPTIONS")).toBeNull();
@@ -31,14 +49,11 @@ describe("GraphQL transport and ingress policy", () => {
 		});
 	});
 
-	it("rejects every untrusted request", () => {
+	it("rejects untrusted requests while accepting signed and service ingress", () => {
 		expect(graphQLIngressFailure(ingress({}))).toMatchObject({
 			status: 401,
 			code: "UNTRUSTED_INGRESS",
 		});
-	});
-
-	it("accepts signed and service ingress", () => {
 		expect(
 			graphQLIngressFailure(ingress({ class: "signed", trusted: true, subject: "signed" }))
 		).toBeNull();
@@ -47,32 +62,65 @@ describe("GraphQL transport and ingress policy", () => {
 		).toBeNull();
 	});
 
-	it("uses the trusted ingress subject for admission and weighted limits", () => {
-		const signed = ingress({ class: "signed", trusted: true, subject: "signed-client" });
-		expect(graphQLAdmissionSubjects({ ingress: signed, principal: null })).toEqual({
-			global: "all-graphql-traffic",
-			ingress: "signed-client",
-			prechargesWeightedBudget: true,
-		});
-		expect(graphQLWeightedRateLimitSubject({ ingress: signed, principal: null })).toBe(
-			"signed-client"
+	it("uses fixed-cost global and browser ingress buckets before authentication", () => {
+		const checks = graphQLPreAuthRateLimitChecks(
+			ingress({ class: "signed", trusted: true, subject: "one-nat" }),
+			config
 		);
+
+		expect(checks).toHaveLength(2);
+		expect(checks.map(({ scope, limit, cost }) => ({ scope, limit, cost }))).toEqual([
+			{
+				scope: GRAPHQL_RATE_LIMIT_SCOPES.ingress,
+				limit: GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
+				cost: 1,
+			},
+			{ scope: GRAPHQL_RATE_LIMIT_SCOPES.ingress, limit: 120, cost: 1 },
+		]);
+		expect(checks[0]?.key).not.toBe(checks[1]?.key);
 	});
 
-	it("precharges a principal only when the ingress did not already consume a unit", () => {
-		const principal = {
-			userId: "user-1",
-			source: "wechat_miniprogram" as const,
-			provider: "wechat_miniprogram" as const,
-			fplEntryId: 7,
-			fplEntryVerifiedAt: "2026-08-03T00:00:00.000Z",
-		};
-		expect(shouldPrechargeResolvedPrincipal(principal, false)).toBe(true);
-		expect(shouldPrechargeResolvedPrincipal(principal, true)).toBe(false);
-		expect(shouldPrechargeResolvedPrincipal(null, false)).toBe(false);
+	it("isolates authenticated weighted budgets behind the same NAT ingress gate", () => {
+		const signed = ingress({ class: "signed", trusted: true, subject: "one-nat" });
+		const firstPreAuth = graphQLPreAuthRateLimitChecks(signed, config);
+		const secondPreAuth = graphQLPreAuthRateLimitChecks(signed, config);
+		const first = graphQLPrincipalAdmission({
+			ingress: signed,
+			principal: principal("user-1"),
+			cost: 30,
+			config,
+		});
+		const second = graphQLPrincipalAdmission({
+			ingress: signed,
+			principal: principal("user-2"),
+			cost: 30,
+			config,
+		});
+
+		expect(firstPreAuth[1]?.key).toBe(secondPreAuth[1]?.key);
+		expect(first.audience).toBe("authenticated");
+		expect(first.check).toMatchObject({
+			scope: GRAPHQL_RATE_LIMIT_SCOPES.authenticated,
+			limit: 300,
+			cost: 30,
+		});
+		expect(first.check.key).not.toBe(second.check.key);
 	});
 
-	it("assigns the larger shared-public budget only to trusted Web public ingress", () => {
+	it("keeps anonymous requests on the signed ingress subject", () => {
+		const signed = ingress({ class: "signed", trusted: true, subject: "one-nat" });
+		const first = graphQLPrincipalAdmission({ ingress: signed, principal: null, cost: 30, config });
+		const second = graphQLPrincipalAdmission({ ingress: signed, principal: null, cost: 1, config });
+		expect(first.audience).toBe("anonymous");
+		expect(first.check).toMatchObject({
+			scope: GRAPHQL_RATE_LIMIT_SCOPES.anonymous,
+			limit: 120,
+			cost: 30,
+		});
+		expect(first.check.key).toBe(second.check.key);
+	});
+
+	it("assigns one shared 1200-unit budget to public RSC and service ingress", () => {
 		const service = ingress({ class: "service", trusted: true, subject: "service-public" });
 		const publicRsc = ingress({
 			class: "signed",
@@ -83,11 +131,40 @@ describe("GraphQL transport and ingress policy", () => {
 		expect(graphQLUsesSharedPublicBudget(service)).toBe(true);
 		expect(graphQLUsesSharedPublicBudget(publicRsc)).toBe(true);
 		expect(graphQLUsesSharedPublicBudget(otherSigned)).toBe(false);
+
+		const serviceAdmission = graphQLPrincipalAdmission({
+			ingress: service,
+			principal: null,
+			cost: 41,
+			config,
+		});
+		const rscAdmission = graphQLPrincipalAdmission({
+			ingress: publicRsc,
+			principal: null,
+			cost: 41,
+			config,
+		});
+		expect(serviceAdmission.check.key).toBe(rscAdmission.check.key);
+		expect(serviceAdmission.check).toMatchObject({
+			scope: GRAPHQL_RATE_LIMIT_SCOPES.sharedPublic,
+			limit: GRAPHQL_SHARED_PUBLIC_RATE_LIMIT,
+			cost: 41,
+		});
+		expect(GRAPHQL_SHARED_PUBLIC_RATE_LIMIT).toBeGreaterThanOrEqual(41 * 20);
 	});
 
-	it("keeps enough bounded shared-public budget for twenty uncached Home renders", () => {
-		const homeWeightedCost = 41;
-		expect(GRAPHQL_SHARED_PUBLIC_RATE_LIMIT).toBeGreaterThanOrEqual(homeWeightedCost * 20);
-		expect(GRAPHQL_SHARED_PUBLIC_RATE_LIMIT).toBe(1_200);
+	it("uses only the four versioned Redis scopes", () => {
+		expect(GRAPHQL_RATE_LIMIT_SCOPES).toEqual({
+			ingress: "graphql-ingress-v2",
+			authenticated: "graphql-authenticated-v2",
+			anonymous: "graphql-anonymous-v2",
+			sharedPublic: "graphql-shared-public-v2",
+		});
+	});
+
+	it("detects invalid credential material before weighted admission", () => {
+		expect(hasAuthenticationMaterial(new Headers({ Authorization: "Bearer invalid" }))).toBe(true);
+		expect(hasAuthenticationMaterial(new Headers({ "X-User-Context": "invalid" }))).toBe(true);
+		expect(hasAuthenticationMaterial(new Headers())).toBe(false);
 	});
 });

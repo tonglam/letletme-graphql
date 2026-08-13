@@ -1,4 +1,5 @@
 import { parseDatabasePoolMax } from "./database-pool-config";
+import { parsePositiveIntegerEnv } from "./env-value";
 
 type EnvKey =
 	| "NODE_ENV"
@@ -14,7 +15,10 @@ type EnvKey =
 	| "METRICS_TOKEN"
 	| "CORS_ORIGIN"
 	| "CORS_CREDENTIALS"
-	| "TRUSTED_PROXY_HOPS";
+	| "TRUSTED_PROXY_HOPS"
+	| "GRAPHQL_BROWSER_INGRESS_RATE_LIMIT"
+	| "GRAPHQL_AUTHENTICATED_RATE_LIMIT"
+	| "GRAPHQL_ANONYMOUS_RATE_LIMIT";
 
 const readEnv = (key: EnvKey): string | undefined => {
 	const value = Bun.env[key];
@@ -42,6 +46,10 @@ const readNumber = (key: EnvKey, fallback: number): number => {
 		throw new Error(`Invalid number for env: ${key}`);
 	}
 	return parsed;
+};
+
+const readPositiveInteger = (key: EnvKey, fallback: number): number => {
+	return parsePositiveIntegerEnv(readEnv(key), key, fallback);
 };
 
 const NODE_ENV = readEnv("NODE_ENV") ?? "development";
@@ -95,4 +103,13 @@ export const env = {
 	CORS_ORIGIN,
 	CORS_CREDENTIALS,
 	TRUSTED_PROXY_HOPS,
+
+	// Two-stage GraphQL admission. The global and shared-public ceilings remain
+	// fixed operational safety contracts; these three are deploy-tunable.
+	GRAPHQL_BROWSER_INGRESS_RATE_LIMIT: readPositiveInteger(
+		"GRAPHQL_BROWSER_INGRESS_RATE_LIMIT",
+		120
+	),
+	GRAPHQL_AUTHENTICATED_RATE_LIMIT: readPositiveInteger("GRAPHQL_AUTHENTICATED_RATE_LIMIT", 300),
+	GRAPHQL_ANONYMOUS_RATE_LIMIT: readPositiveInteger("GRAPHQL_ANONYMOUS_RATE_LIMIT", 120),
 } as const;
