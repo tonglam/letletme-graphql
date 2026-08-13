@@ -538,40 +538,71 @@ const isMarketPulse = (value: unknown): value is MarketPulse =>
 	Array.isArray(value.newPlayers) &&
 	Array.isArray(value.priceChanges);
 
+const marketPulseFlights = new WeakMap<object, Map<string, Promise<MarketPulse>>>();
+
+const runMarketPulseFlight = (
+	context: GraphQLContext,
+	cacheKey: string,
+	load: () => Promise<MarketPulse>
+): Promise<MarketPulse> => {
+	const identity = context.redis as object;
+	let flights = marketPulseFlights.get(identity);
+	if (!flights) {
+		flights = new Map();
+		marketPulseFlights.set(identity, flights);
+	}
+	const existing = flights.get(cacheKey);
+	if (existing) return existing;
+
+	const flight = load();
+	flights.set(cacheKey, flight);
+	const clearFlight = (): void => {
+		if (flights?.get(cacheKey) === flight) flights.delete(cacheKey);
+	};
+	void flight.then(clearFlight, clearFlight);
+	return flight;
+};
+
 export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRepository => ({
 	async getMarketPulse(context: GraphQLContext, requestedDays: number): Promise<MarketPulse> {
 		const cacheKey = gqlCacheKey(context, `market-pulse:${requestedDays}`);
-
-		try {
-			const cached = await context.redis.get(cacheKey);
-			if (cached !== null) {
-				try {
-					const parsed: unknown = JSON.parse(cached);
-					if (isMarketPulse(parsed)) return parsed;
-				} catch (error) {
-					context.logger.warn({ err: error, cacheKey }, "Malformed market pulse cache");
+		return runMarketPulseFlight(context, cacheKey, async () => {
+			try {
+				const cached = await context.redis.get(cacheKey);
+				if (cached !== null) {
+					try {
+						const parsed: unknown = JSON.parse(cached);
+						if (isMarketPulse(parsed)) return parsed;
+					} catch (error) {
+						context.logger.warn({ err: error, cacheKey }, "Malformed market pulse cache");
+					}
+					await context.redis.del(cacheKey);
 				}
-				await context.redis.del(cacheKey);
+			} catch (error) {
+				context.logger.warn({ err: error, cacheKey }, "Failed to read market pulse cache");
 			}
-		} catch (error) {
-			context.logger.warn({ err: error, cacheKey }, "Failed to read market pulse cache");
-		}
 
-		let rows: MarketSnapshotRow[];
-		try {
-			const result = await (queryExecutor ?? context.database).query(MARKET_QUERY, [
-				context.currentSeason.seasonId,
-				requestedDays,
-			]);
-			rows = result.rows as MarketSnapshotRow[];
-		} catch (error) {
-			context.logger.error({ err: error, requestedDays }, "Failed to query market snapshots");
-			throw new Error("Failed to query market snapshots", { cause: error });
-		}
+			let rows: MarketSnapshotRow[];
+			try {
+				const result = await (queryExecutor ?? context.database).query(MARKET_QUERY, [
+					context.currentSeason.seasonId,
+					requestedDays,
+				]);
+				rows = result.rows as MarketSnapshotRow[];
+			} catch (error) {
+				context.logger.error({ err: error, requestedDays }, "Failed to query market snapshots");
+				throw new Error("Failed to query market snapshots", { cause: error });
+			}
 
-		const pulse = buildMarketPulse(rows, requestedDays);
-		await writeQueryCache(context, cacheKey, JSON.stringify(pulse), QUERY_CACHE_TTL_SECONDS.MARKET);
-		return pulse;
+			const pulse = buildMarketPulse(rows, requestedDays);
+			await writeQueryCache(
+				context,
+				cacheKey,
+				JSON.stringify(pulse),
+				QUERY_CACHE_TTL_SECONDS.MARKET
+			);
+			return pulse;
+		});
 	},
 });
 

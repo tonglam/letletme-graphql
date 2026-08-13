@@ -91,6 +91,51 @@ describe("Data publication reader", () => {
 		expect(mgetCalls).toBe(2);
 	});
 
+	it("coalesces concurrent reads of the same immutable item set", async () => {
+		const base = publication();
+		const redis = new TestRedis(base);
+		let mgetCalls = 0;
+		let getCalls = 0;
+		let release!: () => void;
+		let markStarted!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const originalGet = redis.get;
+		const originalMget = redis.mget;
+		redis.get = async (key: string) => {
+			getCalls += 1;
+			return originalGet(key);
+		};
+		redis.mget = async (...keys: string[]) => {
+			mgetCalls += 1;
+			markStarted();
+			await gate;
+			return originalMget(...keys);
+		};
+
+		const reads = Array.from({ length: 20 }, () =>
+			readDataPublication(redis as never, scope, expectedItems)
+		);
+		await started;
+		release();
+		const results = await Promise.all(reads);
+
+		expect(mgetCalls).toBe(1);
+		expect(getCalls).toBe(1);
+		expect(results.every((result) => result === results[0])).toBe(true);
+
+		const cachedReads = await Promise.all(
+			Array.from({ length: 20 }, () => readDataPublication(redis as never, scope, expectedItems))
+		);
+		expect(mgetCalls).toBe(1);
+		expect(getCalls).toBe(2);
+		expect(cachedReads.every((result) => result === results[0])).toBe(true);
+	});
+
 	it("loads only the requested items and fills the same cached revision on demand", async () => {
 		const base = publication();
 		const redis = new TestRedis(base);
