@@ -85,6 +85,7 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 15m
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,RUN_ID,RUN_ATTEMPT
           script: |
             set -euo pipefail
@@ -257,8 +258,8 @@ jobs:
                     mv "$previous_env" .env.deploy
                     chmod 600 .env.deploy
                     rollback_env=.env.deploy
-                  elif [ "$env_promoted" = true ]; then
-                    rm -f .env.deploy
+                  elif [ "$env_promoted" = true ] && [ -f .env.deploy ]; then
+                    rollback_env=.env.deploy
                   fi
                   APP_ENV_FILE="$rollback_env" APP_IMAGE="$old_image" docker compose up \
                     -d --no-deps --no-build --force-recreate graphql
@@ -290,6 +291,9 @@ jobs:
                     fi
                   fi
                 fi
+              fi
+              if [ "$env_promoted" = false ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
+                rm -f "$previous_env"
               fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ]; then
                 VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment fail \
