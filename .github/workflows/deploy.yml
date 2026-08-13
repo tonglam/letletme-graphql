@@ -403,7 +403,6 @@ jobs:
             chmod 600 .env.deploy
             env_promoted=true
 
-            deployment_committed=true
             if [ -n "$old_image" ]; then
               printf '%s\n' "$old_image" > "$HOME/.letletme-graphql-previous-image"
               chmod 600 "$HOME/.letletme-graphql-previous-image"
@@ -411,10 +410,22 @@ jobs:
             if [ -n "$previous_env" ]; then
               rm -f "$previous_env"
             fi
+            deployment_committed=true
             finish_stage
-            docker system df || true
             rollback_armed=false
             trap - EXIT
+            previous_image=""
+            if [ -f "$HOME/.letletme-graphql-previous-image" ]; then
+              previous_image=$(cat "$HOME/.letletme-graphql-previous-image")
+            fi
+            scoped_repo_digests=$(docker image ls --digests --format '{{.Repository}}@{{.Digest}}' \
+              --filter "reference=${image_name}@sha256:*" | sort -u)
+            while IFS= read -r digest_ref; do
+              if [ -z "$digest_ref" ] || [ "$digest_ref" = "$IMAGE_REF" ] || [ "$digest_ref" = "$previous_image" ]; then
+                continue
+              fi
+              docker image rm "$digest_ref" || echo "unable to remove obsolete image reference: $digest_ref" >&2
+            done <<< "$scoped_repo_digests"
             scoped_dangling_images=$(docker image ls --quiet \
               --filter "reference=${image_name}:*" \
               --filter dangling=true | sort -u)
@@ -423,6 +434,7 @@ jobs:
                 docker image rm "$dangling_image"
               fi
             done <<< "$scoped_dangling_images"
+            docker system df || true
             if [ -n "$old_image" ]; then
               docker image inspect "$old_image" >/dev/null
             fi
