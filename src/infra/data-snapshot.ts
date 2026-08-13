@@ -558,6 +558,19 @@ const hasCompleteCoreIdentity = (
 	);
 };
 
+const hasCompleteCoreEventIdentity = (events: readonly CoreEventData[]): boolean => {
+	if (
+		events.length !== EXPECTED_EVENT_COUNT ||
+		!hasUniquePositiveIds(events, (event) => event.id)
+	) {
+		return false;
+	}
+	const eventIds = new Set(events.map((event) => event.id));
+	return Array.from({ length: EXPECTED_EVENT_COUNT }, (_, index) => index + 1).every((eventId) =>
+		eventIds.has(eventId)
+	);
+};
+
 const mapCoreEvent = (row: Record<string, unknown>): CoreEventData | null => {
 	const id = integer(pick(row, "id", "event_id"));
 	const name = string(row.name);
@@ -996,7 +1009,7 @@ const publicationCoreFixtureSnapshot = (
 const publicationCoreEventSnapshot = (publication: DataPublication): CoreEventSnapshot | null => {
 	const events = mapArray(publication.items.events, mapCoreEvent);
 	const currentEventId = integer(publication.items.currentEventId);
-	if (!events) return null;
+	if (!events || !hasCompleteCoreEventIdentity(events)) return null;
 	return {
 		source: "redis",
 		seasonCode: publication.manifest.seasonCode,
@@ -1201,7 +1214,7 @@ const loadCoreEventSnapshotFromPostgres = async (
 	const row = result.rows[0];
 	const authority = validateTargetedCoreAuthority(context, row, expectedManifest);
 	const events = mapArray(row?.events, mapCoreEvent);
-	if (!authority || !events) {
+	if (!authority || !events || !hasCompleteCoreEventIdentity(events)) {
 		throw new Error("Coherent PostgreSQL core event publication is unavailable");
 	}
 	return {

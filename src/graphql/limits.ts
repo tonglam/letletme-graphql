@@ -381,7 +381,7 @@ const accepted = ({
 		shape,
 		weightedComplexity,
 		rateLimitCostUnits: optimizedDirectoryRequest
-			? 5
+			? 5 * rootFields.length
 			: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
 		rootFields: rootFields.map((field) => field.name),
 	};

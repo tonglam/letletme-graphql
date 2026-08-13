@@ -157,6 +157,8 @@ const PICKER_SORT_CODES: Record<PlayerPickerSort, number> = {
 const clampPickerLimit = (limit: number): number =>
 	Math.min(Math.max(Number.isFinite(limit) ? Math.trunc(limit) : 20, 1), 50);
 
+const MARKET_OWNERSHIP_STALE_AFTER_HOURS = 36;
+
 type SqlPickerRow = QueryResultRow & {
 	id: number;
 	web_name: string;
@@ -214,6 +216,113 @@ const decodePickerCursor = (cursor: number | null, sort: PlayerPickerSort): { of
 		});
 	}
 	return { offset };
+};
+
+const isPinnedCoreRevisionBackedByPostgres = async (context: GraphQLContext): Promise<boolean> => {
+	const revision = context.dataRevision?.match(/^core-(.+)$/)?.[1];
+	if (!revision) return false;
+	try {
+		const result = await context.database.query<{ revision: string }>(
+			`SELECT revision::text AS revision
+			 FROM ops.dataset_publications
+			 WHERE dataset = 'fpl:core'
+			   AND season_id = $1
+			   AND event_id IS NULL
+			   AND status = 'active'
+			 LIMIT 1`,
+			[context.currentSeason.seasonId]
+		);
+		return result.rows[0]?.revision === revision;
+	} catch (error) {
+		context.logger.warn(
+			{ err: error },
+			"Failed to validate picker core revision against PostgreSQL"
+		);
+		return false;
+	}
+};
+
+const pickerItemFromCore = (
+	player: InfraPlayer,
+	team: InfraTeam | undefined
+): PlayerPickerItem | null => {
+	if (!team) return null;
+	return {
+		id: player.id,
+		webName: player.webName,
+		position: player.type as Position,
+		team: { id: team.id, name: team.name, shortName: team.shortName },
+		price: player.price,
+		selectedByPercent: player.selectedByPercent,
+		totalPoints: player.totalPoints,
+		form: null,
+	};
+};
+
+const getPlayersForPickerFromPinnedCore = async (
+	context: GraphQLContext,
+	limit: number,
+	cursor: number | null | undefined,
+	search: string | null | undefined,
+	filter: PlayersFilter | null | undefined,
+	sort: Exclude<PlayerPickerSort, "AUTO">,
+	ownershipBand: PlayerPickerOwnershipBand | null
+): Promise<PlayersForPickerPayload> => {
+	const snapshot = await getCoreDataSnapshot(context);
+	const teams = new Map(snapshot.teams.map((team) => [team.id, team] as const));
+	const safeSearch = search?.trim().slice(0, 50).toLowerCase() || null;
+	const safeFilter = normalizeFilter(filter);
+	const matchesBand = (ownership: number | null): boolean => {
+		if (ownershipBand === null) return true;
+		if (ownership === null) return false;
+		if (ownershipBand === "LE5") return ownership <= 5;
+		if (ownershipBand === "GT5_LE15") return ownership > 5 && ownership <= 15;
+		if (ownershipBand === "GT15_LE40") return ownership > 15 && ownership <= 40;
+		return ownership > 40;
+	};
+	const items = snapshot.players
+		.filter((player) => !safeSearch || player.webName.toLowerCase().includes(safeSearch))
+		.filter((player) => safeFilter?.position === undefined || player.type === safeFilter.position)
+		.filter((player) => safeFilter?.teamId === undefined || player.teamId === safeFilter.teamId)
+		.filter((player) => safeFilter?.minPrice === undefined || player.price >= safeFilter.minPrice)
+		.filter((player) => safeFilter?.maxPrice === undefined || player.price <= safeFilter.maxPrice)
+		.filter((player) => matchesBand(player.selectedByPercent))
+		.map((player) => pickerItemFromCore(player, teams.get(player.teamId)))
+		.filter((item): item is PlayerPickerItem => item !== null);
+	items.sort((left, right) => {
+		const text = (value: string): string => value.toLowerCase();
+		switch (sort) {
+			case "NAME_ASC":
+				return text(left.webName).localeCompare(text(right.webName)) || left.id - right.id;
+			case "TOTAL_POINTS_DESC":
+				return (
+					(right.totalPoints ?? -Infinity) - (left.totalPoints ?? -Infinity) || left.id - right.id
+				);
+			case "FORM_DESC":
+				return left.id - right.id;
+			case "PRICE_ASC":
+				return left.price - right.price || left.id - right.id;
+			case "PRICE_DESC":
+				return right.price - left.price || left.id - right.id;
+			case "OWNERSHIP_DESC":
+				return (
+					(right.selectedByPercent ?? -Infinity) - (left.selectedByPercent ?? -Infinity) ||
+					left.id - right.id
+				);
+		}
+	});
+	const decodedCursor = decodePickerCursor(
+		cursor && Number.isSafeInteger(cursor) ? cursor : null,
+		sort
+	);
+	const totalCount = items.length;
+	const page = items.slice(decodedCursor.offset, decodedCursor.offset + limit);
+	const nextOffset = decodedCursor.offset + page.length;
+	return {
+		items: page,
+		nextCursor: nextOffset < totalCount ? encodePickerCursor(sort, nextOffset) : null,
+		totalCount,
+	};
 };
 
 export type PlayerTransferStats = {
@@ -500,7 +609,7 @@ export const playersRepository: PlayersRepository = {
 				: sort;
 		const decodedCursor = decodePickerCursor(
 			cursor && Number.isSafeInteger(cursor) ? cursor : null,
-			sort
+			effectiveSort
 		);
 		const safeSearch = search?.trim().slice(0, 50) || null;
 		const safeFilter = normalizeFilter(filter);
@@ -537,12 +646,35 @@ export const playersRepository: PlayersRepository = {
 		if (cached) {
 			return cached;
 		}
+		const pinnedCoreRevision = context.dataRevision?.match(/^core-(\d+)$/)?.[1];
+		if (!pinnedCoreRevision) {
+			return getPlayersForPickerFromPinnedCore(
+				context,
+				safeLimit,
+				cursor,
+				search,
+				filter,
+				effectiveSort,
+				ownershipBand
+			);
+		}
 
 		const sql = `
+			WITH pinned_core AS MATERIALIZED (
+				SELECT 1
+				FROM ops.dataset_publications
+				WHERE dataset = 'fpl:core'
+				  AND season_id = $1
+				  AND event_id IS NULL
+				  AND status = 'active'
+				  AND revision::text = $11
+				LIMIT 1
+			), latest_market AS MATERIALIZED (
 			WITH latest_market AS MATERIALIZED (
 				SELECT snapshot_date, captured_at
 				FROM fpl.player_market_snapshots
 				WHERE season_id = $1
+				  AND captured_at >= NOW() - INTERVAL '${MARKET_OWNERSHIP_STALE_AFTER_HOURS} hours'
 				ORDER BY snapshot_date DESC, captured_at DESC
 				LIMIT 1
 			), picker_rows AS MATERIALIZED (
@@ -571,6 +703,7 @@ export const playersRepository: PlayersRepository = {
 				 AND market.snapshot_date = latest.snapshot_date
 				 AND market.captured_at = latest.captured_at
 				WHERE player.season_id = $1
+				  AND EXISTS (SELECT 1 FROM pinned_core)
 				  AND ($3::text IS NULL OR player.web_name ILIKE '%' || $3 || '%')
 				  AND ($4::integer IS NULL OR player.element_type = $4)
 				  AND ($5::integer IS NULL OR player.team_id = $5)
@@ -590,7 +723,7 @@ export const playersRepository: PlayersRepository = {
 			ORDER BY ${pickerOrderSql[effectiveSort]}
 			LIMIT $9 OFFSET $10
 		`;
-		const result = await context.database.query<SqlPickerRow>(sql, [
+		const pickerParams = [
 			context.currentSeason.seasonId,
 			statsContext.asOfEventId ?? 0,
 			safeSearch,
@@ -601,11 +734,32 @@ export const playersRepository: PlayersRepository = {
 			ownershipBand,
 			safeLimit,
 			decodedCursor.offset,
-		]);
+			pinnedCoreRevision,
+		];
+		const result = await context.database.query<SqlPickerRow>(sql, pickerParams);
 		const returnedItems = result.rows.map(mapSqlPickerRow);
-		const totalCount = Number(result.rows[0]?.total_count ?? 0);
+		if (returnedItems.length === 0 && !(await isPinnedCoreRevisionBackedByPostgres(context))) {
+			return getPlayersForPickerFromPinnedCore(
+				context,
+				safeLimit,
+				cursor,
+				search,
+				filter,
+				effectiveSort,
+				ownershipBand
+			);
+		}
+		let totalCount = Number(result.rows[0]?.total_count ?? NaN);
+		if (!Number.isFinite(totalCount)) {
+			const countResult = await context.database.query<{ total_count: number | string }>(
+				`${sql.slice(0, sql.lastIndexOf("SELECT filtered.*"))}SELECT count(*)::integer AS total_count FROM filtered`,
+				[...pickerParams.slice(0, 8), null, null, pinnedCoreRevision]
+			);
+			totalCount = Number(countResult.rows[0]?.total_count ?? 0);
+		}
 		const nextOffset = decodedCursor.offset + returnedItems.length;
-		const nextCursor = nextOffset < totalCount ? encodePickerCursor(sort, nextOffset) : null;
+		const nextCursor =
+			nextOffset < totalCount ? encodePickerCursor(effectiveSort, nextOffset) : null;
 		const payload: PlayersForPickerPayload = {
 			items: returnedItems,
 			nextCursor,

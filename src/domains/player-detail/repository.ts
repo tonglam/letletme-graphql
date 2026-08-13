@@ -460,10 +460,20 @@ async function loadTeamFixtureDesk(
 
 		const lastEventId = Math.min(38, fromEventId + UPCOMING_GAMEWEEK_LIMIT - 1);
 		const eventsWithTeamFixtures = new Set(mapped.map((fixture) => fixture.event));
+		const eventsWithAnyFixtures = new Set(
+			fixtureSnapshot.fixtures
+				.filter((fixture) => fixture.eventId !== null)
+				.map((fixture) => fixture.eventId as number)
+		);
 		const knownEvents = new Set(eventSnapshot.events.map((event) => event.id));
 
 		for (let event = fromEventId; event <= lastEventId; event += 1) {
-			if (eventsWithTeamFixtures.has(event) || !knownEvents.has(event)) continue;
+			if (
+				eventsWithTeamFixtures.has(event) ||
+				!knownEvents.has(event) ||
+				!eventsWithAnyFixtures.has(event)
+			)
+				continue;
 			mapped.push({
 				id: -event,
 				event,
