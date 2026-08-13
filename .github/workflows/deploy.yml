@@ -137,6 +137,11 @@ jobs:
             trap fail_without_rollback_on_exit EXIT
             image_name=${IMAGE_REF%@*}
             [[ "$image_name" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]]
+            maintenance_controller=/usr/local/libexec/vps-maintenance
+            if [ ! -x "$maintenance_controller" ]; then
+              echo "missing root-owned VPS maintenance controller: $maintenance_controller" >&2
+              exit 78
+            fi
             case "$VPS_WORKDIR" in
               /*) ;;
               *) echo "VPS_WORKDIR must be an absolute path"; exit 1 ;;
