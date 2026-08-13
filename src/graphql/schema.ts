@@ -11,6 +11,8 @@ import { eventStatsResolvers } from "../domains/event-stats/resolvers";
 import { eventStatsTypeDefs } from "../domains/event-stats/schema";
 import { eventsResolvers } from "../domains/events/resolvers";
 import { eventsTypeDefs } from "../domains/events/schema";
+import { gameweekResolvers } from "../domains/gameweek/resolvers";
+import { gameweekTypeDefs } from "../domains/gameweek/schema";
 import { fixturesResolvers } from "../domains/fixtures/resolvers";
 import { fixturesTypeDefs } from "../domains/fixtures/schema";
 import { leaguesResolvers } from "../domains/leagues/resolvers";
@@ -44,6 +46,7 @@ export const schema = makeExecutableSchema({
 		baseTypeDefs, // Must be first to define Query and Mutation
 		authTypeDefs,
 		eventsTypeDefs,
+		gameweekTypeDefs,
 		playersTypeDefs,
 		playerValuesTypeDefs,
 		fixturesTypeDefs,
@@ -66,6 +69,7 @@ export const schema = makeExecutableSchema({
 		baseResolvers,
 		authResolvers,
 		eventsResolvers,
+		gameweekResolvers,
 		playersResolvers,
 		playerValuesResolvers,
 		fixturesResolvers,
