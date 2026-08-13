@@ -48,6 +48,7 @@ type CachedPublication = Readonly<{
 }>;
 
 const publicationCache = new WeakMap<object, Map<string, CachedPublication>>();
+const publicationReadFlights = new WeakMap<object, Map<string, Promise<DataPublicationRead>>>();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -242,6 +243,16 @@ const getPublicationCache = (redis: Redis): Map<string, CachedPublication> => {
 	return cache;
 };
 
+const getPublicationReadFlights = (redis: Redis): Map<string, Promise<DataPublicationRead>> => {
+	const identity = redis as object;
+	let flights = publicationReadFlights.get(identity);
+	if (!flights) {
+		flights = new Map();
+		publicationReadFlights.set(identity, flights);
+	}
+	return flights;
+};
+
 const READ_PUBLICATION_ITEMS_SCRIPT = `
 local raw_manifest = redis.call('GET', KEYS[1])
 if not raw_manifest then
@@ -369,16 +380,12 @@ export const readDataPublicationItemsAtManifest = async (
 	}
 };
 
-export const readDataPublicationItemsObserved = async (
+const readDataPublicationItemsObservedUncoalesced = async (
 	redis: Redis,
 	scope: DataPublicationScope,
 	requiredItemNames: readonly string[]
 ): Promise<DataPublicationRead> => {
-	assertScope(scope);
-	const uniqueItemNames = [...new Set(requiredItemNames)];
-	if (uniqueItemNames.length === 0) {
-		return { publication: null, observedManifest: null };
-	}
+	const uniqueItemNames = requiredItemNames;
 	const activeKey = activeDataPublicationKey(scope);
 	const cache = getPublicationCache(redis);
 	let observedManifest: DataPublicationManifest | null = null;
@@ -431,6 +438,32 @@ export const readDataPublicationItemsObserved = async (
 		cache.delete(activeKey);
 		return { publication: null, observedManifest };
 	}
+};
+
+export const readDataPublicationItemsObserved = (
+	redis: Redis,
+	scope: DataPublicationScope,
+	requiredItemNames: readonly string[]
+): Promise<DataPublicationRead> => {
+	assertScope(scope);
+	const uniqueItemNames = [...new Set(requiredItemNames)];
+	if (uniqueItemNames.length === 0) {
+		return Promise.resolve({ publication: null, observedManifest: null });
+	}
+
+	const activeKey = activeDataPublicationKey(scope);
+	const flightKey = `${activeKey}\0${[...uniqueItemNames].sort().join("\0")}`;
+	const flights = getPublicationReadFlights(redis);
+	const existing = flights.get(flightKey);
+	if (existing) return existing;
+
+	const flight = readDataPublicationItemsObservedUncoalesced(redis, scope, uniqueItemNames);
+	flights.set(flightKey, flight);
+	const clearFlight = (): void => {
+		if (flights.get(flightKey) === flight) flights.delete(flightKey);
+	};
+	void flight.then(clearFlight, clearFlight);
+	return flight;
 };
 
 export const readDataPublicationItems = async (

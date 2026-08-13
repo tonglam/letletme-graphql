@@ -297,6 +297,37 @@ describe("market repository caching", () => {
 		expect(context.writes[0]?.ttl).toBe(300);
 	});
 
+	it("coalesces concurrent cache misses into one database query", async () => {
+		const context = buildContext();
+		let queries = 0;
+		let release!: () => void;
+		let markStarted!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const repository = createMarketRepository({
+			query: async () => {
+				queries += 1;
+				markStarted();
+				await gate;
+				return { rows: [baseRow("2026-08-03", 1)] };
+			},
+		});
+
+		const reads = Array.from({ length: 20 }, () => repository.getMarketPulse(context.context, 14));
+		await started;
+		expect(queries).toBe(1);
+		release();
+		const results = await Promise.all(reads);
+
+		expect(queries).toBe(1);
+		expect(context.writes).toHaveLength(1);
+		expect(results.every((result) => result === results[0])).toBe(true);
+	});
+
 	it("returns a shaped cache without querying the database", async () => {
 		const context = buildContext(JSON.stringify(emptyMarketPulse(14)));
 		let queries = 0;
