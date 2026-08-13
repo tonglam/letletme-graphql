@@ -56,6 +56,9 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		rosterMode: TournamentRosterMode!
 		rosterSyncStatus: TournamentSetupStatus
 		rosterLastSyncedAt: DateTime
+		officialScheduleHash: String
+		officialScheduleSyncedAt: DateTime
+		officialScheduleLockedAt: DateTime
 		totalTeamNum: Int!
 		tournamentMode: TournamentMode!
 		groupMode: GroupMode
@@ -282,6 +285,69 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		opponentChip: Chip
 	}
 
+	enum OfficialH2HMatchPhase {
+		REGULAR
+		KNOCKOUT
+	}
+
+	type OfficialH2HStanding {
+		entryId: Int!
+		entryName: String
+		playerName: String
+		rank: Int
+		matchPoints: Int!
+		played: Int!
+		won: Int!
+		drawn: Int!
+		lost: Int!
+		pointsFor: Int!
+	}
+
+	type OfficialH2HMatchSide {
+		entryId: Int
+		entryName: String!
+		playerName: String
+		isAverage: Boolean!
+		points: Int
+		matchPoints: Int
+	}
+
+	type OfficialH2HMatch {
+		officialMatchId: Int!
+		eventId: Int!
+		sourceOrder: Int!
+		phase: OfficialH2HMatchPhase!
+		knockoutName: String
+		isBye: Boolean!
+		home: OfficialH2HMatchSide!
+		away: OfficialH2HMatchSide!
+		winnerEntryId: Int
+		tiebreak: String
+		sourceCheckedAt: DateTime
+	}
+
+	type TournamentOfficialH2H {
+		tournament: TournamentInfo!
+		eventId: Int!
+		awaitingSchedule: Boolean!
+		standings: [OfficialH2HStanding!]!
+		matches: [OfficialH2HMatch!]!
+	}
+
+	type EntryOfficialH2HDeskItem {
+		tournamentId: Int!
+		tournamentName: String!
+		totalTeams: Int!
+		eventId: Int!
+		awaitingSchedule: Boolean!
+		isLive: Boolean!
+		isFinal: Boolean!
+		rank: Int
+		lastRank: Int
+		matchPoints: Int!
+		match: OfficialH2HMatch
+	}
+
 	extend type Query {
 		entryTournaments(entryId: Int!): [TournamentInfo!]!
 		tournament(tournamentId: Int!, entryId: Int!): TournamentInfo
@@ -301,5 +367,7 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		tournamentSeasonSnapshot(tournamentId: Int!, eventId: Int!): TournamentSeasonSnapshot!
 		tournamentBattleGroupResults(tournamentId: Int!, eventId: Int!): [TournamentBattleGroupResult!]!
 		entryH2HMatchResults(entryId: Int!): [EntryH2HMatchResult!]!
+		tournamentOfficialH2H(tournamentId: Int!, eventId: Int!): TournamentOfficialH2H!
+		entryOfficialH2HDesk(entryId: Int!): [EntryOfficialH2HDeskItem!]!
 	}
 `;

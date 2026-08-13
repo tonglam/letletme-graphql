@@ -12,6 +12,8 @@ import {
 	mapTournamentBattleGroupResult,
 	mapTournamentEventResult,
 	mapTournamentInfo,
+	projectHistoricalOfficialH2HStandings,
+	resolveOfficialH2HReferenceEventId,
 	TournamentMode,
 	TournamentRosterMode,
 	TournamentSetupPhase,
@@ -30,6 +32,94 @@ const testCacheKey = (key: string): string =>
 		} as GraphQLContext,
 		key
 	);
+
+describe("projectHistoricalOfficialH2HStandings", () => {
+	it("ranks saved official results by match points then Points For with shared ranks", () => {
+		const rows: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 1,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 101,
+				home_net_points: 50,
+				home_rank: null,
+				home_match_points: 3,
+				away_entry_id: 102,
+				away_net_points: 40,
+				away_rank: null,
+				away_match_points: 0,
+			},
+			{
+				id: 2,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 103,
+				home_net_points: 50,
+				home_rank: null,
+				home_match_points: 3,
+				away_entry_id: null,
+				away_net_points: 40,
+				away_rank: null,
+				away_match_points: 0,
+				home_is_average: false,
+				away_is_average: true,
+			},
+		];
+
+		expect(projectHistoricalOfficialH2HStandings([101, 102, 103, 104], rows)).toEqual([
+			{
+				entryId: 101,
+				rank: 1,
+				matchPoints: 3,
+				played: 1,
+				won: 1,
+				drawn: 0,
+				lost: 0,
+				pointsFor: 50,
+			},
+			{
+				entryId: 103,
+				rank: 1,
+				matchPoints: 3,
+				played: 1,
+				won: 1,
+				drawn: 0,
+				lost: 0,
+				pointsFor: 50,
+			},
+			{
+				entryId: 102,
+				rank: 3,
+				matchPoints: 0,
+				played: 1,
+				won: 0,
+				drawn: 0,
+				lost: 1,
+				pointsFor: 40,
+			},
+			{ entryId: 104, rank: 4, matchPoints: 0, played: 0, won: 0, drawn: 0, lost: 0, pointsFor: 0 },
+		]);
+	});
+});
+
+describe("resolveOfficialH2HReferenceEventId", () => {
+	it("uses current, then next, and treats every GW as historical after the season", () => {
+		expect(
+			resolveOfficialH2HReferenceEventId([
+				{ id: 4, finished: false, data_checked: false, is_current: true, is_next: false },
+				{ id: 5, finished: false, data_checked: false, is_current: false, is_next: true },
+			])
+		).toBe(4);
+		expect(
+			resolveOfficialH2HReferenceEventId([
+				{ id: 1, finished: false, data_checked: false, is_current: false, is_next: true },
+			])
+		).toBe(1);
+		expect(resolveOfficialH2HReferenceEventId([])).toBe(39);
+	});
+});
 
 type QueryAction = { type: string; args: unknown[] };
 
@@ -127,6 +217,9 @@ describe("mapTournamentInfo", () => {
 			rosterMode: TournamentRosterMode.SNAPSHOT,
 			rosterSyncStatus: null,
 			rosterLastSyncedAt: null,
+			officialScheduleHash: null,
+			officialScheduleSyncedAt: null,
+			officialScheduleLockedAt: null,
 			totalTeamNum: 32,
 			tournamentMode: TournamentMode.NORMAL,
 			groupMode: GroupMode.POINTS_RACES,

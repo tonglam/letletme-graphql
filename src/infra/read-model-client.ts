@@ -27,6 +27,8 @@ export const READ_MODELS = {
 	tournaments: "competition.tournaments",
 	tournamentEntries: "competition.tournament_entries",
 	tournamentBattleGroupResults: "competition.tournament_battle_group_results",
+	tournamentGroups: "competition.tournament_groups",
+	tournamentKnockoutResults: "competition.tournament_knockout_results",
 	tournamentSelectionStats: "reporting.tournament_selection_stats",
 	tournamentEventResults: "reporting.tournament_event_results",
 	tournamentEntryEventSummaries: "reporting.tournament_entry_event_summaries",
@@ -708,6 +710,9 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 				roster_sync_status,
 				roster_last_synced_at,
 				roster_sync_error,
+				official_schedule_hash,
+				official_schedule_synced_at,
+				official_schedule_locked_at,
 				setup_phase,
 				setup_completed_units,
 				setup_total_units,
@@ -749,9 +754,69 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 				away_net_points,
 				away_rank,
 				away_match_points,
+				official_match_id,
+				source_order,
+				home_is_average,
+				away_is_average,
+				is_bye,
+				source_checked_at,
 				created_at,
 				updated_at
 			FROM competition.tournament_battle_group_results
+			WHERE season_id = $1
+		`,
+	},
+	[READ_MODELS.tournamentGroups]: {
+		sourceRelations: ["competition.tournament_groups"],
+		sql: `
+			SELECT
+				source_group_row_id AS id,
+				tournament_id,
+				group_id,
+				group_name,
+				group_index,
+				entry_id,
+				started_event_id,
+				ended_event_id,
+				group_points,
+				group_rank,
+				played,
+				won,
+				drawn,
+				lost,
+				total_points,
+				total_transfers_cost,
+				total_net_points,
+				qualified,
+				overall_rank,
+				created_at,
+				updated_at
+			FROM competition.tournament_groups
+			WHERE season_id = $1
+		`,
+	},
+	[READ_MODELS.tournamentKnockoutResults]: {
+		sourceRelations: ["competition.tournament_knockout_results"],
+		sql: `
+			SELECT
+				source_result_id AS id,
+				tournament_id,
+				event_id,
+				match_id,
+				play_against_id,
+				home_entry_id,
+				home_net_points,
+				away_entry_id,
+				away_net_points,
+				match_winner,
+				official_match_id,
+				source_order,
+				knockout_name,
+				tiebreak,
+				source_checked_at,
+				created_at,
+				updated_at
+			FROM competition.tournament_knockout_results
 			WHERE season_id = $1
 		`,
 	},
