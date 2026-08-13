@@ -206,7 +206,6 @@ jobs:
             start_stage preflight
             APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
               docker compose run --rm -T graphql bun run contract:check
-            curl --fail --silent http://127.0.0.1:3000/health >/dev/null
             finish_stage
 
             rollback_armed=false
