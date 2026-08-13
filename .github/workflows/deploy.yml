@@ -129,7 +129,7 @@ jobs:
                 rm -f "$previous_env"
               fi
               if [ "$original_status" -ne 0 ] && [ "${deployment_started:-false}" = true ] && [ "${deployment_committed:-false}" = false ]; then
-                VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment fail \
+                VPS_MAINTENANCE_LOCK_FD=9 /usr/local/libexec/vps-maintenance deployment fail \
                   --service=graphql --run-id="$deployment_run_id" --reason="deploy exit $original_status" >/dev/null || true
               fi
               exit "$original_status"
@@ -231,7 +231,7 @@ jobs:
               docker image inspect "$old_image" >/dev/null
             fi
 
-            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment begin \
+            VPS_MAINTENANCE_LOCK_FD=9 /usr/local/libexec/vps-maintenance deployment begin \
               --service=graphql --run-id="$deployment_run_id" --old-image="$old_image" --new-image="$IMAGE_REF" >/dev/null
             deployment_started=true
 
@@ -306,7 +306,7 @@ jobs:
                 rm -f "$previous_env"
               fi
               if [ "$original_status" -ne 0 ] && [ "$deployment_started" = true ] && [ "$deployment_committed" = false ] && [ "$controller_committed" = false ]; then
-                VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment fail \
+                VPS_MAINTENANCE_LOCK_FD=9 /usr/local/libexec/vps-maintenance deployment fail \
                   --service=graphql --run-id="$deployment_run_id" --reason="deploy exit $original_status" >/dev/null || true
               fi
               rm -f "$next_env"
@@ -424,7 +424,7 @@ jobs:
             chmod 600 .env.deploy
             env_promoted=true
 
-            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment commit \
+            VPS_MAINTENANCE_LOCK_FD=9 /usr/local/libexec/vps-maintenance deployment commit \
               --service=graphql --run-id="$deployment_run_id" >/dev/null
             controller_committed=true
             deployment_committed=true
@@ -436,7 +436,7 @@ jobs:
               rm -f "$previous_env"
             fi
             finish_stage
-            VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance cleanup \
+            VPS_MAINTENANCE_LOCK_FD=9 /usr/local/libexec/vps-maintenance cleanup \
               --mode=deploy --service=graphql || true
             docker system df || true
             rollback_armed=false
