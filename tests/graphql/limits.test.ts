@@ -172,6 +172,14 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 40 });
 	});
 
+	it("charges official H2H detail and Team Desk roots for their multi-read projections", () => {
+		const result = validateGraphQLRequestLimits({
+			query:
+				"query { tournamentOfficialH2H(tournamentId: 1, eventId: 3) { eventId } entryOfficialH2HDesk(entryId: 7) { tournamentId } }",
+		});
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 60 });
+	});
+
 	it("charges every aliased liveScores full-event lookup", () => {
 		const result = validateGraphQLRequestLimits({
 			query:

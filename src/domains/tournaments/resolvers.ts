@@ -51,10 +51,12 @@ const getCaptainByIdMemoized = async (
 
 import type {
 	EntryH2HMatchResult,
+	EntryOfficialH2HDeskItem,
 	TournamentBattleGroupResult,
 	TournamentEntryRankingSummary,
 	TournamentEventResult,
 	TournamentInfo,
+	TournamentOfficialH2H,
 	TournamentMode,
 	TournamentParticipant,
 	TournamentSeasonSnapshot,
@@ -108,6 +110,15 @@ type TournamentBattleGroupResultsArgs = {
 };
 
 type EntryH2HMatchResultsArgs = {
+	entryId: number;
+};
+
+type TournamentOfficialH2HArgs = {
+	tournamentId: number;
+	eventId: number;
+};
+
+type EntryOfficialH2HDeskArgs = {
 	entryId: number;
 };
 
@@ -290,6 +301,22 @@ export const tournamentsResolvers = {
 			context: GraphQLContext
 		): Promise<EntryH2HMatchResult[]> =>
 			tournamentsService.getEntryH2HMatchResults(context, args.entryId),
+
+		tournamentOfficialH2H: async (
+			_parent: unknown,
+			args: TournamentOfficialH2HArgs,
+			context: GraphQLContext
+		): Promise<TournamentOfficialH2H> => {
+			await assertTournamentStandingsReady(context, args.tournamentId);
+			return tournamentsService.getTournamentOfficialH2H(context, args.tournamentId, args.eventId);
+		},
+
+		entryOfficialH2HDesk: async (
+			_parent: unknown,
+			args: EntryOfficialH2HDeskArgs,
+			context: GraphQLContext
+		): Promise<EntryOfficialH2HDeskItem[]> =>
+			tournamentsService.getEntryOfficialH2HDesk(context, args.entryId),
 	},
 	TournamentInfo: {
 		leagueType: (parent: TournamentInfo): string => leagueTypeToEnum(parent.leagueType),

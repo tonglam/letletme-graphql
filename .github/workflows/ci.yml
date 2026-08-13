@@ -117,7 +117,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tonglam/letletme_data
-          ref: 7308844dfb8c6c703d259b547e1c56682468daa9
+          # Pin the Data contract that contains the official H2H mirror migration.
+          ref: 8ce8e3b0003a61b6392374dda36f8e53c015c024
           path: data-platform
           persist-credentials: false
 
