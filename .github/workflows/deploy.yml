@@ -80,18 +80,19 @@ jobs:
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
           GRAPHQL_ENV: ${{ secrets.GRAPHQL_ENV }}
           RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,RUN_ID
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,RUN_ID,RUN_ATTEMPT
           script: |
             set -euo pipefail
             exec 9>/run/letletme-vps-ops/maintenance.lock
             flock -w 300 9 || { echo "another VPS deployment or cleanup is running" >&2; exit 75; }
             deployment_started=false
             deployment_committed=false
-            deployment_run_id="${RUN_ID:-graphql-${DEPLOY_SHA}}"
+            deployment_run_id="${RUN_ID:-graphql-${DEPLOY_SHA}}-${RUN_ATTEMPT:-1}"
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
             active_stage=""
@@ -382,10 +383,6 @@ jobs:
             finish_stage
 
             start_stage finalize
-            if [ -n "$old_image" ]; then
-              printf '%s\n' "$old_image" > "$HOME/.letletme-graphql-previous-image"
-              chmod 600 "$HOME/.letletme-graphql-previous-image"
-            fi
             finish_stage
 
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance deployment commit \
@@ -393,6 +390,10 @@ jobs:
             deployment_committed=true
             mv "$next_env" .env.deploy
             chmod 600 .env.deploy
+            if [ -n "$old_image" ]; then
+              printf '%s\n' "$old_image" > "$HOME/.letletme-graphql-previous-image"
+              chmod 600 "$HOME/.letletme-graphql-previous-image"
+            fi
             VPS_MAINTENANCE_LOCK_HELD=1 /usr/local/libexec/vps-maintenance cleanup \
               --mode=deploy --service=graphql || true
             docker system df || true
