@@ -346,6 +346,7 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		lastRank: Int
 		matchPoints: Int!
 		match: OfficialH2HMatch
+		matches: [OfficialH2HMatch!]!
 	}
 
 	extend type Query {

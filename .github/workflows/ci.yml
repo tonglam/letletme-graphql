@@ -118,7 +118,7 @@ jobs:
         with:
           repository: tonglam/letletme_data
           # Pin the Data contract that contains the official H2H mirror migration.
-          ref: da77ecbeedec1169e84c387a9b1781284ec2747b
+          ref: 61a27f87acfd99f1a731422b97abf3a23a34fd27
           path: data-platform
           persist-credentials: false
 
