@@ -76,9 +76,7 @@ describe("production deployment workflow", () => {
 		expect(workflow.indexOf("trap rollback_graphql_on_exit EXIT")).toBeGreaterThan(
 			workflow.indexOf("start_stage preflight")
 		);
-		expect(workflow).not.toMatch(
-			/if \[ .*deployment_started.*\]; then\s*fi/
-		);
+		expect(workflow).not.toMatch(/if \[ .*deployment_started.*\]; then\s*fi/);
 	});
 
 	test("does not hardcode retired generation-prefixed migration filenames", () => {
