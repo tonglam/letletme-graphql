@@ -105,8 +105,8 @@ const lifecycleFromLiveState = (
 	context: CoreEventContext,
 	eventId: number
 ): GameweekLifecycleState => {
-	if (meta?.state === "scheduled") return "SCHEDULED";
 	if (meta?.state === "settled" || (event.finished && event.dataChecked)) return "SETTLED";
+	if (meta?.state === "scheduled") return "SCHEDULED";
 	if (meta?.state === "live") return "PROVISIONAL";
 	if (isScheduledLifecycle(event, fixtures, context, eventId)) return "SCHEDULED";
 	return "PROVISIONAL";
@@ -239,12 +239,12 @@ const resolveHistoricalTeamIds = async (
 	context: GraphQLContext,
 	playersById: ReadonlyMap<number, Player>,
 	eventId: number,
-	currentEventId: number | null
+	upperBoundEventId: number | null
 ): Promise<Map<number, number>> => {
 	const fallback = new Map(
 		Array.from(playersById.values()).map((player) => [player.id, player.teamId] as const)
 	);
-	if (playersById.size === 0 || currentEventId === null || eventId > currentEventId)
+	if (playersById.size === 0 || upperBoundEventId === null || eventId > upperBoundEventId)
 		return fallback;
 	const playerCodes = Array.from(playersById.values())
 		.map((player) => player.code)
@@ -256,7 +256,7 @@ const resolveHistoricalTeamIds = async (
 				 FROM fpl.player_fixture_stats
 				 WHERE season_id = $1
 				   AND player_code = ANY($2::integer[])
-				   AND event_id ${eventId === currentEventId ? "= $3" : "<= $3"}
+				   AND event_id ${eventId === upperBoundEventId ? "= $3" : "<= $3"}
 				 ORDER BY player_code, event_id DESC, fixture_id DESC`,
 			[context.currentSeason.seasonId, playerCodes, eventId]
 		);
@@ -344,7 +344,7 @@ export const gameweekService = {
 					context,
 					playersById,
 					eventId,
-					eventContext.currentEventId
+					eventContext.currentEventId ?? eventContext.latestFinishedEventId
 				);
 				overview = mapOverview(event, playersById, teamNames, eventTeamIds);
 				overviewState = "AVAILABLE";
@@ -373,7 +373,7 @@ export const gameweekService = {
 					context,
 					playersById,
 					eventId,
-					eventContext.currentEventId
+					eventContext.currentEventId ?? eventContext.latestFinishedEventId
 				);
 				dreamTeam = mapAndSortBoards(
 					boards.dreamTeam,

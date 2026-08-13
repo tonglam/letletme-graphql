@@ -198,6 +198,53 @@ describe("gameweekDesk", () => {
 		});
 	});
 
+	it("keeps historical teams available after the season has no current event", async () => {
+		const baseCore = buildTestCoreData(null);
+		const player = baseCore.players[0]!;
+		const core = buildTestCoreData(null, {
+			events: baseCore.events.map((event) => ({
+				...event,
+				finished: true,
+				dataChecked: true,
+				...(event.id === 1 ? { averageEntryScore: 48, mostSelected: player.id } : {}),
+			})),
+			fixtures: baseCore.fixtures.map((fixture) => ({
+				...fixture,
+				started: true,
+				finished: true,
+				finishedProvisional: true,
+			})),
+		});
+		const eventLives = buildTestEventLives(core, 1).map((row, index) =>
+			index === 0 ? { ...row, inDreamTeam: true } : row
+		);
+		const redis = new TestRedis(
+			buildCorePublication("2627", 7, core),
+			buildLivePublication(core, 1, "2627", 8, {
+				state: "settled",
+				eventLives,
+			})
+		);
+		const result = await graphql({
+			schema,
+			source: deskQuery,
+			variableValues: { eventId: 1 },
+			contextValue: buildSnapshotContext(redis, {
+				databaseQuery: async (query) => {
+					expect(String(query)).toContain("event_id <= $3");
+					return { rows: [{ player_code: player.code, team_id: 2 }] };
+				},
+			}),
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.gameweekDesk).toMatchObject({
+			lifecycle: "SETTLED",
+			overview: { mostSelected: { id: player.id, teamShortName: "T02" } },
+			dreamTeam: [{ id: player.id, teamShortName: "T02" }],
+		});
+	});
+
 	it("rejects event IDs outside the published season range", async () => {
 		const core = buildTestCoreData(null);
 		const result = await graphql({
