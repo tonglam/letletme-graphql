@@ -67,6 +67,18 @@ describe("eventsRepository over the core publication", () => {
 		});
 	});
 
+	it("projects the long-lived revision into a compact event context", async () => {
+		const context = contextForEvent(3);
+		await expect(eventsRepository.getCoreEventContext(context)).resolves.toMatchObject({
+			season: "2627",
+			revision: "7",
+			currentEventId: 3,
+			nextEventId: 4,
+			nextDeadlineTime: "2030-08-22T17:30:00.000Z",
+		});
+		expect(context.dataRevision).toBe("core-7");
+	});
+
 	it("serializes publication deadlines through the executable schema", async () => {
 		const schema = makeExecutableSchema({
 			typeDefs: [baseTypeDefs, eventsTypeDefs],

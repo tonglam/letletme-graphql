@@ -133,6 +133,43 @@ const fixtureRow = (overrides: Partial<Record<string, unknown>> = {}) => ({
 });
 
 describe("playerDetailRepository", () => {
+	it("batch-reads two detail cache keys with one Redis MGET", async () => {
+		const context = createContext({
+			currentEvent: null,
+			tables: {
+				"fpl.events": [
+					{
+						id: 1,
+						finished: false,
+						is_current: false,
+						deadline_time_epoch: Math.floor(Date.now() / 1000) + 86_400,
+					},
+				],
+				"fpl.player_market_snapshots": [marketRow()],
+			},
+		});
+		const redis = context.redis as unknown as TestRedis;
+		let detailMgetCalls = 0;
+		let detailGetCalls = 0;
+		const originalMget = redis.mget;
+		const originalGet = redis.get;
+		redis.mget = async (...keys: string[]) => {
+			if (keys.every((key) => key.includes("player-detail"))) detailMgetCalls += 1;
+			return originalMget(...keys);
+		};
+		redis.get = async (key: string) => {
+			if (key.includes("player-detail")) detailGetCalls += 1;
+			return originalGet(key);
+		};
+
+		const details = await playerDetailRepository.getPlayerDetails(context, [9, 10], 1);
+
+		expect(details.get(9)?.id).toBe(9);
+		expect(details.get(10)?.id).toBe(10);
+		expect(detailMgetCalls).toBe(1);
+		expect(detailGetCalls).toBe(0);
+	});
+
 	it("gates season production during preseason but keeps current market and fixtures", async () => {
 		const fromCalls: string[] = [];
 		const context = createContext({

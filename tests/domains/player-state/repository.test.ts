@@ -263,6 +263,19 @@ const snapshot = (players = true): CoreDataSnapshot => ({
 					totalPoints: 80,
 					selectedByPercent: 10,
 				},
+				{
+					id: 20,
+					code: 200,
+					type: 3,
+					teamId: 2,
+					price: 70,
+					startPrice: 70,
+					firstName: "Peer",
+					secondName: "Player",
+					webName: "Peer",
+					totalPoints: 45,
+					selectedByPercent: 5,
+				},
 			]
 		: [],
 	phases: [{ id: 1, name: "Overall", startEvent: 1, stopEvent: 38, highestScore: null }],
@@ -295,6 +308,37 @@ const makeContext = (redis: TestRedis): GraphQLContext =>
 	}) as unknown as GraphQLContext;
 
 describe("Player State repository", () => {
+	it("batch-reads two profile cache keys with one Redis MGET", async () => {
+		const redis = new TestRedis();
+		let mgetCalls = 0;
+		let getCalls = 0;
+		const originalMget = redis.mget;
+		const originalGet = redis.get;
+		redis.mget = async (...keys: string[]) => {
+			mgetCalls += 1;
+			return originalMget(...keys);
+		};
+		redis.get = async (key: string) => {
+			getCalls += 1;
+			return originalGet(key);
+		};
+		const { executor, queries } = makeExecutor();
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+		const profiles = await repository.getPlayerStateProfiles(makeContext(redis), [10, 20], 5);
+
+		expect(profiles.get(10)?.playerId).toBe(10);
+		expect(profiles.get(20)?.playerId).toBe(20);
+		expect(mgetCalls).toBe(1);
+		expect(getCalls).toBe(0);
+		expect(queries.filter((query) => query.includes("player-state:current-peers"))).toHaveLength(1);
+		expect(
+			queries.filter((query) => query.includes("player-state:current-gameweeks"))
+		).toHaveLength(1);
+	});
+
 	it("uses a season-confirmed bridge link and direct Understat PostgreSQL cohort", async () => {
 		const redis = new TestRedis();
 		const { executor, queries } = makeExecutor();

@@ -80,6 +80,7 @@ export const playersTypeDefs = /* GraphQL */ `
 	}
 
 	enum PlayerPickerSort {
+		AUTO
 		NAME_ASC
 		TOTAL_POINTS_DESC
 		FORM_DESC
@@ -101,7 +102,7 @@ export const playersTypeDefs = /* GraphQL */ `
 		playersForPicker(
 			search: String
 			filter: PlayersFilter
-			sort: PlayerPickerSort = TOTAL_POINTS_DESC
+			sort: PlayerPickerSort = AUTO
 			ownershipBand: PlayerPickerOwnershipBand
 			limit: Int = 20
 			cursor: Int

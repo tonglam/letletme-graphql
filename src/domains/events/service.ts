@@ -1,5 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
-import type { CurrentEventInfo, Event, EventsFilter } from "./repository";
+import type { CoreEventContext, CurrentEventInfo, Event, EventsFilter } from "./repository";
 import { eventsRepository } from "./repository";
 
 export const eventsService = {
@@ -13,4 +13,6 @@ export const eventsService = {
 	): Promise<Event[]> => eventsRepository.listEvents(context, filter, limit, offset),
 	getCurrentEventInfo: (context: GraphQLContext): Promise<CurrentEventInfo | null> =>
 		eventsRepository.getCurrentEventInfo(context),
+	getCoreEventContext: (context: GraphQLContext): Promise<CoreEventContext> =>
+		eventsRepository.getCoreEventContext(context),
 };

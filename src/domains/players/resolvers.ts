@@ -175,7 +175,7 @@ export const playersResolvers = {
 				args.cursor ?? null,
 				normalizePlayerPickerSearch(args.search),
 				filter,
-				args.sort ?? "TOTAL_POINTS_DESC",
+				args.sort ?? "AUTO",
 				args.ownershipBand ?? null
 			);
 		},

@@ -92,7 +92,7 @@ describe("GraphQL request limits", () => {
 			{
 				ok: true,
 				weightedComplexity: 220,
-				rateLimitCostUnits: 22,
+				rateLimitCostUnits: 5,
 			}
 		);
 		expect(validateGraphQLRequestLimits({ query, variables: { limit: 100 } }, schema)).toEqual({

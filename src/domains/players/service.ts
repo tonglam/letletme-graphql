@@ -50,7 +50,7 @@ export const playersService = {
 		cursor: number | null | undefined,
 		search: string | null = null,
 		filter?: PlayersFilter | null,
-		sort: PlayerPickerSort = "TOTAL_POINTS_DESC",
+		sort: PlayerPickerSort = "AUTO",
 		ownershipBand: PlayerPickerOwnershipBand | null = null
 	): Promise<PlayersForPickerPayload> {
 		return playersRepository.getPlayersForPicker(

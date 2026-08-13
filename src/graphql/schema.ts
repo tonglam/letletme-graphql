@@ -27,6 +27,8 @@ import { playerDetailResolvers } from "../domains/player-detail/resolvers";
 import { playerDetailTypeDefs } from "../domains/player-detail/schema";
 import { playerStateResolvers } from "../domains/player-state/resolvers";
 import { playerStateTypeDefs } from "../domains/player-state/schema";
+import { playerStatsResolvers } from "../domains/player-stats/resolvers";
+import { playerStatsTypeDefs } from "../domains/player-stats/schema";
 import { playerValuesResolvers } from "../domains/player-values/resolvers";
 import { playerValuesTypeDefs } from "../domains/player-values/schema";
 import { publicLeagueTrendsResolvers } from "../domains/public-league-trends/resolvers";
@@ -58,6 +60,7 @@ export const schema = makeExecutableSchema({
 		publicLeagueTrendsTypeDefs,
 		playerDetailTypeDefs,
 		playerStateTypeDefs,
+		playerStatsTypeDefs,
 	],
 	resolvers: [
 		baseResolvers,
@@ -79,5 +82,6 @@ export const schema = makeExecutableSchema({
 		publicLeagueTrendsResolvers,
 		playerDetailResolvers,
 		playerStateResolvers,
+		playerStatsResolvers,
 	],
 });

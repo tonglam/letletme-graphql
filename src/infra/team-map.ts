@@ -1,5 +1,5 @@
 import type { GraphQLContext } from "../graphql/context";
-import { getCoreDataSnapshot, getCoreFixtureSnapshot, type CoreTeamData } from "./data-snapshot";
+import { getCoreFixtureSnapshot, getCoreTeamSnapshot, type CoreTeamData } from "./data-snapshot";
 import type { Team } from "./types";
 
 const mapTeam = (team: CoreTeamData): Team => ({
@@ -27,7 +27,7 @@ const mapTeams = (teams: readonly CoreTeamData[]): Map<number, Team> =>
 	new Map(teams.map((team) => [team.id, mapTeam(team)]));
 
 export async function buildTeamMap(context: GraphQLContext): Promise<Map<number, Team>> {
-	const snapshot = await getCoreDataSnapshot(context);
+	const snapshot = await getCoreTeamSnapshot(context);
 	return mapTeams(snapshot.teams);
 }
 

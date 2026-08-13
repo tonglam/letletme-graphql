@@ -338,6 +338,7 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["eventOverallResult", 5],
 	["playerDetail", 5],
 	["playerStateProfile", 5],
+	["playerStatsDesk", 5],
 	["playerValueHistory", 5],
 	["marketPulse", 10],
 	["publicLeagueTrends", 10],
@@ -371,13 +372,20 @@ const accepted = ({
 	shape: GraphQLRequestShape;
 	weightedComplexity?: number;
 	rootFields?: Array<{ name: string; uniqueEntryCount: number | null }>;
-}): GraphQLLimitResult => ({
-	ok: true,
-	shape,
-	weightedComplexity,
-	rateLimitCostUnits: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
-	rootFields: rootFields.map((field) => field.name),
-});
+}): GraphQLLimitResult => {
+	const optimizedDirectoryRoots = new Set(["playersForPicker", "playerStatsBootstrap"]);
+	const optimizedDirectoryRequest =
+		rootFields.length > 0 && rootFields.every((field) => optimizedDirectoryRoots.has(field.name));
+	return {
+		ok: true,
+		shape,
+		weightedComplexity,
+		rateLimitCostUnits: optimizedDirectoryRequest
+			? 5 * rootFields.length
+			: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
+		rootFields: rootFields.map((field) => field.name),
+	};
+};
 
 export const validateGraphQLPayloadLimits = (
 	payload: GraphQLPayload,

@@ -1,10 +1,12 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCoreDataSnapshot } from "../../infra/data-snapshot";
+import {
+	getCoreEventSnapshot,
+	getCoreFixtureSnapshot,
+	type CoreFixtureData,
+} from "../../infra/data-snapshot";
 import { getCurrentEvent, type CurrentEventCache } from "../../infra/event";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
-import { buildTeamMap } from "../../infra/team-map";
-import { fixturesRepository, type Fixture } from "../fixtures/repository";
 import { playersRepository } from "../players/repository";
 import {
 	getPlayerSeasonStatsForContext,
@@ -196,31 +198,100 @@ const elementTypeToName = (type: number): string => {
 const playerDetailCacheKey = (playerId: number, eventId: number): string =>
 	`player-detail:${playerId}:${eventId}`;
 
+const playerDetailCacheReadMemo = new WeakMap<
+	object,
+	Map<string, PlayerDetail | null | undefined>
+>();
+
+const requestPlayerDetailCacheMemo = (
+	context: GraphQLContext
+): Map<string, PlayerDetail | null | undefined> => {
+	const scope = context.requestScope ?? context;
+	let memo = playerDetailCacheReadMemo.get(scope);
+	if (!memo) {
+		memo = new Map();
+		playerDetailCacheReadMemo.set(scope, memo);
+	}
+	return memo;
+};
+
+const parsePlayerDetailCacheValue = (
+	raw: string | null
+): PlayerDetail | null | undefined | "malformed" => {
+	if (raw === null) return undefined;
+	if (raw === NULL_SENTINEL) return null;
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		return isPlayerDetail(parsed) ? parsed : "malformed";
+	} catch {
+		return "malformed";
+	}
+};
+
 async function readPlayerDetailCache(
 	context: GraphQLContext,
 	key: string
 ): Promise<PlayerDetail | null | undefined> {
+	const memo = requestPlayerDetailCacheMemo(context);
+	if (memo.has(key)) return memo.get(key);
 	let cached: string | null;
 	try {
 		cached = await context.redis.get(key);
 	} catch (error) {
 		context.logger.warn({ err: error, key }, "Failed to read player-detail cache");
+		memo.set(key, undefined);
 		return undefined;
 	}
-	if (cached === null) return undefined;
-	if (cached === NULL_SENTINEL) return null;
-	try {
-		const parsed: unknown = JSON.parse(cached);
-		if (isPlayerDetail(parsed)) return parsed;
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Malformed player-detail cache");
+	const parsed = parsePlayerDetailCacheValue(cached);
+	if (parsed !== "malformed") {
+		memo.set(key, parsed);
+		return parsed;
 	}
+	context.logger.warn({ key }, "Malformed player-detail cache");
 	try {
 		await context.redis.del(key);
 	} catch (error) {
 		context.logger.warn({ err: error, key }, "Failed to evict malformed player-detail cache");
 	}
+	memo.set(key, undefined);
 	return undefined;
+}
+
+async function readPlayerDetailCaches(context: GraphQLContext, keys: string[]): Promise<void> {
+	const memo = requestPlayerDetailCacheMemo(context);
+	const missingKeys = keys.filter((key) => !memo.has(key));
+	if (missingKeys.length === 0) return;
+	let values: Array<string | null>;
+	try {
+		values = await context.redis.mget(...missingKeys);
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, keyCount: missingKeys.length },
+			"Failed to batch-read player-detail cache"
+		);
+		for (const key of missingKeys) memo.set(key, undefined);
+		return;
+	}
+	const malformedKeys: string[] = [];
+	for (let index = 0; index < missingKeys.length; index += 1) {
+		const key = missingKeys[index]!;
+		const parsed = parsePlayerDetailCacheValue(values[index] ?? null);
+		if (parsed === "malformed") {
+			memo.set(key, undefined);
+			malformedKeys.push(key);
+		} else {
+			memo.set(key, parsed);
+		}
+	}
+	await Promise.all(
+		malformedKeys.map(async (key) => {
+			try {
+				await context.redis.del(key);
+			} catch (error) {
+				context.logger.warn({ err: error, key }, "Failed to evict malformed player-detail cache");
+			}
+		})
+	);
 }
 
 async function loadLatestMarketSnapshot(
@@ -277,7 +348,7 @@ async function loadResolvedEventState(
 	eventId: number | null
 ): Promise<ResolvedEventState | null> {
 	if (eventId === null) return null;
-	const snapshot = await getCoreDataSnapshot(context);
+	const snapshot = await getCoreEventSnapshot(context);
 	const event = snapshot.events.find((candidate) => candidate.id === eventId);
 	return event ? { id: event.id, finished: event.finished } : null;
 }
@@ -318,7 +389,39 @@ async function loadHistoricalTeamId(
 	}
 }
 
-const formatFixtureScore = (fixture: Fixture, wasHome: boolean): string | null => {
+async function loadHistoricalTeamIds(
+	context: GraphQLContext,
+	playerCode: number,
+	eventIds: number[],
+	fallbackTeamId: number
+): Promise<Map<number, number>> {
+	if (eventIds.length === 0) return new Map();
+	try {
+		const result = await context.database.query<{ event_id: number; team_id: number }>(
+			`SELECT DISTINCT ON (event_id) event_id, team_id
+			 FROM fpl.player_fixture_stats
+			 WHERE season_id = $1
+			   AND player_code = $2
+			   AND event_id = ANY($3::integer[])
+			 ORDER BY event_id, fixture_id DESC`,
+			[context.currentSeason.seasonId, playerCode, eventIds]
+		);
+		return new Map(
+			eventIds.map((eventId) => {
+				const row = result.rows.find((candidate) => candidate.event_id === eventId);
+				return [eventId, row?.team_id ?? fallbackTeamId] as const;
+			})
+		);
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, playerCode, eventIds },
+			"Failed to batch historical player teams"
+		);
+		return new Map(eventIds.map((eventId) => [eventId, fallbackTeamId] as const));
+	}
+}
+
+const formatFixtureScore = (fixture: CoreFixtureData, wasHome: boolean): string | null => {
 	if (fixture.teamHScore === null || fixture.teamAScore === null) return null;
 	return wasHome
 		? `${fixture.teamHScore}-${fixture.teamAScore}`
@@ -331,11 +434,13 @@ async function loadTeamFixtureDesk(
 	fromEventId: number
 ): Promise<{ teamShortName: string; fixtures: PlayerFixture[] }> {
 	try {
-		const [fixtures, teams] = await Promise.all([
-			fixturesRepository.listFixtures(context, { teamId }, 100, 0),
-			buildTeamMap(context),
+		const [fixtureSnapshot, eventSnapshot] = await Promise.all([
+			getCoreFixtureSnapshot(context),
+			getCoreEventSnapshot(context),
 		]);
-		const mapped = fixtures
+		const teams = new Map(fixtureSnapshot.teams.map((team) => [team.id, team] as const));
+		const mapped = fixtureSnapshot.fixtures
+			.filter((fixture) => fixture.teamHId === teamId || fixture.teamAId === teamId)
 			.filter((fixture) => fixture.eventId !== null)
 			.map((fixture): PlayerFixture => {
 				const wasHome = fixture.teamHId === teamId;
@@ -355,31 +460,20 @@ async function loadTeamFixtureDesk(
 
 		const lastEventId = Math.min(38, fromEventId + UPCOMING_GAMEWEEK_LIMIT - 1);
 		const eventsWithTeamFixtures = new Set(mapped.map((fixture) => fixture.event));
-		const eventsWithAnyFixtures = new Set(eventsWithTeamFixtures);
-		const uncoveredEvents = Array.from(
-			{ length: Math.max(0, lastEventId - fromEventId + 1) },
-			(_, index) => fromEventId + index
-		).filter((event) => !eventsWithTeamFixtures.has(event));
-		const coverageResults = await Promise.all(
-			uncoveredEvents.map(async (event) => {
-				try {
-					const eventFixtures = await fixturesRepository.getEventFixtures(context, event);
-					return eventFixtures.some((fixture) => fixture.eventId === event) ? event : null;
-				} catch (error) {
-					context.logger.warn(
-						{ err: error, event },
-						"Failed to confirm fixture coverage for player fixture desk"
-					);
-					return null;
-				}
-			})
+		const eventsWithAnyFixtures = new Set(
+			fixtureSnapshot.fixtures
+				.filter((fixture) => fixture.eventId !== null)
+				.map((fixture) => fixture.eventId as number)
 		);
-		for (const event of coverageResults) {
-			if (event !== null) eventsWithAnyFixtures.add(event);
-		}
+		const knownEvents = new Set(eventSnapshot.events.map((event) => event.id));
 
 		for (let event = fromEventId; event <= lastEventId; event += 1) {
-			if (eventsWithTeamFixtures.has(event) || !eventsWithAnyFixtures.has(event)) continue;
+			if (
+				eventsWithTeamFixtures.has(event) ||
+				!knownEvents.has(event) ||
+				!eventsWithAnyFixtures.has(event)
+			)
+				continue;
 			mapped.push({
 				id: -event,
 				event,
@@ -443,11 +537,13 @@ async function loadRecentGameweeks(
 			return [];
 		}
 		const rows = (data ?? []) as RecentGameweekRow[];
-		const teamIds = await Promise.all(
-			rows.map((row) =>
-				loadHistoricalTeamId(context, statsContext.season, playerCode, row.event_id, fallbackTeamId)
-			)
+		const teamIdByEvent = await loadHistoricalTeamIds(
+			context,
+			playerCode,
+			rows.map((row) => row.event_id),
+			fallbackTeamId
 		);
+		const teamIds = rows.map((row) => teamIdByEvent.get(row.event_id) ?? fallbackTeamId);
 		const uniqueTeamIds = Array.from(new Set(teamIds));
 		const deskEntries = await Promise.all(
 			uniqueTeamIds.map(async (teamId) => {
@@ -570,9 +666,27 @@ export interface PlayerDetailRepository {
 		playerId: number,
 		eventId: number
 	): Promise<PlayerDetail | null>;
+	getPlayerDetails(
+		context: GraphQLContext,
+		playerIds: number[],
+		eventId: number
+	): Promise<Map<number, PlayerDetail | null>>;
 }
 
 export const playerDetailRepository: PlayerDetailRepository = {
+	async getPlayerDetails(context, playerIds, eventId) {
+		const uniqueIds = Array.from(
+			new Set(playerIds.filter((id) => Number.isSafeInteger(id) && id > 0))
+		);
+		await readPlayerDetailCaches(
+			context,
+			uniqueIds.map((playerId) => gqlCacheKey(context, playerDetailCacheKey(playerId, eventId)))
+		);
+		const details = await Promise.all(
+			uniqueIds.map((playerId) => this.getPlayerDetail(context, playerId, eventId))
+		);
+		return new Map(uniqueIds.map((playerId, index) => [playerId, details[index] ?? null]));
+	},
 	async getPlayerDetail(
 		context: GraphQLContext,
 		playerId: number,
@@ -593,6 +707,7 @@ export const playerDetailRepository: PlayerDetailRepository = {
 		]);
 		if (!player) {
 			await writeQueryCache(context, cacheKey, NULL_SENTINEL, QUERY_CACHE_TTL_SECONDS.METADATA);
+			requestPlayerDetailCacheMemo(context).set(cacheKey, null);
 			return null;
 		}
 		const resolvedEvent = await loadResolvedEventState(context, statsContext.asOfEventId);
@@ -639,6 +754,7 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			JSON.stringify(detail),
 			QUERY_CACHE_TTL_SECONDS.REPORTING
 		);
+		requestPlayerDetailCacheMemo(context).set(cacheKey, detail);
 		return detail;
 	},
 };
