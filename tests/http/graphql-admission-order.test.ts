@@ -2,23 +2,21 @@ import { readFileSync } from "fs";
 import { describe, expect, it } from "bun:test";
 
 describe("GraphQL admission ordering", () => {
-	it("validates the operation and principal before one atomic admission", () => {
+	it("protects principal verification before complexity-weighted admission", () => {
 		const source = readFileSync("src/index.ts", "utf8");
+		const preAuth = source.indexOf('"preAuthAdmission"');
 		const bodyRead = source.indexOf('"bodyRead"');
-		const requestLimits = source.indexOf('"requestLimits"');
 		const principal = source.indexOf('"principal"');
 		const invalidAuth = source.indexOf("hasAuthenticationMaterial(request.headers)");
-		const admission = source.indexOf('"admission"');
+		const principalAdmission = source.indexOf('"principalAdmission"');
 		const authorization = source.indexOf('"authorization"');
 
-		expect(source).not.toContain('"preAuthAdmission"');
-		expect(source).not.toContain('"principalAdmission"');
+		expect(preAuth).toBeGreaterThan(-1);
+		expect(preAuth).toBeLessThan(bodyRead);
 		expect(bodyRead).toBeLessThan(principal);
-		expect(requestLimits).toBeLessThan(principal);
 		expect(principal).toBeLessThan(invalidAuth);
-		expect(invalidAuth).toBeLessThan(admission);
-		expect(admission).toBeLessThan(authorization);
-		expect(source.match(/enforceGraphQLRateLimits\(/g)?.length).toBe(1);
+		expect(invalidAuth).toBeLessThan(principalAdmission);
+		expect(principalAdmission).toBeLessThan(authorization);
 	});
 
 	it("logs normalized operation names and stage timings without principal identifiers", () => {
