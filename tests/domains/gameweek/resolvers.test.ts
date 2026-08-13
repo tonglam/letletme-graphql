@@ -98,7 +98,11 @@ describe("gameweekDesk", () => {
 			schema,
 			source: deskQuery,
 			variableValues: { eventId: 1 },
-			contextValue: buildSnapshotContext(redis),
+			contextValue: buildSnapshotContext(redis, {
+				databaseQuery: async () => ({
+					rows: [{ player_code: core.players[0]!.code, team_id: 2 }],
+				}),
+			}),
 		});
 
 		expect(result.errors).toBeUndefined();
@@ -107,7 +111,7 @@ describe("gameweekDesk", () => {
 			lifecycle: "PROVISIONAL",
 			overviewState: "PENDING",
 			boardsState: "AVAILABLE",
-			dreamTeam: [{ id: core.players[0]!.id, position: "GOALKEEPER" }],
+			dreamTeam: [{ id: core.players[0]!.id, position: "GOALKEEPER", teamShortName: "T02" }],
 		});
 	});
 

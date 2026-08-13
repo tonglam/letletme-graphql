@@ -244,7 +244,7 @@ const resolveHistoricalTeamIds = async (
 	const fallback = new Map(
 		Array.from(playersById.values()).map((player) => [player.id, player.teamId] as const)
 	);
-	if (playersById.size === 0 || currentEventId === null || eventId >= currentEventId)
+	if (playersById.size === 0 || currentEventId === null || eventId > currentEventId)
 		return fallback;
 	const playerCodes = Array.from(playersById.values())
 		.map((player) => player.code)
