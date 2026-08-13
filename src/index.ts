@@ -342,16 +342,6 @@ const startServer = async (): Promise<void> => {
 						);
 					}
 
-					const preAuthAdmissionFailure = await requestTiming.measure("preAuthAdmission", () =>
-						enforceGraphQLRateLimits({
-							checks: graphQLPreAuthRateLimitChecks(ingress, graphQLRateLimitConfig),
-							corsHeaders,
-						})
-					);
-					if (preAuthAdmissionFailure) {
-						return finalizeGraphQLResponse(preAuthAdmissionFailure, "pre_auth_admission_rejected");
-					}
-
 					const body = await requestTiming.measure("bodyRead", () => readRequestBody(request));
 					let parsedBody: unknown = undefined;
 					if (body) {
@@ -406,17 +396,17 @@ const startServer = async (): Promise<void> => {
 						config: graphQLRateLimitConfig,
 					});
 					rateLimitAudience = principalAdmission.audience;
-					const principalAdmissionFailure = await requestTiming.measure("principalAdmission", () =>
+					const admissionFailure = await requestTiming.measure("admission", () =>
 						enforceGraphQLRateLimits({
-							checks: [principalAdmission.check],
+							checks: [
+								...graphQLPreAuthRateLimitChecks(ingress, graphQLRateLimitConfig),
+								principalAdmission.check,
+							],
 							corsHeaders,
 						})
 					);
-					if (principalAdmissionFailure) {
-						return finalizeGraphQLResponse(
-							principalAdmissionFailure,
-							"principal_admission_rejected"
-						);
+					if (admissionFailure) {
+						return finalizeGraphQLResponse(admissionFailure, "admission_rejected");
 					}
 
 					const currentSeason = currentSeasonProvider.get();
