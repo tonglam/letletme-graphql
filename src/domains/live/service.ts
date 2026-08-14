@@ -1,8 +1,6 @@
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import { getCurrentEventId } from "../../infra/event";
-import { calcElementLivePoints } from "../entry-live/calc-service";
-import { loadLiveBonusByPlayerId } from "./bonus-cache";
 import type {
 	EventLive,
 	LiveExplain,
@@ -38,33 +36,13 @@ export const assertValidLiveExplainBatch = (elementIds: readonly number[]): void
 	}
 };
 
-const withCalculatedTotalPoints = (
-	live: LivePerformance,
-	bonusOverride?: number
-): LivePerformance => ({
-	...live,
-	bonus: bonusOverride ?? live.bonus,
-	totalPoints: calcElementLivePoints(live, bonusOverride),
-});
-
+// The FPL event-live payload is the scoring authority, including projected
+// live bonus.  Never recompute goals/assists/BPS/bonus locally.
 const calculateTotalsForPerformances = async (
-	context: GraphQLContext,
-	performances: LivePerformance[],
-	eventId?: number
-): Promise<LivePerformance[]> => {
-	if (performances.length === 0) {
-		return performances;
-	}
-
-	const targetEventId = eventId ?? performances[0]?.eventId;
-	const bonusByPlayerId = targetEventId
-		? await loadLiveBonusByPlayerId(context, targetEventId)
-		: new Map<number, number>();
-
-	return performances.map((performance) =>
-		withCalculatedTotalPoints(performance, bonusByPlayerId.get(performance.playerId))
-	);
-};
+	_performances: LivePerformance[],
+	_context: GraphQLContext,
+	_eventId?: number
+): Promise<LivePerformance[]> => _performances;
 
 export const liveService = {
 	async getLiveScores(
@@ -76,7 +54,7 @@ export const liveService = {
 		if (!targetEventId) return [];
 		return withLiveSnapshotConsistency(context, targetEventId, async () => {
 			const performances = await liveRepository.getLiveScores(context, targetEventId);
-			const calculated = await calculateTotalsForPerformances(context, performances, targetEventId);
+			const calculated = await calculateTotalsForPerformances(performances, context, targetEventId);
 			return applyLiveScoresFilter(calculated, filter);
 		});
 	},
@@ -91,7 +69,7 @@ export const liveService = {
 		const targeted = await liveRepository.getTargetedLiveRead(context, targetEventId, [playerId]);
 		const performance = targeted.performances.find((value) => value.playerId === playerId);
 		if (!performance) return null;
-		return withCalculatedTotalPoints(performance, targeted.effectiveBonusByPlayer.get(playerId));
+		return performance;
 	},
 
 	async getEventLive(context: GraphQLContext, eventId: number): Promise<EventLive> {
@@ -100,8 +78,8 @@ export const liveService = {
 			return {
 				...eventLive,
 				performances: await calculateTotalsForPerformances(
-					context,
 					eventLive.performances,
+					context,
 					eventId
 				),
 			};
@@ -114,8 +92,8 @@ export const liveService = {
 			if (!meta) throw new Error(`Live snapshot metadata is unavailable for event ${eventId}`);
 			const performances = await liveRepository.getAllLivePerformances(context, eventId);
 			const calculated = await calculateTotalsForPerformances(
-				context,
 				Array.from(performances.values()),
+				context,
 				eventId
 			);
 			return {

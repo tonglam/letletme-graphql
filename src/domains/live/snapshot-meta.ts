@@ -86,16 +86,9 @@ export const parseLiveSnapshotMeta = (
 	) {
 		return null;
 	}
-	const eventLiveCount = itemCount(manifest.items, "eventLives");
+	const eventLiveCount = itemCount(manifest.items, "eventLive");
 	const fixtureCount = itemCount(manifest.items, "fixtures");
-	const fixtureTeamCount = itemCount(manifest.items, "liveFixtures");
-	const bonusTeamCount = itemCount(manifest.items, "liveBonus");
-	if (
-		eventLiveCount === null ||
-		fixtureCount === null ||
-		fixtureTeamCount === null ||
-		bonusTeamCount === null
-	) {
+	if (eventLiveCount === null || fixtureCount === null) {
 		return null;
 	}
 	return {
@@ -108,8 +101,8 @@ export const parseLiveSnapshotMeta = (
 		checkedAt: manifest.sourceCheckedAt,
 		eventLiveCount,
 		fixtureCount,
-		fixtureTeamCount,
-		bonusTeamCount,
+		fixtureTeamCount: 0,
+		bonusTeamCount: 0,
 	};
 };
 
@@ -158,8 +151,10 @@ export const loadLiveSnapshotMeta = async (
 			checkedAt: snapshot.sourceCheckedAt,
 			eventLiveCount: snapshot.eventLives.length,
 			fixtureCount: snapshot.fixtures.length,
-			fixtureTeamCount: Object.keys(snapshot.liveFixtures).length,
-			bonusTeamCount: Object.keys(snapshot.liveBonus).length,
+			fixtureTeamCount: new Set(
+				snapshot.fixtures.flatMap((fixture) => [fixture.teamHId, fixture.teamAId])
+			).size,
+			bonusTeamCount: 0,
 		};
 		rememberSource(context, eventId, snapshot.source);
 		return meta;

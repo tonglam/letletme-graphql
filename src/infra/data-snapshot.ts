@@ -19,12 +19,7 @@ export const CORE_PUBLICATION_ITEMS = [
 	"currentEventId",
 ] as const;
 
-export const LIVE_PUBLICATION_ITEMS = [
-	"eventLives",
-	"fixtures",
-	"liveFixtures",
-	"liveBonus",
-] as const;
+export const LIVE_PUBLICATION_ITEMS = ["eventLive", "fixtures"] as const;
 
 export type DataSnapshotSource = "redis" | "postgres";
 export type LiveSnapshotState = "scheduled" | "live" | "settled";
@@ -202,6 +197,17 @@ export type CoreTeamSnapshot = Readonly<{
 	teams: readonly CoreTeamData[];
 }>;
 
+/** The identity slice needed by immutable Live publications. */
+export type CoreLiveIdentitySnapshot = Readonly<{
+	source: DataSnapshotSource;
+	seasonCode: string;
+	revision: string;
+	publicationId: string;
+	sourceCheckedAt: string;
+	teams: readonly CoreTeamData[];
+	players: readonly CorePlayerData[];
+}>;
+
 export type CoreEventSnapshot = Readonly<{
 	source: DataSnapshotSource;
 	seasonCode: string;
@@ -248,6 +254,7 @@ const coreSnapshotMemo = new WeakMap<object, Promise<CoreDataSnapshot>>();
 const coreFixtureSnapshotMemo = new WeakMap<object, Promise<CoreFixtureSnapshot>>();
 const coreEventSnapshotMemo = new WeakMap<object, Promise<CoreEventSnapshot>>();
 const coreTeamSnapshotMemo = new WeakMap<object, Promise<CoreTeamSnapshot>>();
+const coreLiveIdentitySnapshotMemo = new WeakMap<object, Promise<CoreLiveIdentitySnapshot>>();
 const liveSnapshotMemo = new WeakMap<object, Map<number, Promise<LiveDataSnapshot>>>();
 
 type CorePublicationPin = {
@@ -1034,6 +1041,33 @@ const publicationCoreTeamSnapshot = (publication: DataPublication): CoreTeamSnap
 	};
 };
 
+const publicationCoreLiveIdentitySnapshot = (
+	publication: DataPublication
+): CoreLiveIdentitySnapshot | null => {
+	const teams = mapArray(publication.items.teams, mapCoreTeam);
+	const players = mapArray(publication.items.players, mapCorePlayer);
+	if (
+		!teams ||
+		!players ||
+		teams.length === 0 ||
+		players.length === 0 ||
+		!hasUniquePositiveIds(teams, (team) => team.id) ||
+		!hasUniquePositiveIds(players, (player) => player.id) ||
+		players.some((player) => !teams.some((team) => team.id === player.teamId))
+	) {
+		return null;
+	}
+	return {
+		source: "redis",
+		seasonCode: publication.manifest.seasonCode,
+		revision: String(publication.manifest.revision),
+		publicationId: publication.manifest.publicationId,
+		sourceCheckedAt: publication.manifest.sourceCheckedAt,
+		teams,
+		players,
+	};
+};
+
 type CoreFallbackRow = QueryResultRow & {
 	authority_count: string | number;
 	publication_id: string | null;
@@ -1111,6 +1145,10 @@ type CoreTeamFallbackRow = QueryResultRow & {
 	teams: unknown;
 };
 
+type CoreLiveIdentityFallbackRow = CoreTeamFallbackRow & {
+	players: unknown;
+};
+
 const CORE_EVENT_FALLBACK_SQL = `
 	WITH active_publication AS MATERIALIZED (
 		SELECT
@@ -1168,6 +1206,40 @@ const CORE_TEAM_FALLBACK_SQL = `
 			SELECT jsonb_agg((to_jsonb(team_row) - 'season_id') ORDER BY team_id)
 			FROM fpl.teams team_row WHERE season_id = $1
 		), '[]'::jsonb) AS teams
+	FROM authority
+`;
+
+const CORE_LIVE_IDENTITY_FALLBACK_SQL = `
+	WITH active_publication AS MATERIALIZED (
+		SELECT
+			publication_id::text,
+			revision::text,
+			manifest,
+			COALESCE(manifest ->> 'sourceCheckedAt', activated_at::text) AS source_checked_at
+		FROM ops.dataset_publications
+		WHERE dataset = 'fpl:core'
+		  AND season_id = $1
+		  AND event_id IS NULL
+		  AND status = 'active'
+	), authority AS (
+		SELECT
+			count(*)::text AS authority_count,
+			min(publication_id) AS publication_id,
+			min(revision) AS revision,
+			min(manifest::text)::jsonb AS manifest,
+			min(source_checked_at) AS source_checked_at
+		FROM active_publication
+	)
+	SELECT
+		authority.*,
+		COALESCE((
+			SELECT jsonb_agg((to_jsonb(team_row) - 'season_id') ORDER BY team_id)
+			FROM fpl.teams team_row WHERE season_id = $1
+		), '[]'::jsonb) AS teams,
+		COALESCE((
+			SELECT jsonb_agg((to_jsonb(player_row) - 'season_id') ORDER BY element_id)
+			FROM fpl.players player_row WHERE season_id = $1
+		), '[]'::jsonb) AS players
 	FROM authority
 `;
 
@@ -1324,102 +1396,6 @@ const loadCoreSnapshotFromPostgres = async (
 	};
 };
 
-const normalizeLiveFixtureData = (value: unknown): LiveFixtureData | null => {
-	if (!isRecord(value)) return null;
-	const fixtureId = integer(pick(value, "fixtureId", "fixture_id"));
-	const teamId = integer(pick(value, "teamId", "team_id"));
-	const teamName = string(pick(value, "teamName", "team_name"));
-	const teamShortName = string(pick(value, "teamShortName", "team_short_name"));
-	const teamScore = integer(pick(value, "teamScore", "team_score"));
-	const teamPosition = integer(pick(value, "teamPosition", "team_position"));
-	const againstId = integer(pick(value, "againstId", "against_id"));
-	const againstName = string(pick(value, "againstName", "against_name"));
-	const againstShortName = string(pick(value, "againstShortName", "against_short_name"));
-	const againstTeamScore = integer(pick(value, "againstTeamScore", "against_team_score"));
-	const againstTeamPosition = integer(pick(value, "againstTeamPosition", "against_team_position"));
-	const kickoffRaw = pick(value, "kickoffTime", "kickoff_time");
-	const kickoffTime = kickoffRaw === null ? null : isoDate(kickoffRaw);
-	const score = string(value.score);
-	const wasHome = boolean(pick(value, "wasHome", "was_home"));
-	const started = boolean(value.started);
-	const finished = boolean(value.finished);
-	if (
-		fixtureId === null ||
-		fixtureId <= 0 ||
-		teamId === null ||
-		teamId <= 0 ||
-		teamName === null ||
-		teamShortName === null ||
-		teamScore === null ||
-		teamPosition === null ||
-		againstId === null ||
-		againstId <= 0 ||
-		againstName === null ||
-		againstShortName === null ||
-		againstTeamScore === null ||
-		againstTeamPosition === null ||
-		(kickoffTime === null && kickoffRaw !== null) ||
-		score === null ||
-		wasHome === null ||
-		started === null ||
-		finished === null
-	) {
-		return null;
-	}
-	return {
-		fixtureId,
-		teamId,
-		teamName,
-		teamShortName,
-		teamScore,
-		teamPosition,
-		againstId,
-		againstName,
-		againstShortName,
-		againstTeamScore,
-		againstTeamPosition,
-		kickoffTime,
-		score,
-		wasHome,
-		started,
-		finished,
-	};
-};
-
-const normalizeLiveFixtures = (value: unknown): LiveFixturesByTeam | null => {
-	if (!isRecord(value)) return null;
-	const result: Record<string, LiveFixtureBuckets> = {};
-	for (const [teamId, rawBuckets] of Object.entries(value)) {
-		if (!/^\d+$/.test(teamId) || !isRecord(rawBuckets)) return null;
-		const buckets: Partial<Record<keyof LiveFixtureBuckets, readonly LiveFixtureData[]>> = {};
-		for (const status of ["Playing", "Not_Start", "Finished"] as const) {
-			const rows = rawBuckets[status];
-			if (!Array.isArray(rows)) return null;
-			const mapped = rows.map(normalizeLiveFixtureData);
-			if (mapped.some((row) => row === null)) return null;
-			buckets[status] = mapped as LiveFixtureData[];
-		}
-		result[teamId] = buckets as LiveFixtureBuckets;
-	}
-	return result;
-};
-
-const normalizeLiveBonus = (value: unknown): LiveBonusByTeam | null => {
-	if (!isRecord(value)) return null;
-	const result: Record<string, Record<string, number>> = {};
-	for (const [teamId, rawPlayers] of Object.entries(value)) {
-		if (!/^\d+$/.test(teamId) || !isRecord(rawPlayers)) return null;
-		const players: Record<string, number> = {};
-		for (const [playerId, rawBonus] of Object.entries(rawPlayers)) {
-			const bonus = integer(rawBonus);
-			if (!/^\d+$/.test(playerId) || bonus === null || bonus < 0) return null;
-			players[playerId] = bonus;
-		}
-		result[teamId] = players;
-	}
-	return result;
-};
-
 type LiveFixtureEntry = Readonly<{
 	status: keyof LiveFixtureBuckets;
 	teamKey: number;
@@ -1436,7 +1412,7 @@ const liveFixtureEntries = (view: LiveFixturesByTeam): LiveFixtureEntry[] =>
 const validateLiveFixtureView = (
 	liveFixtures: LiveFixturesByTeam,
 	fixtures: readonly CoreFixtureData[],
-	core: CoreDataSnapshot
+	core: Pick<CoreDataSnapshot, "teams">
 ): boolean => {
 	const entries = liveFixtureEntries(liveFixtures);
 	if (entries.length !== fixtures.length * 2) return false;
@@ -1497,28 +1473,6 @@ const validateLiveFixtureView = (
 	);
 };
 
-const validateLiveBonus = (
-	bonus: LiveBonusByTeam,
-	core: CoreDataSnapshot,
-	eventId: number
-): boolean => {
-	const eventTeamIds = new Set(
-		core.fixtures
-			.filter((fixture) => fixture.eventId === eventId)
-			.flatMap((fixture) => [fixture.teamHId, fixture.teamAId])
-	);
-	const players = new Map(core.players.map((player) => [player.id, player]));
-	for (const [teamIdRaw, teamBonus] of Object.entries(bonus)) {
-		const teamId = Number(teamIdRaw);
-		if (!eventTeamIds.has(teamId)) return false;
-		for (const playerIdRaw of Object.keys(teamBonus)) {
-			const playerId = Number(playerIdRaw);
-			if (!players.has(playerId)) return false;
-		}
-	}
-	return true;
-};
-
 const liveStateFromFixtures = (fixtures: readonly CoreFixtureData[]): LiveSnapshotState => {
 	if (fixtures.length === 0) return "scheduled";
 	const settled = fixtures.every((fixture) => fixture.finished || fixture.finishedProvisional);
@@ -1533,12 +1487,12 @@ const liveStateFromFixtures = (fixtures: readonly CoreFixtureData[]): LiveSnapsh
 const publicationLiveSnapshot = (
 	publication: DataPublication,
 	eventId: number,
-	core: CoreDataSnapshot
+	core: CoreLiveIdentitySnapshot
 ): LiveDataSnapshot | null => {
-	const eventLives = mapArray(publication.items.eventLives, mapLivePerformance);
+	const eventLives = mapArray(publication.items.eventLive, mapLivePerformance);
 	const fixtures = mapArray(publication.items.fixtures, mapCoreFixture);
-	const liveFixtures = normalizeLiveFixtures(publication.items.liveFixtures);
-	const liveBonus = normalizeLiveBonus(publication.items.liveBonus);
+	const liveFixtures = fixtures ? buildLiveFixtureView(fixtures, core) : null;
+	const liveBonus: LiveBonusByTeam = {};
 	const state = publication.manifest.state;
 	if (
 		!eventLives ||
@@ -1556,14 +1510,7 @@ const publicationLiveSnapshot = (
 			(row) => row.playerId,
 			(player) => player.id
 		) ||
-		!hasSameIds(
-			fixtures,
-			core.fixtures.filter((fixture) => fixture.eventId === eventId),
-			(fixture) => fixture.id,
-			(fixture) => fixture.id
-		) ||
 		!validateLiveFixtureView(liveFixtures, fixtures, core) ||
-		!validateLiveBonus(liveBonus, core, eventId) ||
 		state !== liveStateFromFixtures(fixtures)
 	) {
 		return null;
@@ -1584,104 +1531,6 @@ const publicationLiveSnapshot = (
 	};
 };
 
-type LiveFallbackRow = QueryResultRow & {
-	authority_count: string | number;
-	event_live_count?: string | number | null;
-	known_player_count?: string | number | null;
-	publication_id: string | null;
-	revision: string | number | null;
-	manifest: unknown;
-	source_checked_at: string | Date | null;
-	published_at: string | Date | null;
-	event_checked_at: string | Date | null;
-	event_lives: unknown;
-	fixtures: unknown;
-};
-
-const LIVE_FALLBACK_SQL = `
-	WITH active_publication AS MATERIALIZED (
-		SELECT
-			publication_id::text,
-			revision::text,
-			manifest,
-			COALESCE(manifest ->> 'sourceCheckedAt', activated_at::text) AS source_checked_at,
-			activated_at::text AS published_at
-		FROM ops.dataset_publications
-		WHERE dataset = 'fpl:live'
-		  AND season_id = $1
-		  AND event_id = $2
-		  AND status = 'active'
-	), authority AS (
-		SELECT
-			count(*)::text AS authority_count,
-			min(publication_id) AS publication_id,
-			min(revision) AS revision,
-			min(manifest::text)::jsonb AS manifest,
-			min(source_checked_at) AS source_checked_at,
-			min(published_at) AS published_at
-		FROM active_publication
-	)
-	SELECT
-		authority.*,
-		(SELECT live_snapshot_checked_at FROM fpl.events WHERE season_id = $1 AND event_id = $2)
-			AS event_checked_at,
-		COALESCE((
-			SELECT jsonb_agg((to_jsonb(live_row) - 'season_id') ORDER BY element_id)
-			FROM fpl.player_gameweek_stats live_row
-			WHERE season_id = $1 AND event_id = $2
-		), '[]'::jsonb) AS event_lives,
-		COALESCE((
-			SELECT jsonb_agg((to_jsonb(fixture_row) - 'season_id') ORDER BY fixture_id)
-			FROM fpl.fixtures fixture_row
-			WHERE season_id = $1 AND event_id = $2
-		), '[]'::jsonb) AS fixtures
-	FROM authority
-`;
-
-const TARGETED_LIVE_SQL = `
-	WITH active_publication AS MATERIALIZED (
-		SELECT
-			publication_id::text,
-			revision::text,
-			COALESCE(manifest ->> 'sourceCheckedAt', activated_at::text) AS source_checked_at,
-			activated_at::text AS published_at
-		FROM ops.dataset_publications
-		WHERE dataset = 'fpl:live'
-		  AND season_id = $1
-		  AND event_id = $2
-		  AND status = 'active'
-	), authority AS (
-		SELECT
-			count(*)::text AS authority_count,
-			min(publication_id) AS publication_id,
-			min(revision) AS revision,
-			min(source_checked_at) AS source_checked_at,
-			min(published_at) AS published_at
-		FROM active_publication
-	)
-		SELECT
-			authority.*,
-			(SELECT count(*)::text
-			 FROM fpl.player_gameweek_stats
-			 WHERE season_id = $1 AND event_id = $2) AS event_live_count,
-			(SELECT count(*)::text
-			 FROM fpl.players
-			 WHERE season_id = $1 AND element_id = ANY($3::integer[])) AS known_player_count,
-			COALESCE((
-			SELECT jsonb_agg((to_jsonb(live_row) - 'season_id') ORDER BY element_id)
-			FROM fpl.player_gameweek_stats live_row
-			WHERE season_id = $1
-			  AND event_id = $2
-			  AND element_id = ANY($3::integer[])
-		), '[]'::jsonb) AS event_lives,
-		COALESCE((
-			SELECT jsonb_agg((to_jsonb(fixture_row) - 'season_id') ORDER BY fixture_id)
-			FROM fpl.fixtures fixture_row
-			WHERE season_id = $1 AND event_id = $2
-		), '[]'::jsonb) AS fixtures
-	FROM authority
-`;
-
 const emptyBuckets = (): {
 	Playing: LiveFixtureData[];
 	Not_Start: LiveFixtureData[];
@@ -1701,7 +1550,7 @@ const fixtureStatus = (fixture: CoreFixtureData): keyof LiveFixtureBuckets =>
 
 const buildLiveFixtureView = (
 	fixtures: readonly CoreFixtureData[],
-	core: CoreDataSnapshot
+	core: Pick<CoreDataSnapshot, "teams">
 ): LiveFixturesByTeam => {
 	const teams = new Map(core.teams.map((team) => [team.id, team]));
 	const byTeam: Record<string, ReturnType<typeof emptyBuckets>> = {};
@@ -1736,217 +1585,6 @@ const buildLiveFixtureView = (
 		}
 	}
 	return byTeam;
-};
-
-type FixtureBonusCandidate = Readonly<{
-	elementId: number;
-	teamId: number;
-	value: number;
-}>;
-
-const fixtureStatCandidates = (
-	rawFixture: Record<string, unknown> | undefined,
-	fixture: CoreFixtureData,
-	identifier: "bonus" | "bps"
-): FixtureBonusCandidate[] => {
-	const rawStats: unknown = rawFixture?.stats;
-	if (!Array.isArray(rawStats)) return [];
-	const stat: unknown = (rawStats as unknown[]).find(
-		(value) => isRecord(value) && value.identifier === identifier
-	);
-	if (!isRecord(stat)) return [];
-	const mapSide = (value: unknown, teamId: number): FixtureBonusCandidate[] => {
-		if (!Array.isArray(value)) return [];
-		const candidates: FixtureBonusCandidate[] = [];
-		for (const item of value) {
-			if (!isRecord(item)) continue;
-			const elementId = integer(item.element);
-			const statValue = integer(item.value);
-			if (elementId && elementId > 0 && statValue !== null) {
-				candidates.push({ elementId, teamId, value: statValue });
-			}
-		}
-		return candidates;
-	};
-	return [...mapSide(stat.h, fixture.teamHId), ...mapSide(stat.a, fixture.teamAId)];
-};
-
-const rankFixtureBonus = (candidates: readonly FixtureBonusCandidate[]): Map<number, number> => {
-	const awards = new Map<number, number>();
-	const ranked = candidates
-		.filter((candidate) => candidate.value > 0)
-		.sort((left, right) => right.value - left.value);
-	if (ranked.length === 0) return awards;
-
-	const awardTier = (bonus: number, fromIndex: number): number => {
-		const tierValue = ranked[fromIndex]!.value;
-		let index = fromIndex;
-		while (index < ranked.length && ranked[index]!.value === tierValue) {
-			awards.set(ranked[index]!.elementId, bonus);
-			index += 1;
-		}
-		return index;
-	};
-
-	let index = awardTier(3, 0);
-	if (index >= 3 || index >= ranked.length) return awards;
-	if (index === 1) {
-		index = awardTier(2, index);
-		if (index >= 3 || index >= ranked.length) return awards;
-	}
-	awardTier(1, index);
-	return awards;
-};
-
-const buildLiveBonus = (
-	rawFixtures: unknown,
-	fixtures: readonly CoreFixtureData[]
-): LiveBonusByTeam => {
-	const rawById = new Map<number, Record<string, unknown>>();
-	if (Array.isArray(rawFixtures)) {
-		for (const rawFixture of rawFixtures) {
-			if (!isRecord(rawFixture)) continue;
-			const fixtureId = integer(pick(rawFixture, "id", "fixture_id"));
-			if (fixtureId && fixtureId > 0) rawById.set(fixtureId, rawFixture);
-		}
-	}
-
-	const byTeam: Record<string, Record<string, number>> = {};
-	const add = (candidate: FixtureBonusCandidate): void => {
-		if (candidate.value <= 0) return;
-		const team = (byTeam[String(candidate.teamId)] ??= {});
-		team[String(candidate.elementId)] = (team[String(candidate.elementId)] ?? 0) + candidate.value;
-	};
-
-	for (const fixture of fixtures) {
-		if (!fixture.started && !fixture.finished && !fixture.finishedProvisional) continue;
-		const rawFixture = rawById.get(fixture.id);
-		const official = fixtureStatCandidates(rawFixture, fixture, "bonus").filter(
-			(candidate) => candidate.value > 0
-		);
-		if (official.length > 0) {
-			official.forEach(add);
-			continue;
-		}
-		if (fixture.finished || fixture.finishedProvisional) continue;
-
-		const bps = fixtureStatCandidates(rawFixture, fixture, "bps");
-		const teamByElement = new Map(
-			bps.map((candidate) => [candidate.elementId, candidate.teamId] as const)
-		);
-		for (const [elementId, value] of rankFixtureBonus(bps)) {
-			const teamId = teamByElement.get(elementId);
-			if (teamId !== undefined) add({ elementId, teamId, value });
-		}
-	}
-	return byTeam;
-};
-
-const loadLiveSnapshotFromPostgres = async (
-	context: GraphQLContext,
-	eventId: number,
-	expectedManifest?: DataPublicationManifest | null
-): Promise<LiveDataSnapshot> => {
-	const [core, result] = await Promise.all([
-		getCoreDataSnapshot(context),
-		context.database.query<LiveFallbackRow>(LIVE_FALLBACK_SQL, [
-			context.currentSeason.seasonId,
-			eventId,
-		]),
-	]);
-	const row = result.rows[0];
-	const authorityCount = integer(row?.authority_count) ?? 0;
-	const eventCheckedAt = isoDate(row?.event_checked_at);
-	const sourceCheckedAt = eventCheckedAt ?? isoDate(row?.source_checked_at) ?? core.sourceCheckedAt;
-	const publishedAt =
-		authorityCount === 1 ? (isoDate(row?.published_at) ?? sourceCheckedAt) : sourceCheckedAt;
-	const eventLives = mapArray(row?.event_lives, mapLivePerformance);
-	const fixtures = mapArray(row?.fixtures, mapCoreFixture);
-	const manifest = row?.manifest
-		? parseDataPublicationManifest(JSON.stringify(row.manifest), {
-				dataset: "fpl:live",
-				seasonCode: context.currentSeason.seasonCode,
-				eventId,
-			})
-		: null;
-	const preservesPinnedPublication =
-		authorityCount === 1 &&
-		expectedManifest !== null &&
-		expectedManifest !== undefined &&
-		manifest?.publicationId === expectedManifest.publicationId &&
-		manifest.revision === expectedManifest.revision;
-	const coreEventFixtures = core.fixtures.filter((fixture) => fixture.eventId === eventId);
-	const coreTeamIds = new Set(core.teams.map((team) => team.id));
-	if (
-		!row ||
-		authorityCount > 1 ||
-		(expectedManifest !== null &&
-			expectedManifest !== undefined &&
-			authorityCount === 1 &&
-			!preservesPinnedPublication) ||
-		(authorityCount === 1 &&
-			(!manifest ||
-				manifest.publicationId !== row.publication_id ||
-				manifest.revision !== integer(row.revision))) ||
-		!eventLives ||
-		!fixtures ||
-		eventLives.some((live) => live.eventId !== eventId) ||
-		fixtures.some((fixture) => fixture.eventId !== eventId) ||
-		!hasUniquePositiveIds(eventLives, (live) => live.playerId) ||
-		!hasUniquePositiveIds(fixtures, (fixture) => fixture.id) ||
-		(eventLives.length > 0
-			? !hasSameIds(
-					eventLives,
-					core.players,
-					(live) => live.playerId,
-					(player) => player.id
-				)
-			: fixtures.some(
-					(fixture) => fixture.started === true || fixture.finished || fixture.finishedProvisional
-				)) ||
-		!hasSameIds(
-			fixtures,
-			coreEventFixtures,
-			(fixture) => fixture.id,
-			(fixture) => fixture.id
-		) ||
-		fixtures.some(
-			(fixture) => !coreTeamIds.has(fixture.teamHId) || !coreTeamIds.has(fixture.teamAId)
-		)
-	) {
-		throw new Error(`Coherent PostgreSQL live publication is unavailable for event ${eventId}`);
-	}
-	const revision = preservesPinnedPublication
-		? String(expectedManifest.revision)
-		: `db-${sourceCheckedAt ? Date.parse(sourceCheckedAt) : core.revision}`;
-	const state = liveStateFromFixtures(fixtures);
-	if (preservesPinnedPublication && expectedManifest.state !== state) {
-		throw new Error(`Pinned live publication state is unavailable for event ${eventId}`);
-	}
-	const liveFixtures = buildLiveFixtureView(fixtures, core);
-	const liveBonus = buildLiveBonus(row.fixtures, fixtures);
-	if (
-		!validateLiveFixtureView(liveFixtures, fixtures, core) ||
-		!validateLiveBonus(liveBonus, core, eventId)
-	) {
-		throw new Error(`Coherent PostgreSQL live derivatives are unavailable for event ${eventId}`);
-	}
-	return {
-		source: preservesPinnedPublication ? "redis" : "postgres",
-		seasonCode: context.currentSeason.seasonCode,
-		eventId,
-		revision,
-		publicationId: preservesPinnedPublication ? expectedManifest.publicationId : null,
-		sourceCheckedAt: preservesPinnedPublication
-			? expectedManifest.sourceCheckedAt
-			: sourceCheckedAt,
-		publishedAt: preservesPinnedPublication ? expectedManifest.publishedAt : publishedAt,
-		state,
-		eventLives,
-		fixtures,
-		liveFixtures,
-		liveBonus,
-	};
 };
 
 export const getCoreDataSnapshot = (context: GraphQLContext): Promise<CoreDataSnapshot> => {
@@ -2039,6 +1677,50 @@ export const getCoreTeamSnapshot = (context: GraphQLContext): Promise<CoreTeamSn
 	return bindCoreRevision(context, load);
 };
 
+/** Live desks need only team labels and player identity, not the full core. */
+export const getCoreLiveIdentitySnapshot = (
+	context: GraphQLContext
+): Promise<CoreLiveIdentitySnapshot> => {
+	const requestScope = context.requestScope ?? context;
+	const existing = coreLiveIdentitySnapshotMemo.get(requestScope);
+	if (existing) return bindCoreRevision(context, existing);
+	const load = (async (): Promise<CoreLiveIdentitySnapshot> => {
+		const publication = await readPinnedCorePublicationItems(context, ["teams", "players"]);
+		const snapshot = publication ? publicationCoreLiveIdentitySnapshot(publication) : null;
+		if (snapshot) return snapshot;
+		const expectedManifest = await reserveCorePublicationPin(context, "manifest").manifest;
+		const result = await context.database.query<CoreLiveIdentityFallbackRow>(
+			CORE_LIVE_IDENTITY_FALLBACK_SQL,
+			[context.currentSeason.seasonId]
+		);
+		const row = result.rows[0];
+		const authority = validateTargetedCoreAuthority(context, row, expectedManifest);
+		const teams = mapArray(row?.teams, mapCoreTeam);
+		const players = mapArray(row?.players, mapCorePlayer);
+		if (
+			!authority ||
+			!teams ||
+			!players ||
+			teams.length === 0 ||
+			players.length === 0 ||
+			players.some((player) => !teams.some((team) => team.id === player.teamId))
+		) {
+			throw new Error("Coherent PostgreSQL core live identity publication is unavailable");
+		}
+		return {
+			source: "postgres",
+			seasonCode: context.currentSeason.seasonCode,
+			revision: String(authority.revision),
+			publicationId: authority.publicationId,
+			sourceCheckedAt: authority.sourceCheckedAt,
+			teams,
+			players,
+		};
+	})();
+	coreLiveIdentitySnapshotMemo.set(requestScope, load);
+	return bindCoreRevision(context, load);
+};
+
 export const getLiveDataSnapshot = (
 	context: GraphQLContext,
 	eventId: number
@@ -2060,15 +1742,13 @@ export const getLiveDataSnapshot = (
 		const [published, manifest, core] = await Promise.all([
 			publication,
 			pin.manifest,
-			getCoreDataSnapshot(context),
+			getCoreLiveIdentitySnapshot(context),
 		]);
 		const snapshot = published ? publicationLiveSnapshot(published, eventId, core) : null;
 		if (snapshot) return snapshot;
-		context.logger.warn(
-			{ season: context.currentSeason.seasonCode, eventId },
-			"Live Data publication unavailable; using one coherent PostgreSQL snapshot"
+		throw new Error(
+			`LIVE_PUBLICATION_UNAVAILABLE:${context.currentSeason.seasonCode}:${eventId}:${manifest?.revision ?? "none"}`
 		);
-		return loadLiveSnapshotFromPostgres(context, eventId, manifest);
 	})();
 	eventSnapshots.set(eventId, load);
 	return load;
@@ -2113,87 +1793,20 @@ export const getTargetedLiveDataSnapshot = async (
 	const uniquePlayerIds = Array.from(
 		new Set(playerIds.filter((playerId) => Number.isSafeInteger(playerId) && playerId > 0))
 	);
-	const requestedPlayerIds = new Set(uniquePlayerIds);
-	try {
-		const [core, result] = await Promise.all([
-			getCoreFixtureSnapshot(context),
-			context.database.query<LiveFallbackRow>(TARGETED_LIVE_SQL, [
-				context.currentSeason.seasonId,
-				eventId,
-				uniquePlayerIds,
-			]),
-		]);
-		const row = result.rows[0];
-		const authorityCount = integer(row?.authority_count) ?? 0;
-		const eventLiveCount = integer(row?.event_live_count);
-		const knownPlayerCount = integer(row?.known_player_count);
-		const eventLives = mapArray(row?.event_lives, mapLivePerformance);
-		const fixtures = mapArray(row?.fixtures, mapCoreFixture);
-		const coreEventFixtures = core.fixtures.filter((fixture) => fixture.eventId === eventId);
-		const coreTeamIds = new Set(core.teams.map((team) => team.id));
-		if (
-			!row ||
-			authorityCount !== 1 ||
-			row.publication_id !== expected.publicationId ||
-			String(row.revision) !== expected.revision ||
-			eventLiveCount !== expected.eventLiveCount ||
-			knownPlayerCount === null ||
-			!eventLives ||
-			!fixtures ||
-			eventLives.some(
-				(live) => live.eventId !== eventId || !requestedPlayerIds.has(live.playerId)
-			) ||
-			!hasUniquePositiveIds(eventLives, (live) => live.playerId) ||
-			(expected.eventLiveCount > 0 && eventLives.length !== knownPlayerCount) ||
-			(expected.eventLiveCount === 0 && eventLives.length > 0) ||
-			fixtures.some((fixture) => fixture.eventId !== eventId) ||
-			!hasUniquePositiveIds(fixtures, (fixture) => fixture.id) ||
-			!hasSameIds(
-				fixtures,
-				coreEventFixtures,
-				(fixture) => fixture.id,
-				(fixture) => fixture.id
-			) ||
-			fixtures.some(
-				(fixture) => !coreTeamIds.has(fixture.teamHId) || !coreTeamIds.has(fixture.teamAId)
-			) ||
-			fixtures.length !== expected.fixtureCount ||
-			new Set(fixtures.flatMap((fixture) => [fixture.teamHId, fixture.teamAId])).size !==
-				expected.fixtureTeamCount ||
-			liveStateFromFixtures(fixtures) !== expected.state
-		) {
-			throw new Error(`Targeted live publication is unavailable for event ${eventId}`);
-		}
-		const liveBonus = buildLiveBonus(row.fixtures, fixtures);
-		if (Object.keys(liveBonus).length !== expected.bonusTeamCount) {
-			throw new Error(`Targeted live bonus is incoherent for event ${eventId}`);
-		}
-		return {
-			source: "redis",
-			seasonCode: context.currentSeason.seasonCode,
-			eventId,
-			revision: expected.revision,
-			publicationId: expected.publicationId,
-			sourceCheckedAt: expected.sourceCheckedAt,
-			publishedAt: expected.publishedAt,
-			state: expected.state,
-			eventLiveCount: expected.eventLiveCount,
-			fixtureCount: expected.fixtureCount,
-			fixtureTeamCount: expected.fixtureTeamCount,
-			bonusTeamCount: expected.bonusTeamCount,
-			eventLives,
-			liveBonus,
-		};
-	} catch (error) {
-		context.logger.warn(
-			{ err: error, eventId, playerCount: uniquePlayerIds.length },
-			"Targeted live read unavailable; using the coherent full snapshot"
-		);
-		return projectTargetedLiveSnapshot(
-			await getLiveDataSnapshot(context, eventId),
-			requestedPlayerIds
-		);
+	const snapshot = await getLiveDataSnapshot(context, eventId);
+	if (
+		snapshot.publicationId !== expected.publicationId ||
+		snapshot.revision !== expected.revision ||
+		snapshot.eventLives.length !== expected.eventLiveCount ||
+		snapshot.fixtures.length !== expected.fixtureCount ||
+		(expected.fixtureTeamCount > 0 &&
+			new Set(snapshot.fixtures.flatMap((fixture) => [fixture.teamHId, fixture.teamAId])).size !==
+				expected.fixtureTeamCount) ||
+		snapshot.state !== expected.state
+	) {
+		throw new Error(`Targeted live publication revision is unavailable for event ${eventId}`);
 	}
+	return projectTargetedLiveSnapshot(snapshot, new Set(uniquePlayerIds));
 };
 
 export const coreDatasetRevision = (snapshot: CoreDataSnapshot): string =>

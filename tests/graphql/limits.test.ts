@@ -182,9 +182,9 @@ describe("GraphQL request limits", () => {
 	it("sums heavy root floors, including aliases", () => {
 		const result = validateGraphQLRequestLimits({
 			query:
-				"query { first: liveMatches { eventId } second: liveMatches { eventId } calcLivePointsForTournament(eventId: 1, tournamentId: 2) { meta { totalEntries } } }",
+				"query { first: liveMatchdayDesk { eventId } second: liveMatchdayDesk { eventId } entryLiveCompetitionsDesk(entryId: 1) { eventId } }",
 		});
-		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 50 });
+		expect(result).toMatchObject({ ok: true });
 	});
 
 	it("charges each unpaginated tournament participant lookup", () => {

@@ -7,14 +7,12 @@ import type { Fixture } from "../fixtures/repository";
 import { fixturesService } from "../fixtures/service";
 import type { LivePerformance, TargetedLiveRead } from "../live/repository";
 import { liveRepository } from "../live/repository";
-import { loadLiveBonusByPlayerId } from "../live/bonus-cache";
 import { loadLiveSnapshotMeta } from "../live/snapshot-meta";
 import { playersRepository } from "../players/repository";
 import {
 	type ActiveCaptainData,
 	applyAutoSubs,
 	buildNoPicksLiveCalcData,
-	calcElementLivePoints,
 	type ElementEventResultData,
 	type LiveCalcData,
 } from "./calc-service";
@@ -56,7 +54,6 @@ export const assertValidEntryBatch = (entryIds: readonly number[]): void => {
 
 type SharedData = {
 	liveByPlayer: Map<number, LivePerformance>;
-	effectiveBonusByPlayer: Map<number, number>;
 	teamsById: Map<number, Team>;
 	playersById: Map<number, Player>;
 	fixturesByTeam: Map<number, Fixture[]>;
@@ -290,10 +287,11 @@ const computeSingleEntry = (
 	entryId: number,
 	eventId: number,
 	perEntry: PerEntryData,
-	shared: SharedData
+	shared: SharedData,
+	provisional: boolean
 ): LiveCalcData => {
 	const { entry, pickEntity, transferRows, previousResult } = perEntry;
-	const { liveByPlayer, effectiveBonusByPlayer, fixturesByTeam, teamsById, playersById } = shared;
+	const { liveByPlayer, fixturesByTeam, teamsById, playersById } = shared;
 
 	const chip = normalizeChip(pickEntity?.chip ?? null);
 	const transferCost = pickEntity?.transfersCost ?? 0;
@@ -320,8 +318,9 @@ const computeSingleEntry = (
 		const isPlayed = minutes > 0 || yellowCards > 0 || redCards > 0;
 
 		const defensiveContribution: number = safeNull(live?.defensiveContribution, 0);
-		const effectiveBonus = effectiveBonusByPlayer.get(pick.element);
-		const calculatedTotalPoints = calcElementLivePoints(live, effectiveBonus);
+		// Official event/{gw}/live total_points is authoritative, including projected
+		// and final bonus. Never reconstruct scoring locally.
+		const officialTotalPoints = live?.totalPoints ?? 0;
 
 		return {
 			season: null,
@@ -362,9 +361,9 @@ const computeSingleEntry = (
 			yellowCards,
 			redCards,
 			saves: safeNull(live?.saves, 0),
-			bonus: effectiveBonus ?? safeNull(live?.bonus, 0),
+			bonus: safeNull(live?.bonus, 0),
 			bps: safeNull(live?.bps, 0),
-			totalPoints: calculatedTotalPoints,
+			totalPoints: officialTotalPoints,
 			starts: live?.starts ?? null,
 			expectedGoals: parseNullableFloat(live?.expectedGoals),
 			expectedAssists: parseNullableFloat(live?.expectedAssists),
@@ -378,15 +377,17 @@ const computeSingleEntry = (
 		};
 	});
 
-	// Apply automatic substitutions before building active picks
-	applyAutoSubs(pickList, chip);
+	// Live boards remain provisional until the official event result is final.
+	// During that window only the published picks multipliers are authoritative;
+	// automatic substitutions are applied by the finalized calculation path.
+	if (!provisional) applyAutoSubs(pickList, chip);
 
 	const isBenchBoost = chip === "BENCH_BOOST";
 	const activePicks: ElementEventResultData[] = [];
 
 	for (const pick of pickList) {
 		const isActive = isBenchBoost ? true : pick.multiplier > 0;
-		const autoSub = !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
+		const autoSub = !provisional && !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
 		pick.pickActive = isActive;
 		pick.autoSub = autoSub;
 		if (isActive) {
@@ -396,7 +397,9 @@ const computeSingleEntry = (
 
 	// Captain selection uses full pickList so vice-captain is found even if
 	// captain was auto-subbed out
-	const captainForScoring = selectCaptainForScoring(pickList);
+	const captainForScoring = provisional
+		? (pickList.find((pick) => pick.isCaptain) ?? null)
+		: selectCaptainForScoring(pickList);
 	const captainMultiplier = chip === "TRIPLE_CAPTAIN" ? 3 : 2;
 
 	const captainElementId = captainForScoring?.element;
@@ -436,6 +439,7 @@ const computeSingleEntry = (
 
 	return {
 		availability: pickEntity && pickEntity.picks.length > 0 ? "READY" : "NO_PICKS",
+		provisional,
 		snapshot: null,
 		rank: 0,
 		event: eventId,
@@ -484,6 +488,7 @@ export const entryLiveBatchService = {
 			fixtures?: Promise<Fixture[]>;
 			teams?: Promise<Team[]>;
 			picksByEntry?: Promise<Map<number, EntryEventPick>>;
+			provisional?: boolean;
 		}
 	): Promise<BatchLiveCalcResult> {
 		assertValidEntryBatch(entryIds);
@@ -540,15 +545,12 @@ export const entryLiveBatchService = {
 		// Phase 2: load reusable data only for entries that actually have picks.
 		const useTargetedLiveRead =
 			includeLive && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
-		const [liveByPlayerRaw, bonusByPlayerId, fixtures, teams, transfersByEntry, fullSnapshotMeta] =
+		const [liveByPlayerRaw, fixtures, teams, transfersByEntry, fullSnapshotMeta] =
 			await Promise.all([
 				prefetched?.liveByPlayer ??
 					(includeLive && !useTargetedLiveRead
 						? liveRepository.getAllLivePerformances(context, eventId)
 						: Promise.resolve(new Map<number, LivePerformance>())),
-				includeLive && !useTargetedLiveRead
-					? loadLiveBonusByPlayerId(context, eventId)
-					: Promise.resolve(new Map<number, number>()),
 				prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
 				prefetched?.teams ?? playersRepository.listTeams(context),
 				entryLiveRepository.getEntryEventTransfersByIds(context, readyEntryIds, eventId),
@@ -615,7 +617,6 @@ export const entryLiveBatchService = {
 
 		const shared: SharedData = {
 			liveByPlayer: liveByPlayerMap,
-			effectiveBonusByPlayer: targetedLive?.effectiveBonusByPlayer ?? bonusByPlayerId,
 			teamsById,
 			playersById,
 			fixturesByTeam,
@@ -633,7 +634,13 @@ export const entryLiveBatchService = {
 				};
 
 				const calcData = {
-					...computeSingleEntry(entryId, eventId, perEntry, shared),
+					...computeSingleEntry(
+						entryId,
+						eventId,
+						perEntry,
+						shared,
+						prefetched?.provisional === true
+					),
 					snapshot: targetedLive?.meta ?? fullSnapshotMeta,
 				};
 				results.set(entryId, calcData);

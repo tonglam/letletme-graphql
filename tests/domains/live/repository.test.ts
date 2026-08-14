@@ -85,7 +85,17 @@ describe("liveRepository live publication reads", () => {
 	});
 
 	it("reads a targeted player set without hydrating the full live publication", async () => {
-		const { context, redis, core } = liveContext();
+		const core = buildTestCoreData(1);
+		const lives = buildTestEventLives(core, 1);
+		lives[0] = {
+			...lives[0],
+			minutes: 90,
+			goalsScored: 1,
+			bonus: 3,
+			totalPoints: 10,
+			inDreamTeam: true,
+		};
+		const { context, redis } = liveContext(lives);
 		const activeManifest = [...redis.values.entries()].find(
 			([key]) => key.includes(":fpl:live:") && key.endsWith(":active")
 		);
@@ -97,12 +107,8 @@ describe("liveRepository live publication reads", () => {
 			publishedAt: string;
 			items: Array<{ name: string; key: string }>;
 		};
-		if (activeManifest) {
-			const eventLivesKey = publicationManifest.items.find(
-				(item) => item.name === "eventLives"
-			)?.key;
-			if (eventLivesKey) redis.values.delete(eventLivesKey);
-		}
+		// The targeted read is served from the same immutable publication. It
+		// must not fall back to mutable PostgreSQL facts when a player is absent.
 		let queryCount = 0;
 		context.logger = {
 			...context.logger,
@@ -185,7 +191,7 @@ describe("liveRepository live publication reads", () => {
 			publicationId: targeted.meta.publicationId,
 			publishedAt: targeted.meta.publishedAt,
 		});
-		expect(queryCount).toBe(2);
+		expect(queryCount).toBe(0);
 	});
 
 	it("returns no targeted rows for an unknown player without hydrating the full snapshot", async () => {
@@ -201,8 +207,8 @@ describe("liveRepository live publication reads", () => {
 			publishedAt: string;
 			items: Array<{ name: string; key: string }>;
 		};
-		const eventLivesKey = manifest.items.find((item) => item.name === "eventLives")?.key;
-		if (eventLivesKey) redis.values.delete(eventLivesKey);
+		// Unknown players are an empty projection of the immutable event-live
+		// vector, not a reason to hydrate mutable database rows.
 		let queryCount = 0;
 		context.logger = {
 			...context.logger,
@@ -238,7 +244,7 @@ describe("liveRepository live publication reads", () => {
 		const targeted = await liveRepository.getTargetedLiveRead(context, 1, [999_999]);
 
 		expect(targeted.performances).toEqual([]);
-		expect(queryCount).toBe(1);
+		expect(queryCount).toBe(0);
 	});
 
 	it("reads historical multi-event stats in one bounded PostgreSQL query", async () => {

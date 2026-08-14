@@ -8,7 +8,6 @@ import {
 } from "../../infra/data-snapshot";
 import { getCurrentEventId } from "../../infra/event";
 import {
-	isLiveSnapshotDatabaseFallback,
 	loadLivePublicationMeta,
 	loadLiveSnapshotMeta,
 	rememberLiveSnapshotMeta,
@@ -864,7 +863,6 @@ export type EventLive = {
 
 export type TargetedLiveRead = {
 	performances: LivePerformance[];
-	effectiveBonusByPlayer: Map<number, number>;
 	meta: LiveSnapshotMeta;
 };
 
@@ -1530,38 +1528,20 @@ export const liveRepository: LiveRepository = {
 		playerIds: number[]
 	): Promise<TargetedLiveRead> {
 		const publishedMeta = await loadLivePublicationMeta(context, eventId);
-		const snapshot =
-			publishedMeta?.publicationId && !isLiveSnapshotDatabaseFallback(context, eventId)
-				? await getTargetedLiveDataSnapshot(context, eventId, playerIds, {
-						publicationId: publishedMeta.publicationId,
-						revision: publishedMeta.revision,
-						sourceCheckedAt: publishedMeta.checkedAt,
-						publishedAt: publishedMeta.publishedAt,
-						state: publishedMeta.state,
-						eventLiveCount: publishedMeta.eventLiveCount,
-						fixtureCount: publishedMeta.fixtureCount,
-						fixtureTeamCount: publishedMeta.fixtureTeamCount,
-						bonusTeamCount: publishedMeta.bonusTeamCount,
-					})
-				: await getTargetedLiveDataSnapshot(context, eventId, playerIds, {
-						publicationId: "unavailable",
-						revision: "unavailable",
-						sourceCheckedAt: publishedMeta?.checkedAt ?? "",
-						publishedAt: publishedMeta?.publishedAt ?? "",
-						state: publishedMeta?.state ?? "scheduled",
-						eventLiveCount: publishedMeta?.eventLiveCount ?? 0,
-						fixtureCount: publishedMeta?.fixtureCount ?? 0,
-						fixtureTeamCount: publishedMeta?.fixtureTeamCount ?? 0,
-						bonusTeamCount: publishedMeta?.bonusTeamCount ?? 0,
-					});
-		const requested = new Set(playerIds);
-		const effectiveBonusByPlayer = new Map<number, number>();
-		for (const teamBonus of Object.values(snapshot.liveBonus)) {
-			for (const [playerIdRaw, bonus] of Object.entries(teamBonus)) {
-				const playerId = Number(playerIdRaw);
-				if (requested.has(playerId)) effectiveBonusByPlayer.set(playerId, bonus);
-			}
+		if (!publishedMeta?.publicationId) {
+			throw new Error(`Live publication metadata is unavailable for event ${eventId}`);
 		}
+		const snapshot = await getTargetedLiveDataSnapshot(context, eventId, playerIds, {
+			publicationId: publishedMeta.publicationId,
+			revision: publishedMeta.revision,
+			sourceCheckedAt: publishedMeta.checkedAt,
+			publishedAt: publishedMeta.publishedAt,
+			state: publishedMeta.state,
+			eventLiveCount: publishedMeta.eventLiveCount,
+			fixtureCount: publishedMeta.fixtureCount,
+			fixtureTeamCount: publishedMeta.fixtureTeamCount,
+			bonusTeamCount: publishedMeta.bonusTeamCount,
+		});
 		const meta: LiveSnapshotMeta = {
 			season: snapshot.seasonCode,
 			eventId,
@@ -1578,7 +1558,6 @@ export const liveRepository: LiveRepository = {
 		rememberLiveSnapshotMeta(context, meta, snapshot.seasonCode, eventId, snapshot.source);
 		return {
 			performances: snapshot.eventLives.map(mapPublishedLivePerformance),
-			effectiveBonusByPlayer,
 			meta,
 		};
 	},

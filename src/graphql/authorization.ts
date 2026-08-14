@@ -64,7 +64,9 @@ const publicFields = new Set([
 	"eventLiveExplain",
 	"eventLiveExplains",
 	"liveSnapshot",
-	"liveMatches",
+	"liveContext",
+	"liveMatchdayDesk",
+	"liveFixturePlayers",
 	"player",
 	"players",
 	"playersForPicker",
@@ -99,6 +101,9 @@ const ownEntryArgFields = new Map([
 	["entryH2HMatchResults", "entryId"],
 	["entryOfficialH2HDesk", "entryId"],
 	["entryTournaments", "entryId"],
+	["entryLiveCompetitionsDesk", "entryId"],
+	["tournamentSelectionIndex", "entryId"],
+	["tournamentEntrySquads", "entryId"],
 	["tournament", "entryId"],
 	["managedTournament", "entryId"],
 	["tournamentEntryRankingSummary", "entryId"],
@@ -111,10 +116,10 @@ const tournamentMembershipFields = new Set([
 	"tournamentBattleGroupResults",
 	"tournamentOfficialH2H",
 	"tournamentSelectionStats",
-	"calcLivePointsForTournament",
 	"tournamentEntryRankingSummary",
 	"tournamentSeasonSnapshot",
 	"tournament",
+	"tournamentLiveParticipants",
 ]);
 
 const protectedFields = new Set([
