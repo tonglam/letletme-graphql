@@ -350,30 +350,36 @@ jobs:
               ) {
                 throw new Error("GraphQL deployment core contract failed");
               }
+              const live = await request(`query LiveDeploymentSmoke {
+                liveContext {
+                  season coreRevision currentEventId nextEventId liveRevision state stale
+                }
+              }`);
+              const context = live?.liveContext;
+              if (
+                context?.season !== info.season ||
+                typeof context.coreRevision !== "string" ||
+                !context.coreRevision ||
+                typeof context.state !== "string" ||
+                typeof context.stale !== "boolean"
+              ) {
+                throw new Error("GraphQL deployment live context contract failed");
+              }
               const eventId =
-                Number.isInteger(info.currentEvent) && info.currentEvent > 0
-                  ? info.currentEvent
-                  : Number.isInteger(info.nextEvent) && info.nextEvent > 0
-                    ? info.nextEvent
+                Number.isInteger(context.currentEventId) && context.currentEventId > 0
+                  ? context.currentEventId
+                  : Number.isInteger(context.nextEventId) && context.nextEventId > 0
+                    ? context.nextEventId
                     : null;
-              if (!eventId) throw new Error("GraphQL deployment has no current or next event");
-              const live = await request(
-                `query LiveDeploymentSmoke($eventId: Int!) {
-                  liveSnapshot(eventId: $eventId) {
-                    season eventId revision state eventLiveCount fixtureCount
-                  }
-                }`,
-                { eventId },
-              );
-              const snapshot = live?.liveSnapshot;
-              if (snapshot?.season !== info.season || snapshot?.eventId !== eventId) {
-                throw new Error("GraphQL deployment live contract failed");
+              if (context.liveRevision !== null && (!eventId || typeof context.liveRevision !== "string")) {
+                throw new Error("GraphQL deployment live revision contract failed");
               }
               console.log(JSON.stringify({
                 status: "graphql_deployment_contract_passed",
                 season: info.season,
                 eventId,
-                liveState: snapshot.state,
+                liveState: context.state,
+                liveRevision: context.liveRevision,
               }));
             '
 
