@@ -72,6 +72,7 @@ const publicFields = new Set([
 	"playerValues",
 	"playerValueHistory",
 	"marketPulse",
+	"marketSnapshotContext",
 	"publicLeagueTrends",
 	"publicLeagueSelectionStats",
 	"playerDetail",

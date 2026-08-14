@@ -3,7 +3,7 @@ import type Redis from "ioredis";
 
 export const DATA_CACHE_NAMESPACE = "llm:data";
 
-export type DataPublicationDataset = "fpl:core" | "fpl:live";
+export type DataPublicationDataset = "fpl:core" | "fpl:live" | "fpl:market";
 
 export type DataPublicationScope = Readonly<{
 	dataset: DataPublicationDataset;
@@ -68,6 +68,7 @@ const MANIFEST_ITEM_FIELDS = ["name", "key", "type", "count", "bytes", "sha256"]
 const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
 	"fpl:core": ["events", "teams", "players", "phases", "fixtures", "currentEventId"],
 	"fpl:live": ["eventLives", "fixtures", "liveFixtures", "liveBonus"],
+	"fpl:market": ["context"],
 };
 
 const hasExactFields = (value: Record<string, unknown>, fields: readonly string[]): boolean => {
@@ -89,10 +90,10 @@ const hasExactItemNames = (dataset: DataPublicationDataset, names: readonly stri
 const isCanonicalState = (
 	dataset: DataPublicationDataset,
 	state: unknown
-): state is DataPublicationManifest["state"] =>
-	dataset === "fpl:core"
-		? state === "active"
-		: state === "scheduled" || state === "live" || state === "settled";
+): state is DataPublicationManifest["state"] => {
+	if (dataset === "fpl:core" || dataset === "fpl:market") return state === "active";
+	return state === "scheduled" || state === "live" || state === "settled";
+};
 
 export const isDataPublicationId = (value: unknown): value is string =>
 	typeof value === "string" &&
@@ -159,7 +160,12 @@ export const parseDataPublicationManifest = (
 	try {
 		const value: unknown = JSON.parse(raw);
 		if (!isRecord(value) || !hasExactFields(value, MANIFEST_FIELDS)) return null;
-		if (value.dataset !== "fpl:core" && value.dataset !== "fpl:live") return null;
+		if (
+			value.dataset !== "fpl:core" &&
+			value.dataset !== "fpl:live" &&
+			value.dataset !== "fpl:market"
+		)
+			return null;
 		const dataset = value.dataset;
 		if (
 			typeof value.seasonCode !== "string" ||

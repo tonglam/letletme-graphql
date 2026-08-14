@@ -14,6 +14,9 @@ export type GraphQLContext = {
 	currentSeason: CurrentSeason;
 	/** Core Data publication selected once for this GraphQL request. */
 	dataRevision?: string;
+	/** Market Data publication selected once for this GraphQL request. */
+	marketRevision?: string;
+	marketSnapshotSource?: "DATA_PUBLICATION" | "POSTGRES_FALLBACK";
 	redis: Redis;
 	logger: Logger;
 	/** Opaque request correlation identifier; never derived from user identity. */

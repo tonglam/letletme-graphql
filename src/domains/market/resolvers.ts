@@ -2,6 +2,7 @@ import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import type { MarketPulse } from "./repository";
 import { marketService } from "./service";
+import type { MarketSnapshotContext } from "./context";
 
 type MarketPulseArgs = {
 	days?: number | null;
@@ -25,5 +26,14 @@ export const marketResolvers = {
 			context: GraphQLContext
 		): Promise<MarketPulse> =>
 			marketService.getMarketPulse(context, normalizeMarketPulseDays(args.days)),
+		marketSnapshotContext: async (
+			_parent: unknown,
+			_args: unknown,
+			context: GraphQLContext
+		): Promise<MarketSnapshotContext> => marketService.getMarketSnapshotContext(context),
+	},
+	MarketPulse: {
+		availabilityUpdateCount: (pulse: MarketPulse): number =>
+			pulse.availabilityUpdateCount ?? pulse.availabilityUpdates.length,
 	},
 };

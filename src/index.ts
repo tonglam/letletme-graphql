@@ -460,6 +460,9 @@ const startServer = async (): Promise<void> => {
 						"playersForPicker",
 						"playerStatsDesk",
 						"gameweekDesk",
+						"marketSnapshotContext",
+						"marketPulse",
+						"playerValueHistory",
 					]);
 					const lightweightCoreRead =
 						limits.shape === "query" &&
