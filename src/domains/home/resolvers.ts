@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type { HomePersonalDesk } from "./repository";
 import { homeService, type HomeMarketPulse, type HomePublicBootstrap } from "./service";
+import { normalizeMarketPulseDays } from "../market/resolvers";
 
 export const homeResolvers = {
 	Query: {
@@ -18,6 +19,7 @@ export const homeResolvers = {
 			_parent: unknown,
 			args: { days?: number | null },
 			context: GraphQLContext
-		): Promise<HomeMarketPulse> => homeService.getMarketPulse(context, args.days ?? 14),
+		): Promise<HomeMarketPulse> =>
+			homeService.getMarketPulse(context, normalizeMarketPulseDays(args.days)),
 	},
 };

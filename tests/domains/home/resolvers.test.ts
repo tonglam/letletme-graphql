@@ -114,6 +114,17 @@ describe("Home GraphQL contracts", () => {
 		}
 	});
 
+	it("rejects an out-of-range Home market window before querying", async () => {
+		const result = await graphql({
+			schema,
+			source: "query { homeMarketPulse(days: 31) { coverage { requestedDays } } }",
+			contextValue: buildSnapshotContext(new TestRedis()),
+		});
+
+		expect(result.data).toBeNull();
+		expect(result.errors?.[0]?.extensions?.code).toBe("BAD_USER_INPUT");
+	});
+
 	it("maps rank movement without treating missing ranks as zero", () => {
 		expect(movementFromRanks(3, 8)).toEqual({ direction: "UP", places: 5 });
 		expect(movementFromRanks(8, 3)).toEqual({ direction: "DOWN", places: 5 });
@@ -128,6 +139,7 @@ describe("Home GraphQL contracts", () => {
 			expect(sql).toContain("FROM competition.entries");
 			expect(sql).toContain("competition.entry_leagues");
 			expect(sql).toContain("competition.tournaments");
+			expect(sql).toContain("competition.tournament_entries");
 			expect(sql).not.toContain("tournament_groups");
 			expect(sql).not.toContain("official_h2h");
 			expect(sql).not.toContain("battle_");

@@ -286,6 +286,45 @@ describe("playersRepository.getPlayersForPicker", () => {
 });
 
 describe("playersRepository top transfers", () => {
+	it("pins the lightweight core revision before event-player cache keys", async () => {
+		const core = buildTestCoreData(1);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
+		const context = buildSnapshotContext(redis);
+		delete context.dataRevision;
+		context.data = {
+			read: () =>
+				queryChain(
+					{
+						data: [
+							{
+								element_id: 1,
+								event_id: 1,
+								transfers_in_event: 50,
+								transfers_out_event: 0,
+								total_points: 9,
+								selected_by_percent: "4.2",
+							},
+						],
+						error: null,
+					},
+					["select", "eq", "not", "order", "limit", "in"]
+				),
+		} as never;
+
+		const result = await playersRepository.getTopTransfersInEnriched(context, 1, 10);
+
+		expect((context as { dataRevision?: string }).dataRevision).toBe("core-7");
+		expect(result.stats).toEqual([
+			{
+				playerId: 1,
+				eventId: 1,
+				transfersInEvent: 50,
+				transfersOutEvent: 0,
+			},
+		]);
+		expect(result.players[1]).toMatchObject({ id: 1, totalPoints: 9 });
+	});
+
 	it("returns no rows when every event transfer count is zero", async () => {
 		const queryResult = {
 			data: [

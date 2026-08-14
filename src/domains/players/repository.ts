@@ -2,7 +2,7 @@ import { GraphQLError } from "graphql";
 import type { QueryResultRow } from "pg";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCoreDataSnapshot } from "../../infra/data-snapshot";
+import { getCoreDataSnapshot, getCoreEventSnapshot } from "../../infra/data-snapshot";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
@@ -503,6 +503,10 @@ export const playersRepository: PlayersRepository = {
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) return new Map();
 		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0)));
 		if (uniqueIds.length === 0) return new Map();
+		// Lightweight roots do not initialize the full core snapshot at the HTTP
+		// boundary. Pin the event publication before constructing revisioned cache
+		// keys so standalone top-transfer reads remain coherent and cache-safe.
+		if (!context.dataRevision) await getCoreEventSnapshot(context);
 		const keys = uniqueIds.map((id) =>
 			gqlCacheKey(context, `players:event-stats:${id}:${eventId}`)
 		);
