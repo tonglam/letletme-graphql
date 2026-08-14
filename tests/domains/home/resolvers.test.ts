@@ -212,6 +212,8 @@ describe("Home GraphQL contracts", () => {
 		expect(movementFromRanks(3, 3)).toEqual({ direction: "FLAT", places: 0 });
 		expect(movementFromRanks(null, 3)).toEqual({ direction: "UNKNOWN", places: null });
 		expect(movementFromRanks(3, null)).toEqual({ direction: "UNKNOWN", places: null });
+		expect(movementFromRanks(0, 0)).toEqual({ direction: "UNKNOWN", places: null });
+		expect(movementFromRanks(-1, 3)).toEqual({ direction: "UNKNOWN", places: null });
 	});
 
 	it("loads the complete personal desk with one compact SQL statement", async () => {
@@ -251,8 +253,8 @@ describe("Home GraphQL contracts", () => {
 						league_id: 8,
 						league_type: "h2h",
 						league_name: "No Match Details",
-						entry_rank: null,
-						entry_last_rank: 2,
+						entry_rank: 0,
+						entry_last_rank: 0,
 						tournament_id: null,
 					},
 				],
