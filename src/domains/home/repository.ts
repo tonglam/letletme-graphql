@@ -80,7 +80,8 @@ export const HOME_PERSONAL_DESK_SQL = `
 	) tracked ON TRUE
 	WHERE e.season_id = $1
 		AND e.entry_id = $2
-	ORDER BY l.entry_rank ASC NULLS LAST,
+	ORDER BY CASE WHEN l.entry_rank > 0 THEN 0 ELSE 1 END,
+		l.entry_rank ASC NULLS LAST,
 		l.league_name ASC NULLS LAST,
 		l.league_type ASC NULLS LAST,
 		l.league_id ASC NULLS LAST
@@ -92,18 +93,29 @@ const isoDate = (value: string | Date | null): string | null => {
 	return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 };
 
+const normalizeRank = (rank: number | null): number | null =>
+	rank !== null && Number.isSafeInteger(rank) && rank > 0 ? rank : null;
+
 export const movementFromRanks = (
 	currentRank: number | null,
 	previousRank: number | null
 ): HomeRankMovement => {
-	if (currentRank === null || previousRank === null) {
+	const normalizedCurrentRank = normalizeRank(currentRank);
+	const normalizedPreviousRank = normalizeRank(previousRank);
+	if (normalizedCurrentRank === null || normalizedPreviousRank === null) {
 		return { direction: "UNKNOWN", places: null };
 	}
-	if (currentRank < previousRank) {
-		return { direction: "UP", places: previousRank - currentRank };
+	if (normalizedCurrentRank < normalizedPreviousRank) {
+		return {
+			direction: "UP",
+			places: normalizedPreviousRank - normalizedCurrentRank,
+		};
 	}
-	if (currentRank > previousRank) {
-		return { direction: "DOWN", places: currentRank - previousRank };
+	if (normalizedCurrentRank > normalizedPreviousRank) {
+		return {
+			direction: "DOWN",
+			places: normalizedCurrentRank - normalizedPreviousRank,
+		};
 	}
 	return { direction: "FLAT", places: 0 };
 };
@@ -117,10 +129,11 @@ const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRank | null => {
 	) {
 		return null;
 	}
+	const rank = normalizeRank(row.entry_rank);
 	return {
 		key: `${row.league_type}:${row.league_id}`,
 		name: row.league_name,
-		rank: row.entry_rank,
+		rank,
 		movement: movementFromRanks(row.entry_rank, row.entry_last_rank),
 		tournamentId: row.tournament_id,
 	};
