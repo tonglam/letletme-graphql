@@ -2,7 +2,7 @@ import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import { getCoreFixtureSnapshot, type CoreFixtureData } from "../../infra/data-snapshot";
 import { eventsService } from "../events/service";
-import type { Event } from "../events/repository";
+import type { ChipPlay, Event } from "../events/repository";
 import type { LivePerformance } from "../live/repository";
 import { liveService } from "../live/service";
 import type { LiveSnapshotMeta } from "../live/snapshot-meta";
@@ -20,6 +20,10 @@ export type GameweekOverviewPlayer = {
 	teamShortName: string | null;
 };
 
+export type GameweekOverviewTopScorer = GameweekOverviewPlayer & {
+	points: number;
+};
+
 export type GameweekOverview = {
 	averagePoints: number | null;
 	highestPoints: number | null;
@@ -27,6 +31,11 @@ export type GameweekOverview = {
 	mostViceCaptained: GameweekOverviewPlayer | null;
 	mostSelected: GameweekOverviewPlayer | null;
 	mostTransferredIn: GameweekOverviewPlayer | null;
+	topScorer: GameweekOverviewTopScorer | null;
+	mostPlayedChip: {
+		name: string;
+		numberPlayed: number;
+	} | null;
 	chipsPlayed: {
 		benchBoost: number | null;
 		tripleCaptain: number | null;
@@ -124,6 +133,8 @@ const overviewFactsPresent = (event: Event): boolean =>
 	event.mostTransferredIn !== null ||
 	event.mostCaptained !== null ||
 	event.mostViceCaptained !== null ||
+	event.topElement !== null ||
+	event.topElementInfo !== null ||
 	event.chipPlays !== null;
 
 const mapOverviewPlayer = (
@@ -147,32 +158,52 @@ const mapOverview = (
 	playersById: ReadonlyMap<number, Player>,
 	teamNames: ReadonlyMap<number, string>,
 	eventTeamIds: ReadonlyMap<number, number>
-): GameweekOverview => ({
-	averagePoints: event.averageEntryScore,
-	highestPoints: event.highestScore,
-	mostCaptained: mapOverviewPlayer(event.mostCaptained, playersById, teamNames, eventTeamIds),
-	mostViceCaptained: mapOverviewPlayer(
-		event.mostViceCaptained,
+): GameweekOverview => {
+	const topScorerPlayer = mapOverviewPlayer(
+		event.topElementInfo?.element ?? event.topElement,
 		playersById,
 		teamNames,
 		eventTeamIds
-	),
-	mostSelected: mapOverviewPlayer(event.mostSelected, playersById, teamNames, eventTeamIds),
-	mostTransferredIn: mapOverviewPlayer(
-		event.mostTransferredIn,
-		playersById,
-		teamNames,
-		eventTeamIds
-	),
-	chipsPlayed: event.chipPlays
-		? {
-				benchBoost: chipCount(event.chipPlays, "bboost"),
-				tripleCaptain: chipCount(event.chipPlays, "3xc"),
-				wildcard: chipCount(event.chipPlays, "wildcard"),
-				freeHit: chipCount(event.chipPlays, "freehit"),
-			}
-		: null,
-});
+	);
+	const mostPlayedChip =
+		event.chipPlays?.reduce<ChipPlay | null>(
+			(best, candidate) => (!best || candidate.numberPlayed > best.numberPlayed ? candidate : best),
+			null
+		) ?? null;
+	return {
+		averagePoints: event.averageEntryScore,
+		highestPoints: event.highestScore,
+		mostCaptained: mapOverviewPlayer(event.mostCaptained, playersById, teamNames, eventTeamIds),
+		mostViceCaptained: mapOverviewPlayer(
+			event.mostViceCaptained,
+			playersById,
+			teamNames,
+			eventTeamIds
+		),
+		mostSelected: mapOverviewPlayer(event.mostSelected, playersById, teamNames, eventTeamIds),
+		mostTransferredIn: mapOverviewPlayer(
+			event.mostTransferredIn,
+			playersById,
+			teamNames,
+			eventTeamIds
+		),
+		topScorer:
+			topScorerPlayer && event.topElementInfo
+				? { ...topScorerPlayer, points: event.topElementInfo.points }
+				: null,
+		mostPlayedChip: mostPlayedChip
+			? { name: mostPlayedChip.chipName, numberPlayed: mostPlayedChip.numberPlayed }
+			: null,
+		chipsPlayed: event.chipPlays
+			? {
+					benchBoost: chipCount(event.chipPlays, "bboost"),
+					tripleCaptain: chipCount(event.chipPlays, "3xc"),
+					wildcard: chipCount(event.chipPlays, "wildcard"),
+					freeHit: chipCount(event.chipPlays, "freehit"),
+				}
+			: null,
+	};
+};
 
 const mapBoardPlayer = (
 	performance: LivePerformance,
@@ -337,6 +368,7 @@ export const gameweekService = {
 					event.mostViceCaptained,
 					event.mostSelected,
 					event.mostTransferredIn,
+					event.topElementInfo?.element ?? event.topElement,
 				]);
 				const players = await playersService.getPlayersByIds(context, ids);
 				const playersById = new Map(players.map((player) => [player.id, player] as const));

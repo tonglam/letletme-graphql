@@ -105,6 +105,20 @@ describe("authorizeGraphQLRequest", () => {
 		}
 	});
 
+	it("protects the no-argument Home personal desk with the verified binding", async () => {
+		expect(await authorize(`query { homePersonalDesk { state } }`)).toMatchObject({
+			ok: false,
+			status: 401,
+			code: "UNAUTHENTICATED",
+		});
+		expect(
+			await authorize(`query { homePersonalDesk { state } }`, undefined, unverifiedWebsitePrincipal)
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+		expect(
+			await authorize(`query { homePersonalDesk { state } }`, undefined, websitePrincipal)
+		).toEqual({ ok: true });
+	});
+
 	it("allows own-entry fields for a matching bound entry", async () => {
 		const result = await authorize(
 			`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,

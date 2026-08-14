@@ -1,0 +1,381 @@
+import { describe, expect, it, mock } from "bun:test";
+import { graphql } from "graphql";
+import { movementFromRanks } from "../../../src/domains/home/repository";
+import { compactHomeMarketPulse } from "../../../src/domains/home/service";
+import type { MarketPulse } from "../../../src/domains/market/repository";
+import { schema } from "../../../src/graphql/schema";
+import type { GraphQLContext } from "../../../src/graphql/context";
+import type { Principal } from "../../../src/infra/principal";
+import {
+	buildCorePublication,
+	buildSnapshotContext,
+	buildTestCoreData,
+	TestRedis,
+} from "../../helpers/data-publication";
+
+const principal: Principal = {
+	userId: "home-user",
+	source: "website",
+	provider: "better_auth",
+	fplEntryId: 123,
+	fplEntryVerifiedAt: "2026-08-14T00:00:00.000Z",
+};
+
+describe("Home GraphQL contracts", () => {
+	it("bounds every Home market list and preserves owned-first availability", () => {
+		const player = (playerId: number, selectedByPercent: number) => ({
+			playerId,
+			playerCode: 10_000 + playerId,
+			webName: `P${playerId}`,
+			teamId: 1,
+			teamName: "Arsenal",
+			teamShortName: "ARS",
+			position: "MIDFIELDER" as const,
+			price: 100,
+			selectedByPercent,
+		});
+		const availability = Array.from({ length: 8 }, (_, index) => ({
+			player: player(index + 1, index < 3 ? 0.5 : index + 1),
+			status: "a",
+			previousStatus: null,
+			news: "",
+			newsAdded: null,
+			observedDate: "2026-08-14",
+			chanceOfPlayingThisRound: 100,
+			chanceOfPlayingNextRound: 100,
+		}));
+		const pulse = {
+			coverage: {
+				requestedDays: 14,
+				observedDays: 1,
+				firstDate: "2026-08-14",
+				latestDate: "2026-08-14",
+				capturedAt: "2026-08-14T00:00:00.000Z",
+				complete: false,
+				stale: false,
+			},
+			mostSelected: Array.from({ length: 8 }, (_, index) => player(index + 1, 20)),
+			ownershipMovers: {
+				risers: Array.from({ length: 8 }, (_, index) => ({
+					player: player(index + 1, 20),
+					previousSelectedByPercent: 19,
+					selectedByPercent: 20,
+					change: 1,
+				})),
+				fallers: Array.from({ length: 8 }, (_, index) => ({
+					player: player(index + 1, 20),
+					previousSelectedByPercent: 21,
+					selectedByPercent: 20,
+					change: -1,
+				})),
+			},
+			transferMovers: [],
+			availabilityUpdates: availability,
+			availabilityHighlights: [],
+			newPlayers: [],
+			priceChanges: [],
+		} satisfies MarketPulse;
+
+		const compact = compactHomeMarketPulse(pulse);
+		expect(compact.mostSelected).toHaveLength(5);
+		expect(compact.ownershipMovers.risers).toHaveLength(5);
+		expect(compact.ownershipMovers.fallers).toHaveLength(5);
+		expect(compact.availabilityUpdates).toHaveLength(5);
+		expect(compact.availabilityUpdates.map((row) => row.player.playerId)).toEqual([4, 5, 6, 7, 8]);
+	});
+
+	it("exposes only compact league-rank fields on the Home schema", async () => {
+		const result = await graphql({
+			schema,
+			source: `
+				query {
+					homePersonalDesk {
+						leagueRanks { totalTeamNum officialH2H startedEvent state }
+					}
+				}
+			`,
+			contextValue: buildSnapshotContext(new TestRedis()),
+		});
+
+		expect(result.errors?.map((error) => error.message).join(" ")).toContain("Cannot query field");
+		expect(result.data).toBeUndefined();
+	});
+
+	it("classifies the combined Home gameweek roots as lightweight", async () => {
+		const serverSource = await Bun.file("src/index.ts").text();
+		for (const field of [
+			'"homePublicBootstrap"',
+			'"homePersonalDesk"',
+			'"gameweekDesk"',
+			'"topTransfersIn"',
+			'"topTransfersOut"',
+		]) {
+			expect(serverSource).toContain(field);
+		}
+	});
+
+	it("maps rank movement without treating missing ranks as zero", () => {
+		expect(movementFromRanks(3, 8)).toEqual({ direction: "UP", places: 5 });
+		expect(movementFromRanks(8, 3)).toEqual({ direction: "DOWN", places: 5 });
+		expect(movementFromRanks(3, 3)).toEqual({ direction: "FLAT", places: 0 });
+		expect(movementFromRanks(null, 3)).toEqual({ direction: "UNKNOWN", places: null });
+		expect(movementFromRanks(3, null)).toEqual({ direction: "UNKNOWN", places: null });
+	});
+
+	it("loads the complete personal desk with one compact SQL statement", async () => {
+		const databaseQuery = mock(async (text: unknown, values: unknown) => {
+			const sql = String(text);
+			expect(sql).toContain("FROM competition.entries");
+			expect(sql).toContain("competition.entry_leagues");
+			expect(sql).toContain("competition.tournaments");
+			expect(sql).not.toContain("tournament_groups");
+			expect(sql).not.toContain("official_h2h");
+			expect(sql).not.toContain("battle_");
+			expect(values).toEqual([2026, 123]);
+			return {
+				rows: [
+					{
+						entry_name: "Compact XI",
+						player_name: "Ada Manager",
+						overall_points: 123,
+						overall_rank: 456,
+						team_value: 1005,
+						source_checked_at: new Date(),
+						league_id: 7,
+						league_type: "classic",
+						league_name: "Only Rank Data",
+						entry_rank: 3,
+						entry_last_rank: 8,
+						tournament_id: 77,
+					},
+					{
+						entry_name: "Compact XI",
+						player_name: "Ada Manager",
+						overall_points: 123,
+						overall_rank: 456,
+						team_value: 1005,
+						source_checked_at: new Date(),
+						league_id: 8,
+						league_type: "h2h",
+						league_name: "No Match Details",
+						entry_rank: null,
+						entry_last_rank: 2,
+						tournament_id: null,
+					},
+				],
+			};
+		});
+		const context = buildSnapshotContext(new TestRedis(), { databaseQuery });
+		context.principal = principal;
+
+		const result = await graphql({
+			schema,
+			source: `
+				query HomePersonalDesk {
+					homePersonalDesk {
+						state entryName playerName overallPoints overallRank teamValue sourceCheckedAt
+						leagueRanks { key name rank tournamentId movement { direction places } }
+					}
+				}
+			`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.homePersonalDesk).toMatchObject({
+			state: "READY",
+			entryName: "Compact XI",
+			leagueRanks: [
+				{
+					key: "classic:7",
+					name: "Only Rank Data",
+					rank: 3,
+					tournamentId: 77,
+					movement: { direction: "UP", places: 5 },
+				},
+				{
+					key: "h2h:8",
+					name: "No Match Details",
+					rank: null,
+					tournamentId: null,
+					movement: { direction: "UNKNOWN", places: null },
+				},
+			],
+		});
+		expect(databaseQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps a 100-league desk bounded to one query and preserves SQL order", async () => {
+		const now = new Date();
+		const databaseQuery = mock(async () => ({
+			rows: Array.from({ length: 100 }, (_, index) => ({
+				entry_name: "Scale XI",
+				player_name: "Scale Manager",
+				overall_points: 456,
+				overall_rank: 789,
+				team_value: 1010,
+				source_checked_at: now,
+				league_id: index + 1,
+				league_type: index % 2 === 0 ? "classic" : "h2h",
+				league_name: `League ${String(index + 1).padStart(3, "0")}`,
+				entry_rank: index + 1,
+				entry_last_rank: index + 2,
+				tournament_id: index % 10 === 0 ? index + 10_000 : null,
+			})),
+		}));
+		const context = buildSnapshotContext(new TestRedis(), { databaseQuery });
+		context.principal = principal;
+
+		const result = await graphql({
+			schema,
+			source:
+				"query { homePersonalDesk { state leagueRanks { key name rank movement { direction places } tournamentId } } }",
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		const desk = result.data?.homePersonalDesk as {
+			state: string;
+			leagueRanks: Array<{ key: string; name: string }>;
+		};
+		expect(desk.state).toBe("READY");
+		expect(desk.leagueRanks).toHaveLength(100);
+		expect(desk.leagueRanks[0]).toMatchObject({
+			key: "classic:1",
+			name: "League 001",
+		});
+		expect(desk.leagueRanks[99]).toMatchObject({
+			key: "h2h:100",
+			name: "League 100",
+		});
+		expect(databaseQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns a typed empty desk and preserves stale data", async () => {
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						entry_name: "Stale XI",
+						player_name: "Manager",
+						overall_points: 10,
+						overall_rank: 20,
+						team_value: 1000,
+						source_checked_at: new Date(Date.now() - 31 * 60 * 60 * 1000),
+						league_id: null,
+						league_type: null,
+						league_name: null,
+						entry_rank: null,
+						entry_last_rank: null,
+						tournament_id: null,
+					},
+				],
+			}),
+		});
+		context.principal = principal;
+
+		const result = await graphql({
+			schema,
+			source: "query { homePersonalDesk { state entryName leagueRanks { key } } }",
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.homePersonalDesk).toEqual({
+			state: "STALE",
+			entryName: "Stale XI",
+			leagueRanks: [],
+		});
+	});
+
+	it("distinguishes a fresh empty league snapshot from an unavailable entry", async () => {
+		const freshEmpty = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						entry_name: "No Leagues XI",
+						player_name: "Manager",
+						overall_points: 10,
+						overall_rank: 20,
+						team_value: 1000,
+						source_checked_at: new Date(),
+						league_id: null,
+						league_type: null,
+						league_name: null,
+						entry_rank: null,
+						entry_last_rank: null,
+						tournament_id: null,
+					},
+				],
+			}),
+		});
+		freshEmpty.principal = principal;
+		const emptyResult = await graphql({
+			schema,
+			source: "query { homePersonalDesk { state leagueRanks { key } } }",
+			contextValue: freshEmpty,
+		});
+		expect(emptyResult.data?.homePersonalDesk).toEqual({
+			state: "EMPTY",
+			leagueRanks: [],
+		});
+
+		const unavailable = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [] }),
+		});
+		unavailable.principal = principal;
+		const unavailableResult = await graphql({
+			schema,
+			source: "query { homePersonalDesk { state leagueRanks { key } } }",
+			contextValue: unavailable,
+		});
+		expect(unavailableResult.data?.homePersonalDesk).toEqual({
+			state: "UNAVAILABLE",
+			leagueRanks: [],
+		});
+	});
+
+	it("defensively rejects a direct resolver call without a principal", async () => {
+		const context = buildSnapshotContext(new TestRedis());
+		const result = await graphql({
+			schema,
+			source: "query { homePersonalDesk { state } }",
+			contextValue: context,
+		});
+
+		expect(result.data).toBeNull();
+		expect(result.errors?.[0]?.extensions?.code).toBe("UNAUTHENTICATED");
+	});
+
+	it("returns next-event fixtures from the same public core revision", async () => {
+		const core = buildTestCoreData(null);
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core))
+		) as GraphQLContext;
+		const result = await graphql({
+			schema,
+			source: `
+				query HomePublicBootstrap {
+					homePublicBootstrap {
+						context { season revision currentEventId nextEventId nextDeadlineTime }
+						fixtures {
+							id finished kickoffTime
+							homeTeam { id name shortName }
+							awayTeam { id name shortName }
+							homeScore awayScore
+						}
+					}
+				}
+			`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.homePublicBootstrap).toMatchObject({
+			context: { season: "2627", revision: "7", currentEventId: null, nextEventId: 1 },
+		});
+		expect(
+			(result.data?.homePublicBootstrap as { fixtures: Array<{ id: number }> }).fixtures.length
+		).toBeGreaterThan(0);
+	});
+});
