@@ -12,64 +12,11 @@ import { stableStringify } from "../../infra/stringify";
 import { LeagueType } from "../leagues/repository";
 import { entryLiveBatchService } from "../entry-live/batch-service";
 import type { LiveCalcData } from "../entry-live/calc-service";
-
-const LIVE_COMPETITION_PROJECTION_VERSION = "v2";
-const liveCompetitionBoardCacheKey = (
-	context: GraphQLContext,
-	snapshot: { seasonCode: string; eventId: number; revision: string },
-	tournamentId: number
-): string =>
-	gqlCacheKey(
-		context,
-		`live-competition-board:${snapshot.eventId}:${tournamentId}:${LIVE_COMPETITION_PROJECTION_VERSION}`,
-		`live-${snapshot.seasonCode}-${snapshot.eventId}-${snapshot.revision}`
-	);
-
-const readLiveCompetitionBoardCache = async (
-	context: GraphQLContext,
-	key: string
-): Promise<{
-	rows: LiveCalcData[];
-	partial: boolean;
-	failedEntryIds: number[];
-	totalEntries: number;
-} | null> => {
-	try {
-		const raw = await context.redis.get(key);
-		if (!raw) return null;
-		const parsed = JSON.parse(raw) as Record<string, unknown>;
-		if (
-			!parsed ||
-			!Array.isArray(parsed.rows) ||
-			typeof parsed.partial !== "boolean" ||
-			!Array.isArray(parsed.failedEntryIds) ||
-			!Number.isSafeInteger(parsed.totalEntries)
-		)
-			return null;
-		return parsed as unknown as {
-			rows: LiveCalcData[];
-			partial: boolean;
-			failedEntryIds: number[];
-			totalEntries: number;
-		};
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to read tournament live desk cache");
-		return null;
-	}
-};
-
-const writeLiveCompetitionBoardCache = async (
-	context: GraphQLContext,
-	key: string,
-	value: { rows: LiveCalcData[]; partial: boolean; failedEntryIds: number[]; totalEntries: number },
-	ttlSeconds: number
-): Promise<void> => {
-	try {
-		await context.redis.set(key, JSON.stringify(value), "EX", ttlSeconds);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to write tournament live desk cache");
-	}
-};
+import {
+	competitionBoardCacheKey,
+	readCompetitionBoardCache,
+	writeCompetitionBoardCache,
+} from "../live-desks/competition-board-cache";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -2715,6 +2662,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		eventId?: number | null
 	): Promise<TournamentDetailDesk | null> {
 		if (
+			// Detail clients use this as a bounded route parameter, never as a
+			// publication lookup escape hatch.
 			eventId !== null &&
 			eventId !== undefined &&
 			(!Number.isSafeInteger(eventId) || eventId < 1 || eventId > 38)
@@ -2726,7 +2675,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		const tournament = await getTournamentInfoUncached(context, tournamentId);
 		if (!tournament) return null;
 		const eventContext = await eventsService.getLightweightCoreEventContext(context);
-		const activeEventId = eventContext.currentEventId ?? eventContext.nextEventId;
+		const activeEventId =
+			eventContext.currentEventId ?? eventContext.nextEventId ?? eventContext.latestFinishedEventId;
 		const requestedEventId = eventId ?? activeEventId ?? 1;
 		const isOfficial = isOfficialH2HInfo(tournament);
 		const kind: TournamentDetailDesk["kind"] =
@@ -2755,36 +2705,78 @@ export const tournamentsRepository: TournamentsRepository = {
 				requestedEventId
 			);
 		} else if (kind === "live_points") {
-			const [snapshot, eventCore] = await Promise.all([
-				getLiveDataSnapshot(context, requestedEventId),
-				getCoreEventSnapshot(context),
-			]);
+			const eventCore = await getCoreEventSnapshot(context);
 			const event = eventCore.events.find((candidate) => candidate.id === requestedEventId);
-			const liveCacheKey = liveCompetitionBoardCacheKey(context, snapshot, tournamentId);
-			const cached = await readLiveCompetitionBoardCache(context, liveCacheKey);
-			const result = cached
-				? null
-				: await entryLiveBatchService.calcLivePointsForEntries(
+			// Before the first deadline there is no live publication to load. Keep
+			// the desk truthful and render the scheduled empty board instead.
+			const scheduled =
+				event !== undefined &&
+				!event.finished &&
+				!event.isCurrent &&
+				(eventCore.currentEventId === null || event.id > eventCore.currentEventId);
+			if (scheduled) {
+				live = {
+					eventId: requestedEventId,
+					revision: `scheduled-${eventCore.revision}`,
+					state: "SCHEDULED",
+					partial: false,
+					failedEntryIds: [],
+					totalEntries: tournament.totalTeamNum,
+					rows: [],
+				};
+			} else {
+				const snapshot = await getLiveDataSnapshot(context, requestedEventId);
+				// Provisional live points can change when the core event flips to
+				// finished/data_checked. Only final scoring boards are reusable.
+				const scoringPhase = event?.finished === true && event.dataChecked === true;
+				const liveCacheKey = scoringPhase
+					? competitionBoardCacheKey(context, snapshot, tournamentId)
+					: null;
+				const cachedBoard = liveCacheKey
+					? await readCompetitionBoardCache(context, liveCacheKey)
+					: null;
+				const cached = cachedBoard
+					? {
+							rows: cachedBoard.board as LiveCalcData[],
+							partial: cachedBoard.partial,
+							failedEntryIds: cachedBoard.failedEntryIds,
+							totalEntries: cachedBoard.totalEntries,
+						}
+					: null;
+				const result = cached
+					? null
+					: await entryLiveBatchService.calcLivePointsForEntries(
+							context,
+							requestedEventId,
+							await tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId),
+							true,
+							{ provisional: !(event?.finished && event.dataChecked) }
+						);
+				const liveData = cached ?? {
+					rows: Array.from(result?.results.values() ?? []),
+					partial: (result?.errors.length ?? 0) > 0,
+					failedEntryIds: result?.errors.map((error) => error.entryId) ?? [],
+					totalEntries: result?.meta.totalEntries ?? 0,
+				};
+				live = {
+					eventId: requestedEventId,
+					revision: snapshot.revision,
+					state: snapshot.state.toUpperCase(),
+					...liveData,
+				};
+				if (liveCacheKey && !cached && result && result.errors.length === 0) {
+					await writeCompetitionBoardCache(
 						context,
-						requestedEventId,
-						await tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId),
-						true,
-						{ provisional: !(event?.finished && event.dataChecked) }
+						liveCacheKey,
+						{
+							board: liveData.rows,
+							partial: liveData.partial,
+							failedEntryIds: liveData.failedEntryIds,
+							totalEntries: liveData.totalEntries,
+						},
+						24 * 60 * 60
 					);
-			const liveData = cached ?? {
-				rows: Array.from(result?.results.values() ?? []),
-				partial: (result?.errors.length ?? 0) > 0,
-				failedEntryIds: result?.errors.map((error) => error.entryId) ?? [],
-				totalEntries: result?.meta.totalEntries ?? 0,
-			};
-			live = {
-				eventId: requestedEventId,
-				revision: snapshot.revision,
-				state: snapshot.state.toUpperCase(),
-				...liveData,
-			};
-			if (!cached && result && result.errors.length === 0) {
-				await writeLiveCompetitionBoardCache(context, liveCacheKey, liveData, 24 * 60 * 60);
+				}
 			}
 		}
 		const officialSourceCheckedAt =

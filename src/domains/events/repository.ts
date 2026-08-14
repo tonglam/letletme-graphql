@@ -1,6 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { getCoreEventSnapshot, type CoreEventData } from "../../infra/data-snapshot";
-import { readDataPublicationManifest } from "../../infra/data-publication";
 import { getCurrentSeason } from "../../infra/season";
 
 export type ChipPlay = {
@@ -243,41 +242,22 @@ export const eventsRepository: EventsRepository = {
 	},
 
 	async getLightweightCoreEventContext(context): Promise<LightweightCoreEventContext> {
-		const result = await context.data
-			.read("fpl.events")
-			.select("id, deadline_time, finished, data_checked, is_current, is_next")
-			.order("id", { ascending: true });
-		if (result.error) throw new Error("Failed to fetch lightweight event context");
-		const rows =
-			(result.data as Array<{
-				id: number;
-				deadline_time?: string | null;
-				finished?: boolean;
-				data_checked?: boolean;
-				is_current?: boolean;
-				is_next?: boolean;
-			}> | null) ?? [];
-		const current = rows.find((row) => row.is_current) ?? null;
-		const flaggedNext = rows.find((row) => row.is_next) ?? null;
-		const currentEventId = rows.find((row) => row.is_current)?.id ?? null;
-		const nextEventId = current
-			? (rows.find((row) => row.id === current.id + 1)?.id ?? null)
-			: (flaggedNext?.id ?? null);
-		const nextRow = nextEventId ? rows.find((row) => row.id === nextEventId) : null;
+		// Read events and currentEventId from the same pinned publication (or the
+		// targeted PostgreSQL fallback) so the revision cannot describe a
+		// different generation than the event rows.
+		const snapshot = await getCoreEventSnapshot(context);
+		const events = snapshot.events.map(mapEvent).sort((left, right) => left.id - right.id);
+		const resolved = resolveCurrentAndNext(events, snapshot.currentEventId);
 		const latestFinishedEventId =
-			[...rows].filter((row) => row.finished).sort((left, right) => right.id - left.id)[0]?.id ??
-			null;
-		const manifest = await readDataPublicationManifest(context.redis, {
-			dataset: "fpl:core",
-			seasonCode: context.currentSeason.seasonCode,
-		});
+			[...events].filter((event) => event.finished).sort((left, right) => right.id - left.id)[0]
+				?.id ?? null;
 		return {
-			season: context.currentSeason.seasonCode,
-			revision: manifest ? `core-${manifest.revision}` : "postgres",
-			sourceCheckedAt: manifest?.sourceCheckedAt ?? new Date().toISOString(),
-			currentEventId,
-			nextEventId,
-			nextDeadlineTime: nextRow?.deadline_time ?? null,
+			season: snapshot.seasonCode,
+			revision: snapshot.revision,
+			sourceCheckedAt: snapshot.sourceCheckedAt,
+			currentEventId: resolved.current?.id ?? null,
+			nextEventId: resolved.next?.id ?? null,
+			nextDeadlineTime: resolved.next?.deadlineTime ?? null,
 			latestFinishedEventId,
 		};
 	},

@@ -286,7 +286,13 @@ const startServer = async (): Promise<void> => {
 				let ingressClass = "unclassified";
 				let rateLimitAudience = "unresolved";
 				let fullCoreLoaded = false;
+				let graphQLContext: GraphQLContext | undefined;
 				const finalizeGraphQLResponse = (response: Response, outcome: string): Response => {
+					fullCoreLoaded =
+						fullCoreLoaded ||
+						graphQLContext?.fullCoreLoaded === true ||
+						(graphQLContext?.requestScope as { fullCoreLoaded?: boolean } | undefined)
+							?.fullCoreLoaded === true;
 					const durationMs = requestTiming.elapsedMs();
 					response.headers.set("X-Request-Id", requestId);
 					metrics.httpRequestDurationSeconds
@@ -441,7 +447,7 @@ const startServer = async (): Promise<void> => {
 						);
 					}
 
-					const graphQLContext: GraphQLContext = {
+					graphQLContext = {
 						data,
 						database,
 						currentSeason,
@@ -494,7 +500,7 @@ const startServer = async (): Promise<void> => {
 						graphQLContext.fullCoreLoaded = true;
 						try {
 							graphQLContext.dataRevision = await requestTiming.measure("publication", async () =>
-								coreDatasetRevision(await getCoreDataSnapshot(graphQLContext))
+								coreDatasetRevision(await getCoreDataSnapshot(graphQLContext!))
 							);
 						} catch (error) {
 							logger.error({ err: error }, "Data publication authority is unavailable");
@@ -525,9 +531,16 @@ const startServer = async (): Promise<void> => {
 								body: parsedBody,
 								search: "",
 							},
-							context: async () => graphQLContext,
+							context: async () => graphQLContext!,
 						})
 					);
+					// A resolver may fall back from a lightweight root to the full Core
+					// publication. Reflect the actual read path in the request log.
+					fullCoreLoaded =
+						fullCoreLoaded ||
+						graphQLContext.fullCoreLoaded === true ||
+						(graphQLContext.requestScope as { fullCoreLoaded?: boolean } | undefined)
+							?.fullCoreLoaded === true;
 
 					const stopResponseBuild = requestTiming.start("responseBuild");
 
