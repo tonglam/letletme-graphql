@@ -1,6 +1,11 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type { HomePersonalDesk } from "./repository";
-import { homeService, type HomeMarketPulse, type HomePublicBootstrap } from "./service";
+import {
+	homeService,
+	type HomeGameweek,
+	type HomeMarketPulse,
+	type HomePublicBootstrap,
+} from "./service";
 import { normalizeMarketPulseDays } from "../market/resolvers";
 
 export const homeResolvers = {
@@ -10,6 +15,11 @@ export const homeResolvers = {
 			_args: Record<string, never>,
 			context: GraphQLContext
 		): Promise<HomePublicBootstrap> => homeService.getPublicBootstrap(context),
+		homeGameweek: (
+			_parent: unknown,
+			args: { eventId: number },
+			context: GraphQLContext
+		): Promise<HomeGameweek> => homeService.getGameweek(context, args.eventId),
 		homePersonalDesk: (
 			_parent: unknown,
 			_args: Record<string, never>,

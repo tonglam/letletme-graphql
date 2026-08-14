@@ -457,6 +457,7 @@ const startServer = async (): Promise<void> => {
 						"currentEventInfo",
 						"coreEventContext",
 						"homePublicBootstrap",
+						"homeGameweek",
 						"homeMarketPulse",
 						"homePersonalDesk",
 						"playerStatsBootstrap",

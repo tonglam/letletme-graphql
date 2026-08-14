@@ -31,6 +31,12 @@ describe("GraphQL request limits", () => {
 		).toMatchObject({ ok: true, rootFields: ["homePersonalDesk"], rateLimitCostUnits: 5 });
 		expect(
 			validateGraphQLRequestLimits(
+				{ query: "query { homeGameweek(eventId: 1) { transfersState gameweekDesk { eventId } } }" },
+				schema
+			)
+		).toMatchObject({ ok: true, rootFields: ["homeGameweek"], rateLimitCostUnits: 5 });
+		expect(
+			validateGraphQLRequestLimits(
 				{ query: "query { homePublicBootstrap { context { revision } fixtures { id } } }" },
 				schema
 			)
