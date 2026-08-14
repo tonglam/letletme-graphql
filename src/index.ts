@@ -459,6 +459,8 @@ const startServer = async (): Promise<void> => {
 						"playerStatsBootstrap",
 						"playersForPicker",
 						"playerStatsDesk",
+						"trendCohorts",
+						"trendCohortSnapshot",
 						"gameweekDesk",
 						"marketSnapshotContext",
 						"marketPulse",

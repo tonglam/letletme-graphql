@@ -75,6 +75,8 @@ const publicFields = new Set([
 	"marketSnapshotContext",
 	"publicLeagueTrends",
 	"publicLeagueSelectionStats",
+	"trendCohorts",
+	"trendCohortSnapshot",
 	"playerDetail",
 	"playerStateProfile",
 	"miniProgramNotice",

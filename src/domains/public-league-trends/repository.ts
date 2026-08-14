@@ -38,6 +38,104 @@ type AccessRow = {
 	snapshot_revision: string | Date;
 };
 
+const publicationPosition = (value: number): string =>
+	value === 1 ? "GOALKEEPER" : value === 2 ? "DEFENDER" : value === 4 ? "FORWARD" : "MIDFIELDER";
+
+async function readPublishedSelectionStats(
+	context: GraphQLContext,
+	tournamentId: number,
+	eventId: number,
+	limit: number
+): Promise<TournamentSelectionStats | null | undefined> {
+	try {
+		const result = await context.database.query<Record<string, unknown>>(
+			`SELECT publication.publication_id, publication.expected_entries, publication.revision,
+				publication.ownership_state, publication.captaincy_state, publication.transfers_state,
+				rows.element_id, rows.selected_count, rows.effective_selection_count,
+				rows.captain_count, rows.vice_captain_count, rows.transfer_in_count,
+				rows.transfer_out_count, rows.player_name, rows.player_position, rows.team_short_name
+			 FROM reporting.tournament_selection_stat_publications publication
+		 LEFT JOIN reporting.tournament_selection_stat_rows rows
+			 ON rows.publication_id = publication.publication_id
+			WHERE publication.season_id = $1 AND publication.tournament_id = $2
+			  AND publication.event_id = $3 AND publication.is_active
+			ORDER BY rows.selected_count DESC NULLS LAST, rows.element_id
+			LIMIT $4`,
+			[context.currentSeason.seasonId, tournamentId, eventId, Math.max(limit, 12)]
+		);
+		const first = result.rows[0];
+		if (!first) return undefined;
+		const totalEntries = Number(first.expected_entries ?? 0);
+		const percent = (value: number) => (totalEntries > 0 ? (value / totalEntries) * 100 : 0);
+		const rows = result.rows.filter(
+			(row) => row.element_id !== null && row.element_id !== undefined
+		);
+		const selection = rows.map((row) => {
+			const selected = Number(row.selected_count ?? 0);
+			const effective = Number(row.effective_selection_count ?? 0);
+			return {
+				id: Number(row.element_id),
+				webName: String(row.player_name),
+				teamShortName: String(row.team_short_name),
+				position: publicationPosition(Number(row.player_position)),
+				selectedByPercent: percent(selected),
+				eoByPercent: percent(effective),
+			};
+		});
+		const captain = rows
+			.map((row) => ({
+				id: Number(row.element_id),
+				webName: String(row.player_name),
+				teamShortName: String(row.team_short_name),
+				position: publicationPosition(Number(row.player_position)),
+				captainByPercent: percent(Number(row.captain_count ?? 0)),
+				selectedByPercent: percent(Number(row.selected_count ?? 0)),
+				eoByPercent: percent(Number(row.effective_selection_count ?? 0)),
+			}))
+			.sort((left, right) => right.captainByPercent - left.captainByPercent || left.id - right.id)
+			.slice(0, limit);
+		const transfersAvailable = first.transfers_state === "READY";
+		const transferRows = (direction: "in" | "out") =>
+			rows
+				.filter(
+					(row) =>
+						transfersAvailable &&
+						row[direction === "in" ? "transfer_in_count" : "transfer_out_count"] !== null &&
+						row[direction === "in" ? "transfer_in_count" : "transfer_out_count"] !== undefined
+				)
+				.map((row) => ({
+					id: Number(row.element_id),
+					webName: String(row.player_name),
+					teamShortName: String(row.team_short_name),
+					position: publicationPosition(Number(row.player_position)),
+					transfersEvent: Number(
+						row[direction === "in" ? "transfer_in_count" : "transfer_out_count"] ?? 0
+					),
+					selectedByPercent: percent(Number(row.selected_count ?? 0)),
+				}))
+				.sort((left, right) => right.transfersEvent - left.transfersEvent || left.id - right.id)
+				.slice(0, limit);
+		return {
+			totalEntries,
+			goalkeepers: selection.filter((row) => row.position === "GOALKEEPER").slice(0, limit),
+			defenders: selection.filter((row) => row.position === "DEFENDER").slice(0, limit),
+			midfielders: selection.filter((row) => row.position === "MIDFIELDER").slice(0, limit),
+			forwards: selection.filter((row) => row.position === "FORWARD").slice(0, limit),
+			captainSelect: captain,
+			viceCaptainSelect: [],
+			mostSelectedPlayers: selection.slice(0, limit),
+			mostTransferIn: transferRows("in"),
+			mostTransferOut: transferRows("out"),
+		};
+	} catch (error) {
+		context.logger.warn(
+			{ err: error },
+			"New Trends publication read unavailable; using legacy adapter"
+		);
+		return undefined;
+	}
+}
+
 const CATALOG_SQL = `
 	SELECT
 		catalog.tournament_id,
@@ -45,10 +143,10 @@ const CATALOG_SQL = `
 		catalog.sort_order,
 		catalog.published_at,
 		catalog.updated_at,
-		snapshot.event_id AS latest_event_id,
-		snapshot.total_entries,
+		COALESCE(publication.event_id, snapshot.event_id) AS latest_event_id,
+		COALESCE(publication.expected_entries, snapshot.total_entries) AS total_entries,
 		MAX(catalog.updated_at) OVER () AS catalog_revision,
-		MAX(tournament.updated_at) OVER () AS snapshot_revision,
+			GREATEST(tournament.updated_at, COALESCE(publication.published_at, tournament.updated_at)) AS snapshot_revision,
 		(
 			SELECT MAX(tournament_revision.updated_at)
 			FROM competition.public_league_trends catalog_revision
@@ -62,7 +160,17 @@ const CATALOG_SQL = `
 		ON tournament.season_id = catalog.season_id
 		AND tournament.tournament_id = catalog.tournament_id
 		AND (tournament.setup_status IS NULL OR tournament.standings_ready_at IS NOT NULL)
-	JOIN LATERAL (
+	LEFT JOIN LATERAL (
+		SELECT publication.event_id, publication.expected_entries, publication.revision,
+			publication.published_at
+		FROM reporting.tournament_selection_stat_publications publication
+		WHERE publication.season_id = catalog.season_id
+			AND publication.tournament_id = catalog.tournament_id
+			AND publication.is_active
+		ORDER BY publication.event_id DESC, publication.revision DESC
+		LIMIT 1
+	) publication ON true
+	LEFT JOIN LATERAL (
 		SELECT
 			stats.event_id,
 			MAX(stats.total_entries)::integer AS total_entries
@@ -75,6 +183,7 @@ const CATALOG_SQL = `
 	) snapshot ON true
 	WHERE catalog.season_id = $1
 		AND catalog.enabled = true
+		AND (publication.event_id IS NOT NULL OR snapshot.event_id IS NOT NULL)
 	ORDER BY catalog.sort_order ASC, catalog.display_name ASC, catalog.tournament_id ASC
 `;
 
@@ -87,13 +196,19 @@ const ACCESS_SQL = `
 		ON tournament.season_id = catalog.season_id
 		AND tournament.tournament_id = catalog.tournament_id
 		AND (tournament.setup_status IS NULL OR tournament.standings_ready_at IS NOT NULL)
-	JOIN reporting.tournament_selection_stats stats
+	LEFT JOIN reporting.tournament_selection_stat_publications publication
+		ON publication.season_id = catalog.season_id
+		AND publication.tournament_id = catalog.tournament_id
+		AND publication.event_id = $3
+		AND publication.is_active
+	LEFT JOIN reporting.tournament_selection_stats stats
 		ON stats.season_id = catalog.season_id
 		AND stats.tournament_id = catalog.tournament_id
 		AND stats.event_id = $3
 	WHERE catalog.enabled = true
 		AND catalog.season_id = $1
 		AND catalog.tournament_id = $2
+		AND (publication.publication_id IS NOT NULL OR stats.event_id IS NOT NULL)
 	GROUP BY catalog.updated_at, tournament.updated_at
 `;
 
@@ -198,6 +313,10 @@ export const createPublicLeagueTrendsRepository = (
 		eventId,
 		limit
 	): Promise<TournamentSelectionStats | null> {
+		if (!executor) {
+			const published = await readPublishedSelectionStats(context, tournamentId, eventId, limit);
+			if (published !== undefined) return published;
+		}
 		const accessResult = await (executor ?? context.database).query(ACCESS_SQL, [
 			context.currentSeason.seasonId,
 			tournamentId,
