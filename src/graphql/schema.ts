@@ -35,6 +35,8 @@ import { playerValuesResolvers } from "../domains/player-values/resolvers";
 import { playerValuesTypeDefs } from "../domains/player-values/schema";
 import { publicLeagueTrendsResolvers } from "../domains/public-league-trends/resolvers";
 import { publicLeagueTrendsTypeDefs } from "../domains/public-league-trends/schema";
+import { trendsResolvers } from "../domains/trends/resolvers";
+import { trendsTypeDefs } from "../domains/trends/schema";
 import { playersResolvers } from "../domains/players/resolvers";
 import { playersTypeDefs } from "../domains/players/schema";
 import { tournamentsResolvers } from "../domains/tournaments/resolvers";
@@ -61,6 +63,7 @@ export const schema = makeExecutableSchema({
 		eventOverallResultTypeDefs,
 		eventStatsTypeDefs,
 		publicLeagueTrendsTypeDefs,
+		trendsTypeDefs,
 		playerDetailTypeDefs,
 		playerStateTypeDefs,
 		playerStatsTypeDefs,
@@ -84,6 +87,7 @@ export const schema = makeExecutableSchema({
 		eventOverallResultResolvers,
 		eventStatsResolvers,
 		publicLeagueTrendsResolvers,
+		trendsResolvers,
 		playerDetailResolvers,
 		playerStateResolvers,
 		playerStatsResolvers,

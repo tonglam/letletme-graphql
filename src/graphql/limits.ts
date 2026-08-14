@@ -345,6 +345,8 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["marketSnapshotContext", 1],
 	["publicLeagueTrends", 10],
 	["publicLeagueSelectionStats", 10],
+	["trendCohorts", 5],
+	["trendCohortSnapshot", 10],
 	["liveMatches", 10],
 	["calcLivePointsByEntry", 10],
 	["tournamentSelectionStats", 10],
