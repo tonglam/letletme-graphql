@@ -36,6 +36,8 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain('"X-GraphQL-Service-Token": token');
 		expect(workflow).toContain("query DeploymentSmoke");
 		expect(workflow).toContain("query LiveDeploymentSmoke");
+		expect(workflow).toContain("liveContext");
+		expect(workflow).not.toContain("liveSnapshot(eventId: $eventId)");
 		expect(workflow).toContain("image_name=${IMAGE_REF%@*}");
 		expect(workflow).toContain('--filter "reference=${image_name}:*"');
 		expect(workflow).toContain("--filter dangling=true");
