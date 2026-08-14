@@ -50,6 +50,8 @@ const publicFields = new Set([
 	"events",
 	"currentEventInfo",
 	"coreEventContext",
+	"homePublicBootstrap",
+	"homeMarketPulse",
 	"playerStatsBootstrap",
 	"playerStatsDesk",
 	"gameweekDesk",
@@ -120,6 +122,7 @@ const protectedFields = new Set([
 	...tournamentMembershipFields,
 	"calcLivePointsForEntries",
 	"leagueEventResults",
+	"homePersonalDesk",
 ]);
 
 export const isGraphQLRootFieldClassified = (fieldName: string): boolean =>
@@ -320,6 +323,15 @@ const authorizeRootField = async (
 			status: 403,
 			code: "FORBIDDEN",
 			message: "This operation requires a website session",
+		};
+	}
+
+	if (field.name === "homePersonalDesk" && !hasVerifiedEntry(principal)) {
+		return {
+			ok: false,
+			status: 403,
+			code: "FORBIDDEN",
+			message: "A verified FPL binding is required",
 		};
 	}
 

@@ -24,6 +24,18 @@ export const gameweekTypeDefs = /* GraphQL */ `
 		freeHit: Int
 	}
 
+	type GameweekOverviewTopScorer {
+		id: Int!
+		webName: String!
+		teamShortName: String
+		points: Int!
+	}
+
+	type GameweekOverviewMostPlayedChip {
+		name: String!
+		numberPlayed: Int!
+	}
+
 	type GameweekOverview {
 		averagePoints: Int
 		highestPoints: Int
@@ -31,6 +43,8 @@ export const gameweekTypeDefs = /* GraphQL */ `
 		mostViceCaptained: GameweekOverviewPlayer
 		mostSelected: GameweekOverviewPlayer
 		mostTransferredIn: GameweekOverviewPlayer
+		topScorer: GameweekOverviewTopScorer
+		mostPlayedChip: GameweekOverviewMostPlayedChip
 		chipsPlayed: GameweekOverviewChips
 	}
 

@@ -456,6 +456,9 @@ const startServer = async (): Promise<void> => {
 						"eventFixtures",
 						"currentEventInfo",
 						"coreEventContext",
+						"homePublicBootstrap",
+						"homeMarketPulse",
+						"homePersonalDesk",
 						"playerStatsBootstrap",
 						"playersForPicker",
 						"playerStatsDesk",
@@ -464,6 +467,8 @@ const startServer = async (): Promise<void> => {
 						"gameweekDesk",
 						"marketSnapshotContext",
 						"marketPulse",
+						"topTransfersIn",
+						"topTransfersOut",
 						"playerValueHistory",
 					]);
 					const lightweightCoreRead =

@@ -25,6 +25,24 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rootFields: ["gameweekDesk"], rateLimitCostUnits: 5 });
 	});
 
+	it("charges the compact Home public, market, and personal roots", () => {
+		expect(
+			validateGraphQLRequestLimits({ query: "query { homePersonalDesk { state } }" }, schema)
+		).toMatchObject({ ok: true, rootFields: ["homePersonalDesk"], rateLimitCostUnits: 5 });
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { homePublicBootstrap { context { revision } fixtures { id } } }" },
+				schema
+			)
+		).toMatchObject({ ok: true, rootFields: ["homePublicBootstrap"], rateLimitCostUnits: 5 });
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { homeMarketPulse { mostSelected { playerId } } }" },
+				schema
+			)
+		).toMatchObject({ ok: true, rootFields: ["homeMarketPulse"], rateLimitCostUnits: 5 });
+	});
+
 	it("allows standard introspection where Apollo has enabled it", () => {
 		const result = validateGraphQLRequestLimits({ query: getIntrospectionQuery() }, schema);
 		expect(result).toMatchObject({

@@ -15,7 +15,11 @@ const deskQuery = `
 		gameweekDesk(eventId: $eventId) {
 			season coreRevision liveRevision anchorEventId eventId currentEventId nextEventId
 			isPreseason lifecycle deadlineTime publishedAt overviewState boardsState
-			overview { averagePoints highestPoints mostSelected { id teamShortName } }
+			overview {
+				averagePoints highestPoints mostSelected { id teamShortName }
+				topScorer { id webName teamShortName points }
+				mostPlayedChip { name numberPlayed }
+			}
 			dreamTeam { id position teamShortName totalPoints }
 			hauls { id position totalPoints }
 		}
@@ -115,6 +119,54 @@ describe("gameweekDesk", () => {
 			overviewState: "PENDING",
 			boardsState: "AVAILABLE",
 			dreamTeam: [{ id: core.players[0]!.id, position: "GOALKEEPER", teamShortName: "T02" }],
+		});
+	});
+
+	it("projects the Home top scorer and most-played chip from the bounded overview", async () => {
+		const baseCore = buildTestCoreData(1);
+		const player = baseCore.players[0]!;
+		const core = buildTestCoreData(1, {
+			events: baseCore.events.map((event) =>
+				event.id === 1
+					? {
+							...event,
+							averageEntryScore: 48,
+							highestScore: 101,
+							topElement: player.id,
+							topElementInfo: { element: player.id, points: 19 },
+							chipPlays: [
+								{ chipName: "wildcard", numberPlayed: 200 },
+								{ chipName: "bboost", numberPlayed: 350 },
+							],
+						}
+					: event
+			),
+			fixtures: baseCore.fixtures.map((fixture, index) =>
+				index === 0 ? { ...fixture, started: true } : fixture
+			),
+		});
+		const result = await graphql({
+			schema,
+			source: deskQuery,
+			variableValues: { eventId: 1 },
+			contextValue: buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
+				databaseQuery: async () => ({
+					rows: [{ player_code: player.code, team_id: player.teamId }],
+				}),
+			}),
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.gameweekDesk).toMatchObject({
+			overview: {
+				topScorer: {
+					id: player.id,
+					webName: player.webName,
+					teamShortName: "T01",
+					points: 19,
+				},
+				mostPlayedChip: { name: "bboost", numberPlayed: 350 },
+			},
 		});
 	});
 
