@@ -514,17 +514,19 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 		}
 	}
 
-	/* liveMatches */
-	add(
-		"liveMatches",
-		"liveMatches",
-		"query LiveMatches { liveMatches { playing { matchId } finished { matchId } } }",
-		{},
-		"liveMatches"
-	);
+	/* live matchday desks */
+	if (ids.eventId) {
+		add(
+			"live",
+			"liveContext",
+			"query LiveContext { liveContext { season coreRevision currentEventId nextEventId liveRevision state } }",
+			{},
+			"liveContext"
+		);
+	}
 	if (ids.nextFixtureEventId) {
 		add(
-			"liveMatches",
+			"live",
 			"nextEventFixtures",
 			"query NextEventFixtures($eventId: Int!) { eventFixtures(eventId: $eventId) { id code } }",
 			{ eventId: ids.nextFixtureEventId },
@@ -611,16 +613,6 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 			);
 		}
 	}
-	if (ids.tournamentId && ids.entryEventId) {
-		add(
-			"entryLive",
-			"calcLivePointsForTournament",
-			"query CalcLivePointsForTournament($eventId: Int!, $tournamentId: Int!) { calcLivePointsForTournament(eventId: $eventId, tournamentId: $tournamentId) { results { rank livePoints } meta { totalEntries succeededCount } } }",
-			{ eventId: ids.entryEventId, tournamentId: ids.tournamentId },
-			"calcLivePointsForTournament"
-		);
-	}
-
 	/* leagues */
 	if (ids.entryId) {
 		add(
