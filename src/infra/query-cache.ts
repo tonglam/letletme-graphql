@@ -8,6 +8,8 @@ export const QUERY_CACHE_TTL_SECONDS = Object.freeze({
 	HISTORICAL: 60 * 60,
 });
 
+export const MARKET_REVISIONED_TTL_SECONDS = 24 * 60 * 60;
+
 export const writeQueryCache = async (
 	context: GraphQLContext,
 	key: string,

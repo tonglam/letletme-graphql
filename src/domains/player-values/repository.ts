@@ -1,8 +1,9 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
+import { MARKET_REVISIONED_TTL_SECONDS, QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
 import { getCoreDataSnapshot } from "../../infra/data-snapshot";
 import { metrics } from "../../infra/metrics";
+import { getMarketSnapshotContext } from "../market/context";
 
 export type PositionEnum = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
 
@@ -570,7 +571,22 @@ export const playerValuesRepository: PlayerValuesRepository = {
 			return [];
 		}
 
-		const cacheKey = gqlCacheKey(context, buildHistoryCacheKey(args));
+		let marketRevision = context.marketRevision;
+		if (!marketRevision) {
+			marketRevision = (await getMarketSnapshotContext(context).catch(() => null))?.revision;
+		}
+		const revisionedCache = Boolean(marketRevision);
+		const cacheRevision = marketRevision
+			? `${context.dataRevision ?? "core-postgres"}.${marketRevision}`
+			: context.dataRevision;
+		const cacheKey = gqlCacheKey(
+			context,
+			`player-value-history:v2:${buildHistoryCacheKey(args)}`,
+			cacheRevision
+		);
+		const historyCacheTtl = revisionedCache
+			? MARKET_REVISIONED_TTL_SECONDS
+			: QUERY_CACHE_TTL_SECONDS.HISTORICAL;
 		try {
 			const cached = await context.redis.get(cacheKey);
 			if (cached === NULL_SENTINEL) return [];
@@ -614,12 +630,7 @@ export const playerValuesRepository: PlayerValuesRepository = {
 			});
 			if (rows.length === 0) {
 				try {
-					await context.redis.set(
-						cacheKey,
-						NULL_SENTINEL,
-						"EX",
-						QUERY_CACHE_TTL_SECONDS.HISTORICAL
-					);
+					await context.redis.set(cacheKey, NULL_SENTINEL, "EX", historyCacheTtl);
 				} catch (cacheError) {
 					context.logger.warn({ err: cacheError, cacheKey }, "History cache write failed");
 				}
@@ -628,12 +639,7 @@ export const playerValuesRepository: PlayerValuesRepository = {
 
 			const history = mapHistoryRows(rows);
 			try {
-				await context.redis.set(
-					cacheKey,
-					JSON.stringify(history),
-					"EX",
-					QUERY_CACHE_TTL_SECONDS.HISTORICAL
-				);
+				await context.redis.set(cacheKey, JSON.stringify(history), "EX", historyCacheTtl);
 			} catch (cacheError) {
 				context.logger.warn({ err: cacheError, cacheKey }, "History cache write failed");
 			}

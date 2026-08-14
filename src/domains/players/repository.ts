@@ -8,6 +8,7 @@ import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player as InfraPlayer, Team as InfraTeam } from "../../infra/types";
 import { resolvePlayerStatsContext } from "./season-stats-at-event";
+import { getMarketSnapshotContext } from "../market/context";
 
 export enum Position {
 	GOALKEEPER = 1,
@@ -624,9 +625,16 @@ export const playersRepository: PlayersRepository = {
 		const safeSearch = search?.trim().slice(0, 50) || null;
 		const safeFilter = normalizeFilter(filter);
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
+		const marketContext = await getMarketSnapshotContext(context, {
+			allowPostgresFallback: false,
+		}).catch(() => null);
+		const cacheRevision = marketContext
+			? `${context.dataRevision ?? "core-postgres"}.${marketContext.revision}`
+			: (context.dataRevision ?? "core-postgres");
 		const cacheKey = gqlCacheKey(
 			context,
-			`players:picker:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${ownershipBand ?? "ANY"}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`
+			`players:picker:v2:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${ownershipBand ?? "ANY"}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`,
+			cacheRevision
 		);
 
 		const cached = await readJsonCache(
@@ -694,7 +702,7 @@ export const playersRepository: PlayersRepository = {
 					player.team_id,
 					team.name AS team_name,
 					team.short_name AS team_short_name,
-					player.price,
+					COALESCE(market.price, player.price) AS price,
 					COALESCE(market.selected_by_percent, event_stats.selected_by_percent) AS selected_by_percent,
 					COALESCE(event_stats.total_points, player.total_points) AS total_points,
 					event_stats.form

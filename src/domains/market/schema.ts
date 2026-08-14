@@ -74,9 +74,25 @@ export const marketTypeDefs = /* GraphQL */ `
 		availabilityHighlights: [MarketAvailabilityUpdate!]!
 		newPlayers: [MarketNewPlayer!]!
 		priceChanges: [MarketPriceChange!]!
+		availabilityUpdateCount: Int!
+	}
+
+	enum MarketSnapshotSource {
+		DATA_PUBLICATION
+		POSTGRES_FALLBACK
+	}
+
+	type MarketSnapshotContext {
+		season: String!
+		revision: String!
+		source: MarketSnapshotSource!
+		snapshotDate: String
+		capturedAt: DateTime
+		rowCount: Int!
 	}
 
 	extend type Query {
 		marketPulse(days: Int = 14): MarketPulse!
+		marketSnapshotContext: MarketSnapshotContext!
 	}
 `;
