@@ -11,6 +11,11 @@ const capabilities = [
 	"PERSONAL_EXPOSURE",
 ] as const;
 
+// Trends snapshots are revisioned by their own publication pointer. They are
+// deliberately kept out of the core Data snapshot path, so use an explicit
+// cache-key revision rather than forcing a full core snapshot read.
+const TRENDS_CACHE_REVISION = "trends-v1";
+
 const notFound = (message: string): never => {
 	throw new GraphQLError(message, { extensions: { code: "NOT_FOUND", http: { status: 404 } } });
 };
@@ -25,7 +30,12 @@ const validateCohortId = (cohortId: string): number => {
 		throw new GraphQLError("cohortId must match competition:<tournamentId>", {
 			extensions: { code: "BAD_USER_INPUT" },
 		});
-	return Number(match[1]);
+	const tournamentId = Number(match[1]);
+	if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0)
+		throw new GraphQLError("cohortId tournamentId must be a positive safe integer", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	return tournamentId;
 };
 
 const status = (value: unknown): string => (typeof value === "string" ? value : "NOT_READY");
@@ -37,11 +47,11 @@ async function readPublicCache<T>(
 ): Promise<T | undefined> {
 	try {
 		const revision = await context.redis.get(
-			gqlCacheKey(context, `${namespace}:pointer:${pointer}`)
+			gqlCacheKey(context, `${namespace}:pointer:${pointer}`, TRENDS_CACHE_REVISION)
 		);
 		if (!revision) return undefined;
 		const cached = await context.redis.get(
-			gqlCacheKey(context, `${namespace}:${pointer}:${revision}`)
+			gqlCacheKey(context, `${namespace}:${pointer}:${revision}`, TRENDS_CACHE_REVISION)
 		);
 		return cached ? (JSON.parse(cached) as T) : undefined;
 	} catch (error) {
@@ -59,13 +69,13 @@ async function writePublicCache(
 ): Promise<void> {
 	try {
 		await context.redis.set(
-			gqlCacheKey(context, `${namespace}:${pointer}:${revision}`),
+			gqlCacheKey(context, `${namespace}:${pointer}:${revision}`, TRENDS_CACHE_REVISION),
 			JSON.stringify(value),
 			"EX",
 			300
 		);
 		await context.redis.set(
-			gqlCacheKey(context, `${namespace}:pointer:${pointer}`),
+			gqlCacheKey(context, `${namespace}:pointer:${pointer}`, TRENDS_CACHE_REVISION),
 			revision,
 			"EX",
 			60
@@ -148,6 +158,10 @@ export const trendsRepository = {
         latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
         latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state, latest.transfers_state
       FROM competition.public_league_trends catalog
+      JOIN competition.tournaments tournament
+        ON tournament.season_id = catalog.season_id
+        AND tournament.tournament_id = catalog.tournament_id
+        AND tournament.setup_status = 'ready'
       LEFT JOIN LATERAL (
         SELECT publication.event_id, publication.revision, publication.publication_state,
           publication.ownership_state, publication.captaincy_state, publication.vice_captaincy_state, publication.transfers_state
@@ -204,7 +218,7 @@ export const trendsRepository = {
 		if (access === "PUBLIC") {
 			const cached = await readPublicCache<TrendSnapshotPayload>(
 				context,
-				`${tournamentId}:${eventId}`,
+				`${tournamentId}:${eventId}:${limit}`,
 				"trends:snapshot:public"
 			);
 			if (cached) return cached;
@@ -381,7 +395,7 @@ export const trendsRepository = {
 		if (access === "PUBLIC")
 			await writePublicCache(
 				context,
-				`${tournamentId}:${eventId}`,
+				`${tournamentId}:${eventId}:${limit}`,
 				cohort.revision ?? "empty",
 				"trends:snapshot:public",
 				payload

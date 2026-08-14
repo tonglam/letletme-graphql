@@ -48,6 +48,14 @@ async function readPublishedSelectionStats(
 	limit: number
 ): Promise<TournamentSelectionStats | null | undefined> {
 	try {
+		// The publication table is not itself a public-access boundary. Check the
+		// catalog and tournament readiness before accepting any new publication.
+		const accessResult = await context.database.query(ACCESS_SQL, [
+			context.currentSeason.seasonId,
+			tournamentId,
+			eventId,
+		]);
+		if (!accessResult.rows[0]) return null;
 		const result = await context.database.query<Record<string, unknown>>(
 			`SELECT publication.publication_id, publication.expected_entries, publication.revision,
 				publication.ownership_state, publication.captaincy_state, publication.transfers_state,
@@ -59,12 +67,12 @@ async function readPublishedSelectionStats(
 			 ON rows.publication_id = publication.publication_id
 			WHERE publication.season_id = $1 AND publication.tournament_id = $2
 			  AND publication.event_id = $3 AND publication.is_active
-			ORDER BY rows.selected_count DESC NULLS LAST, rows.element_id
-			LIMIT $4`,
-			[context.currentSeason.seasonId, tournamentId, eventId, Math.max(limit, 12)]
+			ORDER BY rows.selected_count DESC NULLS LAST, rows.element_id`,
+			[context.currentSeason.seasonId, tournamentId, eventId]
 		);
 		const first = result.rows[0];
 		if (!first) return undefined;
+		if (first.ownership_state !== "READY") return null;
 		const totalEntries = Number(first.expected_entries ?? 0);
 		const percent = (value: number) => (totalEntries > 0 ? (value / totalEntries) * 100 : 0);
 		const rows = result.rows.filter(
@@ -82,18 +90,40 @@ async function readPublishedSelectionStats(
 				eoByPercent: percent(effective),
 			};
 		});
-		const captain = rows
-			.map((row) => ({
-				id: Number(row.element_id),
-				webName: String(row.player_name),
-				teamShortName: String(row.team_short_name),
-				position: publicationPosition(Number(row.player_position)),
-				captainByPercent: percent(Number(row.captain_count ?? 0)),
-				selectedByPercent: percent(Number(row.selected_count ?? 0)),
-				eoByPercent: percent(Number(row.effective_selection_count ?? 0)),
-			}))
-			.sort((left, right) => right.captainByPercent - left.captainByPercent || left.id - right.id)
-			.slice(0, limit);
+		const captain =
+			first.captaincy_state === "READY"
+				? rows
+						.map((row) => ({
+							id: Number(row.element_id),
+							webName: String(row.player_name),
+							teamShortName: String(row.team_short_name),
+							position: publicationPosition(Number(row.player_position)),
+							captainByPercent: percent(Number(row.captain_count ?? 0)),
+							selectedByPercent: percent(Number(row.selected_count ?? 0)),
+							eoByPercent: percent(Number(row.effective_selection_count ?? 0)),
+						}))
+						.sort(
+							(left, right) => right.captainByPercent - left.captainByPercent || left.id - right.id
+						)
+						.slice(0, limit)
+				: [];
+		const viceCaptain =
+			first.vice_captaincy_state === "READY"
+				? rows
+						.map((row) => ({
+							id: Number(row.element_id),
+							webName: String(row.player_name),
+							teamShortName: String(row.team_short_name),
+							position: publicationPosition(Number(row.player_position)),
+							captainByPercent: (Number(row.vice_captain_count ?? 0) / totalEntries) * 100,
+							selectedByPercent: percent(Number(row.selected_count ?? 0)),
+							eoByPercent: percent(Number(row.effective_selection_count ?? 0)),
+						}))
+						.sort(
+							(left, right) => right.captainByPercent - left.captainByPercent || left.id - right.id
+						)
+						.slice(0, limit)
+				: [];
 		const transfersAvailable = first.transfers_state === "READY";
 		const transferRows = (direction: "in" | "out") =>
 			rows
@@ -122,7 +152,7 @@ async function readPublishedSelectionStats(
 			midfielders: selection.filter((row) => row.position === "MIDFIELDER").slice(0, limit),
 			forwards: selection.filter((row) => row.position === "FORWARD").slice(0, limit),
 			captainSelect: captain,
-			viceCaptainSelect: [],
+			viceCaptainSelect: viceCaptain,
 			mostSelectedPlayers: selection.slice(0, limit),
 			mostTransferIn: transferRows("in"),
 			mostTransferOut: transferRows("out"),
@@ -143,8 +173,18 @@ const CATALOG_SQL = `
 		catalog.sort_order,
 		catalog.published_at,
 		catalog.updated_at,
-		COALESCE(publication.event_id, snapshot.event_id) AS latest_event_id,
-		COALESCE(publication.expected_entries, snapshot.total_entries) AS total_entries,
+		CASE
+			WHEN publication.event_id IS NOT NULL
+				AND (snapshot.event_id IS NULL OR publication.event_id >= snapshot.event_id)
+				THEN publication.event_id
+			ELSE snapshot.event_id
+		END AS latest_event_id,
+		CASE
+			WHEN publication.event_id IS NOT NULL
+				AND (snapshot.event_id IS NULL OR publication.event_id >= snapshot.event_id)
+				THEN publication.expected_entries
+			ELSE snapshot.total_entries
+		END AS total_entries,
 		MAX(catalog.updated_at) OVER () AS catalog_revision,
 			GREATEST(tournament.updated_at, COALESCE(publication.published_at, tournament.updated_at)) AS snapshot_revision,
 		(
@@ -159,7 +199,7 @@ const CATALOG_SQL = `
 	JOIN competition.tournaments tournament
 		ON tournament.season_id = catalog.season_id
 		AND tournament.tournament_id = catalog.tournament_id
-		AND (tournament.setup_status IS NULL OR tournament.standings_ready_at IS NOT NULL)
+		AND tournament.setup_status = 'ready'
 	LEFT JOIN LATERAL (
 		SELECT publication.event_id, publication.expected_entries, publication.revision,
 			publication.published_at
@@ -195,7 +235,7 @@ const ACCESS_SQL = `
 	JOIN competition.tournaments tournament
 		ON tournament.season_id = catalog.season_id
 		AND tournament.tournament_id = catalog.tournament_id
-		AND (tournament.setup_status IS NULL OR tournament.standings_ready_at IS NOT NULL)
+		AND tournament.setup_status = 'ready'
 	LEFT JOIN reporting.tournament_selection_stat_publications publication
 		ON publication.season_id = catalog.season_id
 		AND publication.tournament_id = catalog.tournament_id
