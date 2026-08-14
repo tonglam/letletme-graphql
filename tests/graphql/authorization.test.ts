@@ -87,7 +87,7 @@ describe("authorizeGraphQLRequest", () => {
 	});
 
 	it("allows public root fields without a principal", async () => {
-		const result = await authorize(`query { currentEventInfo { currentEvent } }`);
+		const result = await authorize(`query { homeGameweek(eventId: 1) { transfersState } }`);
 
 		expect(result.ok).toBe(true);
 	});

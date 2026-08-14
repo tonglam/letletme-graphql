@@ -51,6 +51,7 @@ const publicFields = new Set([
 	"currentEventInfo",
 	"coreEventContext",
 	"homePublicBootstrap",
+	"homeGameweek",
 	"homeMarketPulse",
 	"playerStatsBootstrap",
 	"playerStatsDesk",

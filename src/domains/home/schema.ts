@@ -50,8 +50,28 @@ export const homeTypeDefs = /* GraphQL */ `
 		priceChanges: [MarketPriceChange!]!
 	}
 
+	enum HomeTransferSectionState {
+		AVAILABLE
+		UNAVAILABLE
+	}
+
+	type HomeTransferSignal {
+		player: Player!
+		eventId: Int!
+		transfersInEvent: Int!
+		transfersOutEvent: Int!
+	}
+
+	type HomeGameweek {
+		gameweekDesk: GameweekDesk!
+		topTransfersIn: [HomeTransferSignal!]!
+		topTransfersOut: [HomeTransferSignal!]!
+		transfersState: HomeTransferSectionState!
+	}
+
 	extend type Query {
 		homePublicBootstrap: HomePublicBootstrap!
+		homeGameweek(eventId: Int!): HomeGameweek!
 		homePersonalDesk: HomePersonalDesk!
 		homeMarketPulse(days: Int = 14): HomeMarketPulse!
 	}

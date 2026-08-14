@@ -1,8 +1,11 @@
 import { describe, expect, it, mock } from "bun:test";
 import { graphql } from "graphql";
 import { movementFromRanks } from "../../../src/domains/home/repository";
-import { compactHomeMarketPulse } from "../../../src/domains/home/service";
+import { compactHomeMarketPulse, settleHomeTransfers } from "../../../src/domains/home/service";
+import { gameweekService } from "../../../src/domains/gameweek/service";
 import type { MarketPulse } from "../../../src/domains/market/repository";
+import { Position } from "../../../src/domains/players/repository";
+import { playersService } from "../../../src/domains/players/service";
 import { schema } from "../../../src/graphql/schema";
 import type { GraphQLContext } from "../../../src/graphql/context";
 import type { Principal } from "../../../src/infra/principal";
@@ -103,15 +106,93 @@ describe("Home GraphQL contracts", () => {
 
 	it("classifies the combined Home gameweek roots as lightweight", async () => {
 		const serverSource = await Bun.file("src/index.ts").text();
-		for (const field of [
-			'"homePublicBootstrap"',
-			'"homePersonalDesk"',
-			'"gameweekDesk"',
-			'"topTransfersIn"',
-			'"topTransfersOut"',
-		]) {
+		for (const field of ['"homePublicBootstrap"', '"homePersonalDesk"', '"homeGameweek"']) {
 			expect(serverSource).toContain(field);
 		}
+	});
+
+	it("keeps the Home gameweek desk when one transfer section fails", async () => {
+		const originalDesk = gameweekService.getGameweekDesk;
+		const originalTransfersIn = playersService.getTopTransfersInEnriched;
+		const originalTransfersOut = playersService.getTopTransfersOutEnriched;
+		const player = {
+			id: 1,
+			code: 101,
+			webName: "Safe Player",
+			firstName: "Safe",
+			secondName: "Player",
+			teamId: 1,
+			position: Position.MIDFIELDER,
+			price: 75,
+			startPrice: 70,
+			totalPoints: 12,
+			selectedByPercent: 4.5,
+		};
+		gameweekService.getGameweekDesk = async () => ({ eventId: 1, lifecycle: "SCHEDULED" }) as never;
+		playersService.getTopTransfersInEnriched = async () => ({
+			stats: [{ playerId: 1, eventId: 1, transfersInEvent: 1200, transfersOutEvent: 10 }],
+			players: { 1: player },
+		});
+		playersService.getTopTransfersOutEnriched = async () => {
+			throw new Error("transfer section unavailable");
+		};
+
+		try {
+			const result = await graphql({
+				schema,
+				source: `
+					query {
+						homeGameweek(eventId: 1) {
+							transfersState
+							gameweekDesk { eventId lifecycle }
+							topTransfersIn {
+								eventId transfersInEvent transfersOutEvent
+								player { id webName position price }
+							}
+							topTransfersOut { player { id } }
+						}
+					}
+				`,
+				contextValue: buildSnapshotContext(new TestRedis()),
+			});
+
+			expect(result.errors).toBeUndefined();
+			expect(result.data?.homeGameweek).toEqual({
+				transfersState: "UNAVAILABLE",
+				gameweekDesk: { eventId: 1, lifecycle: "SCHEDULED" },
+				topTransfersIn: [
+					{
+						eventId: 1,
+						transfersInEvent: 1200,
+						transfersOutEvent: 10,
+						player: { id: 1, webName: "Safe Player", position: "MIDFIELDER", price: 75 },
+					},
+				],
+				topTransfersOut: [],
+			});
+		} finally {
+			gameweekService.getGameweekDesk = originalDesk;
+			playersService.getTopTransfersInEnriched = originalTransfersIn;
+			playersService.getTopTransfersOutEnriched = originalTransfersOut;
+		}
+	});
+
+	it("marks transfer data unavailable when an enriched row has no player", () => {
+		const settled = settleHomeTransfers(
+			{
+				status: "fulfilled",
+				value: {
+					stats: [{ playerId: 1, eventId: 1, transfersInEvent: 1, transfersOutEvent: 0 }],
+					players: {},
+				},
+			},
+			{ status: "fulfilled", value: { stats: [], players: {} } }
+		);
+		expect(settled).toEqual({
+			topTransfersIn: [],
+			topTransfersOut: [],
+			transfersState: "UNAVAILABLE",
+		});
 	});
 
 	it("rejects an out-of-range Home market window before querying", async () => {
