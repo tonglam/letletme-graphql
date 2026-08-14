@@ -105,9 +105,9 @@ const makePick = (overrides: Partial<ElementEventResultData> = {}): ElementEvent
 });
 
 describe("calcElementLivePoints", () => {
-	it("preserves official fixture rounding while replacing provisional bonus", () => {
+	it("preserves the official event-live total including projected bonus", () => {
 		const live = makeLive({ totalPoints: 11, bonus: 2, minutes: 180 });
-		expect(calcOfficialTotalWithEffectiveBonus(live, 5)).toBe(14);
+		expect(calcOfficialTotalWithEffectiveBonus(live, 5)).toBe(11);
 		expect(calcOfficialTotalWithEffectiveBonus(live)).toBe(11);
 	});
 	it("returns 0 for undefined live", () => {
@@ -125,9 +125,9 @@ describe("calcElementLivePoints", () => {
 		expect(calcElementLivePoints(live)).toBe(7.5);
 	});
 
-	it("replaces only the official bonus with the effective live bonus", () => {
+	it("ignores deprecated local effective-bonus overrides", () => {
 		const live = makeLive({ totalPoints: 12, bonus: 3 });
-		expect(calcElementLivePoints(live, 1)).toBe(10);
+		expect(calcElementLivePoints(live, 1)).toBe(12);
 	});
 
 	it("preserves official negative scores", () => {

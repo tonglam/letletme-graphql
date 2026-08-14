@@ -303,7 +303,6 @@ describe("typed Data snapshots", () => {
 		const corePublication = buildCorePublication("2627", 7, core);
 		const livePublication = buildLivePublication(core, 1, "2627", 8, {
 			eventLives: lives,
-			liveBonus: { "1": { "1": 3 } },
 		});
 		const context = buildSnapshotContext(new TestRedis(corePublication, livePublication));
 
@@ -312,8 +311,8 @@ describe("typed Data snapshots", () => {
 		expect(snapshot.eventLives).toHaveLength(core.players.length);
 		expect(snapshot.eventLives[0]).toMatchObject({ playerId: 1, bonus: 3, totalPoints: 6 });
 		expect(snapshot.fixtures).toHaveLength(10);
-		expect(Object.keys(snapshot.liveFixtures)).toHaveLength(20);
-		expect(snapshot.liveBonus).toEqual({ "1": { "1": 3 } });
+		expect(snapshot.liveFixtures).toBeDefined();
+		expect(snapshot.liveBonus).toEqual({});
 		expect(
 			liveDatasetRevision(coreDatasetRevision(await getCoreDataSnapshot(context)), 1, "8")
 		).toBe("core-7.live-1-8");
@@ -342,7 +341,7 @@ describe("typed Data snapshots", () => {
 		expect(next.eventLives[0]?.totalPoints).toBe(12);
 	});
 
-	it("rejects an invalid live sibling and uses the PostgreSQL dataset as a whole", async () => {
+	it("rejects an invalid live sibling without mutable PostgreSQL fallback", async () => {
 		const core = buildTestCoreData(1);
 		const corePublication = buildCorePublication("2627", 7, core);
 		const incompleteLives = buildTestEventLives(core, 1).slice(1);
@@ -392,19 +391,9 @@ describe("typed Data snapshots", () => {
 			},
 		});
 
-		const first = await getLiveDataSnapshot(context, 1);
-		const second = await getLiveDataSnapshot(context, 1);
-		expect(first).toBe(second);
-		expect(first.source).toBe("postgres");
-		expect(first.revision).toBe("db-1786237323000");
-		expect(first.eventLives[0]).toMatchObject({ playerId: 1, totalPoints: 99 });
-		expect(first.eventLives).toHaveLength(core.players.length);
-		expect(
-			first.liveFixtures[String(eventFixtures[0]!.teamAId)].Playing.find(
-				(fixture) => fixture.fixtureId === eventFixtures[0]!.id
-			)?.score
-		).toBe("1-2");
-		expect(calls).toBe(1);
+		const failure = await getLiveDataSnapshot(context, 1).catch((error: unknown): unknown => error);
+		expect(String(failure)).toContain("LIVE_PUBLICATION_UNAVAILABLE");
+		expect(calls).toBe(0);
 	});
 
 	it("rejects an empty fallback live row once any fixture has started", async () => {
@@ -436,16 +425,15 @@ describe("typed Data snapshots", () => {
 			}),
 		});
 
-		await expect(getLiveDataSnapshot(context, 1)).rejects.toThrow(
-			"Coherent PostgreSQL live publication is unavailable"
-		);
+		const failure = await getLiveDataSnapshot(context, 1).catch((error: unknown): unknown => error);
+		expect(String(failure)).toContain("LIVE_PUBLICATION_UNAVAILABLE");
 	});
 
 	it("rejects a non-canonical active live publication during PostgreSQL fallback", async () => {
 		const core = buildTestCoreData(1);
 		const live = buildLivePublication(core, 1, "2627", 8);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
-		const brokenSibling = live.manifest.items.find((item) => item.name === "liveFixtures")!;
+		const brokenSibling = live.manifest.items.find((item) => item.name === "eventLive")!;
 		redis.values.delete(brokenSibling.key);
 		const invalidManifest = {
 			...buildLivePublication(core, 1, "2627", 9).manifest,
@@ -470,9 +458,7 @@ describe("typed Data snapshots", () => {
 			}),
 		});
 
-		await expect(getLiveDataSnapshot(context, 1)).rejects.toThrow(
-			"Coherent PostgreSQL live publication is unavailable"
-		);
+		await expect(getLiveDataSnapshot(context, 1)).rejects.toThrow("LIVE_PUBLICATION_UNAVAILABLE");
 	});
 
 	it("validates live bonus teams against the requested event, not current player teams", async () => {
@@ -482,14 +468,10 @@ describe("typed Data snapshots", () => {
 		core.players[0] = { ...firstPlayer, teamId: 2 };
 		core.players[11] = { ...secondTeamPlayer, teamId: 1 };
 		const corePublication = buildCorePublication("2627", 7, core);
-		const livePublication = buildLivePublication(core, 1, "2627", 8, {
-			liveBonus: { "1": { "1": 3 } },
-		});
+		const livePublication = buildLivePublication(core, 1, "2627", 8);
 		const context = buildSnapshotContext(new TestRedis(corePublication, livePublication));
 
-		await expect(getLiveDataSnapshot(context, 1)).resolves.toMatchObject({
-			liveBonus: { "1": { "1": 3 } },
-		});
+		await expect(getLiveDataSnapshot(context, 1)).resolves.toMatchObject({ liveBonus: {} });
 	});
 
 	it("fails closed when neither Redis nor PostgreSQL has one coherent core authority", async () => {

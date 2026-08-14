@@ -17,6 +17,8 @@ export type ActiveCaptainData = {
 
 export type LiveCalcData = {
 	availability: EntryLiveAvailability;
+	/** True while the board uses official live totals before final auto-subs/results. */
+	provisional: boolean;
 	snapshot: LiveSnapshotMeta | null;
 	rank: number;
 	event: number;
@@ -101,28 +103,21 @@ export type ElementEventResultData = {
 	dgw: boolean;
 };
 
-/**
- * Preserve FPL's official fixture-level scoring and rounding, replacing only
- * the aggregate bonus while provisional BPS is being estimated.
- */
+/** Official event-live total_points is already the complete scoring authority. */
 export const calcOfficialTotalWithEffectiveBonus = (
 	live: LivePerformance | undefined,
-	effectiveBonus?: number
+	_effectiveBonus?: number
 ): number => {
 	if (!live) return 0;
-	const officialTotal =
-		typeof live.totalPoints === "number" && Number.isFinite(live.totalPoints)
-			? live.totalPoints
-			: 0;
-	const officialBonus =
-		typeof live.bonus === "number" && Number.isFinite(live.bonus) ? live.bonus : 0;
-	return officialTotal - officialBonus + (effectiveBonus ?? officialBonus);
+	return typeof live.totalPoints === "number" && Number.isFinite(live.totalPoints)
+		? live.totalPoints
+		: 0;
 };
 
 export const calcElementLivePoints = (
 	live: LivePerformance | undefined,
-	effectiveBonus?: number
-): number => calcOfficialTotalWithEffectiveBonus(live, effectiveBonus);
+	_effectiveBonus?: number
+): number => calcOfficialTotalWithEffectiveBonus(live);
 
 /**
  * Apply FPL automatic substitutions.
@@ -195,6 +190,7 @@ export const buildNoPicksLiveCalcData = (
 	const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
 	return {
 		availability: "NO_PICKS",
+		provisional: false,
 		snapshot: null,
 		rank: 0,
 		event: eventId,

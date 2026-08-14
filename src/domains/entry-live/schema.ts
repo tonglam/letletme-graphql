@@ -57,20 +57,11 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 			entryIds: [Int!]!
 			includeLive: Boolean
 		): BatchLiveCalcResult!
-
-		"""
-		Batch live calculation for all entries in a tournament.
-		Resolves entry IDs from the tournament, then computes live points for each.
-		"""
-		calcLivePointsForTournament(
-			eventId: Int!
-			tournamentId: Int!
-			includeLive: Boolean
-		): BatchLiveCalcResult!
 	}
 
 	type LiveCalcData {
 		availability: EntryLiveAvailability!
+		provisional: Boolean!
 		snapshot: LiveSnapshotMeta
 		rank: Int!
 		event: Int!

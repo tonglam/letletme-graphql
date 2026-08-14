@@ -67,7 +67,7 @@ const MANIFEST_FIELDS = [
 const MANIFEST_ITEM_FIELDS = ["name", "key", "type", "count", "bytes", "sha256"] as const;
 const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
 	"fpl:core": ["events", "teams", "players", "phases", "fixtures", "currentEventId"],
-	"fpl:live": ["eventLives", "fixtures", "liveFixtures", "liveBonus"],
+	"fpl:live": ["eventLive", "fixtures"],
 	"fpl:market": ["context"],
 };
 

@@ -16,7 +16,6 @@ import {
 	buildTestCoreData,
 	buildTestEventLives,
 	TestRedis,
-	toPublicationFixture,
 } from "../../helpers/data-publication";
 
 describe("live snapshot metadata", () => {
@@ -38,7 +37,7 @@ describe("live snapshot metadata", () => {
 			checkedAt: "2026-08-09T01:00:00.000Z",
 			eventLiveCount: 220,
 			fixtureCount: 10,
-			fixtureTeamCount: 20,
+			fixtureTeamCount: 0,
 			bonusTeamCount: 0,
 		});
 		expect(
@@ -82,7 +81,7 @@ describe("live snapshot metadata", () => {
 		const core = buildTestCoreData(1);
 		const live = buildLivePublication(core, 1, "2627", 8);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
-		const eventLivesKey = live.manifest.items.find((item) => item.name === "eventLives")?.key;
+		const eventLivesKey = live.manifest.items.find((item) => item.name === "eventLive")?.key;
 		if (eventLivesKey) redis.values.delete(eventLivesKey);
 		const context = buildSnapshotContext(redis);
 
@@ -144,7 +143,7 @@ describe("live snapshot metadata", () => {
 		expect(calls).toBe(1);
 	});
 
-	it("marks the whole operation as PostgreSQL fallback when live publication validation fails", async () => {
+	it("fails closed when live publication validation fails", async () => {
 		const core = buildTestCoreData(1);
 		const invalidLive = buildLivePublication(core, 1, "2627", 8, {
 			eventLives: buildTestEventLives(core, 1).slice(1),
@@ -152,28 +151,14 @@ describe("live snapshot metadata", () => {
 		const context = buildSnapshotContext(
 			new TestRedis(buildCorePublication("2627", 7, core), invalidLive),
 			{
-				databaseQuery: async () => ({
-					rows: [
-						{
-							authority_count: "0",
-							publication_id: null,
-							revision: null,
-							source_checked_at: null,
-							published_at: null,
-							event_checked_at: "2026-08-09T01:02:03.000Z",
-							event_lives: buildTestEventLives(core, 1),
-							fixtures: core.fixtures
-								.filter((fixture) => fixture.eventId === 1)
-								.map(toPublicationFixture),
-						},
-					],
-				}),
+				databaseQuery: async () => {
+					throw new Error("mutable live fallback must not run");
+				},
 			}
 		);
 
-		const meta = await loadLiveSnapshotMeta(context, 1);
-		expect(meta?.revision).toBe(`db-${Date.parse("2026-08-09T01:02:03.000Z")}`);
-		expect(isLiveSnapshotDatabaseFallback(context, 1)).toBe(true);
+		await expect(loadLiveSnapshotMeta(context, 1)).rejects.toThrow("LIVE_PUBLICATION_UNAVAILABLE");
+		expect(isLiveSnapshotDatabaseFallback(context, 1)).toBe(false);
 		expect(isLiveSnapshotConsistencyActive(context, 1)).toBe(false);
 	});
 });

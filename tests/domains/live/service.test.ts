@@ -29,7 +29,7 @@ describe("assertValidLiveExplainBatch", () => {
 });
 
 describe("liveService.getPlayerLive", () => {
-	it("uses one targeted read for both performance and effective bonus", async () => {
+	it("uses one targeted read and preserves the official total", async () => {
 		const originalTargeted = liveRepository.getTargetedLiveRead;
 		const originalPlayer = playersRepository.getPlayerById;
 		let targetedCalls = 0;
@@ -63,7 +63,6 @@ describe("liveService.getPlayerLive", () => {
 						totalPoints: 2,
 					},
 				],
-				effectiveBonusByPlayer: new Map([[9, 3]]),
 				meta: {} as never,
 			};
 		};
@@ -72,7 +71,7 @@ describe("liveService.getPlayerLive", () => {
 		try {
 			const result = await liveService.getPlayerLive({} as GraphQLContext, 9, 4);
 			expect(targetedCalls).toBe(1);
-			expect(result).toMatchObject({ playerId: 9, bonus: 3, totalPoints: 5 });
+			expect(result).toMatchObject({ playerId: 9, bonus: 0, totalPoints: 2 });
 		} finally {
 			liveRepository.getTargetedLiveRead = originalTargeted;
 			playersRepository.getPlayerById = originalPlayer;

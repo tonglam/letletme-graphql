@@ -12,10 +12,6 @@ import type {
 	CorePhaseData,
 	CorePlayerData,
 	CoreTeamData,
-	LiveBonusByTeam,
-	LiveFixtureBuckets,
-	LiveFixtureData,
-	LiveFixturesByTeam,
 } from "../../src/infra/data-snapshot";
 
 export type TestPublication = Readonly<{
@@ -258,62 +254,6 @@ export const toPublicationFixture = (fixture: CoreFixtureData): Record<string, u
 	teamADifficulty: fixture.teamADifficulty,
 });
 
-const emptyBuckets = (): LiveFixtureBuckets => ({ Playing: [], Not_Start: [], Finished: [] });
-
-const buildLiveFixtureViews = (
-	fixtures: readonly CoreFixtureData[],
-	teams: readonly CoreTeamData[]
-): LiveFixturesByTeam => {
-	const teamMap = new Map(teams.map((team) => [team.id, team]));
-	const result: Record<
-		string,
-		{ Playing: LiveFixtureData[]; Not_Start: LiveFixtureData[]; Finished: LiveFixtureData[] }
-	> = {};
-	for (const fixture of fixtures) {
-		const home = teamMap.get(fixture.teamHId)!;
-		const away = teamMap.get(fixture.teamAId)!;
-		const finished = fixture.finished || fixture.finishedProvisional;
-		const status: keyof LiveFixtureBuckets = finished
-			? "Finished"
-			: fixture.started
-				? "Playing"
-				: "Not_Start";
-		const create = (wasHome: boolean): LiveFixtureData => {
-			const team = wasHome ? home : away;
-			const opponent = wasHome ? away : home;
-			const teamScore = (wasHome ? fixture.teamHScore : fixture.teamAScore) ?? 0;
-			const opponentScore = (wasHome ? fixture.teamAScore : fixture.teamHScore) ?? 0;
-			return {
-				fixtureId: fixture.id,
-				teamId: team.id,
-				teamName: team.name,
-				teamShortName: team.shortName,
-				teamScore,
-				teamPosition: team.position,
-				againstId: opponent.id,
-				againstName: opponent.name,
-				againstShortName: opponent.shortName,
-				againstTeamScore: opponentScore,
-				againstTeamPosition: opponent.position,
-				kickoffTime: fixture.kickoffTime,
-				score: `${teamScore}-${opponentScore}`,
-				wasHome,
-				started: fixture.started ?? false,
-				finished,
-			};
-		};
-		for (const row of [create(true), create(false)]) {
-			const buckets = (result[String(row.teamId)] ??= emptyBuckets() as {
-				Playing: LiveFixtureData[];
-				Not_Start: LiveFixtureData[];
-				Finished: LiveFixtureData[];
-			});
-			buckets[status].push(row);
-		}
-	}
-	return result;
-};
-
 export const buildLivePublication = (
 	core: TestCoreData,
 	eventId = 1,
@@ -322,23 +262,18 @@ export const buildLivePublication = (
 	overrides: Partial<{
 		eventLives: readonly Record<string, unknown>[];
 		fixtures: readonly CoreFixtureData[];
-		liveFixtures: LiveFixturesByTeam;
-		liveBonus: LiveBonusByTeam;
 		state: "scheduled" | "live" | "settled";
 	}> = {}
 ): TestPublication => {
 	const eventLives = buildTestEventLives(core, eventId);
 	const fixtures =
 		overrides.fixtures ?? core.fixtures.filter((fixture) => fixture.eventId === eventId);
-	const liveFixtures = overrides.liveFixtures ?? buildLiveFixtureViews(fixtures, core.teams);
 	return createTestPublication(
 		{ dataset: "fpl:live", seasonCode, eventId },
 		revision,
 		{
-			eventLives: overrides.eventLives ?? eventLives,
+			eventLive: overrides.eventLives ?? eventLives,
 			fixtures: fixtures.map(toPublicationFixture),
-			liveFixtures,
-			liveBonus: overrides.liveBonus ?? {},
 		},
 		{ state: overrides.state ?? "scheduled" }
 	);

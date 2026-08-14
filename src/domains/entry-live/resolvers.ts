@@ -4,7 +4,6 @@ import { entriesService } from "../entries/service";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
 import { withLiveSnapshotRoot } from "../live/snapshot-meta";
-import { assertTournamentStandingsReady, tournamentsService } from "../tournaments/service";
 import {
 	assertValidEntryBatch,
 	entryLiveBatchService,
@@ -29,12 +28,6 @@ type CalcLivePointsByEntryArgs = {
 type CalcLivePointsForEntriesArgs = {
 	eventId: number;
 	entryIds: number[];
-	includeLive?: boolean | null;
-};
-
-type CalcLivePointsForTournamentArgs = {
-	eventId: number;
-	tournamentId: number;
 	includeLive?: boolean | null;
 };
 
@@ -84,42 +77,6 @@ export const entryLiveResolvers = {
 						includeLive
 					);
 				const result = await calculate();
-				return {
-					results: Array.from(result.results.values()),
-					errors: result.errors,
-					meta: result.meta,
-				};
-			}),
-
-		calcLivePointsForTournament: async (
-			_parent: unknown,
-			args: CalcLivePointsForTournamentArgs,
-			context: GraphQLContext
-		): Promise<{
-			results: LiveCalcData[];
-			errors: Array<{ entryId: number; message: string }>;
-			meta: {
-				eventId: number;
-				totalEntries: number;
-				succeededCount: number;
-				failedCount: number;
-			};
-		}> =>
-			withLiveSnapshotRoot(context, async () => {
-				await assertTournamentStandingsReady(context, args.tournamentId);
-				const includeLive = args.includeLive ?? true;
-				const entryIds = await tournamentsService.getTournamentEntryIdsUncached(
-					context,
-					args.tournamentId
-				);
-				assertValidEntryBatch(entryIds);
-
-				const result = await entryLiveBatchService.calcLivePointsForEntries(
-					context,
-					args.eventId,
-					entryIds,
-					includeLive
-				);
 				return {
 					results: Array.from(result.results.values()),
 					errors: result.errors,

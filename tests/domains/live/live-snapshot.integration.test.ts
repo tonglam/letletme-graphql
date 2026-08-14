@@ -148,7 +148,7 @@ describe("liveSnapshot GraphQL contract", () => {
 		expect(result.data?.liveSnapshot).toEqual({ state: "LIVE" });
 	});
 
-	it("falls the whole live dataset back to one coherent PostgreSQL snapshot", async () => {
+	it("fails closed when an immutable live item is missing", async () => {
 		const core = buildLiveCore();
 		const eventLives = buildLiveEventRows(core);
 		const live = buildLivePublication(core, 1, "2627", 8, {
@@ -156,34 +156,13 @@ describe("liveSnapshot GraphQL contract", () => {
 			state: "live",
 		});
 		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
-		const brokenSibling = live.manifest.items.find((item) => item.name === "liveFixtures")!;
+		const brokenSibling = live.manifest.items.find((item) => item.name === "fixtures")!;
 		redis.values.delete(brokenSibling.key);
-		const fallbackManifest = {
-			...buildLivePublication(core, 1, "2627", 44, {
-				eventLives,
-				state: "live",
-			}).manifest,
-			publicationId: "00000000-0000-4000-8000-000000000044",
-		};
 		let databaseReads = 0;
 		const context = buildSnapshotContext(redis, {
 			databaseQuery: async () => {
 				databaseReads += 1;
-				return {
-					rows: [
-						{
-							authority_count: "1",
-							publication_id: "00000000-0000-4000-8000-000000000044",
-							revision: "44",
-							manifest: fallbackManifest,
-							source_checked_at: "2026-08-09T01:02:00.000Z",
-							published_at: "2026-08-09T01:03:00.000Z",
-							event_checked_at: "2026-08-09T01:02:00.000Z",
-							event_lives: eventLives,
-							fixtures: live.values.fixtures,
-						},
-					],
-				};
+				throw new Error("mutable live fallback must not run");
 			},
 		});
 
@@ -196,15 +175,9 @@ describe("liveSnapshot GraphQL contract", () => {
 			contextValue: context,
 		});
 
-		expect(result.errors).toBeUndefined();
-		expect(result.data?.liveSnapshot).toEqual({
-			revision: `db-${Date.parse("2026-08-09T01:02:00.000Z")}`,
-			state: "LIVE",
-			publishedAt: "2026-08-09T01:03:00.000Z",
-			eventLiveCount: 220,
-			fixtureCount: 10,
-		});
-		expect((result.data?.eventLive as { performances: unknown[] }).performances).toHaveLength(220);
-		expect(databaseReads).toBe(1);
+		expect(result.errors).toBeDefined();
+		expect(result.data?.liveSnapshot).toBeNull();
+		expect(result.data?.eventLive).toBeNull();
+		expect(databaseReads).toBe(0);
 	});
 });
