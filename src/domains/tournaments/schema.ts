@@ -45,6 +45,16 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		OFFICIAL_SYNC
 	}
 
+	enum TournamentDetailKind {
+		SETUP
+		OFFICIAL_H2H
+		LIVE_POINTS
+	}
+
+	enum TournamentDetailSection {
+		PARTICIPANTS
+	}
+
 	type TournamentInfo {
 		id: Int!
 		name: String!
@@ -95,6 +105,64 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		entryId: Int!
 		entryName: String
 		playerName: String
+	}
+
+	type TournamentEventContext {
+		season: String!
+		coreRevision: String!
+		activeEventId: Int
+		requestedEventId: Int!
+	}
+
+	type TournamentSetupDesk {
+		status: TournamentSetupStatus!
+		phase: TournamentSetupPhase!
+		completedUnits: Int!
+		totalUnits: Int!
+		hasWarnings: Boolean!
+	}
+
+	type TournamentOfficialH2HBoard {
+		eventId: Int!
+		awaitingSchedule: Boolean!
+		standings: [OfficialH2HStanding!]!
+		matches: [OfficialH2HMatch!]!
+	}
+
+	type TournamentLiveBoard {
+		eventId: Int!
+		revision: String!
+		state: LiveSnapshotState!
+		partial: Boolean!
+		failedEntryIds: [Int!]!
+		totalEntries: Int!
+		rows: [LiveCalcData!]!
+	}
+
+	type TournamentDetailDesk {
+		revision: String!
+		kind: TournamentDetailKind!
+		context: TournamentEventContext!
+		tournament: TournamentInfo!
+		viewerEntryId: Int!
+		canManage: Boolean!
+		participants: [TournamentParticipant!]!
+		unavailableSections: [TournamentDetailSection!]!
+		setup: TournamentSetupDesk
+		officialH2H: TournamentOfficialH2HBoard
+		live: TournamentLiveBoard
+	}
+
+	type ManagedTournamentStatus {
+		revision: String!
+		state: TournamentState!
+		setupStatus: TournamentSetupStatus!
+		setupPhase: TournamentSetupPhase!
+		rosterSyncStatus: TournamentSetupStatus
+		setupCompletedUnits: Int!
+		setupTotalUnits: Int!
+		setupHasWarnings: Boolean!
+		updatedAt: DateTime!
 	}
 
 	type TournamentEventResult {
@@ -370,5 +438,7 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		entryH2HMatchResults(entryId: Int!): [EntryH2HMatchResult!]!
 		tournamentOfficialH2H(tournamentId: Int!, eventId: Int!): TournamentOfficialH2H!
 		entryOfficialH2HDesk(entryId: Int!): [EntryOfficialH2HDeskItem!]!
+		tournamentDetailDesk(tournamentId: Int!, entryId: Int!, eventId: Int): TournamentDetailDesk
+		managedTournamentStatus(tournamentId: Int!, entryId: Int!): ManagedTournamentStatus
 	}
 `;

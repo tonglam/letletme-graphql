@@ -285,6 +285,7 @@ const startServer = async (): Promise<void> => {
 				let operationName = "anonymous";
 				let ingressClass = "unclassified";
 				let rateLimitAudience = "unresolved";
+				let fullCoreLoaded = false;
 				const finalizeGraphQLResponse = (response: Response, outcome: string): Response => {
 					const durationMs = requestTiming.elapsedMs();
 					response.headers.set("X-Request-Id", requestId);
@@ -303,6 +304,7 @@ const startServer = async (): Promise<void> => {
 							status: response.status,
 							durationMs: Number(durationMs.toFixed(2)),
 							timings: requestTiming.snapshot(),
+							fullCoreLoaded,
 						},
 						"GraphQL request timing"
 					);
@@ -421,6 +423,7 @@ const startServer = async (): Promise<void> => {
 
 					const currentSeason = currentSeasonProvider.get();
 					const data = new ReadModelClient(database, currentSeason);
+					const requestScope = {};
 					const authorization = await requestTiming.measure("authorization", () =>
 						authorizeGraphQLRequest({
 							body: parsedBody,
@@ -428,6 +431,7 @@ const startServer = async (): Promise<void> => {
 							principal,
 							data,
 							logger,
+							requestScope,
 						})
 					);
 					if (!authorization.ok) {
@@ -446,7 +450,7 @@ const startServer = async (): Promise<void> => {
 						requestId,
 						operationName,
 						requestTiming,
-						requestScope: {},
+						requestScope,
 						principal: principal ?? undefined,
 						user: user ?? undefined,
 					};
@@ -471,12 +475,23 @@ const startServer = async (): Promise<void> => {
 						"topTransfersIn",
 						"topTransfersOut",
 						"playerValueHistory",
+						"entryTournaments",
+						"tournament",
+						"managedTournament",
+						"tournamentParticipants",
+						"tournamentEntryIds",
+						"tournamentOfficialH2H",
+						"tournamentDetailDesk",
+						"entryOfficialH2HDesk",
+						"managedTournamentStatus",
 					]);
 					const lightweightCoreRead =
 						limits.shape === "query" &&
 						limits.rootFields.length > 0 &&
 						limits.rootFields.every((field) => lightweightCoreFields.has(field));
 					if (!lightweightCoreRead) {
+						fullCoreLoaded = true;
+						graphQLContext.fullCoreLoaded = true;
 						try {
 							graphQLContext.dataRevision = await requestTiming.measure("publication", async () =>
 								coreDatasetRevision(await getCoreDataSnapshot(graphQLContext))
@@ -493,6 +508,8 @@ const startServer = async (): Promise<void> => {
 								"publication_unavailable"
 							);
 						}
+					} else {
+						graphQLContext.fullCoreLoaded = false;
 					}
 
 					const headers = new HeaderMap();

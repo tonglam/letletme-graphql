@@ -29,6 +29,7 @@ type AuthorizationInput = {
 	principal?: Principal | null;
 	data: ReadModelClient;
 	logger: Logger;
+	requestScope?: object;
 };
 
 export type AuthorizationResult =
@@ -105,6 +106,7 @@ const ownEntryArgFields = new Map([
 	["tournamentSelectionIndex", "entryId"],
 	["tournamentEntrySquads", "entryId"],
 	["tournament", "entryId"],
+	["tournamentDetailDesk", "entryId"],
 	["managedTournament", "entryId"],
 	["tournamentEntryRankingSummary", "entryId"],
 ]);
@@ -120,12 +122,14 @@ const tournamentMembershipFields = new Set([
 	"tournamentSeasonSnapshot",
 	"tournament",
 	"tournamentLiveParticipants",
+	"tournamentDetailDesk",
 ]);
 
 const protectedFields = new Set([
 	...websiteOnlyFields,
 	...ownEntryArgFields.keys(),
 	...tournamentMembershipFields,
+	"managedTournamentStatus",
 	"calcLivePointsForEntries",
 	"leagueEventResults",
 	"homePersonalDesk",
@@ -262,8 +266,12 @@ const requireBoundEntry = (principal: Principal, entryId: number | null): Author
 const hasTournamentMembership = async (
 	dataClient: ReadModelClient,
 	tournamentId: number,
-	entryId: number
+	entryId: number,
+	scope?: object
 ): Promise<boolean> => {
+	const memo = scope ? tournamentAccessMemo(scope, "membership") : null;
+	const memoKey = `${tournamentId}:${entryId}`;
+	if (memo?.has(memoKey)) return memo.get(memoKey)!;
 	const { data, error } = await dataClient
 		.read("competition.tournament_entries")
 		.select("entry_id")
@@ -271,7 +279,24 @@ const hasTournamentMembership = async (
 		.eq("entry_id", entryId)
 		.limit(1);
 	if (error) return false;
-	return ((data as { entry_id: number }[] | null) ?? []).length > 0;
+	const value = ((data as { entry_id: number }[] | null) ?? []).length > 0;
+	memo?.set(memoKey, value);
+	return value;
+};
+
+const tournamentAccessMemo = (
+	scope: object,
+	kind: "membership" | "admin"
+): Map<string, boolean> => {
+	let values = (scope as { tournamentAccess?: Record<string, Map<string, boolean>> })
+		.tournamentAccess?.[kind];
+	if (!values) {
+		const holder = scope as { tournamentAccess?: Record<string, Map<string, boolean>> };
+		holder.tournamentAccess ??= {};
+		values = new Map();
+		holder.tournamentAccess[kind] = values;
+	}
+	return values;
 };
 
 const hasLeagueMembership = async (
@@ -292,8 +317,12 @@ const hasLeagueMembership = async (
 const isTournamentAdmin = async (
 	dataClient: ReadModelClient,
 	tournamentId: number,
-	entryId: number
+	entryId: number,
+	scope?: object
 ): Promise<boolean> => {
+	const memo = scope ? tournamentAccessMemo(scope, "admin") : null;
+	const memoKey = `${tournamentId}:${entryId}`;
+	if (memo?.has(memoKey)) return memo.get(memoKey)!;
 	const { data, error } = await dataClient
 		.read("competition.tournaments")
 		.select("admin_entry_id")
@@ -301,13 +330,16 @@ const isTournamentAdmin = async (
 		.eq("admin_entry_id", entryId)
 		.limit(1);
 	if (error) return false;
-	return ((data as { admin_entry_id: number }[] | null) ?? []).length > 0;
+	const value = ((data as { admin_entry_id: number }[] | null) ?? []).length > 0;
+	memo?.set(memoKey, value);
+	return value;
 };
 
 const authorizeRootField = async (
 	field: RootField,
 	principal: Principal | null | undefined,
-	dataClient: ReadModelClient
+	dataClient: ReadModelClient,
+	requestScope?: object
 ): Promise<AuthorizationResult> => {
 	if (publicFields.has(field.name)) return { ok: true };
 	if (!protectedFields.has(field.name)) {
@@ -373,11 +405,16 @@ const authorizeRootField = async (
 				message: "User is not a member of this tournament",
 			};
 		}
-		const isMember = await hasTournamentMembership(dataClient, tournamentId, principal.fplEntryId!);
+		const isMember = await hasTournamentMembership(
+			dataClient,
+			tournamentId,
+			principal.fplEntryId!,
+			requestScope
+		);
 		const isRetainedAdmin =
-			field.name === "tournamentParticipants" &&
+			(field.name === "tournamentParticipants" || field.name === "tournamentDetailDesk") &&
 			!isMember &&
-			(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!));
+			(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope));
 		if (!isMember && !isRetainedAdmin) {
 			return {
 				ok: false,
@@ -393,7 +430,23 @@ const authorizeRootField = async (
 		if (
 			!tournamentId ||
 			!hasVerifiedEntry(principal) ||
-			!(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!))
+			!(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope))
+		) {
+			return {
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+				message: "User is not the administrator of this tournament",
+			};
+		}
+	}
+
+	if (field.name === "managedTournamentStatus") {
+		const tournamentId = asPositiveInt(field.args.tournamentId);
+		if (
+			!tournamentId ||
+			!hasVerifiedEntry(principal) ||
+			!(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope))
 		) {
 			return {
 				ok: false,
@@ -427,10 +480,12 @@ const authorizePayload = async ({
 	payload,
 	principal,
 	data,
+	requestScope,
 }: {
 	payload: GraphQLRequestPayload;
 	principal?: Principal | null;
 	data: ReadModelClient;
+	requestScope?: object;
 }): Promise<AuthorizationResult> => {
 	if (typeof payload.query !== "string") return { ok: true };
 
@@ -443,7 +498,7 @@ const authorizePayload = async ({
 	const fields = collectRootFields(operation.selectionSet, getFragments(document), variables);
 
 	for (const field of fields) {
-		const result = await authorizeRootField(field, principal, data);
+		const result = await authorizeRootField(field, principal, data, requestScope);
 		if (!result.ok) return result;
 	}
 
@@ -471,6 +526,7 @@ export const authorizeGraphQLRequest = async (
 				payload,
 				principal: input.principal,
 				data: input.data,
+				requestScope: input.requestScope,
 			});
 			if (!result.ok) return result;
 		} catch (error) {
