@@ -2874,7 +2874,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				: null,
 			setupCompletedUnits: Number(row.setup_completed_units ?? 0),
 			setupTotalUnits: Number(row.setup_total_units ?? 0),
-			standingsReadyAt: row.standings_ready_at ? String(row.standings_ready_at) : null,
+			standingsReadyAt: toNullableIsoDateTime(row.standings_ready_at),
 			setupHasWarnings: Number(row.setup_warning_count ?? 0) > 0,
 			updatedAt,
 		};

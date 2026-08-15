@@ -660,6 +660,37 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 		updated_at: "2026-04-21T00:00:00.000Z",
 	};
 
+	it("normalizes Date-backed managed status timestamps", async () => {
+		const updatedAt = new Date("2026-04-21T00:00:00.000Z");
+		const result = await tournamentsRepository.getManagedTournamentStatus(
+			buildContext({
+				tournamentData: [
+					{
+						id: 1,
+						admin_entry_id: 15702,
+						state: "active",
+						setup_status: "ready",
+						setup_phase: "ready",
+						roster_sync_status: null,
+						setup_completed_units: 1,
+						setup_total_units: 1,
+						standings_ready_at: updatedAt,
+						setup_warning_count: 0,
+						updated_at: updatedAt,
+					},
+				],
+			}),
+			1,
+			15702
+		);
+
+		expect(result).toMatchObject({
+			revision: "2026-04-21T00:00:00.000Z",
+			standingsReadyAt: "2026-04-21T00:00:00.000Z",
+			updatedAt: "2026-04-21T00:00:00.000Z",
+		});
+	});
+
 	it("returns cached results when available", async () => {
 		const cached = [
 			{
