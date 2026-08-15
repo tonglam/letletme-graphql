@@ -84,34 +84,42 @@ const fragmentsFor = (document: DocumentNode): Map<string, FragmentDefinitionNod
 			.map((fragment) => [fragment.name.value, fragment])
 	);
 
-const rootFieldNames = (
+type EffectiveRootField = {
+	name: string;
+	responseKey: string;
+};
+
+const effectiveRootFieldsFor = (
 	operation: OperationDefinitionNode,
 	fragments: Map<string, FragmentDefinitionNode>
-): string[] => {
-	const names: string[] = [];
-	const seenFragments = new Set<string>();
+): { fields: EffectiveRootField[]; reachableFragments: Set<string> } => {
+	const fields: EffectiveRootField[] = [];
+	const reachableFragments = new Set<string>();
 	const collect = (selectionSet: SelectionSetNode): void => {
 		for (const selection of selectionSet.selections) {
 			if (selection.kind === Kind.FIELD) {
-				names.push(selection.name.value);
+				fields.push({
+					name: selection.name.value,
+					responseKey: selection.alias?.value ?? selection.name.value,
+				});
 				continue;
 			}
 			if (selection.kind === Kind.INLINE_FRAGMENT) {
 				collect(selection.selectionSet);
 				continue;
 			}
-			if (seenFragments.has(selection.name.value)) {
+			if (reachableFragments.has(selection.name.value)) {
 				continue;
 			}
 			const fragment = fragments.get(selection.name.value);
 			if (fragment) {
-				seenFragments.add(selection.name.value);
+				reachableFragments.add(selection.name.value);
 				collect(fragment.selectionSet);
 			}
 		}
 	};
 	collect(operation.selectionSet);
-	return names;
+	return { fields, reachableFragments };
 };
 
 const asCompositeType = (
@@ -450,9 +458,29 @@ export const validateGraphQLPayloadLimits = (
 		document,
 		typeof payload.operationName === "string" ? payload.operationName : null
 	);
-	const rootNames = operation ? rootFieldNames(operation, fragmentsFor(document)) : [];
+	const fragments = fragmentsFor(document);
+	const rootInspection = operation
+		? effectiveRootFieldsFor(operation, fragments)
+		: { fields: [], reachableFragments: new Set<string>() };
+	const rootNames = rootInspection.fields;
+	const onlyReachableDefinitions =
+		operation !== null &&
+		document.definitions.every((definition) =>
+			definition.kind === Kind.OPERATION_DEFINITION
+				? definition === operation
+				: definition.kind === Kind.FRAGMENT_DEFINITION
+					? rootInspection.reachableFragments.has(definition.name.value)
+					: false
+		);
+	const responseKeys = new Set(rootNames.map((field) => field.responseKey));
 	const usesTournamentDetailDesk =
-		rootNames.length === 1 && rootNames[0] === "tournamentDetailDesk";
+		onlyReachableDefinitions &&
+		responseKeys.size === 1 &&
+		rootNames.length > 0 &&
+		rootNames.every(
+			(field) =>
+				field.name === "tournamentDetailDesk" && field.responseKey === "tournamentDetailDesk"
+		);
 	const maxAstNodes = usesTournamentDetailDesk
 		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
 		: GRAPHQL_LIMITS.maxAstNodes;
