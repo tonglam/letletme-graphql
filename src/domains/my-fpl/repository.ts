@@ -1014,6 +1014,23 @@ const loadTeamTransfers = async (context: GraphQLContext): Promise<MyFplTeamTran
 	) {
 		return { state: "PENDING", context: loadedContext.value, gameweeks: [] };
 	}
+	const expectedTransferEventIds = [...loadedContext.finalizedEventIds].filter(
+		(finalizedEventId) => finalizedEventId >= entry.startedEvent!
+	);
+	if (expectedTransferEventIds.length > 0) {
+		const enrichment = await context.database.query<{ enriched_event_count: number | string }>(
+			`SELECT count(DISTINCT event_id)::integer AS enriched_event_count
+			 FROM competition.entry_event_results
+			 WHERE season_id = $1
+			   AND entry_id = $2
+			   AND event_id = ANY($3::integer[])
+			   AND rich_synced_at IS NOT NULL`,
+			[context.currentSeason.seasonId, entryId, expectedTransferEventIds]
+		);
+		if (Number(enrichment.rows[0]?.enriched_event_count ?? 0) < expectedTransferEventIds.length) {
+			return { state: "PENDING", context: loadedContext.value, gameweeks: [] };
+		}
+	}
 	const cacheKey = gqlCacheKey(context, `my-fpl:${PROJECTION_VERSION}:team-transfers:${entryId}`);
 	const cached = await readCache(
 		context,

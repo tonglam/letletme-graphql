@@ -134,6 +134,8 @@ describe("My FPL review repository", () => {
 		expect(source).toContain("historical_team_in");
 		expect(source).toContain("COALESCE(historical_team_in.team_id, player_in.team_id)");
 		expect(source).toContain("transfers_synced_through_event_id");
+		expect(source).toContain("expectedTransferEventIds");
+		expect(source).toContain("enriched_event_count");
 		expect(source).toContain(
 			'return { state: "PENDING", context: loadedContext.value, gameweeks: [] }'
 		);
