@@ -27,6 +27,8 @@ export type GraphQLContext = {
 	requestTiming?: RequestTiming;
 	/** Stable identity shared by Apollo's shallow context clone for request-local memoization. */
 	requestScope?: object;
+	/** Tournament memberships freshly proven before resolver/cache access in this request. */
+	authorizedTournamentMemberships?: Set<number>;
 	/** Whether the latest Core snapshot lookup reused the request-pinned promise. */
 	coreSnapshotMemoStatus?: "hit" | "miss";
 	/** Whether this request acquired the full Core publication. */

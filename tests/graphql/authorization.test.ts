@@ -119,6 +119,93 @@ describe("authorizeGraphQLRequest", () => {
 		).toEqual({ ok: true });
 	});
 
+	it("derives My FPL Team identity exclusively from a verified principal", async () => {
+		for (const query of [
+			`query { myFplTeamDesk { state } }`,
+			`query { myFplTeamGameweek(eventId: 1) { state } }`,
+			`query { myFplTeamTransfers { state } }`,
+		]) {
+			expect(await authorize(query)).toMatchObject({
+				ok: false,
+				status: 401,
+				code: "UNAUTHENTICATED",
+			});
+			expect(await authorize(query, undefined, unverifiedWebsitePrincipal)).toMatchObject({
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+			});
+			expect(await authorize(query, undefined, websitePrincipal)).toEqual({ ok: true });
+		}
+	});
+
+	it("allows the My FPL competitions desk without a selected tournament", async () => {
+		for (const variables of [{}, { tournamentId: null }]) {
+			const result = await authorize(
+				`query Desk($tournamentId: Int) {
+					myFplCompetitionsDesk(tournamentId: $tournamentId) { state }
+				}`,
+				variables,
+				websitePrincipal
+			);
+			expect(result).toEqual({ ok: true });
+		}
+	});
+
+	it("checks My FPL tournament membership before protected competition reads", async () => {
+		for (const field of [
+			"myFplCompetitionsDesk(tournamentId: $tournamentId)",
+			"myFplCompetitionBoard(tournamentId: $tournamentId, eventId: 1)",
+			"myFplCompetitionSeasonPath(tournamentId: $tournamentId, throughEventId: 1)",
+			"myFplCompetitionSetupStatus(tournamentId: $tournamentId)",
+		]) {
+			const query = `query Read($tournamentId: Int!) { ${field} { __typename } }`;
+			expect(await authorize(query, { tournamentId: 7 }, websitePrincipal)).toEqual({
+				ok: true,
+			});
+			expect(await authorize(query, { tournamentId: 9 }, websitePrincipal)).toMatchObject({
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+			});
+		}
+	});
+
+	it("reuses a freshly proven tournament membership across protected roots", async () => {
+		let membershipReads = 0;
+		const countedData = {
+			read: () => {
+				const chain = {
+					select: () => chain,
+					eq: () => chain,
+					limit: async () => {
+						membershipReads += 1;
+						return { data: [{ entry_id: 123 }], error: null };
+					},
+				};
+				return chain;
+			},
+		} as never;
+		const authorizedTournamentMemberships = new Set<number>();
+		const result = await authorizeGraphQLRequest({
+			body: {
+				query: `query Read($tournamentId: Int!) {
+					myFplCompetitionBoard(tournamentId: $tournamentId, eventId: 1) { state }
+					myFplCompetitionSeasonPath(tournamentId: $tournamentId, throughEventId: 1) { state }
+				}`,
+				variables: { tournamentId: 7 },
+			},
+			searchParams: new URLSearchParams(),
+			principal: websitePrincipal,
+			data: countedData,
+			logger,
+			authorizedTournamentMemberships,
+		});
+		expect(result).toEqual({ ok: true });
+		expect(membershipReads).toBe(1);
+		expect(authorizedTournamentMemberships.has(7)).toBe(true);
+	});
+
 	it("allows own-entry fields for a matching bound entry", async () => {
 		const result = await authorize(
 			`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,

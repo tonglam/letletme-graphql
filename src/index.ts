@@ -430,6 +430,7 @@ const startServer = async (): Promise<void> => {
 					const currentSeason = currentSeasonProvider.get();
 					const data = new ReadModelClient(database, currentSeason);
 					const requestScope = {};
+					const authorizedTournamentMemberships = new Set<number>();
 					const authorization = await requestTiming.measure("authorization", () =>
 						authorizeGraphQLRequest({
 							body: parsedBody,
@@ -438,6 +439,7 @@ const startServer = async (): Promise<void> => {
 							data,
 							logger,
 							requestScope,
+							authorizedTournamentMemberships,
 						})
 					);
 					if (!authorization.ok) {
@@ -457,6 +459,7 @@ const startServer = async (): Promise<void> => {
 						operationName,
 						requestTiming,
 						requestScope,
+						authorizedTournamentMemberships,
 						principal: principal ?? undefined,
 						user: user ?? undefined,
 					};
@@ -490,6 +493,13 @@ const startServer = async (): Promise<void> => {
 						"tournamentDetailDesk",
 						"entryOfficialH2HDesk",
 						"managedTournamentStatus",
+						"myFplTeamDesk",
+						"myFplTeamGameweek",
+						"myFplTeamTransfers",
+						"myFplCompetitionsDesk",
+						"myFplCompetitionBoard",
+						"myFplCompetitionSeasonPath",
+						"myFplCompetitionSetupStatus",
 					]);
 					const lightweightCoreRead =
 						limits.shape === "query" &&

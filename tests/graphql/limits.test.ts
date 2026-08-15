@@ -119,6 +119,57 @@ describe("GraphQL request limits", () => {
 		).toMatchObject({ ok: true, rootFields: ["homeMarketPulse"], rateLimitCostUnits: 5 });
 	});
 
+	it("charges bounded My FPL review desks and detail reads", () => {
+		for (const query of [
+			"query { myFplTeamDesk { state } }",
+			"query { myFplTeamGameweek(eventId: 1) { state } }",
+			"query { myFplTeamTransfers { state } }",
+			"query { myFplCompetitionSeasonPath(tournamentId: 1, throughEventId: 1) { state } }",
+			"query { myFplCompetitionSetupStatus(tournamentId: 1) { ready } }",
+		]) {
+			expect(validateGraphQLRequestLimits({ query }, schema)).toMatchObject({
+				ok: true,
+				rateLimitCostUnits: 5,
+			});
+		}
+
+		for (const query of [
+			"query { myFplCompetitionsDesk { state } }",
+			"query { myFplCompetitionBoard(tournamentId: 1, eventId: 1) { state } }",
+		]) {
+			expect(validateGraphQLRequestLimits({ query }, schema)).toMatchObject({
+				ok: true,
+				rateLimitCostUnits: 10,
+			});
+		}
+	});
+
+	it("allows one bounded competitions desk projection above the generic AST ceiling", () => {
+		const fields = Array.from({ length: 110 }, () => "__typename").join(" ");
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: `query { myFplCompetitionsDesk { ${fields} } }` },
+				schema
+			)
+		).toMatchObject({
+			ok: true,
+			rootFields: ["myFplCompetitionsDesk"],
+			rateLimitCostUnits: 10,
+		});
+
+		expect(
+			validateGraphQLRequestLimits({ query: `query { events { ${fields} } }` }, schema)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+
+		const oversized = Array.from({ length: 205 }, () => "__typename").join(" ");
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: `query { myFplCompetitionsDesk { ${oversized} } }` },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+	});
+
 	it("allows standard introspection where Apollo has enabled it", () => {
 		const result = validateGraphQLRequestLimits({ query: getIntrospectionQuery() }, schema);
 		expect(result).toMatchObject({
