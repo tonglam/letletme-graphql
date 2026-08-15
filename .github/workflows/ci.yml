@@ -297,6 +297,9 @@ jobs:
       - name: Validate startup against the real PG15 catalog
         run: bun run contract:check
 
+      - name: Validate isolated Redis clients
+        run: bun run redis:check
+
       - name: Exercise reader, resolver, and fail-closed contract cases
         env:
           RUN_DATABASE_CONTRACT_INTEGRATION: "1"

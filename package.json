@@ -9,6 +9,7 @@
 		"test": "bun test",
 		"test:watch": "bun test --watch src",
 		"contract:check": "bun scripts/check-database-contract.ts",
+		"redis:check": "bun scripts/check-redis-connectivity.ts",
 		"seed:mini-program-notice": "bun scripts/seed-mini-program-notice-redis.ts",
 		"lint": "eslint src tests scripts",
 		"lint:fix": "eslint src tests scripts --fix",

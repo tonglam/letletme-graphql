@@ -31,6 +31,19 @@ describe("production deployment workflow", () => {
 		expect(workflow).not.toContain("/home/workspace/.letletme-graphql-previous-image");
 	});
 
+	test("checks both Redis clients with the candidate environment before stopping production", () => {
+		const redisPreflightAt = workflow.indexOf("start_stage redisPreflight");
+		const redisCheckAt = workflow.indexOf("bun run redis:check");
+		const rollbackAt = workflow.indexOf("rollback_armed=true");
+		const stopAt = workflow.indexOf("docker compose stop -t 30 graphql");
+
+		expect(workflow).toContain("docker compose run --rm -T --no-deps graphql bun run redis:check");
+		expect(redisPreflightAt).toBeGreaterThan(-1);
+		expect(redisCheckAt).toBeGreaterThan(redisPreflightAt);
+		expect(rollbackAt).toBeGreaterThan(redisCheckAt);
+		expect(stopAt).toBeGreaterThan(redisCheckAt);
+	});
+
 	test("requires both ingress rejection and authenticated business queries", () => {
 		expect(workflow).toContain("test \"$anonymous_status\" = '401'");
 		expect(workflow).toContain('"X-GraphQL-Service-Token": token');
@@ -69,6 +82,7 @@ describe("production deployment workflow", () => {
 			"envValidate",
 			"pull",
 			"preflight",
+			"redisPreflight",
 			"replace",
 			"serviceReady",
 			"smoke",
