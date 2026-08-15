@@ -451,7 +451,7 @@ type DbSetupStatusRow = QueryResultRow & {
 	setup_warning_count?: number | null;
 };
 
-const PROJECTION_VERSION = "v3";
+const PROJECTION_VERSION = "v4";
 const NULLABLE_STATE_CACHE_TTL_SECONDS = 30;
 // Aggregate metrics are intentionally bounded in application memory. The
 // paginated board remains available for larger tournaments, while this
@@ -648,6 +648,7 @@ const loadTeamHistory = async (
 		        result.event_transfers_cost, result.event_net_points,
 		        result.event_bench_points, result.event_chip::text,
 		        result.captain_points, player.web_name AS captain_web_name,
+		        team.short_name AS captain_team_short_name,
 		        result.team_value, result.bank
 		 FROM competition.entry_event_results result
 		 JOIN fpl.events event
@@ -878,11 +879,11 @@ const loadTeamGameweekPrepared = async (
 
 	const rows = await loadTeamGameweekRows(context, entryId, eventId);
 	if (rows.length === 0) {
-		return { ...base, state: "UNAVAILABLE", result: null };
+		return { ...base, state: "PENDING", result: null };
 	}
 	const picks = rows.map(mapGameweekPick).filter((pick): pick is MyFplTeamPick => pick !== null);
 	if (picks.length !== 15) {
-		return { ...base, state: "UNAVAILABLE", result: null };
+		return { ...base, state: "PENDING", result: null };
 	}
 	const first = rows[0];
 	const payload: MyFplTeamGameweek = {
@@ -1358,7 +1359,7 @@ const loadCompetitionBoardPrepared = async (
 	);
 	const parsed = parseBoardPayload(result.rows[0]?.payload);
 	const state: MyFplReviewState =
-		parsed.fieldSize > 0 && parsed.viewerRow !== null ? "READY" : "UNAVAILABLE";
+		parsed.fieldSize > 0 && parsed.viewerRow !== null ? "READY" : "PENDING";
 	const payload: MyFplCompetitionBoardPage = {
 		state,
 		eventId,
@@ -1371,12 +1372,7 @@ const loadCompetitionBoardPrepared = async (
 		viewerRow: parsed.viewerRow,
 	};
 	if (cacheableState(state)) {
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(payload),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(state));
 	}
 	return payload;
 };
@@ -1785,12 +1781,7 @@ const loadCompetitionSeasonPath = async (
 		points,
 	};
 	if (cacheableState(payload.state)) {
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(payload),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(payload.state));
 	}
 	return payload;
 };

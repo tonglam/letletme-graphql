@@ -188,5 +188,9 @@ describe("My FPL review repository", () => {
 		expect(source).toContain('setupPhase: (row.setup_phase ?? "queued").toUpperCase()');
 		expect(source).toContain("row.setup_completed_units ?? 0");
 		expect(source).toContain("row.setup_warning_count ?? 0");
+		expect(source).toContain("team.short_name AS captain_team_short_name");
+		expect(source).toContain('return { ...base, state: "PENDING", result: null }');
+		expect(source).toContain('state: hasRequestedEvent ? "READY" : "PENDING"');
+		expect(source).toContain("stateTtl(payload.state)");
 	});
 });
