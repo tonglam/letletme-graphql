@@ -421,8 +421,7 @@ export const validateGraphQLPayloadLimits = (
 		typeof payload.operationName === "string" ? payload.operationName : null
 	);
 	const usesTournamentDetailDesk = operation?.selectionSet.selections.some(
-		(selection) =>
-			selection.kind === Kind.FIELD && selection.name.value === "tournamentDetailDesk"
+		(selection) => selection.kind === Kind.FIELD && selection.name.value === "tournamentDetailDesk"
 	);
 	const maxAstNodes = usesTournamentDetailDesk
 		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
