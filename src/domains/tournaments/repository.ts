@@ -199,6 +199,8 @@ export type ManagedTournamentStatus = {
 	updatedAt: string;
 };
 
+type DbDateTime = string | Date;
+
 export type DbTournamentInfoRow = {
 	id: number;
 	name: string;
@@ -209,10 +211,10 @@ export type DbTournamentInfoRow = {
 	source_league_name?: string | null;
 	roster_mode?: string;
 	roster_sync_status?: string | null;
-	roster_last_synced_at?: string | null;
+	roster_last_synced_at?: DbDateTime | null;
 	official_schedule_hash?: string | null;
-	official_schedule_synced_at?: string | null;
-	official_schedule_locked_at?: string | null;
+	official_schedule_synced_at?: DbDateTime | null;
+	official_schedule_locked_at?: DbDateTime | null;
 	total_team_num: number;
 	tournament_mode: string;
 	group_mode: string | null;
@@ -236,13 +238,13 @@ export type DbTournamentInfoRow = {
 	setup_phase?: string;
 	setup_completed_units?: number;
 	setup_total_units?: number;
-	setup_progress_updated_at?: string | null;
-	standings_ready_at?: string | null;
+	setup_progress_updated_at?: DbDateTime | null;
+	standings_ready_at?: DbDateTime | null;
 	setup_warning_count?: number;
-	setup_started_at?: string | null;
-	setup_finished_at?: string | null;
-	created_at: string;
-	updated_at: string;
+	setup_started_at?: DbDateTime | null;
+	setup_finished_at?: DbDateTime | null;
+	created_at: DbDateTime;
+	updated_at: DbDateTime;
 };
 
 export type TournamentEventResult = {
@@ -388,8 +390,8 @@ export type DbTournamentEventResultRow = {
 	_tournament_knockout_ended_event_id: number | null;
 	_tournament_knockout_play_against_num: number | null;
 	_tournament_state: string;
-	_tournament_created_at: string;
-	_tournament_updated_at: string;
+	_tournament_created_at: DbDateTime;
+	_tournament_updated_at: DbDateTime;
 };
 
 export type DbLeagueEventResultEnrichmentRow = {
@@ -1112,6 +1114,26 @@ const mapTournamentRosterMode = (mode: string | null | undefined): TournamentRos
 		? TournamentRosterMode.OFFICIAL_SYNC
 		: TournamentRosterMode.SNAPSHOT;
 
+/**
+ * The Data client may decode PostgreSQL timestamptz columns as Date objects,
+ * while the GraphQL DateTime scalar only accepts an ISO-8601 string. Keep the
+ * conversion at the repository boundary so every tournament read has the same
+ * wire representation (and never leaks Date#toString()).
+ */
+const toIsoDateTime = (value: unknown): string => {
+	if (value === null || value === undefined || value === "") {
+		throw new Error("Tournament date-time is missing");
+	}
+	const date = value instanceof Date ? value : new Date(String(value));
+	if (Number.isNaN(date.getTime())) {
+		throw new Error(`Invalid tournament date-time: ${String(value)}`);
+	}
+	return date.toISOString();
+};
+
+const toNullableIsoDateTime = (value: unknown): string | null =>
+	value === null || value === undefined || value === "" ? null : toIsoDateTime(value);
+
 export const extractTournamentIds = (rows: DbTournamentEntryRow[]): number[] => {
 	const unique = new Set<number>();
 	rows.forEach((row) => {
@@ -1132,10 +1154,10 @@ export const mapTournamentInfo = (row: DbTournamentInfoRow): TournamentInfo => (
 	rosterSyncStatus: row.roster_sync_status
 		? mapTournamentSetupStatus(row.roster_sync_status)
 		: null,
-	rosterLastSyncedAt: row.roster_last_synced_at ?? null,
+	rosterLastSyncedAt: toNullableIsoDateTime(row.roster_last_synced_at),
 	officialScheduleHash: row.official_schedule_hash ?? null,
-	officialScheduleSyncedAt: row.official_schedule_synced_at ?? null,
-	officialScheduleLockedAt: row.official_schedule_locked_at ?? null,
+	officialScheduleSyncedAt: toNullableIsoDateTime(row.official_schedule_synced_at),
+	officialScheduleLockedAt: toNullableIsoDateTime(row.official_schedule_locked_at),
 	totalTeamNum: row.total_team_num,
 	tournamentMode: mapTournamentMode(row.tournament_mode),
 	groupMode: mapGroupMode(row.group_mode),
@@ -1159,13 +1181,13 @@ export const mapTournamentInfo = (row: DbTournamentInfoRow): TournamentInfo => (
 	setupPhase: mapTournamentSetupPhase(row.setup_phase),
 	setupCompletedUnits: row.setup_completed_units ?? 0,
 	setupTotalUnits: row.setup_total_units ?? 0,
-	setupProgressUpdatedAt: row.setup_progress_updated_at ?? null,
-	standingsReadyAt: row.standings_ready_at ?? null,
+	setupProgressUpdatedAt: toNullableIsoDateTime(row.setup_progress_updated_at),
+	standingsReadyAt: toNullableIsoDateTime(row.standings_ready_at),
 	setupHasWarnings: (row.setup_warning_count ?? 0) > 0,
-	setupStartedAt: row.setup_started_at ?? null,
-	setupFinishedAt: row.setup_finished_at ?? null,
-	createdAt: row.created_at,
-	updatedAt: row.updated_at,
+	setupStartedAt: toNullableIsoDateTime(row.setup_started_at),
+	setupFinishedAt: toNullableIsoDateTime(row.setup_finished_at),
+	createdAt: toIsoDateTime(row.created_at),
+	updatedAt: toIsoDateTime(row.updated_at),
 });
 
 export const mapTournamentEventResult = (
@@ -1232,12 +1254,12 @@ export const mapTournamentInfoFromViewRow = (row: DbTournamentEventResultRow): T
 	setupCompletedUnits: 0,
 	setupTotalUnits: 0,
 	setupProgressUpdatedAt: null,
-	standingsReadyAt: row._tournament_updated_at,
+	standingsReadyAt: toIsoDateTime(row._tournament_updated_at),
 	setupHasWarnings: false,
 	setupStartedAt: null,
-	setupFinishedAt: row._tournament_updated_at,
-	createdAt: row._tournament_created_at,
-	updatedAt: row._tournament_updated_at,
+	setupFinishedAt: toIsoDateTime(row._tournament_updated_at),
+	createdAt: toIsoDateTime(row._tournament_created_at),
+	updatedAt: toIsoDateTime(row._tournament_updated_at),
 });
 
 export const mapTournamentEventResultFromView = (
@@ -2835,8 +2857,9 @@ export const tournamentsRepository: TournamentsRepository = {
 		const row = tournament.data?.[0] as Record<string, unknown> | undefined;
 		if (!row) return null;
 		const setupStatus = String(row.setup_status) as TournamentSetupStatus;
+		const updatedAt = toIsoDateTime(row.updated_at);
 		return {
-			revision: String(row.updated_at ?? "postgres"),
+			revision: updatedAt,
 			state: String(row.state) as TournamentState,
 			setupStatus,
 			setupPhase: String(
@@ -2851,7 +2874,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			setupCompletedUnits: Number(row.setup_completed_units ?? 0),
 			setupTotalUnits: Number(row.setup_total_units ?? 0),
 			setupHasWarnings: Number(row.setup_warning_count ?? 0) > 0,
-			updatedAt: String(row.updated_at),
+			updatedAt,
 		};
 	},
 };

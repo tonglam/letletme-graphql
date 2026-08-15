@@ -172,6 +172,47 @@ describe("extractTournamentIds", () => {
 });
 
 describe("mapTournamentInfo", () => {
+	it("normalizes database Date values to GraphQL-safe ISO strings", () => {
+		const updatedAt = new Date("2026-04-21T00:00:00.000Z");
+		const row: DbTournamentInfoRow = {
+			id: 11,
+			name: "Date-backed League",
+			creator: "alice",
+			admin_entry_id: 1001,
+			league_id: 999,
+			league_type: "classic",
+			total_team_num: 2,
+			tournament_mode: "normal",
+			group_mode: null,
+			group_team_num: null,
+			group_num: null,
+			group_started_event_id: null,
+			group_ended_event_id: null,
+			group_auto_averages: false,
+			group_rounds: null,
+			group_play_against_num: null,
+			group_qualify_num: null,
+			knockout_mode: null,
+			knockout_team_num: null,
+			knockout_rounds: null,
+			knockout_event_num: null,
+			knockout_started_event_id: null,
+			knockout_ended_event_id: null,
+			knockout_play_against_num: null,
+			state: "active",
+			setup_status: "ready",
+			setup_phase: "ready",
+			standings_ready_at: updatedAt,
+			created_at: updatedAt,
+			updated_at: updatedAt,
+		} as DbTournamentInfoRow;
+
+		const result = mapTournamentInfo(row);
+		expect(result.standingsReadyAt).toBe("2026-04-21T00:00:00.000Z");
+		expect(result.createdAt).toBe("2026-04-21T00:00:00.000Z");
+		expect(result.updatedAt).toBe("2026-04-21T00:00:00.000Z");
+	});
+
 	it("maps a tournament info row to domain model", () => {
 		const row: DbTournamentInfoRow = {
 			id: 11,
