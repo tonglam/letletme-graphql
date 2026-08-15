@@ -84,6 +84,36 @@ const fragmentsFor = (document: DocumentNode): Map<string, FragmentDefinitionNod
 			.map((fragment) => [fragment.name.value, fragment])
 	);
 
+const rootFieldNames = (
+	operation: OperationDefinitionNode,
+	fragments: Map<string, FragmentDefinitionNode>
+): string[] => {
+	const names: string[] = [];
+	const seenFragments = new Set<string>();
+	const collect = (selectionSet: SelectionSetNode): void => {
+		for (const selection of selectionSet.selections) {
+			if (selection.kind === Kind.FIELD) {
+				names.push(selection.name.value);
+				continue;
+			}
+			if (selection.kind === Kind.INLINE_FRAGMENT) {
+				collect(selection.selectionSet);
+				continue;
+			}
+			if (seenFragments.has(selection.name.value)) {
+				continue;
+			}
+			const fragment = fragments.get(selection.name.value);
+			if (fragment) {
+				seenFragments.add(selection.name.value);
+				collect(fragment.selectionSet);
+			}
+		}
+	};
+	collect(operation.selectionSet);
+	return names;
+};
+
 const asCompositeType = (
 	value: GraphQLNamedType | null | undefined
 ): GraphQLCompositeType | null =>
@@ -420,9 +450,9 @@ export const validateGraphQLPayloadLimits = (
 		document,
 		typeof payload.operationName === "string" ? payload.operationName : null
 	);
-	const usesTournamentDetailDesk = operation?.selectionSet.selections.some(
-		(selection) => selection.kind === Kind.FIELD && selection.name.value === "tournamentDetailDesk"
-	);
+	const rootNames = operation ? rootFieldNames(operation, fragmentsFor(document)) : [];
+	const usesTournamentDetailDesk =
+		rootNames.length === 1 && rootNames[0] === "tournamentDetailDesk";
 	const maxAstNodes = usesTournamentDetailDesk
 		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
 		: GRAPHQL_LIMITS.maxAstNodes;

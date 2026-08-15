@@ -35,6 +35,26 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("only grants the desk AST cap to the sole effective root", () => {
+		const fields = Array.from({ length: 220 }, () => "kind").join(" ");
+		const mixed = validateGraphQLRequestLimits({
+			query: `query { tournamentDetailDesk(tournamentId: 1, entryId: 1) { ${fields} } events { id } }`,
+		});
+		expect(mixed).toEqual({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL document exceeds 200 AST nodes",
+		});
+	});
+
+	it("recognizes a desk root selected through a fragment", () => {
+		const fields = Array.from({ length: 100 }, () => "kind").join(" ");
+		const result = validateGraphQLRequestLimits({
+			query: `query { ...DeskRoot } fragment DeskRoot on Query { tournamentDetailDesk(tournamentId: 1, entryId: 1) { ${fields} } }`,
+		});
+		expect(result).toMatchObject({ ok: true, rootFields: ["tournamentDetailDesk"] });
+	});
+
 	it("charges one bounded gameweek desk root instead of separate live roots", () => {
 		const result = validateGraphQLRequestLimits({
 			query: "query { gameweekDesk(eventId: 1) { eventId dreamTeam { id } hauls { id } } }",
