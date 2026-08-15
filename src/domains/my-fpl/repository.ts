@@ -36,6 +36,7 @@ export type MyFplEntryIdentity = {
 	bank: number | null;
 	teamValue: number | null;
 	totalTransfers: number | null;
+	transfersSyncedThroughEventId: number | null;
 };
 
 export type MyFplTeamHistoryRow = {
@@ -300,6 +301,7 @@ type DbEntryRow = QueryResultRow & {
 	bank: number | null;
 	team_value: number | null;
 	total_transfers: number | null;
+	transfers_synced_through_event_id: number | null;
 };
 
 type DbHistoryRow = QueryResultRow & {
@@ -423,6 +425,10 @@ type DbAggregateRow = QueryResultRow & {
 	tournament_rank: number | string | null;
 };
 
+type DbAggregateFieldCountRow = QueryResultRow & {
+	field_size: number;
+};
+
 type DbSeasonPathRow = QueryResultRow & {
 	event_id: number;
 	tournament_rank: number | string | null;
@@ -444,8 +450,12 @@ type DbSetupStatusRow = QueryResultRow & {
 	setup_warning_count: number;
 };
 
-const PROJECTION_VERSION = "v1";
+const PROJECTION_VERSION = "v2";
 const NULLABLE_STATE_CACHE_TTL_SECONDS = 30;
+// Aggregate metrics are intentionally bounded in application memory. The
+// paginated board remains available for larger tournaments, while this
+// summary returns null rather than materializing an unbounded field.
+const MAX_AGGREGATE_FIELD_SIZE = 5000;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -599,7 +609,8 @@ const loadEntry = async (
 ): Promise<MyFplEntryIdentity | null> => {
 	const result = await context.database.query<DbEntryRow>(
 		`SELECT entry_id, entry_name, player_name, region, started_event,
-		        overall_points, overall_rank, bank, team_value, total_transfers
+			        overall_points, overall_rank, bank, team_value, total_transfers,
+			        transfers_synced_through_event_id
 		 FROM competition.entries
 		 WHERE season_id = $1 AND entry_id = $2
 		 LIMIT 1`,
@@ -618,6 +629,7 @@ const loadEntry = async (
 				bank: row.bank,
 				teamValue: row.team_value,
 				totalTransfers: row.total_transfers,
+				transfersSyncedThroughEventId: row.transfers_synced_through_event_id,
 			}
 		: null;
 };
@@ -728,7 +740,10 @@ const mapGameweekPick = (row: DbGameweekRow): MyFplTeamPick | null => {
 		wasHome: row.was_home ?? "",
 		score: row.score ?? "",
 		isPlayed: minutes > 0 || yellowCards > 0 || redCards > 0,
-		autoSub: row.position > 11 && (row.multiplier ?? 0) > 0,
+		autoSub:
+			row.position > 11 &&
+			(row.multiplier ?? 0) > 0 &&
+			normalizeChip(row.event_chip) !== "BENCH_BOOST",
 		expectedGoals: asFiniteNumber(row.expected_goals),
 		expectedAssists: asFiniteNumber(row.expected_assists),
 		expectedGoalInvolvements: asFiniteNumber(row.expected_goal_involvements),
@@ -767,9 +782,18 @@ const loadTeamGameweekRows = async (
 		 LEFT JOIN fpl.players player
 		   ON player.season_id = pick.season_id
 		  AND player.element_id = pick.element_id
+		 LEFT JOIN LATERAL (
+		   SELECT fixture_stats.team_id
+		   FROM fpl.player_fixture_stats fixture_stats
+		   WHERE fixture_stats.season_id = pick.season_id
+		     AND fixture_stats.event_id = pick.event_id
+		     AND fixture_stats.element_id = pick.element_id
+		   ORDER BY fixture_stats.fixture_id
+		   LIMIT 1
+		 ) historical_team ON TRUE
 		 LEFT JOIN fpl.teams team
 		   ON team.season_id = player.season_id
-		  AND team.team_id = player.team_id
+		  AND team.team_id = COALESCE(historical_team.team_id, player.team_id)
 		 LEFT JOIN fpl.player_gameweek_stats stats
 		   ON stats.season_id = pick.season_id
 		  AND stats.event_id = pick.event_id
@@ -777,11 +801,11 @@ const loadTeamGameweekRows = async (
 		 LEFT JOIN LATERAL (
 		   SELECT
 		     string_agg(opponent.short_name, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS against_short_name,
-		     string_agg(CASE WHEN match.team_h_id = player.team_id THEN 'H' ELSE 'A' END, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS was_home,
+		     string_agg(CASE WHEN match.team_h_id = COALESCE(historical_team.team_id, player.team_id) THEN 'H' ELSE 'A' END, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS was_home,
 		     string_agg(
 		       CASE
 		         WHEN match.team_h_score IS NULL OR match.team_a_score IS NULL THEN ''
-		         WHEN match.team_h_id = player.team_id THEN match.team_h_score || '-' || match.team_a_score
+		         WHEN match.team_h_id = COALESCE(historical_team.team_id, player.team_id) THEN match.team_h_score || '-' || match.team_a_score
 		         ELSE match.team_a_score || '-' || match.team_h_score
 		       END,
 		       ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id
@@ -795,7 +819,7 @@ const loadTeamGameweekRows = async (
 		    END
 		   WHERE match.season_id = result.season_id
 		     AND match.event_id = result.event_id
-		     AND player.team_id IN (match.team_h_id, match.team_a_id)
+		     AND COALESCE(historical_team.team_id, player.team_id) IN (match.team_h_id, match.team_a_id)
 		 ) fixture ON TRUE
 		 WHERE result.season_id = $1
 		   AND result.entry_id = $2
@@ -953,6 +977,20 @@ const loadTeamTransfers = async (context: GraphQLContext): Promise<MyFplTeamTran
 	const loadedContext = await loadReviewContext(context);
 	if (loadedContext.value.latestFinalizedEventId === null) {
 		return { state: "PRESEASON", context: loadedContext.value, gameweeks: [] };
+	}
+	const entry = await loadEntry(context, entryId);
+	if (!entry) return { state: "EMPTY", context: loadedContext.value, gameweeks: [] };
+	if (
+		entry.startedEvent === null ||
+		entry.startedEvent > loadedContext.value.latestFinalizedEventId
+	) {
+		return { state: "EMPTY", context: loadedContext.value, gameweeks: [] };
+	}
+	if (
+		entry.transfersSyncedThroughEventId === null ||
+		entry.transfersSyncedThroughEventId < loadedContext.value.latestFinalizedEventId
+	) {
+		return { state: "PENDING", context: loadedContext.value, gameweeks: [] };
 	}
 	const cacheKey = gqlCacheKey(context, `my-fpl:${PROJECTION_VERSION}:team-transfers:${entryId}`);
 	const cached = await readCache(
@@ -1330,6 +1368,20 @@ const loadCompetitionAggregate = async (
 	eventId: number,
 	entryId: number
 ): Promise<MyFplCompetitionAggregate | null> => {
+	const fieldCount = await context.database.query<DbAggregateFieldCountRow>(
+		`SELECT count(*)::integer AS field_size
+		 FROM reporting.tournament_entry_event_summaries
+		 WHERE season_id = $1 AND tournament_id = $2 AND event_id = $3`,
+		[context.currentSeason.seasonId, tournamentId, eventId]
+	);
+	const fieldSize = fieldCount.rows[0]?.field_size ?? 0;
+	if (fieldSize > MAX_AGGREGATE_FIELD_SIZE) {
+		context.logger.info(
+			{ tournamentId, eventId, fieldSize, maxFieldSize: MAX_AGGREGATE_FIELD_SIZE },
+			"Skipping My FPL aggregate for oversized tournament"
+		);
+		return null;
+	}
 	const cacheKey = gqlCacheKey(
 		context,
 		`my-fpl:${PROJECTION_VERSION}:competition-aggregate:${tournamentId}:${eventId}:${entryId}`
@@ -1481,14 +1533,15 @@ const loadCompetitionsDesk = async (
 	// Core revision first, then overlap the remaining lifecycle SQL and catalog
 	// read without ever creating an unversioned cache path.
 	await getCoreEventSnapshot(context);
-	const [loadedContext, tournaments] = await Promise.all([
+	const requestedTournamentPromise = tournamentId
+		? tournamentsRepository.getTournamentInfoUncached(context, tournamentId)
+		: Promise.resolve(null);
+	const [loadedContext, tournaments, requestedTournament] = await Promise.all([
 		loadReviewContext(context),
 		tournamentsRepository.getEntryTournaments(context, entryId),
+		requestedTournamentPromise,
 	]);
-	const selectedTournament =
-		(tournamentId
-			? tournaments.find((candidate) => candidate.id === tournamentId)
-			: tournaments[0]) ?? null;
+	const selectedTournament = (tournamentId ? requestedTournament : tournaments[0]) ?? null;
 	if (tournamentId && !selectedTournament) {
 		throw new GraphQLError("User is not a member of this tournament", {
 			extensions: { code: "FORBIDDEN" },
@@ -1575,6 +1628,15 @@ const loadCompetitionSeasonPath = async (
 		throughEventId,
 		points: [],
 	});
+	const tournament = await tournamentsRepository.getTournamentInfoUncached(context, tournamentId);
+	if (!tournament) return empty("UNAVAILABLE");
+	if (
+		tournament.setupStatus !== TournamentSetupStatus.READY ||
+		!tournament.standingsReadyAt ||
+		tournament.setupHasWarnings
+	) {
+		return empty("PENDING");
+	}
 	if (!loadedContext.finalizedEventIds.has(throughEventId)) return empty("PENDING");
 
 	const cacheKey = gqlCacheKey(

@@ -123,4 +123,30 @@ describe("My FPL review repository", () => {
 		expect(source).toContain("WITH field AS MATERIALIZED");
 		expect(source).toContain("points_vs_average");
 	});
+
+	it("keeps historical clubs and durable readiness checkpoints honest", () => {
+		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
+		expect(source).toContain("FROM fpl.player_fixture_stats fixture_stats");
+		expect(source).toContain("COALESCE(historical_team.team_id, player.team_id)");
+		expect(source).toContain("transfers_synced_through_event_id");
+		expect(source).toContain(
+			'return { state: "PENDING", context: loadedContext.value, gameweeks: [] }'
+		);
+		expect(source).toContain("tournament.setupStatus !== TournamentSetupStatus.READY");
+		expect(source).toContain('normalizeChip(row.event_chip) !== "BENCH_BOOST"');
+	});
+
+	it("does not materialize unbounded competition aggregates", () => {
+		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
+		expect(source).toContain("MAX_AGGREGATE_FIELD_SIZE");
+		expect(source).toContain("Skipping My FPL aggregate for oversized tournament");
+		expect(source).toContain("SELECT count(*)::integer AS field_size");
+	});
+
+	it("resolves an explicitly authorized tournament outside the cached catalog", () => {
+		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
+		expect(source).toContain("requestedTournamentPromise");
+		expect(source).toContain("getTournamentInfoUncached(context, tournamentId)");
+		expect(source).toContain("tournamentId ? requestedTournament : tournaments[0]");
+	});
 });
