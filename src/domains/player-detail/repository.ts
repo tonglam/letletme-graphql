@@ -116,7 +116,7 @@ type LatestMarketSnapshot = {
 };
 
 type MarketSnapshotRow = {
-	snapshot_date: string | Date;
+	snapshot_date: string;
 	captured_at: string | Date;
 	selected_by_percent: string | number;
 	transfers_in: number;
@@ -174,8 +174,7 @@ const toIsoTimestamp = (value: string | Date | null): string | null => {
 	return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 };
 
-const toCalendarDate = (value: string | Date): string | null => {
-	if (value instanceof Date) return value.toISOString().slice(0, 10);
+const toCalendarDate = (value: string): string | null => {
 	const match = /^(\d{4}-\d{2}-\d{2})/.exec(value);
 	return match?.[1] ?? null;
 };
