@@ -18,6 +18,23 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rootFields: ["eventFixtures"] });
 	});
 
+	it("allows the bounded tournament detail desk AST projection", () => {
+		const fields = Array.from({ length: 100 }, () => "kind").join(" ");
+		const desk = validateGraphQLRequestLimits({
+			query: `query { tournamentDetailDesk(tournamentId: 1, entryId: 1) { ${fields} } }`,
+		});
+		expect(desk).toMatchObject({ ok: true, rootFields: ["tournamentDetailDesk"] });
+
+		const ordinary = validateGraphQLRequestLimits({
+			query: `query { events { ${fields} } }`,
+		});
+		expect(ordinary).toEqual({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL document exceeds 200 AST nodes",
+		});
+	});
+
 	it("charges one bounded gameweek desk root instead of separate live roots", () => {
 		const result = validateGraphQLRequestLimits({
 			query: "query { gameweekDesk(eventId: 1) { eventId dreamTeam { id } hauls { id } } }",

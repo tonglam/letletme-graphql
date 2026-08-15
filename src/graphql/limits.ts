@@ -25,6 +25,12 @@ export const GRAPHQL_LIMITS = {
 	maxComplexity: 600,
 } as const;
 
+// The detail desk intentionally projects both the setup/live and official-H2H
+// branches in one response so the Web route can keep a single request. Keep the
+// general document cap strict, but give this one bounded root enough AST room
+// without relaxing depth, alias, root-field, or weighted-complexity guards.
+const TOURNAMENT_DETAIL_DESK_MAX_AST_NODES = 400;
+
 const MAX_LIST_ARGUMENT_WEIGHT = 200;
 
 type GraphQLPayload = {
@@ -410,16 +416,23 @@ export const validateGraphQLPayloadLimits = (
 		return accepted({ shape: "unknown" });
 	}
 
-	let astNodes = 0;
-	visit(document, { enter: () => void (astNodes += 1) });
-	if (astNodes > GRAPHQL_LIMITS.maxAstNodes) {
-		return reject(`GraphQL document exceeds ${GRAPHQL_LIMITS.maxAstNodes} AST nodes`);
-	}
-
 	const operation = operationFor(
 		document,
 		typeof payload.operationName === "string" ? payload.operationName : null
 	);
+	const usesTournamentDetailDesk = operation?.selectionSet.selections.some(
+		(selection) =>
+			selection.kind === Kind.FIELD && selection.name.value === "tournamentDetailDesk"
+	);
+	const maxAstNodes = usesTournamentDetailDesk
+		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
+		: GRAPHQL_LIMITS.maxAstNodes;
+	let astNodes = 0;
+	visit(document, { enter: () => void (astNodes += 1) });
+	if (astNodes > maxAstNodes) {
+		return reject(`GraphQL document exceeds ${maxAstNodes} AST nodes`);
+	}
+
 	if (!operation) {
 		return accepted({ shape: "unknown" });
 	}
