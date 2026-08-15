@@ -226,6 +226,11 @@ jobs:
               docker compose run --rm -T graphql bun run contract:check
             finish_stage
 
+            start_stage redisPreflight
+            APP_ENV_FILE="$next_env" APP_IMAGE="$IMAGE_REF" \
+              docker compose run --rm -T --no-deps graphql bun run redis:check
+            finish_stage
+
             rollback_armed=false
             rollback_graphql_on_exit() {
               original_status=$?
