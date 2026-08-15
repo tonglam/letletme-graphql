@@ -175,4 +175,18 @@ describe("My FPL review repository", () => {
 		expect(source).toContain("metadata.groupMode !== GroupMode.POINTS_RACES");
 		expect(source).toContain("tournament.groupMode !== GroupMode.POINTS_RACES");
 	});
+
+	it("bounds board pagination and normalizes legacy readiness fields", () => {
+		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
+		expect(source).toContain("MAX_COMPETITION_BOARD_PAGE");
+		expect(source).toContain("page must be an integer between 1 and 100");
+		expect(source).toContain("hasRequestedEvent");
+		expect(source).toContain('state: hasRequestedEvent ? "READY" : "PENDING"');
+		expect(source).toContain(
+			"setupStatus: (row.setup_status ?? TournamentSetupStatus.PENDING).toUpperCase()"
+		);
+		expect(source).toContain('setupPhase: (row.setup_phase ?? "queued").toUpperCase()');
+		expect(source).toContain("row.setup_completed_units ?? 0");
+		expect(source).toContain("row.setup_warning_count ?? 0");
+	});
 });

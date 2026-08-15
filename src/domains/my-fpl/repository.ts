@@ -442,21 +442,24 @@ type DbSeasonPathRow = QueryResultRow & {
 };
 
 type DbSetupStatusRow = QueryResultRow & {
-	setup_status: string;
-	setup_phase: string;
-	setup_completed_units: number;
-	setup_total_units: number;
+	setup_status?: string | null;
+	setup_phase?: string | null;
+	setup_completed_units?: number | null;
+	setup_total_units?: number | null;
 	setup_progress_updated_at: Date | string | null;
 	standings_ready_at: Date | string | null;
-	setup_warning_count: number;
+	setup_warning_count?: number | null;
 };
 
-const PROJECTION_VERSION = "v2";
+const PROJECTION_VERSION = "v3";
 const NULLABLE_STATE_CACHE_TTL_SECONDS = 30;
 // Aggregate metrics are intentionally bounded in application memory. The
 // paginated board remains available for larger tournaments, while this
 // summary returns null rather than materializing an unbounded field.
 const MAX_AGGREGATE_FIELD_SIZE = 5000;
+// Keep OFFSET bounded for the fixed-cost board root. Page 100 is the maximum
+// 10,000-row window at the maximum page size.
+const MAX_COMPETITION_BOARD_PAGE = 100;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1219,8 +1222,8 @@ const loadCompetitionBoardPrepared = async (
 ): Promise<MyFplCompetitionBoardPage> => {
 	validateTournamentId(tournamentId);
 	validateEventId(eventId);
-	if (!Number.isSafeInteger(page) || page < 1) {
-		throw new GraphQLError("page must be a positive integer", {
+	if (!Number.isSafeInteger(page) || page < 1 || page > MAX_COMPETITION_BOARD_PAGE) {
+		throw new GraphQLError("page must be an integer between 1 and 100", {
 			extensions: { code: "BAD_USER_INPUT" },
 		});
 	}
@@ -1312,9 +1315,18 @@ const loadCompetitionBoardPrepared = async (
 		   LEFT JOIN fpl.players captain
 		     ON captain.season_id = summary.season_id
 		    AND captain.element_id = summary.played_captain_element_id
+		   LEFT JOIN LATERAL (
+		     SELECT fixture_stats.team_id
+		     FROM fpl.player_fixture_stats fixture_stats
+		     WHERE fixture_stats.season_id = summary.season_id
+		       AND fixture_stats.event_id = summary.event_id
+		       AND fixture_stats.element_id = summary.played_captain_element_id
+		     ORDER BY fixture_stats.fixture_id
+		     LIMIT 1
+		   ) captain_historical_team ON TRUE
 		   LEFT JOIN fpl.teams captain_team
 		     ON captain_team.season_id = captain.season_id
-		    AND captain_team.team_id = captain.team_id
+		    AND captain_team.team_id = COALESCE(captain_historical_team.team_id, captain.team_id)
 		   WHERE summary.season_id = $1
 		     AND summary.tournament_id = $2
 		     AND summary.event_id = $3
@@ -1764,8 +1776,9 @@ const loadCompetitionSeasonPath = async (
 		leaderOverallPoints: row.leader_overall_points,
 		averageOverallPoints: asFiniteNumber(row.average_overall_points),
 	}));
+	const hasRequestedEvent = points.some((point) => point.gameweek === throughEventId);
 	const payload: MyFplCompetitionSeasonPath = {
-		state: points.length > 0 ? "READY" : "UNAVAILABLE",
+		state: hasRequestedEvent ? "READY" : "PENDING",
 		context: loadedContext.value,
 		tournamentId,
 		throughEventId,
@@ -1807,17 +1820,17 @@ const loadCompetitionSetupStatus = async (
 	}
 	return {
 		tournamentId,
-		setupStatus: row.setup_status.toUpperCase(),
-		setupPhase: row.setup_phase.toUpperCase(),
-		setupCompletedUnits: row.setup_completed_units,
-		setupTotalUnits: row.setup_total_units,
+		setupStatus: (row.setup_status ?? TournamentSetupStatus.PENDING).toUpperCase(),
+		setupPhase: (row.setup_phase ?? "queued").toUpperCase(),
+		setupCompletedUnits: row.setup_completed_units ?? 0,
+		setupTotalUnits: row.setup_total_units ?? 0,
 		setupProgressUpdatedAt: isoString(row.setup_progress_updated_at),
 		standingsReadyAt: isoString(row.standings_ready_at),
-		setupHasWarnings: row.setup_warning_count > 0,
+		setupHasWarnings: (row.setup_warning_count ?? 0) > 0,
 		ready:
 			row.setup_status === TournamentSetupStatus.READY &&
 			row.setup_phase === "ready" &&
-			row.setup_warning_count === 0 &&
+			(row.setup_warning_count ?? 0) === 0 &&
 			row.standings_ready_at !== null,
 	};
 };
