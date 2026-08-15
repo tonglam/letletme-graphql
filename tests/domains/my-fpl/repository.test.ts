@@ -86,9 +86,9 @@ describe("My FPL review repository", () => {
 
 		const gameweekMapStart = source.indexOf("const mapGameweekPick", pastSeasonStart);
 		const pastSeasonSource = source.slice(pastSeasonStart, gameweekMapStart);
-		expect(pastSeasonSource).toContain("WHERE entry_id = $1");
-		expect(pastSeasonSource).toContain("season_id < $2");
-		expect(pastSeasonSource).not.toContain("season_id = $1");
+		expect(pastSeasonSource).toContain("WHERE season_id = $1");
+		expect(pastSeasonSource).toContain("entry_id = $2");
+		expect(pastSeasonSource).not.toContain("season_id < $2");
 	});
 
 	it("pins the lightweight Core revision before reading the Team Desk cache", () => {
@@ -128,12 +128,15 @@ describe("My FPL review repository", () => {
 		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
 		expect(source).toContain("FROM fpl.player_fixture_stats fixture_stats");
 		expect(source).toContain("COALESCE(historical_team.team_id, player.team_id)");
+		expect(source).toContain("match.team_h_id = COALESCE(historical_team.team_id, player.team_id)");
 		expect(source).toContain("transfers_synced_through_event_id");
 		expect(source).toContain(
 			'return { state: "PENDING", context: loadedContext.value, gameweeks: [] }'
 		);
 		expect(source).toContain("tournament.setupStatus !== TournamentSetupStatus.READY");
 		expect(source).toContain('normalizeChip(row.event_chip) !== "BENCH_BOOST"');
+		expect(source).toContain("expectedHistoryEventIds");
+		expect(source).toContain('state = historyComplete ? "READY" : "PENDING"');
 	});
 
 	it("does not materialize unbounded competition aggregates", () => {
@@ -148,5 +151,22 @@ describe("My FPL review repository", () => {
 		expect(source).toContain("requestedTournamentPromise");
 		expect(source).toContain("getTournamentInfoUncached(context, tournamentId)");
 		expect(source).toContain("tournamentId ? requestedTournament : tournaments[0]");
+	});
+
+	it("revalidates default membership and rejects unsupported tournament modes", () => {
+		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
+		const deskStart = source.indexOf("const loadCompetitionsDesk");
+		const selectedEventStart = source.indexOf(
+			"const selectedEventId = eventId ?? loadedContext.value.latestFinalizedEventId",
+			deskStart
+		);
+		const membershipStart = source.indexOf(
+			"await assertTournamentMembership(context, selectedTournament.id, entryId)",
+			deskStart
+		);
+		expect(membershipStart).toBeGreaterThan(deskStart);
+		expect(membershipStart).toBeLessThan(selectedEventStart);
+		expect(source).toContain("metadata.groupMode !== GroupMode.POINTS_RACES");
+		expect(source).toContain("tournament.groupMode !== GroupMode.POINTS_RACES");
 	});
 });

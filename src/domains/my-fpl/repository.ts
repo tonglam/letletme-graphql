@@ -5,6 +5,7 @@ import { gqlCacheKey } from "../../infra/cache-key";
 import { getCoreEventSnapshot } from "../../infra/data-snapshot";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import {
+	GroupMode,
 	TournamentSetupStatus,
 	tournamentsRepository,
 	type TournamentInfo,
@@ -690,10 +691,10 @@ const loadPastSeasons = async (
 	const result = await context.database.query<DbPastSeasonRow>(
 		`SELECT source_season_label AS season, total_points, overall_rank
 		 FROM competition.entry_season_histories
-		 WHERE entry_id = $1
-		   AND season_id < $2
+		 WHERE season_id = $1
+		   AND entry_id = $2
 		 ORDER BY season_id, source_season_label`,
-		[entryId, context.currentSeason.seasonId]
+		[context.currentSeason.seasonId, entryId]
 	);
 	return result.rows.map((row) => ({
 		season: row.season,
@@ -811,12 +812,12 @@ const loadTeamGameweekRows = async (
 		       ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id
 		     ) AS score
 		   FROM fpl.fixtures match
-		   JOIN fpl.teams opponent
-		     ON opponent.season_id = match.season_id
-		    AND opponent.team_id = CASE
-		      WHEN match.team_h_id = player.team_id THEN match.team_a_id
-		      ELSE match.team_h_id
-		    END
+			JOIN fpl.teams opponent
+			  ON opponent.season_id = match.season_id
+			 AND opponent.team_id = CASE
+			      WHEN match.team_h_id = COALESCE(historical_team.team_id, player.team_id) THEN match.team_a_id
+			      ELSE match.team_h_id
+			    END
 		   WHERE match.season_id = result.season_id
 		     AND match.event_id = result.event_id
 		     AND COALESCE(historical_team.team_id, player.team_id) IN (match.team_h_id, match.team_a_id)
@@ -939,13 +940,21 @@ const loadTeamDesk = async (
 	if (gameweek) state = gameweek.state;
 	else if (!entry) state = "EMPTY";
 	else if (loadedContext.value.latestFinalizedEventId === null) state = "PRESEASON";
-	else if (history.length > 0) state = "READY";
 	else if (
 		entry.startedEvent === null ||
 		entry.startedEvent > loadedContext.value.latestFinalizedEventId
 	) {
 		state = "EMPTY";
-	} else state = "UNAVAILABLE";
+	} else {
+		const historyEventIds = new Set(history.map((row) => row.eventId));
+		const expectedHistoryEventIds = [...loadedContext.finalizedEventIds].filter(
+			(finalizedEventId) => finalizedEventId >= entry.startedEvent!
+		);
+		const historyComplete =
+			expectedHistoryEventIds.length > 0 &&
+			expectedHistoryEventIds.every((finalizedEventId) => historyEventIds.has(finalizedEventId));
+		state = historyComplete ? "READY" : "PENDING";
+	}
 
 	const payload: MyFplTeamDesk = {
 		state,
@@ -1188,6 +1197,7 @@ const loadCompetitionBoardPrepared = async (
 	});
 	if (!loadedContext.finalizedEventIds.has(eventId)) return empty("PENDING");
 	if (!metadata) return empty("EMPTY");
+	if (metadata.groupMode !== GroupMode.POINTS_RACES) return empty("UNAVAILABLE");
 	if (
 		metadata.setupStatus !== TournamentSetupStatus.READY ||
 		!metadata.standingsReadyAt ||
@@ -1559,6 +1569,10 @@ const loadCompetitionsDesk = async (
 			aggregate: null,
 		};
 	}
+	// The catalog is revision-cached, so revalidate the selected default
+	// tournament before returning even during preseason. This prevents a
+	// recently revoked membership from receiving cached protected metadata.
+	await assertTournamentMembership(context, selectedTournament.id, entryId);
 	const selectedEventId = eventId ?? loadedContext.value.latestFinalizedEventId;
 	if (selectedEventId === null) {
 		return {
@@ -1572,10 +1586,6 @@ const loadCompetitionsDesk = async (
 			aggregate: null,
 		};
 	}
-	// Reuse the pre-resolver authorization fact when a tournament was supplied,
-	// or perform one fresh check for the default selection. Every downstream
-	// cache lookup then observes the same request-local proof.
-	await assertTournamentMembership(context, selectedTournament.id, entryId);
 	const boardPromise = loadCompetitionBoardPrepared(
 		context,
 		loadedContext,
@@ -1589,6 +1599,7 @@ const loadCompetitionsDesk = async (
 	);
 	const canLoadAggregate =
 		loadedContext.finalizedEventIds.has(selectedEventId) &&
+		selectedTournament.groupMode === GroupMode.POINTS_RACES &&
 		selectedTournament.setupStatus === TournamentSetupStatus.READY &&
 		Boolean(selectedTournament.standingsReadyAt) &&
 		!selectedTournament.setupHasWarnings;
@@ -1630,6 +1641,7 @@ const loadCompetitionSeasonPath = async (
 	});
 	const tournament = await tournamentsRepository.getTournamentInfoUncached(context, tournamentId);
 	if (!tournament) return empty("UNAVAILABLE");
+	if (tournament.groupMode !== GroupMode.POINTS_RACES) return empty("UNAVAILABLE");
 	if (
 		tournament.setupStatus !== TournamentSetupStatus.READY ||
 		!tournament.standingsReadyAt ||
