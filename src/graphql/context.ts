@@ -29,6 +29,8 @@ export type GraphQLContext = {
 	requestScope?: object;
 	/** Whether the latest Core snapshot lookup reused the request-pinned promise. */
 	coreSnapshotMemoStatus?: "hit" | "miss";
+	/** Whether this request acquired the full Core publication. */
+	fullCoreLoaded?: boolean;
 	principal?: Principal;
 	user?: AuthUser; // Authenticated Web or Mini Program user
 	/** Set by batched queries (e.g. `liveScores`) so `LivePerformance.player` avoids per-row fetches. */

@@ -10,6 +10,8 @@ import type {
 	TournamentOfficialH2H,
 	TournamentParticipant,
 	TournamentSeasonSnapshot,
+	TournamentDetailDesk,
+	ManagedTournamentStatus,
 } from "./repository";
 import { tournamentsRepository } from "./repository";
 
@@ -137,5 +139,22 @@ export const tournamentsService = {
 		entryId: number
 	): Promise<EntryOfficialH2HDeskItem[]> {
 		return tournamentsRepository.getEntryOfficialH2HDesk(context, entryId);
+	},
+
+	getTournamentDetailDesk(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryId: number,
+		eventId?: number | null
+	): Promise<TournamentDetailDesk | null> {
+		return tournamentsRepository.getTournamentDetailDesk(context, tournamentId, entryId, eventId);
+	},
+
+	getManagedTournamentStatus(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryId: number
+	): Promise<ManagedTournamentStatus | null> {
+		return tournamentsRepository.getManagedTournamentStatus(context, tournamentId, entryId);
 	},
 };

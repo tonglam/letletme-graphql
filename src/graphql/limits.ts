@@ -358,6 +358,8 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["tournamentParticipants", 30],
 	["tournamentSeasonSnapshot", 30],
 	["tournamentOfficialH2H", 30],
+	["tournamentDetailDesk", 30],
+	["managedTournamentStatus", 2],
 ]);
 
 const heavyRootCost = (

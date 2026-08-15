@@ -1,6 +1,5 @@
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
-import { gqlCacheKey } from "../../infra/cache-key";
 import {
 	getCoreEventSnapshot,
 	getCoreFixtureSnapshot,
@@ -12,68 +11,13 @@ import {
 } from "../../infra/data-snapshot";
 import { entryLiveBatchService } from "../entry-live/batch-service";
 import { tournamentsService } from "../tournaments/service";
+import {
+	competitionBoardCacheKey,
+	readCompetitionBoardCache,
+	writeCompetitionBoardCache,
+} from "./competition-board-cache";
 
 type LiveRef = { season: string; eventId: number; revision: string };
-
-const LIVE_COMPETITION_PROJECTION_VERSION = "v2";
-type CachedCompetitionBoard = {
-	board: unknown[];
-	partial: boolean;
-	failedEntryIds: number[];
-	totalEntries: number;
-};
-
-const competitionBoardCacheKey = (
-	context: GraphQLContext,
-	snapshot: Pick<LiveDataSnapshot, "seasonCode" | "eventId" | "revision">,
-	tournamentId: number
-): string =>
-	gqlCacheKey(
-		context,
-		`live-competition-board:${snapshot.eventId}:${tournamentId}:${LIVE_COMPETITION_PROJECTION_VERSION}`,
-		`live-${snapshot.seasonCode}-${snapshot.eventId}-${snapshot.revision}`
-	);
-
-const readCompetitionBoardCache = async (
-	context: GraphQLContext,
-	key: string
-): Promise<CachedCompetitionBoard | null> => {
-	try {
-		const raw = await context.redis.get(key);
-		if (!raw) return null;
-		const parsed = JSON.parse(raw) as CachedCompetitionBoard;
-		if (
-			!parsed ||
-			!Array.isArray(parsed.board) ||
-			typeof parsed.partial !== "boolean" ||
-			!Array.isArray(parsed.failedEntryIds) ||
-			!parsed.failedEntryIds.every((id) => Number.isSafeInteger(id) && id > 0) ||
-			!Number.isSafeInteger(parsed.totalEntries) ||
-			parsed.totalEntries < 0
-		)
-			return null;
-		return parsed;
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to read Live competition board cache");
-		return null;
-	}
-};
-
-const writeCompetitionBoardCache = async (
-	context: GraphQLContext,
-	key: string,
-	value: CachedCompetitionBoard,
-	ttlSeconds: number
-): Promise<void> => {
-	try {
-		await context.redis.set(key, JSON.stringify(value), "EX", ttlSeconds);
-	} catch (error) {
-		context.logger.warn(
-			{ err: error, key, ttlSeconds },
-			"Failed to write Live competition board cache"
-		);
-	}
-};
 
 const resolveSnapshot = async (
 	context: GraphQLContext,

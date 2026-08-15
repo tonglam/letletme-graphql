@@ -148,6 +148,10 @@ export type CoreEventContext = {
 	latestFinishedEventId: number | null;
 };
 
+export type LightweightCoreEventContext = Omit<CoreEventContext, "sourceCheckedAt"> & {
+	sourceCheckedAt: string;
+};
+
 type EventMetadata = Pick<
 	Event,
 	"id" | "deadlineTime" | "deadlineTimeEpoch" | "isCurrent" | "isNext"
@@ -193,6 +197,7 @@ interface EventsRepository {
 	): Promise<Event[]>;
 	getCurrentEventInfo(context: GraphQLContext): Promise<CurrentEventInfo | null>;
 	getCoreEventContext(context: GraphQLContext): Promise<CoreEventContext>;
+	getLightweightCoreEventContext(context: GraphQLContext): Promise<LightweightCoreEventContext>;
 }
 
 export const eventsRepository: EventsRepository = {
@@ -219,6 +224,27 @@ export const eventsRepository: EventsRepository = {
 	},
 
 	async getCoreEventContext(context) {
+		const snapshot = await getCoreEventSnapshot(context);
+		const events = snapshot.events.map(mapEvent).sort((left, right) => left.id - right.id);
+		const resolved = resolveCurrentAndNext(events, snapshot.currentEventId);
+		const latestFinishedEventId =
+			[...events].filter((event) => event.finished).sort((left, right) => right.id - left.id)[0]
+				?.id ?? null;
+		return {
+			season: snapshot.seasonCode,
+			revision: snapshot.revision,
+			sourceCheckedAt: snapshot.sourceCheckedAt,
+			currentEventId: resolved.current?.id ?? null,
+			nextEventId: resolved.next?.id ?? null,
+			nextDeadlineTime: resolved.next?.deadlineTime ?? null,
+			latestFinishedEventId,
+		};
+	},
+
+	async getLightweightCoreEventContext(context): Promise<LightweightCoreEventContext> {
+		// Read events and currentEventId from the same pinned publication (or the
+		// targeted PostgreSQL fallback) so the revision cannot describe a
+		// different generation than the event rows.
 		const snapshot = await getCoreEventSnapshot(context);
 		const events = snapshot.events.map(mapEvent).sort((left, right) => left.id - right.id);
 		const resolved = resolveCurrentAndNext(events, snapshot.currentEventId);

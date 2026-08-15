@@ -1,4 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { GraphQLError } from "graphql";
+import { getCoreEventSnapshot, getLiveDataSnapshot } from "../../infra/data-snapshot";
+import { eventsService } from "../events/service";
 import { gqlCacheKey } from "../../infra/cache-key";
 import {
 	deleteQueryCache,
@@ -7,6 +10,13 @@ import {
 } from "../../infra/query-cache";
 import { stableStringify } from "../../infra/stringify";
 import { LeagueType } from "../leagues/repository";
+import { entryLiveBatchService } from "../entry-live/batch-service";
+import type { LiveCalcData } from "../entry-live/calc-service";
+import {
+	competitionBoardCacheKey,
+	readCompetitionBoardCache,
+	writeCompetitionBoardCache,
+} from "../live-desks/competition-board-cache";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -142,6 +152,51 @@ export type TournamentParticipant = {
 	entryId: number;
 	entryName: string | null;
 	playerName: string | null;
+};
+
+export type TournamentDetailDesk = {
+	tournament: TournamentInfo;
+	viewerEntryId: number;
+	canManage: boolean;
+	participants: TournamentParticipant[];
+	unavailableSections: string[];
+	setup: {
+		status: TournamentSetupStatus;
+		phase: TournamentSetupPhase;
+		completedUnits: number;
+		totalUnits: number;
+		hasWarnings: boolean;
+	} | null;
+	officialH2H: TournamentOfficialH2H | null;
+	live: {
+		eventId: number;
+		revision: string;
+		state: string;
+		partial: boolean;
+		failedEntryIds: number[];
+		totalEntries: number;
+		rows: LiveCalcData[];
+	} | null;
+	revision: string;
+	kind: "setup" | "official_h2h" | "live_points";
+	context: {
+		season: string;
+		coreRevision: string;
+		activeEventId: number | null;
+		requestedEventId: number;
+	};
+};
+
+export type ManagedTournamentStatus = {
+	revision: string;
+	state: TournamentState;
+	setupStatus: TournamentSetupStatus;
+	setupPhase: TournamentSetupPhase;
+	rosterSyncStatus: TournamentSetupStatus | null;
+	setupCompletedUnits: number;
+	setupTotalUnits: number;
+	setupHasWarnings: boolean;
+	updatedAt: string;
 };
 
 export type DbTournamentInfoRow = {
@@ -1332,23 +1387,7 @@ const getTournamentInfosUncached = async (
 const getTournamentInfoById = async (
 	context: GraphQLContext,
 	tournamentId: number
-): Promise<TournamentInfo | null> => {
-	const cacheKey = gqlCacheKey(context, `tournament:info:${tournamentId}`);
-	const cached = await readJsonCache(context, cacheKey, isTournamentInfoCache);
-	if (isRecord(cached) && Number.isFinite(Number(cached.id))) {
-		return cached as unknown as TournamentInfo;
-	}
-
-	const tournament = await getTournamentInfoUncached(context, tournamentId);
-	if (!tournament) return null;
-	await writeQueryCache(
-		context,
-		cacheKey,
-		JSON.stringify(tournament),
-		QUERY_CACHE_TTL_SECONDS.REPORTING
-	);
-	return tournament;
-};
+): Promise<TournamentInfo | null> => getTournamentInfoUncached(context, tournamentId);
 
 const getTournamentCacheReadiness = async (
 	context: GraphQLContext,
@@ -1429,6 +1468,17 @@ interface TournamentsRepository {
 		context: GraphQLContext,
 		entryId: number
 	): Promise<EntryOfficialH2HDeskItem[]>;
+	getTournamentDetailDesk(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryId: number,
+		eventId?: number | null
+	): Promise<TournamentDetailDesk | null>;
+	getManagedTournamentStatus(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryId: number
+	): Promise<ManagedTournamentStatus | null>;
 }
 
 const emptyRankingGaps = {
@@ -1758,17 +1808,21 @@ export const tournamentsRepository: TournamentsRepository = {
 	},
 
 	async getEntryTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]> {
-		const cacheKey = gqlCacheKey(context, `tournaments:entry:${entryId}`);
-		// Accept any well-shaped list cache. Previously we required every row to have
-		// standingsReadyAt, so one in-flight setup made the list cold on every request.
-		const cached = await readJsonCache(context, cacheKey, isTournamentInfoArrayCache);
-		if (
-			Array.isArray(cached) &&
-			cached.every((item) => isRecord(item) && Number.isFinite(Number(item.id)))
-		) {
-			return cached as TournamentInfo[];
+		// Mutable metadata is read directly for lightweight roots. Legacy callers
+		// that already pinned a core revision retain the existing bounded cache
+		// contract during the rolling migration.
+		const cacheKey = context.dataRevision
+			? gqlCacheKey(context, `tournaments:entry:${entryId}`)
+			: null;
+		if (cacheKey) {
+			const cached = await readJsonCache(context, cacheKey, isTournamentInfoArrayCache);
+			if (
+				Array.isArray(cached) &&
+				cached.every((item) => isRecord(item) && Number.isFinite(Number(item.id)))
+			) {
+				return cached as TournamentInfo[];
+			}
 		}
-
 		const { data: entryData, error: entryError } = await context.data
 			.read("competition.tournament_entries")
 			.select("tournament_id")
@@ -1781,12 +1835,13 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const tournamentIds = extractTournamentIds((entryData as DbTournamentEntryRow[] | null) ?? []);
 		if (tournamentIds.length === 0) {
-			await writeQueryCache(
-				context,
-				cacheKey,
-				JSON.stringify([]),
-				QUERY_CACHE_TTL_SECONDS.REPORTING
-			);
+			if (cacheKey)
+				await writeQueryCache(
+					context,
+					cacheKey,
+					JSON.stringify([]),
+					QUERY_CACHE_TTL_SECONDS.REPORTING
+				);
 			return [];
 		}
 
@@ -1802,28 +1857,29 @@ export const tournamentsRepository: TournamentsRepository = {
 		}
 
 		const tournaments = ((infoData as DbTournamentInfoRow[] | null) ?? []).map(mapTournamentInfo);
-		// Always write cache: full TTL when all standings ready, short TTL while any setup is open.
-		const allStandingsReady = tournaments.every(
-			(tournament) => tournament.standingsReadyAt !== null
-		);
-		const ttlSeconds = allStandingsReady
-			? QUERY_CACHE_TTL_SECONDS.REPORTING
-			: Math.min(15, QUERY_CACHE_TTL_SECONDS.REPORTING);
-		await writeQueryCache(context, cacheKey, JSON.stringify(tournaments), ttlSeconds);
+		if (cacheKey) {
+			const allStandingsReady = tournaments.every(
+				(tournament) => tournament.standingsReadyAt !== null
+			);
+			const ttlSeconds = allStandingsReady
+				? QUERY_CACHE_TTL_SECONDS.REPORTING
+				: Math.min(15, QUERY_CACHE_TTL_SECONDS.REPORTING);
+			await writeQueryCache(context, cacheKey, JSON.stringify(tournaments), ttlSeconds);
+		}
 		return tournaments;
 	},
 
 	async getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]> {
+		if (!context.dataRevision)
+			return tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
 		const cacheKey = gqlCacheKey(context, `tournaments:entry-ids:${tournamentId}`);
 		if (!(await getTournamentCacheReadiness(context, tournamentId))) {
 			await deleteQueryCache(context, cacheKey);
 			return tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
 		}
 		const cached = await readJsonCache(context, cacheKey, isEntryIdArrayCache);
-		if (Array.isArray(cached) && cached.every((item) => Number.isFinite(Number(item)))) {
+		if (Array.isArray(cached) && cached.every((item) => Number.isFinite(Number(item))))
 			return cached as number[];
-		}
-
 		const entryIds = await tournamentsRepository.getTournamentEntryIdsUncached(
 			context,
 			tournamentId
@@ -1859,11 +1915,15 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		eventId: number
 	): Promise<TournamentEventResult[]> {
-		const cacheKey = gqlCacheKey(
-			context,
-			`tournaments:event-results:${stableStringify({ tournamentId, eventId })}`
-		);
-		const cached = await readJsonCache(context, cacheKey, isTournamentEventResultArrayCache);
+		const cacheKey = context.dataRevision
+			? gqlCacheKey(
+					context,
+					`tournaments:event-results:${stableStringify({ tournamentId, eventId })}`
+				)
+			: null;
+		const cached = cacheKey
+			? await readJsonCache(context, cacheKey, isTournamentEventResultArrayCache)
+			: undefined;
 		if (
 			Array.isArray(cached) &&
 			cached.every(
@@ -1895,12 +1955,13 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		const rows = (resultData as DbTournamentEventResultRow[] | null) ?? [];
 		if (rows.length === 0) {
-			await writeQueryCache(
-				context,
-				cacheKey,
-				JSON.stringify([]),
-				QUERY_CACHE_TTL_SECONDS.REPORTING
-			);
+			if (cacheKey)
+				await writeQueryCache(
+					context,
+					cacheKey,
+					JSON.stringify([]),
+					QUERY_CACHE_TTL_SECONDS.REPORTING
+				);
 			return [];
 		}
 
@@ -1911,23 +1972,25 @@ export const tournamentsRepository: TournamentsRepository = {
 				{ tournamentId, groupMode: tournament.groupMode },
 				"Tournament event results only supported for POINTS_RACES; returning empty"
 			);
-			await writeQueryCache(
-				context,
-				cacheKey,
-				JSON.stringify([]),
-				QUERY_CACHE_TTL_SECONDS.REPORTING
-			);
+			if (cacheKey)
+				await writeQueryCache(
+					context,
+					cacheKey,
+					JSON.stringify([]),
+					QUERY_CACHE_TTL_SECONDS.REPORTING
+				);
 			return [];
 		}
 
 		const results = rows.map((row) => mapTournamentEventResultFromView(tournament, row));
 
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(results),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		if (cacheKey)
+			await writeQueryCache(
+				context,
+				cacheKey,
+				JSON.stringify(results),
+				QUERY_CACHE_TTL_SECONDS.REPORTING
+			);
 		return results;
 	},
 
@@ -2590,5 +2653,205 @@ export const tournamentsRepository: TournamentsRepository = {
 				Number(right.isLive) - Number(left.isLive) ||
 				left.tournamentName.localeCompare(right.tournamentName)
 		);
+	},
+
+	async getTournamentDetailDesk(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryId: number,
+		eventId?: number | null
+	): Promise<TournamentDetailDesk | null> {
+		if (
+			// Detail clients use this as a bounded route parameter, never as a
+			// publication lookup escape hatch.
+			eventId !== null &&
+			eventId !== undefined &&
+			(!Number.isSafeInteger(eventId) || eventId < 1 || eventId > 38)
+		) {
+			throw new GraphQLError("Requested event is invalid", {
+				extensions: { code: "BAD_USER_INPUT" },
+			});
+		}
+		const tournament = await getTournamentInfoUncached(context, tournamentId);
+		if (!tournament) return null;
+		const eventContext = await eventsService.getLightweightCoreEventContext(context);
+		const activeEventId =
+			eventContext.currentEventId ?? eventContext.nextEventId ?? eventContext.latestFinishedEventId;
+		const requestedEventId = eventId ?? activeEventId ?? 1;
+		const isOfficial = isOfficialH2HInfo(tournament);
+		const kind: TournamentDetailDesk["kind"] =
+			tournament.setupStatus !== TournamentSetupStatus.READY
+				? "setup"
+				: isOfficial
+					? "official_h2h"
+					: "live_points";
+		let participants: TournamentParticipant[] = [];
+		let unavailableSections: string[] = [];
+		try {
+			participants = await tournamentsRepository.getTournamentParticipants(context, tournamentId);
+		} catch (error) {
+			context.logger.warn(
+				{ err: error, section: "participants" },
+				"Tournament detail participants unavailable"
+			);
+			unavailableSections = ["PARTICIPANTS"];
+		}
+		let officialH2H: TournamentOfficialH2H | null = null;
+		let live: TournamentDetailDesk["live"] = null;
+		if (kind === "official_h2h") {
+			officialH2H = await tournamentsRepository.getTournamentOfficialH2H(
+				context,
+				tournamentId,
+				requestedEventId
+			);
+		} else if (kind === "live_points") {
+			const eventCore = await getCoreEventSnapshot(context);
+			const event = eventCore.events.find((candidate) => candidate.id === requestedEventId);
+			// Before the first deadline there is no live publication to load. Keep
+			// the desk truthful and render the scheduled empty board instead.
+			const scheduled =
+				event !== undefined &&
+				!event.finished &&
+				!event.isCurrent &&
+				(eventCore.currentEventId === null || event.id > eventCore.currentEventId);
+			if (scheduled) {
+				live = {
+					eventId: requestedEventId,
+					revision: `scheduled-${eventCore.revision}`,
+					state: "SCHEDULED",
+					partial: false,
+					failedEntryIds: [],
+					totalEntries: tournament.totalTeamNum,
+					rows: [],
+				};
+			} else {
+				const snapshot = await getLiveDataSnapshot(context, requestedEventId);
+				// Provisional live points can change when the core event flips to
+				// finished/data_checked. Only final scoring boards are reusable.
+				const scoringPhase = event?.finished === true && event.dataChecked === true;
+				const liveCacheKey = scoringPhase
+					? competitionBoardCacheKey(context, snapshot, tournamentId)
+					: null;
+				const cachedBoard = liveCacheKey
+					? await readCompetitionBoardCache(context, liveCacheKey)
+					: null;
+				const cached = cachedBoard
+					? {
+							rows: cachedBoard.board as LiveCalcData[],
+							partial: cachedBoard.partial,
+							failedEntryIds: cachedBoard.failedEntryIds,
+							totalEntries: cachedBoard.totalEntries,
+						}
+					: null;
+				const result = cached
+					? null
+					: await entryLiveBatchService.calcLivePointsForEntries(
+							context,
+							requestedEventId,
+							await tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId),
+							true,
+							{ provisional: !(event?.finished && event.dataChecked) }
+						);
+				const liveData = cached ?? {
+					rows: Array.from(result?.results.values() ?? []),
+					partial: (result?.errors.length ?? 0) > 0,
+					failedEntryIds: result?.errors.map((error) => error.entryId) ?? [],
+					totalEntries: result?.meta.totalEntries ?? 0,
+				};
+				live = {
+					eventId: requestedEventId,
+					revision: snapshot.revision,
+					state: snapshot.state.toUpperCase(),
+					...liveData,
+				};
+				if (liveCacheKey && !cached && result && result.errors.length === 0) {
+					await writeCompetitionBoardCache(
+						context,
+						liveCacheKey,
+						{
+							board: liveData.rows,
+							partial: liveData.partial,
+							failedEntryIds: liveData.failedEntryIds,
+							totalEntries: liveData.totalEntries,
+						},
+						24 * 60 * 60
+					);
+				}
+			}
+		}
+		const officialSourceCheckedAt =
+			officialH2H?.matches
+				.map((match) => match.sourceCheckedAt)
+				.filter((value): value is string => Boolean(value))
+				.sort()
+				.at(-1) ?? tournament.updatedAt;
+		return {
+			tournament,
+			viewerEntryId: entryId,
+			canManage: tournament.adminEntryId === entryId,
+			participants,
+			unavailableSections,
+			setup:
+				kind === "setup"
+					? {
+							status: tournament.setupStatus,
+							phase: tournament.setupPhase ?? TournamentSetupPhase.QUEUED,
+							completedUnits: tournament.setupCompletedUnits ?? 0,
+							totalUnits: tournament.setupTotalUnits ?? 0,
+							hasWarnings: tournament.setupHasWarnings ?? false,
+						}
+					: null,
+			officialH2H,
+			live,
+			revision: isOfficial
+				? `official:${tournament.officialScheduleHash ?? "none"}:${officialSourceCheckedAt}`
+				: live
+					? `${tournament.updatedAt}:${eventContext.revision}:live-${live.revision}`
+					: `${tournament.updatedAt}:${eventContext.revision}`,
+			kind,
+			context: {
+				season: context.currentSeason.seasonCode,
+				coreRevision: eventContext.revision,
+				activeEventId,
+				requestedEventId,
+			},
+		};
+	},
+
+	async getManagedTournamentStatus(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryId: number
+	): Promise<ManagedTournamentStatus | null> {
+		const tournament = await context.data
+			.read("competition.tournaments")
+			.select(
+				"id, admin_entry_id, state, setup_status, setup_phase, roster_sync_status, setup_completed_units, setup_total_units, setup_warning_count, updated_at"
+			)
+			.eq("id", tournamentId)
+			.eq("admin_entry_id", entryId)
+			.limit(1);
+		if (tournament.error) throw new Error("Failed to fetch tournament status");
+		const row = tournament.data?.[0] as Record<string, unknown> | undefined;
+		if (!row) return null;
+		const setupStatus = String(row.setup_status) as TournamentSetupStatus;
+		return {
+			revision: String(row.updated_at ?? "postgres"),
+			state: String(row.state) as TournamentState,
+			setupStatus,
+			setupPhase: String(
+				row.setup_phase ??
+					(setupStatus === TournamentSetupStatus.READY
+						? TournamentSetupPhase.READY
+						: TournamentSetupPhase.QUEUED)
+			) as TournamentSetupPhase,
+			rosterSyncStatus: row.roster_sync_status
+				? (String(row.roster_sync_status) as TournamentSetupStatus)
+				: null,
+			setupCompletedUnits: Number(row.setup_completed_units ?? 0),
+			setupTotalUnits: Number(row.setup_total_units ?? 0),
+			setupHasWarnings: Number(row.setup_warning_count ?? 0) > 0,
+			updatedAt: String(row.updated_at),
+		};
 	},
 };

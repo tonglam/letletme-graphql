@@ -61,6 +61,8 @@ import type {
 	TournamentParticipant,
 	TournamentSeasonSnapshot,
 	TournamentSetupStatus,
+	TournamentDetailDesk,
+	ManagedTournamentStatus,
 } from "./repository";
 import {
 	GroupMode,
@@ -317,6 +319,25 @@ export const tournamentsResolvers = {
 			context: GraphQLContext
 		): Promise<EntryOfficialH2HDeskItem[]> =>
 			tournamentsService.getEntryOfficialH2HDesk(context, args.entryId),
+
+		tournamentDetailDesk: async (
+			_parent: unknown,
+			args: { tournamentId: number; entryId: number; eventId?: number | null },
+			context: GraphQLContext
+		): Promise<TournamentDetailDesk | null> =>
+			tournamentsService.getTournamentDetailDesk(
+				context,
+				args.tournamentId,
+				args.entryId,
+				args.eventId
+			),
+
+		managedTournamentStatus: async (
+			_parent: unknown,
+			args: { tournamentId: number; entryId: number },
+			context: GraphQLContext
+		): Promise<ManagedTournamentStatus | null> =>
+			tournamentsService.getManagedTournamentStatus(context, args.tournamentId, args.entryId),
 	},
 	TournamentInfo: {
 		leagueType: (parent: TournamentInfo): string => leagueTypeToEnum(parent.leagueType),
@@ -363,5 +384,23 @@ export const tournamentsResolvers = {
 			_args: Record<string, never>,
 			context: GraphQLContext
 		): Promise<Event | null> => getEventByIdMemoized(context, parent.eventId),
+	},
+	TournamentDetailDesk: {
+		kind: (parent: TournamentDetailDesk): string => parent.kind.toUpperCase(),
+	},
+	TournamentSetupDesk: {
+		status: (parent: NonNullable<TournamentDetailDesk["setup"]>): string =>
+			tournamentSetupStatusToEnum(parent.status),
+		phase: (parent: NonNullable<TournamentDetailDesk["setup"]>): string =>
+			tournamentSetupPhaseToEnum(parent.phase),
+	},
+	ManagedTournamentStatus: {
+		state: (parent: ManagedTournamentStatus): string => tournamentStateToEnum(parent.state),
+		setupStatus: (parent: ManagedTournamentStatus): string =>
+			tournamentSetupStatusToEnum(parent.setupStatus),
+		setupPhase: (parent: ManagedTournamentStatus): string =>
+			tournamentSetupPhaseToEnum(parent.setupPhase),
+		rosterSyncStatus: (parent: ManagedTournamentStatus): string | null =>
+			parent.rosterSyncStatus ? tournamentSetupStatusToEnum(parent.rosterSyncStatus) : null,
 	},
 };

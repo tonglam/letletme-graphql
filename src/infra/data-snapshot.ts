@@ -1588,6 +1588,10 @@ const buildLiveFixtureView = (
 };
 
 export const getCoreDataSnapshot = (context: GraphQLContext): Promise<CoreDataSnapshot> => {
+	context.fullCoreLoaded = true;
+	if (context.requestScope && typeof context.requestScope === "object") {
+		(context.requestScope as { fullCoreLoaded?: boolean }).fullCoreLoaded = true;
+	}
 	const requestScope = context.requestScope ?? context;
 	const existing = coreSnapshotMemo.get(requestScope);
 	if (existing) {
