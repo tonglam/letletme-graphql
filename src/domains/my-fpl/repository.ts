@@ -1157,10 +1157,9 @@ const filterCurrentTournamentMemberships = async (
 	const missingTournamentIds = currentTournamentIds.filter(
 		(tournamentId) => !cachedById.has(tournamentId)
 	);
-	const uncachedTournaments = await Promise.all(
-		missingTournamentIds.map((tournamentId) =>
-			tournamentsRepository.getTournamentInfoUncached(context, tournamentId)
-		)
+	const uncachedTournaments = await tournamentsRepository.getTournamentInfosUncached(
+		context,
+		missingTournamentIds
 	);
 	for (const tournament of uncachedTournaments) {
 		if (tournament) cachedById.set(tournament.id, tournament);

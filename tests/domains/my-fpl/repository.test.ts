@@ -153,7 +153,7 @@ describe("My FPL review repository", () => {
 	it("resolves an explicitly authorized tournament outside the cached catalog", () => {
 		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
 		expect(source).toContain("requestedTournamentPromise");
-		expect(source).toContain("getTournamentInfoUncached(context, tournamentId)");
+		expect(source).toContain("getTournamentInfosUncached");
 		expect(source).toContain("tournamentId ? requestedTournament : tournaments[0]");
 	});
 
