@@ -25,6 +25,12 @@ export const GRAPHQL_LIMITS = {
 	maxComplexity: 600,
 } as const;
 
+// The detail desk intentionally projects both the setup/live and official-H2H
+// branches in one response so the Web route can keep a single request. Keep the
+// general document cap strict, but give this one bounded root enough AST room
+// without relaxing depth, alias, root-field, or weighted-complexity guards.
+const TOURNAMENT_DETAIL_DESK_MAX_AST_NODES = 400;
+
 const MAX_LIST_ARGUMENT_WEIGHT = 200;
 
 type GraphQLPayload = {
@@ -77,6 +83,44 @@ const fragmentsFor = (document: DocumentNode): Map<string, FragmentDefinitionNod
 			)
 			.map((fragment) => [fragment.name.value, fragment])
 	);
+
+type EffectiveRootField = {
+	name: string;
+	responseKey: string;
+};
+
+const effectiveRootFieldsFor = (
+	operation: OperationDefinitionNode,
+	fragments: Map<string, FragmentDefinitionNode>
+): { fields: EffectiveRootField[]; reachableFragments: Set<string> } => {
+	const fields: EffectiveRootField[] = [];
+	const reachableFragments = new Set<string>();
+	const collect = (selectionSet: SelectionSetNode): void => {
+		for (const selection of selectionSet.selections) {
+			if (selection.kind === Kind.FIELD) {
+				fields.push({
+					name: selection.name.value,
+					responseKey: selection.alias?.value ?? selection.name.value,
+				});
+				continue;
+			}
+			if (selection.kind === Kind.INLINE_FRAGMENT) {
+				collect(selection.selectionSet);
+				continue;
+			}
+			if (reachableFragments.has(selection.name.value)) {
+				continue;
+			}
+			const fragment = fragments.get(selection.name.value);
+			if (fragment) {
+				reachableFragments.add(selection.name.value);
+				collect(fragment.selectionSet);
+			}
+		}
+	};
+	collect(operation.selectionSet);
+	return { fields, reachableFragments };
+};
 
 const asCompositeType = (
 	value: GraphQLNamedType | null | undefined
@@ -410,16 +454,42 @@ export const validateGraphQLPayloadLimits = (
 		return accepted({ shape: "unknown" });
 	}
 
-	let astNodes = 0;
-	visit(document, { enter: () => void (astNodes += 1) });
-	if (astNodes > GRAPHQL_LIMITS.maxAstNodes) {
-		return reject(`GraphQL document exceeds ${GRAPHQL_LIMITS.maxAstNodes} AST nodes`);
-	}
-
 	const operation = operationFor(
 		document,
 		typeof payload.operationName === "string" ? payload.operationName : null
 	);
+	const fragments = fragmentsFor(document);
+	const rootInspection = operation
+		? effectiveRootFieldsFor(operation, fragments)
+		: { fields: [], reachableFragments: new Set<string>() };
+	const rootNames = rootInspection.fields;
+	const onlyReachableDefinitions =
+		operation !== null &&
+		document.definitions.every((definition) =>
+			definition.kind === Kind.OPERATION_DEFINITION
+				? definition === operation
+				: definition.kind === Kind.FRAGMENT_DEFINITION
+					? rootInspection.reachableFragments.has(definition.name.value)
+					: false
+		);
+	const responseKeys = new Set(rootNames.map((field) => field.responseKey));
+	const usesTournamentDetailDesk =
+		onlyReachableDefinitions &&
+		responseKeys.size === 1 &&
+		rootNames.length > 0 &&
+		rootNames.every(
+			(field) =>
+				field.name === "tournamentDetailDesk" && field.responseKey === "tournamentDetailDesk"
+		);
+	const maxAstNodes = usesTournamentDetailDesk
+		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
+		: GRAPHQL_LIMITS.maxAstNodes;
+	let astNodes = 0;
+	visit(document, { enter: () => void (astNodes += 1) });
+	if (astNodes > maxAstNodes) {
+		return reject(`GraphQL document exceeds ${maxAstNodes} AST nodes`);
+	}
+
 	if (!operation) {
 		return accepted({ shape: "unknown" });
 	}

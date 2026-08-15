@@ -18,6 +18,76 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rootFields: ["eventFixtures"] });
 	});
 
+	it("allows the bounded tournament detail desk AST projection", () => {
+		const fields = Array.from({ length: 100 }, () => "kind").join(" ");
+		const desk = validateGraphQLRequestLimits({
+			query: `query { tournamentDetailDesk(tournamentId: 1, entryId: 1) { ${fields} } }`,
+		});
+		expect(desk).toMatchObject({ ok: true, rootFields: ["tournamentDetailDesk"] });
+
+		const ordinary = validateGraphQLRequestLimits({
+			query: `query { events { ${fields} } }`,
+		});
+		expect(ordinary).toEqual({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL document exceeds 200 AST nodes",
+		});
+	});
+
+	it("only grants the desk AST cap to the sole effective root", () => {
+		const fields = Array.from({ length: 220 }, () => "kind").join(" ");
+		const mixed = validateGraphQLRequestLimits({
+			query: `query { tournamentDetailDesk(tournamentId: 1, entryId: 1) { ${fields} } events { id } }`,
+		});
+		expect(mixed).toEqual({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL document exceeds 200 AST nodes",
+		});
+	});
+
+	it("recognizes a desk root selected through a fragment", () => {
+		const fields = Array.from({ length: 100 }, () => "kind").join(" ");
+		const result = validateGraphQLRequestLimits({
+			query: `query { ...DeskRoot } fragment DeskRoot on Query { tournamentDetailDesk(tournamentId: 1, entryId: 1) { ${fields} } }`,
+		});
+		expect(result).toMatchObject({ ok: true, rootFields: ["tournamentDetailDesk"] });
+	});
+
+	it("keeps unrelated operations under the general AST cap", () => {
+		const fields = Array.from({ length: 100 }, () => "id").join(" ");
+		const result = validateGraphQLRequestLimits({
+			operationName: "Desk",
+			query: `query Desk { tournamentDetailDesk(tournamentId: 1, entryId: 1) { kind } } query Other { events { ${fields} } }`,
+		});
+		expect(result).toEqual({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL document exceeds 200 AST nodes",
+		});
+	});
+
+	it("merges repeated unaliased desk selections but rejects aliases", () => {
+		const fields = Array.from({ length: 60 }, () => "kind").join(" ");
+		const merged = validateGraphQLRequestLimits({
+			query: `query { tournamentDetailDesk(tournamentId: 1, entryId: 1) { ${fields} } tournamentDetailDesk(tournamentId: 1, entryId: 1) { ${fields} } }`,
+		});
+		expect(merged).toMatchObject({
+			ok: true,
+			rootFields: ["tournamentDetailDesk", "tournamentDetailDesk"],
+		});
+
+		const aliased = validateGraphQLRequestLimits({
+			query: `query { first: tournamentDetailDesk(tournamentId: 1, entryId: 1) { ${fields} } second: tournamentDetailDesk(tournamentId: 1, entryId: 1) { ${fields} } }`,
+		});
+		expect(aliased).toEqual({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL document exceeds 200 AST nodes",
+		});
+	});
+
 	it("charges one bounded gameweek desk root instead of separate live roots", () => {
 		const result = validateGraphQLRequestLimits({
 			query: "query { gameweekDesk(eventId: 1) { eventId dreamTeam { id } hauls { id } } }",
