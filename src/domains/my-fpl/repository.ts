@@ -645,7 +645,7 @@ const loadTeamHistory = async (
 		        result.event_transfers_cost, result.event_net_points,
 		        result.event_bench_points, result.event_chip::text,
 		        result.captain_points, player.web_name AS captain_web_name,
-		        team.short_name AS captain_team_short_name, result.team_value, result.bank
+		        result.team_value, result.bank
 		 FROM competition.entry_event_results result
 		 JOIN fpl.events event
 		   ON event.season_id = result.season_id
@@ -656,9 +656,18 @@ const loadTeamHistory = async (
 		 LEFT JOIN fpl.players player
 		   ON player.season_id = result.season_id
 		  AND player.element_id = result.played_captain_element_id
+		 LEFT JOIN LATERAL (
+		   SELECT fixture_stats.team_id
+		   FROM fpl.player_fixture_stats fixture_stats
+		   WHERE fixture_stats.season_id = result.season_id
+		     AND fixture_stats.event_id = result.event_id
+		     AND fixture_stats.element_id = result.played_captain_element_id
+		   ORDER BY fixture_stats.fixture_id
+		   LIMIT 1
+		 ) captain_historical_team ON TRUE
 		 LEFT JOIN fpl.teams team
 		   ON team.season_id = player.season_id
-		  AND team.team_id = player.team_id
+		  AND team.team_id = COALESCE(captain_historical_team.team_id, player.team_id)
 		 WHERE result.season_id = $1
 		   AND result.entry_id = $2
 		   AND result.rich_synced_at IS NOT NULL
@@ -1035,13 +1044,33 @@ const loadTeamTransfers = async (context: GraphQLContext): Promise<MyFplTeamTran
 		 LEFT JOIN fpl.players player_in
 		   ON player_in.season_id = transfer.season_id
 		  AND player_in.element_id = transfer.element_in_id
+		 LEFT JOIN LATERAL (
+		   SELECT fixture_stats.team_id
+		   FROM fpl.player_fixture_stats fixture_stats
+		   WHERE fixture_stats.season_id = transfer.season_id
+		     AND fixture_stats.event_id = transfer.event_id
+		     AND fixture_stats.element_id = transfer.element_in_id
+		   ORDER BY fixture_stats.fixture_id
+		   LIMIT 1
+		 ) historical_team_in ON TRUE
 		 LEFT JOIN fpl.teams team_in
-		   ON team_in.season_id = player_in.season_id AND team_in.team_id = player_in.team_id
+		   ON team_in.season_id = player_in.season_id
+		  AND team_in.team_id = COALESCE(historical_team_in.team_id, player_in.team_id)
 		 LEFT JOIN fpl.players player_out
 		   ON player_out.season_id = transfer.season_id
 		  AND player_out.element_id = transfer.element_out_id
+		 LEFT JOIN LATERAL (
+		   SELECT fixture_stats.team_id
+		   FROM fpl.player_fixture_stats fixture_stats
+		   WHERE fixture_stats.season_id = transfer.season_id
+		     AND fixture_stats.event_id = transfer.event_id
+		     AND fixture_stats.element_id = transfer.element_out_id
+		   ORDER BY fixture_stats.fixture_id
+		   LIMIT 1
+		 ) historical_team_out ON TRUE
 		 LEFT JOIN fpl.teams team_out
-		   ON team_out.season_id = player_out.season_id AND team_out.team_id = player_out.team_id
+		   ON team_out.season_id = player_out.season_id
+		  AND team_out.team_id = COALESCE(historical_team_out.team_id, player_out.team_id)
 		 WHERE transfer.season_id = $1 AND transfer.entry_id = $2
 		 ORDER BY transfer.event_id, transfer.transfer_time, transfer.transfer_id`,
 		[context.currentSeason.seasonId, entryId]
@@ -1102,6 +1131,26 @@ const assertTournamentMembership = async (
 		});
 	}
 	(context.authorizedTournamentMemberships ??= new Set()).add(tournamentId);
+};
+
+type DbTournamentMembershipRow = QueryResultRow & { tournament_id: number };
+
+const filterCurrentTournamentMemberships = async (
+	context: GraphQLContext,
+	entryId: number,
+	tournaments: TournamentInfo[]
+): Promise<TournamentInfo[]> => {
+	if (tournaments.length === 0) return [];
+	const result = await context.database.query<DbTournamentMembershipRow>(
+		`SELECT tournament_id
+		 FROM competition.tournament_entries
+		 WHERE season_id = $1
+		   AND entry_id = $2
+		   AND tournament_id = ANY($3::integer[])`,
+		[context.currentSeason.seasonId, entryId, tournaments.map((tournament) => tournament.id)]
+	);
+	const currentMemberships = new Set(result.rows.map((row) => row.tournament_id));
+	return tournaments.filter((tournament) => currentMemberships.has(tournament.id));
 };
 
 const normalizeSearch = (value?: string | null): string => {
@@ -1546,11 +1595,12 @@ const loadCompetitionsDesk = async (
 	const requestedTournamentPromise = tournamentId
 		? tournamentsRepository.getTournamentInfoUncached(context, tournamentId)
 		: Promise.resolve(null);
-	const [loadedContext, tournaments, requestedTournament] = await Promise.all([
+	const [loadedContext, cachedTournaments, requestedTournament] = await Promise.all([
 		loadReviewContext(context),
 		tournamentsRepository.getEntryTournaments(context, entryId),
 		requestedTournamentPromise,
 	]);
+	let tournaments = await filterCurrentTournamentMemberships(context, entryId, cachedTournaments);
 	const selectedTournament = (tournamentId ? requestedTournament : tournaments[0]) ?? null;
 	if (tournamentId && !selectedTournament) {
 		throw new GraphQLError("User is not a member of this tournament", {
@@ -1573,6 +1623,9 @@ const loadCompetitionsDesk = async (
 	// tournament before returning even during preseason. This prevents a
 	// recently revoked membership from receiving cached protected metadata.
 	await assertTournamentMembership(context, selectedTournament.id, entryId);
+	if (!tournaments.some((tournament) => tournament.id === selectedTournament.id)) {
+		tournaments = [...tournaments, selectedTournament];
+	}
 	const selectedEventId = eventId ?? loadedContext.value.latestFinalizedEventId;
 	if (selectedEventId === null) {
 		return {

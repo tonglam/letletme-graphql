@@ -129,6 +129,10 @@ describe("My FPL review repository", () => {
 		expect(source).toContain("FROM fpl.player_fixture_stats fixture_stats");
 		expect(source).toContain("COALESCE(historical_team.team_id, player.team_id)");
 		expect(source).toContain("match.team_h_id = COALESCE(historical_team.team_id, player.team_id)");
+		expect(source).toContain("captain_historical_team");
+		expect(source).toContain("COALESCE(captain_historical_team.team_id, player.team_id)");
+		expect(source).toContain("historical_team_in");
+		expect(source).toContain("COALESCE(historical_team_in.team_id, player_in.team_id)");
 		expect(source).toContain("transfers_synced_through_event_id");
 		expect(source).toContain(
 			'return { state: "PENDING", context: loadedContext.value, gameweeks: [] }'
@@ -166,6 +170,8 @@ describe("My FPL review repository", () => {
 		);
 		expect(membershipStart).toBeGreaterThan(deskStart);
 		expect(membershipStart).toBeLessThan(selectedEventStart);
+		expect(source).toContain("filterCurrentTournamentMemberships");
+		expect(source).toContain("tournament_id = ANY($3::integer[])");
 		expect(source).toContain("metadata.groupMode !== GroupMode.POINTS_RACES");
 		expect(source).toContain("tournament.groupMode !== GroupMode.POINTS_RACES");
 	});
