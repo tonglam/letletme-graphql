@@ -195,6 +195,7 @@ export type ManagedTournamentStatus = {
 	rosterSyncStatus: TournamentSetupStatus | null;
 	setupCompletedUnits: number;
 	setupTotalUnits: number;
+	standingsReadyAt: string | null;
 	setupHasWarnings: boolean;
 	updatedAt: string;
 };
@@ -2826,7 +2827,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		const tournament = await context.data
 			.read("competition.tournaments")
 			.select(
-				"id, admin_entry_id, state, setup_status, setup_phase, roster_sync_status, setup_completed_units, setup_total_units, setup_warning_count, updated_at"
+				"id, admin_entry_id, state, setup_status, setup_phase, roster_sync_status, setup_completed_units, setup_total_units, standings_ready_at, setup_warning_count, updated_at"
 			)
 			.eq("id", tournamentId)
 			.eq("admin_entry_id", entryId)
@@ -2850,6 +2851,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				: null,
 			setupCompletedUnits: Number(row.setup_completed_units ?? 0),
 			setupTotalUnits: Number(row.setup_total_units ?? 0),
+			standingsReadyAt: row.standings_ready_at ? String(row.standings_ready_at) : null,
 			setupHasWarnings: Number(row.setup_warning_count ?? 0) > 0,
 			updatedAt: String(row.updated_at),
 		};
