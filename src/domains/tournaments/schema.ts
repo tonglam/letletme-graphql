@@ -161,6 +161,7 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		rosterSyncStatus: TournamentSetupStatus
 		setupCompletedUnits: Int!
 		setupTotalUnits: Int!
+		standingsReadyAt: DateTime
 		setupHasWarnings: Boolean!
 		updatedAt: DateTime!
 	}
