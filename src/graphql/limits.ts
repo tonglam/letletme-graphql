@@ -22,6 +22,7 @@ export const GRAPHQL_LIMITS = {
 	maxRootFields: 5,
 	maxAliases: 20,
 	maxAstNodes: 200,
+	maxBoundedDeskAstNodes: 400,
 	maxComplexity: 600,
 } as const;
 
@@ -423,6 +424,13 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["tournamentOfficialH2H", 30],
 	["tournamentDetailDesk", 30],
 	["managedTournamentStatus", 2],
+	["myFplTeamDesk", 5],
+	["myFplTeamGameweek", 5],
+	["myFplTeamTransfers", 5],
+	["myFplCompetitionsDesk", 10],
+	["myFplCompetitionBoard", 10],
+	["myFplCompetitionSeasonPath", 5],
+	["myFplCompetitionSetupStatus", 5],
 ]);
 
 const heavyRootCost = (
@@ -447,13 +455,26 @@ const accepted = ({
 	const optimizedDirectoryRoots = new Set(["playersForPicker", "playerStatsBootstrap"]);
 	const optimizedDirectoryRequest =
 		rootFields.length > 0 && rootFields.every((field) => optimizedDirectoryRoots.has(field.name));
+	const optimizedMyFplRoots = new Set([
+		"myFplTeamDesk",
+		"myFplTeamGameweek",
+		"myFplTeamTransfers",
+		"myFplCompetitionsDesk",
+		"myFplCompetitionBoard",
+		"myFplCompetitionSeasonPath",
+		"myFplCompetitionSetupStatus",
+	]);
+	const optimizedMyFplRequest =
+		rootFields.length > 0 && rootFields.every((field) => optimizedMyFplRoots.has(field.name));
 	return {
 		ok: true,
 		shape,
 		weightedComplexity,
 		rateLimitCostUnits: optimizedDirectoryRequest
 			? 5 * rootFields.length
-			: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
+			: optimizedMyFplRequest
+				? heavyRootCost(rootFields)
+				: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
 		rootFields: rootFields.map((field) => field.name),
 	};
 };
@@ -500,9 +521,19 @@ export const validateGraphQLPayloadLimits = (
 			(field) =>
 				field.name === "tournamentDetailDesk" && field.responseKey === "tournamentDetailDesk"
 		);
+	const usesMyFplCompetitionsDesk =
+		onlyReachableDefinitions &&
+		responseKeys.size === 1 &&
+		rootNames.length > 0 &&
+		rootNames.every(
+			(field) =>
+				field.name === "myFplCompetitionsDesk" && field.responseKey === "myFplCompetitionsDesk"
+		);
 	const maxAstNodes = usesTournamentDetailDesk
 		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
-		: GRAPHQL_LIMITS.maxAstNodes;
+		: usesMyFplCompetitionsDesk
+			? GRAPHQL_LIMITS.maxBoundedDeskAstNodes
+			: GRAPHQL_LIMITS.maxAstNodes;
 	let astNodes = 0;
 	visit(document, { enter: () => void (astNodes += 1) });
 	if (astNodes > maxAstNodes) {

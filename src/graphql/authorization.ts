@@ -30,6 +30,7 @@ type AuthorizationInput = {
 	data: ReadModelClient;
 	logger: Logger;
 	requestScope?: object;
+	authorizedTournamentMemberships?: Set<number>;
 };
 
 export type AuthorizationResult =
@@ -123,6 +124,16 @@ const tournamentMembershipFields = new Set([
 	"tournament",
 	"tournamentLiveParticipants",
 	"tournamentDetailDesk",
+	"myFplCompetitionBoard",
+	"myFplCompetitionSeasonPath",
+	"myFplCompetitionSetupStatus",
+]);
+
+const verifiedEntryFields = new Set([
+	"myFplTeamDesk",
+	"myFplTeamGameweek",
+	"myFplTeamTransfers",
+	"myFplCompetitionsDesk",
 ]);
 
 const protectedFields = new Set([
@@ -130,6 +141,7 @@ const protectedFields = new Set([
 	...ownEntryArgFields.keys(),
 	...tournamentMembershipFields,
 	"managedTournamentStatus",
+	...verifiedEntryFields,
 	"calcLivePointsForEntries",
 	"leagueEventResults",
 	"homePersonalDesk",
@@ -267,10 +279,12 @@ const hasTournamentMembership = async (
 	dataClient: ReadModelClient,
 	tournamentId: number,
 	entryId: number,
-	scope?: object
+	requestScope?: object,
+	authorizedTournamentMemberships?: Set<number>
 ): Promise<boolean> => {
-	const memo = scope ? tournamentAccessMemo(scope, "membership") : null;
+	const memo = requestScope ? tournamentAccessMemo(requestScope, "membership") : null;
 	const memoKey = `${tournamentId}:${entryId}`;
+	if (authorizedTournamentMemberships?.has(tournamentId)) return true;
 	if (memo?.has(memoKey)) return memo.get(memoKey)!;
 	const { data, error } = await dataClient
 		.read("competition.tournament_entries")
@@ -281,6 +295,7 @@ const hasTournamentMembership = async (
 	if (error) return false;
 	const value = ((data as { entry_id: number }[] | null) ?? []).length > 0;
 	memo?.set(memoKey, value);
+	if (value) authorizedTournamentMemberships?.add(tournamentId);
 	return value;
 };
 
@@ -339,7 +354,8 @@ const authorizeRootField = async (
 	field: RootField,
 	principal: Principal | null | undefined,
 	dataClient: ReadModelClient,
-	requestScope?: object
+	requestScope?: object,
+	authorizedTournamentMemberships?: Set<number>
 ): Promise<AuthorizationResult> => {
 	if (publicFields.has(field.name)) return { ok: true };
 	if (!protectedFields.has(field.name)) {
@@ -371,6 +387,40 @@ const authorizeRootField = async (
 			code: "FORBIDDEN",
 			message: "A verified FPL binding is required",
 		};
+	}
+
+	if (verifiedEntryFields.has(field.name) && !hasVerifiedEntry(principal)) {
+		return {
+			ok: false,
+			status: 403,
+			code: "FORBIDDEN",
+			message: "A verified FPL binding is required",
+		};
+	}
+
+	if (
+		field.name === "myFplCompetitionsDesk" &&
+		field.args.tournamentId !== null &&
+		field.args.tournamentId !== undefined
+	) {
+		const tournamentId = asPositiveInt(field.args.tournamentId);
+		if (
+			!tournamentId ||
+			!(await hasTournamentMembership(
+				dataClient,
+				tournamentId,
+				principal.fplEntryId!,
+				requestScope,
+				authorizedTournamentMemberships
+			))
+		) {
+			return {
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+				message: "User is not a member of this tournament",
+			};
+		}
 	}
 
 	const entryArgName = ownEntryArgFields.get(field.name);
@@ -409,7 +459,8 @@ const authorizeRootField = async (
 			dataClient,
 			tournamentId,
 			principal.fplEntryId!,
-			requestScope
+			requestScope,
+			authorizedTournamentMemberships
 		);
 		const isRetainedAdmin =
 			(field.name === "tournamentParticipants" || field.name === "tournamentDetailDesk") &&
@@ -481,11 +532,13 @@ const authorizePayload = async ({
 	principal,
 	data,
 	requestScope,
+	authorizedTournamentMemberships,
 }: {
 	payload: GraphQLRequestPayload;
 	principal?: Principal | null;
 	data: ReadModelClient;
 	requestScope?: object;
+	authorizedTournamentMemberships?: Set<number>;
 }): Promise<AuthorizationResult> => {
 	if (typeof payload.query !== "string") return { ok: true };
 
@@ -498,7 +551,13 @@ const authorizePayload = async ({
 	const fields = collectRootFields(operation.selectionSet, getFragments(document), variables);
 
 	for (const field of fields) {
-		const result = await authorizeRootField(field, principal, data, requestScope);
+		const result = await authorizeRootField(
+			field,
+			principal,
+			data,
+			requestScope,
+			authorizedTournamentMemberships
+		);
 		if (!result.ok) return result;
 	}
 
@@ -527,6 +586,7 @@ export const authorizeGraphQLRequest = async (
 				principal: input.principal,
 				data: input.data,
 				requestScope: input.requestScope,
+				authorizedTournamentMemberships: input.authorizedTournamentMemberships,
 			});
 			if (!result.ok) return result;
 		} catch (error) {
