@@ -171,9 +171,16 @@ describe("My FPL review repository", () => {
 		expect(membershipStart).toBeGreaterThan(deskStart);
 		expect(membershipStart).toBeLessThan(selectedEventStart);
 		expect(source).toContain("filterCurrentTournamentMemberships");
-		expect(source).toContain("tournament_id = ANY($3::integer[])");
+		expect(source).toContain("missingTournamentIds");
+		expect(source).toContain("getTournamentInfoUncached(context, tournamentId)");
 		expect(source).toContain("metadata.groupMode !== GroupMode.POINTS_RACES");
 		expect(source).toContain("tournament.groupMode !== GroupMode.POINTS_RACES");
+		const boardStart = source.indexOf("const loadCompetitionBoardPrepared");
+		const boardEnd = source.indexOf("const loadCompetitionBoard =", boardStart);
+		const boardSource = source.slice(boardStart, boardEnd);
+		expect(boardSource.indexOf("metadata.groupMode !== GroupMode.POINTS_RACES")).toBeLessThan(
+			boardSource.indexOf("loadedContext.finalizedEventIds.has(eventId)")
+		);
 	});
 
 	it("bounds board pagination and normalizes legacy readiness fields", () => {

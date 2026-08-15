@@ -1144,17 +1144,31 @@ const filterCurrentTournamentMemberships = async (
 	entryId: number,
 	tournaments: TournamentInfo[]
 ): Promise<TournamentInfo[]> => {
-	if (tournaments.length === 0) return [];
 	const result = await context.database.query<DbTournamentMembershipRow>(
 		`SELECT tournament_id
 		 FROM competition.tournament_entries
 		 WHERE season_id = $1
 		   AND entry_id = $2
-		   AND tournament_id = ANY($3::integer[])`,
-		[context.currentSeason.seasonId, entryId, tournaments.map((tournament) => tournament.id)]
+		 ORDER BY tournament_id`,
+		[context.currentSeason.seasonId, entryId]
 	);
-	const currentMemberships = new Set(result.rows.map((row) => row.tournament_id));
-	return tournaments.filter((tournament) => currentMemberships.has(tournament.id));
+	const currentTournamentIds = result.rows.map((row) => row.tournament_id);
+	const cachedById = new Map(tournaments.map((tournament) => [tournament.id, tournament]));
+	const missingTournamentIds = currentTournamentIds.filter(
+		(tournamentId) => !cachedById.has(tournamentId)
+	);
+	const uncachedTournaments = await Promise.all(
+		missingTournamentIds.map((tournamentId) =>
+			tournamentsRepository.getTournamentInfoUncached(context, tournamentId)
+		)
+	);
+	for (const tournament of uncachedTournaments) {
+		if (tournament) cachedById.set(tournament.id, tournament);
+	}
+	return currentTournamentIds.flatMap((tournamentId) => {
+		const tournament = cachedById.get(tournamentId);
+		return tournament ? [tournament] : [];
+	});
 };
 
 const normalizeSearch = (value?: string | null): string => {
@@ -1248,9 +1262,9 @@ const loadCompetitionBoardPrepared = async (
 		rows: [],
 		viewerRow: null,
 	});
-	if (!loadedContext.finalizedEventIds.has(eventId)) return empty("PENDING");
 	if (!metadata) return empty("EMPTY");
 	if (metadata.groupMode !== GroupMode.POINTS_RACES) return empty("UNAVAILABLE");
+	if (!loadedContext.finalizedEventIds.has(eventId)) return empty("PENDING");
 	if (
 		metadata.setupStatus !== TournamentSetupStatus.READY ||
 		!metadata.standingsReadyAt ||
