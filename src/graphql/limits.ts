@@ -95,6 +95,24 @@ const effectiveRootFieldsFor = (
 ): { fields: EffectiveRootField[]; reachableFragments: Set<string> } => {
 	const fields: EffectiveRootField[] = [];
 	const reachableFragments = new Set<string>();
+	const collectNestedFragments = (selectionSet: SelectionSetNode): void => {
+		for (const selection of selectionSet.selections) {
+			if (selection.kind === Kind.FIELD) {
+				if (selection.selectionSet) collectNestedFragments(selection.selectionSet);
+				continue;
+			}
+			if (selection.kind === Kind.INLINE_FRAGMENT) {
+				collectNestedFragments(selection.selectionSet);
+				continue;
+			}
+			if (reachableFragments.has(selection.name.value)) continue;
+			const fragment = fragments.get(selection.name.value);
+			if (fragment) {
+				reachableFragments.add(selection.name.value);
+				collectNestedFragments(fragment.selectionSet);
+			}
+		}
+	};
 	const collect = (selectionSet: SelectionSetNode): void => {
 		for (const selection of selectionSet.selections) {
 			if (selection.kind === Kind.FIELD) {
@@ -102,6 +120,7 @@ const effectiveRootFieldsFor = (
 					name: selection.name.value,
 					responseKey: selection.alias?.value ?? selection.name.value,
 				});
+				if (selection.selectionSet) collectNestedFragments(selection.selectionSet);
 				continue;
 			}
 			if (selection.kind === Kind.INLINE_FRAGMENT) {
