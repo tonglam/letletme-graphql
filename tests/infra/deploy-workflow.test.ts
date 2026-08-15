@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 const workflow = await Bun.file(".github/workflows/deploy.yml").text();
+const dockerfile = await Bun.file("Dockerfile").text();
 
 describe("production deployment workflow", () => {
 	test("bootstraps a missing VPS checkout before resolving the exact main commit", () => {
@@ -42,6 +43,9 @@ describe("production deployment workflow", () => {
 		expect(redisCheckAt).toBeGreaterThan(redisPreflightAt);
 		expect(rollbackAt).toBeGreaterThan(redisCheckAt);
 		expect(stopAt).toBeGreaterThan(redisCheckAt);
+		expect(dockerfile).toContain(
+			"COPY --chown=bun:bun scripts/check-redis-connectivity.ts ./scripts/check-redis-connectivity.ts"
+		);
 	});
 
 	test("requires both ingress rejection and authenticated business queries", () => {
