@@ -345,7 +345,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 		sql: `
 			SELECT
 				source_snapshot_id AS id,
-				snapshot_date,
+				snapshot_date::text AS snapshot_date,
 				captured_at,
 				element_id,
 				player_code,

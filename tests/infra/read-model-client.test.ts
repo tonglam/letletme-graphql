@@ -143,4 +143,12 @@ describe("Data Platform read client", () => {
 			"summary.tournament_event_rank AS tournament_overall_rank"
 		);
 	});
+
+	it("returns market snapshot dates as calendar-date text", async () => {
+		const { executor, queries } = makeExecutor();
+
+		await clientFor(executor).read("fpl.player_market_snapshots").select("snapshot_date");
+
+		expect(queries[0]?.text).toContain("snapshot_date::text AS snapshot_date");
+	});
 });
