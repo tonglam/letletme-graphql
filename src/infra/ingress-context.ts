@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "crypto";
 import { env } from "./env";
+import { hasExactFields } from "./exact-fields";
 
 type IngressEnvelope = {
 	aud?: unknown;
@@ -38,14 +39,6 @@ const equalSecret = (left: string, right: string): boolean => {
 	const actual = createHash("sha256").update(left).digest();
 	const expected = createHash("sha256").update(right).digest();
 	return timingSafeEqual(actual, expected);
-};
-
-const hasExactFields = (value: object, fields: readonly string[]): boolean => {
-	const actual = Object.keys(value).sort();
-	const expected = [...fields].sort();
-	return (
-		actual.length === expected.length && actual.every((field, index) => field === expected[index])
-	);
 };
 
 /** Verify the short-lived, opaque ingress subject signed by letletme-web. */

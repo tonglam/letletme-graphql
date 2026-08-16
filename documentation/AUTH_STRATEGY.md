@@ -16,11 +16,13 @@ Auth, serve `/api/auth/*`, issue device sessions, or accept cookie sessions.
    ingress signature succeeds.
 4. Public server-rendered Web reads use the independent GraphQL service token.
 
-Every entry-scoped field requires a verified entry binding. The `fpl_entry_id`
-column alone is not sufficient; existing bindings are intentionally unverified
-until the web team-name challenge is completed. Concurrent verification is
-serialized and the web database has a partial unique index on verified entry
-IDs.
+Protected entry-scoped fields require a verified entry binding. The public
+`entry` lookup and `calcLivePointsByEntry` live calculation are deliberate
+exceptions used by public comparison/live-score pages; they do not establish
+identity or grant access to history, transfers, leagues, My FPL, or tournament
+data. The `fpl_entry_id` column alone is not sufficient for protected fields;
+existing bindings are intentionally unverified until the web team-name
+challenge is completed.
 
 ## Web binding challenge
 
@@ -39,9 +41,10 @@ the verified web account.
 
 ## Public GraphQL boundary
 
-`me` and read-only FPL data remain public where documented by the schema.
-Entry, league, tournament, and calculation fields are authorized against the
-resolved principal. Removed fields include `myDevices`, `revokeDevice`,
+`me`, public `entry`, and public live calculation remain available behind the
+trusted ingress where documented by the schema. History, transfers, league,
+My FPL, and tournament fields are authorized against the resolved principal.
+Removed fields include `myDevices`, `revokeDevice`,
 `identifyWechatUser`, and `bindFplEntry`.
 
 See [README](../README.md) and the Web repository's authentication contract for

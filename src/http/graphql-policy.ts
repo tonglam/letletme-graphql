@@ -49,7 +49,7 @@ export type GraphQLRateLimitConfig = {
 };
 
 const principalSubject = (principal: Principal): string =>
-	`principal:${principal.provider}:${principal.userId}`;
+	`principal:${principal.source}:${principal.userId}`;
 
 const ingressSubject = (ingress: GraphQLIngress): string =>
 	ingress.subject ?? `missing:${ingress.class}`;

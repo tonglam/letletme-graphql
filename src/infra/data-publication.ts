@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import type Redis from "ioredis";
+import { hasExactFields } from "./exact-fields";
 
 export const DATA_CACHE_NAMESPACE = "llm:data";
 
@@ -69,14 +70,6 @@ const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
 	"fpl:core": ["events", "teams", "players", "phases", "fixtures", "currentEventId"],
 	"fpl:live": ["eventLive", "fixtures"],
 	"fpl:market": ["context"],
-};
-
-const hasExactFields = (value: Record<string, unknown>, fields: readonly string[]): boolean => {
-	const actual = Object.keys(value).sort();
-	const expected = [...fields].sort();
-	return (
-		actual.length === expected.length && actual.every((field, index) => field === expected[index])
-	);
 };
 
 const hasExactItemNames = (dataset: DataPublicationDataset, names: readonly string[]): boolean => {

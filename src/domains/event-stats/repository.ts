@@ -1,6 +1,10 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import {
+	QUERY_CACHE_TTL_SECONDS,
+	readJsonQueryCache,
+	writeJsonQueryCache,
+} from "../../infra/query-cache";
 import { getCurrentSeason } from "../../infra/season";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
@@ -11,34 +15,8 @@ const privateCacheKey = async (context: GraphQLContext, key: string): Promise<st
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
-const evictMalformedCache = async (context: GraphQLContext, key: string): Promise<void> => {
-	try {
-		await context.redis.del(key);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to evict malformed event-stats cache");
-	}
-};
-
-const readCachedJson = async (
-	context: GraphQLContext,
-	key: string
-): Promise<unknown | undefined> => {
-	let raw: string | null;
-	try {
-		raw = await context.redis.get(key);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to read event-stats cache");
-		return undefined;
-	}
-	if (raw === null) return undefined;
-	try {
-		return JSON.parse(raw) as unknown;
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Malformed event-stats cache");
-		await evictMalformedCache(context, key);
-		return undefined;
-	}
-};
+const readCachedJson = async (context: GraphQLContext, key: string): Promise<unknown | undefined> =>
+	readJsonQueryCache(context, key, (value) => value);
 
 export type SelectionStatPlayer = {
 	id: number;
@@ -93,6 +71,12 @@ export type DbTournamentSelectionStatRow = {
 	captain_percentage: number | string;
 	vice_captain_percentage: number | string;
 	effective_ownership_percentage: number | string;
+};
+
+export type TournamentSelectionIndexRow = {
+	playerId: number;
+	count: number;
+	percentage: number;
 };
 
 const positionTypeToEnum = (type: number): string => {
@@ -242,6 +226,54 @@ async function getReadModelRows(
 	}
 
 	return (data as DbTournamentSelectionStatRow[] | null) ?? [];
+}
+
+/**
+ * Reads the reporting aggregate used by live tournament desks. This is kept
+ * separate from the player-enriched event-stats projection so the desk never
+ * needs to load tournament rosters or raw picks at request time.
+ */
+export async function getTournamentSelectionIndexRows(
+	context: GraphQLContext,
+	tournamentId: number,
+	eventId: number
+): Promise<TournamentSelectionIndexRow[]> {
+	if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) return [];
+	if (!Number.isSafeInteger(eventId) || eventId <= 0) return [];
+	const rows = (await getReadModelRows(context, tournamentId, eventId)) ?? [];
+	if (rows.length === 0) return [];
+
+	let totalEntries: number | null = null;
+	const playerIds = new Set<number>();
+	return rows.map((row) => {
+		const playerId = Number(row.element_id);
+		const count = Number(row.pick_count);
+		const rowTotalEntries = Number(row.total_entries);
+		const percentage = Number(row.selection_percentage);
+		if (
+			!Number.isSafeInteger(playerId) ||
+			playerId <= 0 ||
+			!Number.isSafeInteger(count) ||
+			count < 0 ||
+			!Number.isSafeInteger(rowTotalEntries) ||
+			rowTotalEntries <= 0 ||
+			count > rowTotalEntries ||
+			!Number.isFinite(percentage) ||
+			percentage < 0 ||
+			percentage > 100
+		) {
+			throw new Error("Malformed tournament selection index read model row");
+		}
+		if (totalEntries === null) totalEntries = rowTotalEntries;
+		if (rowTotalEntries !== totalEntries) {
+			throw new Error("Inconsistent tournament selection index total_entries");
+		}
+		if (playerIds.has(playerId)) {
+			throw new Error("Duplicate tournament selection index player");
+		}
+		playerIds.add(playerId);
+		return { playerId, count, percentage };
+	});
 }
 
 function snapshotFromReadModel(rows: DbTournamentSelectionStatRow[]): {
@@ -508,12 +540,7 @@ export const eventStatsRepository: EventStatsRepository = {
 				eventId,
 				season
 			);
-			await writeQueryCache(
-				context,
-				cacheKey,
-				JSON.stringify(result),
-				QUERY_CACHE_TTL_SECONDS.REPORTING
-			);
+			await writeJsonQueryCache(context, cacheKey, result, QUERY_CACHE_TTL_SECONDS.REPORTING);
 			return result;
 		}
 

@@ -1,8 +1,7 @@
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import type { TournamentSelectionStats } from "../event-stats/repository";
-import type { PublicLeagueTrend } from "./repository";
-import { publicLeagueTrendsService } from "./service";
+import { publicLeagueTrendsRepository, type PublicLeagueTrend } from "./repository";
 
 const positiveInteger = (value: number, name: string): number => {
 	if (!Number.isInteger(value) || value <= 0) {
@@ -29,13 +28,13 @@ export const publicLeagueTrendsResolvers = {
 			_parent: unknown,
 			_args: unknown,
 			context: GraphQLContext
-		): Promise<PublicLeagueTrend[]> => publicLeagueTrendsService.list(context),
+		): Promise<PublicLeagueTrend[]> => publicLeagueTrendsRepository.list(context),
 		publicLeagueSelectionStats: (
 			_parent: unknown,
 			args: { tournamentId: number; eventId: number; limit?: number | null },
 			context: GraphQLContext
 		): Promise<TournamentSelectionStats | null> =>
-			publicLeagueTrendsService.getSelectionStats(
+			publicLeagueTrendsRepository.getSelectionStats(
 				context,
 				positiveInteger(args.tournamentId, "tournamentId"),
 				positiveInteger(args.eventId, "eventId"),

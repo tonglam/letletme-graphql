@@ -151,7 +151,8 @@ export const validateDatabaseContract = async (
 
 	const capabilityRole = expectOne(
 		(
-			await database.query<CapabilityRoleRow>(`
+			await database.query<CapabilityRoleRow>(
+				`
 				SELECT
 					rolname AS role_name,
 					rolcanlogin,
@@ -162,8 +163,10 @@ export const validateDatabaseContract = async (
 					rolreplication,
 					rolbypassrls
 				FROM pg_roles
-				WHERE rolname = '${GRAPHQL_RUNTIME_CAPABILITY_ROLE}'
-			`)
+				WHERE rolname = $1
+				`,
+				[GRAPHQL_RUNTIME_CAPABILITY_ROLE]
+			)
 		).rows,
 		"The GraphQL runtime capability role cannot be resolved"
 	);

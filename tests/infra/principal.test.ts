@@ -75,6 +75,32 @@ describe("website principal envelope", () => {
 		expect(verifyWebsitePrincipal(websiteHeaders(payload))).toBeNull();
 	});
 
+	test("preserves an explicit unverified season binding without granting proof", () => {
+		const now = Math.floor(Date.now() / 1000);
+		const principal = verifyWebsitePrincipal(
+			websiteHeaders({
+				v: 2,
+				aud: "letletme-graphql",
+				uid: "user-1",
+				eid: 123,
+				evat: null,
+				bs: "2627",
+				ba: "UNVERIFIED",
+				bp: "DIRECT_BINDING",
+				iat: now,
+				exp: now + 60,
+			})
+		);
+
+		expect(principal).toMatchObject({
+			fplEntryId: 123,
+			fplEntryVerifiedAt: null,
+			fplEntrySeason: "2627",
+			fplEntryBindingAssurance: "UNVERIFIED",
+			envelopeVersion: 2,
+		});
+	});
+
 	test("rejects envelopes whose expiry is not after issuance", () => {
 		const now = Math.floor(Date.now() / 1000);
 		expect(
@@ -112,7 +138,6 @@ describe("Mini Program session authentication", () => {
 		const expected = {
 			userId: "mini-user",
 			source: "wechat_miniprogram" as const,
-			provider: "wechat_miniprogram" as const,
 			fplEntryId: 123,
 			fplEntryVerifiedAt: "2026-07-18T00:00:00.000Z",
 		};
@@ -135,5 +160,32 @@ describe("Mini Program session authentication", () => {
 				},
 			})
 		).rejects.toThrow("database unavailable");
+	});
+
+	test("rejects a request carrying both website and Bearer credentials", async () => {
+		const now = Math.floor(Date.now() / 1000);
+		const headers = websiteHeaders({
+			v: 2,
+			aud: "letletme-graphql",
+			uid: "website-user",
+			eid: null,
+			evat: null,
+			bs: null,
+			ba: null,
+			bp: null,
+			iat: now,
+			exp: now + 60,
+		});
+		headers.set("Authorization", "Bearer mini-token");
+		expect(
+			await getPrincipalFromHeaders(headers, {
+				validateMiniProgramSessionToken: async () => ({
+					userId: "mini-user",
+					source: "wechat_miniprogram",
+					fplEntryId: null,
+					fplEntryVerifiedAt: null,
+				}),
+			})
+		).toBeNull();
 	});
 });

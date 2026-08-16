@@ -5,7 +5,7 @@ import type {
 	TournamentSelectionStats,
 	TransferStatPlayer,
 } from "./repository";
-import { eventStatsService } from "./service";
+import { eventStatsRepository } from "./repository";
 import { assertTournamentInsightsReady } from "../tournaments/service";
 
 type TournamentSelectionStatsArgs = {
@@ -22,7 +22,7 @@ export const eventStatsResolvers = {
 			context: GraphQLContext
 		): Promise<TournamentSelectionStats> => {
 			await assertTournamentInsightsReady(context, args.tournamentId);
-			return eventStatsService.getTournamentSelectionStats(
+			return eventStatsRepository.getTournamentSelectionStats(
 				context,
 				args.tournamentId,
 				args.eventId,

@@ -60,6 +60,10 @@ export const entriesTypeDefs = /* GraphQL */ `
 	}
 
 	extend type Query {
+		"""
+		Public entry lookup behind the trusted ingress. This does not establish an
+		identity binding or grant access to protected entry history.
+		"""
 		entry(id: Int!): Entry
 		entryHistory(entryId: Int!): EntryHistoryPayload!
 		entryEventResult(entryId: Int!, eventId: Int!): EntryEventResult

@@ -1,5 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
-import { miniProgramService } from "./service";
+import { miniProgramRepository } from "./repository";
 
 export const miniProgramResolvers = {
 	Query: {
@@ -7,6 +7,6 @@ export const miniProgramResolvers = {
 			_parent: unknown,
 			_args: Record<string, never>,
 			context: GraphQLContext
-		): Promise<string> => miniProgramService.getMiniProgramNotice(context),
+		): Promise<string> => miniProgramRepository.getMiniProgramNotice(context),
 	},
 };

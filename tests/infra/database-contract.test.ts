@@ -78,7 +78,7 @@ const makeContractExecutor = (
 					rowCount: 1,
 				} as never;
 			}
-			if (text.includes("WHERE rolname = 'letletme_graphql_reader'")) {
+			if (text.includes("WHERE rolname = $1")) {
 				return {
 					rows: [
 						{

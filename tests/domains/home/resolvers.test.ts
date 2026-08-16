@@ -7,6 +7,7 @@ import type { MarketPulse } from "../../../src/domains/market/repository";
 import { Position } from "../../../src/domains/players/repository";
 import { playersService } from "../../../src/domains/players/service";
 import { schema } from "../../../src/graphql/schema";
+import { LIGHTWEIGHT_CORE_FIELDS } from "../../../src/graphql/root-field-policy";
 import type { GraphQLContext } from "../../../src/graphql/context";
 import type { Principal } from "../../../src/infra/principal";
 import {
@@ -19,7 +20,6 @@ import {
 const principal: Principal = {
 	userId: "home-user",
 	source: "website",
-	provider: "better_auth",
 	fplEntryId: 123,
 	fplEntryVerifiedAt: "2026-08-14T00:00:00.000Z",
 };
@@ -105,9 +105,8 @@ describe("Home GraphQL contracts", () => {
 	});
 
 	it("classifies the combined Home gameweek roots as lightweight", async () => {
-		const serverSource = await Bun.file("src/index.ts").text();
-		for (const field of ['"homePublicBootstrap"', '"homePersonalDesk"', '"homeGameweek"']) {
-			expect(serverSource).toContain(field);
+		for (const field of ["homePublicBootstrap", "homePersonalDesk", "homeGameweek"]) {
+			expect(LIGHTWEIGHT_CORE_FIELDS.has(field)).toBe(true);
 		}
 	});
 

@@ -7,6 +7,11 @@ Data Platform business schema and publication; `letletme-web` owns `bauth`.
 
 - Bun, Apollo Server 5, PostgreSQL 15, and Redis.
 - `POST /graphql`, `GET /health`, and token-protected `GET /metrics`.
+- `/health` is ready only when PostgreSQL, the current-season authority, the
+  publication/cache Redis client, and the isolated rate-limit Redis client all
+  answer within the bounded probe window.
+- `DATABASE_STATEMENT_TIMEOUT_MS` defaults to 12 seconds and must stay below
+  the Web proxy's 15-second upstream timeout.
 - A dedicated read-only PostgreSQL login inherits
   `letletme_graphql_reader`; it is never the Data migration login.
 - Startup runs `bun run contract:check` and fails closed unless the exact

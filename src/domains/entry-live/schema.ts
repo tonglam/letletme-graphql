@@ -39,6 +39,8 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 
 		"""
 		Full live calculation for an entry and event.
+		This lookup is public behind the trusted ingress for live scoreboards and
+		comparison pages; it does not authorize protected entry data.
 
 		This is the GraphQL-native equivalent of the LiveCalcData payload:
 		- static data (entry/player/team/fixtures) comes from cached repositories

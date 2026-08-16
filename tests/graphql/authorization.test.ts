@@ -44,7 +44,6 @@ const data = {
 const websitePrincipal: Principal = {
 	userId: "user-1",
 	source: "website",
-	provider: "better_auth",
 	fplEntryId: 123,
 	fplEntryVerifiedAt: "2026-07-18T00:00:00.000Z",
 };
@@ -54,6 +53,15 @@ const unverifiedWebsitePrincipal: Principal = {
 	fplEntryVerifiedAt: null,
 };
 
+const unverifiedSeasonPrincipal: Principal = {
+	...websitePrincipal,
+	fplEntryVerifiedAt: null,
+	fplEntryBindingAssurance: "UNVERIFIED",
+	fplEntryBindingProofKind: "DIRECT_BINDING",
+	fplEntrySeason: "2627",
+	envelopeVersion: 2,
+};
+
 const authorize = (
 	query: string,
 	variables?: Record<string, unknown>,
@@ -61,13 +69,16 @@ const authorize = (
 ) =>
 	authorizeGraphQLRequest({
 		body: { query, variables },
-		searchParams: new URLSearchParams(),
 		principal,
 		data,
 		logger,
 	});
 
 describe("authorizeGraphQLRequest", () => {
+	it("keeps the executable schema read-only", () => {
+		expect(schema.getMutationType()).toBeUndefined();
+	});
+
 	it("classifies every field exposed by the executable schema", () => {
 		const fields = [
 			...Object.keys(schema.getQueryType()?.getFields() ?? {}),
@@ -195,7 +206,6 @@ describe("authorizeGraphQLRequest", () => {
 				}`,
 				variables: { tournamentId: 7 },
 			},
-			searchParams: new URLSearchParams(),
 			principal: websitePrincipal,
 			data: countedData,
 			logger,
@@ -251,6 +261,31 @@ describe("authorizeGraphQLRequest", () => {
 			expect(result.status).toBe(403);
 			expect(result.code).toBe("FORBIDDEN");
 		}
+	});
+
+	it("rejects an unverified direct binding even when the entry number matches", async () => {
+		expect(
+			await authorize(
+				`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
+				{ entryId: 123 },
+				unverifiedSeasonPrincipal
+			)
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+	});
+
+	it("rejects a verified binding from a stale season", async () => {
+		const result = await authorizeGraphQLRequest({
+			body: { query: `query { homePersonalDesk { state } }` },
+			principal: {
+				...websitePrincipal,
+				fplEntrySeason: "2526",
+				envelopeVersion: 2,
+			},
+			data,
+			logger,
+			currentSeason: "2627",
+		});
+		expect(result).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
 	});
 
 	it("allows the direct tournament shell for a verified member", async () => {

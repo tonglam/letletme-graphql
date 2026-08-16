@@ -4,12 +4,14 @@ This repository is the GraphQL verifier, not the identity provider.
 
 Implemented here:
 
-- Better Auth dependency, initialization, cookie fallback, and `/api/auth/*`
-  routing removed.
+- Former identity-provider dependency, initialization, cookie fallback, and
+  `/api/auth/*` routing are not part of this service.
 - `/api/device/auth` is not registered and returns the ordinary `404` response.
 - Exact Web-signed envelopes and Web-owned Mini Program session hashes resolve
   to one principal type behind verified ingress.
-- Verified FPL entry state is required for entry-scoped authorization.
+- Verified FPL entry state is required for protected entry-scoped authorization;
+  public entry lookup and live calculation remain explicitly documented
+  exceptions.
 - GraphQL payload, depth, alias, AST, complexity, batch, and Redis rate limits
   are enforced with fail-closed security routes.
 

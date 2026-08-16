@@ -3,6 +3,9 @@ import type { GraphQLContext } from "../../src/graphql/context";
 import {
 	deleteQueryCache,
 	QUERY_CACHE_TTL_SECONDS,
+	readJsonQueryCache,
+	readJsonQueryCacheBatch,
+	writeJsonQueryCache,
 	writeQueryCache,
 } from "../../src/infra/query-cache";
 
@@ -41,5 +44,39 @@ describe("GraphQL query cache policy", () => {
 		await expect(writeQueryCache(context, "key", "value", 0)).rejects.toThrow(
 			"must be a positive integer"
 		);
+	});
+
+	it("decodes JSON caches and evicts malformed or rejected values", async () => {
+		const values = new Map<string, string>([
+			["valid", JSON.stringify({ id: 1 })],
+			["bad-json", "{"],
+			["wrong-shape", JSON.stringify({ id: "not-a-number" })],
+		]);
+		const context = {
+			redis: {
+				get: async (key: string) => values.get(key) ?? null,
+				mget: async (...keys: string[]) => keys.map((key) => values.get(key) ?? null),
+				del: async (key: string) => {
+					values.delete(key);
+				},
+				set: async () => "OK",
+			},
+			logger: { warn: () => {} },
+		} as unknown as GraphQLContext;
+		const decode = (value: unknown): { id: number } | null => {
+			if (typeof value !== "object" || value === null || !("id" in value)) return null;
+			const id = (value as { id?: unknown }).id;
+			return typeof id === "number" ? { id } : null;
+		};
+		expect(await readJsonQueryCache(context, "valid", decode)).toEqual({ id: 1 });
+		expect(await readJsonQueryCache(context, "bad-json", decode)).toBeUndefined();
+		expect(await readJsonQueryCache(context, "wrong-shape", decode)).toBeUndefined();
+		expect(values.has("bad-json")).toBe(false);
+		expect(values.has("wrong-shape")).toBe(false);
+		expect(await readJsonQueryCacheBatch(context, ["valid", "missing"], decode)).toEqual([
+			{ id: 1 },
+			undefined,
+		]);
+		expect(await writeJsonQueryCache(context, "new", { id: 2 }, 60)).toBe(true);
 	});
 });

@@ -13,6 +13,8 @@ const createRedisClient = (): Redis =>
 		maxRetriesPerRequest: 2,
 		enableReadyCheck: true,
 		enableAutoPipelining: true,
+		connectTimeout: 2_000,
+		commandTimeout: 2_000,
 	});
 
 export const getRedis = (): Redis => {
