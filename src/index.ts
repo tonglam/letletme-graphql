@@ -13,7 +13,7 @@ import type { GraphQLContext } from "./graphql/context";
 import { validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
 import { validateDatabaseContract } from "./infra/database-contract";
-import { database } from "./infra/database";
+import { database, databaseHealthCheck } from "./infra/database";
 import { coreDatasetRevision, getCoreDataSnapshot } from "./infra/data-snapshot";
 import { closeDbPool } from "./infra/db-pool";
 import { env } from "./infra/env";
@@ -165,7 +165,7 @@ const healthCheck = async (): Promise<{ ok: boolean; body: string }> => {
 			}
 		},
 		postgres: async () => {
-			await database.query("SELECT 1");
+			await databaseHealthCheck();
 		},
 		season: async () => {
 			currentSeasonProvider.get();

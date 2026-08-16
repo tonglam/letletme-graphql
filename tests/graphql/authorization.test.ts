@@ -288,6 +288,22 @@ describe("authorizeGraphQLRequest", () => {
 		expect(result).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
 	});
 
+	it("rejects a protected Mini Program binding without a season", async () => {
+		const result = await authorizeGraphQLRequest({
+			body: { query: `query { homePersonalDesk { state } }` },
+			principal: {
+				...websitePrincipal,
+				source: "wechat_miniprogram",
+				fplEntrySeason: null,
+				envelopeVersion: 2,
+			},
+			data,
+			logger,
+			currentSeason: "2627",
+		});
+		expect(result).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+	});
+
 	it("allows the direct tournament shell for a verified member", async () => {
 		const result = await authorize(
 			`query Shell($tournamentId: Int!, $entryId: Int!) {

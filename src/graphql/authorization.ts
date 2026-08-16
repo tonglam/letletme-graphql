@@ -156,10 +156,7 @@ const hasVerifiedEntry = (principal: Principal): boolean =>
 	);
 
 const isCurrentSeasonBinding = (principal: Principal, currentSeason?: string): boolean =>
-	!currentSeason ||
-	principal.fplEntrySeason === undefined ||
-	principal.fplEntrySeason === null ||
-	principal.fplEntrySeason === currentSeason;
+	!currentSeason || principal.fplEntrySeason === currentSeason;
 
 const requireBoundEntry = (principal: Principal, entryId: number | null): AuthorizationResult => {
 	if (
