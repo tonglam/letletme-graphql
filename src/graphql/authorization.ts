@@ -87,6 +87,8 @@ const publicFields = new Set([
 	"playerDetail",
 	"playerStateProfile",
 	"miniProgramNotice",
+	"briefingWeek",
+	"briefingStory",
 	"eventOverallResult",
 	"entry",
 	"calcLivePointsByEntry",

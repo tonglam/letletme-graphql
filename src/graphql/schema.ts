@@ -46,6 +46,8 @@ import { playersTypeDefs } from "../domains/players/schema";
 import { tournamentsResolvers } from "../domains/tournaments/resolvers";
 import { tournamentsTypeDefs } from "../domains/tournaments/schema";
 import { baseResolvers, baseTypeDefs } from "./base-schema";
+import { briefingResolvers } from "../domains/briefing/resolvers";
+import { briefingTypeDefs } from "../domains/briefing/schema";
 
 export const schema = makeExecutableSchema({
 	typeDefs: [
@@ -73,6 +75,7 @@ export const schema = makeExecutableSchema({
 		playerDetailTypeDefs,
 		playerStateTypeDefs,
 		playerStatsTypeDefs,
+		briefingTypeDefs,
 	],
 	resolvers: [
 		baseResolvers,
@@ -99,5 +102,6 @@ export const schema = makeExecutableSchema({
 		playerDetailResolvers,
 		playerStateResolvers,
 		playerStatsResolvers,
+		briefingResolvers,
 	],
 });
