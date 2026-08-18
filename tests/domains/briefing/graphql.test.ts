@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { graphql } from "graphql";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import fixture from "../../fixtures/briefing/week-publication-v1.json";
 import type { QueryExecutor } from "../../../src/infra/database";
@@ -17,6 +18,14 @@ const canonicalize = (value: unknown): unknown => {
 };
 
 const canonical = JSON.stringify(canonicalize(fixture));
+const DATA_WEEK_PUBLICATION_FIXTURE_SHA256 =
+	"8870d420a7cb01b037905b378a3186ed087608dc03892fee9b356fde05fc75cc";
+const canonicalSha256 = createHash("sha256").update(canonical, "utf8").digest("hex");
+const rawFixtureSha256 = createHash("sha256")
+	.update(
+		readFileSync(new URL("../../fixtures/briefing/week-publication-v1.json", import.meta.url))
+	)
+	.digest("hex");
 const metadata = {
 	publication_id: fixture.publicationId,
 	scope_key: "week",
@@ -55,6 +64,10 @@ const database: QueryExecutor = {
 };
 
 describe("Briefing GraphQL contract", () => {
+	test("consumes the Data-owned fixture checksum", () => {
+		expect(rawFixtureSha256).toBe(DATA_WEEK_PUBLICATION_FIXTURE_SHA256);
+	});
+
 	test("exposes the shared Week publication without personal fields", async () => {
 		const result = await graphql({
 			schema,
