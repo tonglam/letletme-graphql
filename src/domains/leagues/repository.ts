@@ -2,6 +2,11 @@ import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { stableStringify } from "../../infra/stringify";
+import {
+	OfficialLeagueKind,
+	mapFplOfficialKind,
+	sortLeaguesForOfficialDisplay,
+} from "./display-order";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -65,6 +70,7 @@ export type League = {
 	startedEvent: number | null;
 	entryRank: number | null;
 	entryLastRank: number | null;
+	officialKind: OfficialLeagueKind | null;
 	tournamentId: number | null;
 	tournamentName: string | null;
 	tournamentMode: string | null;
@@ -93,6 +99,8 @@ type DbEntryLeagueRow = {
 	entry_rank: number | null;
 	entry_last_rank: number | null;
 	started_event: number | null;
+	official_kind: string | null;
+	short_name: string | null;
 };
 
 type DbTournamentEnrichmentRow = {
@@ -131,7 +139,7 @@ const mapLeague = (
 ): League => ({
 	id: row.league_id,
 	name: row.league_name,
-	shortName: null,
+	shortName: row.short_name ?? null,
 	type: mapLeagueType(row.league_type),
 	created: tournament?.created_at ?? null,
 	closed: tournament?.state === "finished" ? true : null,
@@ -142,6 +150,7 @@ const mapLeague = (
 	startedEvent: row.started_event,
 	entryRank: row.entry_rank,
 	entryLastRank: row.entry_last_rank,
+	officialKind: mapFplOfficialKind(row.official_kind),
 	tournamentId: tournament?.id ?? null,
 	tournamentName: tournament?.name ?? null,
 	tournamentMode: tournament?.tournament_mode ?? null,
@@ -199,7 +208,7 @@ const buildLeagueFromInfo = async (
 		context.data
 			.read("competition.entry_leagues")
 			.select(
-				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event"
+				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event, official_kind, short_name"
 			)
 			.eq("league_id", leagueId)
 			.eq("league_type", leagueType)
@@ -237,6 +246,7 @@ const buildLeagueFromInfo = async (
 		startedEvent: null,
 		entryRank: null,
 		entryLastRank: null,
+		officialKind: null,
 		tournamentId: tournamentRow?.id ?? null,
 		tournamentName: tournamentRow?.name ?? null,
 		tournamentMode: tournamentRow?.tournament_mode ?? null,
@@ -257,17 +267,16 @@ interface LeaguesRepository {
 
 export const leaguesRepository: LeaguesRepository = {
 	async getEntryLeagues(context: GraphQLContext, entryId: number): Promise<League[]> {
-		const cacheKey = gqlCacheKey(context, `leagues:entry:${entryId}`);
+		const cacheKey = gqlCacheKey(context, `leagues:entry:v2:${entryId}`);
 		const cached = await readJsonCache(context, cacheKey, isLeagueArray);
 		if (cached) return cached;
 
 		const { data, error } = await context.data
 			.read("competition.entry_leagues")
 			.select(
-				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event"
+				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event, official_kind, short_name"
 			)
-			.eq("entry_id", entryId)
-			.order("league_id", { ascending: true });
+			.eq("entry_id", entryId);
 
 		if (error) {
 			context.logger.error({ err: error, entryId }, "Failed to fetch entry leagues");
@@ -279,11 +288,13 @@ export const leaguesRepository: LeaguesRepository = {
 		const leagueKeys = [...new Set(rows.map((r) => `${r.league_id}:${r.league_type}`))];
 		const tournamentMap = await fetchTournamentEnrichments(context, leagueKeys);
 
-		const leagues = rows.map((row) => {
-			const key = `${row.league_id}:${row.league_type}`;
-			const tournament = tournamentMap.get(key);
-			return mapLeague(row, tournament);
-		});
+		const leagues = sortLeaguesForOfficialDisplay(
+			rows.map((row) => {
+				const key = `${row.league_id}:${row.league_type}`;
+				const tournament = tournamentMap.get(key);
+				return mapLeague(row, tournament);
+			})
+		);
 
 		await writeQueryCache(
 			context,

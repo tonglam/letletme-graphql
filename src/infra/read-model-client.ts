@@ -624,6 +624,8 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 				started_event,
 				entry_rank,
 				entry_last_rank,
+				official_kind,
+				short_name,
 				created_at,
 				updated_at
 			FROM competition.entry_leagues

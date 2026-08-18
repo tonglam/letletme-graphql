@@ -222,6 +222,8 @@ describe("Home GraphQL contracts", () => {
 			expect(sql).toContain("competition.entry_leagues");
 			expect(sql).toContain("competition.tournaments");
 			expect(sql).toContain("competition.tournament_entries");
+			expect(sql).toContain("official_kind");
+			expect(sql).toContain("short_name");
 			expect(sql).not.toContain("tournament_groups");
 			expect(sql).not.toContain("official_h2h");
 			expect(sql).not.toContain("battle_");
@@ -299,7 +301,7 @@ describe("Home GraphQL contracts", () => {
 		expect(databaseQuery).toHaveBeenCalledTimes(1);
 	});
 
-	it("keeps a 100-league desk bounded to one query and preserves SQL order", async () => {
+	it("keeps a 100-league desk bounded to one query and sorts invitational leagues for home", async () => {
 		const now = new Date();
 		const databaseQuery = mock(async () => ({
 			rows: Array.from({ length: 100 }, (_, index) => ({
@@ -343,6 +345,94 @@ describe("Home GraphQL contracts", () => {
 			name: "League 100",
 		});
 		expect(databaseQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("omits official system and broadcaster leagues from the home preview", async () => {
+		const databaseQuery = mock(async () => ({
+			rows: [
+				{
+					entry_name: "WhoamI FC",
+					player_name: "Tong W",
+					overall_points: 1856,
+					overall_rank: 12580,
+					team_value: 1035,
+					source_checked_at: new Date(),
+					league_id: 314,
+					league_type: "classic",
+					league_name: "Overall",
+					entry_rank: 12580,
+					entry_last_rank: 12600,
+					official_kind: "s",
+					short_name: "overall",
+					tournament_id: null,
+				},
+				{
+					entry_name: "WhoamI FC",
+					player_name: "Tong W",
+					overall_points: 1856,
+					overall_rank: 12580,
+					team_value: 1035,
+					source_checked_at: new Date(),
+					league_id: 317,
+					league_type: "classic",
+					league_name: "Stan Sport League",
+					entry_rank: 80,
+					entry_last_rank: 90,
+					official_kind: "s",
+					short_name: "brd-stan",
+					tournament_id: null,
+				},
+				{
+					entry_name: "WhoamI FC",
+					player_name: "Tong W",
+					overall_points: 1856,
+					overall_rank: 12580,
+					team_value: 1035,
+					source_checked_at: new Date(),
+					league_id: 9002,
+					league_type: "classic",
+					league_name: "Office League",
+					entry_rank: 1,
+					entry_last_rank: 2,
+					official_kind: "x",
+					short_name: null,
+					tournament_id: 12,
+				},
+				{
+					entry_name: "WhoamI FC",
+					player_name: "Tong W",
+					overall_points: 1856,
+					overall_rank: 12580,
+					team_value: 1035,
+					source_checked_at: new Date(),
+					league_id: 9001,
+					league_type: "classic",
+					league_name: "Friends League",
+					entry_rank: 3,
+					entry_last_rank: 4,
+					official_kind: "x",
+					short_name: null,
+					tournament_id: 11,
+				},
+			],
+		}));
+		const context = buildSnapshotContext(new TestRedis(), { databaseQuery });
+		context.principal = principal;
+
+		const result = await graphql({
+			schema,
+			source: "query { homePersonalDesk { state leagueRanks { key name rank } } }",
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.homePersonalDesk).toMatchObject({
+			state: "READY",
+			leagueRanks: [
+				{ key: "classic:9001", name: "Friends League", rank: 3 },
+				{ key: "classic:9002", name: "Office League", rank: 1 },
+			],
+		});
 	});
 
 	it("returns a typed empty desk and preserves stale data", async () => {

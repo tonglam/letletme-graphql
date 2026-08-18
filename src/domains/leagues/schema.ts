@@ -4,11 +4,18 @@ export const leaguesTypeDefs = /* GraphQL */ `
 		H2H
 	}
 
+	enum OfficialLeagueKind {
+		SYSTEM
+		INVITATIONAL
+		PUBLIC
+	}
+
 	type League {
 		id: Int!
 		name: String!
 		shortName: String
 		type: LeagueType!
+		officialKind: OfficialLeagueKind
 		created: String
 		closed: Boolean
 		maxEntries: Int
