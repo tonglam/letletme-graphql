@@ -70,6 +70,7 @@ add(
 		"playerValues",
 		"playerValueHistory",
 		"marketPulse",
+		"marketLineup",
 		"marketOwnershipOverview",
 		"marketOwnershipDay",
 		"marketSnapshotContext",

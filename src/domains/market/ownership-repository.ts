@@ -15,7 +15,7 @@ const MAX_LIMIT = 50;
 const OWNERSHIP_LOOKBACK_DAYS = 45;
 const STALE_AFTER_MS = 36 * 60 * 60 * 1000;
 
-export type MarketOwnershipPeriod = "DAILY" | "GAMEWEEK" | "ROLLING_7D";
+export type MarketOwnershipPeriod = "DAILY" | "GAMEWEEK";
 
 export type MarketOwnershipCoverageStatus =
 	| "READY"
@@ -525,36 +525,6 @@ export const buildMarketOwnershipDay = (
 	};
 };
 
-const buildRollingOverview = (
-	rows: readonly OwnershipSnapshot[],
-	limit: number,
-	now: Date
-): MarketOwnershipOverview => {
-	const latestDate = uniqueSortedDates(rows).at(-1) ?? null;
-	if (!latestDate) return emptyOverview("ROLLING_7D", "NO_DATA", now);
-	const fromDate = addCalendarDays(latestDate, -6);
-	const expectedDates = datesBetween(fromDate, latestDate);
-	const grouped = rowsGroupedByDate(rows);
-	const fromRows = rowsForDate(grouped, fromDate);
-	const toRows = rowsForDate(grouped, latestDate);
-	let status: MarketOwnershipCoverageStatus = "READY";
-	if (!toRows.length) status = "NO_DATA";
-	else if (!fromRows.length) status = "BASELINE_MISSING";
-	else if (expectedDates.some((date) => !grouped.has(date))) status = "PARTIAL";
-	return overviewFromEndpoints({
-		period: "ROLLING_7D",
-		rows: expectedDates.flatMap((date) => rowsForDate(grouped, date)),
-		fromRows,
-		toRows,
-		fromDate: fromRows.length ? fromDate : null,
-		toDate: toRows.length ? latestDate : null,
-		expectedDates,
-		status,
-		limit: normalizedLimit(limit),
-		now,
-	});
-};
-
 const eventDeadlineMs = (event: Pick<Event, "deadlineTime">): number =>
 	event.deadlineTime ? Date.parse(event.deadlineTime) : Number.NaN;
 
@@ -661,8 +631,6 @@ export const buildMarketOwnershipOverview = (
 				fallers: day.fallers,
 			};
 		}
-		case "ROLLING_7D":
-			return buildRollingOverview(rows, limit, now);
 		case "GAMEWEEK":
 			return buildGameweekOverview(rows, events, normalizedLimit(limit), now);
 	}

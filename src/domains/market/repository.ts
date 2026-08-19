@@ -128,6 +128,7 @@ type QueryExecutor = {
 
 export type MarketRepository = {
 	getMarketPulse(context: GraphQLContext, requestedDays: number): Promise<MarketPulse>;
+	getMarketLineup(context: GraphQLContext): Promise<MarketLineup | null>;
 };
 
 const MARKET_QUERY = `
@@ -520,6 +521,121 @@ export function buildMarketPulse(
 	};
 }
 
+export type MarketLineupSlot = {
+	player: MarketPlayer;
+	row: number;
+	col: number;
+};
+
+export type MarketLineup = {
+	formation: string;
+	totalOwnershipPercent: number;
+	slots: MarketLineupSlot[];
+};
+
+/** DEF-MID-FWD counts for each valid FPL formation. */
+const VALID_FORMATIONS: ReadonlyArray<readonly [number, number, number]> = [
+	[4, 4, 2],
+	[4, 3, 3],
+	[3, 5, 2],
+	[3, 4, 3],
+	[4, 5, 1],
+	[5, 3, 2],
+	[5, 4, 1],
+	[5, 2, 3],
+];
+
+/**
+ * Build the optimal XI from the latest snapshot by maximising total ownership %
+ * under valid FPL formation constraints.
+ */
+export function buildMarketLineup(rawRows: readonly MarketSnapshotRow[]): MarketLineup | null {
+	if (rawRows.length === 0) return null;
+
+	const rowsByPlayerDay = new Map<string, NormalizedMarketRow>();
+	for (const row of rawRows.map(normalizeRow)) {
+		const key = `${row.element_id}:${row.snapshotDate}`;
+		const existing = rowsByPlayerDay.get(key);
+		if (!existing || row.capturedAt > existing.capturedAt) rowsByPlayerDay.set(key, row);
+	}
+	const rows = Array.from(rowsByPlayerDay.values());
+	const observedDates = Array.from(new Set(rows.map((row) => row.snapshotDate))).sort();
+	const latestDate = observedDates.at(-1);
+	if (!latestDate) return null;
+	const latestRows = rows.filter((row) => row.snapshotDate === latestDate);
+
+	const byPos: Record<string, NormalizedMarketRow[]> = {
+		GOALKEEPER: [],
+		DEFENDER: [],
+		MIDFIELDER: [],
+		FORWARD: [],
+	};
+	for (const row of latestRows) {
+		const pos = positionFor(row);
+		byPos[pos].push(row);
+	}
+	for (const key of Object.keys(byPos)) {
+		byPos[key].sort(
+			(a, b) => b.selectedByPercent - a.selectedByPercent || a.element_id - b.element_id
+		);
+	}
+	if (byPos.GOALKEEPER.length < 1) return null;
+
+	let bestKey = "";
+	let bestSum = -1;
+
+	for (const [def, mid, fwd] of VALID_FORMATIONS) {
+		if (byPos.DEFENDER.length < def) continue;
+		if (byPos.MIDFIELDER.length < mid) continue;
+		if (byPos.FORWARD.length < fwd) continue;
+
+		const sum =
+			byPos.GOALKEEPER[0].selectedByPercent +
+			byPos.DEFENDER.slice(0, def).reduce((s, r) => s + r.selectedByPercent, 0) +
+			byPos.MIDFIELDER.slice(0, mid).reduce((s, r) => s + r.selectedByPercent, 0) +
+			byPos.FORWARD.slice(0, fwd).reduce((s, r) => s + r.selectedByPercent, 0);
+
+		if (sum > bestSum) {
+			bestSum = sum;
+			bestKey = `${def}-${mid}-${fwd}`;
+		}
+	}
+
+	if (!bestKey) return null;
+
+	const [def, mid, fwd] = bestKey.split("-").map(Number);
+	const selected: NormalizedMarketRow[] = [
+		byPos.GOALKEEPER[0],
+		...byPos.DEFENDER.slice(0, def),
+		...byPos.MIDFIELDER.slice(0, mid),
+		...byPos.FORWARD.slice(0, fwd),
+	];
+
+	// Row indices: 0=GK, 1=DEF, 2=MID, 3=FWD. Col is position within the row.
+	let rowIdx = 0;
+	let colIdx = 0;
+	let prevPos = "";
+	const slots: MarketLineupSlot[] = selected.map((row) => {
+		const pos = positionFor(row);
+		if (pos !== prevPos) {
+			rowIdx = prevPos ? rowIdx + 1 : 0;
+			colIdx = 0;
+			prevPos = pos;
+		} else {
+			colIdx++;
+		}
+		return { player: playerFor(row), row: rowIdx, col: colIdx };
+	});
+
+	return { formation: bestKey, totalOwnershipPercent: bestSum, slots };
+}
+
+const isMarketLineup = (value: unknown): value is MarketLineup =>
+	isRecord(value) &&
+	typeof value.formation === "string" &&
+	typeof value.totalOwnershipPercent === "number" &&
+	Array.isArray(value.slots);
+
 const isMarketPulse = (value: unknown): value is MarketPulse =>
 	isRecord(value) &&
 	isRecord(value.coverage) &&
@@ -626,6 +742,64 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 			);
 			return pulse;
 		});
+	},
+	async getMarketLineup(context: GraphQLContext): Promise<MarketLineup | null> {
+		let snapshotContext: Awaited<ReturnType<typeof getMarketSnapshotContext>> | null = null;
+		try {
+			snapshotContext = await getMarketSnapshotContext(context);
+		} catch (error) {
+			context.logger.warn(
+				{ err: error },
+				"Market snapshot context unavailable; using request fallback"
+			);
+		}
+		const cacheKey = snapshotContext
+			? gqlCacheKey(
+					context,
+					"market-lineup:v1",
+					`${context.dataRevision ?? "core-postgres"}.${snapshotContext.revision}`
+				)
+			: gqlCacheKey(context, "market-lineup");
+		try {
+			const cached = await context.redis.get(cacheKey);
+			if (cached !== null) {
+				try {
+					const parsed: unknown = JSON.parse(cached);
+					if (isMarketLineup(parsed)) return parsed;
+				} catch (error) {
+					context.logger.warn({ err: error, cacheKey }, "Malformed market lineup cache");
+				}
+				await context.redis.del(cacheKey);
+			}
+		} catch (error) {
+			context.logger.warn({ err: error, cacheKey }, "Failed to read market lineup cache");
+		}
+
+		let rows: MarketSnapshotRow[];
+		try {
+			const result = await (queryExecutor ?? context.database).query(MARKET_QUERY, [
+				context.currentSeason.seasonId,
+				7,
+			]);
+			const compact = result.rows[0] as { market_rows?: unknown } | undefined;
+			rows = Array.isArray(compact?.market_rows)
+				? (compact.market_rows as MarketSnapshotRow[])
+				: (result.rows as MarketSnapshotRow[]);
+		} catch (error) {
+			context.logger.error({ err: error }, "Failed to query market snapshots for lineup");
+			throw new Error("Failed to query market snapshots for lineup", { cause: error });
+		}
+
+		const lineup = buildMarketLineup(rows);
+		if (lineup) {
+			await writeQueryCache(
+				context,
+				cacheKey,
+				JSON.stringify(lineup),
+				snapshotContext ? MARKET_REVISIONED_TTL_SECONDS : QUERY_CACHE_TTL_SECONDS.MARKET
+			);
+		}
+		return lineup;
 	},
 });
 
