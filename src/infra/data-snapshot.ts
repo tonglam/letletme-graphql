@@ -19,6 +19,11 @@ export const CORE_PUBLICATION_ITEMS = [
 	"currentEventId",
 ] as const;
 
+export const TEAM_SELECTION_CORE_PUBLICATION_ITEMS = [
+	...CORE_PUBLICATION_ITEMS,
+	"selectionRules",
+] as const;
+
 export const LIVE_PUBLICATION_ITEMS = ["eventLive", "fixtures"] as const;
 
 export type DataSnapshotSource = "redis" | "postgres";
@@ -176,6 +181,31 @@ export type CoreDataSnapshot = Readonly<{
 	phases: readonly CorePhaseData[];
 	fixtures: readonly CoreFixtureData[];
 	currentEventId: number | null;
+	selectionRules?: CoreSelectionRules | null;
+}>;
+
+export type CoreSelectionRules = Readonly<{
+	squadSize: number;
+	startingSize: number;
+	budget: number;
+	maxPlayersPerTeam: number;
+	currencyMultiplier: number;
+	positions: readonly Readonly<{
+		id: number;
+		name: string;
+		shortName: string;
+		squadSelect: number;
+		minPlay: number;
+		maxPlay: number;
+	}>[];
+	chips: readonly Readonly<{
+		id: number;
+		name: string;
+		number: number;
+		startEvent: number;
+		stopEvent: number;
+		chipType: string;
+	}>[];
 }>;
 
 export type CoreFixtureSnapshot = Readonly<{
@@ -256,6 +286,7 @@ const coreEventSnapshotMemo = new WeakMap<object, Promise<CoreEventSnapshot>>();
 const coreTeamSnapshotMemo = new WeakMap<object, Promise<CoreTeamSnapshot>>();
 const coreLiveIdentitySnapshotMemo = new WeakMap<object, Promise<CoreLiveIdentitySnapshot>>();
 const liveSnapshotMemo = new WeakMap<object, Map<number, Promise<LiveDataSnapshot>>>();
+const teamSelectionCoreSnapshotMemo = new WeakMap<object, Promise<CoreDataSnapshot>>();
 
 type CorePublicationPin = {
 	manifest: Promise<DataPublicationManifest | null>;
@@ -334,7 +365,9 @@ const readPinnedCorePublicationItems = async (
 	}
 	if (pin.publication) {
 		const publication = await pin.publication;
-		if (publication) return publication;
+		if (publication && requiredItemNames.every((name) => Object.hasOwn(publication.items, name))) {
+			return publication;
+		}
 	}
 	const manifest = await pin.manifest;
 	return manifest
@@ -846,6 +879,75 @@ const mapCoreFixture = (row: Record<string, unknown>): CoreFixtureData | null =>
 	};
 };
 
+const mapCoreSelectionRules = (value: unknown): CoreSelectionRules | null => {
+	if (!isRecord(value)) return value === null || value === undefined ? null : null;
+	const squadSize = integer(value.squadSize);
+	const startingSize = integer(value.startingSize);
+	const budget = integer(value.budget);
+	const maxPlayersPerTeam = integer(value.maxPlayersPerTeam);
+	const currencyMultiplier = integer(value.currencyMultiplier);
+	const rawPositions = asRows(value.positions);
+	const rawChips = asRows(value.chips);
+	if (
+		squadSize === null ||
+		startingSize === null ||
+		budget === null ||
+		maxPlayersPerTeam === null ||
+		currencyMultiplier === null ||
+		!rawPositions ||
+		!rawChips
+	) {
+		return null;
+	}
+	const positions = rawPositions.map((position) => ({
+		id: integer(position.id),
+		name: string(position.name),
+		shortName: string(position.shortName),
+		squadSelect: integer(position.squadSelect),
+		minPlay: integer(position.minPlay),
+		maxPlay: integer(position.maxPlay),
+	}));
+	const chips = rawChips.map((chip) => ({
+		id: integer(chip.id),
+		name: string(chip.name),
+		number: integer(chip.number),
+		startEvent: integer(chip.startEvent),
+		stopEvent: integer(chip.stopEvent),
+		chipType: string(chip.chipType),
+	}));
+	if (
+		positions.some(
+			(position) =>
+				position.id === null ||
+				position.name === null ||
+				position.shortName === null ||
+				position.squadSelect === null ||
+				position.minPlay === null ||
+				position.maxPlay === null
+		) ||
+		chips.some(
+			(chip) =>
+				chip.id === null ||
+				chip.name === null ||
+				chip.number === null ||
+				chip.startEvent === null ||
+				chip.stopEvent === null ||
+				chip.chipType === null
+		)
+	) {
+		return null;
+	}
+	return {
+		squadSize,
+		startingSize,
+		budget,
+		maxPlayersPerTeam,
+		currencyMultiplier,
+		positions: positions as CoreSelectionRules["positions"],
+		chips: chips as CoreSelectionRules["chips"],
+	};
+};
+
 const mapLivePerformance = (row: Record<string, unknown>): LivePerformanceData | null => {
 	const eventId = integer(pick(row, "eventId", "event_id"));
 	const playerId = integer(pick(row, "elementId", "element_id"));
@@ -989,6 +1091,7 @@ const publicationCoreSnapshot = (publication: DataPublication): CoreDataSnapshot
 		phases,
 		fixtures,
 		currentEventId,
+		selectionRules: mapCoreSelectionRules(publication.items.selectionRules),
 	};
 };
 
@@ -1079,6 +1182,7 @@ type CoreFallbackRow = QueryResultRow & {
 	players: unknown;
 	phases: unknown;
 	fixtures: unknown;
+	source_metadata: unknown;
 };
 
 const CORE_FALLBACK_SQL = `
@@ -1123,7 +1227,10 @@ const CORE_FALLBACK_SQL = `
 		COALESCE((
 			SELECT jsonb_agg((to_jsonb(fixture_row) - 'season_id') ORDER BY fixture_id)
 			FROM fpl.fixtures fixture_row WHERE season_id = $1
-		), '[]'::jsonb) AS fixtures
+		), '[]'::jsonb) AS fixtures,
+		COALESCE((
+			SELECT source_metadata FROM fpl.seasons WHERE season_id = $1 LIMIT 1
+		), '{}'::jsonb) AS source_metadata
 	FROM authority
 `;
 
@@ -1338,6 +1445,7 @@ const loadCoreSnapshotFromPostgres = async (
 	const players = mapArray(row?.players, mapCorePlayer);
 	const phases = mapArray(row?.phases, mapCorePhase);
 	const fixtures = mapArray(row?.fixtures, mapCoreFixture);
+	const sourceMetadata = isRecord(row?.source_metadata) ? row.source_metadata : null;
 	const manifest = row?.manifest
 		? parseDataPublicationManifest(JSON.stringify(row.manifest), {
 				dataset: "fpl:core",
@@ -1393,6 +1501,7 @@ const loadCoreSnapshotFromPostgres = async (
 		phases,
 		fixtures,
 		currentEventId: resolveCurrentEventId(events, undefined, sourceCheckedAt),
+		selectionRules: mapCoreSelectionRules(sourceMetadata?.selectionRules),
 	};
 };
 
@@ -1612,6 +1721,26 @@ export const getCoreDataSnapshot = (context: GraphQLContext): Promise<CoreDataSn
 		return loadCoreSnapshotFromPostgres(context, expectedManifest);
 	})();
 	coreSnapshotMemo.set(requestScope, load);
+	return bindCoreRevision(context, load);
+};
+
+/** Load the same coherent core publication, including official selection rules. */
+export const getTeamSelectionCoreSnapshot = (
+	context: GraphQLContext
+): Promise<CoreDataSnapshot> => {
+	const requestScope = context.requestScope ?? context;
+	const existing = teamSelectionCoreSnapshotMemo.get(requestScope);
+	if (existing) return bindCoreRevision(context, existing);
+	const load = (async (): Promise<CoreDataSnapshot> => {
+		const publication = await readPinnedCorePublicationItems(
+			context,
+			TEAM_SELECTION_CORE_PUBLICATION_ITEMS
+		);
+		const snapshot = publication ? publicationCoreSnapshot(publication) : null;
+		if (snapshot) return snapshot;
+		return getCoreDataSnapshot(context);
+	})();
+	teamSelectionCoreSnapshotMemo.set(requestScope, load);
 	return bindCoreRevision(context, load);
 };
 

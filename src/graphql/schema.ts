@@ -48,6 +48,8 @@ import { tournamentsTypeDefs } from "../domains/tournaments/schema";
 import { baseResolvers, baseTypeDefs } from "./base-schema";
 import { briefingResolvers } from "../domains/briefing/resolvers";
 import { briefingTypeDefs } from "../domains/briefing/schema";
+import { teamSelectionResolvers } from "../domains/team-selection/resolvers";
+import { teamSelectionTypeDefs } from "../domains/team-selection/schema";
 
 export const schema = makeExecutableSchema({
 	typeDefs: [
@@ -76,6 +78,7 @@ export const schema = makeExecutableSchema({
 		playerStateTypeDefs,
 		playerStatsTypeDefs,
 		briefingTypeDefs,
+		teamSelectionTypeDefs,
 	],
 	resolvers: [
 		baseResolvers,
@@ -103,5 +106,6 @@ export const schema = makeExecutableSchema({
 		playerStateResolvers,
 		playerStatsResolvers,
 		briefingResolvers,
+		teamSelectionResolvers,
 	],
 });
