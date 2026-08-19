@@ -171,6 +171,44 @@ const requireBoundEntry = (principal: Principal, entryId: number | null): Author
 	return { ok: true };
 };
 
+export const authorizeProtectedBinding = (
+	principal: Principal | null | undefined,
+	currentSeason?: string
+): AuthorizationResult => {
+	const principalResult = requirePrincipal(principal);
+	if (!principalResult.ok) return principalResult;
+	if (!principal) return principalResult;
+	if (principal.envelopeVersion === 1) {
+		return {
+			ok: false,
+			status: 403,
+			code: "FORBIDDEN",
+			message: "A season-bearing authentication context is required",
+		};
+	}
+	if (!isCurrentSeasonBinding(principal, currentSeason)) {
+		return {
+			ok: false,
+			status: 403,
+			code: "FORBIDDEN",
+			message: "The FPL binding must be refreshed for the current season",
+		};
+	}
+	if (!hasVerifiedEntry(principal)) {
+		return {
+			ok: false,
+			status: 403,
+			code: "FORBIDDEN",
+			message: "A verified FPL binding is required",
+		};
+	}
+	return { ok: true };
+};
+
+const isPrivateTrendsAccess = (field: RootField): boolean =>
+	(field.name === "trendCohorts" || field.name === "trendCohortSnapshot") &&
+	field.args.access === "MINE";
+
 const hasTournamentMembership = async (
 	dataClient: ReadModelClient,
 	tournamentId: number,
@@ -255,6 +293,9 @@ const authorizeRootField = async (
 	currentSeason?: string
 ): Promise<AuthorizationResult> => {
 	const fieldPolicy = getRootFieldPolicy(field.name);
+	if (isPrivateTrendsAccess(field)) {
+		return authorizeProtectedBinding(principal, currentSeason);
+	}
 	if (fieldPolicy?.access === "public") return { ok: true };
 	if (!fieldPolicy || !protectedFields.has(field.name)) {
 		return {
@@ -265,25 +306,9 @@ const authorizeRootField = async (
 		};
 	}
 
-	const principalResult = requirePrincipal(principal);
-	if (!principalResult.ok) return principalResult;
-	if (!principal) return principalResult;
-	if (principal.envelopeVersion === 1) {
-		return {
-			ok: false,
-			status: 403,
-			code: "FORBIDDEN",
-			message: "A season-bearing authentication context is required",
-		};
-	}
-	if (!isCurrentSeasonBinding(principal, currentSeason)) {
-		return {
-			ok: false,
-			status: 403,
-			code: "FORBIDDEN",
-			message: "The FPL binding must be refreshed for the current season",
-		};
-	}
+	const binding = authorizeProtectedBinding(principal, currentSeason);
+	if (!binding.ok) return binding;
+	if (!principal) return binding;
 
 	if (fieldPolicy.access === "verifiedEntry" && !hasVerifiedEntry(principal)) {
 		return {

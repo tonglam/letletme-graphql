@@ -75,3 +75,22 @@ describe("Trends revisioned cache", () => {
 		expect(values.get(payloadKey!)).not.toBe(JSON.stringify({ invalid: true }));
 	});
 });
+
+describe("Trends private access", () => {
+	it("rejects MINE catalog reads for an unverified assurance binding", async () => {
+		const { context } = makeContext([]);
+		context.principal = {
+			userId: "user-1",
+			source: "wechat_miniprogram",
+			fplEntryId: 123,
+			fplEntryVerifiedAt: "2026-07-18T00:00:00.000Z",
+			fplEntrySeason: "2526",
+			fplEntryBindingAssurance: "UNVERIFIED",
+			envelopeVersion: 2,
+		};
+
+		await expect(trendsRepository.listCohorts(context, "MINE")).rejects.toMatchObject({
+			extensions: { code: "FORBIDDEN" },
+		});
+	});
+});

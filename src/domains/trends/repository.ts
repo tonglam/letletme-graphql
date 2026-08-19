@@ -1,6 +1,7 @@
 import { GraphQLError } from "graphql";
 import { createHash } from "crypto";
 import type { GraphQLContext } from "../../graphql/context";
+import { authorizeProtectedBinding } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
 
 const capabilities = [
@@ -26,6 +27,11 @@ const notFound = (message: string): never => {
 
 const forbidden = (message: string): never => {
 	throw new GraphQLError(message, { extensions: { code: "FORBIDDEN", http: { status: 403 } } });
+};
+
+const requirePrivateTrendsPrincipal = (context: GraphQLContext): void => {
+	const result = authorizeProtectedBinding(context.principal, context.currentSeason.seasonCode);
+	if (!result.ok) forbidden(result.message);
 };
 
 const validateCohortId = (cohortId: string): number => {
@@ -184,11 +190,8 @@ const decodeTrendSnapshot = (value: unknown): TrendSnapshotPayload | null => {
 
 export const trendsRepository = {
 	async listCohorts(context: GraphQLContext, access: "PUBLIC" | "MINE") {
-		if (
-			access === "MINE" &&
-			(!context.principal?.fplEntryId || !context.principal.fplEntryVerifiedAt)
-		) {
-			forbidden("A verified FPL entry is required for private Trends");
+		if (access === "MINE") {
+			requirePrivateTrendsPrincipal(context);
 		}
 		if (access === "PUBLIC") {
 			const cached = await readPublicCache<{
@@ -290,10 +293,8 @@ export const trendsRepository = {
 			if (cached) return cached;
 		}
 		if (access === "MINE") {
-			const entryId = context.principal?.fplEntryId;
-			if (!entryId || !context.principal?.fplEntryVerifiedAt)
-				forbidden("A verified FPL entry is required for private Trends");
-			params.push(entryId);
+			requirePrivateTrendsPrincipal(context);
+			params.push(context.principal!.fplEntryId!);
 		}
 		const cohortResult = await context.database.query<Record<string, unknown>>(
 			`

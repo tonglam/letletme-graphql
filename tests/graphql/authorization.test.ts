@@ -352,6 +352,23 @@ describe("authorizeGraphQLRequest", () => {
 		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
 	});
 
+	it("rejects private Trends when the binding fails protected checks", async () => {
+		const principal: Principal = {
+			...websitePrincipal,
+			source: "wechat_miniprogram",
+			fplEntrySeason: "2627",
+			fplEntryBindingAssurance: "UNVERIFIED",
+			envelopeVersion: 2,
+		};
+		expect(
+			await authorize(
+				`query { trendCohorts(access: MINE) { season } }`,
+				undefined,
+				principal
+			)
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+	});
+
 	it("allows the direct tournament shell for a verified member", async () => {
 		const result = await authorize(
 			`query Shell($tournamentId: Int!, $entryId: Int!) {
