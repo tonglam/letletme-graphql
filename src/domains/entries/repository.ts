@@ -225,9 +225,57 @@ const isEntryHistoryInfo = (value: unknown): value is EntryHistoryInfo => {
 	return typeof value.season === "string" && typeof value.totalPoints === "number";
 };
 
+export const SEARCH_ENTRIES_DEFAULT_LIMIT = 10;
+export const SEARCH_ENTRIES_MAX_LIMIT = 20;
+export const SEARCH_ENTRIES_MIN_QUERY_LENGTH = 2;
+export const SEARCH_ENTRIES_MAX_QUERY_LENGTH = 50;
+
+const ILIKE_ESCAPE_CLAUSE = "ESCAPE E'\\\\'";
+
+export const SEARCH_ENTRIES_SQL = `
+	SELECT
+		entry_id AS id,
+		entry_name,
+		player_name,
+		region,
+		started_event,
+		overall_points,
+		overall_rank,
+		bank,
+		team_value,
+		total_transfers,
+		last_event_id,
+		last_overall_points,
+		last_overall_rank,
+		last_team_value,
+		last_bank
+	FROM competition.entries
+	WHERE season_id = $1
+	  AND (
+			entry_name ILIKE '%' || $2 || '%' ${ILIKE_ESCAPE_CLAUSE}
+			OR player_name ILIKE '%' || $2 || '%' ${ILIKE_ESCAPE_CLAUSE}
+	  )
+	ORDER BY
+		CASE
+			WHEN entry_name ILIKE $2 || '%' ${ILIKE_ESCAPE_CLAUSE} THEN 0
+			WHEN player_name ILIKE $2 || '%' ${ILIKE_ESCAPE_CLAUSE} THEN 1
+			ELSE 2
+		END,
+		overall_rank ASC NULLS LAST,
+		entry_id ASC
+	LIMIT $3
+`;
+
+export const escapeIlikePattern = (value: string): string =>
+	value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+
+const isEntryArray = (value: unknown): value is Entry[] =>
+	Array.isArray(value) && value.every(isEntry);
+
 interface EntriesRepository {
 	getEntryById(context: GraphQLContext, id: number): Promise<Entry | null>;
 	getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>>;
+	searchEntries(context: GraphQLContext, query: string, limit: number): Promise<Entry[]>;
 	getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]>;
 	getEntryHistoryInfo(context: GraphQLContext, entryId: number): Promise<EntryHistoryInfo[]>;
 	getEntryEventResult(
@@ -317,6 +365,29 @@ export const entriesRepository: EntriesRepository = {
 		} catch (error) {
 			context.logger.warn({ err: error, ids: missingIds }, "Failed to cache entries");
 		}
+		return entries;
+	},
+
+	async searchEntries(context: GraphQLContext, query: string, limit: number): Promise<Entry[]> {
+		const pattern = escapeIlikePattern(query);
+		const cacheKey = gqlCacheKey(context, `entries:search:${limit}:${pattern}`);
+		const cached = await readJsonCache(context, cacheKey, isEntryArray);
+		if (cached) {
+			return cached;
+		}
+
+		const result = await context.database.query<DbEntryRow>(SEARCH_ENTRIES_SQL, [
+			context.currentSeason.seasonId,
+			pattern,
+			limit,
+		]);
+		const entries = result.rows.map(mapEntry);
+		await writeQueryCache(
+			context,
+			cacheKey,
+			JSON.stringify(entries),
+			QUERY_CACHE_TTL_SECONDS.METADATA
+		);
 		return entries;
 	},
 

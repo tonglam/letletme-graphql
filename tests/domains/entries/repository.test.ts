@@ -23,6 +23,84 @@ const entryRow = (id: number) => ({
 	last_bank: 5,
 });
 
+describe("entriesRepository.searchEntries", () => {
+	it("fuzzy-matches entry_name and player_name with escaped ILIKE wildcards", async () => {
+		let sql = "";
+		let params: unknown[] = [];
+		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: "core-17",
+			redis: {
+				get: async () => null,
+				set: async () => "OK",
+				del: async () => 0,
+			},
+			database: {
+				query: async (query: string, values: unknown[]) => {
+					sql = query;
+					params = values;
+					return {
+						rows: [
+							entryRow(101),
+							{
+								...entryRow(202),
+								entry_name: "WhoamI FC",
+								player_name: "Tong W",
+							},
+						],
+					};
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const entries = await entriesRepository.searchEntries(context, "Who_a%", 10);
+
+		expect(sql).toContain("FROM competition.entries");
+		expect(sql).toContain("entry_name ILIKE '%' || $2 || '%' ESCAPE E'\\\\'");
+		expect(sql).toContain("player_name ILIKE '%' || $2 || '%' ESCAPE E'\\\\'");
+		expect(params).toEqual([2026, "Who\\_a\\%", 10]);
+		expect(entries.map((entry) => entry.id)).toEqual([101, 202]);
+		expect(entries[1]?.entryName).toBe("WhoamI FC");
+	});
+
+	it("returns a cached search without querying PostgreSQL", async () => {
+		const cached: Entry = {
+			id: 101,
+			entryName: "Cached XI",
+			playerName: "Manager",
+			region: null,
+			startedEvent: 1,
+			overallPoints: 1,
+			overallRank: 2,
+			bank: 3,
+			teamValue: 4,
+			totalTransfers: 5,
+			lastEventId: 1,
+			lastOverallPoints: 1,
+			lastOverallRank: 2,
+			lastTeamValue: 4,
+			lastBank: 3,
+		};
+		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: "core-17",
+			redis: {
+				get: async () => JSON.stringify([cached]),
+				del: async () => 0,
+			},
+			database: {
+				query: async () => {
+					throw new Error("database should not be read");
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		expect(await entriesRepository.searchEntries(context, "Cached", 10)).toEqual([cached]);
+	});
+});
+
 describe("entriesRepository.getEntriesByIds", () => {
 	it("uses one revisioned cache namespace and one PostgreSQL batch for misses", async () => {
 		const readKeys: string[] = [];

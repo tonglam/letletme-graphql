@@ -435,6 +435,7 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["trendCohorts", 5],
 	["trendCohortSnapshot", 10],
 	["calcLivePointsByEntry", 10],
+	["searchEntries", 10],
 	["tournamentSelectionStats", 10],
 	["tournamentEntryRankingSummary", 10],
 	["entryOfficialH2HDesk", 30],
