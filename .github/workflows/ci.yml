@@ -292,6 +292,44 @@ jobs:
             ON bauth.mini_program_session TO letletme_graphql_reader;
           SQL
 
+      - name: Create Briefing content reader fixture
+        env:
+          DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: |
+          psql "$DATA_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE SCHEMA IF NOT EXISTS content;
+          CREATE TABLE IF NOT EXISTS content.publication_payloads (
+            publication_id uuid NOT NULL,
+            locale text NOT NULL,
+            payload jsonb NOT NULL,
+            payload_bytes integer NOT NULL,
+            payload_sha256 text NOT NULL,
+            PRIMARY KEY (publication_id, locale)
+          );
+          CREATE OR REPLACE VIEW content.briefing_active_publication AS
+          SELECT
+            '00000000-0000-4000-8000-000000000001'::uuid AS publication_id,
+            'week'::text AS scope_key,
+            1::bigint AS revision,
+            1::integer AS schema_version,
+            '2627'::text AS season_code,
+            1::integer AS target_event_id,
+            'Gameweek 1'::text AS event_name,
+            TIMESTAMPTZ '2026-08-21T17:30:00Z' AS deadline_time,
+            'READY'::text AS state,
+            TRUE AS servable,
+            TIMESTAMPTZ '2026-08-18T09:58:00Z' AS source_checked_at,
+            TIMESTAMPTZ '2026-08-18T10:00:00Z' AS published_at,
+            TIMESTAMPTZ '2026-08-21T17:30:00Z' AS valid_until,
+            '{}'::jsonb AS locale_manifest
+          WHERE FALSE;
+          REVOKE ALL ON SCHEMA content FROM PUBLIC;
+          REVOKE ALL ON ALL TABLES IN SCHEMA content FROM PUBLIC;
+          GRANT USAGE ON SCHEMA content TO letletme_graphql_reader;
+          GRANT SELECT ON content.briefing_active_publication TO letletme_graphql_reader;
+          GRANT SELECT ON content.publication_payloads TO letletme_graphql_reader;
+          SQL
+
       - name: Create disposable read-only GraphQL login
         env:
           DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb

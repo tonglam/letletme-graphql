@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "scopeKind": "SURFACE",
+  "scopeKey": "week",
+  "revision": 1,
+  "publicationId": "00000000-0000-4000-8000-000000000001",
+  "state": "READY",
+  "locale": "en",
+  "publishedAt": "2026-08-18T10:00:00.000Z",
+  "sourceCheckedAt": "2026-08-18T09:58:00.000Z",
+  "validUntil": "2026-08-21T17:30:00.000Z",
+  "event": {
+    "seasonCode": "2627",
+    "eventId": 1,
+    "name": "Gameweek 1",
+    "deadlineTime": "2026-08-21T17:30:00.000Z"
+  },
+  "featured": [],
+  "sections": []
+}

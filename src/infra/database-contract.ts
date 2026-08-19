@@ -4,7 +4,15 @@ import { loadCurrentSeason, type CurrentSeason } from "./season";
 import { ReadModelClient } from "./read-model-client";
 import { isDataPublicationId, parseDataPublicationManifest } from "./data-publication";
 
-const DATA_SCHEMAS = ["fpl", "competition", "reporting", "ops", "understat", "bridge"] as const;
+const DATA_SCHEMAS = [
+	"fpl",
+	"competition",
+	"reporting",
+	"ops",
+	"understat",
+	"bridge",
+	"content",
+] as const;
 const GRAPHQL_RUNTIME_CAPABILITY_ROLE = "letletme_graphql_reader";
 const GRAPHQL_AUTH_READ_COLUMNS = [
 	{
@@ -247,6 +255,8 @@ export const validateDatabaseContract = async (
 			"fpl.phases",
 			"competition.public_league_trends",
 			"ops.dataset_publications",
+			"content.briefing_active_publication",
+			"content.publication_payloads",
 		]),
 	].sort();
 	const relationPrivileges = (
