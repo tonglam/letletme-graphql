@@ -13,8 +13,8 @@ const BROADCASTER_SHORT_NAME = /^(brd-|man-brd-)/;
 
 export type LeagueDisplayOrderInput = {
 	name: string;
-	scoring?: LeagueScoring | "classic" | "h2h" | "CLASSIC" | "H2H";
-	type?: LeagueScoring | "classic" | "h2h" | "CLASSIC" | "H2H";
+	scoring?: string | null;
+	type?: string | null;
 	officialKind: OfficialLeagueKind | null;
 	shortName: string | null;
 };
@@ -47,8 +47,9 @@ export const isInvitationalLeague = (league: LeagueDisplayOrderInput): boolean =
 	resolveOfficialKind(league.officialKind, league.shortName) === OfficialLeagueKind.INVITATIONAL;
 
 const isH2H = (league: LeagueDisplayOrderInput): boolean => {
-	const value = league.scoring ?? league.type ?? LeagueScoring.CLASSIC;
-	return value === LeagueScoring.H2H || value === "h2h" || value === "H2H";
+	const value = league.type ?? league.scoring;
+	if (value == null) return false;
+	return value.toLowerCase() === LeagueScoring.H2H;
 };
 
 /**
