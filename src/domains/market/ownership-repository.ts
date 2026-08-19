@@ -117,26 +117,29 @@ const OWNERSHIP_QUERY = [
 	"  SELECT MAX(snapshot_date) AS latest_date",
 	"  FROM fpl.player_market_snapshots",
 	"  WHERE season_id = $1",
+	"), requested AS (",
+	"  SELECT $3::date AS requested_date",
 	"), bounded AS (",
 	"  SELECT snapshot_date::text AS snapshot_date, captured_at, element_id, player_code,",
 	"         web_name, team_id, team_name, team_short_name, element_type, position,",
 	"         price, selected_by_percent",
 	"  FROM fpl.player_market_snapshots",
 	"  CROSS JOIN latest",
+	"  CROSS JOIN requested",
 	"  WHERE season_id = $1",
 	"    AND latest.latest_date IS NOT NULL",
-	"    AND snapshot_date >= latest.latest_date - ($2::integer - 1)",
-	"    AND snapshot_date <= latest.latest_date",
-	"), deduped AS (",
-	"  SELECT DISTINCT ON (snapshot_date, element_id) *",
-	"  FROM bounded",
-	"  ORDER BY snapshot_date ASC, element_id ASC, captured_at DESC",
+	"    AND (",
+	"      (requested.requested_date IS NOT NULL",
+	"        AND snapshot_date BETWEEN requested.requested_date - 1 AND requested.requested_date)",
+	"      OR (snapshot_date >= latest.latest_date - ($2::integer - 1)",
+	"        AND snapshot_date <= latest.latest_date)",
+	"    )",
 	")",
 	"SELECT COALESCE(",
-	"  jsonb_agg(to_jsonb(deduped) ORDER BY deduped.snapshot_date ASC, deduped.element_id ASC),",
+	"  jsonb_agg(to_jsonb(bounded) ORDER BY bounded.snapshot_date ASC, bounded.element_id ASC, bounded.captured_at ASC),",
 	"  '[]'::jsonb",
 	") AS ownership_rows",
-	"FROM deduped",
+	"FROM bounded",
 ].join("\n");
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -221,6 +224,37 @@ const isSnapshotRow = (value: unknown): value is MarketOwnershipSnapshotRow =>
 	"price" in value &&
 	"selected_by_percent" in value;
 
+const isNormalizedSnapshot = (value: unknown): value is Record<string, unknown> =>
+	isRecord(value) &&
+	typeof value.snapshotDate === "string" &&
+	typeof value.capturedAt === "string" &&
+	typeof value.webName === "string" &&
+	typeof value.teamName === "string" &&
+	typeof value.teamShortName === "string" &&
+	typeof value.position === "string" &&
+	"elementId" in value &&
+	"playerCode" in value &&
+	"teamId" in value &&
+	"price" in value &&
+	"selectedByPercent" in value;
+
+const normalizeCachedRow = (row: Record<string, unknown>): OwnershipSnapshot => {
+	const elementId = integerValue(row.elementId, "elementId");
+	return {
+		snapshotDate: calendarDate(String(row.snapshotDate), "snapshotDate"),
+		capturedAt: isoTimestamp(String(row.capturedAt), "capturedAt"),
+		elementId,
+		playerCode: integerValue(row.playerCode, "playerCode"),
+		webName: String(row.webName),
+		teamId: integerValue(row.teamId, "teamId"),
+		teamName: String(row.teamName),
+		teamShortName: String(row.teamShortName),
+		position: positionFor(row.position, elementId),
+		price: integerValue(row.price, "price"),
+		selectedByPercent: numberValue(row.selectedByPercent, "selectedByPercent"),
+	};
+};
+
 const decodeRows = (value: unknown): OwnershipSnapshot[] | null => {
 	let parsed = value;
 	if (typeof parsed === "string") {
@@ -230,9 +264,11 @@ const decodeRows = (value: unknown): OwnershipSnapshot[] | null => {
 			return null;
 		}
 	}
-	if (!Array.isArray(parsed) || !parsed.every(isSnapshotRow)) return null;
+	if (!Array.isArray(parsed)) return null;
 	try {
-		return parsed.map(normalizeRow);
+		if (parsed.every(isSnapshotRow)) return parsed.map(normalizeRow);
+		if (parsed.every(isNormalizedSnapshot)) return parsed.map(normalizeCachedRow);
+		return null;
 	} catch {
 		return null;
 	}
@@ -275,7 +311,16 @@ const uniqueSortedDates = (rows: readonly OwnershipSnapshot[]): string[] =>
 const rowsForDate = (
 	rowsByDate: ReadonlyMap<string, OwnershipSnapshot[]>,
 	date: string | null
-): OwnershipSnapshot[] => (date ? (rowsByDate.get(date) ?? []) : []);
+): OwnershipSnapshot[] => (date ? latestRowsByPlayer(rowsByDate.get(date) ?? []) : []);
+
+const latestRowsByPlayer = (rows: readonly OwnershipSnapshot[]): OwnershipSnapshot[] => {
+	const latest = new Map<number, OwnershipSnapshot>();
+	for (const row of rows) {
+		const existing = latest.get(row.elementId);
+		if (!existing || row.capturedAt > existing.capturedAt) latest.set(row.elementId, row);
+	}
+	return Array.from(latest.values()).sort((left, right) => left.elementId - right.elementId);
+};
 
 const maxCapturedAt = (rows: readonly OwnershipSnapshot[]): string | null =>
 	rows.map((row) => row.capturedAt).sort((left, right) => right.localeCompare(left))[0] ?? null;
@@ -318,8 +363,8 @@ const changesFor = (
 	toDate: string,
 	limit: number
 ): { risers: MarketOwnershipChange[]; fallers: MarketOwnershipChange[] } => {
-	const fromByPlayer = new Map(fromRows.map((row) => [row.elementId, row]));
-	const changes = toRows.flatMap((row) => {
+	const fromByPlayer = new Map(latestRowsByPlayer(fromRows).map((row) => [row.elementId, row]));
+	const changes = latestRowsByPlayer(toRows).flatMap((row) => {
 		const from = fromByPlayer.get(row.elementId);
 		if (!from) return [];
 		const changePercentagePoints = row.selectedByPercent - from.selectedByPercent;
@@ -560,18 +605,16 @@ const buildGameweekOverview = (
 			.map((row) => row.snapshotDate)
 			.sort()
 			.at(-1) ?? null;
-	const fromRows = rowsBeforeDeadline.filter((row) => row.snapshotDate === baselineDate);
+	const fromRows = rowsForDate(rowsGroupedByDate(rowsBeforeDeadline), baselineDate);
 	const rowsAfterDeadline = rows.filter((row) => Date.parse(row.capturedAt) > previousDeadlineMs);
 	const toDate =
 		rowsAfterDeadline
 			.map((row) => row.snapshotDate)
 			.sort()
 			.at(-1) ?? null;
-	const toRows = rowsAfterDeadline.filter((row) => row.snapshotDate === toDate);
+	const toRows = rowsForDate(rowsGroupedByDate(rowsAfterDeadline), toDate);
 	const expectedDates = baselineDate && toDate ? datesBetween(baselineDate, toDate) : [latestDate];
-	const relevantRows = expectedDates.flatMap((date) =>
-		rows.filter((row) => row.snapshotDate === date)
-	);
+	const relevantRows = expectedDates.flatMap((date) => rowsForDate(rowsGroupedByDate(rows), date));
 	let status: MarketOwnershipCoverageStatus = "READY";
 	if (!toRows.length) status = "NO_DATA";
 	else if (!fromRows.length) status = "BASELINE_MISSING";
@@ -628,7 +671,8 @@ const rowsMemo = new WeakMap<object, Promise<OwnershipSnapshot[]>>();
 
 const loadRows = async (
 	context: GraphQLContext,
-	queryExecutor?: QueryExecutor
+	queryExecutor?: QueryExecutor,
+	requestedDate: string | null = null
 ): Promise<OwnershipSnapshot[]> => {
 	const requestScope = context.requestScope ?? context;
 	const existing = rowsMemo.get(requestScope);
@@ -642,6 +686,7 @@ const loadRows = async (
 		const result = await executor.query(OWNERSHIP_QUERY, [
 			context.currentSeason.seasonId,
 			OWNERSHIP_LOOKBACK_DAYS,
+			requestedDate,
 		]);
 		const compact = result.rows[0] as { ownership_rows?: unknown } | undefined;
 		const decoded = decodeRows(compact?.ownership_rows ?? result.rows);
@@ -687,8 +732,9 @@ export const createMarketOwnershipRepository = (
 		date: Date | null,
 		limit: number
 	): Promise<MarketOwnershipDay> {
-		const rows = await loadRows(context, queryExecutor);
-		return buildMarketOwnershipDay(rows, dateInput(date), limit);
+		const requestedDate = dateInput(date);
+		const rows = await loadRows(context, queryExecutor, requestedDate);
+		return buildMarketOwnershipDay(rows, requestedDate, limit);
 	},
 });
 

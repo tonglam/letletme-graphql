@@ -62,6 +62,30 @@ describe("market ownership period contracts", () => {
 		expect(result.fallers).toHaveLength(0);
 	});
 
+	it("uses the capture at or before the gameweek deadline for the baseline", () => {
+		const result = buildMarketOwnershipOverview(
+			[
+				row("2026-08-17", 1, 10, "2026-08-17T11:00:00.000Z"),
+				row("2026-08-17", 1, 99, "2026-08-17T13:00:00.000Z"),
+				row("2026-08-19", 1, 15, "2026-08-19T12:00:00.000Z"),
+			],
+			"GAMEWEEK",
+			10,
+			[
+				event(1, "2026-08-10T12:00:00.000Z"),
+				event(2, "2026-08-17T12:00:00.000Z"),
+				event(3, "2026-08-24T12:00:00.000Z"),
+			],
+			new Date("2026-08-19T13:00:00.000Z")
+		);
+
+		expect(result.risers[0]).toMatchObject({
+			fromSelectedByPercent: 10,
+			toSelectedByPercent: 15,
+			changePercentagePoints: 5,
+		});
+	});
+
 	it("does not calculate a daily change when either endpoint is missing", () => {
 		const missingBaseline = buildMarketOwnershipDay(
 			[row("2026-08-19", 1, 14)],
@@ -170,14 +194,16 @@ describe("market ownership period contracts", () => {
 
 	it("loads all ownership rows through one batch query per request scope", async () => {
 		const queries: string[] = [];
+		const queryValues: unknown[][] = [];
 		const values = new Map<string, string>();
 		const repository = createMarketOwnershipRepository({
-			query: async (sql) => {
+			query: async (sql, parameters) => {
 				queries.push(sql);
-				return { rows: [{ ownership_rows: [] }] };
+				queryValues.push(parameters ?? []);
+				return { rows: [{ ownership_rows: [row("2026-08-19", 1, 12)] }] };
 			},
 		});
-		const context = {
+		const contextData = {
 			currentSeason: { seasonId: 2026, seasonCode: "2627" },
 			dataRevision: "test",
 			requestScope: {},
@@ -189,13 +215,30 @@ describe("market ownership period contracts", () => {
 				},
 			},
 			logger: { warn: () => undefined, error: () => undefined },
-		} as never;
+		};
+		const context = contextData as never;
 
 		await repository.getDay(context, null, 10);
 		await repository.getDay(context, null, 10);
 		expect(queries).toHaveLength(1);
-		expect(queries[0]).toContain("DISTINCT ON (snapshot_date, element_id)");
+		expect(queries[0]).not.toContain("DISTINCT ON (snapshot_date, element_id)");
+		expect(queries[0]).toContain("$3::date");
 		expect(queries[0]).toContain("jsonb_agg");
+
+		const cachedRequestContext = {
+			...contextData,
+			requestScope: {},
+		} as never;
+		await repository.getDay(cachedRequestContext, null, 10);
+		expect(queries).toHaveLength(1);
+
+		const historicalRequestContext = {
+			...contextData,
+			dataRevision: "historical",
+			requestScope: {},
+		} as never;
+		await repository.getDay(historicalRequestContext, new Date("2020-01-02T00:00:00.000Z"), 10);
+		expect(queryValues[1]?.[2]).toBe("2020-01-02");
 	});
 });
 
