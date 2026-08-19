@@ -174,6 +174,20 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 		expect(context.__readModels).toEqual([]);
 	});
 
+	it("ignores a malformed query-cache payload and reads the materialized view", async () => {
+		const context = createContext({ rows: ROWS });
+		context.__cache.set(
+			gqlCacheKey(context, "tournament-selection-stats:1:10:10"),
+			JSON.stringify({ totalEntries: 99 })
+		);
+
+		const result = await eventStatsRepository.getTournamentSelectionStats(context, 1, 10, 10);
+		const cacheKey = gqlCacheKey(context, "tournament-selection-stats:1:10:10");
+		expect(result.totalEntries).toBe(10);
+		expect(context.__readModels).toContain("reporting.tournament_selection_stats");
+		expect(JSON.parse(context.__cache.get(cacheKey) ?? "{}")).toMatchObject({ totalEntries: 10 });
+	});
+
 	it("builds positional counts and percentages from the materialized view only", async () => {
 		const context = createContext({ rows: ROWS });
 

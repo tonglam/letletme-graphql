@@ -263,7 +263,10 @@ jobs:
             id text PRIMARY KEY,
             email text,
             fpl_entry_id integer,
-            fpl_entry_verified_at timestamptz
+            fpl_entry_verified_at timestamptz,
+            fpl_entry_season text,
+            fpl_entry_binding_assurance text,
+            fpl_entry_binding_proof_kind text
           );
           CREATE TABLE bauth.mini_program_session (
             id text PRIMARY KEY,
@@ -276,7 +279,14 @@ jobs:
           REVOKE ALL ON SCHEMA bauth FROM PUBLIC;
           REVOKE ALL ON ALL TABLES IN SCHEMA bauth FROM PUBLIC;
           GRANT USAGE ON SCHEMA bauth TO letletme_graphql_reader;
-          GRANT SELECT (id, fpl_entry_id, fpl_entry_verified_at)
+          GRANT SELECT (
+            id,
+            fpl_entry_id,
+            fpl_entry_verified_at,
+            fpl_entry_season,
+            fpl_entry_binding_assurance,
+            fpl_entry_binding_proof_kind
+          )
             ON bauth."user" TO letletme_graphql_reader;
           GRANT SELECT (user_id, token_hash, revoked_at, expires_at)
             ON bauth.mini_program_session TO letletme_graphql_reader;

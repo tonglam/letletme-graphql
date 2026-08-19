@@ -608,6 +608,9 @@ const startServer = async (): Promise<void> => {
 		setExitCode: (code) => {
 			process.exitCode = code;
 		},
+		exitProcess: (code) => {
+			process.exit(code);
+		},
 		log: (error) => {
 			if (error && typeof error === "object" && "signal" in error) {
 				logger.info(error, "Shutting down");

@@ -14,11 +14,12 @@ describe("shutdown coordinator", () => {
 			closeRedis: async () => void calls.push("redis"),
 			closeDbPool: async () => void calls.push("db"),
 			setExitCode: (code) => calls.push(`exit:${code}`),
+			exitProcess: (code) => calls.push(`process.exit:${code}`),
 		});
 		const [first, second] = await Promise.all([shutdown("SIGTERM"), shutdown("SIGINT")]);
 		expect(first).toEqual({ forced: false, failed: false });
 		expect(second).toEqual(first);
-		expect(calls).toEqual(["server", "apollo", "redis", "db", "exit:0"]);
+		expect(calls).toEqual(["server", "apollo", "redis", "db", "exit:0", "process.exit:0"]);
 	});
 
 	it("forces a stalled drain and reports a non-zero exit", async () => {
@@ -35,9 +36,10 @@ describe("shutdown coordinator", () => {
 			closeDbPool: async () => void calls.push("db"),
 			drainTimeoutMs: 5,
 			setExitCode: (code) => calls.push(`exit:${code}`),
+			exitProcess: (code) => calls.push(`process.exit:${code}`),
 		});
 		expect(await shutdown("SIGTERM")).toEqual({ forced: true, failed: true });
-		expect(calls).toEqual(["server", "force", "apollo", "redis", "db", "exit:1"]);
+		expect(calls).toEqual(["server", "force", "apollo", "redis", "db", "exit:1", "process.exit:1"]);
 	});
 
 	it("continues cleanup after a dependency close fails", async () => {
@@ -51,9 +53,10 @@ describe("shutdown coordinator", () => {
 			closeRedis: async () => void calls.push("redis"),
 			closeDbPool: async () => void calls.push("db"),
 			setExitCode: (code) => calls.push(`exit:${code}`),
+			exitProcess: (code) => calls.push(`process.exit:${code}`),
 		});
 
 		expect(await shutdown("SIGTERM")).toEqual({ forced: false, failed: true });
-		expect(calls).toEqual(["server", "apollo", "redis", "db", "exit:1"]);
+		expect(calls).toEqual(["server", "apollo", "redis", "db", "exit:1", "process.exit:1"]);
 	});
 });

@@ -152,6 +152,7 @@ const hasVerifiedEntry = (principal: Principal): boolean =>
 		principal.fplEntryId &&
 		principal.fplEntryVerifiedAt &&
 		(principal.fplEntryBindingAssurance === undefined ||
+			principal.fplEntryBindingAssurance === null ||
 			principal.fplEntryBindingAssurance === "OWNERSHIP_VERIFIED")
 	);
 
@@ -159,12 +160,7 @@ const isCurrentSeasonBinding = (principal: Principal, currentSeason?: string): b
 	!currentSeason || principal.fplEntrySeason === currentSeason;
 
 const requireBoundEntry = (principal: Principal, entryId: number | null): AuthorizationResult => {
-	if (
-		!principal.fplEntryVerifiedAt ||
-		!entryId ||
-		!principal.fplEntryId ||
-		entryId !== principal.fplEntryId
-	) {
+	if (!hasVerifiedEntry(principal) || !entryId || entryId !== principal.fplEntryId) {
 		return {
 			ok: false,
 			status: 403,

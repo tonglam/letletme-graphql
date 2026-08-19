@@ -304,6 +304,54 @@ describe("authorizeGraphQLRequest", () => {
 		expect(result).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
 	});
 
+	it("allows a current Mini Program binding with a legacy null assurance", async () => {
+		const result = await authorizeGraphQLRequest({
+			body: { query: `query { homePersonalDesk { state } }` },
+			principal: {
+				...websitePrincipal,
+				source: "wechat_miniprogram",
+				fplEntrySeason: "2627",
+				fplEntryBindingAssurance: null,
+				envelopeVersion: 2,
+			},
+			data,
+			logger,
+			currentSeason: "2627",
+		});
+		expect(result).toEqual({ ok: true });
+	});
+
+	it("rejects an unverified Mini Program assurance even when verifiedAt is set", async () => {
+		const principal: Principal = {
+			...websitePrincipal,
+			source: "wechat_miniprogram",
+			fplEntrySeason: "2627",
+			fplEntryBindingAssurance: "UNVERIFIED",
+			envelopeVersion: 2,
+		};
+		expect(
+			await authorizeGraphQLRequest({
+				body: { query: `query { homePersonalDesk { state } }` },
+				principal,
+				data,
+				logger,
+				currentSeason: "2627",
+			})
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+		expect(
+			await authorizeGraphQLRequest({
+				body: {
+					query: `query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
+					variables: { entryId: 123 },
+				},
+				principal,
+				data,
+				logger,
+				currentSeason: "2627",
+			})
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+	});
+
 	it("allows the direct tournament shell for a verified member", async () => {
 		const result = await authorize(
 			`query Shell($tournamentId: Int!, $entryId: Int!) {

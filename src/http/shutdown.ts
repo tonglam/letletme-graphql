@@ -35,6 +35,9 @@ export const createShutdownHandler = ({
 	setExitCode = (code: number): void => {
 		process.exitCode = code;
 	},
+	exitProcess = (code: number): void => {
+		process.exit(code);
+	},
 	log = (): void => {},
 }: {
 	server: ShutdownServer;
@@ -43,6 +46,7 @@ export const createShutdownHandler = ({
 	closeDbPool: () => Promise<void>;
 	drainTimeoutMs?: number;
 	setExitCode?: (code: number) => void;
+	exitProcess?: (code: number) => void;
 	log?: (error?: unknown) => void;
 }): ((signal: string) => Promise<ShutdownResult>) => {
 	let shutdownPromise: Promise<ShutdownResult> | null = null;
@@ -73,7 +77,9 @@ export const createShutdownHandler = ({
 					log({ dependency, error });
 				}
 			}
-			setExitCode(failed ? 1 : 0);
+			const exitCode = failed ? 1 : 0;
+			setExitCode(exitCode);
+			exitProcess(exitCode);
 			return { forced, failed };
 		})();
 		return shutdownPromise;

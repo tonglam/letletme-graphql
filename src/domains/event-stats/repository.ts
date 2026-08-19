@@ -1,5 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
+import { hasExactFields } from "../../infra/exact-fields";
 import {
 	QUERY_CACHE_TTL_SECONDS,
 	readJsonQueryCache,
@@ -9,14 +10,186 @@ import { getCurrentSeason } from "../../infra/season";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
 
-const privateCacheKey = async (context: GraphQLContext, key: string): Promise<string> =>
-	gqlCacheKey(context, key);
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
-const readCachedJson = async (context: GraphQLContext, key: string): Promise<unknown | undefined> =>
-	readJsonQueryCache(context, key, (value) => value);
+const isFiniteNumber = (value: unknown): value is number =>
+	typeof value === "number" && Number.isFinite(value);
+
+const isSafeNonNegativeInt = (value: unknown): value is number =>
+	typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+const isSafePositiveInt = (value: unknown): value is number =>
+	isSafeNonNegativeInt(value) && value > 0;
+
+const decodeSelectionPlayer = (value: unknown): SelectionStatPlayer | null => {
+	if (
+		!isRecord(value) ||
+		!hasExactFields(value, [
+			"id",
+			"webName",
+			"teamShortName",
+			"position",
+			"selectedByPercent",
+			"eoByPercent",
+		])
+	) {
+		return null;
+	}
+	if (
+		!isSafePositiveInt(value.id) ||
+		typeof value.webName !== "string" ||
+		typeof value.teamShortName !== "string" ||
+		typeof value.position !== "string" ||
+		!isFiniteNumber(value.selectedByPercent) ||
+		!(value.eoByPercent === null || isFiniteNumber(value.eoByPercent))
+	) {
+		return null;
+	}
+	return {
+		id: value.id,
+		webName: value.webName,
+		teamShortName: value.teamShortName,
+		position: value.position,
+		selectedByPercent: value.selectedByPercent,
+		eoByPercent: value.eoByPercent,
+	};
+};
+
+const decodeCaptainPlayer = (value: unknown): CaptainStatPlayer | null => {
+	if (
+		!isRecord(value) ||
+		!hasExactFields(value, [
+			"id",
+			"webName",
+			"teamShortName",
+			"position",
+			"captainByPercent",
+			"selectedByPercent",
+			"eoByPercent",
+		])
+	) {
+		return null;
+	}
+	if (
+		!isSafePositiveInt(value.id) ||
+		typeof value.webName !== "string" ||
+		typeof value.teamShortName !== "string" ||
+		typeof value.position !== "string" ||
+		!isFiniteNumber(value.captainByPercent) ||
+		!isFiniteNumber(value.selectedByPercent) ||
+		!(value.eoByPercent === null || isFiniteNumber(value.eoByPercent))
+	) {
+		return null;
+	}
+	return {
+		id: value.id,
+		webName: value.webName,
+		teamShortName: value.teamShortName,
+		position: value.position,
+		captainByPercent: value.captainByPercent,
+		selectedByPercent: value.selectedByPercent,
+		eoByPercent: value.eoByPercent,
+	};
+};
+
+const decodeTransferPlayer = (value: unknown): TransferStatPlayer | null => {
+	if (
+		!isRecord(value) ||
+		!hasExactFields(value, [
+			"id",
+			"webName",
+			"teamShortName",
+			"position",
+			"transfersEvent",
+			"selectedByPercent",
+		])
+	) {
+		return null;
+	}
+	if (
+		!isSafePositiveInt(value.id) ||
+		typeof value.webName !== "string" ||
+		typeof value.teamShortName !== "string" ||
+		typeof value.position !== "string" ||
+		!isSafeNonNegativeInt(value.transfersEvent) ||
+		!isFiniteNumber(value.selectedByPercent)
+	) {
+		return null;
+	}
+	return {
+		id: value.id,
+		webName: value.webName,
+		teamShortName: value.teamShortName,
+		position: value.position,
+		transfersEvent: value.transfersEvent,
+		selectedByPercent: value.selectedByPercent,
+	};
+};
+
+const decodePlayerList = <T>(
+	value: unknown,
+	decodeItem: (item: unknown) => T | null
+): T[] | null => {
+	if (!Array.isArray(value)) return null;
+	const items = value.map(decodeItem);
+	return items.every((item): item is T => item !== null) ? items : null;
+};
+
+const TOURNAMENT_SELECTION_STATS_FIELDS = [
+	"totalEntries",
+	"goalkeepers",
+	"defenders",
+	"midfielders",
+	"forwards",
+	"captainSelect",
+	"viceCaptainSelect",
+	"mostSelectedPlayers",
+	"mostTransferIn",
+	"mostTransferOut",
+] as const;
+
+export const decodeTournamentSelectionStats = (value: unknown): TournamentSelectionStats | null => {
+	if (!isRecord(value) || !hasExactFields(value, TOURNAMENT_SELECTION_STATS_FIELDS)) return null;
+	const goalkeepers = decodePlayerList(value.goalkeepers, decodeSelectionPlayer);
+	const defenders = decodePlayerList(value.defenders, decodeSelectionPlayer);
+	const midfielders = decodePlayerList(value.midfielders, decodeSelectionPlayer);
+	const forwards = decodePlayerList(value.forwards, decodeSelectionPlayer);
+	const captainSelect = decodePlayerList(value.captainSelect, decodeCaptainPlayer);
+	const viceCaptainSelect = decodePlayerList(value.viceCaptainSelect, decodeCaptainPlayer);
+	const mostSelectedPlayers = decodePlayerList(value.mostSelectedPlayers, decodeSelectionPlayer);
+	const mostTransferIn = decodePlayerList(value.mostTransferIn, decodeTransferPlayer);
+	const mostTransferOut = decodePlayerList(value.mostTransferOut, decodeTransferPlayer);
+	if (
+		!isSafeNonNegativeInt(value.totalEntries) ||
+		!goalkeepers ||
+		!defenders ||
+		!midfielders ||
+		!forwards ||
+		!captainSelect ||
+		!viceCaptainSelect ||
+		!mostSelectedPlayers ||
+		!mostTransferIn ||
+		!mostTransferOut
+	) {
+		return null;
+	}
+	return {
+		totalEntries: value.totalEntries,
+		goalkeepers,
+		defenders,
+		midfielders,
+		forwards,
+		captainSelect,
+		viceCaptainSelect,
+		mostSelectedPlayers,
+		mostTransferIn,
+		mostTransferOut,
+	};
+};
+
+const privateCacheKey = async (context: GraphQLContext, key: string): Promise<string> =>
+	gqlCacheKey(context, key);
 
 export type SelectionStatPlayer = {
 	id: number;
@@ -521,9 +694,9 @@ export const eventStatsRepository: EventStatsRepository = {
 			context,
 			`tournament-selection-stats:${tournamentId}:${eventId}:${safeLimit}`
 		);
-		const cached = await readCachedJson(context, cacheKey);
-		if (isRecord(cached)) {
-			return cached as unknown as TournamentSelectionStats;
+		const cached = await readJsonQueryCache(context, cacheKey, decodeTournamentSelectionStats);
+		if (cached) {
+			return cached;
 		}
 
 		const readModelRows = await getReadModelRows(context, tournamentId, eventId);

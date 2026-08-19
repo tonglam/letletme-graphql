@@ -198,8 +198,8 @@ export const validateMiniProgramSessionToken = async (token: string): Promise<Pr
 			? new Date(row.fpl_entry_verified_at).toISOString()
 			: null,
 		fplEntrySeason: row.fpl_entry_season,
-		fplEntryBindingAssurance: row.fpl_entry_binding_assurance,
-		fplEntryBindingProofKind: row.fpl_entry_binding_proof_kind,
+		fplEntryBindingAssurance: row.fpl_entry_binding_assurance ?? undefined,
+		fplEntryBindingProofKind: row.fpl_entry_binding_proof_kind ?? undefined,
 		envelopeVersion: 2,
 	};
 };
