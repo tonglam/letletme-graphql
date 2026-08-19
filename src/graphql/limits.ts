@@ -412,6 +412,7 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["playerStateProfile", 5],
 	["playerStatsDesk", 5],
 	["gameweekDesk", 5],
+	["teamSelectionDesk", 5],
 	["homePublicBootstrap", 5],
 	["homeGameweek", 5],
 	["homeMarketPulse", 5],

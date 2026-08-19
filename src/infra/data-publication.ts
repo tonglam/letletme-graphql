@@ -67,10 +67,19 @@ const MANIFEST_FIELDS = [
 ] as const;
 const MANIFEST_ITEM_FIELDS = ["name", "key", "type", "count", "bytes", "sha256"] as const;
 const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
-	"fpl:core": ["events", "teams", "players", "phases", "fixtures", "currentEventId"],
+	"fpl:core": [
+		"events",
+		"teams",
+		"players",
+		"phases",
+		"fixtures",
+		"currentEventId",
+		"selectionRules",
+	],
 	"fpl:live": ["eventLive", "fixtures"],
 	"fpl:market": ["context"],
 };
+const LEGACY_CORE_ITEM_NAMES = ["events", "teams", "players", "phases", "fixtures", "currentEventId"];
 
 const hasExactItemNames = (dataset: DataPublicationDataset, names: readonly string[]): boolean => {
 	const actual = [...names].sort();
@@ -79,6 +88,15 @@ const hasExactItemNames = (dataset: DataPublicationDataset, names: readonly stri
 		actual.length === expected.length && actual.every((name, index) => name === expected[index])
 	);
 };
+
+const hasExactNames = (names: readonly string[], expected: readonly string[]): boolean => {
+	const actual = [...names].sort();
+	const sortedExpected = [...expected].sort();
+	return actual.length === sortedExpected.length && actual.every((name, index) => name === sortedExpected[index]);
+};
+
+const hasAcceptedItemNames = (dataset: DataPublicationDataset, names: readonly string[]): boolean =>
+	hasExactItemNames(dataset, names) || (dataset === "fpl:core" && hasExactNames(names, LEGACY_CORE_ITEM_NAMES));
 
 const isCanonicalState = (
 	dataset: DataPublicationDataset,
@@ -202,7 +220,7 @@ export const parseDataPublicationManifest = (
 			}
 			names.add(name);
 		}
-		if (!hasExactItemNames(dataset, [...names])) return null;
+		if (!hasAcceptedItemNames(dataset, [...names])) return null;
 
 		const manifest = value as DataPublicationManifest;
 		if (scope && !matchesScope(manifest, scope)) return null;
