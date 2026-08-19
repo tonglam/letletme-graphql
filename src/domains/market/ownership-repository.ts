@@ -667,7 +667,7 @@ export const buildMarketOwnershipOverview = (
 	}
 };
 
-const rowsMemo = new WeakMap<object, Promise<OwnershipSnapshot[]>>();
+const rowsMemo = new WeakMap<object, Map<string, Promise<OwnershipSnapshot[]>>>();
 
 const loadRows = async (
 	context: GraphQLContext,
@@ -675,11 +675,17 @@ const loadRows = async (
 	requestedDate: string | null = null
 ): Promise<OwnershipSnapshot[]> => {
 	const requestScope = context.requestScope ?? context;
-	const existing = rowsMemo.get(requestScope);
+	const memoKey = requestedDate ?? "latest";
+	let scopedMemo = rowsMemo.get(requestScope);
+	if (!scopedMemo) {
+		scopedMemo = new Map();
+		rowsMemo.set(requestScope, scopedMemo);
+	}
+	const existing = scopedMemo.get(memoKey);
 	if (existing) return existing;
 	const load = (async (): Promise<OwnershipSnapshot[]> => {
 		const revision = context.marketRevision ?? context.dataRevision ?? "core-postgres";
-		const cacheKey = gqlCacheKey(context, "market-ownership:v3:rows", revision);
+		const cacheKey = gqlCacheKey(context, `market-ownership:v3:rows:${memoKey}`, revision);
 		const cached = await readJsonQueryCache(context, cacheKey, decodeRows);
 		if (cached) return cached;
 		const executor = queryExecutor ?? context.database;
@@ -699,11 +705,11 @@ const loadRows = async (
 		);
 		return decoded;
 	})();
-	rowsMemo.set(requestScope, load);
+	scopedMemo.set(memoKey, load);
 	try {
 		return await load;
 	} catch (error) {
-		if (rowsMemo.get(requestScope) === load) rowsMemo.delete(requestScope);
+		if (scopedMemo.get(memoKey) === load) scopedMemo.delete(memoKey);
 		throw error;
 	}
 };

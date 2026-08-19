@@ -239,6 +239,24 @@ describe("market ownership period contracts", () => {
 		} as never;
 		await repository.getDay(historicalRequestContext, new Date("2020-01-02T00:00:00.000Z"), 10);
 		expect(queryValues[1]?.[2]).toBe("2020-01-02");
+
+		const historicalCachedContext = {
+			...contextData,
+			dataRevision: "historical",
+			requestScope: {},
+		} as never;
+		await repository.getDay(historicalCachedContext, new Date("2020-01-02T00:00:00.000Z"), 10);
+		expect(queryValues).toHaveLength(2);
+
+		const multiDateContext = {
+			...contextData,
+			dataRevision: "multi-date",
+			requestScope: {},
+		} as never;
+		await repository.getDay(multiDateContext, null, 10);
+		await repository.getDay(multiDateContext, new Date("2020-01-02T00:00:00.000Z"), 10);
+		expect(queryValues).toHaveLength(4);
+		expect(queryValues[3]?.[2]).toBe("2020-01-02");
 	});
 });
 
