@@ -270,6 +270,9 @@ describe("entriesService.getEntryById", () => {
 		expect(entry?.playerName).toBe("Tong Lam");
 		expect(written).toHaveLength(1);
 		expect(written[0]?.key.startsWith("llm:gql:core-17:entries-info:")).toBe(true);
-		expect(JSON.parse(written[0]?.value ?? "{}")).toMatchObject({ id: 424242, entryName: "Let Let Me" });
+		expect(JSON.parse(written[0]?.value ?? "{}")).toMatchObject({
+			id: 424242,
+			entryName: "Let Let Me",
+		});
 	});
 });

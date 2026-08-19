@@ -1,8 +1,7 @@
 const ENTRY_SYNC_TIMEOUT_MS = 8_000;
 
 export type EntrySyncResult =
-	| { ok: true; status: "queued"; jobId: string }
-	| { ok: false; reason: string };
+	{ ok: true; status: "queued"; jobId: string } | { ok: false; reason: string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -44,7 +43,12 @@ export async function requestEntryInfoSync(entryId: number): Promise<EntrySyncRe
 		});
 		if (response.status === 202) {
 			const body: unknown = await response.json().catch(() => null);
-			if (isRecord(body) && body.status === "queued" && typeof body.jobId === "string" && body.jobId) {
+			if (
+				isRecord(body) &&
+				body.status === "queued" &&
+				typeof body.jobId === "string" &&
+				body.jobId
+			) {
 				return { ok: true, status: "queued", jobId: body.jobId };
 			}
 			return { ok: false, reason: "invalid queued response from entry sync service" };
