@@ -84,9 +84,17 @@ export const tournamentsService = {
 	getTournamentEventResults(
 		context: GraphQLContext,
 		tournamentId: number,
-		eventId: number
+		eventId: number,
+		limit: number | null,
+		offset: number | null
 	): Promise<TournamentEventResult[]> {
-		return tournamentsRepository.getTournamentEventResults(context, tournamentId, eventId);
+		return tournamentsRepository.getTournamentEventResults(
+			context,
+			tournamentId,
+			eventId,
+			limit,
+			offset
+		);
 	},
 
 	getTournamentEntryRankingSummary(

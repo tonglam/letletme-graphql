@@ -424,7 +424,12 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		managedTournament(tournamentId: Int!, entryId: Int!): TournamentInfo
 		tournamentParticipants(tournamentId: Int!): [TournamentParticipant!]!
 		tournamentEntryIds(tournamentId: Int!): [Int!]!
-		tournamentEventResults(tournamentId: Int!, eventId: Int!): [TournamentEventResult!]!
+		tournamentEventResults(
+			tournamentId: Int!
+			eventId: Int!
+			limit: Int
+			offset: Int
+		): [TournamentEventResult!]!
 		tournamentEntryRankingSummary(
 			tournamentId: Int!
 			eventId: Int!

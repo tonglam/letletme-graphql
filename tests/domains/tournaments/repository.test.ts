@@ -716,13 +716,25 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 		];
 		const context = buildContext({ cacheSeed: JSON.stringify(cached) });
 
-		const result = await tournamentsRepository.getTournamentEventResults(context, 1, 33);
+		const result = await tournamentsRepository.getTournamentEventResults(
+			context,
+			1,
+			33,
+			null,
+			null
+		);
 		expect(result).toEqual(cached);
 	});
 
 	it("returns empty array when the tournament has no results", async () => {
 		const context = buildContext({ resultData: [] });
-		const result = await tournamentsRepository.getTournamentEventResults(context, 1, 33);
+		const result = await tournamentsRepository.getTournamentEventResults(
+			context,
+			1,
+			33,
+			null,
+			null
+		);
 		expect(result).toEqual([]);
 	});
 
@@ -778,7 +790,13 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 				},
 			],
 		});
-		const result = await tournamentsRepository.getTournamentEventResults(context, 1, 33);
+		const result = await tournamentsRepository.getTournamentEventResults(
+			context,
+			1,
+			33,
+			null,
+			null
+		);
 		expect(result).toEqual([]);
 	});
 
@@ -883,7 +901,13 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 			],
 		});
 
-		const result = await tournamentsRepository.getTournamentEventResults(context, 1, 33);
+		const result = await tournamentsRepository.getTournamentEventResults(
+			context,
+			1,
+			33,
+			null,
+			null
+		);
 
 		expect(result).toHaveLength(2);
 		expect(result[0].groupId).toBe(1);

@@ -93,6 +93,8 @@ type TournamentMetadataArgs = {
 type TournamentEventResultsArgs = {
 	tournamentId: number;
 	eventId: number;
+	limit?: number | null;
+	offset?: number | null;
 };
 
 type TournamentEntryRankingSummaryArgs = {
@@ -254,7 +256,13 @@ export const tournamentsResolvers = {
 			context: GraphQLContext
 		): Promise<TournamentEventResult[]> => {
 			await assertTournamentStandingsReady(context, args.tournamentId);
-			return tournamentsService.getTournamentEventResults(context, args.tournamentId, args.eventId);
+			return tournamentsService.getTournamentEventResults(
+				context,
+				args.tournamentId,
+				args.eventId,
+				args.limit ?? null,
+				args.offset ?? null
+			);
 		},
 
 		tournamentEntryRankingSummary: async (

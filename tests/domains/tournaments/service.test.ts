@@ -218,7 +218,7 @@ describe("tournamentsService.getTournamentEventResults", () => {
 		};
 
 		try {
-			const result = await tournamentsService.getTournamentEventResults(context, 1, 33);
+			const result = await tournamentsService.getTournamentEventResults(context, 1, 33, null, null);
 			expect(capturedTournamentId).toBe(1);
 			expect(capturedEventId).toBe(33);
 			expect(result).toEqual(expected);
