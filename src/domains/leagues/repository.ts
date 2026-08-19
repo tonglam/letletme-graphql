@@ -309,7 +309,7 @@ export const leaguesRepository: LeaguesRepository = {
 	): Promise<LeagueEventResult[]> {
 		const cacheKey = gqlCacheKey(
 			context,
-			`leagues:results:${stableStringify({ leagueId, eventId })}`
+			`leagues:results:v2:${stableStringify({ leagueId, eventId })}`
 		);
 		const cached = await readJsonCache(context, cacheKey, isLeagueEventResultArray);
 		if (cached) return cached;
