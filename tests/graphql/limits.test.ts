@@ -271,16 +271,12 @@ describe("GraphQL request limits", () => {
 		const result = validateGraphQLRequestLimits(
 			{
 				query: `
-					query MarketPulse($days: Int = 14) {
+					query MarketPulse($days: Int = 7) {
 						marketPulse(days: $days) {
 							coverage {
 								requestedDays observedDays firstDate latestDate capturedAt complete stale
 							}
 							mostSelected { ...MarketPlayerFields }
-							ownershipMovers {
-								risers { player { ...MarketPlayerFields } previousSelectedByPercent selectedByPercent change }
-								fallers { player { ...MarketPlayerFields } previousSelectedByPercent selectedByPercent change }
-							}
 							transferMovers { player { ...MarketPlayerFields } transfersIn transfersOut netTransfers }
 							availabilityUpdates {
 								player { ...MarketPlayerFields }
@@ -304,6 +300,34 @@ describe("GraphQL request limits", () => {
 					}
 				`,
 				variables: { days: 14 },
+			},
+			schema
+		);
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error(result.message);
+		expect(result.weightedComplexity).toBeLessThan(600);
+	});
+
+	it("keeps the explicit ownership period roots within the public complexity guard", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query MarketOwnership {
+						marketOwnershipOverview(period: DAILY) {
+							period
+							coverage { status requestedDays observedDays fromDate toDate missingDates }
+							risers { player { playerId } fromSelectedByPercent toSelectedByPercent changePercentagePoints fromDate toDate }
+							fallers { player { playerId } fromSelectedByPercent toSelectedByPercent changePercentagePoints fromDate toDate }
+						}
+						marketOwnershipDay {
+							date
+							coverage { status requestedDays observedDays missingDates }
+							risers { player { playerId } changePercentagePoints }
+							fallers { player { playerId } changePercentagePoints }
+						}
+					}
+				`,
 			},
 			schema
 		);

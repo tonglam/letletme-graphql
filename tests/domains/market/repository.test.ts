@@ -67,7 +67,7 @@ const buildContext = (cacheSeed?: string) => {
 		data: {},
 	} as never;
 	if (cacheSeed !== undefined) {
-		strings.set(gqlCacheKey(context, "market-pulse:14"), cacheSeed);
+		strings.set(gqlCacheKey(context, "market-pulse:7"), cacheSeed);
 	}
 	return {
 		strings,
@@ -137,11 +137,6 @@ describe("buildMarketPulse", () => {
 			stale: false,
 		});
 		expect(pulse.mostSelected[0].playerId).toBe(3);
-		expect(pulse.ownershipMovers.risers).toHaveLength(1);
-		expect(pulse.ownershipMovers.risers[0]).toMatchObject({ change: 5 });
-		expect(pulse.ownershipMovers.fallers).toHaveLength(1);
-		expect(pulse.ownershipMovers.fallers[0]).toMatchObject({ change: -5 });
-		expect(pulse.ownershipMovers.risers.some((mover) => mover.player.playerId === 3)).toBe(false);
 		expect(pulse.transferMovers).toHaveLength(1);
 		expect(pulse.transferMovers[0]).toMatchObject({
 			transfersIn: 10,
@@ -162,7 +157,7 @@ describe("buildMarketPulse", () => {
 		});
 	});
 
-	it("marks fourteen observed calendar days complete and old captures stale", () => {
+	it("marks the requested observed calendar days complete and old captures stale", () => {
 		const rows = Array.from({ length: 14 }, (_, index) => {
 			const date = `2026-08-${String(index + 1).padStart(2, "0")}`;
 			return baseRow(date, 1, {
@@ -329,7 +324,7 @@ describe("market repository caching", () => {
 	});
 
 	it("returns a shaped cache without querying the database", async () => {
-		const context = buildContext(JSON.stringify(emptyMarketPulse(14)));
+		const context = buildContext(JSON.stringify(emptyMarketPulse(7)));
 		let queries = 0;
 		const repository = createMarketRepository({
 			query: async () => {
@@ -338,7 +333,7 @@ describe("market repository caching", () => {
 			},
 		});
 
-		expect(await repository.getMarketPulse(context.context, 14)).toEqual(emptyMarketPulse(14));
+		expect(await repository.getMarketPulse(context.context, 7)).toEqual(emptyMarketPulse(7));
 		expect(queries).toBe(0);
 	});
 

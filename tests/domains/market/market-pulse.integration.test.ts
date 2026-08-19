@@ -31,9 +31,9 @@ const query = /* GraphQL */ `
 describe("marketPulse GraphQL contract", () => {
 	it("serializes calendar dates, capture timestamps, positions, and ownership", async () => {
 		const pulse: MarketPulse = {
-			...emptyMarketPulse(14),
+			...emptyMarketPulse(7),
 			coverage: {
-				requestedDays: 14,
+				requestedDays: 7,
 				observedDays: 1,
 				firstDate: "2026-08-03",
 				latestDate: "2026-08-03",
@@ -66,7 +66,7 @@ describe("marketPulse GraphQL contract", () => {
 			logger: { warn: () => undefined, error: () => undefined },
 			data: {},
 		} as never;
-		strings.set(gqlCacheKey(context, "market-pulse:14"), JSON.stringify(pulse));
+		strings.set(gqlCacheKey(context, "market-pulse:7"), JSON.stringify(pulse));
 
 		const result = await graphql({ schema, source: query, contextValue: context });
 

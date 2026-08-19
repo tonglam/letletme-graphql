@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { normalizeMarketPulseDays } from "../../../src/domains/market/resolvers";
 
 describe("normalizeMarketPulseDays", () => {
-	it("uses fourteen days by default and accepts the public bounds", () => {
-		expect(normalizeMarketPulseDays(undefined)).toBe(14);
+	it("uses seven days by default and accepts the public bounds", () => {
+		expect(normalizeMarketPulseDays(undefined)).toBe(7);
 		expect(normalizeMarketPulseDays(1)).toBe(1);
 		expect(normalizeMarketPulseDays(30)).toBe(30);
 	});
