@@ -98,6 +98,13 @@ export enum TournamentRosterMode {
 	OFFICIAL_SYNC = "official_sync",
 }
 
+function paginateResults<T>(results: T[], limit: number | null, offset: number | null): T[] {
+	if (limit === null && offset === null) return results;
+	const start = offset ?? 0;
+	const end = limit !== null ? start + limit : undefined;
+	return results.slice(start, end);
+}
+
 export type TournamentInfo = {
 	id: number;
 	name: string;
@@ -1463,7 +1470,9 @@ interface TournamentsRepository {
 	getTournamentEventResults(
 		context: GraphQLContext,
 		tournamentId: number,
-		eventId: number
+		eventId: number,
+		limit: number | null,
+		offset: number | null
 	): Promise<TournamentEventResult[]>;
 	getTournamentEntryRankingSummary(
 		context: GraphQLContext,
@@ -1936,7 +1945,9 @@ export const tournamentsRepository: TournamentsRepository = {
 	async getTournamentEventResults(
 		context: GraphQLContext,
 		tournamentId: number,
-		eventId: number
+		eventId: number,
+		limit: number | null = null,
+		offset: number | null = null
 	): Promise<TournamentEventResult[]> {
 		const cacheKey = context.dataRevision
 			? gqlCacheKey(
@@ -1956,7 +1967,8 @@ export const tournamentsRepository: TournamentsRepository = {
 					Number.isFinite(Number(item.entryId))
 			)
 		) {
-			return cached as TournamentEventResult[];
+			const results = cached as TournamentEventResult[];
+			return paginateResults(results, limit, offset);
 		}
 
 		const { data: resultData, error: resultError } = await context.data
@@ -2014,7 +2026,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				JSON.stringify(results),
 				QUERY_CACHE_TTL_SECONDS.REPORTING
 			);
-		return results;
+		return paginateResults(results, limit, offset);
 	},
 
 	async getTournamentEntryRankingSummary(
@@ -2071,7 +2083,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				.limit(1),
 			// Shared with season snapshot / event results cache — gaps need full field
 			tournamentsRepository
-				.getTournamentEventResults(context, tournamentId, eventId)
+				.getTournamentEventResults(context, tournamentId, eventId, null, null)
 				.catch((error: unknown) => {
 					context.logger.warn(
 						{ err: error, tournamentId, eventId, entryId },
@@ -2166,7 +2178,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		}
 
 		const [results, snapshotResponse] = await Promise.all([
-			tournamentsRepository.getTournamentEventResults(context, tournamentId, eventId),
+			tournamentsRepository.getTournamentEventResults(context, tournamentId, eventId, null, null),
 			context.data
 				.read("reporting.tournament_entry_event_summaries")
 				.select(
