@@ -361,11 +361,7 @@ describe("authorizeGraphQLRequest", () => {
 			envelopeVersion: 2,
 		};
 		expect(
-			await authorize(
-				`query { trendCohorts(access: MINE) { season } }`,
-				undefined,
-				principal
-			)
+			await authorize(`query { trendCohorts(access: MINE) { season } }`, undefined, principal)
 		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
 	});
 
