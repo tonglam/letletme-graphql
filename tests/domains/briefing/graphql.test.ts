@@ -65,14 +65,14 @@ const database: QueryExecutor = {
 
 describe("Briefing GraphQL contract", () => {
 	withFrozenBriefingClock(() => {
-	test("consumes the Data-owned fixture checksum", () => {
-		expect(rawFixtureSha256).toBe(DATA_WEEK_PUBLICATION_FIXTURE_SHA256);
-	});
+		test("consumes the Data-owned fixture checksum", () => {
+			expect(rawFixtureSha256).toBe(DATA_WEEK_PUBLICATION_FIXTURE_SHA256);
+		});
 
-	test("exposes the shared Week publication without personal fields", async () => {
-		const result = await graphql({
-			schema,
-			source: `
+		test("exposes the shared Week publication without personal fields", async () => {
+			const result = await graphql({
+				schema,
+				source: `
 				query BriefingWeek($locale: BriefingLocale!) {
 					briefingWeek(locale: $locale) {
 						state revision event { eventId deadlineTime }
@@ -81,33 +81,33 @@ describe("Briefing GraphQL contract", () => {
 					}
 				}
 			`,
-			variableValues: { locale: "EN" },
-			contextValue: {
-				database,
-				redis: { get: async () => null },
-			} as never,
+				variableValues: { locale: "EN" },
+				contextValue: {
+					database,
+					redis: { get: async () => null },
+				} as never,
+			});
+			expect(result.errors).toBeUndefined();
+			expect(result.data?.briefingWeek).toMatchObject({
+				state: "READY",
+				revision: 1,
+				event: { eventId: 1 },
+				featured: [],
+				sections: [],
+			});
 		});
-		expect(result.errors).toBeUndefined();
-		expect(result.data?.briefingWeek).toMatchObject({
-			state: "READY",
-			revision: 1,
-			event: { eventId: 1 },
-			featured: [],
-			sections: [],
-		});
-	});
 
-	test("briefingStory preserves week state when the publication is not servable", async () => {
-		const unservableDb: QueryExecutor = {
-			async query(text: string) {
-				if (text.includes("content.briefing_active_publication"))
-					return { rows: [{ ...metadata, servable: false, state: "READY" }] } as never;
-				return { rows: [] } as never;
-			},
-		};
-		const result = await graphql({
-			schema,
-			source: `
+		test("briefingStory preserves week state when the publication is not servable", async () => {
+			const unservableDb: QueryExecutor = {
+				async query(text: string) {
+					if (text.includes("content.briefing_active_publication"))
+						return { rows: [{ ...metadata, servable: false, state: "READY" }] } as never;
+					return { rows: [] } as never;
+				},
+			};
+			const result = await graphql({
+				schema,
+				source: `
 				query BriefingStory($slug: String!, $locale: BriefingLocale!) {
 					briefingStory(slug: $slug, locale: $locale) {
 						state
@@ -115,20 +115,20 @@ describe("Briefing GraphQL contract", () => {
 					}
 				}
 			`,
-			variableValues: { slug: "missing-story", locale: "EN" },
-			contextValue: {
-				database: unservableDb,
-				redis: { get: async () => null },
-			} as never,
+				variableValues: { slug: "missing-story", locale: "EN" },
+				contextValue: {
+					database: unservableDb,
+					redis: { get: async () => null },
+				} as never,
+			});
+			expect(result.errors).toBeUndefined();
+			expect(result.data?.briefingStory).toMatchObject({ state: "READY", story: null });
 		});
-		expect(result.errors).toBeUndefined();
-		expect(result.data?.briefingStory).toMatchObject({ state: "READY", story: null });
-	});
 
-	test("briefingStory returns REMOVED when the slug is absent from a loaded week", async () => {
-		const result = await graphql({
-			schema,
-			source: `
+		test("briefingStory returns REMOVED when the slug is absent from a loaded week", async () => {
+			const result = await graphql({
+				schema,
+				source: `
 				query BriefingStory($slug: String!, $locale: BriefingLocale!) {
 					briefingStory(slug: $slug, locale: $locale) {
 						state
@@ -136,53 +136,53 @@ describe("Briefing GraphQL contract", () => {
 					}
 				}
 			`,
-			variableValues: { slug: "missing-story", locale: "EN" },
-			contextValue: {
-				database,
-				redis: { get: async () => null },
-			} as never,
+				variableValues: { slug: "missing-story", locale: "EN" },
+				contextValue: {
+					database,
+					redis: { get: async () => null },
+				} as never,
+			});
+			expect(result.errors).toBeUndefined();
+			expect(result.data?.briefingStory).toMatchObject({ state: "REMOVED", story: null });
 		});
-		expect(result.errors).toBeUndefined();
-		expect(result.data?.briefingStory).toMatchObject({ state: "REMOVED", story: null });
-	});
 
-	test("briefingWeek and briefingStory share one publication read per request", async () => {
-		let metadataReads = 0;
-		const countingDb: QueryExecutor = {
-			async query(text: string) {
-				if (text.includes("content.briefing_active_publication")) {
-					metadataReads += 1;
-					return { rows: [metadata] } as never;
-				}
-				return {
-					rows: [
-						{
-							payload: fixture,
-							payload_bytes: Buffer.byteLength(canonical),
-							payload_sha256: metadata.locale_manifest.en.sha256,
-						},
-					],
-				} as never;
-			},
-		};
-		const contextValue = {
-			database: countingDb,
-			redis: { get: async () => null },
-			requestScope: {},
-		};
-		const result = await graphql({
-			schema,
-			source: `
+		test("briefingWeek and briefingStory share one publication read per request", async () => {
+			let metadataReads = 0;
+			const countingDb: QueryExecutor = {
+				async query(text: string) {
+					if (text.includes("content.briefing_active_publication")) {
+						metadataReads += 1;
+						return { rows: [metadata] } as never;
+					}
+					return {
+						rows: [
+							{
+								payload: fixture,
+								payload_bytes: Buffer.byteLength(canonical),
+								payload_sha256: metadata.locale_manifest.en.sha256,
+							},
+						],
+					} as never;
+				},
+			};
+			const contextValue = {
+				database: countingDb,
+				redis: { get: async () => null },
+				requestScope: {},
+			};
+			const result = await graphql({
+				schema,
+				source: `
 				query BriefingCombined($slug: String!, $locale: BriefingLocale!) {
 					briefingWeek(locale: $locale) { state revision }
 					briefingStory(slug: $slug, locale: $locale) { state }
 				}
 			`,
-			variableValues: { slug: "missing-story", locale: "EN" },
-			contextValue: contextValue as never,
+				variableValues: { slug: "missing-story", locale: "EN" },
+				contextValue: contextValue as never,
+			});
+			expect(result.errors).toBeUndefined();
+			expect(metadataReads).toBe(1);
 		});
-		expect(result.errors).toBeUndefined();
-		expect(metadataReads).toBe(1);
-	});
 	});
 });

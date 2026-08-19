@@ -4,7 +4,15 @@ import { loadCurrentSeason, type CurrentSeason } from "./season";
 import { ReadModelClient } from "./read-model-client";
 import { isDataPublicationId, parseDataPublicationManifest } from "./data-publication";
 
-const DATA_SCHEMAS = ["fpl", "competition", "reporting", "ops", "understat", "bridge", "content"] as const;
+const DATA_SCHEMAS = [
+	"fpl",
+	"competition",
+	"reporting",
+	"ops",
+	"understat",
+	"bridge",
+	"content",
+] as const;
 const GRAPHQL_RUNTIME_CAPABILITY_ROLE = "letletme_graphql_reader";
 const GRAPHQL_AUTH_READ_COLUMNS = [
 	{
