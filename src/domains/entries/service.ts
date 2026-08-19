@@ -277,10 +277,6 @@ export const entriesService = {
 		return entriesRepository.getEntriesByIds(context, ids);
 	},
 
-	searchEntries(context: GraphQLContext, query: string, limit: number): Promise<Entry[]> {
-		return entriesRepository.searchEntries(context, query, limit);
-	},
-
 	getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]> {
 		return entriesRepository.getEntryHistory(context, entryId);
 	},
