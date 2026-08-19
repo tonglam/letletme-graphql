@@ -12,6 +12,8 @@ services:
       context: .
       target: runner
     env_file: ${APP_ENV_FILE:-.env.deploy}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       TZ: Asia/Shanghai
     logging: *default-logging
