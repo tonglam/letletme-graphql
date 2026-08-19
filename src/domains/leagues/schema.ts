@@ -46,7 +46,7 @@ export const leaguesTypeDefs = /* GraphQL */ `
 	}
 
 	extend type Query {
-		entryLeagues(entryId: Int!): [League!]!
+		entryLeagues(entryId: Int!, type: LeagueType): [League!]!
 		leagueEventResults(leagueId: Int!, eventId: Int!): [LeagueEventResult!]!
 	}
 `;

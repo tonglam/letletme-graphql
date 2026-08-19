@@ -253,8 +253,18 @@ const buildLeagueFromInfo = async (
 	};
 };
 
+const normalizeLeagueTypeFilter = (type?: string | null): string | null => {
+	if (!type) return null;
+	const upper = type.trim().toUpperCase();
+	return upper === "H2H" ? "h2h" : upper === "CLASSIC" ? "classic" : null;
+};
+
 interface LeaguesRepository {
-	getEntryLeagues(context: GraphQLContext, entryId: number): Promise<League[]>;
+	getEntryLeagues(
+		context: GraphQLContext,
+		entryId: number,
+		type?: string | null
+	): Promise<League[]>;
 	getLeagueEventResults(
 		context: GraphQLContext,
 		leagueId: number,
@@ -263,17 +273,27 @@ interface LeaguesRepository {
 }
 
 export const leaguesRepository: LeaguesRepository = {
-	async getEntryLeagues(context: GraphQLContext, entryId: number): Promise<League[]> {
-		const cacheKey = gqlCacheKey(context, `leagues:entry:v2:${entryId}`);
+	async getEntryLeagues(
+		context: GraphQLContext,
+		entryId: number,
+		type?: string | null
+	): Promise<League[]> {
+		const dbType = normalizeLeagueTypeFilter(type);
+		const cacheSuffix = dbType ? `:${dbType}` : "";
+		const cacheKey = gqlCacheKey(context, `leagues:entry:v2:${entryId}${cacheSuffix}`);
 		const cached = await readJsonCache(context, cacheKey, isLeagueArray);
 		if (cached) return cached;
 
-		const { data, error } = await context.data
+		let query = context.data
 			.read("competition.entry_leagues")
 			.select(
 				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event, official_kind, short_name"
 			)
 			.eq("entry_id", entryId);
+		if (dbType) {
+			query = query.eq("league_type", dbType);
+		}
+		const { data, error } = await query;
 
 		if (error) {
 			context.logger.error({ err: error, entryId }, "Failed to fetch entry leagues");
