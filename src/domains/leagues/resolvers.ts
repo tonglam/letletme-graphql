@@ -54,6 +54,7 @@ export const leaguesResolvers = {
 	},
 	League: {
 		type: (parent: League): string => leagueTypeToEnum(parent.type),
+		officialKind: (parent: League): string | null => parent.officialKind,
 	},
 	LeagueEventResult: {
 		league: (parent: LeagueEventResult): League => parent.league,

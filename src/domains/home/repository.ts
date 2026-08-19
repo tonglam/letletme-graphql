@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { mapFplOfficialKind, selectHomeInvitationalLeagues } from "../leagues/display-order";
 
 export type HomeRankDirection = "UP" | "DOWN" | "FLAT" | "UNKNOWN";
 export type HomePersonalDeskState = "READY" | "EMPTY" | "STALE" | "UNAVAILABLE";
@@ -39,6 +40,8 @@ type HomePersonalDeskRow = {
 	league_name: string | null;
 	entry_rank: number | null;
 	entry_last_rank: number | null;
+	official_kind: string | null;
+	short_name: string | null;
 	tournament_id: number | null;
 };
 
@@ -57,6 +60,8 @@ export const HOME_PERSONAL_DESK_SQL = `
 		l.league_name,
 		l.entry_rank,
 		l.entry_last_rank,
+		l.official_kind::text AS official_kind,
+		l.short_name,
 		tracked.tournament_id
 	FROM competition.entries e
 	LEFT JOIN competition.entry_leagues l
@@ -80,11 +85,8 @@ export const HOME_PERSONAL_DESK_SQL = `
 	) tracked ON TRUE
 	WHERE e.season_id = $1
 		AND e.entry_id = $2
-	ORDER BY CASE WHEN l.entry_rank > 0 THEN 0 ELSE 1 END,
-		l.entry_rank ASC NULLS LAST,
-		l.league_name ASC NULLS LAST,
-		l.league_type ASC NULLS LAST,
-		l.league_id ASC NULLS LAST
+	ORDER BY l.league_id ASC NULLS LAST,
+		l.league_type ASC NULLS LAST
 `;
 
 const isoDate = (value: string | Date | null): string | null => {
@@ -120,7 +122,13 @@ export const movementFromRanks = (
 	return { direction: "FLAT", places: 0 };
 };
 
-const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRank | null => {
+type HomeLeagueRankRow = HomeLeagueRank & {
+	scoring: "classic" | "h2h";
+	officialKind: ReturnType<typeof mapFplOfficialKind>;
+	shortName: string | null;
+};
+
+const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRankRow | null => {
 	if (
 		row.league_id === null ||
 		row.league_type === null ||
@@ -130,14 +138,26 @@ const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRank | null => {
 		return null;
 	}
 	const rank = normalizeRank(row.entry_rank);
+	const scoring = row.league_type === "h2h" ? "h2h" : "classic";
 	return {
 		key: `${row.league_type}:${row.league_id}`,
 		name: row.league_name,
 		rank,
 		movement: movementFromRanks(row.entry_rank, row.entry_last_rank),
 		tournamentId: row.tournament_id,
+		scoring,
+		officialKind: mapFplOfficialKind(row.official_kind),
+		shortName: row.short_name,
 	};
 };
+
+const toHomeLeagueRank = (row: HomeLeagueRankRow): HomeLeagueRank => ({
+	key: row.key,
+	name: row.name,
+	rank: row.rank,
+	movement: row.movement,
+	tournamentId: row.tournamentId,
+});
 
 export const homeRepository = {
 	async getPersonalDesk(context: GraphQLContext, entryId: number): Promise<HomePersonalDesk> {
@@ -177,13 +197,14 @@ export const homeRepository = {
 		const sourceAgeMs = sourceCheckedAt
 			? Math.max(0, Date.now() - Date.parse(sourceCheckedAt))
 			: null;
-		const leagueRanks = result.rows
+		const mappedLeagues = result.rows
 			.map(mapLeagueRank)
-			.filter((rank): rank is HomeLeagueRank => rank !== null);
+			.filter((rank): rank is HomeLeagueRankRow => rank !== null);
+		const leagueRanks = selectHomeInvitationalLeagues(mappedLeagues).map(toHomeLeagueRank);
 		const state: HomePersonalDeskState =
 			sourceAgeMs === null || sourceAgeMs > HOME_PERSONAL_STALE_AFTER_MS
 				? "STALE"
-				: leagueRanks.length === 0
+				: mappedLeagues.length === 0
 					? "EMPTY"
 					: "READY";
 		const mapped = {
