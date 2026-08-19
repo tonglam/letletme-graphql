@@ -5,6 +5,9 @@ import {
 } from "../../src/infra/ingress-context";
 import type { Principal } from "../../src/infra/principal";
 import {
+	GRAPHQL_ANONYMOUS_RATE_LIMIT_DEFAULT,
+	GRAPHQL_AUTHENTICATED_RATE_LIMIT_DEFAULT,
+	GRAPHQL_BROWSER_INGRESS_RATE_LIMIT_DEFAULT,
 	GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
 	GRAPHQL_RATE_LIMIT_SCOPES,
 	GRAPHQL_SHARED_PUBLIC_RATE_LIMIT,
@@ -150,6 +153,13 @@ describe("GraphQL transport and two-stage admission policy", () => {
 			cost: 41,
 		});
 		expect(GRAPHQL_SHARED_PUBLIC_RATE_LIMIT).toBeGreaterThanOrEqual(41 * 20);
+	});
+
+	it("sizes Mini browser budgets for slow page-by-page browsing", () => {
+		expect(GRAPHQL_BROWSER_INGRESS_RATE_LIMIT_DEFAULT).toBe(480);
+		expect(GRAPHQL_AUTHENTICATED_RATE_LIMIT_DEFAULT).toBe(900);
+		expect(GRAPHQL_ANONYMOUS_RATE_LIMIT_DEFAULT).toBe(600);
+		expect(GRAPHQL_ANONYMOUS_RATE_LIMIT_DEFAULT).toBeGreaterThanOrEqual(20 * 20);
 	});
 
 	it("uses only the four versioned Redis scopes", () => {

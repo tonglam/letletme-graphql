@@ -33,6 +33,12 @@ export const GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT = 1_500;
 export const GRAPHQL_SHARED_PUBLIC_RATE_LIMIT = 1_200;
 export const GRAPHQL_GLOBAL_ADMISSION_SUBJECT = "all-graphql-traffic";
 
+export {
+	GRAPHQL_ANONYMOUS_RATE_LIMIT_DEFAULT,
+	GRAPHQL_AUTHENTICATED_RATE_LIMIT_DEFAULT,
+	GRAPHQL_BROWSER_INGRESS_RATE_LIMIT_DEFAULT,
+} from "./rate-limit-defaults";
+
 export const GRAPHQL_RATE_LIMIT_SCOPES = {
 	ingress: "graphql-ingress-v2",
 	authenticated: "graphql-authenticated-v2",

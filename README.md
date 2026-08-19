@@ -78,11 +78,15 @@ weighted complexity, unique entry IDs, and Redis-backed rate limits.
 
 GraphQL admission has two stages: a fixed-cost global plus browser-ingress
 request gate before principal verification, followed by complexity-weighted
-authenticated, anonymous, or shared-public admission. Defaults are 120 browser
-requests/minute, 300 authenticated units/minute, 120 anonymous units/minute,
-and a fixed 1200-unit shared public budget. The deploy-tunable values are
+authenticated, anonymous, or shared-public admission. Defaults are 480 browser
+requests/minute, 900 authenticated units/minute, 600 anonymous units/minute,
+and a fixed 1200-unit shared public budget. Mini market and player-picker desks
+charge their root floors instead of `ceil(complexity / 10)`, so a slow browse
+session is not treated like a scrape. The deploy-tunable values are
 `GRAPHQL_BROWSER_INGRESS_RATE_LIMIT`, `GRAPHQL_AUTHENTICATED_RATE_LIMIT`, and
 `GRAPHQL_ANONYMOUS_RATE_LIMIT`; every value must be a positive integer.
+Production VPS `GRAPHQL_ENV` must be updated to the same numbers or the live
+process keeps the previous 120/300/120 secrets.
 
 ## Verification
 
