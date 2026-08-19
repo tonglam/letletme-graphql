@@ -1,10 +1,11 @@
 import { parseDatabasePoolMax } from "./database-pool-config";
-import { parsePositiveIntegerEnv } from "./env-value";
+import { parseBoundedPositiveIntegerEnv, parsePositiveIntegerEnv } from "./env-value";
 
 type EnvKey =
 	| "NODE_ENV"
 	| "DATABASE_URL"
 	| "DATABASE_POOL_MAX"
+	| "DATABASE_STATEMENT_TIMEOUT_MS"
 	| "REDIS_HOST"
 	| "REDIS_PORT"
 	| "REDIS_PASSWORD"
@@ -14,8 +15,6 @@ type EnvKey =
 	| "GRAPHQL_SERVICE_TOKEN"
 	| "METRICS_TOKEN"
 	| "CORS_ORIGIN"
-	| "CORS_CREDENTIALS"
-	| "TRUSTED_PROXY_HOPS"
 	| "GRAPHQL_BROWSER_INGRESS_RATE_LIMIT"
 	| "GRAPHQL_AUTHENTICATED_RATE_LIMIT"
 	| "GRAPHQL_ANONYMOUS_RATE_LIMIT";
@@ -65,22 +64,8 @@ if (isProduction && Buffer.byteLength(GRAPHQL_SERVICE_TOKEN, "utf8") < 32) {
 }
 
 const CORS_ORIGIN = readEnv("CORS_ORIGIN") ?? (isProduction ? "" : "*");
-const CORS_CREDENTIALS = readEnv("CORS_CREDENTIALS") === "true";
-const CORS_ORIGINS = CORS_ORIGIN.split(",")
-	.map((origin) => origin.trim())
-	.filter(Boolean);
-if (isProduction && CORS_CREDENTIALS && (CORS_ORIGINS.includes("*") || CORS_ORIGINS.length === 0)) {
-	throw new Error(
-		"CORS_ORIGIN must be an explicit allowlist when CORS_CREDENTIALS=true in production"
-	);
-}
 if (isProduction && !CORS_ORIGIN) {
 	throw new Error("Missing required production env: CORS_ORIGIN");
-}
-
-const TRUSTED_PROXY_HOPS = readNumber("TRUSTED_PROXY_HOPS", 0);
-if (!Number.isInteger(TRUSTED_PROXY_HOPS) || TRUSTED_PROXY_HOPS < 0) {
-	throw new Error("TRUSTED_PROXY_HOPS must be a non-negative integer");
 }
 
 export const env = {
@@ -88,6 +73,13 @@ export const env = {
 	isProduction,
 	DATABASE_URL: requireEnv("DATABASE_URL"),
 	DATABASE_POOL_MAX: parseDatabasePoolMax(readEnv("DATABASE_POOL_MAX")),
+	DATABASE_STATEMENT_TIMEOUT_MS: parseBoundedPositiveIntegerEnv(
+		readEnv("DATABASE_STATEMENT_TIMEOUT_MS"),
+		"DATABASE_STATEMENT_TIMEOUT_MS",
+		12_000,
+		1_000,
+		60_000
+	),
 	REDIS_HOST: requireEnv("REDIS_HOST"),
 	REDIS_PORT: readNumber("REDIS_PORT", 6379),
 	REDIS_PASSWORD: readEnv("REDIS_PASSWORD") ?? "",
@@ -101,8 +93,6 @@ export const env = {
 
 	// CORS
 	CORS_ORIGIN,
-	CORS_CREDENTIALS,
-	TRUSTED_PROXY_HOPS,
 
 	// Two-stage GraphQL admission. The global and shared-public ceilings remain
 	// fixed operational safety contracts; these three are deploy-tunable.

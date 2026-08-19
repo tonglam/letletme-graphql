@@ -53,7 +53,11 @@ export type GraphQLLimitResult =
 	| {
 			ok: false;
 			message: string;
-			code: "QUERY_TOO_COMPLEX" | "DUPLICATE_ENTRY_IDS";
+			code:
+				| "QUERY_TOO_COMPLEX"
+				| "DUPLICATE_ENTRY_IDS"
+				| "BATCHING_DISABLED"
+				| "INVALID_GRAPHQL_REQUEST";
 	  };
 
 const asVariables = (value: unknown): Record<string, unknown> =>
@@ -388,7 +392,11 @@ const inspectSelectionSet = ({
 
 const reject = (
 	message: string,
-	code: "QUERY_TOO_COMPLEX" | "DUPLICATE_ENTRY_IDS" = "QUERY_TOO_COMPLEX"
+	code:
+		| "QUERY_TOO_COMPLEX"
+		| "DUPLICATE_ENTRY_IDS"
+		| "BATCHING_DISABLED"
+		| "INVALID_GRAPHQL_REQUEST" = "QUERY_TOO_COMPLEX"
 ): GraphQLLimitResult => ({
 	ok: false,
 	code,
@@ -484,7 +492,7 @@ export const validateGraphQLPayloadLimits = (
 	schema?: GraphQLSchema
 ): GraphQLLimitResult => {
 	if (typeof payload.query !== "string") {
-		return accepted({ shape: "unknown" });
+		return reject("GraphQL request body must contain a query string", "INVALID_GRAPHQL_REQUEST");
 	}
 
 	let document: DocumentNode;
@@ -596,13 +604,21 @@ export const validateGraphQLRequestLimits = (
 	body: unknown,
 	schema?: GraphQLSchema
 ): GraphQLLimitResult => {
-	const payloads = Array.isArray(body) ? body : [body];
+	if (Array.isArray(body)) {
+		return reject("GraphQL request batching is disabled", "BATCHING_DISABLED");
+	}
+	if (!body || typeof body !== "object") {
+		return reject("GraphQL request body must be an object", "INVALID_GRAPHQL_REQUEST");
+	}
+	const payloads = [body];
 	let shape: GraphQLRequestShape = "unknown";
 	let weightedComplexity = 0;
 	let rateLimitCostUnits = 0;
 	const rootFields: string[] = [];
 	for (const payload of payloads) {
-		if (!payload || typeof payload !== "object") continue;
+		if (!payload || typeof payload !== "object") {
+			return reject("GraphQL request body must be an object", "INVALID_GRAPHQL_REQUEST");
+		}
 		const result = validateGraphQLPayloadLimits(payload as GraphQLPayload, schema);
 		if (!result.ok) return result;
 		if (result.shape === "mutation") shape = "mutation";

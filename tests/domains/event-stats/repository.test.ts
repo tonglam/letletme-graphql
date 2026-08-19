@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	eventStatsRepository,
+	getTournamentSelectionIndexRows,
 	getTournamentSelectionStatsReadModel,
 	type DbTournamentSelectionStatRow,
 	type TournamentSelectionStats,
@@ -173,6 +174,20 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 		expect(context.__readModels).toEqual([]);
 	});
 
+	it("ignores a malformed query-cache payload and reads the materialized view", async () => {
+		const context = createContext({ rows: ROWS });
+		context.__cache.set(
+			gqlCacheKey(context, "tournament-selection-stats:1:10:10"),
+			JSON.stringify({ totalEntries: 99 })
+		);
+
+		const result = await eventStatsRepository.getTournamentSelectionStats(context, 1, 10, 10);
+		const cacheKey = gqlCacheKey(context, "tournament-selection-stats:1:10:10");
+		expect(result.totalEntries).toBe(10);
+		expect(context.__readModels).toContain("reporting.tournament_selection_stats");
+		expect(JSON.parse(context.__cache.get(cacheKey) ?? "{}")).toMatchObject({ totalEntries: 10 });
+	});
+
 	it("builds positional counts and percentages from the materialized view only", async () => {
 		const context = createContext({ rows: ROWS });
 
@@ -235,5 +250,37 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 
 		expect(result?.totalEntries).toBe(10);
 		expect(context.__directDatabaseReads()).toBe(0);
+	});
+
+	it("projects the live selection index directly from the reporting MV", async () => {
+		const context = createContext({ rows: ROWS });
+		await expect(getTournamentSelectionIndexRows(context, 1, 10)).resolves.toEqual([
+			{ playerId: 1, count: 8, percentage: 80 },
+			{ playerId: 2, count: 7, percentage: 70 },
+			{ playerId: 3, count: 6, percentage: 60 },
+			{ playerId: 4, count: 5, percentage: 50 },
+		]);
+		expect(context.__readModels).toEqual(["reporting.tournament_selection_stats"]);
+		expect(context.__directDatabaseReads()).toBe(0);
+	});
+
+	it("fails closed for malformed or inconsistent live selection rows", async () => {
+		await expect(
+			getTournamentSelectionIndexRows(
+				createContext({ rows: [{ ...ROWS[0]!, total_entries: 9 }, ROWS[1]!] }),
+				1,
+				10
+			)
+		).rejects.toThrow("Inconsistent tournament selection index");
+		await expect(
+			getTournamentSelectionIndexRows(
+				createContext({ rows: [{ ...ROWS[0]!, selection_percentage: 101 }] }),
+				1,
+				10
+			)
+		).rejects.toThrow("Malformed tournament selection index");
+		await expect(
+			getTournamentSelectionIndexRows(createContext({ rows: [ROWS[0]!, ROWS[0]!] }), 1, 10)
+		).rejects.toThrow("Duplicate tournament selection index player");
 	});
 });

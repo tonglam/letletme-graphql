@@ -5,6 +5,8 @@
 		"moduleResolution": "Bundler",
 		"strict": true,
 		"noImplicitAny": true,
+		"noFallthroughCasesInSwitch": true,
+		"forceConsistentCasingInFileNames": true,
 		"esModuleInterop": true,
 		"skipLibCheck": true,
 		"resolveJsonModule": true,

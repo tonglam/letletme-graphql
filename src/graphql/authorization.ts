@@ -11,6 +11,8 @@ import {
 import type { Logger } from "../infra/logger";
 import type { Principal } from "../infra/principal";
 import type { ReadModelClient } from "../infra/read-model-client";
+import { getRootFieldPolicy, ROOT_FIELD_POLICIES } from "./root-field-policy";
+export { isGraphQLRootFieldClassified } from "./root-field-policy";
 
 type GraphQLRequestPayload = {
 	query?: unknown;
@@ -25,12 +27,12 @@ type RootField = {
 
 type AuthorizationInput = {
 	body: unknown;
-	searchParams: URLSearchParams;
 	principal?: Principal | null;
 	data: ReadModelClient;
 	logger: Logger;
 	requestScope?: object;
 	authorizedTournamentMemberships?: Set<number>;
+	currentSeason?: string;
 };
 
 export type AuthorizationResult =
@@ -42,113 +44,16 @@ export type AuthorizationResult =
 			message: string;
 	  };
 
-const publicFields = new Set([
-	"_empty",
-	"__typename",
-	"__schema",
-	"__type",
-	"me",
-	"event",
-	"events",
-	"currentEventInfo",
-	"coreEventContext",
-	"homePublicBootstrap",
-	"homeGameweek",
-	"homeMarketPulse",
-	"playerStatsBootstrap",
-	"playerStatsDesk",
-	"gameweekDesk",
-	"fixtures",
-	"eventFixtures",
-	"liveScores",
-	"playerLive",
-	"eventLive",
-	"eventLiveExplain",
-	"eventLiveExplains",
-	"liveSnapshot",
-	"liveContext",
-	"liveMatchdayDesk",
-	"liveFixturePlayers",
-	"player",
-	"players",
-	"playersForPicker",
-	"team",
-	"teams",
-	"topTransfersIn",
-	"topTransfersOut",
-	"playerValues",
-	"playerValueHistory",
-	"marketPulse",
-	"marketSnapshotContext",
-	"publicLeagueTrends",
-	"publicLeagueSelectionStats",
-	"trendCohorts",
-	"trendCohortSnapshot",
-	"playerDetail",
-	"playerStateProfile",
-	"miniProgramNotice",
-	"eventOverallResult",
-	"entry",
-	"calcLivePointsByEntry",
-]);
-
-const websiteOnlyFields = new Set<string>();
-
-const ownEntryArgFields = new Map([
-	["entryHistory", "entryId"],
-	["entryEventResult", "entryId"],
-	["entryTransferHistory", "entryId"],
-	["entryLive", "entryId"],
-	["entryLeagues", "entryId"],
-	["entryH2HMatchResults", "entryId"],
-	["entryOfficialH2HDesk", "entryId"],
-	["entryTournaments", "entryId"],
-	["entryLiveCompetitionsDesk", "entryId"],
-	["tournamentSelectionIndex", "entryId"],
-	["tournamentEntrySquads", "entryId"],
-	["tournament", "entryId"],
-	["tournamentDetailDesk", "entryId"],
-	["managedTournament", "entryId"],
-	["tournamentEntryRankingSummary", "entryId"],
-]);
-
-const tournamentMembershipFields = new Set([
-	"tournamentParticipants",
-	"tournamentEntryIds",
-	"tournamentEventResults",
-	"tournamentBattleGroupResults",
-	"tournamentOfficialH2H",
-	"tournamentSelectionStats",
-	"tournamentEntryRankingSummary",
-	"tournamentSeasonSnapshot",
-	"tournament",
-	"tournamentLiveParticipants",
-	"tournamentDetailDesk",
-	"myFplCompetitionBoard",
-	"myFplCompetitionSeasonPath",
-	"myFplCompetitionSetupStatus",
-]);
-
-const verifiedEntryFields = new Set([
-	"myFplTeamDesk",
-	"myFplTeamGameweek",
-	"myFplTeamTransfers",
-	"myFplCompetitionsDesk",
-]);
-
-const protectedFields = new Set([
-	...websiteOnlyFields,
-	...ownEntryArgFields.keys(),
-	...tournamentMembershipFields,
-	"managedTournamentStatus",
-	...verifiedEntryFields,
-	"calcLivePointsForEntries",
-	"leagueEventResults",
-	"homePersonalDesk",
-]);
-
-export const isGraphQLRootFieldClassified = (fieldName: string): boolean =>
-	publicFields.has(fieldName) || protectedFields.has(fieldName);
+const ownEntryArgFields = new Map(
+	[...ROOT_FIELD_POLICIES]
+		.filter(
+			([, value]) => value.ownEntryArg ?? (value.access === "ownEntryArg" ? value.arg : undefined)
+		)
+		.map(([key, value]) => [key, value.ownEntryArg ?? value.arg!] as const)
+);
+const protectedFields = new Set(
+	[...ROOT_FIELD_POLICIES].filter(([, value]) => value.access !== "public").map(([key]) => key)
+);
 
 const getOperation = (
 	document: DocumentNode,
@@ -214,27 +119,14 @@ const collectRootFields = (
 	return fields;
 };
 
-const getRequestPayloads = (
-	body: unknown,
-	searchParams: URLSearchParams
-): GraphQLRequestPayload[] => {
+const getRequestPayloads = (body: unknown): GraphQLRequestPayload[] => {
 	if (Array.isArray(body)) {
 		return body as GraphQLRequestPayload[];
 	}
 	if (body && typeof body === "object") {
 		return [body as GraphQLRequestPayload];
 	}
-	const query = searchParams.get("query");
-	if (!query) return [];
-	return [
-		{
-			query,
-			operationName: searchParams.get("operationName"),
-			variables: searchParams.get("variables")
-				? JSON.parse(searchParams.get("variables") ?? "{}")
-				: undefined,
-		},
-	];
+	return [];
 };
 
 const asVariables = (value: unknown): Record<string, unknown> =>
@@ -256,15 +148,19 @@ const requirePrincipal = (principal?: Principal | null): AuthorizationResult =>
 			};
 
 const hasVerifiedEntry = (principal: Principal): boolean =>
-	Boolean(principal.fplEntryId && principal.fplEntryVerifiedAt);
+	Boolean(
+		principal.fplEntryId &&
+		principal.fplEntryVerifiedAt &&
+		(principal.fplEntryBindingAssurance === undefined ||
+			principal.fplEntryBindingAssurance === null ||
+			principal.fplEntryBindingAssurance === "OWNERSHIP_VERIFIED")
+	);
+
+const isCurrentSeasonBinding = (principal: Principal, currentSeason?: string): boolean =>
+	!currentSeason || principal.fplEntrySeason === currentSeason;
 
 const requireBoundEntry = (principal: Principal, entryId: number | null): AuthorizationResult => {
-	if (
-		!principal.fplEntryVerifiedAt ||
-		!entryId ||
-		!principal.fplEntryId ||
-		entryId !== principal.fplEntryId
-	) {
+	if (!hasVerifiedEntry(principal) || !entryId || entryId !== principal.fplEntryId) {
 		return {
 			ok: false,
 			status: 403,
@@ -274,6 +170,44 @@ const requireBoundEntry = (principal: Principal, entryId: number | null): Author
 	}
 	return { ok: true };
 };
+
+export const authorizeProtectedBinding = (
+	principal: Principal | null | undefined,
+	currentSeason?: string
+): AuthorizationResult => {
+	const principalResult = requirePrincipal(principal);
+	if (!principalResult.ok) return principalResult;
+	if (!principal) return principalResult;
+	if (principal.envelopeVersion === 1) {
+		return {
+			ok: false,
+			status: 403,
+			code: "FORBIDDEN",
+			message: "A season-bearing authentication context is required",
+		};
+	}
+	if (!isCurrentSeasonBinding(principal, currentSeason)) {
+		return {
+			ok: false,
+			status: 403,
+			code: "FORBIDDEN",
+			message: "The FPL binding must be refreshed for the current season",
+		};
+	}
+	if (!hasVerifiedEntry(principal)) {
+		return {
+			ok: false,
+			status: 403,
+			code: "FORBIDDEN",
+			message: "A verified FPL binding is required",
+		};
+	}
+	return { ok: true };
+};
+
+const isPrivateTrendsAccess = (field: RootField): boolean =>
+	(field.name === "trendCohorts" || field.name === "trendCohortSnapshot") &&
+	field.args.access === "MINE";
 
 const hasTournamentMembership = async (
 	dataClient: ReadModelClient,
@@ -355,10 +289,15 @@ const authorizeRootField = async (
 	principal: Principal | null | undefined,
 	dataClient: ReadModelClient,
 	requestScope?: object,
-	authorizedTournamentMemberships?: Set<number>
+	authorizedTournamentMemberships?: Set<number>,
+	currentSeason?: string
 ): Promise<AuthorizationResult> => {
-	if (publicFields.has(field.name)) return { ok: true };
-	if (!protectedFields.has(field.name)) {
+	const fieldPolicy = getRootFieldPolicy(field.name);
+	if (isPrivateTrendsAccess(field)) {
+		return authorizeProtectedBinding(principal, currentSeason);
+	}
+	if (fieldPolicy?.access === "public") return { ok: true };
+	if (!fieldPolicy || !protectedFields.has(field.name)) {
 		return {
 			ok: false,
 			status: 403,
@@ -367,29 +306,11 @@ const authorizeRootField = async (
 		};
 	}
 
-	const principalResult = requirePrincipal(principal);
-	if (!principalResult.ok) return principalResult;
-	if (!principal) return principalResult;
+	const binding = authorizeProtectedBinding(principal, currentSeason);
+	if (!binding.ok) return binding;
+	if (!principal) return binding;
 
-	if (websiteOnlyFields.has(field.name) && principal.source !== "website") {
-		return {
-			ok: false,
-			status: 403,
-			code: "FORBIDDEN",
-			message: "This operation requires a website session",
-		};
-	}
-
-	if (field.name === "homePersonalDesk" && !hasVerifiedEntry(principal)) {
-		return {
-			ok: false,
-			status: 403,
-			code: "FORBIDDEN",
-			message: "A verified FPL binding is required",
-		};
-	}
-
-	if (verifiedEntryFields.has(field.name) && !hasVerifiedEntry(principal)) {
+	if (fieldPolicy.access === "verifiedEntry" && !hasVerifiedEntry(principal)) {
 		return {
 			ok: false,
 			status: 403,
@@ -445,7 +366,7 @@ const authorizeRootField = async (
 		}
 	}
 
-	if (tournamentMembershipFields.has(field.name)) {
+	if (fieldPolicy.tournamentMember === true) {
 		const tournamentId = asPositiveInt(field.args.tournamentId);
 		if (!tournamentId || !hasVerifiedEntry(principal)) {
 			return {
@@ -463,7 +384,7 @@ const authorizeRootField = async (
 			authorizedTournamentMemberships
 		);
 		const isRetainedAdmin =
-			(field.name === "tournamentParticipants" || field.name === "tournamentDetailDesk") &&
+			fieldPolicy.retainedAdmin &&
 			!isMember &&
 			(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope));
 		if (!isMember && !isRetainedAdmin) {
@@ -533,12 +454,14 @@ const authorizePayload = async ({
 	data,
 	requestScope,
 	authorizedTournamentMemberships,
+	currentSeason,
 }: {
 	payload: GraphQLRequestPayload;
 	principal?: Principal | null;
 	data: ReadModelClient;
 	requestScope?: object;
 	authorizedTournamentMemberships?: Set<number>;
+	currentSeason?: string;
 }): Promise<AuthorizationResult> => {
 	if (typeof payload.query !== "string") return { ok: true };
 
@@ -556,7 +479,8 @@ const authorizePayload = async ({
 			principal,
 			data,
 			requestScope,
-			authorizedTournamentMemberships
+			authorizedTournamentMemberships,
+			currentSeason
 		);
 		if (!result.ok) return result;
 	}
@@ -569,7 +493,7 @@ export const authorizeGraphQLRequest = async (
 ): Promise<AuthorizationResult> => {
 	let payloads: GraphQLRequestPayload[];
 	try {
-		payloads = getRequestPayloads(input.body, input.searchParams);
+		payloads = getRequestPayloads(input.body);
 	} catch {
 		return {
 			ok: false,
@@ -587,6 +511,7 @@ export const authorizeGraphQLRequest = async (
 				data: input.data,
 				requestScope: input.requestScope,
 				authorizedTournamentMemberships: input.authorizedTournamentMemberships,
+				currentSeason: input.currentSeason,
 			});
 			if (!result.ok) return result;
 		} catch (error) {

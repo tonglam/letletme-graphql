@@ -49,7 +49,7 @@ import { baseResolvers, baseTypeDefs } from "./base-schema";
 
 export const schema = makeExecutableSchema({
 	typeDefs: [
-		baseTypeDefs, // Must be first to define Query and Mutation
+		baseTypeDefs, // Must be first to define Query
 		authTypeDefs,
 		eventsTypeDefs,
 		gameweekTypeDefs,

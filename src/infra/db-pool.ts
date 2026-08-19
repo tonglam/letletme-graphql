@@ -13,6 +13,8 @@ export const dbPool = new Pool({
 	min: 1,
 	idleTimeoutMillis: 30_000,
 	connectionTimeoutMillis: 2_000,
+	statement_timeout: env.DATABASE_STATEMENT_TIMEOUT_MS,
+	application_name: "letletme-graphql",
 });
 
 export const closeDbPool = async (): Promise<void> => {

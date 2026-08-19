@@ -23,7 +23,6 @@ describe("authenticated GraphQL weighted boundary", () => {
 			principal: {
 				userId: "user-1",
 				source: "website",
-				provider: "better_auth",
 				fplEntryId: null,
 				fplEntryVerifiedAt: null,
 			},

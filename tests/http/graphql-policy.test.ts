@@ -34,7 +34,6 @@ const ingress = (overrides: Partial<GraphQLIngress>): GraphQLIngress => ({
 const principal = (userId: string): Principal => ({
 	userId,
 	source: "website",
-	provider: "better_auth",
 	fplEntryId: null,
 	fplEntryVerifiedAt: null,
 });

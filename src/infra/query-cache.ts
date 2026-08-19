@@ -37,3 +37,66 @@ export const deleteQueryCache = async (context: GraphQLContext, key: string): Pr
 		return false;
 	}
 };
+
+export type QueryCacheDecoder<T> = (value: unknown) => T | null;
+
+export const readJsonQueryCache = async <T>(
+	context: GraphQLContext,
+	key: string,
+	decode: QueryCacheDecoder<T>
+): Promise<T | undefined> => {
+	let raw: string | null;
+	try {
+		raw = await context.redis.get(key);
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Failed to read GraphQL query cache");
+		return undefined;
+	}
+	if (raw === null) return undefined;
+	try {
+		const decoded = decode(JSON.parse(raw) as unknown);
+		if (decoded !== null) return decoded;
+		throw new Error("GraphQL query cache codec rejected value");
+	} catch (error) {
+		context.logger.warn({ err: error, key }, "Malformed GraphQL query cache");
+		await deleteQueryCache(context, key);
+		return undefined;
+	}
+};
+
+export const readJsonQueryCacheBatch = async <T>(
+	context: GraphQLContext,
+	keys: readonly string[],
+	decode: QueryCacheDecoder<T>
+): Promise<Array<T | undefined>> => {
+	if (keys.length === 0) return [];
+	let rawValues: Array<string | null>;
+	try {
+		rawValues = await context.redis.mget(...keys);
+	} catch (error) {
+		context.logger.warn({ err: error, keys }, "Failed to read GraphQL query cache batch");
+		return keys.map(() => undefined);
+	}
+	return Promise.all(
+		rawValues.map(async (raw, index) => {
+			if (raw === null) return undefined;
+			const key = keys[index]!;
+			try {
+				const decoded = decode(JSON.parse(raw) as unknown);
+				if (decoded !== null) return decoded;
+				throw new Error("GraphQL query cache codec rejected value");
+			} catch (error) {
+				context.logger.warn({ err: error, key }, "Malformed GraphQL query cache");
+				await deleteQueryCache(context, key);
+				return undefined;
+			}
+		})
+	);
+};
+
+export const writeJsonQueryCache = async (
+	context: GraphQLContext,
+	key: string,
+	value: unknown,
+	ttlSeconds: number
+): Promise<boolean> => writeQueryCache(context, key, JSON.stringify(value), ttlSeconds);

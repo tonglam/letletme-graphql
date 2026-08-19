@@ -1,5 +1,4 @@
 import { createHash } from "crypto";
-import { isIP } from "net";
 import type Redis from "ioredis";
 import type { Logger } from "../infra/logger";
 import { metrics } from "../infra/metrics";
@@ -14,41 +13,6 @@ export class PayloadTooLargeError extends Error {
 		this.name = "PayloadTooLargeError";
 	}
 }
-
-const normalizeIp = (value: string | null | undefined): string | null => {
-	if (!value) return null;
-	const candidate = value.trim();
-	// Check the complete value first so an IPv6 address ending in digits is not
-	// mistaken for an IPv4-style host:port pair.
-	if (isIP(candidate)) return candidate;
-
-	const bracketedHost = candidate.match(/^\[([^\]]+)\](?::\d+)?$/)?.[1];
-	if (bracketedHost && isIP(bracketedHost)) return bracketedHost;
-
-	const host = candidate.match(/^([^:]+):\d+$/)?.[1];
-	return host && isIP(host) ? host : null;
-};
-
-/**
- * Resolve the caller from the socket peer and only the explicitly trusted
- * right-most proxy hops. Untrusted left-most forwarding values are ignored.
- */
-export const resolveClientIp = (
-	headers: Headers,
-	peerAddress: string | null | undefined,
-	trustedProxyHops: number
-): string => {
-	const peer = normalizeIp(peerAddress) ?? "unknown";
-	if (trustedProxyHops <= 0 || peer === "unknown") return peer;
-
-	const forwarded = (headers.get("x-forwarded-for") ?? "")
-		.split(",")
-		.map((value) => normalizeIp(value));
-	const chain = [...forwarded, peer];
-	const clientIndex = chain.length - trustedProxyHops - 1;
-	const candidate = clientIndex >= 0 ? chain[clientIndex] : null;
-	return candidate ?? peer;
-};
 
 export const readRequestBody = async (
 	request: Request,

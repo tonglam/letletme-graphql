@@ -8,6 +8,7 @@ describe("GraphQL database pool configuration", () => {
 		expect(source).toContain("max: env.DATABASE_POOL_MAX");
 		expect(source).toContain("min: 1");
 		expect(source).toContain("idleTimeoutMillis: 30_000");
+		expect(source).toContain("statement_timeout: env.DATABASE_STATEMENT_TIMEOUT_MS");
 		expect(source).not.toContain("max: 20");
 	});
 

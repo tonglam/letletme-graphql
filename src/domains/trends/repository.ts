@@ -1,5 +1,7 @@
 import { GraphQLError } from "graphql";
+import { createHash } from "crypto";
 import type { GraphQLContext } from "../../graphql/context";
+import { authorizeProtectedBinding } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
 
 const capabilities = [
@@ -14,7 +16,10 @@ const capabilities = [
 // Trends snapshots are revisioned by their own publication pointer. They are
 // deliberately kept out of the core Data snapshot path, so use an explicit
 // cache-key revision rather than forcing a full core snapshot read.
-const TRENDS_CACHE_REVISION = "trends-v1";
+const TRENDS_CACHE_SCHEMA_VERSION = "trends-v2";
+
+const trendsRevisionKey = (revision: string): string =>
+	`trends-${createHash("sha256").update(revision, "utf8").digest("hex").slice(0, 24)}`;
 
 const notFound = (message: string): never => {
 	throw new GraphQLError(message, { extensions: { code: "NOT_FOUND", http: { status: 404 } } });
@@ -22,6 +27,11 @@ const notFound = (message: string): never => {
 
 const forbidden = (message: string): never => {
 	throw new GraphQLError(message, { extensions: { code: "FORBIDDEN", http: { status: 403 } } });
+};
+
+const requirePrivateTrendsPrincipal = (context: GraphQLContext): void => {
+	const result = authorizeProtectedBinding(context.principal, context.currentSeason.seasonCode);
+	if (!result.ok) forbidden(result.message);
 };
 
 const validateCohortId = (cohortId: string): number => {
@@ -40,20 +50,72 @@ const validateCohortId = (cohortId: string): number => {
 
 const status = (value: unknown): string => (typeof value === "string" ? value : "NOT_READY");
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+type TrendCohort = ReturnType<typeof mapCohort>;
+
+const decodeTrendCohort = (value: unknown): TrendCohort | null => {
+	if (!isRecord(value)) return null;
+	if (
+		typeof value.id !== "string" ||
+		typeof value.kind !== "string" ||
+		typeof value.access !== "string" ||
+		typeof value.displayName !== "string" ||
+		typeof value.exact !== "boolean" ||
+		(value.latestEventId !== null && !Number.isSafeInteger(value.latestEventId)) ||
+		(value.revision !== null && typeof value.revision !== "string") ||
+		typeof value.availability !== "string" ||
+		!Array.isArray(value.capabilities)
+	) {
+		return null;
+	}
+	return value as TrendCohort;
+};
+
+const decodeTrendCatalog = (
+	value: unknown
+): {
+	season: string;
+	revision: string;
+	cohorts: TrendCohort[];
+} | null => {
+	if (!isRecord(value) || typeof value.season !== "string" || typeof value.revision !== "string")
+		return null;
+	if (!Array.isArray(value.cohorts)) return null;
+	const cohorts = value.cohorts.map(decodeTrendCohort);
+	return cohorts.every((cohort): cohort is TrendCohort => cohort !== null)
+		? { season: value.season, revision: value.revision, cohorts }
+		: null;
+};
+
 async function readPublicCache<T>(
 	context: GraphQLContext,
 	pointer: string,
-	namespace: string
+	namespace: string,
+	decode: (value: unknown) => T | null
 ): Promise<T | undefined> {
 	try {
 		const revision = await context.redis.get(
-			gqlCacheKey(context, `${namespace}:pointer:${pointer}`, TRENDS_CACHE_REVISION)
+			gqlCacheKey(context, `${namespace}:pointer:${pointer}`, TRENDS_CACHE_SCHEMA_VERSION)
 		);
 		if (!revision) return undefined;
-		const cached = await context.redis.get(
-			gqlCacheKey(context, `${namespace}:${pointer}:${revision}`, TRENDS_CACHE_REVISION)
+		const payloadKey = gqlCacheKey(
+			context,
+			`${namespace}:${pointer}:${revision}`,
+			trendsRevisionKey(revision)
 		);
-		return cached ? (JSON.parse(cached) as T) : undefined;
+		const cached = await context.redis.get(payloadKey);
+		if (!cached) return undefined;
+		try {
+			const value = decode(JSON.parse(cached) as unknown);
+			if (value === null) throw new Error("Trends cache codec rejected value");
+			return value;
+		} catch (error) {
+			context.logger.warn({ err: error, key: payloadKey }, "Malformed Trends public cache");
+			await context.redis.del(payloadKey).catch(() => undefined);
+			return undefined;
+		}
 	} catch (error) {
 		context.logger.warn({ err: error }, "Failed to read Trends public cache");
 		return undefined;
@@ -69,13 +131,13 @@ async function writePublicCache(
 ): Promise<void> {
 	try {
 		await context.redis.set(
-			gqlCacheKey(context, `${namespace}:${pointer}:${revision}`, TRENDS_CACHE_REVISION),
+			gqlCacheKey(context, `${namespace}:${pointer}:${revision}`, trendsRevisionKey(revision)),
 			JSON.stringify(value),
 			"EX",
 			300
 		);
 		await context.redis.set(
-			gqlCacheKey(context, `${namespace}:pointer:${pointer}`, TRENDS_CACHE_REVISION),
+			gqlCacheKey(context, `${namespace}:pointer:${pointer}`, TRENDS_CACHE_SCHEMA_VERSION),
 			revision,
 			"EX",
 			60
@@ -112,25 +174,31 @@ const mapCohort = (row: Record<string, unknown>, access: "PUBLIC" | "MINE") => (
 });
 
 type TrendSnapshotPayload = {
-	cohort: ReturnType<typeof mapCohort>;
+	cohort: TrendCohort;
 	eventId: number;
 	sections: Record<string, unknown>[];
 };
 
+const decodeTrendSnapshot = (value: unknown): TrendSnapshotPayload | null => {
+	if (!isRecord(value)) return null;
+	const eventId = value.eventId;
+	if (typeof eventId !== "number" || !Number.isSafeInteger(eventId) || eventId < 1) return null;
+	if (!Array.isArray(value.sections) || !value.sections.every(isRecord)) return null;
+	const cohort = decodeTrendCohort(value.cohort);
+	return cohort ? { cohort, eventId, sections: value.sections } : null;
+};
+
 export const trendsRepository = {
 	async listCohorts(context: GraphQLContext, access: "PUBLIC" | "MINE") {
-		if (
-			access === "MINE" &&
-			(!context.principal?.fplEntryId || !context.principal.fplEntryVerifiedAt)
-		) {
-			forbidden("A verified FPL entry is required for private Trends");
+		if (access === "MINE") {
+			requirePrivateTrendsPrincipal(context);
 		}
 		if (access === "PUBLIC") {
 			const cached = await readPublicCache<{
 				season: string;
 				revision: string;
 				cohorts: ReturnType<typeof mapCohort>[];
-			}>(context, context.currentSeason.seasonCode, "trends:catalog:public");
+			}>(context, context.currentSeason.seasonCode, "trends:catalog:public", decodeTrendCatalog);
 			if (cached) return cached;
 		}
 		const params: unknown[] = [context.currentSeason.seasonId];
@@ -219,15 +287,14 @@ export const trendsRepository = {
 			const cached = await readPublicCache<TrendSnapshotPayload>(
 				context,
 				`${tournamentId}:${eventId}:${limit}`,
-				"trends:snapshot:public"
+				"trends:snapshot:public",
+				decodeTrendSnapshot
 			);
 			if (cached) return cached;
 		}
 		if (access === "MINE") {
-			const entryId = context.principal?.fplEntryId;
-			if (!entryId || !context.principal?.fplEntryVerifiedAt)
-				forbidden("A verified FPL entry is required for private Trends");
-			params.push(entryId);
+			requirePrivateTrendsPrincipal(context);
+			params.push(context.principal!.fplEntryId!);
 		}
 		const cohortResult = await context.database.query<Record<string, unknown>>(
 			`
