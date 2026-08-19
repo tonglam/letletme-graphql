@@ -30,12 +30,12 @@ describe("requestEntryInfoSync", () => {
 		process.env.LETLETME_DATA_API_KEY = "k1";
 		Bun.env.LETLETME_DATA_URL = "http://data.example:3000/";
 		Bun.env.LETLETME_DATA_API_KEY = "k1";
-		globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+		globalThis.fetch = (async (input: URL | string, init?: RequestInit) => {
 			expect(String(input)).toBe("http://data.example:3000/entry-info/424242/sync");
 			expect(init?.method).toBe("POST");
 			expect(new Headers(init?.headers).get("x-api-key")).toBe("k1");
 			return new Response(JSON.stringify({ status: "queued", jobId: "job-9" }), { status: 202 });
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		expect(await requestEntryInfoSync(424242)).toEqual({
 			ok: true,

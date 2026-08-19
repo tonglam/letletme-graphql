@@ -229,7 +229,7 @@ describe("entriesService.getEntryById", () => {
 		globalThis.fetch = (async () => {
 			fetched = true;
 			return new Response("unused", { status: 500 });
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const entry = await entriesService.getEntryById({} as GraphQLContext, 101);
 		expect(entry?.entryName).toBe("Stored");
@@ -249,7 +249,7 @@ describe("entriesService.getEntryById", () => {
 					summary_overall_rank: 100,
 				}),
 				{ status: 200 }
-			)) as typeof fetch;
+			)) as unknown as typeof fetch;
 
 		const written: Array<{ key: string; value: string; ttl: number }> = [];
 		const context = {

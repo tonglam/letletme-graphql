@@ -45,7 +45,7 @@ describe("mapFplEntrySummaryToEntry", () => {
 
 describe("lookupFplEntry", () => {
 	it("returns a mapped entry when FPL has the team", async () => {
-		globalThis.fetch = (async (input: URL | RequestInfo) => {
+		globalThis.fetch = (async (input: URL | string) => {
 			expect(String(input)).toBe("https://fantasy.premierleague.com/api/entry/424242/");
 			return new Response(
 				JSON.stringify({
@@ -58,7 +58,7 @@ describe("lookupFplEntry", () => {
 				}),
 				{ status: 200, headers: { "Content-Type": "application/json" } }
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const entry = await lookupFplEntry(424242);
 		expect(entry?.id).toBe(424242);
@@ -67,11 +67,14 @@ describe("lookupFplEntry", () => {
 	});
 
 	it("returns null for a missing or malformed FPL team", async () => {
-		globalThis.fetch = (async () => new Response("Not found", { status: 404 })) as typeof fetch;
+		globalThis.fetch = (async () =>
+			new Response("Not found", { status: 404 })) as unknown as typeof fetch;
 		expect(await lookupFplEntry(1)).toBeNull();
 
 		globalThis.fetch = (async () =>
-			new Response(JSON.stringify({ id: 2, name: "Wrong" }), { status: 200 })) as typeof fetch;
+			new Response(JSON.stringify({ id: 2, name: "Wrong" }), {
+				status: 200,
+			})) as unknown as typeof fetch;
 		expect(await lookupFplEntry(1)).toBeNull();
 	});
 });
