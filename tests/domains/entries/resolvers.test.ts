@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { Entry, EntryEventResult } from "../../../src/domains/entries/repository";
-import { entriesResolvers, entryResultChipToEnum } from "../../../src/domains/entries/resolvers";
+import {
+	entriesResolvers,
+	entryResultChipToEnum,
+	normalizeEntrySearchLimit,
+	normalizeEntrySearchQuery,
+} from "../../../src/domains/entries/resolvers";
 import { entriesService } from "../../../src/domains/entries/service";
 import type { ElementEventResultData } from "../../../src/domains/entry-live/calc-service";
 import { type Player, Position } from "../../../src/domains/players/repository";
@@ -79,6 +84,63 @@ const makeEntryEventResult = (overrides: Partial<EntryEventResult> = {}): EntryE
 	teamValue: 1030,
 	bank: 10,
 	...overrides,
+});
+
+describe("entry search argument guards", () => {
+	it("trims a name query and rejects short or oversized input", () => {
+		expect(normalizeEntrySearchQuery("  Who  ")).toBe("Who");
+		expect(() => normalizeEntrySearchQuery("x")).toThrow("2-50 characters");
+		expect(() => normalizeEntrySearchQuery("x".repeat(51))).toThrow("2-50 characters");
+	});
+
+	it("defaults and caps the search result limit", () => {
+		expect(normalizeEntrySearchLimit(undefined)).toBe(10);
+		expect(normalizeEntrySearchLimit(null)).toBe(10);
+		expect(normalizeEntrySearchLimit(20)).toBe(20);
+		expect(() => normalizeEntrySearchLimit(0)).toThrow("between 1 and 20");
+		expect(() => normalizeEntrySearchLimit(21)).toThrow("between 1 and 20");
+	});
+
+	it("forwards a validated name search to entriesService", async () => {
+		const original = entriesService.searchEntries;
+		const context = {} as unknown as GraphQLContext;
+		const hits: Entry[] = [
+			{
+				id: 101,
+				entryName: "WhoamI FC",
+				playerName: "Tong W",
+				region: null,
+				startedEvent: 1,
+				overallPoints: 1,
+				overallRank: 2,
+				bank: 3,
+				teamValue: 4,
+				totalTransfers: 5,
+				lastEventId: 1,
+				lastOverallPoints: 1,
+				lastOverallRank: 2,
+				lastTeamValue: 4,
+				lastBank: 3,
+			},
+		];
+		entriesService.searchEntries = async (
+			inputContext: GraphQLContext,
+			query: string,
+			limit: number
+		): Promise<Entry[]> => {
+			expect(inputContext).toBe(context);
+			expect(query).toBe("Who");
+			expect(limit).toBe(8);
+			return hits;
+		};
+		try {
+			await expect(
+				entriesResolvers.Query.searchEntries(null, { query: "  Who  ", limit: 8 }, context)
+			).resolves.toEqual(hits);
+		} finally {
+			entriesService.searchEntries = original;
+		}
+	});
 });
 
 describe("entries resolver enum mappers", () => {

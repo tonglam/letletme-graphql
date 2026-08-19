@@ -69,6 +69,11 @@ export const entriesTypeDefs = /* GraphQL */ `
 		access to protected entry history.
 		"""
 		entry(id: Int!): Entry
+		"""
+		Fuzzy public lookup of synced FPL entries by team name or manager name.
+		Results are bounded and do not grant access to protected entry history.
+		"""
+		searchEntries(query: String!, limit: Int = 10): [Entry!]!
 		entryHistory(entryId: Int!): EntryHistoryPayload!
 		entryEventResult(entryId: Int!, eventId: Int!): EntryEventResult
 		entryTransferHistory(entryId: Int!, live: Boolean = false): [EntryGameweekTransfers!]!

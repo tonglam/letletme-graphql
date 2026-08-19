@@ -94,6 +94,15 @@ describe("authorizeGraphQLRequest", () => {
 		expect(result.ok).toBe(true);
 	});
 
+	it("allows public entry name search without a principal", async () => {
+		const result = await authorize(
+			`query SearchEntries($query: String!) { searchEntries(query: $query) { id entryName playerName } }`,
+			{ query: "Who" }
+		);
+
+		expect(result.ok).toBe(true);
+	});
+
 	it("rejects protected root fields without a principal", async () => {
 		const result = await authorize(
 			`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,

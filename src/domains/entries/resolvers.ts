@@ -1,8 +1,15 @@
+import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import type { ElementEventResultData } from "../entry-live/calc-service";
 import type { Player } from "../players/repository";
 import { playersService } from "../players/service";
 import type { Entry, EntryEventResult, EntryHistoryInfo } from "./repository";
+import {
+	SEARCH_ENTRIES_DEFAULT_LIMIT,
+	SEARCH_ENTRIES_MAX_LIMIT,
+	SEARCH_ENTRIES_MAX_QUERY_LENGTH,
+	SEARCH_ENTRIES_MIN_QUERY_LENGTH,
+} from "./repository";
 import type { EntryGameweekTransfers } from "./service";
 import { entriesService } from "./service";
 
@@ -36,6 +43,11 @@ type EntryArgs = {
 	id: number;
 };
 
+type SearchEntriesArgs = {
+	query: string;
+	limit?: number | null;
+};
+
 type EntryHistoryArgs = {
 	entryId: number;
 };
@@ -53,6 +65,30 @@ type EntryTransferHistoryArgs = {
 type EntryHistoryPayload = {
 	results: EntryEventResult[];
 	history: EntryHistoryInfo[];
+};
+
+export const normalizeEntrySearchQuery = (query: string): string => {
+	const normalized = query.trim();
+	if (
+		normalized.length < SEARCH_ENTRIES_MIN_QUERY_LENGTH ||
+		normalized.length > SEARCH_ENTRIES_MAX_QUERY_LENGTH
+	) {
+		throw new GraphQLError(
+			`Entry search must be ${SEARCH_ENTRIES_MIN_QUERY_LENGTH}-${SEARCH_ENTRIES_MAX_QUERY_LENGTH} characters`,
+			{ extensions: { code: "BAD_USER_INPUT" } }
+		);
+	}
+	return normalized;
+};
+
+export const normalizeEntrySearchLimit = (limit: number | null | undefined): number => {
+	const normalized = limit ?? SEARCH_ENTRIES_DEFAULT_LIMIT;
+	if (!Number.isInteger(normalized) || normalized < 1 || normalized > SEARCH_ENTRIES_MAX_LIMIT) {
+		throw new GraphQLError(`limit must be an integer between 1 and ${SEARCH_ENTRIES_MAX_LIMIT}`, {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
+	return normalized;
 };
 
 export const entryResultChipToEnum = (raw: string | null): string => {
@@ -97,6 +133,17 @@ export const entriesResolvers = {
 			args: EntryArgs,
 			context: GraphQLContext
 		): Promise<Entry | null> => entriesService.getEntryById(context, args.id),
+
+		searchEntries: async (
+			_parent: unknown,
+			args: SearchEntriesArgs,
+			context: GraphQLContext
+		): Promise<Entry[]> =>
+			entriesService.searchEntries(
+				context,
+				normalizeEntrySearchQuery(args.query),
+				normalizeEntrySearchLimit(args.limit)
+			),
 
 		entryHistory: async (
 			_parent: unknown,

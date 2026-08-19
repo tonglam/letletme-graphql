@@ -84,6 +84,7 @@ add(
 		"briefingStory",
 		"eventOverallResult",
 		"entry",
+		"searchEntries",
 		"calcLivePointsByEntry",
 	],
 	"public"
