@@ -28,9 +28,16 @@ export const briefingService = {
 	},
 	async getStory(context: GraphQLContext, slug: string, locale: BriefingLocale) {
 		const read = await briefingRepository.readWeek(context.database, context.redis, locale);
+		if (!read.payload) {
+			return {
+				state: read.state,
+				canonicalSlug: null,
+				story: null,
+			};
+		}
 		const story = flattenStories(read).find((item) => item.slug === slug);
 		return {
-			state: story ? read.state : read.state === "READY" ? "REMOVED" : read.state,
+			state: story ? read.state : "REMOVED",
 			canonicalSlug: story?.slug ?? null,
 			story: story ?? null,
 		};

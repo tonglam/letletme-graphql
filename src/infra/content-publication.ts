@@ -288,13 +288,14 @@ export async function readBriefingWeek(
 	}
 	if (!metadata || !metadata.servable) return unavailable(metadata?.state ?? "OFFSEASON");
 	const revision = Number(metadata.revision);
+	const deadlineTime = metadata.deadline_time ? metadataDate(metadata.deadline_time) : null;
 	const event =
-		metadata.target_event_id && metadata.event_name && metadata.deadline_time
+		metadata.target_event_id && metadata.event_name && deadlineTime
 			? {
 					seasonCode: metadata.season_code,
 					eventId: metadata.target_event_id,
 					name: metadata.event_name,
-					deadlineTime: metadataDate(metadata.deadline_time) as string,
+					deadlineTime,
 				}
 			: null;
 	const validUntil = metadataDate(metadata.valid_until);

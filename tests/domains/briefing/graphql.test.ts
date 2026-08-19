@@ -94,4 +94,53 @@ describe("Briefing GraphQL contract", () => {
 			sections: [],
 		});
 	});
+
+	test("briefingStory preserves week state when the publication is not servable", async () => {
+		const unservableDb: QueryExecutor = {
+			async query(text: string) {
+				if (text.includes("content.briefing_active_publication"))
+					return { rows: [{ ...metadata, servable: false, state: "READY" }] } as never;
+				return { rows: [] } as never;
+			},
+		};
+		const result = await graphql({
+			schema,
+			source: `
+				query BriefingStory($slug: String!, $locale: BriefingLocale!) {
+					briefingStory(slug: $slug, locale: $locale) {
+						state
+						story { slug }
+					}
+				}
+			`,
+			variableValues: { slug: "missing-story", locale: "EN" },
+			contextValue: {
+				database: unservableDb,
+				redis: { get: async () => null },
+			} as never,
+		});
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.briefingStory).toMatchObject({ state: "READY", story: null });
+	});
+
+	test("briefingStory returns REMOVED when the slug is absent from a loaded week", async () => {
+		const result = await graphql({
+			schema,
+			source: `
+				query BriefingStory($slug: String!, $locale: BriefingLocale!) {
+					briefingStory(slug: $slug, locale: $locale) {
+						state
+						story { slug }
+					}
+				}
+			`,
+			variableValues: { slug: "missing-story", locale: "EN" },
+			contextValue: {
+				database,
+				redis: { get: async () => null },
+			} as never,
+		});
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.briefingStory).toMatchObject({ state: "REMOVED", story: null });
+	});
 });

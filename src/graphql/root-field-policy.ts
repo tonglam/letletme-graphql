@@ -188,6 +188,8 @@ const lightweightFields = [
 	"topTransfersIn",
 	"topTransfersOut",
 	"playerValueHistory",
+	"briefingWeek",
+	"briefingStory",
 	"entryTournaments",
 	"tournament",
 	"managedTournament",

@@ -96,4 +96,21 @@ describe("Briefing publication reader", () => {
 		const result = await readBriefingWeek(database, redisWithoutPayload, "en");
 		expect(result).toMatchObject({ state: "UNAVAILABLE", payload: null });
 	});
+
+	test("omits event when metadata deadline_time is invalid", async () => {
+		const invalidDeadlineDb: QueryExecutor = {
+			async query(text: string) {
+				if (text.includes("content.briefing_active_publication"))
+					return { rows: [{ ...metadata, deadline_time: "not-a-date" }] } as never;
+				return {
+					rows: [
+						{ payload: fixture, payload_bytes: Buffer.byteLength(canonical), payload_sha256: hash },
+					],
+				} as never;
+			},
+		};
+		const result = await readBriefingWeek(invalidDeadlineDb, redisWithoutPayload, "en");
+		expect(result.state).toBe("READY");
+		expect(result.event).toBeNull();
+	});
 });
