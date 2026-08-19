@@ -307,6 +307,7 @@ describe("GraphQL request limits", () => {
 		expect(result.ok).toBe(true);
 		if (!result.ok) throw new Error(result.message);
 		expect(result.weightedComplexity).toBeLessThan(600);
+		expect(result.rateLimitCostUnits).toBe(10);
 	});
 
 	it("keeps the explicit ownership period roots within the public complexity guard", () => {
@@ -335,6 +336,7 @@ describe("GraphQL request limits", () => {
 		expect(result.ok).toBe(true);
 		if (!result.ok) throw new Error(result.message);
 		expect(result.weightedComplexity).toBeLessThan(600);
+		expect(result.rateLimitCostUnits).toBe(20);
 	});
 
 	it("sums heavy root floors, including aliases", () => {

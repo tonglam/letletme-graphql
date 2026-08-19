@@ -1,5 +1,10 @@
 import { parseDatabasePoolMax } from "./database-pool-config";
 import { parseBoundedPositiveIntegerEnv, parsePositiveIntegerEnv } from "./env-value";
+import {
+	GRAPHQL_ANONYMOUS_RATE_LIMIT_DEFAULT,
+	GRAPHQL_AUTHENTICATED_RATE_LIMIT_DEFAULT,
+	GRAPHQL_BROWSER_INGRESS_RATE_LIMIT_DEFAULT,
+} from "../http/rate-limit-defaults";
 
 type EnvKey =
 	| "NODE_ENV"
@@ -98,8 +103,14 @@ export const env = {
 	// fixed operational safety contracts; these three are deploy-tunable.
 	GRAPHQL_BROWSER_INGRESS_RATE_LIMIT: readPositiveInteger(
 		"GRAPHQL_BROWSER_INGRESS_RATE_LIMIT",
-		120
+		GRAPHQL_BROWSER_INGRESS_RATE_LIMIT_DEFAULT
 	),
-	GRAPHQL_AUTHENTICATED_RATE_LIMIT: readPositiveInteger("GRAPHQL_AUTHENTICATED_RATE_LIMIT", 300),
-	GRAPHQL_ANONYMOUS_RATE_LIMIT: readPositiveInteger("GRAPHQL_ANONYMOUS_RATE_LIMIT", 120),
+	GRAPHQL_AUTHENTICATED_RATE_LIMIT: readPositiveInteger(
+		"GRAPHQL_AUTHENTICATED_RATE_LIMIT",
+		GRAPHQL_AUTHENTICATED_RATE_LIMIT_DEFAULT
+	),
+	GRAPHQL_ANONYMOUS_RATE_LIMIT: readPositiveInteger(
+		"GRAPHQL_ANONYMOUS_RATE_LIMIT",
+		GRAPHQL_ANONYMOUS_RATE_LIMIT_DEFAULT
+	),
 } as const;

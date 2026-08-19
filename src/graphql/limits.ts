@@ -424,6 +424,12 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["marketOwnershipOverview", 10],
 	["marketOwnershipDay", 10],
 	["marketSnapshotContext", 1],
+	["playerValues", 5],
+	["eventFixtures", 5],
+	["currentEvent", 1],
+	["currentEventInfo", 1],
+	["teams", 2],
+	["miniProgramNotice", 1],
 	["publicLeagueTrends", 10],
 	["publicLeagueSelectionStats", 10],
 	["trendCohorts", 5],
@@ -465,9 +471,22 @@ const accepted = ({
 	weightedComplexity?: number;
 	rootFields?: Array<{ name: string; uniqueEntryCount: number | null }>;
 }): GraphQLLimitResult => {
-	const optimizedDirectoryRoots = new Set(["playersForPicker", "playerStatsBootstrap"]);
-	const optimizedDirectoryRequest =
-		rootFields.length > 0 && rootFields.every((field) => optimizedDirectoryRoots.has(field.name));
+	const boundedPublicDeskRoots = new Set([
+		"playersForPicker",
+		"playerStatsBootstrap",
+		"marketPulse",
+		"marketOwnershipOverview",
+		"marketOwnershipDay",
+		"marketSnapshotContext",
+		"playerValues",
+		"eventFixtures",
+		"currentEvent",
+		"currentEventInfo",
+		"teams",
+		"miniProgramNotice",
+	]);
+	const boundedPublicDeskRequest =
+		rootFields.length > 0 && rootFields.every((field) => boundedPublicDeskRoots.has(field.name));
 	const optimizedMyFplRoots = new Set([
 		"myFplTeamDesk",
 		"myFplTeamGameweek",
@@ -483,8 +502,8 @@ const accepted = ({
 		ok: true,
 		shape,
 		weightedComplexity,
-		rateLimitCostUnits: optimizedDirectoryRequest
-			? 5 * rootFields.length
+		rateLimitCostUnits: boundedPublicDeskRequest
+			? Math.max(5 * rootFields.length, heavyRootCost(rootFields))
 			: optimizedMyFplRequest
 				? heavyRootCost(rootFields)
 				: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
