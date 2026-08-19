@@ -2,8 +2,7 @@ import type { GraphQLContext } from "../../graphql/context";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
 import type { League, LeagueEventResult } from "./repository";
-import { LeagueType } from "./repository";
-import { leaguesService } from "./service";
+import { leaguesRepository, LeagueType } from "./repository";
 
 const eventsMemo = new WeakMap<GraphQLContext, Map<number, Event | null>>();
 
@@ -44,14 +43,14 @@ export const leaguesResolvers = {
 			_parent: unknown,
 			args: EntryLeaguesArgs,
 			context: GraphQLContext
-		): Promise<League[]> => leaguesService.getEntryLeagues(context, args.entryId),
+		): Promise<League[]> => leaguesRepository.getEntryLeagues(context, args.entryId),
 
 		leagueEventResults: async (
 			_parent: unknown,
 			args: LeagueEventResultsArgs,
 			context: GraphQLContext
 		): Promise<LeagueEventResult[]> =>
-			leaguesService.getLeagueEventResults(context, args.leagueId, args.eventId),
+			leaguesRepository.getLeagueEventResults(context, args.leagueId, args.eventId),
 	},
 	League: {
 		type: (parent: League): string => leagueTypeToEnum(parent.type),

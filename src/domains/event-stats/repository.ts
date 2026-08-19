@@ -1,44 +1,195 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import { hasExactFields } from "../../infra/exact-fields";
+import {
+	QUERY_CACHE_TTL_SECONDS,
+	readJsonQueryCache,
+	writeJsonQueryCache,
+} from "../../infra/query-cache";
 import { getCurrentSeason } from "../../infra/season";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
 
-const privateCacheKey = async (context: GraphQLContext, key: string): Promise<string> =>
-	gqlCacheKey(context, key);
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
-const evictMalformedCache = async (context: GraphQLContext, key: string): Promise<void> => {
-	try {
-		await context.redis.del(key);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to evict malformed event-stats cache");
+const isFiniteNumber = (value: unknown): value is number =>
+	typeof value === "number" && Number.isFinite(value);
+
+const isSafeNonNegativeInt = (value: unknown): value is number =>
+	typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+const isSafePositiveInt = (value: unknown): value is number =>
+	isSafeNonNegativeInt(value) && value > 0;
+
+const decodeSelectionPlayer = (value: unknown): SelectionStatPlayer | null => {
+	if (
+		!isRecord(value) ||
+		!hasExactFields(value, [
+			"id",
+			"webName",
+			"teamShortName",
+			"position",
+			"selectedByPercent",
+			"eoByPercent",
+		])
+	) {
+		return null;
 	}
+	if (
+		!isSafePositiveInt(value.id) ||
+		typeof value.webName !== "string" ||
+		typeof value.teamShortName !== "string" ||
+		typeof value.position !== "string" ||
+		!isFiniteNumber(value.selectedByPercent) ||
+		!(value.eoByPercent === null || isFiniteNumber(value.eoByPercent))
+	) {
+		return null;
+	}
+	return {
+		id: value.id,
+		webName: value.webName,
+		teamShortName: value.teamShortName,
+		position: value.position,
+		selectedByPercent: value.selectedByPercent,
+		eoByPercent: value.eoByPercent,
+	};
 };
 
-const readCachedJson = async (
-	context: GraphQLContext,
-	key: string
-): Promise<unknown | undefined> => {
-	let raw: string | null;
-	try {
-		raw = await context.redis.get(key);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to read event-stats cache");
-		return undefined;
+const decodeCaptainPlayer = (value: unknown): CaptainStatPlayer | null => {
+	if (
+		!isRecord(value) ||
+		!hasExactFields(value, [
+			"id",
+			"webName",
+			"teamShortName",
+			"position",
+			"captainByPercent",
+			"selectedByPercent",
+			"eoByPercent",
+		])
+	) {
+		return null;
 	}
-	if (raw === null) return undefined;
-	try {
-		return JSON.parse(raw) as unknown;
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Malformed event-stats cache");
-		await evictMalformedCache(context, key);
-		return undefined;
+	if (
+		!isSafePositiveInt(value.id) ||
+		typeof value.webName !== "string" ||
+		typeof value.teamShortName !== "string" ||
+		typeof value.position !== "string" ||
+		!isFiniteNumber(value.captainByPercent) ||
+		!isFiniteNumber(value.selectedByPercent) ||
+		!(value.eoByPercent === null || isFiniteNumber(value.eoByPercent))
+	) {
+		return null;
 	}
+	return {
+		id: value.id,
+		webName: value.webName,
+		teamShortName: value.teamShortName,
+		position: value.position,
+		captainByPercent: value.captainByPercent,
+		selectedByPercent: value.selectedByPercent,
+		eoByPercent: value.eoByPercent,
+	};
 };
+
+const decodeTransferPlayer = (value: unknown): TransferStatPlayer | null => {
+	if (
+		!isRecord(value) ||
+		!hasExactFields(value, [
+			"id",
+			"webName",
+			"teamShortName",
+			"position",
+			"transfersEvent",
+			"selectedByPercent",
+		])
+	) {
+		return null;
+	}
+	if (
+		!isSafePositiveInt(value.id) ||
+		typeof value.webName !== "string" ||
+		typeof value.teamShortName !== "string" ||
+		typeof value.position !== "string" ||
+		!isSafeNonNegativeInt(value.transfersEvent) ||
+		!isFiniteNumber(value.selectedByPercent)
+	) {
+		return null;
+	}
+	return {
+		id: value.id,
+		webName: value.webName,
+		teamShortName: value.teamShortName,
+		position: value.position,
+		transfersEvent: value.transfersEvent,
+		selectedByPercent: value.selectedByPercent,
+	};
+};
+
+const decodePlayerList = <T>(
+	value: unknown,
+	decodeItem: (item: unknown) => T | null
+): T[] | null => {
+	if (!Array.isArray(value)) return null;
+	const items = value.map(decodeItem);
+	return items.every((item): item is T => item !== null) ? items : null;
+};
+
+const TOURNAMENT_SELECTION_STATS_FIELDS = [
+	"totalEntries",
+	"goalkeepers",
+	"defenders",
+	"midfielders",
+	"forwards",
+	"captainSelect",
+	"viceCaptainSelect",
+	"mostSelectedPlayers",
+	"mostTransferIn",
+	"mostTransferOut",
+] as const;
+
+export const decodeTournamentSelectionStats = (value: unknown): TournamentSelectionStats | null => {
+	if (!isRecord(value) || !hasExactFields(value, TOURNAMENT_SELECTION_STATS_FIELDS)) return null;
+	const goalkeepers = decodePlayerList(value.goalkeepers, decodeSelectionPlayer);
+	const defenders = decodePlayerList(value.defenders, decodeSelectionPlayer);
+	const midfielders = decodePlayerList(value.midfielders, decodeSelectionPlayer);
+	const forwards = decodePlayerList(value.forwards, decodeSelectionPlayer);
+	const captainSelect = decodePlayerList(value.captainSelect, decodeCaptainPlayer);
+	const viceCaptainSelect = decodePlayerList(value.viceCaptainSelect, decodeCaptainPlayer);
+	const mostSelectedPlayers = decodePlayerList(value.mostSelectedPlayers, decodeSelectionPlayer);
+	const mostTransferIn = decodePlayerList(value.mostTransferIn, decodeTransferPlayer);
+	const mostTransferOut = decodePlayerList(value.mostTransferOut, decodeTransferPlayer);
+	if (
+		!isSafeNonNegativeInt(value.totalEntries) ||
+		!goalkeepers ||
+		!defenders ||
+		!midfielders ||
+		!forwards ||
+		!captainSelect ||
+		!viceCaptainSelect ||
+		!mostSelectedPlayers ||
+		!mostTransferIn ||
+		!mostTransferOut
+	) {
+		return null;
+	}
+	return {
+		totalEntries: value.totalEntries,
+		goalkeepers,
+		defenders,
+		midfielders,
+		forwards,
+		captainSelect,
+		viceCaptainSelect,
+		mostSelectedPlayers,
+		mostTransferIn,
+		mostTransferOut,
+	};
+};
+
+const privateCacheKey = async (context: GraphQLContext, key: string): Promise<string> =>
+	gqlCacheKey(context, key);
 
 export type SelectionStatPlayer = {
 	id: number;
@@ -93,6 +244,12 @@ export type DbTournamentSelectionStatRow = {
 	captain_percentage: number | string;
 	vice_captain_percentage: number | string;
 	effective_ownership_percentage: number | string;
+};
+
+export type TournamentSelectionIndexRow = {
+	playerId: number;
+	count: number;
+	percentage: number;
 };
 
 const positionTypeToEnum = (type: number): string => {
@@ -242,6 +399,54 @@ async function getReadModelRows(
 	}
 
 	return (data as DbTournamentSelectionStatRow[] | null) ?? [];
+}
+
+/**
+ * Reads the reporting aggregate used by live tournament desks. This is kept
+ * separate from the player-enriched event-stats projection so the desk never
+ * needs to load tournament rosters or raw picks at request time.
+ */
+export async function getTournamentSelectionIndexRows(
+	context: GraphQLContext,
+	tournamentId: number,
+	eventId: number
+): Promise<TournamentSelectionIndexRow[]> {
+	if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) return [];
+	if (!Number.isSafeInteger(eventId) || eventId <= 0) return [];
+	const rows = (await getReadModelRows(context, tournamentId, eventId)) ?? [];
+	if (rows.length === 0) return [];
+
+	let totalEntries: number | null = null;
+	const playerIds = new Set<number>();
+	return rows.map((row) => {
+		const playerId = Number(row.element_id);
+		const count = Number(row.pick_count);
+		const rowTotalEntries = Number(row.total_entries);
+		const percentage = Number(row.selection_percentage);
+		if (
+			!Number.isSafeInteger(playerId) ||
+			playerId <= 0 ||
+			!Number.isSafeInteger(count) ||
+			count < 0 ||
+			!Number.isSafeInteger(rowTotalEntries) ||
+			rowTotalEntries <= 0 ||
+			count > rowTotalEntries ||
+			!Number.isFinite(percentage) ||
+			percentage < 0 ||
+			percentage > 100
+		) {
+			throw new Error("Malformed tournament selection index read model row");
+		}
+		if (totalEntries === null) totalEntries = rowTotalEntries;
+		if (rowTotalEntries !== totalEntries) {
+			throw new Error("Inconsistent tournament selection index total_entries");
+		}
+		if (playerIds.has(playerId)) {
+			throw new Error("Duplicate tournament selection index player");
+		}
+		playerIds.add(playerId);
+		return { playerId, count, percentage };
+	});
 }
 
 function snapshotFromReadModel(rows: DbTournamentSelectionStatRow[]): {
@@ -489,9 +694,9 @@ export const eventStatsRepository: EventStatsRepository = {
 			context,
 			`tournament-selection-stats:${tournamentId}:${eventId}:${safeLimit}`
 		);
-		const cached = await readCachedJson(context, cacheKey);
-		if (isRecord(cached)) {
-			return cached as unknown as TournamentSelectionStats;
+		const cached = await readJsonQueryCache(context, cacheKey, decodeTournamentSelectionStats);
+		if (cached) {
+			return cached;
 		}
 
 		const readModelRows = await getReadModelRows(context, tournamentId, eventId);
@@ -508,12 +713,7 @@ export const eventStatsRepository: EventStatsRepository = {
 				eventId,
 				season
 			);
-			await writeQueryCache(
-				context,
-				cacheKey,
-				JSON.stringify(result),
-				QUERY_CACHE_TTL_SECONDS.REPORTING
-			);
+			await writeJsonQueryCache(context, cacheKey, result, QUERY_CACHE_TTL_SECONDS.REPORTING);
 			return result;
 		}
 

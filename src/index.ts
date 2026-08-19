@@ -13,7 +13,7 @@ import type { GraphQLContext } from "./graphql/context";
 import { validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
 import { validateDatabaseContract } from "./infra/database-contract";
-import { database } from "./infra/database";
+import { database, databaseHealthCheck } from "./infra/database";
 import { coreDatasetRevision, getCoreDataSnapshot } from "./infra/data-snapshot";
 import { closeDbPool } from "./infra/db-pool";
 import { env } from "./infra/env";
@@ -38,6 +38,10 @@ import {
 	hasAuthenticationMaterial,
 	type GraphQLRateLimitConfig,
 } from "./http/graphql-policy";
+import { validateGraphQLTransportPayload } from "./http/graphql-request";
+import { runHealthChecks } from "./http/health";
+import { createShutdownHandler } from "./http/shutdown";
+import { LIGHTWEIGHT_CORE_FIELDS } from "./graphql/root-field-policy";
 import {
 	extractGraphQLOperationName,
 	RequestTiming,
@@ -69,10 +73,6 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
 			"Content-Type, Authorization, X-Request-Id, X-User-Context, X-User-Context-Sig, X-Ingress-Context, X-Ingress-Context-Sig",
 		"Access-Control-Max-Age": "86400",
 	};
-
-	if (env.CORS_CREDENTIALS) {
-		headers["Access-Control-Allow-Credentials"] = "true";
-	}
 
 	return headers;
 }
@@ -153,30 +153,30 @@ const enforceGraphQLRateLimits = async ({
 	return null;
 };
 
-async function healthCheck(): Promise<{ ok: boolean; body: string }> {
-	const checks: Record<string, string> = {};
-
-	try {
-		const redis = getRedis();
-		const pong = await redis.ping();
-		checks.redis = pong === "PONG" ? "ok" : "fail";
-	} catch {
-		checks.redis = "fail";
-	}
-
-	try {
-		await database.query("SELECT 1");
-		checks.postgres = "ok";
-		currentSeasonProvider.get();
-		checks.season = "ok";
-	} catch {
-		checks.postgres = "fail";
-		checks.season = "fail";
-	}
-
-	const ok = Object.values(checks).every((v) => v === "ok");
-	return { ok, body: JSON.stringify({ status: ok ? "ok" : "degraded", checks }) };
-}
+const healthCheck = async (): Promise<{ ok: boolean; body: string }> => {
+	const result = await runHealthChecks({
+		redis: async () => {
+			if ((await getRedis().ping()) !== "PONG")
+				throw new Error("primary Redis did not answer PONG");
+		},
+		rateLimitRedis: async () => {
+			if ((await getRateLimitRedis().ping()) !== "PONG") {
+				throw new Error("rate-limit Redis did not answer PONG");
+			}
+		},
+		postgres: async () => {
+			await databaseHealthCheck();
+		},
+		season: async () => {
+			currentSeasonProvider.get();
+		},
+	});
+	if (!result.ok) logger.warn({ checks: result.checks }, "Health readiness degraded");
+	return {
+		ok: result.ok,
+		body: JSON.stringify({ status: result.ok ? "ok" : "degraded", checks: result.checks }),
+	};
+};
 
 const startServer = async (): Promise<void> => {
 	const contract = await validateDatabaseContract(database);
@@ -370,16 +370,22 @@ const startServer = async (): Promise<void> => {
 							);
 						} catch {
 							return finalizeGraphQLResponse(
-								new Response(JSON.stringify({ errors: [{ message: "Invalid JSON" }] }), {
-									status: 400,
-									headers: {
-										"Content-Type": "application/json",
-										...corsHeaders,
-									},
-								}),
+								jsonError(
+									400,
+									"INVALID_GRAPHQL_REQUEST",
+									"Request body must be valid JSON",
+									corsHeaders
+								),
 								"invalid_json"
 							);
 						}
+					}
+					const transportFailure = validateGraphQLTransportPayload(parsedBody);
+					if (transportFailure) {
+						return finalizeGraphQLResponse(
+							jsonError(400, transportFailure.code, transportFailure.message, corsHeaders),
+							"invalid_transport_payload"
+						);
 					}
 					operationName = extractGraphQLOperationName(parsedBody);
 
@@ -434,12 +440,12 @@ const startServer = async (): Promise<void> => {
 					const authorization = await requestTiming.measure("authorization", () =>
 						authorizeGraphQLRequest({
 							body: parsedBody,
-							searchParams: url.searchParams,
 							principal,
 							data,
 							logger,
 							requestScope,
 							authorizedTournamentMemberships,
+							currentSeason: currentSeason.seasonCode,
 						})
 					);
 					if (!authorization.ok) {
@@ -463,48 +469,10 @@ const startServer = async (): Promise<void> => {
 						principal: principal ?? undefined,
 						user: user ?? undefined,
 					};
-					const lightweightCoreFields = new Set([
-						"event",
-						"events",
-						"eventFixtures",
-						"currentEventInfo",
-						"coreEventContext",
-						"homePublicBootstrap",
-						"homeGameweek",
-						"homeMarketPulse",
-						"homePersonalDesk",
-						"playerStatsBootstrap",
-						"playersForPicker",
-						"playerStatsDesk",
-						"trendCohorts",
-						"trendCohortSnapshot",
-						"gameweekDesk",
-						"marketSnapshotContext",
-						"marketPulse",
-						"topTransfersIn",
-						"topTransfersOut",
-						"playerValueHistory",
-						"entryTournaments",
-						"tournament",
-						"managedTournament",
-						"tournamentParticipants",
-						"tournamentEntryIds",
-						"tournamentOfficialH2H",
-						"tournamentDetailDesk",
-						"entryOfficialH2HDesk",
-						"managedTournamentStatus",
-						"myFplTeamDesk",
-						"myFplTeamGameweek",
-						"myFplTeamTransfers",
-						"myFplCompetitionsDesk",
-						"myFplCompetitionBoard",
-						"myFplCompetitionSeasonPath",
-						"myFplCompetitionSetupStatus",
-					]);
 					const lightweightCoreRead =
 						limits.shape === "query" &&
 						limits.rootFields.length > 0 &&
-						limits.rootFields.every((field) => lightweightCoreFields.has(field));
+						limits.rootFields.every((field) => LIGHTWEIGHT_CORE_FIELDS.has(field));
 					if (!lightweightCoreRead) {
 						fullCoreLoaded = true;
 						graphQLContext.fullCoreLoaded = true;
@@ -632,18 +600,25 @@ const startServer = async (): Promise<void> => {
 		},
 	});
 
-	const shutdown = async (signal: string): Promise<void> => {
-		logger.info({ signal }, "Shutting down");
-		try {
-			server.stop();
-			await apollo.stop();
-			await closeRedis();
-			await closeDbPool();
-		} catch (error) {
-			logger.error({ err: error }, "Error during shutdown");
-		}
-		process.exit(0);
-	};
+	const shutdown = createShutdownHandler({
+		server,
+		stopApollo: () => apollo.stop(),
+		closeRedis,
+		closeDbPool,
+		setExitCode: (code) => {
+			process.exitCode = code;
+		},
+		exitProcess: (code) => {
+			process.exit(code);
+		},
+		log: (error) => {
+			if (error && typeof error === "object" && "signal" in error) {
+				logger.info(error, "Shutting down");
+			} else {
+				logger.error({ err: error }, "Error during shutdown");
+			}
+		},
+	});
 
 	process.on("SIGTERM", () => {
 		void shutdown("SIGTERM");

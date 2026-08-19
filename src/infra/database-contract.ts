@@ -9,7 +9,14 @@ const GRAPHQL_RUNTIME_CAPABILITY_ROLE = "letletme_graphql_reader";
 const GRAPHQL_AUTH_READ_COLUMNS = [
 	{
 		relationName: 'bauth."user"',
-		columnNames: ["id", "fpl_entry_id", "fpl_entry_verified_at"],
+		columnNames: [
+			"id",
+			"fpl_entry_id",
+			"fpl_entry_verified_at",
+			"fpl_entry_season",
+			"fpl_entry_binding_assurance",
+			"fpl_entry_binding_proof_kind",
+		],
 	},
 	{
 		relationName: "bauth.mini_program_session",
@@ -151,7 +158,8 @@ export const validateDatabaseContract = async (
 
 	const capabilityRole = expectOne(
 		(
-			await database.query<CapabilityRoleRow>(`
+			await database.query<CapabilityRoleRow>(
+				`
 				SELECT
 					rolname AS role_name,
 					rolcanlogin,
@@ -162,8 +170,10 @@ export const validateDatabaseContract = async (
 					rolreplication,
 					rolbypassrls
 				FROM pg_roles
-				WHERE rolname = '${GRAPHQL_RUNTIME_CAPABILITY_ROLE}'
-			`)
+				WHERE rolname = $1
+				`,
+				[GRAPHQL_RUNTIME_CAPABILITY_ROLE]
+			)
 		).rows,
 		"The GraphQL runtime capability role cannot be resolved"
 	);

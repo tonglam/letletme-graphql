@@ -4,6 +4,19 @@ import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
 import { schema } from "../../src/graphql/schema";
 
 describe("GraphQL request limits", () => {
+	it("rejects invalid transport payloads before query cost analysis", () => {
+		expect(validateGraphQLRequestLimits([])).toEqual({
+			ok: false,
+			code: "BATCHING_DISABLED",
+			message: "GraphQL request batching is disabled",
+		});
+		expect(validateGraphQLRequestLimits({})).toEqual({
+			ok: false,
+			code: "INVALID_GRAPHQL_REQUEST",
+			message: "GraphQL request body must contain a query string",
+		});
+	});
+
 	it("accepts an ordinary query", () => {
 		const result = validateGraphQLRequestLimits({
 			query: "query { events { id name } }",

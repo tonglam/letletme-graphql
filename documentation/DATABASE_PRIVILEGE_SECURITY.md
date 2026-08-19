@@ -3,7 +3,11 @@
 `letletme_data` owns Data Platform schemas and grants
 `letletme_graphql_reader` schema usage plus relation `SELECT` only.
 `letletme-web` owns `bauth` and any required auth-reader grant. GraphQL owns no
-database objects or migrations.
+database objects or migrations. The GraphQL reader grant on `bauth."user"` is
+exactly `id`, `fpl_entry_id`, `fpl_entry_verified_at`, `fpl_entry_season`,
+`fpl_entry_binding_assurance`, and `fpl_entry_binding_proof_kind`. The grant on
+`bauth.mini_program_session` is exactly `user_id`, `token_hash`, `revoked_at`,
+and `expires_at`. Startup rejects any broader or narrower auth-column set.
 
 The runtime login must be non-superuser, non-createdb, non-createrole, and
 non-bypassrls. It must have no `CREATE` privilege in a Data schema and no

@@ -51,7 +51,7 @@ import { briefingTypeDefs } from "../domains/briefing/schema";
 
 export const schema = makeExecutableSchema({
 	typeDefs: [
-		baseTypeDefs, // Must be first to define Query and Mutation
+		baseTypeDefs, // Must be first to define Query
 		authTypeDefs,
 		eventsTypeDefs,
 		gameweekTypeDefs,

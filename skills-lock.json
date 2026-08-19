@@ -1,11 +1,6 @@
 {
   "version": 1,
   "skills": {
-    "better-auth-best-practices": {
-      "source": "better-auth/skills",
-      "sourceType": "github",
-      "computedHash": "a4c830509e85557b59339d8d93a4e243e9e59c686e7678854d39230e12c2a6dc"
-    },
     "bun": {
       "source": "bun.sh",
       "sourceType": "well-known",
@@ -15,11 +10,6 @@
       "source": "supabase/agent-skills",
       "sourceType": "github",
       "computedHash": "d606a1146be6d54fb9e73f718b5320b9acac5ff2ba2d7230a555df4b5a923b4a"
-    },
-    "two-factor-authentication-best-practices": {
-      "source": "better-auth/skills",
-      "sourceType": "github",
-      "computedHash": "7e297aaf887e11fdc03e52bdbf44974e161e8f7c393170ced7dc66cace4f6d46"
     },
     "typescript-advanced-types": {
       "source": "wshobson/agents",

@@ -70,7 +70,7 @@ bun run dev
 The service exposes:
 
 - `POST /graphql` for trusted Web traffic;
-- `GET /health` for PostgreSQL, Redis, and current-season readiness; and
+- `GET /health` for PostgreSQL, both Redis clients, and current-season readiness; and
 - `GET /metrics`, protected by `METRICS_TOKEN`.
 
 Requests are bounded by body size, depth, root-field count, aliases, AST nodes,
@@ -100,7 +100,7 @@ auth read boundary, provisions a disposable read-only login, and runs the real
 startup contract. GraphQL has no business migration command; Data schema
 changes land in `letletme_data`, while `bauth` changes land in `letletme-web`.
 
-Leave `TRUSTED_PROXY_HOPS` at `0` unless the complete proxy chain has been
-reviewed. Rate-limit overrides should be changed only with matching production
-traffic evidence; the versioned Redis scopes intentionally do not reuse old
-counters.
+`DATABASE_STATEMENT_TIMEOUT_MS` defaults to 12 seconds and must remain below
+the Web proxy's 15-second upstream deadline. Rate-limit overrides should be
+changed only with matching production traffic evidence; the versioned Redis
+scopes intentionally do not reuse old counters.

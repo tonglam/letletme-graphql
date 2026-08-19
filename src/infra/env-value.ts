@@ -9,3 +9,17 @@ export const parsePositiveIntegerEnv = (
 	}
 	return value;
 };
+
+export const parseBoundedPositiveIntegerEnv = (
+	raw: string | undefined,
+	key: string,
+	fallback: number,
+	minimum: number,
+	maximum: number
+): number => {
+	const value = parsePositiveIntegerEnv(raw, key, fallback);
+	if (value < minimum || value > maximum) {
+		throw new Error(`${key} must be between ${minimum} and ${maximum}`);
+	}
+	return value;
+};

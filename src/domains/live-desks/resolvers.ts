@@ -10,6 +10,7 @@ import {
 	type LiveDataSnapshot,
 } from "../../infra/data-snapshot";
 import { entryLiveBatchService } from "../entry-live/batch-service";
+import { getTournamentSelectionIndexRows } from "../event-stats/repository";
 import { tournamentsService } from "../tournaments/service";
 import {
 	competitionBoardCacheKey,
@@ -256,22 +257,16 @@ export const liveDesksResolvers = {
 		) => {
 			await assertMember(context, args.tournamentId, args.entryId);
 			const { snapshot } = await resolveSnapshot(context, args.ref);
-			const entryIds = await tournamentsService.getTournamentEntryIds(context, args.tournamentId);
-			const picks = await (
-				await import("../entry-live/repository")
-			).entryLiveRepository.getEntryEventPicksByIds(context, entryIds, snapshot.eventId);
-			const counts = new Map<number, number>();
-			for (const pick of picks.values())
-				for (const row of pick.picks) counts.set(row.element, (counts.get(row.element) ?? 0) + 1);
+			const rows = await getTournamentSelectionIndexRows(
+				context,
+				args.tournamentId,
+				snapshot.eventId
+			);
 			return {
 				tournamentId: args.tournamentId,
 				eventId: snapshot.eventId,
 				revision: snapshot.revision,
-				rows: Array.from(counts, ([playerId, count]) => ({
-					playerId,
-					count,
-					percentage: entryIds.length ? (count / entryIds.length) * 100 : 0,
-				})),
+				rows,
 			};
 		},
 		tournamentEntrySquads: async (

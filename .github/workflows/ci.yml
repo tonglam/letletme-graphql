@@ -10,6 +10,7 @@ permissions:
 env:
   NODE_ENV: test
   DATABASE_URL: postgresql://graphql_ci:graphql_ci@127.0.0.1:5432/testdb
+  DATABASE_STATEMENT_TIMEOUT_MS: "12000"
   REDIS_HOST: 127.0.0.1
   REDIS_PORT: "6379"
   REDIS_PASSWORD: ""
@@ -18,8 +19,6 @@ env:
   BACKEND_PROXY_SECRET: test-backend-proxy-secret
   GRAPHQL_SERVICE_TOKEN: test-graphql-service-token-at-least-32-characters
   CORS_ORIGIN: http://localhost:3000
-  CORS_CREDENTIALS: "false"
-  TRUSTED_PROXY_HOPS: "0"
   GRAPHQL_BROWSER_INGRESS_RATE_LIMIT: "120"
   GRAPHQL_AUTHENTICATED_RATE_LIMIT: "300"
   GRAPHQL_ANONYMOUS_RATE_LIMIT: "120"
@@ -47,7 +46,7 @@ jobs:
           GITLEAKS_CONFIG: .gitleaks.toml
 
       - name: Dependency vulnerability scan
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
         with:
           scan-args: |-
             --recursive
@@ -264,7 +263,10 @@ jobs:
             id text PRIMARY KEY,
             email text,
             fpl_entry_id integer,
-            fpl_entry_verified_at timestamptz
+            fpl_entry_verified_at timestamptz,
+            fpl_entry_season text,
+            fpl_entry_binding_assurance text,
+            fpl_entry_binding_proof_kind text
           );
           CREATE TABLE bauth.mini_program_session (
             id text PRIMARY KEY,
@@ -277,7 +279,14 @@ jobs:
           REVOKE ALL ON SCHEMA bauth FROM PUBLIC;
           REVOKE ALL ON ALL TABLES IN SCHEMA bauth FROM PUBLIC;
           GRANT USAGE ON SCHEMA bauth TO letletme_graphql_reader;
-          GRANT SELECT (id, fpl_entry_id, fpl_entry_verified_at)
+          GRANT SELECT (
+            id,
+            fpl_entry_id,
+            fpl_entry_verified_at,
+            fpl_entry_season,
+            fpl_entry_binding_assurance,
+            fpl_entry_binding_proof_kind
+          )
             ON bauth."user" TO letletme_graphql_reader;
           GRANT SELECT (user_id, token_hash, revoked_at, expires_at)
             ON bauth.mini_program_session TO letletme_graphql_reader;
