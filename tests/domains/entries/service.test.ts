@@ -1,5 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import type { EntryEventResult } from "../../../src/domains/entries/repository";
+import { entriesRepository } from "../../../src/domains/entries/repository";
 import { entriesService } from "../../../src/domains/entries/service";
 import {
 	type EntryEventTransferRow,
@@ -193,6 +194,85 @@ describe("entriesService.getEntryEventPicks", () => {
 			totalPoints: 2,
 			minutes: 0,
 			position: 12,
+		});
+	});
+});
+
+describe("entriesService.getEntryById", () => {
+	const originalGetEntryById = entriesRepository.getEntryById;
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		entriesRepository.getEntryById = originalGetEntryById;
+		globalThis.fetch = originalFetch;
+	});
+
+	it("returns the stored row without calling FPL", async () => {
+		entriesRepository.getEntryById = async () => ({
+			id: 101,
+			entryName: "Stored",
+			playerName: "Manager",
+			region: null,
+			startedEvent: 1,
+			overallPoints: 10,
+			overallRank: 20,
+			bank: 1,
+			teamValue: 1000,
+			totalTransfers: 0,
+			lastEventId: 1,
+			lastOverallPoints: 10,
+			lastOverallRank: 20,
+			lastTeamValue: 1000,
+			lastBank: 1,
+		});
+		let fetched = false;
+		globalThis.fetch = (async () => {
+			fetched = true;
+			return new Response("unused", { status: 500 });
+		}) as unknown as typeof fetch;
+
+		const entry = await entriesService.getEntryById({} as GraphQLContext, 101);
+		expect(entry?.entryName).toBe("Stored");
+		expect(fetched).toBe(false);
+	});
+
+	it("falls back to FPL and caches the live summary when the row is missing", async () => {
+		entriesRepository.getEntryById = async () => null;
+		globalThis.fetch = (async () =>
+			new Response(
+				JSON.stringify({
+					id: 424242,
+					name: "Let Let Me",
+					player_first_name: "Tong",
+					player_last_name: "Lam",
+					summary_overall_points: 80,
+					summary_overall_rank: 100,
+				}),
+				{ status: 200 }
+			)) as unknown as typeof fetch;
+
+		const written: Array<{ key: string; value: string; ttl: number }> = [];
+		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: "core-17",
+			redis: {
+				set: async (key: string, value: string, mode: string, ttl: number) => {
+					expect(mode).toBe("EX");
+					written.push({ key, value, ttl });
+					return "OK";
+				},
+			},
+			logger: { warn: () => undefined },
+		} as unknown as GraphQLContext;
+
+		const entry = await entriesService.getEntryById(context, 424242);
+		expect(entry?.entryName).toBe("Let Let Me");
+		expect(entry?.playerName).toBe("Tong Lam");
+		expect(written).toHaveLength(1);
+		expect(written[0]?.key.startsWith("llm:gql:core-17:entries-info:")).toBe(true);
+		expect(JSON.parse(written[0]?.value ?? "{}")).toMatchObject({
+			id: 424242,
+			entryName: "Let Let Me",
 		});
 	});
 });
