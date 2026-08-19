@@ -1,5 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
+import { enqueueEntryInfoSync } from "../../infra/entry-info-sync";
+import { lookupFplEntry } from "../../infra/fpl-entry-lookup";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
@@ -250,12 +252,33 @@ async function buildLiveMapForEvents(
 }
 
 export const entriesService = {
-	getEntryById(context: GraphQLContext, id: number): Promise<Entry | null> {
-		return entriesRepository.getEntryById(context, id);
+	async getEntryById(context: GraphQLContext, id: number): Promise<Entry | null> {
+		const stored = await entriesRepository.getEntryById(context, id);
+		if (stored) {
+			return stored;
+		}
+
+		const live = await lookupFplEntry(id);
+		if (!live) {
+			return null;
+		}
+
+		enqueueEntryInfoSync(id);
+		await writeQueryCache(
+			context,
+			gqlCacheKey(context, `entries:info:${id}`),
+			JSON.stringify(live),
+			QUERY_CACHE_TTL_SECONDS.METADATA
+		);
+		return live;
 	},
 
 	getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
 		return entriesRepository.getEntriesByIds(context, ids);
+	},
+
+	searchEntries(context: GraphQLContext, query: string, limit: number): Promise<Entry[]> {
+		return entriesRepository.searchEntries(context, query, limit);
 	},
 
 	getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]> {

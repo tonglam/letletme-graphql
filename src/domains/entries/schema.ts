@@ -61,10 +61,19 @@ export const entriesTypeDefs = /* GraphQL */ `
 
 	extend type Query {
 		"""
-		Public entry lookup behind the trusted ingress. This does not establish an
-		identity binding or grant access to protected entry history.
+		Public entry lookup behind the trusted ingress. Unknown IDs fall back to
+		the public FPL entry API so bind/search can preview teams that are not
+		yet in competition.entries. A successful fallback also enqueues
+		letletme_data entry-info sync when LETLETME_DATA_URL is configured.
+		This does not write PostgreSQL, establish an identity binding, or grant
+		access to protected entry history.
 		"""
 		entry(id: Int!): Entry
+		"""
+		Fuzzy public lookup of synced FPL entries by team name or manager name.
+		Results are bounded and do not grant access to protected entry history.
+		"""
+		searchEntries(query: String!, limit: Int = 10): [Entry!]!
 		entryHistory(entryId: Int!): EntryHistoryPayload!
 		entryEventResult(entryId: Int!, eventId: Int!): EntryEventResult
 		entryTransferHistory(entryId: Int!, live: Boolean = false): [EntryGameweekTransfers!]!
