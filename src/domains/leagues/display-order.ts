@@ -34,7 +34,10 @@ export const resolveOfficialKind = (
 	shortName: string | null | undefined
 ): OfficialLeagueKind => {
 	if (officialKind) return officialKind;
-	if (isBroadcasterShortName(shortName) || (typeof shortName === "string" && shortName.trim().length > 0)) {
+	if (
+		isBroadcasterShortName(shortName) ||
+		(typeof shortName === "string" && shortName.trim().length > 0)
+	) {
 		return OfficialLeagueKind.SYSTEM;
 	}
 	return OfficialLeagueKind.INVITATIONAL;
@@ -73,8 +76,10 @@ export const compareLeaguesForOfficialDisplay = (
 	return left.name.localeCompare(right.name, "en");
 };
 
-export const sortLeaguesForOfficialDisplay = <T extends LeagueDisplayOrderInput>(leagues: T[]): T[] =>
-	[...leagues].sort(compareLeaguesForOfficialDisplay);
+export const sortLeaguesForOfficialDisplay = <T extends LeagueDisplayOrderInput>(
+	leagues: T[]
+): T[] => [...leagues].sort(compareLeaguesForOfficialDisplay);
 
-export const selectHomeInvitationalLeagues = <T extends LeagueDisplayOrderInput>(leagues: T[]): T[] =>
-	sortLeaguesForOfficialDisplay(leagues).filter(isInvitationalLeague);
+export const selectHomeInvitationalLeagues = <T extends LeagueDisplayOrderInput>(
+	leagues: T[]
+): T[] => sortLeaguesForOfficialDisplay(leagues).filter(isInvitationalLeague);
