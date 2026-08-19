@@ -83,10 +83,7 @@ describe("Trends private access", () => {
 			userId: "user-1",
 			source: "wechat_miniprogram",
 			fplEntryId: 123,
-			fplEntryVerifiedAt: "2026-07-18T00:00:00.000Z",
-			fplEntrySeason: "2526",
-			fplEntryBindingAssurance: "UNVERIFIED",
-			envelopeVersion: 2,
+			fplEntryVerifiedAt: null,
 		};
 
 		await expect(trendsRepository.listCohorts(context, "MINE")).rejects.toMatchObject({

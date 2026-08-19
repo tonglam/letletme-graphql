@@ -13,10 +13,8 @@ Auth, serve `/api/auth/*`, issue device sessions, or accept cookie sessions.
    is trusted only when `evat` is non-null.
 3. Mini Program requests carry a Web-issued bearer token. GraphQL hashes the
    token and validates it against `bauth.mini_program_session` only after the
-   ingress signature succeeds. The joined `bauth."user"` read also loads
-   `fpl_entry_season`, `fpl_entry_binding_assurance`, and
-   `fpl_entry_binding_proof_kind`. A null assurance on a verified current-season
-   binding is treated as a legacy row, not as `UNVERIFIED`.
+   ingress signature succeeds. The joined `bauth."user"` read loads only the
+   legacy `fpl_entry_id` and `fpl_entry_verified_at` binding fields.
 4. Public server-rendered Web reads use the independent GraphQL service token.
 
 Protected entry-scoped fields require a verified entry binding. The public
@@ -24,8 +22,7 @@ Protected entry-scoped fields require a verified entry binding. The public
 exceptions used by public comparison/live-score pages; they do not establish
 identity or grant access to history, transfers, leagues, My FPL, or tournament
 data. The `fpl_entry_id` column alone is not sufficient for protected fields;
-existing bindings are intentionally unverified until the web team-name
-challenge is completed.
+the Web-signed `fpl_entry_verified_at` value is required.
 
 ## Web binding challenge
 

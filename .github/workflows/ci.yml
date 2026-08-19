@@ -263,10 +263,7 @@ jobs:
             id text PRIMARY KEY,
             email text,
             fpl_entry_id integer,
-            fpl_entry_verified_at timestamptz,
-            fpl_entry_season text,
-            fpl_entry_binding_assurance text,
-            fpl_entry_binding_proof_kind text
+            fpl_entry_verified_at timestamptz
           );
           CREATE TABLE bauth.mini_program_session (
             id text PRIMARY KEY,
@@ -282,10 +279,7 @@ jobs:
           GRANT SELECT (
             id,
             fpl_entry_id,
-            fpl_entry_verified_at,
-            fpl_entry_season,
-            fpl_entry_binding_assurance,
-            fpl_entry_binding_proof_kind
+            fpl_entry_verified_at
           )
             ON bauth."user" TO letletme_graphql_reader;
           GRANT SELECT (user_id, token_hash, revoked_at, expires_at)

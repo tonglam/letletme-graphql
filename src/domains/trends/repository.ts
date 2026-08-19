@@ -30,7 +30,7 @@ const forbidden = (message: string): never => {
 };
 
 const requirePrivateTrendsPrincipal = (context: GraphQLContext): void => {
-	const result = authorizeProtectedBinding(context.principal, context.currentSeason.seasonCode);
+	const result = authorizeProtectedBinding(context.principal);
 	if (!result.ok) forbidden(result.message);
 };
 

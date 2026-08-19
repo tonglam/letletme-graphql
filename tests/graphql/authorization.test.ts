@@ -53,15 +53,6 @@ const unverifiedWebsitePrincipal: Principal = {
 	fplEntryVerifiedAt: null,
 };
 
-const unverifiedSeasonPrincipal: Principal = {
-	...websitePrincipal,
-	fplEntryVerifiedAt: null,
-	fplEntryBindingAssurance: "UNVERIFIED",
-	fplEntryBindingProofKind: "DIRECT_BINDING",
-	fplEntrySeason: "2627",
-	envelopeVersion: 2,
-};
-
 const authorize = (
 	query: string,
 	variables?: Record<string, unknown>,
@@ -261,108 +252,6 @@ describe("authorizeGraphQLRequest", () => {
 			expect(result.status).toBe(403);
 			expect(result.code).toBe("FORBIDDEN");
 		}
-	});
-
-	it("rejects an unverified direct binding even when the entry number matches", async () => {
-		expect(
-			await authorize(
-				`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
-				{ entryId: 123 },
-				unverifiedSeasonPrincipal
-			)
-		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
-	});
-
-	it("rejects a verified binding from a stale season", async () => {
-		const result = await authorizeGraphQLRequest({
-			body: { query: `query { homePersonalDesk { state } }` },
-			principal: {
-				...websitePrincipal,
-				fplEntrySeason: "2526",
-				envelopeVersion: 2,
-			},
-			data,
-			logger,
-			currentSeason: "2627",
-		});
-		expect(result).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
-	});
-
-	it("rejects a protected Mini Program binding without a season", async () => {
-		const result = await authorizeGraphQLRequest({
-			body: { query: `query { homePersonalDesk { state } }` },
-			principal: {
-				...websitePrincipal,
-				source: "wechat_miniprogram",
-				fplEntrySeason: null,
-				envelopeVersion: 2,
-			},
-			data,
-			logger,
-			currentSeason: "2627",
-		});
-		expect(result).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
-	});
-
-	it("allows a current Mini Program binding with a legacy null assurance", async () => {
-		const result = await authorizeGraphQLRequest({
-			body: { query: `query { homePersonalDesk { state } }` },
-			principal: {
-				...websitePrincipal,
-				source: "wechat_miniprogram",
-				fplEntrySeason: "2627",
-				fplEntryBindingAssurance: null,
-				envelopeVersion: 2,
-			},
-			data,
-			logger,
-			currentSeason: "2627",
-		});
-		expect(result).toEqual({ ok: true });
-	});
-
-	it("rejects an unverified Mini Program assurance even when verifiedAt is set", async () => {
-		const principal: Principal = {
-			...websitePrincipal,
-			source: "wechat_miniprogram",
-			fplEntrySeason: "2627",
-			fplEntryBindingAssurance: "UNVERIFIED",
-			envelopeVersion: 2,
-		};
-		expect(
-			await authorizeGraphQLRequest({
-				body: { query: `query { homePersonalDesk { state } }` },
-				principal,
-				data,
-				logger,
-				currentSeason: "2627",
-			})
-		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
-		expect(
-			await authorizeGraphQLRequest({
-				body: {
-					query: `query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
-					variables: { entryId: 123 },
-				},
-				principal,
-				data,
-				logger,
-				currentSeason: "2627",
-			})
-		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
-	});
-
-	it("rejects private Trends when the binding fails protected checks", async () => {
-		const principal: Principal = {
-			...websitePrincipal,
-			source: "wechat_miniprogram",
-			fplEntrySeason: "2627",
-			fplEntryBindingAssurance: "UNVERIFIED",
-			envelopeVersion: 2,
-		};
-		expect(
-			await authorize(`query { trendCohorts(access: MINE) { season } }`, undefined, principal)
-		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
 	});
 
 	it("allows the direct tournament shell for a verified member", async () => {
