@@ -20,7 +20,7 @@ export type HomePublicBootstrap = {
 
 export type HomeMarketPulse = Pick<
 	MarketPulse,
-	"coverage" | "mostSelected" | "ownershipMovers" | "availabilityUpdates" | "priceChanges"
+	"coverage" | "mostSelected" | "availabilityUpdates" | "priceChanges"
 >;
 
 export type HomeTransferSignal = {
@@ -91,10 +91,6 @@ const selectHomeAvailability = (
 export const compactHomeMarketPulse = (pulse: MarketPulse): HomeMarketPulse => ({
 	coverage: pulse.coverage,
 	mostSelected: pulse.mostSelected.slice(0, HOME_MARKET_LIMIT),
-	ownershipMovers: {
-		risers: pulse.ownershipMovers.risers.slice(0, HOME_MARKET_LIMIT),
-		fallers: pulse.ownershipMovers.fallers.slice(0, HOME_MARKET_LIMIT),
-	},
 	availabilityUpdates: selectHomeAvailability(pulse.availabilityUpdates),
 	priceChanges: pulse.priceChanges.slice(0, HOME_MARKET_LIMIT),
 });
@@ -150,8 +146,6 @@ export const homeService = {
 				requestId: context.requestId,
 				operationName: context.operationName,
 				mostSelectedRows: compact.mostSelected.length,
-				ownershipRows:
-					compact.ownershipMovers.risers.length + compact.ownershipMovers.fallers.length,
 				availabilityRows: compact.availabilityUpdates.length,
 				priceRows: compact.priceChanges.length,
 				totalDurationMs: Number((performance.now() - startedAt).toFixed(2)),

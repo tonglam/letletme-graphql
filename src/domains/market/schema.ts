@@ -21,16 +21,64 @@ export const marketTypeDefs = /* GraphQL */ `
 		stale: Boolean!
 	}
 
-	type MarketOwnershipMover {
-		player: MarketPlayer!
-		previousSelectedByPercent: Float!
-		selectedByPercent: Float!
-		change: Float!
+	enum MarketOwnershipPeriod {
+		DAILY
+		GAMEWEEK
+		ROLLING_7D
 	}
 
-	type MarketOwnershipMovers {
-		risers: [MarketOwnershipMover!]!
-		fallers: [MarketOwnershipMover!]!
+	enum MarketOwnershipCoverageStatus {
+		READY
+		PARTIAL
+		NO_DATA
+		BASELINE_MISSING
+		NO_PREVIOUS_GAMEWEEK
+		NO_UPCOMING_GAMEWEEK
+	}
+
+	type MarketOwnershipCoverage {
+		status: MarketOwnershipCoverageStatus!
+		requestedDays: Int!
+		observedDays: Int!
+		firstDate: Date
+		latestDate: Date
+		fromDate: Date
+		toDate: Date
+		missingDates: [Date!]!
+		capturedAt: DateTime
+		complete: Boolean!
+		stale: Boolean!
+	}
+
+	type MarketOwnershipChange {
+		player: MarketPlayer!
+		fromSelectedByPercent: Float!
+		toSelectedByPercent: Float!
+		changePercentagePoints: Float!
+		fromDate: Date!
+		toDate: Date!
+	}
+
+	type MarketOwnershipGameweek {
+		id: Int!
+		name: String!
+		deadlineTime: DateTime!
+	}
+
+	type MarketOwnershipOverview {
+		period: MarketOwnershipPeriod!
+		gameweek: MarketOwnershipGameweek
+		coverage: MarketOwnershipCoverage!
+		risers: [MarketOwnershipChange!]!
+		fallers: [MarketOwnershipChange!]!
+	}
+
+	type MarketOwnershipDay {
+		period: MarketOwnershipPeriod!
+		date: Date
+		coverage: MarketOwnershipCoverage!
+		risers: [MarketOwnershipChange!]!
+		fallers: [MarketOwnershipChange!]!
 	}
 
 	type MarketTransferMover {
@@ -68,7 +116,6 @@ export const marketTypeDefs = /* GraphQL */ `
 	type MarketPulse {
 		coverage: MarketCoverage!
 		mostSelected: [MarketPlayer!]!
-		ownershipMovers: MarketOwnershipMovers!
 		transferMovers: [MarketTransferMover!]!
 		availabilityUpdates: [MarketAvailabilityUpdate!]!
 		availabilityHighlights: [MarketAvailabilityUpdate!]!
@@ -92,7 +139,12 @@ export const marketTypeDefs = /* GraphQL */ `
 	}
 
 	extend type Query {
-		marketPulse(days: Int = 14): MarketPulse!
+		marketPulse(days: Int = 7): MarketPulse!
+		marketOwnershipOverview(
+			period: MarketOwnershipPeriod!
+			limit: Int = 10
+		): MarketOwnershipOverview!
+		marketOwnershipDay(date: Date, limit: Int = 10): MarketOwnershipDay!
 		marketSnapshotContext: MarketSnapshotContext!
 	}
 `;

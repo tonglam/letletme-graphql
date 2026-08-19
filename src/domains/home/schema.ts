@@ -45,7 +45,6 @@ export const homeTypeDefs = /* GraphQL */ `
 	type HomeMarketPulse {
 		coverage: MarketCoverage!
 		mostSelected: [MarketPlayer!]!
-		ownershipMovers: MarketOwnershipMovers!
 		availabilityUpdates: [MarketAvailabilityUpdate!]!
 		priceChanges: [MarketPriceChange!]!
 	}
@@ -73,6 +72,6 @@ export const homeTypeDefs = /* GraphQL */ `
 		homePublicBootstrap: HomePublicBootstrap!
 		homeGameweek(eventId: Int!): HomeGameweek!
 		homePersonalDesk: HomePersonalDesk!
-		homeMarketPulse(days: Int = 14): HomeMarketPulse!
+		homeMarketPulse(days: Int = 7): HomeMarketPulse!
 	}
 `;
