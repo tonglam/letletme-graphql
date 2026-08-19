@@ -48,7 +48,7 @@ export const isInvitationalLeague = (league: LeagueDisplayOrderInput): boolean =
 
 const isH2H = (league: LeagueDisplayOrderInput): boolean => {
 	const value = league.type ?? league.scoring;
-	if (value == null) return false;
+	if (value === null || value === undefined) return false;
 	return value.toLowerCase() === LeagueScoring.H2H;
 };
 
