@@ -133,9 +133,6 @@ const makeContractExecutor = (
 					'bauth."user".id',
 					'bauth."user".fpl_entry_id',
 					'bauth."user".fpl_entry_verified_at',
-					'bauth."user".fpl_entry_season',
-					'bauth."user".fpl_entry_binding_assurance',
-					'bauth."user".fpl_entry_binding_proof_kind',
 					"bauth.mini_program_session.user_id",
 					"bauth.mini_program_session.token_hash",
 					"bauth.mini_program_session.revoked_at",
@@ -146,9 +143,6 @@ const makeContractExecutor = (
 					['bauth."user"', "email"],
 					['bauth."user"', "fpl_entry_id"],
 					['bauth."user"', "fpl_entry_verified_at"],
-					['bauth."user"', "fpl_entry_season"],
-					['bauth."user"', "fpl_entry_binding_assurance"],
-					['bauth."user"', "fpl_entry_binding_proof_kind"],
 					["bauth.mini_program_session", "id"],
 					["bauth.mini_program_session", "user_id"],
 					["bauth.mini_program_session", "token_hash"],
@@ -242,7 +236,7 @@ describe("GraphQL startup database contract", () => {
 		);
 	});
 
-	it("accepts only the ten Web auth columns used by GraphQL", async () => {
+	it("accepts only the seven Web auth columns used by GraphQL", async () => {
 		const { executor } = makeContractExecutor();
 		await expect(validateDatabaseContract(executor)).resolves.toMatchObject({
 			roleName: "graphql_runtime",
@@ -266,11 +260,11 @@ describe("GraphQL startup database contract", () => {
 	});
 
 	it("rejects missing or writable Web auth columns", async () => {
-		const missingSeason = makeContractExecutor({
-			authMissingColumn: 'bauth."user".fpl_entry_season',
+		const missingEntryId = makeContractExecutor({
+			authMissingColumn: 'bauth."user".fpl_entry_id',
 		});
-		await expect(validateDatabaseContract(missingSeason.executor)).rejects.toThrow(
-			'invalid bauth."user".fpl_entry_season auth column boundary'
+		await expect(validateDatabaseContract(missingEntryId.executor)).rejects.toThrow(
+			'invalid bauth."user".fpl_entry_id auth column boundary'
 		);
 
 		const missingColumn = makeContractExecutor({

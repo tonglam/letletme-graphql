@@ -75,30 +75,24 @@ describe("website principal envelope", () => {
 		expect(verifyWebsitePrincipal(websiteHeaders(payload))).toBeNull();
 	});
 
-	test("preserves an explicit unverified season binding without granting proof", () => {
+	test("rejects the deferred v2 envelope instead of downgrading it to v1", () => {
 		const now = Math.floor(Date.now() / 1000);
-		const principal = verifyWebsitePrincipal(
-			websiteHeaders({
-				v: 2,
-				aud: "letletme-graphql",
-				uid: "user-1",
-				eid: 123,
-				evat: null,
-				bs: "2627",
-				ba: "UNVERIFIED",
-				bp: "DIRECT_BINDING",
-				iat: now,
-				exp: now + 60,
-			})
-		);
-
-		expect(principal).toMatchObject({
-			fplEntryId: 123,
-			fplEntryVerifiedAt: null,
-			fplEntrySeason: "2627",
-			fplEntryBindingAssurance: "UNVERIFIED",
-			envelopeVersion: 2,
-		});
+		expect(
+			verifyWebsitePrincipal(
+				websiteHeaders({
+					v: 2,
+					aud: "letletme-graphql",
+					uid: "user-1",
+					eid: null,
+					evat: null,
+					bs: null,
+					ba: null,
+					bp: null,
+					iat: now,
+					exp: now + 60,
+				})
+			)
+		).toBeNull();
 	});
 
 	test("rejects envelopes whose expiry is not after issuance", () => {
@@ -165,14 +159,10 @@ describe("Mini Program session authentication", () => {
 	test("rejects a request carrying both website and Bearer credentials", async () => {
 		const now = Math.floor(Date.now() / 1000);
 		const headers = websiteHeaders({
-			v: 2,
 			aud: "letletme-graphql",
 			uid: "website-user",
 			eid: null,
 			evat: null,
-			bs: null,
-			ba: null,
-			bp: null,
 			iat: now,
 			exp: now + 60,
 		});

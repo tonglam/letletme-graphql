@@ -445,7 +445,6 @@ const startServer = async (): Promise<void> => {
 							logger,
 							requestScope,
 							authorizedTournamentMemberships,
-							currentSeason: currentSeason.seasonCode,
 						})
 					);
 					if (!authorization.ok) {
