@@ -26,6 +26,7 @@ const getEventByIdMemoized = async (
 
 type EntryLeaguesArgs = {
 	entryId: number;
+	type?: string | null;
 };
 
 type LeagueEventResultsArgs = {
@@ -43,7 +44,7 @@ export const leaguesResolvers = {
 			_parent: unknown,
 			args: EntryLeaguesArgs,
 			context: GraphQLContext
-		): Promise<League[]> => leaguesRepository.getEntryLeagues(context, args.entryId),
+		): Promise<League[]> => leaguesRepository.getEntryLeagues(context, args.entryId, args.type),
 
 		leagueEventResults: async (
 			_parent: unknown,
