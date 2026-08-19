@@ -106,47 +106,6 @@ describe("market ownership period contracts", () => {
 		expect(missingTarget.fallers).toEqual([]);
 	});
 
-	it("marks rolling seven-day interior gaps as partial and reports the observed count", () => {
-		const dates = [
-			"2026-08-13",
-			"2026-08-14",
-			"2026-08-15",
-			"2026-08-17",
-			"2026-08-18",
-			"2026-08-19",
-		];
-		const result = buildMarketOwnershipOverview(
-			dates.map((date, index) => row(date, 1, index === dates.length - 1 ? 16 : 10)),
-			"ROLLING_7D",
-			10,
-			[],
-			new Date("2026-08-19T13:00:00.000Z")
-		);
-
-		expect(result.coverage).toMatchObject({
-			status: "PARTIAL",
-			requestedDays: 7,
-			observedDays: 6,
-			missingDates: ["2026-08-16"],
-		});
-		expect(result.risers[0]?.changePercentagePoints).toBe(6);
-	});
-
-	it("reports a missing rolling baseline instead of inventing a comparison", () => {
-		const result = buildMarketOwnershipOverview(
-			["2026-08-14", "2026-08-15", "2026-08-16", "2026-08-17", "2026-08-18", "2026-08-19"].map(
-				(date) => row(date, 1, 10)
-			),
-			"ROLLING_7D",
-			10,
-			[],
-			new Date("2026-08-19T13:00:00.000Z")
-		);
-
-		expect(result.coverage.status).toBe("BASELINE_MISSING");
-		expect(result.risers).toEqual([]);
-	});
-
 	it("assigns the latest snapshot to the next deadline and compares after the previous deadline", () => {
 		const result = buildMarketOwnershipOverview(
 			[

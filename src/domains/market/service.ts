@@ -1,5 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
-import { marketRepository, type MarketPulse } from "./repository";
+import { marketRepository, type MarketPulse, type MarketLineup } from "./repository";
 import {
 	marketOwnershipRepository,
 	type MarketOwnershipDay,
@@ -11,6 +11,9 @@ import { getMarketSnapshotContext, type MarketSnapshotContext } from "./context"
 export const marketService = {
 	getMarketPulse(context: GraphQLContext, days: number): Promise<MarketPulse> {
 		return marketRepository.getMarketPulse(context, days);
+	},
+	getMarketLineup(context: GraphQLContext): Promise<MarketLineup | null> {
+		return marketRepository.getMarketLineup(context);
 	},
 	getMarketOwnershipOverview(
 		context: GraphQLContext,

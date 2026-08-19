@@ -1,6 +1,6 @@
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
-import type { MarketPulse } from "./repository";
+import type { MarketPulse, MarketLineup } from "./repository";
 import { marketService } from "./service";
 import type { MarketSnapshotContext } from "./context";
 import type {
@@ -52,6 +52,11 @@ export const marketResolvers = {
 			context: GraphQLContext
 		): Promise<MarketPulse> =>
 			marketService.getMarketPulse(context, normalizeMarketPulseDays(args.days)),
+		marketLineup: async (
+			_parent: unknown,
+			_args: unknown,
+			context: GraphQLContext
+		): Promise<MarketLineup | null> => marketService.getMarketLineup(context),
 		marketSnapshotContext: async (
 			_parent: unknown,
 			_args: unknown,

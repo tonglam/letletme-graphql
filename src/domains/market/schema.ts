@@ -24,7 +24,6 @@ export const marketTypeDefs = /* GraphQL */ `
 	enum MarketOwnershipPeriod {
 		DAILY
 		GAMEWEEK
-		ROLLING_7D
 	}
 
 	enum MarketOwnershipCoverageStatus {
@@ -113,6 +112,18 @@ export const marketTypeDefs = /* GraphQL */ `
 		direction: PriceChangeType!
 	}
 
+	type MarketLineupSlot {
+		player: MarketPlayer!
+		row: Int!
+		col: Int!
+	}
+
+	type MarketLineup {
+		formation: String!
+		totalOwnershipPercent: Float!
+		slots: [MarketLineupSlot!]!
+	}
+
 	type MarketPulse {
 		coverage: MarketCoverage!
 		mostSelected: [MarketPlayer!]!
@@ -140,6 +151,7 @@ export const marketTypeDefs = /* GraphQL */ `
 
 	extend type Query {
 		marketPulse(days: Int = 7): MarketPulse!
+		marketLineup: MarketLineup!
 		marketOwnershipOverview(
 			period: MarketOwnershipPeriod!
 			limit: Int = 10
