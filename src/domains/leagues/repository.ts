@@ -2,11 +2,8 @@ import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { stableStringify } from "../../infra/stringify";
-import {
-	OfficialLeagueKind,
-	mapFplOfficialKind,
-	sortLeaguesForOfficialDisplay,
-} from "./display-order";
+import type { OfficialLeagueKind } from "./display-order";
+import { mapFplOfficialKind, sortLeaguesForOfficialDisplay } from "./display-order";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
