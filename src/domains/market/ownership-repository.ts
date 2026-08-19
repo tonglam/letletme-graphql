@@ -131,7 +131,8 @@ const OWNERSHIP_QUERY = [
 	"    AND (",
 	"      (requested.requested_date IS NOT NULL",
 	"        AND snapshot_date BETWEEN requested.requested_date - 1 AND requested.requested_date)",
-	"      OR (snapshot_date >= latest.latest_date - ($2::integer - 1)",
+	"      OR (requested.requested_date IS NULL",
+	"        AND snapshot_date >= latest.latest_date - ($2::integer - 1)",
 	"        AND snapshot_date <= latest.latest_date)",
 	"    )",
 	")",
@@ -684,6 +685,7 @@ const loadRows = async (
 	const existing = scopedMemo.get(memoKey);
 	if (existing) return existing;
 	const load = (async (): Promise<OwnershipSnapshot[]> => {
+		const usesMarketRevision = Boolean(context.marketRevision);
 		const revision = context.marketRevision ?? context.dataRevision ?? "core-postgres";
 		const cacheKey = gqlCacheKey(context, `market-ownership:v3:rows:${memoKey}`, revision);
 		const cached = await readJsonQueryCache(context, cacheKey, decodeRows);
@@ -701,7 +703,7 @@ const loadRows = async (
 			context,
 			cacheKey,
 			decoded,
-			context.marketRevision ? MARKET_REVISIONED_TTL_SECONDS : QUERY_CACHE_TTL_SECONDS.MARKET
+			usesMarketRevision ? MARKET_REVISIONED_TTL_SECONDS : QUERY_CACHE_TTL_SECONDS.MARKET
 		);
 		return decoded;
 	})();
