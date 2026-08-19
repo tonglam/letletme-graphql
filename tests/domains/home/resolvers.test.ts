@@ -58,20 +58,6 @@ describe("Home GraphQL contracts", () => {
 				stale: false,
 			},
 			mostSelected: Array.from({ length: 8 }, (_, index) => player(index + 1, 20)),
-			ownershipMovers: {
-				risers: Array.from({ length: 8 }, (_, index) => ({
-					player: player(index + 1, 20),
-					previousSelectedByPercent: 19,
-					selectedByPercent: 20,
-					change: 1,
-				})),
-				fallers: Array.from({ length: 8 }, (_, index) => ({
-					player: player(index + 1, 20),
-					previousSelectedByPercent: 21,
-					selectedByPercent: 20,
-					change: -1,
-				})),
-			},
 			transferMovers: [],
 			availabilityUpdates: availability,
 			availabilityHighlights: [],
@@ -81,8 +67,6 @@ describe("Home GraphQL contracts", () => {
 
 		const compact = compactHomeMarketPulse(pulse);
 		expect(compact.mostSelected).toHaveLength(5);
-		expect(compact.ownershipMovers.risers).toHaveLength(5);
-		expect(compact.ownershipMovers.fallers).toHaveLength(5);
 		expect(compact.availabilityUpdates).toHaveLength(5);
 		expect(compact.availabilityUpdates.map((row) => row.player.playerId)).toEqual([4, 5, 6, 7, 8]);
 	});

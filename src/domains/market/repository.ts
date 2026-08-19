@@ -51,20 +51,6 @@ export type MarketAvailabilityUpdate = {
 export type MarketPulse = {
 	coverage: MarketCoverage;
 	mostSelected: MarketPlayer[];
-	ownershipMovers: {
-		risers: Array<{
-			player: MarketPlayer;
-			previousSelectedByPercent: number;
-			selectedByPercent: number;
-			change: number;
-		}>;
-		fallers: Array<{
-			player: MarketPlayer;
-			previousSelectedByPercent: number;
-			selectedByPercent: number;
-			change: number;
-		}>;
-	};
 	transferMovers: Array<{
 		player: MarketPlayer;
 		transfersIn: number;
@@ -313,7 +299,6 @@ export const emptyMarketPulse = (requestedDays: number): MarketPulse => ({
 		stale: false,
 	},
 	mostSelected: [],
-	ownershipMovers: { risers: [], fallers: [] },
 	transferMovers: [],
 	availabilityUpdates: [],
 	availabilityHighlights: [],
@@ -341,38 +326,13 @@ export function buildMarketPulse(
 	const latestDate = observedDates.at(-1)!;
 	const windowStart = addCalendarDays(latestDate, -(requestedDays - 1));
 	const latestRows = rows.filter((row) => row.snapshotDate === latestDate);
-	const firstRows = rows.filter((row) => row.snapshotDate === firstDate);
 	const latestByPlayer = new Map(latestRows.map((row) => [row.element_id, row]));
-	const firstByPlayer = new Map(firstRows.map((row) => [row.element_id, row]));
 	const capturedAt = latestRows.map((row) => row.capturedAt).sort((a, b) => b.localeCompare(a))[0];
 	const capturedAtMs = Date.parse(capturedAt);
 
 	const mostSelected = latestRows
 		.map(playerFor)
 		.sort((a, b) => b.selectedByPercent - a.selectedByPercent || comparePlayer(a, b))
-		.slice(0, MARKET_RESULT_LIMIT);
-
-	const ownership = latestRows.flatMap((row) => {
-		const previous = firstByPlayer.get(row.element_id);
-		if (!previous || firstDate === latestDate) return [];
-		const change = row.selectedByPercent - previous.selectedByPercent;
-		if (Math.abs(change) < 0.0005) return [];
-		return [
-			{
-				player: playerFor(row),
-				previousSelectedByPercent: previous.selectedByPercent,
-				selectedByPercent: row.selectedByPercent,
-				change,
-			},
-		];
-	});
-	const risers = ownership
-		.filter((mover) => mover.change > 0)
-		.sort((a, b) => b.change - a.change || comparePlayer(a.player, b.player))
-		.slice(0, MARKET_RESULT_LIMIT);
-	const fallers = ownership
-		.filter((mover) => mover.change < 0)
-		.sort((a, b) => a.change - b.change || comparePlayer(a.player, b.player))
 		.slice(0, MARKET_RESULT_LIMIT);
 
 	const transferTotals = new Map<number, { transfersIn: number; transfersOut: number }>();
@@ -551,7 +511,6 @@ export function buildMarketPulse(
 			stale: Math.max(now.getTime() - capturedAtMs, 0) > STALE_AFTER_MS,
 		},
 		mostSelected,
-		ownershipMovers: { risers, fallers },
 		transferMovers,
 		availabilityUpdates,
 		availabilityHighlights,
@@ -567,9 +526,6 @@ const isMarketPulse = (value: unknown): value is MarketPulse =>
 	typeof value.coverage.requestedDays === "number" &&
 	typeof value.coverage.observedDays === "number" &&
 	Array.isArray(value.mostSelected) &&
-	isRecord(value.ownershipMovers) &&
-	Array.isArray(value.ownershipMovers.risers) &&
-	Array.isArray(value.ownershipMovers.fallers) &&
 	Array.isArray(value.transferMovers) &&
 	Array.isArray(value.availabilityUpdates) &&
 	Array.isArray(value.availabilityHighlights) &&
@@ -616,7 +572,7 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 		const cacheKey = snapshotContext
 			? gqlCacheKey(
 					context,
-					`market-pulse:v2:${requestedDays}`,
+					`market-pulse:v3:${requestedDays}`,
 					`${context.dataRevision ?? "core-postgres"}.${snapshotContext.revision}`
 				)
 			: gqlCacheKey(context, `market-pulse:${requestedDays}`);
