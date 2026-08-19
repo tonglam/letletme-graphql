@@ -284,11 +284,14 @@ export const leaguesRepository: LeaguesRepository = {
 		const cached = await readJsonCache(context, cacheKey, isLeagueArray);
 		if (cached) return cached;
 
+		// Use a single query with LEFT JOIN to fetch leagues and tournament data together
+		// This eliminates the N+1 query problem
 		let query = context.data
 			.read("competition.entry_leagues")
-			.select(
-				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event, official_kind, short_name"
-			)
+			.select(`
+				league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event, official_kind, short_name,
+				tournaments!left(id, name, admin_entry_id, total_team_num, tournament_mode, group_mode, state, created_at)
+			`)
 			.eq("entry_id", entryId);
 		if (dbType) {
 			query = query.eq("league_type", dbType);
@@ -300,15 +303,11 @@ export const leaguesRepository: LeaguesRepository = {
 			throw new Error("Failed to fetch entry leagues");
 		}
 
-		const rows = (data as DbEntryLeagueRow[] | null) ?? [];
-
-		const leagueKeys = [...new Set(rows.map((r) => `${r.league_id}:${r.league_type}`))];
-		const tournamentMap = await fetchTournamentEnrichments(context, leagueKeys);
+		const rows = (data as Array<DbEntryLeagueRow & { tournaments: DbTournamentEnrichmentRow | null }>) ?? [];
 
 		const leagues = sortLeaguesForOfficialDisplay(
 			rows.map((row) => {
-				const key = `${row.league_id}:${row.league_type}`;
-				const tournament = tournamentMap.get(key);
+				const tournament = row.tournaments;
 				return mapLeague(row, tournament);
 			})
 		);
