@@ -79,7 +79,14 @@ const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
 	"fpl:live": ["eventLive", "fixtures"],
 	"fpl:market": ["context"],
 };
-const LEGACY_CORE_ITEM_NAMES = ["events", "teams", "players", "phases", "fixtures", "currentEventId"];
+const LEGACY_CORE_ITEM_NAMES = [
+	"events",
+	"teams",
+	"players",
+	"phases",
+	"fixtures",
+	"currentEventId",
+];
 
 const hasExactItemNames = (dataset: DataPublicationDataset, names: readonly string[]): boolean => {
 	const actual = [...names].sort();
@@ -92,11 +99,15 @@ const hasExactItemNames = (dataset: DataPublicationDataset, names: readonly stri
 const hasExactNames = (names: readonly string[], expected: readonly string[]): boolean => {
 	const actual = [...names].sort();
 	const sortedExpected = [...expected].sort();
-	return actual.length === sortedExpected.length && actual.every((name, index) => name === sortedExpected[index]);
+	return (
+		actual.length === sortedExpected.length &&
+		actual.every((name, index) => name === sortedExpected[index])
+	);
 };
 
 const hasAcceptedItemNames = (dataset: DataPublicationDataset, names: readonly string[]): boolean =>
-	hasExactItemNames(dataset, names) || (dataset === "fpl:core" && hasExactNames(names, LEGACY_CORE_ITEM_NAMES));
+	hasExactItemNames(dataset, names) ||
+	(dataset === "fpl:core" && hasExactNames(names, LEGACY_CORE_ITEM_NAMES));
 
 const isCanonicalState = (
 	dataset: DataPublicationDataset,

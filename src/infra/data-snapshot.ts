@@ -933,7 +933,7 @@ const mapCoreSelectionRules = (value: unknown): CoreSelectionRules | null => {
 				chip.startEvent === null ||
 				chip.stopEvent === null ||
 				chip.chipType === null
-			)
+		)
 	) {
 		return null;
 	}

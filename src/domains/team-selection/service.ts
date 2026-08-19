@@ -45,7 +45,7 @@ const phaseFor = (
 };
 
 const positionName = (id: number): "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD" =>
-	(id === 1 ? "GOALKEEPER" : id === 2 ? "DEFENDER" : id === 3 ? "MIDFIELDER" : "FORWARD");
+	id === 1 ? "GOALKEEPER" : id === 2 ? "DEFENDER" : id === 3 ? "MIDFIELDER" : "FORWARD";
 
 export type TeamSelectionDesk = {
 	season: string;
@@ -59,9 +59,21 @@ export type TeamSelectionDesk = {
 	rules: CoreSelectionRules | null;
 	players: Array<Record<string, unknown>>;
 	fixtures: Array<Record<string, unknown>>;
-	playerPool: { state: "AVAILABLE" | "UNAVAILABLE" | "PENDING"; checkedAt: string | null; message: string | null };
-	fixtureSection: { state: "AVAILABLE" | "UNAVAILABLE" | "PENDING"; checkedAt: string | null; message: string | null };
-	rulesSection: { state: "AVAILABLE" | "UNAVAILABLE" | "PENDING"; checkedAt: string | null; message: string | null };
+	playerPool: {
+		state: "AVAILABLE" | "UNAVAILABLE" | "PENDING";
+		checkedAt: string | null;
+		message: string | null;
+	};
+	fixtureSection: {
+		state: "AVAILABLE" | "UNAVAILABLE" | "PENDING";
+		checkedAt: string | null;
+		message: string | null;
+	};
+	rulesSection: {
+		state: "AVAILABLE" | "UNAVAILABLE" | "PENDING";
+		checkedAt: string | null;
+		message: string | null;
+	};
 };
 
 type MarketFact = {
@@ -96,16 +108,20 @@ const loadMarketFacts = async (
 		return {
 			revision: marketContext?.revision ?? null,
 			facts: new Map(
-				result.rows.map((row) => [
-					row.element_id,
-					{
-						price: row.price,
-						ownership: row.selected_by_percent === null ? null : Number(row.selected_by_percent),
-						status: row.status,
-						news: row.news,
-						chanceOfPlaying: row.chance_of_playing_this_round,
-					},
-				] as const)
+				result.rows.map(
+					(row) =>
+						[
+							row.element_id,
+							{
+								price: row.price,
+								ownership:
+									row.selected_by_percent === null ? null : Number(row.selected_by_percent),
+								status: row.status,
+								news: row.news,
+								chanceOfPlaying: row.chance_of_playing_this_round,
+							},
+						] as const
+				)
 			),
 		};
 	} catch (marketError) {
@@ -120,7 +136,11 @@ export const teamSelectionService = {
 		requestedEventId: number,
 		horizon: number
 	): Promise<TeamSelectionDesk> {
-		if (!Number.isSafeInteger(requestedEventId) || requestedEventId < 1 || requestedEventId > MAX_EVENT_ID) {
+		if (
+			!Number.isSafeInteger(requestedEventId) ||
+			requestedEventId < 1 ||
+			requestedEventId > MAX_EVENT_ID
+		) {
 			throw error("Team Selection event ID must be between 1 and 38", "BAD_USER_INPUT");
 		}
 		if (!Number.isSafeInteger(horizon) || horizon < 1 || horizon > MAX_HORIZON) {
@@ -134,38 +154,43 @@ export const teamSelectionService = {
 		const teamsById = new Map(snapshot.teams.map((team) => [team.id, team] as const));
 		const rules = snapshot.selectionRules ?? null;
 		const market = await loadMarketFacts(context);
-		const players = snapshot.players.map((player) => ({
-			...(() => {
-				const marketFact = market.facts.get(player.id);
-				return marketFact
-					? {
-						price: marketFact.price,
-						ownership: marketFact.ownership,
-						status: marketFact.status,
-						news: marketFact.news,
-						chanceOfPlaying: marketFact.chanceOfPlaying,
-					}
-					: {
-						price: player.price,
-						ownership: player.selectedByPercent,
-						status: null,
-						news: null,
-						chanceOfPlaying: null,
-					};
-			})(),
-			id: player.id,
-			code: player.code,
-			webName: player.webName,
-			firstName: player.firstName,
-			secondName: player.secondName,
-			team: teamsById.get(player.teamId),
-			position: positionName(player.type),
-			form: null,
-			totalPoints: player.totalPoints,
-		})).filter((player) => player.team !== undefined);
+		const players = snapshot.players
+			.map((player) => ({
+				...(() => {
+					const marketFact = market.facts.get(player.id);
+					return marketFact
+						? {
+								price: marketFact.price,
+								ownership: marketFact.ownership,
+								status: marketFact.status,
+								news: marketFact.news,
+								chanceOfPlaying: marketFact.chanceOfPlaying,
+							}
+						: {
+								price: player.price,
+								ownership: player.selectedByPercent,
+								status: null,
+								news: null,
+								chanceOfPlaying: null,
+							};
+				})(),
+				id: player.id,
+				code: player.code,
+				webName: player.webName,
+				firstName: player.firstName,
+				secondName: player.secondName,
+				team: teamsById.get(player.teamId),
+				position: positionName(player.type),
+				form: null,
+				totalPoints: player.totalPoints,
+			}))
+			.filter((player) => player.team !== undefined);
 		const eventIds = new Set(
 			snapshot.events
-				.filter((candidate) => candidate.id >= requestedEventId && candidate.id < requestedEventId + horizon)
+				.filter(
+					(candidate) =>
+						candidate.id >= requestedEventId && candidate.id < requestedEventId + horizon
+				)
 				.map((candidate) => candidate.id)
 		);
 		const fixtures = snapshot.fixtures.flatMap((fixture) => {
@@ -173,15 +198,17 @@ export const teamSelectionService = {
 			const home = teamsById.get(fixture.teamHId);
 			const away = teamsById.get(fixture.teamAId);
 			if (!home || !away) return [];
-			return [{
-				id: fixture.id,
-				eventId: fixture.eventId,
-				kickoffTime: fixture.kickoffTime,
-				homeTeam: { id: home.id, name: home.name, shortName: home.shortName },
-				awayTeam: { id: away.id, name: away.name, shortName: away.shortName },
-				homeDifficulty: fixture.teamHDifficulty,
-				awayDifficulty: fixture.teamADifficulty,
-			}];
+			return [
+				{
+					id: fixture.id,
+					eventId: fixture.eventId,
+					kickoffTime: fixture.kickoffTime,
+					homeTeam: { id: home.id, name: home.name, shortName: home.shortName },
+					awayTeam: { id: away.id, name: away.name, shortName: away.shortName },
+					homeDifficulty: fixture.teamHDifficulty,
+					awayDifficulty: fixture.teamADifficulty,
+				},
+			];
 		});
 		return {
 			season: snapshot.seasonCode,
@@ -195,9 +222,26 @@ export const teamSelectionService = {
 			rules,
 			players,
 			fixtures,
-			playerPool: { state: players.length > 0 ? "AVAILABLE" : "UNAVAILABLE", checkedAt, message: players.length > 0 ? null : "Official player pool is unavailable." },
-			fixtureSection: { state: fixtures.length > 0 ? "AVAILABLE" : "UNAVAILABLE", checkedAt, message: fixtures.length > 0 ? null : "Official fixtures are unavailable for the requested horizon." },
-			rulesSection: { state: rules ? "AVAILABLE" : "UNAVAILABLE", checkedAt, message: rules ? null : "Official selection rules are unavailable; no lineup legality decision is trusted." },
+			playerPool: {
+				state: players.length > 0 ? "AVAILABLE" : "UNAVAILABLE",
+				checkedAt,
+				message: players.length > 0 ? null : "Official player pool is unavailable.",
+			},
+			fixtureSection: {
+				state: fixtures.length > 0 ? "AVAILABLE" : "UNAVAILABLE",
+				checkedAt,
+				message:
+					fixtures.length > 0
+						? null
+						: "Official fixtures are unavailable for the requested horizon.",
+			},
+			rulesSection: {
+				state: rules ? "AVAILABLE" : "UNAVAILABLE",
+				checkedAt,
+				message: rules
+					? null
+					: "Official selection rules are unavailable; no lineup legality decision is trusted.",
+			},
 		};
 	},
 };
