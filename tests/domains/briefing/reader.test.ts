@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import fixture from "../../fixtures/briefing/week-publication-v1.json";
 import type { QueryExecutor } from "../../../src/infra/database";
 import { readBriefingWeek } from "../../../src/infra/content-publication";
+import { withFrozenBriefingClock } from "./frozen-clock";
 
 const canonicalize = (value: unknown): unknown => {
 	if (Array.isArray(value)) return value.map(canonicalize);
@@ -55,6 +56,7 @@ function databaseWithFallback(): QueryExecutor {
 }
 
 describe("Briefing publication reader", () => {
+	withFrozenBriefingClock(() => {
 	test("falls back to the same PostgreSQL revision when Redis is empty", async () => {
 		const result = await readBriefingWeek(databaseWithFallback(), redisWithoutPayload, "en");
 		expect(result.state).toBe("READY");
@@ -112,5 +114,6 @@ describe("Briefing publication reader", () => {
 		const result = await readBriefingWeek(invalidDeadlineDb, redisWithoutPayload, "en");
 		expect(result.state).toBe("READY");
 		expect(result.event).toBeNull();
+	});
 	});
 });

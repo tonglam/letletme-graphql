@@ -1,10 +1,10 @@
 import type { GraphQLContext } from "../../graphql/context";
-import { briefingRepository } from "./repository";
 import type {
 	BriefingLocale,
 	BriefingStoryCard,
 	BriefingWeekRead,
 } from "../../infra/content-publication";
+import { readBriefingWeekForRequest } from "./request-read";
 
 const flattenStories = (read: BriefingWeekRead): BriefingStoryCard[] =>
 	read.payload
@@ -13,7 +13,7 @@ const flattenStories = (read: BriefingWeekRead): BriefingStoryCard[] =>
 
 export const briefingService = {
 	async getWeek(context: GraphQLContext, locale: BriefingLocale) {
-		const read = await briefingRepository.readWeek(context.database, context.redis, locale);
+		const read = await readBriefingWeekForRequest(context, locale);
 		return {
 			state: read.state,
 			revision: read.revision,
@@ -21,13 +21,13 @@ export const briefingService = {
 			publishedAt: read.publishedAt,
 			sourceCheckedAt: read.sourceCheckedAt,
 			staleAt: read.staleAt,
-			event: read.event,
+			event: read.payload?.event ?? read.event,
 			featured: read.payload?.featured ?? [],
 			sections: read.payload?.sections ?? [],
 		};
 	},
 	async getStory(context: GraphQLContext, slug: string, locale: BriefingLocale) {
-		const read = await briefingRepository.readWeek(context.database, context.redis, locale);
+		const read = await readBriefingWeekForRequest(context, locale);
 		if (!read.payload) {
 			return {
 				state: read.state,

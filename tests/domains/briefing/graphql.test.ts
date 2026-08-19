@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import fixture from "../../fixtures/briefing/week-publication-v1.json";
 import type { QueryExecutor } from "../../../src/infra/database";
 import { schema } from "../../../src/graphql/schema";
+import { withFrozenBriefingClock } from "./frozen-clock";
 
 const canonicalize = (value: unknown): unknown => {
 	if (Array.isArray(value)) return value.map(canonicalize);
@@ -63,6 +64,7 @@ const database: QueryExecutor = {
 };
 
 describe("Briefing GraphQL contract", () => {
+	withFrozenBriefingClock(() => {
 	test("consumes the Data-owned fixture checksum", () => {
 		expect(rawFixtureSha256).toBe(DATA_WEEK_PUBLICATION_FIXTURE_SHA256);
 	});
@@ -142,5 +144,45 @@ describe("Briefing GraphQL contract", () => {
 		});
 		expect(result.errors).toBeUndefined();
 		expect(result.data?.briefingStory).toMatchObject({ state: "REMOVED", story: null });
+	});
+
+	test("briefingWeek and briefingStory share one publication read per request", async () => {
+		let metadataReads = 0;
+		const countingDb: QueryExecutor = {
+			async query(text: string) {
+				if (text.includes("content.briefing_active_publication")) {
+					metadataReads += 1;
+					return { rows: [metadata] } as never;
+				}
+				return {
+					rows: [
+						{
+							payload: fixture,
+							payload_bytes: Buffer.byteLength(canonical),
+							payload_sha256: metadata.locale_manifest.en.sha256,
+						},
+					],
+				} as never;
+			},
+		};
+		const contextValue = {
+			database: countingDb,
+			redis: { get: async () => null },
+			requestScope: {},
+		};
+		const result = await graphql({
+			schema,
+			source: `
+				query BriefingCombined($slug: String!, $locale: BriefingLocale!) {
+					briefingWeek(locale: $locale) { state revision }
+					briefingStory(slug: $slug, locale: $locale) { state }
+				}
+			`,
+			variableValues: { slug: "missing-story", locale: "EN" },
+			contextValue: contextValue as never,
+		});
+		expect(result.errors).toBeUndefined();
+		expect(metadataReads).toBe(1);
+	});
 	});
 });
