@@ -34,7 +34,10 @@ const metadata = {
 	source_checked_at: fixture.sourceCheckedAt,
 	published_at: fixture.publishedAt,
 	valid_until: fixture.validUntil,
-	locale_manifest: { en: { bytes: Buffer.byteLength(canonical), sha256: hash } },
+	locale_manifest: {
+		en: { bytes: Buffer.byteLength(canonical), sha256: hash },
+		"zh-CN": { bytes: Buffer.byteLength(canonical), sha256: hash },
+	},
 };
 
 const redisWithoutPayload = {
@@ -97,6 +100,20 @@ describe("Briefing publication reader", () => {
 			};
 			const result = await readBriefingWeek(database, redisWithoutPayload, "en");
 			expect(result).toMatchObject({ state: "UNAVAILABLE", payload: null });
+		});
+
+		test("fails closed when the active publication is missing one locale manifest", async () => {
+			const incompleteDb: QueryExecutor = {
+				async query(text: string) {
+					if (text.includes("content.briefing_active_publication"))
+						return {
+							rows: [{ ...metadata, locale_manifest: { en: metadata.locale_manifest.en } }],
+						} as never;
+					return { rows: [] } as never;
+				},
+			};
+			const result = await readBriefingWeek(incompleteDb, redisWithoutPayload, "en");
+			expect(result).toMatchObject({ state: "UNAVAILABLE", payload: null, revision: 1 });
 		});
 
 		test("omits event when metadata deadline_time is invalid", async () => {
