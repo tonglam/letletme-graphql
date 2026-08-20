@@ -19,6 +19,7 @@ env:
   BACKEND_PROXY_SECRET: test-backend-proxy-secret
   GRAPHQL_SERVICE_TOKEN: test-graphql-service-token-at-least-32-characters
   CORS_ORIGIN: http://localhost:3000
+  GRAPHQL_RATE_LIMIT_MODE: legacy
   GRAPHQL_BROWSER_INGRESS_RATE_LIMIT: "480"
   GRAPHQL_AUTHENTICATED_RATE_LIMIT: "900"
   GRAPHQL_ANONYMOUS_RATE_LIMIT: "600"

@@ -8,9 +8,7 @@ import {
 	GRAPHQL_ANONYMOUS_RATE_LIMIT_DEFAULT,
 	GRAPHQL_AUTHENTICATED_RATE_LIMIT_DEFAULT,
 	GRAPHQL_BROWSER_INGRESS_RATE_LIMIT_DEFAULT,
-	GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
 	GRAPHQL_RATE_LIMIT_SCOPES,
-	GRAPHQL_SHARED_PUBLIC_RATE_LIMIT,
 	graphQLIngressFailure,
 	graphQLMethodFailure,
 	graphQLPreAuthRateLimitChecks,
@@ -21,6 +19,9 @@ import {
 } from "../../src/http/graphql-policy";
 
 const config: GraphQLRateLimitConfig = {
+	windowSeconds: 60,
+	globalAdmission: 1_500,
+	sharedPublic: 1_200,
 	browserIngress: 120,
 	authenticated: 300,
 	anonymous: 120,
@@ -30,6 +31,9 @@ const ingress = (overrides: Partial<GraphQLIngress>): GraphQLIngress => ({
 	class: "untrusted",
 	trusted: false,
 	subject: null,
+	abuseSubject: null,
+	trafficClass: "legacy",
+	workload: "public-other",
 	ingressContext: null,
 	...overrides,
 });
@@ -74,7 +78,7 @@ describe("GraphQL transport and two-stage admission policy", () => {
 		expect(checks.map(({ scope, limit, cost }) => ({ scope, limit, cost }))).toEqual([
 			{
 				scope: GRAPHQL_RATE_LIMIT_SCOPES.ingress,
-				limit: GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
+				limit: config.globalAdmission,
 				cost: 1,
 			},
 			{ scope: GRAPHQL_RATE_LIMIT_SCOPES.ingress, limit: 120, cost: 1 },
@@ -149,10 +153,10 @@ describe("GraphQL transport and two-stage admission policy", () => {
 		expect(serviceAdmission.check.key).toBe(rscAdmission.check.key);
 		expect(serviceAdmission.check).toMatchObject({
 			scope: GRAPHQL_RATE_LIMIT_SCOPES.sharedPublic,
-			limit: GRAPHQL_SHARED_PUBLIC_RATE_LIMIT,
+			limit: config.sharedPublic,
 			cost: 41,
 		});
-		expect(GRAPHQL_SHARED_PUBLIC_RATE_LIMIT).toBeGreaterThanOrEqual(41 * 20);
+		expect(config.sharedPublic).toBeGreaterThanOrEqual(41 * 20);
 	});
 
 	it("sizes Mini browser budgets for slow page-by-page browsing", () => {

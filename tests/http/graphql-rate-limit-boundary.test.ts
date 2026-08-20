@@ -3,6 +3,15 @@ import type Redis from "ioredis";
 import { graphQLPrincipalAdmission } from "../../src/http/graphql-policy";
 import { checkRateLimits } from "../../src/http/security";
 
+const config = {
+	windowSeconds: 60,
+	globalAdmission: 1_500,
+	sharedPublic: 1_200,
+	browserIngress: 120,
+	authenticated: 300,
+	anonymous: 120,
+};
+
 describe("authenticated GraphQL weighted boundary", () => {
 	it("allows ten cost-30 picker operations and rejects the eleventh with Retry-After", async () => {
 		let count = 0;
@@ -18,7 +27,16 @@ describe("authenticated GraphQL weighted boundary", () => {
 				class: "signed",
 				trusted: true,
 				subject: "one-nat",
-				ingressContext: { subject: "one-nat" },
+				abuseSubject: null,
+				trafficClass: "legacy",
+				workload: "public-other",
+				ingressContext: {
+					version: 1,
+					subject: "one-nat",
+					abuseSubject: null,
+					trafficClass: "legacy",
+					workload: "public-other",
+				},
 			},
 			principal: {
 				userId: "user-1",
@@ -27,7 +45,7 @@ describe("authenticated GraphQL weighted boundary", () => {
 				fplEntryVerifiedAt: null,
 			},
 			cost: 30,
-			config: { browserIngress: 120, authenticated: 300, anonymous: 120 },
+			config,
 		});
 
 		for (let request = 1; request <= 10; request += 1) {
@@ -40,6 +58,7 @@ describe("authenticated GraphQL weighted boundary", () => {
 			allowed: false,
 			retryAfterSeconds: 37,
 			deniedScope: "graphql-authenticated-v2",
+			deniedCheckIndex: 0,
 		});
 	});
 
@@ -56,11 +75,14 @@ describe("authenticated GraphQL weighted boundary", () => {
 				class: "service",
 				trusted: true,
 				subject: "service:web-public-rsc",
+				abuseSubject: null,
+				trafficClass: "service",
+				workload: "public-other",
 				ingressContext: null,
 			},
 			principal: null,
 			cost: 41,
-			config: { browserIngress: 120, authenticated: 300, anonymous: 120 },
+			config,
 		});
 
 		const results = await Promise.all(

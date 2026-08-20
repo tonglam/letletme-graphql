@@ -1,4 +1,4 @@
-import { collectDefaultMetrics, Counter, Histogram, Registry } from "prom-client";
+import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 
 const registry = new Registry();
 
@@ -8,7 +8,7 @@ const httpRequestDurationSeconds = new Histogram({
 	name: "http_request_duration_seconds",
 	help: "Duration of HTTP requests in seconds",
 	labelNames: ["method", "route", "status"] as const,
-	buckets: [0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+	buckets: [0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.799, 0.8, 1, 1.9, 1.999, 2, 2.5, 5],
 });
 
 registry.registerMetric(httpRequestDurationSeconds);
@@ -37,6 +37,20 @@ const graphqlRateLimitDecisions = new Counter({
 	labelNames: ["scope", "outcome"] as const,
 });
 
+const graphqlRateLimitV3Decisions = new Counter({
+	name: "graphql_rate_limit_v3_decisions_total",
+	help: "GraphQL rate-limit outcomes using controlled traffic, workload, and scope labels",
+	labelNames: ["traffic_class", "workload", "scope", "outcome"] as const,
+});
+
+export const GRAPHQL_REQUEST_OUTCOME_LABELS = ["result"] as const;
+
+const graphqlRequestOutcomes = new Counter({
+	name: "graphql_request_outcomes_total",
+	help: "GraphQL request outcomes using a controlled result label",
+	labelNames: GRAPHQL_REQUEST_OUTCOME_LABELS,
+});
+
 const cacheRepositoryEvents = new Counter({
 	name: "cache_repository_events_total",
 	help: "Cache source, fallback, malformed, negative-hit, and suppressed-write events",
@@ -61,14 +75,45 @@ const playerStatsDeskFields = new Counter({
 	labelNames: ["field", "status"] as const,
 });
 
+type DatabasePoolMetrics = {
+	total: number;
+	idle: number;
+	waiting: number;
+};
+
+let readDatabasePoolMetrics = (): DatabasePoolMetrics => ({
+	total: 0,
+	idle: 0,
+	waiting: 0,
+});
+
+const postgresPoolClients = new Gauge({
+	name: "postgres_pool_clients",
+	help: "PostgreSQL pool clients by state",
+	labelNames: ["state"] as const,
+	collect(): void {
+		const snapshot = readDatabasePoolMetrics();
+		this.labels("total").set(snapshot.total);
+		this.labels("idle").set(snapshot.idle);
+		this.labels("waiting").set(snapshot.waiting);
+	},
+});
+
 registry.registerMetric(rateLimitStorageFailures);
 registry.registerMetric(authTokenValidations);
 registry.registerMetric(graphqlIngressRequests);
 registry.registerMetric(graphqlRateLimitDecisions);
+registry.registerMetric(graphqlRateLimitV3Decisions);
+registry.registerMetric(graphqlRequestOutcomes);
 registry.registerMetric(cacheRepositoryEvents);
 registry.registerMetric(playerStateProfiles);
 registry.registerMetric(playerStateProviderStale);
 registry.registerMetric(playerStatsDeskFields);
+registry.registerMetric(postgresPoolClients);
+
+export const registerDatabasePoolMetrics = (provider: () => DatabasePoolMetrics): void => {
+	readDatabasePoolMetrics = provider;
+};
 
 export const metrics = {
 	registry,
@@ -77,10 +122,13 @@ export const metrics = {
 	authTokenValidations,
 	graphqlIngressRequests,
 	graphqlRateLimitDecisions,
+	graphqlRateLimitV3Decisions,
+	graphqlRequestOutcomes,
 	cacheRepositoryEvents,
 	playerStateProfiles,
 	playerStateProviderStale,
 	playerStatsDeskFields,
+	postgresPoolClients,
 };
 
 export const metricsResponse = async (): Promise<Response> => {

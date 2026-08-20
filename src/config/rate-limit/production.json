@@ -1,0 +1,84 @@
+{
+	"schemaVersion": 3,
+	"policyVersion": "graphql-v3",
+	"capacity": {
+		"validated": false,
+		"sustainableRps": null,
+		"targetConcurrent": 300,
+		"requiredHeadroomRatio": 0.4,
+		"evidence": null
+	},
+	"legacyV2": {
+		"windowSeconds": 60,
+		"globalRequest": 1500,
+		"sharedPublicWeighted": 1200,
+		"browserIngress": 480,
+		"authenticatedWeighted": 900,
+		"anonymousWeighted": 600
+	},
+	"global": {
+		"refillPerSecond": 100,
+		"burst": 1000
+	},
+	"trafficClasses": {
+		"mini": {
+			"abuseRequest": {
+				"refillPerSecond": 100,
+				"burst": 1200
+			},
+			"anonymousWeighted": {
+				"refillPerSecond": 10,
+				"burst": 600
+			},
+			"sessionWeighted": {
+				"refillPerSecond": 15,
+				"burst": 900
+			}
+		},
+		"web_browser": {
+			"anonymousWeighted": {
+				"refillPerSecond": 10,
+				"burst": 600
+			},
+			"sessionWeighted": {
+				"refillPerSecond": 15,
+				"burst": 900
+			}
+		},
+		"web_rsc": {
+			"classRequest": {
+				"refillPerSecond": 10,
+				"burst": 120
+			},
+			"workloads": {
+				"interactive": { "refillPerSecond": 10, "burst": 300 },
+				"home": { "refillPerSecond": 10, "burst": 300 },
+				"fixtures": { "refillPerSecond": 20, "burst": 450 },
+				"market": { "refillPerSecond": 20, "burst": 450 },
+				"player-stats": { "refillPerSecond": 30, "burst": 600 },
+				"gameweek": { "refillPerSecond": 10, "burst": 300 },
+				"public-other": { "refillPerSecond": 10, "burst": 300 }
+			}
+		},
+		"service": {
+			"classRequest": {
+				"refillPerSecond": 5,
+				"burst": 60
+			},
+			"weighted": {
+				"refillPerSecond": 15,
+				"burst": 900
+			}
+		},
+		"legacy": {
+			"classRequest": {
+				"refillPerSecond": 8,
+				"burst": 480
+			},
+			"weighted": {
+				"refillPerSecond": 10,
+				"burst": 600
+			}
+		}
+	}
+}
