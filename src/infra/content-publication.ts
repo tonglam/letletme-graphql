@@ -373,7 +373,7 @@ export async function readBriefingWeek(
 	let pointerWasUsable = false;
 	try {
 		const rawPointer = await redis.get(BRIEFING_WEEK_ACTIVE_POINTER_KEY);
-		if (rawPointer) {
+		if (rawPointer !== null) {
 			const parsed: unknown = JSON.parse(rawPointer);
 			const isUsablePointer =
 				isRecord(parsed) &&
