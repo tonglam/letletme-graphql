@@ -65,6 +65,9 @@ jobs:
       - name: Test
         run: bun test --coverage
 
+      - name: Critical My FPL coverage
+        run: bun run coverage:critical
+
       - name: Build
         run: bun build src/index.ts --target bun --outdir /tmp/build-check
 
