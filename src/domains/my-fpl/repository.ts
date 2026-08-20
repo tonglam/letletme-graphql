@@ -21,6 +21,37 @@ export type MyFplReviewContext = {
 	latestFinalizedEventId: number | null;
 };
 
+/** Internal dependency seam used by hermetic My FPL behavior tests. */
+export type MyFplRepositoryDependencies = {
+	getCoreEventSnapshot: typeof getCoreEventSnapshot;
+	tournamentsRepository: typeof tournamentsRepository;
+};
+
+const defaultDependencies: MyFplRepositoryDependencies = {
+	getCoreEventSnapshot,
+	tournamentsRepository,
+};
+
+const dependencyOverrides = new WeakMap<object, MyFplRepositoryDependencies>();
+
+const dependenciesFor = (context: GraphQLContext): MyFplRepositoryDependencies =>
+	dependencyOverrides.get(context) ?? defaultDependencies;
+
+const withDependencies = async <T>(
+	context: GraphQLContext,
+	dependencies: MyFplRepositoryDependencies,
+	operation: () => Promise<T>
+): Promise<T> => {
+	const previous = dependencyOverrides.get(context);
+	dependencyOverrides.set(context, dependencies);
+	try {
+		return await operation();
+	} finally {
+		if (previous) dependencyOverrides.set(context, previous);
+		else dependencyOverrides.delete(context);
+	}
+};
+
 type LoadedReviewContext = {
 	value: MyFplReviewContext;
 	finalizedEventIds: Set<number>;
@@ -478,6 +509,9 @@ const asInteger = (value: unknown): number | null => {
 	return parsed !== null && Number.isSafeInteger(parsed) ? parsed : null;
 };
 
+const isSafeInteger = (value: unknown): value is number =>
+	typeof value === "number" && Number.isSafeInteger(value);
+
 const isoString = (value: Date | string | null): string | null => {
 	if (value === null) return null;
 	const date = new Date(value);
@@ -540,6 +574,304 @@ const validateTournamentId = (tournamentId: number): void => {
 	}
 };
 
+const isReviewState = (value: unknown): value is MyFplReviewState =>
+	typeof value === "string" &&
+	["PRESEASON", "PENDING", "READY", "EMPTY", "UNAVAILABLE"].includes(value);
+
+const isReviewContext = (value: unknown): value is MyFplReviewContext =>
+	isRecord(value) &&
+	typeof value.season === "string" &&
+	typeof value.coreRevision === "string" &&
+	[value.currentEventId, value.nextEventId, value.latestFinalizedEventId].every(
+		(item) => item === null || isSafeInteger(item)
+	);
+
+const isNullableSafeInteger = (value: unknown): value is number | null =>
+	value === null || isSafeInteger(value);
+
+const isFiniteNumber = (value: unknown): value is number =>
+	typeof value === "number" && Number.isFinite(value);
+
+const isNullableFiniteNumber = (value: unknown): value is number | null =>
+	value === null || isFiniteNumber(value);
+
+const isNullableString = (value: unknown): value is string | null =>
+	value === null || typeof value === "string";
+
+const isChip = (value: unknown): value is string =>
+	typeof value === "string" &&
+	["NONE", "BENCH_BOOST", "FREE_HIT", "TRIPLE_CAPTAIN", "WILDCARD", "MANAGER"].includes(value);
+
+const isNullableChip = (value: unknown): value is string | null => value === null || isChip(value);
+
+const isIsoDateTime = (value: unknown): value is string =>
+	typeof value === "string" && Number.isFinite(Date.parse(value));
+
+const isTypedRecord = (
+	value: unknown,
+	fields: Record<string, (candidate: unknown) => boolean>
+): value is Record<string, unknown> =>
+	isRecord(value) &&
+	Object.entries(fields).every(
+		([key, predicate]) => Object.prototype.hasOwnProperty.call(value, key) && predicate(value[key])
+	);
+
+const isEntryIdentityCache = (value: unknown): value is MyFplEntryIdentity =>
+	isTypedRecord(value, {
+		id: isSafeInteger,
+		entryName: (candidate) => typeof candidate === "string",
+		playerName: (candidate) => typeof candidate === "string",
+		region: isNullableString,
+		startedEvent: isNullableSafeInteger,
+		overallPoints: isNullableSafeInteger,
+		overallRank: isNullableSafeInteger,
+		bank: isNullableSafeInteger,
+		teamValue: isNullableSafeInteger,
+		totalTransfers: isNullableSafeInteger,
+		transfersSyncedThroughEventId: isNullableSafeInteger,
+	});
+
+const isTeamHistoryRowCache = (value: unknown): value is MyFplTeamHistoryRow =>
+	isTypedRecord(value, {
+		eventId: isSafeInteger,
+		eventPoints: isSafeInteger,
+		eventRank: isNullableSafeInteger,
+		overallPoints: isSafeInteger,
+		overallRank: isSafeInteger,
+		eventTransfers: isSafeInteger,
+		eventTransfersCost: isSafeInteger,
+		eventNetPoints: isSafeInteger,
+		eventBenchPoints: isSafeInteger,
+		eventChip: isChip,
+		eventCaptainPoints: isSafeInteger,
+		captainWebName: isNullableString,
+		captainTeamShortName: isNullableString,
+		teamValue: isNullableSafeInteger,
+		bank: isNullableSafeInteger,
+	});
+
+const isPastSeasonCache = (value: unknown): value is MyFplPastSeason =>
+	isTypedRecord(value, {
+		season: (candidate) => typeof candidate === "string",
+		totalPoints: isSafeInteger,
+		overallRank: isSafeInteger,
+	});
+
+const isTeamPickCache = (value: unknown): value is MyFplTeamPick =>
+	isTypedRecord(value, {
+		element: isSafeInteger,
+		position: isSafeInteger,
+		webName: (candidate) => typeof candidate === "string",
+		teamShortName: (candidate) => typeof candidate === "string",
+		teamName: (candidate) => typeof candidate === "string",
+		elementTypeName: (candidate) => typeof candidate === "string",
+		isCaptain: (candidate) => typeof candidate === "boolean",
+		isViceCaptain: (candidate) => typeof candidate === "boolean",
+		multiplier: isSafeInteger,
+		totalPoints: isSafeInteger,
+		minutes: isSafeInteger,
+		goalsScored: isSafeInteger,
+		assists: isSafeInteger,
+		cleanSheets: isSafeInteger,
+		goalsConceded: isSafeInteger,
+		yellowCards: isSafeInteger,
+		redCards: isSafeInteger,
+		saves: isSafeInteger,
+		bonus: isSafeInteger,
+		bps: isSafeInteger,
+		againstShortName: (candidate) => typeof candidate === "string",
+		wasHome: (candidate) => typeof candidate === "string",
+		score: (candidate) => typeof candidate === "string",
+		isPlayed: (candidate) => typeof candidate === "boolean",
+		autoSub: (candidate) => typeof candidate === "boolean",
+		expectedGoals: isNullableFiniteNumber,
+		expectedAssists: isNullableFiniteNumber,
+		expectedGoalInvolvements: isNullableFiniteNumber,
+		expectedGoalsConceded: isNullableFiniteNumber,
+	});
+
+const isTeamGameweekResultCache = (value: unknown): value is MyFplTeamGameweekResult =>
+	isTypedRecord(value, {
+		eventId: isSafeInteger,
+		eventPoints: isSafeInteger,
+		overallPoints: isSafeInteger,
+		overallRank: isSafeInteger,
+		eventTransfers: isSafeInteger,
+		eventTransfersCost: isSafeInteger,
+		eventNetPoints: isSafeInteger,
+		eventBenchPoints: isSafeInteger,
+		eventChip: isChip,
+		eventCaptainPoints: isSafeInteger,
+		playedCaptainWebName: isNullableString,
+		teamValue: isNullableSafeInteger,
+		bank: isNullableSafeInteger,
+		picks: (candidate) => Array.isArray(candidate) && candidate.every(isTeamPickCache),
+	});
+
+const isTeamGameweekCache = (value: unknown): value is MyFplTeamGameweek =>
+	isTypedRecord(value, {
+		state: isReviewState,
+		context: isReviewContext,
+		eventId: isSafeInteger,
+		entry: (candidate) => candidate === null || isEntryIdentityCache(candidate),
+		result: (candidate) => candidate === null || isTeamGameweekResultCache(candidate),
+	});
+
+const isTeamDeskCache = (value: unknown): value is MyFplTeamDesk =>
+	isTypedRecord(value, {
+		state: isReviewState,
+		context: isReviewContext,
+		entry: (candidate) => candidate === null || isEntryIdentityCache(candidate),
+		history: (candidate) => Array.isArray(candidate) && candidate.every(isTeamHistoryRowCache),
+		pastSeasons: (candidate) => Array.isArray(candidate) && candidate.every(isPastSeasonCache),
+		selectedEventId: isNullableSafeInteger,
+		gameweek: (candidate) => candidate === null || isTeamGameweekCache(candidate),
+	});
+
+const isTransferMoveCache = (value: unknown): value is MyFplTransferMove =>
+	isTypedRecord(value, {
+		eventId: isSafeInteger,
+		elementInWebName: (candidate) => typeof candidate === "string",
+		elementInTypeName: (candidate) => typeof candidate === "string",
+		elementInTeamShortName: (candidate) => typeof candidate === "string",
+		elementInCost: isSafeInteger,
+		elementOutWebName: (candidate) => typeof candidate === "string",
+		elementOutTypeName: (candidate) => typeof candidate === "string",
+		elementOutTeamShortName: (candidate) => typeof candidate === "string",
+		elementOutCost: isSafeInteger,
+		time: isIsoDateTime,
+	});
+
+const isTransferGameweekCache = (value: unknown): value is MyFplTransferGameweek =>
+	isTypedRecord(value, {
+		eventId: isSafeInteger,
+		eventTransfers: isSafeInteger,
+		eventTransfersCost: isSafeInteger,
+		transfers: (candidate) => Array.isArray(candidate) && candidate.every(isTransferMoveCache),
+	});
+
+const isTeamTransfersCache = (value: unknown): value is MyFplTeamTransfers =>
+	isTypedRecord(value, {
+		state: isReviewState,
+		context: isReviewContext,
+		gameweeks: (candidate) => Array.isArray(candidate) && candidate.every(isTransferGameweekCache),
+	});
+
+const isCompetitionBoardRowCache = (value: unknown): value is MyFplCompetitionBoardRow =>
+	isTypedRecord(value, {
+		eventId: isSafeInteger,
+		groupId: isNullableSafeInteger,
+		entryId: isSafeInteger,
+		entryName: isNullableString,
+		playerName: isNullableString,
+		rank: isNullableSafeInteger,
+		previousRank: isNullableSafeInteger,
+		eventPoints: isNullableSafeInteger,
+		eventCost: isNullableSafeInteger,
+		eventNetPoints: isNullableSafeInteger,
+		eventRank: isNullableSafeInteger,
+		overallPoints: isNullableSafeInteger,
+		overallRank: isNullableSafeInteger,
+		eventChip: isNullableChip,
+		captainId: isNullableSafeInteger,
+		captainWebName: isNullableString,
+		captainTeamShortName: isNullableString,
+		captainPoints: isNullableSafeInteger,
+		teamValue: isNullableSafeInteger,
+		bank: isNullableSafeInteger,
+	});
+
+const isCompetitionBoardCache = (value: unknown): value is MyFplCompetitionBoardPage =>
+	isTypedRecord(value, {
+		state: isReviewState,
+		eventId: isSafeInteger,
+		page: isSafeInteger,
+		pageSize: isSafeInteger,
+		totalRows: isSafeInteger,
+		totalPages: isSafeInteger,
+		fieldSize: isSafeInteger,
+		rows: (candidate) => Array.isArray(candidate) && candidate.every(isCompetitionBoardRowCache),
+		viewerRow: (candidate) => candidate === null || isCompetitionBoardRowCache(candidate),
+	});
+
+const isCompetitionMetricCache = (value: unknown): value is MyFplCompetitionMetric =>
+	isTypedRecord(value, {
+		key: (candidate) =>
+			typeof candidate === "string" &&
+			[
+				"OVERALL_POINTS",
+				"TEAM_VALUE",
+				"TRANSFERS",
+				"TOTAL_COSTS",
+				"BENCH_POINTS",
+				"AUTO_SUB_POINTS",
+			].includes(candidate),
+		leaderValue: isNullableFiniteNumber,
+		leaderEntryId: isNullableSafeInteger,
+		leaderEntryName: isNullableString,
+		leaderPlayerName: isNullableString,
+		averageValue: isNullableFiniteNumber,
+		higherIsBetter: (candidate) => typeof candidate === "boolean",
+	});
+
+const isCompetitionViewerCache = (value: unknown): value is MyFplCompetitionViewerSummary =>
+	isTypedRecord(value, {
+		entryId: isSafeInteger,
+		overallRank: isNullableSafeInteger,
+		tournamentOverallRank: isNullableSafeInteger,
+		teamValue: isNullableSafeInteger,
+		tournamentTeamValueRank: isNullableSafeInteger,
+		transfersNum: isNullableSafeInteger,
+		tournamentTransfersRank: isNullableSafeInteger,
+		totalCosts: isNullableSafeInteger,
+		tournamentCostsRank: isNullableSafeInteger,
+		totalBenchPoints: isNullableSafeInteger,
+		tournamentBenchPointsRank: isNullableSafeInteger,
+		autoSubPoints: isNullableSafeInteger,
+		tournamentAutoSubRank: isNullableSafeInteger,
+		overallPoints: isNullableSafeInteger,
+		leaderOverallPoints: isNullableSafeInteger,
+		gapToLeader: isNullableSafeInteger,
+		pointsBehindNext: isNullableSafeInteger,
+		pointsAheadOfPrev: isNullableSafeInteger,
+	});
+
+const isCompetitionAggregateCache = (value: unknown): value is MyFplCompetitionAggregate =>
+	isTypedRecord(value, {
+		eventId: isSafeInteger,
+		entryCount: isSafeInteger,
+		leaderOverallPoints: isNullableSafeInteger,
+		secondOverallPoints: isNullableSafeInteger,
+		gapFirstSecond: isNullableSafeInteger,
+		averageOverallPoints: isNullableSafeInteger,
+		metrics: (candidate) => Array.isArray(candidate) && candidate.every(isCompetitionMetricCache),
+		viewer: (candidate) => candidate === null || isCompetitionViewerCache(candidate),
+	});
+
+const isCompetitionSeasonPathPointCache = (
+	value: unknown
+): value is MyFplCompetitionSeasonPathPoint =>
+	isTypedRecord(value, {
+		gameweek: isSafeInteger,
+		tournamentRank: isNullableSafeInteger,
+		gapToLeader: isNullableSafeInteger,
+		pointsVsAverage: isNullableFiniteNumber,
+		fieldSize: isSafeInteger,
+		overallPoints: isNullableSafeInteger,
+		leaderOverallPoints: isNullableSafeInteger,
+		averageOverallPoints: isNullableFiniteNumber,
+	});
+
+const isCompetitionSeasonPathCache = (value: unknown): value is MyFplCompetitionSeasonPath =>
+	isTypedRecord(value, {
+		state: isReviewState,
+		context: isReviewContext,
+		tournamentId: isSafeInteger,
+		throughEventId: isSafeInteger,
+		points: (candidate) =>
+			Array.isArray(candidate) && candidate.every(isCompetitionSeasonPathPointCache),
+	});
+
 const readCache = async <T>(
 	context: GraphQLContext,
 	key: string,
@@ -573,12 +905,14 @@ const stateTtl = (state: MyFplReviewState): number =>
 	state === "PENDING" ? NULLABLE_STATE_CACHE_TTL_SECONDS : QUERY_CACHE_TTL_SECONDS.REPORTING;
 
 const loadReviewContext = async (context: GraphQLContext): Promise<LoadedReviewContext> => {
-	const snapshotPromise = getCoreEventSnapshot(context);
+	const snapshotPromise = dependenciesFor(context).getCoreEventSnapshot(context);
 	const lifecyclePromise = context.database.query<DbEventLifecycleRow>(
+		/* c8 ignore start -- SQL text is not executable application logic. */
 		`SELECT event_id, finished, data_checked, live_snapshot_finalized_at
 		 FROM fpl.events
 		 WHERE season_id = $1
 		 ORDER BY event_id`,
+		/* c8 ignore stop */
 		[context.currentSeason.seasonId]
 	);
 	const [snapshot, lifecycle] = await Promise.all([snapshotPromise, lifecyclePromise]);
@@ -872,8 +1206,7 @@ const loadTeamGameweekPrepared = async (
 	const cached = await readCache(
 		context,
 		cacheKey,
-		(value): value is MyFplTeamGameweek =>
-			isRecord(value) && value.eventId === eventId && typeof value.state === "string"
+		(value): value is MyFplTeamGameweek => isTeamGameweekCache(value) && value.eventId === eventId
 	);
 	if (cached) return cached;
 
@@ -924,17 +1257,12 @@ const loadTeamDesk = async (
 	// Lightweight requests deliberately skip the full Core preload in the HTTP
 	// layer. Pin the compact event snapshot before deriving a revision-scoped
 	// cache key; loadReviewContext reuses this request-local promise on a miss.
-	await getCoreEventSnapshot(context);
+	await dependenciesFor(context).getCoreEventSnapshot(context);
 	const cacheKey = gqlCacheKey(
 		context,
 		`my-fpl:${PROJECTION_VERSION}:team-desk:${entryId}:${eventId ?? "season"}`
 	);
-	const cached = await readCache(
-		context,
-		cacheKey,
-		(value): value is MyFplTeamDesk =>
-			isRecord(value) && Array.isArray(value.history) && typeof value.state === "string"
-	);
+	const cached = await readCache(context, cacheKey, isTeamDeskCache);
 	if (cached) return cached;
 
 	// All four projections are independent. On a miss, start them together so
@@ -1032,12 +1360,7 @@ const loadTeamTransfers = async (context: GraphQLContext): Promise<MyFplTeamTran
 		}
 	}
 	const cacheKey = gqlCacheKey(context, `my-fpl:${PROJECTION_VERSION}:team-transfers:${entryId}`);
-	const cached = await readCache(
-		context,
-		cacheKey,
-		(value): value is MyFplTeamTransfers =>
-			isRecord(value) && Array.isArray(value.gameweeks) && typeof value.state === "string"
-	);
+	const cached = await readCache(context, cacheKey, isTeamTransfersCache);
 	if (cached) return cached;
 
 	const result = await context.database.query<DbTransferRow>(
@@ -1174,10 +1497,9 @@ const filterCurrentTournamentMemberships = async (
 	const missingTournamentIds = currentTournamentIds.filter(
 		(tournamentId) => !cachedById.has(tournamentId)
 	);
-	const uncachedTournaments = await tournamentsRepository.getTournamentInfosUncached(
-		context,
-		missingTournamentIds
-	);
+	const uncachedTournaments = await dependenciesFor(
+		context
+	).tournamentsRepository.getTournamentInfosUncached(context, missingTournamentIds);
 	for (const tournament of uncachedTournaments) {
 		if (tournament) cachedById.set(tournament.id, tournament);
 	}
@@ -1266,7 +1588,11 @@ const loadCompetitionBoardPrepared = async (
 	const normalizedSearch = normalizeSearch(search);
 	await assertTournamentMembership(context, tournamentId, entryId);
 	const metadata =
-		tournament ?? (await tournamentsRepository.getTournamentInfoUncached(context, tournamentId));
+		tournament ??
+		(await dependenciesFor(context).tournamentsRepository.getTournamentInfoUncached(
+			context,
+			tournamentId
+		));
 	const empty = (state: MyFplReviewState): MyFplCompetitionBoardPage => ({
 		state,
 		eventId,
@@ -1297,7 +1623,7 @@ const loadCompetitionBoardPrepared = async (
 		context,
 		cacheKey,
 		(value): value is MyFplCompetitionBoardPage =>
-			isRecord(value) && Array.isArray(value.rows) && value.eventId === eventId
+			isCompetitionBoardCache(value) && value.eventId === eventId
 	);
 	if (cached) return cached;
 
@@ -1487,7 +1813,7 @@ const loadCompetitionAggregate = async (
 		context,
 		cacheKey,
 		(value): value is MyFplCompetitionAggregate =>
-			isRecord(value) && value.eventId === eventId && Array.isArray(value.metrics)
+			isCompetitionAggregateCache(value) && value.eventId === eventId
 	);
 	if (cached) return cached;
 	const result = await context.database.query<DbAggregateRow>(
@@ -1629,13 +1955,16 @@ const loadCompetitionsDesk = async (
 	// getEntryTournaments derives its cache key synchronously. Pin the compact
 	// Core revision first, then overlap the remaining lifecycle SQL and catalog
 	// read without ever creating an unversioned cache path.
-	await getCoreEventSnapshot(context);
+	await dependenciesFor(context).getCoreEventSnapshot(context);
 	const requestedTournamentPromise = tournamentId
-		? tournamentsRepository.getTournamentInfoUncached(context, tournamentId)
+		? dependenciesFor(context).tournamentsRepository.getTournamentInfoUncached(
+				context,
+				tournamentId
+			)
 		: Promise.resolve(null);
 	const [loadedContext, cachedTournaments, requestedTournament] = await Promise.all([
 		loadReviewContext(context),
-		tournamentsRepository.getEntryTournaments(context, entryId),
+		dependenciesFor(context).tournamentsRepository.getEntryTournaments(context, entryId),
 		requestedTournamentPromise,
 	]);
 	let tournaments = await filterCurrentTournamentMemberships(context, entryId, cachedTournaments);
@@ -1730,7 +2059,10 @@ const loadCompetitionSeasonPath = async (
 		throughEventId,
 		points: [],
 	});
-	const tournament = await tournamentsRepository.getTournamentInfoUncached(context, tournamentId);
+	const tournament = await dependenciesFor(context).tournamentsRepository.getTournamentInfoUncached(
+		context,
+		tournamentId
+	);
 	if (!tournament) return empty("UNAVAILABLE");
 	if (tournament.groupMode !== GroupMode.POINTS_RACES) return empty("UNAVAILABLE");
 	if (
@@ -1750,7 +2082,7 @@ const loadCompetitionSeasonPath = async (
 		context,
 		cacheKey,
 		(value): value is MyFplCompetitionSeasonPath =>
-			isRecord(value) && Array.isArray(value.points) && value.throughEventId === throughEventId
+			isCompetitionSeasonPathCache(value) && value.throughEventId === throughEventId
 	);
 	if (cached) return cached;
 
@@ -1822,7 +2154,7 @@ const loadCompetitionSetupStatus = async (
 ): Promise<MyFplCompetitionSetupStatus> => {
 	validateTournamentId(tournamentId);
 	const entryId = requireVerifiedEntryId(context);
-	await getCoreEventSnapshot(context);
+	await dependenciesFor(context).getCoreEventSnapshot(context);
 	await assertTournamentMembership(context, tournamentId, entryId);
 	const result = await context.database.query<DbSetupStatusRow>(
 		`SELECT setup_status::text, setup_phase::text, setup_completed_units,
@@ -1856,15 +2188,45 @@ const loadCompetitionSetupStatus = async (
 	};
 };
 
-export const myFplRepository = {
-	loadTeamDesk,
-	loadTeamGameweek,
-	loadTeamTransfers,
-	loadCompetitionsDesk,
-	loadCompetitionBoard,
-	loadCompetitionSeasonPath,
-	loadCompetitionSetupStatus,
+export type MyFplRepository = {
+	loadTeamDesk: typeof loadTeamDesk;
+	loadTeamGameweek: typeof loadTeamGameweek;
+	loadTeamTransfers: typeof loadTeamTransfers;
+	loadCompetitionsDesk: typeof loadCompetitionsDesk;
+	loadCompetitionBoard: typeof loadCompetitionBoard;
+	loadCompetitionSeasonPath: typeof loadCompetitionSeasonPath;
+	loadCompetitionSetupStatus: typeof loadCompetitionSetupStatus;
 };
+
+export const createMyFplRepository = (
+	overrides: Partial<MyFplRepositoryDependencies> = {}
+): MyFplRepository => {
+	const dependencies: MyFplRepositoryDependencies = { ...defaultDependencies, ...overrides };
+	return {
+		loadTeamDesk: (context, eventId) =>
+			withDependencies(context, dependencies, () => loadTeamDesk(context, eventId)),
+		loadTeamGameweek: (context, eventId) =>
+			withDependencies(context, dependencies, () => loadTeamGameweek(context, eventId)),
+		loadTeamTransfers: (context) =>
+			withDependencies(context, dependencies, () => loadTeamTransfers(context)),
+		loadCompetitionsDesk: (context, tournamentId, eventId) =>
+			withDependencies(context, dependencies, () =>
+				loadCompetitionsDesk(context, tournamentId, eventId)
+			),
+		loadCompetitionBoard: (context, args) =>
+			withDependencies(context, dependencies, () => loadCompetitionBoard(context, args)),
+		loadCompetitionSeasonPath: (context, tournamentId, throughEventId) =>
+			withDependencies(context, dependencies, () =>
+				loadCompetitionSeasonPath(context, tournamentId, throughEventId)
+			),
+		loadCompetitionSetupStatus: (context, tournamentId) =>
+			withDependencies(context, dependencies, () =>
+				loadCompetitionSetupStatus(context, tournamentId)
+			),
+	};
+};
+
+export const myFplRepository = createMyFplRepository();
 
 export const myFplTestables = {
 	normalizeSearch,
