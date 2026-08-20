@@ -151,6 +151,7 @@ describe("Briefing publication reader", () => {
 		test("separates Redis outages from cache corruption", async () => {
 			const beforeCorruptions = getBriefingReaderMetrics().corruptions;
 			const beforeUnavailable = getBriefingReaderMetrics().redisUnavailable;
+			const beforeRepairs = getBriefingReaderMetrics().repairs;
 			const redis = {
 				get: async () => {
 					throw new Error("Redis timeout");
@@ -159,6 +160,7 @@ describe("Briefing publication reader", () => {
 			await readBriefingWeek(databaseWithFallback(), redis, "en");
 			expect(getBriefingReaderMetrics().corruptions).toBe(beforeCorruptions);
 			expect(getBriefingReaderMetrics().redisUnavailable).toBeGreaterThan(beforeUnavailable);
+			expect(getBriefingReaderMetrics().repairs).toBe(beforeRepairs);
 		});
 
 		test("returns unavailable when PostgreSQL metadata cannot be read", async () => {

@@ -461,7 +461,7 @@ export async function readBriefingWeek(
 				validateAgainstMetadata(parsed, locale, metadata, serialized(parsed))
 			)
 				payload = parsed;
-			if (payload && !pointerWasUsable) recordReaderEvent("repair");
+			if (payload && !pointerWasUsable && !redisUnavailable) recordReaderEvent("repair");
 		} catch {
 			return {
 				...unavailable(),
