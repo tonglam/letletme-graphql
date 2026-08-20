@@ -211,8 +211,15 @@ const validCachedTournamentInfo = {
 	setupCompletedUnits: 2,
 	setupTotalUnits: 2,
 	setupProgressUpdatedAt: null,
+	setupProgressMode: TournamentSetupProgressMode.DETERMINATE,
+	setupAttempt: 0,
+	setupMaxAttempts: 3,
+	nextRetryAt: null,
 	standingsReadyAt: "2026-04-21T00:00:00.000Z",
+	profilesReadyAt: null,
+	insightsReadyAt: "2026-04-21T00:00:00.000Z",
 	setupHasWarnings: false,
+	warningSummaries: [],
 	setupStartedAt: null,
 	setupFinishedAt: "2026-04-21T00:00:00.000Z",
 	createdAt: "2026-04-21T00:00:00.000Z",
@@ -2112,6 +2119,20 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 				return { data: [row], error: null };
 			},
 		};
+		const issueQuery = {
+			select() {
+				return issueQuery;
+			},
+			in() {
+				return issueQuery;
+			},
+			is() {
+				return issueQuery;
+			},
+			async order() {
+				return { data: [], error: null };
+			},
+		};
 		const context = {
 			database: {
 				query: async () => {
@@ -2122,7 +2143,9 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 			dataRevision: "core-test",
 			data: {
 				read(table: string) {
-					return table === "competition.tournaments" ? infoQuery : membershipQuery;
+					if (table === "competition.tournaments") return infoQuery;
+					if (table === "competition.tournament_setup_issues") return issueQuery;
+					return membershipQuery;
 				},
 			},
 			redis: {

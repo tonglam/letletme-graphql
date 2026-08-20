@@ -1151,6 +1151,15 @@ const isRequired = (
 	predicate: (candidate: unknown) => boolean
 ): boolean => hasOwn(value, key) && predicate(value[key]);
 
+const isTournamentSetupWarningSummaryCache = (
+	value: unknown
+): value is TournamentSetupWarningSummary =>
+	isRecord(value) &&
+	isRequired(value, "category", (candidate) =>
+		isEnumValue(TournamentSetupWarningCategory, candidate)
+	) &&
+	isRequired(value, "affectedCount", isSafeInteger);
+
 const isTournamentInfoCache = (value: unknown): value is TournamentInfo => {
 	if (!isRecord(value)) return false;
 	return (
@@ -1205,7 +1214,15 @@ const isTournamentInfoCache = (value: unknown): value is TournamentInfo => {
 		isRequired(value, "setupCompletedUnits", (candidate) => isSafeInteger(candidate)) &&
 		isRequired(value, "setupTotalUnits", (candidate) => isSafeInteger(candidate)) &&
 		isRequired(value, "setupProgressUpdatedAt", isNullableIsoDateTime) &&
+		isRequired(value, "setupProgressMode", (candidate) =>
+			isEnumValue(TournamentSetupProgressMode, candidate)
+		) &&
+		isRequired(value, "setupAttempt", isSafeInteger) &&
+		isRequired(value, "setupMaxAttempts", isSafeInteger) &&
+		isRequired(value, "nextRetryAt", isNullableIsoDateTime) &&
 		isRequired(value, "standingsReadyAt", isNullableIsoDateTime) &&
+		isRequired(value, "profilesReadyAt", isNullableIsoDateTime) &&
+		isRequired(value, "insightsReadyAt", isNullableIsoDateTime) &&
 		isRequired(value, "setupHasWarnings", (candidate) => typeof candidate === "boolean") &&
 		isRequired(value, "setupStartedAt", isNullableIsoDateTime) &&
 		isRequired(value, "setupFinishedAt", isNullableIsoDateTime) &&
@@ -1215,7 +1232,17 @@ const isTournamentInfoCache = (value: unknown): value is TournamentInfo => {
 };
 
 const isTournamentInfoArrayCache = (value: unknown): value is TournamentInfo[] =>
-	Array.isArray(value) && value.every(isTournamentInfoCache);
+	Array.isArray(value) &&
+	value.every(
+		(item) =>
+			isTournamentInfoCache(item) &&
+			isRequired(
+				item,
+				"warningSummaries",
+				(candidate) =>
+					Array.isArray(candidate) && candidate.every(isTournamentSetupWarningSummaryCache)
+			)
+	);
 
 const isEntryIdArrayCache = (value: unknown): value is number[] =>
 	Array.isArray(value) && value.every((item) => isSafeInteger(item) && item > 0);
@@ -1528,16 +1555,14 @@ export async function getTournamentSetupIssueDiagnostics(
 	return ((result.data as DbTournamentSetupIssueRow[] | null) ?? []).map(mapTournamentSetupIssue);
 }
 
-export async function getTournamentSetupWarningSummaries(
-	context: GraphQLContext,
-	tournamentId: number
-): Promise<TournamentSetupWarningSummary[]> {
-	const diagnostics = await getTournamentSetupIssueDiagnostics(context, tournamentId);
+const summarizeTournamentSetupIssues = (
+	issues: readonly TournamentSetupIssueDiagnostic[]
+): TournamentSetupWarningSummary[] => {
 	const totals = new Map<
 		TournamentSetupWarningCategory,
 		{ affectedEntryIds: Set<number>; fallbackCount: number }
 	>();
-	for (const issue of diagnostics) {
+	for (const issue of issues) {
 		if (issue.severity !== TournamentSetupIssueSeverity.WARNING) continue;
 		const total = totals.get(issue.category) ?? {
 			affectedEntryIds: new Set<number>(),
@@ -1554,7 +1579,75 @@ export async function getTournamentSetupWarningSummaries(
 				total.affectedEntryIds.size > 0 ? total.affectedEntryIds.size : total.fallbackCount,
 		}))
 		.sort((left, right) => left.category.localeCompare(right.category));
+};
+
+export async function getTournamentSetupWarningSummaries(
+	context: GraphQLContext,
+	tournamentId: number
+): Promise<TournamentSetupWarningSummary[]> {
+	const diagnostics = await getTournamentSetupIssueDiagnostics(context, tournamentId);
+	return summarizeTournamentSetupIssues(diagnostics);
 }
+
+type DbTournamentSetupWarningSummaryRow = {
+	tournament_id: number;
+	category: string;
+	severity: string;
+	affected_entry_ids: number[] | null;
+	affected_entry_count: number | null;
+};
+
+const getTournamentSetupWarningSummariesByTournamentIds = async (
+	context: GraphQLContext,
+	tournamentIds: readonly number[]
+): Promise<Map<number, TournamentSetupWarningSummary[]>> => {
+	const uniqueIds = [...new Set(tournamentIds)];
+	const summaries = new Map<number, TournamentSetupWarningSummary[]>();
+	if (uniqueIds.length === 0) return summaries;
+
+	const result = await context.data
+		.read<DbTournamentSetupWarningSummaryRow>("competition.tournament_setup_issues")
+		.select("tournament_id, category, severity, affected_entry_ids, affected_entry_count")
+		.in("tournament_id", uniqueIds)
+		.is("resolved_at", null)
+		.order("tournament_id", { ascending: true });
+	if (result.error) {
+		context.logger.warn(
+			{ err: result.error, tournamentCount: uniqueIds.length },
+			"Failed to load tournament setup warning summaries"
+		);
+		for (const tournamentId of uniqueIds) summaries.set(tournamentId, []);
+		return summaries;
+	}
+
+	const issuesByTournament = new Map<number, TournamentSetupIssueDiagnostic[]>();
+	for (const row of (result.data as DbTournamentSetupWarningSummaryRow[] | null) ?? []) {
+		const issues = issuesByTournament.get(row.tournament_id) ?? [];
+		issues.push({
+			issueKey: "",
+			code: "",
+			diagnosticCode: null,
+			category: mapSetupIssueCategory(row.category),
+			severity: mapSetupIssueSeverity(row.severity),
+			eventId: null,
+			affectedEntryIds: Array.isArray(row.affected_entry_ids)
+				? row.affected_entry_ids.filter((id) => Number.isSafeInteger(id) && id > 0)
+				: [],
+			affectedCount: Number(row.affected_entry_count ?? 0),
+			repairAttempts: 0,
+			nextRepairAt: null,
+			repairExhausted: false,
+		});
+		issuesByTournament.set(row.tournament_id, issues);
+	}
+	for (const tournamentId of uniqueIds) {
+		summaries.set(
+			tournamentId,
+			summarizeTournamentSetupIssues(issuesByTournament.get(tournamentId) ?? [])
+		);
+	}
+	return summaries;
+};
 
 export const extractTournamentIds = (rows: DbTournamentEntryRow[]): number[] => {
 	const unique = new Set<number>();
@@ -2385,16 +2478,24 @@ export const tournamentsRepository: TournamentsRepository = {
 		}
 
 		const tournaments = ((infoData as DbTournamentInfoRow[] | null) ?? []).map(mapTournamentInfo);
+		const warningSummariesByTournament = await getTournamentSetupWarningSummariesByTournamentIds(
+			context,
+			tournaments.map((tournament) => tournament.id)
+		);
+		const tournamentsWithWarnings = tournaments.map((tournament) => ({
+			...tournament,
+			warningSummaries: warningSummariesByTournament.get(tournament.id) ?? [],
+		}));
 		if (cacheKey) {
-			const allStandingsReady = tournaments.every(
+			const allStandingsReady = tournamentsWithWarnings.every(
 				(tournament) => tournament.standingsReadyAt !== null
 			);
 			const ttlSeconds = allStandingsReady
 				? QUERY_CACHE_TTL_SECONDS.REPORTING
 				: Math.min(15, QUERY_CACHE_TTL_SECONDS.REPORTING);
-			await writeQueryCache(context, cacheKey, JSON.stringify(tournaments), ttlSeconds);
+			await writeQueryCache(context, cacheKey, JSON.stringify(tournamentsWithWarnings), ttlSeconds);
 		}
-		return tournaments;
+		return tournamentsWithWarnings;
 	},
 
 	async getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]> {
@@ -3373,8 +3474,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		if (!row) return null;
 		const setupStatus = String(row.setup_status) as TournamentSetupStatus;
 		const updatedAt = toIsoDateTime(row.updated_at);
-		const warningSummaries = await getTournamentSetupWarningSummaries(context, tournamentId);
 		const issues = await getTournamentSetupIssueDiagnostics(context, tournamentId);
+		const warningSummaries = summarizeTournamentSetupIssues(issues);
 		return {
 			revision: updatedAt,
 			state: String(row.state) as TournamentState,
