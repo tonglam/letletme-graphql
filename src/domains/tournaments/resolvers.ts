@@ -65,6 +65,8 @@ import type {
 	ManagedTournamentStatus,
 	TournamentSetupIssueDiagnostic,
 	TournamentSetupWarningSummary,
+	TournamentSetupWarningCategory,
+	TournamentSetupIssueSeverity,
 } from "./repository";
 import {
 	GroupMode,
@@ -73,8 +75,6 @@ import {
 	TournamentSetupPhase,
 	TournamentState,
 	TournamentSetupProgressMode,
-	TournamentSetupWarningCategory,
-	TournamentSetupIssueSeverity,
 } from "./repository";
 import {
 	assertTournamentInsightsReady,
