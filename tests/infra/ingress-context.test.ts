@@ -60,6 +60,24 @@ describe("signed web ingress context", () => {
 		});
 	});
 
+	test("requires an abuse subject for Mini v2 ingress", () => {
+		expect(
+			verifyIngressContext(
+				signed({
+					v: 2,
+					aud: "letletme-graphql",
+					trafficClass: "mini",
+					subject,
+					abuseSubject: null,
+					workload: "market",
+					iat: 100,
+					exp: 160,
+				}),
+				120
+			)
+		).toBeNull();
+	});
+
 	test("rejects spoofed, expired, overlong, wrong-audience, and extra-field envelopes", () => {
 		const base = { aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 };
 		expect(verifyIngressContext(signed(base, "attacker-secret"), 120)).toBeNull();

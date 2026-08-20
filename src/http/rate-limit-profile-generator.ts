@@ -57,10 +57,16 @@ export const generateValidatedRateLimitProfile = ({
 		);
 	}
 	const workloadPolicies = Object.fromEntries(
-		Object.entries(observation.webRsc.workloadWeightedPerSecond).map(([workload, rate]) => [
-			workload,
-			measuredBucket(finiteNonNegative(rate, `webRsc.workload.${workload}`)),
-		])
+		Object.entries(base.trafficClasses.web_rsc.workloads).map(([workload, basePolicy]) => {
+			const rate = finiteNonNegative(
+				observation.webRsc.workloadWeightedPerSecond[workload as GraphQLWorkload],
+				`webRsc.workload.${workload}`
+			);
+			// The target load model intentionally exercises only the public RSC
+			// workloads it can render. A zero observation is not evidence that an
+			// unobserved workload can safely be reduced to a one-token bucket.
+			return [workload, rate === 0 ? basePolicy : measuredBucket(rate)];
+		})
 	);
 	const candidate = {
 		...base,

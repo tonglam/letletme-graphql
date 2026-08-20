@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import type Redis from "ioredis";
 import {
+	rateLimitAggregateMinute,
 	rateLimitFingerprint,
+	rateLimitRecentAggregateKey,
 	recordRateLimitAggregate,
 	summarizeRateLimitTotals,
 } from "../../src/infra/rate-limit-observability";
@@ -14,6 +16,14 @@ describe("rate-limit observability privacy", () => {
 		expect(first).toBe(second);
 		expect(first).toMatch(/^[a-f0-9]{12}$/);
 		expect(first).not.toContain("raw-device-id");
+	});
+
+	it("uses bounded minute keys for recent rollout monitoring", () => {
+		const minute = rateLimitAggregateMinute(new Date("2026-08-20T12:34:56.000Z"));
+		expect(minute).toBe("2026-08-20T12:34");
+		expect(rateLimitRecentAggregateKey(minute)).toBe(
+			"llm:gql:rate-limit:v3:recent:2026-08-20T12:34"
+		);
 	});
 
 	it("stores only controlled dimensions and denied fingerprints", async () => {
@@ -37,6 +47,7 @@ describe("rate-limit observability privacy", () => {
 		});
 		const serialized = JSON.stringify(commands);
 		expect(serialized).toContain("mini|market|client|denied");
+		expect(serialized).toContain("llm:gql:rate-limit:v3:recent:2026-08-20T00:00");
 		expect(serialized).toContain("abc123abc123");
 		expect(serialized).not.toContain("raw-device-id");
 	});
@@ -76,6 +87,7 @@ describe("rate-limit observability privacy", () => {
 			])
 		);
 		expect(summary.interactiveDeniedRate).toBe(0.1);
+		expect(summary.totalDecisions).toBe(202);
 		expect(summary.shadowInteractiveDeniedRate).toBe(42 / 102);
 		expect(summary.globalDenied).toBe(0);
 		expect(summary.globalWouldDenied).toBe(2);

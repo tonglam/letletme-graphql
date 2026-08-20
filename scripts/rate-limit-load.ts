@@ -548,6 +548,7 @@ type SustainablePhaseResult = {
 	phase: string;
 	multiplier: number;
 	durationSeconds: number;
+	elapsedSeconds: number;
 	achievedGraphQLRps: number;
 	passed: boolean;
 	reasons: string[];
@@ -586,6 +587,10 @@ const evaluateSustainablePhase = ({
 	);
 	const runtimeStart = runtimeSamples[runtimeStartIndex];
 	const runtimeEnd = runtimeSamples[runtimeEndIndex];
+	const elapsedSeconds =
+		runtimeStart && runtimeEnd
+			? Math.max(0.001, (runtimeEnd.at - runtimeStart.at) / 1000)
+			: Number.POSITIVE_INFINITY;
 	const serverRequests = counterDelta("serverGraphQLRequests", runtimeStart, runtimeEnd);
 	const serverErrors = counterDelta("serverNon429Errors", runtimeStart, runtimeEnd);
 	const serverErrorRate =
@@ -632,7 +637,8 @@ const evaluateSustainablePhase = ({
 		phase,
 		multiplier,
 		durationSeconds,
-		achievedGraphQLRps: serverRequests / durationSeconds,
+		elapsedSeconds,
+		achievedGraphQLRps: serverRequests / elapsedSeconds,
 		passed: reasons.length === 0,
 		reasons,
 	};
@@ -677,7 +683,9 @@ const collectRuntimeSample = async (): Promise<void> => {
 		globalDenied: metricSum(
 			metricsBody,
 			"graphql_rate_limit_v3_decisions_total",
-			(labels) => labels.includes('scope="global"') && labels.includes('outcome="denied"')
+			(labels) =>
+				labels.includes('scope="global"') &&
+				(labels.includes('outcome="denied"') || labels.includes('outcome="legacy_denied"'))
 		),
 		globalWouldDenied: metricSum(
 			metricsBody,
@@ -687,7 +695,9 @@ const collectRuntimeSample = async (): Promise<void> => {
 		nonMiniDenied: metricSum(
 			metricsBody,
 			"graphql_rate_limit_v3_decisions_total",
-			(labels) => !labels.includes('traffic_class="mini"') && labels.includes('outcome="denied"')
+			(labels) =>
+				!labels.includes('traffic_class="mini"') &&
+				(labels.includes('outcome="denied"') || labels.includes('outcome="legacy_denied"'))
 		),
 		wouldDenied: metricSum(metricsBody, "graphql_rate_limit_v3_decisions_total", (labels) =>
 			labels.includes('outcome="would_deny"')

@@ -47,13 +47,24 @@ const globalRequestCheck = (policy: GraphQLRateLimitPolicyV3): TokenBucketCheckV
 	});
 
 export const graphQLV3PreAuthRateLimitChecks = (
-	_ingress: GraphQLIngress,
-	_policy: GraphQLRateLimitPolicyV3
-): readonly TokenBucketCheckV3[] =>
-	// v3 waits until request cost and principal are known, then evaluates every
-	// applicable bucket in one Lua stage. Otherwise a request rejected by its
-	// device/workload bucket could still drain the global or shared-NAT bucket.
-	[];
+	ingress: GraphQLIngress,
+	policy: GraphQLRateLimitPolicyV3
+): readonly TokenBucketCheckV3[] => {
+	if (ingress.trafficClass !== "mini") return [];
+	// The IP bucket is strictly an ingress abuse guard. Charging it before
+	// session validation bounds invalid-token database work, while leaving the
+	// global and weighted buckets together in the later atomic stage. Verified
+	// Mini v2 envelopes always carry abuseSubject; the device subject is a safe
+	// bounded fallback for manually constructed contexts.
+	return [
+		check({
+			id: ingress.abuseSubject ? "mini-ip-abuse-request" : "mini-ingress-request",
+			scope: "client",
+			subject: ingress.abuseSubject ?? requiredSubject(ingress),
+			policy: policy.trafficClasses.mini.abuseRequest,
+		}),
+	];
+};
 
 /**
  * Trusted requests rejected before cost/principal resolution still pass the
@@ -89,16 +100,6 @@ export const graphQLV3PrincipalAdmission = ({
 				audience: authenticated ? "authenticated" : "anonymous",
 				checks: [
 					globalRequest,
-					...(ingress.abuseSubject
-						? [
-								check({
-									id: "mini-ip-abuse-request",
-									scope: "client",
-									subject: ingress.abuseSubject,
-									policy: policy.trafficClasses.mini.abuseRequest,
-								}),
-							]
-						: []),
 					check({
 						id: authenticated ? "mini-session-weighted" : "mini-device-weighted",
 						scope: "client",

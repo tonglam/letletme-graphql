@@ -1,13 +1,16 @@
 import {
 	rateLimitAggregateDate,
 	rateLimitAggregateKey,
+	rateLimitAggregateMinute,
 	rateLimitDeniedRankingKey,
+	rateLimitRecentAggregateKey,
 	summarizeRateLimitTotals,
 } from "../src/infra/rate-limit-observability";
 import { closeRedis, connectRedis, getRateLimitRedis } from "../src/infra/redis";
 
 type ReportOptions = {
 	days: number;
+	recentMinutes: number | null;
 	json: boolean;
 	failInteractiveRate: number | null;
 	failOnGlobal: boolean;
@@ -15,6 +18,7 @@ type ReportOptions = {
 
 const parseOptions = (argv: readonly string[]): ReportOptions => {
 	let days = 2;
+	let recentMinutes: number | null = null;
 	let json = false;
 	let failInteractiveRate: number | null = null;
 	let failOnGlobal = false;
@@ -33,6 +37,11 @@ const parseOptions = (argv: readonly string[]): ReportOptions => {
 			index += 1;
 			continue;
 		}
+		if (argument === "--recent-minutes") {
+			recentMinutes = Number(argv[index + 1]);
+			index += 1;
+			continue;
+		}
 		if (argument === "--fail-interactive-rate") {
 			failInteractiveRate = Number(argv[index + 1]);
 			index += 1;
@@ -44,12 +53,18 @@ const parseOptions = (argv: readonly string[]): ReportOptions => {
 		throw new Error("--days must be an integer from 1 through 14");
 	}
 	if (
+		recentMinutes !== null &&
+		(!Number.isInteger(recentMinutes) || recentMinutes < 5 || recentMinutes > 120)
+	) {
+		throw new Error("--recent-minutes must be an integer from 5 through 120");
+	}
+	if (
 		failInteractiveRate !== null &&
 		(!Number.isFinite(failInteractiveRate) || failInteractiveRate < 0 || failInteractiveRate > 1)
 	) {
 		throw new Error("--fail-interactive-rate must be between 0 and 1");
 	}
-	return { days, json, failInteractiveRate, failOnGlobal };
+	return { days, recentMinutes, json, failInteractiveRate, failOnGlobal };
 };
 
 const reportDates = (days: number, now = new Date()): string[] =>
@@ -58,6 +73,24 @@ const reportDates = (days: number, now = new Date()): string[] =>
 		date.setUTCDate(date.getUTCDate() - offset);
 		return rateLimitAggregateDate(date);
 	});
+
+const reportMinutes = (minutes: number, now = new Date()): string[] => {
+	const anchor = new Date(now);
+	anchor.setUTCSeconds(0, 0);
+	return Array.from({ length: minutes }, (_, offset) => {
+		const date = new Date(anchor.getTime() - offset * 60 * 1000);
+		return rateLimitAggregateMinute(date);
+	});
+};
+
+const accumulateTotals = (
+	totals: Map<string, number>,
+	counts: Readonly<Record<string, number>>
+): void => {
+	for (const [key, count] of Object.entries(counts)) {
+		totals.set(key, (totals.get(key) ?? 0) + count);
+	}
+};
 
 const parseRanking = (
 	values: readonly string[]
@@ -76,49 +109,77 @@ const options = parseOptions(Bun.argv.slice(2));
 await connectRedis();
 try {
 	const redis = getRateLimitRedis();
-	const dates = reportDates(options.days);
-	const daily = await Promise.all(
-		dates.map(async (date) => {
-			const [counts, denied] = await Promise.all([
-				redis.hgetall(rateLimitAggregateKey(date)),
-				redis.zrevrange(rateLimitDeniedRankingKey(date), 0, 19, "WITHSCORES"),
-			]);
-			return {
-				date,
+	const generatedAt = new Date();
+	const dates = reportDates(options.days, generatedAt);
+	const minutes =
+		options.recentMinutes === null ? [] : reportMinutes(options.recentMinutes, generatedAt);
+	const [daily, recentBuckets] = await Promise.all([
+		Promise.all(
+			dates.map(async (date) => {
+				const [counts, denied] = await Promise.all([
+					redis.hgetall(rateLimitAggregateKey(date)),
+					redis.zrevrange(rateLimitDeniedRankingKey(date), 0, 19, "WITHSCORES"),
+				]);
+				return {
+					date,
+					counts: Object.fromEntries(
+						Object.entries(counts).map(([key, value]) => [key, Number(value) || 0])
+					),
+					denied: parseRanking(denied),
+				};
+			})
+		),
+		Promise.all(
+			minutes.map(async (minute) => ({
+				minute,
 				counts: Object.fromEntries(
-					Object.entries(counts).map(([key, value]) => [key, Number(value) || 0])
+					Object.entries(await redis.hgetall(rateLimitRecentAggregateKey(minute))).map(
+						([key, value]) => [key, Number(value) || 0]
+					)
 				),
-				denied: parseRanking(denied),
-			};
-		})
-	);
+			}))
+		),
+	]);
 	const totals = new Map<string, number>();
 	for (const day of daily) {
-		for (const [key, count] of Object.entries(day.counts)) {
-			totals.set(key, (totals.get(key) ?? 0) + count);
-		}
+		accumulateTotals(totals, day.counts);
 	}
 	const summary = summarizeRateLimitTotals(totals);
+	const recentTotals = new Map<string, number>();
+	for (const bucket of recentBuckets) accumulateTotals(recentTotals, bucket.counts);
+	const recent =
+		options.recentMinutes === null
+			? null
+			: {
+					minutes: options.recentMinutes,
+					summary: summarizeRateLimitTotals(recentTotals),
+					totals: Object.fromEntries(
+						[...recentTotals.entries()].sort(([left], [right]) => left.localeCompare(right))
+					),
+					buckets: recentBuckets,
+				};
 	const report = {
 		policy: "graphql-v3",
-		generatedAt: new Date().toISOString(),
+		generatedAt: generatedAt.toISOString(),
 		days: options.days,
 		summary,
 		totals: Object.fromEntries(
 			[...totals.entries()].sort(([left], [right]) => left.localeCompare(right))
 		),
 		daily,
+		recent,
 	};
 	if (options.json) {
 		console.log(JSON.stringify(report));
 	} else {
 		console.log(JSON.stringify(report, null, 2));
 	}
+	const gateSummary = recent?.summary ?? summary;
 	if (
 		(options.failInteractiveRate !== null &&
-			Math.max(summary.interactiveDeniedRate, summary.shadowInteractiveDeniedRate) >
+			Math.max(gateSummary.interactiveDeniedRate, gateSummary.shadowInteractiveDeniedRate) >
 				options.failInteractiveRate) ||
-		(options.failOnGlobal && (summary.globalDenied > 0 || summary.globalWouldDenied > 0))
+		(options.failOnGlobal && (gateSummary.globalDenied > 0 || gateSummary.globalWouldDenied > 0))
 	) {
 		process.exitCode = 1;
 	}

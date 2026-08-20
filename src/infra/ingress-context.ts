@@ -132,6 +132,7 @@ const verifyEnvelopeV2 = (
 		envelope.trafficClass === "legacy" ||
 		!isOpaqueSubject(envelope.subject) ||
 		!(envelope.abuseSubject === null || isOpaqueSubject(envelope.abuseSubject)) ||
+		(envelope.trafficClass === "mini" && envelope.abuseSubject === null) ||
 		!GRAPHQL_WORKLOADS.includes(envelope.workload as GraphQLWorkload) ||
 		!validLifetime(envelope, nowSeconds)
 	) {

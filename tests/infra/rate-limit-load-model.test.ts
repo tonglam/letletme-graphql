@@ -47,6 +47,9 @@ describe("GraphQL v3 capacity model", () => {
 		expect(source).toContain("X-Letletme-Capacity-Run");
 		expect(source).toContain("sample.status < 200 || sample.status >= 300");
 		expect(source).toContain("if (!result.passed) break");
+		expect(source).toContain("(runtimeEnd.at - runtimeStart.at) / 1000");
+		expect(source).toContain("serverRequests / elapsedSeconds");
+		expect(source).toContain('outcome="legacy_denied"');
 	});
 
 	it("derives sustainable RPS from passing probes without a manual profile override", () => {

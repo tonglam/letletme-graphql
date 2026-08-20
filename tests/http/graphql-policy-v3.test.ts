@@ -99,6 +99,23 @@ describe("GraphQL v3 production policy", () => {
 			refillPerSecond: 13,
 			burst: 130,
 		});
+		const zeroObservation = generateValidatedRateLimitProfile({
+			base: productionGraphQLRateLimitPolicy,
+			observation: {
+				...observation,
+				webRsc: {
+					...observation.webRsc,
+					workloadWeightedPerSecond: {
+						...observation.webRsc.workloadWeightedPerSecond,
+						home: 0,
+					},
+				},
+			},
+			evidence: "load-test/run-zero-workload.json",
+		});
+		expect(zeroObservation.trafficClasses.web_rsc.workloads.home).toEqual(
+			productionGraphQLRateLimitPolicy.trafficClasses.web_rsc.workloads.home
+		);
 		const wrongTarget = JSON.parse(JSON.stringify(generated)) as {
 			capacity: { targetConcurrent: number };
 		};
@@ -125,17 +142,11 @@ describe("GraphQL v3 identity and workload isolation", () => {
 				workload: "market",
 			})
 		);
-		expect(graphQLV3PreAuthRateLimitChecks(devices[0]!, productionGraphQLRateLimitPolicy)).toEqual(
-			[]
-		);
 		const abuseKeys = devices.map(
 			(device) =>
-				graphQLV3PrincipalAdmission({
-					ingress: device,
-					principal: null,
-					cost: 30,
-					policy: productionGraphQLRateLimitPolicy,
-				}).checks.find((candidate) => candidate.id === "mini-ip-abuse-request")?.key
+				graphQLV3PreAuthRateLimitChecks(device, productionGraphQLRateLimitPolicy).find(
+					(candidate) => candidate.id === "mini-ip-abuse-request"
+				)?.key
 		);
 		expect(new Set(abuseKeys).size).toBe(1);
 		const weightedKeys = devices.map(
@@ -149,12 +160,9 @@ describe("GraphQL v3 identity and workload isolation", () => {
 		);
 		expect(new Set(weightedKeys).size).toBe(100);
 		expect(
-			graphQLV3PrincipalAdmission({
-				ingress: devices[0]!,
-				principal: null,
-				cost: 30,
-				policy: productionGraphQLRateLimitPolicy,
-			}).checks.find((candidate) => candidate.id === "mini-ip-abuse-request")
+			graphQLV3PreAuthRateLimitChecks(devices[0]!, productionGraphQLRateLimitPolicy).find(
+				(candidate) => candidate.id === "mini-ip-abuse-request"
+			)
 		).toMatchObject({ refillPerSecond: 100, burst: 1_200 });
 	});
 
@@ -215,7 +223,7 @@ describe("GraphQL v3 identity and workload isolation", () => {
 		expect(service.id).toBe("service-weighted");
 	});
 
-	it("places global, shared class/NAT, and weighted buckets in one atomic stage", () => {
+	it("bounds Mini ingress before auth and keeps global with weighted admission", () => {
 		expect(graphQLV3EarlyFailureRateLimitChecks(productionGraphQLRateLimitPolicy)).toEqual([
 			expect.objectContaining({ id: "global-request", scope: "global", cost: 1 }),
 		]);
@@ -232,9 +240,19 @@ describe("GraphQL v3 identity and workload isolation", () => {
 		}).checks;
 		expect(miniChecks.map((candidate) => candidate.id)).toEqual([
 			"global-request",
-			"mini-ip-abuse-request",
 			"mini-device-weighted",
 		]);
+		expect(
+			graphQLV3PreAuthRateLimitChecks(
+				ingress({
+					trafficClass: "mini",
+					subject: "one-device",
+					abuseSubject: "shared-nat",
+					workload: "market",
+				}),
+				productionGraphQLRateLimitPolicy
+			).map((candidate) => candidate.id)
+		).toEqual(["mini-ip-abuse-request"]);
 
 		const rscChecks = graphQLV3PrincipalAdmission({
 			ingress: ingress({

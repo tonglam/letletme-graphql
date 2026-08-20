@@ -7,6 +7,7 @@ import { env } from "./env";
 import { metrics } from "./metrics";
 
 export const RATE_LIMIT_AGGREGATE_RETENTION_SECONDS = 14 * 24 * 60 * 60;
+export const RATE_LIMIT_RECENT_RETENTION_SECONDS = 2 * 60 * 60;
 
 export type RateLimitAggregateOutcome =
 	"allowed" | "denied" | "would_allow" | "would_deny" | "legacy_allowed" | "legacy_denied";
@@ -35,7 +36,14 @@ export const rateLimitAggregateKey = (date: string): string =>
 export const rateLimitDeniedRankingKey = (date: string): string =>
 	`llm:gql:rate-limit:v3:denied:${date}`;
 
+export const rateLimitAggregateMinute = (date = new Date()): string =>
+	date.toISOString().slice(0, 16);
+
+export const rateLimitRecentAggregateKey = (minute: string): string =>
+	`llm:gql:rate-limit:v3:recent:${minute}`;
+
 export type RateLimitReportSummary = {
+	totalDecisions: number;
 	interactiveAllowed: number;
 	interactiveDenied: number;
 	interactiveDeniedRate: number;
@@ -49,6 +57,7 @@ export type RateLimitReportSummary = {
 export const summarizeRateLimitTotals = (
 	totals: ReadonlyMap<string, number>
 ): RateLimitReportSummary => {
+	let totalDecisions = 0;
 	let interactiveAllowed = 0;
 	let interactiveDenied = 0;
 	let shadowInteractiveAllowed = 0;
@@ -59,6 +68,7 @@ export const summarizeRateLimitTotals = (
 		const [trafficClass, workload, scope, outcome] = key.split("|");
 		const interactive =
 			trafficClass === "mini" || trafficClass === "web_browser" || workload === "interactive";
+		totalDecisions += count;
 		if (interactive && (outcome === "allowed" || outcome === "legacy_allowed")) {
 			interactiveAllowed += count;
 		}
@@ -75,6 +85,7 @@ export const summarizeRateLimitTotals = (
 	const interactiveTotal = interactiveAllowed + interactiveDenied;
 	const shadowInteractiveTotal = shadowInteractiveAllowed + shadowInteractiveDenied;
 	return {
+		totalDecisions,
 		interactiveAllowed,
 		interactiveDenied,
 		interactiveDeniedRate: interactiveTotal === 0 ? 0 : interactiveDenied / interactiveTotal,
@@ -109,11 +120,14 @@ export const recordRateLimitAggregate = async ({
 	metrics.graphqlRateLimitV3Decisions.labels(trafficClass, workload, scope, outcome).inc();
 	const day = rateLimitAggregateDate(date);
 	const aggregateKey = rateLimitAggregateKey(day);
+	const recentKey = rateLimitRecentAggregateKey(rateLimitAggregateMinute(date));
 	const field = [trafficClass, workload, scope, outcome].join("|");
 	try {
 		const pipeline = redis.pipeline();
 		pipeline.hincrby(aggregateKey, field, 1);
 		pipeline.expire(aggregateKey, RATE_LIMIT_AGGREGATE_RETENTION_SECONDS);
+		pipeline.hincrby(recentKey, field, 1);
+		pipeline.expire(recentKey, RATE_LIMIT_RECENT_RETENTION_SECONDS);
 		if (deniedOutcomes.has(outcome)) {
 			const rankingKey = rateLimitDeniedRankingKey(day);
 			pipeline.zincrby(

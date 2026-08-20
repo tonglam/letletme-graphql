@@ -29,7 +29,7 @@ jobs:
           ssh-keyscan -H "$VPS_HOST" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
 
-      - name: Read two-day aggregate and enforce alert gates
+      - name: Read aggregate and enforce recent alert gates
         env:
           VPS_HOST: ${{ vars.VPS_HOST }}
           VPS_USER: ${{ vars.VPS_USER }}
@@ -45,15 +45,20 @@ jobs:
           ssh -i "$HOME/.ssh/letletme_graphql" \
             -o BatchMode=yes \
             "$VPS_USER@$VPS_HOST" \
-            "cd $remote_workdir && APP_ENV_FILE=.env.deploy docker compose exec -T graphql bun run rate-limit:report --days 2 --json" \
+            "cd $remote_workdir && APP_ENV_FILE=.env.deploy docker compose exec -T graphql bun run rate-limit:report --days 2 --recent-minutes 10 --json" \
             > "$RUNNER_TEMP/rate-limit-report.json"
-          jq -e '.policy == "graphql-v3" and (.days == 2)' \
+          jq -e '
+            .policy == "graphql-v3" and
+            .days == 2 and
+            .recent.minutes == 10 and
+            .recent.summary.totalDecisions > 0
+          ' \
             "$RUNNER_TEMP/rate-limit-report.json"
           jq -e '
-            .summary.interactiveDeniedRate <= 0.01 and
-            .summary.shadowInteractiveDeniedRate <= 0.01 and
-            .summary.globalDenied == 0 and
-            .summary.globalWouldDenied == 0
+            .recent.summary.interactiveDeniedRate <= 0.01 and
+            .recent.summary.shadowInteractiveDeniedRate <= 0.01 and
+            .recent.summary.globalDenied == 0 and
+            .recent.summary.globalWouldDenied == 0
           ' "$RUNNER_TEMP/rate-limit-report.json"
 
       - name: Retain non-sensitive report

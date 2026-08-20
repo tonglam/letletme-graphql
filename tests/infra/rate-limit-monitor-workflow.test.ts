@@ -5,11 +5,12 @@ const workflow = await Bun.file(".github/workflows/rate-limit-monitor.yml").text
 describe("rate-limit monitor workflow", () => {
 	test("runs every five minutes with privacy-safe aggregate gates", () => {
 		expect(workflow).toContain('cron: "*/5 * * * *"');
-		expect(workflow).toContain("rate-limit:report --days 2 --json");
-		expect(workflow).toContain(".summary.interactiveDeniedRate <= 0.01");
-		expect(workflow).toContain(".summary.shadowInteractiveDeniedRate <= 0.01");
-		expect(workflow).toContain(".summary.globalDenied == 0");
-		expect(workflow).toContain(".summary.globalWouldDenied == 0");
+		expect(workflow).toContain("rate-limit:report --days 2 --recent-minutes 10 --json");
+		expect(workflow).toContain(".recent.summary.totalDecisions > 0");
+		expect(workflow).toContain(".recent.summary.interactiveDeniedRate <= 0.01");
+		expect(workflow).toContain(".recent.summary.shadowInteractiveDeniedRate <= 0.01");
+		expect(workflow).toContain(".recent.summary.globalDenied == 0");
+		expect(workflow).toContain(".recent.summary.globalWouldDenied == 0");
 		expect(workflow).not.toContain("GRAPHQL_ENV");
 	});
 
