@@ -23,6 +23,7 @@ export const READ_MODELS = {
 	entryEventTransfers: "competition.entry_event_transfers",
 	entrySeasonHistories: "competition.entry_season_histories",
 	entryLeagues: "competition.entry_leagues",
+	entryLeaguesWithTournament: "competition.entry_leagues_with_tournament",
 	leagueEventResults: "competition.league_event_results",
 	tournaments: "competition.tournaments",
 	tournamentEntries: "competition.tournament_entries",
@@ -630,6 +631,51 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 				updated_at
 			FROM competition.entry_leagues
 			WHERE season_id = $1
+		`,
+	},
+	[READ_MODELS.entryLeaguesWithTournament]: {
+		sourceRelations: ["competition.entry_leagues", "competition.tournaments"],
+		sql: `
+			SELECT
+				entry_league.source_entry_league_id AS id,
+				entry_league.entry_id,
+				entry_league.league_id,
+				entry_league.league_name,
+				entry_league.league_type,
+				entry_league.started_event,
+				entry_league.entry_rank,
+				entry_league.entry_last_rank,
+				entry_league.official_kind,
+				entry_league.short_name,
+				entry_league.created_at,
+				entry_league.updated_at,
+				tournament.tournament_id,
+				tournament.name AS tournament_name,
+				tournament.admin_entry_id AS tournament_admin_entry_id,
+				tournament.total_team_num AS tournament_total_team_num,
+				tournament.tournament_mode,
+				tournament.group_mode AS tournament_group_mode,
+				tournament.state AS tournament_state,
+				tournament.created_at AS tournament_created_at
+			FROM competition.entry_leagues entry_league
+			LEFT JOIN LATERAL (
+				SELECT
+					tournament_id,
+					name,
+					admin_entry_id,
+					total_team_num,
+					tournament_mode,
+					group_mode,
+					state,
+					created_at
+				FROM competition.tournaments
+				WHERE season_id = entry_league.season_id
+				  AND league_id = entry_league.league_id
+				  AND league_type = entry_league.league_type
+				ORDER BY tournament_id
+				LIMIT 1
+			) tournament ON TRUE
+			WHERE entry_league.season_id = $1
 		`,
 	},
 	[READ_MODELS.leagueEventResults]: {

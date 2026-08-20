@@ -113,6 +113,28 @@ type DbTournamentEnrichmentRow = {
 	created_at: string;
 };
 
+type TournamentProjection = {
+	id: number | null;
+	name: string | null;
+	admin_entry_id: number | null;
+	total_team_num: number | null;
+	tournament_mode: string | null;
+	group_mode: string | null;
+	state: string | null;
+	created_at: string | null;
+};
+
+type DbEntryLeagueWithTournamentRow = DbEntryLeagueRow & {
+	tournament_id: number | null;
+	tournament_name: string | null;
+	tournament_admin_entry_id: number | null;
+	tournament_total_team_num: number | null;
+	tournament_mode: string | null;
+	tournament_group_mode: string | null;
+	tournament_state: string | null;
+	tournament_created_at: string | null;
+};
+
 type DbLeagueEventResultRow = {
 	league_id: number;
 	league_type: string;
@@ -130,10 +152,7 @@ const mapLeagueType = (type: string): LeagueType => {
 	return type === "h2h" ? LeagueType.H2H : LeagueType.CLASSIC;
 };
 
-const mapLeague = (
-	row: DbEntryLeagueRow,
-	tournament?: DbTournamentEnrichmentRow | null
-): League => ({
+const mapLeague = (row: DbEntryLeagueRow, tournament?: TournamentProjection | null): League => ({
 	id: row.league_id,
 	name: row.league_name,
 	shortName: row.short_name ?? null,
@@ -168,32 +187,20 @@ const mapLeagueEventResult = (row: DbLeagueEventResultRow, league: League): Leag
 	overallRank: row.overall_rank,
 });
 
-const fetchTournamentEnrichments = async (
-	context: GraphQLContext,
-	leagueKeys: string[]
-): Promise<Map<string, DbTournamentEnrichmentRow>> => {
-	const tournamentMap = new Map<string, DbTournamentEnrichmentRow>();
-	if (leagueKeys.length === 0) return tournamentMap;
-
-	const leagueIds = [...new Set(leagueKeys.map((k) => parseInt(k.split(":")[0], 10)))];
-
-	const { data: tData } = await context.data
-		.read("competition.tournaments")
-		.select(
-			"id, name, admin_entry_id, league_id, league_type, total_team_num, tournament_mode, group_mode, state, created_at"
-		)
-		.in("league_id", leagueIds);
-
-	if (tData) {
-		for (const t of tData as DbTournamentEnrichmentRow[]) {
-			const key = `${t.league_id}:${t.league_type}`;
-			if (!tournamentMap.has(key)) {
-				tournamentMap.set(key, t);
-			}
-		}
-	}
-
-	return tournamentMap;
+const mapTournamentProjection = (
+	row: DbEntryLeagueWithTournamentRow
+): TournamentProjection | null => {
+	if (row.tournament_id === null) return null;
+	return {
+		id: row.tournament_id,
+		name: row.tournament_name,
+		admin_entry_id: row.tournament_admin_entry_id,
+		total_team_num: row.tournament_total_team_num,
+		tournament_mode: row.tournament_mode,
+		group_mode: row.tournament_group_mode,
+		state: row.tournament_state,
+		created_at: row.tournament_created_at,
+	};
 };
 
 const buildLeagueFromInfo = async (
@@ -285,9 +292,9 @@ export const leaguesRepository: LeaguesRepository = {
 		if (cached) return cached;
 
 		let query = context.data
-			.read("competition.entry_leagues")
+			.read("competition.entry_leagues_with_tournament")
 			.select(
-				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event, official_kind, short_name"
+				"league_id, league_name, league_type, entry_id, entry_rank, entry_last_rank, started_event, official_kind, short_name, tournament_id, tournament_name, tournament_admin_entry_id, tournament_total_team_num, tournament_mode, tournament_group_mode, tournament_state, tournament_created_at"
 			)
 			.eq("entry_id", entryId);
 		if (dbType) {
@@ -300,16 +307,11 @@ export const leaguesRepository: LeaguesRepository = {
 			throw new Error("Failed to fetch entry leagues");
 		}
 
-		const rows = (data as DbEntryLeagueRow[] | null) ?? [];
-
-		const leagueKeys = [...new Set(rows.map((r) => `${r.league_id}:${r.league_type}`))];
-		const tournamentMap = await fetchTournamentEnrichments(context, leagueKeys);
+		const rows = (data as DbEntryLeagueWithTournamentRow[] | null) ?? [];
 
 		const leagues = sortLeaguesForOfficialDisplay(
 			rows.map((row) => {
-				const key = `${row.league_id}:${row.league_type}`;
-				const tournament = tournamentMap.get(key);
-				return mapLeague(row, tournament);
+				return mapLeague(row, mapTournamentProjection(row));
 			})
 		);
 
