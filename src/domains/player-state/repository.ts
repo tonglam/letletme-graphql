@@ -1088,13 +1088,18 @@ const historyForPlayerStateRows = (
 	};
 };
 
-const seasonPhaseForRow = (row: PlayerStateSeasonRow, currentSeason: string): PlayerSeasonPhase => {
+const seasonPhaseForRow = (
+	row: PlayerStateSeasonRow,
+	currentSeason: string,
+	currentLifecycleState?: string
+): PlayerSeasonPhase => {
 	if (row.season_code !== currentSeason) return "COMPLETED";
-	if (row.lifecycle_state === "preseason") return "PRESEASON";
-	if (row.lifecycle_state === "completed" || row.lifecycle_state === "closed") {
+	const lifecycleState = currentLifecycleState ?? row.lifecycle_state;
+	if (lifecycleState === "preseason") return "PRESEASON";
+	if (lifecycleState === "completed" || lifecycleState === "closed") {
 		return "COMPLETED";
 	}
-	if (row.lifecycle_state === "reference_only") return "PRESEASON";
+	if (lifecycleState === "reference_only") return "PRESEASON";
 	return "ACTIVE";
 };
 
@@ -1273,7 +1278,7 @@ const buildSeasonTimeline = (
 	);
 	const currentRow = subjectRows.find((row) => row.season_code === currentSeason) ?? null;
 	const points = subjectRows.map((row): PlayerSeasonTimelinePoint => {
-		const phase = seasonPhaseForRow(row, currentSeason);
+		const phase = seasonPhaseForRow(row, currentSeason, currentLifecycleState);
 		const position = row.element_type;
 		return {
 			season: row.season_code,

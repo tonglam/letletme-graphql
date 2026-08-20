@@ -187,7 +187,7 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 		const profileCacheKey = (contextValue: GraphQLContext, playerId: number, horizon: number) =>
 			gqlCacheKey(
 				contextValue,
-				`player-state-profile:v3:${playerStateDatasetRevision}:${playerId}:${horizon}`
+				`player-state-profile:v3:${playerStateDatasetRevision}:${contextValue.currentSeason.lifecycleState ?? "unknown"}:${playerId}:${horizon}`
 			);
 
 		it("returns a cross-provider profile from canonical relations", async () => {

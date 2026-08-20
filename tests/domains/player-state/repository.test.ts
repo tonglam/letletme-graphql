@@ -389,7 +389,10 @@ const snapshot = (players = true): CoreDataSnapshot => ({
 	})),
 });
 
-const makeContext = (redis: TestRedis, lifecycleState?: "preseason" | "active"): GraphQLContext =>
+const makeContext = (
+	redis: TestRedis,
+	lifecycleState?: "reference_only" | "completed" | "preseason" | "active" | "closed"
+): GraphQLContext =>
 	({
 		currentSeason: {
 			seasonId: 2025,
@@ -590,6 +593,22 @@ describe("Player State repository", () => {
 		expect(profile?.seasonTimeline[0]).toMatchObject({
 			phase: "PRESEASON",
 			fplTotalPoints: null,
+		});
+	});
+
+	it("uses refreshed current lifecycle while the projection row catches up", async () => {
+		const redis = new TestRedis();
+		const { executor } = makeExecutor({ currentLifecycleState: "active" });
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis, "closed"), 10, 5);
+		expect(profile?.seasonTimeline[0]).toMatchObject({
+			season: "2526",
+			phase: "COMPLETED",
+			fplTotalPoints: 70,
 		});
 	});
 
