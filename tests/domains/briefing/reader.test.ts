@@ -131,6 +131,36 @@ describe("Briefing publication reader", () => {
 			expect(after).toBeGreaterThan(before);
 		});
 
+		test("records corruption when a valid pointer is missing the requested locale payload", async () => {
+			const before = getBriefingReaderMetrics().corruptions;
+			const pointer = JSON.stringify({
+				schemaVersion: 1,
+				publicationId: fixture.publicationId,
+				revision: 1,
+				state: "READY",
+				locales: ["en", "zh-CN"],
+				hashes: { en: hash, "zh-CN": hash },
+			});
+			const redis = {
+				get: async (key: string) => (key.includes(":active") ? pointer : null),
+			} as unknown as Redis;
+			await readBriefingWeek(databaseWithFallback(), redis, "en");
+			expect(getBriefingReaderMetrics().corruptions).toBeGreaterThan(before);
+		});
+
+		test("separates Redis outages from cache corruption", async () => {
+			const beforeCorruptions = getBriefingReaderMetrics().corruptions;
+			const beforeUnavailable = getBriefingReaderMetrics().redisUnavailable;
+			const redis = {
+				get: async () => {
+					throw new Error("Redis timeout");
+				},
+			} as unknown as Redis;
+			await readBriefingWeek(databaseWithFallback(), redis, "en");
+			expect(getBriefingReaderMetrics().corruptions).toBe(beforeCorruptions);
+			expect(getBriefingReaderMetrics().redisUnavailable).toBeGreaterThan(beforeUnavailable);
+		});
+
 		test("returns unavailable when PostgreSQL metadata cannot be read", async () => {
 			const database: QueryExecutor = {
 				async query() {

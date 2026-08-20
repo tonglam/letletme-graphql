@@ -6,12 +6,15 @@ import { metrics } from "./metrics";
 
 export const BRIEFING_WEEK_ACTIVE_POINTER_KEY = "llm:content:briefing:week:active";
 
-const briefingReaderMetrics = { fallbacks: 0, corruptions: 0, repairs: 0 };
+const briefingReaderMetrics = { fallbacks: 0, corruptions: 0, repairs: 0, redisUnavailable: 0 };
 
-const recordReaderEvent = (event: "fallback" | "corruption" | "repair"): void => {
+const recordReaderEvent = (
+	event: "fallback" | "corruption" | "repair" | "redis_unavailable"
+): void => {
 	if (event === "fallback") briefingReaderMetrics.fallbacks += 1;
 	if (event === "corruption") briefingReaderMetrics.corruptions += 1;
 	if (event === "repair") briefingReaderMetrics.repairs += 1;
+	if (event === "redis_unavailable") briefingReaderMetrics.redisUnavailable += 1;
 	metrics.briefingPublicationReaderEvents.labels(event).inc();
 };
 
@@ -371,9 +374,16 @@ export async function readBriefingWeek(
 	let pointer: ActivePointer | null = null;
 	let rawPayload: string | null = null;
 	let pointerWasUsable = false;
+	let redisUnavailable = false;
+	let rawPointer: string | null = null;
 	try {
-		const rawPointer = await redis.get(BRIEFING_WEEK_ACTIVE_POINTER_KEY);
-		if (rawPointer !== null) {
+		rawPointer = await redis.get(BRIEFING_WEEK_ACTIVE_POINTER_KEY);
+	} catch {
+		redisUnavailable = true;
+		recordReaderEvent("redis_unavailable");
+	}
+	if (rawPointer !== null) {
+		try {
 			const parsed: unknown = JSON.parse(rawPointer);
 			const isUsablePointer =
 				isRecord(parsed) &&
@@ -392,15 +402,21 @@ export async function readBriefingWeek(
 			if (isUsablePointer) {
 				pointer = parsed as unknown as ActivePointer;
 				pointerWasUsable = true;
-				rawPayload = await redis.get(payloadKey(revision, locale));
+				try {
+					rawPayload = await redis.get(payloadKey(revision, locale));
+				} catch {
+					redisUnavailable = true;
+					recordReaderEvent("redis_unavailable");
+				}
 			} else {
 				recordReaderEvent("corruption");
 			}
+		} catch {
+			recordReaderEvent("corruption");
 		}
-	} catch {
+	}
+	if (pointer && rawPayload === null && !redisUnavailable) {
 		recordReaderEvent("corruption");
-		pointer = null;
-		rawPayload = null;
 	}
 
 	let payload: BriefingWeekPayload | null = null;

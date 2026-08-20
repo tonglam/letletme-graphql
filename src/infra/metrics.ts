@@ -45,7 +45,7 @@ const cacheRepositoryEvents = new Counter({
 
 const briefingPublicationReaderEvents = new Counter({
 	name: "briefing_publication_reader_events_total",
-	help: "Briefing publication reader fallback, corruption, and repair events",
+	help: "Briefing publication reader fallback, corruption, repair, and Redis availability events",
 	labelNames: ["event"] as const,
 });
 
