@@ -458,6 +458,7 @@ const startServer = async (): Promise<void> => {
 						data,
 						database,
 						currentSeason,
+						refreshCurrentSeason: () => currentSeasonProvider.refresh(database),
 						redis: getRedis(),
 						logger,
 						requestId,

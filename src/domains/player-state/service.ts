@@ -17,13 +17,18 @@ const profileSingleflightKey = (
 	revision: string,
 	playerId: number,
 	horizon: number
-): string => `${context.currentSeason.seasonId}:${revision}:${playerId}:${horizon}`;
+): string =>
+	`${context.currentSeason.seasonId}:${context.currentSeason.lifecycleState ?? "unknown"}:${revision}:${playerId}:${horizon}`;
 
 const loadProfilesSingleflight = async (
 	context: GraphQLContext,
 	playerIds: number[],
 	horizon: number
 ): Promise<Map<number, PlayerStateProfile | null>> => {
+	const refreshedSeason = await context.refreshCurrentSeason?.();
+	if (refreshedSeason && refreshedSeason !== context.currentSeason) {
+		context.currentSeason = refreshedSeason;
+	}
 	// The process-level coalescing key must include the immutable core revision.
 	// Otherwise a request that starts immediately after an active-pointer switch
 	// could join work that is still computing against the old publication.

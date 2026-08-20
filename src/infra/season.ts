@@ -78,6 +78,8 @@ export const loadCurrentSeason = async (database: QueryExecutor): Promise<Curren
 
 export class CurrentSeasonProvider {
 	private value: CurrentSeason | null = null;
+	private refreshedAt = 0;
+	private refreshPromise: Promise<CurrentSeason> | null = null;
 
 	get(): CurrentSeason {
 		if (!this.value) throw unavailable();
@@ -86,6 +88,22 @@ export class CurrentSeasonProvider {
 
 	seed(value: CurrentSeason): void {
 		this.value = Object.freeze({ ...value });
+		this.refreshedAt = Date.now();
+	}
+
+	/** Revalidate the mutable season lifecycle on a short process-local interval. */
+	async refresh(database: QueryExecutor, maxAgeMs = 5_000): Promise<CurrentSeason> {
+		if (this.value && Date.now() - this.refreshedAt < maxAgeMs) return this.value;
+		if (this.refreshPromise) return this.refreshPromise;
+		this.refreshPromise = loadCurrentSeason(database)
+			.then((value) => {
+				this.seed(value);
+				return value;
+			})
+			.finally(() => {
+				this.refreshPromise = null;
+			});
+		return this.refreshPromise;
 	}
 }
 

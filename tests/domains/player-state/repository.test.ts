@@ -15,6 +15,9 @@ type QueryFixture = Readonly<{
 	understatRows?: QueryResultRow[];
 	understatError?: Error;
 	omitCurrentSeasonRows?: boolean;
+	currentLifecycleState?: string;
+	closedHistoricalSeason?: boolean;
+	negativeCurrentPoints?: boolean;
 }>;
 
 const isVerifiedStatus = (status: unknown): boolean =>
@@ -161,13 +164,18 @@ const playerStateRows = (fixture: QueryFixture): QueryResultRow[] => {
 			rows.push({
 				season_id: season === "2526" ? 2025 : season === "2425" ? 2024 : 2023,
 				season_code: season,
-				lifecycle_state: season === "2526" ? "active" : "completed",
+				lifecycle_state:
+					season === "2526"
+						? (fixture.currentLifecycleState ?? "active")
+						: fixture.closedHistoricalSeason
+							? "closed"
+							: "completed",
 				player_code: playerCode,
 				element_id: elementId,
 				element_type: 3,
 				fpl_minutes: minutes,
 				fpl_gameweeks: season === "2526" ? 10 : 38,
-				fpl_total_points: points,
+				fpl_total_points: fixture.negativeCurrentPoints && season === "2526" ? -5 : points,
 				fpl_starts: season === "2526" ? 10 : 30,
 				fpl_clean_sheets: season === "2526" ? 2 : 8,
 				fpl_saves: 0,
@@ -564,6 +572,37 @@ describe("Player State repository", () => {
 			phase: "PRESEASON",
 			fplTotalPoints: null,
 		});
+	});
+
+	it("keeps closed history and reference-only current seasons out of active analysis", async () => {
+		const redis = new TestRedis();
+		const { executor } = makeExecutor({
+			closedHistoricalSeason: true,
+			currentLifecycleState: "reference_only",
+		});
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
+		expect(profile?.seasonTimeline.map((point) => point.season)).toEqual(["2526", "2425", "2324"]);
+		expect(profile?.seasonTimeline[0]).toMatchObject({
+			phase: "PRESEASON",
+			fplTotalPoints: null,
+		});
+	});
+
+	it("accepts negative FPL totals in a completed season timeline", async () => {
+		const redis = new TestRedis();
+		const { executor } = makeExecutor({ negativeCurrentPoints: true });
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
+		expect(profile?.seasonTimeline[0]?.fplTotalPoints).toBe(-5);
 	});
 
 	it("preserves an ambiguous mapping without reading Understat metrics", async () => {

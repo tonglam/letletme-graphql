@@ -438,9 +438,7 @@ const playerSeasonTimelineGuard = (
 			point.position < 1 ||
 			point.position > 4 ||
 			(point.fplTotalPoints !== null &&
-				(typeof point.fplTotalPoints !== "number" ||
-					!Number.isInteger(point.fplTotalPoints) ||
-					point.fplTotalPoints < 0)) ||
+				(typeof point.fplTotalPoints !== "number" || !Number.isInteger(point.fplTotalPoints))) ||
 			!Array.isArray(point.signals) ||
 			point.signals.length !== 2 ||
 			!point.signals.every(playerSeasonSignalGuard)
@@ -529,7 +527,10 @@ const profileCacheKey = (
 	playerId: number,
 	horizon: number
 ): string =>
-	gqlCacheKey(context, `player-state-profile:v3:${stateRevision}:${playerId}:${horizon}`);
+	gqlCacheKey(
+		context,
+		`player-state-profile:v3:${stateRevision}:${context.currentSeason.lifecycleState ?? "unknown"}:${playerId}:${horizon}`
+	);
 
 let datasetRevisionMemo: { expiresAt: number; value: PlayerStateDatasetRevision } | null = null;
 
@@ -1033,7 +1034,9 @@ const historyForPlayerStateRows = (
 	);
 	const baselineSeasons = subjectRows
 		.filter(
-			(row) => row.lifecycle_state === "completed" && row.fpl_minutes >= HISTORY_PLAYER_MINUTES
+			(row) =>
+				(row.lifecycle_state === "completed" || row.lifecycle_state === "closed") &&
+				row.fpl_minutes >= HISTORY_PLAYER_MINUTES
 		)
 		.map((row) => ({
 			season: row.season_code,
@@ -1058,7 +1061,7 @@ const historyForPlayerStateRows = (
 		}))
 		.sort((left, right) => left.season.localeCompare(right.season));
 	const seasons = subjectRows
-		.filter((row) => row.lifecycle_state === "completed")
+		.filter((row) => row.lifecycle_state === "completed" || row.lifecycle_state === "closed")
 		.map((row) => row.season_code)
 		.sort()
 		.reverse();
@@ -1091,12 +1094,14 @@ const seasonPhaseForRow = (row: PlayerStateSeasonRow, currentSeason: string): Pl
 	if (row.lifecycle_state === "completed" || row.lifecycle_state === "closed") {
 		return "COMPLETED";
 	}
+	if (row.lifecycle_state === "reference_only") return "PRESEASON";
 	return "ACTIVE";
 };
 
 const missingCurrentSeasonPhase = (lifecycleState: string | undefined): PlayerSeasonPhase => {
 	if (lifecycleState === "preseason") return "PRESEASON";
 	if (lifecycleState === "completed" || lifecycleState === "closed") return "COMPLETED";
+	if (lifecycleState === "reference_only") return "PRESEASON";
 	return "ACTIVE";
 };
 
@@ -1262,7 +1267,9 @@ const buildSeasonTimeline = (
 	const subjectRows = rows.filter(
 		(row) =>
 			row.player_code === playerCode &&
-			(row.season_code === currentSeason || row.lifecycle_state === "completed")
+			(row.season_code === currentSeason ||
+				row.lifecycle_state === "completed" ||
+				row.lifecycle_state === "closed")
 	);
 	const currentRow = subjectRows.find((row) => row.season_code === currentSeason) ?? null;
 	const points = subjectRows.map((row): PlayerSeasonTimelinePoint => {
