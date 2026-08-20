@@ -40,6 +40,34 @@ export type PlayerStateAnalysisStatus =
 export type PlayerStateProviderMode =
 	"FPL_ONLY" | "FPL_WITH_UNDERSTAT_HISTORY" | "FPL_WITH_UNDERSTAT_CURRENT";
 
+export type PlayerSeasonPhase = "PRESEASON" | "ACTIVE" | "COMPLETED";
+
+export type PlayerSeasonSignalCode =
+	| "UNDERSTAT_NPXG_PER_90"
+	| "UNDERSTAT_XA_PER_90"
+	| "UNDERSTAT_NPXG_XA_PER_90"
+	| "UNDERSTAT_KEY_PASSES_PER_90"
+	| "OFFICIAL_CLEAN_SHEET_RATE"
+	| "OFFICIAL_SAVES_PER_90";
+
+export type PlayerSeasonSignal = {
+	code: PlayerSeasonSignalCode;
+	provider: PlayerStateProvider;
+	value: number | null;
+	unit: string;
+	sampleMinutes: number | null;
+	analysisStatus: PlayerStateAnalysisStatus;
+	reasonCodes: string[];
+};
+
+export type PlayerSeasonTimelinePoint = {
+	season: string;
+	phase: PlayerSeasonPhase;
+	position: number;
+	fplTotalPoints: number | null;
+	signals: PlayerSeasonSignal[];
+};
+
 export type PlayerStateMetric = {
 	code: string;
 	source: PlayerStateMetricSource;
@@ -190,6 +218,7 @@ export type PlayerStateProfile = {
 	careerTrajectory: PlayerStateCareerPoint[];
 	outlook: PlayerStateOutlook;
 	coverage: PlayerStateCoverage;
+	seasonTimeline: PlayerSeasonTimelinePoint[];
 };
 
 export type PlayerGameweekSample = {

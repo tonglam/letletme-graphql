@@ -123,6 +123,13 @@ describe("Data Platform read client", () => {
 		expect(relations).toContain("understat.seasons");
 		expect(relations).toContain("understat.player_seasons");
 		expect(relations).toContain("bridge.entity_links");
+		const playerStateProbe = queries.find((query) =>
+			query.text.includes("FROM reporting.player_state_season_rows")
+		);
+		expect(playerStateProbe?.text).toContain("fpl_total_points");
+		expect(playerStateProbe?.text).toContain("fpl_starts");
+		expect(playerStateProbe?.text).toContain("fpl_clean_sheets");
+		expect(playerStateProbe?.text).toContain("fpl_saves");
 	});
 
 	it("projects tournament season rank from the canonical points-group result", async () => {

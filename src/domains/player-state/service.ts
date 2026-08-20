@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { getCoreEventSnapshot } from "../../infra/data-snapshot";
 import { metrics } from "../../infra/metrics";
+import type { CurrentSeason } from "../../infra/season";
 import { getPlayerStateDatasetRevision, playerStateRepository } from "./repository";
 import type { PlayerStateProfile } from "./types";
 
@@ -17,13 +18,42 @@ const profileSingleflightKey = (
 	revision: string,
 	playerId: number,
 	horizon: number
-): string => `${context.currentSeason.seasonId}:${revision}:${playerId}:${horizon}`;
+): string =>
+	`${context.currentSeason.seasonId}:${context.currentSeason.lifecycleState ?? "unknown"}:${revision}:${playerId}:${horizon}`;
+
+/**
+ * A request pins its season identity when the ReadModelClient and authorization
+ * are created. Refresh may update lifecycle state, but it must never move the
+ * request to a different season after those readers have been constructed.
+ */
+export const applyRefreshedCurrentSeason = (
+	currentSeason: CurrentSeason,
+	refreshedSeason: CurrentSeason
+): CurrentSeason => {
+	if (
+		currentSeason.seasonId !== refreshedSeason.seasonId ||
+		currentSeason.seasonCode !== refreshedSeason.seasonCode
+	) {
+		return currentSeason;
+	}
+	if (currentSeason.lifecycleState === refreshedSeason.lifecycleState) return currentSeason;
+	return Object.freeze({
+		seasonId: currentSeason.seasonId,
+		seasonCode: currentSeason.seasonCode,
+		...(refreshedSeason.lifecycleState === undefined
+			? {}
+			: { lifecycleState: refreshedSeason.lifecycleState }),
+	});
+};
 
 const loadProfilesSingleflight = async (
 	context: GraphQLContext,
 	playerIds: number[],
 	horizon: number
 ): Promise<Map<number, PlayerStateProfile | null>> => {
+	const refreshedSeason = await context.refreshCurrentSeason?.();
+	if (refreshedSeason)
+		context.currentSeason = applyRefreshedCurrentSeason(context.currentSeason, refreshedSeason);
 	// The process-level coalescing key must include the immutable core revision.
 	// Otherwise a request that starts immediately after an active-pointer switch
 	// could join work that is still computing against the old publication.

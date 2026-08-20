@@ -45,12 +45,69 @@ describe("PostgreSQL current-season authority", () => {
 		await expect(loadCurrentSeason(database)).rejects.toBeInstanceOf(GraphQLError);
 	});
 
-	it("holds an immutable startup-authoritative season without database refresh", () => {
+	it("holds the startup season until an explicit refresh", () => {
 		const provider = new CurrentSeasonProvider();
 		expect(() => provider.get()).toThrow(GraphQLError);
 		provider.seed({ seasonId: 2026, seasonCode: "2627" });
 		expect(provider.get()).toEqual({ seasonId: 2026, seasonCode: "2627" });
 		expect(provider.get()).toEqual({ seasonId: 2026, seasonCode: "2627" });
+	});
+
+	it("refreshes a changed lifecycle without replacing the season provider", async () => {
+		const provider = new CurrentSeasonProvider();
+		provider.seed({ seasonId: 2026, seasonCode: "2627", lifecycleState: "preseason" });
+		const lifecycleState = "active";
+		const database: QueryExecutor = {
+			query: async () =>
+				({
+					rows: [{ season_id: 2026, season_code: "2627", lifecycle_state: lifecycleState }],
+					rowCount: 1,
+				}) as never,
+		};
+
+		await provider.refresh(database, 0);
+		expect(provider.get()).toMatchObject({ lifecycleState: "active" });
+	});
+
+	it("keeps a request-pinned identity while advancing the provider", async () => {
+		const provider = new CurrentSeasonProvider();
+		const pinned = { seasonId: 2026, seasonCode: "2627", lifecycleState: "preseason" as const };
+		provider.seed(pinned);
+		const database: QueryExecutor = {
+			query: async () =>
+				({
+					rows: [{ season_id: 2027, season_code: "2728", lifecycle_state: "active" }],
+					rowCount: 1,
+				}) as never,
+		};
+
+		await expect(provider.refresh(database, 0, pinned)).resolves.toEqual(pinned);
+		expect(provider.get()).toEqual({
+			seasonId: 2027,
+			seasonCode: "2728",
+			lifecycleState: "active",
+		});
+	});
+
+	it("throttles repeated rollover checks after retaining the pinned identity", async () => {
+		const provider = new CurrentSeasonProvider();
+		const pinned = { seasonId: 2026, seasonCode: "2627", lifecycleState: "preseason" as const };
+		provider.seed(pinned);
+		let queryCount = 0;
+		const database: QueryExecutor = {
+			query: async () => {
+				queryCount += 1;
+				return {
+					rows: [{ season_id: 2027, season_code: "2728", lifecycle_state: "active" }],
+					rowCount: 1,
+				} as never;
+			},
+		};
+
+		await expect(provider.refresh(database, 0, pinned)).resolves.toEqual(pinned);
+		await expect(provider.refresh(database, 5_000, pinned)).resolves.toEqual(pinned);
+		expect(queryCount).toBe(1);
+		expect(provider.get()).toMatchObject({ seasonId: 2027, seasonCode: "2728" });
 	});
 
 	it("reads request context season metadata without a Redis fallback", async () => {
