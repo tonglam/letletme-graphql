@@ -1527,6 +1527,48 @@ describe("tournamentsRepository.getTournamentEntryRankingSummary", () => {
 		expect(result.pointsAheadOfPrev).toBeNull();
 	});
 
+	it("normalizes PostgreSQL bigint window ranks before caching the summary", async () => {
+		const context = buildContext({
+			tournamentData: [tournamentRow],
+			snapshotData: [
+				{
+					tournament_id: 1,
+					event_id: 3,
+					entry_id: 15702,
+					tournament_overall_rank: "2",
+					overall_rank: "1000",
+					team_value: "1020",
+					cum_transfers_num: "3",
+					cum_total_costs: "4",
+					cum_total_bench_points: "11",
+					cum_auto_sub_points: "7",
+					tournament_team_value_rank: "1",
+					tournament_transfers_rank: "2",
+					tournament_costs_rank: "2",
+					tournament_bench_points_rank: "1",
+					tournament_auto_sub_rank: "1",
+				},
+			],
+		});
+
+		const first = await tournamentsRepository.getTournamentEntryRankingSummary(
+			context,
+			1,
+			3,
+			15702
+		);
+		const second = await tournamentsRepository.getTournamentEntryRankingSummary(
+			context,
+			1,
+			3,
+			15702
+		);
+
+		expect(first.tournamentOverallRank).toBe(2);
+		expect(first.tournamentTransfersRank).toBe(2);
+		expect(second).toEqual(first);
+	});
+
 	it("preserves the ranking summary when the optional field gap lookup fails", async () => {
 		const context = buildContext({
 			tournamentData: [tournamentRow],

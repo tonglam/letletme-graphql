@@ -974,6 +974,17 @@ const isSafeInteger = (value: unknown): value is number =>
 const isFiniteNumber = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value);
 
+const normalizeDatabaseNumber = (value: unknown): number | null => {
+	if (value === null || value === undefined || value === "") return null;
+	const parsed = typeof value === "number" ? value : Number(value);
+	return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeDatabaseInteger = (value: unknown): number | null => {
+	const parsed = normalizeDatabaseNumber(value);
+	return parsed !== null && Number.isSafeInteger(parsed) ? parsed : null;
+};
+
 const isNullableSafeInteger = (value: unknown): value is number | null =>
 	value === null || isSafeInteger(value);
 
@@ -2347,18 +2358,20 @@ export const tournamentsRepository: TournamentsRepository = {
 		const summary: TournamentEntryRankingSummary = {
 			eventId,
 			entryId,
-			overallRank: snapshotRow?.overall_rank ?? null,
-			tournamentOverallRank: snapshotRow?.tournament_overall_rank ?? null,
-			teamValue: snapshotRow?.team_value ?? null,
-			tournamentTeamValueRank: snapshotRow?.tournament_team_value_rank ?? null,
-			transfersNum: snapshotRow?.cum_transfers_num ?? 0,
-			tournamentTransfersRank: snapshotRow?.tournament_transfers_rank ?? null,
-			totalCosts: snapshotRow?.cum_total_costs ?? 0,
-			tournamentCostsRank: snapshotRow?.tournament_costs_rank ?? null,
-			totalBenchPoints: snapshotRow?.cum_total_bench_points ?? 0,
-			tournamentBenchPointsRank: snapshotRow?.tournament_bench_points_rank ?? null,
-			autoSubPoints: snapshotRow?.cum_auto_sub_points ?? 0,
-			tournamentAutoSubRank: snapshotRow?.tournament_auto_sub_rank ?? null,
+			overallRank: normalizeDatabaseInteger(snapshotRow?.overall_rank),
+			tournamentOverallRank: normalizeDatabaseInteger(snapshotRow?.tournament_overall_rank),
+			teamValue: normalizeDatabaseNumber(snapshotRow?.team_value),
+			tournamentTeamValueRank: normalizeDatabaseInteger(snapshotRow?.tournament_team_value_rank),
+			transfersNum: normalizeDatabaseNumber(snapshotRow?.cum_transfers_num) ?? 0,
+			tournamentTransfersRank: normalizeDatabaseInteger(snapshotRow?.tournament_transfers_rank),
+			totalCosts: normalizeDatabaseNumber(snapshotRow?.cum_total_costs) ?? 0,
+			tournamentCostsRank: normalizeDatabaseInteger(snapshotRow?.tournament_costs_rank),
+			totalBenchPoints: normalizeDatabaseNumber(snapshotRow?.cum_total_bench_points) ?? 0,
+			tournamentBenchPointsRank: normalizeDatabaseInteger(
+				snapshotRow?.tournament_bench_points_rank
+			),
+			autoSubPoints: normalizeDatabaseNumber(snapshotRow?.cum_auto_sub_points) ?? 0,
+			tournamentAutoSubRank: normalizeDatabaseInteger(snapshotRow?.tournament_auto_sub_rank),
 			...gaps,
 		};
 
