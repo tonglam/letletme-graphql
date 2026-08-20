@@ -968,8 +968,14 @@ const tournamentCacheKey = (context: GraphQLContext, suffix: string): string =>
 const hasOwn = (value: Record<string, unknown>, key: string): boolean =>
 	Object.prototype.hasOwnProperty.call(value, key);
 
+const GRAPHQL_INT_MIN = -2_147_483_648;
+const GRAPHQL_INT_MAX = 2_147_483_647;
+
 const isSafeInteger = (value: unknown): value is number =>
-	typeof value === "number" && Number.isSafeInteger(value);
+	typeof value === "number" &&
+	Number.isSafeInteger(value) &&
+	value >= GRAPHQL_INT_MIN &&
+	value <= GRAPHQL_INT_MAX;
 
 const isFiniteNumber = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value);

@@ -262,6 +262,12 @@ describe("tournament cache wire contracts", () => {
 			})
 		).toBe(false);
 		expect(
+			tournamentCacheTestables.isTournamentEventResultCache({
+				...validResult,
+				entryId: 2_147_483_648,
+			})
+		).toBe(false);
+		expect(
 			tournamentCacheTestables.isTournamentInfoCache({
 				...validCachedTournamentInfo,
 				setupStatus: "bogus",
