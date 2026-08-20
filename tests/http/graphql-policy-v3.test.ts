@@ -99,6 +99,11 @@ describe("GraphQL v3 production policy", () => {
 			refillPerSecond: 13,
 			burst: 130,
 		});
+		const wrongTarget = JSON.parse(JSON.stringify(generated)) as {
+			capacity: { targetConcurrent: number };
+		};
+		wrongTarget.capacity.targetConcurrent = 100;
+		expect(() => parseGraphQLRateLimitPolicyV3(wrongTarget)).toThrow("exactly 300");
 		expect(() =>
 			generateValidatedRateLimitProfile({
 				base: productionGraphQLRateLimitPolicy,

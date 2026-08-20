@@ -23,6 +23,8 @@ type RequestSample = {
 	status: number;
 	durationMs: number;
 	rateLimitScope: string | null;
+	shadowRateLimitOutcome: "allow" | "deny" | null;
+	shadowRateLimitScope: string | null;
 	graphqlErrors: number;
 	attacker: boolean;
 };
@@ -88,8 +90,8 @@ const allowHttp = booleanValue("LOAD_ALLOW_HTTP");
 const skipSessionValidation = booleanValue("LOAD_SKIP_SESSION_VALIDATION");
 const runId = process.env.LOAD_RUN_ID?.trim() || `capacity-${Date.now().toString(36)}`;
 
-if (!/^[A-Za-z0-9._:-]{8,48}$/.test(runId)) {
-	throw new Error("LOAD_RUN_ID must contain 8-48 safe identifier characters");
+if (!/^[A-Za-z0-9_-]{8,32}$/.test(runId)) {
+	throw new Error("LOAD_RUN_ID must contain 8-32 request-ID-safe characters");
 }
 if (
 	sustainabilityMultipliers.length === 0 ||
@@ -128,6 +130,16 @@ const sleep = (milliseconds: number): Promise<void> =>
 	new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
+
+let requestSequence = 0;
+const capacityRequestId = (actorId: string): string => {
+	requestSequence += 1;
+	return `${runId}-${sha256(actorId).slice(0, 8)}-${requestSequence.toString(36)}`;
+};
+
+const capacityRunSignature = createHmac("sha256", backendSecret)
+	.update(`capacity-run:${runId}`)
+	.digest("base64url");
 
 const signedLegacyHeaders = (actorId: string): Record<string, string> => {
 	const now = Math.floor(Date.now() / 1000);
@@ -177,14 +189,14 @@ const queryForWorkload = (
 			return {
 				operationName: "CapacityPlayerStats",
 				query: `query CapacityPlayerStats {
-					currentEventInfo { season currentEvent nextEvent nextUtcDeadline }
+					playersForPicker(limit: 1) { items { id webName } nextCursor }
 				}`,
 				variables: {},
 			};
 		case "gameweek":
 			return {
 				operationName: "CapacityGameweek",
-				query: "query CapacityGameweek { miniProgramNotice }",
+				query: "query CapacityGameweek { gameweekDesk(eventId: 1) { eventId lifecycle } }",
 				variables: {},
 			};
 		case "interactive":
@@ -266,7 +278,7 @@ const graphQLRequest = async (
 		"content-type": "application/json",
 		accept: "application/json",
 		"user-agent": `LetLetMe-Capacity/${runId}`,
-		"X-Request-Id": `${runId}-${actor.id}-${Date.now().toString(36)}`.slice(0, 96),
+		"X-Request-Id": capacityRequestId(actor.id),
 	};
 	if (actor.kind === "mini") {
 		headers["X-Letletme-Client"] = "wechat-miniprogram";
@@ -279,6 +291,8 @@ const graphQLRequest = async (
 	const startedAt = performance.now();
 	let status: number;
 	let rateLimitScope: string | null;
+	let shadowRateLimitOutcome: "allow" | "deny" | null = null;
+	let shadowRateLimitScope: string | null = null;
 	let graphqlErrors = 0;
 	try {
 		const response = await fetch(target, {
@@ -289,6 +303,12 @@ const graphQLRequest = async (
 		});
 		status = response.status;
 		rateLimitScope = response.headers.get("x-ratelimit-scope");
+		const shadowOutcomeHeader = response.headers.get("x-ratelimit-shadow-outcome");
+		shadowRateLimitOutcome =
+			shadowOutcomeHeader === "allow" || shadowOutcomeHeader === "deny"
+				? shadowOutcomeHeader
+				: null;
+		shadowRateLimitScope = response.headers.get("x-ratelimit-shadow-scope");
 		const body = (await response.json().catch(() => null)) as {
 			errors?: readonly unknown[];
 		} | null;
@@ -307,6 +327,8 @@ const graphQLRequest = async (
 		status,
 		durationMs: performance.now() - startedAt,
 		rateLimitScope,
+		shadowRateLimitOutcome,
+		shadowRateLimitScope,
 		graphqlErrors,
 		attacker,
 	};
@@ -318,6 +340,8 @@ const pageRequest = async (actor: Actor, phase: string): Promise<RequestSample> 
 	const headers: Record<string, string> = {
 		accept: "text/html",
 		"user-agent": `LetLetMe-Capacity/${runId}`,
+		"X-Letletme-Capacity-Run": runId,
+		"X-Letletme-Capacity-Sig": capacityRunSignature,
 	};
 	if (actor.cookie) headers.cookie = actor.cookie;
 	const startedAt = performance.now();
@@ -343,6 +367,8 @@ const pageRequest = async (actor: Actor, phase: string): Promise<RequestSample> 
 		status,
 		durationMs: performance.now() - startedAt,
 		rateLimitScope: null,
+		shadowRateLimitOutcome: null,
+		shadowRateLimitScope: null,
 		graphqlErrors: 0,
 		attacker: false,
 	};
@@ -796,7 +822,17 @@ const actualGlobalDenied = counterDelta("globalDenied", baselineRuntime, isolati
 const globalWouldDenied = counterDelta("globalWouldDenied", baselineRuntime, isolationRuntime);
 const nonMiniDenied = counterDelta("nonMiniDenied", baselineRuntime, isolationRuntime);
 const capacityWouldDenied = counterDelta("wouldDenied", baselineRuntime, capacityRuntime);
-const attackerWouldDenied = counterDelta("wouldDenied", capacityRuntime, isolationRuntime);
+const isolationWouldDenied = counterDelta("wouldDenied", capacityRuntime, isolationRuntime);
+const attackerWouldDenied = attackerSamples.filter(
+	(sample) => sample.shadowRateLimitOutcome === "deny"
+).length;
+const natPeerWouldDenied = natPeerGraphQL.filter(
+	(sample) => sample.shadowRateLimitOutcome === "deny"
+).length;
+const shadowIsolationSamples = [...attackerSamples, ...natPeerGraphQL];
+const shadowIsolationAttributable =
+	isolationWouldDenied === 0 ||
+	shadowIsolationSamples.every((sample) => sample.shadowRateLimitOutcome !== null);
 const serverGraphQLRequests = counterDelta(
 	"serverGraphQLRequests",
 	baselineRuntime,
@@ -924,7 +960,8 @@ const gates = {
 	cpuBelow80PercentForFiveMinutes: !cpuSustainedBreach,
 	memoryBelow85Percent: maxMemoryPercent <= 85,
 	attackerWasIsolated: attacker429 > 0 || attackerWouldDenied > 0,
-	natPeersUnaffected: natPeer429 === 0 && natPeerErrors === 0,
+	natPeersUnaffected: natPeer429 === 0 && natPeerErrors === 0 && natPeerWouldDenied === 0,
+	shadowIsolationAttributable,
 	sustainableRpsHeadroomProven,
 };
 
@@ -976,6 +1013,8 @@ const report = {
 		nonMiniDenied,
 		capacityWouldDenied,
 		attackerWouldDenied,
+		natPeerWouldDenied,
+		isolationWouldDenied,
 		non429Errors: non429Errors.length,
 		directNon429ErrorRate,
 		serverGraphQLRequests,

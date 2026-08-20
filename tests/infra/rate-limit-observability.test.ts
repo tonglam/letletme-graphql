@@ -3,6 +3,7 @@ import type Redis from "ioredis";
 import {
 	rateLimitFingerprint,
 	recordRateLimitAggregate,
+	summarizeRateLimitTotals,
 } from "../../src/infra/rate-limit-observability";
 import { GRAPHQL_REQUEST_OUTCOME_LABELS } from "../../src/infra/metrics";
 
@@ -62,5 +63,21 @@ describe("rate-limit observability privacy", () => {
 
 	it("exports GraphQL outcomes with only one controlled result dimension", () => {
 		expect(GRAPHQL_REQUEST_OUTCOME_LABELS).toEqual(["result"]);
+	});
+
+	it("reports enforced and shadow rollout alarms independently", () => {
+		const summary = summarizeRateLimitTotals(
+			new Map([
+				["mini|market|client|legacy_allowed", 90],
+				["mini|market|client|legacy_denied", 10],
+				["mini|market|client|would_allow", 60],
+				["mini|market|client|would_deny", 40],
+				["mini|market|global|would_deny", 2],
+			])
+		);
+		expect(summary.interactiveDeniedRate).toBe(0.1);
+		expect(summary.shadowInteractiveDeniedRate).toBe(42 / 102);
+		expect(summary.globalDenied).toBe(0);
+		expect(summary.globalWouldDenied).toBe(2);
 	});
 });

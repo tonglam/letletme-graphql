@@ -101,6 +101,8 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
 		"Access-Control-Allow-Methods": "POST, OPTIONS",
 		"Access-Control-Allow-Headers":
 			"Content-Type, Authorization, X-Request-Id, X-User-Context, X-User-Context-Sig, X-Ingress-Context, X-Ingress-Context-Sig",
+		"Access-Control-Expose-Headers":
+			"X-Request-Id, Retry-After, X-RateLimit-Policy, X-RateLimit-Scope, X-RateLimit-Shadow-Outcome, X-RateLimit-Shadow-Scope",
 		"Access-Control-Max-Age": "86400",
 	};
 
@@ -526,6 +528,18 @@ const startServer = async (): Promise<void> => {
 				let shadowLegacyPreAuthResponse: Response | null = null;
 				let trustedIngress: GraphQLIngress | null = null;
 				let v3AdmissionEvaluated = false;
+				let shadowRateLimitDecision: {
+					outcome: "allow" | "deny";
+					scope: GraphQLRateLimitHeaderScope;
+				} | null = null;
+				const captureShadowRateLimitDecision = (decision: TokenBucketStageResultV3): void => {
+					if (env.GRAPHQL_RATE_LIMIT_MODE !== "shadow-v3") return;
+					if (shadowRateLimitDecision?.outcome === "deny") return;
+					shadowRateLimitDecision = {
+						outcome: decision.allowed ? "allow" : "deny",
+						scope: decision.deniedScope ?? decision.details.at(-1)?.scope ?? "client",
+					};
+				};
 				const finalizeGraphQLResponse = (response: Response, outcome: string): Response => {
 					fullCoreLoaded =
 						fullCoreLoaded ||
@@ -534,6 +548,10 @@ const startServer = async (): Promise<void> => {
 							?.fullCoreLoaded === true;
 					const durationMs = requestTiming.elapsedMs();
 					response.headers.set("X-Request-Id", requestId);
+					if (trustedIngress && shadowRateLimitDecision) {
+						response.headers.set("X-RateLimit-Shadow-Outcome", shadowRateLimitDecision.outcome);
+						response.headers.set("X-RateLimit-Shadow-Scope", shadowRateLimitDecision.scope);
+					}
 					metrics.httpRequestDurationSeconds
 						.labels(request.method, url.pathname, String(response.status))
 						.observe(durationMs / 1000);
@@ -580,6 +598,7 @@ const startServer = async (): Promise<void> => {
 							})
 						);
 						if (earlyAdmission.decision) {
+							captureShadowRateLimitDecision(earlyAdmission.decision);
 							logV3RateLimitDecision({
 								requestId,
 								operation: operationName,
@@ -655,6 +674,7 @@ const startServer = async (): Promise<void> => {
 						})
 					);
 					if (preAuthAdmission.v3Decision) {
+						captureShadowRateLimitDecision(preAuthAdmission.v3Decision);
 						logV3RateLimitDecision({
 							requestId,
 							operation: operationName,
@@ -782,6 +802,7 @@ const startServer = async (): Promise<void> => {
 						v3AdmissionEvaluated = true;
 					}
 					if (principalAdmissionResult.v3Decision) {
+						captureShadowRateLimitDecision(principalAdmissionResult.v3Decision);
 						logV3RateLimitDecision({
 							requestId,
 							operation: operationName,

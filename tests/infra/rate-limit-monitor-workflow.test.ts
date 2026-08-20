@@ -7,7 +7,9 @@ describe("rate-limit monitor workflow", () => {
 		expect(workflow).toContain('cron: "*/5 * * * *"');
 		expect(workflow).toContain("rate-limit:report --days 2 --json");
 		expect(workflow).toContain(".summary.interactiveDeniedRate <= 0.01");
+		expect(workflow).toContain(".summary.shadowInteractiveDeniedRate <= 0.01");
 		expect(workflow).toContain(".summary.globalDenied == 0");
+		expect(workflow).toContain(".summary.globalWouldDenied == 0");
 		expect(workflow).not.toContain("GRAPHQL_ENV");
 	});
 

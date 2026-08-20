@@ -2,6 +2,7 @@ import { GRAPHQL_TRAFFIC_CLASSES, GRAPHQL_WORKLOADS } from "../infra/ingress-env
 import type { RateLimitTargetObservation } from "./rate-limit-profile-generator";
 
 export type CapacityLoadReport = {
+	runId: string;
 	gatePassed: boolean;
 	model: { targetConcurrent: number };
 	summary: { sustainableRps: number };
@@ -24,6 +25,8 @@ export const parseCapacityLoadReport = (value: unknown): CapacityLoadReport => {
 	const summary = candidate.summary;
 	const window = candidate.window;
 	if (
+		typeof candidate.runId !== "string" ||
+		!/^[A-Za-z0-9_-]{8,32}$/.test(candidate.runId) ||
 		typeof candidate.gatePassed !== "boolean" ||
 		!model ||
 		typeof model !== "object" ||
@@ -53,6 +56,7 @@ export const parseCapacityLoadReport = (value: unknown): CapacityLoadReport => {
 		throw new Error("Load report contains an invalid stage window");
 	}
 	return {
+		runId: candidate.runId,
 		gatePassed: candidate.gatePassed,
 		model: { targetConcurrent: 300 },
 		summary: {
@@ -66,6 +70,7 @@ export const parseCapacityLoadReport = (value: unknown): CapacityLoadReport => {
 
 type V3DecisionLog = {
 	time?: unknown;
+	requestId?: unknown;
 	msg?: unknown;
 	stage?: unknown;
 	policy?: unknown;
@@ -109,6 +114,7 @@ export const buildRateLimitTargetObservation = ({
 		throw new Error("Capacity evidence requires a complete fifteen-minute 300-concurrent stage");
 	}
 	const durationSeconds = (window.finishedAt - window.startedAt) / 1000;
+	const requestIdPrefix = `${report.runId}-`;
 	const workloads = Object.fromEntries(
 		GRAPHQL_WORKLOADS.map((workload) => [workload, 0])
 	) as Record<(typeof GRAPHQL_WORKLOADS)[number], number>;
@@ -126,6 +132,8 @@ export const buildRateLimitTargetObservation = ({
 			at < window.startedAt ||
 			at > window.finishedAt ||
 			decision.msg !== "GraphQL v3 rate-limit decision" ||
+			typeof decision.requestId !== "string" ||
+			!decision.requestId.startsWith(requestIdPrefix) ||
 			decision.stage !== "weighted" ||
 			decision.policy !== "graphql-v3" ||
 			decision.allowed !== true ||

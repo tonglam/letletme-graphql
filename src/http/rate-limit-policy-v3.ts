@@ -269,6 +269,9 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 		if (!parsed.capacity.sustainableRps || !parsed.capacity.evidence) {
 			throw new Error("Validated capacity requires sustainableRps and evidence");
 		}
+		if (parsed.capacity.targetConcurrent !== 300) {
+			throw new Error("Validated capacity must target exactly 300 concurrent clients");
+		}
 		const expectedRefill = Math.floor(
 			(1 - parsed.capacity.requiredHeadroomRatio) * parsed.capacity.sustainableRps
 		);

@@ -51,7 +51,9 @@ jobs:
             "$RUNNER_TEMP/rate-limit-report.json"
           jq -e '
             .summary.interactiveDeniedRate <= 0.01 and
-            .summary.globalDenied == 0
+            .summary.shadowInteractiveDeniedRate <= 0.01 and
+            .summary.globalDenied == 0 and
+            .summary.globalWouldDenied == 0
           ' "$RUNNER_TEMP/rate-limit-report.json"
 
       - name: Retain non-sensitive report

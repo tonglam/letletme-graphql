@@ -48,5 +48,8 @@ describe("GraphQL admission ordering", () => {
 		expect(source).toContain("v3Checks: v3PrincipalAdmission.checks");
 		expect(source).toContain("graphQLV3EarlyFailureRateLimitChecks");
 		expect(source).toContain('"earlyFailureAdmission"');
+		expect(source).toContain('"X-RateLimit-Shadow-Outcome"');
+		expect(source).toContain("captureShadowRateLimitDecision");
+		expect(source).toContain('shadowRateLimitDecision?.outcome === "deny"');
 	});
 });

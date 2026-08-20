@@ -35,6 +35,58 @@ export const rateLimitAggregateKey = (date: string): string =>
 export const rateLimitDeniedRankingKey = (date: string): string =>
 	`llm:gql:rate-limit:v3:denied:${date}`;
 
+export type RateLimitReportSummary = {
+	interactiveAllowed: number;
+	interactiveDenied: number;
+	interactiveDeniedRate: number;
+	shadowInteractiveAllowed: number;
+	shadowInteractiveDenied: number;
+	shadowInteractiveDeniedRate: number;
+	globalDenied: number;
+	globalWouldDenied: number;
+};
+
+export const summarizeRateLimitTotals = (
+	totals: ReadonlyMap<string, number>
+): RateLimitReportSummary => {
+	let interactiveAllowed = 0;
+	let interactiveDenied = 0;
+	let shadowInteractiveAllowed = 0;
+	let shadowInteractiveDenied = 0;
+	let globalDenied = 0;
+	let globalWouldDenied = 0;
+	for (const [key, count] of totals) {
+		const [trafficClass, workload, scope, outcome] = key.split("|");
+		const interactive =
+			trafficClass === "mini" || trafficClass === "web_browser" || workload === "interactive";
+		if (interactive && (outcome === "allowed" || outcome === "legacy_allowed")) {
+			interactiveAllowed += count;
+		}
+		if (interactive && (outcome === "denied" || outcome === "legacy_denied")) {
+			interactiveDenied += count;
+		}
+		if (interactive && outcome === "would_allow") shadowInteractiveAllowed += count;
+		if (interactive && outcome === "would_deny") shadowInteractiveDenied += count;
+		if (scope === "global" && (outcome === "denied" || outcome === "legacy_denied")) {
+			globalDenied += count;
+		}
+		if (scope === "global" && outcome === "would_deny") globalWouldDenied += count;
+	}
+	const interactiveTotal = interactiveAllowed + interactiveDenied;
+	const shadowInteractiveTotal = shadowInteractiveAllowed + shadowInteractiveDenied;
+	return {
+		interactiveAllowed,
+		interactiveDenied,
+		interactiveDeniedRate: interactiveTotal === 0 ? 0 : interactiveDenied / interactiveTotal,
+		shadowInteractiveAllowed,
+		shadowInteractiveDenied,
+		shadowInteractiveDeniedRate:
+			shadowInteractiveTotal === 0 ? 0 : shadowInteractiveDenied / shadowInteractiveTotal,
+		globalDenied,
+		globalWouldDenied,
+	};
+};
+
 export const recordRateLimitAggregate = async ({
 	redis,
 	trafficClass,

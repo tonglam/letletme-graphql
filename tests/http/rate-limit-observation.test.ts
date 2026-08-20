@@ -4,6 +4,7 @@ import { buildRateLimitTargetObservation } from "../../src/http/rate-limit-obser
 const startedAt = Date.parse("2026-08-20T00:00:00.000Z");
 const finishedAt = startedAt + 15 * 60 * 1000;
 const report = {
+	runId: "capacity-run-123",
 	gatePassed: true,
 	model: { targetConcurrent: 300 },
 	summary: { sustainableRps: 40 },
@@ -18,6 +19,7 @@ const log = (input: Record<string, unknown>): string =>
 		msg: "GraphQL v3 rate-limit decision",
 		stage: "weighted",
 		policy: "graphql-v3",
+		requestId: "capacity-run-123-request-1",
 		allowed: true,
 		...input,
 	});
@@ -27,6 +29,12 @@ describe("capacity log observation", () => {
 		const observation = buildRateLimitTargetObservation({
 			report,
 			logLines: [
+				log({
+					requestId: "another-run-request-1",
+					trafficClass: "mini",
+					workload: "home",
+					cost: 50,
+				}),
 				log({ trafficClass: "mini", workload: "market", cost: 4 }),
 				log({ trafficClass: "web_rsc", workload: "player-stats", cost: 20 }),
 				log({ trafficClass: "web_rsc", workload: "fixtures", cost: 10 }),

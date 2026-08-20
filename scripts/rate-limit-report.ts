@@ -2,6 +2,7 @@ import {
 	rateLimitAggregateDate,
 	rateLimitAggregateKey,
 	rateLimitDeniedRankingKey,
+	summarizeRateLimitTotals,
 } from "../src/infra/rate-limit-observability";
 import { closeRedis, connectRedis, getRateLimitRedis } from "../src/infra/redis";
 
@@ -97,35 +98,12 @@ try {
 			totals.set(key, (totals.get(key) ?? 0) + count);
 		}
 	}
-	let interactiveAllowed = 0;
-	let interactiveDenied = 0;
-	let globalDenied = 0;
-	for (const [key, count] of totals) {
-		const [trafficClass, workload, scope, outcome] = key.split("|");
-		const interactive =
-			trafficClass === "mini" || trafficClass === "web_browser" || workload === "interactive";
-		if (interactive && (outcome === "allowed" || outcome === "legacy_allowed")) {
-			interactiveAllowed += count;
-		}
-		if (interactive && (outcome === "denied" || outcome === "legacy_denied")) {
-			interactiveDenied += count;
-		}
-		if (scope === "global" && (outcome === "denied" || outcome === "legacy_denied")) {
-			globalDenied += count;
-		}
-	}
-	const interactiveTotal = interactiveAllowed + interactiveDenied;
-	const interactiveDeniedRate = interactiveTotal === 0 ? 0 : interactiveDenied / interactiveTotal;
+	const summary = summarizeRateLimitTotals(totals);
 	const report = {
 		policy: "graphql-v3",
 		generatedAt: new Date().toISOString(),
 		days: options.days,
-		summary: {
-			interactiveAllowed,
-			interactiveDenied,
-			interactiveDeniedRate,
-			globalDenied,
-		},
+		summary,
 		totals: Object.fromEntries(
 			[...totals.entries()].sort(([left], [right]) => left.localeCompare(right))
 		),
@@ -137,8 +115,10 @@ try {
 		console.log(JSON.stringify(report, null, 2));
 	}
 	if (
-		(options.failInteractiveRate !== null && interactiveDeniedRate > options.failInteractiveRate) ||
-		(options.failOnGlobal && globalDenied > 0)
+		(options.failInteractiveRate !== null &&
+			Math.max(summary.interactiveDeniedRate, summary.shadowInteractiveDeniedRate) >
+				options.failInteractiveRate) ||
+		(options.failOnGlobal && (summary.globalDenied > 0 || summary.globalWouldDenied > 0))
 	) {
 		process.exitCode = 1;
 	}
