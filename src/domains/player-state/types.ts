@@ -30,10 +30,15 @@ export type PlayerStateMetricSource =
 	"FPL_CURRENT" | "FPL_HISTORY" | "UNDERSTAT_CURRENT" | "UNDERSTAT_HISTORY" | "DERIVED";
 
 export type PlayerStateMappingStatus =
-	"VERIFIED" | "UNVERIFIED" | "AMBIGUOUS" | "QUARANTINED" | "UNAVAILABLE";
+	"VERIFIED" | "UNVERIFIED" | "AMBIGUOUS" | "QUARANTINED" | "UNAVAILABLE" | "NOT_APPLICABLE";
 
 export type PlayerStateProvider = "FPL" | "UNDERSTAT";
 export type PlayerStateProviderScope = "CURRENT" | "HISTORY";
+export type PlayerStateDataStatus = "AVAILABLE" | "UNAVAILABLE";
+export type PlayerStateAnalysisStatus =
+	"READY" | "PRESEASON" | "INSUFFICIENT" | "NOT_APPLICABLE" | "UNAVAILABLE";
+export type PlayerStateProviderMode =
+	"FPL_ONLY" | "FPL_WITH_UNDERSTAT_HISTORY" | "FPL_WITH_UNDERSTAT_CURRENT";
 
 export type PlayerStateMetric = {
 	code: string;
@@ -145,26 +150,24 @@ export type PlayerStateCareerPoint = {
 	expectedMetricsAvailable: boolean;
 };
 
-export type PlayerStateProviderRevision = {
+export type PlayerStateSourceCoverage = {
 	provider: PlayerStateProvider;
 	scope: PlayerStateProviderScope;
-	season: string;
+	seasons: string[];
+	dataStatus: PlayerStateDataStatus;
+	analysisStatus: PlayerStateAnalysisStatus;
+	mappingStatus: PlayerStateMappingStatus;
+	reasonCodes: string[];
 	revision: string | null;
 	asOf: string | null;
 	freshnessSeconds: number | null;
 	stale: boolean;
-	available: boolean;
 };
 
 export type PlayerStateCoverage = {
-	fplCurrent: boolean;
-	understatCurrent: boolean;
-	fplHistorySeasons: string[];
-	understatHistorySeasons: string[];
-	mappingStatus: PlayerStateMappingStatus;
+	sources: PlayerStateSourceCoverage[];
 	metricCoverage: string[];
 	limitations: string[];
-	providers: PlayerStateProviderRevision[];
 };
 
 export type PlayerStateProfile = {
@@ -178,7 +181,7 @@ export type PlayerStateProfile = {
 	asOf: string;
 	trend: PlayerStateTrend;
 	confidence: PlayerStateConfidence;
-	fplOnly: boolean;
+	providerMode: PlayerStateProviderMode;
 	reasons: PlayerStateReason[];
 	profileRadar: PlayerRadarProfile | null;
 	dimensions: PlayerStateDimension[];

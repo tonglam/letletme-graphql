@@ -117,7 +117,7 @@ jobs:
         with:
           repository: tonglam/letletme_data
           # Pin the Data contract that contains entry league official kind migration.
-          ref: 31df28b972601a5d411c9850c99e765a20e3ee2f
+          ref: 41da42af6355967e252edb3958b4b3e4bada2c10
           path: data-platform
           persist-credentials: false
 

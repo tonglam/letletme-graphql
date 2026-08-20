@@ -36,11 +36,32 @@ export const playerStatsTypeDefs = /* GraphQL */ `
 		fixtures: [PlayerFixture!]!
 	}
 
+	enum PlayerStatsDeskFieldStatus {
+		AVAILABLE
+		NOT_FOUND
+		TEMPORARILY_UNAVAILABLE
+	}
+
+	type PlayerStatsOverviewResult {
+		status: PlayerStatsDeskFieldStatus!
+		value: PlayerStatsOverview
+	}
+
+	type PlayerStatsStateResult {
+		status: PlayerStatsDeskFieldStatus!
+		value: PlayerStateProfile
+	}
+
+	type PlayerStatsEvidenceResult {
+		status: PlayerStatsDeskFieldStatus!
+		value: PlayerDetail
+	}
+
 	type PlayerStatsDeskEntry {
 		playerId: Int!
-		overview: PlayerStatsOverview
-		state: PlayerStateProfile
-		evidence: PlayerDetail
+		overview: PlayerStatsOverviewResult!
+		state: PlayerStatsStateResult!
+		evidence: PlayerStatsEvidenceResult!
 	}
 
 	type PlayerStatsDeskPayload {

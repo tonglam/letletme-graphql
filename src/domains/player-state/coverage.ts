@@ -1,4 +1,10 @@
-import type { PlayerStateCoverage, PlayerStateProviderRevision } from "./types";
+import type {
+	PlayerStateAnalysisStatus,
+	PlayerStateDataStatus,
+	PlayerStateMappingStatus,
+	PlayerStateProviderScope,
+	PlayerStateSourceCoverage,
+} from "./types";
 
 export const PLAYER_STATE_FRESHNESS_STALE_SECONDS = 36 * 60 * 60;
 
@@ -22,7 +28,7 @@ export const confirmedPlayerLinkSeasons = (evidence: unknown): string[] => {
 export function resolvePlayerStateMappingStatus(
 	link: ProviderLinkRow | null,
 	season: string
-): PlayerStateCoverage["mappingStatus"] {
+): PlayerStateMappingStatus {
 	if (!link) return "UNAVAILABLE";
 	if (link.status === "quarantined") return "QUARANTINED";
 	if (link.status === "ambiguous") return "AMBIGUOUS";
@@ -39,21 +45,44 @@ export function resolvePlayerStateMappingStatus(
 const freshness = (timestamp: string | null): number | null =>
 	timestamp === null ? null : Math.max(0, Math.floor((Date.now() - Date.parse(timestamp)) / 1000));
 
-export const buildPlayerStateProviderRevision = (input: {
-	provider: PlayerStateProviderRevision["provider"];
-	scope: PlayerStateProviderRevision["scope"];
-	season: string;
+export const buildPlayerStateSourceCoverage = (input: {
+	provider: PlayerStateSourceCoverage["provider"];
+	scope: PlayerStateProviderScope;
+	seasons: string[];
 	revision: string | null;
 	asOf: string | null;
-	available: boolean;
-}): PlayerStateProviderRevision => {
+	dataStatus: PlayerStateDataStatus;
+	analysisStatus: PlayerStateAnalysisStatus;
+	mappingStatus: PlayerStateMappingStatus;
+	reasonCodes: string[];
+}): PlayerStateSourceCoverage => {
 	const age = freshness(input.asOf);
 	return {
-		...input,
+		provider: input.provider,
+		scope: input.scope,
+		seasons: input.seasons,
+		revision: input.revision,
+		asOf: input.asOf,
+		dataStatus: input.dataStatus,
+		analysisStatus: input.analysisStatus,
+		mappingStatus: input.mappingStatus,
+		reasonCodes: input.reasonCodes,
 		freshnessSeconds: age,
 		stale:
-			input.available &&
+			input.dataStatus === "AVAILABLE" &&
 			input.scope === "CURRENT" &&
 			(age === null || age > PLAYER_STATE_FRESHNESS_STALE_SECONDS),
 	};
 };
+
+export const sourceCoverage = (input: {
+	provider: PlayerStateSourceCoverage["provider"];
+	scope: PlayerStateSourceCoverage["scope"];
+	seasons: string[];
+	dataStatus: PlayerStateDataStatus;
+	analysisStatus: PlayerStateAnalysisStatus;
+	mappingStatus: PlayerStateMappingStatus;
+	reasonCodes: string[];
+	revision: string | null;
+	asOf: string | null;
+}): PlayerStateSourceCoverage => buildPlayerStateSourceCoverage(input);

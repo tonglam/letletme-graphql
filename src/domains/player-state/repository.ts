@@ -20,13 +20,7 @@ import {
 	expectedMetricsAvailableForSeason,
 	percentile,
 } from "./engine";
-import {
-	buildPlayerStateProviderRevision,
-	confirmedPlayerLinkSeasons,
-	PLAYER_STATE_FRESHNESS_STALE_SECONDS,
-	resolvePlayerStateMappingStatus,
-	type ProviderLinkRow,
-} from "./coverage";
+import { sourceCoverage, PLAYER_STATE_FRESHNESS_STALE_SECONDS } from "./coverage";
 import { applyPlayerStateEvidencePolicy } from "./trend-evidence-policy";
 import type {
 	PlayerGameweekSample,
@@ -34,12 +28,14 @@ import type {
 	PlayerRadarProfile,
 	PlayerStateBaselineSeason,
 	PlayerStateCareerPoint,
-	PlayerStateCoverage,
 	PlayerStateDimension,
 	PlayerStateMetric,
 	PlayerStateOutlookGameweek,
 	PlayerStateProfile,
-	PlayerStateProviderRevision,
+	PlayerStateSourceCoverage,
+	PlayerStateAnalysisStatus,
+	PlayerStateProviderMode,
+	PlayerStateMappingStatus,
 	ProcessAssessment,
 } from "./types";
 
@@ -51,7 +47,6 @@ const CURRENT_PEER_MINUTES = 900;
 const HISTORY_PLAYER_MINUTES = 450;
 const HISTORY_PEER_MINUTES = 900;
 const PROCESS_MINIMUM_MINUTES = 180;
-const PROCESS_PEER_MINUTES = 450;
 
 export type QueryExecutor = DatabaseQueryExecutor;
 
@@ -64,6 +59,60 @@ type MarketRow = QueryResultRow & {
 	status: string;
 	chance_this_round: number | null;
 	captured_at: Date | string;
+};
+
+type PlayerStateSeasonRow = QueryResultRow & {
+	season_id: number;
+	season_code: string;
+	lifecycle_state: string;
+	player_code: number;
+	element_id: number;
+	element_type: number;
+	fpl_minutes: number;
+	fpl_gameweeks: number;
+	fpl_points_per_90: number | string | null;
+	fpl_return_rate: number | string | null;
+	fpl_bonus_per_90: number | string | null;
+	fpl_position_percentile: number | string | null;
+	fpl_peer_count: number;
+	expected_metrics_available: boolean;
+	fpl_source_hash: string;
+	fpl_source_updated_at: Date | string;
+	understat_mapping_status: string;
+	understat_player_id: number | null;
+	understat_season_state: string | null;
+	understat_minutes: number | null;
+	understat_npxg_per_90: number | string | null;
+	understat_xa_per_90: number | string | null;
+	understat_shots_per_90: number | string | null;
+	understat_key_passes_per_90: number | string | null;
+	understat_xg_chain_per_90: number | string | null;
+	understat_xg_buildup_per_90: number | string | null;
+	understat_npxg_percentile: number | string | null;
+	understat_xa_percentile: number | string | null;
+	understat_shots_percentile: number | string | null;
+	understat_key_passes_percentile: number | string | null;
+	understat_xg_chain_percentile: number | string | null;
+	understat_xg_buildup_percentile: number | string | null;
+	understat_process_percentile: number | string | null;
+	understat_peer_count: number;
+	understat_source_hash: string | null;
+	understat_source_updated_at: Date | string | null;
+	refreshed_at: Date | string;
+};
+
+type DatasetRevisionRow = QueryResultRow & {
+	revision: number | string;
+	method_version: string;
+	source_updated_at: Date | string;
+	refreshed_at: Date | string;
+};
+
+type PlayerStateDatasetRevision = {
+	revision: string;
+	methodVersion: string;
+	sourceUpdatedAt: string;
+	refreshedAt: string;
 };
 
 type CurrentPeerRow = QueryResultRow & {
@@ -89,28 +138,6 @@ type CurrentPeerGameweekRow = QueryResultRow & {
 	minutes: number | null;
 	started: boolean | null;
 	bonus: number | null;
-};
-
-type HistoricalCohortRow = QueryResultRow & {
-	season: string;
-	player_code: number;
-	position: number;
-	minutes: number | null;
-	total_points: number | null;
-	bonus: number | null;
-	return_count: string | number | null;
-	gameweek_count: string | number | null;
-	as_of: Date | string | null;
-};
-
-type HistoricalMetricRow = {
-	season: string;
-	playerCode: number;
-	position: number;
-	minutes: number;
-	pointsPer90: number | null;
-	returnRate: number | null;
-	bonusPer90: number | null;
 };
 
 type CurrentMetricRow = {
@@ -172,13 +199,68 @@ type UnderstatProcessResult = {
 	historySeasons: string[];
 };
 
-const marketSql = `
-	/* player-state:market */
-	SELECT status, chance_of_playing_this_round AS chance_this_round, captured_at
+const marketsSql = `
+	/* player-state:markets-batch */
+	SELECT DISTINCT ON (element_id)
+		status,
+		chance_of_playing_this_round AS chance_this_round,
+		captured_at,
+		element_id
 	FROM fpl.player_market_snapshots
-	WHERE season_id = $1 AND element_id = $2
-	ORDER BY snapshot_date DESC, captured_at DESC
-	LIMIT 1
+	WHERE season_id = $1 AND element_id = ANY($2::integer[])
+	ORDER BY element_id, snapshot_date DESC, captured_at DESC
+`;
+
+const datasetRevisionSql = `
+	/* player-state:dataset-revision */
+	SELECT revision, method_version, source_updated_at, refreshed_at
+	FROM reporting.player_state_dataset_metadata
+	WHERE dataset_key = 'player_state'
+`;
+
+const seasonRowsSql = `
+	/* player-state:season-rows */
+	SELECT
+		season_id,
+		season_code,
+		lifecycle_state,
+		player_code,
+		element_id,
+		element_type,
+		fpl_minutes,
+		fpl_gameweeks,
+		fpl_points_per_90,
+		fpl_return_rate,
+		fpl_bonus_per_90,
+		fpl_position_percentile,
+		fpl_peer_count,
+		expected_metrics_available,
+		fpl_source_hash,
+		fpl_source_updated_at,
+		understat_mapping_status,
+		understat_player_id,
+		understat_season_state,
+		understat_minutes,
+		understat_npxg_per_90,
+		understat_xa_per_90,
+		understat_shots_per_90,
+		understat_key_passes_per_90,
+		understat_xg_chain_per_90,
+		understat_xg_buildup_per_90,
+		understat_npxg_percentile,
+		understat_xa_percentile,
+		understat_shots_percentile,
+		understat_key_passes_percentile,
+		understat_xg_chain_percentile,
+		understat_xg_buildup_percentile,
+		understat_process_percentile,
+		understat_peer_count,
+		understat_source_hash,
+		understat_source_updated_at,
+		refreshed_at
+	FROM reporting.player_state_season_rows
+	WHERE player_code = ANY($1::integer[])
+	ORDER BY player_code, season_id DESC
 `;
 
 const currentPeersSql = `
@@ -224,120 +306,6 @@ const currentPeerGameweeksSql = `
 	ORDER BY stats.event_id, stats.element_id
 `;
 
-const historicalCohortsSql = `
-	/* player-state:fpl-history */
-	WITH requested AS MATERIALIZED (
-		SELECT season.season_id, season.season_code, subject.element_type AS position
-		FROM fpl.seasons season
-		JOIN fpl.players subject
-			ON subject.season_id = season.season_id
-			AND subject.code = $1
-		WHERE season.lifecycle_state = 'completed'
-	)
-	SELECT
-		requested.season_code AS season,
-		player.code AS player_code,
-		player.element_type AS position,
-		COALESCE(summary.minutes, 0)::integer AS minutes,
-		COALESCE(summary.total_points, 0)::integer AS total_points,
-		COALESCE(summary.bonus, 0)::integer AS bonus,
-		COALESCE(summary.return_count, 0)::integer AS return_count,
-		COALESCE(summary.gameweeks_available, 0)::integer AS gameweek_count,
-		GREATEST(player.updated_at, summary.source_updated_at) AS as_of
-	FROM requested
-	JOIN fpl.players player
-		ON player.season_id = requested.season_id
-		AND player.element_type = requested.position
-	LEFT JOIN reporting.player_season_summary_rows summary
-		ON summary.season_id = player.season_id
-		AND summary.element_id = player.element_id
-	ORDER BY requested.season_code, player.code
-`;
-
-const verifiedProviderLinkSql = `
-	/* player-state:provider-link-verified */
-	SELECT status::text, rule_id, left_entity_id, evidence
-	FROM bridge.entity_links
-	WHERE entity_type = 'player'
-		AND left_provider = 'understat'
-		AND right_provider = 'fpl'
-		AND right_entity_id = $1
-		AND status IN ('auto_verified', 'manual_verified')
-	LIMIT 1
-`;
-
-const unresolvedProviderLinkSql = `
-	/* player-state:provider-link-unresolved */
-	SELECT status::text, rule_id, left_entity_id, evidence
-	FROM bridge.entity_links
-	WHERE entity_type = 'player'
-		AND left_provider = 'understat'
-		AND right_provider = 'fpl'
-		AND right_entity_id = $1
-		AND status NOT IN ('auto_verified', 'manual_verified')
-	ORDER BY CASE status::text
-		WHEN 'quarantined' THEN 1
-		WHEN 'ambiguous' THEN 2
-		ELSE 3
-	END, updated_at DESC, created_at DESC
-	LIMIT 1
-`;
-
-const understatCohortsSql = `
-	/* player-state:understat-cohorts */
-	WITH requested AS MATERIALIZED (
-		SELECT season.season_id, season.season_code, subject.element_type AS position
-		FROM fpl.seasons season
-		JOIN fpl.players subject
-			ON subject.season_id = season.season_id
-			AND subject.code = $1
-		WHERE season.season_code = ANY($2::text[])
-	), linked_peers AS MATERIALIZED (
-		SELECT
-			requested.season_code,
-			player.code AS player_code,
-			CASE
-				WHEN link.left_entity_id ~ '^[0-9]+$' THEN link.left_entity_id::integer
-			END AS player_id
-		FROM requested
-		JOIN fpl.players player
-			ON player.season_id = requested.season_id
-			AND player.element_type = requested.position
-		JOIN bridge.entity_links link
-			ON link.entity_type = 'player'
-			AND link.left_provider = 'understat'
-			AND link.right_provider = 'fpl'
-			AND link.right_entity_id = player.code::text
-			AND link.status IN ('auto_verified', 'manual_verified')
-			AND link.evidence -> 'confirmedSeasons' ? requested.season_code
-	)
-	SELECT
-		linked.season_code AS season,
-		provider_season.state::text AS season_state,
-		provider_season.last_seen_at AS season_last_seen_at,
-		linked.player_code,
-		metrics.player_id,
-		(linked.player_code = $1) AS is_subject,
-		metrics.time_minutes AS minutes,
-		metrics.position,
-		metrics.non_penalty_xg,
-		metrics.xa,
-		metrics.shots,
-		metrics.key_passes,
-		metrics.xg_chain,
-		metrics.xg_buildup,
-		metrics.source_hash,
-		metrics.updated_at
-	FROM linked_peers linked
-	JOIN understat.player_seasons metrics
-		ON metrics.season_code = linked.season_code
-		AND metrics.player_id = linked.player_id
-	JOIN understat.seasons provider_season
-		ON provider_season.season_code = metrics.season_code
-	WHERE linked.player_id IS NOT NULL
-	ORDER BY linked.season_code, linked.player_code
-`;
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -348,11 +316,6 @@ const asNumber = (value: unknown): number | null => {
 		return Number.isFinite(parsed) ? parsed : null;
 	}
 	return null;
-};
-
-const asInt = (value: unknown): number | null => {
-	const parsed = asNumber(value);
-	return parsed === null ? null : Math.trunc(parsed);
 };
 
 const iso = (value: Date | string | null): string | null => {
@@ -373,6 +336,49 @@ const freshness = (timestamp: string | null): number | null =>
 const stableHash = (value: unknown): string =>
 	createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 20);
 
+const PLAYER_STATE_SOURCE_KEYS = [
+	"FPL:CURRENT",
+	"FPL:HISTORY",
+	"UNDERSTAT:CURRENT",
+	"UNDERSTAT:HISTORY",
+] as const;
+
+const playerStateSourceGuard = (value: unknown): value is PlayerStateSourceCoverage => {
+	if (!isRecord(value)) return false;
+	if (
+		(value.provider !== "FPL" && value.provider !== "UNDERSTAT") ||
+		(value.scope !== "CURRENT" && value.scope !== "HISTORY") ||
+		!Array.isArray(value.seasons) ||
+		!value.seasons.every((season) => typeof season === "string" && /^\d{4}$/.test(season)) ||
+		(value.dataStatus !== "AVAILABLE" && value.dataStatus !== "UNAVAILABLE") ||
+		(value.analysisStatus !== "READY" &&
+			value.analysisStatus !== "PRESEASON" &&
+			value.analysisStatus !== "INSUFFICIENT" &&
+			value.analysisStatus !== "NOT_APPLICABLE" &&
+			value.analysisStatus !== "UNAVAILABLE") ||
+		(value.mappingStatus !== "VERIFIED" &&
+			value.mappingStatus !== "UNVERIFIED" &&
+			value.mappingStatus !== "AMBIGUOUS" &&
+			value.mappingStatus !== "QUARANTINED" &&
+			value.mappingStatus !== "UNAVAILABLE" &&
+			value.mappingStatus !== "NOT_APPLICABLE") ||
+		!Array.isArray(value.reasonCodes) ||
+		!value.reasonCodes.every((reason) => typeof reason === "string") ||
+		(value.revision !== null && typeof value.revision !== "string") ||
+		(value.asOf !== null && typeof value.asOf !== "string") ||
+		(value.freshnessSeconds !== null &&
+			(typeof value.freshnessSeconds !== "number" ||
+				!Number.isInteger(value.freshnessSeconds) ||
+				value.freshnessSeconds < 0)) ||
+		typeof value.stale !== "boolean"
+	) {
+		return false;
+	}
+	return PLAYER_STATE_SOURCE_KEYS.includes(
+		`${value.provider}:${value.scope}` as (typeof PLAYER_STATE_SOURCE_KEYS)[number]
+	);
+};
+
 const profileGuard = (value: unknown): value is PlayerStateProfile =>
 	isRecord(value) &&
 	typeof value.playerId === "number" &&
@@ -380,10 +386,54 @@ const profileGuard = (value: unknown): value is PlayerStateProfile =>
 	typeof value.season === "string" &&
 	typeof value.trend === "string" &&
 	Array.isArray(value.dimensions) &&
-	isRecord(value.coverage);
+	isRecord(value.coverage) &&
+	Array.isArray(value.coverage.sources) &&
+	value.coverage.sources.length === 4 &&
+	value.coverage.sources.every(playerStateSourceGuard) &&
+	value.coverage.sources.every(
+		(source, index) => `${source.provider}:${source.scope}` === PLAYER_STATE_SOURCE_KEYS[index]
+	) &&
+	Array.isArray(value.coverage.metricCoverage) &&
+	value.coverage.metricCoverage.every((metric) => typeof metric === "string") &&
+	Array.isArray(value.coverage.limitations) &&
+	value.coverage.limitations.every((limitation) => typeof limitation === "string") &&
+	(value.providerMode === "FPL_ONLY" ||
+		value.providerMode === "FPL_WITH_UNDERSTAT_HISTORY" ||
+		value.providerMode === "FPL_WITH_UNDERSTAT_CURRENT");
 
-const profileCacheKey = (context: GraphQLContext, playerId: number, horizon: number): string =>
-	gqlCacheKey(context, `player-state-profile:${playerId}:${horizon}`);
+const profileCacheKey = (
+	context: GraphQLContext,
+	stateRevision: string,
+	playerId: number,
+	horizon: number
+): string =>
+	gqlCacheKey(context, `player-state-profile:v2:${stateRevision}:${playerId}:${horizon}`);
+
+let datasetRevisionMemo: { expiresAt: number; value: PlayerStateDatasetRevision } | null = null;
+
+const loadDatasetRevision = async (
+	context: GraphQLContext,
+	executor: QueryExecutor
+): Promise<PlayerStateDatasetRevision> => {
+	const cached = datasetRevisionMemo;
+	if (cached && cached.expiresAt > Date.now()) return cached.value;
+	const row = (await executor.query<DatasetRevisionRow>(datasetRevisionSql, [])).rows[0];
+	if (!row) throw new Error("Player State dataset revision is unavailable");
+	const value = {
+		revision: String(row.revision),
+		methodVersion: row.method_version,
+		sourceUpdatedAt: iso(row.source_updated_at) ?? new Date(0).toISOString(),
+		refreshedAt: iso(row.refreshed_at) ?? new Date(0).toISOString(),
+	};
+	datasetRevisionMemo = { expiresAt: Date.now() + 5_000, value };
+	return value;
+};
+
+/** Shared five-second dataset revision memo used by the service singleflight key. */
+export const getPlayerStateDatasetRevision = (
+	context: GraphQLContext,
+	executor: QueryExecutor = context.database
+): Promise<PlayerStateDatasetRevision> => loadDatasetRevision(context, executor);
 
 const profileCacheReadMemo = new WeakMap<
 	object,
@@ -394,6 +444,65 @@ type CurrentCohort = Readonly<{
 	peerRows: CurrentPeerRow[];
 	gameweekRows: CurrentPeerGameweekRow[];
 }>;
+
+type SharedProfileData = Readonly<{
+	seasonRowsByCode: Map<number, PlayerStateSeasonRow[]>;
+	marketById: Map<number, MarketRow>;
+}>;
+
+const sharedProfileDataMemo = new WeakMap<object, Map<string, Promise<SharedProfileData>>>();
+type ProfilePreload = Readonly<{
+	snapshot: CoreDataSnapshot;
+	shared: SharedProfileData;
+	datasetRevision: PlayerStateDatasetRevision;
+	executor: QueryExecutor;
+}>;
+const profilePreloadMemo = new WeakMap<object, Map<number, ProfilePreload>>();
+
+const loadSharedProfileData = (
+	context: GraphQLContext,
+	executor: QueryExecutor,
+	playerCodes: number[],
+	playerIds: number[],
+	seasonId: number
+): Promise<SharedProfileData> => {
+	const scope = context.requestScope ?? context;
+	let memo = sharedProfileDataMemo.get(scope);
+	if (!memo) {
+		memo = new Map();
+		sharedProfileDataMemo.set(scope, memo);
+	}
+	const codes = [...new Set(playerCodes)].sort((left, right) => left - right);
+	const ids = [...new Set(playerIds)].sort((left, right) => left - right);
+	const key = `${seasonId}:${codes.join(",")}:${ids.join(",")}`;
+	const existing = memo.get(key);
+	if (existing) return existing;
+	const loading = Promise.all([
+		codes.length === 0
+			? Promise.resolve({ rows: [] as PlayerStateSeasonRow[] })
+			: executor.query<PlayerStateSeasonRow>(seasonRowsSql, [codes]),
+		ids.length === 0
+			? Promise.resolve({ rows: [] as MarketRow[] })
+			: executor.query<MarketRow & { element_id: number }>(marketsSql, [seasonId, ids]),
+	]).then(([seasonRows, markets]) => {
+		const seasonRowsByCode = new Map<number, PlayerStateSeasonRow[]>();
+		for (const row of seasonRows.rows) {
+			const rows = seasonRowsByCode.get(row.player_code) ?? [];
+			rows.push(row);
+			seasonRowsByCode.set(row.player_code, rows);
+		}
+		const marketById = new Map<number, MarketRow>();
+		for (const row of markets.rows) {
+			marketById.set(row.element_id, row);
+		}
+		return { seasonRowsByCode, marketById };
+	});
+	memo.set(key, loading);
+	void loading.catch(() => {
+		if (memo?.get(key) === loading) memo.delete(key);
+	});
+	return loading;
+};
 
 const currentCohortMemo = new WeakMap<object, Map<string, Promise<CurrentCohort>>>();
 
@@ -792,87 +901,65 @@ const buildPlayerRadarProfile = (
 	};
 };
 
-const historicalMetric = (row: HistoricalCohortRow): HistoricalMetricRow | null => {
-	const minutes = asInt(row.minutes);
-	const totalPoints = asNumber(row.total_points);
-	const bonus = asNumber(row.bonus);
-	const returnCount = asNumber(row.return_count);
-	const gameweekCount = asNumber(row.gameweek_count);
-	if (minutes === null) return null;
-	return {
-		season: row.season,
-		playerCode: row.player_code,
-		position: row.position,
-		minutes,
-		pointsPer90: minutes > 0 && totalPoints !== null ? (totalPoints * 90) / minutes : null,
-		returnRate:
-			returnCount !== null && gameweekCount !== null && gameweekCount > 0
-				? (returnCount / gameweekCount) * 100
-				: null,
-		bonusPer90: minutes > 0 && bonus !== null ? (bonus * 90) / minutes : null,
-	};
-};
-
-const historyForPlayer = (rows: HistoricalCohortRow[], playerCode: number): PlayerHistory => {
-	const metrics = rows
-		.map(historicalMetric)
-		.filter((row): row is HistoricalMetricRow => row !== null);
-	const selected = metrics.filter(
-		(row) => row.playerCode === playerCode && row.minutes >= HISTORY_PLAYER_MINUTES
+const historyForPlayerStateRows = (
+	rows: PlayerStateSeasonRow[],
+	playerCode: number,
+	currentSeason: string
+): PlayerHistory => {
+	const subjectRows = rows.filter(
+		(row) => row.player_code === playerCode && row.season_code !== currentSeason
 	);
-	const baselineSeasons: PlayerStateBaselineSeason[] = selected.map((row) => {
-		const peers = metrics.filter(
-			(peer) =>
-				peer.season === row.season &&
-				peer.position === row.position &&
-				peer.minutes >= HISTORY_PEER_MINUTES
-		);
-		return {
-			season: row.season,
-			position: row.position,
-			minutes: row.minutes,
-			pointsPer90: row.pointsPer90,
-			returnRate: row.returnRate,
-			bonusPer90: row.bonusPer90,
-			positionPercentile: metricCompositePercentile(row, peers),
+	const baselineSeasons = subjectRows
+		.filter(
+			(row) => row.lifecycle_state === "completed" && row.fpl_minutes >= HISTORY_PLAYER_MINUTES
+		)
+		.map((row) => ({
+			season: row.season_code,
+			position: row.element_type,
+			minutes: row.fpl_minutes,
+			pointsPer90: asNumber(row.fpl_points_per_90),
+			returnRate: asNumber(row.fpl_return_rate),
+			bonusPer90: asNumber(row.fpl_bonus_per_90),
+			positionPercentile: asNumber(row.fpl_position_percentile),
 			weight: 0,
-			expectedMetricsAvailable: expectedMetricsAvailableForSeason(row.season),
-			understatProcessPercentile: null,
-		};
-	});
+			expectedMetricsAvailable: row.expected_metrics_available,
+			understatProcessPercentile: asNumber(row.understat_process_percentile),
+		}));
 	const careerTrajectory = baselineSeasons
 		.map((season): PlayerStateCareerPoint => ({
 			season: season.season,
 			position: season.position,
 			minutes: season.minutes,
 			fplPositionPercentile: season.positionPercentile,
-			understatProcessPercentile: null,
+			understatProcessPercentile: season.understatProcessPercentile,
 			expectedMetricsAvailable: season.expectedMetricsAvailable,
 		}))
 		.sort((left, right) => left.season.localeCompare(right.season));
-	const seasons = [
-		...new Set(metrics.filter((row) => row.playerCode === playerCode).map((row) => row.season)),
-	]
+	const seasons = subjectRows
+		.filter((row) => row.lifecycle_state === "completed")
+		.map((row) => row.season_code)
 		.sort()
 		.reverse();
-	const asOf = latestIso(rows.map((row) => iso(row.as_of)));
 	return {
 		baselineSeasons,
 		careerTrajectory,
-		seasons,
+		seasons: [...new Set(seasons)],
 		revision: stableHash(
-			rows.map((row) => [
-				row.season,
-				row.player_code,
-				row.minutes,
-				row.total_points,
-				row.bonus,
-				row.return_count,
-				row.gameweek_count,
-				iso(row.as_of),
+			subjectRows.map((row) => [
+				row.season_code,
+				row.fpl_minutes,
+				row.fpl_points_per_90,
+				row.fpl_position_percentile,
+				row.understat_process_percentile,
+				row.refreshed_at,
 			])
 		),
-		asOf,
+		asOf: latestIso(
+			subjectRows.flatMap((row) => [
+				iso(row.fpl_source_updated_at),
+				iso(row.understat_source_updated_at),
+			])
+		),
 	};
 };
 
@@ -1005,54 +1092,6 @@ const metric = (
 	capability: options.capability ?? true,
 });
 
-const per90 = (value: unknown, minutes: number): number | null => {
-	const number = asNumber(value);
-	return number === null || minutes <= 0 ? null : (number * 90) / minutes;
-};
-
-const understatValues = (row: UnderstatCohortRow): UnderstatValues => ({
-	npxgPer90: per90(row.non_penalty_xg, row.minutes),
-	xaPer90: per90(row.xa, row.minutes),
-	shotsPer90: per90(row.shots, row.minutes),
-	keyPassesPer90: per90(row.key_passes, row.minutes),
-	xgChainPer90: per90(row.xg_chain, row.minutes),
-	xgBuildupPer90: per90(row.xg_buildup, row.minutes),
-});
-
-const understatCompositePercentile = (
-	row: UnderstatCohortRow,
-	cohort: UnderstatCohortRow[]
-): number | null => {
-	const subject = understatValues(row);
-	const peers = cohort.map(understatValues);
-	return averagePercentiles([
-		percentile(
-			subject.npxgPer90,
-			peers.map((peer) => peer.npxgPer90)
-		),
-		percentile(
-			subject.xaPer90,
-			peers.map((peer) => peer.xaPer90)
-		),
-		percentile(
-			subject.shotsPer90,
-			peers.map((peer) => peer.shotsPer90)
-		),
-		percentile(
-			subject.keyPassesPer90,
-			peers.map((peer) => peer.keyPassesPer90)
-		),
-		percentile(
-			subject.xgChainPer90,
-			peers.map((peer) => peer.xgChainPer90)
-		),
-		percentile(
-			subject.xgBuildupPer90,
-			peers.map((peer) => peer.xgBuildupPer90)
-		),
-	]);
-};
-
 const unavailableProcess = (
 	rating: ProcessAssessment["rating"],
 	reasonCode: string
@@ -1066,26 +1105,65 @@ const unavailableProcess = (
 	metrics: [],
 });
 
-const buildUnderstatProcess = (
+const understatSeasonValues = (row: PlayerStateSeasonRow): UnderstatValues => ({
+	npxgPer90: asNumber(row.understat_npxg_per_90),
+	xaPer90: asNumber(row.understat_xa_per_90),
+	shotsPer90: asNumber(row.understat_shots_per_90),
+	keyPassesPer90: asNumber(row.understat_key_passes_per_90),
+	xgChainPer90: asNumber(row.understat_xg_chain_per_90),
+	xgBuildupPer90: asNumber(row.understat_xg_buildup_per_90),
+});
+
+const understatSeasonSubject = (row: PlayerStateSeasonRow): UnderstatCohortRow => {
+	const values = understatSeasonValues(row);
+	const total = (value: number | null): number =>
+		value === null || row.understat_minutes === null ? 0 : (value * row.understat_minutes) / 90;
+	return {
+		season: row.season_code,
+		season_state: row.understat_season_state ?? "planned",
+		season_last_seen_at: row.understat_source_updated_at ?? row.refreshed_at,
+		player_code: row.player_code,
+		player_id: row.understat_player_id ?? 0,
+		is_subject: true,
+		minutes: row.understat_minutes ?? 0,
+		position: String(row.element_type),
+		non_penalty_xg: total(values.npxgPer90),
+		xa: total(values.xaPer90),
+		shots: total(values.shotsPer90),
+		key_passes: total(values.keyPassesPer90),
+		xg_chain: total(values.xgChainPer90),
+		xg_buildup: total(values.xgBuildupPer90),
+		source_hash: row.understat_source_hash ?? "player-state",
+		updated_at: row.understat_source_updated_at ?? row.refreshed_at,
+	};
+};
+
+/** Build Understat analysis from the season projection.  Peer ranks are
+ * intentionally consumed from the read model; GraphQL never rebuilds a
+ * provider cohort for an individual player request. */
+const buildUnderstatProcessFromSeasonRows = (
 	position: number,
 	season: string,
-	mappingStatus: PlayerStateCoverage["mappingStatus"],
-	rows: UnderstatCohortRow[]
+	rows: PlayerStateSeasonRow[]
 ): UnderstatProcessResult => {
-	const subjects = rows.filter((row) => row.is_subject);
+	const historyRows = rows.filter(
+		(row) =>
+			row.season_code < season &&
+			row.understat_player_id !== null &&
+			row.understat_season_state === "complete" &&
+			row.understat_mapping_status === "VERIFIED"
+	);
 	const historyPercentiles = new Map<string, number>();
-	for (const subject of subjects.filter((row) => row.season !== season)) {
-		const cohort = rows.filter(
-			(row) => row.season === subject.season && row.minutes >= PROCESS_PEER_MINUTES
-		);
-		const rank = understatCompositePercentile(subject, cohort);
-		if (rank !== null) historyPercentiles.set(subject.season, rank);
+	for (const row of historyRows) {
+		const value = asNumber(row.understat_process_percentile);
+		if (value !== null) historyPercentiles.set(row.season_code, value);
 	}
-	const historySeasons = subjects
-		.filter((row) => row.season_state === "complete")
-		.map((row) => row.season)
-		.sort();
-	const currentSubject = subjects.find((row) => row.season === season) ?? null;
+	const historySeasons = [...new Set(historyRows.map((row) => row.season_code))].sort().reverse();
+	const currentRow = rows.find((row) => row.season_code === season) ?? null;
+	const currentSubject =
+		currentRow?.understat_player_id !== null && currentRow
+			? understatSeasonSubject(currentRow)
+			: null;
 	if (position === 1) {
 		return {
 			assessment: unavailableProcess("TEAM_CONTEXT_ONLY", "PROCESS_GKP_TEAM_CONTEXT_ONLY"),
@@ -1094,7 +1172,7 @@ const buildUnderstatProcess = (
 			historySeasons,
 		};
 	}
-	if (mappingStatus !== "VERIFIED") {
+	if (currentRow === null || currentRow.understat_mapping_status !== "VERIFIED") {
 		return {
 			assessment: unavailableProcess("UNAVAILABLE", "PROCESS_MAPPING_UNAVAILABLE"),
 			currentSubject: null,
@@ -1103,8 +1181,9 @@ const buildUnderstatProcess = (
 		};
 	}
 	if (
-		currentSubject === null ||
-		(currentSubject.season_state !== "active" && currentSubject.season_state !== "complete")
+		currentRow.understat_player_id === null ||
+		(currentRow.understat_season_state !== "active" &&
+			currentRow.understat_season_state !== "complete")
 	) {
 		return {
 			assessment: unavailableProcess("UNAVAILABLE", "PROCESS_UNAVAILABLE_UNDERSTAT"),
@@ -1113,11 +1192,12 @@ const buildUnderstatProcess = (
 			historySeasons,
 		};
 	}
-	if (currentSubject.minutes < PROCESS_MINIMUM_MINUTES) {
+	const sampleMinutes = currentRow.understat_minutes ?? 0;
+	if (sampleMinutes < PROCESS_MINIMUM_MINUTES) {
 		return {
 			assessment: {
 				...unavailableProcess("INSUFFICIENT", "PROCESS_SAMPLE_BELOW_180_MINUTES"),
-				sampleMinutes: currentSubject.minutes,
+				sampleMinutes,
 				smallSample: true,
 			},
 			currentSubject,
@@ -1125,25 +1205,26 @@ const buildUnderstatProcess = (
 			historySeasons,
 		};
 	}
-	const cohort = rows.filter((row) => row.season === season && row.minutes >= PROCESS_PEER_MINUTES);
-	const currentPercentile = understatCompositePercentile(currentSubject, cohort);
+	const currentPercentile = asNumber(currentRow.understat_process_percentile);
 	if (currentPercentile === null) {
 		return {
 			assessment: {
 				...unavailableProcess("UNAVAILABLE", "PROCESS_COHORT_UNAVAILABLE"),
-				sampleMinutes: currentSubject.minutes,
+				sampleMinutes,
 			},
 			currentSubject,
 			historyPercentiles,
 			historySeasons,
 		};
 	}
-	const historicalSubjects = subjects
-		.filter((row) => row.season < season && row.minutes >= HISTORY_PLAYER_MINUTES)
-		.sort((left, right) => right.season.localeCompare(left.season))
+	const historicalSubjects = historyRows
+		.filter(
+			(row) => row.season_code < season && (row.understat_minutes ?? 0) >= HISTORY_PLAYER_MINUTES
+		)
+		.sort((left, right) => right.season_code.localeCompare(left.season_code))
 		.slice(0, 3);
 	const baselinePercentile = averagePercentiles(
-		historicalSubjects.map((row) => historyPercentiles.get(row.season) ?? null)
+		historicalSubjects.map((row) => historyPercentiles.get(row.season_code) ?? null)
 	);
 	const direction =
 		baselinePercentile === null
@@ -1154,35 +1235,57 @@ const buildUnderstatProcess = (
 					? "FALLING"
 					: "STABLE";
 	const rating = currentPercentile >= 70 ? "STRONG" : currentPercentile >= 30 ? "TYPICAL" : "WEAK";
-	const values = understatValues(currentSubject);
-	const historicalValues = historicalSubjects.map(understatValues);
-	const metricSpecs: Array<{
+	const values = understatSeasonValues(currentRow);
+	const historicalValues = historicalSubjects.map(understatSeasonValues);
+	const specs: Array<{
 		code: string;
 		value: keyof UnderstatValues;
+		percentile: number | string | null;
 	}> = [
-		{ code: "UNDERSTAT_NPXG_PER_90", value: "npxgPer90" },
-		{ code: "UNDERSTAT_XA_PER_90", value: "xaPer90" },
-		{ code: "UNDERSTAT_SHOTS_PER_90", value: "shotsPer90" },
-		{ code: "UNDERSTAT_KEY_PASSES_PER_90", value: "keyPassesPer90" },
-		{ code: "UNDERSTAT_XG_CHAIN_PER_90", value: "xgChainPer90" },
-		{ code: "UNDERSTAT_XG_BUILDUP_PER_90", value: "xgBuildupPer90" },
+		{
+			code: "UNDERSTAT_NPXG_PER_90",
+			value: "npxgPer90",
+			percentile: currentRow.understat_npxg_percentile,
+		},
+		{
+			code: "UNDERSTAT_XA_PER_90",
+			value: "xaPer90",
+			percentile: currentRow.understat_xa_percentile,
+		},
+		{
+			code: "UNDERSTAT_SHOTS_PER_90",
+			value: "shotsPer90",
+			percentile: currentRow.understat_shots_percentile,
+		},
+		{
+			code: "UNDERSTAT_KEY_PASSES_PER_90",
+			value: "keyPassesPer90",
+			percentile: currentRow.understat_key_passes_percentile,
+		},
+		{
+			code: "UNDERSTAT_XG_CHAIN_PER_90",
+			value: "xgChainPer90",
+			percentile: currentRow.understat_xg_chain_percentile,
+		},
+		{
+			code: "UNDERSTAT_XG_BUILDUP_PER_90",
+			value: "xgBuildupPer90",
+			percentile: currentRow.understat_xg_buildup_percentile,
+		},
 	];
-	const metrics = metricSpecs.map(({ code, value }) =>
+	const metrics = specs.map(({ code, value, percentile: rank }) =>
 		metric(code, values[value], {
 			source: "UNDERSTAT_CURRENT",
 			baseline:
 				historicalValues.length === 0
 					? null
 					: averagePercentiles(historicalValues.map((candidate) => candidate[value])),
-			percentile: percentile(
-				values[value],
-				cohort.map((row) => understatValues(row)[value])
-			),
+			percentile: asNumber(rank),
 			unit: "per90",
 			season,
-			sampleMinutes: currentSubject.minutes,
-			sampleSize: cohort.length,
-			smallSample: currentSubject.minutes < HISTORY_PLAYER_MINUTES,
+			sampleMinutes,
+			sampleSize: currentRow.understat_peer_count,
+			smallSample: sampleMinutes < HISTORY_PLAYER_MINUTES,
 		})
 	);
 	return {
@@ -1190,8 +1293,8 @@ const buildUnderstatProcess = (
 			rating,
 			direction,
 			available: true,
-			sampleMinutes: currentSubject.minutes,
-			smallSample: currentSubject.minutes < HISTORY_PLAYER_MINUTES,
+			sampleMinutes,
+			smallSample: sampleMinutes < HISTORY_PLAYER_MINUTES,
 			reasonCodes: [
 				rating === "STRONG"
 					? "PROCESS_STRONG"
@@ -1206,21 +1309,6 @@ const buildUnderstatProcess = (
 		historyPercentiles,
 		historySeasons,
 	};
-};
-
-const isDurableVerifiedLink = (link: ProviderLinkRow | null): boolean =>
-	link !== null &&
-	(link.status === "auto_verified" || link.status === "manual_verified") &&
-	link.left_entity_id !== null;
-
-const loadProviderLink = async (
-	executor: QueryExecutor,
-	playerCode: number
-): Promise<ProviderLinkRow | null> => {
-	const values = [String(playerCode)];
-	const verified = await executor.query<ProviderLinkRow>(verifiedProviderLinkSql, values);
-	if (verified.rows[0]) return verified.rows[0];
-	return (await executor.query<ProviderLinkRow>(unresolvedProviderLinkSql, values)).rows[0] ?? null;
 };
 
 export interface PlayerStateRepository {
@@ -1248,14 +1336,66 @@ export const createPlayerStateRepository = (
 			new Set(playerIds.filter((id) => Number.isSafeInteger(id) && id > 0))
 		);
 		const safeHorizon = Number.isSafeInteger(horizon) ? Math.min(8, Math.max(1, horizon)) : 5;
-		await readProfileCaches(
+		if (uniqueIds.length === 0) return new Map();
+		const executor = dependencies.executor ?? context.database;
+		const datasetRevision = await loadDatasetRevision(context, executor);
+		const cacheKeys = uniqueIds.map((playerId) =>
+			profileCacheKey(context, datasetRevision.revision, playerId, safeHorizon)
+		);
+		await readProfileCaches(context, cacheKeys);
+		const cacheMemo = requestProfileCacheMemo(context);
+		const missingIds = uniqueIds.filter(
+			(playerId) =>
+				cacheMemo.get(profileCacheKey(context, datasetRevision.revision, playerId, safeHorizon)) ===
+				undefined
+		);
+		if (missingIds.length === 0) {
+			return new Map(
+				uniqueIds.map((playerId) => [
+					playerId,
+					cacheMemo.get(
+						profileCacheKey(context, datasetRevision.revision, playerId, safeHorizon)
+					) ?? null,
+				])
+			);
+		}
+		const loadSnapshot = dependencies.loadCoreSnapshot ?? getCoreDataSnapshot;
+		const snapshot = await loadSnapshot(context);
+		const selectedPlayers = snapshot.players.filter((player) => missingIds.includes(player.id));
+		const shared = await loadSharedProfileData(
 			context,
-			uniqueIds.map((playerId) => profileCacheKey(context, playerId, safeHorizon))
+			executor,
+			selectedPlayers.map((player) => player.code),
+			selectedPlayers.map((player) => player.id),
+			context.currentSeason.seasonId
 		);
-		const profiles = await Promise.all(
-			uniqueIds.map((playerId) => this.getPlayerStateProfile(context, playerId, safeHorizon))
+		const scope = context.requestScope ?? context;
+		let preload = profilePreloadMemo.get(scope);
+		if (!preload) {
+			preload = new Map();
+			profilePreloadMemo.set(scope, preload);
+		}
+		for (const playerId of missingIds) {
+			preload.set(playerId, { snapshot, shared, datasetRevision, executor });
+		}
+		let profiles: Array<PlayerStateProfile | null>;
+		try {
+			profiles = await Promise.all(
+				missingIds.map((playerId) => this.getPlayerStateProfile(context, playerId, safeHorizon))
+			);
+		} finally {
+			for (const playerId of missingIds) preload.delete(playerId);
+		}
+		return new Map(
+			uniqueIds.map((playerId) => [
+				playerId,
+				missingIds.includes(playerId)
+					? (profiles[missingIds.indexOf(playerId)] ?? null)
+					: (cacheMemo.get(
+							profileCacheKey(context, datasetRevision.revision, playerId, safeHorizon)
+						) ?? null),
+			])
 		);
-		return new Map(uniqueIds.map((playerId, index) => [playerId, profiles[index] ?? null]));
 	},
 	async getPlayerStateProfile(
 		context: GraphQLContext,
@@ -1264,18 +1404,21 @@ export const createPlayerStateRepository = (
 	): Promise<PlayerStateProfile | null> {
 		if (!Number.isSafeInteger(playerId) || playerId <= 0) return null;
 		const safeHorizon = Number.isSafeInteger(horizon) ? Math.min(8, Math.max(1, horizon)) : 5;
-		const key = profileCacheKey(context, playerId, safeHorizon);
+		const preload = profilePreloadMemo.get(context.requestScope ?? context)?.get(playerId);
+		const executor = preload?.executor ?? dependencies.executor ?? context.database;
+		const datasetRevision =
+			preload?.datasetRevision ?? (await loadDatasetRevision(context, executor));
+		const key = profileCacheKey(context, datasetRevision.revision, playerId, safeHorizon);
 		const cached = await readProfileCache(context, key);
 		if (cached !== undefined) return cached;
 
 		const loadSnapshot = dependencies.loadCoreSnapshot ?? getCoreDataSnapshot;
-		const snapshot = await loadSnapshot(context);
+		const snapshot = preload?.snapshot ?? (await loadSnapshot(context));
 		const player = snapshot.players.find((candidate) => candidate.id === playerId);
 		if (!player) {
 			await writeNullCache(context, key);
 			return null;
 		}
-		const executor = dependencies.executor ?? context.database;
 		const seasonId = context.currentSeason.seasonId;
 		const season = context.currentSeason.seasonCode;
 		const asOfEventId = resolveAsOfEventId(snapshot);
@@ -1289,39 +1432,25 @@ export const createPlayerStateRepository = (
 			.slice(0, 10)
 			.sort((left, right) => left - right);
 
-		const linkPromise = loadProviderLink(executor, player.code);
-		const fplPromise = Promise.all([
-			executor.query<MarketRow>(marketSql, [seasonId, playerId]),
-			loadCurrentCohort(
-				context,
-				executor,
-				seasonId,
-				player.type,
-				asOfEventId !== null,
-				startedEventIds
-			),
-			executor.query<HistoricalCohortRow>(historicalCohortsSql, [player.code]),
-		]);
-
-		const link = await linkPromise;
-		const mappingStatus = resolvePlayerStateMappingStatus(link, season);
-		const confirmedSeasons = isDurableVerifiedLink(link)
-			? confirmedPlayerLinkSeasons(link?.evidence ?? null)
-			: [];
-		const understatRows =
-			confirmedSeasons.length === 0
-				? []
-				: (
-						await executor.query<UnderstatCohortRow>(understatCohortsSql, [
-							player.code,
-							confirmedSeasons,
-						])
-					).rows;
-		const [marketResult, currentCohortRows, historyResult] = await fplPromise;
-
-		const processResult = buildUnderstatProcess(player.type, season, mappingStatus, understatRows);
+		const shared =
+			preload?.shared ??
+			(await loadSharedProfileData(context, executor, [player.code], [player.id], seasonId));
+		const currentMarket = shared.marketById.get(playerId) ?? null;
+		const seasonRows = shared.seasonRowsByCode.get(player.code) ?? [];
+		const currentCohortRows = await loadCurrentCohort(
+			context,
+			executor,
+			seasonId,
+			player.type,
+			asOfEventId !== null,
+			startedEventIds
+		);
+		const currentRow = seasonRows.find((row) => row.season_code === season) ?? null;
+		const mappingStatus = (currentRow?.understat_mapping_status ??
+			"UNAVAILABLE") as PlayerStateMappingStatus;
+		const processResult = buildUnderstatProcessFromSeasonRows(player.type, season, seasonRows);
 		const history = addUnderstatHistory(
-			historyForPlayer(historyResult.rows, player.code),
+			historyForPlayerStateRows(seasonRows, player.code, season),
 			processResult.historyPercentiles
 		);
 		const samples = toGameweekSamples(startedEventIds, currentCohortRows.gameweekRows, playerId);
@@ -1333,7 +1462,7 @@ export const createPlayerStateRepository = (
 		const recentWindowComplete =
 			recentWindow.length === 5 && recentWindow.every((sample) => sample.covered);
 		const role = assessRole(recentSamples, previousSamples);
-		const market = marketResult.rows[0] ?? null;
+		const market = currentMarket;
 		const marketCapturedAt = iso(market?.captured_at ?? null);
 		const availability = assessAvailability(
 			market === null
@@ -1558,20 +1687,10 @@ export const createPlayerStateRepository = (
 			limitations.add("CURRENT_FPL_COVERAGE_INCOMPLETE");
 		}
 		if (!outlookCoverageComplete) limitations.add("OUTLOOK_FIXTURE_COVERAGE_UNKNOWN");
-		if (mappingStatus === "UNAVAILABLE") limitations.add("PLAYER_MAPPING_UNAVAILABLE");
-		if (mappingStatus === "UNVERIFIED") limitations.add("PLAYER_MAPPING_UNVERIFIED");
-		if (mappingStatus === "AMBIGUOUS") limitations.add("PLAYER_MAPPING_AMBIGUOUS");
-		if (mappingStatus === "QUARANTINED") limitations.add("PLAYER_MAPPING_QUARANTINED");
-		if (mappingStatus === "VERIFIED" && processResult.currentSubject === null) {
-			limitations.add("UNDERSTAT_PLAYER_DATA_UNAVAILABLE");
-		}
 		if (!process.available) {
 			limitations.add(
 				player.type === 1 ? "GKP_PERSONAL_PROCESS_UNAVAILABLE" : "REAL_WORLD_PROCESS_UNAVAILABLE"
 			);
-		}
-		if (processResult.historySeasons.length === 0) {
-			limitations.add("HISTORICAL_UNDERSTAT_UNAVAILABLE");
 		}
 		if (history.careerTrajectory.some((point) => !point.expectedMetricsAvailable)) {
 			limitations.add("OLD_FPL_EXPECTED_METRICS_MASKED");
@@ -1582,34 +1701,109 @@ export const createPlayerStateRepository = (
 			iso(processResult.currentSubject?.season_last_seen_at ?? null),
 		]);
 		const asOf =
-			latestIso([snapshot.sourceCheckedAt, marketCapturedAt, understatAsOf]) ??
-			new Date(0).toISOString();
-		const providers: PlayerStateProviderRevision[] = [
-			buildPlayerStateProviderRevision({
+			latestIso([
+				snapshot.sourceCheckedAt,
+				marketCapturedAt,
+				understatAsOf,
+				datasetRevision.refreshedAt,
+			]) ?? new Date(0).toISOString();
+		const fplCurrentAvailable = currentRow !== null;
+		const fplCurrentAnalysis: PlayerStateAnalysisStatus =
+			currentRow === null
+				? "UNAVAILABLE"
+				: currentRow.lifecycle_state === "preseason"
+					? "PRESEASON"
+					: fplSufficient
+						? "READY"
+						: "INSUFFICIENT";
+		const understatCurrentAvailable =
+			currentRow?.understat_mapping_status === "VERIFIED" &&
+			currentRow.understat_player_id !== null &&
+			(currentRow.understat_season_state === "active" ||
+				currentRow.understat_season_state === "complete") &&
+			processResult.currentSubject !== null;
+		const understatHistoryAvailable = processResult.historySeasons.length > 0;
+		const understatCurrentReasonCodes = understatCurrentAvailable
+			? processResult.assessment.available || player.type === 1
+				? []
+				: processResult.assessment.reasonCodes
+			: currentRow === null
+				? ["UNDERSTAT_CURRENT_NO_SEASON_ROW"]
+				: mappingStatus !== "VERIFIED"
+					? [`UNDERSTAT_CURRENT_MAPPING_${mappingStatus}`]
+					: ["UNDERSTAT_CURRENT_DATA_UNAVAILABLE"];
+		const sources: PlayerStateSourceCoverage[] = [
+			sourceCoverage({
 				provider: "FPL",
 				scope: "CURRENT",
-				season,
+				seasons: fplCurrentAvailable ? [season] : [],
 				revision: `${snapshot.revision}:${snapshot.publicationId}`,
 				asOf: snapshot.sourceCheckedAt,
-				available: true,
+				dataStatus: fplCurrentAvailable ? "AVAILABLE" : "UNAVAILABLE",
+				analysisStatus: fplCurrentAnalysis,
+				mappingStatus: "NOT_APPLICABLE",
+				reasonCodes:
+					fplCurrentAnalysis === "PRESEASON"
+						? ["FPL_CURRENT_PRESEASON"]
+						: fplCurrentAnalysis === "UNAVAILABLE"
+							? ["FPL_CURRENT_NO_SEASON_ROW"]
+							: fplSufficient
+								? []
+								: ["FPL_CURRENT_INSUFFICIENT"],
 			}),
-			buildPlayerStateProviderRevision({
+			sourceCoverage({
 				provider: "FPL",
 				scope: "HISTORY",
-				season: history.seasons[0] ?? season,
-				revision: history.revision,
+				seasons: history.seasons,
+				revision: datasetRevision.revision,
 				asOf: history.asOf,
-				available: history.seasons.length > 0,
+				dataStatus: "AVAILABLE",
+				analysisStatus: history.baselineSeasons.length > 0 ? "READY" : "INSUFFICIENT",
+				mappingStatus: "NOT_APPLICABLE",
+				reasonCodes: history.seasons.length === 0 ? ["FPL_HISTORY_NO_PLAYER_SEASONS"] : [],
 			}),
-			buildPlayerStateProviderRevision({
+			sourceCoverage({
 				provider: "UNDERSTAT",
 				scope: "CURRENT",
-				season,
-				revision: processResult.currentSubject?.source_hash ?? null,
+				seasons: understatCurrentAvailable ? [season] : [],
+				revision: currentRow?.understat_source_hash ?? null,
 				asOf: understatAsOf,
-				available: mappingStatus === "VERIFIED" && processResult.currentSubject !== null,
+				dataStatus: understatCurrentAvailable ? "AVAILABLE" : "UNAVAILABLE",
+				analysisStatus:
+					understatCurrentAvailable && player.type === 1
+						? "NOT_APPLICABLE"
+						: understatCurrentAvailable
+							? process.available
+								? "READY"
+								: process.rating === "INSUFFICIENT"
+									? "INSUFFICIENT"
+									: "UNAVAILABLE"
+							: "UNAVAILABLE",
+				mappingStatus,
+				reasonCodes: understatCurrentReasonCodes,
+			}),
+			sourceCoverage({
+				provider: "UNDERSTAT",
+				scope: "HISTORY",
+				seasons: processResult.historySeasons,
+				revision: understatHistoryAvailable ? datasetRevision.revision : null,
+				asOf: understatHistoryAvailable ? history.asOf : null,
+				dataStatus: understatHistoryAvailable ? "AVAILABLE" : "UNAVAILABLE",
+				analysisStatus:
+					player.type === 1
+						? "NOT_APPLICABLE"
+						: understatHistoryAvailable
+							? "READY"
+							: "INSUFFICIENT",
+				mappingStatus: understatHistoryAvailable ? "VERIFIED" : mappingStatus,
+				reasonCodes: understatHistoryAvailable ? [] : ["UNDERSTAT_HISTORY_NO_VERIFIED_SEASONS"],
 			}),
 		];
+		const providerMode: PlayerStateProviderMode = understatCurrentAvailable
+			? "FPL_WITH_UNDERSTAT_CURRENT"
+			: understatHistoryAvailable
+				? "FPL_WITH_UNDERSTAT_HISTORY"
+				: "FPL_ONLY";
 		const metricCoverage = dimensions
 			.flatMap((dimension) => dimension.metrics)
 			.filter((candidate) => candidate.capability && candidate.value !== null)
@@ -1625,7 +1819,7 @@ export const createPlayerStateRepository = (
 			asOf,
 			trend: evidenceDecision.trend,
 			confidence: evidenceDecision.withheld ? "LOW" : composed.confidence,
-			fplOnly: !process.available,
+			providerMode,
 			reasons:
 				evidenceDecision.withheld && evidenceDecision.reasonCode
 					? [
@@ -1651,14 +1845,9 @@ export const createPlayerStateRepository = (
 			careerTrajectory: history.careerTrajectory,
 			outlook,
 			coverage: {
-				fplCurrent: fplSufficient,
-				understatCurrent: process.available,
-				fplHistorySeasons: history.seasons,
-				understatHistorySeasons: processResult.historySeasons,
-				mappingStatus,
+				sources,
 				metricCoverage: [...new Set(metricCoverage)],
 				limitations: [...limitations],
-				providers,
 			},
 		};
 		await writeProfileCache(context, key, profile);

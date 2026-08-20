@@ -72,25 +72,6 @@ const currentGameweekRows: QueryResultRow[] = Array.from({ length: 10 }, (_, ind
 	}))
 ).flat();
 
-const historyRows: QueryResultRow[] = [
-	["2324", 100, 120, 2700, 170, 20, 18, 38],
-	["2324", 200, 120, 2500, 120, 8, 10, 38],
-	["2324", 300, 120, 2800, 210, 30, 22, 38],
-	["2425", 100, 120, 2800, 185, 22, 20, 38],
-	["2425", 200, 120, 2600, 130, 10, 11, 38],
-	["2425", 300, 120, 2850, 220, 34, 24, 38],
-].map(([season, playerCode, position, minutes, totalPoints, bonus, returns, gameweeks]) => ({
-	season,
-	player_code: playerCode,
-	position: Number(position) / 40,
-	minutes,
-	total_points: totalPoints,
-	bonus,
-	return_count: returns,
-	gameweek_count: gameweeks,
-	as_of: `${season}-05-20T00:00:00.000Z`,
-}));
-
 const verifiedLink: QueryResultRow = {
 	status: "auto_verified",
 	rule_id: "understat-fpl-player-name",
@@ -133,6 +114,95 @@ const defaultUnderstatRows: QueryResultRow[] = [
 	understatRow("2526", 300, 3000, 1000, 8, 6),
 ];
 
+const playerStateRows = (fixture: QueryFixture): QueryResultRow[] => {
+	const link = fixture.link === undefined ? verifiedLink : fixture.link;
+	if (fixture.understatError) throw fixture.understatError;
+	const providerRows = fixture.understatRows ?? defaultUnderstatRows;
+	const providerBySeasonAndCode = new Map(
+		providerRows.map((row) => [`${row.season}:${row.player_code}`, row] as const)
+	);
+	const statusForSeason = (season: string): string => {
+		if (link === null) return "UNAVAILABLE";
+		if (link.status === "ambiguous") return "AMBIGUOUS";
+		if (link.status === "quarantined") return "QUARANTINED";
+		if (isVerifiedStatus(link.status)) {
+			const confirmed =
+				typeof link.evidence === "object" && link.evidence !== null
+					? (link.evidence as { confirmedSeasons?: unknown }).confirmedSeasons
+					: [];
+			return Array.isArray(confirmed) && confirmed.includes(season) ? "VERIFIED" : "UNVERIFIED";
+		}
+		return "UNVERIFIED";
+	};
+	const rows: QueryResultRow[] = [];
+	for (const [season, minutes, points, bonus, returns] of [
+		["2324", 2700, 170, 20, 18],
+		["2425", 2800, 185, 22, 20],
+		["2526", 1000, 70, 9, 8],
+	] as const) {
+		for (const [playerCode, elementId] of [
+			[100, 10],
+			[200, 20],
+		] as const) {
+			const mappingStatus = statusForSeason(season);
+			const provider =
+				mappingStatus === "VERIFIED"
+					? providerBySeasonAndCode.get(`${season}:${playerCode}`)
+					: undefined;
+			const providerMinutes = provider ? Number(provider.minutes) : null;
+			const providerSourceHash: unknown = provider?.source_hash;
+			const providerUpdatedAt: unknown = provider?.updated_at;
+			const per90 = (value: number | string | null | undefined): number | null =>
+				provider && providerMinutes && value !== null && value !== undefined
+					? (Number(value) * 90) / providerMinutes
+					: null;
+			rows.push({
+				season_id: season === "2526" ? 2025 : season === "2425" ? 2024 : 2023,
+				season_code: season,
+				lifecycle_state: season === "2526" ? "active" : "completed",
+				player_code: playerCode,
+				element_id: elementId,
+				element_type: 3,
+				fpl_minutes: minutes,
+				fpl_gameweeks: season === "2526" ? 10 : 38,
+				fpl_points_per_90: (points * 90) / minutes,
+				fpl_return_rate: (returns / (season === "2526" ? 10 : 38)) * 100,
+				fpl_bonus_per_90: (bonus * 90) / minutes,
+				fpl_position_percentile: playerCode === 100 ? 75 : 45,
+				fpl_peer_count: 2,
+				expected_metrics_available: season !== "2324",
+				fpl_source_hash: `${season}-${playerCode}-fpl-hash`,
+				fpl_source_updated_at: "2026-08-08T00:00:00.000Z",
+				understat_mapping_status: mappingStatus,
+				understat_player_id: provider ? Number(provider.player_id) : null,
+				understat_season_state: provider ? "complete" : null,
+				understat_minutes: providerMinutes,
+				understat_npxg_per_90: per90(provider?.non_penalty_xg),
+				understat_xa_per_90: per90(provider?.xa),
+				understat_shots_per_90: per90(provider?.shots),
+				understat_key_passes_per_90: per90(provider?.key_passes),
+				understat_xg_chain_per_90: per90(provider?.xg_chain),
+				understat_xg_buildup_per_90: per90(provider?.xg_buildup),
+				understat_npxg_percentile: provider ? 70 : null,
+				understat_xa_percentile: provider ? 65 : null,
+				understat_shots_percentile: provider ? 60 : null,
+				understat_key_passes_percentile: provider ? 55 : null,
+				understat_xg_chain_percentile: provider ? 68 : null,
+				understat_xg_buildup_percentile: provider ? 62 : null,
+				understat_process_percentile: provider ? 65 : null,
+				understat_peer_count: provider ? 2 : 0,
+				understat_source_hash: typeof providerSourceHash === "string" ? providerSourceHash : null,
+				understat_source_updated_at:
+					typeof providerUpdatedAt === "string" || providerUpdatedAt instanceof Date
+						? providerUpdatedAt
+						: null,
+				refreshed_at: "2026-08-08T00:00:00.000Z",
+			});
+		}
+	}
+	return rows;
+};
+
 const makeExecutor = (
 	fixture: QueryFixture = {}
 ): Readonly<{ executor: QueryExecutor; queries: string[] }> => {
@@ -141,16 +211,26 @@ const makeExecutor = (
 		query: async <Row extends QueryResultRow>(text: string) => {
 			queries.push(text);
 			let rows: QueryResultRow[];
-			if (text.includes("player-state:provider-link-verified")) {
-				rows =
-					fixture.link === undefined || isVerifiedStatus(fixture.link?.status)
-						? [fixture.link ?? verifiedLink]
-						: [];
-			} else if (text.includes("player-state:provider-link-unresolved")) {
-				rows = fixture.link && !isVerifiedStatus(fixture.link.status) ? [fixture.link] : [];
-			} else if (text.includes("player-state:understat-cohorts")) {
-				if (fixture.understatError) throw fixture.understatError;
-				rows = fixture.understatRows ?? defaultUnderstatRows;
+			if (text.includes("player-state:dataset-revision")) {
+				rows = [
+					{
+						revision: 17,
+						method_version: "1",
+						source_updated_at: "2026-08-08T00:00:00.000Z",
+						refreshed_at: "2026-08-08T00:00:00.000Z",
+					},
+				];
+			} else if (text.includes("player-state:season-rows")) {
+				rows = playerStateRows(fixture);
+			} else if (text.includes("player-state:markets-batch")) {
+				rows = [
+					{
+						element_id: 10,
+						status: "a",
+						chance_this_round: 100,
+						captured_at: new Date().toISOString(),
+					},
+				];
 			} else if (text.includes("player-state:market")) {
 				rows = [
 					{
@@ -163,8 +243,6 @@ const makeExecutor = (
 				rows = currentSummaryRows;
 			} else if (text.includes("player-state:current-gameweeks")) {
 				rows = currentGameweekRows;
-			} else if (text.includes("player-state:fpl-history")) {
-				rows = historyRows;
 			} else {
 				throw new Error(`Unexpected query: ${text}`);
 			}
@@ -339,7 +417,7 @@ describe("Player State repository", () => {
 		).toHaveLength(1);
 	});
 
-	it("uses a season-confirmed bridge link and direct Understat PostgreSQL cohort", async () => {
+	it("uses the season projection and exposes current plus historical Understat coverage", async () => {
 		const redis = new TestRedis();
 		const { executor, queries } = makeExecutor();
 		let snapshotLoads = 0;
@@ -352,16 +430,25 @@ describe("Player State repository", () => {
 		});
 
 		const first = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
-		expect(first?.coverage.mappingStatus).toBe("VERIFIED");
-		expect(first?.coverage.understatCurrent).toBe(true);
-		expect(first?.fplOnly).toBe(false);
+		expect(first?.providerMode).toBe("FPL_WITH_UNDERSTAT_CURRENT");
+		expect(
+			first?.coverage.sources.find(
+				(source) => source.provider === "UNDERSTAT" && source.scope === "CURRENT"
+			)?.mappingStatus
+		).toBe("VERIFIED");
+		expect(
+			first?.coverage.sources.find(
+				(source) => source.provider === "UNDERSTAT" && source.scope === "HISTORY"
+			)?.seasons
+		).toEqual(["2425"]);
 		expect(
 			first?.dimensions
 				.find((dimension) => dimension.kind === "REAL_WORLD_PROCESS")
 				?.metrics.map((item) => item.code)
 		).toContain("UNDERSTAT_NPXG_PER_90");
-		expect(queries.some((query) => query.includes("bridge.entity_links"))).toBe(true);
-		expect(queries.some((query) => query.includes("understat.player_seasons"))).toBe(true);
+		expect(queries.filter((query) => query.includes("player-state:season-rows"))).toHaveLength(1);
+		expect(queries.some((query) => query.includes("bridge.entity_links"))).toBe(false);
+		expect(queries.some((query) => query.includes("understat.player_seasons"))).toBe(false);
 		expect(redis.setCalls[0]?.slice(2)).toEqual(["EX", PLAYER_STATE_SUCCESS_CACHE_TTL_SECONDS]);
 		expect(redis.setCalls[0]?.[0]).toStartWith("llm:gql:9:");
 
@@ -381,25 +468,44 @@ describe("Player State repository", () => {
 		});
 
 		const profile = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
-		expect(profile?.fplOnly).toBe(true);
-		expect(profile?.coverage.mappingStatus).toBe("UNAVAILABLE");
-		expect(profile?.coverage.limitations).toContain("PLAYER_MAPPING_UNAVAILABLE");
+		expect(profile?.providerMode).toBe("FPL_ONLY");
+		expect(
+			profile?.coverage.sources.find(
+				(source) => source.provider === "UNDERSTAT" && source.scope === "CURRENT"
+			)?.mappingStatus
+		).toBe("UNAVAILABLE");
+		expect(
+			profile?.coverage.sources.find(
+				(source) => source.provider === "UNDERSTAT" && source.scope === "HISTORY"
+			)?.dataStatus
+		).toBe("UNAVAILABLE");
+		expect(profile?.coverage.limitations).not.toContain("PLAYER_MAPPING_UNAVAILABLE");
 		expect(queries.some((query) => query.includes("player-state:understat-cohorts"))).toBe(false);
 	});
 
-	it("keeps a verified mapping but degrades to FPL-only when Understat has no row", async () => {
+	it("keeps Understat history when the current Understat season has no row", async () => {
 		const redis = new TestRedis();
-		const { executor } = makeExecutor({ understatRows: [] });
+		const { executor } = makeExecutor({
+			understatRows: defaultUnderstatRows.filter((row) => row.season === "2425"),
+		});
 		const repository = createPlayerStateRepository({
 			executor,
 			loadCoreSnapshot: async () => snapshot(),
 		});
 
 		const profile = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
-		expect(profile?.coverage.mappingStatus).toBe("VERIFIED");
-		expect(profile?.coverage.understatCurrent).toBe(false);
-		expect(profile?.coverage.limitations).toContain("UNDERSTAT_PLAYER_DATA_UNAVAILABLE");
-		expect(profile?.fplOnly).toBe(true);
+		expect(profile?.providerMode).toBe("FPL_WITH_UNDERSTAT_HISTORY");
+		expect(
+			profile?.coverage.sources.find(
+				(source) => source.provider === "UNDERSTAT" && source.scope === "CURRENT"
+			)?.dataStatus
+		).toBe("UNAVAILABLE");
+		expect(
+			profile?.coverage.sources.find(
+				(source) => source.provider === "UNDERSTAT" && source.scope === "HISTORY"
+			)?.seasons
+		).toEqual(["2425"]);
+		expect(profile?.coverage.limitations).not.toContain("UNDERSTAT_PLAYER_DATA_UNAVAILABLE");
 	});
 
 	it("preserves an ambiguous mapping without reading Understat metrics", async () => {
@@ -418,9 +524,13 @@ describe("Player State repository", () => {
 		});
 
 		const profile = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
-		expect(profile?.coverage.mappingStatus).toBe("AMBIGUOUS");
-		expect(profile?.coverage.limitations).toContain("PLAYER_MAPPING_AMBIGUOUS");
-		expect(profile?.fplOnly).toBe(true);
+		expect(profile?.providerMode).toBe("FPL_ONLY");
+		expect(
+			profile?.coverage.sources.find(
+				(source) => source.provider === "UNDERSTAT" && source.scope === "CURRENT"
+			)?.mappingStatus
+		).toBe("AMBIGUOUS");
+		expect(profile?.coverage.limitations).not.toContain("PLAYER_MAPPING_AMBIGUOUS");
 		expect(queries.some((query) => query.includes("player-state:understat-cohorts"))).toBe(false);
 	});
 

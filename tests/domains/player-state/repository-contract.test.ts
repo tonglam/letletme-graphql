@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
-	buildPlayerStateProviderRevision,
+	sourceCoverage,
 	resolvePlayerStateMappingStatus,
 	type ProviderLinkRow,
 } from "../../../src/domains/player-state/coverage";
@@ -32,21 +32,27 @@ describe("Player State provider contract", () => {
 	});
 
 	it("does not label a missing provider revision as stale", () => {
-		const missing = buildPlayerStateProviderRevision({
+		const missing = sourceCoverage({
 			provider: "UNDERSTAT",
 			scope: "CURRENT",
-			season: "2627",
+			seasons: [],
 			revision: null,
 			asOf: null,
-			available: false,
+			dataStatus: "UNAVAILABLE",
+			analysisStatus: "UNAVAILABLE",
+			mappingStatus: "UNAVAILABLE",
+			reasonCodes: ["UNDERSTAT_CURRENT_NO_SEASON_ROW"],
 		});
-		const old = buildPlayerStateProviderRevision({
+		const old = sourceCoverage({
 			provider: "UNDERSTAT",
 			scope: "CURRENT",
-			season: "2627",
+			seasons: ["2627"],
 			revision: "old-revision",
 			asOf: "2020-01-01T00:00:00.000Z",
-			available: true,
+			dataStatus: "AVAILABLE",
+			analysisStatus: "READY",
+			mappingStatus: "VERIFIED",
+			reasonCodes: [],
 		});
 
 		expect(missing.stale).toBe(false);
