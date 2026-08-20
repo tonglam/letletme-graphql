@@ -287,6 +287,19 @@ describe("tournament cache wire contracts", () => {
 				createdAt: "2026-02-30T00:00:00.000Z",
 			})
 		).toBe(false);
+		expect(
+			tournamentCacheTestables.isTournamentSetupWarningSummaryCache({
+				category: "insights",
+				affectedCount: 1,
+				repairExhausted: true,
+			})
+		).toBe(true);
+		expect(
+			tournamentCacheTestables.isTournamentSetupWarningSummaryCache({
+				category: "insights",
+				affectedCount: 1,
+			})
+		).toBe(false);
 	});
 
 	it("requires all persisted ranking, season, battle and H2H fields", () => {
@@ -2119,6 +2132,7 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 				return { data: [row], error: null };
 			},
 		};
+		let issueResult: { data: unknown[] | null; error: unknown } = { data: [], error: null };
 		const issueQuery = {
 			select() {
 				return issueQuery;
@@ -2130,7 +2144,7 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 				return issueQuery;
 			},
 			async order() {
-				return { data: [], error: null };
+				return issueResult;
 			},
 		};
 		const context = {
@@ -2183,6 +2197,14 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 		const cachedResult = await tournamentsRepository.getEntryTournaments(context, 55);
 		expect(cachedResult).toHaveLength(1);
 		expect(cacheWrites).toBe(1);
+
+		cache.delete(testCacheKey("tournaments:entry:55"));
+		issueResult = { data: null, error: new Error("database unavailable") };
+		await expect(tournamentsRepository.getEntryTournaments(context, 55)).rejects.toThrow(
+			"Failed to load tournament setup warning summaries"
+		);
+		expect(cacheWrites).toBe(1);
+		expect(cache.has(testCacheKey("tournaments:entry:55"))).toBe(false);
 	});
 });
 

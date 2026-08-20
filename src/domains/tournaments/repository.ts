@@ -1160,7 +1160,8 @@ const isTournamentSetupWarningSummaryCache = (
 	isRequired(value, "category", (candidate) =>
 		isEnumValue(TournamentSetupWarningCategory, candidate)
 	) &&
-	isRequired(value, "affectedCount", isSafeInteger);
+	isRequired(value, "affectedCount", isSafeInteger) &&
+	isRequired(value, "repairExhausted", (candidate) => typeof candidate === "boolean");
 
 const isTournamentInfoCache = (value: unknown): value is TournamentInfo => {
 	if (!isRecord(value)) return false;
@@ -1627,8 +1628,7 @@ const getTournamentSetupWarningSummariesByTournamentIds = async (
 			{ err: result.error, tournamentCount: uniqueIds.length },
 			"Failed to load tournament setup warning summaries"
 		);
-		for (const tournamentId of uniqueIds) summaries.set(tournamentId, []);
-		return summaries;
+		throw new Error("Failed to load tournament setup warning summaries");
 	}
 
 	const issuesByTournament = new Map<number, TournamentSetupIssueDiagnostic[]>();
@@ -2348,6 +2348,7 @@ const isSeasonSnapshotCache = (value: unknown): value is TournamentSeasonSnapsho
 
 export const tournamentCacheTestables = {
 	isTournamentInfoCache,
+	isTournamentSetupWarningSummaryCache,
 	isTournamentEventResultCache,
 	isRankingSummaryCache,
 	isBattleResultCache,
