@@ -1,0 +1,64 @@
+name: GraphQL rate-limit monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: graphql-rate-limit-monitor
+  cancel-in-progress: true
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Configure VPS SSH
+        env:
+          VPS_HOST: ${{ vars.VPS_HOST }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_KEY" > "$HOME/.ssh/letletme_graphql"
+          chmod 600 "$HOME/.ssh/letletme_graphql"
+          ssh-keyscan -H "$VPS_HOST" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Read two-day aggregate and enforce alert gates
+        env:
+          VPS_HOST: ${{ vars.VPS_HOST }}
+          VPS_USER: ${{ vars.VPS_USER }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        run: |
+          set -euo pipefail
+          case "$VPS_WORKDIR" in
+            /*) ;;
+            *) echo "VPS_WORKDIR must be absolute"; exit 1 ;;
+          esac
+          test "$VPS_WORKDIR" != "/"
+          remote_workdir=$(printf '%q' "$VPS_WORKDIR")
+          ssh -i "$HOME/.ssh/letletme_graphql" \
+            -o BatchMode=yes \
+            "$VPS_USER@$VPS_HOST" \
+            "cd $remote_workdir && APP_ENV_FILE=.env.deploy docker compose exec -T graphql bun run rate-limit:report --days 2 --json" \
+            > "$RUNNER_TEMP/rate-limit-report.json"
+          jq -e '.policy == "graphql-v3" and (.days == 2)' \
+            "$RUNNER_TEMP/rate-limit-report.json"
+          jq -e '
+            .summary.interactiveDeniedRate <= 0.01 and
+            .summary.globalDenied == 0
+          ' "$RUNNER_TEMP/rate-limit-report.json"
+
+      - name: Retain non-sensitive report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: graphql-rate-limit-report-${{ github.run_id }}
+          path: ${{ runner.temp }}/rate-limit-report.json
+          if-no-files-found: warn
+          retention-days: 14

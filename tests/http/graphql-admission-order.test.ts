@@ -33,4 +33,20 @@ describe("GraphQL admission ordering", () => {
 		expect(timingPayload).not.toContain("userId");
 		expect(timingPayload).not.toContain("principal:");
 	});
+
+	it("persists the v3 shadow outcome before a legacy rejection can return", () => {
+		const source = readFileSync("src/index.ts", "utf8");
+		const decisionBlock = source.indexOf("if (principalAdmissionResult.v3Decision)");
+		const aggregate = source.indexOf("await recordRequestRateLimitOutcome", decisionBlock);
+		const earlyResponse = source.indexOf("if (principalAdmissionResult.response)", decisionBlock);
+
+		expect(decisionBlock).toBeGreaterThan(-1);
+		expect(aggregate).toBeGreaterThan(decisionBlock);
+		expect(aggregate).toBeLessThan(earlyResponse);
+		expect(source).toContain("shadowLegacyPreAuthResponse = preAuthAdmission.response");
+		expect(source).toContain("shadowSkipLegacy: shadowLegacyPreAuthResponse !== null");
+		expect(source).toContain("v3Checks: v3PrincipalAdmission.checks");
+		expect(source).toContain("graphQLV3EarlyFailureRateLimitChecks");
+		expect(source).toContain('"earlyFailureAdmission"');
+	});
 });

@@ -76,17 +76,72 @@ The service exposes:
 Requests are bounded by body size, depth, root-field count, aliases, AST nodes,
 weighted complexity, unique entry IDs, and Redis-backed rate limits.
 
-GraphQL admission has two stages: a fixed-cost global plus browser-ingress
-request gate before principal verification, followed by complexity-weighted
-authenticated, anonymous, or shared-public admission. Defaults are 480 browser
-requests/minute, 900 authenticated units/minute, 600 anonymous units/minute,
-and a fixed 1200-unit shared public budget. Mini market and player-picker desks
-charge their root floors instead of `ceil(complexity / 10)`, so a slow browse
-session is not treated like a scrape. The deploy-tunable values are
-`GRAPHQL_BROWSER_INGRESS_RATE_LIMIT`, `GRAPHQL_AUTHENTICATED_RATE_LIMIT`, and
-`GRAPHQL_ANONYMOUS_RATE_LIMIT`; every value must be a positive integer.
-Production VPS `GRAPHQL_ENV` must be updated to the same numbers or the live
-process keeps the previous 120/300/120 secrets.
+GraphQL admission supports `legacy`, `shadow-v3`, and `enforce-v3` modes.
+The versioned profile is `src/config/rate-limit/production.json`. v3 uses
+Redis-time continuous token buckets, a global emergency request gate, isolated
+Mini device/user and NAT-abuse buckets, workload-specific Web RSC budgets, and
+an independent service budget. `enforce-v3` refuses to start until the profile
+contains reviewed 300-concurrent capacity evidence with at least 40% headroom.
+
+The three legacy-v2 limits remain environment variables only for compatibility
+and rollback: `GRAPHQL_BROWSER_INGRESS_RATE_LIMIT`,
+`GRAPHQL_AUTHENTICATED_RATE_LIMIT`, and
+`GRAPHQL_ANONYMOUS_RATE_LIMIT`. Select the runtime with
+`GRAPHQL_RATE_LIMIT_MODE=legacy|shadow-v3|enforce-v3`. The deploy workflow has
+explicit persisted rollout profiles for P0, shadow, enforce, compatibility
+restoration, and rollback; P0 captures the previous environment, image, SHA,
+health, metrics, and container resource baseline before replacement.
+
+Redis keeps fourteen days of controlled-dimension aggregates and denied
+12-character HMAC fingerprints. It never stores raw IPs, device IDs, tokens,
+variables, or queries. Read the report with:
+
+```bash
+bun run rate-limit:report --days 2 --json
+```
+
+The five-minute monitor fails when actual interactive 429s exceed 1% or any
+global 429 occurs and retains the non-sensitive report as a workflow artifact.
+Run the capacity harness from an external load generator, with secrets supplied
+only through its process environment. It executes the exact 180 Mini / 60 RSC /
+45 signed-in / 15 compatibility-service model at 50, 100, 200, and 300
+concurrency, the 10-second burst, the one-device abuse isolation check, and
+five-minute higher-throughput probes that stop at the first failed level. The
+report gates GraphQL 429 and non-429 errors, p95/p99, readiness, PostgreSQL pool
+waiting, CPU, memory, NAT-peer isolation, and the required 40% headroom. It
+derives `S` from the highest passing probe; profile generation has no manual
+`S` override. `LOAD_SESSION_COOKIES_JSON` must contain 45 distinct
+temporary test sessions; neither sessions nor signing credentials are written
+to the report.
+
+```bash
+bun run rate-limit:load --output load-test/run-123.json
+```
+
+Required environment names are `LOAD_WEB_ORIGIN`, `LOAD_GRAPHQL_ORIGIN`,
+`BACKEND_PROXY_SECRET`, `GRAPHQL_SERVICE_TOKEN`, `LOAD_METRICS_TOKEN`,
+`LOAD_MEMORY_LIMIT_BYTES`, `LOAD_CPU_CORES`, and
+`LOAD_SESSION_COOKIES_JSON`. Short-duration overrides are available for harness
+smoke tests, but are not valid capacity evidence. After the full stepped run,
+derive weighted workload rates from the matching structured v3 decision logs,
+using a command that rejects failed runs and any 300-concurrent stage shorter
+than fifteen minutes:
+
+```bash
+bun run rate-limit:observe \
+  --load-report load-test/run-123.json \
+  --logs load-test/run-123-graphql.jsonl \
+  --output load-test/run-123-observation.json
+```
+
+Then generate the reviewed production profile from the measured sustainable
+RPS embedded in that observation and the target traffic:
+
+```bash
+bun run rate-limit:profile --observation load-test/run-123-observation.json \
+  --evidence load-test/run-123.json \
+  --output src/config/rate-limit/production.json
+```
 
 ## Verification
 

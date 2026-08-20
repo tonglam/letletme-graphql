@@ -1,0 +1,21 @@
+{
+	"targetConcurrent": 300,
+	"sustainableRps": 40,
+	"totalRequestPerSecond": 10,
+	"webRsc": {
+		"classRequestPerSecond": 4,
+		"workloadWeightedPerSecond": {
+			"interactive": 1,
+			"home": 1,
+			"fixtures": 6,
+			"market": 6,
+			"player-stats": 10,
+			"gameweek": 2,
+			"public-other": 1
+		}
+	},
+	"service": {
+		"classRequestPerSecond": 1,
+		"weightedPerSecond": 4
+	}
+}

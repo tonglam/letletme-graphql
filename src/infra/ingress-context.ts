@@ -1,20 +1,49 @@
 import { createHash, createHmac, timingSafeEqual } from "crypto";
 import { env } from "./env";
 import { hasExactFields } from "./exact-fields";
+import {
+	GRAPHQL_TRAFFIC_CLASSES,
+	GRAPHQL_WORKLOADS,
+	type GraphQLTrafficClass,
+	type GraphQLWorkload,
+} from "./ingress-envelope";
 
-type IngressEnvelope = {
+export {
+	GRAPHQL_TRAFFIC_CLASSES,
+	GRAPHQL_WORKLOADS,
+	type GraphQLTrafficClass,
+	type GraphQLWorkload,
+} from "./ingress-envelope";
+
+type IngressEnvelopeV1 = {
 	aud?: unknown;
 	sub?: unknown;
 	iat?: unknown;
 	exp?: unknown;
 };
 
-export type VerifiedIngressContext = { subject: string };
+type IngressEnvelopeV2 = {
+	v?: unknown;
+	aud?: unknown;
+	trafficClass?: unknown;
+	subject?: unknown;
+	abuseSubject?: unknown;
+	workload?: unknown;
+	iat?: unknown;
+	exp?: unknown;
+};
+
+export type VerifiedIngressContext = {
+	readonly version: 1 | 2;
+	readonly subject: string;
+	readonly abuseSubject: string | null;
+	readonly trafficClass: GraphQLTrafficClass;
+	readonly workload: GraphQLWorkload;
+};
 
 export const GRAPHQL_SERVICE_TOKEN_HEADER = "X-GraphQL-Service-Token";
 export const GRAPHQL_SERVICE_RATE_LIMIT_SUBJECT = "service:web-public-rsc";
-// Must mirror letletme-web's fixed public RSC ingress purpose. The HMAC keeps
-// this shared budget unavailable to arbitrary signed user/client subjects.
+// v1 compatibility only. New public RSC callers use a v2 web_rsc envelope.
 export const WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT = createHmac("sha256", env.BACKEND_PROXY_SECRET)
 	.update("rate-limit:web-public-rsc")
 	.digest("hex");
@@ -22,10 +51,13 @@ export const WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT = createHmac("sha256", env.BACKEN
 export type GraphQLIngressClass = "signed" | "service" | "untrusted";
 
 export type GraphQLIngress = {
-	class: GraphQLIngressClass;
-	trusted: boolean;
-	subject: string | null;
-	ingressContext: VerifiedIngressContext | null;
+	readonly class: GraphQLIngressClass;
+	readonly trusted: boolean;
+	readonly subject: string | null;
+	readonly abuseSubject: string | null;
+	readonly trafficClass: GraphQLTrafficClass;
+	readonly workload: GraphQLWorkload;
+	readonly ingressContext: VerifiedIngressContext | null;
 };
 
 const equalBase64Url = (left: string, right: string): boolean => {
@@ -41,6 +73,79 @@ const equalSecret = (left: string, right: string): boolean => {
 	return timingSafeEqual(actual, expected);
 };
 
+const isOpaqueSubject = (value: unknown): value is string =>
+	typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+
+const validLifetime = (envelope: { iat?: unknown; exp?: unknown }, nowSeconds: number): boolean => {
+	const issuedAt =
+		typeof envelope.iat === "number" && Number.isSafeInteger(envelope.iat) ? envelope.iat : null;
+	const expiresAt =
+		typeof envelope.exp === "number" && Number.isSafeInteger(envelope.exp) ? envelope.exp : null;
+	return Boolean(
+		issuedAt !== null &&
+		expiresAt !== null &&
+		issuedAt <= nowSeconds + 5 &&
+		expiresAt >= nowSeconds &&
+		expiresAt - issuedAt <= 60
+	);
+};
+
+const verifyEnvelopeV1 = (
+	envelope: IngressEnvelopeV1,
+	nowSeconds: number
+): VerifiedIngressContext | null => {
+	if (
+		!hasExactFields(envelope, ["aud", "sub", "iat", "exp"]) ||
+		envelope.aud !== "letletme-graphql" ||
+		!isOpaqueSubject(envelope.sub) ||
+		!validLifetime(envelope, nowSeconds)
+	) {
+		return null;
+	}
+	return {
+		version: 1,
+		subject: envelope.sub,
+		abuseSubject: null,
+		trafficClass: "legacy",
+		workload: "public-other",
+	};
+};
+
+const verifyEnvelopeV2 = (
+	envelope: IngressEnvelopeV2,
+	nowSeconds: number
+): VerifiedIngressContext | null => {
+	if (
+		!hasExactFields(envelope, [
+			"v",
+			"aud",
+			"trafficClass",
+			"subject",
+			"abuseSubject",
+			"workload",
+			"iat",
+			"exp",
+		]) ||
+		envelope.v !== 2 ||
+		envelope.aud !== "letletme-graphql" ||
+		!GRAPHQL_TRAFFIC_CLASSES.includes(envelope.trafficClass as GraphQLTrafficClass) ||
+		envelope.trafficClass === "legacy" ||
+		!isOpaqueSubject(envelope.subject) ||
+		!(envelope.abuseSubject === null || isOpaqueSubject(envelope.abuseSubject)) ||
+		!GRAPHQL_WORKLOADS.includes(envelope.workload as GraphQLWorkload) ||
+		!validLifetime(envelope, nowSeconds)
+	) {
+		return null;
+	}
+	return {
+		version: 2,
+		subject: envelope.subject,
+		abuseSubject: envelope.abuseSubject,
+		trafficClass: envelope.trafficClass as GraphQLTrafficClass,
+		workload: envelope.workload as GraphQLWorkload,
+	};
+};
+
 /** Verify the short-lived, opaque ingress subject signed by letletme-web. */
 export const verifyIngressContext = (
 	headers: Headers,
@@ -52,10 +157,10 @@ export const verifyIngressContext = (
 	if (!contextHeader || !signature) return null;
 
 	let payload: string;
-	let envelope: IngressEnvelope;
+	let envelope: IngressEnvelopeV1 | IngressEnvelopeV2;
 	try {
 		payload = Buffer.from(contextHeader, "base64url").toString("utf8");
-		envelope = JSON.parse(payload) as IngressEnvelope;
+		envelope = JSON.parse(payload) as IngressEnvelopeV1 | IngressEnvelopeV2;
 	} catch {
 		return null;
 	}
@@ -65,24 +170,9 @@ export const verifyIngressContext = (
 		.digest("base64url");
 	if (!equalBase64Url(signature, expected)) return null;
 
-	const issuedAt =
-		typeof envelope.iat === "number" && Number.isSafeInteger(envelope.iat) ? envelope.iat : null;
-	const expiresAt =
-		typeof envelope.exp === "number" && Number.isSafeInteger(envelope.exp) ? envelope.exp : null;
-	if (
-		!hasExactFields(envelope, ["aud", "sub", "iat", "exp"]) ||
-		envelope.aud !== "letletme-graphql" ||
-		typeof envelope.sub !== "string" ||
-		!/^[a-f0-9]{64}$/.test(envelope.sub) ||
-		issuedAt === null ||
-		expiresAt === null ||
-		issuedAt > nowSeconds + 5 ||
-		expiresAt < nowSeconds ||
-		expiresAt - issuedAt > 60
-	)
-		return null;
-
-	return { subject: envelope.sub };
+	return "v" in envelope
+		? verifyEnvelopeV2(envelope as IngressEnvelopeV2, nowSeconds)
+		: verifyEnvelopeV1(envelope as IngressEnvelopeV1, nowSeconds);
 };
 
 export const verifyGraphQLServiceToken = (
@@ -106,6 +196,9 @@ export const classifyGraphQLIngress = (
 			class: "signed",
 			trusted: true,
 			subject: ingressContext.subject,
+			abuseSubject: ingressContext.abuseSubject,
+			trafficClass: ingressContext.trafficClass,
+			workload: ingressContext.workload,
 			ingressContext,
 		};
 	}
@@ -118,6 +211,9 @@ export const classifyGraphQLIngress = (
 			class: "untrusted",
 			trusted: false,
 			subject: null,
+			abuseSubject: null,
+			trafficClass: "legacy",
+			workload: "public-other",
 			ingressContext: null,
 		};
 	}
@@ -128,6 +224,9 @@ export const classifyGraphQLIngress = (
 			class: "service",
 			trusted: true,
 			subject: GRAPHQL_SERVICE_RATE_LIMIT_SUBJECT,
+			abuseSubject: null,
+			trafficClass: "service",
+			workload: "public-other",
 			ingressContext: null,
 		};
 	}
@@ -136,6 +235,9 @@ export const classifyGraphQLIngress = (
 		class: "untrusted",
 		trusted: false,
 		subject: null,
+		abuseSubject: null,
+		trafficClass: "legacy",
+		workload: "public-other",
 		ingressContext: null,
 	};
 };

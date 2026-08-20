@@ -28,9 +28,6 @@ export const graphQLIngressFailure = (ingress: GraphQLIngress): GraphQLPolicyFai
 	return null;
 };
 
-export const GRAPHQL_RATE_LIMIT_WINDOW_SECONDS = 60;
-export const GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT = 1_500;
-export const GRAPHQL_SHARED_PUBLIC_RATE_LIMIT = 1_200;
 export const GRAPHQL_GLOBAL_ADMISSION_SUBJECT = "all-graphql-traffic";
 
 export {
@@ -49,6 +46,9 @@ export const GRAPHQL_RATE_LIMIT_SCOPES = {
 const GRAPHQL_SHARED_PUBLIC_SUBJECT = "all-public-rsc-and-service";
 
 export type GraphQLRateLimitConfig = {
+	readonly windowSeconds: number;
+	readonly globalAdmission: number;
+	readonly sharedPublic: number;
 	readonly browserIngress: number;
 	readonly authenticated: number;
 	readonly anonymous: number;
@@ -80,8 +80,8 @@ export const graphQLPreAuthRateLimitChecks = (
 				GRAPHQL_RATE_LIMIT_SCOPES.ingress,
 				`global:${GRAPHQL_GLOBAL_ADMISSION_SUBJECT}`
 			),
-			limit: GRAPHQL_GLOBAL_ADMISSION_RATE_LIMIT,
-			windowSeconds: GRAPHQL_RATE_LIMIT_WINDOW_SECONDS,
+			limit: config.globalAdmission,
+			windowSeconds: config.windowSeconds,
 			cost: 1,
 		},
 		{
@@ -94,8 +94,8 @@ export const graphQLPreAuthRateLimitChecks = (
 					? `ingress:${GRAPHQL_SHARED_PUBLIC_SUBJECT}`
 					: `ingress:${ingressSubject(ingress)}`
 			),
-			limit: sharedPublic ? GRAPHQL_SHARED_PUBLIC_RATE_LIMIT : config.browserIngress,
-			windowSeconds: GRAPHQL_RATE_LIMIT_WINDOW_SECONDS,
+			limit: sharedPublic ? config.sharedPublic : config.browserIngress,
+			windowSeconds: config.windowSeconds,
 			cost: 1,
 		},
 	];
@@ -128,8 +128,8 @@ export const graphQLPrincipalAdmission = ({
 					GRAPHQL_RATE_LIMIT_SCOPES.sharedPublic,
 					`weighted:${GRAPHQL_SHARED_PUBLIC_SUBJECT}`
 				),
-				limit: GRAPHQL_SHARED_PUBLIC_RATE_LIMIT,
-				windowSeconds: GRAPHQL_RATE_LIMIT_WINDOW_SECONDS,
+				limit: config.sharedPublic,
+				windowSeconds: config.windowSeconds,
 				cost: boundedCost,
 			},
 		};
@@ -142,7 +142,7 @@ export const graphQLPrincipalAdmission = ({
 				scope: GRAPHQL_RATE_LIMIT_SCOPES.authenticated,
 				key: rateLimitKey(GRAPHQL_RATE_LIMIT_SCOPES.authenticated, principalSubject(principal)),
 				limit: config.authenticated,
-				windowSeconds: GRAPHQL_RATE_LIMIT_WINDOW_SECONDS,
+				windowSeconds: config.windowSeconds,
 				cost: boundedCost,
 			},
 		};
@@ -154,7 +154,7 @@ export const graphQLPrincipalAdmission = ({
 			scope: GRAPHQL_RATE_LIMIT_SCOPES.anonymous,
 			key: rateLimitKey(GRAPHQL_RATE_LIMIT_SCOPES.anonymous, `weighted:${ingressSubject(ingress)}`),
 			limit: config.anonymous,
-			windowSeconds: GRAPHQL_RATE_LIMIT_WINDOW_SECONDS,
+			windowSeconds: config.windowSeconds,
 			cost: boundedCost,
 		},
 	};

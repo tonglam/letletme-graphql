@@ -5,6 +5,7 @@ import {
 	GRAPHQL_AUTHENTICATED_RATE_LIMIT_DEFAULT,
 	GRAPHQL_BROWSER_INGRESS_RATE_LIMIT_DEFAULT,
 } from "../http/rate-limit-defaults";
+import { parseGraphQLRateLimitMode } from "../http/rate-limit-policy-v3";
 
 type EnvKey =
 	| "NODE_ENV"
@@ -20,6 +21,7 @@ type EnvKey =
 	| "GRAPHQL_SERVICE_TOKEN"
 	| "METRICS_TOKEN"
 	| "CORS_ORIGIN"
+	| "GRAPHQL_RATE_LIMIT_MODE"
 	| "GRAPHQL_BROWSER_INGRESS_RATE_LIMIT"
 	| "GRAPHQL_AUTHENTICATED_RATE_LIMIT"
 	| "GRAPHQL_ANONYMOUS_RATE_LIMIT";
@@ -99,8 +101,9 @@ export const env = {
 	// CORS
 	CORS_ORIGIN,
 
-	// Two-stage GraphQL admission. The global and shared-public ceilings remain
-	// fixed operational safety contracts; these three are deploy-tunable.
+	// v3 uses the versioned production profile. These three legacy-v2 values
+	// remain deploy-tunable only for compatibility and rollback.
+	GRAPHQL_RATE_LIMIT_MODE: parseGraphQLRateLimitMode(readEnv("GRAPHQL_RATE_LIMIT_MODE")),
 	GRAPHQL_BROWSER_INGRESS_RATE_LIMIT: readPositiveInteger(
 		"GRAPHQL_BROWSER_INGRESS_RATE_LIMIT",
 		GRAPHQL_BROWSER_INGRESS_RATE_LIMIT_DEFAULT
