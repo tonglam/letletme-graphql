@@ -14,6 +14,10 @@ type QueryFixture = Readonly<{
 	link?: QueryResultRow | null;
 	understatRows?: QueryResultRow[];
 	understatError?: Error;
+	omitCurrentSeasonRows?: boolean;
+	currentLifecycleState?: string;
+	closedHistoricalSeason?: boolean;
+	negativeCurrentPoints?: boolean;
 }>;
 
 const isVerifiedStatus = (status: unknown): boolean =>
@@ -140,6 +144,7 @@ const playerStateRows = (fixture: QueryFixture): QueryResultRow[] => {
 		["2425", 2800, 185, 22, 20],
 		["2526", 1000, 70, 9, 8],
 	] as const) {
+		if (fixture.omitCurrentSeasonRows && season === "2526") continue;
 		for (const [playerCode, elementId] of [
 			[100, 10],
 			[200, 20],
@@ -159,12 +164,21 @@ const playerStateRows = (fixture: QueryFixture): QueryResultRow[] => {
 			rows.push({
 				season_id: season === "2526" ? 2025 : season === "2425" ? 2024 : 2023,
 				season_code: season,
-				lifecycle_state: season === "2526" ? "active" : "completed",
+				lifecycle_state:
+					season === "2526"
+						? (fixture.currentLifecycleState ?? "active")
+						: fixture.closedHistoricalSeason
+							? "closed"
+							: "completed",
 				player_code: playerCode,
 				element_id: elementId,
 				element_type: 3,
 				fpl_minutes: minutes,
 				fpl_gameweeks: season === "2526" ? 10 : 38,
+				fpl_total_points: fixture.negativeCurrentPoints && season === "2526" ? -5 : points,
+				fpl_starts: season === "2526" ? 10 : 30,
+				fpl_clean_sheets: season === "2526" ? 2 : 8,
+				fpl_saves: 0,
 				fpl_points_per_90: (points * 90) / minutes,
 				fpl_return_rate: (returns / (season === "2526" ? 10 : 38)) * 100,
 				fpl_bonus_per_90: (bonus * 90) / minutes,
@@ -375,9 +389,16 @@ const snapshot = (players = true): CoreDataSnapshot => ({
 	})),
 });
 
-const makeContext = (redis: TestRedis): GraphQLContext =>
+const makeContext = (
+	redis: TestRedis,
+	lifecycleState?: "reference_only" | "completed" | "preseason" | "active" | "closed"
+): GraphQLContext =>
 	({
-		currentSeason: { seasonId: 2025, seasonCode: "2526" },
+		currentSeason: {
+			seasonId: 2025,
+			seasonCode: "2526",
+			...(lifecycleState ? { lifecycleState } : {}),
+		},
 		dataRevision: "9",
 		redis,
 		logger: testLogger,
@@ -451,6 +472,23 @@ describe("Player State repository", () => {
 		expect(queries.some((query) => query.includes("understat.player_seasons"))).toBe(false);
 		expect(redis.setCalls[0]?.slice(2)).toEqual(["EX", PLAYER_STATE_SUCCESS_CACHE_TTL_SECONDS]);
 		expect(redis.setCalls[0]?.[0]).toStartWith("llm:gql:9:");
+		expect(first?.seasonTimeline.map((point) => point.season)).toEqual(["2526", "2425", "2324"]);
+		expect(first?.seasonTimeline[0]).toMatchObject({
+			season: "2526",
+			phase: "ACTIVE",
+			position: 3,
+			fplTotalPoints: 70,
+		});
+		expect(first?.seasonTimeline[0]?.signals.map((signal) => signal.code)).toEqual([
+			"UNDERSTAT_NPXG_XA_PER_90",
+			"UNDERSTAT_KEY_PASSES_PER_90",
+		]);
+		expect(
+			first?.seasonTimeline[0]?.signals.every((signal) => signal.analysisStatus === "READY")
+		).toBe(true);
+		expect(
+			first?.seasonTimeline[2]?.signals.every((signal) => signal.analysisStatus === "UNAVAILABLE")
+		).toBe(true);
 
 		const queryCount = queries.length;
 		const second = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
@@ -506,6 +544,100 @@ describe("Player State repository", () => {
 			)?.seasons
 		).toEqual(["2425"]);
 		expect(profile?.coverage.limitations).not.toContain("UNDERSTAT_PLAYER_DATA_UNAVAILABLE");
+	});
+
+	it("does not infer preseason when a current FPL projection row is missing", async () => {
+		const redis = new TestRedis();
+		const { executor } = makeExecutor({ omitCurrentSeasonRows: true });
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis, "active"), 10, 5);
+		const current = profile?.seasonTimeline[0];
+		expect(current).toMatchObject({
+			season: "2526",
+			phase: "ACTIVE",
+			fplTotalPoints: null,
+		});
+		expect(
+			current?.signals.every((signal) => signal.reasonCodes.includes("FPL_SEASON_ROW_UNAVAILABLE"))
+		).toBe(true);
+
+		const preseason = await repository.getPlayerStateProfile(
+			makeContext(new TestRedis(), "preseason"),
+			10,
+			5
+		);
+		expect(preseason?.seasonTimeline[0]).toMatchObject({
+			season: "2526",
+			phase: "PRESEASON",
+			fplTotalPoints: null,
+		});
+	});
+
+	it("keeps closed history and reference-only current seasons out of active analysis", async () => {
+		const redis = new TestRedis();
+		const { executor } = makeExecutor({
+			closedHistoricalSeason: true,
+			currentLifecycleState: "reference_only",
+		});
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
+		expect(profile?.seasonTimeline.map((point) => point.season)).toEqual(["2526", "2425", "2324"]);
+		expect(profile?.seasonTimeline[0]).toMatchObject({
+			phase: "PRESEASON",
+			fplTotalPoints: null,
+		});
+	});
+
+	it("uses refreshed current lifecycle while the projection row catches up", async () => {
+		const redis = new TestRedis();
+		const { executor } = makeExecutor({ currentLifecycleState: "active" });
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis, "closed"), 10, 5);
+		expect(profile?.seasonTimeline[0]).toMatchObject({
+			season: "2526",
+			phase: "COMPLETED",
+			fplTotalPoints: 70,
+		});
+	});
+
+	it("uses refreshed lifecycle for FPL current coverage", async () => {
+		const redis = new TestRedis();
+		const { executor } = makeExecutor({ currentLifecycleState: "preseason" });
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis, "active"), 10, 5);
+		const fplCurrent = profile?.coverage.sources.find(
+			(source) => source.provider === "FPL" && source.scope === "CURRENT"
+		);
+		expect(fplCurrent?.analysisStatus).not.toBe("PRESEASON");
+		expect(fplCurrent?.reasonCodes).not.toContain("FPL_CURRENT_PRESEASON");
+	});
+
+	it("accepts negative FPL totals in a completed season timeline", async () => {
+		const redis = new TestRedis();
+		const { executor } = makeExecutor({ negativeCurrentPoints: true });
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
+		expect(profile?.seasonTimeline[0]?.fplTotalPoints).toBe(-5);
 	});
 
 	it("preserves an ambiguous mapping without reading Understat metrics", async () => {

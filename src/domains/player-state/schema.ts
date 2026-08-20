@@ -94,6 +94,39 @@ export const playerStateTypeDefs = /* GraphQL */ `
 		HISTORY
 	}
 
+	enum PlayerSeasonPhase {
+		PRESEASON
+		ACTIVE
+		COMPLETED
+	}
+
+	enum PlayerSeasonSignalCode {
+		UNDERSTAT_NPXG_PER_90
+		UNDERSTAT_XA_PER_90
+		UNDERSTAT_NPXG_XA_PER_90
+		UNDERSTAT_KEY_PASSES_PER_90
+		OFFICIAL_CLEAN_SHEET_RATE
+		OFFICIAL_SAVES_PER_90
+	}
+
+	type PlayerSeasonSignal {
+		code: PlayerSeasonSignalCode!
+		provider: PlayerStateProvider!
+		value: Float
+		unit: String!
+		sampleMinutes: Int
+		analysisStatus: PlayerStateAnalysisStatus!
+		reasonCodes: [String!]!
+	}
+
+	type PlayerSeasonTimelinePoint {
+		season: String!
+		phase: PlayerSeasonPhase!
+		position: Int!
+		fplTotalPoints: Int
+		signals: [PlayerSeasonSignal!]!
+	}
+
 	type PlayerStateMetric {
 		code: String!
 		source: PlayerStateMetricSource!
@@ -250,6 +283,7 @@ export const playerStateTypeDefs = /* GraphQL */ `
 		careerTrajectory: [PlayerStateCareerPoint!]!
 		outlook: PlayerStateOutlook!
 		coverage: PlayerStateCoverage!
+		seasonTimeline: [PlayerSeasonTimelinePoint!]!
 	}
 
 	extend type Query {
