@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 
 import fixture from "../../fixtures/briefing/week-publication-v1.json";
 import type { QueryExecutor } from "../../../src/infra/database";
-import { readBriefingWeek } from "../../../src/infra/content-publication";
+import { getBriefingReaderMetrics, readBriefingWeek } from "../../../src/infra/content-publication";
 import { metrics } from "../../../src/infra/metrics";
 import { withFrozenBriefingClock } from "./frozen-clock";
 
@@ -109,6 +109,26 @@ describe("Briefing publication reader", () => {
 			const result = await readBriefingWeek(databaseWithFallback(), redis, "en");
 			expect(result.state).toBe("READY");
 			expect(result.payload?.revision).toBe(1);
+		});
+
+		test("records corruption when present Redis data fails semantic validation", async () => {
+			const before = getBriefingReaderMetrics().corruptions;
+			const redis = {
+				get: async (key: string) =>
+					key.includes(":active")
+						? JSON.stringify({
+								schemaVersion: 1,
+								publicationId: fixture.publicationId,
+								revision: 1,
+								state: "READY",
+								locales: ["en", "zh-CN"],
+								hashes: { en: "0".repeat(64), "zh-CN": "0".repeat(64) },
+							})
+						: JSON.stringify({ ...fixture, revision: 2 }),
+			} as unknown as Redis;
+			await readBriefingWeek(databaseWithFallback(), redis, "en");
+			const after = getBriefingReaderMetrics().corruptions;
+			expect(after).toBeGreaterThan(before);
 		});
 
 		test("returns unavailable when PostgreSQL metadata cannot be read", async () => {

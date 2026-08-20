@@ -375,7 +375,7 @@ export async function readBriefingWeek(
 		const rawPointer = await redis.get(BRIEFING_WEEK_ACTIVE_POINTER_KEY);
 		if (rawPointer) {
 			const parsed: unknown = JSON.parse(rawPointer);
-			if (
+			const isUsablePointer =
 				isRecord(parsed) &&
 				parsed.schemaVersion === 1 &&
 				parsed.publicationId === metadata.publication_id &&
@@ -388,11 +388,13 @@ export async function readBriefingWeek(
 				typeof parsed.hashes.en === "string" &&
 				/^[0-9a-f]{64}$/i.test(parsed.hashes.en) &&
 				typeof parsed.hashes["zh-CN"] === "string" &&
-				/^[0-9a-f]{64}$/i.test(parsed.hashes["zh-CN"])
-			) {
+				/^[0-9a-f]{64}$/i.test(parsed.hashes["zh-CN"]);
+			if (isUsablePointer) {
 				pointer = parsed as unknown as ActivePointer;
 				pointerWasUsable = true;
 				rawPayload = await redis.get(payloadKey(revision, locale));
+			} else {
+				recordReaderEvent("corruption");
 			}
 		}
 	} catch {
@@ -402,16 +404,19 @@ export async function readBriefingWeek(
 	}
 
 	let payload: BriefingWeekPayload | null = null;
-	if (pointer && rawPayload) {
+	if (pointer && rawPayload !== null) {
 		try {
 			const parsed = parseBriefingWeekPayload(JSON.parse(rawPayload), locale);
-			if (
+			const isValidPayload =
 				parsed &&
 				validateAgainstMetadata(parsed, locale, metadata, rawPayload) &&
 				pointer.hashes.en === metadata.locale_manifest.en.sha256 &&
-				pointer.hashes["zh-CN"] === metadata.locale_manifest["zh-CN"].sha256
-			)
+				pointer.hashes["zh-CN"] === metadata.locale_manifest["zh-CN"].sha256;
+			if (isValidPayload) {
 				payload = parsed;
+			} else {
+				recordReaderEvent("corruption");
+			}
 		} catch {
 			recordReaderEvent("corruption");
 			payload = null;
