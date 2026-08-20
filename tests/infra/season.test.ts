@@ -85,6 +85,26 @@ describe("PostgreSQL current-season authority", () => {
 		expect(provider.get()).toEqual(pinned);
 	});
 
+	it("throttles repeated rollover checks after retaining the pinned identity", async () => {
+		const provider = new CurrentSeasonProvider();
+		const pinned = { seasonId: 2026, seasonCode: "2627", lifecycleState: "preseason" as const };
+		provider.seed(pinned);
+		let queryCount = 0;
+		const database: QueryExecutor = {
+			query: async () => {
+				queryCount += 1;
+				return {
+					rows: [{ season_id: 2027, season_code: "2728", lifecycle_state: "active" }],
+					rowCount: 1,
+				} as never;
+			},
+		};
+
+		await provider.refresh(database, 0, pinned);
+		await provider.refresh(database, 5_000, pinned);
+		expect(queryCount).toBe(1);
+	});
+
 	it("reads request context season metadata without a Redis fallback", async () => {
 		const context = {
 			currentSeason: { seasonId: 2026, seasonCode: "2627" },

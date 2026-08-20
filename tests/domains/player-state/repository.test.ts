@@ -612,6 +612,22 @@ describe("Player State repository", () => {
 		});
 	});
 
+	it("uses refreshed lifecycle for FPL current coverage", async () => {
+		const redis = new TestRedis();
+		const { executor } = makeExecutor({ currentLifecycleState: "preseason" });
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis, "active"), 10, 5);
+		const fplCurrent = profile?.coverage.sources.find(
+			(source) => source.provider === "FPL" && source.scope === "CURRENT"
+		);
+		expect(fplCurrent?.analysisStatus).not.toBe("PRESEASON");
+		expect(fplCurrent?.reasonCodes).not.toContain("FPL_CURRENT_PRESEASON");
+	});
+
 	it("accepts negative FPL totals in a completed season timeline", async () => {
 		const redis = new TestRedis();
 		const { executor } = makeExecutor({ negativeCurrentPoints: true });

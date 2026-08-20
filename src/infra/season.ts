@@ -114,6 +114,10 @@ export class CurrentSeasonProvider {
 					pinned &&
 					(value.seasonId !== pinned.seasonId || value.seasonCode !== pinned.seasonCode)
 				) {
+					// The authority was checked, even though this request must retain
+					// its pinned identity. Keep the five-second throttle across the
+					// rollover so sequential requests do not hammer the metadata query.
+					this.refreshedAt = Date.now();
 					return this.value ?? pinned;
 				}
 				this.seed(value);
