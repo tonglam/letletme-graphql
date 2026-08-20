@@ -4,6 +4,7 @@ import {
 	rateLimitAggregateMinute,
 	rateLimitFingerprint,
 	rateLimitRecentAggregateKey,
+	parseRateLimitStorageFailureTotal,
 	recordRateLimitAggregate,
 	summarizeRateLimitTotals,
 } from "../../src/infra/rate-limit-observability";
@@ -24,6 +25,23 @@ describe("rate-limit observability privacy", () => {
 		expect(rateLimitRecentAggregateKey(minute)).toBe(
 			"llm:gql:rate-limit:v3:recent:2026-08-20T12:34"
 		);
+	});
+
+	it("sums every live rate-limit storage failure series", () => {
+		expect(
+			parseRateLimitStorageFailureTotal(`
+# HELP rate_limit_storage_failures_total Rate-limit storage failures
+# TYPE rate_limit_storage_failures_total counter
+rate_limit_storage_failures_total{scope="global-request",mode="open"} 2
+rate_limit_storage_failures_total{scope="mini-ip-abuse-request",mode="open"} 1
+rate_limit_storage_failures_total{scope="service-weighted",mode="closed"} 3
+`)
+		).toBe(6);
+		expect(() =>
+			parseRateLimitStorageFailureTotal(
+				'rate_limit_storage_failures_total{scope="global-request",mode="open"} invalid'
+			)
+		).toThrow("Invalid rate-limit storage failure metric value");
 	});
 
 	it("stores only controlled dimensions and denied fingerprints", async () => {

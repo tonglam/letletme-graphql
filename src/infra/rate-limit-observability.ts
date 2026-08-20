@@ -57,6 +57,23 @@ export type RateLimitReportSummary = {
 	globalWouldDenied: number;
 };
 
+export const parseRateLimitStorageFailureTotal = (metricsText: string): number => {
+	let total = 0;
+	for (const line of metricsText.split("\n")) {
+		if (!/^rate_limit_storage_failures_total(?:\{|\s)/.test(line)) continue;
+		const match = line.match(
+			/^rate_limit_storage_failures_total(?:\{[^}]*\})?\s+([^\s]+)(?:\s+\d+)?$/
+		);
+		if (!match) throw new Error("Malformed rate-limit storage failure metric");
+		const value = Number(match[1]);
+		if (!Number.isFinite(value) || value < 0) {
+			throw new Error("Invalid rate-limit storage failure metric value");
+		}
+		total += value;
+	}
+	return total;
+};
+
 export const summarizeRateLimitTotals = (
 	totals: ReadonlyMap<string, number>
 ): RateLimitReportSummary => {

@@ -5,8 +5,11 @@ const workflow = await Bun.file(".github/workflows/rate-limit-monitor.yml").text
 describe("rate-limit monitor workflow", () => {
 	test("runs every five minutes with privacy-safe aggregate gates", () => {
 		expect(workflow).toContain('cron: "*/5 * * * *"');
-		expect(workflow).toContain("rate-limit:report --days 2 --recent-minutes 10 --json");
+		expect(workflow).toContain(
+			"rate-limit:report --days 2 --recent-minutes 10 --include-live-storage-failures --json"
+		);
 		expect(workflow).toContain(".recent.summary.totalDecisions > 0");
+		expect(workflow).toContain(".live.rateLimitStorageFailures == 0");
 		expect(workflow).toContain('.mode == "shadow-v3" and .recent.summary.shadowDecisions > 0');
 		expect(workflow).toContain('.mode == "enforce-v3" and .recent.summary.enforcedDecisions > 0');
 		expect(workflow).toContain(".recent.summary.interactiveDeniedRate <= 0.01");

@@ -45,12 +45,13 @@ jobs:
           ssh -i "$HOME/.ssh/letletme_graphql" \
             -o BatchMode=yes \
             "$VPS_USER@$VPS_HOST" \
-            "cd $remote_workdir && APP_ENV_FILE=.env.deploy docker compose exec -T graphql bun run rate-limit:report --days 2 --recent-minutes 10 --json" \
+            "cd $remote_workdir && APP_ENV_FILE=.env.deploy docker compose exec -T graphql bun run rate-limit:report --days 2 --recent-minutes 10 --include-live-storage-failures --json" \
             > "$RUNNER_TEMP/rate-limit-report.json"
           jq -e '
             .policy == "graphql-v3" and
             .days == 2 and
             .recent.minutes == 10 and
+            .live.rateLimitStorageFailures == 0 and
             .recent.summary.totalDecisions > 0 and
             (
               .mode == "legacy" or

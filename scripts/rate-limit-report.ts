@@ -4,6 +4,7 @@ import {
 	rateLimitAggregateMinute,
 	rateLimitDeniedRankingKey,
 	rateLimitRecentAggregateKey,
+	parseRateLimitStorageFailureTotal,
 	summarizeRateLimitTotals,
 } from "../src/infra/rate-limit-observability";
 import { env } from "../src/infra/env";
@@ -15,6 +16,7 @@ type ReportOptions = {
 	json: boolean;
 	failInteractiveRate: number | null;
 	failOnGlobal: boolean;
+	includeLiveStorageFailures: boolean;
 };
 
 const parseOptions = (argv: readonly string[]): ReportOptions => {
@@ -23,6 +25,7 @@ const parseOptions = (argv: readonly string[]): ReportOptions => {
 	let json = false;
 	let failInteractiveRate: number | null = null;
 	let failOnGlobal = false;
+	let includeLiveStorageFailures = false;
 	for (let index = 0; index < argv.length; index += 1) {
 		const argument = argv[index];
 		if (argument === "--json") {
@@ -31,6 +34,10 @@ const parseOptions = (argv: readonly string[]): ReportOptions => {
 		}
 		if (argument === "--fail-on-global") {
 			failOnGlobal = true;
+			continue;
+		}
+		if (argument === "--include-live-storage-failures") {
+			includeLiveStorageFailures = true;
 			continue;
 		}
 		if (argument === "--days") {
@@ -65,7 +72,26 @@ const parseOptions = (argv: readonly string[]): ReportOptions => {
 	) {
 		throw new Error("--fail-interactive-rate must be between 0 and 1");
 	}
-	return { days, recentMinutes, json, failInteractiveRate, failOnGlobal };
+	return {
+		days,
+		recentMinutes,
+		json,
+		failInteractiveRate,
+		failOnGlobal,
+		includeLiveStorageFailures,
+	};
+};
+
+const readLiveRateLimitStorageFailures = async (): Promise<number> => {
+	if (!env.METRICS_TOKEN) throw new Error("METRICS_TOKEN is required for live metrics");
+	const response = await fetch(`http://127.0.0.1:${env.PORT}/metrics`, {
+		headers: { "X-Metrics-Token": env.METRICS_TOKEN },
+		signal: AbortSignal.timeout(5_000),
+	});
+	if (!response.ok) {
+		throw new Error(`Live metrics request failed with HTTP ${response.status}`);
+	}
+	return parseRateLimitStorageFailureTotal(await response.text());
 };
 
 const reportDates = (days: number, now = new Date()): string[] =>
@@ -159,6 +185,9 @@ try {
 					),
 					buckets: recentBuckets,
 				};
+	const live = options.includeLiveStorageFailures
+		? { rateLimitStorageFailures: await readLiveRateLimitStorageFailures() }
+		: null;
 	const report = {
 		policy: "graphql-v3",
 		mode: env.GRAPHQL_RATE_LIMIT_MODE,
@@ -170,6 +199,7 @@ try {
 		),
 		daily,
 		recent,
+		live,
 	};
 	if (options.json) {
 		console.log(JSON.stringify(report));
