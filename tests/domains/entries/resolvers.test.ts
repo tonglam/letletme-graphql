@@ -87,6 +87,23 @@ const makeEntryEventResult = (overrides: Partial<EntryEventResult> = {}): EntryE
 });
 
 describe("entry search argument guards", () => {
+	it("forwards persisted entry snapshots through the side-effect-free service path", async () => {
+		const original = entriesService.getEntrySnapshot;
+		const context = {} as GraphQLContext;
+		entriesService.getEntrySnapshot = async (inputContext, id) => {
+			expect(inputContext).toBe(context);
+			expect(id).toBe(101);
+			return null;
+		};
+		try {
+			await expect(
+				entriesResolvers.Query.entrySnapshot(null, { id: 101 }, context)
+			).resolves.toBeNull();
+		} finally {
+			entriesService.getEntrySnapshot = original;
+		}
+	});
+
 	it("trims a name query and rejects short or oversized input", () => {
 		expect(normalizeEntrySearchQuery("  Who  ")).toBe("Who");
 		expect(() => normalizeEntrySearchQuery("x")).toThrow("2-50 characters");

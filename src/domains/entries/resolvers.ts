@@ -128,6 +128,12 @@ export const entryResultChipToEnum = (raw: string | null): string => {
 
 export const entriesResolvers = {
 	Query: {
+		entrySnapshot: async (
+			_parent: unknown,
+			args: EntryArgs,
+			context: GraphQLContext
+		): Promise<Entry | null> => entriesService.getEntrySnapshot(context, args.id),
+
 		entry: async (
 			_parent: unknown,
 			args: EntryArgs,
