@@ -6,6 +6,20 @@ on:
     types: [completed]
     branches: ["main"]
   workflow_dispatch:
+    inputs:
+      rate_limit_rollout:
+        description: Persisted GraphQL rate-limit rollout profile
+        required: true
+        default: preserve
+        type: choice
+        options:
+          - preserve
+          - p0-legacy
+          - shadow-v3
+          - enforce-v3
+          - enforce-v3-restored-compat
+          - rollback-legacy
+          - secret
 
 concurrency:
   group: deploy-main
@@ -111,18 +125,24 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
           GRAPHQL_ENV: ${{ secrets.GRAPHQL_ENV }}
+          RATE_LIMIT_ROLLOUT: ${{ inputs.rate_limit_rollout || 'preserve' }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          command_timeout: 15m
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV
+          command_timeout: 45m
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,RATE_LIMIT_ROLLOUT
           script: |
             set -euo pipefail
             deployment_started=false
             deployment_committed=false
             env_promoted=false
             previous_env=""
+            deployment_state="$HOME/.letletme-graphql-current-deployment.json"
+            deployment_state_next=""
+            rollout_state=""
+            rollout_state_backup=""
+            rollout_state_existed=false
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
             active_stage=""
@@ -153,6 +173,12 @@ jobs:
               fi
               if [ -n "${previous_env:-}" ]; then
                 rm -f "$previous_env"
+              fi
+              if [ -n "${deployment_state_next:-}" ]; then
+                rm -f "$deployment_state_next"
+              fi
+              if [ -n "${rollout_state_backup:-}" ]; then
+                rm -f "$rollout_state_backup"
               fi
               exit "$original_status"
             }
@@ -193,14 +219,70 @@ jobs:
             next_env=$(mktemp "$VPS_WORKDIR/.env.deploy.next.XXXXXX")
             printf '%s' "$GRAPHQL_ENV" > "$next_env"
             chmod 600 "$next_env"
-            python3 - "$next_env" <<'PY'
+            rollout_state="$HOME/.letletme-graphql-rate-limit-rollout"
+            if [ -f "$rollout_state" ]; then
+              rollout_state_existed=true
+              rollout_state_backup=$(mktemp "$HOME/.letletme-graphql-rate-limit-rollout.previous.XXXXXX")
+              cp "$rollout_state" "$rollout_state_backup"
+              chmod 600 "$rollout_state_backup"
+            fi
+            persist_rate_limit_rollout=""
+            case "$RATE_LIMIT_ROLLOUT" in
+              preserve)
+                if [ -f "$rollout_state" ]; then
+                  active_rate_limit_rollout=$(cat "$rollout_state")
+                else
+                  active_rate_limit_rollout=secret
+                fi
+                ;;
+              p0-legacy|shadow-v3|enforce-v3|enforce-v3-restored-compat|rollback-legacy)
+                active_rate_limit_rollout="$RATE_LIMIT_ROLLOUT"
+                persist_rate_limit_rollout="$active_rate_limit_rollout"
+                ;;
+              secret)
+                active_rate_limit_rollout=secret
+                persist_rate_limit_rollout=secret
+                ;;
+              *)
+                echo "Unknown rate-limit rollout profile"
+                exit 1
+                ;;
+            esac
+            python3 - "$next_env" "$active_rate_limit_rollout" <<'PY'
             import re
             import sys
             from pathlib import Path
             from urllib.parse import unquote, urlsplit
 
             env_path = Path(sys.argv[1])
+            rollout = sys.argv[2]
             lines = env_path.read_text(encoding="utf-8").splitlines()
+
+            profiles = {
+                "p0-legacy": ("legacy", "960", "900", "1200"),
+                "shadow-v3": ("shadow-v3", "960", "900", "1200"),
+                "enforce-v3": ("enforce-v3", "960", "900", "1200"),
+                "enforce-v3-restored-compat": ("enforce-v3", "480", "900", "600"),
+                "rollback-legacy": ("legacy", "480", "900", "600"),
+            }
+            if rollout != "secret":
+                if rollout not in profiles:
+                    raise SystemExit("Unsupported persisted rate-limit rollout profile")
+                mode, browser, authenticated, anonymous = profiles[rollout]
+                replacements = {
+                    "GRAPHQL_RATE_LIMIT_MODE": mode,
+                    "GRAPHQL_BROWSER_INGRESS_RATE_LIMIT": browser,
+                    "GRAPHQL_AUTHENTICATED_RATE_LIMIT": authenticated,
+                    "GRAPHQL_ANONYMOUS_RATE_LIMIT": anonymous,
+                }
+                lines = [
+                    line
+                    for line in lines
+                    if line.split("=", 1)[0] not in replacements
+                ]
+                lines.extend(f"{key}={value}" for key, value in replacements.items())
+                env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
             database_url_indexes = [
                 index for index, line in enumerate(lines) if line.startswith("DATABASE_URL=")
             ]
@@ -246,6 +328,72 @@ jobs:
               old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container")
               test -n "$old_image"
               docker image inspect "$old_image" >/dev/null
+            fi
+
+            running_deploy_sha=""
+            if [ -n "$old_container" ] && [ -f "$deployment_state" ]; then
+              state_sha=$(jq -r '.deploySha // empty' "$deployment_state" 2>/dev/null || true)
+              state_image=$(jq -r '.image // empty' "$deployment_state" 2>/dev/null || true)
+              if [[ "$state_sha" =~ ^[0-9a-f]{40}$ ]] && [ "$state_image" = "$old_image" ]; then
+                running_deploy_sha="$state_sha"
+              elif [ "$RATE_LIMIT_ROLLOUT" = p0-legacy ]; then
+                echo "Stored GraphQL deployment identity does not match the running image"
+                exit 1
+              fi
+            fi
+
+            if [ "$RATE_LIMIT_ROLLOUT" = p0-legacy ]; then
+              test -n "$old_container"
+              [[ "$old_image" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+              [[ "$running_deploy_sha" =~ ^[0-9a-f]{40}$ ]] || {
+                echo "P0 requires a persisted SHA bound to the running GraphQL image"
+                exit 1
+              }
+              backup_root="$HOME/.letletme-graphql-rollbacks"
+              install -m 700 -d "$backup_root"
+              backup_stamp=$(date -u +%Y%m%dT%H%M%SZ)
+              backup_dir="$backup_root/pre-p0-$backup_stamp"
+              install -m 700 -d "$backup_dir"
+              if [ -f .env.deploy ]; then
+                cp .env.deploy "$backup_dir/env.deploy"
+                chmod 600 "$backup_dir/env.deploy"
+              fi
+              curl --fail --silent http://127.0.0.1:4000/health > "$backup_dir/health.json"
+              if [ -n "$old_container" ]; then
+                docker stats --no-stream --format '{{json .}}' "$old_container" \
+                  > "$backup_dir/docker-stats.json"
+                APP_ENV_FILE=.env.deploy APP_IMAGE="$old_image" \
+                  docker compose exec -T graphql bun -e '
+                    const token = process.env.METRICS_TOKEN;
+                    const response = await fetch("http://127.0.0.1:4000/metrics", {
+                      headers: { "X-Metrics-Token": token },
+                    });
+                    if (!response.ok) throw new Error("metrics baseline failed");
+                    process.stdout.write(await response.text());
+                  ' > "$backup_dir/metrics.prom"
+                docker cp scripts/rate-limit-p0-probe.ts \
+                  "$old_container:/tmp/rate-limit-p0-probe.ts"
+                docker exec \
+                  -e P0_PROBE_REQUESTS=700 \
+                  -e P0_PROBE_SUBJECT="before-$backup_stamp" \
+                  "$old_container" bun /tmp/rate-limit-p0-probe.ts \
+                  > "$backup_dir/probe-before.json"
+                jq -e \
+                  '.total == 700 and .successful > 0 and .rateLimited > 0 and .unexpected == 0 and (.successful + .rateLimited == .total)' \
+                  "$backup_dir/probe-before.json" \
+                  >/dev/null
+              fi
+              jq -n \
+                --arg capturedAt "$backup_stamp" \
+                --arg deploySha "$running_deploy_sha" \
+                --arg image "$old_image" \
+                '{capturedAt: $capturedAt, deploySha: $deploySha, image: $image}' \
+                > "$backup_dir/manifest.json"
+              chmod 600 "$backup_dir/health.json" "$backup_dir/docker-stats.json" \
+                "$backup_dir/metrics.prom" "$backup_dir/probe-before.json" \
+                "$backup_dir/manifest.json" 2>/dev/null || true
+              printf '%s\n' "$backup_dir" > "$HOME/.letletme-graphql-pre-p0-latest"
+              chmod 600 "$HOME/.letletme-graphql-pre-p0-latest"
             fi
 
             deployment_started=true
@@ -318,9 +466,23 @@ jobs:
                   APP_ENV_FILE="$rollback_cleanup_env" APP_IMAGE="$IMAGE_REF" \
                     docker compose rm --stop --force graphql || true
                 fi
+                if [ "$rollout_state_existed" = true ]; then
+                  if [ -n "$rollout_state_backup" ] && [ -f "$rollout_state_backup" ]; then
+                    mv "$rollout_state_backup" "$rollout_state"
+                    chmod 600 "$rollout_state"
+                    rollout_state_backup=""
+                  else
+                    echo "GraphQL rollback could not restore the previous rate-limit rollout state"
+                  fi
+                else
+                  rm -f "$rollout_state"
+                fi
               fi
               if [ "$env_promoted" = false ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
                 rm -f "$previous_env"
+              fi
+              if [ -n "${deployment_state_next:-}" ]; then
+                rm -f "$deployment_state_next"
               fi
               rm -f "$next_env"
               exit "$original_status"
@@ -438,22 +600,110 @@ jobs:
             done
             finish_stage
 
+            if [ "$RATE_LIMIT_ROLLOUT" = p0-legacy ]; then
+              start_stage p0Observe
+              observation_dir="$backup_dir/observation"
+              install -m 700 -d "$observation_dir"
+              docker cp scripts/rate-limit-p0-probe.ts \
+                "$container:/tmp/rate-limit-p0-probe.ts"
+              docker exec \
+                -e P0_PROBE_REQUESTS=700 \
+                -e P0_PROBE_SUBJECT="after-$backup_stamp" \
+                "$container" bun /tmp/rate-limit-p0-probe.ts \
+                > "$observation_dir/probe-after.json"
+              before_429=$(jq -r '.rateLimited' "$backup_dir/probe-before.json")
+              after_429=$(jq -r '.rateLimited' "$observation_dir/probe-after.json")
+              jq -e \
+                '.total == 700 and .successful > 0 and .unexpected == 0 and (.successful + .rateLimited == .total)' \
+                "$observation_dir/probe-after.json" \
+                >/dev/null
+              test "$before_429" -gt 0
+              if [ $(( after_429 * 2 )) -gt "$before_429" ]; then
+                echo "P0 regression 429s did not fall by at least 50%: $before_429 -> $after_429"
+                exit 1
+              fi
+
+              capture_candidate_metrics() {
+                docker exec "$container" bun -e '
+                  const token = process.env.METRICS_TOKEN;
+                  const response = await fetch("http://127.0.0.1:4000/metrics", {
+                    headers: { "X-Metrics-Token": token },
+                  });
+                  if (!response.ok) throw new Error("metrics observation failed");
+                  process.stdout.write(await response.text());
+                '
+              }
+              capture_candidate_metrics > "$observation_dir/previous.prom"
+              printf '%s\n' \
+                '{"badGraphqlErrors":0,"dbWaiting":0,"cpu":0,"memory":0,"samples":0}' \
+                > "$observation_dir/state.json"
+              : > "$observation_dir/samples.jsonl"
+              for sample in $(seq 1 60); do
+                sleep 30
+                health_status=$(curl --silent --show-error \
+                  --output "$observation_dir/health.json" \
+                  --write-out '%{http_code}' \
+                  http://127.0.0.1:4000/health || true)
+                capture_candidate_metrics > "$observation_dir/current.prom"
+                docker stats --no-stream --format '{{json .}}' "$container" \
+                  > "$observation_dir/stats.json"
+                if ! python3 scripts/rate_limit_p0_guard.py \
+                  --baseline "$backup_dir/metrics.prom" \
+                  --previous "$observation_dir/previous.prom" \
+                  --current "$observation_dir/current.prom" \
+                  --stats "$observation_dir/stats.json" \
+                  --state "$observation_dir/state.json" \
+                  --output "$observation_dir/next-state.json" \
+                  --health-status "${health_status:-0}"; then
+                  cat "$observation_dir/next-state.json"
+                  exit 1
+                fi
+                mv "$observation_dir/next-state.json" "$observation_dir/state.json"
+                cat "$observation_dir/state.json" >> "$observation_dir/samples.jsonl"
+                cp "$observation_dir/current.prom" "$observation_dir/previous.prom"
+              done
+              chmod -R go-rwx "$backup_dir"
+              finish_stage
+            fi
+
             start_stage finalize
             mv "$next_env" .env.deploy
             chmod 600 .env.deploy
             env_promoted=true
+            if [ -n "$persist_rate_limit_rollout" ]; then
+              if [ "$persist_rate_limit_rollout" = secret ]; then
+                rm -f "$rollout_state"
+              else
+                printf '%s\n' "$persist_rate_limit_rollout" > "$rollout_state"
+                chmod 600 "$rollout_state"
+              fi
+            fi
 
             if [ -n "$old_image" ]; then
               printf '%s\n' "$old_image" > "$HOME/.letletme-graphql-previous-image"
               chmod 600 "$HOME/.letletme-graphql-previous-image"
             fi
-            if [ -n "$previous_env" ]; then
-              rm -f "$previous_env"
-            fi
+            deployment_state_next=$(mktemp "$HOME/.letletme-graphql-current-deployment.next.XXXXXX")
+            jq -n \
+              --arg deployedAt "$(date -u +%Y%m%dT%H%M%SZ)" \
+              --arg deploySha "$DEPLOY_SHA" \
+              --arg image "$IMAGE_REF" \
+              '{deployedAt: $deployedAt, deploySha: $deploySha, image: $image}' \
+              > "$deployment_state_next"
+            chmod 600 "$deployment_state_next"
+            mv "$deployment_state_next" "$deployment_state"
+            deployment_state_next=""
             deployment_committed=true
             finish_stage
             rollback_armed=false
             trap - EXIT
+            if [ -n "$rollout_state_backup" ]; then
+              rm -f "$rollout_state_backup"
+              rollout_state_backup=""
+            fi
+            if [ -n "$previous_env" ]; then
+              rm -f "$previous_env"
+            fi
             previous_image=""
             if [ -f "$HOME/.letletme-graphql-previous-image" ]; then
               previous_image=$(cat "$HOME/.letletme-graphql-previous-image")

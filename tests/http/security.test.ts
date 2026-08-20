@@ -69,7 +69,12 @@ describe("HTTP security boundaries", () => {
 				{ scope: "global", key: "global-key", limit: 1500, windowSeconds: 60 },
 				{ scope: "subject", key: "subject-key", limit: 120, windowSeconds: 60 },
 			])
-		).toEqual({ allowed: false, retryAfterSeconds: 17, deniedScope: "global" });
+		).toEqual({
+			allowed: false,
+			retryAfterSeconds: 17,
+			deniedScope: "global",
+			deniedCheckIndex: 0,
+		});
 	});
 
 	it("returns the Redis window TTL as an accurate retry delay", async () => {
