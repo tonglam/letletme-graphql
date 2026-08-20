@@ -2055,7 +2055,8 @@ export const createPlayerStateRepository = (
 				datasetRevision.refreshedAt,
 			]) ?? new Date(0).toISOString();
 		const fplCurrentAvailable = currentRow !== null;
-		const currentLifecycleState = context.currentSeason.lifecycleState ?? currentRow?.lifecycle_state;
+		const currentLifecycleState =
+			context.currentSeason.lifecycleState ?? currentRow?.lifecycle_state;
 		const fplCurrentAnalysis: PlayerStateAnalysisStatus =
 			currentRow === null
 				? "UNAVAILABLE"
