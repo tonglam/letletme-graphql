@@ -27,8 +27,11 @@ type RequestSample = {
 	shadowRateLimitOutcome: "allow" | "deny" | null;
 	shadowRateLimitScope: string | null;
 	graphqlErrors: number;
+	authenticatedSession: boolean;
 	attacker: boolean;
 };
+
+const capacitySessionResponseHeader = "x-letletme-capacity-session";
 
 type RuntimeSample = {
 	at: number;
@@ -332,6 +335,7 @@ const graphQLRequest = async (
 		shadowRateLimitOutcome,
 		shadowRateLimitScope,
 		graphqlErrors,
+		authenticatedSession: false,
 		attacker,
 	};
 };
@@ -348,6 +352,7 @@ const pageRequest = async (actor: Actor, phase: string): Promise<RequestSample> 
 	if (actor.cookie) headers.cookie = actor.cookie;
 	const startedAt = performance.now();
 	let status: number;
+	let authenticatedSession = false;
 	try {
 		const response = await fetch(target, {
 			headers,
@@ -355,6 +360,7 @@ const pageRequest = async (actor: Actor, phase: string): Promise<RequestSample> 
 			signal: AbortSignal.timeout(15_000),
 		});
 		status = response.status;
+		authenticatedSession = response.headers.get(capacitySessionResponseHeader) === "authenticated";
 		await response.body?.cancel();
 	} catch {
 		status = -1;
@@ -372,6 +378,7 @@ const pageRequest = async (actor: Actor, phase: string): Promise<RequestSample> 
 		shadowRateLimitOutcome: null,
 		shadowRateLimitScope: null,
 		graphqlErrors: 0,
+		authenticatedSession,
 		attacker: false,
 	};
 };
@@ -821,6 +828,14 @@ const capacityGraphQL = capacitySamples.filter((sample) => sample.transport === 
 const capacityPageErrors = capacitySamples.filter(
 	(sample) => sample.transport === "page" && (sample.status < 200 || sample.status >= 300)
 );
+const capacitySessionSamples = capacitySamples.filter(
+	(sample) => sample.transport === "page" && sample.kind === "session"
+);
+const authenticatedSessionActorCount = new Set(
+	capacitySessionSamples
+		.filter((sample) => sample.authenticatedSession)
+		.map((sample) => sample.actorId)
+).size;
 const attackerSamples = samples.filter((sample) => sample.attacker);
 const natPeerSamples = samples.filter((sample) => sample.phase === "malicious" && !sample.attacker);
 const natPeerGraphQL = natPeerSamples.filter((sample) => sample.transport === "graphql");
@@ -961,6 +976,9 @@ const gates = {
 	normal429Zero: normal429.length === 0 && nonMiniDenied === 0,
 	global429Zero: global429.length === 0 && actualGlobalDenied === 0 && globalWouldDenied === 0,
 	pageRequestsSuccessful: capacityPageErrors.length === 0,
+	sessionActorsAuthenticated:
+		authenticatedSessionActorCount === 45 &&
+		capacitySessionSamples.every((sample) => sample.authenticatedSession),
 	v3TargetWouldDenyZero: capacityWouldDenied === 0,
 	non429ErrorRateBelowPointOnePercent: non429ErrorRate < 0.001,
 	graphQLP95Below800Ms: clientGraphQLP95Ms < 800 && serverGraphQLP95UpperBoundMs < 800,
@@ -1022,6 +1040,7 @@ const report = {
 		totalRequests: samples.length,
 		normalGraphQLRequests: capacityGraphQL.length,
 		pageErrors: capacityPageErrors.length,
+		authenticatedSessionActorCount,
 		totalRequestPerSecond: capacitySamples.length / capacityElapsedSeconds,
 		targetGraphQLRps,
 		sustainableRps,

@@ -635,7 +635,7 @@ jobs:
               }
               capture_candidate_metrics > "$observation_dir/previous.prom"
               printf '%s\n' \
-                '{"bad5xx":0,"dbWaiting":0,"cpu":0,"memory":0,"samples":0}' \
+                '{"badGraphqlErrors":0,"dbWaiting":0,"cpu":0,"memory":0,"samples":0}' \
                 > "$observation_dir/state.json"
               : > "$observation_dir/samples.jsonl"
               for sample in $(seq 1 60); do

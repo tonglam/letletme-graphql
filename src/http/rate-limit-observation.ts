@@ -189,10 +189,14 @@ export const buildRateLimitTargetObservation = ({
 	const workloads = Object.fromEntries(
 		GRAPHQL_WORKLOADS.map((workload) => [workload, 0])
 	) as Record<(typeof GRAPHQL_WORKLOADS)[number], number>;
+	const workloadMaxCosts = Object.fromEntries(
+		GRAPHQL_WORKLOADS.map((workload) => [workload, 0])
+	) as Record<(typeof GRAPHQL_WORKLOADS)[number], number>;
 	let totalRequests = 0;
 	let rscRequests = 0;
 	let serviceRequests = 0;
 	let serviceWeighted = 0;
+	let serviceMaxWeightedCost = 0;
 
 	for (const line of logLines) {
 		const decision = parseDecision(line);
@@ -221,11 +225,14 @@ export const buildRateLimitTargetObservation = ({
 		totalRequests += 1;
 		if (decision.trafficClass === "web_rsc") {
 			rscRequests += 1;
-			workloads[decision.workload as (typeof GRAPHQL_WORKLOADS)[number]] += decision.cost;
+			const workload = decision.workload as (typeof GRAPHQL_WORKLOADS)[number];
+			workloads[workload] += decision.cost;
+			workloadMaxCosts[workload] = Math.max(workloadMaxCosts[workload], decision.cost);
 		}
 		if (decision.trafficClass === "service") {
 			serviceRequests += 1;
 			serviceWeighted += decision.cost;
+			serviceMaxWeightedCost = Math.max(serviceMaxWeightedCost, decision.cost);
 		}
 	}
 
@@ -243,10 +250,12 @@ export const buildRateLimitTargetObservation = ({
 			workloadWeightedPerSecond: Object.fromEntries(
 				Object.entries(workloads).map(([workload, units]) => [workload, units / durationSeconds])
 			) as Record<(typeof GRAPHQL_WORKLOADS)[number], number>,
+			workloadMaxCost: workloadMaxCosts,
 		},
 		service: {
 			classRequestPerSecond: serviceRequests / durationSeconds,
 			weightedPerSecond: serviceWeighted / durationSeconds,
+			maxWeightedCost: serviceMaxWeightedCost,
 		},
 	};
 };

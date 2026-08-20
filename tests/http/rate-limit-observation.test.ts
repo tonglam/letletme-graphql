@@ -74,9 +74,13 @@ describe("capacity log observation", () => {
 		expect(observation.webRsc.classRequestPerSecond).toBe(2 / 900);
 		expect(observation.webRsc.workloadWeightedPerSecond["player-stats"]).toBe(20 / 900);
 		expect(observation.webRsc.workloadWeightedPerSecond.fixtures).toBe(10 / 900);
+		expect(observation.webRsc.workloadMaxCost["player-stats"]).toBe(20);
+		expect(observation.webRsc.workloadMaxCost.fixtures).toBe(10);
+		expect(observation.webRsc.workloadMaxCost.market).toBe(0);
 		expect(observation.service).toEqual({
 			classRequestPerSecond: 1 / 900,
 			weightedPerSecond: 8 / 900,
+			maxWeightedCost: 8,
 		});
 	});
 

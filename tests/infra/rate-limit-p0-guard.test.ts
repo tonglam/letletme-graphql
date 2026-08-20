@@ -5,13 +5,28 @@ import { join } from "path";
 
 let directory = "";
 
-const histogram = ({ slow = false, waiting = 0 }: { slow?: boolean; waiting?: number } = {}) => `
+const histogram = ({
+	slow = false,
+	waiting = 0,
+	ok = 100,
+	graphqlErrors = 0,
+	serverErrors = 0,
+}: {
+	slow?: boolean;
+	waiting?: number;
+	ok?: number;
+	graphqlErrors?: number;
+	serverErrors?: number;
+} = {}) => `
 http_request_duration_seconds_count{method="POST",route="/graphql",status="200"} 100
 http_request_duration_seconds_bucket{method="POST",route="/graphql",status="200",le="0.5"} ${slow ? 0 : 96}
 http_request_duration_seconds_bucket{method="POST",route="/graphql",status="200",le="0.8"} ${slow ? 0 : 99}
 http_request_duration_seconds_bucket{method="POST",route="/graphql",status="200",le="1"} ${slow ? 90 : 100}
 http_request_duration_seconds_bucket{method="POST",route="/graphql",status="200",le="2"} 100
 http_request_duration_seconds_bucket{method="POST",route="/graphql",status="200",le="+Inf"} 100
+graphql_request_outcomes_total{result="ok"} ${ok}
+graphql_request_outcomes_total{result="graphql_error"} ${graphqlErrors}
+graphql_request_outcomes_total{result="server_error"} ${serverErrors}
 postgres_pool_clients{state="waiting"} ${waiting}
 `;
 
@@ -22,6 +37,9 @@ http_request_duration_seconds_bucket{method="POST",route="/graphql",status="200"
 http_request_duration_seconds_bucket{method="POST",route="/graphql",status="200",le="1"} 0
 http_request_duration_seconds_bucket{method="POST",route="/graphql",status="200",le="2"} 0
 http_request_duration_seconds_bucket{method="POST",route="/graphql",status="200",le="+Inf"} 0
+graphql_request_outcomes_total{result="ok"} 0
+graphql_request_outcomes_total{result="graphql_error"} 0
+graphql_request_outcomes_total{result="server_error"} 0
 postgres_pool_clients{state="waiting"} 0
 `;
 
@@ -35,7 +53,7 @@ afterAll(async () => {
 
 const runGuard = async ({
 	current = histogram(),
-	state = { bad5xx: 0, dbWaiting: 0, cpu: 0, memory: 0, samples: 0 },
+	state = { badGraphqlErrors: 0, dbWaiting: 0, cpu: 0, memory: 0, samples: 0 },
 	healthStatus = 200,
 }: {
 	current?: string;
@@ -101,10 +119,25 @@ describe("P0 thirty-minute rollout guard", () => {
 	it("fails after two consecutive non-zero PostgreSQL waiting samples", async () => {
 		const result = await runGuard({
 			current: histogram({ waiting: 1 }),
-			state: { bad5xx: 0, dbWaiting: 1, cpu: 0, memory: 0, samples: 1 },
+			state: { badGraphqlErrors: 0, dbWaiting: 1, cpu: 0, memory: 0, samples: 1 },
 		});
 		expect(result.exitCode).toBe(1);
 		expect(result.report.dbWaiting).toBe(2);
 		expect(result.report.reasons.join(" ")).toContain("two samples");
+	});
+
+	it("counts HTTP-200 GraphQL errors in the sustained rollback gate", async () => {
+		const result = await runGuard({
+			current: histogram({ ok: 90, graphqlErrors: 10 }),
+			state: {
+				badGraphqlErrors: 9,
+				dbWaiting: 0,
+				cpu: 0,
+				memory: 0,
+				samples: 9,
+			},
+		});
+		expect(result.exitCode).toBe(1);
+		expect(result.report.reasons.join(" ")).toContain("non-429 GraphQL errors exceeded 1%");
 	});
 });

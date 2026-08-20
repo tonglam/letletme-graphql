@@ -86,8 +86,17 @@ describe("GraphQL v3 production policy", () => {
 					gameweek: 2,
 					"public-other": 1,
 				},
+				workloadMaxCost: {
+					interactive: 8,
+					home: 24,
+					fixtures: 20,
+					market: 30,
+					"player-stats": 100,
+					gameweek: 20,
+					"public-other": 8,
+				},
 			},
-			service: { classRequestPerSecond: 1, weightedPerSecond: 4 },
+			service: { classRequestPerSecond: 1, weightedPerSecond: 4, maxWeightedCost: 40 },
 		};
 		const generated = generateValidatedRateLimitProfile({
 			base: productionGraphQLRateLimitPolicy,
@@ -99,6 +108,24 @@ describe("GraphQL v3 production policy", () => {
 			refillPerSecond: 13,
 			burst: 130,
 		});
+		expect(generated.trafficClasses.web_rsc.workloads.home.burst).toBeGreaterThanOrEqual(24);
+		expect(generated.trafficClasses.service.weighted.burst).toBeGreaterThanOrEqual(40);
+		expect(() =>
+			generateValidatedRateLimitProfile({
+				base: productionGraphQLRateLimitPolicy,
+				observation: {
+					...observation,
+					webRsc: {
+						...observation.webRsc,
+						workloadMaxCost: {
+							...observation.webRsc.workloadMaxCost,
+							home: 0,
+						},
+					},
+				},
+				evidence: "load-test/missing-max-cost.json",
+			})
+		).toThrow("must cover an observed request");
 		const zeroObservation = generateValidatedRateLimitProfile({
 			base: productionGraphQLRateLimitPolicy,
 			observation: {

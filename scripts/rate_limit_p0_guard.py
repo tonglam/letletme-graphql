@@ -33,13 +33,11 @@ def prometheus(path: Path, metric: str) -> list[tuple[dict[str, str], float]]:
     return rows
 
 
-def graph_ql_status_counts(path: Path) -> dict[str, float]:
+def graph_ql_outcome_counts(path: Path) -> dict[str, float]:
     result: dict[str, float] = {}
-    for labels, value in prometheus(path, "http_request_duration_seconds_count"):
-        if labels.get("method") != "POST" or labels.get("route") != "/graphql":
-            continue
-        status = labels.get("status", "unknown")
-        result[status] = result.get(status, 0.0) + value
+    for labels, value in prometheus(path, "graphql_request_outcomes_total"):
+        outcome = labels.get("result", "unknown")
+        result[outcome] = result.get(outcome, 0.0) + value
     return result
 
 
@@ -110,19 +108,21 @@ def main() -> int:
     state = (
         json.loads(args.state.read_text(encoding="utf-8"))
         if args.state.exists()
-        else {"bad5xx": 0, "dbWaiting": 0, "cpu": 0, "memory": 0, "samples": 0}
+        else {"badGraphqlErrors": 0, "dbWaiting": 0, "cpu": 0, "memory": 0, "samples": 0}
     )
-    previous_status = graph_ql_status_counts(args.previous)
-    current_status = graph_ql_status_counts(args.current)
-    status_delta = {
-        status: max(0.0, value - previous_status.get(status, 0.0))
-        for status, value in current_status.items()
+    previous_outcomes = graph_ql_outcome_counts(args.previous)
+    current_outcomes = graph_ql_outcome_counts(args.current)
+    outcome_delta = {
+        outcome: max(0.0, value - previous_outcomes.get(outcome, 0.0))
+        for outcome, value in current_outcomes.items()
     }
-    non_429_total = sum(value for status, value in status_delta.items() if status != "429")
-    non_429_5xx = sum(
-        value for status, value in status_delta.items() if status != "429" and status.startswith("5")
+    non_429_total = sum(
+        value for outcome, value in outcome_delta.items() if outcome != "rate_limited"
     )
-    error_rate = non_429_5xx / non_429_total if non_429_total else 0.0
+    non_429_graphql_errors = sum(
+        outcome_delta.get(outcome, 0.0) for outcome in ("graphql_error", "server_error")
+    )
+    error_rate = non_429_graphql_errors / non_429_total if non_429_total else 0.0
 
     baseline_p95 = quantile(graph_ql_histogram(args.baseline), 0.95)
     interval_p95 = quantile(
@@ -135,7 +135,11 @@ def main() -> int:
     memory = percentage(stats.get("MemPerc"))
 
     state["samples"] = int(state.get("samples", 0)) + 1
-    state["bad5xx"] = int(state.get("bad5xx", 0)) + 1 if non_429_total and error_rate > 0.01 else 0
+    state["badGraphqlErrors"] = (
+        int(state.get("badGraphqlErrors", 0)) + 1
+        if non_429_total and error_rate > 0.01
+        else 0
+    )
     state["dbWaiting"] = int(state.get("dbWaiting", 0)) + 1 if waiting is not None and waiting > 0 else 0
     state["cpu"] = int(state.get("cpu", 0)) + 1 if cpu > 80 else 0
     state["memory"] = int(state.get("memory", 0)) + 1 if memory > 85 else 0
@@ -143,10 +147,12 @@ def main() -> int:
     reasons: list[str] = []
     if args.health_status != 200:
         reasons.append(f"health returned {args.health_status}")
+    if not current_outcomes:
+        reasons.append("GraphQL request outcome metric is missing")
     if waiting is None:
         reasons.append("postgres pool waiting metric is missing")
-    if state["bad5xx"] >= SUSTAINED_SAMPLES:
-        reasons.append("non-429 5xx exceeded 1% for five minutes")
+    if state["badGraphqlErrors"] >= SUSTAINED_SAMPLES:
+        reasons.append("non-429 GraphQL errors exceeded 1% for five minutes")
     if state["dbWaiting"] >= 2:
         reasons.append("PostgreSQL pool waiting was non-zero for two samples")
     if state["cpu"] >= SUSTAINED_SAMPLES:
@@ -169,7 +175,8 @@ def main() -> int:
         **state,
         "healthStatus": args.health_status,
         "non429Requests": non_429_total,
-        "non4295xxRate": error_rate,
+        "non429GraphqlErrors": non_429_graphql_errors,
+        "non429GraphqlErrorRate": error_rate,
         "baselineP95Seconds": baseline_p95,
         "intervalP95Seconds": interval_p95,
         "poolWaiting": waiting,
