@@ -45,14 +45,20 @@ const cacheRepositoryEvents = new Counter({
 
 const playerStateProfiles = new Counter({
 	name: "player_state_profiles_total",
-	help: "Player State profiles by trend, confidence, provider mode, and mapping status",
-	labelNames: ["trend", "confidence", "mode", "mapping_status"] as const,
+	help: "Player State profiles by trend, confidence, provider mode, and current analysis status",
+	labelNames: ["trend", "confidence", "provider_mode", "current_analysis_status"] as const,
 });
 
 const playerStateProviderStale = new Counter({
 	name: "player_state_provider_stale_total",
 	help: "Stale provider revisions observed while serving Player State profiles",
 	labelNames: ["provider", "scope"] as const,
+});
+
+const playerStatsDeskFields = new Counter({
+	name: "player_stats_desk_fields_total",
+	help: "Player Stats desk field outcomes by field and status",
+	labelNames: ["field", "status"] as const,
 });
 
 registry.registerMetric(rateLimitStorageFailures);
@@ -62,6 +68,7 @@ registry.registerMetric(graphqlRateLimitDecisions);
 registry.registerMetric(cacheRepositoryEvents);
 registry.registerMetric(playerStateProfiles);
 registry.registerMetric(playerStateProviderStale);
+registry.registerMetric(playerStatsDeskFields);
 
 export const metrics = {
 	registry,
@@ -73,6 +80,7 @@ export const metrics = {
 	cacheRepositoryEvents,
 	playerStateProfiles,
 	playerStateProviderStale,
+	playerStatsDeskFields,
 };
 
 export const metricsResponse = async (): Promise<Response> => {

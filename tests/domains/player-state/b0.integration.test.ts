@@ -68,6 +68,7 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 		let coreSnapshot: CoreDataSnapshot;
 		let season: SeasonRow;
 		let subject: SubjectRow;
+		let playerStateDatasetRevision: string;
 
 		beforeAll(async () => {
 			season = (
@@ -77,6 +78,18 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 				 WHERE season_code = '2526'`
 				)
 			).rows[0]!;
+			playerStateDatasetRevision = String(
+				(
+					await pool.query<{ revision: number | string }>(
+						`SELECT revision
+						 FROM reporting.player_state_dataset_metadata
+						 WHERE dataset_key = 'player_state'`
+					)
+				).rows[0]?.revision ?? ""
+			);
+			if (!playerStateDatasetRevision) {
+				throw new Error("Player State dataset metadata is not published");
+			}
 			subject = (
 				await pool.query<SubjectRow>(
 					`SELECT player.element_id, player.code, player.element_type, player.team_id
@@ -171,16 +184,28 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 				data: {},
 			}) as unknown as GraphQLContext;
 
+		const profileCacheKey = (contextValue: GraphQLContext, playerId: number, horizon: number) =>
+			gqlCacheKey(
+				contextValue,
+				`player-state-profile:v2:${playerStateDatasetRevision}:${playerId}:${horizon}`
+			);
+
 		it("returns a cross-provider profile from canonical relations", async () => {
 			const profile = await repository.getPlayerStateProfile(
 				context(new TestRedis()),
 				subject.element_id,
 				5
 			);
-			expect(profile?.coverage.mappingStatus).toBe("VERIFIED");
-			expect(profile?.coverage.understatCurrent).toBe(true);
-			expect(profile?.fplOnly).toBe(false);
-			expect(profile?.coverage.understatHistorySeasons).toContain("2526");
+			const understatCurrent = profile?.coverage.sources.find(
+				(source) => source.provider === "UNDERSTAT" && source.scope === "CURRENT"
+			);
+			const understatHistory = profile?.coverage.sources.find(
+				(source) => source.provider === "UNDERSTAT" && source.scope === "HISTORY"
+			);
+			expect(understatCurrent?.mappingStatus).toBe("VERIFIED");
+			expect(understatCurrent?.dataStatus).toBe("AVAILABLE");
+			expect(profile?.providerMode).toBe("FPL_WITH_UNDERSTAT_CURRENT");
+			expect(understatHistory?.seasons).not.toContain("2526");
 		}, 30_000);
 
 		it.skipIf(!hasRedisEnvironment)(
@@ -241,10 +266,7 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 						currentCore.players.some((player) => player.id === currentSubject.element_id)
 					).toBe(true);
 					currentContext.dataRevision = coreDatasetRevision(currentCore);
-					cacheKey = gqlCacheKey(
-						currentContext,
-						`player-state-profile:${currentSubject.element_id}:5`
-					);
+					cacheKey = profileCacheKey(currentContext, currentSubject.element_id, 5);
 					await redis.del(cacheKey);
 					const currentRepository = createPlayerStateRepository({ executor: pool });
 					const profile = await currentRepository.getPlayerStateProfile(
@@ -253,11 +275,16 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 						5
 					);
 					expect(profile?.season).toBe(currentSeason.season_code);
-					expect(profile?.coverage.mappingStatus).toBe("UNVERIFIED");
-					expect(profile?.coverage.understatCurrent).toBe(false);
-					expect(profile?.coverage.understatHistorySeasons.length).toBeGreaterThan(0);
-					expect(profile?.coverage.limitations).toContain("PLAYER_MAPPING_UNVERIFIED");
-					expect(profile?.fplOnly).toBe(true);
+					const understatCurrent = profile?.coverage.sources.find(
+						(source) => source.provider === "UNDERSTAT" && source.scope === "CURRENT"
+					);
+					const understatHistory = profile?.coverage.sources.find(
+						(source) => source.provider === "UNDERSTAT" && source.scope === "HISTORY"
+					);
+					expect(understatCurrent?.mappingStatus).toBe("UNVERIFIED");
+					expect(understatCurrent?.dataStatus).toBe("UNAVAILABLE");
+					expect(understatHistory?.seasons).toEqual([]);
+					expect(profile?.providerMode).toBe("FPL_ONLY");
 				} finally {
 					if (cacheKey !== null) await redis.del(cacheKey);
 					await redis.quit();
@@ -271,11 +298,8 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 			async () => {
 				const redis = new Redis({ host: redisHost, port: redisPort, maxRetriesPerRequest: 1 });
 				const redisContext = context(redis);
-				const successKey = gqlCacheKey(
-					redisContext,
-					`player-state-profile:${subject.element_id}:5`
-				);
-				const nullKey = gqlCacheKey(redisContext, `player-state-profile:999999:5`);
+				const successKey = profileCacheKey(redisContext, subject.element_id, 5);
+				const nullKey = profileCacheKey(redisContext, 999999, 5);
 				try {
 					await redis.del(successKey, nullKey);
 					await repository.getPlayerStateProfile(redisContext, subject.element_id, 5);

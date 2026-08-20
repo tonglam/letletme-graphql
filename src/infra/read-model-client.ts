@@ -11,6 +11,8 @@ export const READ_MODELS = {
 	playerGameweekStats: "fpl.player_gameweek_stats",
 	playerGameweekScoringItems: "fpl.player_gameweek_scoring_items",
 	playerSeasonSummaries: "reporting.player_season_summaries",
+	playerStateSeasonRows: "reporting.player_state_season_rows",
+	playerStateDatasetMetadata: "reporting.player_state_dataset_metadata",
 	playerValueChanges: "reporting.player_value_changes",
 	playerMarketSnapshots: "fpl.player_market_snapshots",
 	playerFixtureStats: "fpl.player_fixture_stats",
@@ -323,6 +325,59 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 				dream_team_appearances
 			FROM reporting.player_season_summaries
 			WHERE season_id = $1
+		`,
+	},
+	[READ_MODELS.playerStateSeasonRows]: {
+		sourceRelations: ["reporting.player_state_season_rows"],
+		sql: `
+			SELECT
+				season_id,
+				season_code,
+				lifecycle_state,
+				player_code,
+				element_id,
+				element_type,
+				fpl_minutes,
+				fpl_gameweeks,
+				fpl_points_per_90,
+				fpl_return_rate,
+				fpl_bonus_per_90,
+				fpl_position_percentile,
+				fpl_peer_count,
+				expected_metrics_available,
+				fpl_source_hash,
+				fpl_source_updated_at,
+				understat_mapping_status,
+				understat_player_id,
+				understat_season_state,
+				understat_minutes,
+				understat_npxg_per_90,
+				understat_xa_per_90,
+				understat_shots_per_90,
+				understat_key_passes_per_90,
+				understat_xg_chain_per_90,
+				understat_xg_buildup_per_90,
+				understat_npxg_percentile,
+				understat_xa_percentile,
+				understat_shots_percentile,
+				understat_key_passes_percentile,
+				understat_xg_chain_percentile,
+				understat_xg_buildup_percentile,
+				understat_process_percentile,
+				understat_peer_count,
+				understat_source_hash,
+				understat_source_updated_at,
+				refreshed_at
+			FROM reporting.player_state_season_rows
+			WHERE season_id = $1
+		`,
+	},
+	[READ_MODELS.playerStateDatasetMetadata]: {
+		sourceRelations: ["reporting.player_state_dataset_metadata"],
+		sql: `
+			SELECT dataset_key, revision, method_version, source_updated_at, refreshed_at
+			FROM reporting.player_state_dataset_metadata
+			WHERE dataset_key = 'player_state' AND $1::smallint IS NOT NULL
 		`,
 	},
 	[READ_MODELS.playerValueChanges]: {

@@ -62,6 +62,26 @@ export const playerStateTypeDefs = /* GraphQL */ `
 		AMBIGUOUS
 		QUARANTINED
 		UNAVAILABLE
+		NOT_APPLICABLE
+	}
+
+	enum PlayerStateDataStatus {
+		AVAILABLE
+		UNAVAILABLE
+	}
+
+	enum PlayerStateAnalysisStatus {
+		READY
+		PRESEASON
+		INSUFFICIENT
+		NOT_APPLICABLE
+		UNAVAILABLE
+	}
+
+	enum PlayerStateProviderMode {
+		FPL_ONLY
+		FPL_WITH_UNDERSTAT_HISTORY
+		FPL_WITH_UNDERSTAT_CURRENT
 	}
 
 	enum PlayerStateProvider {
@@ -190,26 +210,24 @@ export const playerStateTypeDefs = /* GraphQL */ `
 		expectedMetricsAvailable: Boolean!
 	}
 
-	type PlayerStateProviderRevision {
+	type PlayerStateSourceCoverage {
 		provider: PlayerStateProvider!
 		scope: PlayerStateProviderScope!
-		season: String!
+		seasons: [String!]!
+		dataStatus: PlayerStateDataStatus!
+		analysisStatus: PlayerStateAnalysisStatus!
+		mappingStatus: PlayerStateMappingStatus!
+		reasonCodes: [String!]!
 		revision: String
 		asOf: DateTime
 		freshnessSeconds: Int
 		stale: Boolean!
-		available: Boolean!
 	}
 
 	type PlayerStateCoverage {
-		fplCurrent: Boolean!
-		understatCurrent: Boolean!
-		fplHistorySeasons: [String!]!
-		understatHistorySeasons: [String!]!
-		mappingStatus: PlayerStateMappingStatus!
+		sources: [PlayerStateSourceCoverage!]!
 		metricCoverage: [String!]!
 		limitations: [String!]!
-		providers: [PlayerStateProviderRevision!]!
 	}
 
 	type PlayerStateProfile {
@@ -223,7 +241,7 @@ export const playerStateTypeDefs = /* GraphQL */ `
 		asOf: DateTime!
 		trend: PlayerStateTrend!
 		confidence: PlayerStateConfidence!
-		fplOnly: Boolean!
+		providerMode: PlayerStateProviderMode!
 		reasons: [PlayerStateReason!]!
 		profileRadar: PlayerRadarProfile
 		dimensions: [PlayerStateDimension!]!

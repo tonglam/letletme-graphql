@@ -1,13 +1,16 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { getCoreEventSnapshot } from "../../infra/data-snapshot";
 import { metrics } from "../../infra/metrics";
-import { playerStateRepository } from "./repository";
+import { getPlayerStateDatasetRevision, playerStateRepository } from "./repository";
 import type { PlayerStateProfile } from "./types";
 
 const profileSingleflight = new Map<string, Promise<PlayerStateProfile | null>>();
 
-const revisionFor = async (context: GraphQLContext): Promise<string> =>
-	(await getCoreEventSnapshot(context)).revision;
+const revisionFor = async (context: GraphQLContext): Promise<string> => {
+	const coreRevision = (await getCoreEventSnapshot(context)).revision;
+	const datasetRevision = await getPlayerStateDatasetRevision(context, context.database);
+	return `${coreRevision}:${datasetRevision.revision}`;
+};
 
 const profileSingleflightKey = (
 	context: GraphQLContext,
@@ -62,16 +65,19 @@ export const playerStateService = {
 		const profile =
 			(await loadProfilesSingleflight(context, [playerId], horizon)).get(playerId) ?? null;
 		if (profile) {
+			const currentSource = profile.coverage.sources.find(
+				(source) => source.provider === "FPL" && source.scope === "CURRENT"
+			);
 			metrics.playerStateProfiles
 				.labels(
 					profile.trend.toLowerCase(),
 					profile.confidence.toLowerCase(),
-					profile.fplOnly ? "fpl_only" : "cross_provider",
-					profile.coverage.mappingStatus.toLowerCase()
+					profile.providerMode.toLowerCase(),
+					(currentSource?.analysisStatus ?? "UNAVAILABLE").toLowerCase()
 				)
 				.inc();
-			for (const provider of profile.coverage.providers) {
-				if (!provider.available || !provider.stale) continue;
+			for (const provider of profile.coverage.sources) {
+				if (provider.dataStatus !== "AVAILABLE" || !provider.stale) continue;
 				metrics.playerStateProviderStale
 					.labels(provider.provider.toLowerCase(), provider.scope.toLowerCase())
 					.inc();
@@ -88,12 +94,15 @@ export const playerStateService = {
 		const profiles = await loadProfilesSingleflight(context, playerIds, horizon);
 		for (const profile of profiles.values()) {
 			if (!profile) continue;
+			const currentSource = profile.coverage.sources.find(
+				(source) => source.provider === "FPL" && source.scope === "CURRENT"
+			);
 			metrics.playerStateProfiles
 				.labels(
 					profile.trend.toLowerCase(),
 					profile.confidence.toLowerCase(),
-					profile.fplOnly ? "fpl_only" : "cross_provider",
-					profile.coverage.mappingStatus.toLowerCase()
+					profile.providerMode.toLowerCase(),
+					(currentSource?.analysisStatus ?? "UNAVAILABLE").toLowerCase()
 				)
 				.inc();
 		}

@@ -8,6 +8,7 @@ import { playerDetailService } from "../player-detail/service";
 import { playerStateService } from "../player-state/service";
 import type { PlayerStateProfile } from "../player-state/types";
 import { GraphQLError } from "graphql";
+import { metrics } from "../../infra/metrics";
 
 type PlayerStatsBootstrap = {
 	context: CoreEventContext;
@@ -26,6 +27,12 @@ type PlayerStatsDeskBatch = {
 	playerIds: number[];
 	eventId: number;
 	horizon: number;
+};
+
+type DeskFieldStatus = "AVAILABLE" | "NOT_FOUND" | "TEMPORARILY_UNAVAILABLE";
+type DeskFieldResult<T> = {
+	status: DeskFieldStatus;
+	value: T | null;
 };
 
 const detailBatchMemo = new WeakMap<
@@ -69,17 +76,27 @@ const memoizedState = (
 	return batch.then((profiles) => profiles.get(parent.playerId) ?? null);
 };
 
-const nullableDeskField = async <T>(
+const resolveDeskField = async <T>(
 	context: GraphQLContext,
 	field: "overview" | "state" | "evidence",
 	playerId: number,
-	load: () => Promise<T>
-): Promise<T | null> => {
+	load: () => Promise<T | null>
+): Promise<DeskFieldResult<T>> => {
 	try {
-		return await load();
+		const value = await load();
+		return value === null
+			? (() => {
+					metrics.playerStatsDeskFields.labels(field, "not_found").inc();
+					return { status: "NOT_FOUND" as const, value: null };
+				})()
+			: (() => {
+					metrics.playerStatsDeskFields.labels(field, "available").inc();
+					return { status: "AVAILABLE" as const, value };
+				})();
 	} catch (error) {
 		context.logger.warn({ err: error, field, playerId }, "Player stats desk field is unavailable");
-		return null;
+		metrics.playerStatsDeskFields.labels(field, "temporarily_unavailable").inc();
+		return { status: "TEMPORARILY_UNAVAILABLE", value: null };
 	}
 };
 
@@ -153,23 +170,19 @@ export const playerStatsResolvers = {
 			parent: PlayerStatsDeskEntry,
 			_args: unknown,
 			context: GraphQLContext
-		): Promise<PlayerDetail | null> =>
-			nullableDeskField(context, "overview", parent.playerId, () =>
-				memoizedDetail(context, parent)
-			),
+		): Promise<DeskFieldResult<PlayerDetail>> =>
+			resolveDeskField(context, "overview", parent.playerId, () => memoizedDetail(context, parent)),
 		state: (
 			parent: PlayerStatsDeskEntry,
 			_args: unknown,
 			context: GraphQLContext
-		): Promise<PlayerStateProfile | null> =>
-			nullableDeskField(context, "state", parent.playerId, () => memoizedState(context, parent)),
+		): Promise<DeskFieldResult<PlayerStateProfile>> =>
+			resolveDeskField(context, "state", parent.playerId, () => memoizedState(context, parent)),
 		evidence: (
 			parent: PlayerStatsDeskEntry,
 			_args: unknown,
 			context: GraphQLContext
-		): Promise<PlayerDetail | null> =>
-			nullableDeskField(context, "evidence", parent.playerId, () =>
-				memoizedDetail(context, parent)
-			),
+		): Promise<DeskFieldResult<PlayerDetail>> =>
+			resolveDeskField(context, "evidence", parent.playerId, () => memoizedDetail(context, parent)),
 	},
 };
