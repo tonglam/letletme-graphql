@@ -82,6 +82,8 @@ export enum TournamentSetupIssueSeverity {
 export type TournamentSetupWarningSummary = {
 	category: TournamentSetupWarningCategory;
 	affectedCount: number;
+	/** True only when every unresolved warning in this category is exhausted. */
+	repairExhausted?: boolean;
 };
 
 export type TournamentSetupIssueDiagnostic = {
@@ -1560,16 +1562,22 @@ const summarizeTournamentSetupIssues = (
 ): TournamentSetupWarningSummary[] => {
 	const totals = new Map<
 		TournamentSetupWarningCategory,
-		{ affectedEntryIds: Set<number>; fallbackCount: number }
+		{
+			affectedEntryIds: Set<number>;
+			fallbackCount: number;
+			repairExhausted: boolean;
+		}
 	>();
 	for (const issue of issues) {
 		if (issue.severity !== TournamentSetupIssueSeverity.WARNING) continue;
 		const total = totals.get(issue.category) ?? {
 			affectedEntryIds: new Set<number>(),
 			fallbackCount: 0,
+			repairExhausted: true,
 		};
 		for (const entryId of issue.affectedEntryIds) total.affectedEntryIds.add(entryId);
 		total.fallbackCount = Math.max(total.fallbackCount, issue.affectedCount);
+		total.repairExhausted = total.repairExhausted && issue.repairExhausted;
 		totals.set(issue.category, total);
 	}
 	return [...totals.entries()]
@@ -1577,6 +1585,7 @@ const summarizeTournamentSetupIssues = (
 			category,
 			affectedCount:
 				total.affectedEntryIds.size > 0 ? total.affectedEntryIds.size : total.fallbackCount,
+			repairExhausted: total.repairExhausted,
 		}))
 		.sort((left, right) => left.category.localeCompare(right.category));
 };
@@ -1595,6 +1604,7 @@ type DbTournamentSetupWarningSummaryRow = {
 	severity: string;
 	affected_entry_ids: number[] | null;
 	affected_entry_count: number | null;
+	repair_exhausted_at: DbDateTime | null;
 };
 
 const getTournamentSetupWarningSummariesByTournamentIds = async (
@@ -1607,7 +1617,9 @@ const getTournamentSetupWarningSummariesByTournamentIds = async (
 
 	const result = await context.data
 		.read<DbTournamentSetupWarningSummaryRow>("competition.tournament_setup_issues")
-		.select("tournament_id, category, severity, affected_entry_ids, affected_entry_count")
+		.select(
+			"tournament_id, category, severity, affected_entry_ids, affected_entry_count, repair_exhausted_at"
+		)
 		.in("tournament_id", uniqueIds)
 		.is("resolved_at", null)
 		.order("tournament_id", { ascending: true });
@@ -1636,7 +1648,8 @@ const getTournamentSetupWarningSummariesByTournamentIds = async (
 			affectedCount: Number(row.affected_entry_count ?? 0),
 			repairAttempts: 0,
 			nextRepairAt: null,
-			repairExhausted: false,
+			repairExhausted:
+				row.repair_exhausted_at !== null && row.repair_exhausted_at !== undefined,
 		});
 		issuesByTournament.set(row.tournament_id, issues);
 	}

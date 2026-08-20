@@ -59,6 +59,7 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 	type TournamentSetupWarningSummary {
 		category: TournamentSetupWarningCategory!
 		affectedCount: Int!
+		repairExhausted: Boolean!
 	}
 
 	type TournamentSetupIssueDiagnostic {
