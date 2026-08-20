@@ -23,6 +23,8 @@ export const GRAPHQL_LIMITS = {
 	maxAliases: 20,
 	maxAstNodes: 200,
 	maxBoundedDeskAstNodes: 400,
+	maxPlayerStatsDeskAstNodes: 240,
+	maxPlayerStateProfileAstNodes: 240,
 	maxComplexity: 600,
 } as const;
 
@@ -31,6 +33,8 @@ export const GRAPHQL_LIMITS = {
 // general document cap strict, but give this one bounded root enough AST room
 // without relaxing depth, alias, root-field, or weighted-complexity guards.
 const TOURNAMENT_DETAIL_DESK_MAX_AST_NODES = 400;
+const PLAYER_STATS_DESK_MAX_AST_NODES = 240;
+const PLAYER_STATE_PROFILE_MAX_AST_NODES = 240;
 
 const MAX_LIST_ARGUMENT_WEIGHT = 200;
 
@@ -567,11 +571,29 @@ export const validateGraphQLPayloadLimits = (
 			(field) =>
 				field.name === "myFplCompetitionsDesk" && field.responseKey === "myFplCompetitionsDesk"
 		);
+	const usesPlayerStatsDesk =
+		onlyReachableDefinitions &&
+		responseKeys.size === 1 &&
+		rootNames.length > 0 &&
+		rootNames.every(
+			(field) => field.name === "playerStatsDesk" && field.responseKey === "playerStatsDesk"
+		);
+	const usesPlayerStateProfile =
+		onlyReachableDefinitions &&
+		responseKeys.size === 1 &&
+		rootNames.length > 0 &&
+		rootNames.every(
+			(field) => field.name === "playerStateProfile" && field.responseKey === "playerStateProfile"
+		);
 	const maxAstNodes = usesTournamentDetailDesk
 		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
 		: usesMyFplCompetitionsDesk
 			? GRAPHQL_LIMITS.maxBoundedDeskAstNodes
-			: GRAPHQL_LIMITS.maxAstNodes;
+			: usesPlayerStatsDesk
+				? PLAYER_STATS_DESK_MAX_AST_NODES
+				: usesPlayerStateProfile
+					? PLAYER_STATE_PROFILE_MAX_AST_NODES
+					: GRAPHQL_LIMITS.maxAstNodes;
 	let astNodes = 0;
 	visit(document, { enter: () => void (astNodes += 1) });
 	if (astNodes > maxAstNodes) {

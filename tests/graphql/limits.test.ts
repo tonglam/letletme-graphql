@@ -183,6 +183,42 @@ describe("GraphQL request limits", () => {
 		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
 	});
 
+	it("allows the bounded player stats timeline projection above the generic AST ceiling", () => {
+		const fields = Array.from({ length: 110 }, () => "__typename").join(" ");
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: `query { playerStatsDesk(playerIds: [1], eventId: 1) { ${fields} } }` },
+				schema
+			)
+		).toMatchObject({ ok: true, rootFields: ["playerStatsDesk"] });
+
+		const oversized = Array.from({ length: 205 }, () => "__typename").join(" ");
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: `query { playerStatsDesk(playerIds: [1], eventId: 1) { ${oversized} } }` },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+	});
+
+	it("allows the bounded player state profile projection above the generic AST ceiling", () => {
+		const fields = Array.from({ length: 110 }, () => "__typename").join(" ");
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: `query { playerStateProfile(playerId: 1) { ${fields} } }` },
+				schema
+			)
+		).toMatchObject({ ok: true, rootFields: ["playerStateProfile"] });
+
+		const oversized = Array.from({ length: 205 }, () => "__typename").join(" ");
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: `query { playerStateProfile(playerId: 1) { ${oversized} } }` },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+	});
+
 	it("allows standard introspection where Apollo has enabled it", () => {
 		const result = validateGraphQLRequestLimits({ query: getIntrospectionQuery() }, schema);
 		expect(result).toMatchObject({
