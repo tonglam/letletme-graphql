@@ -73,6 +73,7 @@ export type RateLimitCheck = {
 
 export type RateLimitBatchResult = RateLimitResult & {
 	deniedScope?: string;
+	deniedCheckIndex?: number;
 };
 
 export const checkRateLimits = async (
@@ -112,12 +113,14 @@ export const checkRateLimits = async (
 			retryAfterSeconds: Number.isFinite(ttl) && ttl >= 0 ? Math.max(1, ttl) : check.windowSeconds,
 		};
 	});
-	const denied = decisions.filter((decision) => !decision.allowed);
+	const denied = decisions
+		.map((decision, index) => ({ ...decision, index }))
+		.filter((decision) => !decision.allowed);
 	return {
 		allowed: denied.length === 0,
 		retryAfterSeconds:
 			denied.length > 0 ? Math.max(...denied.map((decision) => decision.retryAfterSeconds)) : 0,
-		...(denied[0] ? { deniedScope: denied[0].scope } : {}),
+		...(denied[0] ? { deniedScope: denied[0].scope, deniedCheckIndex: denied[0].index } : {}),
 	};
 };
 

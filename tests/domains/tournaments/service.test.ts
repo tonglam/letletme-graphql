@@ -108,6 +108,25 @@ describe("tournament readiness", () => {
 		}
 	});
 
+	it("does not expose insights until the capability timestamp is published", async () => {
+		const original = tournamentsRepository.getTournamentInfoUncached;
+		tournamentsRepository.getTournamentInfoUncached = async () =>
+			({
+				id: 7,
+				standingsReadyAt: "2026-08-04T00:00:00.000Z",
+				setupStatus: "ready",
+				setupPhase: "ready",
+				insightsReadyAt: null,
+			}) as never;
+		try {
+			await expect(assertTournamentInsightsReady({} as GraphQLContext, 7)).rejects.toMatchObject({
+				extensions: { code: "TOURNAMENT_INSIGHTS_NOT_READY" },
+			});
+		} finally {
+			tournamentsRepository.getTournamentInfoUncached = original;
+		}
+	});
+
 	it("delegates entry H2H reads to the repository readiness barrier", async () => {
 		const originalResults = tournamentsRepository.getEntryH2HMatchResults;
 		const context = {} as GraphQLContext;

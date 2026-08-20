@@ -30,7 +30,52 @@ describe("signed web ingress context", () => {
 
 	test("accepts the exact canonical envelope for at most sixty seconds", () => {
 		const headers = signed({ aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 });
-		expect(verifyIngressContext(headers, 120)).toEqual({ subject });
+		expect(verifyIngressContext(headers, 120)).toEqual({
+			version: 1,
+			subject,
+			abuseSubject: null,
+			trafficClass: "legacy",
+			workload: "public-other",
+		});
+	});
+
+	test("accepts the exact v2 identity and workload envelope", () => {
+		const abuseSubject = "b".repeat(64);
+		const headers = signed({
+			v: 2,
+			aud: "letletme-graphql",
+			trafficClass: "mini",
+			subject,
+			abuseSubject,
+			workload: "market",
+			iat: 100,
+			exp: 160,
+		});
+		expect(verifyIngressContext(headers, 120)).toEqual({
+			version: 2,
+			subject,
+			abuseSubject,
+			trafficClass: "mini",
+			workload: "market",
+		});
+	});
+
+	test("requires an abuse subject for Mini v2 ingress", () => {
+		expect(
+			verifyIngressContext(
+				signed({
+					v: 2,
+					aud: "letletme-graphql",
+					trafficClass: "mini",
+					subject,
+					abuseSubject: null,
+					workload: "market",
+					iat: 100,
+					exp: 160,
+				}),
+				120
+			)
+		).toBeNull();
 	});
 
 	test("rejects spoofed, expired, overlong, wrong-audience, and extra-field envelopes", () => {
@@ -40,6 +85,21 @@ describe("signed web ingress context", () => {
 		expect(verifyIngressContext(signed({ ...base, exp: 161 }), 120)).toBeNull();
 		expect(verifyIngressContext(signed({ ...base, aud: "other" }), 120)).toBeNull();
 		expect(verifyIngressContext(signed({ ...base, unexpectedField: true }), 120)).toBeNull();
+		expect(
+			verifyIngressContext(
+				signed({
+					v: 2,
+					aud: "letletme-graphql",
+					trafficClass: "legacy",
+					subject,
+					abuseSubject: null,
+					workload: "market",
+					iat: 100,
+					exp: 160,
+				}),
+				120
+			)
+		).toBeNull();
 	});
 
 	test("classifies signed ingress ahead of forwarded user credentials", () => {
@@ -64,6 +124,9 @@ describe("signed web ingress context", () => {
 			class: "service",
 			trusted: true,
 			subject: GRAPHQL_SERVICE_RATE_LIMIT_SUBJECT,
+			abuseSubject: null,
+			trafficClass: "service",
+			workload: "public-other",
 			ingressContext: null,
 		});
 	});

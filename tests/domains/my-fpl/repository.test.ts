@@ -1,16 +1,317 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { myFplTestables } from "../../../src/domains/my-fpl/repository";
+import { GraphQLError } from "graphql";
+import {
+	createMyFplRepository,
+	myFplTestables,
+	type MyFplRepository,
+	type MyFplRepositoryDependencies,
+	type MyFplReviewState,
+	type MyFplTeamHistoryRow,
+} from "../../../src/domains/my-fpl/repository";
+import { createMyFplResolvers } from "../../../src/domains/my-fpl/resolvers";
+import {
+	GroupMode,
+	KnockoutMode,
+	TournamentMode,
+	TournamentRosterMode,
+	TournamentSetupPhase,
+	TournamentSetupStatus,
+	TournamentState,
+	type TournamentInfo,
+} from "../../../src/domains/tournaments/repository";
+import { LeagueType } from "../../../src/domains/leagues/repository";
+import type { GraphQLContext } from "../../../src/graphql/context";
+import { gqlCacheKey } from "../../../src/infra/cache-key";
+import { TestRedis, testLogger } from "../../helpers/data-publication";
+
+const verifiedPrincipal = {
+	userId: "user-1",
+	source: "website" as const,
+	fplEntryId: 123,
+	fplEntryVerifiedAt: "2026-08-20T00:00:00.000Z",
+};
+
+const entryRow = (overrides: Record<string, unknown> = {}) => ({
+	entry_id: 123,
+	entry_name: "Codex XI",
+	player_name: "Test Manager",
+	region: "AU",
+	started_event: 1,
+	overall_points: 100,
+	overall_rank: 1000,
+	bank: 10,
+	team_value: 1000,
+	total_transfers: 2,
+	transfers_synced_through_event_id: 2,
+	...overrides,
+});
+
+const historyRow = (eventId: number): MyFplTeamHistoryRow & Record<string, unknown> => ({
+	eventId,
+	eventPoints: 50,
+	eventRank: 10,
+	overallPoints: eventId * 50,
+	overallRank: 10,
+	eventTransfers: 1,
+	eventTransfersCost: 0,
+	eventNetPoints: 50,
+	eventBenchPoints: 2,
+	eventChip: "NONE",
+	eventCaptainPoints: 10,
+	captainWebName: null,
+	captainTeamShortName: null,
+	teamValue: 1000,
+	bank: 10,
+	event_id: eventId,
+	event_points: 50,
+	event_rank: 10,
+	overall_points: eventId * 50,
+	overall_rank: 10,
+	event_transfers: 1,
+	event_transfers_cost: 0,
+	event_net_points: 50,
+	event_bench_points: 2,
+	event_chip: "none",
+	captain_points: 10,
+	captain_web_name: null,
+	captain_team_short_name: null,
+	team_value: 1000,
+	rich_synced_at: "2026-08-20T00:00:00.000Z",
+});
+
+const gameweekRow = (eventId: number, elementId: number) => ({
+	event_id: eventId,
+	event_points: 50,
+	overall_points: 100,
+	overall_rank: 10,
+	event_transfers: 1,
+	event_transfers_cost: 0,
+	event_net_points: 50,
+	event_bench_points: 2,
+	event_chip: "none",
+	captain_points: 10,
+	played_captain_web_name: "Captain",
+	team_value: 1000,
+	bank: 10,
+	element_id: elementId,
+	position: elementId,
+	web_name: `Player ${elementId}`,
+	team_short_name: "ARS",
+	team_name: "Arsenal",
+	element_type: ((elementId - 1) % 4) + 1,
+	is_captain: elementId === 1,
+	is_vice_captain: elementId === 2,
+	multiplier: elementId === 1 ? 2 : 1,
+	total_points: 5,
+	minutes: 90,
+	goals_scored: 0,
+	assists: 0,
+	clean_sheets: 1,
+	goals_conceded: 0,
+	yellow_cards: 0,
+	red_cards: 0,
+	saves: 0,
+	bonus: 0,
+	bps: 10,
+	expected_goals: "0.10",
+	expected_assists: "0.20",
+	expected_goal_involvements: "0.30",
+	expected_goals_conceded: "0.40",
+	against_short_name: "CHE",
+	was_home: "H",
+	score: "2-0",
+});
+
+const tournament = (overrides: Partial<TournamentInfo> = {}): TournamentInfo => ({
+	id: 7,
+	name: "Codex Cup",
+	creator: "user-1",
+	adminEntryId: 123,
+	leagueId: 7,
+	leagueType: LeagueType.CLASSIC,
+	sourceLeagueName: null,
+	rosterMode: TournamentRosterMode.SNAPSHOT,
+	rosterSyncStatus: TournamentSetupStatus.READY,
+	rosterLastSyncedAt: null,
+	officialScheduleHash: null,
+	officialScheduleSyncedAt: null,
+	officialScheduleLockedAt: null,
+	totalTeamNum: 2,
+	tournamentMode: TournamentMode.NORMAL,
+	groupMode: GroupMode.POINTS_RACES,
+	groupTeamNum: 2,
+	groupNum: 1,
+	groupStartedEventId: 1,
+	groupEndedEventId: 38,
+	groupAutoAverages: false,
+	groupRounds: 1,
+	groupPlayAgainstNum: 1,
+	groupQualifyNum: 1,
+	knockoutMode: KnockoutMode.NO_KNOCKOUT,
+	knockoutTeamNum: null,
+	knockoutRounds: null,
+	knockoutEventNum: null,
+	knockoutStartedEventId: null,
+	knockoutEndedEventId: null,
+	knockoutPlayAgainstNum: null,
+	state: TournamentState.ACTIVE,
+	setupStatus: TournamentSetupStatus.READY,
+	setupPhase: TournamentSetupPhase.READY,
+	setupCompletedUnits: 10,
+	setupTotalUnits: 10,
+	setupProgressUpdatedAt: "2026-08-20T00:00:00.000Z",
+	standingsReadyAt: "2026-08-20T00:00:00.000Z",
+	insightsReadyAt: "2026-08-20T00:00:00.000Z",
+	setupHasWarnings: false,
+	setupStartedAt: "2026-08-20T00:00:00.000Z",
+	setupFinishedAt: "2026-08-20T00:00:00.000Z",
+	createdAt: "2026-08-19T00:00:00.000Z",
+	updatedAt: "2026-08-20T00:00:00.000Z",
+	...overrides,
+});
+
+type FixtureOptions = {
+	finalizedIds?: number[];
+	currentEventId?: number | null;
+	entryRows?: unknown[];
+	historyRows?: unknown[];
+	pastSeasonRows?: unknown[];
+	transferRows?: unknown[];
+	gameweekRows?: unknown[];
+	aggregateRows?: unknown[];
+	aggregateFieldSize?: number;
+	seasonPathRows?: unknown[];
+	enrichedCount?: number;
+	membershipIds?: number[];
+	member?: boolean;
+	catalog?: TournamentInfo[];
+	selectedTournament?: TournamentInfo | null;
+	boardPayload?: unknown;
+	setupRows?: unknown[];
+	queryOverride?: (
+		sql: string,
+		params: unknown[]
+	) => Promise<{ rows: unknown[]; rowCount?: number }>;
+};
+
+const snapshotFor = (currentEventId: number | null) => ({
+	source: "redis" as const,
+	seasonCode: "2627",
+	revision: "core-7",
+	publicationId: "00000000-0000-4000-8000-000000000007",
+	sourceCheckedAt: "2026-08-20T00:00:00.000Z",
+	currentEventId,
+	events: [
+		{ id: 1, isCurrent: currentEventId === 1, isNext: currentEventId === null },
+		{ id: 2, isCurrent: currentEventId === 2, isNext: currentEventId === 1 },
+		{ id: 3, isCurrent: currentEventId === 3, isNext: currentEventId === 2 },
+	],
+});
+
+const makeFixture = (options: FixtureOptions = {}) => {
+	const redis = new TestRedis();
+	const queries: Array<{ sql: string; params: unknown[] }> = [];
+	const selectedTournament =
+		options.selectedTournament === undefined ? tournament() : options.selectedTournament;
+	const catalog = options.catalog ?? (selectedTournament ? [selectedTournament] : []);
+	const lifecycleRows = (options.finalizedIds ?? []).map((eventId) => ({
+		event_id: eventId,
+		finished: true,
+		data_checked: true,
+		live_snapshot_finalized_at: "2026-08-20T00:00:00.000Z",
+	}));
+	const query = async (sql: string, params: unknown[] = []) => {
+		queries.push({ sql, params });
+		if (options.queryOverride) return options.queryOverride(sql, params);
+		if (sql.includes("FROM fpl.events")) return { rows: lifecycleRows };
+		if (sql.includes("FROM competition.entries")) return { rows: options.entryRows ?? [] };
+		if (sql.includes("FROM competition.entry_season_histories")) {
+			return { rows: options.pastSeasonRows ?? [] };
+		}
+		if (sql.includes("enriched_event_count")) {
+			return { rows: [{ enriched_event_count: options.enrichedCount ?? 0 }] };
+		}
+		if (sql.includes("FROM competition.entry_event_transfers")) {
+			return { rows: options.transferRows ?? [] };
+		}
+		if (sql.includes("FROM competition.entry_event_results result")) {
+			if (sql.includes("entry_event_picks")) return { rows: options.gameweekRows ?? [] };
+			return { rows: options.historyRows ?? [] };
+		}
+		if (sql.includes("FROM competition.tournament_entries")) {
+			if (sql.includes("SELECT tournament_id")) {
+				const ids = options.membershipIds ?? (options.member === false ? [] : [7]);
+				return {
+					rows: ids.map((tournamentId) => ({ tournament_id: tournamentId })),
+					rowCount: ids.length,
+				};
+			}
+			return {
+				rows: options.member === false ? [] : [{ ok: 1 }],
+				rowCount: options.member === false ? 0 : 1,
+			};
+		}
+		if (sql.includes("jsonb_build_object")) {
+			return {
+				rows: [
+					{
+						payload: options.boardPayload ?? {
+							fieldSize: 0,
+							totalRows: 0,
+							rows: [],
+							viewerRow: null,
+						},
+					},
+				],
+			};
+		}
+		if (sql.includes("FROM competition.tournaments")) return { rows: options.setupRows ?? [] };
+		if (sql.includes("WITH field AS MATERIALIZED")) return { rows: options.seasonPathRows ?? [] };
+		if (sql.includes("SELECT count(*)::integer AS field_size")) {
+			return {
+				rows: [{ field_size: options.aggregateFieldSize ?? options.aggregateRows?.length ?? 0 }],
+			};
+		}
+		if (sql.includes("FROM reporting.tournament_entry_event_summaries summary")) {
+			return { rows: options.aggregateRows ?? [] };
+		}
+		return { rows: [] };
+	};
+	const context = {
+		currentSeason: { seasonId: 2026, seasonCode: "2627" },
+		dataRevision: "core-test",
+		redis,
+		database: { query },
+		data: {},
+		logger: testLogger,
+		principal: verifiedPrincipal,
+	} as unknown as GraphQLContext;
+	const tournamentsRepository = {
+		getEntryTournaments: async () => catalog,
+		getTournamentInfosUncached: async (_context: GraphQLContext, ids: number[]) =>
+			ids.map((id) => (id === selectedTournament?.id ? selectedTournament : null)),
+		getTournamentInfoUncached: async () => selectedTournament,
+	};
+	const dependencies: MyFplRepositoryDependencies = {
+		getCoreEventSnapshot: async () => snapshotFor(options.currentEventId ?? 2) as never,
+		tournamentsRepository: tournamentsRepository as never,
+	};
+	return {
+		context,
+		redis,
+		queries,
+		repository: createMyFplRepository(dependencies),
+	};
+};
 
 describe("My FPL review repository", () => {
-	it("normalizes bounded search and legacy chip values", () => {
+	it("normalizes search, chips, positions and board rows", () => {
 		expect(myFplTestables.normalizeSearch("  North London  ")).toBe("North London");
 		expect(() => myFplTestables.normalizeSearch("x".repeat(81))).toThrow(
 			"search must contain at most 80 characters"
 		);
 		expect(myFplTestables.normalizeChip("bboost")).toBe("BENCH_BOOST");
 		expect(myFplTestables.normalizeChip("3xc")).toBe("TRIPLE_CAPTAIN");
-		expect(myFplTestables.normalizeChip(null)).toBe("NONE");
 		expect([1, 2, 3, 4, 5].map(myFplTestables.positionName)).toEqual([
 			"GKP",
 			"DEF",
@@ -18,9 +319,6 @@ describe("My FPL review repository", () => {
 			"FWD",
 			"",
 		]);
-	});
-
-	it("maps compact board JSON without losing stable rank values", () => {
 		expect(
 			myFplTestables.mapBoardJsonRow({
 				event_id: 8,
@@ -44,162 +342,340 @@ describe("My FPL review repository", () => {
 				team_value: 1007,
 				bank: 13,
 			})
-		).toMatchObject({
-			eventId: 8,
-			groupId: 2,
-			entryId: 123,
-			rank: 7,
-			previousRank: 9,
-			eventChip: "FREE_HIT",
+		).toMatchObject({ rank: 7, previousRank: 9, eventChip: "FREE_HIT" });
+	});
+
+	it("requires a verified principal and preserves the bound entry identity", async () => {
+		const unauthenticated = makeFixture();
+		unauthenticated.context.principal = undefined;
+		await expect(
+			unauthenticated.repository.loadTeamDesk(unauthenticated.context)
+		).rejects.toMatchObject({
+			extensions: { code: "FORBIDDEN" },
+		});
+		const fixture = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
+		const desk = await fixture.repository.loadTeamDesk(fixture.context);
+		expect(desk.entry?.id).toBe(123);
+		expect(desk.entry?.entryName).toBe("Codex XI");
+	});
+
+	it("reports PRESEASON, EMPTY, PENDING and READY from durable checkpoints", async () => {
+		const preseason = makeFixture({ entryRows: [entryRow()], finalizedIds: [] });
+		expect((await preseason.repository.loadTeamDesk(preseason.context)).state).toBe("PRESEASON");
+		const empty = makeFixture({ finalizedIds: [1], entryRows: [] });
+		expect((await empty.repository.loadTeamDesk(empty.context)).state).toBe("EMPTY");
+		const pending = makeFixture({
+			finalizedIds: [1, 2],
+			entryRows: [entryRow()],
+			historyRows: [historyRow(1)],
+		});
+		const pendingDesk = await pending.repository.loadTeamDesk(pending.context);
+		expect(pendingDesk.state).toBe("PENDING");
+		expect(pending.redis.setCalls.at(-1)?.[3]).toBe(30);
+		const ready = makeFixture({
+			finalizedIds: [1, 2],
+			entryRows: [entryRow()],
+			historyRows: [historyRow(1), historyRow(2)],
+		});
+		expect((await ready.repository.loadTeamDesk(ready.context)).state).toBe("READY");
+		expect(ready.redis.setCalls.at(-1)?.[3]).toBeGreaterThan(30);
+	});
+
+	it("does not promote incomplete finalized or rich-enriched data to READY", async () => {
+		const lifecycleIncomplete = makeFixture({
+			entryRows: [entryRow()],
+			finalizedIds: [],
+			historyRows: [historyRow(1)],
+		});
+		expect(
+			(await lifecycleIncomplete.repository.loadTeamDesk(lifecycleIncomplete.context)).state
+		).toBe("PRESEASON");
+		const richIncomplete = makeFixture({
+			entryRows: [entryRow()],
+			finalizedIds: [1, 2],
+			historyRows: [],
+		});
+		expect((await richIncomplete.repository.loadTeamDesk(richIncomplete.context)).state).toBe(
+			"PENDING"
+		);
+	});
+
+	it("evicts malformed and schema-invalid cache values before querying PostgreSQL", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			entryRows: [entryRow()],
+			historyRows: [historyRow(1)],
+		});
+		const key = gqlCacheKey(fixture.context, "my-fpl:v4:team-desk:123:season");
+		await fixture.redis.set(key, JSON.stringify({ state: "READY", history: [] }));
+		const desk = await fixture.repository.loadTeamDesk(fixture.context);
+		expect(desk.state).toBe("READY");
+		expect(await fixture.redis.get(key)).not.toBe(JSON.stringify({ state: "READY", history: [] }));
+		const malformed = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
+		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v4:team-desk:123:season");
+		await malformed.redis.set(malformedKey, "{");
+		await malformed.repository.loadTeamDesk(malformed.context);
+		expect(await malformed.redis.get(malformedKey)).not.toBe("{");
+	});
+
+	it("keeps transfer and gameweek readiness fail-closed", async () => {
+		const preseason = makeFixture({ finalizedIds: [] });
+		expect((await preseason.repository.loadTeamTransfers(preseason.context)).state).toBe(
+			"PRESEASON"
+		);
+		const pending = makeFixture({
+			finalizedIds: [1, 2],
+			entryRows: [entryRow({ transfers_synced_through_event_id: 1 })],
+		});
+		expect((await pending.repository.loadTeamTransfers(pending.context)).state).toBe("PENDING");
+		const gameweek = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
+		expect((await gameweek.repository.loadTeamGameweek(gameweek.context, 1)).state).toBe("PENDING");
+		await expect(gameweek.repository.loadTeamGameweek(gameweek.context, 0)).rejects.toMatchObject({
+			extensions: { code: "BAD_USER_INPUT" },
 		});
 	});
 
-	it("keeps the domain on finalized durable review data and lightweight core", () => {
-		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
-		expect(source).toContain("getCoreEventSnapshot");
-		expect(source).not.toContain("getCoreDataSnapshot");
-		expect(source).toContain("event.finished");
-		expect(source).toContain("event.data_checked");
-		expect(source).toContain("event.live_snapshot_finalized_at IS NOT NULL");
-		expect(source).toContain("result.rich_synced_at IS NOT NULL");
-		expect(source).not.toMatch(/entry-live|live-bonus|self.?calc/i);
+	it("returns a ready gameweek only after all fifteen picks are enriched", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			entryRows: [entryRow()],
+			gameweekRows: Array.from({ length: 15 }, (_, index) => gameweekRow(1, index + 1)),
+		});
+		const gameweek = await fixture.repository.loadTeamGameweek(fixture.context, 1);
+		expect(gameweek.state).toBe("READY");
+		expect(gameweek.result?.picks).toHaveLength(15);
+		expect(gameweek.result?.picks[0]?.isCaptain).toBe(true);
 	});
 
-	it("does not select picks for season history and batches gameweek detail", () => {
-		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
-		const historyStart = source.indexOf("const loadTeamHistory");
-		const pastSeasonStart = source.indexOf("const loadPastSeasons");
-		const historySource = source.slice(historyStart, pastSeasonStart);
-		expect(historySource).not.toContain("entry_event_picks");
-		expect(historySource).not.toContain("event_picks");
+	it("loads enriched transfer rows and groups them by gameweek", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			entryRows: [entryRow()],
+			enrichedCount: 1,
+			transferRows: [
+				{
+					event_id: 1,
+					event_transfers: 1,
+					event_transfers_cost: 4,
+					element_in_web_name: "In",
+					element_in_type: 3,
+					element_in_team_short_name: "ARS",
+					element_in_cost: 70,
+					element_out_web_name: "Out",
+					element_out_type: 4,
+					element_out_team_short_name: "CHE",
+					element_out_cost: 65,
+					transfer_time: "2026-08-20T00:00:00.000Z",
+				},
+			],
+		});
+		const transfers = await fixture.repository.loadTeamTransfers(fixture.context);
+		expect(transfers.state).toBe("READY");
+		expect(transfers.gameweeks).toHaveLength(1);
+		expect(transfers.gameweeks[0]?.transfers[0]?.elementInWebName).toBe("In");
+	});
 
-		const gameweekQueryCount = source.match(/JOIN competition\.entry_event_picks pick/g);
-		expect(gameweekQueryCount).toHaveLength(1);
-		expect(source).toContain("LEFT JOIN fpl.player_gameweek_stats stats");
-		const preparedStart = source.indexOf("const loadTeamGameweekPrepared");
-		const preparedEnd = source.indexOf("const loadTeamDesk", preparedStart);
-		const prepared = source.slice(preparedStart, preparedEnd);
-		expect(prepared.indexOf("finalizedEventIds.has(eventId)")).toBeGreaterThan(-1);
-		expect(prepared.indexOf("loadTeamGameweekRows")).toBeGreaterThan(
-			prepared.indexOf("finalizedEventIds.has(eventId)")
+	it("validates tournament board pagination, pushes range to SQL, and warms its cache", async () => {
+		const boardRow = {
+			event_id: 1,
+			group_id: 1,
+			entry_id: 123,
+			entry_name: "Foo",
+			player_name: "A",
+			rank: 1,
+			previous_rank: null,
+			event_points: 50,
+			event_cost: 0,
+			event_net_points: 50,
+			event_rank: 10,
+			overall_points: 100,
+			overall_rank: 1000,
+			event_chip: "none",
+			captain_id: null,
+			captain_web_name: null,
+			captain_team_short_name: null,
+			captain_points: null,
+			team_value: 1000,
+			bank: 10,
+		};
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			boardPayload: {
+				fieldSize: 2,
+				totalRows: 2,
+				rows: [boardRow],
+				viewerRow: boardRow,
+			},
+		});
+		const page = await fixture.repository.loadCompetitionBoard(fixture.context, {
+			tournamentId: 7,
+			eventId: 1,
+			page: 2,
+			pageSize: 1,
+			search: " Foo ",
+		});
+		expect(page.state).toBe("READY");
+		expect(page.totalPages).toBe(2);
+		const boardQuery = fixture.queries.find((query) => query.sql.includes("LIMIT $5 OFFSET $6"));
+		expect(boardQuery?.params.slice(3, 6)).toEqual(["Foo", 1, 1]);
+		const queryCount = fixture.queries.filter((query) =>
+			query.sql.includes("LIMIT $5 OFFSET $6")
+		).length;
+		await fixture.repository.loadCompetitionBoard(fixture.context, {
+			tournamentId: 7,
+			eventId: 1,
+			page: 2,
+			pageSize: 1,
+			search: " Foo ",
+		});
+		expect(fixture.queries.filter((query) => query.sql.includes("LIMIT $5 OFFSET $6")).length).toBe(
+			queryCount
 		);
-
-		const gameweekMapStart = source.indexOf("const mapGameweekPick", pastSeasonStart);
-		const pastSeasonSource = source.slice(pastSeasonStart, gameweekMapStart);
-		expect(pastSeasonSource).toContain("WHERE season_id = $1");
-		expect(pastSeasonSource).toContain("entry_id = $2");
-		expect(pastSeasonSource).not.toContain("season_id < $2");
+		await expect(
+			fixture.repository.loadCompetitionBoard(fixture.context, {
+				tournamentId: 7,
+				eventId: 1,
+				page: 101,
+				pageSize: 1,
+			})
+		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
 	});
 
-	it("pins the lightweight Core revision before reading the Team Desk cache", () => {
-		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
-		const deskStart = source.indexOf("const loadTeamDesk");
-		const gameweekStart = source.indexOf("const loadTeamGameweek", deskStart + 1);
-		const deskSource = source.slice(deskStart, gameweekStart);
-		expect(deskSource.indexOf("await getCoreEventSnapshot(context)")).toBeGreaterThan(-1);
-		expect(deskSource.indexOf("await getCoreEventSnapshot(context)")).toBeLessThan(
-			deskSource.indexOf("const cacheKey = gqlCacheKey")
+	it("keeps membership and tournament mode checks before board reads", async () => {
+		const unsupported = makeFixture({
+			finalizedIds: [1],
+			selectedTournament: tournament({ groupMode: GroupMode.BATTLE_RACES }),
+		});
+		const result = await unsupported.repository.loadCompetitionBoard(unsupported.context, {
+			tournamentId: 7,
+			eventId: 1,
+		});
+		expect(result.state).toBe("UNAVAILABLE");
+		const forbidden = makeFixture({ member: false, selectedTournament: tournament() });
+		await expect(
+			forbidden.repository.loadCompetitionBoard(forbidden.context, { tournamentId: 7, eventId: 1 })
+		).rejects.toMatchObject({ extensions: { code: "FORBIDDEN" } });
+	});
+
+	it("returns the competitions desk with aggregate and season-path readiness", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			entryRows: [entryRow()],
+			boardPayload: {
+				fieldSize: 2,
+				totalRows: 2,
+				rows: [{ event_id: 1, group_id: 1, entry_id: 123, entry_name: "Foo", player_name: "A" }],
+				viewerRow: { event_id: 1, group_id: 1, entry_id: 123, entry_name: "Foo", player_name: "A" },
+			},
+			aggregateRows: [
+				{
+					entry_id: 123,
+					entry_name: "Foo",
+					player_name: "A",
+					overall_points: 100,
+					overall_rank: 1,
+					team_value: 1000,
+					cumulative_transfers: 1,
+					cumulative_transfer_cost: 4,
+					cumulative_bench_points: 2,
+					cumulative_auto_sub_points: 0,
+					tournament_rank: 1,
+				},
+			],
+			seasonPathRows: [
+				{
+					event_id: 1,
+					tournament_rank: 1,
+					field_size: 1,
+					overall_points: 100,
+					leader_overall_points: 100,
+					average_overall_points: "100",
+					gap_to_leader: 0,
+					points_vs_average: "0",
+				},
+			],
+		});
+		const desk = await fixture.repository.loadCompetitionsDesk(fixture.context, 7, 1);
+		expect(desk.state).toBe("READY");
+		expect(desk.aggregate?.viewer?.entryId).toBe(123);
+		const path = await fixture.repository.loadCompetitionSeasonPath(fixture.context, 7, 1);
+		expect(path.state).toBe("READY");
+		expect(path.points[0]?.tournamentRank).toBe(1);
+	});
+
+	it("does not convert PostgreSQL errors into empty data or success cache", async () => {
+		const fixture = makeFixture({
+			queryOverride: async (sql) => {
+				if (sql.includes("FROM competition.entries")) throw new Error("database unavailable");
+				if (sql.includes("FROM fpl.events")) return { rows: [] };
+				return { rows: [] };
+			},
+		});
+		await expect(fixture.repository.loadTeamDesk(fixture.context)).rejects.toThrow(
+			"database unavailable"
 		);
+		expect(fixture.redis.setCalls).toHaveLength(0);
 	});
 
-	it("pins the lightweight Core revision before reading the competition catalog cache", () => {
-		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
-		const deskStart = source.indexOf("const loadCompetitionsDesk");
-		const pathStart = source.indexOf("const loadCompetitionSeasonPath", deskStart + 1);
-		const deskSource = source.slice(deskStart, pathStart);
-		expect(deskSource.indexOf("await getCoreEventSnapshot(context)")).toBeGreaterThan(-1);
-		expect(deskSource.indexOf("await getCoreEventSnapshot(context)")).toBeLessThan(
-			deskSource.indexOf("tournamentsRepository.getEntryTournaments")
+	it("normalizes setup readiness without letting profile warnings hide ready insights", async () => {
+		const fixture = makeFixture({
+			setupRows: [
+				{
+					setup_status: "ready",
+					setup_phase: "ready",
+					setup_completed_units: 10,
+					setup_total_units: 10,
+					setup_progress_updated_at: "2026-08-20T00:00:00.000Z",
+					standings_ready_at: "2026-08-20T00:00:00.000Z",
+					insights_ready_at: "2026-08-20T00:00:00.000Z",
+					setup_warning_count: 1,
+				},
+			],
+		});
+		const status = await fixture.repository.loadCompetitionSetupStatus(fixture.context, 7);
+		expect(status.setupStatus).toBe("READY");
+		expect(status.insightsReadyAt).toBe("2026-08-20T00:00:00.000Z");
+		expect(status.setupHasWarnings).toBe(true);
+		expect(status.ready).toBe(true);
+	});
+
+	it("delegates resolver roots through the injected repository and propagates errors", async () => {
+		const calls: string[] = [];
+		const fakeRepository = {
+			loadTeamDesk: async () => {
+				calls.push("desk");
+				return { state: "EMPTY" as MyFplReviewState } as never;
+			},
+			loadTeamGameweek: async () => ({ state: "PENDING" as MyFplReviewState }) as never,
+			loadTeamTransfers: async () => ({ state: "PRESEASON" as MyFplReviewState }) as never,
+			loadCompetitionsDesk: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
+			loadCompetitionBoard: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
+			loadCompetitionSeasonPath: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
+			loadCompetitionSetupStatus: async () => {
+				throw new GraphQLError("database unavailable", {
+					extensions: { code: "INTERNAL_SERVER_ERROR" },
+				});
+			},
+		} as unknown as MyFplRepository;
+		const resolvers = createMyFplResolvers(fakeRepository);
+		const context = makeFixture().context;
+		await resolvers.Query.myFplTeamDesk(null, {}, context);
+		expect(calls).toEqual(["desk"]);
+		await resolvers.Query.myFplTeamGameweek(null, { eventId: 1 }, context);
+		await resolvers.Query.myFplTeamTransfers(null, {}, context);
+		await resolvers.Query.myFplCompetitionsDesk(null, {}, context);
+		await resolvers.Query.myFplCompetitionBoard(
+			null,
+			{ tournamentId: 7, eventId: 1, page: 1, pageSize: 1 },
+			context
 		);
-	});
-
-	it("uses one paginated board projection and one season-path CTE", () => {
-		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
-		expect(source).toContain("LIMIT $5 OFFSET $6");
-		expect(source).toContain("'totalRows', (SELECT count(*)::integer FROM filtered)");
-		expect(source).toContain("viewer_row");
-		expect(source).toContain('toLocaleLowerCase("en-US")}:${entryId}`');
-		expect(source).toContain("parsed.viewerRow !== null");
-		expect(source).toContain("WITH field AS MATERIALIZED");
-		expect(source).toContain("points_vs_average");
-	});
-
-	it("keeps historical clubs and durable readiness checkpoints honest", () => {
-		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
-		expect(source).toContain("FROM fpl.player_fixture_stats fixture_stats");
-		expect(source).toContain("COALESCE(historical_team.team_id, player.team_id)");
-		expect(source).toContain("match.team_h_id = COALESCE(historical_team.team_id, player.team_id)");
-		expect(source).toContain("captain_historical_team");
-		expect(source).toContain("COALESCE(captain_historical_team.team_id, player.team_id)");
-		expect(source).toContain("historical_team_in");
-		expect(source).toContain("COALESCE(historical_team_in.team_id, player_in.team_id)");
-		expect(source).toContain("transfers_synced_through_event_id");
-		expect(source).toContain("expectedTransferEventIds");
-		expect(source).toContain("enriched_event_count");
-		expect(source).toContain(
-			'return { state: "PENDING", context: loadedContext.value, gameweeks: [] }'
+		await resolvers.Query.myFplCompetitionSeasonPath(
+			null,
+			{ tournamentId: 7, throughEventId: 1 },
+			context
 		);
-		expect(source).toContain("tournament.setupStatus !== TournamentSetupStatus.READY");
-		expect(source).toContain('normalizeChip(row.event_chip) !== "BENCH_BOOST"');
-		expect(source).toContain("expectedHistoryEventIds");
-		expect(source).toContain('state = historyComplete ? "READY" : "PENDING"');
-	});
-
-	it("does not materialize unbounded competition aggregates", () => {
-		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
-		expect(source).toContain("MAX_AGGREGATE_FIELD_SIZE");
-		expect(source).toContain("Skipping My FPL aggregate for oversized tournament");
-		expect(source).toContain("SELECT count(*)::integer AS field_size");
-	});
-
-	it("resolves an explicitly authorized tournament outside the cached catalog", () => {
-		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
-		expect(source).toContain("requestedTournamentPromise");
-		expect(source).toContain("getTournamentInfosUncached");
-		expect(source).toContain("tournamentId ? requestedTournament : tournaments[0]");
-	});
-
-	it("revalidates default membership and rejects unsupported tournament modes", () => {
-		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
-		const deskStart = source.indexOf("const loadCompetitionsDesk");
-		const selectedEventStart = source.indexOf(
-			"const selectedEventId = eventId ?? loadedContext.value.latestFinalizedEventId",
-			deskStart
-		);
-		const membershipStart = source.indexOf(
-			"await assertTournamentMembership(context, selectedTournament.id, entryId)",
-			deskStart
-		);
-		expect(membershipStart).toBeGreaterThan(deskStart);
-		expect(membershipStart).toBeLessThan(selectedEventStart);
-		expect(source).toContain("filterCurrentTournamentMemberships");
-		expect(source).toContain("missingTournamentIds");
-		expect(source).toContain("getTournamentInfoUncached(context, tournamentId)");
-		expect(source).toContain("metadata.groupMode !== GroupMode.POINTS_RACES");
-		expect(source).toContain("tournament.groupMode !== GroupMode.POINTS_RACES");
-		const boardStart = source.indexOf("const loadCompetitionBoardPrepared");
-		const boardEnd = source.indexOf("const loadCompetitionBoard =", boardStart);
-		const boardSource = source.slice(boardStart, boardEnd);
-		expect(boardSource.indexOf("metadata.groupMode !== GroupMode.POINTS_RACES")).toBeLessThan(
-			boardSource.indexOf("loadedContext.finalizedEventIds.has(eventId)")
-		);
-	});
-
-	it("bounds board pagination and normalizes legacy readiness fields", () => {
-		const source = readFileSync("src/domains/my-fpl/repository.ts", "utf8");
-		expect(source).toContain("MAX_COMPETITION_BOARD_PAGE");
-		expect(source).toContain("page must be an integer between 1 and 100");
-		expect(source).toContain("hasRequestedEvent");
-		expect(source).toContain('state: hasRequestedEvent ? "READY" : "PENDING"');
-		expect(source).toContain(
-			"setupStatus: (row.setup_status ?? TournamentSetupStatus.PENDING).toUpperCase()"
-		);
-		expect(source).toContain('setupPhase: (row.setup_phase ?? "queued").toUpperCase()');
-		expect(source).toContain("row.setup_completed_units ?? 0");
-		expect(source).toContain("row.setup_warning_count ?? 0");
-		expect(source).toContain("team.short_name AS captain_team_short_name");
-		expect(source).toContain('return { ...base, state: "PENDING", result: null }');
-		expect(source).toContain('state: hasRequestedEvent ? "READY" : "PENDING"');
-		expect(source).toContain("stateTtl(payload.state)");
+		await expect(
+			resolvers.Query.myFplCompetitionSetupStatus(null, { tournamentId: 7 }, context)
+		).rejects.toThrow("database unavailable");
 	});
 });

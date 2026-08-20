@@ -12,6 +12,8 @@ export type GraphQLContext = {
 	data: ReadModelClient;
 	database: QueryExecutor;
 	currentSeason: CurrentSeason;
+	/** Refreshes the mutable current-season lifecycle before state reads. */
+	refreshCurrentSeason?: () => Promise<CurrentSeason>;
 	/** Core Data publication selected once for this GraphQL request. */
 	dataRevision?: string;
 	redis: Redis;

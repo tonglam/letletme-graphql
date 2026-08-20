@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
 
 const workflow = await Bun.file(".github/workflows/deploy.yml").text();
 const dockerfile = await Bun.file("Dockerfile").text();
+const p0Probe = await Bun.file("scripts/rate-limit-p0-probe.ts").text();
 
 describe("production deployment workflow", () => {
 	test("bootstraps a missing VPS checkout before resolving the exact main commit", () => {
@@ -102,8 +104,73 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain("letletme_graphql_runtime\\.[^.]+");
 		expect(workflow).toContain("if not parsed.password:");
 		expect(workflow).not.toContain("GRAPHQL_RUNTIME_DB_PASSWORD");
-		expect(workflow).not.toContain("env_path.write_text");
+		expect(workflow).toContain('"GRAPHQL_RATE_LIMIT_MODE": mode');
+		expect(workflow).toContain('"GRAPHQL_BROWSER_INGRESS_RATE_LIMIT": browser');
 		expect(workflow).not.toContain("urlunsplit");
+	});
+
+	test("persists explicit rate-limit rollout state only after a successful replacement", () => {
+		expect(workflow).toContain("p0-legacy");
+		expect(workflow).toContain("shadow-v3");
+		expect(workflow).toContain("enforce-v3-restored-compat");
+		expect(workflow).toContain("$HOME/.letletme-graphql-rate-limit-rollout");
+		expect(workflow).toContain("$HOME/.letletme-graphql-rollbacks");
+		expect(workflow).toContain("metrics.prom");
+		expect(workflow).toContain("command_timeout: 45m");
+		expect(workflow).not.toMatch(/\+\s{2,}(?:>|docker|--arg|['{])/);
+		expect(workflow).toContain("start_stage p0Observe");
+		expect(workflow).toContain("scripts/rate_limit_p0_guard.py");
+		expect(workflow).toContain("for sample in $(seq 1 60)");
+		expect(workflow).toContain("P0_PROBE_REQUESTS=700");
+		expect(workflow).toContain(
+			".total == 700 and .successful > 0 and .rateLimited > 0 and .unexpected == 0"
+		);
+		expect(workflow).toContain(".total == 700 and .successful > 0 and .unexpected == 0");
+		expect(workflow).toContain("after_429 * 2");
+		expect(workflow.indexOf("start_stage p0Observe")).toBeLessThan(
+			workflow.indexOf("start_stage finalize")
+		);
+		expect(workflow.indexOf('mv "$next_env" .env.deploy')).toBeLessThan(
+			workflow.indexOf("printf '%s\\n' \"$persist_rate_limit_rollout\"")
+		);
+	});
+
+	test("uses a deterministic P0 probe that crosses both changed legacy buckets", () => {
+		const query = /const query = `([\s\S]*?)`;/u.exec(p0Probe)?.[1];
+		expect(query).toBeTruthy();
+		expect(validateGraphQLRequestLimits({ query })).toMatchObject({
+			ok: true,
+			rateLimitCostUnits: 2,
+		});
+		expect(p0Probe).toContain('P0_PROBE_REQUESTS ?? "700"');
+		expect(p0Probe).toContain("response.status === 200");
+		expect(p0Probe).toContain("successful");
+		expect(p0Probe).toContain("unexpected");
+	});
+
+	test("restores the persisted rollout selector if finalization rolls back", () => {
+		const rolloutWriteAt = workflow.indexOf(
+			'printf \'%s\\n\' "$persist_rate_limit_rollout" > "$rollout_state"'
+		);
+		const deploymentCommittedAt = workflow.lastIndexOf("deployment_committed=true");
+
+		expect(workflow).toContain("rollout_state_existed=false");
+		expect(workflow).toContain("rollout_state_backup=$(mktemp");
+		expect(workflow).toContain('mv "$rollout_state_backup" "$rollout_state"');
+		expect(workflow).toContain('rm -f "$rollout_state"');
+		expect(rolloutWriteAt).toBeGreaterThan(-1);
+		expect(rolloutWriteAt).toBeLessThan(deploymentCommittedAt);
+	});
+
+	test("binds P0 backup evidence to the running image instead of the checkout", () => {
+		expect(workflow).toContain("$HOME/.letletme-graphql-current-deployment.json");
+		expect(workflow).toContain('[ "$state_image" = "$old_image" ]');
+		expect(workflow).toContain("P0 requires a persisted SHA bound to the running GraphQL image");
+		expect(workflow).toContain('--arg deploySha "$running_deploy_sha"');
+		expect(workflow).not.toContain('--arg deploySha "$previous_deploy_sha"');
+		expect(workflow.indexOf('mv "$deployment_state_next" "$deployment_state"')).toBeLessThan(
+			workflow.lastIndexOf("deployment_committed=true")
+		);
 	});
 
 	test("emits structured timing for every remote deployment phase", () => {

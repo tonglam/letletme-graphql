@@ -1,9 +1,8 @@
-/** Per-IP request gate. 120/min rejected slow Mini browsing and DevTools retries. */
-export const GRAPHQL_BROWSER_INGRESS_RATE_LIMIT_DEFAULT = 480;
-/** Logged-in weighted units / 60s. */
-export const GRAPHQL_AUTHENTICATED_RATE_LIMIT_DEFAULT = 900;
-/**
- * Anonymous weighted units / 60s for signed Mini/web browsers.
- * Market desks used to consume ceil(complexity/10) and exhaust 120 in two pages.
- */
-export const GRAPHQL_ANONYMOUS_RATE_LIMIT_DEFAULT = 600;
+import rawProductionPolicy from "../config/rate-limit/production.json";
+
+/** Legacy-v2 defaults remain deploy-tunable for rollback compatibility. */
+export const GRAPHQL_BROWSER_INGRESS_RATE_LIMIT_DEFAULT =
+	rawProductionPolicy.legacyV2.browserIngress;
+export const GRAPHQL_AUTHENTICATED_RATE_LIMIT_DEFAULT =
+	rawProductionPolicy.legacyV2.authenticatedWeighted;
+export const GRAPHQL_ANONYMOUS_RATE_LIMIT_DEFAULT = rawProductionPolicy.legacyV2.anonymousWeighted;
