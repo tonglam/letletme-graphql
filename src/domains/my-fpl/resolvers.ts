@@ -1,7 +1,9 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { measureRequestStage } from "../../http/request-timing";
 import {
+	createMyFplRepository,
 	myFplRepository,
+	type MyFplRepository,
 	type MyFplCompetitionBoardPage,
 	type MyFplCompetitionSeasonPath,
 	type MyFplCompetitionSetupStatus,
@@ -24,7 +26,7 @@ type CompetitionBoardArgs = {
 type CompetitionSeasonPathArgs = { tournamentId: number; throughEventId: number };
 type CompetitionSetupStatusArgs = { tournamentId: number };
 
-export const myFplResolvers = {
+export const createMyFplResolvers = (repository: MyFplRepository = myFplRepository) => ({
 	Query: {
 		myFplTeamDesk: (
 			_parent: unknown,
@@ -32,7 +34,7 @@ export const myFplResolvers = {
 			context: GraphQLContext
 		): Promise<MyFplTeamDesk> =>
 			measureRequestStage(context.requestTiming, "myFplTeamDesk", () =>
-				myFplRepository.loadTeamDesk(context, args.eventId)
+				repository.loadTeamDesk(context, args.eventId)
 			),
 		myFplTeamGameweek: (
 			_parent: unknown,
@@ -40,7 +42,7 @@ export const myFplResolvers = {
 			context: GraphQLContext
 		): Promise<MyFplTeamGameweek> =>
 			measureRequestStage(context.requestTiming, "myFplTeamGameweek", () =>
-				myFplRepository.loadTeamGameweek(context, args.eventId)
+				repository.loadTeamGameweek(context, args.eventId)
 			),
 		myFplTeamTransfers: (
 			_parent: unknown,
@@ -48,7 +50,7 @@ export const myFplResolvers = {
 			context: GraphQLContext
 		): Promise<MyFplTeamTransfers> =>
 			measureRequestStage(context.requestTiming, "myFplTeamTransfers", () =>
-				myFplRepository.loadTeamTransfers(context)
+				repository.loadTeamTransfers(context)
 			),
 		myFplCompetitionsDesk: (
 			_parent: unknown,
@@ -56,7 +58,7 @@ export const myFplResolvers = {
 			context: GraphQLContext
 		): Promise<MyFplCompetitionsDesk> =>
 			measureRequestStage(context.requestTiming, "myFplCompetitionsDesk", () =>
-				myFplRepository.loadCompetitionsDesk(context, args.tournamentId, args.eventId)
+				repository.loadCompetitionsDesk(context, args.tournamentId, args.eventId)
 			),
 		myFplCompetitionBoard: (
 			_parent: unknown,
@@ -64,7 +66,7 @@ export const myFplResolvers = {
 			context: GraphQLContext
 		): Promise<MyFplCompetitionBoardPage> =>
 			measureRequestStage(context.requestTiming, "myFplCompetitionBoard", () =>
-				myFplRepository.loadCompetitionBoard(context, args)
+				repository.loadCompetitionBoard(context, args)
 			),
 		myFplCompetitionSeasonPath: (
 			_parent: unknown,
@@ -72,7 +74,7 @@ export const myFplResolvers = {
 			context: GraphQLContext
 		): Promise<MyFplCompetitionSeasonPath> =>
 			measureRequestStage(context.requestTiming, "myFplCompetitionSeasonPath", () =>
-				myFplRepository.loadCompetitionSeasonPath(context, args.tournamentId, args.throughEventId)
+				repository.loadCompetitionSeasonPath(context, args.tournamentId, args.throughEventId)
 			),
 		myFplCompetitionSetupStatus: (
 			_parent: unknown,
@@ -80,7 +82,9 @@ export const myFplResolvers = {
 			context: GraphQLContext
 		): Promise<MyFplCompetitionSetupStatus> =>
 			measureRequestStage(context.requestTiming, "myFplCompetitionSetupStatus", () =>
-				myFplRepository.loadCompetitionSetupStatus(context, args.tournamentId)
+				repository.loadCompetitionSetupStatus(context, args.tournamentId)
 			),
 	},
-};
+});
+
+export const myFplResolvers = createMyFplResolvers(createMyFplRepository());
