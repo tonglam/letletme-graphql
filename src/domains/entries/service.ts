@@ -252,6 +252,10 @@ async function buildLiveMapForEvents(
 }
 
 export const entriesService = {
+	getEntrySnapshot(context: GraphQLContext, id: number): Promise<Entry | null> {
+		return entriesRepository.getEntrySnapshotById(context, id);
+	},
+
 	async getEntryById(context: GraphQLContext, id: number): Promise<Entry | null> {
 		const stored = await entriesRepository.getEntryById(context, id);
 		if (stored) {

@@ -70,6 +70,12 @@ export const entriesTypeDefs = /* GraphQL */ `
 		"""
 		entry(id: Int!): Entry
 		"""
+		Persisted public entry snapshot for read-only consumers. This resolver
+		never calls the public FPL API, enqueues Data work, or writes query caches.
+		Unknown IDs return null.
+		"""
+		entrySnapshot(id: Int!): Entry
+		"""
 		Fuzzy public lookup of synced FPL entries by team name or manager name.
 		Results are bounded and do not grant access to protected entry history.
 		"""

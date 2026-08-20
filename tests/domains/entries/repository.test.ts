@@ -101,6 +101,59 @@ describe("entriesRepository.searchEntries", () => {
 	});
 });
 
+describe("entriesRepository.getEntrySnapshotById", () => {
+	it("reads one persisted row without touching Redis", async () => {
+		let relation = "";
+		let selected = "";
+		let filteredId = 0;
+		const context = {
+			data: {
+				read: (value: string) => {
+					relation = value;
+					return {
+						select: (fields: string) => {
+							selected = fields;
+							return {
+								eq: (_column: string, id: number) => {
+									filteredId = id;
+									return {
+										limit: async () => ({ data: [entryRow(id)], error: null }),
+									};
+								},
+							};
+						},
+					};
+				},
+			},
+			logger: { error: () => undefined },
+		} as never;
+
+		const entry = await entriesRepository.getEntrySnapshotById(context, 101);
+
+		expect(relation).toBe("competition.entries");
+		expect(selected).toContain("entry_name");
+		expect(filteredId).toBe(101);
+		expect(entry?.entryName).toBe("Entry 101");
+	});
+
+	it("returns null for an unknown persisted entry without a cache fallback", async () => {
+		const context = {
+			data: {
+				read: () => ({
+					select: () => ({
+						eq: () => ({
+							limit: async () => ({ data: [], error: null }),
+						}),
+					}),
+				}),
+			},
+			logger: { error: () => undefined },
+		} as never;
+
+		await expect(entriesRepository.getEntrySnapshotById(context, 999_999)).resolves.toBeNull();
+	});
+});
+
 describe("entriesRepository.getEntriesByIds", () => {
 	it("uses one revisioned cache namespace and one PostgreSQL batch for misses", async () => {
 		const readKeys: string[] = [];

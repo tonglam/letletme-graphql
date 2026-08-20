@@ -198,6 +198,32 @@ describe("entriesService.getEntryEventPicks", () => {
 	});
 });
 
+describe("entriesService.getEntrySnapshot", () => {
+	const originalGetEntrySnapshotById = entriesRepository.getEntrySnapshotById;
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		entriesRepository.getEntrySnapshotById = originalGetEntrySnapshotById;
+		globalThis.fetch = originalFetch;
+	});
+
+	it("delegates only to the persisted repository path", async () => {
+		let requestedId = 0;
+		entriesRepository.getEntrySnapshotById = async (_context, id) => {
+			requestedId = id;
+			return null;
+		};
+		globalThis.fetch = (async () => {
+			throw new Error("FPL must not be called");
+		}) as unknown as typeof fetch;
+
+		const result = await entriesService.getEntrySnapshot({} as GraphQLContext, 424242);
+
+		expect(result).toBeNull();
+		expect(requestedId).toBe(424242);
+	});
+});
+
 describe("entriesService.getEntryById", () => {
 	const originalGetEntryById = entriesRepository.getEntryById;
 	const originalFetch = globalThis.fetch;

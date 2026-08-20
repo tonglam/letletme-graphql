@@ -108,6 +108,9 @@ const mapEntry = (row: DbEntryRow): Entry => ({
 	lastBank: row.last_bank,
 });
 
+const ENTRY_SELECT_FIELDS =
+	"id, entry_name, player_name, region, started_event, overall_points, overall_rank, bank, team_value, total_transfers, last_event_id, last_overall_points, last_overall_rank, last_team_value, last_bank";
+
 const mapEntryEventResult = (row: DbEntryEventResultRow): EntryEventResult => ({
 	entryId: row.entry_id,
 	eventId: row.event_id,
@@ -274,6 +277,7 @@ const isEntryArray = (value: unknown): value is Entry[] =>
 
 interface EntriesRepository {
 	getEntryById(context: GraphQLContext, id: number): Promise<Entry | null>;
+	getEntrySnapshotById(context: GraphQLContext, id: number): Promise<Entry | null>;
 	getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>>;
 	searchEntries(context: GraphQLContext, query: string, limit: number): Promise<Entry[]>;
 	getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]>;
@@ -294,6 +298,24 @@ export const entriesRepository: EntriesRepository = {
 	async getEntryById(context: GraphQLContext, id: number): Promise<Entry | null> {
 		if (!Number.isSafeInteger(id) || id <= 0) return null;
 		return (await this.getEntriesByIds(context, [id])).get(id) ?? null;
+	},
+
+	async getEntrySnapshotById(context: GraphQLContext, id: number): Promise<Entry | null> {
+		if (!Number.isSafeInteger(id) || id <= 0) return null;
+
+		const { data, error } = await context.data
+			.read("competition.entries")
+			.select(ENTRY_SELECT_FIELDS)
+			.eq("id", id)
+			.limit(1);
+
+		if (error) {
+			context.logger.error({ err: error, id }, "Failed to fetch persisted entry snapshot");
+			throw new Error("Failed to fetch persisted entry snapshot");
+		}
+
+		const row = ((data as DbEntryRow[] | null) ?? [])[0];
+		return row ? mapEntry(row) : null;
 	},
 
 	async getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
@@ -334,9 +356,7 @@ export const entriesRepository: EntriesRepository = {
 
 		const { data, error } = await context.data
 			.read("competition.entries")
-			.select(
-				"id, entry_name, player_name, region, started_event, overall_points, overall_rank, bank, team_value, total_transfers, last_event_id, last_overall_points, last_overall_rank, last_team_value, last_bank"
-			)
+			.select(ENTRY_SELECT_FIELDS)
 			.in("id", missingIds);
 
 		if (error) {

@@ -103,6 +103,15 @@ describe("authorizeGraphQLRequest", () => {
 		expect(result.ok).toBe(true);
 	});
 
+	it("allows the persisted public entry snapshot without a principal", async () => {
+		const result = await authorize(
+			`query EntrySnapshot($id: Int!) { entrySnapshot(id: $id) { id entryName playerName } }`,
+			{ id: 123 }
+		);
+
+		expect(result.ok).toBe(true);
+	});
+
 	it("rejects protected root fields without a principal", async () => {
 		const result = await authorize(
 			`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
