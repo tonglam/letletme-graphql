@@ -144,6 +144,22 @@ describe("Data Platform read client", () => {
 		);
 	});
 
+	it("uses the season-safe joined entry league read model", async () => {
+		const { executor, queries } = makeExecutor();
+
+		await clientFor(executor)
+			.read("competition.entry_leagues_with_tournament")
+			.select("league_id, tournament_id, tournament_name")
+			.eq("entry_id", 123)
+			.eq("league_type", "h2h");
+
+		expect(queries).toHaveLength(1);
+		expect(queries[0]?.values).toEqual([2026, 123, "h2h"]);
+		expect(queries[0]?.text).toContain("LEFT JOIN LATERAL");
+		expect(queries[0]?.text).toContain("season_id = entry_league.season_id");
+		expect(queries[0]?.text).toContain("league_type = entry_league.league_type");
+	});
+
 	it("returns market snapshot dates as calendar-date text", async () => {
 		const { executor, queries } = makeExecutor();
 
