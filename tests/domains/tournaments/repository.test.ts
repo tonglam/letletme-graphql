@@ -237,8 +237,8 @@ describe("tournament cache wire contracts", () => {
 			eventChip: null,
 			captainId: 7,
 			captainPoints: 14,
-			teamValue: 1000.5,
-			bank: 0.5,
+			teamValue: 1000,
+			bank: 0,
 		};
 
 		expect(tournamentCacheTestables.isTournamentInfoCache(validCachedTournamentInfo)).toBe(true);
@@ -256,6 +256,12 @@ describe("tournament cache wire contracts", () => {
 			})
 		).toBe(false);
 		expect(
+			tournamentCacheTestables.isTournamentEventResultCache({
+				...validResult,
+				teamValue: 1000.5,
+			})
+		).toBe(false);
+		expect(
 			tournamentCacheTestables.isTournamentInfoCache({
 				...validCachedTournamentInfo,
 				setupStatus: "bogus",
@@ -264,7 +270,7 @@ describe("tournament cache wire contracts", () => {
 		expect(
 			tournamentCacheTestables.isTournamentInfoCache({
 				...validCachedTournamentInfo,
-				createdAt: "not-a-date",
+				createdAt: "2026-02-30T00:00:00.000Z",
 			})
 		).toBe(false);
 	});
@@ -352,6 +358,7 @@ describe("tournament cache wire contracts", () => {
 		expect(tournamentCacheTestables.isH2HResultCache({ ...h2h, opponentEntryId: "11" })).toBe(
 			false
 		);
+		expect(tournamentCacheTestables.isH2HResultCache({ ...h2h, entryChip: "bogus" })).toBe(false);
 
 		const season = {
 			asOfEventId: 3,
@@ -648,7 +655,7 @@ describe("mapTournamentEventResult", () => {
 			eventRank: 201,
 			overallPoints: 1987,
 			overallRank: 10022,
-			eventChip: "freehit",
+			eventChip: "FREE_HIT",
 			captainId: 430,
 			captainPoints: 12,
 			teamValue: 1030,
@@ -954,7 +961,7 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 				eventRank: 10,
 				overallPoints: 2000,
 				overallRank: 100,
-				eventChip: "bboost",
+				eventChip: "BENCH_BOOST",
 				captainId: 430,
 				captainPoints: 12,
 				teamValue: 1030,
@@ -1210,7 +1217,7 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 		expect(result[1].groupId).toBe(2);
 		expect(result[1].entryId).toBe(300);
 		expect(result[1].entryName).toBe("Fallback Entry 300");
-		expect(result[1].eventChip).toBe("freehit");
+		expect(result[1].eventChip).toBe("FREE_HIT");
 
 		const cached = await context.redis.get(
 			testCacheKey(`tournaments:event-results:{"eventId":33,"tournamentId":1}`)

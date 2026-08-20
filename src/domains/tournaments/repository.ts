@@ -994,10 +994,82 @@ const isNullableFiniteNumber = (value: unknown): value is number | null =>
 const isNullableString = (value: unknown): value is string | null =>
 	value === null || typeof value === "string";
 
-const isIsoDateTime = (value: unknown): value is string =>
-	typeof value === "string" &&
-	/^\d{4}-\d{2}-\d{2}T/.test(value) &&
-	Number.isFinite(Date.parse(value));
+const normalizeTournamentChip = (value: unknown): string | null => {
+	if (typeof value !== "string") return null;
+	const normalized = value.toUpperCase().trim();
+	const compact = normalized.replace(/[^A-Z0-9]/g, "");
+	if (
+		normalized === "NONE" ||
+		normalized === "NO_CHIP" ||
+		compact === "NONE" ||
+		compact === "NOCHIP"
+	) {
+		return "NONE";
+	}
+	if (
+		normalized === "BENCH_BOOST" ||
+		compact === "BENCHBOOST" ||
+		compact === "BBOOST" ||
+		compact === "BB"
+	) {
+		return "BENCH_BOOST";
+	}
+	if (
+		normalized === "TRIPLE_CAPTAIN" ||
+		compact === "TRIPLECAPTAIN" ||
+		compact === "3XC" ||
+		compact === "TC"
+	) {
+		return "TRIPLE_CAPTAIN";
+	}
+	if (normalized === "FREE_HIT" || compact === "FREEHIT" || compact === "FH") {
+		return "FREE_HIT";
+	}
+	if (normalized === "WILDCARD" || compact === "WILDCARD" || compact === "WC") {
+		return "WILDCARD";
+	}
+	if (normalized === "MANAGER" || compact === "MANAGER" || compact === "AM") {
+		return "MANAGER";
+	}
+	return null;
+};
+
+const isNullableChip = (value: unknown): value is string | null =>
+	value === null || normalizeTournamentChip(value) === value;
+
+const isIsoDateTime = (value: unknown): value is string => {
+	if (typeof value !== "string") return false;
+	const match =
+		/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/.exec(
+			value
+		);
+	if (!match) return false;
+	const [, yearText, monthText, dayText, hourText, minuteText, secondText, zone] = match;
+	const year = Number(yearText);
+	const month = Number(monthText);
+	const day = Number(dayText);
+	const hour = Number(hourText);
+	const minute = Number(minuteText);
+	const second = Number(secondText);
+	const offsetHours = zone === "Z" ? 0 : Number(zone.slice(1, 3));
+	const offsetMinutes = zone === "Z" ? 0 : Number(zone.slice(4, 6));
+	const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+	return (
+		month >= 1 &&
+		month <= 12 &&
+		day >= 1 &&
+		day <= daysInMonth &&
+		hour >= 0 &&
+		hour <= 23 &&
+		minute >= 0 &&
+		minute <= 59 &&
+		second >= 0 &&
+		second <= 59 &&
+		offsetHours <= 23 &&
+		offsetMinutes <= 59 &&
+		Number.isFinite(Date.parse(value))
+	);
+};
 
 const isNullableIsoDateTime = (value: unknown): value is string | null =>
 	value === null || isIsoDateTime(value);
@@ -1090,17 +1162,17 @@ const isTournamentEventResultCache = (value: unknown): value is TournamentEventR
 		isRequired(value, "entryName", isNullableString) &&
 		isRequired(value, "playerName", isNullableString) &&
 		isRequired(value, "eventGroupRank", isNullableSafeInteger) &&
-		isRequired(value, "eventPoints", isNullableFiniteNumber) &&
-		isRequired(value, "eventCost", isNullableFiniteNumber) &&
-		isRequired(value, "eventNetPoints", isNullableFiniteNumber) &&
+		isRequired(value, "eventPoints", isNullableSafeInteger) &&
+		isRequired(value, "eventCost", isNullableSafeInteger) &&
+		isRequired(value, "eventNetPoints", isNullableSafeInteger) &&
 		isRequired(value, "eventRank", isNullableSafeInteger) &&
-		isRequired(value, "overallPoints", isNullableFiniteNumber) &&
+		isRequired(value, "overallPoints", isNullableSafeInteger) &&
 		isRequired(value, "overallRank", isNullableSafeInteger) &&
-		isRequired(value, "eventChip", isNullableString) &&
+		isRequired(value, "eventChip", isNullableChip) &&
 		isRequired(value, "captainId", isNullableSafeInteger) &&
-		isRequired(value, "captainPoints", isNullableFiniteNumber) &&
-		isRequired(value, "teamValue", isNullableFiniteNumber) &&
-		isRequired(value, "bank", isNullableFiniteNumber)
+		isRequired(value, "captainPoints", isNullableSafeInteger) &&
+		isRequired(value, "teamValue", isNullableSafeInteger) &&
+		isRequired(value, "bank", isNullableSafeInteger)
 	);
 };
 
@@ -1145,15 +1217,15 @@ const isBattleResultCache = (value: unknown): value is TournamentBattleGroupResu
 		isRequired(value, "homeEntryId", isSafeInteger) &&
 		isRequired(value, "homeEntryName", isNullableString) &&
 		isRequired(value, "homePlayerName", isNullableString) &&
-		isRequired(value, "homeNetPoints", isNullableFiniteNumber) &&
+		isRequired(value, "homeNetPoints", isNullableSafeInteger) &&
 		isRequired(value, "homeRank", isNullableSafeInteger) &&
-		isRequired(value, "homeMatchPoints", isNullableFiniteNumber) &&
+		isRequired(value, "homeMatchPoints", isNullableSafeInteger) &&
 		isRequired(value, "awayEntryId", isSafeInteger) &&
 		isRequired(value, "awayEntryName", isNullableString) &&
 		isRequired(value, "awayPlayerName", isNullableString) &&
-		isRequired(value, "awayNetPoints", isNullableFiniteNumber) &&
+		isRequired(value, "awayNetPoints", isNullableSafeInteger) &&
 		isRequired(value, "awayRank", isNullableSafeInteger) &&
-		isRequired(value, "awayMatchPoints", isNullableFiniteNumber)
+		isRequired(value, "awayMatchPoints", isNullableSafeInteger)
 	);
 };
 
@@ -1174,7 +1246,13 @@ const isH2HResultCache = (value: unknown): value is EntryH2HMatchResult => {
 			"opponentPlayerName",
 			"entryChip",
 			"opponentChip",
-		].every((key) => isRequired(value, key, isNullableString)) &&
+		].every((key) =>
+			isRequired(value, key, (candidate) =>
+				["entryChip", "opponentChip"].includes(key)
+					? isNullableChip(candidate)
+					: isNullableString(candidate)
+			)
+		) &&
 		[
 			"entryNetPoints",
 			"entryRank",
@@ -1188,7 +1266,7 @@ const isH2HResultCache = (value: unknown): value is EntryH2HMatchResult => {
 			"opponentEventPoints",
 			"opponentTransferCost",
 			"opponentOverallRank",
-		].every((key) => isRequired(value, key, isNullableFiniteNumber))
+		].every((key) => isRequired(value, key, isNullableSafeInteger))
 	);
 };
 
@@ -1389,7 +1467,7 @@ export const mapTournamentEventResult = (
 	eventRank: row.event_rank,
 	overallPoints: leagueEventRow?.overall_points ?? null,
 	overallRank: leagueEventRow?.overall_rank ?? null,
-	eventChip: leagueEventRow?.event_chip ?? null,
+	eventChip: normalizeTournamentChip(leagueEventRow?.event_chip),
 	captainId: leagueEventRow?.captain_id ?? null,
 	captainPoints: leagueEventRow?.captain_points ?? null,
 	teamValue: leagueEventRow?.team_value ?? null,
@@ -1459,7 +1537,7 @@ export const mapTournamentEventResultFromView = (
 	eventRank: row.event_rank,
 	overallPoints: row.overall_points,
 	overallRank: row.overall_rank,
-	eventChip: row.event_chip,
+	eventChip: normalizeTournamentChip(row.event_chip),
 	captainId: row.captain_id,
 	captainPoints: row.captain_points,
 	teamValue: row.team_value,
@@ -1527,7 +1605,7 @@ export const mapEntryH2HMatchResult = (
 		entryEventPoints: myEvent?.event_points ?? null,
 		entryTransferCost: myEvent?.event_transfers_cost ?? null,
 		entryOverallRank: myEvent?.overall_rank ?? null,
-		entryChip: myEvent?.event_chip ?? null,
+		entryChip: normalizeTournamentChip(myEvent?.event_chip),
 		opponentEntryId: oppEntryId,
 		opponentEntryName: oppName?.entry_name ?? null,
 		opponentPlayerName: oppName?.player_name ?? null,
@@ -1537,7 +1615,7 @@ export const mapEntryH2HMatchResult = (
 		opponentEventPoints: oppEvent?.event_points ?? null,
 		opponentTransferCost: oppEvent?.event_transfers_cost ?? null,
 		opponentOverallRank: oppEvent?.overall_rank ?? null,
-		opponentChip: oppEvent?.event_chip ?? null,
+		opponentChip: normalizeTournamentChip(oppEvent?.event_chip),
 	};
 };
 
@@ -1957,9 +2035,9 @@ const isSeasonStandingCache = (value: unknown): value is TournamentSeasonStandin
 		isRequired(value, "rank", isNullableSafeInteger) &&
 		isRequired(value, "entryName", isNullableString) &&
 		isRequired(value, "playerName", isNullableString) &&
-		isRequired(value, "overallPoints", isNullableFiniteNumber) &&
+		isRequired(value, "overallPoints", isNullableSafeInteger) &&
 		isRequired(value, "overallRank", isNullableSafeInteger) &&
-		isRequired(value, "teamValue", isNullableFiniteNumber)
+		isRequired(value, "teamValue", isNullableSafeInteger)
 	);
 };
 
@@ -1968,10 +2046,10 @@ const isSeasonSnapshotCache = (value: unknown): value is TournamentSeasonSnapsho
 	return (
 		isRequired(value, "asOfEventId", isSafeInteger) &&
 		isRequired(value, "entryCount", isSafeInteger) &&
-		isRequired(value, "leaderOverallPoints", isNullableFiniteNumber) &&
-		isRequired(value, "secondOverallPoints", isNullableFiniteNumber) &&
-		isRequired(value, "gapFirstSecond", isNullableFiniteNumber) &&
-		isRequired(value, "averageOverallPoints", isNullableFiniteNumber) &&
+		isRequired(value, "leaderOverallPoints", isNullableSafeInteger) &&
+		isRequired(value, "secondOverallPoints", isNullableSafeInteger) &&
+		isRequired(value, "gapFirstSecond", isNullableSafeInteger) &&
+		isRequired(value, "averageOverallPoints", isNullableSafeInteger) &&
 		isRequired(
 			value,
 			"metrics",
