@@ -6,6 +6,11 @@ import {
 	type MarketSnapshotRow,
 } from "../../../src/domains/market/repository";
 import { gqlCacheKey } from "../../../src/infra/cache-key";
+import {
+	buildSnapshotContext,
+	createTestPublication,
+	TestRedis,
+} from "../../helpers/data-publication";
 
 const baseRow = (
 	date: string,
@@ -349,5 +354,46 @@ describe("market repository caching", () => {
 			"Failed to query market snapshots"
 		);
 		expect(context.writes).toHaveLength(0);
+	});
+
+	it("re-pins after a query observes that the selected latest capture was overwritten", async () => {
+		const capturedAt = "2026-08-20T01:40:00.000Z";
+		const publication = createTestPublication({ dataset: "fpl:market", seasonCode: "2627" }, 21, {
+			context: {
+				seasonCode: "2627",
+				snapshotDate: "2026-08-20",
+				capturedAt,
+				rowCount: 1,
+			},
+		});
+		const context = buildSnapshotContext(new TestRedis(publication), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						snapshot_date: "2026-08-20",
+						captured_at: capturedAt,
+						row_count: 1,
+						capture_count: 1,
+					},
+				],
+			}),
+		});
+		let reads = 0;
+		const repository = createMarketRepository({
+			query: async () => ({
+				rows:
+					reads++ === 0
+						? [baseRow("2026-08-19", 1)]
+						: [baseRow("2026-08-20", 1, { captured_at: capturedAt })],
+			}),
+		});
+
+		const result = await repository.getMarketPulse(context, 14);
+		expect(result.coverage.latestDate).toBe("2026-08-20");
+		expect(reads).toBe(2);
+		expect((context.redis as unknown as TestRedis).setCalls.at(-1)?.slice(-2)).toEqual([
+			"EX",
+			86_400,
+		]);
 	});
 });

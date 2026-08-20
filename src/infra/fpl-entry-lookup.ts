@@ -20,6 +20,11 @@ type FplEntrySummary = {
 	last_deadline_total_transfers?: number | null;
 };
 
+export type FplEntryLookupResult =
+	| { status: "found"; entry: Entry }
+	| { status: "not_found" }
+	| { status: "unavailable"; reason: "transient" | "invalid_response" | "invalid_id" };
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -73,9 +78,9 @@ export const mapFplEntrySummaryToEntry = (summary: FplEntrySummary): Entry => ({
 	lastBank: null,
 });
 
-export async function lookupFplEntry(entryId: number): Promise<Entry | null> {
+export async function lookupFplEntryResult(entryId: number): Promise<FplEntryLookupResult> {
 	if (!Number.isSafeInteger(entryId) || entryId <= 0) {
-		return null;
+		return { status: "unavailable", reason: "invalid_id" };
 	}
 
 	const controller = new AbortController();
@@ -86,14 +91,27 @@ export async function lookupFplEntry(entryId: number): Promise<Entry | null> {
 			headers: { Accept: "application/json", "User-Agent": FPL_USER_AGENT },
 			signal: controller.signal,
 		});
-		if (!response.ok) {
-			return null;
+		if (response.status === 404) return { status: "not_found" };
+		if (!response.ok) return { status: "unavailable", reason: "transient" };
+		let body: unknown;
+		try {
+			body = await response.json();
+		} catch {
+			return { status: "unavailable", reason: "invalid_response" };
 		}
-		const parsed = parseFplEntrySummary(await response.json(), entryId);
-		return parsed ? mapFplEntrySummaryToEntry(parsed) : null;
+		const parsed = parseFplEntrySummary(body, entryId);
+		return parsed
+			? { status: "found", entry: mapFplEntrySummaryToEntry(parsed) }
+			: { status: "unavailable", reason: "invalid_response" };
 	} catch {
-		return null;
+		return { status: "unavailable", reason: "transient" };
 	} finally {
 		clearTimeout(timeoutId);
 	}
+}
+
+/** Backwards-compatible nullable helper used by non-admission callers. */
+export async function lookupFplEntry(entryId: number): Promise<Entry | null> {
+	const result = await lookupFplEntryResult(entryId);
+	return result.status === "found" ? result.entry : null;
 }

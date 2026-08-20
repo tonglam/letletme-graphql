@@ -1,11 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import {
-	MARKET_REVISIONED_TTL_SECONDS,
-	QUERY_CACHE_TTL_SECONDS,
-	writeQueryCache,
-} from "../../infra/query-cache";
-import { getMarketSnapshotContext } from "./context";
+import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import { getMarketSnapshotContext, refreshMarketSnapshotContext } from "./context";
 
 const MARKET_RESULT_LIMIT = 10;
 const PRICE_CHANGE_LIMIT = 20;
@@ -132,15 +128,24 @@ export type MarketRepository = {
 };
 
 const MARKET_QUERY = `
-	WITH bounds AS (
+	WITH raw_bounds AS (
 		SELECT MIN(snapshot_date) AS baseline_date, MAX(snapshot_date) AS latest_date
 		FROM fpl.player_market_snapshots
 		WHERE season_id = $1
+	), bounds AS (
+		SELECT baseline_date,
+			COALESCE($3::date, latest_date) AS latest_date,
+			$4::timestamptz AS latest_captured_at
+		FROM raw_bounds
 	), window_rows AS (
 		SELECT snapshot.*
 		FROM fpl.player_market_snapshots snapshot
 		CROSS JOIN bounds
 		WHERE snapshot.season_id = $1
+	  AND (bounds.latest_captured_at IS NULL
+		OR snapshot.snapshot_date < bounds.latest_date
+		OR (snapshot.snapshot_date = bounds.latest_date
+			AND snapshot.captured_at <= bounds.latest_captured_at))
 		  AND snapshot.snapshot_date >= bounds.latest_date - ($2::integer - 1)
 		  AND snapshot.snapshot_date <= bounds.latest_date
 	), window_elements AS (
@@ -198,6 +203,10 @@ const MARKET_QUERY = `
 	WHERE bounds.latest_date IS NOT NULL
 	  AND annotated.snapshot_date >= bounds.latest_date - ($2::integer - 1)
 	  AND annotated.snapshot_date <= bounds.latest_date
+	  AND (bounds.latest_captured_at IS NULL
+		OR annotated.snapshot_date < bounds.latest_date
+		OR (annotated.snapshot_date = bounds.latest_date
+			AND annotated.captured_at <= bounds.latest_captured_at))
 `;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -685,7 +694,7 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 				"Market snapshot context unavailable; using request fallback"
 			);
 		}
-		const cacheKey = snapshotContext
+		let cacheKey = snapshotContext
 			? gqlCacheKey(
 					context,
 					`market-pulse:v3:${requestedDays}`,
@@ -708,12 +717,15 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 				context.logger.warn({ err: error, cacheKey }, "Failed to read market pulse cache");
 			}
 
-			let rows: MarketSnapshotRow[];
-			try {
+			const readRows = async (
+				pin: Awaited<ReturnType<typeof getMarketSnapshotContext>> | null
+			): Promise<{ rows: MarketSnapshotRow[]; hasPinnedSnapshot: boolean }> => {
 				const queryStartedAt = performance.now();
 				const result = await (queryExecutor ?? context.database).query(MARKET_QUERY, [
 					context.currentSeason.seasonId,
 					requestedDays,
+					pin?.snapshotDate ?? null,
+					pin?.capturedAt ?? null,
 				]);
 				const compact = result.rows[0] as { market_rows?: unknown } | undefined;
 				rows = Array.isArray(compact?.market_rows)
@@ -728,6 +740,31 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 					},
 					"Market compact query completed"
 				);
+				const hasPinnedSnapshot =
+					!pin ||
+					rows.some(
+						(row) =>
+							toCalendarDate(row.snapshot_date, "snapshot_date") === pin.snapshotDate &&
+							toIsoTimestamp(row.captured_at, "captured_at") === pin.capturedAt
+					);
+				return { rows, hasPinnedSnapshot };
+			};
+			let rows: MarketSnapshotRow[];
+			try {
+				let read = await readRows(snapshotContext);
+				rows = read.rows;
+				if (snapshotContext && !read.hasPinnedSnapshot) {
+					snapshotContext = await refreshMarketSnapshotContext(context);
+					if (!snapshotContext) throw new Error("Market snapshot pin unavailable after retry");
+					cacheKey = gqlCacheKey(
+						context,
+						`market-pulse:v3:${requestedDays}`,
+						`${context.dataRevision ?? "core-postgres"}.${snapshotContext.revision}`
+					);
+					read = await readRows(snapshotContext);
+					rows = read.rows;
+					if (!read.hasPinnedSnapshot) throw new Error("Market snapshot pin changed during query");
+				}
 			} catch (error) {
 				context.logger.error({ err: error, requestedDays }, "Failed to query market snapshots");
 				throw new Error("Failed to query market snapshots", { cause: error });
@@ -738,7 +775,7 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 				context,
 				cacheKey,
 				JSON.stringify(pulse),
-				snapshotContext ? MARKET_REVISIONED_TTL_SECONDS : QUERY_CACHE_TTL_SECONDS.MARKET
+				snapshotContext?.cacheTtlSeconds ?? QUERY_CACHE_TTL_SECONDS.MARKET
 			);
 			return pulse;
 		});
@@ -753,7 +790,7 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 				"Market snapshot context unavailable; using request fallback"
 			);
 		}
-		const cacheKey = snapshotContext
+		let cacheKey = snapshotContext
 			? gqlCacheKey(
 					context,
 					"market-lineup:v1",
@@ -775,16 +812,44 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 			context.logger.warn({ err: error, cacheKey }, "Failed to read market lineup cache");
 		}
 
-		let rows: MarketSnapshotRow[];
-		try {
+		const readRows = async (
+			pin: Awaited<ReturnType<typeof getMarketSnapshotContext>> | null
+		): Promise<{ rows: MarketSnapshotRow[]; hasPinnedSnapshot: boolean }> => {
 			const result = await (queryExecutor ?? context.database).query(MARKET_QUERY, [
 				context.currentSeason.seasonId,
 				7,
+				pin?.snapshotDate ?? null,
+				pin?.capturedAt ?? null,
 			]);
 			const compact = result.rows[0] as { market_rows?: unknown } | undefined;
 			rows = Array.isArray(compact?.market_rows)
 				? (compact.market_rows as MarketSnapshotRow[])
 				: (result.rows as MarketSnapshotRow[]);
+			const hasPinnedSnapshot =
+				!pin ||
+				rows.some(
+					(row) =>
+						toCalendarDate(row.snapshot_date, "snapshot_date") === pin.snapshotDate &&
+						toIsoTimestamp(row.captured_at, "captured_at") === pin.capturedAt
+				);
+			return { rows, hasPinnedSnapshot };
+		};
+		let rows: MarketSnapshotRow[];
+		try {
+			let read = await readRows(snapshotContext);
+			rows = read.rows;
+			if (snapshotContext && !read.hasPinnedSnapshot) {
+				snapshotContext = await refreshMarketSnapshotContext(context);
+				if (!snapshotContext) throw new Error("Market snapshot pin unavailable after retry");
+				cacheKey = gqlCacheKey(
+					context,
+					"market-lineup:v1",
+					`${context.dataRevision ?? "core-postgres"}.${snapshotContext.revision}`
+				);
+				read = await readRows(snapshotContext);
+				rows = read.rows;
+				if (!read.hasPinnedSnapshot) throw new Error("Market snapshot pin changed during query");
+			}
 		} catch (error) {
 			context.logger.error({ err: error }, "Failed to query market snapshots for lineup");
 			throw new Error("Failed to query market snapshots for lineup", { cause: error });
@@ -796,7 +861,7 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 				context,
 				cacheKey,
 				JSON.stringify(lineup),
-				snapshotContext ? MARKET_REVISIONED_TTL_SECONDS : QUERY_CACHE_TTL_SECONDS.MARKET
+				snapshotContext?.cacheTtlSeconds ?? QUERY_CACHE_TTL_SECONDS.MARKET
 			);
 		}
 		return lineup;

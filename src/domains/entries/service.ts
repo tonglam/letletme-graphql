@@ -1,7 +1,8 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { enqueueEntryInfoSync } from "../../infra/entry-info-sync";
-import { lookupFplEntry } from "../../infra/fpl-entry-lookup";
+import { lookupFplEntryResult, type FplEntryLookupResult } from "../../infra/fpl-entry-lookup";
+import { metrics } from "../../infra/metrics";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
@@ -17,6 +18,59 @@ import type { LivePerformance } from "../live/repository";
 import { liveRepository } from "../live/repository";
 import type { Entry, EntryEventResult, EntryHistoryInfo } from "./repository";
 import { entriesRepository } from "./repository";
+
+const FPL_ENTRY_NEGATIVE_TTL_SECONDS = 60;
+const FPL_ENTRY_NEGATIVE_SENTINEL = "__entry_fpl:not_found__";
+const MAX_FPL_ENTRY_IN_FLIGHT = 8;
+const fplEntryFlights = new Map<number, Promise<FplEntryLookupResult>>();
+let fplEntryInFlight = 0;
+
+const countEntryAdmission = (
+	event: "negative_hit" | "not_found" | "unavailable" | "saturated" | "found"
+): void => {
+	metrics.cacheRepositoryEvents.labels("entry_fpl", event).inc();
+};
+
+const readNegativeEntryCache = async (context: GraphQLContext, id: number): Promise<boolean> => {
+	try {
+		const value = await context.redis.get(gqlCacheKey(context, `entries:fpl-miss:${id}`));
+		if (value === FPL_ENTRY_NEGATIVE_SENTINEL) {
+			countEntryAdmission("negative_hit");
+			return true;
+		}
+	} catch (error) {
+		context.logger.warn({ err: error, id }, "FPL entry negative cache unavailable");
+	}
+	return false;
+};
+
+const writeNegativeEntryCache = async (context: GraphQLContext, id: number): Promise<void> => {
+	try {
+		await writeQueryCache(
+			context,
+			gqlCacheKey(context, `entries:fpl-miss:${id}`),
+			FPL_ENTRY_NEGATIVE_SENTINEL,
+			FPL_ENTRY_NEGATIVE_TTL_SECONDS
+		);
+	} catch (error) {
+		context.logger.warn({ err: error, id }, "FPL entry negative cache write failed");
+	}
+};
+
+const lookupAdmission = (id: number): Promise<FplEntryLookupResult> | null => {
+	const existing = fplEntryFlights.get(id);
+	if (existing) return existing;
+	if (fplEntryInFlight >= MAX_FPL_ENTRY_IN_FLIGHT) return null;
+	fplEntryInFlight += 1;
+	const flight = lookupFplEntryResult(id);
+	fplEntryFlights.set(id, flight);
+	const clear = (): void => {
+		fplEntryInFlight -= 1;
+		if (fplEntryFlights.get(id) === flight) fplEntryFlights.delete(id);
+	};
+	void flight.then(clear, clear);
+	return flight;
+};
 
 export type EntryGameweekTransfers = {
 	eventId: number;
@@ -257,15 +311,30 @@ export const entriesService = {
 	},
 
 	async getEntryById(context: GraphQLContext, id: number): Promise<Entry | null> {
+		if (!Number.isSafeInteger(id) || id <= 0) return null;
 		const stored = await entriesRepository.getEntryById(context, id);
 		if (stored) {
 			return stored;
 		}
 
-		const live = await lookupFplEntry(id);
-		if (!live) {
+		if (await readNegativeEntryCache(context, id)) return null;
+		const admission = lookupAdmission(id);
+		if (!admission) {
+			countEntryAdmission("saturated");
 			return null;
 		}
+		const result = await admission;
+		if (result.status === "not_found") {
+			countEntryAdmission("not_found");
+			await writeNegativeEntryCache(context, id);
+			return null;
+		}
+		if (result.status === "unavailable") {
+			countEntryAdmission("unavailable");
+			return null;
+		}
+		countEntryAdmission("found");
+		const live = result.entry;
 
 		enqueueEntryInfoSync(id);
 		await writeQueryCache(

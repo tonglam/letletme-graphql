@@ -17,6 +17,19 @@ describe("production deployment workflow", () => {
 		expect(workflow).not.toContain("/usr/local/libexec/vps-maintenance");
 	});
 
+	test("manual deploys require a successful exact-head CI push run", () => {
+		expect(workflow).toContain("actions: read");
+		expect(workflow).toContain(
+			"actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=$main_sha"
+		);
+		expect(workflow).toContain('.status == "completed"');
+		expect(workflow).toContain('.conclusion == "success"');
+		expect(workflow).toContain("No completed successful ci.yml push run found for exact main SHA");
+		expect(workflow.indexOf("No completed successful ci.yml push run found")).toBeLessThan(
+			workflow.indexOf("Checkout protected main commit")
+		);
+	});
+
 	test("arms rollback before replacing the running container", () => {
 		const armedAt = workflow.indexOf("rollback_armed=true");
 		const stopAt = workflow.indexOf("docker compose stop -t 30 graphql");
@@ -66,6 +79,19 @@ describe("production deployment workflow", () => {
 		expect(workflow).not.toContain("flock -w 300 9");
 		expect(workflow).not.toContain("/usr/local/libexec/vps-maintenance");
 		expect(workflow).not.toContain("schema" + "Version");
+	});
+
+	test("scans the immutable digest before promoting latest", () => {
+		const buildAt = workflow.indexOf("Build and push immutable image");
+		const scanAt = workflow.indexOf("Scan immutable image before promotion");
+		const promoteAt = workflow.indexOf("Promote scanned digest to latest");
+		expect(buildAt).toBeGreaterThan(-1);
+		expect(scanAt).toBeGreaterThan(buildAt);
+		expect(promoteAt).toBeGreaterThan(scanAt);
+		expect(workflow.slice(buildAt, scanAt)).not.toContain('--tag "${IMAGE_NAME}:latest"');
+		expect(workflow).toContain("image-ref: ${{ steps.image.outputs.image_ref }}");
+		expect(workflow).toContain('docker buildx imagetools create --tag "${IMAGE_NAME}:latest"');
+		expect(workflow).toContain("severity: HIGH,CRITICAL");
 	});
 
 	test("uses the complete GraphQL environment URL without password rewriting", () => {

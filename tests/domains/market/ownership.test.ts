@@ -8,6 +8,11 @@ import {
 	type MarketOwnershipSnapshotRow,
 } from "../../../src/domains/market/ownership-repository";
 import { schema } from "../../../src/graphql/schema";
+import {
+	buildSnapshotContext,
+	createTestPublication,
+	TestRedis,
+} from "../../helpers/data-publication";
 
 const row = (
 	date: string,
@@ -249,5 +254,51 @@ describe("market ownership GraphQL schema", () => {
 		expect(schema.getType("MarketOwnershipOverview")).toBeDefined();
 		expect(schema.getType("MarketOwnershipDay")).toBeDefined();
 		expect(schema.getType("MarketOwnershipCoverageStatus")).toBeDefined();
+	});
+});
+
+describe("market ownership snapshot pinning", () => {
+	it("retries when the pinned latest capture is missing from the query result", async () => {
+		const capturedAt = "2026-08-20T12:00:00.000Z";
+		const publication = createTestPublication({ dataset: "fpl:market", seasonCode: "2627" }, 22, {
+			context: {
+				seasonCode: "2627",
+				snapshotDate: "2026-08-20",
+				capturedAt,
+				rowCount: 1,
+			},
+		});
+		const context = buildSnapshotContext(new TestRedis(publication), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						snapshot_date: "2026-08-20",
+						captured_at: capturedAt,
+						row_count: 1,
+						capture_count: 1,
+					},
+				],
+			}),
+		});
+		let reads = 0;
+		const repository = createMarketOwnershipRepository({
+			query: async () => ({
+				rows: [
+					{
+						ownership_rows: [
+							reads++ === 0 ? row("2026-08-19", 1, 10) : row("2026-08-20", 1, 12, capturedAt),
+						],
+					},
+				],
+			}),
+		});
+
+		const result = await repository.getOverview(context, "DAILY", 10);
+		expect(result.coverage.toDate).toBe("2026-08-20");
+		expect(reads).toBe(2);
+		expect((context.redis as unknown as TestRedis).setCalls.at(-1)?.slice(-2)).toEqual([
+			"EX",
+			86_400,
+		]);
 	});
 });

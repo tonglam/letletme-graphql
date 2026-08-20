@@ -6,6 +6,7 @@ import { gqlCacheKey } from "../../infra/cache-key";
 import {
 	deleteQueryCache,
 	QUERY_CACHE_TTL_SECONDS,
+	readJsonQueryCache,
 	writeQueryCache,
 } from "../../infra/query-cache";
 import { stableStringify } from "../../infra/stringify";
@@ -20,37 +21,6 @@ import {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
-
-const readJsonCache = async (
-	context: GraphQLContext,
-	key: string,
-	validate: (value: unknown) => boolean = () => true
-): Promise<unknown | undefined> => {
-	let raw: string | null;
-	try {
-		raw = await context.redis.get(key);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to read tournaments cache");
-		return undefined;
-	}
-	if (raw === null) return undefined;
-	try {
-		const parsed = JSON.parse(raw) as unknown;
-		if (validate(parsed)) return parsed;
-		context.logger.warn({ key }, "Invalid shaped tournaments cache");
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Malformed tournaments cache");
-		try {
-			await context.redis.del(key);
-		} catch (evictionError) {
-			context.logger.warn(
-				{ err: evictionError, key },
-				"Failed to evict malformed tournaments cache"
-			);
-		}
-		return undefined;
-	}
-};
 
 export enum TournamentMode {
 	NORMAL = "normal",
@@ -98,12 +68,26 @@ export enum TournamentRosterMode {
 	OFFICIAL_SYNC = "official_sync",
 }
 
-function paginateResults<T>(results: T[], limit: number | null, offset: number | null): T[] {
-	if (limit === null && offset === null) return results;
-	const start = offset ?? 0;
-	const end = limit !== null ? start + limit : undefined;
-	return results.slice(start, end);
-}
+export const normalizeTournamentEventResultsPagination = (
+	limit: number | null,
+	offset: number | null
+): { limit: number | null; offset: number | null } => {
+	if (limit === null && offset === null) return { limit: null, offset: null };
+	if (offset !== null && limit === null) {
+		throw new GraphQLError("offset requires limit", { extensions: { code: "BAD_USER_INPUT" } });
+	}
+	if (limit !== null && (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)) {
+		throw new GraphQLError("limit must be an integer between 1 and 500", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
+	if (offset !== null && (!Number.isSafeInteger(offset) || offset < 0 || offset > 4999)) {
+		throw new GraphQLError("offset must be an integer between 0 and 4999", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
+	return { limit, offset: offset ?? 0 };
+};
 
 export type TournamentInfo = {
 	id: number;
@@ -1847,7 +1831,9 @@ export const tournamentsRepository: TournamentsRepository = {
 			? gqlCacheKey(context, `tournaments:entry:${entryId}`)
 			: null;
 		if (cacheKey) {
-			const cached = await readJsonCache(context, cacheKey, isTournamentInfoArrayCache);
+			const cached = await readJsonQueryCache(context, cacheKey, (value) =>
+				isTournamentInfoArrayCache(value) ? value : null
+			);
 			if (
 				Array.isArray(cached) &&
 				cached.every((item) => isRecord(item) && Number.isFinite(Number(item.id)))
@@ -1909,7 +1895,9 @@ export const tournamentsRepository: TournamentsRepository = {
 			await deleteQueryCache(context, cacheKey);
 			return tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
 		}
-		const cached = await readJsonCache(context, cacheKey, isEntryIdArrayCache);
+		const cached = await readJsonQueryCache(context, cacheKey, (value) =>
+			isEntryIdArrayCache(value) ? value : null
+		);
 		if (Array.isArray(cached) && cached.every((item) => Number.isFinite(Number(item))))
 			return cached as number[];
 		const entryIds = await tournamentsRepository.getTournamentEntryIdsUncached(
@@ -1949,14 +1937,22 @@ export const tournamentsRepository: TournamentsRepository = {
 		limit: number | null = null,
 		offset: number | null = null
 	): Promise<TournamentEventResult[]> {
+		const pagination = normalizeTournamentEventResultsPagination(limit, offset);
+		const isPaged = pagination.limit !== null;
 		const cacheKey = context.dataRevision
 			? gqlCacheKey(
 					context,
-					`tournaments:event-results:${stableStringify({ tournamentId, eventId })}`
+					`tournaments:event-results:${stableStringify({
+						tournamentId,
+						eventId,
+						...(isPaged ? { limit: pagination.limit, offset: pagination.offset ?? 0 } : {}),
+					})}`
 				)
 			: null;
 		const cached = cacheKey
-			? await readJsonCache(context, cacheKey, isTournamentEventResultArrayCache)
+			? await readJsonQueryCache(context, cacheKey, (value) =>
+					isTournamentEventResultArrayCache(value) ? value : null
+				)
 			: undefined;
 		if (
 			Array.isArray(cached) &&
@@ -1967,11 +1963,10 @@ export const tournamentsRepository: TournamentsRepository = {
 					Number.isFinite(Number(item.entryId))
 			)
 		) {
-			const results = cached as TournamentEventResult[];
-			return paginateResults(results, limit, offset);
+			return cached as TournamentEventResult[];
 		}
 
-		const { data: resultData, error: resultError } = await context.data
+		let resultQuery = context.data
 			.read("reporting.tournament_event_results")
 			.select(TOURNAMENT_VIEW_COLUMNS)
 			.eq("tournament_id", tournamentId)
@@ -1979,6 +1974,13 @@ export const tournamentsRepository: TournamentsRepository = {
 			.order("group_id", { ascending: true })
 			.order("event_group_rank", { ascending: true, nullsFirst: false })
 			.order("entry_id", { ascending: true });
+		if (isPaged) {
+			resultQuery = resultQuery.range(
+				pagination.offset ?? 0,
+				(pagination.offset ?? 0) + (pagination.limit ?? 1) - 1
+			);
+		}
+		const { data: resultData, error: resultError } = await resultQuery;
 
 		if (resultError) {
 			context.logger.error(
@@ -2026,7 +2028,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				JSON.stringify(results),
 				QUERY_CACHE_TTL_SECONDS.REPORTING
 			);
-		return paginateResults(results, limit, offset);
+		return results;
 	},
 
 	async getTournamentEntryRankingSummary(
@@ -2043,7 +2045,9 @@ export const tournamentsRepository: TournamentsRepository = {
 				entryId,
 			})}`
 		);
-		const cached = await readJsonCache(context, cacheKey, isRankingSummaryCache);
+		const cached = await readJsonQueryCache(context, cacheKey, (value) =>
+			isRankingSummaryCache(value) ? value : null
+		);
 		if (
 			isRecord(cached) &&
 			Number.isFinite(Number(cached.eventId)) &&
@@ -2172,7 +2176,9 @@ export const tournamentsRepository: TournamentsRepository = {
 			context,
 			`tournaments:season-snapshot:${stableStringify({ tournamentId, eventId })}`
 		);
-		const cached = await readJsonCache(context, cacheKey, isSeasonSnapshotCache);
+		const cached = await readJsonQueryCache(context, cacheKey, (value) =>
+			isSeasonSnapshotCache(value) ? value : null
+		);
 		if (isSeasonSnapshotCache(cached)) {
 			return cached;
 		}
@@ -2235,7 +2241,9 @@ export const tournamentsRepository: TournamentsRepository = {
 			context,
 			`tournaments:battle-results:${stableStringify({ tournamentId, eventId })}`
 		);
-		const cached = await readJsonCache(context, cacheKey, isBattleResultArrayCache);
+		const cached = await readJsonQueryCache(context, cacheKey, (value) =>
+			isBattleResultArrayCache(value) ? value : null
+		);
 		if (
 			Array.isArray(cached) &&
 			cached.every((item) => isRecord(item) && Number.isFinite(Number(item.eventId)))
@@ -2325,7 +2333,9 @@ export const tournamentsRepository: TournamentsRepository = {
 			context,
 			`tournaments:entry-h2h:${entryId}:${stableStringify(membershipTournamentIds)}`
 		);
-		const cached = await readJsonCache(context, cacheKey, isH2HResultArrayCache);
+		const cached = await readJsonQueryCache(context, cacheKey, (value) =>
+			isH2HResultArrayCache(value) ? value : null
+		);
 		if (
 			Array.isArray(cached) &&
 			cached.every((item) => isRecord(item) && Number.isFinite(Number(item.eventId)))
