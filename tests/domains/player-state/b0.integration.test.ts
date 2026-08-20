@@ -193,7 +193,7 @@ describe.skipIf(!enabled || (!databaseUrl && !hasPgEnvironment))(
 					contextValue.currentSeason.lifecycleState ?? "unknown",
 					playerId,
 					horizon,
-				].join(":"),
+				].join(":")
 			);
 
 		it("returns a cross-provider profile from canonical relations", async () => {
