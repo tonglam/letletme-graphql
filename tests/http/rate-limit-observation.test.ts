@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { capacityRunRequestIdPrefix } from "../../src/http/capacity-run-id";
 import { buildRateLimitTargetObservation } from "../../src/http/rate-limit-observation";
 
 const startedAt = Date.parse("2026-08-20T00:00:00.000Z");
@@ -19,7 +20,7 @@ const log = (input: Record<string, unknown>): string =>
 		msg: "GraphQL v3 rate-limit decision",
 		stage: "weighted",
 		policy: "graphql-v3",
-		requestId: "capacity-run-123-request-1",
+		requestId: `${capacityRunRequestIdPrefix(report.runId)}request-1`,
 		allowed: true,
 		...input,
 	});
@@ -31,6 +32,12 @@ describe("capacity log observation", () => {
 			logLines: [
 				log({
 					requestId: "another-run-request-1",
+					trafficClass: "mini",
+					workload: "home",
+					cost: 50,
+				}),
+				log({
+					requestId: `${capacityRunRequestIdPrefix(`${report.runId}-2`)}request-1`,
 					trafficClass: "mini",
 					workload: "home",
 					cost: 50,

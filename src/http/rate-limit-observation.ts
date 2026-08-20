@@ -1,4 +1,5 @@
 import { GRAPHQL_TRAFFIC_CLASSES, GRAPHQL_WORKLOADS } from "../infra/ingress-envelope";
+import { capacityRunRequestIdPrefix } from "./capacity-run-id";
 import type { RateLimitTargetObservation } from "./rate-limit-profile-generator";
 
 export type CapacityLoadReport = {
@@ -114,7 +115,7 @@ export const buildRateLimitTargetObservation = ({
 		throw new Error("Capacity evidence requires a complete fifteen-minute 300-concurrent stage");
 	}
 	const durationSeconds = (window.finishedAt - window.startedAt) / 1000;
-	const requestIdPrefix = `${report.runId}-`;
+	const requestIdPrefix = capacityRunRequestIdPrefix(report.runId);
 	const workloads = Object.fromEntries(
 		GRAPHQL_WORKLOADS.map((workload) => [workload, 0])
 	) as Record<(typeof GRAPHQL_WORKLOADS)[number], number>;

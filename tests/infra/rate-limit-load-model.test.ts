@@ -42,6 +42,8 @@ describe("GraphQL v3 capacity model", () => {
 		expect(source).toContain("natPeersUnaffected");
 		expect(source).toContain("natPeerWouldDenied");
 		expect(source).toContain("shadowIsolationAttributable");
+		expect(source).toContain("attackerWasIsolated: attackerWouldDenied > 0");
+		expect(source).not.toContain("attackerWasIsolated: attacker429 > 0");
 		expect(source).toContain("X-Letletme-Capacity-Run");
 		expect(source).toContain("sample.status < 200 || sample.status >= 300");
 		expect(source).toContain("if (!result.passed) break");

@@ -142,6 +142,17 @@ describe("production deployment workflow", () => {
 		expect(p0Probe).toContain('P0_PROBE_REQUESTS ?? "700"');
 	});
 
+	test("binds P0 backup evidence to the running image instead of the checkout", () => {
+		expect(workflow).toContain("$HOME/.letletme-graphql-current-deployment.json");
+		expect(workflow).toContain('[ "$state_image" = "$old_image" ]');
+		expect(workflow).toContain("P0 requires a persisted SHA bound to the running GraphQL image");
+		expect(workflow).toContain('--arg deploySha "$running_deploy_sha"');
+		expect(workflow).not.toContain('--arg deploySha "$previous_deploy_sha"');
+		expect(workflow.indexOf('mv "$deployment_state_next" "$deployment_state"')).toBeLessThan(
+			workflow.lastIndexOf("deployment_committed=true")
+		);
+	});
+
 	test("emits structured timing for every remote deployment phase", () => {
 		for (const stage of [
 			"checkout",

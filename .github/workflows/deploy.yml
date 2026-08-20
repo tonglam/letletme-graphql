@@ -138,6 +138,8 @@ jobs:
             deployment_committed=false
             env_promoted=false
             previous_env=""
+            deployment_state="$HOME/.letletme-graphql-current-deployment.json"
+            deployment_state_next=""
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
             active_stage=""
@@ -169,6 +171,9 @@ jobs:
               if [ -n "${previous_env:-}" ]; then
                 rm -f "$previous_env"
               fi
+              if [ -n "${deployment_state_next:-}" ]; then
+                rm -f "$deployment_state_next"
+              fi
               exit "$original_status"
             }
             trap fail_without_rollback_on_exit EXIT
@@ -196,8 +201,6 @@ jobs:
             cd "$VPS_WORKDIR"
             git diff --quiet || { echo "GraphQL VPS checkout has tracked modifications"; exit 1; }
             git diff --cached --quiet || { echo "GraphQL VPS index has staged modifications"; exit 1; }
-            previous_deploy_sha=$(git rev-parse HEAD)
-            [[ "$previous_deploy_sha" =~ ^[0-9a-f]{40}$ ]]
             git fetch origin main
             test "$(git rev-parse origin/main)" = "$DEPLOY_SHA"
             git checkout --force main
@@ -315,8 +318,25 @@ jobs:
               docker image inspect "$old_image" >/dev/null
             fi
 
+            running_deploy_sha=""
+            if [ -n "$old_container" ] && [ -f "$deployment_state" ]; then
+              state_sha=$(jq -r '.deploySha // empty' "$deployment_state" 2>/dev/null || true)
+              state_image=$(jq -r '.image // empty' "$deployment_state" 2>/dev/null || true)
+              if [[ "$state_sha" =~ ^[0-9a-f]{40}$ ]] && [ "$state_image" = "$old_image" ]; then
+                running_deploy_sha="$state_sha"
+              elif [ "$RATE_LIMIT_ROLLOUT" = p0-legacy ]; then
+                echo "Stored GraphQL deployment identity does not match the running image"
+                exit 1
+              fi
+            fi
+
             if [ "$RATE_LIMIT_ROLLOUT" = p0-legacy ]; then
               test -n "$old_container"
+              [[ "$old_image" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+              [[ "$running_deploy_sha" =~ ^[0-9a-f]{40}$ ]] || {
+                echo "P0 requires a persisted SHA bound to the running GraphQL image"
+                exit 1
+              }
               backup_root="$HOME/.letletme-graphql-rollbacks"
               install -m 700 -d "$backup_root"
               backup_stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -351,7 +371,7 @@ jobs:
               fi
               jq -n \
                 --arg capturedAt "$backup_stamp" \
-                --arg deploySha "$previous_deploy_sha" \
+                --arg deploySha "$running_deploy_sha" \
                 --arg image "$old_image" \
                 '{capturedAt: $capturedAt, deploySha: $deploySha, image: $image}' \
                 > "$backup_dir/manifest.json"
@@ -435,6 +455,9 @@ jobs:
               fi
               if [ "$env_promoted" = false ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
                 rm -f "$previous_env"
+              fi
+              if [ -n "${deployment_state_next:-}" ]; then
+                rm -f "$deployment_state_next"
               fi
               rm -f "$next_env"
               exit "$original_status"
@@ -631,13 +654,23 @@ jobs:
               printf '%s\n' "$old_image" > "$HOME/.letletme-graphql-previous-image"
               chmod 600 "$HOME/.letletme-graphql-previous-image"
             fi
-            if [ -n "$previous_env" ]; then
-              rm -f "$previous_env"
-            fi
+            deployment_state_next=$(mktemp "$HOME/.letletme-graphql-current-deployment.next.XXXXXX")
+            jq -n \
+              --arg deployedAt "$(date -u +%Y%m%dT%H%M%SZ)" \
+              --arg deploySha "$DEPLOY_SHA" \
+              --arg image "$IMAGE_REF" \
+              '{deployedAt: $deployedAt, deploySha: $deploySha, image: $image}' \
+              > "$deployment_state_next"
+            chmod 600 "$deployment_state_next"
+            mv "$deployment_state_next" "$deployment_state"
+            deployment_state_next=""
             deployment_committed=true
             finish_stage
             rollback_armed=false
             trap - EXIT
+            if [ -n "$previous_env" ]; then
+              rm -f "$previous_env"
+            fi
             previous_image=""
             if [ -f "$HOME/.letletme-graphql-previous-image" ]; then
               previous_image=$(cat "$HOME/.letletme-graphql-previous-image")

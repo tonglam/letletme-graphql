@@ -1,4 +1,5 @@
 import { createHash, createHmac } from "crypto";
+import { capacityRunRequestIdPrefix } from "../src/http/capacity-run-id";
 
 type Workload =
 	"interactive" | "home" | "fixtures" | "market" | "player-stats" | "gameweek" | "public-other";
@@ -132,9 +133,10 @@ const sleep = (milliseconds: number): Promise<void> =>
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 
 let requestSequence = 0;
+const requestIdPrefix = capacityRunRequestIdPrefix(runId);
 const capacityRequestId = (actorId: string): string => {
 	requestSequence += 1;
-	return `${runId}-${sha256(actorId).slice(0, 8)}-${requestSequence.toString(36)}`;
+	return `${requestIdPrefix}${sha256(actorId).slice(0, 8)}-${requestSequence.toString(36)}`;
 };
 
 const capacityRunSignature = createHmac("sha256", backendSecret)
@@ -959,7 +961,7 @@ const gates = {
 	runtimeMetricsComplete,
 	cpuBelow80PercentForFiveMinutes: !cpuSustainedBreach,
 	memoryBelow85Percent: maxMemoryPercent <= 85,
-	attackerWasIsolated: attacker429 > 0 || attackerWouldDenied > 0,
+	attackerWasIsolated: attackerWouldDenied > 0,
 	natPeersUnaffected: natPeer429 === 0 && natPeerErrors === 0 && natPeerWouldDenied === 0,
 	shadowIsolationAttributable,
 	sustainableRpsHeadroomProven,
