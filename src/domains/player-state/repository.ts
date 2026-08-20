@@ -36,6 +36,10 @@ import type {
 	PlayerStateAnalysisStatus,
 	PlayerStateProviderMode,
 	PlayerStateMappingStatus,
+	PlayerSeasonPhase,
+	PlayerSeasonSignal,
+	PlayerSeasonSignalCode,
+	PlayerSeasonTimelinePoint,
 	ProcessAssessment,
 } from "./types";
 
@@ -70,6 +74,10 @@ type PlayerStateSeasonRow = QueryResultRow & {
 	element_type: number;
 	fpl_minutes: number;
 	fpl_gameweeks: number;
+	fpl_total_points: number;
+	fpl_starts: number;
+	fpl_clean_sheets: number;
+	fpl_saves: number;
 	fpl_points_per_90: number | string | null;
 	fpl_return_rate: number | string | null;
 	fpl_bonus_per_90: number | string | null;
@@ -229,6 +237,10 @@ const seasonRowsSql = `
 		element_type,
 		fpl_minutes,
 		fpl_gameweeks,
+		fpl_total_points,
+		fpl_starts,
+		fpl_clean_sheets,
+		fpl_saves,
 		fpl_points_per_90,
 		fpl_return_rate,
 		fpl_bonus_per_90,
@@ -343,6 +355,108 @@ const PLAYER_STATE_SOURCE_KEYS = [
 	"UNDERSTAT:HISTORY",
 ] as const;
 
+const PLAYER_SEASON_SIGNAL_CODES = [
+	"UNDERSTAT_NPXG_PER_90",
+	"UNDERSTAT_XA_PER_90",
+	"UNDERSTAT_NPXG_XA_PER_90",
+	"UNDERSTAT_KEY_PASSES_PER_90",
+	"OFFICIAL_CLEAN_SHEET_RATE",
+	"OFFICIAL_SAVES_PER_90",
+] as const satisfies readonly PlayerSeasonSignalCode[];
+
+const signalCodesForPosition = (position: number): readonly PlayerSeasonSignalCode[] => {
+	switch (position) {
+		case 1:
+			return ["OFFICIAL_SAVES_PER_90", "OFFICIAL_CLEAN_SHEET_RATE"];
+		case 2:
+			return ["OFFICIAL_CLEAN_SHEET_RATE", "UNDERSTAT_NPXG_XA_PER_90"];
+		case 3:
+			return ["UNDERSTAT_NPXG_XA_PER_90", "UNDERSTAT_KEY_PASSES_PER_90"];
+		case 4:
+		default:
+			return ["UNDERSTAT_NPXG_PER_90", "UNDERSTAT_XA_PER_90"];
+	}
+};
+
+const signalProviderForCode = (code: PlayerSeasonSignalCode): "FPL" | "UNDERSTAT" =>
+	code.startsWith("OFFICIAL_") ? "FPL" : "UNDERSTAT";
+
+const isAnalysisStatus = (value: unknown): value is PlayerStateAnalysisStatus =>
+	value === "READY" ||
+	value === "PRESEASON" ||
+	value === "INSUFFICIENT" ||
+	value === "NOT_APPLICABLE" ||
+	value === "UNAVAILABLE";
+
+const playerSeasonSignalGuard = (value: unknown): value is PlayerSeasonSignal => {
+	if (!isRecord(value)) return false;
+	const code = value.code;
+	const provider = value.provider;
+	const signalCode = PLAYER_SEASON_SIGNAL_CODES.includes(
+		code as (typeof PLAYER_SEASON_SIGNAL_CODES)[number]
+	)
+		? (code as PlayerSeasonSignalCode)
+		: null;
+	return (
+		signalCode !== null &&
+		provider === signalProviderForCode(signalCode) &&
+		(value.value === null || (typeof value.value === "number" && Number.isFinite(value.value))) &&
+		typeof value.unit === "string" &&
+		value.unit.length > 0 &&
+		(value.sampleMinutes === null ||
+			(typeof value.sampleMinutes === "number" &&
+				Number.isInteger(value.sampleMinutes) &&
+				value.sampleMinutes >= 0)) &&
+		isAnalysisStatus(value.analysisStatus) &&
+		Array.isArray(value.reasonCodes) &&
+		value.reasonCodes.every((reason) => typeof reason === "string") &&
+		(value.analysisStatus !== "READY" || value.value !== null)
+	);
+};
+
+const playerSeasonTimelineGuard = (
+	value: unknown,
+	profileSeason: string
+): value is PlayerSeasonTimelinePoint[] => {
+	if (!Array.isArray(value) || value.length === 0) return false;
+	const seasons = value.map((point) => (isRecord(point) ? point.season : null));
+	if (
+		seasons[0] !== profileSeason ||
+		!seasons.every((season) => typeof season === "string" && /^\d{4}$/.test(season))
+	) {
+		return false;
+	}
+	for (let index = 1; index < seasons.length; index += 1) {
+		if (seasons[index - 1]! <= seasons[index]!) return false;
+	}
+	return value.every((point) => {
+		if (!isRecord(point)) return false;
+		if (
+			(point.phase !== "PRESEASON" && point.phase !== "ACTIVE" && point.phase !== "COMPLETED") ||
+			typeof point.position !== "number" ||
+			!Number.isInteger(point.position) ||
+			point.position < 1 ||
+			point.position > 4 ||
+			(point.fplTotalPoints !== null &&
+				(typeof point.fplTotalPoints !== "number" ||
+					!Number.isInteger(point.fplTotalPoints) ||
+					point.fplTotalPoints < 0)) ||
+			!Array.isArray(point.signals) ||
+			point.signals.length !== 2 ||
+			!point.signals.every(playerSeasonSignalGuard)
+		) {
+			return false;
+		}
+		const expectedCodes = signalCodesForPosition(point.position);
+		const codes = point.signals.map((signal) => signal.code);
+		return (
+			new Set(codes).size === 2 &&
+			codes.every((code, index) => code === expectedCodes[index]) &&
+			(point.phase === "PRESEASON" ? point.fplTotalPoints === null : point.fplTotalPoints !== null)
+		);
+	});
+};
+
 const playerStateSourceGuard = (value: unknown): value is PlayerStateSourceCoverage => {
 	if (!isRecord(value)) return false;
 	if (
@@ -399,7 +513,8 @@ const profileGuard = (value: unknown): value is PlayerStateProfile =>
 	value.coverage.limitations.every((limitation) => typeof limitation === "string") &&
 	(value.providerMode === "FPL_ONLY" ||
 		value.providerMode === "FPL_WITH_UNDERSTAT_HISTORY" ||
-		value.providerMode === "FPL_WITH_UNDERSTAT_CURRENT");
+		value.providerMode === "FPL_WITH_UNDERSTAT_CURRENT") &&
+	playerSeasonTimelineGuard(value.seasonTimeline, value.season);
 
 const profileCacheKey = (
 	context: GraphQLContext,
@@ -407,7 +522,7 @@ const profileCacheKey = (
 	playerId: number,
 	horizon: number
 ): string =>
-	gqlCacheKey(context, `player-state-profile:v2:${stateRevision}:${playerId}:${horizon}`);
+	gqlCacheKey(context, `player-state-profile:v3:${stateRevision}:${playerId}:${horizon}`);
 
 let datasetRevisionMemo: { expiresAt: number; value: PlayerStateDatasetRevision } | null = null;
 
@@ -963,6 +1078,204 @@ const historyForPlayerStateRows = (
 	};
 };
 
+const seasonPhaseForRow = (row: PlayerStateSeasonRow, currentSeason: string): PlayerSeasonPhase => {
+	if (row.season_code !== currentSeason) return "COMPLETED";
+	if (row.lifecycle_state === "preseason") return "PRESEASON";
+	if (row.lifecycle_state === "completed" || row.lifecycle_state === "closed") {
+		return "COMPLETED";
+	}
+	return "ACTIVE";
+};
+
+const seasonSignalUnit = (code: PlayerSeasonSignalCode): string =>
+	code === "OFFICIAL_CLEAN_SHEET_RATE" ? "percent" : "per90";
+
+const seasonSignal = (
+	code: PlayerSeasonSignalCode,
+	row: PlayerStateSeasonRow | null,
+	phase: PlayerSeasonPhase
+): PlayerSeasonSignal => {
+	const provider = signalProviderForCode(code);
+	const unit = seasonSignalUnit(code);
+	if (phase === "PRESEASON") {
+		return {
+			code,
+			provider,
+			value: null,
+			unit,
+			sampleMinutes: 0,
+			analysisStatus: "PRESEASON",
+			reasonCodes: ["CURRENT_SEASON_PRESEASON"],
+		};
+	}
+	if (row === null) {
+		return {
+			code,
+			provider,
+			value: null,
+			unit,
+			sampleMinutes: null,
+			analysisStatus: "UNAVAILABLE",
+			reasonCodes: ["FPL_SEASON_ROW_UNAVAILABLE"],
+		};
+	}
+	const minimumMinutes = phase === "ACTIVE" ? PROCESS_MINIMUM_MINUTES : HISTORY_PLAYER_MINUTES;
+	const isUnderstat = provider === "UNDERSTAT";
+	const sampleMinutes = isUnderstat ? row.understat_minutes : row.fpl_minutes;
+	if (isUnderstat && row.understat_mapping_status !== "VERIFIED") {
+		return {
+			code,
+			provider,
+			value: null,
+			unit,
+			sampleMinutes,
+			analysisStatus: "UNAVAILABLE",
+			reasonCodes: ["UNDERSTAT_MAPPING_NOT_VERIFIED"],
+		};
+	}
+	if (
+		isUnderstat &&
+		(row.understat_player_id === null ||
+			(row.understat_season_state !== "active" && row.understat_season_state !== "complete"))
+	) {
+		return {
+			code,
+			provider,
+			value: null,
+			unit,
+			sampleMinutes,
+			analysisStatus: "UNAVAILABLE",
+			reasonCodes: ["UNDERSTAT_SEASON_DATA_UNAVAILABLE"],
+		};
+	}
+	if (sampleMinutes === null || sampleMinutes < minimumMinutes) {
+		return {
+			code,
+			provider,
+			value: null,
+			unit,
+			sampleMinutes,
+			analysisStatus: "INSUFFICIENT",
+			reasonCodes: [
+				phase === "ACTIVE"
+					? "CURRENT_SAMPLE_BELOW_180_MINUTES"
+					: "HISTORY_SAMPLE_BELOW_450_MINUTES",
+			],
+		};
+	}
+
+	const values = understatSeasonValues(row);
+	let value: number | null;
+	switch (code) {
+		case "UNDERSTAT_NPXG_PER_90":
+			value = values.npxgPer90;
+			break;
+		case "UNDERSTAT_XA_PER_90":
+			value = values.xaPer90;
+			break;
+		case "UNDERSTAT_NPXG_XA_PER_90":
+			value =
+				values.npxgPer90 !== null && values.xaPer90 !== null
+					? values.npxgPer90 + values.xaPer90
+					: null;
+			break;
+		case "UNDERSTAT_KEY_PASSES_PER_90":
+			value = values.keyPassesPer90;
+			break;
+		case "OFFICIAL_CLEAN_SHEET_RATE": {
+			const starts = asNumber(row.fpl_starts);
+			const cleanSheets = asNumber(row.fpl_clean_sheets);
+			value =
+				starts !== null && starts > 0 && cleanSheets !== null ? (cleanSheets / starts) * 100 : null;
+			if (value === null) {
+				return {
+					code,
+					provider,
+					value: null,
+					unit,
+					sampleMinutes,
+					analysisStatus: "UNAVAILABLE",
+					reasonCodes: ["OFFICIAL_STARTS_UNAVAILABLE"],
+				};
+			}
+			break;
+		}
+		case "OFFICIAL_SAVES_PER_90": {
+			const saves = asNumber(row.fpl_saves);
+			value = saves !== null && row.fpl_minutes > 0 ? (saves * 90) / row.fpl_minutes : null;
+			if (value === null) {
+				return {
+					code,
+					provider,
+					value: null,
+					unit,
+					sampleMinutes,
+					analysisStatus: "UNAVAILABLE",
+					reasonCodes: ["OFFICIAL_SAVES_UNAVAILABLE"],
+				};
+			}
+			break;
+		}
+	}
+	if (value === null) {
+		return {
+			code,
+			provider,
+			value: null,
+			unit,
+			sampleMinutes,
+			analysisStatus: "UNAVAILABLE",
+			reasonCodes: [isUnderstat ? "UNDERSTAT_METRIC_UNAVAILABLE" : "OFFICIAL_METRIC_UNAVAILABLE"],
+		};
+	}
+	return {
+		code,
+		provider,
+		value,
+		unit,
+		sampleMinutes,
+		analysisStatus: "READY",
+		reasonCodes: [],
+	};
+};
+
+const buildSeasonTimeline = (
+	rows: PlayerStateSeasonRow[],
+	playerCode: number,
+	currentSeason: string,
+	currentPosition: number
+): PlayerSeasonTimelinePoint[] => {
+	const subjectRows = rows.filter(
+		(row) =>
+			row.player_code === playerCode &&
+			(row.season_code === currentSeason || row.lifecycle_state === "completed")
+	);
+	const currentRow = subjectRows.find((row) => row.season_code === currentSeason) ?? null;
+	const points = subjectRows.map((row): PlayerSeasonTimelinePoint => {
+		const phase = seasonPhaseForRow(row, currentSeason);
+		const position = row.element_type;
+		return {
+			season: row.season_code,
+			phase,
+			position,
+			fplTotalPoints: phase === "PRESEASON" ? null : (asNumber(row.fpl_total_points) ?? 0),
+			signals: signalCodesForPosition(position).map((code) => seasonSignal(code, row, phase)),
+		};
+	});
+	if (currentRow === null) {
+		points.push({
+			season: currentSeason,
+			phase: "PRESEASON",
+			position: currentPosition,
+			fplTotalPoints: null,
+			signals: signalCodesForPosition(currentPosition).map((code) =>
+				seasonSignal(code, null, "PRESEASON")
+			),
+		});
+	}
+	return points.sort((left, right) => right.season.localeCompare(left.season));
+};
+
 const addUnderstatHistory = (
 	history: PlayerHistory,
 	processPercentiles: Map<string, number>
@@ -1453,6 +1766,7 @@ export const createPlayerStateRepository = (
 			historyForPlayerStateRows(seasonRows, player.code, season),
 			processResult.historyPercentiles
 		);
+		const seasonTimeline = buildSeasonTimeline(seasonRows, player.code, season, player.type);
 		const samples = toGameweekSamples(startedEventIds, currentCohortRows.gameweekRows, playerId);
 		const recentWindow = samples.slice(0, 5);
 		const previousWindow = samples.slice(5, 10);
@@ -1844,6 +2158,7 @@ export const createPlayerStateRepository = (
 			},
 			careerTrajectory: history.careerTrajectory,
 			outlook,
+			seasonTimeline,
 			coverage: {
 				sources,
 				metricCoverage: [...new Set(metricCoverage)],

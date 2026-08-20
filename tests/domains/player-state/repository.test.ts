@@ -165,6 +165,10 @@ const playerStateRows = (fixture: QueryFixture): QueryResultRow[] => {
 				element_type: 3,
 				fpl_minutes: minutes,
 				fpl_gameweeks: season === "2526" ? 10 : 38,
+				fpl_total_points: points,
+				fpl_starts: season === "2526" ? 10 : 30,
+				fpl_clean_sheets: season === "2526" ? 2 : 8,
+				fpl_saves: 0,
 				fpl_points_per_90: (points * 90) / minutes,
 				fpl_return_rate: (returns / (season === "2526" ? 10 : 38)) * 100,
 				fpl_bonus_per_90: (bonus * 90) / minutes,
@@ -451,6 +455,23 @@ describe("Player State repository", () => {
 		expect(queries.some((query) => query.includes("understat.player_seasons"))).toBe(false);
 		expect(redis.setCalls[0]?.slice(2)).toEqual(["EX", PLAYER_STATE_SUCCESS_CACHE_TTL_SECONDS]);
 		expect(redis.setCalls[0]?.[0]).toStartWith("llm:gql:9:");
+		expect(first?.seasonTimeline.map((point) => point.season)).toEqual(["2526", "2425", "2324"]);
+		expect(first?.seasonTimeline[0]).toMatchObject({
+			season: "2526",
+			phase: "ACTIVE",
+			position: 3,
+			fplTotalPoints: 70,
+		});
+		expect(first?.seasonTimeline[0]?.signals.map((signal) => signal.code)).toEqual([
+			"UNDERSTAT_NPXG_XA_PER_90",
+			"UNDERSTAT_KEY_PASSES_PER_90",
+		]);
+		expect(
+			first?.seasonTimeline[0]?.signals.every((signal) => signal.analysisStatus === "READY")
+		).toBe(true);
+		expect(
+			first?.seasonTimeline[2]?.signals.every((signal) => signal.analysisStatus === "UNAVAILABLE")
+		).toBe(true);
 
 		const queryCount = queries.length;
 		const second = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
