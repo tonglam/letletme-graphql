@@ -63,6 +63,10 @@ import type {
 	TournamentSetupStatus,
 	TournamentDetailDesk,
 	ManagedTournamentStatus,
+	TournamentSetupIssueDiagnostic,
+	TournamentSetupWarningSummary,
+	TournamentSetupWarningCategory,
+	TournamentSetupIssueSeverity,
 } from "./repository";
 import {
 	GroupMode,
@@ -70,6 +74,7 @@ import {
 	TournamentRosterMode,
 	TournamentSetupPhase,
 	TournamentState,
+	TournamentSetupProgressMode,
 } from "./repository";
 import {
 	assertTournamentInsightsReady,
@@ -77,6 +82,28 @@ import {
 	tournamentsService,
 } from "./service";
 import { normalizeTournamentEventResultsPagination } from "./repository";
+import { getTournamentSetupWarningSummaries } from "./repository";
+
+const warningSummaryMemo = new WeakMap<
+	GraphQLContext,
+	Map<number, Promise<TournamentSetupWarningSummary[]>>
+>();
+
+const getTournamentSetupWarningSummariesMemoized = (
+	context: GraphQLContext,
+	tournamentId: number
+): Promise<TournamentSetupWarningSummary[]> => {
+	let memo = warningSummaryMemo.get(context);
+	if (!memo) {
+		memo = new Map();
+		warningSummaryMemo.set(context, memo);
+	}
+	const cached = memo.get(tournamentId);
+	if (cached) return cached;
+	const request = getTournamentSetupWarningSummaries(context, tournamentId);
+	memo.set(tournamentId, request);
+	return request;
+};
 
 type EntryTournamentsArgs = {
 	entryId: number;
@@ -179,6 +206,17 @@ export const tournamentSetupStatusToEnum = (status: TournamentSetupStatus): stri
 
 export const tournamentSetupPhaseToEnum = (phase: TournamentSetupPhase): string =>
 	phase.toUpperCase();
+
+export const tournamentSetupProgressModeToEnum = (mode: TournamentSetupProgressMode): string =>
+	mode.toUpperCase();
+
+export const tournamentSetupWarningCategoryToEnum = (
+	category: TournamentSetupWarningCategory
+): string => category.toUpperCase();
+
+export const tournamentSetupIssueSeverityToEnum = (
+	severity: TournamentSetupIssueSeverity
+): string => severity.toUpperCase();
 
 export const tournamentRosterModeToEnum = (mode: TournamentRosterMode): string =>
 	mode.toUpperCase();
@@ -367,10 +405,30 @@ export const tournamentsResolvers = {
 		},
 		setupPhase: (parent: TournamentInfo): string =>
 			tournamentSetupPhaseToEnum(parent.setupPhase ?? TournamentSetupPhase.READY),
+		setupProgressMode: (parent: TournamentInfo): string =>
+			tournamentSetupProgressModeToEnum(
+				parent.setupProgressMode ?? TournamentSetupProgressMode.DETERMINATE
+			),
 		rosterMode: (parent: TournamentInfo): string =>
 			tournamentRosterModeToEnum(parent.rosterMode ?? TournamentRosterMode.SNAPSHOT),
 		rosterSyncStatus: (parent: TournamentInfo): string | null =>
 			parent.rosterSyncStatus ? tournamentSetupStatusToEnum(parent.rosterSyncStatus) : null,
+		warningSummaries: async (
+			parent: TournamentInfo,
+			_args: Record<string, never>,
+			context: GraphQLContext
+		): Promise<TournamentSetupWarningSummary[]> =>
+			parent.warningSummaries ?? getTournamentSetupWarningSummariesMemoized(context, parent.id),
+	},
+	TournamentSetupWarningSummary: {
+		category: (parent: TournamentSetupWarningSummary): string =>
+			tournamentSetupWarningCategoryToEnum(parent.category),
+	},
+	TournamentSetupIssueDiagnostic: {
+		category: (parent: TournamentSetupIssueDiagnostic): string =>
+			tournamentSetupWarningCategoryToEnum(parent.category),
+		severity: (parent: TournamentSetupIssueDiagnostic): string =>
+			tournamentSetupIssueSeverityToEnum(parent.severity),
 	},
 	TournamentEventResult: {
 		tournament: (parent: TournamentEventResult): TournamentInfo => parent.tournament,
@@ -408,6 +466,16 @@ export const tournamentsResolvers = {
 			tournamentSetupStatusToEnum(parent.status),
 		phase: (parent: NonNullable<TournamentDetailDesk["setup"]>): string =>
 			tournamentSetupPhaseToEnum(parent.phase),
+		progressMode: (parent: NonNullable<TournamentDetailDesk["setup"]>): string =>
+			tournamentSetupProgressModeToEnum(parent.progressMode),
+		warningSummaries: async (
+			parent: NonNullable<TournamentDetailDesk["setup"]>,
+			_args: Record<string, never>,
+			context: GraphQLContext
+		): Promise<TournamentSetupWarningSummary[]> =>
+			parent.warningSummaries.length > 0 || !parent.__tournamentId
+				? parent.warningSummaries
+				: getTournamentSetupWarningSummariesMemoized(context, parent.__tournamentId),
 	},
 	ManagedTournamentStatus: {
 		state: (parent: ManagedTournamentStatus): string => tournamentStateToEnum(parent.state),
@@ -417,5 +485,9 @@ export const tournamentsResolvers = {
 			tournamentSetupPhaseToEnum(parent.setupPhase),
 		rosterSyncStatus: (parent: ManagedTournamentStatus): string | null =>
 			parent.rosterSyncStatus ? tournamentSetupStatusToEnum(parent.rosterSyncStatus) : null,
+		setupProgressMode: (parent: ManagedTournamentStatus): string =>
+			tournamentSetupProgressModeToEnum(parent.setupProgressMode),
+		warningSummaries: (parent: ManagedTournamentStatus): TournamentSetupWarningSummary[] =>
+			parent.warningSummaries,
 	},
 };

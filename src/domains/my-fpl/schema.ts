@@ -260,7 +260,8 @@ export const myFplTypeDefs = /* GraphQL */ `
 		setupTotalUnits: Int!
 		setupProgressUpdatedAt: DateTime
 		standingsReadyAt: DateTime
-		setupHasWarnings: Boolean!
+		insightsReadyAt: DateTime
+		setupHasWarnings: Boolean! @deprecated(reason: "Use insightsReadyAt")
 		ready: Boolean!
 	}
 

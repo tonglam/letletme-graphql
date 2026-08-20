@@ -63,6 +63,43 @@ export enum TournamentSetupPhase {
 	FAILED = "failed",
 }
 
+export enum TournamentSetupProgressMode {
+	DETERMINATE = "determinate",
+	INDETERMINATE = "indeterminate",
+}
+
+export enum TournamentSetupWarningCategory {
+	PROFILES = "profiles",
+	INSIGHTS = "insights",
+	RESULTS = "results",
+}
+
+export enum TournamentSetupIssueSeverity {
+	WARNING = "warning",
+	BLOCKING = "blocking",
+}
+
+export type TournamentSetupWarningSummary = {
+	category: TournamentSetupWarningCategory;
+	affectedCount: number;
+	/** True only when every unresolved warning in this category is exhausted. */
+	repairExhausted?: boolean;
+};
+
+export type TournamentSetupIssueDiagnostic = {
+	issueKey: string;
+	code: string;
+	diagnosticCode: string | null;
+	category: TournamentSetupWarningCategory;
+	severity: TournamentSetupIssueSeverity;
+	eventId: number | null;
+	affectedEntryIds: number[];
+	affectedCount: number;
+	repairAttempts: number;
+	nextRepairAt: string | null;
+	repairExhausted: boolean;
+};
+
 export enum TournamentRosterMode {
 	SNAPSHOT = "snapshot",
 	OFFICIAL_SYNC = "official_sync",
@@ -127,8 +164,15 @@ export type TournamentInfo = {
 	setupCompletedUnits?: number;
 	setupTotalUnits?: number;
 	setupProgressUpdatedAt?: string | null;
+	setupProgressMode?: TournamentSetupProgressMode;
+	setupAttempt?: number;
+	setupMaxAttempts?: number;
+	nextRetryAt?: string | null;
 	standingsReadyAt?: string | null;
+	profilesReadyAt?: string | null;
+	insightsReadyAt?: string | null;
 	setupHasWarnings?: boolean;
+	warningSummaries?: TournamentSetupWarningSummary[];
 	setupStartedAt?: string | null;
 	setupFinishedAt?: string | null;
 	createdAt: string;
@@ -157,6 +201,12 @@ export type TournamentDetailDesk = {
 		completedUnits: number;
 		totalUnits: number;
 		hasWarnings: boolean;
+		progressMode: TournamentSetupProgressMode;
+		attempt: number;
+		maxAttempts: number;
+		nextRetryAt: string | null;
+		warningSummaries: TournamentSetupWarningSummary[];
+		__tournamentId?: number;
 	} | null;
 	officialH2H: TournamentOfficialH2H | null;
 	live: {
@@ -186,8 +236,16 @@ export type ManagedTournamentStatus = {
 	rosterSyncStatus: TournamentSetupStatus | null;
 	setupCompletedUnits: number;
 	setupTotalUnits: number;
+	setupProgressMode: TournamentSetupProgressMode;
+	setupAttempt: number;
+	setupMaxAttempts: number;
+	nextRetryAt: string | null;
 	standingsReadyAt: string | null;
+	profilesReadyAt: string | null;
+	insightsReadyAt: string | null;
 	setupHasWarnings: boolean;
+	warningSummaries: TournamentSetupWarningSummary[];
+	issues: TournamentSetupIssueDiagnostic[];
 	updatedAt: string;
 };
 
@@ -233,6 +291,12 @@ export type DbTournamentInfoRow = {
 	setup_progress_updated_at?: DbDateTime | null;
 	standings_ready_at?: DbDateTime | null;
 	setup_warning_count?: number;
+	setup_progress_indeterminate?: boolean;
+	setup_attempt?: number;
+	setup_max_attempts?: number;
+	setup_next_retry_at?: DbDateTime | null;
+	profiles_ready_at?: DbDateTime | null;
+	insights_ready_at?: DbDateTime | null;
 	setup_started_at?: DbDateTime | null;
 	setup_finished_at?: DbDateTime | null;
 	created_at: DbDateTime;
@@ -1089,6 +1153,16 @@ const isRequired = (
 	predicate: (candidate: unknown) => boolean
 ): boolean => hasOwn(value, key) && predicate(value[key]);
 
+const isTournamentSetupWarningSummaryCache = (
+	value: unknown
+): value is TournamentSetupWarningSummary =>
+	isRecord(value) &&
+	isRequired(value, "category", (candidate) =>
+		isEnumValue(TournamentSetupWarningCategory, candidate)
+	) &&
+	isRequired(value, "affectedCount", isSafeInteger) &&
+	isRequired(value, "repairExhausted", (candidate) => typeof candidate === "boolean");
+
 const isTournamentInfoCache = (value: unknown): value is TournamentInfo => {
 	if (!isRecord(value)) return false;
 	return (
@@ -1143,7 +1217,15 @@ const isTournamentInfoCache = (value: unknown): value is TournamentInfo => {
 		isRequired(value, "setupCompletedUnits", (candidate) => isSafeInteger(candidate)) &&
 		isRequired(value, "setupTotalUnits", (candidate) => isSafeInteger(candidate)) &&
 		isRequired(value, "setupProgressUpdatedAt", isNullableIsoDateTime) &&
+		isRequired(value, "setupProgressMode", (candidate) =>
+			isEnumValue(TournamentSetupProgressMode, candidate)
+		) &&
+		isRequired(value, "setupAttempt", isSafeInteger) &&
+		isRequired(value, "setupMaxAttempts", isSafeInteger) &&
+		isRequired(value, "nextRetryAt", isNullableIsoDateTime) &&
 		isRequired(value, "standingsReadyAt", isNullableIsoDateTime) &&
+		isRequired(value, "profilesReadyAt", isNullableIsoDateTime) &&
+		isRequired(value, "insightsReadyAt", isNullableIsoDateTime) &&
 		isRequired(value, "setupHasWarnings", (candidate) => typeof candidate === "boolean") &&
 		isRequired(value, "setupStartedAt", isNullableIsoDateTime) &&
 		isRequired(value, "setupFinishedAt", isNullableIsoDateTime) &&
@@ -1153,7 +1235,17 @@ const isTournamentInfoCache = (value: unknown): value is TournamentInfo => {
 };
 
 const isTournamentInfoArrayCache = (value: unknown): value is TournamentInfo[] =>
-	Array.isArray(value) && value.every(isTournamentInfoCache);
+	Array.isArray(value) &&
+	value.every(
+		(item) =>
+			isTournamentInfoCache(item) &&
+			isRequired(
+				item,
+				"warningSummaries",
+				(candidate) =>
+					Array.isArray(candidate) && candidate.every(isTournamentSetupWarningSummaryCache)
+			)
+	);
 
 const isEntryIdArrayCache = (value: unknown): value is number[] =>
 	Array.isArray(value) && value.every((item) => isSafeInteger(item) && item > 0);
@@ -1280,7 +1372,7 @@ const isH2HResultArrayCache = (value: unknown): value is EntryH2HMatchResult[] =
 	Array.isArray(value) && value.every(isH2HResultCache);
 
 const TOURNAMENT_INFO_COLUMNS =
-	"id, name, creator, admin_entry_id, league_id, league_type, source_league_name, roster_mode, roster_sync_status, roster_last_synced_at, official_schedule_hash, official_schedule_synced_at, official_schedule_locked_at, total_team_num, tournament_mode, group_mode, group_team_num, group_num, group_started_event_id, group_ended_event_id, group_auto_averages, group_rounds, group_play_against_num, group_qualify_num, knockout_mode, knockout_team_num, knockout_rounds, knockout_event_num, knockout_started_event_id, knockout_ended_event_id, knockout_play_against_num, state, setup_status, setup_phase, setup_completed_units, setup_total_units, setup_progress_updated_at, standings_ready_at, setup_warning_count, setup_started_at, setup_finished_at, created_at, updated_at";
+	"id, name, creator, admin_entry_id, league_id, league_type, source_league_name, roster_mode, roster_sync_status, roster_last_synced_at, official_schedule_hash, official_schedule_synced_at, official_schedule_locked_at, total_team_num, tournament_mode, group_mode, group_team_num, group_num, group_started_event_id, group_ended_event_id, group_auto_averages, group_rounds, group_play_against_num, group_qualify_num, knockout_mode, knockout_team_num, knockout_rounds, knockout_event_num, knockout_started_event_id, knockout_ended_event_id, knockout_play_against_num, state, setup_status, setup_phase, setup_completed_units, setup_total_units, setup_progress_updated_at, setup_progress_indeterminate, setup_attempt, setup_max_attempts, setup_next_retry_at, standings_ready_at, profiles_ready_at, insights_ready_at, setup_warning_count, setup_started_at, setup_finished_at, created_at, updated_at";
 
 const TOURNAMENT_VIEW_COLUMNS =
 	"tournament_id, event_id, entry_id, group_id, event_group_rank, event_points, event_cost, event_net_points, event_rank, overall_points, overall_rank, event_chip, captain_id, captain_points, team_value, bank, entry_name, player_name, _tournament_id, _tournament_name, _tournament_creator, _tournament_admin_entry_id, _tournament_league_id, _tournament_league_type, _tournament_total_team_num, _tournament_tournament_mode, _tournament_group_mode, _tournament_group_team_num, _tournament_group_num, _tournament_group_started_event_id, _tournament_group_ended_event_id, _tournament_group_auto_averages, _tournament_group_rounds, _tournament_group_play_against_num, _tournament_group_qualify_num, _tournament_knockout_mode, _tournament_knockout_team_num, _tournament_knockout_rounds, _tournament_knockout_event_num, _tournament_knockout_started_event_id, _tournament_knockout_ended_event_id, _tournament_knockout_play_against_num, _tournament_state, _tournament_created_at, _tournament_updated_at";
@@ -1398,6 +1490,176 @@ const toIsoDateTime = (value: unknown): string => {
 const toNullableIsoDateTime = (value: unknown): string | null =>
 	value === null || value === undefined || value === "" ? null : toIsoDateTime(value);
 
+type DbTournamentSetupIssueRow = {
+	issue_key: string;
+	code: string;
+	diagnostic_code: string | null;
+	category: string;
+	severity: string;
+	event_id: number | null;
+	affected_entry_ids: number[] | null;
+	affected_entry_count: number | null;
+	repair_attempts: number | null;
+	next_repair_at: DbDateTime | null;
+	repair_exhausted_at: DbDateTime | null;
+};
+
+function mapSetupIssueCategory(value: string): TournamentSetupWarningCategory {
+	if (value === TournamentSetupWarningCategory.INSIGHTS)
+		return TournamentSetupWarningCategory.INSIGHTS;
+	if (value === TournamentSetupWarningCategory.RESULTS)
+		return TournamentSetupWarningCategory.RESULTS;
+	return TournamentSetupWarningCategory.PROFILES;
+}
+
+function mapSetupIssueSeverity(value: string): TournamentSetupIssueSeverity {
+	return value === TournamentSetupIssueSeverity.BLOCKING
+		? TournamentSetupIssueSeverity.BLOCKING
+		: TournamentSetupIssueSeverity.WARNING;
+}
+
+function mapTournamentSetupIssue(row: DbTournamentSetupIssueRow): TournamentSetupIssueDiagnostic {
+	return {
+		issueKey: row.issue_key,
+		code: row.code,
+		diagnosticCode: row.diagnostic_code ?? null,
+		category: mapSetupIssueCategory(row.category),
+		severity: mapSetupIssueSeverity(row.severity),
+		eventId: row.event_id ?? null,
+		affectedEntryIds: Array.isArray(row.affected_entry_ids)
+			? row.affected_entry_ids.filter((id) => Number.isSafeInteger(id) && id > 0)
+			: [],
+		affectedCount: Number(row.affected_entry_count ?? 0),
+		repairAttempts: Number(row.repair_attempts ?? 0),
+		nextRepairAt: toNullableIsoDateTime(row.next_repair_at),
+		repairExhausted: row.repair_exhausted_at !== null,
+	};
+}
+
+export async function getTournamentSetupIssueDiagnostics(
+	context: GraphQLContext,
+	tournamentId: number
+): Promise<TournamentSetupIssueDiagnostic[]> {
+	const result = await context.data
+		.read<DbTournamentSetupIssueRow>("competition.tournament_setup_issues")
+		.select(
+			"issue_key, code, diagnostic_code, category, severity, event_id, affected_entry_ids, affected_entry_count, repair_attempts, next_repair_at, repair_exhausted_at"
+		)
+		.eq("tournament_id", tournamentId)
+		.is("resolved_at", null)
+		.order("issue_key", { ascending: true });
+	if (result.error) {
+		context.logger.warn(
+			{ err: result.error, tournamentId },
+			"Failed to load setup issue diagnostics"
+		);
+		return [];
+	}
+	return ((result.data as DbTournamentSetupIssueRow[] | null) ?? []).map(mapTournamentSetupIssue);
+}
+
+const summarizeTournamentSetupIssues = (
+	issues: readonly TournamentSetupIssueDiagnostic[]
+): TournamentSetupWarningSummary[] => {
+	const totals = new Map<
+		TournamentSetupWarningCategory,
+		{
+			affectedEntryIds: Set<number>;
+			fallbackCount: number;
+			repairExhausted: boolean;
+		}
+	>();
+	for (const issue of issues) {
+		if (issue.severity !== TournamentSetupIssueSeverity.WARNING) continue;
+		const total = totals.get(issue.category) ?? {
+			affectedEntryIds: new Set<number>(),
+			fallbackCount: 0,
+			repairExhausted: true,
+		};
+		for (const entryId of issue.affectedEntryIds) total.affectedEntryIds.add(entryId);
+		total.fallbackCount = Math.max(total.fallbackCount, issue.affectedCount);
+		total.repairExhausted = total.repairExhausted && issue.repairExhausted;
+		totals.set(issue.category, total);
+	}
+	return [...totals.entries()]
+		.map(([category, total]) => ({
+			category,
+			affectedCount: Math.max(total.affectedEntryIds.size, total.fallbackCount),
+			repairExhausted: total.repairExhausted,
+		}))
+		.sort((left, right) => left.category.localeCompare(right.category));
+};
+
+export async function getTournamentSetupWarningSummaries(
+	context: GraphQLContext,
+	tournamentId: number
+): Promise<TournamentSetupWarningSummary[]> {
+	const diagnostics = await getTournamentSetupIssueDiagnostics(context, tournamentId);
+	return summarizeTournamentSetupIssues(diagnostics);
+}
+
+type DbTournamentSetupWarningSummaryRow = {
+	tournament_id: number;
+	category: string;
+	severity: string;
+	affected_entry_ids: number[] | null;
+	affected_entry_count: number | null;
+	repair_exhausted_at: DbDateTime | null;
+};
+
+const getTournamentSetupWarningSummariesByTournamentIds = async (
+	context: GraphQLContext,
+	tournamentIds: readonly number[]
+): Promise<Map<number, TournamentSetupWarningSummary[]>> => {
+	const uniqueIds = [...new Set(tournamentIds)];
+	const summaries = new Map<number, TournamentSetupWarningSummary[]>();
+	if (uniqueIds.length === 0) return summaries;
+
+	const result = await context.data
+		.read<DbTournamentSetupWarningSummaryRow>("competition.tournament_setup_issues")
+		.select(
+			"tournament_id, category, severity, affected_entry_ids, affected_entry_count, repair_exhausted_at"
+		)
+		.in("tournament_id", uniqueIds)
+		.is("resolved_at", null)
+		.order("tournament_id", { ascending: true });
+	if (result.error) {
+		context.logger.warn(
+			{ err: result.error, tournamentCount: uniqueIds.length },
+			"Failed to load tournament setup warning summaries"
+		);
+		throw new Error("Failed to load tournament setup warning summaries");
+	}
+
+	const issuesByTournament = new Map<number, TournamentSetupIssueDiagnostic[]>();
+	for (const row of (result.data as DbTournamentSetupWarningSummaryRow[] | null) ?? []) {
+		const issues = issuesByTournament.get(row.tournament_id) ?? [];
+		issues.push({
+			issueKey: "",
+			code: "",
+			diagnosticCode: null,
+			category: mapSetupIssueCategory(row.category),
+			severity: mapSetupIssueSeverity(row.severity),
+			eventId: null,
+			affectedEntryIds: Array.isArray(row.affected_entry_ids)
+				? row.affected_entry_ids.filter((id) => Number.isSafeInteger(id) && id > 0)
+				: [],
+			affectedCount: Number(row.affected_entry_count ?? 0),
+			repairAttempts: 0,
+			nextRepairAt: null,
+			repairExhausted: row.repair_exhausted_at !== null && row.repair_exhausted_at !== undefined,
+		});
+		issuesByTournament.set(row.tournament_id, issues);
+	}
+	for (const tournamentId of uniqueIds) {
+		summaries.set(
+			tournamentId,
+			summarizeTournamentSetupIssues(issuesByTournament.get(tournamentId) ?? [])
+		);
+	}
+	return summaries;
+};
+
 export const extractTournamentIds = (rows: DbTournamentEntryRow[]): number[] => {
 	const unique = new Set<number>();
 	rows.forEach((row) => {
@@ -1446,7 +1708,15 @@ export const mapTournamentInfo = (row: DbTournamentInfoRow): TournamentInfo => (
 	setupCompletedUnits: row.setup_completed_units ?? 0,
 	setupTotalUnits: row.setup_total_units ?? 0,
 	setupProgressUpdatedAt: toNullableIsoDateTime(row.setup_progress_updated_at),
+	setupProgressMode: row.setup_progress_indeterminate
+		? TournamentSetupProgressMode.INDETERMINATE
+		: TournamentSetupProgressMode.DETERMINATE,
+	setupAttempt: row.setup_attempt ?? 0,
+	setupMaxAttempts: row.setup_max_attempts ?? 3,
+	nextRetryAt: toNullableIsoDateTime(row.setup_next_retry_at),
 	standingsReadyAt: toNullableIsoDateTime(row.standings_ready_at),
+	profilesReadyAt: toNullableIsoDateTime(row.profiles_ready_at),
+	insightsReadyAt: toNullableIsoDateTime(row.insights_ready_at),
 	setupHasWarnings: (row.setup_warning_count ?? 0) > 0,
 	setupStartedAt: toNullableIsoDateTime(row.setup_started_at),
 	setupFinishedAt: toNullableIsoDateTime(row.setup_finished_at),
@@ -1520,6 +1790,13 @@ export const mapTournamentInfoFromViewRow = (row: DbTournamentEventResultRow): T
 	setupProgressUpdatedAt: null,
 	standingsReadyAt: toIsoDateTime(row._tournament_updated_at),
 	setupHasWarnings: false,
+	setupProgressMode: TournamentSetupProgressMode.DETERMINATE,
+	setupAttempt: 0,
+	setupMaxAttempts: 3,
+	nextRetryAt: null,
+	profilesReadyAt: null,
+	insightsReadyAt: toIsoDateTime(row._tournament_updated_at),
+	warningSummaries: [],
 	setupStartedAt: null,
 	setupFinishedAt: toIsoDateTime(row._tournament_updated_at),
 	createdAt: toIsoDateTime(row._tournament_created_at),
@@ -2071,6 +2348,7 @@ const isSeasonSnapshotCache = (value: unknown): value is TournamentSeasonSnapsho
 
 export const tournamentCacheTestables = {
 	isTournamentInfoCache,
+	isTournamentSetupWarningSummaryCache,
 	isTournamentEventResultCache,
 	isRankingSummaryCache,
 	isBattleResultCache,
@@ -2212,16 +2490,24 @@ export const tournamentsRepository: TournamentsRepository = {
 		}
 
 		const tournaments = ((infoData as DbTournamentInfoRow[] | null) ?? []).map(mapTournamentInfo);
+		const warningSummariesByTournament = await getTournamentSetupWarningSummariesByTournamentIds(
+			context,
+			tournaments.map((tournament) => tournament.id)
+		);
+		const tournamentsWithWarnings = tournaments.map((tournament) => ({
+			...tournament,
+			warningSummaries: warningSummariesByTournament.get(tournament.id) ?? [],
+		}));
 		if (cacheKey) {
-			const allStandingsReady = tournaments.every(
+			const allStandingsReady = tournamentsWithWarnings.every(
 				(tournament) => tournament.standingsReadyAt !== null
 			);
 			const ttlSeconds = allStandingsReady
 				? QUERY_CACHE_TTL_SECONDS.REPORTING
 				: Math.min(15, QUERY_CACHE_TTL_SECONDS.REPORTING);
-			await writeQueryCache(context, cacheKey, JSON.stringify(tournaments), ttlSeconds);
+			await writeQueryCache(context, cacheKey, JSON.stringify(tournamentsWithWarnings), ttlSeconds);
 		}
-		return tournaments;
+		return tournamentsWithWarnings;
 	},
 
 	async getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]> {
@@ -3157,6 +3443,12 @@ export const tournamentsRepository: TournamentsRepository = {
 							completedUnits: tournament.setupCompletedUnits ?? 0,
 							totalUnits: tournament.setupTotalUnits ?? 0,
 							hasWarnings: tournament.setupHasWarnings ?? false,
+							progressMode: tournament.setupProgressMode ?? TournamentSetupProgressMode.DETERMINATE,
+							attempt: tournament.setupAttempt ?? 0,
+							maxAttempts: tournament.setupMaxAttempts ?? 3,
+							nextRetryAt: tournament.nextRetryAt ?? null,
+							warningSummaries: tournament.warningSummaries ?? [],
+							__tournamentId: tournament.id,
 						}
 					: null,
 			officialH2H,
@@ -3184,7 +3476,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		const tournament = await context.data
 			.read("competition.tournaments")
 			.select(
-				"id, admin_entry_id, state, setup_status, setup_phase, roster_sync_status, setup_completed_units, setup_total_units, standings_ready_at, setup_warning_count, updated_at"
+				"id, admin_entry_id, state, setup_status, setup_phase, roster_sync_status, setup_completed_units, setup_total_units, setup_progress_indeterminate, setup_attempt, setup_max_attempts, setup_next_retry_at, standings_ready_at, profiles_ready_at, insights_ready_at, setup_warning_count, updated_at"
 			)
 			.eq("id", tournamentId)
 			.eq("admin_entry_id", entryId)
@@ -3194,6 +3486,8 @@ export const tournamentsRepository: TournamentsRepository = {
 		if (!row) return null;
 		const setupStatus = String(row.setup_status) as TournamentSetupStatus;
 		const updatedAt = toIsoDateTime(row.updated_at);
+		const issues = await getTournamentSetupIssueDiagnostics(context, tournamentId);
+		const warningSummaries = summarizeTournamentSetupIssues(issues);
 		return {
 			revision: updatedAt,
 			state: String(row.state) as TournamentState,
@@ -3209,8 +3503,18 @@ export const tournamentsRepository: TournamentsRepository = {
 				: null,
 			setupCompletedUnits: Number(row.setup_completed_units ?? 0),
 			setupTotalUnits: Number(row.setup_total_units ?? 0),
+			setupProgressMode: row.setup_progress_indeterminate
+				? TournamentSetupProgressMode.INDETERMINATE
+				: TournamentSetupProgressMode.DETERMINATE,
+			setupAttempt: Number(row.setup_attempt ?? 0),
+			setupMaxAttempts: Number(row.setup_max_attempts ?? 3),
+			nextRetryAt: toNullableIsoDateTime(row.setup_next_retry_at),
 			standingsReadyAt: toNullableIsoDateTime(row.standings_ready_at),
+			profilesReadyAt: toNullableIsoDateTime(row.profiles_ready_at),
+			insightsReadyAt: toNullableIsoDateTime(row.insights_ready_at),
 			setupHasWarnings: Number(row.setup_warning_count ?? 0) > 0,
+			warningSummaries,
+			issues,
 			updatedAt,
 		};
 	},

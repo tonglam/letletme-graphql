@@ -17,6 +17,7 @@ import {
 	TournamentMode,
 	TournamentRosterMode,
 	TournamentSetupPhase,
+	TournamentSetupProgressMode,
 	TournamentSetupStatus,
 	TournamentState,
 	tournamentCacheTestables,
@@ -210,8 +211,15 @@ const validCachedTournamentInfo = {
 	setupCompletedUnits: 2,
 	setupTotalUnits: 2,
 	setupProgressUpdatedAt: null,
+	setupProgressMode: TournamentSetupProgressMode.DETERMINATE,
+	setupAttempt: 0,
+	setupMaxAttempts: 3,
+	nextRetryAt: null,
 	standingsReadyAt: "2026-04-21T00:00:00.000Z",
+	profilesReadyAt: null,
+	insightsReadyAt: "2026-04-21T00:00:00.000Z",
 	setupHasWarnings: false,
+	warningSummaries: [],
 	setupStartedAt: null,
 	setupFinishedAt: "2026-04-21T00:00:00.000Z",
 	createdAt: "2026-04-21T00:00:00.000Z",
@@ -277,6 +285,19 @@ describe("tournament cache wire contracts", () => {
 			tournamentCacheTestables.isTournamentInfoCache({
 				...validCachedTournamentInfo,
 				createdAt: "2026-02-30T00:00:00.000Z",
+			})
+		).toBe(false);
+		expect(
+			tournamentCacheTestables.isTournamentSetupWarningSummaryCache({
+				category: "insights",
+				affectedCount: 1,
+				repairExhausted: true,
+			})
+		).toBe(true);
+		expect(
+			tournamentCacheTestables.isTournamentSetupWarningSummaryCache({
+				category: "insights",
+				affectedCount: 1,
 			})
 		).toBe(false);
 	});
@@ -530,7 +551,13 @@ describe("mapTournamentInfo", () => {
 			setupCompletedUnits: 0,
 			setupTotalUnits: 0,
 			setupProgressUpdatedAt: null,
+			setupProgressMode: TournamentSetupProgressMode.DETERMINATE,
+			setupAttempt: 0,
+			setupMaxAttempts: 3,
+			nextRetryAt: null,
 			standingsReadyAt: "2026-04-21T00:00:00.000Z",
+			profilesReadyAt: null,
+			insightsReadyAt: null,
 			setupHasWarnings: false,
 			setupStartedAt: null,
 			setupFinishedAt: null,
@@ -815,6 +842,10 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 				},
 				eq(...args: unknown[]) {
 					actions.push({ type: "eq", args });
+					return builder;
+				},
+				is(...args: unknown[]) {
+					actions.push({ type: "is", args });
 					return builder;
 				},
 				in(...args: unknown[]) {
@@ -2101,6 +2132,21 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 				return { data: [row], error: null };
 			},
 		};
+		let issueResult: { data: unknown[] | null; error: unknown } = { data: [], error: null };
+		const issueQuery = {
+			select() {
+				return issueQuery;
+			},
+			in() {
+				return issueQuery;
+			},
+			is() {
+				return issueQuery;
+			},
+			async order() {
+				return issueResult;
+			},
+		};
 		const context = {
 			database: {
 				query: async () => {
@@ -2111,7 +2157,9 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 			dataRevision: "core-test",
 			data: {
 				read(table: string) {
-					return table === "competition.tournaments" ? infoQuery : membershipQuery;
+					if (table === "competition.tournaments") return infoQuery;
+					if (table === "competition.tournament_setup_issues") return issueQuery;
+					return membershipQuery;
 				},
 			},
 			redis: {
@@ -2149,6 +2197,14 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 		const cachedResult = await tournamentsRepository.getEntryTournaments(context, 55);
 		expect(cachedResult).toHaveLength(1);
 		expect(cacheWrites).toBe(1);
+
+		cache.delete(testCacheKey("tournaments:entry:55"));
+		issueResult = { data: null, error: new Error("database unavailable") };
+		await expect(tournamentsRepository.getEntryTournaments(context, 55)).rejects.toThrow(
+			"Failed to load tournament setup warning summaries"
+		);
+		expect(cacheWrites).toBe(1);
+		expect(cache.has(testCacheKey("tournaments:entry:55"))).toBe(false);
 	});
 });
 

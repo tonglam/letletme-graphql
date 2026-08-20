@@ -40,6 +40,42 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		FAILED
 	}
 
+	enum TournamentSetupProgressMode {
+		DETERMINATE
+		INDETERMINATE
+	}
+
+	enum TournamentSetupWarningCategory {
+		PROFILES
+		INSIGHTS
+		RESULTS
+	}
+
+	enum TournamentSetupIssueSeverity {
+		WARNING
+		BLOCKING
+	}
+
+	type TournamentSetupWarningSummary {
+		category: TournamentSetupWarningCategory!
+		affectedCount: Int!
+		repairExhausted: Boolean!
+	}
+
+	type TournamentSetupIssueDiagnostic {
+		issueKey: String!
+		code: String!
+		diagnosticCode: String
+		category: TournamentSetupWarningCategory!
+		severity: TournamentSetupIssueSeverity!
+		eventId: Int
+		affectedEntryIds: [Int!]!
+		affectedCount: Int!
+		repairAttempts: Int!
+		nextRepairAt: DateTime
+		repairExhausted: Boolean!
+	}
+
 	enum TournamentRosterMode {
 		SNAPSHOT
 		OFFICIAL_SYNC
@@ -93,8 +129,15 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		setupCompletedUnits: Int!
 		setupTotalUnits: Int!
 		setupProgressUpdatedAt: DateTime
+		setupProgressMode: TournamentSetupProgressMode!
+		setupAttempt: Int!
+		setupMaxAttempts: Int!
+		nextRetryAt: DateTime
 		standingsReadyAt: DateTime
-		setupHasWarnings: Boolean!
+		profilesReadyAt: DateTime
+		insightsReadyAt: DateTime
+		setupHasWarnings: Boolean! @deprecated(reason: "Use warningSummaries and capability timestamps")
+		warningSummaries: [TournamentSetupWarningSummary!]!
 		setupStartedAt: DateTime
 		setupFinishedAt: DateTime
 		createdAt: DateTime!
@@ -120,6 +163,11 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		completedUnits: Int!
 		totalUnits: Int!
 		hasWarnings: Boolean!
+		progressMode: TournamentSetupProgressMode!
+		attempt: Int!
+		maxAttempts: Int!
+		nextRetryAt: DateTime
+		warningSummaries: [TournamentSetupWarningSummary!]!
 	}
 
 	type TournamentOfficialH2HBoard {
@@ -161,8 +209,16 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		rosterSyncStatus: TournamentSetupStatus
 		setupCompletedUnits: Int!
 		setupTotalUnits: Int!
+		setupProgressMode: TournamentSetupProgressMode!
+		setupAttempt: Int!
+		setupMaxAttempts: Int!
+		nextRetryAt: DateTime
 		standingsReadyAt: DateTime
-		setupHasWarnings: Boolean!
+		profilesReadyAt: DateTime
+		insightsReadyAt: DateTime
+		setupHasWarnings: Boolean! @deprecated(reason: "Use warningSummaries and capability timestamps")
+		warningSummaries: [TournamentSetupWarningSummary!]!
+		issues: [TournamentSetupIssueDiagnostic!]!
 		updatedAt: DateTime!
 	}
 
