@@ -9,6 +9,7 @@ import { buildTeamMap } from "../../infra/team-map";
 import type { Player as InfraPlayer, Team as InfraTeam } from "../../infra/types";
 import { resolvePlayerStatsContext } from "./season-stats-at-event";
 import {
+	createMarketPinFailure,
 	getMarketSnapshotContext,
 	refreshMarketSnapshotContext,
 	type MarketSnapshotContext,
@@ -838,11 +839,13 @@ export const playersRepository: PlayersRepository = {
 		if (marketContext && !marketPinPresent) {
 			const requestScope = context.requestScope ?? context;
 			const retries = pickerPinRetryScopes.get(requestScope) ?? 0;
-			if (retries >= 1) throw new Error("Market snapshot pin changed during picker query");
+			if (retries >= 1)
+				throw createMarketPinFailure(context, "Market snapshot pin changed during picker query");
 			pickerPinRetryScopes.set(requestScope, retries + 1);
 			try {
 				const refreshed = await refreshMarketSnapshotContext(context);
-				if (!refreshed) throw new Error("Market snapshot pin unavailable after retry");
+				if (!refreshed)
+					throw createMarketPinFailure(context, "Market snapshot pin unavailable after retry");
 				return playersRepository.getPlayersForPicker(
 					context,
 					limit,
