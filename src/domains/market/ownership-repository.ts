@@ -7,7 +7,11 @@ import {
 } from "../../infra/query-cache";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
-import { getMarketSnapshotContext, refreshMarketSnapshotContext } from "./context";
+import {
+	createMarketPinFailure,
+	getMarketSnapshotContext,
+	refreshMarketSnapshotContext,
+} from "./context";
 import type { MarketPlayer, MarketPosition } from "./repository";
 
 const DEFAULT_LIMIT = 10;
@@ -689,12 +693,13 @@ const loadRows = async (
 		let decoded = read.rows;
 		if (marketContext && requestedDate === null && !read.hasPinnedSnapshot) {
 			marketContext = await refreshMarketSnapshotContext(context);
-			if (!marketContext) throw new Error("Market snapshot pin unavailable after retry");
+			if (!marketContext)
+				throw createMarketPinFailure(context, "Market snapshot pin unavailable after retry");
 			revision = `${context.dataRevision ?? "core-postgres"}.${marketContext.revision}`;
 			cacheKey = gqlCacheKey(context, `market-ownership:v3:rows:${memoKey}`, revision);
 			read = await readRows(marketContext);
 			if (!read || !read.hasPinnedSnapshot)
-				throw new Error("Market snapshot pin changed during query");
+				throw createMarketPinFailure(context, "Market snapshot pin changed during query");
 			decoded = read.rows;
 		}
 		await writeJsonQueryCache(

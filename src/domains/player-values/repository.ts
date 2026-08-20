@@ -4,6 +4,7 @@ import { QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
 import { getCoreDataSnapshot } from "../../infra/data-snapshot";
 import { metrics } from "../../infra/metrics";
 import {
+	createMarketPinFailure,
 	getMarketSnapshotContext,
 	refreshMarketSnapshotContext,
 	type MarketSnapshotContext,
@@ -658,11 +659,16 @@ export const playerValuesRepository: PlayerValuesRepository = {
 			if (marketContext && !(await marketSnapshotExists(context, marketContext))) {
 				const requestScope = context.requestScope ?? context;
 				const retries = historyPinRetryScopes.get(requestScope) ?? 0;
-				if (retries >= 1) throw new Error("Market snapshot pin changed during value history query");
+				if (retries >= 1)
+					throw createMarketPinFailure(
+						context,
+						"Market snapshot pin changed during value history query"
+					);
 				historyPinRetryScopes.set(requestScope, retries + 1);
 				try {
 					const refreshed = await refreshMarketSnapshotContext(context);
-					if (!refreshed) throw new Error("Market snapshot pin unavailable after retry");
+					if (!refreshed)
+						throw createMarketPinFailure(context, "Market snapshot pin unavailable after retry");
 					return playerValuesRepository.getPlayerValueHistory(context, args);
 				} finally {
 					if (retries === 0) historyPinRetryScopes.delete(requestScope);

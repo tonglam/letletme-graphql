@@ -1,7 +1,11 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
-import { getMarketSnapshotContext, refreshMarketSnapshotContext } from "./context";
+import {
+	createMarketPinFailure,
+	getMarketSnapshotContext,
+	refreshMarketSnapshotContext,
+} from "./context";
 
 const MARKET_RESULT_LIMIT = 10;
 const PRICE_CHANGE_LIMIT = 20;
@@ -755,7 +759,8 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 				rows = read.rows;
 				if (snapshotContext && !read.hasPinnedSnapshot) {
 					snapshotContext = await refreshMarketSnapshotContext(context);
-					if (!snapshotContext) throw new Error("Market snapshot pin unavailable after retry");
+					if (!snapshotContext)
+						throw createMarketPinFailure(context, "Market snapshot pin unavailable after retry");
 					cacheKey = gqlCacheKey(
 						context,
 						`market-pulse:v3:${requestedDays}`,
@@ -763,7 +768,8 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 					);
 					read = await readRows(snapshotContext);
 					rows = read.rows;
-					if (!read.hasPinnedSnapshot) throw new Error("Market snapshot pin changed during query");
+					if (!read.hasPinnedSnapshot)
+						throw createMarketPinFailure(context, "Market snapshot pin changed during query");
 				}
 			} catch (error) {
 				context.logger.error({ err: error, requestedDays }, "Failed to query market snapshots");
@@ -840,7 +846,8 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 			rows = read.rows;
 			if (snapshotContext && !read.hasPinnedSnapshot) {
 				snapshotContext = await refreshMarketSnapshotContext(context);
-				if (!snapshotContext) throw new Error("Market snapshot pin unavailable after retry");
+				if (!snapshotContext)
+					throw createMarketPinFailure(context, "Market snapshot pin unavailable after retry");
 				cacheKey = gqlCacheKey(
 					context,
 					"market-lineup:v1",
@@ -848,7 +855,8 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 				);
 				read = await readRows(snapshotContext);
 				rows = read.rows;
-				if (!read.hasPinnedSnapshot) throw new Error("Market snapshot pin changed during query");
+				if (!read.hasPinnedSnapshot)
+					throw createMarketPinFailure(context, "Market snapshot pin changed during query");
 			}
 		} catch (error) {
 			context.logger.error({ err: error }, "Failed to query market snapshots for lineup");
