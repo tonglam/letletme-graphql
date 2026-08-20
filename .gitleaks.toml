@@ -4,10 +4,8 @@ title = "letletme-graphql"
 useDefault = true
 
 [allowlist]
-description = "Local env files, dependencies, and documentation placeholders"
+description = "Dependencies and documentation placeholders"
 paths = [
-  '''\.env$''',
-  '''\.env\..*$''',
   '''node_modules/''',
   '''bun.lock$''',
 ]

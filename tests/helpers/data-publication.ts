@@ -69,7 +69,10 @@ export const createTestPublication = (
 		publicationId: publicationId(revision),
 		sourceCheckedAt: options.sourceCheckedAt ?? publishedAt,
 		publishedAt,
-		state: scope.dataset === "fpl:core" ? "active" : (options.state ?? "scheduled"),
+		state:
+			scope.dataset === "fpl:core" || scope.dataset === "fpl:market"
+				? "active"
+				: (options.state ?? "scheduled"),
 		items,
 	};
 	store.set(activeDataPublicationKey(scope), JSON.stringify(manifest));

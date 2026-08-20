@@ -301,4 +301,66 @@ describe("entriesService.getEntryById", () => {
 			entryName: "Let Let Me",
 		});
 	});
+
+	it("writes a short negative cache only for a real FPL 404", async () => {
+		entriesRepository.getEntryById = async () => null;
+		let fetches = 0;
+		globalThis.fetch = (async () => {
+			fetches += 1;
+			return new Response("missing", { status: 404 });
+		}) as unknown as typeof fetch;
+		const values = new Map<string, string>();
+		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: "core-negative",
+			redis: {
+				get: async (key: string) => values.get(key) ?? null,
+				set: async (key: string, value: string, _mode: string, ttl: number) => {
+					values.set(key, value);
+					expect(ttl).toBe(60);
+					return "OK";
+				},
+				del: async () => 0,
+			},
+			logger: { warn: () => undefined },
+		} as unknown as GraphQLContext;
+		expect(await entriesService.getEntryById(context, 515151)).toBeNull();
+		expect(await entriesService.getEntryById(context, 515151)).toBeNull();
+		expect(fetches).toBe(1);
+	});
+
+	it("does not cache transient FPL failures and caps distinct admissions at eight", async () => {
+		entriesRepository.getEntryById = async () => null;
+		let fetches = 0;
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		globalThis.fetch = (async () => {
+			fetches += 1;
+			await gate;
+			return new Response("busy", { status: 503 });
+		}) as unknown as typeof fetch;
+		const values = new Map<string, string>();
+		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: "core-saturated",
+			redis: {
+				get: async (key: string) => values.get(key) ?? null,
+				set: async (key: string, value: string) => {
+					values.set(key, value);
+					return "OK";
+				},
+				del: async () => 0,
+			},
+			logger: { warn: () => undefined },
+		} as unknown as GraphQLContext;
+		const calls = Array.from({ length: 10 }, (_, index) =>
+			entriesService.getEntryById(context, 620000 + index)
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(fetches).toBe(8);
+		release();
+		expect((await Promise.all(calls)).every((entry) => entry === null)).toBe(true);
+	});
 });

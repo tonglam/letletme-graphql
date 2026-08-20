@@ -145,6 +145,8 @@ describe("playersRepository.getPlayersForPicker", () => {
 	it("keeps the pinned picker CTE chain syntactically flat", () => {
 		const source = readFileSync("src/domains/players/repository.ts", "utf8");
 		expect(source.match(/latest_market AS MATERIALIZED/g)).toHaveLength(1);
+		expect(source).toContain("COALESCE(market.price, player.price) >= $6");
+		expect(source).toContain("COALESCE(market.price, player.price) <= $7");
 	});
 
 	it("uses the core publication, reporting stats, and a normally expiring query cache", async () => {
@@ -163,10 +165,154 @@ describe("playersRepository.getPlayersForPicker", () => {
 		expect(first.nextCursor).toEqual(expect.any(Number));
 		expect(first.nextCursor).toBeLessThan(0);
 		expect(second).toEqual(first);
-		expect(queryCount()).toBe(1);
+		// One query pins the PostgreSQL market metadata; the second reads the picker rows.
+		expect(queryCount()).toBe(2);
 		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":players-picker:"));
 		expect(cacheWrite?.[0]).toMatch(/^llm:gql:core-7:players-picker:/);
 		expect(cacheWrite?.slice(-2)).toEqual(["EX", 300]);
+	});
+
+	it("uses the market price for picker bounds and the returned price", async () => {
+		const core = buildTestCoreData(null);
+		const player = core.players[0]!;
+		const team = core.teams.find((candidate) => candidate.id === player.teamId)!;
+		const capturedAt = "2026-08-20T01:00:00.000Z";
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
+			databaseQuery: async (...args: unknown[]) => {
+				const sql = args[0];
+				const values = (args[1] as readonly unknown[] | undefined) ?? [];
+				if (String(sql).includes("latest_date")) {
+					return {
+						rows: [
+							{
+								snapshot_date: "2026-08-20",
+								captured_at: capturedAt,
+								row_count: 1,
+								capture_count: 1,
+							},
+						],
+					};
+				}
+				const marketPrice = 80;
+				const minPrice = Number(values?.[5] ?? 0);
+				return {
+					rows:
+						minPrice <= marketPrice
+							? [
+									{
+										id: player.id,
+										web_name: player.webName,
+										element_type: player.type,
+										team_id: team.id,
+										team_name: team.name,
+										team_short_name: team.shortName,
+										price: marketPrice,
+										selected_by_percent: 12,
+										total_points: player.totalPoints,
+										form: null,
+										total_count: 1,
+									},
+								]
+							: [],
+				};
+			},
+		});
+
+		const result = await playersRepository.getPlayersForPicker(
+			context,
+			10,
+			null,
+			null,
+			{ minPrice: 70, maxPrice: null },
+			"PRICE_ASC"
+		);
+		expect(result.items).toEqual([
+			expect.objectContaining({ id: player.id, price: 80, selectedByPercent: 12 }),
+		]);
+	});
+
+	it("keeps the market price in the pinned-core fallback path", async () => {
+		const core = buildTestCoreData(null);
+		const player = core.players[0]!;
+		const capturedAt = "2026-08-20T01:00:00.000Z";
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
+			dataRevision: "legacy-core",
+			databaseQuery: async (sql) => {
+				if (String(sql).includes("latest_date")) {
+					return {
+						rows: [
+							{
+								snapshot_date: "2026-08-20",
+								captured_at: capturedAt,
+								row_count: 1,
+								capture_count: 1,
+							},
+						],
+					};
+				}
+				return { rows: [{ element_id: player.id, price: 80 }] };
+			},
+		});
+
+		const result = await playersRepository.getPlayersForPicker(
+			context,
+			10,
+			null,
+			null,
+			{ minPrice: 70, maxPrice: null },
+			"PRICE_ASC"
+		);
+		expect(result.items).toEqual([expect.objectContaining({ id: player.id, price: 80 })]);
+	});
+
+	it("re-pins once when the selected market capture disappears before the picker query", async () => {
+		const core = buildTestCoreData(null);
+		const player = core.players[0]!;
+		const team = core.teams.find((candidate) => candidate.id === player.teamId)!;
+		let metadataReads = 0;
+		let pickerReads = 0;
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
+			databaseQuery: async (sql) => {
+				if (String(sql).includes("latest_date")) {
+					metadataReads += 1;
+					return {
+						rows: [
+							{
+								snapshot_date: "2026-08-20",
+								captured_at:
+									metadataReads === 1 ? "2026-08-20T01:00:00.000Z" : "2026-08-20T02:00:00.000Z",
+								row_count: 1,
+								capture_count: 1,
+							},
+						],
+					};
+				}
+				pickerReads += 1;
+				return {
+					rows: [
+						{
+							id: player.id,
+							web_name: player.webName,
+							element_type: player.type,
+							team_id: team.id,
+							team_name: team.name,
+							team_short_name: team.shortName,
+							price: 80,
+							selected_by_percent: 12,
+							total_points: player.totalPoints,
+							form: null,
+							total_count: 1,
+							market_snapshot_present: pickerReads > 1,
+						},
+					],
+				};
+			},
+		});
+
+		const result = await playersRepository.getPlayersForPicker(context, 10, null);
+		expect(result.items).toEqual([expect.objectContaining({ id: player.id, price: 80 })]);
+		expect(metadataReads).toBe(2);
+		expect(pickerReads).toBe(2);
 	});
 
 	it("applies the requested sort before taking the page", async () => {

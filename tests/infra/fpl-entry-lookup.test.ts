@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { lookupFplEntry, mapFplEntrySummaryToEntry } from "../../src/infra/fpl-entry-lookup";
+import {
+	lookupFplEntry,
+	lookupFplEntryResult,
+	mapFplEntrySummaryToEntry,
+} from "../../src/infra/fpl-entry-lookup";
 
 const originalFetch = globalThis.fetch;
 
@@ -76,5 +80,22 @@ describe("lookupFplEntry", () => {
 				status: 200,
 			})) as unknown as typeof fetch;
 		expect(await lookupFplEntry(1)).toBeNull();
+	});
+
+	it("classifies 404 and transient responses separately", async () => {
+		globalThis.fetch = (async () =>
+			new Response("Not found", { status: 404 })) as unknown as typeof fetch;
+		expect(await lookupFplEntryResult(1)).toEqual({ status: "not_found" });
+
+		globalThis.fetch = (async () =>
+			new Response("busy", { status: 503 })) as unknown as typeof fetch;
+		expect(await lookupFplEntryResult(1)).toEqual({ status: "unavailable", reason: "transient" });
+
+		globalThis.fetch = (async () =>
+			new Response("bad", { status: 200 })) as unknown as typeof fetch;
+		expect(await lookupFplEntryResult(1)).toEqual({
+			status: "unavailable",
+			reason: "invalid_response",
+		});
 	});
 });

@@ -1,9 +1,13 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { MARKET_REVISIONED_TTL_SECONDS, QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
+import { QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
 import { getCoreDataSnapshot } from "../../infra/data-snapshot";
 import { metrics } from "../../infra/metrics";
-import { getMarketSnapshotContext } from "../market/context";
+import {
+	getMarketSnapshotContext,
+	refreshMarketSnapshotContext,
+	type MarketSnapshotContext,
+} from "../market/context";
 
 export type PositionEnum = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
 
@@ -492,6 +496,31 @@ const parseHistoryCache = (raw: string): PlayerValueHistoryRepositoryItem[] | nu
 	}
 };
 
+const historyPinRetryScopes = new WeakMap<object, number>();
+
+const marketSnapshotExists = async (
+	context: GraphQLContext,
+	marketContext: MarketSnapshotContext
+): Promise<boolean> => {
+	try {
+		const result = await context.database.query<{ present: boolean | string }>(
+			`SELECT EXISTS (
+				SELECT 1
+				FROM fpl.player_market_snapshots
+				WHERE season_id = $1
+				  AND snapshot_date = $2::date
+				  AND captured_at = $3::timestamptz
+			) AS present`,
+			[context.currentSeason.seasonId, marketContext.snapshotDate, marketContext.capturedAt]
+		);
+		const present = result.rows[0]?.present;
+		return present === true || present === "true";
+	} catch (error) {
+		context.logger.warn({ err: error }, "Player-value market pin verification unavailable");
+		return false;
+	}
+};
+
 export const playerValuesRepository: PlayerValuesRepository = {
 	async getPlayerValues(context: GraphQLContext, changeDate: Date): Promise<PlayerValue[]> {
 		const compactDate = getCompactDateString(changeDate);
@@ -571,22 +600,19 @@ export const playerValuesRepository: PlayerValuesRepository = {
 			return [];
 		}
 
-		let marketRevision = context.marketRevision;
-		if (!marketRevision) {
-			marketRevision = (await getMarketSnapshotContext(context).catch(() => null))?.revision;
-		}
-		const revisionedCache = Boolean(marketRevision);
-		const cacheRevision = marketRevision
-			? `${context.dataRevision ?? "core-postgres"}.${marketRevision}`
+		const marketContext = await getMarketSnapshotContext(context).catch((error) => {
+			context.logger.warn({ err: error }, "Player-value market snapshot context unavailable");
+			return null;
+		});
+		const cacheRevision = marketContext?.revision
+			? `${context.dataRevision ?? "core-postgres"}.${marketContext.revision}`
 			: context.dataRevision;
 		const cacheKey = gqlCacheKey(
 			context,
 			`player-value-history:v2:${buildHistoryCacheKey(args)}`,
 			cacheRevision
 		);
-		const historyCacheTtl = revisionedCache
-			? MARKET_REVISIONED_TTL_SECONDS
-			: QUERY_CACHE_TTL_SECONDS.HISTORICAL;
+		const historyCacheTtl = marketContext?.cacheTtlSeconds ?? QUERY_CACHE_TTL_SECONDS.HISTORICAL;
 		try {
 			const cached = await context.redis.get(cacheKey);
 			if (cached === NULL_SENTINEL) return [];
@@ -611,7 +637,13 @@ export const playerValuesRepository: PlayerValuesRepository = {
 			}
 
 			if (args.toDate) {
-				query = query.lte("change_date", getCompactDateString(args.toDate));
+				const requestedTo = getCompactDateString(args.toDate);
+				const pinnedTo = marketContext?.snapshotDate
+					? marketContext.snapshotDate.replaceAll("-", "")
+					: requestedTo;
+				query = query.lte("change_date", pinnedTo < requestedTo ? pinnedTo : requestedTo);
+			} else if (marketContext?.snapshotDate) {
+				query = query.lte("change_date", marketContext.snapshotDate.replaceAll("-", ""));
 			}
 
 			const { data, error } = await query;
@@ -622,6 +654,20 @@ export const playerValuesRepository: PlayerValuesRepository = {
 					"Failed to fetch player value history from database"
 				);
 				throw new Error(error.message, { cause: error });
+			}
+			if (marketContext && !(await marketSnapshotExists(context, marketContext))) {
+				const requestScope = context.requestScope ?? context;
+				const retries = historyPinRetryScopes.get(requestScope) ?? 0;
+				if (retries >= 1) throw new Error("Market snapshot pin changed during value history query");
+				historyPinRetryScopes.set(requestScope, retries + 1);
+				try {
+					const refreshed = await refreshMarketSnapshotContext(context);
+					if (!refreshed) throw new Error("Market snapshot pin unavailable after retry");
+					return playerValuesRepository.getPlayerValueHistory(context, args);
+				} finally {
+					if (retries === 0) historyPinRetryScopes.delete(requestScope);
+					else historyPinRetryScopes.set(requestScope, retries);
+				}
 			}
 
 			const rows = ((data as DbPlayerValueHistoryRow[] | null) ?? []).filter((row) => {

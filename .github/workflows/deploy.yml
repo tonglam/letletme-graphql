@@ -19,6 +19,7 @@ jobs:
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       packages: write
     env:
@@ -32,8 +33,21 @@ jobs:
         run: |
           set -euo pipefail
           main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
-          test "$main_sha" = "${WORKFLOW_SHA:-$main_sha}"
+          workflow_sha="${WORKFLOW_SHA:-}"
+          test -z "$workflow_sha" || test "$main_sha" = "$workflow_sha"
+          ci_run_id=""
+          if [ -z "$workflow_sha" ]; then
+            runs_json=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=$main_sha&per_page=20")
+            ci_run_id=$(printf '%s' "$runs_json" | jq -r --arg sha "$main_sha" \
+              '[.workflow_runs[] | select(.head_sha == $sha and .event == "push" and .status == "completed" and .conclusion == "success")] | sort_by(.id) | last | .id // empty')
+            test -n "$ci_run_id" || {
+              echo "No completed successful ci.yml push run found for exact main SHA $main_sha"
+              exit 1
+            }
+          fi
           echo "sha=$main_sha" >> "$GITHUB_OUTPUT"
+          echo "ci_run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
 
       - name: Checkout protected main commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,18 +71,36 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push once
+      - name: Build and push immutable image
+        id: image
         run: |
           set -euo pipefail
           docker buildx build \
             --platform linux/amd64 \
             --tag "${IMAGE_NAME}:${{ steps.target.outputs.sha }}" \
-            --tag "${IMAGE_NAME}:latest" \
             --metadata-file build-metadata.json \
             --push .
           digest=$(jq -r '.["containerimage.digest"]' build-metadata.json)
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "IMAGE_REF=${IMAGE_NAME}@${digest}" >> "$GITHUB_ENV"
+          image_ref="${IMAGE_NAME}@${digest}"
+          echo "IMAGE_REF=$image_ref" >> "$GITHUB_ENV"
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Scan immutable image before promotion
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          scan-type: image
+          image-ref: ${{ steps.image.outputs.image_ref }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: false
+          severity: HIGH,CRITICAL
+
+      - name: Promote scanned digest to latest
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${IMAGE_NAME}:latest" "${{ steps.image.outputs.image_ref }}"
 
       - name: Deploy exact image digest
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5

@@ -76,6 +76,7 @@ import {
 	assertTournamentStandingsReady,
 	tournamentsService,
 } from "./service";
+import { normalizeTournamentEventResultsPagination } from "./repository";
 
 type EntryTournamentsArgs = {
 	entryId: number;
@@ -255,13 +256,19 @@ export const tournamentsResolvers = {
 			args: TournamentEventResultsArgs,
 			context: GraphQLContext
 		): Promise<TournamentEventResult[]> => {
+			const pagination = normalizeTournamentEventResultsPagination(
+				args.limit ?? null,
+				args.offset ?? null
+			);
 			await assertTournamentStandingsReady(context, args.tournamentId);
 			return tournamentsService.getTournamentEventResults(
 				context,
 				args.tournamentId,
 				args.eventId,
-				args.limit ?? null,
-				args.offset ?? null
+				pagination.limit,
+				pagination.offset === 0 && (args.offset === null || args.offset === undefined)
+					? null
+					: pagination.offset
 			);
 		},
 

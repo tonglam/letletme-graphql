@@ -40,3 +40,26 @@ jobs:
           exit-code: "1"
           ignore-unfixed: false
           severity: HIGH,CRITICAL
+
+  contract-drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compare fixed Data contract with Data main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fixed_sha=$(tr -d '[:space:]' < .github/data-platform-contract-ref)
+          [[ "$fixed_sha" =~ ^[0-9a-f]{40}$ ]]
+          data_main_sha=$(gh api repos/tonglam/letletme_data/commits/main --jq '.sha')
+          printf 'fixed Data SHA: %s\nData main SHA: %s\n' "$fixed_sha" "$data_main_sha"
+          if [ "$fixed_sha" != "$data_main_sha" ]; then
+            echo "Data contract reference drifted; update the fixed SHA only after review and merge."
+            exit 1
+          fi

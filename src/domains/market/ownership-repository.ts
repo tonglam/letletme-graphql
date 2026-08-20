@@ -1,13 +1,13 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import {
-	MARKET_REVISIONED_TTL_SECONDS,
 	QUERY_CACHE_TTL_SECONDS,
 	readJsonQueryCache,
 	writeJsonQueryCache,
 } from "../../infra/query-cache";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
+import { getMarketSnapshotContext, refreshMarketSnapshotContext } from "./context";
 import type { MarketPlayer, MarketPosition } from "./repository";
 
 const DEFAULT_LIMIT = 10;
@@ -114,7 +114,7 @@ export type MarketOwnershipRepository = {
 
 const OWNERSHIP_QUERY = [
 	"WITH latest AS (",
-	"  SELECT MAX(snapshot_date) AS latest_date",
+	"  SELECT COALESCE($4::date, MAX(snapshot_date)) AS latest_date",
 	"  FROM fpl.player_market_snapshots",
 	"  WHERE season_id = $1",
 	"), requested AS (",
@@ -126,8 +126,10 @@ const OWNERSHIP_QUERY = [
 	"  FROM fpl.player_market_snapshots",
 	"  CROSS JOIN latest",
 	"  CROSS JOIN requested",
+	"  CROSS JOIN (SELECT $4::date AS pinned_date, $5::timestamptz AS pinned_captured_at) pin",
 	"  WHERE season_id = $1",
 	"    AND latest.latest_date IS NOT NULL",
+	"    AND (pin.pinned_date IS NULL OR snapshot_date < pin.pinned_date OR (snapshot_date = pin.pinned_date AND captured_at <= pin.pinned_captured_at))",
 	"    AND (",
 	"      (requested.requested_date IS NOT NULL",
 	"        AND snapshot_date BETWEEN requested.requested_date - 1 AND requested.requested_date)",
@@ -653,25 +655,53 @@ const loadRows = async (
 	const existing = scopedMemo.get(memoKey);
 	if (existing) return existing;
 	const load = (async (): Promise<OwnershipSnapshot[]> => {
-		const usesMarketRevision = Boolean(context.marketRevision);
-		const revision = context.marketRevision ?? context.dataRevision ?? "core-postgres";
-		const cacheKey = gqlCacheKey(context, `market-ownership:v3:rows:${memoKey}`, revision);
+		let marketContext = await getMarketSnapshotContext(context).catch((error) => {
+			context.logger.warn({ err: error }, "Market ownership snapshot context unavailable");
+			return null;
+		});
+		let revision = marketContext?.revision
+			? `${context.dataRevision ?? "core-postgres"}.${marketContext.revision}`
+			: (context.dataRevision ?? "core-postgres");
+		let cacheKey = gqlCacheKey(context, `market-ownership:v3:rows:${memoKey}`, revision);
 		const cached = await readJsonQueryCache(context, cacheKey, decodeRows);
 		if (cached) return cached;
 		const executor = queryExecutor ?? context.database;
-		const result = await executor.query(OWNERSHIP_QUERY, [
-			context.currentSeason.seasonId,
-			OWNERSHIP_LOOKBACK_DAYS,
-			requestedDate,
-		]);
-		const compact = result.rows[0] as { ownership_rows?: unknown } | undefined;
-		const decoded = decodeRows(compact?.ownership_rows ?? result.rows);
-		if (!decoded) throw new Error("Invalid market ownership query result");
+		const readRows = async (pin: typeof marketContext) => {
+			const result = await executor.query(OWNERSHIP_QUERY, [
+				context.currentSeason.seasonId,
+				OWNERSHIP_LOOKBACK_DAYS,
+				requestedDate,
+				pin?.snapshotDate ?? null,
+				pin?.capturedAt ?? null,
+			]);
+			const compact = result.rows[0] as { ownership_rows?: unknown } | undefined;
+			const decoded = decodeRows(compact?.ownership_rows ?? result.rows);
+			if (!decoded) return null;
+			const hasPinnedSnapshot =
+				!pin ||
+				decoded.some(
+					(row) => row.snapshotDate === pin.snapshotDate && row.capturedAt === pin.capturedAt
+				);
+			return { rows: decoded, hasPinnedSnapshot };
+		};
+		let read = await readRows(marketContext);
+		if (!read) throw new Error("Invalid market ownership query result");
+		let decoded = read.rows;
+		if (marketContext && requestedDate === null && !read.hasPinnedSnapshot) {
+			marketContext = await refreshMarketSnapshotContext(context);
+			if (!marketContext) throw new Error("Market snapshot pin unavailable after retry");
+			revision = `${context.dataRevision ?? "core-postgres"}.${marketContext.revision}`;
+			cacheKey = gqlCacheKey(context, `market-ownership:v3:rows:${memoKey}`, revision);
+			read = await readRows(marketContext);
+			if (!read || !read.hasPinnedSnapshot)
+				throw new Error("Market snapshot pin changed during query");
+			decoded = read.rows;
+		}
 		await writeJsonQueryCache(
 			context,
 			cacheKey,
 			decoded,
-			usesMarketRevision ? MARKET_REVISIONED_TTL_SECONDS : QUERY_CACHE_TTL_SECONDS.MARKET
+			marketContext?.cacheTtlSeconds ?? QUERY_CACHE_TTL_SECONDS.MARKET
 		);
 		return decoded;
 	})();

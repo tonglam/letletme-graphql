@@ -212,6 +212,9 @@ const listWeight = (
 			negativeListLimit ||= value < 0;
 			multiplier = Math.max(multiplier, Math.min(Math.max(value, 1), MAX_LIST_ARGUMENT_WEIGHT));
 		}
+		if (name === "offset" && typeof value === "number") {
+			negativeListLimit ||= value < 0;
+		}
 	}
 	return {
 		multiplier,
@@ -436,6 +439,8 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["trendCohortSnapshot", 10],
 	["calcLivePointsByEntry", 10],
 	["searchEntries", 10],
+	["entry", 5],
+	["tournamentEventResults", 30],
 	["tournamentSelectionStats", 10],
 	["tournamentEntryRankingSummary", 10],
 	["entryOfficialH2HDesk", 30],

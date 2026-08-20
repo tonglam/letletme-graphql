@@ -519,6 +519,7 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 			table: string;
 			actions: Array<{ type: string; args: unknown[] }>;
 		}> = [];
+		const deletedKeys: string[] = [];
 
 		const makeBuilder = (table: string) => {
 			const actions: Array<{ type: string; args: unknown[] }> = [];
@@ -532,8 +533,12 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 					};
 				}
 				if (table === "reporting.tournament_event_results") {
+					const range = actions.find((action) => action.type === "range");
+					const resultData = options.resultData ?? [];
 					return {
-						data: options.resultData ?? [],
+						data: range
+							? resultData.slice(Number(range.args[0]), Number(range.args[1]) + 1)
+							: resultData,
 						error: options.resultError ?? null,
 					};
 				}
@@ -583,6 +588,10 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 					actions.push({ type: "order", args });
 					return builder;
 				},
+				range(...args: unknown[]) {
+					actions.push({ type: "range", args });
+					return builder;
+				},
 				async limit(...args: unknown[]) {
 					actions.push({ type: "limit", args });
 					return resolveResult();
@@ -613,6 +622,11 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 					redisState.set(key, value);
 					return "OK";
 				},
+				async del(key: string) {
+					deletedKeys.push(key);
+					redisState.delete(key);
+					return 1;
+				},
 			} as never,
 			logger: {
 				error() {
@@ -626,6 +640,7 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 			// Test helpers
 			__queryLog: queryLog,
 			__redisState: redisState,
+			__deletedKeys: deletedKeys,
 		} as GraphQLContext;
 	};
 
@@ -736,6 +751,36 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 			null
 		);
 		expect(result).toEqual([]);
+	});
+
+	it("pushes bounded pages into the read model and caches the page key", async () => {
+		const context = buildContext({ resultData: [] }) as GraphQLContext & {
+			__queryLog: Array<{
+				table: string;
+				actions: Array<{ type: string; args: unknown[] }>;
+			}>;
+			__redisState: Map<string, string>;
+		};
+		const result = await tournamentsRepository.getTournamentEventResults(context, 1, 33, 2, 4);
+		expect(result).toEqual([]);
+		const resultQuery = context.__queryLog.find(
+			(entry) => entry.table === "reporting.tournament_event_results"
+		);
+		expect(resultQuery?.actions.find((action) => action.type === "range")?.args).toEqual([4, 5]);
+		expect([...context.__redisState.keys()]).toHaveLength(1);
+		const queryCount = context.__queryLog.length;
+		await tournamentsRepository.getTournamentEventResults(context, 1, 33, 2, 4);
+		expect(context.__queryLog.length).toBe(queryCount);
+		await tournamentsRepository.getTournamentEventResults(context, 1, 33, 2, 6);
+		expect([...context.__redisState.keys()]).toHaveLength(2);
+	});
+
+	it("evicts malformed tournament event-result cache JSON before querying", async () => {
+		const context = buildContext({ cacheSeed: "{not-json", resultData: [] }) as GraphQLContext & {
+			__deletedKeys: string[];
+		};
+		await tournamentsRepository.getTournamentEventResults(context, 1, 33, null, null);
+		expect(context.__deletedKeys).toHaveLength(1);
 	});
 
 	it("returns empty array when the tournament mode is not POINTS_RACES", async () => {

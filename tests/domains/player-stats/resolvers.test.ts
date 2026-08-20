@@ -74,7 +74,9 @@ describe("playerStatsDesk", () => {
 				},
 			},
 		});
-		expect(databaseQueries).toBe(1);
+		// The picker now validates the request-scoped market pin in PostgreSQL
+		// alongside its bounded directory read.
+		expect(databaseQueries).toBe(2);
 		expect(mgetKeys.some((key) => /:(players|fixtures|phases)$/.test(key))).toBe(false);
 	});
 

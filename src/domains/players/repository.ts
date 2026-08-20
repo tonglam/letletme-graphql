@@ -8,7 +8,11 @@ import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
 import type { Player as InfraPlayer, Team as InfraTeam } from "../../infra/types";
 import { resolvePlayerStatsContext } from "./season-stats-at-event";
-import { getMarketSnapshotContext } from "../market/context";
+import {
+	getMarketSnapshotContext,
+	refreshMarketSnapshotContext,
+	type MarketSnapshotContext,
+} from "../market/context";
 
 export enum Position {
 	GOALKEEPER = 1,
@@ -158,8 +162,6 @@ const PICKER_SORT_CODES: Record<PlayerPickerSort, number> = {
 const clampPickerLimit = (limit: number): number =>
 	Math.min(Math.max(Number.isFinite(limit) ? Math.trunc(limit) : 20, 1), 50);
 
-const MARKET_OWNERSHIP_STALE_AFTER_HOURS = 36;
-
 type SqlPickerRow = QueryResultRow & {
 	id: number;
 	web_name: string;
@@ -172,6 +174,7 @@ type SqlPickerRow = QueryResultRow & {
 	total_points: number | string | null;
 	form: number | string | null;
 	total_count: number | string;
+	market_snapshot_present?: boolean;
 };
 
 const pickerOrderSql: Record<Exclude<PlayerPickerSort, "AUTO">, string> = {
@@ -181,6 +184,31 @@ const pickerOrderSql: Record<Exclude<PlayerPickerSort, "AUTO">, string> = {
 	PRICE_ASC: "price ASC, lower(web_name) ASC, id ASC",
 	PRICE_DESC: "price DESC, lower(web_name) ASC, id ASC",
 	OWNERSHIP_DESC: "selected_by_percent DESC NULLS LAST, lower(web_name) ASC, id ASC",
+};
+
+const pickerPinRetryScopes = new WeakMap<object, number>();
+
+const marketPinPresentForEmptyPicker = async (
+	context: GraphQLContext,
+	marketContext: MarketSnapshotContext
+): Promise<boolean> => {
+	try {
+		const result = await context.database.query<{ present: boolean | string }>(
+			`SELECT EXISTS (
+				SELECT 1
+				FROM fpl.player_market_snapshots
+				WHERE season_id = $1
+				  AND snapshot_date = $2::date
+				  AND captured_at = $3::timestamptz
+			) AS present`,
+			[context.currentSeason.seasonId, marketContext.snapshotDate, marketContext.capturedAt]
+		);
+		const present = result.rows[0]?.present;
+		return present === true || present === "true";
+	} catch (error) {
+		context.logger.warn({ err: error }, "Player picker market pin verification unavailable");
+		return false;
+	}
 };
 
 const mapSqlPickerRow = (row: SqlPickerRow): PlayerPickerItem => ({
@@ -245,7 +273,8 @@ const isPinnedCoreRevisionBackedByPostgres = async (context: GraphQLContext): Pr
 
 const pickerItemFromCore = (
 	player: Awaited<ReturnType<typeof getCoreDataSnapshot>>["players"][number],
-	team: InfraTeam | undefined
+	team: InfraTeam | undefined,
+	effectivePrice: number = player.price
 ): PlayerPickerItem | null => {
 	if (!team) return null;
 	return {
@@ -253,11 +282,40 @@ const pickerItemFromCore = (
 		webName: player.webName,
 		position: player.type as Position,
 		team: { id: team.id, name: team.name, shortName: team.shortName },
-		price: player.price,
+		price: effectivePrice,
 		selectedByPercent: player.selectedByPercent,
 		totalPoints: player.totalPoints,
 		form: null,
 	};
+};
+
+const readPinnedMarketPrices = async (
+	context: GraphQLContext,
+	marketContext: MarketSnapshotContext | null
+): Promise<Map<number, number>> => {
+	if (!marketContext) return new Map();
+	try {
+		const result = await context.database.query<{
+			element_id: number;
+			price: number | string | null;
+		}>(
+			`SELECT element_id, price
+			 FROM fpl.player_market_snapshots
+			 WHERE season_id = $1
+			   AND snapshot_date = $2::date
+			   AND captured_at = $3::timestamptz`,
+			[context.currentSeason.seasonId, marketContext.snapshotDate, marketContext.capturedAt]
+		);
+		return new Map(
+			result.rows.flatMap((row) => {
+				const price = asNullableNumber(row.price);
+				return price === null ? [] : [[row.element_id, price] as const];
+			})
+		);
+	} catch (error) {
+		context.logger.warn({ err: error }, "Player picker market prices unavailable in core fallback");
+		return new Map();
+	}
 };
 
 const getPlayersForPickerFromPinnedCore = async (
@@ -267,10 +325,14 @@ const getPlayersForPickerFromPinnedCore = async (
 	search: string | null | undefined,
 	filter: PlayersFilter | null | undefined,
 	sort: Exclude<PlayerPickerSort, "AUTO">,
-	ownershipBand: PlayerPickerOwnershipBand | null
+	ownershipBand: PlayerPickerOwnershipBand | null,
+	marketContext: MarketSnapshotContext | null
 ): Promise<PlayersForPickerPayload> => {
 	const snapshot = await getCoreDataSnapshot(context);
 	const teams = new Map(snapshot.teams.map((team) => [team.id, team] as const));
+	const marketPrices = await readPinnedMarketPrices(context, marketContext);
+	const effectivePriceFor = (player: (typeof snapshot.players)[number]): number =>
+		marketPrices.get(player.id) ?? player.price;
 	const safeSearch = search?.trim().slice(0, 50).toLowerCase() || null;
 	const safeFilter = normalizeFilter(filter);
 	const matchesBand = (ownership: number | null): boolean => {
@@ -289,16 +351,18 @@ const getPlayersForPickerFromPinnedCore = async (
 			(player) =>
 				safeFilter?.minPrice === undefined ||
 				safeFilter.minPrice === null ||
-				player.price >= safeFilter.minPrice
+				effectivePriceFor(player) >= safeFilter.minPrice
 		)
 		.filter(
 			(player) =>
 				safeFilter?.maxPrice === undefined ||
 				safeFilter.maxPrice === null ||
-				player.price <= safeFilter.maxPrice
+				effectivePriceFor(player) <= safeFilter.maxPrice
 		)
 		.filter((player) => matchesBand(player.selectedByPercent))
-		.map((player) => pickerItemFromCore(player, teams.get(player.teamId)))
+		.map((player) =>
+			pickerItemFromCore(player, teams.get(player.teamId), effectivePriceFor(player))
+		)
 		.filter((item): item is PlayerPickerItem => item !== null);
 	items.sort((left, right) => {
 		const text = (value: string): string => value.toLowerCase();
@@ -629,9 +693,10 @@ export const playersRepository: PlayersRepository = {
 		const safeSearch = search?.trim().slice(0, 50) || null;
 		const safeFilter = normalizeFilter(filter);
 		const searchKey = safeSearch ? encodeURIComponent(safeSearch.toLowerCase()) : "all";
-		const marketContext = await getMarketSnapshotContext(context, {
-			allowPostgresFallback: false,
-		}).catch(() => null);
+		const marketContext = await getMarketSnapshotContext(context).catch((error) => {
+			context.logger.warn({ err: error }, "Player picker market snapshot context unavailable");
+			return null;
+		});
 		const cacheRevision = marketContext
 			? `${context.dataRevision ?? "core-postgres"}.${marketContext.revision}`
 			: (context.dataRevision ?? "core-postgres");
@@ -677,7 +742,8 @@ export const playersRepository: PlayersRepository = {
 				search,
 				filter,
 				effectiveSort,
-				ownershipBand
+				ownershipBand,
+				marketContext
 			);
 		}
 
@@ -695,7 +761,9 @@ export const playersRepository: PlayersRepository = {
 				SELECT snapshot_date, captured_at
 				FROM fpl.player_market_snapshots
 				WHERE season_id = $1
-				  AND captured_at >= NOW() - INTERVAL '${MARKET_OWNERSHIP_STALE_AFTER_HOURS} hours'
+				  AND ($12::date IS NULL OR snapshot_date = $12::date)
+				  AND ($13::timestamptz IS NULL OR captured_at = $13::timestamptz)
+				  AND ($12::date IS NOT NULL OR captured_at >= NOW() - INTERVAL '36 hours')
 				ORDER BY snapshot_date DESC, captured_at DESC
 				LIMIT 1
 			), picker_rows AS MATERIALIZED (
@@ -707,9 +775,10 @@ export const playersRepository: PlayersRepository = {
 					team.name AS team_name,
 					team.short_name AS team_short_name,
 					COALESCE(market.price, player.price) AS price,
-					COALESCE(market.selected_by_percent, event_stats.selected_by_percent) AS selected_by_percent,
-					COALESCE(event_stats.total_points, player.total_points) AS total_points,
-					event_stats.form
+						COALESCE(market.selected_by_percent, event_stats.selected_by_percent) AS selected_by_percent,
+						COALESCE(event_stats.total_points, player.total_points) AS total_points,
+						event_stats.form,
+						EXISTS (SELECT 1 FROM latest_market) AS market_snapshot_present
 				FROM fpl.players player
 				JOIN fpl.teams team
 				  ON team.season_id = player.season_id AND team.team_id = player.team_id
@@ -728,8 +797,8 @@ export const playersRepository: PlayersRepository = {
 				  AND ($3::text IS NULL OR player.web_name ILIKE '%' || $3 || '%')
 				  AND ($4::integer IS NULL OR player.element_type = $4)
 				  AND ($5::integer IS NULL OR player.team_id = $5)
-				  AND ($6::integer IS NULL OR player.price >= $6)
-				  AND ($7::integer IS NULL OR player.price <= $7)
+				  AND ($6::integer IS NULL OR COALESCE(market.price, player.price) >= $6)
+				  AND ($7::integer IS NULL OR COALESCE(market.price, player.price) <= $7)
 			), filtered AS (
 				SELECT *
 				FROM picker_rows
@@ -756,9 +825,38 @@ export const playersRepository: PlayersRepository = {
 			safeLimit,
 			decodedCursor.offset,
 			pinnedCoreRevision,
+			marketContext?.snapshotDate ?? null,
+			marketContext?.capturedAt ?? null,
 		];
 		const result = await context.database.query<SqlPickerRow>(sql, pickerParams);
 		const returnedItems = result.rows.map(mapSqlPickerRow);
+		const marketPinPresent =
+			!marketContext ||
+			(result.rows.length > 0
+				? result.rows.every((row) => row.market_snapshot_present !== false)
+				: await marketPinPresentForEmptyPicker(context, marketContext));
+		if (marketContext && !marketPinPresent) {
+			const requestScope = context.requestScope ?? context;
+			const retries = pickerPinRetryScopes.get(requestScope) ?? 0;
+			if (retries >= 1) throw new Error("Market snapshot pin changed during picker query");
+			pickerPinRetryScopes.set(requestScope, retries + 1);
+			try {
+				const refreshed = await refreshMarketSnapshotContext(context);
+				if (!refreshed) throw new Error("Market snapshot pin unavailable after retry");
+				return playersRepository.getPlayersForPicker(
+					context,
+					limit,
+					cursor,
+					search,
+					filter,
+					sort,
+					ownershipBand
+				);
+			} finally {
+				if (retries === 0) pickerPinRetryScopes.delete(requestScope);
+				else pickerPinRetryScopes.set(requestScope, retries);
+			}
+		}
 		if (returnedItems.length === 0 && !(await isPinnedCoreRevisionBackedByPostgres(context))) {
 			return getPlayersForPickerFromPinnedCore(
 				context,
@@ -767,14 +865,22 @@ export const playersRepository: PlayersRepository = {
 				search,
 				filter,
 				effectiveSort,
-				ownershipBand
+				ownershipBand,
+				marketContext
 			);
 		}
 		let totalCount = Number(result.rows[0]?.total_count ?? NaN);
 		if (!Number.isFinite(totalCount)) {
 			const countResult = await context.database.query<{ total_count: number | string }>(
 				`${sql.slice(0, sql.lastIndexOf("SELECT filtered.*"))}SELECT count(*)::integer AS total_count FROM filtered`,
-				[...pickerParams.slice(0, 8), null, null, pinnedCoreRevision]
+				[
+					...pickerParams.slice(0, 8),
+					null,
+					null,
+					pinnedCoreRevision,
+					marketContext?.snapshotDate ?? null,
+					marketContext?.capturedAt ?? null,
+				]
 			);
 			totalCount = Number(countResult.rows[0]?.total_count ?? 0);
 		}
@@ -791,7 +897,7 @@ export const playersRepository: PlayersRepository = {
 			context,
 			cacheKey,
 			JSON.stringify(payload),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
+			marketContext?.cacheTtlSeconds ?? QUERY_CACHE_TTL_SECONDS.REPORTING
 		);
 		return payload;
 	},

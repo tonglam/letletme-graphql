@@ -5,7 +5,11 @@ import {
 	type CoreDataSnapshot,
 	type CoreSelectionRules,
 } from "../../infra/data-snapshot";
-import { getMarketSnapshotContext } from "../market/context";
+import {
+	getMarketSnapshotContext,
+	refreshMarketSnapshotContext,
+	type MarketSnapshotContext,
+} from "../market/context";
 
 const MAX_EVENT_ID = 38;
 const MAX_HORIZON = 8;
@@ -88,23 +92,33 @@ const loadMarketFacts = async (
 	context: GraphQLContext
 ): Promise<{ revision: string | null; facts: Map<number, MarketFact> }> => {
 	try {
-		const marketContext = await getMarketSnapshotContext(context);
-		const result = await context.database.query<{
-			element_id: number;
-			price: number;
-			selected_by_percent: number | string | null;
-			status: string;
-			news: string;
-			chance_of_playing_this_round: number | null;
-		}>(
-			`SELECT DISTINCT ON (element_id)
+		let marketContext = await getMarketSnapshotContext(context);
+		const load = async (pin: MarketSnapshotContext | null) =>
+			context.database.query<{
+				element_id: number;
+				price: number;
+				selected_by_percent: number | string | null;
+				status: string;
+				news: string;
+				chance_of_playing_this_round: number | null;
+			}>(
+				`SELECT DISTINCT ON (element_id)
 				element_id, price, selected_by_percent, status, news,
 				chance_of_playing_this_round
-			 FROM fpl.player_market_snapshots
-			 WHERE season_id = $1
-			 ORDER BY element_id, snapshot_date DESC, captured_at DESC`,
-			[context.currentSeason.seasonId]
-		);
+				 FROM fpl.player_market_snapshots
+				 WHERE season_id = $1
+				   AND ($2::date IS NULL OR snapshot_date = $2::date)
+				   AND ($3::timestamptz IS NULL OR captured_at = $3::timestamptz)
+				 ORDER BY element_id, snapshot_date DESC, captured_at DESC`,
+				[context.currentSeason.seasonId, pin?.snapshotDate ?? null, pin?.capturedAt ?? null]
+			);
+		let result = await load(marketContext);
+		if (marketContext && result.rows.length === 0) {
+			marketContext = await refreshMarketSnapshotContext(context);
+			if (!marketContext) throw new Error("Market snapshot pin unavailable after retry");
+			result = await load(marketContext);
+			if (result.rows.length === 0) throw new Error("Market snapshot pin changed during query");
+		}
 		return {
 			revision: marketContext?.revision ?? null,
 			facts: new Map(
@@ -129,6 +143,8 @@ const loadMarketFacts = async (
 		return { revision: null, facts: new Map() };
 	}
 };
+
+export const teamSelectionTestables = { phaseFor, positionName };
 
 export const teamSelectionService = {
 	async getTeamSelectionDesk(
