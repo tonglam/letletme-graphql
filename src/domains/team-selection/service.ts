@@ -6,6 +6,7 @@ import {
 	type CoreSelectionRules,
 } from "../../infra/data-snapshot";
 import {
+	createMarketPinFailure,
 	getMarketSnapshotContext,
 	refreshMarketSnapshotContext,
 	type MarketSnapshotContext,
@@ -115,9 +116,11 @@ const loadMarketFacts = async (
 		let result = await load(marketContext);
 		if (marketContext && result.rows.length === 0) {
 			marketContext = await refreshMarketSnapshotContext(context);
-			if (!marketContext) throw new Error("Market snapshot pin unavailable after retry");
+			if (!marketContext)
+				throw createMarketPinFailure(context, "Market snapshot pin unavailable after retry");
 			result = await load(marketContext);
-			if (result.rows.length === 0) throw new Error("Market snapshot pin changed during query");
+			if (result.rows.length === 0)
+				throw createMarketPinFailure(context, "Market snapshot pin changed during query");
 		}
 		return {
 			revision: marketContext?.revision ?? null,

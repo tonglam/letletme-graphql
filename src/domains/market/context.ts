@@ -219,7 +219,12 @@ export const refreshMarketSnapshotContext = async (
 	const requestScope = context.requestScope ?? context;
 	marketContextMemo.delete(requestScope);
 	countMarketEvent("pin_retry");
-	const refreshed = await getMarketSnapshotContext(context);
-	if (!refreshed) countMarketEvent("pin_failed");
-	return refreshed;
+	return getMarketSnapshotContext(context);
+};
+
+/** Record the terminal outcome of one retry and preserve the caller's error contract. */
+export const createMarketPinFailure = (context: GraphQLContext, message: string): Error => {
+	void context;
+	countMarketEvent("pin_failed");
+	return new Error(message);
 };
