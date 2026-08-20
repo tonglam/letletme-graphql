@@ -56,7 +56,7 @@ describe("PostgreSQL current-season authority", () => {
 	it("refreshes a changed lifecycle without replacing the season provider", async () => {
 		const provider = new CurrentSeasonProvider();
 		provider.seed({ seasonId: 2026, seasonCode: "2627", lifecycleState: "preseason" });
-		let lifecycleState = "active";
+		const lifecycleState = "active";
 		const database: QueryExecutor = {
 			query: async () =>
 				({
