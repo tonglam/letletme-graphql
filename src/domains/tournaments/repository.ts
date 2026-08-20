@@ -1131,7 +1131,7 @@ const isRankingSummaryCache = (value: unknown): value is TournamentEntryRankingS
 	];
 	return (
 		integerFields.every((key) => isRequired(value, key, isSafeInteger)) &&
-		nullableNumberFields.every((key) => isRequired(value, key, isNullableFiniteNumber))
+		nullableNumberFields.every((key) => isRequired(value, key, isNullableSafeInteger))
 	);
 };
 

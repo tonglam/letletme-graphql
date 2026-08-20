@@ -295,6 +295,9 @@ describe("tournament cache wire contracts", () => {
 		expect(tournamentCacheTestables.isRankingSummaryCache({ ...summary, totalCosts: "0" })).toBe(
 			false
 		);
+		expect(tournamentCacheTestables.isRankingSummaryCache({ ...summary, teamValue: 1000.5 })).toBe(
+			false
+		);
 
 		const battle = {
 			tournament: validCachedTournamentInfo,
