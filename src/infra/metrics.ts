@@ -57,6 +57,12 @@ const cacheRepositoryEvents = new Counter({
 	labelNames: ["domain", "event"] as const,
 });
 
+const briefingPublicationReaderEvents = new Counter({
+	name: "briefing_publication_reader_events_total",
+	help: "Briefing publication reader fallback, corruption, repair, and Redis availability events",
+	labelNames: ["event"] as const,
+});
+
 const playerStateProfiles = new Counter({
 	name: "player_state_profiles_total",
 	help: "Player State profiles by trend, confidence, provider mode, and current analysis status",
@@ -106,6 +112,7 @@ registry.registerMetric(graphqlRateLimitDecisions);
 registry.registerMetric(graphqlRateLimitV3Decisions);
 registry.registerMetric(graphqlRequestOutcomes);
 registry.registerMetric(cacheRepositoryEvents);
+registry.registerMetric(briefingPublicationReaderEvents);
 registry.registerMetric(playerStateProfiles);
 registry.registerMetric(playerStateProviderStale);
 registry.registerMetric(playerStatsDeskFields);
@@ -125,6 +132,7 @@ export const metrics = {
 	graphqlRateLimitV3Decisions,
 	graphqlRequestOutcomes,
 	cacheRepositoryEvents,
+	briefingPublicationReaderEvents,
 	playerStateProfiles,
 	playerStateProviderStale,
 	playerStatsDeskFields,

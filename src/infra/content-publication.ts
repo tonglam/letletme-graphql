@@ -2,8 +2,25 @@ import { createHash } from "node:crypto";
 
 import type Redis from "ioredis";
 import type { QueryExecutor } from "./database";
+import { metrics } from "./metrics";
 
 export const BRIEFING_WEEK_ACTIVE_POINTER_KEY = "llm:content:briefing:week:active";
+
+const briefingReaderMetrics = { fallbacks: 0, corruptions: 0, repairs: 0, redisUnavailable: 0 };
+
+const recordReaderEvent = (
+	event: "fallback" | "corruption" | "repair" | "redis_unavailable"
+): void => {
+	if (event === "fallback") briefingReaderMetrics.fallbacks += 1;
+	if (event === "corruption") briefingReaderMetrics.corruptions += 1;
+	if (event === "repair") briefingReaderMetrics.repairs += 1;
+	if (event === "redis_unavailable") briefingReaderMetrics.redisUnavailable += 1;
+	metrics.briefingPublicationReaderEvents.labels(event).inc();
+};
+
+export function getBriefingReaderMetrics(): Readonly<typeof briefingReaderMetrics> {
+	return { ...briefingReaderMetrics };
+}
 
 export type BriefingState = "READY" | "EMPTY" | "STALE" | "OFFSEASON" | "UNAVAILABLE" | "REMOVED";
 export type BriefingLocale = "en" | "zh-CN";
@@ -211,6 +228,21 @@ export function parseBriefingWeekPayload(
 
 const metadataDate = (value: string | Date | null): string | null => iso(value);
 
+const hasLocalePair = (
+	manifest: ActiveMetadata["locale_manifest"]
+): manifest is Record<BriefingLocale, { bytes: number; sha256: string }> =>
+	["en", "zh-CN"].every((locale) => {
+		const entry: unknown = manifest[locale];
+		return (
+			isRecord(entry) &&
+			typeof entry.bytes === "number" &&
+			Number.isSafeInteger(entry.bytes) &&
+			entry.bytes >= 0 &&
+			typeof entry.sha256 === "string" &&
+			/^[0-9a-f]{64}$/i.test(entry.sha256)
+		);
+	});
+
 const toMetadata = (row: ActiveMetadata): ActiveMetadata => ({
 	...row,
 	revision: Number(row.revision),
@@ -286,7 +318,35 @@ export async function readBriefingWeek(
 	} catch {
 		return unavailable();
 	}
-	if (!metadata || !metadata.servable) return unavailable(metadata?.state ?? "OFFSEASON");
+	if (!metadata) return unavailable("OFFSEASON");
+	if (!metadata.servable) {
+		return {
+			...unavailable(metadata.state),
+			publicationId: metadata.publication_id,
+			revision: Number(metadata.revision),
+			sourceCheckedAt: metadataDate(metadata.source_checked_at),
+			publishedAt: metadataDate(metadata.published_at),
+			event:
+				metadata.target_event_id && metadata.event_name && metadataDate(metadata.deadline_time)
+					? {
+							seasonCode: metadata.season_code,
+							eventId: metadata.target_event_id,
+							name: metadata.event_name,
+							deadlineTime: metadataDate(metadata.deadline_time) as string,
+						}
+					: null,
+		};
+	}
+	if (!hasLocalePair(metadata.locale_manifest)) {
+		recordReaderEvent("corruption");
+		return {
+			...unavailable(),
+			publicationId: metadata.publication_id,
+			revision: Number(metadata.revision),
+			sourceCheckedAt: metadataDate(metadata.source_checked_at),
+			publishedAt: metadataDate(metadata.published_at),
+		};
+	}
 	const revision = Number(metadata.revision);
 	const deadlineTime = metadata.deadline_time ? metadataDate(metadata.deadline_time) : null;
 	const event =
@@ -314,45 +374,72 @@ export async function readBriefingWeek(
 
 	let pointer: ActivePointer | null = null;
 	let rawPayload: string | null = null;
+	let redisUnavailable = false;
+	let rawPointer: string | null = null;
 	try {
-		const rawPointer = await redis.get(BRIEFING_WEEK_ACTIVE_POINTER_KEY);
-		if (rawPointer) {
+		rawPointer = await redis.get(BRIEFING_WEEK_ACTIVE_POINTER_KEY);
+	} catch {
+		redisUnavailable = true;
+		recordReaderEvent("redis_unavailable");
+	}
+	if (rawPointer !== null) {
+		try {
 			const parsed: unknown = JSON.parse(rawPointer);
-			if (
+			const isUsablePointer =
 				isRecord(parsed) &&
 				parsed.schemaVersion === 1 &&
 				parsed.publicationId === metadata.publication_id &&
 				Number(parsed.revision) === revision &&
+				parsed.state === metadata.state &&
 				Array.isArray(parsed.locales) &&
-				parsed.locales.includes(locale) &&
+				parsed.locales.includes("en") &&
+				parsed.locales.includes("zh-CN") &&
 				isRecord(parsed.hashes) &&
-				typeof parsed.hashes[locale] === "string"
-			) {
+				typeof parsed.hashes.en === "string" &&
+				/^[0-9a-f]{64}$/i.test(parsed.hashes.en) &&
+				typeof parsed.hashes["zh-CN"] === "string" &&
+				/^[0-9a-f]{64}$/i.test(parsed.hashes["zh-CN"]);
+			if (isUsablePointer) {
 				pointer = parsed as unknown as ActivePointer;
-				rawPayload = await redis.get(payloadKey(revision, locale));
+				try {
+					rawPayload = await redis.get(payloadKey(revision, locale));
+				} catch {
+					redisUnavailable = true;
+					recordReaderEvent("redis_unavailable");
+				}
+			} else {
+				recordReaderEvent("corruption");
 			}
+		} catch {
+			recordReaderEvent("corruption");
 		}
-	} catch {
-		pointer = null;
-		rawPayload = null;
+	}
+	if (pointer && rawPayload === null && !redisUnavailable) {
+		recordReaderEvent("corruption");
 	}
 
 	let payload: BriefingWeekPayload | null = null;
-	if (pointer && rawPayload) {
+	if (pointer && rawPayload !== null) {
 		try {
 			const parsed = parseBriefingWeekPayload(JSON.parse(rawPayload), locale);
-			if (
+			const isValidPayload =
 				parsed &&
 				validateAgainstMetadata(parsed, locale, metadata, rawPayload) &&
-				pointer.hashes[locale] === metadata.locale_manifest[locale]?.sha256
-			)
+				pointer.hashes.en === metadata.locale_manifest.en.sha256 &&
+				pointer.hashes["zh-CN"] === metadata.locale_manifest["zh-CN"].sha256;
+			if (isValidPayload) {
 				payload = parsed;
+			} else {
+				recordReaderEvent("corruption");
+			}
 		} catch {
+			recordReaderEvent("corruption");
 			payload = null;
 		}
 	}
 
 	if (!payload) {
+		recordReaderEvent("fallback");
 		try {
 			const fallback = await database.query<{
 				payload: unknown;
@@ -373,6 +460,7 @@ export async function readBriefingWeek(
 				validateAgainstMetadata(parsed, locale, metadata, serialized(parsed))
 			)
 				payload = parsed;
+			if (payload && !redisUnavailable) recordReaderEvent("repair");
 		} catch {
 			return {
 				...unavailable(),

@@ -45,6 +45,10 @@ const metadata = {
 			bytes: Buffer.byteLength(canonical),
 			sha256: createHash("sha256").update(canonical, "utf8").digest("hex"),
 		},
+		"zh-CN": {
+			bytes: Buffer.byteLength(canonical),
+			sha256: createHash("sha256").update(canonical, "utf8").digest("hex"),
+		},
 	},
 };
 
