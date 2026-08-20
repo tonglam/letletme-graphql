@@ -84,6 +84,27 @@ import {
 import { normalizeTournamentEventResultsPagination } from "./repository";
 import { getTournamentSetupWarningSummaries } from "./repository";
 
+const warningSummaryMemo = new WeakMap<
+	GraphQLContext,
+	Map<number, Promise<TournamentSetupWarningSummary[]>>
+>();
+
+const getTournamentSetupWarningSummariesMemoized = (
+	context: GraphQLContext,
+	tournamentId: number
+): Promise<TournamentSetupWarningSummary[]> => {
+	let memo = warningSummaryMemo.get(context);
+	if (!memo) {
+		memo = new Map();
+		warningSummaryMemo.set(context, memo);
+	}
+	const cached = memo.get(tournamentId);
+	if (cached) return cached;
+	const request = getTournamentSetupWarningSummaries(context, tournamentId);
+	memo.set(tournamentId, request);
+	return request;
+};
+
 type EntryTournamentsArgs = {
 	entryId: number;
 };
@@ -397,7 +418,7 @@ export const tournamentsResolvers = {
 			_args: Record<string, never>,
 			context: GraphQLContext
 		): Promise<TournamentSetupWarningSummary[]> =>
-			parent.warningSummaries ?? getTournamentSetupWarningSummaries(context, parent.id),
+			parent.warningSummaries ?? getTournamentSetupWarningSummariesMemoized(context, parent.id),
 	},
 	TournamentSetupWarningSummary: {
 		category: (parent: TournamentSetupWarningSummary): string =>
@@ -454,7 +475,7 @@ export const tournamentsResolvers = {
 		): Promise<TournamentSetupWarningSummary[]> =>
 			parent.warningSummaries.length > 0 || !parent.__tournamentId
 				? parent.warningSummaries
-				: getTournamentSetupWarningSummaries(context, parent.__tournamentId),
+				: getTournamentSetupWarningSummariesMemoized(context, parent.__tournamentId),
 	},
 	ManagedTournamentStatus: {
 		state: (parent: ManagedTournamentStatus): string => tournamentStateToEnum(parent.state),

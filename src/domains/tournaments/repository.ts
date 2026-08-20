@@ -1583,8 +1583,7 @@ const summarizeTournamentSetupIssues = (
 	return [...totals.entries()]
 		.map(([category, total]) => ({
 			category,
-			affectedCount:
-				total.affectedEntryIds.size > 0 ? total.affectedEntryIds.size : total.fallbackCount,
+			affectedCount: Math.max(total.affectedEntryIds.size, total.fallbackCount),
 			repairExhausted: total.repairExhausted,
 		}))
 		.sort((left, right) => left.category.localeCompare(right.category));
@@ -1648,8 +1647,7 @@ const getTournamentSetupWarningSummariesByTournamentIds = async (
 			affectedCount: Number(row.affected_entry_count ?? 0),
 			repairAttempts: 0,
 			nextRepairAt: null,
-			repairExhausted:
-				row.repair_exhausted_at !== null && row.repair_exhausted_at !== undefined,
+			repairExhausted: row.repair_exhausted_at !== null && row.repair_exhausted_at !== undefined,
 		});
 		issuesByTournament.set(row.tournament_id, issues);
 	}
