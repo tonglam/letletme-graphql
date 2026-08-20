@@ -458,7 +458,10 @@ const startServer = async (): Promise<void> => {
 						data,
 						database,
 						currentSeason,
-						refreshCurrentSeason: () => currentSeasonProvider.refresh(database),
+						// Only refresh lifecycle for the season pinned when this request
+						// constructed its read-model client and authorization scope.
+						refreshCurrentSeason: () =>
+							currentSeasonProvider.refresh(database, 5_000, currentSeason),
 						redis: getRedis(),
 						logger,
 						requestId,

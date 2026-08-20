@@ -1088,26 +1088,26 @@ const historyForPlayerStateRows = (
 	};
 };
 
+const phaseForLifecycle = (lifecycleState: string | undefined): PlayerSeasonPhase => {
+	if (lifecycleState === "preseason" || lifecycleState === "reference_only") return "PRESEASON";
+	if (lifecycleState === "completed" || lifecycleState === "closed") return "COMPLETED";
+	return "ACTIVE";
+};
+
 const seasonPhaseForRow = (
 	row: PlayerStateSeasonRow,
 	currentSeason: string,
 	currentLifecycleState?: string
 ): PlayerSeasonPhase => {
 	if (row.season_code !== currentSeason) return "COMPLETED";
-	const lifecycleState = currentLifecycleState ?? row.lifecycle_state;
-	if (lifecycleState === "preseason") return "PRESEASON";
-	if (lifecycleState === "completed" || lifecycleState === "closed") {
-		return "COMPLETED";
-	}
-	if (lifecycleState === "reference_only") return "PRESEASON";
-	return "ACTIVE";
+	// The current-season authority is refreshed independently of the reporting
+	// projection. Prefer it when both are present so a stale row cannot make a
+	// newly closed or active season look like the previous phase.
+	return phaseForLifecycle(currentLifecycleState ?? row.lifecycle_state);
 };
 
 const missingCurrentSeasonPhase = (lifecycleState: string | undefined): PlayerSeasonPhase => {
-	if (lifecycleState === "preseason") return "PRESEASON";
-	if (lifecycleState === "completed" || lifecycleState === "closed") return "COMPLETED";
-	if (lifecycleState === "reference_only") return "PRESEASON";
-	return "ACTIVE";
+	return phaseForLifecycle(lifecycleState);
 };
 
 const seasonSignalUnit = (code: PlayerSeasonSignalCode): string =>

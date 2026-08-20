@@ -91,12 +91,31 @@ export class CurrentSeasonProvider {
 		this.refreshedAt = Date.now();
 	}
 
-	/** Revalidate the mutable season lifecycle on a short process-local interval. */
-	async refresh(database: QueryExecutor, maxAgeMs = 5_000): Promise<CurrentSeason> {
+	/**
+	 * Revalidate the mutable season lifecycle on a short process-local interval.
+	 *
+	 * Request contexts are built with a ReadModelClient and authorization bound
+	 * to one season identity. A lifecycle refresh may update that identity's
+	 * state, but must never switch a request to a newly promoted season halfway
+	 * through a multi-root operation. Callers can pass the request-pinned
+	 * identity to make that boundary explicit.
+	 */
+	async refresh(
+		database: QueryExecutor,
+		maxAgeMs = 5_000,
+		pinnedIdentity?: Pick<CurrentSeason, "seasonId" | "seasonCode">
+	): Promise<CurrentSeason> {
 		if (this.value && Date.now() - this.refreshedAt < maxAgeMs) return this.value;
 		if (this.refreshPromise) return this.refreshPromise;
 		this.refreshPromise = loadCurrentSeason(database)
 			.then((value) => {
+				const pinned = pinnedIdentity ?? this.value;
+				if (
+					pinned &&
+					(value.seasonId !== pinned.seasonId || value.seasonCode !== pinned.seasonCode)
+				) {
+					return this.value ?? pinned;
+				}
 				this.seed(value);
 				return value;
 			})
