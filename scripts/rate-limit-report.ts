@@ -6,6 +6,7 @@ import {
 	rateLimitRecentAggregateKey,
 	summarizeRateLimitTotals,
 } from "../src/infra/rate-limit-observability";
+import { env } from "../src/infra/env";
 import { closeRedis, connectRedis, getRateLimitRedis } from "../src/infra/redis";
 
 type ReportOptions = {
@@ -160,6 +161,7 @@ try {
 				};
 	const report = {
 		policy: "graphql-v3",
+		mode: env.GRAPHQL_RATE_LIMIT_MODE,
 		generatedAt: generatedAt.toISOString(),
 		days: options.days,
 		summary,

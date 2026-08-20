@@ -56,6 +56,13 @@ export const generateValidatedRateLimitProfile = ({
 			`Target traffic ${targetRps} RPS exceeds the 40% headroom gate of ${globalRefill} RPS`
 		);
 	}
+	const webRscClassRequestPerSecond = finiteNonNegative(
+		observation.webRsc.classRequestPerSecond,
+		"webRsc.classRequestPerSecond"
+	);
+	if (webRscClassRequestPerSecond === 0) {
+		throw new Error("Capacity evidence must contain Web RSC rate-limit decisions");
+	}
 	const workloadPolicies = Object.fromEntries(
 		Object.entries(base.trafficClasses.web_rsc.workloads).map(([workload, basePolicy]) => {
 			const rate = finiteNonNegative(
@@ -82,12 +89,7 @@ export const generateValidatedRateLimitProfile = ({
 			...base.trafficClasses,
 			web_rsc: {
 				...base.trafficClasses.web_rsc,
-				classRequest: measuredBucket(
-					finiteNonNegative(
-						observation.webRsc.classRequestPerSecond,
-						"webRsc.classRequestPerSecond"
-					)
-				),
+				classRequest: measuredBucket(webRscClassRequestPerSecond),
 				workloads: workloadPolicies,
 			},
 			service: {

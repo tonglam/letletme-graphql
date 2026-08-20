@@ -116,6 +116,16 @@ describe("GraphQL v3 production policy", () => {
 		expect(zeroObservation.trafficClasses.web_rsc.workloads.home).toEqual(
 			productionGraphQLRateLimitPolicy.trafficClasses.web_rsc.workloads.home
 		);
+		expect(() =>
+			generateValidatedRateLimitProfile({
+				base: productionGraphQLRateLimitPolicy,
+				observation: {
+					...observation,
+					webRsc: { ...observation.webRsc, classRequestPerSecond: 0 },
+				},
+				evidence: "load-test/run-without-rsc-decisions.json",
+			})
+		).toThrow("must contain Web RSC rate-limit decisions");
 		const wrongTarget = JSON.parse(JSON.stringify(generated)) as {
 			capacity: { targetConcurrent: number };
 		};

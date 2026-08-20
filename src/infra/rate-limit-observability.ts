@@ -44,6 +44,9 @@ export const rateLimitRecentAggregateKey = (minute: string): string =>
 
 export type RateLimitReportSummary = {
 	totalDecisions: number;
+	v3Decisions: number;
+	enforcedDecisions: number;
+	shadowDecisions: number;
 	interactiveAllowed: number;
 	interactiveDenied: number;
 	interactiveDeniedRate: number;
@@ -58,6 +61,8 @@ export const summarizeRateLimitTotals = (
 	totals: ReadonlyMap<string, number>
 ): RateLimitReportSummary => {
 	let totalDecisions = 0;
+	let enforcedDecisions = 0;
+	let shadowDecisions = 0;
 	let interactiveAllowed = 0;
 	let interactiveDenied = 0;
 	let shadowInteractiveAllowed = 0;
@@ -69,6 +74,8 @@ export const summarizeRateLimitTotals = (
 		const interactive =
 			trafficClass === "mini" || trafficClass === "web_browser" || workload === "interactive";
 		totalDecisions += count;
+		if (outcome === "allowed" || outcome === "denied") enforcedDecisions += count;
+		if (outcome === "would_allow" || outcome === "would_deny") shadowDecisions += count;
 		if (interactive && (outcome === "allowed" || outcome === "legacy_allowed")) {
 			interactiveAllowed += count;
 		}
@@ -86,6 +93,9 @@ export const summarizeRateLimitTotals = (
 	const shadowInteractiveTotal = shadowInteractiveAllowed + shadowInteractiveDenied;
 	return {
 		totalDecisions,
+		v3Decisions: enforcedDecisions + shadowDecisions,
+		enforcedDecisions,
+		shadowDecisions,
 		interactiveAllowed,
 		interactiveDenied,
 		interactiveDeniedRate: interactiveTotal === 0 ? 0 : interactiveDenied / interactiveTotal,

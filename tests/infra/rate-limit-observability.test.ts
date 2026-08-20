@@ -88,8 +88,36 @@ describe("rate-limit observability privacy", () => {
 		);
 		expect(summary.interactiveDeniedRate).toBe(0.1);
 		expect(summary.totalDecisions).toBe(202);
+		expect(summary.v3Decisions).toBe(102);
+		expect(summary.enforcedDecisions).toBe(0);
+		expect(summary.shadowDecisions).toBe(102);
 		expect(summary.shadowInteractiveDeniedRate).toBe(42 / 102);
 		expect(summary.globalDenied).toBe(0);
 		expect(summary.globalWouldDenied).toBe(2);
+	});
+
+	it("does not treat legacy-only traffic as v3 rollout evidence", () => {
+		const summary = summarizeRateLimitTotals(
+			new Map([
+				["mini|market|client|legacy_allowed", 90],
+				["mini|market|client|legacy_denied", 10],
+			])
+		);
+		expect(summary.totalDecisions).toBe(100);
+		expect(summary.v3Decisions).toBe(0);
+		expect(summary.enforcedDecisions).toBe(0);
+		expect(summary.shadowDecisions).toBe(0);
+	});
+
+	it("reports enforced v3 decisions separately from shadow decisions", () => {
+		const summary = summarizeRateLimitTotals(
+			new Map([
+				["web_rsc|fixtures|workload|allowed", 9],
+				["web_rsc|fixtures|workload|denied", 1],
+			])
+		);
+		expect(summary.v3Decisions).toBe(10);
+		expect(summary.enforcedDecisions).toBe(10);
+		expect(summary.shadowDecisions).toBe(0);
 	});
 });

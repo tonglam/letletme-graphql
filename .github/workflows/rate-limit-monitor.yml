@@ -51,7 +51,12 @@ jobs:
             .policy == "graphql-v3" and
             .days == 2 and
             .recent.minutes == 10 and
-            .recent.summary.totalDecisions > 0
+            .recent.summary.totalDecisions > 0 and
+            (
+              .mode == "legacy" or
+              (.mode == "shadow-v3" and .recent.summary.shadowDecisions > 0) or
+              (.mode == "enforce-v3" and .recent.summary.enforcedDecisions > 0)
+            )
           ' \
             "$RUNNER_TEMP/rate-limit-report.json"
           jq -e '
