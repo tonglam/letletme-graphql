@@ -1004,11 +1004,18 @@ const report = {
 		capacityFinishedAt: runtimeSamples[capacityRuntimeSampleIndex]?.at ?? finishedAt,
 		isolationFinishedAt,
 		finishedAt,
-		stageWindows: stageWindows.map(({ concurrent, startedAt, finishedAt }) => ({
-			concurrent,
-			startedAt,
-			finishedAt,
-		})),
+		stageWindows: stageWindows.map(
+			({ concurrent, startedAt, finishedAt, runtimeStartIndex, runtimeEndIndex }) => ({
+				concurrent,
+				startedAt,
+				finishedAt,
+				serverGraphQLRequests: counterDelta(
+					"serverGraphQLRequests",
+					runtimeSamples[runtimeStartIndex],
+					runtimeSamples[runtimeEndIndex]
+				),
+			})
+		),
 	},
 	summary: {
 		elapsedSeconds,

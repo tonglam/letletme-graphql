@@ -528,6 +528,8 @@ const startServer = async (): Promise<void> => {
 				let shadowLegacyPreAuthResponse: Response | null = null;
 				let trustedIngress: GraphQLIngress | null = null;
 				let v3AdmissionEvaluated = false;
+				let terminalPreAuthV3Denial: TokenBucketStageResultV3 | null = null;
+				let v3AggregateRecorded = false;
 				let shadowRateLimitDecision: {
 					outcome: "allow" | "deny";
 					scope: GraphQLRateLimitHeaderScope;
@@ -539,6 +541,20 @@ const startServer = async (): Promise<void> => {
 						outcome: decision.allowed ? "allow" : "deny",
 						scope: decision.deniedScope ?? decision.details.at(-1)?.scope ?? "client",
 					};
+				};
+				const recordTerminalRequestV3Outcome = async (
+					ingress: GraphQLIngress,
+					fallbackDecision: TokenBucketStageResultV3
+				): Promise<void> => {
+					if (v3AggregateRecorded) return;
+					const terminalDecision = terminalPreAuthV3Denial ?? fallbackDecision;
+					v3AggregateRecorded = true;
+					await recordRequestRateLimitOutcome({
+						ingress,
+						scope:
+							terminalDecision.deniedScope ?? terminalDecision.details.at(-1)?.scope ?? "client",
+						outcome: terminalV3Outcome(terminalDecision),
+					});
 				};
 				const finalizeGraphQLResponse = (response: Response, outcome: string): Response => {
 					fullCoreLoaded =
@@ -607,11 +623,7 @@ const startServer = async (): Promise<void> => {
 								stage: "pre-auth",
 								decision: earlyAdmission.decision,
 							});
-							await recordRequestRateLimitOutcome({
-								ingress: ingressForFailure,
-								scope: "global",
-								outcome: terminalV3Outcome(earlyAdmission.decision),
-							});
+							await recordTerminalRequestV3Outcome(ingressForFailure, earlyAdmission.decision);
 						}
 						if (earlyAdmission.response) {
 							return finalizeGraphQLResponse(
@@ -674,6 +686,9 @@ const startServer = async (): Promise<void> => {
 						})
 					);
 					if (preAuthAdmission.v3Decision) {
+						if (!preAuthAdmission.v3Decision.allowed) {
+							terminalPreAuthV3Denial = preAuthAdmission.v3Decision;
+						}
 						captureShadowRateLimitDecision(preAuthAdmission.v3Decision);
 						logV3RateLimitDecision({
 							requestId,
@@ -697,11 +712,7 @@ const startServer = async (): Promise<void> => {
 							preAuthAdmission.v3Decision &&
 							!preAuthAdmission.v3Decision.allowed
 						) {
-							await recordRequestRateLimitOutcome({
-								ingress,
-								scope: preAuthAdmission.v3Decision.deniedScope ?? "client",
-								outcome: "denied",
-							});
+							await recordTerminalRequestV3Outcome(ingress, preAuthAdmission.v3Decision);
 						}
 						if (
 							env.GRAPHQL_RATE_LIMIT_MODE === "shadow-v3" &&
@@ -811,14 +822,7 @@ const startServer = async (): Promise<void> => {
 							stage: "weighted",
 							decision: principalAdmissionResult.v3Decision,
 						});
-						await recordRequestRateLimitOutcome({
-							ingress,
-							scope:
-								principalAdmissionResult.v3Decision.deniedScope ??
-								principalAdmissionResult.v3Decision.details.at(-1)?.scope ??
-								"client",
-							outcome: terminalV3Outcome(principalAdmissionResult.v3Decision),
-						});
+						await recordTerminalRequestV3Outcome(ingress, principalAdmissionResult.v3Decision);
 					}
 					if (shadowLegacyPreAuthResponse) {
 						return finalizeGraphQLResponse(

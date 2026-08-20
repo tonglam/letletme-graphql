@@ -1,17 +1,38 @@
 import { describe, expect, it } from "bun:test";
 import { capacityRunRequestIdPrefix } from "../../src/http/capacity-run-id";
-import { buildRateLimitTargetObservation } from "../../src/http/rate-limit-observation";
+import {
+	buildRateLimitTargetObservation,
+	parseCapacityLoadReport,
+} from "../../src/http/rate-limit-observation";
 
 const startedAt = Date.parse("2026-08-20T00:00:00.000Z");
 const finishedAt = startedAt + 15 * 60 * 1000;
 const report = {
 	runId: "capacity-run-123",
 	gatePassed: true,
-	model: { targetConcurrent: 300 },
+	model: { targetConcurrent: 300, stagesSeconds: { sustainability: 300 } },
 	summary: { sustainableRps: 40 },
 	window: {
-		stageWindows: [{ concurrent: 300, startedAt, finishedAt }],
+		stageWindows: [{ concurrent: 300, startedAt, finishedAt, serverGraphQLRequests: 4 }],
 	},
+	sustainability: [
+		{
+			phase: "stage-300",
+			multiplier: 1,
+			durationSeconds: 900,
+			elapsedSeconds: 900,
+			achievedGraphQLRps: 20,
+			passed: true,
+		},
+		{
+			phase: "sustainable-2x",
+			multiplier: 2,
+			durationSeconds: 300,
+			elapsedSeconds: 300,
+			achievedGraphQLRps: 40.4,
+			passed: true,
+		},
+	],
 };
 
 const log = (input: Record<string, unknown>): string =>
@@ -71,7 +92,14 @@ describe("capacity log observation", () => {
 				report: {
 					...report,
 					window: {
-						stageWindows: [{ concurrent: 300, startedAt, finishedAt: startedAt + 1_000 }],
+						stageWindows: [
+							{
+								concurrent: 300,
+								startedAt,
+								finishedAt: startedAt + 1_000,
+								serverGraphQLRequests: 1,
+							},
+						],
 					},
 				},
 				logLines: [],
@@ -85,6 +113,51 @@ describe("capacity log observation", () => {
 					log({ time: finishedAt + 1, trafficClass: "mini", workload: "home", cost: 1 }),
 				],
 			})
-		).toThrow("No weighted v3 decisions");
+		).toThrow("coverage mismatch");
+	});
+
+	it("rejects truncated decision logs instead of undersizing class buckets", () => {
+		expect(() =>
+			buildRateLimitTargetObservation({
+				report,
+				logLines: [log({ trafficClass: "mini", workload: "home", cost: 1 })],
+			})
+		).toThrow("expected 4, matched 1");
+	});
+
+	it("rejects short configured or elapsed sustainability probes", () => {
+		expect(() =>
+			buildRateLimitTargetObservation({
+				report: {
+					...report,
+					model: { targetConcurrent: 300, stagesSeconds: { sustainability: 1 } },
+				},
+				logLines: [],
+			})
+		).toThrow("five-minute sustainability probes");
+
+		expect(() =>
+			buildRateLimitTargetObservation({
+				report: {
+					...report,
+					sustainability: report.sustainability.map((phase) =>
+						phase.phase === "sustainable-2x" ? { ...phase, elapsedSeconds: 1 } : phase
+					),
+				},
+				logLines: [],
+			})
+		).toThrow("complete five-minute probes");
+	});
+
+	it("parses the completeness fields required by profile generation", () => {
+		expect(parseCapacityLoadReport(report)).toEqual(report);
+		expect(() =>
+			parseCapacityLoadReport({
+				...report,
+				window: {
+					stageWindows: [{ concurrent: 300, startedAt, finishedAt }],
+				},
+			})
+		).toThrow("invalid stage window");
 	});
 });

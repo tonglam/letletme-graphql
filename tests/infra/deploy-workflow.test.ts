@@ -122,7 +122,10 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain("scripts/rate_limit_p0_guard.py");
 		expect(workflow).toContain("for sample in $(seq 1 60)");
 		expect(workflow).toContain("P0_PROBE_REQUESTS=700");
-		expect(workflow).toContain(".total == 700 and .rateLimited > 0");
+		expect(workflow).toContain(
+			".total == 700 and .successful > 0 and .rateLimited > 0 and .unexpected == 0"
+		);
+		expect(workflow).toContain(".total == 700 and .successful > 0 and .unexpected == 0");
 		expect(workflow).toContain("after_429 * 2");
 		expect(workflow.indexOf("start_stage p0Observe")).toBeLessThan(
 			workflow.indexOf("start_stage finalize")
@@ -140,6 +143,23 @@ describe("production deployment workflow", () => {
 			rateLimitCostUnits: 2,
 		});
 		expect(p0Probe).toContain('P0_PROBE_REQUESTS ?? "700"');
+		expect(p0Probe).toContain("response.status === 200");
+		expect(p0Probe).toContain("successful");
+		expect(p0Probe).toContain("unexpected");
+	});
+
+	test("restores the persisted rollout selector if finalization rolls back", () => {
+		const rolloutWriteAt = workflow.indexOf(
+			'printf \'%s\\n\' "$persist_rate_limit_rollout" > "$rollout_state"'
+		);
+		const deploymentCommittedAt = workflow.lastIndexOf("deployment_committed=true");
+
+		expect(workflow).toContain("rollout_state_existed=false");
+		expect(workflow).toContain("rollout_state_backup=$(mktemp");
+		expect(workflow).toContain('mv "$rollout_state_backup" "$rollout_state"');
+		expect(workflow).toContain('rm -f "$rollout_state"');
+		expect(rolloutWriteAt).toBeGreaterThan(-1);
+		expect(rolloutWriteAt).toBeLessThan(deploymentCommittedAt);
 	});
 
 	test("binds P0 backup evidence to the running image instead of the checkout", () => {

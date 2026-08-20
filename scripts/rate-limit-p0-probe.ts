@@ -31,7 +31,9 @@ const query = `query P0RateLimitRegression {
 	}
 }`;
 
-const requestOnce = async (index: number): Promise<number> => {
+type ProbeResult = { status: number; successful: boolean };
+
+const requestOnce = async (index: number): Promise<ProbeResult> => {
 	const now = Math.floor(Date.now() / 1000);
 	const payload = JSON.stringify({
 		aud: "letletme-graphql",
@@ -50,13 +52,23 @@ const requestOnce = async (index: number): Promise<number> => {
 		body: JSON.stringify({ operationName: "P0RateLimitRegression", query }),
 		signal: AbortSignal.timeout(10_000),
 	});
-	await response.body?.cancel();
-	return response.status;
+	const body = (await response.json().catch(() => null)) as {
+		data?: unknown;
+		errors?: readonly unknown[];
+	} | null;
+	return {
+		status: response.status,
+		successful:
+			response.status === 200 &&
+			body !== null &&
+			body.data !== undefined &&
+			(body.errors?.length ?? 0) === 0,
+	};
 };
 
-const statuses: number[] = [];
+const results: ProbeResult[] = [];
 for (let offset = 0; offset < total; offset += 20) {
-	statuses.push(
+	results.push(
 		...(await Promise.all(
 			Array.from({ length: Math.min(20, total - offset) }, (_, index) =>
 				requestOnce(offset + index)
@@ -65,17 +77,23 @@ for (let offset = 0; offset < total; offset += 20) {
 	);
 }
 
+const statuses = results.map((result) => result.status);
 const counts = Object.fromEntries(
 	[...new Set(statuses)]
 		.sort((left, right) => left - right)
 		.map((status) => [String(status), statuses.filter((candidate) => candidate === status).length])
 );
+const successful = results.filter((result) => result.successful).length;
+const rateLimited = counts["429"] ?? 0;
+const unexpected = total - successful - rateLimited;
 process.stdout.write(
 	`${JSON.stringify({
 		operation: "p0-rate-limit-regression",
 		total,
-		rateLimited: counts["429"] ?? 0,
-		nonRateLimited: total - (counts["429"] ?? 0),
+		successful,
+		rateLimited,
+		unexpected,
+		nonRateLimited: total - rateLimited,
 		statuses: counts,
 	})}\n`
 );

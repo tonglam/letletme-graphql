@@ -49,6 +49,8 @@ describe("GraphQL v3 capacity model", () => {
 		expect(source).toContain("if (!result.passed) break");
 		expect(source).toContain("(runtimeEnd.at - runtimeStart.at) / 1000");
 		expect(source).toContain("serverRequests / elapsedSeconds");
+		expect(source).toContain("serverGraphQLRequests: counterDelta(");
+		expect(source).toContain("elapsedSeconds");
 		expect(source).toContain('outcome="legacy_denied"');
 	});
 

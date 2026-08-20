@@ -5,15 +5,27 @@ import type { RateLimitTargetObservation } from "./rate-limit-profile-generator"
 export type CapacityLoadReport = {
 	runId: string;
 	gatePassed: boolean;
-	model: { targetConcurrent: number };
+	model: {
+		targetConcurrent: number;
+		stagesSeconds: { sustainability: number };
+	};
 	summary: { sustainableRps: number };
 	window: {
 		stageWindows: readonly {
 			concurrent: number;
 			startedAt: number;
 			finishedAt: number;
+			serverGraphQLRequests: number;
 		}[];
 	};
+	sustainability: readonly {
+		phase: string;
+		multiplier: number;
+		durationSeconds: number;
+		elapsedSeconds: number;
+		achievedGraphQLRps: number;
+		passed: boolean;
+	}[];
 };
 
 const isFiniteNumber = (value: unknown): value is number =>
@@ -25,6 +37,9 @@ export const parseCapacityLoadReport = (value: unknown): CapacityLoadReport => {
 	const model = candidate.model;
 	const summary = candidate.summary;
 	const window = candidate.window;
+	const sustainability = candidate.sustainability;
+	const stagesSeconds =
+		model && typeof model === "object" ? (model as Record<string, unknown>).stagesSeconds : null;
 	if (
 		typeof candidate.runId !== "string" ||
 		!/^[A-Za-z0-9_-]{8,32}$/.test(candidate.runId) ||
@@ -32,13 +47,18 @@ export const parseCapacityLoadReport = (value: unknown): CapacityLoadReport => {
 		!model ||
 		typeof model !== "object" ||
 		(model as Record<string, unknown>).targetConcurrent !== 300 ||
+		!stagesSeconds ||
+		typeof stagesSeconds !== "object" ||
+		!isFiniteNumber((stagesSeconds as Record<string, unknown>).sustainability) ||
+		((stagesSeconds as Record<string, number>).sustainability as number) <= 0 ||
 		!summary ||
 		typeof summary !== "object" ||
 		!Number.isSafeInteger((summary as Record<string, unknown>).sustainableRps) ||
 		((summary as Record<string, unknown>).sustainableRps as number) < 0 ||
 		!window ||
 		typeof window !== "object" ||
-		!Array.isArray((window as Record<string, unknown>).stageWindows)
+		!Array.isArray((window as Record<string, unknown>).stageWindows) ||
+		!Array.isArray(sustainability)
 	) {
 		throw new Error("Load report does not match the capacity evidence schema");
 	}
@@ -50,22 +70,51 @@ export const parseCapacityLoadReport = (value: unknown): CapacityLoadReport => {
 			return (
 				isFiniteNumber(stage.concurrent) &&
 				isFiniteNumber(stage.startedAt) &&
-				isFiniteNumber(stage.finishedAt)
+				isFiniteNumber(stage.finishedAt) &&
+				Number.isSafeInteger(stage.serverGraphQLRequests) &&
+				(stage.serverGraphQLRequests as number) > 0
 			);
 		})
 	) {
 		throw new Error("Load report contains an invalid stage window");
 	}
+	if (
+		!sustainability.every((entry) => {
+			if (!entry || typeof entry !== "object") return false;
+			const phase = entry as Record<string, unknown>;
+			return (
+				typeof phase.phase === "string" &&
+				phase.phase.length > 0 &&
+				isFiniteNumber(phase.multiplier) &&
+				(phase.multiplier as number) >= 1 &&
+				isFiniteNumber(phase.durationSeconds) &&
+				(phase.durationSeconds as number) > 0 &&
+				isFiniteNumber(phase.elapsedSeconds) &&
+				(phase.elapsedSeconds as number) > 0 &&
+				isFiniteNumber(phase.achievedGraphQLRps) &&
+				(phase.achievedGraphQLRps as number) >= 0 &&
+				typeof phase.passed === "boolean"
+			);
+		})
+	) {
+		throw new Error("Load report contains invalid sustainability evidence");
+	}
 	return {
 		runId: candidate.runId,
 		gatePassed: candidate.gatePassed,
-		model: { targetConcurrent: 300 },
+		model: {
+			targetConcurrent: 300,
+			stagesSeconds: {
+				sustainability: (stagesSeconds as Record<string, number>).sustainability,
+			},
+		},
 		summary: {
 			sustainableRps: (summary as Record<string, number>).sustainableRps,
 		},
 		window: {
 			stageWindows: stageWindows as CapacityLoadReport["window"]["stageWindows"],
 		},
+		sustainability: sustainability as CapacityLoadReport["sustainability"],
 	};
 };
 
@@ -109,6 +158,27 @@ export const buildRateLimitTargetObservation = ({
 	}
 	if (!Number.isSafeInteger(report.summary.sustainableRps) || report.summary.sustainableRps < 2) {
 		throw new Error("Load report must contain an automatically measured sustainable RPS");
+	}
+	if (report.model.stagesSeconds.sustainability < 5 * 60) {
+		throw new Error("Capacity evidence requires five-minute sustainability probes");
+	}
+	const passedSustainability = report.sustainability.filter((phase) => phase.passed);
+	const measuredSustainableRps = Math.floor(
+		Math.max(0, ...passedSustainability.map((phase) => phase.achievedGraphQLRps))
+	);
+	if (measuredSustainableRps !== report.summary.sustainableRps) {
+		throw new Error("Sustainable RPS does not match the passing probe evidence");
+	}
+	const reliedUponSustainability = passedSustainability.filter(
+		(phase) => Math.floor(phase.achievedGraphQLRps) === report.summary.sustainableRps
+	);
+	if (
+		reliedUponSustainability.length === 0 ||
+		reliedUponSustainability.some(
+			(phase) => phase.durationSeconds < 5 * 60 || phase.elapsedSeconds < phase.durationSeconds
+		)
+	) {
+		throw new Error("Sustainable RPS must rely only on complete five-minute probes");
 	}
 	const window = report.window.stageWindows.find((candidate) => candidate.concurrent === 300);
 	if (!window || window.finishedAt - window.startedAt < 15 * 60 * 1000) {
@@ -159,8 +229,10 @@ export const buildRateLimitTargetObservation = ({
 		}
 	}
 
-	if (totalRequests === 0) {
-		throw new Error("No weighted v3 decisions matched the 300-concurrent evidence window");
+	if (totalRequests !== window.serverGraphQLRequests) {
+		throw new Error(
+			`Capacity decision log coverage mismatch: expected ${window.serverGraphQLRequests}, matched ${totalRequests}`
+		);
 	}
 	return {
 		targetConcurrent: 300,

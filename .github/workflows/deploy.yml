@@ -140,6 +140,9 @@ jobs:
             previous_env=""
             deployment_state="$HOME/.letletme-graphql-current-deployment.json"
             deployment_state_next=""
+            rollout_state=""
+            rollout_state_backup=""
+            rollout_state_existed=false
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
             active_stage=""
@@ -173,6 +176,9 @@ jobs:
               fi
               if [ -n "${deployment_state_next:-}" ]; then
                 rm -f "$deployment_state_next"
+              fi
+              if [ -n "${rollout_state_backup:-}" ]; then
+                rm -f "$rollout_state_backup"
               fi
               exit "$original_status"
             }
@@ -214,6 +220,12 @@ jobs:
             printf '%s' "$GRAPHQL_ENV" > "$next_env"
             chmod 600 "$next_env"
             rollout_state="$HOME/.letletme-graphql-rate-limit-rollout"
+            if [ -f "$rollout_state" ]; then
+              rollout_state_existed=true
+              rollout_state_backup=$(mktemp "$HOME/.letletme-graphql-rate-limit-rollout.previous.XXXXXX")
+              cp "$rollout_state" "$rollout_state_backup"
+              chmod 600 "$rollout_state_backup"
+            fi
             persist_rate_limit_rollout=""
             case "$RATE_LIMIT_ROLLOUT" in
               preserve)
@@ -366,7 +378,9 @@ jobs:
                   -e P0_PROBE_SUBJECT="before-$backup_stamp" \
                   "$old_container" bun /tmp/rate-limit-p0-probe.ts \
                   > "$backup_dir/probe-before.json"
-                jq -e '.total == 700 and .rateLimited > 0' "$backup_dir/probe-before.json" \
+                jq -e \
+                  '.total == 700 and .successful > 0 and .rateLimited > 0 and .unexpected == 0 and (.successful + .rateLimited == .total)' \
+                  "$backup_dir/probe-before.json" \
                   >/dev/null
               fi
               jq -n \
@@ -451,6 +465,17 @@ jobs:
                   fi
                   APP_ENV_FILE="$rollback_cleanup_env" APP_IMAGE="$IMAGE_REF" \
                     docker compose rm --stop --force graphql || true
+                fi
+                if [ "$rollout_state_existed" = true ]; then
+                  if [ -n "$rollout_state_backup" ] && [ -f "$rollout_state_backup" ]; then
+                    mv "$rollout_state_backup" "$rollout_state"
+                    chmod 600 "$rollout_state"
+                    rollout_state_backup=""
+                  else
+                    echo "GraphQL rollback could not restore the previous rate-limit rollout state"
+                  fi
+                else
+                  rm -f "$rollout_state"
                 fi
               fi
               if [ "$env_promoted" = false ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
@@ -588,6 +613,10 @@ jobs:
                 > "$observation_dir/probe-after.json"
               before_429=$(jq -r '.rateLimited' "$backup_dir/probe-before.json")
               after_429=$(jq -r '.rateLimited' "$observation_dir/probe-after.json")
+              jq -e \
+                '.total == 700 and .successful > 0 and .unexpected == 0 and (.successful + .rateLimited == .total)' \
+                "$observation_dir/probe-after.json" \
+                >/dev/null
               test "$before_429" -gt 0
               if [ $(( after_429 * 2 )) -gt "$before_429" ]; then
                 echo "P0 regression 429s did not fall by at least 50%: $before_429 -> $after_429"
@@ -668,6 +697,10 @@ jobs:
             finish_stage
             rollback_armed=false
             trap - EXIT
+            if [ -n "$rollout_state_backup" ]; then
+              rm -f "$rollout_state_backup"
+              rollout_state_backup=""
+            fi
             if [ -n "$previous_env" ]; then
               rm -f "$previous_env"
             fi
