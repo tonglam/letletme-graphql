@@ -960,52 +960,229 @@ type DbTournamentEventSnapshotRow = {
 	tournament_auto_sub_rank: number | null;
 };
 
-const isTournamentInfoCache = (value: unknown): value is TournamentInfo =>
-	isRecord(value) &&
-	Number.isFinite(Number(value.id)) &&
-	typeof value.name === "string" &&
-	typeof value.setupStatus === "string" &&
-	typeof value.setupPhase === "string" &&
-	Number.isFinite(Number(value.setupCompletedUnits)) &&
-	Number.isFinite(Number(value.setupTotalUnits)) &&
-	typeof value.setupHasWarnings === "boolean" &&
-	"standingsReadyAt" in value &&
-	typeof value.rosterMode === "string";
+const TOURNAMENT_CACHE_NAMESPACE = "tournaments:v2";
+
+const tournamentCacheKey = (context: GraphQLContext, suffix: string): string =>
+	gqlCacheKey(context, `${TOURNAMENT_CACHE_NAMESPACE}:${suffix}`);
+
+const hasOwn = (value: Record<string, unknown>, key: string): boolean =>
+	Object.prototype.hasOwnProperty.call(value, key);
+
+const isSafeInteger = (value: unknown): value is number =>
+	typeof value === "number" && Number.isSafeInteger(value);
+
+const isFiniteNumber = (value: unknown): value is number =>
+	typeof value === "number" && Number.isFinite(value);
+
+const isNullableSafeInteger = (value: unknown): value is number | null =>
+	value === null || isSafeInteger(value);
+
+const isNullableFiniteNumber = (value: unknown): value is number | null =>
+	value === null || isFiniteNumber(value);
+
+const isNullableString = (value: unknown): value is string | null =>
+	value === null || typeof value === "string";
+
+const isIsoDateTime = (value: unknown): value is string =>
+	typeof value === "string" &&
+	/^\d{4}-\d{2}-\d{2}T/.test(value) &&
+	Number.isFinite(Date.parse(value));
+
+const isNullableIsoDateTime = (value: unknown): value is string | null =>
+	value === null || isIsoDateTime(value);
+
+const isEnumValue = <T extends string>(enumObject: Record<string, T>, value: unknown): value is T =>
+	typeof value === "string" && Object.values(enumObject).includes(value as T);
+
+const isRequired = (
+	value: Record<string, unknown>,
+	key: string,
+	predicate: (candidate: unknown) => boolean
+): boolean => hasOwn(value, key) && predicate(value[key]);
+
+const isTournamentInfoCache = (value: unknown): value is TournamentInfo => {
+	if (!isRecord(value)) return false;
+	return (
+		isRequired(value, "id", (candidate) => isSafeInteger(candidate)) &&
+		isRequired(value, "name", (candidate) => typeof candidate === "string") &&
+		isRequired(value, "creator", (candidate) => typeof candidate === "string") &&
+		isRequired(value, "adminEntryId", (candidate) => isSafeInteger(candidate)) &&
+		isRequired(value, "leagueId", (candidate) => isSafeInteger(candidate)) &&
+		isRequired(value, "leagueType", (candidate) => isEnumValue(LeagueType, candidate)) &&
+		isRequired(value, "sourceLeagueName", isNullableString) &&
+		isRequired(value, "rosterMode", (candidate) => isEnumValue(TournamentRosterMode, candidate)) &&
+		isRequired(
+			value,
+			"rosterSyncStatus",
+			(candidate) => candidate === null || isEnumValue(TournamentSetupStatus, candidate)
+		) &&
+		isRequired(value, "rosterLastSyncedAt", isNullableIsoDateTime) &&
+		isRequired(value, "officialScheduleHash", isNullableString) &&
+		isRequired(value, "officialScheduleSyncedAt", isNullableIsoDateTime) &&
+		isRequired(value, "officialScheduleLockedAt", isNullableIsoDateTime) &&
+		isRequired(value, "totalTeamNum", (candidate) => isSafeInteger(candidate)) &&
+		isRequired(value, "tournamentMode", (candidate) => isEnumValue(TournamentMode, candidate)) &&
+		isRequired(
+			value,
+			"groupMode",
+			(candidate) => candidate === null || isEnumValue(GroupMode, candidate)
+		) &&
+		isRequired(value, "groupTeamNum", isNullableSafeInteger) &&
+		isRequired(value, "groupNum", isNullableSafeInteger) &&
+		isRequired(value, "groupStartedEventId", isNullableSafeInteger) &&
+		isRequired(value, "groupEndedEventId", isNullableSafeInteger) &&
+		isRequired(value, "groupAutoAverages", (candidate) => typeof candidate === "boolean") &&
+		isRequired(value, "groupRounds", isNullableSafeInteger) &&
+		isRequired(value, "groupPlayAgainstNum", isNullableSafeInteger) &&
+		isRequired(value, "groupQualifyNum", isNullableSafeInteger) &&
+		isRequired(
+			value,
+			"knockoutMode",
+			(candidate) => candidate === null || isEnumValue(KnockoutMode, candidate)
+		) &&
+		isRequired(value, "knockoutTeamNum", isNullableSafeInteger) &&
+		isRequired(value, "knockoutRounds", isNullableSafeInteger) &&
+		isRequired(value, "knockoutEventNum", isNullableSafeInteger) &&
+		isRequired(value, "knockoutStartedEventId", isNullableSafeInteger) &&
+		isRequired(value, "knockoutEndedEventId", isNullableSafeInteger) &&
+		isRequired(value, "knockoutPlayAgainstNum", isNullableSafeInteger) &&
+		isRequired(value, "state", (candidate) => isEnumValue(TournamentState, candidate)) &&
+		isRequired(value, "setupStatus", (candidate) =>
+			isEnumValue(TournamentSetupStatus, candidate)
+		) &&
+		isRequired(value, "setupPhase", (candidate) => isEnumValue(TournamentSetupPhase, candidate)) &&
+		isRequired(value, "setupCompletedUnits", (candidate) => isSafeInteger(candidate)) &&
+		isRequired(value, "setupTotalUnits", (candidate) => isSafeInteger(candidate)) &&
+		isRequired(value, "setupProgressUpdatedAt", isNullableIsoDateTime) &&
+		isRequired(value, "standingsReadyAt", isNullableIsoDateTime) &&
+		isRequired(value, "setupHasWarnings", (candidate) => typeof candidate === "boolean") &&
+		isRequired(value, "setupStartedAt", isNullableIsoDateTime) &&
+		isRequired(value, "setupFinishedAt", isNullableIsoDateTime) &&
+		isRequired(value, "createdAt", isIsoDateTime) &&
+		isRequired(value, "updatedAt", isIsoDateTime)
+	);
+};
 
 const isTournamentInfoArrayCache = (value: unknown): value is TournamentInfo[] =>
 	Array.isArray(value) && value.every(isTournamentInfoCache);
 
 const isEntryIdArrayCache = (value: unknown): value is number[] =>
-	Array.isArray(value) &&
-	value.every((item) => Number.isSafeInteger(Number(item)) && Number(item) > 0);
+	Array.isArray(value) && value.every((item) => isSafeInteger(item) && item > 0);
+
+const isTournamentEventResultCache = (value: unknown): value is TournamentEventResult => {
+	if (!isRecord(value)) return false;
+	return (
+		isRequired(value, "tournament", isTournamentInfoCache) &&
+		isRequired(value, "eventId", isSafeInteger) &&
+		isRequired(value, "groupId", isSafeInteger) &&
+		isRequired(value, "entryId", isSafeInteger) &&
+		isRequired(value, "entryName", isNullableString) &&
+		isRequired(value, "playerName", isNullableString) &&
+		isRequired(value, "eventGroupRank", isNullableSafeInteger) &&
+		isRequired(value, "eventPoints", isNullableFiniteNumber) &&
+		isRequired(value, "eventCost", isNullableFiniteNumber) &&
+		isRequired(value, "eventNetPoints", isNullableFiniteNumber) &&
+		isRequired(value, "eventRank", isNullableSafeInteger) &&
+		isRequired(value, "overallPoints", isNullableFiniteNumber) &&
+		isRequired(value, "overallRank", isNullableSafeInteger) &&
+		isRequired(value, "eventChip", isNullableString) &&
+		isRequired(value, "captainId", isNullableSafeInteger) &&
+		isRequired(value, "captainPoints", isNullableFiniteNumber) &&
+		isRequired(value, "teamValue", isNullableFiniteNumber) &&
+		isRequired(value, "bank", isNullableFiniteNumber)
+	);
+};
 
 const isTournamentEventResultArrayCache = (value: unknown): value is TournamentEventResult[] =>
-	Array.isArray(value) &&
-	value.every(
-		(item) =>
-			isRecord(item) &&
-			Number.isFinite(Number(item.eventId)) &&
-			Number.isFinite(Number(item.entryId)) &&
-			isTournamentInfoCache(item.tournament)
-	);
+	Array.isArray(value) && value.every(isTournamentEventResultCache);
 
-const isRankingSummaryCache = (value: unknown): value is TournamentEntryRankingSummary =>
-	isRecord(value) &&
-	Number.isFinite(Number(value.eventId)) &&
-	Number.isFinite(Number(value.entryId));
+const isRankingSummaryCache = (value: unknown): value is TournamentEntryRankingSummary => {
+	if (!isRecord(value)) return false;
+	const integerFields = ["eventId", "entryId"];
+	const nullableNumberFields = [
+		"overallRank",
+		"tournamentOverallRank",
+		"teamValue",
+		"tournamentTeamValueRank",
+		"transfersNum",
+		"tournamentTransfersRank",
+		"totalCosts",
+		"tournamentCostsRank",
+		"totalBenchPoints",
+		"tournamentBenchPointsRank",
+		"autoSubPoints",
+		"tournamentAutoSubRank",
+		"overallPoints",
+		"leaderOverallPoints",
+		"gapToLeader",
+		"pointsBehindNext",
+		"pointsAheadOfPrev",
+	];
+	return (
+		integerFields.every((key) => isRequired(value, key, isSafeInteger)) &&
+		nullableNumberFields.every((key) => isRequired(value, key, isNullableFiniteNumber))
+	);
+};
+
+const isBattleResultCache = (value: unknown): value is TournamentBattleGroupResult => {
+	if (!isRecord(value)) return false;
+	return (
+		isRequired(value, "tournament", isTournamentInfoCache) &&
+		isRequired(value, "matchId", isSafeInteger) &&
+		isRequired(value, "groupId", isSafeInteger) &&
+		isRequired(value, "eventId", isSafeInteger) &&
+		isRequired(value, "homeEntryId", isSafeInteger) &&
+		isRequired(value, "homeEntryName", isNullableString) &&
+		isRequired(value, "homePlayerName", isNullableString) &&
+		isRequired(value, "homeNetPoints", isNullableFiniteNumber) &&
+		isRequired(value, "homeRank", isNullableSafeInteger) &&
+		isRequired(value, "homeMatchPoints", isNullableFiniteNumber) &&
+		isRequired(value, "awayEntryId", isSafeInteger) &&
+		isRequired(value, "awayEntryName", isNullableString) &&
+		isRequired(value, "awayPlayerName", isNullableString) &&
+		isRequired(value, "awayNetPoints", isNullableFiniteNumber) &&
+		isRequired(value, "awayRank", isNullableSafeInteger) &&
+		isRequired(value, "awayMatchPoints", isNullableFiniteNumber)
+	);
+};
 
 const isBattleResultArrayCache = (value: unknown): value is TournamentBattleGroupResult[] =>
-	Array.isArray(value) &&
-	value.every(
-		(item) =>
-			isRecord(item) &&
-			Number.isFinite(Number(item.matchId)) &&
-			isTournamentInfoCache(item.tournament)
+	Array.isArray(value) && value.every(isBattleResultCache);
+
+const isH2HResultCache = (value: unknown): value is EntryH2HMatchResult => {
+	if (!isRecord(value)) return false;
+	return (
+		isRequired(value, "tournament", isTournamentInfoCache) &&
+		["matchId", "groupId", "eventId", "entryId", "opponentEntryId"].every((key) =>
+			isRequired(value, key, isSafeInteger)
+		) &&
+		[
+			"entryName",
+			"playerName",
+			"opponentEntryName",
+			"opponentPlayerName",
+			"entryChip",
+			"opponentChip",
+		].every((key) => isRequired(value, key, isNullableString)) &&
+		[
+			"entryNetPoints",
+			"entryRank",
+			"entryMatchPoints",
+			"entryEventPoints",
+			"entryTransferCost",
+			"entryOverallRank",
+			"opponentNetPoints",
+			"opponentRank",
+			"opponentMatchPoints",
+			"opponentEventPoints",
+			"opponentTransferCost",
+			"opponentOverallRank",
+		].every((key) => isRequired(value, key, isNullableFiniteNumber))
 	);
+};
 
 const isH2HResultArrayCache = (value: unknown): value is EntryH2HMatchResult[] =>
-	Array.isArray(value) &&
-	value.every((item) => isRecord(item) && isTournamentInfoCache(item.tournament));
+	Array.isArray(value) && value.every(isH2HResultCache);
 
 const TOURNAMENT_INFO_COLUMNS =
 	"id, name, creator, admin_entry_id, league_id, league_type, source_league_name, roster_mode, roster_sync_status, roster_last_synced_at, official_schedule_hash, official_schedule_synced_at, official_schedule_locked_at, total_team_num, tournament_mode, group_mode, group_team_num, group_num, group_started_event_id, group_ended_event_id, group_auto_averages, group_rounds, group_play_against_num, group_qualify_num, knockout_mode, knockout_team_num, knockout_rounds, knockout_event_num, knockout_started_event_id, knockout_ended_event_id, knockout_play_against_num, state, setup_status, setup_phase, setup_completed_units, setup_total_units, setup_progress_updated_at, standings_ready_at, setup_warning_count, setup_started_at, setup_finished_at, created_at, updated_at";
@@ -1734,12 +1911,79 @@ function buildSeasonSnapshotFromEventResults(
 	};
 }
 
-const isSeasonSnapshotCache = (value: unknown): value is TournamentSeasonSnapshot =>
-	isRecord(value) &&
-	Number.isFinite(Number(value.asOfEventId)) &&
-	Number.isFinite(Number(value.entryCount)) &&
-	Array.isArray(value.standings) &&
-	Array.isArray(value.metrics);
+const SEASON_METRIC_KEYS = new Set<TournamentSeasonMetricKey>([
+	"OVERALL_POINTS",
+	"TEAM_VALUE",
+	"TRANSFERS",
+	"TOTAL_COSTS",
+	"BENCH_POINTS",
+	"AUTO_SUB_POINTS",
+]);
+
+const isSeasonMetricCache = (value: unknown): value is TournamentSeasonMetric => {
+	if (!isRecord(value)) return false;
+	return (
+		isRequired(
+			value,
+			"key",
+			(candidate) =>
+				typeof candidate === "string" &&
+				SEASON_METRIC_KEYS.has(candidate as TournamentSeasonMetricKey)
+		) &&
+		isRequired(value, "leaderValue", isNullableFiniteNumber) &&
+		isRequired(value, "leaderEntryId", isNullableSafeInteger) &&
+		isRequired(value, "leaderEntryName", isNullableString) &&
+		isRequired(value, "leaderPlayerName", isNullableString) &&
+		isRequired(value, "averageValue", isNullableFiniteNumber) &&
+		isRequired(value, "higherIsBetter", (candidate) => typeof candidate === "boolean")
+	);
+};
+
+const isSeasonStandingCache = (value: unknown): value is TournamentSeasonStandingRow => {
+	if (!isRecord(value)) return false;
+	return (
+		isRequired(value, "entryId", isSafeInteger) &&
+		isRequired(value, "rank", isNullableSafeInteger) &&
+		isRequired(value, "entryName", isNullableString) &&
+		isRequired(value, "playerName", isNullableString) &&
+		isRequired(value, "overallPoints", isNullableFiniteNumber) &&
+		isRequired(value, "overallRank", isNullableSafeInteger) &&
+		isRequired(value, "teamValue", isNullableFiniteNumber)
+	);
+};
+
+const isSeasonSnapshotCache = (value: unknown): value is TournamentSeasonSnapshot => {
+	if (!isRecord(value)) return false;
+	return (
+		isRequired(value, "asOfEventId", isSafeInteger) &&
+		isRequired(value, "entryCount", isSafeInteger) &&
+		isRequired(value, "leaderOverallPoints", isNullableFiniteNumber) &&
+		isRequired(value, "secondOverallPoints", isNullableFiniteNumber) &&
+		isRequired(value, "gapFirstSecond", isNullableFiniteNumber) &&
+		isRequired(value, "averageOverallPoints", isNullableFiniteNumber) &&
+		isRequired(
+			value,
+			"metrics",
+			(candidate) => Array.isArray(candidate) && candidate.every(isSeasonMetricCache)
+		) &&
+		isRequired(
+			value,
+			"standings",
+			(candidate) => Array.isArray(candidate) && candidate.every(isSeasonStandingCache)
+		)
+	);
+};
+
+export const tournamentCacheTestables = {
+	isTournamentInfoCache,
+	isTournamentEventResultCache,
+	isRankingSummaryCache,
+	isBattleResultCache,
+	isH2HResultCache,
+	isSeasonSnapshotCache,
+	isEntryIdArrayCache,
+	tournamentCacheKey,
+};
 
 export const tournamentsRepository: TournamentsRepository = {
 	getTournamentInfoUncached,
@@ -1827,9 +2071,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		// Mutable metadata is read directly for lightweight roots. Legacy callers
 		// that already pinned a core revision retain the existing bounded cache
 		// contract during the rolling migration.
-		const cacheKey = context.dataRevision
-			? gqlCacheKey(context, `tournaments:entry:${entryId}`)
-			: null;
+		const cacheKey = context.dataRevision ? tournamentCacheKey(context, `entry:${entryId}`) : null;
 		if (cacheKey) {
 			const cached = await readJsonQueryCache(context, cacheKey, (value) =>
 				isTournamentInfoArrayCache(value) ? value : null
@@ -1890,7 +2132,7 @@ export const tournamentsRepository: TournamentsRepository = {
 	async getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]> {
 		if (!context.dataRevision)
 			return tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
-		const cacheKey = gqlCacheKey(context, `tournaments:entry-ids:${tournamentId}`);
+		const cacheKey = tournamentCacheKey(context, `entry-ids:${tournamentId}`);
 		if (!(await getTournamentCacheReadiness(context, tournamentId))) {
 			await deleteQueryCache(context, cacheKey);
 			return tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
@@ -1898,8 +2140,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		const cached = await readJsonQueryCache(context, cacheKey, (value) =>
 			isEntryIdArrayCache(value) ? value : null
 		);
-		if (Array.isArray(cached) && cached.every((item) => Number.isFinite(Number(item))))
-			return cached as number[];
+		if (Array.isArray(cached)) return cached;
 		const entryIds = await tournamentsRepository.getTournamentEntryIdsUncached(
 			context,
 			tournamentId
@@ -1940,9 +2181,9 @@ export const tournamentsRepository: TournamentsRepository = {
 		const pagination = normalizeTournamentEventResultsPagination(limit, offset);
 		const isPaged = pagination.limit !== null;
 		const cacheKey = context.dataRevision
-			? gqlCacheKey(
+			? tournamentCacheKey(
 					context,
-					`tournaments:event-results:${stableStringify({
+					`event-results:${stableStringify({
 						tournamentId,
 						eventId,
 						...(isPaged ? { limit: pagination.limit, offset: pagination.offset ?? 0 } : {}),
@@ -1954,17 +2195,7 @@ export const tournamentsRepository: TournamentsRepository = {
 					isTournamentEventResultArrayCache(value) ? value : null
 				)
 			: undefined;
-		if (
-			Array.isArray(cached) &&
-			cached.every(
-				(item) =>
-					isRecord(item) &&
-					Number.isFinite(Number(item.eventId)) &&
-					Number.isFinite(Number(item.entryId))
-			)
-		) {
-			return cached as TournamentEventResult[];
-		}
+		if (Array.isArray(cached)) return cached;
 
 		let resultQuery = context.data
 			.read("reporting.tournament_event_results")
@@ -2037,9 +2268,9 @@ export const tournamentsRepository: TournamentsRepository = {
 		eventId: number,
 		entryId: number
 	): Promise<TournamentEntryRankingSummary> {
-		const cacheKey = gqlCacheKey(
+		const cacheKey = tournamentCacheKey(
 			context,
-			`tournaments:ranking-summary:${stableStringify({
+			`ranking-summary:${stableStringify({
 				tournamentId,
 				eventId,
 				entryId,
@@ -2048,13 +2279,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		const cached = await readJsonQueryCache(context, cacheKey, (value) =>
 			isRankingSummaryCache(value) ? value : null
 		);
-		if (
-			isRecord(cached) &&
-			Number.isFinite(Number(cached.eventId)) &&
-			Number.isFinite(Number(cached.entryId))
-		) {
-			return cached as unknown as TournamentEntryRankingSummary;
-		}
+		if (isRecord(cached)) return cached;
 
 		const emptySummary: TournamentEntryRankingSummary = {
 			eventId,
@@ -2172,9 +2397,9 @@ export const tournamentsRepository: TournamentsRepository = {
 			return empty;
 		}
 
-		const cacheKey = gqlCacheKey(
+		const cacheKey = tournamentCacheKey(
 			context,
-			`tournaments:season-snapshot:${stableStringify({ tournamentId, eventId })}`
+			`season-snapshot:${stableStringify({ tournamentId, eventId })}`
 		);
 		const cached = await readJsonQueryCache(context, cacheKey, (value) =>
 			isSeasonSnapshotCache(value) ? value : null
@@ -2237,19 +2462,14 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		eventId: number
 	): Promise<TournamentBattleGroupResult[]> {
-		const cacheKey = gqlCacheKey(
+		const cacheKey = tournamentCacheKey(
 			context,
-			`tournaments:battle-results:${stableStringify({ tournamentId, eventId })}`
+			`battle-results:${stableStringify({ tournamentId, eventId })}`
 		);
 		const cached = await readJsonQueryCache(context, cacheKey, (value) =>
 			isBattleResultArrayCache(value) ? value : null
 		);
-		if (
-			Array.isArray(cached) &&
-			cached.every((item) => isRecord(item) && Number.isFinite(Number(item.eventId)))
-		) {
-			return cached as TournamentBattleGroupResult[];
-		}
+		if (Array.isArray(cached)) return cached;
 
 		const [tournamentResult, matchResult] = await Promise.all([
 			getTournamentInfoById(context, tournamentId),
@@ -2329,18 +2549,14 @@ export const tournamentsRepository: TournamentsRepository = {
 		// Membership is read authoritatively before the cache. A roster change
 		// selects a new key, while a former entrant's persisted match history is
 		// still available under the empty-membership key.
-		const cacheKey = gqlCacheKey(
+		const cacheKey = tournamentCacheKey(
 			context,
-			`tournaments:entry-h2h:${entryId}:${stableStringify(membershipTournamentIds)}`
+			`entry-h2h:${entryId}:${stableStringify(membershipTournamentIds)}`
 		);
 		const cached = await readJsonQueryCache(context, cacheKey, (value) =>
 			isH2HResultArrayCache(value) ? value : null
 		);
-		if (
-			Array.isArray(cached) &&
-			cached.every((item) => isRecord(item) && Number.isFinite(Number(item.eventId)))
-		)
-			return cached as EntryH2HMatchResult[];
+		if (Array.isArray(cached)) return cached;
 
 		const matchResult = await context.data
 			.read("competition.tournament_battle_group_results")

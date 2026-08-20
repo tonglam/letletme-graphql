@@ -19,6 +19,7 @@ import {
 	TournamentSetupPhase,
 	TournamentSetupStatus,
 	TournamentState,
+	tournamentCacheTestables,
 	tournamentsRepository,
 } from "../../../src/domains/tournaments/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
@@ -30,7 +31,7 @@ const testCacheKey = (key: string): string =>
 			currentSeason: { seasonId: 2025, seasonCode: "2526" },
 			dataRevision: "core-test",
 		} as GraphQLContext,
-		key
+		key.startsWith("tournaments:") ? `tournaments:v2:${key.slice("tournaments:".length)}` : key
 	);
 
 describe("projectHistoricalOfficialH2HStandings", () => {
@@ -168,6 +169,234 @@ describe("extractTournamentIds", () => {
 		];
 
 		expect(extractTournamentIds(rows)).toEqual([5, 7, 9]);
+	});
+});
+
+const validCachedTournamentInfo = {
+	id: 1,
+	name: "Tournament",
+	creator: "creator",
+	adminEntryId: 10,
+	leagueId: 20,
+	leagueType: LeagueType.CLASSIC,
+	sourceLeagueName: null,
+	rosterMode: TournamentRosterMode.SNAPSHOT,
+	rosterSyncStatus: null,
+	rosterLastSyncedAt: null,
+	officialScheduleHash: null,
+	officialScheduleSyncedAt: null,
+	officialScheduleLockedAt: null,
+	totalTeamNum: 2,
+	tournamentMode: TournamentMode.NORMAL,
+	groupMode: GroupMode.POINTS_RACES,
+	groupTeamNum: 2,
+	groupNum: 1,
+	groupStartedEventId: 1,
+	groupEndedEventId: 38,
+	groupAutoAverages: false,
+	groupRounds: null,
+	groupPlayAgainstNum: null,
+	groupQualifyNum: null,
+	knockoutMode: null,
+	knockoutTeamNum: null,
+	knockoutRounds: null,
+	knockoutEventNum: null,
+	knockoutStartedEventId: null,
+	knockoutEndedEventId: null,
+	knockoutPlayAgainstNum: null,
+	state: TournamentState.ACTIVE,
+	setupStatus: TournamentSetupStatus.READY,
+	setupPhase: TournamentSetupPhase.READY,
+	setupCompletedUnits: 2,
+	setupTotalUnits: 2,
+	setupProgressUpdatedAt: null,
+	standingsReadyAt: "2026-04-21T00:00:00.000Z",
+	setupHasWarnings: false,
+	setupStartedAt: null,
+	setupFinishedAt: "2026-04-21T00:00:00.000Z",
+	createdAt: "2026-04-21T00:00:00.000Z",
+	updatedAt: "2026-04-21T00:00:00.000Z",
+};
+
+describe("tournament cache wire contracts", () => {
+	it("accepts complete cache objects and rejects missing or mistyped required fields", () => {
+		const validResult = {
+			tournament: validCachedTournamentInfo,
+			eventId: 3,
+			groupId: 1,
+			entryId: 10,
+			entryName: "Entry",
+			playerName: "Player",
+			eventGroupRank: 1,
+			eventPoints: 70,
+			eventCost: 0,
+			eventNetPoints: 70,
+			eventRank: 1,
+			overallPoints: 100,
+			overallRank: 1,
+			eventChip: null,
+			captainId: 7,
+			captainPoints: 14,
+			teamValue: 1000.5,
+			bank: 0.5,
+		};
+
+		expect(tournamentCacheTestables.isTournamentInfoCache(validCachedTournamentInfo)).toBe(true);
+		expect(tournamentCacheTestables.isTournamentEventResultCache(validResult)).toBe(true);
+		expect(
+			tournamentCacheTestables.isTournamentEventResultCache({
+				...validResult,
+				groupId: undefined,
+			})
+		).toBe(false);
+		expect(
+			tournamentCacheTestables.isTournamentEventResultCache({
+				...validResult,
+				entryId: "10",
+			})
+		).toBe(false);
+		expect(
+			tournamentCacheTestables.isTournamentInfoCache({
+				...validCachedTournamentInfo,
+				setupStatus: "bogus",
+			})
+		).toBe(false);
+		expect(
+			tournamentCacheTestables.isTournamentInfoCache({
+				...validCachedTournamentInfo,
+				createdAt: "not-a-date",
+			})
+		).toBe(false);
+	});
+
+	it("requires all persisted ranking, season, battle and H2H fields", () => {
+		const summary = {
+			eventId: 3,
+			entryId: 10,
+			overallRank: null,
+			tournamentOverallRank: null,
+			teamValue: null,
+			tournamentTeamValueRank: null,
+			transfersNum: 0,
+			tournamentTransfersRank: null,
+			totalCosts: 0,
+			tournamentCostsRank: null,
+			totalBenchPoints: 0,
+			tournamentBenchPointsRank: null,
+			autoSubPoints: 0,
+			tournamentAutoSubRank: null,
+			overallPoints: null,
+			leaderOverallPoints: null,
+			gapToLeader: null,
+			pointsBehindNext: null,
+			pointsAheadOfPrev: null,
+		};
+		expect(tournamentCacheTestables.isRankingSummaryCache(summary)).toBe(true);
+		expect(tournamentCacheTestables.isRankingSummaryCache({ ...summary, totalCosts: "0" })).toBe(
+			false
+		);
+
+		const battle = {
+			tournament: validCachedTournamentInfo,
+			matchId: 1,
+			groupId: 1,
+			eventId: 3,
+			homeEntryId: 10,
+			homeEntryName: null,
+			homePlayerName: null,
+			homeNetPoints: 10,
+			homeRank: 1,
+			homeMatchPoints: 3,
+			awayEntryId: 11,
+			awayEntryName: null,
+			awayPlayerName: null,
+			awayNetPoints: 5,
+			awayRank: 2,
+			awayMatchPoints: 0,
+		};
+		expect(tournamentCacheTestables.isBattleResultCache(battle)).toBe(true);
+		expect(tournamentCacheTestables.isBattleResultCache({ ...battle, groupId: undefined })).toBe(
+			false
+		);
+
+		const h2h = {
+			tournament: validCachedTournamentInfo,
+			matchId: 1,
+			groupId: 1,
+			eventId: 3,
+			entryId: 10,
+			entryName: null,
+			playerName: null,
+			entryNetPoints: 10,
+			entryRank: 1,
+			entryMatchPoints: 3,
+			entryEventPoints: 70,
+			entryTransferCost: 0,
+			entryOverallRank: 1,
+			entryChip: null,
+			opponentEntryId: 11,
+			opponentEntryName: null,
+			opponentPlayerName: null,
+			opponentNetPoints: 5,
+			opponentRank: 2,
+			opponentMatchPoints: 0,
+			opponentEventPoints: 65,
+			opponentTransferCost: 4,
+			opponentOverallRank: 2,
+			opponentChip: null,
+		};
+		expect(tournamentCacheTestables.isH2HResultCache(h2h)).toBe(true);
+		expect(tournamentCacheTestables.isH2HResultCache({ ...h2h, opponentEntryId: "11" })).toBe(
+			false
+		);
+
+		const season = {
+			asOfEventId: 3,
+			entryCount: 1,
+			leaderOverallPoints: 100,
+			secondOverallPoints: null,
+			gapFirstSecond: null,
+			averageOverallPoints: 100,
+			metrics: [
+				{
+					key: "OVERALL_POINTS",
+					leaderValue: 100,
+					leaderEntryId: 10,
+					leaderEntryName: "Entry",
+					leaderPlayerName: "Player",
+					averageValue: 100,
+					higherIsBetter: true,
+				},
+			],
+			standings: [
+				{
+					entryId: 10,
+					rank: 1,
+					entryName: "Entry",
+					playerName: "Player",
+					overallPoints: 100,
+					overallRank: 1,
+					teamValue: 1000,
+				},
+			],
+		};
+		expect(tournamentCacheTestables.isSeasonSnapshotCache(season)).toBe(true);
+		expect(
+			tournamentCacheTestables.isSeasonSnapshotCache({
+				...season,
+				metrics: [{ ...season.metrics[0], key: "unknown" }],
+			})
+		).toBe(false);
+	});
+
+	it("uses the versioned tournament cache namespace", () => {
+		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "r1",
+		} as GraphQLContext;
+		expect(tournamentCacheTestables.tournamentCacheKey(context, "event-results:page")).toBe(
+			gqlCacheKey(context, "tournaments:v2:event-results:page")
+		);
 	});
 });
 
@@ -780,6 +1009,23 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 			__deletedKeys: string[];
 		};
 		await tournamentsRepository.getTournamentEventResults(context, 1, 33, null, null);
+		expect(context.__deletedKeys).toHaveLength(1);
+	});
+
+	it("evicts schema-invalid tournament event-result JSON before querying", async () => {
+		const context = buildContext({
+			cacheSeed: JSON.stringify([
+				{
+					tournament: validCachedTournamentInfo,
+					eventId: 33,
+					entryId: 7,
+				},
+			]),
+			resultData: [],
+		}) as GraphQLContext & { __deletedKeys: string[] };
+
+		await tournamentsRepository.getTournamentEventResults(context, 1, 33, null, null);
+
 		expect(context.__deletedKeys).toHaveLength(1);
 	});
 
