@@ -14,7 +14,7 @@ const context = () => {
 };
 
 describe("playerStatsDesk", () => {
-	it("bootstraps from directory SQL plus the pinned market metadata without loading the full core publication", async () => {
+	it("bootstraps from one directory SQL without loading the full core publication", async () => {
 		const core = buildTestCoreData(3);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
 		const mgetKeys: string[] = [];
@@ -74,8 +74,7 @@ describe("playerStatsDesk", () => {
 				},
 			},
 		});
-		// The picker now pins market publication metadata before its directory read.
-		expect(databaseQueries).toBe(2);
+		expect(databaseQueries).toBe(1);
 		expect(mgetKeys.some((key) => /:(players|fixtures|phases)$/.test(key))).toBe(false);
 	});
 
