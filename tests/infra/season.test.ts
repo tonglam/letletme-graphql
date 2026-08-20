@@ -69,7 +69,7 @@ describe("PostgreSQL current-season authority", () => {
 		expect(provider.get()).toMatchObject({ lifecycleState: "active" });
 	});
 
-	it("keeps a request-pinned identity when the current season advances", async () => {
+	it("keeps a request-pinned identity while advancing the provider", async () => {
 		const provider = new CurrentSeasonProvider();
 		const pinned = { seasonId: 2026, seasonCode: "2627", lifecycleState: "preseason" as const };
 		provider.seed(pinned);
@@ -81,8 +81,12 @@ describe("PostgreSQL current-season authority", () => {
 				}) as never,
 		};
 
-		await expect(provider.refresh(database, 0, pinned)).resolves.toBe(provider.get());
-		expect(provider.get()).toEqual(pinned);
+		await expect(provider.refresh(database, 0, pinned)).resolves.toEqual(pinned);
+		expect(provider.get()).toEqual({
+			seasonId: 2027,
+			seasonCode: "2728",
+			lifecycleState: "active",
+		});
 	});
 
 	it("throttles repeated rollover checks after retaining the pinned identity", async () => {
@@ -100,9 +104,10 @@ describe("PostgreSQL current-season authority", () => {
 			},
 		};
 
-		await provider.refresh(database, 0, pinned);
-		await provider.refresh(database, 5_000, pinned);
+		await expect(provider.refresh(database, 0, pinned)).resolves.toEqual(pinned);
+		await expect(provider.refresh(database, 5_000, pinned)).resolves.toEqual(pinned);
 		expect(queryCount).toBe(1);
+		expect(provider.get()).toMatchObject({ seasonId: 2027, seasonCode: "2728" });
 	});
 
 	it("reads request context season metadata without a Redis fallback", async () => {

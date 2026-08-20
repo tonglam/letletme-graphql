@@ -81,6 +81,13 @@ export class CurrentSeasonProvider {
 	private refreshedAt = 0;
 	private refreshPromise: Promise<CurrentSeason> | null = null;
 
+	private static sameIdentity(
+		left: Pick<CurrentSeason, "seasonId" | "seasonCode">,
+		right: Pick<CurrentSeason, "seasonId" | "seasonCode">
+	): boolean {
+		return left.seasonId === right.seasonId && left.seasonCode === right.seasonCode;
+	}
+
 	get(): CurrentSeason {
 		if (!this.value) throw unavailable();
 		return this.value;
@@ -103,30 +110,30 @@ export class CurrentSeasonProvider {
 	async refresh(
 		database: QueryExecutor,
 		maxAgeMs = 5_000,
-		pinnedIdentity?: Pick<CurrentSeason, "seasonId" | "seasonCode">
+		pinnedIdentity?: Pick<CurrentSeason, "seasonId" | "seasonCode" | "lifecycleState">
 	): Promise<CurrentSeason> {
-		if (this.value && Date.now() - this.refreshedAt < maxAgeMs) return this.value;
-		if (this.refreshPromise) return this.refreshPromise;
-		this.refreshPromise = loadCurrentSeason(database)
-			.then((value) => {
-				const pinned = pinnedIdentity ?? this.value;
-				if (
-					pinned &&
-					(value.seasonId !== pinned.seasonId || value.seasonCode !== pinned.seasonCode)
-				) {
-					// The authority was checked, even though this request must retain
-					// its pinned identity. Keep the five-second throttle across the
-					// rollover so sequential requests do not hammer the metadata query.
-					this.refreshedAt = Date.now();
-					return this.value ?? pinned;
-				}
-				this.seed(value);
-				return value;
-			})
-			.finally(() => {
-				this.refreshPromise = null;
-			});
-		return this.refreshPromise;
+		if (this.value && Date.now() - this.refreshedAt < maxAgeMs) {
+			return pinnedIdentity && !CurrentSeasonProvider.sameIdentity(this.value, pinnedIdentity)
+				? pinnedIdentity
+				: this.value;
+		}
+		if (!this.refreshPromise) {
+			this.refreshPromise = loadCurrentSeason(database)
+				.then((value) => {
+					// Always advance the process-level provider to the authority's
+					// latest season. A caller with an older request pin is mapped back
+					// to that identity below, while future requests see this value.
+					this.seed(value);
+					return value;
+				})
+				.finally(() => {
+					this.refreshPromise = null;
+				});
+		}
+		const refreshed = await this.refreshPromise;
+		return pinnedIdentity && !CurrentSeasonProvider.sameIdentity(refreshed, pinnedIdentity)
+			? pinnedIdentity
+			: refreshed;
 	}
 }
 
