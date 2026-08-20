@@ -14,6 +14,7 @@ type QueryFixture = Readonly<{
 	link?: QueryResultRow | null;
 	understatRows?: QueryResultRow[];
 	understatError?: Error;
+	omitCurrentSeasonRows?: boolean;
 }>;
 
 const isVerifiedStatus = (status: unknown): boolean =>
@@ -140,6 +141,7 @@ const playerStateRows = (fixture: QueryFixture): QueryResultRow[] => {
 		["2425", 2800, 185, 22, 20],
 		["2526", 1000, 70, 9, 8],
 	] as const) {
+		if (fixture.omitCurrentSeasonRows && season === "2526") continue;
 		for (const [playerCode, elementId] of [
 			[100, 10],
 			[200, 20],
@@ -379,9 +381,13 @@ const snapshot = (players = true): CoreDataSnapshot => ({
 	})),
 });
 
-const makeContext = (redis: TestRedis): GraphQLContext =>
+const makeContext = (redis: TestRedis, lifecycleState?: "preseason" | "active"): GraphQLContext =>
 	({
-		currentSeason: { seasonId: 2025, seasonCode: "2526" },
+		currentSeason: {
+			seasonId: 2025,
+			seasonCode: "2526",
+			...(lifecycleState ? { lifecycleState } : {}),
+		},
 		dataRevision: "9",
 		redis,
 		logger: testLogger,
@@ -527,6 +533,37 @@ describe("Player State repository", () => {
 			)?.seasons
 		).toEqual(["2425"]);
 		expect(profile?.coverage.limitations).not.toContain("UNDERSTAT_PLAYER_DATA_UNAVAILABLE");
+	});
+
+	it("does not infer preseason when a current FPL projection row is missing", async () => {
+		const redis = new TestRedis();
+		const { executor } = makeExecutor({ omitCurrentSeasonRows: true });
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis, "active"), 10, 5);
+		const current = profile?.seasonTimeline[0];
+		expect(current).toMatchObject({
+			season: "2526",
+			phase: "ACTIVE",
+			fplTotalPoints: null,
+		});
+		expect(
+			current?.signals.every((signal) => signal.reasonCodes.includes("FPL_SEASON_ROW_UNAVAILABLE"))
+		).toBe(true);
+
+		const preseason = await repository.getPlayerStateProfile(
+			makeContext(new TestRedis(), "preseason"),
+			10,
+			5
+		);
+		expect(preseason?.seasonTimeline[0]).toMatchObject({
+			season: "2526",
+			phase: "PRESEASON",
+			fplTotalPoints: null,
+		});
 	});
 
 	it("preserves an ambiguous mapping without reading Understat metrics", async () => {

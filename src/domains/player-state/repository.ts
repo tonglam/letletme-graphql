@@ -449,10 +449,17 @@ const playerSeasonTimelineGuard = (
 		}
 		const expectedCodes = signalCodesForPosition(point.position);
 		const codes = point.signals.map((signal) => signal.code);
+		const fplRowUnavailable = point.signals.every(
+			(signal) =>
+				signal.analysisStatus === "UNAVAILABLE" &&
+				signal.reasonCodes.includes("FPL_SEASON_ROW_UNAVAILABLE")
+		);
 		return (
 			new Set(codes).size === 2 &&
 			codes.every((code, index) => code === expectedCodes[index]) &&
-			(point.phase === "PRESEASON" ? point.fplTotalPoints === null : point.fplTotalPoints !== null)
+			(point.phase === "PRESEASON"
+				? point.fplTotalPoints === null
+				: point.fplTotalPoints !== null || fplRowUnavailable)
 		);
 	});
 };
@@ -1087,6 +1094,12 @@ const seasonPhaseForRow = (row: PlayerStateSeasonRow, currentSeason: string): Pl
 	return "ACTIVE";
 };
 
+const missingCurrentSeasonPhase = (lifecycleState: string | undefined): PlayerSeasonPhase => {
+	if (lifecycleState === "preseason") return "PRESEASON";
+	if (lifecycleState === "completed" || lifecycleState === "closed") return "COMPLETED";
+	return "ACTIVE";
+};
+
 const seasonSignalUnit = (code: PlayerSeasonSignalCode): string =>
 	code === "OFFICIAL_CLEAN_SHEET_RATE" ? "percent" : "per90";
 
@@ -1243,7 +1256,8 @@ const buildSeasonTimeline = (
 	rows: PlayerStateSeasonRow[],
 	playerCode: number,
 	currentSeason: string,
-	currentPosition: number
+	currentPosition: number,
+	currentLifecycleState?: string
 ): PlayerSeasonTimelinePoint[] => {
 	const subjectRows = rows.filter(
 		(row) =>
@@ -1263,13 +1277,14 @@ const buildSeasonTimeline = (
 		};
 	});
 	if (currentRow === null) {
+		const phase = missingCurrentSeasonPhase(currentLifecycleState);
 		points.push({
 			season: currentSeason,
-			phase: "PRESEASON",
+			phase,
 			position: currentPosition,
 			fplTotalPoints: null,
 			signals: signalCodesForPosition(currentPosition).map((code) =>
-				seasonSignal(code, null, "PRESEASON")
+				seasonSignal(code, null, phase)
 			),
 		});
 	}
@@ -1766,7 +1781,13 @@ export const createPlayerStateRepository = (
 			historyForPlayerStateRows(seasonRows, player.code, season),
 			processResult.historyPercentiles
 		);
-		const seasonTimeline = buildSeasonTimeline(seasonRows, player.code, season, player.type);
+		const seasonTimeline = buildSeasonTimeline(
+			seasonRows,
+			player.code,
+			season,
+			player.type,
+			context.currentSeason.lifecycleState
+		);
 		const samples = toGameweekSamples(startedEventIds, currentCohortRows.gameweekRows, playerId);
 		const recentWindow = samples.slice(0, 5);
 		const previousWindow = samples.slice(5, 10);
