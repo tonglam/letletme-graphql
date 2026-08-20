@@ -2,10 +2,18 @@ import { createHash } from "node:crypto";
 
 import type Redis from "ioredis";
 import type { QueryExecutor } from "./database";
+import { metrics } from "./metrics";
 
 export const BRIEFING_WEEK_ACTIVE_POINTER_KEY = "llm:content:briefing:week:active";
 
 const briefingReaderMetrics = { fallbacks: 0, corruptions: 0, repairs: 0 };
+
+const recordReaderEvent = (event: "fallback" | "corruption" | "repair"): void => {
+	if (event === "fallback") briefingReaderMetrics.fallbacks += 1;
+	if (event === "corruption") briefingReaderMetrics.corruptions += 1;
+	if (event === "repair") briefingReaderMetrics.repairs += 1;
+	metrics.briefingPublicationReaderEvents.labels(event).inc();
+};
 
 export function getBriefingReaderMetrics(): Readonly<typeof briefingReaderMetrics> {
 	return { ...briefingReaderMetrics };
@@ -221,11 +229,12 @@ const hasLocalePair = (
 	manifest: ActiveMetadata["locale_manifest"]
 ): manifest is Record<BriefingLocale, { bytes: number; sha256: string }> =>
 	["en", "zh-CN"].every((locale) => {
-		const entry = manifest[locale];
+		const entry: unknown = manifest[locale];
 		return (
-			entry !== undefined &&
+			isRecord(entry) &&
 			Number.isSafeInteger(Number(entry.bytes)) &&
 			Number(entry.bytes) >= 0 &&
+			typeof entry.sha256 === "string" &&
 			/^[0-9a-f]{64}$/i.test(entry.sha256)
 		);
 	});
@@ -246,16 +255,7 @@ async function activeMetadata(database: QueryExecutor): Promise<ActiveMetadata |
 		["week"]
 	);
 	const row = result.rows[0];
-	if (row) return toMetadata(row);
-	const fallback = await database.query<ActiveMetadata>(
-		`SELECT publication_id, scope_key, revision, schema_version, season_code, target_event_id, event_name, deadline_time, state, servable, source_checked_at, published_at, valid_until, locale_manifest
-		 FROM content.publications
-		 WHERE scope_key = $1 AND status = 'active'
-		 ORDER BY revision DESC
-		 LIMIT 1`,
-		["week"]
-	);
-	return fallback.rows[0] ? toMetadata(fallback.rows[0]) : null;
+	return row ? toMetadata(row) : null;
 }
 
 const payloadKey = (revision: number, locale: BriefingLocale): string =>
@@ -334,7 +334,7 @@ export async function readBriefingWeek(
 		};
 	}
 	if (!hasLocalePair(metadata.locale_manifest)) {
-		briefingReaderMetrics.corruptions += 1;
+		recordReaderEvent("corruption");
 		return {
 			...unavailable(),
 			publicationId: metadata.publication_id,
@@ -396,7 +396,7 @@ export async function readBriefingWeek(
 			}
 		}
 	} catch {
-		briefingReaderMetrics.corruptions += 1;
+		recordReaderEvent("corruption");
 		pointer = null;
 		rawPayload = null;
 	}
@@ -413,13 +413,13 @@ export async function readBriefingWeek(
 			)
 				payload = parsed;
 		} catch {
-			briefingReaderMetrics.corruptions += 1;
+			recordReaderEvent("corruption");
 			payload = null;
 		}
 	}
 
 	if (!payload) {
-		briefingReaderMetrics.fallbacks += 1;
+		recordReaderEvent("fallback");
 		try {
 			const fallback = await database.query<{
 				payload: unknown;
@@ -440,7 +440,7 @@ export async function readBriefingWeek(
 				validateAgainstMetadata(parsed, locale, metadata, serialized(parsed))
 			)
 				payload = parsed;
-			if (payload && !pointerWasUsable) briefingReaderMetrics.repairs += 1;
+			if (payload && !pointerWasUsable) recordReaderEvent("repair");
 		} catch {
 			return {
 				...unavailable(),

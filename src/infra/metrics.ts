@@ -43,6 +43,12 @@ const cacheRepositoryEvents = new Counter({
 	labelNames: ["domain", "event"] as const,
 });
 
+const briefingPublicationReaderEvents = new Counter({
+	name: "briefing_publication_reader_events_total",
+	help: "Briefing publication reader fallback, corruption, and repair events",
+	labelNames: ["event"] as const,
+});
+
 const playerStateProfiles = new Counter({
 	name: "player_state_profiles_total",
 	help: "Player State profiles by trend, confidence, provider mode, and current analysis status",
@@ -66,6 +72,7 @@ registry.registerMetric(authTokenValidations);
 registry.registerMetric(graphqlIngressRequests);
 registry.registerMetric(graphqlRateLimitDecisions);
 registry.registerMetric(cacheRepositoryEvents);
+registry.registerMetric(briefingPublicationReaderEvents);
 registry.registerMetric(playerStateProfiles);
 registry.registerMetric(playerStateProviderStale);
 registry.registerMetric(playerStatsDeskFields);
@@ -78,6 +85,7 @@ export const metrics = {
 	graphqlIngressRequests,
 	graphqlRateLimitDecisions,
 	cacheRepositoryEvents,
+	briefingPublicationReaderEvents,
 	playerStateProfiles,
 	playerStateProviderStale,
 	playerStatsDeskFields,

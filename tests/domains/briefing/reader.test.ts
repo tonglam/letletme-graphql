@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import fixture from "../../fixtures/briefing/week-publication-v1.json";
 import type { QueryExecutor } from "../../../src/infra/database";
 import { readBriefingWeek } from "../../../src/infra/content-publication";
+import { metrics } from "../../../src/infra/metrics";
 import { withFrozenBriefingClock } from "./frozen-clock";
 
 const canonicalize = (value: unknown): unknown => {
@@ -65,6 +66,24 @@ describe("Briefing publication reader", () => {
 			expect(result.state).toBe("READY");
 			expect(result.revision).toBe(1);
 			expect(result.payload?.publicationId).toBe(fixture.publicationId);
+			expect(await metrics.registry.metrics()).toContain(
+				"briefing_publication_reader_events_total"
+			);
+		});
+
+		test("does not query a base publication when the active relation is empty", async () => {
+			const queries: string[] = [];
+			const database: QueryExecutor = {
+				async query(text: string) {
+					queries.push(text);
+					return { rows: [] } as never;
+				},
+			};
+			const result = await readBriefingWeek(database, redisWithoutPayload, "en");
+			expect(result.state).toBe("OFFSEASON");
+			expect(queries).toHaveLength(1);
+			expect(queries[0]).toContain("content.briefing_active_publication");
+			expect(queries[0]).not.toContain("content.publications");
 		});
 
 		test("fails closed when the active publication has expired", async () => {
@@ -113,6 +132,28 @@ describe("Briefing publication reader", () => {
 				},
 			};
 			const result = await readBriefingWeek(incompleteDb, redisWithoutPayload, "en");
+			expect(result).toMatchObject({ state: "UNAVAILABLE", payload: null, revision: 1 });
+		});
+
+		test("fails closed when a locale manifest entry is null", async () => {
+			const malformedDb: QueryExecutor = {
+				async query(text: string) {
+					if (text.includes("content.briefing_active_publication"))
+						return {
+							rows: [
+								{
+									...metadata,
+									locale_manifest: {
+										en: metadata.locale_manifest.en,
+										"zh-CN": null,
+									},
+								},
+							],
+						} as never;
+					return { rows: [] } as never;
+				},
+			};
+			const result = await readBriefingWeek(malformedDb, redisWithoutPayload, "en");
 			expect(result).toMatchObject({ state: "UNAVAILABLE", payload: null, revision: 1 });
 		});
 
