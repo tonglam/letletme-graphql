@@ -86,6 +86,25 @@ describe("Briefing publication reader", () => {
 			expect(queries[0]).not.toContain("content.publications");
 		});
 
+		test("counts a successful PostgreSQL payload fallback as a repair", async () => {
+			const before = getBriefingReaderMetrics().repairs;
+			const pointer = JSON.stringify({
+				schemaVersion: 1,
+				publicationId: fixture.publicationId,
+				revision: 1,
+				state: "READY",
+				locales: ["en", "zh-CN"],
+				hashes: { en: hash, "zh-CN": hash },
+			});
+			const redis = {
+				get: async (key: string) => (key.includes(":active") ? pointer : null),
+			} as unknown as Redis;
+			const result = await readBriefingWeek(databaseWithFallback(), redis, "en");
+			expect(result.state).toBe("READY");
+			expect(result.payload?.publicationId).toBe(fixture.publicationId);
+			expect(getBriefingReaderMetrics().repairs).toBe(before + 1);
+		});
+
 		test("fails closed when the active publication has expired", async () => {
 			const expiredDb: QueryExecutor = {
 				async query(text: string) {
@@ -198,6 +217,28 @@ describe("Briefing publication reader", () => {
 									locale_manifest: {
 										en: metadata.locale_manifest.en,
 										"zh-CN": null,
+									},
+								},
+							],
+						} as never;
+					return { rows: [] } as never;
+				},
+			};
+			const result = await readBriefingWeek(malformedDb, redisWithoutPayload, "en");
+			expect(result).toMatchObject({ state: "UNAVAILABLE", payload: null, revision: 1 });
+		});
+
+		test("fails closed when a locale manifest byte count is not a number", async () => {
+			const malformedDb: QueryExecutor = {
+				async query(text: string) {
+					if (text.includes("content.briefing_active_publication"))
+						return {
+							rows: [
+								{
+									...metadata,
+									locale_manifest: {
+										en: { ...metadata.locale_manifest.en, bytes: null },
+										"zh-CN": metadata.locale_manifest["zh-CN"],
 									},
 								},
 							],

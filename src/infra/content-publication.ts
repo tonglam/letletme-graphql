@@ -235,8 +235,9 @@ const hasLocalePair = (
 		const entry: unknown = manifest[locale];
 		return (
 			isRecord(entry) &&
-			Number.isSafeInteger(Number(entry.bytes)) &&
-			Number(entry.bytes) >= 0 &&
+			typeof entry.bytes === "number" &&
+			Number.isSafeInteger(entry.bytes) &&
+			entry.bytes >= 0 &&
 			typeof entry.sha256 === "string" &&
 			/^[0-9a-f]{64}$/i.test(entry.sha256)
 		);
@@ -373,7 +374,6 @@ export async function readBriefingWeek(
 
 	let pointer: ActivePointer | null = null;
 	let rawPayload: string | null = null;
-	let pointerWasUsable = false;
 	let redisUnavailable = false;
 	let rawPointer: string | null = null;
 	try {
@@ -401,7 +401,6 @@ export async function readBriefingWeek(
 				/^[0-9a-f]{64}$/i.test(parsed.hashes["zh-CN"]);
 			if (isUsablePointer) {
 				pointer = parsed as unknown as ActivePointer;
-				pointerWasUsable = true;
 				try {
 					rawPayload = await redis.get(payloadKey(revision, locale));
 				} catch {
@@ -461,7 +460,7 @@ export async function readBriefingWeek(
 				validateAgainstMetadata(parsed, locale, metadata, serialized(parsed))
 			)
 				payload = parsed;
-			if (payload && !pointerWasUsable && !redisUnavailable) recordReaderEvent("repair");
+			if (payload && !redisUnavailable) recordReaderEvent("repair");
 		} catch {
 			return {
 				...unavailable(),
