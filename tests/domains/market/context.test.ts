@@ -26,6 +26,19 @@ const contextFor = (redis: TestRedis, row = pgMetadata()) =>
 	buildSnapshotContext(redis, { databaseQuery: async () => row });
 
 describe("market snapshot context", () => {
+	it("qualifies the snapshot date in the joined PostgreSQL metadata query", async () => {
+		let query = "";
+		const context = contextFor(new TestRedis());
+		context.database.query = (async (sql: string) => {
+			query = sql;
+			return pgMetadata();
+		}) as unknown as typeof context.database.query;
+
+		await getMarketSnapshotContext(context);
+
+		expect(query).toContain("SELECT snapshot.snapshot_date::text AS snapshot_date");
+	});
+
 	it("uses DATA_PUBLICATION only when Redis and PostgreSQL metadata match", async () => {
 		const redis = new TestRedis(
 			createTestPublication({ dataset: "fpl:market", seasonCode: "2627" }, 17, {

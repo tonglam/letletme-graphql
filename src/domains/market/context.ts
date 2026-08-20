@@ -85,7 +85,7 @@ const loadPostgresMetadata = async (
 			FROM fpl.player_market_snapshots
 			WHERE season_id = $1
 		), latest_batch AS (
-			SELECT snapshot_date::text AS snapshot_date,
+			SELECT snapshot.snapshot_date::text AS snapshot_date,
 				MAX(captured_at) AS captured_at,
 				COUNT(*)::integer AS row_count,
 				COUNT(DISTINCT captured_at)::integer AS capture_count
