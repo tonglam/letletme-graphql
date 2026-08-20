@@ -35,6 +35,7 @@ export const READ_MODELS = {
 	tournamentSelectionStats: "reporting.tournament_selection_stats",
 	tournamentEventResults: "reporting.tournament_event_results",
 	tournamentEntryEventSummaries: "reporting.tournament_entry_event_summaries",
+	tournamentSetupIssues: "competition.tournament_setup_issues",
 } as const;
 
 export type ReadModel = (typeof READ_MODELS)[keyof typeof READ_MODELS];
@@ -1069,6 +1070,31 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 			  ON tournament.season_id = summary.season_id
 			 AND tournament.tournament_id = summary.tournament_id
 			WHERE summary.season_id = $1
+		`,
+	},
+	[READ_MODELS.tournamentSetupIssues]: {
+		sourceRelations: ["competition.tournament_setup_issues"],
+		sql: `
+			SELECT
+				issue_id,
+				season_id,
+				tournament_id,
+				issue_key,
+				code,
+				category,
+				severity,
+				event_id,
+				affected_entry_ids,
+				affected_entry_count,
+				diagnostic_code,
+				internal_message,
+				repair_attempts,
+				next_repair_at,
+				repair_exhausted_at,
+				resolved_at,
+				updated_at
+			FROM competition.tournament_setup_issues
+			WHERE season_id = $1
 		`,
 	},
 };

@@ -17,6 +17,7 @@ import {
 	TournamentMode,
 	TournamentRosterMode,
 	TournamentSetupPhase,
+	TournamentSetupProgressMode,
 	TournamentSetupStatus,
 	TournamentState,
 	tournamentCacheTestables,
@@ -530,7 +531,13 @@ describe("mapTournamentInfo", () => {
 			setupCompletedUnits: 0,
 			setupTotalUnits: 0,
 			setupProgressUpdatedAt: null,
+			setupProgressMode: TournamentSetupProgressMode.DETERMINATE,
+			setupAttempt: 0,
+			setupMaxAttempts: 3,
+			nextRetryAt: null,
 			standingsReadyAt: "2026-04-21T00:00:00.000Z",
+			profilesReadyAt: null,
+			insightsReadyAt: null,
 			setupHasWarnings: false,
 			setupStartedAt: null,
 			setupFinishedAt: null,
@@ -815,6 +822,10 @@ describe("tournamentsRepository.getTournamentEventResults", () => {
 				},
 				eq(...args: unknown[]) {
 					actions.push({ type: "eq", args });
+					return builder;
+				},
+				is(...args: unknown[]) {
+					actions.push({ type: "is", args });
 					return builder;
 				},
 				in(...args: unknown[]) {

@@ -286,6 +286,7 @@ describe("tournamentSeasonSnapshot query resolver", () => {
 				standingsReadyAt: "2026-08-04T00:00:00.000Z",
 				setupStatus: "ready",
 				setupPhase: "ready",
+				insightsReadyAt: "2026-08-04T00:00:00.000Z",
 				setupHasWarnings: false,
 			} as never;
 		};

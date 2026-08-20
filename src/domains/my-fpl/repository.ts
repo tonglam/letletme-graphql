@@ -311,6 +311,7 @@ export type MyFplCompetitionSetupStatus = {
 	setupTotalUnits: number;
 	setupProgressUpdatedAt: string | null;
 	standingsReadyAt: string | null;
+	insightsReadyAt: string | null;
 	setupHasWarnings: boolean;
 	ready: boolean;
 };
@@ -479,6 +480,7 @@ type DbSetupStatusRow = QueryResultRow & {
 	setup_total_units?: number | null;
 	setup_progress_updated_at: Date | string | null;
 	standings_ready_at: Date | string | null;
+	insights_ready_at?: Date | string | null;
 	setup_warning_count?: number | null;
 };
 
@@ -1610,7 +1612,7 @@ const loadCompetitionBoardPrepared = async (
 	if (
 		metadata.setupStatus !== TournamentSetupStatus.READY ||
 		!metadata.standingsReadyAt ||
-		metadata.setupHasWarnings
+		!metadata.insightsReadyAt
 	) {
 		return empty("PENDING");
 	}
@@ -2022,7 +2024,7 @@ const loadCompetitionsDesk = async (
 		selectedTournament.groupMode === GroupMode.POINTS_RACES &&
 		selectedTournament.setupStatus === TournamentSetupStatus.READY &&
 		Boolean(selectedTournament.standingsReadyAt) &&
-		!selectedTournament.setupHasWarnings;
+		Boolean(selectedTournament.insightsReadyAt);
 	const [board, aggregateCandidate] = canLoadAggregate
 		? await Promise.all([
 				boardPromise,
@@ -2068,7 +2070,7 @@ const loadCompetitionSeasonPath = async (
 	if (
 		tournament.setupStatus !== TournamentSetupStatus.READY ||
 		!tournament.standingsReadyAt ||
-		tournament.setupHasWarnings
+		!tournament.insightsReadyAt
 	) {
 		return empty("PENDING");
 	}
@@ -2159,6 +2161,7 @@ const loadCompetitionSetupStatus = async (
 	const result = await context.database.query<DbSetupStatusRow>(
 		`SELECT setup_status::text, setup_phase::text, setup_completed_units,
 		        setup_total_units, setup_progress_updated_at, standings_ready_at,
+		        insights_ready_at,
 		        setup_warning_count
 		 FROM competition.tournaments
 		 WHERE season_id = $1 AND tournament_id = $2
@@ -2179,12 +2182,13 @@ const loadCompetitionSetupStatus = async (
 		setupTotalUnits: row.setup_total_units ?? 0,
 		setupProgressUpdatedAt: isoString(row.setup_progress_updated_at),
 		standingsReadyAt: isoString(row.standings_ready_at),
+		insightsReadyAt: isoString(row.insights_ready_at ?? null),
 		setupHasWarnings: (row.setup_warning_count ?? 0) > 0,
 		ready:
 			row.setup_status === TournamentSetupStatus.READY &&
 			row.setup_phase === "ready" &&
-			(row.setup_warning_count ?? 0) === 0 &&
-			row.standings_ready_at !== null,
+			row.standings_ready_at !== null &&
+			row.insights_ready_at !== null,
 	};
 };
 

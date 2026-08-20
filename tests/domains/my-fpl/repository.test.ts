@@ -161,6 +161,7 @@ const tournament = (overrides: Partial<TournamentInfo> = {}): TournamentInfo => 
 	setupTotalUnits: 10,
 	setupProgressUpdatedAt: "2026-08-20T00:00:00.000Z",
 	standingsReadyAt: "2026-08-20T00:00:00.000Z",
+	insightsReadyAt: "2026-08-20T00:00:00.000Z",
 	setupHasWarnings: false,
 	setupStartedAt: "2026-08-20T00:00:00.000Z",
 	setupFinishedAt: "2026-08-20T00:00:00.000Z",
@@ -616,7 +617,7 @@ describe("My FPL review repository", () => {
 		expect(fixture.redis.setCalls).toHaveLength(0);
 	});
 
-	it("normalizes setup readiness and keeps warnings from producing ready", async () => {
+	it("normalizes setup readiness without letting profile warnings hide ready insights", async () => {
 		const fixture = makeFixture({
 			setupRows: [
 				{
@@ -626,14 +627,16 @@ describe("My FPL review repository", () => {
 					setup_total_units: 10,
 					setup_progress_updated_at: "2026-08-20T00:00:00.000Z",
 					standings_ready_at: "2026-08-20T00:00:00.000Z",
+					insights_ready_at: "2026-08-20T00:00:00.000Z",
 					setup_warning_count: 1,
 				},
 			],
 		});
 		const status = await fixture.repository.loadCompetitionSetupStatus(fixture.context, 7);
 		expect(status.setupStatus).toBe("READY");
+		expect(status.insightsReadyAt).toBe("2026-08-20T00:00:00.000Z");
 		expect(status.setupHasWarnings).toBe(true);
-		expect(status.ready).toBe(false);
+		expect(status.ready).toBe(true);
 	});
 
 	it("delegates resolver roots through the injected repository and propagates errors", async () => {

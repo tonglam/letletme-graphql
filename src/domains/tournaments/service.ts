@@ -36,7 +36,7 @@ export const assertTournamentInsightsReady = async (
 	if (
 		tournament.setupStatus !== "ready" ||
 		tournament.setupPhase !== "ready" ||
-		tournament.setupHasWarnings
+		!tournament.insightsReadyAt
 	) {
 		throw new GraphQLError("Tournament insights are still being prepared", {
 			extensions: { code: "TOURNAMENT_INSIGHTS_NOT_READY" },
