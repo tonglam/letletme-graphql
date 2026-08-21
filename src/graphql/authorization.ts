@@ -149,6 +149,9 @@ const requirePrincipal = (principal?: Principal | null): AuthorizationResult =>
 const hasVerifiedEntry = (principal: Principal): boolean =>
 	Boolean(principal.fplEntryId && principal.fplEntryVerifiedAt);
 
+const hasPlatformAdminAccess = (principal: Principal): boolean =>
+	principal.source === "website" && principal.platformAdmin === true && hasVerifiedEntry(principal);
+
 const requireBoundEntry = (principal: Principal, entryId: number | null): AuthorizationResult => {
 	if (!hasVerifiedEntry(principal) || !entryId || entryId !== principal.fplEntryId) {
 		return {
@@ -299,13 +302,14 @@ const authorizeRootField = async (
 		const tournamentId = asPositiveInt(field.args.tournamentId);
 		if (
 			!tournamentId ||
-			!(await hasTournamentMembership(
-				dataClient,
-				tournamentId,
-				principal.fplEntryId!,
-				requestScope,
-				authorizedTournamentMemberships
-			))
+			(!hasPlatformAdminAccess(principal) &&
+				!(await hasTournamentMembership(
+					dataClient,
+					tournamentId,
+					principal.fplEntryId!,
+					requestScope,
+					authorizedTournamentMemberships
+				)))
 		) {
 			return {
 				ok: false,
@@ -348,24 +352,26 @@ const authorizeRootField = async (
 				message: "User is not a member of this tournament",
 			};
 		}
-		const isMember = await hasTournamentMembership(
-			dataClient,
-			tournamentId,
-			principal.fplEntryId!,
-			requestScope,
-			authorizedTournamentMemberships
-		);
-		const isRetainedAdmin =
-			fieldPolicy.retainedAdmin &&
-			!isMember &&
-			(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope));
-		if (!isMember && !isRetainedAdmin) {
-			return {
-				ok: false,
-				status: 403,
-				code: "FORBIDDEN",
-				message: "User is not a member or retained administrator of this tournament",
-			};
+		if (!hasPlatformAdminAccess(principal)) {
+			const isMember = await hasTournamentMembership(
+				dataClient,
+				tournamentId,
+				principal.fplEntryId!,
+				requestScope,
+				authorizedTournamentMemberships
+			);
+			const isRetainedAdmin =
+				fieldPolicy.retainedAdmin &&
+				!isMember &&
+				(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope));
+			if (!isMember && !isRetainedAdmin) {
+				return {
+					ok: false,
+					status: 403,
+					code: "FORBIDDEN",
+					message: "User is not a member or retained administrator of this tournament",
+				};
+			}
 		}
 	}
 
@@ -374,7 +380,8 @@ const authorizeRootField = async (
 		if (
 			!tournamentId ||
 			!hasVerifiedEntry(principal) ||
-			!(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope))
+			(!hasPlatformAdminAccess(principal) &&
+				!(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope)))
 		) {
 			return {
 				ok: false,
@@ -390,7 +397,8 @@ const authorizeRootField = async (
 		if (
 			!tournamentId ||
 			!hasVerifiedEntry(principal) ||
-			!(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope))
+			(!hasPlatformAdminAccess(principal) &&
+				!(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope)))
 		) {
 			return {
 				ok: false,
@@ -406,7 +414,8 @@ const authorizeRootField = async (
 		if (
 			!leagueId ||
 			!hasVerifiedEntry(principal) ||
-			!(await hasLeagueMembership(dataClient, leagueId, principal.fplEntryId!))
+			(!hasPlatformAdminAccess(principal) &&
+				!(await hasLeagueMembership(dataClient, leagueId, principal.fplEntryId!)))
 		) {
 			return {
 				ok: false,

@@ -157,7 +157,10 @@ registry.set(
 	"managedTournament",
 	policy("tournamentAdmin", { arg: "tournamentId", ownEntryArg: "entryId" })
 );
-registry.set("managedTournamentStatus", policy("tournamentAdmin", { arg: "tournamentId" }));
+registry.set(
+	"managedTournamentStatus",
+	policy("tournamentAdmin", { arg: "tournamentId", ownEntryArg: "entryId" })
+);
 registry.set("leagueEventResults", policy("leagueMember", { arg: "leagueId" }));
 registry.set("calcLivePointsForEntries", policy("calcOwnEntries", { arg: "entryIds" }));
 registry.set("homePersonalDesk", policy("verifiedEntry"));
