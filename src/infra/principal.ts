@@ -22,6 +22,8 @@ export type Principal = {
 	source: PrincipalSource;
 	fplEntryId: number | null;
 	fplEntryVerifiedAt: string | null;
+	/** Account-level role attested by the Website HMAC envelope. */
+	platformAdmin?: boolean;
 };
 
 type WebsiteEnvelope = {
@@ -29,6 +31,7 @@ type WebsiteEnvelope = {
 	uid?: unknown;
 	eid?: unknown;
 	evat?: unknown;
+	adm?: unknown;
 	iat?: unknown;
 	exp?: unknown;
 };
@@ -79,11 +82,22 @@ export const verifyWebsitePrincipal = (headers: Headers): Principal | null => {
 		typeof envelope.iat === "number" && Number.isSafeInteger(envelope.iat) ? envelope.iat : null;
 	const expiresAt =
 		typeof envelope.exp === "number" && Number.isSafeInteger(envelope.exp) ? envelope.exp : null;
+	const hasLegacyFields = hasExactFields(envelope, ["aud", "uid", "eid", "evat", "iat", "exp"]);
+	const hasPlatformAdminFields = hasExactFields(envelope, [
+		"aud",
+		"uid",
+		"eid",
+		"evat",
+		"adm",
+		"iat",
+		"exp",
+	]);
 	if (
-		!hasExactFields(envelope, ["aud", "uid", "eid", "evat", "iat", "exp"]) ||
+		(!hasLegacyFields && !hasPlatformAdminFields) ||
 		envelope.aud !== "letletme-graphql" ||
 		typeof envelope.uid !== "string" ||
 		envelope.uid.length === 0 ||
+		(envelope.adm !== undefined && typeof envelope.adm !== "boolean") ||
 		issuedAt === null ||
 		expiresAt === null ||
 		issuedAt > now + 30 ||
@@ -112,6 +126,7 @@ export const verifyWebsitePrincipal = (headers: Headers): Principal | null => {
 		source: "website",
 		fplEntryId,
 		fplEntryVerifiedAt: fplEntryId === null || !verifiedAt ? null : verifiedAt,
+		platformAdmin: fplEntryId !== null && envelope.adm === true,
 	};
 };
 
@@ -146,6 +161,7 @@ export const validateMiniProgramSessionToken = async (token: string): Promise<Pr
 		fplEntryVerifiedAt: row.fpl_entry_verified_at
 			? new Date(row.fpl_entry_verified_at).toISOString()
 			: null,
+		platformAdmin: false,
 	};
 };
 

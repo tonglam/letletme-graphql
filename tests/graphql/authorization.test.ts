@@ -53,6 +53,14 @@ const unverifiedWebsitePrincipal: Principal = {
 	fplEntryVerifiedAt: null,
 };
 
+const platformAdminPrincipal: Principal = {
+	userId: "platform-admin",
+	source: "website",
+	fplEntryId: 6953,
+	fplEntryVerifiedAt: "2026-08-21T00:00:00.000Z",
+	platformAdmin: true,
+};
+
 const authorize = (
 	query: string,
 	variables?: Record<string, unknown>,
@@ -312,6 +320,42 @@ describe("authorizeGraphQLRequest", () => {
 			}`,
 			{ tournamentId: 9 },
 			websitePrincipal
+		);
+		expect(result).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+	});
+
+	it("allows a verified platform administrator across tournament and league gates", async () => {
+		for (const [query, variables] of [
+			[
+				`query Participants($tournamentId: Int!) {
+					tournamentParticipants(tournamentId: $tournamentId) { entryId }
+				}`,
+				{ tournamentId: 9 },
+			],
+			[
+				`query Managed($tournamentId: Int!, $entryId: Int!) {
+					managedTournament(tournamentId: $tournamentId, entryId: $entryId) { id }
+				}`,
+				{ tournamentId: 9, entryId: 6953 },
+			],
+			[
+				`query League($leagueId: Int!, $eventId: Int!) {
+					leagueEventResults(leagueId: $leagueId, eventId: $eventId) { entryId }
+				}`,
+				{ leagueId: 999, eventId: 1 },
+			],
+		] as const) {
+			expect(await authorize(query, variables, platformAdminPrincipal)).toEqual({ ok: true });
+		}
+	});
+
+	it("does not let a platform administrator impersonate another FPL entry", async () => {
+		const result = await authorize(
+			`query Managed($tournamentId: Int!, $entryId: Int!) {
+				managedTournament(tournamentId: $tournamentId, entryId: $entryId) { id }
+			}`,
+			{ tournamentId: 9, entryId: 123 },
+			platformAdminPrincipal
 		);
 		expect(result).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
 	});

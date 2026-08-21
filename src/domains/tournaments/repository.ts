@@ -2358,6 +2358,12 @@ export const tournamentCacheTestables = {
 	tournamentCacheKey,
 };
 
+const hasPlatformAdminAccess = (context: GraphQLContext, entryId: number): boolean =>
+	context.principal?.source === "website" &&
+	context.principal.platformAdmin === true &&
+	context.principal.fplEntryId === entryId &&
+	Boolean(context.principal.fplEntryVerifiedAt);
+
 export const tournamentsRepository: TournamentsRepository = {
 	getTournamentInfoUncached,
 	getTournamentInfosUncached,
@@ -2367,17 +2373,19 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		entryId: number
 	): Promise<TournamentInfo | null> {
-		const { data, error } = await context.data
-			.read("competition.tournament_entries")
-			.select("entry_id")
-			.eq("tournament_id", tournamentId)
-			.eq("entry_id", entryId)
-			.limit(1);
-		if (error) {
-			context.logger.error({ err: error, tournamentId, entryId }, "Failed to verify membership");
-			throw new Error("Failed to fetch tournament");
+		if (!hasPlatformAdminAccess(context, entryId)) {
+			const { data, error } = await context.data
+				.read("competition.tournament_entries")
+				.select("entry_id")
+				.eq("tournament_id", tournamentId)
+				.eq("entry_id", entryId)
+				.limit(1);
+			if (error) {
+				context.logger.error({ err: error, tournamentId, entryId }, "Failed to verify membership");
+				throw new Error("Failed to fetch tournament");
+			}
+			if (((data as { entry_id: number }[] | null) ?? []).length === 0) return null;
 		}
-		if (((data as { entry_id: number }[] | null) ?? []).length === 0) return null;
 		return getTournamentInfoUncached(context, tournamentId);
 	},
 
@@ -2386,12 +2394,12 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		entryId: number
 	): Promise<TournamentInfo | null> {
-		const { data, error } = await context.data
+		const query = context.data
 			.read("competition.tournaments")
 			.select(TOURNAMENT_INFO_COLUMNS)
-			.eq("id", tournamentId)
-			.eq("admin_entry_id", entryId)
-			.limit(1);
+			.eq("id", tournamentId);
+		if (!hasPlatformAdminAccess(context, entryId)) query.eq("admin_entry_id", entryId);
+		const { data, error } = await query.limit(1);
 		if (error) {
 			context.logger.error(
 				{ err: error, tournamentId, entryId },
@@ -2444,7 +2452,11 @@ export const tournamentsRepository: TournamentsRepository = {
 		// Mutable metadata is read directly for lightweight roots. Legacy callers
 		// that already pinned a core revision retain the existing bounded cache
 		// contract during the rolling migration.
-		const cacheKey = context.dataRevision ? tournamentCacheKey(context, `entry:${entryId}`) : null;
+		const platformAdmin = hasPlatformAdminAccess(context, entryId);
+		const cacheScope = platformAdmin ? "platform-admin" : "entry";
+		const cacheKey = context.dataRevision
+			? tournamentCacheKey(context, `${cacheScope}:${entryId}`)
+			: null;
 		if (cacheKey) {
 			const cached = await readJsonQueryCache(context, cacheKey, (value) =>
 				isTournamentInfoArrayCache(value) ? value : null
@@ -2456,33 +2468,39 @@ export const tournamentsRepository: TournamentsRepository = {
 				return cached as TournamentInfo[];
 			}
 		}
-		const { data: entryData, error: entryError } = await context.data
-			.read("competition.tournament_entries")
-			.select("tournament_id")
-			.eq("entry_id", entryId);
+		let tournamentIds: number[] | null = null;
+		if (!platformAdmin) {
+			const { data: entryData, error: entryError } = await context.data
+				.read("competition.tournament_entries")
+				.select("tournament_id")
+				.eq("entry_id", entryId);
 
-		if (entryError) {
-			context.logger.error({ err: entryError, entryId }, "Failed to fetch tournament memberships");
-			throw new Error("Failed to fetch tournament memberships");
-		}
-
-		const tournamentIds = extractTournamentIds((entryData as DbTournamentEntryRow[] | null) ?? []);
-		if (tournamentIds.length === 0) {
-			if (cacheKey)
-				await writeQueryCache(
-					context,
-					cacheKey,
-					JSON.stringify([]),
-					QUERY_CACHE_TTL_SECONDS.REPORTING
+			if (entryError) {
+				context.logger.error(
+					{ err: entryError, entryId },
+					"Failed to fetch tournament memberships"
 				);
-			return [];
+				throw new Error("Failed to fetch tournament memberships");
+			}
+
+			tournamentIds = extractTournamentIds((entryData as DbTournamentEntryRow[] | null) ?? []);
+			if (tournamentIds.length === 0) {
+				if (cacheKey)
+					await writeQueryCache(
+						context,
+						cacheKey,
+						JSON.stringify([]),
+						QUERY_CACHE_TTL_SECONDS.REPORTING
+					);
+				return [];
+			}
 		}
 
-		const { data: infoData, error: infoError } = await context.data
-			.read("competition.tournaments")
-			.select(TOURNAMENT_INFO_COLUMNS)
-			.in("id", tournamentIds)
-			.order("id", { ascending: true });
+		const infoQuery = context.data.read("competition.tournaments").select(TOURNAMENT_INFO_COLUMNS);
+		if (tournamentIds) infoQuery.in("id", tournamentIds);
+		const { data: infoData, error: infoError } = await infoQuery.order("id", {
+			ascending: true,
+		});
 
 		if (infoError) {
 			context.logger.error({ err: infoError, entryId }, "Failed to fetch tournament details");
@@ -3432,7 +3450,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		return {
 			tournament,
 			viewerEntryId: entryId,
-			canManage: tournament.adminEntryId === entryId,
+			canManage: tournament.adminEntryId === entryId || hasPlatformAdminAccess(context, entryId),
 			participants,
 			unavailableSections,
 			setup:
@@ -3473,14 +3491,14 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		entryId: number
 	): Promise<ManagedTournamentStatus | null> {
-		const tournament = await context.data
+		const query = context.data
 			.read("competition.tournaments")
 			.select(
 				"id, admin_entry_id, state, setup_status, setup_phase, roster_sync_status, setup_completed_units, setup_total_units, setup_progress_indeterminate, setup_attempt, setup_max_attempts, setup_next_retry_at, standings_ready_at, profiles_ready_at, insights_ready_at, setup_warning_count, updated_at"
 			)
-			.eq("id", tournamentId)
-			.eq("admin_entry_id", entryId)
-			.limit(1);
+			.eq("id", tournamentId);
+		if (!hasPlatformAdminAccess(context, entryId)) query.eq("admin_entry_id", entryId);
+		const tournament = await query.limit(1);
 		if (tournament.error) throw new Error("Failed to fetch tournament status");
 		const row = tournament.data?.[0] as Record<string, unknown> | undefined;
 		if (!row) return null;

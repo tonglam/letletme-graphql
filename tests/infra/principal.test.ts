@@ -75,6 +75,51 @@ describe("website principal envelope", () => {
 		expect(verifyWebsitePrincipal(websiteHeaders(payload))).toBeNull();
 	});
 
+	test("accepts a signed platform role and keeps legacy envelopes non-admin", () => {
+		const now = Math.floor(Date.now() / 1000);
+		const legacy = verifyWebsitePrincipal(
+			websiteHeaders({
+				aud: "letletme-graphql",
+				uid: "legacy-user",
+				eid: 6953,
+				evat: "2026-08-21T00:00:00.000Z",
+				iat: now,
+				exp: now + 60,
+			})
+		);
+		expect(legacy?.platformAdmin).toBe(false);
+
+		const platformAdmin = verifyWebsitePrincipal(
+			websiteHeaders({
+				aud: "letletme-graphql",
+				uid: "platform-admin",
+				eid: 6953,
+				evat: "2026-08-21T00:00:00.000Z",
+				adm: true,
+				iat: now,
+				exp: now + 60,
+			})
+		);
+		expect(platformAdmin?.platformAdmin).toBe(true);
+	});
+
+	test("rejects a non-boolean platform role", () => {
+		const now = Math.floor(Date.now() / 1000);
+		expect(
+			verifyWebsitePrincipal(
+				websiteHeaders({
+					aud: "letletme-graphql",
+					uid: "user-1",
+					eid: 6953,
+					evat: "2026-08-21T00:00:00.000Z",
+					adm: "true",
+					iat: now,
+					exp: now + 60,
+				})
+			)
+		).toBeNull();
+	});
+
 	test("rejects the deferred v2 envelope instead of downgrading it to v1", () => {
 		const now = Math.floor(Date.now() / 1000);
 		expect(
