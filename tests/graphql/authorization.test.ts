@@ -350,14 +350,16 @@ describe("authorizeGraphQLRequest", () => {
 	});
 
 	it("does not let a platform administrator impersonate another FPL entry", async () => {
-		const result = await authorize(
-			`query Managed($tournamentId: Int!, $entryId: Int!) {
-				managedTournament(tournamentId: $tournamentId, entryId: $entryId) { id }
-			}`,
-			{ tournamentId: 9, entryId: 123 },
-			platformAdminPrincipal
-		);
-		expect(result).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+		for (const field of ["managedTournament", "managedTournamentStatus"]) {
+			const result = await authorize(
+				`query Managed($tournamentId: Int!, $entryId: Int!) {
+					${field}(tournamentId: $tournamentId, entryId: $entryId) { __typename }
+				}`,
+				{ tournamentId: 9, entryId: 123 },
+				platformAdminPrincipal
+			);
+			expect(result).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+		}
 	});
 
 	it("rejects managed tournament impersonation", async () => {

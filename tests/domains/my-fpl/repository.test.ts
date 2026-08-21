@@ -557,6 +557,35 @@ describe("My FPL review repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "FORBIDDEN" } });
 	});
 
+	it("lets an attested platform administrator use My FPL competition roots as a non-member", async () => {
+		const fixture = makeFixture({
+			member: false,
+			membershipIds: [],
+			finalizedIds: [],
+			setupRows: [
+				{
+					setup_status: "ready",
+					setup_phase: "ready",
+					setup_completed_units: 10,
+					setup_total_units: 10,
+					setup_progress_updated_at: "2026-08-20T00:00:00.000Z",
+					standings_ready_at: "2026-08-20T00:00:00.000Z",
+					insights_ready_at: "2026-08-20T00:00:00.000Z",
+					setup_warning_count: 0,
+				},
+			],
+		});
+		fixture.context.principal = { ...verifiedPrincipal, platformAdmin: true };
+
+		const desk = await fixture.repository.loadCompetitionsDesk(fixture.context, 7);
+		expect(desk.tournaments.map((item) => item.id)).toEqual([7]);
+		const status = await fixture.repository.loadCompetitionSetupStatus(fixture.context, 7);
+		expect(status.ready).toBe(true);
+		expect(
+			fixture.queries.some((query) => query.sql.includes("FROM competition.tournament_entries"))
+		).toBe(false);
+	});
+
 	it("returns the competitions desk with aggregate and season-path readiness", async () => {
 		const fixture = makeFixture({
 			finalizedIds: [1],
