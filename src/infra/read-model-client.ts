@@ -7,6 +7,7 @@ export const READ_MODELS = {
 	teams: "fpl.teams",
 	players: "fpl.players",
 	playerEventSnapshots: "fpl.player_event_snapshots",
+	playerEventSnapshotPublications: "fpl.player_event_snapshot_publications",
 	fixtures: "fpl.fixtures",
 	playerGameweekStats: "fpl.player_gameweek_stats",
 	playerGameweekScoringItems: "fpl.player_gameweek_scoring_items",
@@ -193,6 +194,24 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 			  ON team.season_id = snapshot.season_id
 			 AND team.team_id = player.team_id
 			WHERE snapshot.season_id = $1
+		`,
+	},
+	[READ_MODELS.playerEventSnapshotPublications]: {
+		sourceRelations: ["fpl.player_event_snapshot_publications"],
+		sql: `
+			SELECT
+				event_id,
+				revision,
+				source_checked_at,
+				published_at,
+				row_count,
+				expected_row_count,
+				content_sha256,
+				baseline_verified_at,
+				created_at,
+				updated_at
+			FROM fpl.player_event_snapshot_publications
+			WHERE season_id = $1
 		`,
 	},
 	[READ_MODELS.fixtures]: {

@@ -41,8 +41,10 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		eventId: Int!
 		homeTeamId: Int!
 		homeTeamName: String!
+		homeTeamShortName: String!
 		awayTeamId: Int!
 		awayTeamName: String!
+		awayTeamShortName: String!
 		homeScore: Int
 		awayScore: Int
 		kickoffTime: DateTime
@@ -56,9 +58,12 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		eventId: Int!
 		revision: String!
 		state: LiveSnapshotState!
+		sourceCheckedAt: DateTime!
 		publishedAt: DateTime!
+		stale: Boolean!
 		matches: [LiveMatchSummary!]!
 		nextFixtures: [LiveMatchSummary!]!
+			@deprecated(reason: "Use core eventFixtures for next-event schedule")
 		highlights: [LivePerformance!]!
 	}
 

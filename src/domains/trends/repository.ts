@@ -78,6 +78,8 @@ const decodeTrendCatalog = (
 ): {
 	season: string;
 	revision: string;
+	state: string;
+	sourceCheckedAt: string | null;
 	cohorts: TrendCohort[];
 } | null => {
 	if (!isRecord(value) || typeof value.season !== "string" || typeof value.revision !== "string")
@@ -85,7 +87,16 @@ const decodeTrendCatalog = (
 	if (!Array.isArray(value.cohorts)) return null;
 	const cohorts = value.cohorts.map(decodeTrendCohort);
 	return cohorts.every((cohort): cohort is TrendCohort => cohort !== null)
-		? { season: value.season, revision: value.revision, cohorts }
+		? {
+				season: value.season,
+				revision: value.revision,
+				state: typeof value.state === "string" ? value.state : "NOT_PUBLISHED",
+				sourceCheckedAt:
+					value.sourceCheckedAt === null || typeof value.sourceCheckedAt === "string"
+						? ((value.sourceCheckedAt as string | null | undefined) ?? null)
+						: null,
+				cohorts,
+			}
 		: null;
 };
 
@@ -197,6 +208,8 @@ export const trendsRepository = {
 			const cached = await readPublicCache<{
 				season: string;
 				revision: string;
+				state: string;
+				sourceCheckedAt: string | null;
 				cohorts: ReturnType<typeof mapCohort>[];
 			}>(context, context.currentSeason.seasonCode, "trends:catalog:public", decodeTrendCatalog);
 			if (cached) return cached;
@@ -206,13 +219,15 @@ export const trendsRepository = {
 			access === "MINE"
 				? `
       SELECT tournament.tournament_id, COALESCE(catalog.display_name, tournament.name) AS display_name,
-        latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
+					latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
+					latest.captured_at AS source_checked_at,
         latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state, latest.transfers_state
       FROM competition.tournaments tournament
       LEFT JOIN competition.public_league_trends catalog
         ON catalog.season_id = tournament.season_id AND catalog.tournament_id = tournament.tournament_id
       LEFT JOIN LATERAL (
         SELECT publication.event_id, publication.revision, publication.publication_state,
+          publication.captured_at,
           publication.ownership_state, publication.captaincy_state, publication.vice_captaincy_state,
           publication.transfers_state
         FROM reporting.tournament_selection_stat_publications publication
@@ -223,7 +238,8 @@ export const trendsRepository = {
       WHERE tournament.season_id = $1 AND tournament.setup_status = 'ready'`
 				: `
       SELECT catalog.tournament_id, catalog.display_name,
-        latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
+				latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
+				latest.captured_at AS source_checked_at,
         latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state, latest.transfers_state
       FROM competition.public_league_trends catalog
       JOIN competition.tournaments tournament
@@ -232,6 +248,7 @@ export const trendsRepository = {
         AND tournament.setup_status = 'ready'
       LEFT JOIN LATERAL (
         SELECT publication.event_id, publication.revision, publication.publication_state,
+          publication.captured_at,
           publication.ownership_state, publication.captaincy_state, publication.vice_captaincy_state, publication.transfers_state
         FROM reporting.tournament_selection_stat_publications publication
         WHERE publication.season_id = catalog.season_id
@@ -248,11 +265,23 @@ export const trendsRepository = {
 				? " ORDER BY COALESCE(catalog.sort_order, 0), tournament.tournament_id"
 				: " ORDER BY catalog.sort_order, catalog.tournament_id";
 		const result = await context.database.query<Record<string, unknown>>(sql, params);
+		const hasPublishedRows = result.rows.some(
+			(row) => row.revision !== null && row.revision !== undefined
+		);
+		const sourceCheckedAtValue = result.rows
+			.map((row) => row.source_checked_at)
+			.filter((value): value is string | Date => value !== null && value !== undefined)
+			.sort((left, right) => Date.parse(String(right)) - Date.parse(String(left)))[0];
+		const sourceCheckedAt = sourceCheckedAtValue
+			? new Date(sourceCheckedAtValue).toISOString()
+			: null;
 		const payload = {
 			season: context.currentSeason.seasonCode,
-			revision: result.rows
-				.map((row) => `${row.tournament_id}:${row.revision ?? "none"}`)
-				.join("|"),
+			revision:
+				result.rows.map((row) => `${row.tournament_id}:${row.revision ?? "none"}`).join("|") ||
+				`not-published:${context.currentSeason.seasonCode}`,
+			state: hasPublishedRows ? "PUBLISHED" : "NOT_PUBLISHED",
+			sourceCheckedAt,
 			cohorts: result.rows.map((row) => mapCohort(row, access)),
 		};
 		if (access === "PUBLIC")

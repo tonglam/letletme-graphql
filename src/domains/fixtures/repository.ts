@@ -1,5 +1,9 @@
 import type { GraphQLContext } from "../../graphql/context";
-import { getCoreFixtureSnapshot, type CoreFixtureData } from "../../infra/data-snapshot";
+import {
+	getCoreEventSnapshot,
+	getCoreFixtureSnapshot,
+	type CoreFixtureData,
+} from "../../infra/data-snapshot";
 import { getCurrentEventId } from "../../infra/event";
 import { metrics } from "../../infra/metrics";
 
@@ -28,6 +32,17 @@ export type FixturesFilter = {
 };
 
 const mapFixture = (fixture: CoreFixtureData): Fixture => ({ ...fixture });
+
+const mapCoreScheduleFixture = (fixture: CoreFixtureData, currentEvent: boolean): Fixture => {
+	if (!currentEvent || fixture.finished || fixture.finishedProvisional) return mapFixture(fixture);
+	// Core is the schedule publication. An unfinished current fixture's score
+	// belongs exclusively to the live publication and must fail closed here.
+	return {
+		...mapFixture(fixture),
+		teamHScore: null,
+		teamAScore: null,
+	};
+};
 
 const normalizeFilter = (filter?: FixturesFilter | null): FixturesFilter | undefined =>
 	filter
@@ -89,11 +104,14 @@ export const fixturesRepository: FixturesRepository = {
 	async getEventFixtures(context, eventId) {
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) return [];
 		const acquisitionStartedAt = performance.now();
-		const snapshot = await getCoreFixtureSnapshot(context);
+		const [snapshot, eventSnapshot] = await Promise.all([
+			getCoreFixtureSnapshot(context),
+			getCoreEventSnapshot(context),
+		]);
 		const coreFixtureAcquisitionMs = performance.now() - acquisitionStartedAt;
 		const transformStartedAt = performance.now();
 		const fixtures = snapshot.fixtures
-			.map(mapFixture)
+			.map((fixture) => mapCoreScheduleFixture(fixture, eventSnapshot.currentEventId === eventId))
 			.filter((fixture) => fixture.eventId === eventId)
 			.sort(kickoffOrder);
 		const fixtureTransformMs = performance.now() - transformStartedAt;

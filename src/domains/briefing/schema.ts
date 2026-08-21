@@ -8,6 +8,7 @@ export const briefingTypeDefs = /* GraphQL */ `
 		EMPTY
 		STALE
 		OFFSEASON
+		NOT_PUBLISHED
 		UNAVAILABLE
 		REMOVED
 	}

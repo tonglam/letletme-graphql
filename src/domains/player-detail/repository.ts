@@ -520,7 +520,12 @@ async function loadRecentGameweeks(
 	fallbackTeamId: number,
 	knownFixtures: PlayerFixture[]
 ): Promise<PlayerRecentGameweek[]> {
-	if (statsContext.scope !== "CURRENT_SEASON" || statsContext.asOfEventId === null) return [];
+	if (
+		statsContext.scope !== "CURRENT_SEASON" ||
+		statsContext.status !== "AVAILABLE" ||
+		statsContext.asOfEventId === null
+	)
+		return [];
 	try {
 		const { data, error } = await context.data
 			.read("fpl.player_gameweek_stats")
@@ -585,7 +590,9 @@ const currentSeasonStats = (
 	statsContext: PlayerStatsContext,
 	stats: PlayerSeasonStatsAtEvent | null
 ): PlayerSeasonStatsAtEvent | null =>
-	statsContext.scope === "CURRENT_SEASON" && stats?.available ? stats : null;
+	statsContext.scope === "CURRENT_SEASON" && statsContext.status === "AVAILABLE" && stats?.available
+		? stats
+		: null;
 
 function assemblePlayerDetail(args: {
 	playerId: number;

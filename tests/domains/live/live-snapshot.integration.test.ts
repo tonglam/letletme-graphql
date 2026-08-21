@@ -102,6 +102,7 @@ describe("liveSnapshot GraphQL contract", () => {
 		const live = buildLivePublication(core, 1, "2627", 8, {
 			eventLives: buildLiveEventRows(core),
 			state: "live",
+			sourceCheckedAt: new Date().toISOString(),
 		});
 		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
 		const originalGet = redis.get;
@@ -153,6 +154,7 @@ describe("liveSnapshot GraphQL contract", () => {
 		const live = buildLivePublication(core, 1, "2627", 8, {
 			eventLives: buildLiveEventRows(core),
 			state: "live",
+			sourceCheckedAt: new Date().toISOString(),
 		});
 		const context = buildSnapshotContext(
 			new TestRedis(buildCorePublication("2627", 7, core), live)
@@ -162,7 +164,8 @@ describe("liveSnapshot GraphQL contract", () => {
 			schema,
 			source: `query {
 				liveMatchdayDesk(ref: { season: "2627", eventId: 1, revision: "8" }) {
-					matches { fixtureId minutes started }
+					sourceCheckedAt stale
+					matches { fixtureId minutes started homeTeamShortName awayTeamShortName }
 					nextFixtures { fixtureId minutes started }
 				}
 			}`,
@@ -171,9 +174,23 @@ describe("liveSnapshot GraphQL contract", () => {
 
 		expect(result.errors).toBeUndefined();
 		const desk = result.data?.liveMatchdayDesk as {
-			matches: Array<{ fixtureId: number; minutes: number; started: boolean }>;
+			sourceCheckedAt: unknown;
+			stale: boolean;
+			matches: Array<{
+				fixtureId: number;
+				minutes: number;
+				started: boolean;
+				homeTeamShortName: string;
+				awayTeamShortName: string;
+			}>;
 			nextFixtures: Array<{ fixtureId: number; minutes: number; started: boolean }>;
 		};
+		expect(desk.sourceCheckedAt).toBeTruthy();
+		expect(desk.stale).toBe(false);
+		expect(desk.matches[0]).toMatchObject({
+			homeTeamShortName: "T01",
+			awayTeamShortName: "T20",
+		});
 		expect(desk.matches.find((match) => match.fixtureId === 1)).toMatchObject({
 			minutes: 45,
 			started: true,
@@ -193,7 +210,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			schema,
 			source: `query {
 				liveMatchdayDesk(ref: { season: "2627", eventId: 1, revision: "8" }) {
-					season eventId revision state publishedAt
+					season eventId revision state sourceCheckedAt publishedAt stale
 					matches { fixtureId eventId minutes started finished }
 					nextFixtures { fixtureId eventId minutes started finished }
 					highlights { totalPoints }
@@ -208,6 +225,8 @@ describe("liveSnapshot GraphQL contract", () => {
 			eventId: number;
 			revision: string;
 			state: string;
+			sourceCheckedAt: string;
+			stale: boolean;
 			matches: Array<{ fixtureId: number; eventId: number }>;
 			nextFixtures: Array<{ fixtureId: number; eventId: number }>;
 			highlights: Array<{ totalPoints: number }>;
@@ -218,10 +237,38 @@ describe("liveSnapshot GraphQL contract", () => {
 			revision: "8",
 			state: "SCHEDULED",
 		});
+		expect(desk.sourceCheckedAt).toBeTruthy();
+		expect(desk.stale).toBe(false);
 		expect(desk.matches.length).toBeGreaterThan(0);
 		expect(desk.matches.every((match) => match.eventId === 1)).toBe(true);
 		expect(desk.nextFixtures.length).toBeGreaterThan(0);
 		expect(desk.highlights).toEqual([]);
+	});
+
+	it("maps the manifest live state to LIVE_ACTIVE and tracks source age", async () => {
+		const core = buildLiveCore();
+		const live = buildLivePublication(core, 1, "2627", 8, {
+			eventLives: buildLiveEventRows(core),
+			state: "live",
+			sourceCheckedAt: new Date().toISOString(),
+		});
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), live)
+		);
+
+		const result = await graphql({
+			schema,
+			source: `query { liveContext { state source stale liveRevision } }`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveContext).toMatchObject({
+			state: "LIVE_ACTIVE",
+			source: "REDIS",
+			stale: false,
+			liveRevision: "8",
+		});
 	});
 
 	it("fails closed when an immutable live item is missing", async () => {

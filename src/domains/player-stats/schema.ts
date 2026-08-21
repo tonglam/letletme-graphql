@@ -1,6 +1,7 @@
 export const playerStatsTypeDefs = /* GraphQL */ `
 	type PlayerStatsBootstrap {
 		context: CoreEventContext!
+		statsContext: PlayerStatsContext!
 		teams: [Team!]!
 		directory: PlayersForPickerPayload!
 	}

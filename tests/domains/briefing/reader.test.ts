@@ -81,9 +81,10 @@ describe("Briefing publication reader", () => {
 			};
 			const result = await readBriefingWeek(database, redisWithoutPayload, "en");
 			expect(result.state).toBe("OFFSEASON");
-			expect(queries).toHaveLength(1);
+			expect(queries).toHaveLength(2);
 			expect(queries[0]).toContain("content.briefing_active_publication");
 			expect(queries[0]).not.toContain("content.publications");
+			expect(queries[1]).toContain("fpl.events");
 		});
 
 		test("counts a successful PostgreSQL payload fallback as a repair", async () => {
