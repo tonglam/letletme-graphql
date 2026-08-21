@@ -106,6 +106,25 @@ describe("Data Platform read client", () => {
 		});
 	});
 
+	it("projects tournament setup reliability fields for repository reads", async () => {
+		const { executor, queries } = makeExecutor();
+		const fields = [
+			"setup_progress_indeterminate",
+			"setup_attempt",
+			"setup_max_attempts",
+			"setup_next_retry_at",
+			"profiles_ready_at",
+			"insights_ready_at",
+		] as const;
+
+		await clientFor(executor).read("competition.tournaments").select(fields.join(", "));
+
+		const query = queries[0]?.text ?? "";
+		for (const field of fields) {
+			expect(query.match(new RegExp("\\b" + field + "\\b", "g"))?.length).toBeGreaterThanOrEqual(2);
+		}
+	});
+
 	it("probes every registered model at the current season and exposes a unique relation set", async () => {
 		const { executor, queries } = makeExecutor();
 		await clientFor(executor).probe();
