@@ -49,6 +49,24 @@ const resolveSnapshot = async (
 const teamName = (core: Pick<CoreLiveIdentitySnapshot, "teams">, id: number): string =>
 	core.teams.find((team) => team.id === id)?.name ?? "";
 
+const liveContextState = (
+	publicationState: "active" | "scheduled" | "live" | "settled",
+	currentEvent: { finished?: boolean; dataChecked?: boolean } | null | undefined
+) => {
+	switch (publicationState) {
+		case "live":
+			return "LIVE_ACTIVE" as const;
+		case "settled":
+			return currentEvent?.finished && currentEvent.dataChecked
+				? ("FINALIZED" as const)
+				: ("GW_REVIEW" as const);
+		case "active":
+		case "scheduled":
+		default:
+			return "SCHEDULED" as const;
+	}
+};
+
 const matchRows = (
 	snapshot: Pick<LiveDataSnapshot, "eventId" | "fixtures">,
 	core: Pick<CoreLiveIdentitySnapshot, "teams">
@@ -93,15 +111,7 @@ export const liveDesksResolvers = {
 				currentEventId: eventId,
 				nextEventId: core.events.find((event) => event.isNext)?.id ?? null,
 				liveRevision: current ? String(current.revision) : null,
-				state: current
-					? current.state === "active"
-						? "LIVE_ACTIVE"
-						: current.state === "settled"
-							? currentEvent?.finished && currentEvent.dataChecked
-								? "FINALIZED"
-								: "GW_REVIEW"
-							: "SCHEDULED"
-					: "SCHEDULED",
+				state: current ? liveContextState(current.state, currentEvent) : "SCHEDULED",
 				sourceCheckedAt: current?.sourceCheckedAt ?? null,
 				publishedAt: current?.publishedAt ?? null,
 				source: current ? "REDIS" : null,
