@@ -825,7 +825,13 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 				setup_completed_units,
 				setup_total_units,
 				setup_progress_updated_at,
+				setup_progress_indeterminate,
+				setup_attempt,
+				setup_max_attempts,
+				setup_next_retry_at,
 				standings_ready_at,
+				profiles_ready_at,
+				insights_ready_at,
 				setup_warning_count
 			FROM competition.tournaments
 			WHERE season_id = $1
