@@ -148,6 +148,39 @@ describe("liveSnapshot GraphQL contract", () => {
 		expect(result.data?.liveSnapshot).toEqual({ state: "LIVE" });
 	});
 
+	it("publishes fixture minutes through the live matchday desk", async () => {
+		const core = buildLiveCore();
+		const live = buildLivePublication(core, 1, "2627", 8, {
+			eventLives: buildLiveEventRows(core),
+			state: "live",
+		});
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), live)
+		);
+
+		const result = await graphql({
+			schema,
+			source: `query {
+				liveMatchdayDesk(ref: { season: "2627", eventId: 1, revision: "8" }) {
+					matches { fixtureId minutes started }
+					nextFixtures { fixtureId minutes started }
+				}
+			}`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		const desk = result.data?.liveMatchdayDesk as {
+			matches: Array<{ fixtureId: number; minutes: number; started: boolean }>;
+			nextFixtures: Array<{ fixtureId: number; minutes: number; started: boolean }>;
+		};
+		expect(desk.matches.find((match) => match.fixtureId === 1)).toMatchObject({
+			minutes: 45,
+			started: true,
+		});
+		expect(desk.nextFixtures[0]).toMatchObject({ minutes: 0, started: false });
+	});
+
 	it("fails closed when an immutable live item is missing", async () => {
 		const core = buildLiveCore();
 		const eventLives = buildLiveEventRows(core);

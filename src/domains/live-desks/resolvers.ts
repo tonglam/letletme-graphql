@@ -63,6 +63,7 @@ const matchRows = (
 		homeScore: fixture.teamHScore,
 		awayScore: fixture.teamAScore,
 		kickoffTime: fixture.kickoffTime,
+		minutes: fixture.minutes,
 		started: fixture.started === true,
 		finished: fixture.finished || fixture.finishedProvisional,
 	}));

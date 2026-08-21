@@ -46,6 +46,7 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		homeScore: Int
 		awayScore: Int
 		kickoffTime: DateTime
+		minutes: Int!
 		started: Boolean!
 		finished: Boolean!
 	}
