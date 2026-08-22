@@ -56,6 +56,7 @@ export const trendsTypeDefs = /* GraphQL */ `
 		kind: TrendCohortKind!
 		access: TrendCohortAccess!
 		displayName: String!
+		setupStatus: TournamentSetupStatus!
 		exact: Boolean!
 		latestEventId: Int
 		revision: String
