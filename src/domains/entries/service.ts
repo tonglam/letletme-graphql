@@ -330,9 +330,10 @@ async function loadEventTeamIds(
 	try {
 		const { data, error } = await context.data
 			.read("fpl.player_fixture_stats")
-			.select("element_id, event_id, team_id")
+			.select("element_id, event_id, fixture_id, team_id")
 			.eq("event_id", eventId)
-			.in("element_id", playerIds);
+			.in("element_id", playerIds)
+			.order("fixture_id", { ascending: true });
 		if (error) {
 			context.logger.warn(
 				{ err: error, eventId, playerIds },
@@ -344,6 +345,7 @@ async function loadEventTeamIds(
 		for (const raw of (data ?? []) as Array<{
 			element_id?: unknown;
 			event_id?: unknown;
+			fixture_id?: unknown;
 			team_id?: unknown;
 		}>) {
 			const elementId = asNumber(raw.element_id);

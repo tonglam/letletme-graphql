@@ -63,9 +63,15 @@ const makeContext = (
 				select: () => Builder;
 				in: () => Builder;
 				eq: () => Builder;
+				order: () => Builder;
 			};
 			const builder = promise as Builder;
-			Object.assign(builder, { select: () => builder, in: () => builder, eq: () => builder });
+			Object.assign(builder, {
+				select: () => builder,
+				in: () => builder,
+				eq: () => builder,
+				order: () => builder,
+			});
 			return builder;
 		},
 	} as never;
