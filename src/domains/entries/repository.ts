@@ -3,6 +3,10 @@ import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 
 const NULL_SENTINEL = "__entries:null__";
+// v3 invalidates the v2 namespace, which could contain partial rich-history
+// arrays written before the completeness gate was introduced.
+const ENTRY_RESULT_CACHE_VERSION = "v3";
+const ENTRY_HISTORY_INFO_CACHE_VERSION = "v2";
 
 export type Entry = {
 	id: number;
@@ -37,6 +41,7 @@ export type EntryEventResult = {
 	eventPlayedCaptain: number | null;
 	eventCaptainPoints: number;
 	eventPicks: unknown[];
+	eventAutoSub?: unknown[];
 	teamValue: number | null;
 	bank: number | null;
 };
@@ -80,6 +85,8 @@ type DbEntryEventResultRow = {
 	event_played_captain?: number | null;
 	event_captain_points?: number | null;
 	event_picks?: unknown;
+	event_auto_sub?: unknown;
+	rich_synced_at?: string | null;
 	team_value: number | null;
 	bank: number | null;
 };
@@ -88,6 +95,11 @@ type DbEntryHistoryInfoRow = {
 	season: string;
 	total_points: number;
 	overall_rank: number;
+};
+
+type DbEntryHistoryCheckpointRow = {
+	past_seasons_checked_at: string | Date | null;
+	past_seasons_count: number | null;
 };
 
 const mapEntry = (row: DbEntryRow): Entry => ({
@@ -126,6 +138,7 @@ const mapEntryEventResult = (row: DbEntryEventResultRow): EntryEventResult => ({
 	eventPlayedCaptain: row.event_played_captain ?? null,
 	eventCaptainPoints: row.event_captain_points ?? 0,
 	eventPicks: parseJsonArray(row.event_picks),
+	eventAutoSub: parseJsonArray(row.event_auto_sub),
 	teamValue: row.team_value,
 	bank: row.bank,
 });
@@ -219,7 +232,8 @@ const isEntryEventResult = (value: unknown): value is EntryEventResult => {
 		typeof value.entryId === "number" &&
 		Number.isFinite(value.entryId) &&
 		typeof value.eventId === "number" &&
-		Number.isFinite(value.eventId)
+		Number.isFinite(value.eventId) &&
+		Array.isArray(value.eventAutoSub)
 	);
 };
 
@@ -416,7 +430,10 @@ export const entriesRepository: EntriesRepository = {
 			return [];
 		}
 
-		const cacheKey = gqlCacheKey(context, `entries:history:${entryId}`);
+		const cacheKey = gqlCacheKey(
+			context,
+			`entries:history:${ENTRY_RESULT_CACHE_VERSION}:${entryId}`
+		);
 		let cached: string | null = null;
 		try {
 			cached = await context.redis.get(cacheKey);
@@ -439,7 +456,7 @@ export const entriesRepository: EntriesRepository = {
 		const { data, error } = await context.data
 			.read("competition.entry_event_results")
 			.select(
-				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, rich_synced_at, team_value, bank"
 			)
 			.eq("entry_id", entryId)
 			.order("event_id", { ascending: true });
@@ -449,13 +466,24 @@ export const entriesRepository: EntriesRepository = {
 			throw new Error("Failed to fetch entry history");
 		}
 
-		const history = (data as DbEntryEventResultRow[] | null)?.map(mapEntryEventResult) ?? [];
-		await writeQueryCache(
-			context,
-			cacheKey,
-			history.length === 0 ? NULL_SENTINEL : JSON.stringify(history),
-			QUERY_CACHE_TTL_SECONDS.HISTORICAL
+		const rows = (data as DbEntryEventResultRow[] | null) ?? [];
+		const hasPendingRichSync = rows.some(
+			(row) => row.rich_synced_at === null || row.rich_synced_at === undefined
 		);
+		const history = rows
+			.filter((row) => row.rich_synced_at !== null && row.rich_synced_at !== undefined)
+			.map(mapEntryEventResult);
+		// Rich synchronization advances independently of the Core revision. Do
+		// not retain a partial history snapshot for an hour while the latest
+		// finalized event is still being enriched.
+		if (!hasPendingRichSync) {
+			await writeQueryCache(
+				context,
+				cacheKey,
+				history.length === 0 ? NULL_SENTINEL : JSON.stringify(history),
+				QUERY_CACHE_TTL_SECONDS.HISTORICAL
+			);
+		}
 		return history;
 	},
 
@@ -464,7 +492,40 @@ export const entriesRepository: EntriesRepository = {
 			return [];
 		}
 
-		const cacheKey = gqlCacheKey(context, `entries:history-info:${entryId}`);
+		const checkpointResult = await context.data
+			.read("competition.entries")
+			.select("past_seasons_checked_at,past_seasons_count")
+			.eq("id", entryId)
+			.limit(1);
+		if (checkpointResult.error) {
+			context.logger.error(
+				{ err: checkpointResult.error, entryId },
+				"Failed to fetch entry history-info checkpoint"
+			);
+			throw new Error("Failed to fetch entry history-info checkpoint");
+		}
+		const checkpoint = ((checkpointResult.data as DbEntryHistoryCheckpointRow[] | null) ?? [])[0];
+		const pastSeasonsCount = checkpoint?.past_seasons_count;
+		const pastSeasonsCheckedAt = checkpoint?.past_seasons_checked_at;
+		if (
+			pastSeasonsCheckedAt === null ||
+			pastSeasonsCheckedAt === undefined ||
+			pastSeasonsCount === null ||
+			pastSeasonsCount === undefined ||
+			!Number.isSafeInteger(pastSeasonsCount) ||
+			pastSeasonsCount < 0
+		) {
+			return [];
+		}
+
+		// Include the successful checkpoint in the key so a new authoritative
+		// history replacement cannot reuse the previous legacy payload.
+		const cacheKey = gqlCacheKey(
+			context,
+			`entries:history-info:${ENTRY_HISTORY_INFO_CACHE_VERSION}:${entryId}:${String(
+				pastSeasonsCheckedAt
+			)}:${pastSeasonsCount}`
+		);
 		let cached: string | null = null;
 		try {
 			cached = await context.redis.get(cacheKey);
@@ -485,10 +546,10 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const { data, error } = await context.data
-			.read("competition.entry_season_histories")
+			.read("competition.entry_past_seasons")
 			.select("season,total_points,overall_rank")
 			.eq("entry_id", entryId)
-			.order("season", { ascending: true });
+			.order("id", { ascending: true });
 
 		if (error) {
 			context.logger.error({ err: error, entryId }, "Failed to fetch entry history info");
@@ -496,6 +557,11 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const historyInfo = (data as DbEntryHistoryInfoRow[] | null)?.map(mapEntryHistoryInfo) ?? [];
+		if (historyInfo.length !== pastSeasonsCount) {
+			// A checkpoint without its complete row set is not proof of a ready
+			// legacy result. Do not cache or expose a partial array.
+			return [];
+		}
 		await writeQueryCache(
 			context,
 			cacheKey,
@@ -519,7 +585,10 @@ export const entriesRepository: EntriesRepository = {
 			return null;
 		}
 
-		const cacheKey = gqlCacheKey(context, `entries:event-result:${entryId}:${eventId}`);
+		const cacheKey = gqlCacheKey(
+			context,
+			`entries:event-result:${ENTRY_RESULT_CACHE_VERSION}:${entryId}:${eventId}`
+		);
 		const cached = await readJsonCache(context, cacheKey, isEntryEventResult);
 		if (cached) {
 			return cached;
@@ -528,7 +597,7 @@ export const entriesRepository: EntriesRepository = {
 		const { data, error } = await context.data
 			.read("competition.entry_event_results")
 			.select(
-				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, rich_synced_at, team_value, bank"
 			)
 			.eq("entry_id", entryId)
 			.eq("event_id", eventId)
@@ -540,7 +609,7 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const row = data?.[0] as DbEntryEventResultRow | undefined;
-		if (!row) {
+		if (!row || row.rich_synced_at === null || row.rich_synced_at === undefined) {
 			return null;
 		}
 
@@ -567,7 +636,10 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const cacheKeys = uniqueIds.map((entryId) =>
-			gqlCacheKey(context, `entries:event-result:${entryId}:${eventId}`)
+			gqlCacheKey(
+				context,
+				`entries:event-result:${ENTRY_RESULT_CACHE_VERSION}:${entryId}:${eventId}`
+			)
 		);
 		const results = new Map<number, EntryEventResult>();
 		const missIds: number[] = [];
@@ -606,7 +678,7 @@ export const entriesRepository: EntriesRepository = {
 		const { data, error } = await context.data
 			.read("competition.entry_event_results")
 			.select(
-				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, rich_synced_at, team_value, bank"
 			)
 			.in("entry_id", missIds)
 			.eq("event_id", eventId);
@@ -620,11 +692,16 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const pipeline = context.redis.pipeline();
-		for (const row of (data as DbEntryEventResultRow[] | null) ?? []) {
+		for (const row of ((data as DbEntryEventResultRow[] | null) ?? []).filter(
+			(row) => row.rich_synced_at !== null && row.rich_synced_at !== undefined
+		)) {
 			const result = mapEntryEventResult(row);
 			results.set(result.entryId, result);
 			pipeline.set(
-				gqlCacheKey(context, `entries:event-result:${result.entryId}:${eventId}`),
+				gqlCacheKey(
+					context,
+					`entries:event-result:${ENTRY_RESULT_CACHE_VERSION}:${result.entryId}:${eventId}`
+				),
 				JSON.stringify(result),
 				"EX",
 				QUERY_CACHE_TTL_SECONDS.METADATA

@@ -7,6 +7,7 @@ import {
 	type MyFplRepositoryDependencies,
 	type MyFplReviewState,
 	type MyFplTeamHistoryRow,
+	type MyFplCompetitionAggregate,
 } from "../../../src/domains/my-fpl/repository";
 import { createMyFplResolvers } from "../../../src/domains/my-fpl/resolvers";
 import {
@@ -23,6 +24,7 @@ import { LeagueType } from "../../../src/domains/leagues/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
 import { gqlCacheKey } from "../../../src/infra/cache-key";
 import { TestRedis, testLogger } from "../../helpers/data-publication";
+import { COMPETITION_AGGREGATE_SQL } from "../../../src/domains/my-fpl/competition-aggregate-sql";
 
 const verifiedPrincipal = {
 	userId: "user-1",
@@ -30,6 +32,39 @@ const verifiedPrincipal = {
 	fplEntryId: 123,
 	fplEntryVerifiedAt: "2026-08-20T00:00:00.000Z",
 };
+
+describe("competition aggregate SQL contract", () => {
+	it("keeps the established semantic metric order", () => {
+		const catalog = COMPETITION_AGGREGATE_SQL.slice(
+			COMPETITION_AGGREGATE_SQL.indexOf("VALUES"),
+			COMPETITION_AGGREGATE_SQL.indexOf(") AS catalog")
+		);
+		const order = [
+			"OVERALL_POINTS",
+			"TEAM_VALUE",
+			"TRANSFERS",
+			"TOTAL_COSTS",
+			"BENCH_POINTS",
+			"AUTO_SUB_POINTS",
+		].map((key) => catalog.indexOf(key));
+		expect(order).toEqual([...order].sort((left, right) => left - right));
+	});
+
+	it("uses only event-scoped captain teams", () => {
+		expect(COMPETITION_AGGREGATE_SQL).toContain(
+			"captain_team.team_id = captain_historical_team.team_id"
+		);
+		expect(COMPETITION_AGGREGATE_SQL).not.toContain(
+			"COALESCE(captain_historical_team.team_id, captain.team_id)"
+		);
+	});
+
+	it("requires scored rows for movement insights", () => {
+		expect(COMPETITION_AGGREGATE_SQL).toContain(
+			"AND event_points IS NOT NULL\n    AND event_net_points IS NOT NULL"
+		);
+	});
+});
 
 const entryRow = (overrides: Record<string, unknown> = {}) => ({
 	entry_id: 123,
@@ -79,7 +114,11 @@ const historyRow = (eventId: number): MyFplTeamHistoryRow & Record<string, unkno
 	rich_synced_at: "2026-08-20T00:00:00.000Z",
 });
 
-const gameweekRow = (eventId: number, elementId: number) => ({
+const gameweekRow = (
+	eventId: number,
+	elementId: number,
+	overrides: Record<string, unknown> = {}
+) => ({
 	event_id: eventId,
 	event_points: 50,
 	overall_points: 100,
@@ -120,6 +159,9 @@ const gameweekRow = (eventId: number, elementId: number) => ({
 	against_short_name: "CHE",
 	was_home: "H",
 	score: "2-0",
+	fixture_count: 1,
+	automatic_substitutions: [],
+	...overrides,
 });
 
 const tournament = (overrides: Partial<TournamentInfo> = {}): TournamentInfo => ({
@@ -180,6 +222,7 @@ type FixtureOptions = {
 	gameweekRows?: unknown[];
 	aggregateRows?: unknown[];
 	aggregateFieldSize?: number;
+	aggregatePayload?: MyFplCompetitionAggregate | null;
 	seasonPathRows?: unknown[];
 	enrichedCount?: number;
 	membershipIds?: number[];
@@ -192,6 +235,262 @@ type FixtureOptions = {
 		sql: string,
 		params: unknown[]
 	) => Promise<{ rows: unknown[]; rowCount?: number }>;
+};
+
+type AggregateTestRow = Record<string, unknown>;
+
+const aggregatePayloadFromRows = (
+	rawRows: unknown[],
+	eventId = 1,
+	viewerEntryId = 123
+): MyFplCompetitionAggregate => {
+	const rows = rawRows as AggregateTestRow[];
+	const numberAt = (row: AggregateTestRow, key: string): number | null =>
+		typeof row[key] === "number" ? (row[key] as number) : null;
+	const stringAt = (row: AggregateTestRow, key: string): string | null =>
+		typeof row[key] === "string" ? (row[key] as string) : null;
+	const sortedPoints = rows
+		.map((row) => ({ row, value: numberAt(row, "overall_points") }))
+		.filter((sample): sample is { row: AggregateTestRow; value: number } => sample.value !== null)
+		.sort(
+			(left, right) =>
+				right.value -
+				left.value -
+				(numberAt(left.row, "entry_id") ?? 0) +
+				(numberAt(right.row, "entry_id") ?? 0)
+		);
+	const leaderOverallPoints = sortedPoints[0]?.value ?? null;
+	const secondOverallPoints = sortedPoints[1]?.value ?? null;
+	const metric = (
+		key:
+			| "OVERALL_POINTS"
+			| "TEAM_VALUE"
+			| "TRANSFERS"
+			| "TOTAL_COSTS"
+			| "BENCH_POINTS"
+			| "AUTO_SUB_POINTS",
+		field: string,
+		higherIsBetter: boolean
+	) => {
+		const samples = rows
+			.map((row) => ({ row, value: numberAt(row, field) }))
+			.filter((sample): sample is { row: AggregateTestRow; value: number } => sample.value !== null)
+			.sort(
+				(left, right) =>
+					(higherIsBetter ? right.value - left.value : left.value - right.value) ||
+					(numberAt(left.row, "entry_id") ?? 0) - (numberAt(right.row, "entry_id") ?? 0)
+			);
+		const leader = samples[0];
+		return {
+			key,
+			leaderValue: leader?.value ?? null,
+			leaderEntryId: leader ? numberAt(leader.row, "entry_id") : null,
+			leaderEntryName: leader ? stringAt(leader.row, "entry_name") : null,
+			leaderPlayerName: leader ? stringAt(leader.row, "player_name") : null,
+			averageValue:
+				samples.length === 0
+					? null
+					: Math.round(
+							(samples.reduce((sum, sample) => sum + sample.value, 0) / samples.length) * 100
+						) / 100,
+			higherIsBetter,
+		};
+	};
+	const metricRank = (
+		field: string,
+		higherIsBetter: boolean,
+		row: AggregateTestRow
+	): number | null => {
+		const value = numberAt(row, field);
+		if (value === null) return null;
+		return (
+			1 +
+			rows.filter((candidate) => {
+				const candidateValue = numberAt(candidate, field);
+				return (
+					candidateValue !== null &&
+					(higherIsBetter ? candidateValue > value : candidateValue < value)
+				);
+			}).length
+		);
+	};
+	const mine = rows.find((row) => numberAt(row, "entry_id") === viewerEntryId) ?? null;
+	const pointIndex = mine
+		? sortedPoints.findIndex((sample) => numberAt(sample.row, "entry_id") === viewerEntryId)
+		: -1;
+	const averageOverallPoints =
+		sortedPoints.length === 0
+			? null
+			: Math.round(
+					sortedPoints.reduce((sum, sample) => sum + sample.value, 0) / sortedPoints.length
+				);
+	const performance = rows
+		.filter(
+			(row) => numberAt(row, "event_points") !== null && numberAt(row, "event_net_points") !== null
+		)
+		.sort(
+			(left, right) =>
+				(numberAt(right, "event_net_points") ?? 0) - (numberAt(left, "event_net_points") ?? 0) ||
+				(numberAt(left, "entry_id") ?? 0) - (numberAt(right, "entry_id") ?? 0)
+		);
+	const toPerformance = (row: AggregateTestRow) => ({
+		entryId: numberAt(row, "entry_id") ?? 0,
+		entryName: stringAt(row, "entry_name"),
+		playerName: stringAt(row, "player_name"),
+		eventPoints: numberAt(row, "event_points") ?? 0,
+		eventNetPoints: numberAt(row, "event_net_points") ?? 0,
+		rank: numberAt(row, "tournament_rank"),
+		previousRank: numberAt(row, "previous_tournament_rank"),
+		captainId: numberAt(row, "captain_id"),
+		captainWebName: stringAt(row, "captain_web_name"),
+		captainTeamShortName: stringAt(row, "captain_team_short_name"),
+		captainPoints: numberAt(row, "captain_points"),
+	});
+	const movementRows = rows
+		.map((row) => ({
+			row,
+			movement:
+				numberAt(row, "previous_tournament_rank") === null ||
+				numberAt(row, "tournament_rank") === null
+					? null
+					: (numberAt(row, "previous_tournament_rank") ?? 0) - numberAt(row, "tournament_rank")!,
+		}))
+		.filter((item): item is { row: AggregateTestRow; movement: number } => item.movement !== null);
+	const risers = movementRows
+		.filter((item) => item.movement > 0)
+		.sort(
+			(left, right) =>
+				right.movement - left.movement ||
+				(numberAt(left.row, "entry_id") ?? 0) - (numberAt(right.row, "entry_id") ?? 0)
+		)
+		.slice(0, 5)
+		.map((item) => toPerformance(item.row));
+	const fallers = movementRows
+		.filter((item) => item.movement < 0)
+		.sort(
+			(left, right) =>
+				left.movement - right.movement ||
+				(numberAt(left.row, "entry_id") ?? 0) - (numberAt(right.row, "entry_id") ?? 0)
+		)
+		.slice(0, 5)
+		.map((item) => toPerformance(item.row));
+	const distribution = (kind: "captain" | "chip") => {
+		const groups = new Map<
+			string,
+			{ label: string; teamShortName: string | null; count: number; totalPoints: number }
+		>();
+		for (const row of rows) {
+			const captainId = numberAt(row, "captain_id");
+			const rawChip =
+				stringAt(row, "event_chip")
+					?.toUpperCase()
+					.replace(/[^A-Z0-9]/g, "") ?? "NONE";
+			const key =
+				kind === "captain"
+					? captainId === null
+						? "NONE"
+						: String(captainId)
+					: rawChip === "BBOOST" || rawChip === "BENCHBOOST"
+						? "BENCH_BOOST"
+						: rawChip === "FREEHIT"
+							? "FREE_HIT"
+							: rawChip;
+			const current = groups.get(key) ?? {
+				label:
+					kind === "captain"
+						? captainId === null
+							? "NONE"
+							: (stringAt(row, "captain_web_name") ?? String(captainId))
+						: key,
+				teamShortName: kind === "captain" ? stringAt(row, "captain_team_short_name") : null,
+				count: 0,
+				totalPoints: 0,
+			};
+			current.count += 1;
+			current.totalPoints +=
+				kind === "captain" && captainId === null
+					? 0
+					: (numberAt(row, kind === "captain" ? "captain_points" : "event_net_points") ??
+						numberAt(row, "event_points") ??
+						0);
+			groups.set(key, current);
+		}
+		return [...groups.entries()]
+			.map(([key, value]) => ({
+				key,
+				label: value.label,
+				teamShortName: value.teamShortName,
+				count: value.count,
+				percentage: rows.length === 0 ? 0 : Math.round((value.count / rows.length) * 10_000) / 100,
+				averagePoints: Math.round((value.totalPoints / value.count) * 10) / 10,
+			}))
+			.sort((left, right) => right.count - left.count || left.key.localeCompare(right.key));
+	};
+	return {
+		eventId,
+		entryCount: rows.length,
+		leaderOverallPoints,
+		secondOverallPoints,
+		gapFirstSecond:
+			leaderOverallPoints === null || secondOverallPoints === null
+				? null
+				: leaderOverallPoints - secondOverallPoints,
+		averageOverallPoints,
+		metrics: [
+			metric("OVERALL_POINTS", "overall_points", true),
+			metric("TEAM_VALUE", "team_value", true),
+			metric("TRANSFERS", "cumulative_transfers", false),
+			metric("TOTAL_COSTS", "cumulative_transfer_cost", false),
+			metric("BENCH_POINTS", "cumulative_bench_points", true),
+			metric("AUTO_SUB_POINTS", "cumulative_auto_sub_points", true),
+		],
+		viewer: mine
+			? {
+					entryId: viewerEntryId,
+					overallRank: numberAt(mine, "overall_rank"),
+					tournamentOverallRank: numberAt(mine, "tournament_rank"),
+					teamValue: numberAt(mine, "team_value"),
+					tournamentTeamValueRank: metricRank("team_value", true, mine),
+					transfersNum: numberAt(mine, "cumulative_transfers"),
+					tournamentTransfersRank: metricRank("cumulative_transfers", false, mine),
+					totalCosts: numberAt(mine, "cumulative_transfer_cost"),
+					tournamentCostsRank: metricRank("cumulative_transfer_cost", false, mine),
+					totalBenchPoints: numberAt(mine, "cumulative_bench_points"),
+					tournamentBenchPointsRank: metricRank("cumulative_bench_points", true, mine),
+					autoSubPoints: numberAt(mine, "cumulative_auto_sub_points"),
+					tournamentAutoSubRank: metricRank("cumulative_auto_sub_points", true, mine),
+					overallPoints: numberAt(mine, "overall_points"),
+					leaderOverallPoints,
+					gapToLeader:
+						numberAt(mine, "overall_points") === null || leaderOverallPoints === null
+							? null
+							: Math.max(0, leaderOverallPoints - (numberAt(mine, "overall_points") ?? 0)),
+					pointsBehindNext:
+						pointIndex <= 0
+							? pointIndex === 0
+								? 0
+								: null
+							: Math.max(
+									0,
+									sortedPoints[pointIndex - 1].value - (numberAt(mine, "overall_points") ?? 0)
+								),
+					pointsAheadOfPrev:
+						pointIndex < 0 || pointIndex === sortedPoints.length - 1
+							? pointIndex === sortedPoints.length - 1
+								? 0
+								: null
+							: Math.max(
+									0,
+									(numberAt(mine, "overall_points") ?? 0) - sortedPoints[pointIndex + 1].value
+								),
+				}
+			: null,
+		topPerformers: performance.slice(0, 5).map(toPerformance),
+		risers: risers,
+		fallers,
+		captainDistribution: distribution("captain"),
+		chipDistribution: distribution("chip"),
+	};
 };
 
 const snapshotFor = (currentEventId: number | null) => ({
@@ -225,7 +524,7 @@ const makeFixture = (options: FixtureOptions = {}) => {
 		if (options.queryOverride) return options.queryOverride(sql, params);
 		if (sql.includes("FROM fpl.events")) return { rows: lifecycleRows };
 		if (sql.includes("FROM competition.entries")) return { rows: options.entryRows ?? [] };
-		if (sql.includes("FROM competition.entry_season_histories")) {
+		if (sql.includes("FROM competition.entry_past_seasons")) {
 			return { rows: options.pastSeasonRows ?? [] };
 		}
 		if (sql.includes("enriched_event_count")) {
@@ -252,6 +551,16 @@ const makeFixture = (options: FixtureOptions = {}) => {
 			};
 		}
 		if (sql.includes("jsonb_build_object")) {
+			if (sql.includes("my-fpl competition aggregate")) {
+				return {
+					rows: [
+						{
+							payload:
+								options.aggregatePayload ?? aggregatePayloadFromRows(options.aggregateRows ?? []),
+						},
+					],
+				};
+			}
 			return {
 				rows: [
 					{
@@ -328,6 +637,7 @@ describe("My FPL review repository", () => {
 				player_name: "Test Manager",
 				rank: "7",
 				previous_rank: "9",
+				field_rank: "5",
 				event_points: 61,
 				event_cost: 4,
 				event_net_points: 57,
@@ -342,7 +652,12 @@ describe("My FPL review repository", () => {
 				team_value: 1007,
 				bank: 13,
 			})
-		).toMatchObject({ rank: 7, previousRank: 9, eventChip: "FREE_HIT" });
+		).toMatchObject({
+			rank: 7,
+			previousRank: 9,
+			fieldRank: 5,
+			eventChip: "FREE_HIT",
+		});
 	});
 
 	it("requires a verified principal and preserves the bound entry identity", async () => {
@@ -374,11 +689,43 @@ describe("My FPL review repository", () => {
 		expect(pending.redis.setCalls.at(-1)?.[3]).toBe(30);
 		const ready = makeFixture({
 			finalizedIds: [1, 2],
-			entryRows: [entryRow()],
+			entryRows: [
+				entryRow({
+					past_seasons_checked_at: "2026-08-20T00:00:00.000Z",
+					past_seasons_count: 0,
+				}),
+			],
 			historyRows: [historyRow(1), historyRow(2)],
 		});
 		expect((await ready.repository.loadTeamDesk(ready.context)).state).toBe("READY");
 		expect(ready.redis.setCalls.at(-1)?.[3]).toBeGreaterThan(30);
+	});
+
+	it("distinguishes a confirmed empty past-season history from an unchecked history", async () => {
+		const confirmedEmpty = makeFixture({
+			finalizedIds: [1],
+			entryRows: [
+				entryRow({
+					past_seasons_checked_at: "2026-08-20T00:00:00.000Z",
+					past_seasons_count: 0,
+				}),
+			],
+			pastSeasonRows: [],
+			historyRows: [historyRow(1)],
+		});
+		const readyDesk = await confirmedEmpty.repository.loadTeamDesk(confirmedEmpty.context);
+		expect(readyDesk.pastSeasons).toEqual([]);
+		expect(readyDesk.pastSeasonsState).toBe("READY");
+		expect(confirmedEmpty.redis.setCalls.at(-1)?.[3]).toBeGreaterThan(30);
+
+		const unchecked = makeFixture({
+			finalizedIds: [1],
+			entryRows: [entryRow({ past_seasons_checked_at: null, past_seasons_count: null })],
+			historyRows: [historyRow(1)],
+		});
+		const uncheckedDesk = await unchecked.repository.loadTeamDesk(unchecked.context);
+		expect(uncheckedDesk.pastSeasonsState).toBe("PENDING");
+		expect(unchecked.redis.setCalls.at(-1)?.[3]).toBe(30);
 	});
 
 	it("does not promote incomplete finalized or rich-enriched data to READY", async () => {
@@ -400,19 +747,56 @@ describe("My FPL review repository", () => {
 		);
 	});
 
+	it("keeps an older selected gameweek pending while newer history is incomplete", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1, 2],
+			entryRows: [entryRow()],
+			historyRows: [historyRow(1)],
+			gameweekRows: Array.from({ length: 15 }, (_, index) => gameweekRow(1, index + 1)),
+		});
+
+		const desk = await fixture.repository.loadTeamDesk(fixture.context, 1);
+
+		expect(desk.gameweek?.state).toBe("READY");
+		expect(desk.state).toBe("PENDING");
+		expect(fixture.redis.setCalls.at(-1)?.[3]).toBe(30);
+	});
+
+	it("keeps an empty pre-entry gameweek pending while later history is incomplete", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1, 2],
+			entryRows: [
+				entryRow({
+					started_event: 2,
+					past_seasons_checked_at: "2026-08-20T00:00:00.000Z",
+					past_seasons_count: 0,
+				}),
+			],
+			pastSeasonRows: [],
+			historyRows: [],
+		});
+
+		const desk = await fixture.repository.loadTeamDesk(fixture.context, 1);
+
+		expect(desk.gameweek?.state).toBe("EMPTY");
+		expect(desk.state).toBe("PENDING");
+		expect(desk.pastSeasonsState).toBe("READY");
+		expect(fixture.redis.setCalls.at(-1)?.[3]).toBe(30);
+	});
+
 	it("evicts malformed and schema-invalid cache values before querying PostgreSQL", async () => {
 		const fixture = makeFixture({
 			finalizedIds: [1],
 			entryRows: [entryRow()],
 			historyRows: [historyRow(1)],
 		});
-		const key = gqlCacheKey(fixture.context, "my-fpl:v4:team-desk:123:season");
+		const key = gqlCacheKey(fixture.context, "my-fpl:v9:team-desk:123:season");
 		await fixture.redis.set(key, JSON.stringify({ state: "READY", history: [] }));
 		const desk = await fixture.repository.loadTeamDesk(fixture.context);
 		expect(desk.state).toBe("READY");
 		expect(await fixture.redis.get(key)).not.toBe(JSON.stringify({ state: "READY", history: [] }));
 		const malformed = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
-		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v4:team-desk:123:season");
+		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v9:team-desk:123:season");
 		await malformed.redis.set(malformedKey, "{");
 		await malformed.repository.loadTeamDesk(malformed.context);
 		expect(await malformed.redis.get(malformedKey)).not.toBe("{");
@@ -445,6 +829,48 @@ describe("My FPL review repository", () => {
 		expect(gameweek.state).toBe("READY");
 		expect(gameweek.result?.picks).toHaveLength(15);
 		expect(gameweek.result?.picks[0]?.isCaptain).toBe(true);
+	});
+
+	it("derives fixture count, BGW and DGW from the fixture aggregate", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			entryRows: [entryRow()],
+			gameweekRows: Array.from({ length: 15 }, (_, index) =>
+				gameweekRow(1, index + 1, {
+					fixture_count: index === 0 ? 0 : index === 1 ? 2 : 1,
+				})
+			),
+		});
+		const gameweek = await fixture.repository.loadTeamGameweek(fixture.context, 1);
+		expect(gameweek.state).toBe("READY");
+		expect(gameweek.result?.picks[0]).toMatchObject({
+			fixtureCount: 0,
+			bgw: true,
+			dgw: false,
+		});
+		expect(gameweek.result?.picks[1]).toMatchObject({
+			fixtureCount: 2,
+			bgw: false,
+			dgw: true,
+		});
+	});
+
+	it("uses only official automatic substitutions and never infers them from Bench Boost", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			entryRows: [entryRow()],
+			gameweekRows: Array.from({ length: 15 }, (_, index) =>
+				gameweekRow(1, index + 1, {
+					event_chip: "benchboost",
+					automatic_substitutions: [],
+				})
+			),
+		});
+		const gameweek = await fixture.repository.loadTeamGameweek(fixture.context, 1);
+		expect(gameweek.state).toBe("READY");
+		expect(gameweek.result?.eventChip).toBe("BENCH_BOOST");
+		expect(gameweek.result?.picks.every((pick) => pick.autoSub)).toBe(false);
+		expect(gameweek.result?.picks.every((pick) => !pick.autoSub)).toBe(true);
 	});
 
 	it("loads enriched transfer rows and groups them by gameweek", async () => {
@@ -484,6 +910,7 @@ describe("My FPL review repository", () => {
 			player_name: "A",
 			rank: 1,
 			previous_rank: null,
+			field_rank: 1,
 			event_points: 50,
 			event_cost: 0,
 			event_net_points: 50,
@@ -518,6 +945,8 @@ describe("My FPL review repository", () => {
 		expect(page.totalPages).toBe(2);
 		const boardQuery = fixture.queries.find((query) => query.sql.includes("LIMIT $5 OFFSET $6"));
 		expect(boardQuery?.params.slice(3, 6)).toEqual(["Foo", 1, 1]);
+		expect(boardQuery?.sql).toContain("summary.tournament_event_rank::integer AS field_rank");
+		expect(boardQuery?.sql).toContain("AS field_rank");
 		const queryCount = fixture.queries.filter((query) =>
 			query.sql.includes("LIMIT $5 OFFSET $6")
 		).length;
@@ -630,6 +1059,134 @@ describe("My FPL review repository", () => {
 		const path = await fixture.repository.loadCompetitionSeasonPath(fixture.context, 7, 1);
 		expect(path.state).toBe("READY");
 		expect(path.points[0]?.tournamentRank).toBe(1);
+	});
+
+	it("computes competition insight distributions from the complete field", async () => {
+		const boardRow = {
+			event_id: 1,
+			group_id: 1,
+			entry_id: 123,
+			entry_name: "Foo",
+			player_name: "A",
+			rank: 1,
+			previous_rank: 2,
+			field_rank: 1,
+			event_points: 60,
+			event_cost: 0,
+			event_net_points: 56,
+			event_rank: 1,
+			overall_points: 100,
+			overall_rank: 1000,
+			event_chip: "benchboost",
+			captain_id: 11,
+			captain_web_name: "Saka",
+			captain_team_short_name: "ARS",
+			captain_points: 20,
+			team_value: 1000,
+			bank: 10,
+		};
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			boardPayload: {
+				fieldSize: 3,
+				totalRows: 3,
+				rows: [boardRow],
+				viewerRow: boardRow,
+			},
+			aggregateRows: [
+				{
+					entry_id: 123,
+					entry_name: "Foo",
+					player_name: "A",
+					overall_points: 100,
+					overall_rank: 1000,
+					team_value: 1000,
+					cumulative_transfers: 1,
+					cumulative_transfer_cost: 0,
+					cumulative_bench_points: 4,
+					cumulative_auto_sub_points: 0,
+					event_points: 60,
+					event_net_points: 56,
+					event_chip: "benchboost",
+					captain_id: 11,
+					captain_web_name: "Saka",
+					captain_team_short_name: "ARS",
+					captain_points: 20,
+					tournament_rank: 1,
+					previous_tournament_rank: 2,
+				},
+				{
+					entry_id: 124,
+					entry_name: "Bar",
+					player_name: "B",
+					overall_points: 90,
+					overall_rank: 1100,
+					team_value: 995,
+					cumulative_transfers: 2,
+					cumulative_transfer_cost: 4,
+					cumulative_bench_points: 2,
+					cumulative_auto_sub_points: 1,
+					event_points: 40,
+					event_net_points: 40,
+					event_chip: "none",
+					captain_id: 11,
+					captain_web_name: "Saka",
+					captain_team_short_name: "ARS",
+					captain_points: 10,
+					tournament_rank: 2,
+					previous_tournament_rank: 3,
+				},
+				{
+					entry_id: 125,
+					entry_name: "Baz",
+					player_name: "C",
+					overall_points: 80,
+					overall_rank: 1200,
+					team_value: 990,
+					cumulative_transfers: 0,
+					cumulative_transfer_cost: 0,
+					cumulative_bench_points: 1,
+					cumulative_auto_sub_points: 0,
+					event_points: 30,
+					event_net_points: 30,
+					event_chip: "freehit",
+					captain_id: 12,
+					captain_web_name: "Palmer",
+					captain_team_short_name: "CHE",
+					captain_points: 8,
+					tournament_rank: 3,
+					previous_tournament_rank: 1,
+				},
+			],
+		});
+		const desk = await fixture.repository.loadCompetitionsDesk(fixture.context, 7, 1);
+		const aggregate = desk.aggregate;
+		expect(aggregate?.entryCount).toBe(3);
+		expect(aggregate?.topPerformers[0]?.entryId).toBe(123);
+		expect(aggregate?.risers[0]?.entryId).toBe(123);
+		expect(aggregate?.fallers[0]?.entryId).toBe(125);
+		expect(aggregate?.captainDistribution[0]).toMatchObject({
+			key: "11",
+			teamShortName: "ARS",
+			count: 2,
+			percentage: 66.67,
+			averagePoints: 15,
+		});
+		expect(aggregate?.chipDistribution.find((row) => row.key === "BENCH_BOOST")).toMatchObject({
+			count: 1,
+			percentage: 33.33,
+		});
+	});
+
+	it("marks H2H/battle review as unavailable instead of rendering a points race", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			selectedTournament: tournament({ groupMode: GroupMode.BATTLE_RACES }),
+		});
+		const desk = await fixture.repository.loadCompetitionsDesk(fixture.context, 7, 1);
+		expect(desk.state).toBe("UNAVAILABLE");
+		expect(desk.board?.state).toBe("UNAVAILABLE");
+		expect(desk.aggregate).toBeNull();
 	});
 
 	it("does not convert PostgreSQL errors into empty data or success cache", async () => {

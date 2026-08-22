@@ -76,6 +76,9 @@ export const myFplTypeDefs = /* GraphQL */ `
 		againstShortName: String!
 		wasHome: String!
 		score: String!
+		fixtureCount: Int!
+		bgw: Boolean!
+		dgw: Boolean!
 		isPlayed: Boolean!
 		autoSub: Boolean!
 		expectedGoals: Float
@@ -115,6 +118,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		entry: MyFplEntryIdentity
 		history: [MyFplTeamHistoryRow!]!
 		pastSeasons: [MyFplPastSeason!]!
+		pastSeasonsState: MyFplReviewState!
 		selectedEventId: Int
 		gameweek: MyFplTeamGameweek
 	}
@@ -153,6 +157,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		playerName: String
 		rank: Int
 		previousRank: Int
+		fieldRank: Int
 		eventPoints: Int
 		eventCost: Int
 		eventNetPoints: Int
@@ -211,6 +216,29 @@ export const myFplTypeDefs = /* GraphQL */ `
 		pointsAheadOfPrev: Int
 	}
 
+	type MyFplCompetitionPerformance {
+		entryId: Int!
+		entryName: String
+		playerName: String
+		eventPoints: Int!
+		eventNetPoints: Int!
+		rank: Int
+		previousRank: Int
+		captainId: Int
+		captainWebName: String
+		captainTeamShortName: String
+		captainPoints: Int
+	}
+
+	type MyFplCompetitionDistribution {
+		key: String!
+		label: String!
+		teamShortName: String
+		count: Int!
+		percentage: Float!
+		averagePoints: Float!
+	}
+
 	type MyFplCompetitionAggregate {
 		eventId: Int!
 		entryCount: Int!
@@ -220,6 +248,11 @@ export const myFplTypeDefs = /* GraphQL */ `
 		averageOverallPoints: Int
 		metrics: [MyFplCompetitionMetric!]!
 		viewer: MyFplCompetitionViewerSummary
+		topPerformers: [MyFplCompetitionPerformance!]!
+		risers: [MyFplCompetitionPerformance!]!
+		fallers: [MyFplCompetitionPerformance!]!
+		captainDistribution: [MyFplCompetitionDistribution!]!
+		chipDistribution: [MyFplCompetitionDistribution!]!
 	}
 
 	type MyFplCompetitionsDesk {
