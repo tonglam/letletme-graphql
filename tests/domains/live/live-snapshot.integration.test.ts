@@ -181,6 +181,49 @@ describe("liveSnapshot GraphQL contract", () => {
 		expect(desk.nextFixtures[0]).toMatchObject({ minutes: 0, started: false });
 	});
 
+	it("uses core fixtures when scheduled live payload is unavailable", async () => {
+		const core = buildTestCoreData(1);
+		const live = buildLivePublication(core, 1, "2627", 8, { state: "scheduled" });
+		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
+		const eventLiveItem = live.manifest.items.find((item) => item.name === "eventLive");
+		if (!eventLiveItem) throw new Error("test live publication is missing eventLive");
+		redis.values.delete(eventLiveItem.key);
+
+		const result = await graphql({
+			schema,
+			source: `query {
+				liveMatchdayDesk(ref: { season: "2627", eventId: 1, revision: "8" }) {
+					season eventId revision state publishedAt
+					matches { fixtureId eventId minutes started finished }
+					nextFixtures { fixtureId eventId minutes started finished }
+					highlights { totalPoints }
+				}
+			}`,
+			contextValue: buildSnapshotContext(redis),
+		});
+
+		expect(result.errors).toBeUndefined();
+		const desk = result.data?.liveMatchdayDesk as {
+			season: string;
+			eventId: number;
+			revision: string;
+			state: string;
+			matches: Array<{ fixtureId: number; eventId: number }>;
+			nextFixtures: Array<{ fixtureId: number; eventId: number }>;
+			highlights: Array<{ totalPoints: number }>;
+		};
+		expect(desk).toMatchObject({
+			season: "2627",
+			eventId: 1,
+			revision: "8",
+			state: "SCHEDULED",
+		});
+		expect(desk.matches.length).toBeGreaterThan(0);
+		expect(desk.matches.every((match) => match.eventId === 1)).toBe(true);
+		expect(desk.nextFixtures.length).toBeGreaterThan(0);
+		expect(desk.highlights).toEqual([]);
+	});
+
 	it("fails closed when an immutable live item is missing", async () => {
 		const core = buildLiveCore();
 		const eventLives = buildLiveEventRows(core);
