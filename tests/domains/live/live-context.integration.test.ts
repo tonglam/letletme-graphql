@@ -52,7 +52,7 @@ describe("liveContext lifecycle state", () => {
 		});
 	}
 
-	it("uses Data lifecycle status instead of treating a quiet live publication as active", async () => {
+	it("lets a fresh active publication override a stale quiet-interval checkpoint", async () => {
 		const base = buildTestCoreData(1);
 		const core = {
 			...base,
@@ -70,6 +70,7 @@ describe("liveContext lifecycle state", () => {
 		const live = buildLivePublication(core, 1, "2627", 8, {
 			state: "live",
 			sourceCheckedAt: "2026-08-22T06:46:47.764Z",
+			lastSuccessfulFetchAt: new Date().toISOString(),
 		});
 		const context = buildSnapshotContext(
 			new TestRedis(buildCorePublication("2627", 7, core), live),
@@ -105,9 +106,8 @@ describe("liveContext lifecycle state", () => {
 		expect(result.errors).toBeUndefined();
 		expect(result.data?.liveContext).toMatchObject({
 			state: "LIVE_ACTIVE",
-			windowState: "BETWEEN_FIXTURES",
-			producerState: "BETWEEN_FIXTURES",
-			nextRefreshAt: new Date("2026-08-22T09:37:58.000Z"),
+			windowState: "LIVE_ACTIVE",
+			producerState: "LIVE_ACTIVE",
 		});
 	});
 });

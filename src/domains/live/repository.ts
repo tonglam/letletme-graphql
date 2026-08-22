@@ -1592,7 +1592,7 @@ export const liveRepository: LiveRepository = {
 				publicationId: snapshot.publicationId,
 				state: snapshot.state,
 				publishedAt: snapshot.publishedAt,
-				checkedAt: snapshot.sourceCheckedAt,
+				checkedAt: snapshot.lastSuccessfulFetchAt,
 				eventLiveCount: snapshot.eventLiveCount,
 				fixtureCount: snapshot.fixtureCount,
 				fixtureTeamCount: snapshot.fixtureTeamCount,

@@ -110,7 +110,21 @@ const refreshSeconds: Record<LiveWindowState, number> = {
 	OFFSEASON: 1800,
 };
 
-const staleAfterMs = 60_000;
+const staleAfterMsForWindow = (state: LiveWindowState): number => {
+	switch (state) {
+		case "LIVE_ACTIVE":
+			return 90_000;
+		case "DAY_SETTLING":
+			return 180_000;
+		case "BETWEEN_FIXTURES":
+			// The producer intentionally polls this quiet interval every five
+			// minutes. Add a bounded queue/clock margin without hiding a stalled
+			// active-match producer behind the same threshold.
+			return 6 * 60_000;
+		default:
+			return 60_000;
+	}
+};
 
 const lifecycleWindowState = (
 	state: ProducerLifecycleState,
@@ -278,10 +292,19 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 		anchorMode = "OFFSEASON";
 	}
 	const lifecycleState = input.lifecycleState;
+	const sourceCheckedAt = input.sourceCheckedAt;
+	const checkedAtMs = sourceCheckedAt ? Date.parse(sourceCheckedAt) : Number.NaN;
+	const liveSnapshotIsFresh =
+		input.publicationState === "live" &&
+		Number.isFinite(checkedAtMs) &&
+		nowMs - checkedAtMs <= staleAfterMsForWindow("LIVE_ACTIVE");
+	const liveSnapshotHasActiveFixture =
+		liveSnapshotIsFresh && input.liveEventId === anchorEventId && hasActive(anchorFixtures);
 	const lifecycleApplies =
 		input.lifecycleEventId === anchorEventId &&
 		lifecycleState !== null &&
-		lifecycleState !== undefined;
+		lifecycleState !== undefined &&
+		!liveSnapshotHasActiveFixture;
 	if (lifecycleApplies) {
 		windowState = lifecycleWindowState(lifecycleState!, windowState);
 	}
@@ -304,6 +327,8 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 				return resolvedWindowState;
 		}
 	})();
+	const staleAfterMs = staleAfterMsForWindow(resolvedWindowState);
+	const sourceIsFresh = Number.isFinite(checkedAtMs) && nowMs - checkedAtMs <= staleAfterMs;
 	const dataAvailability: LiveDataAvailability = (() => {
 		switch (resolvedWindowState) {
 			case "PRESEASON":
@@ -314,18 +339,10 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 			case "OFFSEASON":
 				return "FINAL";
 			default:
-				return input.liveRevision
-					? resolvedWindowState === "LIVE_ACTIVE" &&
-						input.sourceCheckedAt &&
-						nowMs - Date.parse(input.sourceCheckedAt) <= staleAfterMs
-						? "FRESH"
-						: "LAST_GOOD"
-					: "UNAVAILABLE";
+				return input.liveRevision ? (sourceIsFresh ? "FRESH" : "LAST_GOOD") : "UNAVAILABLE";
 		}
 	})();
-	const sourceCheckedAt = input.sourceCheckedAt;
-	const checkedAtMs = sourceCheckedAt ? Date.parse(sourceCheckedAt) : Number.NaN;
-	const stale = !Number.isFinite(checkedAtMs) || nowMs - checkedAtMs > staleAfterMs;
+	const stale = !sourceIsFresh;
 	const persistedRefreshAtMs = input.lifecycleNextRefreshAt
 		? Date.parse(input.lifecycleNextRefreshAt)
 		: Number.NaN;

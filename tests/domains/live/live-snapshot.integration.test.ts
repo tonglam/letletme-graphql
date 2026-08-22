@@ -102,7 +102,8 @@ describe("liveSnapshot GraphQL contract", () => {
 		const live = buildLivePublication(core, 1, "2627", 8, {
 			eventLives: buildLiveEventRows(core),
 			state: "live",
-			sourceCheckedAt: new Date().toISOString(),
+			sourceCheckedAt: "2026-08-09T01:00:00.000Z",
+			lastSuccessfulFetchAt: new Date().toISOString(),
 		});
 		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
 		const originalGet = redis.get;
@@ -154,7 +155,8 @@ describe("liveSnapshot GraphQL contract", () => {
 		const live = buildLivePublication(core, 1, "2627", 8, {
 			eventLives: buildLiveEventRows(core),
 			state: "live",
-			sourceCheckedAt: new Date().toISOString(),
+			sourceCheckedAt: "2026-08-09T01:00:00.000Z",
+			lastSuccessfulFetchAt: new Date().toISOString(),
 		});
 		const context = buildSnapshotContext(
 			new TestRedis(buildCorePublication("2627", 7, core), live)
@@ -196,6 +198,54 @@ describe("liveSnapshot GraphQL contract", () => {
 			started: true,
 		});
 		expect(desk.nextFixtures[0]).toMatchObject({ minutes: 0, started: false });
+	});
+
+	it("exposes provisional completion separately from the authoritative finished flag", async () => {
+		const base = buildLiveCore();
+		const firstFixture = base.fixtures.find((fixture) => fixture.eventId === 1);
+		if (!firstFixture) throw new Error("test core is missing fixture 1");
+		const core = {
+			...base,
+			fixtures: base.fixtures.map((fixture) =>
+				fixture.id === firstFixture.id
+					? { ...fixture, started: true, finished: false, finishedProvisional: true, minutes: 90 }
+					: fixture
+			),
+		};
+		const live = buildLivePublication(core, 1, "2627", 8, {
+			eventLives: buildLiveEventRows(core),
+			fixtures: core.fixtures.filter((fixture) => fixture.eventId === 1),
+			state: "live",
+		});
+		const result = await graphql({
+			schema,
+			source: `query {
+			liveMatchdayDesk(ref: { season: "2627", eventId: 1, revision: "8" }) {
+				matches { fixtureId minutes started finished finishedProvisional }
+			}
+		}`,
+			contextValue: buildSnapshotContext(
+				new TestRedis(buildCorePublication("2627", 7, core), live)
+			),
+		});
+
+		expect(result.errors).toBeUndefined();
+		const desk = result.data?.liveMatchdayDesk as {
+			matches: Array<{
+				fixtureId: number;
+				minutes: number;
+				started: boolean;
+				finished: boolean;
+				finishedProvisional: boolean;
+			}>;
+		};
+		expect(desk.matches).toContainEqual({
+			fixtureId: firstFixture.id,
+			minutes: 90,
+			started: true,
+			finished: false,
+			finishedProvisional: true,
+		});
 	});
 
 	it("uses core fixtures when scheduled live payload is unavailable without a live ref", async () => {
