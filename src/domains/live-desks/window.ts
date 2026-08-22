@@ -326,11 +326,15 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 	const sourceCheckedAt = input.sourceCheckedAt;
 	const checkedAtMs = sourceCheckedAt ? Date.parse(sourceCheckedAt) : Number.NaN;
 	const stale = !Number.isFinite(checkedAtMs) || nowMs - checkedAtMs > staleAfterMs;
+	const persistedRefreshAtMs = input.lifecycleNextRefreshAt
+		? Date.parse(input.lifecycleNextRefreshAt)
+		: Number.NaN;
+	// A worker restart or a delayed lifecycle tick can leave the persisted
+	// checkpoint behind the current clock. Never hand clients an overdue timer:
+	// that would make every visible page refetch immediately in a tight loop.
 	const refreshAt =
-		lifecycleApplies &&
-		input.lifecycleNextRefreshAt &&
-		Number.isFinite(Date.parse(input.lifecycleNextRefreshAt))
-			? new Date(input.lifecycleNextRefreshAt).toISOString()
+		lifecycleApplies && Number.isFinite(persistedRefreshAtMs) && persistedRefreshAtMs > nowMs
+			? new Date(persistedRefreshAtMs).toISOString()
 			: anchorEventId === null
 				? null
 				: new Date(nowMs + refreshSeconds[windowState] * 1000).toISOString();

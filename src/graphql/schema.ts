@@ -25,6 +25,8 @@ import { liveDesksResolvers } from "../domains/live-desks/resolvers";
 import { liveDesksTypeDefs } from "../domains/live-desks/schema";
 import { marketResolvers } from "../domains/market/resolvers";
 import { marketTypeDefs } from "../domains/market/schema";
+import { priceChangesResolvers } from "../domains/price-changes/resolvers";
+import { priceChangesTypeDefs } from "../domains/price-changes/schema";
 import { myFplResolvers } from "../domains/my-fpl/resolvers";
 import { myFplTypeDefs } from "../domains/my-fpl/schema";
 import { miniProgramResolvers } from "../domains/mini-program/resolvers";
@@ -66,6 +68,7 @@ export const schema = makeExecutableSchema({
 		miniProgramTypeDefs,
 		entryLiveTypeDefs,
 		marketTypeDefs,
+		priceChangesTypeDefs,
 		myFplTypeDefs,
 		leaguesTypeDefs,
 		tournamentsTypeDefs,
@@ -93,6 +96,7 @@ export const schema = makeExecutableSchema({
 		liveDesksResolvers,
 		miniProgramResolvers,
 		marketResolvers,
+		priceChangesResolvers,
 		myFplResolvers,
 		entryLiveResolvers,
 		leaguesResolvers,
