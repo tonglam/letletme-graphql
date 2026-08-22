@@ -373,9 +373,7 @@ describe("entriesService.getEntryEventPicks", () => {
 			bank: 0,
 		});
 
-		const firstOpponentId =
-			originalFixture.teamHId === 2 ? originalFixture.teamAId : originalFixture.teamHId;
-		expect(result[0]).toMatchObject({ teamId: 2, dgw: true, againstId: firstOpponentId });
+		expect(result[0]).toMatchObject({ teamId: 2, dgw: true, againstId: 0 });
 	});
 
 	it("keeps event fixtures when current player metadata is missing", async () => {

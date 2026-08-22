@@ -269,7 +269,7 @@ const mapEntryPick = (params: {
 		teamCode: team?.code ?? 0,
 		teamName: team?.name ?? "",
 		teamShortName: team?.shortName ?? "",
-		againstId: fixtureOpponents[0]?.opponentId ?? 0,
+		againstId: fixtureOpponents.length === 1 ? (fixtureOpponents[0]?.opponentId ?? 0) : 0,
 		againstName: isBlankGameweek
 			? "BLANK"
 			: fixtureOpponents

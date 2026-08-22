@@ -136,7 +136,10 @@ WITH aggregate_rows AS MATERIALIZED (
   SELECT aggregate_rows.*,
          previous_tournament_rank - tournament_rank AS movement
   FROM aggregate_rows
-  WHERE previous_tournament_rank IS NOT NULL AND tournament_rank IS NOT NULL
+  WHERE previous_tournament_rank IS NOT NULL
+    AND tournament_rank IS NOT NULL
+    AND event_points IS NOT NULL
+    AND event_net_points IS NOT NULL
 ), captain_groups AS (
   SELECT
     CASE WHEN captain_id IS NULL THEN 'NONE' ELSE captain_id::text END AS key,

@@ -58,6 +58,12 @@ describe("competition aggregate SQL contract", () => {
 			"COALESCE(captain_historical_team.team_id, captain.team_id)"
 		);
 	});
+
+	it("requires scored rows for movement insights", () => {
+		expect(COMPETITION_AGGREGATE_SQL).toContain(
+			"AND event_points IS NOT NULL\n    AND event_net_points IS NOT NULL"
+		);
+	});
 });
 
 const entryRow = (overrides: Record<string, unknown> = {}) => ({
