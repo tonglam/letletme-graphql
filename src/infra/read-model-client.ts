@@ -578,7 +578,9 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 				last_event_id,
 				snapshot_synced_through_event_id AS entry_snapshot_synced_through_event_id,
 				transfers_synced_through_event_id AS entry_transfers_synced_through_event_id,
-				transfers_source_checked_at AS entry_transfers_source_checked_at
+				transfers_source_checked_at AS entry_transfers_source_checked_at,
+				past_seasons_checked_at,
+				past_seasons_count
 			FROM competition.entries
 			WHERE season_id = $1
 		`,

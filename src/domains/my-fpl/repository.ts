@@ -1227,27 +1227,32 @@ const loadTeamGameweekRows = async (
 		  AND stats.element_id = pick.element_id
 		 LEFT JOIN LATERAL (
 			SELECT
-			  count(match.fixture_id)::integer AS fixture_count,
+			  count(DISTINCT match.fixture_id)::integer AS fixture_count,
 			  string_agg(opponent.short_name, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS against_short_name,
-		     string_agg(CASE WHEN match.team_h_id = historical_team.team_id THEN 'H' ELSE 'A' END, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS was_home,
+		     string_agg(CASE WHEN match.team_h_id = fixture_stats.team_id THEN 'H' ELSE 'A' END, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS was_home,
 		     string_agg(
 		       CASE
 		         WHEN match.team_h_score IS NULL OR match.team_a_score IS NULL THEN ''
-		         WHEN match.team_h_id = historical_team.team_id THEN match.team_h_score || '-' || match.team_a_score
+		         WHEN match.team_h_id = fixture_stats.team_id THEN match.team_h_score || '-' || match.team_a_score
 		         ELSE match.team_a_score || '-' || match.team_h_score
 		       END,
 		       ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id
 		     ) AS score
 		   FROM fpl.fixtures match
+			JOIN fpl.player_fixture_stats fixture_stats
+			  ON fixture_stats.season_id = match.season_id
+			 AND fixture_stats.event_id = match.event_id
+			 AND fixture_stats.fixture_id = match.fixture_id
+			 AND fixture_stats.element_id = pick.element_id
 			JOIN fpl.teams opponent
 			  ON opponent.season_id = match.season_id
 			 AND opponent.team_id = CASE
-		      WHEN match.team_h_id = historical_team.team_id THEN match.team_a_id
+		      WHEN match.team_h_id = fixture_stats.team_id THEN match.team_a_id
 			      ELSE match.team_h_id
 			    END
 		   WHERE match.season_id = result.season_id
 		     AND match.event_id = result.event_id
-		     AND historical_team.team_id IN (match.team_h_id, match.team_a_id)
+		     AND fixture_stats.team_id IN (match.team_h_id, match.team_a_id)
 		 ) fixture ON TRUE
 		 WHERE result.season_id = $1
 		   AND result.entry_id = $2

@@ -3,7 +3,10 @@ import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 
 const NULL_SENTINEL = "__entries:null__";
-const ENTRY_RESULT_CACHE_VERSION = "v2";
+// v3 invalidates the v2 namespace, which could contain partial rich-history
+// arrays written before the completeness gate was introduced.
+const ENTRY_RESULT_CACHE_VERSION = "v3";
+const ENTRY_HISTORY_INFO_CACHE_VERSION = "v2";
 
 export type Entry = {
 	id: number;
@@ -92,6 +95,11 @@ type DbEntryHistoryInfoRow = {
 	season: string;
 	total_points: number;
 	overall_rank: number;
+};
+
+type DbEntryHistoryCheckpointRow = {
+	past_seasons_checked_at: string | Date | null;
+	past_seasons_count: number | null;
 };
 
 const mapEntry = (row: DbEntryRow): Entry => ({
@@ -484,7 +492,40 @@ export const entriesRepository: EntriesRepository = {
 			return [];
 		}
 
-		const cacheKey = gqlCacheKey(context, `entries:history-info:${entryId}`);
+		const checkpointResult = await context.data
+			.read("competition.entries")
+			.select("past_seasons_checked_at,past_seasons_count")
+			.eq("id", entryId)
+			.limit(1);
+		if (checkpointResult.error) {
+			context.logger.error(
+				{ err: checkpointResult.error, entryId },
+				"Failed to fetch entry history-info checkpoint"
+			);
+			throw new Error("Failed to fetch entry history-info checkpoint");
+		}
+		const checkpoint = ((checkpointResult.data as DbEntryHistoryCheckpointRow[] | null) ?? [])[0];
+		const pastSeasonsCount = checkpoint?.past_seasons_count;
+		const pastSeasonsCheckedAt = checkpoint?.past_seasons_checked_at;
+		if (
+			pastSeasonsCheckedAt === null ||
+			pastSeasonsCheckedAt === undefined ||
+			pastSeasonsCount === null ||
+			pastSeasonsCount === undefined ||
+			!Number.isSafeInteger(pastSeasonsCount) ||
+			pastSeasonsCount < 0
+		) {
+			return [];
+		}
+
+		// Include the successful checkpoint in the key so a new authoritative
+		// history replacement cannot reuse the previous legacy payload.
+		const cacheKey = gqlCacheKey(
+			context,
+			`entries:history-info:${ENTRY_HISTORY_INFO_CACHE_VERSION}:${entryId}:${String(
+				pastSeasonsCheckedAt
+			)}:${pastSeasonsCount}`
+		);
 		let cached: string | null = null;
 		try {
 			cached = await context.redis.get(cacheKey);
@@ -516,6 +557,11 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const historyInfo = (data as DbEntryHistoryInfoRow[] | null)?.map(mapEntryHistoryInfo) ?? [];
+		if (historyInfo.length !== pastSeasonsCount) {
+			// A checkpoint without its complete row set is not proof of a ready
+			// legacy result. Do not cache or expose a partial array.
+			return [];
+		}
 		await writeQueryCache(
 			context,
 			cacheKey,
