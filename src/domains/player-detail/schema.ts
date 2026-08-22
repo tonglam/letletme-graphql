@@ -5,10 +5,24 @@ export const playerDetailTypeDefs = /* GraphQL */ `
 		UNAVAILABLE
 	}
 
+	enum PlayerStatsSnapshotStatus {
+		AVAILABLE
+		PRESEASON
+		STALE
+		INCOMPLETE
+		UNAVAILABLE
+	}
+
 	type PlayerStatsContext {
 		scope: PlayerStatsScope!
 		season: String!
 		asOfEventId: Int
+		status: PlayerStatsSnapshotStatus!
+		revision: String
+		sourceCheckedAt: DateTime
+		publishedAt: DateTime
+		rowCount: Int!
+		expectedRowCount: Int!
 	}
 
 	type PlayerAvailability {

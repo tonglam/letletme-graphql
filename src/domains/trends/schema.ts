@@ -66,6 +66,8 @@ export const trendsTypeDefs = /* GraphQL */ `
 	type TrendCohortCatalogPayload {
 		season: String!
 		revision: String!
+		state: String!
+		sourceCheckedAt: DateTime
 		cohorts: [TrendCohort!]!
 	}
 

@@ -628,6 +628,39 @@ describe("Player State repository", () => {
 		expect(fplCurrent?.reasonCodes).not.toContain("FPL_CURRENT_PRESEASON");
 	});
 
+	it("masks current FPL values when the Player Stats publication is stale", async () => {
+		const redis = new TestRedis();
+		const { executor } = makeExecutor();
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+			resolveStatsContext: async () => ({
+				scope: "CURRENT_SEASON",
+				season: "2526",
+				asOfEventId: 10,
+				status: "STALE",
+				revision: "stats-revision-4",
+				sourceCheckedAt: "2026-08-08T00:00:00.000Z",
+				publishedAt: "2026-08-08T00:00:01.000Z",
+				rowCount: 220,
+				expectedRowCount: 220,
+			}),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
+		const currentTimeline = profile?.seasonTimeline.find((point) => point.season === "2526");
+		const fplCurrent = profile?.coverage.sources.find(
+			(source) => source.provider === "FPL" && source.scope === "CURRENT"
+		);
+
+		expect(currentTimeline?.fplTotalPoints).toBeNull();
+		expect(currentTimeline?.signals.every((signal) => signal.value === null)).toBe(true);
+		expect(fplCurrent).toMatchObject({
+			dataStatus: "UNAVAILABLE",
+			revision: "stats-revision-4",
+		});
+	});
+
 	it("accepts negative FPL totals in a completed season timeline", async () => {
 		const redis = new TestRedis();
 		const { executor } = makeExecutor({ negativeCurrentPoints: true });

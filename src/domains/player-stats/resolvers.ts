@@ -7,11 +7,16 @@ import type { PlayerDetail } from "../player-detail/repository";
 import { playerDetailService } from "../player-detail/service";
 import { playerStateService } from "../player-state/service";
 import type { PlayerStateProfile } from "../player-state/types";
+import {
+	resolvePlayerStatsContext,
+	type PlayerStatsContext,
+} from "../players/season-stats-at-event";
 import { GraphQLError } from "graphql";
 import { metrics } from "../../infra/metrics";
 
 type PlayerStatsBootstrap = {
 	context: CoreEventContext;
+	statsContext: PlayerStatsContext;
 	teams: Team[];
 	directory: PlayersForPickerPayload;
 };
@@ -109,7 +114,10 @@ export const playerStatsResolvers = {
 		): Promise<PlayerStatsBootstrap> => {
 			// Resolve the immutable publication first. The following SQL directory
 			// and team projection then share this request's pinned revision.
-			const eventContext = await eventsService.getCoreEventContext(context);
+			const [eventContext, statsContext] = await Promise.all([
+				eventsService.getCoreEventContext(context),
+				resolvePlayerStatsContext(context),
+			]);
 			context.dataRevision ??= `core-${eventContext.revision}`;
 			const [teams, directory] = await Promise.all([
 				playersService.listTeams(context),
@@ -123,7 +131,7 @@ export const playerStatsResolvers = {
 					null
 				),
 			]);
-			return { context: eventContext, teams, directory };
+			return { context: eventContext, statsContext, teams, directory };
 		},
 		playerStatsDesk: async (
 			_parent: unknown,

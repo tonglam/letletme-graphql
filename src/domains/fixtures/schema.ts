@@ -25,6 +25,7 @@ export const fixturesTypeDefs = /* GraphQL */ `
 
 	extend type Query {
 		fixtures(filter: FixturesFilter, limit: Int = 50, offset: Int = 0): [Fixture!]!
+		"Core schedule only. For current live scores query liveMatchdayDesk."
 		eventFixtures(eventId: Int!): [Fixture!]!
 	}
 `;

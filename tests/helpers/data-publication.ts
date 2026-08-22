@@ -266,6 +266,7 @@ export const buildLivePublication = (
 		eventLives: readonly Record<string, unknown>[];
 		fixtures: readonly CoreFixtureData[];
 		state: "scheduled" | "live" | "settled";
+		sourceCheckedAt: string;
 	}> = {}
 ): TestPublication => {
 	const eventLives = buildTestEventLives(core, eventId);
@@ -278,7 +279,10 @@ export const buildLivePublication = (
 			eventLive: overrides.eventLives ?? eventLives,
 			fixtures: fixtures.map(toPublicationFixture),
 		},
-		{ state: overrides.state ?? "scheduled" }
+		{
+			state: overrides.state ?? "scheduled",
+			sourceCheckedAt: overrides.sourceCheckedAt,
+		}
 	);
 };
 

@@ -19,7 +19,10 @@ const buildContext = (state: "scheduled" | "live" | "settled", finalized = false
 				),
 			}
 		: base;
-	const live = buildLivePublication(core, 1, "2627", 8, { state });
+	const live = buildLivePublication(core, 1, "2627", 8, {
+		state,
+		sourceCheckedAt: new Date().toISOString(),
+	});
 	return buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core), live));
 };
 

@@ -5,11 +5,19 @@ import { QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
 import { getCurrentSeason } from "../../infra/season";
 
 export type PlayerStatsScope = "CURRENT_SEASON" | "PREVIOUS_SEASON" | "UNAVAILABLE";
+export type PlayerStatsSnapshotStatus =
+	"AVAILABLE" | "PRESEASON" | "STALE" | "INCOMPLETE" | "UNAVAILABLE";
 
 export type PlayerStatsContext = {
 	scope: PlayerStatsScope;
 	season: string;
 	asOfEventId: number | null;
+	status: PlayerStatsSnapshotStatus;
+	revision: string | null;
+	sourceCheckedAt: string | null;
+	publishedAt: string | null;
+	rowCount: number;
+	expectedRowCount: number;
 };
 
 export type PlayerSeasonStatsAtEvent = {
@@ -63,11 +71,190 @@ const asNullableInt = (value: unknown): number | null => {
 	return parsed === null ? null : Math.trunc(parsed);
 };
 
-const unavailableContext = (season: string): PlayerStatsContext => ({
+const unavailableContext = (
+	season: string,
+	status: PlayerStatsSnapshotStatus = "UNAVAILABLE"
+): PlayerStatsContext => ({
 	scope: "UNAVAILABLE",
 	season,
 	asOfEventId: null,
+	status,
+	revision: null,
+	sourceCheckedAt: null,
+	publishedAt: null,
+	rowCount: 0,
+	expectedRowCount: 0,
 });
+
+type PublicationRow = {
+	event_id: number;
+	revision: string | number;
+	source_checked_at: string | Date;
+	published_at: string | Date;
+	row_count: number;
+	expected_row_count: number;
+	baseline_verified_at: string | Date | null;
+};
+
+const isoTimestamp = (value: string | Date | null | undefined): string | null => {
+	if (value === null || value === undefined) return null;
+	const parsed = value instanceof Date ? value : new Date(value);
+	return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+};
+
+const positiveCount = (value: unknown): number | null => {
+	const parsed = typeof value === "number" ? value : Number(value);
+	return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+};
+
+const publicationContext = (
+	season: string,
+	eventId: number,
+	publication: PublicationRow,
+	status: PlayerStatsSnapshotStatus
+): PlayerStatsContext => ({
+	scope: "CURRENT_SEASON",
+	season,
+	asOfEventId: eventId,
+	status,
+	revision: String(publication.revision),
+	sourceCheckedAt: isoTimestamp(publication.source_checked_at),
+	publishedAt: isoTimestamp(publication.published_at),
+	rowCount: positiveCount(publication.row_count) ?? 0,
+	expectedRowCount: positiveCount(publication.expected_row_count) ?? 0,
+});
+
+const statsContextMemo = new WeakMap<object, Map<number, Promise<PlayerStatsContext>>>();
+
+const statsContextKey = (requestedEventId: number | null | undefined): number =>
+	typeof requestedEventId === "number" && Number.isSafeInteger(requestedEventId)
+		? requestedEventId
+		: 0;
+
+async function resolvePlayerStatsContextUncached(
+	context: GraphQLContext,
+	requestedEventId?: number | null
+): Promise<PlayerStatsContext> {
+	// Production GraphQL contexts always provide the typed Data read client. A
+	// narrow fallback keeps isolated resolver/unit contexts from attempting a
+	// PostgreSQL authority lookup; it is never used by the production server.
+	if (typeof (context.data as { read?: unknown } | null | undefined)?.read !== "function") {
+		return {
+			scope: "CURRENT_SEASON",
+			season: context.currentSeason.seasonCode,
+			asOfEventId: null,
+			status: "AVAILABLE",
+			revision: context.dataRevision ?? null,
+			sourceCheckedAt: null,
+			publishedAt: null,
+			rowCount: 0,
+			expectedRowCount: 0,
+		};
+	}
+	const [season, eventSnapshot] = await Promise.all([
+		getCurrentSeason(context),
+		getCoreEventSnapshot(context),
+	]);
+	const upperBound =
+		typeof requestedEventId === "number" &&
+		Number.isSafeInteger(requestedEventId) &&
+		requestedEventId > 0
+			? requestedEventId
+			: null;
+	const event =
+		eventSnapshot.currentEventId !== null &&
+		(upperBound === null || eventSnapshot.currentEventId <= upperBound)
+			? (eventSnapshot.events.find((candidate) => candidate.id === eventSnapshot.currentEventId) ??
+				null)
+			: ([...eventSnapshot.events]
+					.filter((candidate) => upperBound === null || candidate.id <= upperBound)
+					.filter((candidate) => candidate.finished || candidate.isCurrent)
+					.sort((left, right) => right.id - left.id)[0] ?? null);
+	if (!event) {
+		return unavailableContext(
+			season,
+			context.currentSeason.lifecycleState === "preseason" ? "PRESEASON" : "UNAVAILABLE"
+		);
+	}
+
+	let publication: PublicationRow | null;
+	try {
+		const result = await context.data
+			.read("fpl.player_event_snapshot_publications")
+			.select(
+				"event_id, revision, source_checked_at, published_at, row_count, expected_row_count, baseline_verified_at"
+			)
+			.eq("event_id", event.id)
+			.limit(1);
+		if (result.error) throw result.error;
+		publication = ((result.data ?? [])[0] as PublicationRow | undefined) ?? null;
+	} catch (error) {
+		context.logger.warn({ err: error, eventId: event.id }, "Player Stats publication unavailable");
+		return {
+			scope: "CURRENT_SEASON",
+			season,
+			asOfEventId: event.id,
+			status: context.currentSeason.lifecycleState === "preseason" ? "PRESEASON" : "UNAVAILABLE",
+			revision: null,
+			sourceCheckedAt: null,
+			publishedAt: null,
+			rowCount: 0,
+			expectedRowCount: 0,
+		};
+	}
+	if (!publication) {
+		return {
+			scope: "CURRENT_SEASON",
+			season,
+			asOfEventId: event.id,
+			status: context.currentSeason.lifecycleState === "preseason" ? "PRESEASON" : "UNAVAILABLE",
+			revision: null,
+			sourceCheckedAt: null,
+			publishedAt: null,
+			rowCount: 0,
+			expectedRowCount: 0,
+		};
+	}
+
+	const header = publicationContext(season, event.id, publication, "AVAILABLE");
+	if (!header.sourceCheckedAt || !header.publishedAt || !publication.baseline_verified_at) {
+		return publicationContext(season, event.id, publication, "UNAVAILABLE");
+	}
+	if (
+		header.rowCount <= 0 ||
+		header.expectedRowCount <= 0 ||
+		header.rowCount !== header.expectedRowCount
+	) {
+		return publicationContext(season, event.id, publication, "INCOMPLETE");
+	}
+
+	try {
+		const rows = await context.data
+			.read("fpl.player_event_snapshots")
+			.select("element_id, event_id")
+			.eq("event_id", event.id);
+		if (rows.error) throw rows.error;
+		const ids = (rows.data ?? [])
+			.map((row) => Number((row as { element_id?: unknown }).element_id))
+			.filter((id) => Number.isSafeInteger(id) && id > 0);
+		const uniqueIds = new Set(ids);
+		if (ids.length !== header.expectedRowCount || uniqueIds.size !== header.expectedRowCount) {
+			return publicationContext(season, event.id, publication, "INCOMPLETE");
+		}
+	} catch (error) {
+		context.logger.warn({ err: error, eventId: event.id }, "Player Stats rows unavailable");
+		return publicationContext(season, event.id, publication, "INCOMPLETE");
+	}
+
+	if (context.currentSeason.lifecycleState === "preseason") {
+		return publicationContext(season, event.id, publication, "PRESEASON");
+	}
+	const sourceAge = Date.now() - Date.parse(header.sourceCheckedAt);
+	if (!event.finished && (!Number.isFinite(sourceAge) || sourceAge > 60_000)) {
+		return publicationContext(season, event.id, publication, "STALE");
+	}
+	return header;
+}
 
 /**
  * Resolve the latest event whose current-season statistics are safe to label
@@ -78,31 +265,18 @@ export async function resolvePlayerStatsContext(
 	context: GraphQLContext,
 	requestedEventId?: number | null
 ): Promise<PlayerStatsContext> {
-	const [season, snapshot] = await Promise.all([
-		getCurrentSeason(context),
-		getCoreEventSnapshot(context),
-	]);
-	const upperBound =
-		typeof requestedEventId === "number" &&
-		Number.isSafeInteger(requestedEventId) &&
-		requestedEventId > 0
-			? requestedEventId
-			: null;
-
-	if (
-		snapshot.currentEventId !== null &&
-		(upperBound === null || snapshot.currentEventId <= upperBound)
-	) {
-		return { scope: "CURRENT_SEASON", season, asOfEventId: snapshot.currentEventId };
+	const scope = context.requestScope ?? context;
+	let memo = statsContextMemo.get(scope);
+	if (!memo) {
+		memo = new Map();
+		statsContextMemo.set(scope, memo);
 	}
-
-	const latestStarted = [...snapshot.events]
-		.filter((event) => upperBound === null || event.id <= upperBound)
-		.filter((event) => event.finished || event.isCurrent)
-		.sort((left, right) => right.id - left.id)[0];
-	return latestStarted
-		? { scope: "CURRENT_SEASON", season, asOfEventId: latestStarted.id }
-		: unavailableContext(season);
+	const key = statsContextKey(requestedEventId);
+	const cached = memo.get(key);
+	if (cached) return cached;
+	const loading = resolvePlayerStatsContextUncached(context, requestedEventId);
+	memo.set(key, loading);
+	return loading;
 }
 
 const emptySeasonStats = (elementId: number, eventId: number): PlayerSeasonStatsAtEvent => ({
@@ -192,8 +366,12 @@ const isPlayerSeasonStatsAtEvent = (value: unknown): value is PlayerSeasonStatsA
 	(value.totalPoints === null || typeof value.totalPoints === "number") &&
 	(value.form === null || typeof value.form === "number");
 
-const cacheKey = (context: GraphQLContext, elementId: number, eventId: number): string =>
-	gqlCacheKey(context, `players:season-stats:${elementId}:${eventId}`);
+const cacheKey = (
+	context: GraphQLContext,
+	elementId: number,
+	eventId: number,
+	revision: string
+): string => gqlCacheKey(context, `players:season-stats:${elementId}:${eventId}:${revision}`);
 
 async function isUnfinishedCurrentEvent(
 	context: GraphQLContext,
@@ -247,11 +425,17 @@ export async function getPlayerSeasonStatsByIdsForContext(
 	);
 	const result = new Map<number, PlayerSeasonStatsAtEvent>();
 	const eventId = statsContext.asOfEventId;
-	if (uniqueIds.length === 0 || statsContext.scope !== "CURRENT_SEASON" || eventId === null) {
+	if (
+		uniqueIds.length === 0 ||
+		statsContext.scope !== "CURRENT_SEASON" ||
+		statsContext.status !== "AVAILABLE" ||
+		eventId === null ||
+		statsContext.revision === null
+	) {
 		return result;
 	}
 
-	const keys = uniqueIds.map((id) => cacheKey(context, id, eventId));
+	const keys = uniqueIds.map((id) => cacheKey(context, id, eventId, statsContext.revision!));
 	let cachedRows: Array<string | null> = uniqueIds.map(() => null);
 	try {
 		cachedRows = await context.redis.mget(...keys);
@@ -309,7 +493,7 @@ export async function getPlayerSeasonStatsByIdsForContext(
 		found.add(mapped.elementId);
 		result.set(mapped.elementId, mapped);
 		pipeline.set(
-			cacheKey(context, mapped.elementId, eventId),
+			cacheKey(context, mapped.elementId, eventId, statsContext.revision!),
 			JSON.stringify(mapped),
 			"EX",
 			cacheTtl
@@ -320,7 +504,7 @@ export async function getPlayerSeasonStatsByIdsForContext(
 		const empty = emptySeasonStats(id, eventId);
 		result.set(id, empty);
 		pipeline.set(
-			cacheKey(context, id, eventId),
+			cacheKey(context, id, eventId, statsContext.revision!),
 			JSON.stringify(empty),
 			"EX",
 			QUERY_CACHE_TTL_SECONDS.METADATA
