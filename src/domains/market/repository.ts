@@ -5,6 +5,7 @@ import {
 	createMarketPinFailure,
 	getMarketSnapshotContext,
 	refreshMarketSnapshotContext,
+	type MarketSnapshotContext,
 } from "./context";
 
 const MARKET_RESULT_LIMIT = 10;
@@ -32,6 +33,7 @@ export type MarketCoverage = {
 	observedDays: number;
 	firstDate: string | null;
 	latestDate: string | null;
+	missingDates: string[];
 	capturedAt: string | null;
 	complete: boolean;
 	stale: boolean;
@@ -71,7 +73,16 @@ export type MarketPulse = {
 		change: number;
 		direction: "RISE" | "FALL";
 	}>;
+	/** Full, deterministically ordered evidence retained for the paginated API. */
+	availabilityEvidence: MarketAvailabilityUpdate[];
 	availabilityUpdateCount?: number;
+};
+
+export type MarketAvailabilityPage = {
+	context: MarketSnapshotContext;
+	items: MarketAvailabilityUpdate[];
+	totalCount: number;
+	nextOffset: number | null;
 };
 
 export type MarketSnapshotRow = {
@@ -128,8 +139,30 @@ type QueryExecutor = {
 
 export type MarketRepository = {
 	getMarketPulse(context: GraphQLContext, requestedDays: number): Promise<MarketPulse>;
+	getMarketAvailabilityPage(
+		context: GraphQLContext,
+		requestedDays: number,
+		limit: number,
+		offset: number
+	): Promise<MarketAvailabilityPage>;
 	getMarketLineup(context: GraphQLContext): Promise<MarketLineup | null>;
 };
+
+export function buildMarketAvailabilityPage(
+	pulse: MarketPulse,
+	context: MarketSnapshotContext,
+	limit: number,
+	offset: number
+): MarketAvailabilityPage {
+	const allItems = pulse.availabilityEvidence;
+	const end = Math.min(offset + limit, allItems.length);
+	return {
+		context,
+		items: allItems.slice(offset, end),
+		totalCount: allItems.length,
+		nextOffset: end < allItems.length ? end : null,
+	};
+}
 
 const MARKET_QUERY = `
 	WITH raw_bounds AS (
@@ -308,6 +341,7 @@ export const emptyMarketPulse = (requestedDays: number): MarketPulse => ({
 		observedDays: 0,
 		firstDate: null,
 		latestDate: null,
+		missingDates: [],
 		capturedAt: null,
 		complete: false,
 		stale: false,
@@ -316,6 +350,7 @@ export const emptyMarketPulse = (requestedDays: number): MarketPulse => ({
 	transferMovers: [],
 	availabilityUpdates: [],
 	availabilityHighlights: [],
+	availabilityEvidence: [],
 	newPlayers: [],
 	priceChanges: [],
 	availabilityUpdateCount: 0,
@@ -339,6 +374,11 @@ export function buildMarketPulse(
 	const firstDate = observedDates[0];
 	const latestDate = observedDates.at(-1)!;
 	const windowStart = addCalendarDays(latestDate, -(requestedDays - 1));
+	const expectedDates = Array.from({ length: requestedDays }, (_, index) =>
+		addCalendarDays(windowStart, index)
+	);
+	const observedDateSet = new Set(observedDates);
+	const missingDates = expectedDates.filter((date) => !observedDateSet.has(date));
 	const latestRows = rows.filter((row) => row.snapshotDate === latestDate);
 	const latestByPlayer = new Map(latestRows.map((row) => [row.element_id, row]));
 	const capturedAt = latestRows.map((row) => row.capturedAt).sort((a, b) => b.localeCompare(a))[0];
@@ -520,14 +560,16 @@ export function buildMarketPulse(
 			observedDays: observedDates.length,
 			firstDate,
 			latestDate,
+			missingDates,
 			capturedAt,
-			complete: observedDates.length === requestedDays,
+			complete: missingDates.length === 0,
 			stale: Math.max(now.getTime() - capturedAtMs, 0) > STALE_AFTER_MS,
 		},
 		mostSelected,
 		transferMovers,
 		availabilityUpdates,
 		availabilityHighlights,
+		availabilityEvidence,
 		availabilityUpdateCount: availabilityEvidence.length,
 		newPlayers,
 		priceChanges,
@@ -654,9 +696,11 @@ const isMarketPulse = (value: unknown): value is MarketPulse =>
 	isRecord(value.coverage) &&
 	typeof value.coverage.requestedDays === "number" &&
 	typeof value.coverage.observedDays === "number" &&
+	Array.isArray(value.coverage.missingDates) &&
 	Array.isArray(value.mostSelected) &&
 	Array.isArray(value.transferMovers) &&
 	Array.isArray(value.availabilityUpdates) &&
+	Array.isArray(value.availabilityEvidence) &&
 	Array.isArray(value.availabilityHighlights) &&
 	Array.isArray(value.newPlayers) &&
 	Array.isArray(value.priceChanges) &&
@@ -701,10 +745,10 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 		let cacheKey = snapshotContext
 			? gqlCacheKey(
 					context,
-					`market-pulse:v3:${requestedDays}`,
+					`market-pulse:v4:${requestedDays}`,
 					`${context.dataRevision ?? "core-postgres"}.${snapshotContext.revision}`
 				)
-			: gqlCacheKey(context, `market-pulse:${requestedDays}`);
+			: gqlCacheKey(context, `market-pulse:v4:${requestedDays}`);
 		return runMarketPulseFlight(context, cacheKey, async () => {
 			try {
 				const cached = await context.redis.get(cacheKey);
@@ -763,7 +807,7 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 						throw createMarketPinFailure(context, "Market snapshot pin unavailable after retry");
 					cacheKey = gqlCacheKey(
 						context,
-						`market-pulse:v3:${requestedDays}`,
+						`market-pulse:v4:${requestedDays}`,
 						`${context.dataRevision ?? "core-postgres"}.${snapshotContext.revision}`
 					);
 					read = await readRows(snapshotContext);
@@ -785,6 +829,19 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 			);
 			return pulse;
 		});
+	},
+	async getMarketAvailabilityPage(
+		context: GraphQLContext,
+		requestedDays: number,
+		limit: number,
+		offset: number
+	): Promise<MarketAvailabilityPage> {
+		const pulse = await this.getMarketPulse(context, requestedDays);
+		// Read the context after the pulse so a same-day pin retry cannot pair
+		// the refreshed full evidence with the pre-retry revision.
+		const snapshotContext = await getMarketSnapshotContext(context);
+		if (!snapshotContext) throw new Error("Market snapshot context is unavailable");
+		return buildMarketAvailabilityPage(pulse, snapshotContext, limit, offset);
 	},
 	async getMarketLineup(context: GraphQLContext): Promise<MarketLineup | null> {
 		let snapshotContext: Awaited<ReturnType<typeof getMarketSnapshotContext>> | null = null;

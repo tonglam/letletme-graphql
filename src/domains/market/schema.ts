@@ -16,6 +16,7 @@ export const marketTypeDefs = /* GraphQL */ `
 		observedDays: Int!
 		firstDate: Date
 		latestDate: Date
+		missingDates: [Date!]!
 		capturedAt: DateTime
 		complete: Boolean!
 		stale: Boolean!
@@ -135,6 +136,13 @@ export const marketTypeDefs = /* GraphQL */ `
 		availabilityUpdateCount: Int!
 	}
 
+	type MarketAvailabilityPage {
+		context: MarketSnapshotContext!
+		items: [MarketAvailabilityUpdate!]!
+		totalCount: Int!
+		nextOffset: Int
+	}
+
 	enum MarketSnapshotSource {
 		DATA_PUBLICATION
 		POSTGRES_FALLBACK
@@ -151,6 +159,7 @@ export const marketTypeDefs = /* GraphQL */ `
 
 	extend type Query {
 		marketPulse(days: Int = 7): MarketPulse!
+		marketAvailabilityPage(days: Int = 7, limit: Int = 20, offset: Int = 0): MarketAvailabilityPage!
 		marketLineup: MarketLineup!
 		marketOwnershipOverview(
 			period: MarketOwnershipPeriod!

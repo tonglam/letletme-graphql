@@ -37,6 +37,7 @@ describe("marketPulse GraphQL contract", () => {
 				observedDays: 1,
 				firstDate: "2026-08-03",
 				latestDate: "2026-08-03",
+				missingDates: [],
 				capturedAt: "2026-08-03T01:40:00.000Z",
 				complete: false,
 				stale: false,
@@ -66,7 +67,7 @@ describe("marketPulse GraphQL contract", () => {
 			logger: { warn: () => undefined, error: () => undefined },
 			data: {},
 		} as never;
-		strings.set(gqlCacheKey(context, "market-pulse:7"), JSON.stringify(pulse));
+		strings.set(gqlCacheKey(context, "market-pulse:v4:7"), JSON.stringify(pulse));
 
 		const result = await graphql({ schema, source: query, contextValue: context });
 

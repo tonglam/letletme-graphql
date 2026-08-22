@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	buildMarketAvailabilityPage,
 	buildMarketPulse,
 	createMarketRepository,
 	emptyMarketPulse,
@@ -72,7 +73,7 @@ const buildContext = (cacheSeed?: string) => {
 		data: {},
 	} as never;
 	if (cacheSeed !== undefined) {
-		strings.set(gqlCacheKey(context, "market-pulse:7"), cacheSeed);
+		strings.set(gqlCacheKey(context, "market-pulse:v4:7"), cacheSeed);
 	}
 	return {
 		strings,
@@ -141,6 +142,7 @@ describe("buildMarketPulse", () => {
 			complete: false,
 			stale: false,
 		});
+		expect(pulse.coverage.missingDates).toEqual(["2026-08-02"]);
 		expect(pulse.mostSelected[0].playerId).toBe(3);
 		expect(pulse.transferMovers).toHaveLength(1);
 		expect(pulse.transferMovers[0]).toMatchObject({
@@ -250,6 +252,7 @@ describe("buildMarketPulse", () => {
 
 		const pulse = buildMarketPulse(rows, 14, new Date("2026-08-03T12:00:00Z"));
 		expect(pulse.availabilityUpdates).toHaveLength(20);
+		expect(pulse.availabilityEvidence).toHaveLength(22);
 		expect(pulse.availabilityUpdates.some((item) => item.player.playerId === 22)).toBe(false);
 		expect(pulse.availabilityHighlights).toHaveLength(5);
 		expect(pulse.availabilityHighlights[0]?.player.playerId).toBe(22);
@@ -273,6 +276,45 @@ describe("buildMarketPulse", () => {
 		expect(pulse.mostSelected).toHaveLength(1);
 		expect(pulse.mostSelected[0]).toMatchObject({ playerId: 1, selectedByPercent: 12 });
 		expect(pulse.coverage.capturedAt).toBe("2026-08-03T02:00:00.000Z");
+	});
+
+	it("paginates the complete availability evidence without losing the total", () => {
+		const pulse = buildMarketPulse(
+			Array.from({ length: 45 }, (_, index) =>
+				baseRow("2026-08-03", index + 1, {
+					selected_by_percent: 100 - index,
+					status: "i",
+					previous_status: "a",
+					chance_of_playing_this_round: 0,
+					previous_chance_this_round: 100,
+				})
+			),
+			14
+		);
+		const context = {
+			season: "2627",
+			revision: "market:1",
+			source: "POSTGRES_FALLBACK" as const,
+			snapshotDate: "2026-08-03",
+			capturedAt: "2026-08-03T01:40:00.000Z",
+			rowCount: 45,
+			cacheTtlSeconds: 300,
+		};
+
+		const first = buildMarketAvailabilityPage(pulse, context, 20, 0);
+		const second = buildMarketAvailabilityPage(pulse, context, 20, first.nextOffset!);
+		const third = buildMarketAvailabilityPage(pulse, context, 20, second.nextOffset!);
+
+		expect(first.items).toHaveLength(20);
+		expect(second.items).toHaveLength(20);
+		expect(third.items).toHaveLength(5);
+		expect(third.nextOffset).toBeNull();
+		expect(
+			[...first.items, ...second.items, ...third.items].map((item) => item.player.playerId)
+		).toEqual(Array.from({ length: 45 }, (_, index) => index + 1));
+		expect(first.totalCount).toBe(45);
+		expect(second.totalCount).toBe(45);
+		expect(third.totalCount).toBe(45);
 	});
 });
 

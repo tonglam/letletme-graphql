@@ -38,6 +38,10 @@ const PLAYER_STATE_PROFILE_MAX_AST_NODES = 240;
 
 const MAX_LIST_ARGUMENT_WEIGHT = 200;
 
+// These roots contain a bounded list alongside fixed-size sibling projections.
+// Charge the requested list once, but do not multiply unrelated siblings by it.
+const NON_PROPAGATING_LIMIT_ROOTS = new Set(["playerStatsBootstrap"]);
+
 type GraphQLPayload = {
 	query?: unknown;
 	variables?: unknown;
@@ -302,6 +306,9 @@ const inspectSelectionSet = ({
 				});
 			}
 			const childMultiplier = multiplier * weight.multiplier;
+			const propagateToChildren =
+				weight.propagateToChildren &&
+				!(depth === 1 && NON_PROPAGATING_LIMIT_ROOTS.has(selection.name.value));
 			oversizedEntryBatch ||= weight.oversizedEntryBatch;
 			oversizedLiveExplainBatch ||= weight.oversizedLiveExplainBatch;
 			duplicateEntryIds ||= weight.duplicateEntryIds;
@@ -319,7 +326,7 @@ const inspectSelectionSet = ({
 					fragments,
 					variables,
 					depth: depth + 1,
-					multiplier: weight.propagateToChildren ? childMultiplier : multiplier,
+					multiplier: propagateToChildren ? childMultiplier : multiplier,
 					seenFragments: new Set(seenFragments),
 					schema,
 					parentType: asCompositeType(namedChildType),
@@ -423,11 +430,13 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["homePublicBootstrap", 5],
 	["homeGameweek", 5],
 	["homeMarketPulse", 5],
+	["playerStatsBootstrap", 10],
 	["homePersonalDesk", 5],
 	["briefingWeek", 5],
 	["briefingStory", 5],
 	["playerValueHistory", 5],
 	["marketPulse", 10],
+	["marketAvailabilityPage", 5],
 	["marketOwnershipOverview", 10],
 	["marketOwnershipDay", 10],
 	["marketSnapshotContext", 1],
@@ -484,6 +493,7 @@ const accepted = ({
 	const boundedPublicDeskRoots = new Set([
 		"playersForPicker",
 		"playerStatsBootstrap",
+		"marketAvailabilityPage",
 		"marketPulse",
 		"marketOwnershipOverview",
 		"marketOwnershipDay",

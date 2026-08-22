@@ -112,6 +112,12 @@ export const playerStatsResolvers = {
 			args: { limit?: number | null },
 			context: GraphQLContext
 		): Promise<PlayerStatsBootstrap> => {
+			const limit = args.limit ?? 20;
+			if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+				throw new GraphQLError("limit must be an integer between 1 and 50", {
+					extensions: { code: "BAD_USER_INPUT" },
+				});
+			}
 			// Resolve the immutable publication first. The following SQL directory
 			// and team projection then share this request's pinned revision.
 			const [eventContext, statsContext] = await Promise.all([
@@ -121,15 +127,7 @@ export const playerStatsResolvers = {
 			context.dataRevision ??= `core-${eventContext.revision}`;
 			const [teams, directory] = await Promise.all([
 				playersService.listTeams(context),
-				playersService.getPlayersForPicker(
-					context,
-					args.limit ?? 20,
-					null,
-					null,
-					undefined,
-					"AUTO",
-					null
-				),
+				playersService.getPlayersForPicker(context, limit, null, null, undefined, "AUTO", null),
 			]);
 			return { context: eventContext, statsContext, teams, directory };
 		},

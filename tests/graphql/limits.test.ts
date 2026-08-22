@@ -303,6 +303,73 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("charges the Player Stats bootstrap directory without multiplying fixed siblings", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query GetPlayerStatsBootstrap($limit: Int = 20) {
+						playerStatsBootstrap(limit: $limit) {
+							context {
+								season revision sourceCheckedAt currentEventId nextEventId
+								nextDeadlineTime latestFinishedEventId
+							}
+							statsContext {
+								status revision sourceCheckedAt publishedAt rowCount expectedRowCount
+							}
+							teams { id name shortName }
+							directory {
+								items {
+									id webName position price selectedByPercent totalPoints form
+									team { id name shortName }
+								}
+								totalCount nextCursor
+							}
+						}
+					}
+				`,
+				variables: { limit: 20 },
+			},
+			schema
+		);
+
+		expect(result).toMatchObject({
+			ok: true,
+			weightedComplexity: 54,
+			rateLimitCostUnits: 10,
+			rootFields: ["playerStatsBootstrap"],
+		});
+	});
+
+	it("keeps the bounded Market availability page below the public complexity guard", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query MarketAvailabilityPage($limit: Int = 20, $offset: Int = 0) {
+						marketAvailabilityPage(limit: $limit, offset: $offset) {
+							context { revision source snapshotDate capturedAt rowCount }
+							items {
+								player {
+									playerId playerCode webName teamId teamName teamShortName
+									position price selectedByPercent
+								}
+								status previousStatus news newsAdded observedDate
+								chanceOfPlayingThisRound chanceOfPlayingNextRound
+							}
+							totalCount nextOffset
+						}
+					}
+				`,
+				variables: { limit: 20, offset: 0 },
+			},
+			schema
+		);
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error(result.message);
+		expect(result.weightedComplexity).toBeLessThan(600);
+		expect(result.rateLimitCostUnits).toBe(5);
+	});
+
 	it("keeps the fixed-size Market pulse below the public complexity guard", () => {
 		const result = validateGraphQLRequestLimits(
 			{
