@@ -65,7 +65,10 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 		availability: EntryLiveAvailability!
 		provisional: Boolean!
 		snapshot: LiveSnapshotMeta
-		rank: Int!
+		"Official manager headline with an explicit freshness/source contract."
+		score: LiveManagerScore!
+		"@deprecated Use score.eventRank or score.leagueRank."
+		rank: Int! @deprecated(reason: "Use score.eventRank or score.leagueRank")
 		event: Int!
 		entry: Int!
 		entryName: String!
@@ -82,10 +85,10 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 		lastOverallRank: Int!
 		lastValue: Float!
 		chip: Chip!
-		livePoints: Int!
+		livePoints: Int! @deprecated(reason: "Use score.eventPoints")
 		transferCost: Int!
-		liveNetPoints: Int!
-		liveTotalPoints: Int!
+		liveNetPoints: Int! @deprecated(reason: "Use score.netEventPoints")
+		liveTotalPoints: Int! @deprecated(reason: "Use score.totalPoints when totalScope is OVERALL")
 		played: Int!
 		toPlay: Int!
 		playedCaptain: Int!
@@ -98,6 +101,73 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 	enum EntryLiveAvailability {
 		READY
 		NO_PICKS
+	}
+
+	enum LiveManagerScoreSource {
+		FPL_ENTRY_SUMMARY
+		FPL_CLASSIC_STANDINGS
+		FPL_FINAL_RESULT
+		UNAVAILABLE
+	}
+
+	enum LiveManagerScoreState {
+		FRESH
+		STALE
+		SETTLING
+		FINAL
+		UNAVAILABLE
+	}
+
+	enum LiveManagerScoreTotalScope {
+		OVERALL
+		CLASSIC_PHASE
+		UNKNOWN
+	}
+
+	enum LiveManagerScoreSemantics {
+		GROSS
+		NET
+		ZERO_COST_EQUIVALENT
+		UNKNOWN
+	}
+
+	enum LiveManagerScoreReconciliation {
+		MATCHED
+		SOURCE_SKEW
+		NOT_COMPARABLE
+		NO_LINEUP
+	}
+
+	enum LiveManagerScoreReason {
+		UPSTREAM_UNAVAILABLE
+		UPSTREAM_RATE_LIMITED
+		SOURCE_TOO_OLD
+		MISSING_SCORE
+		MISSING_LINEUP
+		UNSUPPORTED_H2H
+		SEMANTICS_UNKNOWN
+		SOURCE_SKEW
+	}
+
+	type LiveManagerScore {
+		eventPoints: Int
+		netEventPoints: Int
+		totalPoints: Int
+		totalScope: LiveManagerScoreTotalScope!
+		eventRank: Int
+		overallRank: Int
+		leagueRank: Int
+		transferCost: Int!
+		source: LiveManagerScoreSource!
+		state: LiveManagerScoreState!
+		eventPointSemantics: LiveManagerScoreSemantics!
+		revision: String
+		checkedAt: DateTime
+		upstreamUpdatedAt: DateTime
+		staleAt: DateTime
+		nextRefreshAt: DateTime
+		reconciliation: LiveManagerScoreReconciliation!
+		reasonCodes: [LiveManagerScoreReason!]!
 	}
 
 	type ActiveCaptain {

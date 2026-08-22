@@ -92,6 +92,13 @@ explicit persisted rollout profiles for P0, shadow, enforce, compatibility
 restoration, and rollback; P0 captures the previous environment, image, SHA,
 health, metrics, and container resource baseline before replacement.
 
+Live manager headlines use the official FPL entry/Classic standings read-through.
+When the official row is outside its freshness window, GraphQL returns an explicit
+`UNAVAILABLE` score; it never substitutes a locally calculated manager total.
+This cutover is forward-only: there is no manager-live local mode or rollback flag.
+An unavailable or inconsistent official row is repaired by fixing the upstream
+publication/read-through and re-serving the official value.
+
 Redis keeps fourteen days of controlled-dimension aggregates and denied
 12-character HMAC fingerprints. It never stores raw IPs, device IDs, tokens,
 variables, or queries. Read the report with:

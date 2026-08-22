@@ -11,11 +11,18 @@ import { loadLiveSnapshotMeta } from "../live/snapshot-meta";
 import { playersRepository } from "../players/repository";
 import {
 	type ActiveCaptainData,
-	applyAutoSubs,
 	buildNoPicksLiveCalcData,
 	type ElementEventResultData,
 	type LiveCalcData,
 } from "./calc-service";
+import { applyAutoSubs, selectCaptainForScoring } from "./legacy-h2h-adapter";
+import {
+	buildManagerScore,
+	loadManagerScores,
+	unavailableManagerScore,
+	type OfficialManagerScoreRow,
+} from "./manager-score";
+import { eventsService } from "../events/service";
 import type { EntryEventPick, EntryEventTransferRow } from "./repository";
 import { entryLiveRepository } from "./repository";
 import { resolvePreviousEventBaseline } from "./baseline";
@@ -236,26 +243,6 @@ const buildTeamMatchInfo = (params: {
 	};
 };
 
-const hasCompletedFixtures = (pick: ElementEventResultData): boolean =>
-	pick.isGwFinished || pick.playStatus === PLAY_STATUS.BLANK || pick.bgw;
-
-const selectCaptainForScoring = (
-	picks: ElementEventResultData[]
-): ElementEventResultData | null => {
-	const captain = picks.find((p) => p.isCaptain) ?? null;
-	if (!captain) {
-		return null;
-	}
-	if (captain.isPlayed) {
-		return captain;
-	}
-	if (!hasCompletedFixtures(captain)) {
-		return captain;
-	}
-	const vice = picks.find((p) => p.isViceCaptain) ?? null;
-	return vice ?? captain;
-};
-
 const normalizeChip = (raw: string | null | undefined): string => {
 	const value = (raw ?? "").toUpperCase().trim();
 	const compactValue = value.replace(/[^A-Z0-9]/g, "");
@@ -288,7 +275,8 @@ const computeSingleEntry = (
 	eventId: number,
 	perEntry: PerEntryData,
 	shared: SharedData,
-	provisional: boolean
+	provisional: boolean,
+	legacyH2H = false
 ): LiveCalcData => {
 	const { entry, pickEntity, transferRows, previousResult } = perEntry;
 	const { liveByPlayer, fixturesByTeam, teamsById, playersById } = shared;
@@ -377,16 +365,22 @@ const computeSingleEntry = (
 		};
 	});
 
-	// Live boards remain provisional until the official event result is final.
-	// During that window only the published picks multipliers are authoritative;
-	// automatic substitutions are applied by the finalized calculation path.
-	if (!provisional) applyAutoSubs(pickList, chip);
+	// H2H remains on its isolated legacy adapter until FPL publishes a usable
+	// live H2H contract. First-party single/classic/points-race paths use only
+	// official multipliers and never infer substitutions.
+	if (legacyH2H && !provisional) applyAutoSubs(pickList, chip);
 
 	const isBenchBoost = chip === "BENCH_BOOST";
 	const activePicks: ElementEventResultData[] = [];
 
 	for (const pick of pickList) {
-		const isActive = isBenchBoost ? true : pick.multiplier > 0;
+		// Official FPL picks multipliers are the only source of truth for the
+		// current/final lineup. Never infer auto-subs or captain promotion from
+		// minutes, fixture state, bench order, or chip names in the live path.
+		const isActive = legacyH2H ? (isBenchBoost ? true : pick.multiplier > 0) : pick.multiplier > 0;
+		// After finalization, the official multiplier is authoritative for the
+		// display-only bench relation. During live/settling we deliberately leave
+		// this false instead of predicting an automatic substitution.
 		const autoSub = !provisional && !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
 		pick.pickActive = isActive;
 		pick.autoSub = autoSub;
@@ -395,20 +389,24 @@ const computeSingleEntry = (
 		}
 	}
 
-	// Captain selection uses full pickList so vice-captain is found even if
-	// captain was auto-subbed out
-	const captainForScoring = provisional
-		? (pickList.find((pick) => pick.isCaptain) ?? null)
-		: selectCaptainForScoring(pickList);
+	const captainForScoring = legacyH2H
+		? provisional
+			? (pickList.find((pick) => pick.isCaptain) ?? null)
+			: selectCaptainForScoring(pickList)
+		: pickList.find((pick) => pick.multiplier >= 2) ??
+			pickList.find((pick) => pick.isCaptain) ??
+			null;
+	// The multiplier already carries captain/bench-boost/triple-captain
+	// semantics. Applying another captain multiplier would double-count points.
 	const captainMultiplier = chip === "TRIPLE_CAPTAIN" ? 3 : 2;
-
-	const captainElementId = captainForScoring?.element;
-	const livePoints = activePicks.reduce((sum, p) => {
-		if (captainElementId !== undefined && p.element === captainElementId) {
-			return sum + p.totalPoints * captainMultiplier;
-		}
-		return sum + p.totalPoints;
-	}, 0);
+	const livePoints = legacyH2H
+		? activePicks.reduce((sum, p) => {
+				if (captainForScoring?.element !== undefined && p.element === captainForScoring.element) {
+					return sum + p.totalPoints * captainMultiplier;
+				}
+				return sum + p.totalPoints;
+			}, 0)
+		: activePicks.reduce((sum, p) => sum + p.totalPoints * p.multiplier, 0);
 
 	const liveNetPoints = livePoints - transferCost;
 	const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
@@ -441,6 +439,7 @@ const computeSingleEntry = (
 		availability: pickEntity && pickEntity.picks.length > 0 ? "READY" : "NO_PICKS",
 		provisional,
 		snapshot: null,
+		score: unavailableManagerScore(transferCost),
 		rank: 0,
 		event: eventId,
 		entry: entryId,
@@ -488,7 +487,8 @@ export const entryLiveBatchService = {
 			fixtures?: Promise<Fixture[]>;
 			teams?: Promise<Team[]>;
 			picksByEntry?: Promise<Map<number, EntryEventPick>>;
-			provisional?: boolean;
+			tournamentId?: number;
+			legacyH2H?: boolean;
 		}
 	): Promise<BatchLiveCalcResult> {
 		assertValidEntryBatch(entryIds);
@@ -504,29 +504,68 @@ export const entryLiveBatchService = {
 
 		// Phase 1: resolve identity and picks. Entries without picks must not enter
 		// Live, fixture, player, transfer or bonus acquisition.
-		const [entriesById, picksByEntry, previousResultsByEntry] = await Promise.all([
+		const [entriesById, picksByEntry, previousResultsByEntry, managerScores] = await Promise.all([
 			entriesService.getEntriesByIds(context, entryIds),
 			prefetched?.picksByEntry ??
 				entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
 			eventId > 1
 				? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
 				: Promise.resolve(new Map<number, EntryEventResult>()),
+			loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
 		]);
 		const readyEntryIds = entryIds.filter(
 			(entryId) => (picksByEntry.get(entryId)?.picks.length ?? 0) > 0
 		);
+		// Manager headline availability is independent from lineup availability.
+		// Keep NO_PICKS metadata cheap while still resolving the official manager
+		// score; final lifecycle evidence requires a persisted lineup/result pair.
+		const event = readyEntryIds.length > 0 ? await eventsService.getEventById(context, eventId) : null;
+		const provisional =
+			readyEntryIds.length === 0 || !(event?.finished === true && event.dataChecked === true);
+		const legacyH2H = prefetched?.legacyH2H === true || managerScores.errorCode === "UNSUPPORTED_H2H_LIVE";
+		const finalizedResultsByEntry = !provisional
+			? await entriesService.getEntryEventResultsByEntryIds(context, readyEntryIds, eventId)
+			: new Map<number, EntryEventResult>();
+		if (!provisional && readyEntryIds.length > 0) {
+			// FPL can publish automatic_subs and the effective captain after the
+			// event flips to finished/data_checked. Read through a finalization-scoped
+			// cache key so the canonical picks are refreshed once, then remain stable.
+			const finalizedPicks = await entryLiveRepository.getEntryEventPicksByIds(
+				context,
+				readyEntryIds,
+				eventId,
+				false,
+				`data-checked:${eventId}`
+			);
+			for (const [entryId, pick] of finalizedPicks) picksByEntry.set(entryId, pick);
+		}
 		const results = new Map<number, LiveCalcData>();
 		for (const entryId of entryIds) {
 			if (!readyEntryIds.includes(entryId)) {
-				results.set(
-					entryId,
-					buildNoPicksLiveCalcData(
+				const noPicks = buildNoPicksLiveCalcData(
 						entryId,
 						eventId,
 						entriesById.get(entryId) ?? null,
 						previousResultsByEntry.get(entryId) ?? null
-					)
 				);
+				const manager = buildManagerScore({
+					row: managerScores.rows.get(entryId),
+					upstreamErrorCode: managerScores.errorCode,
+					provisional,
+					available: false,
+					transferCost: 0,
+					detailEventPoints: 0,
+					nextRefreshAt: managerScores.nextRefreshAt,
+				});
+				results.set(entryId, {
+					...noPicks,
+					provisional,
+					score: manager.score,
+					rank: manager.headline.rank,
+					livePoints: manager.headline.livePoints,
+					liveNetPoints: manager.headline.liveNetPoints,
+					liveTotalPoints: manager.headline.liveTotalPoints,
+				});
 			}
 		}
 		if (readyEntryIds.length === 0) {
@@ -639,11 +678,68 @@ export const entryLiveBatchService = {
 						eventId,
 						perEntry,
 						shared,
-						prefetched?.provisional === true
+						provisional,
+						legacyH2H
 					),
 					snapshot: targetedLive?.meta ?? fullSnapshotMeta,
 				};
-				results.set(entryId, calcData);
+				const finalized = finalizedResultsByEntry.get(entryId);
+				const finalRow: OfficialManagerScoreRow | undefined = finalized
+					? {
+						season: context.currentSeason.seasonCode,
+						eventId,
+						entryId,
+						eventPoints: finalized.eventPoints,
+						netEventPoints: finalized.eventNetPoints,
+						totalPoints: finalized.overallPoints,
+						totalScope: "OVERALL",
+						eventRank: finalized.eventRank,
+						overallRank: finalized.overallRank,
+						leagueRank: null,
+						transferCost: finalized.eventTransfersCost,
+						eventPointSemantics:
+							finalized.eventPoints === finalized.eventNetPoints && finalized.eventTransfersCost === 0
+								? "ZERO_COST_EQUIVALENT"
+								: finalized.eventPoints - finalized.eventTransfersCost === finalized.eventNetPoints
+									? "GROSS"
+									: "UNKNOWN",
+						source: "FPL_FINAL_RESULT",
+						revision: `final:${eventId}:${entryId}:${finalized.overallPoints}:${finalized.overallRank}`,
+						checkedAt: new Date().toISOString(),
+						upstreamUpdatedAt: null,
+						staleAt: new Date(Date.now() + 90_000).toISOString(),
+					}
+					: undefined;
+				const manager = buildManagerScore({
+					row: finalRow ?? managerScores.rows.get(entryId),
+					upstreamErrorCode: managerScores.errorCode,
+					provisional,
+					available: true,
+					transferCost: calcData.transferCost,
+					detailEventPoints: calcData.livePoints,
+					previousOverallPoints: perEntry.previousResult?.overallPoints ?? null,
+					nextRefreshAt: managerScores.nextRefreshAt,
+				});
+				// H2H is deliberately outside the official manager-live cutover. Keep
+				// its isolated legacy flat totals intact while the additive score
+				// contract reports the official H2H endpoint as unavailable.
+				const headline = legacyH2H
+					? {
+							rank: 0,
+							livePoints: calcData.livePoints,
+							liveNetPoints: calcData.liveNetPoints,
+							liveTotalPoints: calcData.liveTotalPoints,
+						}
+					: manager.headline;
+				results.set(entryId, {
+					...calcData,
+					score: manager.score,
+					rank: headline.rank,
+					livePoints: headline.livePoints,
+					liveNetPoints: headline.liveNetPoints,
+					liveTotalPoints: headline.liveTotalPoints,
+					overallRank: manager.score.overallRank ?? calcData.overallRank,
+				});
 			} catch (err) {
 				const message = err instanceof Error ? err.message : "Computation error";
 				errors.push({ entryId, message });
