@@ -227,9 +227,16 @@ const mapEntryPick = (params: {
 	const minutes = live?.minutes ?? 0;
 	const yellowCards = live?.yellowCards ?? 0;
 	const redCards = live?.redCards ?? 0;
-	const playerFixtures = fixtures.filter(
-		(fixture) => fixture.teamHId === eventTeamId || fixture.teamAId === eventTeamId
-	);
+	const playerFixtures = fixtures
+		.filter((fixture) => fixture.teamHId === eventTeamId || fixture.teamAId === eventTeamId)
+		.sort((left, right) => {
+			if (left.kickoffTime === null && right.kickoffTime !== null) return 1;
+			if (left.kickoffTime !== null && right.kickoffTime === null) return -1;
+			if (left.kickoffTime !== right.kickoffTime) {
+				return (left.kickoffTime ?? "").localeCompare(right.kickoffTime ?? "");
+			}
+			return left.id - right.id;
+		});
 	const fixtureOpponents = playerFixtures.map((fixture) => {
 		const wasHome = fixture.teamHId === eventTeamId;
 		const opponentId = wasHome ? fixture.teamAId : fixture.teamHId;
