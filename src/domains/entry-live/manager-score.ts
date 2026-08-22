@@ -50,7 +50,6 @@ export type OfficialManagerScoreRow =
 	ManagerLiveScoreRow | (Omit<ManagerLiveScoreRow, "source"> & { source: "FPL_FINAL_RESULT" });
 
 const REFRESH_SECONDS = 30;
-const STALE_SECONDS = Math.max(90, 3 * REFRESH_SECONDS);
 
 const ageSeconds = (checkedAt: string, now = Date.now()): number => {
 	const timestamp = Date.parse(checkedAt);
@@ -67,9 +66,10 @@ const plusSeconds = (iso: string, seconds: number): string => {
 const isWithinStaleWindow = (
 	row: Pick<OfficialManagerScoreRow, "checkedAt" | "staleAt">
 ): boolean => {
-	const expiry = Date.parse(row.staleAt);
-	if (Number.isFinite(expiry)) return Date.now() <= expiry;
-	return ageSeconds(row.checkedAt) <= STALE_SECONDS;
+	// staleAt is a freshness signal for the score state, not a hard deletion
+	// boundary. Keep the last official row until a newer official/final row
+	// replaces it; a temporary upstream miss must not erase the headline.
+	return Number.isFinite(Date.parse(row.checkedAt));
 };
 
 export async function loadManagerScores(
@@ -273,21 +273,29 @@ export const unavailableManagerScore = (transferCost = 0): LiveManagerScore =>
  */
 export function rankTournamentRowsByOfficialEventPoints<
 	T extends { entry: number; rank: number; score: LiveManagerScore },
->(rows: readonly T[]): T[] {
+>(rows: readonly T[], options: { useNet?: boolean } = {}): T[] {
+	const metric = (row: T): number | null =>
+		options.useNet
+			? typeof row.score.netEventPoints === "number" && row.score.eventPointSemantics !== "UNKNOWN"
+				? row.score.netEventPoints
+				: null
+			: typeof row.score.eventPoints === "number"
+				? row.score.eventPoints
+				: null;
 	const ranked = rows
 		.filter(
 			(row) =>
-				typeof row.score.eventPoints === "number" &&
+				metric(row) !== null &&
 				(row.score.source === "FPL_ENTRY_SUMMARY" ||
 					row.score.source === "FPL_CLASSIC_STANDINGS" ||
 					row.score.source === "FPL_FINAL_RESULT")
 		)
-		.sort((left, right) => (right.score.eventPoints ?? 0) - (left.score.eventPoints ?? 0));
+		.sort((left, right) => (metric(right) ?? 0) - (metric(left) ?? 0));
 	const ranks = new Map<number, number>();
 	let previousPoints: number | null = null;
 	let previousRank = 0;
 	for (let index = 0; index < ranked.length; index += 1) {
-		const points = ranked[index]?.score.eventPoints ?? 0;
+		const points = metric(ranked[index]!) ?? 0;
 		if (previousPoints === null || points !== previousPoints) previousRank = index + 1;
 		ranks.set(ranked[index]!.entry, previousRank);
 		previousPoints = points;

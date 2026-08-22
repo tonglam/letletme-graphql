@@ -11,7 +11,7 @@ import { metrics } from "./metrics";
 
 const MANAGER_LIVE_TIMEOUT_MS = 5_000;
 
-export type ManagerLiveSource = "FPL_ENTRY_SUMMARY" | "FPL_CLASSIC_STANDINGS";
+export type ManagerLiveSource = "FPL_ENTRY_SUMMARY" | "FPL_CLASSIC_STANDINGS" | "FPL_FINAL_RESULT";
 export type ManagerLiveTotalScope = "OVERALL" | "CLASSIC_PHASE";
 
 export type ManagerLiveScoreRow = {
@@ -74,7 +74,9 @@ const parseRow = (value: unknown): ManagerLiveScoreRow | null => {
 		!Number.isSafeInteger(value.eventId) ||
 		typeof value.checkedAt !== "string" ||
 		typeof value.revision !== "string" ||
-		(value.source !== "FPL_ENTRY_SUMMARY" && value.source !== "FPL_CLASSIC_STANDINGS") ||
+		(value.source !== "FPL_ENTRY_SUMMARY" &&
+			value.source !== "FPL_CLASSIC_STANDINGS" &&
+			value.source !== "FPL_FINAL_RESULT") ||
 		(value.totalScope !== "OVERALL" && value.totalScope !== "CLASSIC_PHASE") ||
 		typeof value.season !== "string" ||
 		typeof value.staleAt !== "string" ||

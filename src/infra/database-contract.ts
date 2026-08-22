@@ -248,6 +248,7 @@ export const validateDatabaseContract = async (
 			"fpl.phases",
 			"competition.public_league_trends",
 			"ops.dataset_publications",
+			"ops.dataset_publication_items",
 			"content.briefing_active_publication",
 			"content.publication_payloads",
 		]),

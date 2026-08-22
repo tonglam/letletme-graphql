@@ -184,12 +184,13 @@ describe("liveRepository live publication reads", () => {
 		expect(targeted.performances).toEqual([
 			expect.objectContaining({ playerId: 1, minutes: 90, totalPoints: 10 }),
 		]);
-		expect(targeted.meta.publishedAt).toBe(publicationManifest.publishedAt);
+		expect(targeted.meta).not.toBeNull();
+		expect(targeted.meta!.publishedAt).toBe(publicationManifest.publishedAt);
 		expect(full).toHaveLength(core.players.length);
 		expect(fullMeta).toMatchObject({
-			revision: targeted.meta.revision,
-			publicationId: targeted.meta.publicationId,
-			publishedAt: targeted.meta.publishedAt,
+			revision: targeted.meta!.revision,
+			publicationId: targeted.meta!.publicationId,
+			publishedAt: targeted.meta!.publishedAt,
 		});
 		expect(queryCount).toBe(0);
 	});

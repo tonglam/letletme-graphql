@@ -584,18 +584,22 @@ export const entryLiveBatchService = {
 		}
 
 		// Phase 2: load reusable data only for entries that actually have picks.
+		// Finalized and historical desks still need the durable player projection
+		// for detail rows. Only the manager headline switches to the official final
+		// result; suppressing this read made finalized entries silently lose details.
+		const needsLiveDetails = includeLive;
 		const useTargetedLiveRead =
-			includeLive && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
+			needsLiveDetails && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
 		const [liveByPlayerRaw, fixtures, teams, transfersByEntry, fullSnapshotMeta] =
 			await Promise.all([
 				prefetched?.liveByPlayer ??
-					(includeLive && !useTargetedLiveRead
+					(needsLiveDetails && !useTargetedLiveRead
 						? liveRepository.getAllLivePerformances(context, eventId)
 						: Promise.resolve(new Map<number, LivePerformance>())),
 				prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
 				prefetched?.teams ?? playersRepository.listTeams(context),
 				entryLiveRepository.getEntryEventTransfersByIds(context, readyEntryIds, eventId),
-				includeLive && !useTargetedLiveRead
+				needsLiveDetails && !useTargetedLiveRead
 					? loadLiveSnapshotMeta(context, eventId)
 					: Promise.resolve(null),
 			]);
@@ -614,11 +618,19 @@ export const entryLiveBatchService = {
 
 		// Load only the needed players via HMGET (not HGETALL of all 600+)
 		const playerIds = Array.from(allPlayerIds);
+		let targetedLiveError: Error | null = null;
 		const loadTargetedLive = async (): Promise<TargetedLiveRead | null> => {
 			if (!useTargetedLiveRead) return null;
 			const stopSnapshot = context.requestTiming?.start("entryLive.liveSnapshot");
 			try {
 				return await liveRepository.getTargetedLiveRead(context, eventId, playerIds);
+			} catch (error) {
+				targetedLiveError = error instanceof Error ? error : new Error("Live data unavailable");
+				context.logger.info(
+					{ eventId, err: error instanceof Error ? error.message : "unknown" },
+					"Targeted live read unavailable; marking entries partial"
+				);
+				return null;
 			} finally {
 				stopSnapshot?.();
 			}
@@ -666,6 +678,7 @@ export const entryLiveBatchService = {
 		// Phase 4: Compute per-entry (pure CPU, zero I/O)
 		for (const entryId of readyEntryIds) {
 			try {
+				if (targetedLiveError) throw targetedLiveError;
 				const perEntry: PerEntryData = {
 					entryId,
 					entry: entriesById.get(entryId) ?? null,
@@ -717,16 +730,17 @@ export const entryLiveBatchService = {
 					previousOverallPoints: perEntry.previousResult?.overallPoints ?? null,
 					nextRefreshAt: managerScores.nextRefreshAt,
 				});
-				// H2H is deliberately outside the official manager-live cutover. Keep
-				// its isolated legacy flat totals intact while the additive score
-				// contract reports the official H2H endpoint as unavailable.
+				// H2H has no official live matchup table. Its provisional result is
+				// safe only when the official manager row carries a provable net-point
+				// semantic; never compare gross/unknown values or local estimates.
+				const h2hHasOfficialNet =
+					manager.score.source !== "UNAVAILABLE" &&
+					typeof manager.score.netEventPoints === "number" &&
+					manager.score.eventPointSemantics !== "UNKNOWN";
 				const headline = legacyH2H
-					? {
-							rank: 0,
-							livePoints: calcData.livePoints,
-							liveNetPoints: calcData.liveNetPoints,
-							liveTotalPoints: calcData.liveTotalPoints,
-						}
+					? h2hHasOfficialNet
+						? manager.headline
+						: { rank: 0, livePoints: 0, liveNetPoints: 0, liveTotalPoints: 0 }
 					: manager.headline;
 				results.set(entryId, {
 					...calcData,

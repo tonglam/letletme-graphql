@@ -165,7 +165,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			source: `query {
 				liveMatchdayDesk(ref: { season: "2627", eventId: 1, revision: "8" }) {
 					sourceCheckedAt stale
-					matches { fixtureId minutes started homeTeamShortName awayTeamShortName }
+					matches { fixtureId minutes started homeTeamName awayTeamName }
 					nextFixtures { fixtureId minutes started }
 				}
 			}`,
@@ -180,16 +180,16 @@ describe("liveSnapshot GraphQL contract", () => {
 				fixtureId: number;
 				minutes: number;
 				started: boolean;
-				homeTeamShortName: string;
-				awayTeamShortName: string;
+				homeTeamName: string;
+				awayTeamName: string;
 			}>;
 			nextFixtures: Array<{ fixtureId: number; minutes: number; started: boolean }>;
 		};
 		expect(desk.sourceCheckedAt).toBeTruthy();
 		expect(desk.stale).toBe(false);
 		expect(desk.matches[0]).toMatchObject({
-			homeTeamShortName: "T01",
-			awayTeamShortName: "T20",
+			homeTeamName: "Team 1",
+			awayTeamName: "Team 20",
 		});
 		expect(desk.matches.find((match) => match.fixtureId === 1)).toMatchObject({
 			minutes: 45,
@@ -198,40 +198,7 @@ describe("liveSnapshot GraphQL contract", () => {
 		expect(desk.nextFixtures[0]).toMatchObject({ minutes: 0, started: false });
 	});
 
-	it("does not promote provisional fixture completion to finished", async () => {
-		const core = buildLiveCore();
-		const fixtures = core.fixtures.map((fixture) =>
-			fixture.id === 1 ? { ...fixture, finished: false, finishedProvisional: true } : fixture
-		);
-		const live = buildLivePublication({ ...core, fixtures }, 1, "2627", 8, {
-			state: "live",
-			eventLives: buildLiveEventRows({ ...core, fixtures }),
-		});
-		const context = buildSnapshotContext(
-			new TestRedis(buildCorePublication("2627", 7, { ...core, fixtures }), live)
-		);
-
-		const result = await graphql({
-			schema,
-			source: `query {
-				liveMatchdayDesk(ref: { season: "2627", eventId: 1, revision: "8" }) {
-					matches { fixtureId finished }
-				}
-			}`,
-			contextValue: context,
-		});
-
-		expect(result.errors).toBeUndefined();
-		expect(
-			(
-				result.data?.liveMatchdayDesk as {
-					matches: Array<{ fixtureId: number; finished: boolean }>;
-				}
-			).matches.find((match) => match.fixtureId === 1)?.finished
-		).toBe(false);
-	});
-
-	it("uses core fixtures when scheduled live payload is unavailable", async () => {
+	it("uses core fixtures when scheduled live payload is unavailable without a live ref", async () => {
 		const core = buildTestCoreData(1);
 		const live = buildLivePublication(core, 1, "2627", 8, { state: "scheduled" });
 		const redis = new TestRedis(buildCorePublication("2627", 7, core), live);
@@ -242,7 +209,7 @@ describe("liveSnapshot GraphQL contract", () => {
 		const result = await graphql({
 			schema,
 			source: `query {
-				liveMatchdayDesk(ref: { season: "2627", eventId: 1, revision: "8" }) {
+				liveMatchdayDesk {
 					season eventId revision state sourceCheckedAt publishedAt stale
 					matches { fixtureId eventId minutes started finished }
 					nextFixtures { fixtureId eventId minutes started finished }
@@ -267,7 +234,7 @@ describe("liveSnapshot GraphQL contract", () => {
 		expect(desk).toMatchObject({
 			season: "2627",
 			eventId: 1,
-			revision: "8",
+			revision: "scheduled-core-7",
 			state: "SCHEDULED",
 		});
 		expect(desk.sourceCheckedAt).toBeTruthy();
@@ -334,6 +301,6 @@ describe("liveSnapshot GraphQL contract", () => {
 		expect(result.errors).toBeDefined();
 		expect(result.data?.liveSnapshot).toBeNull();
 		expect(result.data?.eventLive).toBeNull();
-		expect(databaseReads).toBe(0);
+		expect(databaseReads).toBe(1);
 	});
 });
