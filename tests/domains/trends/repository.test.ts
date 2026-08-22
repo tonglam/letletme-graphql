@@ -80,6 +80,14 @@ describe("Trends revisioned cache", () => {
 });
 
 describe("Trends private access", () => {
+	type TestTrendSection = {
+		rows: Array<{ percentage: number | null }> | null;
+		evidenceContext: {
+			denominator: number | null;
+			limitations: string[];
+		};
+	};
+
 	const snapshotCohort = {
 		tournament_id: 7,
 		display_name: "Example",
@@ -161,8 +169,9 @@ describe("Trends private access", () => {
 			12,
 			"MINE"
 		);
-		const section = payload.sections.find((item) => item.capability === "OWNERSHIP");
-		const firstRow = section?.rows?.[0] as { percentage: number | null } | undefined;
+		const section = payload.sections.find((item) => item.capability === "OWNERSHIP") as
+			TestTrendSection | undefined;
+		const firstRow = section?.rows?.[0];
 
 		expect(section?.evidenceContext.denominator).toBe(6);
 		expect(firstRow?.percentage).toBe(50);
@@ -176,7 +185,8 @@ describe("Trends private access", () => {
 			12,
 			"MINE"
 		);
-		const section = payload.sections.find((item) => item.capability === "PERSONAL_EXPOSURE");
+		const section = payload.sections.find((item) => item.capability === "PERSONAL_EXPOSURE") as
+			TestTrendSection | undefined;
 
 		expect(section).toMatchObject({
 			state: "PARTIAL",

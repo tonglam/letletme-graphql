@@ -53,6 +53,7 @@ describe("Home GraphQL contracts", () => {
 				observedDays: 1,
 				firstDate: "2026-08-14",
 				latestDate: "2026-08-14",
+				missingDates: [],
 				capturedAt: "2026-08-14T00:00:00.000Z",
 				complete: false,
 				stale: false,
@@ -61,6 +62,7 @@ describe("Home GraphQL contracts", () => {
 			transferMovers: [],
 			availabilityUpdates: availability,
 			availabilityHighlights: [],
+			availabilityEvidence: availability,
 			newPlayers: [],
 			priceChanges: [],
 		} satisfies MarketPulse;
