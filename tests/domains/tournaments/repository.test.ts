@@ -2076,6 +2076,85 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 });
 
 describe("tournamentsRepository.getEntryTournaments", () => {
+	it("lists all tournaments for a verified platform administrator without a membership filter", async () => {
+		const readTables: string[] = [];
+		let idFilterCalls = 0;
+		const infoQuery = {
+			select() {
+				return infoQuery;
+			},
+			in() {
+				idFilterCalls += 1;
+				return infoQuery;
+			},
+			async order() {
+				return { data: [], error: null };
+			},
+		};
+		const context = {
+			dataRevision: undefined,
+			data: {
+				read(table: string) {
+					readTables.push(table);
+					return infoQuery;
+				},
+			},
+			principal: {
+				userId: "platform-admin",
+				source: "website",
+				fplEntryId: 6953,
+				fplEntryVerifiedAt: "2026-08-21T00:00:00.000Z",
+				platformAdmin: true,
+			},
+			logger: {
+				error() {
+					return undefined;
+				},
+				warn() {
+					return undefined;
+				},
+			},
+		} as unknown as GraphQLContext;
+
+		expect(await tournamentsRepository.getEntryTournaments(context, 6953)).toEqual([]);
+		expect(readTables).toEqual(["competition.tournaments"]);
+		expect(idFilterCalls).toBe(0);
+	});
+
+	it("does not add the tournament owner predicate for a verified platform administrator", async () => {
+		const filters: Array<[string, unknown]> = [];
+		const query = {
+			select() {
+				return query;
+			},
+			eq(column: string, value: unknown) {
+				filters.push([column, value]);
+				return query;
+			},
+			async limit() {
+				return { data: [], error: null };
+			},
+		};
+		const context = {
+			data: { read: () => query },
+			principal: {
+				userId: "platform-admin",
+				source: "website",
+				fplEntryId: 6953,
+				fplEntryVerifiedAt: "2026-08-21T00:00:00.000Z",
+				platformAdmin: true,
+			},
+			logger: {
+				error() {
+					return undefined;
+				},
+			},
+		} as unknown as GraphQLContext;
+
+		expect(await tournamentsRepository.getManagedTournament(context, 9, 6953)).toBeNull();
+		expect(filters).toEqual([["id", 9]]);
+	});
+
 	it("caches setup-era tournament metadata only for a short TTL", async () => {
 		const updatedAt = "2026-04-21T00:00:00.000Z";
 		const row: DbTournamentInfoRow = {

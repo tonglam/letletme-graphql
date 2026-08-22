@@ -7,6 +7,8 @@ import {
 	getCoreLiveIdentitySnapshot,
 	getLiveDataPublicationManifest,
 	getLiveDataSnapshot,
+	type CoreEventSnapshot,
+	type CoreFixtureSnapshot,
 	type CoreLiveIdentitySnapshot,
 	type LiveDataSnapshot,
 } from "../../infra/data-snapshot";
@@ -55,13 +57,32 @@ const resolveSnapshot = async (
 const teamName = (core: Pick<CoreLiveIdentitySnapshot, "teams">, id: number): string =>
 	core.teams.find((team) => team.id === id)?.name ?? "";
 
+const liveContextState = (
+	publicationState: "active" | "scheduled" | "live" | "settled",
+	currentEvent: { finished?: boolean; dataChecked?: boolean } | null | undefined
+) => {
+	switch (publicationState) {
+		case "live":
+			return "LIVE_ACTIVE" as const;
+		case "settled":
+			return currentEvent?.finished && currentEvent.dataChecked
+				? ("FINALIZED" as const)
+				: ("GW_REVIEW" as const);
+		case "active":
+		case "scheduled":
+		default:
+			return "SCHEDULED" as const;
+	}
+};
+
 const matchRows = (
-	snapshot: Pick<LiveDataSnapshot, "eventId" | "fixtures">,
+	eventId: number,
+	fixtures: LiveDataSnapshot["fixtures"],
 	core: Pick<CoreLiveIdentitySnapshot, "teams">
 ) =>
-	snapshot.fixtures.map((fixture) => ({
+	fixtures.map((fixture) => ({
 		fixtureId: fixture.id,
-		eventId: snapshot.eventId,
+		eventId,
 		homeTeamId: fixture.teamHId,
 		homeTeamName: teamName(core, fixture.teamHId),
 		awayTeamId: fixture.teamAId,
@@ -69,9 +90,41 @@ const matchRows = (
 		homeScore: fixture.teamHScore,
 		awayScore: fixture.teamAScore,
 		kickoffTime: fixture.kickoffTime,
+		minutes: fixture.minutes,
 		started: fixture.started === true,
 		finished: fixture.finished || fixture.finishedProvisional,
 	}));
+
+const scheduledMatchdayDesk = (
+	eventCore: CoreEventSnapshot,
+	fixtureCore: CoreFixtureSnapshot,
+	eventId: number,
+	manifest: Awaited<ReturnType<typeof getLiveDataPublicationManifest>>
+) => {
+	const nextEventId = eventCore.events.find((event) => event.isNext)?.id ?? null;
+	return {
+		season: fixtureCore.seasonCode,
+		eventId,
+		revision: manifest ? String(manifest.revision) : `scheduled-core-${fixtureCore.revision}`,
+		state: "SCHEDULED" as const,
+		// Keep the non-null GraphQL contract without pretending that core data is
+		// a live publication. This timestamp is only used for freshness display.
+		publishedAt: manifest?.publishedAt ?? fixtureCore.sourceCheckedAt,
+		matches: matchRows(
+			eventId,
+			fixtureCore.fixtures.filter((fixture) => fixture.eventId === eventId),
+			fixtureCore
+		),
+		nextFixtures: nextEventId
+			? matchRows(
+					nextEventId,
+					fixtureCore.fixtures.filter((fixture) => fixture.eventId === nextEventId),
+					fixtureCore
+				)
+			: [],
+		highlights: [],
+	};
+};
 
 const assertMember = async (context: GraphQLContext, tournamentId: number, entryId: number) => {
 	const tournament = await tournamentsService.getTournamentForMember(
@@ -133,15 +186,7 @@ export const liveDesksResolvers = {
 				currentEventId: eventId,
 				nextEventId: core.events.find((event) => event.isNext)?.id ?? null,
 				liveRevision: current ? String(current.revision) : null,
-				state: current
-					? current.state === "active"
-						? "LIVE_ACTIVE"
-						: current.state === "settled"
-							? currentEvent?.finished && currentEvent.dataChecked
-								? "FINALIZED"
-								: "GW_REVIEW"
-							: "SCHEDULED"
-					: "SCHEDULED",
+				state: current ? liveContextState(current.state, currentEvent) : "SCHEDULED",
 				sourceCheckedAt: current?.sourceCheckedAt ?? null,
 				publishedAt: current?.publishedAt ?? null,
 				source: current ? "REDIS" : null,
@@ -153,10 +198,36 @@ export const liveDesksResolvers = {
 			args: { ref?: LiveRef | null },
 			context: GraphQLContext
 		) => {
-			const [{ snapshot, core }, fixtureCore, eventCore] = await Promise.all([
+			if (args.ref && args.ref.season !== context.currentSeason.seasonCode) {
+				throw new GraphQLError("Live revision belongs to another season", {
+					extensions: { code: "LIVE_REVISION_GONE" },
+				});
+			}
+			const eventCore = await getCoreEventSnapshot(context);
+			const eventId = args.ref?.eventId ?? eventCore.currentEventId ?? 0;
+			const manifest = eventId > 0 ? await getLiveDataPublicationManifest(context, eventId) : null;
+			const currentEvent = eventCore.events.find((event) => event.id === eventId);
+			const lifecycleState = manifest
+				? liveContextState(manifest.state, currentEvent)
+				: "SCHEDULED";
+
+			if (lifecycleState === "SCHEDULED") {
+				if (args.ref && (!manifest || String(manifest.revision) !== args.ref.revision)) {
+					throw new GraphQLError("Requested live revision has expired", {
+						extensions: { code: "LIVE_REVISION_GONE" },
+					});
+				}
+				return scheduledMatchdayDesk(
+					eventCore,
+					await getCoreFixtureSnapshot(context),
+					eventId,
+					manifest
+				);
+			}
+
+			const [{ snapshot, core }, fixtureCore] = await Promise.all([
 				resolveSnapshot(context, args.ref),
 				getCoreFixtureSnapshot(context),
-				getCoreEventSnapshot(context),
 			]);
 			const nextEventId = eventCore.events.find((event) => event.isNext)?.id ?? null;
 			return {
@@ -165,14 +236,11 @@ export const liveDesksResolvers = {
 				revision: snapshot.revision,
 				state: snapshot.state.toUpperCase(),
 				publishedAt: snapshot.publishedAt,
-				matches: matchRows(snapshot, core),
+				matches: matchRows(snapshot.eventId, snapshot.fixtures, core),
 				nextFixtures: nextEventId
 					? matchRows(
-							{
-								...snapshot,
-								eventId: nextEventId,
-								fixtures: fixtureCore.fixtures.filter((fixture) => fixture.eventId === nextEventId),
-							},
+							nextEventId,
+							fixtureCore.fixtures.filter((fixture) => fixture.eventId === nextEventId),
 							fixtureCore
 						)
 					: [],
