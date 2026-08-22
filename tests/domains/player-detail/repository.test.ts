@@ -10,20 +10,55 @@ import {
 type TableRows = Record<string, unknown[]>;
 
 const queryBuilder = (rows: unknown[]) => {
-	const result = { data: rows, error: null };
+	let selectedRows = [...rows];
 	const builder = {
 		select: () => builder,
-		eq: () => builder,
-		lte: () => builder,
-		in: () => builder,
+		eq: (column: string, value: unknown) => {
+			selectedRows = selectedRows.filter((row) => {
+				const actual = (row as Record<string, unknown>)[column];
+				return actual === undefined || actual === value || String(actual) === String(value);
+			});
+			return builder;
+		},
+		lte: (column: string, value: unknown) => {
+			selectedRows = selectedRows.filter((row) => {
+				const actual = (row as Record<string, unknown>)[column];
+				return actual === undefined || Number(actual) <= Number(value);
+			});
+			return builder;
+		},
+		in: (column: string, values: unknown[]) => {
+			selectedRows = selectedRows.filter((row) =>
+				values.some((value) => {
+					const actual = (row as Record<string, unknown>)[column];
+					return actual === undefined || actual === value || String(actual) === String(value);
+				})
+			);
+			return builder;
+		},
 		or: () => builder,
-		order: () => builder,
-		limit: () => builder,
-		range: () => builder,
-		then: <TResult1 = typeof result, TResult2 = never>(
-			onfulfilled?: ((value: typeof result) => TResult1 | PromiseLike<TResult1>) | null,
+		order: (column: string, options?: { ascending?: boolean }) => {
+			selectedRows.sort((left, right) => {
+				const leftValue = (left as Record<string, unknown>)[column];
+				const rightValue = (right as Record<string, unknown>)[column];
+				const comparison = String(leftValue ?? "").localeCompare(String(rightValue ?? ""));
+				return options?.ascending === false ? -comparison : comparison;
+			});
+			return builder;
+		},
+		limit: (count: number) => {
+			selectedRows = selectedRows.slice(0, count);
+			return builder;
+		},
+		range: (from: number, to: number) => {
+			selectedRows = selectedRows.slice(from, to + 1);
+			return builder;
+		},
+		then: <TResult1 = { data: unknown[]; error: null }, TResult2 = never>(
+			onfulfilled?:
+				((value: { data: unknown[]; error: null }) => TResult1 | PromiseLike<TResult1>) | null,
 			onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
-		) => Promise.resolve(result).then(onfulfilled, onrejected),
+		) => Promise.resolve({ data: selectedRows, error: null }).then(onfulfilled, onrejected),
 	};
 	return builder;
 };
@@ -86,12 +121,46 @@ function createContext(args: {
 						: team
 		),
 	};
+	const explicitSnapshotRows = args.tables["fpl.player_event_snapshots"] ?? [];
+	const maxPublishedEvent = Math.max(
+		0,
+		...core.events.filter((event) => event.finished || event.isCurrent).map((event) => event.id)
+	);
+	const snapshotRows = Array.from({ length: maxPublishedEvent }, (_, eventIndex) =>
+		core.players.map((player) => {
+			const eventId = eventIndex + 1;
+			const override = explicitSnapshotRows.find(
+				(row) =>
+					Number((row as { element_id?: unknown }).element_id) === player.id &&
+					Number((row as { event_id?: unknown }).event_id) === eventId
+			) as Record<string, unknown> | undefined;
+			return {
+				element_id: player.id,
+				event_id: eventId,
+				total_points: 0,
+				...override,
+			};
+		})
+	).flat();
+	const publicationRows = Array.from({ length: maxPublishedEvent }, (_, eventIndex) => ({
+		event_id: eventIndex + 1,
+		revision: "11",
+		source_checked_at: new Date().toISOString(),
+		published_at: new Date().toISOString(),
+		row_count: core.players.length,
+		expected_row_count: core.players.length,
+		baseline_verified_at: new Date().toISOString(),
+	}));
 	const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
 		dataRevision: "core-7",
 	});
 	context.data = {
 		read: (table: string) => {
 			fromCalls.push(table);
+			if (table === "fpl.player_event_snapshots") return queryBuilder(snapshotRows);
+			if (table === "fpl.player_event_snapshot_publications") {
+				return queryBuilder(args.tables[table] ?? publicationRows);
+			}
 			return queryBuilder(args.tables[table] ?? []);
 		},
 	} as never;
@@ -196,6 +265,12 @@ describe("playerDetailRepository", () => {
 			scope: "UNAVAILABLE",
 			season: "2627",
 			asOfEventId: null,
+			status: "UNAVAILABLE",
+			revision: null,
+			sourceCheckedAt: null,
+			publishedAt: null,
+			rowCount: 0,
+			expectedRowCount: 0,
 		});
 		expect(detail?.totalPoints).toBeNull();
 		expect(detail?.form).toBeNull();
@@ -243,10 +318,14 @@ describe("playerDetailRepository", () => {
 
 		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
 
-		expect(detail?.statsContext).toEqual({
+		expect(detail?.statsContext).toMatchObject({
 			scope: "CURRENT_SEASON",
 			season: "2627",
 			asOfEventId: 3,
+			status: "AVAILABLE",
+			revision: "11",
+			rowCount: 220,
+			expectedRowCount: 220,
 		});
 		expect(detail?.recentGameweeks[0]?.provisional).toBe(true);
 	});
@@ -330,10 +409,14 @@ describe("playerDetailRepository", () => {
 
 		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
 
-		expect(detail?.statsContext).toEqual({
+		expect(detail?.statsContext).toMatchObject({
 			scope: "CURRENT_SEASON",
 			season: "2627",
 			asOfEventId: 3,
+			status: "AVAILABLE",
+			revision: "11",
+			rowCount: 220,
+			expectedRowCount: 220,
 		});
 		expect(detail).toMatchObject({
 			totalPoints: 55,

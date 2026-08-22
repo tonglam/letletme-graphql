@@ -28,6 +28,14 @@ import {
 
 type LiveRef = { season: string; eventId: number; revision: string };
 
+const LIVE_STALE_AFTER_MS = 60_000;
+
+const isStale = (sourceCheckedAt: string | null | undefined): boolean => {
+	if (!sourceCheckedAt) return true;
+	const checkedAt = Date.parse(sourceCheckedAt);
+	return !Number.isFinite(checkedAt) || Date.now() - checkedAt > LIVE_STALE_AFTER_MS;
+};
+
 const resolveSnapshot = async (
 	context: GraphQLContext,
 	ref?: LiveRef | null
@@ -57,24 +65,26 @@ const resolveSnapshot = async (
 const teamName = (core: Pick<CoreLiveIdentitySnapshot, "teams">, id: number): string =>
 	core.teams.find((team) => team.id === id)?.name ?? "";
 
+const teamShortName = (core: Pick<CoreLiveIdentitySnapshot, "teams">, id: number): string =>
+	core.teams.find((team) => team.id === id)?.shortName ?? "";
+
 const liveContextState = (
 	publicationState: "active" | "scheduled" | "live" | "settled",
 	currentEvent: { finished?: boolean; dataChecked?: boolean } | null | undefined
 ) => {
 	switch (publicationState) {
 		case "live":
+		case "active":
 			return "LIVE_ACTIVE" as const;
 		case "settled":
 			return currentEvent?.finished && currentEvent.dataChecked
 				? ("FINALIZED" as const)
 				: ("GW_REVIEW" as const);
-		case "active":
 		case "scheduled":
 		default:
 			return "SCHEDULED" as const;
 	}
 };
-
 const matchRows = (
 	eventId: number,
 	fixtures: LiveDataSnapshot["fixtures"],
@@ -85,8 +95,10 @@ const matchRows = (
 		eventId,
 		homeTeamId: fixture.teamHId,
 		homeTeamName: teamName(core, fixture.teamHId),
+		homeTeamShortName: teamShortName(core, fixture.teamHId),
 		awayTeamId: fixture.teamAId,
 		awayTeamName: teamName(core, fixture.teamAId),
+		awayTeamShortName: teamShortName(core, fixture.teamAId),
 		homeScore: fixture.teamHScore,
 		awayScore: fixture.teamAScore,
 		kickoffTime: fixture.kickoffTime,
@@ -107,9 +119,11 @@ const scheduledMatchdayDesk = (
 		eventId,
 		revision: manifest ? String(manifest.revision) : `scheduled-core-${fixtureCore.revision}`,
 		state: "SCHEDULED" as const,
+		sourceCheckedAt: manifest?.sourceCheckedAt ?? fixtureCore.sourceCheckedAt,
 		// Keep the non-null GraphQL contract without pretending that core data is
 		// a live publication. This timestamp is only used for freshness display.
 		publishedAt: manifest?.publishedAt ?? fixtureCore.sourceCheckedAt,
+		stale: isStale(manifest?.sourceCheckedAt ?? fixtureCore.sourceCheckedAt),
 		matches: matchRows(
 			eventId,
 			fixtureCore.fixtures.filter((fixture) => fixture.eventId === eventId),
@@ -189,8 +203,8 @@ export const liveDesksResolvers = {
 				state: current ? liveContextState(current.state, currentEvent) : "SCHEDULED",
 				sourceCheckedAt: current?.sourceCheckedAt ?? null,
 				publishedAt: current?.publishedAt ?? null,
-				source: current ? "REDIS" : null,
-				stale: false,
+				source: current ? (isStale(current.sourceCheckedAt) ? "STALE" : "REDIS") : null,
+				stale: isStale(current?.sourceCheckedAt),
 			};
 		},
 		liveMatchdayDesk: async (
@@ -235,7 +249,9 @@ export const liveDesksResolvers = {
 				eventId: snapshot.eventId,
 				revision: snapshot.revision,
 				state: snapshot.state.toUpperCase(),
+				sourceCheckedAt: snapshot.sourceCheckedAt,
 				publishedAt: snapshot.publishedAt,
+				stale: isStale(snapshot.sourceCheckedAt),
 				matches: matchRows(snapshot.eventId, snapshot.fixtures, core),
 				nextFixtures: nextEventId
 					? matchRows(

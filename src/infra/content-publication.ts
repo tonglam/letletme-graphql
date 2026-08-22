@@ -22,7 +22,8 @@ export function getBriefingReaderMetrics(): Readonly<typeof briefingReaderMetric
 	return { ...briefingReaderMetrics };
 }
 
-export type BriefingState = "READY" | "EMPTY" | "STALE" | "OFFSEASON" | "UNAVAILABLE" | "REMOVED";
+export type BriefingState =
+	"READY" | "EMPTY" | "STALE" | "OFFSEASON" | "NOT_PUBLISHED" | "UNAVAILABLE" | "REMOVED";
 export type BriefingLocale = "en" | "zh-CN";
 
 export type BriefingStoryCard = {
@@ -169,6 +170,7 @@ export function parseBriefingWeekPayload(
 		value.state !== "EMPTY" &&
 		value.state !== "STALE" &&
 		value.state !== "OFFSEASON" &&
+		value.state !== "NOT_PUBLISHED" &&
 		value.state !== "UNAVAILABLE" &&
 		value.state !== "REMOVED"
 	)
@@ -307,6 +309,25 @@ const unavailable = (state: BriefingState = "UNAVAILABLE"): BriefingWeekRead => 
 	event: null,
 });
 
+async function hasCurrentOrNextEvent(database: QueryExecutor): Promise<boolean> {
+	try {
+		const result = await database.query<{ exists: boolean }>(
+			`SELECT EXISTS (
+				SELECT 1
+				FROM fpl.events event
+				JOIN fpl.seasons season ON season.season_id = event.season_id
+				WHERE season.is_current AND (event.is_current OR event.is_next)
+			) AS exists`
+		);
+		return result.rows[0]?.exists === true;
+	} catch {
+		// Content publication must fail closed as NOT_PUBLISHED when lifecycle
+		// metadata cannot be read; only a confirmed empty event context is
+		// allowed to produce OFFSEASON.
+		return true;
+	}
+}
+
 export async function readBriefingWeek(
 	database: QueryExecutor,
 	redis: Redis,
@@ -318,7 +339,10 @@ export async function readBriefingWeek(
 	} catch {
 		return unavailable();
 	}
-	if (!metadata) return unavailable("OFFSEASON");
+	if (!metadata)
+		return (await hasCurrentOrNextEvent(database))
+			? unavailable("NOT_PUBLISHED")
+			: unavailable("OFFSEASON");
 	if (!metadata.servable) {
 		return {
 			...unavailable(metadata.state),

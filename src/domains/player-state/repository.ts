@@ -8,6 +8,10 @@ import {
 	type CoreDataSnapshot,
 	type CoreFixtureData,
 } from "../../infra/data-snapshot";
+import {
+	resolvePlayerStatsContext,
+	type PlayerStatsSnapshotStatus,
+} from "../players/season-stats-at-event";
 import { deleteQueryCache, writeQueryCache } from "../../infra/query-cache";
 import {
 	assessAvailability,
@@ -57,6 +61,7 @@ export type QueryExecutor = DatabaseQueryExecutor;
 type PlayerStateRepositoryDependencies = Readonly<{
 	executor?: QueryExecutor;
 	loadCoreSnapshot?: (context: GraphQLContext) => Promise<CoreDataSnapshot>;
+	resolveStatsContext?: typeof resolvePlayerStatsContext;
 }>;
 
 type MarketRow = QueryResultRow & {
@@ -1303,6 +1308,30 @@ const buildSeasonTimeline = (
 	return points.sort((left, right) => right.season.localeCompare(left.season));
 };
 
+const maskCurrentSeasonTimeline = (
+	timeline: PlayerSeasonTimelinePoint[],
+	currentSeason: string,
+	status: PlayerStatsSnapshotStatus
+): PlayerSeasonTimelinePoint[] => {
+	if (status === "AVAILABLE") return timeline;
+	const reasonCode = `FPL_CURRENT_STATS_${status}`;
+	return timeline.map((point) => {
+		if (point.season !== currentSeason) return point;
+		return {
+			...point,
+			fplTotalPoints: null,
+			signals: point.signals.map((signal) => ({
+				...signal,
+				value: null,
+				analysisStatus: "UNAVAILABLE" as const,
+				reasonCodes: [
+					...new Set([...signal.reasonCodes, "FPL_SEASON_ROW_UNAVAILABLE", reasonCode]),
+				],
+			})),
+		};
+	});
+};
+
 const addUnderstatHistory = (
 	history: PlayerHistory,
 	processPercentiles: Map<string, number>
@@ -1754,6 +1783,9 @@ export const createPlayerStateRepository = (
 
 		const loadSnapshot = dependencies.loadCoreSnapshot ?? getCoreDataSnapshot;
 		const snapshot = preload?.snapshot ?? (await loadSnapshot(context));
+		const statsContext = await (dependencies.resolveStatsContext ?? resolvePlayerStatsContext)(
+			context
+		);
 		const player = snapshot.players.find((candidate) => candidate.id === playerId);
 		if (!player) {
 			await writeNullCache(context, key);
@@ -1761,7 +1793,7 @@ export const createPlayerStateRepository = (
 		}
 		const seasonId = context.currentSeason.seasonId;
 		const season = context.currentSeason.seasonCode;
-		const asOfEventId = resolveAsOfEventId(snapshot);
+		const asOfEventId = statsContext.asOfEventId ?? resolveAsOfEventId(snapshot);
 		const startedEventIds = snapshot.events
 			.filter(
 				(event) =>
@@ -1777,14 +1809,17 @@ export const createPlayerStateRepository = (
 			(await loadSharedProfileData(context, executor, [player.code], [player.id], seasonId));
 		const currentMarket = shared.marketById.get(playerId) ?? null;
 		const seasonRows = shared.seasonRowsByCode.get(player.code) ?? [];
-		const currentCohortRows = await loadCurrentCohort(
-			context,
-			executor,
-			seasonId,
-			player.type,
-			asOfEventId !== null,
-			startedEventIds
-		);
+		const currentCohortRows: CurrentCohort =
+			statsContext.status === "AVAILABLE"
+				? await loadCurrentCohort(
+						context,
+						executor,
+						seasonId,
+						player.type,
+						asOfEventId !== null,
+						startedEventIds
+					)
+				: { peerRows: [], gameweekRows: [] };
 		const currentRow = seasonRows.find((row) => row.season_code === season) ?? null;
 		const mappingStatus = (currentRow?.understat_mapping_status ??
 			"UNAVAILABLE") as PlayerStateMappingStatus;
@@ -1793,12 +1828,16 @@ export const createPlayerStateRepository = (
 			historyForPlayerStateRows(seasonRows, player.code, season),
 			processResult.historyPercentiles
 		);
-		const seasonTimeline = buildSeasonTimeline(
-			seasonRows,
-			player.code,
+		const seasonTimeline = maskCurrentSeasonTimeline(
+			buildSeasonTimeline(
+				seasonRows,
+				player.code,
+				season,
+				player.type,
+				context.currentSeason.lifecycleState
+			),
 			season,
-			player.type,
-			context.currentSeason.lifecycleState
+			statsContext.status
 		);
 		const samples = toGameweekSamples(startedEventIds, currentCohortRows.gameweekRows, playerId);
 		const recentWindow = samples.slice(0, 5);
@@ -1856,6 +1895,7 @@ export const createPlayerStateRepository = (
 		});
 		const process = processResult.assessment;
 		const fplSufficient =
+			statsContext.status === "AVAILABLE" &&
 			recentSamples.length >= MINIMUM_CURRENT_GAMEWEEKS &&
 			recentWindowComplete &&
 			currentPlayer !== null &&
@@ -2049,22 +2089,25 @@ export const createPlayerStateRepository = (
 		]);
 		const asOf =
 			latestIso([
+				statsContext.sourceCheckedAt,
 				snapshot.sourceCheckedAt,
 				marketCapturedAt,
 				understatAsOf,
 				datasetRevision.refreshedAt,
 			]) ?? new Date(0).toISOString();
-		const fplCurrentAvailable = currentRow !== null;
+		const fplCurrentAvailable = statsContext.status === "AVAILABLE" && currentRow !== null;
 		const currentLifecycleState =
 			context.currentSeason.lifecycleState ?? currentRow?.lifecycle_state;
 		const fplCurrentAnalysis: PlayerStateAnalysisStatus =
-			currentRow === null
-				? "UNAVAILABLE"
-				: currentLifecycleState === "preseason" || currentLifecycleState === "reference_only"
-					? "PRESEASON"
-					: fplSufficient
-						? "READY"
-						: "INSUFFICIENT";
+			statsContext.status === "PRESEASON"
+				? "PRESEASON"
+				: statsContext.status !== "AVAILABLE" || currentRow === null
+					? "UNAVAILABLE"
+					: currentLifecycleState === "preseason" || currentLifecycleState === "reference_only"
+						? "PRESEASON"
+						: fplSufficient
+							? "READY"
+							: "INSUFFICIENT";
 		const understatCurrentAvailable =
 			currentRow?.understat_mapping_status === "VERIFIED" &&
 			currentRow.understat_player_id !== null &&
@@ -2086,8 +2129,8 @@ export const createPlayerStateRepository = (
 				provider: "FPL",
 				scope: "CURRENT",
 				seasons: fplCurrentAvailable ? [season] : [],
-				revision: `${snapshot.revision}:${snapshot.publicationId}`,
-				asOf: snapshot.sourceCheckedAt,
+				revision: statsContext.revision,
+				asOf: statsContext.sourceCheckedAt,
 				dataStatus: fplCurrentAvailable ? "AVAILABLE" : "UNAVAILABLE",
 				analysisStatus: fplCurrentAnalysis,
 				mappingStatus: "NOT_APPLICABLE",
@@ -2095,7 +2138,7 @@ export const createPlayerStateRepository = (
 					fplCurrentAnalysis === "PRESEASON"
 						? ["FPL_CURRENT_PRESEASON"]
 						: fplCurrentAnalysis === "UNAVAILABLE"
-							? ["FPL_CURRENT_NO_SEASON_ROW"]
+							? [`FPL_CURRENT_STATS_${statsContext.status}`]
 							: fplSufficient
 								? []
 								: ["FPL_CURRENT_INSUFFICIENT"],
