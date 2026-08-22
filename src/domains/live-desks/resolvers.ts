@@ -84,21 +84,18 @@ const livePublicationState = (
 	manifest && manifest.state !== "active" ? manifest.state : null;
 
 const readLiveWindow = async (context: GraphQLContext) => {
-	const [eventCore, fixtureCore, core] = await Promise.all([
+	const [eventCore, fixtureCore] = await Promise.all([
 		getCoreEventSnapshot(context),
 		getCoreFixtureSnapshot(context),
-		getCoreLiveIdentitySnapshot(context),
 	]);
 	const currentEventId = eventCore.currentEventId;
-	const currentPublication = currentEventId
-		? await getLiveDataPublicationManifestWithSource(context, currentEventId).catch(() => null)
-		: null;
-	const currentLifecycle = currentEventId
-		? await getLiveLifecycleStatus(context, currentEventId)
-		: null;
-	const currentSnapshot = currentEventId
-		? await getLiveDataSnapshot(context, currentEventId).catch(() => null)
-		: null;
+	const [currentPublication, currentLifecycle, currentSnapshot] = currentEventId
+		? await Promise.all([
+				getLiveDataPublicationManifestWithSource(context, currentEventId).catch(() => null),
+				getLiveLifecycleStatus(context, currentEventId),
+				getLiveDataSnapshot(context, currentEventId).catch(() => null),
+			])
+		: [null, null, null];
 	const currentManifest = currentPublication?.manifest ?? null;
 	const currentFixtures = mergeLiveSnapshotFixtures(fixtureCore.fixtures, currentSnapshot);
 	const initialWindow = resolveLiveWindow({
@@ -108,6 +105,7 @@ const readLiveWindow = async (context: GraphQLContext) => {
 		nextEventId: eventCore.events.find((event) => event.isNext)?.id ?? null,
 		liveRevision:
 			currentSnapshot?.revision ?? (currentManifest ? String(currentManifest.revision) : null),
+		publicationId: currentSnapshot?.publicationId ?? currentManifest?.publicationId ?? null,
 		liveEventId: currentSnapshot?.eventId ?? (currentManifest ? currentEventId : null),
 		publicationState: currentSnapshot?.state ?? livePublicationState(currentManifest),
 		sourceCheckedAt:
@@ -118,7 +116,11 @@ const readLiveWindow = async (context: GraphQLContext) => {
 		source: currentPublication?.source ?? fixtureCore.source,
 		lifecycleEventId: currentLifecycle?.eventId ?? null,
 		lifecycleState: currentLifecycle?.state ?? null,
+		lifecycleObservedAt: currentLifecycle?.observedAt ?? null,
 		lifecycleNextRefreshAt: currentLifecycle?.nextRefreshAt ?? null,
+		lifecycleLiveRevision: currentLifecycle?.liveRevision ?? null,
+		lifecyclePublicationId: currentLifecycle?.publicationId ?? null,
+		lifecycleSourceCheckedAt: currentLifecycle?.sourceCheckedAt ?? null,
 	});
 	const anchorLifecycle =
 		initialWindow.anchorEventId === currentEventId
@@ -142,6 +144,7 @@ const readLiveWindow = async (context: GraphQLContext) => {
 				currentEventId,
 				nextEventId: initialWindow.nextEventId,
 				liveRevision: anchorSnapshot?.revision ?? String(anchorManifest.revision),
+				publicationId: anchorSnapshot?.publicationId ?? anchorManifest.publicationId,
 				liveEventId: anchorSnapshot?.eventId ?? initialWindow.anchorEventId,
 				publicationState: anchorSnapshot?.state ?? livePublicationState(anchorManifest),
 				sourceCheckedAt:
@@ -151,13 +154,16 @@ const readLiveWindow = async (context: GraphQLContext) => {
 				source: anchorPublication?.source ?? fixtureCore.source,
 				lifecycleEventId: anchorLifecycle?.eventId ?? null,
 				lifecycleState: anchorLifecycle?.state ?? null,
+				lifecycleObservedAt: anchorLifecycle?.observedAt ?? null,
 				lifecycleNextRefreshAt: anchorLifecycle?.nextRefreshAt ?? null,
+				lifecycleLiveRevision: anchorLifecycle?.liveRevision ?? null,
+				lifecyclePublicationId: anchorLifecycle?.publicationId ?? null,
+				lifecycleSourceCheckedAt: anchorLifecycle?.sourceCheckedAt ?? null,
 			})
 		: initialWindow;
 	return {
 		eventCore,
 		fixtureCore,
-		core,
 		window,
 		manifest: anchorManifest,
 		publicationSource: anchorPublication?.source ?? null,
@@ -358,7 +364,7 @@ export const liveDesksResolvers = {
 					extensions: { code: "LIVE_REVISION_GONE" },
 				});
 			}
-			const { eventCore, fixtureCore, core, window, manifest, publicationSource, lifecycleStatus } =
+			const { eventCore, fixtureCore, window, manifest, publicationSource, lifecycleStatus } =
 				await readLiveWindow(context);
 			const eventId = args.ref?.eventId ?? window.anchorEventId ?? eventCore.currentEventId ?? 0;
 			const eventLifecycle =
@@ -403,6 +409,7 @@ export const liveDesksResolvers = {
 				currentEventId: eventCore.currentEventId,
 				nextEventId: window.nextEventId,
 				liveRevision: snapshot.revision,
+				publicationId: snapshot.publicationId,
 				liveEventId: snapshot.eventId,
 				publicationState: snapshot.state,
 				sourceCheckedAt: snapshot.lastSuccessfulFetchAt,
@@ -410,7 +417,11 @@ export const liveDesksResolvers = {
 				source: snapshot.source,
 				lifecycleEventId: eventLifecycle?.eventId ?? null,
 				lifecycleState: eventLifecycle?.state ?? null,
+				lifecycleObservedAt: eventLifecycle?.observedAt ?? null,
 				lifecycleNextRefreshAt: eventLifecycle?.nextRefreshAt ?? null,
+				lifecycleLiveRevision: eventLifecycle?.liveRevision ?? null,
+				lifecyclePublicationId: eventLifecycle?.publicationId ?? null,
+				lifecycleSourceCheckedAt: eventLifecycle?.sourceCheckedAt ?? null,
 			});
 			return {
 				season: snapshot.seasonCode,
@@ -425,7 +436,7 @@ export const liveDesksResolvers = {
 				source: snapshot.source === "postgres" ? "POSTGRES" : "REDIS",
 				stale: snapshotWindow.stale,
 				nextRefreshAt: snapshotWindow.nextRefreshAt,
-				matches: matchRows(snapshot.eventId, snapshot.fixtures, core),
+				matches: matchRows(snapshot.eventId, snapshot.fixtures, fixtureCore),
 				nextFixtures: nextEventAfter(eventCore, snapshot.eventId)
 					? matchRows(
 							nextEventAfter(eventCore, snapshot.eventId)!,
@@ -473,27 +484,11 @@ export const liveDesksResolvers = {
 					extensions: { code: "LIVE_REVISION_GONE" },
 				});
 			}
-			const [tournaments, eventCore, fixtureCore] = await Promise.all([
+			const [tournaments, liveWindow] = await Promise.all([
 				tournamentsService.getEntryTournaments(context, args.entryId),
-				getCoreEventSnapshot(context),
-				getCoreFixtureSnapshot(context),
+				readLiveWindow(context),
 			]);
-			const currentLifecycle = eventCore.currentEventId
-				? await getLiveLifecycleStatus(context, eventCore.currentEventId)
-				: null;
-			const window = resolveLiveWindow({
-				events: eventCore.events,
-				fixtures: fixtureCore.fixtures,
-				currentEventId: eventCore.currentEventId,
-				nextEventId: eventCore.events.find((event) => event.isNext)?.id ?? null,
-				liveRevision: null,
-				sourceCheckedAt: fixtureCore.sourceCheckedAt,
-				publishedAt: fixtureCore.sourceCheckedAt,
-				source: fixtureCore.source,
-				lifecycleEventId: currentLifecycle?.eventId ?? null,
-				lifecycleState: currentLifecycle?.state ?? null,
-				lifecycleNextRefreshAt: currentLifecycle?.nextRefreshAt ?? null,
-			});
+			const { eventCore, fixtureCore, window, lifecycleStatus } = liveWindow;
 			const eventId = args.ref?.eventId ?? window.anchorEventId ?? eventCore.currentEventId ?? 0;
 			const snapshot =
 				eventId > 0 ? await getLiveDataSnapshot(context, eventId).catch(() => null) : null;
@@ -504,8 +499,10 @@ export const liveDesksResolvers = {
 			}
 			const event = eventCore.events.find((candidate) => candidate.id === eventId);
 			const deskLifecycle = snapshot
-				? await getLiveLifecycleStatus(context, snapshot.eventId)
-				: currentLifecycle;
+				? snapshot.eventId === window.anchorEventId
+					? lifecycleStatus
+					: await getLiveLifecycleStatus(context, snapshot.eventId)
+				: lifecycleStatus;
 			const deskWindow = snapshot
 				? resolveLiveWindow({
 						events: eventCore.events,
@@ -513,6 +510,7 @@ export const liveDesksResolvers = {
 						currentEventId: eventCore.currentEventId,
 						nextEventId: window.nextEventId,
 						liveRevision: snapshot.revision,
+						publicationId: snapshot.publicationId,
 						liveEventId: snapshot.eventId,
 						publicationState: snapshot.state,
 						sourceCheckedAt: snapshot.lastSuccessfulFetchAt,
@@ -520,7 +518,11 @@ export const liveDesksResolvers = {
 						source: snapshot.source,
 						lifecycleEventId: deskLifecycle?.eventId ?? null,
 						lifecycleState: deskLifecycle?.state ?? null,
+						lifecycleObservedAt: deskLifecycle?.observedAt ?? null,
 						lifecycleNextRefreshAt: deskLifecycle?.nextRefreshAt ?? null,
+						lifecycleLiveRevision: deskLifecycle?.liveRevision ?? null,
+						lifecyclePublicationId: deskLifecycle?.publicationId ?? null,
+						lifecycleSourceCheckedAt: deskLifecycle?.sourceCheckedAt ?? null,
 					})
 				: window;
 			const provisional = !(event?.finished && event.dataChecked);

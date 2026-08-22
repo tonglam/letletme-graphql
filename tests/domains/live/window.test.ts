@@ -93,6 +93,7 @@ describe("live window contract", () => {
 			currentEventId: 2,
 			nextEventId: 3,
 			liveRevision: "17",
+			publicationId: "publication-17",
 			liveEventId: 1,
 			publicationState: "settled",
 			sourceCheckedAt: "2026-08-15T10:00:00.000Z",
@@ -133,6 +134,7 @@ describe("live window contract", () => {
 			currentEventId: 1,
 			nextEventId: 2,
 			liveRevision: "17",
+			publicationId: "publication-17",
 			liveEventId: 1,
 			publicationState: "live",
 			sourceCheckedAt: "2026-08-08T18:14:30.000Z",
@@ -140,7 +142,11 @@ describe("live window contract", () => {
 			source: "redis",
 			lifecycleEventId: 1,
 			lifecycleState: "BETWEEN_FIXTURES",
+			lifecycleObservedAt: "2026-08-08T18:14:30.000Z",
 			lifecycleNextRefreshAt: "2026-08-08T19:00:00.000Z",
+			lifecycleLiveRevision: "17",
+			lifecyclePublicationId: "publication-17",
+			lifecycleSourceCheckedAt: "2026-08-08T18:14:30.000Z",
 			now: new Date("2026-08-08T18:15:00.000Z"),
 		});
 
@@ -174,6 +180,7 @@ describe("live window contract", () => {
 			currentEventId: 1,
 			nextEventId: 2,
 			liveRevision: "17",
+			publicationId: "publication-17",
 			liveEventId: null,
 			publicationState: null,
 			sourceCheckedAt: "2026-08-08T18:12:00.000Z",
@@ -181,7 +188,11 @@ describe("live window contract", () => {
 			source: "redis",
 			lifecycleEventId: 1,
 			lifecycleState: "BETWEEN_FIXTURES",
+			lifecycleObservedAt: "2026-08-08T18:10:00.000Z",
 			lifecycleNextRefreshAt: "2026-08-08T19:00:00.000Z",
+			lifecycleLiveRevision: "17",
+			lifecyclePublicationId: "publication-17",
+			lifecycleSourceCheckedAt: "2026-08-08T18:12:00.000Z",
 			now: new Date("2026-08-08T18:15:00.000Z"),
 		});
 
@@ -194,7 +205,7 @@ describe("live window contract", () => {
 		});
 	});
 
-	it("recomputes an overdue lifecycle timer from the current window", () => {
+	it("recomputes a lifecycle timer that is overdue within the grace period", () => {
 		const base = buildTestCoreData(1);
 		const core = {
 			...base,
@@ -215,6 +226,7 @@ describe("live window contract", () => {
 			currentEventId: 1,
 			nextEventId: 2,
 			liveRevision: "17",
+			publicationId: "publication-17",
 			liveEventId: 1,
 			publicationState: "live",
 			sourceCheckedAt: "2026-08-08T12:30:00.000Z",
@@ -222,11 +234,86 @@ describe("live window contract", () => {
 			source: "redis",
 			lifecycleEventId: 1,
 			lifecycleState: "BETWEEN_FIXTURES",
-			lifecycleNextRefreshAt: "2026-08-08T18:00:00.000Z",
+			lifecycleObservedAt: "2026-08-08T18:14:30.000Z",
+			lifecycleNextRefreshAt: "2026-08-08T18:14:00.000Z",
+			lifecycleLiveRevision: "17",
+			lifecyclePublicationId: "publication-17",
+			lifecycleSourceCheckedAt: "2026-08-08T12:30:00.000Z",
 			now: new Date("2026-08-08T18:15:00.000Z"),
 		});
 
 		expect(window.nextRefreshAt).toBe("2026-08-08T18:20:00.000Z");
+	});
+
+	it("ignores a stale persisted lifecycle checkpoint", () => {
+		const base = buildTestCoreData(1);
+		const core = {
+			...base,
+			fixtures: base.fixtures.map((fixture) =>
+				fixture.eventId === 1
+					? { ...fixture, started: true, kickoffTime: "2026-08-08T18:00:00.000Z" }
+					: fixture
+			),
+		};
+		const window = resolveLiveWindow({
+			events: core.events,
+			fixtures: core.fixtures,
+			currentEventId: 1,
+			nextEventId: 2,
+			liveRevision: "304",
+			publicationId: "publication-304",
+			liveEventId: 1,
+			publicationState: "live",
+			sourceCheckedAt: "2026-08-08T18:14:45.000Z",
+			publishedAt: "2026-08-08T18:14:45.000Z",
+			source: "redis",
+			lifecycleEventId: 1,
+			lifecycleState: "BETWEEN_FIXTURES",
+			lifecycleObservedAt: "2026-08-08T12:00:00.000Z",
+			lifecycleNextRefreshAt: "2026-08-08T12:05:00.000Z",
+			lifecycleLiveRevision: "17",
+			lifecyclePublicationId: "publication-17",
+			lifecycleSourceCheckedAt: "2026-08-08T12:00:00.000Z",
+			now: new Date("2026-08-08T18:15:00.000Z"),
+		});
+
+		expect(window).toMatchObject({
+			windowState: "LIVE_ACTIVE",
+			producerState: "LIVE_ACTIVE",
+			dataAvailability: "FRESH",
+			nextRefreshAt: "2026-08-08T18:15:30.000Z",
+		});
+	});
+
+	it("does not let a lifecycle checkpoint from an older publication override the desk", () => {
+		const core = buildTestCoreData(1);
+		const window = resolveLiveWindow({
+			events: core.events,
+			fixtures: core.fixtures,
+			currentEventId: 1,
+			nextEventId: 2,
+			liveRevision: "18",
+			publicationId: "publication-18",
+			liveEventId: 1,
+			publicationState: "live",
+			sourceCheckedAt: "2026-08-08T18:14:45.000Z",
+			publishedAt: "2026-08-08T18:14:45.000Z",
+			source: "redis",
+			lifecycleEventId: 1,
+			lifecycleState: "BETWEEN_FIXTURES",
+			lifecycleObservedAt: "2026-08-08T18:14:50.000Z",
+			lifecycleNextRefreshAt: "2026-08-08T19:00:00.000Z",
+			lifecycleLiveRevision: "17",
+			lifecyclePublicationId: "publication-17",
+			lifecycleSourceCheckedAt: "2026-08-08T18:14:00.000Z",
+			now: new Date("2026-08-08T18:15:00.000Z"),
+		});
+
+		expect(window).toMatchObject({
+			windowState: "LIVE_ACTIVE",
+			producerState: "LIVE_ACTIVE",
+			nextRefreshAt: "2026-08-08T18:15:30.000Z",
+		});
 	});
 
 	it("enters offseason after the final gameweek while retaining the final anchor", () => {
