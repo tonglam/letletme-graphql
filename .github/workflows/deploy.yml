@@ -134,6 +134,17 @@ jobs:
           envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,RATE_LIMIT_ROLLOUT
           script: |
             set -euo pipefail
+            platform_deploy_lock_path=${DEPLOY_LOCK_PATH:-/var/lock/letletme-platform-deploy.lock}
+            mkdir -p "$(dirname "$platform_deploy_lock_path")"
+            exec 9>"$platform_deploy_lock_path"
+            flock -n 9 || {
+              echo "platform deploy lock is already held: $platform_deploy_lock_path" >&2
+              exit 1
+            }
+            release_platform_deploy_lock() {
+              flock -u 9 || true
+              exec 9>&- || true
+            }
             deployment_started=false
             deployment_committed=false
             env_promoted=false
@@ -180,6 +191,7 @@ jobs:
               if [ -n "${rollout_state_backup:-}" ]; then
                 rm -f "$rollout_state_backup"
               fi
+              release_platform_deploy_lock
               exit "$original_status"
             }
             trap fail_without_rollback_on_exit EXIT
@@ -485,6 +497,7 @@ jobs:
                 rm -f "$deployment_state_next"
               fi
               rm -f "$next_env"
+              release_platform_deploy_lock
               exit "$original_status"
             }
             trap rollback_graphql_on_exit EXIT
