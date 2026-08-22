@@ -458,16 +458,24 @@ export const entriesRepository: EntriesRepository = {
 			throw new Error("Failed to fetch entry history");
 		}
 
-		const history =
-			(data as DbEntryEventResultRow[] | null)
-				?.filter((row) => row.rich_synced_at !== null && row.rich_synced_at !== undefined)
-				.map(mapEntryEventResult) ?? [];
-		await writeQueryCache(
-			context,
-			cacheKey,
-			history.length === 0 ? NULL_SENTINEL : JSON.stringify(history),
-			QUERY_CACHE_TTL_SECONDS.HISTORICAL
+		const rows = (data as DbEntryEventResultRow[] | null) ?? [];
+		const hasPendingRichSync = rows.some(
+			(row) => row.rich_synced_at === null || row.rich_synced_at === undefined
 		);
+		const history = rows
+			.filter((row) => row.rich_synced_at !== null && row.rich_synced_at !== undefined)
+			.map(mapEntryEventResult);
+		// Rich synchronization advances independently of the Core revision. Do
+		// not retain a partial history snapshot for an hour while the latest
+		// finalized event is still being enriched.
+		if (!hasPendingRichSync) {
+			await writeQueryCache(
+				context,
+				cacheKey,
+				history.length === 0 ? NULL_SENTINEL : JSON.stringify(history),
+				QUERY_CACHE_TTL_SECONDS.HISTORICAL
+			);
+		}
 		return history;
 	},
 
