@@ -49,6 +49,15 @@ describe("competition aggregate SQL contract", () => {
 		].map((key) => catalog.indexOf(key));
 		expect(order).toEqual([...order].sort((left, right) => left - right));
 	});
+
+	it("uses only event-scoped captain teams", () => {
+		expect(COMPETITION_AGGREGATE_SQL).toContain(
+			"captain_team.team_id = captain_historical_team.team_id"
+		);
+		expect(COMPETITION_AGGREGATE_SQL).not.toContain(
+			"COALESCE(captain_historical_team.team_id, captain.team_id)"
+		);
+	});
 });
 
 const entryRow = (overrides: Record<string, unknown> = {}) => ({

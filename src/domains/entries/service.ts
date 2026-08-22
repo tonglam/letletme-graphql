@@ -211,6 +211,8 @@ const mapEntryPick = (params: {
 	team: Team | undefined;
 	live: LivePerformance | undefined;
 	fixtures: ReadonlyArray<{
+		id: number;
+		kickoffTime: string | null;
 		teamHId: number;
 		teamAId: number;
 		teamHScore: number | null;
@@ -225,11 +227,9 @@ const mapEntryPick = (params: {
 	const minutes = live?.minutes ?? 0;
 	const yellowCards = live?.yellowCards ?? 0;
 	const redCards = live?.redCards ?? 0;
-	const playerFixtures = player
-		? fixtures.filter(
-				(fixture) => fixture.teamHId === eventTeamId || fixture.teamAId === eventTeamId
-			)
-		: [];
+	const playerFixtures = fixtures.filter(
+		(fixture) => fixture.teamHId === eventTeamId || fixture.teamAId === eventTeamId
+	);
 	const fixtureOpponents = playerFixtures.map((fixture) => {
 		const wasHome = fixture.teamHId === eventTeamId;
 		const opponentId = wasHome ? fixture.teamAId : fixture.teamHId;
@@ -329,7 +329,8 @@ const officialAutoSubElements = (value: unknown): Set<number> => {
 async function loadEventTeamIds(
 	context: GraphQLContext,
 	eventId: number,
-	playerIds: number[]
+	playerIds: number[],
+	fixtures: ReadonlyArray<{ id: number; kickoffTime: string | null }>
 ): Promise<Map<number, number>> {
 	if (playerIds.length === 0) return new Map();
 	try {
@@ -342,26 +343,49 @@ async function loadEventTeamIds(
 		if (error) {
 			throw new Error("Failed to load event-scoped player teams", { cause: error });
 		}
-		const result = new Map<number, number>();
-		for (const raw of (data ?? []) as Array<{
+		const kickoffByFixtureId = new Map(
+			fixtures.map((fixture) => [fixture.id, fixture.kickoffTime] as const)
+		);
+		const rows = (data ?? []) as Array<{
 			element_id?: unknown;
 			event_id?: unknown;
 			fixture_id?: unknown;
 			team_id?: unknown;
-		}>) {
-			const elementId = asNumber(raw.element_id);
-			const rowEventId = asNumber(raw.event_id);
-			const teamId = asNumber(raw.team_id);
-			if (
-				elementId !== null &&
-				rowEventId === eventId &&
-				teamId !== null &&
-				teamId > 0 &&
-				!result.has(elementId)
-			) {
-				result.set(elementId, teamId);
-			}
-		}
+		}>;
+		const result = new Map<number, number>();
+		rows
+			.map((raw) => {
+				const fixtureId = asNumber(raw.fixture_id);
+				return {
+					raw,
+					fixtureId,
+					kickoffTime: fixtureId === null ? null : (kickoffByFixtureId.get(fixtureId) ?? null),
+				};
+			})
+			.sort((left, right) => {
+				if (left.kickoffTime === null && right.kickoffTime !== null) return 1;
+				if (left.kickoffTime !== null && right.kickoffTime === null) return -1;
+				if (left.kickoffTime !== right.kickoffTime) {
+					return (left.kickoffTime ?? "").localeCompare(right.kickoffTime ?? "");
+				}
+				return (
+					(left.fixtureId ?? Number.MAX_SAFE_INTEGER) - (right.fixtureId ?? Number.MAX_SAFE_INTEGER)
+				);
+			})
+			.forEach(({ raw }) => {
+				const elementId = asNumber(raw.element_id);
+				const rowEventId = asNumber(raw.event_id);
+				const teamId = asNumber(raw.team_id);
+				if (
+					elementId !== null &&
+					rowEventId === eventId &&
+					teamId !== null &&
+					teamId > 0 &&
+					!result.has(elementId)
+				) {
+					result.set(elementId, teamId);
+				}
+			});
 		return result;
 	} catch (error) {
 		context.logger.error(
@@ -496,16 +520,16 @@ export const entriesService = {
 		}
 
 		const playerIds = uniquePositiveIds(picks.map((pick) => pick.element));
-		const [playerMap, teamMap, liveByPlayer, fixtureSnapshot, eventTeamIds] = await Promise.all([
+		const [playerMap, teamMap, liveByPlayer, fixtureSnapshot] = await Promise.all([
 			buildPlayerMap(context, playerIds),
 			buildTeamMap(context),
 			buildLiveMapForEvents(context, [result.eventId], playerIds),
 			getCoreFixtureSnapshot(context),
-			loadEventTeamIds(context, result.eventId, playerIds),
 		]);
 		const fixtures = fixtureSnapshot.fixtures.filter(
 			(fixture) => fixture.eventId === result.eventId
 		);
+		const eventTeamIds = await loadEventTeamIds(context, result.eventId, playerIds, fixtures);
 		const autoSubElements = officialAutoSubElements(result.eventAutoSub);
 
 		return picks.map((pick) => {

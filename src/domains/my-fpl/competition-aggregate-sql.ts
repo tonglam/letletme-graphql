@@ -66,8 +66,8 @@ WITH aggregate_rows AS MATERIALIZED (
     LIMIT 1
   ) captain_historical_team ON TRUE
   LEFT JOIN fpl.teams captain_team
-    ON captain_team.season_id = captain.season_id
-   AND captain_team.team_id = COALESCE(captain_historical_team.team_id, captain.team_id)
+    ON captain_team.season_id = summary.season_id
+   AND captain_team.team_id = captain_historical_team.team_id
   WHERE summary.season_id = $1
     AND summary.tournament_id = $2
     AND summary.event_id = $3
