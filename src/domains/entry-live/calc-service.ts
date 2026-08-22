@@ -1,11 +1,13 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type { Entry, EntryEventResult } from "../entries/repository";
 import { entriesService } from "../entries/service";
+import { eventsService } from "../events/service";
 import type { LivePerformance } from "../live/repository";
 import type { LiveSnapshotMeta } from "../live/snapshot-meta";
 import { resolvePreviousEventBaseline } from "./baseline";
 import type { EntryEventTransfersData } from "./transfer-enrichment";
 import { entryLiveRepository } from "./repository";
+import { buildManagerScore, loadManagerScores, type LiveManagerScore } from "./manager-score";
 
 export type EntryLiveAvailability = "READY" | "NO_PICKS";
 
@@ -20,6 +22,7 @@ export type LiveCalcData = {
 	/** True while the board uses official live totals before final auto-subs/results. */
 	provisional: boolean;
 	snapshot: LiveSnapshotMeta | null;
+	score: LiveManagerScore;
 	rank: number;
 	event: number;
 	entry: number;
@@ -119,64 +122,9 @@ export const calcElementLivePoints = (
 	_effectiveBonus?: number
 ): number => calcOfficialTotalWithEffectiveBonus(live);
 
-/**
- * Apply FPL automatic substitutions.
- *
- * Rules:
- * - No auto-subs during Bench Boost (all 15 count)
- * - Bench players evaluated in order (position 12, 13, 14, 15)
- * - Bench player must have played (>0 minutes) to come on
- * - Replaces a non-playing starter (0 minutes, multiplier > 0)
- * - Formation must remain valid after substitution
- */
-export const applyAutoSubs = (pickList: ElementEventResultData[], chip: string): void => {
-	if (chip === "BENCH_BOOST") return;
-
-	const starters = pickList.filter((pick) => pick.position <= 11);
-	const bench = pickList
-		.filter((pick) => pick.position > 11)
-		.sort((left, right) => left.position - right.position);
-	const nonPlayingStarters = starters.filter(
-		(pick) => pick.minutes === 0 && pick.multiplier > 0 && (pick.isGwFinished || pick.bgw)
-	);
-
-	const isValidFormation = (active: ElementEventResultData[]): boolean => {
-		const goalkeeperCount = active.filter((pick) => pick.elementType === 1).length;
-		const defenderCount = active.filter((pick) => pick.elementType === 2).length;
-		const midfielderCount = active.filter((pick) => pick.elementType === 3).length;
-		const forwardCount = active.filter((pick) => pick.elementType === 4).length;
-		return (
-			goalkeeperCount === 1 &&
-			defenderCount >= 3 &&
-			defenderCount <= 5 &&
-			midfielderCount >= 2 &&
-			midfielderCount <= 5 &&
-			forwardCount >= 1 &&
-			forwardCount <= 3
-		);
-	};
-
-	for (const benchPlayer of bench) {
-		if (benchPlayer.minutes === 0) continue;
-		if (nonPlayingStarters.length === 0) break;
-
-		for (let index = 0; index < nonPlayingStarters.length; index += 1) {
-			const starter = nonPlayingStarters[index];
-			const originalStarterMultiplier = starter.multiplier;
-			const originalBenchMultiplier = benchPlayer.multiplier;
-
-			starter.multiplier = 0;
-			benchPlayer.multiplier = 1;
-			if (isValidFormation(pickList.filter((pick) => pick.multiplier > 0))) {
-				nonPlayingStarters.splice(index, 1);
-				break;
-			}
-
-			starter.multiplier = originalStarterMultiplier;
-			benchPlayer.multiplier = originalBenchMultiplier;
-		}
-	}
-};
+// Kept as a compatibility export for existing H2H-only callers and tests.
+// Non-H2H live paths import the isolated adapter directly and never invoke it.
+export { applyAutoSubs } from "./legacy-h2h-adapter";
 
 const scaledEntryValue = (value: number | null | undefined): number =>
 	typeof value === "number" ? value / 10 : 0;
@@ -192,6 +140,26 @@ export const buildNoPicksLiveCalcData = (
 		availability: "NO_PICKS",
 		provisional: false,
 		snapshot: null,
+		score: {
+			eventPoints: null,
+			netEventPoints: null,
+			totalPoints: null,
+			totalScope: "UNKNOWN",
+			eventRank: null,
+			overallRank: null,
+			leagueRank: null,
+			transferCost: 0,
+			source: "UNAVAILABLE",
+			state: "UNAVAILABLE",
+			eventPointSemantics: "UNKNOWN",
+			revision: null,
+			checkedAt: null,
+			upstreamUpdatedAt: null,
+			staleAt: null,
+			nextRefreshAt: null,
+			reconciliation: "NO_LINEUP",
+			reasonCodes: ["MISSING_LINEUP"],
+		},
 		rank: 0,
 		event: eventId,
 		entry: entryId,
@@ -216,7 +184,9 @@ export const buildNoPicksLiveCalcData = (
 		livePoints: 0,
 		transferCost: 0,
 		liveNetPoints: 0,
-		liveTotalPoints: baseline.overallPoints,
+		// Headline totals are official-manager-only; historical baseline belongs
+		// exclusively to the lastOverallPoints display field.
+		liveTotalPoints: 0,
 		played: 0,
 		toPlay: 0,
 		playedCaptain: 0,
@@ -248,9 +218,25 @@ export const entryLiveCalcService = {
 		}
 
 		const stopPicks = context.requestTiming?.start("entryLive.picks");
-		const pickEntity = await entryLiveRepository
+		let pickEntity = await entryLiveRepository
 			.getEntryEventPick(context, entryId, eventId)
 			.finally(() => stopPicks?.());
+		// A normal live pick miss can race the final publication. Probe the
+		// finalization-scoped read before declaring the entry NO_PICKS so a
+		// freshly persisted official lineup is not hidden behind the old cache.
+		if (!pickEntity || pickEntity.picks.length === 0) {
+			const event = await eventsService.getEventById(context, eventId).catch(() => null);
+			if (event?.finished === true && event.dataChecked === true) {
+				const finalized = await entryLiveRepository.getEntryEventPicksByIds(
+					context,
+					[entryId],
+					eventId,
+					false,
+					`data-checked:${eventId}`
+				);
+				pickEntity = finalized.get(entryId) ?? pickEntity;
+			}
+		}
 		if (!pickEntity || pickEntity.picks.length === 0) {
 			const [entry, previousResult] = await Promise.all([
 				entriesService.getEntryById(context, entryId).catch((error) => {
@@ -264,23 +250,40 @@ export const entryLiveCalcService = {
 					? entriesService.getEntryEventResult(context, entryId, eventId - 1)
 					: Promise.resolve(null),
 			]);
-			return buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
+			const noPicks = buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
+			const managerScores = await loadManagerScores(context, eventId, [entryId]);
+			const manager = buildManagerScore({
+				row: managerScores.rows.get(entryId),
+				upstreamErrorCode: managerScores.errorCode,
+				provisional: true,
+				available: false,
+				transferCost: 0,
+				detailEventPoints: 0,
+				nextRefreshAt: managerScores.nextRefreshAt,
+			});
+			return {
+				...noPicks,
+				provisional: true,
+				score: manager.score,
+				rank: manager.headline.rank,
+				livePoints: manager.headline.livePoints,
+				liveNetPoints: manager.headline.liveNetPoints,
+				liveTotalPoints: manager.headline.liveTotalPoints,
+			};
 		}
-
 		const calculate = async (): Promise<LiveCalcData> => {
 			const { entryLiveBatchService } = await import("./batch-service");
 			const stopAggregate = context.requestTiming?.start("entryLive.aggregate");
 			const batch = await entryLiveBatchService
-				.calcLivePointsForEntries(context, eventId, [entryId], includeLive, {
-					picksByEntry: Promise.resolve(new Map([[entryId, pickEntity]])),
-				})
+				// Do not prefetch picks into the batch path. Once the event is
+				// finalized, the batch service must be able to roll over to its
+				// finalization-scoped cache and observe official multipliers,
+				// automatic_subs, and captain changes.
+				.calcLivePointsForEntries(context, eventId, [entryId], includeLive)
 				.finally(() => stopAggregate?.());
 			const result = batch.results.get(entryId);
 			if (result) {
-				return {
-					...result,
-					availability: "READY",
-				};
+				return { ...result, availability: "READY" };
 			}
 			const message = batch.errors.find((error) => error.entryId === entryId)?.message;
 			throw new Error(message ?? `Live points calculation failed for entry ${entryId}`);

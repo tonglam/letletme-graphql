@@ -121,7 +121,7 @@ describe("Data Platform read client", () => {
 
 		const query = queries[0]?.text ?? "";
 		for (const field of fields) {
-			expect(query.match(new RegExp("\\b" + field + "\\b", "g"))?.length).toBeGreaterThanOrEqual(2);
+			expect(query.match(new RegExp(`\\b${field}\\b`, "g"))?.length).toBeGreaterThanOrEqual(2);
 		}
 	});
 

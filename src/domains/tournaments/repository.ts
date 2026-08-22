@@ -12,6 +12,10 @@ import {
 import { stableStringify } from "../../infra/stringify";
 import { LeagueType } from "../leagues/repository";
 import { entryLiveBatchService } from "../entry-live/batch-service";
+import {
+	managerScoreBoardIsFinal,
+	rankTournamentRowsByOfficialEventPoints,
+} from "../entry-live/manager-score";
 import type { LiveCalcData } from "../entry-live/calc-service";
 import {
 	competitionBoardCacheKey,
@@ -3394,9 +3398,19 @@ export const tournamentsRepository: TournamentsRepository = {
 				const liveCacheKey = scoringPhase
 					? competitionBoardCacheKey(context, snapshot, tournamentId)
 					: null;
-				const cachedBoard = liveCacheKey
+				const cachedCandidate = liveCacheKey
 					? await readCompetitionBoardCache(context, liveCacheKey)
 					: null;
+				const cachedRows = cachedCandidate?.board as
+					| Array<{
+							entry: number;
+							score?: { source?: string; state?: string };
+					  }>
+					| undefined;
+				const cachedBoard =
+					cachedCandidate && cachedRows && managerScoreBoardIsFinal(cachedRows)
+						? cachedCandidate
+						: null;
 				const cached = cachedBoard
 					? {
 							rows: cachedBoard.board as LiveCalcData[],
@@ -3412,10 +3426,10 @@ export const tournamentsRepository: TournamentsRepository = {
 							requestedEventId,
 							await tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId),
 							true,
-							{ provisional: !(event?.finished && event.dataChecked) }
+							{ tournamentId, legacyH2H: tournament.leagueType === LeagueType.H2H }
 						);
 				const liveData = cached ?? {
-					rows: Array.from(result?.results.values() ?? []),
+					rows: rankTournamentRowsByOfficialEventPoints(Array.from(result?.results.values() ?? [])),
 					partial: (result?.errors.length ?? 0) > 0,
 					failedEntryIds: result?.errors.map((error) => error.entryId) ?? [],
 					totalEntries: result?.meta.totalEntries ?? 0,
@@ -3426,7 +3440,13 @@ export const tournamentsRepository: TournamentsRepository = {
 					state: snapshot.state.toUpperCase(),
 					...liveData,
 				};
-				if (liveCacheKey && !cached && result && result.errors.length === 0) {
+				if (
+					liveCacheKey &&
+					!cached &&
+					result &&
+					result.errors.length === 0 &&
+					managerScoreBoardIsFinal(liveData.rows)
+				) {
 					await writeCompetitionBoardCache(
 						context,
 						liveCacheKey,

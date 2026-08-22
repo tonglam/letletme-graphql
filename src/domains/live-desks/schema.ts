@@ -83,6 +83,9 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		tournaments: [TournamentInfo!]!
 		selectedTournamentId: Int
 		board: [LiveCalcData!]!
+		managerRevision: String
+		officialCoverage: Float!
+		unavailableEntryIds: [Int!]!
 		partial: Boolean!
 		failedEntryIds: [Int!]!
 		totalEntries: Int!

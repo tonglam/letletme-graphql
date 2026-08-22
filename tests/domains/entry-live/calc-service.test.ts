@@ -352,7 +352,7 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 				lastOverallPoints: 300,
 				lastOverallRank: 500,
 				lastValue: 99.5,
-				liveTotalPoints: 300,
+				liveTotalPoints: 0,
 			});
 			expect(stages).toEqual(["entryLive.picks"]);
 		} finally {
