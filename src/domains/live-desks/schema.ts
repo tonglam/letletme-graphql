@@ -20,7 +20,37 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 
 	enum LiveSnapshotSource {
 		REDIS
+		POSTGRES
+		CORE
 		STALE
+	}
+
+	enum LiveWindowState {
+		PRESEASON
+		EVENT_SCHEDULED
+		LIVE_ACTIVE
+		DAY_SETTLING
+		BETWEEN_FIXTURES
+		GW_REVIEW
+		FINALIZED
+		BETWEEN_GAMEWEEKS
+		OFFSEASON
+	}
+
+	enum LiveDataAvailability {
+		SCHEDULED
+		FRESH
+		LAST_GOOD
+		FINAL
+		PARTIAL
+		UNAVAILABLE
+	}
+
+	enum LiveAnchorMode {
+		UPCOMING
+		CURRENT
+		PREVIOUS_FINAL
+		OFFSEASON
 	}
 
 	type LiveContext {
@@ -28,12 +58,19 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		coreRevision: String!
 		currentEventId: Int
 		nextEventId: Int
+		anchorEventId: Int
+		latestFinalizedEventId: Int
 		liveRevision: String
 		state: LiveLifecycleState!
+		windowState: LiveWindowState!
+		producerState: LiveLifecycleState!
+		anchorMode: LiveAnchorMode!
+		dataAvailability: LiveDataAvailability!
 		sourceCheckedAt: DateTime
 		publishedAt: DateTime
 		source: LiveSnapshotSource
 		stale: Boolean!
+		nextRefreshAt: DateTime
 	}
 
 	type LiveMatchSummary {
@@ -41,10 +78,8 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		eventId: Int!
 		homeTeamId: Int!
 		homeTeamName: String!
-		homeTeamShortName: String!
 		awayTeamId: Int!
 		awayTeamName: String!
-		awayTeamShortName: String!
 		homeScore: Int
 		awayScore: Int
 		kickoffTime: DateTime
@@ -58,9 +93,14 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		eventId: Int!
 		revision: String!
 		state: LiveSnapshotState!
+		windowState: LiveWindowState!
+		dataAvailability: LiveDataAvailability!
+		liveRevision: String
 		sourceCheckedAt: DateTime!
 		publishedAt: DateTime!
+		source: LiveSnapshotSource!
 		stale: Boolean!
+		nextRefreshAt: DateTime
 		matches: [LiveMatchSummary!]!
 		nextFixtures: [LiveMatchSummary!]!
 			@deprecated(reason: "Use core eventFixtures for next-event schedule")
@@ -80,6 +120,9 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		eventId: Int!
 		revision: String
 		state: LiveSnapshotState!
+		windowState: LiveWindowState!
+		dataAvailability: LiveDataAvailability!
+		nextRefreshAt: DateTime
 		tournaments: [TournamentInfo!]!
 		selectedTournamentId: Int
 		board: [LiveCalcData!]!

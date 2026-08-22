@@ -28,6 +28,12 @@ export const LIVE_PUBLICATION_ITEMS = ["eventLive", "fixtures"] as const;
 
 export type DataSnapshotSource = "redis" | "postgres";
 export type LiveSnapshotState = "scheduled" | "live" | "settled";
+export type LivePublicationManifestSource = "redis" | "postgres";
+
+export type LivePublicationManifestWithSource = Readonly<{
+	manifest: DataPublicationManifest;
+	source: LivePublicationManifestSource;
+}>;
 
 export type CoreEventData = Readonly<{
 	id: number;
@@ -428,13 +434,24 @@ const reserveLivePublicationPin = (
 	return pin;
 };
 
-export const getLiveDataPublicationManifest = (
+export const getLiveDataPublicationManifestWithSource = async (
 	context: GraphQLContext,
 	eventId: number
-): Promise<DataPublicationManifest | null> => {
-	if (!Number.isSafeInteger(eventId) || eventId <= 0) return Promise.resolve(null);
-	return reserveLivePublicationPin(context, eventId, "manifest").manifest;
+): Promise<LivePublicationManifestWithSource | null> => {
+	if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
+	const manifest = await reserveLivePublicationPin(context, eventId, "manifest").manifest;
+	if (manifest) return { manifest, source: "redis" };
+	const postgresPublication = await loadLivePublicationFromPostgres(context, eventId);
+	return postgresPublication
+		? { manifest: postgresPublication.manifest, source: "postgres" }
+		: null;
 };
+
+export const getLiveDataPublicationManifest = async (
+	context: GraphQLContext,
+	eventId: number
+): Promise<DataPublicationManifest | null> =>
+	(await getLiveDataPublicationManifestWithSource(context, eventId))?.manifest ?? null;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1256,6 +1273,149 @@ type CoreLiveIdentityFallbackRow = CoreTeamFallbackRow & {
 	players: unknown;
 };
 
+type LiveFallbackRow = QueryResultRow & {
+	authority_count: string | number;
+	publication_id: string | null;
+	revision: string | number | null;
+	manifest: unknown;
+	source_checked_at: string | Date | null;
+	event_lives: unknown;
+	fixtures: unknown;
+	event_live_item_count: string | number | null;
+	fixture_item_count: string | number | null;
+	event_live_checksum: string | null;
+	fixture_checksum: string | null;
+};
+
+/**
+ * PostgreSQL is a read-through for the exact active live publication. The
+ * item rows are never mixed with Redis or rebuilt from mutable tables: both
+ * item checksums, counts, and the single active manifest must agree.
+ */
+const LIVE_FALLBACK_SQL = `
+	WITH active_publication AS MATERIALIZED (
+		SELECT
+			publication_id::text,
+			revision::text,
+			manifest,
+			COALESCE(manifest ->> 'sourceCheckedAt', activated_at::text) AS source_checked_at
+		FROM ops.dataset_publications
+		WHERE dataset = 'fpl:live'
+		  AND season_id = $1
+		  AND event_id = $2
+		  AND status = 'active'
+	), authority AS (
+		SELECT
+			count(*)::text AS authority_count,
+			min(publication_id) AS publication_id,
+			min(revision) AS revision,
+			min(manifest::text)::jsonb AS manifest,
+			min(source_checked_at) AS source_checked_at
+		FROM active_publication
+	)
+	SELECT
+		authority.*,
+		(
+			SELECT payload
+			FROM ops.dataset_publication_items item
+			JOIN active_publication publication ON item.publication_id::text = publication.publication_id
+			WHERE item.item_name = 'eventLive'
+		) AS event_lives,
+		(
+			SELECT payload
+			FROM ops.dataset_publication_items item
+			JOIN active_publication publication ON item.publication_id::text = publication.publication_id
+			WHERE item.item_name = 'fixtures'
+		) AS fixtures,
+		(
+			SELECT item.item_count
+			FROM ops.dataset_publication_items item
+			JOIN active_publication publication ON item.publication_id::text = publication.publication_id
+			WHERE item.item_name = 'eventLive'
+		) AS event_live_item_count,
+		(
+			SELECT item.item_count
+			FROM ops.dataset_publication_items item
+			JOIN active_publication publication ON item.publication_id::text = publication.publication_id
+			WHERE item.item_name = 'fixtures'
+		) AS fixture_item_count,
+		(
+			SELECT item.checksum
+			FROM ops.dataset_publication_items item
+			JOIN active_publication publication ON item.publication_id::text = publication.publication_id
+			WHERE item.item_name = 'eventLive'
+		) AS event_live_checksum,
+		(
+			SELECT item.checksum
+			FROM ops.dataset_publication_items item
+			JOIN active_publication publication ON item.publication_id::text = publication.publication_id
+			WHERE item.item_name = 'fixtures'
+		) AS fixture_checksum
+	FROM authority
+`;
+
+const liveFallbackPublication = (
+	context: GraphQLContext,
+	row: LiveFallbackRow | undefined,
+	eventId: number,
+	expectedManifest?: DataPublicationManifest | null
+): DataPublication | null => {
+	const revision = integer(row?.revision);
+	const manifest = row?.manifest
+		? parseDataPublicationManifest(JSON.stringify(row.manifest), {
+				dataset: "fpl:live",
+				seasonCode: context.currentSeason.seasonCode,
+				eventId,
+			})
+		: null;
+	const eventLiveItem = manifest?.items.find((item) => item.name === "eventLive");
+	const fixtureItem = manifest?.items.find((item) => item.name === "fixtures");
+	const eventLives = row?.event_lives;
+	const fixtures = row?.fixtures;
+	const eventLiveCount = integer(row?.event_live_item_count);
+	const fixtureCount = integer(row?.fixture_item_count);
+	if (
+		!row ||
+		integer(row.authority_count) !== 1 ||
+		typeof row.publication_id !== "string" ||
+		revision === null ||
+		!manifest ||
+		manifest.publicationId !== row.publication_id ||
+		manifest.revision !== revision ||
+		manifest.eventId !== eventId ||
+		manifest.items.length !== LIVE_PUBLICATION_ITEMS.length ||
+		!eventLiveItem ||
+		!fixtureItem ||
+		!Array.isArray(eventLives) ||
+		!Array.isArray(fixtures) ||
+		eventLiveCount === null ||
+		fixtureCount === null ||
+		eventLiveCount !== eventLives.length ||
+		fixtureCount !== fixtures.length ||
+		row.event_live_checksum !== eventLiveItem.sha256 ||
+		row.fixture_checksum !== fixtureItem.sha256 ||
+		(expectedManifest !== null &&
+			expectedManifest !== undefined &&
+			(manifest.publicationId !== expectedManifest.publicationId ||
+				manifest.revision !== expectedManifest.revision))
+	) {
+		return null;
+	}
+	return { manifest, items: { eventLive: eventLives, fixtures } };
+};
+
+async function loadLivePublicationFromPostgres(
+	context: GraphQLContext,
+	eventId: number,
+	expectedManifest?: DataPublicationManifest | null
+): Promise<DataPublication | null> {
+	const result = await context.database.query<LiveFallbackRow>(LIVE_FALLBACK_SQL, [
+		context.currentSeason.seasonId,
+		eventId,
+	]);
+	return liveFallbackPublication(context, result.rows[0], eventId, expectedManifest);
+}
+
 const CORE_EVENT_FALLBACK_SQL = `
 	WITH active_publication AS MATERIALIZED (
 		SELECT
@@ -1596,7 +1756,8 @@ const liveStateFromFixtures = (fixtures: readonly CoreFixtureData[]): LiveSnapsh
 const publicationLiveSnapshot = (
 	publication: DataPublication,
 	eventId: number,
-	core: CoreLiveIdentitySnapshot
+	core: CoreLiveIdentitySnapshot,
+	source: DataSnapshotSource = "redis"
 ): LiveDataSnapshot | null => {
 	const eventLives = mapArray(publication.items.eventLive, mapLivePerformance);
 	const fixtures = mapArray(publication.items.fixtures, mapCoreFixture);
@@ -1625,7 +1786,7 @@ const publicationLiveSnapshot = (
 		return null;
 	}
 	return {
-		source: "redis",
+		source,
 		seasonCode: publication.manifest.seasonCode,
 		eventId,
 		revision: String(publication.manifest.revision),
@@ -1879,6 +2040,21 @@ export const getLiveDataSnapshot = (
 		]);
 		const snapshot = published ? publicationLiveSnapshot(published, eventId, core) : null;
 		if (snapshot) return snapshot;
+		let databasePublication: DataPublication | null;
+		try {
+			databasePublication = await loadLivePublicationFromPostgres(context, eventId, manifest);
+		} catch (error) {
+			throw new Error(
+				`LIVE_PUBLICATION_UNAVAILABLE:${context.currentSeason.seasonCode}:${eventId}:${
+					manifest?.revision ?? "none"
+				}`,
+				{ cause: error }
+			);
+		}
+		const databaseSnapshot = databasePublication
+			? publicationLiveSnapshot(databasePublication, eventId, core, "postgres")
+			: null;
+		if (databaseSnapshot) return databaseSnapshot;
 		throw new Error(
 			`LIVE_PUBLICATION_UNAVAILABLE:${context.currentSeason.seasonCode}:${eventId}:${manifest?.revision ?? "none"}`
 		);

@@ -1122,6 +1122,28 @@ const fetchLivePerformanceFromDbByEventsAndPlayerIds = async (
 
 	return (data as unknown as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
 };
+
+const fetchLivePerformancesFromDbByEvents = async (
+	context: GraphQLContext,
+	eventIds: number[]
+): Promise<LivePerformance[]> => {
+	const uniqueEventIds = Array.from(
+		new Set(eventIds.filter((id) => Number.isFinite(id) && id > 0))
+	);
+	if (uniqueEventIds.length === 0) return [];
+	const { data, error } = await context.data
+		.read("fpl.player_gameweek_stats")
+		.select(EVENT_LIVES_PROJECTION)
+		.in("event_id", uniqueEventIds);
+	if (error) {
+		context.logger.warn(
+			{ err: error, eventIds: uniqueEventIds },
+			"Live publication unavailable and PostgreSQL live read-through failed"
+		);
+		return [];
+	}
+	return (data as unknown as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
+};
 const LIVE_EXPLAIN_CACHE_TTL_SEC = 10;
 const LIVE_EXPLAIN_SINGLEFLIGHT_BATCH_SIZE = 100;
 
@@ -1381,7 +1403,21 @@ export const liveRepository: LiveRepository = {
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) {
 			return new Map();
 		}
-		const snapshot = await getLiveDataSnapshot(context, eventId);
+		const snapshot = await getLiveDataSnapshot(context, eventId).catch(async (error) => {
+			context.logger.info(
+				{ eventId, err: error instanceof Error ? error.message : "unknown" },
+				"Live publication unavailable; returning durable last-good player rows"
+			);
+			return null;
+		});
+		if (!snapshot) {
+			return new Map(
+				(await fetchLivePerformancesFromDbByEvents(context, [eventId])).map((performance) => [
+					performance.playerId,
+					performance,
+				])
+			);
+		}
 		return new Map(
 			snapshot.eventLives.map((row) => {
 				const performance = mapPublishedLivePerformance(row);

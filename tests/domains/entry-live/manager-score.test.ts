@@ -85,7 +85,7 @@ describe("official manager live score contract", () => {
 		expect(gross.score.netEventPoints).toBe(42);
 	});
 
-	it("returns unavailable when the official value is too old", () => {
+	it("keeps the last-good official value when the upstream refresh is too old", () => {
 		const checkedAt = new Date(Date.now() - 11 * 60_000);
 		const result = buildManagerScore({
 			row: row({
@@ -98,10 +98,10 @@ describe("official manager live score contract", () => {
 			transferCost: 4,
 			detailEventPoints: 39,
 		});
-		expect(result.score.source).toBe("UNAVAILABLE");
-		expect(result.score.state).toBe("UNAVAILABLE");
-		expect(result.score.eventPoints).toBeNull();
-		expect(result.score.reasonCodes).toContain("SOURCE_TOO_OLD");
+		expect(result.score.source).toBe("FPL_ENTRY_SUMMARY");
+		expect(result.score.state).toBe("STALE");
+		expect(result.score.eventPoints).toBe(42);
+		expect(result.score.reasonCodes).toContain("UPSTREAM_UNAVAILABLE");
 	});
 
 	it("does not use local totals while an official row is missing its score", () => {
@@ -190,6 +190,51 @@ describe("official manager live score contract", () => {
 			official(2, 12),
 			unavailable,
 		]);
+		expect(ranked.find((item) => item.entry === 1)?.rank).toBe(1);
+		expect(ranked.find((item) => item.entry === 2)?.rank).toBe(1);
+		expect(ranked.find((item) => item.entry === 3)?.rank).toBe(0);
+	});
+
+	it("ranks H2H rows only from explicit official net points", () => {
+		const netRow = (
+			entry: number,
+			eventPoints: number,
+			totalPoints: number,
+			previousOverallPoints: number,
+			transferCost: number
+		) => ({
+			entry,
+			rank: 0,
+			score: buildManagerScore({
+				row: row({ entryId: entry, eventPoints, totalPoints }),
+				upstreamErrorCode: null,
+				provisional: true,
+				available: true,
+				transferCost,
+				previousOverallPoints,
+				detailEventPoints: eventPoints,
+			}).score,
+		});
+		const ranked = rankTournamentRowsByOfficialEventPoints(
+			[
+				netRow(1, 20, 120, 100, 0),
+				netRow(2, 21, 120, 100, 1),
+				{
+					entry: 3,
+					rank: 0,
+					score: buildManagerScore({
+						row: row({ entryId: 3, eventPoints: 22 }),
+						upstreamErrorCode: null,
+						provisional: true,
+						available: true,
+						transferCost: 0,
+						detailEventPoints: 22,
+					}).score,
+				},
+			],
+			{ useNet: true }
+		);
+
 		expect(ranked.find((item) => item.entry === 1)?.rank).toBe(1);
 		expect(ranked.find((item) => item.entry === 2)?.rank).toBe(1);
 		expect(ranked.find((item) => item.entry === 3)?.rank).toBe(0);

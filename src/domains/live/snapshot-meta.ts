@@ -139,25 +139,36 @@ export const loadLiveSnapshotMeta = async (
 	}
 	const memoized = eventMeta.get(eventId);
 	if (memoized) return memoized;
-	const load = (async (): Promise<LiveSnapshotMeta> => {
-		const snapshot = await getLiveDataSnapshot(context, eventId);
-		const meta: LiveSnapshotMeta = {
-			season: snapshot.seasonCode,
-			eventId,
-			revision: snapshot.revision,
-			publicationId: snapshot.publicationId,
-			state: snapshot.state,
-			publishedAt: snapshot.publishedAt,
-			checkedAt: snapshot.sourceCheckedAt,
-			eventLiveCount: snapshot.eventLives.length,
-			fixtureCount: snapshot.fixtures.length,
-			fixtureTeamCount: new Set(
-				snapshot.fixtures.flatMap((fixture) => [fixture.teamHId, fixture.teamAId])
-			).size,
-			bonusTeamCount: 0,
-		};
-		rememberSource(context, eventId, snapshot.source);
-		return meta;
+	const load = (async (): Promise<LiveSnapshotMeta | null> => {
+		try {
+			const snapshot = await getLiveDataSnapshot(context, eventId);
+			const meta: LiveSnapshotMeta = {
+				season: snapshot.seasonCode,
+				eventId,
+				revision: snapshot.revision,
+				publicationId: snapshot.publicationId,
+				state: snapshot.state,
+				publishedAt: snapshot.publishedAt,
+				checkedAt: snapshot.sourceCheckedAt,
+				eventLiveCount: snapshot.eventLives.length,
+				fixtureCount: snapshot.fixtures.length,
+				fixtureTeamCount: new Set(
+					snapshot.fixtures.flatMap((fixture) => [fixture.teamHId, fixture.teamAId])
+				).size,
+				bonusTeamCount: 0,
+			};
+			rememberSource(context, eventId, snapshot.source);
+			return meta;
+		} catch (error) {
+			if (
+				String(error instanceof Error ? error.message : error).startsWith(
+					"LIVE_PUBLICATION_UNAVAILABLE"
+				)
+			) {
+				return null;
+			}
+			throw error;
+		}
 	})();
 	eventMeta.set(eventId, load);
 	return load;

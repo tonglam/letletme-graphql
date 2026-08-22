@@ -157,7 +157,7 @@ describe("live snapshot metadata", () => {
 			}
 		);
 
-		await expect(loadLiveSnapshotMeta(context, 1)).rejects.toThrow("LIVE_PUBLICATION_UNAVAILABLE");
+		expect(await loadLiveSnapshotMeta(context, 1)).toBeNull();
 		expect(isLiveSnapshotDatabaseFallback(context, 1)).toBe(false);
 		expect(isLiveSnapshotConsistencyActive(context, 1)).toBe(false);
 	});

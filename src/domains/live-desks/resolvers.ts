@@ -5,13 +5,14 @@ import {
 	getCoreEventSnapshot,
 	getCoreFixtureSnapshot,
 	getCoreLiveIdentitySnapshot,
-	getLiveDataPublicationManifest,
+	getLiveDataPublicationManifestWithSource,
 	getLiveDataSnapshot,
 	type CoreEventSnapshot,
 	type CoreFixtureSnapshot,
 	type CoreLiveIdentitySnapshot,
 	type LiveDataSnapshot,
 } from "../../infra/data-snapshot";
+import type { DataPublicationManifest } from "../../infra/data-publication";
 import { entryLiveBatchService } from "../entry-live/batch-service";
 import {
 	managerScoreBoardIsFinal,
@@ -25,6 +26,7 @@ import {
 	readCompetitionBoardCache,
 	writeCompetitionBoardCache,
 } from "./competition-board-cache";
+import { resolveLiveWindow, type LiveWindow } from "./window";
 
 type LiveRef = { season: string; eventId: number; revision: string };
 
@@ -34,6 +36,91 @@ const isStale = (sourceCheckedAt: string | null | undefined): boolean => {
 	if (!sourceCheckedAt) return true;
 	const checkedAt = Date.parse(sourceCheckedAt);
 	return !Number.isFinite(checkedAt) || Date.now() - checkedAt > LIVE_STALE_AFTER_MS;
+};
+
+const compatibilityState = (
+	window: LiveWindow
+): "LIVE_ACTIVE" | "GW_REVIEW" | "FINALIZED" | "SCHEDULED" => {
+	switch (window.windowState) {
+		case "LIVE_ACTIVE":
+		case "DAY_SETTLING":
+		case "BETWEEN_FIXTURES":
+			return "LIVE_ACTIVE";
+		case "GW_REVIEW":
+			return "GW_REVIEW";
+		case "FINALIZED":
+		case "BETWEEN_GAMEWEEKS":
+			return "FINALIZED";
+		default:
+			return "SCHEDULED";
+	}
+};
+
+const snapshotStateForWindow = (window: LiveWindow): "SCHEDULED" | "LIVE" | "SETTLED" => {
+	if (window.windowState === "PRESEASON" || window.windowState === "EVENT_SCHEDULED")
+		return "SCHEDULED";
+	if (window.windowState === "FINALIZED" || window.windowState === "BETWEEN_GAMEWEEKS")
+		return "SETTLED";
+	return "LIVE";
+};
+
+const livePublicationState = (
+	manifest: DataPublicationManifest | null
+): "scheduled" | "live" | "settled" | null =>
+	manifest && manifest.state !== "active" ? manifest.state : null;
+
+const readLiveWindow = async (context: GraphQLContext) => {
+	const [eventCore, fixtureCore, core] = await Promise.all([
+		getCoreEventSnapshot(context),
+		getCoreFixtureSnapshot(context),
+		getCoreLiveIdentitySnapshot(context),
+	]);
+	const currentEventId = eventCore.currentEventId;
+	const currentPublication = currentEventId
+		? await getLiveDataPublicationManifestWithSource(context, currentEventId).catch(() => null)
+		: null;
+	const currentManifest = currentPublication?.manifest ?? null;
+	const initialWindow = resolveLiveWindow({
+		events: eventCore.events,
+		fixtures: fixtureCore.fixtures,
+		currentEventId,
+		nextEventId: eventCore.events.find((event) => event.isNext)?.id ?? null,
+		liveRevision: currentManifest ? String(currentManifest.revision) : null,
+		liveEventId: currentManifest ? currentEventId : null,
+		publicationState: livePublicationState(currentManifest),
+		sourceCheckedAt: currentManifest?.sourceCheckedAt ?? fixtureCore.sourceCheckedAt,
+		publishedAt: currentManifest?.publishedAt ?? fixtureCore.sourceCheckedAt,
+		source: currentPublication?.source ?? fixtureCore.source,
+	});
+	const anchorPublication =
+		initialWindow.anchorEventId && initialWindow.anchorEventId !== currentEventId
+			? await getLiveDataPublicationManifestWithSource(context, initialWindow.anchorEventId).catch(
+					() => null
+				)
+			: currentPublication;
+	const anchorManifest = anchorPublication?.manifest ?? null;
+	const window = anchorManifest
+		? resolveLiveWindow({
+				events: eventCore.events,
+				fixtures: fixtureCore.fixtures,
+				currentEventId,
+				nextEventId: initialWindow.nextEventId,
+				liveRevision: String(anchorManifest.revision),
+				liveEventId: initialWindow.anchorEventId,
+				publicationState: livePublicationState(anchorManifest),
+				sourceCheckedAt: anchorManifest.sourceCheckedAt,
+				publishedAt: anchorManifest.publishedAt,
+				source: anchorPublication?.source ?? fixtureCore.source,
+			})
+		: initialWindow;
+	return {
+		eventCore,
+		fixtureCore,
+		core,
+		window,
+		manifest: anchorManifest,
+		publicationSource: anchorPublication?.source ?? null,
+	};
 };
 
 const resolveSnapshot = async (
@@ -65,26 +152,6 @@ const resolveSnapshot = async (
 const teamName = (core: Pick<CoreLiveIdentitySnapshot, "teams">, id: number): string =>
 	core.teams.find((team) => team.id === id)?.name ?? "";
 
-const teamShortName = (core: Pick<CoreLiveIdentitySnapshot, "teams">, id: number): string =>
-	core.teams.find((team) => team.id === id)?.shortName ?? "";
-
-const liveContextState = (
-	publicationState: "active" | "scheduled" | "live" | "settled",
-	currentEvent: { finished?: boolean; dataChecked?: boolean } | null | undefined
-) => {
-	switch (publicationState) {
-		case "live":
-		case "active":
-			return "LIVE_ACTIVE" as const;
-		case "settled":
-			return currentEvent?.finished && currentEvent.dataChecked
-				? ("FINALIZED" as const)
-				: ("GW_REVIEW" as const);
-		case "scheduled":
-		default:
-			return "SCHEDULED" as const;
-	}
-};
 const matchRows = (
 	eventId: number,
 	fixtures: LiveDataSnapshot["fixtures"],
@@ -95,10 +162,8 @@ const matchRows = (
 		eventId,
 		homeTeamId: fixture.teamHId,
 		homeTeamName: teamName(core, fixture.teamHId),
-		homeTeamShortName: teamShortName(core, fixture.teamHId),
 		awayTeamId: fixture.teamAId,
 		awayTeamName: teamName(core, fixture.teamAId),
-		awayTeamShortName: teamShortName(core, fixture.teamAId),
 		homeScore: fixture.teamHScore,
 		awayScore: fixture.teamAScore,
 		kickoffTime: fixture.kickoffTime,
@@ -113,18 +178,24 @@ const scheduledMatchdayDesk = (
 	eventCore: CoreEventSnapshot,
 	fixtureCore: CoreFixtureSnapshot,
 	eventId: number,
-	manifest: Awaited<ReturnType<typeof getLiveDataPublicationManifest>>
+	manifest: DataPublicationManifest | null,
+	publicationSource: "redis" | "postgres" | null,
+	window: LiveWindow
 ) => {
 	const nextEventId = eventCore.events.find((event) => event.isNext)?.id ?? null;
 	return {
 		season: fixtureCore.seasonCode,
 		eventId,
 		revision: manifest ? String(manifest.revision) : `scheduled-core-${fixtureCore.revision}`,
-		state: "SCHEDULED" as const,
+		state: snapshotStateForWindow(window),
+		windowState: window.windowState,
+		dataAvailability: window.dataAvailability,
+		liveRevision: window.liveRevision,
 		sourceCheckedAt: manifest?.sourceCheckedAt ?? fixtureCore.sourceCheckedAt,
 		// Keep the non-null GraphQL contract without pretending that core data is
 		// a live publication. This timestamp is only used for freshness display.
 		publishedAt: manifest?.publishedAt ?? fixtureCore.sourceCheckedAt,
+		source: manifest ? publicationSource?.toUpperCase() : "CORE",
 		stale: isStale(manifest?.sourceCheckedAt ?? fixtureCore.sourceCheckedAt),
 		matches: matchRows(
 			eventId,
@@ -157,23 +228,29 @@ const assertMember = async (context: GraphQLContext, tournamentId: number, entry
 const managerBoardMeta = (
 	board: Array<{
 		entry: number;
-		score?: { eventPoints?: number | null; source?: string; revision?: string | null };
-	}>
+		score?: {
+			eventPoints?: number | null;
+			netEventPoints?: number | null;
+			eventPointSemantics?: string;
+			source?: string;
+			revision?: string | null;
+		};
+	}>,
+	options: { requireNet?: boolean } = {}
 ) => {
 	const isOfficialSource = (source?: string): boolean =>
 		source === "FPL_ENTRY_SUMMARY" ||
 		source === "FPL_CLASSIC_STANDINGS" ||
 		source === "FPL_FINAL_RESULT";
+	const hasOfficialMetric = (score?: (typeof board)[number]["score"]): boolean =>
+		isOfficialSource(score?.source) &&
+		(options.requireNet
+			? typeof score?.netEventPoints === "number" && score.eventPointSemantics !== "UNKNOWN"
+			: typeof score?.eventPoints === "number");
 	const unavailableEntryIds = board
-		.filter(
-			(row) =>
-				row.score?.source === "UNAVAILABLE" ||
-				(isOfficialSource(row.score?.source) && typeof row.score?.eventPoints !== "number")
-		)
+		.filter((row) => row.score?.source === "UNAVAILABLE" || !hasOfficialMetric(row.score))
 		.map((row) => row.entry);
-	const officialRows = board.filter(
-		(row) => isOfficialSource(row.score?.source) && typeof row.score?.eventPoints === "number"
-	);
+	const officialRows = board.filter((row) => hasOfficialMetric(row.score));
 	const revisions = board
 		.map((row) => (row.score?.revision ? `${row.entry}:${row.score.revision}` : null))
 		.filter((revision): revision is string => Boolean(revision))
@@ -192,21 +269,29 @@ const managerBoardMeta = (
 export const liveDesksResolvers = {
 	Query: {
 		liveContext: async (_parent: unknown, _args: unknown, context: GraphQLContext) => {
-			const core = await getCoreEventSnapshot(context);
-			const eventId = core.currentEventId;
-			const current = eventId ? await getLiveDataPublicationManifest(context, eventId) : null;
-			const currentEvent = eventId ? core.events.find((event) => event.id === eventId) : null;
+			const { eventCore, window, manifest, publicationSource } = await readLiveWindow(context);
 			return {
 				season: context.currentSeason.seasonCode,
-				coreRevision: core.revision,
-				currentEventId: eventId,
-				nextEventId: core.events.find((event) => event.isNext)?.id ?? null,
-				liveRevision: current ? String(current.revision) : null,
-				state: current ? liveContextState(current.state, currentEvent) : "SCHEDULED",
-				sourceCheckedAt: current?.sourceCheckedAt ?? null,
-				publishedAt: current?.publishedAt ?? null,
-				source: current ? (isStale(current.sourceCheckedAt) ? "STALE" : "REDIS") : null,
-				stale: isStale(current?.sourceCheckedAt),
+				coreRevision: eventCore.revision,
+				currentEventId: window.currentEventId,
+				nextEventId: window.nextEventId,
+				anchorEventId: window.anchorEventId,
+				latestFinalizedEventId: window.latestFinalizedEventId,
+				liveRevision: window.liveRevision,
+				state: compatibilityState(window),
+				windowState: window.windowState,
+				producerState: window.producerState,
+				anchorMode: window.anchorMode,
+				dataAvailability: window.dataAvailability,
+				sourceCheckedAt: window.sourceCheckedAt,
+				publishedAt: window.publishedAt,
+				source: manifest
+					? (publicationSource?.toUpperCase() ?? null)
+					: window.anchorEventId
+						? "CORE"
+						: null,
+				stale: window.stale,
+				nextRefreshAt: window.nextRefreshAt,
 			};
 		},
 		liveMatchdayDesk: async (
@@ -219,46 +304,70 @@ export const liveDesksResolvers = {
 					extensions: { code: "LIVE_REVISION_GONE" },
 				});
 			}
-			const eventCore = await getCoreEventSnapshot(context);
-			const eventId = args.ref?.eventId ?? eventCore.currentEventId ?? 0;
-			const manifest = eventId > 0 ? await getLiveDataPublicationManifest(context, eventId) : null;
-			const currentEvent = eventCore.events.find((event) => event.id === eventId);
-			const lifecycleState = manifest
-				? liveContextState(manifest.state, currentEvent)
-				: "SCHEDULED";
-
-			if (lifecycleState === "SCHEDULED") {
-				if (args.ref && (!manifest || String(manifest.revision) !== args.ref.revision)) {
-					throw new GraphQLError("Requested live revision has expired", {
-						extensions: { code: "LIVE_REVISION_GONE" },
-					});
-				}
-				return scheduledMatchdayDesk(
+			const { eventCore, fixtureCore, core, window, manifest, publicationSource } =
+				await readLiveWindow(context);
+			const eventId = args.ref?.eventId ?? window.anchorEventId ?? eventCore.currentEventId ?? 0;
+			const eventPublication =
+				eventId !== window.anchorEventId
+					? await getLiveDataPublicationManifestWithSource(context, eventId).catch(() => null)
+					: manifest
+						? { manifest, source: publicationSource }
+						: null;
+			const eventManifest = eventPublication?.manifest ?? null;
+			const coreDesk = (
+				usableManifest = eventManifest,
+				usableSource = eventPublication?.source ?? null
+			) =>
+				scheduledMatchdayDesk(
 					eventCore,
-					await getCoreFixtureSnapshot(context),
+					fixtureCore,
 					eventId,
-					manifest
+					usableManifest,
+					usableSource,
+					window
 				);
+			let snapshot: LiveDataSnapshot | null = null;
+			if (eventId > 0) {
+				snapshot = await getLiveDataSnapshot(context, eventId).catch(() => null);
 			}
-
-			const [{ snapshot, core }, fixtureCore] = await Promise.all([
-				resolveSnapshot(context, args.ref),
-				getCoreFixtureSnapshot(context),
-			]);
-			const nextEventId = eventCore.events.find((event) => event.isNext)?.id ?? null;
+			if (args.ref && (!snapshot || snapshot.revision !== args.ref.revision)) {
+				throw new GraphQLError("Requested live revision has expired", {
+					extensions: { code: "LIVE_REVISION_GONE" },
+				});
+			}
+			// A manifest without all immutable items is not a usable live revision.
+			// Keep the core schedule visible, but do not expose the broken revision as
+			// if it were a valid live overlay.
+			if (!snapshot) return coreDesk(null);
+			const snapshotWindow = resolveLiveWindow({
+				events: eventCore.events,
+				fixtures: fixtureCore.fixtures,
+				currentEventId: eventCore.currentEventId,
+				nextEventId: window.nextEventId,
+				liveRevision: snapshot.revision,
+				liveEventId: snapshot.eventId,
+				publicationState: snapshot.state,
+				sourceCheckedAt: snapshot.sourceCheckedAt,
+				publishedAt: snapshot.publishedAt,
+				source: snapshot.source,
+			});
 			return {
 				season: snapshot.seasonCode,
 				eventId: snapshot.eventId,
 				revision: snapshot.revision,
 				state: snapshot.state.toUpperCase(),
+				windowState: snapshotWindow.windowState,
+				dataAvailability: snapshotWindow.dataAvailability,
+				liveRevision: snapshot.revision,
 				sourceCheckedAt: snapshot.sourceCheckedAt,
 				publishedAt: snapshot.publishedAt,
+				source: snapshot.source === "postgres" ? "POSTGRES" : "REDIS",
 				stale: isStale(snapshot.sourceCheckedAt),
 				matches: matchRows(snapshot.eventId, snapshot.fixtures, core),
-				nextFixtures: nextEventId
+				nextFixtures: window.nextEventId
 					? matchRows(
-							nextEventId,
-							fixtureCore.fixtures.filter((fixture) => fixture.eventId === nextEventId),
+							window.nextEventId,
+							fixtureCore.fixtures.filter((fixture) => fixture.eventId === window.nextEventId),
 							fixtureCore
 						)
 					: [],
@@ -295,15 +404,47 @@ export const liveDesksResolvers = {
 			args: { entryId: number; selectedTournamentId?: number | null; ref?: LiveRef | null },
 			context: GraphQLContext
 		) => {
-			const [tournaments, resolved, eventCore] = await Promise.all([
+			const [tournaments, eventCore, fixtureCore] = await Promise.all([
 				tournamentsService.getEntryTournaments(context, args.entryId),
-				resolveSnapshot(context, args.ref),
 				getCoreEventSnapshot(context),
+				getCoreFixtureSnapshot(context),
 			]);
-			const event = eventCore.events.find(
-				(candidate) => candidate.id === resolved.snapshot.eventId
-			);
+			const window = resolveLiveWindow({
+				events: eventCore.events,
+				fixtures: fixtureCore.fixtures,
+				currentEventId: eventCore.currentEventId,
+				nextEventId: eventCore.events.find((event) => event.isNext)?.id ?? null,
+				liveRevision: null,
+				sourceCheckedAt: fixtureCore.sourceCheckedAt,
+				publishedAt: fixtureCore.sourceCheckedAt,
+				source: fixtureCore.source,
+			});
+			const eventId = args.ref?.eventId ?? window.anchorEventId ?? eventCore.currentEventId ?? 0;
+			const snapshot =
+				eventId > 0 ? await getLiveDataSnapshot(context, eventId).catch(() => null) : null;
+			if (args.ref && (!snapshot || snapshot.revision !== args.ref.revision)) {
+				throw new GraphQLError("Requested live revision has expired", {
+					extensions: { code: "LIVE_REVISION_GONE" },
+				});
+			}
+			const event = eventCore.events.find((candidate) => candidate.id === eventId);
+			const deskWindow = snapshot
+				? resolveLiveWindow({
+						events: eventCore.events,
+						fixtures: fixtureCore.fixtures,
+						currentEventId: eventCore.currentEventId,
+						nextEventId: window.nextEventId,
+						liveRevision: snapshot.revision,
+						liveEventId: snapshot.eventId,
+						publicationState: snapshot.state,
+						sourceCheckedAt: snapshot.sourceCheckedAt,
+						publishedAt: snapshot.publishedAt,
+						source: snapshot.source,
+					})
+				: window;
 			const provisional = !(event?.finished && event.dataChecked);
+			const deskRevision = snapshot?.revision ?? null;
+			const deskState = snapshot?.state.toUpperCase() ?? snapshotStateForWindow(window);
 			// A stale/deep-linked tournament id must not trigger an authorization
 			// probe for an arbitrary tournament. Fall back to the first membership
 			// returned for this entry and keep the desk single-request.
@@ -317,9 +458,12 @@ export const liveDesksResolvers = {
 			if (!selected)
 				return {
 					season: context.currentSeason.seasonCode,
-					eventId: resolved.snapshot.eventId,
-					revision: resolved.snapshot.revision,
-					state: resolved.snapshot.state.toUpperCase(),
+					eventId,
+					revision: deskRevision,
+					state: deskState,
+					windowState: deskWindow.windowState,
+					dataAvailability: deskWindow.dataAvailability,
+					nextRefreshAt: deskWindow.nextRefreshAt,
 					tournaments,
 					selectedTournamentId: null,
 					board: [],
@@ -331,14 +475,17 @@ export const liveDesksResolvers = {
 					totalEntries: 0,
 				};
 			await assertMember(context, selected, args.entryId);
-			const boardCacheKey = competitionBoardCacheKey(context, resolved.snapshot, selected);
+			const selectedTournament = tournaments.find((tournament) => tournament.id === selected);
+			const requireNet = selectedTournament?.leagueType === LeagueType.H2H;
+			const boardCacheKey = snapshot ? competitionBoardCacheKey(context, snapshot, selected) : null;
 			// Manager scores have an independent revision from the player-live
 			// publication. Do not serve a provisional board cache keyed only by the
 			// player revision; the Data service's bounded Redis read is the source
 			// of truth for this request.
-			const cachedCandidate = provisional
-				? null
-				: await readCompetitionBoardCache(context, boardCacheKey);
+			const cachedCandidate =
+				provisional || !boardCacheKey
+					? null
+					: await readCompetitionBoardCache(context, boardCacheKey);
 			const cachedRows = cachedCandidate?.board as
 				| Array<{
 						entry: number;
@@ -353,14 +500,24 @@ export const liveDesksResolvers = {
 				const boardMeta = managerBoardMeta(
 					cachedBoard.board as Array<{
 						entry: number;
-						score?: { eventPoints?: number | null; source?: string; revision?: string | null };
-					}>
+						score?: {
+							eventPoints?: number | null;
+							netEventPoints?: number | null;
+							eventPointSemantics?: string;
+							source?: string;
+							revision?: string | null;
+						};
+					}>,
+					{ requireNet }
 				);
 				return {
 					season: context.currentSeason.seasonCode,
-					eventId: resolved.snapshot.eventId,
-					revision: resolved.snapshot.revision,
-					state: resolved.snapshot.state.toUpperCase(),
+					eventId,
+					revision: deskRevision,
+					state: deskState,
+					windowState: deskWindow.windowState,
+					dataAvailability: deskWindow.dataAvailability,
+					nextRefreshAt: deskWindow.nextRefreshAt,
 					tournaments,
 					selectedTournamentId: selected,
 					...boardMeta,
@@ -368,25 +525,29 @@ export const liveDesksResolvers = {
 				};
 			}
 			const entryIds = await tournamentsService.getTournamentEntryIds(context, selected);
-			const selectedTournament = tournaments.find((tournament) => tournament.id === selected);
 			const result = await entryLiveBatchService.calcLivePointsForEntries(
 				context,
-				resolved.snapshot.eventId,
+				eventId,
 				entryIds,
 				true,
 				{ tournamentId: selected, legacyH2H: selectedTournament?.leagueType === LeagueType.H2H }
 			);
-			const board = rankTournamentRowsByOfficialEventPoints(Array.from(result.results.values()));
-			const boardMeta = managerBoardMeta(board);
+			const board = rankTournamentRowsByOfficialEventPoints(Array.from(result.results.values()), {
+				useNet: requireNet,
+			});
+			const boardMeta = managerBoardMeta(board, { requireNet });
 			// `revision` remains the player-live publication ref so existing
 			// LiveRevisionRefInput callers can round-trip it. `managerRevision` is
 			// the stable composite of all manager-score rows and is the independent
 			// freshness signal consumed by the clients.
 			const response = {
 				season: context.currentSeason.seasonCode,
-				eventId: resolved.snapshot.eventId,
-				revision: resolved.snapshot.revision,
-				state: resolved.snapshot.state.toUpperCase(),
+				eventId,
+				revision: deskRevision,
+				state: deskState,
+				windowState: deskWindow.windowState,
+				dataAvailability: deskWindow.dataAvailability,
+				nextRefreshAt: deskWindow.nextRefreshAt,
 				tournaments,
 				selectedTournamentId: selected,
 				...boardMeta,
@@ -395,10 +556,10 @@ export const liveDesksResolvers = {
 				failedEntryIds: result.errors.map((error) => error.entryId),
 				totalEntries: result.meta.totalEntries,
 			};
-			if (result.errors.length === 0 && managerScoreBoardIsFinal(board)) {
+			if (result.errors.length === 0 && managerScoreBoardIsFinal(board) && boardCacheKey) {
 				await writeCompetitionBoardCache(
 					context,
-					boardCacheKey,
+					boardCacheKey!,
 					{
 						board,
 						partial: false,

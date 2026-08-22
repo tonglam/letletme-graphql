@@ -584,18 +584,19 @@ export const entryLiveBatchService = {
 		}
 
 		// Phase 2: load reusable data only for entries that actually have picks.
+		const needsLiveDetails = includeLive && provisional;
 		const useTargetedLiveRead =
-			includeLive && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
+			needsLiveDetails && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
 		const [liveByPlayerRaw, fixtures, teams, transfersByEntry, fullSnapshotMeta] =
 			await Promise.all([
 				prefetched?.liveByPlayer ??
-					(includeLive && !useTargetedLiveRead
+					(needsLiveDetails && !useTargetedLiveRead
 						? liveRepository.getAllLivePerformances(context, eventId)
 						: Promise.resolve(new Map<number, LivePerformance>())),
 				prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
 				prefetched?.teams ?? playersRepository.listTeams(context),
 				entryLiveRepository.getEntryEventTransfersByIds(context, readyEntryIds, eventId),
-				includeLive && !useTargetedLiveRead
+				needsLiveDetails && !useTargetedLiveRead
 					? loadLiveSnapshotMeta(context, eventId)
 					: Promise.resolve(null),
 			]);
@@ -619,6 +620,12 @@ export const entryLiveBatchService = {
 			const stopSnapshot = context.requestTiming?.start("entryLive.liveSnapshot");
 			try {
 				return await liveRepository.getTargetedLiveRead(context, eventId, playerIds);
+			} catch (error) {
+				context.logger.info(
+					{ eventId, err: error instanceof Error ? error.message : "unknown" },
+					"Targeted live publication read unavailable; retaining durable player rows"
+				);
+				return null;
 			} finally {
 				stopSnapshot?.();
 			}
@@ -717,16 +724,17 @@ export const entryLiveBatchService = {
 					previousOverallPoints: perEntry.previousResult?.overallPoints ?? null,
 					nextRefreshAt: managerScores.nextRefreshAt,
 				});
-				// H2H is deliberately outside the official manager-live cutover. Keep
-				// its isolated legacy flat totals intact while the additive score
-				// contract reports the official H2H endpoint as unavailable.
+				// H2H has no official live matchup table. Its provisional result is
+				// safe only when the official manager row carries a provable net-point
+				// semantic; never compare gross/unknown values or local estimates.
+				const h2hHasOfficialNet =
+					manager.score.source !== "UNAVAILABLE" &&
+					typeof manager.score.netEventPoints === "number" &&
+					manager.score.eventPointSemantics !== "UNKNOWN";
 				const headline = legacyH2H
-					? {
-							rank: 0,
-							livePoints: calcData.livePoints,
-							liveNetPoints: calcData.liveNetPoints,
-							liveTotalPoints: calcData.liveTotalPoints,
-						}
+					? h2hHasOfficialNet
+						? manager.headline
+						: { rank: 0, livePoints: 0, liveNetPoints: 0, liveTotalPoints: 0 }
 					: manager.headline;
 				results.set(entryId, {
 					...calcData,

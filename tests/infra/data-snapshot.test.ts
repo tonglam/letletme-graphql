@@ -341,7 +341,7 @@ describe("typed Data snapshots", () => {
 		expect(next.eventLives[0]?.totalPoints).toBe(12);
 	});
 
-	it("rejects an invalid live sibling without mutable PostgreSQL fallback", async () => {
+	it("rejects an invalid live sibling when the exact PostgreSQL publication is unavailable", async () => {
 		const core = buildTestCoreData(1);
 		const corePublication = buildCorePublication("2627", 7, core);
 		const incompleteLives = buildTestEventLives(core, 1).slice(1);
@@ -362,7 +362,7 @@ describe("typed Data snapshots", () => {
 		const context = buildSnapshotContext(new TestRedis(corePublication, livePublication), {
 			databaseQuery: async (sql: unknown, values: unknown) => {
 				calls += 1;
-				expect(String(sql)).toContain("fpl.player_gameweek_stats");
+				expect(String(sql)).toContain("ops.dataset_publications");
 				expect(values).toEqual([2026, 1]);
 				return {
 					rows: [
@@ -393,7 +393,7 @@ describe("typed Data snapshots", () => {
 
 		const failure = await getLiveDataSnapshot(context, 1).catch((error: unknown): unknown => error);
 		expect(String(failure)).toContain("LIVE_PUBLICATION_UNAVAILABLE");
-		expect(calls).toBe(0);
+		expect(calls).toBe(1);
 	});
 
 	it("rejects an empty fallback live row once any fixture has started", async () => {
