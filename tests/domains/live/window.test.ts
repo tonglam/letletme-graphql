@@ -182,6 +182,7 @@ describe("live window contract", () => {
 			source: "redis",
 			lifecycleEventId: 1,
 			lifecycleState: "BETWEEN_FIXTURES",
+			lifecycleObservedAt: "2026-08-08T18:14:30.000Z",
 			lifecycleNextRefreshAt: "2026-08-08T19:00:00.000Z",
 			now: new Date("2026-08-08T18:15:00.000Z"),
 		});
