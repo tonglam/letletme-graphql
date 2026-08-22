@@ -16,7 +16,7 @@ const capabilities = [
 // Trends snapshots are revisioned by their own publication pointer. They are
 // deliberately kept out of the core Data snapshot path, so use an explicit
 // cache-key revision rather than forcing a full core snapshot read.
-const TRENDS_CACHE_SCHEMA_VERSION = "trends-v2";
+const TRENDS_CACHE_SCHEMA_VERSION = "trends-v3";
 
 const trendsRevisionKey = (revision: string): string =>
 	`trends-${createHash("sha256").update(revision, "utf8").digest("hex").slice(0, 24)}`;
@@ -62,6 +62,7 @@ const decodeTrendCohort = (value: unknown): TrendCohort | null => {
 		typeof value.kind !== "string" ||
 		typeof value.access !== "string" ||
 		typeof value.displayName !== "string" ||
+		typeof value.setupStatus !== "string" ||
 		typeof value.exact !== "boolean" ||
 		(value.latestEventId !== null && !Number.isSafeInteger(value.latestEventId)) ||
 		(value.revision !== null && typeof value.revision !== "string") ||
@@ -159,30 +160,40 @@ async function writePublicCache(
 }
 
 function capabilityStatuses(row: Record<string, unknown> | undefined, access: "PUBLIC" | "MINE") {
+	const setupReady = String(row?.setup_status).toLowerCase() === "ready";
 	return [
-		["OWNERSHIP", status(row?.ownership_state)],
-		["EFFECTIVE_OWNERSHIP", status(row?.ownership_state)],
-		["CAPTAINCY", status(row?.captaincy_state)],
-		["VICE_CAPTAINCY", status(row?.vice_captaincy_state)],
-		["TRANSFERS", status(row?.transfers_state)],
-		["PERSONAL_EXPOSURE", access === "MINE" ? status(row?.ownership_state) : "UNSUPPORTED"],
+		["OWNERSHIP", setupReady ? status(row?.ownership_state) : "NOT_READY"],
+		["EFFECTIVE_OWNERSHIP", setupReady ? status(row?.ownership_state) : "NOT_READY"],
+		["CAPTAINCY", setupReady ? status(row?.captaincy_state) : "NOT_READY"],
+		["VICE_CAPTAINCY", setupReady ? status(row?.vice_captaincy_state) : "NOT_READY"],
+		["TRANSFERS", setupReady ? status(row?.transfers_state) : "NOT_READY"],
+		[
+			"PERSONAL_EXPOSURE",
+			access === "MINE" ? (setupReady ? status(row?.ownership_state) : "NOT_READY") : "UNSUPPORTED",
+		],
 	].map(([capability, state]) => ({ capability, state }));
 }
 
-const mapCohort = (row: Record<string, unknown>, access: "PUBLIC" | "MINE") => ({
-	id: `competition:${Number(row.tournament_id)}`,
-	kind: "TRACKED_OFFICIAL_COMPETITION",
-	access,
-	displayName: String(row.display_name ?? row.name ?? `Competition ${row.tournament_id}`),
-	exact: true,
-	latestEventId:
-		row.latest_event_id === null || row.latest_event_id === undefined
-			? null
-			: Number(row.latest_event_id),
-	revision: row.revision === null || row.revision === undefined ? null : String(row.revision),
-	availability: status(row.publication_state ?? "NOT_YET_CAPTURED"),
-	capabilities: capabilityStatuses(row, access),
-});
+const mapCohort = (row: Record<string, unknown>, access: "PUBLIC" | "MINE") => {
+	const setupStatus =
+		typeof row.setup_status === "string" ? row.setup_status.toUpperCase() : "PENDING";
+	return {
+		id: `competition:${Number(row.tournament_id)}`,
+		kind: "TRACKED_OFFICIAL_COMPETITION",
+		access,
+		displayName: String(row.display_name ?? row.name ?? `Competition ${row.tournament_id}`),
+		setupStatus,
+		exact: true,
+		latestEventId:
+			row.latest_event_id === null || row.latest_event_id === undefined
+				? null
+				: Number(row.latest_event_id),
+		revision: row.revision === null || row.revision === undefined ? null : String(row.revision),
+		availability:
+			setupStatus === "READY" ? status(row.publication_state ?? "NOT_YET_CAPTURED") : "NOT_READY",
+		capabilities: capabilityStatuses(row, access),
+	};
+};
 
 type TrendSnapshotPayload = {
 	cohort: TrendCohort;
@@ -218,11 +229,15 @@ export const trendsRepository = {
 		let sql =
 			access === "MINE"
 				? `
-      SELECT tournament.tournament_id, COALESCE(catalog.display_name, tournament.name) AS display_name,
-					latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
+      SELECT tournament.tournament_id, tournament.setup_status,
+        COALESCE(catalog.display_name, tournament.name) AS display_name,
+        latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
 					latest.captured_at AS source_checked_at,
         latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state, latest.transfers_state
-      FROM competition.tournaments tournament
+      FROM competition.tournament_entries member
+      JOIN competition.tournaments tournament
+        ON tournament.season_id = member.season_id
+        AND tournament.tournament_id = member.tournament_id
       LEFT JOIN competition.public_league_trends catalog
         ON catalog.season_id = tournament.season_id AND catalog.tournament_id = tournament.tournament_id
       LEFT JOIN LATERAL (
@@ -235,10 +250,10 @@ export const trendsRepository = {
           AND publication.tournament_id = tournament.tournament_id AND publication.is_active
         ORDER BY publication.event_id DESC, publication.revision DESC LIMIT 1
       ) latest ON true
-      WHERE tournament.season_id = $1 AND tournament.setup_status = 'ready'`
+      WHERE member.season_id = $1 AND member.entry_id = $2`
 				: `
-      SELECT catalog.tournament_id, catalog.display_name,
-				latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
+      SELECT catalog.tournament_id, tournament.setup_status, catalog.display_name,
+        latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
 				latest.captured_at AS source_checked_at,
         latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state, latest.transfers_state
       FROM competition.public_league_trends catalog
@@ -258,7 +273,6 @@ export const trendsRepository = {
       WHERE catalog.season_id = $1 AND catalog.enabled = TRUE`;
 		if (access === "MINE") {
 			params.push(context.principal!.fplEntryId);
-			sql += ` AND EXISTS (SELECT 1 FROM competition.tournament_entries member WHERE member.season_id = tournament.season_id AND member.tournament_id = tournament.tournament_id AND member.entry_id = $2)`;
 		}
 		sql +=
 			access === "MINE"
@@ -327,7 +341,8 @@ export const trendsRepository = {
 		}
 		const cohortResult = await context.database.query<Record<string, unknown>>(
 			`
-      SELECT tournament.tournament_id, COALESCE(catalog.display_name, tournament.name) AS display_name, publication.event_id AS latest_event_id,
+      SELECT tournament.tournament_id, tournament.setup_status,
+        COALESCE(catalog.display_name, tournament.name) AS display_name, publication.event_id AS latest_event_id,
         publication.revision, publication.publication_state, publication.ownership_state,
         publication.captaincy_state, publication.vice_captaincy_state, publication.transfers_state,
         publication.publication_id, publication.expected_entries, publication.captured_at, publication.published_at
