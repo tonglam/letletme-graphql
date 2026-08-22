@@ -744,20 +744,41 @@ const isTypedRecord = (
 		([key, predicate]) => Object.prototype.hasOwnProperty.call(value, key) && predicate(value[key])
 	);
 
-const isEntryIdentityCache = (value: unknown): value is MyFplEntryIdentity =>
-	isTypedRecord(value, {
-		id: isSafeInteger,
-		entryName: (candidate) => typeof candidate === "string",
-		playerName: (candidate) => typeof candidate === "string",
-		region: isNullableString,
-		startedEvent: isNullableSafeInteger,
-		overallPoints: isNullableSafeInteger,
-		overallRank: isNullableSafeInteger,
-		bank: isNullableSafeInteger,
-		teamValue: isNullableSafeInteger,
-		totalTransfers: isNullableSafeInteger,
-		transfersSyncedThroughEventId: isNullableSafeInteger,
-	});
+const isEntryIdentityCache = (value: unknown): value is MyFplEntryIdentity => {
+	if (
+		!isTypedRecord(value, {
+			id: isSafeInteger,
+			entryName: (candidate) => typeof candidate === "string",
+			playerName: (candidate) => typeof candidate === "string",
+			region: isNullableString,
+			startedEvent: isNullableSafeInteger,
+			overallPoints: isNullableSafeInteger,
+			overallRank: isNullableSafeInteger,
+			bank: isNullableSafeInteger,
+			teamValue: isNullableSafeInteger,
+			totalTransfers: isNullableSafeInteger,
+			transfersSyncedThroughEventId: isNullableSafeInteger,
+		})
+	) {
+		return false;
+	}
+	const candidate = value as Record<string, unknown>;
+	if (
+		Object.prototype.hasOwnProperty.call(candidate, "pastSeasonsCheckedAt") &&
+		candidate.pastSeasonsCheckedAt !== null &&
+		!isIsoDateTime(candidate.pastSeasonsCheckedAt)
+	) {
+		return false;
+	}
+	if (
+		Object.prototype.hasOwnProperty.call(candidate, "pastSeasonsCount") &&
+		candidate.pastSeasonsCount !== null &&
+		!isSafeInteger(candidate.pastSeasonsCount)
+	) {
+		return false;
+	}
+	return true;
+};
 
 const isTeamHistoryRowCache = (value: unknown): value is MyFplTeamHistoryRow =>
 	isTypedRecord(value, {
@@ -1211,7 +1232,10 @@ const loadReviewContext = async (context: GraphQLContext): Promise<LoadedReviewC
 		publications.set(row.event_id, publicationFromRow(row));
 	}
 	const latestPublishedEventId =
-		[...publications.keys()].sort((left, right) => right - left)[0] ?? null;
+		publicationResult.rows
+			.map((row) => row.event_id)
+			.filter((eventId) => Number.isSafeInteger(eventId) && eventId > 0)
+			.sort((left, right) => right - left)[0] ?? null;
 	return {
 		value: {
 			season: snapshot.seasonCode,
@@ -1905,7 +1929,7 @@ const loadTeamDesk = async (
 	const history = snapshot?.payload.history ?? fallbackHistory;
 	const pastSeasons = snapshot?.payload.pastSeasons ?? fallbackPastSeasons;
 	const gameweek =
-		eventId === undefined || eventId === null || selectedEventId === null
+		selectedEventId === null
 			? null
 			: await loadTeamGameweekPrepared(
 					context,
@@ -1940,8 +1964,16 @@ const loadTeamDesk = async (
 	else if (selectedEventId === null) state = historyComplete ? "READY" : "PENDING";
 	else if (entry.startedEvent === null || entry.startedEvent > selectedEventId) state = "EMPTY";
 	else state = historyComplete ? "READY" : "PENDING";
+	const snapshotPastSeasonsCount = entry?.pastSeasonsCount;
 	const pastSeasonsState: MyFplReviewState = snapshot
-		? "READY"
+		? typeof entry?.pastSeasonsCheckedAt === "string" &&
+			Number.isFinite(Date.parse(entry.pastSeasonsCheckedAt)) &&
+			typeof snapshotPastSeasonsCount === "number" &&
+			Number.isSafeInteger(snapshotPastSeasonsCount) &&
+			snapshotPastSeasonsCount >= 0 &&
+			snapshotPastSeasonsCount === pastSeasons.length
+			? "READY"
+			: "PENDING"
 		: !entry
 			? "EMPTY"
 			: entry.pastSeasonsCheckedAt !== null &&
@@ -2033,6 +2065,24 @@ const loadTeamTransfers = async (
 			};
 		}
 		const historyByEvent = new Map(snapshot.payload.history.map((row) => [row.eventId, row]));
+		const transferCounts = new Map<number, number>();
+		for (const move of snapshot.payload.transfers) {
+			transferCounts.set(move.eventId, (transferCounts.get(move.eventId) ?? 0) + 1);
+		}
+		if (
+			snapshot.payload.history.some(
+				(row) =>
+					row.eventTransfers < 0 ||
+					(row.eventTransfers > 0 && transferCounts.get(row.eventId) !== row.eventTransfers)
+			)
+		) {
+			return {
+				state: "PENDING",
+				context: loadedContext.value,
+				gameweeks: [],
+				snapshotMeta: snapshot.publication,
+			};
+		}
 		const grouped = new Map<number, MyFplTransferGameweek>();
 		for (const move of snapshot.payload.transfers) {
 			const existing = grouped.get(move.eventId) ?? {
@@ -2299,7 +2349,16 @@ const mapSnapshotBoardRow = (
 		candidate === null || candidate === undefined ? null : String(candidate);
 	const eventId = asInteger(value.eventId);
 	const entryId = asInteger(value.entryId);
-	if (eventId === null || eventId !== expectedEventId || entryId === null) return null;
+	const storedEntryId = asInteger(value.__snapshotEntryId);
+	if (
+		eventId === null ||
+		eventId !== expectedEventId ||
+		entryId === null ||
+		storedEntryId === null ||
+		storedEntryId !== entryId
+	) {
+		return null;
+	}
 	return {
 		eventId,
 		groupId: integerOrNull(value.groupId),
@@ -2421,6 +2480,7 @@ const loadCompetitionBoardPrepared = async (
 			field_size: number;
 			total_rows: number;
 			expected_field_size: number | null;
+			invalid_row_count: number;
 			rows: unknown;
 			viewer_row: unknown;
 		}>(
@@ -2436,25 +2496,37 @@ const loadCompetitionBoardPrepared = async (
 			      OR payload->>'playerName' ILIKE '%' || $5 || '%'
 			 ), paged AS (
 			   SELECT * FROM filtered
-			   ORDER BY (payload->>'groupId')::integer NULLS LAST,
-			            (payload->>'rank')::integer NULLS LAST,
+				   ORDER BY CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
+				                THEN (payload->>'groupId')::integer END NULLS LAST,
+				            CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
+				                THEN (payload->>'rank')::integer END NULLS LAST,
 			            entry_id
 			   LIMIT $6 OFFSET $7
 			 )
 			 SELECT
 			   (SELECT count(*)::integer FROM board) AS field_size,
 			   (SELECT count(*)::integer FROM filtered) AS total_rows,
-			   COALESCE((SELECT jsonb_agg(payload ORDER BY (payload->>'groupId')::integer NULLS LAST,
-			                                      (payload->>'rank')::integer NULLS LAST,
-			                                      entry_id) FROM paged), '[]'::jsonb) AS rows,
-			   (SELECT (aggregate.payload->>'entryCount')::integer
+				   COALESCE((SELECT jsonb_agg(payload || jsonb_build_object('__snapshotEntryId', entry_id)
+				                               ORDER BY CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
+				                                      THEN (payload->>'groupId')::integer END NULLS LAST,
+				                                      CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
+				                                      THEN (payload->>'rank')::integer END NULLS LAST,
+				                                      entry_id) FROM paged), '[]'::jsonb) AS rows,
+				   (SELECT count(*)::integer FROM board
+				     WHERE ((payload->>'groupId') IS NOT NULL
+				             AND payload->>'groupId' !~ '^-?[0-9]+$')
+				        OR ((payload->>'rank') IS NOT NULL
+				             AND payload->>'rank' !~ '^-?[0-9]+$')) AS invalid_row_count,
+				   (SELECT CASE WHEN aggregate.payload->>'entryCount' ~ '^[0-9]+$'
+				                   THEN (aggregate.payload->>'entryCount')::integer END
 			      FROM competition.my_fpl_snapshot_tournament_aggregates aggregate
 			     WHERE aggregate.season_id = $1
 			       AND aggregate.event_id = $2
 			       AND aggregate.revision = $3::bigint
 			       AND aggregate.tournament_id = $4
 			   ) AS expected_field_size,
-			   (SELECT payload FROM board WHERE entry_id = $8 LIMIT 1) AS viewer_row`,
+				   (SELECT payload || jsonb_build_object('__snapshotEntryId', entry_id)
+				      FROM board WHERE entry_id = $8 LIMIT 1) AS viewer_row`,
 			[
 				context.currentSeason.seasonId,
 				eventId,
@@ -2469,6 +2541,7 @@ const loadCompetitionBoardPrepared = async (
 		const fieldSize = asInteger(result.rows[0]?.field_size) ?? 0;
 		const totalRows = asInteger(result.rows[0]?.total_rows) ?? 0;
 		const expectedFieldSize = asInteger(result.rows[0]?.expected_field_size);
+		const invalidRowCount = asInteger(result.rows[0]?.invalid_row_count);
 		const rawRows = Array.isArray(result.rows[0]?.rows) ? result.rows[0]?.rows : [];
 		const rows = rawRows
 			.map((value) => mapSnapshotBoardRow(value, eventId))
@@ -2478,6 +2551,7 @@ const loadCompetitionBoardPrepared = async (
 			fieldSize < 0 ||
 			totalRows < 0 ||
 			totalRows > fieldSize ||
+			invalidRowCount !== 0 ||
 			expectedFieldSize === null ||
 			expectedFieldSize <= 0 ||
 			fieldSize !== expectedFieldSize ||

@@ -576,6 +576,8 @@ const snapshotPayload = () => ({
 		teamValue: 1000,
 		totalTransfers: 2,
 		transfersSyncedThroughEventId: 1,
+		pastSeasonsCheckedAt: "2026-08-22T09:00:00.000Z",
+		pastSeasonsCount: 1,
 	},
 	history: [historyRow(1)],
 	pastSeasons: [{ season: "2526", totalPoints: 1000, overallRank: 500 }],
@@ -678,9 +680,11 @@ const snapshotEntryRow = () => ({
 const snapshotBoardRow = () => ({
 	field_size: 1,
 	expected_field_size: 1,
+	invalid_row_count: 0,
 	total_rows: 1,
 	rows: [
 		{
+			__snapshotEntryId: 123,
 			eventId: 1,
 			groupId: null,
 			entryId: 123,
@@ -705,6 +709,7 @@ const snapshotBoardRow = () => ({
 		},
 	],
 	viewer_row: {
+		__snapshotEntryId: 123,
 		eventId: 1,
 		groupId: null,
 		entryId: 123,
