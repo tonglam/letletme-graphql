@@ -20,6 +20,15 @@ on:
           - enforce-v3-restored-compat
           - rollback-legacy
           - secret
+      my_fpl_snapshot_read:
+        description: My FPL immutable daily snapshot read flag
+        required: true
+        default: preserve
+        type: choice
+        options:
+          - preserve
+          - enable
+          - disable
 
 concurrency:
   group: deploy-main
@@ -126,12 +135,13 @@ jobs:
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
           GRAPHQL_ENV: ${{ secrets.GRAPHQL_ENV }}
           RATE_LIMIT_ROLLOUT: ${{ inputs.rate_limit_rollout || 'preserve' }}
+          MY_FPL_SNAPSHOT_READ: ${{ inputs.my_fpl_snapshot_read || 'preserve' }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           command_timeout: 45m
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,RATE_LIMIT_ROLLOUT
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,RATE_LIMIT_ROLLOUT,MY_FPL_SNAPSHOT_READ
           script: |
             set -euo pipefail
             platform_deploy_lock_path=${DEPLOY_LOCK_PATH:-/var/lock/letletme-platform-deploy.lock}
@@ -260,7 +270,7 @@ jobs:
                 exit 1
                 ;;
             esac
-            python3 - "$next_env" "$active_rate_limit_rollout" <<'PY'
+            python3 - "$next_env" "$active_rate_limit_rollout" "$MY_FPL_SNAPSHOT_READ" <<'PY'
             import re
             import sys
             from pathlib import Path
@@ -268,6 +278,7 @@ jobs:
 
             env_path = Path(sys.argv[1])
             rollout = sys.argv[2]
+            snapshot_read = sys.argv[3]
             lines = env_path.read_text(encoding="utf-8").splitlines()
 
             profiles = {
@@ -293,7 +304,20 @@ jobs:
                     if line.split("=", 1)[0] not in replacements
                 ]
                 lines.extend(f"{key}={value}" for key, value in replacements.items())
-                env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            if snapshot_read not in ("preserve", "enable", "disable"):
+                raise SystemExit("Unsupported My FPL snapshot read flag")
+            if snapshot_read != "preserve":
+                lines = [
+                    line
+                    for line in lines
+                    if line.split("=", 1)[0] != "MY_FPL_SNAPSHOT_READ_ENABLED"
+                ]
+                lines.append(
+                    "MY_FPL_SNAPSHOT_READ_ENABLED="
+                    + ("true" if snapshot_read == "enable" else "false")
+                )
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
             database_url_indexes = [
                 index for index, line in enumerate(lines) if line.startswith("DATABASE_URL=")
