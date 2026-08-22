@@ -5,6 +5,7 @@ import {
 	getCoreEventSnapshot,
 	getCoreFixtureSnapshot,
 	getCoreLiveIdentitySnapshot,
+	getLiveLifecycleStatus,
 	getLiveDataPublicationManifestWithSource,
 	getLiveDataSnapshot,
 	type CoreEventSnapshot,
@@ -84,6 +85,9 @@ const readLiveWindow = async (context: GraphQLContext) => {
 	const currentPublication = currentEventId
 		? await getLiveDataPublicationManifestWithSource(context, currentEventId).catch(() => null)
 		: null;
+	const currentLifecycle = currentEventId
+		? await getLiveLifecycleStatus(context, currentEventId)
+		: null;
 	const currentManifest = currentPublication?.manifest ?? null;
 	const initialWindow = resolveLiveWindow({
 		events: eventCore.events,
@@ -96,7 +100,16 @@ const readLiveWindow = async (context: GraphQLContext) => {
 		sourceCheckedAt: currentManifest?.sourceCheckedAt ?? fixtureCore.sourceCheckedAt,
 		publishedAt: currentManifest?.publishedAt ?? fixtureCore.sourceCheckedAt,
 		source: currentPublication?.source ?? fixtureCore.source,
+		lifecycleEventId: currentLifecycle?.eventId ?? null,
+		lifecycleState: currentLifecycle?.state ?? null,
+		lifecycleNextRefreshAt: currentLifecycle?.nextRefreshAt ?? null,
 	});
+	const anchorLifecycle =
+		initialWindow.anchorEventId === currentEventId
+			? currentLifecycle
+			: initialWindow.anchorEventId
+				? await getLiveLifecycleStatus(context, initialWindow.anchorEventId)
+				: null;
 	const anchorPublication =
 		initialWindow.anchorEventId && initialWindow.anchorEventId !== currentEventId
 			? await getLiveDataPublicationManifestWithSource(context, initialWindow.anchorEventId).catch(
@@ -116,6 +129,9 @@ const readLiveWindow = async (context: GraphQLContext) => {
 				sourceCheckedAt: anchorManifest.sourceCheckedAt,
 				publishedAt: anchorManifest.publishedAt,
 				source: anchorPublication?.source ?? fixtureCore.source,
+				lifecycleEventId: anchorLifecycle?.eventId ?? null,
+				lifecycleState: anchorLifecycle?.state ?? null,
+				lifecycleNextRefreshAt: anchorLifecycle?.nextRefreshAt ?? null,
 			})
 		: initialWindow;
 	return {
@@ -125,6 +141,7 @@ const readLiveWindow = async (context: GraphQLContext) => {
 		window,
 		manifest: anchorManifest,
 		publicationSource: anchorPublication?.source ?? null,
+		lifecycleStatus: anchorLifecycle,
 	};
 };
 
@@ -320,9 +337,13 @@ export const liveDesksResolvers = {
 					extensions: { code: "LIVE_REVISION_GONE" },
 				});
 			}
-			const { eventCore, fixtureCore, core, window, manifest, publicationSource } =
+			const { eventCore, fixtureCore, core, window, manifest, publicationSource, lifecycleStatus } =
 				await readLiveWindow(context);
 			const eventId = args.ref?.eventId ?? window.anchorEventId ?? eventCore.currentEventId ?? 0;
+			const eventLifecycle =
+				eventId === window.anchorEventId
+					? lifecycleStatus
+					: await getLiveLifecycleStatus(context, eventId);
 			const eventPublication =
 				eventId !== window.anchorEventId
 					? await getLiveDataPublicationManifestWithSource(context, eventId).catch(() => null)
@@ -366,6 +387,9 @@ export const liveDesksResolvers = {
 				sourceCheckedAt: snapshot.sourceCheckedAt,
 				publishedAt: snapshot.publishedAt,
 				source: snapshot.source,
+				lifecycleEventId: eventLifecycle?.eventId ?? null,
+				lifecycleState: eventLifecycle?.state ?? null,
+				lifecycleNextRefreshAt: eventLifecycle?.nextRefreshAt ?? null,
 			});
 			return {
 				season: snapshot.seasonCode,
@@ -433,6 +457,9 @@ export const liveDesksResolvers = {
 				getCoreEventSnapshot(context),
 				getCoreFixtureSnapshot(context),
 			]);
+			const currentLifecycle = eventCore.currentEventId
+				? await getLiveLifecycleStatus(context, eventCore.currentEventId)
+				: null;
 			const window = resolveLiveWindow({
 				events: eventCore.events,
 				fixtures: fixtureCore.fixtures,
@@ -442,6 +469,9 @@ export const liveDesksResolvers = {
 				sourceCheckedAt: fixtureCore.sourceCheckedAt,
 				publishedAt: fixtureCore.sourceCheckedAt,
 				source: fixtureCore.source,
+				lifecycleEventId: currentLifecycle?.eventId ?? null,
+				lifecycleState: currentLifecycle?.state ?? null,
+				lifecycleNextRefreshAt: currentLifecycle?.nextRefreshAt ?? null,
 			});
 			const eventId = args.ref?.eventId ?? window.anchorEventId ?? eventCore.currentEventId ?? 0;
 			const snapshot =
@@ -452,6 +482,9 @@ export const liveDesksResolvers = {
 				});
 			}
 			const event = eventCore.events.find((candidate) => candidate.id === eventId);
+			const deskLifecycle = snapshot
+				? await getLiveLifecycleStatus(context, snapshot.eventId)
+				: currentLifecycle;
 			const deskWindow = snapshot
 				? resolveLiveWindow({
 						events: eventCore.events,
@@ -464,6 +497,9 @@ export const liveDesksResolvers = {
 						sourceCheckedAt: snapshot.sourceCheckedAt,
 						publishedAt: snapshot.publishedAt,
 						source: snapshot.source,
+						lifecycleEventId: deskLifecycle?.eventId ?? null,
+						lifecycleState: deskLifecycle?.state ?? null,
+						lifecycleNextRefreshAt: deskLifecycle?.nextRefreshAt ?? null,
 					})
 				: window;
 			const provisional = !(event?.finished && event.dataChecked);

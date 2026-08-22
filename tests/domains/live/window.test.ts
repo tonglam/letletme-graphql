@@ -110,6 +110,48 @@ describe("live window contract", () => {
 		});
 	});
 
+	it("uses the persisted producer lifecycle during a quiet interval", () => {
+		const base = buildTestCoreData(1);
+		const core = {
+			...base,
+			fixtures: base.fixtures.map((fixture) =>
+				fixture.eventId === 1
+					? {
+							...fixture,
+							started: true,
+							finished: false,
+							kickoffTime: "2026-08-08T12:00:00.000Z",
+						}
+					: fixture.eventId === 2
+						? { ...fixture, kickoffTime: "2026-08-08T19:00:00.000Z" }
+						: fixture
+			),
+		};
+		const window = resolveLiveWindow({
+			events: core.events,
+			fixtures: core.fixtures,
+			currentEventId: 1,
+			nextEventId: 2,
+			liveRevision: "17",
+			liveEventId: 1,
+			publicationState: "live",
+			sourceCheckedAt: "2026-08-08T12:30:00.000Z",
+			publishedAt: "2026-08-08T12:30:00.000Z",
+			source: "redis",
+			lifecycleEventId: 1,
+			lifecycleState: "BETWEEN_FIXTURES",
+			lifecycleNextRefreshAt: "2026-08-08T19:00:00.000Z",
+			now: new Date("2026-08-08T18:15:00.000Z"),
+		});
+
+		expect(window).toMatchObject({
+			anchorEventId: 1,
+			windowState: "BETWEEN_FIXTURES",
+			producerState: "BETWEEN_FIXTURES",
+			nextRefreshAt: "2026-08-08T19:00:00.000Z",
+		});
+	});
+
 	it("enters offseason after the final gameweek while retaining the final anchor", () => {
 		const core = buildTestCoreData(null, {
 			events: buildTestCoreData(null).events.map((event) => ({

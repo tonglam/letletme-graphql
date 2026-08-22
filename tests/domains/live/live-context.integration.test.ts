@@ -51,4 +51,63 @@ describe("liveContext lifecycle state", () => {
 			});
 		});
 	}
+
+	it("uses Data lifecycle status instead of treating a quiet live publication as active", async () => {
+		const base = buildTestCoreData(1);
+		const core = {
+			...base,
+			fixtures: base.fixtures.map((fixture) =>
+				fixture.eventId === 1
+					? {
+							...fixture,
+							started: true,
+							finished: false,
+							kickoffTime: "2026-08-21T19:00:00.000Z",
+						}
+					: fixture
+			),
+		};
+		const live = buildLivePublication(core, 1, "2627", 8, {
+			state: "live",
+			sourceCheckedAt: "2026-08-22T06:46:47.764Z",
+		});
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), live),
+			{
+				databaseQuery: async (query) => {
+					if (String(query).includes("ops.live_lifecycle_status")) {
+						return {
+							rows: [
+								{
+									event_id: 1,
+									state: "BETWEEN_FIXTURES",
+									observed_at: "2026-08-22T09:32:58.000Z",
+									last_changed_at: "2026-08-22T06:56:48.000Z",
+									next_refresh_at: "2026-08-22T09:37:58.000Z",
+									live_revision: "177",
+									publication_id: live.manifest.publicationId,
+									source_checked_at: "2026-08-22T06:46:47.764Z",
+								},
+							],
+						};
+					}
+					throw new Error("Unexpected database query");
+				},
+			}
+		);
+
+		const result = await graphql({
+			schema,
+			source: `query { liveContext { state windowState producerState nextRefreshAt } }`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveContext).toMatchObject({
+			state: "LIVE_ACTIVE",
+			windowState: "BETWEEN_FIXTURES",
+			producerState: "BETWEEN_FIXTURES",
+			nextRefreshAt: new Date("2026-08-22T09:37:58.000Z"),
+		});
+	});
 });

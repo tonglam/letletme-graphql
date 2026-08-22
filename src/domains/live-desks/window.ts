@@ -2,6 +2,7 @@ import type {
 	CoreEventData,
 	CoreFixtureData,
 	DataSnapshotSource,
+	LiveLifecycleState as ProducerLifecycleState,
 	LiveSnapshotState,
 } from "../../infra/data-snapshot";
 
@@ -32,6 +33,9 @@ export type LiveWindowInput = {
 	sourceCheckedAt: string | null;
 	publishedAt: string | null;
 	source: DataSnapshotSource | null;
+	lifecycleEventId?: number | null;
+	lifecycleState?: ProducerLifecycleState | null;
+	lifecycleNextRefreshAt?: string | null;
 	now?: Date;
 };
 
@@ -107,6 +111,30 @@ const refreshSeconds: Record<LiveWindowState, number> = {
 };
 
 const staleAfterMs = 60_000;
+
+const lifecycleWindowState = (
+	state: ProducerLifecycleState,
+	current: LiveWindowState
+): LiveWindowState => {
+	switch (state) {
+		case "LIVE_ACTIVE":
+			return "LIVE_ACTIVE";
+		case "DAY_SETTLING":
+			return "DAY_SETTLING";
+		case "BETWEEN_FIXTURES":
+			return "BETWEEN_FIXTURES";
+		case "GW_REVIEW":
+			return "GW_REVIEW";
+		case "FINALIZED":
+			return current === "BETWEEN_GAMEWEEKS" || current === "OFFSEASON" ? current : "FINALIZED";
+		case "PRE_DEADLINE":
+			return "PRESEASON";
+		case "PICKS_WAIT":
+		case "PICKS_PROBE":
+		case "PICKS_SYNC":
+			return current === "PRESEASON" ? "EVENT_SCHEDULED" : current;
+	}
+};
 
 export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 	const now = input.now ?? new Date();
@@ -249,11 +277,20 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 		windowState = "OFFSEASON";
 		anchorMode = "OFFSEASON";
 	}
+	const lifecycleState = input.lifecycleState;
+	const lifecycleApplies =
+		input.lifecycleEventId === anchorEventId &&
+		lifecycleState !== null &&
+		lifecycleState !== undefined;
+	if (lifecycleApplies) {
+		windowState = lifecycleWindowState(lifecycleState!, windowState);
+	}
 
 	const resolvedWindowState = ((value: string): LiveWindowState => value as LiveWindowState)(
 		windowState
 	);
 	const producerState: LiveWindow["producerState"] = (() => {
+		if (lifecycleApplies) return lifecycleState!;
 		switch (resolvedWindowState) {
 			case "PRESEASON":
 				return "PRE_DEADLINE";
@@ -290,9 +327,13 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 	const checkedAtMs = sourceCheckedAt ? Date.parse(sourceCheckedAt) : Number.NaN;
 	const stale = !Number.isFinite(checkedAtMs) || nowMs - checkedAtMs > staleAfterMs;
 	const refreshAt =
-		anchorEventId === null
-			? null
-			: new Date(nowMs + refreshSeconds[windowState] * 1000).toISOString();
+		lifecycleApplies &&
+		input.lifecycleNextRefreshAt &&
+		Number.isFinite(Date.parse(input.lifecycleNextRefreshAt))
+			? new Date(input.lifecycleNextRefreshAt).toISOString()
+			: anchorEventId === null
+				? null
+				: new Date(nowMs + refreshSeconds[windowState] * 1000).toISOString();
 
 	return {
 		anchorEventId,
