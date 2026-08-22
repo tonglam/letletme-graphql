@@ -9,6 +9,25 @@ export type HomeRankMovement = {
 	places: number | null;
 };
 
+export type HomeH2HMatchupSide = {
+	entryId: number | null;
+	entryName: string | null;
+	playerName: string | null;
+	isAverage: boolean;
+	points: number | null;
+};
+
+export type HomeH2HMatchup = {
+	officialMatchId: number;
+	eventId: number;
+	isLive: boolean;
+	isFinal: boolean;
+	isBye: boolean;
+	viewer: HomeH2HMatchupSide;
+	opponent: HomeH2HMatchupSide;
+	sourceCheckedAt: string | null;
+};
+
 export type HomeLeagueRank = {
 	key: string;
 	name: string;
@@ -16,6 +35,7 @@ export type HomeLeagueRank = {
 	rank: number | null;
 	movement: HomeRankMovement;
 	tournamentId: number | null;
+	h2hMatchup: HomeH2HMatchup | null;
 };
 
 export type HomePersonalDesk = {
@@ -30,6 +50,7 @@ export type HomePersonalDesk = {
 };
 
 type HomePersonalDeskRow = {
+	entry_id: number;
 	entry_name: string | null;
 	player_name: string | null;
 	overall_points: number | null;
@@ -44,12 +65,30 @@ type HomePersonalDeskRow = {
 	official_kind: string | null;
 	short_name: string | null;
 	tournament_id: number | null;
+	h2h_official_match_id: number | null;
+	h2h_event_id: number | null;
+	h2h_home_entry_id: number | null;
+	h2h_home_entry_name: string | null;
+	h2h_home_player_name: string | null;
+	h2h_home_points: number | null;
+	h2h_home_is_average: boolean | null;
+	h2h_away_entry_id: number | null;
+	h2h_away_entry_name: string | null;
+	h2h_away_player_name: string | null;
+	h2h_away_points: number | null;
+	h2h_away_is_average: boolean | null;
+	h2h_is_bye: boolean | null;
+	h2h_source_checked_at: string | Date | null;
+	h2h_event_is_current: boolean | null;
+	h2h_event_finished: boolean | null;
+	h2h_event_data_checked: boolean | null;
 };
 
 const HOME_PERSONAL_STALE_AFTER_MS = 30 * 60 * 60 * 1000;
 
 export const HOME_PERSONAL_DESK_SQL = `
 	SELECT
+		e.entry_id,
 		e.entry_name,
 		e.player_name,
 		e.overall_points,
@@ -63,7 +102,24 @@ export const HOME_PERSONAL_DESK_SQL = `
 		l.entry_last_rank,
 		l.official_kind::text AS official_kind,
 		l.short_name,
-		tracked.tournament_id
+		tracked.tournament_id,
+		h2h_match.official_match_id AS h2h_official_match_id,
+		h2h_match.event_id AS h2h_event_id,
+		h2h_match.home_entry_id AS h2h_home_entry_id,
+		home_match_entry.entry_name AS h2h_home_entry_name,
+		home_match_entry.player_name AS h2h_home_player_name,
+		h2h_match.home_points AS h2h_home_points,
+		h2h_match.home_is_average AS h2h_home_is_average,
+		h2h_match.away_entry_id AS h2h_away_entry_id,
+		away_match_entry.entry_name AS h2h_away_entry_name,
+		away_match_entry.player_name AS h2h_away_player_name,
+		h2h_match.away_points AS h2h_away_points,
+		h2h_match.away_is_average AS h2h_away_is_average,
+		h2h_match.is_bye AS h2h_is_bye,
+		h2h_match.source_checked_at AS h2h_source_checked_at,
+		reference_event.is_current AS h2h_event_is_current,
+		reference_event.finished AS h2h_event_finished,
+		reference_event.data_checked AS h2h_event_data_checked
 	FROM competition.entries e
 	LEFT JOIN competition.entry_leagues l
 		ON l.season_id = e.season_id
@@ -84,6 +140,64 @@ export const HOME_PERSONAL_DESK_SQL = `
 		ORDER BY t.tournament_id
 		LIMIT 1
 	) tracked ON TRUE
+	LEFT JOIN LATERAL (
+		SELECT event_id, is_current, finished, data_checked
+		FROM fpl.events event
+		WHERE event.season_id = e.season_id
+			AND (event.is_current = TRUE OR event.is_next = TRUE)
+		ORDER BY event.is_current DESC, event.is_next DESC, event.event_id ASC
+		LIMIT 1
+	) reference_event ON TRUE
+	LEFT JOIN LATERAL (
+		SELECT candidate.*
+		FROM (
+			SELECT
+				battle.official_match_id,
+				battle.event_id,
+				battle.source_order,
+				battle.home_entry_id,
+				battle.home_net_points AS home_points,
+				battle.home_is_average,
+				battle.away_entry_id,
+				battle.away_net_points AS away_points,
+				battle.away_is_average,
+				battle.is_bye,
+				battle.source_checked_at
+			FROM competition.tournament_battle_group_results battle
+			WHERE battle.season_id = e.season_id
+				AND battle.tournament_id = tracked.tournament_id
+				AND battle.event_id = reference_event.event_id
+				AND battle.official_match_id IS NOT NULL
+				AND (battle.home_entry_id = e.entry_id OR battle.away_entry_id = e.entry_id)
+			UNION ALL
+			SELECT
+				knockout.official_match_id,
+				knockout.event_id,
+				knockout.source_order,
+				knockout.home_entry_id,
+				knockout.home_net_points AS home_points,
+				FALSE AS home_is_average,
+				knockout.away_entry_id,
+				knockout.away_net_points AS away_points,
+				FALSE AS away_is_average,
+				(knockout.home_entry_id IS NULL OR knockout.away_entry_id IS NULL) AS is_bye,
+				knockout.source_checked_at
+			FROM competition.tournament_knockout_results knockout
+			WHERE knockout.season_id = e.season_id
+				AND knockout.tournament_id = tracked.tournament_id
+				AND knockout.event_id = reference_event.event_id
+				AND knockout.official_match_id IS NOT NULL
+				AND (knockout.home_entry_id = e.entry_id OR knockout.away_entry_id = e.entry_id)
+		) candidate
+		ORDER BY candidate.source_order ASC, candidate.official_match_id ASC
+		LIMIT 1
+	) h2h_match ON l.league_type::text = 'h2h'
+	LEFT JOIN competition.entries home_match_entry
+		ON home_match_entry.season_id = e.season_id
+		AND home_match_entry.entry_id = h2h_match.home_entry_id
+	LEFT JOIN competition.entries away_match_entry
+		ON away_match_entry.season_id = e.season_id
+		AND away_match_entry.entry_id = h2h_match.away_entry_id
 	WHERE e.season_id = $1
 		AND e.entry_id = $2
 	ORDER BY l.league_id ASC NULLS LAST,
@@ -98,6 +212,64 @@ const isoDate = (value: string | Date | null): string | null => {
 
 const normalizeRank = (rank: number | null): number | null =>
 	rank !== null && Number.isSafeInteger(rank) && rank > 0 ? rank : null;
+
+const integerOrNull = (value: number | null): number | null =>
+	value !== null && Number.isSafeInteger(value) ? value : null;
+
+const matchupSide = ({
+	entryId,
+	entryName,
+	playerName,
+	isAverage,
+	points,
+}: {
+	entryId: number | null;
+	entryName: string | null;
+	playerName: string | null;
+	isAverage: boolean | null;
+	points: number | null;
+}): HomeH2HMatchupSide => ({
+	entryId: integerOrNull(entryId),
+	entryName,
+	playerName,
+	isAverage: isAverage === true,
+	points: integerOrNull(points),
+});
+
+const mapH2HMatchup = (row: HomePersonalDeskRow): HomeH2HMatchup | null => {
+	const officialMatchId = integerOrNull(row.h2h_official_match_id);
+	const eventId = integerOrNull(row.h2h_event_id);
+	if (officialMatchId === null || officialMatchId <= 0 || eventId === null || eventId <= 0) {
+		return null;
+	}
+	const home = matchupSide({
+		entryId: row.h2h_home_entry_id,
+		entryName: row.h2h_home_entry_name,
+		playerName: row.h2h_home_player_name,
+		isAverage: row.h2h_home_is_average,
+		points: row.h2h_home_points,
+	});
+	const away = matchupSide({
+		entryId: row.h2h_away_entry_id,
+		entryName: row.h2h_away_entry_name,
+		playerName: row.h2h_away_player_name,
+		isAverage: row.h2h_away_is_average,
+		points: row.h2h_away_points,
+	});
+	const viewerIsHome = home.entryId === row.entry_id;
+	const viewerIsAway = away.entryId === row.entry_id;
+	if (!viewerIsHome && !viewerIsAway) return null;
+	return {
+		officialMatchId,
+		eventId,
+		isLive: row.h2h_event_is_current === true && row.h2h_event_data_checked !== true,
+		isFinal: row.h2h_event_finished === true && row.h2h_event_data_checked === true,
+		isBye: row.h2h_is_bye === true,
+		viewer: viewerIsHome ? home : away,
+		opponent: viewerIsHome ? away : home,
+		sourceCheckedAt: isoDate(row.h2h_source_checked_at),
+	};
+};
 
 export const movementFromRanks = (
 	currentRank: number | null,
@@ -147,6 +319,7 @@ const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRankRow | null => {
 		rank,
 		movement: movementFromRanks(row.entry_rank, row.entry_last_rank),
 		tournamentId: row.tournament_id,
+		h2hMatchup: scoring === "h2h" ? mapH2HMatchup(row) : null,
 		scoring,
 		officialKind: mapFplOfficialKind(row.official_kind),
 		shortName: row.short_name,
@@ -156,10 +329,11 @@ const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRankRow | null => {
 const toHomeLeagueRank = (row: HomeLeagueRankRow): HomeLeagueRank => ({
 	key: row.key,
 	name: row.name,
-	leagueType: row.scoring === "h2h" ? "H2H" : "CLASSIC",
+	leagueType: row.leagueType,
 	rank: row.rank,
 	movement: row.movement,
 	tournamentId: row.tournamentId,
+	h2hMatchup: row.h2hMatchup,
 });
 
 export const homeRepository = {
@@ -179,6 +353,7 @@ export const homeRepository = {
 					operationName: context.operationName,
 					sqlDurationMs: Number(sqlDurationMs.toFixed(2)),
 					leagueRowCount: 0,
+					h2hMatchupCount: 0,
 					totalDurationMs: Number((performance.now() - startedAt).toFixed(2)),
 				},
 				"Home personal desk unavailable"
@@ -204,6 +379,7 @@ export const homeRepository = {
 			.map(mapLeagueRank)
 			.filter((rank): rank is HomeLeagueRankRow => rank !== null);
 		const leagueRanks = selectHomeInvitationalLeagues(mappedLeagues).map(toHomeLeagueRank);
+		const h2hMatchupCount = leagueRanks.filter((league) => league.h2hMatchup !== null).length;
 		const state: HomePersonalDeskState =
 			sourceAgeMs === null || sourceAgeMs > HOME_PERSONAL_STALE_AFTER_MS
 				? "STALE"
@@ -229,6 +405,7 @@ export const homeRepository = {
 				sqlDurationMs: Number(sqlDurationMs.toFixed(2)),
 				mappingDurationMs: Number(mappingDurationMs.toFixed(2)),
 				leagueRowCount: leagueRanks.length,
+				h2hMatchupCount,
 				sourceAgeMs,
 				state,
 				totalDurationMs: Number((performance.now() - startedAt).toFixed(2)),
