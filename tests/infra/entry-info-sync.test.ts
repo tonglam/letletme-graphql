@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { requestEntryInfoSync } from "../../src/infra/entry-info-sync";
+import { requestEntryInfoSync, requestEntryPicksSync } from "../../src/infra/entry-info-sync";
 
 const originalFetch = globalThis.fetch;
 const originalUrl = process.env.LETLETME_DATA_URL;
@@ -41,6 +41,31 @@ describe("requestEntryInfoSync", () => {
 			ok: true,
 			status: "queued",
 			jobId: "job-9",
+		});
+	});
+
+	it("posts a missing live-picks enqueue contract", async () => {
+		process.env.LETLETME_DATA_URL = "http://data.example:3000/";
+		process.env.LETLETME_DATA_API_KEY = "k1";
+		Bun.env.LETLETME_DATA_URL = "http://data.example:3000/";
+		Bun.env.LETLETME_DATA_API_KEY = "k1";
+		globalThis.fetch = (async (input: URL | string, init?: RequestInit) => {
+			expect(String(input)).toBe("http://data.example:3000/entry-sync/picks");
+			expect(init?.method).toBe("POST");
+			expect(new Headers(init?.headers).get("x-api-key")).toBe("k1");
+			expect(JSON.parse(String(init?.body))).toEqual({
+				entryIds: [424242],
+				eventId: 7,
+			});
+			return new Response(JSON.stringify({ success: true, jobId: "job-picks-9" }), {
+				status: 202,
+			});
+		}) as unknown as typeof fetch;
+
+		expect(await requestEntryPicksSync(424242, 7)).toEqual({
+			ok: true,
+			status: "queued",
+			jobId: "job-picks-9",
 		});
 	});
 });

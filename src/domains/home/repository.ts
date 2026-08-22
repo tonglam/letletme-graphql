@@ -12,6 +12,7 @@ export type HomeRankMovement = {
 export type HomeLeagueRank = {
 	key: string;
 	name: string;
+	leagueType: "CLASSIC" | "H2H";
 	rank: number | null;
 	movement: HomeRankMovement;
 	tournamentId: number | null;
@@ -154,6 +155,7 @@ const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRankRow | null => {
 const toHomeLeagueRank = (row: HomeLeagueRankRow): HomeLeagueRank => ({
 	key: row.key,
 	name: row.name,
+	leagueType: row.scoring === "h2h" ? "H2H" : "CLASSIC",
 	rank: row.rank,
 	movement: row.movement,
 	tournamentId: row.tournamentId,

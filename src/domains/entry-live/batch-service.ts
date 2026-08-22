@@ -451,12 +451,7 @@ const computeSingleEntry = (
 		overallRank: safeInt(entry?.overallRank),
 		value: asScaled(entry?.teamValue ?? null, 10),
 		bank: asScaled(entry?.bank ?? null, 10),
-		teamValue: asScaled(
-			(entry?.teamValue ?? null) !== null && (entry?.bank ?? null) !== null
-				? safeInt(entry?.teamValue) - safeInt(entry?.bank)
-				: null,
-			10
-		),
+		teamValue: asScaled(entry?.teamValue ?? null, 10),
 		totalTransfers: safeInt(entry?.totalTransfers),
 		lastOverallPoints,
 		lastOverallRank,

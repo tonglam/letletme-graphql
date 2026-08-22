@@ -150,6 +150,8 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				lastOverallPoints: 90,
 				lastOverallRank: 110,
 				lastValue: 99,
+				bank: 1,
+				teamValue: 100,
 				pickList: [],
 			});
 			expect(result.meta.succeededCount).toBe(1);

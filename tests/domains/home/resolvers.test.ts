@@ -256,7 +256,7 @@ describe("Home GraphQL contracts", () => {
 				query HomePersonalDesk {
 					homePersonalDesk {
 						state entryName playerName overallPoints overallRank teamValue sourceCheckedAt
-						leagueRanks { key name rank tournamentId movement { direction places } }
+						leagueRanks { key name leagueType rank tournamentId movement { direction places } }
 					}
 				}
 			`,
@@ -271,6 +271,7 @@ describe("Home GraphQL contracts", () => {
 				{
 					key: "classic:7",
 					name: "Only Rank Data",
+					leagueType: "CLASSIC",
 					rank: 3,
 					tournamentId: 77,
 					movement: { direction: "UP", places: 5 },
@@ -278,6 +279,7 @@ describe("Home GraphQL contracts", () => {
 				{
 					key: "h2h:8",
 					name: "No Match Details",
+					leagueType: "H2H",
 					rank: null,
 					tournamentId: null,
 					movement: { direction: "UNKNOWN", places: null },
@@ -311,7 +313,7 @@ describe("Home GraphQL contracts", () => {
 		const result = await graphql({
 			schema,
 			source:
-				"query { homePersonalDesk { state leagueRanks { key name rank movement { direction places } tournamentId } } }",
+				"query { homePersonalDesk { state leagueRanks { key name leagueType rank movement { direction places } tournamentId } } }",
 			contextValue: context,
 		});
 

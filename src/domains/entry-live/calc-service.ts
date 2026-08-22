@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { enqueueEntryPicksSync } from "../../infra/entry-info-sync";
 import type { Entry, EntryEventResult } from "../entries/repository";
 import { entriesService } from "../entries/service";
 import { eventsService } from "../events/service";
@@ -171,11 +172,7 @@ export const buildNoPicksLiveCalcData = (
 		overallRank: entry?.overallRank ?? 0,
 		value: scaledEntryValue(entry?.teamValue),
 		bank: scaledEntryValue(entry?.bank),
-		teamValue: scaledEntryValue(
-			entry?.teamValue !== null && entry?.teamValue !== undefined && entry.bank !== null
-				? entry.teamValue - (entry.bank ?? 0)
-				: null
-		),
+		teamValue: scaledEntryValue(entry?.teamValue),
 		totalTransfers: entry?.totalTransfers ?? 0,
 		lastOverallPoints: baseline.overallPoints,
 		lastOverallRank: baseline.overallRank ?? 0,
@@ -250,6 +247,11 @@ export const entryLiveCalcService = {
 					? entriesService.getEntryEventResult(context, entryId, eventId - 1)
 					: Promise.resolve(null),
 			]);
+			// Public live-points pages accept any valid FPL entry, while the Data
+			// service normally fan-outs event picks for tournament rosters. Queue
+			// this missing entry on demand so the next refresh can calculate the
+			// player-level score instead of permanently returning NO_PICKS.
+			enqueueEntryPicksSync(entryId, eventId);
 			const noPicks = buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
 			const managerScores = await loadManagerScores(context, eventId, [entryId]);
 			const manager = buildManagerScore({
