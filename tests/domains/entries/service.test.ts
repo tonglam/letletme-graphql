@@ -42,7 +42,8 @@ const liveRow = (eventId: number, elementId: number, totalPoints: number, minute
 
 const makeContext = (
 	core: ReturnType<typeof buildTestCoreData>,
-	liveRows: Array<ReturnType<typeof liveRow>>
+	liveRows: Array<ReturnType<typeof liveRow>>,
+	fixtureTeamRows: Array<{ event_id: number; element_id: number; team_id: number }> = []
 ): GraphQLContext => {
 	const context = buildSnapshotContext(new TestRedis(buildCorePublication("2526", 7, core)), {
 		seasonId: 2025,
@@ -51,13 +52,20 @@ const makeContext = (
 	});
 	context.data = {
 		read: (table: string) => {
-			if (table !== "fpl.player_gameweek_stats") {
+			if (table !== "fpl.player_gameweek_stats" && table !== "fpl.player_fixture_stats") {
 				throw new Error(`Unexpected read model ${table}`);
 			}
-			const promise = Promise.resolve({ data: liveRows, error: null });
-			type Builder = typeof promise & { select: () => Builder; in: () => Builder };
+			const promise = Promise.resolve({
+				data: table === "fpl.player_fixture_stats" ? fixtureTeamRows : liveRows,
+				error: null,
+			});
+			type Builder = typeof promise & {
+				select: () => Builder;
+				in: () => Builder;
+				eq: () => Builder;
+			};
 			const builder = promise as Builder;
-			Object.assign(builder, { select: () => builder, in: () => builder });
+			Object.assign(builder, { select: () => builder, in: () => builder, eq: () => builder });
 			return builder;
 		},
 	} as never;
@@ -194,6 +202,59 @@ describe("entriesService.getEntryEventPicks", () => {
 			totalPoints: 2,
 			minutes: 0,
 			position: 12,
+		});
+	});
+
+	it("uses the player team from the requested event when enriching historical fixtures", async () => {
+		const base = buildTestCoreData(34);
+		const targetFixture = base.fixtures.find(
+			(fixture) => fixture.eventId === 34 && (fixture.teamHId === 2 || fixture.teamAId === 2)
+		);
+		if (!targetFixture) throw new Error("Test fixture not found");
+		const core = {
+			...base,
+			fixtures: base.fixtures.map((fixture) =>
+				fixture.id === targetFixture.id
+					? { ...fixture, finished: true, started: true, minutes: 90, teamHScore: 1, teamAScore: 0 }
+					: fixture
+			),
+		};
+		const context = makeContext(
+			core,
+			[liveRow(34, 4, 10, 90)],
+			[{ event_id: 34, element_id: 4, team_id: 2 }]
+		);
+		const wasHome = targetFixture.teamHId === 2;
+		const opponentId = wasHome ? targetFixture.teamAId : targetFixture.teamHId;
+		const score = wasHome ? "1-0" : "0-1";
+
+		const result = await entriesService.getEntryEventPicks(context, {
+			entryId: 84885,
+			eventId: 34,
+			eventPoints: 10,
+			eventRank: 1,
+			overallPoints: 10,
+			overallRank: 1,
+			eventTransfers: 0,
+			eventTransfersCost: 0,
+			eventNetPoints: 10,
+			eventBenchPoints: 0,
+			eventChip: null,
+			eventPlayedCaptain: 4,
+			eventCaptainPoints: 10,
+			eventPicks: [{ element: 4, position: 1, multiplier: 2, is_captain: true }],
+			teamValue: 1000,
+			bank: 0,
+		});
+
+		expect(result[0]).toMatchObject({
+			teamId: 2,
+			teamShortName: "T02",
+			againstId: opponentId,
+			wasHome: wasHome ? "H" : "A",
+			score,
+			bgw: false,
+			dgw: false,
 		});
 	});
 });

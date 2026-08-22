@@ -217,19 +217,21 @@ const mapEntryPick = (params: {
 		teamAScore: number | null;
 	}>;
 	teamsById: ReadonlyMap<number, Team>;
+	eventTeamId: number;
 	autoSubElements: ReadonlySet<number>;
 }): ElementEventResultData => {
-	const { eventId, pick, player, team, live, fixtures, teamsById, autoSubElements } = params;
+	const { eventId, pick, player, team, live, fixtures, teamsById, eventTeamId, autoSubElements } =
+		params;
 	const minutes = live?.minutes ?? 0;
 	const yellowCards = live?.yellowCards ?? 0;
 	const redCards = live?.redCards ?? 0;
 	const playerFixtures = player
 		? fixtures.filter(
-				(fixture) => fixture.teamHId === player.teamId || fixture.teamAId === player.teamId
+				(fixture) => fixture.teamHId === eventTeamId || fixture.teamAId === eventTeamId
 			)
 		: [];
 	const fixtureOpponents = playerFixtures.map((fixture) => {
-		const wasHome = fixture.teamHId === player?.teamId;
+		const wasHome = fixture.teamHId === eventTeamId;
 		const opponentId = wasHome ? fixture.teamAId : fixture.teamHId;
 		const opponent = teamsById.get(opponentId);
 		const score =
@@ -255,7 +257,7 @@ const mapEntryPick = (params: {
 		price: asScaled(player?.price, 10),
 		elementType: player?.position ?? 0,
 		elementTypeName: elementTypeName(player?.position ?? 0),
-		teamId: player?.teamId ?? 0,
+		teamId: eventTeamId,
 		teamCode: team?.code ?? 0,
 		teamName: team?.name ?? "",
 		teamShortName: team?.shortName ?? "",
@@ -318,6 +320,54 @@ const officialAutoSubElements = (value: unknown): Set<number> => {
 	}
 	return result;
 };
+
+async function loadEventTeamIds(
+	context: GraphQLContext,
+	eventId: number,
+	playerIds: number[]
+): Promise<Map<number, number>> {
+	if (playerIds.length === 0) return new Map();
+	try {
+		const { data, error } = await context.data
+			.read("fpl.player_fixture_stats")
+			.select("element_id, event_id, team_id")
+			.eq("event_id", eventId)
+			.in("element_id", playerIds);
+		if (error) {
+			context.logger.warn(
+				{ err: error, eventId, playerIds },
+				"Failed to load event-scoped player teams; using current data"
+			);
+			return new Map();
+		}
+		const result = new Map<number, number>();
+		for (const raw of (data ?? []) as Array<{
+			element_id?: unknown;
+			event_id?: unknown;
+			team_id?: unknown;
+		}>) {
+			const elementId = asNumber(raw.element_id);
+			const rowEventId = asNumber(raw.event_id);
+			const teamId = asNumber(raw.team_id);
+			if (
+				elementId !== null &&
+				rowEventId === eventId &&
+				teamId !== null &&
+				teamId > 0 &&
+				!result.has(elementId)
+			) {
+				result.set(elementId, teamId);
+			}
+		}
+		return result;
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, eventId, playerIds },
+			"Failed to load event-scoped player teams; using current data"
+		);
+		return new Map();
+	}
+}
 
 async function buildLiveMapForEvents(
 	context: GraphQLContext,
@@ -441,11 +491,12 @@ export const entriesService = {
 		}
 
 		const playerIds = uniquePositiveIds(picks.map((pick) => pick.element));
-		const [playerMap, teamMap, liveByPlayer, fixtureSnapshot] = await Promise.all([
+		const [playerMap, teamMap, liveByPlayer, fixtureSnapshot, eventTeamIds] = await Promise.all([
 			buildPlayerMap(context, playerIds),
 			buildTeamMap(context),
 			buildLiveMapForEvents(context, [result.eventId], playerIds),
 			getCoreFixtureSnapshot(context),
+			loadEventTeamIds(context, result.eventId, playerIds),
 		]);
 		const fixtures = fixtureSnapshot.fixtures.filter(
 			(fixture) => fixture.eventId === result.eventId
@@ -454,7 +505,8 @@ export const entriesService = {
 
 		return picks.map((pick) => {
 			const player = playerMap.get(pick.element);
-			const team = player ? teamMap.get(player.teamId) : undefined;
+			const eventTeamId = eventTeamIds.get(pick.element) ?? player?.teamId ?? 0;
+			const team = teamMap.get(eventTeamId);
 			const live = liveByPlayer.get(livePerformanceKey(result.eventId, pick.element));
 			return mapEntryPick({
 				eventId: result.eventId,
@@ -464,6 +516,7 @@ export const entriesService = {
 				live,
 				fixtures,
 				teamsById: teamMap,
+				eventTeamId,
 				autoSubElements,
 			});
 		});

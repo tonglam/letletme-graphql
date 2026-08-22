@@ -87,7 +87,7 @@ type DbEntryEventResultRow = {
 };
 
 type DbEntryHistoryInfoRow = {
-	source_season_label: string;
+	season: string;
 	total_points: number;
 	overall_rank: number;
 };
@@ -151,7 +151,7 @@ const parseJsonArray = (value: unknown): unknown[] => {
 };
 
 const mapEntryHistoryInfo = (row: DbEntryHistoryInfoRow): EntryHistoryInfo => ({
-	season: row.source_season_label,
+	season: row.season,
 	totalPoints: row.total_points,
 	overallRank: row.overall_rank,
 });
@@ -489,10 +489,9 @@ export const entriesRepository: EntriesRepository = {
 
 		const { data, error } = await context.data
 			.read("competition.entry_past_seasons")
-			.select("source_season_label,total_points,overall_rank")
-			.eq("entry_season_id", context.currentSeason.seasonId)
+			.select("season,total_points,overall_rank")
 			.eq("entry_id", entryId)
-			.order("source_season_id", { ascending: true });
+			.order("id", { ascending: true });
 
 		if (error) {
 			context.logger.error({ err: error, entryId }, "Failed to fetch entry history info");

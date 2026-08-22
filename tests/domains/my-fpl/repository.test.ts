@@ -7,6 +7,7 @@ import {
 	type MyFplRepositoryDependencies,
 	type MyFplReviewState,
 	type MyFplTeamHistoryRow,
+	type MyFplCompetitionAggregate,
 } from "../../../src/domains/my-fpl/repository";
 import { createMyFplResolvers } from "../../../src/domains/my-fpl/resolvers";
 import {
@@ -187,6 +188,7 @@ type FixtureOptions = {
 	gameweekRows?: unknown[];
 	aggregateRows?: unknown[];
 	aggregateFieldSize?: number;
+	aggregatePayload?: MyFplCompetitionAggregate | null;
 	seasonPathRows?: unknown[];
 	enrichedCount?: number;
 	membershipIds?: number[];
@@ -199,6 +201,262 @@ type FixtureOptions = {
 		sql: string,
 		params: unknown[]
 	) => Promise<{ rows: unknown[]; rowCount?: number }>;
+};
+
+type AggregateTestRow = Record<string, unknown>;
+
+const aggregatePayloadFromRows = (
+	rawRows: unknown[],
+	eventId = 1,
+	viewerEntryId = 123
+): MyFplCompetitionAggregate => {
+	const rows = rawRows as AggregateTestRow[];
+	const numberAt = (row: AggregateTestRow, key: string): number | null =>
+		typeof row[key] === "number" ? (row[key] as number) : null;
+	const stringAt = (row: AggregateTestRow, key: string): string | null =>
+		typeof row[key] === "string" ? (row[key] as string) : null;
+	const sortedPoints = rows
+		.map((row) => ({ row, value: numberAt(row, "overall_points") }))
+		.filter((sample): sample is { row: AggregateTestRow; value: number } => sample.value !== null)
+		.sort(
+			(left, right) =>
+				right.value -
+				left.value -
+				(numberAt(left.row, "entry_id") ?? 0) +
+				(numberAt(right.row, "entry_id") ?? 0)
+		);
+	const leaderOverallPoints = sortedPoints[0]?.value ?? null;
+	const secondOverallPoints = sortedPoints[1]?.value ?? null;
+	const metric = (
+		key:
+			| "OVERALL_POINTS"
+			| "TEAM_VALUE"
+			| "TRANSFERS"
+			| "TOTAL_COSTS"
+			| "BENCH_POINTS"
+			| "AUTO_SUB_POINTS",
+		field: string,
+		higherIsBetter: boolean
+	) => {
+		const samples = rows
+			.map((row) => ({ row, value: numberAt(row, field) }))
+			.filter((sample): sample is { row: AggregateTestRow; value: number } => sample.value !== null)
+			.sort(
+				(left, right) =>
+					(higherIsBetter ? right.value - left.value : left.value - right.value) ||
+					(numberAt(left.row, "entry_id") ?? 0) - (numberAt(right.row, "entry_id") ?? 0)
+			);
+		const leader = samples[0];
+		return {
+			key,
+			leaderValue: leader?.value ?? null,
+			leaderEntryId: leader ? numberAt(leader.row, "entry_id") : null,
+			leaderEntryName: leader ? stringAt(leader.row, "entry_name") : null,
+			leaderPlayerName: leader ? stringAt(leader.row, "player_name") : null,
+			averageValue:
+				samples.length === 0
+					? null
+					: Math.round(
+							(samples.reduce((sum, sample) => sum + sample.value, 0) / samples.length) * 100
+						) / 100,
+			higherIsBetter,
+		};
+	};
+	const metricRank = (
+		field: string,
+		higherIsBetter: boolean,
+		row: AggregateTestRow
+	): number | null => {
+		const value = numberAt(row, field);
+		if (value === null) return null;
+		return (
+			1 +
+			rows.filter((candidate) => {
+				const candidateValue = numberAt(candidate, field);
+				return (
+					candidateValue !== null &&
+					(higherIsBetter ? candidateValue > value : candidateValue < value)
+				);
+			}).length
+		);
+	};
+	const mine = rows.find((row) => numberAt(row, "entry_id") === viewerEntryId) ?? null;
+	const pointIndex = mine
+		? sortedPoints.findIndex((sample) => numberAt(sample.row, "entry_id") === viewerEntryId)
+		: -1;
+	const averageOverallPoints =
+		sortedPoints.length === 0
+			? null
+			: Math.round(
+					sortedPoints.reduce((sum, sample) => sum + sample.value, 0) / sortedPoints.length
+				);
+	const performance = rows
+		.filter(
+			(row) => numberAt(row, "event_points") !== null && numberAt(row, "event_net_points") !== null
+		)
+		.sort(
+			(left, right) =>
+				(numberAt(right, "event_net_points") ?? 0) - (numberAt(left, "event_net_points") ?? 0) ||
+				(numberAt(left, "entry_id") ?? 0) - (numberAt(right, "entry_id") ?? 0)
+		);
+	const toPerformance = (row: AggregateTestRow) => ({
+		entryId: numberAt(row, "entry_id") ?? 0,
+		entryName: stringAt(row, "entry_name"),
+		playerName: stringAt(row, "player_name"),
+		eventPoints: numberAt(row, "event_points") ?? 0,
+		eventNetPoints: numberAt(row, "event_net_points") ?? 0,
+		rank: numberAt(row, "tournament_rank"),
+		previousRank: numberAt(row, "previous_tournament_rank"),
+		captainId: numberAt(row, "captain_id"),
+		captainWebName: stringAt(row, "captain_web_name"),
+		captainTeamShortName: stringAt(row, "captain_team_short_name"),
+		captainPoints: numberAt(row, "captain_points"),
+	});
+	const movementRows = rows
+		.map((row) => ({
+			row,
+			movement:
+				numberAt(row, "previous_tournament_rank") === null ||
+				numberAt(row, "tournament_rank") === null
+					? null
+					: (numberAt(row, "previous_tournament_rank") ?? 0) - numberAt(row, "tournament_rank")!,
+		}))
+		.filter((item): item is { row: AggregateTestRow; movement: number } => item.movement !== null);
+	const risers = movementRows
+		.filter((item) => item.movement > 0)
+		.sort(
+			(left, right) =>
+				right.movement - left.movement ||
+				(numberAt(left.row, "entry_id") ?? 0) - (numberAt(right.row, "entry_id") ?? 0)
+		)
+		.slice(0, 5)
+		.map((item) => toPerformance(item.row));
+	const fallers = movementRows
+		.filter((item) => item.movement < 0)
+		.sort(
+			(left, right) =>
+				left.movement - right.movement ||
+				(numberAt(left.row, "entry_id") ?? 0) - (numberAt(right.row, "entry_id") ?? 0)
+		)
+		.slice(0, 5)
+		.map((item) => toPerformance(item.row));
+	const distribution = (kind: "captain" | "chip") => {
+		const groups = new Map<
+			string,
+			{ label: string; teamShortName: string | null; count: number; totalPoints: number }
+		>();
+		for (const row of rows) {
+			const captainId = numberAt(row, "captain_id");
+			const rawChip =
+				stringAt(row, "event_chip")
+					?.toUpperCase()
+					.replace(/[^A-Z0-9]/g, "") ?? "NONE";
+			const key =
+				kind === "captain"
+					? captainId === null
+						? "NONE"
+						: String(captainId)
+					: rawChip === "BBOOST" || rawChip === "BENCHBOOST"
+						? "BENCH_BOOST"
+						: rawChip === "FREEHIT"
+							? "FREE_HIT"
+							: rawChip;
+			const current = groups.get(key) ?? {
+				label:
+					kind === "captain"
+						? captainId === null
+							? "NONE"
+							: (stringAt(row, "captain_web_name") ?? String(captainId))
+						: key,
+				teamShortName: kind === "captain" ? stringAt(row, "captain_team_short_name") : null,
+				count: 0,
+				totalPoints: 0,
+			};
+			current.count += 1;
+			current.totalPoints +=
+				kind === "captain" && captainId === null
+					? 0
+					: (numberAt(row, kind === "captain" ? "captain_points" : "event_net_points") ??
+						numberAt(row, "event_points") ??
+						0);
+			groups.set(key, current);
+		}
+		return [...groups.entries()]
+			.map(([key, value]) => ({
+				key,
+				label: value.label,
+				teamShortName: value.teamShortName,
+				count: value.count,
+				percentage: rows.length === 0 ? 0 : Math.round((value.count / rows.length) * 10_000) / 100,
+				averagePoints: Math.round((value.totalPoints / value.count) * 10) / 10,
+			}))
+			.sort((left, right) => right.count - left.count || left.key.localeCompare(right.key));
+	};
+	return {
+		eventId,
+		entryCount: rows.length,
+		leaderOverallPoints,
+		secondOverallPoints,
+		gapFirstSecond:
+			leaderOverallPoints === null || secondOverallPoints === null
+				? null
+				: leaderOverallPoints - secondOverallPoints,
+		averageOverallPoints,
+		metrics: [
+			metric("OVERALL_POINTS", "overall_points", true),
+			metric("TEAM_VALUE", "team_value", true),
+			metric("TRANSFERS", "cumulative_transfers", false),
+			metric("TOTAL_COSTS", "cumulative_transfer_cost", false),
+			metric("BENCH_POINTS", "cumulative_bench_points", true),
+			metric("AUTO_SUB_POINTS", "cumulative_auto_sub_points", true),
+		],
+		viewer: mine
+			? {
+					entryId: viewerEntryId,
+					overallRank: numberAt(mine, "overall_rank"),
+					tournamentOverallRank: numberAt(mine, "tournament_rank"),
+					teamValue: numberAt(mine, "team_value"),
+					tournamentTeamValueRank: metricRank("team_value", true, mine),
+					transfersNum: numberAt(mine, "cumulative_transfers"),
+					tournamentTransfersRank: metricRank("cumulative_transfers", false, mine),
+					totalCosts: numberAt(mine, "cumulative_transfer_cost"),
+					tournamentCostsRank: metricRank("cumulative_transfer_cost", false, mine),
+					totalBenchPoints: numberAt(mine, "cumulative_bench_points"),
+					tournamentBenchPointsRank: metricRank("cumulative_bench_points", true, mine),
+					autoSubPoints: numberAt(mine, "cumulative_auto_sub_points"),
+					tournamentAutoSubRank: metricRank("cumulative_auto_sub_points", true, mine),
+					overallPoints: numberAt(mine, "overall_points"),
+					leaderOverallPoints,
+					gapToLeader:
+						numberAt(mine, "overall_points") === null || leaderOverallPoints === null
+							? null
+							: Math.max(0, leaderOverallPoints - (numberAt(mine, "overall_points") ?? 0)),
+					pointsBehindNext:
+						pointIndex <= 0
+							? pointIndex === 0
+								? 0
+								: null
+							: Math.max(
+									0,
+									sortedPoints[pointIndex - 1].value - (numberAt(mine, "overall_points") ?? 0)
+								),
+					pointsAheadOfPrev:
+						pointIndex < 0 || pointIndex === sortedPoints.length - 1
+							? pointIndex === sortedPoints.length - 1
+								? 0
+								: null
+							: Math.max(
+									0,
+									(numberAt(mine, "overall_points") ?? 0) - sortedPoints[pointIndex + 1].value
+								),
+				}
+			: null,
+		topPerformers: performance.slice(0, 5).map(toPerformance),
+		risers: risers,
+		fallers,
+		captainDistribution: distribution("captain"),
+		chipDistribution: distribution("chip"),
+	};
 };
 
 const snapshotFor = (currentEventId: number | null) => ({
@@ -259,6 +517,16 @@ const makeFixture = (options: FixtureOptions = {}) => {
 			};
 		}
 		if (sql.includes("jsonb_build_object")) {
+			if (sql.includes("my-fpl competition aggregate")) {
+				return {
+					rows: [
+						{
+							payload:
+								options.aggregatePayload ?? aggregatePayloadFromRows(options.aggregateRows ?? []),
+						},
+					],
+				};
+			}
 			return {
 				rows: [
 					{
