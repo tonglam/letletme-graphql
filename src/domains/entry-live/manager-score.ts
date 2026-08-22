@@ -168,6 +168,12 @@ export function buildManagerScore(params: {
 						: "FRESH";
 		const eventPoints = row.eventPoints;
 		let eventPointSemantics = row.eventPointSemantics ?? "UNKNOWN";
+		// Gross and net event points are mathematically identical when there is
+		// no transfer deduction. This is enough evidence for provisional H2H even
+		// when GW1 has no previous-overall baseline to compare against.
+		if (eventPointSemantics === "UNKNOWN" && eventPoints !== null && effectiveTransferCost === 0) {
+			eventPointSemantics = "ZERO_COST_EQUIVALENT";
+		}
 		if (
 			eventPointSemantics === "UNKNOWN" &&
 			row.totalScope === "OVERALL" &&
