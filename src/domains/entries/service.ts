@@ -247,6 +247,7 @@ const mapEntryPick = (params: {
 			score,
 		};
 	});
+	const isBlankGameweek = fixtureOpponents.length === 0;
 
 	return {
 		season: null,
@@ -262,14 +263,18 @@ const mapEntryPick = (params: {
 		teamName: team?.name ?? "",
 		teamShortName: team?.shortName ?? "",
 		againstId: fixtureOpponents[0]?.opponentId ?? 0,
-		againstName: fixtureOpponents
-			.map((item) => item.opponent?.name ?? "")
-			.filter(Boolean)
-			.join(" / "),
-		againstShortName: fixtureOpponents
-			.map((item) => item.opponent?.shortName ?? "")
-			.filter(Boolean)
-			.join(" / "),
+		againstName: isBlankGameweek
+			? "BLANK"
+			: fixtureOpponents
+					.map((item) => item.opponent?.name ?? "")
+					.filter(Boolean)
+					.join(" / "),
+		againstShortName: isBlankGameweek
+			? "BLANK"
+			: fixtureOpponents
+					.map((item) => item.opponent?.shortName ?? "")
+					.filter(Boolean)
+					.join(" / "),
 		wasHome: fixtureOpponents.map((item) => item.wasHome).join(" / "),
 		score: fixtureOpponents.map((item) => item.score).join(" / "),
 		position: pick.position,
@@ -507,7 +512,10 @@ export const entriesService = {
 
 		return picks.map((pick) => {
 			const player = playerMap.get(pick.element);
-			const eventTeamId = eventTeamIds.get(pick.element) ?? player?.teamId ?? 0;
+			// A missing event-scoped row means the player had no verified club for
+			// this event. Do not substitute the player's current club: that can
+			// attach a later club's fixture to an historical blank gameweek.
+			const eventTeamId = eventTeamIds.get(pick.element) ?? 0;
 			const team = teamMap.get(eventTeamId);
 			const live = liveByPlayer.get(livePerformanceKey(result.eventId, pick.element));
 			return mapEntryPick({

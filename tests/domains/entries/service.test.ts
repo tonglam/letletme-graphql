@@ -185,7 +185,14 @@ describe("entriesService.getEntryEventPicks", () => {
 						: player
 			),
 		};
-		const context = makeContext(core, [liveRow(34, 4, 10, 90), liveRow(34, 1, 2, 0)]);
+		const context = makeContext(
+			core,
+			[liveRow(34, 4, 10, 90), liveRow(34, 1, 2, 0)],
+			[
+				{ event_id: 34, element_id: 4, team_id: 1 },
+				{ event_id: 34, element_id: 1, team_id: 1 },
+			]
+		);
 
 		const result = await entriesService.getEntryEventPicks(context, eventResult);
 
@@ -261,6 +268,53 @@ describe("entriesService.getEntryEventPicks", () => {
 			score,
 			bgw: false,
 			dgw: false,
+		});
+	});
+
+	it("does not attach the current club to a historical blank gameweek", async () => {
+		const base = buildTestCoreData(34);
+		const currentClubFixture = base.fixtures.find(
+			(fixture) => fixture.eventId === 34 && (fixture.teamHId === 2 || fixture.teamAId === 2)
+		);
+		if (!currentClubFixture) throw new Error("Current club fixture not found");
+		const core = {
+			...base,
+			players: base.players.map((player) =>
+				player.id === 4
+					? { ...player, teamId: 2 }
+					: player.id === 12
+						? { ...player, teamId: 1 }
+						: player
+			),
+		};
+		const context = makeContext(core, [liveRow(34, 4, 10, 90)]);
+
+		const result = await entriesService.getEntryEventPicks(context, {
+			entryId: 84885,
+			eventId: 34,
+			eventPoints: 10,
+			eventRank: 1,
+			overallPoints: 10,
+			overallRank: 1,
+			eventTransfers: 0,
+			eventTransfersCost: 0,
+			eventNetPoints: 10,
+			eventBenchPoints: 0,
+			eventChip: null,
+			eventPlayedCaptain: 4,
+			eventCaptainPoints: 10,
+			eventPicks: [{ element: 4, position: 1, multiplier: 2, is_captain: true }],
+			teamValue: 1000,
+			bank: 0,
+		});
+
+		expect(result[0]).toMatchObject({
+			teamId: 0,
+			againstName: "BLANK",
+			againstShortName: "BLANK",
+			wasHome: "",
+			score: "",
+			bgw: true,
 		});
 	});
 });

@@ -164,18 +164,18 @@ WITH aggregate_rows AS MATERIALIZED (
         'leaderPlayerName', stats.leader_player_name,
         'averageValue', stats.average_value,
         'higherIsBetter', catalog.higher_is_better
-      ) ORDER BY catalog.key
+      ) ORDER BY catalog.sort_order
     ), '[]'::jsonb
   ) AS value
   FROM (
     VALUES
-      ('AUTO_SUB_POINTS'::text, TRUE),
-      ('BENCH_POINTS'::text, TRUE),
-      ('OVERALL_POINTS'::text, TRUE),
-      ('TEAM_VALUE'::text, TRUE),
-      ('TOTAL_COSTS'::text, FALSE),
-      ('TRANSFERS'::text, FALSE)
-  ) AS catalog(key, higher_is_better)
+      (1, 'OVERALL_POINTS'::text, TRUE),
+      (2, 'TEAM_VALUE'::text, TRUE),
+      (3, 'TRANSFERS'::text, FALSE),
+      (4, 'TOTAL_COSTS'::text, FALSE),
+      (5, 'BENCH_POINTS'::text, TRUE),
+      (6, 'AUTO_SUB_POINTS'::text, TRUE)
+  ) AS catalog(sort_order, key, higher_is_better)
   LEFT JOIN metric_stats stats ON stats.key = catalog.key
 )
 SELECT jsonb_build_object(

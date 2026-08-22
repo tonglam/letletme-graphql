@@ -266,6 +266,75 @@ const cachedResult: EntryEventResult = {
 };
 
 describe("entriesRepository.getEntryEventResultsByEntryIds", () => {
+	it("evicts cached event results that predate official auto-sub data", async () => {
+		const deletedKeys: string[] = [];
+		let databaseReads = 0;
+		const legacyResult = { ...cachedResult };
+		delete legacyResult.eventAutoSub;
+		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
+			redis: {
+				mget: async () => [JSON.stringify(legacyResult)],
+				del: async (key: string) => {
+					deletedKeys.push(key);
+					return 1;
+				},
+				pipeline: () => {
+					const pipeline = {
+						set() {
+							return pipeline;
+						},
+						exec: async () => [],
+					};
+					return pipeline;
+				},
+			},
+			data: {
+				read: () => {
+					databaseReads += 1;
+					return {
+						select: () => ({
+							in: () => ({
+								eq: async () => ({
+									data: [
+										{
+											entry_id: cachedResult.entryId,
+											event_id: cachedResult.eventId,
+											event_points: cachedResult.eventPoints,
+											event_rank: cachedResult.eventRank,
+											overall_points: cachedResult.overallPoints,
+											overall_rank: cachedResult.overallRank,
+											event_transfers: cachedResult.eventTransfers,
+											event_transfers_cost: cachedResult.eventTransfersCost,
+											event_net_points: cachedResult.eventNetPoints,
+											event_bench_points: cachedResult.eventBenchPoints,
+											event_chip: cachedResult.eventChip,
+											event_played_captain: cachedResult.eventPlayedCaptain,
+											event_captain_points: cachedResult.eventCaptainPoints,
+											event_picks: cachedResult.eventPicks,
+											event_auto_sub: cachedResult.eventAutoSub,
+											team_value: cachedResult.teamValue,
+											bank: cachedResult.bank,
+										},
+									],
+									error: null,
+								}),
+							}),
+						}),
+					};
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const results = await entriesRepository.getEntryEventResultsByEntryIds(context, [101], 32);
+
+		expect(results.get(101)).toEqual(cachedResult);
+		expect(databaseReads).toBe(1);
+		expect(deletedKeys).toHaveLength(1);
+	});
+
 	it("reuses the per-entry baseline cache before querying PostgreSQL", async () => {
 		let databaseReads = 0;
 		const context = {

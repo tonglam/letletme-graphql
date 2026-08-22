@@ -222,7 +222,8 @@ const isEntryEventResult = (value: unknown): value is EntryEventResult => {
 		typeof value.entryId === "number" &&
 		Number.isFinite(value.entryId) &&
 		typeof value.eventId === "number" &&
-		Number.isFinite(value.eventId)
+		Number.isFinite(value.eventId) &&
+		Array.isArray(value.eventAutoSub)
 	);
 };
 

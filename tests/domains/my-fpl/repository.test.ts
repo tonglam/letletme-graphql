@@ -24,6 +24,7 @@ import { LeagueType } from "../../../src/domains/leagues/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
 import { gqlCacheKey } from "../../../src/infra/cache-key";
 import { TestRedis, testLogger } from "../../helpers/data-publication";
+import { COMPETITION_AGGREGATE_SQL } from "../../../src/domains/my-fpl/competition-aggregate-sql";
 
 const verifiedPrincipal = {
 	userId: "user-1",
@@ -31,6 +32,24 @@ const verifiedPrincipal = {
 	fplEntryId: 123,
 	fplEntryVerifiedAt: "2026-08-20T00:00:00.000Z",
 };
+
+describe("competition aggregate SQL contract", () => {
+	it("keeps the established semantic metric order", () => {
+		const catalog = COMPETITION_AGGREGATE_SQL.slice(
+			COMPETITION_AGGREGATE_SQL.indexOf("VALUES"),
+			COMPETITION_AGGREGATE_SQL.indexOf(") AS catalog")
+		);
+		const order = [
+			"OVERALL_POINTS",
+			"TEAM_VALUE",
+			"TRANSFERS",
+			"TOTAL_COSTS",
+			"BENCH_POINTS",
+			"AUTO_SUB_POINTS",
+		].map((key) => catalog.indexOf(key));
+		expect(order).toEqual([...order].sort((left, right) => left - right));
+	});
+});
 
 const entryRow = (overrides: Record<string, unknown> = {}) => ({
 	entry_id: 123,
