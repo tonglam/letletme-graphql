@@ -118,6 +118,7 @@ const readLiveWindow = async (context: GraphQLContext) => {
 		source: currentPublication?.source ?? fixtureCore.source,
 		lifecycleEventId: currentLifecycle?.eventId ?? null,
 		lifecycleState: currentLifecycle?.state ?? null,
+		lifecycleObservedAt: currentLifecycle?.observedAt ?? null,
 		lifecycleNextRefreshAt: currentLifecycle?.nextRefreshAt ?? null,
 	});
 	const anchorLifecycle =
@@ -151,6 +152,7 @@ const readLiveWindow = async (context: GraphQLContext) => {
 				source: anchorPublication?.source ?? fixtureCore.source,
 				lifecycleEventId: anchorLifecycle?.eventId ?? null,
 				lifecycleState: anchorLifecycle?.state ?? null,
+				lifecycleObservedAt: anchorLifecycle?.observedAt ?? null,
 				lifecycleNextRefreshAt: anchorLifecycle?.nextRefreshAt ?? null,
 			})
 		: initialWindow;
@@ -410,6 +412,7 @@ export const liveDesksResolvers = {
 				source: snapshot.source,
 				lifecycleEventId: eventLifecycle?.eventId ?? null,
 				lifecycleState: eventLifecycle?.state ?? null,
+				lifecycleObservedAt: eventLifecycle?.observedAt ?? null,
 				lifecycleNextRefreshAt: eventLifecycle?.nextRefreshAt ?? null,
 			});
 			return {
@@ -492,6 +495,7 @@ export const liveDesksResolvers = {
 				source: fixtureCore.source,
 				lifecycleEventId: currentLifecycle?.eventId ?? null,
 				lifecycleState: currentLifecycle?.state ?? null,
+				lifecycleObservedAt: currentLifecycle?.observedAt ?? null,
 				lifecycleNextRefreshAt: currentLifecycle?.nextRefreshAt ?? null,
 			});
 			const eventId = args.ref?.eventId ?? window.anchorEventId ?? eventCore.currentEventId ?? 0;
@@ -520,6 +524,7 @@ export const liveDesksResolvers = {
 						source: snapshot.source,
 						lifecycleEventId: deskLifecycle?.eventId ?? null,
 						lifecycleState: deskLifecycle?.state ?? null,
+						lifecycleObservedAt: deskLifecycle?.observedAt ?? null,
 						lifecycleNextRefreshAt: deskLifecycle?.nextRefreshAt ?? null,
 					})
 				: window;

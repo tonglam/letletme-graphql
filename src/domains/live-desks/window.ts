@@ -35,6 +35,7 @@ export type LiveWindowInput = {
 	source: DataSnapshotSource | null;
 	lifecycleEventId?: number | null;
 	lifecycleState?: ProducerLifecycleState | null;
+	lifecycleObservedAt?: string | null;
 	lifecycleNextRefreshAt?: string | null;
 	now?: Date;
 };
@@ -125,6 +126,7 @@ const staleAfterMsForWindow = (state: LiveWindowState): number => {
 			return 60_000;
 	}
 };
+const lifecycleStatusMaxAgeMs = 2 * 60_000;
 
 const lifecycleWindowState = (
 	state: ProducerLifecycleState,
@@ -292,6 +294,13 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 		anchorMode = "OFFSEASON";
 	}
 	const lifecycleState = input.lifecycleState;
+	const lifecycleObservedAtMs = input.lifecycleObservedAt
+		? Date.parse(input.lifecycleObservedAt)
+		: Number.NaN;
+	const lifecycleIsFresh =
+		Number.isFinite(lifecycleObservedAtMs) &&
+		lifecycleObservedAtMs <= nowMs + 30_000 &&
+		nowMs - lifecycleObservedAtMs <= lifecycleStatusMaxAgeMs;
 	const sourceCheckedAt = input.sourceCheckedAt;
 	const checkedAtMs = sourceCheckedAt ? Date.parse(sourceCheckedAt) : Number.NaN;
 	const liveSnapshotIsFresh =
@@ -304,6 +313,7 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 		input.lifecycleEventId === anchorEventId &&
 		lifecycleState !== null &&
 		lifecycleState !== undefined &&
+		lifecycleIsFresh &&
 		!liveSnapshotHasActiveFixture;
 	if (lifecycleApplies) {
 		windowState = lifecycleWindowState(lifecycleState!, windowState);
