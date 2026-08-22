@@ -5,6 +5,8 @@
  * never filled from historical price changes.
  */
 
+import { DateTimeResolver } from "graphql-scalars";
+
 const PRICE_CHANGE_TIMEOUT_MS = 5_000;
 
 export type PriceChangePredictionStatus =
@@ -69,8 +71,18 @@ const isFiniteNumber = (value: unknown): value is number =>
 const isSafeInteger = (value: unknown): value is number =>
 	typeof value === "number" && Number.isSafeInteger(value);
 
-const isNullableString = (value: unknown): value is string | null =>
-	value === null || typeof value === "string";
+const isDateTimeString = (value: unknown): value is string => {
+	if (typeof value !== "string") return false;
+	try {
+		DateTimeResolver.parseValue(value);
+		return true;
+	} catch {
+		return false;
+	}
+};
+
+const isNullableDateTimeString = (value: unknown): value is string | null =>
+	value === null || isDateTimeString(value);
 
 const isStatus = (value: unknown): value is PriceChangePredictionStatus =>
 	value === "VERY_LIKELY_RISE" ||
@@ -121,12 +133,14 @@ const parsePlayer = (value: unknown): PriceChangePlayer | null => {
 		!isOwnershipTrend(value.ownershipTrend) ||
 		!isSafeInteger(value.transfersInEvent) ||
 		!isSafeInteger(value.transfersOutEvent) ||
-		!isNullableString(value.lockedUntil) ||
+		!isNullableDateTimeString(value.lockedUntil) ||
 		typeof value.calibrating !== "boolean" ||
 		!Array.isArray(value.projections)
 	) {
 		return null;
 	}
+	const projections = value.projections.map(parseProjection);
+	if (projections.some((projection) => projection === null)) return null;
 	return {
 		playerId: value.playerId,
 		playerCode: value.playerCode,
@@ -145,9 +159,7 @@ const parsePlayer = (value: unknown): PriceChangePlayer | null => {
 		transfersOutEvent: value.transfersOutEvent,
 		lockedUntil: value.lockedUntil,
 		calibrating: value.calibrating,
-		projections: value.projections
-			.map(parseProjection)
-			.filter((projection): projection is PriceChangeProjection => projection !== null),
+		projections: projections as PriceChangeProjection[],
 	};
 };
 
@@ -159,11 +171,11 @@ const parseBoard = (value: unknown): PriceChangeBoard | null => {
 			value.status !== "STALE" &&
 			value.status !== "UNAVAILABLE") ||
 		value.source !== "FPL_BOOTSTRAP" ||
-		!isNullableString(value.deadline) ||
+		!isNullableDateTimeString(value.deadline) ||
 		!Array.isArray(value.nextDeadlines) ||
-		!value.nextDeadlines.every((deadline) => typeof deadline === "string") ||
-		!isNullableString(value.fetchedAt) ||
-		!isNullableString(value.staleAt) ||
+		!value.nextDeadlines.every(isDateTimeString) ||
+		!isNullableDateTimeString(value.fetchedAt) ||
+		!isNullableDateTimeString(value.staleAt) ||
 		typeof value.revision !== "string" ||
 		!isSafeInteger(value.expectedPlayerCount) ||
 		!isSafeInteger(value.observedPlayerCount) ||
@@ -171,6 +183,8 @@ const parseBoard = (value: unknown): PriceChangeBoard | null => {
 	) {
 		return null;
 	}
+	const players = value.players.map(parsePlayer);
+	if (players.some((player) => player === null)) return null;
 	return {
 		status: value.status,
 		source: "FPL_BOOTSTRAP",
@@ -181,9 +195,7 @@ const parseBoard = (value: unknown): PriceChangeBoard | null => {
 		revision: value.revision,
 		expectedPlayerCount: value.expectedPlayerCount,
 		observedPlayerCount: value.observedPlayerCount,
-		players: value.players
-			.map(parsePlayer)
-			.filter((player): player is PriceChangePlayer => player !== null),
+		players: players as PriceChangePlayer[],
 	};
 };
 
