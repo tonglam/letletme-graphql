@@ -143,6 +143,7 @@ const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRankRow | null => {
 	return {
 		key: `${row.league_type}:${row.league_id}`,
 		name: row.league_name,
+		leagueType: scoring === "h2h" ? "H2H" : "CLASSIC",
 		rank,
 		movement: movementFromRanks(row.entry_rank, row.entry_last_rank),
 		tournamentId: row.tournament_id,
