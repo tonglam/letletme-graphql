@@ -29,6 +29,27 @@ export const LIVE_PUBLICATION_ITEMS = ["eventLive", "fixtures"] as const;
 export type DataSnapshotSource = "redis" | "postgres";
 export type LiveSnapshotState = "scheduled" | "live" | "settled";
 export type LivePublicationManifestSource = "redis" | "postgres";
+export type LiveLifecycleState =
+	| "PRE_DEADLINE"
+	| "PICKS_WAIT"
+	| "PICKS_PROBE"
+	| "PICKS_SYNC"
+	| "LIVE_ACTIVE"
+	| "BETWEEN_FIXTURES"
+	| "DAY_SETTLING"
+	| "GW_REVIEW"
+	| "FINALIZED";
+
+export type LiveLifecycleStatus = Readonly<{
+	eventId: number;
+	state: LiveLifecycleState;
+	observedAt: string;
+	lastChangedAt: string;
+	nextRefreshAt: string | null;
+	liveRevision: string | null;
+	publicationId: string | null;
+	sourceCheckedAt: string | null;
+}>;
 
 export type LivePublicationManifestWithSource = Readonly<{
 	manifest: DataPublicationManifest;
@@ -292,6 +313,10 @@ const coreEventSnapshotMemo = new WeakMap<object, Promise<CoreEventSnapshot>>();
 const coreTeamSnapshotMemo = new WeakMap<object, Promise<CoreTeamSnapshot>>();
 const coreLiveIdentitySnapshotMemo = new WeakMap<object, Promise<CoreLiveIdentitySnapshot>>();
 const liveSnapshotMemo = new WeakMap<object, Map<number, Promise<LiveDataSnapshot>>>();
+const liveLifecycleStatusMemo = new WeakMap<
+	object,
+	Map<number, Promise<LiveLifecycleStatus | null>>
+>();
 const teamSelectionCoreSnapshotMemo = new WeakMap<object, Promise<CoreDataSnapshot>>();
 
 type CorePublicationPin = {
@@ -448,6 +473,38 @@ export const getLiveDataPublicationManifestWithSource = async (
 	return postgresPublication
 		? { manifest: postgresPublication.manifest, source: "postgres" }
 		: null;
+};
+
+export const getLiveLifecycleStatus = (
+	context: GraphQLContext,
+	eventId: number
+): Promise<LiveLifecycleStatus | null> => {
+	if (!Number.isSafeInteger(eventId) || eventId <= 0) return Promise.resolve(null);
+	const requestScope = context.requestScope ?? context;
+	let statuses = liveLifecycleStatusMemo.get(requestScope);
+	if (!statuses) {
+		statuses = new Map();
+		liveLifecycleStatusMemo.set(requestScope, statuses);
+	}
+	const existing = statuses.get(eventId);
+	if (existing) return existing;
+	const load = (async (): Promise<LiveLifecycleStatus | null> => {
+		try {
+			const result = await context.database.query<LiveLifecycleStatusRow>(
+				LIVE_LIFECYCLE_STATUS_SQL,
+				[context.currentSeason.seasonId, eventId]
+			);
+			return mapLiveLifecycleStatus(result.rows[0]);
+		} catch (error) {
+			context.logger.warn(
+				{ eventId, error },
+				"Live lifecycle status unavailable; using coherent publication/core inference"
+			);
+			return null;
+		}
+	})();
+	statuses.set(eventId, load);
+	return load;
 };
 
 export const getLiveDataPublicationManifest = async (
@@ -1274,6 +1331,77 @@ type CoreTeamFallbackRow = QueryResultRow & {
 
 type CoreLiveIdentityFallbackRow = CoreTeamFallbackRow & {
 	players: unknown;
+};
+
+type LiveLifecycleStatusRow = QueryResultRow & {
+	event_id: string | number;
+	state: string;
+	observed_at: string | Date;
+	last_changed_at: string | Date;
+	next_refresh_at: string | Date | null;
+	live_revision: string | number | null;
+	publication_id: string | null;
+	source_checked_at: string | Date | null;
+};
+
+const LIVE_LIFECYCLE_STATUS_SQL = `
+	SELECT
+		event_id,
+		state,
+		observed_at,
+		last_changed_at,
+		next_refresh_at,
+		live_revision,
+		publication_id::text AS publication_id,
+		source_checked_at
+	FROM ops.live_lifecycle_status
+	WHERE season_id = $1
+	  AND event_id = $2
+	LIMIT 1
+`;
+
+const LIVE_LIFECYCLE_STATES = new Set<LiveLifecycleState>([
+	"PRE_DEADLINE",
+	"PICKS_WAIT",
+	"PICKS_PROBE",
+	"PICKS_SYNC",
+	"LIVE_ACTIVE",
+	"BETWEEN_FIXTURES",
+	"DAY_SETTLING",
+	"GW_REVIEW",
+	"FINALIZED",
+]);
+
+const mapLiveLifecycleStatus = (
+	row: LiveLifecycleStatusRow | undefined
+): LiveLifecycleStatus | null => {
+	if (!row) return null;
+	const eventId = integer(row.event_id);
+	const observedAt = isoDate(row.observed_at);
+	const lastChangedAt = isoDate(row.last_changed_at);
+	if (
+		eventId === null ||
+		eventId <= 0 ||
+		!LIVE_LIFECYCLE_STATES.has(row.state as LiveLifecycleState) ||
+		!observedAt ||
+		!lastChangedAt
+	) {
+		return null;
+	}
+	const optionalString = (value: string | number | null): string | null =>
+		value === null ? null : String(value);
+	const optionalDate = (value: string | Date | null): string | null =>
+		value === null ? null : isoDate(value);
+	return {
+		eventId,
+		state: row.state as LiveLifecycleState,
+		observedAt,
+		lastChangedAt,
+		nextRefreshAt: optionalDate(row.next_refresh_at),
+		liveRevision: optionalString(row.live_revision),
+		publicationId: row.publication_id,
+		sourceCheckedAt: optionalDate(row.source_checked_at),
+	};
 };
 
 type LiveFallbackRow = QueryResultRow & {
