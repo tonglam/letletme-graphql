@@ -3,6 +3,7 @@ import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 
 const NULL_SENTINEL = "__entries:null__";
+const ENTRY_RESULT_CACHE_VERSION = "v2";
 
 export type Entry = {
 	id: number;
@@ -82,6 +83,7 @@ type DbEntryEventResultRow = {
 	event_captain_points?: number | null;
 	event_picks?: unknown;
 	event_auto_sub?: unknown;
+	rich_synced_at?: string | null;
 	team_value: number | null;
 	bank: number | null;
 };
@@ -420,7 +422,10 @@ export const entriesRepository: EntriesRepository = {
 			return [];
 		}
 
-		const cacheKey = gqlCacheKey(context, `entries:history:${entryId}`);
+		const cacheKey = gqlCacheKey(
+			context,
+			`entries:history:${ENTRY_RESULT_CACHE_VERSION}:${entryId}`
+		);
 		let cached: string | null = null;
 		try {
 			cached = await context.redis.get(cacheKey);
@@ -443,7 +448,7 @@ export const entriesRepository: EntriesRepository = {
 		const { data, error } = await context.data
 			.read("competition.entry_event_results")
 			.select(
-				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, team_value, bank"
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, rich_synced_at, team_value, bank"
 			)
 			.eq("entry_id", entryId)
 			.order("event_id", { ascending: true });
@@ -453,7 +458,10 @@ export const entriesRepository: EntriesRepository = {
 			throw new Error("Failed to fetch entry history");
 		}
 
-		const history = (data as DbEntryEventResultRow[] | null)?.map(mapEntryEventResult) ?? [];
+		const history =
+			(data as DbEntryEventResultRow[] | null)
+				?.filter((row) => row.rich_synced_at !== null && row.rich_synced_at !== undefined)
+				.map(mapEntryEventResult) ?? [];
 		await writeQueryCache(
 			context,
 			cacheKey,
@@ -523,7 +531,10 @@ export const entriesRepository: EntriesRepository = {
 			return null;
 		}
 
-		const cacheKey = gqlCacheKey(context, `entries:event-result:${entryId}:${eventId}`);
+		const cacheKey = gqlCacheKey(
+			context,
+			`entries:event-result:${ENTRY_RESULT_CACHE_VERSION}:${entryId}:${eventId}`
+		);
 		const cached = await readJsonCache(context, cacheKey, isEntryEventResult);
 		if (cached) {
 			return cached;
@@ -532,7 +543,7 @@ export const entriesRepository: EntriesRepository = {
 		const { data, error } = await context.data
 			.read("competition.entry_event_results")
 			.select(
-				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, team_value, bank"
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, rich_synced_at, team_value, bank"
 			)
 			.eq("entry_id", entryId)
 			.eq("event_id", eventId)
@@ -544,7 +555,7 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const row = data?.[0] as DbEntryEventResultRow | undefined;
-		if (!row) {
+		if (!row || row.rich_synced_at === null || row.rich_synced_at === undefined) {
 			return null;
 		}
 
@@ -571,7 +582,10 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const cacheKeys = uniqueIds.map((entryId) =>
-			gqlCacheKey(context, `entries:event-result:${entryId}:${eventId}`)
+			gqlCacheKey(
+				context,
+				`entries:event-result:${ENTRY_RESULT_CACHE_VERSION}:${entryId}:${eventId}`
+			)
 		);
 		const results = new Map<number, EntryEventResult>();
 		const missIds: number[] = [];
@@ -610,7 +624,7 @@ export const entriesRepository: EntriesRepository = {
 		const { data, error } = await context.data
 			.read("competition.entry_event_results")
 			.select(
-				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, team_value, bank"
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, rich_synced_at, team_value, bank"
 			)
 			.in("entry_id", missIds)
 			.eq("event_id", eventId);
@@ -624,11 +638,16 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const pipeline = context.redis.pipeline();
-		for (const row of (data as DbEntryEventResultRow[] | null) ?? []) {
+		for (const row of ((data as DbEntryEventResultRow[] | null) ?? []).filter(
+			(row) => row.rich_synced_at !== null && row.rich_synced_at !== undefined
+		)) {
 			const result = mapEntryEventResult(row);
 			results.set(result.entryId, result);
 			pipeline.set(
-				gqlCacheKey(context, `entries:event-result:${result.entryId}:${eventId}`),
+				gqlCacheKey(
+					context,
+					`entries:event-result:${ENTRY_RESULT_CACHE_VERSION}:${result.entryId}:${eventId}`
+				),
 				JSON.stringify(result),
 				"EX",
 				QUERY_CACHE_TTL_SECONDS.METADATA

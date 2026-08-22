@@ -1747,14 +1747,10 @@ const loadCompetitionBoardPrepared = async (
 		          entry.player_name,
 		          COALESCE(group_result.event_group_rank, summary.tournament_event_rank)::integer AS rank,
 		          COALESCE(previous_group.event_group_rank, previous_summary.tournament_event_rank)::integer AS previous_rank,
-		          CASE
-		            WHEN summary.overall_points IS NULL THEN NULL
-		            ELSE ROW_NUMBER() OVER (
-		              ORDER BY summary.overall_points DESC NULLS LAST,
-		                       summary.overall_rank ASC NULLS LAST,
-		                       summary.entry_id
-		            )::integer
-		          END AS field_rank,
+			          -- tournament_event_rank is the published full-field rank. Do
+			          -- not rank by raw FPL totals: a points race may start after
+			          -- the season begins or use a different scoring window.
+			          summary.tournament_event_rank::integer AS field_rank,
 		          summary.event_points,
 		          summary.event_transfers_cost AS event_cost,
 		          summary.event_net_points,
@@ -1790,14 +1786,19 @@ const loadCompetitionBoardPrepared = async (
 		   LEFT JOIN fpl.players captain
 		     ON captain.season_id = summary.season_id
 		    AND captain.element_id = summary.played_captain_element_id
-		   LEFT JOIN LATERAL (
-		     SELECT fixture_stats.team_id
-		     FROM fpl.player_fixture_stats fixture_stats
-		     WHERE fixture_stats.season_id = summary.season_id
-		       AND fixture_stats.event_id = summary.event_id
-		       AND fixture_stats.element_id = summary.played_captain_element_id
-		     ORDER BY fixture_stats.fixture_id
-		     LIMIT 1
+			LEFT JOIN LATERAL (
+			  SELECT fixture_stats.team_id
+			  FROM fpl.player_fixture_stats fixture_stats
+			  JOIN fpl.fixtures fixture
+			    ON fixture.season_id = fixture_stats.season_id
+			   AND fixture.fixture_id = fixture_stats.fixture_id
+			  WHERE fixture_stats.season_id = summary.season_id
+			    AND fixture_stats.event_id = summary.event_id
+			    AND fixture_stats.element_id = summary.played_captain_element_id
+			  ORDER BY fixture.kickoff_time NULLS LAST,
+			           fixture.fixture_id,
+			           fixture_stats.fixture_id
+			  LIMIT 1
 		   ) captain_historical_team ON TRUE
 		   LEFT JOIN fpl.teams captain_team
 		     ON captain_team.season_id = captain.season_id

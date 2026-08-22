@@ -59,10 +59,15 @@ WITH aggregate_rows AS MATERIALIZED (
   LEFT JOIN LATERAL (
     SELECT fixture_stats.team_id
     FROM fpl.player_fixture_stats fixture_stats
+    JOIN fpl.fixtures fixture
+      ON fixture.season_id = fixture_stats.season_id
+     AND fixture.fixture_id = fixture_stats.fixture_id
     WHERE fixture_stats.season_id = summary.season_id
       AND fixture_stats.event_id = summary.event_id
       AND fixture_stats.element_id = summary.played_captain_element_id
-    ORDER BY fixture_stats.fixture_id
+    ORDER BY fixture.kickoff_time NULLS LAST,
+             fixture.fixture_id,
+             fixture_stats.fixture_id
     LIMIT 1
   ) captain_historical_team ON TRUE
   LEFT JOIN fpl.teams captain_team

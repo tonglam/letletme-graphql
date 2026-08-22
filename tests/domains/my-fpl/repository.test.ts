@@ -908,7 +908,7 @@ describe("My FPL review repository", () => {
 		expect(page.totalPages).toBe(2);
 		const boardQuery = fixture.queries.find((query) => query.sql.includes("LIMIT $5 OFFSET $6"));
 		expect(boardQuery?.params.slice(3, 6)).toEqual(["Foo", 1, 1]);
-		expect(boardQuery?.sql).toContain("ROW_NUMBER() OVER");
+		expect(boardQuery?.sql).toContain("summary.tournament_event_rank::integer AS field_rank");
 		expect(boardQuery?.sql).toContain("AS field_rank");
 		const queryCount = fixture.queries.filter((query) =>
 			query.sql.includes("LIMIT $5 OFFSET $6")
