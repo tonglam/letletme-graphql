@@ -201,6 +201,7 @@ export type MyFplCompetitionBoardRow = {
 	playerName: string | null;
 	rank: number | null;
 	previousRank: number | null;
+	fieldRank: number | null;
 	eventPoints: number | null;
 	eventCost: number | null;
 	eventNetPoints: number | null;
@@ -471,6 +472,7 @@ type DbBoardJsonRow = {
 	player_name: string | null;
 	rank: number | string | null;
 	previous_rank: number | string | null;
+	field_rank: number | string | null;
 	event_points: number | null;
 	event_cost: number | null;
 	event_net_points: number | null;
@@ -508,7 +510,7 @@ type DbSetupStatusRow = QueryResultRow & {
 	setup_warning_count?: number | null;
 };
 
-const PROJECTION_VERSION = "v6";
+const PROJECTION_VERSION = "v7";
 const NULLABLE_STATE_CACHE_TTL_SECONDS = 30;
 // Keep OFFSET bounded for the fixed-cost board root. Page 100 is the maximum
 // 10,000-row window at the maximum page size.
@@ -792,6 +794,7 @@ const isCompetitionBoardRowCache = (value: unknown): value is MyFplCompetitionBo
 		playerName: isNullableString,
 		rank: isNullableSafeInteger,
 		previousRank: isNullableSafeInteger,
+		fieldRank: isNullableSafeInteger,
 		captainId: isNullableSafeInteger,
 		captainWebName: isNullableString,
 		captainTeamShortName: isNullableString,
@@ -1635,6 +1638,7 @@ const mapBoardJsonRow = (row: DbBoardJsonRow): MyFplCompetitionBoardRow => ({
 	playerName: row.player_name,
 	rank: asInteger(row.rank),
 	previousRank: asInteger(row.previous_rank),
+	fieldRank: asInteger(row.field_rank),
 	eventPoints: row.event_points,
 	eventCost: row.event_cost,
 	eventNetPoints: row.event_net_points,
@@ -1745,6 +1749,14 @@ const loadCompetitionBoardPrepared = async (
 		          entry.player_name,
 		          COALESCE(group_result.event_group_rank, summary.tournament_event_rank)::integer AS rank,
 		          COALESCE(previous_group.event_group_rank, previous_summary.tournament_event_rank)::integer AS previous_rank,
+		          CASE
+		            WHEN summary.overall_points IS NULL THEN NULL
+		            ELSE ROW_NUMBER() OVER (
+		              ORDER BY summary.overall_points DESC NULLS LAST,
+		                       summary.overall_rank ASC NULLS LAST,
+		                       summary.entry_id
+		            )::integer
+		          END AS field_rank,
 		          summary.event_points,
 		          summary.event_transfers_cost AS event_cost,
 		          summary.event_net_points,

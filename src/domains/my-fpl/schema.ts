@@ -157,6 +157,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		playerName: String
 		rank: Int
 		previousRank: Int
+		fieldRank: Int
 		eventPoints: Int
 		eventCost: Int
 		eventNetPoints: Int

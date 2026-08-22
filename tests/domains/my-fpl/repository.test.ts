@@ -622,6 +622,7 @@ describe("My FPL review repository", () => {
 				player_name: "Test Manager",
 				rank: "7",
 				previous_rank: "9",
+				field_rank: "5",
 				event_points: 61,
 				event_cost: 4,
 				event_net_points: 57,
@@ -636,7 +637,12 @@ describe("My FPL review repository", () => {
 				team_value: 1007,
 				bank: 13,
 			})
-		).toMatchObject({ rank: 7, previousRank: 9, eventChip: "FREE_HIT" });
+		).toMatchObject({
+			rank: 7,
+			previousRank: 9,
+			fieldRank: 5,
+			eventChip: "FREE_HIT",
+		});
 	});
 
 	it("requires a verified principal and preserves the bound entry identity", async () => {
@@ -726,13 +732,13 @@ describe("My FPL review repository", () => {
 			entryRows: [entryRow()],
 			historyRows: [historyRow(1)],
 		});
-		const key = gqlCacheKey(fixture.context, "my-fpl:v6:team-desk:123:season");
+		const key = gqlCacheKey(fixture.context, "my-fpl:v7:team-desk:123:season");
 		await fixture.redis.set(key, JSON.stringify({ state: "READY", history: [] }));
 		const desk = await fixture.repository.loadTeamDesk(fixture.context);
 		expect(desk.state).toBe("READY");
 		expect(await fixture.redis.get(key)).not.toBe(JSON.stringify({ state: "READY", history: [] }));
 		const malformed = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
-		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v6:team-desk:123:season");
+		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v7:team-desk:123:season");
 		await malformed.redis.set(malformedKey, "{");
 		await malformed.repository.loadTeamDesk(malformed.context);
 		expect(await malformed.redis.get(malformedKey)).not.toBe("{");
@@ -846,6 +852,7 @@ describe("My FPL review repository", () => {
 			player_name: "A",
 			rank: 1,
 			previous_rank: null,
+			field_rank: 1,
 			event_points: 50,
 			event_cost: 0,
 			event_net_points: 50,
@@ -880,6 +887,8 @@ describe("My FPL review repository", () => {
 		expect(page.totalPages).toBe(2);
 		const boardQuery = fixture.queries.find((query) => query.sql.includes("LIMIT $5 OFFSET $6"));
 		expect(boardQuery?.params.slice(3, 6)).toEqual(["Foo", 1, 1]);
+		expect(boardQuery?.sql).toContain("ROW_NUMBER() OVER");
+		expect(boardQuery?.sql).toContain("AS field_rank");
 		const queryCount = fixture.queries.filter((query) =>
 			query.sql.includes("LIMIT $5 OFFSET $6")
 		).length;
@@ -1003,6 +1012,7 @@ describe("My FPL review repository", () => {
 			player_name: "A",
 			rank: 1,
 			previous_rank: 2,
+			field_rank: 1,
 			event_points: 60,
 			event_cost: 0,
 			event_net_points: 56,
