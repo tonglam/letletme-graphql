@@ -677,6 +677,7 @@ const snapshotEntryRow = () => ({
 
 const snapshotBoardRow = () => ({
 	field_size: 1,
+	expected_field_size: 1,
 	total_rows: 1,
 	rows: [
 		{

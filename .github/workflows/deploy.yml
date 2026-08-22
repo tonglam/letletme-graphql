@@ -164,6 +164,9 @@ jobs:
             rollout_state=""
             rollout_state_backup=""
             rollout_state_existed=false
+            snapshot_read_state=""
+            snapshot_read_state_backup=""
+            snapshot_read_state_existed=false
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
             active_stage=""
@@ -200,6 +203,9 @@ jobs:
               fi
               if [ -n "${rollout_state_backup:-}" ]; then
                 rm -f "$rollout_state_backup"
+              fi
+              if [ -n "${snapshot_read_state_backup:-}" ]; then
+                rm -f "$snapshot_read_state_backup"
               fi
               release_platform_deploy_lock
               exit "$original_status"
@@ -270,7 +276,40 @@ jobs:
                 exit 1
                 ;;
             esac
-            python3 - "$next_env" "$active_rate_limit_rollout" "$MY_FPL_SNAPSHOT_READ" <<'PY'
+            snapshot_read_state="$HOME/.letletme-graphql-my-fpl-snapshot-read"
+            if [ -f "$snapshot_read_state" ]; then
+              snapshot_read_state_existed=true
+              snapshot_read_state_backup=$(mktemp "$HOME/.letletme-graphql-my-fpl-snapshot-read.previous.XXXXXX")
+              cp "$snapshot_read_state" "$snapshot_read_state_backup"
+              chmod 600 "$snapshot_read_state_backup"
+            fi
+            persist_snapshot_read=""
+            case "$MY_FPL_SNAPSHOT_READ" in
+              preserve)
+                if [ -f "$snapshot_read_state" ]; then
+                  active_snapshot_read=$(cat "$snapshot_read_state")
+                else
+                  active_snapshot_read=false
+                fi
+                ;;
+              enable)
+                active_snapshot_read=true
+                persist_snapshot_read=true
+                ;;
+              disable)
+                active_snapshot_read=false
+                persist_snapshot_read=false
+                ;;
+              *)
+                echo "Unknown My FPL snapshot read flag"
+                exit 1
+                ;;
+            esac
+            case "$active_snapshot_read" in
+              true|false) ;;
+              *) echo "Invalid persisted My FPL snapshot read state"; exit 1 ;;
+            esac
+            python3 - "$next_env" "$active_rate_limit_rollout" "$active_snapshot_read" <<'PY'
             import re
             import sys
             from pathlib import Path
@@ -278,7 +317,7 @@ jobs:
 
             env_path = Path(sys.argv[1])
             rollout = sys.argv[2]
-            snapshot_read = sys.argv[3]
+            snapshot_read_enabled = sys.argv[3]
             lines = env_path.read_text(encoding="utf-8").splitlines()
 
             profiles = {
@@ -305,18 +344,14 @@ jobs:
                 ]
                 lines.extend(f"{key}={value}" for key, value in replacements.items())
 
-            if snapshot_read not in ("preserve", "enable", "disable"):
-                raise SystemExit("Unsupported My FPL snapshot read flag")
-            if snapshot_read != "preserve":
-                lines = [
-                    line
-                    for line in lines
-                    if line.split("=", 1)[0] != "MY_FPL_SNAPSHOT_READ_ENABLED"
-                ]
-                lines.append(
-                    "MY_FPL_SNAPSHOT_READ_ENABLED="
-                    + ("true" if snapshot_read == "enable" else "false")
-                )
+            if snapshot_read_enabled not in ("true", "false"):
+                raise SystemExit("Unsupported persisted My FPL snapshot read state")
+            lines = [
+                line
+                for line in lines
+                if line.split("=", 1)[0] != "MY_FPL_SNAPSHOT_READ_ENABLED"
+            ]
+            lines.append("MY_FPL_SNAPSHOT_READ_ENABLED=" + snapshot_read_enabled)
             env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
             database_url_indexes = [
@@ -512,6 +547,17 @@ jobs:
                   fi
                 else
                   rm -f "$rollout_state"
+                fi
+                if [ "$snapshot_read_state_existed" = true ]; then
+                  if [ -n "$snapshot_read_state_backup" ] && [ -f "$snapshot_read_state_backup" ]; then
+                    mv "$snapshot_read_state_backup" "$snapshot_read_state"
+                    chmod 600 "$snapshot_read_state"
+                    snapshot_read_state_backup=""
+                  else
+                    echo "GraphQL rollback could not restore the previous My FPL snapshot read state"
+                  fi
+                else
+                  rm -f "$snapshot_read_state"
                 fi
               fi
               if [ "$env_promoted" = false ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
@@ -715,6 +761,10 @@ jobs:
                 chmod 600 "$rollout_state"
               fi
             fi
+            if [ -n "$persist_snapshot_read" ]; then
+              printf '%s\n' "$persist_snapshot_read" > "$snapshot_read_state"
+              chmod 600 "$snapshot_read_state"
+            fi
 
             if [ -n "$old_image" ]; then
               printf '%s\n' "$old_image" > "$HOME/.letletme-graphql-previous-image"
@@ -737,6 +787,10 @@ jobs:
             if [ -n "$rollout_state_backup" ]; then
               rm -f "$rollout_state_backup"
               rollout_state_backup=""
+            fi
+            if [ -n "$snapshot_read_state_backup" ]; then
+              rm -f "$snapshot_read_state_backup"
+              snapshot_read_state_backup=""
             fi
             if [ -n "$previous_env" ]; then
               rm -f "$previous_env"
