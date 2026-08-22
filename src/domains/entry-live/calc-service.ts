@@ -232,7 +232,7 @@ export const entryLiveCalcService = {
 					[entryId],
 					eventId,
 					false,
-					`data-checked:${eventId}`,
+					`data-checked:${eventId}`
 				);
 				pickEntity = finalized.get(entryId) ?? pickEntity;
 			}
@@ -242,7 +242,7 @@ export const entryLiveCalcService = {
 				entriesService.getEntryById(context, entryId).catch((error) => {
 					context.logger?.warn(
 						{ err: error, entryId, eventId },
-						"Entry metadata unavailable for no-picks response",
+						"Entry metadata unavailable for no-picks response"
 					);
 					return null;
 				}),

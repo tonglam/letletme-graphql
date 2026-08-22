@@ -9,8 +9,8 @@ const row = (overrides: Record<string, unknown> = {}) => ({
 	season: "2627",
 	eventId: 1,
 	entryId: 10,
-		eventPoints: 42,
-		netEventPoints: null,
+	eventPoints: 42,
+	netEventPoints: null,
 	totalPoints: 142,
 	totalScope: "OVERALL" as const,
 	eventRank: 7,
@@ -170,7 +170,7 @@ describe("official manager live score contract", () => {
 					provisional: true,
 					available: true,
 					transferCost: 0,
-						detailEventPoints: eventPoints,
+					detailEventPoints: eventPoints,
 				}).score,
 			},
 		});
@@ -185,7 +185,11 @@ describe("official manager live score contract", () => {
 				detailEventPoints: 99,
 			}).score,
 		};
-		const ranked = rankTournamentRowsByOfficialEventPoints([official(1, 12), official(2, 12), unavailable]);
+		const ranked = rankTournamentRowsByOfficialEventPoints([
+			official(1, 12),
+			official(2, 12),
+			unavailable,
+		]);
 		expect(ranked.find((item) => item.entry === 1)?.rank).toBe(1);
 		expect(ranked.find((item) => item.entry === 2)?.rank).toBe(1);
 		expect(ranked.find((item) => item.entry === 3)?.rank).toBe(0);

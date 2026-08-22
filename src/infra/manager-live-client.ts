@@ -131,12 +131,18 @@ export async function requestManagerLiveScores(params: {
 			signal: controller.signal,
 		});
 		if (!response.ok) {
-			metrics.managerLiveUpstreamRequestsTotal.labels(`http_${response.status >= 500 ? "5xx" : response.status === 429 ? "429" : "4xx"}`).inc();
+			metrics.managerLiveUpstreamRequestsTotal
+				.labels(`http_${response.status >= 500 ? "5xx" : response.status === 429 ? "429" : "4xx"}`)
+				.inc();
 			params.logger?.warn(
 				{ eventId: params.eventId, status: response.status },
 				"Official manager live endpoint returned a non-success response"
 			);
-			return { rows: new Map(), errorCode: response.status === 429 ? "UPSTREAM_RATE_LIMITED" : "UPSTREAM_UNAVAILABLE", nextRefreshAt: null };
+			return {
+				rows: new Map(),
+				errorCode: response.status === 429 ? "UPSTREAM_RATE_LIMITED" : "UPSTREAM_UNAVAILABLE",
+				nextRefreshAt: null,
+			};
 		}
 		const body: unknown = await response.json().catch(() => null);
 		if (!isRecord(body) || body.success !== true || !isRecord(body.data)) {
@@ -156,10 +162,10 @@ export async function requestManagerLiveScores(params: {
 		}
 		const parsedRows = Array.isArray(data.rows)
 			? data.rows
-				.map(parseRow)
-				.filter(
-					(row): row is ManagerLiveScoreRow => row !== null && row.eventId === params.eventId,
-				)
+					.map(parseRow)
+					.filter(
+						(row): row is ManagerLiveScoreRow => row !== null && row.eventId === params.eventId
+					)
 			: [];
 		const rows = new Map(parsedRows.map((row) => [row.entryId, row]));
 		const errorCode =

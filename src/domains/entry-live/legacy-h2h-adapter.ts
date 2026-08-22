@@ -60,7 +60,7 @@ const hasCompletedFixtures = (pick: ElementEventResultData): boolean =>
 	pick.isGwFinished || pick.playStatus === 0 || pick.bgw;
 
 export const selectCaptainForScoring = (
-	picks: ElementEventResultData[],
+	picks: ElementEventResultData[]
 ): ElementEventResultData | null => {
 	const captain = picks.find((pick) => pick.isCaptain) ?? null;
 	if (!captain) return null;

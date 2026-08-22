@@ -318,14 +318,19 @@ export const liveDesksResolvers = {
 			// publication. Do not serve a provisional board cache keyed only by the
 			// player revision; the Data service's bounded Redis read is the source
 			// of truth for this request.
-			const cachedCandidate = provisional ? null : await readCompetitionBoardCache(context, boardCacheKey);
-			const cachedRows = cachedCandidate?.board as Array<{
-				entry: number;
-				score?: { source?: string; state?: string };
-			}> | undefined;
-			const cachedBoard = cachedCandidate && cachedRows && managerScoreBoardIsFinal(cachedRows)
-				? cachedCandidate
-				: null;
+			const cachedCandidate = provisional
+				? null
+				: await readCompetitionBoardCache(context, boardCacheKey);
+			const cachedRows = cachedCandidate?.board as
+				| Array<{
+						entry: number;
+						score?: { source?: string; state?: string };
+				  }>
+				| undefined;
+			const cachedBoard =
+				cachedCandidate && cachedRows && managerScoreBoardIsFinal(cachedRows)
+					? cachedCandidate
+					: null;
 			if (cachedBoard) {
 				const boardMeta = managerBoardMeta(
 					cachedBoard.board as Array<{
@@ -424,7 +429,10 @@ export const liveDesksResolvers = {
 				snapshot.eventId,
 				ids,
 				true,
-				{ tournamentId: args.tournamentId, legacyH2H: memberTournament.leagueType === LeagueType.H2H }
+				{
+					tournamentId: args.tournamentId,
+					legacyH2H: memberTournament.leagueType === LeagueType.H2H,
+				}
 			);
 			return {
 				tournamentId: args.tournamentId,

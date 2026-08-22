@@ -316,12 +316,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 		// deadline. Keep this read on the live TTL until the final result path has
 		// been observed, rather than hiding the update behind a one-hour cache.
 		try {
-			await context.redis.set(
-				cacheKey,
-				JSON.stringify(result),
-				"EX",
-				QUERY_CACHE_TTL_SECONDS.LIVE
-			);
+			await context.redis.set(cacheKey, JSON.stringify(result), "EX", QUERY_CACHE_TTL_SECONDS.LIVE);
 		} catch (error) {
 			context.logger.warn({ err: error, cacheKey }, "Failed to cache entry-live picks");
 		}
@@ -355,7 +350,9 @@ export const entryLiveRepository: EntryLiveRepository = {
 		const missIds: number[] = [];
 
 		try {
-			const cached = forceRefresh ? cacheKeys.map(() => null) : await context.redis.mget(...cacheKeys);
+			const cached = forceRefresh
+				? cacheKeys.map(() => null)
+				: await context.redis.mget(...cacheKeys);
 			for (let i = 0; i < uniqueIds.length; i++) {
 				const raw = cached[i];
 				if (raw) {
@@ -424,9 +421,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 				cacheKeyFor(rowEntryId),
 				JSON.stringify(pick),
 				"EX",
-				finalizationRevision
-					? QUERY_CACHE_TTL_SECONDS.HISTORICAL
-					: QUERY_CACHE_TTL_SECONDS.LIVE
+				finalizationRevision ? QUERY_CACHE_TTL_SECONDS.HISTORICAL : QUERY_CACHE_TTL_SECONDS.LIVE
 			);
 		}
 

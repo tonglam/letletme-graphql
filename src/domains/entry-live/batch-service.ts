@@ -393,9 +393,9 @@ const computeSingleEntry = (
 		? provisional
 			? (pickList.find((pick) => pick.isCaptain) ?? null)
 			: selectCaptainForScoring(pickList)
-		: pickList.find((pick) => pick.multiplier >= 2) ??
+		: (pickList.find((pick) => pick.multiplier >= 2) ??
 			pickList.find((pick) => pick.isCaptain) ??
-			null;
+			null);
 	// The multiplier already carries captain/bench-boost/triple-captain
 	// semantics. Applying another captain multiplier would double-count points.
 	const captainMultiplier = chip === "TRIPLE_CAPTAIN" ? 3 : 2;
@@ -519,10 +519,12 @@ export const entryLiveBatchService = {
 		// Manager headline availability is independent from lineup availability.
 		// Keep NO_PICKS metadata cheap while still resolving the official manager
 		// score; final lifecycle evidence requires a persisted lineup/result pair.
-		const event = readyEntryIds.length > 0 ? await eventsService.getEventById(context, eventId) : null;
+		const event =
+			readyEntryIds.length > 0 ? await eventsService.getEventById(context, eventId) : null;
 		const provisional =
 			readyEntryIds.length === 0 || !(event?.finished === true && event.dataChecked === true);
-		const legacyH2H = prefetched?.legacyH2H === true || managerScores.errorCode === "UNSUPPORTED_H2H_LIVE";
+		const legacyH2H =
+			prefetched?.legacyH2H === true || managerScores.errorCode === "UNSUPPORTED_H2H_LIVE";
 		const finalizedResultsByEntry = !provisional
 			? await entriesService.getEntryEventResultsByEntryIds(context, readyEntryIds, eventId)
 			: new Map<number, EntryEventResult>();
@@ -543,10 +545,10 @@ export const entryLiveBatchService = {
 		for (const entryId of entryIds) {
 			if (!readyEntryIds.includes(entryId)) {
 				const noPicks = buildNoPicksLiveCalcData(
-						entryId,
-						eventId,
-						entriesById.get(entryId) ?? null,
-						previousResultsByEntry.get(entryId) ?? null
+					entryId,
+					eventId,
+					entriesById.get(entryId) ?? null,
+					previousResultsByEntry.get(entryId) ?? null
 				);
 				const manager = buildManagerScore({
 					row: managerScores.rows.get(entryId),
@@ -673,42 +675,37 @@ export const entryLiveBatchService = {
 				};
 
 				const calcData = {
-					...computeSingleEntry(
-						entryId,
-						eventId,
-						perEntry,
-						shared,
-						provisional,
-						legacyH2H
-					),
+					...computeSingleEntry(entryId, eventId, perEntry, shared, provisional, legacyH2H),
 					snapshot: targetedLive?.meta ?? fullSnapshotMeta,
 				};
 				const finalized = finalizedResultsByEntry.get(entryId);
 				const finalRow: OfficialManagerScoreRow | undefined = finalized
 					? {
-						season: context.currentSeason.seasonCode,
-						eventId,
-						entryId,
-						eventPoints: finalized.eventPoints,
-						netEventPoints: finalized.eventNetPoints,
-						totalPoints: finalized.overallPoints,
-						totalScope: "OVERALL",
-						eventRank: finalized.eventRank,
-						overallRank: finalized.overallRank,
-						leagueRank: null,
-						transferCost: finalized.eventTransfersCost,
-						eventPointSemantics:
-							finalized.eventPoints === finalized.eventNetPoints && finalized.eventTransfersCost === 0
-								? "ZERO_COST_EQUIVALENT"
-								: finalized.eventPoints - finalized.eventTransfersCost === finalized.eventNetPoints
-									? "GROSS"
-									: "UNKNOWN",
-						source: "FPL_FINAL_RESULT",
-						revision: `final:${eventId}:${entryId}:${finalized.overallPoints}:${finalized.overallRank}`,
-						checkedAt: new Date().toISOString(),
-						upstreamUpdatedAt: null,
-						staleAt: new Date(Date.now() + 90_000).toISOString(),
-					}
+							season: context.currentSeason.seasonCode,
+							eventId,
+							entryId,
+							eventPoints: finalized.eventPoints,
+							netEventPoints: finalized.eventNetPoints,
+							totalPoints: finalized.overallPoints,
+							totalScope: "OVERALL",
+							eventRank: finalized.eventRank,
+							overallRank: finalized.overallRank,
+							leagueRank: null,
+							transferCost: finalized.eventTransfersCost,
+							eventPointSemantics:
+								finalized.eventPoints === finalized.eventNetPoints &&
+								finalized.eventTransfersCost === 0
+									? "ZERO_COST_EQUIVALENT"
+									: finalized.eventPoints - finalized.eventTransfersCost ===
+										  finalized.eventNetPoints
+										? "GROSS"
+										: "UNKNOWN",
+							source: "FPL_FINAL_RESULT",
+							revision: `final:${eventId}:${entryId}:${finalized.overallPoints}:${finalized.overallRank}`,
+							checkedAt: new Date().toISOString(),
+							upstreamUpdatedAt: null,
+							staleAt: new Date(Date.now() + 90_000).toISOString(),
+						}
 					: undefined;
 				const manager = buildManagerScore({
 					row: finalRow ?? managerScores.rows.get(entryId),

@@ -7,26 +7,12 @@ import {
 import { metrics } from "../../infra/metrics";
 
 export type LiveManagerScoreSource =
-	| "FPL_ENTRY_SUMMARY"
-	| "FPL_CLASSIC_STANDINGS"
-	| "FPL_FINAL_RESULT"
-	| "UNAVAILABLE";
-export type LiveManagerScoreState =
-	| "FRESH"
-	| "STALE"
-	| "SETTLING"
-	| "FINAL"
-	| "UNAVAILABLE";
-export type LiveManagerScoreTotalScope =
-	| "OVERALL"
-	| "CLASSIC_PHASE"
-	| "UNKNOWN";
+	"FPL_ENTRY_SUMMARY" | "FPL_CLASSIC_STANDINGS" | "FPL_FINAL_RESULT" | "UNAVAILABLE";
+export type LiveManagerScoreState = "FRESH" | "STALE" | "SETTLING" | "FINAL" | "UNAVAILABLE";
+export type LiveManagerScoreTotalScope = "OVERALL" | "CLASSIC_PHASE" | "UNKNOWN";
 export type LiveManagerScoreSemantics = "GROSS" | "NET" | "ZERO_COST_EQUIVALENT" | "UNKNOWN";
 export type LiveManagerScoreReconciliation =
-	| "MATCHED"
-	| "SOURCE_SKEW"
-	| "NOT_COMPARABLE"
-	| "NO_LINEUP";
+	"MATCHED" | "SOURCE_SKEW" | "NOT_COMPARABLE" | "NO_LINEUP";
 export type LiveManagerScoreReason =
 	| "UPSTREAM_UNAVAILABLE"
 	| "UPSTREAM_RATE_LIMITED"
@@ -61,8 +47,7 @@ export type LiveManagerScore = {
 export type ManagerScoreLoad = ManagerLiveFetchResult;
 
 export type OfficialManagerScoreRow =
-	| ManagerLiveScoreRow
-	| (Omit<ManagerLiveScoreRow, "source"> & { source: "FPL_FINAL_RESULT" });
+	ManagerLiveScoreRow | (Omit<ManagerLiveScoreRow, "source"> & { source: "FPL_FINAL_RESULT" });
 
 const REFRESH_SECONDS = 30;
 const STALE_SECONDS = Math.max(90, 3 * REFRESH_SECONDS);
@@ -80,7 +65,7 @@ const plusSeconds = (iso: string, seconds: number): string => {
 };
 
 const isWithinStaleWindow = (
-	row: Pick<OfficialManagerScoreRow, "checkedAt" | "staleAt">,
+	row: Pick<OfficialManagerScoreRow, "checkedAt" | "staleAt">
 ): boolean => {
 	const expiry = Date.parse(row.staleAt);
 	if (Number.isFinite(expiry)) return Date.now() <= expiry;
@@ -141,7 +126,10 @@ export function buildManagerScore(params: {
 	detailEventPoints: number;
 	previousOverallPoints?: number | null;
 	nextRefreshAt?: string | null;
-}): { score: LiveManagerScore; headline: { rank: number; livePoints: number; liveNetPoints: number; liveTotalPoints: number } } {
+}): {
+	score: LiveManagerScore;
+	headline: { rank: number; livePoints: number; liveNetPoints: number; liveTotalPoints: number };
+} {
 	const {
 		row,
 		upstreamErrorCode,
@@ -195,7 +183,11 @@ export function buildManagerScore(params: {
 				eventPointSemantics = "GROSS";
 			}
 		}
-		if (row.eventPoints !== null && effectiveTransferCost > 0 && eventPointSemantics === "UNKNOWN") {
+		if (
+			row.eventPoints !== null &&
+			effectiveTransferCost > 0 &&
+			eventPointSemantics === "UNKNOWN"
+		) {
 			reasons.push("SEMANTICS_UNKNOWN");
 		}
 		const netEventPoints =
@@ -210,7 +202,12 @@ export function buildManagerScore(params: {
 		const totalPoints = row.totalPoints;
 		const result: {
 			score: LiveManagerScore;
-			headline: { rank: number; livePoints: number; liveNetPoints: number; liveTotalPoints: number };
+			headline: {
+				rank: number;
+				livePoints: number;
+				liveNetPoints: number;
+				liveTotalPoints: number;
+			};
 		} = {
 			score: {
 				eventPoints,
@@ -231,7 +228,7 @@ export function buildManagerScore(params: {
 				nextRefreshAt:
 					state === "FINAL"
 						? null
-						: params.nextRefreshAt ?? plusSeconds(row.checkedAt, REFRESH_SECONDS),
+						: (params.nextRefreshAt ?? plusSeconds(row.checkedAt, REFRESH_SECONDS)),
 				reconciliation,
 				reasonCodes: reasons,
 			},
@@ -239,7 +236,7 @@ export function buildManagerScore(params: {
 				rank: row.eventRank ?? row.leagueRank ?? 0,
 				livePoints: eventPoints ?? 0,
 				liveNetPoints: netEventPoints ?? eventPoints ?? 0,
-				liveTotalPoints: row.totalScope === "OVERALL" ? totalPoints ?? 0 : 0,
+				liveTotalPoints: row.totalScope === "OVERALL" ? (totalPoints ?? 0) : 0,
 			},
 		};
 		recordScoreMetrics(result.score);
@@ -300,9 +297,9 @@ export function rankTournamentRowsByOfficialEventPoints<
 }
 
 export function managerScoreBoardIsFinal(
-	rows: ReadonlyArray<{ score?: { source?: string; state?: string } }>,
+	rows: ReadonlyArray<{ score?: { source?: string; state?: string } }>
 ): boolean {
 	return rows.every(
-		(row) => row.score?.source === "FPL_FINAL_RESULT" && row.score.state === "FINAL",
+		(row) => row.score?.source === "FPL_FINAL_RESULT" && row.score.state === "FINAL"
 	);
 }

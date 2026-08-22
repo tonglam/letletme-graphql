@@ -3401,13 +3401,16 @@ export const tournamentsRepository: TournamentsRepository = {
 				const cachedCandidate = liveCacheKey
 					? await readCompetitionBoardCache(context, liveCacheKey)
 					: null;
-				const cachedRows = cachedCandidate?.board as Array<{
-					entry: number;
-					score?: { source?: string; state?: string };
-				}> | undefined;
-				const cachedBoard = cachedCandidate && cachedRows && managerScoreBoardIsFinal(cachedRows)
-					? cachedCandidate
-					: null;
+				const cachedRows = cachedCandidate?.board as
+					| Array<{
+							entry: number;
+							score?: { source?: string; state?: string };
+					  }>
+					| undefined;
+				const cachedBoard =
+					cachedCandidate && cachedRows && managerScoreBoardIsFinal(cachedRows)
+						? cachedCandidate
+						: null;
 				const cached = cachedBoard
 					? {
 							rows: cachedBoard.board as LiveCalcData[],
