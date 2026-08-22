@@ -88,6 +88,7 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		minutes: Int!
 		started: Boolean!
 		finished: Boolean!
+		finishedProvisional: Boolean!
 	}
 
 	type LiveMatchdayDesk {

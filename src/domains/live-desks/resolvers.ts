@@ -31,12 +31,20 @@ import { resolveLiveWindow, type LiveWindow } from "./window";
 
 type LiveRef = { season: string; eventId: number; revision: string };
 
-const LIVE_STALE_AFTER_MS = 60_000;
+const manifestSourceCheckedAt = (
+	manifest: DataPublicationManifest | null,
+	fallback: string | null = null
+): string | null => manifest?.lastSuccessfulFetchAt ?? manifest?.sourceCheckedAt ?? fallback;
 
-const isStale = (sourceCheckedAt: string | null | undefined): boolean => {
-	if (!sourceCheckedAt) return true;
-	const checkedAt = Date.parse(sourceCheckedAt);
-	return !Number.isFinite(checkedAt) || Date.now() - checkedAt > LIVE_STALE_AFTER_MS;
+const mergeLiveSnapshotFixtures = (
+	fixtures: CoreFixtureSnapshot["fixtures"],
+	snapshot: Pick<LiveDataSnapshot, "eventId" | "fixtures"> | null
+): CoreFixtureSnapshot["fixtures"] => {
+	if (!snapshot) return fixtures;
+	return [
+		...fixtures.filter((fixture) => fixture.eventId !== snapshot.eventId),
+		...snapshot.fixtures,
+	];
 };
 
 const compatibilityState = (
@@ -88,17 +96,25 @@ const readLiveWindow = async (context: GraphQLContext) => {
 	const currentLifecycle = currentEventId
 		? await getLiveLifecycleStatus(context, currentEventId)
 		: null;
+	const currentSnapshot = currentEventId
+		? await getLiveDataSnapshot(context, currentEventId).catch(() => null)
+		: null;
 	const currentManifest = currentPublication?.manifest ?? null;
+	const currentFixtures = mergeLiveSnapshotFixtures(fixtureCore.fixtures, currentSnapshot);
 	const initialWindow = resolveLiveWindow({
 		events: eventCore.events,
-		fixtures: fixtureCore.fixtures,
+		fixtures: currentFixtures,
 		currentEventId,
 		nextEventId: eventCore.events.find((event) => event.isNext)?.id ?? null,
-		liveRevision: currentManifest ? String(currentManifest.revision) : null,
-		liveEventId: currentManifest ? currentEventId : null,
-		publicationState: livePublicationState(currentManifest),
-		sourceCheckedAt: currentManifest?.sourceCheckedAt ?? fixtureCore.sourceCheckedAt,
-		publishedAt: currentManifest?.publishedAt ?? fixtureCore.sourceCheckedAt,
+		liveRevision:
+			currentSnapshot?.revision ?? (currentManifest ? String(currentManifest.revision) : null),
+		liveEventId: currentSnapshot?.eventId ?? (currentManifest ? currentEventId : null),
+		publicationState: currentSnapshot?.state ?? livePublicationState(currentManifest),
+		sourceCheckedAt:
+			currentSnapshot?.lastSuccessfulFetchAt ??
+			manifestSourceCheckedAt(currentManifest, fixtureCore.sourceCheckedAt),
+		publishedAt:
+			currentSnapshot?.publishedAt ?? currentManifest?.publishedAt ?? fixtureCore.sourceCheckedAt,
 		source: currentPublication?.source ?? fixtureCore.source,
 		lifecycleEventId: currentLifecycle?.eventId ?? null,
 		lifecycleState: currentLifecycle?.state ?? null,
@@ -117,17 +133,21 @@ const readLiveWindow = async (context: GraphQLContext) => {
 				)
 			: currentPublication;
 	const anchorManifest = anchorPublication?.manifest ?? null;
+	const anchorSnapshot =
+		currentSnapshot?.eventId === initialWindow.anchorEventId ? currentSnapshot : null;
 	const window = anchorManifest
 		? resolveLiveWindow({
 				events: eventCore.events,
-				fixtures: fixtureCore.fixtures,
+				fixtures: mergeLiveSnapshotFixtures(fixtureCore.fixtures, anchorSnapshot),
 				currentEventId,
 				nextEventId: initialWindow.nextEventId,
-				liveRevision: String(anchorManifest.revision),
-				liveEventId: initialWindow.anchorEventId,
-				publicationState: livePublicationState(anchorManifest),
-				sourceCheckedAt: anchorManifest.sourceCheckedAt,
-				publishedAt: anchorManifest.publishedAt,
+				liveRevision: anchorSnapshot?.revision ?? String(anchorManifest.revision),
+				liveEventId: anchorSnapshot?.eventId ?? initialWindow.anchorEventId,
+				publicationState: anchorSnapshot?.state ?? livePublicationState(anchorManifest),
+				sourceCheckedAt:
+					anchorSnapshot?.lastSuccessfulFetchAt ??
+					manifestSourceCheckedAt(anchorManifest, fixtureCore.sourceCheckedAt),
+				publishedAt: anchorSnapshot?.publishedAt ?? anchorManifest.publishedAt,
 				source: anchorPublication?.source ?? fixtureCore.source,
 				lifecycleEventId: anchorLifecycle?.eventId ?? null,
 				lifecycleState: anchorLifecycle?.state ?? null,
@@ -204,6 +224,7 @@ const matchRows = (
 		// `finishedProvisional` is an upstream staging signal, not the
 		// authoritative FPL `finished` flag exposed by this contract.
 		finished: fixture.finished,
+		finishedProvisional: fixture.finishedProvisional,
 	}));
 
 const scheduledMatchdayDesk = (
@@ -223,12 +244,12 @@ const scheduledMatchdayDesk = (
 		windowState: window.windowState,
 		dataAvailability: window.dataAvailability,
 		liveRevision: window.liveRevision,
-		sourceCheckedAt: manifest?.sourceCheckedAt ?? fixtureCore.sourceCheckedAt,
+		sourceCheckedAt: window.sourceCheckedAt ?? fixtureCore.sourceCheckedAt,
 		// Keep the non-null GraphQL contract without pretending that core data is
 		// a live publication. This timestamp is only used for freshness display.
 		publishedAt: manifest?.publishedAt ?? fixtureCore.sourceCheckedAt,
 		source: manifest ? publicationSource?.toUpperCase() : "CORE",
-		stale: isStale(manifest?.sourceCheckedAt ?? fixtureCore.sourceCheckedAt),
+		stale: window.stale,
 		nextRefreshAt: window.nextRefreshAt,
 		matches: matchRows(
 			eventId,
@@ -378,13 +399,13 @@ export const liveDesksResolvers = {
 			if (!snapshot) return coreDesk(null);
 			const snapshotWindow = resolveLiveWindow({
 				events: eventCore.events,
-				fixtures: fixtureCore.fixtures,
+				fixtures: mergeLiveSnapshotFixtures(fixtureCore.fixtures, snapshot),
 				currentEventId: eventCore.currentEventId,
 				nextEventId: window.nextEventId,
 				liveRevision: snapshot.revision,
 				liveEventId: snapshot.eventId,
 				publicationState: snapshot.state,
-				sourceCheckedAt: snapshot.sourceCheckedAt,
+				sourceCheckedAt: snapshot.lastSuccessfulFetchAt,
 				publishedAt: snapshot.publishedAt,
 				source: snapshot.source,
 				lifecycleEventId: eventLifecycle?.eventId ?? null,
@@ -399,10 +420,10 @@ export const liveDesksResolvers = {
 				windowState: snapshotWindow.windowState,
 				dataAvailability: snapshotWindow.dataAvailability,
 				liveRevision: snapshot.revision,
-				sourceCheckedAt: snapshot.sourceCheckedAt,
+				sourceCheckedAt: snapshot.lastSuccessfulFetchAt,
 				publishedAt: snapshot.publishedAt,
 				source: snapshot.source === "postgres" ? "POSTGRES" : "REDIS",
-				stale: isStale(snapshot.sourceCheckedAt),
+				stale: snapshotWindow.stale,
 				nextRefreshAt: snapshotWindow.nextRefreshAt,
 				matches: matchRows(snapshot.eventId, snapshot.fixtures, core),
 				nextFixtures: nextEventAfter(eventCore, snapshot.eventId)
@@ -488,13 +509,13 @@ export const liveDesksResolvers = {
 			const deskWindow = snapshot
 				? resolveLiveWindow({
 						events: eventCore.events,
-						fixtures: fixtureCore.fixtures,
+						fixtures: mergeLiveSnapshotFixtures(fixtureCore.fixtures, snapshot),
 						currentEventId: eventCore.currentEventId,
 						nextEventId: window.nextEventId,
 						liveRevision: snapshot.revision,
 						liveEventId: snapshot.eventId,
 						publicationState: snapshot.state,
-						sourceCheckedAt: snapshot.sourceCheckedAt,
+						sourceCheckedAt: snapshot.lastSuccessfulFetchAt,
 						publishedAt: snapshot.publishedAt,
 						source: snapshot.source,
 						lifecycleEventId: deskLifecycle?.eventId ?? null,

@@ -45,7 +45,11 @@ export const createTestPublication = (
 	scope: DataPublicationScope,
 	revision: number,
 	values: Readonly<Record<string, unknown>>,
-	options: { state?: "scheduled" | "live" | "settled"; sourceCheckedAt?: string } = {}
+	options: {
+		state?: "scheduled" | "live" | "settled";
+		sourceCheckedAt?: string;
+		lastSuccessfulFetchAt?: string;
+	} = {}
 ): TestPublication => {
 	const store = new Map<string, string>();
 	const items = Object.entries(values).map(([name, value]) => {
@@ -68,6 +72,9 @@ export const createTestPublication = (
 		revision,
 		publicationId: publicationId(revision),
 		sourceCheckedAt: options.sourceCheckedAt ?? publishedAt,
+		...(options.lastSuccessfulFetchAt
+			? { lastSuccessfulFetchAt: options.lastSuccessfulFetchAt }
+			: {}),
 		publishedAt,
 		state:
 			scope.dataset === "fpl:core" || scope.dataset === "fpl:market"
@@ -267,6 +274,7 @@ export const buildLivePublication = (
 		fixtures: readonly CoreFixtureData[];
 		state: "scheduled" | "live" | "settled";
 		sourceCheckedAt: string;
+		lastSuccessfulFetchAt?: string;
 	}> = {}
 ): TestPublication => {
 	const eventLives = buildTestEventLives(core, eventId);
@@ -282,6 +290,7 @@ export const buildLivePublication = (
 		{
 			state: overrides.state ?? "scheduled",
 			sourceCheckedAt: overrides.sourceCheckedAt,
+			lastSuccessfulFetchAt: overrides.lastSuccessfulFetchAt,
 		}
 	);
 };

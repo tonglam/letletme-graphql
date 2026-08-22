@@ -28,6 +28,7 @@ export type DataPublicationManifest = Readonly<{
 	revision: number;
 	publicationId: string;
 	sourceCheckedAt: string;
+	lastSuccessfulFetchAt?: string;
 	publishedAt: string;
 	state: "active" | "scheduled" | "live" | "settled";
 	items: readonly DataPublicationManifestItem[];
@@ -65,7 +66,12 @@ const MANIFEST_FIELDS = [
 	"state",
 	"items",
 ] as const;
+const OPTIONAL_MANIFEST_FIELDS = ["lastSuccessfulFetchAt"] as const;
 const MANIFEST_ITEM_FIELDS = ["name", "key", "type", "count", "bytes", "sha256"] as const;
+
+const hasManifestFields = (value: Record<string, unknown>): boolean =>
+	hasExactFields(value, MANIFEST_FIELDS) ||
+	hasExactFields(value, [...MANIFEST_FIELDS, ...OPTIONAL_MANIFEST_FIELDS]);
 const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
 	"fpl:core": [
 		"events",
@@ -181,7 +187,7 @@ export const parseDataPublicationManifest = (
 	if (!raw) return null;
 	try {
 		const value: unknown = JSON.parse(raw);
-		if (!isRecord(value) || !hasExactFields(value, MANIFEST_FIELDS)) return null;
+		if (!isRecord(value) || !hasManifestFields(value)) return null;
 		if (
 			value.dataset !== "fpl:core" &&
 			value.dataset !== "fpl:live" &&
@@ -196,6 +202,7 @@ export const parseDataPublicationManifest = (
 			Number(value.revision) <= 0 ||
 			!isDataPublicationId(value.publicationId) ||
 			!isIsoDate(value.sourceCheckedAt) ||
+			(value.lastSuccessfulFetchAt !== undefined && !isIsoDate(value.lastSuccessfulFetchAt)) ||
 			!isIsoDate(value.publishedAt) ||
 			!isCanonicalState(dataset, value.state) ||
 			!Array.isArray(value.items)

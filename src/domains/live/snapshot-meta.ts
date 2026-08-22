@@ -149,7 +149,7 @@ export const loadLiveSnapshotMeta = async (
 				publicationId: snapshot.publicationId,
 				state: snapshot.state,
 				publishedAt: snapshot.publishedAt,
-				checkedAt: snapshot.sourceCheckedAt,
+				checkedAt: snapshot.lastSuccessfulFetchAt,
 				eventLiveCount: snapshot.eventLives.length,
 				fixtureCount: snapshot.fixtures.length,
 				fixtureTeamCount: new Set(

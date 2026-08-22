@@ -282,6 +282,7 @@ export type LiveDataSnapshot = Readonly<{
 	revision: string;
 	publicationId: string | null;
 	sourceCheckedAt: string;
+	lastSuccessfulFetchAt: string;
 	publishedAt: string;
 	state: LiveSnapshotState;
 	eventLives: readonly LivePerformanceData[];
@@ -297,6 +298,7 @@ export type TargetedLiveDataSnapshot = Readonly<{
 	revision: string;
 	publicationId: string | null;
 	sourceCheckedAt: string;
+	lastSuccessfulFetchAt: string;
 	publishedAt: string;
 	state: LiveSnapshotState;
 	eventLiveCount: number;
@@ -1961,6 +1963,8 @@ const publicationLiveSnapshot = (
 		revision: String(publication.manifest.revision),
 		publicationId: publication.manifest.publicationId,
 		sourceCheckedAt: publication.manifest.sourceCheckedAt,
+		lastSuccessfulFetchAt:
+			publication.manifest.lastSuccessfulFetchAt ?? publication.manifest.sourceCheckedAt,
 		publishedAt: publication.manifest.publishedAt,
 		state,
 		eventLives,
@@ -2243,6 +2247,7 @@ const projectTargetedLiveSnapshot = (
 	revision: snapshot.revision,
 	publicationId: snapshot.publicationId,
 	sourceCheckedAt: snapshot.sourceCheckedAt,
+	lastSuccessfulFetchAt: snapshot.lastSuccessfulFetchAt,
 	publishedAt: snapshot.publishedAt,
 	state: snapshot.state,
 	eventLiveCount: snapshot.eventLives.length,

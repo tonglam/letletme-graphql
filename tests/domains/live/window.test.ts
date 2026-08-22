@@ -110,7 +110,7 @@ describe("live window contract", () => {
 		});
 	});
 
-	it("uses the persisted producer lifecycle during a quiet interval", () => {
+	it("lets a fresh active publication override an older quiet-interval checkpoint", () => {
 		const base = buildTestCoreData(1);
 		const core = {
 			...base,
@@ -135,8 +135,8 @@ describe("live window contract", () => {
 			liveRevision: "17",
 			liveEventId: 1,
 			publicationState: "live",
-			sourceCheckedAt: "2026-08-08T12:30:00.000Z",
-			publishedAt: "2026-08-08T12:30:00.000Z",
+			sourceCheckedAt: "2026-08-08T18:14:30.000Z",
+			publishedAt: "2026-08-08T18:14:30.000Z",
 			source: "redis",
 			lifecycleEventId: 1,
 			lifecycleState: "BETWEEN_FIXTURES",
@@ -146,8 +146,50 @@ describe("live window contract", () => {
 
 		expect(window).toMatchObject({
 			anchorEventId: 1,
+			windowState: "LIVE_ACTIVE",
+			producerState: "LIVE_ACTIVE",
+			nextRefreshAt: "2026-08-08T18:15:30.000Z",
+		});
+	});
+
+	it("uses the five-minute producer cadence for a genuinely quiet interval", () => {
+		const base = buildTestCoreData(1);
+		const core = {
+			...base,
+			fixtures: base.fixtures.map((fixture) =>
+				fixture.eventId === 1
+					? {
+							...fixture,
+							started: false,
+							finished: false,
+							finishedProvisional: false,
+							kickoffTime: "2026-08-08T19:00:00.000Z",
+						}
+					: fixture
+			),
+		};
+		const window = resolveLiveWindow({
+			events: core.events,
+			fixtures: core.fixtures,
+			currentEventId: 1,
+			nextEventId: 2,
+			liveRevision: "17",
+			liveEventId: null,
+			publicationState: null,
+			sourceCheckedAt: "2026-08-08T18:12:00.000Z",
+			publishedAt: "2026-08-08T18:12:00.000Z",
+			source: "redis",
+			lifecycleEventId: 1,
+			lifecycleState: "BETWEEN_FIXTURES",
+			lifecycleNextRefreshAt: "2026-08-08T19:00:00.000Z",
+			now: new Date("2026-08-08T18:15:00.000Z"),
+		});
+
+		expect(window).toMatchObject({
 			windowState: "BETWEEN_FIXTURES",
 			producerState: "BETWEEN_FIXTURES",
+			dataAvailability: "FRESH",
+			stale: false,
 			nextRefreshAt: "2026-08-08T19:00:00.000Z",
 		});
 	});
