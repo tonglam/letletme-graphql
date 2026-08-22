@@ -201,7 +201,7 @@ describe("Home GraphQL contracts", () => {
 		expect(movementFromRanks(-1, 3)).toEqual({ direction: "UNKNOWN", places: null });
 	});
 
-	it("loads the complete personal desk with one compact SQL statement", async () => {
+	it("loads league ranks and the viewer's current H2H matchup with one compact SQL statement", async () => {
 		const databaseQuery = mock(async (text: unknown, values: unknown) => {
 			const sql = String(text);
 			expect(sql).toContain("FROM competition.entries");
@@ -211,12 +211,14 @@ describe("Home GraphQL contracts", () => {
 			expect(sql).toContain("official_kind");
 			expect(sql).toContain("short_name");
 			expect(sql).not.toContain("tournament_groups");
-			expect(sql).not.toContain("official_h2h");
-			expect(sql).not.toContain("battle_");
+			expect(sql).toContain("fpl.events");
+			expect(sql).toContain("tournament_battle_group_results");
+			expect(sql).toContain("tournament_knockout_results");
 			expect(values).toEqual([2026, 123]);
 			return {
 				rows: [
 					{
+						entry_id: 123,
 						entry_name: "Compact XI",
 						player_name: "Ada Manager",
 						overall_points: 123,
@@ -231,6 +233,7 @@ describe("Home GraphQL contracts", () => {
 						tournament_id: 77,
 					},
 					{
+						entry_id: 123,
 						entry_name: "Compact XI",
 						player_name: "Ada Manager",
 						overall_points: 123,
@@ -239,10 +242,27 @@ describe("Home GraphQL contracts", () => {
 						source_checked_at: new Date(),
 						league_id: 8,
 						league_type: "h2h",
-						league_name: "No Match Details",
-						entry_rank: 0,
-						entry_last_rank: 0,
-						tournament_id: null,
+						league_name: "Current Match League",
+						entry_rank: 1,
+						entry_last_rank: 1,
+						tournament_id: 6,
+						h2h_official_match_id: 2_071_743,
+						h2h_event_id: 1,
+						h2h_home_entry_id: 123,
+						h2h_home_entry_name: "Compact XI",
+						h2h_home_player_name: "Ada Manager",
+						h2h_home_points: 24,
+						h2h_home_is_average: false,
+						h2h_away_entry_id: 31_056,
+						h2h_away_entry_name: "Tong言无忌",
+						h2h_away_player_name: "炸群高手 磊磊酱",
+						h2h_away_points: 43,
+						h2h_away_is_average: false,
+						h2h_is_bye: false,
+						h2h_source_checked_at: new Date("2026-08-22T20:09:19.668Z"),
+						h2h_event_is_current: true,
+						h2h_event_finished: false,
+						h2h_event_data_checked: false,
 					},
 				],
 			};
@@ -256,7 +276,14 @@ describe("Home GraphQL contracts", () => {
 				query HomePersonalDesk {
 					homePersonalDesk {
 						state entryName playerName overallPoints overallRank teamValue sourceCheckedAt
-						leagueRanks { key name leagueType rank tournamentId movement { direction places } }
+						leagueRanks {
+							key name leagueType rank tournamentId movement { direction places }
+							h2hMatchup {
+								officialMatchId eventId isLive isFinal isBye sourceCheckedAt
+								viewer { entryId entryName playerName isAverage points }
+								opponent { entryId entryName playerName isAverage points }
+							}
+						}
 					}
 				}
 			`,
@@ -275,14 +302,36 @@ describe("Home GraphQL contracts", () => {
 					rank: 3,
 					tournamentId: 77,
 					movement: { direction: "UP", places: 5 },
+					h2hMatchup: null,
 				},
 				{
 					key: "h2h:8",
-					name: "No Match Details",
+					name: "Current Match League",
 					leagueType: "H2H",
-					rank: null,
-					tournamentId: null,
-					movement: { direction: "UNKNOWN", places: null },
+					rank: 1,
+					tournamentId: 6,
+					movement: { direction: "FLAT", places: 0 },
+					h2hMatchup: {
+						officialMatchId: 2_071_743,
+						eventId: 1,
+						isLive: true,
+						isFinal: false,
+						isBye: false,
+						viewer: {
+							entryId: 123,
+							entryName: "Compact XI",
+							playerName: "Ada Manager",
+							isAverage: false,
+							points: 24,
+						},
+						opponent: {
+							entryId: 31_056,
+							entryName: "Tong言无忌",
+							playerName: "炸群高手 磊磊酱",
+							isAverage: false,
+							points: 43,
+						},
+					},
 				},
 			],
 		});

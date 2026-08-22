@@ -16,6 +16,30 @@ export const homeTypeDefs = /* GraphQL */ `
 		places: Int
 	}
 
+	enum HomeLeagueType {
+		CLASSIC
+		H2H
+	}
+
+	type HomeH2HMatchupSide {
+		entryId: Int
+		entryName: String
+		playerName: String
+		isAverage: Boolean!
+		points: Int
+	}
+
+	type HomeH2HMatchup {
+		officialMatchId: Int!
+		eventId: Int!
+		isLive: Boolean!
+		isFinal: Boolean!
+		isBye: Boolean!
+		viewer: HomeH2HMatchupSide!
+		opponent: HomeH2HMatchupSide!
+		sourceCheckedAt: DateTime
+	}
+
 	type HomeLeagueRank {
 		key: ID!
 		name: String!
@@ -23,6 +47,7 @@ export const homeTypeDefs = /* GraphQL */ `
 		rank: Int
 		movement: HomeRankMovement!
 		tournamentId: Int
+		h2hMatchup: HomeH2HMatchup
 	}
 
 	enum HomePersonalDeskState {
