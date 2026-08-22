@@ -762,6 +762,28 @@ describe("My FPL review repository", () => {
 		expect(fixture.redis.setCalls.at(-1)?.[3]).toBe(30);
 	});
 
+	it("keeps an empty pre-entry gameweek pending while later history is incomplete", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1, 2],
+			entryRows: [
+				entryRow({
+					started_event: 2,
+					past_seasons_checked_at: "2026-08-20T00:00:00.000Z",
+					past_seasons_count: 0,
+				}),
+			],
+			pastSeasonRows: [],
+			historyRows: [],
+		});
+
+		const desk = await fixture.repository.loadTeamDesk(fixture.context, 1);
+
+		expect(desk.gameweek?.state).toBe("EMPTY");
+		expect(desk.state).toBe("PENDING");
+		expect(desk.pastSeasonsState).toBe("READY");
+		expect(fixture.redis.setCalls.at(-1)?.[3]).toBe(30);
+	});
+
 	it("evicts malformed and schema-invalid cache values before querying PostgreSQL", async () => {
 		const fixture = makeFixture({
 			finalizedIds: [1],

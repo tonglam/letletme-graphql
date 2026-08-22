@@ -1376,10 +1376,11 @@ const loadTeamDesk = async (
 	const historyComplete =
 		expectedHistoryEventIds.length > 0 &&
 		expectedHistoryEventIds.every((finalizedEventId) => historyEventIds.has(finalizedEventId));
+	const historyPending = expectedHistoryEventIds.length > 0 && !historyComplete;
 	let state: MyFplReviewState;
 	if (gameweek) {
 		state = gameweek.state;
-		if (state === "READY" && !historyComplete) state = "PENDING";
+		if ((state === "READY" || state === "EMPTY") && historyPending) state = "PENDING";
 	} else if (!entry) state = "EMPTY";
 	else if (loadedContext.value.latestFinalizedEventId === null) state = "PRESEASON";
 	else if (
