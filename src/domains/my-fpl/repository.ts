@@ -1132,13 +1132,7 @@ const mapGameweekPick = (
 	row: DbGameweekRow,
 	autoSubElements: ReadonlySet<number>
 ): MyFplTeamPick | null => {
-	if (
-		row.element_id === null ||
-		row.position === null ||
-		row.web_name === null ||
-		row.team_short_name === null ||
-		row.team_name === null
-	) {
+	if (row.element_id === null || row.position === null || row.web_name === null) {
 		return null;
 	}
 	const minutes = row.minutes ?? 0;
@@ -1149,8 +1143,10 @@ const mapGameweekPick = (
 		element: row.element_id,
 		position: row.position,
 		webName: row.web_name,
-		teamShortName: row.team_short_name,
-		teamName: row.team_name,
+		// A missing event-scoped team is a valid historical blank-week signal.
+		// Never replace it with the player's current club.
+		teamShortName: row.team_short_name ?? "",
+		teamName: row.team_name ?? "",
 		elementTypeName: positionName(row.element_type),
 		isCaptain: row.is_captain ?? false,
 		isViceCaptain: row.is_vice_captain ?? false,
@@ -1224,7 +1220,7 @@ const loadTeamGameweekRows = async (
 		 ) historical_team ON TRUE
 		 LEFT JOIN fpl.teams team
 		   ON team.season_id = player.season_id
-		  AND team.team_id = COALESCE(historical_team.team_id, player.team_id)
+		  AND team.team_id = historical_team.team_id
 		 LEFT JOIN fpl.player_gameweek_stats stats
 		   ON stats.season_id = pick.season_id
 		  AND stats.event_id = pick.event_id
@@ -1233,11 +1229,11 @@ const loadTeamGameweekRows = async (
 			SELECT
 			  count(match.fixture_id)::integer AS fixture_count,
 			  string_agg(opponent.short_name, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS against_short_name,
-		     string_agg(CASE WHEN match.team_h_id = COALESCE(historical_team.team_id, player.team_id) THEN 'H' ELSE 'A' END, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS was_home,
+		     string_agg(CASE WHEN match.team_h_id = historical_team.team_id THEN 'H' ELSE 'A' END, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS was_home,
 		     string_agg(
 		       CASE
 		         WHEN match.team_h_score IS NULL OR match.team_a_score IS NULL THEN ''
-		         WHEN match.team_h_id = COALESCE(historical_team.team_id, player.team_id) THEN match.team_h_score || '-' || match.team_a_score
+		         WHEN match.team_h_id = historical_team.team_id THEN match.team_h_score || '-' || match.team_a_score
 		         ELSE match.team_a_score || '-' || match.team_h_score
 		       END,
 		       ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id
@@ -1246,12 +1242,12 @@ const loadTeamGameweekRows = async (
 			JOIN fpl.teams opponent
 			  ON opponent.season_id = match.season_id
 			 AND opponent.team_id = CASE
-			      WHEN match.team_h_id = COALESCE(historical_team.team_id, player.team_id) THEN match.team_a_id
+		      WHEN match.team_h_id = historical_team.team_id THEN match.team_a_id
 			      ELSE match.team_h_id
 			    END
 		   WHERE match.season_id = result.season_id
 		     AND match.event_id = result.event_id
-		     AND COALESCE(historical_team.team_id, player.team_id) IN (match.team_h_id, match.team_a_id)
+		     AND historical_team.team_id IN (match.team_h_id, match.team_a_id)
 		 ) fixture ON TRUE
 		 WHERE result.season_id = $1
 		   AND result.entry_id = $2
@@ -1400,8 +1396,10 @@ const loadTeamDesk = async (
 		selectedEventId: eventId ?? null,
 		gameweek,
 	};
+	const cacheState: MyFplReviewState =
+		state === "PENDING" || pastSeasonsState === "PENDING" ? "PENDING" : state;
 	if (cacheableState(state)) {
-		await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(state));
+		await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(cacheState));
 	}
 	return payload;
 };

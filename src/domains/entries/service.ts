@@ -340,11 +340,7 @@ async function loadEventTeamIds(
 			.in("element_id", playerIds)
 			.order("fixture_id", { ascending: true });
 		if (error) {
-			context.logger.warn(
-				{ err: error, eventId, playerIds },
-				"Failed to load event-scoped player teams; using current data"
-			);
-			return new Map();
+			throw new Error("Failed to load event-scoped player teams", { cause: error });
 		}
 		const result = new Map<number, number>();
 		for (const raw of (data ?? []) as Array<{
@@ -368,11 +364,13 @@ async function loadEventTeamIds(
 		}
 		return result;
 	} catch (error) {
-		context.logger.warn(
+		context.logger.error(
 			{ err: error, eventId, playerIds },
-			"Failed to load event-scoped player teams; using current data"
+			"Failed to load event-scoped player teams"
 		);
-		return new Map();
+		throw error instanceof Error
+			? error
+			: new Error("Failed to load event-scoped player teams", { cause: error });
 	}
 }
 

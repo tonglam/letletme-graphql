@@ -43,7 +43,8 @@ const liveRow = (eventId: number, elementId: number, totalPoints: number, minute
 const makeContext = (
 	core: ReturnType<typeof buildTestCoreData>,
 	liveRows: Array<ReturnType<typeof liveRow>>,
-	fixtureTeamRows: Array<{ event_id: number; element_id: number; team_id: number }> = []
+	fixtureTeamRows: Array<{ event_id: number; element_id: number; team_id: number }> = [],
+	fixtureTeamError: Error | null = null
 ): GraphQLContext => {
 	const context = buildSnapshotContext(new TestRedis(buildCorePublication("2526", 7, core)), {
 		seasonId: 2025,
@@ -57,7 +58,7 @@ const makeContext = (
 			}
 			const promise = Promise.resolve({
 				data: table === "fpl.player_fixture_stats" ? fixtureTeamRows : liveRows,
-				error: null,
+				error: table === "fpl.player_fixture_stats" ? fixtureTeamError : null,
 			});
 			type Builder = typeof promise & {
 				select: () => Builder;
@@ -315,6 +316,36 @@ describe("entriesService.getEntryEventPicks", () => {
 			wasHome: "",
 			score: "",
 			bgw: true,
+		});
+	});
+
+	it("fails closed when event-scoped team data is unavailable", async () => {
+		const core = buildTestCoreData(34);
+		const fixtureTeamError = new Error("fixture stats unavailable");
+		const context = makeContext(core, [liveRow(34, 4, 10, 90)], [], fixtureTeamError);
+
+		await expect(
+			entriesService.getEntryEventPicks(context, {
+				entryId: 84885,
+				eventId: 34,
+				eventPoints: 10,
+				eventRank: 1,
+				overallPoints: 10,
+				overallRank: 1,
+				eventTransfers: 0,
+				eventTransfersCost: 0,
+				eventNetPoints: 10,
+				eventBenchPoints: 0,
+				eventChip: null,
+				eventPlayedCaptain: 4,
+				eventCaptainPoints: 10,
+				eventPicks: [{ element: 4, position: 1, multiplier: 2, is_captain: true }],
+				teamValue: 1000,
+				bank: 0,
+			})
+		).rejects.toMatchObject({
+			message: "Failed to load event-scoped player teams",
+			cause: fixtureTeamError,
 		});
 	});
 });

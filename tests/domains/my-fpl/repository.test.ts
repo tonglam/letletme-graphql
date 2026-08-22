@@ -674,7 +674,12 @@ describe("My FPL review repository", () => {
 		expect(pending.redis.setCalls.at(-1)?.[3]).toBe(30);
 		const ready = makeFixture({
 			finalizedIds: [1, 2],
-			entryRows: [entryRow()],
+			entryRows: [
+				entryRow({
+					past_seasons_checked_at: "2026-08-20T00:00:00.000Z",
+					past_seasons_count: 0,
+				}),
+			],
 			historyRows: [historyRow(1), historyRow(2)],
 		});
 		expect((await ready.repository.loadTeamDesk(ready.context)).state).toBe("READY");
@@ -696,15 +701,16 @@ describe("My FPL review repository", () => {
 		const readyDesk = await confirmedEmpty.repository.loadTeamDesk(confirmedEmpty.context);
 		expect(readyDesk.pastSeasons).toEqual([]);
 		expect(readyDesk.pastSeasonsState).toBe("READY");
+		expect(confirmedEmpty.redis.setCalls.at(-1)?.[3]).toBeGreaterThan(30);
 
 		const unchecked = makeFixture({
 			finalizedIds: [1],
 			entryRows: [entryRow({ past_seasons_checked_at: null, past_seasons_count: null })],
 			historyRows: [historyRow(1)],
 		});
-		expect((await unchecked.repository.loadTeamDesk(unchecked.context)).pastSeasonsState).toBe(
-			"PENDING"
-		);
+		const uncheckedDesk = await unchecked.repository.loadTeamDesk(unchecked.context);
+		expect(uncheckedDesk.pastSeasonsState).toBe("PENDING");
+		expect(unchecked.redis.setCalls.at(-1)?.[3]).toBe(30);
 	});
 
 	it("does not promote incomplete finalized or rich-enriched data to READY", async () => {
