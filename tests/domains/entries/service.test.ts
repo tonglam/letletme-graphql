@@ -330,7 +330,10 @@ describe("entriesService.getEntryEventPicks", () => {
 			(fixture) => fixture.eventId === 34 && (fixture.teamHId === 2 || fixture.teamAId === 2)
 		);
 		const movedFixture = base.fixtures.find(
-			(fixture) => fixture.eventId === 35 && (fixture.teamHId === 2 || fixture.teamAId === 2)
+			(fixture) =>
+				fixture.id !== originalFixture?.id &&
+				fixture.eventId === 34 &&
+				(fixture.teamHId === 4 || fixture.teamAId === 4)
 		);
 		if (!originalFixture || !movedFixture) throw new Error("DGW fixture not found");
 		const firstKickoff = "2026-01-01T12:00:00.000Z";
@@ -341,7 +344,7 @@ describe("entriesService.getEntryEventPicks", () => {
 				fixture.id === originalFixture.id
 					? { ...fixture, kickoffTime: firstKickoff }
 					: fixture.id === movedFixture.id
-						? { ...fixture, eventId: 34, kickoffTime: secondKickoff }
+						? { ...fixture, kickoffTime: secondKickoff }
 						: fixture
 			),
 		};

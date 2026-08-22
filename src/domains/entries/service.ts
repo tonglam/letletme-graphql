@@ -219,16 +219,19 @@ const mapEntryPick = (params: {
 		teamAScore: number | null;
 	}>;
 	teamsById: ReadonlyMap<number, Team>;
-	eventTeamId: number;
+	eventTeamIds: ReadonlyArray<number>;
 	autoSubElements: ReadonlySet<number>;
 }): ElementEventResultData => {
-	const { eventId, pick, player, team, live, fixtures, teamsById, eventTeamId, autoSubElements } =
+	const { eventId, pick, player, team, live, fixtures, teamsById, eventTeamIds, autoSubElements } =
 		params;
+	const eventTeamId = eventTeamIds[0] ?? 0;
 	const minutes = live?.minutes ?? 0;
 	const yellowCards = live?.yellowCards ?? 0;
 	const redCards = live?.redCards ?? 0;
 	const playerFixtures = fixtures
-		.filter((fixture) => fixture.teamHId === eventTeamId || fixture.teamAId === eventTeamId)
+		.filter(
+			(fixture) => eventTeamIds.includes(fixture.teamHId) || eventTeamIds.includes(fixture.teamAId)
+		)
 		.sort((left, right) => {
 			if (left.kickoffTime === null && right.kickoffTime !== null) return 1;
 			if (left.kickoffTime !== null && right.kickoffTime === null) return -1;
@@ -238,7 +241,7 @@ const mapEntryPick = (params: {
 			return left.id - right.id;
 		});
 	const fixtureOpponents = playerFixtures.map((fixture) => {
-		const wasHome = fixture.teamHId === eventTeamId;
+		const wasHome = eventTeamIds.includes(fixture.teamHId);
 		const opponentId = wasHome ? fixture.teamAId : fixture.teamHId;
 		const opponent = teamsById.get(opponentId);
 		const score =
@@ -338,7 +341,7 @@ async function loadEventTeamIds(
 	eventId: number,
 	playerIds: number[],
 	fixtures: ReadonlyArray<{ id: number; kickoffTime: string | null }>
-): Promise<Map<number, number>> {
+): Promise<Map<number, number[]>> {
 	if (playerIds.length === 0) return new Map();
 	try {
 		const { data, error } = await context.data
@@ -359,7 +362,7 @@ async function loadEventTeamIds(
 			fixture_id?: unknown;
 			team_id?: unknown;
 		}>;
-		const result = new Map<number, number>();
+		const result = new Map<number, number[]>();
 		rows
 			.map((raw) => {
 				const fixtureId = asNumber(raw.fixture_id);
@@ -383,14 +386,10 @@ async function loadEventTeamIds(
 				const elementId = asNumber(raw.element_id);
 				const rowEventId = asNumber(raw.event_id);
 				const teamId = asNumber(raw.team_id);
-				if (
-					elementId !== null &&
-					rowEventId === eventId &&
-					teamId !== null &&
-					teamId > 0 &&
-					!result.has(elementId)
-				) {
-					result.set(elementId, teamId);
+				if (elementId !== null && rowEventId === eventId && teamId !== null && teamId > 0) {
+					const teamIds = result.get(elementId) ?? [];
+					if (!teamIds.includes(teamId)) teamIds.push(teamId);
+					result.set(elementId, teamIds);
 				}
 			});
 		return result;
@@ -536,7 +535,12 @@ export const entriesService = {
 		const fixtures = fixtureSnapshot.fixtures.filter(
 			(fixture) => fixture.eventId === result.eventId
 		);
-		const eventTeamIds = await loadEventTeamIds(context, result.eventId, playerIds, fixtures);
+		const eventTeamIdsByPlayer = await loadEventTeamIds(
+			context,
+			result.eventId,
+			playerIds,
+			fixtures
+		);
 		const autoSubElements = officialAutoSubElements(result.eventAutoSub);
 
 		return picks.map((pick) => {
@@ -544,7 +548,8 @@ export const entriesService = {
 			// A missing event-scoped row means the player had no verified club for
 			// this event. Do not substitute the player's current club: that can
 			// attach a later club's fixture to an historical blank gameweek.
-			const eventTeamId = eventTeamIds.get(pick.element) ?? 0;
+			const eventTeamIds = eventTeamIdsByPlayer.get(pick.element) ?? [];
+			const eventTeamId = eventTeamIds[0] ?? 0;
 			const team = teamMap.get(eventTeamId);
 			const live = liveByPlayer.get(livePerformanceKey(result.eventId, pick.element));
 			return mapEntryPick({
@@ -555,7 +560,7 @@ export const entriesService = {
 				live,
 				fixtures,
 				teamsById: teamMap,
-				eventTeamId,
+				eventTeamIds,
 				autoSubElements,
 			});
 		});
