@@ -69,6 +69,7 @@ const withDependencies = async <T>(
 type LoadedReviewContext = {
 	value: MyFplReviewContext;
 	finalizedEventIds: Set<number>;
+	settledEventIds: Set<number>;
 	publications: Map<number, MyFplSnapshotPublication>;
 };
 
@@ -1188,6 +1189,9 @@ const loadReviewContext = async (context: GraphQLContext): Promise<LoadedReviewC
 		lifecyclePromise,
 		publicationPromise,
 	]);
+	const settledEventIds = new Set(
+		lifecycle.rows.filter((row) => row.finished && row.data_checked).map((row) => row.event_id)
+	);
 	const finalizedEventIds = new Set(
 		lifecycle.rows
 			.filter((row) => row.finished && row.data_checked && row.live_snapshot_finalized_at !== null)
@@ -1218,6 +1222,7 @@ const loadReviewContext = async (context: GraphQLContext): Promise<LoadedReviewC
 			latestPublishedEventId,
 		},
 		finalizedEventIds,
+		settledEventIds,
 		publications,
 	};
 };
@@ -1434,6 +1439,23 @@ const loadSnapshotEntry = async (
 	const payload = parseSnapshotEntryPayload(row.payload);
 	if (!payload) return null;
 	if (payload.entry.id !== entryId) return null;
+	const historyEventIds = payload.history.map((historyRow) => historyRow.eventId);
+	const uniqueHistoryEventIds = new Set(historyEventIds);
+	const expectedHistoryEventIds = [...loadedContext.settledEventIds].filter(
+		(settledEventId) =>
+			settledEventId <= eventId &&
+			(payload.entry.startedEvent === null ||
+				payload.entry.startedEvent === undefined ||
+				settledEventId >= payload.entry.startedEvent)
+	);
+	if (
+		uniqueHistoryEventIds.size !== historyEventIds.length ||
+		historyEventIds.some((historyEventId) => historyEventId < 1 || historyEventId > eventId) ||
+		(!row.is_empty &&
+			expectedHistoryEventIds.some((settledEventId) => !uniqueHistoryEventIds.has(settledEventId)))
+	) {
+		return null;
+	}
 	const pickCount = payload.gameweek.result?.picks.length ?? 0;
 	if (
 		payload.gameweek.eventId !== eventId ||
@@ -1713,7 +1735,7 @@ const loadTeamGameweekPrepared = async (
 		return {
 			context: loadedContext.value,
 			eventId,
-			entry: entry === undefined ? await loadEntry(context, entryId) : entry,
+			entry: null,
 			state: "PENDING",
 			result: null,
 			snapshotMeta: null,
@@ -1834,22 +1856,23 @@ const loadTeamDesk = async (
 	const pinnedPublication = snapshotRevision?.trim()
 		? await loadSnapshotPublicationByRevision(context, loadedContext, snapshotRevision)
 		: null;
+	const snapshotRequested = snapshotReadEnabled() || Boolean(snapshotRevision?.trim());
 	const selectedEventId =
-		eventId ?? pinnedPublication?.eventId ?? defaultReviewEventId(loadedContext);
+		eventId ??
+		pinnedPublication?.eventId ??
+		(snapshotRequested ? defaultReviewEventId(loadedContext) : null);
 	const snapshot =
-		selectedEventId !== null && (snapshotReadEnabled() || Boolean(snapshotRevision?.trim()))
+		selectedEventId !== null && snapshotRequested
 			? await loadSnapshotEntry(context, loadedContext, entryId, selectedEventId, snapshotRevision)
 			: null;
-	if (snapshotReadEnabled() && !snapshot) {
-		const entry = await loadEntry(context, entryId);
+	if (snapshotRequested && !snapshot) {
 		return {
-			state:
-				selectedEventId === null ? (entry ? "PRESEASON" : "EMPTY") : entry ? "PENDING" : "EMPTY",
+			state: selectedEventId === null && !snapshotRevision?.trim() ? "PRESEASON" : "PENDING",
 			context: loadedContext.value,
-			entry,
+			entry: null,
 			history: [],
 			pastSeasons: [],
-			pastSeasonsState: entry ? "PENDING" : "EMPTY",
+			pastSeasonsState: "PENDING",
 			selectedEventId,
 			gameweek: null,
 			snapshotMeta: null,
@@ -1871,7 +1894,7 @@ const loadTeamDesk = async (
 	}
 	if (cached) return cached;
 
-	const [fallbackEntry, fallbackHistory, fallbackPastSeasons] = snapshotReadEnabled()
+	const [fallbackEntry, fallbackHistory, fallbackPastSeasons] = snapshotRequested
 		? [null, [] as MyFplTeamHistoryRow[], [] as MyFplPastSeason[]]
 		: await Promise.all([
 				loadEntry(context, entryId),
@@ -1913,8 +1936,8 @@ const loadTeamDesk = async (
 		if ((state === "READY" || state === "EMPTY") && historyPending) state = "PENDING";
 	} else if (!entry) state = "EMPTY";
 	else if (snapshot) state = snapshot.payload.gameweek.state;
-	else if (selectedEventId === null || loadedContext.value.latestFinalizedEventId === null)
-		state = "PRESEASON";
+	else if (loadedContext.value.latestFinalizedEventId === null) state = "PRESEASON";
+	else if (selectedEventId === null) state = historyComplete ? "READY" : "PENDING";
 	else if (entry.startedEvent === null || entry.startedEvent > selectedEventId) state = "EMPTY";
 	else state = historyComplete ? "READY" : "PENDING";
 	const pastSeasonsState: MyFplReviewState = snapshot
@@ -1975,6 +1998,9 @@ const loadTeamTransfers = async (
 		: null;
 	const selectedEventId = pinnedPublication?.eventId ?? defaultReviewEventId(loadedContext);
 	const snapshotRequested = snapshotReadEnabled() || Boolean(snapshotRevision?.trim());
+	if (selectedEventId === null && !snapshotRevision?.trim()) {
+		return { state: "PRESEASON", context: loadedContext.value, gameweeks: [], snapshotMeta: null };
+	}
 	const hasSnapshot =
 		selectedEventId !== null &&
 		snapshotRequested &&
@@ -2707,6 +2733,58 @@ const loadCompetitionAggregateSnapshot = async (
 	return normalized;
 };
 
+const parseSnapshotSeasonPathPoints = (
+	value: unknown
+): MyFplCompetitionSeasonPathPoint[] | null => {
+	if (!Array.isArray(value)) return null;
+	const points: MyFplCompetitionSeasonPathPoint[] = [];
+	for (const candidate of value) {
+		if (!isRecord(candidate)) return null;
+		const nullableInteger = (key: string): number | null | undefined => {
+			if (!Object.prototype.hasOwnProperty.call(candidate, key)) return undefined;
+			if (candidate[key] === null) return null;
+			return asInteger(candidate[key]);
+		};
+		const nullableNumber = (key: string): number | null | undefined => {
+			if (!Object.prototype.hasOwnProperty.call(candidate, key)) return undefined;
+			if (candidate[key] === null) return null;
+			return asFiniteNumber(candidate[key]);
+		};
+		const gameweek = asInteger(candidate.gameweek);
+		const fieldSize = asInteger(candidate.fieldSize);
+		const tournamentRank = nullableInteger("tournamentRank");
+		const gapToLeader = nullableInteger("gapToLeader");
+		const pointsVsAverage = nullableNumber("pointsVsAverage");
+		const overallPoints = nullableInteger("overallPoints");
+		const leaderOverallPoints = nullableInteger("leaderOverallPoints");
+		const averageOverallPoints = nullableNumber("averageOverallPoints");
+		if (
+			gameweek === null ||
+			fieldSize === null ||
+			fieldSize < 0 ||
+			tournamentRank === undefined ||
+			gapToLeader === undefined ||
+			pointsVsAverage === undefined ||
+			overallPoints === undefined ||
+			leaderOverallPoints === undefined ||
+			averageOverallPoints === undefined
+		) {
+			return null;
+		}
+		points.push({
+			gameweek,
+			tournamentRank,
+			gapToLeader,
+			pointsVsAverage,
+			fieldSize,
+			overallPoints,
+			leaderOverallPoints,
+			averageOverallPoints,
+		});
+	}
+	return points;
+};
+
 const loadCompetitionBoard = async (
 	context: GraphQLContext,
 	args: {
@@ -2838,14 +2916,16 @@ const loadCompetitionsDesk = async (
 			])
 		: [await boardPromise, null];
 	const aggregate = board.state === "READY" ? aggregateCandidate : null;
+	const aggregateInvalid = board.state === "READY" && canLoadAggregate && aggregate === null;
+	const deskState = aggregateInvalid ? "PENDING" : board.state;
 	return {
-		state: board.state,
+		state: deskState,
 		context: loadedContext.value,
 		tournaments,
 		selectedTournamentId: selectedTournament.id,
 		selectedTournament,
 		eventId: selectedEventId,
-		board,
+		board: aggregateInvalid ? null : board,
 		aggregate,
 		snapshotMeta: board.snapshotMeta ?? aggregate?.snapshotMeta ?? null,
 	};
@@ -2919,20 +2999,8 @@ const loadCompetitionSeasonPath = async (
 				: isRecord(raw)
 					? raw.seasonPath
 					: null;
-		const points = Array.isArray(rawPoints)
-			? rawPoints
-					.filter((point): point is Record<string, unknown> => isRecord(point))
-					.map((point) => ({
-						gameweek: asInteger(point.gameweek) ?? 0,
-						tournamentRank: asInteger(point.tournamentRank),
-						gapToLeader: asInteger(point.gapToLeader),
-						pointsVsAverage: asFiniteNumber(point.pointsVsAverage),
-						fieldSize: asInteger(point.fieldSize) ?? 0,
-						overallPoints: asInteger(point.overallPoints),
-						leaderOverallPoints: asInteger(point.leaderOverallPoints),
-						averageOverallPoints: asFiniteNumber(point.averageOverallPoints),
-					}))
-			: [];
+		const points = parseSnapshotSeasonPathPoints(rawPoints);
+		if (points === null) return empty("PENDING", snapshot.publication);
 		const payload: MyFplCompetitionSeasonPath = {
 			state: points.some((point) => point.gameweek === throughEventId) ? "READY" : "PENDING",
 			context: loadedContext.value,
