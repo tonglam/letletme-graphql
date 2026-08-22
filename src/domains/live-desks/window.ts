@@ -299,9 +299,7 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 		Number.isFinite(checkedAtMs) &&
 		nowMs - checkedAtMs <= staleAfterMsForWindow("LIVE_ACTIVE");
 	const liveSnapshotHasActiveFixture =
-		liveSnapshotIsFresh &&
-		input.liveEventId === anchorEventId &&
-		hasActive(anchorFixtures);
+		liveSnapshotIsFresh && input.liveEventId === anchorEventId && hasActive(anchorFixtures);
 	const lifecycleApplies =
 		input.lifecycleEventId === anchorEventId &&
 		lifecycleState !== null &&
