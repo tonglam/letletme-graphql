@@ -569,10 +569,10 @@ const MAX_COMPETITION_BOARD_PAGE = 100;
 // Roll out the immutable publication reader only after Data has generated the
 // first shadow/publication revisions.  When enabled, My FPL never falls back
 // to mutable canonical rows for a product response.
-const MY_FPL_SNAPSHOT_READ_ENABLED = process.env.MY_FPL_SNAPSHOT_READ_ENABLED === "true";
+const snapshotReadEnabled = (): boolean => process.env.MY_FPL_SNAPSHOT_READ_ENABLED === "true";
 
 const defaultReviewEventId = (context: LoadedReviewContext): number | null =>
-	MY_FPL_SNAPSHOT_READ_ENABLED
+	snapshotReadEnabled()
 		? (context.value.latestPublishedEventId ??
 			context.value.currentEventId ??
 			context.value.latestFinalizedEventId)
@@ -1613,7 +1613,7 @@ const loadTeamGameweekPrepared = async (
 			snapshotMeta: null,
 		};
 	}
-	if (MY_FPL_SNAPSHOT_READ_ENABLED && !snapshot) {
+	if (snapshotReadEnabled() && !snapshot) {
 		return {
 			context: loadedContext.value,
 			eventId,
@@ -1739,7 +1739,7 @@ const loadTeamDesk = async (
 	const snapshot = selectedEventId
 		? await loadSnapshotEntry(context, loadedContext, entryId, selectedEventId, snapshotRevision)
 		: null;
-	if (MY_FPL_SNAPSHOT_READ_ENABLED && !snapshot) {
+	if (snapshotReadEnabled() && !snapshot) {
 		const entry = await loadEntry(context, entryId);
 		return {
 			state:
@@ -1763,7 +1763,7 @@ const loadTeamDesk = async (
 	const cached = await readCache(context, cacheKey, isTeamDeskCache);
 	if (cached) return cached;
 
-	const [fallbackEntry, fallbackHistory, fallbackPastSeasons] = MY_FPL_SNAPSHOT_READ_ENABLED
+	const [fallbackEntry, fallbackHistory, fallbackPastSeasons] = snapshotReadEnabled()
 		? [null, [] as MyFplTeamHistoryRow[], [] as MyFplPastSeason[]]
 		: await Promise.all([
 				loadEntry(context, entryId),
@@ -1866,7 +1866,7 @@ const loadTeamTransfers = async (
 	const hasSnapshot =
 		selectedEventId !== null &&
 		(loadedContext.publications.has(selectedEventId) || Boolean(snapshotRevision));
-	if (MY_FPL_SNAPSHOT_READ_ENABLED && !hasSnapshot) {
+	if (snapshotReadEnabled() && !hasSnapshot) {
 		return { state: "PENDING", context: loadedContext.value, gameweeks: [], snapshotMeta: null };
 	}
 	if (
@@ -2262,7 +2262,7 @@ const loadCompetitionBoardPrepared = async (
 			? await loadSnapshotEntry(context, loadedContext, entryId, eventId, snapshotRevision)
 			: null;
 	if (snapshotRevision && !snapshot) return empty("PENDING");
-	if (MY_FPL_SNAPSHOT_READ_ENABLED && !snapshot) return empty("PENDING");
+	if (snapshotReadEnabled() && !snapshot) return empty("PENDING");
 	if (snapshot) {
 		const revision = snapshot.publication.revision;
 		const cacheKey = gqlCacheKey(
@@ -2755,7 +2755,7 @@ const loadCompetitionSeasonPath = async (
 			? await loadSnapshotEntry(context, loadedContext, entryId, throughEventId, snapshotRevision)
 			: null;
 	if (snapshotRevision && !snapshot) return empty("PENDING");
-	if (MY_FPL_SNAPSHOT_READ_ENABLED && !snapshot) return empty("PENDING");
+	if (snapshotReadEnabled() && !snapshot) return empty("PENDING");
 	if (snapshot) {
 		const revision = snapshot.publication.revision;
 		const cacheKey = gqlCacheKey(
