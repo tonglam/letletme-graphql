@@ -104,7 +104,9 @@ const matchRows = (
 		kickoffTime: fixture.kickoffTime,
 		minutes: fixture.minutes,
 		started: fixture.started === true,
-		finished: fixture.finished || fixture.finishedProvisional,
+		// `finishedProvisional` is an upstream staging signal, not the
+		// authoritative FPL `finished` flag exposed by this contract.
+		finished: fixture.finished,
 	}));
 
 const scheduledMatchdayDesk = (

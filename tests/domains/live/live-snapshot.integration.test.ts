@@ -198,6 +198,39 @@ describe("liveSnapshot GraphQL contract", () => {
 		expect(desk.nextFixtures[0]).toMatchObject({ minutes: 0, started: false });
 	});
 
+	it("does not promote provisional fixture completion to finished", async () => {
+		const core = buildLiveCore();
+		const fixtures = core.fixtures.map((fixture) =>
+			fixture.id === 1 ? { ...fixture, finished: false, finishedProvisional: true } : fixture
+		);
+		const live = buildLivePublication({ ...core, fixtures }, 1, "2627", 8, {
+			state: "live",
+			eventLives: buildLiveEventRows({ ...core, fixtures }),
+		});
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, { ...core, fixtures }), live)
+		);
+
+		const result = await graphql({
+			schema,
+			source: `query {
+				liveMatchdayDesk(ref: { season: "2627", eventId: 1, revision: "8" }) {
+					matches { fixtureId finished }
+				}
+			}`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(
+			(
+				result.data?.liveMatchdayDesk as {
+					matches: Array<{ fixtureId: number; finished: boolean }>;
+				}
+			).matches.find((match) => match.fixtureId === 1)?.finished
+		).toBe(false);
+	});
+
 	it("uses core fixtures when scheduled live payload is unavailable", async () => {
 		const core = buildTestCoreData(1);
 		const live = buildLivePublication(core, 1, "2627", 8, { state: "scheduled" });
