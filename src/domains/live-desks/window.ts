@@ -315,7 +315,7 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 	const lifecycleSourceCheckedAtMs = input.lifecycleSourceCheckedAt
 		? Date.parse(input.lifecycleSourceCheckedAt)
 		: Number.NaN;
-	const lifecycleMatchesPublication = (() => {
+	const lifecycleMatchesPublication = ((): boolean => {
 		if (input.liveRevision === null && !input.publicationId) return true;
 		if (input.publicationId && input.lifecyclePublicationId) {
 			return input.publicationId === input.lifecyclePublicationId;
