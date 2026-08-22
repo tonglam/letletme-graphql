@@ -747,19 +747,34 @@ describe("My FPL review repository", () => {
 		);
 	});
 
+	it("keeps an older selected gameweek pending while newer history is incomplete", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1, 2],
+			entryRows: [entryRow()],
+			historyRows: [historyRow(1)],
+			gameweekRows: Array.from({ length: 15 }, (_, index) => gameweekRow(1, index + 1)),
+		});
+
+		const desk = await fixture.repository.loadTeamDesk(fixture.context, 1);
+
+		expect(desk.gameweek?.state).toBe("READY");
+		expect(desk.state).toBe("PENDING");
+		expect(fixture.redis.setCalls.at(-1)?.[3]).toBe(30);
+	});
+
 	it("evicts malformed and schema-invalid cache values before querying PostgreSQL", async () => {
 		const fixture = makeFixture({
 			finalizedIds: [1],
 			entryRows: [entryRow()],
 			historyRows: [historyRow(1)],
 		});
-		const key = gqlCacheKey(fixture.context, "my-fpl:v7:team-desk:123:season");
+		const key = gqlCacheKey(fixture.context, "my-fpl:v8:team-desk:123:season");
 		await fixture.redis.set(key, JSON.stringify({ state: "READY", history: [] }));
 		const desk = await fixture.repository.loadTeamDesk(fixture.context);
 		expect(desk.state).toBe("READY");
 		expect(await fixture.redis.get(key)).not.toBe(JSON.stringify({ state: "READY", history: [] }));
 		const malformed = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
-		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v7:team-desk:123:season");
+		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v8:team-desk:123:season");
 		await malformed.redis.set(malformedKey, "{");
 		await malformed.repository.loadTeamDesk(malformed.context);
 		expect(await malformed.redis.get(malformedKey)).not.toBe("{");

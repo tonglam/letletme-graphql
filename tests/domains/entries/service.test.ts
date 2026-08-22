@@ -241,7 +241,7 @@ describe("entriesService.getEntryEventPicks", () => {
 		const context = makeContext(
 			core,
 			[liveRow(34, 4, 10, 90)],
-			[{ event_id: 34, element_id: 4, team_id: 2 }]
+			[{ event_id: 34, element_id: 4, fixture_id: targetFixture.id, team_id: 2 }]
 		);
 		const wasHome = targetFixture.teamHId === 2;
 		const opponentId = wasHome ? targetFixture.teamAId : targetFixture.teamHId;

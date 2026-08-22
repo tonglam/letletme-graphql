@@ -510,7 +510,7 @@ type DbSetupStatusRow = QueryResultRow & {
 	setup_warning_count?: number | null;
 };
 
-const PROJECTION_VERSION = "v7";
+const PROJECTION_VERSION = "v8";
 const NULLABLE_STATE_CACHE_TTL_SECONDS = 30;
 // Keep OFFSET bounded for the fixed-cost board root. Page 100 is the maximum
 // 10,000-row window at the maximum page size.
@@ -1364,9 +1364,23 @@ const loadTeamDesk = async (
 		eventId === undefined || eventId === null
 			? null
 			: await loadTeamGameweekPrepared(context, loadedContext, entryId, eventId, entry);
+	const historyEventIds = new Set(history.map((row) => row.eventId));
+	const expectedHistoryEventIds =
+		entry?.startedEvent !== null &&
+		entry?.startedEvent !== undefined &&
+		loadedContext.value.latestFinalizedEventId !== null
+			? [...loadedContext.finalizedEventIds].filter(
+					(finalizedEventId) => finalizedEventId >= entry.startedEvent!
+				)
+			: [];
+	const historyComplete =
+		expectedHistoryEventIds.length > 0 &&
+		expectedHistoryEventIds.every((finalizedEventId) => historyEventIds.has(finalizedEventId));
 	let state: MyFplReviewState;
-	if (gameweek) state = gameweek.state;
-	else if (!entry) state = "EMPTY";
+	if (gameweek) {
+		state = gameweek.state;
+		if (state === "READY" && !historyComplete) state = "PENDING";
+	} else if (!entry) state = "EMPTY";
 	else if (loadedContext.value.latestFinalizedEventId === null) state = "PRESEASON";
 	else if (
 		entry.startedEvent === null ||
@@ -1374,13 +1388,6 @@ const loadTeamDesk = async (
 	) {
 		state = "EMPTY";
 	} else {
-		const historyEventIds = new Set(history.map((row) => row.eventId));
-		const expectedHistoryEventIds = [...loadedContext.finalizedEventIds].filter(
-			(finalizedEventId) => finalizedEventId >= entry.startedEvent!
-		);
-		const historyComplete =
-			expectedHistoryEventIds.length > 0 &&
-			expectedHistoryEventIds.every((finalizedEventId) => historyEventIds.has(finalizedEventId));
 		state = historyComplete ? "READY" : "PENDING";
 	}
 	const pastSeasonsState: MyFplReviewState = !entry
