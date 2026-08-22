@@ -333,9 +333,7 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 	// checkpoint behind the current clock. Never hand clients an overdue timer:
 	// that would make every visible page refetch immediately in a tight loop.
 	const refreshAt =
-		lifecycleApplies &&
-		Number.isFinite(persistedRefreshAtMs) &&
-		persistedRefreshAtMs > nowMs
+		lifecycleApplies && Number.isFinite(persistedRefreshAtMs) && persistedRefreshAtMs > nowMs
 			? new Date(persistedRefreshAtMs).toISOString()
 			: anchorEventId === null
 				? null
