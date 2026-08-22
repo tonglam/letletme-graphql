@@ -252,6 +252,13 @@ export const validateDatabaseContract = async (
 			"ops.live_lifecycle_status",
 			"content.briefing_active_publication",
 			"content.publication_payloads",
+			// My FPL immutable daily snapshot projections are read directly by
+			// the review roots, so keep them in the same preflight boundary as
+			// the generated read models.
+			"competition.my_fpl_snapshot_publications",
+			"competition.my_fpl_snapshot_entries",
+			"competition.my_fpl_snapshot_tournament_rows",
+			"competition.my_fpl_snapshot_tournament_aggregates",
 		]),
 	].sort();
 	const relationPrivileges = (

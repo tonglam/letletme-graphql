@@ -230,6 +230,11 @@ type FixtureOptions = {
 	catalog?: TournamentInfo[];
 	selectedTournament?: TournamentInfo | null;
 	boardPayload?: unknown;
+	publicationRows?: unknown[];
+	snapshotEntryRow?: unknown;
+	snapshotBoardRow?: unknown;
+	snapshotAggregatePayload?: unknown;
+	snapshotSeasonPathPayload?: unknown;
 	setupRows?: unknown[];
 	queryOverride?: (
 		sql: string,
@@ -507,6 +512,228 @@ const snapshotFor = (currentEventId: number | null) => ({
 	],
 });
 
+const snapshotPublicationRow = {
+	season_id: 2026,
+	event_id: 1,
+	revision: "42",
+	snapshot_date: "2026-08-22",
+	source_checked_at: "2026-08-22T10:45:00.000Z",
+	published_at: "2026-08-22T10:46:00.000Z",
+	kind: "PROVISIONAL" as const,
+	expected_entry_count: 1,
+	ready_entry_count: 1,
+	empty_entry_count: 0,
+	expected_tournament_count: 1,
+	ready_tournament_count: 1,
+	content_sha256: "0".repeat(64),
+};
+
+const snapshotPick = (element: number) => ({
+	element,
+	position: element,
+	webName: `Player ${element}`,
+	teamShortName: "ARS",
+	teamName: "Arsenal",
+	elementTypeName: element === 1 ? "GKP" : "DEF",
+	isCaptain: element === 1,
+	isViceCaptain: element === 2,
+	multiplier: element === 1 ? 2 : 1,
+	totalPoints: 5,
+	minutes: 90,
+	goalsScored: 0,
+	assists: 0,
+	cleanSheets: 1,
+	goalsConceded: 0,
+	yellowCards: 0,
+	redCards: 0,
+	saves: 0,
+	bonus: 0,
+	bps: 10,
+	againstShortName: "CHE",
+	wasHome: "H",
+	score: "2-0",
+	fixtureCount: 1,
+	bgw: false,
+	dgw: false,
+	isPlayed: true,
+	autoSub: false,
+	expectedGoals: 0.1,
+	expectedAssists: 0.2,
+	expectedGoalInvolvements: 0.3,
+	expectedGoalsConceded: 0.4,
+});
+
+const snapshotPayload = () => ({
+	entry: {
+		id: 123,
+		entryName: "Codex XI",
+		playerName: "Test Manager",
+		region: "AU",
+		startedEvent: 1,
+		overallPoints: 100,
+		overallRank: 1000,
+		bank: 10,
+		teamValue: 1000,
+		totalTransfers: 2,
+		transfersSyncedThroughEventId: 1,
+		pastSeasonsCheckedAt: "2026-08-22T09:00:00.000Z",
+		pastSeasonsCount: 1,
+	},
+	history: [historyRow(1)],
+	pastSeasons: [{ season: "2526", totalPoints: 1000, overallRank: 500 }],
+	gameweek: {
+		state: "READY" as const,
+		eventId: 1,
+		result: {
+			eventId: 1,
+			eventPoints: 50,
+			overallPoints: 100,
+			overallRank: 1000,
+			eventTransfers: 1,
+			eventTransfersCost: 0,
+			eventNetPoints: 50,
+			eventBenchPoints: 2,
+			eventChip: "NONE" as const,
+			eventCaptainPoints: 10,
+			playedCaptainWebName: "Captain",
+			teamValue: 1000,
+			bank: 10,
+			picks: Array.from({ length: 15 }, (_, index) => snapshotPick(index + 1)),
+		},
+	},
+	transfers: [
+		{
+			eventId: 1,
+			elementInWebName: "Player 16",
+			elementInTypeName: "DEF",
+			elementInTeamShortName: "ARS",
+			elementInCost: 50,
+			elementOutWebName: "Player 15",
+			elementOutTypeName: "DEF",
+			elementOutTeamShortName: "CHE",
+			elementOutCost: 49,
+			time: "2026-08-22T09:00:00.000Z",
+		},
+	],
+});
+
+const snapshotAggregatePayload = () => ({
+	eventId: 1,
+	entryCount: 1,
+	leaderOverallPoints: 100,
+	secondOverallPoints: null,
+	gapFirstSecond: null,
+	averageOverallPoints: 100,
+	metrics: [],
+	viewers: {
+		"123": {
+			entryId: 123,
+			overallRank: 1,
+			tournamentOverallRank: 1,
+			teamValue: 1000,
+			tournamentTeamValueRank: 1,
+			transfersNum: 1,
+			tournamentTransfersRank: 1,
+			totalCosts: 0,
+			tournamentCostsRank: 1,
+			totalBenchPoints: 2,
+			tournamentBenchPointsRank: 1,
+			autoSubPoints: 0,
+			tournamentAutoSubRank: 1,
+			overallPoints: 100,
+			leaderOverallPoints: 100,
+			gapToLeader: 0,
+			pointsBehindNext: 0,
+			pointsAheadOfPrev: 0,
+		},
+	},
+	topPerformers: [],
+	risers: [],
+	fallers: [],
+	captainDistribution: [],
+	chipDistribution: [],
+	seasonPaths: {
+		"123": [
+			{
+				gameweek: 1,
+				tournamentRank: 1,
+				gapToLeader: 0,
+				pointsVsAverage: 0,
+				fieldSize: 1,
+				overallPoints: 100,
+				leaderOverallPoints: 100,
+				averageOverallPoints: 100,
+			},
+		],
+	},
+});
+
+const snapshotEntryRow = () => ({
+	...snapshotPublicationRow,
+	entry_row_count: 1,
+	aggregate_row_count: 1,
+	payload: snapshotPayload(),
+	is_empty: false,
+	picks_count: 15,
+});
+
+const snapshotBoardRow = () => ({
+	field_size: 1,
+	expected_field_size: 1,
+	invalid_row_count: 0,
+	total_rows: 1,
+	rows: [
+		{
+			__snapshotEntryId: 123,
+			eventId: 1,
+			groupId: null,
+			entryId: 123,
+			entryName: "Codex XI",
+			playerName: "Test Manager",
+			rank: 1,
+			previousRank: null,
+			fieldRank: 1,
+			eventPoints: 50,
+			eventCost: 0,
+			eventNetPoints: 50,
+			eventRank: 1,
+			overallPoints: 100,
+			overallRank: 1,
+			eventChip: "NONE",
+			captainId: 1,
+			captainWebName: "Captain",
+			captainTeamShortName: "ARS",
+			captainPoints: 10,
+			teamValue: 1000,
+			bank: 10,
+		},
+	],
+	viewer_row: {
+		__snapshotEntryId: 123,
+		eventId: 1,
+		groupId: null,
+		entryId: 123,
+		entryName: "Codex XI",
+		playerName: "Test Manager",
+		rank: 1,
+		previousRank: null,
+		fieldRank: 1,
+		eventPoints: 50,
+		eventCost: 0,
+		eventNetPoints: 50,
+		eventRank: 1,
+		overallPoints: 100,
+		overallRank: 1,
+		eventChip: "NONE",
+		captainId: 1,
+		captainWebName: "Captain",
+		captainTeamShortName: "ARS",
+		captainPoints: 10,
+		teamValue: 1000,
+		bank: 10,
+	},
+});
+
 const makeFixture = (options: FixtureOptions = {}) => {
 	const redis = new TestRedis();
 	const queries: Array<{ sql: string; params: unknown[] }> = [];
@@ -522,6 +749,31 @@ const makeFixture = (options: FixtureOptions = {}) => {
 	const query = async (sql: string, params: unknown[] = []) => {
 		queries.push({ sql, params });
 		if (options.queryOverride) return options.queryOverride(sql, params);
+		if (sql.includes("JOIN competition.my_fpl_snapshot_entries")) {
+			return { rows: options.snapshotEntryRow ? [options.snapshotEntryRow] : [] };
+		}
+		if (sql.includes("FROM competition.my_fpl_snapshot_tournament_rows")) {
+			return { rows: [options.snapshotBoardRow ?? {}] };
+		}
+		if (sql.includes("FROM competition.my_fpl_snapshot_tournament_aggregates aggregate")) {
+			return {
+				rows:
+					options.snapshotAggregatePayload === undefined
+						? []
+						: [{ payload: options.snapshotAggregatePayload }],
+			};
+		}
+		if (sql.includes("FROM competition.my_fpl_snapshot_tournament_aggregates")) {
+			return {
+				rows:
+					options.snapshotSeasonPathPayload === undefined
+						? []
+						: [{ payload: options.snapshotSeasonPathPayload }],
+			};
+		}
+		if (sql.includes("FROM competition.my_fpl_snapshot_publications")) {
+			return { rows: options.publicationRows ?? [] };
+		}
 		if (sql.includes("FROM fpl.events")) return { rows: lifecycleRows };
 		if (sql.includes("FROM competition.entries")) return { rows: options.entryRows ?? [] };
 		if (sql.includes("FROM competition.entry_past_seasons")) {
@@ -613,8 +865,20 @@ const makeFixture = (options: FixtureOptions = {}) => {
 	};
 };
 
+const withSnapshotRead = async <T>(operation: () => Promise<T>): Promise<T> => {
+	const previous = process.env.MY_FPL_SNAPSHOT_READ_ENABLED;
+	process.env.MY_FPL_SNAPSHOT_READ_ENABLED = "true";
+	try {
+		return await operation();
+	} finally {
+		if (previous === undefined) delete process.env.MY_FPL_SNAPSHOT_READ_ENABLED;
+		else process.env.MY_FPL_SNAPSHOT_READ_ENABLED = previous;
+	}
+};
+
 describe("My FPL review repository", () => {
 	it("normalizes search, chips, positions and board rows", () => {
+		expect(myFplTestables.snapshotDateKey(new Date("2026-08-21T16:00:00.000Z"))).toBe("2026-08-22");
 		expect(myFplTestables.normalizeSearch("  North London  ")).toBe("North London");
 		expect(() => myFplTestables.normalizeSearch("x".repeat(81))).toThrow(
 			"search must contain at most 80 characters"
@@ -657,6 +921,99 @@ describe("My FPL review repository", () => {
 			previousRank: 9,
 			fieldRank: 5,
 			eventChip: "FREE_HIT",
+		});
+	});
+
+	it("reads every My FPL surface from one pinned daily publication", async () => {
+		await withSnapshotRead(async () => {
+			const fixture = makeFixture({
+				finalizedIds: [1],
+				publicationRows: [snapshotPublicationRow],
+				snapshotEntryRow: snapshotEntryRow(),
+				snapshotBoardRow: snapshotBoardRow(),
+				snapshotAggregatePayload: snapshotAggregatePayload(),
+				snapshotSeasonPathPayload: snapshotAggregatePayload(),
+			});
+
+			const desk = await fixture.repository.loadTeamDesk(fixture.context, 1, "42");
+			expect(desk.state).toBe("READY");
+			expect(desk.selectedEventId).toBe(1);
+			expect(desk.snapshotMeta).toMatchObject({ revision: "42", kind: "PROVISIONAL" });
+			expect(desk.gameweek?.result?.picks).toHaveLength(15);
+
+			const gameweek = await fixture.repository.loadTeamGameweek(fixture.context, 1, "42");
+			expect(gameweek.state).toBe("READY");
+			expect(gameweek.snapshotMeta?.revision).toBe("42");
+
+			const transfers = await fixture.repository.loadTeamTransfers(fixture.context, "42");
+			expect(transfers.state).toBe("READY");
+			expect(transfers.gameweeks[0]?.transfers).toHaveLength(1);
+
+			const competitions = await fixture.repository.loadCompetitionsDesk(
+				fixture.context,
+				7,
+				1,
+				"42"
+			);
+			expect(competitions.state).toBe("READY");
+			expect(competitions.snapshotMeta?.revision).toBe("42");
+			expect(competitions.board?.viewerRow?.entryId).toBe(123);
+			expect(competitions.aggregate?.viewer?.entryId).toBe(123);
+
+			const path = await fixture.repository.loadCompetitionSeasonPath(fixture.context, 7, 1, "42");
+			expect(path.state).toBe("READY");
+			expect(path.points[0]?.gameweek).toBe(1);
+			expect(path.snapshotMeta?.revision).toBe("42");
+		});
+	});
+
+	it("fails closed when the snapshot aggregate viewer is bound to another entry", async () => {
+		await withSnapshotRead(async () => {
+			const aggregate = snapshotAggregatePayload();
+			const fixture = makeFixture({
+				publicationRows: [snapshotPublicationRow],
+				snapshotEntryRow: snapshotEntryRow(),
+				snapshotBoardRow: snapshotBoardRow(),
+				snapshotAggregatePayload: {
+					...aggregate,
+					viewers: {
+						"123": { ...aggregate.viewers["123"], entryId: 999 },
+					},
+				},
+				snapshotSeasonPathPayload: aggregate,
+			});
+			const competitions = await fixture.repository.loadCompetitionsDesk(
+				fixture.context,
+				7,
+				1,
+				"42"
+			);
+			expect(competitions.aggregate).toBeNull();
+		});
+	});
+
+	it("fails closed when the daily publication is absent or malformed", async () => {
+		await withSnapshotRead(async () => {
+			const absent = makeFixture({ entryRows: [entryRow()] });
+			expect((await absent.repository.loadTeamDesk(absent.context)).state).toBe("PENDING");
+			expect((await absent.repository.loadTeamGameweek(absent.context, 1)).state).toBe("PENDING");
+			expect((await absent.repository.loadTeamTransfers(absent.context)).state).toBe("PENDING");
+			expect(
+				(
+					await absent.repository.loadCompetitionBoard(absent.context, {
+						tournamentId: 7,
+						eventId: 1,
+					})
+				).state
+			).toBe("PENDING");
+
+			const malformed = makeFixture({
+				publicationRows: [{ ...snapshotPublicationRow, content_sha256: "bad" }],
+				entryRows: [entryRow()],
+			});
+			const desk = await malformed.repository.loadTeamDesk(malformed.context, 1);
+			expect(desk.state).toBe("PENDING");
+			expect(desk.snapshotMeta).toBeNull();
 		});
 	});
 
@@ -790,13 +1147,13 @@ describe("My FPL review repository", () => {
 			entryRows: [entryRow()],
 			historyRows: [historyRow(1)],
 		});
-		const key = gqlCacheKey(fixture.context, "my-fpl:v9:team-desk:123:season");
+		const key = gqlCacheKey(fixture.context, "my-fpl:v10:team-desk:123:season");
 		await fixture.redis.set(key, JSON.stringify({ state: "READY", history: [] }));
 		const desk = await fixture.repository.loadTeamDesk(fixture.context);
 		expect(desk.state).toBe("READY");
 		expect(await fixture.redis.get(key)).not.toBe(JSON.stringify({ state: "READY", history: [] }));
 		const malformed = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
-		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v9:team-desk:123:season");
+		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v10:team-desk:123:season");
 		await malformed.redis.set(malformedKey, "{");
 		await malformed.repository.loadTeamDesk(malformed.context);
 		expect(await malformed.redis.get(malformedKey)).not.toBe("{");
@@ -899,6 +1256,24 @@ describe("My FPL review repository", () => {
 		expect(transfers.state).toBe("READY");
 		expect(transfers.gameweeks).toHaveLength(1);
 		expect(transfers.gameweeks[0]?.transfers[0]?.elementInWebName).toBe("In");
+	});
+
+	it("rejects contradictory transfer counts in a daily snapshot", async () => {
+		await withSnapshotRead(async () => {
+			const payload = snapshotPayload();
+			const fixture = makeFixture({
+				publicationRows: [snapshotPublicationRow],
+				snapshotEntryRow: {
+					...snapshotEntryRow(),
+					payload: {
+						...payload,
+						history: [{ ...historyRow(1), eventTransfers: 0 }],
+					},
+				},
+			});
+			const transfers = await fixture.repository.loadTeamTransfers(fixture.context);
+			expect(transfers.state).toBe("PENDING");
+		});
 	});
 
 	it("validates tournament board pagination, pushes range to SQL, and warms its cache", async () => {

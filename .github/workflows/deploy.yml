@@ -20,6 +20,15 @@ on:
           - enforce-v3-restored-compat
           - rollback-legacy
           - secret
+      my_fpl_snapshot_read:
+        description: My FPL immutable daily snapshot read flag
+        required: true
+        default: preserve
+        type: choice
+        options:
+          - preserve
+          - enable
+          - disable
 
 concurrency:
   group: deploy-main
@@ -126,12 +135,13 @@ jobs:
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
           GRAPHQL_ENV: ${{ secrets.GRAPHQL_ENV }}
           RATE_LIMIT_ROLLOUT: ${{ inputs.rate_limit_rollout || 'preserve' }}
+          MY_FPL_SNAPSHOT_READ: ${{ inputs.my_fpl_snapshot_read || 'preserve' }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           command_timeout: 45m
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,RATE_LIMIT_ROLLOUT
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,GRAPHQL_ENV,RATE_LIMIT_ROLLOUT,MY_FPL_SNAPSHOT_READ
           script: |
             set -euo pipefail
             platform_deploy_lock_path=${DEPLOY_LOCK_PATH:-/var/lock/letletme-platform-deploy.lock}
@@ -154,6 +164,9 @@ jobs:
             rollout_state=""
             rollout_state_backup=""
             rollout_state_existed=false
+            snapshot_read_state=""
+            snapshot_read_state_backup=""
+            snapshot_read_state_existed=false
             [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
             active_stage=""
@@ -190,6 +203,9 @@ jobs:
               fi
               if [ -n "${rollout_state_backup:-}" ]; then
                 rm -f "$rollout_state_backup"
+              fi
+              if [ -n "${snapshot_read_state_backup:-}" ]; then
+                rm -f "$snapshot_read_state_backup"
               fi
               release_platform_deploy_lock
               exit "$original_status"
@@ -260,7 +276,40 @@ jobs:
                 exit 1
                 ;;
             esac
-            python3 - "$next_env" "$active_rate_limit_rollout" <<'PY'
+            snapshot_read_state="$HOME/.letletme-graphql-my-fpl-snapshot-read"
+            if [ -f "$snapshot_read_state" ]; then
+              snapshot_read_state_existed=true
+              snapshot_read_state_backup=$(mktemp "$HOME/.letletme-graphql-my-fpl-snapshot-read.previous.XXXXXX")
+              cp "$snapshot_read_state" "$snapshot_read_state_backup"
+              chmod 600 "$snapshot_read_state_backup"
+            fi
+            persist_snapshot_read=""
+            case "$MY_FPL_SNAPSHOT_READ" in
+              preserve)
+                if [ -f "$snapshot_read_state" ]; then
+                  active_snapshot_read=$(cat "$snapshot_read_state")
+                else
+                  active_snapshot_read=false
+                fi
+                ;;
+              enable)
+                active_snapshot_read=true
+                persist_snapshot_read=true
+                ;;
+              disable)
+                active_snapshot_read=false
+                persist_snapshot_read=false
+                ;;
+              *)
+                echo "Unknown My FPL snapshot read flag"
+                exit 1
+                ;;
+            esac
+            case "$active_snapshot_read" in
+              true|false) ;;
+              *) echo "Invalid persisted My FPL snapshot read state"; exit 1 ;;
+            esac
+            python3 - "$next_env" "$active_rate_limit_rollout" "$active_snapshot_read" <<'PY'
             import re
             import sys
             from pathlib import Path
@@ -268,6 +317,7 @@ jobs:
 
             env_path = Path(sys.argv[1])
             rollout = sys.argv[2]
+            snapshot_read_enabled = sys.argv[3]
             lines = env_path.read_text(encoding="utf-8").splitlines()
 
             profiles = {
@@ -293,7 +343,16 @@ jobs:
                     if line.split("=", 1)[0] not in replacements
                 ]
                 lines.extend(f"{key}={value}" for key, value in replacements.items())
-                env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            if snapshot_read_enabled not in ("true", "false"):
+                raise SystemExit("Unsupported persisted My FPL snapshot read state")
+            lines = [
+                line
+                for line in lines
+                if line.split("=", 1)[0] != "MY_FPL_SNAPSHOT_READ_ENABLED"
+            ]
+            lines.append("MY_FPL_SNAPSHOT_READ_ENABLED=" + snapshot_read_enabled)
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
             database_url_indexes = [
                 index for index, line in enumerate(lines) if line.startswith("DATABASE_URL=")
@@ -488,6 +547,17 @@ jobs:
                   fi
                 else
                   rm -f "$rollout_state"
+                fi
+                if [ "$snapshot_read_state_existed" = true ]; then
+                  if [ -n "$snapshot_read_state_backup" ] && [ -f "$snapshot_read_state_backup" ]; then
+                    mv "$snapshot_read_state_backup" "$snapshot_read_state"
+                    chmod 600 "$snapshot_read_state"
+                    snapshot_read_state_backup=""
+                  else
+                    echo "GraphQL rollback could not restore the previous My FPL snapshot read state"
+                  fi
+                else
+                  rm -f "$snapshot_read_state"
                 fi
               fi
               if [ "$env_promoted" = false ] && [ -n "${previous_env:-}" ] && [ -f "$previous_env" ]; then
@@ -691,6 +761,10 @@ jobs:
                 chmod 600 "$rollout_state"
               fi
             fi
+            if [ -n "$persist_snapshot_read" ]; then
+              printf '%s\n' "$persist_snapshot_read" > "$snapshot_read_state"
+              chmod 600 "$snapshot_read_state"
+            fi
 
             if [ -n "$old_image" ]; then
               printf '%s\n' "$old_image" > "$HOME/.letletme-graphql-previous-image"
@@ -713,6 +787,10 @@ jobs:
             if [ -n "$rollout_state_backup" ]; then
               rm -f "$rollout_state_backup"
               rollout_state_backup=""
+            fi
+            if [ -n "$snapshot_read_state_backup" ]; then
+              rm -f "$snapshot_read_state_backup"
+              snapshot_read_state_backup=""
             fi
             if [ -n "$previous_env" ]; then
               rm -f "$previous_env"

@@ -7,12 +7,34 @@ export const myFplTypeDefs = /* GraphQL */ `
 		UNAVAILABLE
 	}
 
+	enum MyFplSnapshotKind {
+		PROVISIONAL
+		FINAL
+	}
+
+	enum MyFplSnapshotFreshness {
+		CURRENT
+		GENERATING
+		STALE
+	}
+
+	type MyFplSnapshotMeta {
+		revision: String!
+		eventId: Int!
+		snapshotDate: Date!
+		sourceCheckedAt: DateTime!
+		publishedAt: DateTime!
+		kind: MyFplSnapshotKind!
+		freshness: MyFplSnapshotFreshness!
+	}
+
 	type MyFplReviewContext {
 		season: String!
 		coreRevision: String!
 		currentEventId: Int
 		nextEventId: Int
 		latestFinalizedEventId: Int
+		latestPublishedEventId: Int
 	}
 
 	type MyFplEntryIdentity {
@@ -110,6 +132,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		eventId: Int!
 		entry: MyFplEntryIdentity
 		result: MyFplTeamGameweekResult
+		snapshotMeta: MyFplSnapshotMeta
 	}
 
 	type MyFplTeamDesk {
@@ -121,6 +144,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		pastSeasonsState: MyFplReviewState!
 		selectedEventId: Int
 		gameweek: MyFplTeamGameweek
+		snapshotMeta: MyFplSnapshotMeta
 	}
 
 	type MyFplTransferMove {
@@ -147,6 +171,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		state: MyFplReviewState!
 		context: MyFplReviewContext!
 		gameweeks: [MyFplTransferGameweek!]!
+		snapshotMeta: MyFplSnapshotMeta
 	}
 
 	type MyFplCompetitionBoardRow {
@@ -183,6 +208,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		fieldSize: Int!
 		rows: [MyFplCompetitionBoardRow!]!
 		viewerRow: MyFplCompetitionBoardRow
+		snapshotMeta: MyFplSnapshotMeta
 	}
 
 	type MyFplCompetitionMetric {
@@ -253,6 +279,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		fallers: [MyFplCompetitionPerformance!]!
 		captainDistribution: [MyFplCompetitionDistribution!]!
 		chipDistribution: [MyFplCompetitionDistribution!]!
+		snapshotMeta: MyFplSnapshotMeta
 	}
 
 	type MyFplCompetitionsDesk {
@@ -264,6 +291,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		eventId: Int
 		board: MyFplCompetitionBoardPage
 		aggregate: MyFplCompetitionAggregate
+		snapshotMeta: MyFplSnapshotMeta
 	}
 
 	type MyFplCompetitionSeasonPathPoint {
@@ -283,6 +311,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		tournamentId: Int!
 		throughEventId: Int!
 		points: [MyFplCompetitionSeasonPathPoint!]!
+		snapshotMeta: MyFplSnapshotMeta
 	}
 
 	type MyFplCompetitionSetupStatus {
@@ -299,11 +328,15 @@ export const myFplTypeDefs = /* GraphQL */ `
 	}
 
 	extend type Query {
-		myFplTeamDesk(eventId: Int): MyFplTeamDesk!
-		myFplTeamGameweek(eventId: Int!): MyFplTeamGameweek!
-		myFplTeamTransfers: MyFplTeamTransfers!
+		myFplTeamDesk(eventId: Int, snapshotRevision: String): MyFplTeamDesk!
+		myFplTeamGameweek(eventId: Int!, snapshotRevision: String): MyFplTeamGameweek!
+		myFplTeamTransfers(snapshotRevision: String): MyFplTeamTransfers!
 
-		myFplCompetitionsDesk(tournamentId: Int, eventId: Int): MyFplCompetitionsDesk!
+		myFplCompetitionsDesk(
+			tournamentId: Int
+			eventId: Int
+			snapshotRevision: String
+		): MyFplCompetitionsDesk!
 
 		myFplCompetitionBoard(
 			tournamentId: Int!
@@ -311,11 +344,13 @@ export const myFplTypeDefs = /* GraphQL */ `
 			page: Int = 1
 			pageSize: Int = 100
 			search: String
+			snapshotRevision: String
 		): MyFplCompetitionBoardPage!
 
 		myFplCompetitionSeasonPath(
 			tournamentId: Int!
 			throughEventId: Int!
+			snapshotRevision: String
 		): MyFplCompetitionSeasonPath!
 
 		myFplCompetitionSetupStatus(tournamentId: Int!): MyFplCompetitionSetupStatus!
