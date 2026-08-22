@@ -13,15 +13,12 @@ const readEnv = (key: "LETLETME_DATA_URL" | "LETLETME_DATA_API_KEY"): string => 
 
 const getEntrySyncBaseUrl = (): string => readEnv("LETLETME_DATA_URL").replace(/\/+$/, "");
 
-/**
- * Ask letletme_data to persist an FPL entry. GraphQL never writes PostgreSQL;
- * this is the same enqueue contract the website uses after bind.
- */
-export async function requestEntryInfoSync(entryId: number): Promise<EntrySyncResult> {
-	if (!Number.isSafeInteger(entryId) || entryId <= 0) {
-		return { ok: false, reason: "invalid entry id" };
-	}
+type QueuedEntrySyncBody = Record<string, unknown> | undefined;
 
+async function requestQueuedEntrySync(
+	path: string,
+	body?: QueuedEntrySyncBody
+): Promise<EntrySyncResult> {
 	const baseUrl = getEntrySyncBaseUrl();
 	if (!baseUrl) {
 		return { ok: false, reason: "LETLETME_DATA_URL is not configured" };
@@ -36,20 +33,21 @@ export async function requestEntryInfoSync(entryId: number): Promise<EntrySyncRe
 	}
 
 	try {
-		const response = await fetch(`${baseUrl}/entry-info/${entryId}/sync`, {
+		const response = await fetch(`${baseUrl}${path}`, {
 			method: "POST",
 			headers,
+			...(body ? { body: JSON.stringify(body) } : {}),
 			signal: controller.signal,
 		});
 		if (response.status === 202) {
-			const body: unknown = await response.json().catch(() => null);
+			const responseBody: unknown = await response.json().catch(() => null);
 			if (
-				isRecord(body) &&
-				body.status === "queued" &&
-				typeof body.jobId === "string" &&
-				body.jobId
+				isRecord(responseBody) &&
+				typeof responseBody.jobId === "string" &&
+				responseBody.jobId &&
+				(responseBody.status === "queued" || responseBody.success === true)
 			) {
-				return { ok: true, status: "queued", jobId: body.jobId };
+				return { ok: true, status: "queued", jobId: responseBody.jobId };
 			}
 			return { ok: false, reason: "invalid queued response from entry sync service" };
 		}
@@ -64,6 +62,57 @@ export async function requestEntryInfoSync(entryId: number): Promise<EntrySyncRe
 	}
 }
 
+/**
+ * Ask letletme_data to persist an FPL entry. GraphQL never writes PostgreSQL;
+ * this is the same enqueue contract the website uses after bind.
+ */
+export async function requestEntryInfoSync(entryId: number): Promise<EntrySyncResult> {
+	if (!Number.isSafeInteger(entryId) || entryId <= 0) {
+		return { ok: false, reason: "invalid entry id" };
+	}
+
+	return requestQueuedEntrySync(`/entry-info/${entryId}/sync`);
+}
+
 export function enqueueEntryInfoSync(entryId: number): void {
 	void requestEntryInfoSync(entryId);
+}
+
+/**
+ * Queue the current-event lineup for public live-points lookups when the
+ * read model has not seen this entry yet. This is deliberately asynchronous:
+ * GraphQL does not write PostgreSQL in the request, and the next refresh
+ * observes the persisted picks through the normal Data/Redis path.
+ */
+export async function requestEntryPicksSync(
+	entryId: number,
+	eventId: number
+): Promise<EntrySyncResult> {
+	if (!Number.isSafeInteger(entryId) || entryId <= 0) {
+		return { ok: false, reason: "invalid entry id" };
+	}
+	if (!Number.isSafeInteger(eventId) || eventId <= 0) {
+		return { ok: false, reason: "invalid event id" };
+	}
+
+	return requestQueuedEntrySync("/entry-sync/picks", {
+		entryIds: [entryId],
+		eventId,
+	});
+}
+
+const entryPicksSyncFlights = new Map<string, Promise<EntrySyncResult>>();
+
+export function enqueueEntryPicksSync(entryId: number, eventId: number): void {
+	if (!Number.isSafeInteger(entryId) || entryId <= 0) return;
+	if (!Number.isSafeInteger(eventId) || eventId <= 0) return;
+
+	const key = `${entryId}:${eventId}`;
+	if (entryPicksSyncFlights.has(key)) return;
+
+	const flight = requestEntryPicksSync(entryId, eventId);
+	entryPicksSyncFlights.set(key, flight);
+	void flight.finally(() => {
+		if (entryPicksSyncFlights.get(key) === flight) entryPicksSyncFlights.delete(key);
+	});
 }

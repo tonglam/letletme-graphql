@@ -349,6 +349,8 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 				overallPoints: 321,
 				overallRank: 456,
 				value: 100.5,
+				bank: 1.5,
+				teamValue: 100.5,
 				lastOverallPoints: 300,
 				lastOverallRank: 500,
 				lastValue: 99.5,

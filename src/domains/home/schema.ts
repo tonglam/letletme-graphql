@@ -6,6 +6,11 @@ export const homeTypeDefs = /* GraphQL */ `
 		UNKNOWN
 	}
 
+	enum HomeLeagueType {
+		CLASSIC
+		H2H
+	}
+
 	type HomeRankMovement {
 		direction: HomeRankDirection!
 		places: Int
@@ -14,6 +19,7 @@ export const homeTypeDefs = /* GraphQL */ `
 	type HomeLeagueRank {
 		key: ID!
 		name: String!
+		leagueType: HomeLeagueType!
 		rank: Int
 		movement: HomeRankMovement!
 		tournamentId: Int
