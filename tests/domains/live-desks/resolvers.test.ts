@@ -13,4 +13,16 @@ describe("live desks tournament selection index", () => {
 		expect(source).toContain("const [tournaments, liveWindow] = await Promise.all");
 		expect(source).not.toContain("const [tournaments, eventCore, fixtureCore]");
 	});
+
+	it("keeps the shared live window independent from player identity data", async () => {
+		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const windowReader = source.slice(
+			source.indexOf("const readLiveWindow"),
+			source.indexOf("const resolveSnapshot")
+		);
+		expect(windowReader).not.toContain("getCoreLiveIdentitySnapshot");
+		expect(source).toContain(
+			"matches: matchRows(snapshot.eventId, snapshot.fixtures, fixtureCore)"
+		);
+	});
 });

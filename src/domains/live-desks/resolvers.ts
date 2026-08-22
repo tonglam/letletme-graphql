@@ -84,10 +84,9 @@ const livePublicationState = (
 	manifest && manifest.state !== "active" ? manifest.state : null;
 
 const readLiveWindow = async (context: GraphQLContext) => {
-	const [eventCore, fixtureCore, core] = await Promise.all([
+	const [eventCore, fixtureCore] = await Promise.all([
 		getCoreEventSnapshot(context),
 		getCoreFixtureSnapshot(context),
-		getCoreLiveIdentitySnapshot(context),
 	]);
 	const currentEventId = eventCore.currentEventId;
 	const [currentPublication, currentLifecycle, currentSnapshot] = currentEventId
@@ -165,7 +164,6 @@ const readLiveWindow = async (context: GraphQLContext) => {
 	return {
 		eventCore,
 		fixtureCore,
-		core,
 		window,
 		manifest: anchorManifest,
 		publicationSource: anchorPublication?.source ?? null,
@@ -366,7 +364,7 @@ export const liveDesksResolvers = {
 					extensions: { code: "LIVE_REVISION_GONE" },
 				});
 			}
-			const { eventCore, fixtureCore, core, window, manifest, publicationSource, lifecycleStatus } =
+			const { eventCore, fixtureCore, window, manifest, publicationSource, lifecycleStatus } =
 				await readLiveWindow(context);
 			const eventId = args.ref?.eventId ?? window.anchorEventId ?? eventCore.currentEventId ?? 0;
 			const eventLifecycle =
@@ -438,7 +436,7 @@ export const liveDesksResolvers = {
 				source: snapshot.source === "postgres" ? "POSTGRES" : "REDIS",
 				stale: snapshotWindow.stale,
 				nextRefreshAt: snapshotWindow.nextRefreshAt,
-				matches: matchRows(snapshot.eventId, snapshot.fixtures, core),
+				matches: matchRows(snapshot.eventId, snapshot.fixtures, fixtureCore),
 				nextFixtures: nextEventAfter(eventCore, snapshot.eventId)
 					? matchRows(
 							nextEventAfter(eventCore, snapshot.eventId)!,
