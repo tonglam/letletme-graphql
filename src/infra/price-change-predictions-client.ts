@@ -68,8 +68,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isFiniteNumber = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value);
 
-const isSafeInteger = (value: unknown): value is number =>
-	typeof value === "number" && Number.isSafeInteger(value);
+const isGraphQLInt = (value: unknown): value is number =>
+	typeof value === "number" &&
+	Number.isInteger(value) &&
+	value >= -2_147_483_648 &&
+	value <= 2_147_483_647;
 
 const isDateTimeString = (value: unknown): value is string => {
 	if (typeof value !== "string") return false;
@@ -99,7 +102,7 @@ const isOwnershipTrend = (value: unknown): value is PriceChangeOwnershipTrend =>
 const parseProjection = (value: unknown): PriceChangeProjection | null => {
 	if (!isRecord(value)) return null;
 	if (
-		!isFiniteNumber(value.offset) ||
+		!isGraphQLInt(value.offset) ||
 		!isFiniteNumber(value.projectedPercent) ||
 		!isFiniteNumber(value.likelihood)
 	) {
@@ -115,24 +118,24 @@ const parseProjection = (value: unknown): PriceChangeProjection | null => {
 const parsePlayer = (value: unknown): PriceChangePlayer | null => {
 	if (!isRecord(value)) return null;
 	if (
-		!isSafeInteger(value.playerId) ||
-		!isSafeInteger(value.playerCode) ||
+		!isGraphQLInt(value.playerId) ||
+		!isGraphQLInt(value.playerCode) ||
 		typeof value.webName !== "string" ||
-		!isSafeInteger(value.teamId) ||
+		!isGraphQLInt(value.teamId) ||
 		typeof value.teamName !== "string" ||
 		typeof value.teamShortName !== "string" ||
 		(value.position !== "GKP" &&
 			value.position !== "DEF" &&
 			value.position !== "MID" &&
 			value.position !== "FWD") ||
-		!isFiniteNumber(value.currentPrice) ||
+		!isGraphQLInt(value.currentPrice) ||
 		!isFiniteNumber(value.selectedByPercent) ||
 		!isFiniteNumber(value.progressPercent) ||
 		!isFiniteNumber(value.hourlyRate) ||
 		!isStatus(value.status) ||
 		!isOwnershipTrend(value.ownershipTrend) ||
-		!isSafeInteger(value.transfersInEvent) ||
-		!isSafeInteger(value.transfersOutEvent) ||
+		!isGraphQLInt(value.transfersInEvent) ||
+		!isGraphQLInt(value.transfersOutEvent) ||
 		!isNullableDateTimeString(value.lockedUntil) ||
 		typeof value.calibrating !== "boolean" ||
 		!Array.isArray(value.projections)
@@ -177,8 +180,8 @@ const parseBoard = (value: unknown): PriceChangeBoard | null => {
 		!isNullableDateTimeString(value.fetchedAt) ||
 		!isNullableDateTimeString(value.staleAt) ||
 		typeof value.revision !== "string" ||
-		!isSafeInteger(value.expectedPlayerCount) ||
-		!isSafeInteger(value.observedPlayerCount) ||
+		!isGraphQLInt(value.expectedPlayerCount) ||
+		!isGraphQLInt(value.observedPlayerCount) ||
 		!Array.isArray(value.players)
 	) {
 		return null;

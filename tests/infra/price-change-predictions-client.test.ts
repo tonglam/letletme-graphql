@@ -92,4 +92,18 @@ describe("requestPriceChangePredictions", () => {
 
 		expect((await requestPriceChangePredictions()).status).toBe("UNAVAILABLE");
 	});
+
+	it("fails closed when a projection offset is not a GraphQL Int", async () => {
+		mockBoardResponse({
+			...validBoard,
+			players: [
+				{
+					...validPlayer,
+					projections: [{ offset: 0.5, projectedPercent: 0.5, likelihood: 0.8 }],
+				},
+			],
+		});
+
+		expect((await requestPriceChangePredictions()).status).toBe("UNAVAILABLE");
+	});
 });
