@@ -42,7 +42,14 @@ const liveRow = (eventId: number, elementId: number, totalPoints: number, minute
 
 const makeContext = (
 	core: ReturnType<typeof buildTestCoreData>,
-	liveRows: Array<ReturnType<typeof liveRow>>
+	liveRows: Array<ReturnType<typeof liveRow>>,
+	fixtureTeamRows: Array<{
+		event_id: number;
+		element_id: number;
+		fixture_id?: number;
+		team_id: number;
+	}> = [],
+	fixtureTeamError: Error | null = null
 ): GraphQLContext => {
 	const context = buildSnapshotContext(new TestRedis(buildCorePublication("2526", 7, core)), {
 		seasonId: 2025,
@@ -51,13 +58,26 @@ const makeContext = (
 	});
 	context.data = {
 		read: (table: string) => {
-			if (table !== "fpl.player_gameweek_stats") {
+			if (table !== "fpl.player_gameweek_stats" && table !== "fpl.player_fixture_stats") {
 				throw new Error(`Unexpected read model ${table}`);
 			}
-			const promise = Promise.resolve({ data: liveRows, error: null });
-			type Builder = typeof promise & { select: () => Builder; in: () => Builder };
+			const promise = Promise.resolve({
+				data: table === "fpl.player_fixture_stats" ? fixtureTeamRows : liveRows,
+				error: table === "fpl.player_fixture_stats" ? fixtureTeamError : null,
+			});
+			type Builder = typeof promise & {
+				select: () => Builder;
+				in: () => Builder;
+				eq: () => Builder;
+				order: () => Builder;
+			};
 			const builder = promise as Builder;
-			Object.assign(builder, { select: () => builder, in: () => builder });
+			Object.assign(builder, {
+				select: () => builder,
+				in: () => builder,
+				eq: () => builder,
+				order: () => builder,
+			});
 			return builder;
 		},
 	} as never;
@@ -171,7 +191,14 @@ describe("entriesService.getEntryEventPicks", () => {
 						: player
 			),
 		};
-		const context = makeContext(core, [liveRow(34, 4, 10, 90), liveRow(34, 1, 2, 0)]);
+		const context = makeContext(
+			core,
+			[liveRow(34, 4, 10, 90), liveRow(34, 1, 2, 0)],
+			[
+				{ event_id: 34, element_id: 4, team_id: 1 },
+				{ event_id: 34, element_id: 1, team_id: 1 },
+			]
+		);
 
 		const result = await entriesService.getEntryEventPicks(context, eventResult);
 
@@ -194,6 +221,232 @@ describe("entriesService.getEntryEventPicks", () => {
 			totalPoints: 2,
 			minutes: 0,
 			position: 12,
+		});
+	});
+
+	it("uses the player team from the requested event when enriching historical fixtures", async () => {
+		const base = buildTestCoreData(34);
+		const targetFixture = base.fixtures.find(
+			(fixture) => fixture.eventId === 34 && (fixture.teamHId === 2 || fixture.teamAId === 2)
+		);
+		if (!targetFixture) throw new Error("Test fixture not found");
+		const core = {
+			...base,
+			fixtures: base.fixtures.map((fixture) =>
+				fixture.id === targetFixture.id
+					? { ...fixture, finished: true, started: true, minutes: 90, teamHScore: 1, teamAScore: 0 }
+					: fixture
+			),
+		};
+		const context = makeContext(
+			core,
+			[liveRow(34, 4, 10, 90)],
+			[{ event_id: 34, element_id: 4, fixture_id: targetFixture.id, team_id: 2 }]
+		);
+		const wasHome = targetFixture.teamHId === 2;
+		const opponentId = wasHome ? targetFixture.teamAId : targetFixture.teamHId;
+		const score = wasHome ? "1-0" : "0-1";
+
+		const result = await entriesService.getEntryEventPicks(context, {
+			entryId: 84885,
+			eventId: 34,
+			eventPoints: 10,
+			eventRank: 1,
+			overallPoints: 10,
+			overallRank: 1,
+			eventTransfers: 0,
+			eventTransfersCost: 0,
+			eventNetPoints: 10,
+			eventBenchPoints: 0,
+			eventChip: null,
+			eventPlayedCaptain: 4,
+			eventCaptainPoints: 10,
+			eventPicks: [{ element: 4, position: 1, multiplier: 2, is_captain: true }],
+			teamValue: 1000,
+			bank: 0,
+		});
+
+		expect(result[0]).toMatchObject({
+			teamId: 2,
+			teamShortName: "T02",
+			againstId: opponentId,
+			wasHome: wasHome ? "H" : "A",
+			score,
+			bgw: false,
+			dgw: false,
+		});
+	});
+
+	it("does not attach the current club to a historical blank gameweek", async () => {
+		const base = buildTestCoreData(34);
+		const currentClubFixture = base.fixtures.find(
+			(fixture) => fixture.eventId === 34 && (fixture.teamHId === 2 || fixture.teamAId === 2)
+		);
+		if (!currentClubFixture) throw new Error("Current club fixture not found");
+		const core = {
+			...base,
+			players: base.players.map((player) =>
+				player.id === 4
+					? { ...player, teamId: 2 }
+					: player.id === 12
+						? { ...player, teamId: 1 }
+						: player
+			),
+		};
+		const context = makeContext(core, [liveRow(34, 4, 10, 90)]);
+
+		const result = await entriesService.getEntryEventPicks(context, {
+			entryId: 84885,
+			eventId: 34,
+			eventPoints: 10,
+			eventRank: 1,
+			overallPoints: 10,
+			overallRank: 1,
+			eventTransfers: 0,
+			eventTransfersCost: 0,
+			eventNetPoints: 10,
+			eventBenchPoints: 0,
+			eventChip: null,
+			eventPlayedCaptain: 4,
+			eventCaptainPoints: 10,
+			eventPicks: [{ element: 4, position: 1, multiplier: 2, is_captain: true }],
+			teamValue: 1000,
+			bank: 0,
+		});
+
+		expect(result[0]).toMatchObject({
+			teamId: 0,
+			againstName: "BLANK",
+			againstShortName: "BLANK",
+			wasHome: "",
+			score: "",
+			bgw: true,
+		});
+	});
+
+	it("uses kickoff order for a double gameweek team lookup", async () => {
+		const base = buildTestCoreData(34);
+		const originalFixture = base.fixtures.find(
+			(fixture) => fixture.eventId === 34 && (fixture.teamHId === 2 || fixture.teamAId === 2)
+		);
+		const movedFixture = base.fixtures.find(
+			(fixture) =>
+				fixture.id !== originalFixture?.id &&
+				fixture.eventId === 34 &&
+				(fixture.teamHId === 4 || fixture.teamAId === 4)
+		);
+		if (!originalFixture || !movedFixture) throw new Error("DGW fixture not found");
+		const firstKickoff = "2026-01-01T12:00:00.000Z";
+		const secondKickoff = "2026-01-01T20:00:00.000Z";
+		const core = {
+			...base,
+			fixtures: base.fixtures.map((fixture) =>
+				fixture.id === originalFixture.id
+					? { ...fixture, kickoffTime: firstKickoff }
+					: fixture.id === movedFixture.id
+						? { ...fixture, kickoffTime: secondKickoff }
+						: fixture
+			),
+		};
+		const context = makeContext(
+			core,
+			[liveRow(34, 4, 10, 90)],
+			[
+				{ event_id: 34, element_id: 4, fixture_id: movedFixture.id, team_id: 4 },
+				{ event_id: 34, element_id: 4, fixture_id: originalFixture.id, team_id: 2 },
+			]
+		);
+
+		const result = await entriesService.getEntryEventPicks(context, {
+			entryId: 84885,
+			eventId: 34,
+			eventPoints: 10,
+			eventRank: 1,
+			overallPoints: 10,
+			overallRank: 1,
+			eventTransfers: 0,
+			eventTransfersCost: 0,
+			eventNetPoints: 10,
+			eventBenchPoints: 0,
+			eventChip: null,
+			eventPlayedCaptain: 4,
+			eventCaptainPoints: 10,
+			eventPicks: [{ element: 4, position: 1, multiplier: 2, is_captain: true }],
+			teamValue: 1000,
+			bank: 0,
+		});
+
+		expect(result[0]).toMatchObject({ teamId: 2, dgw: true, againstId: 0 });
+	});
+
+	it("keeps event fixtures when current player metadata is missing", async () => {
+		const base = buildTestCoreData(34);
+		const targetFixture = base.fixtures.find(
+			(fixture) => fixture.eventId === 34 && (fixture.teamHId === 2 || fixture.teamAId === 2)
+		);
+		if (!targetFixture) throw new Error("Historical fixture not found");
+		const context = makeContext(
+			base,
+			[liveRow(34, 999, 10, 90)],
+			[{ event_id: 34, element_id: 999, fixture_id: targetFixture.id, team_id: 2 }]
+		);
+		const wasHome = targetFixture.teamHId === 2;
+		const opponentId = wasHome ? targetFixture.teamAId : targetFixture.teamHId;
+
+		const result = await entriesService.getEntryEventPicks(context, {
+			entryId: 84885,
+			eventId: 34,
+			eventPoints: 10,
+			eventRank: 1,
+			overallPoints: 10,
+			overallRank: 1,
+			eventTransfers: 0,
+			eventTransfersCost: 0,
+			eventNetPoints: 10,
+			eventBenchPoints: 0,
+			eventChip: null,
+			eventPlayedCaptain: 999,
+			eventCaptainPoints: 10,
+			eventPicks: [{ element: 999, position: 1, multiplier: 2, is_captain: true }],
+			teamValue: 1000,
+			bank: 0,
+		});
+
+		expect(result[0]).toMatchObject({
+			element: 999,
+			teamId: 2,
+			againstId: opponentId,
+			bgw: false,
+		});
+	});
+
+	it("fails closed when event-scoped team data is unavailable", async () => {
+		const core = buildTestCoreData(34);
+		const fixtureTeamError = new Error("fixture stats unavailable");
+		const context = makeContext(core, [liveRow(34, 4, 10, 90)], [], fixtureTeamError);
+
+		await expect(
+			entriesService.getEntryEventPicks(context, {
+				entryId: 84885,
+				eventId: 34,
+				eventPoints: 10,
+				eventRank: 1,
+				overallPoints: 10,
+				overallRank: 1,
+				eventTransfers: 0,
+				eventTransfersCost: 0,
+				eventNetPoints: 10,
+				eventBenchPoints: 0,
+				eventChip: null,
+				eventPlayedCaptain: 4,
+				eventCaptainPoints: 10,
+				eventPicks: [{ element: 4, position: 1, multiplier: 2, is_captain: true }],
+				teamValue: 1000,
+				bank: 0,
+			})
+		).rejects.toMatchObject({
+			message: "Failed to load event-scoped player teams",
+			cause: fixtureTeamError,
 		});
 	});
 });

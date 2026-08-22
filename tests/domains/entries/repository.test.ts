@@ -154,6 +154,115 @@ describe("entriesRepository.getEntrySnapshotById", () => {
 	});
 });
 
+describe("entriesRepository.getEntryHistoryInfo", () => {
+	const checkpointRow = (checkedAt: string | null, count: number | null) => ({
+		past_seasons_checked_at: checkedAt,
+		past_seasons_count: count,
+	});
+
+	const historyRow = (season: string) => ({
+		season,
+		total_points: 100,
+		overall_rank: 200,
+	});
+
+	it("does not expose or cache history before the checkpoint is complete", async () => {
+		let historyReads = 0;
+		const cacheReads: string[] = [];
+		const context = {
+			redis: {
+				get: async (key: string) => {
+					cacheReads.push(key);
+					return null;
+				},
+				del: async () => 0,
+			},
+			data: {
+				read: (relation: string) => {
+					if (relation === "competition.entry_past_seasons") historyReads += 1;
+					return {
+						select: () => ({
+							eq: () => ({
+								limit: async () => ({
+									data: relation === "competition.entries" ? [checkpointRow(null, null)] : [],
+									error: null,
+								}),
+							}),
+						}),
+					};
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		expect(await entriesRepository.getEntryHistoryInfo(context, 6953)).toEqual([]);
+		expect(historyReads).toBe(0);
+		expect(cacheReads).toEqual([]);
+	});
+
+	it("keys ready history by its checkpoint and rejects partial rows", async () => {
+		const cacheReads: string[] = [];
+		const cacheWrites: string[] = [];
+		let historyRows = [historyRow("2025/26")];
+		let checkedAt = "2026-08-22T12:59:43.110Z";
+		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: "core-17",
+			redis: {
+				get: async (key: string) => {
+					cacheReads.push(key);
+					return null;
+				},
+				set: async (key: string) => {
+					cacheWrites.push(key);
+					return "OK";
+				},
+				del: async () => 0,
+			},
+			data: {
+				read: (relation: string) => {
+					if (relation === "competition.entries") {
+						return {
+							select: () => ({
+								eq: () => ({
+									limit: async () => ({
+										data: [checkpointRow(checkedAt, 2)],
+										error: null,
+									}),
+								}),
+							}),
+						};
+					}
+					return {
+						select: () => ({
+							eq: () => ({
+								order: async () => ({ data: historyRows, error: null }),
+							}),
+						}),
+					};
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		expect(await entriesRepository.getEntryHistoryInfo(context, 6953)).toEqual([]);
+		expect(cacheWrites).toHaveLength(0);
+		expect(cacheReads[0]).toMatch(/^llm:gql:core-17:entries-history-info:/);
+
+		historyRows = [historyRow("2025/26"), historyRow("2024/25")];
+		expect(await entriesRepository.getEntryHistoryInfo(context, 6953)).toEqual([
+			{ season: "2025/26", totalPoints: 100, overallRank: 200 },
+			{ season: "2024/25", totalPoints: 100, overallRank: 200 },
+		]);
+		expect(cacheWrites).toHaveLength(1);
+		expect(cacheWrites[0]).toBe(cacheReads[1]);
+
+		checkedAt = "2026-08-22T13:00:43.110Z";
+		expect(await entriesRepository.getEntryHistoryInfo(context, 6953)).toHaveLength(2);
+		expect(cacheReads[2]).not.toBe(cacheReads[1]);
+	});
+});
+
 describe("entriesRepository.getEntriesByIds", () => {
 	it("uses one revisioned cache namespace and one PostgreSQL batch for misses", async () => {
 		const readKeys: string[] = [];
@@ -259,12 +368,83 @@ const cachedResult: EntryEventResult = {
 	eventChip: null,
 	eventPlayedCaptain: 10,
 	eventCaptainPoints: 16,
+	eventAutoSub: [],
 	eventPicks: [],
 	teamValue: 1_020,
 	bank: 5,
 };
 
 describe("entriesRepository.getEntryEventResultsByEntryIds", () => {
+	it("evicts cached event results that predate official auto-sub data", async () => {
+		const deletedKeys: string[] = [];
+		let databaseReads = 0;
+		const legacyResult = { ...cachedResult };
+		delete legacyResult.eventAutoSub;
+		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
+			redis: {
+				mget: async () => [JSON.stringify(legacyResult)],
+				del: async (key: string) => {
+					deletedKeys.push(key);
+					return 1;
+				},
+				pipeline: () => {
+					const pipeline = {
+						set() {
+							return pipeline;
+						},
+						exec: async () => [],
+					};
+					return pipeline;
+				},
+			},
+			data: {
+				read: () => {
+					databaseReads += 1;
+					return {
+						select: () => ({
+							in: () => ({
+								eq: async () => ({
+									data: [
+										{
+											entry_id: cachedResult.entryId,
+											event_id: cachedResult.eventId,
+											event_points: cachedResult.eventPoints,
+											event_rank: cachedResult.eventRank,
+											overall_points: cachedResult.overallPoints,
+											overall_rank: cachedResult.overallRank,
+											event_transfers: cachedResult.eventTransfers,
+											event_transfers_cost: cachedResult.eventTransfersCost,
+											event_net_points: cachedResult.eventNetPoints,
+											event_bench_points: cachedResult.eventBenchPoints,
+											event_chip: cachedResult.eventChip,
+											event_played_captain: cachedResult.eventPlayedCaptain,
+											event_captain_points: cachedResult.eventCaptainPoints,
+											event_picks: cachedResult.eventPicks,
+											event_auto_sub: cachedResult.eventAutoSub,
+											rich_synced_at: "2026-08-20T00:00:00.000Z",
+											team_value: cachedResult.teamValue,
+											bank: cachedResult.bank,
+										},
+									],
+									error: null,
+								}),
+							}),
+						}),
+					};
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const results = await entriesRepository.getEntryEventResultsByEntryIds(context, [101], 32);
+
+		expect(results.get(101)).toEqual(cachedResult);
+		expect(databaseReads).toBe(1);
+		expect(deletedKeys).toHaveLength(1);
+	});
+
 	it("reuses the per-entry baseline cache before querying PostgreSQL", async () => {
 		let databaseReads = 0;
 		const context = {
@@ -334,6 +514,7 @@ describe("entriesRepository.getEntryEventResultsByEntryIds", () => {
 										event_played_captain: cachedResult.eventPlayedCaptain,
 										event_captain_points: cachedResult.eventCaptainPoints,
 										event_picks: cachedResult.eventPicks,
+										rich_synced_at: "2026-08-20T00:00:00.000Z",
 										team_value: cachedResult.teamValue,
 										bank: cachedResult.bank,
 									},
