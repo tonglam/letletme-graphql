@@ -38,7 +38,22 @@ describe("official manager live score contract", () => {
 		});
 		expect(result.score.source).toBe("FPL_ENTRY_SUMMARY");
 		expect(result.score.reconciliation).toBe("NO_LINEUP");
+		expect(result.score.eventPointSemantics).toBe("ZERO_COST_EQUIVALENT");
+		expect(result.score.netEventPoints).toBe(42);
 		expect(result.headline.livePoints).toBe(42);
+	});
+
+	it("proves net points from a zero transfer cost without an overall baseline", () => {
+		const result = buildManagerScore({
+			row: row({ totalPoints: 42, eventPoints: 42 }),
+			upstreamErrorCode: null,
+			provisional: true,
+			available: true,
+			transferCost: 0,
+			detailEventPoints: 42,
+		});
+		expect(result.score.eventPointSemantics).toBe("ZERO_COST_EQUIVALENT");
+		expect(result.score.netEventPoints).toBe(42);
 	});
 
 	it("keeps a recently checked official row marked stale", () => {
@@ -227,7 +242,7 @@ describe("official manager live score contract", () => {
 						upstreamErrorCode: null,
 						provisional: true,
 						available: true,
-						transferCost: 0,
+						transferCost: 1,
 						detailEventPoints: 22,
 					}).score,
 				},

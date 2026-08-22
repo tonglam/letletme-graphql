@@ -27,6 +27,7 @@ import {
 	readCompetitionBoardCache,
 	writeCompetitionBoardCache,
 } from "./competition-board-cache";
+import { selectTournamentDeskEntryWindow } from "./tournament-entry-window";
 import { resolveLiveWindow, type LiveWindow } from "./window";
 
 type LiveRef = { season: string; eventId: number; revision: string };
@@ -296,7 +297,7 @@ const managerBoardMeta = (
 			revision?: string | null;
 		};
 	}>,
-	options: { requireNet?: boolean } = {}
+	options: { requireNet?: boolean; totalEntries?: number } = {}
 ) => {
 	const isOfficialSource = (source?: string): boolean =>
 		source === "FPL_ENTRY_SUMMARY" ||
@@ -321,7 +322,10 @@ const managerBoardMeta = (
 			: null;
 	return {
 		managerRevision,
-		officialCoverage: board.length === 0 ? 0 : officialRows.length / board.length,
+		officialCoverage:
+			(options.totalEntries ?? board.length) === 0
+				? 0
+				: officialRows.length / (options.totalEntries ?? board.length),
 		unavailableEntryIds,
 	};
 };
@@ -607,7 +611,11 @@ export const liveDesksResolvers = {
 					...cachedBoard,
 				};
 			}
-			const entryIds = await tournamentsService.getTournamentEntryIds(context, selected);
+			const allEntryIds = await tournamentsService.getTournamentEntryIds(context, selected);
+			const { entryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
+				allEntryIds,
+				args.entryId
+			);
 			const result = await entryLiveBatchService.calcLivePointsForEntries(
 				context,
 				eventId,
@@ -618,7 +626,13 @@ export const liveDesksResolvers = {
 			const board = rankTournamentRowsByOfficialEventPoints(Array.from(result.results.values()), {
 				useNet: requireNet,
 			});
-			const boardMeta = managerBoardMeta(board, { requireNet });
+			const boardMeta = managerBoardMeta(board, {
+				requireNet,
+				totalEntries: allEntryIds.length,
+			});
+			const unavailableEntryIds = Array.from(
+				new Set([...boardMeta.unavailableEntryIds, ...deferredEntryIds])
+			);
 			// `revision` remains the player-live publication ref so existing
 			// LiveRevisionRefInput callers can round-trip it. `managerRevision` is
 			// the stable composite of all manager-score rows and is the independent
@@ -634,12 +648,18 @@ export const liveDesksResolvers = {
 				tournaments,
 				selectedTournamentId: selected,
 				...boardMeta,
+				unavailableEntryIds,
 				board,
-				partial: result.errors.length > 0,
+				partial: result.errors.length > 0 || deferredEntryIds.length > 0,
 				failedEntryIds: result.errors.map((error) => error.entryId),
-				totalEntries: result.meta.totalEntries,
+				totalEntries: allEntryIds.length,
 			};
-			if (result.errors.length === 0 && managerScoreBoardIsFinal(board) && boardCacheKey) {
+			if (
+				result.errors.length === 0 &&
+				deferredEntryIds.length === 0 &&
+				managerScoreBoardIsFinal(board) &&
+				boardCacheKey
+			) {
 				await writeCompetitionBoardCache(
 					context,
 					boardCacheKey!,
