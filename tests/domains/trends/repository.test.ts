@@ -80,6 +80,119 @@ describe("Trends revisioned cache", () => {
 });
 
 describe("Trends private access", () => {
+	const snapshotCohort = {
+		tournament_id: 7,
+		display_name: "Example",
+		setup_status: "ready",
+		latest_event_id: 1,
+		revision: "2026:1|7:abc",
+		publication_state: "READY",
+		ownership_state: "READY",
+		captaincy_state: "READY",
+		vice_captaincy_state: "READY",
+		transfers_state: "READY",
+		expected_entries: 6,
+		captured_at: "2026-08-22T00:00:00.000Z",
+		published_at: "2026-08-22T00:00:00.000Z",
+		publication_id: 99,
+	};
+
+	const personalRows = (count: number) =>
+		Array.from({ length: count }, (_, index) => ({
+			element_id: index + 1,
+			pick_position: index + 1,
+			player_name: `Player ${index + 1}`,
+			player_position: index < 2 ? 1 : 3,
+			team_short_name: "ARS",
+			count: index === 0 ? 2 : 1,
+		}));
+
+	const snapshotContext = (
+		rows: Record<string, unknown>[],
+		aggregateRows: Record<string, unknown>[] = [snapshotCohort]
+	) => {
+		const { context } = makeContext([]);
+		context.principal = {
+			userId: "user-1",
+			source: "website",
+			fplEntryId: 123,
+			fplEntryVerifiedAt: "2026-08-22T00:00:00.000Z",
+		};
+		context.database.query = (async (sql: string) => ({
+			rows: sql.includes("entry_event_picks")
+				? rows
+				: sql.includes("tournament_selection_stat_rows")
+					? aggregateRows
+					: [snapshotCohort],
+		})) as typeof context.database.query;
+		return context;
+	};
+
+	it("returns all 15 personal exposure picks even when aggregate limit is 12", async () => {
+		const payload = await trendsRepository.snapshot(
+			snapshotContext(personalRows(15)),
+			"competition:7",
+			1,
+			12,
+			"MINE"
+		);
+		const section = payload.sections.find((item) => item.capability === "PERSONAL_EXPOSURE");
+
+		expect(section).toMatchObject({
+			state: "READY",
+			evidenceContext: { denominator: 6, sampleSize: 6, availabilityState: "READY" },
+		});
+		expect(section?.rows).toHaveLength(15);
+	});
+
+	it("recomputes aggregate percentages from the evidence denominator", async () => {
+		const payload = await trendsRepository.snapshot(
+			snapshotContext(personalRows(15), [
+				{
+					element_id: 1,
+					player_name: "Popular Player",
+					player_position: 3,
+					team_short_name: "ARS",
+					count: 3,
+				},
+			]),
+			"competition:7",
+			1,
+			12,
+			"MINE"
+		);
+		const section = payload.sections.find((item) => item.capability === "OWNERSHIP");
+		const firstRow = section?.rows?.[0] as { percentage: number | null } | undefined;
+
+		expect(section?.evidenceContext.denominator).toBe(6);
+		expect(firstRow?.percentage).toBe(50);
+	});
+
+	it("marks incomplete personal exposure as partial and preserves the field denominator", async () => {
+		const payload = await trendsRepository.snapshot(
+			snapshotContext(personalRows(14)),
+			"competition:7",
+			1,
+			12,
+			"MINE"
+		);
+		const section = payload.sections.find((item) => item.capability === "PERSONAL_EXPOSURE");
+
+		expect(section).toMatchObject({
+			state: "PARTIAL",
+			evidenceContext: {
+				denominator: 6,
+				sampleSize: 6,
+				availabilityState: "PARTIAL",
+				coverageState: "partial",
+			},
+		});
+		expect(section?.rows).toHaveLength(14);
+		expect(section?.evidenceContext.limitations).toEqual([
+			"Personal exposure returned 14 of 15 squad picks or contained duplicate rows.",
+		]);
+	});
+
 	it("rejects MINE catalog reads for an unverified assurance binding", async () => {
 		const { context } = makeContext([]);
 		context.principal = {

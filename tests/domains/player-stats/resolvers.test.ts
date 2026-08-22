@@ -14,6 +14,24 @@ const context = () => {
 };
 
 describe("playerStatsDesk", () => {
+	it("rejects Player Stats bootstrap limits outside the bounded directory range", async () => {
+		for (const limit of [0, 51]) {
+			const result = await graphql({
+				schema,
+				source: `
+					query Bootstrap($limit: Int) {
+						playerStatsBootstrap(limit: $limit) { context { revision } }
+					}
+				`,
+				variableValues: { limit },
+				contextValue: context(),
+			});
+
+			expect(result.data).toBeNull();
+			expect(result.errors?.[0]?.extensions?.code).toBe("BAD_USER_INPUT");
+		}
+	});
+
 	it("bootstraps from one directory SQL without loading the full core publication", async () => {
 		const core = buildTestCoreData(3);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));

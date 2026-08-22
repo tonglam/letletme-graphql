@@ -13,6 +13,8 @@ const capabilities = [
 	"PERSONAL_EXPOSURE",
 ] as const;
 
+const FPL_SQUAD_SIZE = 15;
+
 // Trends snapshots are revisioned by their own publication pointer. They are
 // deliberately kept out of the core Data snapshot path, so use an explicit
 // cache-key revision rather than forcing a full core snapshot read.
@@ -439,8 +441,9 @@ export const trendsRepository = {
 					if (!entryId) return { capability, state: "NOT_READY", evidenceContext, rows: null };
 					const personal = await context.database.query<Record<string, unknown>>(
 						`
-          SELECT pick.element_id, COALESCE(NULLIF(concat_ws(' ', player.first_name, player.second_name), ''), player.web_name) AS player_name,
-            player.element_type AS player_position, team.short_name AS team_short_name, pick.multiplier::int AS count
+	          SELECT pick.element_id, pick.position AS pick_position,
+            COALESCE(NULLIF(concat_ws(' ', player.first_name, player.second_name), ''), player.web_name) AS player_name,
+	            player.element_type AS player_position, team.short_name AS team_short_name, pick.multiplier::int AS count
           FROM competition.entry_event_picks pick
           JOIN fpl.players player ON player.season_id = pick.season_id AND player.element_id = pick.element_id
           JOIN fpl.teams team ON team.season_id = player.season_id AND team.team_id = player.team_id
@@ -448,20 +451,47 @@ export const trendsRepository = {
           ORDER BY pick.multiplier DESC, pick.position`,
 						[context.currentSeason.seasonId, entryId, eventId]
 					);
+					const personalRows = personal.rows.map((row) => ({
+						elementId: Number(row.element_id),
+						playerName: String(row.player_name),
+						playerPosition: Number(row.player_position),
+						teamShortName: String(row.team_short_name),
+						count: Number(row.count),
+						percentage: null,
+					}));
+					const elementIds = new Set(personalRows.map((row) => row.elementId));
+					const pickPositionValues = personal.rows.map((row) => Number(row.pick_position));
+					const pickPositions = new Set(pickPositionValues);
+					const validPersonalRows = personalRows.every(
+						(row) => Number.isSafeInteger(row.elementId) && row.elementId > 0
+					);
+					const validPickPositions = pickPositionValues.every(
+						(position) => Number.isSafeInteger(position) && position > 0
+					);
+					const complete =
+						personalRows.length === FPL_SQUAD_SIZE &&
+						validPersonalRows &&
+						validPickPositions &&
+						elementIds.size === personalRows.length &&
+						pickPositions.size === personalRows.length;
+					const personalState = complete ? state : "PARTIAL";
+					const personalEvidenceContext = complete
+						? evidenceContext
+						: {
+								...evidenceContext,
+								truthState: "partial",
+								coverageState: "partial",
+								availabilityState: personalState,
+								limitations: [
+									...evidenceContext.limitations,
+									`Personal exposure returned ${personalRows.length} of ${FPL_SQUAD_SIZE} squad picks or contained duplicate rows.`,
+								],
+							};
 					return {
 						capability,
-						state,
-						evidenceContext,
-						rows: personal.rows
-							.map((row) => ({
-								elementId: Number(row.element_id),
-								playerName: String(row.player_name),
-								playerPosition: Number(row.player_position),
-								teamShortName: String(row.team_short_name),
-								count: Number(row.count),
-								percentage: null,
-							}))
-							.slice(0, limit),
+						state: personalState,
+						evidenceContext: personalEvidenceContext,
+						rows: personalRows,
 					};
 				}
 				const orderColumn =
