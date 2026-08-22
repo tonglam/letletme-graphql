@@ -24,7 +24,7 @@ export const READ_MODELS = {
 	entryEventResults: "competition.entry_event_results",
 	entryEventPicks: "competition.entry_event_picks",
 	entryEventTransfers: "competition.entry_event_transfers",
-	entrySeasonHistories: "competition.entry_season_histories",
+	entrySeasonHistories: "competition.entry_past_seasons",
 	entryLeagues: "competition.entry_leagues",
 	entryLeaguesWithTournament: "competition.entry_leagues_with_tournament",
 	leagueEventResults: "competition.league_event_results",
@@ -678,18 +678,18 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 		`,
 	},
 	[READ_MODELS.entrySeasonHistories]: {
-		sourceRelations: ["competition.entry_season_histories"],
+		sourceRelations: ["competition.entry_past_seasons"],
 		sql: `
 			SELECT
-				source_history_id AS id,
+				source_season_id AS id,
 				entry_id,
 				source_season_label AS season,
 				total_points,
 				overall_rank,
 				created_at,
 				updated_at
-			FROM competition.entry_season_histories
-			WHERE season_id = $1
+			FROM competition.entry_past_seasons
+			WHERE entry_season_id = $1
 		`,
 	},
 	[READ_MODELS.entryLeagues]: {

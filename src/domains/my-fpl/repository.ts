@@ -119,6 +119,9 @@ export type MyFplTeamPick = {
 	againstShortName: string;
 	wasHome: string;
 	score: string;
+	fixtureCount: number;
+	bgw: boolean;
+	dgw: boolean;
 	isPlayed: boolean;
 	autoSub: boolean;
 	expectedGoals: number | null;
@@ -158,6 +161,7 @@ export type MyFplTeamDesk = {
 	entry: MyFplEntryIdentity | null;
 	history: MyFplTeamHistoryRow[];
 	pastSeasons: MyFplPastSeason[];
+	pastSeasonsState: MyFplReviewState;
 	selectedEventId: number | null;
 	gameweek: MyFplTeamGameweek | null;
 };
@@ -262,6 +266,29 @@ export type MyFplCompetitionViewerSummary = {
 	pointsAheadOfPrev: number | null;
 };
 
+export type MyFplCompetitionPerformance = {
+	entryId: number;
+	entryName: string | null;
+	playerName: string | null;
+	eventPoints: number;
+	eventNetPoints: number;
+	rank: number | null;
+	previousRank: number | null;
+	captainId: number | null;
+	captainWebName: string | null;
+	captainTeamShortName: string | null;
+	captainPoints: number | null;
+};
+
+export type MyFplCompetitionDistribution = {
+	key: string;
+	label: string;
+	teamShortName: string | null;
+	count: number;
+	percentage: number;
+	averagePoints: number;
+};
+
 export type MyFplCompetitionAggregate = {
 	eventId: number;
 	entryCount: number;
@@ -271,6 +298,11 @@ export type MyFplCompetitionAggregate = {
 	averageOverallPoints: number | null;
 	metrics: MyFplCompetitionMetric[];
 	viewer: MyFplCompetitionViewerSummary | null;
+	topPerformers: MyFplCompetitionPerformance[];
+	risers: MyFplCompetitionPerformance[];
+	fallers: MyFplCompetitionPerformance[];
+	captainDistribution: MyFplCompetitionDistribution[];
+	chipDistribution: MyFplCompetitionDistribution[];
 };
 
 export type MyFplCompetitionsDesk = {
@@ -335,6 +367,13 @@ type DbEntryRow = QueryResultRow & {
 	team_value: number | null;
 	total_transfers: number | null;
 	transfers_synced_through_event_id: number | null;
+	past_seasons_checked_at: Date | string | null;
+	past_seasons_count: number | null;
+};
+
+type MyFplEntryIdentityRecord = MyFplEntryIdentity & {
+	pastSeasonsCheckedAt: string | null;
+	pastSeasonsCount: number | null;
 };
 
 type DbHistoryRow = QueryResultRow & {
@@ -402,6 +441,8 @@ type DbGameweekRow = QueryResultRow & {
 	against_short_name: string | null;
 	was_home: string | null;
 	score: string | null;
+	fixture_count: number | string | null;
+	automatic_substitutions: unknown;
 };
 
 type DbTransferRow = QueryResultRow & {
@@ -455,11 +496,15 @@ type DbAggregateRow = QueryResultRow & {
 	cumulative_transfer_cost: number | null;
 	cumulative_bench_points: number | null;
 	cumulative_auto_sub_points: number | null;
+	event_points: number | null;
+	event_net_points: number | null;
+	event_chip: string | null;
+	captain_id: number | null;
+	captain_points: number | null;
+	captain_web_name: string | null;
+	captain_team_short_name: string | null;
 	tournament_rank: number | string | null;
-};
-
-type DbAggregateFieldCountRow = QueryResultRow & {
-	field_size: number;
+	previous_tournament_rank: number | string | null;
 };
 
 type DbSeasonPathRow = QueryResultRow & {
@@ -484,12 +529,8 @@ type DbSetupStatusRow = QueryResultRow & {
 	setup_warning_count?: number | null;
 };
 
-const PROJECTION_VERSION = "v4";
+const PROJECTION_VERSION = "v6";
 const NULLABLE_STATE_CACHE_TTL_SECONDS = 30;
-// Aggregate metrics are intentionally bounded in application memory. The
-// paginated board remains available for larger tournaments, while this
-// summary returns null rather than materializing an unbounded field.
-const MAX_AGGREGATE_FIELD_SIZE = 5000;
 // Keep OFFSET bounded for the fixed-cost board root. Page 100 is the maximum
 // 10,000-row window at the maximum page size.
 const MAX_COMPETITION_BOARD_PAGE = 100;
@@ -684,6 +725,9 @@ const isTeamPickCache = (value: unknown): value is MyFplTeamPick =>
 		againstShortName: (candidate) => typeof candidate === "string",
 		wasHome: (candidate) => typeof candidate === "string",
 		score: (candidate) => typeof candidate === "string",
+		fixtureCount: isSafeInteger,
+		bgw: (candidate) => typeof candidate === "boolean",
+		dgw: (candidate) => typeof candidate === "boolean",
 		isPlayed: (candidate) => typeof candidate === "boolean",
 		autoSub: (candidate) => typeof candidate === "boolean",
 		expectedGoals: isNullableFiniteNumber,
@@ -726,6 +770,7 @@ const isTeamDeskCache = (value: unknown): value is MyFplTeamDesk =>
 		entry: (candidate) => candidate === null || isEntryIdentityCache(candidate),
 		history: (candidate) => Array.isArray(candidate) && candidate.every(isTeamHistoryRowCache),
 		pastSeasons: (candidate) => Array.isArray(candidate) && candidate.every(isPastSeasonCache),
+		pastSeasonsState: isReviewState,
 		selectedEventId: isNullableSafeInteger,
 		gameweek: (candidate) => candidate === null || isTeamGameweekCache(candidate),
 	});
@@ -768,6 +813,10 @@ const isCompetitionBoardRowCache = (value: unknown): value is MyFplCompetitionBo
 		playerName: isNullableString,
 		rank: isNullableSafeInteger,
 		previousRank: isNullableSafeInteger,
+		captainId: isNullableSafeInteger,
+		captainWebName: isNullableString,
+		captainTeamShortName: isNullableString,
+		captainPoints: isNullableSafeInteger,
 		eventPoints: isNullableSafeInteger,
 		eventCost: isNullableSafeInteger,
 		eventNetPoints: isNullableSafeInteger,
@@ -775,10 +824,6 @@ const isCompetitionBoardRowCache = (value: unknown): value is MyFplCompetitionBo
 		overallPoints: isNullableSafeInteger,
 		overallRank: isNullableSafeInteger,
 		eventChip: isNullableChip,
-		captainId: isNullableSafeInteger,
-		captainWebName: isNullableString,
-		captainTeamShortName: isNullableString,
-		captainPoints: isNullableSafeInteger,
 		teamValue: isNullableSafeInteger,
 		bank: isNullableSafeInteger,
 	});
@@ -838,6 +883,31 @@ const isCompetitionViewerCache = (value: unknown): value is MyFplCompetitionView
 		pointsAheadOfPrev: isNullableSafeInteger,
 	});
 
+const isCompetitionPerformanceCache = (value: unknown): value is MyFplCompetitionPerformance =>
+	isTypedRecord(value, {
+		entryId: isSafeInteger,
+		entryName: isNullableString,
+		playerName: isNullableString,
+		eventPoints: isSafeInteger,
+		eventNetPoints: isSafeInteger,
+		rank: isNullableSafeInteger,
+		previousRank: isNullableSafeInteger,
+		captainId: isNullableSafeInteger,
+		captainWebName: isNullableString,
+		captainTeamShortName: isNullableString,
+		captainPoints: isNullableSafeInteger,
+	});
+
+const isCompetitionDistributionCache = (value: unknown): value is MyFplCompetitionDistribution =>
+	isTypedRecord(value, {
+		key: (candidate) => typeof candidate === "string",
+		label: (candidate) => typeof candidate === "string",
+		teamShortName: isNullableString,
+		count: isSafeInteger,
+		percentage: isFiniteNumber,
+		averagePoints: isFiniteNumber,
+	});
+
 const isCompetitionAggregateCache = (value: unknown): value is MyFplCompetitionAggregate =>
 	isTypedRecord(value, {
 		eventId: isSafeInteger,
@@ -848,6 +918,16 @@ const isCompetitionAggregateCache = (value: unknown): value is MyFplCompetitionA
 		averageOverallPoints: isNullableSafeInteger,
 		metrics: (candidate) => Array.isArray(candidate) && candidate.every(isCompetitionMetricCache),
 		viewer: (candidate) => candidate === null || isCompetitionViewerCache(candidate),
+		topPerformers: (candidate) =>
+			Array.isArray(candidate) && candidate.every(isCompetitionPerformanceCache),
+		risers: (candidate) =>
+			Array.isArray(candidate) && candidate.every(isCompetitionPerformanceCache),
+		fallers: (candidate) =>
+			Array.isArray(candidate) && candidate.every(isCompetitionPerformanceCache),
+		captainDistribution: (candidate) =>
+			Array.isArray(candidate) && candidate.every(isCompetitionDistributionCache),
+		chipDistribution: (candidate) =>
+			Array.isArray(candidate) && candidate.every(isCompetitionDistributionCache),
 	});
 
 const isCompetitionSeasonPathPointCache = (
@@ -946,11 +1026,12 @@ const loadReviewContext = async (context: GraphQLContext): Promise<LoadedReviewC
 const loadEntry = async (
 	context: GraphQLContext,
 	entryId: number
-): Promise<MyFplEntryIdentity | null> => {
+): Promise<MyFplEntryIdentityRecord | null> => {
 	const result = await context.database.query<DbEntryRow>(
 		`SELECT entry_id, entry_name, player_name, region, started_event,
-			        overall_points, overall_rank, bank, team_value, total_transfers,
-			        transfers_synced_through_event_id
+				        overall_points, overall_rank, bank, team_value, total_transfers,
+				        transfers_synced_through_event_id, past_seasons_checked_at,
+				        past_seasons_count
 		 FROM competition.entries
 		 WHERE season_id = $1 AND entry_id = $2
 		 LIMIT 1`,
@@ -970,6 +1051,8 @@ const loadEntry = async (
 				teamValue: row.team_value,
 				totalTransfers: row.total_transfers,
 				transfersSyncedThroughEventId: row.transfers_synced_through_event_id,
+				pastSeasonsCheckedAt: isoString(row.past_seasons_checked_at),
+				pastSeasonsCount: row.past_seasons_count,
 			}
 		: null;
 };
@@ -1039,10 +1122,10 @@ const loadPastSeasons = async (
 ): Promise<MyFplPastSeason[]> => {
 	const result = await context.database.query<DbPastSeasonRow>(
 		`SELECT source_season_label AS season, total_points, overall_rank
-		 FROM competition.entry_season_histories
-		 WHERE season_id = $1
+		 FROM competition.entry_past_seasons
+		 WHERE entry_season_id = $1
 		   AND entry_id = $2
-		 ORDER BY season_id, source_season_label`,
+		 ORDER BY source_season_id`,
 		[context.currentSeason.seasonId, entryId]
 	);
 	return result.rows.map((row) => ({
@@ -1052,7 +1135,21 @@ const loadPastSeasons = async (
 	}));
 };
 
-const mapGameweekPick = (row: DbGameweekRow): MyFplTeamPick | null => {
+const officialAutoSubElements = (value: unknown): Set<number> => {
+	if (!Array.isArray(value)) return new Set();
+	const elements = new Set<number>();
+	for (const candidate of value) {
+		if (!isRecord(candidate)) continue;
+		const elementIn = asInteger(candidate.element_in ?? candidate.elementIn);
+		if (elementIn !== null && elementIn > 0) elements.add(elementIn);
+	}
+	return elements;
+};
+
+const mapGameweekPick = (
+	row: DbGameweekRow,
+	autoSubElements: ReadonlySet<number>
+): MyFplTeamPick | null => {
 	if (
 		row.element_id === null ||
 		row.position === null ||
@@ -1065,6 +1162,7 @@ const mapGameweekPick = (row: DbGameweekRow): MyFplTeamPick | null => {
 	const minutes = row.minutes ?? 0;
 	const yellowCards = row.yellow_cards ?? 0;
 	const redCards = row.red_cards ?? 0;
+	const fixtureCount = asInteger(row.fixture_count) ?? 0;
 	return {
 		element: row.element_id,
 		position: row.position,
@@ -1089,11 +1187,11 @@ const mapGameweekPick = (row: DbGameweekRow): MyFplTeamPick | null => {
 		againstShortName: row.against_short_name ?? "",
 		wasHome: row.was_home ?? "",
 		score: row.score ?? "",
+		fixtureCount,
+		bgw: fixtureCount === 0,
+		dgw: fixtureCount > 1,
 		isPlayed: minutes > 0 || yellowCards > 0 || redCards > 0,
-		autoSub:
-			row.position > 11 &&
-			(row.multiplier ?? 0) > 0 &&
-			normalizeChip(row.event_chip) !== "BENCH_BOOST",
+		autoSub: autoSubElements.has(row.element_id),
 		expectedGoals: asFiniteNumber(row.expected_goals),
 		expectedAssists: asFiniteNumber(row.expected_assists),
 		expectedGoalInvolvements: asFiniteNumber(row.expected_goal_involvements),
@@ -1110,9 +1208,10 @@ const loadTeamGameweekRows = async (
 		`SELECT result.event_id, result.event_points, result.overall_points,
 		        result.overall_rank, result.event_transfers, result.event_transfers_cost,
 		        result.event_net_points, result.event_bench_points,
-		        result.event_chip::text, result.captain_points,
-		        captain.web_name AS played_captain_web_name,
-		        result.team_value, result.bank,
+				result.event_chip::text, result.captain_points,
+				captain.web_name AS played_captain_web_name,
+				result.team_value, result.bank,
+				result.automatic_substitutions,
 		        pick.element_id, pick.position, player.web_name, team.short_name AS team_short_name,
 		        team.name AS team_name, player.element_type, pick.is_captain,
 		        pick.is_vice_captain, pick.multiplier, stats.total_points, stats.minutes,
@@ -1120,7 +1219,7 @@ const loadTeamGameweekRows = async (
 		        stats.yellow_cards, stats.red_cards, stats.saves, stats.bonus, stats.bps,
 		        stats.expected_goals, stats.expected_assists,
 		        stats.expected_goal_involvements, stats.expected_goals_conceded,
-		        fixture.against_short_name, fixture.was_home, fixture.score
+		        fixture.against_short_name, fixture.was_home, fixture.score, fixture.fixture_count
 		 FROM competition.entry_event_results result
 		 LEFT JOIN fpl.players captain
 		   ON captain.season_id = result.season_id
@@ -1149,8 +1248,9 @@ const loadTeamGameweekRows = async (
 		  AND stats.event_id = pick.event_id
 		  AND stats.element_id = pick.element_id
 		 LEFT JOIN LATERAL (
-		   SELECT
-		     string_agg(opponent.short_name, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS against_short_name,
+			SELECT
+			  count(match.fixture_id)::integer AS fixture_count,
+			  string_agg(opponent.short_name, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS against_short_name,
 		     string_agg(CASE WHEN match.team_h_id = COALESCE(historical_team.team_id, player.team_id) THEN 'H' ELSE 'A' END, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS was_home,
 		     string_agg(
 		       CASE
@@ -1216,8 +1316,10 @@ const loadTeamGameweekPrepared = async (
 	if (rows.length === 0) {
 		return { ...base, state: "PENDING", result: null };
 	}
-	const picks = rows.map(mapGameweekPick).filter((pick): pick is MyFplTeamPick => pick !== null);
-	if (picks.length !== 15) {
+	const picks = rows
+		.map((row) => mapGameweekPick(row, officialAutoSubElements(row.automatic_substitutions)))
+		.filter((pick): pick is MyFplTeamPick => pick !== null);
+	if (rows.length !== 15 || picks.length !== 15) {
 		return { ...base, state: "PENDING", result: null };
 	}
 	const first = rows[0];
@@ -1298,6 +1400,13 @@ const loadTeamDesk = async (
 			expectedHistoryEventIds.every((finalizedEventId) => historyEventIds.has(finalizedEventId));
 		state = historyComplete ? "READY" : "PENDING";
 	}
+	const pastSeasonsState: MyFplReviewState = !entry
+		? "EMPTY"
+		: entry.pastSeasonsCheckedAt !== null &&
+			  entry.pastSeasonsCount !== null &&
+			  entry.pastSeasonsCount === pastSeasons.length
+			? "READY"
+			: "PENDING";
 
 	const payload: MyFplTeamDesk = {
 		state,
@@ -1305,6 +1414,7 @@ const loadTeamDesk = async (
 		entry,
 		history,
 		pastSeasons,
+		pastSeasonsState,
 		selectedEventId: eventId ?? null,
 		gameweek,
 	};
@@ -1804,26 +1914,68 @@ const buildMetric = (
 	};
 };
 
+const mapCompetitionPerformance = (row: DbAggregateRow): MyFplCompetitionPerformance => ({
+	entryId: row.entry_id,
+	entryName: row.entry_name,
+	playerName: row.player_name,
+	eventPoints: row.event_points ?? 0,
+	eventNetPoints: row.event_net_points ?? 0,
+	rank: asInteger(row.tournament_rank),
+	previousRank: asInteger(row.previous_tournament_rank),
+	captainId: row.captain_id,
+	captainWebName: row.captain_web_name,
+	captainTeamShortName: row.captain_team_short_name,
+	captainPoints: row.captain_points,
+});
+
+const buildCompetitionDistribution = (
+	rows: DbAggregateRow[],
+	read: (row: DbAggregateRow) => {
+		key: string;
+		label: string;
+		teamShortName: string | null;
+		points: number;
+	}
+): MyFplCompetitionDistribution[] => {
+	const counts = new Map<
+		string,
+		{ label: string; teamShortName: string | null; count: number; totalPoints: number }
+	>();
+	for (const row of rows) {
+		const item = read(row);
+		const current = counts.get(item.key);
+		if (current) {
+			current.count += 1;
+			current.totalPoints += item.points;
+		} else {
+			counts.set(item.key, {
+				label: item.label,
+				teamShortName: item.teamShortName,
+				count: 1,
+				totalPoints: item.points,
+			});
+		}
+	}
+	const denominator = rows.length;
+	return [...counts.entries()]
+		.map(([key, value]) => ({
+			key,
+			label: value.label,
+			teamShortName: value.teamShortName,
+			count: value.count,
+			percentage: denominator === 0 ? 0 : Math.round((value.count / denominator) * 10_000) / 100,
+			averagePoints:
+				value.count === 0 ? 0 : Math.round((value.totalPoints / value.count) * 10) / 10,
+		}))
+		.sort((left, right) => right.count - left.count || left.key.localeCompare(right.key));
+};
+
 const loadCompetitionAggregate = async (
 	context: GraphQLContext,
 	tournamentId: number,
 	eventId: number,
 	entryId: number
 ): Promise<MyFplCompetitionAggregate | null> => {
-	const fieldCount = await context.database.query<DbAggregateFieldCountRow>(
-		`SELECT count(*)::integer AS field_size
-		 FROM reporting.tournament_entry_event_summaries
-		 WHERE season_id = $1 AND tournament_id = $2 AND event_id = $3`,
-		[context.currentSeason.seasonId, tournamentId, eventId]
-	);
-	const fieldSize = fieldCount.rows[0]?.field_size ?? 0;
-	if (fieldSize > MAX_AGGREGATE_FIELD_SIZE) {
-		context.logger.info(
-			{ tournamentId, eventId, fieldSize, maxFieldSize: MAX_AGGREGATE_FIELD_SIZE },
-			"Skipping My FPL aggregate for oversized tournament"
-		);
-		return null;
-	}
 	const cacheKey = gqlCacheKey(
 		context,
 		`my-fpl:${PROJECTION_VERSION}:competition-aggregate:${tournamentId}:${eventId}:${entryId}`
@@ -1840,7 +1992,13 @@ const loadCompetitionAggregate = async (
 		        summary.overall_points, summary.overall_rank, summary.team_value,
 		        summary.cumulative_transfers, summary.cumulative_transfer_cost,
 		        summary.cumulative_bench_points, summary.cumulative_auto_sub_points,
-		        COALESCE(group_result.event_group_rank, summary.tournament_event_rank)::integer AS tournament_rank
+		        summary.event_points, summary.event_net_points, summary.event_chip::text,
+		        summary.captain_points,
+		        summary.played_captain_element_id AS captain_id,
+		        captain.web_name AS captain_web_name,
+		        captain_team.short_name AS captain_team_short_name,
+		        COALESCE(group_result.event_group_rank, summary.tournament_event_rank)::integer AS tournament_rank,
+		        COALESCE(previous_group.event_group_rank, previous_summary.tournament_event_rank)::integer AS previous_tournament_rank
 		 FROM reporting.tournament_entry_event_summaries summary
 		 JOIN competition.entries entry
 		   ON entry.season_id = summary.season_id AND entry.entry_id = summary.entry_id
@@ -1849,6 +2007,31 @@ const loadCompetitionAggregate = async (
 		  AND group_result.tournament_id = summary.tournament_id
 		  AND group_result.event_id = summary.event_id
 		  AND group_result.entry_id = summary.entry_id
+		 LEFT JOIN reporting.tournament_entry_event_summaries previous_summary
+		   ON previous_summary.season_id = summary.season_id
+		  AND previous_summary.tournament_id = summary.tournament_id
+		  AND previous_summary.event_id = summary.event_id - 1
+		  AND previous_summary.entry_id = summary.entry_id
+		 LEFT JOIN competition.tournament_points_group_results previous_group
+		   ON previous_group.season_id = summary.season_id
+		  AND previous_group.tournament_id = summary.tournament_id
+		  AND previous_group.event_id = summary.event_id - 1
+		  AND previous_group.entry_id = summary.entry_id
+		 LEFT JOIN fpl.players captain
+		   ON captain.season_id = summary.season_id
+		  AND captain.element_id = summary.played_captain_element_id
+		 LEFT JOIN LATERAL (
+		   SELECT fixture_stats.team_id
+		   FROM fpl.player_fixture_stats fixture_stats
+		   WHERE fixture_stats.season_id = summary.season_id
+		     AND fixture_stats.event_id = summary.event_id
+		     AND fixture_stats.element_id = summary.played_captain_element_id
+		   ORDER BY fixture_stats.fixture_id
+		   LIMIT 1
+		 ) captain_historical_team ON TRUE
+		 LEFT JOIN fpl.teams captain_team
+		   ON captain_team.season_id = captain.season_id
+		  AND captain_team.team_id = COALESCE(captain_historical_team.team_id, captain.team_id)
 		 WHERE summary.season_id = $1
 		   AND summary.tournament_id = $2
 		   AND summary.event_id = $3
@@ -1910,6 +2093,50 @@ const loadCompetitionAggregate = async (
 							: Math.max(0, mine.overall_points - below.overall_points),
 			}
 		: null;
+	const performanceRows = result.rows.filter(
+		(row) => row.event_points !== null && row.event_net_points !== null
+	);
+	const topPerformers = [...performanceRows]
+		.sort(
+			(left, right) =>
+				right.event_net_points! - left.event_net_points! || left.entry_id - right.entry_id
+		)
+		.slice(0, 5)
+		.map(mapCompetitionPerformance);
+	const movementRows = result.rows
+		.map((row) => ({
+			row,
+			movement:
+				asInteger(row.previous_tournament_rank) === null || asInteger(row.tournament_rank) === null
+					? null
+					: asInteger(row.previous_tournament_rank)! - asInteger(row.tournament_rank)!,
+		}))
+		.filter((item): item is { row: DbAggregateRow; movement: number } => item.movement !== null);
+	const risers = [...movementRows]
+		.filter((item) => item.movement > 0)
+		.sort((left, right) => right.movement - left.movement || left.row.entry_id - right.row.entry_id)
+		.slice(0, 5)
+		.map((item) => mapCompetitionPerformance(item.row));
+	const fallers = [...movementRows]
+		.filter((item) => item.movement < 0)
+		.sort((left, right) => left.movement - right.movement || left.row.entry_id - right.row.entry_id)
+		.slice(0, 5)
+		.map((item) => mapCompetitionPerformance(item.row));
+	const captainDistribution = buildCompetitionDistribution(result.rows, (row) => ({
+		key: row.captain_id === null ? "NONE" : String(row.captain_id),
+		label: row.captain_id === null ? "NONE" : (row.captain_web_name ?? String(row.captain_id)),
+		teamShortName: row.captain_id === null ? null : row.captain_team_short_name,
+		points: row.captain_id === null ? 0 : (row.captain_points ?? 0),
+	}));
+	const chipDistribution = buildCompetitionDistribution(result.rows, (row) => {
+		const chip = normalizeChip(row.event_chip);
+		return {
+			key: chip,
+			label: chip,
+			teamShortName: null,
+			points: row.event_net_points ?? row.event_points ?? 0,
+		};
+	});
 	const payload: MyFplCompetitionAggregate = {
 		eventId,
 		entryCount: result.rows.length,
@@ -1929,6 +2156,11 @@ const loadCompetitionAggregate = async (
 			buildMetric("AUTO_SUB_POINTS", result.rows, autoSub, true),
 		],
 		viewer,
+		topPerformers,
+		risers,
+		fallers,
+		captainDistribution,
+		chipDistribution,
 	};
 	await writeQueryCache(
 		context,

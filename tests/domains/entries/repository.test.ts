@@ -259,6 +259,7 @@ const cachedResult: EntryEventResult = {
 	eventChip: null,
 	eventPlayedCaptain: 10,
 	eventCaptainPoints: 16,
+	eventAutoSub: [],
 	eventPicks: [],
 	teamValue: 1_020,
 	bank: 5,

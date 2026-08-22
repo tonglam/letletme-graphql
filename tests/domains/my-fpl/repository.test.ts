@@ -79,7 +79,11 @@ const historyRow = (eventId: number): MyFplTeamHistoryRow & Record<string, unkno
 	rich_synced_at: "2026-08-20T00:00:00.000Z",
 });
 
-const gameweekRow = (eventId: number, elementId: number) => ({
+const gameweekRow = (
+	eventId: number,
+	elementId: number,
+	overrides: Record<string, unknown> = {}
+) => ({
 	event_id: eventId,
 	event_points: 50,
 	overall_points: 100,
@@ -120,6 +124,9 @@ const gameweekRow = (eventId: number, elementId: number) => ({
 	against_short_name: "CHE",
 	was_home: "H",
 	score: "2-0",
+	fixture_count: 1,
+	automatic_substitutions: [],
+	...overrides,
 });
 
 const tournament = (overrides: Partial<TournamentInfo> = {}): TournamentInfo => ({
@@ -225,7 +232,7 @@ const makeFixture = (options: FixtureOptions = {}) => {
 		if (options.queryOverride) return options.queryOverride(sql, params);
 		if (sql.includes("FROM fpl.events")) return { rows: lifecycleRows };
 		if (sql.includes("FROM competition.entries")) return { rows: options.entryRows ?? [] };
-		if (sql.includes("FROM competition.entry_season_histories")) {
+		if (sql.includes("FROM competition.entry_past_seasons")) {
 			return { rows: options.pastSeasonRows ?? [] };
 		}
 		if (sql.includes("enriched_event_count")) {
@@ -381,6 +388,32 @@ describe("My FPL review repository", () => {
 		expect(ready.redis.setCalls.at(-1)?.[3]).toBeGreaterThan(30);
 	});
 
+	it("distinguishes a confirmed empty past-season history from an unchecked history", async () => {
+		const confirmedEmpty = makeFixture({
+			finalizedIds: [1],
+			entryRows: [
+				entryRow({
+					past_seasons_checked_at: "2026-08-20T00:00:00.000Z",
+					past_seasons_count: 0,
+				}),
+			],
+			pastSeasonRows: [],
+			historyRows: [historyRow(1)],
+		});
+		const readyDesk = await confirmedEmpty.repository.loadTeamDesk(confirmedEmpty.context);
+		expect(readyDesk.pastSeasons).toEqual([]);
+		expect(readyDesk.pastSeasonsState).toBe("READY");
+
+		const unchecked = makeFixture({
+			finalizedIds: [1],
+			entryRows: [entryRow({ past_seasons_checked_at: null, past_seasons_count: null })],
+			historyRows: [historyRow(1)],
+		});
+		expect((await unchecked.repository.loadTeamDesk(unchecked.context)).pastSeasonsState).toBe(
+			"PENDING"
+		);
+	});
+
 	it("does not promote incomplete finalized or rich-enriched data to READY", async () => {
 		const lifecycleIncomplete = makeFixture({
 			entryRows: [entryRow()],
@@ -406,13 +439,13 @@ describe("My FPL review repository", () => {
 			entryRows: [entryRow()],
 			historyRows: [historyRow(1)],
 		});
-		const key = gqlCacheKey(fixture.context, "my-fpl:v4:team-desk:123:season");
+		const key = gqlCacheKey(fixture.context, "my-fpl:v6:team-desk:123:season");
 		await fixture.redis.set(key, JSON.stringify({ state: "READY", history: [] }));
 		const desk = await fixture.repository.loadTeamDesk(fixture.context);
 		expect(desk.state).toBe("READY");
 		expect(await fixture.redis.get(key)).not.toBe(JSON.stringify({ state: "READY", history: [] }));
 		const malformed = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
-		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v4:team-desk:123:season");
+		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v6:team-desk:123:season");
 		await malformed.redis.set(malformedKey, "{");
 		await malformed.repository.loadTeamDesk(malformed.context);
 		expect(await malformed.redis.get(malformedKey)).not.toBe("{");
@@ -445,6 +478,48 @@ describe("My FPL review repository", () => {
 		expect(gameweek.state).toBe("READY");
 		expect(gameweek.result?.picks).toHaveLength(15);
 		expect(gameweek.result?.picks[0]?.isCaptain).toBe(true);
+	});
+
+	it("derives fixture count, BGW and DGW from the fixture aggregate", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			entryRows: [entryRow()],
+			gameweekRows: Array.from({ length: 15 }, (_, index) =>
+				gameweekRow(1, index + 1, {
+					fixture_count: index === 0 ? 0 : index === 1 ? 2 : 1,
+				})
+			),
+		});
+		const gameweek = await fixture.repository.loadTeamGameweek(fixture.context, 1);
+		expect(gameweek.state).toBe("READY");
+		expect(gameweek.result?.picks[0]).toMatchObject({
+			fixtureCount: 0,
+			bgw: true,
+			dgw: false,
+		});
+		expect(gameweek.result?.picks[1]).toMatchObject({
+			fixtureCount: 2,
+			bgw: false,
+			dgw: true,
+		});
+	});
+
+	it("uses only official automatic substitutions and never infers them from Bench Boost", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			entryRows: [entryRow()],
+			gameweekRows: Array.from({ length: 15 }, (_, index) =>
+				gameweekRow(1, index + 1, {
+					event_chip: "benchboost",
+					automatic_substitutions: [],
+				})
+			),
+		});
+		const gameweek = await fixture.repository.loadTeamGameweek(fixture.context, 1);
+		expect(gameweek.state).toBe("READY");
+		expect(gameweek.result?.eventChip).toBe("BENCH_BOOST");
+		expect(gameweek.result?.picks.every((pick) => pick.autoSub)).toBe(false);
+		expect(gameweek.result?.picks.every((pick) => !pick.autoSub)).toBe(true);
 	});
 
 	it("loads enriched transfer rows and groups them by gameweek", async () => {
@@ -630,6 +705,133 @@ describe("My FPL review repository", () => {
 		const path = await fixture.repository.loadCompetitionSeasonPath(fixture.context, 7, 1);
 		expect(path.state).toBe("READY");
 		expect(path.points[0]?.tournamentRank).toBe(1);
+	});
+
+	it("computes competition insight distributions from the complete field", async () => {
+		const boardRow = {
+			event_id: 1,
+			group_id: 1,
+			entry_id: 123,
+			entry_name: "Foo",
+			player_name: "A",
+			rank: 1,
+			previous_rank: 2,
+			event_points: 60,
+			event_cost: 0,
+			event_net_points: 56,
+			event_rank: 1,
+			overall_points: 100,
+			overall_rank: 1000,
+			event_chip: "benchboost",
+			captain_id: 11,
+			captain_web_name: "Saka",
+			captain_team_short_name: "ARS",
+			captain_points: 20,
+			team_value: 1000,
+			bank: 10,
+		};
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			boardPayload: {
+				fieldSize: 3,
+				totalRows: 3,
+				rows: [boardRow],
+				viewerRow: boardRow,
+			},
+			aggregateRows: [
+				{
+					entry_id: 123,
+					entry_name: "Foo",
+					player_name: "A",
+					overall_points: 100,
+					overall_rank: 1000,
+					team_value: 1000,
+					cumulative_transfers: 1,
+					cumulative_transfer_cost: 0,
+					cumulative_bench_points: 4,
+					cumulative_auto_sub_points: 0,
+					event_points: 60,
+					event_net_points: 56,
+					event_chip: "benchboost",
+					captain_id: 11,
+					captain_web_name: "Saka",
+					captain_team_short_name: "ARS",
+					captain_points: 20,
+					tournament_rank: 1,
+					previous_tournament_rank: 2,
+				},
+				{
+					entry_id: 124,
+					entry_name: "Bar",
+					player_name: "B",
+					overall_points: 90,
+					overall_rank: 1100,
+					team_value: 995,
+					cumulative_transfers: 2,
+					cumulative_transfer_cost: 4,
+					cumulative_bench_points: 2,
+					cumulative_auto_sub_points: 1,
+					event_points: 40,
+					event_net_points: 40,
+					event_chip: "none",
+					captain_id: 11,
+					captain_web_name: "Saka",
+					captain_team_short_name: "ARS",
+					captain_points: 10,
+					tournament_rank: 2,
+					previous_tournament_rank: 3,
+				},
+				{
+					entry_id: 125,
+					entry_name: "Baz",
+					player_name: "C",
+					overall_points: 80,
+					overall_rank: 1200,
+					team_value: 990,
+					cumulative_transfers: 0,
+					cumulative_transfer_cost: 0,
+					cumulative_bench_points: 1,
+					cumulative_auto_sub_points: 0,
+					event_points: 30,
+					event_net_points: 30,
+					event_chip: "freehit",
+					captain_id: 12,
+					captain_web_name: "Palmer",
+					captain_team_short_name: "CHE",
+					captain_points: 8,
+					tournament_rank: 3,
+					previous_tournament_rank: 1,
+				},
+			],
+		});
+		const desk = await fixture.repository.loadCompetitionsDesk(fixture.context, 7, 1);
+		const aggregate = desk.aggregate;
+		expect(aggregate?.entryCount).toBe(3);
+		expect(aggregate?.topPerformers[0]?.entryId).toBe(123);
+		expect(aggregate?.risers[0]?.entryId).toBe(123);
+		expect(aggregate?.fallers[0]?.entryId).toBe(125);
+		expect(aggregate?.captainDistribution[0]).toMatchObject({
+			key: "11",
+			teamShortName: "ARS",
+			count: 2,
+			percentage: 66.67,
+			averagePoints: 15,
+		});
+		expect(aggregate?.chipDistribution.find((row) => row.key === "BENCH_BOOST")).toMatchObject({
+			count: 1,
+			percentage: 33.33,
+		});
+	});
+
+	it("marks H2H/battle review as unavailable instead of rendering a points race", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			selectedTournament: tournament({ groupMode: GroupMode.BATTLE_RACES }),
+		});
+		const desk = await fixture.repository.loadCompetitionsDesk(fixture.context, 7, 1);
+		expect(desk.state).toBe("UNAVAILABLE");
+		expect(desk.board?.state).toBe("UNAVAILABLE");
+		expect(desk.aggregate).toBeNull();
 	});
 
 	it("does not convert PostgreSQL errors into empty data or success cache", async () => {

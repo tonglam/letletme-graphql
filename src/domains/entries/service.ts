@@ -6,6 +6,7 @@ import { metrics } from "../../infra/metrics";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
+import { getCoreFixtureSnapshot } from "../../infra/data-snapshot";
 import type { Player, Team } from "../../infra/types";
 import type { ElementEventResultData } from "../entry-live/calc-service";
 import type { EntryEventTransferRow } from "../entry-live/repository";
@@ -209,11 +210,41 @@ const mapEntryPick = (params: {
 	player: Player | undefined;
 	team: Team | undefined;
 	live: LivePerformance | undefined;
+	fixtures: ReadonlyArray<{
+		teamHId: number;
+		teamAId: number;
+		teamHScore: number | null;
+		teamAScore: number | null;
+	}>;
+	teamsById: ReadonlyMap<number, Team>;
+	autoSubElements: ReadonlySet<number>;
 }): ElementEventResultData => {
-	const { eventId, pick, player, team, live } = params;
+	const { eventId, pick, player, team, live, fixtures, teamsById, autoSubElements } = params;
 	const minutes = live?.minutes ?? 0;
 	const yellowCards = live?.yellowCards ?? 0;
 	const redCards = live?.redCards ?? 0;
+	const playerFixtures = player
+		? fixtures.filter(
+				(fixture) => fixture.teamHId === player.teamId || fixture.teamAId === player.teamId
+			)
+		: [];
+	const fixtureOpponents = playerFixtures.map((fixture) => {
+		const wasHome = fixture.teamHId === player?.teamId;
+		const opponentId = wasHome ? fixture.teamAId : fixture.teamHId;
+		const opponent = teamsById.get(opponentId);
+		const score =
+			fixture.teamHScore === null || fixture.teamAScore === null
+				? ""
+				: wasHome
+					? `${fixture.teamHScore}-${fixture.teamAScore}`
+					: `${fixture.teamAScore}-${fixture.teamHScore}`;
+		return {
+			opponentId,
+			opponent,
+			wasHome: wasHome ? "H" : "A",
+			score,
+		};
+	});
 
 	return {
 		season: null,
@@ -228,11 +259,17 @@ const mapEntryPick = (params: {
 		teamCode: team?.code ?? 0,
 		teamName: team?.name ?? "",
 		teamShortName: team?.shortName ?? "",
-		againstId: 0,
-		againstName: "",
-		againstShortName: "BLANK",
-		wasHome: "",
-		score: "",
+		againstId: fixtureOpponents[0]?.opponentId ?? 0,
+		againstName: fixtureOpponents
+			.map((item) => item.opponent?.name ?? "")
+			.filter(Boolean)
+			.join(" / "),
+		againstShortName: fixtureOpponents
+			.map((item) => item.opponent?.shortName ?? "")
+			.filter(Boolean)
+			.join(" / "),
+		wasHome: fixtureOpponents.map((item) => item.wasHome).join(" / "),
+		score: fixtureOpponents.map((item) => item.score).join(" / "),
 		position: pick.position,
 		multiplier: pick.multiplier,
 		isCaptain: pick.isCaptain,
@@ -263,10 +300,23 @@ const mapEntryPick = (params: {
 		expectedGoalsConceded: parseNullableFloat(live?.expectedGoalsConceded),
 		inDreamTeam: live?.inDreamTeam ?? null,
 		pickActive: pick.multiplier > 0,
-		autoSub: pick.position > 11 && pick.multiplier > 0,
-		bgw: false,
-		dgw: false,
+		autoSub: autoSubElements.has(pick.element),
+		bgw: fixtureOpponents.length === 0,
+		dgw: fixtureOpponents.length > 1,
 	};
+};
+
+const officialAutoSubElements = (value: unknown): Set<number> => {
+	if (!Array.isArray(value)) return new Set();
+	const result = new Set<number>();
+	for (const candidate of value) {
+		if (!isRecord(candidate)) continue;
+		const elementIn = asNumber(candidate.element_in ?? candidate.elementIn);
+		if (elementIn !== null && Number.isSafeInteger(elementIn) && elementIn > 0) {
+			result.add(elementIn);
+		}
+	}
+	return result;
 };
 
 async function buildLiveMapForEvents(
@@ -391,11 +441,16 @@ export const entriesService = {
 		}
 
 		const playerIds = uniquePositiveIds(picks.map((pick) => pick.element));
-		const [playerMap, teamMap, liveByPlayer] = await Promise.all([
+		const [playerMap, teamMap, liveByPlayer, fixtureSnapshot] = await Promise.all([
 			buildPlayerMap(context, playerIds),
 			buildTeamMap(context),
 			buildLiveMapForEvents(context, [result.eventId], playerIds),
+			getCoreFixtureSnapshot(context),
 		]);
+		const fixtures = fixtureSnapshot.fixtures.filter(
+			(fixture) => fixture.eventId === result.eventId
+		);
+		const autoSubElements = officialAutoSubElements(result.eventAutoSub);
 
 		return picks.map((pick) => {
 			const player = playerMap.get(pick.element);
@@ -407,6 +462,9 @@ export const entriesService = {
 				player,
 				team,
 				live,
+				fixtures,
+				teamsById: teamMap,
+				autoSubElements,
 			});
 		});
 	},

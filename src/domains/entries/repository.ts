@@ -37,6 +37,7 @@ export type EntryEventResult = {
 	eventPlayedCaptain: number | null;
 	eventCaptainPoints: number;
 	eventPicks: unknown[];
+	eventAutoSub?: unknown[];
 	teamValue: number | null;
 	bank: number | null;
 };
@@ -80,12 +81,13 @@ type DbEntryEventResultRow = {
 	event_played_captain?: number | null;
 	event_captain_points?: number | null;
 	event_picks?: unknown;
+	event_auto_sub?: unknown;
 	team_value: number | null;
 	bank: number | null;
 };
 
 type DbEntryHistoryInfoRow = {
-	season: string;
+	source_season_label: string;
 	total_points: number;
 	overall_rank: number;
 };
@@ -126,6 +128,7 @@ const mapEntryEventResult = (row: DbEntryEventResultRow): EntryEventResult => ({
 	eventPlayedCaptain: row.event_played_captain ?? null,
 	eventCaptainPoints: row.event_captain_points ?? 0,
 	eventPicks: parseJsonArray(row.event_picks),
+	eventAutoSub: parseJsonArray(row.event_auto_sub),
 	teamValue: row.team_value,
 	bank: row.bank,
 });
@@ -148,7 +151,7 @@ const parseJsonArray = (value: unknown): unknown[] => {
 };
 
 const mapEntryHistoryInfo = (row: DbEntryHistoryInfoRow): EntryHistoryInfo => ({
-	season: row.season,
+	season: row.source_season_label,
 	totalPoints: row.total_points,
 	overallRank: row.overall_rank,
 });
@@ -439,7 +442,7 @@ export const entriesRepository: EntriesRepository = {
 		const { data, error } = await context.data
 			.read("competition.entry_event_results")
 			.select(
-				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, team_value, bank"
 			)
 			.eq("entry_id", entryId)
 			.order("event_id", { ascending: true });
@@ -485,10 +488,11 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const { data, error } = await context.data
-			.read("competition.entry_season_histories")
-			.select("season,total_points,overall_rank")
+			.read("competition.entry_past_seasons")
+			.select("source_season_label,total_points,overall_rank")
+			.eq("entry_season_id", context.currentSeason.seasonId)
 			.eq("entry_id", entryId)
-			.order("season", { ascending: true });
+			.order("source_season_id", { ascending: true });
 
 		if (error) {
 			context.logger.error({ err: error, entryId }, "Failed to fetch entry history info");
@@ -528,7 +532,7 @@ export const entriesRepository: EntriesRepository = {
 		const { data, error } = await context.data
 			.read("competition.entry_event_results")
 			.select(
-				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, team_value, bank"
 			)
 			.eq("entry_id", entryId)
 			.eq("event_id", eventId)
@@ -606,7 +610,7 @@ export const entriesRepository: EntriesRepository = {
 		const { data, error } = await context.data
 			.read("competition.entry_event_results")
 			.select(
-				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, team_value, bank"
+				"entry_id, event_id, event_points, event_rank, overall_points, overall_rank, event_transfers, event_transfers_cost, event_net_points, event_bench_points, event_chip, event_played_captain, event_captain_points, event_picks, event_auto_sub, team_value, bank"
 			)
 			.in("entry_id", missIds)
 			.eq("event_id", eventId);
