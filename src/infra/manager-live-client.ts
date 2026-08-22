@@ -9,7 +9,10 @@
 
 import { metrics } from "./metrics";
 
-const MANAGER_LIVE_TIMEOUT_MS = 5_000;
+// A cold classic tournament request can refresh standings and enrich the
+// roster with official entry summaries. Keep enough room for that bounded
+// upstream crawl before treating the Data service as unavailable.
+const MANAGER_LIVE_TIMEOUT_MS = 15_000;
 
 export type ManagerLiveSource = "FPL_ENTRY_SUMMARY" | "FPL_CLASSIC_STANDINGS" | "FPL_FINAL_RESULT";
 export type ManagerLiveTotalScope = "OVERALL" | "CLASSIC_PHASE";
