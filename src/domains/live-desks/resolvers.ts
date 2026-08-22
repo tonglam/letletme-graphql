@@ -417,12 +417,7 @@ export const liveDesksResolvers = {
 			context: GraphQLContext
 		) => {
 			const memberTournament = await assertMember(context, args.tournamentId, args.entryId);
-			const [{ snapshot }, eventCore] = await Promise.all([
-				resolveSnapshot(context, args.ref),
-				getCoreEventSnapshot(context),
-			]);
-			const event = eventCore.events.find((candidate) => candidate.id === snapshot.eventId);
-			const provisional = !(event?.finished && event.dataChecked);
+			const { snapshot } = await resolveSnapshot(context, args.ref);
 			const ids = Array.from(new Set([args.entryId, ...args.comparedEntryIds])).slice(0, 2);
 			const result = await entryLiveBatchService.calcLivePointsForEntries(
 				context,

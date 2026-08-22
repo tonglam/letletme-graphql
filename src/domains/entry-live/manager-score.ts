@@ -140,7 +140,6 @@ export function buildManagerScore(params: {
 		previousOverallPoints = null,
 	} = params;
 	const effectiveTransferCost = row?.transferCost ?? transferCost;
-	const score = baseScore(effectiveTransferCost);
 	const reconciliation: LiveManagerScoreReconciliation = !available
 		? "NO_LINEUP"
 		: row && typeof row.eventPoints === "number"
