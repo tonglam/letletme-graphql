@@ -28,6 +28,7 @@ export type LiveWindowInput = {
 	currentEventId: number | null;
 	nextEventId: number | null;
 	liveRevision: string | null;
+	publicationId?: string | null;
 	liveEventId?: number | null;
 	publicationState?: LiveSnapshotState | null;
 	sourceCheckedAt: string | null;
@@ -37,6 +38,9 @@ export type LiveWindowInput = {
 	lifecycleState?: ProducerLifecycleState | null;
 	lifecycleObservedAt?: string | null;
 	lifecycleNextRefreshAt?: string | null;
+	lifecycleLiveRevision?: string | null;
+	lifecyclePublicationId?: string | null;
+	lifecycleSourceCheckedAt?: string | null;
 	now?: Date;
 };
 
@@ -126,7 +130,7 @@ const staleAfterMsForWindow = (state: LiveWindowState): number => {
 			return 60_000;
 	}
 };
-const lifecycleStatusMaxAgeMs = 2 * 60_000;
+const lifecycleStatusGraceMs = 2 * 60_000;
 
 const lifecycleWindowState = (
 	state: ProducerLifecycleState,
@@ -297,12 +301,34 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 	const lifecycleObservedAtMs = input.lifecycleObservedAt
 		? Date.parse(input.lifecycleObservedAt)
 		: Number.NaN;
+	const lifecycleNextRefreshAtMs = input.lifecycleNextRefreshAt
+		? Date.parse(input.lifecycleNextRefreshAt)
+		: Number.NaN;
 	const lifecycleIsFresh =
 		Number.isFinite(lifecycleObservedAtMs) &&
 		lifecycleObservedAtMs <= nowMs + 30_000 &&
-		nowMs - lifecycleObservedAtMs <= lifecycleStatusMaxAgeMs;
+		(Number.isFinite(lifecycleNextRefreshAtMs)
+			? nowMs <= lifecycleNextRefreshAtMs + lifecycleStatusGraceMs
+			: nowMs - lifecycleObservedAtMs <= lifecycleStatusGraceMs);
 	const sourceCheckedAt = input.sourceCheckedAt;
 	const checkedAtMs = sourceCheckedAt ? Date.parse(sourceCheckedAt) : Number.NaN;
+	const lifecycleSourceCheckedAtMs = input.lifecycleSourceCheckedAt
+		? Date.parse(input.lifecycleSourceCheckedAt)
+		: Number.NaN;
+	const lifecycleMatchesPublication = (() => {
+		if (input.liveRevision === null && !input.publicationId) return true;
+		if (input.publicationId && input.lifecyclePublicationId) {
+			return input.publicationId === input.lifecyclePublicationId;
+		}
+		if (input.liveRevision !== null && input.lifecycleLiveRevision) {
+			return input.liveRevision === input.lifecycleLiveRevision;
+		}
+		return (
+			Number.isFinite(checkedAtMs) &&
+			Number.isFinite(lifecycleSourceCheckedAtMs) &&
+			lifecycleSourceCheckedAtMs >= checkedAtMs
+		);
+	})();
 	const liveSnapshotIsFresh =
 		input.publicationState === "live" &&
 		Number.isFinite(checkedAtMs) &&
@@ -314,6 +340,7 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 		lifecycleState !== null &&
 		lifecycleState !== undefined &&
 		lifecycleIsFresh &&
+		lifecycleMatchesPublication &&
 		!liveSnapshotHasActiveFixture;
 	if (lifecycleApplies) {
 		windowState = lifecycleWindowState(lifecycleState!, windowState);

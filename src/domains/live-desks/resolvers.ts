@@ -106,6 +106,7 @@ const readLiveWindow = async (context: GraphQLContext) => {
 		nextEventId: eventCore.events.find((event) => event.isNext)?.id ?? null,
 		liveRevision:
 			currentSnapshot?.revision ?? (currentManifest ? String(currentManifest.revision) : null),
+		publicationId: currentSnapshot?.publicationId ?? currentManifest?.publicationId ?? null,
 		liveEventId: currentSnapshot?.eventId ?? (currentManifest ? currentEventId : null),
 		publicationState: currentSnapshot?.state ?? livePublicationState(currentManifest),
 		sourceCheckedAt:
@@ -118,6 +119,9 @@ const readLiveWindow = async (context: GraphQLContext) => {
 		lifecycleState: currentLifecycle?.state ?? null,
 		lifecycleObservedAt: currentLifecycle?.observedAt ?? null,
 		lifecycleNextRefreshAt: currentLifecycle?.nextRefreshAt ?? null,
+		lifecycleLiveRevision: currentLifecycle?.liveRevision ?? null,
+		lifecyclePublicationId: currentLifecycle?.publicationId ?? null,
+		lifecycleSourceCheckedAt: currentLifecycle?.sourceCheckedAt ?? null,
 	});
 	const anchorLifecycle =
 		initialWindow.anchorEventId === currentEventId
@@ -141,6 +145,7 @@ const readLiveWindow = async (context: GraphQLContext) => {
 				currentEventId,
 				nextEventId: initialWindow.nextEventId,
 				liveRevision: anchorSnapshot?.revision ?? String(anchorManifest.revision),
+				publicationId: anchorSnapshot?.publicationId ?? anchorManifest.publicationId,
 				liveEventId: anchorSnapshot?.eventId ?? initialWindow.anchorEventId,
 				publicationState: anchorSnapshot?.state ?? livePublicationState(anchorManifest),
 				sourceCheckedAt:
@@ -152,6 +157,9 @@ const readLiveWindow = async (context: GraphQLContext) => {
 				lifecycleState: anchorLifecycle?.state ?? null,
 				lifecycleObservedAt: anchorLifecycle?.observedAt ?? null,
 				lifecycleNextRefreshAt: anchorLifecycle?.nextRefreshAt ?? null,
+				lifecycleLiveRevision: anchorLifecycle?.liveRevision ?? null,
+				lifecyclePublicationId: anchorLifecycle?.publicationId ?? null,
+				lifecycleSourceCheckedAt: anchorLifecycle?.sourceCheckedAt ?? null,
 			})
 		: initialWindow;
 	return {
@@ -403,6 +411,7 @@ export const liveDesksResolvers = {
 				currentEventId: eventCore.currentEventId,
 				nextEventId: window.nextEventId,
 				liveRevision: snapshot.revision,
+				publicationId: snapshot.publicationId,
 				liveEventId: snapshot.eventId,
 				publicationState: snapshot.state,
 				sourceCheckedAt: snapshot.lastSuccessfulFetchAt,
@@ -412,6 +421,9 @@ export const liveDesksResolvers = {
 				lifecycleState: eventLifecycle?.state ?? null,
 				lifecycleObservedAt: eventLifecycle?.observedAt ?? null,
 				lifecycleNextRefreshAt: eventLifecycle?.nextRefreshAt ?? null,
+				lifecycleLiveRevision: eventLifecycle?.liveRevision ?? null,
+				lifecyclePublicationId: eventLifecycle?.publicationId ?? null,
+				lifecycleSourceCheckedAt: eventLifecycle?.sourceCheckedAt ?? null,
 			});
 			return {
 				season: snapshot.seasonCode,
@@ -500,6 +512,7 @@ export const liveDesksResolvers = {
 						currentEventId: eventCore.currentEventId,
 						nextEventId: window.nextEventId,
 						liveRevision: snapshot.revision,
+						publicationId: snapshot.publicationId,
 						liveEventId: snapshot.eventId,
 						publicationState: snapshot.state,
 						sourceCheckedAt: snapshot.lastSuccessfulFetchAt,
@@ -509,6 +522,9 @@ export const liveDesksResolvers = {
 						lifecycleState: deskLifecycle?.state ?? null,
 						lifecycleObservedAt: deskLifecycle?.observedAt ?? null,
 						lifecycleNextRefreshAt: deskLifecycle?.nextRefreshAt ?? null,
+						lifecycleLiveRevision: deskLifecycle?.liveRevision ?? null,
+						lifecyclePublicationId: deskLifecycle?.publicationId ?? null,
+						lifecycleSourceCheckedAt: deskLifecycle?.sourceCheckedAt ?? null,
 					})
 				: window;
 			const provisional = !(event?.finished && event.dataChecked);
