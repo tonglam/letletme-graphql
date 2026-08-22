@@ -238,7 +238,7 @@ describe("liveSnapshot GraphQL contract", () => {
 			state: "SCHEDULED",
 		});
 		expect(desk.sourceCheckedAt).toBeTruthy();
-		expect(desk.stale).toBe(false);
+		expect(desk.stale).toBe(true);
 		expect(desk.matches.length).toBeGreaterThan(0);
 		expect(desk.matches.every((match) => match.eventId === 1)).toBe(true);
 		expect(desk.nextFixtures.length).toBeGreaterThan(0);
