@@ -878,6 +878,7 @@ const withSnapshotRead = async <T>(operation: () => Promise<T>): Promise<T> => {
 
 describe("My FPL review repository", () => {
 	it("normalizes search, chips, positions and board rows", () => {
+		expect(myFplTestables.snapshotDateKey(new Date("2026-08-21T16:00:00.000Z"))).toBe("2026-08-22");
 		expect(myFplTestables.normalizeSearch("  North London  ")).toBe("North London");
 		expect(() => myFplTestables.normalizeSearch("x".repeat(81))).toThrow(
 			"search must contain at most 80 characters"
@@ -963,6 +964,31 @@ describe("My FPL review repository", () => {
 			expect(path.state).toBe("READY");
 			expect(path.points[0]?.gameweek).toBe(1);
 			expect(path.snapshotMeta?.revision).toBe("42");
+		});
+	});
+
+	it("fails closed when the snapshot aggregate viewer is bound to another entry", async () => {
+		await withSnapshotRead(async () => {
+			const aggregate = snapshotAggregatePayload();
+			const fixture = makeFixture({
+				publicationRows: [snapshotPublicationRow],
+				snapshotEntryRow: snapshotEntryRow(),
+				snapshotBoardRow: snapshotBoardRow(),
+				snapshotAggregatePayload: {
+					...aggregate,
+					viewers: {
+						"123": { ...aggregate.viewers["123"], entryId: 999 },
+					},
+				},
+				snapshotSeasonPathPayload: aggregate,
+			});
+			const competitions = await fixture.repository.loadCompetitionsDesk(
+				fixture.context,
+				7,
+				1,
+				"42"
+			);
+			expect(competitions.aggregate).toBeNull();
 		});
 	});
 
@@ -1230,6 +1256,24 @@ describe("My FPL review repository", () => {
 		expect(transfers.state).toBe("READY");
 		expect(transfers.gameweeks).toHaveLength(1);
 		expect(transfers.gameweeks[0]?.transfers[0]?.elementInWebName).toBe("In");
+	});
+
+	it("rejects contradictory transfer counts in a daily snapshot", async () => {
+		await withSnapshotRead(async () => {
+			const payload = snapshotPayload();
+			const fixture = makeFixture({
+				publicationRows: [snapshotPublicationRow],
+				snapshotEntryRow: {
+					...snapshotEntryRow(),
+					payload: {
+						...payload,
+						history: [{ ...historyRow(1), eventTransfers: 0 }],
+					},
+				},
+			});
+			const transfers = await fixture.repository.loadTeamTransfers(fixture.context);
+			expect(transfers.state).toBe("PENDING");
+		});
 	});
 
 	it("validates tournament board pagination, pushes range to SQL, and warms its cache", async () => {

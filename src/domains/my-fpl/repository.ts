@@ -1099,8 +1099,15 @@ const cacheableState = (state: MyFplReviewState): boolean => state !== "UNAVAILA
 const stateTtl = (state: MyFplReviewState): number =>
 	state === "PENDING" ? NULLABLE_STATE_CACHE_TTL_SECONDS : QUERY_CACHE_TTL_SECONDS.REPORTING;
 
-const snapshotDateKey = (value: string | Date): string =>
-	value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+const snapshotDateKey = (value: string | Date): string => {
+	if (!(value instanceof Date)) return String(value).slice(0, 10);
+	return new Intl.DateTimeFormat("en-CA", {
+		timeZone: "Asia/Shanghai",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+	}).format(value);
+};
 
 const currentUtc8Minutes = (now = new Date()): number => {
 	const parts = new Intl.DateTimeFormat("en-GB", {
@@ -2072,9 +2079,9 @@ const loadTeamTransfers = async (
 		if (
 			snapshot.payload.history.some(
 				(row) =>
-					row.eventTransfers < 0 ||
-					(row.eventTransfers > 0 && transferCounts.get(row.eventId) !== row.eventTransfers)
-			)
+					row.eventTransfers < 0 || (transferCounts.get(row.eventId) ?? 0) !== row.eventTransfers
+			) ||
+			snapshot.payload.transfers.some((move) => !historyByEvent.has(move.eventId))
 		) {
 			return {
 				state: "PENDING",
@@ -2497,9 +2504,11 @@ const loadCompetitionBoardPrepared = async (
 			 ), paged AS (
 			   SELECT * FROM filtered
 				   ORDER BY CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
-				                THEN (payload->>'groupId')::integer END NULLS LAST,
+				                THEN CASE WHEN (payload->>'groupId')::numeric BETWEEN -2147483648 AND 2147483647
+				                          THEN (payload->>'groupId')::integer END END NULLS LAST,
 				            CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
-				                THEN (payload->>'rank')::integer END NULLS LAST,
+				                THEN CASE WHEN (payload->>'rank')::numeric BETWEEN -2147483648 AND 2147483647
+				                          THEN (payload->>'rank')::integer END END NULLS LAST,
 			            entry_id
 			   LIMIT $6 OFFSET $7
 			 )
@@ -2514,9 +2523,13 @@ const loadCompetitionBoardPrepared = async (
 				                                      entry_id) FROM paged), '[]'::jsonb) AS rows,
 				   (SELECT count(*)::integer FROM board
 				     WHERE ((payload->>'groupId') IS NOT NULL
-				             AND payload->>'groupId' !~ '^-?[0-9]+$')
+				             AND CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
+				                      THEN (payload->>'groupId')::numeric NOT BETWEEN -2147483648 AND 2147483647
+				                      ELSE TRUE END)
 				        OR ((payload->>'rank') IS NOT NULL
-				             AND payload->>'rank' !~ '^-?[0-9]+$')) AS invalid_row_count,
+				             AND CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
+				                      THEN (payload->>'rank')::numeric NOT BETWEEN -2147483648 AND 2147483647
+				                      ELSE TRUE END)) AS invalid_row_count,
 				   (SELECT CASE WHEN aggregate.payload->>'entryCount' ~ '^[0-9]+$'
 				                   THEN (aggregate.payload->>'entryCount')::integer END
 			      FROM competition.my_fpl_snapshot_tournament_aggregates aggregate
@@ -2794,6 +2807,7 @@ const loadCompetitionAggregateSnapshot = async (
 	if (!isRecord(raw)) return null;
 	const viewers = isRecord(raw.viewers) ? raw.viewers : {};
 	const viewer = viewers[String(entryId)] ?? null;
+	if (!isRecord(viewer) || viewer.entryId !== entryId) return null;
 	const { viewers: _viewers, ...aggregatePayload } = raw;
 	void _viewers;
 	const normalized = { ...aggregatePayload, viewer, snapshotMeta: snapshot };
@@ -3256,4 +3270,5 @@ export const myFplTestables = {
 	normalizeChip,
 	positionName,
 	mapBoardJsonRow,
+	snapshotDateKey,
 };
