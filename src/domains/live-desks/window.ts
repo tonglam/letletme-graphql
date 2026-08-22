@@ -132,6 +132,11 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 	const currentHasStarted = hasStarted(currentFixtures);
 	const currentIsSettled = isFinished(currentFixtures);
 	const currentHasFuture = hasFutureFixture(currentFixtures, nowMs);
+	const seasonFinalized =
+		events.length > 0 &&
+		events.every(
+			(event) => event.finished && event.dataChecked && isFinished(byEvent.get(event.id) ?? [])
+		);
 	const currentDeadlineMs = currentEvent?.deadlineTime
 		? Date.parse(currentEvent.deadlineTime)
 		: Number.NaN;
@@ -212,6 +217,13 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 			Number.isFinite(currentDeadlineMs) && nowMs < currentDeadlineMs
 				? "PRESEASON"
 				: "EVENT_SCHEDULED";
+	} else if (seasonFinalized && latestFinalized !== null) {
+		// After the last finalized event there is no next gameweek to anchor.
+		// Keep the final event available for historical desks, but expose the
+		// season boundary explicitly so clients stop polling as if a GW were live.
+		anchorEventId = latestFinalized;
+		anchorMode = "OFFSEASON";
+		windowState = "OFFSEASON";
 	} else if (latestFinalized !== null) {
 		anchorEventId = latestFinalized;
 		anchorMode = "PREVIOUS_FINAL";
@@ -262,6 +274,7 @@ export const resolveLiveWindow = (input: LiveWindowInput): LiveWindow => {
 				return "SCHEDULED";
 			case "FINALIZED":
 			case "BETWEEN_GAMEWEEKS":
+			case "OFFSEASON":
 				return "FINAL";
 			default:
 				return input.liveRevision

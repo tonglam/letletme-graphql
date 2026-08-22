@@ -863,7 +863,7 @@ export type EventLive = {
 
 export type TargetedLiveRead = {
 	performances: LivePerformance[];
-	meta: LiveSnapshotMeta;
+	meta: LiveSnapshotMeta | null;
 };
 
 interface LiveRepository {
@@ -1136,11 +1136,11 @@ const fetchLivePerformancesFromDbByEvents = async (
 		.select(EVENT_LIVES_PROJECTION)
 		.in("event_id", uniqueEventIds);
 	if (error) {
-		context.logger.warn(
+		context.logger.error(
 			{ err: error, eventIds: uniqueEventIds },
 			"Live publication unavailable and PostgreSQL live read-through failed"
 		);
-		return [];
+		throw new Error("Failed to fetch historical live performances");
 	}
 	return (data as unknown as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
 };
@@ -1563,39 +1563,53 @@ export const liveRepository: LiveRepository = {
 		eventId: number,
 		playerIds: number[]
 	): Promise<TargetedLiveRead> {
-		const publishedMeta = await loadLivePublicationMeta(context, eventId);
-		if (!publishedMeta?.publicationId) {
-			throw new Error(`Live publication metadata is unavailable for event ${eventId}`);
-		}
-		const snapshot = await getTargetedLiveDataSnapshot(context, eventId, playerIds, {
-			publicationId: publishedMeta.publicationId,
-			revision: publishedMeta.revision,
-			sourceCheckedAt: publishedMeta.checkedAt,
-			publishedAt: publishedMeta.publishedAt,
-			state: publishedMeta.state,
-			eventLiveCount: publishedMeta.eventLiveCount,
-			fixtureCount: publishedMeta.fixtureCount,
-			fixtureTeamCount: publishedMeta.fixtureTeamCount,
-			bonusTeamCount: publishedMeta.bonusTeamCount,
+		const readDurableRows = async (): Promise<TargetedLiveRead> => ({
+			performances: await fetchLivePerformanceFromDbByEventsAndPlayerIds(
+				context,
+				[eventId],
+				playerIds
+			),
+			meta: null,
 		});
-		const meta: LiveSnapshotMeta = {
-			season: snapshot.seasonCode,
-			eventId,
-			revision: snapshot.revision,
-			publicationId: snapshot.publicationId,
-			state: snapshot.state,
-			publishedAt: snapshot.publishedAt,
-			checkedAt: snapshot.sourceCheckedAt,
-			eventLiveCount: snapshot.eventLiveCount,
-			fixtureCount: snapshot.fixtureCount,
-			fixtureTeamCount: snapshot.fixtureTeamCount,
-			bonusTeamCount: snapshot.bonusTeamCount,
-		};
-		rememberLiveSnapshotMeta(context, meta, snapshot.seasonCode, eventId, snapshot.source);
-		return {
-			performances: snapshot.eventLives.map(mapPublishedLivePerformance),
-			meta,
-		};
+		try {
+			const publishedMeta = await loadLivePublicationMeta(context, eventId);
+			if (!publishedMeta?.publicationId) return readDurableRows();
+			const snapshot = await getTargetedLiveDataSnapshot(context, eventId, playerIds, {
+				publicationId: publishedMeta.publicationId,
+				revision: publishedMeta.revision,
+				sourceCheckedAt: publishedMeta.checkedAt,
+				publishedAt: publishedMeta.publishedAt,
+				state: publishedMeta.state,
+				eventLiveCount: publishedMeta.eventLiveCount,
+				fixtureCount: publishedMeta.fixtureCount,
+				fixtureTeamCount: publishedMeta.fixtureTeamCount,
+				bonusTeamCount: publishedMeta.bonusTeamCount,
+			});
+			const meta: LiveSnapshotMeta = {
+				season: snapshot.seasonCode,
+				eventId,
+				revision: snapshot.revision,
+				publicationId: snapshot.publicationId,
+				state: snapshot.state,
+				publishedAt: snapshot.publishedAt,
+				checkedAt: snapshot.sourceCheckedAt,
+				eventLiveCount: snapshot.eventLiveCount,
+				fixtureCount: snapshot.fixtureCount,
+				fixtureTeamCount: snapshot.fixtureTeamCount,
+				bonusTeamCount: snapshot.bonusTeamCount,
+			};
+			rememberLiveSnapshotMeta(context, meta, snapshot.seasonCode, eventId, snapshot.source);
+			return {
+				performances: snapshot.eventLives.map(mapPublishedLivePerformance),
+				meta,
+			};
+		} catch (error) {
+			context.logger.info(
+				{ eventId, err: error instanceof Error ? error.message : "unknown" },
+				"Live publication targeted read unavailable; reading durable player rows"
+			);
+			return readDurableRows();
+		}
 	},
 
 	getLivePerformancesForEventsAndPlayers(

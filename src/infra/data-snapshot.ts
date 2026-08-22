@@ -384,6 +384,7 @@ const readPinnedCorePublicationItems = async (
 type LivePublicationPin = {
 	manifest: Promise<DataPublicationManifest | null>;
 	publication?: Promise<DataPublication | null>;
+	postgresPublication?: Promise<DataPublication | null>;
 };
 
 const livePublicationPinMemo = new WeakMap<object, Map<number, LivePublicationPin>>();
@@ -439,9 +440,11 @@ export const getLiveDataPublicationManifestWithSource = async (
 	eventId: number
 ): Promise<LivePublicationManifestWithSource | null> => {
 	if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
-	const manifest = await reserveLivePublicationPin(context, eventId, "manifest").manifest;
+	const pin = reserveLivePublicationPin(context, eventId, "manifest");
+	const manifest = await pin.manifest;
 	if (manifest) return { manifest, source: "redis" };
-	const postgresPublication = await loadLivePublicationFromPostgres(context, eventId);
+	pin.postgresPublication ??= loadLivePublicationFromPostgres(context, eventId);
+	const postgresPublication = await pin.postgresPublication;
 	return postgresPublication
 		? { manifest: postgresPublication.manifest, source: "postgres" }
 		: null;
@@ -1285,6 +1288,10 @@ type LiveFallbackRow = QueryResultRow & {
 	fixture_item_count: string | number | null;
 	event_live_checksum: string | null;
 	fixture_checksum: string | null;
+	event_live_payload_bytes: string | number | null;
+	fixture_payload_bytes: string | number | null;
+	event_live_payload_sha256: string | null;
+	fixture_payload_sha256: string | null;
 };
 
 /**
@@ -1351,6 +1358,34 @@ const LIVE_FALLBACK_SQL = `
 			JOIN active_publication publication ON item.publication_id::text = publication.publication_id
 			WHERE item.item_name = 'fixtures'
 		) AS fixture_checksum
+		,
+		(
+			SELECT octet_length(convert_to(item.payload::text, 'UTF8'))
+			FROM ops.dataset_publication_items item
+			JOIN active_publication publication ON item.publication_id::text = publication.publication_id
+			WHERE item.item_name = 'eventLive'
+		) AS event_live_payload_bytes
+		,
+		(
+			SELECT octet_length(convert_to(item.payload::text, 'UTF8'))
+			FROM ops.dataset_publication_items item
+			JOIN active_publication publication ON item.publication_id::text = publication.publication_id
+			WHERE item.item_name = 'fixtures'
+		) AS fixture_payload_bytes
+		,
+		(
+			SELECT encode(sha256(convert_to(item.payload::text, 'UTF8')), 'hex')
+			FROM ops.dataset_publication_items item
+			JOIN active_publication publication ON item.publication_id::text = publication.publication_id
+			WHERE item.item_name = 'eventLive'
+		) AS event_live_payload_sha256
+		,
+		(
+			SELECT encode(sha256(convert_to(item.payload::text, 'UTF8')), 'hex')
+			FROM ops.dataset_publication_items item
+			JOIN active_publication publication ON item.publication_id::text = publication.publication_id
+			WHERE item.item_name = 'fixtures'
+		) AS fixture_payload_sha256
 	FROM authority
 `;
 
@@ -1374,6 +1409,8 @@ const liveFallbackPublication = (
 	const fixtures = row?.fixtures;
 	const eventLiveCount = integer(row?.event_live_item_count);
 	const fixtureCount = integer(row?.fixture_item_count);
+	const eventLivePayloadBytes = integer(row?.event_live_payload_bytes);
+	const fixturePayloadBytes = integer(row?.fixture_payload_bytes);
 	if (
 		!row ||
 		integer(row.authority_count) !== 1 ||
@@ -1394,6 +1431,10 @@ const liveFallbackPublication = (
 		fixtureCount !== fixtures.length ||
 		row.event_live_checksum !== eventLiveItem.sha256 ||
 		row.fixture_checksum !== fixtureItem.sha256 ||
+		eventLivePayloadBytes !== eventLiveItem.bytes ||
+		fixturePayloadBytes !== fixtureItem.bytes ||
+		row.event_live_payload_sha256 !== eventLiveItem.sha256 ||
+		row.fixture_payload_sha256 !== fixtureItem.sha256 ||
 		(expectedManifest !== null &&
 			expectedManifest !== undefined &&
 			(manifest.publicationId !== expectedManifest.publicationId ||
@@ -2042,7 +2083,8 @@ export const getLiveDataSnapshot = (
 		if (snapshot) return snapshot;
 		let databasePublication: DataPublication | null;
 		try {
-			databasePublication = await loadLivePublicationFromPostgres(context, eventId, manifest);
+			pin.postgresPublication ??= loadLivePublicationFromPostgres(context, eventId, manifest);
+			databasePublication = await pin.postgresPublication;
 		} catch (error) {
 			throw new Error(
 				`LIVE_PUBLICATION_UNAVAILABLE:${context.currentSeason.seasonCode}:${eventId}:${

@@ -584,7 +584,10 @@ export const entryLiveBatchService = {
 		}
 
 		// Phase 2: load reusable data only for entries that actually have picks.
-		const needsLiveDetails = includeLive && provisional;
+		// Finalized and historical desks still need the durable player projection
+		// for detail rows. Only the manager headline switches to the official final
+		// result; suppressing this read made finalized entries silently lose details.
+		const needsLiveDetails = includeLive;
 		const useTargetedLiveRead =
 			needsLiveDetails && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
 		const [liveByPlayerRaw, fixtures, teams, transfersByEntry, fullSnapshotMeta] =
@@ -615,15 +618,17 @@ export const entryLiveBatchService = {
 
 		// Load only the needed players via HMGET (not HGETALL of all 600+)
 		const playerIds = Array.from(allPlayerIds);
+		let targetedLiveError: Error | null = null;
 		const loadTargetedLive = async (): Promise<TargetedLiveRead | null> => {
 			if (!useTargetedLiveRead) return null;
 			const stopSnapshot = context.requestTiming?.start("entryLive.liveSnapshot");
 			try {
 				return await liveRepository.getTargetedLiveRead(context, eventId, playerIds);
 			} catch (error) {
+				targetedLiveError = error instanceof Error ? error : new Error("Live data unavailable");
 				context.logger.info(
 					{ eventId, err: error instanceof Error ? error.message : "unknown" },
-					"Targeted live publication read unavailable; retaining durable player rows"
+					"Targeted live read unavailable; marking entries partial"
 				);
 				return null;
 			} finally {
@@ -673,6 +678,7 @@ export const entryLiveBatchService = {
 		// Phase 4: Compute per-entry (pure CPU, zero I/O)
 		for (const entryId of readyEntryIds) {
 			try {
+				if (targetedLiveError) throw targetedLiveError;
 				const perEntry: PerEntryData = {
 					entryId,
 					entry: entriesById.get(entryId) ?? null,

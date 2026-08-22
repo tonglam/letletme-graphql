@@ -109,4 +109,41 @@ describe("live window contract", () => {
 			dataAvailability: "FINAL",
 		});
 	});
+
+	it("enters offseason after the final gameweek while retaining the final anchor", () => {
+		const core = buildTestCoreData(null, {
+			events: buildTestCoreData(null).events.map((event) => ({
+				...event,
+				finished: true,
+				dataChecked: true,
+				isCurrent: false,
+				isNext: false,
+			})),
+			fixtures: buildTestCoreData(null).fixtures.map((fixture) => ({
+				...fixture,
+				started: true,
+				finished: true,
+				finishedProvisional: false,
+			})),
+		});
+		const window = resolveLiveWindow({
+			events: core.events,
+			fixtures: core.fixtures,
+			currentEventId: null,
+			nextEventId: null,
+			liveRevision: null,
+			sourceCheckedAt: null,
+			publishedAt: null,
+			source: "redis",
+			now: new Date("2027-06-01T12:00:00.000Z"),
+		});
+
+		expect(window).toMatchObject({
+			anchorEventId: 38,
+			latestFinalizedEventId: 38,
+			anchorMode: "OFFSEASON",
+			windowState: "OFFSEASON",
+			dataAvailability: "FINAL",
+		});
+	});
 });

@@ -2,7 +2,7 @@ import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import type { LiveDataSnapshot } from "../../infra/data-snapshot";
 
-export const LIVE_COMPETITION_PROJECTION_VERSION = "v2";
+export const LIVE_COMPETITION_PROJECTION_VERSION = "v3";
 
 export type CachedCompetitionBoard = {
 	board: unknown[];

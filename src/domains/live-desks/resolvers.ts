@@ -50,6 +50,7 @@ const compatibilityState = (
 			return "GW_REVIEW";
 		case "FINALIZED":
 		case "BETWEEN_GAMEWEEKS":
+		case "OFFSEASON":
 			return "FINALIZED";
 		default:
 			return "SCHEDULED";
@@ -59,7 +60,11 @@ const compatibilityState = (
 const snapshotStateForWindow = (window: LiveWindow): "SCHEDULED" | "LIVE" | "SETTLED" => {
 	if (window.windowState === "PRESEASON" || window.windowState === "EVENT_SCHEDULED")
 		return "SCHEDULED";
-	if (window.windowState === "FINALIZED" || window.windowState === "BETWEEN_GAMEWEEKS")
+	if (
+		window.windowState === "FINALIZED" ||
+		window.windowState === "BETWEEN_GAMEWEEKS" ||
+		window.windowState === "OFFSEASON"
+	)
 		return "SETTLED";
 	return "LIVE";
 };
@@ -152,6 +157,14 @@ const resolveSnapshot = async (
 const teamName = (core: Pick<CoreLiveIdentitySnapshot, "teams">, id: number): string =>
 	core.teams.find((team) => team.id === id)?.name ?? "";
 
+const teamShortName = (core: Pick<CoreLiveIdentitySnapshot, "teams">, id: number): string =>
+	core.teams.find((team) => team.id === id)?.shortName ?? "";
+
+const nextEventAfter = (eventCore: CoreEventSnapshot, eventId: number): number | null =>
+	eventCore.events
+		.filter((event) => event.id > eventId)
+		.sort((left, right) => left.id - right.id)[0]?.id ?? null;
+
 const matchRows = (
 	eventId: number,
 	fixtures: LiveDataSnapshot["fixtures"],
@@ -162,8 +175,10 @@ const matchRows = (
 		eventId,
 		homeTeamId: fixture.teamHId,
 		homeTeamName: teamName(core, fixture.teamHId),
+		homeTeamShortName: teamShortName(core, fixture.teamHId),
 		awayTeamId: fixture.teamAId,
 		awayTeamName: teamName(core, fixture.teamAId),
+		awayTeamShortName: teamShortName(core, fixture.teamAId),
 		homeScore: fixture.teamHScore,
 		awayScore: fixture.teamAScore,
 		kickoffTime: fixture.kickoffTime,
@@ -182,7 +197,7 @@ const scheduledMatchdayDesk = (
 	publicationSource: "redis" | "postgres" | null,
 	window: LiveWindow
 ) => {
-	const nextEventId = eventCore.events.find((event) => event.isNext)?.id ?? null;
+	const nextEventId = nextEventAfter(eventCore, eventId);
 	return {
 		season: fixtureCore.seasonCode,
 		eventId,
@@ -197,6 +212,7 @@ const scheduledMatchdayDesk = (
 		publishedAt: manifest?.publishedAt ?? fixtureCore.sourceCheckedAt,
 		source: manifest ? publicationSource?.toUpperCase() : "CORE",
 		stale: isStale(manifest?.sourceCheckedAt ?? fixtureCore.sourceCheckedAt),
+		nextRefreshAt: window.nextRefreshAt,
 		matches: matchRows(
 			eventId,
 			fixtureCore.fixtures.filter((fixture) => fixture.eventId === eventId),
@@ -363,11 +379,14 @@ export const liveDesksResolvers = {
 				publishedAt: snapshot.publishedAt,
 				source: snapshot.source === "postgres" ? "POSTGRES" : "REDIS",
 				stale: isStale(snapshot.sourceCheckedAt),
+				nextRefreshAt: snapshotWindow.nextRefreshAt,
 				matches: matchRows(snapshot.eventId, snapshot.fixtures, core),
-				nextFixtures: window.nextEventId
+				nextFixtures: nextEventAfter(eventCore, snapshot.eventId)
 					? matchRows(
-							window.nextEventId,
-							fixtureCore.fixtures.filter((fixture) => fixture.eventId === window.nextEventId),
+							nextEventAfter(eventCore, snapshot.eventId)!,
+							fixtureCore.fixtures.filter(
+								(fixture) => fixture.eventId === nextEventAfter(eventCore, snapshot.eventId)
+							),
 							fixtureCore
 						)
 					: [],
@@ -404,6 +423,11 @@ export const liveDesksResolvers = {
 			args: { entryId: number; selectedTournamentId?: number | null; ref?: LiveRef | null },
 			context: GraphQLContext
 		) => {
+			if (args.ref && args.ref.season !== context.currentSeason.seasonCode) {
+				throw new GraphQLError("Live revision belongs to another season", {
+					extensions: { code: "LIVE_REVISION_GONE" },
+				});
+			}
 			const [tournaments, eventCore, fixtureCore] = await Promise.all([
 				tournamentsService.getEntryTournaments(context, args.entryId),
 				getCoreEventSnapshot(context),

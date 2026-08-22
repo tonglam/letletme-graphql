@@ -78,8 +78,10 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		eventId: Int!
 		homeTeamId: Int!
 		homeTeamName: String!
+		homeTeamShortName: String! @deprecated(reason: "Use core team identity")
 		awayTeamId: Int!
 		awayTeamName: String!
+		awayTeamShortName: String! @deprecated(reason: "Use core team identity")
 		homeScore: Int
 		awayScore: Int
 		kickoffTime: DateTime
