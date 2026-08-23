@@ -530,10 +530,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 			new Set([1])
 		);
 		expect(unevenProjection).toMatchObject({ storedPlayed: 2, derivedPlayed: 2 });
-		expect(unevenProjection.standings).toEqual([
-			expect.objectContaining({ entryId: 102, played: 1 }),
-			expect.objectContaining({ entryId: 101, played: 1 }),
-		]);
+		expect(unevenProjection.standings).toBeNull();
 
 		const moreCompleteGroups = caughtUpGroups.map((group) => ({ ...group, played: 3 }));
 		expect(
@@ -653,7 +650,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 		expect(rejected.options.finalizedEventIds?.has(1)).toBe(false);
 		expect(rejected.options.suppressedEventIds).toEqual(new Set([1]));
 		expect(
-			projectOfficialH2HStandingsFromResults([101, 102, 103, 104], mixedBatch, rejected.options)
+			projectHistoricalOfficialH2HStandings([101, 102, 103, 104], mixedBatch, rejected.options)
 		).toEqual([
 			expect.objectContaining({ entryId: 101, played: 0, matchPoints: 0 }),
 			expect.objectContaining({ entryId: 102, played: 0, matchPoints: 0 }),

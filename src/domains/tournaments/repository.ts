@@ -1037,7 +1037,10 @@ function selectCurrentOfficialH2HProjection(
 	const derived = projectOfficialH2HStandingsFromResults(entryIds, historyRows, options);
 	const derivedPlayed = derived.reduce((total, row) => total + row.played, 0);
 	const storedByEntry = new Map(groups.map((row) => [row.entry_id, row]));
-	const derivedCoverageIsAtLeastStored = derivedPlayed >= storedPlayed;
+	const derivedCoverageIsAtLeastStored = derived.every((row) => {
+		const stored = storedByEntry.get(row.entryId);
+		return stored !== undefined && row.played >= Math.max(0, stored.played ?? 0);
+	});
 	const hasLaggingStoredEntry =
 		derivedCoverageIsAtLeastStored &&
 		derived.some((row) => {
@@ -1212,7 +1215,7 @@ async function loadOfficialH2HSnapshots(
 				? projectHistoricalOfficialH2HStandings(
 						tournamentGroups.map((row) => row.entry_id),
 						tournamentHistory,
-						{ finalizedEventIds }
+						currentProjection.options
 					)
 				: null;
 		const projectedStandings = historicalStandings ?? currentProjection.standings;
@@ -3471,7 +3474,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				? projectHistoricalOfficialH2HStandings(
 						groups.map((row) => row.entry_id),
 						history,
-						{ finalizedEventIds }
+						currentProjection.options
 					)
 				: null;
 		const projectedStandings = historicalStandings ?? currentProjection.standings;
