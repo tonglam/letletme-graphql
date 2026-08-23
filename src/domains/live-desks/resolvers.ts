@@ -31,6 +31,7 @@ import {
 } from "./competition-board-cache";
 import {
 	buildEntryLiveCompetitionBoard,
+	entryLiveCompetitionRosterRevision,
 	entryLiveCompetitionBoardCacheKey,
 	getOrBuildEntryLiveCompetitionBoard,
 	normalizeEntryLiveCompetitionBoardRequest,
@@ -529,11 +530,15 @@ export const liveDesksResolvers = {
 				readLiveWindow(context),
 				tournamentsService.getTournamentEntryIds(context, request.tournamentId),
 			]);
-			const entryIds = Array.from(
+			const allEntryIds = Array.from(
 				new Set(
 					tournamentEntryIds.filter((entryId) => Number.isSafeInteger(entryId) && entryId > 0)
 				)
 			).sort((left, right) => left - right);
+			const { entryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
+				allEntryIds,
+				request.entryId
+			);
 			const { eventCore, window } = liveWindow;
 			const event = eventCore.events.find((candidate) => candidate.id === request.eventId);
 			if (!event) {
@@ -552,6 +557,8 @@ export const liveDesksResolvers = {
 			}
 			const playerRevision = snapshot?.revision ?? `core-${eventCore.revision}`;
 			const managerRevision = managerLoadRevision(managerScores);
+			const rosterRevision = entryLiveCompetitionRosterRevision(allEntryIds);
+			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
 			const cacheIdentity = {
 				season: context.currentSeason.seasonCode,
 				eventId: request.eventId,
@@ -559,6 +566,8 @@ export const liveDesksResolvers = {
 				coreRevision: eventCore.revision,
 				playerRevision,
 				managerRevision,
+				rosterRevision,
+				windowRevision,
 			};
 			const cacheKey = entryLiveCompetitionBoardCacheKey(context, cacheIdentity);
 			const requireNet = memberTournament.leagueType === LeagueType.H2H;
@@ -581,8 +590,9 @@ export const liveDesksResolvers = {
 				return buildEntryLiveCompetitionBoard({
 					...cacheIdentity,
 					rows: rankedRows,
-					totalEntries: entryIds.length,
+					totalEntries: allEntryIds.length,
 					failedEntryIds: result.errors.map((error) => error.entryId),
+					unavailableEntryIds: deferredEntryIds,
 					requireNet,
 				});
 			});
@@ -836,23 +846,20 @@ export const liveDesksResolvers = {
 			const enrichedRows = rows.map((row) => {
 				const player = players.get(row.playerId);
 				const team = player ? teams.get(player.teamId) : null;
-				if (!player || !team) {
-					throw new Error("Tournament selection index references an unknown core player");
-				}
 				return {
 					...row,
-					playerName: player.webName,
-					teamId: team.id,
-					teamName: team.name,
-					teamShortName: team.shortName,
+					playerName: player?.webName ?? `Player ${row.playerId}`,
+					teamId: team?.id ?? player?.teamId ?? 0,
+					teamName: team?.name ?? "Unknown",
+					teamShortName: team?.shortName ?? "—",
 					position:
-						player.type === 1
+						player?.type === 1
 							? "GKP"
-							: player.type === 2
+							: player?.type === 2
 								? "DEF"
-								: player.type === 3
+								: player?.type === 3
 									? "MID"
-									: player.type === 4
+									: player?.type === 4
 										? "FWD"
 										: "UNKNOWN",
 				};
@@ -875,9 +882,11 @@ export const liveDesksResolvers = {
 			// Preserve the legacy one-opponent contract (viewer + opponent), while
 			// allowing the new clients to request an explicit pair of entries.
 			const ids =
-				requestedIds.length === 1 && requestedIds[0] !== args.entryId
-					? [args.entryId, requestedIds[0]!]
-					: requestedIds;
+				requestedIds.length === 0
+					? [args.entryId]
+					: requestedIds.length === 1 && requestedIds[0] !== args.entryId
+						? [args.entryId, requestedIds[0]!]
+						: requestedIds;
 			if (
 				ids.length === 0 ||
 				ids.length > 2 ||

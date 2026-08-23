@@ -5,7 +5,7 @@ import { gqlCacheKey } from "../../infra/cache-key";
 import type { LiveCalcData } from "../entry-live/calc-service";
 import type { LiveManagerScore } from "../entry-live/manager-score";
 
-export const ENTRY_LIVE_COMPETITION_BOARD_PROJECTION_VERSION = "v1";
+export const ENTRY_LIVE_COMPETITION_BOARD_PROJECTION_VERSION = "v2";
 export const ENTRY_LIVE_COMPETITION_BOARD_CACHE_TTL_SECONDS = 30;
 
 export type EntryLiveCompetitionBoardSort =
@@ -143,7 +143,24 @@ const BOARD_SORTS = new Set<EntryLiveCompetitionBoardSort>([
 	"ENTRY_NAME",
 ]);
 
-const CHIP_VALUES = new Set(["NONE", "TRIPLE_CAPTAIN", "BENCH_BOOST", "WILDCARD", "FREE_HIT"]);
+const CHIP_VALUES = new Set([
+	"NONE",
+	"TRIPLE_CAPTAIN",
+	"BENCH_BOOST",
+	"WILDCARD",
+	"FREE_HIT",
+	"MANAGER",
+]);
+
+export const entryLiveCompetitionRosterRevision = (entryIds: readonly number[]): string =>
+	createHash("sha256")
+		.update(
+			Array.from(new Set(entryIds))
+				.sort((left, right) => left - right)
+				.join(",")
+		)
+		.digest("hex")
+		.slice(0, 20);
 
 export const normalizeEntryLiveCompetitionBoardRequest = (
 	value: unknown
@@ -311,6 +328,11 @@ const boardRevisionFor = (input: {
 	coreRevision: string;
 	playerRevision: string;
 	managerRevision: string | null;
+	rosterRevision: string;
+	windowRevision: string;
+	totalEntries: number;
+	unavailableEntryIds: readonly number[];
+	failedEntryIds: readonly number[];
 	rows: readonly IndexedEntryLiveCompetitionBoardRow[];
 }): string =>
 	createHash("sha256")
@@ -323,6 +345,11 @@ const boardRevisionFor = (input: {
 				coreRevision: input.coreRevision,
 				playerRevision: input.playerRevision,
 				managerRevision: input.managerRevision,
+				rosterRevision: input.rosterRevision,
+				windowRevision: input.windowRevision,
+				totalEntries: input.totalEntries,
+				unavailableEntryIds: [...input.unavailableEntryIds].sort((left, right) => left - right),
+				failedEntryIds: [...input.failedEntryIds].sort((left, right) => left - right),
 				// Hash every value that can change membership, order, or headline
 				// content, plus all internal filter indexes. Poll timestamps and the
 				// derived fresh/stale state are deliberately excluded so a no-op
@@ -380,9 +407,12 @@ export const buildEntryLiveCompetitionBoard = (input: {
 	coreRevision: string;
 	playerRevision: string;
 	managerRevision: string | null;
+	rosterRevision?: string;
+	windowRevision?: string;
 	rows: readonly LiveCalcData[];
 	totalEntries: number;
 	failedEntryIds?: readonly number[];
+	unavailableEntryIds?: readonly number[];
 	requireNet?: boolean;
 }): CachedEntryLiveCompetitionBoard => {
 	const rows = input.rows.map(projectRow);
@@ -394,13 +424,21 @@ export const buildEntryLiveCompetitionBoard = (input: {
 	const failedEntryIds = Array.from(new Set(input.failedEntryIds ?? [])).sort(
 		(left, right) => left - right
 	);
-	const unavailable = Array.from(new Set([...unavailableEntryIds, ...failedEntryIds])).sort(
-		(left, right) => left - right
-	);
+	const unavailable = Array.from(
+		new Set([...unavailableEntryIds, ...(input.unavailableEntryIds ?? []), ...failedEntryIds])
+	).sort((left, right) => left - right);
 	const officialEventPoints = officialRows
 		.map((row) => (requireNet ? row.score.netEventPoints : row.score.eventPoints))
 		.filter((points): points is number => typeof points === "number");
-	const boardRevision = boardRevisionFor({ ...input, rows });
+	const rowEntryIds = rows.map((row) => row.entry);
+	const boardRevision = boardRevisionFor({
+		...input,
+		rosterRevision: input.rosterRevision ?? entryLiveCompetitionRosterRevision(rowEntryIds),
+		windowRevision: input.windowRevision ?? entryLiveCompetitionRosterRevision(rowEntryIds),
+		unavailableEntryIds: unavailable,
+		failedEntryIds,
+		rows,
+	});
 	return {
 		boardRevision,
 		playerRevision: input.playerRevision,
@@ -501,12 +539,16 @@ export const queryEntryLiveCompetitionBoard = (
 		});
 	}
 	const search = request.search.toLocaleLowerCase();
+	const numericEntrySearch = /^\d+$/.test(search) ? Number(search) : null;
 	const chips = new Set(request.chips);
 	const captainIds = new Set(request.captainPlayerIds);
 	const direction = request.direction === "ASC" ? 1 : -1;
 	const filtered = board.rows.filter(
 		(row) =>
-			(search.length === 0 || row.searchText.includes(search)) &&
+			(search.length === 0 ||
+				(numericEntrySearch === null
+					? row.searchText.includes(search)
+					: Number.isSafeInteger(numericEntrySearch) && row.entry === numericEntrySearch)) &&
 			(chips.size === 0 || chips.has(row.chip)) &&
 			(captainIds.size === 0 || captainIds.has(row.captainId)) &&
 			(!request.ownership || rowMatchesOwnership(row, request.ownership)) &&
@@ -555,6 +597,8 @@ export const entryLiveCompetitionBoardCacheKey = (
 		coreRevision: string;
 		playerRevision: string;
 		managerRevision: string | null;
+		rosterRevision: string;
+		windowRevision: string;
 	}
 ): string => {
 	const identity = createHash("sha256")

@@ -9,7 +9,11 @@ describe("live desks tournament selection index", () => {
 		);
 		expect(selectionIndex).toContain("getTournamentSelectionIndexRows");
 		expect(selectionIndex).toContain("getCoreDataSnapshot");
-		expect(selectionIndex).toContain("playerName: player.webName");
+		expect(selectionIndex).toContain("player?.webName");
+		expect(selectionIndex).toContain("Player ${row.playerId}");
+		expect(selectionIndex).not.toContain(
+			"Tournament selection index references an unknown core player"
+		);
 		expect(selectionIndex).not.toContain("getEntryEventPicksByIds");
 		expect(selectionIndex).not.toContain("getTournamentEntryIds(context, args.tournamentId)");
 	});
@@ -52,9 +56,24 @@ describe("live desks tournament selection index", () => {
 		);
 		expect(comparison).toContain("new Set(args.comparedEntryIds)");
 		expect(comparison).toContain("requestedIds.length === 1");
+		expect(comparison).toContain("requestedIds.length === 0");
 		expect(comparison).toContain("[args.entryId, requestedIds[0]!]");
 		expect(comparison).toContain("ids.length > 2");
 		expect(comparison).toContain("getTournamentEntryIds");
 		expect(comparison).not.toContain("slice(0, 2)");
+	});
+
+	it("bounds a large lightweight board before manager and batch reads", async () => {
+		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const board = source.slice(
+			source.indexOf("entryLiveCompetitionBoard: async"),
+			source.indexOf("entryLiveCompetitionsDesk: async")
+		);
+		expect(board).toContain("selectTournamentDeskEntryWindow");
+		expect(board.indexOf("selectTournamentDeskEntryWindow")).toBeLessThan(
+			board.indexOf("loadManagerScores")
+		);
+		expect(board).toContain("totalEntries: allEntryIds.length");
+		expect(board).toContain("unavailableEntryIds: deferredEntryIds");
 	});
 });

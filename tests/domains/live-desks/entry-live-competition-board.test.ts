@@ -6,6 +6,7 @@ import {
 import type { LiveManagerScore } from "../../../src/domains/entry-live/manager-score";
 import {
 	buildEntryLiveCompetitionBoard,
+	entryLiveCompetitionRosterRevision,
 	normalizeEntryLiveCompetitionBoardRequest,
 	queryEntryLiveCompetitionBoard,
 	type EntryLiveCompetitionBoardRequest,
@@ -183,6 +184,17 @@ describe("entry live competition board request validation", () => {
 		).toThrow();
 		expect(() => normalizeEntryLiveCompetitionBoardRequest({ ...base, page: 2 })).toThrow();
 	});
+
+	it("accepts every canonical chip, including manager", () => {
+		expect(
+			normalizeEntryLiveCompetitionBoardRequest({
+				entryId: 1,
+				tournamentId: 2,
+				eventId: 3,
+				chips: ["MANAGER"],
+			}).chips
+		).toEqual(["MANAGER"]);
+	});
 });
 
 describe("entry live competition board filtering and paging", () => {
@@ -298,6 +310,13 @@ describe("entry live competition board filtering and paging", () => {
 		}
 	});
 
+	it("does not substring-match an all-numeric entry search", () => {
+		const built = board([liveRow({ entry: 12 }), liveRow({ entry: 112 })]);
+		expect(
+			queryEntryLiveCompetitionBoard(built, request({ search: "12" })).rows.map((row) => row.entry)
+		).toEqual([12]);
+	});
+
 	it("rejects a stale revision without discarding the caller's prior page", () => {
 		const built = board(rows);
 		try {
@@ -348,6 +367,46 @@ describe("entry live competition board filtering and paging", () => {
 		};
 
 		expect(board([refreshed]).boardRevision).toBe(board([first]).boardRevision);
+	});
+
+	it("changes cache identity and board revision when tournament membership changes", () => {
+		const row = liveRow({ entry: 1 });
+		const firstRosterRevision = entryLiveCompetitionRosterRevision([1]);
+		const secondRosterRevision = entryLiveCompetitionRosterRevision([1, 2]);
+		const first = buildEntryLiveCompetitionBoard({
+			season: "2026/27",
+			eventId: 1,
+			tournamentId: 10,
+			coreRevision: "core-1",
+			playerRevision: "player-1",
+			managerRevision: null,
+			rosterRevision: firstRosterRevision,
+			windowRevision: firstRosterRevision,
+			rows: [row],
+			totalEntries: 1,
+		});
+		const second = buildEntryLiveCompetitionBoard({
+			season: "2026/27",
+			eventId: 1,
+			tournamentId: 10,
+			coreRevision: "core-1",
+			playerRevision: "player-1",
+			managerRevision: null,
+			rosterRevision: secondRosterRevision,
+			windowRevision: firstRosterRevision,
+			rows: [row],
+			totalEntries: 2,
+			unavailableEntryIds: [2],
+		});
+
+		expect(secondRosterRevision).not.toBe(firstRosterRevision);
+		expect(second.boardRevision).not.toBe(first.boardRevision);
+		expect(second).toMatchObject({
+			totalEntries: 2,
+			unavailableEntryIds: [2],
+			failedEntryIds: [],
+			partial: true,
+		});
 	});
 });
 
