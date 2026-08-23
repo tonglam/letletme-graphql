@@ -196,14 +196,27 @@ const hasTournamentMembership = async (
 	const memoKey = `${tournamentId}:${entryId}`;
 	if (authorizedTournamentMemberships?.has(tournamentId)) return true;
 	if (memo?.has(memoKey)) return memo.get(memoKey)!;
-	const { data, error } = await dataClient
+	const rosterMembership = await dataClient
 		.read("competition.tournament_entries")
 		.select("entry_id")
 		.eq("tournament_id", tournamentId)
 		.eq("entry_id", entryId)
 		.limit(1);
-	if (error) return false;
-	const value = ((data as { entry_id: number }[] | null) ?? []).length > 0;
+	let value =
+		!rosterMembership.error &&
+		((rosterMembership.data as { entry_id: number }[] | null) ?? []).length > 0;
+	if (!value) {
+		const officialLeagueMembership = await dataClient
+			.read("competition.entry_leagues_with_tournament")
+			.select("tournament_id")
+			.eq("tournament_id", tournamentId)
+			.eq("entry_id", entryId)
+			.limit(1);
+		value =
+			!officialLeagueMembership.error &&
+			((officialLeagueMembership.data as { tournament_id: number | null }[] | null) ?? []).length >
+				0;
+	}
 	memo?.set(memoKey, value);
 	if (value) authorizedTournamentMemberships?.add(tournamentId);
 	return value;

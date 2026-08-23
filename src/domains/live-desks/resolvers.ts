@@ -561,6 +561,7 @@ export const liveDesksResolvers = {
 					failedEntryIds: [],
 					totalEntries: 0,
 				};
+			await assertMember(context, selected, args.entryId);
 			const selectedTournament = tournaments.find((tournament) => tournament.id === selected);
 			const requireNet = selectedTournament?.leagueType === LeagueType.H2H;
 			const boardCacheKey = snapshot ? competitionBoardCacheKey(context, snapshot, selected) : null;

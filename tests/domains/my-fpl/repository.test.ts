@@ -226,6 +226,7 @@ type FixtureOptions = {
 	seasonPathRows?: unknown[];
 	enrichedCount?: number;
 	membershipIds?: number[];
+	officialMembershipIds?: number[];
 	member?: boolean;
 	catalog?: TournamentInfo[];
 	selectedTournament?: TournamentInfo | null;
@@ -790,16 +791,19 @@ const makeFixture = (options: FixtureOptions = {}) => {
 			return { rows: options.historyRows ?? [] };
 		}
 		if (sql.includes("FROM competition.tournament_entries")) {
-			if (sql.includes("SELECT tournament_id")) {
-				const ids = options.membershipIds ?? (options.member === false ? [] : [7]);
+			const rosterIds = options.membershipIds ?? (options.member === false ? [] : [7]);
+			const ids = [...new Set([...rosterIds, ...(options.officialMembershipIds ?? [])])];
+			if (sql.trimStart().startsWith("SELECT tournament_id")) {
 				return {
 					rows: ids.map((tournamentId) => ({ tournament_id: tournamentId })),
 					rowCount: ids.length,
 				};
 			}
+			const requestedTournamentId = Number(params[0]);
+			const isMember = ids.includes(requestedTournamentId);
 			return {
-				rows: options.member === false ? [] : [{ ok: 1 }],
-				rowCount: options.member === false ? 0 : 1,
+				rows: isMember ? [{ ok: 1 }] : [],
+				rowCount: isMember ? 1 : 0,
 			};
 		}
 		if (sql.includes("jsonb_build_object")) {
@@ -1359,6 +1363,27 @@ describe("My FPL review repository", () => {
 		await expect(
 			forbidden.repository.loadCompetitionBoard(forbidden.context, { tournamentId: 7, eventId: 1 })
 		).rejects.toMatchObject({ extensions: { code: "FORBIDDEN" } });
+	});
+
+	it("keeps a tracked official Classic membership without frozen roster membership", async () => {
+		const classic = tournament({ id: 3, leagueId: 8_863, name: "Tracked Classic" });
+		const fixture = makeFixture({
+			member: false,
+			membershipIds: [],
+			officialMembershipIds: [3],
+			selectedTournament: classic,
+			catalog: [classic],
+		});
+
+		const desk = await fixture.repository.loadCompetitionsDesk(fixture.context);
+
+		expect(desk.selectedTournamentId).toBe(3);
+		expect(desk.tournaments.map((item) => item.id)).toEqual([3]);
+		expect(
+			fixture.queries
+				.filter((query) => query.sql.includes("FROM competition.tournament_entries"))
+				.every((query) => query.sql.includes("competition.entry_leagues_with_tournament"))
+		).toBe(true);
 	});
 
 	it("lets an attested platform administrator use My FPL competition roots as a non-member", async () => {
