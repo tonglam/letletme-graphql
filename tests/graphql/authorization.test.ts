@@ -60,6 +60,14 @@ const unverifiedWebsitePrincipal: Principal = {
 	fplEntryVerifiedAt: null,
 };
 
+const miniViewerPrincipal: Principal = {
+	userId: "mini-account-1",
+	source: "wechat_miniprogram",
+	viewerEntryId: 123,
+	fplEntryId: null,
+	fplEntryVerifiedAt: null,
+};
+
 const platformAdminPrincipal: Principal = {
 	userId: "platform-admin",
 	source: "website",
@@ -140,7 +148,7 @@ describe("authorizeGraphQLRequest", () => {
 		}
 	});
 
-	it("protects the no-argument Home personal desk with the verified binding", async () => {
+	it("allows the Home personal desk for a selected Mini Program viewer", async () => {
 		expect(await authorize(`query { homePersonalDesk { state } }`)).toMatchObject({
 			ok: false,
 			status: 401,
@@ -152,9 +160,12 @@ describe("authorizeGraphQLRequest", () => {
 		expect(
 			await authorize(`query { homePersonalDesk { state } }`, undefined, websitePrincipal)
 		).toEqual({ ok: true });
+		expect(
+			await authorize(`query { homePersonalDesk { state } }`, undefined, miniViewerPrincipal)
+		).toEqual({ ok: true });
 	});
 
-	it("derives My FPL Team identity exclusively from a verified principal", async () => {
+	it("derives My FPL Team identity from a verified Web or selected Mini viewer", async () => {
 		for (const query of [
 			`query { myFplTeamDesk { state } }`,
 			`query { myFplTeamGameweek(eventId: 1) { state } }`,
@@ -171,6 +182,7 @@ describe("authorizeGraphQLRequest", () => {
 				code: "FORBIDDEN",
 			});
 			expect(await authorize(query, undefined, websitePrincipal)).toEqual({ ok: true });
+			expect(await authorize(query, undefined, miniViewerPrincipal)).toEqual({ ok: true });
 		}
 	});
 
@@ -196,6 +208,9 @@ describe("authorizeGraphQLRequest", () => {
 		]) {
 			const query = `query Read($tournamentId: Int!) { ${field} { __typename } }`;
 			expect(await authorize(query, { tournamentId: 7 }, websitePrincipal)).toEqual({
+				ok: true,
+			});
+			expect(await authorize(query, { tournamentId: 7 }, miniViewerPrincipal)).toEqual({
 				ok: true,
 			});
 			expect(await authorize(query, { tournamentId: 9 }, websitePrincipal)).toMatchObject({
@@ -248,6 +263,20 @@ describe("authorizeGraphQLRequest", () => {
 		);
 
 		expect(result.ok).toBe(true);
+		expect(
+			await authorize(
+				`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
+				{ entryId: 123 },
+				miniViewerPrincipal
+			)
+		).toEqual({ ok: true });
+		expect(
+			await authorize(
+				`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
+				{ entryId: 456 },
+				miniViewerPrincipal
+			)
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
 	});
 
 	it("allows public calcLivePointsByEntry pages without a principal", async () => {
