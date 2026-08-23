@@ -13,6 +13,7 @@ import {
 	mapTournamentEventResult,
 	mapTournamentInfo,
 	projectHistoricalOfficialH2HStandings,
+	projectOfficialH2HStandingsFromResults,
 	resolveOfficialH2HReferenceEventId,
 	TournamentMode,
 	TournamentRosterMode,
@@ -102,6 +103,48 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 				pointsFor: 40,
 			},
 			{ entryId: 104, rank: 4, matchPoints: 0, played: 0, won: 0, drawn: 0, lost: 0, pointsFor: 0 },
+		]);
+	});
+
+	it("derives match outcomes from published scores when stored outcome fields are null", () => {
+		const rows: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 3,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 101,
+				home_net_points: 24,
+				home_rank: null,
+				home_match_points: null,
+				away_entry_id: 102,
+				away_net_points: 43,
+				away_rank: null,
+				away_match_points: null,
+			},
+		];
+
+		expect(projectOfficialH2HStandingsFromResults([101, 102], rows)).toEqual([
+			{
+				entryId: 102,
+				rank: 1,
+				matchPoints: 3,
+				played: 1,
+				won: 1,
+				drawn: 0,
+				lost: 0,
+				pointsFor: 43,
+			},
+			{
+				entryId: 101,
+				rank: 2,
+				matchPoints: 0,
+				played: 1,
+				won: 0,
+				drawn: 0,
+				lost: 1,
+				pointsFor: 24,
+			},
 		]);
 	});
 });

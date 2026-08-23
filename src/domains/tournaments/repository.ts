@@ -685,7 +685,35 @@ function officialMatchSide(
 
 type HistoricalH2HStandingProjection = Omit<OfficialH2HStanding, "entryName" | "playerName">;
 
-export function projectHistoricalOfficialH2HStandings(
+function resolvedOfficialMatchPoints(row: DbTournamentBattleGroupResultRow): {
+	home: number | null;
+	away: number | null;
+} {
+	if (
+		row.home_match_points !== null &&
+		row.home_match_points !== undefined &&
+		row.away_match_points !== null &&
+		row.away_match_points !== undefined
+	) {
+		return { home: row.home_match_points, away: row.away_match_points };
+	}
+	const homePoints = row.home_net_points;
+	const awayPoints = row.away_net_points;
+	// FPL can publish scores before its per-match outcome fields. A genuine
+	// 0-0 placeholder remains unplayed until the outcome fields are available.
+	if (
+		typeof homePoints !== "number" ||
+		typeof awayPoints !== "number" ||
+		(homePoints === 0 && awayPoints === 0)
+	) {
+		return { home: null, away: null };
+	}
+	if (homePoints > awayPoints) return { home: 3, away: 0 };
+	if (homePoints < awayPoints) return { home: 0, away: 3 };
+	return { home: 1, away: 1 };
+}
+
+export function projectOfficialH2HStandingsFromResults(
 	entryIds: readonly number[],
 	rows: readonly DbTournamentBattleGroupResultRow[]
 ): HistoricalH2HStandingProjection[] {
@@ -702,16 +730,17 @@ export function projectHistoricalOfficialH2HStandings(
 		});
 	}
 	for (const row of rows) {
+		const outcome = resolvedOfficialMatchPoints(row);
 		const sides = [
 			{
 				entryId: row.home_entry_id,
 				points: row.home_net_points,
-				matchPoints: row.home_match_points,
+				matchPoints: outcome.home,
 			},
 			{
 				entryId: row.away_entry_id,
 				points: row.away_net_points,
-				matchPoints: row.away_match_points,
+				matchPoints: outcome.away,
 			},
 		];
 		for (const side of sides) {
@@ -741,6 +770,13 @@ export function projectHistoricalOfficialH2HStandings(
 		previousKey = key;
 		return { ...standing, rank };
 	});
+}
+
+export function projectHistoricalOfficialH2HStandings(
+	entryIds: readonly number[],
+	rows: readonly DbTournamentBattleGroupResultRow[]
+): HistoricalH2HStandingProjection[] {
+	return projectOfficialH2HStandingsFromResults(entryIds, rows);
 }
 
 function mapOfficialBattleMatch(
@@ -835,6 +871,25 @@ type OfficialH2HSnapshotLoad = {
 	history: DbTournamentBattleGroupResultRow[];
 };
 
+function officialGroupRowsHaveScores(rows: readonly DbTournamentGroupRow[]): boolean {
+	return rows.some((row) =>
+		[row.group_points, row.played, row.won, row.drawn, row.lost, row.total_net_points].some(
+			(value) => value !== null && value !== undefined && value !== 0
+		)
+	);
+}
+
+function officialBattleRowsHaveScores(rows: readonly DbTournamentBattleGroupResultRow[]): boolean {
+	return rows.some(
+		(row) =>
+			(row.home_match_points !== null && row.home_match_points !== undefined) ||
+			(row.away_match_points !== null && row.away_match_points !== undefined) ||
+			(typeof row.home_net_points === "number" &&
+				typeof row.away_net_points === "number" &&
+				(row.home_net_points !== 0 || row.away_net_points !== 0))
+	);
+}
+
 async function loadOfficialH2HSnapshots(
 	context: GraphQLContext,
 	tournaments: readonly TournamentInfo[],
@@ -885,8 +940,21 @@ async function loadOfficialH2HSnapshots(
 		throw new Error("Failed to fetch official H2H mirror");
 	}
 
+	const groups = (groupResult.data as DbTournamentGroupRow[] | null) ?? [];
+	const battles = (battleResult.data as DbTournamentBattleGroupResultRow[] | null) ?? [];
+	const knockouts = (knockoutResult.data as DbTournamentKnockoutResultRow[] | null) ?? [];
+	const groupsByTournamentForFallback = new Map<number, DbTournamentGroupRow[]>();
+	for (const row of groups) {
+		const bucket = groupsByTournamentForFallback.get(row.tournament_id) ?? [];
+		bucket.push(row);
+		groupsByTournamentForFallback.set(row.tournament_id, bucket);
+	}
+	const needsHistoryForFallback = tournaments.some(
+		(tournament) =>
+			!officialGroupRowsHaveScores(groupsByTournamentForFallback.get(tournament.id) ?? [])
+	);
 	let historyRows: DbTournamentBattleGroupResultRow[] = [];
-	if (includeHistory) {
+	if (includeHistory || needsHistoryForFallback) {
 		const historyResult = await context.data
 			.read("competition.tournament_battle_group_results")
 			.select(OFFICIAL_BATTLE_COLUMNS)
@@ -905,10 +973,6 @@ async function loadOfficialH2HSnapshots(
 		}
 		historyRows = (historyResult.data as DbTournamentBattleGroupResultRow[] | null) ?? [];
 	}
-
-	const groups = (groupResult.data as DbTournamentGroupRow[] | null) ?? [];
-	const battles = (battleResult.data as DbTournamentBattleGroupResultRow[] | null) ?? [];
-	const knockouts = (knockoutResult.data as DbTournamentKnockoutResultRow[] | null) ?? [];
 	const entryIds = [
 		...new Set(
 			[
@@ -961,6 +1025,14 @@ async function loadOfficialH2HSnapshots(
 		const tournamentBattles = battlesByTournament.get(tournament.id) ?? [];
 		const tournamentKnockouts = knockoutsByTournament.get(tournament.id) ?? [];
 		const tournamentHistory = historyByTournament.get(tournament.id) ?? [];
+		const matchDerivedStandings =
+			!officialGroupRowsHaveScores(tournamentGroups) &&
+			officialBattleRowsHaveScores(tournamentHistory)
+				? projectOfficialH2HStandingsFromResults(
+						tournamentGroups.map((row) => row.entry_id),
+						tournamentHistory
+					)
+				: null;
 		const historicalStandings =
 			eventId < activeEventId && includeHistory
 				? projectHistoricalOfficialH2HStandings(
@@ -968,6 +1040,7 @@ async function loadOfficialH2HSnapshots(
 						tournamentHistory
 					)
 				: null;
+		const projectedStandings = historicalStandings ?? matchDerivedStandings;
 		const matches = [
 			...tournamentBattles.map((row) => mapOfficialBattleMatch(row, entryNames)),
 			...tournamentKnockouts.map((row) => mapOfficialKnockoutMatch(row, entryNames)),
@@ -984,8 +1057,8 @@ async function loadOfficialH2HSnapshots(
 				awaitingSchedule:
 					tournament.officialScheduleLockedAt === null ||
 					tournament.officialScheduleLockedAt === undefined,
-				standings: historicalStandings
-					? historicalStandings.map((row) => ({
+				standings: projectedStandings
+					? projectedStandings.map((row) => ({
 							...row,
 							entryName: entryNames.get(row.entryId)?.entry_name ?? null,
 							playerName: entryNames.get(row.entryId)?.player_name ?? null,
