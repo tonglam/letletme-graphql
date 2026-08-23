@@ -40,7 +40,10 @@ import {
 	normalizeEntryLiveCompetitionBoardRequest,
 	queryEntryLiveCompetitionBoard,
 } from "./entry-live-competition-board";
-import { selectTournamentDeskEntryWindow } from "./tournament-entry-window";
+import {
+	normalizeTournamentRosterEntryIds,
+	selectTournamentDeskEntryWindow,
+} from "./tournament-entry-window";
 import { resolveLiveWindow, type LiveWindow } from "./window";
 
 type LiveRef = { season: string; eventId: number; revision: string };
@@ -299,6 +302,12 @@ const assertMember = async (context: GraphQLContext, tournamentId: number, entry
 	return tournament;
 };
 
+const usesPlatformAdminTournamentBypass = (context: GraphQLContext, entryId: number): boolean =>
+	context.principal?.source === "website" &&
+	context.principal.platformAdmin === true &&
+	context.principal.fplEntryId === entryId &&
+	Boolean(context.principal.fplEntryVerifiedAt);
+
 const managerBoardMeta = (
 	board: Array<{
 		entry: number;
@@ -533,12 +542,11 @@ export const liveDesksResolvers = {
 				readLiveWindow(context),
 				tournamentsService.getTournamentEntryIdsUncached(context, request.tournamentId),
 			]);
-			const allEntryIds = Array.from(
-				new Set([
-					request.entryId,
-					...tournamentEntryIds.filter((entryId) => Number.isSafeInteger(entryId) && entryId > 0),
-				])
-			).sort((left, right) => left - right);
+			const allEntryIds = normalizeTournamentRosterEntryIds(
+				tournamentEntryIds,
+				request.entryId,
+				!usesPlatformAdminTournamentBypass(context, request.entryId)
+			);
 			const { entryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
 				allEntryIds,
 				request.entryId
@@ -927,10 +935,13 @@ export const liveDesksResolvers = {
 					extensions: { code: "BAD_USER_INPUT" },
 				});
 			}
-			const tournamentEntryIds = new Set([
-				args.entryId,
-				...(await tournamentsService.getTournamentEntryIdsUncached(context, args.tournamentId)),
-			]);
+			const tournamentEntryIds = new Set(
+				normalizeTournamentRosterEntryIds(
+					await tournamentsService.getTournamentEntryIdsUncached(context, args.tournamentId),
+					args.entryId,
+					!usesPlatformAdminTournamentBypass(context, args.entryId)
+				)
+			);
 			if (ids.some((entryId) => !tournamentEntryIds.has(entryId))) {
 				throw new GraphQLError("Comparison entry is not a tournament member", {
 					extensions: { code: "FORBIDDEN" },

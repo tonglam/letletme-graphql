@@ -1,10 +1,20 @@
 import { describe, expect, it } from "bun:test";
 import {
 	MAX_TOURNAMENT_DESK_ENTRIES,
+	normalizeTournamentRosterEntryIds,
 	selectTournamentDeskEntryWindow,
 } from "../../../src/domains/live-desks/tournament-entry-window";
 
 describe("live tournament entry window", () => {
+	it("retains a verified member missing from an incomplete roster read", () => {
+		expect(normalizeTournamentRosterEntryIds([202, 101], 303, true)).toEqual([101, 202, 303]);
+	});
+
+	it("does not inject an administrator who is not a tournament member", () => {
+		expect(normalizeTournamentRosterEntryIds([202, 101], 303, false)).toEqual([101, 202]);
+		expect(normalizeTournamentRosterEntryIds([303, 202, 101], 303, false)).toEqual([101, 202, 303]);
+	});
+
 	it("keeps ordinary tournaments complete", () => {
 		expect(selectTournamentDeskEntryWindow([1, 2, 3], 2)).toEqual({
 			entryIds: [1, 2, 3],

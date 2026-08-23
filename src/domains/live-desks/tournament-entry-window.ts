@@ -5,6 +5,18 @@ export type TournamentDeskEntryWindow = {
 	deferredEntryIds: number[];
 };
 
+export const normalizeTournamentRosterEntryIds = (
+	entryIds: readonly number[],
+	requestingEntryId: number,
+	retainVerifiedViewer: boolean
+): number[] =>
+	Array.from(
+		new Set([
+			...(retainVerifiedViewer ? [requestingEntryId] : []),
+			...entryIds.filter((entryId) => Number.isSafeInteger(entryId) && entryId > 0),
+		])
+	).sort((left, right) => left - right);
+
 /**
  * Keep a live tournament request inside the entry-live admission limit.
  * The requesting manager is retained in the foreground window so a large
