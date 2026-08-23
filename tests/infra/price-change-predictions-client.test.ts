@@ -1,9 +1,59 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { requestPriceChangePredictions } from "../../src/infra/price-change-predictions-client";
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import type Redis from "ioredis";
+import type { GraphQLContext } from "../../src/graphql/context";
+import type { QueryExecutor } from "../../src/infra/database";
+import {
+	activeDataPublicationKey,
+	dataPublicationItemKey,
+	type DataPublicationManifest,
+} from "../../src/infra/data-publication";
+import {
+	PRICE_CHANGE_MAX_AGE_MS,
+	PRICE_CHANGE_READY_MS,
+	readPriceChangePredictions,
+} from "../../src/infra/price-change-predictions-client";
 
-const originalFetch = globalThis.fetch;
-const originalUrl = process.env.LETLETME_DATA_URL;
-const originalKey = process.env.LETLETME_DATA_API_KEY;
+class FakeRedis {
+	private readonly values = new Map<string, string>();
+
+	set(key: string, value: string): void {
+		this.values.set(key, value);
+	}
+
+	remove(key: string): void {
+		this.values.delete(key);
+	}
+
+	async get(key: string): Promise<string | null> {
+		return this.values.get(key) ?? null;
+	}
+
+	async mget(...keys: string[]): Promise<(string | null)[]> {
+		return keys.map((key) => this.values.get(key) ?? null);
+	}
+}
+
+const canonicalJson = (value: unknown): string => {
+	const canonicalize = (candidate: unknown): unknown => {
+		if (Array.isArray(candidate)) return candidate.map(canonicalize);
+		if (candidate !== null && typeof candidate === "object") {
+			const record = candidate as Record<string, unknown>;
+			return Object.fromEntries(
+				Object.keys(record)
+					.sort()
+					.map((key) => [key, canonicalize(record[key])])
+			);
+		}
+		return candidate;
+	};
+	return JSON.stringify(canonicalize(value));
+};
+
+const sha256 = async (value: string): Promise<string> => {
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+	return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+};
 
 const validPlayer = {
 	playerId: 1,
@@ -23,87 +73,151 @@ const validPlayer = {
 	transfersOutEvent: 100,
 	lockedUntil: null,
 	calibrating: false,
-	projections: [{ offset: 1, projectedPercent: 0.5, likelihood: 0.8 }],
+	projections: [{ offset: 0, projectedPercent: 0.5, likelihood: 4 }],
 };
 
-const validBoard = {
-	status: "READY",
-	source: "FPL_BOOTSTRAP",
-	deadline: "2026-08-22T10:00:00Z",
-	nextDeadlines: ["2026-08-23T10:00:00Z"],
-	fetchedAt: "2026-08-22T09:55:00Z",
-	staleAt: "2026-08-22T10:55:00Z",
-	revision: "revision-1",
-	expectedPlayerCount: 1,
-	observedPlayerCount: 1,
-	players: [validPlayer],
-};
-
-function mockBoardResponse(board: unknown): void {
-	process.env.LETLETME_DATA_URL = "http://data.example:3000/";
-	process.env.LETLETME_DATA_API_KEY = "k1";
-	Bun.env.LETLETME_DATA_URL = "http://data.example:3000/";
-	Bun.env.LETLETME_DATA_API_KEY = "k1";
-	globalThis.fetch = (async (input: URL | string, init?: RequestInit) => {
-		expect(String(input)).toBe(
-			"http://data.example:3000/internal/price-change-predictions/resolve"
-		);
-		expect(init?.method).toBe("POST");
-		expect(new Headers(init?.headers).get("x-api-key")).toBe("k1");
-		return new Response(JSON.stringify({ success: true, data: board }), {
-			status: 200,
-			headers: { "Content-Type": "application/json" },
-		});
-	}) as unknown as typeof fetch;
+async function createPublication(ageMs: number): Promise<{
+	manifest: DataPublicationManifest;
+	context: Record<string, unknown>;
+	players: unknown[];
+	redis: FakeRedis;
+	items: Record<string, unknown>;
+}> {
+	const fetchedAt = new Date(Date.now() - ageMs).toISOString();
+	const context = {
+		schemaVersion: 1,
+		source: "FPL_BOOTSTRAP",
+		fetchedAt,
+		staleAt: new Date(Date.parse(fetchedAt) + PRICE_CHANGE_READY_MS).toISOString(),
+		hardExpiresAt: new Date(Date.parse(fetchedAt) + PRICE_CHANGE_MAX_AGE_MS).toISOString(),
+		deadline: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+		nextDeadlines: [new Date(Date.now() + 60 * 60 * 1_000).toISOString()],
+		expectedPlayerCount: 1,
+		observedPlayerCount: 1,
+	};
+	const players = [validPlayer];
+	const scope = { dataset: "fpl:price-changes" as const, seasonCode: "2026" };
+	const publicationId = "11111111-1111-4111-8111-111111111111";
+	const items = { context, players };
+	const manifestItems = await Promise.all(
+		(Object.entries(items) as ["context" | "players", unknown][]).map(async ([name, value]) => {
+			const payload = canonicalJson(value);
+			return {
+				name,
+				key: dataPublicationItemKey(scope, 1, name),
+				type: "string" as const,
+				count: Array.isArray(value) ? value.length : Object.keys(value as object).length,
+				bytes: Buffer.byteLength(payload, "utf8"),
+				sha256: await sha256(payload),
+			};
+		})
+	);
+	const manifest: DataPublicationManifest = {
+		dataset: "fpl:price-changes",
+		seasonCode: "2026",
+		eventId: null,
+		revision: 1,
+		publicationId,
+		sourceCheckedAt: fetchedAt,
+		publishedAt: new Date().toISOString(),
+		state: "active",
+		items: manifestItems,
+	};
+	const redis = new FakeRedis();
+	redis.set(activeDataPublicationKey(scope), JSON.stringify(manifest));
+	for (const item of manifestItems) redis.set(item.key, canonicalJson(items[item.name]));
+	return { manifest, context, players, redis, items };
 }
 
-afterEach(() => {
-	globalThis.fetch = originalFetch;
-	if (originalUrl === undefined) delete process.env.LETLETME_DATA_URL;
-	else process.env.LETLETME_DATA_URL = originalUrl;
-	if (originalKey === undefined) delete process.env.LETLETME_DATA_API_KEY;
-	else process.env.LETLETME_DATA_API_KEY = originalKey;
-	delete Bun.env.LETLETME_DATA_URL;
-	delete Bun.env.LETLETME_DATA_API_KEY;
-});
+function makeContext(redis: FakeRedis, database: QueryExecutor): GraphQLContext {
+	return {
+		redis: redis as unknown as Redis,
+		database,
+		currentSeason: { seasonId: 2026, seasonCode: "2026" },
+	} as GraphQLContext;
+}
 
-describe("requestPriceChangePredictions", () => {
-	it("accepts a valid official board", async () => {
-		mockBoardResponse(validBoard);
+function makeDatabase(
+	publication: Awaited<ReturnType<typeof createPublication>>,
+	mutate?: (rows: Array<Record<string, unknown>>) => void
+): QueryExecutor {
+	const authority = {
+		publication_id: publication.manifest.publicationId,
+		revision: String(publication.manifest.revision),
+		manifest: publication.manifest,
+	};
+	const rows = publication.manifest.items.map((item) => ({
+		item_name: item.name,
+		item_count: item.count,
+		checksum: item.sha256,
+		payload: publication.items[item.name],
+	}));
+	mutate?.(rows);
+	return {
+		query: async (sql: string) => {
+			if (sql.includes("dataset_publications")) return { rows: [authority] };
+			return { rows };
+		},
+	} as QueryExecutor;
+}
 
-		const board = await requestPriceChangePredictions();
+describe("price-change publication reader", () => {
+	it("reads a valid Redis publication without touching PostgreSQL", async () => {
+		const publication = await createPublication(9 * 60 * 1_000);
+		let databaseCalls = 0;
+		const database = {
+			query: async () => {
+				databaseCalls += 1;
+				throw new Error("PostgreSQL should not be needed");
+			},
+		} as unknown as QueryExecutor;
 
-		expect(board.status).toBe("READY");
-		expect(board.players).toHaveLength(1);
+		const board = await readPriceChangePredictions(makeContext(publication.redis, database));
+		assert.equal(board.status, "READY");
+		assert.equal(board.revision, publication.manifest.publicationId);
+		assert.equal(board.players.length, 1);
+		assert.equal(databaseCalls, 0);
 	});
 
-	it("fails closed when any upstream player is malformed", async () => {
-		mockBoardResponse({
-			...validBoard,
-			players: [validPlayer, { ...validPlayer, webName: 42 }],
-			observedPlayerCount: 2,
+	it("falls back to the matching PostgreSQL publication when Redis is damaged", async () => {
+		const publication = await createPublication(9 * 60 * 1_000);
+		const playersItem = publication.manifest.items.find((item) => item.name === "players");
+		publication.redis.set(playersItem!.key, "[]");
+
+		const board = await readPriceChangePredictions(
+			makeContext(publication.redis, makeDatabase(publication))
+		);
+		assert.equal(board.status, "READY");
+		assert.equal(board.players[0]?.playerId, 1);
+	});
+
+	it("fails closed when PostgreSQL item checksum proof is wrong", async () => {
+		const publication = await createPublication(9 * 60 * 1_000);
+		publication.redis.remove(
+			activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode: "2026" })
+		);
+		const database = makeDatabase(publication, (rows) => {
+			rows[1]!.checksum = "0".repeat(64);
 		});
 
-		expect((await requestPriceChangePredictions()).status).toBe("UNAVAILABLE");
+		const board = await readPriceChangePredictions(makeContext(publication.redis, database));
+		assert.equal(board.status, "UNAVAILABLE");
 	});
 
-	it("fails closed when a deadline is not a GraphQL DateTime", async () => {
-		mockBoardResponse({ ...validBoard, nextDeadlines: ["not-a-date"] });
-
-		expect((await requestPriceChangePredictions()).status).toBe("UNAVAILABLE");
-	});
-
-	it("fails closed when a projection offset is not a GraphQL Int", async () => {
-		mockBoardResponse({
-			...validBoard,
-			players: [
-				{
-					...validPlayer,
-					projections: [{ offset: 0.5, projectedPercent: 0.5, likelihood: 0.8 }],
-				},
-			],
-		});
-
-		expect((await requestPriceChangePredictions()).status).toBe("UNAVAILABLE");
+	it("derives READY, STALE, and UNAVAILABLE from publication age", async () => {
+		for (const [ageMs, expected] of [
+			[9 * 60 * 1_000, "READY"],
+			[PRICE_CHANGE_READY_MS + 1_000, "STALE"],
+			[PRICE_CHANGE_MAX_AGE_MS + 1_000, "UNAVAILABLE"],
+		] as const) {
+			const publication = await createPublication(ageMs);
+			publication.redis.remove(
+				activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode: "2026" })
+			);
+			const board = await readPriceChangePredictions(
+				makeContext(publication.redis, makeDatabase(publication))
+			);
+			assert.equal(board.status, expected);
+		}
 	});
 });
