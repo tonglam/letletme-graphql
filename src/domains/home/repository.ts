@@ -62,6 +62,7 @@ type HomePersonalDeskRow = {
 	league_name: string | null;
 	entry_rank: number | null;
 	entry_last_rank: number | null;
+	league_started_event: number | null;
 	official_kind: string | null;
 	short_name: string | null;
 	tournament_id: number | null;
@@ -79,6 +80,7 @@ type HomePersonalDeskRow = {
 	h2h_away_is_average: boolean | null;
 	h2h_is_bye: boolean | null;
 	h2h_source_checked_at: string | Date | null;
+	h2h_reference_event_id: number | null;
 	h2h_event_is_current: boolean | null;
 	h2h_event_finished: boolean | null;
 	h2h_event_data_checked: boolean | null;
@@ -100,6 +102,7 @@ export const HOME_PERSONAL_DESK_SQL = `
 		l.league_name,
 		l.entry_rank,
 		l.entry_last_rank,
+		l.started_event AS league_started_event,
 		l.official_kind::text AS official_kind,
 		l.short_name,
 		tracked.tournament_id,
@@ -117,6 +120,7 @@ export const HOME_PERSONAL_DESK_SQL = `
 		h2h_match.away_is_average AS h2h_away_is_average,
 		h2h_match.is_bye AS h2h_is_bye,
 		h2h_match.source_checked_at AS h2h_source_checked_at,
+		reference_event.event_id AS h2h_reference_event_id,
 		reference_event.is_current AS h2h_event_is_current,
 		reference_event.finished AS h2h_event_finished,
 		reference_event.data_checked AS h2h_event_data_checked
@@ -144,8 +148,16 @@ export const HOME_PERSONAL_DESK_SQL = `
 		SELECT event_id, is_current, finished, data_checked
 		FROM fpl.events event
 		WHERE event.season_id = e.season_id
-			AND (event.is_current = TRUE OR event.is_next = TRUE)
-		ORDER BY event.is_current DESC, event.is_next DESC, event.event_id ASC
+			AND (
+				event.is_current = TRUE
+				OR event.is_next = TRUE
+				OR (event.finished = TRUE AND event.data_checked = TRUE)
+			)
+		ORDER BY
+			event.is_current DESC,
+			event.is_next DESC,
+			(event.finished AND event.data_checked) DESC,
+			event.event_id DESC
 		LIMIT 1
 	) reference_event ON TRUE
 	LEFT JOIN LATERAL (
@@ -301,6 +313,33 @@ type HomeLeagueRankRow = HomeLeagueRank & {
 	shortName: string | null;
 };
 
+const resolveLeagueRanks = (
+	row: HomePersonalDeskRow,
+	scoring: HomeLeagueRankRow["scoring"]
+): { rank: number | null; previousRank: number | null } => {
+	const entryRank = normalizeRank(row.entry_rank);
+	const entryLastRank = normalizeRank(row.entry_last_rank);
+	if (scoring === "classic") {
+		return { rank: entryRank, previousRank: entryLastRank };
+	}
+
+	const startedEventValue = integerOrNull(row.league_started_event);
+	const startedEvent = startedEventValue !== null && startedEventValue > 0 ? startedEventValue : 1;
+	const referenceEventValue = integerOrNull(row.h2h_reference_event_id);
+	const referenceEvent =
+		referenceEventValue !== null && referenceEventValue > 0 ? referenceEventValue : null;
+	const hasSettledOfficialRank =
+		referenceEvent !== null &&
+		(referenceEvent > startedEvent ||
+			(referenceEvent === startedEvent &&
+				row.h2h_event_finished === true &&
+				row.h2h_event_data_checked === true));
+	return {
+		rank: hasSettledOfficialRank ? entryRank : null,
+		previousRank: hasSettledOfficialRank ? entryLastRank : null,
+	};
+};
+
 const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRankRow | null => {
 	if (
 		row.league_id === null ||
@@ -310,14 +349,14 @@ const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRankRow | null => {
 	) {
 		return null;
 	}
-	const rank = normalizeRank(row.entry_rank);
 	const scoring = row.league_type === "h2h" ? "h2h" : "classic";
+	const { rank, previousRank } = resolveLeagueRanks(row, scoring);
 	return {
 		key: `${row.league_type}:${row.league_id}`,
 		name: row.league_name,
 		leagueType: scoring === "h2h" ? "H2H" : "CLASSIC",
 		rank,
-		movement: movementFromRanks(row.entry_rank, row.entry_last_rank),
+		movement: movementFromRanks(rank, previousRank),
 		tournamentId: row.tournament_id,
 		h2hMatchup: scoring === "h2h" ? mapH2HMatchup(row) : null,
 		scoring,
