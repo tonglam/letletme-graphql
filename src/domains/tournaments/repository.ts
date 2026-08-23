@@ -997,8 +997,16 @@ function selectCurrentOfficialH2HProjection(
 
 	const derived = projectOfficialH2HStandingsFromResults(entryIds, historyRows, options);
 	const derivedPlayed = derived.reduce((total, row) => total + row.played, 0);
+	const storedPlayedByEntry = new Map(
+		groups.map((row) => [row.entry_id, Math.max(0, row.played ?? 0)])
+	);
+	const hasLaggingStoredEntry = derived.some(
+		(row) => (storedPlayedByEntry.get(row.entryId) ?? -1) < row.played
+	);
 	return {
-		standings: derivedPlayed > storedPlayed ? derived : null,
+		// The stored table may refresh unevenly: equal aggregate coverage does
+		// not prove that every entry has caught up to the atomic match snapshot.
+		standings: hasLaggingStoredEntry ? derived : null,
 		options,
 		storedPlayed,
 		derivedPlayed,

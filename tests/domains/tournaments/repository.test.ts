@@ -396,6 +396,26 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 				new Set([1])
 			).standings
 		).toBeNull();
+
+		const unevenGroupsWithEqualCoverage = [
+			{ ...groups[0]!, played: 2 },
+			{ ...groups[1]!, played: 0 },
+		];
+		const currentOnlyRows = history.filter((row) => row.event_id === 2);
+		const unevenProjection = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+			2,
+			unevenGroupsWithEqualCoverage,
+			currentOnlyRows,
+			currentOnlyRows,
+			2,
+			2,
+			new Set([1])
+		);
+		expect(unevenProjection).toMatchObject({ storedPlayed: 2, derivedPlayed: 2 });
+		expect(unevenProjection.standings).toEqual([
+			expect.objectContaining({ entryId: 102, played: 1 }),
+			expect.objectContaining({ entryId: 101, played: 1 }),
+		]);
 	});
 
 	it("keeps an incomplete or all-zero current round out of the read-side projection", () => {
