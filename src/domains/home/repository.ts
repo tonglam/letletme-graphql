@@ -106,7 +106,7 @@ export const HOME_PERSONAL_DESK_SQL = `
 		l.started_event AS league_started_event,
 		l.official_kind::text AS official_kind,
 		l.short_name,
-		tracked.tournament_id,
+		COALESCE(official_h2h.tournament_id, tracked.tournament_id) AS tournament_id,
 		h2h_match.official_match_id AS h2h_official_match_id,
 		h2h_match.event_id AS h2h_event_id,
 		h2h_match.home_entry_id AS h2h_home_entry_id,
@@ -138,6 +138,17 @@ export const HOME_PERSONAL_DESK_SQL = `
 		ORDER BY t.tournament_id
 		LIMIT 1
 	) tracked ON TRUE
+	LEFT JOIN LATERAL (
+		SELECT t.tournament_id
+		FROM competition.tournaments t
+		WHERE t.season_id = l.season_id
+			AND t.league_id = l.league_id
+			AND t.league_type = l.league_type
+			AND t.roster_mode::text = 'official_sync'
+			AND t.group_mode::text = 'battle_races'
+		ORDER BY t.tournament_id DESC
+		LIMIT 1
+	) official_h2h ON l.league_type::text = 'h2h'
 	LEFT JOIN LATERAL (
 		SELECT event_id, is_current, finished, data_checked
 		FROM fpl.events event
@@ -171,7 +182,7 @@ export const HOME_PERSONAL_DESK_SQL = `
 				battle.source_checked_at
 			FROM competition.tournament_battle_group_results battle
 			WHERE battle.season_id = e.season_id
-				AND battle.tournament_id = tracked.tournament_id
+				AND battle.tournament_id = COALESCE(official_h2h.tournament_id, tracked.tournament_id)
 				AND battle.event_id = reference_event.event_id
 				AND battle.official_match_id IS NOT NULL
 				AND (battle.home_entry_id = e.entry_id OR battle.away_entry_id = e.entry_id)
@@ -190,7 +201,7 @@ export const HOME_PERSONAL_DESK_SQL = `
 				knockout.source_checked_at
 			FROM competition.tournament_knockout_results knockout
 			WHERE knockout.season_id = e.season_id
-				AND knockout.tournament_id = tracked.tournament_id
+				AND knockout.tournament_id = COALESCE(official_h2h.tournament_id, tracked.tournament_id)
 				AND knockout.event_id = reference_event.event_id
 				AND knockout.official_match_id IS NOT NULL
 				AND (knockout.home_entry_id = e.entry_id OR knockout.away_entry_id = e.entry_id)
