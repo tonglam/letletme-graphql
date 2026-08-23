@@ -16,11 +16,6 @@ export const homeTypeDefs = /* GraphQL */ `
 		places: Int
 	}
 
-	enum HomeLeagueType {
-		CLASSIC
-		H2H
-	}
-
 	type HomeH2HMatchupSide {
 		entryId: Int
 		entryName: String

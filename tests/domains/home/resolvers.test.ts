@@ -212,14 +212,16 @@ describe("Home GraphQL contracts", () => {
 			expect(sql).toContain("competition.entry_leagues");
 			expect(sql).toContain("competition.tournaments");
 			expect(sql).not.toContain("competition.tournament_entries");
+			expect(sql).toContain("t.roster_mode::text = 'official_sync'");
+			expect(sql).toContain("t.official_schedule_locked_at IS NOT NULL");
+			expect(sql).toContain("t.setup_status::text = 'ready'");
+			expect(sql).toContain("t.updated_at DESC");
+			expect(sql).not.toMatch(/ORDER BY t\.tournament_id\s+LIMIT 1/);
 			expect(sql).toContain("official_kind");
 			expect(sql).toContain("short_name");
 			expect(sql).toContain("l.started_event");
 			expect(sql).toContain(
 				"COALESCE(official_h2h.tournament_id, tracked.tournament_id) AS tournament_id"
-			);
-			expect(sql).toMatch(
-				/AND t\.league_type = l\.league_type\s+ORDER BY t\.tournament_id\s+LIMIT 1\s+\) tracked ON TRUE/
 			);
 			expect(sql).toContain("t.roster_mode::text = 'official_sync'");
 			expect(sql).toContain("t.group_mode::text = 'battle_races'");
