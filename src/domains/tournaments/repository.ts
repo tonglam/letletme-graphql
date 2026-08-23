@@ -895,7 +895,8 @@ async function loadOfficialH2HSnapshots(
 	tournaments: readonly TournamentInfo[],
 	eventId: number,
 	activeEventId: number,
-	includeHistory: boolean
+	includeHistory: boolean,
+	finalizedEventIds: ReadonlySet<number> = new Set()
 ): Promise<Map<number, OfficialH2HSnapshotLoad>> {
 	const tournamentIds = tournaments.map((tournament) => tournament.id);
 	const [groupResult, battleResult, knockoutResult] = await Promise.all([
@@ -949,10 +950,12 @@ async function loadOfficialH2HSnapshots(
 		bucket.push(row);
 		groupsByTournamentForFallback.set(row.tournament_id, bucket);
 	}
-	const needsHistoryForFallback = tournaments.some(
-		(tournament) =>
-			!officialGroupRowsHaveScores(groupsByTournamentForFallback.get(tournament.id) ?? [])
-	);
+	const needsHistoryForFallback =
+		finalizedEventIds.has(eventId) &&
+		tournaments.some(
+			(tournament) =>
+				!officialGroupRowsHaveScores(groupsByTournamentForFallback.get(tournament.id) ?? [])
+		);
 	let historyRows: DbTournamentBattleGroupResultRow[] = [];
 	if (includeHistory || needsHistoryForFallback) {
 		const historyResult = await context.data
@@ -1026,6 +1029,7 @@ async function loadOfficialH2HSnapshots(
 		const tournamentKnockouts = knockoutsByTournament.get(tournament.id) ?? [];
 		const tournamentHistory = historyByTournament.get(tournament.id) ?? [];
 		const matchDerivedStandings =
+			finalizedEventIds.has(eventId) &&
 			!officialGroupRowsHaveScores(tournamentGroups) &&
 			officialBattleRowsHaveScores(tournamentHistory)
 				? projectOfficialH2HStandingsFromResults(
@@ -3143,15 +3147,20 @@ export const tournamentsRepository: TournamentsRepository = {
 			.select("id, finished, data_checked, is_current, is_next")
 			.order("id", { ascending: true });
 		if (referenceEventResult.error) throw new Error("Failed to resolve the H2H reference event");
-		const referenceEventId = resolveOfficialH2HReferenceEventId(
-			(referenceEventResult.data as DbEventStateRow[] | null) ?? []
+		const referenceEvents = (referenceEventResult.data as DbEventStateRow[] | null) ?? [];
+		const referenceEventId = resolveOfficialH2HReferenceEventId(referenceEvents);
+		const finalizedEventIds = new Set(
+			referenceEvents
+				.filter((event) => event.finished && event.data_checked)
+				.map((event) => event.id)
 		);
 		const loadedOfficialH2H = await loadOfficialH2HSnapshots(
 			context,
 			[tournament],
 			eventId,
 			referenceEventId,
-			eventId < referenceEventId
+			eventId < referenceEventId,
+			finalizedEventIds
 		);
 		const loadedSnapshot = loadedOfficialH2H.get(tournamentId);
 		if (loadedSnapshot) return loadedSnapshot.snapshot;
@@ -3318,12 +3327,16 @@ export const tournamentsRepository: TournamentsRepository = {
 			events.find((event) => event.is_current) ?? events.find((event) => event.is_next);
 		if (!currentEvent) return [];
 		const referenceEventId = resolveOfficialH2HReferenceEventId(events);
+		const finalizedEventIds = new Set(
+			events.filter((event) => event.finished && event.data_checked).map((event) => event.id)
+		);
 		const loadedOfficialH2H = await loadOfficialH2HSnapshots(
 			context,
 			tournaments,
 			currentEvent.id,
 			referenceEventId,
-			true
+			true,
+			finalizedEventIds
 		);
 		const bulkRows: EntryOfficialH2HDeskItem[] = [];
 		for (const tournament of tournaments) {
