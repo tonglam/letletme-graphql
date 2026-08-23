@@ -712,6 +712,21 @@ function resolvedOfficialMatchPoints(
 	if (row.is_bye === true || options.suppressedEventIds?.has(row.event_id) === true) {
 		return { home: null, away: null };
 	}
+	const homePoints = row.home_net_points;
+	const awayPoints = row.away_net_points;
+	const hasFinalizedEvidence = options.finalizedEventIds?.has(row.event_id) === true;
+	const hasProvisionalEvidence = options.provisionalEventIds?.has(row.event_id) === true;
+	// A complete live score batch is the newest evidence. Its saved outcome fields
+	// can still describe the preceding score snapshot, so always derive the live
+	// outcome from the validated scores.
+	if (hasProvisionalEvidence) {
+		if (typeof homePoints !== "number" || typeof awayPoints !== "number") {
+			return { home: null, away: null };
+		}
+		if (homePoints > awayPoints) return { home: 3, away: 0 };
+		if (homePoints < awayPoints) return { home: 0, away: 3 };
+		return { home: 1, away: 1 };
+	}
 	if (
 		row.home_match_points !== null &&
 		row.home_match_points !== undefined &&
@@ -720,10 +735,6 @@ function resolvedOfficialMatchPoints(
 	) {
 		return { home: row.home_match_points, away: row.away_match_points };
 	}
-	const homePoints = row.home_net_points;
-	const awayPoints = row.away_net_points;
-	const hasFinalizedEvidence = options.finalizedEventIds?.has(row.event_id) === true;
-	const hasProvisionalEvidence = options.provisionalEventIds?.has(row.event_id) === true;
 	const hasScoreEvidence =
 		options.finalizedEventIds === undefined || hasFinalizedEvidence || hasProvisionalEvidence;
 	// FPL can publish scores before its per-match outcome fields. Do not derive
@@ -1022,7 +1033,6 @@ function selectCurrentOfficialH2HProjection(
 			const stored = storedByEntry.get(row.entryId);
 			return (
 				!stored ||
-				stored.group_rank !== row.rank ||
 				(stored.group_points ?? 0) !== row.matchPoints ||
 				(stored.played ?? 0) !== row.played ||
 				(stored.won ?? 0) !== row.won ||

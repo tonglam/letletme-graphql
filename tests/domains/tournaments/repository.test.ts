@@ -190,6 +190,34 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 		]);
 	});
 
+	it("derives a validated live outcome from the latest scores instead of stale saved outcomes", () => {
+		const rows: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 41,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 101,
+				home_net_points: 20,
+				home_rank: 1,
+				home_match_points: 3,
+				away_entry_id: 102,
+				away_net_points: 50,
+				away_rank: 2,
+				away_match_points: 0,
+			},
+		];
+
+		expect(
+			projectOfficialH2HStandingsFromResults([101, 102], rows, {
+				provisionalEventIds: new Set([1]),
+			})
+		).toEqual([
+			expect.objectContaining({ entryId: 102, matchPoints: 3, won: 1, pointsFor: 50 }),
+			expect.objectContaining({ entryId: 101, matchPoints: 0, lost: 1, pointsFor: 20 }),
+		]);
+	});
+
 	it("requires one complete non-zero live score batch across the entire roster", () => {
 		const rows: DbTournamentBattleGroupResultRow[] = [
 			{
@@ -424,6 +452,22 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 			tournamentCacheTestables.selectCurrentOfficialH2HProjection(
 				2,
 				caughtUpGroups,
+				history.filter((row) => row.event_id === 2),
+				history,
+				2,
+				2,
+				new Set([1])
+			).standings
+		).toBeNull();
+
+		const authoritativeTieRanks = caughtUpGroups.map((group) => ({
+			...group,
+			group_rank: 1,
+		}));
+		expect(
+			tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+				2,
+				authoritativeTieRanks,
 				history.filter((row) => row.event_id === 2),
 				history,
 				2,
