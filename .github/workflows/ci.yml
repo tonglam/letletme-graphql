@@ -280,10 +280,21 @@ jobs:
           CREATE TABLE bauth.mini_program_session (
             id text PRIMARY KEY,
             user_id text NOT NULL,
+            account_id text,
             token_hash text NOT NULL,
             revoked_at timestamptz,
             expires_at timestamptz NOT NULL,
             device_id text
+          );
+          CREATE TABLE bauth.mini_program_account (
+            id text PRIMARY KEY,
+            openid text NOT NULL,
+            unionid text,
+            linked_web_user_id text,
+            follow_entry_id integer,
+            entry_choice text,
+            entry_choice_mini_entry_id integer,
+            entry_choice_web_entry_id integer
           );
           REVOKE ALL ON SCHEMA bauth FROM PUBLIC;
           REVOKE ALL ON ALL TABLES IN SCHEMA bauth FROM PUBLIC;
@@ -294,8 +305,17 @@ jobs:
             fpl_entry_verified_at
           )
             ON bauth."user" TO letletme_graphql_reader;
-          GRANT SELECT (user_id, token_hash, revoked_at, expires_at)
+          GRANT SELECT (user_id, account_id, token_hash, revoked_at, expires_at)
             ON bauth.mini_program_session TO letletme_graphql_reader;
+          GRANT SELECT (
+            id,
+            linked_web_user_id,
+            follow_entry_id,
+            entry_choice,
+            entry_choice_mini_entry_id,
+            entry_choice_web_entry_id
+          )
+            ON bauth.mini_program_account TO letletme_graphql_reader;
           SQL
 
       - name: Create Briefing content reader fixture

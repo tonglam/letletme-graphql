@@ -134,9 +134,16 @@ const makeContractExecutor = (
 					'bauth."user".fpl_entry_id',
 					'bauth."user".fpl_entry_verified_at',
 					"bauth.mini_program_session.user_id",
+					"bauth.mini_program_session.account_id",
 					"bauth.mini_program_session.token_hash",
 					"bauth.mini_program_session.revoked_at",
 					"bauth.mini_program_session.expires_at",
+					"bauth.mini_program_account.id",
+					"bauth.mini_program_account.linked_web_user_id",
+					"bauth.mini_program_account.follow_entry_id",
+					"bauth.mini_program_account.entry_choice",
+					"bauth.mini_program_account.entry_choice_mini_entry_id",
+					"bauth.mini_program_account.entry_choice_web_entry_id",
 				]);
 				const physicalColumns = [
 					['bauth."user"', "id"],
@@ -145,10 +152,18 @@ const makeContractExecutor = (
 					['bauth."user"', "fpl_entry_verified_at"],
 					["bauth.mini_program_session", "id"],
 					["bauth.mini_program_session", "user_id"],
+					["bauth.mini_program_session", "account_id"],
 					["bauth.mini_program_session", "token_hash"],
 					["bauth.mini_program_session", "revoked_at"],
 					["bauth.mini_program_session", "expires_at"],
 					["bauth.mini_program_session", "device_id"],
+					["bauth.mini_program_account", "id"],
+					["bauth.mini_program_account", "linked_web_user_id"],
+					["bauth.mini_program_account", "follow_entry_id"],
+					["bauth.mini_program_account", "entry_choice"],
+					["bauth.mini_program_account", "entry_choice_mini_entry_id"],
+					["bauth.mini_program_account", "entry_choice_web_entry_id"],
+					["bauth.mini_program_account", "openid"],
 				] as const;
 				const rows = physicalColumns
 					.map(([relation_name, column_name]) => {
@@ -236,7 +251,7 @@ describe("GraphQL startup database contract", () => {
 		);
 	});
 
-	it("accepts only the seven Web auth columns used by GraphQL", async () => {
+	it("accepts only the Web auth columns used by GraphQL", async () => {
 		const { executor } = makeContractExecutor();
 		await expect(validateDatabaseContract(executor)).resolves.toMatchObject({
 			roleName: "graphql_runtime",

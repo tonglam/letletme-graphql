@@ -14,6 +14,7 @@ import { playersService } from "../players/service";
 import { measureRequestStage } from "../../http/request-timing";
 import type { EntryOfficialH2HDeskItem } from "../tournaments/repository";
 import { tournamentsService } from "../tournaments/service";
+import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 
 export type HomePublicBootstrap = {
 	context: CoreEventContext;
@@ -210,10 +211,10 @@ export const homeService = {
 		if (!context.principal) {
 			throw authError("Authentication required", "UNAUTHENTICATED", 401);
 		}
-		if (!context.principal.fplEntryId || !context.principal.fplEntryVerifiedAt) {
-			throw authError("A verified FPL binding is required", "FORBIDDEN", 403);
+		const entryId = viewerEntryIdForPrincipal(context.principal);
+		if (!entryId) {
+			throw authError("A viewed FPL team is required", "FORBIDDEN", 403);
 		}
-		const entryId = context.principal.fplEntryId;
 		const desk = await homeRepository.getPersonalDesk(context, entryId);
 		if (
 			!desk.leagueRanks.some(

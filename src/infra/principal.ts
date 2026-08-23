@@ -20,6 +20,8 @@ export type PrincipalSource = "website" | "wechat_miniprogram";
 export type Principal = {
 	userId: string;
 	source: PrincipalSource;
+	/** Entry selected for read-only viewer surfaces; it carries no ownership proof. */
+	viewerEntryId?: number | null;
 	fplEntryId: number | null;
 	fplEntryVerifiedAt: string | null;
 	/** Account-level role attested by the Website HMAC envelope. */
@@ -37,9 +39,13 @@ type WebsiteEnvelope = {
 };
 
 type MiniProgramSessionRow = {
-	user_id: string;
+	user_id: string | null;
 	fpl_entry_id: number | null;
 	fpl_entry_verified_at: Date | string | null;
+	follow_entry_id: number | null;
+	entry_choice: string | null;
+	entry_choice_mini_entry_id: number | null;
+	entry_choice_web_entry_id: number | null;
 };
 
 type PrincipalValidators = {
@@ -124,10 +130,32 @@ export const verifyWebsitePrincipal = (headers: Headers): Principal | null => {
 	return {
 		userId: envelope.uid,
 		source: "website",
+		viewerEntryId: fplEntryId,
 		fplEntryId,
 		fplEntryVerifiedAt: fplEntryId === null || !verifiedAt ? null : verifiedAt,
 		platformAdmin: fplEntryId !== null && envelope.adm === true,
 	};
+};
+
+export const resolveMiniProgramViewerEntry = (
+	row: Pick<
+		MiniProgramSessionRow,
+		| "fpl_entry_id"
+		| "follow_entry_id"
+		| "entry_choice"
+		| "entry_choice_mini_entry_id"
+		| "entry_choice_web_entry_id"
+	>
+): number | null => {
+	const miniEntryId = row.follow_entry_id;
+	const webEntryId = row.fpl_entry_id;
+	if (!miniEntryId) return webEntryId;
+	if (!webEntryId || miniEntryId === webEntryId) return miniEntryId;
+	const resolvedToWeb =
+		row.entry_choice === "WEB" &&
+		row.entry_choice_mini_entry_id === miniEntryId &&
+		row.entry_choice_web_entry_id === webEntryId;
+	return resolvedToWeb ? webEntryId : miniEntryId;
 };
 
 const getBearerToken = (headers: Headers): string | null => {
@@ -139,11 +167,25 @@ const getBearerToken = (headers: Headers): string | null => {
 export const validateMiniProgramSessionToken = async (token: string): Promise<Principal | null> => {
 	const tokenHash = hashMiniProgramSessionToken(token);
 	const result = await database.query<MiniProgramSessionRow>(
-		`SELECT s.user_id,
-		        CASE WHEN u.fpl_entry_verified_at IS NOT NULL THEN u.fpl_entry_id END AS fpl_entry_id,
-		        u.fpl_entry_verified_at
+		`SELECT COALESCE(account.id, s.user_id) AS user_id,
+		        CASE
+		          WHEN account.id IS NOT NULL AND linked_user.fpl_entry_verified_at IS NOT NULL
+		            THEN linked_user.fpl_entry_id
+		          WHEN account.id IS NULL AND legacy_user.fpl_entry_verified_at IS NOT NULL
+		            THEN legacy_user.fpl_entry_id
+		        END AS fpl_entry_id,
+		        CASE
+		          WHEN account.id IS NOT NULL THEN linked_user.fpl_entry_verified_at
+		          ELSE legacy_user.fpl_entry_verified_at
+		        END AS fpl_entry_verified_at,
+		        account.follow_entry_id,
+		        account.entry_choice,
+		        account.entry_choice_mini_entry_id,
+		        account.entry_choice_web_entry_id
 		 FROM bauth.mini_program_session s
-		 JOIN bauth."user" u ON u.id = s.user_id
+		 LEFT JOIN bauth.mini_program_account account ON account.id = s.account_id
+		 LEFT JOIN bauth."user" linked_user ON linked_user.id = account.linked_web_user_id
+		 LEFT JOIN bauth."user" legacy_user ON legacy_user.id = s.user_id
 		 WHERE s.token_hash = $1
 		   AND s.revoked_at IS NULL
 		   AND s.expires_at > NOW()
@@ -151,12 +193,13 @@ export const validateMiniProgramSessionToken = async (token: string): Promise<Pr
 		[tokenHash]
 	);
 	const row = result.rows[0];
-	if (!row) return null;
+	if (!row || !row.user_id) return null;
 	metrics.authTokenValidations.labels("web_mini_program").inc();
 
 	return {
 		userId: row.user_id,
 		source: "wechat_miniprogram",
+		viewerEntryId: resolveMiniProgramViewerEntry(row),
 		fplEntryId: row.fpl_entry_id,
 		fplEntryVerifiedAt: row.fpl_entry_verified_at
 			? new Date(row.fpl_entry_verified_at).toISOString()
