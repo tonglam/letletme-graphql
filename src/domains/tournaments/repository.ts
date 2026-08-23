@@ -1061,6 +1061,19 @@ async function loadOfficialH2HSnapshots(
 	finalizedEventIds: ReadonlySet<number> = new Set()
 ): Promise<Map<number, OfficialH2HSnapshotLoad>> {
 	const tournamentIds = tournaments.map((tournament) => tournament.id);
+	const needsHistoryForFallback = finalizedEventIds.has(eventId) || eventId === activeEventId;
+	const shouldLoadHistory = includeHistory || needsHistoryForFallback;
+	const currentEventBattleQuery = shouldLoadHistory
+		? Promise.resolve({ data: [] as DbTournamentBattleGroupResultRow[], error: null })
+		: context.data
+				.read("competition.tournament_battle_group_results")
+				.select(OFFICIAL_BATTLE_COLUMNS)
+				.in("tournament_id", tournamentIds)
+				.eq("event_id", eventId)
+				.not("official_match_id", "is", null)
+				.order("event_id", { ascending: true })
+				.order("source_order", { ascending: true })
+				.order("official_match_id", { ascending: true });
 	const [groupResult, battleResult, knockoutResult] = await Promise.all([
 		context.data
 			.read("competition.tournament_groups")
@@ -1070,15 +1083,7 @@ async function loadOfficialH2HSnapshots(
 			.in("tournament_id", tournamentIds)
 			.order("group_rank", { ascending: true })
 			.order("entry_id", { ascending: true }),
-		context.data
-			.read("competition.tournament_battle_group_results")
-			.select(OFFICIAL_BATTLE_COLUMNS)
-			.in("tournament_id", tournamentIds)
-			.eq("event_id", eventId)
-			.not("official_match_id", "is", null)
-			.order("event_id", { ascending: true })
-			.order("source_order", { ascending: true })
-			.order("official_match_id", { ascending: true }),
+		currentEventBattleQuery,
 		context.data
 			.read("competition.tournament_knockout_results")
 			.select(
@@ -1106,9 +1111,8 @@ async function loadOfficialH2HSnapshots(
 	const groups = (groupResult.data as DbTournamentGroupRow[] | null) ?? [];
 	const battles = (battleResult.data as DbTournamentBattleGroupResultRow[] | null) ?? [];
 	const knockouts = (knockoutResult.data as DbTournamentKnockoutResultRow[] | null) ?? [];
-	const needsHistoryForFallback = finalizedEventIds.has(eventId) || eventId === activeEventId;
 	let historyRows: DbTournamentBattleGroupResultRow[] = [];
-	if (includeHistory || needsHistoryForFallback) {
+	if (shouldLoadHistory) {
 		const historyResult = await context.data
 			.read("competition.tournament_battle_group_results")
 			.select(OFFICIAL_BATTLE_COLUMNS)

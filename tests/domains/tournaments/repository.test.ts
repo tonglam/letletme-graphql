@@ -3489,10 +3489,17 @@ describe("official H2H live standings read-side fallback", () => {
 		const events = [
 			{ id: 1, finished: false, data_checked: false, is_current: true, is_next: false },
 		];
+		let currentEventBattleReads = 0;
 
 		const makeBuilder = (table: string) => {
 			const actions: QueryAction[] = [];
 			const resolveResult = () => {
+				if (
+					table === "competition.tournament_battle_group_results" &&
+					actions.some((action) => action.type === "eq" && action.args[0] === "event_id")
+				) {
+					currentEventBattleReads += 1;
+				}
 				const source =
 					table === "competition.tournaments"
 						? [tournament]
@@ -3568,6 +3575,7 @@ describe("official H2H live standings read-side fallback", () => {
 
 		const snapshot = await tournamentsRepository.getTournamentOfficialH2H(context, 9, 1);
 		const desk = await tournamentsRepository.getEntryOfficialH2HDesk(context, 101);
+		expect(currentEventBattleReads).toBe(0);
 
 		expect(snapshot.standings).toEqual([
 			expect.objectContaining({
