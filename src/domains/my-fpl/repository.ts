@@ -2241,6 +2241,25 @@ const loadTeamTransfers = async (
 	return payload;
 };
 
+const CURRENT_TOURNAMENT_MEMBERSHIPS_SQL = `
+	SELECT tournament_id
+	FROM competition.tournament_entries
+	WHERE season_id = $1 AND entry_id = $2
+	UNION
+	SELECT tracked_tournament.tournament_id
+	FROM competition.entry_leagues entry_league
+	JOIN LATERAL (
+		SELECT tournament.tournament_id
+		FROM competition.tournaments tournament
+		WHERE tournament.season_id = entry_league.season_id
+		  AND tournament.league_id = entry_league.league_id
+		  AND tournament.league_type = entry_league.league_type
+		ORDER BY tournament.tournament_id
+		LIMIT 1
+	) tracked_tournament ON TRUE
+	WHERE entry_league.season_id = $1 AND entry_league.entry_id = $2
+`;
+
 const assertTournamentMembership = async (
 	context: GraphQLContext,
 	tournamentId: number,
@@ -2258,18 +2277,10 @@ const assertTournamentMembership = async (
 	if (context.authorizedTournamentMemberships?.has(tournamentId)) return;
 	const result = await context.database.query(
 		`SELECT 1
-		 FROM (
-			 SELECT tournament_id
-			 FROM competition.tournament_entries
-			 WHERE season_id = $2 AND entry_id = $3
-			 UNION
-			 SELECT tournament_id
-			 FROM competition.entry_leagues_with_tournament
-			 WHERE season_id = $2 AND entry_id = $3 AND tournament_id IS NOT NULL
-		 ) membership
-		 WHERE tournament_id = $1
+		 FROM (${CURRENT_TOURNAMENT_MEMBERSHIPS_SQL}) membership
+		 WHERE tournament_id = $3
 		 LIMIT 1`,
-		[tournamentId, context.currentSeason.seasonId, entryId]
+		[context.currentSeason.seasonId, entryId, tournamentId]
 	);
 	if (result.rowCount !== 1) {
 		throw new GraphQLError("User is not a member of this tournament", {
@@ -2296,15 +2307,7 @@ const filterCurrentTournamentMemberships = async (
 	}
 	const result = await context.database.query<DbTournamentMembershipRow>(
 		`SELECT tournament_id
-		 FROM (
-			 SELECT tournament_id
-			 FROM competition.tournament_entries
-			 WHERE season_id = $1 AND entry_id = $2
-			 UNION
-			 SELECT tournament_id
-			 FROM competition.entry_leagues_with_tournament
-			 WHERE season_id = $1 AND entry_id = $2 AND tournament_id IS NOT NULL
-		 ) membership
+		 FROM (${CURRENT_TOURNAMENT_MEMBERSHIPS_SQL}) membership
 		 ORDER BY tournament_id`,
 		[context.currentSeason.seasonId, entryId]
 	);
