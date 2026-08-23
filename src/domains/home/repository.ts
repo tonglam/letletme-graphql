@@ -62,11 +62,10 @@ type HomePersonalDeskRow = {
 	league_name: string | null;
 	entry_rank: number | null;
 	entry_last_rank: number | null;
+	league_started_event: number | null;
 	official_kind: string | null;
 	short_name: string | null;
 	tournament_id: number | null;
-	h2h_standing_rank: number | null;
-	h2h_standing_played: number | null;
 	h2h_official_match_id: number | null;
 	h2h_event_id: number | null;
 	h2h_home_entry_id: number | null;
@@ -81,6 +80,7 @@ type HomePersonalDeskRow = {
 	h2h_away_is_average: boolean | null;
 	h2h_is_bye: boolean | null;
 	h2h_source_checked_at: string | Date | null;
+	h2h_reference_event_id: number | null;
 	h2h_event_is_current: boolean | null;
 	h2h_event_finished: boolean | null;
 	h2h_event_data_checked: boolean | null;
@@ -102,11 +102,10 @@ export const HOME_PERSONAL_DESK_SQL = `
 		l.league_name,
 		l.entry_rank,
 		l.entry_last_rank,
+		l.started_event AS league_started_event,
 		l.official_kind::text AS official_kind,
 		l.short_name,
 		tracked.tournament_id,
-		h2h_standing.group_rank AS h2h_standing_rank,
-		h2h_standing.played AS h2h_standing_played,
 		h2h_match.official_match_id AS h2h_official_match_id,
 		h2h_match.event_id AS h2h_event_id,
 		h2h_match.home_entry_id AS h2h_home_entry_id,
@@ -121,6 +120,7 @@ export const HOME_PERSONAL_DESK_SQL = `
 		h2h_match.away_is_average AS h2h_away_is_average,
 		h2h_match.is_bye AS h2h_is_bye,
 		h2h_match.source_checked_at AS h2h_source_checked_at,
+		reference_event.event_id AS h2h_reference_event_id,
 		reference_event.is_current AS h2h_event_is_current,
 		reference_event.finished AS h2h_event_finished,
 		reference_event.data_checked AS h2h_event_data_checked
@@ -145,20 +145,19 @@ export const HOME_PERSONAL_DESK_SQL = `
 		LIMIT 1
 	) tracked ON TRUE
 	LEFT JOIN LATERAL (
-		SELECT tournament_group.group_rank, tournament_group.played
-		FROM competition.tournament_groups tournament_group
-		WHERE tournament_group.season_id = e.season_id
-			AND tournament_group.tournament_id = tracked.tournament_id
-			AND tournament_group.entry_id = e.entry_id
-		ORDER BY tournament_group.group_id ASC
-		LIMIT 1
-	) h2h_standing ON l.league_type::text = 'h2h'
-	LEFT JOIN LATERAL (
 		SELECT event_id, is_current, finished, data_checked
 		FROM fpl.events event
 		WHERE event.season_id = e.season_id
-			AND (event.is_current = TRUE OR event.is_next = TRUE)
-		ORDER BY event.is_current DESC, event.is_next DESC, event.event_id ASC
+			AND (
+				event.is_current = TRUE
+				OR event.is_next = TRUE
+				OR (event.finished = TRUE AND event.data_checked = TRUE)
+			)
+		ORDER BY
+			event.is_current DESC,
+			event.is_next DESC,
+			(event.finished AND event.data_checked) DESC,
+			event.event_id DESC
 		LIMIT 1
 	) reference_event ON TRUE
 	LEFT JOIN LATERAL (
@@ -324,26 +323,17 @@ const resolveLeagueRanks = (
 		return { rank: entryRank, previousRank: entryLastRank };
 	}
 
-	const publishedRank = normalizeRank(row.h2h_standing_rank);
-	const publishedPlayed = integerOrNull(row.h2h_standing_played);
-	if (publishedRank !== null && publishedPlayed !== null && publishedPlayed > 0) {
-		return {
-			rank: publishedRank,
-			// The compact query does not carry the mirror's prior standing. Avoid
-			// mixing its current rank with entry_leagues' independently refreshed
-			// history when calculating movement.
-			previousRank: null,
-		};
-	}
-	if (row.tournament_id !== null) {
-		// The tracked mirror is canonical. Before it has a played standing, FPL
-		// reports every H2H entrant as rank 1; surface that state as unranked.
-		return { rank: null, previousRank: null };
-	}
-
+	const startedEventValue = integerOrNull(row.league_started_event);
+	const startedEvent = startedEventValue !== null && startedEventValue > 0 ? startedEventValue : 1;
+	const referenceEventValue = integerOrNull(row.h2h_reference_event_id);
+	const referenceEvent =
+		referenceEventValue !== null && referenceEventValue > 0 ? referenceEventValue : null;
 	const hasSettledOfficialRank =
-		entryLastRank !== null ||
-		(row.h2h_event_finished === true && row.h2h_event_data_checked === true);
+		referenceEvent !== null &&
+		(referenceEvent > startedEvent ||
+			(referenceEvent === startedEvent &&
+				row.h2h_event_finished === true &&
+				row.h2h_event_data_checked === true));
 	return {
 		rank: hasSettledOfficialRank ? entryRank : null,
 		previousRank: hasSettledOfficialRank ? entryLastRank : null,
