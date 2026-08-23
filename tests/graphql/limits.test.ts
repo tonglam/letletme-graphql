@@ -474,6 +474,24 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 60 });
 	});
 
+	it("accepts and charges the bounded 50-row lightweight live board", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `query Board($pageSize: Int) {
+					entryLiveCompetitionBoard(entryId: 1, tournamentId: 2, eventId: 3, pageSize: $pageSize) {
+						boardRevision totalEntries filteredEntries hasMore
+						rows { entry entryName livePoints totalPoints: liveTotalPoints score { source eventPoints } }
+					}
+				}`,
+				variables: { pageSize: 50 },
+			},
+			schema
+		);
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 20 });
+		if (!result.ok) throw new Error(result.message);
+		expect(result.weightedComplexity).toBeLessThan(600);
+	});
+
 	it("charges every aliased liveScores full-event lookup", () => {
 		const result = validateGraphQLRequestLimits({
 			query:

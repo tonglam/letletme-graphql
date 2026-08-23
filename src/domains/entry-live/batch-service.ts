@@ -20,6 +20,7 @@ import {
 	buildManagerScore,
 	loadManagerScores,
 	unavailableManagerScore,
+	type ManagerScoreLoad,
 	type OfficialManagerScoreRow,
 } from "./manager-score";
 import { eventsService } from "../events/service";
@@ -482,6 +483,7 @@ export const entryLiveBatchService = {
 			fixtures?: Promise<Fixture[]>;
 			teams?: Promise<Team[]>;
 			picksByEntry?: Promise<Map<number, EntryEventPick>>;
+			managerScores?: Promise<ManagerScoreLoad> | ManagerScoreLoad;
 			tournamentId?: number;
 			legacyH2H?: boolean;
 		}
@@ -506,7 +508,8 @@ export const entryLiveBatchService = {
 			eventId > 1
 				? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
 				: Promise.resolve(new Map<number, EntryEventResult>()),
-			loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
+			prefetched?.managerScores ??
+				loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
 		]);
 		const readyEntryIds = entryIds.filter(
 			(entryId) => (picksByEntry.get(entryId)?.picks.length ?? 0) > 0

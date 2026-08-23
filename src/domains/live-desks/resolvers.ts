@@ -16,6 +16,7 @@ import {
 import type { DataPublicationManifest } from "../../infra/data-publication";
 import { entryLiveBatchService } from "../entry-live/batch-service";
 import {
+	loadManagerScores,
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
 } from "../entry-live/manager-score";
@@ -27,6 +28,13 @@ import {
 	readCompetitionBoardCache,
 	writeCompetitionBoardCache,
 } from "./competition-board-cache";
+import {
+	buildEntryLiveCompetitionBoard,
+	entryLiveCompetitionBoardCacheKey,
+	getOrBuildEntryLiveCompetitionBoard,
+	normalizeEntryLiveCompetitionBoardRequest,
+	queryEntryLiveCompetitionBoard,
+} from "./entry-live-competition-board";
 import { selectTournamentDeskEntryWindow } from "./tournament-entry-window";
 import { resolveLiveWindow, type LiveWindow } from "./window";
 
@@ -330,6 +338,26 @@ const managerBoardMeta = (
 	};
 };
 
+const managerLoadRevision = (input: {
+	managerRevision: string | null;
+	rows: ReadonlyMap<number, { revision: string }>;
+	missingEntryIds: readonly number[];
+}): string | null => {
+	if (input.managerRevision) return input.managerRevision;
+	if (input.rows.size === 0 && input.missingEntryIds.length === 0) return null;
+	return createHash("sha256")
+		.update(
+			JSON.stringify({
+				rows: Array.from(input.rows, ([entryId, row]) => [entryId, row.revision]).sort(
+					(left, right) => Number(left[0]) - Number(right[0])
+				),
+				missingEntryIds: [...input.missingEntryIds].sort((left, right) => left - right),
+			})
+		)
+		.digest("hex")
+		.slice(0, 20);
+};
+
 export const liveDesksResolvers = {
 	Query: {
 		liveContext: async (_parent: unknown, _args: unknown, context: GraphQLContext) => {
@@ -476,6 +504,123 @@ export const liveDesksResolvers = {
 				revision: snapshot.revision,
 				fixtureId: args.fixtureId,
 				players: snapshot.eventLives.filter((row) => playerIds.has(row.playerId)),
+			};
+		},
+		entryLiveCompetitionBoard: async (
+			_parent: unknown,
+			args: Record<string, unknown>,
+			context: GraphQLContext
+		) => {
+			const request = normalizeEntryLiveCompetitionBoardRequest(args);
+			const ref = (args.ref as LiveRef | null | undefined) ?? null;
+			if (ref && ref.season !== context.currentSeason.seasonCode) {
+				throw new GraphQLError("Live revision belongs to another season", {
+					extensions: { code: "LIVE_REVISION_GONE" },
+				});
+			}
+			if (ref && ref.eventId !== request.eventId) {
+				throw new GraphQLError("Live revision belongs to another event", {
+					extensions: { code: "LIVE_REVISION_GONE" },
+				});
+			}
+			const memberTournament = await assertMember(context, request.tournamentId, request.entryId);
+			const [liveWindow, tournamentEntryIds] = await Promise.all([
+				readLiveWindow(context),
+				tournamentsService.getTournamentEntryIds(context, request.tournamentId),
+			]);
+			const entryIds = Array.from(
+				new Set(
+					tournamentEntryIds.filter((entryId) => Number.isSafeInteger(entryId) && entryId > 0)
+				)
+			).sort((left, right) => left - right);
+			const { eventCore, window } = liveWindow;
+			const event = eventCore.events.find((candidate) => candidate.id === request.eventId);
+			if (!event) {
+				throw new GraphQLError("Event does not belong to the active season", {
+					extensions: { code: "LIVE_EVENT_NOT_FOUND" },
+				});
+			}
+			const [snapshot, managerScores] = await Promise.all([
+				getLiveDataSnapshot(context, request.eventId).catch(() => null),
+				loadManagerScores(context, request.eventId, entryIds, request.tournamentId),
+			]);
+			if (ref && (!snapshot || snapshot.revision !== ref.revision)) {
+				throw new GraphQLError("Requested live revision has expired", {
+					extensions: { code: "LIVE_REVISION_GONE" },
+				});
+			}
+			const playerRevision = snapshot?.revision ?? `core-${eventCore.revision}`;
+			const managerRevision = managerLoadRevision(managerScores);
+			const cacheIdentity = {
+				season: context.currentSeason.seasonCode,
+				eventId: request.eventId,
+				tournamentId: request.tournamentId,
+				coreRevision: eventCore.revision,
+				playerRevision,
+				managerRevision,
+			};
+			const cacheKey = entryLiveCompetitionBoardCacheKey(context, cacheIdentity);
+			const requireNet = memberTournament.leagueType === LeagueType.H2H;
+			const board = await getOrBuildEntryLiveCompetitionBoard(context, cacheKey, async () => {
+				const result = await entryLiveBatchService.calcLivePointsForEntries(
+					context,
+					request.eventId,
+					entryIds,
+					true,
+					{
+						tournamentId: request.tournamentId,
+						legacyH2H: requireNet,
+						managerScores,
+					}
+				);
+				const rankedRows = rankTournamentRowsByOfficialEventPoints(
+					Array.from(result.results.values()),
+					{ useNet: requireNet }
+				);
+				return buildEntryLiveCompetitionBoard({
+					...cacheIdentity,
+					rows: rankedRows,
+					totalEntries: entryIds.length,
+					failedEntryIds: result.errors.map((error) => error.entryId),
+					requireNet,
+				});
+			});
+			const page = queryEntryLiveCompetitionBoard(board, request);
+			const dataAvailability =
+				request.eventId === window.anchorEventId
+					? window.dataAvailability
+					: event?.finished && event.dataChecked
+						? "FINAL"
+						: snapshot
+							? "LAST_GOOD"
+							: event && event.id > (eventCore.currentEventId ?? 0)
+								? "SCHEDULED"
+								: "UNAVAILABLE";
+			return {
+				season: context.currentSeason.seasonCode,
+				eventId: request.eventId,
+				tournamentId: request.tournamentId,
+				boardRevision: board.boardRevision,
+				playerRevision: board.playerRevision,
+				managerRevision: board.managerRevision,
+				dataAvailability,
+				managerDataAvailability: managerScores.dataAvailability,
+				managerServedFrom: managerScores.servedFrom,
+				managerRefreshQueued: managerScores.refreshQueued,
+				managerCheckedAt: managerScores.checkedAt,
+				managerNextRefreshAt: managerScores.nextRefreshAt,
+				officialCoverage: board.officialCoverage,
+				unavailableEntryIds: board.unavailableEntryIds,
+				failedEntryIds: board.failedEntryIds,
+				partial: board.partial,
+				totalEntries: board.totalEntries,
+				filteredEntries: page.filteredEntries,
+				page: request.page,
+				pageSize: request.pageSize,
+				hasMore: page.hasMore,
+				highestEventPoints: board.highestEventPoints,
+				averageEventPoints: board.averageEventPoints,
+				rows: page.rows,
 			};
 		},
 		entryLiveCompetitionsDesk: async (
@@ -700,7 +845,30 @@ export const liveDesksResolvers = {
 		) => {
 			const memberTournament = await assertMember(context, args.tournamentId, args.entryId);
 			const { snapshot } = await resolveSnapshot(context, args.ref);
-			const ids = Array.from(new Set([args.entryId, ...args.comparedEntryIds])).slice(0, 2);
+			const requestedIds = Array.from(new Set(args.comparedEntryIds));
+			// Preserve the legacy one-opponent contract (viewer + opponent), while
+			// allowing the new clients to request an explicit pair of entries.
+			const ids =
+				requestedIds.length === 1 && requestedIds[0] !== args.entryId
+					? [args.entryId, requestedIds[0]!]
+					: requestedIds;
+			if (
+				ids.length === 0 ||
+				ids.length > 2 ||
+				ids.some((entryId) => !Number.isSafeInteger(entryId) || entryId <= 0)
+			) {
+				throw new GraphQLError("Comparison requires one or two valid tournament entries", {
+					extensions: { code: "BAD_USER_INPUT" },
+				});
+			}
+			const tournamentEntryIds = new Set(
+				await tournamentsService.getTournamentEntryIds(context, args.tournamentId)
+			);
+			if (ids.some((entryId) => !tournamentEntryIds.has(entryId))) {
+				throw new GraphQLError("Comparison entry is not a tournament member", {
+					extensions: { code: "FORBIDDEN" },
+				});
+			}
 			const result = await entryLiveBatchService.calcLivePointsForEntries(
 				context,
 				snapshot.eventId,

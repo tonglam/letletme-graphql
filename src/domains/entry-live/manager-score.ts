@@ -82,6 +82,11 @@ export async function loadManagerScores(
 		eventId,
 		entryIds,
 		tournamentId,
+		// Production requests always carry the pinned season. Keep the helper
+		// tolerant of legacy/direct resolver contexts so an unavailable official
+		// manager headline cannot turn an otherwise valid no-picks response into
+		// a GraphQL execution error.
+		expectedSeason: context.currentSeason?.seasonCode,
 		logger: context.logger,
 	});
 }

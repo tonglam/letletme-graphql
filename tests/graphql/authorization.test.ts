@@ -250,6 +250,23 @@ describe("authorizeGraphQLRequest", () => {
 		expect(result.ok).toBe(true);
 	});
 
+	it("requires both the bound entry and tournament membership for the lightweight live board", async () => {
+		const query = `query Board($entryId: Int!, $tournamentId: Int!) {
+			entryLiveCompetitionBoard(entryId: $entryId, tournamentId: $tournamentId, eventId: 1) {
+				boardRevision
+			}
+		}`;
+		expect(await authorize(query, { entryId: 123, tournamentId: 7 }, websitePrincipal)).toEqual({
+			ok: true,
+		});
+		expect(
+			await authorize(query, { entryId: 999, tournamentId: 7 }, websitePrincipal)
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+		expect(
+			await authorize(query, { entryId: 123, tournamentId: 9 }, websitePrincipal)
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+	});
+
 	it("allows public calcLivePointsByEntry pages without a principal", async () => {
 		const result = await authorize(
 			`query Calc($eventId: Int!, $entryId: Int!) {

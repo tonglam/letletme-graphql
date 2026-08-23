@@ -40,7 +40,7 @@ const MAX_LIST_ARGUMENT_WEIGHT = 200;
 
 // These roots contain a bounded list alongside fixed-size sibling projections.
 // Charge the requested list once, but do not multiply unrelated siblings by it.
-const NON_PROPAGATING_LIMIT_ROOTS = new Set(["playerStatsBootstrap"]);
+const NON_PROPAGATING_LIMIT_ROOTS = new Set(["playerStatsBootstrap", "entryLiveCompetitionBoard"]);
 
 type GraphQLPayload = {
 	query?: unknown;
@@ -216,7 +216,7 @@ const listWeight = (
 			oversizedLiveExplainBatch ||= value.length > 15;
 			multiplier = Math.max(multiplier, Math.min(value.length, 15));
 		}
-		if (["first", "last", "limit"].includes(name) && typeof value === "number") {
+		if (["first", "last", "limit", "pageSize"].includes(name) && typeof value === "number") {
 			negativeListLimit ||= value < 0;
 			multiplier = Math.max(multiplier, Math.min(Math.max(value, 1), MAX_LIST_ARGUMENT_WEIGHT));
 		}
@@ -470,6 +470,7 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["myFplCompetitionBoard", 10],
 	["myFplCompetitionSeasonPath", 5],
 	["myFplCompetitionSetupStatus", 5],
+	["entryLiveCompetitionBoard", 20],
 ]);
 
 const heavyRootCost = (

@@ -3,9 +3,13 @@ import { describe, expect, it } from "bun:test";
 describe("live desks tournament selection index", () => {
 	it("uses the reporting read model instead of request-time pick scans", async () => {
 		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
-		expect(source).toContain("getTournamentSelectionIndexRows");
-		expect(source).not.toContain("getEntryEventPicksByIds");
-		expect(source).not.toContain("getTournamentEntryIds(context, args.tournamentId)");
+		const selectionIndex = source.slice(
+			source.indexOf("tournamentSelectionIndex: async"),
+			source.indexOf("tournamentEntrySquads: async")
+		);
+		expect(selectionIndex).toContain("getTournamentSelectionIndexRows");
+		expect(selectionIndex).not.toContain("getEntryEventPicksByIds");
+		expect(selectionIndex).not.toContain("getTournamentEntryIds(context, args.tournamentId)");
 	});
 
 	it("routes tournament anchoring through the shared live window", async () => {
@@ -36,5 +40,19 @@ describe("live desks tournament selection index", () => {
 		expect(desk.indexOf("await assertMember(context, selected, args.entryId)")).toBeLessThan(
 			desk.indexOf("readCompetitionBoardCache")
 		);
+	});
+
+	it("loads squads only for the requested comparison pair and verifies tournament membership", async () => {
+		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const comparison = source.slice(
+			source.indexOf("tournamentEntrySquads: async"),
+			source.indexOf("tournamentLiveParticipants: async")
+		);
+		expect(comparison).toContain("new Set(args.comparedEntryIds)");
+		expect(comparison).toContain("requestedIds.length === 1");
+		expect(comparison).toContain("[args.entryId, requestedIds[0]!]");
+		expect(comparison).toContain("ids.length > 2");
+		expect(comparison).toContain("getTournamentEntryIds");
+		expect(comparison).not.toContain("slice(0, 2)");
 	});
 });

@@ -9,13 +9,15 @@
 
 import { metrics } from "./metrics";
 
-// A cold classic tournament request can refresh standings and enrich the
-// roster with official entry summaries. Keep enough room for that bounded
-// upstream crawl before treating the Data service as unavailable.
-const MANAGER_LIVE_TIMEOUT_MS = 15_000;
+// The GraphQL request path is cache-only. Data owns upstream refreshes in its
+// manager-live worker, so a slow internal read must degrade to UNAVAILABLE
+// instead of consuming the entire live-board latency budget.
+const MANAGER_LIVE_TIMEOUT_MS = 1_000;
 
 export type ManagerLiveSource = "FPL_ENTRY_SUMMARY" | "FPL_CLASSIC_STANDINGS" | "FPL_FINAL_RESULT";
 export type ManagerLiveTotalScope = "OVERALL" | "CLASSIC_PHASE";
+export type ManagerLiveDataAvailability = "FRESH" | "LAST_GOOD" | "PARTIAL" | "UNAVAILABLE";
+export type ManagerLiveServedFrom = "REDIS" | "POSTGRES" | "MIXED" | "NONE";
 
 export type ManagerLiveScoreRow = {
 	season: string;
@@ -40,6 +42,10 @@ export type ManagerLiveScoreRow = {
 export type ManagerLiveResolveResult = {
 	season: string;
 	eventId: number;
+	managerRevision: string;
+	dataAvailability: ManagerLiveDataAvailability;
+	servedFrom: ManagerLiveServedFrom;
+	refreshQueued: boolean;
 	rows: ManagerLiveScoreRow[];
 	missingEntryIds: number[];
 	partial: boolean;
@@ -49,8 +55,15 @@ export type ManagerLiveResolveResult = {
 };
 
 export type ManagerLiveFetchResult = {
+	season: string | null;
 	rows: Map<number, ManagerLiveScoreRow>;
 	errorCode: ManagerLiveResolveResult["errorCode"];
+	managerRevision: string | null;
+	dataAvailability: ManagerLiveDataAvailability;
+	servedFrom: ManagerLiveServedFrom;
+	refreshQueued: boolean;
+	missingEntryIds: number[];
+	checkedAt: string | null;
 	nextRefreshAt: string | null;
 };
 
@@ -63,26 +76,64 @@ const isNullableNumber = (value: unknown): value is number | null | undefined =>
 const isNullableString = (value: unknown): value is string | null | undefined =>
 	value === null || value === undefined || typeof value === "string";
 
+const isIsoDateString = (value: unknown): value is string =>
+	typeof value === "string" && Number.isFinite(Date.parse(value));
+
+const isManagerDataAvailability = (value: unknown): value is ManagerLiveDataAvailability =>
+	value === "FRESH" || value === "LAST_GOOD" || value === "PARTIAL" || value === "UNAVAILABLE";
+
+const isManagerServedFrom = (value: unknown): value is ManagerLiveServedFrom =>
+	value === "REDIS" || value === "POSTGRES" || value === "MIXED" || value === "NONE";
+
+const parsePositiveIntegerList = (value: unknown): number[] | null => {
+	if (!Array.isArray(value)) return null;
+	const parsed: number[] = [];
+	for (const item of value as unknown[]) {
+		if (typeof item !== "number" || !Number.isSafeInteger(item) || item <= 0) return null;
+		parsed.push(item);
+	}
+	return parsed;
+};
+
 const readEnv = (key: "LETLETME_DATA_URL" | "LETLETME_DATA_API_KEY"): string => {
 	const value = Bun.env[key] ?? process.env[key];
 	return typeof value === "string" ? value.trim() : "";
 };
+
+const unavailableResult = (
+	errorCode: ManagerLiveFetchResult["errorCode"] = "UPSTREAM_UNAVAILABLE"
+): ManagerLiveFetchResult => ({
+	season: null,
+	rows: new Map(),
+	errorCode,
+	managerRevision: null,
+	dataAvailability: "UNAVAILABLE",
+	servedFrom: "NONE",
+	refreshQueued: false,
+	missingEntryIds: [],
+	checkedAt: null,
+	nextRefreshAt: null,
+});
 
 const parseRow = (value: unknown): ManagerLiveScoreRow | null => {
 	if (!isRecord(value)) return null;
 	if (
 		typeof value.entryId !== "number" ||
 		!Number.isSafeInteger(value.entryId) ||
+		value.entryId <= 0 ||
 		typeof value.eventId !== "number" ||
 		!Number.isSafeInteger(value.eventId) ||
-		typeof value.checkedAt !== "string" ||
+		value.eventId <= 0 ||
+		!isIsoDateString(value.checkedAt) ||
 		typeof value.revision !== "string" ||
+		value.revision.length === 0 ||
 		(value.source !== "FPL_ENTRY_SUMMARY" &&
 			value.source !== "FPL_CLASSIC_STANDINGS" &&
 			value.source !== "FPL_FINAL_RESULT") ||
 		(value.totalScope !== "OVERALL" && value.totalScope !== "CLASSIC_PHASE") ||
 		typeof value.season !== "string" ||
-		typeof value.staleAt !== "string" ||
+		value.season.length === 0 ||
+		!isIsoDateString(value.staleAt) ||
 		!isNullableNumber(value.eventPoints) ||
 		!isNullableNumber(value.netEventPoints) ||
 		!isNullableNumber(value.totalPoints) ||
@@ -94,7 +145,8 @@ const parseRow = (value: unknown): ManagerLiveScoreRow | null => {
 			value.eventPointSemantics !== "NET" &&
 			value.eventPointSemantics !== "ZERO_COST_EQUIVALENT" &&
 			value.eventPointSemantics !== "UNKNOWN") ||
-		!isNullableString(value.upstreamUpdatedAt)
+		!isNullableString(value.upstreamUpdatedAt) ||
+		(typeof value.upstreamUpdatedAt === "string" && !isIsoDateString(value.upstreamUpdatedAt))
 	) {
 		return null;
 	}
@@ -109,12 +161,13 @@ export async function requestManagerLiveScores(params: {
 	eventId: number;
 	entryIds: readonly number[];
 	tournamentId?: number;
+	expectedSeason?: string;
 	logger?: { warn: (obj: Record<string, unknown>, msg: string) => void };
 }): Promise<ManagerLiveFetchResult> {
 	const baseUrl = readEnv("LETLETME_DATA_URL").replace(/\/+$/, "");
 	if (!baseUrl || params.entryIds.length === 0) {
 		metrics.managerLiveUpstreamRequestsTotal.labels("not_configured").inc();
-		return { rows: new Map(), errorCode: "UPSTREAM_UNAVAILABLE", nextRefreshAt: null };
+		return unavailableResult();
 	}
 
 	const controller = new AbortController();
@@ -131,6 +184,7 @@ export async function requestManagerLiveScores(params: {
 			body: JSON.stringify({
 				eventId: params.eventId,
 				entryIds: params.entryIds,
+				readMode: "CACHE_ONLY",
 				...(params.tournamentId === undefined ? {} : { tournamentId: params.tournamentId }),
 			}),
 			signal: controller.signal,
@@ -143,16 +197,14 @@ export async function requestManagerLiveScores(params: {
 				{ eventId: params.eventId, status: response.status },
 				"Official manager live endpoint returned a non-success response"
 			);
-			return {
-				rows: new Map(),
-				errorCode: response.status === 429 ? "UPSTREAM_RATE_LIMITED" : "UPSTREAM_UNAVAILABLE",
-				nextRefreshAt: null,
-			};
+			return unavailableResult(
+				response.status === 429 ? "UPSTREAM_RATE_LIMITED" : "UPSTREAM_UNAVAILABLE"
+			);
 		}
 		const body: unknown = await response.json().catch(() => null);
 		if (!isRecord(body) || body.success !== true || !isRecord(body.data)) {
 			metrics.managerLiveUpstreamRequestsTotal.labels("invalid_response").inc();
-			return { rows: new Map(), errorCode: "UPSTREAM_UNAVAILABLE", nextRefreshAt: null };
+			return unavailableResult();
 		}
 		const data = body.data;
 		if (
@@ -160,19 +212,58 @@ export async function requestManagerLiveScores(params: {
 			!Number.isSafeInteger(data.eventId) ||
 			data.eventId !== params.eventId ||
 			typeof data.season !== "string" ||
-			typeof data.checkedAt !== "string"
+			data.season.length === 0 ||
+			(params.expectedSeason !== undefined && data.season !== params.expectedSeason) ||
+			typeof data.managerRevision !== "string" ||
+			data.managerRevision.length === 0 ||
+			!isManagerDataAvailability(data.dataAvailability) ||
+			!isManagerServedFrom(data.servedFrom) ||
+			typeof data.refreshQueued !== "boolean" ||
+			!Array.isArray(data.rows) ||
+			!Array.isArray(data.missingEntryIds) ||
+			typeof data.partial !== "boolean" ||
+			(data.errorCode !== null &&
+				data.errorCode !== "UNSUPPORTED_H2H_LIVE" &&
+				data.errorCode !== "UPSTREAM_UNAVAILABLE" &&
+				data.errorCode !== "UPSTREAM_RATE_LIMITED") ||
+			!isIsoDateString(data.checkedAt) ||
+			!isIsoDateString(data.nextRefreshAt)
 		) {
 			metrics.managerLiveUpstreamRequestsTotal.labels("invalid_response").inc();
-			return { rows: new Map(), errorCode: "UPSTREAM_UNAVAILABLE", nextRefreshAt: null };
+			return unavailableResult();
 		}
-		const parsedRows = Array.isArray(data.rows)
-			? data.rows
-					.map(parseRow)
-					.filter(
-						(row): row is ManagerLiveScoreRow => row !== null && row.eventId === params.eventId
-					)
-			: [];
-		const rows = new Map(parsedRows.map((row) => [row.entryId, row]));
+		const parsedRows = data.rows.map(parseRow);
+		if (parsedRows.some((row) => row === null)) {
+			metrics.managerLiveUpstreamRequestsTotal.labels("invalid_response").inc();
+			return unavailableResult();
+		}
+		const validRows = parsedRows as ManagerLiveScoreRow[];
+		const requestedEntryIds = new Set(params.entryIds);
+		const rowEntryIds = validRows.map((row) => row.entryId);
+		const missingEntryIds = parsePositiveIntegerList(data.missingEntryIds);
+		if (!missingEntryIds) {
+			metrics.managerLiveUpstreamRequestsTotal.labels("invalid_response").inc();
+			return unavailableResult();
+		}
+		if (
+			rowEntryIds.some(
+				(entryId, index) =>
+					!requestedEntryIds.has(entryId) || rowEntryIds.indexOf(entryId) !== index
+			) ||
+			missingEntryIds.some(
+				(entryId, index) =>
+					!requestedEntryIds.has(entryId) ||
+					missingEntryIds.indexOf(entryId) !== index ||
+					rowEntryIds.includes(entryId)
+			) ||
+			new Set([...rowEntryIds, ...missingEntryIds]).size !== requestedEntryIds.size ||
+			validRows.some((row) => row.eventId !== params.eventId || row.season !== data.season) ||
+			data.partial !== missingEntryIds.length > 0
+		) {
+			metrics.managerLiveUpstreamRequestsTotal.labels("invalid_response").inc();
+			return unavailableResult();
+		}
+		const rows = new Map(validRows.map((row) => [row.entryId, row]));
 		const errorCode =
 			data.errorCode === "UNSUPPORTED_H2H_LIVE" ||
 			data.errorCode === "UPSTREAM_UNAVAILABLE" ||
@@ -181,9 +272,16 @@ export async function requestManagerLiveScores(params: {
 				: null;
 		metrics.managerLiveUpstreamRequestsTotal.labels(errorCode ? "partial" : "success").inc();
 		return {
+			season: data.season,
 			rows,
 			errorCode,
-			nextRefreshAt: typeof data.nextRefreshAt === "string" ? data.nextRefreshAt : null,
+			managerRevision: data.managerRevision,
+			dataAvailability: data.dataAvailability,
+			servedFrom: data.servedFrom,
+			refreshQueued: data.refreshQueued,
+			missingEntryIds,
+			checkedAt: data.checkedAt,
+			nextRefreshAt: data.nextRefreshAt,
 		};
 	} catch (error) {
 		metrics.managerLiveUpstreamRequestsTotal.labels("error").inc();
@@ -191,7 +289,7 @@ export async function requestManagerLiveScores(params: {
 			{ eventId: params.eventId, error: error instanceof Error ? error.message : String(error) },
 			"Official manager live endpoint unavailable"
 		);
-		return { rows: new Map(), errorCode: "UPSTREAM_UNAVAILABLE", nextRefreshAt: null };
+		return unavailableResult();
 	} finally {
 		metrics.managerLiveUpstreamLatencySeconds.observe((performance.now() - startedAt) / 1000);
 		clearTimeout(timeoutId);
