@@ -607,6 +607,9 @@ export type EntryOfficialH2HDeskItem = {
 	rank: number | null;
 	lastRank: number | null;
 	matchPoints: number;
+	/** Internal read-side evidence; intentionally not exposed by the GraphQL schema. */
+	standingsPublished: boolean;
+	standingsCurrentEventComplete: boolean;
 	match: OfficialH2HMatch | null;
 	matches: OfficialH2HMatch[];
 };
@@ -910,6 +913,8 @@ function isOfficialH2HInfo(tournament: TournamentInfo): boolean {
 type OfficialH2HSnapshotLoad = {
 	snapshot: TournamentOfficialH2H;
 	history: DbTournamentBattleGroupResultRow[];
+	standingsPublished: boolean;
+	currentEventComplete: boolean;
 };
 
 function officialBattleRowsAreCompleteForEntries(
@@ -988,6 +993,7 @@ function officialBattleRowsAreCompleteForEntries(
 type OfficialH2HProjectionSelection = {
 	standings: HistoricalH2HStandingProjection[] | null;
 	options: OfficialH2HProjectionOptions;
+	currentEventComplete: boolean;
 	storedPlayed: number;
 	derivedPlayed: number;
 };
@@ -1050,7 +1056,13 @@ function selectCurrentOfficialH2HProjection(
 	};
 	const storedPlayed = groups.reduce((total, row) => total + Math.max(0, row.played ?? 0), 0);
 	if (!completeCurrentEvent) {
-		return { standings: null, options, storedPlayed, derivedPlayed: 0 };
+		return {
+			standings: null,
+			options,
+			currentEventComplete: false,
+			storedPlayed,
+			derivedPlayed: 0,
+		};
 	}
 
 	const derived = projectOfficialH2HStandingsFromResults(entryIds, historyRows, options);
@@ -1080,6 +1092,7 @@ function selectCurrentOfficialH2HProjection(
 		// If any stored entry has more result coverage, keep the whole table authoritative.
 		standings: hasLaggingStoredEntry ? derived : null,
 		options,
+		currentEventComplete: true,
 		storedPlayed,
 		derivedPlayed,
 	};
@@ -1277,6 +1290,9 @@ async function loadOfficialH2HSnapshots(
 				matches,
 			},
 			history: tournamentHistory,
+			standingsPublished:
+				currentProjection.currentEventComplete || currentProjection.storedPlayed > 0,
+			currentEventComplete: currentProjection.currentEventComplete,
 		});
 	}
 	return loaded;
@@ -3558,14 +3574,30 @@ export const tournamentsRepository: TournamentsRepository = {
 		context: GraphQLContext,
 		entryId: number
 	): Promise<EntryOfficialH2HDeskItem[]> {
-		const membershipResult = await context.data
-			.read("competition.tournament_entries")
-			.select("tournament_id")
-			.eq("entry_id", entryId);
-		if (membershipResult.error) throw new Error("Failed to fetch official H2H memberships");
-		const tournamentIds = extractTournamentIds(
-			(membershipResult.data as DbTournamentEntryRow[] | null) ?? []
+		const [rosterMemberships, officialLeagueMemberships] = await Promise.all([
+			context.data
+				.read("competition.tournament_entries")
+				.select("tournament_id")
+				.eq("entry_id", entryId),
+			context.data
+				.read("competition.entry_leagues_with_tournament")
+				.select("tournament_id")
+				.eq("entry_id", entryId),
+		]);
+		if (rosterMemberships.error || officialLeagueMemberships.error) {
+			throw new Error("Failed to fetch official H2H memberships");
+		}
+		const canonicalTournamentIds = (
+			(officialLeagueMemberships.data as { tournament_id: number | null }[] | null) ?? []
+		).flatMap((row) =>
+			Number.isSafeInteger(row.tournament_id) && Number(row.tournament_id) > 0
+				? [{ tournament_id: Number(row.tournament_id) }]
+				: []
 		);
+		const tournamentIds = extractTournamentIds([
+			...((rosterMemberships.data as DbTournamentEntryRow[] | null) ?? []),
+			...canonicalTournamentIds,
+		]);
 		const tournaments = (await getTournamentInfosUncached(context, tournamentIds)).filter(
 			isOfficialH2HInfo
 		);
@@ -3596,16 +3628,19 @@ export const tournamentsRepository: TournamentsRepository = {
 		for (const tournament of tournaments) {
 			const loadedSnapshot = loadedOfficialH2H.get(tournament.id);
 			if (!loadedSnapshot) continue;
-			const { snapshot, history } = loadedSnapshot;
+			const { snapshot, history, standingsPublished, currentEventComplete } = loadedSnapshot;
 			const standing = snapshot.standings.find((row) => row.entryId === entryId);
 			const matches = snapshot.matches.filter(
 				(candidate) => candidate.home.entryId === entryId || candidate.away.entryId === entryId
 			);
-			const previousStandings = projectHistoricalOfficialH2HStandings(
+			const projectedPreviousStandings = projectHistoricalOfficialH2HStandings(
 				snapshot.standings.map((row) => row.entryId),
 				history.filter((row) => row.event_id < currentEvent.id),
 				{ finalizedEventIds }
 			);
+			const previousStandings = projectedPreviousStandings.some((row) => row.played > 0)
+				? projectedPreviousStandings
+				: [];
 			bulkRows.push({
 				tournamentId: tournament.id,
 				tournamentName: tournament.name,
@@ -3617,6 +3652,8 @@ export const tournamentsRepository: TournamentsRepository = {
 				rank: standing?.rank ?? null,
 				lastRank: previousStandings.find((row) => row.entryId === entryId)?.rank ?? null,
 				matchPoints: standing?.matchPoints ?? 0,
+				standingsPublished,
+				standingsCurrentEventComplete: currentEventComplete,
 				match: matches.find((match) => match.phase === "REGULAR") ?? matches[0] ?? null,
 				matches,
 			});
@@ -3651,6 +3688,8 @@ export const tournamentsRepository: TournamentsRepository = {
 				rank: standing?.rank ?? null,
 				lastRank: null,
 				matchPoints: standing?.matchPoints ?? 0,
+				standingsPublished: false,
+				standingsCurrentEventComplete: false,
 				match: match ?? null,
 				matches: match ? [match] : [],
 			});

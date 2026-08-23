@@ -1,7 +1,11 @@
 import { describe, expect, it, mock } from "bun:test";
 import { graphql } from "graphql";
-import { movementFromRanks } from "../../../src/domains/home/repository";
-import { compactHomeMarketPulse, settleHomeTransfers } from "../../../src/domains/home/service";
+import { movementFromRanks, type HomePersonalDesk } from "../../../src/domains/home/repository";
+import {
+	compactHomeMarketPulse,
+	reconcileHomeOfficialH2HRanks,
+	settleHomeTransfers,
+} from "../../../src/domains/home/service";
 import { gameweekService } from "../../../src/domains/gameweek/service";
 import type { MarketPulse } from "../../../src/domains/market/repository";
 import { Position } from "../../../src/domains/players/repository";
@@ -211,6 +215,14 @@ describe("Home GraphQL contracts", () => {
 			expect(sql).toContain("official_kind");
 			expect(sql).toContain("short_name");
 			expect(sql).toContain("l.started_event");
+			expect(sql).toContain(
+				"COALESCE(official_h2h.tournament_id, tracked.tournament_id) AS tournament_id"
+			);
+			expect(sql).toMatch(
+				/AND t\.league_type = l\.league_type\s+ORDER BY t\.tournament_id\s+LIMIT 1\s+\) tracked ON TRUE/
+			);
+			expect(sql).toContain("t.roster_mode::text = 'official_sync'");
+			expect(sql).toContain("t.group_mode::text = 'battle_races'");
 			expect(sql).not.toContain("competition.tournament_groups");
 			expect(sql).toContain("fpl.events");
 			expect(sql).toContain("event.finished = TRUE AND event.data_checked = TRUE");
@@ -341,6 +353,133 @@ describe("Home GraphQL contracts", () => {
 			],
 		});
 		expect(databaseQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("reconciles Home H2H ranks only from the official mirror desk", () => {
+		const desk: HomePersonalDesk = {
+			entryId: 123,
+			state: "READY",
+			entryName: "Compact XI",
+			playerName: "Ada Manager",
+			overallPoints: 49,
+			overallRank: 90_000,
+			teamValue: 1000,
+			sourceCheckedAt: "2026-08-23T01:00:00.000Z",
+			leagueRanks: [
+				{
+					key: "classic:7",
+					name: "Classic",
+					leagueType: "CLASSIC",
+					rank: 7,
+					movement: { direction: "FLAT", places: 0 },
+					tournamentId: 5,
+					h2hMatchup: null,
+				},
+				{
+					key: "h2h:8",
+					name: "Official H2H",
+					leagueType: "H2H",
+					rank: null,
+					movement: { direction: "UNKNOWN", places: null },
+					tournamentId: 6,
+					h2hMatchup: null,
+				},
+				{
+					key: "h2h:9",
+					name: "Custom H2H",
+					leagueType: "H2H",
+					rank: 4,
+					movement: { direction: "FLAT", places: 0 },
+					tournamentId: 7,
+					h2hMatchup: null,
+				},
+				{
+					key: "h2h:10",
+					name: "Waiting Official H2H",
+					leagueType: "H2H",
+					rank: null,
+					movement: { direction: "UNKNOWN", places: null },
+					tournamentId: 8,
+					h2hMatchup: null,
+				},
+				{
+					key: "h2h:11",
+					name: "Settled Official H2H",
+					leagueType: "H2H",
+					rank: 3,
+					movement: { direction: "UP", places: 2 },
+					tournamentId: 9,
+					h2hMatchup: null,
+				},
+			],
+		};
+		const officialDesk = [
+			{
+				tournamentId: 6,
+				tournamentName: "Official H2H",
+				totalTeams: 21,
+				eventId: 1,
+				awaitingSchedule: false,
+				isLive: true,
+				isFinal: false,
+				rank: 2,
+				lastRank: null,
+				matchPoints: 3,
+				standingsPublished: true,
+				standingsCurrentEventComplete: true,
+				match: null,
+				matches: [],
+			},
+			{
+				tournamentId: 8,
+				tournamentName: "Waiting Official H2H",
+				totalTeams: 21,
+				eventId: 1,
+				awaitingSchedule: false,
+				isLive: true,
+				isFinal: false,
+				rank: 1,
+				lastRank: null,
+				matchPoints: 0,
+				standingsPublished: false,
+				standingsCurrentEventComplete: false,
+				match: null,
+				matches: [],
+			},
+			{
+				tournamentId: 9,
+				tournamentName: "Settled Official H2H",
+				totalTeams: 21,
+				eventId: 2,
+				awaitingSchedule: false,
+				isLive: true,
+				isFinal: false,
+				rank: 2,
+				lastRank: 3,
+				matchPoints: 3,
+				standingsPublished: true,
+				standingsCurrentEventComplete: false,
+				match: null,
+				matches: [],
+			},
+		];
+
+		const reconciled = reconcileHomeOfficialH2HRanks(desk, officialDesk);
+
+		expect(reconciled.leagueRanks).toEqual([
+			desk.leagueRanks[0],
+			{
+				...desk.leagueRanks[1],
+				rank: 2,
+				movement: { direction: "UNKNOWN", places: null },
+			},
+			desk.leagueRanks[2],
+			desk.leagueRanks[3],
+			{
+				...desk.leagueRanks[4],
+				rank: 2,
+			},
+		]);
 	});
 
 	it("keeps the settled official rank during a later live event", async () => {

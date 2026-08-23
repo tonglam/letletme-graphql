@@ -414,6 +414,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 			new Set([1])
 		);
 		expect(projected).toMatchObject({ storedPlayed: 2, derivedPlayed: 4 });
+		expect(projected.currentEventComplete).toBe(true);
 		expect(projected.standings).toEqual([
 			expect.objectContaining({
 				entryId: 102,
@@ -3596,10 +3597,8 @@ describe("official H2H live standings read-side fallback", () => {
 			},
 		];
 		let historyBattles: DbTournamentBattleGroupResultRow[] | null = null;
-		const memberships = [
-			{ tournament_id: 9, entry_id: 101 },
-			{ tournament_id: 9, entry_id: 102 },
-		];
+		const memberships = [{ tournament_id: 9, entry_id: 102 }];
+		const canonicalMemberships = [{ tournament_id: 9, entry_id: 101 }];
 		const entries = [
 			{ id: 101, entry_name: "WhoAMI Agent", player_name: "WhoAMI's Team" },
 			{ id: 102, entry_name: "Average Killers", player_name: "Manager Two" },
@@ -3631,11 +3630,13 @@ describe("official H2H live standings read-side fallback", () => {
 									? []
 									: table === "competition.tournament_entries"
 										? memberships
-										: table === "competition.entries"
-											? entries
-											: table === "fpl.events"
-												? events
-												: [];
+										: table === "competition.entry_leagues_with_tournament"
+											? canonicalMemberships
+											: table === "competition.entries"
+												? entries
+												: table === "fpl.events"
+													? events
+													: [];
 				return { data: filterRowsByActions(source, actions), error: null };
 			};
 			const builder = {
@@ -3723,7 +3724,10 @@ describe("official H2H live standings read-side fallback", () => {
 		expect(desk[0]).toMatchObject({
 			tournamentId: 9,
 			rank: 1,
+			lastRank: null,
 			matchPoints: 3,
+			standingsPublished: true,
+			standingsCurrentEventComplete: true,
 			match: {
 				home: { entryId: 101, points: 49, matchPoints: 3 },
 				away: { entryId: 102, points: 23, matchPoints: 0 },
