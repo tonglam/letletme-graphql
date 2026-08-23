@@ -189,6 +189,521 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 			}),
 		]);
 	});
+
+	it("derives a validated live or finalized outcome from the latest scores instead of stale saved outcomes", () => {
+		const rows: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 41,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 101,
+				home_net_points: 20,
+				home_rank: 1,
+				home_match_points: 3,
+				away_entry_id: 102,
+				away_net_points: 50,
+				away_rank: 2,
+				away_match_points: 0,
+			},
+		];
+
+		expect(
+			projectOfficialH2HStandingsFromResults([101, 102], rows, {
+				provisionalEventIds: new Set([1]),
+			})
+		).toEqual([
+			expect.objectContaining({ entryId: 102, matchPoints: 3, won: 1, pointsFor: 50 }),
+			expect.objectContaining({ entryId: 101, matchPoints: 0, lost: 1, pointsFor: 20 }),
+		]);
+		expect(
+			projectOfficialH2HStandingsFromResults([101, 102], rows, {
+				finalizedEventIds: new Set([1]),
+			})
+		).toEqual([
+			expect.objectContaining({ entryId: 102, matchPoints: 3, won: 1, pointsFor: 50 }),
+			expect.objectContaining({ entryId: 101, matchPoints: 0, lost: 1, pointsFor: 20 }),
+		]);
+	});
+
+	it("requires one complete non-zero live score batch across the entire roster", () => {
+		const rows: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 5,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 101,
+				home_net_points: 49,
+				home_rank: null,
+				home_match_points: null,
+				away_entry_id: 102,
+				away_net_points: 23,
+				away_rank: null,
+				away_match_points: null,
+				home_is_average: false,
+				away_is_average: false,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
+			},
+			{
+				id: 6,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 103,
+				home_net_points: 24,
+				home_rank: null,
+				home_match_points: null,
+				away_entry_id: null,
+				away_net_points: 23,
+				away_rank: null,
+				away_match_points: null,
+				home_is_average: false,
+				away_is_average: true,
+				source_checked_at: new Date("2026-08-23T01:00:00.000Z"),
+			},
+		];
+		const liveOptions = { finalizedEventIds: new Set<number>(), provisionalEventIds: new Set([1]) };
+
+		expect(
+			tournamentCacheTestables.officialBattleRowsAreCompleteForEntries(
+				[101, 102, 103],
+				rows,
+				liveOptions
+			)
+		).toBe(true);
+		for (const incomplete of [
+			[],
+			rows.slice(0, 1),
+			[rows[0]!, { ...rows[1]!, home_net_points: null }],
+			[rows[0]!, { ...rows[1]!, home_entry_id: 102 }],
+			[
+				rows[0]!,
+				{
+					...rows[1]!,
+					home_net_points: 0,
+					away_net_points: 0,
+					source_checked_at: "2026-08-23T01:01:00.000Z",
+				},
+			],
+			rows.map((row) => ({ ...row, home_net_points: 0, away_net_points: 0 })),
+		]) {
+			expect(
+				tournamentCacheTestables.officialBattleRowsAreCompleteForEntries(
+					[101, 102, 103],
+					incomplete,
+					liveOptions
+				)
+			).toBe(false);
+		}
+	});
+
+	it("accepts a true bye for atomic coverage without scoring the bye", () => {
+		const rows: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 7,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 101,
+				home_net_points: 50,
+				home_rank: null,
+				home_match_points: null,
+				away_entry_id: 102,
+				away_net_points: 40,
+				away_rank: null,
+				away_match_points: null,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
+			},
+			{
+				id: 8,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 103,
+				home_net_points: null,
+				home_rank: null,
+				home_match_points: null,
+				away_entry_id: null,
+				away_net_points: null,
+				away_rank: null,
+				away_match_points: null,
+				is_bye: true,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
+			},
+		];
+		const options = { finalizedEventIds: new Set<number>(), provisionalEventIds: new Set([1]) };
+
+		expect(
+			tournamentCacheTestables.officialBattleRowsAreCompleteForEntries(
+				[101, 102, 103],
+				rows,
+				options
+			)
+		).toBe(true);
+		expect(projectOfficialH2HStandingsFromResults([101, 102, 103], rows, options)).toContainEqual(
+			expect.objectContaining({ entryId: 103, played: 0, matchPoints: 0, pointsFor: 0 })
+		);
+	});
+
+	it("projects finalized history plus a complete live round only while saved groups lag", () => {
+		const groups = [
+			{
+				tournament_id: 9,
+				entry_id: 101,
+				group_points: 3,
+				group_rank: 1,
+				played: 1,
+				won: 1,
+				drawn: 0,
+				lost: 0,
+				total_net_points: 40,
+			},
+			{
+				tournament_id: 9,
+				entry_id: 102,
+				group_points: 0,
+				group_rank: 2,
+				played: 1,
+				won: 0,
+				drawn: 0,
+				lost: 1,
+				total_net_points: 30,
+			},
+		];
+		const history: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 9,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 101,
+				home_net_points: 40,
+				home_rank: null,
+				home_match_points: null,
+				away_entry_id: 102,
+				away_net_points: 30,
+				away_rank: null,
+				away_match_points: null,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
+			},
+			{
+				id: 10,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 2,
+				home_entry_id: 101,
+				home_net_points: 20,
+				home_rank: null,
+				home_match_points: null,
+				away_entry_id: 102,
+				away_net_points: 50,
+				away_rank: null,
+				away_match_points: null,
+				source_checked_at: "2026-08-23T01:01:00.000Z",
+			},
+		];
+
+		const projected = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+			2,
+			groups,
+			history.filter((row) => row.event_id === 2),
+			history,
+			2,
+			2,
+			new Set([1])
+		);
+		expect(projected).toMatchObject({ storedPlayed: 2, derivedPlayed: 4 });
+		expect(projected.standings).toEqual([
+			expect.objectContaining({
+				entryId: 102,
+				rank: 1,
+				matchPoints: 3,
+				played: 2,
+				won: 1,
+				lost: 1,
+				pointsFor: 80,
+			}),
+			expect.objectContaining({
+				entryId: 101,
+				rank: 2,
+				matchPoints: 3,
+				played: 2,
+				won: 1,
+				lost: 1,
+				pointsFor: 60,
+			}),
+		]);
+
+		const caughtUpGroups = groups.map((group) =>
+			group.entry_id === 101
+				? {
+						...group,
+						group_points: 3,
+						group_rank: 2,
+						played: 2,
+						won: 1,
+						lost: 1,
+						total_net_points: 60,
+					}
+				: {
+						...group,
+						group_points: 3,
+						group_rank: 1,
+						played: 2,
+						won: 1,
+						lost: 1,
+						total_net_points: 80,
+					}
+		);
+		expect(
+			tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+				2,
+				caughtUpGroups,
+				history.filter((row) => row.event_id === 2),
+				history,
+				2,
+				2,
+				new Set([1])
+			).standings
+		).toBeNull();
+
+		const authoritativeTieRanks = caughtUpGroups.map((group) => ({
+			...group,
+			group_rank: 1,
+		}));
+		expect(
+			tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+				2,
+				authoritativeTieRanks,
+				history.filter((row) => row.event_id === 2),
+				history,
+				2,
+				2,
+				new Set([1])
+			).standings
+		).toBeNull();
+
+		const currentOnlyRows = history.filter((row) => row.event_id === 2);
+		const changedScoreAtEqualCoverage = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+			2,
+			groups,
+			currentOnlyRows,
+			currentOnlyRows,
+			2,
+			2,
+			new Set([1])
+		);
+		expect(changedScoreAtEqualCoverage).toMatchObject({ storedPlayed: 2, derivedPlayed: 2 });
+		expect(changedScoreAtEqualCoverage.standings).toEqual([
+			expect.objectContaining({
+				entryId: 102,
+				rank: 1,
+				matchPoints: 3,
+				played: 1,
+				won: 1,
+				lost: 0,
+				pointsFor: 50,
+			}),
+			expect.objectContaining({
+				entryId: 101,
+				rank: 2,
+				matchPoints: 0,
+				played: 1,
+				won: 0,
+				lost: 1,
+				pointsFor: 20,
+			}),
+		]);
+
+		const unevenGroupsWithEqualCoverage = [
+			{ ...groups[0]!, played: 2 },
+			{ ...groups[1]!, played: 0 },
+		];
+		const unevenProjection = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+			2,
+			unevenGroupsWithEqualCoverage,
+			currentOnlyRows,
+			currentOnlyRows,
+			2,
+			2,
+			new Set([1])
+		);
+		expect(unevenProjection).toMatchObject({ storedPlayed: 2, derivedPlayed: 2 });
+		expect(unevenProjection.standings).toBeNull();
+
+		const moreCompleteGroups = caughtUpGroups.map((group) => ({ ...group, played: 3 }));
+		expect(
+			tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+				2,
+				moreCompleteGroups,
+				history.filter((row) => row.event_id === 2),
+				history,
+				2,
+				2,
+				new Set([1])
+			).standings
+		).toBeNull();
+	});
+
+	it("keeps an incomplete or all-zero current round out of the read-side projection", () => {
+		const groups = [101, 102].map((entryId) => ({
+			tournament_id: 9,
+			entry_id: entryId,
+			group_points: 0,
+			group_rank: 1,
+			played: 0,
+			won: 0,
+			drawn: 0,
+			lost: 0,
+			total_net_points: 0,
+		}));
+		const allZero: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 11,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 101,
+				home_net_points: 0,
+				home_rank: null,
+				home_match_points: null,
+				away_entry_id: 102,
+				away_net_points: 0,
+				away_rank: null,
+				away_match_points: null,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
+			},
+		];
+
+		for (const currentRows of [allZero, [{ ...allZero[0]!, away_net_points: null }]]) {
+			const selected = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+				2,
+				groups,
+				currentRows,
+				currentRows,
+				1,
+				1,
+				new Set()
+			);
+			expect(selected.standings).toBeNull();
+			expect(selected.options.provisionalEventIds?.size).toBe(0);
+			expect(selected.options.suppressedEventIds).toEqual(new Set([1]));
+		}
+	});
+
+	it("rejects mixed batch markers for a finalized current round", () => {
+		const groups = [101, 102, 103, 104].map((entryId) => ({
+			tournament_id: 9,
+			entry_id: entryId,
+			group_points: 0,
+			group_rank: 1,
+			played: 0,
+			won: 0,
+			drawn: 0,
+			lost: 0,
+			total_net_points: 0,
+		}));
+		const mixedBatch: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 12,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 101,
+				home_net_points: 20,
+				home_rank: null,
+				home_match_points: 3,
+				away_entry_id: 102,
+				away_net_points: 50,
+				away_rank: null,
+				away_match_points: 0,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
+			},
+			{
+				id: 13,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 103,
+				home_net_points: 40,
+				home_rank: null,
+				home_match_points: 0,
+				away_entry_id: 104,
+				away_net_points: 30,
+				away_rank: null,
+				away_match_points: 3,
+				source_checked_at: "2026-08-23T01:01:00.000Z",
+			},
+		];
+
+		const rejected = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+			4,
+			groups,
+			mixedBatch,
+			mixedBatch,
+			1,
+			1,
+			new Set([1])
+		);
+		expect(rejected.standings).toBeNull();
+		expect(rejected.options.finalizedEventIds?.has(1)).toBe(false);
+		expect(rejected.options.suppressedEventIds).toEqual(new Set([1]));
+		expect(
+			projectHistoricalOfficialH2HStandings([101, 102, 103, 104], mixedBatch, rejected.options)
+		).toEqual([
+			expect.objectContaining({ entryId: 101, played: 0, matchPoints: 0 }),
+			expect.objectContaining({ entryId: 102, played: 0, matchPoints: 0 }),
+			expect.objectContaining({ entryId: 103, played: 0, matchPoints: 0 }),
+			expect.objectContaining({ entryId: 104, played: 0, matchPoints: 0 }),
+		]);
+
+		const atomicBatch = mixedBatch.map((row) => ({
+			...row,
+			source_checked_at: "2026-08-23T01:00:00.000Z",
+		}));
+		const accepted = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+			4,
+			groups,
+			atomicBatch,
+			atomicBatch,
+			1,
+			1,
+			new Set([1])
+		);
+		expect(accepted.standings).toEqual([
+			expect.objectContaining({ entryId: 102, rank: 1, matchPoints: 3, pointsFor: 50 }),
+			expect.objectContaining({ entryId: 103, rank: 2, matchPoints: 3, pointsFor: 40 }),
+			expect.objectContaining({ entryId: 104, rank: 3, matchPoints: 0, pointsFor: 30 }),
+			expect.objectContaining({ entryId: 101, rank: 4, matchPoints: 0, pointsFor: 20 }),
+		]);
+
+		const liveBatch = atomicBatch.map((row, index) => ({
+			...row,
+			id: 20 + index,
+			event_id: 2,
+			home_match_points: null,
+			away_match_points: null,
+			source_checked_at: "2026-08-23T02:00:00.000Z",
+		}));
+		const liveWithRejectedHistory = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+			4,
+			groups,
+			liveBatch,
+			[...mixedBatch, ...liveBatch],
+			2,
+			2,
+			new Set([1])
+		);
+		expect(liveWithRejectedHistory.options.finalizedEventIds?.has(1)).toBe(false);
+		expect(liveWithRejectedHistory.options.suppressedEventIds?.has(1)).toBe(true);
+		expect(liveWithRejectedHistory.standings).toEqual([
+			expect.objectContaining({ entryId: 102, matchPoints: 3, played: 1, pointsFor: 50 }),
+			expect.objectContaining({ entryId: 103, matchPoints: 3, played: 1, pointsFor: 40 }),
+			expect.objectContaining({ entryId: 104, matchPoints: 0, played: 1, pointsFor: 30 }),
+			expect.objectContaining({ entryId: 101, matchPoints: 0, played: 1, pointsFor: 20 }),
+		]);
+	});
 });
 
 describe("resolveOfficialH2HReferenceEventId", () => {
@@ -3007,5 +3522,282 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 		const matchReadsAfterEmptyPublication = matchReads;
 		expect(await tournamentsRepository.getEntryH2HMatchResults(context, 100)).toEqual([]);
 		expect(matchReads).toBe(matchReadsAfterEmptyPublication);
+	});
+});
+
+describe("official H2H live standings read-side fallback", () => {
+	it("keeps the tournament snapshot and Entry Desk on the same complete live projection", async () => {
+		const tournament: DbTournamentInfoRow = {
+			id: 9,
+			name: "Official H2H",
+			creator: "owner",
+			admin_entry_id: 101,
+			league_id: 34879,
+			league_type: "h2h",
+			source_league_name: "Official H2H",
+			roster_mode: "official_sync",
+			roster_sync_status: "ready",
+			official_schedule_locked_at: "2026-08-20T00:00:00.000Z",
+			total_team_num: 2,
+			tournament_mode: "normal",
+			group_mode: "battle_races",
+			group_team_num: 2,
+			group_num: 1,
+			group_started_event_id: 1,
+			group_ended_event_id: 35,
+			group_auto_averages: false,
+			group_rounds: 1,
+			group_play_against_num: 1,
+			group_qualify_num: null,
+			knockout_mode: "no_knockout",
+			knockout_team_num: null,
+			knockout_rounds: null,
+			knockout_event_num: null,
+			knockout_started_event_id: null,
+			knockout_ended_event_id: null,
+			knockout_play_against_num: null,
+			state: "active",
+			setup_status: "ready",
+			setup_phase: "ready",
+			created_at: "2026-08-20T00:00:00.000Z",
+			updated_at: "2026-08-23T00:00:00.000Z",
+		};
+		const groups = [101, 102].map((entryId) => ({
+			tournament_id: 9,
+			entry_id: entryId,
+			group_points: 0,
+			group_rank: 1,
+			played: 0,
+			won: 0,
+			drawn: 0,
+			lost: 0,
+			total_net_points: 0,
+		}));
+		const battles: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 90,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 101,
+				home_net_points: 49,
+				home_rank: null,
+				home_match_points: null,
+				away_entry_id: 102,
+				away_net_points: 23,
+				away_rank: null,
+				away_match_points: null,
+				official_match_id: 2071743,
+				source_order: 0,
+				home_is_average: false,
+				away_is_average: false,
+				is_bye: false,
+				source_checked_at: new Date("2026-08-23T01:00:00.000Z"),
+			},
+		];
+		let historyBattles: DbTournamentBattleGroupResultRow[] | null = null;
+		const memberships = [
+			{ tournament_id: 9, entry_id: 101 },
+			{ tournament_id: 9, entry_id: 102 },
+		];
+		const entries = [
+			{ id: 101, entry_name: "WhoAMI Agent", player_name: "WhoAMI's Team" },
+			{ id: 102, entry_name: "Average Killers", player_name: "Manager Two" },
+		];
+		const events = [
+			{ id: 1, finished: false, data_checked: false, is_current: true, is_next: false },
+		];
+		let currentEventBattleReads = 0;
+
+		const makeBuilder = (table: string) => {
+			const actions: QueryAction[] = [];
+			const resolveResult = () => {
+				if (
+					table === "competition.tournament_battle_group_results" &&
+					actions.some((action) => action.type === "eq" && action.args[0] === "event_id")
+				) {
+					currentEventBattleReads += 1;
+				}
+				const source =
+					table === "competition.tournaments"
+						? [tournament]
+						: table === "competition.tournament_groups"
+							? groups
+							: table === "competition.tournament_battle_group_results"
+								? actions.some((action) => action.type === "lte") && historyBattles !== null
+									? historyBattles
+									: battles
+								: table === "competition.tournament_knockout_results"
+									? []
+									: table === "competition.tournament_entries"
+										? memberships
+										: table === "competition.entries"
+											? entries
+											: table === "fpl.events"
+												? events
+												: [];
+				return { data: filterRowsByActions(source, actions), error: null };
+			};
+			const builder = {
+				select(...args: unknown[]) {
+					actions.push({ type: "select", args });
+					return builder;
+				},
+				eq(...args: unknown[]) {
+					actions.push({ type: "eq", args });
+					return builder;
+				},
+				in(...args: unknown[]) {
+					actions.push({ type: "in", args });
+					return builder;
+				},
+				lte(...args: unknown[]) {
+					actions.push({ type: "lte", args });
+					return builder;
+				},
+				not(...args: unknown[]) {
+					actions.push({ type: "not", args });
+					return builder;
+				},
+				order(...args: unknown[]) {
+					actions.push({ type: "order", args });
+					return builder;
+				},
+				async limit(...args: unknown[]) {
+					actions.push({ type: "limit", args });
+					return resolveResult();
+				},
+				then<TResult1 = ReturnType<typeof resolveResult>, TResult2 = never>(
+					onfulfilled?:
+						((value: ReturnType<typeof resolveResult>) => TResult1 | PromiseLike<TResult1>) | null,
+					onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+				) {
+					return Promise.resolve(resolveResult()).then(onfulfilled, onrejected);
+				},
+			};
+			return builder;
+		};
+		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: "core-live-h2h",
+			data: { read: (table: string) => makeBuilder(table) },
+			logger: {
+				error() {
+					return undefined;
+				},
+				warn() {
+					return undefined;
+				},
+			},
+		} as unknown as GraphQLContext;
+
+		const snapshot = await tournamentsRepository.getTournamentOfficialH2H(context, 9, 1);
+		const desk = await tournamentsRepository.getEntryOfficialH2HDesk(context, 101);
+		expect(currentEventBattleReads).toBe(0);
+
+		expect(snapshot.standings).toEqual([
+			expect.objectContaining({
+				entryId: 101,
+				rank: 1,
+				matchPoints: 3,
+				played: 1,
+				won: 1,
+				pointsFor: 49,
+			}),
+			expect.objectContaining({
+				entryId: 102,
+				rank: 2,
+				matchPoints: 0,
+				played: 1,
+				lost: 1,
+				pointsFor: 23,
+			}),
+		]);
+		expect(snapshot.matches[0]).toMatchObject({
+			home: { entryId: 101, points: 49, matchPoints: 3 },
+			away: { entryId: 102, points: 23, matchPoints: 0 },
+			winnerEntryId: 101,
+			sourceCheckedAt: "2026-08-23T01:00:00.000Z",
+		});
+		expect(desk).toHaveLength(1);
+		expect(desk[0]).toMatchObject({
+			tournamentId: 9,
+			rank: 1,
+			matchPoints: 3,
+			match: {
+				home: { entryId: 101, points: 49, matchPoints: 3 },
+				away: { entryId: 102, points: 23, matchPoints: 0 },
+				winnerEntryId: 101,
+			},
+		});
+
+		battles[0]!.home_net_points = 20;
+		battles[0]!.away_net_points = 50;
+		const updatedSnapshot = await tournamentsRepository.getTournamentOfficialH2H(context, 9, 1);
+		const updatedDesk = await tournamentsRepository.getEntryOfficialH2HDesk(context, 101);
+		expect(updatedSnapshot.standings).toEqual([
+			expect.objectContaining({ entryId: 102, rank: 1, matchPoints: 3, pointsFor: 50 }),
+			expect.objectContaining({ entryId: 101, rank: 2, matchPoints: 0, pointsFor: 20 }),
+		]);
+		expect(updatedDesk[0]).toMatchObject({
+			rank: 2,
+			matchPoints: 0,
+			match: {
+				home: { entryId: 101, points: 20, matchPoints: 0 },
+				away: { entryId: 102, points: 50, matchPoints: 3 },
+				winnerEntryId: 102,
+			},
+		});
+
+		battles[0]!.home_net_points = 0;
+		battles[0]!.away_net_points = 0;
+		battles[0]!.source_checked_at = new Date("2026-08-23T01:00:00.000Z");
+		historyBattles = [
+			{
+				...battles[0]!,
+				home_net_points: 55,
+				away_net_points: 25,
+				source_checked_at: new Date("2026-08-23T01:01:00.000Z"),
+			},
+		];
+		const crossPublicationSnapshot = await tournamentsRepository.getTournamentOfficialH2H(
+			context,
+			9,
+			1
+		);
+		expect(crossPublicationSnapshot.standings).toEqual([
+			expect.objectContaining({ entryId: 101, rank: 1, matchPoints: 3, pointsFor: 55 }),
+			expect.objectContaining({ entryId: 102, rank: 2, matchPoints: 0, pointsFor: 25 }),
+		]);
+		expect(crossPublicationSnapshot.matches[0]).toMatchObject({
+			home: { entryId: 101, points: 55, matchPoints: 3 },
+			away: { entryId: 102, points: 25, matchPoints: 0 },
+			winnerEntryId: 101,
+			sourceCheckedAt: "2026-08-23T01:01:00.000Z",
+		});
+		historyBattles = null;
+
+		battles[0]!.home_match_points = 3;
+		battles[0]!.away_match_points = 0;
+		battles[0]!.away_net_points = null;
+		const incompleteSnapshot = await tournamentsRepository.getTournamentOfficialH2H(context, 9, 1);
+		expect(incompleteSnapshot.standings.every((standing) => standing.played === 0)).toBe(true);
+		expect(incompleteSnapshot.matches[0]).toMatchObject({
+			home: { matchPoints: null },
+			away: { matchPoints: null },
+			winnerEntryId: null,
+		});
+
+		groups.pop();
+		battles[0]!.away_net_points = 23;
+		const incompleteGroupSnapshot = await tournamentsRepository.getTournamentOfficialH2H(
+			context,
+			9,
+			1
+		);
+		expect(incompleteGroupSnapshot.matches[0]).toMatchObject({
+			home: { entryId: 101, entryName: "WhoAMI Agent" },
+			away: { entryId: 102, entryName: "Average Killers" },
+		});
 	});
 });
