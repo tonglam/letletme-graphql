@@ -799,7 +799,7 @@ const makeFixture = (options: FixtureOptions = {}) => {
 					rowCount: ids.length,
 				};
 			}
-			const requestedTournamentId = Number(params[0]);
+			const requestedTournamentId = Number(params.at(-1));
 			const isMember = ids.includes(requestedTournamentId);
 			return {
 				rows: isMember ? [{ ok: 1 }] : [],
@@ -1379,10 +1379,17 @@ describe("My FPL review repository", () => {
 
 		expect(desk.selectedTournamentId).toBe(3);
 		expect(desk.tournaments.map((item) => item.id)).toEqual([3]);
+		const membershipQueries = fixture.queries.filter((query) =>
+			query.sql.includes("FROM competition.tournament_entries")
+		);
+		expect(membershipQueries.length).toBeGreaterThan(0);
 		expect(
-			fixture.queries
-				.filter((query) => query.sql.includes("FROM competition.tournament_entries"))
-				.every((query) => query.sql.includes("competition.entry_leagues_with_tournament"))
+			membershipQueries.every(
+				(query) =>
+					query.sql.includes("FROM competition.entry_leagues entry_league") &&
+					query.sql.includes("FROM competition.tournaments tournament") &&
+					!query.sql.includes("competition.entry_leagues_with_tournament")
+			)
 		).toBe(true);
 	});
 
