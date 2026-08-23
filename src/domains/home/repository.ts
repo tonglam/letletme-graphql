@@ -135,13 +135,6 @@ export const HOME_PERSONAL_DESK_SQL = `
 		WHERE t.season_id = l.season_id
 			AND t.league_id = l.league_id
 			AND t.league_type = l.league_type
-			AND EXISTS (
-				SELECT 1
-				FROM competition.tournament_entries member
-				WHERE member.season_id = t.season_id
-					AND member.tournament_id = t.tournament_id
-					AND member.entry_id = e.entry_id
-			)
 		ORDER BY t.tournament_id
 		LIMIT 1
 	) tracked ON TRUE

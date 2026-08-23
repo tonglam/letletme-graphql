@@ -533,8 +533,8 @@ export const liveDesksResolvers = {
 			const deskRevision = snapshot?.revision ?? null;
 			const deskState = snapshot?.state.toUpperCase() ?? snapshotStateForWindow(window);
 			// A stale/deep-linked tournament id must not trigger an authorization
-			// probe for an arbitrary tournament. Fall back to the first membership
-			// returned for this entry and keep the desk single-request.
+			// probe for an arbitrary tournament. Fall back to the first authorized
+			// roster or tracked official-league tournament returned for this entry.
 			const selected =
 				(args.selectedTournamentId &&
 				tournaments.some((item) => item.id === args.selectedTournamentId)
@@ -561,7 +561,6 @@ export const liveDesksResolvers = {
 					failedEntryIds: [],
 					totalEntries: 0,
 				};
-			await assertMember(context, selected, args.entryId);
 			const selectedTournament = tournaments.find((tournament) => tournament.id === selected);
 			const requireNet = selectedTournament?.leagueType === LeagueType.H2H;
 			const boardCacheKey = snapshot ? competitionBoardCacheKey(context, snapshot, selected) : null;

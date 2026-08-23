@@ -201,13 +201,13 @@ describe("Home GraphQL contracts", () => {
 		expect(movementFromRanks(-1, 3)).toEqual({ direction: "UNKNOWN", places: null });
 	});
 
-	it("loads league ranks and the viewer's current H2H matchup with one compact SQL statement", async () => {
+	it("maps tracked official leagues without requiring frozen tournament-roster membership", async () => {
 		const databaseQuery = mock(async (text: unknown, values: unknown) => {
 			const sql = String(text);
 			expect(sql).toContain("FROM competition.entries");
 			expect(sql).toContain("competition.entry_leagues");
 			expect(sql).toContain("competition.tournaments");
-			expect(sql).toContain("competition.tournament_entries");
+			expect(sql).not.toContain("competition.tournament_entries");
 			expect(sql).toContain("official_kind");
 			expect(sql).toContain("short_name");
 			expect(sql).toContain("l.started_event");
