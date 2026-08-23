@@ -76,7 +76,10 @@ const validPlayer = {
 	projections: [{ offset: 0, projectedPercent: 0.5, likelihood: 4 }],
 };
 
-async function createPublication(ageMs: number): Promise<{
+async function createPublication(
+	ageMs: number,
+	publicationId = "11111111-1111-4111-8111-111111111111"
+): Promise<{
 	manifest: DataPublicationManifest;
 	context: Record<string, unknown>;
 	players: unknown[];
@@ -97,7 +100,6 @@ async function createPublication(ageMs: number): Promise<{
 	};
 	const players = [validPlayer];
 	const scope = { dataset: "fpl:price-changes" as const, seasonCode: "2026" };
-	const publicationId = "11111111-1111-4111-8111-111111111111";
 	const items = { context, players };
 	const manifestItems = await Promise.all(
 		(Object.entries(items) as ["context" | "players", unknown][]).map(async ([name, value]) => {
@@ -191,6 +193,23 @@ describe("price-change publication reader", () => {
 		assert.equal(board.players[0]?.playerId, 1);
 	});
 
+	it("falls back to a fresh PostgreSQL publication when the Redis publication expired", async () => {
+		const expiredRedisPublication = await createPublication(
+			PRICE_CHANGE_MAX_AGE_MS + 1_000,
+			"11111111-1111-4111-8111-111111111111"
+		);
+		const freshPostgresPublication = await createPublication(
+			9 * 60 * 1_000,
+			"22222222-2222-4222-8222-222222222222"
+		);
+
+		const board = await readPriceChangePredictions(
+			makeContext(expiredRedisPublication.redis, makeDatabase(freshPostgresPublication))
+		);
+		assert.equal(board.status, "READY");
+		assert.equal(board.revision, freshPostgresPublication.manifest.publicationId);
+	});
+
 	it("fails closed when PostgreSQL item checksum proof is wrong", async () => {
 		const publication = await createPublication(9 * 60 * 1_000);
 		publication.redis.remove(
@@ -219,5 +238,13 @@ describe("price-change publication reader", () => {
 			);
 			assert.equal(board.status, expected);
 		}
+	});
+
+	it("fails closed when fetchedAt is in the future", async () => {
+		const publication = await createPublication(-1_000);
+		const board = await readPriceChangePredictions(
+			makeContext(publication.redis, makeDatabase(publication))
+		);
+		assert.equal(board.status, "UNAVAILABLE");
 	});
 });
