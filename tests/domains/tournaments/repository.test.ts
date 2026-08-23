@@ -224,7 +224,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 				away_match_points: null,
 				home_is_average: false,
 				away_is_average: true,
-				source_checked_at: "2026-08-23T01:00:00.000Z",
+				source_checked_at: new Date("2026-08-23T01:00:00.000Z"),
 			},
 		];
 		const liveOptions = { finalizedEventIds: new Set<number>(), provisionalEventIds: new Set([1]) };
@@ -3366,9 +3366,10 @@ describe("official H2H live standings read-side fallback", () => {
 				home_is_average: false,
 				away_is_average: false,
 				is_bye: false,
-				source_checked_at: "2026-08-23T01:00:00.000Z",
+				source_checked_at: new Date("2026-08-23T01:00:00.000Z"),
 			},
 		];
+		let historyBattles: DbTournamentBattleGroupResultRow[] | null = null;
 		const memberships = [
 			{ tournament_id: 9, entry_id: 101 },
 			{ tournament_id: 9, entry_id: 102 },
@@ -3390,7 +3391,9 @@ describe("official H2H live standings read-side fallback", () => {
 						: table === "competition.tournament_groups"
 							? groups
 							: table === "competition.tournament_battle_group_results"
-								? battles
+								? actions.some((action) => action.type === "lte") && historyBattles !== null
+									? historyBattles
+									: battles
 								: table === "competition.tournament_knockout_results"
 									? []
 									: table === "competition.tournament_entries"
@@ -3480,6 +3483,7 @@ describe("official H2H live standings read-side fallback", () => {
 			home: { entryId: 101, points: 49, matchPoints: 3 },
 			away: { entryId: 102, points: 23, matchPoints: 0 },
 			winnerEntryId: 101,
+			sourceCheckedAt: "2026-08-23T01:00:00.000Z",
 		});
 		expect(desk).toHaveLength(1);
 		expect(desk[0]).toMatchObject({
@@ -3510,6 +3514,34 @@ describe("official H2H live standings read-side fallback", () => {
 				winnerEntryId: 102,
 			},
 		});
+
+		battles[0]!.home_net_points = 0;
+		battles[0]!.away_net_points = 0;
+		battles[0]!.source_checked_at = new Date("2026-08-23T01:00:00.000Z");
+		historyBattles = [
+			{
+				...battles[0]!,
+				home_net_points: 55,
+				away_net_points: 25,
+				source_checked_at: new Date("2026-08-23T01:01:00.000Z"),
+			},
+		];
+		const crossPublicationSnapshot = await tournamentsRepository.getTournamentOfficialH2H(
+			context,
+			9,
+			1
+		);
+		expect(crossPublicationSnapshot.standings).toEqual([
+			expect.objectContaining({ entryId: 101, rank: 1, matchPoints: 3, pointsFor: 55 }),
+			expect.objectContaining({ entryId: 102, rank: 2, matchPoints: 0, pointsFor: 25 }),
+		]);
+		expect(crossPublicationSnapshot.matches[0]).toMatchObject({
+			home: { entryId: 101, points: 55, matchPoints: 3 },
+			away: { entryId: 102, points: 25, matchPoints: 0 },
+			winnerEntryId: 101,
+			sourceCheckedAt: "2026-08-23T01:01:00.000Z",
+		});
+		historyBattles = null;
 
 		battles[0]!.home_match_points = 3;
 		battles[0]!.away_match_points = 0;

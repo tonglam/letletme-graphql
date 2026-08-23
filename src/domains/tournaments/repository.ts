@@ -530,7 +530,7 @@ export type DbTournamentBattleGroupResultRow = {
 	home_is_average?: boolean;
 	away_is_average?: boolean;
 	is_bye?: boolean;
-	source_checked_at?: string | null;
+	source_checked_at?: string | Date | null;
 };
 
 export type TournamentBattleGroupResult = {
@@ -635,7 +635,7 @@ type DbTournamentKnockoutResultRow = {
 	source_order: number | null;
 	knockout_name: string | null;
 	tiebreak: string | null;
-	source_checked_at: string | null;
+	source_checked_at: string | Date | null;
 };
 
 type DbEventStateRow = {
@@ -660,6 +660,14 @@ export function resolveOfficialH2HReferenceEventId(events: readonly DbEventState
 
 const OFFICIAL_BATTLE_COLUMNS =
 	"id, tournament_id, group_id, event_id, home_entry_id, home_net_points, home_rank, home_match_points, away_entry_id, away_net_points, away_rank, away_match_points, official_match_id, source_order, home_is_average, away_is_average, is_bye, source_checked_at";
+
+function normalizeOfficialH2HSourceCheckedAt(
+	value: string | Date | null | undefined
+): string | null {
+	if (value === null || value === undefined || value === "") return null;
+	const date = value instanceof Date ? value : new Date(value);
+	return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
 
 function officialMatchSide(
 	entryId: number | null,
@@ -841,7 +849,7 @@ function mapOfficialBattleMatch(
 		),
 		winnerEntryId,
 		tiebreak: null,
-		sourceCheckedAt: row.source_checked_at ?? null,
+		sourceCheckedAt: normalizeOfficialH2HSourceCheckedAt(row.source_checked_at),
 	};
 }
 
@@ -875,7 +883,7 @@ function mapOfficialKnockoutMatch(
 		),
 		winnerEntryId: row.match_winner,
 		tiebreak: row.tiebreak,
-		sourceCheckedAt: row.source_checked_at,
+		sourceCheckedAt: normalizeOfficialH2HSourceCheckedAt(row.source_checked_at),
 	};
 }
 
@@ -925,7 +933,7 @@ function officialBattleRowsAreCompleteForEntries(
 			containsProvisionalRows = true;
 			// Data publishes one official H2H snapshot with one checked-at value.
 			// Mixed markers mean this read observed an incremental or partial round.
-			const batchMarker = row.source_checked_at?.trim();
+			const batchMarker = normalizeOfficialH2HSourceCheckedAt(row.source_checked_at);
 			if (!batchMarker) return false;
 			provisionalBatchMarkers.add(batchMarker);
 		}
@@ -1150,10 +1158,12 @@ async function loadOfficialH2HSnapshots(
 		const tournamentKnockouts = knockoutsByTournament.get(tournament.id) ?? [];
 		const tournamentHistory = historyByTournament.get(tournament.id) ?? [];
 		const currentEventHistory = tournamentHistory.filter((row) => row.event_id === eventId);
+		const currentEventBattles =
+			includeHistory || needsHistoryForFallback ? currentEventHistory : tournamentBattles;
 		const currentProjection = selectCurrentOfficialH2HProjection(
 			tournament.totalTeamNum,
 			tournamentGroups,
-			currentEventHistory,
+			currentEventBattles,
 			tournamentHistory,
 			eventId,
 			activeEventId,
@@ -1169,7 +1179,7 @@ async function loadOfficialH2HSnapshots(
 				: null;
 		const projectedStandings = historicalStandings ?? currentProjection.standings;
 		const matches = [
-			...tournamentBattles.map((row) =>
+			...currentEventBattles.map((row) =>
 				mapOfficialBattleMatch(row, entryNames, currentProjection.options)
 			),
 			...tournamentKnockouts.map((row) => mapOfficialKnockoutMatch(row, entryNames)),
