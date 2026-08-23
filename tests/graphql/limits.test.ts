@@ -183,6 +183,41 @@ describe("GraphQL request limits", () => {
 		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
 	});
 
+	it("allows only the sole unaliased live competition board to use the bounded desk AST cap", () => {
+		const fields = Array.from({ length: 110 }, () => "__typename").join(" ");
+		const boardQuery = `entryLiveCompetitionBoard(entryId: 1, tournamentId: 1, eventId: 1) { ${fields} }`;
+		expect(
+			validateGraphQLRequestLimits({ query: `query { ${boardQuery} }` }, schema)
+		).toMatchObject({
+			ok: true,
+			rootFields: ["entryLiveCompetitionBoard"],
+			rateLimitCostUnits: 20,
+		});
+
+		expect(
+			validateGraphQLRequestLimits({ query: `query { ${boardQuery} events { id } }` }, schema)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+
+		expect(
+			validateGraphQLRequestLimits(
+				{
+					query: `query { board: entryLiveCompetitionBoard(entryId: 1, tournamentId: 1, eventId: 1) { ${fields} } }`,
+				},
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+
+		const oversized = Array.from({ length: 205 }, () => "__typename").join(" ");
+		expect(
+			validateGraphQLRequestLimits(
+				{
+					query: `query { entryLiveCompetitionBoard(entryId: 1, tournamentId: 1, eventId: 1) { ${oversized} } }`,
+				},
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+	});
+
 	it("allows the bounded player stats timeline projection above the generic AST ceiling", () => {
 		const fields = Array.from({ length: 110 }, () => "__typename").join(" ");
 		expect(

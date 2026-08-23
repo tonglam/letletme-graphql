@@ -584,6 +584,15 @@ export const validateGraphQLPayloadLimits = (
 			(field) =>
 				field.name === "myFplCompetitionsDesk" && field.responseKey === "myFplCompetitionsDesk"
 		);
+	const usesEntryLiveCompetitionBoard =
+		onlyReachableDefinitions &&
+		responseKeys.size === 1 &&
+		rootNames.length > 0 &&
+		rootNames.every(
+			(field) =>
+				field.name === "entryLiveCompetitionBoard" &&
+				field.responseKey === "entryLiveCompetitionBoard"
+		);
 	const usesPlayerStatsDesk =
 		onlyReachableDefinitions &&
 		responseKeys.size === 1 &&
@@ -600,7 +609,7 @@ export const validateGraphQLPayloadLimits = (
 		);
 	const maxAstNodes = usesTournamentDetailDesk
 		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
-		: usesMyFplCompetitionsDesk
+		: usesMyFplCompetitionsDesk || usesEntryLiveCompetitionBoard
 			? GRAPHQL_LIMITS.maxBoundedDeskAstNodes
 			: usesPlayerStatsDesk
 				? PLAYER_STATS_DESK_MAX_AST_NODES
