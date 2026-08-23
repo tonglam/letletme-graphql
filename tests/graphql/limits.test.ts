@@ -111,7 +111,7 @@ describe("GraphQL request limits", () => {
 	it("charges the compact Home public, market, and personal roots", () => {
 		expect(
 			validateGraphQLRequestLimits({ query: "query { homePersonalDesk { state } }" }, schema)
-		).toMatchObject({ ok: true, rootFields: ["homePersonalDesk"], rateLimitCostUnits: 5 });
+		).toMatchObject({ ok: true, rootFields: ["homePersonalDesk"], rateLimitCostUnits: 30 });
 		expect(
 			validateGraphQLRequestLimits(
 				{ query: "query { homeGameweek(eventId: 1) { transfersState gameweekDesk { eventId } } }" },

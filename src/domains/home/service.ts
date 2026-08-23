@@ -6,12 +6,14 @@ import type { Fixture } from "../fixtures/repository";
 import { fixturesService } from "../fixtures/service";
 import type { GameweekDesk } from "../gameweek/service";
 import { gameweekService } from "../gameweek/service";
-import { homeRepository, type HomePersonalDesk } from "./repository";
+import { homeRepository, movementFromRanks, type HomePersonalDesk } from "./repository";
 import { marketService } from "../market/service";
 import type { MarketAvailabilityUpdate, MarketPulse } from "../market/repository";
 import type { Player, TopTransfersEnriched } from "../players/repository";
 import { playersService } from "../players/service";
 import { measureRequestStage } from "../../http/request-timing";
+import type { EntryOfficialH2HDeskItem } from "../tournaments/repository";
+import { tournamentsService } from "../tournaments/service";
 
 export type HomePublicBootstrap = {
 	context: CoreEventContext;
@@ -94,6 +96,30 @@ export const compactHomeMarketPulse = (pulse: MarketPulse): HomeMarketPulse => (
 	availabilityUpdates: selectHomeAvailability(pulse.availabilityUpdates),
 	priceChanges: pulse.priceChanges.slice(0, HOME_MARKET_LIMIT),
 });
+
+export const reconcileHomeOfficialH2HRanks = (
+	desk: HomePersonalDesk,
+	officialH2HDesk: readonly EntryOfficialH2HDeskItem[]
+): HomePersonalDesk => {
+	const officialByTournament = new Map(
+		officialH2HDesk.map((row) => [row.tournamentId, row] as const)
+	);
+	return {
+		...desk,
+		leagueRanks: desk.leagueRanks.map((league) => {
+			if (league.leagueType !== "H2H" || league.tournamentId === null) return league;
+			const official = officialByTournament.get(league.tournamentId);
+			if (!official?.standingsPublished || official.rank === null) return league;
+			return {
+				...league,
+				rank: official.rank,
+				movement: official.standingsCurrentEventComplete
+					? movementFromRanks(official.rank, official.lastRank)
+					: league.movement,
+			};
+		}),
+	};
+};
 
 const authError = (
 	message: string,
@@ -180,13 +206,31 @@ export const homeService = {
 		return { context: eventContext, fixtures };
 	},
 
-	getPersonalDesk(context: GraphQLContext): Promise<HomePersonalDesk> {
+	async getPersonalDesk(context: GraphQLContext): Promise<HomePersonalDesk> {
 		if (!context.principal) {
 			throw authError("Authentication required", "UNAUTHENTICATED", 401);
 		}
 		if (!context.principal.fplEntryId || !context.principal.fplEntryVerifiedAt) {
 			throw authError("A verified FPL binding is required", "FORBIDDEN", 403);
 		}
-		return homeRepository.getPersonalDesk(context, context.principal.fplEntryId);
+		const entryId = context.principal.fplEntryId;
+		const desk = await homeRepository.getPersonalDesk(context, entryId);
+		if (
+			!desk.leagueRanks.some(
+				(league) => league.leagueType === "H2H" && league.tournamentId !== null
+			)
+		) {
+			return desk;
+		}
+		try {
+			const officialH2HDesk = await tournamentsService.getEntryOfficialH2HDesk(context, entryId);
+			return reconcileHomeOfficialH2HRanks(desk, officialH2HDesk);
+		} catch (error) {
+			context.logger.warn(
+				{ err: error, requestId: context.requestId, operationName: context.operationName, entryId },
+				"Home official H2H rank reconciliation unavailable"
+			);
+			return desk;
+		}
 	},
 };
