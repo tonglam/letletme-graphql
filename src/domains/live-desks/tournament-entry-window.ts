@@ -17,6 +17,23 @@ export const normalizeTournamentRosterEntryIds = (
 		])
 	).sort((left, right) => left - right);
 
+export const selectTournamentComparisonEntryIds = (
+	requestedEntryIds: readonly number[],
+	requestingEntryId: number,
+	requestingEntryIsMember: boolean
+): number[] => {
+	const requestedIds = Array.from(new Set(requestedEntryIds));
+	if (requestedIds.length === 0) return [requestingEntryId];
+	if (
+		requestedIds.length === 1 &&
+		requestedIds[0] !== requestingEntryId &&
+		requestingEntryIsMember
+	) {
+		return [requestingEntryId, requestedIds[0]!];
+	}
+	return requestedIds;
+};
+
 /**
  * Keep a live tournament request inside the entry-live admission limit.
  * The requesting manager is retained in the foreground window so a large

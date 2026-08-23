@@ -42,6 +42,7 @@ import {
 } from "./entry-live-competition-board";
 import {
 	normalizeTournamentRosterEntryIds,
+	selectTournamentComparisonEntryIds,
 	selectTournamentDeskEntryWindow,
 } from "./tournament-entry-window";
 import { resolveLiveWindow, type LiveWindow } from "./window";
@@ -918,18 +919,9 @@ export const liveDesksResolvers = {
 			const memberTournament = await assertMember(context, args.tournamentId, args.entryId);
 			const { snapshot } = await resolveSnapshot(context, args.ref);
 			const requestedIds = Array.from(new Set(args.comparedEntryIds));
-			// Preserve the legacy one-opponent contract (viewer + opponent), while
-			// allowing the new clients to request an explicit pair of entries.
-			const ids =
-				requestedIds.length === 0
-					? [args.entryId]
-					: requestedIds.length === 1 && requestedIds[0] !== args.entryId
-						? [args.entryId, requestedIds[0]!]
-						: requestedIds;
 			if (
-				ids.length === 0 ||
-				ids.length > 2 ||
-				ids.some((entryId) => !Number.isSafeInteger(entryId) || entryId <= 0)
+				requestedIds.length > 2 ||
+				requestedIds.some((entryId) => !Number.isSafeInteger(entryId) || entryId <= 0)
 			) {
 				throw new GraphQLError("Comparison requires one or two valid tournament entries", {
 					extensions: { code: "BAD_USER_INPUT" },
@@ -942,6 +934,22 @@ export const liveDesksResolvers = {
 					!usesPlatformAdminTournamentBypass(context, args.entryId)
 				)
 			);
+			// Preserve the legacy member + opponent contract, but do not prepend a
+			// platform administrator whose entry is not actually in this roster.
+			const ids = selectTournamentComparisonEntryIds(
+				requestedIds,
+				args.entryId,
+				tournamentEntryIds.has(args.entryId)
+			);
+			if (
+				ids.length === 0 ||
+				ids.length > 2 ||
+				ids.some((entryId) => !Number.isSafeInteger(entryId) || entryId <= 0)
+			) {
+				throw new GraphQLError("Comparison requires one or two valid tournament entries", {
+					extensions: { code: "BAD_USER_INPUT" },
+				});
+			}
 			if (ids.some((entryId) => !tournamentEntryIds.has(entryId))) {
 				throw new GraphQLError("Comparison entry is not a tournament member", {
 					extensions: { code: "FORBIDDEN" },

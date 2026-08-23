@@ -57,9 +57,8 @@ describe("live desks tournament selection index", () => {
 			source.indexOf("tournamentLiveParticipants: async")
 		);
 		expect(comparison).toContain("new Set(args.comparedEntryIds)");
-		expect(comparison).toContain("requestedIds.length === 1");
-		expect(comparison).toContain("requestedIds.length === 0");
-		expect(comparison).toContain("[args.entryId, requestedIds[0]!]");
+		expect(comparison).toContain("selectTournamentComparisonEntryIds");
+		expect(comparison).toContain("tournamentEntryIds.has(args.entryId)");
 		expect(comparison).toContain("ids.length > 2");
 		expect(comparison).toContain("getTournamentEntryIdsUncached");
 		expect(comparison).toContain("normalizeTournamentRosterEntryIds");

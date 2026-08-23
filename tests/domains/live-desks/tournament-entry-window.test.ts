@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	MAX_TOURNAMENT_DESK_ENTRIES,
 	normalizeTournamentRosterEntryIds,
+	selectTournamentComparisonEntryIds,
 	selectTournamentDeskEntryWindow,
 } from "../../../src/domains/live-desks/tournament-entry-window";
 
@@ -13,6 +14,12 @@ describe("live tournament entry window", () => {
 	it("does not inject an administrator who is not a tournament member", () => {
 		expect(normalizeTournamentRosterEntryIds([202, 101], 303, false)).toEqual([101, 202]);
 		expect(normalizeTournamentRosterEntryIds([303, 202, 101], 303, false)).toEqual([101, 202, 303]);
+	});
+
+	it("prepends the viewer to one opponent only when the viewer is a member", () => {
+		expect(selectTournamentComparisonEntryIds([202], 101, true)).toEqual([101, 202]);
+		expect(selectTournamentComparisonEntryIds([202], 303, false)).toEqual([202]);
+		expect(selectTournamentComparisonEntryIds([101, 202], 303, false)).toEqual([101, 202]);
 	});
 
 	it("keeps ordinary tournaments complete", () => {
