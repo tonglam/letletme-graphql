@@ -1021,7 +1021,7 @@ describe("My FPL review repository", () => {
 		});
 	});
 
-	it("requires a verified principal and preserves the bound entry identity", async () => {
+	it("requires a viewer team and preserves the selected entry identity", async () => {
 		const unauthenticated = makeFixture();
 		unauthenticated.context.principal = undefined;
 		await expect(
@@ -1033,6 +1033,16 @@ describe("My FPL review repository", () => {
 		const desk = await fixture.repository.loadTeamDesk(fixture.context);
 		expect(desk.entry?.id).toBe(123);
 		expect(desk.entry?.entryName).toBe("Codex XI");
+
+		const miniViewer = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
+		miniViewer.context.principal = {
+			userId: "mini-account-1",
+			source: "wechat_miniprogram",
+			viewerEntryId: 123,
+			fplEntryId: null,
+			fplEntryVerifiedAt: null,
+		};
+		expect((await miniViewer.repository.loadTeamDesk(miniViewer.context)).entry?.id).toBe(123);
 	});
 
 	it("reports PRESEASON, EMPTY, PENDING and READY from durable checkpoints", async () => {

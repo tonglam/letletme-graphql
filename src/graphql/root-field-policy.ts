@@ -1,8 +1,9 @@
 export type RootFieldAccess =
 	| "public"
+	| "viewerEntry"
+	| "viewerEntryArg"
+	| "viewerTournamentMember"
 	| "verifiedEntry"
-	| "ownEntryArg"
-	| "tournamentMember"
 	| "tournamentAdmin"
 	| "leagueMember"
 	| "calcOwnEntries";
@@ -112,7 +113,7 @@ add(
 		"managedTournament",
 		"tournamentEntryRankingSummary",
 	],
-	"ownEntryArg",
+	"viewerEntryArg",
 	{ arg: "entryId" }
 );
 
@@ -133,7 +134,7 @@ add(
 		"myFplCompetitionSeasonPath",
 		"myFplCompetitionSetupStatus",
 	],
-	"tournamentMember",
+	"viewerTournamentMember",
 	{ arg: "tournamentId" }
 );
 
@@ -143,7 +144,7 @@ for (const field of [
 	"myFplTeamTransfers",
 	"myFplCompetitionsDesk",
 ]) {
-	registry.set(field, policy("verifiedEntry"));
+	registry.set(field, policy("viewerEntry"));
 }
 
 for (const field of [
@@ -165,10 +166,10 @@ registry.set(
 );
 registry.set("leagueEventResults", policy("leagueMember", { arg: "leagueId" }));
 registry.set("calcLivePointsForEntries", policy("calcOwnEntries", { arg: "entryIds" }));
-registry.set("homePersonalDesk", policy("verifiedEntry"));
+registry.set("homePersonalDesk", policy("viewerEntry"));
 registry.set(
 	"entryLiveCompetitionBoard",
-	policy("tournamentMember", {
+	policy("viewerTournamentMember", {
 		arg: "tournamentId",
 		ownEntryArg: "entryId",
 		tournamentMember: true,
@@ -181,7 +182,7 @@ for (const field of ["tournamentParticipants", "tournamentDetailDesk", "tourname
 }
 
 for (const [field, current] of registry) {
-	if (current.access === "tournamentMember") {
+	if (current.access === "viewerTournamentMember") {
 		registry.set(field, { ...current, tournamentMember: true });
 	}
 }
