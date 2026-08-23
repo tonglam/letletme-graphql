@@ -25,4 +25,16 @@ describe("live desks tournament selection index", () => {
 			"matches: matchRows(snapshot.eventId, snapshot.fixtures, fixtureCore)"
 		);
 	});
+
+	it("revalidates the selected membership before reading a cached competition board", async () => {
+		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const desk = source.slice(
+			source.indexOf("entryLiveCompetitionsDesk: async"),
+			source.indexOf("liveTournamentSelectionStats: async")
+		);
+		expect(desk.indexOf("await assertMember(context, selected, args.entryId)")).toBeGreaterThan(0);
+		expect(desk.indexOf("await assertMember(context, selected, args.entryId)")).toBeLessThan(
+			desk.indexOf("readCompetitionBoardCache")
+		);
+	});
 });

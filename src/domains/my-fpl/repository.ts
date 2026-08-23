@@ -2258,8 +2258,16 @@ const assertTournamentMembership = async (
 	if (context.authorizedTournamentMemberships?.has(tournamentId)) return;
 	const result = await context.database.query(
 		`SELECT 1
-		 FROM competition.tournament_entries
-		 WHERE tournament_id = $1 AND season_id = $2 AND entry_id = $3
+		 FROM (
+			 SELECT tournament_id
+			 FROM competition.tournament_entries
+			 WHERE season_id = $2 AND entry_id = $3
+			 UNION
+			 SELECT tournament_id
+			 FROM competition.entry_leagues_with_tournament
+			 WHERE season_id = $2 AND entry_id = $3 AND tournament_id IS NOT NULL
+		 ) membership
+		 WHERE tournament_id = $1
 		 LIMIT 1`,
 		[tournamentId, context.currentSeason.seasonId, entryId]
 	);
@@ -2288,9 +2296,15 @@ const filterCurrentTournamentMemberships = async (
 	}
 	const result = await context.database.query<DbTournamentMembershipRow>(
 		`SELECT tournament_id
-		 FROM competition.tournament_entries
-		 WHERE season_id = $1
-		   AND entry_id = $2
+		 FROM (
+			 SELECT tournament_id
+			 FROM competition.tournament_entries
+			 WHERE season_id = $1 AND entry_id = $2
+			 UNION
+			 SELECT tournament_id
+			 FROM competition.entry_leagues_with_tournament
+			 WHERE season_id = $1 AND entry_id = $2 AND tournament_id IS NOT NULL
+		 ) membership
 		 ORDER BY tournament_id`,
 		[context.currentSeason.seasonId, entryId]
 	);

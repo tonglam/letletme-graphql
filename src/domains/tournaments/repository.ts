@@ -2449,17 +2449,40 @@ export const tournamentsRepository: TournamentsRepository = {
 		entryId: number
 	): Promise<TournamentInfo | null> {
 		if (!hasPlatformAdminAccess(context, entryId)) {
-			const { data, error } = await context.data
+			const rosterMembership = await context.data
 				.read("competition.tournament_entries")
 				.select("entry_id")
 				.eq("tournament_id", tournamentId)
 				.eq("entry_id", entryId)
 				.limit(1);
-			if (error) {
-				context.logger.error({ err: error, tournamentId, entryId }, "Failed to verify membership");
+			if (rosterMembership.error) {
+				context.logger.error(
+					{ err: rosterMembership.error, tournamentId, entryId },
+					"Failed to verify tournament roster membership"
+				);
 				throw new Error("Failed to fetch tournament");
 			}
-			if (((data as { entry_id: number }[] | null) ?? []).length === 0) return null;
+			const isRosterMember =
+				((rosterMembership.data as { entry_id: number }[] | null) ?? []).length > 0;
+			if (!isRosterMember) {
+				const officialLeagueMembership = await context.data
+					.read("competition.entry_leagues_with_tournament")
+					.select("tournament_id")
+					.eq("entry_id", entryId)
+					.eq("tournament_id", tournamentId)
+					.limit(1);
+				if (officialLeagueMembership.error) {
+					context.logger.error(
+						{ err: officialLeagueMembership.error, tournamentId, entryId },
+						"Failed to verify official league membership"
+					);
+					throw new Error("Failed to fetch tournament");
+				}
+				const isOfficialLeagueMember =
+					((officialLeagueMembership.data as { tournament_id: number | null }[] | null) ?? [])
+						.length > 0;
+				if (!isOfficialLeagueMember) return null;
+			}
 		}
 		return getTournamentInfoUncached(context, tournamentId);
 	},
@@ -2530,7 +2553,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		const platformAdmin = hasPlatformAdminAccess(context, entryId);
 		const cacheScope = platformAdmin ? "platform-admin" : "entry";
 		const cacheKey = context.dataRevision
-			? tournamentCacheKey(context, `${cacheScope}:${entryId}`)
+			? tournamentCacheKey(context, `${cacheScope}:visible-v2:${entryId}`)
 			: null;
 		if (cacheKey) {
 			const cached = await readJsonQueryCache(context, cacheKey, (value) =>
@@ -2545,20 +2568,43 @@ export const tournamentsRepository: TournamentsRepository = {
 		}
 		let tournamentIds: number[] | null = null;
 		if (!platformAdmin) {
-			const { data: entryData, error: entryError } = await context.data
-				.read("competition.tournament_entries")
-				.select("tournament_id")
-				.eq("entry_id", entryId);
+			const [rosterMemberships, officialLeagueMemberships] = await Promise.all([
+				context.data
+					.read("competition.tournament_entries")
+					.select("tournament_id")
+					.eq("entry_id", entryId),
+				context.data
+					.read("competition.entry_leagues_with_tournament")
+					.select("tournament_id")
+					.eq("entry_id", entryId),
+			]);
 
-			if (entryError) {
+			if (rosterMemberships.error) {
 				context.logger.error(
-					{ err: entryError, entryId },
-					"Failed to fetch tournament memberships"
+					{ err: rosterMemberships.error, entryId },
+					"Failed to fetch tournament roster memberships"
+				);
+				throw new Error("Failed to fetch tournament memberships");
+			}
+			if (officialLeagueMemberships.error) {
+				context.logger.error(
+					{ err: officialLeagueMemberships.error, entryId },
+					"Failed to fetch tracked official league memberships"
 				);
 				throw new Error("Failed to fetch tournament memberships");
 			}
 
-			tournamentIds = extractTournamentIds((entryData as DbTournamentEntryRow[] | null) ?? []);
+			const officialTournamentIds = (
+				(officialLeagueMemberships.data as { tournament_id: number | null }[] | null) ?? []
+			).flatMap((row) =>
+				Number.isSafeInteger(row.tournament_id) && Number(row.tournament_id) > 0
+					? [{ tournament_id: Number(row.tournament_id) }]
+					: []
+			);
+			tournamentIds = extractTournamentIds([
+				...((rosterMemberships.data as DbTournamentEntryRow[] | null) ?? []),
+				...officialTournamentIds,
+			]);
 			if (tournamentIds.length === 0) {
 				if (cacheKey)
 					await writeQueryCache(

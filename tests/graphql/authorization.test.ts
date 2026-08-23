@@ -28,6 +28,13 @@ const data = {
 					return { data: [{ entry_id: 123 }], error: null };
 				}
 				if (
+					table === "competition.entry_leagues_with_tournament" &&
+					filters.get("tournament_id") === 3 &&
+					filters.get("entry_id") === 123
+				) {
+					return { data: [{ tournament_id: 3 }], error: null };
+				}
+				if (
 					table === "competition.tournaments" &&
 					(filters.get("id") === 7 || filters.get("id") === 8) &&
 					filters.get("admin_entry_id") === 123
@@ -289,6 +296,17 @@ describe("authorizeGraphQLRequest", () => {
 			websitePrincipal
 		);
 		expect(result.ok).toBe(true);
+	});
+
+	it("allows a tracked official-league member who is absent from the frozen roster", async () => {
+		const result = await authorize(
+			`query Shell($tournamentId: Int!, $entryId: Int!) {
+				tournament(tournamentId: $tournamentId, entryId: $entryId) { id }
+			}`,
+			{ tournamentId: 3, entryId: 123 },
+			websitePrincipal
+		);
+		expect(result).toEqual({ ok: true });
 	});
 
 	it("allows a retained administrator to manage after leaving the roster", async () => {

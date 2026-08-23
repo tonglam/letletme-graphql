@@ -2160,7 +2160,154 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 	});
 });
 
+describe("tournamentsRepository.getTournamentForMember", () => {
+	it("accepts current official-league membership when the tournament roster is a stale snapshot", async () => {
+		const tournamentRow = {
+			id: 3,
+			name: "Tracked Classic",
+			creator: "admin",
+			admin_entry_id: 6_953,
+			league_id: 8_863,
+			league_type: "classic",
+			total_team_num: 98,
+			tournament_mode: "normal",
+			group_mode: "points_races",
+			group_team_num: 98,
+			group_num: 1,
+			group_started_event_id: 1,
+			group_ended_event_id: 38,
+			group_auto_averages: false,
+			group_rounds: 38,
+			group_play_against_num: null,
+			group_qualify_num: null,
+			knockout_mode: "no_knockout",
+			knockout_team_num: null,
+			knockout_rounds: null,
+			knockout_event_num: null,
+			knockout_started_event_id: null,
+			knockout_ended_event_id: null,
+			knockout_play_against_num: null,
+			state: "active",
+			setup_status: "ready",
+			setup_phase: "ready",
+			created_at: "2026-08-20T14:33:31.925Z",
+			updated_at: "2026-08-21T20:35:08.237Z",
+		} as DbTournamentInfoRow;
+		const rosterQuery = {
+			select() {
+				return rosterQuery;
+			},
+			eq() {
+				return rosterQuery;
+			},
+			async limit() {
+				return { data: [], error: null };
+			},
+		};
+		const officialLeagueQuery = {
+			select() {
+				return officialLeagueQuery;
+			},
+			eq() {
+				return officialLeagueQuery;
+			},
+			async limit() {
+				return { data: [{ tournament_id: 3 }], error: null };
+			},
+		};
+		const tournamentQuery = {
+			select() {
+				return tournamentQuery;
+			},
+			eq() {
+				return tournamentQuery;
+			},
+			async limit() {
+				return { data: [tournamentRow], error: null };
+			},
+		};
+		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			data: {
+				read(table: string) {
+					if (table === "competition.tournament_entries") return rosterQuery;
+					if (table === "competition.entry_leagues_with_tournament") {
+						return officialLeagueQuery;
+					}
+					return tournamentQuery;
+				},
+			},
+			logger: {
+				error() {
+					return undefined;
+				},
+			},
+		} as unknown as GraphQLContext;
+
+		const tournament = await tournamentsRepository.getTournamentForMember(context, 3, 8_743_559);
+
+		expect(tournament?.id).toBe(3);
+		expect(tournament?.leagueId).toBe(8_863);
+	});
+});
+
 describe("tournamentsRepository.getEntryTournaments", () => {
+	it("includes a tracked official league before its frozen tournament roster catches up", async () => {
+		let requestedTournamentIds: unknown = null;
+		const rosterQuery = {
+			select() {
+				return rosterQuery;
+			},
+			async eq() {
+				return { data: [], error: null };
+			},
+		};
+		const officialLeagueQuery = {
+			select() {
+				return officialLeagueQuery;
+			},
+			async eq() {
+				return { data: [{ tournament_id: 3 }], error: null };
+			},
+		};
+		const infoQuery = {
+			select() {
+				return infoQuery;
+			},
+			in(_column: string, values: unknown[]) {
+				requestedTournamentIds = values;
+				return infoQuery;
+			},
+			async order() {
+				return { data: [], error: null };
+			},
+		};
+		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: undefined,
+			data: {
+				read(table: string) {
+					if (table === "competition.tournament_entries") return rosterQuery;
+					if (table === "competition.entry_leagues_with_tournament") {
+						return officialLeagueQuery;
+					}
+					return infoQuery;
+				},
+			},
+			logger: {
+				error() {
+					return undefined;
+				},
+				warn() {
+					return undefined;
+				},
+			},
+		} as unknown as GraphQLContext;
+
+		expect(await tournamentsRepository.getEntryTournaments(context, 8_743_559)).toEqual([]);
+		expect(requestedTournamentIds).toEqual([3]);
+	});
+
 	it("lists all tournaments for a verified platform administrator without a membership filter", async () => {
 		const readTables: string[] = [];
 		let idFilterCalls = 0;
@@ -2356,19 +2503,19 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 		expect(result[0]?.standingsReadyAt).toBeNull();
 		expect(cacheWrites).toBe(1);
 		expect(cacheTtl).toBe(15);
-		expect(cache.has(testCacheKey("tournaments:entry:55"))).toBe(true);
+		expect(cache.has(testCacheKey("tournaments:entry:visible-v2:55"))).toBe(true);
 
 		const cachedResult = await tournamentsRepository.getEntryTournaments(context, 55);
 		expect(cachedResult).toHaveLength(1);
 		expect(cacheWrites).toBe(1);
 
-		cache.delete(testCacheKey("tournaments:entry:55"));
+		cache.delete(testCacheKey("tournaments:entry:visible-v2:55"));
 		issueResult = { data: null, error: new Error("database unavailable") };
 		await expect(tournamentsRepository.getEntryTournaments(context, 55)).rejects.toThrow(
 			"Failed to load tournament setup warning summaries"
 		);
 		expect(cacheWrites).toBe(1);
-		expect(cache.has(testCacheKey("tournaments:entry:55"))).toBe(false);
+		expect(cache.has(testCacheKey("tournaments:entry:visible-v2:55"))).toBe(false);
 	});
 });
 
