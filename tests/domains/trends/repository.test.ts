@@ -217,6 +217,33 @@ describe("Trends private access", () => {
 		});
 	});
 
+	it("allows MINE catalog reads for a selected Mini Program viewer", async () => {
+		const { context } = makeContext([
+			{
+				tournament_id: 7,
+				display_name: "Example",
+				setup_status: "ready",
+				latest_event_id: 1,
+				revision: "viewer-revision",
+				publication_state: "READY",
+				ownership_state: "READY",
+				captaincy_state: "READY",
+				vice_captaincy_state: "READY",
+				transfers_state: "READY",
+			},
+		]);
+		context.principal = {
+			userId: "mini-account-1",
+			source: "wechat_miniprogram",
+			viewerEntryId: 123,
+			fplEntryId: null,
+			fplEntryVerifiedAt: null,
+		};
+
+		const result = await trendsRepository.listCohorts(context, "MINE");
+		expect(result.cohorts).toHaveLength(1);
+	});
+
 	it("lists every joined tournament and marks an unfinished setup as not ready", async () => {
 		let catalogSql = "";
 		let catalogParams: unknown[] = [];

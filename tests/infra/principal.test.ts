@@ -1,7 +1,11 @@
 import { createHmac } from "crypto";
 import { describe, expect, test } from "bun:test";
 import { env } from "../../src/infra/env";
-import { getPrincipalFromHeaders, verifyWebsitePrincipal } from "../../src/infra/principal";
+import {
+	getPrincipalFromHeaders,
+	resolveMiniProgramViewerEntry,
+	verifyWebsitePrincipal,
+} from "../../src/infra/principal";
 
 const addSignedHeader = (
 	headers: Headers,
@@ -62,6 +66,7 @@ describe("website principal envelope", () => {
 			exp: now + 60,
 		});
 		expect(verifyWebsitePrincipal(headers)?.fplEntryId).toBe(123);
+		expect(verifyWebsitePrincipal(headers)?.viewerEntryId).toBe(123);
 
 		const payload = {
 			aud: "letletme-graphql",
@@ -158,6 +163,36 @@ describe("website principal envelope", () => {
 });
 
 describe("Mini Program session authentication", () => {
+	test("resolves the effective viewer without treating it as verified ownership", () => {
+		expect(
+			resolveMiniProgramViewerEntry({
+				fpl_entry_id: null,
+				follow_entry_id: 6953,
+				entry_choice: null,
+				entry_choice_mini_entry_id: null,
+				entry_choice_web_entry_id: null,
+			})
+		).toBe(6953);
+		expect(
+			resolveMiniProgramViewerEntry({
+				fpl_entry_id: 123,
+				follow_entry_id: 6953,
+				entry_choice: "WEB",
+				entry_choice_mini_entry_id: 6953,
+				entry_choice_web_entry_id: 123,
+			})
+		).toBe(123);
+		expect(
+			resolveMiniProgramViewerEntry({
+				fpl_entry_id: 456,
+				follow_entry_id: 6953,
+				entry_choice: "WEB",
+				entry_choice_mini_entry_id: 6953,
+				entry_choice_web_entry_id: 123,
+			})
+		).toBe(6953);
+	});
+
 	test("does not validate a bearer outside signed ingress", async () => {
 		let validationCalls = 0;
 		const principal = await getPrincipalFromHeaders(

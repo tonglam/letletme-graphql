@@ -43,10 +43,11 @@ export type AuthorizationResult =
 			message: string;
 	  };
 
-const ownEntryArgFields = new Map(
+const viewerEntryArgFields = new Map(
 	[...ROOT_FIELD_POLICIES]
 		.filter(
-			([, value]) => value.ownEntryArg ?? (value.access === "ownEntryArg" ? value.arg : undefined)
+			([, value]) =>
+				value.ownEntryArg ?? (value.access === "viewerEntryArg" ? value.arg : undefined)
 		)
 		.map(([key, value]) => [key, value.ownEntryArg ?? value.arg!] as const)
 );
@@ -149,16 +150,44 @@ const requirePrincipal = (principal?: Principal | null): AuthorizationResult =>
 const hasVerifiedEntry = (principal: Principal): boolean =>
 	Boolean(principal.fplEntryId && principal.fplEntryVerifiedAt);
 
+export const viewerEntryIdForPrincipal = (principal: Principal): number | null => {
+	if (
+		typeof principal.viewerEntryId === "number" &&
+		Number.isSafeInteger(principal.viewerEntryId) &&
+		principal.viewerEntryId > 0
+	) {
+		return principal.viewerEntryId;
+	}
+	return hasVerifiedEntry(principal) ? principal.fplEntryId : null;
+};
+
 const hasPlatformAdminAccess = (principal: Principal): boolean =>
 	principal.source === "website" && principal.platformAdmin === true && hasVerifiedEntry(principal);
 
-const requireBoundEntry = (principal: Principal, entryId: number | null): AuthorizationResult => {
-	if (!hasVerifiedEntry(principal) || !entryId || entryId !== principal.fplEntryId) {
+const requireViewerEntry = (principal: Principal, entryId: number | null): AuthorizationResult => {
+	if (!entryId || entryId !== viewerEntryIdForPrincipal(principal)) {
 		return {
 			ok: false,
 			status: 403,
 			code: "FORBIDDEN",
-			message: "Requested entry is not bound to this user",
+			message: "Requested entry is not selected by this viewer",
+		};
+	}
+	return { ok: true };
+};
+
+export const authorizeViewerEntry = (
+	principal: Principal | null | undefined
+): AuthorizationResult => {
+	const principalResult = requirePrincipal(principal);
+	if (!principalResult.ok) return principalResult;
+	if (!principal) return principalResult;
+	if (!viewerEntryIdForPrincipal(principal)) {
+		return {
+			ok: false,
+			status: 403,
+			code: "FORBIDDEN",
+			message: "A viewed FPL team is required",
 		};
 	}
 	return { ok: true };
@@ -282,7 +311,7 @@ const authorizeRootField = async (
 ): Promise<AuthorizationResult> => {
 	const fieldPolicy = getRootFieldPolicy(field.name);
 	if (isPrivateTrendsAccess(field)) {
-		return authorizeProtectedBinding(principal);
+		return authorizeViewerEntry(principal);
 	}
 	if (fieldPolicy?.access === "public") return { ok: true };
 	if (!fieldPolicy || !protectedFields.has(field.name)) {
@@ -294,9 +323,16 @@ const authorizeRootField = async (
 		};
 	}
 
-	const binding = authorizeProtectedBinding(principal);
-	if (!binding.ok) return binding;
-	if (!principal) return binding;
+	const viewerAccess =
+		fieldPolicy.access === "viewerEntry" ||
+		fieldPolicy.access === "viewerEntryArg" ||
+		fieldPolicy.access === "viewerTournamentMember";
+	const identity = viewerAccess
+		? authorizeViewerEntry(principal)
+		: authorizeProtectedBinding(principal);
+	if (!identity.ok) return identity;
+	if (!principal) return identity;
+	const viewerEntryId = viewerEntryIdForPrincipal(principal);
 
 	if (fieldPolicy.access === "verifiedEntry" && !hasVerifiedEntry(principal)) {
 		return {
@@ -319,7 +355,7 @@ const authorizeRootField = async (
 				!(await hasTournamentMembership(
 					dataClient,
 					tournamentId,
-					principal.fplEntryId!,
+					viewerEntryId!,
 					requestScope,
 					authorizedTournamentMemberships
 				)))
@@ -333,9 +369,9 @@ const authorizeRootField = async (
 		}
 	}
 
-	const entryArgName = ownEntryArgFields.get(field.name);
+	const entryArgName = viewerEntryArgFields.get(field.name);
 	if (entryArgName) {
-		const ownResult = requireBoundEntry(principal, asPositiveInt(field.args[entryArgName]));
+		const ownResult = requireViewerEntry(principal, asPositiveInt(field.args[entryArgName]));
 		if (!ownResult.ok) return ownResult;
 	}
 
@@ -357,7 +393,7 @@ const authorizeRootField = async (
 
 	if (fieldPolicy.tournamentMember === true) {
 		const tournamentId = asPositiveInt(field.args.tournamentId);
-		if (!tournamentId || !hasVerifiedEntry(principal)) {
+		if (!tournamentId || !viewerEntryId) {
 			return {
 				ok: false,
 				status: 403,
@@ -369,13 +405,14 @@ const authorizeRootField = async (
 			const isMember = await hasTournamentMembership(
 				dataClient,
 				tournamentId,
-				principal.fplEntryId!,
+				viewerEntryId,
 				requestScope,
 				authorizedTournamentMemberships
 			);
 			const isRetainedAdmin =
 				fieldPolicy.retainedAdmin &&
 				!isMember &&
+				hasVerifiedEntry(principal) &&
 				(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope));
 			if (!isMember && !isRetainedAdmin) {
 				return {

@@ -1,6 +1,7 @@
 import { GraphQLError } from "graphql";
 import type { QueryResultRow } from "pg";
 import type { GraphQLContext } from "../../graphql/context";
+import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { getCoreEventSnapshot } from "../../infra/data-snapshot";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
@@ -658,10 +659,10 @@ const positionName = (value: number | null): string => {
 	}
 };
 
-const requireVerifiedEntryId = (context: GraphQLContext): number => {
-	const entryId = context.principal?.fplEntryId;
-	if (!context.principal?.fplEntryVerifiedAt || !entryId || entryId <= 0) {
-		throw new GraphQLError("A verified FPL binding is required", {
+const requireViewerEntryId = (context: GraphQLContext): number => {
+	const entryId = context.principal ? viewerEntryIdForPrincipal(context.principal) : null;
+	if (!entryId || entryId <= 0) {
+		throw new GraphQLError("A viewed FPL team is required", {
 			extensions: { code: "FORBIDDEN" },
 		});
 	}
@@ -1418,7 +1419,7 @@ const loadSnapshotEntry = async (
 	const pinned = publication.revision;
 	const cacheKey = gqlCacheKey(
 		context,
-		`my-fpl:${PROJECTION_VERSION}:snapshot-entry:${eventId}:${pinned}:${requireVerifiedEntryId(context)}`
+		`my-fpl:${PROJECTION_VERSION}:snapshot-entry:${eventId}:${pinned}:${requireViewerEntryId(context)}`
 	);
 	const cached = await readCache(context, cacheKey, (value): value is LoadedSnapshotEntry => {
 		const parsed = parseLoadedSnapshotEntryCache(value);
@@ -1426,7 +1427,7 @@ const loadSnapshotEntry = async (
 			parsed &&
 			parsed.publication.revision === publication.revision &&
 			parsed.publication.eventId === eventId &&
-			parsed.payload.entry.id === requireVerifiedEntryId(context) &&
+			parsed.payload.entry.id === requireViewerEntryId(context) &&
 			parsed.payload.gameweek.eventId === eventId
 		);
 	});
@@ -1881,7 +1882,7 @@ const loadTeamDesk = async (
 	snapshotRevision?: string | null
 ): Promise<MyFplTeamDesk> => {
 	if (eventId !== undefined && eventId !== null) validateEventId(eventId);
-	const entryId = requireVerifiedEntryId(context);
+	const entryId = requireViewerEntryId(context);
 	await dependenciesFor(context).getCoreEventSnapshot(context);
 	const loadedContext = await loadReviewContext(context);
 	const pinnedPublication = snapshotRevision?.trim()
@@ -2014,7 +2015,7 @@ const loadTeamGameweek = async (
 	snapshotRevision?: string | null
 ): Promise<MyFplTeamGameweek> => {
 	validateEventId(eventId);
-	const entryId = requireVerifiedEntryId(context);
+	const entryId = requireViewerEntryId(context);
 	const loadedContext = await loadReviewContext(context);
 	return loadTeamGameweekPrepared(
 		context,
@@ -2030,7 +2031,7 @@ const loadTeamTransfers = async (
 	context: GraphQLContext,
 	snapshotRevision?: string | null
 ): Promise<MyFplTeamTransfers> => {
-	const entryId = requireVerifiedEntryId(context);
+	const entryId = requireViewerEntryId(context);
 	const loadedContext = await loadReviewContext(context);
 	const pinnedPublication = snapshotRevision?.trim()
 		? await loadSnapshotPublicationByRevision(context, loadedContext, snapshotRevision)
@@ -2901,7 +2902,7 @@ const loadCompetitionBoard = async (
 		snapshotRevision?: string | null;
 	}
 ): Promise<MyFplCompetitionBoardPage> => {
-	const entryId = requireVerifiedEntryId(context);
+	const entryId = requireViewerEntryId(context);
 	const loadedContext = await loadReviewContext(context);
 	return loadCompetitionBoardPrepared(
 		context,
@@ -2925,7 +2926,7 @@ const loadCompetitionsDesk = async (
 ): Promise<MyFplCompetitionsDesk> => {
 	if (tournamentId !== undefined && tournamentId !== null) validateTournamentId(tournamentId);
 	if (eventId !== undefined && eventId !== null) validateEventId(eventId);
-	const entryId = requireVerifiedEntryId(context);
+	const entryId = requireViewerEntryId(context);
 	// getEntryTournaments derives its cache key synchronously. Pin the compact
 	// Core revision first, then overlap the remaining lifecycle SQL and catalog
 	// read without ever creating an unversioned cache path.
@@ -3044,7 +3045,7 @@ const loadCompetitionSeasonPath = async (
 ): Promise<MyFplCompetitionSeasonPath> => {
 	validateTournamentId(tournamentId);
 	validateEventId(throughEventId);
-	const entryId = requireVerifiedEntryId(context);
+	const entryId = requireViewerEntryId(context);
 	const loadedContext = await loadReviewContext(context);
 	await assertTournamentMembership(context, tournamentId, entryId);
 	const empty = (
@@ -3201,7 +3202,7 @@ const loadCompetitionSetupStatus = async (
 	tournamentId: number
 ): Promise<MyFplCompetitionSetupStatus> => {
 	validateTournamentId(tournamentId);
-	const entryId = requireVerifiedEntryId(context);
+	const entryId = requireViewerEntryId(context);
 	await dependenciesFor(context).getCoreEventSnapshot(context);
 	await assertTournamentMembership(context, tournamentId, entryId);
 	const result = await context.database.query<DbSetupStatusRow>(

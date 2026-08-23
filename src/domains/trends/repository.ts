@@ -1,7 +1,7 @@
 import { GraphQLError } from "graphql";
 import { createHash } from "crypto";
 import type { GraphQLContext } from "../../graphql/context";
-import { authorizeProtectedBinding } from "../../graphql/authorization";
+import { authorizeViewerEntry, viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
 
 const capabilities = [
@@ -32,9 +32,12 @@ const forbidden = (message: string): never => {
 };
 
 const requirePrivateTrendsPrincipal = (context: GraphQLContext): void => {
-	const result = authorizeProtectedBinding(context.principal);
+	const result = authorizeViewerEntry(context.principal);
 	if (!result.ok) forbidden(result.message);
 };
+
+const viewerEntryId = (context: GraphQLContext): number | null =>
+	context.principal ? viewerEntryIdForPrincipal(context.principal) : null;
 
 const validateCohortId = (cohortId: string): number => {
 	const match = /^competition:([1-9][0-9]*)$/.exec(cohortId);
@@ -274,7 +277,7 @@ export const trendsRepository = {
       ) latest ON true
       WHERE catalog.season_id = $1 AND catalog.enabled = TRUE`;
 		if (access === "MINE") {
-			params.push(context.principal!.fplEntryId);
+			params.push(viewerEntryId(context)!);
 		}
 		sql +=
 			access === "MINE"
@@ -339,7 +342,7 @@ export const trendsRepository = {
 		}
 		if (access === "MINE") {
 			requirePrivateTrendsPrincipal(context);
-			params.push(context.principal!.fplEntryId!);
+			params.push(viewerEntryId(context)!);
 		}
 		const cohortResult = await context.database.query<Record<string, unknown>>(
 			`
@@ -363,7 +366,7 @@ export const trendsRepository = {
 		const cohortRow = cohortResult.rows[0];
 		if (!cohortRow) {
 			if (access === "MINE") {
-				const entryId = context.principal?.fplEntryId;
+				const entryId = viewerEntryId(context);
 				const membership = await context.database.query<{
 					tournament_id: number;
 					is_member: boolean;
@@ -437,7 +440,7 @@ export const trendsRepository = {
 				if (state !== "READY" || (capability !== "PERSONAL_EXPOSURE" && !cohortRow.publication_id))
 					return { capability, state, evidenceContext, rows: null };
 				if (capability === "PERSONAL_EXPOSURE") {
-					const entryId = context.principal?.fplEntryId;
+					const entryId = viewerEntryId(context);
 					if (!entryId) return { capability, state: "NOT_READY", evidenceContext, rows: null };
 					const personal = await context.database.query<Record<string, unknown>>(
 						`

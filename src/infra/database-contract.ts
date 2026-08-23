@@ -21,7 +21,18 @@ const GRAPHQL_AUTH_READ_COLUMNS = [
 	},
 	{
 		relationName: "bauth.mini_program_session",
-		columnNames: ["user_id", "token_hash", "revoked_at", "expires_at"],
+		columnNames: ["user_id", "account_id", "token_hash", "revoked_at", "expires_at"],
+	},
+	{
+		relationName: "bauth.mini_program_account",
+		columnNames: [
+			"id",
+			"linked_web_user_id",
+			"follow_entry_id",
+			"entry_choice",
+			"entry_choice_mini_entry_id",
+			"entry_choice_web_entry_id",
+		],
 	},
 ] as const;
 const GRAPHQL_AUTH_RELATIONS = GRAPHQL_AUTH_READ_COLUMNS.map(({ relationName }) => relationName);
