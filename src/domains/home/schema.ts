@@ -58,6 +58,7 @@ export const homeTypeDefs = /* GraphQL */ `
 	}
 
 	type HomePersonalDesk {
+		entryId: Int!
 		state: HomePersonalDeskState!
 		entryName: String
 		playerName: String
