@@ -716,13 +716,14 @@ function resolvedOfficialMatchPoints(
 	const awayPoints = row.away_net_points;
 	const hasFinalizedEvidence = options.finalizedEventIds?.has(row.event_id) === true;
 	const hasProvisionalEvidence = options.provisionalEventIds?.has(row.event_id) === true;
-	// A complete live score batch is the newest evidence. Its saved outcome fields
-	// can still describe the preceding score snapshot, so always derive the live
-	// outcome from the validated scores.
-	if (hasProvisionalEvidence) {
-		if (typeof homePoints !== "number" || typeof awayPoints !== "number") {
-			return { home: null, away: null };
-		}
+	// A complete live or finalized score batch is the newest evidence. Its saved
+	// outcome fields can still describe the preceding score snapshot, so prefer
+	// validated scores whenever both sides are present.
+	if (
+		(hasProvisionalEvidence || hasFinalizedEvidence) &&
+		typeof homePoints === "number" &&
+		typeof awayPoints === "number"
+	) {
 		if (homePoints > awayPoints) return { home: 3, away: 0 };
 		if (homePoints < awayPoints) return { home: 0, away: 3 };
 		return { home: 1, away: 1 };
@@ -1136,6 +1137,7 @@ async function loadOfficialH2HSnapshots(
 			[
 				...groups.map((row) => row.entry_id),
 				...battles.flatMap((row) => [row.home_entry_id, row.away_entry_id]),
+				...historyRows.flatMap((row) => [row.home_entry_id, row.away_entry_id]),
 				...knockouts.flatMap((row) => [row.home_entry_id, row.away_entry_id]),
 			].filter((entryId): entryId is number => entryId !== null)
 		),

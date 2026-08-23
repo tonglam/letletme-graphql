@@ -190,7 +190,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 		]);
 	});
 
-	it("derives a validated live outcome from the latest scores instead of stale saved outcomes", () => {
+	it("derives a validated live or finalized outcome from the latest scores instead of stale saved outcomes", () => {
 		const rows: DbTournamentBattleGroupResultRow[] = [
 			{
 				id: 41,
@@ -211,6 +211,14 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 		expect(
 			projectOfficialH2HStandingsFromResults([101, 102], rows, {
 				provisionalEventIds: new Set([1]),
+			})
+		).toEqual([
+			expect.objectContaining({ entryId: 102, matchPoints: 3, won: 1, pointsFor: 50 }),
+			expect.objectContaining({ entryId: 101, matchPoints: 0, lost: 1, pointsFor: 20 }),
+		]);
+		expect(
+			projectOfficialH2HStandingsFromResults([101, 102], rows, {
+				finalizedEventIds: new Set([1]),
 			})
 		).toEqual([
 			expect.objectContaining({ entryId: 102, matchPoints: 3, won: 1, pointsFor: 50 }),
@@ -3668,6 +3676,18 @@ describe("official H2H live standings read-side fallback", () => {
 			home: { matchPoints: null },
 			away: { matchPoints: null },
 			winnerEntryId: null,
+		});
+
+		groups.pop();
+		battles[0]!.away_net_points = 23;
+		const incompleteGroupSnapshot = await tournamentsRepository.getTournamentOfficialH2H(
+			context,
+			9,
+			1
+		);
+		expect(incompleteGroupSnapshot.matches[0]).toMatchObject({
+			home: { entryId: 101, entryName: "WhoAMI Agent" },
+			away: { entryId: 102, entryName: "Average Killers" },
 		});
 	});
 });
