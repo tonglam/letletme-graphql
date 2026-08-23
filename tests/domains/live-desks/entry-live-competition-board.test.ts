@@ -1,11 +1,17 @@
 import { describe, expect, it } from "bun:test";
+import type { GraphQLContext } from "../../../src/graphql/context";
 import {
 	buildNoPicksLiveCalcData,
 	type LiveCalcData,
 } from "../../../src/domains/entry-live/calc-service";
-import type { LiveManagerScore } from "../../../src/domains/entry-live/manager-score";
+import type {
+	LiveManagerScore,
+	ManagerScoreLoad,
+} from "../../../src/domains/entry-live/manager-score";
 import {
 	buildEntryLiveCompetitionBoard,
+	entryLiveCompetitionBoardCacheKey,
+	entryLiveCompetitionManagerStatusRevision,
 	entryLiveCompetitionRosterRevision,
 	normalizeEntryLiveCompetitionBoardRequest,
 	queryEntryLiveCompetitionBoard,
@@ -32,6 +38,42 @@ const score = (input: Partial<LiveManagerScore> = {}): LiveManagerScore => ({
 	reconciliation: "MATCHED",
 	reasonCodes: [],
 	...input,
+});
+
+const managerLoad = (checkedAt: string): ManagerScoreLoad => ({
+	season: "2627",
+	rows: new Map([
+		[
+			1,
+			{
+				season: "2627",
+				eventId: 1,
+				entryId: 1,
+				eventPoints: 10,
+				netEventPoints: 10,
+				totalPoints: 100,
+				totalScope: "OVERALL",
+				eventRank: 1,
+				overallRank: 1000,
+				leagueRank: 1,
+				source: "FPL_ENTRY_SUMMARY",
+				transferCost: 0,
+				eventPointSemantics: "ZERO_COST_EQUIVALENT",
+				revision: "manager-row-1",
+				checkedAt,
+				upstreamUpdatedAt: null,
+				staleAt: "2026-08-23T00:02:00.000Z",
+			},
+		],
+	]),
+	errorCode: null,
+	managerRevision: "manager-1",
+	dataAvailability: "FRESH",
+	servedFrom: "REDIS",
+	refreshQueued: false,
+	missingEntryIds: [],
+	checkedAt,
+	nextRefreshAt: "2026-08-23T00:01:00.000Z",
 });
 
 type PickInput = {
@@ -444,6 +486,52 @@ describe("entry live competition board filtering and paging", () => {
 		};
 
 		expect(board([refreshed]).boardRevision).toBe(board([first]).boardRevision);
+	});
+
+	it("recomputes cached row status for no-op polls and freshness transitions", () => {
+		const first = managerLoad("2026-08-23T00:00:00.000Z");
+		const refreshed = managerLoad("2026-08-23T00:00:30.000Z");
+		const firstStatus = entryLiveCompetitionManagerStatusRevision(
+			first,
+			Date.parse("2026-08-23T00:00:10.000Z")
+		);
+		const refreshedStatus = entryLiveCompetitionManagerStatusRevision(
+			refreshed,
+			Date.parse("2026-08-23T00:00:40.000Z")
+		);
+		const staleStatus = entryLiveCompetitionManagerStatusRevision(
+			first,
+			Date.parse("2026-08-23T00:00:31.000Z")
+		);
+
+		expect(refreshedStatus).not.toBe(firstStatus);
+		expect(staleStatus).not.toBe(firstStatus);
+
+		const context = {
+			dataRevision: "core-1",
+			currentSeason: { seasonCode: "2627" },
+		} as GraphQLContext;
+		const identity = {
+			season: "2627",
+			eventId: 1,
+			tournamentId: 10,
+			coreRevision: "core-1",
+			playerRevision: "player-1",
+			managerRevision: "manager-1",
+			rosterRevision: "roster-1",
+			windowRevision: "window-1",
+		};
+		expect(
+			entryLiveCompetitionBoardCacheKey(context, {
+				...identity,
+				managerStatusRevision: refreshedStatus,
+			})
+		).not.toBe(
+			entryLiveCompetitionBoardCacheKey(context, {
+				...identity,
+				managerStatusRevision: firstStatus,
+			})
+		);
 	});
 
 	it("changes cache identity and board revision when tournament membership changes", () => {

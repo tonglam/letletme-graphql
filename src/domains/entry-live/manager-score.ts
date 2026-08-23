@@ -49,7 +49,7 @@ export type ManagerScoreLoad = ManagerLiveFetchResult;
 export type OfficialManagerScoreRow =
 	ManagerLiveScoreRow | (Omit<ManagerLiveScoreRow, "source"> & { source: "FPL_FINAL_RESULT" });
 
-const REFRESH_SECONDS = 30;
+export const MANAGER_SCORE_REFRESH_SECONDS = 30;
 
 const ageSeconds = (checkedAt: string, now = Date.now()): number => {
 	const timestamp = Date.parse(checkedAt);
@@ -162,7 +162,7 @@ export function buildManagerScore(params: {
 		if (reconciliation === "SOURCE_SKEW") reasons.push("SOURCE_SKEW");
 		if (row.eventPoints === null && row.totalPoints === null) reasons.push("MISSING_SCORE");
 		const finalEvidence = row.source === "FPL_FINAL_RESULT";
-		const fresh = ageSeconds(row.checkedAt) <= REFRESH_SECONDS;
+		const fresh = ageSeconds(row.checkedAt) <= MANAGER_SCORE_REFRESH_SECONDS;
 		const state: LiveManagerScoreState =
 			!provisional && finalEvidence
 				? "FINAL"
@@ -238,7 +238,7 @@ export function buildManagerScore(params: {
 				nextRefreshAt:
 					state === "FINAL"
 						? null
-						: (params.nextRefreshAt ?? plusSeconds(row.checkedAt, REFRESH_SECONDS)),
+						: (params.nextRefreshAt ?? plusSeconds(row.checkedAt, MANAGER_SCORE_REFRESH_SECONDS)),
 				reconciliation,
 				reasonCodes: reasons,
 			},

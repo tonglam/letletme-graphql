@@ -3,7 +3,11 @@ import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import type { LiveCalcData } from "../entry-live/calc-service";
-import type { LiveManagerScore } from "../entry-live/manager-score";
+import {
+	MANAGER_SCORE_REFRESH_SECONDS,
+	type LiveManagerScore,
+	type ManagerScoreLoad,
+} from "../entry-live/manager-score";
 
 export const ENTRY_LIVE_COMPETITION_BOARD_PROJECTION_VERSION = "v2";
 export const ENTRY_LIVE_COMPETITION_BOARD_CACHE_TTL_SECONDS = 30;
@@ -158,6 +162,38 @@ export const entryLiveCompetitionRosterRevision = (entryIds: readonly number[]):
 			Array.from(new Set(entryIds))
 				.sort((left, right) => left - right)
 				.join(",")
+		)
+		.digest("hex")
+		.slice(0, 20);
+
+export const entryLiveCompetitionManagerStatusRevision = (
+	input: ManagerScoreLoad,
+	now = Date.now()
+): string =>
+	createHash("sha256")
+		.update(
+			JSON.stringify({
+				dataAvailability: input.dataAvailability,
+				servedFrom: input.servedFrom,
+				refreshQueued: input.refreshQueued,
+				errorCode: input.errorCode,
+				checkedAt: input.checkedAt,
+				nextRefreshAt: input.nextRefreshAt,
+				missingEntryIds: [...input.missingEntryIds].sort((left, right) => left - right),
+				rows: Array.from(input.rows, ([entryId, row]) => {
+					const checkedAt = Date.parse(row.checkedAt);
+					return {
+						entryId,
+						revision: row.revision,
+						checkedAt: row.checkedAt,
+						upstreamUpdatedAt: row.upstreamUpdatedAt,
+						staleAt: row.staleAt,
+						fresh:
+							Number.isFinite(checkedAt) &&
+							Math.max(0, (now - checkedAt) / 1000) <= MANAGER_SCORE_REFRESH_SECONDS,
+					};
+				}).sort((left, right) => left.entryId - right.entryId),
+			})
 		)
 		.digest("hex")
 		.slice(0, 20);
@@ -613,6 +649,7 @@ export const entryLiveCompetitionBoardCacheKey = (
 		coreRevision: string;
 		playerRevision: string;
 		managerRevision: string | null;
+		managerStatusRevision: string;
 		rosterRevision: string;
 		windowRevision: string;
 	}

@@ -34,8 +34,9 @@ import {
 } from "./competition-board-cache";
 import {
 	buildEntryLiveCompetitionBoard,
-	entryLiveCompetitionRosterRevision,
 	entryLiveCompetitionBoardCacheKey,
+	entryLiveCompetitionManagerStatusRevision,
+	entryLiveCompetitionRosterRevision,
 	getOrBuildEntryLiveCompetitionBoard,
 	normalizeEntryLiveCompetitionBoardRequest,
 	queryEntryLiveCompetitionBoard,
@@ -570,6 +571,7 @@ export const liveDesksResolvers = {
 			}
 			const playerRevision = snapshot?.revision ?? `core-${eventCore.revision}`;
 			const managerRevision = managerLoadRevision(managerScores);
+			const managerStatusRevision = entryLiveCompetitionManagerStatusRevision(managerScores);
 			const rosterRevision = entryLiveCompetitionRosterRevision(allEntryIds);
 			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
 			const cacheIdentity = {
@@ -582,7 +584,10 @@ export const liveDesksResolvers = {
 				rosterRevision,
 				windowRevision,
 			};
-			const cacheKey = entryLiveCompetitionBoardCacheKey(context, cacheIdentity);
+			const cacheKey = entryLiveCompetitionBoardCacheKey(context, {
+				...cacheIdentity,
+				managerStatusRevision,
+			});
 			const requireNet = memberTournament.leagueType === LeagueType.H2H;
 			const board = await getOrBuildEntryLiveCompetitionBoard(context, cacheKey, async () => {
 				const result = await entryLiveBatchService.calcLivePointsForEntries(
