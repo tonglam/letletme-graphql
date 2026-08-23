@@ -4,6 +4,7 @@ import type { GraphQLContext } from "../../graphql/context";
 import {
 	getCoreEventSnapshot,
 	getCoreFixtureSnapshot,
+	getCoreDataSnapshot,
 	getCoreLiveIdentitySnapshot,
 	getLiveLifecycleStatus,
 	getLiveDataPublicationManifestWithSource,
@@ -826,16 +827,41 @@ export const liveDesksResolvers = {
 		) => {
 			await assertMember(context, args.tournamentId, args.entryId);
 			const { snapshot } = await resolveSnapshot(context, args.ref);
-			const rows = await getTournamentSelectionIndexRows(
-				context,
-				args.tournamentId,
-				snapshot.eventId
-			);
+			const [rows, core] = await Promise.all([
+				getTournamentSelectionIndexRows(context, args.tournamentId, snapshot.eventId),
+				getCoreDataSnapshot(context),
+			]);
+			const players = new Map(core.players.map((player) => [player.id, player]));
+			const teams = new Map(core.teams.map((team) => [team.id, team]));
+			const enrichedRows = rows.map((row) => {
+				const player = players.get(row.playerId);
+				const team = player ? teams.get(player.teamId) : null;
+				if (!player || !team) {
+					throw new Error("Tournament selection index references an unknown core player");
+				}
+				return {
+					...row,
+					playerName: player.webName,
+					teamId: team.id,
+					teamName: team.name,
+					teamShortName: team.shortName,
+					position:
+						player.type === 1
+							? "GKP"
+							: player.type === 2
+								? "DEF"
+								: player.type === 3
+									? "MID"
+									: player.type === 4
+										? "FWD"
+										: "UNKNOWN",
+				};
+			});
 			return {
 				tournamentId: args.tournamentId,
 				eventId: snapshot.eventId,
 				revision: snapshot.revision,
-				rows,
+				rows: enrichedRows,
 			};
 		},
 		tournamentEntrySquads: async (

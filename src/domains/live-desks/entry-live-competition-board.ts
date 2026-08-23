@@ -15,6 +15,8 @@ export type EntryLiveCompetitionBoardSort =
 	| "PLAYED"
 	| "TOTAL_POINTS"
 	| "OVERALL_RANK"
+	| "TEAM_VALUE"
+	| "RANK"
 	| "ENTRY_NAME";
 
 export type EntryLiveCompetitionBoardSortDirection = "ASC" | "DESC";
@@ -136,6 +138,8 @@ const BOARD_SORTS = new Set<EntryLiveCompetitionBoardSort>([
 	"PLAYED",
 	"TOTAL_POINTS",
 	"OVERALL_RANK",
+	"TEAM_VALUE",
+	"RANK",
 	"ENTRY_NAME",
 ]);
 
@@ -255,14 +259,17 @@ const projectRow = (row: LiveCalcData): IndexedEntryLiveCompetitionBoardRow => {
 	for (const pick of row.pickList) {
 		ownerAny.add(pick.element);
 		increment(teamAny, pick.teamId);
-		if (pick.pickActive) {
+		// Preserve the existing filter contract: starter/bench is the selected
+		// lineup position, not the current scoring multiplier. Bench Boost and
+		// finalized automatic substitutions must not move a pick between scopes.
+		if (pick.position <= 11) {
 			ownerStarter.add(pick.element);
 			increment(teamStarter, pick.teamId);
 		} else {
 			ownerBench.add(pick.element);
 			increment(teamBench, pick.teamId);
 		}
-		if (pick.isCaptain || pick.multiplier >= 2) captains.add(pick.element);
+		if (pick.isCaptain) captains.add(pick.element);
 		if (pick.isViceCaptain) viceCaptains.add(pick.element);
 	}
 	const captainId = row.activeCaptain.id || row.playedCaptain || 0;
@@ -436,8 +443,9 @@ const rowMatchesOwnership = (
 			: filter.captainMode === "VICE"
 				? new Set(row.viceCaptains)
 				: null;
-	return filter.playerIds.every(
-		(playerId) => owners.has(playerId) && (!roleIds || roleIds.has(playerId))
+	return (
+		filter.playerIds.every((playerId) => owners.has(playerId)) &&
+		(!roleIds || filter.playerIds.some((playerId) => roleIds.has(playerId)))
 	);
 };
 
@@ -465,6 +473,10 @@ const numericSortValue = (
 			return row.score.totalPoints;
 		case "OVERALL_RANK":
 			return row.score.overallRank ?? (row.overallRank > 0 ? row.overallRank : null);
+		case "TEAM_VALUE":
+			return row.teamValue;
+		case "RANK":
+			return row.rank > 0 ? row.rank : null;
 	}
 };
 

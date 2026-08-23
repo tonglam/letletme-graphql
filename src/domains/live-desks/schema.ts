@@ -144,6 +144,8 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		PLAYED
 		TOTAL_POINTS
 		OVERALL_RANK
+		TEAM_VALUE
+		RANK
 		ENTRY_NAME
 	}
 
@@ -232,6 +234,11 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 
 	type TournamentSelectionIndexRow {
 		playerId: Int!
+		playerName: String!
+		teamId: Int!
+		teamName: String!
+		teamShortName: String!
+		position: String!
 		count: Int!
 		percentage: Float!
 	}

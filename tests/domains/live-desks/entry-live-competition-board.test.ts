@@ -37,6 +37,7 @@ type PickInput = {
 	element: number;
 	teamId: number;
 	starter?: boolean;
+	active?: boolean;
 	captain?: boolean;
 	vice?: boolean;
 };
@@ -45,7 +46,7 @@ const pick = (input: PickInput): LiveCalcData["pickList"][number] =>
 	({
 		element: input.element,
 		teamId: input.teamId,
-		pickActive: input.starter !== false,
+		pickActive: input.active ?? input.starter !== false,
 		isCaptain: input.captain === true,
 		isViceCaptain: input.vice === true,
 		multiplier: input.captain ? 2 : input.starter === false ? 0 : 1,
@@ -245,10 +246,49 @@ describe("entry live competition board filtering and paging", () => {
 			queryEntryLiveCompetitionBoard(
 				built,
 				request({
+					ownership: {
+						playerIds: [101, 102],
+						scope: "STARTER",
+						captainMode: "CAPTAIN",
+					},
+				})
+			).rows.map((row) => row.entry)
+		).toEqual([1]);
+		expect(
+			queryEntryLiveCompetitionBoard(
+				built,
+				request({
 					ownership: { playerIds: [103], scope: "BENCH", captainMode: "VICE" },
 				})
 			).rows.map((row) => row.entry)
 		).toEqual([1]);
+	});
+
+	it("keeps starter and bench scopes tied to selected positions", () => {
+		const built = board([
+			liveRow({
+				entry: 3,
+				picks: [
+					{ element: 301, teamId: 1, starter: true, active: false },
+					{ element: 302, teamId: 2, starter: false, active: true },
+				],
+			}),
+		]);
+
+		expect(
+			queryEntryLiveCompetitionBoard(
+				built,
+				request({ ownership: { playerIds: [301], scope: "STARTER", captainMode: "ANY" } })
+			).filteredEntries
+		).toBe(1);
+		expect(
+			queryEntryLiveCompetitionBoard(
+				built,
+				request({
+					teamCountRules: [{ teamId: 2, exactCount: 1, scope: "BENCH" }],
+				})
+			).filteredEntries
+		).toBe(1);
 	});
 
 	it("searches team, manager and exact entry ID text", () => {
@@ -345,7 +385,7 @@ describe("entry live competition board sorting and performance envelope", () => 
 		}),
 	];
 
-	it("supports all seven existing sort fields with entry ID as the stable tie-break", () => {
+	it("supports the existing table sorts plus lightweight board sorts with entry ID as tie-break", () => {
 		const built = board(rows);
 		const cases: Array<
 			[
@@ -360,6 +400,8 @@ describe("entry live competition board sorting and performance envelope", () => 
 			["PLAYED", "DESC", [2, 3, 1]],
 			["TOTAL_POINTS", "DESC", [1, 2, 3]],
 			["OVERALL_RANK", "ASC", [1, 2, 3]],
+			["TEAM_VALUE", "DESC", [3, 2, 1]],
+			["RANK", "ASC", [1, 2, 3]],
 			["ENTRY_NAME", "ASC", [1, 2, 3]],
 		];
 		for (const [sort, direction, expected] of cases) {

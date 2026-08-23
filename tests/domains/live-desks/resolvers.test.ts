@@ -8,6 +8,8 @@ describe("live desks tournament selection index", () => {
 			source.indexOf("tournamentEntrySquads: async")
 		);
 		expect(selectionIndex).toContain("getTournamentSelectionIndexRows");
+		expect(selectionIndex).toContain("getCoreDataSnapshot");
+		expect(selectionIndex).toContain("playerName: player.webName");
 		expect(selectionIndex).not.toContain("getEntryEventPicksByIds");
 		expect(selectionIndex).not.toContain("getTournamentEntryIds(context, args.tournamentId)");
 	});
