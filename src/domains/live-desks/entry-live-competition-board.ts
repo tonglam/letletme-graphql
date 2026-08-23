@@ -205,8 +205,13 @@ export const normalizeEntryLiveCompetitionBoardRequest = (
 		if (!isRecord(rule)) throw badInput(`teamCountRules[${index}] must be an object`);
 		if (!isPositiveSafeInteger(rule.teamId))
 			throw badInput(`teamCountRules[${index}].teamId is invalid`);
-		if (!isPositiveSafeInteger(rule.exactCount) || rule.exactCount > 15)
-			throw badInput(`teamCountRules[${index}].exactCount must be between 1 and 15`);
+		if (
+			typeof rule.exactCount !== "number" ||
+			!Number.isSafeInteger(rule.exactCount) ||
+			rule.exactCount < 0 ||
+			rule.exactCount > 15
+		)
+			throw badInput(`teamCountRules[${index}].exactCount must be between 0 and 15`);
 		return {
 			teamId: rule.teamId,
 			exactCount: rule.exactCount,

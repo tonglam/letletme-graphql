@@ -195,6 +195,17 @@ describe("entry live competition board request validation", () => {
 			}).chips
 		).toEqual(["MANAGER"]);
 	});
+
+	it("accepts zero as an exact team count", () => {
+		expect(
+			normalizeEntryLiveCompetitionBoardRequest({
+				entryId: 1,
+				tournamentId: 2,
+				eventId: 3,
+				teamCountRules: [{ teamId: 9, exactCount: 0, scope: "ANY" }],
+			}).teamCountRules
+		).toEqual([{ teamId: 9, exactCount: 0, scope: "ANY" }]);
+	});
 });
 
 describe("entry live competition board filtering and paging", () => {
@@ -301,6 +312,18 @@ describe("entry live competition board filtering and paging", () => {
 				})
 			).filteredEntries
 		).toBe(1);
+	});
+
+	it("matches an exact zero count when a team is absent", () => {
+		const built = board(rows);
+		expect(
+			queryEntryLiveCompetitionBoard(
+				built,
+				request({
+					teamCountRules: [{ teamId: 9, exactCount: 0, scope: "ANY" }],
+				})
+			).rows.map((row) => row.entry)
+		).toEqual([1, 2]);
 	});
 
 	it("indexes team-count filters with the player's team at the requested event", () => {
