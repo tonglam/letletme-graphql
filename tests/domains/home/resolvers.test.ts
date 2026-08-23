@@ -279,7 +279,7 @@ describe("Home GraphQL contracts", () => {
 			source: `
 				query HomePersonalDesk {
 					homePersonalDesk {
-						state entryName playerName overallPoints overallRank teamValue sourceCheckedAt
+						entryId state entryName playerName overallPoints overallRank teamValue sourceCheckedAt
 						leagueRanks {
 							key name leagueType rank tournamentId movement { direction places }
 							h2hMatchup {
@@ -296,6 +296,7 @@ describe("Home GraphQL contracts", () => {
 
 		expect(result.errors).toBeUndefined();
 		expect(result.data?.homePersonalDesk).toMatchObject({
+			entryId: 123,
 			state: "READY",
 			entryName: "Compact XI",
 			leagueRanks: [

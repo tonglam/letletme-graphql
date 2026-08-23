@@ -39,6 +39,7 @@ export type HomeLeagueRank = {
 };
 
 export type HomePersonalDesk = {
+	entryId: number;
 	state: HomePersonalDeskState;
 	entryName: string | null;
 	playerName: string | null;
@@ -398,6 +399,7 @@ export const homeRepository = {
 				"Home personal desk unavailable"
 			);
 			return {
+				entryId,
 				state: "UNAVAILABLE",
 				entryName: null,
 				playerName: null,
@@ -426,6 +428,7 @@ export const homeRepository = {
 					? "EMPTY"
 					: "READY";
 		const mapped = {
+			entryId,
 			state,
 			entryName: first.entry_name,
 			playerName: first.player_name,
