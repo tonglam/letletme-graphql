@@ -317,6 +317,22 @@ describe("entry live competition board filtering and paging", () => {
 		).toEqual([12]);
 	});
 
+	it("returns the filtered viewer row independently from the requested page", () => {
+		const built = board([liveRow({ entry: 1 }), liveRow({ entry: 2 }), liveRow({ entry: 3 })]);
+		const result = queryEntryLiveCompetitionBoard(
+			built,
+			request({ entryId: 3, page: 1, pageSize: 1 })
+		);
+		expect(result.rows.map((row) => row.entry)).toEqual([1]);
+		expect(result.viewerRow?.entry).toBe(3);
+
+		const filtered = queryEntryLiveCompetitionBoard(
+			built,
+			request({ entryId: 3, page: 1, pageSize: 1, search: "1" })
+		);
+		expect(filtered.viewerRow).toBeNull();
+	});
+
 	it("rejects a stale revision without discarding the caller's prior page", () => {
 		const built = board(rows);
 		try {

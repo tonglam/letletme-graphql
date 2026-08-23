@@ -632,6 +632,7 @@ export const liveDesksResolvers = {
 				highestEventPoints: board.highestEventPoints,
 				averageEventPoints: board.averageEventPoints,
 				rows: page.rows,
+				viewerRow: page.viewerRow,
 			};
 		},
 		entryLiveCompetitionsDesk: async (

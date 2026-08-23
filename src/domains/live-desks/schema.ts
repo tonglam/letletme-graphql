@@ -230,6 +230,7 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		highestEventPoints: Int
 		averageEventPoints: Float
 		rows: [EntryLiveCompetitionBoardRow!]!
+		viewerRow: EntryLiveCompetitionBoardRow
 	}
 
 	type TournamentSelectionIndexRow {

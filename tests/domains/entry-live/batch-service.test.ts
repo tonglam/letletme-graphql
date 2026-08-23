@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { entryLiveBatchService } from "../../../src/domains/entry-live/batch-service";
+import {
+	entryLiveBatchService,
+	entryLiveBatchServiceTestables,
+} from "../../../src/domains/entry-live/batch-service";
 import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
 import { entriesService } from "../../../src/domains/entries/service";
 import type { LivePerformance } from "../../../src/domains/live/repository";
@@ -70,6 +73,11 @@ const makeMockContext = (options: {
 };
 
 describe("entryLiveBatchService.calcLivePointsForEntries", () => {
+	it("normalizes manager chip aliases for live board filters", () => {
+		expect(entryLiveBatchServiceTestables.normalizeChip("MANAGER")).toBe("MANAGER");
+		expect(entryLiveBatchServiceTestables.normalizeChip("am")).toBe("MANAGER");
+	});
+
 	it("returns empty results for empty entry IDs", async () => {
 		const context = makeMockContext({});
 		const result = await entryLiveBatchService.calcLivePointsForEntries(context, 33, []);

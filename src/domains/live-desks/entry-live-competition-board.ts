@@ -532,7 +532,12 @@ const compareNullableNumbers = (
 export const queryEntryLiveCompetitionBoard = (
 	board: CachedEntryLiveCompetitionBoard,
 	request: EntryLiveCompetitionBoardRequest
-): { rows: EntryLiveCompetitionBoardRow[]; filteredEntries: number; hasMore: boolean } => {
+): {
+	rows: EntryLiveCompetitionBoardRow[];
+	viewerRow: EntryLiveCompetitionBoardRow | null;
+	filteredEntries: number;
+	hasMore: boolean;
+} => {
 	if (request.expectedBoardRevision && request.expectedBoardRevision !== board.boardRevision) {
 		throw new GraphQLError("The live competition board changed while paging", {
 			extensions: { code: "LIVE_BOARD_REVISION_GONE", boardRevision: board.boardRevision },
@@ -568,21 +573,22 @@ export const queryEntryLiveCompetitionBoard = (
 	});
 	const start = (request.page - 1) * request.pageSize;
 	const pageRows = filtered.slice(start, start + request.pageSize);
+	const toPublicRow = ({
+		searchText: _searchText,
+		ownerAny: _ownerAny,
+		ownerStarter: _ownerStarter,
+		ownerBench: _ownerBench,
+		captains: _captains,
+		viceCaptains: _viceCaptains,
+		teamAny: _teamAny,
+		teamStarter: _teamStarter,
+		teamBench: _teamBench,
+		...row
+	}: IndexedEntryLiveCompetitionBoardRow): EntryLiveCompetitionBoardRow => row;
+	const viewerRow = filtered.find((row) => row.entry === request.entryId) ?? null;
 	return {
-		rows: pageRows.map(
-			({
-				searchText: _searchText,
-				ownerAny: _ownerAny,
-				ownerStarter: _ownerStarter,
-				ownerBench: _ownerBench,
-				captains: _captains,
-				viceCaptains: _viceCaptains,
-				teamAny: _teamAny,
-				teamStarter: _teamStarter,
-				teamBench: _teamBench,
-				...row
-			}) => row
-		),
+		rows: pageRows.map(toPublicRow),
+		viewerRow: viewerRow ? toPublicRow(viewerRow) : null,
 		filteredEntries: filtered.length,
 		hasMore: start + pageRows.length < filtered.length,
 	};

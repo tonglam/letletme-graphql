@@ -267,9 +267,12 @@ const normalizeChip = (raw: string | null | undefined): string => {
 		return "FREE_HIT";
 	if (value === "WILDCARD" || compactValue === "WILDCARD" || compactValue === "WC")
 		return "WILDCARD";
+	if (compactValue === "MANAGER" || compactValue === "AM") return "MANAGER";
 	if (compactValue === "NONE" || compactValue === "NA" || compactValue === "") return "NONE";
 	return "NONE";
 };
+
+export const entryLiveBatchServiceTestables = { normalizeChip };
 
 const computeSingleEntry = (
 	entryId: number,
