@@ -685,9 +685,50 @@ function officialMatchSide(
 
 type HistoricalH2HStandingProjection = Omit<OfficialH2HStanding, "entryName" | "playerName">;
 
-export function projectHistoricalOfficialH2HStandings(
+type OfficialH2HProjectionOptions = {
+	/** Only use score-derived outcomes for events with finalized evidence. */
+	finalizedEventIds?: ReadonlySet<number>;
+};
+
+function resolvedOfficialMatchPoints(
+	row: DbTournamentBattleGroupResultRow,
+	options: OfficialH2HProjectionOptions = {}
+): {
+	home: number | null;
+	away: number | null;
+} {
+	if (
+		row.home_match_points !== null &&
+		row.home_match_points !== undefined &&
+		row.away_match_points !== null &&
+		row.away_match_points !== undefined
+	) {
+		return { home: row.home_match_points, away: row.away_match_points };
+	}
+	const homePoints = row.home_net_points;
+	const awayPoints = row.away_net_points;
+	const hasFinalizedEvidence =
+		options.finalizedEventIds === undefined || options.finalizedEventIds.has(row.event_id);
+	const hasFinalizedZeroScore = options.finalizedEventIds?.has(row.event_id) === true;
+	// FPL can publish scores before its per-match outcome fields. Do not derive
+	// a live result from moving points; finalized 0-0 scores are a real draw.
+	if (
+		typeof homePoints !== "number" ||
+		typeof awayPoints !== "number" ||
+		!hasFinalizedEvidence ||
+		(homePoints === 0 && awayPoints === 0 && !hasFinalizedZeroScore)
+	) {
+		return { home: null, away: null };
+	}
+	if (homePoints > awayPoints) return { home: 3, away: 0 };
+	if (homePoints < awayPoints) return { home: 0, away: 3 };
+	return { home: 1, away: 1 };
+}
+
+export function projectOfficialH2HStandingsFromResults(
 	entryIds: readonly number[],
-	rows: readonly DbTournamentBattleGroupResultRow[]
+	rows: readonly DbTournamentBattleGroupResultRow[],
+	options: OfficialH2HProjectionOptions = {}
 ): HistoricalH2HStandingProjection[] {
 	const totals = new Map<number, Omit<HistoricalH2HStandingProjection, "rank">>();
 	for (const entryId of entryIds) {
@@ -702,16 +743,17 @@ export function projectHistoricalOfficialH2HStandings(
 		});
 	}
 	for (const row of rows) {
+		const outcome = resolvedOfficialMatchPoints(row, options);
 		const sides = [
 			{
 				entryId: row.home_entry_id,
 				points: row.home_net_points,
-				matchPoints: row.home_match_points,
+				matchPoints: outcome.home,
 			},
 			{
 				entryId: row.away_entry_id,
 				points: row.away_net_points,
-				matchPoints: row.away_match_points,
+				matchPoints: outcome.away,
 			},
 		];
 		for (const side of sides) {
@@ -743,9 +785,18 @@ export function projectHistoricalOfficialH2HStandings(
 	});
 }
 
+export function projectHistoricalOfficialH2HStandings(
+	entryIds: readonly number[],
+	rows: readonly DbTournamentBattleGroupResultRow[],
+	options: OfficialH2HProjectionOptions = {}
+): HistoricalH2HStandingProjection[] {
+	return projectOfficialH2HStandingsFromResults(entryIds, rows, options);
+}
+
 function mapOfficialBattleMatch(
 	row: DbTournamentBattleGroupResultRow,
-	entryNames: Map<number, DbEntryInfoNameRow>
+	entryNames: Map<number, DbEntryInfoNameRow>,
+	finalizedEventIds: ReadonlySet<number> = new Set()
 ): OfficialH2HMatch {
 	if (
 		row.official_match_id === null ||
@@ -755,12 +806,9 @@ function mapOfficialBattleMatch(
 	) {
 		throw new Error("Official H2H battle row is missing source identity");
 	}
+	const outcome = resolvedOfficialMatchPoints(row, { finalizedEventIds });
 	const winnerEntryId =
-		row.home_match_points === 3
-			? row.home_entry_id
-			: row.away_match_points === 3
-				? row.away_entry_id
-				: null;
+		outcome.home === 3 ? row.home_entry_id : outcome.away === 3 ? row.away_entry_id : null;
 	return {
 		officialMatchId: row.official_match_id,
 		eventId: row.event_id,
@@ -772,14 +820,14 @@ function mapOfficialBattleMatch(
 			row.home_entry_id,
 			row.home_is_average ?? row.home_entry_id === null,
 			row.home_net_points,
-			row.home_match_points,
+			outcome.home,
 			entryNames
 		),
 		away: officialMatchSide(
 			row.away_entry_id,
 			row.away_is_average ?? row.away_entry_id === null,
 			row.away_net_points,
-			row.away_match_points,
+			outcome.away,
 			entryNames
 		),
 		winnerEntryId,
@@ -835,12 +883,23 @@ type OfficialH2HSnapshotLoad = {
 	history: DbTournamentBattleGroupResultRow[];
 };
 
+function officialBattleRowsHaveScores(
+	rows: readonly DbTournamentBattleGroupResultRow[],
+	finalizedEventIds?: ReadonlySet<number>
+): boolean {
+	return rows.some((row) => {
+		const outcome = resolvedOfficialMatchPoints(row, { finalizedEventIds });
+		return outcome.home !== null && outcome.away !== null;
+	});
+}
+
 async function loadOfficialH2HSnapshots(
 	context: GraphQLContext,
 	tournaments: readonly TournamentInfo[],
 	eventId: number,
 	activeEventId: number,
-	includeHistory: boolean
+	includeHistory: boolean,
+	finalizedEventIds: ReadonlySet<number> = new Set()
 ): Promise<Map<number, OfficialH2HSnapshotLoad>> {
 	const tournamentIds = tournaments.map((tournament) => tournament.id);
 	const [groupResult, battleResult, knockoutResult] = await Promise.all([
@@ -885,8 +944,12 @@ async function loadOfficialH2HSnapshots(
 		throw new Error("Failed to fetch official H2H mirror");
 	}
 
+	const groups = (groupResult.data as DbTournamentGroupRow[] | null) ?? [];
+	const battles = (battleResult.data as DbTournamentBattleGroupResultRow[] | null) ?? [];
+	const knockouts = (knockoutResult.data as DbTournamentKnockoutResultRow[] | null) ?? [];
+	const needsHistoryForFallback = finalizedEventIds.has(eventId);
 	let historyRows: DbTournamentBattleGroupResultRow[] = [];
-	if (includeHistory) {
+	if (includeHistory || needsHistoryForFallback) {
 		const historyResult = await context.data
 			.read("competition.tournament_battle_group_results")
 			.select(OFFICIAL_BATTLE_COLUMNS)
@@ -905,10 +968,6 @@ async function loadOfficialH2HSnapshots(
 		}
 		historyRows = (historyResult.data as DbTournamentBattleGroupResultRow[] | null) ?? [];
 	}
-
-	const groups = (groupResult.data as DbTournamentGroupRow[] | null) ?? [];
-	const battles = (battleResult.data as DbTournamentBattleGroupResultRow[] | null) ?? [];
-	const knockouts = (knockoutResult.data as DbTournamentKnockoutResultRow[] | null) ?? [];
 	const entryIds = [
 		...new Set(
 			[
@@ -961,15 +1020,27 @@ async function loadOfficialH2HSnapshots(
 		const tournamentBattles = battlesByTournament.get(tournament.id) ?? [];
 		const tournamentKnockouts = knockoutsByTournament.get(tournament.id) ?? [];
 		const tournamentHistory = historyByTournament.get(tournament.id) ?? [];
+		const currentEventHistory = tournamentHistory.filter((row) => row.event_id === eventId);
+		const matchDerivedStandings =
+			finalizedEventIds.has(eventId) &&
+			officialBattleRowsHaveScores(currentEventHistory, finalizedEventIds)
+				? projectOfficialH2HStandingsFromResults(
+						tournamentGroups.map((row) => row.entry_id),
+						tournamentHistory,
+						{ finalizedEventIds }
+					)
+				: null;
 		const historicalStandings =
 			eventId < activeEventId && includeHistory
 				? projectHistoricalOfficialH2HStandings(
 						tournamentGroups.map((row) => row.entry_id),
-						tournamentHistory
+						tournamentHistory,
+						{ finalizedEventIds }
 					)
 				: null;
+		const projectedStandings = historicalStandings ?? matchDerivedStandings;
 		const matches = [
-			...tournamentBattles.map((row) => mapOfficialBattleMatch(row, entryNames)),
+			...tournamentBattles.map((row) => mapOfficialBattleMatch(row, entryNames, finalizedEventIds)),
 			...tournamentKnockouts.map((row) => mapOfficialKnockoutMatch(row, entryNames)),
 		].sort(
 			(left, right) =>
@@ -984,8 +1055,8 @@ async function loadOfficialH2HSnapshots(
 				awaitingSchedule:
 					tournament.officialScheduleLockedAt === null ||
 					tournament.officialScheduleLockedAt === undefined,
-				standings: historicalStandings
-					? historicalStandings.map((row) => ({
+				standings: projectedStandings
+					? projectedStandings.map((row) => ({
 							...row,
 							entryName: entryNames.get(row.entryId)?.entry_name ?? null,
 							playerName: entryNames.get(row.entryId)?.player_name ?? null,
@@ -3070,15 +3141,20 @@ export const tournamentsRepository: TournamentsRepository = {
 			.select("id, finished, data_checked, is_current, is_next")
 			.order("id", { ascending: true });
 		if (referenceEventResult.error) throw new Error("Failed to resolve the H2H reference event");
-		const referenceEventId = resolveOfficialH2HReferenceEventId(
-			(referenceEventResult.data as DbEventStateRow[] | null) ?? []
+		const referenceEvents = (referenceEventResult.data as DbEventStateRow[] | null) ?? [];
+		const referenceEventId = resolveOfficialH2HReferenceEventId(referenceEvents);
+		const finalizedEventIds = new Set(
+			referenceEvents
+				.filter((event) => event.finished && event.data_checked)
+				.map((event) => event.id)
 		);
 		const loadedOfficialH2H = await loadOfficialH2HSnapshots(
 			context,
 			[tournament],
 			eventId,
 			referenceEventId,
-			eventId < referenceEventId
+			eventId < referenceEventId,
+			finalizedEventIds
 		);
 		const loadedSnapshot = loadedOfficialH2H.get(tournamentId);
 		if (loadedSnapshot) return loadedSnapshot.snapshot;
@@ -3158,7 +3234,8 @@ export const tournamentsRepository: TournamentsRepository = {
 			eventId < activeEventId
 				? projectHistoricalOfficialH2HStandings(
 						groups.map((row) => row.entry_id),
-						history
+						history,
+						{ finalizedEventIds }
 					)
 				: null;
 		const entryIds = [
@@ -3182,7 +3259,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			((nameResult.data as DbEntryInfoNameRow[] | null) ?? []).map((row) => [row.id, row])
 		);
 		const matches = [
-			...battles.map((row) => mapOfficialBattleMatch(row, entryNames)),
+			...battles.map((row) => mapOfficialBattleMatch(row, entryNames, finalizedEventIds)),
 			...knockouts.map((row) => mapOfficialKnockoutMatch(row, entryNames)),
 		].sort(
 			(left, right) =>
@@ -3245,12 +3322,16 @@ export const tournamentsRepository: TournamentsRepository = {
 			events.find((event) => event.is_current) ?? events.find((event) => event.is_next);
 		if (!currentEvent) return [];
 		const referenceEventId = resolveOfficialH2HReferenceEventId(events);
+		const finalizedEventIds = new Set(
+			events.filter((event) => event.finished && event.data_checked).map((event) => event.id)
+		);
 		const loadedOfficialH2H = await loadOfficialH2HSnapshots(
 			context,
 			tournaments,
 			currentEvent.id,
 			referenceEventId,
-			true
+			true,
+			finalizedEventIds
 		);
 		const bulkRows: EntryOfficialH2HDeskItem[] = [];
 		for (const tournament of tournaments) {
@@ -3263,7 +3344,8 @@ export const tournamentsRepository: TournamentsRepository = {
 			);
 			const previousStandings = projectHistoricalOfficialH2HStandings(
 				snapshot.standings.map((row) => row.entryId),
-				history.filter((row) => row.event_id < currentEvent.id)
+				history.filter((row) => row.event_id < currentEvent.id),
+				{ finalizedEventIds }
 			);
 			bulkRows.push({
 				tournamentId: tournament.id,
