@@ -210,7 +210,7 @@ describe("Home GraphQL contracts", () => {
 			expect(sql).toContain("competition.tournament_entries");
 			expect(sql).toContain("official_kind");
 			expect(sql).toContain("short_name");
-			expect(sql).not.toContain("tournament_groups");
+			expect(sql).toContain("competition.tournament_groups");
 			expect(sql).toContain("fpl.events");
 			expect(sql).toContain("tournament_battle_group_results");
 			expect(sql).toContain("tournament_knockout_results");
@@ -244,8 +244,10 @@ describe("Home GraphQL contracts", () => {
 						league_type: "h2h",
 						league_name: "Current Match League",
 						entry_rank: 1,
-						entry_last_rank: 1,
+						entry_last_rank: 0,
 						tournament_id: 6,
+						h2h_standing_rank: 1,
+						h2h_standing_played: 0,
 						h2h_official_match_id: 2_071_743,
 						h2h_event_id: 1,
 						h2h_home_entry_id: 123,
@@ -308,9 +310,9 @@ describe("Home GraphQL contracts", () => {
 					key: "h2h:8",
 					name: "Current Match League",
 					leagueType: "H2H",
-					rank: 1,
+					rank: null,
 					tournamentId: 6,
-					movement: { direction: "FLAT", places: 0 },
+					movement: { direction: "UNKNOWN", places: null },
 					h2hMatchup: {
 						officialMatchId: 2_071_743,
 						eventId: 1,
@@ -336,6 +338,96 @@ describe("Home GraphQL contracts", () => {
 			],
 		});
 		expect(databaseQuery).toHaveBeenCalledTimes(1);
+	});
+
+	it("uses a played H2H mirror standing instead of the entry-league placeholder", async () => {
+		const databaseQuery = mock(async () => ({
+			rows: [
+				{
+					entry_id: 123,
+					entry_name: "Compact XI",
+					player_name: "Ada Manager",
+					overall_points: 24,
+					overall_rank: 456,
+					team_value: 1000,
+					source_checked_at: new Date(),
+					league_id: 8,
+					league_type: "h2h",
+					league_name: "Published H2H",
+					entry_rank: 1,
+					entry_last_rank: 0,
+					tournament_id: 6,
+					h2h_standing_rank: 4,
+					h2h_standing_played: 1,
+					h2h_event_is_current: true,
+					h2h_event_finished: true,
+					h2h_event_data_checked: true,
+				},
+			],
+		}));
+		const context = buildSnapshotContext(new TestRedis(), { databaseQuery });
+		context.principal = principal;
+
+		const result = await graphql({
+			schema,
+			source: "query { homePersonalDesk { leagueRanks { rank movement { direction places } } } }",
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.homePersonalDesk).toMatchObject({
+			leagueRanks: [
+				{
+					rank: 4,
+					movement: { direction: "UNKNOWN", places: null },
+				},
+			],
+		});
+	});
+
+	it("keeps a settled H2H rank when no tracked projection is available", async () => {
+		const databaseQuery = mock(async () => ({
+			rows: [
+				{
+					entry_id: 123,
+					entry_name: "Compact XI",
+					player_name: "Ada Manager",
+					overall_points: 49,
+					overall_rank: 123,
+					team_value: 1000,
+					source_checked_at: new Date(),
+					league_id: 9,
+					league_type: "h2h",
+					league_name: "Settled H2H",
+					entry_rank: 2,
+					entry_last_rank: 0,
+					tournament_id: null,
+					h2h_standing_rank: null,
+					h2h_standing_played: null,
+					h2h_event_is_current: true,
+					h2h_event_finished: true,
+					h2h_event_data_checked: true,
+				},
+			],
+		}));
+		const context = buildSnapshotContext(new TestRedis(), { databaseQuery });
+		context.principal = principal;
+
+		const result = await graphql({
+			schema,
+			source: "query { homePersonalDesk { leagueRanks { rank movement { direction places } } } }",
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.homePersonalDesk).toMatchObject({
+			leagueRanks: [
+				{
+					rank: 2,
+					movement: { direction: "UNKNOWN", places: null },
+				},
+			],
+		});
 	});
 
 	it("keeps a 100-league desk bounded to one query and sorts invitational leagues for home", async () => {

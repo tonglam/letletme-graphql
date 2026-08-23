@@ -65,6 +65,8 @@ type HomePersonalDeskRow = {
 	official_kind: string | null;
 	short_name: string | null;
 	tournament_id: number | null;
+	h2h_standing_rank: number | null;
+	h2h_standing_played: number | null;
 	h2h_official_match_id: number | null;
 	h2h_event_id: number | null;
 	h2h_home_entry_id: number | null;
@@ -103,6 +105,8 @@ export const HOME_PERSONAL_DESK_SQL = `
 		l.official_kind::text AS official_kind,
 		l.short_name,
 		tracked.tournament_id,
+		h2h_standing.group_rank AS h2h_standing_rank,
+		h2h_standing.played AS h2h_standing_played,
 		h2h_match.official_match_id AS h2h_official_match_id,
 		h2h_match.event_id AS h2h_event_id,
 		h2h_match.home_entry_id AS h2h_home_entry_id,
@@ -140,6 +144,15 @@ export const HOME_PERSONAL_DESK_SQL = `
 		ORDER BY t.tournament_id
 		LIMIT 1
 	) tracked ON TRUE
+	LEFT JOIN LATERAL (
+		SELECT tournament_group.group_rank, tournament_group.played
+		FROM competition.tournament_groups tournament_group
+		WHERE tournament_group.season_id = e.season_id
+			AND tournament_group.tournament_id = tracked.tournament_id
+			AND tournament_group.entry_id = e.entry_id
+		ORDER BY tournament_group.group_id ASC
+		LIMIT 1
+	) h2h_standing ON l.league_type::text = 'h2h'
 	LEFT JOIN LATERAL (
 		SELECT event_id, is_current, finished, data_checked
 		FROM fpl.events event
@@ -301,6 +314,42 @@ type HomeLeagueRankRow = HomeLeagueRank & {
 	shortName: string | null;
 };
 
+const resolveLeagueRanks = (
+	row: HomePersonalDeskRow,
+	scoring: HomeLeagueRankRow["scoring"]
+): { rank: number | null; previousRank: number | null } => {
+	const entryRank = normalizeRank(row.entry_rank);
+	const entryLastRank = normalizeRank(row.entry_last_rank);
+	if (scoring === "classic") {
+		return { rank: entryRank, previousRank: entryLastRank };
+	}
+
+	const publishedRank = normalizeRank(row.h2h_standing_rank);
+	const publishedPlayed = integerOrNull(row.h2h_standing_played);
+	if (publishedRank !== null && publishedPlayed !== null && publishedPlayed > 0) {
+		return {
+			rank: publishedRank,
+			// The compact query does not carry the mirror's prior standing. Avoid
+			// mixing its current rank with entry_leagues' independently refreshed
+			// history when calculating movement.
+			previousRank: null,
+		};
+	}
+	if (row.tournament_id !== null) {
+		// The tracked mirror is canonical. Before it has a played standing, FPL
+		// reports every H2H entrant as rank 1; surface that state as unranked.
+		return { rank: null, previousRank: null };
+	}
+
+	const hasSettledOfficialRank =
+		entryLastRank !== null ||
+		(row.h2h_event_finished === true && row.h2h_event_data_checked === true);
+	return {
+		rank: hasSettledOfficialRank ? entryRank : null,
+		previousRank: hasSettledOfficialRank ? entryLastRank : null,
+	};
+};
+
 const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRankRow | null => {
 	if (
 		row.league_id === null ||
@@ -310,14 +359,14 @@ const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRankRow | null => {
 	) {
 		return null;
 	}
-	const rank = normalizeRank(row.entry_rank);
 	const scoring = row.league_type === "h2h" ? "h2h" : "classic";
+	const { rank, previousRank } = resolveLeagueRanks(row, scoring);
 	return {
 		key: `${row.league_type}:${row.league_id}`,
 		name: row.league_name,
 		leagueType: scoring === "h2h" ? "H2H" : "CLASSIC",
 		rank,
-		movement: movementFromRanks(row.entry_rank, row.entry_last_rank),
+		movement: movementFromRanks(rank, previousRank),
 		tournamentId: row.tournament_id,
 		h2hMatchup: scoring === "h2h" ? mapH2HMatchup(row) : null,
 		scoring,
