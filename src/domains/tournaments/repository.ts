@@ -2897,17 +2897,38 @@ export const tournamentsRepository: TournamentsRepository = {
 		context: GraphQLContext,
 		tournamentId: number
 	): Promise<number[]> {
-		const { data, error } = await context.data
-			.read("competition.tournament_entries")
-			.select("entry_id")
-			.eq("tournament_id", tournamentId);
+		const [rosterMemberships, officialLeagueMemberships] = await Promise.all([
+			context.data
+				.read("competition.tournament_entries")
+				.select("entry_id")
+				.eq("tournament_id", tournamentId),
+			context.data
+				.read("competition.entry_leagues_with_tournament")
+				.select("entry_id")
+				.eq("tournament_id", tournamentId),
+		]);
 
-		if (error) {
-			context.logger.error({ err: error, tournamentId }, "Failed to fetch tournament entry IDs");
+		if (rosterMemberships.error || officialLeagueMemberships.error) {
+			context.logger.error(
+				{
+					err: rosterMemberships.error ?? officialLeagueMemberships.error,
+					tournamentId,
+				},
+				"Failed to fetch tournament entry IDs"
+			);
 			throw new Error("Failed to fetch tournament entry IDs");
 		}
 
-		return ((data as { entry_id: number }[] | null) ?? []).map((row) => row.entry_id);
+		return Array.from(
+			new Set(
+				[
+					...((rosterMemberships.data as { entry_id: number }[] | null) ?? []),
+					...((officialLeagueMemberships.data as { entry_id: number }[] | null) ?? []),
+				]
+					.map((row) => row.entry_id)
+					.filter((entryId) => Number.isSafeInteger(entryId) && entryId > 0)
+			)
+		).sort((left, right) => left - right);
 	},
 
 	async getTournamentEventResults(

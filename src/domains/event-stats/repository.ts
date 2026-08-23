@@ -267,7 +267,7 @@ const positionTypeToEnum = (type: number): string => {
 	}
 };
 
-async function getPlayerAndTeamMaps(
+export async function getEventScopedPlayerAndTeamMaps(
 	context: GraphQLContext,
 	playerIds: number[],
 	eventId?: number,
@@ -539,7 +539,12 @@ async function buildTournamentSelectionStats(
 		]),
 	];
 
-	const { playerMap, teamMap } = await getPlayerAndTeamMaps(context, allPlayerIds, eventId, season);
+	const { playerMap, teamMap } = await getEventScopedPlayerAndTeamMaps(
+		context,
+		allPlayerIds,
+		eventId,
+		season
+	);
 
 	const buildSelectionPlayer = (playerId: number): SelectionStatPlayer | null => {
 		const player = playerMap.get(playerId);

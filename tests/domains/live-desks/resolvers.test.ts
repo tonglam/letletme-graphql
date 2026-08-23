@@ -8,8 +8,10 @@ describe("live desks tournament selection index", () => {
 			source.indexOf("tournamentEntrySquads: async")
 		);
 		expect(selectionIndex).toContain("getTournamentSelectionIndexRows");
+		expect(selectionIndex).toContain("getEventScopedPlayerAndTeamMaps");
+		expect(selectionIndex).toContain("args.ref.season");
 		expect(selectionIndex).toContain("getCoreDataSnapshot");
-		expect(selectionIndex).toContain("player?.webName");
+		expect(selectionIndex).toContain("player?.web_name");
 		expect(selectionIndex).toContain("Player ${row.playerId}");
 		expect(selectionIndex).not.toContain(
 			"Tournament selection index references an unknown core player"
@@ -70,6 +72,8 @@ describe("live desks tournament selection index", () => {
 			source.indexOf("entryLiveCompetitionsDesk: async")
 		);
 		expect(board).toContain("selectTournamentDeskEntryWindow");
+		expect(board).toContain("getTournamentEntryIdsUncached");
+		expect(board).toContain("getEventScopedPlayerAndTeamMaps");
 		expect(board.indexOf("selectTournamentDeskEntryWindow")).toBeLessThan(
 			board.indexOf("loadManagerScores")
 		);

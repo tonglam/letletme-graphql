@@ -21,7 +21,10 @@ import {
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
 } from "../entry-live/manager-score";
-import { getTournamentSelectionIndexRows } from "../event-stats/repository";
+import {
+	getEventScopedPlayerAndTeamMaps,
+	getTournamentSelectionIndexRows,
+} from "../event-stats/repository";
 import { LeagueType } from "../leagues/repository";
 import { tournamentsService } from "../tournaments/service";
 import {
@@ -528,7 +531,7 @@ export const liveDesksResolvers = {
 			const memberTournament = await assertMember(context, request.tournamentId, request.entryId);
 			const [liveWindow, tournamentEntryIds] = await Promise.all([
 				readLiveWindow(context),
-				tournamentsService.getTournamentEntryIds(context, request.tournamentId),
+				tournamentsService.getTournamentEntryIdsUncached(context, request.tournamentId),
 			]);
 			const allEntryIds = Array.from(
 				new Set(
@@ -587,8 +590,20 @@ export const liveDesksResolvers = {
 					Array.from(result.results.values()),
 					{ useNet: requireNet }
 				);
+				const { playerMap } = await getEventScopedPlayerAndTeamMaps(
+					context,
+					Array.from(
+						new Set(rankedRows.flatMap((row) => row.pickList.map((pick) => pick.element)))
+					),
+					request.eventId,
+					context.currentSeason.seasonCode
+				);
+				const eventTeamIds = new Map(
+					Array.from(playerMap, ([playerId, player]) => [playerId, player.team_id])
+				);
 				return buildEntryLiveCompetitionBoard({
 					...cacheIdentity,
+					eventTeamIds,
 					rows: rankedRows,
 					totalEntries: allEntryIds.length,
 					failedEntryIds: result.errors.map((error) => error.entryId),
@@ -838,21 +853,31 @@ export const liveDesksResolvers = {
 		) => {
 			await assertMember(context, args.tournamentId, args.entryId);
 			const { snapshot } = await resolveSnapshot(context, args.ref);
-			const [rows, core] = await Promise.all([
-				getTournamentSelectionIndexRows(context, args.tournamentId, snapshot.eventId),
+			const rows = await getTournamentSelectionIndexRows(
+				context,
+				args.tournamentId,
+				snapshot.eventId
+			);
+			const [{ playerMap: players, teamMap: eventTeams }, core] = await Promise.all([
+				getEventScopedPlayerAndTeamMaps(
+					context,
+					rows.map((row) => row.playerId),
+					snapshot.eventId,
+					args.ref.season
+				),
 				getCoreDataSnapshot(context),
 			]);
-			const players = new Map(core.players.map((player) => [player.id, player]));
 			const teams = new Map(core.teams.map((team) => [team.id, team]));
 			const enrichedRows = rows.map((row) => {
 				const player = players.get(row.playerId);
-				const team = player ? teams.get(player.teamId) : null;
+				const team = player ? teams.get(player.team_id) : null;
+				const eventTeam = player ? eventTeams.get(player.team_id) : null;
 				return {
 					...row,
-					playerName: player?.webName ?? `Player ${row.playerId}`,
-					teamId: team?.id ?? player?.teamId ?? 0,
+					playerName: player?.web_name ?? `Player ${row.playerId}`,
+					teamId: team?.id ?? player?.team_id ?? 0,
 					teamName: team?.name ?? "Unknown",
-					teamShortName: team?.shortName ?? "—",
+					teamShortName: eventTeam?.short_name ?? team?.shortName ?? "—",
 					position:
 						player?.type === 1
 							? "GKP"

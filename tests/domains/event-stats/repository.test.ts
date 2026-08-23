@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	eventStatsRepository,
+	getEventScopedPlayerAndTeamMaps,
 	getTournamentSelectionIndexRows,
 	getTournamentSelectionStatsReadModel,
 	type DbTournamentSelectionStatRow,
@@ -114,6 +115,7 @@ type TestContext = GraphQLContext & {
 function createContext(
 	options: {
 		rows?: DbTournamentSelectionStatRow[];
+		fixtureRows?: Array<{ player_code: number; team_id: number }>;
 		error?: unknown;
 		cached?: TournamentSelectionStats;
 	} = {}
@@ -138,6 +140,9 @@ function createContext(
 			readModels.push(model);
 			if (model === "reporting.tournament_selection_stats") {
 				return makeQuery({ data: options.rows ?? [], error: options.error ?? null });
+			}
+			if (model === "fpl.player_fixture_stats") {
+				return makeQuery({ data: options.fixtureRows ?? [], error: null });
 			}
 			return makeQuery({ data: [], error: null });
 		},
@@ -262,6 +267,18 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 		]);
 		expect(context.__readModels).toEqual(["reporting.tournament_selection_stats"]);
 		expect(context.__directDatabaseReads()).toBe(0);
+	});
+
+	it("resolves a transferred player's team at the requested historical event", async () => {
+		const context = createContext({
+			fixtureRows: [{ player_code: 10_001, team_id: 2 }],
+		});
+
+		const { playerMap, teamMap } = await getEventScopedPlayerAndTeamMaps(context, [1], 7, "2526");
+
+		expect(playerMap.get(1)).toMatchObject({ team_id: 2 });
+		expect(teamMap.get(2)).toEqual({ id: 2, short_name: "T02" });
+		expect(context.__readModels).toContain("fpl.player_fixture_stats");
 	});
 
 	it("fails closed for malformed or inconsistent live selection rows", async () => {

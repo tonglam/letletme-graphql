@@ -303,6 +303,44 @@ describe("entry live competition board filtering and paging", () => {
 		).toBe(1);
 	});
 
+	it("indexes team-count filters with the player's team at the requested event", () => {
+		const built = buildEntryLiveCompetitionBoard({
+			season: "2627",
+			eventId: 7,
+			tournamentId: 10,
+			coreRevision: "core-1",
+			playerRevision: "player-1",
+			managerRevision: "manager-1",
+			eventTeamIds: new Map([[301, 9]]),
+			rows: [
+				liveRow({
+					entry: 3,
+					picks: [{ element: 301, teamId: 2 }],
+				}),
+			],
+			totalEntries: 1,
+		});
+
+		expect(
+			queryEntryLiveCompetitionBoard(
+				built,
+				request({
+					eventId: 7,
+					teamCountRules: [{ teamId: 9, exactCount: 1, scope: "ANY" }],
+				})
+			).filteredEntries
+		).toBe(1);
+		expect(
+			queryEntryLiveCompetitionBoard(
+				built,
+				request({
+					eventId: 7,
+					teamCountRules: [{ teamId: 2, exactCount: 1, scope: "ANY" }],
+				})
+			).filteredEntries
+		).toBe(0);
+	});
+
 	it("searches team, manager and exact entry ID text", () => {
 		const built = board(rows);
 		for (const search of ["alpha", "alice", "2"]) {

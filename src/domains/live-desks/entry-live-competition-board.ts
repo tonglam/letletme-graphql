@@ -264,7 +264,10 @@ const scoreHasOfficialEventMetric = (score: LiveManagerScore, requireNet: boolea
 	);
 };
 
-const projectRow = (row: LiveCalcData): IndexedEntryLiveCompetitionBoardRow => {
+const projectRow = (
+	row: LiveCalcData,
+	eventTeamIds?: ReadonlyMap<number, number>
+): IndexedEntryLiveCompetitionBoardRow => {
 	const ownerAny = new Set<number>();
 	const ownerStarter = new Set<number>();
 	const ownerBench = new Set<number>();
@@ -274,17 +277,18 @@ const projectRow = (row: LiveCalcData): IndexedEntryLiveCompetitionBoardRow => {
 	const teamStarter = new Map<number, number>();
 	const teamBench = new Map<number, number>();
 	for (const pick of row.pickList) {
+		const teamId = eventTeamIds?.get(pick.element) ?? pick.teamId;
 		ownerAny.add(pick.element);
-		increment(teamAny, pick.teamId);
+		increment(teamAny, teamId);
 		// Preserve the existing filter contract: starter/bench is the selected
 		// lineup position, not the current scoring multiplier. Bench Boost and
 		// finalized automatic substitutions must not move a pick between scopes.
 		if (pick.position <= 11) {
 			ownerStarter.add(pick.element);
-			increment(teamStarter, pick.teamId);
+			increment(teamStarter, teamId);
 		} else {
 			ownerBench.add(pick.element);
-			increment(teamBench, pick.teamId);
+			increment(teamBench, teamId);
 		}
 		if (pick.isCaptain) captains.add(pick.element);
 		if (pick.isViceCaptain) viceCaptains.add(pick.element);
@@ -409,13 +413,14 @@ export const buildEntryLiveCompetitionBoard = (input: {
 	managerRevision: string | null;
 	rosterRevision?: string;
 	windowRevision?: string;
+	eventTeamIds?: ReadonlyMap<number, number>;
 	rows: readonly LiveCalcData[];
 	totalEntries: number;
 	failedEntryIds?: readonly number[];
 	unavailableEntryIds?: readonly number[];
 	requireNet?: boolean;
 }): CachedEntryLiveCompetitionBoard => {
-	const rows = input.rows.map(projectRow);
+	const rows = input.rows.map((row) => projectRow(row, input.eventTeamIds));
 	const requireNet = input.requireNet === true;
 	const officialRows = rows.filter((row) => scoreHasOfficialEventMetric(row.score, requireNet));
 	const unavailableEntryIds = rows

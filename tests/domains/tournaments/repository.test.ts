@@ -2531,19 +2531,26 @@ describe("mapTournamentBattleGroupResult", () => {
 });
 
 describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
-	it("bypasses a stale cached roster", async () => {
-		let membershipReads = 0;
+	it("bypasses a stale cache and unions tracked official members into the roster", async () => {
+		let rosterReads = 0;
+		let officialReads = 0;
 		let readinessReads = 0;
-		const membershipQuery = {
+		const rosterQuery = {
 			select() {
-				return membershipQuery;
+				return rosterQuery;
 			},
 			async eq() {
-				membershipReads += 1;
-				return {
-					data: [{ entry_id: 101 }, { entry_id: 202 }],
-					error: null,
-				};
+				rosterReads += 1;
+				return { data: [{ entry_id: 101 }], error: null };
+			},
+		};
+		const officialQuery = {
+			select() {
+				return officialQuery;
+			},
+			async eq() {
+				officialReads += 1;
+				return { data: [{ entry_id: 202 }], error: null };
 			},
 		};
 		const readinessQuery = {
@@ -2574,7 +2581,11 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 			dataRevision: "core-test",
 			data: {
 				read(table: string) {
-					return table === "competition.tournaments" ? readinessQuery : membershipQuery;
+					if (table === "competition.tournaments") return readinessQuery;
+					if (table === "competition.entry_leagues_with_tournament") {
+						return officialQuery;
+					}
+					return rosterQuery;
 				},
 			},
 			redis: {
@@ -2601,12 +2612,14 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 		} as unknown as GraphQLContext;
 
 		expect(await tournamentsRepository.getTournamentEntryIds(context, 7)).toEqual([999]);
-		expect(membershipReads).toBe(0);
+		expect(rosterReads).toBe(0);
+		expect(officialReads).toBe(0);
 		expect(readinessReads).toBe(1);
 		expect(await tournamentsRepository.getTournamentEntryIdsUncached(context, 7)).toEqual([
 			101, 202,
 		]);
-		expect(membershipReads).toBe(1);
+		expect(rosterReads).toBe(1);
+		expect(officialReads).toBe(1);
 	});
 
 	it("does not reuse or repopulate a roster cache before standings publish", async () => {
@@ -2671,7 +2684,7 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 		} as unknown as GraphQLContext;
 
 		expect(await tournamentsRepository.getTournamentEntryIds(context, 7)).toEqual([101, 202]);
-		expect(membershipReads).toBe(1);
+		expect(membershipReads).toBe(2);
 		expect(cache.has(testCacheKey("tournaments:entry-ids:7"))).toBe(false);
 	});
 });

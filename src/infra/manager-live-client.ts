@@ -79,6 +79,9 @@ const isNullableString = (value: unknown): value is string | null | undefined =>
 const isIsoDateString = (value: unknown): value is string =>
 	typeof value === "string" && Number.isFinite(Date.parse(value));
 
+const isSeasonCode = (value: unknown): value is string =>
+	typeof value === "string" && /^\d{4}$/.test(value);
+
 const isManagerDataAvailability = (value: unknown): value is ManagerLiveDataAvailability =>
 	value === "FRESH" || value === "LAST_GOOD" || value === "PARTIAL" || value === "UNAVAILABLE";
 
@@ -131,8 +134,7 @@ const parseRow = (value: unknown): ManagerLiveScoreRow | null => {
 			value.source !== "FPL_CLASSIC_STANDINGS" &&
 			value.source !== "FPL_FINAL_RESULT") ||
 		(value.totalScope !== "OVERALL" && value.totalScope !== "CLASSIC_PHASE") ||
-		typeof value.season !== "string" ||
-		value.season.length === 0 ||
+		!isSeasonCode(value.season) ||
 		!isIsoDateString(value.staleAt) ||
 		!isNullableNumber(value.eventPoints) ||
 		!isNullableNumber(value.netEventPoints) ||
@@ -211,8 +213,7 @@ export async function requestManagerLiveScores(params: {
 			typeof data.eventId !== "number" ||
 			!Number.isSafeInteger(data.eventId) ||
 			data.eventId !== params.eventId ||
-			typeof data.season !== "string" ||
-			data.season.length === 0 ||
+			!isSeasonCode(data.season) ||
 			(params.expectedSeason !== undefined && data.season !== params.expectedSeason) ||
 			typeof data.managerRevision !== "string" ||
 			data.managerRevision.length === 0 ||

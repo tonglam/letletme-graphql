@@ -6,7 +6,7 @@ const originalUrl = process.env.LETLETME_DATA_URL;
 const originalKey = process.env.LETLETME_DATA_API_KEY;
 
 const row = {
-	season: "2026/27",
+	season: "2627",
 	eventId: 1,
 	entryId: 101,
 	eventPoints: 38,
@@ -59,7 +59,7 @@ describe("requestManagerLiveScores", () => {
 				JSON.stringify({
 					success: true,
 					data: {
-						season: "2026/27",
+						season: "2627",
 						eventId: 1,
 						managerRevision: "manager-revision",
 						dataAvailability: "LAST_GOOD",
@@ -81,10 +81,10 @@ describe("requestManagerLiveScores", () => {
 			eventId: 1,
 			entryIds: [101, 102],
 			tournamentId: 9,
-			expectedSeason: "2026/27",
+			expectedSeason: "2627",
 		});
 
-		expect(result.season).toBe("2026/27");
+		expect(result.season).toBe("2627");
 		expect(result.rows.get(101)?.eventPoints).toBe(38);
 		expect(result.managerRevision).toBe("manager-revision");
 		expect(result.dataAvailability).toBe("LAST_GOOD");
@@ -100,7 +100,7 @@ describe("requestManagerLiveScores", () => {
 			new Response(
 				JSON.stringify({
 					success: true,
-					data: { season: "2026/27", eventId: 1, checkedAt: 42, rows: [row] },
+					data: { season: "2627", eventId: 1, checkedAt: 42, rows: [row] },
 				}),
 				{ status: 200, headers: { "Content-Type": "application/json" } }
 			)) as unknown as typeof fetch;
@@ -112,7 +112,7 @@ describe("requestManagerLiveScores", () => {
 		expect(result.errorCode).toBe("UPSTREAM_UNAVAILABLE");
 	});
 
-	it("rejects partial coverage that does not exactly match the requested entries", async () => {
+	it("rejects display-formatted seasons instead of accepting a non-canonical Data contract", async () => {
 		configure();
 		globalThis.fetch = (async () =>
 			new Response(
@@ -120,6 +120,40 @@ describe("requestManagerLiveScores", () => {
 					success: true,
 					data: {
 						season: "2026/27",
+						eventId: 1,
+						managerRevision: "manager-revision",
+						dataAvailability: "FRESH",
+						servedFrom: "REDIS",
+						refreshQueued: false,
+						rows: [{ ...row, season: "2026/27" }],
+						missingEntryIds: [],
+						partial: false,
+						errorCode: null,
+						checkedAt: "2026-08-23T08:00:00.000Z",
+						nextRefreshAt: "2026-08-23T08:00:30.000Z",
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } }
+			)) as unknown as typeof fetch;
+
+		const result = await requestManagerLiveScores({
+			eventId: 1,
+			entryIds: [101],
+			expectedSeason: "2627",
+		});
+
+		expect(result.rows.size).toBe(0);
+		expect(result.dataAvailability).toBe("UNAVAILABLE");
+	});
+
+	it("rejects partial coverage that does not exactly match the requested entries", async () => {
+		configure();
+		globalThis.fetch = (async () =>
+			new Response(
+				JSON.stringify({
+					success: true,
+					data: {
+						season: "2627",
 						eventId: 1,
 						managerRevision: "manager-revision",
 						dataAvailability: "PARTIAL",
