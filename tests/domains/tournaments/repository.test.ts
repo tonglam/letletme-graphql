@@ -147,6 +147,48 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 			},
 		]);
 	});
+
+	it("counts a finalized 0-0 score as a draw but leaves a live 0-0 unplayed", () => {
+		const rows: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 4,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 2,
+				home_entry_id: 101,
+				home_net_points: 0,
+				home_rank: null,
+				home_match_points: null,
+				away_entry_id: 102,
+				away_net_points: 0,
+				away_rank: null,
+				away_match_points: null,
+			},
+		];
+
+		expect(projectOfficialH2HStandingsFromResults([101, 102], rows)).toEqual([
+			expect.objectContaining({ entryId: 101, played: 0, drawn: 0 }),
+			expect.objectContaining({ entryId: 102, played: 0, drawn: 0 }),
+		]);
+		expect(
+			projectOfficialH2HStandingsFromResults([101, 102], rows, {
+				finalizedEventIds: new Set([2]),
+			})
+		).toEqual([
+			expect.objectContaining({
+				entryId: 101,
+				matchPoints: 1,
+				played: 1,
+				drawn: 1,
+			}),
+			expect.objectContaining({
+				entryId: 102,
+				matchPoints: 1,
+				played: 1,
+				drawn: 1,
+			}),
+		]);
+	});
 });
 
 describe("resolveOfficialH2HReferenceEventId", () => {
