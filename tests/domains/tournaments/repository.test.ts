@@ -2622,6 +2622,46 @@ describe("tournamentsRepository.getTournamentEntryIdsUncached", () => {
 		expect(officialReads).toBe(1);
 	});
 
+	it("keeps the canonical roster when optional official membership enrichment fails", async () => {
+		const warnings: unknown[] = [];
+		const rosterQuery = {
+			select() {
+				return rosterQuery;
+			},
+			async eq() {
+				return { data: [{ entry_id: 101 }, { entry_id: 202 }], error: null };
+			},
+		};
+		const officialQuery = {
+			select() {
+				return officialQuery;
+			},
+			async eq() {
+				return { data: null, error: { message: "temporary official view outage" } };
+			},
+		};
+		const context = {
+			data: {
+				read(table: string) {
+					return table === "competition.tournament_entries" ? rosterQuery : officialQuery;
+				},
+			},
+			logger: {
+				error() {
+					return undefined;
+				},
+				warn(payload: unknown) {
+					warnings.push(payload);
+				},
+			},
+		} as unknown as GraphQLContext;
+
+		expect(await tournamentsRepository.getTournamentEntryIdsUncached(context, 7)).toEqual([
+			101, 202,
+		]);
+		expect(warnings).toHaveLength(1);
+	});
+
 	it("does not reuse or repopulate a roster cache before standings publish", async () => {
 		let membershipReads = 0;
 		const cache = new Map<string, string>([

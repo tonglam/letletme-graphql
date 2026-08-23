@@ -2908,22 +2908,33 @@ export const tournamentsRepository: TournamentsRepository = {
 				.eq("tournament_id", tournamentId),
 		]);
 
-		if (rosterMemberships.error || officialLeagueMemberships.error) {
+		if (rosterMemberships.error) {
 			context.logger.error(
 				{
-					err: rosterMemberships.error ?? officialLeagueMemberships.error,
+					err: rosterMemberships.error,
 					tournamentId,
 				},
 				"Failed to fetch tournament entry IDs"
 			);
 			throw new Error("Failed to fetch tournament entry IDs");
 		}
+		if (officialLeagueMemberships.error) {
+			context.logger.warn(
+				{
+					err: officialLeagueMemberships.error,
+					tournamentId,
+				},
+				"Failed to enrich tournament entry IDs from official memberships; using canonical roster"
+			);
+		}
 
 		return Array.from(
 			new Set(
 				[
 					...((rosterMemberships.data as { entry_id: number }[] | null) ?? []),
-					...((officialLeagueMemberships.data as { entry_id: number }[] | null) ?? []),
+					...((officialLeagueMemberships.error
+						? []
+						: (officialLeagueMemberships.data as { entry_id: number }[] | null)) ?? []),
 				]
 					.map((row) => row.entry_id)
 					.filter((entryId) => Number.isSafeInteger(entryId) && entryId > 0)

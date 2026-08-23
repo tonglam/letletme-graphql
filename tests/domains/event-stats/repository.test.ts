@@ -115,7 +115,7 @@ type TestContext = GraphQLContext & {
 function createContext(
 	options: {
 		rows?: DbTournamentSelectionStatRow[];
-		fixtureRows?: Array<{ player_code: number; team_id: number }>;
+		fixtureRows?: Array<{ player_code: number; team_id: number; event_id: number }>;
 		error?: unknown;
 		cached?: TournamentSelectionStats;
 	} = {}
@@ -271,7 +271,7 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 
 	it("resolves a transferred player's team at the requested historical event", async () => {
 		const context = createContext({
-			fixtureRows: [{ player_code: 10_001, team_id: 2 }],
+			fixtureRows: [{ player_code: 10_001, team_id: 2, event_id: 7 }],
 		});
 
 		const { playerMap, teamMap } = await getEventScopedPlayerAndTeamMaps(context, [1], 7, "2526");
@@ -279,6 +279,30 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 		expect(playerMap.get(1)).toMatchObject({ team_id: 2 });
 		expect(teamMap.get(2)).toEqual({ id: 2, short_name: "T02" });
 		expect(context.__readModels).toContain("fpl.player_fixture_stats");
+	});
+
+	it("keeps as-of-event team history for historical consumers", async () => {
+		const context = createContext({
+			fixtureRows: [{ player_code: 10_001, team_id: 2, event_id: 6 }],
+		});
+
+		const { playerMap, teamMap } = await getEventScopedPlayerAndTeamMaps(context, [1], 7, "2526");
+
+		expect(playerMap.get(1)).toMatchObject({ team_id: 2 });
+		expect(teamMap.get(2)).toEqual({ id: 2, short_name: "T02" });
+	});
+
+	it("keeps the current team when live enrichment has no exact-event identity", async () => {
+		const context = createContext({
+			fixtureRows: [{ player_code: 10_001, team_id: 2, event_id: 6 }],
+		});
+
+		const { playerMap, teamMap } = await getEventScopedPlayerAndTeamMaps(context, [1], 7, "2526", {
+			requireExactEventIdentity: true,
+		});
+
+		expect(playerMap.get(1)).toMatchObject({ team_id: 1 });
+		expect(teamMap.get(1)).toEqual({ id: 1, short_name: "T01" });
 	});
 
 	it("fails closed for malformed or inconsistent live selection rows", async () => {

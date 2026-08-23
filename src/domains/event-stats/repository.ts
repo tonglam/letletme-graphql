@@ -271,7 +271,8 @@ export async function getEventScopedPlayerAndTeamMaps(
 	context: GraphQLContext,
 	playerIds: number[],
 	eventId?: number,
-	season?: string
+	season?: string,
+	options: { requireExactEventIdentity?: boolean } = {}
 ): Promise<{
 	playerMap: Map<number, { id: number; web_name: string; team_id: number; type: number }>;
 	teamMap: Map<number, { id: number; short_name: string }>;
@@ -309,17 +310,23 @@ export async function getEventScopedPlayerAndTeamMaps(
 			});
 			const validCodes = playerCodes.filter((c) => c > 0);
 			if (validCodes.length > 0) {
-				const { data, error } = await context.data
+				const baseQuery = context.data
 					.read("fpl.player_fixture_stats")
-					.select("player_code, team_id")
+					.select("player_code, team_id, event_id")
 					.eq("season", season)
-					.in("player_code", validCodes)
-					.lte("event_id", eventId)
-					.order("event_id", { ascending: false })
-					.order("fixture_id", { ascending: false });
+					.in("player_code", validCodes);
+				const eventQuery = options.requireExactEventIdentity
+					? baseQuery.eq("event_id", eventId)
+					: baseQuery.lte("event_id", eventId).order("event_id", { ascending: false });
+				const { data, error } = await eventQuery.order("fixture_id", { ascending: false });
 				if (!error && data) {
 					const eventTeamMap = new Map<number, number>();
-					for (const row of data as { player_code: number; team_id: number }[]) {
+					for (const row of data as {
+						player_code: number;
+						team_id: number;
+						event_id: number;
+					}[]) {
+						if (options.requireExactEventIdentity && row.event_id !== eventId) continue;
 						if (!eventTeamMap.has(row.player_code)) {
 							eventTeamMap.set(row.player_code, row.team_id);
 						}

@@ -534,9 +534,10 @@ export const liveDesksResolvers = {
 				tournamentsService.getTournamentEntryIdsUncached(context, request.tournamentId),
 			]);
 			const allEntryIds = Array.from(
-				new Set(
-					tournamentEntryIds.filter((entryId) => Number.isSafeInteger(entryId) && entryId > 0)
-				)
+				new Set([
+					request.entryId,
+					...tournamentEntryIds.filter((entryId) => Number.isSafeInteger(entryId) && entryId > 0),
+				])
 			).sort((left, right) => left - right);
 			const { entryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
 				allEntryIds,
@@ -596,7 +597,11 @@ export const liveDesksResolvers = {
 						new Set(rankedRows.flatMap((row) => row.pickList.map((pick) => pick.element)))
 					),
 					request.eventId,
-					context.currentSeason.seasonCode
+					context.currentSeason.seasonCode,
+					{
+						requireExactEventIdentity:
+							request.eventId >= (eventCore.currentEventId ?? request.eventId),
+					}
 				);
 				const eventTeamIds = new Map(
 					Array.from(playerMap, ([playerId, player]) => [playerId, player.team_id])
@@ -922,9 +927,10 @@ export const liveDesksResolvers = {
 					extensions: { code: "BAD_USER_INPUT" },
 				});
 			}
-			const tournamentEntryIds = new Set(
-				await tournamentsService.getTournamentEntryIds(context, args.tournamentId)
-			);
+			const tournamentEntryIds = new Set([
+				args.entryId,
+				...(await tournamentsService.getTournamentEntryIdsUncached(context, args.tournamentId)),
+			]);
 			if (ids.some((entryId) => !tournamentEntryIds.has(entryId))) {
 				throw new GraphQLError("Comparison entry is not a tournament member", {
 					extensions: { code: "FORBIDDEN" },

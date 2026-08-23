@@ -61,7 +61,9 @@ describe("live desks tournament selection index", () => {
 		expect(comparison).toContain("requestedIds.length === 0");
 		expect(comparison).toContain("[args.entryId, requestedIds[0]!]");
 		expect(comparison).toContain("ids.length > 2");
-		expect(comparison).toContain("getTournamentEntryIds");
+		expect(comparison).toContain("getTournamentEntryIdsUncached");
+		expect(comparison).toContain("args.entryId,");
+		expect(comparison).not.toContain("getTournamentEntryIds(context");
 		expect(comparison).not.toContain("slice(0, 2)");
 	});
 
@@ -73,7 +75,9 @@ describe("live desks tournament selection index", () => {
 		);
 		expect(board).toContain("selectTournamentDeskEntryWindow");
 		expect(board).toContain("getTournamentEntryIdsUncached");
+		expect(board).toContain("request.entryId,");
 		expect(board).toContain("getEventScopedPlayerAndTeamMaps");
+		expect(board).toContain("requireExactEventIdentity:");
 		expect(board.indexOf("selectTournamentDeskEntryWindow")).toBeLessThan(
 			board.indexOf("loadManagerScores")
 		);
