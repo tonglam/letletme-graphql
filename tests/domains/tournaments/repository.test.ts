@@ -677,6 +677,32 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 			expect.objectContaining({ entryId: 104, rank: 3, matchPoints: 0, pointsFor: 30 }),
 			expect.objectContaining({ entryId: 101, rank: 4, matchPoints: 0, pointsFor: 20 }),
 		]);
+
+		const liveBatch = atomicBatch.map((row, index) => ({
+			...row,
+			id: 20 + index,
+			event_id: 2,
+			home_match_points: null,
+			away_match_points: null,
+			source_checked_at: "2026-08-23T02:00:00.000Z",
+		}));
+		const liveWithRejectedHistory = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+			4,
+			groups,
+			liveBatch,
+			[...mixedBatch, ...liveBatch],
+			2,
+			2,
+			new Set([1])
+		);
+		expect(liveWithRejectedHistory.options.finalizedEventIds?.has(1)).toBe(false);
+		expect(liveWithRejectedHistory.options.suppressedEventIds?.has(1)).toBe(true);
+		expect(liveWithRejectedHistory.standings).toEqual([
+			expect.objectContaining({ entryId: 102, matchPoints: 3, played: 1, pointsFor: 50 }),
+			expect.objectContaining({ entryId: 103, matchPoints: 3, played: 1, pointsFor: 40 }),
+			expect.objectContaining({ entryId: 104, matchPoints: 0, played: 1, pointsFor: 30 }),
+			expect.objectContaining({ entryId: 101, matchPoints: 0, played: 1, pointsFor: 20 }),
+		]);
 	});
 });
 

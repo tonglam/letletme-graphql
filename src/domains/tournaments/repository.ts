@@ -1002,32 +1002,51 @@ function selectCurrentOfficialH2HProjection(
 	finalizedEventIds: ReadonlySet<number>
 ): OfficialH2HProjectionSelection {
 	const entryIds = groups.map((row) => row.entry_id);
+	const rosterIsComplete =
+		entryIds.length === expectedEntryCount && new Set(entryIds).size === expectedEntryCount;
 	const finalizedCandidate = finalizedEventIds.has(eventId);
 	const provisionalCandidate = eventId === activeEventId && !finalizedCandidate ? eventId : null;
-	const candidateOptions: OfficialH2HProjectionOptions = {
-		finalizedEventIds,
-		provisionalEventIds:
-			provisionalCandidate === null ? new Set<number>() : new Set([provisionalCandidate]),
-	};
-	const completeCurrentEvent =
-		entryIds.length === expectedEntryCount &&
-		new Set(entryIds).size === expectedEntryCount &&
-		(finalizedCandidate || provisionalCandidate !== null) &&
-		officialBattleRowsAreCompleteForEntries(entryIds, currentEventRows, candidateOptions);
-	const validatedFinalizedEventIds =
-		finalizedCandidate && !completeCurrentEvent
-			? new Set([...finalizedEventIds].filter((candidateEventId) => candidateEventId !== eventId))
-			: finalizedEventIds;
+	const finalizedRowsByEvent = new Map<number, DbTournamentBattleGroupResultRow[]>();
+	for (const row of historyRows) {
+		if (!finalizedEventIds.has(row.event_id)) continue;
+		const rows = finalizedRowsByEvent.get(row.event_id) ?? [];
+		rows.push(row);
+		finalizedRowsByEvent.set(row.event_id, rows);
+	}
+	const validatedFinalizedEventIds = new Set<number>();
+	const rejectedFinalizedEventIds = new Set<number>();
+	for (const [candidateEventId, rows] of finalizedRowsByEvent) {
+		const complete =
+			rosterIsComplete &&
+			officialBattleRowsAreCompleteForEntries(entryIds, rows, {
+				finalizedEventIds: new Set([candidateEventId]),
+			});
+		if (complete) validatedFinalizedEventIds.add(candidateEventId);
+		else rejectedFinalizedEventIds.add(candidateEventId);
+	}
+	if (finalizedCandidate && !validatedFinalizedEventIds.has(eventId)) {
+		rejectedFinalizedEventIds.add(eventId);
+	}
+	const completeProvisionalEvent =
+		rosterIsComplete &&
+		provisionalCandidate !== null &&
+		officialBattleRowsAreCompleteForEntries(entryIds, currentEventRows, {
+			provisionalEventIds: new Set([provisionalCandidate]),
+		});
+	const completeCurrentEvent = finalizedCandidate
+		? validatedFinalizedEventIds.has(eventId)
+		: completeProvisionalEvent;
+	const suppressedEventIds = new Set(rejectedFinalizedEventIds);
+	if (!completeCurrentEvent && provisionalCandidate !== null) {
+		suppressedEventIds.add(provisionalCandidate);
+	}
 	const options: OfficialH2HProjectionOptions = {
 		finalizedEventIds: validatedFinalizedEventIds,
 		provisionalEventIds:
 			completeCurrentEvent && provisionalCandidate !== null
 				? new Set([provisionalCandidate])
 				: new Set<number>(),
-		suppressedEventIds:
-			!completeCurrentEvent && (provisionalCandidate !== null || finalizedCandidate)
-				? new Set([eventId])
-				: new Set<number>(),
+		suppressedEventIds,
 	};
 	const storedPlayed = groups.reduce((total, row) => total + Math.max(0, row.played ?? 0), 0);
 	if (!completeCurrentEvent) {
@@ -1058,7 +1077,7 @@ function selectCurrentOfficialH2HProjection(
 	return {
 		// Equal played counts do not prove that the stored table has caught up:
 		// a newer atomic score batch can change outcomes, PF and ranks in-place.
-		// If the stored table has more aggregate result coverage, keep it authoritative.
+		// If any stored entry has more result coverage, keep the whole table authoritative.
 		standings: hasLaggingStoredEntry ? derived : null,
 		options,
 		storedPlayed,
