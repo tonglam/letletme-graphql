@@ -930,7 +930,8 @@ function officialBattleRowsAreCompleteForEntries(
 	const scheduledEntryIds = new Set<number>();
 	let hasNonZeroProvisionalScore = false;
 	let containsProvisionalRows = false;
-	const provisionalBatchMarkers = new Set<string>();
+	let containsScoreAuthoritativeRows = false;
+	const scoreBatchMarkers = new Set<string>();
 	for (const row of rows) {
 		const realSides = [row.home_entry_id, row.away_entry_id].filter(
 			(entryId): entryId is number => entryId !== null
@@ -941,13 +942,17 @@ function officialBattleRowsAreCompleteForEntries(
 		for (const entryId of realSides) scheduledEntryIds.add(entryId);
 
 		const isProvisional = options.provisionalEventIds?.has(row.event_id) === true;
-		if (isProvisional) {
-			containsProvisionalRows = true;
-			// Data publishes one official H2H snapshot with one checked-at value.
+		const isFinalized = options.finalizedEventIds?.has(row.event_id) === true;
+		if (isProvisional || isFinalized) {
+			containsScoreAuthoritativeRows = true;
+			// Data atomically publishes one official H2H round with one checked-at value.
 			// Mixed markers mean this read observed an incremental or partial round.
 			const batchMarker = normalizeOfficialH2HSourceCheckedAt(row.source_checked_at);
 			if (!batchMarker) return false;
-			provisionalBatchMarkers.add(batchMarker);
+			scoreBatchMarkers.add(batchMarker);
+		}
+		if (isProvisional) {
+			containsProvisionalRows = true;
 		}
 
 		if (row.is_bye === true) {
@@ -975,7 +980,8 @@ function officialBattleRowsAreCompleteForEntries(
 	return (
 		scheduledEntryIds.size === expectedEntryIds.size &&
 		[...expectedEntryIds].every((entryId) => scheduledEntryIds.has(entryId)) &&
-		(!containsProvisionalRows || (hasNonZeroProvisionalScore && provisionalBatchMarkers.size === 1))
+		(!containsScoreAuthoritativeRows || scoreBatchMarkers.size === 1) &&
+		(!containsProvisionalRows || hasNonZeroProvisionalScore)
 	);
 }
 
@@ -996,8 +1002,8 @@ function selectCurrentOfficialH2HProjection(
 	finalizedEventIds: ReadonlySet<number>
 ): OfficialH2HProjectionSelection {
 	const entryIds = groups.map((row) => row.entry_id);
-	const provisionalCandidate =
-		eventId === activeEventId && !finalizedEventIds.has(eventId) ? eventId : null;
+	const finalizedCandidate = finalizedEventIds.has(eventId);
+	const provisionalCandidate = eventId === activeEventId && !finalizedCandidate ? eventId : null;
 	const candidateOptions: OfficialH2HProjectionOptions = {
 		finalizedEventIds,
 		provisionalEventIds:
@@ -1006,17 +1012,21 @@ function selectCurrentOfficialH2HProjection(
 	const completeCurrentEvent =
 		entryIds.length === expectedEntryCount &&
 		new Set(entryIds).size === expectedEntryCount &&
-		(finalizedEventIds.has(eventId) || provisionalCandidate !== null) &&
+		(finalizedCandidate || provisionalCandidate !== null) &&
 		officialBattleRowsAreCompleteForEntries(entryIds, currentEventRows, candidateOptions);
+	const validatedFinalizedEventIds =
+		finalizedCandidate && !completeCurrentEvent
+			? new Set([...finalizedEventIds].filter((candidateEventId) => candidateEventId !== eventId))
+			: finalizedEventIds;
 	const options: OfficialH2HProjectionOptions = {
-		finalizedEventIds,
+		finalizedEventIds: validatedFinalizedEventIds,
 		provisionalEventIds:
 			completeCurrentEvent && provisionalCandidate !== null
 				? new Set([provisionalCandidate])
 				: new Set<number>(),
 		suppressedEventIds:
-			!completeCurrentEvent && provisionalCandidate !== null
-				? new Set([provisionalCandidate])
+			!completeCurrentEvent && (provisionalCandidate !== null || finalizedCandidate)
+				? new Set([eventId])
 				: new Set<number>(),
 	};
 	const storedPlayed = groups.reduce((total, row) => total + Math.max(0, row.played ?? 0), 0);

@@ -594,6 +594,93 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 			expect(selected.options.suppressedEventIds).toEqual(new Set([1]));
 		}
 	});
+
+	it("rejects mixed batch markers for a finalized current round", () => {
+		const groups = [101, 102, 103, 104].map((entryId) => ({
+			tournament_id: 9,
+			entry_id: entryId,
+			group_points: 0,
+			group_rank: 1,
+			played: 0,
+			won: 0,
+			drawn: 0,
+			lost: 0,
+			total_net_points: 0,
+		}));
+		const mixedBatch: DbTournamentBattleGroupResultRow[] = [
+			{
+				id: 12,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 101,
+				home_net_points: 20,
+				home_rank: null,
+				home_match_points: 3,
+				away_entry_id: 102,
+				away_net_points: 50,
+				away_rank: null,
+				away_match_points: 0,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
+			},
+			{
+				id: 13,
+				tournament_id: 9,
+				group_id: 1,
+				event_id: 1,
+				home_entry_id: 103,
+				home_net_points: 40,
+				home_rank: null,
+				home_match_points: 0,
+				away_entry_id: 104,
+				away_net_points: 30,
+				away_rank: null,
+				away_match_points: 3,
+				source_checked_at: "2026-08-23T01:01:00.000Z",
+			},
+		];
+
+		const rejected = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+			4,
+			groups,
+			mixedBatch,
+			mixedBatch,
+			1,
+			1,
+			new Set([1])
+		);
+		expect(rejected.standings).toBeNull();
+		expect(rejected.options.finalizedEventIds?.has(1)).toBe(false);
+		expect(rejected.options.suppressedEventIds).toEqual(new Set([1]));
+		expect(
+			projectOfficialH2HStandingsFromResults([101, 102, 103, 104], mixedBatch, rejected.options)
+		).toEqual([
+			expect.objectContaining({ entryId: 101, played: 0, matchPoints: 0 }),
+			expect.objectContaining({ entryId: 102, played: 0, matchPoints: 0 }),
+			expect.objectContaining({ entryId: 103, played: 0, matchPoints: 0 }),
+			expect.objectContaining({ entryId: 104, played: 0, matchPoints: 0 }),
+		]);
+
+		const atomicBatch = mixedBatch.map((row) => ({
+			...row,
+			source_checked_at: "2026-08-23T01:00:00.000Z",
+		}));
+		const accepted = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+			4,
+			groups,
+			atomicBatch,
+			atomicBatch,
+			1,
+			1,
+			new Set([1])
+		);
+		expect(accepted.standings).toEqual([
+			expect.objectContaining({ entryId: 102, rank: 1, matchPoints: 3, pointsFor: 50 }),
+			expect.objectContaining({ entryId: 103, rank: 2, matchPoints: 3, pointsFor: 40 }),
+			expect.objectContaining({ entryId: 104, rank: 3, matchPoints: 0, pointsFor: 30 }),
+			expect.objectContaining({ entryId: 101, rank: 4, matchPoints: 0, pointsFor: 20 }),
+		]);
+	});
 });
 
 describe("resolveOfficialH2HReferenceEventId", () => {
