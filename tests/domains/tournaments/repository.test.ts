@@ -207,6 +207,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 				away_match_points: null,
 				home_is_average: false,
 				away_is_average: false,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
 			},
 			{
 				id: 6,
@@ -223,6 +224,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 				away_match_points: null,
 				home_is_average: false,
 				away_is_average: true,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
 			},
 		];
 		const liveOptions = { finalizedEventIds: new Set<number>(), provisionalEventIds: new Set([1]) };
@@ -239,6 +241,15 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 			rows.slice(0, 1),
 			[rows[0]!, { ...rows[1]!, home_net_points: null }],
 			[rows[0]!, { ...rows[1]!, home_entry_id: 102 }],
+			[
+				rows[0]!,
+				{
+					...rows[1]!,
+					home_net_points: 0,
+					away_net_points: 0,
+					source_checked_at: "2026-08-23T01:01:00.000Z",
+				},
+			],
 			rows.map((row) => ({ ...row, home_net_points: 0, away_net_points: 0 })),
 		]) {
 			expect(
@@ -266,6 +277,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 				away_net_points: 40,
 				away_rank: null,
 				away_match_points: null,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
 			},
 			{
 				id: 8,
@@ -281,6 +293,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 				away_rank: null,
 				away_match_points: null,
 				is_bye: true,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
 			},
 		];
 		const options = { finalizedEventIds: new Set<number>(), provisionalEventIds: new Set([1]) };
@@ -336,6 +349,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 				away_net_points: 30,
 				away_rank: null,
 				away_match_points: null,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
 			},
 			{
 				id: 10,
@@ -350,6 +364,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 				away_net_points: 50,
 				away_rank: null,
 				away_match_points: null,
+				source_checked_at: "2026-08-23T01:01:00.000Z",
 			},
 		];
 
@@ -444,6 +459,7 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 				away_net_points: 0,
 				away_rank: null,
 				away_match_points: null,
+				source_checked_at: "2026-08-23T01:00:00.000Z",
 			},
 		];
 

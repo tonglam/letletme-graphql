@@ -910,6 +910,7 @@ function officialBattleRowsAreCompleteForEntries(
 	const scheduledEntryIds = new Set<number>();
 	let hasNonZeroProvisionalScore = false;
 	let containsProvisionalRows = false;
+	const provisionalBatchMarkers = new Set<string>();
 	for (const row of rows) {
 		const realSides = [row.home_entry_id, row.away_entry_id].filter(
 			(entryId): entryId is number => entryId !== null
@@ -918,6 +919,16 @@ function officialBattleRowsAreCompleteForEntries(
 		if (realSides.some((entryId) => !expectedEntryIds.has(entryId))) return false;
 		if (realSides.some((entryId) => scheduledEntryIds.has(entryId))) return false;
 		for (const entryId of realSides) scheduledEntryIds.add(entryId);
+
+		const isProvisional = options.provisionalEventIds?.has(row.event_id) === true;
+		if (isProvisional) {
+			containsProvisionalRows = true;
+			// Data publishes one official H2H snapshot with one checked-at value.
+			// Mixed markers mean this read observed an incremental or partial round.
+			const batchMarker = row.source_checked_at?.trim();
+			if (!batchMarker) return false;
+			provisionalBatchMarkers.add(batchMarker);
+		}
 
 		if (row.is_bye === true) {
 			if (realSides.length !== 1) return false;
@@ -929,9 +940,7 @@ function officialBattleRowsAreCompleteForEntries(
 		if (row.home_entry_id !== null && row.home_is_average === true) return false;
 		if (row.away_entry_id !== null && row.away_is_average === true) return false;
 
-		const isProvisional = options.provisionalEventIds?.has(row.event_id) === true;
 		if (isProvisional) {
-			containsProvisionalRows = true;
 			if (typeof row.home_net_points !== "number" || typeof row.away_net_points !== "number") {
 				return false;
 			}
@@ -946,7 +955,7 @@ function officialBattleRowsAreCompleteForEntries(
 	return (
 		scheduledEntryIds.size === expectedEntryIds.size &&
 		[...expectedEntryIds].every((entryId) => scheduledEntryIds.has(entryId)) &&
-		(!containsProvisionalRows || hasNonZeroProvisionalScore)
+		(!containsProvisionalRows || (hasNonZeroProvisionalScore && provisionalBatchMarkers.size === 1))
 	);
 }
 
