@@ -1014,15 +1014,27 @@ function selectCurrentOfficialH2HProjection(
 
 	const derived = projectOfficialH2HStandingsFromResults(entryIds, historyRows, options);
 	const derivedPlayed = derived.reduce((total, row) => total + row.played, 0);
-	const storedPlayedByEntry = new Map(
-		groups.map((row) => [row.entry_id, Math.max(0, row.played ?? 0)])
-	);
-	const hasLaggingStoredEntry = derived.some(
-		(row) => (storedPlayedByEntry.get(row.entryId) ?? -1) < row.played
-	);
+	const storedByEntry = new Map(groups.map((row) => [row.entry_id, row]));
+	const derivedCoverageIsAtLeastStored = derivedPlayed >= storedPlayed;
+	const hasLaggingStoredEntry =
+		derivedCoverageIsAtLeastStored &&
+		derived.some((row) => {
+			const stored = storedByEntry.get(row.entryId);
+			return (
+				!stored ||
+				stored.group_rank !== row.rank ||
+				(stored.group_points ?? 0) !== row.matchPoints ||
+				(stored.played ?? 0) !== row.played ||
+				(stored.won ?? 0) !== row.won ||
+				(stored.drawn ?? 0) !== row.drawn ||
+				(stored.lost ?? 0) !== row.lost ||
+				(stored.total_net_points ?? 0) !== row.pointsFor
+			);
+		});
 	return {
-		// The stored table may refresh unevenly: equal aggregate coverage does
-		// not prove that every entry has caught up to the atomic match snapshot.
+		// Equal played counts do not prove that the stored table has caught up:
+		// a newer atomic score batch can change outcomes, PF and ranks in-place.
+		// If the stored table has more aggregate result coverage, keep it authoritative.
 		standings: hasLaggingStoredEntry ? derived : null,
 		options,
 		storedPlayed,

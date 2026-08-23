@@ -399,7 +399,27 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 			}),
 		]);
 
-		const caughtUpGroups = groups.map((group) => ({ ...group, played: 2 }));
+		const caughtUpGroups = groups.map((group) =>
+			group.entry_id === 101
+				? {
+						...group,
+						group_points: 3,
+						group_rank: 2,
+						played: 2,
+						won: 1,
+						lost: 1,
+						total_net_points: 60,
+					}
+				: {
+						...group,
+						group_points: 3,
+						group_rank: 1,
+						played: 2,
+						won: 1,
+						lost: 1,
+						total_net_points: 80,
+					}
+		);
 		expect(
 			tournamentCacheTestables.selectCurrentOfficialH2HProjection(
 				2,
@@ -412,11 +432,42 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 			).standings
 		).toBeNull();
 
+		const currentOnlyRows = history.filter((row) => row.event_id === 2);
+		const changedScoreAtEqualCoverage = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+			2,
+			groups,
+			currentOnlyRows,
+			currentOnlyRows,
+			2,
+			2,
+			new Set([1])
+		);
+		expect(changedScoreAtEqualCoverage).toMatchObject({ storedPlayed: 2, derivedPlayed: 2 });
+		expect(changedScoreAtEqualCoverage.standings).toEqual([
+			expect.objectContaining({
+				entryId: 102,
+				rank: 1,
+				matchPoints: 3,
+				played: 1,
+				won: 1,
+				lost: 0,
+				pointsFor: 50,
+			}),
+			expect.objectContaining({
+				entryId: 101,
+				rank: 2,
+				matchPoints: 0,
+				played: 1,
+				won: 0,
+				lost: 1,
+				pointsFor: 20,
+			}),
+		]);
+
 		const unevenGroupsWithEqualCoverage = [
 			{ ...groups[0]!, played: 2 },
 			{ ...groups[1]!, played: 0 },
 		];
-		const currentOnlyRows = history.filter((row) => row.event_id === 2);
 		const unevenProjection = tournamentCacheTestables.selectCurrentOfficialH2HProjection(
 			2,
 			unevenGroupsWithEqualCoverage,
@@ -431,6 +482,19 @@ describe("projectHistoricalOfficialH2HStandings", () => {
 			expect.objectContaining({ entryId: 102, played: 1 }),
 			expect.objectContaining({ entryId: 101, played: 1 }),
 		]);
+
+		const moreCompleteGroups = caughtUpGroups.map((group) => ({ ...group, played: 3 }));
+		expect(
+			tournamentCacheTestables.selectCurrentOfficialH2HProjection(
+				2,
+				moreCompleteGroups,
+				history.filter((row) => row.event_id === 2),
+				history,
+				2,
+				2,
+				new Set([1])
+			).standings
+		).toBeNull();
 	});
 
 	it("keeps an incomplete or all-zero current round out of the read-side projection", () => {
