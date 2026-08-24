@@ -630,7 +630,7 @@ describe("Player State repository", () => {
 
 	it("masks current FPL values when the Player Stats publication is stale", async () => {
 		const redis = new TestRedis();
-		const { executor } = makeExecutor();
+		const { executor, queries } = makeExecutor();
 		const repository = createPlayerStateRepository({
 			executor,
 			loadCoreSnapshot: async () => snapshot(),
@@ -654,11 +654,57 @@ describe("Player State repository", () => {
 		);
 
 		expect(currentTimeline?.fplTotalPoints).toBeNull();
-		expect(currentTimeline?.signals.every((signal) => signal.value === null)).toBe(true);
+		expect(currentTimeline?.signals.every((signal) => signal.provider === "UNDERSTAT")).toBe(true);
+		expect(currentTimeline?.signals.every((signal) => signal.value !== null)).toBe(true);
+		expect(currentTimeline?.signals.every((signal) => signal.analysisStatus === "READY")).toBe(
+			true
+		);
 		expect(fplCurrent).toMatchObject({
 			dataStatus: "UNAVAILABLE",
 			revision: "stats-revision-4",
 		});
+
+		const queryCount = queries.length;
+		const cached = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
+		expect(cached).toEqual(profile);
+		expect(queries).toHaveLength(queryCount);
+	});
+
+	it("keeps observed Understat values visible while marking a small current sample", async () => {
+		const redis = new TestRedis();
+		const understatRows = defaultUnderstatRows.map((row) =>
+			row.season === "2526" && row.player_code === 100
+				? {
+						...row,
+						minutes: 20,
+						non_penalty_xg: 0,
+						xa: 0.24904337525367737,
+						key_passes: 1,
+					}
+				: row
+		);
+		const { executor } = makeExecutor({ understatRows });
+		const repository = createPlayerStateRepository({
+			executor,
+			loadCoreSnapshot: async () => snapshot(),
+		});
+
+		const profile = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
+		const signals = profile?.seasonTimeline[0]?.signals ?? [];
+
+		expect(signals[0]).toMatchObject({
+			code: "UNDERSTAT_NPXG_XA_PER_90",
+			sampleMinutes: 20,
+			analysisStatus: "INSUFFICIENT",
+			reasonCodes: ["CURRENT_SAMPLE_BELOW_180_MINUTES"],
+		});
+		expect(signals[0]?.value).toBeCloseTo(1.1206951886415482, 10);
+		expect(signals[1]).toMatchObject({
+			code: "UNDERSTAT_KEY_PASSES_PER_90",
+			sampleMinutes: 20,
+			analysisStatus: "INSUFFICIENT",
+		});
+		expect(signals[1]?.value).toBe(4.5);
 	});
 
 	it("accepts negative FPL totals in a completed season timeline", async () => {
