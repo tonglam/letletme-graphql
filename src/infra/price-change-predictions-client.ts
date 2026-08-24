@@ -478,9 +478,19 @@ export async function readPriceChangePredictions(
 		const board = parsePublicationBoard(redisRead.publication, new Date());
 		if (board) return board;
 	}
-	const postgresPublication = await loadPriceChangePublicationFromPostgres(context).catch(
-		() => null
-	);
+	let postgresPublication: DataPublication | null = null;
+	try {
+		postgresPublication = await loadPriceChangePublicationFromPostgres(context);
+	} catch (error) {
+		context.logger.warn(
+			{
+				err: error,
+				dataset: PRICE_CHANGE_DATASET,
+				seasonCode: context.currentSeason.seasonCode,
+			},
+			"Failed to load price-change publication from PostgreSQL"
+		);
+	}
 	if (postgresPublication) {
 		const board = parsePublicationBoard(postgresPublication, new Date());
 		if (board) return board;

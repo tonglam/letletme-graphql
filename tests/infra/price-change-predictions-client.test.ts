@@ -87,14 +87,15 @@ async function createPublication(
 	items: Record<string, unknown>;
 }> {
 	const fetchedAt = new Date(Date.now() - ageMs).toISOString();
+	const deadline = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
 	const context = {
 		schemaVersion: 1,
 		source: "FPL_BOOTSTRAP",
 		fetchedAt,
 		staleAt: new Date(Date.parse(fetchedAt) + PRICE_CHANGE_READY_MS).toISOString(),
 		hardExpiresAt: new Date(Date.parse(fetchedAt) + PRICE_CHANGE_MAX_AGE_MS).toISOString(),
-		deadline: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
-		nextDeadlines: [new Date(Date.now() + 60 * 60 * 1_000).toISOString()],
+		deadline,
+		nextDeadlines: [deadline],
 		expectedPlayerCount: 1,
 		observedPlayerCount: 1,
 	};
@@ -131,11 +132,18 @@ async function createPublication(
 	return { manifest, context, players, redis, items };
 }
 
-function makeContext(redis: FakeRedis, database: QueryExecutor): GraphQLContext {
+function makeContext(
+	redis: FakeRedis,
+	database: QueryExecutor,
+	logger: GraphQLContext["logger"] = {
+		warn: () => undefined,
+	} as unknown as GraphQLContext["logger"]
+): GraphQLContext {
 	return {
 		redis: redis as unknown as Redis,
 		database,
 		currentSeason: { seasonId: 2026, seasonCode: "2026" },
+		logger,
 	} as GraphQLContext;
 }
 
@@ -246,5 +254,34 @@ describe("price-change publication reader", () => {
 			makeContext(publication.redis, makeDatabase(publication))
 		);
 		assert.equal(board.status, "UNAVAILABLE");
+	});
+
+	it("logs PostgreSQL fallback query failures", async () => {
+		const publication = await createPublication(9 * 60 * 1_000);
+		publication.redis.remove(
+			activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode: "2026" })
+		);
+		const databaseError = new Error("database unavailable");
+		const database = {
+			query: async () => {
+				throw databaseError;
+			},
+		} as unknown as QueryExecutor;
+		let warning: { fields: Record<string, unknown>; message: string } | undefined;
+		const logger = {
+			warn: (fields: Record<string, unknown>, message: string) => {
+				warning = { fields, message };
+			},
+		} as unknown as GraphQLContext["logger"];
+
+		const board = await readPriceChangePredictions(
+			makeContext(publication.redis, database, logger)
+		);
+
+		assert.equal(board.status, "UNAVAILABLE");
+		assert.equal(warning?.fields.err, databaseError);
+		assert.equal(warning?.fields.dataset, "fpl:price-changes");
+		assert.equal(warning?.fields.seasonCode, "2026");
+		assert.equal(warning?.message, "Failed to load price-change publication from PostgreSQL");
 	});
 });
