@@ -319,7 +319,7 @@ export function buildManagerScore(params: {
 			source: "FPL_EVENT_LIVE",
 			state: !provisional ? "SETTLING" : fresh ? "FRESH" : "STALE",
 			eventPointSemantics: effectiveTransferCost === 0 ? "ZERO_COST_EQUIVALENT" : "GROSS",
-			revision: `event-live:${authority.revision}:${eventPoints}:${effectiveTransferCost}`,
+			revision: `event-live:${authority.revision}:${eventPoints}:${effectiveTransferCost}:rank:${row?.eventRank ?? "none"}:${row?.overallRank ?? "none"}:${row?.leagueRank ?? "none"}`,
 			checkedAt,
 			upstreamUpdatedAt: checkedAt,
 			staleAt: plusSeconds(checkedAt, REFRESH_SECONDS * 3),

@@ -587,7 +587,7 @@ export const entryLiveBatchService = {
 					rank: manager.headline.rank,
 					eventTransfers: finalized?.eventTransfers,
 					transferCost: manager.score.transferCost,
-					chip: finalized?.eventChip ?? noPicks.chip,
+					chip: normalizeChip(finalized?.eventChip ?? noPicks.chip),
 					lastOverallPoints: finalized
 						? finalized.overallPoints - finalized.eventNetPoints
 						: noPicks.lastOverallPoints,

@@ -925,6 +925,7 @@ export type OfficialH2HSnapshotLoad = {
 	history: DbTournamentBattleGroupResultRow[];
 	standingsPublished: boolean;
 	currentEventComplete: boolean;
+	validatedFinalizedEventIds: ReadonlySet<number>;
 };
 
 function officialBattleRowsAreCompleteForEntries(
@@ -1000,6 +1001,70 @@ function officialBattleRowsAreCompleteForEntries(
 		[...expectedEntryIds].every((entryId) => scheduledEntryIds.has(entryId)) &&
 		(!containsScoreAuthoritativeRows || scoreBatchMarkers.size === 1) &&
 		(!containsProvisionalRows || hasNonZeroProvisionalScore || containsTrustedEventLiveRows)
+	);
+}
+
+function officialKnockoutRowsAreCompleteForFinalizedEvent(
+	rows: readonly DbTournamentKnockoutResultRow[],
+	eventId: number
+): boolean {
+	if (rows.length === 0 || rows.some((row) => row.event_id !== eventId)) return false;
+
+	const matchIds = new Set<number>();
+	const sourceOrders = new Set<number>();
+	const scoreBatchMarkers = new Set<string>();
+	for (const row of rows) {
+		if (
+			row.official_match_id === null ||
+			!Number.isSafeInteger(row.official_match_id) ||
+			row.source_order === null ||
+			!Number.isSafeInteger(row.source_order) ||
+			matchIds.has(row.official_match_id) ||
+			sourceOrders.has(row.source_order)
+		) {
+			return false;
+		}
+		matchIds.add(row.official_match_id);
+		sourceOrders.add(row.source_order);
+
+		const batchMarker = normalizeOfficialH2HSourceCheckedAt(row.source_checked_at);
+		if (!batchMarker) return false;
+		scoreBatchMarkers.add(batchMarker);
+
+		const sides = [row.home_entry_id, row.away_entry_id].filter(
+			(entryId): entryId is number => entryId !== null
+		);
+		if (sides.length === 0 || new Set(sides).size !== sides.length) return false;
+		if (row.match_winner === null || !sides.includes(row.match_winner)) return false;
+		if (sides.length === 1) continue;
+		if (typeof row.home_net_points !== "number" || typeof row.away_net_points !== "number") {
+			return false;
+		}
+		if (
+			row.home_net_points !== row.away_net_points &&
+			row.match_winner !==
+				(row.home_net_points > row.away_net_points ? row.home_entry_id : row.away_entry_id)
+		) {
+			return false;
+		}
+	}
+	return scoreBatchMarkers.size === 1;
+}
+
+function officialH2HCurrentEventIsComplete(
+	battleRoundComplete: boolean,
+	battleRows: readonly DbTournamentBattleGroupResultRow[],
+	knockoutRows: readonly DbTournamentKnockoutResultRow[],
+	eventId: number,
+	finalizedEventIds: ReadonlySet<number>
+): boolean {
+	if (!finalizedEventIds.has(eventId)) return battleRoundComplete;
+	const hasBattleRound = battleRows.length > 0;
+	const hasKnockoutRound = knockoutRows.length > 0;
+	if (!hasBattleRound && !hasKnockoutRound) return false;
+	return (
+		(!hasBattleRound || battleRoundComplete) &&
+		(!hasKnockoutRound || officialKnockoutRowsAreCompleteForFinalizedEvent(knockoutRows, eventId))
 	);
 }
 
@@ -1255,6 +1320,17 @@ async function loadOfficialH2HSnapshots(
 			activeEventId,
 			finalizedEventIds
 		);
+		const currentEventComplete = officialH2HCurrentEventIsComplete(
+			currentProjection.currentEventComplete,
+			currentEventBattles,
+			tournamentKnockouts,
+			eventId,
+			finalizedEventIds
+		);
+		const validatedFinalizedEventIds = new Set(currentProjection.options.finalizedEventIds ?? []);
+		if (currentEventComplete && finalizedEventIds.has(eventId)) {
+			validatedFinalizedEventIds.add(eventId);
+		}
 		const historicalStandings =
 			eventId < activeEventId && includeHistory
 				? projectHistoricalOfficialH2HStandings(
@@ -1276,7 +1352,7 @@ async function loadOfficialH2HSnapshots(
 				left.officialMatchId - right.officialMatchId
 		);
 		const scoreCheckedAt =
-			finalizedEventIds.has(eventId) && currentProjection.currentEventComplete
+			finalizedEventIds.has(eventId) && currentEventComplete
 				? latestOfficialH2HCheckedAt(matches)
 				: null;
 		loaded.set(tournament.id, {
@@ -1310,9 +1386,9 @@ async function loadOfficialH2HSnapshots(
 				matches,
 			},
 			history: tournamentHistory,
-			standingsPublished:
-				currentProjection.currentEventComplete || currentProjection.storedPlayed > 0,
-			currentEventComplete: currentProjection.currentEventComplete,
+			standingsPublished: currentEventComplete || currentProjection.storedPlayed > 0,
+			currentEventComplete,
+			validatedFinalizedEventIds,
 		});
 	}
 	return loaded;
@@ -1331,6 +1407,49 @@ const latestOfficialH2HCheckedAt = (matches: readonly OfficialH2HMatch[]): strin
 		.filter((value): value is string => Boolean(value))
 		.sort()
 		.at(-1) ?? null;
+
+function rejectedFinalizedOfficialH2HEventIds(
+	finalizedEventIds: ReadonlySet<number>,
+	validatedFinalizedEventIds: ReadonlySet<number>
+): Set<number> {
+	return new Set(
+		[...finalizedEventIds].filter((eventId) => !validatedFinalizedEventIds.has(eventId))
+	);
+}
+
+function officialKnockoutMatchesHaveCompleteSchedule(
+	matches: readonly OfficialH2HMatch[],
+	eventId: number
+): boolean {
+	const rows = matches.filter((match) => match.eventId === eventId && match.phase === "KNOCKOUT");
+	if (rows.length === 0) return false;
+	const matchIds = new Set<number>();
+	const sourceOrders = new Set<number>();
+	for (const row of rows) {
+		if (matchIds.has(row.officialMatchId) || sourceOrders.has(row.sourceOrder)) return false;
+		matchIds.add(row.officialMatchId);
+		sourceOrders.add(row.sourceOrder);
+		const sides = [row.home.entryId, row.away.entryId].filter(
+			(entryId): entryId is number => entryId !== null
+		);
+		if (sides.length === 0 || new Set(sides).size !== sides.length) return false;
+	}
+	return true;
+}
+
+function activeOfficialH2HScoreEntryIds(
+	loaded: OfficialH2HSnapshotLoad,
+	eventId: number
+): number[] {
+	return [
+		...new Set(
+			loaded.snapshot.matches
+				.filter((match) => match.eventId === eventId)
+				.flatMap((match) => [match.home.entryId, match.away.entryId])
+				.filter((entryId): entryId is number => entryId !== null)
+		),
+	];
+}
 
 function suppressActiveOfficialH2HScores(
 	loaded: OfficialH2HSnapshotLoad,
@@ -1362,8 +1481,11 @@ function suppressActiveOfficialH2HScores(
 		loaded.snapshot.standings.map((standing) => [standing.entryId, standing] as const)
 	);
 	const projected = projectOfficialH2HStandingsFromResults(entryIds, loaded.history, {
-		finalizedEventIds,
-		suppressedEventIds: new Set([eventId]),
+		finalizedEventIds: loaded.validatedFinalizedEventIds,
+		suppressedEventIds: new Set([
+			eventId,
+			...rejectedFinalizedOfficialH2HEventIds(finalizedEventIds, loaded.validatedFinalizedEventIds),
+		]),
 	});
 	return {
 		...loaded,
@@ -1411,13 +1533,21 @@ export function projectOfficialH2HEventLiveSnapshot(
 	const entryIds = loaded.snapshot.standings.map((standing) => standing.entryId);
 	const expectedEntryCount = loaded.snapshot.tournament.totalTeamNum;
 	const currentSourceRows = loaded.history.filter((row) => row.event_id === eventId);
+	const scoreEntryIds = activeOfficialH2HScoreEntryIds(loaded, eventId);
+	const hasRegularRound = currentSourceRows.length > 0;
+	const hasCompleteKnockoutSchedule = officialKnockoutMatchesHaveCompleteSchedule(
+		loaded.snapshot.matches,
+		eventId
+	);
 	if (
 		!Number.isSafeInteger(expectedEntryCount) ||
 		expectedEntryCount <= 0 ||
 		entryIds.length !== expectedEntryCount ||
 		new Set(entryIds).size !== expectedEntryCount ||
+		(!hasRegularRound && !hasCompleteKnockoutSchedule) ||
 		currentSourceRows.some((row) => row.home_is_average || row.away_is_average) ||
-		entryIds.some((entryId) => typeof batch.scores.get(entryId) !== "number")
+		scoreEntryIds.length === 0 ||
+		scoreEntryIds.some((entryId) => typeof batch.scores.get(entryId) !== "number")
 	) {
 		return suppressed;
 	}
@@ -1435,11 +1565,17 @@ export function projectOfficialH2HEventLiveSnapshot(
 	});
 	const currentRows = projectedHistory.filter((row) => row.event_id === eventId);
 	const options: OfficialH2HProjectionOptions = {
-		finalizedEventIds,
+		finalizedEventIds: loaded.validatedFinalizedEventIds,
 		provisionalEventIds: new Set([eventId]),
+		suppressedEventIds: rejectedFinalizedOfficialH2HEventIds(
+			finalizedEventIds,
+			loaded.validatedFinalizedEventIds
+		),
 		trustedEventLiveEventIds: new Set([eventId]),
 	};
-	if (!officialBattleRowsAreCompleteForEntries(entryIds, currentRows, options)) return suppressed;
+	if (hasRegularRound && !officialBattleRowsAreCompleteForEntries(entryIds, currentRows, options)) {
+		return suppressed;
+	}
 
 	const standingIdentity = new Map(
 		loaded.snapshot.standings.map((standing) => [standing.entryId, standing] as const)
@@ -1557,34 +1693,30 @@ async function applyActiveOfficialH2HScoreAuthority(
 		);
 	}
 
-	const baseline = new Map(
-		[...loaded].map(([tournamentId, snapshot]) => [
-			tournamentId,
-			suppressActiveOfficialH2HScores(snapshot, eventId, finalizedEventIds),
-		])
+	const projected = await Promise.all(
+		[...loaded].map(async ([tournamentId, snapshot]) => {
+			const baseline = suppressActiveOfficialH2HScores(snapshot, eventId, finalizedEventIds);
+			const entryIds = activeOfficialH2HScoreEntryIds(snapshot, eventId);
+			const batch = await loadEventLiveH2HScoreBatch(context, eventId, entryIds).catch((error) => {
+				context.logger.warn(
+					{
+						tournamentId,
+						eventId,
+						err: error instanceof Error ? error.message : "unknown",
+					},
+					"Event-live H2H score projection unavailable"
+				);
+				return null;
+			});
+			return [
+				tournamentId,
+				batch
+					? projectOfficialH2HEventLiveSnapshot(snapshot, eventId, batch, finalizedEventIds)
+					: baseline,
+			] as const;
+		})
 	);
-	const entryIds = [
-		...new Set(
-			[...loaded.values()].flatMap((snapshot) =>
-				snapshot.snapshot.standings.map((standing) => standing.entryId)
-			)
-		),
-	];
-	const batch = await loadEventLiveH2HScoreBatch(context, eventId, entryIds).catch((error) => {
-		context.logger.warn(
-			{ eventId, err: error instanceof Error ? error.message : "unknown" },
-			"Event-live H2H score projection unavailable"
-		);
-		return null;
-	});
-	if (!batch) return baseline;
-
-	return new Map(
-		[...loaded].map(([tournamentId, snapshot]) => [
-			tournamentId,
-			projectOfficialH2HEventLiveSnapshot(snapshot, eventId, batch, finalizedEventIds),
-		])
-	);
+	return new Map(projected);
 }
 
 type DbTournamentEventSnapshotRow = {
@@ -2937,7 +3069,11 @@ export const tournamentCacheTestables = {
 	isSeasonSnapshotCache,
 	isEntryIdArrayCache,
 	officialBattleRowsAreCompleteForEntries,
+	officialKnockoutRowsAreCompleteForFinalizedEvent,
+	officialH2HCurrentEventIsComplete,
 	selectCurrentOfficialH2HProjection,
+	suppressActiveOfficialH2HScores,
+	applyActiveOfficialH2HScoreAuthority,
 	tournamentCacheKey,
 };
 
@@ -3798,6 +3934,18 @@ export const tournamentsRepository: TournamentsRepository = {
 			activeEventId,
 			finalizedEventIds
 		);
+		const currentEventBattles = history.filter((row) => row.event_id === eventId);
+		const currentEventComplete = officialH2HCurrentEventIsComplete(
+			currentProjection.currentEventComplete,
+			currentEventBattles,
+			knockouts,
+			eventId,
+			finalizedEventIds
+		);
+		const validatedFinalizedEventIds = new Set(currentProjection.options.finalizedEventIds ?? []);
+		if (currentEventComplete && finalizedEventIds.has(eventId)) {
+			validatedFinalizedEventIds.add(eventId);
+		}
 		const historicalStandings =
 			eventId < activeEventId
 				? projectHistoricalOfficialH2HStandings(
@@ -3836,9 +3984,10 @@ export const tournamentsRepository: TournamentsRepository = {
 				left.sourceOrder - right.sourceOrder ||
 				left.officialMatchId - right.officialMatchId
 		);
-		const scoreCheckedAt = finalizedEventIds.has(eventId)
-			? latestOfficialH2HCheckedAt(matches)
-			: null;
+		const scoreCheckedAt =
+			finalizedEventIds.has(eventId) && currentEventComplete
+				? latestOfficialH2HCheckedAt(matches)
+				: null;
 		const fallbackLoad: OfficialH2HSnapshotLoad = {
 			snapshot: {
 				tournament,
@@ -3870,9 +4019,9 @@ export const tournamentsRepository: TournamentsRepository = {
 				matches,
 			},
 			history,
-			standingsPublished:
-				currentProjection.currentEventComplete || currentProjection.storedPlayed > 0,
-			currentEventComplete: currentProjection.currentEventComplete,
+			standingsPublished: currentEventComplete || currentProjection.storedPlayed > 0,
+			currentEventComplete,
+			validatedFinalizedEventIds,
 		};
 		const projectedFallback = await applyActiveOfficialH2HScoreAuthority(
 			context,
@@ -3946,7 +4095,13 @@ export const tournamentsRepository: TournamentsRepository = {
 		for (const tournament of tournaments) {
 			const loadedSnapshot = loadedOfficialH2H.get(tournament.id);
 			if (!loadedSnapshot) continue;
-			const { snapshot, history, standingsPublished, currentEventComplete } = loadedSnapshot;
+			const {
+				snapshot,
+				history,
+				standingsPublished,
+				currentEventComplete,
+				validatedFinalizedEventIds,
+			} = loadedSnapshot;
 			const standing = snapshot.standings.find((row) => row.entryId === entryId);
 			const matches = snapshot.matches.filter(
 				(candidate) => candidate.home.entryId === entryId || candidate.away.entryId === entryId
@@ -3954,7 +4109,13 @@ export const tournamentsRepository: TournamentsRepository = {
 			const projectedPreviousStandings = projectHistoricalOfficialH2HStandings(
 				snapshot.standings.map((row) => row.entryId),
 				history.filter((row) => row.event_id < currentEvent.id),
-				{ finalizedEventIds }
+				{
+					finalizedEventIds: validatedFinalizedEventIds,
+					suppressedEventIds: rejectedFinalizedOfficialH2HEventIds(
+						finalizedEventIds,
+						validatedFinalizedEventIds
+					),
+				}
 			);
 			const previousStandings = projectedPreviousStandings.some((row) => row.played > 0)
 				? projectedPreviousStandings

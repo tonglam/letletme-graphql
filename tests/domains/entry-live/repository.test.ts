@@ -217,6 +217,12 @@ describe("entryLiveRepository batch picks", () => {
 										is_captain: true,
 										is_vice_captain: false,
 									},
+									{
+										element: 11,
+										position: 2,
+										is_captain: false,
+										is_vice_captain: true,
+									},
 								],
 								chip: "bboost",
 								transfers_cost: 4,
@@ -244,6 +250,7 @@ describe("entryLiveRepository batch picks", () => {
 		expect(projection).toBe("entry_id, event_id, chip, picks, transfers_cost");
 		expect(result.get(1)).toMatchObject({ chip: "bboost", transfersCost: 4 });
 		expect(result.get(1)?.picks[0]).toMatchObject({ element: 10, isCaptain: true });
+		expect(result.get(1)?.picks).toHaveLength(1);
 		expect(pipelineWrites).toHaveLength(1);
 	});
 });
@@ -281,5 +288,25 @@ describe("hasCompleteEntryEventPick", () => {
 		const crossEntry = complete();
 		crossEntry.picks[0]!.entryId = 2;
 		expect(hasCompleteEntryEventPick(crossEntry, 3, 1)).toBe(false);
+	});
+
+	it("rejects missing or impossible official multiplier distributions", () => {
+		const missingMultiplier = complete();
+		missingMultiplier.picks[2]!.multiplier = undefined as never;
+		expect(hasCompleteEntryEventPick(missingMultiplier, 3, 1)).toBe(false);
+
+		const tooManyStarters = complete();
+		tooManyStarters.picks[11]!.multiplier = 1;
+		expect(hasCompleteEntryEventPick(tooManyStarters, 3, 1)).toBe(false);
+
+		const twoBoostedPlayers = complete();
+		twoBoostedPlayers.picks[1]!.multiplier = 2;
+		twoBoostedPlayers.picks[2]!.multiplier = 0;
+		expect(hasCompleteEntryEventPick(twoBoostedPlayers, 3, 1)).toBe(false);
+
+		const boostOutsideCaptaincy = complete();
+		boostOutsideCaptaincy.picks[0]!.multiplier = 1;
+		boostOutsideCaptaincy.picks[2]!.multiplier = 2;
+		expect(hasCompleteEntryEventPick(boostOutsideCaptaincy, 3, 1)).toBe(false);
 	});
 });

@@ -46,6 +46,10 @@ export const hasCompleteEntryEventPick = (
 	const elements = new Set<number>();
 	let captains = 0;
 	let viceCaptains = 0;
+	let positiveMultipliers = 0;
+	let multiplierTotal = 0;
+	let boostedMultipliers = 0;
+	let boostedMultiplierBelongsToCaptaincy = true;
 	for (const pick of pickEntity.picks) {
 		if (
 			pick.eventId !== eventId ||
@@ -63,11 +67,30 @@ export const hasCompleteEntryEventPick = (
 		}
 		positions.add(pick.position);
 		elements.add(pick.element);
+		if (pick.isCaptain && pick.isViceCaptain) return false;
 		if (pick.isCaptain) captains += 1;
 		if (pick.isViceCaptain) viceCaptains += 1;
+		if (pick.multiplier > 0) positiveMultipliers += 1;
+		multiplierTotal += pick.multiplier;
+		if (pick.multiplier > 1) {
+			boostedMultipliers += 1;
+			boostedMultiplierBelongsToCaptaincy =
+				boostedMultiplierBelongsToCaptaincy && (pick.isCaptain || pick.isViceCaptain);
+		}
 	}
 
-	return positions.size === 15 && elements.size === 15 && captains === 1 && viceCaptains === 1;
+	const hasOfficialMultiplierShape =
+		boostedMultipliers === 1 &&
+		boostedMultiplierBelongsToCaptaincy &&
+		((positiveMultipliers === 11 && (multiplierTotal === 12 || multiplierTotal === 13)) ||
+			(positiveMultipliers === 15 && multiplierTotal === 16));
+	return (
+		positions.size === 15 &&
+		elements.size === 15 &&
+		captains === 1 &&
+		viceCaptains === 1 &&
+		hasOfficialMultiplierShape
+	);
 };
 
 export type EntryEventTransferRow = {
@@ -184,12 +207,12 @@ const parsePick = (raw: unknown, fallback: { eventId: number; entryId: number })
 
 	const element = asNumber(raw.element);
 	const position = asNumber(raw.position);
-	const multiplier = asNumber(raw.multiplier) ?? 1;
+	const multiplier = asNumber(raw.multiplier);
 
 	const isCaptain = asBoolean(raw.is_captain) ?? false;
 	const isViceCaptain = asBoolean(raw.is_vice_captain) ?? false;
 
-	if (!element || !position) {
+	if (!element || !position || multiplier === null) {
 		return null;
 	}
 

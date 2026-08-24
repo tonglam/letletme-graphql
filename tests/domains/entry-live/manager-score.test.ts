@@ -67,6 +67,23 @@ describe("event-live manager score contract", () => {
 		expect(result.headline.livePoints).toBe(37);
 	});
 
+	it("changes the traceable revision when official rank metadata changes", () => {
+		const build = (eventRank: number) =>
+			buildManagerScore({
+				row: row({ eventRank }),
+				upstreamErrorCode: null,
+				provisional: true,
+				available: true,
+				transferCost: 0,
+				detailEventPoints: 37,
+				previousOverallPoints: 0,
+				eventLiveAuthority: authority(),
+			});
+
+		expect(build(7).score.revision).not.toBe(build(8).score.revision);
+		expect(build(7).score.revision).toContain(":rank:7:101:none");
+	});
+
 	it("marks an old event-live revision stale without reverting to manager summary", () => {
 		const checkedAt = new Date(Date.now() - 45_000).toISOString();
 		const result = buildManagerScore({
