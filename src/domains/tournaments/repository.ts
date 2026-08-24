@@ -1171,7 +1171,14 @@ function officialH2HCurrentEventIsComplete(
 	const hasBattleRound = battleRows.length > 0;
 	const hasKnockoutRound = knockoutRows.length > 0;
 	if (!hasBattleRound && !hasKnockoutRound) return false;
+	const batchMarkers = new Set<string>();
+	for (const row of [...battleRows, ...knockoutRows]) {
+		const marker = normalizeOfficialH2HSourceCheckedAt(row.source_checked_at);
+		if (!marker) return false;
+		batchMarkers.add(marker);
+	}
 	return (
+		batchMarkers.size === 1 &&
 		(!hasBattleRound || battleRoundComplete) &&
 		(!hasKnockoutRound ||
 			officialKnockoutRowsAreCompleteForFinalizedEvent(knockoutRows, eventId, tournament))
@@ -1708,6 +1715,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 	const standingIdentity = new Map(
 		loaded.snapshot.standings.map((standing) => [standing.entryId, standing] as const)
 	);
+	const knockoutStructure = resolveOfficialKnockoutStructure(loaded.snapshot.tournament);
 	const standings = projectOfficialH2HStandingsFromResults(entryIds, projectedHistory, options).map(
 		(standing) => ({
 			...standing,
@@ -1721,7 +1729,14 @@ export function projectOfficialH2HEventLiveSnapshot(
 			match.home.entryId === null ? null : (batch.scores.get(match.home.entryId) ?? null);
 		const awayPoints =
 			match.away.entryId === null ? null : (batch.scores.get(match.away.entryId) ?? null);
-		const scoreable = !match.isBye && homePoints !== null && awayPoints !== null;
+		// A multi-event knockout winner depends on the aggregate tie. This live
+		// batch contains only the current event, so defer the outcome until Data
+		// publishes the authoritative finalized knockout result.
+		const deferKnockoutOutcome =
+			match.phase === "KNOCKOUT" &&
+			(knockoutStructure === null || knockoutStructure.eventsPerOpponent > 1);
+		const scoreable =
+			!match.isBye && !deferKnockoutOutcome && homePoints !== null && awayPoints !== null;
 		const homeMatchPoints = !scoreable
 			? null
 			: homePoints > awayPoints
@@ -1735,8 +1750,9 @@ export function projectOfficialH2HEventLiveSnapshot(
 			...match,
 			home: { ...match.home, points: homePoints, matchPoints: homeMatchPoints },
 			away: { ...match.away, points: awayPoints, matchPoints: awayMatchPoints },
-			winnerEntryId:
-				homeMatchPoints === 3
+			winnerEntryId: match.isBye
+				? (match.winnerEntryId ?? match.home.entryId ?? match.away.entryId)
+				: homeMatchPoints === 3
 					? match.home.entryId
 					: awayMatchPoints === 3
 						? match.away.entryId

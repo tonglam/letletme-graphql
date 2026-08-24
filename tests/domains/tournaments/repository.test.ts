@@ -328,6 +328,81 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 		});
 	});
 
+	it("preserves a deterministic knockout bye winner during the live overlay", () => {
+		const loaded = activeOfficialH2HLoad();
+		loaded.history = [];
+		loaded.snapshot.matches[0] = {
+			...loaded.snapshot.matches[0]!,
+			phase: "KNOCKOUT",
+			knockoutName: "Final",
+			isBye: true,
+			away: {
+				...loaded.snapshot.matches[0]!.away,
+				entryId: null,
+				points: null,
+				matchPoints: null,
+			},
+			winnerEntryId: null,
+		};
+
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([[101, 37]]),
+				revision: "event-live-gw1-bye",
+				checkedAt: "2026-08-24T00:06:30.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot.matches[0]).toMatchObject({
+			isBye: true,
+			home: { entryId: 101, points: 37, matchPoints: null },
+			away: { entryId: null, points: null, matchPoints: null },
+			winnerEntryId: 101,
+		});
+	});
+
+	it("defers a multi-event knockout winner until the aggregate is finalized", () => {
+		const loaded = activeOfficialH2HLoad();
+		loaded.history = [];
+		loaded.snapshot.tournament = {
+			...loaded.snapshot.tournament,
+			knockoutMode: KnockoutMode.DOUBLE_ELIMINATION,
+			knockoutRounds: 2,
+			knockoutEventNum: 1,
+			knockoutPlayAgainstNum: 2,
+		};
+		loaded.snapshot.matches[0] = {
+			...loaded.snapshot.matches[0]!,
+			phase: "KNOCKOUT",
+			knockoutName: "Final",
+		};
+
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+				]),
+				revision: "event-live-gw1-first-leg",
+				checkedAt: "2026-08-24T00:06:45.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot.matches[0]).toMatchObject({
+			home: { points: 37, matchPoints: null },
+			away: { points: 31, matchPoints: null },
+			winnerEntryId: null,
+		});
+	});
+
 	it("accepts a complete finalized knockout-only round", () => {
 		const knockout = {
 			tournament_id: 9,
@@ -450,6 +525,65 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 				)
 			).toBe(true);
 		}
+	});
+
+	it("requires one source marker across a combined finalized round", () => {
+		const battle: DbTournamentBattleGroupResultRow = {
+			id: 7000,
+			tournament_id: 9,
+			group_id: 1,
+			event_id: 1,
+			home_entry_id: 201,
+			home_net_points: 22,
+			home_rank: null,
+			home_match_points: 3,
+			away_entry_id: 202,
+			away_net_points: 18,
+			away_rank: null,
+			away_match_points: 0,
+			source_checked_at: "2026-08-24T00:07:00.000Z",
+		};
+		const knockout = {
+			tournament_id: 9,
+			event_id: 1,
+			home_entry_id: 101,
+			home_net_points: 37,
+			away_entry_id: 102,
+			away_net_points: 31,
+			match_winner: 101,
+			official_match_id: 7001,
+			source_order: 1,
+			knockout_name: "Final",
+			tiebreak: null,
+			source_checked_at: "2026-08-24T00:08:00.000Z",
+		};
+		const config = {
+			knockoutTeamNum: 2,
+			knockoutRounds: 1,
+			knockoutEventNum: 1,
+			knockoutStartedEventId: 1,
+		};
+
+		expect(
+			tournamentCacheTestables.officialH2HCurrentEventIsComplete(
+				true,
+				[battle],
+				[knockout],
+				1,
+				new Set([1]),
+				config
+			)
+		).toBe(false);
+		expect(
+			tournamentCacheTestables.officialH2HCurrentEventIsComplete(
+				true,
+				[battle],
+				[{ ...knockout, source_checked_at: battle.source_checked_at ?? null }],
+				1,
+				new Set([1]),
+				config
+			)
+		).toBe(true);
 	});
 
 	it("does not restore rejected finalized history while suppressing an active round", () => {
