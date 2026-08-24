@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import type { Player, Team } from "../../infra/types";
@@ -15,7 +16,6 @@ import {
 	type ElementEventResultData,
 	type LiveCalcData,
 } from "./calc-service";
-import { applyAutoSubs, selectCaptainForScoring } from "./legacy-h2h-adapter";
 import {
 	buildManagerScore,
 	loadManagerScores,
@@ -24,7 +24,7 @@ import {
 } from "./manager-score";
 import { eventsService } from "../events/service";
 import type { EntryEventPick, EntryEventTransferRow } from "./repository";
-import { entryLiveRepository } from "./repository";
+import { entryLiveRepository, hasCompleteEntryEventPick } from "./repository";
 import { resolvePreviousEventBaseline } from "./baseline";
 import type { EntryEventResult } from "../entries/repository";
 import {
@@ -32,6 +32,7 @@ import {
 	type EntryEventTransfersData,
 	enrichTransferRows,
 } from "./transfer-enrichment";
+import { stableStringify } from "../../infra/stringify";
 
 export type BatchLiveCalcResult = {
 	results: Map<number, LiveCalcData>;
@@ -96,6 +97,68 @@ const parseNullableFloat = (value: string | null | undefined): number | null => 
 	}
 	const parsed = Number.parseFloat(value);
 	return Number.isFinite(parsed) ? parsed : null;
+};
+
+const buildFinalManagerScoreRow = (
+	season: string,
+	eventId: number,
+	entryId: number,
+	finalized: EntryEventResult,
+	checkedAt: string
+): OfficialManagerScoreRow => {
+	const revisionHash = createHash("sha256")
+		.update(
+			stableStringify({
+				season,
+				eventId,
+				entryId,
+				eventPoints: finalized.eventPoints,
+				netEventPoints: finalized.eventNetPoints,
+				eventRank: finalized.eventRank,
+				overallPoints: finalized.overallPoints,
+				overallRank: finalized.overallRank,
+				transferCost: finalized.eventTransfersCost,
+				checkedAt,
+			}),
+			"utf8"
+		)
+		.digest("hex")
+		.slice(0, 24);
+	return {
+		season,
+		eventId,
+		entryId,
+		eventPoints: finalized.eventPoints,
+		netEventPoints: finalized.eventNetPoints,
+		totalPoints: finalized.overallPoints,
+		totalScope: "OVERALL",
+		eventRank: finalized.eventRank,
+		overallRank: finalized.overallRank,
+		leagueRank: null,
+		transferCost: finalized.eventTransfersCost,
+		eventPointSemantics:
+			finalized.eventPoints === finalized.eventNetPoints && finalized.eventTransfersCost === 0
+				? "ZERO_COST_EQUIVALENT"
+				: finalized.eventPoints - finalized.eventTransfersCost === finalized.eventNetPoints
+					? "GROSS"
+					: "UNKNOWN",
+		source: "FPL_FINAL_RESULT",
+		revision: `final:${eventId}:${entryId}:${revisionHash}`,
+		checkedAt,
+		upstreamUpdatedAt: checkedAt,
+		staleAt: new Date(Date.parse(checkedAt) + 90_000).toISOString(),
+	};
+};
+
+const finalizedPicksRevision = (eventId: number, results: readonly EntryEventResult[]): string => {
+	const evidence = results
+		.map((result) => ({ entryId: result.entryId, richSyncedAt: result.richSyncedAt }))
+		.sort((left, right) => left.entryId - right.entryId);
+	const digest = createHash("sha256")
+		.update(stableStringify({ eventId, evidence }), "utf8")
+		.digest("hex")
+		.slice(0, 24);
+	return `event-result:${eventId}:${digest}`;
 };
 
 const elementTypeName = (player: Player | null): string => {
@@ -275,8 +338,7 @@ const computeSingleEntry = (
 	eventId: number,
 	perEntry: PerEntryData,
 	shared: SharedData,
-	provisional: boolean,
-	legacyH2H = false
+	provisional: boolean
 ): LiveCalcData => {
 	const { entry, pickEntity, transferRows, previousResult } = perEntry;
 	const { liveByPlayer, fixturesByTeam, teamsById, playersById } = shared;
@@ -365,11 +427,6 @@ const computeSingleEntry = (
 		};
 	});
 
-	// H2H remains on its isolated legacy adapter until FPL publishes a usable
-	// live H2H contract. First-party single/classic/points-race paths use only
-	// official multipliers and never infer substitutions.
-	if (legacyH2H && !provisional) applyAutoSubs(pickList, chip);
-
 	const isBenchBoost = chip === "BENCH_BOOST";
 	const activePicks: ElementEventResultData[] = [];
 
@@ -377,7 +434,7 @@ const computeSingleEntry = (
 		// Official FPL picks multipliers are the only source of truth for the
 		// current/final lineup. Never infer auto-subs or captain promotion from
 		// minutes, fixture state, bench order, or chip names in the live path.
-		const isActive = legacyH2H ? (isBenchBoost ? true : pick.multiplier > 0) : pick.multiplier > 0;
+		const isActive = pick.multiplier > 0;
 		// After finalization, the official multiplier is authoritative for the
 		// display-only bench relation. During live/settling we deliberately leave
 		// this false instead of predicting an automatic substitution.
@@ -389,24 +446,13 @@ const computeSingleEntry = (
 		}
 	}
 
-	const captainForScoring = legacyH2H
-		? provisional
-			? (pickList.find((pick) => pick.isCaptain) ?? null)
-			: selectCaptainForScoring(pickList)
-		: (pickList.find((pick) => pick.multiplier >= 2) ??
-			pickList.find((pick) => pick.isCaptain) ??
-			null);
+	const captainForScoring =
+		pickList.find((pick) => pick.multiplier >= 2) ??
+		pickList.find((pick) => pick.isCaptain) ??
+		null;
 	// The multiplier already carries captain/bench-boost/triple-captain
 	// semantics. Applying another captain multiplier would double-count points.
-	const captainMultiplier = chip === "TRIPLE_CAPTAIN" ? 3 : 2;
-	const livePoints = legacyH2H
-		? activePicks.reduce((sum, p) => {
-				if (captainForScoring?.element !== undefined && p.element === captainForScoring.element) {
-					return sum + p.totalPoints * captainMultiplier;
-				}
-				return sum + p.totalPoints;
-			}, 0)
-		: activePicks.reduce((sum, p) => sum + p.totalPoints * p.multiplier, 0);
+	const livePoints = activePicks.reduce((sum, p) => sum + p.totalPoints * p.multiplier, 0);
 
 	const liveNetPoints = livePoints - transferCost;
 	const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
@@ -476,14 +522,13 @@ export const entryLiveBatchService = {
 		context: GraphQLContext,
 		eventId: number,
 		entryIds: number[],
-		includeLive = true,
+		_includeLive = true,
 		prefetched?: {
 			liveByPlayer?: Promise<Map<number, LivePerformance>>;
 			fixtures?: Promise<Fixture[]>;
 			teams?: Promise<Team[]>;
 			picksByEntry?: Promise<Map<number, EntryEventPick>>;
 			tournamentId?: number;
-			legacyH2H?: boolean;
 		}
 	): Promise<BatchLiveCalcResult> {
 		assertValidEntryBatch(entryIds);
@@ -499,59 +544,88 @@ export const entryLiveBatchService = {
 
 		// Phase 1: resolve identity and picks. Entries without picks must not enter
 		// Live, fixture, player, transfer or bonus acquisition.
-		const [entriesById, picksByEntry, previousResultsByEntry, managerScores] = await Promise.all([
-			entriesService.getEntriesByIds(context, entryIds),
-			prefetched?.picksByEntry ??
-				entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
-			eventId > 1
-				? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
-				: Promise.resolve(new Map<number, EntryEventResult>()),
-			loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
-		]);
-		const readyEntryIds = entryIds.filter(
-			(entryId) => (picksByEntry.get(entryId)?.picks.length ?? 0) > 0
-		);
+		const [entriesById, picksByEntry, previousResultsByEntry, managerScores, event] =
+			await Promise.all([
+				entriesService.getEntriesByIds(context, entryIds),
+				prefetched?.picksByEntry ??
+					entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
+				eventId > 1
+					? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
+					: Promise.resolve(new Map<number, EntryEventResult>()),
+				loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
+				eventsService.getEventById(context, eventId).catch(() => null),
+			]);
 		// Manager headline availability is independent from lineup availability.
 		// Keep NO_PICKS metadata cheap while still resolving the official manager
 		// score; final lifecycle evidence requires a persisted lineup/result pair.
-		const event =
-			readyEntryIds.length > 0 ? await eventsService.getEventById(context, eventId) : null;
-		const provisional =
-			readyEntryIds.length === 0 || !(event?.finished === true && event.dataChecked === true);
-		const legacyH2H =
-			prefetched?.legacyH2H === true || managerScores.errorCode === "UNSUPPORTED_H2H_LIVE";
-		const finalizedResultsByEntry = !provisional
-			? await entriesService.getEntryEventResultsByEntryIds(context, readyEntryIds, eventId)
-			: new Map<number, EntryEventResult>();
-		if (!provisional && readyEntryIds.length > 0) {
+		const provisional = !(event?.finished === true && event.dataChecked === true);
+		let finalizedResultsByEntry = new Map<number, EntryEventResult>();
+		if (!provisional) {
 			// FPL can publish automatic_subs and the effective captain after the
 			// event flips to finished/data_checked. Read through a finalization-scoped
 			// cache key so the canonical picks are refreshed once, then remain stable.
-			const finalizedPicks = await entryLiveRepository.getEntryEventPicksByIds(
+			const finalizedResults = await entriesService.getEntryEventResultsByEntryIds(
 				context,
-				readyEntryIds,
-				eventId,
-				false,
-				`data-checked:${eventId}`
+				entryIds,
+				eventId
 			);
-			for (const [entryId, pick] of finalizedPicks) picksByEntry.set(entryId, pick);
+			finalizedResultsByEntry = finalizedResults;
+			const durableEntryIds = entryIds.filter((entryId) => finalizedResults.has(entryId));
+			const settlingEntryIds = entryIds.filter((entryId) => !finalizedResults.has(entryId));
+			const durableResults = durableEntryIds
+				.map((entryId) => finalizedResults.get(entryId))
+				.filter((result): result is EntryEventResult => result !== undefined);
+			const [durablePicks, settlingPicks] = await Promise.all([
+				durableEntryIds.length > 0
+					? entryLiveRepository.getEntryEventPicksByIds(
+							context,
+							durableEntryIds,
+							eventId,
+							false,
+							finalizedPicksRevision(eventId, durableResults)
+						)
+					: Promise.resolve(new Map<number, EntryEventPick>()),
+				settlingEntryIds.length > 0
+					? entryLiveRepository.getEntryEventPicksByIds(context, settlingEntryIds, eventId, true)
+					: Promise.resolve(new Map<number, EntryEventPick>()),
+			]);
+			for (const [entryId, pick] of [...durablePicks, ...settlingPicks]) {
+				picksByEntry.set(entryId, pick);
+			}
 		}
+		const readyEntryIds = entryIds.filter((entryId) =>
+			hasCompleteEntryEventPick(picksByEntry.get(entryId), eventId, entryId, !provisional)
+		);
+		const readyEntryIdSet = new Set(readyEntryIds);
 		const results = new Map<number, LiveCalcData>();
 		for (const entryId of entryIds) {
-			if (!readyEntryIds.includes(entryId)) {
-				const noPicks = buildNoPicksLiveCalcData(
-					entryId,
-					eventId,
-					entriesById.get(entryId) ?? null,
-					previousResultsByEntry.get(entryId) ?? null
-				);
+			if (!readyEntryIdSet.has(entryId)) {
+				const entry = entriesById.get(entryId) ?? null;
+				const previousResult = previousResultsByEntry.get(entryId) ?? null;
+				const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
+				const finalized = finalizedResultsByEntry.get(entryId);
+				const finalRow = finalized
+					? buildFinalManagerScoreRow(
+							context.currentSeason.seasonCode,
+							eventId,
+							entryId,
+							finalized,
+							finalized.richSyncedAt
+						)
+					: undefined;
+				const noPicks = buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
 				const manager = buildManagerScore({
-					row: managerScores.rows.get(entryId),
+					row: finalRow ?? managerScores.rows.get(entryId),
 					upstreamErrorCode: managerScores.errorCode,
 					provisional,
 					available: false,
-					transferCost: 0,
-					detailEventPoints: 0,
+					transferCost: finalized?.eventTransfersCost ?? 0,
+					detailEventPoints: finalized?.eventPoints ?? 0,
+					previousOverallPoints: finalized
+						? finalized.overallPoints - finalized.eventNetPoints
+						: baseline.resolved
+							? baseline.overallPoints
+							: null,
 					nextRefreshAt: managerScores.nextRefreshAt,
 				});
 				results.set(entryId, {
@@ -559,6 +633,12 @@ export const entryLiveBatchService = {
 					provisional,
 					score: manager.score,
 					rank: manager.headline.rank,
+					eventTransfers: finalized?.eventTransfers,
+					transferCost: manager.score.transferCost,
+					chip: normalizeChip(finalized?.eventChip ?? noPicks.chip),
+					lastOverallPoints: finalized
+						? finalized.overallPoints - finalized.eventNetPoints
+						: noPicks.lastOverallPoints,
 					livePoints: manager.headline.livePoints,
 					liveNetPoints: manager.headline.liveNetPoints,
 					liveTotalPoints: manager.headline.liveTotalPoints,
@@ -582,7 +662,10 @@ export const entryLiveBatchService = {
 		// Finalized and historical desks still need the durable player projection
 		// for detail rows. Only the manager headline switches to the official final
 		// result; suppressing this read made finalized entries silently lose details.
-		const needsLiveDetails = includeLive;
+		// A caller may omit the heavy display detail, but every active score still
+		// requires the coherent event-live payload. includeLive is never allowed to
+		// switch the manager headline to another scoring source.
+		const needsLiveDetails = readyEntryIds.length > 0;
 		const useTargetedLiveRead =
 			needsLiveDetails && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
 		const [liveByPlayerRaw, fixtures, teams, transfersByEntry, fullSnapshotMeta] =
@@ -601,7 +684,9 @@ export const entryLiveBatchService = {
 
 		// Collect all unique player IDs from picks and transfers
 		const allPlayerIds = new Set<number>();
-		for (const [, picks] of picksByEntry) {
+		for (const entryId of readyEntryIds) {
+			const picks = picksByEntry.get(entryId);
+			if (!picks) continue;
 			for (const pick of picks.picks) allPlayerIds.add(pick.element);
 		}
 		for (const [, rows] of transfersByEntry) {
@@ -683,38 +768,24 @@ export const entryLiveBatchService = {
 				};
 
 				const calcData = {
-					...computeSingleEntry(entryId, eventId, perEntry, shared, provisional, legacyH2H),
+					...computeSingleEntry(entryId, eventId, perEntry, shared, provisional),
 					snapshot: targetedLive?.meta ?? fullSnapshotMeta,
 				};
 				const finalized = finalizedResultsByEntry.get(entryId);
-				const finalRow: OfficialManagerScoreRow | undefined = finalized
-					? {
-							season: context.currentSeason.seasonCode,
+				const finalRow = finalized
+					? buildFinalManagerScoreRow(
+							context.currentSeason.seasonCode,
 							eventId,
 							entryId,
-							eventPoints: finalized.eventPoints,
-							netEventPoints: finalized.eventNetPoints,
-							totalPoints: finalized.overallPoints,
-							totalScope: "OVERALL",
-							eventRank: finalized.eventRank,
-							overallRank: finalized.overallRank,
-							leagueRank: null,
-							transferCost: finalized.eventTransfersCost,
-							eventPointSemantics:
-								finalized.eventPoints === finalized.eventNetPoints &&
-								finalized.eventTransfersCost === 0
-									? "ZERO_COST_EQUIVALENT"
-									: finalized.eventPoints - finalized.eventTransfersCost ===
-										  finalized.eventNetPoints
-										? "GROSS"
-										: "UNKNOWN",
-							source: "FPL_FINAL_RESULT",
-							revision: `final:${eventId}:${entryId}:${finalized.overallPoints}:${finalized.overallRank}`,
-							checkedAt: new Date().toISOString(),
-							upstreamUpdatedAt: null,
-							staleAt: new Date(Date.now() + 90_000).toISOString(),
-						}
+							finalized,
+							finalized.richSyncedAt
+						)
 					: undefined;
+				const baseline = resolvePreviousEventBaseline(
+					perEntry.entry,
+					eventId,
+					perEntry.previousResult
+				);
 				const manager = buildManagerScore({
 					row: finalRow ?? managerScores.rows.get(entryId),
 					upstreamErrorCode: managerScores.errorCode,
@@ -722,28 +793,28 @@ export const entryLiveBatchService = {
 					available: true,
 					transferCost: calcData.transferCost,
 					detailEventPoints: calcData.livePoints,
-					previousOverallPoints: perEntry.previousResult?.overallPoints ?? null,
+					previousOverallPoints: finalized
+						? finalized.overallPoints - finalized.eventNetPoints
+						: baseline.resolved
+							? baseline.overallPoints
+							: null,
+					eventLiveAuthority: calcData.snapshot
+						? {
+								revision: calcData.snapshot.revision,
+								checkedAt: calcData.snapshot.checkedAt,
+							}
+						: null,
 					nextRefreshAt: managerScores.nextRefreshAt,
 				});
-				// H2H has no official live matchup table. Its provisional result is
-				// safe only when the official manager row carries a provable net-point
-				// semantic; never compare gross/unknown values or local estimates.
-				const h2hHasOfficialNet =
-					manager.score.source !== "UNAVAILABLE" &&
-					typeof manager.score.netEventPoints === "number" &&
-					manager.score.eventPointSemantics !== "UNKNOWN";
-				const headline = legacyH2H
-					? h2hHasOfficialNet
-						? manager.headline
-						: { rank: 0, livePoints: 0, liveNetPoints: 0, liveTotalPoints: 0 }
-					: manager.headline;
 				results.set(entryId, {
 					...calcData,
 					score: manager.score,
-					rank: headline.rank,
-					livePoints: headline.livePoints,
-					liveNetPoints: headline.liveNetPoints,
-					liveTotalPoints: headline.liveTotalPoints,
+					rank: manager.headline.rank,
+					eventTransfers: finalized?.eventTransfers ?? calcData.transfersList.length,
+					transferCost: manager.score.transferCost,
+					livePoints: manager.headline.livePoints,
+					liveNetPoints: manager.headline.liveNetPoints,
+					liveTotalPoints: manager.headline.liveTotalPoints,
 					overallRank: manager.score.overallRank ?? calcData.overallRank,
 				});
 			} catch (err) {

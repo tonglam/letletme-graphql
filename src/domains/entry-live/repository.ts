@@ -22,6 +22,101 @@ export type Pick = {
 	isViceCaptain: boolean;
 };
 
+/**
+ * Active event/live scoring is only valid with one complete official FPL squad.
+ * Keep cache parsing tolerant, but fail closed at the scoring authority boundary.
+ */
+export const hasCompleteEntryEventPick = (
+	pickEntity: EntryEventPick | null | undefined,
+	eventId: number,
+	entryId: number,
+	allowFinalNoCaptainBoost = false
+): pickEntity is EntryEventPick => {
+	if (
+		!pickEntity ||
+		pickEntity.eventId !== eventId ||
+		pickEntity.entryId !== entryId ||
+		!Number.isSafeInteger(pickEntity.transfersCost) ||
+		pickEntity.transfersCost < 0 ||
+		pickEntity.picks.length !== 15
+	) {
+		return false;
+	}
+
+	const positions = new Set<number>();
+	const elements = new Set<number>();
+	let captains = 0;
+	let viceCaptains = 0;
+	let positiveMultipliers = 0;
+	let multiplierTotal = 0;
+	let boostedMultipliers = 0;
+	let boostedMultiplierBelongsToCaptaincy = true;
+	let captainMultiplier: number | null = null;
+	let viceCaptainMultiplier: number | null = null;
+	for (const pick of pickEntity.picks) {
+		if (
+			pick.eventId !== eventId ||
+			pick.entryId !== entryId ||
+			!Number.isSafeInteger(pick.element) ||
+			pick.element <= 0 ||
+			!Number.isSafeInteger(pick.position) ||
+			pick.position < 1 ||
+			pick.position > 15 ||
+			!Number.isSafeInteger(pick.multiplier) ||
+			pick.multiplier < 0 ||
+			pick.multiplier > 3
+		) {
+			return false;
+		}
+		positions.add(pick.position);
+		elements.add(pick.element);
+		if (pick.isCaptain && pick.isViceCaptain) return false;
+		if (pick.isCaptain) {
+			captains += 1;
+			captainMultiplier = pick.multiplier;
+		}
+		if (pick.isViceCaptain) {
+			viceCaptains += 1;
+			viceCaptainMultiplier = pick.multiplier;
+		}
+		if (pick.multiplier > 0) positiveMultipliers += 1;
+		multiplierTotal += pick.multiplier;
+		if (pick.multiplier > 1) {
+			boostedMultipliers += 1;
+			boostedMultiplierBelongsToCaptaincy =
+				boostedMultiplierBelongsToCaptaincy && (pick.isCaptain || pick.isViceCaptain);
+		}
+	}
+
+	const hasOfficialCaptainBoostShape =
+		boostedMultipliers === 1 &&
+		boostedMultiplierBelongsToCaptaincy &&
+		// When FPL promotes the vice-captain, the original captain no longer
+		// contributes to the XI. Accepting captain=1 with vice=2 would count 12
+		// players while still satisfying the aggregate multiplier totals below.
+		(viceCaptainMultiplier === null || viceCaptainMultiplier <= 1 || captainMultiplier === 0) &&
+		((positiveMultipliers === 11 && (multiplierTotal === 12 || multiplierTotal === 13)) ||
+			(pickEntity.chip?.trim().toLowerCase() === "bboost" &&
+				((positiveMultipliers === 15 && multiplierTotal === 16) ||
+					(positiveMultipliers === 14 && multiplierTotal === 15))));
+	const hasFinalNoCaptainBoostShape =
+		allowFinalNoCaptainBoost &&
+		boostedMultipliers === 0 &&
+		captainMultiplier === 0 &&
+		viceCaptainMultiplier === 0 &&
+		((positiveMultipliers === 11 && multiplierTotal === 11) ||
+			(pickEntity.chip?.trim().toLowerCase() === "bboost" &&
+				positiveMultipliers === 13 &&
+				multiplierTotal === 13));
+	return (
+		positions.size === 15 &&
+		elements.size === 15 &&
+		captains === 1 &&
+		viceCaptains === 1 &&
+		(hasOfficialCaptainBoostShape || hasFinalNoCaptainBoostShape)
+	);
+};
+
 export type EntryEventTransferRow = {
 	eventId: number;
 	entryId: number;
@@ -76,6 +171,8 @@ const isEntryEventPick = (value: unknown): value is EntryEventPick => {
 	return (
 		asNumber(value.entryId) !== null &&
 		asNumber(value.eventId) !== null &&
+		Number.isSafeInteger(value.transfersCost) &&
+		Number(value.transfersCost) >= 0 &&
 		value.picks.every((pick) => isRecord(pick) && asNumber(pick.element) !== null)
 	);
 };
@@ -136,12 +233,12 @@ const parsePick = (raw: unknown, fallback: { eventId: number; entryId: number })
 
 	const element = asNumber(raw.element);
 	const position = asNumber(raw.position);
-	const multiplier = asNumber(raw.multiplier) ?? 1;
+	const multiplier = asNumber(raw.multiplier);
 
 	const isCaptain = asBoolean(raw.is_captain) ?? false;
 	const isViceCaptain = asBoolean(raw.is_vice_captain) ?? false;
 
-	if (!element || !position) {
+	if (!element || !position || multiplier === null) {
 		return null;
 	}
 
@@ -274,7 +371,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 	): Promise<EntryEventPick | null> {
 		if (!Number.isSafeInteger(entryId) || entryId <= 0) return null;
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
-		const cacheKey = gqlCacheKey(context, `entries:picks:${entryId}:${eventId}`);
+		const cacheKey = gqlCacheKey(context, `entries:picks:v2:${entryId}:${eventId}`);
 		const cached = await parseCachedJson(context, cacheKey, isEntryEventPick);
 		if (cached) {
 			return cached;
@@ -300,7 +397,18 @@ export const entryLiveRepository: EntryLiveRepository = {
 
 		const picksRaw = row.picks ?? null;
 		const chip = asString(row.chip);
-		const transfersCost = asNumber(row.transfers_cost) ?? 0;
+		const transfersCost = asNumber(row.transfers_cost);
+		if (
+			typeof transfersCost !== "number" ||
+			!Number.isSafeInteger(transfersCost) ||
+			transfersCost < 0
+		) {
+			context.logger.warn(
+				{ entryId, eventId },
+				"Ignoring entry picks without an official transfer cost"
+			);
+			return null;
+		}
 
 		const picks = parsePicks(picksRaw, { entryId, eventId });
 
@@ -342,8 +450,8 @@ export const entryLiveRepository: EntryLiveRepository = {
 			gqlCacheKey(
 				context,
 				finalizationRevision
-					? `entries:picks:${id}:${eventId}:final:${finalizationRevision}`
-					: `entries:picks:${id}:${eventId}`
+					? `entries:picks:v2:${id}:${eventId}:final:${finalizationRevision}`
+					: `entries:picks:v2:${id}:${eventId}`
 			);
 		const cacheKeys = uniqueIds.map(cacheKeyFor);
 		const results = new Map<number, EntryEventPick>();
@@ -405,7 +513,18 @@ export const entryLiveRepository: EntryLiveRepository = {
 
 			const picksRaw = row.picks ?? null;
 			const chip = asString(row.chip);
-			const transfersCost = asNumber(row.transfers_cost) ?? 0;
+			const transfersCost = asNumber(row.transfers_cost);
+			if (
+				typeof transfersCost !== "number" ||
+				!Number.isSafeInteger(transfersCost) ||
+				transfersCost < 0
+			) {
+				context.logger.warn(
+					{ entryId: rowEntryId, eventId },
+					"Ignoring entry picks without an official transfer cost"
+				);
+				continue;
+			}
 
 			const picks = parsePicks(picksRaw, { entryId: rowEntryId, eventId });
 			const pick: EntryEventPick = {

@@ -174,6 +174,7 @@ describe("entriesService.getEntryEventPicks", () => {
 					is_vice_captain: false,
 				},
 			],
+			richSyncedAt: "2026-08-20T00:00:00.000Z",
 			teamValue: 1020,
 			bank: 5,
 		};
@@ -262,6 +263,7 @@ describe("entriesService.getEntryEventPicks", () => {
 			eventPlayedCaptain: 4,
 			eventCaptainPoints: 10,
 			eventPicks: [{ element: 4, position: 1, multiplier: 2, is_captain: true }],
+			richSyncedAt: "2026-08-20T00:00:00.000Z",
 			teamValue: 1000,
 			bank: 0,
 		});
@@ -310,6 +312,7 @@ describe("entriesService.getEntryEventPicks", () => {
 			eventPlayedCaptain: 4,
 			eventCaptainPoints: 10,
 			eventPicks: [{ element: 4, position: 1, multiplier: 2, is_captain: true }],
+			richSyncedAt: "2026-08-20T00:00:00.000Z",
 			teamValue: 1000,
 			bank: 0,
 		});
@@ -372,6 +375,7 @@ describe("entriesService.getEntryEventPicks", () => {
 			eventPlayedCaptain: 4,
 			eventCaptainPoints: 10,
 			eventPicks: [{ element: 4, position: 1, multiplier: 2, is_captain: true }],
+			richSyncedAt: "2026-08-20T00:00:00.000Z",
 			teamValue: 1000,
 			bank: 0,
 		});
@@ -408,6 +412,7 @@ describe("entriesService.getEntryEventPicks", () => {
 			eventPlayedCaptain: 999,
 			eventCaptainPoints: 10,
 			eventPicks: [{ element: 999, position: 1, multiplier: 2, is_captain: true }],
+			richSyncedAt: "2026-08-20T00:00:00.000Z",
 			teamValue: 1000,
 			bank: 0,
 		});
@@ -441,6 +446,7 @@ describe("entriesService.getEntryEventPicks", () => {
 				eventPlayedCaptain: 4,
 				eventCaptainPoints: 10,
 				eventPicks: [{ element: 4, position: 1, multiplier: 2, is_captain: true }],
+				richSyncedAt: "2026-08-20T00:00:00.000Z",
 				teamValue: 1000,
 				bank: 0,
 			})

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import { entryLiveBatchService } from "../../../src/domains/entry-live/batch-service";
 import { LeagueType } from "../../../src/domains/leagues/repository";
 import {
 	type DbTournamentBattleGroupResultRow,
 	type DbTournamentEntryRow,
 	type DbTournamentInfoRow,
 	type DbTournamentPointsGroupResultRow,
+	type OfficialH2HSnapshotLoad,
 	type TournamentEventResult,
 	extractTournamentIds,
 	GroupMode,
@@ -13,6 +15,7 @@ import {
 	mapTournamentEventResult,
 	mapTournamentInfo,
 	projectHistoricalOfficialH2HStandings,
+	projectOfficialH2HEventLiveSnapshot,
 	projectOfficialH2HStandingsFromResults,
 	resolveOfficialH2HReferenceEventId,
 	TournamentMode,
@@ -35,6 +38,657 @@ const testCacheKey = (key: string): string =>
 		} as GraphQLContext,
 		key.startsWith("tournaments:") ? `tournaments:v2:${key.slice("tournaments:".length)}` : key
 	);
+
+const activeOfficialH2HLoad = (): OfficialH2HSnapshotLoad => ({
+	snapshot: {
+		tournament: {
+			id: 9,
+			name: "Official H2H",
+			totalTeamNum: 2,
+			knockoutTeamNum: 2,
+			knockoutEventNum: 1,
+			knockoutStartedEventId: 1,
+		} as OfficialH2HSnapshotLoad["snapshot"]["tournament"],
+		eventId: 1,
+		awaitingSchedule: false,
+		scoreSource: "UNAVAILABLE",
+		scoreRevision: null,
+		scoreCheckedAt: null,
+		standings: [
+			{
+				entryId: 101,
+				entryName: "Entry 101",
+				playerName: "Manager 101",
+				rank: 1,
+				matchPoints: 3,
+				played: 1,
+				won: 1,
+				drawn: 0,
+				lost: 0,
+				pointsFor: 23,
+			},
+			{
+				entryId: 102,
+				entryName: "Entry 102",
+				playerName: "Manager 102",
+				rank: 2,
+				matchPoints: 0,
+				played: 1,
+				won: 0,
+				drawn: 0,
+				lost: 1,
+				pointsFor: 19,
+			},
+		],
+		matches: [
+			{
+				officialMatchId: 7001,
+				eventId: 1,
+				sourceOrder: 1,
+				phase: "REGULAR",
+				knockoutName: null,
+				isBye: false,
+				home: {
+					entryId: 101,
+					entryName: "Entry 101",
+					playerName: "Manager 101",
+					isAverage: false,
+					points: 23,
+					matchPoints: 3,
+				},
+				away: {
+					entryId: 102,
+					entryName: "Entry 102",
+					playerName: "Manager 102",
+					isAverage: false,
+					points: 19,
+					matchPoints: 0,
+				},
+				winnerEntryId: 101,
+				tiebreak: null,
+				sourceCheckedAt: "2026-08-24T00:00:00.000Z",
+			},
+		],
+	},
+	history: [
+		{
+			id: 7001,
+			tournament_id: 9,
+			group_id: 1,
+			event_id: 1,
+			home_entry_id: 101,
+			home_net_points: 23,
+			home_rank: null,
+			home_match_points: 3,
+			away_entry_id: 102,
+			away_net_points: 19,
+			away_rank: null,
+			away_match_points: 0,
+			official_match_id: 7001,
+			source_order: 1,
+			home_is_average: false,
+			away_is_average: false,
+			is_bye: false,
+			source_checked_at: "2026-08-24T00:00:00.000Z",
+		},
+	],
+	standingsPublished: true,
+	currentEventComplete: true,
+	validatedFinalizedEventIds: new Set(),
+});
+
+describe("projectOfficialH2HEventLiveSnapshot", () => {
+	it("replaces a lagging official H2H score with one coherent event-live batch", () => {
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			activeOfficialH2HLoad(),
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+				]),
+				revision: "event-live-gw1-r8",
+				checkedAt: "2026-08-24T00:01:00.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot).toMatchObject({
+			scoreSource: "FPL_EVENT_LIVE",
+			scoreRevision: "event-live-gw1-r8",
+			scoreCheckedAt: "2026-08-24T00:01:00.000Z",
+			matches: [
+				{
+					home: { entryId: 101, points: 37, matchPoints: 3 },
+					away: { entryId: 102, points: 31, matchPoints: 0 },
+					winnerEntryId: 101,
+				},
+			],
+		});
+		expect(projected.snapshot.standings).toEqual([
+			expect.objectContaining({ entryId: 101, matchPoints: 3, pointsFor: 37 }),
+			expect.objectContaining({ entryId: 102, matchPoints: 0, pointsFor: 31 }),
+		]);
+	});
+
+	it("fails the whole active H2H round closed when one manager score is missing", () => {
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			activeOfficialH2HLoad(),
+			1,
+			{
+				scores: new Map([[101, 37]]),
+				revision: "event-live-gw1-r8",
+				checkedAt: "2026-08-24T00:01:00.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot.scoreSource).toBe("UNAVAILABLE");
+		expect(projected.snapshot.matches[0]).toMatchObject({
+			home: { points: null, matchPoints: null },
+			away: { points: null, matchPoints: null },
+			winnerEntryId: null,
+		});
+		expect(projected.snapshot.standings.every((standing) => standing.played === 0)).toBe(true);
+	});
+
+	it("accepts an all-zero event-live batch without treating it as missing", () => {
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			activeOfficialH2HLoad(),
+			1,
+			{
+				scores: new Map([
+					[101, 0],
+					[102, 0],
+				]),
+				revision: "event-live-gw1-r9",
+				checkedAt: "2026-08-24T00:02:00.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot.scoreSource).toBe("FPL_EVENT_LIVE");
+		expect(projected.snapshot.matches[0]).toMatchObject({
+			home: { points: 0, matchPoints: 1 },
+			away: { points: 0, matchPoints: 1 },
+			winnerEntryId: null,
+		});
+	});
+
+	it("fails closed when the loaded H2H roster is truncated", () => {
+		const loaded = activeOfficialH2HLoad();
+		loaded.snapshot.tournament.totalTeamNum = 3;
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+				]),
+				revision: "event-live-gw1-r10",
+				checkedAt: "2026-08-24T00:03:00.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot.scoreSource).toBe("UNAVAILABLE");
+		expect(projected.snapshot.matches[0]?.home.points).toBeNull();
+	});
+
+	it("does not stamp an invalid finalized H2H round as official", () => {
+		const loaded = activeOfficialH2HLoad();
+		loaded.currentEventComplete = false;
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+				]),
+				revision: "event-live-gw1-r11",
+				checkedAt: "2026-08-24T00:04:00.000Z",
+				state: "settled",
+			},
+			new Set([1])
+		);
+
+		expect(projected.snapshot.scoreSource).toBe("UNAVAILABLE");
+		expect(projected.snapshot.scoreRevision).toBeNull();
+		expect(projected.snapshot.matches[0]?.winnerEntryId).toBeNull();
+	});
+
+	it("does not mix an Average Team H2H score into an event-live revision", () => {
+		const loaded = activeOfficialH2HLoad();
+		const row = loaded.history[0]!;
+		row.away_entry_id = null;
+		row.away_is_average = true;
+		loaded.snapshot.matches[0]!.away.entryId = null;
+		loaded.snapshot.matches[0]!.away.isAverage = true;
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+				]),
+				revision: "event-live-gw1-r12",
+				checkedAt: "2026-08-24T00:05:00.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot.scoreSource).toBe("UNAVAILABLE");
+		expect(projected.snapshot.matches[0]?.away.points).toBeNull();
+	});
+
+	it("uses the event-live batch for an active knockout-only round", () => {
+		const loaded = activeOfficialH2HLoad();
+		loaded.history = [];
+		loaded.currentEventComplete = false;
+		loaded.snapshot.matches[0] = {
+			...loaded.snapshot.matches[0]!,
+			phase: "KNOCKOUT",
+			knockoutName: "Final",
+		};
+
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+				]),
+				revision: "event-live-gw1-knockout",
+				checkedAt: "2026-08-24T00:06:00.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot).toMatchObject({
+			scoreSource: "FPL_EVENT_LIVE",
+			scoreRevision: "event-live-gw1-knockout",
+			matches: [
+				{
+					phase: "KNOCKOUT",
+					home: { points: 37, matchPoints: 3 },
+					away: { points: 31, matchPoints: 0 },
+					winnerEntryId: 101,
+				},
+			],
+		});
+	});
+
+	it("preserves a deterministic knockout bye winner during the live overlay", () => {
+		const loaded = activeOfficialH2HLoad();
+		loaded.history = [];
+		loaded.snapshot.matches[0] = {
+			...loaded.snapshot.matches[0]!,
+			phase: "KNOCKOUT",
+			knockoutName: "Final",
+			isBye: true,
+			away: {
+				...loaded.snapshot.matches[0]!.away,
+				entryId: null,
+				points: null,
+				matchPoints: null,
+			},
+			winnerEntryId: null,
+		};
+
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([[101, 37]]),
+				revision: "event-live-gw1-bye",
+				checkedAt: "2026-08-24T00:06:30.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot.matches[0]).toMatchObject({
+			isBye: true,
+			home: { entryId: 101, points: 37, matchPoints: null },
+			away: { entryId: null, points: null, matchPoints: null },
+			winnerEntryId: 101,
+		});
+	});
+
+	it("defers a multi-event knockout winner until the aggregate is finalized", () => {
+		const loaded = activeOfficialH2HLoad();
+		loaded.history = [];
+		loaded.snapshot.tournament = {
+			...loaded.snapshot.tournament,
+			knockoutMode: KnockoutMode.DOUBLE_ELIMINATION,
+			knockoutRounds: 2,
+			knockoutEventNum: 1,
+			knockoutPlayAgainstNum: 2,
+		};
+		loaded.snapshot.matches[0] = {
+			...loaded.snapshot.matches[0]!,
+			phase: "KNOCKOUT",
+			knockoutName: "Final",
+		};
+
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+				]),
+				revision: "event-live-gw1-first-leg",
+				checkedAt: "2026-08-24T00:06:45.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot.matches[0]).toMatchObject({
+			home: { points: 37, matchPoints: null },
+			away: { points: 31, matchPoints: null },
+			winnerEntryId: null,
+		});
+	});
+
+	it("accepts a complete finalized knockout-only round", () => {
+		const knockout = {
+			tournament_id: 9,
+			event_id: 1,
+			home_entry_id: 101,
+			home_net_points: 37,
+			away_entry_id: 102,
+			away_net_points: 31,
+			match_winner: 101,
+			official_match_id: 7001,
+			source_order: 1,
+			knockout_name: "Final",
+			tiebreak: null,
+			source_checked_at: "2026-08-24T00:07:00.000Z",
+		};
+
+		expect(
+			tournamentCacheTestables.officialH2HCurrentEventIsComplete(
+				false,
+				[],
+				[knockout],
+				1,
+				new Set([1]),
+				{
+					knockoutTeamNum: 2,
+					knockoutEventNum: 1,
+					knockoutStartedEventId: 1,
+				}
+			)
+		).toBe(true);
+	});
+
+	it("rejects an incrementally published partial semifinal round", () => {
+		const firstSemifinal = {
+			tournament_id: 9,
+			event_id: 1,
+			home_entry_id: 101,
+			home_net_points: 37,
+			away_entry_id: 102,
+			away_net_points: 31,
+			match_winner: 101,
+			official_match_id: 7001,
+			source_order: 1,
+			knockout_name: "Semi-finals",
+			tiebreak: null,
+			source_checked_at: "2026-08-24T00:07:00.000Z",
+		};
+		const config = {
+			knockoutTeamNum: 4,
+			knockoutEventNum: 2,
+			knockoutStartedEventId: 1,
+		};
+
+		expect(
+			tournamentCacheTestables.officialH2HCurrentEventIsComplete(
+				false,
+				[],
+				[firstSemifinal],
+				1,
+				new Set([1]),
+				config
+			)
+		).toBe(false);
+		expect(
+			tournamentCacheTestables.officialH2HCurrentEventIsComplete(
+				false,
+				[],
+				[
+					firstSemifinal,
+					{
+						...firstSemifinal,
+						home_entry_id: 103,
+						away_entry_id: 104,
+						match_winner: 103,
+						official_match_id: 7002,
+						source_order: 2,
+					},
+				],
+				1,
+				new Set([1]),
+				config
+			)
+		).toBe(true);
+	});
+
+	it("accepts a complete multi-event final using bracket-round cardinality", () => {
+		const final = {
+			tournament_id: 9,
+			event_id: 5,
+			home_entry_id: 101,
+			home_net_points: 37,
+			away_entry_id: 102,
+			away_net_points: 31,
+			match_winner: 101,
+			official_match_id: 7001,
+			source_order: 1,
+			knockout_name: "Final",
+			tiebreak: null,
+			source_checked_at: "2026-08-24T00:07:00.000Z",
+		};
+		const common = {
+			knockoutMode: KnockoutMode.DOUBLE_ELIMINATION,
+			knockoutTeamNum: 8,
+			knockoutStartedEventId: 1,
+			knockoutPlayAgainstNum: 2,
+		};
+
+		for (const config of [
+			{ ...common, knockoutRounds: 3, knockoutEventNum: 6 },
+			{ ...common, knockoutRounds: 6, knockoutEventNum: 3 },
+		]) {
+			expect(
+				tournamentCacheTestables.officialH2HCurrentEventIsComplete(
+					false,
+					[],
+					[final],
+					5,
+					new Set([5]),
+					config
+				)
+			).toBe(true);
+		}
+	});
+
+	it("requires one source marker across a combined finalized round", () => {
+		const battle: DbTournamentBattleGroupResultRow = {
+			id: 7000,
+			tournament_id: 9,
+			group_id: 1,
+			event_id: 1,
+			home_entry_id: 201,
+			home_net_points: 22,
+			home_rank: null,
+			home_match_points: 3,
+			away_entry_id: 202,
+			away_net_points: 18,
+			away_rank: null,
+			away_match_points: 0,
+			source_checked_at: "2026-08-24T00:07:00.000Z",
+		};
+		const knockout = {
+			tournament_id: 9,
+			event_id: 1,
+			home_entry_id: 101,
+			home_net_points: 37,
+			away_entry_id: 102,
+			away_net_points: 31,
+			match_winner: 101,
+			official_match_id: 7001,
+			source_order: 1,
+			knockout_name: "Final",
+			tiebreak: null,
+			source_checked_at: "2026-08-24T00:08:00.000Z",
+		};
+		const config = {
+			knockoutTeamNum: 2,
+			knockoutRounds: 1,
+			knockoutEventNum: 1,
+			knockoutStartedEventId: 1,
+		};
+
+		expect(
+			tournamentCacheTestables.officialH2HCurrentEventIsComplete(
+				true,
+				[battle],
+				[knockout],
+				1,
+				new Set([1]),
+				config
+			)
+		).toBe(false);
+		expect(
+			tournamentCacheTestables.officialH2HCurrentEventIsComplete(
+				true,
+				[battle],
+				[{ ...knockout, source_checked_at: battle.source_checked_at ?? null }],
+				1,
+				new Set([1]),
+				config
+			)
+		).toBe(true);
+	});
+
+	it("does not restore rejected finalized history while suppressing an active round", () => {
+		const loaded = activeOfficialH2HLoad();
+		loaded.validatedFinalizedEventIds = new Set();
+		const suppressed = tournamentCacheTestables.suppressActiveOfficialH2HScores(
+			loaded,
+			2,
+			new Set([1])
+		);
+
+		expect(suppressed.snapshot.standings).toEqual([
+			expect.objectContaining({ entryId: 101, played: 0, matchPoints: 0 }),
+			expect.objectContaining({ entryId: 102, played: 0, matchPoints: 0 }),
+		]);
+	});
+});
+
+describe("applyActiveOfficialH2HScoreAuthority", () => {
+	it("isolates event-live score acquisition per tournament", async () => {
+		const first = activeOfficialH2HLoad();
+		const second = activeOfficialH2HLoad();
+		second.snapshot.tournament = { ...second.snapshot.tournament, id: 10 };
+		const replaceEntryId = (entryId: number | null): number | null =>
+			entryId === 101 ? 201 : entryId === 102 ? 202 : entryId;
+		second.snapshot.standings = second.snapshot.standings.map((standing) => ({
+			...standing,
+			entryId: replaceEntryId(standing.entryId)!,
+		}));
+		second.snapshot.matches = second.snapshot.matches.map((match) => ({
+			...match,
+			home: { ...match.home, entryId: replaceEntryId(match.home.entryId) },
+			away: { ...match.away, entryId: replaceEntryId(match.away.entryId) },
+			winnerEntryId: replaceEntryId(match.winnerEntryId),
+		}));
+		second.history = second.history.map((row) => ({
+			...row,
+			tournament_id: 10,
+			home_entry_id: replaceEntryId(row.home_entry_id),
+			away_entry_id: replaceEntryId(row.away_entry_id),
+		}));
+
+		const original = entryLiveBatchService.calcLivePointsForEntries;
+		const calls: number[][] = [];
+		let lineupRevision = "lineup-a";
+		entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, entryIds) => {
+			calls.push([...entryIds]);
+			if (entryIds.includes(201)) throw new Error("second tournament unavailable");
+			const checkedAt = "2026-08-24T00:08:00.000Z";
+			return {
+				results: new Map(
+					entryIds.map((entryId, index) => [
+						entryId,
+						{
+							score: {
+								revision: `event-live:8:${entryId}:${lineupRevision}`,
+								checkedAt,
+								source: "FPL_EVENT_LIVE",
+								state: "FRESH",
+								netEventPoints: 37 - index * 6,
+							},
+							snapshot: { revision: "8", checkedAt, state: "live" },
+						} as never,
+					])
+				),
+				errors: [],
+				meta: {
+					eventId: 1,
+					totalEntries: entryIds.length,
+					succeededCount: entryIds.length,
+					failedCount: 0,
+				},
+			};
+		};
+
+		try {
+			const projected = await tournamentCacheTestables.applyActiveOfficialH2HScoreAuthority(
+				{ logger: { warn: () => undefined } } as never,
+				new Map([
+					[9, first],
+					[10, second],
+				]),
+				1,
+				new Set()
+			);
+
+			expect(calls.map((entryIds) => entryIds.join(",")).sort()).toEqual(["101,102", "201,202"]);
+			expect(projected.get(9)?.snapshot.scoreSource).toBe("FPL_EVENT_LIVE");
+			expect(projected.get(10)?.snapshot.scoreSource).toBe("UNAVAILABLE");
+			const firstRevision = projected.get(9)?.snapshot.scoreRevision;
+			expect(firstRevision).toMatch(/^event-live-h2h:1:[0-9a-f]{24}$/);
+
+			lineupRevision = "lineup-b";
+			const refreshed = await tournamentCacheTestables.applyActiveOfficialH2HScoreAuthority(
+				{ logger: { warn: () => undefined } } as never,
+				new Map([[9, first]]),
+				1,
+				new Set()
+			);
+			expect(refreshed.get(9)?.snapshot.scoreRevision).not.toBe(firstRevision);
+		} finally {
+			entryLiveBatchService.calcLivePointsForEntries = original;
+		}
+	});
+});
 
 describe("projectHistoricalOfficialH2HStandings", () => {
 	it("ranks saved official results by match points then Points For with shared ranks", () => {
@@ -3526,8 +4180,8 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 	});
 });
 
-describe("official H2H live standings read-side fallback", () => {
-	it("keeps the tournament snapshot and Entry Desk on the same complete live projection", async () => {
+describe("official H2H active score authority", () => {
+	it("does not expose the separately refreshed H2H score when event-live calculation is unavailable", async () => {
 		const tournament: DbTournamentInfoRow = {
 			id: 9,
 			name: "Official H2H",
@@ -3596,7 +4250,7 @@ describe("official H2H live standings read-side fallback", () => {
 				source_checked_at: new Date("2026-08-23T01:00:00.000Z"),
 			},
 		];
-		let historyBattles: DbTournamentBattleGroupResultRow[] | null = null;
+		const historyBattles: DbTournamentBattleGroupResultRow[] | null = null;
 		const memberships = [{ tournament_id: 9, entry_id: 102 }];
 		const canonicalMemberships = [{ tournament_id: 9, entry_id: 101 }];
 		const entries = [
@@ -3695,113 +4349,44 @@ describe("official H2H live standings read-side fallback", () => {
 		const snapshot = await tournamentsRepository.getTournamentOfficialH2H(context, 9, 1);
 		const desk = await tournamentsRepository.getEntryOfficialH2HDesk(context, 101);
 		expect(currentEventBattleReads).toBe(0);
-
-		expect(snapshot.standings).toEqual([
-			expect.objectContaining({
-				entryId: 101,
-				rank: 1,
-				matchPoints: 3,
-				played: 1,
-				won: 1,
-				pointsFor: 49,
-			}),
-			expect.objectContaining({
-				entryId: 102,
-				rank: 2,
-				matchPoints: 0,
-				played: 1,
-				lost: 1,
-				pointsFor: 23,
-			}),
-		]);
+		expect(snapshot.scoreSource).toBe("UNAVAILABLE");
+		expect(snapshot.scoreRevision).toBeNull();
+		expect(snapshot.standings.every((standing) => standing.played === 0)).toBe(true);
 		expect(snapshot.matches[0]).toMatchObject({
-			home: { entryId: 101, points: 49, matchPoints: 3 },
-			away: { entryId: 102, points: 23, matchPoints: 0 },
-			winnerEntryId: 101,
-			sourceCheckedAt: "2026-08-23T01:00:00.000Z",
+			home: { entryId: 101, points: null, matchPoints: null },
+			away: { entryId: 102, points: null, matchPoints: null },
+			winnerEntryId: null,
+			sourceCheckedAt: null,
 		});
 		expect(desk).toHaveLength(1);
 		expect(desk[0]).toMatchObject({
 			tournamentId: 9,
+			scoreSource: "UNAVAILABLE",
 			rank: 1,
 			lastRank: null,
-			matchPoints: 3,
-			standingsPublished: true,
-			standingsCurrentEventComplete: true,
+			matchPoints: 0,
+			standingsPublished: false,
+			standingsCurrentEventComplete: false,
 			match: {
-				home: { entryId: 101, points: 49, matchPoints: 3 },
-				away: { entryId: 102, points: 23, matchPoints: 0 },
-				winnerEntryId: 101,
+				home: { entryId: 101, points: null, matchPoints: null },
+				away: { entryId: 102, points: null, matchPoints: null },
+				winnerEntryId: null,
 			},
 		});
 
+		// Changing only the official H2H feed must never change the public active score.
 		battles[0]!.home_net_points = 20;
 		battles[0]!.away_net_points = 50;
 		const updatedSnapshot = await tournamentsRepository.getTournamentOfficialH2H(context, 9, 1);
-		const updatedDesk = await tournamentsRepository.getEntryOfficialH2HDesk(context, 101);
-		expect(updatedSnapshot.standings).toEqual([
-			expect.objectContaining({ entryId: 102, rank: 1, matchPoints: 3, pointsFor: 50 }),
-			expect.objectContaining({ entryId: 101, rank: 2, matchPoints: 0, pointsFor: 20 }),
-		]);
-		expect(updatedDesk[0]).toMatchObject({
-			rank: 2,
-			matchPoints: 0,
-			match: {
-				home: { entryId: 101, points: 20, matchPoints: 0 },
-				away: { entryId: 102, points: 50, matchPoints: 3 },
-				winnerEntryId: 102,
-			},
-		});
-
-		battles[0]!.home_net_points = 0;
-		battles[0]!.away_net_points = 0;
-		battles[0]!.source_checked_at = new Date("2026-08-23T01:00:00.000Z");
-		historyBattles = [
-			{
-				...battles[0]!,
-				home_net_points: 55,
-				away_net_points: 25,
-				source_checked_at: new Date("2026-08-23T01:01:00.000Z"),
-			},
-		];
-		const crossPublicationSnapshot = await tournamentsRepository.getTournamentOfficialH2H(
-			context,
-			9,
-			1
-		);
-		expect(crossPublicationSnapshot.standings).toEqual([
-			expect.objectContaining({ entryId: 101, rank: 1, matchPoints: 3, pointsFor: 55 }),
-			expect.objectContaining({ entryId: 102, rank: 2, matchPoints: 0, pointsFor: 25 }),
-		]);
-		expect(crossPublicationSnapshot.matches[0]).toMatchObject({
-			home: { entryId: 101, points: 55, matchPoints: 3 },
-			away: { entryId: 102, points: 25, matchPoints: 0 },
-			winnerEntryId: 101,
-			sourceCheckedAt: "2026-08-23T01:01:00.000Z",
-		});
-		historyBattles = null;
-
-		battles[0]!.home_match_points = 3;
-		battles[0]!.away_match_points = 0;
-		battles[0]!.away_net_points = null;
-		const incompleteSnapshot = await tournamentsRepository.getTournamentOfficialH2H(context, 9, 1);
-		expect(incompleteSnapshot.standings.every((standing) => standing.played === 0)).toBe(true);
-		expect(incompleteSnapshot.matches[0]).toMatchObject({
-			home: { matchPoints: null },
-			away: { matchPoints: null },
-			winnerEntryId: null,
-		});
-
-		groups.pop();
-		battles[0]!.away_net_points = 23;
-		const incompleteGroupSnapshot = await tournamentsRepository.getTournamentOfficialH2H(
-			context,
-			9,
-			1
-		);
-		expect(incompleteGroupSnapshot.matches[0]).toMatchObject({
-			home: { entryId: 101, entryName: "WhoAMI Agent" },
-			away: { entryId: 102, entryName: "Average Killers" },
+		expect(updatedSnapshot).toMatchObject({
+			scoreSource: "UNAVAILABLE",
+			matches: [
+				{
+					home: { entryId: 101, points: null, matchPoints: null },
+					away: { entryId: 102, points: null, matchPoints: null },
+					winnerEntryId: null,
+				},
+			],
 		});
 	});
 });

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
+import {
+	entryLiveRepository,
+	hasCompleteEntryEventPick,
+} from "../../../src/domains/entry-live/repository";
 import { gqlCacheKey } from "../../../src/infra/cache-key";
 
 const buildContext = (options: { cache?: string | null; rows?: unknown[] } = {}) => {
@@ -214,6 +217,12 @@ describe("entryLiveRepository batch picks", () => {
 										is_captain: true,
 										is_vice_captain: false,
 									},
+									{
+										element: 11,
+										position: 2,
+										is_captain: false,
+										is_vice_captain: true,
+									},
 								],
 								chip: "bboost",
 								transfers_cost: 4,
@@ -241,6 +250,154 @@ describe("entryLiveRepository batch picks", () => {
 		expect(projection).toBe("entry_id, event_id, chip, picks, transfers_cost");
 		expect(result.get(1)).toMatchObject({ chip: "bboost", transfersCost: 4 });
 		expect(result.get(1)?.picks[0]).toMatchObject({ element: 10, isCaptain: true });
+		expect(result.get(1)?.picks).toHaveLength(1);
 		expect(pipelineWrites).toHaveLength(1);
+	});
+
+	it("does not publish or cache picks without an official transfer cost", async () => {
+		const pipelineWrites: unknown[][] = [];
+		const pipeline = {
+			set: (...args: unknown[]) => {
+				pipelineWrites.push(args);
+				return pipeline;
+			},
+			exec: async () => [],
+		};
+		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
+			redis: {
+				mget: async () => [null],
+				del: async () => 0,
+				pipeline: () => pipeline,
+			},
+			data: {
+				read: () => {
+					const result = {
+						data: [
+							{
+								entry_id: 1,
+								event_id: 3,
+								picks: Array.from({ length: 15 }, (_, index) => ({
+									element: index + 1,
+									position: index + 1,
+									multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+									is_captain: index === 0,
+									is_vice_captain: index === 1,
+								})),
+								chip: null,
+								transfers_cost: null,
+							},
+						],
+						error: null,
+					};
+					const query = Promise.resolve(result);
+					const builder = Object.assign(query, {
+						select: () => builder,
+						in: () => builder,
+						eq: () => builder,
+					});
+					return builder;
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const result = await entryLiveRepository.getEntryEventPicksByIds(context, [1], 3);
+
+		expect(result.has(1)).toBe(false);
+		expect(pipelineWrites).toHaveLength(0);
+	});
+});
+
+describe("hasCompleteEntryEventPick", () => {
+	const complete = () => ({
+		eventId: 3,
+		entryId: 1,
+		chip: null as string | null,
+		transfersCost: 0,
+		picks: Array.from({ length: 15 }, (_, index) => ({
+			eventId: 3,
+			entryId: 1,
+			element: index + 1,
+			position: index + 1,
+			multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+			isCaptain: index === 0,
+			isViceCaptain: index === 1,
+		})),
+	});
+
+	it("accepts one complete official 15-player squad", () => {
+		expect(hasCompleteEntryEventPick(complete(), 3, 1)).toBe(true);
+	});
+
+	it("rejects partial, duplicated, or cross-entry squads", () => {
+		const partial = complete();
+		partial.picks.pop();
+		expect(hasCompleteEntryEventPick(partial, 3, 1)).toBe(false);
+
+		const duplicated = complete();
+		duplicated.picks[14]!.element = duplicated.picks[13]!.element;
+		expect(hasCompleteEntryEventPick(duplicated, 3, 1)).toBe(false);
+
+		const crossEntry = complete();
+		crossEntry.picks[0]!.entryId = 2;
+		expect(hasCompleteEntryEventPick(crossEntry, 3, 1)).toBe(false);
+	});
+
+	it("rejects missing or impossible official multiplier distributions", () => {
+		const missingMultiplier = complete();
+		missingMultiplier.picks[2]!.multiplier = undefined as never;
+		expect(hasCompleteEntryEventPick(missingMultiplier, 3, 1)).toBe(false);
+
+		const tooManyStarters = complete();
+		tooManyStarters.picks[11]!.multiplier = 1;
+		expect(hasCompleteEntryEventPick(tooManyStarters, 3, 1)).toBe(false);
+
+		const twoBoostedPlayers = complete();
+		twoBoostedPlayers.picks[1]!.multiplier = 2;
+		twoBoostedPlayers.picks[2]!.multiplier = 0;
+		expect(hasCompleteEntryEventPick(twoBoostedPlayers, 3, 1)).toBe(false);
+
+		const boostOutsideCaptaincy = complete();
+		boostOutsideCaptaincy.picks[0]!.multiplier = 1;
+		boostOutsideCaptaincy.picks[2]!.multiplier = 2;
+		expect(hasCompleteEntryEventPick(boostOutsideCaptaincy, 3, 1)).toBe(false);
+	});
+
+	it("rejects a promoted vice-captain while the original captain remains active", () => {
+		const impossiblePromotion = complete();
+		impossiblePromotion.picks[0]!.multiplier = 1;
+		impossiblePromotion.picks[1]!.multiplier = 2;
+
+		expect(hasCompleteEntryEventPick(impossiblePromotion, 3, 1)).toBe(false);
+
+		impossiblePromotion.picks[0]!.multiplier = 0;
+		impossiblePromotion.picks[11]!.multiplier = 1;
+		expect(hasCompleteEntryEventPick(impossiblePromotion, 3, 1)).toBe(true);
+	});
+
+	it("accepts a finalized XI when both captaincy picks have no multiplier", () => {
+		const noCaptainBoost = complete();
+		noCaptainBoost.picks[0]!.multiplier = 0;
+		noCaptainBoost.picks[1]!.multiplier = 0;
+		noCaptainBoost.picks[11]!.multiplier = 1;
+		noCaptainBoost.picks[12]!.multiplier = 1;
+
+		expect(hasCompleteEntryEventPick(noCaptainBoost, 3, 1)).toBe(false);
+		expect(hasCompleteEntryEventPick(noCaptainBoost, 3, 1, true)).toBe(true);
+	});
+
+	it("accepts settled Bench Boost captain promotion and no-boost shapes", () => {
+		const promotedVice = complete();
+		promotedVice.chip = "bboost";
+		promotedVice.picks[0]!.multiplier = 0;
+		promotedVice.picks[1]!.multiplier = 2;
+		for (const pick of promotedVice.picks.slice(2)) pick.multiplier = 1;
+		expect(hasCompleteEntryEventPick(promotedVice, 3, 1, true)).toBe(true);
+
+		promotedVice.picks[1]!.multiplier = 0;
+		expect(hasCompleteEntryEventPick(promotedVice, 3, 1)).toBe(false);
+		expect(hasCompleteEntryEventPick(promotedVice, 3, 1, true)).toBe(true);
 	});
 });

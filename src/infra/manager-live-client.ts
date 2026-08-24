@@ -1,10 +1,10 @@
 /**
  * Thin client for the Data service's official manager-live publication.
  *
- * GraphQL treats this endpoint as authoritative for non-H2H manager headlines:
- * a missing/slow Data service must never turn a live board into a 5xx, but an
- * upstream miss is surfaced as UNAVAILABLE and is never replaced by a local
- * calculation or another manager-score source.
+ * During an active event, GraphQL uses this endpoint only for manager/rank
+ * metadata and reconciliation. The score itself is rebuilt from the coherent
+ * event-live publication. After data_checked, the final result row is
+ * authoritative.
  */
 
 import { metrics } from "./metrics";
@@ -14,7 +14,8 @@ import { metrics } from "./metrics";
 // upstream crawl before treating the Data service as unavailable.
 const MANAGER_LIVE_TIMEOUT_MS = 15_000;
 
-export type ManagerLiveSource = "FPL_ENTRY_SUMMARY" | "FPL_CLASSIC_STANDINGS" | "FPL_FINAL_RESULT";
+export type ManagerLiveSource =
+	"FPL_EVENT_LIVE" | "FPL_ENTRY_SUMMARY" | "FPL_CLASSIC_STANDINGS" | "FPL_FINAL_RESULT";
 export type ManagerLiveTotalScope = "OVERALL" | "CLASSIC_PHASE";
 
 export type ManagerLiveScoreRow = {
@@ -77,7 +78,8 @@ const parseRow = (value: unknown): ManagerLiveScoreRow | null => {
 		!Number.isSafeInteger(value.eventId) ||
 		typeof value.checkedAt !== "string" ||
 		typeof value.revision !== "string" ||
-		(value.source !== "FPL_ENTRY_SUMMARY" &&
+		(value.source !== "FPL_EVENT_LIVE" &&
+			value.source !== "FPL_ENTRY_SUMMARY" &&
 			value.source !== "FPL_CLASSIC_STANDINGS" &&
 			value.source !== "FPL_FINAL_RESULT") ||
 		(value.totalScope !== "OVERALL" && value.totalScope !== "CLASSIC_PHASE") ||
