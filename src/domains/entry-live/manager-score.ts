@@ -7,7 +7,11 @@ import {
 import { metrics } from "../../infra/metrics";
 
 export type LiveManagerScoreSource =
-	"FPL_ENTRY_SUMMARY" | "FPL_CLASSIC_STANDINGS" | "FPL_FINAL_RESULT" | "UNAVAILABLE";
+	| "FPL_EVENT_LIVE"
+	| "FPL_ENTRY_SUMMARY"
+	| "FPL_CLASSIC_STANDINGS"
+	| "FPL_FINAL_RESULT"
+	| "UNAVAILABLE";
 export type LiveManagerScoreState = "FRESH" | "STALE" | "SETTLING" | "FINAL" | "UNAVAILABLE";
 export type LiveManagerScoreTotalScope = "OVERALL" | "CLASSIC_PHASE" | "UNKNOWN";
 export type LiveManagerScoreSemantics = "GROSS" | "NET" | "ZERO_COST_EQUIVALENT" | "UNKNOWN";
@@ -49,6 +53,11 @@ export type ManagerScoreLoad = ManagerLiveFetchResult;
 export type OfficialManagerScoreRow =
 	ManagerLiveScoreRow | (Omit<ManagerLiveScoreRow, "source"> & { source: "FPL_FINAL_RESULT" });
 
+export type EventLiveScoreAuthority = {
+	revision: string;
+	checkedAt: string;
+};
+
 const REFRESH_SECONDS = 30;
 
 const ageSeconds = (checkedAt: string, now = Date.now()): number => {
@@ -61,6 +70,25 @@ const plusSeconds = (iso: string, seconds: number): string => {
 	return Number.isFinite(value)
 		? new Date(value + seconds * 1000).toISOString()
 		: new Date(Date.now() + seconds * 1000).toISOString();
+};
+
+const hasTraceableRevision = (value: string | null | undefined): value is string =>
+	typeof value === "string" && value.trim().length > 0;
+
+const hasTraceableCheckedAt = (value: string | null | undefined): value is string =>
+	typeof value === "string" && value.trim().length > 0 && Number.isFinite(Date.parse(value));
+
+const asOfficialTransferCost = (value: number | null | undefined): number | null =>
+	typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+export const isTraceableOfficialManagerScore = (score: LiveManagerScore): boolean => {
+	if (!hasTraceableRevision(score.revision) || !hasTraceableCheckedAt(score.checkedAt))
+		return false;
+	if (score.source === "FPL_FINAL_RESULT") return score.state === "FINAL";
+	return (
+		score.source === "FPL_EVENT_LIVE" &&
+		(score.state === "FRESH" || score.state === "STALE" || score.state === "SETTLING")
+	);
 };
 
 const isWithinStaleWindow = (
@@ -116,15 +144,29 @@ const recordScoreMetrics = (score: LiveManagerScore): void => {
 	}
 };
 
+const rowMatchesEventLiveScore = (
+	row: OfficialManagerScoreRow,
+	grossEventPoints: number,
+	netEventPoints: number
+): boolean => {
+	if (row.eventPointSemantics === "NET") return row.eventPoints === netEventPoints;
+	if (row.eventPointSemantics === "GROSS" || row.eventPointSemantics === "ZERO_COST_EQUIVALENT") {
+		return row.eventPoints === grossEventPoints;
+	}
+	if (typeof row.netEventPoints === "number") return row.netEventPoints === netEventPoints;
+	return row.eventPoints === grossEventPoints;
+};
+
 /** Build the additive score contract and the legacy flat headline aliases. */
 export function buildManagerScore(params: {
 	row?: OfficialManagerScoreRow;
 	upstreamErrorCode: ManagerScoreLoad["errorCode"];
 	provisional: boolean;
 	available: boolean;
-	transferCost: number;
+	transferCost: number | null;
 	detailEventPoints: number;
 	previousOverallPoints?: number | null;
+	eventLiveAuthority?: EventLiveScoreAuthority | null;
 	nextRefreshAt?: string | null;
 }): {
 	score: LiveManagerScore;
@@ -139,33 +181,30 @@ export function buildManagerScore(params: {
 		detailEventPoints,
 		previousOverallPoints = null,
 	} = params;
-	const effectiveTransferCost = row?.transferCost ?? transferCost;
-	const reconciliation: LiveManagerScoreReconciliation = !available
-		? "NO_LINEUP"
-		: row && typeof row.eventPoints === "number"
-			? row.eventPoints === detailEventPoints
-				? "MATCHED"
-				: "SOURCE_SKEW"
-			: "NOT_COMPARABLE";
-
-	if (row && isWithinStaleWindow(row)) {
+	const suppliedTransferCost = asOfficialTransferCost(transferCost);
+	const rowTransferCost = asOfficialTransferCost(row?.transferCost);
+	const finalTransferCost = rowTransferCost ?? suppliedTransferCost;
+	if (
+		!provisional &&
+		row?.source === "FPL_FINAL_RESULT" &&
+		hasTraceableRevision(row.revision) &&
+		hasTraceableCheckedAt(row.checkedAt) &&
+		finalTransferCost !== null &&
+		isWithinStaleWindow(row)
+	) {
+		const effectiveTransferCost = finalTransferCost;
+		const detailNetEventPoints = detailEventPoints - effectiveTransferCost;
+		const reconciliation: LiveManagerScoreReconciliation = !available
+			? "NO_LINEUP"
+			: typeof row.eventPoints === "number"
+				? rowMatchesEventLiveScore(row, detailEventPoints, detailNetEventPoints)
+					? "MATCHED"
+					: "SOURCE_SKEW"
+				: "NOT_COMPARABLE";
 		const reasons: LiveManagerScoreReason[] = [];
-		if (upstreamErrorCode === "UNSUPPORTED_H2H_LIVE") reasons.push("UNSUPPORTED_H2H");
-		else if (upstreamErrorCode === "UPSTREAM_RATE_LIMITED") reasons.push("UPSTREAM_RATE_LIMITED");
-		else if (upstreamErrorCode) reasons.push("UPSTREAM_UNAVAILABLE");
 		if (!available) reasons.push("MISSING_LINEUP");
 		if (reconciliation === "SOURCE_SKEW") reasons.push("SOURCE_SKEW");
 		if (row.eventPoints === null && row.totalPoints === null) reasons.push("MISSING_SCORE");
-		const finalEvidence = row.source === "FPL_FINAL_RESULT";
-		const fresh = ageSeconds(row.checkedAt) <= REFRESH_SECONDS;
-		const state: LiveManagerScoreState =
-			!provisional && finalEvidence
-				? "FINAL"
-				: !fresh
-					? "STALE"
-					: !provisional
-						? "SETTLING"
-						: "FRESH";
 		const eventPoints = row.eventPoints;
 		let eventPointSemantics = row.eventPointSemantics ?? "UNKNOWN";
 		// Gross and net event points are mathematically identical when there is
@@ -224,16 +263,13 @@ export function buildManagerScore(params: {
 				leagueRank: row.leagueRank,
 				transferCost: effectiveTransferCost,
 				source: row.source,
-				state,
+				state: "FINAL",
 				eventPointSemantics,
 				revision: row.revision,
 				checkedAt: row.checkedAt,
 				upstreamUpdatedAt: row.upstreamUpdatedAt,
 				staleAt: row.staleAt,
-				nextRefreshAt:
-					state === "FINAL"
-						? null
-						: (params.nextRefreshAt ?? plusSeconds(row.checkedAt, REFRESH_SECONDS)),
+				nextRefreshAt: null,
 				reconciliation,
 				reasonCodes: reasons,
 			},
@@ -248,14 +284,79 @@ export function buildManagerScore(params: {
 		return result;
 	}
 
+	// During an active or settling event, the only score authority is the
+	// revisioned official event/{event}/live player payload combined with the
+	// official 15-pick multipliers. Manager summary and league rows are retained
+	// solely as rank metadata and reconciliation evidence.
+	if (
+		available &&
+		suppliedTransferCost !== null &&
+		params.eventLiveAuthority &&
+		hasTraceableRevision(params.eventLiveAuthority.revision) &&
+		hasTraceableCheckedAt(params.eventLiveAuthority.checkedAt)
+	) {
+		const authority = params.eventLiveAuthority;
+		const checkedAt = authority.checkedAt;
+		const fresh = ageSeconds(checkedAt) <= REFRESH_SECONDS;
+		const effectiveTransferCost = suppliedTransferCost;
+		const eventPoints = detailEventPoints;
+		const netEventPoints = eventPoints - effectiveTransferCost;
+		const totalPoints =
+			previousOverallPoints === null ? null : previousOverallPoints + netEventPoints;
+		const reconciliation: LiveManagerScoreReconciliation =
+			row && typeof row.eventPoints === "number"
+				? rowMatchesEventLiveScore(row, eventPoints, netEventPoints)
+					? "MATCHED"
+					: "SOURCE_SKEW"
+				: "NOT_COMPARABLE";
+		const reasons: LiveManagerScoreReason[] = [];
+		if (upstreamErrorCode === "UPSTREAM_RATE_LIMITED") reasons.push("UPSTREAM_RATE_LIMITED");
+		else if (upstreamErrorCode && upstreamErrorCode !== "UNSUPPORTED_H2H_LIVE")
+			reasons.push("UPSTREAM_UNAVAILABLE");
+		if (!fresh) reasons.push("SOURCE_TOO_OLD");
+		if (reconciliation === "SOURCE_SKEW") reasons.push("SOURCE_SKEW");
+
+		const score: LiveManagerScore = {
+			eventPoints,
+			netEventPoints,
+			totalPoints,
+			totalScope: totalPoints === null ? "UNKNOWN" : "OVERALL",
+			eventRank: row?.eventRank ?? null,
+			overallRank: row?.overallRank ?? null,
+			leagueRank: row?.leagueRank ?? null,
+			transferCost: effectiveTransferCost,
+			source: "FPL_EVENT_LIVE",
+			state: !provisional ? "SETTLING" : fresh ? "FRESH" : "STALE",
+			eventPointSemantics: effectiveTransferCost === 0 ? "ZERO_COST_EQUIVALENT" : "GROSS",
+			revision: `event-live:${authority.revision}:${eventPoints}:${effectiveTransferCost}:total:${totalPoints ?? "none"}:${totalPoints === null ? "UNKNOWN" : "OVERALL"}:rank:${row?.eventRank ?? "none"}:${row?.overallRank ?? "none"}:${row?.leagueRank ?? "none"}`,
+			checkedAt,
+			upstreamUpdatedAt: checkedAt,
+			staleAt: plusSeconds(checkedAt, REFRESH_SECONDS * 3),
+			nextRefreshAt: params.nextRefreshAt ?? plusSeconds(checkedAt, REFRESH_SECONDS),
+			reconciliation,
+			reasonCodes: reasons,
+		};
+		const result = {
+			score,
+			headline: {
+				rank: row?.eventRank ?? row?.leagueRank ?? 0,
+				livePoints: eventPoints,
+				liveNetPoints: netEventPoints,
+				liveTotalPoints: totalPoints ?? 0,
+			},
+		};
+		recordScoreMetrics(score);
+		return result;
+	}
+
 	const reasons: LiveManagerScoreReason[] = [];
 	if (upstreamErrorCode === "UNSUPPORTED_H2H_LIVE") reasons.push("UNSUPPORTED_H2H");
 	else if (upstreamErrorCode === "UPSTREAM_RATE_LIMITED") reasons.push("UPSTREAM_RATE_LIMITED");
 	else if (upstreamErrorCode) reasons.push("UPSTREAM_UNAVAILABLE");
-	if (row) reasons.push("SOURCE_TOO_OLD");
+	if (row || !params.eventLiveAuthority) reasons.push("SOURCE_TOO_OLD");
 	if (!available) reasons.push("MISSING_LINEUP");
-	if (available && !row) reasons.push("MISSING_SCORE");
-	const unavailable = baseScore(transferCost);
+	if (suppliedTransferCost === null) reasons.push("MISSING_SCORE");
+	const unavailable = baseScore(suppliedTransferCost ?? 0);
 	unavailable.checkedAt = row?.checkedAt ?? null;
 	unavailable.staleAt = row?.staleAt ?? null;
 	unavailable.nextRefreshAt = params.nextRefreshAt ?? null;
@@ -289,13 +390,7 @@ export function rankTournamentRowsByOfficialEventPoints<
 				? row.score.eventPoints
 				: null;
 	const ranked = rows
-		.filter(
-			(row) =>
-				metric(row) !== null &&
-				(row.score.source === "FPL_ENTRY_SUMMARY" ||
-					row.score.source === "FPL_CLASSIC_STANDINGS" ||
-					row.score.source === "FPL_FINAL_RESULT")
-		)
+		.filter((row) => metric(row) !== null && isTraceableOfficialManagerScore(row.score))
 		.sort((left, right) => (metric(right) ?? 0) - (metric(left) ?? 0));
 	const ranks = new Map<number, number>();
 	let previousPoints: number | null = null;

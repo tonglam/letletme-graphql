@@ -84,6 +84,7 @@ const makeEntryEventResult = (overrides: Partial<EntryEventResult> = {}): EntryE
 	teamValue: 1030,
 	bank: 10,
 	...overrides,
+	richSyncedAt: overrides.richSyncedAt ?? "2026-08-20T00:00:00.000Z",
 });
 
 describe("entry search argument guards", () => {

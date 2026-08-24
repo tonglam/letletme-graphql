@@ -3,9 +3,8 @@ import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 
 const NULL_SENTINEL = "__entries:null__";
-// v3 invalidates the v2 namespace, which could contain partial rich-history
-// arrays written before the completeness gate was introduced.
-const ENTRY_RESULT_CACHE_VERSION = "v3";
+// v4 requires the durable rich-publication timestamp used as final score provenance.
+const ENTRY_RESULT_CACHE_VERSION = "v4";
 const ENTRY_HISTORY_INFO_CACHE_VERSION = "v2";
 
 export type Entry = {
@@ -42,6 +41,7 @@ export type EntryEventResult = {
 	eventCaptainPoints: number;
 	eventPicks: unknown[];
 	eventAutoSub?: unknown[];
+	richSyncedAt: string;
 	teamValue: number | null;
 	bank: number | null;
 };
@@ -86,7 +86,7 @@ type DbEntryEventResultRow = {
 	event_captain_points?: number | null;
 	event_picks?: unknown;
 	event_auto_sub?: unknown;
-	rich_synced_at?: string | null;
+	rich_synced_at?: string | Date | null;
 	team_value: number | null;
 	bank: number | null;
 };
@@ -123,25 +123,35 @@ const mapEntry = (row: DbEntryRow): Entry => ({
 const ENTRY_SELECT_FIELDS =
 	"id, entry_name, player_name, region, started_event, overall_points, overall_rank, bank, team_value, total_transfers, last_event_id, last_overall_points, last_overall_rank, last_team_value, last_bank";
 
-const mapEntryEventResult = (row: DbEntryEventResultRow): EntryEventResult => ({
-	entryId: row.entry_id,
-	eventId: row.event_id,
-	eventPoints: row.event_points,
-	eventRank: row.event_rank,
-	overallPoints: row.overall_points,
-	overallRank: row.overall_rank,
-	eventTransfers: row.event_transfers,
-	eventTransfersCost: row.event_transfers_cost,
-	eventNetPoints: row.event_net_points,
-	eventBenchPoints: row.event_bench_points ?? 0,
-	eventChip: row.event_chip ?? null,
-	eventPlayedCaptain: row.event_played_captain ?? null,
-	eventCaptainPoints: row.event_captain_points ?? 0,
-	eventPicks: parseJsonArray(row.event_picks),
-	eventAutoSub: parseJsonArray(row.event_auto_sub),
-	teamValue: row.team_value,
-	bank: row.bank,
-});
+const normalizeRichSyncedAt = (value: string | Date | null | undefined): string | null => {
+	const timestamp = value instanceof Date ? value.getTime() : Date.parse(value ?? "");
+	return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+};
+
+const mapEntryEventResult = (row: DbEntryEventResultRow): EntryEventResult | null => {
+	const richSyncedAt = normalizeRichSyncedAt(row.rich_synced_at);
+	if (!richSyncedAt) return null;
+	return {
+		entryId: row.entry_id,
+		eventId: row.event_id,
+		eventPoints: row.event_points,
+		eventRank: row.event_rank,
+		overallPoints: row.overall_points,
+		overallRank: row.overall_rank,
+		eventTransfers: row.event_transfers,
+		eventTransfersCost: row.event_transfers_cost,
+		eventNetPoints: row.event_net_points,
+		eventBenchPoints: row.event_bench_points ?? 0,
+		eventChip: row.event_chip ?? null,
+		eventPlayedCaptain: row.event_played_captain ?? null,
+		eventCaptainPoints: row.event_captain_points ?? 0,
+		eventPicks: parseJsonArray(row.event_picks),
+		eventAutoSub: parseJsonArray(row.event_auto_sub),
+		richSyncedAt,
+		teamValue: row.team_value,
+		bank: row.bank,
+	};
+};
 
 const parseJsonArray = (value: unknown): unknown[] => {
 	if (Array.isArray(value)) {
@@ -233,7 +243,9 @@ const isEntryEventResult = (value: unknown): value is EntryEventResult => {
 		Number.isFinite(value.entryId) &&
 		typeof value.eventId === "number" &&
 		Number.isFinite(value.eventId) &&
-		Array.isArray(value.eventAutoSub)
+		Array.isArray(value.eventAutoSub) &&
+		typeof value.richSyncedAt === "string" &&
+		Number.isFinite(Date.parse(value.richSyncedAt))
 	);
 };
 
@@ -471,8 +483,8 @@ export const entriesRepository: EntriesRepository = {
 			(row) => row.rich_synced_at === null || row.rich_synced_at === undefined
 		);
 		const history = rows
-			.filter((row) => row.rich_synced_at !== null && row.rich_synced_at !== undefined)
-			.map(mapEntryEventResult);
+			.map(mapEntryEventResult)
+			.filter((row): row is EntryEventResult => row !== null);
 		// Rich synchronization advances independently of the Core revision. Do
 		// not retain a partial history snapshot for an hour while the latest
 		// finalized event is still being enriched.
@@ -614,6 +626,7 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const result = mapEntryEventResult(row);
+		if (!result) return null;
 		await writeQueryCache(
 			context,
 			cacheKey,
@@ -692,10 +705,9 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		const pipeline = context.redis.pipeline();
-		for (const row of ((data as DbEntryEventResultRow[] | null) ?? []).filter(
-			(row) => row.rich_synced_at !== null && row.rich_synced_at !== undefined
-		)) {
+		for (const row of (data as DbEntryEventResultRow[] | null) ?? []) {
 			const result = mapEntryEventResult(row);
+			if (!result) continue;
 			results.set(result.entryId, result);
 			pipeline.set(
 				gqlCacheKey(

@@ -173,6 +173,9 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 	type TournamentOfficialH2HBoard {
 		eventId: Int!
 		awaitingSchedule: Boolean!
+		scoreSource: OfficialH2HScoreSource!
+		scoreRevision: String
+		scoreCheckedAt: DateTime
 		standings: [OfficialH2HStanding!]!
 		matches: [OfficialH2HMatch!]!
 	}
@@ -415,6 +418,12 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		KNOCKOUT
 	}
 
+	enum OfficialH2HScoreSource {
+		FPL_EVENT_LIVE
+		FPL_H2H_FINAL
+		UNAVAILABLE
+	}
+
 	type OfficialH2HStanding {
 		entryId: Int!
 		entryName: String
@@ -455,6 +464,9 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		tournament: TournamentInfo!
 		eventId: Int!
 		awaitingSchedule: Boolean!
+		scoreSource: OfficialH2HScoreSource!
+		scoreRevision: String
+		scoreCheckedAt: DateTime
 		standings: [OfficialH2HStanding!]!
 		matches: [OfficialH2HMatch!]!
 	}
@@ -467,6 +479,9 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		awaitingSchedule: Boolean!
 		isLive: Boolean!
 		isFinal: Boolean!
+		scoreSource: OfficialH2HScoreSource!
+		scoreRevision: String
+		scoreCheckedAt: DateTime
 		rank: Int
 		lastRank: Int
 		matchPoints: Int!

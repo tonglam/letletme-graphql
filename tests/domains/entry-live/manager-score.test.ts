@@ -26,8 +26,13 @@ const row = (overrides: Record<string, unknown> = {}) => ({
 	...overrides,
 });
 
-describe("official manager live score contract", () => {
-	it("uses an official headline even when picks are unavailable", () => {
+const authority = (checkedAt = new Date().toISOString()) => ({
+	revision: "live-8",
+	checkedAt,
+});
+
+describe("event-live manager score contract", () => {
+	it("does not expose an entry-summary score without a traceable lineup", () => {
 		const result = buildManagerScore({
 			row: row(),
 			upstreamErrorCode: null,
@@ -36,128 +41,205 @@ describe("official manager live score contract", () => {
 			transferCost: 0,
 			detailEventPoints: 0,
 		});
-		expect(result.score.source).toBe("FPL_ENTRY_SUMMARY");
+		expect(result.score.source).toBe("UNAVAILABLE");
 		expect(result.score.reconciliation).toBe("NO_LINEUP");
-		expect(result.score.eventPointSemantics).toBe("ZERO_COST_EQUIVALENT");
-		expect(result.score.netEventPoints).toBe(42);
-		expect(result.headline.livePoints).toBe(42);
+		expect(result.score.reasonCodes).toContain("MISSING_LINEUP");
+		expect(result.headline.livePoints).toBe(0);
 	});
 
-	it("proves net points from a zero transfer cost without an overall baseline", () => {
+	it("uses official event-live player totals as the active score authority", () => {
 		const result = buildManagerScore({
-			row: row({ totalPoints: 42, eventPoints: 42 }),
+			row: row({ eventPoints: 23, totalPoints: 23 }),
 			upstreamErrorCode: null,
 			provisional: true,
 			available: true,
 			transferCost: 0,
-			detailEventPoints: 42,
+			detailEventPoints: 37,
+			previousOverallPoints: 0,
+			eventLiveAuthority: authority(),
 		});
+		expect(result.score.source).toBe("FPL_EVENT_LIVE");
+		expect(result.score.eventPoints).toBe(37);
+		expect(result.score.netEventPoints).toBe(37);
+		expect(result.score.totalPoints).toBe(37);
 		expect(result.score.eventPointSemantics).toBe("ZERO_COST_EQUIVALENT");
-		expect(result.score.netEventPoints).toBe(42);
-	});
-
-	it("keeps a recently checked official row marked stale", () => {
-		const checkedAt = new Date(Date.now() - 45_000);
-		const result = buildManagerScore({
-			row: row({
-				checkedAt: checkedAt.toISOString(),
-				staleAt: new Date(checkedAt.getTime() + 90_000).toISOString(),
-			}),
-			upstreamErrorCode: "UPSTREAM_UNAVAILABLE",
-			provisional: true,
-			available: true,
-			transferCost: 4,
-			detailEventPoints: 39,
-		});
-		expect(result.score.state).toBe("STALE");
-		expect(result.score.source).toBe("FPL_ENTRY_SUMMARY");
 		expect(result.score.reconciliation).toBe("SOURCE_SKEW");
+		expect(result.headline.livePoints).toBe(37);
 	});
 
-	it("classifies official event points against the previous overall baseline", () => {
-		const net = buildManagerScore({
-			row: row({ totalPoints: 142, eventPoints: 42 }),
-			upstreamErrorCode: null,
-			provisional: true,
-			available: true,
-			transferCost: 4,
-			previousOverallPoints: 100,
-			detailEventPoints: 42,
-		});
-		expect(net.score.eventPointSemantics).toBe("NET");
-		expect(net.score.netEventPoints).toBe(42);
+	it("changes the traceable revision when official rank metadata changes", () => {
+		const build = (eventRank: number) =>
+			buildManagerScore({
+				row: row({ eventRank }),
+				upstreamErrorCode: null,
+				provisional: true,
+				available: true,
+				transferCost: 0,
+				detailEventPoints: 37,
+				previousOverallPoints: 0,
+				eventLiveAuthority: authority(),
+			});
 
-		const gross = buildManagerScore({
-			row: row({ totalPoints: 142, eventPoints: 46 }),
-			upstreamErrorCode: null,
-			provisional: true,
-			available: true,
-			transferCost: 4,
-			previousOverallPoints: 100,
-			detailEventPoints: 42,
-		});
-		expect(gross.score.eventPointSemantics).toBe("GROSS");
-		expect(gross.score.netEventPoints).toBe(42);
+		expect(build(7).score.revision).not.toBe(build(8).score.revision);
+		expect(build(7).score.revision).toContain(":rank:7:101:none");
 	});
 
-	it("keeps the last-good official value when the upstream refresh is too old", () => {
-		const checkedAt = new Date(Date.now() - 11 * 60_000);
+	it("changes the traceable revision when the resolved season baseline changes", () => {
+		const build = (previousOverallPoints: number | null) =>
+			buildManagerScore({
+				row: row(),
+				upstreamErrorCode: null,
+				provisional: true,
+				available: true,
+				transferCost: 0,
+				detailEventPoints: 37,
+				previousOverallPoints,
+				eventLiveAuthority: authority(),
+			});
+
+		expect(build(null).score.revision).not.toBe(build(100).score.revision);
+		expect(build(100).score.revision).not.toBe(build(101).score.revision);
+		expect(build(null).score.revision).toContain(":total:none:UNKNOWN:");
+		expect(build(100).score.revision).toContain(":total:137:OVERALL:");
+	});
+
+	it("marks an old event-live revision stale without reverting to manager summary", () => {
+		const checkedAt = new Date(Date.now() - 45_000).toISOString();
 		const result = buildManagerScore({
-			row: row({
-				checkedAt: checkedAt.toISOString(),
-				staleAt: new Date(checkedAt.getTime() + 90_000).toISOString(),
-			}),
+			row: row({ eventPoints: 42 }),
 			upstreamErrorCode: "UPSTREAM_UNAVAILABLE",
 			provisional: true,
 			available: true,
 			transferCost: 4,
 			detailEventPoints: 39,
+			previousOverallPoints: 100,
+			eventLiveAuthority: authority(checkedAt),
 		});
-		expect(result.score.source).toBe("FPL_ENTRY_SUMMARY");
 		expect(result.score.state).toBe("STALE");
-		expect(result.score.eventPoints).toBe(42);
+		expect(result.score.source).toBe("FPL_EVENT_LIVE");
+		expect(result.score.eventPoints).toBe(39);
+		expect(result.score.netEventPoints).toBe(35);
+		expect(result.score.reasonCodes).toContain("SOURCE_TOO_OLD");
 		expect(result.score.reasonCodes).toContain("UPSTREAM_UNAVAILABLE");
 	});
 
-	it("does not use local totals while an official row is missing its score", () => {
+	it("derives net and season totals from event-live plus the finalized baseline", () => {
+		const result = buildManagerScore({
+			row: row({ eventPoints: 41, totalPoints: 141 }),
+			upstreamErrorCode: null,
+			provisional: true,
+			available: true,
+			transferCost: 4,
+			previousOverallPoints: 100,
+			detailEventPoints: 46,
+			eventLiveAuthority: authority(),
+		});
+		expect(result.score.eventPointSemantics).toBe("GROSS");
+		expect(result.score.eventPoints).toBe(46);
+		expect(result.score.netEventPoints).toBe(42);
+		expect(result.score.totalPoints).toBe(142);
+		expect(result.score.totalScope).toBe("OVERALL");
+	});
+
+	it("reconciles NET manager metadata against the event-live-derived net score", () => {
 		const result = buildManagerScore({
 			row: row({
-				eventPoints: null,
-				totalPoints: null,
-				totalScope: "CLASSIC_PHASE",
+				eventPoints: 42,
+				netEventPoints: 42,
+				eventPointSemantics: "NET",
+				transferCost: 4,
 			}),
+			upstreamErrorCode: null,
+			provisional: true,
+			available: true,
+			transferCost: 4,
+			detailEventPoints: 46,
+			previousOverallPoints: 100,
+			eventLiveAuthority: authority(),
+		});
+
+		expect(result.score.eventPoints).toBe(46);
+		expect(result.score.netEventPoints).toBe(42);
+		expect(result.score.reconciliation).toBe("MATCHED");
+		expect(result.score.reasonCodes).not.toContain("SOURCE_SKEW");
+	});
+
+	it("remains event-live authoritative when manager metadata has no score", () => {
+		const result = buildManagerScore({
+			row: row({ eventPoints: null, totalPoints: null, totalScope: "CLASSIC_PHASE" }),
 			upstreamErrorCode: null,
 			provisional: true,
 			available: true,
 			previousOverallPoints: 100,
 			transferCost: 4,
 			detailEventPoints: 39,
+			eventLiveAuthority: authority(),
 		});
-		expect(result.score.reasonCodes).toContain("MISSING_SCORE");
-		expect(result.headline.livePoints).toBe(0);
-		expect(result.headline.liveNetPoints).toBe(0);
-		expect(result.headline.liveTotalPoints).toBe(0);
+		expect(result.score.source).toBe("FPL_EVENT_LIVE");
+		expect(result.score.eventPoints).toBe(39);
+		expect(result.score.netEventPoints).toBe(35);
+		expect(result.score.totalPoints).toBe(135);
 	});
 
-	it("does not expose detail points when the official manager row is absent", () => {
+	it("does not require entry-summary metadata to expose a traceable live score", () => {
 		const result = buildManagerScore({
 			upstreamErrorCode: "UPSTREAM_UNAVAILABLE",
 			provisional: true,
 			available: true,
 			transferCost: 4,
 			detailEventPoints: 39,
+			previousOverallPoints: 100,
+			eventLiveAuthority: authority(),
 		});
-		expect(result.score.source).toBe("UNAVAILABLE");
-		expect(result.score.state).toBe("UNAVAILABLE");
+		expect(result.score.source).toBe("FPL_EVENT_LIVE");
+		expect(result.score.state).toBe("FRESH");
 		expect(result.headline).toEqual({
 			rank: 0,
-			livePoints: 0,
-			liveNetPoints: 0,
-			liveTotalPoints: 0,
+			livePoints: 39,
+			liveNetPoints: 35,
+			liveTotalPoints: 135,
 		});
 	});
 
-	it("stops manager refresh after a final official result", () => {
+	it("fails closed when event-live provenance has no usable revision or timestamp", () => {
+		for (const eventLiveAuthority of [
+			{ revision: "", checkedAt: new Date().toISOString() },
+			{ revision: "live-8", checkedAt: "not-a-timestamp" },
+		]) {
+			const result = buildManagerScore({
+				row: row({ eventPoints: 23 }),
+				upstreamErrorCode: null,
+				provisional: true,
+				available: true,
+				transferCost: 0,
+				detailEventPoints: 37,
+				previousOverallPoints: 0,
+				eventLiveAuthority,
+			});
+			expect(result.score.source).toBe("UNAVAILABLE");
+			expect(result.score.eventPoints).toBeNull();
+		}
+	});
+
+	it("fails closed when the official transfer cost is unavailable", () => {
+		const result = buildManagerScore({
+			row: row({ transferCost: 4 }),
+			upstreamErrorCode: null,
+			provisional: true,
+			available: true,
+			transferCost: null,
+			detailEventPoints: 37,
+			previousOverallPoints: 100,
+			eventLiveAuthority: authority(),
+		});
+
+		expect(result.score.source).toBe("UNAVAILABLE");
+		expect(result.score.eventPoints).toBeNull();
+		expect(result.score.netEventPoints).toBeNull();
+		expect(result.score.totalPoints).toBeNull();
+	});
+
+	it("uses the persisted final result only after FPL data_checked", () => {
 		const result = buildManagerScore({
 			row: row({
 				source: "FPL_FINAL_RESULT",
@@ -168,26 +250,28 @@ describe("official manager live score contract", () => {
 			available: true,
 			transferCost: 0,
 			detailEventPoints: 42,
+			eventLiveAuthority: authority(),
 		});
 		expect(result.score.state).toBe("FINAL");
+		expect(result.score.source).toBe("FPL_FINAL_RESULT");
 		expect(result.score.nextRefreshAt).toBeNull();
 		expect(managerScoreBoardIsFinal([{ score: result.score }])).toBe(true);
 	});
 
-	it("ranks tournament rows from official event points and leaves unavailable rows unranked", () => {
-		const official = (entry: number, eventPoints: number) => ({
+	it("ranks tournament rows from event-live points and leaves unavailable rows unranked", () => {
+		const live = (entry: number, eventPoints: number) => ({
 			entry,
 			rank: 0,
-			score: {
-				...buildManagerScore({
-					row: row({ entryId: entry, eventPoints }),
-					upstreamErrorCode: null,
-					provisional: true,
-					available: true,
-					transferCost: 0,
-					detailEventPoints: eventPoints,
-				}).score,
-			},
+			score: buildManagerScore({
+				row: row({ entryId: entry, eventPoints }),
+				upstreamErrorCode: null,
+				provisional: true,
+				available: true,
+				transferCost: 0,
+				detailEventPoints: eventPoints,
+				previousOverallPoints: 0,
+				eventLiveAuthority: authority(),
+			}).score,
 		});
 		const unavailable = {
 			entry: 3,
@@ -195,63 +279,39 @@ describe("official manager live score contract", () => {
 			score: buildManagerScore({
 				upstreamErrorCode: "UPSTREAM_UNAVAILABLE",
 				provisional: true,
-				available: true,
+				available: false,
 				transferCost: 0,
 				detailEventPoints: 99,
 			}).score,
 		};
-		const ranked = rankTournamentRowsByOfficialEventPoints([
-			official(1, 12),
-			official(2, 12),
-			unavailable,
-		]);
+		const ranked = rankTournamentRowsByOfficialEventPoints([live(1, 12), live(2, 12), unavailable]);
 		expect(ranked.find((item) => item.entry === 1)?.rank).toBe(1);
 		expect(ranked.find((item) => item.entry === 2)?.rank).toBe(1);
 		expect(ranked.find((item) => item.entry === 3)?.rank).toBe(0);
 	});
 
-	it("ranks H2H rows only from explicit official net points", () => {
-		const netRow = (
-			entry: number,
-			eventPoints: number,
-			totalPoints: number,
-			previousOverallPoints: number,
-			transferCost: number
-		) => ({
+	it("ranks H2H rows from event-live-derived net points", () => {
+		const netRow = (entry: number, eventPoints: number, transferCost: number) => ({
 			entry,
 			rank: 0,
 			score: buildManagerScore({
-				row: row({ entryId: entry, eventPoints, totalPoints }),
+				row: row({ entryId: entry }),
 				upstreamErrorCode: null,
 				provisional: true,
 				available: true,
 				transferCost,
-				previousOverallPoints,
+				previousOverallPoints: 100,
 				detailEventPoints: eventPoints,
+				eventLiveAuthority: authority(),
 			}).score,
 		});
 		const ranked = rankTournamentRowsByOfficialEventPoints(
-			[
-				netRow(1, 20, 120, 100, 0),
-				netRow(2, 21, 120, 100, 1),
-				{
-					entry: 3,
-					rank: 0,
-					score: buildManagerScore({
-						row: row({ entryId: 3, eventPoints: 22 }),
-						upstreamErrorCode: null,
-						provisional: true,
-						available: true,
-						transferCost: 1,
-						detailEventPoints: 22,
-					}).score,
-				},
-			],
+			[netRow(1, 20, 0), netRow(2, 21, 1), netRow(3, 22, 1)],
 			{ useNet: true }
 		);
 
-		expect(ranked.find((item) => item.entry === 1)?.rank).toBe(1);
-		expect(ranked.find((item) => item.entry === 2)?.rank).toBe(1);
-		expect(ranked.find((item) => item.entry === 3)?.rank).toBe(0);
+		expect(ranked.find((item) => item.entry === 1)?.rank).toBe(2);
+		expect(ranked.find((item) => item.entry === 2)?.rank).toBe(2);
+		expect(ranked.find((item) => item.entry === 3)?.rank).toBe(1);
 	});
 });

@@ -300,9 +300,7 @@ const managerBoardMeta = (
 	options: { requireNet?: boolean; totalEntries?: number } = {}
 ) => {
 	const isOfficialSource = (source?: string): boolean =>
-		source === "FPL_ENTRY_SUMMARY" ||
-		source === "FPL_CLASSIC_STANDINGS" ||
-		source === "FPL_FINAL_RESULT";
+		source === "FPL_EVENT_LIVE" || source === "FPL_FINAL_RESULT";
 	const hasOfficialMetric = (score?: (typeof board)[number]["score"]): boolean =>
 		isOfficialSource(score?.source) &&
 		(options.requireNet
@@ -621,7 +619,7 @@ export const liveDesksResolvers = {
 				eventId,
 				entryIds,
 				true,
-				{ tournamentId: selected, legacyH2H: selectedTournament?.leagueType === LeagueType.H2H }
+				{ tournamentId: selected }
 			);
 			const board = rankTournamentRowsByOfficialEventPoints(Array.from(result.results.values()), {
 				useNet: requireNet,
@@ -698,7 +696,7 @@ export const liveDesksResolvers = {
 			args: { entryId: number; tournamentId: number; comparedEntryIds: number[]; ref: LiveRef },
 			context: GraphQLContext
 		) => {
-			const memberTournament = await assertMember(context, args.tournamentId, args.entryId);
+			await assertMember(context, args.tournamentId, args.entryId);
 			const { snapshot } = await resolveSnapshot(context, args.ref);
 			const ids = Array.from(new Set([args.entryId, ...args.comparedEntryIds])).slice(0, 2);
 			const result = await entryLiveBatchService.calcLivePointsForEntries(
@@ -708,7 +706,6 @@ export const liveDesksResolvers = {
 				true,
 				{
 					tournamentId: args.tournamentId,
-					legacyH2H: memberTournament.leagueType === LeagueType.H2H,
 				}
 			);
 			return {

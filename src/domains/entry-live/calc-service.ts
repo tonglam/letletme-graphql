@@ -7,7 +7,7 @@ import type { LivePerformance } from "../live/repository";
 import type { LiveSnapshotMeta } from "../live/snapshot-meta";
 import { resolvePreviousEventBaseline } from "./baseline";
 import type { EntryEventTransfersData } from "./transfer-enrichment";
-import { entryLiveRepository } from "./repository";
+import { entryLiveRepository, hasCompleteEntryEventPick } from "./repository";
 import { buildManagerScore, loadManagerScores, type LiveManagerScore } from "./manager-score";
 
 export type EntryLiveAvailability = "READY" | "NO_PICKS";
@@ -42,6 +42,8 @@ export type LiveCalcData = {
 	lastValue: number;
 	chip: string;
 	livePoints: number;
+	/** Official transfer count when a finalized result is available without lineup detail. */
+	eventTransfers?: number;
 	transferCost: number;
 	liveNetPoints: number;
 	liveTotalPoints: number;
@@ -214,27 +216,36 @@ export const entryLiveCalcService = {
 			return buildNoPicksLiveCalcData(entryId);
 		}
 
+		const calculate = async (): Promise<LiveCalcData> => {
+			const { entryLiveBatchService } = await import("./batch-service");
+			const stopAggregate = context.requestTiming?.start("entryLive.aggregate");
+			const batch = await entryLiveBatchService
+				// Do not prefetch picks into the batch path. Once the event is
+				// finalized, the batch service must be able to roll over to its
+				// finalization-scoped cache and observe official multipliers,
+				// automatic_subs, and captain changes.
+				.calcLivePointsForEntries(context, eventId, [entryId], includeLive)
+				.finally(() => stopAggregate?.());
+			const result = batch.results.get(entryId);
+			if (result) return result;
+			const message = batch.errors.find((error) => error.entryId === entryId)?.message;
+			throw new Error(message ?? `Live points calculation failed for entry ${entryId}`);
+		};
+
 		const stopPicks = context.requestTiming?.start("entryLive.picks");
-		let pickEntity = await entryLiveRepository
+		const pickEntity = await entryLiveRepository
 			.getEntryEventPick(context, entryId, eventId)
 			.finally(() => stopPicks?.());
-		// A normal live pick miss can race the final publication. Probe the
-		// finalization-scoped read before declaring the entry NO_PICKS so a
-		// freshly persisted official lineup is not hidden behind the old cache.
-		if (!pickEntity || pickEntity.picks.length === 0) {
+		// A normal live pick miss can race final publication. Delegate finalized
+		// events to the batch path, which refreshes finalization-scoped picks and
+		// retains the durable official result even if rich picks remain unavailable.
+		if (!hasCompleteEntryEventPick(pickEntity, eventId, entryId)) {
 			const event = await eventsService.getEventById(context, eventId).catch(() => null);
 			if (event?.finished === true && event.dataChecked === true) {
-				const finalized = await entryLiveRepository.getEntryEventPicksByIds(
-					context,
-					[entryId],
-					eventId,
-					false,
-					`data-checked:${eventId}`
-				);
-				pickEntity = finalized.get(entryId) ?? pickEntity;
+				return calculate();
 			}
 		}
-		if (!pickEntity || pickEntity.picks.length === 0) {
+		if (!hasCompleteEntryEventPick(pickEntity, eventId, entryId)) {
 			const [entry, previousResult] = await Promise.all([
 				entriesService.getEntryById(context, entryId).catch((error) => {
 					context.logger?.warn(
@@ -273,24 +284,6 @@ export const entryLiveCalcService = {
 				liveTotalPoints: manager.headline.liveTotalPoints,
 			};
 		}
-		const calculate = async (): Promise<LiveCalcData> => {
-			const { entryLiveBatchService } = await import("./batch-service");
-			const stopAggregate = context.requestTiming?.start("entryLive.aggregate");
-			const batch = await entryLiveBatchService
-				// Do not prefetch picks into the batch path. Once the event is
-				// finalized, the batch service must be able to roll over to its
-				// finalization-scoped cache and observe official multipliers,
-				// automatic_subs, and captain changes.
-				.calcLivePointsForEntries(context, eventId, [entryId], includeLive)
-				.finally(() => stopAggregate?.());
-			const result = batch.results.get(entryId);
-			if (result) {
-				return { ...result, availability: "READY" };
-			}
-			const message = batch.errors.find((error) => error.entryId === entryId)?.message;
-			throw new Error(message ?? `Live points calculation failed for entry ${entryId}`);
-		};
-
 		return calculate();
 	},
 };

@@ -1,7 +1,7 @@
 export const entryLiveTypeDefs = /* GraphQL */ `
 	"""
 	Summary of an entry's performance for a single event,
-	enriched with live-style totals based on historical results.
+	derived from the same official event-live score authority as the detail desk.
 	"""
 	type EntryLive {
 		entry: Entry!
@@ -26,14 +26,16 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 		Represents a live-style total assuming this event is still in progress.
 		"""
 		liveTotalPoints: Int!
+		"Traceable official score source, publication revision, and freshness."
+		score: LiveManagerScore!
 	}
 
 	extend type Query {
 		"""
 		Aggregated view of an entry's performance for a given event.
 
-		This query composes data from the Entries and Events domains
-		and is optimized via Redis-backed repositories.
+		For an active or settling event this query fails closed unless the official
+		event-live player publication and all 15 official picks are available.
 		"""
 		entryLive(entryId: Int!, eventId: Int!): EntryLive
 
@@ -104,6 +106,7 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 	}
 
 	enum LiveManagerScoreSource {
+		FPL_EVENT_LIVE
 		FPL_ENTRY_SUMMARY
 		FPL_CLASSIC_STANDINGS
 		FPL_FINAL_RESULT

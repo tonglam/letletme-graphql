@@ -1,9 +1,10 @@
 import type { GraphQLContext } from "../../graphql/context";
-import type { Entry, EntryEventResult } from "../entries/repository";
+import type { Entry } from "../entries/repository";
 import { entriesService } from "../entries/service";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
-import { resolvePreviousEventBaseline } from "./baseline";
+import { entryLiveCalcService, type LiveCalcData } from "./calc-service";
+import { isTraceableOfficialManagerScore, type LiveManagerScore } from "./manager-score";
 
 export type EntryLive = {
 	entry: Entry;
@@ -18,49 +19,45 @@ export type EntryLive = {
 	previousOverallPoints: number | null;
 	previousOverallRank: number | null;
 	liveTotalPoints: number;
+	score: LiveManagerScore;
 };
 
-type RequiredEntryEventResult = Pick<
-	EntryEventResult,
-	| "entryId"
-	| "eventId"
-	| "eventPoints"
-	| "eventRank"
-	| "overallPoints"
-	| "overallRank"
-	| "eventTransfers"
-	| "eventTransfersCost"
-	| "eventNetPoints"
->;
-
-const toEntryLive = (params: {
+export const projectEntryLiveFromCalc = (params: {
 	entry: Entry;
 	event: Event;
-	current: RequiredEntryEventResult;
-	previous: EntryEventResult | null;
-}): EntryLive => {
-	const baseline = resolvePreviousEventBaseline(
-		params.entry,
-		params.current.eventId,
-		params.previous
-	);
-	const previousOverallPoints = baseline.overallPoints;
-	const previousOverallRank = baseline.overallRank;
-	const liveTotalPoints = (previousOverallPoints ?? 0) + params.current.eventNetPoints;
+	calc: LiveCalcData;
+}): EntryLive | null => {
+	const { calc } = params;
+	const hasProjectableAvailability =
+		calc.availability === "READY" ||
+		(calc.availability === "NO_PICKS" &&
+			calc.score.source === "FPL_FINAL_RESULT" &&
+			calc.score.state === "FINAL");
+	if (
+		!hasProjectableAvailability ||
+		!isTraceableOfficialManagerScore(calc.score) ||
+		typeof calc.score.eventPoints !== "number" ||
+		typeof calc.score.netEventPoints !== "number" ||
+		typeof calc.score.totalPoints !== "number" ||
+		calc.score.totalScope !== "OVERALL"
+	) {
+		return null;
+	}
 
 	return {
 		entry: params.entry,
 		event: params.event,
-		eventPoints: params.current.eventPoints,
-		eventRank: params.current.eventRank,
-		overallPoints: params.current.overallPoints,
-		overallRank: params.current.overallRank,
-		eventTransfers: params.current.eventTransfers,
-		eventTransfersCost: params.current.eventTransfersCost,
-		eventNetPoints: params.current.eventNetPoints,
-		previousOverallPoints,
-		previousOverallRank,
-		liveTotalPoints,
+		eventPoints: calc.score.eventPoints,
+		eventRank: calc.score.eventRank,
+		overallPoints: calc.score.totalPoints,
+		overallRank: calc.score.overallRank ?? calc.overallRank,
+		eventTransfers: calc.eventTransfers ?? calc.transfersList.length,
+		eventTransfersCost: calc.score.transferCost,
+		eventNetPoints: calc.score.netEventPoints,
+		previousOverallPoints: calc.lastOverallPoints,
+		previousOverallRank: calc.lastOverallRank > 0 ? calc.lastOverallRank : null,
+		liveTotalPoints: calc.score.totalPoints,
+		score: calc.score,
 	};
 };
 
@@ -78,24 +75,16 @@ export const entryLiveService = {
 			return null;
 		}
 
-		const [entry, currentResult, event, previousResult] = await Promise.all([
+		const [entry, event, calc] = await Promise.all([
 			entriesService.getEntryById(context, entryId),
-			entriesService.getEntryEventResult(context, entryId, eventId),
 			eventsService.getEventById(context, eventId),
-			eventId > 1
-				? entriesService.getEntryEventResult(context, entryId, eventId - 1)
-				: Promise.resolve(null),
+			entryLiveCalcService.calcLivePointsByEntry(context, eventId, entryId, true),
 		]);
 
-		if (!entry || !currentResult || !event) {
+		if (!entry || !event) {
 			return null;
 		}
 
-		return toEntryLive({
-			entry,
-			event,
-			current: currentResult,
-			previous: previousResult,
-		});
+		return projectEntryLiveFromCalc({ entry, event, calc });
 	},
 };

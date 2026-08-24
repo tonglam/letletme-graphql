@@ -36,6 +36,7 @@ const previous = (eventId: number): EntryEventResult => ({
 	eventPlayedCaptain: null,
 	eventCaptainPoints: 0,
 	eventPicks: [],
+	richSyncedAt: "2026-08-20T00:00:00.000Z",
 	teamValue: 1000,
 	bank: 0,
 });
@@ -46,6 +47,7 @@ describe("resolvePreviousEventBaseline", () => {
 			overallPoints: 300,
 			overallRank: 10,
 			teamValue: 1010,
+			resolved: true,
 		});
 	});
 
@@ -54,6 +56,7 @@ describe("resolvePreviousEventBaseline", () => {
 			overallPoints: 250,
 			overallRank: 20,
 			teamValue: 1000,
+			resolved: true,
 		});
 	});
 
@@ -62,6 +65,16 @@ describe("resolvePreviousEventBaseline", () => {
 			overallPoints: 0,
 			overallRank: null,
 			teamValue: null,
+			resolved: true,
+		});
+	});
+
+	it("marks an unknown historical gap as an unresolved display fallback", () => {
+		expect(resolvePreviousEventBaseline(entry({ lastEventId: 7 }), 6, null)).toEqual({
+			overallPoints: 0,
+			overallRank: null,
+			teamValue: null,
+			resolved: false,
 		});
 	});
 });
