@@ -43,6 +43,7 @@ const activeOfficialH2HLoad = (): OfficialH2HSnapshotLoad => ({
 		tournament: {
 			id: 9,
 			name: "Official H2H",
+			totalTeamNum: 2,
 		} as OfficialH2HSnapshotLoad["snapshot"]["tournament"],
 		eventId: 1,
 		awaitingSchedule: false,
@@ -210,6 +211,77 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 			away: { points: 0, matchPoints: 1 },
 			winnerEntryId: null,
 		});
+	});
+
+	it("fails closed when the loaded H2H roster is truncated", () => {
+		const loaded = activeOfficialH2HLoad();
+		loaded.snapshot.tournament.totalTeamNum = 3;
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+				]),
+				revision: "event-live-gw1-r10",
+				checkedAt: "2026-08-24T00:03:00.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot.scoreSource).toBe("UNAVAILABLE");
+		expect(projected.snapshot.matches[0]?.home.points).toBeNull();
+	});
+
+	it("does not stamp an invalid finalized H2H round as official", () => {
+		const loaded = activeOfficialH2HLoad();
+		loaded.currentEventComplete = false;
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+				]),
+				revision: "event-live-gw1-r11",
+				checkedAt: "2026-08-24T00:04:00.000Z",
+				state: "settled",
+			},
+			new Set([1])
+		);
+
+		expect(projected.snapshot.scoreSource).toBe("UNAVAILABLE");
+		expect(projected.snapshot.scoreRevision).toBeNull();
+		expect(projected.snapshot.matches[0]?.winnerEntryId).toBeNull();
+	});
+
+	it("does not mix an Average Team H2H score into an event-live revision", () => {
+		const loaded = activeOfficialH2HLoad();
+		const row = loaded.history[0]!;
+		row.away_entry_id = null;
+		row.away_is_average = true;
+		loaded.snapshot.matches[0]!.away.entryId = null;
+		loaded.snapshot.matches[0]!.away.isAverage = true;
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+				]),
+				revision: "event-live-gw1-r12",
+				checkedAt: "2026-08-24T00:05:00.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot.scoreSource).toBe("UNAVAILABLE");
+		expect(projected.snapshot.matches[0]?.away.points).toBeNull();
 	});
 });
 

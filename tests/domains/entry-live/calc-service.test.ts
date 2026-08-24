@@ -7,6 +7,7 @@ import {
 } from "../../../src/domains/entry-live/calc-service";
 import { entryLiveBatchService } from "../../../src/domains/entry-live/batch-service";
 import { entriesService } from "../../../src/domains/entries/service";
+import { eventsService } from "../../../src/domains/events/service";
 import {
 	applyAutoSubs,
 	calcElementLivePoints,
@@ -364,6 +365,45 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 		}
 	});
 
+	it("delegates finalized missing-picks entries to the durable final-result path", async () => {
+		const originalGetPick = entryLiveRepository.getEntryEventPick;
+		const originalGetEvent = eventsService.getEventById;
+		const originalBatchCalc = entryLiveBatchService.calcLivePointsForEntries;
+		const stages: string[] = [];
+		const finalResult = {
+			availability: "NO_PICKS",
+			event: 2,
+			entry: 123,
+			score: { source: "FPL_FINAL_RESULT", state: "FINAL" },
+		} as LiveCalcData;
+		entryLiveRepository.getEntryEventPick = async () => null;
+		eventsService.getEventById = async () =>
+			({ id: 2, finished: true, dataChecked: true }) as never;
+		entryLiveBatchService.calcLivePointsForEntries = async () => ({
+			results: new Map([[123, finalResult]]),
+			errors: [],
+			meta: { eventId: 2, totalEntries: 1, succeededCount: 1, failedCount: 0 },
+		});
+		const context = {
+			requestTiming: {
+				start: (stage: string) => {
+					stages.push(stage);
+					return () => undefined;
+				},
+			},
+		} as unknown as GraphQLContext;
+
+		try {
+			const result = await entryLiveCalcService.calcLivePointsByEntry(context, 2, 123, true);
+			expect(result).toBe(finalResult);
+			expect(stages).toEqual(["entryLive.picks", "entryLive.aggregate"]);
+		} finally {
+			entryLiveRepository.getEntryEventPick = originalGetPick;
+			eventsService.getEventById = originalGetEvent;
+			entryLiveBatchService.calcLivePointsForEntries = originalBatchCalc;
+		}
+	});
+
 	it("returns READY while reusing one request-scoped live snapshot", async () => {
 		const originalGetPick = entryLiveRepository.getEntryEventPick;
 		const originalBatchCalc = entryLiveBatchService.calcLivePointsForEntries;
@@ -381,7 +421,21 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 			},
 		});
 		entryLiveRepository.getEntryEventPick = async () =>
-			({ picks: [{ element: 1 }] }) as Awaited<ReturnType<typeof originalGetPick>>;
+			({
+				eventId: 1,
+				entryId: 123,
+				chip: null,
+				transfersCost: 0,
+				picks: Array.from({ length: 15 }, (_, index) => ({
+					eventId: 1,
+					entryId: 123,
+					element: index + 1,
+					position: index + 1,
+					multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+					isCaptain: index === 0,
+					isViceCaptain: index === 1,
+				})),
+			}) as Awaited<ReturnType<typeof originalGetPick>>;
 		let batchSnapshot: Awaited<ReturnType<typeof loadLiveSnapshotMeta>> | undefined;
 		entryLiveBatchService.calcLivePointsForEntries = async (batchContext, eventId, entryIds) => {
 			batchSnapshot = await loadLiveSnapshotMeta(batchContext, eventId);
@@ -390,6 +444,7 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 					[
 						entryIds[0]!,
 						{
+							availability: "READY",
 							entry: entryIds[0]!,
 							event: eventId,
 							snapshot: batchSnapshot,

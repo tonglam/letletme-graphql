@@ -141,6 +141,19 @@ const recordScoreMetrics = (score: LiveManagerScore): void => {
 	}
 };
 
+const rowMatchesEventLiveScore = (
+	row: OfficialManagerScoreRow,
+	grossEventPoints: number,
+	netEventPoints: number
+): boolean => {
+	if (row.eventPointSemantics === "NET") return row.eventPoints === netEventPoints;
+	if (row.eventPointSemantics === "GROSS" || row.eventPointSemantics === "ZERO_COST_EQUIVALENT") {
+		return row.eventPoints === grossEventPoints;
+	}
+	if (typeof row.netEventPoints === "number") return row.netEventPoints === netEventPoints;
+	return row.eventPoints === grossEventPoints;
+};
+
 /** Build the additive score contract and the legacy flat headline aliases. */
 export function buildManagerScore(params: {
 	row?: OfficialManagerScoreRow;
@@ -172,10 +185,11 @@ export function buildManagerScore(params: {
 		hasTraceableCheckedAt(row.checkedAt);
 	if (finalEvidence && row && isWithinStaleWindow(row)) {
 		const effectiveTransferCost = row.transferCost ?? transferCost;
+		const detailNetEventPoints = detailEventPoints - effectiveTransferCost;
 		const reconciliation: LiveManagerScoreReconciliation = !available
 			? "NO_LINEUP"
 			: typeof row.eventPoints === "number"
-				? row.eventPoints === detailEventPoints
+				? rowMatchesEventLiveScore(row, detailEventPoints, detailNetEventPoints)
 					? "MATCHED"
 					: "SOURCE_SKEW"
 				: "NOT_COMPARABLE";
@@ -282,7 +296,7 @@ export function buildManagerScore(params: {
 			previousOverallPoints === null ? null : previousOverallPoints + netEventPoints;
 		const reconciliation: LiveManagerScoreReconciliation =
 			row && typeof row.eventPoints === "number"
-				? row.eventPoints === eventPoints
+				? rowMatchesEventLiveScore(row, eventPoints, netEventPoints)
 					? "MATCHED"
 					: "SOURCE_SKEW"
 				: "NOT_COMPARABLE";

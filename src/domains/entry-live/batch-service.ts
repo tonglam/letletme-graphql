@@ -23,7 +23,7 @@ import {
 } from "./manager-score";
 import { eventsService } from "../events/service";
 import type { EntryEventPick, EntryEventTransferRow } from "./repository";
-import { entryLiveRepository } from "./repository";
+import { entryLiveRepository, hasCompleteEntryEventPick } from "./repository";
 import { resolvePreviousEventBaseline } from "./baseline";
 import type { EntryEventResult } from "../entries/repository";
 import {
@@ -96,6 +96,37 @@ const parseNullableFloat = (value: string | null | undefined): number | null => 
 	const parsed = Number.parseFloat(value);
 	return Number.isFinite(parsed) ? parsed : null;
 };
+
+const buildFinalManagerScoreRow = (
+	season: string,
+	eventId: number,
+	entryId: number,
+	finalized: EntryEventResult,
+	checkedAt: string
+): OfficialManagerScoreRow => ({
+	season,
+	eventId,
+	entryId,
+	eventPoints: finalized.eventPoints,
+	netEventPoints: finalized.eventNetPoints,
+	totalPoints: finalized.overallPoints,
+	totalScope: "OVERALL",
+	eventRank: finalized.eventRank,
+	overallRank: finalized.overallRank,
+	leagueRank: null,
+	transferCost: finalized.eventTransfersCost,
+	eventPointSemantics:
+		finalized.eventPoints === finalized.eventNetPoints && finalized.eventTransfersCost === 0
+			? "ZERO_COST_EQUIVALENT"
+			: finalized.eventPoints - finalized.eventTransfersCost === finalized.eventNetPoints
+				? "GROSS"
+				: "UNKNOWN",
+	source: "FPL_FINAL_RESULT",
+	revision: `final:${eventId}:${entryId}:${finalized.overallPoints}:${finalized.overallRank}`,
+	checkedAt,
+	upstreamUpdatedAt: null,
+	staleAt: new Date(Date.parse(checkedAt) + 90_000).toISOString(),
+});
 
 const elementTypeName = (player: Player | null): string => {
 	if (!player) return "";
@@ -480,57 +511,73 @@ export const entryLiveBatchService = {
 
 		// Phase 1: resolve identity and picks. Entries without picks must not enter
 		// Live, fixture, player, transfer or bonus acquisition.
-		const [entriesById, picksByEntry, previousResultsByEntry, managerScores] = await Promise.all([
-			entriesService.getEntriesByIds(context, entryIds),
-			prefetched?.picksByEntry ??
-				entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
-			eventId > 1
-				? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
-				: Promise.resolve(new Map<number, EntryEventResult>()),
-			loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
-		]);
-		const readyEntryIds = entryIds.filter(
-			(entryId) => (picksByEntry.get(entryId)?.picks.length ?? 0) > 0
-		);
+		const [entriesById, picksByEntry, previousResultsByEntry, managerScores, event] =
+			await Promise.all([
+				entriesService.getEntriesByIds(context, entryIds),
+				prefetched?.picksByEntry ??
+					entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
+				eventId > 1
+					? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
+					: Promise.resolve(new Map<number, EntryEventResult>()),
+				loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
+				eventsService.getEventById(context, eventId).catch(() => null),
+			]);
 		// Manager headline availability is independent from lineup availability.
 		// Keep NO_PICKS metadata cheap while still resolving the official manager
 		// score; final lifecycle evidence requires a persisted lineup/result pair.
-		const event =
-			readyEntryIds.length > 0 ? await eventsService.getEventById(context, eventId) : null;
-		const provisional =
-			readyEntryIds.length === 0 || !(event?.finished === true && event.dataChecked === true);
-		const finalizedResultsByEntry = !provisional
-			? await entriesService.getEntryEventResultsByEntryIds(context, readyEntryIds, eventId)
-			: new Map<number, EntryEventResult>();
-		if (!provisional && readyEntryIds.length > 0) {
+		const provisional = !(event?.finished === true && event.dataChecked === true);
+		let finalizedResultsByEntry = new Map<number, EntryEventResult>();
+		if (!provisional) {
 			// FPL can publish automatic_subs and the effective captain after the
 			// event flips to finished/data_checked. Read through a finalization-scoped
 			// cache key so the canonical picks are refreshed once, then remain stable.
-			const finalizedPicks = await entryLiveRepository.getEntryEventPicksByIds(
-				context,
-				readyEntryIds,
-				eventId,
-				false,
-				`data-checked:${eventId}`
-			);
+			const [finalizedResults, finalizedPicks] = await Promise.all([
+				entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId),
+				entryLiveRepository.getEntryEventPicksByIds(
+					context,
+					entryIds,
+					eventId,
+					false,
+					`data-checked:${eventId}`
+				),
+			]);
+			finalizedResultsByEntry = finalizedResults;
 			for (const [entryId, pick] of finalizedPicks) picksByEntry.set(entryId, pick);
 		}
+		const readyEntryIds = entryIds.filter((entryId) =>
+			hasCompleteEntryEventPick(picksByEntry.get(entryId), eventId, entryId)
+		);
+		const readyEntryIdSet = new Set(readyEntryIds);
+		const finalCheckedAt = new Date().toISOString();
 		const results = new Map<number, LiveCalcData>();
 		for (const entryId of entryIds) {
-			if (!readyEntryIds.includes(entryId)) {
-				const noPicks = buildNoPicksLiveCalcData(
-					entryId,
-					eventId,
-					entriesById.get(entryId) ?? null,
-					previousResultsByEntry.get(entryId) ?? null
-				);
+			if (!readyEntryIdSet.has(entryId)) {
+				const entry = entriesById.get(entryId) ?? null;
+				const previousResult = previousResultsByEntry.get(entryId) ?? null;
+				const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
+				const finalized = finalizedResultsByEntry.get(entryId);
+				const finalRow = finalized
+					? buildFinalManagerScoreRow(
+							context.currentSeason.seasonCode,
+							eventId,
+							entryId,
+							finalized,
+							finalCheckedAt
+						)
+					: undefined;
+				const noPicks = buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
 				const manager = buildManagerScore({
-					row: managerScores.rows.get(entryId),
+					row: finalRow ?? managerScores.rows.get(entryId),
 					upstreamErrorCode: managerScores.errorCode,
 					provisional,
 					available: false,
-					transferCost: 0,
-					detailEventPoints: 0,
+					transferCost: finalized?.eventTransfersCost ?? 0,
+					detailEventPoints: finalized?.eventPoints ?? 0,
+					previousOverallPoints: finalized
+						? finalized.overallPoints - finalized.eventNetPoints
+						: baseline.resolved
+							? baseline.overallPoints
+							: null,
 					nextRefreshAt: managerScores.nextRefreshAt,
 				});
 				results.set(entryId, {
@@ -538,6 +585,12 @@ export const entryLiveBatchService = {
 					provisional,
 					score: manager.score,
 					rank: manager.headline.rank,
+					eventTransfers: finalized?.eventTransfers,
+					transferCost: manager.score.transferCost,
+					chip: finalized?.eventChip ?? noPicks.chip,
+					lastOverallPoints: finalized
+						? finalized.overallPoints - finalized.eventNetPoints
+						: noPicks.lastOverallPoints,
 					livePoints: manager.headline.livePoints,
 					liveNetPoints: manager.headline.liveNetPoints,
 					liveTotalPoints: manager.headline.liveTotalPoints,
@@ -583,7 +636,9 @@ export const entryLiveBatchService = {
 
 		// Collect all unique player IDs from picks and transfers
 		const allPlayerIds = new Set<number>();
-		for (const [, picks] of picksByEntry) {
+		for (const entryId of readyEntryIds) {
+			const picks = picksByEntry.get(entryId);
+			if (!picks) continue;
 			for (const pick of picks.picks) allPlayerIds.add(pick.element);
 		}
 		for (const [, rows] of transfersByEntry) {
@@ -669,34 +724,20 @@ export const entryLiveBatchService = {
 					snapshot: targetedLive?.meta ?? fullSnapshotMeta,
 				};
 				const finalized = finalizedResultsByEntry.get(entryId);
-				const finalRow: OfficialManagerScoreRow | undefined = finalized
-					? {
-							season: context.currentSeason.seasonCode,
+				const finalRow = finalized
+					? buildFinalManagerScoreRow(
+							context.currentSeason.seasonCode,
 							eventId,
 							entryId,
-							eventPoints: finalized.eventPoints,
-							netEventPoints: finalized.eventNetPoints,
-							totalPoints: finalized.overallPoints,
-							totalScope: "OVERALL",
-							eventRank: finalized.eventRank,
-							overallRank: finalized.overallRank,
-							leagueRank: null,
-							transferCost: finalized.eventTransfersCost,
-							eventPointSemantics:
-								finalized.eventPoints === finalized.eventNetPoints &&
-								finalized.eventTransfersCost === 0
-									? "ZERO_COST_EQUIVALENT"
-									: finalized.eventPoints - finalized.eventTransfersCost ===
-										  finalized.eventNetPoints
-										? "GROSS"
-										: "UNKNOWN",
-							source: "FPL_FINAL_RESULT",
-							revision: `final:${eventId}:${entryId}:${finalized.overallPoints}:${finalized.overallRank}`,
-							checkedAt: new Date().toISOString(),
-							upstreamUpdatedAt: null,
-							staleAt: new Date(Date.now() + 90_000).toISOString(),
-						}
+							finalized,
+							finalCheckedAt
+						)
 					: undefined;
+				const baseline = resolvePreviousEventBaseline(
+					perEntry.entry,
+					eventId,
+					perEntry.previousResult
+				);
 				const manager = buildManagerScore({
 					row: finalRow ?? managerScores.rows.get(entryId),
 					upstreamErrorCode: managerScores.errorCode,
@@ -704,7 +745,11 @@ export const entryLiveBatchService = {
 					available: true,
 					transferCost: calcData.transferCost,
 					detailEventPoints: calcData.livePoints,
-					previousOverallPoints: calcData.lastOverallPoints,
+					previousOverallPoints: finalized
+						? finalized.overallPoints - finalized.eventNetPoints
+						: baseline.resolved
+							? baseline.overallPoints
+							: null,
 					eventLiveAuthority: calcData.snapshot
 						? {
 								revision: calcData.snapshot.revision,
@@ -717,6 +762,8 @@ export const entryLiveBatchService = {
 					...calcData,
 					score: manager.score,
 					rank: manager.headline.rank,
+					eventTransfers: finalized?.eventTransfers ?? calcData.transfersList.length,
+					transferCost: manager.score.transferCost,
 					livePoints: manager.headline.livePoints,
 					liveNetPoints: manager.headline.liveNetPoints,
 					liveTotalPoints: manager.headline.liveTotalPoints,

@@ -28,8 +28,13 @@ export const projectEntryLiveFromCalc = (params: {
 	calc: LiveCalcData;
 }): EntryLive | null => {
 	const { calc } = params;
+	const hasProjectableAvailability =
+		calc.availability === "READY" ||
+		(calc.availability === "NO_PICKS" &&
+			calc.score.source === "FPL_FINAL_RESULT" &&
+			calc.score.state === "FINAL");
 	if (
-		calc.availability !== "READY" ||
+		!hasProjectableAvailability ||
 		!isTraceableOfficialManagerScore(calc.score) ||
 		typeof calc.score.eventPoints !== "number" ||
 		typeof calc.score.netEventPoints !== "number" ||
@@ -45,7 +50,7 @@ export const projectEntryLiveFromCalc = (params: {
 		eventRank: calc.score.eventRank,
 		overallPoints: calc.score.totalPoints,
 		overallRank: calc.score.overallRank ?? calc.overallRank,
-		eventTransfers: calc.transfersList.length,
+		eventTransfers: calc.eventTransfers ?? calc.transfersList.length,
 		eventTransfersCost: calc.score.transferCost,
 		eventNetPoints: calc.score.netEventPoints,
 		previousOverallPoints: calc.lastOverallPoints,

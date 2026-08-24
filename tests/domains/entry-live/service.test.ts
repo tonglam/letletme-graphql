@@ -66,4 +66,26 @@ describe("entryLive score authority", () => {
 		} as LiveCalcData;
 		expect(projectEntryLiveFromCalc({ entry, event, calc: untraceable })).toBeNull();
 	});
+
+	it("keeps a traceable finalized result when rich lineup details are missing", () => {
+		const finalized = {
+			...eventLiveCalc,
+			availability: "NO_PICKS",
+			eventTransfers: 2,
+			score: {
+				...eventLiveCalc.score,
+				source: "FPL_FINAL_RESULT",
+				state: "FINAL",
+				revision: "final:1:109967:37:4090000",
+				reconciliation: "NO_LINEUP",
+				reasonCodes: ["MISSING_LINEUP"],
+			},
+		} as LiveCalcData;
+
+		expect(projectEntryLiveFromCalc({ entry, event, calc: finalized })).toMatchObject({
+			eventPoints: 37,
+			eventTransfers: 2,
+			score: { source: "FPL_FINAL_RESULT", state: "FINAL" },
+		});
+	});
 });

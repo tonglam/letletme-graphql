@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { entryLiveBatchService } from "../../../src/domains/entry-live/batch-service";
 import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
 import { entriesService } from "../../../src/domains/entries/service";
+import { eventsService } from "../../../src/domains/events/service";
 import type { LivePerformance } from "../../../src/domains/live/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
 import {
@@ -11,6 +12,22 @@ import {
 	buildTestCoreData,
 	TestRedis,
 } from "../../helpers/data-publication";
+
+const completePick = (entryId: number, eventId: number, firstElement = 1) => ({
+	eventId,
+	entryId,
+	chip: null,
+	transfersCost: 0,
+	picks: Array.from({ length: 15 }, (_, index) => ({
+		eventId,
+		entryId,
+		element: firstElement + index,
+		position: index + 1,
+		multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+		isCaptain: index === 0,
+		isViceCaptain: index === 1,
+	})),
+});
 
 const makeMockContext = (options: {
 	livePerformances?: Map<number, LivePerformance>;
@@ -162,6 +179,117 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		}
 	});
 
+	it("preserves a finalized official result when rich picks remain unavailable", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		const originalResults = entriesService.getEntryEventResultsByEntryIds;
+		const originalPicks = entryLiveRepository.getEntryEventPicksByIds;
+		const originalEvent = eventsService.getEventById;
+		entriesService.getEntriesByIds = async () =>
+			new Map([
+				[
+					1001,
+					{
+						id: 1001,
+						entryName: "Final Team",
+						playerName: "Final Player",
+						region: null,
+						startedEvent: 1,
+						overallPoints: 137,
+						overallRank: 400,
+						bank: 10,
+						teamValue: 1000,
+						totalTransfers: 2,
+						lastEventId: 2,
+						lastOverallPoints: 100,
+						lastOverallRank: 500,
+						lastTeamValue: 990,
+						lastBank: 10,
+					},
+				],
+			]);
+		entriesService.getEntryEventResultsByEntryIds = async (_context, _entryIds, eventId) => {
+			if (eventId === 1) {
+				return new Map([
+					[
+						1001,
+						{
+							entryId: 1001,
+							eventId: 1,
+							eventPoints: 100,
+							eventRank: 500,
+							overallPoints: 100,
+							overallRank: 500,
+							eventTransfers: 0,
+							eventTransfersCost: 0,
+							eventNetPoints: 100,
+							eventBenchPoints: 0,
+							eventChip: null,
+							eventPlayedCaptain: 1,
+							eventCaptainPoints: 10,
+							eventPicks: [],
+							teamValue: 990,
+							bank: 10,
+						},
+					],
+				]);
+			}
+			return new Map([
+				[
+					1001,
+					{
+						entryId: 1001,
+						eventId: 2,
+						eventPoints: 41,
+						eventRank: 79,
+						overallPoints: 137,
+						overallRank: 400,
+						eventTransfers: 2,
+						eventTransfersCost: 4,
+						eventNetPoints: 37,
+						eventBenchPoints: 8,
+						eventChip: null,
+						eventPlayedCaptain: 1,
+						eventCaptainPoints: 12,
+						eventPicks: [],
+						teamValue: 1000,
+						bank: 10,
+					},
+				],
+			]);
+		};
+		entryLiveRepository.getEntryEventPicksByIds = async () => new Map();
+		eventsService.getEventById = async () =>
+			({ id: 2, finished: true, dataChecked: true }) as never;
+
+		try {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(
+				makeMockContext({}),
+				2,
+				[1001]
+			);
+			expect(result.results.get(1001)).toMatchObject({
+				availability: "NO_PICKS",
+				provisional: false,
+				eventTransfers: 2,
+				transferCost: 4,
+				lastOverallPoints: 100,
+				livePoints: 41,
+				liveNetPoints: 37,
+				liveTotalPoints: 137,
+				score: {
+					source: "FPL_FINAL_RESULT",
+					state: "FINAL",
+					reconciliation: "NO_LINEUP",
+				},
+			});
+		} finally {
+			entriesService.getEntriesByIds = originalEntries;
+			entriesService.getEntryEventResultsByEntryIds = originalResults;
+			entryLiveRepository.getEntryEventPicksByIds = originalPicks;
+			eventsService.getEventById = originalEvent;
+		}
+	});
+
 	it("preserves input order while propagating the pinned revision to ready results", async () => {
 		const originalEntries = entriesService.getEntriesByIds;
 		const originalTransfers = entryLiveRepository.getEntryEventTransfersByIds;
@@ -192,20 +320,6 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				[202, entry(202)],
 			]);
 		entryLiveRepository.getEntryEventTransfersByIds = async () => new Map();
-		const pick = (element: number) => ({
-			chip: null,
-			transfersCost: 0,
-			picks: [
-				{
-					element,
-					position: 1,
-					multiplier: 1,
-					isCaptain: false,
-					isViceCaptain: false,
-				},
-			],
-		});
-
 		try {
 			const result = await entryLiveBatchService.calcLivePointsForEntries(
 				context,
@@ -216,7 +330,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 					liveByPlayer: Promise.resolve(new Map()),
 					fixtures: Promise.resolve([]),
 					teams: Promise.resolve(core.teams as never),
-					picksByEntry: Promise.resolve(new Map([[101, pick(1)]]) as never),
+					picksByEntry: Promise.resolve(new Map([[101, completePick(101, 1)]]) as never),
 				}
 			);
 

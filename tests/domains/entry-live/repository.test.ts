@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
+import {
+	entryLiveRepository,
+	hasCompleteEntryEventPick,
+} from "../../../src/domains/entry-live/repository";
 import { gqlCacheKey } from "../../../src/infra/cache-key";
 
 const buildContext = (options: { cache?: string | null; rows?: unknown[] } = {}) => {
@@ -242,5 +245,41 @@ describe("entryLiveRepository batch picks", () => {
 		expect(result.get(1)).toMatchObject({ chip: "bboost", transfersCost: 4 });
 		expect(result.get(1)?.picks[0]).toMatchObject({ element: 10, isCaptain: true });
 		expect(pipelineWrites).toHaveLength(1);
+	});
+});
+
+describe("hasCompleteEntryEventPick", () => {
+	const complete = () => ({
+		eventId: 3,
+		entryId: 1,
+		chip: null,
+		transfersCost: 0,
+		picks: Array.from({ length: 15 }, (_, index) => ({
+			eventId: 3,
+			entryId: 1,
+			element: index + 1,
+			position: index + 1,
+			multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+			isCaptain: index === 0,
+			isViceCaptain: index === 1,
+		})),
+	});
+
+	it("accepts one complete official 15-player squad", () => {
+		expect(hasCompleteEntryEventPick(complete(), 3, 1)).toBe(true);
+	});
+
+	it("rejects partial, duplicated, or cross-entry squads", () => {
+		const partial = complete();
+		partial.picks.pop();
+		expect(hasCompleteEntryEventPick(partial, 3, 1)).toBe(false);
+
+		const duplicated = complete();
+		duplicated.picks[14]!.element = duplicated.picks[13]!.element;
+		expect(hasCompleteEntryEventPick(duplicated, 3, 1)).toBe(false);
+
+		const crossEntry = complete();
+		crossEntry.picks[0]!.entryId = 2;
+		expect(hasCompleteEntryEventPick(crossEntry, 3, 1)).toBe(false);
 	});
 });

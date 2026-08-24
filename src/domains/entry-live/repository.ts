@@ -22,6 +22,54 @@ export type Pick = {
 	isViceCaptain: boolean;
 };
 
+/**
+ * Active event/live scoring is only valid with one complete official FPL squad.
+ * Keep cache parsing tolerant, but fail closed at the scoring authority boundary.
+ */
+export const hasCompleteEntryEventPick = (
+	pickEntity: EntryEventPick | null | undefined,
+	eventId: number,
+	entryId: number
+): pickEntity is EntryEventPick => {
+	if (
+		!pickEntity ||
+		pickEntity.eventId !== eventId ||
+		pickEntity.entryId !== entryId ||
+		!Number.isSafeInteger(pickEntity.transfersCost) ||
+		pickEntity.transfersCost < 0 ||
+		pickEntity.picks.length !== 15
+	) {
+		return false;
+	}
+
+	const positions = new Set<number>();
+	const elements = new Set<number>();
+	let captains = 0;
+	let viceCaptains = 0;
+	for (const pick of pickEntity.picks) {
+		if (
+			pick.eventId !== eventId ||
+			pick.entryId !== entryId ||
+			!Number.isSafeInteger(pick.element) ||
+			pick.element <= 0 ||
+			!Number.isSafeInteger(pick.position) ||
+			pick.position < 1 ||
+			pick.position > 15 ||
+			!Number.isSafeInteger(pick.multiplier) ||
+			pick.multiplier < 0 ||
+			pick.multiplier > 3
+		) {
+			return false;
+		}
+		positions.add(pick.position);
+		elements.add(pick.element);
+		if (pick.isCaptain) captains += 1;
+		if (pick.isViceCaptain) viceCaptains += 1;
+	}
+
+	return positions.size === 15 && elements.size === 15 && captains === 1 && viceCaptains === 1;
+};
+
 export type EntryEventTransferRow = {
 	eventId: number;
 	entryId: number;

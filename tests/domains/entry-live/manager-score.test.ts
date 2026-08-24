@@ -105,6 +105,29 @@ describe("event-live manager score contract", () => {
 		expect(result.score.totalScope).toBe("OVERALL");
 	});
 
+	it("reconciles NET manager metadata against the event-live-derived net score", () => {
+		const result = buildManagerScore({
+			row: row({
+				eventPoints: 42,
+				netEventPoints: 42,
+				eventPointSemantics: "NET",
+				transferCost: 4,
+			}),
+			upstreamErrorCode: null,
+			provisional: true,
+			available: true,
+			transferCost: 4,
+			detailEventPoints: 46,
+			previousOverallPoints: 100,
+			eventLiveAuthority: authority(),
+		});
+
+		expect(result.score.eventPoints).toBe(46);
+		expect(result.score.netEventPoints).toBe(42);
+		expect(result.score.reconciliation).toBe("MATCHED");
+		expect(result.score.reasonCodes).not.toContain("SOURCE_SKEW");
+	});
+
 	it("remains event-live authoritative when manager metadata has no score", () => {
 		const result = buildManagerScore({
 			row: row({ eventPoints: null, totalPoints: null, totalScope: "CLASSIC_PHASE" }),

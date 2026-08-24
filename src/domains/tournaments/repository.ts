@@ -1275,9 +1275,10 @@ async function loadOfficialH2HSnapshots(
 				left.sourceOrder - right.sourceOrder ||
 				left.officialMatchId - right.officialMatchId
 		);
-		const scoreCheckedAt = finalizedEventIds.has(eventId)
-			? latestOfficialH2HCheckedAt(matches)
-			: null;
+		const scoreCheckedAt =
+			finalizedEventIds.has(eventId) && currentProjection.currentEventComplete
+				? latestOfficialH2HCheckedAt(matches)
+				: null;
 		loaded.set(tournament.id, {
 			snapshot: {
 				tournament,
@@ -1338,7 +1339,7 @@ function suppressActiveOfficialH2HScores(
 ): OfficialH2HSnapshotLoad {
 	if (finalizedEventIds.has(eventId)) {
 		const scoreCheckedAt = latestOfficialH2HCheckedAt(loaded.snapshot.matches);
-		if (!scoreCheckedAt) {
+		if (!loaded.currentEventComplete || !scoreCheckedAt) {
 			return suppressActiveOfficialH2HScores(
 				loaded,
 				eventId,
@@ -1408,8 +1409,14 @@ export function projectOfficialH2HEventLiveSnapshot(
 	if (finalizedEventIds.has(eventId) || batch.state === "scheduled") return suppressed;
 
 	const entryIds = loaded.snapshot.standings.map((standing) => standing.entryId);
+	const expectedEntryCount = loaded.snapshot.tournament.totalTeamNum;
+	const currentSourceRows = loaded.history.filter((row) => row.event_id === eventId);
 	if (
-		entryIds.length === 0 ||
+		!Number.isSafeInteger(expectedEntryCount) ||
+		expectedEntryCount <= 0 ||
+		entryIds.length !== expectedEntryCount ||
+		new Set(entryIds).size !== expectedEntryCount ||
+		currentSourceRows.some((row) => row.home_is_average || row.away_is_average) ||
 		entryIds.some((entryId) => typeof batch.scores.get(entryId) !== "number")
 	) {
 		return suppressed;
@@ -1420,13 +1427,9 @@ export function projectOfficialH2HEventLiveSnapshot(
 		return {
 			...row,
 			home_net_points:
-				row.home_entry_id === null
-					? row.home_net_points
-					: (batch.scores.get(row.home_entry_id) ?? null),
+				row.home_entry_id === null ? null : (batch.scores.get(row.home_entry_id) ?? null),
 			away_net_points:
-				row.away_entry_id === null
-					? row.away_net_points
-					: (batch.scores.get(row.away_entry_id) ?? null),
+				row.away_entry_id === null ? null : (batch.scores.get(row.away_entry_id) ?? null),
 			source_checked_at: batch.checkedAt,
 		};
 	});
@@ -1451,13 +1454,9 @@ export function projectOfficialH2HEventLiveSnapshot(
 	const matches = loaded.snapshot.matches.map((match) => {
 		if (match.eventId !== eventId) return match;
 		const homePoints =
-			match.home.entryId === null
-				? match.home.points
-				: (batch.scores.get(match.home.entryId) ?? null);
+			match.home.entryId === null ? null : (batch.scores.get(match.home.entryId) ?? null);
 		const awayPoints =
-			match.away.entryId === null
-				? match.away.points
-				: (batch.scores.get(match.away.entryId) ?? null);
+			match.away.entryId === null ? null : (batch.scores.get(match.away.entryId) ?? null);
 		const scoreable = !match.isBye && homePoints !== null && awayPoints !== null;
 		const homeMatchPoints = !scoreable
 			? null
