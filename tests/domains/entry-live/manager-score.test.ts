@@ -221,6 +221,24 @@ describe("event-live manager score contract", () => {
 		}
 	});
 
+	it("fails closed when the official transfer cost is unavailable", () => {
+		const result = buildManagerScore({
+			row: row({ transferCost: 4 }),
+			upstreamErrorCode: null,
+			provisional: true,
+			available: true,
+			transferCost: null,
+			detailEventPoints: 37,
+			previousOverallPoints: 100,
+			eventLiveAuthority: authority(),
+		});
+
+		expect(result.score.source).toBe("UNAVAILABLE");
+		expect(result.score.eventPoints).toBeNull();
+		expect(result.score.netEventPoints).toBeNull();
+		expect(result.score.totalPoints).toBeNull();
+	});
+
 	it("uses the persisted final result only after FPL data_checked", () => {
 		const result = buildManagerScore({
 			row: row({

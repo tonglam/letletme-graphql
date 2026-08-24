@@ -78,6 +78,9 @@ const hasTraceableRevision = (value: string | null | undefined): value is string
 const hasTraceableCheckedAt = (value: string | null | undefined): value is string =>
 	typeof value === "string" && value.trim().length > 0 && Number.isFinite(Date.parse(value));
 
+const asOfficialTransferCost = (value: number | null | undefined): number | null =>
+	typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+
 export const isTraceableOfficialManagerScore = (score: LiveManagerScore): boolean => {
 	if (!hasTraceableRevision(score.revision) || !hasTraceableCheckedAt(score.checkedAt))
 		return false;
@@ -160,7 +163,7 @@ export function buildManagerScore(params: {
 	upstreamErrorCode: ManagerScoreLoad["errorCode"];
 	provisional: boolean;
 	available: boolean;
-	transferCost: number;
+	transferCost: number | null;
 	detailEventPoints: number;
 	previousOverallPoints?: number | null;
 	eventLiveAuthority?: EventLiveScoreAuthority | null;
@@ -178,13 +181,18 @@ export function buildManagerScore(params: {
 		detailEventPoints,
 		previousOverallPoints = null,
 	} = params;
-	const finalEvidence =
+	const suppliedTransferCost = asOfficialTransferCost(transferCost);
+	const rowTransferCost = asOfficialTransferCost(row?.transferCost);
+	const finalTransferCost = rowTransferCost ?? suppliedTransferCost;
+	if (
 		!provisional &&
 		row?.source === "FPL_FINAL_RESULT" &&
 		hasTraceableRevision(row.revision) &&
-		hasTraceableCheckedAt(row.checkedAt);
-	if (finalEvidence && row && isWithinStaleWindow(row)) {
-		const effectiveTransferCost = row.transferCost ?? transferCost;
+		hasTraceableCheckedAt(row.checkedAt) &&
+		finalTransferCost !== null &&
+		isWithinStaleWindow(row)
+	) {
+		const effectiveTransferCost = finalTransferCost;
 		const detailNetEventPoints = detailEventPoints - effectiveTransferCost;
 		const reconciliation: LiveManagerScoreReconciliation = !available
 			? "NO_LINEUP"
@@ -282,6 +290,7 @@ export function buildManagerScore(params: {
 	// solely as rank metadata and reconciliation evidence.
 	if (
 		available &&
+		suppliedTransferCost !== null &&
 		params.eventLiveAuthority &&
 		hasTraceableRevision(params.eventLiveAuthority.revision) &&
 		hasTraceableCheckedAt(params.eventLiveAuthority.checkedAt)
@@ -289,7 +298,7 @@ export function buildManagerScore(params: {
 		const authority = params.eventLiveAuthority;
 		const checkedAt = authority.checkedAt;
 		const fresh = ageSeconds(checkedAt) <= REFRESH_SECONDS;
-		const effectiveTransferCost = transferCost;
+		const effectiveTransferCost = suppliedTransferCost;
 		const eventPoints = detailEventPoints;
 		const netEventPoints = eventPoints - effectiveTransferCost;
 		const totalPoints =
@@ -346,7 +355,8 @@ export function buildManagerScore(params: {
 	else if (upstreamErrorCode) reasons.push("UPSTREAM_UNAVAILABLE");
 	if (row || !params.eventLiveAuthority) reasons.push("SOURCE_TOO_OLD");
 	if (!available) reasons.push("MISSING_LINEUP");
-	const unavailable = baseScore(transferCost);
+	if (suppliedTransferCost === null) reasons.push("MISSING_SCORE");
+	const unavailable = baseScore(suppliedTransferCost ?? 0);
 	unavailable.checkedAt = row?.checkedAt ?? null;
 	unavailable.staleAt = row?.staleAt ?? null;
 	unavailable.nextRefreshAt = params.nextRefreshAt ?? null;

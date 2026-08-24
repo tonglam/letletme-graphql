@@ -96,14 +96,18 @@ export const hasCompleteEntryEventPick = (
 		// players while still satisfying the aggregate multiplier totals below.
 		(viceCaptainMultiplier === null || viceCaptainMultiplier <= 1 || captainMultiplier === 0) &&
 		((positiveMultipliers === 11 && (multiplierTotal === 12 || multiplierTotal === 13)) ||
-			(positiveMultipliers === 15 && multiplierTotal === 16));
+			(pickEntity.chip?.trim().toLowerCase() === "bboost" &&
+				((positiveMultipliers === 15 && multiplierTotal === 16) ||
+					(positiveMultipliers === 14 && multiplierTotal === 15))));
 	const hasFinalNoCaptainBoostShape =
 		allowFinalNoCaptainBoost &&
 		boostedMultipliers === 0 &&
 		captainMultiplier === 0 &&
 		viceCaptainMultiplier === 0 &&
-		positiveMultipliers === 11 &&
-		multiplierTotal === 11;
+		((positiveMultipliers === 11 && multiplierTotal === 11) ||
+			(pickEntity.chip?.trim().toLowerCase() === "bboost" &&
+				positiveMultipliers === 13 &&
+				multiplierTotal === 13));
 	return (
 		positions.size === 15 &&
 		elements.size === 15 &&
@@ -167,6 +171,8 @@ const isEntryEventPick = (value: unknown): value is EntryEventPick => {
 	return (
 		asNumber(value.entryId) !== null &&
 		asNumber(value.eventId) !== null &&
+		Number.isSafeInteger(value.transfersCost) &&
+		Number(value.transfersCost) >= 0 &&
 		value.picks.every((pick) => isRecord(pick) && asNumber(pick.element) !== null)
 	);
 };
@@ -365,7 +371,7 @@ export const entryLiveRepository: EntryLiveRepository = {
 	): Promise<EntryEventPick | null> {
 		if (!Number.isSafeInteger(entryId) || entryId <= 0) return null;
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
-		const cacheKey = gqlCacheKey(context, `entries:picks:${entryId}:${eventId}`);
+		const cacheKey = gqlCacheKey(context, `entries:picks:v2:${entryId}:${eventId}`);
 		const cached = await parseCachedJson(context, cacheKey, isEntryEventPick);
 		if (cached) {
 			return cached;
@@ -391,7 +397,18 @@ export const entryLiveRepository: EntryLiveRepository = {
 
 		const picksRaw = row.picks ?? null;
 		const chip = asString(row.chip);
-		const transfersCost = asNumber(row.transfers_cost) ?? 0;
+		const transfersCost = asNumber(row.transfers_cost);
+		if (
+			typeof transfersCost !== "number" ||
+			!Number.isSafeInteger(transfersCost) ||
+			transfersCost < 0
+		) {
+			context.logger.warn(
+				{ entryId, eventId },
+				"Ignoring entry picks without an official transfer cost"
+			);
+			return null;
+		}
 
 		const picks = parsePicks(picksRaw, { entryId, eventId });
 
@@ -433,8 +450,8 @@ export const entryLiveRepository: EntryLiveRepository = {
 			gqlCacheKey(
 				context,
 				finalizationRevision
-					? `entries:picks:${id}:${eventId}:final:${finalizationRevision}`
-					: `entries:picks:${id}:${eventId}`
+					? `entries:picks:v2:${id}:${eventId}:final:${finalizationRevision}`
+					: `entries:picks:v2:${id}:${eventId}`
 			);
 		const cacheKeys = uniqueIds.map(cacheKeyFor);
 		const results = new Map<number, EntryEventPick>();
@@ -496,7 +513,18 @@ export const entryLiveRepository: EntryLiveRepository = {
 
 			const picksRaw = row.picks ?? null;
 			const chip = asString(row.chip);
-			const transfersCost = asNumber(row.transfers_cost) ?? 0;
+			const transfersCost = asNumber(row.transfers_cost);
+			if (
+				typeof transfersCost !== "number" ||
+				!Number.isSafeInteger(transfersCost) ||
+				transfersCost < 0
+			) {
+				context.logger.warn(
+					{ entryId: rowEntryId, eventId },
+					"Ignoring entry picks without an official transfer cost"
+				);
+				continue;
+			}
 
 			const picks = parsePicks(picksRaw, { entryId: rowEntryId, eventId });
 			const pick: EntryEventPick = {

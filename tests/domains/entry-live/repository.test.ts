@@ -253,13 +253,68 @@ describe("entryLiveRepository batch picks", () => {
 		expect(result.get(1)?.picks).toHaveLength(1);
 		expect(pipelineWrites).toHaveLength(1);
 	});
+
+	it("does not publish or cache picks without an official transfer cost", async () => {
+		const pipelineWrites: unknown[][] = [];
+		const pipeline = {
+			set: (...args: unknown[]) => {
+				pipelineWrites.push(args);
+				return pipeline;
+			},
+			exec: async () => [],
+		};
+		const context = {
+			currentSeason: { seasonId: 2025, seasonCode: "2526" },
+			dataRevision: "core-test",
+			redis: {
+				mget: async () => [null],
+				del: async () => 0,
+				pipeline: () => pipeline,
+			},
+			data: {
+				read: () => {
+					const result = {
+						data: [
+							{
+								entry_id: 1,
+								event_id: 3,
+								picks: Array.from({ length: 15 }, (_, index) => ({
+									element: index + 1,
+									position: index + 1,
+									multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+									is_captain: index === 0,
+									is_vice_captain: index === 1,
+								})),
+								chip: null,
+								transfers_cost: null,
+							},
+						],
+						error: null,
+					};
+					const query = Promise.resolve(result);
+					const builder = Object.assign(query, {
+						select: () => builder,
+						in: () => builder,
+						eq: () => builder,
+					});
+					return builder;
+				},
+			},
+			logger: { warn: () => undefined, error: () => undefined },
+		} as never;
+
+		const result = await entryLiveRepository.getEntryEventPicksByIds(context, [1], 3);
+
+		expect(result.has(1)).toBe(false);
+		expect(pipelineWrites).toHaveLength(0);
+	});
 });
 
 describe("hasCompleteEntryEventPick", () => {
 	const complete = () => ({
 		eventId: 3,
 		entryId: 1,
-		chip: null,
+		chip: null as string | null,
 		transfersCost: 0,
 		picks: Array.from({ length: 15 }, (_, index) => ({
 			eventId: 3,
@@ -331,5 +386,18 @@ describe("hasCompleteEntryEventPick", () => {
 
 		expect(hasCompleteEntryEventPick(noCaptainBoost, 3, 1)).toBe(false);
 		expect(hasCompleteEntryEventPick(noCaptainBoost, 3, 1, true)).toBe(true);
+	});
+
+	it("accepts settled Bench Boost captain promotion and no-boost shapes", () => {
+		const promotedVice = complete();
+		promotedVice.chip = "bboost";
+		promotedVice.picks[0]!.multiplier = 0;
+		promotedVice.picks[1]!.multiplier = 2;
+		for (const pick of promotedVice.picks.slice(2)) pick.multiplier = 1;
+		expect(hasCompleteEntryEventPick(promotedVice, 3, 1, true)).toBe(true);
+
+		promotedVice.picks[1]!.multiplier = 0;
+		expect(hasCompleteEntryEventPick(promotedVice, 3, 1)).toBe(false);
+		expect(hasCompleteEntryEventPick(promotedVice, 3, 1, true)).toBe(true);
 	});
 });
