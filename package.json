@@ -17,7 +17,7 @@
 		"rate-limit:observe": "bun scripts/build-rate-limit-observation.ts",
 		"rate-limit:p0-probe": "bun scripts/rate-limit-p0-probe.ts",
 		"seed:mini-program-notice": "bun scripts/seed-mini-program-notice-redis.ts",
-		"lint": "eslint src tests scripts",
+		"lint": "eslint src tests scripts --max-warnings=0",
 		"lint:fix": "eslint src tests scripts --fix",
 		"format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.ts\"",
 		"format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.ts\""
