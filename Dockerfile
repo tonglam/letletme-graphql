@@ -12,6 +12,10 @@ FROM base AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 
+ARG VCS_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/tonglam/letletme-graphql" \
+	org.opencontainers.image.revision="${VCS_REVISION}"
+
 COPY --from=deps --chown=bun:bun /app/package.json ./
 COPY --from=deps --chown=bun:bun /app/bun.lock ./
 COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules

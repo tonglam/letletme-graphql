@@ -96,6 +96,14 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain("severity: HIGH,CRITICAL");
 	});
 
+	test("binds the image and running container to the exact deployment commit", () => {
+		expect(dockerfile).toContain("ARG VCS_REVISION=unknown");
+		expect(dockerfile).toContain('org.opencontainers.image.revision="${VCS_REVISION}"');
+		expect(workflow).toContain('--build-arg "VCS_REVISION=${{ steps.target.outputs.sha }}"');
+		expect(workflow).toContain('index .Config.Labels "org.opencontainers.image.revision"');
+		expect(workflow).toContain('= "$DEPLOY_SHA"');
+	});
+
 	test("uses the complete GraphQL environment URL without password rewriting", () => {
 		expect(workflow).toContain("GRAPHQL_ENV: ${{ secrets.GRAPHQL_ENV }}");
 		expect(workflow).toContain('printf \'%s\' "$GRAPHQL_ENV" > "$next_env"');
