@@ -17,6 +17,8 @@ on:
           - p0-legacy
           - shadow-v3
           - enforce-v3
+          - shadow-v4
+          - enforce-v4
           - enforce-v3-restored-compat
           - rollback-legacy
           - secret
@@ -264,7 +266,7 @@ jobs:
                   active_rate_limit_rollout=secret
                 fi
                 ;;
-              p0-legacy|shadow-v3|enforce-v3|enforce-v3-restored-compat|rollback-legacy)
+              p0-legacy|shadow-v3|enforce-v3|shadow-v4|enforce-v4|enforce-v3-restored-compat|rollback-legacy)
                 active_rate_limit_rollout="$RATE_LIMIT_ROLLOUT"
                 persist_rate_limit_rollout="$active_rate_limit_rollout"
                 ;;
@@ -325,6 +327,8 @@ jobs:
                 "p0-legacy": ("legacy", "960", "900", "1200"),
                 "shadow-v3": ("shadow-v3", "960", "900", "1200"),
                 "enforce-v3": ("enforce-v3", "960", "900", "1200"),
+                "shadow-v4": ("shadow-v4", "960", "900", "1200"),
+                "enforce-v4": ("enforce-v4", "960", "900", "1200"),
                 "enforce-v3-restored-compat": ("enforce-v3", "480", "900", "600"),
                 "rollback-legacy": ("legacy", "480", "900", "600"),
             }

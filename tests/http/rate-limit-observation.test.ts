@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { capacityRunRequestIdPrefix } from "../../src/http/capacity-run-id";
 import {
 	buildRateLimitTargetObservation,
+	buildRateLimitTargetObservationV4,
 	parseCapacityLoadReport,
 } from "../../src/http/rate-limit-observation";
 
@@ -163,5 +164,85 @@ describe("capacity log observation", () => {
 				},
 			})
 		).toThrow("invalid stage window");
+	});
+
+	it("derives separate anonymous and authenticated Mini workload evidence for v4", () => {
+		const v4Log = (input: Record<string, unknown>): string =>
+			JSON.stringify({
+				time: startedAt + 1_000,
+				msg: "GraphQL v4 rate-limit decision",
+				stage: "weighted",
+				policy: "graphql-v4",
+				requestId: `${capacityRunRequestIdPrefix(report.runId)}request-v4`,
+				allowed: true,
+				...input,
+			});
+		const observation = buildRateLimitTargetObservationV4({
+			report: {
+				...report,
+				window: {
+					...report.window,
+					stageWindows: [{ ...report.window.stageWindows[0]!, serverGraphQLRequests: 6 }],
+				},
+			},
+			logLines: [
+				v4Log({
+					trafficClass: "mini",
+					workload: "fixtures",
+					audience: "anonymous",
+					fingerprint: "aaaaaaaaaaaa",
+					cost: 5,
+				}),
+				v4Log({
+					trafficClass: "mini",
+					workload: "fixtures",
+					audience: "anonymous",
+					fingerprint: "aaaaaaaaaaaa",
+					cost: 3,
+				}),
+				v4Log({
+					trafficClass: "mini",
+					workload: "fixtures",
+					audience: "anonymous",
+					fingerprint: "bbbbbbbbbbbb",
+					cost: 4,
+				}),
+				v4Log({
+					trafficClass: "mini",
+					workload: "player-stats",
+					audience: "authenticated",
+					fingerprint: "cccccccccccc",
+					cost: 40,
+				}),
+				v4Log({ trafficClass: "web_rsc", workload: "fixtures", cost: 10 }),
+				v4Log({ trafficClass: "service", workload: "public-other", cost: 8 }),
+			],
+		});
+		expect(observation.mini.anonymousWeightedPerSecond.fixtures).toBe(8 / 900);
+		expect(observation.mini.anonymousMaxCost.fixtures).toBe(5);
+		expect(observation.mini.sessionWeightedPerSecond["player-stats"]).toBe(40 / 900);
+		expect(observation.mini.sessionMaxCost["player-stats"]).toBe(40);
+		expect(() =>
+			buildRateLimitTargetObservationV4({
+				report,
+				logLines: [
+					v4Log({
+						trafficClass: "mini",
+						workload: "fixtures",
+						audience: "anonymous",
+						cost: 5,
+					}),
+					v4Log({
+						trafficClass: "mini",
+						workload: "player-stats",
+						audience: "authenticated",
+						fingerprint: "cccccccccccc",
+						cost: 40,
+					}),
+					v4Log({ trafficClass: "web_rsc", workload: "fixtures", cost: 10 }),
+					v4Log({ trafficClass: "service", workload: "public-other", cost: 8 }),
+				],
+			})
+		).toThrow("identity fingerprints");
 	});
 });

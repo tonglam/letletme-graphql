@@ -156,7 +156,7 @@ describe("authorizeGraphQLRequest", () => {
 		});
 		expect(
 			await authorize(`query { homePersonalDesk { state } }`, undefined, unverifiedWebsitePrincipal)
-		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+		).toMatchObject({ ok: false, status: 403, code: "VIEWER_ENTRY_REQUIRED" });
 		expect(
 			await authorize(`query { homePersonalDesk { state } }`, undefined, websitePrincipal)
 		).toEqual({ ok: true });
@@ -179,7 +179,7 @@ describe("authorizeGraphQLRequest", () => {
 			expect(await authorize(query, undefined, unverifiedWebsitePrincipal)).toMatchObject({
 				ok: false,
 				status: 403,
-				code: "FORBIDDEN",
+				code: "VIEWER_ENTRY_REQUIRED",
 			});
 			expect(await authorize(query, undefined, websitePrincipal)).toEqual({ ok: true });
 			expect(await authorize(query, undefined, miniViewerPrincipal)).toEqual({ ok: true });
@@ -302,7 +302,7 @@ describe("authorizeGraphQLRequest", () => {
 		expect(result.ok).toBe(true);
 	});
 
-	it("rejects a matching entry when the binding is not verified", async () => {
+	it("requires a selected viewer entry before reading an entry-scoped root", async () => {
 		const result = await authorize(
 			`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,
 			{ entryId: 123 },
@@ -312,7 +312,7 @@ describe("authorizeGraphQLRequest", () => {
 		expect(result.ok).toBe(false);
 		if (!result.ok) {
 			expect(result.status).toBe(403);
-			expect(result.code).toBe("FORBIDDEN");
+			expect(result.code).toBe("VIEWER_ENTRY_REQUIRED");
 		}
 	});
 

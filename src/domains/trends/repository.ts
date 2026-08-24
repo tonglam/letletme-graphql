@@ -27,13 +27,13 @@ const notFound = (message: string): never => {
 	throw new GraphQLError(message, { extensions: { code: "NOT_FOUND", http: { status: 404 } } });
 };
 
-const forbidden = (message: string): never => {
-	throw new GraphQLError(message, { extensions: { code: "FORBIDDEN", http: { status: 403 } } });
+const forbidden = (message: string, code = "FORBIDDEN"): never => {
+	throw new GraphQLError(message, { extensions: { code, http: { status: 403 } } });
 };
 
 const requirePrivateTrendsPrincipal = (context: GraphQLContext): void => {
 	const result = authorizeViewerEntry(context.principal);
-	if (!result.ok) forbidden(result.message);
+	if (!result.ok) forbidden(result.message, result.code);
 };
 
 const viewerEntryId = (context: GraphQLContext): number | null =>

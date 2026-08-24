@@ -25,6 +25,9 @@ describe("rate-limit observability privacy", () => {
 		expect(rateLimitRecentAggregateKey(minute)).toBe(
 			"llm:gql:rate-limit:v3:recent:2026-08-20T12:34"
 		);
+		expect(rateLimitRecentAggregateKey(minute, "graphql-v4")).toBe(
+			"llm:gql:rate-limit:v4:recent:2026-08-20T12:34"
+		);
 	});
 
 	it("sums every live rate-limit storage failure series", () => {
@@ -97,10 +100,10 @@ rate_limit_storage_failures_total{scope="service-weighted",mode="closed"} 3
 	it("reports enforced and shadow rollout alarms independently", () => {
 		const summary = summarizeRateLimitTotals(
 			new Map([
-				["mini|market|client|legacy_allowed", 90],
-				["mini|market|client|legacy_denied", 10],
-				["mini|market|client|would_allow", 60],
-				["mini|market|client|would_deny", 40],
+				["mini|market|workload|legacy_allowed", 90],
+				["mini|market|workload|legacy_denied", 10],
+				["mini|market|workload|would_allow", 60],
+				["mini|market|workload|would_deny", 40],
 				["mini|market|global|would_deny", 2],
 			])
 		);
@@ -112,6 +115,7 @@ rate_limit_storage_failures_total{scope="service-weighted",mode="closed"} 3
 		expect(summary.shadowInteractiveDeniedRate).toBe(42 / 102);
 		expect(summary.globalDenied).toBe(0);
 		expect(summary.globalWouldDenied).toBe(2);
+		expect(summary.miniWorkloadShadowDeniedRate.market).toBe(40 / 100);
 	});
 
 	it("does not treat legacy-only traffic as v3 rollout evidence", () => {

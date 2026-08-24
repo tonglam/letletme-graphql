@@ -124,7 +124,7 @@ export const reconcileHomeOfficialH2HRanks = (
 
 const authError = (
 	message: string,
-	code: "UNAUTHENTICATED" | "FORBIDDEN",
+	code: "UNAUTHENTICATED" | "VIEWER_ENTRY_REQUIRED" | "FORBIDDEN",
 	status: 401 | 403
 ): GraphQLError => new GraphQLError(message, { extensions: { code, http: { status } } });
 
@@ -213,7 +213,7 @@ export const homeService = {
 		}
 		const entryId = viewerEntryIdForPrincipal(context.principal);
 		if (!entryId) {
-			throw authError("A viewed FPL team is required", "FORBIDDEN", 403);
+			throw authError("A viewed FPL team is required", "VIEWER_ENTRY_REQUIRED", 403);
 		}
 		const desk = await homeRepository.getPersonalDesk(context, entryId);
 		if (

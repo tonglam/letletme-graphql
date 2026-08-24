@@ -120,6 +120,8 @@ describe("production deployment workflow", () => {
 	test("persists explicit rate-limit rollout state only after a successful replacement", () => {
 		expect(workflow).toContain("p0-legacy");
 		expect(workflow).toContain("shadow-v3");
+		expect(workflow).toContain("shadow-v4");
+		expect(workflow).toContain("enforce-v4");
 		expect(workflow).toContain("enforce-v3-restored-compat");
 		expect(workflow).toContain("$HOME/.letletme-graphql-rate-limit-rollout");
 		expect(workflow).toContain("$HOME/.letletme-graphql-rollbacks");

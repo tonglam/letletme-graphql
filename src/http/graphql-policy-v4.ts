@@ -1,8 +1,10 @@
 import type { GraphQLIngress } from "../infra/ingress-context";
 import type { Principal } from "../infra/principal";
-import type { GraphQLRateLimitPolicyV3, TokenBucketPolicy } from "./rate-limit-policy-v3";
+import { graphQLPrincipalSubject } from "./graphql-policy-v3";
+import type { GraphQLRateLimitPolicyV4 } from "./rate-limit-policy-v4";
+import type { TokenBucketPolicy } from "./rate-limit-policy-v3";
 import {
-	tokenBucketKeyV3,
+	tokenBucketKeyV4,
 	type GraphQLRateLimitHeaderScope,
 	type TokenBucketCheckV3,
 } from "./token-bucket-v3";
@@ -10,9 +12,6 @@ import {
 const GLOBAL_SUBJECT = "all-graphql-traffic";
 const RSC_CLASS_SUBJECT = "all-web-rsc";
 const SERVICE_CLASS_SUBJECT = "all-services";
-
-export const graphQLPrincipalSubject = (principal: Principal): string =>
-	`principal:${principal.source}:${principal.userId}`;
 
 const requiredSubject = (ingress: GraphQLIngress): string =>
 	ingress.subject ?? `missing:${ingress.trafficClass}`;
@@ -32,33 +31,28 @@ const check = ({
 }): TokenBucketCheckV3 => ({
 	id,
 	scope,
-	key: tokenBucketKeyV3(id, subject),
+	key: tokenBucketKeyV4(id, subject),
 	refillPerSecond: policy.refillPerSecond,
 	burst: policy.burst,
 	cost,
 });
 
-const globalRequestCheck = (policy: GraphQLRateLimitPolicyV3): TokenBucketCheckV3 =>
+const globalRequestCheck = (policy: GraphQLRateLimitPolicyV4): TokenBucketCheckV3 =>
 	check({
-		id: "global-request",
+		id: "v4-global-request",
 		scope: "global",
 		subject: GLOBAL_SUBJECT,
 		policy: policy.global,
 	});
 
-export const graphQLV3PreAuthRateLimitChecks = (
+export const graphQLV4PreAuthRateLimitChecks = (
 	ingress: GraphQLIngress,
-	policy: GraphQLRateLimitPolicyV3
+	policy: GraphQLRateLimitPolicyV4
 ): readonly TokenBucketCheckV3[] => {
 	if (ingress.trafficClass !== "mini") return [];
-	// The IP bucket is strictly an ingress abuse guard. Charging it before
-	// session validation bounds invalid-token database work, while leaving the
-	// global and weighted buckets together in the later atomic stage. Verified
-	// Mini v2 envelopes always carry abuseSubject; the device subject is a safe
-	// bounded fallback for manually constructed contexts.
 	return [
 		check({
-			id: ingress.abuseSubject ? "mini-ip-abuse-request" : "mini-ingress-request",
+			id: ingress.abuseSubject ? "mini-v4-ip-abuse-request" : "mini-v4-ingress-request",
 			scope: "client",
 			subject: ingress.abuseSubject ?? requiredSubject(ingress),
 			policy: policy.trafficClasses.mini.abuseRequest,
@@ -66,21 +60,16 @@ export const graphQLV3PreAuthRateLimitChecks = (
 	];
 };
 
-/**
- * Trusted requests rejected before cost/principal resolution still pass the
- * global emergency valve exactly once. Valid requests use the full atomic
- * stage below instead, so a denied client/workload never drains global.
- */
-export const graphQLV3EarlyFailureRateLimitChecks = (
-	policy: GraphQLRateLimitPolicyV3
+export const graphQLV4EarlyFailureRateLimitChecks = (
+	policy: GraphQLRateLimitPolicyV4
 ): readonly TokenBucketCheckV3[] => [globalRequestCheck(policy)];
 
-export type GraphQLV3PrincipalAdmission = {
+export type GraphQLV4PrincipalAdmission = {
 	readonly audience: "authenticated" | "anonymous" | "workload" | "service" | "legacy";
 	readonly checks: readonly TokenBucketCheckV3[];
 };
 
-export const graphQLV3PrincipalAdmission = ({
+export const graphQLV4PrincipalAdmission = ({
 	ingress,
 	principal,
 	cost,
@@ -89,24 +78,38 @@ export const graphQLV3PrincipalAdmission = ({
 	ingress: GraphQLIngress;
 	principal: Principal | null;
 	cost: number;
-	policy: GraphQLRateLimitPolicyV3;
-}): GraphQLV3PrincipalAdmission => {
+	policy: GraphQLRateLimitPolicyV4;
+}): GraphQLV4PrincipalAdmission => {
 	const boundedCost = Math.max(1, Math.floor(cost));
 	const globalRequest = globalRequestCheck(policy);
 	switch (ingress.trafficClass) {
 		case "mini": {
 			const authenticated = principal !== null;
+			const identity = authenticated
+				? graphQLPrincipalSubject(principal)
+				: requiredSubject(ingress);
+			const identityLabel = authenticated ? "session" : "device";
+			const workloadPolicy = authenticated
+				? policy.trafficClasses.mini.sessionWorkloads[ingress.workload]
+				: policy.trafficClasses.mini.anonymousWorkloads[ingress.workload];
 			return {
 				audience: authenticated ? "authenticated" : "anonymous",
 				checks: [
 					globalRequest,
 					check({
-						id: authenticated ? "mini-session-weighted" : "mini-device-weighted",
+						id: `mini-${identityLabel}-aggregate-weighted`,
 						scope: "client",
-						subject: authenticated ? graphQLPrincipalSubject(principal) : requiredSubject(ingress),
+						subject: identity,
 						policy: authenticated
-							? policy.trafficClasses.mini.sessionWeighted
-							: policy.trafficClasses.mini.anonymousWeighted,
+							? policy.trafficClasses.mini.aggregateSessionWeighted
+							: policy.trafficClasses.mini.aggregateAnonymousWeighted,
+						cost: boundedCost,
+					}),
+					check({
+						id: `mini-${identityLabel}-${ingress.workload}-weighted`,
+						scope: "workload",
+						subject: `${identity}:${ingress.workload}`,
+						policy: workloadPolicy,
 						cost: boundedCost,
 					}),
 				],
@@ -119,7 +122,9 @@ export const graphQLV3PrincipalAdmission = ({
 				checks: [
 					globalRequest,
 					check({
-						id: authenticated ? "web-browser-session-weighted" : "web-browser-anonymous-weighted",
+						id: authenticated
+							? "v4-web-browser-session-weighted"
+							: "v4-web-browser-anonymous-weighted",
 						scope: "client",
 						subject: authenticated ? graphQLPrincipalSubject(principal) : requiredSubject(ingress),
 						policy: authenticated
@@ -136,13 +141,13 @@ export const graphQLV3PrincipalAdmission = ({
 				checks: [
 					globalRequest,
 					check({
-						id: "web-rsc-class-request",
+						id: "v4-web-rsc-class-request",
 						scope: "workload",
 						subject: RSC_CLASS_SUBJECT,
 						policy: policy.trafficClasses.web_rsc.classRequest,
 					}),
 					check({
-						id: `web-rsc-${ingress.workload}-weighted`,
+						id: `v4-web-rsc-${ingress.workload}-weighted`,
 						scope: "workload",
 						subject: `web-rsc:${ingress.workload}`,
 						policy: policy.trafficClasses.web_rsc.workloads[ingress.workload],
@@ -156,13 +161,13 @@ export const graphQLV3PrincipalAdmission = ({
 				checks: [
 					globalRequest,
 					check({
-						id: "service-class-request",
+						id: "v4-service-class-request",
 						scope: "workload",
 						subject: SERVICE_CLASS_SUBJECT,
 						policy: policy.trafficClasses.service.classRequest,
 					}),
 					check({
-						id: "service-weighted",
+						id: "v4-service-weighted",
 						scope: "workload",
 						subject: requiredSubject(ingress),
 						policy: policy.trafficClasses.service.weighted,
@@ -176,13 +181,13 @@ export const graphQLV3PrincipalAdmission = ({
 				checks: [
 					globalRequest,
 					check({
-						id: "legacy-class-request",
+						id: "v4-legacy-class-request",
 						scope: "client",
 						subject: requiredSubject(ingress),
 						policy: policy.trafficClasses.legacy.classRequest,
 					}),
 					check({
-						id: "legacy-weighted",
+						id: "v4-legacy-weighted",
 						scope: "client",
 						subject: principal ? graphQLPrincipalSubject(principal) : requiredSubject(ingress),
 						policy: policy.trafficClasses.legacy.weighted,

@@ -12,6 +12,7 @@ type Actor = {
 	workload: Workload;
 	path?: string;
 	cookie?: string;
+	miniToken?: string;
 };
 
 type RequestSample = {
@@ -28,6 +29,7 @@ type RequestSample = {
 	shadowRateLimitScope: string | null;
 	graphqlErrors: number;
 	authenticatedSession: boolean;
+	tokenBearing: boolean;
 	attacker: boolean;
 };
 
@@ -92,6 +94,7 @@ const sustainabilityMultipliers = (process.env.LOAD_SUSTAINABILITY_MULTIPLIERS ?
 	.filter(Number.isFinite);
 const allowHttp = booleanValue("LOAD_ALLOW_HTTP");
 const skipSessionValidation = booleanValue("LOAD_SKIP_SESSION_VALIDATION");
+const includeMiniSessions = booleanValue("LOAD_INCLUDE_MINI_SESSIONS");
 const runId = process.env.LOAD_RUN_ID?.trim() || `capacity-${Date.now().toString(36)}`;
 
 if (!/^[A-Za-z0-9_-]{8,32}$/.test(runId)) {
@@ -126,6 +129,18 @@ const sessionCookies = ((): string[] => {
 	const bounded = parsed.map((value) => value.trim()).filter(Boolean);
 	if (!skipSessionValidation && (bounded.length < 45 || new Set(bounded).size < 45)) {
 		throw new Error("Capacity mode requires 45 distinct signed-in session cookies");
+	}
+	return bounded;
+})();
+
+const miniSessionTokens = ((): string[] => {
+	const raw = process.env.LOAD_MINI_SESSION_TOKENS_JSON?.trim() || "[]";
+	const parsed = JSON.parse(raw) as unknown;
+	if (!isStringArray(parsed))
+		throw new Error("LOAD_MINI_SESSION_TOKENS_JSON must be a JSON string array");
+	const bounded = parsed.map((value) => value.trim()).filter(Boolean);
+	if (includeMiniSessions && (bounded.length < 45 || new Set(bounded).size < 45)) {
+		throw new Error("Mini session capacity mode requires 45 distinct temporary tokens");
 	}
 	return bounded;
 })();
@@ -224,13 +239,30 @@ const queryForWorkload = (
 	}
 };
 
+const addMiniAuthenticationProbe = (request: ReturnType<typeof queryForWorkload>) => {
+	const query = request.query.trimEnd();
+	const finalBrace = query.lastIndexOf("}");
+	if (finalBrace < 0 || /\bme\s*\{/.test(query)) return request;
+	return {
+		...request,
+		query: `${query.slice(0, finalBrace).trimEnd()}\n\tme { id }\n}`,
+	};
+};
+
 const buildActors = (): Actor[] => {
 	const miniWorkloads: Workload[] = ["home", "fixtures", "market", "player-stats", "gameweek"];
-	const miniActors: Actor[] = Array.from({ length: 180 }, (_, index) => ({
-		id: `mini-${index + 1}`,
-		kind: "mini" as const,
-		workload: miniWorkloads[index % miniWorkloads.length]!,
-	}));
+	const miniActors: Actor[] = Array.from({ length: 180 }, (_, index) => {
+		const miniToken =
+			includeMiniSessions && index % 2 === 1
+				? miniSessionTokens[Math.floor(index / 2) % miniSessionTokens.length]
+				: undefined;
+		return {
+			id: `mini-${index + 1}`,
+			kind: "mini" as const,
+			workload: miniWorkloads[index % miniWorkloads.length]!,
+			...(miniToken ? { miniToken } : {}),
+		};
+	});
 	const rscActors: Actor[] = Array.from({ length: 60 }, (_, index) => {
 		const groupIndex = index % 10;
 		const workload: Workload =
@@ -278,7 +310,10 @@ const graphQLRequest = async (
 	phase: string
 ): Promise<RequestSample> => {
 	const target = actor.kind === "mini" ? `${webOrigin}/api/graphql` : `${graphQLOrigin}/graphql`;
-	const request = queryForWorkload(actor.workload);
+	const request =
+		actor.kind === "mini" && actor.miniToken
+			? addMiniAuthenticationProbe(queryForWorkload(actor.workload))
+			: queryForWorkload(actor.workload);
 	const headers: Record<string, string> = {
 		"content-type": "application/json",
 		accept: "application/json",
@@ -288,6 +323,7 @@ const graphQLRequest = async (
 	if (actor.kind === "mini") {
 		headers["X-Letletme-Client"] = "wechat-miniprogram";
 		headers["X-Letletme-Device-Id"] = `load-${runId}-${actor.id}`.slice(0, 128);
+		if (actor.miniToken) headers.Authorization = `Bearer ${actor.miniToken}`;
 	} else if (actor.kind === "legacy") {
 		Object.assign(headers, signedLegacyHeaders(actor.id));
 	} else if (actor.kind === "service") {
@@ -299,6 +335,8 @@ const graphQLRequest = async (
 	let shadowRateLimitOutcome: "allow" | "deny" | null = null;
 	let shadowRateLimitScope: string | null = null;
 	let graphqlErrors = 0;
+	let authenticatedSession = false;
+	const tokenBearing = actor.kind === "mini" && Boolean(actor.miniToken);
 	try {
 		const response = await fetch(target, {
 			method: "POST",
@@ -315,9 +353,14 @@ const graphQLRequest = async (
 				: null;
 		shadowRateLimitScope = response.headers.get("x-ratelimit-shadow-scope");
 		const body = (await response.json().catch(() => null)) as {
+			data?: { me?: { id?: unknown } | null };
 			errors?: readonly unknown[];
 		} | null;
 		graphqlErrors = body?.errors?.length ?? 0;
+		// A supplied token only changes the probe shape. Authentication is true
+		// only when the GraphQL server returns the authenticated user's `me`.
+		authenticatedSession =
+			actor.kind === "mini" && typeof body?.data?.me?.id === "string" && body.data.me.id.length > 0;
 	} catch {
 		status = 0;
 		rateLimitScope = "transport";
@@ -335,7 +378,8 @@ const graphQLRequest = async (
 		shadowRateLimitOutcome,
 		shadowRateLimitScope,
 		graphqlErrors,
-		authenticatedSession: false,
+		authenticatedSession,
+		tokenBearing,
 		attacker,
 	};
 };
@@ -379,6 +423,7 @@ const pageRequest = async (actor: Actor, phase: string): Promise<RequestSample> 
 		shadowRateLimitScope: null,
 		graphqlErrors: 0,
 		authenticatedSession,
+		tokenBearing: false,
 		attacker: false,
 	};
 };
@@ -836,6 +881,10 @@ const authenticatedSessionActorCount = new Set(
 		.filter((sample) => sample.authenticatedSession)
 		.map((sample) => sample.actorId)
 ).size;
+const miniTokenSamples = capacitySamples.filter(
+	(sample) => sample.transport === "graphql" && sample.kind === "mini" && sample.tokenBearing
+);
+const miniSessionActorCount = new Set(miniTokenSamples.map((sample) => sample.actorId)).size;
 const attackerSamples = samples.filter((sample) => sample.attacker);
 const natPeerSamples = samples.filter((sample) => sample.phase === "malicious" && !sample.attacker);
 const natPeerGraphQL = natPeerSamples.filter((sample) => sample.transport === "graphql");
@@ -979,6 +1028,11 @@ const gates = {
 	sessionActorsAuthenticated:
 		authenticatedSessionActorCount === 45 &&
 		capacitySessionSamples.every((sample) => sample.authenticatedSession),
+	miniSessionActorsAuthenticated:
+		!includeMiniSessions ||
+		(miniSessionActorCount === 90 &&
+			miniTokenSamples.length > 0 &&
+			miniTokenSamples.every((sample) => sample.authenticatedSession)),
 	v3TargetWouldDenyZero: capacityWouldDenied === 0,
 	non429ErrorRateBelowPointOnePercent: non429ErrorRate < 0.001,
 	graphQLP95Below800Ms: clientGraphQLP95Ms < 800 && serverGraphQLP95UpperBoundMs < 800,
@@ -1001,6 +1055,8 @@ const report = {
 	model: {
 		targetConcurrent: 300,
 		mini: 180,
+		miniAnonymous: includeMiniSessions ? 90 : 180,
+		miniSession: includeMiniSessions ? 90 : 0,
 		sharedNatMini: 100,
 		webRsc: { total: 60, playerStats: 30, fixtures: 18, market: 12 },
 		session: 45,
@@ -1044,6 +1100,8 @@ const report = {
 		totalRequestPerSecond: capacitySamples.length / capacityElapsedSeconds,
 		targetGraphQLRps,
 		sustainableRps,
+		miniSessionActorCount,
+		miniTokenBearingSamples: miniTokenSamples.length,
 		normal429: normal429.length,
 		global429: global429.length,
 		actualGlobalDenied,
