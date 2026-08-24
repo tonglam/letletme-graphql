@@ -321,4 +321,15 @@ describe("hasCompleteEntryEventPick", () => {
 		impossiblePromotion.picks[11]!.multiplier = 1;
 		expect(hasCompleteEntryEventPick(impossiblePromotion, 3, 1)).toBe(true);
 	});
+
+	it("accepts a finalized XI when both captaincy picks have no multiplier", () => {
+		const noCaptainBoost = complete();
+		noCaptainBoost.picks[0]!.multiplier = 0;
+		noCaptainBoost.picks[1]!.multiplier = 0;
+		noCaptainBoost.picks[11]!.multiplier = 1;
+		noCaptainBoost.picks[12]!.multiplier = 1;
+
+		expect(hasCompleteEntryEventPick(noCaptainBoost, 3, 1)).toBe(false);
+		expect(hasCompleteEntryEventPick(noCaptainBoost, 3, 1, true)).toBe(true);
+	});
 });

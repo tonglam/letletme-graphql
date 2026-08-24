@@ -594,7 +594,7 @@ export const entryLiveBatchService = {
 			}
 		}
 		const readyEntryIds = entryIds.filter((entryId) =>
-			hasCompleteEntryEventPick(picksByEntry.get(entryId), eventId, entryId)
+			hasCompleteEntryEventPick(picksByEntry.get(entryId), eventId, entryId, !provisional)
 		);
 		const readyEntryIdSet = new Set(readyEntryIds);
 		const results = new Map<number, LiveCalcData>();

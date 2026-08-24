@@ -29,7 +29,8 @@ export type Pick = {
 export const hasCompleteEntryEventPick = (
 	pickEntity: EntryEventPick | null | undefined,
 	eventId: number,
-	entryId: number
+	entryId: number,
+	allowFinalNoCaptainBoost = false
 ): pickEntity is EntryEventPick => {
 	if (
 		!pickEntity ||
@@ -87,7 +88,7 @@ export const hasCompleteEntryEventPick = (
 		}
 	}
 
-	const hasOfficialMultiplierShape =
+	const hasOfficialCaptainBoostShape =
 		boostedMultipliers === 1 &&
 		boostedMultiplierBelongsToCaptaincy &&
 		// When FPL promotes the vice-captain, the original captain no longer
@@ -96,12 +97,19 @@ export const hasCompleteEntryEventPick = (
 		(viceCaptainMultiplier === null || viceCaptainMultiplier <= 1 || captainMultiplier === 0) &&
 		((positiveMultipliers === 11 && (multiplierTotal === 12 || multiplierTotal === 13)) ||
 			(positiveMultipliers === 15 && multiplierTotal === 16));
+	const hasFinalNoCaptainBoostShape =
+		allowFinalNoCaptainBoost &&
+		boostedMultipliers === 0 &&
+		captainMultiplier === 0 &&
+		viceCaptainMultiplier === 0 &&
+		positiveMultipliers === 11 &&
+		multiplierTotal === 11;
 	return (
 		positions.size === 15 &&
 		elements.size === 15 &&
 		captains === 1 &&
 		viceCaptains === 1 &&
-		hasOfficialMultiplierShape
+		(hasOfficialCaptainBoostShape || hasFinalNoCaptainBoostShape)
 	);
 };
 
