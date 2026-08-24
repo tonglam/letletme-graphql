@@ -49,6 +49,8 @@ describe("GraphQL v3 capacity model", () => {
 		expect(source).toContain(
 			'response.headers.get(capacitySessionResponseHeader) === "authenticated"'
 		);
+		expect(source).toContain("body?.data?.me?.id");
+		expect(source).not.toContain("authenticatedSession: Boolean(actor.miniToken)");
 		expect(source).toContain("authenticatedSessionActorCount === 45");
 		expect(source).toContain("sample.status < 200 || sample.status >= 300");
 		expect(source).toContain("if (!result.passed) break");

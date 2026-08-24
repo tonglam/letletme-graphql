@@ -178,22 +178,71 @@ describe("capacity log observation", () => {
 				...input,
 			});
 		const observation = buildRateLimitTargetObservationV4({
-			report,
+			report: {
+				...report,
+				window: {
+					...report.window,
+					stageWindows: [{ ...report.window.stageWindows[0]!, serverGraphQLRequests: 6 }],
+				},
+			},
 			logLines: [
-				v4Log({ trafficClass: "mini", workload: "fixtures", audience: "anonymous", cost: 5 }),
+				v4Log({
+					trafficClass: "mini",
+					workload: "fixtures",
+					audience: "anonymous",
+					fingerprint: "aaaaaaaaaaaa",
+					cost: 5,
+				}),
+				v4Log({
+					trafficClass: "mini",
+					workload: "fixtures",
+					audience: "anonymous",
+					fingerprint: "aaaaaaaaaaaa",
+					cost: 3,
+				}),
+				v4Log({
+					trafficClass: "mini",
+					workload: "fixtures",
+					audience: "anonymous",
+					fingerprint: "bbbbbbbbbbbb",
+					cost: 4,
+				}),
 				v4Log({
 					trafficClass: "mini",
 					workload: "player-stats",
 					audience: "authenticated",
+					fingerprint: "cccccccccccc",
 					cost: 40,
 				}),
 				v4Log({ trafficClass: "web_rsc", workload: "fixtures", cost: 10 }),
 				v4Log({ trafficClass: "service", workload: "public-other", cost: 8 }),
 			],
 		});
-		expect(observation.mini.anonymousWeightedPerSecond.fixtures).toBe(5 / 900);
+		expect(observation.mini.anonymousWeightedPerSecond.fixtures).toBe(8 / 900);
 		expect(observation.mini.anonymousMaxCost.fixtures).toBe(5);
 		expect(observation.mini.sessionWeightedPerSecond["player-stats"]).toBe(40 / 900);
 		expect(observation.mini.sessionMaxCost["player-stats"]).toBe(40);
+		expect(() =>
+			buildRateLimitTargetObservationV4({
+				report,
+				logLines: [
+					v4Log({
+						trafficClass: "mini",
+						workload: "fixtures",
+						audience: "anonymous",
+						cost: 5,
+					}),
+					v4Log({
+						trafficClass: "mini",
+						workload: "player-stats",
+						audience: "authenticated",
+						fingerprint: "cccccccccccc",
+						cost: 40,
+					}),
+					v4Log({ trafficClass: "web_rsc", workload: "fixtures", cost: 10 }),
+					v4Log({ trafficClass: "service", workload: "public-other", cost: 8 }),
+				],
+			})
+		).toThrow("identity fingerprints");
 	});
 });

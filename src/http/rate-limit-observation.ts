@@ -133,6 +133,7 @@ type V3DecisionLog = {
 	cost?: unknown;
 	allowed?: unknown;
 	audience?: unknown;
+	fingerprint?: unknown;
 };
 
 const timestampMs = (value: unknown): number | null => {
@@ -285,10 +286,16 @@ export const buildRateLimitTargetObservationV4 = ({
 	const window = report.window.stageWindows.find((candidate) => candidate.concurrent === 300);
 	if (!window) throw new Error("Capacity evidence requires a complete 300-concurrent stage");
 	const requestIdPrefix = capacityRunRequestIdPrefix(report.runId);
-	const anonymousWeightedPerSecond = emptyWorkloadRates();
-	const anonymousMaxCost = emptyWorkloadRates();
-	const sessionWeightedPerSecond = emptyWorkloadRates();
-	const sessionMaxCost = emptyWorkloadRates();
+	type MiniIdentityObservation = {
+		weighted: Record<(typeof GRAPHQL_WORKLOADS)[number], number>;
+		maxCost: Record<(typeof GRAPHQL_WORKLOADS)[number], number>;
+	};
+	const identityObservation = (): MiniIdentityObservation => ({
+		weighted: emptyWorkloadRates(),
+		maxCost: emptyWorkloadRates(),
+	});
+	const anonymousByIdentity = new Map<string, MiniIdentityObservation>();
+	const sessionByIdentity = new Map<string, MiniIdentityObservation>();
 	let anonymousDecisions = 0;
 	let sessionDecisions = 0;
 	for (const line of logLines) {
@@ -312,14 +319,27 @@ export const buildRateLimitTargetObservationV4 = ({
 		)
 			continue;
 		const workload = decision.workload as (typeof GRAPHQL_WORKLOADS)[number];
-		if (decision.audience === "anonymous") {
+		const audience =
+			decision.audience === "anonymous" || decision.audience === "authenticated"
+				? decision.audience
+				: null;
+		if (!audience) {
+			throw new Error("Capacity evidence contains a Mini decision without a valid audience");
+		}
+		if (typeof decision.fingerprint !== "string" || !/^[0-9a-f]{12}$/i.test(decision.fingerprint)) {
+			throw new Error(
+				"Capacity evidence requires identity fingerprints for Mini workload decisions"
+			);
+		}
+		const observations = audience === "anonymous" ? anonymousByIdentity : sessionByIdentity;
+		const identity = observations.get(decision.fingerprint) ?? identityObservation();
+		observations.set(decision.fingerprint, identity);
+		identity.weighted[workload] += decision.cost;
+		identity.maxCost[workload] = Math.max(identity.maxCost[workload], decision.cost);
+		if (audience === "anonymous") {
 			anonymousDecisions += 1;
-			anonymousWeightedPerSecond[workload] += decision.cost;
-			anonymousMaxCost[workload] = Math.max(anonymousMaxCost[workload], decision.cost);
-		} else if (decision.audience === "authenticated") {
+		} else {
 			sessionDecisions += 1;
-			sessionWeightedPerSecond[workload] += decision.cost;
-			sessionMaxCost[workload] = Math.max(sessionMaxCost[workload], decision.cost);
 		}
 	}
 	if (anonymousDecisions === 0 || sessionDecisions === 0) {
@@ -328,10 +348,31 @@ export const buildRateLimitTargetObservationV4 = ({
 		);
 	}
 	const durationSeconds = (window.finishedAt - window.startedAt) / 1000;
+	const maxPerIdentity = (
+		observations: Map<string, MiniIdentityObservation>,
+		field: "weighted" | "maxCost"
+	): Record<(typeof GRAPHQL_WORKLOADS)[number], number> =>
+		Object.fromEntries(
+			GRAPHQL_WORKLOADS.map((workload) => [
+				workload,
+				Math.max(
+					0,
+					...Array.from(observations.values(), (observation) => observation[field][workload])
+				),
+			])
+		) as Record<(typeof GRAPHQL_WORKLOADS)[number], number>;
 	const divide = (values: Record<(typeof GRAPHQL_WORKLOADS)[number], number>) =>
 		Object.fromEntries(
 			GRAPHQL_WORKLOADS.map((workload) => [workload, values[workload] / durationSeconds])
 		) as Record<(typeof GRAPHQL_WORKLOADS)[number], number>;
+	// Workload buckets are keyed by one device or principal. Use the highest
+	// observed identity rate, while aggregate ceilings are generated later from
+	// the sum of the per-workload buckets. Summing the fleet here would size one
+	// identity bucket for every load-test actor and weaken abuse protection.
+	const anonymousWeightedPerSecond = maxPerIdentity(anonymousByIdentity, "weighted");
+	const anonymousMaxCost = maxPerIdentity(anonymousByIdentity, "maxCost");
+	const sessionWeightedPerSecond = maxPerIdentity(sessionByIdentity, "weighted");
+	const sessionMaxCost = maxPerIdentity(sessionByIdentity, "maxCost");
 	const mini: MiniRateLimitObservation = {
 		anonymousWeightedPerSecond: divide(anonymousWeightedPerSecond),
 		anonymousMaxCost,

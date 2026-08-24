@@ -71,8 +71,14 @@ jobs:
           jq -e '
             (.mode != "shadow-v4" and .mode != "enforce-v4") or
             (
+              .mode == "shadow-v4" and
               ([.recent.summary.miniWorkloadShadowDeniedRate[]] | all(. <= 0.01)) and
               .recent.summary.miniWorkloadShadowDenied["player-stats"] == 0
+            ) or
+            (
+              .mode == "enforce-v4" and
+              ([.recent.summary.miniWorkloadDeniedRate[]] | all(. <= 0.01)) and
+              .recent.summary.miniWorkloadDenied["player-stats"] == 0
             )
           ' "$RUNNER_TEMP/rate-limit-report.json"
 

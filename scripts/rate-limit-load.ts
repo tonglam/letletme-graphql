@@ -238,6 +238,11 @@ const queryForWorkload = (
 	}
 };
 
+const addMiniAuthenticationProbe = (request: ReturnType<typeof queryForWorkload>) => ({
+	...request,
+	query: request.query.replace(/\n\s*}\s*$/, "\n\t\t\t\t\tme { id }\n\t\t\t\t}"),
+});
+
 const buildActors = (): Actor[] => {
 	const miniWorkloads: Workload[] = ["home", "fixtures", "market", "player-stats", "gameweek"];
 	const miniActors: Actor[] = Array.from({ length: 180 }, (_, index) => {
@@ -299,7 +304,10 @@ const graphQLRequest = async (
 	phase: string
 ): Promise<RequestSample> => {
 	const target = actor.kind === "mini" ? `${webOrigin}/api/graphql` : `${graphQLOrigin}/graphql`;
-	const request = queryForWorkload(actor.workload);
+	const request =
+		actor.kind === "mini" && actor.miniToken
+			? addMiniAuthenticationProbe(queryForWorkload(actor.workload))
+			: queryForWorkload(actor.workload);
 	const headers: Record<string, string> = {
 		"content-type": "application/json",
 		accept: "application/json",
@@ -321,6 +329,7 @@ const graphQLRequest = async (
 	let shadowRateLimitOutcome: "allow" | "deny" | null = null;
 	let shadowRateLimitScope: string | null = null;
 	let graphqlErrors = 0;
+	let authenticatedSession = false;
 	try {
 		const response = await fetch(target, {
 			method: "POST",
@@ -337,9 +346,14 @@ const graphQLRequest = async (
 				: null;
 		shadowRateLimitScope = response.headers.get("x-ratelimit-shadow-scope");
 		const body = (await response.json().catch(() => null)) as {
+			data?: { me?: { id?: unknown } | null };
 			errors?: readonly unknown[];
 		} | null;
 		graphqlErrors = body?.errors?.length ?? 0;
+		// A supplied token only changes the probe shape. Authentication is true
+		// only when the GraphQL server returns the authenticated user's `me`.
+		authenticatedSession =
+			actor.kind === "mini" && typeof body?.data?.me?.id === "string" && body.data.me.id.length > 0;
 	} catch {
 		status = 0;
 		rateLimitScope = "transport";
@@ -357,7 +371,7 @@ const graphQLRequest = async (
 		shadowRateLimitOutcome,
 		shadowRateLimitScope,
 		graphqlErrors,
-		authenticatedSession: Boolean(actor.miniToken),
+		authenticatedSession,
 		attacker,
 	};
 };

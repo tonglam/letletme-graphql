@@ -15,6 +15,9 @@ describe("rate-limit monitor workflow", () => {
 		expect(workflow).toContain('.mode == "shadow-v4" and .policy == "graphql-v4"');
 		expect(workflow).toContain("miniWorkloadShadowDeniedRate");
 		expect(workflow).toContain('miniWorkloadShadowDenied["player-stats"] == 0');
+		expect(workflow).toContain('.mode == "enforce-v4"');
+		expect(workflow).toContain("miniWorkloadDeniedRate");
+		expect(workflow).toContain('miniWorkloadDenied["player-stats"] == 0');
 		expect(workflow).toContain(".recent.summary.interactiveDeniedRate <= 0.01");
 		expect(workflow).toContain(".recent.summary.shadowInteractiveDeniedRate <= 0.01");
 		expect(workflow).toContain(".recent.summary.globalDenied == 0");

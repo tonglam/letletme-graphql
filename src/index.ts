@@ -48,6 +48,7 @@ import {
 	graphQLV3EarlyFailureRateLimitChecks,
 	graphQLV3PreAuthRateLimitChecks,
 	graphQLV3PrincipalAdmission,
+	graphQLPrincipalSubject,
 } from "./http/graphql-policy-v3";
 import {
 	graphQLV4EarlyFailureRateLimitChecks,
@@ -389,6 +390,7 @@ const logV3RateLimitDecision = ({
 	ingress,
 	stage,
 	audience,
+	identitySubject,
 	decision,
 }: {
 	requestId: string;
@@ -397,6 +399,7 @@ const logV3RateLimitDecision = ({
 	ingress: GraphQLIngress;
 	stage: "pre-auth" | "weighted";
 	audience?: string;
+	identitySubject?: string | null;
 	decision: TokenBucketStageResultV3;
 }): void => {
 	const selected =
@@ -426,7 +429,7 @@ const logV3RateLimitDecision = ({
 				: decision.allowed
 					? "allowed"
 					: "denied",
-			fingerprint: rateLimitFingerprint(ingress.subject),
+			fingerprint: rateLimitFingerprint(identitySubject ?? ingress.subject),
 			policy: activeGraphQLRateLimitPolicy.policyVersion,
 		},
 		`GraphQL ${activeGraphQLRateLimitPolicy.policyVersion.replace("graphql-", "")} rate-limit decision`
@@ -898,6 +901,7 @@ const startServer = async (): Promise<void> => {
 							ingress,
 							stage: "weighted",
 							audience: rateLimitAudience,
+							identitySubject: principal ? graphQLPrincipalSubject(principal) : ingress.subject,
 							decision: principalAdmissionResult.v3Decision,
 						});
 						await recordTerminalRequestV3Outcome(ingress, principalAdmissionResult.v3Decision);

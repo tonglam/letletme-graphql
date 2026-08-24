@@ -1,5 +1,6 @@
 import type { GraphQLIngress } from "../infra/ingress-context";
 import type { Principal } from "../infra/principal";
+import { graphQLPrincipalSubject } from "./graphql-policy-v3";
 import type { GraphQLRateLimitPolicyV4 } from "./rate-limit-policy-v4";
 import type { TokenBucketPolicy } from "./rate-limit-policy-v3";
 import {
@@ -11,9 +12,6 @@ import {
 const GLOBAL_SUBJECT = "all-graphql-traffic";
 const RSC_CLASS_SUBJECT = "all-web-rsc";
 const SERVICE_CLASS_SUBJECT = "all-services";
-
-const principalSubject = (principal: Principal): string =>
-	`principal:${principal.source}:${principal.userId}`;
 
 const requiredSubject = (ingress: GraphQLIngress): string =>
 	ingress.subject ?? `missing:${ingress.trafficClass}`;
@@ -87,7 +85,9 @@ export const graphQLV4PrincipalAdmission = ({
 	switch (ingress.trafficClass) {
 		case "mini": {
 			const authenticated = principal !== null;
-			const identity = authenticated ? principalSubject(principal) : requiredSubject(ingress);
+			const identity = authenticated
+				? graphQLPrincipalSubject(principal)
+				: requiredSubject(ingress);
 			const identityLabel = authenticated ? "session" : "device";
 			const workloadPolicy = authenticated
 				? policy.trafficClasses.mini.sessionWorkloads[ingress.workload]
@@ -126,7 +126,7 @@ export const graphQLV4PrincipalAdmission = ({
 							? "v4-web-browser-session-weighted"
 							: "v4-web-browser-anonymous-weighted",
 						scope: "client",
-						subject: authenticated ? principalSubject(principal) : requiredSubject(ingress),
+						subject: authenticated ? graphQLPrincipalSubject(principal) : requiredSubject(ingress),
 						policy: authenticated
 							? policy.trafficClasses.web_browser.sessionWeighted
 							: policy.trafficClasses.web_browser.anonymousWeighted,
@@ -189,7 +189,7 @@ export const graphQLV4PrincipalAdmission = ({
 					check({
 						id: "v4-legacy-weighted",
 						scope: "client",
-						subject: principal ? principalSubject(principal) : requiredSubject(ingress),
+						subject: principal ? graphQLPrincipalSubject(principal) : requiredSubject(ingress),
 						policy: policy.trafficClasses.legacy.weighted,
 						cost: boundedCost,
 					}),

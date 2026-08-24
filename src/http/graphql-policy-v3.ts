@@ -11,7 +11,7 @@ const GLOBAL_SUBJECT = "all-graphql-traffic";
 const RSC_CLASS_SUBJECT = "all-web-rsc";
 const SERVICE_CLASS_SUBJECT = "all-services";
 
-const principalSubject = (principal: Principal): string =>
+export const graphQLPrincipalSubject = (principal: Principal): string =>
 	`principal:${principal.source}:${principal.userId}`;
 
 const requiredSubject = (ingress: GraphQLIngress): string =>
@@ -103,7 +103,7 @@ export const graphQLV3PrincipalAdmission = ({
 					check({
 						id: authenticated ? "mini-session-weighted" : "mini-device-weighted",
 						scope: "client",
-						subject: authenticated ? principalSubject(principal) : requiredSubject(ingress),
+						subject: authenticated ? graphQLPrincipalSubject(principal) : requiredSubject(ingress),
 						policy: authenticated
 							? policy.trafficClasses.mini.sessionWeighted
 							: policy.trafficClasses.mini.anonymousWeighted,
@@ -121,7 +121,7 @@ export const graphQLV3PrincipalAdmission = ({
 					check({
 						id: authenticated ? "web-browser-session-weighted" : "web-browser-anonymous-weighted",
 						scope: "client",
-						subject: authenticated ? principalSubject(principal) : requiredSubject(ingress),
+						subject: authenticated ? graphQLPrincipalSubject(principal) : requiredSubject(ingress),
 						policy: authenticated
 							? policy.trafficClasses.web_browser.sessionWeighted
 							: policy.trafficClasses.web_browser.anonymousWeighted,
@@ -184,7 +184,7 @@ export const graphQLV3PrincipalAdmission = ({
 					check({
 						id: "legacy-weighted",
 						scope: "client",
-						subject: principal ? principalSubject(principal) : requiredSubject(ingress),
+						subject: principal ? graphQLPrincipalSubject(principal) : requiredSubject(ingress),
 						policy: policy.trafficClasses.legacy.weighted,
 						cost: boundedCost,
 					}),
