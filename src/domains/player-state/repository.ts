@@ -1176,7 +1176,11 @@ const seasonSignal = (
 			reasonCodes: ["UNDERSTAT_SEASON_DATA_UNAVAILABLE"],
 		};
 	}
-	if (sampleMinutes === null || sampleMinutes < minimumMinutes) {
+	const sampleInsufficient = sampleMinutes === null || sampleMinutes < minimumMinutes;
+	// Understat is an independent source clock.  Keep its observed per-90 values
+	// visible during the small opening sample, while retaining the quality state
+	// so consumers can distinguish an observation from a decision-grade sample.
+	if (!isUnderstat && sampleInsufficient) {
 		return {
 			code,
 			provider,
@@ -1262,8 +1266,14 @@ const seasonSignal = (
 		value,
 		unit,
 		sampleMinutes,
-		analysisStatus: "READY",
-		reasonCodes: [],
+		analysisStatus: sampleInsufficient ? "INSUFFICIENT" : "READY",
+		reasonCodes: sampleInsufficient
+			? [
+					phase === "ACTIVE"
+						? "CURRENT_SAMPLE_BELOW_180_MINUTES"
+						: "HISTORY_SAMPLE_BELOW_450_MINUTES",
+				]
+			: [],
 	};
 };
 
@@ -1320,14 +1330,21 @@ const maskCurrentSeasonTimeline = (
 		return {
 			...point,
 			fplTotalPoints: null,
-			signals: point.signals.map((signal) => ({
-				...signal,
-				value: null,
-				analysisStatus: "UNAVAILABLE" as const,
-				reasonCodes: [
-					...new Set([...signal.reasonCodes, "FPL_SEASON_ROW_UNAVAILABLE", reasonCode]),
-				],
-			})),
+			// FPL publication status must not erase Understat observations.  The
+			// providers publish on different clocks, especially while a fixture is
+			// still only provisionally finished in FPL.
+			signals: point.signals.map((signal) =>
+				signal.provider === "UNDERSTAT"
+					? signal
+					: {
+							...signal,
+							value: null,
+							analysisStatus: "UNAVAILABLE" as const,
+							reasonCodes: [
+								...new Set([...signal.reasonCodes, "FPL_SEASON_ROW_UNAVAILABLE", reasonCode]),
+							],
+						}
+			),
 		};
 	});
 };
