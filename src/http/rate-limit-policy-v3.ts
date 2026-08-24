@@ -1,7 +1,13 @@
 import rawProductionPolicy from "../config/rate-limit/production.json";
 import type { GraphQLWorkload } from "../infra/ingress-envelope";
 
-export const GRAPHQL_RATE_LIMIT_MODES = ["legacy", "shadow-v3", "enforce-v3"] as const;
+export const GRAPHQL_RATE_LIMIT_MODES = [
+	"legacy",
+	"shadow-v3",
+	"enforce-v3",
+	"shadow-v4",
+	"enforce-v4",
+] as const;
 export type GraphQLRateLimitMode = (typeof GRAPHQL_RATE_LIMIT_MODES)[number];
 
 export type TokenBucketPolicy = {

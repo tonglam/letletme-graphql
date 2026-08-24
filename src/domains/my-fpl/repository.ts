@@ -673,7 +673,7 @@ const requireViewerEntryId = (context: GraphQLContext): number => {
 	const entryId = context.principal ? viewerEntryIdForPrincipal(context.principal) : null;
 	if (!entryId || entryId <= 0) {
 		throw new GraphQLError("A viewed FPL team is required", {
-			extensions: { code: "FORBIDDEN" },
+			extensions: { code: "VIEWER_ENTRY_REQUIRED", http: { status: 403 } },
 		});
 	}
 	return entryId;

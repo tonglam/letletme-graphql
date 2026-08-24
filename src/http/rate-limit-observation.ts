@@ -1,6 +1,10 @@
 import { GRAPHQL_TRAFFIC_CLASSES, GRAPHQL_WORKLOADS } from "../infra/ingress-envelope";
 import { capacityRunRequestIdPrefix } from "./capacity-run-id";
 import type { RateLimitTargetObservation } from "./rate-limit-profile-generator";
+import type {
+	RateLimitTargetObservationV4,
+	MiniRateLimitObservation,
+} from "./rate-limit-profile-generator-v4";
 
 export type CapacityLoadReport = {
 	runId: string;
@@ -128,6 +132,7 @@ type V3DecisionLog = {
 	workload?: unknown;
 	cost?: unknown;
 	allowed?: unknown;
+	audience?: unknown;
 };
 
 const timestampMs = (value: unknown): number | null => {
@@ -149,9 +154,11 @@ const parseDecision = (line: string): V3DecisionLog | null => {
 export const buildRateLimitTargetObservation = ({
 	report,
 	logLines,
+	policyVersion = "graphql-v3",
 }: {
 	report: CapacityLoadReport;
 	logLines: readonly string[];
+	policyVersion?: "graphql-v3" | "graphql-v4";
 }): RateLimitTargetObservation => {
 	if (!report.gatePassed || report.model.targetConcurrent !== 300) {
 		throw new Error("Load report must pass the exact 300-concurrent capacity gates");
@@ -206,11 +213,11 @@ export const buildRateLimitTargetObservation = ({
 			at === null ||
 			at < window.startedAt ||
 			at > window.finishedAt ||
-			decision.msg !== "GraphQL v3 rate-limit decision" ||
+			decision.msg !== `GraphQL ${policyVersion.replace("graphql-", "")} rate-limit decision` ||
 			typeof decision.requestId !== "string" ||
 			!decision.requestId.startsWith(requestIdPrefix) ||
 			decision.stage !== "weighted" ||
-			decision.policy !== "graphql-v3" ||
+			decision.policy !== policyVersion ||
 			decision.allowed !== true ||
 			!GRAPHQL_TRAFFIC_CLASSES.includes(
 				decision.trafficClass as (typeof GRAPHQL_TRAFFIC_CLASSES)[number]
@@ -258,4 +265,78 @@ export const buildRateLimitTargetObservation = ({
 			maxWeightedCost: serviceMaxWeightedCost,
 		},
 	};
+};
+
+const emptyWorkloadRates = (): Record<(typeof GRAPHQL_WORKLOADS)[number], number> =>
+	Object.fromEntries(GRAPHQL_WORKLOADS.map((workload) => [workload, 0])) as Record<
+		(typeof GRAPHQL_WORKLOADS)[number],
+		number
+	>;
+
+/** Builds the v4 observation, including separate anonymous/session Mini buckets. */
+export const buildRateLimitTargetObservationV4 = ({
+	report,
+	logLines,
+}: {
+	report: CapacityLoadReport;
+	logLines: readonly string[];
+}): RateLimitTargetObservationV4 => {
+	const base = buildRateLimitTargetObservation({ report, logLines, policyVersion: "graphql-v4" });
+	const window = report.window.stageWindows.find((candidate) => candidate.concurrent === 300);
+	if (!window) throw new Error("Capacity evidence requires a complete 300-concurrent stage");
+	const requestIdPrefix = capacityRunRequestIdPrefix(report.runId);
+	const anonymousWeightedPerSecond = emptyWorkloadRates();
+	const anonymousMaxCost = emptyWorkloadRates();
+	const sessionWeightedPerSecond = emptyWorkloadRates();
+	const sessionMaxCost = emptyWorkloadRates();
+	let anonymousDecisions = 0;
+	let sessionDecisions = 0;
+	for (const line of logLines) {
+		const decision = parseDecision(line);
+		const at = timestampMs(decision?.time);
+		if (
+			!decision ||
+			at === null ||
+			at < window.startedAt ||
+			at > window.finishedAt ||
+			decision.msg !== "GraphQL v4 rate-limit decision" ||
+			decision.policy !== "graphql-v4" ||
+			typeof decision.requestId !== "string" ||
+			!decision.requestId.startsWith(requestIdPrefix) ||
+			decision.stage !== "weighted" ||
+			decision.trafficClass !== "mini" ||
+			!GRAPHQL_WORKLOADS.includes(decision.workload as (typeof GRAPHQL_WORKLOADS)[number]) ||
+			typeof decision.cost !== "number" ||
+			!Number.isSafeInteger(decision.cost) ||
+			decision.cost < 1
+		)
+			continue;
+		const workload = decision.workload as (typeof GRAPHQL_WORKLOADS)[number];
+		if (decision.audience === "anonymous") {
+			anonymousDecisions += 1;
+			anonymousWeightedPerSecond[workload] += decision.cost;
+			anonymousMaxCost[workload] = Math.max(anonymousMaxCost[workload], decision.cost);
+		} else if (decision.audience === "authenticated") {
+			sessionDecisions += 1;
+			sessionWeightedPerSecond[workload] += decision.cost;
+			sessionMaxCost[workload] = Math.max(sessionMaxCost[workload], decision.cost);
+		}
+	}
+	if (anonymousDecisions === 0 || sessionDecisions === 0) {
+		throw new Error(
+			"Capacity evidence must contain both anonymous and authenticated Mini workload decisions"
+		);
+	}
+	const durationSeconds = (window.finishedAt - window.startedAt) / 1000;
+	const divide = (values: Record<(typeof GRAPHQL_WORKLOADS)[number], number>) =>
+		Object.fromEntries(
+			GRAPHQL_WORKLOADS.map((workload) => [workload, values[workload] / durationSeconds])
+		) as Record<(typeof GRAPHQL_WORKLOADS)[number], number>;
+	const mini: MiniRateLimitObservation = {
+		anonymousWeightedPerSecond: divide(anonymousWeightedPerSecond),
+		anonymousMaxCost,
+		sessionWeightedPerSecond: divide(sessionWeightedPerSecond),
+		sessionMaxCost,
+	};
+	return { ...base, mini };
 };

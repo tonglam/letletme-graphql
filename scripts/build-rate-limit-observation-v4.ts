@@ -1,5 +1,5 @@
 import {
-	buildRateLimitTargetObservation,
+	buildRateLimitTargetObservationV4,
 	parseCapacityLoadReport,
 } from "../src/http/rate-limit-observation";
 
@@ -10,21 +10,17 @@ const valueAfter = (name: string): string => {
 	return value;
 };
 
-const reportPath = valueAfter("--load-report");
-const logsPath = valueAfter("--logs");
-const policyVersion: "graphql-v3" | "graphql-v4" = Bun.argv.includes("--v4")
-	? "graphql-v4"
-	: "graphql-v3";
+const report = parseCapacityLoadReport(
+	JSON.parse(await Bun.file(valueAfter("--load-report")).text()) as unknown
+);
+const logs = await Bun.file(valueAfter("--logs")).text();
 const outputIndex = Bun.argv.indexOf("--output");
 const outputPath = outputIndex >= 0 ? Bun.argv[outputIndex + 1] : undefined;
 if (outputIndex >= 0 && !outputPath) throw new Error("--output requires a path");
 
-const report = parseCapacityLoadReport(JSON.parse(await Bun.file(reportPath).text()) as unknown);
-const logs = await Bun.file(logsPath).text();
-const observation = buildRateLimitTargetObservation({
+const observation = buildRateLimitTargetObservationV4({
 	report,
 	logLines: logs.split("\n"),
-	policyVersion,
 });
 const rendered = `${JSON.stringify(observation, null, "\t")}\n`;
 if (outputPath) await Bun.write(outputPath, rendered);

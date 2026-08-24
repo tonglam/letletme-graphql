@@ -1087,7 +1087,7 @@ describe("My FPL review repository", () => {
 		await expect(
 			unauthenticated.repository.loadTeamDesk(unauthenticated.context)
 		).rejects.toMatchObject({
-			extensions: { code: "FORBIDDEN" },
+			extensions: { code: "VIEWER_ENTRY_REQUIRED" },
 		});
 		const fixture = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
 		const desk = await fixture.repository.loadTeamDesk(fixture.context);

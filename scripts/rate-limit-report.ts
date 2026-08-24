@@ -6,6 +6,7 @@ import {
 	rateLimitRecentAggregateKey,
 	parseRateLimitStorageFailureTotal,
 	summarizeRateLimitTotals,
+	type GraphQLRateLimitPolicyVersion,
 } from "../src/infra/rate-limit-observability";
 import { env } from "../src/infra/env";
 import { closeRedis, connectRedis, getRateLimitRedis } from "../src/infra/redis";
@@ -136,6 +137,10 @@ const options = parseOptions(Bun.argv.slice(2));
 await connectRedis();
 try {
 	const redis = getRateLimitRedis();
+	const policyVersion: GraphQLRateLimitPolicyVersion =
+		env.GRAPHQL_RATE_LIMIT_MODE === "shadow-v4" || env.GRAPHQL_RATE_LIMIT_MODE === "enforce-v4"
+			? "graphql-v4"
+			: "graphql-v3";
 	const generatedAt = new Date();
 	const dates = reportDates(options.days, generatedAt);
 	const minutes =
@@ -144,8 +149,8 @@ try {
 		Promise.all(
 			dates.map(async (date) => {
 				const [counts, denied] = await Promise.all([
-					redis.hgetall(rateLimitAggregateKey(date)),
-					redis.zrevrange(rateLimitDeniedRankingKey(date), 0, 19, "WITHSCORES"),
+					redis.hgetall(rateLimitAggregateKey(date, policyVersion)),
+					redis.zrevrange(rateLimitDeniedRankingKey(date, policyVersion), 0, 19, "WITHSCORES"),
 				]);
 				return {
 					date,
@@ -160,9 +165,9 @@ try {
 			minutes.map(async (minute) => ({
 				minute,
 				counts: Object.fromEntries(
-					Object.entries(await redis.hgetall(rateLimitRecentAggregateKey(minute))).map(
-						([key, value]) => [key, Number(value) || 0]
-					)
+					Object.entries(
+						await redis.hgetall(rateLimitRecentAggregateKey(minute, policyVersion))
+					).map(([key, value]) => [key, Number(value) || 0])
 				),
 			}))
 		),
@@ -189,7 +194,7 @@ try {
 		? { rateLimitStorageFailures: await readLiveRateLimitStorageFailures() }
 		: null;
 	const report = {
-		policy: "graphql-v3",
+		policy: policyVersion,
 		mode: env.GRAPHQL_RATE_LIMIT_MODE,
 		generatedAt: generatedAt.toISOString(),
 		days: options.days,

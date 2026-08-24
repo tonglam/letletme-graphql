@@ -76,18 +76,23 @@ The service exposes:
 Requests are bounded by body size, depth, root-field count, aliases, AST nodes,
 weighted complexity, unique entry IDs, and Redis-backed rate limits.
 
-GraphQL admission supports `legacy`, `shadow-v3`, and `enforce-v3` modes.
+GraphQL admission supports `legacy`, `shadow-v3`, `enforce-v3`, `shadow-v4`,
+and `enforce-v4` modes. v4 is parallel to v3 and is not enabled by default.
 The versioned profile is `src/config/rate-limit/production.json`. v3 uses
 Redis-time continuous token buckets, a global emergency request gate, isolated
 Mini device/user and NAT-abuse buckets, workload-specific Web RSC budgets, and
 an independent service budget. `enforce-v3` refuses to start until the profile
 contains reviewed 300-concurrent capacity evidence with at least 40% headroom.
+The v4 profile is `src/config/rate-limit/production-v4.json`; it adds separate
+Mini anonymous/session aggregate ceilings and identity-plus-workload buckets.
+Its aggregate ceilings must equal the sum of the workload buckets, and
+`enforce-v4` refuses to start until generated capacity evidence is validated.
 
 The three legacy-v2 limits remain environment variables only for compatibility
 and rollback: `GRAPHQL_BROWSER_INGRESS_RATE_LIMIT`,
 `GRAPHQL_AUTHENTICATED_RATE_LIMIT`, and
 `GRAPHQL_ANONYMOUS_RATE_LIMIT`. Select the runtime with
-`GRAPHQL_RATE_LIMIT_MODE=legacy|shadow-v3|enforce-v3`. The deploy workflow has
+`GRAPHQL_RATE_LIMIT_MODE=legacy|shadow-v3|enforce-v3|shadow-v4|enforce-v4`. The deploy workflow has
 explicit persisted rollout profiles for P0, shadow, enforce, compatibility
 restoration, and rollback; P0 captures the previous environment, image, SHA,
 health, metrics, and container resource baseline before replacement.
@@ -117,9 +122,11 @@ five-minute higher-throughput probes that stop at the first failed level. The
 report gates GraphQL 429 and non-429 errors, p95/p99, readiness, PostgreSQL pool
 waiting, CPU, memory, NAT-peer isolation, and the required 40% headroom. It
 derives `S` from the highest passing probe; profile generation has no manual
-`S` override. `LOAD_SESSION_COOKIES_JSON` must contain 45 distinct
-temporary test sessions; neither sessions nor signing credentials are written
-to the report.
+`S` override. `LOAD_SESSION_COOKIES_JSON` must contain 45 distinct temporary
+test sessions; neither sessions nor signing credentials are written to the
+report. Set `LOAD_INCLUDE_MINI_SESSIONS=true` and provide 45 distinct
+temporary bearer tokens in `LOAD_MINI_SESSION_TOKENS_JSON` to run the Mini
+anonymous/session mix required by v4 observation.
 
 ```bash
 bun run rate-limit:load --output load-test/run-123.json
@@ -149,6 +156,25 @@ bun run rate-limit:profile --observation load-test/run-123-observation.json \
   --evidence load-test/run-123.json \
   --output src/config/rate-limit/production.json
 ```
+
+For a v4 capacity profile, run the loader with the Mini session mix enabled,
+then use the v4 observation and profile commands:
+
+```bash
+bun run rate-limit:observe:v4 \
+  --load-report load-test/run-123.json \
+  --logs load-test/run-123-graphql.jsonl \
+  --output load-test/run-123-v4-observation.json
+bun run rate-limit:profile:v4 \
+  --observation load-test/run-123-v4-observation.json \
+  --evidence load-test/run-123.json \
+  --output src/config/rate-limit/production-v4.json
+```
+
+Deploy the generated profile in `shadow-v4` first. The monitor must observe a
+full 24-hour window covering production peak, with zero storage failures and
+global would-deny, no more than 1% organic Mini workload would-deny, and zero
+player-stats would-deny before `enforce-v4` is considered.
 
 ## Verification
 

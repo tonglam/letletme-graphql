@@ -92,6 +92,13 @@ export const tokenBucketKeyV3 = (id: string, subject: string): string => {
 	return `llm:gql:security:rate:v3:${id}:${subjectHash}`;
 };
 
+/** v4 uses a distinct keyspace so shadow traffic cannot mutate v3 state. */
+export const tokenBucketKeyV4 = (id: string, subject: string): string => {
+	if (!/^[a-z0-9-]{1,64}$/.test(id)) throw new Error("Invalid token-bucket id");
+	const subjectHash = createHash("sha256").update(subject).digest("hex").slice(0, 32);
+	return `llm:gql:security:rate:v4:${id}:${subjectHash}`;
+};
+
 export const checkTokenBucketStageV3 = async (
 	redis: Redis,
 	checks: readonly TokenBucketCheckV3[]

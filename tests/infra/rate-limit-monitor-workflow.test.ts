@@ -12,6 +12,9 @@ describe("rate-limit monitor workflow", () => {
 		expect(workflow).toContain(".live.rateLimitStorageFailures == 0");
 		expect(workflow).toContain('.mode == "shadow-v3" and .recent.summary.shadowDecisions > 0');
 		expect(workflow).toContain('.mode == "enforce-v3" and .recent.summary.enforcedDecisions > 0');
+		expect(workflow).toContain('.mode == "shadow-v4" and .policy == "graphql-v4"');
+		expect(workflow).toContain("miniWorkloadShadowDeniedRate");
+		expect(workflow).toContain('miniWorkloadShadowDenied["player-stats"] == 0');
 		expect(workflow).toContain(".recent.summary.interactiveDeniedRate <= 0.01");
 		expect(workflow).toContain(".recent.summary.shadowInteractiveDeniedRate <= 0.01");
 		expect(workflow).toContain(".recent.summary.globalDenied == 0");

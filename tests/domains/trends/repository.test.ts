@@ -213,7 +213,7 @@ describe("Trends private access", () => {
 		};
 
 		await expect(trendsRepository.listCohorts(context, "MINE")).rejects.toMatchObject({
-			extensions: { code: "FORBIDDEN" },
+			extensions: { code: "VIEWER_ENTRY_REQUIRED" },
 		});
 	});
 

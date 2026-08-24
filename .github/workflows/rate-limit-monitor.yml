@@ -48,7 +48,7 @@ jobs:
             "cd $remote_workdir && APP_ENV_FILE=.env.deploy docker compose exec -T graphql bun run rate-limit:report --days 2 --recent-minutes 10 --include-live-storage-failures --json" \
             > "$RUNNER_TEMP/rate-limit-report.json"
           jq -e '
-            .policy == "graphql-v3" and
+            (.policy == "graphql-v3" or .policy == "graphql-v4") and
             .days == 2 and
             .recent.minutes == 10 and
             .live.rateLimitStorageFailures == 0 and
@@ -56,7 +56,9 @@ jobs:
             (
               .mode == "legacy" or
               (.mode == "shadow-v3" and .recent.summary.shadowDecisions > 0) or
-              (.mode == "enforce-v3" and .recent.summary.enforcedDecisions > 0)
+              (.mode == "enforce-v3" and .recent.summary.enforcedDecisions > 0) or
+              (.mode == "shadow-v4" and .policy == "graphql-v4" and .recent.summary.shadowDecisions > 0) or
+              (.mode == "enforce-v4" and .policy == "graphql-v4" and .recent.summary.enforcedDecisions > 0)
             )
           ' \
             "$RUNNER_TEMP/rate-limit-report.json"
@@ -65,6 +67,13 @@ jobs:
             .recent.summary.shadowInteractiveDeniedRate <= 0.01 and
             .recent.summary.globalDenied == 0 and
             .recent.summary.globalWouldDenied == 0
+          ' "$RUNNER_TEMP/rate-limit-report.json"
+          jq -e '
+            (.mode != "shadow-v4" and .mode != "enforce-v4") or
+            (
+              ([.recent.summary.miniWorkloadShadowDeniedRate[]] | all(. <= 0.01)) and
+              .recent.summary.miniWorkloadShadowDenied["player-stats"] == 0
+            )
           ' "$RUNNER_TEMP/rate-limit-report.json"
 
       - name: Retain non-sensitive report

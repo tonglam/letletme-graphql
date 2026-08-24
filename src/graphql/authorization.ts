@@ -39,7 +39,7 @@ export type AuthorizationResult =
 	| {
 			ok: false;
 			status: 401 | 403;
-			code: "UNAUTHENTICATED" | "FORBIDDEN";
+			code: "UNAUTHENTICATED" | "VIEWER_ENTRY_REQUIRED" | "FORBIDDEN";
 			message: string;
 	  };
 
@@ -186,7 +186,7 @@ export const authorizeViewerEntry = (
 		return {
 			ok: false,
 			status: 403,
-			code: "FORBIDDEN",
+			code: "VIEWER_ENTRY_REQUIRED",
 			message: "A viewed FPL team is required",
 		};
 	}
