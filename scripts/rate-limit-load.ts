@@ -29,6 +29,7 @@ type RequestSample = {
 	shadowRateLimitScope: string | null;
 	graphqlErrors: number;
 	authenticatedSession: boolean;
+	tokenBearing: boolean;
 	attacker: boolean;
 };
 
@@ -238,10 +239,15 @@ const queryForWorkload = (
 	}
 };
 
-const addMiniAuthenticationProbe = (request: ReturnType<typeof queryForWorkload>) => ({
-	...request,
-	query: request.query.replace(/\n\s*}\s*$/, "\n\t\t\t\t\tme { id }\n\t\t\t\t}"),
-});
+const addMiniAuthenticationProbe = (request: ReturnType<typeof queryForWorkload>) => {
+	const query = request.query.trimEnd();
+	const finalBrace = query.lastIndexOf("}");
+	if (finalBrace < 0 || /\bme\s*\{/.test(query)) return request;
+	return {
+		...request,
+		query: `${query.slice(0, finalBrace).trimEnd()}\n\tme { id }\n}`,
+	};
+};
 
 const buildActors = (): Actor[] => {
 	const miniWorkloads: Workload[] = ["home", "fixtures", "market", "player-stats", "gameweek"];
@@ -330,6 +336,7 @@ const graphQLRequest = async (
 	let shadowRateLimitScope: string | null = null;
 	let graphqlErrors = 0;
 	let authenticatedSession = false;
+	const tokenBearing = actor.kind === "mini" && Boolean(actor.miniToken);
 	try {
 		const response = await fetch(target, {
 			method: "POST",
@@ -372,6 +379,7 @@ const graphQLRequest = async (
 		shadowRateLimitScope,
 		graphqlErrors,
 		authenticatedSession,
+		tokenBearing,
 		attacker,
 	};
 };
@@ -415,6 +423,7 @@ const pageRequest = async (actor: Actor, phase: string): Promise<RequestSample> 
 		shadowRateLimitScope: null,
 		graphqlErrors: 0,
 		authenticatedSession,
+		tokenBearing: false,
 		attacker: false,
 	};
 };
@@ -872,14 +881,10 @@ const authenticatedSessionActorCount = new Set(
 		.filter((sample) => sample.authenticatedSession)
 		.map((sample) => sample.actorId)
 ).size;
-const miniSessionActorCount = new Set(
-	capacitySamples
-		.filter(
-			(sample) =>
-				sample.transport === "graphql" && sample.kind === "mini" && sample.authenticatedSession
-		)
-		.map((sample) => sample.actorId)
-).size;
+const miniTokenSamples = capacitySamples.filter(
+	(sample) => sample.transport === "graphql" && sample.kind === "mini" && sample.tokenBearing
+);
+const miniSessionActorCount = new Set(miniTokenSamples.map((sample) => sample.actorId)).size;
 const attackerSamples = samples.filter((sample) => sample.attacker);
 const natPeerSamples = samples.filter((sample) => sample.phase === "malicious" && !sample.attacker);
 const natPeerGraphQL = natPeerSamples.filter((sample) => sample.transport === "graphql");
@@ -1026,12 +1031,8 @@ const gates = {
 	miniSessionActorsAuthenticated:
 		!includeMiniSessions ||
 		(miniSessionActorCount === 90 &&
-			capacitySamples
-				.filter(
-					(sample) =>
-						sample.transport === "graphql" && sample.kind === "mini" && sample.authenticatedSession
-				)
-				.every((sample) => sample.authenticatedSession)),
+			miniTokenSamples.length > 0 &&
+			miniTokenSamples.every((sample) => sample.authenticatedSession)),
 	v3TargetWouldDenyZero: capacityWouldDenied === 0,
 	non429ErrorRateBelowPointOnePercent: non429ErrorRate < 0.001,
 	graphQLP95Below800Ms: clientGraphQLP95Ms < 800 && serverGraphQLP95UpperBoundMs < 800,
@@ -1099,6 +1100,8 @@ const report = {
 		totalRequestPerSecond: capacitySamples.length / capacityElapsedSeconds,
 		targetGraphQLRps,
 		sustainableRps,
+		miniSessionActorCount,
+		miniTokenBearingSamples: miniTokenSamples.length,
 		normal429: normal429.length,
 		global429: global429.length,
 		actualGlobalDenied,
