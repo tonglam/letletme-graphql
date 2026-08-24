@@ -2,7 +2,7 @@
 	"name": "letletme-graphql",
 	"private": true,
 	"type": "module",
-	"packageManager": "bun@1.3.14",
+	"packageManager": "bun@1.4.0",
 	"scripts": {
 		"dev": "bun --watch src/index.ts",
 		"start": "bun src/index.ts",
@@ -17,7 +17,7 @@
 		"rate-limit:observe": "bun scripts/build-rate-limit-observation.ts",
 		"rate-limit:p0-probe": "bun scripts/rate-limit-p0-probe.ts",
 		"seed:mini-program-notice": "bun scripts/seed-mini-program-notice-redis.ts",
-		"lint": "eslint src tests scripts",
+		"lint": "eslint src tests scripts --max-warnings=0",
 		"lint:fix": "eslint src tests scripts --fix",
 		"format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.ts\"",
 		"format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.ts\""
@@ -36,10 +36,11 @@
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",
 		"@types/graphql-depth-limit": "^1.1.6",
+		"@types/node": "26.2.0",
 		"@types/pg": "^8.20.0",
 		"@typescript-eslint/eslint-plugin": "^8.65.0",
 		"@typescript-eslint/parser": "^8.65.0",
-		"bun-types": "^1.3.14",
+		"bun-types": "^1.4.0",
 		"eslint": "^10.7.0",
 		"eslint-config-prettier": "^10.1.8",
 		"prettier": "^3.9.5"
