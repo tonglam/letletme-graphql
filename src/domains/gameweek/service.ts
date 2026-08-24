@@ -8,6 +8,7 @@ import { liveService } from "../live/service";
 import type { LiveSnapshotMeta } from "../live/snapshot-meta";
 import { Position, type Player } from "../players/repository";
 import { playersService } from "../players/service";
+import { measureRequestStage } from "../../http/request-timing";
 
 export const MAX_GAMEWEEK_ID = 38;
 
@@ -78,6 +79,30 @@ export type GameweekDesk = {
 };
 
 type CoreEventContext = Awaited<ReturnType<typeof eventsService.getCoreEventContext>>;
+
+const gameweekDeskFlights = new WeakMap<object, Map<string, Promise<GameweekDesk>>>();
+
+const getGameweekDeskFlights = (context: GraphQLContext): Map<string, Promise<GameweekDesk>> => {
+	const identity = context.redis as object;
+	let flights = gameweekDeskFlights.get(identity);
+	if (!flights) {
+		flights = new Map();
+		gameweekDeskFlights.set(identity, flights);
+	}
+	return flights;
+};
+
+const gameweekDeskFlightKey = (
+	context: GraphQLContext,
+	eventContext: CoreEventContext,
+	eventId: number
+): string =>
+	[
+		context.currentSeason.seasonId,
+		context.currentSeason.seasonCode,
+		eventContext.revision,
+		eventId,
+	].join(":");
 
 const positiveEventId = (value: number | null | undefined): number | null =>
 	typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -332,7 +357,11 @@ export const gameweekService = {
 			throw toGraphQLError("Gameweek event ID must be between 1 and 38", "BAD_USER_INPUT");
 		}
 
-		const eventContext = await eventsService.getCoreEventContext(context);
+		const eventContext = await measureRequestStage(
+			context.requestTiming,
+			"gameweek.eventContext",
+			() => eventsService.getCoreEventContext(context)
+		);
 		context.dataRevision ??= `core-${eventContext.revision}`;
 		const anchorEventId = resolveGameweekAnchor(eventContext);
 		const eventId = requestedEventId ?? anchorEventId;
@@ -340,120 +369,161 @@ export const gameweekService = {
 			throw toGraphQLError("Gameweek event context is unavailable", "DATA_UNAVAILABLE");
 		}
 
-		const [event, fixtureSnapshot] = await Promise.all([
-			eventsService.getEventById(context, eventId),
-			getCoreFixtureSnapshot(context),
-		]);
-		if (!event) {
-			throw toGraphQLError(`Gameweek event ${eventId} was not found`, "NOT_FOUND");
-		}
+		const flights = getGameweekDeskFlights(context);
+		const flightKey = gameweekDeskFlightKey(context, eventContext, eventId);
+		const existing = flights.get(flightKey);
+		if (existing) return existing;
 
-		const fixtures = fixtureSnapshot.fixtures.filter((fixture) => fixture.eventId === eventId);
-		const teamNames = new Map(
-			fixtureSnapshot.teams.map((team) => [team.id, team.shortName] as const)
-		);
-		const isPreseason =
-			eventContext.currentEventId === null && eventContext.nextEventId === 1 && eventId === 1;
-		const scheduled = isScheduledLifecycle(event, fixtures, eventContext, eventId);
-		const initialLifecycle = scheduled
-			? "SCHEDULED"
-			: lifecycleFromLiveState(null, event, fixtures, eventContext, eventId);
-
-		let overviewState: GameweekSectionState = "PENDING";
-		let overview: GameweekOverview | null = null;
-		if (initialLifecycle !== "SCHEDULED" && (overviewFactsPresent(event) || event.dataChecked)) {
-			try {
-				const ids = uniquePositiveIds([
-					event.mostCaptained,
-					event.mostViceCaptained,
-					event.mostSelected,
-					event.mostTransferredIn,
-					event.topElementInfo?.element ?? event.topElement,
-				]);
-				const players = await playersService.getPlayersByIds(context, ids);
-				const playersById = new Map(players.map((player) => [player.id, player] as const));
-				const eventTeamIds = await resolveHistoricalTeamIds(
-					context,
-					playersById,
-					eventId,
-					eventContext.currentEventId ?? eventContext.latestFinishedEventId
-				);
-				overview = mapOverview(event, playersById, teamNames, eventTeamIds);
-				overviewState = "AVAILABLE";
-			} catch (error) {
-				context.logger.warn({ err: error, eventId }, "Gameweek overview is unavailable");
-				overviewState = "UNAVAILABLE";
+		const flight = (async (): Promise<GameweekDesk> => {
+			const [event, fixtureSnapshot] = await Promise.all([
+				measureRequestStage(context.requestTiming, "gameweek.event", () =>
+					eventsService.getEventById(context, eventId)
+				),
+				measureRequestStage(context.requestTiming, "gameweek.fixtures", () =>
+					getCoreFixtureSnapshot(context)
+				),
+			]);
+			if (!event) {
+				throw toGraphQLError(`Gameweek event ${eventId} was not found`, "NOT_FOUND");
 			}
-		}
 
-		let boardsState: GameweekSectionState = scheduled ? "PENDING" : "UNAVAILABLE";
-		let liveRevision: string | null = null;
-		let publishedAt: string | null = null;
-		let lifecycle = initialLifecycle;
-		let dreamTeam: GameweekBoardPlayer[] = [];
-		let hauls: GameweekBoardPlayer[] = [];
+			const fixtures = fixtureSnapshot.fixtures.filter((fixture) => fixture.eventId === eventId);
+			const teamNames = new Map(
+				fixtureSnapshot.teams.map((team) => [team.id, team.shortName] as const)
+			);
+			const isPreseason =
+				eventContext.currentEventId === null && eventContext.nextEventId === 1 && eventId === 1;
+			const scheduled = isScheduledLifecycle(event, fixtures, eventContext, eventId);
+			const initialLifecycle = scheduled
+				? "SCHEDULED"
+				: lifecycleFromLiveState(null, event, fixtures, eventContext, eventId);
 
-		if (!scheduled) {
-			try {
-				const boards = await liveService.getGameweekBoards(context, eventId);
-				const playerIds = Array.from(
-					new Set([...boards.dreamTeam, ...boards.hauls].map((performance) => performance.playerId))
-				);
-				const players = await playersService.getPlayersByIds(context, playerIds);
-				const playersById = new Map(players.map((player) => [player.id, player] as const));
-				const eventTeamIds = await resolveHistoricalTeamIds(
-					context,
-					playersById,
-					eventId,
-					eventContext.currentEventId ?? eventContext.latestFinishedEventId
-				);
-				dreamTeam = mapAndSortBoards(
-					boards.dreamTeam,
-					"position",
-					playersById,
-					teamNames,
-					eventTeamIds
-				);
-				hauls = mapAndSortBoards(boards.hauls, "points", playersById, teamNames, eventTeamIds);
-				const meta = boards.meta;
-				liveRevision = meta.revision;
-				publishedAt = meta.publishedAt;
-				lifecycle = lifecycleFromLiveState(meta, event, fixtures, eventContext, eventId);
-				boardsState = "AVAILABLE";
-			} catch (error) {
-				context.logger.warn({ err: error, eventId }, "Gameweek boards are unavailable");
+			let overviewState: GameweekSectionState = "PENDING";
+			let overview: GameweekOverview | null = null;
+			if (initialLifecycle !== "SCHEDULED" && (overviewFactsPresent(event) || event.dataChecked)) {
+				try {
+					const ids = uniquePositiveIds([
+						event.mostCaptained,
+						event.mostViceCaptained,
+						event.mostSelected,
+						event.mostTransferredIn,
+						event.topElementInfo?.element ?? event.topElement,
+					]);
+					const players = await measureRequestStage(
+						context.requestTiming,
+						"gameweek.overview.players",
+						() => playersService.getPlayersByIds(context, ids)
+					);
+					const playersById = new Map(players.map((player) => [player.id, player] as const));
+					const eventTeamIds = await measureRequestStage(
+						context.requestTiming,
+						"gameweek.overview.historicalTeams",
+						() =>
+							resolveHistoricalTeamIds(
+								context,
+								playersById,
+								eventId,
+								eventContext.currentEventId ?? eventContext.latestFinishedEventId
+							)
+					);
+					overview = mapOverview(event, playersById, teamNames, eventTeamIds);
+					overviewState = "AVAILABLE";
+				} catch (error) {
+					context.logger.warn({ err: error, eventId }, "Gameweek overview is unavailable");
+					overviewState = "UNAVAILABLE";
+				}
 			}
-		}
 
-		// Core fixtures can advance before the independently published live snapshot.
-		// Keep the public desk internally consistent until the live publication catches up.
-		if (lifecycle === "SCHEDULED") {
-			overviewState = "PENDING";
-			overview = null;
-			boardsState = "PENDING";
-			dreamTeam = [];
-			hauls = [];
-			liveRevision = null;
-			publishedAt = null;
-		}
+			let boardsState: GameweekSectionState = scheduled ? "PENDING" : "UNAVAILABLE";
+			let liveRevision: string | null = null;
+			let publishedAt: string | null = null;
+			let lifecycle = initialLifecycle;
+			let dreamTeam: GameweekBoardPlayer[] = [];
+			let hauls: GameweekBoardPlayer[] = [];
 
-		return {
-			season: eventContext.season,
-			coreRevision: eventContext.revision,
-			liveRevision,
-			anchorEventId: anchorEventId ?? eventId,
-			eventId,
-			currentEventId: eventContext.currentEventId,
-			nextEventId: eventContext.nextEventId,
-			isPreseason,
-			lifecycle,
-			deadlineTime: event.deadlineTime,
-			publishedAt,
-			overviewState,
-			boardsState,
-			overview,
-			dreamTeam,
-			hauls,
+			if (!scheduled) {
+				try {
+					const boards = await measureRequestStage(
+						context.requestTiming,
+						"gameweek.boards.snapshot",
+						() => liveService.getGameweekBoards(context, eventId)
+					);
+					const playerIds = Array.from(
+						new Set(
+							[...boards.dreamTeam, ...boards.hauls].map((performance) => performance.playerId)
+						)
+					);
+					const players = await measureRequestStage(
+						context.requestTiming,
+						"gameweek.boards.players",
+						() => playersService.getPlayersByIds(context, playerIds)
+					);
+					const playersById = new Map(players.map((player) => [player.id, player] as const));
+					const eventTeamIds = await measureRequestStage(
+						context.requestTiming,
+						"gameweek.boards.historicalTeams",
+						() =>
+							resolveHistoricalTeamIds(
+								context,
+								playersById,
+								eventId,
+								eventContext.currentEventId ?? eventContext.latestFinishedEventId
+							)
+					);
+					dreamTeam = mapAndSortBoards(
+						boards.dreamTeam,
+						"position",
+						playersById,
+						teamNames,
+						eventTeamIds
+					);
+					hauls = mapAndSortBoards(boards.hauls, "points", playersById, teamNames, eventTeamIds);
+					const meta = boards.meta;
+					liveRevision = meta.revision;
+					publishedAt = meta.publishedAt;
+					lifecycle = lifecycleFromLiveState(meta, event, fixtures, eventContext, eventId);
+					boardsState = "AVAILABLE";
+				} catch (error) {
+					context.logger.warn({ err: error, eventId }, "Gameweek boards are unavailable");
+				}
+			}
+
+			// Core fixtures can advance before the independently published live snapshot.
+			// Keep the public desk internally consistent until the live publication catches up.
+			if (lifecycle === "SCHEDULED") {
+				overviewState = "PENDING";
+				overview = null;
+				boardsState = "PENDING";
+				dreamTeam = [];
+				hauls = [];
+				liveRevision = null;
+				publishedAt = null;
+			}
+
+			return {
+				season: eventContext.season,
+				coreRevision: eventContext.revision,
+				liveRevision,
+				anchorEventId: anchorEventId ?? eventId,
+				eventId,
+				currentEventId: eventContext.currentEventId,
+				nextEventId: eventContext.nextEventId,
+				isPreseason,
+				lifecycle,
+				deadlineTime: event.deadlineTime,
+				publishedAt,
+				overviewState,
+				boardsState,
+				overview,
+				dreamTeam,
+				hauls,
+			};
+		})();
+		flights.set(flightKey, flight);
+		const clearFlight = (): void => {
+			if (flights.get(flightKey) === flight) flights.delete(flightKey);
 		};
+		void flight.then(clearFlight, clearFlight);
+		return flight;
 	},
 };

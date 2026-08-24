@@ -48,6 +48,58 @@ describe("gameweekDesk", () => {
 		});
 	});
 
+	it("coalesces concurrent desk loads for the same live publication", async () => {
+		const baseCore = buildTestCoreData(1);
+		const player = baseCore.players[0]!;
+		const core = buildTestCoreData(1, {
+			events: baseCore.events.map((event) =>
+				event.id === 1 ? { ...event, averageEntryScore: 48, mostSelected: player.id } : event
+			),
+			fixtures: baseCore.fixtures.map((fixture, index) =>
+				index === 0 ? { ...fixture, started: true } : fixture
+			),
+		});
+		const eventLives = buildTestEventLives(core, 1).map((row, index) =>
+			index === 0 ? { ...row, inDreamTeam: true, totalPoints: 12 } : row
+		);
+		const redis = new TestRedis(
+			buildCorePublication("2627", 7, core),
+			buildLivePublication(core, 1, "2627", 8, { state: "live", eventLives })
+		);
+		let databaseCalls = 0;
+		const databaseQuery = async () => {
+			databaseCalls += 1;
+			await new Promise<void>((resolve) => setTimeout(resolve, 20));
+			return { rows: [{ player_code: player.code, team_id: player.teamId }] };
+		};
+		const run = (context: ReturnType<typeof buildSnapshotContext>) =>
+			graphql({
+				schema,
+				source: deskQuery,
+				variableValues: { eventId: 1 },
+				contextValue: context,
+			});
+
+		const [first, second] = await Promise.all([
+			run(buildSnapshotContext(redis, { databaseQuery })),
+			run(buildSnapshotContext(redis, { databaseQuery })),
+		]);
+
+		expect(first.errors).toBeUndefined();
+		expect(second.errors).toBeUndefined();
+		expect(first.data?.gameweekDesk).toMatchObject({
+			eventId: 1,
+			lifecycle: "PROVISIONAL",
+			boardsState: "AVAILABLE",
+		});
+		expect(second.data?.gameweekDesk).toMatchObject({
+			eventId: 1,
+			lifecycle: "PROVISIONAL",
+			boardsState: "AVAILABLE",
+		});
+		expect(databaseCalls).toBe(2);
+	});
+
 	it("returns a scheduled preseason desk without live reads or false unavailable boards", async () => {
 		const core = buildTestCoreData(null);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
