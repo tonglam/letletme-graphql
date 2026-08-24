@@ -50,6 +50,8 @@ export const hasCompleteEntryEventPick = (
 	let multiplierTotal = 0;
 	let boostedMultipliers = 0;
 	let boostedMultiplierBelongsToCaptaincy = true;
+	let captainMultiplier: number | null = null;
+	let viceCaptainMultiplier: number | null = null;
 	for (const pick of pickEntity.picks) {
 		if (
 			pick.eventId !== eventId ||
@@ -68,8 +70,14 @@ export const hasCompleteEntryEventPick = (
 		positions.add(pick.position);
 		elements.add(pick.element);
 		if (pick.isCaptain && pick.isViceCaptain) return false;
-		if (pick.isCaptain) captains += 1;
-		if (pick.isViceCaptain) viceCaptains += 1;
+		if (pick.isCaptain) {
+			captains += 1;
+			captainMultiplier = pick.multiplier;
+		}
+		if (pick.isViceCaptain) {
+			viceCaptains += 1;
+			viceCaptainMultiplier = pick.multiplier;
+		}
 		if (pick.multiplier > 0) positiveMultipliers += 1;
 		multiplierTotal += pick.multiplier;
 		if (pick.multiplier > 1) {
@@ -82,6 +90,10 @@ export const hasCompleteEntryEventPick = (
 	const hasOfficialMultiplierShape =
 		boostedMultipliers === 1 &&
 		boostedMultiplierBelongsToCaptaincy &&
+		// When FPL promotes the vice-captain, the original captain no longer
+		// contributes to the XI. Accepting captain=1 with vice=2 would count 12
+		// players while still satisfying the aggregate multiplier totals below.
+		(viceCaptainMultiplier === null || viceCaptainMultiplier <= 1 || captainMultiplier === 0) &&
 		((positiveMultipliers === 11 && (multiplierTotal === 12 || multiplierTotal === 13)) ||
 			(positiveMultipliers === 15 && multiplierTotal === 16));
 	return (

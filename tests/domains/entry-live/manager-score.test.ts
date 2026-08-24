@@ -84,6 +84,25 @@ describe("event-live manager score contract", () => {
 		expect(build(7).score.revision).toContain(":rank:7:101:none");
 	});
 
+	it("changes the traceable revision when the resolved season baseline changes", () => {
+		const build = (previousOverallPoints: number | null) =>
+			buildManagerScore({
+				row: row(),
+				upstreamErrorCode: null,
+				provisional: true,
+				available: true,
+				transferCost: 0,
+				detailEventPoints: 37,
+				previousOverallPoints,
+				eventLiveAuthority: authority(),
+			});
+
+		expect(build(null).score.revision).not.toBe(build(100).score.revision);
+		expect(build(100).score.revision).not.toBe(build(101).score.revision);
+		expect(build(null).score.revision).toContain(":total:none:UNKNOWN:");
+		expect(build(100).score.revision).toContain(":total:137:OVERALL:");
+	});
+
 	it("marks an old event-live revision stale without reverting to manager summary", () => {
 		const checkedAt = new Date(Date.now() - 45_000).toISOString();
 		const result = buildManagerScore({

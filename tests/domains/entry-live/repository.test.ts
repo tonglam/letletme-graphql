@@ -309,4 +309,16 @@ describe("hasCompleteEntryEventPick", () => {
 		boostOutsideCaptaincy.picks[2]!.multiplier = 2;
 		expect(hasCompleteEntryEventPick(boostOutsideCaptaincy, 3, 1)).toBe(false);
 	});
+
+	it("rejects a promoted vice-captain while the original captain remains active", () => {
+		const impossiblePromotion = complete();
+		impossiblePromotion.picks[0]!.multiplier = 1;
+		impossiblePromotion.picks[1]!.multiplier = 2;
+
+		expect(hasCompleteEntryEventPick(impossiblePromotion, 3, 1)).toBe(false);
+
+		impossiblePromotion.picks[0]!.multiplier = 0;
+		impossiblePromotion.picks[11]!.multiplier = 1;
+		expect(hasCompleteEntryEventPick(impossiblePromotion, 3, 1)).toBe(true);
+	});
 });

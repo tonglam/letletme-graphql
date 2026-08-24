@@ -1007,16 +1007,64 @@ function officialBattleRowsAreCompleteForEntries(
 
 type OfficialKnockoutRoundConfig = Pick<
 	TournamentInfo,
-	"knockoutTeamNum" | "knockoutEventNum" | "knockoutStartedEventId"
->;
+	"knockoutTeamNum" | "knockoutStartedEventId"
+> &
+	Partial<
+		Pick<
+			TournamentInfo,
+			"knockoutMode" | "knockoutRounds" | "knockoutEventNum" | "knockoutPlayAgainstNum"
+		>
+	>;
+
+function resolveOfficialKnockoutStructure(
+	tournament: OfficialKnockoutRoundConfig
+): { bracketSize: number; rounds: number; eventsPerOpponent: number } | null {
+	if (tournament.knockoutMode === KnockoutMode.NO_KNOCKOUT) return null;
+	const teamCount = tournament.knockoutTeamNum ?? 0;
+	if (!Number.isSafeInteger(teamCount) || teamCount < 2) return null;
+	const rounds = Math.ceil(Math.log2(teamCount));
+	const bracketSize = 2 ** rounds;
+	const configuredEventsPerOpponent = tournament.knockoutPlayAgainstNum;
+	const eventsPerOpponent =
+		configuredEventsPerOpponent !== null &&
+		configuredEventsPerOpponent !== undefined &&
+		Number.isSafeInteger(configuredEventsPerOpponent) &&
+		configuredEventsPerOpponent >= 1
+			? configuredEventsPerOpponent
+			: tournament.knockoutMode === KnockoutMode.DOUBLE_ELIMINATION
+				? 2
+				: 1;
+
+	// Current Data rows store bracket stages in knockoutEventNum and elapsed
+	// gameweeks in knockoutRounds. Older/imported rows can use the opposite
+	// naming. Require one configured representation to reconcile to the bracket
+	// implied by the team count, including multi-event ties, before trusting it.
+	const configuredCounts = [
+		tournament.knockoutRounds,
+		tournament.knockoutEventNum,
+		tournament.knockoutRounds === null || tournament.knockoutRounds === undefined
+			? null
+			: tournament.knockoutRounds / eventsPerOpponent,
+		tournament.knockoutEventNum === null || tournament.knockoutEventNum === undefined
+			? null
+			: tournament.knockoutEventNum / eventsPerOpponent,
+	].filter(
+		(value): value is number =>
+			typeof value === "number" && Number.isSafeInteger(value) && value >= 1
+	);
+	if (configuredCounts.length > 0 && !configuredCounts.includes(rounds)) return null;
+
+	return { bracketSize, rounds, eventsPerOpponent };
+}
 
 function resolveOfficialKnockoutRound(
 	tournament: OfficialKnockoutRoundConfig,
 	eventId: number,
 	knockoutName: string | null
 ): number | null {
-	const rounds = tournament.knockoutEventNum ?? 0;
-	if (!Number.isSafeInteger(rounds) || rounds < 1) return null;
+	const structure = resolveOfficialKnockoutStructure(tournament);
+	if (!structure) return null;
+	const { rounds, eventsPerOpponent } = structure;
 	const normalizedName = knockoutName?.trim().toLowerCase() ?? "";
 	const round = normalizedName.includes("quarter")
 		? Math.max(1, rounds - 2)
@@ -1026,7 +1074,13 @@ function resolveOfficialKnockoutRound(
 				? rounds
 				: tournament.knockoutStartedEventId === null
 					? null
-					: Math.min(Math.max(eventId - tournament.knockoutStartedEventId + 1, 1), rounds);
+					: Math.min(
+							Math.max(
+								Math.floor((eventId - tournament.knockoutStartedEventId) / eventsPerOpponent) + 1,
+								1
+							),
+							rounds
+						);
 	return round !== null && round >= 1 && round <= rounds ? round : null;
 }
 
@@ -1035,10 +1089,10 @@ function expectedOfficialKnockoutMatches(
 	eventId: number,
 	knockoutName: string | null
 ): { round: number; matches: number } | null {
-	const teamCount = tournament.knockoutTeamNum ?? 0;
+	const structure = resolveOfficialKnockoutStructure(tournament);
 	const round = resolveOfficialKnockoutRound(tournament, eventId, knockoutName);
-	if (!Number.isSafeInteger(teamCount) || teamCount < 2 || round === null) return null;
-	const matches = teamCount / 2 ** round;
+	if (!structure || round === null) return null;
+	const matches = structure.bracketSize / 2 ** round;
 	return Number.isSafeInteger(matches) && matches >= 1 ? { round, matches } : null;
 }
 

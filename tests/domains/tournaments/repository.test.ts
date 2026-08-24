@@ -413,6 +413,45 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 		).toBe(true);
 	});
 
+	it("accepts a complete multi-event final using bracket-round cardinality", () => {
+		const final = {
+			tournament_id: 9,
+			event_id: 5,
+			home_entry_id: 101,
+			home_net_points: 37,
+			away_entry_id: 102,
+			away_net_points: 31,
+			match_winner: 101,
+			official_match_id: 7001,
+			source_order: 1,
+			knockout_name: "Final",
+			tiebreak: null,
+			source_checked_at: "2026-08-24T00:07:00.000Z",
+		};
+		const common = {
+			knockoutMode: KnockoutMode.DOUBLE_ELIMINATION,
+			knockoutTeamNum: 8,
+			knockoutStartedEventId: 1,
+			knockoutPlayAgainstNum: 2,
+		};
+
+		for (const config of [
+			{ ...common, knockoutRounds: 3, knockoutEventNum: 6 },
+			{ ...common, knockoutRounds: 6, knockoutEventNum: 3 },
+		]) {
+			expect(
+				tournamentCacheTestables.officialH2HCurrentEventIsComplete(
+					false,
+					[],
+					[final],
+					5,
+					new Set([5]),
+					config
+				)
+			).toBe(true);
+		}
+	});
+
 	it("does not restore rejected finalized history while suppressing an active round", () => {
 		const loaded = activeOfficialH2HLoad();
 		loaded.validatedFinalizedEventIds = new Set();
