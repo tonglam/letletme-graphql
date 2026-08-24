@@ -183,8 +183,9 @@ describe("EntryEventResult resolvers", () => {
 
 	it("resolves event pick lists through entriesService", async () => {
 		const original = entriesService.getEntryEventPicks;
-		const context = {} as unknown as GraphQLContext;
+		const context = { requestScope: {} } as unknown as GraphQLContext;
 		const parent = makeEntryEventResult();
+		let calls = 0;
 		const picks = [
 			makePick({ element: 1, autoSub: false }),
 			makePick({ element: 2, autoSub: true }),
@@ -194,18 +195,47 @@ describe("EntryEventResult resolvers", () => {
 			inputContext: GraphQLContext,
 			inputParent: EntryEventResult
 		): Promise<ElementEventResultData[]> => {
+			calls += 1;
 			expect(inputContext).toBe(context);
 			expect(inputParent).toBe(parent);
 			return picks;
 		};
 
 		try {
-			await expect(
-				entriesResolvers.EntryEventResult.eventPicks(parent, {}, context)
-			).resolves.toHaveLength(2);
-			await expect(
-				entriesResolvers.EntryEventResult.eventAutoSub(parent, {}, context)
-			).resolves.toHaveLength(1);
+			const [allPicks, autoSubs] = await Promise.all([
+				entriesResolvers.EntryEventResult.eventPicks(parent, {}, context),
+				entriesResolvers.EntryEventResult.eventAutoSub(parent, {}, context),
+			]);
+			expect(allPicks).toHaveLength(2);
+			expect(autoSubs).toHaveLength(1);
+			expect(calls).toBe(1);
+		} finally {
+			entriesService.getEntryEventPicks = original;
+		}
+	});
+
+	it("does not share enriched picks between distinct parent payloads", async () => {
+		const original = entriesService.getEntryEventPicks;
+		const context = { requestScope: {} } as unknown as GraphQLContext;
+		const firstParent = makeEntryEventResult();
+		const secondParent = makeEntryEventResult();
+		let calls = 0;
+		entriesService.getEntryEventPicks = async (
+			_inputContext: GraphQLContext,
+			inputParent: EntryEventResult
+		): Promise<ElementEventResultData[]> => {
+			calls += 1;
+			return [makePick({ element: inputParent === firstParent ? 1 : 2 })];
+		};
+
+		try {
+			const [first, second] = await Promise.all([
+				entriesResolvers.EntryEventResult.eventPicks(firstParent, {}, context),
+				entriesResolvers.EntryEventResult.eventPicks(secondParent, {}, context),
+			]);
+			expect(first[0]?.element).toBe(1);
+			expect(second[0]?.element).toBe(2);
+			expect(calls).toBe(2);
 		} finally {
 			entriesService.getEntryEventPicks = original;
 		}

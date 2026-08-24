@@ -232,6 +232,7 @@ type FixtureOptions = {
 	selectedTournament?: TournamentInfo | null;
 	boardPayload?: unknown;
 	publicationRows?: unknown[];
+	pinnedPublicationRows?: unknown[];
 	snapshotEntryRow?: unknown;
 	snapshotBoardRow?: unknown;
 	snapshotAggregatePayload?: unknown;
@@ -773,7 +774,11 @@ const makeFixture = (options: FixtureOptions = {}) => {
 			};
 		}
 		if (sql.includes("FROM competition.my_fpl_snapshot_publications")) {
-			return { rows: options.publicationRows ?? [] };
+			return {
+				rows: sql.includes("AND active")
+					? (options.publicationRows ?? [])
+					: (options.pinnedPublicationRows ?? options.publicationRows ?? []),
+			};
 		}
 		if (sql.includes("FROM fpl.events")) return { rows: lifecycleRows };
 		if (sql.includes("FROM competition.entries")) return { rows: options.entryRows ?? [] };
@@ -928,6 +933,35 @@ describe("My FPL review repository", () => {
 		});
 	});
 
+	it("keeps only the previous UTC+8 day inside the daily provisional grace window", () => {
+		const beforeObligation = new Date("2026-08-23T02:44:00.000Z");
+		const duringObligation = new Date("2026-08-23T03:00:00.000Z");
+		expect(myFplTestables.snapshotFreshness("2026-08-23", "PROVISIONAL", beforeObligation)).toBe(
+			"CURRENT"
+		);
+		expect(myFplTestables.snapshotFreshness("2026-08-22", "PROVISIONAL", beforeObligation)).toBe(
+			"CURRENT"
+		);
+		expect(myFplTestables.snapshotFreshness("2026-08-22", "PROVISIONAL", duringObligation)).toBe(
+			"GENERATING"
+		);
+		expect(myFplTestables.snapshotFreshness("2026-08-21", "PROVISIONAL", beforeObligation)).toBe(
+			"STALE"
+		);
+		expect(myFplTestables.snapshotFreshness("2026-08-24", "PROVISIONAL", beforeObligation)).toBe(
+			"STALE"
+		);
+		expect(myFplTestables.snapshotFreshness("2026-01-01", "FINAL", beforeObligation)).toBe(
+			"CURRENT"
+		);
+	});
+
+	it("compares normalized PostgreSQL bigint snapshot revisions", () => {
+		expect(myFplTestables.compareSnapshotRevisions("43", "42")).toBe(1);
+		expect(myFplTestables.compareSnapshotRevisions("00042", "42")).toBe(0);
+		expect(myFplTestables.compareSnapshotRevisions("9", "10")).toBe(-1);
+	});
+
 	it("reads every My FPL surface from one pinned daily publication", async () => {
 		await withSnapshotRead(async () => {
 			const fixture = makeFixture({
@@ -968,6 +1002,32 @@ describe("My FPL review repository", () => {
 			expect(path.state).toBe("READY");
 			expect(path.points[0]?.gameweek).toBe(1);
 			expect(path.snapshotMeta?.revision).toBe("42");
+		});
+	});
+
+	it("uses a newer active revision only after the requested retained revision is unavailable", async () => {
+		await withSnapshotRead(async () => {
+			const activePublication = { ...snapshotPublicationRow, revision: "43" };
+			const fixture = makeFixture({
+				finalizedIds: [1],
+				publicationRows: [activePublication],
+				pinnedPublicationRows: [],
+				snapshotEntryRow: { ...snapshotEntryRow(), revision: "43" },
+			});
+
+			const desk = await fixture.repository.loadTeamDesk(fixture.context, 1, "42");
+
+			expect(desk.state).toBe("READY");
+			expect(desk.snapshotMeta?.revision).toBe("43");
+			expect(
+				fixture.queries.some(
+					({ sql, params }) =>
+						sql.includes("FROM competition.my_fpl_snapshot_publications") &&
+						!sql.includes("AND active") &&
+						params.includes("42")
+				)
+			).toBe(true);
+			expect(fixture.queries.every(({ sql }) => !sql.includes("active OR"))).toBe(true);
 		});
 	});
 
