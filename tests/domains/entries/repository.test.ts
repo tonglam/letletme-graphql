@@ -370,6 +370,7 @@ const cachedResult: EntryEventResult = {
 	eventCaptainPoints: 16,
 	eventAutoSub: [],
 	eventPicks: [],
+	richSyncedAt: "2026-08-20T00:00:00.000Z",
 	teamValue: 1_020,
 	bank: 5,
 };

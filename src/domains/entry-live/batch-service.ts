@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import type { Player, Team } from "../../infra/types";
@@ -31,6 +32,7 @@ import {
 	type EntryEventTransfersData,
 	enrichTransferRows,
 } from "./transfer-enrichment";
+import { stableStringify } from "../../infra/stringify";
 
 export type BatchLiveCalcResult = {
 	results: Map<number, LiveCalcData>;
@@ -124,9 +126,20 @@ const buildFinalManagerScoreRow = (
 	source: "FPL_FINAL_RESULT",
 	revision: `final:${eventId}:${entryId}:${finalized.overallPoints}:${finalized.overallRank}`,
 	checkedAt,
-	upstreamUpdatedAt: null,
+	upstreamUpdatedAt: checkedAt,
 	staleAt: new Date(Date.parse(checkedAt) + 90_000).toISOString(),
 });
+
+const finalizedPicksRevision = (eventId: number, results: readonly EntryEventResult[]): string => {
+	const evidence = results
+		.map((result) => ({ entryId: result.entryId, richSyncedAt: result.richSyncedAt }))
+		.sort((left, right) => left.entryId - right.entryId);
+	const digest = createHash("sha256")
+		.update(stableStringify({ eventId, evidence }), "utf8")
+		.digest("hex")
+		.slice(0, 24);
+	return `event-result:${eventId}:${digest}`;
+};
 
 const elementTypeName = (player: Player | null): string => {
 	if (!player) return "";
@@ -531,24 +544,39 @@ export const entryLiveBatchService = {
 			// FPL can publish automatic_subs and the effective captain after the
 			// event flips to finished/data_checked. Read through a finalization-scoped
 			// cache key so the canonical picks are refreshed once, then remain stable.
-			const [finalizedResults, finalizedPicks] = await Promise.all([
-				entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId),
-				entryLiveRepository.getEntryEventPicksByIds(
-					context,
-					entryIds,
-					eventId,
-					false,
-					`data-checked:${eventId}`
-				),
-			]);
+			const finalizedResults = await entriesService.getEntryEventResultsByEntryIds(
+				context,
+				entryIds,
+				eventId
+			);
 			finalizedResultsByEntry = finalizedResults;
-			for (const [entryId, pick] of finalizedPicks) picksByEntry.set(entryId, pick);
+			const durableEntryIds = entryIds.filter((entryId) => finalizedResults.has(entryId));
+			const settlingEntryIds = entryIds.filter((entryId) => !finalizedResults.has(entryId));
+			const durableResults = durableEntryIds
+				.map((entryId) => finalizedResults.get(entryId))
+				.filter((result): result is EntryEventResult => result !== undefined);
+			const [durablePicks, settlingPicks] = await Promise.all([
+				durableEntryIds.length > 0
+					? entryLiveRepository.getEntryEventPicksByIds(
+							context,
+							durableEntryIds,
+							eventId,
+							false,
+							finalizedPicksRevision(eventId, durableResults)
+						)
+					: Promise.resolve(new Map<number, EntryEventPick>()),
+				settlingEntryIds.length > 0
+					? entryLiveRepository.getEntryEventPicksByIds(context, settlingEntryIds, eventId, true)
+					: Promise.resolve(new Map<number, EntryEventPick>()),
+			]);
+			for (const [entryId, pick] of [...durablePicks, ...settlingPicks]) {
+				picksByEntry.set(entryId, pick);
+			}
 		}
 		const readyEntryIds = entryIds.filter((entryId) =>
 			hasCompleteEntryEventPick(picksByEntry.get(entryId), eventId, entryId)
 		);
 		const readyEntryIdSet = new Set(readyEntryIds);
-		const finalCheckedAt = new Date().toISOString();
 		const results = new Map<number, LiveCalcData>();
 		for (const entryId of entryIds) {
 			if (!readyEntryIdSet.has(entryId)) {
@@ -562,7 +590,7 @@ export const entryLiveBatchService = {
 							eventId,
 							entryId,
 							finalized,
-							finalCheckedAt
+							finalized.richSyncedAt
 						)
 					: undefined;
 				const noPicks = buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
@@ -730,7 +758,7 @@ export const entryLiveBatchService = {
 							eventId,
 							entryId,
 							finalized,
-							finalCheckedAt
+							finalized.richSyncedAt
 						)
 					: undefined;
 				const baseline = resolvePreviousEventBaseline(

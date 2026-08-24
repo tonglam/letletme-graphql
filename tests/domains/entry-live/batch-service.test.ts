@@ -184,6 +184,11 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		const originalResults = entriesService.getEntryEventResultsByEntryIds;
 		const originalPicks = entryLiveRepository.getEntryEventPicksByIds;
 		const originalEvent = eventsService.getEventById;
+		const pickCalls: Array<{
+			entryIds: number[];
+			forceRefresh: boolean | undefined;
+			finalizationRevision: string | undefined;
+		}> = [];
 		entriesService.getEntriesByIds = async () =>
 			new Map([
 				[
@@ -227,6 +232,8 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 							eventPlayedCaptain: 1,
 							eventCaptainPoints: 10,
 							eventPicks: [],
+							eventAutoSub: [],
+							richSyncedAt: "2026-08-23T00:09:00.000Z",
 							teamValue: 990,
 							bank: 10,
 						},
@@ -251,13 +258,24 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 						eventPlayedCaptain: 1,
 						eventCaptainPoints: 12,
 						eventPicks: [],
+						eventAutoSub: [],
+						richSyncedAt: "2026-08-24T00:09:00.000Z",
 						teamValue: 1000,
 						bank: 10,
 					},
 				],
 			]);
 		};
-		entryLiveRepository.getEntryEventPicksByIds = async () => new Map();
+		entryLiveRepository.getEntryEventPicksByIds = async (
+			_context,
+			entryIds,
+			_eventId,
+			forceRefresh,
+			finalizationRevision
+		) => {
+			pickCalls.push({ entryIds: [...entryIds], forceRefresh, finalizationRevision });
+			return new Map();
+		};
 		eventsService.getEventById = async () =>
 			({ id: 2, finished: true, dataChecked: true }) as never;
 
@@ -280,9 +298,46 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				score: {
 					source: "FPL_FINAL_RESULT",
 					state: "FINAL",
+					checkedAt: "2026-08-24T00:09:00.000Z",
+					upstreamUpdatedAt: "2026-08-24T00:09:00.000Z",
 					reconciliation: "NO_LINEUP",
 				},
 			});
+			const finalPickCall = pickCalls.find((call) => call.forceRefresh === false);
+			expect(finalPickCall).toMatchObject({ entryIds: [1001], forceRefresh: false });
+			expect(finalPickCall?.finalizationRevision).toMatch(/^event-result:2:[0-9a-f]{24}$/);
+		} finally {
+			entriesService.getEntriesByIds = originalEntries;
+			entriesService.getEntryEventResultsByEntryIds = originalResults;
+			entryLiveRepository.getEntryEventPicksByIds = originalPicks;
+			eventsService.getEventById = originalEvent;
+		}
+	});
+
+	it("keeps force-refreshing final picks while the durable result is not published", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		const originalResults = entriesService.getEntryEventResultsByEntryIds;
+		const originalPicks = entryLiveRepository.getEntryEventPicksByIds;
+		const originalEvent = eventsService.getEventById;
+		const calls: Array<{ forceRefresh?: boolean; finalizationRevision?: string }> = [];
+		entriesService.getEntriesByIds = async () => new Map();
+		entriesService.getEntryEventResultsByEntryIds = async () => new Map();
+		entryLiveRepository.getEntryEventPicksByIds = async (
+			_context,
+			_entryIds,
+			_eventId,
+			forceRefresh,
+			finalizationRevision
+		) => {
+			calls.push({ forceRefresh, finalizationRevision });
+			return new Map();
+		};
+		eventsService.getEventById = async () =>
+			({ id: 2, finished: true, dataChecked: true }) as never;
+
+		try {
+			await entryLiveBatchService.calcLivePointsForEntries(makeMockContext({}), 2, [1001]);
+			expect(calls).toContainEqual({ forceRefresh: true, finalizationRevision: undefined });
 		} finally {
 			entriesService.getEntriesByIds = originalEntries;
 			entriesService.getEntryEventResultsByEntryIds = originalResults;

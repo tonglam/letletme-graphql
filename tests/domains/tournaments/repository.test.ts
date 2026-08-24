@@ -45,6 +45,9 @@ const activeOfficialH2HLoad = (): OfficialH2HSnapshotLoad => ({
 			id: 9,
 			name: "Official H2H",
 			totalTeamNum: 2,
+			knockoutTeamNum: 2,
+			knockoutEventNum: 1,
+			knockoutStartedEventId: 1,
 		} as OfficialH2HSnapshotLoad["snapshot"]["tournament"],
 		eventId: 1,
 		awaitingSchedule: false,
@@ -347,7 +350,65 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 				[],
 				[knockout],
 				1,
-				new Set([1])
+				new Set([1]),
+				{
+					knockoutTeamNum: 2,
+					knockoutEventNum: 1,
+					knockoutStartedEventId: 1,
+				}
+			)
+		).toBe(true);
+	});
+
+	it("rejects an incrementally published partial semifinal round", () => {
+		const firstSemifinal = {
+			tournament_id: 9,
+			event_id: 1,
+			home_entry_id: 101,
+			home_net_points: 37,
+			away_entry_id: 102,
+			away_net_points: 31,
+			match_winner: 101,
+			official_match_id: 7001,
+			source_order: 1,
+			knockout_name: "Semi-finals",
+			tiebreak: null,
+			source_checked_at: "2026-08-24T00:07:00.000Z",
+		};
+		const config = {
+			knockoutTeamNum: 4,
+			knockoutEventNum: 2,
+			knockoutStartedEventId: 1,
+		};
+
+		expect(
+			tournamentCacheTestables.officialH2HCurrentEventIsComplete(
+				false,
+				[],
+				[firstSemifinal],
+				1,
+				new Set([1]),
+				config
+			)
+		).toBe(false);
+		expect(
+			tournamentCacheTestables.officialH2HCurrentEventIsComplete(
+				false,
+				[],
+				[
+					firstSemifinal,
+					{
+						...firstSemifinal,
+						home_entry_id: 103,
+						away_entry_id: 104,
+						match_winner: 103,
+						official_match_id: 7002,
+						source_order: 2,
+					},
+				],
+				1,
+				new Set([1]),
+				config
 			)
 		).toBe(true);
 	});
@@ -394,6 +455,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 
 		const original = entryLiveBatchService.calcLivePointsForEntries;
 		const calls: number[][] = [];
+		let lineupRevision = "lineup-a";
 		entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, entryIds) => {
 			calls.push([...entryIds]);
 			if (entryIds.includes(201)) throw new Error("second tournament unavailable");
@@ -404,7 +466,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 						entryId,
 						{
 							score: {
-								revision: `event-live:8:${entryId}`,
+								revision: `event-live:8:${entryId}:${lineupRevision}`,
 								checkedAt,
 								source: "FPL_EVENT_LIVE",
 								state: "FRESH",
@@ -438,6 +500,17 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 			expect(calls.map((entryIds) => entryIds.join(",")).sort()).toEqual(["101,102", "201,202"]);
 			expect(projected.get(9)?.snapshot.scoreSource).toBe("FPL_EVENT_LIVE");
 			expect(projected.get(10)?.snapshot.scoreSource).toBe("UNAVAILABLE");
+			const firstRevision = projected.get(9)?.snapshot.scoreRevision;
+			expect(firstRevision).toMatch(/^event-live-h2h:1:[0-9a-f]{24}$/);
+
+			lineupRevision = "lineup-b";
+			const refreshed = await tournamentCacheTestables.applyActiveOfficialH2HScoreAuthority(
+				{ logger: { warn: () => undefined } } as never,
+				new Map([[9, first]]),
+				1,
+				new Set()
+			);
+			expect(refreshed.get(9)?.snapshot.scoreRevision).not.toBe(firstRevision);
 		} finally {
 			entryLiveBatchService.calcLivePointsForEntries = original;
 		}

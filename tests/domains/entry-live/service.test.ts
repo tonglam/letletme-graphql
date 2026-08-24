@@ -67,6 +67,14 @@ describe("entryLive score authority", () => {
 		expect(projectEntryLiveFromCalc({ entry, event, calc: untraceable })).toBeNull();
 	});
 
+	it("does not relabel a phase total as the overall total", () => {
+		const phaseTotal = {
+			...eventLiveCalc,
+			score: { ...eventLiveCalc.score, totalScope: "CLASSIC_PHASE" },
+		} as LiveCalcData;
+		expect(projectEntryLiveFromCalc({ entry, event, calc: phaseTotal })).toBeNull();
+	});
+
 	it("keeps a traceable finalized result when rich lineup details are missing", () => {
 		const finalized = {
 			...eventLiveCalc,

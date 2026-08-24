@@ -36,6 +36,7 @@ const previous = (eventId: number): EntryEventResult => ({
 	eventPlayedCaptain: null,
 	eventCaptainPoints: 0,
 	eventPicks: [],
+	richSyncedAt: "2026-08-20T00:00:00.000Z",
 	teamValue: 1000,
 	bank: 0,
 });

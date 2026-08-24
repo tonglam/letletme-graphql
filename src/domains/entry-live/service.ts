@@ -38,7 +38,8 @@ export const projectEntryLiveFromCalc = (params: {
 		!isTraceableOfficialManagerScore(calc.score) ||
 		typeof calc.score.eventPoints !== "number" ||
 		typeof calc.score.netEventPoints !== "number" ||
-		typeof calc.score.totalPoints !== "number"
+		typeof calc.score.totalPoints !== "number" ||
+		calc.score.totalScope !== "OVERALL"
 	) {
 		return null;
 	}
