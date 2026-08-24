@@ -189,6 +189,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			forceRefresh: boolean | undefined;
 			finalizationRevision: string | undefined;
 		}> = [];
+		let finalEventRank = 79;
 		entriesService.getEntriesByIds = async () =>
 			new Map([
 				[
@@ -247,7 +248,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 						entryId: 1001,
 						eventId: 2,
 						eventPoints: 41,
-						eventRank: 79,
+						eventRank: finalEventRank,
 						overallPoints: 137,
 						overallRank: 400,
 						eventTransfers: 2,
@@ -306,6 +307,14 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			const finalPickCall = pickCalls.find((call) => call.forceRefresh === false);
 			expect(finalPickCall).toMatchObject({ entryIds: [1001], forceRefresh: false });
 			expect(finalPickCall?.finalizationRevision).toMatch(/^event-result:2:[0-9a-f]{24}$/);
+			const firstScoreRevision = result.results.get(1001)?.score.revision;
+			finalEventRank = 80;
+			const reranked = await entryLiveBatchService.calcLivePointsForEntries(
+				makeMockContext({}),
+				2,
+				[1001]
+			);
+			expect(reranked.results.get(1001)?.score.revision).not.toBe(firstScoreRevision);
 		} finally {
 			entriesService.getEntriesByIds = originalEntries;
 			entriesService.getEntryEventResultsByEntryIds = originalResults;

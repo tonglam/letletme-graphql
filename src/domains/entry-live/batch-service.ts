@@ -105,30 +105,50 @@ const buildFinalManagerScoreRow = (
 	entryId: number,
 	finalized: EntryEventResult,
 	checkedAt: string
-): OfficialManagerScoreRow => ({
-	season,
-	eventId,
-	entryId,
-	eventPoints: finalized.eventPoints,
-	netEventPoints: finalized.eventNetPoints,
-	totalPoints: finalized.overallPoints,
-	totalScope: "OVERALL",
-	eventRank: finalized.eventRank,
-	overallRank: finalized.overallRank,
-	leagueRank: null,
-	transferCost: finalized.eventTransfersCost,
-	eventPointSemantics:
-		finalized.eventPoints === finalized.eventNetPoints && finalized.eventTransfersCost === 0
-			? "ZERO_COST_EQUIVALENT"
-			: finalized.eventPoints - finalized.eventTransfersCost === finalized.eventNetPoints
-				? "GROSS"
-				: "UNKNOWN",
-	source: "FPL_FINAL_RESULT",
-	revision: `final:${eventId}:${entryId}:${finalized.overallPoints}:${finalized.overallRank}`,
-	checkedAt,
-	upstreamUpdatedAt: checkedAt,
-	staleAt: new Date(Date.parse(checkedAt) + 90_000).toISOString(),
-});
+): OfficialManagerScoreRow => {
+	const revisionHash = createHash("sha256")
+		.update(
+			stableStringify({
+				season,
+				eventId,
+				entryId,
+				eventPoints: finalized.eventPoints,
+				netEventPoints: finalized.eventNetPoints,
+				eventRank: finalized.eventRank,
+				overallPoints: finalized.overallPoints,
+				overallRank: finalized.overallRank,
+				transferCost: finalized.eventTransfersCost,
+				checkedAt,
+			}),
+			"utf8"
+		)
+		.digest("hex")
+		.slice(0, 24);
+	return {
+		season,
+		eventId,
+		entryId,
+		eventPoints: finalized.eventPoints,
+		netEventPoints: finalized.eventNetPoints,
+		totalPoints: finalized.overallPoints,
+		totalScope: "OVERALL",
+		eventRank: finalized.eventRank,
+		overallRank: finalized.overallRank,
+		leagueRank: null,
+		transferCost: finalized.eventTransfersCost,
+		eventPointSemantics:
+			finalized.eventPoints === finalized.eventNetPoints && finalized.eventTransfersCost === 0
+				? "ZERO_COST_EQUIVALENT"
+				: finalized.eventPoints - finalized.eventTransfersCost === finalized.eventNetPoints
+					? "GROSS"
+					: "UNKNOWN",
+		source: "FPL_FINAL_RESULT",
+		revision: `final:${eventId}:${entryId}:${revisionHash}`,
+		checkedAt,
+		upstreamUpdatedAt: checkedAt,
+		staleAt: new Date(Date.parse(checkedAt) + 90_000).toISOString(),
+	};
+};
 
 const finalizedPicksRevision = (eventId: number, results: readonly EntryEventResult[]): string => {
 	const evidence = results
