@@ -4,7 +4,7 @@ import { hasExactFields } from "./exact-fields";
 
 export const DATA_CACHE_NAMESPACE = "llm:data";
 
-export type DataPublicationDataset = "fpl:core" | "fpl:live" | "fpl:market";
+export type DataPublicationDataset = "fpl:core" | "fpl:live" | "fpl:market" | "fpl:price-changes";
 
 export type DataPublicationScope = Readonly<{
 	dataset: DataPublicationDataset;
@@ -84,6 +84,7 @@ const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
 	],
 	"fpl:live": ["eventLive", "fixtures"],
 	"fpl:market": ["context"],
+	"fpl:price-changes": ["context", "players"],
 };
 const LEGACY_CORE_ITEM_NAMES = [
 	"events",
@@ -119,7 +120,8 @@ const isCanonicalState = (
 	dataset: DataPublicationDataset,
 	state: unknown
 ): state is DataPublicationManifest["state"] => {
-	if (dataset === "fpl:core" || dataset === "fpl:market") return state === "active";
+	if (dataset === "fpl:core" || dataset === "fpl:market" || dataset === "fpl:price-changes")
+		return state === "active";
 	return state === "scheduled" || state === "live" || state === "settled";
 };
 
@@ -191,7 +193,8 @@ export const parseDataPublicationManifest = (
 		if (
 			value.dataset !== "fpl:core" &&
 			value.dataset !== "fpl:live" &&
-			value.dataset !== "fpl:market"
+			value.dataset !== "fpl:market" &&
+			value.dataset !== "fpl:price-changes"
 		)
 			return null;
 		const dataset = value.dataset;

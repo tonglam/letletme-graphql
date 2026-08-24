@@ -10,6 +10,7 @@ import type {
 } from "./repository";
 import { applyLiveScoresFilter, liveRepository } from "./repository";
 import { loadLiveSnapshotMeta, withLiveSnapshotConsistency } from "./snapshot-meta";
+import { measureRequestStage } from "../../http/request-timing";
 
 export const MAX_LIVE_EXPLAIN_BATCH = 15;
 
@@ -87,21 +88,29 @@ export const liveService = {
 	},
 
 	async getGameweekBoards(context: GraphQLContext, eventId: number): Promise<GameweekBoards> {
-		return withLiveSnapshotConsistency(context, eventId, async () => {
-			const meta = await loadLiveSnapshotMeta(context, eventId);
-			if (!meta) throw new Error(`Live snapshot metadata is unavailable for event ${eventId}`);
-			const performances = await liveRepository.getAllLivePerformances(context, eventId);
-			const calculated = await calculateTotalsForPerformances(
-				Array.from(performances.values()),
-				context,
-				eventId
-			);
-			return {
-				meta,
-				dreamTeam: applyLiveScoresFilter(calculated, { inDreamTeam: true }),
-				hauls: applyLiveScoresFilter(calculated, { minTotalPoints: 10 }),
-			};
-		});
+		return measureRequestStage(context.requestTiming, "live.gameweek.coherence", () =>
+			withLiveSnapshotConsistency(context, eventId, async () => {
+				const meta = await measureRequestStage(context.requestTiming, "live.gameweek.meta", () =>
+					loadLiveSnapshotMeta(context, eventId)
+				);
+				if (!meta) throw new Error(`Live snapshot metadata is unavailable for event ${eventId}`);
+				const performances = await measureRequestStage(
+					context.requestTiming,
+					"live.gameweek.performances",
+					() => liveRepository.getAllLivePerformances(context, eventId)
+				);
+				const calculated = await calculateTotalsForPerformances(
+					Array.from(performances.values()),
+					context,
+					eventId
+				);
+				return {
+					meta,
+					dreamTeam: applyLiveScoresFilter(calculated, { inDreamTeam: true }),
+					hauls: applyLiveScoresFilter(calculated, { minTotalPoints: 10 }),
+				};
+			})
+		);
 	},
 
 	async getEventLiveExplain(
