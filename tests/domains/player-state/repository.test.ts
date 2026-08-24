@@ -630,7 +630,7 @@ describe("Player State repository", () => {
 
 	it("masks current FPL values when the Player Stats publication is stale", async () => {
 		const redis = new TestRedis();
-		const { executor } = makeExecutor();
+		const { executor, queries } = makeExecutor();
 		const repository = createPlayerStateRepository({
 			executor,
 			loadCoreSnapshot: async () => snapshot(),
@@ -663,6 +663,11 @@ describe("Player State repository", () => {
 			dataStatus: "UNAVAILABLE",
 			revision: "stats-revision-4",
 		});
+
+		const queryCount = queries.length;
+		const cached = await repository.getPlayerStateProfile(makeContext(redis), 10, 5);
+		expect(cached).toEqual(profile);
+		expect(queries).toHaveLength(queryCount);
 	});
 
 	it("keeps observed Understat values visible while marking a small current sample", async () => {

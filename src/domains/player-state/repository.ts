@@ -457,12 +457,22 @@ const playerSeasonTimelineGuard = (
 				signal.analysisStatus === "UNAVAILABLE" &&
 				signal.reasonCodes.includes("FPL_SEASON_ROW_UNAVAILABLE")
 		);
+		const fplSignals = point.signals.filter((signal) => signal.provider === "FPL");
+		const understatSignals = point.signals.filter((signal) => signal.provider === "UNDERSTAT");
+		const fplSourceUnavailable =
+			fplSignals.length === 0 ||
+			fplSignals.every(
+				(signal) =>
+					signal.analysisStatus === "UNAVAILABLE" &&
+					signal.reasonCodes.includes("FPL_SEASON_ROW_UNAVAILABLE")
+			);
+		const independentSourceClock = understatSignals.length > 0 && fplSourceUnavailable;
 		return (
 			new Set(codes).size === 2 &&
 			codes.every((code, index) => code === expectedCodes[index]) &&
 			(point.phase === "PRESEASON"
 				? point.fplTotalPoints === null
-				: point.fplTotalPoints !== null || fplRowUnavailable)
+				: point.fplTotalPoints !== null || fplRowUnavailable || independentSourceClock)
 		);
 	});
 };
