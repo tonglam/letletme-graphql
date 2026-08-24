@@ -135,7 +135,23 @@ export const HOME_PERSONAL_DESK_SQL = `
 		WHERE t.season_id = l.season_id
 			AND t.league_id = l.league_id
 			AND t.league_type = l.league_type
-		ORDER BY t.tournament_id
+		ORDER BY
+			(
+				l.league_type::text = 'h2h'
+				AND t.roster_mode::text = 'official_sync'
+				AND t.state::text IN ('active', 'finished')
+				AND t.setup_status::text = 'ready'
+				AND t.official_schedule_locked_at IS NOT NULL
+				AND t.standings_ready_at IS NOT NULL
+			) DESC,
+			CASE t.state::text
+				WHEN 'active' THEN 2
+				WHEN 'finished' THEN 1
+				ELSE 0
+			END DESC,
+			(t.setup_status::text = 'ready' AND t.standings_ready_at IS NOT NULL) DESC,
+			t.updated_at DESC,
+			t.tournament_id DESC
 		LIMIT 1
 	) tracked ON TRUE
 	LEFT JOIN LATERAL (

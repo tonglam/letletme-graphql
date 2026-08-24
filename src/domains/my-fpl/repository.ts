@@ -629,6 +629,16 @@ const normalizeSnapshotRevision = (value: string | null | undefined): string | n
 	return normalized;
 };
 
+const compareSnapshotRevisions = (left: string, right: string): number => {
+	const normalizedLeft = normalizeSnapshotRevision(left);
+	const normalizedRight = normalizeSnapshotRevision(right);
+	if (!normalizedLeft || !normalizedRight) return 0;
+	if (normalizedLeft.length !== normalizedRight.length) {
+		return normalizedLeft.length > normalizedRight.length ? 1 : -1;
+	}
+	return normalizedLeft === normalizedRight ? 0 : normalizedLeft > normalizedRight ? 1 : -1;
+};
+
 const normalizeChip = (value: string | null): string => {
 	const compact = String(value ?? "NONE")
 		.toUpperCase()
@@ -1110,6 +1120,17 @@ const snapshotDateKey = (value: string | Date): string => {
 	}).format(value);
 };
 
+const utcDateOrdinal = (value: string): number | null => {
+	const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+	if (!match) return null;
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	const timestamp = Date.UTC(year, month - 1, day);
+	const normalized = new Date(timestamp).toISOString().slice(0, 10);
+	return normalized === value ? Math.floor(timestamp / 86_400_000) : null;
+};
+
 const currentUtc8Minutes = (now = new Date()): number => {
 	const parts = new Intl.DateTimeFormat("en-GB", {
 		timeZone: "Asia/Shanghai",
@@ -1131,6 +1152,15 @@ const snapshotFreshness = (
 	// because the calendar moved on; only a still-provisional event participates
 	// in the next daily obligation window.
 	if (kind === "FINAL" || snapshotDate === currentUtc8DateKey(now)) return "CURRENT";
+	const snapshotOrdinal = utcDateOrdinal(snapshotDate);
+	const currentOrdinal = utcDateOrdinal(currentUtc8DateKey(now));
+	if (
+		snapshotOrdinal === null ||
+		currentOrdinal === null ||
+		currentOrdinal - snapshotOrdinal !== 1
+	) {
+		return "STALE";
+	}
 	const minute = currentUtc8Minutes(now);
 	if (minute < 10 * 60 + 45) return "CURRENT";
 	return kind === "PROVISIONAL" && minute >= 10 * 60 + 45 && minute < 13 * 60 + 45
@@ -1280,12 +1310,12 @@ const loadSnapshotPublication = async (
 		 WHERE season_id = $1
 		   AND event_id = $2
 		   AND revision = $3::bigint
-		   AND (active OR $4::boolean)
 		 LIMIT 1`,
-		[context.currentSeason.seasonId, eventId, pinned, true]
+		[context.currentSeason.seasonId, eventId, pinned]
 	);
 	const row = result.rows[0];
-	return row && isValidSnapshotPublicationRow(row) ? publicationFromRow(row) : null;
+	if (row && isValidSnapshotPublicationRow(row)) return publicationFromRow(row);
+	return active && compareSnapshotRevisions(active.revision, pinned) > 0 ? active : null;
 };
 
 const loadSnapshotPublicationByRevision = async (
@@ -1306,13 +1336,15 @@ const loadSnapshotPublicationByRevision = async (
 		 FROM competition.my_fpl_snapshot_publications
 		 WHERE season_id = $1
 		   AND revision = $2::bigint
-		   AND (active OR $3::boolean)
 		 ORDER BY event_id
 		 LIMIT 1`,
-		[context.currentSeason.seasonId, pinned, true]
+		[context.currentSeason.seasonId, pinned]
 	);
 	const row = result.rows[0];
-	return row && isValidSnapshotPublicationRow(row) ? publicationFromRow(row) : null;
+	if (row && isValidSnapshotPublicationRow(row)) return publicationFromRow(row);
+	const fallbackEventId = defaultReviewEventId(loadedContext);
+	const active = fallbackEventId === null ? null : loadedContext.publications.get(fallbackEventId);
+	return active && compareSnapshotRevisions(active.revision, pinned) > 0 ? active : null;
 };
 
 const loadEntry = async (
@@ -1462,9 +1494,8 @@ const loadSnapshotEntry = async (
 		 WHERE publication.season_id = $1
 		   AND publication.event_id = $3
 		   AND publication.revision = $4::bigint
-		   AND (publication.active OR $5::boolean)
 		 LIMIT 1`,
-		[context.currentSeason.seasonId, entryId, eventId, pinned, Boolean(snapshotRevision?.trim())]
+		[context.currentSeason.seasonId, entryId, eventId, pinned]
 	);
 	const row = result.rows[0];
 	if (!row || row.picks_count < 0 || row.picks_count > 15) return null;
@@ -1945,7 +1976,7 @@ const loadTeamDesk = async (
 					entryId,
 					selectedEventId,
 					entry,
-					snapshotRevision ?? snapshot?.publication.revision
+					snapshot?.publication.revision ?? snapshotRevision
 				);
 	const historyEventIds = new Set(history.map((row) => row.eventId));
 	const expectedHistoryEventIds =
@@ -2816,10 +2847,9 @@ const loadCompetitionAggregateSnapshot = async (
 		     WHERE publication.season_id = aggregate.season_id
 		       AND publication.event_id = aggregate.event_id
 		       AND publication.revision = aggregate.revision
-		       AND (publication.active OR $5::boolean)
 		   )
 		 LIMIT 1`,
-		[context.currentSeason.seasonId, eventId, revision, tournamentId, Boolean(snapshotRevision)]
+		[context.currentSeason.seasonId, eventId, revision, tournamentId]
 	);
 	const raw = result.rows[0]?.payload;
 	if (!isRecord(raw)) return null;
@@ -3289,4 +3319,6 @@ export const myFplTestables = {
 	positionName,
 	mapBoardJsonRow,
 	snapshotDateKey,
+	snapshotFreshness,
+	compareSnapshotRevisions,
 };

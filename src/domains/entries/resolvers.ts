@@ -19,6 +19,31 @@ import { entriesService } from "./service";
  */
 const playersForEventMemo = new WeakMap<GraphQLContext, Map<string, Player | null>>();
 
+const entryEventPicksMemo = new WeakMap<
+	object,
+	Map<EntryEventResult, Promise<ElementEventResultData[]>>
+>();
+
+const getEntryEventPicksMemoized = (
+	context: GraphQLContext,
+	parent: EntryEventResult
+): Promise<ElementEventResultData[]> => {
+	const scope = context.requestScope ?? context;
+	let memo = entryEventPicksMemo.get(scope);
+	if (!memo) {
+		memo = new Map();
+		entryEventPicksMemo.set(scope, memo);
+	}
+	const cached = memo.get(parent);
+	if (cached) return cached;
+	const pending = entriesService.getEntryEventPicks(context, parent);
+	memo.set(parent, pending);
+	void pending.catch(() => {
+		if (memo?.get(parent) === pending) memo.delete(parent);
+	});
+	return pending;
+};
+
 const getPlayerByIdForEventMemoized = async (
 	context: GraphQLContext,
 	playerId: number,
@@ -200,12 +225,12 @@ export const entriesResolvers = {
 			parent: EntryEventResult,
 			_args: Record<string, never>,
 			context: GraphQLContext
-		): Promise<ElementEventResultData[]> => entriesService.getEntryEventPicks(context, parent),
+		): Promise<ElementEventResultData[]> => getEntryEventPicksMemoized(context, parent),
 		eventAutoSub: async (
 			parent: EntryEventResult,
 			_args: Record<string, never>,
 			context: GraphQLContext
 		): Promise<ElementEventResultData[]> =>
-			(await entriesService.getEntryEventPicks(context, parent)).filter((pick) => pick.autoSub),
+			(await getEntryEventPicksMemoized(context, parent)).filter((pick) => pick.autoSub),
 	},
 };
