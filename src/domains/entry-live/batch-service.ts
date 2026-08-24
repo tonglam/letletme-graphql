@@ -15,7 +15,6 @@ import {
 	type ElementEventResultData,
 	type LiveCalcData,
 } from "./calc-service";
-import { applyAutoSubs, selectCaptainForScoring } from "./legacy-h2h-adapter";
 import {
 	buildManagerScore,
 	loadManagerScores,
@@ -275,8 +274,7 @@ const computeSingleEntry = (
 	eventId: number,
 	perEntry: PerEntryData,
 	shared: SharedData,
-	provisional: boolean,
-	legacyH2H = false
+	provisional: boolean
 ): LiveCalcData => {
 	const { entry, pickEntity, transferRows, previousResult } = perEntry;
 	const { liveByPlayer, fixturesByTeam, teamsById, playersById } = shared;
@@ -365,11 +363,6 @@ const computeSingleEntry = (
 		};
 	});
 
-	// H2H remains on its isolated legacy adapter until FPL publishes a usable
-	// live H2H contract. First-party single/classic/points-race paths use only
-	// official multipliers and never infer substitutions.
-	if (legacyH2H && !provisional) applyAutoSubs(pickList, chip);
-
 	const isBenchBoost = chip === "BENCH_BOOST";
 	const activePicks: ElementEventResultData[] = [];
 
@@ -377,7 +370,7 @@ const computeSingleEntry = (
 		// Official FPL picks multipliers are the only source of truth for the
 		// current/final lineup. Never infer auto-subs or captain promotion from
 		// minutes, fixture state, bench order, or chip names in the live path.
-		const isActive = legacyH2H ? (isBenchBoost ? true : pick.multiplier > 0) : pick.multiplier > 0;
+		const isActive = pick.multiplier > 0;
 		// After finalization, the official multiplier is authoritative for the
 		// display-only bench relation. During live/settling we deliberately leave
 		// this false instead of predicting an automatic substitution.
@@ -389,24 +382,13 @@ const computeSingleEntry = (
 		}
 	}
 
-	const captainForScoring = legacyH2H
-		? provisional
-			? (pickList.find((pick) => pick.isCaptain) ?? null)
-			: selectCaptainForScoring(pickList)
-		: (pickList.find((pick) => pick.multiplier >= 2) ??
-			pickList.find((pick) => pick.isCaptain) ??
-			null);
+	const captainForScoring =
+		pickList.find((pick) => pick.multiplier >= 2) ??
+		pickList.find((pick) => pick.isCaptain) ??
+		null;
 	// The multiplier already carries captain/bench-boost/triple-captain
 	// semantics. Applying another captain multiplier would double-count points.
-	const captainMultiplier = chip === "TRIPLE_CAPTAIN" ? 3 : 2;
-	const livePoints = legacyH2H
-		? activePicks.reduce((sum, p) => {
-				if (captainForScoring?.element !== undefined && p.element === captainForScoring.element) {
-					return sum + p.totalPoints * captainMultiplier;
-				}
-				return sum + p.totalPoints;
-			}, 0)
-		: activePicks.reduce((sum, p) => sum + p.totalPoints * p.multiplier, 0);
+	const livePoints = activePicks.reduce((sum, p) => sum + p.totalPoints * p.multiplier, 0);
 
 	const liveNetPoints = livePoints - transferCost;
 	const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
@@ -476,14 +458,13 @@ export const entryLiveBatchService = {
 		context: GraphQLContext,
 		eventId: number,
 		entryIds: number[],
-		includeLive = true,
+		_includeLive = true,
 		prefetched?: {
 			liveByPlayer?: Promise<Map<number, LivePerformance>>;
 			fixtures?: Promise<Fixture[]>;
 			teams?: Promise<Team[]>;
 			picksByEntry?: Promise<Map<number, EntryEventPick>>;
 			tournamentId?: number;
-			legacyH2H?: boolean;
 		}
 	): Promise<BatchLiveCalcResult> {
 		assertValidEntryBatch(entryIds);
@@ -518,8 +499,6 @@ export const entryLiveBatchService = {
 			readyEntryIds.length > 0 ? await eventsService.getEventById(context, eventId) : null;
 		const provisional =
 			readyEntryIds.length === 0 || !(event?.finished === true && event.dataChecked === true);
-		const legacyH2H =
-			prefetched?.legacyH2H === true || managerScores.errorCode === "UNSUPPORTED_H2H_LIVE";
 		const finalizedResultsByEntry = !provisional
 			? await entriesService.getEntryEventResultsByEntryIds(context, readyEntryIds, eventId)
 			: new Map<number, EntryEventResult>();
@@ -582,7 +561,10 @@ export const entryLiveBatchService = {
 		// Finalized and historical desks still need the durable player projection
 		// for detail rows. Only the manager headline switches to the official final
 		// result; suppressing this read made finalized entries silently lose details.
-		const needsLiveDetails = includeLive;
+		// A caller may omit the heavy display detail, but every active score still
+		// requires the coherent event-live payload. includeLive is never allowed to
+		// switch the manager headline to another scoring source.
+		const needsLiveDetails = readyEntryIds.length > 0;
 		const useTargetedLiveRead =
 			needsLiveDetails && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
 		const [liveByPlayerRaw, fixtures, teams, transfersByEntry, fullSnapshotMeta] =
@@ -683,7 +665,7 @@ export const entryLiveBatchService = {
 				};
 
 				const calcData = {
-					...computeSingleEntry(entryId, eventId, perEntry, shared, provisional, legacyH2H),
+					...computeSingleEntry(entryId, eventId, perEntry, shared, provisional),
 					snapshot: targetedLive?.meta ?? fullSnapshotMeta,
 				};
 				const finalized = finalizedResultsByEntry.get(entryId);
@@ -722,28 +704,22 @@ export const entryLiveBatchService = {
 					available: true,
 					transferCost: calcData.transferCost,
 					detailEventPoints: calcData.livePoints,
-					previousOverallPoints: perEntry.previousResult?.overallPoints ?? null,
+					previousOverallPoints: calcData.lastOverallPoints,
+					eventLiveAuthority: calcData.snapshot
+						? {
+								revision: calcData.snapshot.revision,
+								checkedAt: calcData.snapshot.checkedAt,
+							}
+						: null,
 					nextRefreshAt: managerScores.nextRefreshAt,
 				});
-				// H2H has no official live matchup table. Its provisional result is
-				// safe only when the official manager row carries a provable net-point
-				// semantic; never compare gross/unknown values or local estimates.
-				const h2hHasOfficialNet =
-					manager.score.source !== "UNAVAILABLE" &&
-					typeof manager.score.netEventPoints === "number" &&
-					manager.score.eventPointSemantics !== "UNKNOWN";
-				const headline = legacyH2H
-					? h2hHasOfficialNet
-						? manager.headline
-						: { rank: 0, livePoints: 0, liveNetPoints: 0, liveTotalPoints: 0 }
-					: manager.headline;
 				results.set(entryId, {
 					...calcData,
 					score: manager.score,
-					rank: headline.rank,
-					livePoints: headline.livePoints,
-					liveNetPoints: headline.liveNetPoints,
-					liveTotalPoints: headline.liveTotalPoints,
+					rank: manager.headline.rank,
+					livePoints: manager.headline.livePoints,
+					liveNetPoints: manager.headline.liveNetPoints,
+					liveTotalPoints: manager.headline.liveTotalPoints,
 					overallRank: manager.score.overallRank ?? calcData.overallRank,
 				});
 			} catch (err) {
