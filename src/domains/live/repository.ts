@@ -910,6 +910,10 @@ interface LiveRepository {
 		context: GraphQLContext,
 		eventId: number
 	): Promise<Map<number, LivePerformance>>;
+	getDurableGameweekBoardPerformances(
+		context: GraphQLContext,
+		eventId: number
+	): Promise<Map<number, LivePerformance>>;
 	getSelectedByPercent(
 		context: GraphQLContext,
 		eventId: number,
@@ -1141,6 +1145,22 @@ const fetchLivePerformancesFromDbByEvents = async (
 			"Live publication unavailable and PostgreSQL live read-through failed"
 		);
 		throw new Error("Failed to fetch historical live performances");
+	}
+	return (data as unknown as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
+};
+
+const fetchDurableGameweekBoardPerformancesFromDb = async (
+	context: GraphQLContext,
+	eventId: number
+): Promise<LivePerformance[]> => {
+	const { data, error } = await context.data
+		.read("fpl.player_gameweek_stats")
+		.select(EVENT_LIVES_PROJECTION)
+		.eq("event_id", eventId)
+		.or("in_dream_team.eq.true,total_points.gte.10");
+	if (error) {
+		context.logger.error({ eventId }, "Failed to fetch durable gameweek board performances");
+		throw new Error("Failed to fetch durable gameweek board performances");
 	}
 	return (data as unknown as DbLiveRow[] | null)?.map(mapLivePerformance) ?? [];
 };
@@ -1423,6 +1443,19 @@ export const liveRepository: LiveRepository = {
 				const performance = mapPublishedLivePerformance(row);
 				return [performance.playerId, performance];
 			})
+		);
+	},
+
+	async getDurableGameweekBoardPerformances(
+		context: GraphQLContext,
+		eventId: number
+	): Promise<Map<number, LivePerformance>> {
+		if (!Number.isSafeInteger(eventId) || eventId <= 0) return new Map();
+		return new Map(
+			(await fetchDurableGameweekBoardPerformancesFromDb(context, eventId)).map((performance) => [
+				performance.playerId,
+				performance,
+			])
 		);
 	},
 

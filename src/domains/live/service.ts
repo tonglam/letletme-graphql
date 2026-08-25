@@ -17,7 +17,8 @@ export const MAX_LIVE_EXPLAIN_BATCH = 15;
 export type GameweekBoards = {
 	dreamTeam: LivePerformance[];
 	hauls: LivePerformance[];
-	meta: NonNullable<Awaited<ReturnType<typeof loadLiveSnapshotMeta>>>;
+	meta: Awaited<ReturnType<typeof loadLiveSnapshotMeta>>;
+	source: "LIVE_PUBLICATION" | "DURABLE_DB";
 };
 
 export const assertValidLiveExplainBatch = (elementIds: readonly number[]): void => {
@@ -87,27 +88,55 @@ export const liveService = {
 		});
 	},
 
-	async getGameweekBoards(context: GraphQLContext, eventId: number): Promise<GameweekBoards> {
+	async getGameweekBoards(
+		context: GraphQLContext,
+		eventId: number,
+		options: { allowDurableFallback?: boolean } = {}
+	): Promise<GameweekBoards> {
 		return measureRequestStage(context.requestTiming, "live.gameweek.coherence", () =>
 			withLiveSnapshotConsistency(context, eventId, async () => {
 				const meta = await measureRequestStage(context.requestTiming, "live.gameweek.meta", () =>
 					loadLiveSnapshotMeta(context, eventId)
 				);
-				if (!meta) throw new Error(`Live snapshot metadata is unavailable for event ${eventId}`);
+				if (!meta && options.allowDurableFallback !== true) {
+					throw new Error(`Live snapshot metadata is unavailable for event ${eventId}`);
+				}
 				const performances = await measureRequestStage(
 					context.requestTiming,
 					"live.gameweek.performances",
-					() => liveRepository.getAllLivePerformances(context, eventId)
+					() =>
+						meta
+							? liveRepository.getAllLivePerformances(context, eventId)
+							: liveRepository.getDurableGameweekBoardPerformances(context, eventId)
 				);
 				const calculated = await calculateTotalsForPerformances(
 					Array.from(performances.values()),
 					context,
 					eventId
 				);
+				const dreamTeam = applyLiveScoresFilter(calculated, { inDreamTeam: true });
+				const hauls = applyLiveScoresFilter(calculated, { minTotalPoints: 10 });
+				if (!meta) {
+					context.logger.warn(
+						{
+							eventId,
+							source: "DURABLE_DB",
+							candidateRows: performances.size,
+							dreamTeamRows: dreamTeam.length,
+							haulRows: hauls.length,
+							reason: "LIVE_PUBLICATION_UNAVAILABLE",
+						},
+						"Using durable settled gameweek board performances"
+					);
+					if (dreamTeam.length !== 11) {
+						throw new Error(`Durable gameweek board is incomplete for event ${eventId}`);
+					}
+				}
 				return {
 					meta,
-					dreamTeam: applyLiveScoresFilter(calculated, { inDreamTeam: true }),
-					hauls: applyLiveScoresFilter(calculated, { minTotalPoints: 10 }),
+					source: meta ? "LIVE_PUBLICATION" : "DURABLE_DB",
+					dreamTeam,
+					hauls,
 				};
 			})
 		);
