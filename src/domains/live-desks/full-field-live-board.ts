@@ -1,5 +1,5 @@
 import type { Entry } from "../entries/repository";
-import type { EntryEventPick } from "../entry-live/repository";
+import { hasCompleteEntryEventPick, type EntryEventPick } from "../entry-live/repository";
 import { unavailableManagerScore, type LiveManagerScore } from "../entry-live/manager-score";
 import type { ManagerLiveScoreRow, ManagerLiveSource } from "../../infra/manager-live-client";
 import type { Player } from "../players/repository";
@@ -113,7 +113,7 @@ export const buildFullFieldLiveBoardIndex = (
 	for (const entryId of input.allEntryIds) {
 		const entry = input.entries.get(entryId);
 		const pick = input.picks.get(entryId);
-		if (!pick) {
+		if (!hasCompleteEntryEventPick(pick, input.eventId, entryId)) {
 			throw new Error(`Entry ${entryId} has no complete event pick row`);
 		}
 		const ownerAny = new Set<number>();

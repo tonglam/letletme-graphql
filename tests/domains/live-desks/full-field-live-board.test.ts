@@ -217,5 +217,13 @@ describe("full-field live board index", () => {
 		expect(() => buildFullFieldLiveBoardIndex({ ...boardInput, picks: incompletePicks })).toThrow(
 			"Entry 3 has no complete event pick row"
 		);
+
+		const partialPicks = new Map(boardInput.picks);
+		const partialPick = partialPicks.get(3);
+		if (!partialPick) throw new Error("test partial pick missing");
+		partialPicks.set(3, { ...partialPick, picks: partialPick.picks.slice(0, 14) });
+		expect(() => buildFullFieldLiveBoardIndex({ ...boardInput, picks: partialPicks })).toThrow(
+			"Entry 3 has no complete event pick row"
+		);
 	});
 });
