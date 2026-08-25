@@ -39,6 +39,7 @@ export const gameweekTypeDefs = /* GraphQL */ `
 	type GameweekOverview {
 		averagePoints: Int
 		highestPoints: Int
+		highestScoringEntry: Int
 		mostCaptained: GameweekOverviewPlayer
 		mostViceCaptained: GameweekOverviewPlayer
 		mostSelected: GameweekOverviewPlayer

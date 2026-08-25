@@ -23,15 +23,6 @@ export const resolvePreviousEventBaseline = (
 		return { overallPoints: 0, overallRank: null, teamValue: null, resolved: true };
 	}
 
-	if (entry?.lastEventId === eventId - 1 && entry.overallPoints !== null) {
-		return {
-			overallPoints: entry.overallPoints,
-			overallRank: entry.overallRank,
-			teamValue: entry.teamValue,
-			resolved: true,
-		};
-	}
-
 	if (previousResult?.eventId === eventId - 1) {
 		return {
 			overallPoints: previousResult.overallPoints,
@@ -40,6 +31,10 @@ export const resolvePreviousEventBaseline = (
 			resolved: true,
 		};
 	}
+
+	// competition.entries is a profile snapshot. During an active Gameweek its
+	// summary_overall_points can already include event N even though lastEventId
+	// still identifies N-1. It must never become the cumulative scoring baseline.
 
 	return { overallPoints: 0, overallRank: null, teamValue: null, resolved: false };
 };

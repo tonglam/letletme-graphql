@@ -28,6 +28,7 @@ export type GameweekOverviewTopScorer = GameweekOverviewPlayer & {
 export type GameweekOverview = {
 	averagePoints: number | null;
 	highestPoints: number | null;
+	highestScoringEntry: number | null;
 	mostCaptained: GameweekOverviewPlayer | null;
 	mostViceCaptained: GameweekOverviewPlayer | null;
 	mostSelected: GameweekOverviewPlayer | null;
@@ -154,6 +155,7 @@ const chipCount = (chips: Event["chipPlays"], name: string): number | null => {
 const overviewFactsPresent = (event: Event): boolean =>
 	event.averageEntryScore !== null ||
 	event.highestScore !== null ||
+	event.highestScoringEntry !== null ||
 	event.mostSelected !== null ||
 	event.mostTransferredIn !== null ||
 	event.mostCaptained !== null ||
@@ -198,6 +200,7 @@ const mapOverview = (
 	return {
 		averagePoints: event.averageEntryScore,
 		highestPoints: event.highestScore,
+		highestScoringEntry: event.highestScoringEntry,
 		mostCaptained: mapOverviewPlayer(event.mostCaptained, playersById, teamNames, eventTeamIds),
 		mostViceCaptained: mapOverviewPlayer(
 			event.mostViceCaptained,
@@ -493,13 +496,11 @@ export const gameweekService = {
 						},
 						"Gameweek boards source selected"
 					);
-				} catch {
+				} catch (error) {
 					context.logger.warn(
 						{
 							eventId,
-							reason: allowDurableFallback
-								? "DURABLE_BOARD_UNAVAILABLE"
-								: "LIVE_PUBLICATION_UNAVAILABLE",
+							reason: error instanceof Error ? error.message : "UNKNOWN",
 						},
 						"Gameweek boards are unavailable"
 					);

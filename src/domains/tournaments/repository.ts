@@ -24,6 +24,7 @@ import {
 	readCompetitionBoardCache,
 	writeCompetitionBoardCache,
 } from "../live-desks/competition-board-cache";
+import { selectTournamentDeskEntryWindow } from "../live-desks/tournament-entry-window";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -217,7 +218,8 @@ export type TournamentDetailDesk = {
 	officialH2H: TournamentOfficialH2H | null;
 	live: {
 		eventId: number;
-		revision: string;
+		/** Null when durable manager scores exist without a live publication. */
+		revision: string | null;
 		state: string;
 		partial: boolean;
 		failedEntryIds: number[];
@@ -4416,13 +4418,23 @@ export const tournamentsRepository: TournamentsRepository = {
 					rows: [],
 				};
 			} else {
-				const snapshot = await getLiveDataSnapshot(context, requestedEventId);
+				const snapshot = await getLiveDataSnapshot(context, requestedEventId).catch((error) => {
+					context.logger.info(
+						{
+							eventId: requestedEventId,
+							err: error instanceof Error ? error.message : "unknown",
+						},
+						"Tournament live publication unavailable; calculating the durable manager board"
+					);
+					return null;
+				});
 				// Provisional live points can change when the core event flips to
 				// finished/data_checked. Only final scoring boards are reusable.
 				const scoringPhase = event?.finished === true && event.dataChecked === true;
-				const liveCacheKey = scoringPhase
-					? competitionBoardCacheKey(context, snapshot, tournamentId)
-					: null;
+				const liveCacheKey =
+					scoringPhase && snapshot
+						? competitionBoardCacheKey(context, snapshot, tournamentId)
+						: null;
 				const cachedCandidate = liveCacheKey
 					? await readCompetitionBoardCache(context, liveCacheKey)
 					: null;
@@ -4444,25 +4456,34 @@ export const tournamentsRepository: TournamentsRepository = {
 							totalEntries: cachedBoard.totalEntries,
 						}
 					: null;
+				const allEntryIds = cached
+					? []
+					: await tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
+				const { entryIds, deferredEntryIds } = cached
+					? { entryIds: [], deferredEntryIds: [] }
+					: selectTournamentDeskEntryWindow(allEntryIds, entryId);
 				const result = cached
 					? null
 					: await entryLiveBatchService.calcLivePointsForEntries(
 							context,
 							requestedEventId,
-							await tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId),
+							entryIds,
 							true,
 							{ tournamentId }
 						);
 				const liveData = cached ?? {
 					rows: rankTournamentRowsByOfficialEventPoints(Array.from(result?.results.values() ?? [])),
-					partial: (result?.errors.length ?? 0) > 0,
-					failedEntryIds: result?.errors.map((error) => error.entryId) ?? [],
-					totalEntries: result?.meta.totalEntries ?? 0,
+					partial: (result?.errors.length ?? 0) > 0 || deferredEntryIds.length > 0,
+					failedEntryIds: [
+						...(result?.errors.map((error) => error.entryId) ?? []),
+						...deferredEntryIds,
+					],
+					totalEntries: allEntryIds.length,
 				};
 				live = {
 					eventId: requestedEventId,
-					revision: snapshot.revision,
-					state: snapshot.state.toUpperCase(),
+					revision: snapshot?.revision ?? null,
+					state: snapshot?.state.toUpperCase() ?? (scoringPhase ? "SETTLED" : "LIVE"),
 					...liveData,
 				};
 				if (
@@ -4470,6 +4491,7 @@ export const tournamentsRepository: TournamentsRepository = {
 					!cached &&
 					result &&
 					result.errors.length === 0 &&
+					deferredEntryIds.length === 0 &&
 					managerScoreBoardIsFinal(liveData.rows)
 				) {
 					await writeCompetitionBoardCache(
@@ -4519,7 +4541,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			revision: isOfficial
 				? `official:${tournament.officialScheduleHash ?? "none"}:${officialSourceCheckedAt}`
 				: live
-					? `${tournament.updatedAt}:${eventContext.revision}:live-${live.revision}`
+					? `${tournament.updatedAt}:${eventContext.revision}:live-${live.revision ?? `durable-${requestedEventId}`}`
 					: `${tournament.updatedAt}:${eventContext.revision}`,
 			kind,
 			context: {

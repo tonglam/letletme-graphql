@@ -1,7 +1,6 @@
 export enum OfficialLeagueKind {
 	SYSTEM = "SYSTEM",
 	INVITATIONAL = "INVITATIONAL",
-	PUBLIC = "PUBLIC",
 }
 
 export enum LeagueScoring {
@@ -22,7 +21,6 @@ export type LeagueDisplayOrderInput = {
 export const mapFplOfficialKind = (value: string | null | undefined): OfficialLeagueKind | null => {
 	if (value === "s") return OfficialLeagueKind.SYSTEM;
 	if (value === "x") return OfficialLeagueKind.INVITATIONAL;
-	if (value === "c") return OfficialLeagueKind.PUBLIC;
 	return null;
 };
 
@@ -55,7 +53,7 @@ const isH2H = (league: LeagueDisplayOrderInput): boolean => {
 /**
  * Official FPL mobile My Leagues group order.
  * 0 Broadcaster, 1 Invitational Classic, 2 Invitational H2H,
- * 3 Public Classic, 4 Public H2H, 5 General.
+ * 3 System Classic, 4 System H2H, 5 General.
  */
 export const officialLeagueGroup = (league: LeagueDisplayOrderInput): number => {
 	const kind = resolveOfficialKind(league.officialKind, league.shortName);
@@ -63,8 +61,8 @@ export const officialLeagueGroup = (league: LeagueDisplayOrderInput): number => 
 	if (kind === OfficialLeagueKind.SYSTEM && isBroadcasterShortName(league.shortName)) return 0;
 	if (kind === OfficialLeagueKind.INVITATIONAL && !h2h) return 1;
 	if (kind === OfficialLeagueKind.INVITATIONAL && h2h) return 2;
-	if (kind === OfficialLeagueKind.PUBLIC && !h2h) return 3;
-	if (kind === OfficialLeagueKind.PUBLIC && h2h) return 4;
+	if (kind === OfficialLeagueKind.SYSTEM && !h2h) return 3;
+	if (kind === OfficialLeagueKind.SYSTEM && h2h) return 4;
 	return 5;
 };
 
@@ -81,6 +79,29 @@ export const sortLeaguesForOfficialDisplay = <T extends LeagueDisplayOrderInput>
 	leagues: T[]
 ): T[] => [...leagues].sort(compareLeaguesForOfficialDisplay);
 
-export const selectHomeInvitationalLeagues = <T extends LeagueDisplayOrderInput>(
-	leagues: T[]
-): T[] => sortLeaguesForOfficialDisplay(leagues).filter(isInvitationalLeague);
+export const isHomeLeague = (league: LeagueDisplayOrderInput): boolean => {
+	const kind = league.officialKind;
+	return kind === OfficialLeagueKind.INVITATIONAL || kind === OfficialLeagueKind.SYSTEM;
+};
+
+const homeLeagueGroup = (league: LeagueDisplayOrderInput): number => {
+	const kind = league.officialKind;
+	const h2h = isH2H(league);
+	if (kind === OfficialLeagueKind.INVITATIONAL && !h2h) return 0;
+	if (kind === OfficialLeagueKind.SYSTEM && !h2h) return 1;
+	if (kind === OfficialLeagueKind.INVITATIONAL && h2h) return 2;
+	if (kind === OfficialLeagueKind.SYSTEM && h2h) return 3;
+	return 4;
+};
+
+const compareHomeLeagues = (
+	left: LeagueDisplayOrderInput,
+	right: LeagueDisplayOrderInput
+): number => {
+	const groupDelta = homeLeagueGroup(left) - homeLeagueGroup(right);
+	if (groupDelta !== 0) return groupDelta;
+	return left.name.localeCompare(right.name, "en");
+};
+
+export const selectHomeLeagues = <T extends LeagueDisplayOrderInput>(leagues: T[]): T[] =>
+	leagues.filter(isHomeLeague).sort(compareHomeLeagues);

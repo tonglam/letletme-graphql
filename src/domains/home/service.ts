@@ -12,9 +12,14 @@ import type { MarketAvailabilityUpdate, MarketPulse } from "../market/repository
 import type { Player, TopTransfersEnriched } from "../players/repository";
 import { playersService } from "../players/service";
 import { measureRequestStage } from "../../http/request-timing";
+import { homeMarketRepository, type HomeMarketDesk } from "./market-repository";
 import type { EntryOfficialH2HDeskItem } from "../tournaments/repository";
 import { tournamentsService } from "../tournaments/service";
 import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
+import type { Event } from "../events/repository";
+import { entryLiveBatchService, type BatchLiveCalcResult } from "../entry-live/batch-service";
+import type { LiveCalcData } from "../entry-live/calc-service";
+import { isTraceableOfficialManagerScore } from "../entry-live/manager-score";
 
 export type HomePublicBootstrap = {
 	context: CoreEventContext;
@@ -110,13 +115,173 @@ export const reconcileHomeOfficialH2HRanks = (
 		leagueRanks: desk.leagueRanks.map((league) => {
 			if (league.leagueType !== "H2H" || league.tournamentId === null) return league;
 			const official = officialByTournament.get(league.tournamentId);
-			if (!official?.standingsPublished || official.rank === null) return league;
+			if (!official) return league;
+			if (
+				!official.isFinal ||
+				!official.standingsPublished ||
+				!official.standingsCurrentEventComplete ||
+				official.rank === null
+			) {
+				return { ...league, rankState: "UPDATING" };
+			}
 			return {
 				...league,
 				rank: official.rank,
-				movement: official.standingsCurrentEventComplete
-					? movementFromRanks(official.rank, official.lastRank)
-					: league.movement,
+				rankState: "READY",
+				rankCheckedAt: official.scoreCheckedAt ?? league.rankCheckedAt,
+				movement: movementFromRanks(official.rank, official.lastRank),
+			};
+		}),
+	};
+};
+
+const isFinalEvent = (event: Event): boolean => event.finished && event.dataChecked;
+
+const checkedAtOrAfter = (
+	checkedAt: string | null,
+	boundary: string | null | undefined
+): boolean => {
+	const checkedTimestamp = Date.parse(checkedAt ?? "");
+	const boundaryTimestamp = Date.parse(boundary ?? "");
+	return (
+		Number.isFinite(checkedTimestamp) &&
+		Number.isFinite(boundaryTimestamp) &&
+		checkedTimestamp >= boundaryTimestamp
+	);
+};
+
+export const applyHomeRankLifecycle = (
+	desk: HomePersonalDesk,
+	event: Event | null
+): HomePersonalDesk => {
+	if (!event) return desk;
+	const final = isFinalEvent(event);
+	const leagueRanks = desk.leagueRanks.map((league) => ({
+		...league,
+		rankState: !final
+			? ("UPDATING" as const)
+			: league.rank !== null && checkedAtOrAfter(league.rankCheckedAt, event.dataCheckedAt)
+				? ("READY" as const)
+				: ("UPDATING" as const),
+	}));
+	return {
+		...desk,
+		rankState: !final
+			? "UPDATING"
+			: desk.overallRank !== null && checkedAtOrAfter(desk.rankCheckedAt, event.dataCheckedAt)
+				? "READY"
+				: "UPDATING",
+		leagueRanks,
+	};
+};
+
+const pointsStateFromCalc = (calc: LiveCalcData): HomePersonalDesk["pointsState"] => {
+	switch (calc.score.state) {
+		case "FRESH":
+			return "LIVE";
+		case "STALE":
+			return "STALE";
+		case "SETTLING":
+			return "SETTLING";
+		case "FINAL":
+			return "FINAL";
+		default:
+			return "UNAVAILABLE";
+	}
+};
+
+const scoreCanHeadline = (calc: LiveCalcData | undefined): boolean =>
+	calc !== undefined &&
+	isTraceableOfficialManagerScore(calc.score) &&
+	typeof calc.score.totalPoints === "number" &&
+	calc.score.totalScope === "OVERALL";
+
+export const applyHomeScoreLifecycle = (
+	desk: HomePersonalDesk,
+	event: Event | null,
+	calc: LiveCalcData | undefined
+): HomePersonalDesk => {
+	if (!event) return desk;
+	const final = isFinalEvent(event);
+	if (!calc || !scoreCanHeadline(calc)) {
+		if (final) {
+			// Once the event is settled, the live calculator is no longer the
+			// source of truth. Keep the official snapshot that the home query
+			// already loaded instead of clearing it or marking the rank live.
+			const hasOfficialPoints = typeof desk.overallPoints === "number";
+			return {
+				...desk,
+				pointsState: hasOfficialPoints ? "FINAL" : "SETTLING",
+				pointsCheckedAt: hasOfficialPoints
+					? (desk.pointsCheckedAt ?? desk.sourceCheckedAt)
+					: desk.pointsCheckedAt,
+			};
+		}
+		return {
+			...desk,
+			overallPoints: null,
+			pointsState: final ? "SETTLING" : "UNAVAILABLE",
+			pointsCheckedAt: calc?.score.checkedAt ?? null,
+			rankState: "UPDATING",
+		};
+	}
+	const finalRank = final ? calc.score.overallRank : null;
+	return {
+		...desk,
+		overallPoints: calc.score.totalPoints,
+		pointsState: pointsStateFromCalc(calc),
+		pointsCheckedAt: calc.score.checkedAt,
+		overallRank: finalRank ?? desk.overallRank,
+		rankState: finalRank === null ? "UPDATING" : "READY",
+		rankCheckedAt: finalRank === null ? desk.rankCheckedAt : calc.score.checkedAt,
+	};
+};
+
+const pairScore = (calc: LiveCalcData | undefined): number | null =>
+	calc &&
+	isTraceableOfficialManagerScore(calc.score) &&
+	typeof calc.score.netEventPoints === "number"
+		? calc.score.netEventPoints
+		: null;
+
+const oldestCheckedAt = (...values: Array<string | null | undefined>): string | null => {
+	const parsed = values
+		.flatMap((value) => {
+			const timestamp = Date.parse(value ?? "");
+			return Number.isFinite(timestamp) && value ? [{ value, timestamp }] : [];
+		})
+		.sort((left, right) => left.timestamp - right.timestamp);
+	return parsed[0]?.value ?? null;
+};
+
+export const applyHomePairScores = (
+	desk: HomePersonalDesk,
+	event: Event | null,
+	results: BatchLiveCalcResult["results"]
+): HomePersonalDesk => {
+	if (!event || isFinalEvent(event)) return desk;
+	return {
+		...desk,
+		leagueRanks: desk.leagueRanks.map((league) => {
+			const matchup = league.h2hMatchup;
+			if (!matchup?.isLive || matchup.eventId !== event.id) return league;
+			const viewerCalc = matchup.viewer.entryId ? results.get(matchup.viewer.entryId) : undefined;
+			const opponentCalc = matchup.opponent.entryId
+				? results.get(matchup.opponent.entryId)
+				: undefined;
+			return {
+				...league,
+				h2hMatchup: {
+					...matchup,
+					viewer: { ...matchup.viewer, points: pairScore(viewerCalc) },
+					opponent: matchup.opponent.entryId
+						? { ...matchup.opponent, points: pairScore(opponentCalc) }
+						: matchup.opponent,
+					sourceCheckedAt: oldestCheckedAt(
+						viewerCalc?.score.checkedAt,
+						opponentCalc?.score.checkedAt
+					),
+				},
 			};
 		}),
 	};
@@ -182,6 +347,10 @@ export const homeService = {
 		return compact;
 	},
 
+	getMarketDesk(context: GraphQLContext): Promise<HomeMarketDesk> {
+		return homeMarketRepository.getDesk(context);
+	},
+
 	async getPublicBootstrap(context: GraphQLContext): Promise<HomePublicBootstrap> {
 		const startedAt = performance.now();
 		const eventContextStartedAt = performance.now();
@@ -215,14 +384,65 @@ export const homeService = {
 		if (!entryId) {
 			throw authError("A viewed FPL team is required", "VIEWER_ENTRY_REQUIRED", 403);
 		}
-		const desk = await homeRepository.getPersonalDesk(context, entryId);
-		if (
-			!desk.leagueRanks.some(
-				(league) => league.leagueType === "H2H" && league.tournamentId !== null
-			)
-		) {
-			return desk;
+		const [rawDesk, eventContext] = await Promise.all([
+			homeRepository.getPersonalDesk(context, entryId),
+			eventsService.getCoreEventContext(context).catch((error) => {
+				context.logger.warn(
+					{
+						err: error,
+						requestId: context.requestId,
+						operationName: context.operationName,
+						entryId,
+					},
+					"Home event lifecycle unavailable; keeping the last official desk snapshot"
+				);
+				return null;
+			}),
+		]);
+		const eventId = eventContext
+			? (eventContext.currentEventId ?? eventContext.latestFinishedEventId)
+			: null;
+		const event = eventId ? await eventsService.getEventById(context, eventId) : null;
+		let desk = applyHomeRankLifecycle(rawDesk, event);
+
+		let batch: BatchLiveCalcResult | null = null;
+		if (event && !isFinalEvent(event)) {
+			const pairEntryIds = desk.leagueRanks.flatMap((league) => {
+				const matchup = league.h2hMatchup;
+				if (!matchup?.isLive || matchup.eventId !== event.id) return [];
+				return [matchup.viewer.entryId, matchup.opponent.entryId].filter(
+					(candidate): candidate is number =>
+						candidate !== null && Number.isSafeInteger(candidate) && candidate > 0
+				);
+			});
+			const entryIds = [...new Set([entryId, ...pairEntryIds])];
+			try {
+				batch = await entryLiveBatchService.calcLivePointsForEntries(
+					context,
+					event.id,
+					entryIds,
+					true
+				);
+			} catch (error) {
+				context.logger.warn(
+					{
+						err: error,
+						requestId: context.requestId,
+						operationName: context.operationName,
+						entryId,
+						eventId: event.id,
+					},
+					"Home live score projection unavailable"
+				);
+			}
 		}
+		desk = applyHomeScoreLifecycle(desk, event, batch?.results.get(entryId));
+		if (batch) desk = applyHomePairScores(desk, event, batch.results);
+
+		const hasOfficialH2H = desk.leagueRanks.some(
+			(league) => league.leagueType === "H2H" && league.tournamentId !== null
+		);
+		if (!event || !isFinalEvent(event) || !hasOfficialH2H) return desk;
 		try {
 			const officialH2HDesk = await tournamentsService.getEntryOfficialH2HDesk(context, entryId);
 			return reconcileHomeOfficialH2HRanks(desk, officialH2HDesk);

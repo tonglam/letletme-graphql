@@ -19,6 +19,7 @@ export type Event = {
 	averageEntryScore: number | null;
 	finished: boolean;
 	dataChecked: boolean;
+	dataCheckedAt?: string | null;
 	highestScoringEntry: number | null;
 	deadlineTimeEpoch: number | null;
 	deadlineTimeGameOffset: number | null;
@@ -98,6 +99,7 @@ const mapEvent = (row: CoreEventData): Event => ({
 	averageEntryScore: row.averageEntryScore,
 	finished: row.finished,
 	dataChecked: row.dataChecked,
+	dataCheckedAt: row.dataCheckedAt ?? null,
 	highestScoringEntry: row.highestScoringEntry,
 	deadlineTimeEpoch: row.deadlineTimeEpoch,
 	deadlineTimeGameOffset: row.deadlineTimeGameOffset,

@@ -16,7 +16,7 @@ const deskQuery = `
 			season coreRevision liveRevision anchorEventId eventId currentEventId nextEventId
 			isPreseason lifecycle deadlineTime publishedAt overviewState boardsState
 			overview {
-				averagePoints highestPoints mostSelected { id teamShortName }
+				averagePoints highestPoints highestScoringEntry mostSelected { id teamShortName }
 				topScorer { id webName teamShortName points }
 				mostPlayedChip { name numberPlayed }
 			}
@@ -298,6 +298,7 @@ describe("gameweekDesk", () => {
 							...event,
 							averageEntryScore: 48,
 							highestScore: 101,
+							highestScoringEntry: 123,
 							topElement: player.id,
 							topElementInfo: { element: player.id, points: 19 },
 							chipPlays: [
@@ -332,6 +333,7 @@ describe("gameweekDesk", () => {
 					points: 19,
 				},
 				mostPlayedChip: { name: "bboost", numberPlayed: 350 },
+				highestScoringEntry: 123,
 			},
 		});
 	});

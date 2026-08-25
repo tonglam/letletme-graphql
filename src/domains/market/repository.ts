@@ -50,6 +50,15 @@ export type MarketAvailabilityUpdate = {
 	chanceOfPlayingNextRound: number | null;
 };
 
+export type MarketPriceChange = {
+	player: MarketPlayer;
+	changeDate: string;
+	oldPrice: number;
+	newPrice: number;
+	change: number;
+	direction: "RISE" | "FALL";
+};
+
 export type MarketPulse = {
 	coverage: MarketCoverage;
 	mostSelected: MarketPlayer[];
@@ -65,14 +74,7 @@ export type MarketPulse = {
 		player: MarketPlayer;
 		firstObservedDate: string;
 	}>;
-	priceChanges: Array<{
-		player: MarketPlayer;
-		changeDate: string;
-		oldPrice: number;
-		newPrice: number;
-		change: number;
-		direction: "RISE" | "FALL";
-	}>;
+	priceChanges: MarketPriceChange[];
 	/** Full, deterministically ordered evidence retained for the paginated API. */
 	availabilityEvidence: MarketAvailabilityUpdate[];
 	availabilityUpdateCount?: number;
