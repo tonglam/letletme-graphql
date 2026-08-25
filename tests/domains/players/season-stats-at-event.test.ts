@@ -76,23 +76,45 @@ describe("resolvePlayerStatsContext", () => {
 	it("aligns freshness with live and repair cadences only while lifecycle is healthy", () => {
 		const now = Date.parse("2026-08-25T11:20:00.000Z");
 		const observedAt = new Date(now - 30_000).toISOString();
+		const nextRefreshAt = new Date(now + 9 * 60_000 + 30_000).toISOString();
 
-		expect(resolvePlayerStatsFreshnessBudgetMs({ state: "LIVE_ACTIVE", observedAt }, now)).toBe(
-			90_000
-		);
-		expect(resolvePlayerStatsFreshnessBudgetMs({ state: "DAY_SETTLING", observedAt }, now)).toBe(
-			90_000
-		);
+		expect(
+			resolvePlayerStatsFreshnessBudgetMs({ state: "LIVE_ACTIVE", observedAt, nextRefreshAt }, now)
+		).toBe(90_000);
+		expect(
+			resolvePlayerStatsFreshnessBudgetMs({ state: "DAY_SETTLING", observedAt, nextRefreshAt }, now)
+		).toBe(90_000);
 		for (const state of ["PICKS_SYNC", "BETWEEN_FIXTURES", "GW_REVIEW"] as const) {
-			expect(resolvePlayerStatsFreshnessBudgetMs({ state, observedAt }, now)).toBe(360_000);
+			expect(resolvePlayerStatsFreshnessBudgetMs({ state, observedAt, nextRefreshAt }, now)).toBe(
+				360_000
+			);
 		}
+	});
+
+	it("trusts the persisted lifecycle deadline through scheduler grace and then fails closed", () => {
+		const observedAt = Date.parse("2026-08-25T11:20:00.000Z");
+		const nextRefreshAt = new Date(observedAt + 10 * 60_000).toISOString();
+		const lifecycle = {
+			state: "GW_REVIEW" as const,
+			observedAt: new Date(observedAt).toISOString(),
+			nextRefreshAt,
+		};
+
+		expect(resolvePlayerStatsFreshnessBudgetMs(lifecycle, observedAt + 11 * 60_000)).toBe(360_000);
+		expect(resolvePlayerStatsFreshnessBudgetMs(lifecycle, observedAt + 12 * 60_000 + 1)).toBe(
+			60_000
+		);
 		expect(
 			resolvePlayerStatsFreshnessBudgetMs(
-				{ state: "GW_REVIEW", observedAt: new Date(now - 120_001).toISOString() },
-				now
+				{
+					state: "GW_REVIEW",
+					observedAt: new Date(observedAt).toISOString(),
+					nextRefreshAt: new Date(observedAt + 14 * 60_000).toISOString(),
+				},
+				observedAt + 2 * 60_000 + 1
 			)
 		).toBe(60_000);
-		expect(resolvePlayerStatsFreshnessBudgetMs(null, now)).toBe(60_000);
+		expect(resolvePlayerStatsFreshnessBudgetMs(null, observedAt)).toBe(60_000);
 	});
 
 	it("keeps a five-minute repair publication available during a healthy GW review", async () => {

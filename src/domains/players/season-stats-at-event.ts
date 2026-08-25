@@ -27,26 +27,46 @@ export type PlayerStatsContext = {
 const PLAYER_STATS_DEFAULT_FRESHNESS_MS = 60_000;
 const PLAYER_STATS_LIVE_FRESHNESS_MS = 90_000;
 const PLAYER_STATS_REPAIR_FRESHNESS_MS = 6 * 60_000;
-const LIVE_LIFECYCLE_HEARTBEAT_MAX_AGE_MS = 2 * 60_000;
+const LIVE_LIFECYCLE_HEARTBEAT_FALLBACK_MAX_AGE_MS = 2 * 60_000;
+const LIVE_LIFECYCLE_HEARTBEAT_GRACE_MS = 2 * 60_000;
+const LIVE_LIFECYCLE_HEARTBEAT_HARD_MAX_AGE_MS = 15 * 60_000;
 
 /**
  * Match the read-side freshness budget to the producer's lifecycle cadence.
- * A stale lifecycle heartbeat never relaxes the fail-closed default.
+ * The persisted next refresh deadline is authoritative, but only within a
+ * bounded window. A stale or malformed lifecycle heartbeat never relaxes the
+ * fail-closed default.
  */
 export function resolvePlayerStatsFreshnessBudgetMs(
-	lifecycle: Pick<LiveLifecycleStatus, "state" | "observedAt"> | null,
+	lifecycle: Pick<LiveLifecycleStatus, "state" | "observedAt" | "nextRefreshAt"> | null,
 	nowMs = Date.now()
 ): number {
 	if (!lifecycle) return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
 	const observedAtMs = Date.parse(lifecycle.observedAt);
 	const lifecycleAgeMs = nowMs - observedAtMs;
-	if (
-		!Number.isFinite(observedAtMs) ||
-		lifecycleAgeMs < 0 ||
-		lifecycleAgeMs > LIVE_LIFECYCLE_HEARTBEAT_MAX_AGE_MS
-	) {
+	if (!Number.isFinite(observedAtMs) || lifecycleAgeMs < 0) {
 		return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
 	}
+
+	let heartbeatExpiresAtMs = observedAtMs + LIVE_LIFECYCLE_HEARTBEAT_FALLBACK_MAX_AGE_MS;
+	if (lifecycle.nextRefreshAt) {
+		const nextRefreshAtMs = Date.parse(lifecycle.nextRefreshAt);
+		const scheduledDelayMs = nextRefreshAtMs - observedAtMs;
+		const maxScheduledDelayMs =
+			LIVE_LIFECYCLE_HEARTBEAT_HARD_MAX_AGE_MS - LIVE_LIFECYCLE_HEARTBEAT_GRACE_MS;
+		if (
+			Number.isFinite(nextRefreshAtMs) &&
+			scheduledDelayMs >= 0 &&
+			scheduledDelayMs <= maxScheduledDelayMs
+		) {
+			heartbeatExpiresAtMs = Math.min(
+				nextRefreshAtMs + LIVE_LIFECYCLE_HEARTBEAT_GRACE_MS,
+				observedAtMs + LIVE_LIFECYCLE_HEARTBEAT_HARD_MAX_AGE_MS
+			);
+		}
+	}
+	if (nowMs > heartbeatExpiresAtMs) return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
+
 	if (lifecycle.state === "LIVE_ACTIVE" || lifecycle.state === "DAY_SETTLING") {
 		return PLAYER_STATS_LIVE_FRESHNESS_MS;
 	}
