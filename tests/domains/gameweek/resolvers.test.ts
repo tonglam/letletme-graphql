@@ -15,9 +15,9 @@ const deskQuery = `
 		gameweekDesk(eventId: $eventId) {
 			season coreRevision liveRevision anchorEventId eventId currentEventId nextEventId
 			isPreseason lifecycle deadlineTime publishedAt overviewState boardsState
-			overview {
-				averagePoints highestPoints highestScoringEntry mostSelected { id teamShortName }
-				topScorer { id webName teamShortName points }
+				overview {
+					averagePoints highestPoints highestScoringEntry mostSelected { id position teamShortName }
+					topScorer { id webName position teamShortName points }
 				mostPlayedChip { name numberPlayed }
 			}
 			dreamTeam { id position teamShortName totalPoints }
@@ -329,6 +329,7 @@ describe("gameweekDesk", () => {
 				topScorer: {
 					id: player.id,
 					webName: player.webName,
+					position: "GOALKEEPER",
 					teamShortName: "T01",
 					points: 19,
 				},
