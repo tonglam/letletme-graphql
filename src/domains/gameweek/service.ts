@@ -14,10 +14,12 @@ export const MAX_GAMEWEEK_ID = 38;
 
 export type GameweekLifecycleState = "SCHEDULED" | "PROVISIONAL" | "SETTLED";
 export type GameweekSectionState = "PENDING" | "AVAILABLE" | "UNAVAILABLE";
+type GameweekPlayerPosition = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
 
 export type GameweekOverviewPlayer = {
 	id: number;
 	webName: string;
+	position: GameweekPlayerPosition;
 	teamShortName: string | null;
 };
 
@@ -49,7 +51,7 @@ export type GameweekOverview = {
 export type GameweekBoardPlayer = {
 	id: number;
 	webName: string;
-	position: "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
+	position: GameweekPlayerPosition;
 	teamShortName: string;
 	price: number;
 	minutes: number | null;
@@ -164,6 +166,15 @@ const overviewFactsPresent = (event: Event): boolean =>
 	event.topElementInfo !== null ||
 	event.chipPlays !== null;
 
+const gameweekPlayerPosition = (position: Position): GameweekPlayerPosition =>
+	position === Position.GOALKEEPER
+		? "GOALKEEPER"
+		: position === Position.DEFENDER
+			? "DEFENDER"
+			: position === Position.MIDFIELDER
+				? "MIDFIELDER"
+				: "FORWARD";
+
 const mapOverviewPlayer = (
 	playerId: number | null,
 	playersById: ReadonlyMap<number, Player>,
@@ -176,6 +187,7 @@ const mapOverviewPlayer = (
 	return {
 		id: player.id,
 		webName: player.webName,
+		position: gameweekPlayerPosition(player.position),
 		teamShortName: teamNames.get(eventTeamIds.get(player.id) ?? player.teamId) ?? null,
 	};
 };
@@ -244,14 +256,7 @@ const mapBoardPlayer = (
 	return {
 		id: player.id,
 		webName: player.webName,
-		position:
-			player.position === Position.GOALKEEPER
-				? "GOALKEEPER"
-				: player.position === Position.DEFENDER
-					? "DEFENDER"
-					: player.position === Position.MIDFIELDER
-						? "MIDFIELDER"
-						: "FORWARD",
+		position: gameweekPlayerPosition(player.position),
 		teamShortName: teamNames.get(eventTeamIds.get(player.id) ?? player.teamId) ?? "—",
 		price: player.price,
 		minutes: performance.minutes,

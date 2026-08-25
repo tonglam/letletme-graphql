@@ -14,6 +14,7 @@ export const gameweekTypeDefs = /* GraphQL */ `
 	type GameweekOverviewPlayer {
 		id: Int!
 		webName: String!
+		position: Position!
 		teamShortName: String
 	}
 
@@ -27,6 +28,7 @@ export const gameweekTypeDefs = /* GraphQL */ `
 	type GameweekOverviewTopScorer {
 		id: Int!
 		webName: String!
+		position: Position!
 		teamShortName: String
 		points: Int!
 	}
