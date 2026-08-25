@@ -28,6 +28,32 @@ const principal: Principal = {
 	fplEntryVerifiedAt: "2026-08-14T00:00:00.000Z",
 };
 
+const withDurableBoardRows = (context: ReturnType<typeof buildSnapshotContext>): void => {
+	context.data = {
+		read: (model: string) => {
+			const rows =
+				model === "fpl.player_gameweek_stats"
+					? Array.from({ length: 11 }, (_, index) => ({
+							event_id: 1,
+							element_id: index + 1,
+							minutes: 90,
+							in_dream_team: true,
+							total_points: 20 - index,
+						}))
+					: [];
+			const result = Promise.resolve({ data: rows, error: null });
+			const builder = {
+				select: () => builder,
+				eq: () => builder,
+				in: () => builder,
+				or: () => builder,
+				then: result.then.bind(result),
+			};
+			return builder as never;
+		},
+	} as never;
+};
+
 describe("Home GraphQL contracts", () => {
 	it("bounds every Home market list and preserves owned-first availability", () => {
 		const player = (playerId: number, selectedByPercent: number) => ({
@@ -164,6 +190,49 @@ describe("Home GraphQL contracts", () => {
 			playersService.getTopTransfersInEnriched = originalTransfersIn;
 			playersService.getTopTransfersOutEnriched = originalTransfersOut;
 		}
+	});
+
+	it("keeps homeGameweek available when settled boards use durable PostgreSQL rows", async () => {
+		const baseCore = buildTestCoreData(1);
+		const core = buildTestCoreData(1, {
+			events: baseCore.events.map((event) =>
+				event.id === 1 ? { ...event, finished: true, dataChecked: true } : event
+			),
+		});
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
+			databaseQuery: async () => ({ rows: [] }),
+		});
+		withDurableBoardRows(context);
+
+		const result = await graphql({
+			schema,
+			source: `
+				query {
+					homeGameweek(eventId: 1) {
+						gameweekDesk {
+							lifecycle boardsState liveRevision publishedAt
+							dreamTeam { id }
+						}
+
+					}
+				}
+
+			`,
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		const homeGameweek = result.data?.homeGameweek as
+			{ gameweekDesk?: { dreamTeam?: unknown[] } } | undefined;
+		expect(homeGameweek).toMatchObject({
+			gameweekDesk: {
+				lifecycle: "SETTLED",
+				boardsState: "AVAILABLE",
+				liveRevision: null,
+				publishedAt: null,
+			},
+		});
+		expect(homeGameweek?.gameweekDesk?.dreamTeam).toHaveLength(11);
 	});
 
 	it("marks transfer data unavailable when an enriched row has no player", () => {

@@ -1164,9 +1164,15 @@ type ComparisonFilter = Readonly<{
 	value: unknown;
 }>;
 
+type OrComparisonOperator = "=" | "<>" | ">" | ">=" | "<" | "<=";
+
 type OrFilter = Readonly<{
 	kind: "or";
-	alternatives: readonly Readonly<{ column: string; value: string }>[];
+	alternatives: readonly Readonly<{
+		column: string;
+		operator: OrComparisonOperator;
+		value: string;
+	}>[];
 }>;
 
 type Filter = ComparisonFilter | OrFilter;
@@ -1246,10 +1252,18 @@ class ReadQuery<Row extends QueryResultRow = QueryResultRow> implements PromiseL
 		const alternatives = expression.split(",").map((candidate) => candidate.trim());
 		if (alternatives.length < 2) throw new Error("Read-model OR requires at least two clauses");
 		const parsed = alternatives.map((candidate) => {
-			const match = candidate.match(/^([a-z_][a-z0-9_]*)\.eq\.(.+)$/);
+			const match = candidate.match(/^([a-z_][a-z0-9_]*)\.(eq|neq|gt|gte|lt|lte)\.(.+)$/);
 			if (!match) throw new Error(`Unsupported read-model OR clause: ${candidate}`);
 			quoteIdentifier(match[1]);
-			return { column: match[1], value: match[2] };
+			const operator: Record<string, OrComparisonOperator> = {
+				eq: "=",
+				neq: "<>",
+				gt: ">",
+				gte: ">=",
+				lt: "<",
+				lte: "<=",
+			};
+			return { column: match[1], operator: operator[match[2]]!, value: match[3] };
 		});
 		this.filters.push({ kind: "or", alternatives: parsed });
 		return this;
@@ -1311,9 +1325,9 @@ class ReadQuery<Row extends QueryResultRow = QueryResultRow> implements PromiseL
 		const where: string[] = [];
 		for (const filter of this.filters) {
 			if (filter.kind === "or") {
-				const alternatives = filter.alternatives.map(({ column, value }) => {
+				const alternatives = filter.alternatives.map(({ column, operator, value }) => {
 					values.push(value);
-					return `${quoteIdentifier(column)} = $${values.length}`;
+					return `${quoteIdentifier(column)} ${operator} $${values.length}`;
 				});
 				where.push(`(${alternatives.join(" OR ")})`);
 				continue;

@@ -51,6 +51,19 @@ describe("Data Platform read client", () => {
 		expect(queries[0].text).not.toContain(maliciousValue);
 	});
 
+	it("supports bounded comparison operators inside OR filters", async () => {
+		const { executor, queries } = makeExecutor([{ id: 1 }]);
+
+		await clientFor(executor)
+			.read("fpl.player_gameweek_stats")
+			.select("event_id, element_id")
+			.eq("event_id", 1)
+			.or("in_dream_team.eq.true,total_points.gte.10");
+
+		expect(queries[0].text).toContain('("in_dream_team" = $3 OR "total_points" >= $4)');
+		expect(queries[0].values).toEqual([2026, 1, "true", "10"]);
+	});
+
 	it("rejects unregistered models and unsafe identifiers before querying", () => {
 		const { executor, queries } = makeExecutor();
 		const client = clientFor(executor);
