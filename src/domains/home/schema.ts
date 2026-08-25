@@ -104,6 +104,23 @@ export const homeTypeDefs = /* GraphQL */ `
 		priceChanges: [MarketPriceChange!]!
 	}
 
+	enum HomeMarketSectionState {
+		AVAILABLE
+		EMPTY
+		UNAVAILABLE
+	}
+
+	type HomeMarketDesk {
+		revision: String!
+		capturedAt: DateTime
+		ownershipState: HomeMarketSectionState!
+		ownership: MarketOwnershipDay
+		priceChangesState: HomeMarketSectionState!
+		priceChanges: [MarketPriceChange!]!
+		availabilityState: HomeMarketSectionState!
+		availabilityUpdates: [MarketAvailabilityUpdate!]!
+	}
+
 	enum HomeTransferSectionState {
 		AVAILABLE
 		UNAVAILABLE
@@ -128,5 +145,6 @@ export const homeTypeDefs = /* GraphQL */ `
 		homeGameweek(eventId: Int!): HomeGameweek!
 		homePersonalDesk: HomePersonalDesk!
 		homeMarketPulse(days: Int = 7): HomeMarketPulse!
+		homeMarketDesk: HomeMarketDesk!
 	}
 `;

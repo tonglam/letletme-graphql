@@ -16,7 +16,7 @@ const deskQuery = `
 			season coreRevision liveRevision anchorEventId eventId currentEventId nextEventId
 			isPreseason lifecycle deadlineTime publishedAt overviewState boardsState
 			overview {
-				averagePoints highestPoints mostSelected { id teamShortName }
+				averagePoints highestPoints highestScoringEntry mostSelected { id teamShortName }
 				topScorer { id webName teamShortName points }
 				mostPlayedChip { name numberPlayed }
 			}
@@ -25,6 +25,35 @@ const deskQuery = `
 		}
 	}
 `;
+
+const withDurableBoardRows = (
+	context: ReturnType<typeof buildSnapshotContext>,
+	rowCount = 11
+): void => {
+	context.data = {
+		read: (model: string) => {
+			const rows =
+				model === "fpl.player_gameweek_stats"
+					? Array.from({ length: rowCount }, (_, index) => ({
+							event_id: 1,
+							element_id: index + 1,
+							minutes: 90,
+							in_dream_team: true,
+							total_points: 20 - index,
+						}))
+					: [];
+			const result = Promise.resolve({ data: rows, error: null });
+			const builder = {
+				select: () => builder,
+				eq: () => builder,
+				in: () => builder,
+				or: () => builder,
+				then: result.then.bind(result),
+			};
+			return builder as never;
+		},
+	} as never;
+};
 
 describe("gameweekDesk", () => {
 	it("keeps the current gameweek scheduled until a fixture starts", async () => {
@@ -174,6 +203,91 @@ describe("gameweekDesk", () => {
 		});
 	});
 
+	it("recovers settled boards from durable PostgreSQL rows when live publication is missing", async () => {
+		const baseCore = buildTestCoreData(1);
+		const core = buildTestCoreData(1, {
+			events: baseCore.events.map((event) =>
+				event.id === 1 ? { ...event, finished: true, dataChecked: true } : event
+			),
+		});
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
+			databaseQuery: async () => ({ rows: [] }),
+		});
+		withDurableBoardRows(context);
+
+		const result = await graphql({
+			schema,
+			source: deskQuery,
+			variableValues: { eventId: 1 },
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.gameweekDesk).toMatchObject({
+			eventId: 1,
+			lifecycle: "SETTLED",
+			liveRevision: null,
+			publishedAt: null,
+			boardsState: "AVAILABLE",
+		});
+		const desk = result.data?.gameweekDesk as { dreamTeam?: unknown[] } | undefined;
+		expect(desk?.dreamTeam).toHaveLength(11);
+	});
+
+	it("does not expose an incomplete durable dream team", async () => {
+		const baseCore = buildTestCoreData(1);
+		const core = buildTestCoreData(1, {
+			events: baseCore.events.map((event) =>
+				event.id === 1 ? { ...event, finished: true, dataChecked: true } : event
+			),
+		});
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
+			databaseQuery: async () => ({ rows: [] }),
+		});
+		withDurableBoardRows(context, 10);
+
+		const result = await graphql({
+			schema,
+			source: deskQuery,
+			variableValues: { eventId: 1 },
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.gameweekDesk).toMatchObject({
+			boardsState: "UNAVAILABLE",
+			dreamTeam: [],
+			hauls: [],
+		});
+	});
+
+	it("keeps provisional boards unavailable when live publication is missing", async () => {
+		const baseCore = buildTestCoreData(1);
+		const core = buildTestCoreData(1, {
+			fixtures: baseCore.fixtures.map((fixture, index) =>
+				index === 0 ? { ...fixture, started: true } : fixture
+			),
+		});
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
+			databaseQuery: async () => ({ rows: [] }),
+		});
+		withDurableBoardRows(context);
+
+		const result = await graphql({
+			schema,
+			source: deskQuery,
+			variableValues: { eventId: 1 },
+			contextValue: context,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.gameweekDesk).toMatchObject({
+			lifecycle: "PROVISIONAL",
+			boardsState: "UNAVAILABLE",
+			dreamTeam: [],
+		});
+	});
+
 	it("projects the Home top scorer and most-played chip from the bounded overview", async () => {
 		const baseCore = buildTestCoreData(1);
 		const player = baseCore.players[0]!;
@@ -184,6 +298,7 @@ describe("gameweekDesk", () => {
 							...event,
 							averageEntryScore: 48,
 							highestScore: 101,
+							highestScoringEntry: 123,
 							topElement: player.id,
 							topElementInfo: { element: player.id, points: 19 },
 							chipPlays: [
@@ -218,6 +333,7 @@ describe("gameweekDesk", () => {
 					points: 19,
 				},
 				mostPlayedChip: { name: "bboost", numberPlayed: 350 },
+				highestScoringEntry: 123,
 			},
 		});
 	});

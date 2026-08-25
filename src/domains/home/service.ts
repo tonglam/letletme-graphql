@@ -12,6 +12,7 @@ import type { MarketAvailabilityUpdate, MarketPulse } from "../market/repository
 import type { Player, TopTransfersEnriched } from "../players/repository";
 import { playersService } from "../players/service";
 import { measureRequestStage } from "../../http/request-timing";
+import { homeMarketRepository, type HomeMarketDesk } from "./market-repository";
 import type { EntryOfficialH2HDeskItem } from "../tournaments/repository";
 import { tournamentsService } from "../tournaments/service";
 import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
@@ -344,6 +345,10 @@ export const homeService = {
 			"Home market pulse loaded"
 		);
 		return compact;
+	},
+
+	getMarketDesk(context: GraphQLContext): Promise<HomeMarketDesk> {
+		return homeMarketRepository.getDesk(context);
 	},
 
 	async getPublicBootstrap(context: GraphQLContext): Promise<HomePublicBootstrap> {
