@@ -157,7 +157,7 @@ describe("full-field live board index", () => {
 				},
 			])
 		);
-		const board = buildFullFieldLiveBoardIndex({
+		const boardInput = {
 			season: "2026",
 			eventId: 38,
 			tournamentId: 8,
@@ -175,7 +175,8 @@ describe("full-field live board index", () => {
 				[3, makeManagerRow(3, 10)],
 			]),
 			requireNet: false,
-		});
+		};
+		const board = buildFullFieldLiveBoardIndex(boardInput);
 		const request: EntryLiveCompetitionBoardRequest = {
 			entryId: 1,
 			tournamentId: 8,
@@ -196,5 +197,25 @@ describe("full-field live board index", () => {
 		expect(page.filteredEntries).toBe(1);
 		expect(page.rows[0]?.entry).toBe(1);
 		expect(page.rows[0]?.score.source).toBe("FPL_CLASSIC_STANDINGS");
+
+		const fallbackPick = boardInput.picks.get(1);
+		if (!fallbackPick) throw new Error("test pick missing");
+		const fallbackManagerRow = boardInput.managerRows.get(1);
+		if (!fallbackManagerRow) throw new Error("test manager row missing");
+		const fallbackBoard = buildFullFieldLiveBoardIndex({
+			...boardInput,
+			picks: new Map(boardInput.picks).set(1, { ...fallbackPick, transfersCost: 4 }),
+			managerRows: new Map(boardInput.managerRows).set(1, {
+				...fallbackManagerRow,
+				transferCost: null,
+			}),
+		});
+		expect(fallbackBoard.rows.find((row) => row.entry === 1)?.transferCost).toBe(4);
+
+		const incompletePicks = new Map(boardInput.picks);
+		incompletePicks.delete(3);
+		expect(() => buildFullFieldLiveBoardIndex({ ...boardInput, picks: incompletePicks })).toThrow(
+			"Entry 3 has no complete event pick row"
+		);
 	});
 });

@@ -113,6 +113,9 @@ export const buildFullFieldLiveBoardIndex = (
 	for (const entryId of input.allEntryIds) {
 		const entry = input.entries.get(entryId);
 		const pick = input.picks.get(entryId);
+		if (!pick) {
+			throw new Error(`Entry ${entryId} has no complete event pick row`);
+		}
 		const ownerAny = new Set<number>();
 		const ownerStarter = new Set<number>();
 		const ownerBench = new Set<number>();
@@ -137,7 +140,15 @@ export const buildFullFieldLiveBoardIndex = (
 			if (selected.isViceCaptain) viceCaptains.add(selected.element);
 		}
 		const captain = (pick?.picks ?? []).find((selected) => selected.isCaptain);
-		const score = scoreFromDataRow(input.managerRows.get(entryId));
+		const managerRow = input.managerRows.get(entryId);
+		const loadedScore = scoreFromDataRow(managerRow);
+		// Data may omit transferCost for a standings row even though the
+		// event-scoped pick row has the official transfer cost. Keep the index's
+		// ordering/filter value faithful to the pick contract in that case.
+		const transferCost =
+			typeof managerRow?.transferCost === "number" ? managerRow.transferCost : pick.transfersCost;
+		const score =
+			loadedScore.transferCost === transferCost ? loadedScore : { ...loadedScore, transferCost };
 		rows.push({
 			entry: entryId,
 			entryName: entry?.entryName ?? "",
@@ -147,7 +158,7 @@ export const buildFullFieldLiveBoardIndex = (
 			teamValue: (entry?.teamValue ?? 0) / 10,
 			chip: canonicalChip(pick?.chip ?? null),
 			livePoints: score.eventPoints ?? 0,
-			transferCost: score.transferCost,
+			transferCost,
 			liveNetPoints: score.netEventPoints ?? score.eventPoints ?? 0,
 			liveTotalPoints: score.totalPoints ?? 0,
 			played: 0,

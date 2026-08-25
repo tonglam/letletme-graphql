@@ -267,14 +267,14 @@ const positionTypeToEnum = (type: number): string => {
 	}
 };
 
-async function getPlayerAndTeamMaps(
+export async function getPlayerAndTeamMaps(
 	context: GraphQLContext,
 	playerIds: number[],
 	eventId?: number,
 	season?: string
 ): Promise<{
 	playerMap: Map<number, { id: number; web_name: string; team_id: number; type: number }>;
-	teamMap: Map<number, { id: number; short_name: string }>;
+	teamMap: Map<number, { id: number; name: string; short_name: string }>;
 }> {
 	if (playerIds.length === 0) {
 		return { playerMap: new Map(), teamMap: new Map() };
@@ -343,10 +343,10 @@ async function getPlayerAndTeamMaps(
 	}
 
 	const neededTeamIds = new Set([...filteredPlayerMap.values()].map((p) => p.team_id));
-	const filteredTeamMap = new Map<number, { id: number; short_name: string }>();
+	const filteredTeamMap = new Map<number, { id: number; name: string; short_name: string }>();
 	for (const [id, team] of fullTeamMap) {
 		if (neededTeamIds.has(id)) {
-			filteredTeamMap.set(id, { id, short_name: team.shortName });
+			filteredTeamMap.set(id, { id, name: team.name, short_name: team.shortName });
 		}
 	}
 

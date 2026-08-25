@@ -4517,11 +4517,22 @@ export const tournamentsRepository: TournamentsRepository = {
 				// Provisional live points can change when the core event flips to
 				// finished/data_checked. Only final scoring boards are reusable.
 				const scoringPhase = event?.finished === true && event.dataChecked === true;
+				const rosterEntryIds = await tournamentsRepository.getTournamentEntryIdsUncached(
+					context,
+					tournamentId
+				);
+				const { entryIds: boundedEntryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
+					rosterEntryIds,
+					entryId
+				);
 				const liveCacheKey =
 					scoringPhase && snapshot
 						? competitionBoardCacheKey(context, snapshot, tournamentId)
 						: null;
-				const cachedCandidate = liveCacheKey
+				// A finalized board with deferred rows is viewer-specific because the
+				// bounded window retains the requesting manager. Do not read or write
+				// the shared event/tournament cache for that shape.
+				const cachedCandidate = liveCacheKey && deferredEntryIds.length === 0
 					? await readCompetitionBoardCache(context, liveCacheKey)
 					: null;
 				const cachedRows = cachedCandidate?.board as
@@ -4542,12 +4553,6 @@ export const tournamentsRepository: TournamentsRepository = {
 							totalEntries: cachedBoard.totalEntries,
 						}
 					: null;
-				const rosterEntryIds = cached
-					? []
-					: await tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
-				const { entryIds: boundedEntryIds, deferredEntryIds } = cached
-					? { entryIds: [], deferredEntryIds: [] }
-					: selectTournamentDeskEntryWindow(rosterEntryIds, entryId);
 				const result = cached
 					? null
 					: await entryLiveBatchService.calcLivePointsForEntries(
@@ -4576,8 +4581,8 @@ export const tournamentsRepository: TournamentsRepository = {
 					liveCacheKey &&
 					!cached &&
 					result &&
-					result.errors.length === 0 &&
 					deferredEntryIds.length === 0 &&
+					result.errors.length === 0 &&
 					managerScoreBoardIsFinal(liveData.rows)
 				) {
 					await writeCompetitionBoardCache(

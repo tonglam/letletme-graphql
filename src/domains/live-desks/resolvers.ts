@@ -24,7 +24,7 @@ import {
 } from "../entry-live/manager-score";
 import { loadManagerScoresInChunks } from "../entry-live/manager-score-batches";
 import { entriesService } from "../entries/service";
-import { getTournamentSelectionIndexRows } from "../event-stats/repository";
+import { getPlayerAndTeamMaps, getTournamentSelectionIndexRows } from "../event-stats/repository";
 import { LeagueType } from "../leagues/repository";
 import { playersService } from "../players/service";
 import { Position } from "../players/repository";
@@ -610,6 +610,8 @@ export const liveDesksResolvers = {
 			const canAttemptFullField =
 				fullFieldEnabled &&
 				request.sort !== "PLAYED" &&
+				request.captainPlayerIds.length === 0 &&
+				(request.ownership?.captainMode ?? "ANY") === "ANY" &&
 				initialCoverage?.state === "COMPLETE" &&
 				initialCoverage.rosterRevision === rosterRevision &&
 				initialCoverage.expectedEntries === allEntryIds.length &&
@@ -861,7 +863,8 @@ export const liveDesksResolvers = {
 				officialCoverage: board.officialCoverage,
 				unavailableEntryIds: board.unavailableEntryIds,
 				failedEntryIds: calculatedFailedEntryIds,
-				partial: board.partial || calculatedFailedEntryIds.length > 0 || !fullFieldReady,
+				partial:
+					board.partial || calculatedFailedEntryIds.length > 0 || deferredEntryIds.length > 0,
 				totalEntries: board.totalEntries,
 				filteredEntries: page.filteredEntries,
 				page: request.page,
@@ -1080,23 +1083,29 @@ export const liveDesksResolvers = {
 				getTournamentSelectionIndexRows(context, args.tournamentId, snapshot.eventId),
 				getCoreDataSnapshot(context),
 			]);
-			const players = new Map(core.players.map((player) => [player.id, player] as const));
+			const eventMaps = await getPlayerAndTeamMaps(
+				context,
+				rows.map((row) => row.playerId),
+				snapshot.eventId,
+				context.currentSeason.seasonCode
+			);
 			const teams = new Map(core.teams.map((team) => [team.id, team] as const));
 			return {
 				tournamentId: args.tournamentId,
 				eventId: snapshot.eventId,
 				revision: snapshot.revision,
 				rows: rows.flatMap((row) => {
-					const player = players.get(row.playerId);
-					const team = player ? teams.get(player.teamId) : undefined;
-					if (!player || !team) return [];
+					const player = eventMaps.playerMap.get(row.playerId);
+					const eventTeam = player ? eventMaps.teamMap.get(player.team_id) : undefined;
+					const team = player ? teams.get(player.team_id) : undefined;
+					if (!player || (!eventTeam && !team)) return [];
 					return [
 						{
 							...row,
-							playerName: player.webName,
-							teamId: team.id,
-							teamName: team.name,
-							teamShortName: team.shortName,
+							playerName: player.web_name,
+							teamId: player.team_id,
+							teamName: eventTeam?.name ?? team?.name ?? "",
+							teamShortName: eventTeam?.short_name ?? team?.shortName ?? "",
 							position: selectionPositionName(player.type),
 						},
 					];
