@@ -13,6 +13,7 @@ import {
 	calcElementLivePoints,
 	calcOfficialTotalWithEffectiveBonus,
 } from "../../../src/domains/entry-live/calc-service";
+import { projectLiveLineup } from "../../../src/domains/entry-live/legacy-h2h-adapter";
 import type { LivePerformance } from "../../../src/domains/live/repository";
 import { loadLiveSnapshotMeta } from "../../../src/domains/live/snapshot-meta";
 import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
@@ -239,6 +240,37 @@ describe("applyAutoSubs", () => {
 		expect(picks[1].multiplier).toBe(0); // Starter subbed out
 	});
 
+	it("keeps the first pending bench player as the live projection", () => {
+		const picks = [
+			makePick({ position: 1, elementType: 1, minutes: 90, multiplier: 1 }),
+			makePick({ position: 2, elementType: 2, minutes: 0, multiplier: 1 }),
+			makePick({ position: 3, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 4, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 5, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 6, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 7, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 8, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 9, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 10, elementType: 4, minutes: 90, multiplier: 1 }),
+			makePick({ position: 11, elementType: 4, minutes: 90, multiplier: 1 }),
+			makePick({
+				position: 12,
+				elementType: 3,
+				minutes: 0,
+				multiplier: 0,
+				isGwFinished: false,
+				playStatus: 1,
+			}),
+			makePick({ position: 13, elementType: 2, minutes: 90, multiplier: 0 }),
+		];
+
+		applyAutoSubs(picks, "NONE");
+
+		expect(picks[11].multiplier).toBe(1);
+		expect(picks[12].multiplier).toBe(0);
+		expect(picks[1].multiplier).toBe(0);
+	});
+
 	it("does not sub if formation would be invalid", () => {
 		const picks = [
 			makePick({ position: 1, elementType: 1, minutes: 90, multiplier: 1 }),
@@ -285,6 +317,32 @@ describe("applyAutoSubs", () => {
 		expect(picks[12].multiplier).toBe(1); // Second bench DEF came on
 	});
 
+	it("does not reuse a bench player whose official substitution is already active", () => {
+		const picks = [
+			makePick({ position: 1, elementType: 1, minutes: 90, multiplier: 1 }),
+			makePick({ position: 2, elementType: 2, minutes: 0, multiplier: 0 }),
+			makePick({ position: 3, elementType: 2, minutes: 0, multiplier: 1 }),
+			makePick({ position: 4, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 5, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 6, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 7, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 8, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 9, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 10, elementType: 4, minutes: 90, multiplier: 1 }),
+			makePick({ position: 11, elementType: 4, minutes: 90, multiplier: 1 }),
+			makePick({ position: 12, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 13, elementType: 2, minutes: 90, multiplier: 0 }),
+		];
+
+		applyAutoSubs(picks, "NONE");
+
+		expect(picks[1].multiplier).toBe(0);
+		expect(picks[2].multiplier).toBe(0);
+		expect(picks[11].multiplier).toBe(1);
+		expect(picks[12].multiplier).toBe(1);
+		expect(picks.filter((pick) => pick.multiplier > 0)).toHaveLength(11);
+	});
+
 	it("does nothing when all starters played", () => {
 		const picks = [
 			makePick({ position: 1, elementType: 1, minutes: 90, multiplier: 1 }),
@@ -295,6 +353,80 @@ describe("applyAutoSubs", () => {
 		expect(picks[0].multiplier).toBe(1);
 		expect(picks[1].multiplier).toBe(1);
 		expect(picks[2].multiplier).toBe(0);
+	});
+});
+
+describe("projectLiveLineup", () => {
+	const projectedPicks = () => [
+		makePick({ element: 1, position: 1, elementType: 1, totalPoints: 2 }),
+		makePick({
+			element: 2,
+			position: 2,
+			elementType: 2,
+			minutes: 0,
+			totalPoints: 0,
+			isPlayed: false,
+			isCaptain: true,
+			multiplier: 2,
+		}),
+		makePick({ element: 3, position: 3, elementType: 2, totalPoints: 2 }),
+		makePick({ element: 4, position: 4, elementType: 2, totalPoints: 2 }),
+		makePick({ element: 5, position: 5, elementType: 2, totalPoints: 2 }),
+		makePick({
+			element: 6,
+			position: 6,
+			elementType: 3,
+			totalPoints: 5,
+			isViceCaptain: true,
+		}),
+		makePick({ element: 7, position: 7, elementType: 3, totalPoints: 2 }),
+		makePick({ element: 8, position: 8, elementType: 3, totalPoints: 2 }),
+		makePick({ element: 9, position: 9, elementType: 3, totalPoints: 2 }),
+		makePick({ element: 10, position: 10, elementType: 4, totalPoints: 2 }),
+		makePick({ element: 11, position: 11, elementType: 4, totalPoints: 2 }),
+		makePick({ element: 12, position: 12, elementType: 1, totalPoints: 3, multiplier: 0 }),
+		makePick({ element: 13, position: 13, elementType: 2, totalPoints: 6, multiplier: 0 }),
+		makePick({ element: 14, position: 14, totalPoints: 1, multiplier: 0 }),
+		makePick({ element: 15, position: 15, totalPoints: 1, multiplier: 0 }),
+	];
+
+	it("projects both the automatic substitute and vice-captain promotion", () => {
+		const picks = projectedPicks();
+		const projection = projectLiveLineup(picks, "NONE");
+		const vice = picks.find((pick) => pick.isViceCaptain)!;
+		expect(picks.find((pick) => pick.element === 13)?.autoSub).toBe(true);
+		expect(projection.captainForScoring?.element).toBe(vice.element);
+		expect(vice.multiplier).toBe(2);
+		expect(picks.find((pick) => pick.isCaptain)?.multiplier).toBe(0);
+		expect(projection.points).toBe(
+			projection.activePicks.reduce((sum, pick) => sum + pick.totalPoints, 0) + vice.totalPoints
+		);
+	});
+
+	it("applies the triple-captain multiplier to a promoted vice-captain", () => {
+		const picks = projectedPicks();
+		const projection = projectLiveLineup(picks, "TRIPLE_CAPTAIN");
+		const vice = picks.find((pick) => pick.isViceCaptain)!;
+		expect(vice.multiplier).toBe(3);
+		expect(projection.points).toBe(
+			projection.activePicks.reduce((sum, pick) => sum + pick.totalPoints, 0) + vice.totalPoints * 2
+		);
+	});
+
+	it("does not promote or multiply a vice-captain who did not appear", () => {
+		const picks = projectedPicks();
+		const vice = picks.find((pick) => pick.isViceCaptain)!;
+		vice.minutes = 0;
+		vice.isPlayed = true;
+		vice.totalPoints = -1;
+
+		const projection = projectLiveLineup(picks, "NONE");
+
+		expect(projection.captainForScoring).toBeNull();
+		expect(vice.multiplier).toBe(0);
+		expect(projection.points).toBe(
+			projection.activePicks.reduce((sum, pick) => sum + pick.totalPoints, 0)
+		);
 	});
 });
 

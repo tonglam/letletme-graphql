@@ -20,7 +20,7 @@ export type ActiveCaptainData = {
 
 export type LiveCalcData = {
 	availability: EntryLiveAvailability;
-	/** True while the board uses official live totals before final auto-subs/results. */
+	/** True while the board projects auto-subs/captaincy from revisioned live player totals. */
 	provisional: boolean;
 	snapshot: LiveSnapshotMeta | null;
 	score: LiveManagerScore;
@@ -125,8 +125,7 @@ export const calcElementLivePoints = (
 	_effectiveBonus?: number
 ): number => calcOfficialTotalWithEffectiveBonus(live);
 
-// Kept as a compatibility export for existing H2H-only callers and tests.
-// Non-H2H live paths import the isolated adapter directly and never invoke it.
+// Compatibility export for existing callers and focused FPL-rule tests.
 export { applyAutoSubs } from "./legacy-h2h-adapter";
 
 const scaledEntryValue = (value: number | null | undefined): number =>
