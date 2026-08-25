@@ -240,6 +240,37 @@ describe("applyAutoSubs", () => {
 		expect(picks[1].multiplier).toBe(0); // Starter subbed out
 	});
 
+	it("keeps the first pending bench player as the live projection", () => {
+		const picks = [
+			makePick({ position: 1, elementType: 1, minutes: 90, multiplier: 1 }),
+			makePick({ position: 2, elementType: 2, minutes: 0, multiplier: 1 }),
+			makePick({ position: 3, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 4, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 5, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 6, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 7, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 8, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 9, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 10, elementType: 4, minutes: 90, multiplier: 1 }),
+			makePick({ position: 11, elementType: 4, minutes: 90, multiplier: 1 }),
+			makePick({
+				position: 12,
+				elementType: 3,
+				minutes: 0,
+				multiplier: 0,
+				isGwFinished: false,
+				playStatus: 1,
+			}),
+			makePick({ position: 13, elementType: 2, minutes: 90, multiplier: 0 }),
+		];
+
+		applyAutoSubs(picks, "NONE");
+
+		expect(picks[11].multiplier).toBe(1);
+		expect(picks[12].multiplier).toBe(0);
+		expect(picks[1].multiplier).toBe(0);
+	});
+
 	it("does not sub if formation would be invalid", () => {
 		const picks = [
 			makePick({ position: 1, elementType: 1, minutes: 90, multiplier: 1 }),
@@ -284,6 +315,32 @@ describe("applyAutoSubs", () => {
 		expect(picks[2].multiplier).toBe(0); // Second DEF subbed out
 		expect(picks[11].multiplier).toBe(1); // First bench DEF came on
 		expect(picks[12].multiplier).toBe(1); // Second bench DEF came on
+	});
+
+	it("does not reuse a bench player whose official substitution is already active", () => {
+		const picks = [
+			makePick({ position: 1, elementType: 1, minutes: 90, multiplier: 1 }),
+			makePick({ position: 2, elementType: 2, minutes: 0, multiplier: 0 }),
+			makePick({ position: 3, elementType: 2, minutes: 0, multiplier: 1 }),
+			makePick({ position: 4, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 5, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 6, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 7, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 8, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 9, elementType: 3, minutes: 90, multiplier: 1 }),
+			makePick({ position: 10, elementType: 4, minutes: 90, multiplier: 1 }),
+			makePick({ position: 11, elementType: 4, minutes: 90, multiplier: 1 }),
+			makePick({ position: 12, elementType: 2, minutes: 90, multiplier: 1 }),
+			makePick({ position: 13, elementType: 2, minutes: 90, multiplier: 0 }),
+		];
+
+		applyAutoSubs(picks, "NONE");
+
+		expect(picks[1].multiplier).toBe(0);
+		expect(picks[2].multiplier).toBe(0);
+		expect(picks[11].multiplier).toBe(1);
+		expect(picks[12].multiplier).toBe(1);
+		expect(picks.filter((pick) => pick.multiplier > 0)).toHaveLength(11);
 	});
 
 	it("does nothing when all starters played", () => {
@@ -350,6 +407,21 @@ describe("projectLiveLineup", () => {
 		const vice = picks.find((pick) => pick.isViceCaptain)!;
 		expect(projection.points).toBe(
 			projection.activePicks.reduce((sum, pick) => sum + pick.totalPoints, 0) + vice.totalPoints * 2
+		);
+	});
+
+	it("does not promote or multiply a vice-captain who did not appear", () => {
+		const picks = projectedPicks();
+		const vice = picks.find((pick) => pick.isViceCaptain)!;
+		vice.minutes = 0;
+		vice.isPlayed = true;
+		vice.totalPoints = -1;
+
+		const projection = projectLiveLineup(picks, "NONE");
+
+		expect(projection.captainForScoring).toBeNull();
+		expect(projection.points).toBe(
+			projection.activePicks.reduce((sum, pick) => sum + pick.totalPoints, 0)
 		);
 	});
 });
