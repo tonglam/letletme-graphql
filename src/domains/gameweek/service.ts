@@ -443,10 +443,11 @@ export const gameweekService = {
 
 			if (!scheduled) {
 				try {
+					const allowDurableFallback = event.finished === true && event.dataChecked === true;
 					const boards = await measureRequestStage(
 						context.requestTiming,
 						"gameweek.boards.snapshot",
-						() => liveService.getGameweekBoards(context, eventId)
+						() => liveService.getGameweekBoards(context, eventId, { allowDurableFallback })
 					);
 					const playerIds = Array.from(
 						new Set(
@@ -479,12 +480,27 @@ export const gameweekService = {
 					);
 					hauls = mapAndSortBoards(boards.hauls, "points", playersById, teamNames, eventTeamIds);
 					const meta = boards.meta;
-					liveRevision = meta.revision;
-					publishedAt = meta.publishedAt;
+					liveRevision = meta?.revision ?? null;
+					publishedAt = meta?.publishedAt ?? null;
 					lifecycle = lifecycleFromLiveState(meta, event, fixtures, eventContext, eventId);
 					boardsState = "AVAILABLE";
+					context.logger.info(
+						{
+							eventId,
+							source: boards.source,
+							dreamTeamRows: dreamTeam.length,
+							haulRows: hauls.length,
+						},
+						"Gameweek boards source selected"
+					);
 				} catch (error) {
-					context.logger.warn({ err: error, eventId }, "Gameweek boards are unavailable");
+					context.logger.warn(
+						{
+							eventId,
+							reason: error instanceof Error ? error.message : "UNKNOWN",
+						},
+						"Gameweek boards are unavailable"
+					);
 				}
 			}
 

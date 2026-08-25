@@ -29,6 +29,7 @@ const withReadRows = (
 				select: () => builder,
 				eq: () => builder,
 				in: () => builder,
+				or: () => builder,
 				order: () => builder,
 				then: result.then.bind(result),
 			};
@@ -292,6 +293,38 @@ describe("liveRepository live publication reads", () => {
 		);
 		expect(result).toHaveLength(1);
 		expect(result[0]).toMatchObject({ eventId: 2, playerId: 1, totalPoints: 10 });
+		expect(calls).toEqual(["fpl.player_gameweek_stats"]);
+	});
+
+	it("reads only durable board candidates from PostgreSQL", async () => {
+		const { context } = liveContext();
+		const calls: string[] = [];
+		withReadRows(
+			context,
+			{
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 1,
+						element_id: 1,
+						in_dream_team: true,
+						total_points: 8,
+					},
+					{
+						event_id: 1,
+						element_id: 2,
+						in_dream_team: false,
+						total_points: 10,
+					},
+				],
+			},
+			calls
+		);
+
+		const result = await liveRepository.getDurableGameweekBoardPerformances(context, 1);
+
+		expect(result.size).toBe(2);
+		expect(result.get(1)).toMatchObject({ inDreamTeam: true, totalPoints: 8 });
+		expect(result.get(2)).toMatchObject({ inDreamTeam: false, totalPoints: 10 });
 		expect(calls).toEqual(["fpl.player_gameweek_stats"]);
 	});
 });
