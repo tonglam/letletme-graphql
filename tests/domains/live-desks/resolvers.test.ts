@@ -3,9 +3,13 @@ import { describe, expect, it } from "bun:test";
 describe("live desks tournament selection index", () => {
 	it("uses the reporting read model instead of request-time pick scans", async () => {
 		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const selectionIndex = source.slice(
+			source.indexOf("tournamentSelectionIndex:"),
+			source.indexOf("tournamentEntrySquads:")
+		);
 		expect(source).toContain("getTournamentSelectionIndexRows");
-		expect(source).not.toContain("getEntryEventPicksByIds");
-		expect(source).not.toContain("getTournamentEntryIds(context, args.tournamentId)");
+		expect(selectionIndex).not.toContain("getEntryEventPicksByIds");
+		expect(selectionIndex).not.toContain("getTournamentEntryIds(context, args.tournamentId)");
 	});
 
 	it("routes tournament anchoring through the shared live window", async () => {

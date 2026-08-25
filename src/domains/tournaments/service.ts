@@ -73,6 +73,17 @@ export const tournamentsService = {
 		return tournamentsRepository.getEntryTournaments(context, entryId);
 	},
 
+	getEntryParticipatingTournaments(
+		context: GraphQLContext,
+		entryId: number
+	): Promise<TournamentInfo[]> {
+		return tournamentsRepository.getEntryParticipatingTournaments(context, entryId);
+	},
+
+	getManageableTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]> {
+		return tournamentsRepository.getManageableTournaments(context, entryId);
+	},
+
 	getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]> {
 		return tournamentsRepository.getTournamentEntryIds(context, tournamentId);
 	},

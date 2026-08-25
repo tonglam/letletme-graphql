@@ -22,6 +22,7 @@ import {
 	loadManagerScores,
 	unavailableManagerScore,
 	type OfficialManagerScoreRow,
+	type ManagerScoreLoad,
 } from "./manager-score";
 import { eventsService } from "../events/service";
 import type { EntryEventPick, EntryEventTransferRow } from "./repository";
@@ -538,6 +539,7 @@ export const entryLiveBatchService = {
 			teams?: Promise<Team[]>;
 			picksByEntry?: Promise<Map<number, EntryEventPick>>;
 			tournamentId?: number;
+			managerScores?: ManagerScoreLoad;
 		}
 	): Promise<BatchLiveCalcResult> {
 		assertValidEntryBatch(entryIds);
@@ -561,7 +563,8 @@ export const entryLiveBatchService = {
 				eventId > 1
 					? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
 					: Promise.resolve(new Map<number, EntryEventResult>()),
-				loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
+				prefetched?.managerScores ??
+					loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
 				eventsService.getEventById(context, eventId).catch(() => null),
 			]);
 		// Manager headline availability is independent from lineup availability.

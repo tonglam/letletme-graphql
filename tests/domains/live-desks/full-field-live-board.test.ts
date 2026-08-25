@@ -1,0 +1,200 @@
+import { describe, expect, it } from "bun:test";
+import type { ManagerScoreLoad } from "../../../src/domains/entry-live/manager-score";
+import {
+	loadManagerScoresInChunks,
+	mergeManagerScoreLoads,
+	splitManagerLiveEntryIds,
+} from "../../../src/domains/entry-live/manager-score-batches";
+import type { ManagerLiveScoreRow } from "../../../src/infra/manager-live-client";
+import { buildFullFieldLiveBoardIndex } from "../../../src/domains/live-desks/full-field-live-board";
+import {
+	queryEntryLiveCompetitionBoard,
+	type EntryLiveCompetitionBoardRequest,
+} from "../../../src/domains/live-desks/entry-live-competition-board";
+
+const makeManagerRow = (entryId: number, eventPoints: number): ManagerLiveScoreRow => ({
+	season: "2026",
+	eventId: 38,
+	entryId,
+	eventPoints,
+	netEventPoints: eventPoints,
+	totalPoints: 100 + eventPoints,
+	totalScope: "OVERALL",
+	eventRank: null,
+	overallRank: entryId,
+	leagueRank: entryId,
+	source: "FPL_CLASSIC_STANDINGS",
+	transferCost: 0,
+	eventPointSemantics: "ZERO_COST_EQUIVALENT",
+	revision: `manager:${entryId}`,
+	checkedAt: "2026-08-25T00:00:00.000Z",
+	upstreamUpdatedAt: "2026-08-25T00:00:00.000Z",
+	staleAt: "2026-08-25T00:01:00.000Z",
+});
+
+const makeLoad = (rows: ManagerLiveScoreRow[], expectedEntries: number): ManagerScoreLoad => ({
+	season: "2026",
+	rows: new Map(rows.map((row) => [row.entryId, row])),
+	errorCode: null,
+	managerRevision: `load:${rows.length}`,
+	dataAvailability: "FRESH",
+	servedFrom: "REDIS",
+	refreshQueued: false,
+	missingEntryIds: [],
+	checkedAt: "2026-08-25T00:00:00.000Z",
+	nextRefreshAt: "2026-08-25T00:00:30.000Z",
+	tournamentCoverage: {
+		rosterRevision: "roster",
+		expectedEntries,
+		resolvedEntries: expectedEntries,
+		fullyFetchedAt: "2026-08-25T00:00:00.000Z",
+		managerRevision: `coverage:${expectedEntries}`,
+		error: null,
+		state: "COMPLETE",
+	},
+});
+
+describe("full-field live board bounded manager loads", () => {
+	it("splits every supported boundary into requests of at most 500", () => {
+		for (const size of [499, 500, 501, 1567]) {
+			const chunks = splitManagerLiveEntryIds(
+				Array.from({ length: size }, (_, index) => size - index)
+			);
+			expect(chunks.every((chunk) => chunk.length <= 500)).toBe(true);
+			expect(chunks.flat()).toEqual(Array.from({ length: size }, (_, index) => index + 1));
+		}
+	});
+
+	it("merges bounded loads without claiming complete coverage when a row is missing", () => {
+		const merged = mergeManagerScoreLoads([makeLoad([makeManagerRow(1, 10)], 2)], [1, 2]);
+		expect(merged.rows.size).toBe(1);
+		expect(merged.missingEntryIds).toEqual([2]);
+		expect(merged.dataAvailability).toBe("PARTIAL");
+		expect(merged.tournamentCoverage?.state).toBe("PARTIAL");
+	});
+
+	it("loads 1,567 managers two chunks at a time and merges all rows", async () => {
+		const entryIds = Array.from({ length: 1567 }, (_, index) => index + 1);
+		let active = 0;
+		let peak = 0;
+		const merged = await loadManagerScoresInChunks(entryIds, async (chunk) => {
+			active += 1;
+			peak = Math.max(peak, active);
+			await Promise.resolve();
+			active -= 1;
+			return makeLoad(
+				chunk.map((entryId) => makeManagerRow(entryId, entryId % 20)),
+				entryIds.length
+			);
+		});
+		expect(peak).toBeLessThanOrEqual(2);
+		expect(merged.rows.size).toBe(1567);
+		expect(merged.missingEntryIds).toEqual([]);
+		expect(merged.tournamentCoverage?.state).toBe("COMPLETE");
+	});
+});
+
+describe("full-field live board index", () => {
+	it("ranks the complete field and applies ownership filters before page calculation", () => {
+		const entryIds = [1, 2, 3];
+		const players = new Map(
+			Array.from({ length: 45 }, (_, index) => [
+				index + 100,
+				{
+					id: index + 100,
+					code: index + 100,
+					webName: `Player ${index + 100}`,
+					firstName: null,
+					secondName: null,
+					teamId: index % 2 === 0 ? 1 : 2,
+					position: 2,
+					price: 50,
+					startPrice: 50,
+					totalPoints: 0,
+					selectedByPercent: null,
+				},
+			])
+		);
+		const picks = new Map(
+			entryIds.map((entryId) => [
+				entryId,
+				{
+					entryId,
+					eventId: 38,
+					chip: entryId === 1 ? "wildcard" : null,
+					transfersCost: 0,
+					picks: Array.from({ length: 15 }, (_, index) => ({
+						eventId: 38,
+						entryId,
+						element: 100 + index,
+						position: index + 1,
+						multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+						isCaptain: index === 0,
+						isViceCaptain: index === 1,
+					})),
+				},
+			])
+		);
+		const entries = new Map(
+			entryIds.map((id) => [
+				id,
+				{
+					id,
+					entryName: `Team ${id}`,
+					playerName: `Manager ${id}`,
+					region: null,
+					startedEvent: 1,
+					overallPoints: 100,
+					overallRank: id,
+					bank: 0,
+					teamValue: 1000,
+					totalTransfers: 0,
+					lastEventId: 37,
+					lastOverallPoints: 90,
+					lastOverallRank: id,
+					lastTeamValue: 1000,
+					lastBank: 0,
+				},
+			])
+		);
+		const board = buildFullFieldLiveBoardIndex({
+			season: "2026",
+			eventId: 38,
+			tournamentId: 8,
+			coreRevision: "core",
+			playerRevision: "live",
+			managerRevision: "manager",
+			rosterRevision: "roster",
+			allEntryIds: entryIds,
+			entries,
+			picks,
+			players,
+			managerRows: new Map([
+				[1, makeManagerRow(1, 30)],
+				[2, makeManagerRow(2, 20)],
+				[3, makeManagerRow(3, 10)],
+			]),
+			requireNet: false,
+		});
+		const request: EntryLiveCompetitionBoardRequest = {
+			entryId: 1,
+			tournamentId: 8,
+			eventId: 38,
+			page: 1,
+			pageSize: 20,
+			sort: "RANK",
+			direction: "ASC",
+			search: "",
+			chips: ["WILDCARD"],
+			captainPlayerIds: [],
+			ownership: null,
+			teamCountRules: [],
+			expectedBoardRevision: null,
+		};
+		const page = queryEntryLiveCompetitionBoard(board, request);
+		expect(board.rows.map((row) => row.rank)).toEqual([1, 2, 3]);
+		expect(page.filteredEntries).toBe(1);
+		expect(page.rows[0]?.entry).toBe(1);
+		expect(page.rows[0]?.score.source).toBe("FPL_CLASSIC_STANDINGS");
+	});
+});

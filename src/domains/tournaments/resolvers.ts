@@ -262,6 +262,20 @@ export const tournamentsResolvers = {
 			context: GraphQLContext
 		): Promise<TournamentInfo[]> => tournamentsService.getEntryTournaments(context, args.entryId),
 
+		entryParticipatingTournaments: async (
+			_parent: unknown,
+			args: EntryTournamentsArgs,
+			context: GraphQLContext
+		): Promise<TournamentInfo[]> =>
+			tournamentsService.getEntryParticipatingTournaments(context, args.entryId),
+
+		manageableTournaments: async (
+			_parent: unknown,
+			args: EntryTournamentsArgs,
+			context: GraphQLContext
+		): Promise<TournamentInfo[]> =>
+			tournamentsService.getManageableTournaments(context, args.entryId),
+
 		tournament: async (
 			_parent: unknown,
 			args: TournamentMetadataArgs,

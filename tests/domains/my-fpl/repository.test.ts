@@ -1463,7 +1463,7 @@ describe("My FPL review repository", () => {
 		).toBe(true);
 	});
 
-	it("lets an attested platform administrator use My FPL competition roots as a non-member", async () => {
+	it("keeps platform administrator management separate from My FPL membership", async () => {
 		const fixture = makeFixture({
 			member: false,
 			membershipIds: [],
@@ -1483,13 +1483,14 @@ describe("My FPL review repository", () => {
 		});
 		fixture.context.principal = { ...verifiedPrincipal, platformAdmin: true };
 
-		const desk = await fixture.repository.loadCompetitionsDesk(fixture.context, 7);
-		expect(desk.tournaments.map((item) => item.id)).toEqual([7]);
-		const status = await fixture.repository.loadCompetitionSetupStatus(fixture.context, 7);
-		expect(status.ready).toBe(true);
-		expect(
-			fixture.queries.some((query) => query.sql.includes("FROM competition.tournament_entries"))
-		).toBe(false);
+		await expect(fixture.repository.loadCompetitionsDesk(fixture.context, 7)).rejects.toMatchObject(
+			{
+				extensions: { code: "FORBIDDEN" },
+			}
+		);
+		await expect(
+			fixture.repository.loadCompetitionSetupStatus(fixture.context, 7)
+		).rejects.toMatchObject({ extensions: { code: "FORBIDDEN" } });
 	});
 
 	it("returns the competitions desk with aggregate and season-path readiness", async () => {

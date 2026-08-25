@@ -2297,15 +2297,6 @@ const assertTournamentMembership = async (
 	tournamentId: number,
 	entryId: number
 ): Promise<void> => {
-	if (
-		context.principal?.source === "website" &&
-		context.principal.platformAdmin === true &&
-		context.principal.fplEntryId === entryId &&
-		Boolean(context.principal.fplEntryVerifiedAt)
-	) {
-		(context.authorizedTournamentMemberships ??= new Set()).add(tournamentId);
-		return;
-	}
 	if (context.authorizedTournamentMemberships?.has(tournamentId)) return;
 	const result = await context.database.query(
 		`SELECT 1
@@ -2329,14 +2320,6 @@ const filterCurrentTournamentMemberships = async (
 	entryId: number,
 	tournaments: TournamentInfo[]
 ): Promise<TournamentInfo[]> => {
-	if (
-		context.principal?.source === "website" &&
-		context.principal.platformAdmin === true &&
-		context.principal.fplEntryId === entryId &&
-		Boolean(context.principal.fplEntryVerifiedAt)
-	) {
-		return tournaments;
-	}
 	const result = await context.database.query<DbTournamentMembershipRow>(
 		`SELECT tournament_id
 		 FROM (${CURRENT_TOURNAMENT_MEMBERSHIPS_SQL}) membership

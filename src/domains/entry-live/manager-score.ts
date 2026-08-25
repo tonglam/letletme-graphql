@@ -58,7 +58,7 @@ export type EventLiveScoreAuthority = {
 	checkedAt: string;
 };
 
-const REFRESH_SECONDS = 30;
+export const MANAGER_SCORE_REFRESH_SECONDS = 30;
 
 const ageSeconds = (checkedAt: string, now = Date.now()): number => {
 	const timestamp = Date.parse(checkedAt);
@@ -110,6 +110,7 @@ export async function loadManagerScores(
 		eventId,
 		entryIds,
 		tournamentId,
+		readMode: "CACHE_ONLY",
 		logger: context.logger,
 	});
 }
@@ -299,7 +300,7 @@ export function buildManagerScore(params: {
 	) {
 		const authority = params.eventLiveAuthority;
 		const checkedAt = authority.checkedAt;
-		const fresh = ageSeconds(checkedAt) <= REFRESH_SECONDS;
+		const fresh = ageSeconds(checkedAt) <= MANAGER_SCORE_REFRESH_SECONDS;
 		const effectiveTransferCost = suppliedTransferCost;
 		const eventPoints = detailEventPoints;
 		const netEventPoints = eventPoints - effectiveTransferCost;
@@ -334,8 +335,8 @@ export function buildManagerScore(params: {
 			revision: `event-live:${authority.revision}:lineup:${params.projectedLineup ? "projected" : "official"}:${eventPoints}:${effectiveTransferCost}:total:${totalPoints ?? "none"}:${totalPoints === null ? "UNKNOWN" : "OVERALL"}:rank:${row?.eventRank ?? "none"}:${row?.overallRank ?? "none"}:${row?.leagueRank ?? "none"}`,
 			checkedAt,
 			upstreamUpdatedAt: checkedAt,
-			staleAt: plusSeconds(checkedAt, REFRESH_SECONDS * 3),
-			nextRefreshAt: params.nextRefreshAt ?? plusSeconds(checkedAt, REFRESH_SECONDS),
+			staleAt: plusSeconds(checkedAt, MANAGER_SCORE_REFRESH_SECONDS * 3),
+			nextRefreshAt: params.nextRefreshAt ?? plusSeconds(checkedAt, MANAGER_SCORE_REFRESH_SECONDS),
 			reconciliation,
 			reasonCodes: reasons,
 		};

@@ -2534,10 +2534,14 @@ const getTournamentSetupWarningSummariesByTournamentIds = async (
 	return summaries;
 };
 
-export const extractTournamentIds = (rows: DbTournamentEntryRow[]): number[] => {
+export const extractTournamentIds = (
+	rows: readonly { tournament_id: number | null }[]
+): number[] => {
 	const unique = new Set<number>();
 	rows.forEach((row) => {
-		unique.add(row.tournament_id);
+		if (Number.isSafeInteger(row.tournament_id) && Number(row.tournament_id) > 0) {
+			unique.add(Number(row.tournament_id));
+		}
 	});
 	return [...unique];
 };
@@ -2872,6 +2876,11 @@ interface TournamentsRepository {
 		tournamentId: number
 	): Promise<TournamentParticipant[]>;
 	getEntryTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]>;
+	getEntryParticipatingTournaments(
+		context: GraphQLContext,
+		entryId: number
+	): Promise<TournamentInfo[]>;
+	getManageableTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]>;
 	getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]>;
 	getTournamentEntryIdsUncached(context: GraphQLContext, tournamentId: number): Promise<number[]>;
 	getTournamentEventResults(
@@ -3452,6 +3461,83 @@ export const tournamentsRepository: TournamentsRepository = {
 			await writeQueryCache(context, cacheKey, JSON.stringify(tournamentsWithWarnings), ttlSeconds);
 		}
 		return tournamentsWithWarnings;
+	},
+
+	async getEntryParticipatingTournaments(
+		context: GraphQLContext,
+		entryId: number
+	): Promise<TournamentInfo[]> {
+		const [rosterMemberships, officialLeagueMemberships] = await Promise.all([
+			context.data
+				.read("competition.tournament_entries")
+				.select("tournament_id")
+				.eq("entry_id", entryId),
+			context.data
+				.read("competition.entry_leagues_with_tournament")
+				.select("tournament_id")
+				.eq("entry_id", entryId),
+		]);
+		if (rosterMemberships.error || officialLeagueMemberships.error) {
+			context.logger.error(
+				{
+					entryId,
+					rosterError: rosterMemberships.error,
+					officialLeagueError: officialLeagueMemberships.error,
+				},
+				"Failed to fetch participating tournaments"
+			);
+			throw new Error("Failed to fetch participating tournaments");
+		}
+		const tournamentIds = extractTournamentIds([
+			...((rosterMemberships.data as DbTournamentEntryRow[] | null) ?? []),
+			...((officialLeagueMemberships.data as { tournament_id: number | null }[] | null) ?? []).map(
+				(row) => ({ tournament_id: row.tournament_id })
+			),
+		]);
+		if (tournamentIds.length === 0) return [];
+		const { data, error } = await context.data
+			.read("competition.tournaments")
+			.select(TOURNAMENT_INFO_COLUMNS)
+			.in("id", tournamentIds)
+			.order("id", { ascending: true });
+		if (error) {
+			context.logger.error(
+				{ err: error, entryId },
+				"Failed to fetch participating tournament details"
+			);
+			throw new Error("Failed to fetch participating tournaments");
+		}
+		const tournaments = ((data as DbTournamentInfoRow[] | null) ?? []).map(mapTournamentInfo);
+		const warningSummariesByTournament = await getTournamentSetupWarningSummariesByTournamentIds(
+			context,
+			tournaments.map((tournament) => tournament.id)
+		);
+		return tournaments.map((tournament) => ({
+			...tournament,
+			warningSummaries: warningSummariesByTournament.get(tournament.id) ?? [],
+		}));
+	},
+
+	async getManageableTournaments(
+		context: GraphQLContext,
+		entryId: number
+	): Promise<TournamentInfo[]> {
+		const query = context.data.read("competition.tournaments").select(TOURNAMENT_INFO_COLUMNS);
+		if (!hasPlatformAdminAccess(context, entryId)) query.eq("admin_entry_id", entryId);
+		const { data, error } = await query.order("id", { ascending: true });
+		if (error) {
+			context.logger.error({ err: error, entryId }, "Failed to fetch manageable tournaments");
+			throw new Error("Failed to fetch manageable tournaments");
+		}
+		const tournaments = ((data as DbTournamentInfoRow[] | null) ?? []).map(mapTournamentInfo);
+		const warningSummariesByTournament = await getTournamentSetupWarningSummariesByTournamentIds(
+			context,
+			tournaments.map((tournament) => tournament.id)
+		);
+		return tournaments.map((tournament) => ({
+			...tournament,
+			warningSummaries: warningSummariesByTournament.get(tournament.id) ?? [],
+		}));
 	},
 
 	async getTournamentEntryIds(context: GraphQLContext, tournamentId: number): Promise<number[]> {
@@ -4456,18 +4542,18 @@ export const tournamentsRepository: TournamentsRepository = {
 							totalEntries: cachedBoard.totalEntries,
 						}
 					: null;
-				const allEntryIds = cached
+				const rosterEntryIds = cached
 					? []
 					: await tournamentsRepository.getTournamentEntryIdsUncached(context, tournamentId);
-				const { entryIds, deferredEntryIds } = cached
+				const { entryIds: boundedEntryIds, deferredEntryIds } = cached
 					? { entryIds: [], deferredEntryIds: [] }
-					: selectTournamentDeskEntryWindow(allEntryIds, entryId);
+					: selectTournamentDeskEntryWindow(rosterEntryIds, entryId);
 				const result = cached
 					? null
 					: await entryLiveBatchService.calcLivePointsForEntries(
 							context,
 							requestedEventId,
-							entryIds,
+							boundedEntryIds,
 							true,
 							{ tournamentId }
 						);
@@ -4478,7 +4564,7 @@ export const tournamentsRepository: TournamentsRepository = {
 						...(result?.errors.map((error) => error.entryId) ?? []),
 						...deferredEntryIds,
 					],
-					totalEntries: allEntryIds.length,
+					totalEntries: rosterEntryIds.length,
 				};
 				live = {
 					eventId: requestedEventId,
