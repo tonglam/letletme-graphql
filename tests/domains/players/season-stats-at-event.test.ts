@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { resolvePlayerStatsContext } from "../../../src/domains/players/season-stats-at-event";
+import {
+	resolvePlayerStatsContext,
+	resolvePlayerStatsFreshnessBudgetMs,
+} from "../../../src/domains/players/season-stats-at-event";
 import {
 	buildCorePublication,
 	buildSnapshotContext,
@@ -33,9 +36,10 @@ const queryBuilder = (rows: unknown[]) => {
 
 const installPlayerStatsReads = (
 	context: ReturnType<typeof buildSnapshotContext>,
-	core: ReturnType<typeof buildTestCoreData>
+	core: ReturnType<typeof buildTestCoreData>,
+	sourceCheckedAt = new Date().toISOString()
 ) => {
-	const timestamp = new Date().toISOString();
+	const publishedAt = new Date().toISOString();
 	const maxEvent = Math.max(
 		0,
 		...core.events.filter((event) => event.finished || event.isCurrent).map((event) => event.id)
@@ -43,11 +47,11 @@ const installPlayerStatsReads = (
 	const publications = Array.from({ length: maxEvent }, (_, index) => ({
 		event_id: index + 1,
 		revision: "11",
-		source_checked_at: timestamp,
-		published_at: timestamp,
+		source_checked_at: sourceCheckedAt,
+		published_at: publishedAt,
 		row_count: core.players.length,
 		expected_row_count: core.players.length,
-		baseline_verified_at: timestamp,
+		baseline_verified_at: publishedAt,
 	}));
 	const snapshots = Array.from({ length: maxEvent }, (_, index) =>
 		core.players.map((player) => ({
@@ -69,6 +73,84 @@ const installPlayerStatsReads = (
 };
 
 describe("resolvePlayerStatsContext", () => {
+	it("aligns freshness with live and repair cadences only while lifecycle is healthy", () => {
+		const now = Date.parse("2026-08-25T11:20:00.000Z");
+		const observedAt = new Date(now - 30_000).toISOString();
+
+		expect(resolvePlayerStatsFreshnessBudgetMs({ state: "LIVE_ACTIVE", observedAt }, now)).toBe(
+			90_000
+		);
+		expect(resolvePlayerStatsFreshnessBudgetMs({ state: "DAY_SETTLING", observedAt }, now)).toBe(
+			90_000
+		);
+		for (const state of ["PICKS_SYNC", "BETWEEN_FIXTURES", "GW_REVIEW"] as const) {
+			expect(resolvePlayerStatsFreshnessBudgetMs({ state, observedAt }, now)).toBe(360_000);
+		}
+		expect(
+			resolvePlayerStatsFreshnessBudgetMs(
+				{ state: "GW_REVIEW", observedAt: new Date(now - 120_001).toISOString() },
+				now
+			)
+		).toBe(60_000);
+		expect(resolvePlayerStatsFreshnessBudgetMs(null, now)).toBe(60_000);
+	});
+
+	it("keeps a five-minute repair publication available during a healthy GW review", async () => {
+		const now = Date.now();
+		const publication = buildCorePublication("2627", 7, buildTestCoreData(3));
+		const context = buildSnapshotContext(new TestRedis(publication), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						event_id: 3,
+						state: "GW_REVIEW",
+						observed_at: new Date(now - 30_000),
+						last_changed_at: new Date(now - 60_000),
+						next_refresh_at: new Date(now + 30_000),
+						live_revision: "7",
+						publication_id: "live-7",
+						source_checked_at: new Date(now - 120_000),
+					},
+				],
+			}),
+		});
+		installPlayerStatsReads(context, buildTestCoreData(3), new Date(now - 120_000).toISOString());
+
+		await expect(resolvePlayerStatsContext(context)).resolves.toMatchObject({
+			status: "AVAILABLE",
+			asOfEventId: 3,
+			rowCount: 220,
+			expectedRowCount: 220,
+		});
+	});
+
+	it("keeps the same two-minute-old publication stale while matches are live", async () => {
+		const now = Date.now();
+		const publication = buildCorePublication("2627", 7, buildTestCoreData(3));
+		const context = buildSnapshotContext(new TestRedis(publication), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						event_id: 3,
+						state: "LIVE_ACTIVE",
+						observed_at: new Date(now - 30_000),
+						last_changed_at: new Date(now - 60_000),
+						next_refresh_at: new Date(now + 30_000),
+						live_revision: "7",
+						publication_id: "live-7",
+						source_checked_at: new Date(now - 120_000),
+					},
+				],
+			}),
+		});
+		installPlayerStatsReads(context, buildTestCoreData(3), new Date(now - 120_000).toISOString());
+
+		await expect(resolvePlayerStatsContext(context)).resolves.toMatchObject({
+			status: "STALE",
+			asOfEventId: 3,
+		});
+	});
+
 	it("uses the request-pinned current event without querying a second authority", async () => {
 		const publication = buildCorePublication("2627", 7, buildTestCoreData(3));
 		const context = buildSnapshotContext(new TestRedis(publication));
