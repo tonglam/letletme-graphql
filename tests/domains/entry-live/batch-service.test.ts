@@ -1,8 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	entryLiveBatchService,
-	resultIsFreshForFinalization,
-} from "../../../src/domains/entry-live/batch-service";
+import { entryLiveBatchService } from "../../../src/domains/entry-live/batch-service";
 import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
 import { entriesService } from "../../../src/domains/entries/service";
 import { eventsService } from "../../../src/domains/events/service";
@@ -120,12 +117,6 @@ const makeMockContext = (options: {
 };
 
 describe("entryLiveBatchService.calcLivePointsForEntries", () => {
-	it("accepts final rows only when they were published after data_checked", () => {
-		const result = { richSyncedAt: "2026-08-24T00:09:00.000Z" } as never;
-		expect(resultIsFreshForFinalization(result, "2026-08-24T00:08:59.000Z")).toBe(true);
-		expect(resultIsFreshForFinalization(result, "2026-08-24T00:09:01.000Z")).toBe(false);
-		expect(resultIsFreshForFinalization(result, null)).toBe(false);
-	});
 	it("returns empty results for empty entry IDs", async () => {
 		const context = makeMockContext({});
 		const result = await entryLiveBatchService.calcLivePointsForEntries(context, 33, []);
@@ -317,12 +308,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			return new Map();
 		};
 		eventsService.getEventById = async () =>
-			({
-				id: 2,
-				finished: true,
-				dataChecked: true,
-				dataCheckedAt: "2026-08-24T00:08:00.000Z",
-			}) as never;
+			({ id: 2, finished: true, dataChecked: true }) as never;
 
 		try {
 			const result = await entryLiveBatchService.calcLivePointsForEntries(
@@ -386,12 +372,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			return new Map();
 		};
 		eventsService.getEventById = async () =>
-			({
-				id: 2,
-				finished: true,
-				dataChecked: true,
-				dataCheckedAt: "2026-08-24T00:08:00.000Z",
-			}) as never;
+			({ id: 2, finished: true, dataChecked: true }) as never;
 
 		try {
 			await entryLiveBatchService.calcLivePointsForEntries(makeMockContext({}), 2, [1001]);
@@ -404,7 +385,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		}
 	});
 
-	it("uses the projected automatic substitute and vice-captain in the live headline", async () => {
+	it("uses provisional full-time fixtures for live auto-subs and vice-captain scoring", async () => {
 		const originalEntries = entriesService.getEntriesByIds;
 		const originalTransfers = entryLiveRepository.getEntryEventTransfersByIds;
 		const core = buildTestCoreData(1);

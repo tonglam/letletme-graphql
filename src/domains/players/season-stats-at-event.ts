@@ -1,6 +1,10 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCoreEventSnapshot } from "../../infra/data-snapshot";
+import {
+	getCoreEventSnapshot,
+	getLiveLifecycleStatus,
+	type LiveLifecycleStatus,
+} from "../../infra/data-snapshot";
 import { QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
 import { getCurrentSeason } from "../../infra/season";
 
@@ -19,6 +23,62 @@ export type PlayerStatsContext = {
 	rowCount: number;
 	expectedRowCount: number;
 };
+
+const PLAYER_STATS_DEFAULT_FRESHNESS_MS = 60_000;
+const PLAYER_STATS_LIVE_FRESHNESS_MS = 90_000;
+const PLAYER_STATS_REPAIR_FRESHNESS_MS = 6 * 60_000;
+const LIVE_LIFECYCLE_HEARTBEAT_FALLBACK_MAX_AGE_MS = 2 * 60_000;
+const LIVE_LIFECYCLE_HEARTBEAT_GRACE_MS = 2 * 60_000;
+const LIVE_LIFECYCLE_HEARTBEAT_HARD_MAX_AGE_MS = 15 * 60_000;
+
+/**
+ * Match the read-side freshness budget to the producer's lifecycle cadence.
+ * The persisted next refresh deadline is authoritative, but only within a
+ * bounded window. A stale or malformed lifecycle heartbeat never relaxes the
+ * fail-closed default.
+ */
+export function resolvePlayerStatsFreshnessBudgetMs(
+	lifecycle: Pick<LiveLifecycleStatus, "state" | "observedAt" | "nextRefreshAt"> | null,
+	nowMs = Date.now()
+): number {
+	if (!lifecycle) return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
+	const observedAtMs = Date.parse(lifecycle.observedAt);
+	const lifecycleAgeMs = nowMs - observedAtMs;
+	if (!Number.isFinite(observedAtMs) || lifecycleAgeMs < 0) {
+		return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
+	}
+
+	let heartbeatExpiresAtMs = observedAtMs + LIVE_LIFECYCLE_HEARTBEAT_FALLBACK_MAX_AGE_MS;
+	if (lifecycle.nextRefreshAt) {
+		const nextRefreshAtMs = Date.parse(lifecycle.nextRefreshAt);
+		const scheduledDelayMs = nextRefreshAtMs - observedAtMs;
+		const maxScheduledDelayMs =
+			LIVE_LIFECYCLE_HEARTBEAT_HARD_MAX_AGE_MS - LIVE_LIFECYCLE_HEARTBEAT_GRACE_MS;
+		if (
+			Number.isFinite(nextRefreshAtMs) &&
+			scheduledDelayMs >= 0 &&
+			scheduledDelayMs <= maxScheduledDelayMs
+		) {
+			heartbeatExpiresAtMs = Math.min(
+				nextRefreshAtMs + LIVE_LIFECYCLE_HEARTBEAT_GRACE_MS,
+				observedAtMs + LIVE_LIFECYCLE_HEARTBEAT_HARD_MAX_AGE_MS
+			);
+		}
+	}
+	if (nowMs > heartbeatExpiresAtMs) return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
+
+	if (lifecycle.state === "LIVE_ACTIVE" || lifecycle.state === "DAY_SETTLING") {
+		return PLAYER_STATS_LIVE_FRESHNESS_MS;
+	}
+	if (
+		lifecycle.state === "PICKS_SYNC" ||
+		lifecycle.state === "BETWEEN_FIXTURES" ||
+		lifecycle.state === "GW_REVIEW"
+	) {
+		return PLAYER_STATS_REPAIR_FRESHNESS_MS;
+	}
+	return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
+}
 
 export type PlayerSeasonStatsAtEvent = {
 	elementId: number;
@@ -249,8 +309,11 @@ async function resolvePlayerStatsContextUncached(
 	if (context.currentSeason.lifecycleState === "preseason") {
 		return publicationContext(season, event.id, publication, "PRESEASON");
 	}
-	const sourceAge = Date.now() - Date.parse(header.sourceCheckedAt);
-	if (!event.finished && (!Number.isFinite(sourceAge) || sourceAge > 60_000)) {
+	const nowMs = Date.now();
+	const lifecycle = event.finished ? null : await getLiveLifecycleStatus(context, event.id);
+	const freshnessBudgetMs = resolvePlayerStatsFreshnessBudgetMs(lifecycle, nowMs);
+	const sourceAge = nowMs - Date.parse(header.sourceCheckedAt);
+	if (!event.finished && (!Number.isFinite(sourceAge) || sourceAge > freshnessBudgetMs)) {
 		return publicationContext(season, event.id, publication, "STALE");
 	}
 	return header;

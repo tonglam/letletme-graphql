@@ -100,19 +100,6 @@ const parseNullableFloat = (value: string | null | undefined): number | null => 
 	return Number.isFinite(parsed) ? parsed : null;
 };
 
-export const resultIsFreshForFinalization = (
-	result: EntryEventResult,
-	dataCheckedAt: string | null | undefined
-): boolean => {
-	const resultTimestamp = Date.parse(result.richSyncedAt);
-	const finalizationTimestamp = Date.parse(dataCheckedAt ?? "");
-	return (
-		Number.isFinite(resultTimestamp) &&
-		Number.isFinite(finalizationTimestamp) &&
-		resultTimestamp >= finalizationTimestamp
-	);
-};
-
 const buildFinalManagerScoreRow = (
 	season: string,
 	eventId: number,
@@ -449,7 +436,7 @@ const computeSingleEntry = (
 	});
 
 	const isBenchBoost = chip === "BENCH_BOOST";
-	// FPL publishes the final automatic_subs and effective captain only when the
+	// FPL publishes final automatic_subs and the effective captain only when the
 	// Gameweek settles. Until then, project the same bench-order and formation
 	// rules from the revision-pinned live player payload. Final rows continue to
 	// use the official multipliers unchanged.
@@ -586,20 +573,16 @@ export const entryLiveBatchService = {
 			// FPL can publish automatic_subs and the effective captain after the
 			// event flips to finished/data_checked. Read through a finalization-scoped
 			// cache key so the canonical picks are refreshed once, then remain stable.
-			const candidateResults = await entriesService.getEntryEventResultsByEntryIds(
+			const finalizedResults = await entriesService.getEntryEventResultsByEntryIds(
 				context,
 				entryIds,
 				eventId
 			);
-			finalizedResultsByEntry = new Map(
-				[...candidateResults].filter(([, result]) =>
-					resultIsFreshForFinalization(result, event?.dataCheckedAt)
-				)
-			);
-			const durableEntryIds = entryIds.filter((entryId) => finalizedResultsByEntry.has(entryId));
-			const settlingEntryIds = entryIds.filter((entryId) => !finalizedResultsByEntry.has(entryId));
+			finalizedResultsByEntry = finalizedResults;
+			const durableEntryIds = entryIds.filter((entryId) => finalizedResults.has(entryId));
+			const settlingEntryIds = entryIds.filter((entryId) => !finalizedResults.has(entryId));
 			const durableResults = durableEntryIds
-				.map((entryId) => finalizedResultsByEntry.get(entryId))
+				.map((entryId) => finalizedResults.get(entryId))
 				.filter((result): result is EntryEventResult => result !== undefined);
 			const [durablePicks, settlingPicks] = await Promise.all([
 				durableEntryIds.length > 0

@@ -445,8 +445,8 @@ export const gameweekService = {
 			let hauls: GameweekBoardPlayer[] = [];
 
 			if (!scheduled) {
+				const allowDurableFallback = event.finished === true && event.dataChecked === true;
 				try {
-					const allowDurableFallback = event.finished === true && event.dataChecked === true;
 					const boards = await measureRequestStage(
 						context.requestTiming,
 						"gameweek.boards.snapshot",

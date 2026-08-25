@@ -14,26 +14,6 @@ import {
 	TestRedis,
 } from "../../helpers/data-publication";
 
-describe("assertValidLiveExplainBatch", () => {
-	it("accepts a unique fifteen-player squad", () => {
-		expect(() =>
-			assertValidLiveExplainBatch(
-				Array.from({ length: MAX_LIVE_EXPLAIN_BATCH }, (_, index) => index + 1)
-			)
-		).not.toThrow();
-	});
-
-	it("rejects oversized, duplicate, and non-positive player IDs", () => {
-		expect(() =>
-			assertValidLiveExplainBatch(
-				Array.from({ length: MAX_LIVE_EXPLAIN_BATCH + 1 }, (_, index) => index + 1)
-			)
-		).toThrow("player limit");
-		expect(() => assertValidLiveExplainBatch([1, 1])).toThrow("unique positive integers");
-		expect(() => assertValidLiveExplainBatch([0])).toThrow("unique positive integers");
-	});
-});
-
 const withReadRows = (context: ReturnType<typeof buildSnapshotContext>, rowCount = 11): void => {
 	context.data = {
 		read: (model: string) => {
@@ -60,50 +40,23 @@ const withReadRows = (context: ReturnType<typeof buildSnapshotContext>, rowCount
 	} as never;
 };
 
-describe("live gameweek boards", () => {
-	it("allows the settled PostgreSQL fallback only when explicitly enabled", async () => {
-		const baseCore = buildTestCoreData(1);
-		const core = buildTestCoreData(1, {
-			events: baseCore.events.map((event) =>
-				event.id === 1
-					? {
-							...event,
-							finished: true,
-							dataChecked: true,
-							dataCheckedAt: "2026-08-20T02:00:00.000Z",
-						}
-					: event
-			),
-		});
-		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
-		withReadRows(context);
-
-		await expect(liveService.getGameweekBoards(context, 1)).rejects.toThrow(
-			"Live snapshot metadata is unavailable"
-		);
-
-		const boards = await liveService.getGameweekBoards(context, 1, {
-			allowDurableFallback: true,
-		});
-
-		expect(boards.source).toBe("DURABLE_DB");
-		expect(boards.meta).toBeNull();
-		expect(boards.dreamTeam).toHaveLength(11);
-		expect(boards.dreamTeam[0]).toMatchObject({ playerId: 1, totalPoints: 12 });
+describe("assertValidLiveExplainBatch", () => {
+	it("accepts a unique fifteen-player squad", () => {
+		expect(() =>
+			assertValidLiveExplainBatch(
+				Array.from({ length: MAX_LIVE_EXPLAIN_BATCH }, (_, index) => index + 1)
+			)
+		).not.toThrow();
 	});
 
-	it("rejects an incomplete settled PostgreSQL dream team", async () => {
-		const core = buildTestCoreData(1, {
-			events: buildTestCoreData(1).events.map((event) =>
-				event.id === 1 ? { ...event, finished: true, dataChecked: true } : event
-			),
-		});
-		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
-		withReadRows(context, 10);
-
-		await expect(
-			liveService.getGameweekBoards(context, 1, { allowDurableFallback: true })
-		).rejects.toThrow("Durable gameweek board is incomplete");
+	it("rejects oversized, duplicate, and non-positive player IDs", () => {
+		expect(() =>
+			assertValidLiveExplainBatch(
+				Array.from({ length: MAX_LIVE_EXPLAIN_BATCH + 1 }, (_, index) => index + 1)
+			)
+		).toThrow("player limit");
+		expect(() => assertValidLiveExplainBatch([1, 1])).toThrow("unique positive integers");
+		expect(() => assertValidLiveExplainBatch([0])).toThrow("unique positive integers");
 	});
 });
 
@@ -155,5 +108,44 @@ describe("liveService.getPlayerLive", () => {
 			liveRepository.getTargetedLiveRead = originalTargeted;
 			playersRepository.getPlayerById = originalPlayer;
 		}
+	});
+});
+
+describe("live gameweek boards", () => {
+	it("allows the settled PostgreSQL fallback only when explicitly enabled", async () => {
+		const core = buildTestCoreData(1, {
+			events: buildTestCoreData(1).events.map((event) =>
+				event.id === 1 ? { ...event, finished: true, dataChecked: true } : event
+			),
+		});
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
+		withReadRows(context);
+
+		await expect(liveService.getGameweekBoards(context, 1)).rejects.toThrow(
+			"Live snapshot metadata is unavailable"
+		);
+
+		const boards = await liveService.getGameweekBoards(context, 1, {
+			allowDurableFallback: true,
+		});
+
+		expect(boards.source).toBe("DURABLE_DB");
+		expect(boards.meta).toBeNull();
+		expect(boards.dreamTeam).toHaveLength(11);
+		expect(boards.dreamTeam[0]).toMatchObject({ playerId: 1, totalPoints: 12 });
+	});
+
+	it("rejects an incomplete settled PostgreSQL dream team", async () => {
+		const core = buildTestCoreData(1, {
+			events: buildTestCoreData(1).events.map((event) =>
+				event.id === 1 ? { ...event, finished: true, dataChecked: true } : event
+			),
+		});
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
+		withReadRows(context, 10);
+
+		await expect(
+			liveService.getGameweekBoards(context, 1, { allowDurableFallback: true })
+		).rejects.toThrow("Durable gameweek board is incomplete");
 	});
 });

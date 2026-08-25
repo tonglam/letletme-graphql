@@ -1,12 +1,18 @@
 import type { ElementEventResultData } from "./calc-service";
 
+const hasCompletedFixtures = (pick: ElementEventResultData): boolean =>
+	pick.isGwFinished || pick.playStatus === 0 || pick.bgw;
+
 /** FPL-rule provisional substitution projection shared by live entry and H2H desks. */
 export const applyAutoSubs = (pickList: ElementEventResultData[], chip: string): void => {
 	if (chip === "BENCH_BOOST") return;
 
 	const starters = pickList.filter((pick) => pick.position <= 11);
 	const bench = pickList
-		.filter((pick) => pick.position > 11)
+		// During settling, FPL can publish part of the official substitution
+		// result before the event becomes non-provisional. Never consume a bench
+		// player whose official multiplier has already made them active.
+		.filter((pick) => pick.position > 11 && pick.multiplier === 0)
 		.sort((left, right) => left.position - right.position);
 	const nonPlayingStarters = starters.filter(
 		(pick) => pick.minutes === 0 && pick.multiplier > 0 && (pick.isGwFinished || pick.bgw)
@@ -29,7 +35,10 @@ export const applyAutoSubs = (pickList: ElementEventResultData[], chip: string):
 	};
 
 	for (const benchPlayer of bench) {
-		if (benchPlayer.minutes === 0) continue;
+		// Keep a pending first-choice substitute as the live projection. Move to
+		// the next bench player only after this player's own fixtures also finish
+		// without an appearance.
+		if (benchPlayer.minutes === 0 && hasCompletedFixtures(benchPlayer)) continue;
 		if (nonPlayingStarters.length === 0) break;
 
 		for (let index = 0; index < nonPlayingStarters.length; index += 1) {
@@ -50,17 +59,17 @@ export const applyAutoSubs = (pickList: ElementEventResultData[], chip: string):
 	}
 };
 
-const hasCompletedFixtures = (pick: ElementEventResultData): boolean =>
-	pick.isGwFinished || pick.playStatus === 0 || pick.bgw;
+const hasAppeared = (pick: ElementEventResultData): boolean => pick.minutes > 0;
 
 export const selectCaptainForScoring = (
 	picks: ElementEventResultData[]
 ): ElementEventResultData | null => {
 	const captain = picks.find((pick) => pick.isCaptain) ?? null;
 	if (!captain) return null;
-	if (captain.isPlayed) return captain;
+	if (hasAppeared(captain)) return captain;
 	if (!hasCompletedFixtures(captain)) return captain;
-	return picks.find((pick) => pick.isViceCaptain) ?? captain;
+	const viceCaptain = picks.find((pick) => pick.isViceCaptain) ?? null;
+	return viceCaptain && hasAppeared(viceCaptain) ? viceCaptain : null;
 };
 
 /** Project the lineup FPL will settle once all currently completed fixtures are final. */
@@ -74,14 +83,37 @@ export const projectLiveLineup = (
 } => {
 	applyAutoSubs(pickList, chip);
 	const isBenchBoost = chip === "BENCH_BOOST";
+	const captainMultiplier = chip === "TRIPLE_CAPTAIN" ? 3 : 2;
+	const originalCaptain = pickList.find((pick) => pick.isCaptain) ?? null;
+	const selectedCaptain = selectCaptainForScoring(pickList);
+	const captainForScoring =
+		selectedCaptain && (isBenchBoost || selectedCaptain.multiplier > 0) ? selectedCaptain : null;
+
+	// A confirmed non-appearance never keeps the captain bonus. Preserve one
+	// copy only when the no-show remains in the active lineup, then publish the
+	// effective captain multiplier on an appearing, active vice-captain.
+	if (
+		originalCaptain &&
+		!hasAppeared(originalCaptain) &&
+		hasCompletedFixtures(originalCaptain) &&
+		originalCaptain.multiplier > 1
+	) {
+		originalCaptain.multiplier = 1;
+	}
+	if (
+		captainForScoring &&
+		originalCaptain &&
+		captainForScoring.element !== originalCaptain.element
+	) {
+		captainForScoring.multiplier = captainMultiplier;
+	}
+
 	const activePicks = pickList.filter((pick) => {
 		const active = isBenchBoost || pick.multiplier > 0;
 		pick.pickActive = active;
 		pick.autoSub = !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
 		return active;
 	});
-	const captainForScoring = selectCaptainForScoring(pickList);
-	const captainMultiplier = chip === "TRIPLE_CAPTAIN" ? 3 : 2;
 	const captainIsActive =
 		captainForScoring !== null &&
 		activePicks.some((pick) => pick.element === captainForScoring.element);
