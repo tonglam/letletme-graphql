@@ -396,6 +396,8 @@ describe("projectLiveLineup", () => {
 		const vice = picks.find((pick) => pick.isViceCaptain)!;
 		expect(picks.find((pick) => pick.element === 13)?.autoSub).toBe(true);
 		expect(projection.captainForScoring?.element).toBe(vice.element);
+		expect(vice.multiplier).toBe(2);
+		expect(picks.find((pick) => pick.isCaptain)?.multiplier).toBe(0);
 		expect(projection.points).toBe(
 			projection.activePicks.reduce((sum, pick) => sum + pick.totalPoints, 0) + vice.totalPoints
 		);
@@ -405,6 +407,7 @@ describe("projectLiveLineup", () => {
 		const picks = projectedPicks();
 		const projection = projectLiveLineup(picks, "TRIPLE_CAPTAIN");
 		const vice = picks.find((pick) => pick.isViceCaptain)!;
+		expect(vice.multiplier).toBe(3);
 		expect(projection.points).toBe(
 			projection.activePicks.reduce((sum, pick) => sum + pick.totalPoints, 0) + vice.totalPoints * 2
 		);
@@ -420,6 +423,7 @@ describe("projectLiveLineup", () => {
 		const projection = projectLiveLineup(picks, "NONE");
 
 		expect(projection.captainForScoring).toBeNull();
+		expect(vice.multiplier).toBe(0);
 		expect(projection.points).toBe(
 			projection.activePicks.reduce((sum, pick) => sum + pick.totalPoints, 0)
 		);

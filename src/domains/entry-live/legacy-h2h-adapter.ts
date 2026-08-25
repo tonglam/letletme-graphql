@@ -83,14 +83,37 @@ export const projectLiveLineup = (
 } => {
 	applyAutoSubs(pickList, chip);
 	const isBenchBoost = chip === "BENCH_BOOST";
+	const captainMultiplier = chip === "TRIPLE_CAPTAIN" ? 3 : 2;
+	const originalCaptain = pickList.find((pick) => pick.isCaptain) ?? null;
+	const selectedCaptain = selectCaptainForScoring(pickList);
+	const captainForScoring =
+		selectedCaptain && (isBenchBoost || selectedCaptain.multiplier > 0) ? selectedCaptain : null;
+
+	// A confirmed non-appearance never keeps the captain bonus. Preserve one
+	// copy only when the no-show remains in the active lineup, then publish the
+	// effective captain multiplier on an appearing, active vice-captain.
+	if (
+		originalCaptain &&
+		!hasAppeared(originalCaptain) &&
+		hasCompletedFixtures(originalCaptain) &&
+		originalCaptain.multiplier > 1
+	) {
+		originalCaptain.multiplier = 1;
+	}
+	if (
+		captainForScoring &&
+		originalCaptain &&
+		captainForScoring.element !== originalCaptain.element
+	) {
+		captainForScoring.multiplier = captainMultiplier;
+	}
+
 	const activePicks = pickList.filter((pick) => {
 		const active = isBenchBoost || pick.multiplier > 0;
 		pick.pickActive = active;
 		pick.autoSub = !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
 		return active;
 	});
-	const captainForScoring = selectCaptainForScoring(pickList);
-	const captainMultiplier = chip === "TRIPLE_CAPTAIN" ? 3 : 2;
 	const captainIsActive =
 		captainForScoring !== null &&
 		activePicks.some((pick) => pick.element === captainForScoring.element);
