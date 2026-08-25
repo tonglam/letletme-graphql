@@ -167,6 +167,7 @@ export function buildManagerScore(params: {
 	detailEventPoints: number;
 	previousOverallPoints?: number | null;
 	eventLiveAuthority?: EventLiveScoreAuthority | null;
+	projectedLineup?: boolean;
 	nextRefreshAt?: string | null;
 }): {
 	score: LiveManagerScore;
@@ -286,8 +287,9 @@ export function buildManagerScore(params: {
 
 	// During an active or settling event, the only score authority is the
 	// revisioned official event/{event}/live player payload combined with the
-	// official 15-pick multipliers. Manager summary and league rows are retained
-	// solely as rank metadata and reconciliation evidence.
+	// official picks and, while provisional, the FPL automatic-substitution and
+	// captain-promotion rules. Manager summary and league rows are retained solely
+	// as rank metadata and reconciliation evidence.
 	if (
 		available &&
 		suppliedTransferCost !== null &&
@@ -303,8 +305,9 @@ export function buildManagerScore(params: {
 		const netEventPoints = eventPoints - effectiveTransferCost;
 		const totalPoints =
 			previousOverallPoints === null ? null : previousOverallPoints + netEventPoints;
-		const reconciliation: LiveManagerScoreReconciliation =
-			row && typeof row.eventPoints === "number"
+		const reconciliation: LiveManagerScoreReconciliation = params.projectedLineup
+			? "NOT_COMPARABLE"
+			: row && typeof row.eventPoints === "number"
 				? rowMatchesEventLiveScore(row, eventPoints, netEventPoints)
 					? "MATCHED"
 					: "SOURCE_SKEW"
@@ -328,7 +331,7 @@ export function buildManagerScore(params: {
 			source: "FPL_EVENT_LIVE",
 			state: !provisional ? "SETTLING" : fresh ? "FRESH" : "STALE",
 			eventPointSemantics: effectiveTransferCost === 0 ? "ZERO_COST_EQUIVALENT" : "GROSS",
-			revision: `event-live:${authority.revision}:${eventPoints}:${effectiveTransferCost}:total:${totalPoints ?? "none"}:${totalPoints === null ? "UNKNOWN" : "OVERALL"}:rank:${row?.eventRank ?? "none"}:${row?.overallRank ?? "none"}:${row?.leagueRank ?? "none"}`,
+			revision: `event-live:${authority.revision}:lineup:${params.projectedLineup ? "projected" : "official"}:${eventPoints}:${effectiveTransferCost}:total:${totalPoints ?? "none"}:${totalPoints === null ? "UNKNOWN" : "OVERALL"}:rank:${row?.eventRank ?? "none"}:${row?.overallRank ?? "none"}:${row?.leagueRank ?? "none"}`,
 			checkedAt,
 			upstreamUpdatedAt: checkedAt,
 			staleAt: plusSeconds(checkedAt, REFRESH_SECONDS * 3),

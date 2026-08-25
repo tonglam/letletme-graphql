@@ -1,12 +1,6 @@
 import type { ElementEventResultData } from "./calc-service";
 
-/**
- * Legacy H2H-only substitution adapter.
- *
- * FPL does not currently expose a usable live H2H aggregate. Keep the old
- * prediction logic isolated here so the single-entry, Classic, and
- * tournament paths cannot accidentally use it for their official headline.
- */
+/** FPL-rule provisional substitution projection shared by live entry and H2H desks. */
 export const applyAutoSubs = (pickList: ElementEventResultData[], chip: string): void => {
 	if (chip === "BENCH_BOOST") return;
 
@@ -67,4 +61,34 @@ export const selectCaptainForScoring = (
 	if (captain.isPlayed) return captain;
 	if (!hasCompletedFixtures(captain)) return captain;
 	return picks.find((pick) => pick.isViceCaptain) ?? captain;
+};
+
+/** Project the lineup FPL will settle once all currently completed fixtures are final. */
+export const projectLiveLineup = (
+	pickList: ElementEventResultData[],
+	chip: string
+): {
+	activePicks: ElementEventResultData[];
+	captainForScoring: ElementEventResultData | null;
+	points: number;
+} => {
+	applyAutoSubs(pickList, chip);
+	const isBenchBoost = chip === "BENCH_BOOST";
+	const activePicks = pickList.filter((pick) => {
+		const active = isBenchBoost || pick.multiplier > 0;
+		pick.pickActive = active;
+		pick.autoSub = !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
+		return active;
+	});
+	const captainForScoring = selectCaptainForScoring(pickList);
+	const captainMultiplier = chip === "TRIPLE_CAPTAIN" ? 3 : 2;
+	const captainIsActive =
+		captainForScoring !== null &&
+		activePicks.some((pick) => pick.element === captainForScoring.element);
+	const points =
+		activePicks.reduce((sum, pick) => sum + pick.totalPoints, 0) +
+		(captainIsActive && captainForScoring
+			? captainForScoring.totalPoints * (captainMultiplier - 1)
+			: 0);
+	return { activePicks, captainForScoring, points };
 };

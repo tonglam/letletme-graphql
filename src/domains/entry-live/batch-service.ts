@@ -16,6 +16,7 @@ import {
 	type ElementEventResultData,
 	type LiveCalcData,
 } from "./calc-service";
+import { projectLiveLineup } from "./legacy-h2h-adapter";
 import {
 	buildManagerScore,
 	loadManagerScores,
@@ -204,9 +205,16 @@ const getPlayStatusForTeam = (
 	if (!fixtures || fixtures.length === 0) {
 		return { started: true, finished: true, status: PLAY_STATUS.BLANK };
 	}
-	const anyStarted = fixtures.some((f) => f.started === true);
-	const anyFinished = fixtures.some((f) => f.finished === true);
-	const allFinished = fixtures.every((f) => f.finished === true);
+	// Full-time is published as `finishedProvisional` before the later
+	// data-checked `finished` flag. Auto-sub projections should start at full-time,
+	// while every fixture in a DGW must still be complete.
+	const fixtureIsComplete = (fixture: Fixture): boolean =>
+		fixture.finished === true || fixture.finishedProvisional === true;
+	const anyStarted = fixtures.some(
+		(fixture) => fixture.started === true || fixtureIsComplete(fixture)
+	);
+	const anyFinished = fixtures.some(fixtureIsComplete);
+	const allFinished = fixtures.every(fixtureIsComplete);
 
 	if (anyStarted && !allFinished) {
 		return { started: true, finished: false, status: PLAY_STATUS.PLAYING };
@@ -428,31 +436,32 @@ const computeSingleEntry = (
 	});
 
 	const isBenchBoost = chip === "BENCH_BOOST";
-	const activePicks: ElementEventResultData[] = [];
-
-	for (const pick of pickList) {
-		// Official FPL picks multipliers are the only source of truth for the
-		// current/final lineup. Never infer auto-subs or captain promotion from
-		// minutes, fixture state, bench order, or chip names in the live path.
-		const isActive = pick.multiplier > 0;
-		// After finalization, the official multiplier is authoritative for the
-		// display-only bench relation. During live/settling we deliberately leave
-		// this false instead of predicting an automatic substitution.
-		const autoSub = !provisional && !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
-		pick.pickActive = isActive;
-		pick.autoSub = autoSub;
-		if (isActive) {
-			activePicks.push(pick);
+	// FPL publishes final automatic_subs and the effective captain only when the
+	// Gameweek settles. Until then, project the same bench-order and formation
+	// rules from the revision-pinned live player payload. Final rows continue to
+	// use the official multipliers unchanged.
+	let activePicks: ElementEventResultData[];
+	let captainForScoring: ElementEventResultData | null;
+	let livePoints: number;
+	if (provisional) {
+		const projection = projectLiveLineup(pickList, chip);
+		activePicks = projection.activePicks;
+		captainForScoring = projection.captainForScoring;
+		livePoints = projection.points;
+	} else {
+		activePicks = [];
+		for (const pick of pickList) {
+			const isActive = pick.multiplier > 0;
+			pick.pickActive = isActive;
+			pick.autoSub = !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
+			if (isActive) activePicks.push(pick);
 		}
+		captainForScoring =
+			pickList.find((pick) => pick.multiplier >= 2) ??
+			pickList.find((pick) => pick.isCaptain) ??
+			null;
+		livePoints = activePicks.reduce((sum, pick) => sum + pick.totalPoints * pick.multiplier, 0);
 	}
-
-	const captainForScoring =
-		pickList.find((pick) => pick.multiplier >= 2) ??
-		pickList.find((pick) => pick.isCaptain) ??
-		null;
-	// The multiplier already carries captain/bench-boost/triple-captain
-	// semantics. Applying another captain multiplier would double-count points.
-	const livePoints = activePicks.reduce((sum, p) => sum + p.totalPoints * p.multiplier, 0);
 
 	const liveNetPoints = livePoints - transferCost;
 	const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
@@ -804,6 +813,7 @@ export const entryLiveBatchService = {
 								checkedAt: calcData.snapshot.checkedAt,
 							}
 						: null,
+					projectedLineup: provisional,
 					nextRefreshAt: managerScores.nextRefreshAt,
 				});
 				results.set(entryId, {
