@@ -42,11 +42,11 @@ const previous = (eventId: number): EntryEventResult => ({
 });
 
 describe("resolvePreviousEventBaseline", () => {
-	it("uses entry_infos only when it is exactly event N-1", () => {
+	it("prefers the canonical event N-1 result over a live-inclusive entry profile", () => {
 		expect(resolvePreviousEventBaseline(entry(), 7, previous(6))).toEqual({
-			overallPoints: 300,
-			overallRank: 10,
-			teamValue: 1010,
+			overallPoints: 250,
+			overallRank: 20,
+			teamValue: 1000,
 			resolved: true,
 		});
 	});
@@ -71,6 +71,15 @@ describe("resolvePreviousEventBaseline", () => {
 
 	it("marks an unknown historical gap as an unresolved display fallback", () => {
 		expect(resolvePreviousEventBaseline(entry({ lastEventId: 7 }), 6, null)).toEqual({
+			overallPoints: 0,
+			overallRank: null,
+			teamValue: null,
+			resolved: false,
+		});
+	});
+
+	it("never treats an active profile total as the previous-Gameweek baseline", () => {
+		expect(resolvePreviousEventBaseline(entry({ lastEventId: 6 }), 7, null)).toEqual({
 			overallPoints: 0,
 			overallRank: null,
 			teamValue: null,

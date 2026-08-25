@@ -182,7 +182,7 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 
 	type TournamentLiveBoard {
 		eventId: Int!
-		revision: String!
+		revision: String
 		state: LiveSnapshotState!
 		partial: Boolean!
 		failedEntryIds: [Int!]!

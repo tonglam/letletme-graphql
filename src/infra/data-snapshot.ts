@@ -63,6 +63,7 @@ export type CoreEventData = Readonly<{
 	averageEntryScore: number | null;
 	finished: boolean;
 	dataChecked: boolean;
+	dataCheckedAt?: string | null;
 	highestScoringEntry: number | null;
 	deadlineTimeEpoch: number | null;
 	deadlineTimeGameOffset: number | null;
@@ -697,6 +698,9 @@ const mapCoreEvent = (row: Record<string, unknown>): CoreEventData | null => {
 	const deadlineTime = deadlineTimeRaw === null ? null : isoDate(deadlineTimeRaw);
 	const finished = boolean(row.finished);
 	const dataChecked = boolean(pick(row, "dataChecked", "data_checked"));
+	const dataCheckedAtRaw = pick(row, "dataCheckedAt", "data_checked_at");
+	const dataCheckedAt =
+		dataCheckedAtRaw === null || dataCheckedAtRaw === undefined ? null : isoDate(dataCheckedAtRaw);
 	const isPrevious = boolean(pick(row, "isPrevious", "is_previous"));
 	const isCurrent = boolean(pick(row, "isCurrent", "is_current"));
 	const isNext = boolean(pick(row, "isNext", "is_next"));
@@ -724,6 +728,7 @@ const mapCoreEvent = (row: Record<string, unknown>): CoreEventData | null => {
 		(deadlineTime === null && deadlineTimeRaw !== null) ||
 		finished === null ||
 		dataChecked === null ||
+		(dataCheckedAtRaw !== null && dataCheckedAtRaw !== undefined && dataCheckedAt === null) ||
 		isPrevious === null ||
 		isCurrent === null ||
 		isNext === null ||
@@ -752,6 +757,7 @@ const mapCoreEvent = (row: Record<string, unknown>): CoreEventData | null => {
 		averageEntryScore,
 		finished,
 		dataChecked,
+		dataCheckedAt,
 		highestScoringEntry,
 		deadlineTimeEpoch,
 		deadlineTimeGameOffset,

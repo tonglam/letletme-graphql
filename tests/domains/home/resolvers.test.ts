@@ -2,10 +2,15 @@ import { describe, expect, it, mock } from "bun:test";
 import { graphql } from "graphql";
 import { movementFromRanks, type HomePersonalDesk } from "../../../src/domains/home/repository";
 import {
+	applyHomePairScores,
+	applyHomeRankLifecycle,
+	applyHomeScoreLifecycle,
 	compactHomeMarketPulse,
 	reconcileHomeOfficialH2HRanks,
 	settleHomeTransfers,
 } from "../../../src/domains/home/service";
+import type { LiveCalcData } from "../../../src/domains/entry-live/calc-service";
+import type { Event } from "../../../src/domains/events/repository";
 import { gameweekService } from "../../../src/domains/gameweek/service";
 import type { MarketPulse } from "../../../src/domains/market/repository";
 import { Position } from "../../../src/domains/players/repository";
@@ -26,6 +31,100 @@ const principal: Principal = {
 	source: "website",
 	fplEntryId: 123,
 	fplEntryVerifiedAt: "2026-08-14T00:00:00.000Z",
+};
+
+const lifecycleDesk = (): HomePersonalDesk => ({
+	entryId: 123,
+	state: "READY",
+	entryName: "Lifecycle XI",
+	playerName: "Lifecycle Manager",
+	region: "AU",
+	overallPoints: 38,
+	pointsState: "UNAVAILABLE",
+	pointsCheckedAt: null,
+	overallRank: 644_000,
+	rankState: "READY",
+	rankCheckedAt: "2026-08-24T00:00:00.000Z",
+	teamValue: 1000,
+	bank: 15,
+	leagueRanks: [
+		{
+			key: "h2h:8",
+			name: "Pair-scoped H2H",
+			leagueType: "H2H",
+			visibility: "PRIVATE",
+			rank: 10,
+			rankState: "READY",
+			rankCheckedAt: "2026-08-24T00:00:00.000Z",
+			movement: { direction: "FLAT", places: 0 },
+			tournamentId: 8,
+			h2hMatchup: {
+				officialMatchId: 88,
+				eventId: 1,
+				isLive: true,
+				isFinal: false,
+				isBye: false,
+				sourceCheckedAt: "2026-08-24T00:00:00.000Z",
+				viewer: {
+					entryId: 123,
+					entryName: "Lifecycle XI",
+					playerName: "Lifecycle Manager",
+					isAverage: false,
+					points: 38,
+				},
+				opponent: {
+					entryId: 456,
+					entryName: "Opponent XI",
+					playerName: "Opponent Manager",
+					isAverage: false,
+					points: 41,
+				},
+			},
+		},
+	],
+	sourceCheckedAt: "2026-08-24T00:00:00.000Z",
+});
+
+const lifecycleEvent = (final = false): Event =>
+	({
+		id: 1,
+		finished: final,
+		dataChecked: final,
+		dataCheckedAt: final ? "2026-08-25T01:00:00.000Z" : null,
+	}) as Event;
+
+const lifecycleCalc = (options: {
+	entryId: number;
+	totalPoints: number;
+	netEventPoints: number;
+	final?: boolean;
+	overallRank?: number | null;
+	checkedAt?: string;
+}): LiveCalcData => {
+	const checkedAt = options.checkedAt ?? "2026-08-25T00:00:00.000Z";
+	return {
+		entry: options.entryId,
+		score: {
+			eventPoints: options.netEventPoints,
+			netEventPoints: options.netEventPoints,
+			totalPoints: options.totalPoints,
+			totalScope: "OVERALL",
+			eventRank: null,
+			overallRank: options.overallRank ?? null,
+			leagueRank: null,
+			transferCost: 0,
+			source: options.final ? "FPL_FINAL_RESULT" : "FPL_EVENT_LIVE",
+			state: options.final ? "FINAL" : "FRESH",
+			eventPointSemantics: "ZERO_COST_EQUIVALENT",
+			revision: options.final ? "final:1" : "event-live:1:lineup:projected",
+			checkedAt,
+			upstreamUpdatedAt: checkedAt,
+			staleAt: null,
+			nextRefreshAt: null,
+			reconciliation: "NOT_COMPARABLE",
+			reasonCodes: [],
+		},
+	} as unknown as LiveCalcData;
 };
 
 describe("Home GraphQL contracts", () => {
@@ -205,6 +304,78 @@ describe("Home GraphQL contracts", () => {
 		expect(movementFromRanks(-1, 3)).toEqual({ direction: "UNKNOWN", places: null });
 	});
 
+	it("shows the projected live total while preserving the last official ranks", () => {
+		const event = lifecycleEvent(false);
+		const ranked = applyHomeRankLifecycle(lifecycleDesk(), event);
+		const result = applyHomeScoreLifecycle(
+			ranked,
+			event,
+			lifecycleCalc({ entryId: 123, totalPoints: 71, netEventPoints: 33 })
+		);
+
+		expect(result).toMatchObject({
+			overallPoints: 71,
+			pointsState: "LIVE",
+			overallRank: 644_000,
+			rankState: "UPDATING",
+			leagueRanks: [{ rank: 10, rankState: "UPDATING" }],
+		});
+	});
+
+	it("switches points and ranks to the fresh official result after finalization", () => {
+		const event = lifecycleEvent(true);
+		const ranked = applyHomeRankLifecycle(lifecycleDesk(), event);
+		const result = applyHomeScoreLifecycle(
+			ranked,
+			event,
+			lifecycleCalc({
+				entryId: 123,
+				totalPoints: 74,
+				netEventPoints: 36,
+				final: true,
+				overallRank: 600_000,
+				checkedAt: "2026-08-25T01:01:00.000Z",
+			})
+		);
+
+		expect(result).toMatchObject({
+			overallPoints: 74,
+			pointsState: "FINAL",
+			overallRank: 600_000,
+			rankState: "READY",
+			rankCheckedAt: "2026-08-25T01:01:00.000Z",
+		});
+	});
+
+	it("preserves the official Home snapshot after finalization without live projection", () => {
+		const event = lifecycleEvent(true);
+		const ranked = applyHomeRankLifecycle(lifecycleDesk(), event);
+		const result = applyHomeScoreLifecycle(ranked, event, undefined);
+
+		expect(result).toMatchObject({
+			overallPoints: 38,
+			pointsState: "FINAL",
+			pointsCheckedAt: "2026-08-24T00:00:00.000Z",
+			overallRank: 644_000,
+			rankState: "UPDATING",
+		});
+	});
+
+	it("calculates a live H2H matchup from only the viewer and opponent", () => {
+		const event = lifecycleEvent(false);
+		const results = new Map([
+			[123, lifecycleCalc({ entryId: 123, totalPoints: 71, netEventPoints: 33 })],
+			[456, lifecycleCalc({ entryId: 456, totalPoints: 70, netEventPoints: 29 })],
+		]);
+		const result = applyHomePairScores(lifecycleDesk(), event, results);
+
+		expect(result.leagueRanks[0]?.h2hMatchup).toMatchObject({
+			viewer: { entryId: 123, points: 33 },
+			opponent: { entryId: 456, points: 29 },
+			sourceCheckedAt: "2026-08-25T00:00:00.000Z",
+		});
+	});
+
 	it("maps tracked official leagues without requiring frozen tournament-roster membership", async () => {
 		const databaseQuery = mock(async (text: unknown, values: unknown) => {
 			const sql = String(text);
@@ -240,9 +411,11 @@ describe("Home GraphQL contracts", () => {
 						overall_points: 123,
 						overall_rank: 456,
 						team_value: 1005,
+						bank: 15,
 						source_checked_at: new Date(),
 						league_id: 7,
 						league_type: "classic",
+						official_kind: "s",
 						league_name: "Only Rank Data",
 						entry_rank: 3,
 						entry_last_rank: 8,
@@ -255,9 +428,11 @@ describe("Home GraphQL contracts", () => {
 						overall_points: 123,
 						overall_rank: 456,
 						team_value: 1005,
+						bank: 15,
 						source_checked_at: new Date(),
 						league_id: 8,
 						league_type: "h2h",
+						official_kind: "x",
 						league_name: "Current Match League",
 						entry_rank: 1,
 						entry_last_rank: 0,
@@ -285,7 +460,10 @@ describe("Home GraphQL contracts", () => {
 				],
 			};
 		});
-		const context = buildSnapshotContext(new TestRedis(), { databaseQuery });
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, buildTestCoreData(null))),
+			{ databaseQuery }
+		);
 		context.principal = principal;
 
 		const result = await graphql({
@@ -293,9 +471,9 @@ describe("Home GraphQL contracts", () => {
 			source: `
 				query HomePersonalDesk {
 					homePersonalDesk {
-						entryId state entryName playerName overallPoints overallRank teamValue sourceCheckedAt
+						entryId state entryName playerName overallPoints overallRank teamValue bank sourceCheckedAt
 						leagueRanks {
-							key name leagueType rank tournamentId movement { direction places }
+							key name leagueType visibility rank tournamentId movement { direction places }
 							h2hMatchup {
 								officialMatchId eventId isLive isFinal isBye sourceCheckedAt
 								viewer { entryId entryName playerName isAverage points }
@@ -318,6 +496,7 @@ describe("Home GraphQL contracts", () => {
 					key: "classic:7",
 					name: "Only Rank Data",
 					leagueType: "CLASSIC",
+					visibility: "PUBLIC",
 					rank: 3,
 					tournamentId: 77,
 					movement: { direction: "UP", places: 5 },
@@ -327,6 +506,7 @@ describe("Home GraphQL contracts", () => {
 					key: "h2h:8",
 					name: "Current Match League",
 					leagueType: "H2H",
+					visibility: "PRIVATE",
 					rank: null,
 					tournamentId: 6,
 					movement: { direction: "UNKNOWN", places: null },
@@ -363,8 +543,14 @@ describe("Home GraphQL contracts", () => {
 			state: "READY",
 			entryName: "Compact XI",
 			playerName: "Ada Manager",
+			region: null,
+			bank: 15,
 			overallPoints: 49,
+			pointsState: "FINAL",
+			pointsCheckedAt: "2026-08-23T01:00:00.000Z",
 			overallRank: 90_000,
+			rankState: "READY",
+			rankCheckedAt: "2026-08-23T01:00:00.000Z",
 			teamValue: 1000,
 			sourceCheckedAt: "2026-08-23T01:00:00.000Z",
 			leagueRanks: [
@@ -372,7 +558,10 @@ describe("Home GraphQL contracts", () => {
 					key: "classic:7",
 					name: "Classic",
 					leagueType: "CLASSIC",
+					visibility: "PRIVATE",
 					rank: 7,
+					rankState: "READY",
+					rankCheckedAt: "2026-08-23T01:00:00.000Z",
 					movement: { direction: "FLAT", places: 0 },
 					tournamentId: 5,
 					h2hMatchup: null,
@@ -381,7 +570,10 @@ describe("Home GraphQL contracts", () => {
 					key: "h2h:8",
 					name: "Official H2H",
 					leagueType: "H2H",
+					visibility: "PRIVATE",
 					rank: null,
+					rankState: "UNAVAILABLE",
+					rankCheckedAt: null,
 					movement: { direction: "UNKNOWN", places: null },
 					tournamentId: 6,
 					h2hMatchup: null,
@@ -390,7 +582,10 @@ describe("Home GraphQL contracts", () => {
 					key: "h2h:9",
 					name: "Custom H2H",
 					leagueType: "H2H",
+					visibility: "PRIVATE",
 					rank: 4,
+					rankState: "READY",
+					rankCheckedAt: "2026-08-23T01:00:00.000Z",
 					movement: { direction: "FLAT", places: 0 },
 					tournamentId: 7,
 					h2hMatchup: null,
@@ -399,7 +594,10 @@ describe("Home GraphQL contracts", () => {
 					key: "h2h:10",
 					name: "Waiting Official H2H",
 					leagueType: "H2H",
+					visibility: "PRIVATE",
 					rank: null,
+					rankState: "UNAVAILABLE",
+					rankCheckedAt: null,
 					movement: { direction: "UNKNOWN", places: null },
 					tournamentId: 8,
 					h2hMatchup: null,
@@ -408,7 +606,10 @@ describe("Home GraphQL contracts", () => {
 					key: "h2h:11",
 					name: "Settled Official H2H",
 					leagueType: "H2H",
+					visibility: "PRIVATE",
 					rank: 3,
+					rankState: "READY",
+					rankCheckedAt: "2026-08-23T01:00:00.000Z",
 					movement: { direction: "UP", places: 2 },
 					tournamentId: 9,
 					h2hMatchup: null,
@@ -460,16 +661,16 @@ describe("Home GraphQL contracts", () => {
 				totalTeams: 21,
 				eventId: 2,
 				awaitingSchedule: false,
-				isLive: true,
-				isFinal: false,
-				scoreSource: "UNAVAILABLE" as const,
-				scoreRevision: null,
-				scoreCheckedAt: null,
+				isLive: false,
+				isFinal: true,
+				scoreSource: "FPL_H2H_FINAL" as const,
+				scoreRevision: "final:2",
+				scoreCheckedAt: "2026-08-24T07:00:00.000Z",
 				rank: 2,
 				lastRank: 3,
 				matchPoints: 3,
 				standingsPublished: true,
-				standingsCurrentEventComplete: false,
+				standingsCurrentEventComplete: true,
 				match: null,
 				matches: [],
 			},
@@ -481,14 +682,19 @@ describe("Home GraphQL contracts", () => {
 			desk.leagueRanks[0],
 			{
 				...desk.leagueRanks[1],
-				rank: 2,
-				movement: { direction: "UNKNOWN", places: null },
+				rankState: "UPDATING",
 			},
 			desk.leagueRanks[2],
-			desk.leagueRanks[3],
+			{
+				...desk.leagueRanks[3],
+				rankState: "UPDATING",
+			},
 			{
 				...desk.leagueRanks[4],
 				rank: 2,
+				rankState: "READY",
+				rankCheckedAt: "2026-08-24T07:00:00.000Z",
+				movement: { direction: "UP", places: 1 },
 			},
 		]);
 	});
@@ -506,6 +712,7 @@ describe("Home GraphQL contracts", () => {
 					source_checked_at: new Date(),
 					league_id: 8,
 					league_type: "h2h",
+					official_kind: "x",
 					league_name: "Tracked Snapshot H2H",
 					entry_rank: 3,
 					entry_last_rank: 4,
@@ -551,6 +758,7 @@ describe("Home GraphQL contracts", () => {
 					source_checked_at: new Date(),
 					league_id: 9,
 					league_type: "h2h",
+					official_kind: "x",
 					league_name: "Future-start H2H",
 					entry_rank: 1,
 					entry_last_rank: 0,
@@ -596,6 +804,7 @@ describe("Home GraphQL contracts", () => {
 					source_checked_at: new Date(),
 					league_id: 10,
 					league_type: "h2h",
+					official_kind: "x",
 					league_name: "Final-week H2H",
 					entry_rank: 2,
 					entry_last_rank: 0,
@@ -640,13 +849,18 @@ describe("Home GraphQL contracts", () => {
 				source_checked_at: now,
 				league_id: index + 1,
 				league_type: index % 2 === 0 ? "classic" : "h2h",
+				official_kind: "x",
+				short_name: null,
 				league_name: `League ${String(index + 1).padStart(3, "0")}`,
 				entry_rank: index + 1,
 				entry_last_rank: index + 2,
 				tournament_id: index % 10 === 0 ? index + 10_000 : null,
 			})),
 		}));
-		const context = buildSnapshotContext(new TestRedis(), { databaseQuery });
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, buildTestCoreData(null))),
+			{ databaseQuery }
+		);
 		context.principal = principal;
 
 		const result = await graphql({
@@ -674,7 +888,7 @@ describe("Home GraphQL contracts", () => {
 		expect(databaseQuery).toHaveBeenCalledTimes(1);
 	});
 
-	it("omits official system and broadcaster leagues from the home preview", async () => {
+	it("includes official system and broadcaster leagues in the home preview", async () => {
 		const databaseQuery = mock(async () => ({
 			rows: [
 				{
@@ -758,6 +972,8 @@ describe("Home GraphQL contracts", () => {
 			leagueRanks: [
 				{ key: "classic:9001", name: "Friends League", rank: 3 },
 				{ key: "classic:9002", name: "Office League", rank: 1 },
+				{ key: "classic:314", name: "Overall", rank: 12580 },
+				{ key: "classic:317", name: "Stan Sport League", rank: 80 },
 			],
 		});
 	});

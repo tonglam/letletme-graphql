@@ -11,6 +11,25 @@ export const homeTypeDefs = /* GraphQL */ `
 		H2H
 	}
 
+	enum HomeLeagueVisibility {
+		PRIVATE
+		PUBLIC
+	}
+
+	enum HomeRankState {
+		READY
+		UPDATING
+		UNAVAILABLE
+	}
+
+	enum HomePointsState {
+		LIVE
+		STALE
+		SETTLING
+		FINAL
+		UNAVAILABLE
+	}
+
 	type HomeRankMovement {
 		direction: HomeRankDirection!
 		places: Int
@@ -39,7 +58,10 @@ export const homeTypeDefs = /* GraphQL */ `
 		key: ID!
 		name: String!
 		leagueType: HomeLeagueType!
+		visibility: HomeLeagueVisibility!
 		rank: Int
+		rankState: HomeRankState!
+		rankCheckedAt: DateTime
 		movement: HomeRankMovement!
 		tournamentId: Int
 		h2hMatchup: HomeH2HMatchup
@@ -57,9 +79,15 @@ export const homeTypeDefs = /* GraphQL */ `
 		state: HomePersonalDeskState!
 		entryName: String
 		playerName: String
+		region: String
 		overallPoints: Int
+		pointsState: HomePointsState!
+		pointsCheckedAt: DateTime
 		overallRank: Int
+		rankState: HomeRankState!
+		rankCheckedAt: DateTime
 		teamValue: Int
+		bank: Int
 		leagueRanks: [HomeLeagueRank!]!
 		sourceCheckedAt: DateTime
 	}

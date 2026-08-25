@@ -3,7 +3,8 @@ import {
 	LeagueScoring,
 	OfficialLeagueKind,
 	compareLeaguesForOfficialDisplay,
-	selectHomeInvitationalLeagues,
+	mapFplOfficialKind,
+	selectHomeLeagues,
 	sortLeaguesForOfficialDisplay,
 } from "../../../src/domains/leagues/display-order";
 
@@ -15,6 +16,13 @@ const league = (
 ) => ({ name, officialKind: kind, scoring, shortName });
 
 describe("official FPL league display order", () => {
+	it("maps only the FPL s/x categories", () => {
+		expect(mapFplOfficialKind("s")).toBe(OfficialLeagueKind.SYSTEM);
+		expect(mapFplOfficialKind("x")).toBe(OfficialLeagueKind.INVITATIONAL);
+		expect(mapFplOfficialKind("c")).toBeNull();
+		expect(mapFplOfficialKind(null)).toBeNull();
+	});
+
 	it("sorts invitational classic names with localeCompare en", () => {
 		const names = [
 			"这破游戏⚽让让群大乱斗(25/26)",
@@ -50,7 +58,6 @@ describe("official FPL league display order", () => {
 			league("Overall", OfficialLeagueKind.SYSTEM, LeagueScoring.CLASSIC, "overall"),
 			league("Australia", OfficialLeagueKind.SYSTEM, LeagueScoring.CLASSIC, "region-241"),
 			league("让让群10周年瑞士轮", OfficialLeagueKind.INVITATIONAL, LeagueScoring.H2H),
-			league("Public Classic", OfficialLeagueKind.PUBLIC),
 			league("Friends League", OfficialLeagueKind.INVITATIONAL),
 			league("Stan Sport League", OfficialLeagueKind.SYSTEM, LeagueScoring.CLASSIC, "brd-stan"),
 		]);
@@ -58,7 +65,6 @@ describe("official FPL league display order", () => {
 			"Stan Sport League",
 			"Friends League",
 			"让让群10周年瑞士轮",
-			"Public Classic",
 			"Australia",
 			"Overall",
 		]);
@@ -80,17 +86,25 @@ describe("official FPL league display order", () => {
 		expect(compareLeaguesForOfficialDisplay(privateLeague, overall)).toBeLessThan(0);
 	});
 
-	it("keeps only invitational leagues for the home preview", () => {
-		const preview = selectHomeInvitationalLeagues([
+	it("keeps private and system leagues while excluding unknown categories", () => {
+		const preview = selectHomeLeagues([
 			league("Overall", OfficialLeagueKind.SYSTEM, LeagueScoring.CLASSIC, "overall"),
 			league("Stan Sport League", OfficialLeagueKind.SYSTEM, LeagueScoring.CLASSIC, "brd-stan"),
 			league("Office League", OfficialLeagueKind.INVITATIONAL),
 			league("Friends League", OfficialLeagueKind.INVITATIONAL),
 			league("H2H Cup", OfficialLeagueKind.INVITATIONAL, LeagueScoring.H2H),
+			{
+				name: "Legacy c League",
+				officialKind: null,
+				scoring: LeagueScoring.CLASSIC,
+				shortName: "legacy-c",
+			},
 		]);
 		expect(preview.map((item) => item.name)).toEqual([
 			"Friends League",
 			"Office League",
+			"Overall",
+			"Stan Sport League",
 			"H2H Cup",
 		]);
 	});

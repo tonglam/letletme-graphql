@@ -1,8 +1,14 @@
 import type { GraphQLContext } from "../../graphql/context";
-import { mapFplOfficialKind, selectHomeInvitationalLeagues } from "../leagues/display-order";
+import {
+	OfficialLeagueKind,
+	mapFplOfficialKind,
+	selectHomeLeagues,
+} from "../leagues/display-order";
 
 export type HomeRankDirection = "UP" | "DOWN" | "FLAT" | "UNKNOWN";
 export type HomePersonalDeskState = "READY" | "EMPTY" | "STALE" | "UNAVAILABLE";
+export type HomePointsState = "LIVE" | "STALE" | "SETTLING" | "FINAL" | "UNAVAILABLE";
+export type HomeRankState = "READY" | "UPDATING" | "UNAVAILABLE";
 
 export type HomeRankMovement = {
 	direction: HomeRankDirection;
@@ -32,7 +38,10 @@ export type HomeLeagueRank = {
 	key: string;
 	name: string;
 	leagueType: "CLASSIC" | "H2H";
+	visibility: "PRIVATE" | "PUBLIC";
 	rank: number | null;
+	rankState: HomeRankState;
+	rankCheckedAt: string | null;
 	movement: HomeRankMovement;
 	tournamentId: number | null;
 	h2hMatchup: HomeH2HMatchup | null;
@@ -43,9 +52,15 @@ export type HomePersonalDesk = {
 	state: HomePersonalDeskState;
 	entryName: string | null;
 	playerName: string | null;
+	region: string | null;
 	overallPoints: number | null;
+	pointsState: HomePointsState;
+	pointsCheckedAt: string | null;
 	overallRank: number | null;
+	rankState: HomeRankState;
+	rankCheckedAt: string | null;
 	teamValue: number | null;
+	bank: number | null;
 	leagueRanks: HomeLeagueRank[];
 	sourceCheckedAt: string | null;
 };
@@ -54,15 +69,18 @@ type HomePersonalDeskRow = {
 	entry_id: number;
 	entry_name: string | null;
 	player_name: string | null;
+	region: string | null;
 	overall_points: number | null;
 	overall_rank: number | null;
 	team_value: number | null;
+	bank: number | null;
 	source_checked_at: string | Date | null;
 	league_id: number | null;
 	league_type: string | null;
 	league_name: string | null;
 	entry_rank: number | null;
 	entry_last_rank: number | null;
+	league_source_checked_at: string | Date | null;
 	league_started_event: number | null;
 	official_kind: string | null;
 	short_name: string | null;
@@ -94,15 +112,18 @@ export const HOME_PERSONAL_DESK_SQL = `
 		e.entry_id,
 		e.entry_name,
 		e.player_name,
+		e.region,
 		e.overall_points,
 		e.overall_rank,
 		e.team_value,
+		e.bank,
 		e.updated_at AS source_checked_at,
 		l.league_id,
 		l.league_type::text AS league_type,
 		l.league_name,
 		l.entry_rank,
 		l.entry_last_rank,
+		l.updated_at AS league_source_checked_at,
 		l.started_event AS league_started_event,
 		l.official_kind::text AS official_kind,
 		l.short_name,
@@ -372,16 +393,20 @@ const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRankRow | null => {
 	}
 	const scoring = row.league_type === "h2h" ? "h2h" : "classic";
 	const { rank, previousRank } = resolveLeagueRanks(row, scoring);
+	const officialKind = mapFplOfficialKind(row.official_kind);
 	return {
 		key: `${row.league_type}:${row.league_id}`,
 		name: row.league_name,
 		leagueType: scoring === "h2h" ? "H2H" : "CLASSIC",
+		visibility: officialKind === OfficialLeagueKind.SYSTEM ? "PUBLIC" : "PRIVATE",
 		rank,
+		rankState: rank === null ? "UNAVAILABLE" : "READY",
+		rankCheckedAt: isoDate(row.league_source_checked_at),
 		movement: movementFromRanks(rank, previousRank),
 		tournamentId: row.tournament_id,
 		h2hMatchup: scoring === "h2h" ? mapH2HMatchup(row) : null,
 		scoring,
-		officialKind: mapFplOfficialKind(row.official_kind),
+		officialKind,
 		shortName: row.short_name,
 	};
 };
@@ -390,7 +415,10 @@ const toHomeLeagueRank = (row: HomeLeagueRankRow): HomeLeagueRank => ({
 	key: row.key,
 	name: row.name,
 	leagueType: row.leagueType,
+	visibility: row.visibility,
 	rank: row.rank,
+	rankState: row.rankState,
+	rankCheckedAt: row.rankCheckedAt,
 	movement: row.movement,
 	tournamentId: row.tournamentId,
 	h2hMatchup: row.h2hMatchup,
@@ -423,9 +451,15 @@ export const homeRepository = {
 				state: "UNAVAILABLE",
 				entryName: null,
 				playerName: null,
+				region: null,
 				overallPoints: null,
+				pointsState: "UNAVAILABLE",
+				pointsCheckedAt: null,
 				overallRank: null,
+				rankState: "UNAVAILABLE",
+				rankCheckedAt: null,
 				teamValue: null,
+				bank: null,
 				leagueRanks: [],
 				sourceCheckedAt: null,
 			};
@@ -439,7 +473,7 @@ export const homeRepository = {
 		const mappedLeagues = result.rows
 			.map(mapLeagueRank)
 			.filter((rank): rank is HomeLeagueRankRow => rank !== null);
-		const leagueRanks = selectHomeInvitationalLeagues(mappedLeagues).map(toHomeLeagueRank);
+		const leagueRanks = selectHomeLeagues(mappedLeagues).map(toHomeLeagueRank);
 		const h2hMatchupCount = leagueRanks.filter((league) => league.h2hMatchup !== null).length;
 		const state: HomePersonalDeskState =
 			sourceAgeMs === null || sourceAgeMs > HOME_PERSONAL_STALE_AFTER_MS
@@ -452,9 +486,15 @@ export const homeRepository = {
 			state,
 			entryName: first.entry_name,
 			playerName: first.player_name,
+			region: first.region,
 			overallPoints: first.overall_points,
+			pointsState: "UNAVAILABLE",
+			pointsCheckedAt: null,
 			overallRank: first.overall_rank,
+			rankState: normalizeRank(first.overall_rank) === null ? "UNAVAILABLE" : "READY",
+			rankCheckedAt: sourceCheckedAt,
 			teamValue: first.team_value,
+			bank: first.bank,
 			leagueRanks,
 			sourceCheckedAt,
 		} satisfies HomePersonalDesk;

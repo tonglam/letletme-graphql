@@ -13,6 +13,7 @@ import {
 	calcElementLivePoints,
 	calcOfficialTotalWithEffectiveBonus,
 } from "../../../src/domains/entry-live/calc-service";
+import { projectLiveLineup } from "../../../src/domains/entry-live/legacy-h2h-adapter";
 import type { LivePerformance } from "../../../src/domains/live/repository";
 import { loadLiveSnapshotMeta } from "../../../src/domains/live/snapshot-meta";
 import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
@@ -298,6 +299,61 @@ describe("applyAutoSubs", () => {
 	});
 });
 
+describe("projectLiveLineup", () => {
+	const projectedPicks = () => [
+		makePick({ element: 1, position: 1, elementType: 1, totalPoints: 2 }),
+		makePick({
+			element: 2,
+			position: 2,
+			elementType: 2,
+			minutes: 0,
+			totalPoints: 0,
+			isPlayed: false,
+			isCaptain: true,
+			multiplier: 2,
+		}),
+		makePick({ element: 3, position: 3, elementType: 2, totalPoints: 2 }),
+		makePick({ element: 4, position: 4, elementType: 2, totalPoints: 2 }),
+		makePick({ element: 5, position: 5, elementType: 2, totalPoints: 2 }),
+		makePick({
+			element: 6,
+			position: 6,
+			elementType: 3,
+			totalPoints: 5,
+			isViceCaptain: true,
+		}),
+		makePick({ element: 7, position: 7, elementType: 3, totalPoints: 2 }),
+		makePick({ element: 8, position: 8, elementType: 3, totalPoints: 2 }),
+		makePick({ element: 9, position: 9, elementType: 3, totalPoints: 2 }),
+		makePick({ element: 10, position: 10, elementType: 4, totalPoints: 2 }),
+		makePick({ element: 11, position: 11, elementType: 4, totalPoints: 2 }),
+		makePick({ element: 12, position: 12, elementType: 1, totalPoints: 3, multiplier: 0 }),
+		makePick({ element: 13, position: 13, elementType: 2, totalPoints: 6, multiplier: 0 }),
+		makePick({ element: 14, position: 14, totalPoints: 1, multiplier: 0 }),
+		makePick({ element: 15, position: 15, totalPoints: 1, multiplier: 0 }),
+	];
+
+	it("projects both the automatic substitute and vice-captain promotion", () => {
+		const picks = projectedPicks();
+		const projection = projectLiveLineup(picks, "NONE");
+		const vice = picks.find((pick) => pick.isViceCaptain)!;
+		expect(picks.find((pick) => pick.element === 13)?.autoSub).toBe(true);
+		expect(projection.captainForScoring?.element).toBe(vice.element);
+		expect(projection.points).toBe(
+			projection.activePicks.reduce((sum, pick) => sum + pick.totalPoints, 0) + vice.totalPoints
+		);
+	});
+
+	it("applies the triple-captain multiplier to a promoted vice-captain", () => {
+		const picks = projectedPicks();
+		const projection = projectLiveLineup(picks, "TRIPLE_CAPTAIN");
+		const vice = picks.find((pick) => pick.isViceCaptain)!;
+		expect(projection.points).toBe(
+			projection.activePicks.reduce((sum, pick) => sum + pick.totalPoints, 0) + vice.totalPoints * 2
+		);
+	});
+});
+
 describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 	it("returns NO_PICKS before acquiring a live snapshot or enrichment", async () => {
 		const originalGetPick = entryLiveRepository.getEntryEventPick;
@@ -378,7 +434,12 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 		} as LiveCalcData;
 		entryLiveRepository.getEntryEventPick = async () => null;
 		eventsService.getEventById = async () =>
-			({ id: 2, finished: true, dataChecked: true }) as never;
+			({
+				id: 2,
+				finished: true,
+				dataChecked: true,
+				dataCheckedAt: "2026-08-24T00:08:00.000Z",
+			}) as never;
 		entryLiveBatchService.calcLivePointsForEntries = async () => ({
 			results: new Map([[123, finalResult]]),
 			errors: [],

@@ -7,7 +7,6 @@ export const leaguesTypeDefs = /* GraphQL */ `
 	enum OfficialLeagueKind {
 		SYSTEM
 		INVITATIONAL
-		PUBLIC
 	}
 
 	type League {
