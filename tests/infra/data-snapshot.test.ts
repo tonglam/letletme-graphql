@@ -318,6 +318,74 @@ describe("typed Data snapshots", () => {
 		).toBe("core-7.live-1-8");
 	});
 
+	it("accepts a settled historical roster when current core has later players", async () => {
+		const historicalCore = buildTestCoreData(1);
+		const lastPlayer = historicalCore.players.at(-1)!;
+		const currentCore = buildTestCoreData(1, {
+			players: [
+				...historicalCore.players,
+				{ ...lastPlayer, id: 221, code: 10_221, webName: "Later Player 221" },
+				{ ...lastPlayer, id: 222, code: 10_222, webName: "Later Player 222" },
+			],
+		});
+		const settledFixtures = historicalCore.fixtures
+			.filter((fixture) => fixture.eventId === 1)
+			.map((fixture) => ({
+				...fixture,
+				started: true,
+				finished: true,
+				finishedProvisional: true,
+				minutes: 90,
+				teamHScore: 0,
+				teamAScore: 0,
+			}));
+		const context = buildSnapshotContext(
+			new TestRedis(
+				buildCorePublication("2627", 7, currentCore),
+				buildLivePublication(historicalCore, 1, "2627", 8, {
+					fixtures: settledFixtures,
+					state: "settled",
+				})
+			)
+		);
+
+		const snapshot = await getLiveDataSnapshot(context, 1);
+
+		expect(snapshot.state).toBe("settled");
+		expect(snapshot.revision).toBe("8");
+		expect(snapshot.eventLives).toHaveLength(historicalCore.players.length);
+		expect(snapshot.eventLives.some((row) => row.playerId === 221)).toBe(false);
+	});
+
+	it("rejects an unknown player in a settled historical roster", async () => {
+		const core = buildTestCoreData(1);
+		const lives = buildTestEventLives(core, 1);
+		lives[lives.length - 1] = { ...lives.at(-1)!, elementId: 999 };
+		const settledFixtures = core.fixtures
+			.filter((fixture) => fixture.eventId === 1)
+			.map((fixture) => ({
+				...fixture,
+				started: true,
+				finished: true,
+				finishedProvisional: true,
+				minutes: 90,
+				teamHScore: 0,
+				teamAScore: 0,
+			}));
+		const context = buildSnapshotContext(
+			new TestRedis(
+				buildCorePublication("2627", 7, core),
+				buildLivePublication(core, 1, "2627", 8, {
+					eventLives: lives,
+					fixtures: settledFixtures,
+					state: "settled",
+				})
+			)
+		);
+
+		await expect(getLiveDataSnapshot(context, 1)).rejects.toThrow("LIVE_PUBLICATION_UNAVAILABLE");
+	});
+
 	it("pins a live revision for one request and exposes a newer pointer only to a new request", async () => {
 		const core = buildTestCoreData(1);
 		const corePublication = buildCorePublication("2627", 7, core);

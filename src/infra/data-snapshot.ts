@@ -593,6 +593,29 @@ const hasSameIds = <T, U>(
 	return ids.size === left.length && right.every((value) => ids.has(rightId(value)));
 };
 
+const hasCompatibleLivePlayerIds = (
+	eventLives: readonly LivePerformanceData[],
+	players: readonly CorePlayerData[],
+	state: DataPublicationManifest["state"]
+): boolean => {
+	if (
+		hasSameIds(
+			eventLives,
+			players,
+			(row) => row.playerId,
+			(player) => player.id
+		)
+	) {
+		return true;
+	}
+	if (state !== "settled" || eventLives.length === 0 || eventLives.length >= players.length) {
+		return false;
+	}
+	// A settled publication owns its historical roster; current Core can add players later.
+	const currentPlayerIds = new Set(players.map((player) => player.id));
+	return eventLives.every((row) => currentPlayerIds.has(row.playerId));
+};
+
 const hasCompleteCoreIdentity = (
 	events: readonly CoreEventData[],
 	teams: readonly CoreTeamData[],
@@ -1951,12 +1974,7 @@ const publicationLiveSnapshot = (
 		fixtures.some((fixture) => fixture.eventId !== eventId) ||
 		!hasUniquePositiveIds(eventLives, (row) => row.playerId) ||
 		!hasUniquePositiveIds(fixtures, (fixture) => fixture.id) ||
-		!hasSameIds(
-			eventLives,
-			core.players,
-			(row) => row.playerId,
-			(player) => player.id
-		) ||
+		!hasCompatibleLivePlayerIds(eventLives, core.players, state) ||
 		!validateLiveFixtureView(liveFixtures, fixtures, core) ||
 		state !== liveStateFromFixtures(fixtures)
 	) {
