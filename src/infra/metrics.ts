@@ -51,6 +51,12 @@ const graphqlRequestOutcomes = new Counter({
 	labelNames: GRAPHQL_REQUEST_OUTCOME_LABELS,
 });
 
+const livePublicationEventsTotal = new Counter({
+	name: "live_publication_events_total",
+	help: "Live publication contract events using a controlled reason label",
+	labelNames: ["reason"] as const,
+});
+
 const cacheRepositoryEvents = new Counter({
 	name: "cache_repository_events_total",
 	help: "Cache source, fallback, malformed, negative-hit, and suppressed-write events",
@@ -141,6 +147,7 @@ registry.registerMetric(graphqlIngressRequests);
 registry.registerMetric(graphqlRateLimitDecisions);
 registry.registerMetric(graphqlRateLimitV3Decisions);
 registry.registerMetric(graphqlRequestOutcomes);
+registry.registerMetric(livePublicationEventsTotal);
 registry.registerMetric(cacheRepositoryEvents);
 registry.registerMetric(briefingPublicationReaderEvents);
 registry.registerMetric(playerStateProfiles);
@@ -166,6 +173,7 @@ export const metrics = {
 	graphqlRateLimitDecisions,
 	graphqlRateLimitV3Decisions,
 	graphqlRequestOutcomes,
+	livePublicationEventsTotal,
 	cacheRepositoryEvents,
 	briefingPublicationReaderEvents,
 	playerStateProfiles,
