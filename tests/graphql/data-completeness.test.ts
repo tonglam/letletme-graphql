@@ -22,6 +22,28 @@ describe("additive data completeness metadata", () => {
 		});
 	});
 
+	it("fails closed when supplied completeness counts disagree", () => {
+		expect(
+			buildDataCompleteness({
+				contractKey: "entry-picks",
+				scopeKey: "event:4",
+				revision: "r1",
+				expectedCount: 10,
+				observedCount: 9,
+				complete: true,
+			})
+		).toMatchObject({ complete: false, expectedCount: 10, observedCount: 9 });
+		expect(
+			buildDataCompleteness({
+				contractKey: "entry-picks",
+				scopeKey: "event:4",
+				revision: "r1",
+				expectedCount: 10,
+				complete: true,
+			})
+		).toMatchObject({ complete: false, expectedCount: 10, observedCount: null });
+	});
+
 	it("exposes metadata on the business envelopes without replacing legacy fields", () => {
 		for (const typeName of [
 			"CoreEventContext",

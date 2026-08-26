@@ -68,12 +68,15 @@ export const buildDataCompleteness = (input: CompletenessInput): DataCompletenes
 	const observedCount = normalizeCount(input.observedCount);
 	const countsAgree =
 		expectedCount !== null && observedCount !== null && expectedCount === observedCount;
+	const countsSupplied = expectedCount !== null || observedCount !== null;
 	const revisionOk = revisionsAgree(revision, payloadRevision);
 	const eligibility = input.eligibility ?? "ELIGIBLE";
+	const requestedComplete = input.complete ?? (countsAgree || !countsSupplied);
 	const complete =
 		eligibility === "ELIGIBLE" &&
 		revisionOk &&
-		(input.complete ?? (countsAgree || (expectedCount === null && observedCount === null)));
+		(!countsSupplied || countsAgree) &&
+		requestedComplete;
 	return Object.freeze({
 		contractKey: input.contractKey,
 		scopeKey: input.scopeKey,
