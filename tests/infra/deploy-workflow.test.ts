@@ -83,6 +83,21 @@ describe("production deployment workflow", () => {
 		expect(workflow).not.toContain("schema" + "Version");
 	});
 
+	test("rejects deployments that cannot read the durable price-change publication", () => {
+		const liveSmokeAt = workflow.indexOf("query LiveDeploymentSmoke");
+		const priceChangeSmokeAt = workflow.indexOf("query PriceChangeDeploymentSmoke");
+		const smokeFinishedAt = workflow.indexOf("finish_stage", priceChangeSmokeAt);
+
+		expect(priceChangeSmokeAt).toBeGreaterThan(liveSmokeAt);
+		expect(smokeFinishedAt).toBeGreaterThan(priceChangeSmokeAt);
+		expect(workflow).toContain("priceChangeBoard {");
+		expect(workflow).toContain('priceChangeBoard?.status === "UNAVAILABLE"');
+		expect(workflow).toContain('priceChangeBoard.revision === "unavailable"');
+		expect(workflow).toContain("priceChangeBoard.expectedPlayerCount <= 0");
+		expect(workflow).toContain("priceChangeBoard.observedPlayerCount <= 0");
+		expect(workflow).toContain("GraphQL deployment price-change publication contract failed");
+	});
+
 	test("scans the immutable digest before promoting latest", () => {
 		const buildAt = workflow.indexOf("Build and push immutable image");
 		const scanAt = workflow.indexOf("Scan immutable image before promotion");
