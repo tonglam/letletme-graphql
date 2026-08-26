@@ -38,7 +38,8 @@ describe("live desks tournament selection index", () => {
 		);
 		expect(snapshotResolver).toContain("context.logger.warn");
 		expect(snapshotResolver).toContain("claimLivePublicationFailureLog");
-		expect(snapshotResolver).toContain("livePublicationFailureReason(error)");
+		expect(snapshotResolver).toContain("livePublicationFailureDetails(");
+		expect(snapshotResolver).not.toContain("ref?.revision ?? null");
 		expect(snapshotResolver).not.toContain("cause: error");
 		expect(snapshotResolver).not.toContain("err: error");
 	});

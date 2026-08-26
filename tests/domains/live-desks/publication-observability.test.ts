@@ -1,25 +1,42 @@
 import { describe, expect, it } from "bun:test";
 import {
 	claimLivePublicationFailureLog,
-	livePublicationFailureReason,
+	livePublicationFailureDetails,
 } from "../../../src/domains/live-desks/publication-observability";
 
 describe("live publication observability", () => {
 	it("recognizes the bounded publication-unavailable reason", () => {
 		expect(
-			livePublicationFailureReason(new Error("LIVE_PUBLICATION_UNAVAILABLE:2627:1:1230"))
-		).toBe("LIVE_PUBLICATION_UNAVAILABLE");
+			livePublicationFailureDetails(
+				new Error("LIVE_PUBLICATION_UNAVAILABLE:2627:1:1230"),
+				"2627",
+				1
+			)
+		).toEqual({ reason: "LIVE_PUBLICATION_UNAVAILABLE", revision: "1230" });
 	});
 
-	it("does not copy internal error text into logs", () => {
+	it("does not copy public input or internal error text into logs", () => {
 		expect(
-			livePublicationFailureReason(
-				new Error("relation live_publications does not exist; password=secret")
+			livePublicationFailureDetails(
+				new Error("relation live_publications does not exist; password=secret"),
+				"2627",
+				1
 			)
-		).toBe("LIVE_SNAPSHOT_LOAD_FAILED");
-		expect(livePublicationFailureReason("LIVE_PUBLICATION_UNAVAILABLE:2627:1:1230")).toBe(
-			"LIVE_SNAPSHOT_LOAD_FAILED"
-		);
+		).toEqual({ reason: "LIVE_SNAPSHOT_LOAD_FAILED", revision: null });
+		expect(
+			livePublicationFailureDetails(
+				new Error("LIVE_PUBLICATION_UNAVAILABLE:2627:1:not-a-revision"),
+				"2627",
+				1
+			)
+		).toEqual({ reason: "LIVE_SNAPSHOT_LOAD_FAILED", revision: null });
+		expect(
+			livePublicationFailureDetails(
+				new Error("LIVE_PUBLICATION_UNAVAILABLE:2627:2:1230"),
+				"2627",
+				1
+			)
+		).toEqual({ reason: "LIVE_SNAPSHOT_LOAD_FAILED", revision: null });
 	});
 
 	it("deduplicates aliased field failures within one request", () => {

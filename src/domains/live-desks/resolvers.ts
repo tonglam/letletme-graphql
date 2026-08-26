@@ -48,7 +48,7 @@ import {
 import { buildFullFieldLiveBoardIndex } from "./full-field-live-board";
 import {
 	claimLivePublicationFailureLog,
-	livePublicationFailureReason,
+	livePublicationFailureDetails,
 } from "./publication-observability";
 import { selectTournamentDeskEntryWindow } from "./tournament-entry-window";
 import { resolveLiveWindow, type LiveWindow } from "./window";
@@ -226,14 +226,16 @@ const resolveSnapshot = async (
 	}
 	const eventId = ref?.eventId ?? (await getCoreEventSnapshot(context)).currentEventId ?? 0;
 	const snapshot = await getLiveDataSnapshot(context, eventId).catch((error) => {
-		const revision = ref?.revision ?? null;
-		if (claimLivePublicationFailureLog(context.requestScope ?? context, eventId, revision)) {
+		const failure = livePublicationFailureDetails(error, context.currentSeason.seasonCode, eventId);
+		if (
+			claimLivePublicationFailureLog(context.requestScope ?? context, eventId, failure.revision)
+		) {
 			context.logger.warn(
 				{
 					season: context.currentSeason.seasonCode,
 					eventId,
-					revision,
-					reason: livePublicationFailureReason(error),
+					revision: failure.revision,
+					reason: failure.reason,
 				},
 				"Live publication snapshot is unavailable"
 			);
