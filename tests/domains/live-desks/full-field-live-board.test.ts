@@ -8,6 +8,7 @@ import {
 import type { ManagerLiveScoreRow } from "../../../src/infra/manager-live-client";
 import type { LiveDataSnapshot } from "../../../src/infra/data-snapshot";
 import {
+	classifyEntryLiveCompetitionDataAvailability,
 	hasComparableFullFieldManagerMetric,
 	isScheduledTournamentEvent,
 	managerScoresAlignedWithLiveSnapshot,
@@ -291,6 +292,31 @@ describe("full-field live board bounded manager loads", () => {
 				dataChecked: false,
 			})
 		).toBe(false);
+	});
+
+	it("does not label a finished but unchecked event as scheduled", () => {
+		expect(
+			classifyEntryLiveCompetitionDataAvailability({
+				eventId: 38,
+				anchorEventId: 37,
+				anchorDataAvailability: "FINAL",
+				currentEventId: null,
+				finished: true,
+				dataChecked: false,
+				snapshotAvailable: false,
+			})
+		).toBe("UNAVAILABLE");
+		expect(
+			classifyEntryLiveCompetitionDataAvailability({
+				eventId: 38,
+				anchorEventId: 37,
+				anchorDataAvailability: "FINAL",
+				currentEventId: 37,
+				finished: false,
+				dataChecked: false,
+				snapshotAvailable: false,
+			})
+		).toBe("SCHEDULED");
 	});
 
 	it("loads 1,567 managers two chunks at a time and merges all rows", async () => {

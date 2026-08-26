@@ -493,6 +493,22 @@ export const isScheduledTournamentEvent = (input: {
 	);
 };
 
+export const classifyEntryLiveCompetitionDataAvailability = (input: {
+	eventId: number;
+	anchorEventId: number | null;
+	anchorDataAvailability: string;
+	currentEventId: number | null;
+	finished: boolean;
+	dataChecked: boolean;
+	snapshotAvailable: boolean;
+}): string => {
+	if (input.eventId === input.anchorEventId) return input.anchorDataAvailability;
+	if (input.finished && input.dataChecked) return "FINAL";
+	if (input.snapshotAvailable) return "LAST_GOOD";
+	if (!input.finished && input.eventId > (input.currentEventId ?? 0)) return "SCHEDULED";
+	return "UNAVAILABLE";
+};
+
 export const liveDesksResolvers = {
 	Query: {
 		liveContext: async (_parent: unknown, _args: unknown, context: GraphQLContext) => {
@@ -1068,16 +1084,15 @@ export const liveDesksResolvers = {
 			const unavailableEntryCount = board.unavailableEntryIds.filter(
 				(entryId) => !deferredIds.has(entryId) && !failedIds.has(entryId)
 			).length;
-			const dataAvailability =
-				request.eventId === window.anchorEventId
-					? window.dataAvailability
-					: event.finished && event.dataChecked
-						? "FINAL"
-						: snapshot
-							? "LAST_GOOD"
-							: event.id > (eventCore.currentEventId ?? 0)
-								? "SCHEDULED"
-								: "UNAVAILABLE";
+			const dataAvailability = classifyEntryLiveCompetitionDataAvailability({
+				eventId: request.eventId,
+				anchorEventId: window.anchorEventId,
+				anchorDataAvailability: window.dataAvailability,
+				currentEventId: eventCore.currentEventId,
+				finished: event.finished,
+				dataChecked: event.dataChecked,
+				snapshotAvailable: Boolean(snapshot),
+			});
 			return {
 				season: context.currentSeason.seasonCode,
 				eventId: request.eventId,
