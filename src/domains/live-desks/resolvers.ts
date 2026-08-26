@@ -739,6 +739,7 @@ export const liveDesksResolvers = {
 				});
 				fullFieldDataReady =
 					coverage?.state === "COMPLETE" &&
+					typeof coverage.managerRevision === "string" &&
 					coverage.rosterRevision === rosterRevision &&
 					coverage.expectedEntries === allEntryIds.length &&
 					coverage.resolvedEntries === allEntryIds.length &&
@@ -777,6 +778,7 @@ export const liveDesksResolvers = {
 					windowRevision: boardWindowRevision,
 					projectionMode,
 					managerStatusRevision,
+					requireTeamValue: request.sort === "TEAM_VALUE",
 				});
 			let fullFieldBoard = false;
 			let board;

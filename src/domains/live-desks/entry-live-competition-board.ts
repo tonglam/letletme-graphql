@@ -789,6 +789,7 @@ export const entryLiveCompetitionBoardCacheKey = (
 		rosterRevision: string;
 		windowRevision: string;
 		projectionMode?: "BOUNDED" | "FULL_FIELD";
+		requireTeamValue?: boolean;
 	}
 ): string => {
 	const identity = createHash("sha256")
@@ -796,6 +797,7 @@ export const entryLiveCompetitionBoardCacheKey = (
 			JSON.stringify({
 				...input,
 				projectionMode: input.projectionMode ?? "BOUNDED",
+				requireTeamValue: input.requireTeamValue ?? false,
 				projection: ENTRY_LIVE_COMPETITION_BOARD_PROJECTION_VERSION,
 			})
 		)

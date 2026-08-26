@@ -122,6 +122,31 @@ describe("full-field live board bounded manager loads", () => {
 		expect(merged.tournamentCoverage?.state).toBe("PARTIAL");
 	});
 
+	it("does not claim complete coverage when chunks use different manager revisions", () => {
+		const first = makeLoad([makeManagerRow(1, 10)], 2);
+		const second = makeLoad([makeManagerRow(2, 11)], 2);
+		const merged = mergeManagerScoreLoads(
+			[
+				first,
+				{
+					...second,
+					tournamentCoverage: {
+						...second.tournamentCoverage!,
+						managerRevision: "coverage:other",
+					},
+				},
+			],
+			[1, 2]
+		);
+
+		expect(merged.rows.size).toBe(2);
+		expect(merged.tournamentCoverage).toMatchObject({
+			state: "PARTIAL",
+			managerRevision: null,
+			error: "INCONSISTENT_MANAGER_REVISION",
+		});
+	});
+
 	it("loads 1,567 managers two chunks at a time and merges all rows", async () => {
 		const entryIds = Array.from({ length: 1567 }, (_, index) => index + 1);
 		let active = 0;

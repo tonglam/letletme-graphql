@@ -129,21 +129,37 @@ const mergeCoverage = (
 			.map((coverage) => coverage.rosterRevision)
 			.filter((revision): revision is string => revision !== null)
 	);
+	const coverageManagerRevisions = new Set(
+		coverages
+			.map((coverage) => coverage.managerRevision)
+			.filter(
+				(revision): revision is string => typeof revision === "string" && revision.trim().length > 0
+			)
+	);
+	const hasMissingManagerRevision = coverages.some(
+		(coverage) =>
+			typeof coverage.managerRevision !== "string" || coverage.managerRevision.trim() === ""
+	);
+	const hasConsistentManagerRevision =
+		coverages.length > 0 && !hasMissingManagerRevision && coverageManagerRevisions.size === 1;
+	const inconsistentManagerRevision = !hasConsistentManagerRevision;
 	const fullyFetchedAt = latestTimestamp(coverages.map((coverage) => coverage.fullyFetchedAt));
 	const inheritedState = leastCompleteCoverageState(coverages);
-	const state: ManagerLiveCoverageState = missingCoverage
-		? resolvedEntries === 0
-			? "UNAVAILABLE"
-			: "PARTIAL"
-		: errorCode
-			? inheritedState === "UNAVAILABLE" || resolvedEntries === 0
+	const state: ManagerLiveCoverageState = inconsistentManagerRevision
+		? "PARTIAL"
+		: missingCoverage
+			? resolvedEntries === 0
 				? "UNAVAILABLE"
 				: "PARTIAL"
-			: inheritedState && inheritedState !== "COMPLETE"
-				? inheritedState
-				: resolvedEntries < expectedEntries
-					? "PARTIAL"
-					: "COMPLETE";
+			: errorCode
+				? inheritedState === "UNAVAILABLE" || resolvedEntries === 0
+					? "UNAVAILABLE"
+					: "PARTIAL"
+				: inheritedState && inheritedState !== "COMPLETE"
+					? inheritedState
+					: resolvedEntries < expectedEntries
+						? "PARTIAL"
+						: "COMPLETE";
 	return {
 		rosterRevision: rosterRevisions.size === 1 ? [...rosterRevisions][0]! : null,
 		expectedEntries: Math.max(
@@ -155,11 +171,12 @@ const mergeCoverage = (
 			resolvedEntries
 		),
 		fullyFetchedAt,
-		managerRevision:
-			managerRevision ??
-			coverages.find((coverage) => coverage.managerRevision)?.managerRevision ??
-			null,
-		error: errorCode ?? coverages.find((coverage) => coverage.error)?.error ?? null,
+		managerRevision: hasConsistentManagerRevision ? [...coverageManagerRevisions][0]! : null,
+		error:
+			errorCode ??
+			(inconsistentManagerRevision
+				? "INCONSISTENT_MANAGER_REVISION"
+				: (coverages.find((coverage) => coverage.error)?.error ?? null)),
 		state,
 	};
 };
