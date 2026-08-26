@@ -221,6 +221,163 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		expect(normalizeChip("AM")).toBe("MANAGER");
 	});
 
+	it("fails closed when the effective lineup has the wrong player membership", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		const originalTransfers = entryLiveRepository.getEntryEventTransfersByIds;
+		const core = buildTestCoreData(1);
+		const context = buildSnapshotContext(
+			new TestRedis(
+				buildCorePublication("2627", 7, core),
+				buildLivePublication(core, 1, "2627", 8, {
+					sourceCheckedAt: new Date().toISOString(),
+				})
+			)
+		);
+		const picks = completePick(101, 1);
+		const liveByPlayer = new Map(
+			picks.picks.map((pick) => [pick.element, livePerformance(pick.element)] as const)
+		);
+		const effectiveLineup = picks.picks.map((pick, index) => ({
+			elementId: index === 14 ? 16 : pick.element,
+			position: pick.position,
+			sourceMultiplier: pick.multiplier,
+			effectiveMultiplier: pick.multiplier,
+			pickActive: pick.multiplier > 0,
+			autoSub: false,
+			isCaptain: pick.isCaptain,
+			isViceCaptain: pick.isViceCaptain,
+			captainForScoring: pick.isCaptain,
+		}));
+		entriesService.getEntriesByIds = async () =>
+			new Map([
+				[
+					101,
+					{
+						id: 101,
+						entryName: "Membership Team",
+						playerName: "Membership Player",
+						region: null,
+						startedEvent: 1,
+						overallPoints: 0,
+						overallRank: null,
+						bank: 0,
+						teamValue: 1000,
+						totalTransfers: 0,
+						lastEventId: null,
+						lastOverallPoints: null,
+						lastOverallRank: null,
+						lastTeamValue: null,
+						lastBank: null,
+					},
+				],
+			]);
+		entryLiveRepository.getEntryEventTransfersByIds = async () => new Map();
+		installManagerLiveResponse(1, [
+			managerRow(101, 1, {
+				eventPoints: 0,
+				netEventPoints: 0,
+				totalPoints: 0,
+				effectiveLineup,
+			}),
+		]);
+		try {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(context, 1, [101], {
+				liveByPlayer: Promise.resolve(liveByPlayer),
+				fixtures: Promise.resolve([]),
+				teams: Promise.resolve(core.teams as never),
+				picksByEntry: Promise.resolve(new Map([[101, picks]]) as never),
+			});
+			const calc = result.results.get(101);
+			expect(calc?.score.reconciliation).toBe("NO_LINEUP");
+			expect(calc?.score.reasonCodes).toContain("MISSING_LINEUP");
+			expect(calc?.pickList).toEqual([]);
+			expect(calc?.snapshot).toBeNull();
+		} finally {
+			restoreManagerLiveResponse();
+			entriesService.getEntriesByIds = originalEntries;
+			entryLiveRepository.getEntryEventTransfersByIds = originalTransfers;
+		}
+	});
+
+	it("clears all detail fields when headline reconciliation fails", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		const originalTransfers = entryLiveRepository.getEntryEventTransfersByIds;
+		const core = buildTestCoreData(1);
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), buildLivePublication(core, 1, "2627", 8))
+		);
+		const picks = completePick(101, 1);
+		const liveByPlayer = new Map(
+			picks.picks.map((pick) => [pick.element, livePerformance(pick.element)] as const)
+		);
+		const effectiveLineup = picks.picks.map((pick) => ({
+			elementId: pick.element,
+			position: pick.position,
+			sourceMultiplier: pick.multiplier,
+			effectiveMultiplier: pick.multiplier,
+			pickActive: pick.multiplier > 0,
+			autoSub: false,
+			isCaptain: pick.isCaptain,
+			isViceCaptain: pick.isViceCaptain,
+			captainForScoring: pick.isCaptain,
+		}));
+		entriesService.getEntriesByIds = async () =>
+			new Map([
+				[
+					101,
+					{
+						id: 101,
+						entryName: "Skew Team",
+						playerName: "Skew Player",
+						region: null,
+						startedEvent: 1,
+						overallPoints: 0,
+						overallRank: null,
+						bank: 0,
+						teamValue: 1000,
+						totalTransfers: 0,
+						lastEventId: null,
+						lastOverallPoints: null,
+						lastOverallRank: null,
+						lastTeamValue: null,
+						lastBank: null,
+					},
+				],
+			]);
+		entryLiveRepository.getEntryEventTransfersByIds = async () => new Map();
+		installManagerLiveResponse(1, [
+			managerRow(101, 1, {
+				eventPoints: 99,
+				netEventPoints: 99,
+				totalPoints: 99,
+				effectiveLineup,
+			}),
+		]);
+		try {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(context, 1, [101], {
+				liveByPlayer: Promise.resolve(liveByPlayer),
+				fixtures: Promise.resolve([]),
+				teams: Promise.resolve(core.teams as never),
+				picksByEntry: Promise.resolve(new Map([[101, picks]]) as never),
+			});
+			const calc = result.results.get(101);
+			expect(calc?.score.reconciliation).toBe("SOURCE_SKEW");
+			expect(calc).toMatchObject({
+				pickList: [],
+				activeCaptain: { id: 0, name: "", points: 0 },
+				snapshot: null,
+				played: 0,
+				toPlay: 0,
+				playedCaptain: 0,
+				captainName: "",
+			});
+		} finally {
+			restoreManagerLiveResponse();
+			entriesService.getEntriesByIds = originalEntries;
+			entryLiveRepository.getEntryEventTransfersByIds = originalTransfers;
+		}
+	});
+
 	it("returns empty results for empty entry IDs", async () => {
 		const context = makeMockContext({});
 		const result = await entryLiveBatchService.calcLivePointsForEntries(context, 33, []);
@@ -768,7 +925,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				"READY",
 				"NO_PICKS",
 			]);
-			expect(result.results.get(101)?.snapshot?.revision).toBe("8");
+			expect(result.results.get(101)?.snapshot).toBeNull();
 			expect(result.results.get(202)?.snapshot).toBeNull();
 		} finally {
 			restoreManagerLiveResponse();

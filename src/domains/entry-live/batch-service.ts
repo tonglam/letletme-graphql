@@ -113,6 +113,21 @@ type PerEntryData = {
 	previousResult: EntryEventResult | null;
 };
 
+const hasCompleteLineupMembership = (
+	picks: readonly { element: number }[],
+	authorityLineup: readonly EffectiveLineupRow[]
+): boolean => {
+	if (picks.length !== authorityLineup.length) return false;
+	const pickElements = new Set(picks.map((pick) => pick.element));
+	const authorityElements = new Set(authorityLineup.map((row) => row.elementId));
+	return (
+		pickElements.size === picks.length &&
+		authorityElements.size === authorityLineup.length &&
+		pickElements.size === authorityElements.size &&
+		[...pickElements].every((elementId) => authorityElements.has(elementId))
+	);
+};
+
 const PLAY_STATUS = {
 	BLANK: 0,
 	NOT_STARTED: 1,
@@ -426,9 +441,7 @@ const computeSingleEntry = (
 	});
 
 	const authorityByElement = new Map(authorityLineup.map((row) => [row.elementId, row] as const));
-	const hasCompleteAuthorityLineup =
-		authorityLineup.length === pickList.length &&
-		pickList.every((pick) => authorityByElement.has(pick.element));
+	const hasCompleteAuthorityLineup = hasCompleteLineupMembership(pickList, authorityLineup);
 	if (!hasCompleteAuthorityLineup) {
 		return {
 			availability: pickEntity && pickEntity.picks.length > 0 ? "READY" : "NO_PICKS",
@@ -846,9 +859,13 @@ export const entryLiveBatchService = {
 				const detailHasAllLiveRows = pickRows.every((pick) => liveByPlayerMap.has(pick.element));
 				// A pinned publication mismatch is represented as an empty live map by
 				// the repository. Require every pick to have a row so a failed fence
-				// cannot be mistaken for a valid zero-point detail payload.
+				// cannot be mistaken for a valid zero-point detail payload. The lineup
+				// membership check also prevents a same-length but different effective
+				// lineup from being treated as a complete detail payload.
 				const detailAvailable =
-					!targetedLiveError && detailHasAllLiveRows && authorityLineup.length === pickRows.length;
+					!targetedLiveError &&
+					detailHasAllLiveRows &&
+					hasCompleteLineupMembership(pickRows, authorityLineup);
 				const finalized = finalizedResultsByEntry.get(entryId);
 				const authoritativeRow = managerScores.rows.get(entryId);
 				const manager = buildManagerScore({
@@ -871,6 +888,11 @@ export const entryLiveBatchService = {
 						? {
 								pickList: [],
 								activeCaptain: { id: 0, name: "", points: 0 },
+								snapshot: null,
+								played: 0,
+								toPlay: 0,
+								playedCaptain: 0,
+								captainName: "",
 							}
 						: {}),
 					score: manager.score,
