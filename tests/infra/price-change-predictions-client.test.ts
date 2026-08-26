@@ -202,14 +202,11 @@ describe("price-change publication reader", () => {
 		);
 
 		const board = await readPriceChangePredictions(
-			makeContext(
-				publication.redis,
-				{
-					query: async () => {
-						throw new Error("PostgreSQL should not be needed");
-					},
-				} as unknown as QueryExecutor
-			)
+			makeContext(publication.redis, {
+				query: async () => {
+					throw new Error("PostgreSQL should not be needed");
+				},
+			} as unknown as QueryExecutor)
 		);
 
 		assert.equal(board.status, "READY");

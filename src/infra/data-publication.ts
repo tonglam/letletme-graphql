@@ -210,26 +210,24 @@ export const parseDataPublicationManifest = (
 			return null;
 		const dataset = value.dataset;
 		if (
-			typeof value.seasonCode !== "string" ||
-			!/^\d{4}$/.test(value.seasonCode) ||
-			!Number.isSafeInteger(value.revision) ||
-			Number(value.revision) <= 0 ||
-			!isDataPublicationId(value.publicationId) ||
-			!isIsoDate(value.sourceCheckedAt) ||
-			(value.lastSuccessfulFetchAt !== undefined && !isIsoDate(value.lastSuccessfulFetchAt)) ||
-			(value.freshnessWindowId !== undefined &&
-				(!Number.isSafeInteger(value.freshnessWindowId) || value.freshnessWindowId <= 0)) ||
-			(value.freshnessWindowIds !== undefined &&
-				(!Array.isArray(value.freshnessWindowIds) ||
-					value.freshnessWindowIds.some(
-						(windowId) =>
-							typeof windowId !== "number" ||
-							!Number.isSafeInteger(windowId) ||
-							windowId <= 0
-					))),
+			(typeof value.seasonCode !== "string" ||
+				!/^\d{4}$/.test(value.seasonCode) ||
+				!Number.isSafeInteger(value.revision) ||
+				Number(value.revision) <= 0 ||
+				!isDataPublicationId(value.publicationId) ||
+				!isIsoDate(value.sourceCheckedAt) ||
+				(value.lastSuccessfulFetchAt !== undefined && !isIsoDate(value.lastSuccessfulFetchAt)) ||
+				(value.freshnessWindowId !== undefined &&
+					(!Number.isSafeInteger(value.freshnessWindowId) || value.freshnessWindowId <= 0)) ||
+				(value.freshnessWindowIds !== undefined &&
+					(!Array.isArray(value.freshnessWindowIds) ||
+						value.freshnessWindowIds.some(
+							(windowId) =>
+								typeof windowId !== "number" || !Number.isSafeInteger(windowId) || windowId <= 0
+						))),
 			!isIsoDate(value.publishedAt) ||
-			!isCanonicalState(dataset, value.state) ||
-			!Array.isArray(value.items)
+				!isCanonicalState(dataset, value.state) ||
+				!Array.isArray(value.items))
 		) {
 			return null;
 		}
