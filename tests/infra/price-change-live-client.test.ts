@@ -299,6 +299,8 @@ describe("price-change live client", () => {
 		(hot.board as { staleAt: string }).staleAt = new Date(
 			Date.parse(oldFetchedAt) + 10 * 60 * 1_000
 		).toISOString();
+		(hot as { payloadHash: string }).payloadHash = hotEnvelopePayloadHash(hot);
+		(hot as { metadataHash: string }).metadataHash = hotEnvelopeMetadataHash(hot);
 		publishHot(redis, hot);
 
 		const cursor = await readPriceChangeLiveCursor(context(redis));
