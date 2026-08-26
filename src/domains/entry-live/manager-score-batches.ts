@@ -76,6 +76,24 @@ const earliestTimestamp = (values: readonly (string | null)[]): string | null =>
 	return valid.length === 0 ? null : new Date(Math.min(...valid)).toISOString();
 };
 
+const coverageStatePriority: Record<ManagerLiveCoverageState, number> = {
+	COMPLETE: 0,
+	WARMING: 1,
+	PARTIAL: 2,
+	UNAVAILABLE: 3,
+};
+
+const leastCompleteCoverageState = (
+	coverages: readonly ManagerLiveTournamentCoverage[]
+): ManagerLiveCoverageState | null =>
+	coverages.reduce<ManagerLiveCoverageState | null>(
+		(selected, coverage) =>
+			selected === null || coverageStatePriority[coverage.state] > coverageStatePriority[selected]
+				? coverage.state
+				: selected,
+		null
+	);
+
 const mergeCoverage = (
 	loads: readonly ManagerScoreLoad[],
 	expectedEntries: number,
@@ -96,13 +114,15 @@ const mergeCoverage = (
 			.filter((revision): revision is string => revision !== null)
 	);
 	const fullyFetchedAt = latestTimestamp(coverages.map((coverage) => coverage.fullyFetchedAt));
-	const state: ManagerLiveCoverageState =
-		errorCode || resolvedEntries < expectedEntries
-			? resolvedEntries === 0
-				? "UNAVAILABLE"
-				: "PARTIAL"
-			: coverages.some((coverage) => coverage.state === "WARMING")
-				? "WARMING"
+	const inheritedState = leastCompleteCoverageState(coverages);
+	const state: ManagerLiveCoverageState = errorCode
+		? inheritedState === "UNAVAILABLE" || resolvedEntries === 0
+			? "UNAVAILABLE"
+			: "PARTIAL"
+		: inheritedState && inheritedState !== "COMPLETE"
+			? inheritedState
+			: resolvedEntries < expectedEntries
+				? "PARTIAL"
 				: "COMPLETE";
 	return {
 		rosterRevision: rosterRevisions.size === 1 ? [...rosterRevisions][0]! : null,

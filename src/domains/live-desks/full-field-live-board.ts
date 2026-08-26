@@ -97,6 +97,8 @@ export type FullFieldLiveBoardIndexInput = {
 	entries: ReadonlyMap<number, Entry>;
 	picks: ReadonlyMap<number, EntryEventPick>;
 	players: ReadonlyMap<number, Player>;
+	/** Event-scoped team ids; current player rows are only a name/value fallback. */
+	playerTeamIds?: ReadonlyMap<number, number>;
 	managerRows: ReadonlyMap<number, ManagerLiveScoreRow>;
 	requireNet: boolean;
 };
@@ -126,7 +128,7 @@ export const buildFullFieldLiveBoardIndex = (
 		const teamBench = new Map<number, number>();
 		for (const selected of pick?.picks ?? []) {
 			const player = input.players.get(selected.element);
-			const teamId = player?.teamId ?? 0;
+			const teamId = input.playerTeamIds?.get(selected.element) ?? player?.teamId ?? 0;
 			ownerAny.add(selected.element);
 			add(teamAny, teamId);
 			if (selected.position <= 11) {

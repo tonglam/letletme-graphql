@@ -607,9 +607,15 @@ export const liveDesksResolvers = {
 				(Bun.env.FULL_FIELD_LIVE_BOARD_ENABLED ?? process.env.FULL_FIELD_LIVE_BOARD_ENABLED) ===
 				"true";
 			const initialCoverage = initialManagerScores.tournamentCoverage;
+			const initialHasComparableOverallTotals = allEntryIds.every((entryId) => {
+				const row = initialManagerScores.rows.get(entryId);
+				return row?.totalScope === "OVERALL" && typeof row.totalPoints === "number";
+			});
 			const canAttemptFullField =
 				fullFieldEnabled &&
 				request.sort !== "PLAYED" &&
+				(request.sort !== "TOTAL_POINTS" ||
+					(allEntryIds.length <= entryIds.length && initialHasComparableOverallTotals)) &&
 				request.captainPlayerIds.length === 0 &&
 				(request.ownership?.captainMode ?? "ANY") === "ANY" &&
 				initialCoverage?.state === "COMPLETE" &&
@@ -670,10 +676,14 @@ export const liveDesksResolvers = {
 				managerRevision,
 				rosterRevision,
 			};
-			const makeCacheKey = (boardWindowRevision: string): string =>
+			const makeCacheKey = (
+				boardWindowRevision: string,
+				projectionMode: "BOUNDED" | "FULL_FIELD"
+			): string =>
 				entryLiveCompetitionBoardCacheKey(context, {
 					...cacheIdentity,
 					windowRevision: boardWindowRevision,
+					projectionMode,
 					managerStatusRevision,
 				});
 			let fullFieldBoard = false;
@@ -682,7 +692,7 @@ export const liveDesksResolvers = {
 				try {
 					board = await getOrBuildEntryLiveCompetitionBoard(
 						context,
-						makeCacheKey(rosterRevision),
+						makeCacheKey(rosterRevision, "FULL_FIELD"),
 						async () => {
 							const [entries, picks] = await Promise.all([
 								entriesService.getEntriesByIds(context, allEntryIds),
@@ -695,11 +705,15 @@ export const liveDesksResolvers = {
 									)
 								)
 							);
-							const players = await playersService.getPlayersByIdsForEvent(
-								context,
-								playerIds,
-								request.eventId
-							);
+							const [players, eventPlayers] = await Promise.all([
+								playersService.getPlayersByIdsForEvent(context, playerIds, request.eventId),
+								getPlayerAndTeamMaps(
+									context,
+									playerIds,
+									request.eventId,
+									context.currentSeason.seasonCode
+								),
+							]);
 							return buildFullFieldLiveBoardIndex({
 								...cacheIdentity,
 								managerRows: managerScores.rows,
@@ -707,6 +721,12 @@ export const liveDesksResolvers = {
 								entries,
 								picks,
 								players,
+								playerTeamIds: new Map(
+									Array.from(eventPlayers.playerMap.entries()).map(([id, player]) => [
+										id,
+										player.team_id,
+									])
+								),
 								managerRevision,
 								rosterRevision,
 								requireNet,
@@ -724,7 +744,7 @@ export const liveDesksResolvers = {
 			if (!board) {
 				board = await getOrBuildEntryLiveCompetitionBoard(
 					context,
-					makeCacheKey(windowRevision),
+					makeCacheKey(windowRevision, "BOUNDED"),
 					async () => {
 						const result = await entryLiveBatchService.calcLivePointsForEntries(
 							context,
@@ -740,9 +760,30 @@ export const liveDesksResolvers = {
 							Array.from(result.results.values()),
 							{ useNet: requireNet }
 						);
+						let eventTeamIds: ReadonlyMap<number, number> | undefined;
+						if (request.teamCountRules.length > 0) {
+							const playerIds = Array.from(
+								new Set(rankedRows.flatMap((row) => row.pickList.map((pick) => pick.element)))
+							);
+							if (playerIds.length > 0) {
+								const eventPlayers = await getPlayerAndTeamMaps(
+									context,
+									playerIds,
+									request.eventId,
+									context.currentSeason.seasonCode
+								);
+								eventTeamIds = new Map(
+									Array.from(eventPlayers.playerMap.entries()).map(([id, player]) => [
+										id,
+										player.team_id,
+									])
+								);
+							}
+						}
 						return buildEntryLiveCompetitionBoard({
 							...cacheIdentity,
 							windowRevision,
+							eventTeamIds,
 							rows: rankedRows,
 							totalEntries: allEntryIds.length,
 							failedEntryIds: result.errors.map((error) => error.entryId),

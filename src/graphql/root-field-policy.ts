@@ -4,6 +4,7 @@ export type RootFieldAccess =
 	| "viewerEntryArg"
 	| "viewerTournamentMember"
 	| "verifiedEntry"
+	| "verifiedEntryArg"
 	| "tournamentAdmin"
 	| "leagueMember"
 	| "calcOwnEntries";
@@ -119,6 +120,11 @@ add(
 	"viewerEntryArg",
 	{ arg: "entryId" }
 );
+
+// Management listings are keyed by the administrator's bound FPL entry, not
+// by the currently selected viewer entry. This keeps a Mini Program's
+// followed team from becoming an authorization identity for management data.
+registry.set("manageableTournaments", policy("verifiedEntryArg", { arg: "entryId" }));
 
 add(
 	[

@@ -534,6 +534,36 @@ describe("entry live competition board filtering and paging", () => {
 		);
 	});
 
+	it("keeps bounded and full-field board projections in separate caches", () => {
+		const context = {
+			dataRevision: "core-1",
+			currentSeason: { seasonCode: "2627" },
+		} as GraphQLContext;
+		const identity = {
+			season: "2627",
+			eventId: 1,
+			tournamentId: 10,
+			coreRevision: "core-1",
+			playerRevision: "player-1",
+			managerRevision: "manager-1",
+			managerStatusRevision: "status-1",
+			rosterRevision: "roster-1",
+			windowRevision: "window-1",
+		};
+
+		expect(
+			entryLiveCompetitionBoardCacheKey(context, {
+				...identity,
+				projectionMode: "BOUNDED",
+			})
+		).not.toBe(
+			entryLiveCompetitionBoardCacheKey(context, {
+				...identity,
+				projectionMode: "FULL_FIELD",
+			})
+		);
+	});
+
 	it("changes cache identity and board revision when tournament membership changes", () => {
 		const row = liveRow({ entry: 1 });
 		const firstRosterRevision = entryLiveCompetitionRosterRevision([1]);

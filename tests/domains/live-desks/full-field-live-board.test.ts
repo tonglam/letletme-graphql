@@ -73,6 +73,27 @@ describe("full-field live board bounded manager loads", () => {
 		expect(merged.tournamentCoverage?.state).toBe("PARTIAL");
 	});
 
+	it("preserves a partial coverage state when all rows happen to be present", () => {
+		const load = makeLoad([makeManagerRow(1, 10), makeManagerRow(2, 11)], 2);
+		const merged = mergeManagerScoreLoads(
+			[
+				{
+					...load,
+					tournamentCoverage: {
+						...load.tournamentCoverage!,
+						resolvedEntries: 2,
+						state: "PARTIAL",
+					},
+				},
+			],
+			[1, 2]
+		);
+
+		expect(merged.rows.size).toBe(2);
+		expect(merged.missingEntryIds).toEqual([]);
+		expect(merged.tournamentCoverage?.state).toBe("PARTIAL");
+	});
+
 	it("loads 1,567 managers two chunks at a time and merges all rows", async () => {
 		const entryIds = Array.from({ length: 1567 }, (_, index) => index + 1);
 		let active = 0;
@@ -197,6 +218,17 @@ describe("full-field live board index", () => {
 		expect(page.filteredEntries).toBe(1);
 		expect(page.rows[0]?.entry).toBe(1);
 		expect(page.rows[0]?.score.source).toBe("FPL_CLASSIC_STANDINGS");
+
+		const eventScopedBoard = buildFullFieldLiveBoardIndex({
+			...boardInput,
+			playerTeamIds: new Map([[100, 9]]),
+		});
+		const eventScopedPage = queryEntryLiveCompetitionBoard(eventScopedBoard, {
+			...request,
+			chips: [],
+			teamCountRules: [{ teamId: 9, exactCount: 1, scope: "ANY" }],
+		});
+		expect(eventScopedPage.filteredEntries).toBe(3);
 
 		const fallbackPick = boardInput.picks.get(1);
 		if (!fallbackPick) throw new Error("test pick missing");
