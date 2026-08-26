@@ -16,10 +16,10 @@ describe("additive data completeness metadata", () => {
 				complete: true,
 			})
 		).toMatchObject({
-				complete: false,
-				eligibility: "INVALID",
-				revision: "r1",
-			});
+			complete: false,
+			eligibility: "INVALID",
+			revision: "r1",
+		});
 	});
 
 	it("exposes metadata on the business envelopes without replacing legacy fields", () => {

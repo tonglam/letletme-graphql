@@ -239,7 +239,8 @@ export const liveResolvers = {
 				scopeKey: `season:${parent.season}:event:${parent.eventId}`,
 				revision: parent.revision,
 				sourceCheckedAt: parent.checkedAt,
-				complete: parent.revision.length > 0 && parent.eventLiveCount >= 0 && parent.fixtureCount >= 0,
+				complete:
+					parent.revision.length > 0 && parent.eventLiveCount >= 0 && parent.fixtureCount >= 0,
 			}),
 	},
 	EventLive: {
