@@ -404,6 +404,22 @@ export async function readPriceChangeLiveBoard(
 			extensions: { code: "BAD_USER_INPUT" },
 		});
 	}
+	if (requestedRevision && requestedHotRevision) {
+		const hot = await readHotSnapshot(context, now, requestedRevision);
+		if (!hot) {
+			throw new GraphQLError("The requested live price revision is unavailable", {
+				extensions: { code: "PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE" },
+			});
+		}
+		return {
+			revision: hot.revision,
+			state: hot.reconciliation.state === "reconciled" ? "DURABLE" : "PROVISIONAL",
+			detectedAt: hot.detectedAt,
+			expiresAt: hot.expiresAt,
+			durablePublicationId: hot.reconciliation.durablePublicationId,
+			board: hot.board,
+		};
+	}
 	const [hot, durable] = await Promise.all([
 		readHotSnapshot(context, now, requestedRevision),
 		readPriceChangePredictions(context),
@@ -428,11 +444,10 @@ export async function readPriceChangeLiveBoard(
 				board: requestedDurable,
 			};
 		}
-		if (!hot) {
+		if (!hot)
 			throw new GraphQLError("The requested live price revision is unavailable", {
 				extensions: { code: "PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE" },
 			});
-		}
 		return {
 			revision: hot.revision,
 			state: hot.reconciliation.state === "reconciled" ? "DURABLE" : "PROVISIONAL",

@@ -352,10 +352,21 @@ describe("price-change live client", () => {
 		const newerSnapshot = hotSnapshot(500, "0123456789abcdef");
 		publishHot(redis, oldSnapshot);
 		publishHot(redis, newerSnapshot);
+		const queries: string[] = [];
+		const database = {
+			query: async (sql: string) => {
+				queries.push(sql);
+				return { rows: [] };
+			},
+		};
 
-		const board = await readPriceChangeLiveBoard(context(redis), "abcdef0123456789");
+		const board = await readPriceChangeLiveBoard(
+			context(redis, database as unknown as QueryExecutor),
+			"abcdef0123456789"
+		);
 		assert.equal(board.revision, "abcdef0123456789");
 		assert.equal(board.board.revision, "abcdef0123456789");
+		assert.equal(queries.length, 0);
 	});
 
 	it("rejects an envelope whose board fetchedAt is not identical", async () => {
