@@ -61,6 +61,7 @@ export const homeResolvers = {
 				revision: parent.revision,
 				sourceCheckedAt: parent.capturedAt,
 				complete:
+					parent.source === "DATA_PUBLICATION" &&
 					parent.revision.length > 0 &&
 					parent.capturedAt !== null &&
 					parent.ownershipState !== "UNAVAILABLE" &&
