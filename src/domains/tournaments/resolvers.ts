@@ -83,6 +83,7 @@ import {
 } from "./service";
 import { normalizeTournamentEventResultsPagination } from "./repository";
 import { getTournamentSetupWarningSummaries } from "./repository";
+import { buildDataCompleteness } from "../../graphql/data-completeness";
 
 const warningSummaryMemo = new WeakMap<
 	GraphQLContext,
@@ -474,6 +475,44 @@ export const tournamentsResolvers = {
 	},
 	TournamentDetailDesk: {
 		kind: (parent: TournamentDetailDesk): string => parent.kind.toUpperCase(),
+	},
+	TournamentOfficialH2H: {
+		completeness: (parent: TournamentOfficialH2H) =>
+			buildDataCompleteness({
+				contractKey: "official-h2h",
+				scopeKey: `tournament:${parent.tournament.id}:event:${parent.eventId}`,
+				revision: parent.scoreRevision,
+				sourceCheckedAt: parent.scoreCheckedAt,
+				expectedCount: parent.matches.length,
+				observedCount: parent.matches.length,
+				complete:
+					!parent.awaitingSchedule &&
+					parent.scoreSource !== "UNAVAILABLE" &&
+					parent.scoreRevision !== null,
+			}),
+	},
+	TournamentOfficialH2HBoard: {
+		completeness: (parent: {
+			tournament: TournamentInfo;
+			eventId: number;
+			awaitingSchedule: boolean;
+			scoreSource: string;
+			scoreRevision: string | null;
+			scoreCheckedAt: string | null;
+			matches: unknown[];
+		}) =>
+			buildDataCompleteness({
+				contractKey: "official-h2h",
+				scopeKey: `tournament:${parent.tournament.id}:event:${parent.eventId}`,
+				revision: parent.scoreRevision,
+				sourceCheckedAt: parent.scoreCheckedAt,
+				expectedCount: parent.matches.length,
+				observedCount: parent.matches.length,
+				complete:
+					!parent.awaitingSchedule &&
+					parent.scoreSource !== "UNAVAILABLE" &&
+					parent.scoreRevision !== null,
+			}),
 	},
 	TournamentSetupDesk: {
 		status: (parent: NonNullable<TournamentDetailDesk["setup"]>): string =>

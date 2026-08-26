@@ -18,6 +18,7 @@ import {
 	type LiveSnapshotState,
 	withLiveSnapshotRoot,
 } from "./snapshot-meta";
+import { buildDataCompleteness } from "../../graphql/data-completeness";
 
 /**
  * Per-request memoization for player lookups to avoid N+1 Redis/DB round-trips
@@ -232,6 +233,15 @@ export const liveResolvers = {
 	LiveSnapshotMeta: {
 		state: (parent: LiveSnapshotMeta): Uppercase<LiveSnapshotState> =>
 			parent.state.toUpperCase() as Uppercase<LiveSnapshotState>,
+		completeness: (parent: LiveSnapshotMeta) =>
+			buildDataCompleteness({
+				contractKey: "live-snapshot",
+				scopeKey: `season:${parent.season}:event:${parent.eventId}`,
+				revision: parent.revision,
+				sourceCheckedAt: parent.checkedAt,
+				complete:
+					parent.revision.length > 0 && parent.eventLiveCount >= 0 && parent.fixtureCount >= 0,
+			}),
 	},
 	EventLive: {
 		event: async (

@@ -25,6 +25,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 
 	type MyFplSnapshotMeta {
 		revision: String!
+		completeness: DataCompletenessMeta
 		eventId: Int!
 		snapshotDate: Date!
 		sourceCheckedAt: DateTime!

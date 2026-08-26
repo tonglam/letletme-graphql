@@ -74,6 +74,7 @@ export type GameweekDesk = {
 	lifecycle: GameweekLifecycleState;
 	deadlineTime: string | null;
 	publishedAt: string | null;
+	sourceCheckedAt: string | null;
 	overviewState: GameweekSectionState;
 	boardsState: GameweekSectionState;
 	overview: GameweekOverview | null;
@@ -445,6 +446,7 @@ export const gameweekService = {
 			let boardsState: GameweekSectionState = scheduled ? "PENDING" : "UNAVAILABLE";
 			let liveRevision: string | null = null;
 			let publishedAt: string | null = null;
+			let sourceCheckedAt: string | null = null;
 			let lifecycle = initialLifecycle;
 			let dreamTeam: GameweekBoardPlayer[] = [];
 			let hauls: GameweekBoardPlayer[] = [];
@@ -490,6 +492,7 @@ export const gameweekService = {
 					const meta = boards.meta;
 					liveRevision = meta?.revision ?? null;
 					publishedAt = meta?.publishedAt ?? null;
+					sourceCheckedAt = meta?.checkedAt ?? null;
 					lifecycle = lifecycleFromLiveState(meta, event, fixtures, eventContext, eventId);
 					boardsState = "AVAILABLE";
 					context.logger.info(
@@ -522,6 +525,7 @@ export const gameweekService = {
 				hauls = [];
 				liveRevision = null;
 				publishedAt = null;
+				sourceCheckedAt = null;
 			}
 
 			return {
@@ -536,6 +540,7 @@ export const gameweekService = {
 				lifecycle,
 				deadlineTime: event.deadlineTime,
 				publishedAt,
+				sourceCheckedAt,
 				overviewState,
 				boardsState,
 				overview,
