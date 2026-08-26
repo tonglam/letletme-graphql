@@ -469,12 +469,6 @@ type PublicationCandidateRow = QueryResultRow & {
 	manifest: unknown;
 };
 
-type ActivePublicationRow = QueryResultRow & {
-	publication_id: string;
-	revision: string | number;
-	manifest: unknown;
-};
-
 type PublicationItemRow = QueryResultRow & {
 	publication_id: string;
 	item_name: string;
@@ -522,20 +516,6 @@ const PUBLICATION_CANDIDATES_SQL = `
 	SELECT publication_id, revision, status, manifest FROM active_candidates
 	UNION ALL
 	SELECT publication_id, revision, status, manifest FROM retired_candidates
-`;
-
-// Cursor polling must remain cheap even when Redis is unavailable. Keep this
-// query limited to the active authority row and read only the context item
-// below; the player array is fetched only by the revision-bound board query.
-const ACTIVE_PUBLICATION_CURSOR_SQL = `
-	SELECT publication_id::text AS publication_id, revision::text AS revision, manifest
-	FROM ops.dataset_publications
-	WHERE dataset = 'fpl:price-changes'
-	  AND season_id = $1
-	  AND event_id IS NULL
-	  AND status = 'active'
-	ORDER BY revision DESC
-	LIMIT 2
 `;
 
 const PUBLICATION_BY_ID_SQL = `
@@ -870,57 +850,79 @@ export async function readPriceChangePredictionsCursor(
 	}
 
 	try {
-		const authority = await context.database.query<ActivePublicationRow>(
-			ACTIVE_PUBLICATION_CURSOR_SQL,
+		// Keep the cursor fallback bounded to the same active plus twelve retained
+		// candidates used by the board reader. Only the context item is fetched;
+		// player arrays remain exclusive to the revision-bound board query.
+		const authority = await context.database.query<PublicationCandidateRow>(
+			PUBLICATION_CANDIDATES_SQL,
 			[context.currentSeason.seasonId]
 		);
-		if (authority.rows.length !== 1) return null;
-		const row = authority.rows[0];
-		const rawManifest =
-			typeof row.manifest === "string" ? row.manifest : (JSON.stringify(row.manifest) ?? "");
-		const manifest = parseDataPublicationManifest(rawManifest, scope);
-		const revision = Number(row.revision);
-		if (
-			!manifest ||
-			!isPriceChangeManifest(manifest) ||
-			!Number.isSafeInteger(revision) ||
-			manifest.publicationId !== row.publication_id ||
-			manifest.revision !== revision
-		) {
-			return null;
-		}
-
-		const itemResult = await context.database.query<PublicationItemRow>(PUBLICATION_CONTEXT_SQL, [
-			row.publication_id,
-		]);
-		if (itemResult.rows.length !== 1) return null;
-		const item = itemResult.rows[0];
-		const manifestItem = manifest.items.find((candidate) => candidate.name === "context");
-		if (
-			item.item_name !== "context" ||
-			!manifestItem ||
-			typeof item.checksum !== "string" ||
-			item.checksum !== manifestItem.sha256
-		) {
-			return null;
-		}
-		let payload: unknown;
-		try {
-			payload = typeof item.payload === "string" ? JSON.parse(item.payload) : item.payload;
-			const serialized = canonicalJson(payload);
+		const activeRows = authority.rows.filter((row) => row.status === "active");
+		if (activeRows.length > 1) return null;
+		const activeRevision = activeRows.length === 1 ? Number(activeRows[0]!.revision) : null;
+		const candidates = authority.rows
+			.filter((row) => row.status === "active" || row.status === "retired")
+			.map((row) => ({ row, revision: Number(row.revision) }))
+			.filter(
+				(candidate) =>
+					Number.isSafeInteger(candidate.revision) &&
+					candidate.revision > 0 &&
+					(candidate.row.status === "active" ||
+						activeRevision === null ||
+						!Number.isSafeInteger(activeRevision) ||
+						candidate.revision < activeRevision)
+			)
+			.sort((left, right) => {
+				if (left.row.status !== right.row.status) return left.row.status === "active" ? -1 : 1;
+				return right.revision - left.revision;
+			});
+		for (const { row, revision } of candidates) {
+			const rawManifest =
+				typeof row.manifest === "string" ? row.manifest : (JSON.stringify(row.manifest) ?? "");
+			const manifest = parseDataPublicationManifest(rawManifest, scope);
 			if (
-				Number(item.item_count) !== manifestItem.count ||
-				payloadCount(payload) !== manifestItem.count ||
-				Buffer.byteLength(serialized, "utf8") !== manifestItem.bytes ||
-				sha256(serialized) !== manifestItem.sha256
+				!manifest ||
+				!isPriceChangeManifest(manifest) ||
+				!Number.isSafeInteger(revision) ||
+				manifest.publicationId !== row.publication_id ||
+				manifest.revision !== revision
 			) {
-				return null;
+				continue;
 			}
-		} catch {
-			return null;
+			const itemResult = await context.database.query<PublicationItemRow>(PUBLICATION_CONTEXT_SQL, [
+				row.publication_id,
+			]);
+			if (itemResult.rows.length !== 1) continue;
+			const item = itemResult.rows[0];
+			const manifestItem = manifest.items.find((candidate) => candidate.name === "context");
+			if (
+				item.item_name !== "context" ||
+				!manifestItem ||
+				typeof item.checksum !== "string" ||
+				item.checksum !== manifestItem.sha256
+			) {
+				continue;
+			}
+			let payload: unknown;
+			try {
+				payload = typeof item.payload === "string" ? JSON.parse(item.payload) : item.payload;
+				const serialized = canonicalJson(payload);
+				if (
+					Number(item.item_count) !== manifestItem.count ||
+					payloadCount(payload) !== manifestItem.count ||
+					Buffer.byteLength(serialized, "utf8") !== manifestItem.bytes ||
+					sha256(serialized) !== manifestItem.sha256
+				) {
+					continue;
+				}
+			} catch {
+				continue;
+			}
+			const publicationContext = parseContext(payload);
+			const cursor = publicationContext ? cursorFromContext(manifest, publicationContext) : null;
+			if (cursor) return row.status === "retired" ? { ...cursor, state: "STALE" } : cursor;
 		}
-		const publicationContext = parseContext(payload);
-		return publicationContext ? cursorFromContext(manifest, publicationContext) : null;
+		return null;
 	} catch (error) {
 		context.logger.warn(
 			{

@@ -370,6 +370,7 @@ describe("price-change live client", () => {
 							{
 								publication_id: durable.manifest.publicationId,
 								revision: String(durable.manifest.revision),
+								status: "active",
 								manifest: durable.manifest,
 							},
 						],
@@ -396,5 +397,42 @@ describe("price-change live client", () => {
 		assert.equal(queries.length, 2);
 		assert.ok(queries[1]?.includes("item_name = 'context'"));
 		assert.ok(!queries[1]?.includes("ORDER BY item_name"));
+	});
+
+	it("falls back to retained durable cursor metadata when the active publication is unreadable", async () => {
+		const redis = new FakeRedis();
+		const retained = durableFixture(9 * 60 * 1_000, "11111111-1111-4111-8111-111111111111", 1);
+		const database = {
+			query: async (sql: string) => {
+				if (sql.includes("FROM ops.dataset_publications")) {
+					return {
+						rows: [
+							{
+								publication_id: retained.manifest.publicationId,
+								revision: String(retained.manifest.revision),
+								status: "retired",
+								manifest: retained.manifest,
+							},
+						],
+					};
+				}
+				return {
+					rows: [
+						{
+							item_name: "context",
+							item_count: retained.manifest.items.find((item) => item.name === "context")?.count,
+							checksum: retained.manifest.items.find((item) => item.name === "context")?.sha256,
+							payload: retained.items.context,
+						},
+					],
+				};
+			},
+		};
+
+		const cursor = await readPriceChangeLiveCursor(
+			context(redis, database as unknown as QueryExecutor)
+		);
+		assert.equal(cursor.revision, retained.manifest.publicationId);
+		assert.equal(cursor.state, "DURABLE");
 	});
 });
