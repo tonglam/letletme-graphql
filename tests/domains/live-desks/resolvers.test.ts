@@ -41,4 +41,16 @@ describe("live desks tournament selection index", () => {
 			desk.indexOf("readCompetitionBoardCache")
 		);
 	});
+
+	it("uses the verified principal entry for the management fallback", async () => {
+		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const helper = source.slice(
+			source.indexOf("const assertMemberOrManager"),
+			source.indexOf("const managerBoardMeta")
+		);
+		expect(helper).toContain("verifiedManagerEntryId");
+		expect(helper).toContain("context.principal.fplEntryId");
+		expect(helper).toContain("getManagedTournament");
+		expect(helper).not.toMatch(/getManagedTournament\(context, tournamentId, entryId\)/);
+	});
 });

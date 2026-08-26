@@ -328,7 +328,20 @@ const assertMemberOrManager = async (
 ) => {
 	const member = await tournamentsService.getTournamentForMember(context, tournamentId, entryId);
 	if (member) return member;
-	const managed = await tournamentsService.getManagedTournament(context, tournamentId, entryId);
+	const verifiedManagerEntryId =
+		typeof context.principal?.fplEntryId === "number" &&
+		context.principal.fplEntryId > 0 &&
+		Boolean(context.principal.fplEntryVerifiedAt)
+			? context.principal.fplEntryId
+			: null;
+	const managed =
+		verifiedManagerEntryId === null
+			? null
+			: await tournamentsService.getManagedTournament(
+					context,
+					tournamentId,
+					verifiedManagerEntryId
+				);
 	if (managed) return managed;
 	throw new GraphQLError("Tournament access denied", { extensions: { code: "FORBIDDEN" } });
 };
@@ -788,9 +801,14 @@ export const liveDesksResolvers = {
 						context,
 						makeCacheKey(rosterRevision, "FULL_FIELD"),
 						async () => {
-							const [entries, picks] = await Promise.all([
+							const [entries, picks, eventResults] = await Promise.all([
 								entriesService.getEntriesByIds(context, allEntryIds),
 								entryLiveRepository.getEntryEventPicksByIds(context, allEntryIds, request.eventId),
+								entriesService.getEntryEventResultsByEntryIds(
+									context,
+									allEntryIds,
+									request.eventId
+								),
 							]);
 							const playerIds = Array.from(
 								new Set(
@@ -813,6 +831,7 @@ export const liveDesksResolvers = {
 								managerRows: managerScores.rows,
 								allEntryIds,
 								entries,
+								eventResults,
 								picks,
 								players,
 								playerTeamIds: new Map(
@@ -825,6 +844,7 @@ export const liveDesksResolvers = {
 								rosterRevision,
 								requireNet,
 								allowFinalNoCaptainBoost: event.finished && event.dataChecked,
+								requireEventTeamValue: event.finished && event.dataChecked,
 								requireTeamValue: request.sort === "TEAM_VALUE",
 							});
 						}

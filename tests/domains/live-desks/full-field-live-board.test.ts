@@ -328,6 +328,26 @@ describe("full-field live board index", () => {
 			})
 		).toThrow("Entry 3 has no team value for TEAM_VALUE sorting");
 
+		const eventResults = new Map<number, { teamValue: number }>(
+			entryIds.map((entryId) => [entryId, { teamValue: 800 + entryId }])
+		);
+		const historicalBoard = buildFullFieldLiveBoardIndex({
+			...boardInput,
+			eventResults,
+			requireEventTeamValue: true,
+			requireTeamValue: true,
+		});
+		expect(historicalBoard.rows.map((row) => row.teamValue)).toEqual([80.1, 80.2, 80.3]);
+		const missingHistoricalResult = new Map(eventResults);
+		missingHistoricalResult.delete(3);
+		expect(() =>
+			buildFullFieldLiveBoardIndex({
+				...boardInput,
+				eventResults: missingHistoricalResult,
+				requireEventTeamValue: true,
+			})
+		).toThrow("Entry 3 has no finalized event team value");
+
 		const eventScopedBoard = buildFullFieldLiveBoardIndex({
 			...boardInput,
 			playerTeamIds: new Map(

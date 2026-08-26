@@ -1,4 +1,4 @@
-import type { Entry } from "../entries/repository";
+import type { Entry, EntryEventResult } from "../entries/repository";
 import { hasCompleteEntryEventPick, type EntryEventPick } from "../entry-live/repository";
 import { unavailableManagerScore, type LiveManagerScore } from "../entry-live/manager-score";
 import type { ManagerLiveScoreRow, ManagerLiveSource } from "../../infra/manager-live-client";
@@ -95,6 +95,7 @@ export type FullFieldLiveBoardIndexInput = {
 	rosterRevision: string;
 	allEntryIds: readonly number[];
 	entries: ReadonlyMap<number, Entry>;
+	eventResults?: ReadonlyMap<number, Pick<EntryEventResult, "teamValue">>;
 	picks: ReadonlyMap<number, EntryEventPick>;
 	players: ReadonlyMap<number, Player>;
 	/** Event-scoped team ids; current player rows are only a name/value fallback. */
@@ -105,6 +106,8 @@ export type FullFieldLiveBoardIndexInput = {
 	allowFinalNoCaptainBoost?: boolean;
 	/** TEAM_VALUE sorting must never turn an unknown value into zero. */
 	requireTeamValue?: boolean;
+	/** A finalized event must use its persisted event result, never current entry data. */
+	requireEventTeamValue?: boolean;
 };
 
 /**
@@ -123,7 +126,17 @@ export const buildFullFieldLiveBoardIndex = (
 		if (!hasCompleteEntryEventPick(pick, input.eventId, entryId, input.allowFinalNoCaptainBoost)) {
 			throw new Error(`Entry ${entryId} has no complete event pick row`);
 		}
-		if (input.requireTeamValue && typeof entry.teamValue !== "number") {
+		const eventTeamValue = input.eventResults?.get(entryId)?.teamValue;
+		const teamValue =
+			typeof eventTeamValue === "number"
+				? eventTeamValue
+				: input.requireEventTeamValue
+					? null
+					: entry.teamValue;
+		if (input.requireEventTeamValue && typeof eventTeamValue !== "number") {
+			throw new Error(`Entry ${entryId} has no finalized event team value`);
+		}
+		if (input.requireTeamValue && typeof teamValue !== "number") {
 			throw new Error(`Entry ${entryId} has no team value for TEAM_VALUE sorting`);
 		}
 		const ownerAny = new Set<number>();
@@ -173,7 +186,7 @@ export const buildFullFieldLiveBoardIndex = (
 			playerName: entry.playerName,
 			rank: 0,
 			overallRank: score.overallRank ?? entry?.overallRank ?? 0,
-			teamValue: typeof entry.teamValue === "number" ? entry.teamValue / 10 : 0,
+			teamValue: typeof teamValue === "number" ? teamValue / 10 : 0,
 			chip: canonicalChip(pick?.chip ?? null),
 			livePoints: score.eventPoints ?? 0,
 			transferCost,
