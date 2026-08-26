@@ -143,6 +143,9 @@ export const isDataPublicationId = (value: unknown): value is string =>
 const isIsoDate = (value: unknown): value is string =>
 	typeof value === "string" && Number.isFinite(Date.parse(value));
 
+const isPositiveSafeInteger = (value: unknown): value is number =>
+	typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+
 const assertScope = (scope: DataPublicationScope): void => {
 	if (!/^\d{4}$/.test(scope.seasonCode)) throw new Error("Invalid Data publication season");
 	if (scope.dataset === "fpl:live") {
@@ -210,24 +213,19 @@ export const parseDataPublicationManifest = (
 			return null;
 		const dataset = value.dataset;
 		if (
-			(typeof value.seasonCode !== "string" ||
-				!/^\d{4}$/.test(value.seasonCode) ||
-				!Number.isSafeInteger(value.revision) ||
-				Number(value.revision) <= 0 ||
-				!isDataPublicationId(value.publicationId) ||
-				!isIsoDate(value.sourceCheckedAt) ||
-				(value.lastSuccessfulFetchAt !== undefined && !isIsoDate(value.lastSuccessfulFetchAt)) ||
-				(value.freshnessWindowId !== undefined &&
-					(!Number.isSafeInteger(value.freshnessWindowId) || value.freshnessWindowId <= 0)) ||
-				(value.freshnessWindowIds !== undefined &&
-					(!Array.isArray(value.freshnessWindowIds) ||
-						value.freshnessWindowIds.some(
-							(windowId) =>
-								typeof windowId !== "number" || !Number.isSafeInteger(windowId) || windowId <= 0
-						))),
+			typeof value.seasonCode !== "string" ||
+			!/^\d{4}$/.test(value.seasonCode) ||
+			!isPositiveSafeInteger(value.revision) ||
+			!isDataPublicationId(value.publicationId) ||
+			!isIsoDate(value.sourceCheckedAt) ||
+			(value.lastSuccessfulFetchAt !== undefined && !isIsoDate(value.lastSuccessfulFetchAt)) ||
+			(value.freshnessWindowId !== undefined && !isPositiveSafeInteger(value.freshnessWindowId)) ||
+			(value.freshnessWindowIds !== undefined &&
+				(!Array.isArray(value.freshnessWindowIds) ||
+					value.freshnessWindowIds.some((windowId) => !isPositiveSafeInteger(windowId)))) ||
 			!isIsoDate(value.publishedAt) ||
-				!isCanonicalState(dataset, value.state) ||
-				!Array.isArray(value.items))
+			!isCanonicalState(dataset, value.state) ||
+			!Array.isArray(value.items)
 		) {
 			return null;
 		}
