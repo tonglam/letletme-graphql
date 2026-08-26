@@ -9,6 +9,7 @@ import type {
 	MarketOwnershipPeriod,
 } from "./ownership-repository";
 import { marketOwnershipService } from "./service";
+import { buildDataCompleteness } from "../../graphql/data-completeness";
 
 type MarketPulseArgs = {
 	days?: number | null;
@@ -123,5 +124,17 @@ export const marketResolvers = {
 	MarketPulse: {
 		availabilityUpdateCount: (pulse: MarketPulse): number =>
 			pulse.availabilityUpdateCount ?? pulse.availabilityUpdates.length,
+	},
+	MarketSnapshotContext: {
+		completeness: (parent: MarketSnapshotContext, _args: unknown, context: GraphQLContext) =>
+			buildDataCompleteness({
+				contractKey: "market-price",
+				scopeKey: `season:${context.currentSeason.seasonCode}:source-day:${parent.snapshotDate}`,
+				revision: parent.revision,
+				sourceCheckedAt: parent.capturedAt,
+				expectedCount: parent.rowCount,
+				observedCount: parent.rowCount,
+				complete: parent.source === "DATA_PUBLICATION" && parent.rowCount > 0,
+			}),
 	},
 };

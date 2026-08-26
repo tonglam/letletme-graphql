@@ -61,6 +61,7 @@ export const priceChangesTypeDefs = /* GraphQL */ `
 		fetchedAt: DateTime
 		staleAt: DateTime
 		revision: String!
+		completeness: DataCompletenessMeta
 		expectedPlayerCount: Int!
 		observedPlayerCount: Int!
 		players: [PriceChangePlayer!]!

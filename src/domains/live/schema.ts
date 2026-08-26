@@ -41,6 +41,7 @@ export const liveTypeDefs = /* GraphQL */ `
 		season: String!
 		eventId: Int!
 		revision: String!
+		completeness: DataCompletenessMeta
 		state: LiveSnapshotState!
 		publishedAt: String!
 		checkedAt: String!

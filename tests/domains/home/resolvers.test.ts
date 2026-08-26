@@ -16,6 +16,7 @@ import type { MarketPulse } from "../../../src/domains/market/repository";
 import { Position } from "../../../src/domains/players/repository";
 import { playersService } from "../../../src/domains/players/service";
 import { schema } from "../../../src/graphql/schema";
+import { homeResolvers } from "../../../src/domains/home/resolvers";
 import { LIGHTWEIGHT_CORE_FIELDS } from "../../../src/graphql/root-field-policy";
 import type { GraphQLContext } from "../../../src/graphql/context";
 import type { Principal } from "../../../src/infra/principal";
@@ -157,6 +158,31 @@ const withDurableBoardRows = (
 };
 
 describe("Home GraphQL contracts", () => {
+	it("does not claim Home market completeness from a PostgreSQL fallback", () => {
+		const completeness = homeResolvers.HomeMarketDesk.completeness as unknown as (
+			parent: Record<string, unknown>,
+			args: unknown,
+			context: GraphQLContext
+		) => { complete: boolean; eligibility: string };
+		const result = completeness(
+			{
+				revision: "core.pg-123",
+				source: "POSTGRES_FALLBACK",
+				capturedAt: "2026-08-20T01:02:03.000Z",
+				ownershipState: "AVAILABLE",
+				ownership: {},
+				priceChangesState: "AVAILABLE",
+				priceChanges: [],
+				availabilityState: "AVAILABLE",
+				availabilityUpdates: [],
+			},
+			{},
+			{ currentSeason: { seasonCode: "2627" } } as GraphQLContext
+		);
+
+		expect(result).toMatchObject({ complete: false, eligibility: "ELIGIBLE" });
+	});
+
 	it("bounds every Home market list and preserves owned-first availability", () => {
 		const player = (playerId: number, selectedByPercent: number) => ({
 			playerId,

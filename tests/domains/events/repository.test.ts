@@ -5,6 +5,7 @@ import { eventsRepository } from "../../../src/domains/events/repository";
 import { eventsResolvers } from "../../../src/domains/events/resolvers";
 import { eventsTypeDefs } from "../../../src/domains/events/schema";
 import { baseResolvers, baseTypeDefs } from "../../../src/graphql/base-schema";
+import { dataCompletenessTypeDefs } from "../../../src/graphql/data-completeness";
 import {
 	buildCorePublication,
 	buildSnapshotContext,
@@ -81,7 +82,7 @@ describe("eventsRepository over the core publication", () => {
 
 	it("serializes publication deadlines through the executable schema", async () => {
 		const schema = makeExecutableSchema({
-			typeDefs: [baseTypeDefs, eventsTypeDefs],
+			typeDefs: [baseTypeDefs, dataCompletenessTypeDefs, eventsTypeDefs],
 			resolvers: [baseResolvers, eventsResolvers],
 		});
 		const result = await graphql({

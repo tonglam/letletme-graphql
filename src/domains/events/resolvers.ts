@@ -2,6 +2,7 @@ import { DateTimeResolver, JSONResolver } from "graphql-scalars";
 import type { GraphQLContext } from "../../graphql/context";
 import type { CoreEventContext, CurrentEventInfo, Event, EventsFilter } from "./repository";
 import { eventsService } from "./service";
+import { buildDataCompleteness } from "../../graphql/data-completeness";
 
 type EventArgs = {
 	id: number;
@@ -39,5 +40,17 @@ export const eventsResolvers = {
 			_args: Record<string, never>,
 			context: GraphQLContext
 		): Promise<CoreEventContext> => eventsService.getCoreEventContext(context),
+	},
+	CoreEventContext: {
+		completeness: (parent: CoreEventContext) =>
+			buildDataCompleteness({
+				contractKey: "core-fixtures",
+				scopeKey: `season:${parent.season}`,
+				revision: parent.revision,
+				sourceCheckedAt: parent.sourceCheckedAt,
+				// The core snapshot reader validates the publication manifest before
+				// this context is returned, so no second row count is invented here.
+				complete: true,
+			}),
 	},
 };

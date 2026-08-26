@@ -47,6 +47,7 @@ export const eventsTypeDefs = /* GraphQL */ `
 		season: String!
 		revision: String!
 		sourceCheckedAt: DateTime!
+		completeness: DataCompletenessMeta
 		currentEventId: Int
 		nextEventId: Int
 		nextDeadlineTime: DateTime

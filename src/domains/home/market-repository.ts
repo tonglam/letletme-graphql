@@ -5,7 +5,7 @@ import {
 	readJsonQueryCache,
 	writeJsonQueryCache,
 } from "../../infra/query-cache";
-import { getMarketSnapshotContext } from "../market/context";
+import { getMarketSnapshotContext, type MarketSnapshotSource } from "../market/context";
 import type {
 	MarketAvailabilityUpdate,
 	MarketPlayer,
@@ -23,6 +23,8 @@ export type HomeMarketSectionState = "AVAILABLE" | "EMPTY" | "UNAVAILABLE";
 
 export type HomeMarketDesk = {
 	revision: string;
+	/** The desk is complete only when its request pin came from a verified Data publication. */
+	source: MarketSnapshotSource | null;
 	capturedAt: string | null;
 	ownershipState: HomeMarketSectionState;
 	ownership: MarketOwnershipDay | null;
@@ -490,6 +492,7 @@ const unavailableDesk = (
 	capturedAt: string | null = null
 ): HomeMarketDesk => ({
 	revision,
+	source: null,
 	capturedAt,
 	ownershipState: "UNAVAILABLE",
 	ownership: null,
@@ -505,6 +508,9 @@ const isState = (value: unknown): value is HomeMarketSectionState =>
 const isHomeMarketDesk = (value: unknown): value is HomeMarketDesk =>
 	isRecord(value) &&
 	typeof value.revision === "string" &&
+	(value.source === null ||
+		value.source === "DATA_PUBLICATION" ||
+		value.source === "POSTGRES_FALLBACK") &&
 	(value.capturedAt === null || typeof value.capturedAt === "string") &&
 	isState(value.ownershipState) &&
 	(value.ownership === null || isRecord(value.ownership)) &&
@@ -615,6 +621,7 @@ export const createHomeMarketRepository = (
 
 			const desk: HomeMarketDesk = {
 				revision,
+				source: snapshotContext.source,
 				capturedAt: snapshotContext.capturedAt,
 				ownershipState:
 					ownershipResult.status === "rejected" ? "UNAVAILABLE" : stateFor(ownershipRows),

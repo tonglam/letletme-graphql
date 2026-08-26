@@ -90,6 +90,7 @@ export const homeTypeDefs = /* GraphQL */ `
 		bank: Int
 		leagueRanks: [HomeLeagueRank!]!
 		sourceCheckedAt: DateTime
+		completeness: DataCompletenessMeta
 	}
 
 	type HomePublicBootstrap {
@@ -112,6 +113,7 @@ export const homeTypeDefs = /* GraphQL */ `
 
 	type HomeMarketDesk {
 		revision: String!
+		completeness: DataCompletenessMeta
 		capturedAt: DateTime
 		ownershipState: HomeMarketSectionState!
 		ownership: MarketOwnershipDay
