@@ -1,11 +1,14 @@
 import type { GraphQLContext } from "../graphql/context";
 import { GraphQLError } from "graphql";
+import { DateTimeResolver } from "graphql-scalars";
 import {
 	PRICE_CHANGE_READY_MS,
 	PRICE_CHANGE_MAX_AGE_MS,
 	parsePriceChangeBoardValue,
 	readPriceChangePredictions,
 	readPriceChangePredictionsByPublicationId,
+	readPriceChangePredictionsCursor,
+	type PriceChangeDurableCursor,
 	type PriceChangeBoard,
 } from "./price-change-predictions-client";
 import { isDataPublicationId } from "./data-publication";
@@ -61,6 +64,16 @@ type HotSnapshot = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
+const isDateTimeString = (value: unknown): value is string => {
+	if (typeof value !== "string") return false;
+	try {
+		DateTimeResolver.parseValue(value);
+		return true;
+	} catch {
+		return false;
+	}
+};
+
 const hotPointerKey = (seasonCode: string): string => `${HOT_KEY_PREFIX}:${seasonCode}:active`;
 
 const parsePointer = (value: string | null): { revision: string; payloadKey: string } | null => {
@@ -93,9 +106,9 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 		!/^[0-9a-f]{64}$/.test(value.sourceHash) ||
 		(value.artifactId !== null && typeof value.artifactId !== "string") ||
 		(value.deadline !== null && typeof value.deadline !== "string") ||
-		typeof value.detectedAt !== "string" ||
-		typeof value.fetchedAt !== "string" ||
-		typeof value.expiresAt !== "string" ||
+		!isDateTimeString(value.detectedAt) ||
+		!isDateTimeString(value.fetchedAt) ||
+		!isDateTimeString(value.expiresAt) ||
 		!Number.isSafeInteger(value.expectedPlayerCount) ||
 		!Number.isSafeInteger(value.observedPlayerCount) ||
 		(value.corePlayerCount !== null && !Number.isSafeInteger(value.corePlayerCount)) ||
@@ -111,6 +124,7 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 		!Number.isFinite(detectedAt) ||
 		!Number.isFinite(fetchedAt) ||
 		!Number.isFinite(expiresAt) ||
+		detectedAt > now.getTime() ||
 		expiresAt <= now.getTime() ||
 		expiresAt !== detectedAt + HOT_TTL_MS
 	) {
@@ -241,15 +255,23 @@ async function readHotSnapshot(
 	}
 }
 
-function isNewerHotSnapshot(hot: HotSnapshot | null, durable: PriceChangeBoard): boolean {
-	if (!hot || durable.status === "UNAVAILABLE" || !durable.fetchedAt) return Boolean(hot);
+function isNewerHotSnapshot(
+	hot: HotSnapshot | null,
+	durable: Pick<PriceChangeBoard, "status" | "fetchedAt"> | PriceChangeDurableCursor | null
+): boolean {
+	const durableStatus = durable && "status" in durable ? durable.status : durable?.state;
+	if (!hot || !durable || durableStatus === "UNAVAILABLE" || !durable.fetchedAt)
+		return Boolean(hot);
 	const hotAt = Date.parse(hot.fetchedAt);
 	const durableAt = Date.parse(durable.fetchedAt);
 	return Number.isFinite(hotAt) && (!Number.isFinite(durableAt) || hotAt > durableAt);
 }
 
-function durableCursor(seasonCode: string, board: PriceChangeBoard): PriceChangeLiveCursor {
-	if (board.status === "UNAVAILABLE") {
+function durableCursor(
+	seasonCode: string,
+	durable: PriceChangeDurableCursor | null
+): PriceChangeLiveCursor {
+	if (!durable) {
 		return {
 			seasonCode,
 			revision: null,
@@ -261,11 +283,11 @@ function durableCursor(seasonCode: string, board: PriceChangeBoard): PriceChange
 	}
 	return {
 		seasonCode,
-		revision: board.revision,
+		revision: durable.revision,
 		state: "DURABLE",
-		detectedAt: board.fetchedAt,
-		fetchedAt: board.fetchedAt,
-		expiresAt: durableHardExpiresAt(board),
+		detectedAt: durable.fetchedAt,
+		fetchedAt: durable.fetchedAt,
+		expiresAt: durable.hardExpiresAt,
 	};
 }
 
@@ -290,7 +312,7 @@ export async function readPriceChangeLiveCursor(
 	const now = new Date();
 	const [hot, durable] = await Promise.all([
 		readHotSnapshot(context, now),
-		readPriceChangePredictions(context),
+		readPriceChangePredictionsCursor(context, now),
 	]);
 	if (isNewerHotSnapshot(hot, durable)) {
 		return {

@@ -4,6 +4,8 @@ import { DateTimeResolver } from "graphql-scalars";
 import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
+	readDataPublicationItemsAtManifest,
+	readDataPublicationManifest,
 	readDataPublicationItemsObserved,
 	isDataPublicationId,
 	type DataPublication,
@@ -67,6 +69,13 @@ export type PriceChangeBoard = {
 	observedPlayerCount: number;
 	players: PriceChangePlayer[];
 };
+
+export type PriceChangeDurableCursor = Readonly<{
+	revision: string;
+	fetchedAt: string;
+	hardExpiresAt: string;
+	state: "READY" | "STALE";
+}>;
 
 type PriceChangePublicationContext = {
 	schemaVersion: 1;
@@ -619,6 +628,68 @@ export async function readPriceChangePredictions(
 		if (board) return board;
 	}
 	return unavailableBoard();
+}
+
+/**
+ * Read only the active publication manifest and context for cursor polling.
+ * The cursor never needs to materialize the player array; a full board read is
+ * reserved for the subsequent revision-bound board request.
+ */
+export async function readPriceChangePredictionsCursor(
+	context: GraphQLContext,
+	now: Date = new Date()
+): Promise<PriceChangeDurableCursor | null> {
+	const scope = {
+		dataset: PRICE_CHANGE_DATASET,
+		seasonCode: context.currentSeason.seasonCode,
+	} as const;
+	try {
+		const manifest = await readDataPublicationManifest(context.redis, scope);
+		if (
+			!manifest ||
+			manifest.eventId !== null ||
+			manifest.state !== "active" ||
+			manifest.items.length !== PRICE_CHANGE_ITEMS.length ||
+			manifest.items
+				.map((item) => item.name)
+				.sort()
+				.join(",") !== [...PRICE_CHANGE_ITEMS].sort().join(",")
+		) {
+			return null;
+		}
+		const publication = await readDataPublicationItemsAtManifest(context.redis, manifest, [
+			"context",
+		]);
+		const publicationContext = publication ? parseContext(publication.items.context) : null;
+		if (!publicationContext) return null;
+		const fetchedAt = Date.parse(publicationContext.fetchedAt);
+		const hardExpiresAt = Date.parse(publicationContext.hardExpiresAt);
+		const ageMs = now.getTime() - fetchedAt;
+		if (
+			!Number.isFinite(fetchedAt) ||
+			!Number.isFinite(hardExpiresAt) ||
+			ageMs < 0 ||
+			ageMs > PRICE_CHANGE_MAX_AGE_MS
+		) {
+			return null;
+		}
+		return {
+			revision: manifest.publicationId,
+			fetchedAt: publicationContext.fetchedAt,
+			hardExpiresAt: publicationContext.hardExpiresAt,
+			state: ageMs < PRICE_CHANGE_READY_MS ? "READY" : "STALE",
+		};
+	} catch (error) {
+		context.logger.warn(
+			{
+				err: error,
+				dataset: PRICE_CHANGE_DATASET,
+				seasonCode: context.currentSeason.seasonCode,
+			},
+			"Failed to load price-change cursor metadata"
+		);
+		return null;
+	}
 }
 
 /** Kept as a local name for callers while the implementation is now a pure publication reader. */
