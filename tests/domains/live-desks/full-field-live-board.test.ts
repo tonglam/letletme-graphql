@@ -11,6 +11,7 @@ import {
 	hasComparableFullFieldManagerMetric,
 	isScheduledTournamentEvent,
 	managerScoresAlignedWithLiveSnapshot,
+	selectManagerScoresForBoard,
 } from "../../../src/domains/live-desks/resolvers";
 import {
 	buildFullFieldLiveBoardIndex,
@@ -310,6 +311,15 @@ describe("full-field live board bounded manager loads", () => {
 		expect(merged.rows.size).toBe(1567);
 		expect(merged.missingEntryIds).toEqual([]);
 		expect(merged.tournamentCoverage?.state).toBe("COMPLETE");
+	});
+
+	it("retains the successful bounded manager load when expansion is incomplete", () => {
+		const initial = makeLoad([makeManagerRow(1, 10)], 2);
+		const expanded = makeLoad([makeManagerRow(2, 11)], 2);
+
+		expect(selectManagerScoresForBoard(initial, expanded, false)).toBe(initial);
+		expect(selectManagerScoresForBoard(initial, expanded, true)).toBe(expanded);
+		expect(selectManagerScoresForBoard(initial, null, false)).toBe(initial);
 	});
 });
 

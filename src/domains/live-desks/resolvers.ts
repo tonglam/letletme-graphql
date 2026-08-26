@@ -112,6 +112,12 @@ const snapshotStateForWindow = (window: LiveWindow): "SCHEDULED" | "LIVE" | "SET
 	return "LIVE";
 };
 
+export const selectManagerScoresForBoard = (
+	initial: ManagerScoreLoad,
+	expanded: ManagerScoreLoad | null,
+	fullFieldDataReady: boolean
+): ManagerScoreLoad => (fullFieldDataReady && expanded ? expanded : initial);
+
 const livePublicationState = (
 	manifest: DataPublicationManifest | null
 ): "scheduled" | "live" | "settled" | null =>
@@ -777,33 +783,41 @@ export const liveDesksResolvers = {
 				initialCoverage.rosterRevision === rosterRevision &&
 				initialCoverage.expectedEntries === allEntryIds.length &&
 				initialCoverage.resolvedEntries === allEntryIds.length;
-			let managerScores = initialManagerScores;
-			let fullFieldDataReady: boolean;
+			let expandedManagerScores: ManagerScoreLoad | null = null;
+			let fullFieldDataReady = false;
 			if (canAttemptFullField && allEntryIds.length > entryIds.length) {
-				const completeManagerScores = await loadManagerScoresInChunks(
-					allEntryIds,
-					(chunk) => loadManagerScores(context, request.eventId, chunk, request.tournamentId),
-					2
-				);
-				managerScores = completeManagerScores;
-				const coverage = completeManagerScores.tournamentCoverage;
-				const hasAllRankMetrics = allEntryIds.every((entryId) => {
-					return hasComparableFullFieldManagerMetric(completeManagerScores.rows.get(entryId), {
-						requireNet,
-						requestedNet,
+				try {
+					const completeManagerScores = await loadManagerScoresInChunks(
+						allEntryIds,
+						(chunk) => loadManagerScores(context, request.eventId, chunk, request.tournamentId),
+						2
+					);
+					expandedManagerScores = completeManagerScores;
+					const coverage = completeManagerScores.tournamentCoverage;
+					const hasAllRankMetrics = allEntryIds.every((entryId) => {
+						return hasComparableFullFieldManagerMetric(completeManagerScores.rows.get(entryId), {
+							requireNet,
+							requestedNet,
+						});
 					});
-				});
-				fullFieldDataReady =
-					coverage?.state === "COMPLETE" &&
-					typeof coverage.managerRevision === "string" &&
-					coverage.rosterRevision === rosterRevision &&
-					coverage.expectedEntries === allEntryIds.length &&
-					coverage.resolvedEntries === allEntryIds.length &&
-					completeManagerScores.rows.size === allEntryIds.length &&
-					completeManagerScores.missingEntryIds.length === 0 &&
-					hasAllRankMetrics &&
-					managerScoresAlignedWithLiveSnapshot(completeManagerScores, event, snapshot);
+					fullFieldDataReady =
+						coverage?.state === "COMPLETE" &&
+						typeof coverage.managerRevision === "string" &&
+						coverage.rosterRevision === rosterRevision &&
+						coverage.expectedEntries === allEntryIds.length &&
+						coverage.resolvedEntries === allEntryIds.length &&
+						completeManagerScores.rows.size === allEntryIds.length &&
+						completeManagerScores.missingEntryIds.length === 0 &&
+						hasAllRankMetrics &&
+						managerScoresAlignedWithLiveSnapshot(completeManagerScores, event, snapshot);
+				} catch (error) {
+					context.logger.warn(
+						{ err: error, eventId: request.eventId, tournamentId: request.tournamentId },
+						"Full-field manager expansion unavailable; retaining bounded manager load"
+					);
+				}
 			} else {
+				const managerScores = initialManagerScores;
 				const hasAllRankMetrics = allEntryIds.every((entryId) => {
 					return hasComparableFullFieldManagerMetric(managerScores.rows.get(entryId), {
 						requireNet,
@@ -817,6 +831,11 @@ export const liveDesksResolvers = {
 					hasAllRankMetrics &&
 					managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
 			}
+			const managerScores = selectManagerScoresForBoard(
+				initialManagerScores,
+				expandedManagerScores,
+				fullFieldDataReady
+			);
 			const managerRevision = managerLoadRevision(managerScores);
 			const managerStatusRevision = entryLiveCompetitionManagerStatusRevision(managerScores);
 			const cacheIdentity = {

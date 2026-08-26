@@ -731,12 +731,13 @@ export const toPublicEntryLiveCompetitionBoardRow = ({
 
 /** Merge page-only live calculations without replacing event-scoped index fields. */
 export const enrichEntryLiveCompetitionBoardRow = (
-	indexedRow: Pick<EntryLiveCompetitionBoardRow, "rank" | "teamValue">,
+	indexedRow: Pick<EntryLiveCompetitionBoardRow, "rank" | "overallRank" | "teamValue">,
 	calculatedRow: LiveCalcData
 ): EntryLiveCompetitionBoardRow => ({
 	...toPublicEntryLiveCompetitionBoardRow(projectEntryLiveCompetitionBoardRow(calculatedRow)),
 	teamValue: indexedRow.teamValue,
 	rank: indexedRow.rank,
+	overallRank: indexedRow.overallRank,
 });
 
 export const queryEntryLiveCompetitionBoard = (

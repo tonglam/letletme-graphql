@@ -480,9 +480,11 @@ describe("entry live competition board filtering and paging", () => {
 
 	it("preserves the indexed team value when enriching a full-field page row", () => {
 		const calculated = liveRow({ entry: 3 });
-		const indexed = { ...board([calculated]).rows[0]!, teamValue: 81.2 };
+		const indexed = { ...board([calculated]).rows[0]!, teamValue: 81.2, overallRank: 123 };
 
-		expect(enrichEntryLiveCompetitionBoardRow(indexed, calculated).teamValue).toBe(81.2);
+		const enriched = enrichEntryLiveCompetitionBoardRow(indexed, calculated);
+		expect(enriched.teamValue).toBe(81.2);
+		expect(enriched.overallRank).toBe(123);
 	});
 
 	it("searches team, manager and exact entry ID text", () => {
