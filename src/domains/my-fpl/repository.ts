@@ -1947,9 +1947,11 @@ const loadCompetitionBoardPrepared = async (
 			   (SELECT count(*)::integer FROM filtered) AS total_rows,
 				   COALESCE((SELECT jsonb_agg(payload || jsonb_build_object('__snapshotEntryId', entry_id)
 				                               ORDER BY CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
-				                                      THEN (payload->>'groupId')::integer END NULLS LAST,
+				                                      THEN CASE WHEN (payload->>'groupId')::numeric BETWEEN -2147483648 AND 2147483647
+				                                                THEN (payload->>'groupId')::integer END END NULLS LAST,
 				                                      CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
-				                                      THEN (payload->>'rank')::integer END NULLS LAST,
+				                                      THEN CASE WHEN (payload->>'rank')::numeric BETWEEN -2147483648 AND 2147483647
+				                                                THEN (payload->>'rank')::integer END END NULLS LAST,
 				                                      entry_id) FROM paged), '[]'::jsonb) AS rows,
 				   (SELECT count(*)::integer FROM board
 				     WHERE ((payload->>'groupId') IS NOT NULL
