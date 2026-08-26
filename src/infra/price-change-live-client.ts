@@ -150,7 +150,7 @@ const parseHotSnapshotMetadata = (
 		typeof value.metadataHash !== "string" ||
 		!/^[0-9a-f]{64}$/.test(value.metadataHash) ||
 		(value.artifactId !== null && typeof value.artifactId !== "string") ||
-		(value.deadline !== null && !isDateTimeString(value.deadline)) ||
+		!isDateTimeString(value.deadline) ||
 		!isDateTimeString(value.detectedAt) ||
 		!isDateTimeString(value.fetchedAt) ||
 		!isDateTimeString(value.expiresAt) ||

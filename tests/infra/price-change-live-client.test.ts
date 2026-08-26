@@ -539,6 +539,16 @@ describe("price-change live client", () => {
 		assert.equal((await readPriceChangeLiveBoard(context(redis))).state, "UNAVAILABLE");
 	});
 
+	it("does not advertise a metadata cursor without its primary deadline", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		(snapshot as { deadline: string | null }).deadline = null;
+		(snapshot as { metadataHash: string }).metadataHash = hotEnvelopeMetadataHash(snapshot);
+		publishHot(redis, snapshot);
+
+		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
+	});
+
 	it("returns unavailable without a durable or hot publication", async () => {
 		const cursor = await readPriceChangeLiveCursor(context(new FakeRedis()));
 		assert.deepEqual(cursor, {
