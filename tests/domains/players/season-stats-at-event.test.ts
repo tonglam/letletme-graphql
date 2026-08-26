@@ -60,14 +60,26 @@ const installPlayerStatsReads = (
 			total_points: 0,
 		}))
 	).flat();
+	const bundles = snapshots.map((snapshot) => ({
+		...snapshot,
+		publication_revision: "11",
+		publication_source_checked_at: sourceCheckedAt,
+		publication_published_at: publishedAt,
+		publication_row_count: core.players.length,
+		publication_expected_row_count: core.players.length,
+		publication_content_sha256: "a".repeat(64),
+		publication_baseline_verified_at: publishedAt,
+	}));
 	context.data = {
 		read: (table: string) =>
 			queryBuilder(
-				table === "fpl.player_event_snapshot_publications"
-					? publications
-					: table === "fpl.player_event_snapshots"
-						? snapshots
-						: []
+				table === "fpl.player_event_snapshot_bundles"
+					? bundles
+					: table === "fpl.player_event_snapshot_publications"
+						? publications
+						: table === "fpl.player_event_snapshots"
+							? snapshots
+							: []
 			),
 	} as never;
 };

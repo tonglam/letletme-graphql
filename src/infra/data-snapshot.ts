@@ -63,6 +63,7 @@ export type CoreEventData = Readonly<{
 	averageEntryScore: number | null;
 	finished: boolean;
 	dataChecked: boolean;
+	/** FPL freshness fence for final result publication. */
 	dataCheckedAt?: string | null;
 	highestScoringEntry: number | null;
 	deadlineTimeEpoch: number | null;
@@ -2289,13 +2290,13 @@ export const getTargetedLiveDataSnapshot = async (
 	expected: {
 		publicationId: string;
 		revision: string;
-		sourceCheckedAt: string;
-		publishedAt: string;
-		state: LiveSnapshotState;
-		eventLiveCount: number;
-		fixtureCount: number;
-		fixtureTeamCount: number;
-		bonusTeamCount: number;
+		sourceCheckedAt?: string;
+		publishedAt?: string;
+		state?: LiveSnapshotState;
+		eventLiveCount?: number;
+		fixtureCount?: number;
+		fixtureTeamCount?: number;
+		bonusTeamCount?: number;
 	}
 ): Promise<TargetedLiveDataSnapshot> => {
 	const uniquePlayerIds = Array.from(
@@ -2305,12 +2306,14 @@ export const getTargetedLiveDataSnapshot = async (
 	if (
 		snapshot.publicationId !== expected.publicationId ||
 		snapshot.revision !== expected.revision ||
-		snapshot.eventLives.length !== expected.eventLiveCount ||
-		snapshot.fixtures.length !== expected.fixtureCount ||
-		(expected.fixtureTeamCount > 0 &&
+		(expected.eventLiveCount !== undefined &&
+			snapshot.eventLives.length !== expected.eventLiveCount) ||
+		(expected.fixtureCount !== undefined && snapshot.fixtures.length !== expected.fixtureCount) ||
+		(expected.fixtureTeamCount !== undefined &&
+			expected.fixtureTeamCount > 0 &&
 			new Set(snapshot.fixtures.flatMap((fixture) => [fixture.teamHId, fixture.teamAId])).size !==
 				expected.fixtureTeamCount) ||
-		snapshot.state !== expected.state
+		(expected.state !== undefined && snapshot.state !== expected.state)
 	) {
 		throw new Error(`Targeted live publication revision is unavailable for event ${eventId}`);
 	}

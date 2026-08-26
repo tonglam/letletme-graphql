@@ -449,16 +449,18 @@ export const managerScoresAlignedWithLiveSnapshot = (
 	if (!snapshot) return false;
 	const livePublishedAt = Date.parse(snapshot.publishedAt || snapshot.lastSuccessfulFetchAt);
 	if (!Number.isFinite(livePublishedAt)) return false;
-	const liveRevisionPrefix = snapshot.publicationId
-		? `fpl:live:${snapshot.publicationId}:${snapshot.revision}:`
-		: null;
 	return Array.from(managerScores.rows.values()).every((row) => {
 		const managerCheckedAt = Date.parse(row.checkedAt);
+		const provenance = row.provenance;
 		return (
 			row.source === "FPL_EVENT_LIVE" &&
 			Number.isFinite(managerCheckedAt) &&
 			managerCheckedAt >= livePublishedAt &&
-			(liveRevisionPrefix === null || row.revision.startsWith(liveRevisionPrefix))
+			provenance?.scoreSource === "FPL_EVENT_LIVE" &&
+			provenance.calculationMode === "PROJECTED_AUTOSUBS" &&
+			(snapshot.publicationId === null ||
+				(provenance.livePublicationId === snapshot.publicationId &&
+					provenance.liveRevision === snapshot.revision))
 		);
 	});
 };
@@ -783,10 +785,24 @@ export const liveDesksResolvers = {
 				};
 			}
 
-			const [snapshot, initialManagerScores] = await Promise.all([
-				getLiveDataSnapshot(context, request.eventId).catch(() => null),
-				loadManagerScores(context, request.eventId, entryIds, request.tournamentId),
-			]);
+			const snapshot = await getLiveDataSnapshot(context, request.eventId).catch(() => null);
+			const initialManagerScores = await loadManagerScores(
+				context,
+				request.eventId,
+				entryIds,
+				request.tournamentId,
+				{
+					includeEffectiveLineup: true,
+					...(snapshot?.publicationId
+						? {
+								liveRef: {
+									publicationId: snapshot.publicationId,
+									revision: snapshot.revision,
+								},
+							}
+						: {}),
+				}
+			);
 			if (ref && (!snapshot || snapshot.revision !== ref.revision)) {
 				throw new GraphQLError("Requested live revision has expired", {
 					extensions: { code: "LIVE_BOARD_REVISION_GONE" },
@@ -821,7 +837,18 @@ export const liveDesksResolvers = {
 				try {
 					const completeManagerScores = await loadManagerScoresInChunks(
 						allEntryIds,
-						(chunk) => loadManagerScores(context, request.eventId, chunk, request.tournamentId),
+						(chunk) =>
+							loadManagerScores(context, request.eventId, chunk, request.tournamentId, {
+								includeEffectiveLineup: true,
+								...(snapshot?.publicationId
+									? {
+											liveRef: {
+												publicationId: snapshot.publicationId,
+												revision: snapshot.revision,
+											},
+										}
+									: {}),
+							}),
 						2
 					);
 					expandedManagerScores = completeManagerScores;
@@ -902,11 +929,13 @@ export const liveDesksResolvers = {
 							const [entries, picks, eventResults] = await Promise.all([
 								entriesService.getEntriesByIds(context, allEntryIds),
 								entryLiveRepository.getEntryEventPicksByIds(context, allEntryIds, request.eventId),
-								entriesService.getEntryEventResultsByEntryIds(
-									context,
-									allEntryIds,
-									request.eventId
-								),
+								event.finished && event.dataChecked
+									? entriesService.getEntryEventResultsByEntryIds(
+											context,
+											allEntryIds,
+											request.eventId
+										)
+									: Promise.resolve(undefined),
 							]);
 							const playerIds = Array.from(
 								new Set(
@@ -969,10 +998,17 @@ export const liveDesksResolvers = {
 							context,
 							request.eventId,
 							entryIds,
-							true,
 							{
 								tournamentId: request.tournamentId,
 								managerScores,
+								...(snapshot?.publicationId
+									? {
+											liveRef: {
+												publicationId: snapshot.publicationId,
+												revision: snapshot.revision,
+											},
+										}
+									: {}),
 							}
 						);
 						const rankedRows = rankTournamentRowsByOfficialEventPoints(
@@ -1039,8 +1075,18 @@ export const liveDesksResolvers = {
 						context,
 						request.eventId,
 						pageEntryIds,
-						true,
-						{ tournamentId: request.tournamentId, managerScores }
+						{
+							tournamentId: request.tournamentId,
+							managerScores,
+							...(snapshot?.publicationId
+								? {
+										liveRef: {
+											publicationId: snapshot.publicationId,
+											revision: snapshot.revision,
+										},
+									}
+								: {}),
+						}
 					);
 					const calculatedFailed = calculated.errors.map((error) => error.entryId);
 					const calculatedIds = new Set(calculated.results.keys());
@@ -1288,8 +1334,17 @@ export const liveDesksResolvers = {
 				context,
 				eventId,
 				entryIds,
-				true,
-				{ tournamentId: selected }
+				{
+					tournamentId: selected,
+					...(snapshot?.publicationId
+						? {
+								liveRef: {
+									publicationId: snapshot.publicationId,
+									revision: snapshot.revision,
+								},
+							}
+						: {}),
+				}
 			);
 			const board = rankTournamentRowsByOfficialEventPoints(Array.from(result.results.values()), {
 				useNet: requireNet,
@@ -1396,9 +1451,16 @@ export const liveDesksResolvers = {
 				context,
 				snapshot.eventId,
 				ids,
-				true,
 				{
 					tournamentId: args.tournamentId,
+					...(snapshot.publicationId
+						? {
+								liveRef: {
+									publicationId: snapshot.publicationId,
+									revision: snapshot.revision,
+								},
+							}
+						: {}),
 				}
 			);
 			return {

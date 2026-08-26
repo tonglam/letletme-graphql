@@ -1,20 +1,19 @@
 import type { GraphQLContext } from "../../graphql/context";
 import {
 	requestManagerLiveScores,
+	type EffectiveLineupRow,
 	type ManagerLiveFetchResult,
+	type ManagerLiveCalculationMode,
 	type ManagerLiveScoreRow,
+	type ManagerScoreProvenance,
 } from "../../infra/manager-live-client";
 import { metrics } from "../../infra/metrics";
 
-export type LiveManagerScoreSource =
-	| "FPL_EVENT_LIVE"
-	| "FPL_ENTRY_SUMMARY"
-	| "FPL_CLASSIC_STANDINGS"
-	| "FPL_FINAL_RESULT"
-	| "UNAVAILABLE";
+export type LiveManagerScoreSource = "FPL_EVENT_LIVE" | "FPL_FINAL_RESULT" | "UNAVAILABLE";
 export type LiveManagerScoreState = "FRESH" | "STALE" | "SETTLING" | "FINAL" | "UNAVAILABLE";
 export type LiveManagerScoreTotalScope = "OVERALL" | "CLASSIC_PHASE" | "UNKNOWN";
 export type LiveManagerScoreSemantics = "GROSS" | "NET" | "ZERO_COST_EQUIVALENT" | "UNKNOWN";
+export type LiveManagerScoreCalculationMode = ManagerLiveCalculationMode;
 export type LiveManagerScoreReconciliation =
 	"MATCHED" | "SOURCE_SKEW" | "NOT_COMPARABLE" | "NO_LINEUP";
 export type LiveManagerScoreReason =
@@ -46,17 +45,15 @@ export type LiveManagerScore = {
 	nextRefreshAt: string | null;
 	reconciliation: LiveManagerScoreReconciliation;
 	reasonCodes: LiveManagerScoreReason[];
+	calculationMode?: LiveManagerScoreCalculationMode | null;
+	algorithmVersion?: string | null;
+	provenance?: ManagerScoreProvenance | null;
+	effectiveLineup?: EffectiveLineupRow[] | null;
 };
 
 export type ManagerScoreLoad = ManagerLiveFetchResult;
 
-export type OfficialManagerScoreRow =
-	ManagerLiveScoreRow | (Omit<ManagerLiveScoreRow, "source"> & { source: "FPL_FINAL_RESULT" });
-
-export type EventLiveScoreAuthority = {
-	revision: string;
-	checkedAt: string;
-};
+export type OfficialManagerScoreRow = ManagerLiveScoreRow;
 
 export const MANAGER_SCORE_REFRESH_SECONDS = 30;
 
@@ -91,26 +88,21 @@ export const isTraceableOfficialManagerScore = (score: LiveManagerScore): boolea
 	);
 };
 
-const isWithinStaleWindow = (
-	row: Pick<OfficialManagerScoreRow, "checkedAt" | "staleAt">
-): boolean => {
-	// staleAt is a freshness signal for the score state, not a hard deletion
-	// boundary. Keep the last official row until a newer official/final row
-	// replaces it; a temporary upstream miss must not erase the headline.
-	return Number.isFinite(Date.parse(row.checkedAt));
-};
-
 export async function loadManagerScores(
 	context: GraphQLContext,
 	eventId: number,
 	entryIds: readonly number[],
-	tournamentId?: number
+	tournamentId?: number,
+	options: {
+		includeEffectiveLineup?: boolean;
+		liveRef?: { publicationId: string; revision: string };
+	} = {}
 ): Promise<ManagerScoreLoad> {
 	return requestManagerLiveScores({
 		eventId,
 		entryIds,
 		tournamentId,
-		readMode: "CACHE_ONLY",
+		...options,
 		logger: context.logger,
 	});
 }
@@ -134,6 +126,10 @@ const baseScore = (transferCost: number): LiveManagerScore => ({
 	nextRefreshAt: null,
 	reconciliation: "NOT_COMPARABLE",
 	reasonCodes: [],
+	calculationMode: null,
+	algorithmVersion: null,
+	provenance: null,
+	effectiveLineup: null,
 });
 
 const recordScoreMetrics = (score: LiveManagerScore): void => {
@@ -158,7 +154,7 @@ const rowMatchesEventLiveScore = (
 	return row.eventPoints === grossEventPoints;
 };
 
-/** Build the additive score contract and the legacy flat headline aliases. */
+/** Build the score contract and flat headline aliases from the single Data authority row. */
 export function buildManagerScore(params: {
 	row?: OfficialManagerScoreRow;
 	upstreamErrorCode: ManagerScoreLoad["errorCode"];
@@ -166,211 +162,106 @@ export function buildManagerScore(params: {
 	available: boolean;
 	transferCost: number | null;
 	detailEventPoints: number;
-	previousOverallPoints?: number | null;
-	eventLiveAuthority?: EventLiveScoreAuthority | null;
-	projectedLineup?: boolean;
 	nextRefreshAt?: string | null;
 }): {
 	score: LiveManagerScore;
 	headline: { rank: number; livePoints: number; liveNetPoints: number; liveTotalPoints: number };
 } {
-	const {
-		row,
-		upstreamErrorCode,
-		provisional,
-		available,
-		transferCost,
-		detailEventPoints,
-		previousOverallPoints = null,
-	} = params;
+	const { row, upstreamErrorCode, provisional, available, transferCost, detailEventPoints } =
+		params;
 	const suppliedTransferCost = asOfficialTransferCost(transferCost);
 	const rowTransferCost = asOfficialTransferCost(row?.transferCost);
 	const finalTransferCost = rowTransferCost ?? suppliedTransferCost;
+	const isFinalRow =
+		!provisional && row?.source === "FPL_FINAL_RESULT" && row.calculationMode === "FINAL_RESULT";
+	const isProjectedRow =
+		provisional && row?.source === "FPL_EVENT_LIVE" && row.calculationMode === "PROJECTED_AUTOSUBS";
 	if (
-		!provisional &&
-		row?.source === "FPL_FINAL_RESULT" &&
-		hasTraceableRevision(row.revision) &&
-		hasTraceableCheckedAt(row.checkedAt) &&
-		finalTransferCost !== null &&
-		isWithinStaleWindow(row)
+		!row ||
+		(!isFinalRow && !isProjectedRow) ||
+		!hasTraceableRevision(row.revision) ||
+		!hasTraceableCheckedAt(row.checkedAt) ||
+		finalTransferCost === null
 	) {
-		const effectiveTransferCost = finalTransferCost;
-		const detailNetEventPoints = detailEventPoints - effectiveTransferCost;
-		const reconciliation: LiveManagerScoreReconciliation = !available
-			? "NO_LINEUP"
-			: typeof row.eventPoints === "number"
-				? rowMatchesEventLiveScore(row, detailEventPoints, detailNetEventPoints)
-					? "MATCHED"
-					: "SOURCE_SKEW"
-				: "NOT_COMPARABLE";
 		const reasons: LiveManagerScoreReason[] = [];
+		if (upstreamErrorCode === "UNSUPPORTED_H2H_LIVE") reasons.push("UNSUPPORTED_H2H");
+		else if (upstreamErrorCode === "UPSTREAM_RATE_LIMITED") reasons.push("UPSTREAM_RATE_LIMITED");
+		else if (upstreamErrorCode) reasons.push("UPSTREAM_UNAVAILABLE");
+		if (!row || !hasTraceableCheckedAt(row?.checkedAt)) reasons.push("SOURCE_TOO_OLD");
 		if (!available) reasons.push("MISSING_LINEUP");
-		if (reconciliation === "SOURCE_SKEW") reasons.push("SOURCE_SKEW");
-		if (row.eventPoints === null && row.totalPoints === null) reasons.push("MISSING_SCORE");
-		const eventPoints = row.eventPoints;
-		let eventPointSemantics = row.eventPointSemantics ?? "UNKNOWN";
-		// Gross and net event points are mathematically identical when there is
-		// no transfer deduction. This is enough evidence for provisional H2H even
-		// when GW1 has no previous-overall baseline to compare against.
-		if (eventPointSemantics === "UNKNOWN" && eventPoints !== null && effectiveTransferCost === 0) {
-			eventPointSemantics = "ZERO_COST_EQUIVALENT";
-		}
-		if (
-			eventPointSemantics === "UNKNOWN" &&
-			row.totalScope === "OVERALL" &&
-			eventPoints !== null &&
-			row.totalPoints !== null &&
-			previousOverallPoints !== null
-		) {
-			const officialDelta = row.totalPoints - previousOverallPoints;
-			if (eventPoints === officialDelta) {
-				eventPointSemantics = effectiveTransferCost === 0 ? "ZERO_COST_EQUIVALENT" : "NET";
-			} else if (eventPoints - effectiveTransferCost === officialDelta) {
-				eventPointSemantics = "GROSS";
-			}
-		}
-		if (
-			row.eventPoints !== null &&
-			effectiveTransferCost > 0 &&
-			eventPointSemantics === "UNKNOWN"
-		) {
-			reasons.push("SEMANTICS_UNKNOWN");
-		}
-		const netEventPoints =
-			row.netEventPoints ??
-			(eventPoints === null
-				? null
-				: eventPointSemantics === "NET" || eventPointSemantics === "ZERO_COST_EQUIVALENT"
-					? eventPoints
-					: eventPointSemantics === "GROSS"
-						? eventPoints - effectiveTransferCost
-						: null);
-		const totalPoints = row.totalPoints;
-		const result: {
-			score: LiveManagerScore;
-			headline: {
-				rank: number;
-				livePoints: number;
-				liveNetPoints: number;
-				liveTotalPoints: number;
-			};
-		} = {
-			score: {
-				eventPoints,
-				netEventPoints,
-				totalPoints,
-				totalScope: row.totalScope,
-				eventRank: row.eventRank,
-				overallRank: row.overallRank,
-				leagueRank: row.leagueRank,
-				transferCost: effectiveTransferCost,
-				source: row.source,
-				state: "FINAL",
-				eventPointSemantics,
-				revision: row.revision,
-				checkedAt: row.checkedAt,
-				upstreamUpdatedAt: row.upstreamUpdatedAt,
-				staleAt: row.staleAt,
-				nextRefreshAt: null,
-				reconciliation,
-				reasonCodes: reasons,
-			},
-			headline: {
-				rank: row.eventRank ?? row.leagueRank ?? 0,
-				livePoints: eventPoints ?? 0,
-				liveNetPoints: netEventPoints ?? eventPoints ?? 0,
-				liveTotalPoints: row.totalScope === "OVERALL" ? (totalPoints ?? 0) : 0,
-			},
+		if (finalTransferCost === null) reasons.push("MISSING_SCORE");
+		const unavailable = baseScore(finalTransferCost ?? 0);
+		unavailable.checkedAt = row?.checkedAt ?? null;
+		unavailable.staleAt = row?.staleAt ?? null;
+		unavailable.nextRefreshAt = params.nextRefreshAt ?? null;
+		unavailable.reconciliation = !available ? "NO_LINEUP" : "NOT_COMPARABLE";
+		unavailable.reasonCodes = reasons;
+		const result = {
+			score: unavailable,
+			headline: { rank: 0, livePoints: 0, liveNetPoints: 0, liveTotalPoints: 0 },
 		};
 		recordScoreMetrics(result.score);
 		return result;
 	}
 
-	// During an active or settling event, the only score authority is the
-	// revisioned official event/{event}/live player payload combined with the
-	// official picks and, while provisional, the FPL automatic-substitution and
-	// captain-promotion rules. Manager summary and league rows are retained solely
-	// as rank metadata and reconciliation evidence.
-	if (
-		available &&
-		suppliedTransferCost !== null &&
-		params.eventLiveAuthority &&
-		hasTraceableRevision(params.eventLiveAuthority.revision) &&
-		hasTraceableCheckedAt(params.eventLiveAuthority.checkedAt)
-	) {
-		const authority = params.eventLiveAuthority;
-		const checkedAt = authority.checkedAt;
-		const fresh = ageSeconds(checkedAt) <= MANAGER_SCORE_REFRESH_SECONDS;
-		const effectiveTransferCost = suppliedTransferCost;
-		const eventPoints = detailEventPoints;
-		const netEventPoints = eventPoints - effectiveTransferCost;
-		const totalPoints =
-			previousOverallPoints === null ? null : previousOverallPoints + netEventPoints;
-		const reconciliation: LiveManagerScoreReconciliation = params.projectedLineup
-			? "NOT_COMPARABLE"
-			: row && typeof row.eventPoints === "number"
-				? rowMatchesEventLiveScore(row, eventPoints, netEventPoints)
-					? "MATCHED"
-					: "SOURCE_SKEW"
-				: "NOT_COMPARABLE";
-		const reasons: LiveManagerScoreReason[] = [];
-		if (upstreamErrorCode === "UPSTREAM_RATE_LIMITED") reasons.push("UPSTREAM_RATE_LIMITED");
-		else if (upstreamErrorCode && upstreamErrorCode !== "UNSUPPORTED_H2H_LIVE")
-			reasons.push("UPSTREAM_UNAVAILABLE");
-		if (!fresh) reasons.push("SOURCE_TOO_OLD");
-		if (reconciliation === "SOURCE_SKEW") reasons.push("SOURCE_SKEW");
-
-		const score: LiveManagerScore = {
-			eventPoints,
-			netEventPoints,
-			totalPoints,
-			totalScope: totalPoints === null ? "UNKNOWN" : "OVERALL",
-			eventRank: row?.eventRank ?? null,
-			overallRank: row?.overallRank ?? null,
-			leagueRank: row?.leagueRank ?? null,
-			transferCost: effectiveTransferCost,
-			source: "FPL_EVENT_LIVE",
-			state: !provisional ? "SETTLING" : fresh ? "FRESH" : "STALE",
-			eventPointSemantics: effectiveTransferCost === 0 ? "ZERO_COST_EQUIVALENT" : "GROSS",
-			revision: `event-live:${authority.revision}:lineup:${params.projectedLineup ? "projected" : "official"}:${eventPoints}:${effectiveTransferCost}:total:${totalPoints ?? "none"}:${totalPoints === null ? "UNKNOWN" : "OVERALL"}:rank:${row?.eventRank ?? "none"}:${row?.overallRank ?? "none"}:${row?.leagueRank ?? "none"}`,
-			checkedAt,
-			upstreamUpdatedAt: checkedAt,
-			staleAt: plusSeconds(checkedAt, MANAGER_SCORE_REFRESH_SECONDS * 3),
-			nextRefreshAt: params.nextRefreshAt ?? plusSeconds(checkedAt, MANAGER_SCORE_REFRESH_SECONDS),
-			reconciliation,
-			reasonCodes: reasons,
-		};
-		const result = {
-			score,
-			headline: {
-				rank: row?.eventRank ?? row?.leagueRank ?? 0,
-				livePoints: eventPoints,
-				liveNetPoints: netEventPoints,
-				liveTotalPoints: totalPoints ?? 0,
-			},
-		};
-		recordScoreMetrics(score);
-		return result;
-	}
-
+	const effectiveTransferCost = finalTransferCost;
+	const eventPoints = row.eventPoints;
+	const netEventPoints = row.netEventPoints;
+	const detailNetEventPoints = detailEventPoints - effectiveTransferCost;
+	const reconciliation: LiveManagerScoreReconciliation = !available
+		? "NO_LINEUP"
+		: typeof eventPoints === "number" && typeof netEventPoints === "number"
+			? rowMatchesEventLiveScore(row, detailEventPoints, detailNetEventPoints) &&
+				netEventPoints === eventPoints - effectiveTransferCost
+				? "MATCHED"
+				: "SOURCE_SKEW"
+			: "NOT_COMPARABLE";
+	const fresh = ageSeconds(row.checkedAt) <= MANAGER_SCORE_REFRESH_SECONDS;
 	const reasons: LiveManagerScoreReason[] = [];
-	if (upstreamErrorCode === "UNSUPPORTED_H2H_LIVE") reasons.push("UNSUPPORTED_H2H");
-	else if (upstreamErrorCode === "UPSTREAM_RATE_LIMITED") reasons.push("UPSTREAM_RATE_LIMITED");
-	else if (upstreamErrorCode) reasons.push("UPSTREAM_UNAVAILABLE");
-	if (row || !params.eventLiveAuthority) reasons.push("SOURCE_TOO_OLD");
+	if (upstreamErrorCode === "UPSTREAM_RATE_LIMITED") reasons.push("UPSTREAM_RATE_LIMITED");
+	else if (upstreamErrorCode && upstreamErrorCode !== "UNSUPPORTED_H2H_LIVE")
+		reasons.push("UPSTREAM_UNAVAILABLE");
+	if (isProjectedRow && !fresh) reasons.push("SOURCE_TOO_OLD");
 	if (!available) reasons.push("MISSING_LINEUP");
-	if (suppliedTransferCost === null) reasons.push("MISSING_SCORE");
-	const unavailable = baseScore(suppliedTransferCost ?? 0);
-	unavailable.checkedAt = row?.checkedAt ?? null;
-	unavailable.staleAt = row?.staleAt ?? null;
-	unavailable.nextRefreshAt = params.nextRefreshAt ?? null;
-	unavailable.reconciliation = !available ? "NO_LINEUP" : "NOT_COMPARABLE";
-	unavailable.reasonCodes = reasons;
-	const result = {
-		score: unavailable,
-		headline: { rank: 0, livePoints: 0, liveNetPoints: 0, liveTotalPoints: 0 },
+	if (reconciliation === "SOURCE_SKEW") reasons.push("SOURCE_SKEW");
+	if (eventPoints === null || netEventPoints === null || row.totalPoints === null)
+		reasons.push("MISSING_SCORE");
+	const score: LiveManagerScore = {
+		eventPoints,
+		netEventPoints,
+		totalPoints: row.totalPoints,
+		totalScope: row.totalScope,
+		eventRank: row.eventRank,
+		overallRank: row.overallRank,
+		leagueRank: row.leagueRank,
+		transferCost: effectiveTransferCost,
+		source: row.source,
+		state: isFinalRow ? "FINAL" : fresh ? "FRESH" : "STALE",
+		eventPointSemantics: row.eventPointSemantics,
+		revision: row.revision,
+		checkedAt: row.checkedAt,
+		upstreamUpdatedAt: row.upstreamUpdatedAt,
+		staleAt: row.staleAt,
+		nextRefreshAt: isFinalRow
+			? null
+			: (params.nextRefreshAt ?? plusSeconds(row.checkedAt, MANAGER_SCORE_REFRESH_SECONDS)),
+		reconciliation,
+		reasonCodes: reasons,
+		calculationMode: row.calculationMode,
+		algorithmVersion: row.algorithmVersion ?? null,
+		provenance: row.provenance ?? null,
+		effectiveLineup: row.effectiveLineup ?? null,
 	};
-	recordScoreMetrics(result.score);
+	const result = {
+		score,
+		headline: {
+			rank: row.eventRank ?? row.leagueRank ?? 0,
+			livePoints: eventPoints ?? 0,
+			liveNetPoints: netEventPoints ?? eventPoints ?? 0,
+			liveTotalPoints: row.totalScope === "OVERALL" ? (row.totalPoints ?? 0) : 0,
+		},
+	};
+	recordScoreMetrics(score);
 	return result;
 }
 
@@ -380,7 +271,7 @@ export const unavailableManagerScore = (transferCost = 0): LiveManagerScore =>
 /**
  * Tournament boards do not reuse the Classic league's season rank. They rank
  * the official event headline within the tournament desk, keeping ties on the same competition
- * rank and leaving rows without an official event value at their legacy rank.
+ * rank and leaving rows without an official event value at their existing rank.
  */
 export function rankTournamentRowsByOfficialEventPoints<
 	T extends { entry: number; rank: number; score: LiveManagerScore },

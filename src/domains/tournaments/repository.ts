@@ -1785,12 +1785,9 @@ async function loadEventLiveH2HScoreBatch(
 	entryIds: readonly number[]
 ): Promise<EventLiveH2HScoreBatch | null> {
 	if (entryIds.length === 0 || entryIds.length > 500) return null;
-	const result = await entryLiveBatchService.calcLivePointsForEntries(
-		context,
-		eventId,
-		[...entryIds],
-		true
-	);
+	const result = await entryLiveBatchService.calcLivePointsForEntries(context, eventId, [
+		...entryIds,
+	]);
 	if (result.errors.length > 0 || result.results.size !== entryIds.length) return null;
 
 	const scores = new Map<number, number>();
@@ -4560,8 +4557,17 @@ export const tournamentsRepository: TournamentsRepository = {
 							context,
 							requestedEventId,
 							boundedEntryIds,
-							true,
-							{ tournamentId }
+							{
+								tournamentId,
+								...(snapshot?.publicationId
+									? {
+											liveRef: {
+												publicationId: snapshot.publicationId,
+												revision: snapshot.revision,
+											},
+										}
+									: {}),
+							}
 						);
 				const liveData = cached ?? {
 					rows: rankTournamentRowsByOfficialEventPoints(Array.from(result?.results.values() ?? [])),

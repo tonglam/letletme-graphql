@@ -10,7 +10,10 @@ import {
 	type ManagerScoreLoad,
 } from "../entry-live/manager-score";
 
-export const ENTRY_LIVE_COMPETITION_BOARD_PROJECTION_VERSION = "v2";
+// The cache envelope now includes the revisioned Data score authority. A new
+// version intentionally retires every pre-authority board payload instead of
+// trying to interpret it as the new contract.
+export const ENTRY_LIVE_COMPETITION_BOARD_PROJECTION_VERSION = "v3";
 export const ENTRY_LIVE_COMPETITION_BOARD_CACHE_TTL_SECONDS = 30;
 
 export type EntryLiveCompetitionBoardSort =
@@ -138,13 +141,7 @@ const isCountPairArray = (value: unknown): value is CountPair[] =>
 			isNonNegativeSafeInteger(pair[1])
 	);
 
-const LIVE_MANAGER_SCORE_SOURCES = new Set([
-	"FPL_EVENT_LIVE",
-	"FPL_ENTRY_SUMMARY",
-	"FPL_CLASSIC_STANDINGS",
-	"FPL_FINAL_RESULT",
-	"UNAVAILABLE",
-]);
+const LIVE_MANAGER_SCORE_SOURCES = new Set(["FPL_EVENT_LIVE", "FPL_FINAL_RESULT", "UNAVAILABLE"]);
 const LIVE_MANAGER_SCORE_STATES = new Set(["FRESH", "STALE", "SETTLING", "FINAL", "UNAVAILABLE"]);
 const LIVE_MANAGER_SCORE_SCOPES = new Set(["OVERALL", "CLASSIC_PHASE", "UNKNOWN"]);
 const LIVE_MANAGER_SCORE_SEMANTICS = new Set(["GROSS", "NET", "ZERO_COST_EQUIVALENT", "UNKNOWN"]);
@@ -154,10 +151,12 @@ const LIVE_MANAGER_SCORE_RECONCILIATIONS = new Set([
 	"NOT_COMPARABLE",
 	"NO_LINEUP",
 ]);
+const LIVE_MANAGER_SCORE_CALCULATION_MODES = new Set(["PROJECTED_AUTOSUBS", "FINAL_RESULT"]);
+const PROJECTED_ALGORITHM_VERSION = "fpl-projected-autosubs-v1";
 
 const isCachedManagerScore = (value: unknown): value is LiveManagerScore => {
 	if (!isRecord(value)) return false;
-	return (
+	if (!(
 		isNullableFiniteNumber(value.eventPoints) &&
 		isNullableFiniteNumber(value.netEventPoints) &&
 		isNullableFiniteNumber(value.totalPoints) &&
@@ -175,7 +174,58 @@ const isCachedManagerScore = (value: unknown): value is LiveManagerScore => {
 		isNullableString(value.staleAt) &&
 		isNullableString(value.nextRefreshAt) &&
 		LIVE_MANAGER_SCORE_RECONCILIATIONS.has(String(value.reconciliation)) &&
-		isStringArray(value.reasonCodes)
+		isStringArray(value.reasonCodes) &&
+		LIVE_MANAGER_SCORE_CALCULATION_MODES.has(String(value.calculationMode)) &&
+		(value.algorithmVersion === null || typeof value.algorithmVersion === "string") &&
+		isRecord(value.provenance)
+	))
+		return false;
+	const provenance = value.provenance;
+	if (
+		provenance.scoreSource !== value.source ||
+		provenance.calculationMode !== value.calculationMode ||
+		provenance.algorithmVersion !== value.algorithmVersion ||
+		typeof provenance.inputRevision !== "string" ||
+		provenance.inputRevision.length === 0 ||
+		typeof provenance.scoreRevision !== "string" ||
+		provenance.scoreRevision.length === 0
+	)
+		return false;
+	if (value.calculationMode === "PROJECTED_AUTOSUBS") {
+		return (
+			value.source === "FPL_EVENT_LIVE" &&
+			value.algorithmVersion === PROJECTED_ALGORITHM_VERSION &&
+			typeof provenance.livePublicationId === "string" &&
+			provenance.livePublicationId.length > 0 &&
+			typeof provenance.liveRevision === "string" &&
+			provenance.liveRevision.length > 0 &&
+			typeof provenance.liveCheckedAt === "string" &&
+			provenance.liveCheckedAt.length > 0 &&
+			typeof provenance.picksRevision === "string" &&
+			provenance.picksRevision.length > 0 &&
+			typeof provenance.picksCheckedAt === "string" &&
+			provenance.picksCheckedAt.length > 0 &&
+			typeof provenance.previousTotalsRevision === "string" &&
+			provenance.previousTotalsRevision.length > 0 &&
+			provenance.resultRevision === null &&
+			provenance.resultCheckedAt === null &&
+			provenance.dataCheckedAt === null
+		);
+	}
+	return (
+		value.source === "FPL_FINAL_RESULT" &&
+		value.algorithmVersion === null &&
+		provenance.livePublicationId === null &&
+		provenance.liveRevision === null &&
+		provenance.liveCheckedAt === null &&
+		typeof provenance.picksRevision === "string" &&
+		provenance.picksRevision.length > 0 &&
+		typeof provenance.picksCheckedAt === "string" &&
+		provenance.picksCheckedAt.length > 0 &&
+		provenance.previousTotalsRevision === null &&
+		provenance.resultRevision !== null &&
+		provenance.resultCheckedAt !== null &&
+		provenance.dataCheckedAt !== null
 	);
 };
 
@@ -395,11 +445,7 @@ const countPairs = (counts: Map<number, number>): CountPair[] =>
 	Array.from(counts.entries()).sort((left, right) => left[0] - right[0]);
 
 const scoreHasOfficialEventMetric = (score: LiveManagerScore, requireNet: boolean): boolean => {
-	const official =
-		score.source === "FPL_EVENT_LIVE" ||
-		score.source === "FPL_ENTRY_SUMMARY" ||
-		score.source === "FPL_CLASSIC_STANDINGS" ||
-		score.source === "FPL_FINAL_RESULT";
+	const official = score.source === "FPL_EVENT_LIVE" || score.source === "FPL_FINAL_RESULT";
 	return (
 		official &&
 		(requireNet

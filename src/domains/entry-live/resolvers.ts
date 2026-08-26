@@ -22,13 +22,11 @@ type EntryLiveArgs = {
 type CalcLivePointsByEntryArgs = {
 	eventId: number;
 	entryId: number;
-	includeLive?: boolean | null;
 };
 
 type CalcLivePointsForEntriesArgs = {
 	eventId: number;
 	entryIds: number[];
-	includeLive?: boolean | null;
 };
 
 export const entryLiveResolvers = {
@@ -45,12 +43,7 @@ export const entryLiveResolvers = {
 			args: CalcLivePointsByEntryArgs,
 			context: GraphQLContext
 		): Promise<LiveCalcData> =>
-			entryLiveCalcService.calcLivePointsByEntry(
-				context,
-				args.eventId,
-				args.entryId,
-				args.includeLive ?? true
-			),
+			entryLiveCalcService.calcLivePointsByEntry(context, args.eventId, args.entryId),
 
 		calcLivePointsForEntries: async (
 			_parent: unknown,
@@ -68,14 +61,8 @@ export const entryLiveResolvers = {
 		}> =>
 			withLiveSnapshotRoot(context, async () => {
 				assertValidEntryBatch(args.entryIds);
-				const includeLive = args.includeLive ?? true;
 				const calculate = (): Promise<BatchLiveCalcResult> =>
-					entryLiveBatchService.calcLivePointsForEntries(
-						context,
-						args.eventId,
-						args.entryIds,
-						includeLive
-					);
+					entryLiveBatchService.calcLivePointsForEntries(context, args.eventId, args.entryIds);
 				const result = await calculate();
 				return {
 					results: Array.from(result.results.values()),

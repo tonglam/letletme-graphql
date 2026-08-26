@@ -78,7 +78,7 @@ export const entryLiveService = {
 		const [entry, event, calc] = await Promise.all([
 			entriesService.getEntryById(context, entryId),
 			eventsService.getEventById(context, eventId),
-			entryLiveCalcService.calcLivePointsByEntry(context, eventId, entryId, true),
+			entryLiveCalcService.calcLivePointsByEntry(context, eventId, entryId),
 		]);
 
 		if (!entry || !event) {

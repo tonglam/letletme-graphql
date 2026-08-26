@@ -121,7 +121,7 @@ function createContext(args: {
 						: team
 		),
 	};
-	const explicitSnapshotRows = args.tables["fpl.player_event_snapshots"] ?? [];
+	const explicitSnapshotRows = args.tables["fpl.player_event_snapshot_bundles"] ?? [];
 	const maxPublishedEvent = Math.max(
 		0,
 		...core.events.filter((event) => event.finished || event.isCurrent).map((event) => event.id)
@@ -151,13 +151,27 @@ function createContext(args: {
 		expected_row_count: core.players.length,
 		baseline_verified_at: new Date().toISOString(),
 	}));
+	const bundleRows = snapshotRows.map((row) => {
+		const publication = publicationRows.find((candidate) => candidate.event_id === row.event_id);
+		return {
+			...row,
+			publication_revision: publication?.revision ?? "11",
+			publication_source_checked_at: publication?.source_checked_at ?? new Date().toISOString(),
+			publication_published_at: publication?.published_at ?? new Date().toISOString(),
+			publication_row_count: publication?.row_count ?? core.players.length,
+			publication_expected_row_count: publication?.expected_row_count ?? core.players.length,
+			publication_content_sha256: "test-player-event-bundle",
+			publication_baseline_verified_at:
+				publication?.baseline_verified_at ?? new Date().toISOString(),
+		};
+	});
 	const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
 		dataRevision: "core-7",
 	});
 	context.data = {
 		read: (table: string) => {
 			fromCalls.push(table);
-			if (table === "fpl.player_event_snapshots") return queryBuilder(snapshotRows);
+			if (table === "fpl.player_event_snapshot_bundles") return queryBuilder(bundleRows);
 			if (table === "fpl.player_event_snapshot_publications") {
 				return queryBuilder(args.tables[table] ?? publicationRows);
 			}
@@ -255,7 +269,7 @@ describe("playerDetailRepository", () => {
 				],
 				"fpl.player_market_snapshots": [marketRow()],
 				"fpl.fixtures": [fixtureRow({ event_id: 1 })],
-				"fpl.player_event_snapshots": [{ element_id: 9, event_id: 1, total_points: 200 }],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 1, total_points: 200 }],
 			},
 		});
 
@@ -280,7 +294,7 @@ describe("playerDetailRepository", () => {
 		expect(detail?.recentGameweeks).toEqual([]);
 		expect(detail?.fixtures).toHaveLength(38);
 		expect(detail?.fixtures.filter((fixture) => fixture.bgw)).toHaveLength(0);
-		expect(fromCalls).not.toContain("fpl.player_event_snapshots");
+		expect(fromCalls).not.toContain("fpl.player_event_snapshot_bundles");
 		expect(fromCalls).not.toContain("fpl.player_gameweek_stats");
 	});
 
@@ -297,7 +311,7 @@ describe("playerDetailRepository", () => {
 					},
 				],
 				"fpl.player_market_snapshots": [marketRow()],
-				"fpl.player_event_snapshots": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
 				"fpl.player_gameweek_stats": [
 					{
 						event_id: 3,
@@ -335,7 +349,7 @@ describe("playerDetailRepository", () => {
 			currentEvent: { id: 3, isCurrent: true, finished: false },
 			tables: {
 				"fpl.player_market_snapshots": [marketRow({ status: "d", news: "Knock" })],
-				"fpl.player_event_snapshots": [
+				"fpl.player_event_snapshot_bundles": [
 					{
 						element_id: 9,
 						event_id: 3,
@@ -451,7 +465,7 @@ describe("playerDetailRepository", () => {
 					},
 				],
 				"fpl.player_market_snapshots": [marketRow()],
-				"fpl.player_event_snapshots": [
+				"fpl.player_event_snapshot_bundles": [
 					{
 						element_id: 9,
 						event_id: 3,

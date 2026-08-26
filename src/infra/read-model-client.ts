@@ -7,6 +7,7 @@ export const READ_MODELS = {
 	teams: "fpl.teams",
 	players: "fpl.players",
 	playerEventSnapshots: "fpl.player_event_snapshots",
+	playerEventSnapshotBundles: "fpl.player_event_snapshot_bundles",
 	playerEventSnapshotPublications: "fpl.player_event_snapshot_publications",
 	fixtures: "fpl.fixtures",
 	playerGameweekStats: "fpl.player_gameweek_stats",
@@ -192,6 +193,82 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 			 AND player.element_id = snapshot.element_id
 			JOIN fpl.teams team
 			  ON team.season_id = snapshot.season_id
+			 AND team.team_id = player.team_id
+			WHERE snapshot.season_id = $1
+		`,
+	},
+	[READ_MODELS.playerEventSnapshotBundles]: {
+		sourceRelations: [
+			"fpl.player_event_snapshots",
+			"fpl.player_event_snapshot_publications",
+			"fpl.players",
+			"fpl.teams",
+		],
+		sql: `
+			SELECT
+				snapshot.source_snapshot_id AS id,
+				snapshot.event_id,
+				snapshot.element_id,
+				snapshot.element_type,
+				snapshot.total_points,
+				snapshot.form,
+				snapshot.influence,
+				snapshot.creativity,
+				snapshot.threat,
+				snapshot.ict_index,
+				snapshot.expected_goals,
+				snapshot.expected_assists,
+				snapshot.expected_goal_involvements,
+				snapshot.expected_goals_conceded,
+				snapshot.minutes,
+				snapshot.goals_scored,
+				snapshot.assists,
+				snapshot.clean_sheets,
+				snapshot.goals_conceded,
+				snapshot.own_goals,
+				snapshot.penalties_saved,
+				snapshot.yellow_cards,
+				snapshot.red_cards,
+				snapshot.saves,
+				snapshot.bonus,
+				snapshot.bps,
+				snapshot.starts,
+				snapshot.influence_rank,
+				snapshot.influence_rank_type,
+				snapshot.creativity_rank,
+				snapshot.creativity_rank_type,
+				snapshot.threat_rank,
+				snapshot.threat_rank_type,
+				snapshot.ict_index_rank,
+				snapshot.ict_index_rank_type,
+				snapshot.created_at,
+				snapshot.updated_at,
+				snapshot.transfers_in,
+				snapshot.transfers_in_event,
+				snapshot.transfers_out,
+				snapshot.transfers_out_event,
+				snapshot.selected_by_percent,
+				player.web_name,
+				player.team_id,
+				team.name AS team_name,
+				team.short_name AS team_short_name,
+				player.price AS value,
+				publication.revision AS publication_revision,
+				publication.source_checked_at AS publication_source_checked_at,
+				publication.published_at AS publication_published_at,
+				publication.row_count AS publication_row_count,
+				publication.expected_row_count AS publication_expected_row_count,
+				publication.content_sha256 AS publication_content_sha256,
+				publication.baseline_verified_at AS publication_baseline_verified_at
+			FROM fpl.player_event_snapshots snapshot
+			JOIN fpl.player_event_snapshot_publications publication
+			  ON publication.season_id = snapshot.season_id
+			 AND publication.event_id = snapshot.event_id
+			JOIN fpl.players player
+			  ON player.season_id = snapshot.season_id
+			 AND player.element_id = snapshot.element_id
+			JOIN fpl.teams team
+			  ON team.season_id = player.season_id
 			 AND team.team_id = player.team_id
 			WHERE snapshot.season_id = $1
 		`,

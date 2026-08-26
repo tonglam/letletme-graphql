@@ -120,12 +120,25 @@ describe("playersRepository core reads", () => {
 		const context = buildSnapshotContext(redis);
 		let readCount = 0;
 		context.data = {
-			read: () => {
+			read: (table: string) => {
 				readCount += 1;
-				return queryChain(
-					{ data: [{ total_points: 9, selected_by_percent: "4.2" }], error: null },
-					["select", "eq", "limit"]
-				);
+				const data =
+					readCount === 1 && table === "fpl.player_event_snapshot_bundles"
+						? [
+								{
+									element_id: 1,
+									event_id: 1,
+									publication_revision: "stats-1",
+									publication_source_checked_at: new Date().toISOString(),
+									publication_published_at: new Date().toISOString(),
+									publication_row_count: 1,
+									publication_expected_row_count: 1,
+									publication_content_sha256: "a".repeat(64),
+									publication_baseline_verified_at: new Date().toISOString(),
+								},
+							]
+						: [{ total_points: 9, selected_by_percent: "4.2" }];
+				return queryChain({ data, error: null }, ["select", "eq", "limit"]);
 			},
 		} as never;
 
@@ -134,7 +147,7 @@ describe("playersRepository core reads", () => {
 
 		expect(first).toMatchObject({ id: 1, price: 45, totalPoints: 9, selectedByPercent: 4.2 });
 		expect(second).toEqual(first);
-		expect(readCount).toBe(1);
+		expect(readCount).toBe(2);
 		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":players-event-stats:"));
 		expect(cacheWrite?.[0]).toMatch(/^llm:gql:core-7:players-event-stats:/);
 		expect(cacheWrite?.slice(-2)).toEqual(["EX", 3600]);
@@ -438,23 +451,40 @@ describe("playersRepository top transfers", () => {
 		const context = buildSnapshotContext(redis);
 		delete context.dataRevision;
 		context.data = {
-			read: () =>
-				queryChain(
-					{
-						data: [
-							{
-								element_id: 1,
-								event_id: 1,
-								transfers_in_event: 50,
-								transfers_out_event: 0,
-								total_points: 9,
-								selected_by_percent: "4.2",
-							},
-						],
-						error: null,
-					},
-					["select", "eq", "not", "order", "limit", "in"]
-				),
+			read: (() => {
+				let readCount = 0;
+				return (table: string) => {
+					readCount += 1;
+					const data =
+						readCount === 1 && table === "fpl.player_event_snapshot_bundles"
+							? [
+									{
+										element_id: 1,
+										event_id: 1,
+										publication_revision: "stats-1",
+										publication_source_checked_at: new Date().toISOString(),
+										publication_published_at: new Date().toISOString(),
+										publication_row_count: 1,
+										publication_expected_row_count: 1,
+										publication_content_sha256: "a".repeat(64),
+										publication_baseline_verified_at: new Date().toISOString(),
+									},
+								]
+							: readCount === 3 && table === "fpl.player_event_snapshot_bundles"
+								? [{ element_id: 1, total_points: 9, selected_by_percent: "4.2" }]
+								: [
+										{
+											element_id: 1,
+											event_id: 1,
+											transfers_in_event: 50,
+											transfers_out_event: 0,
+											total_points: 9,
+											selected_by_percent: "4.2",
+										},
+									];
+					return queryChain({ data, error: null }, ["select", "eq", "not", "order", "limit", "in"]);
+				};
+			})(),
 		} as never;
 
 		const result = await playersRepository.getTopTransfersInEnriched(context, 1, 10);
@@ -490,11 +520,37 @@ describe("playersRepository top transfers", () => {
 			order: () => builder,
 			limit: async () => queryResult,
 		};
-		const context = {
-			currentSeason: { seasonId: 2026, seasonCode: "2627" },
-			dataRevision: "core-7",
-			data: { read: () => builder },
-			logger: { error: () => undefined },
+		const core = buildTestCoreData(1);
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
+		let readCount = 0;
+		context.data = {
+			read: (table: string) => {
+				readCount += 1;
+				const data =
+					readCount === 1 && table === "fpl.player_event_snapshot_bundles"
+						? [
+								{
+									element_id: 1,
+									event_id: 1,
+									publication_revision: "stats-1",
+									publication_source_checked_at: new Date().toISOString(),
+									publication_published_at: new Date().toISOString(),
+									publication_row_count: 1,
+									publication_expected_row_count: 1,
+									publication_content_sha256: "a".repeat(64),
+									publication_baseline_verified_at: new Date().toISOString(),
+								},
+							]
+						: [
+								{
+									element_id: 1,
+									event_id: 1,
+									transfers_in_event: 0,
+									transfers_out_event: 0,
+								},
+							];
+				return queryChain({ data, error: null }, ["select", "eq", "not", "order", "limit", "in"]);
+			},
 		} as never;
 
 		expect(await playersRepository.getTopTransfersInEnriched(context, 1, 10)).toEqual({

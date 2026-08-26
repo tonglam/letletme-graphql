@@ -34,13 +34,35 @@ const makeManagerRow = (entryId: number, eventPoints: number): ManagerLiveScoreR
 	eventRank: null,
 	overallRank: entryId,
 	leagueRank: entryId,
-	source: "FPL_CLASSIC_STANDINGS",
+	source: "FPL_EVENT_LIVE",
 	transferCost: 0,
 	eventPointSemantics: "ZERO_COST_EQUIVALENT",
 	revision: `manager:${entryId}`,
 	checkedAt: "2026-08-25T00:00:00.000Z",
 	upstreamUpdatedAt: "2026-08-25T00:00:00.000Z",
 	staleAt: "2026-08-25T00:01:00.000Z",
+	calculationMode: "PROJECTED_AUTOSUBS",
+	algorithmVersion: "fpl-projected-autosubs-v1",
+	provenance: {
+		scoreSource: "FPL_EVENT_LIVE",
+		calculationMode: "PROJECTED_AUTOSUBS",
+		algorithmVersion: "fpl-projected-autosubs-v1",
+		inputRevision: "input-1",
+		scoreRevision: `score-${entryId}`,
+		rankRevision: `rank-${entryId}`,
+		livePublicationId: "00000000-0000-4000-8000-000000000001",
+		liveRevision: "38",
+		liveCheckedAt: "2026-08-25T00:00:00.000Z",
+		picksRevision: `picks-${entryId}`,
+		picksCheckedAt: "2026-08-25T00:00:00.000Z",
+		previousTotalsRevision: `totals-${entryId}`,
+		previousTotalsThroughEventId: 37,
+		resultRevision: null,
+		resultCheckedAt: null,
+		dataCheckedAt: null,
+		rankSource: "FPL_CLASSIC_STANDINGS",
+		rankCheckedAt: "2026-08-25T00:00:00.000Z",
+	},
 });
 
 const makeLoad = (rows: ManagerLiveScoreRow[], expectedEntries: number): ManagerScoreLoad => ({
@@ -213,7 +235,14 @@ describe("full-field live board bounded manager loads", () => {
 				{
 					...makeManagerRow(1, 10),
 					source: "FPL_EVENT_LIVE",
-					revision: "fpl:live:publication:38:entry:1:hash",
+					provenance: {
+						...makeManagerRow(1, 10).provenance!,
+						scoreSource: "FPL_EVENT_LIVE",
+						calculationMode: "PROJECTED_AUTOSUBS",
+						algorithmVersion: "fpl-projected-autosubs-v1",
+						livePublicationId: "publication",
+						liveRevision: "38",
+					},
 				},
 			],
 			1
@@ -451,7 +480,7 @@ describe("full-field live board index", () => {
 		expect(board.rows.map((row) => row.rank)).toEqual([1, 2, 3]);
 		expect(page.filteredEntries).toBe(1);
 		expect(page.rows[0]?.entry).toBe(1);
-		expect(page.rows[0]?.score.source).toBe("FPL_CLASSIC_STANDINGS");
+		expect(page.rows[0]?.score.source).toBe("FPL_EVENT_LIVE");
 
 		const grossFirstManagerRows = new Map(boardInput.managerRows);
 		const grossFirst = grossFirstManagerRows.get(1);

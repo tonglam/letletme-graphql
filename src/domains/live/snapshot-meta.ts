@@ -26,6 +26,21 @@ export type LiveSnapshotMeta = {
 	bonusTeamCount: number;
 };
 
+/** The minimum identity needed to fence a second read to the same publication. */
+export type LiveSnapshotReference = Pick<LiveSnapshotMeta, "publicationId" | "revision"> &
+	Partial<
+		Pick<
+			LiveSnapshotMeta,
+			| "state"
+			| "publishedAt"
+			| "checkedAt"
+			| "eventLiveCount"
+			| "fixtureCount"
+			| "fixtureTeamCount"
+			| "bonusTeamCount"
+		>
+	>;
+
 const metaMemo = new WeakMap<object, Map<number, Promise<LiveSnapshotMeta | null>>>();
 const sourceMemo = new WeakMap<object, Map<number, "redis" | "postgres">>();
 const publicationMetaMemo = new WeakMap<object, Map<number, Promise<LiveSnapshotMeta | null>>>();
@@ -176,8 +191,8 @@ export const loadLiveSnapshotMeta = async (
 
 /**
  * Read only the active publication manifest for paths that fetch a bounded
- * player set from PostgreSQL. Invalid or unavailable manifests retain the
- * existing coherent full-snapshot fallback.
+ * player set from PostgreSQL. Invalid or unavailable manifests use the
+ * regular coherent full-snapshot read.
  */
 export const loadLivePublicationMeta = (
 	context: GraphQLContext,

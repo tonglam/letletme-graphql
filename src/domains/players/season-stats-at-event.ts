@@ -156,6 +156,18 @@ type PublicationRow = {
 	baseline_verified_at: string | Date | null;
 };
 
+type PlayerEventSnapshotBundleRow = {
+	event_id: number;
+	element_id: number;
+	publication_revision: string | number;
+	publication_source_checked_at: string | Date;
+	publication_published_at: string | Date;
+	publication_row_count: number;
+	publication_expected_row_count: number;
+	publication_content_sha256: string;
+	publication_baseline_verified_at: string | Date | null;
+};
+
 const isoTimestamp = (value: string | Date | null | undefined): string | null => {
 	if (value === null || value === undefined) return null;
 	const parsed = value instanceof Date ? value : new Date(value);
@@ -195,22 +207,6 @@ async function resolvePlayerStatsContextUncached(
 	context: GraphQLContext,
 	requestedEventId?: number | null
 ): Promise<PlayerStatsContext> {
-	// Production GraphQL contexts always provide the typed Data read client. A
-	// narrow fallback keeps isolated resolver/unit contexts from attempting a
-	// PostgreSQL authority lookup; it is never used by the production server.
-	if (typeof (context.data as { read?: unknown } | null | undefined)?.read !== "function") {
-		return {
-			scope: "CURRENT_SEASON",
-			season: context.currentSeason.seasonCode,
-			asOfEventId: null,
-			status: "AVAILABLE",
-			revision: context.dataRevision ?? null,
-			sourceCheckedAt: null,
-			publishedAt: null,
-			rowCount: 0,
-			expectedRowCount: 0,
-		};
-	}
 	const [season, eventSnapshot] = await Promise.all([
 		getCurrentSeason(context),
 		getCoreEventSnapshot(context),
@@ -238,16 +234,29 @@ async function resolvePlayerStatsContextUncached(
 	}
 
 	let publication: PublicationRow | null;
+	let bundleRows: PlayerEventSnapshotBundleRow[];
 	try {
 		const result = await context.data
-			.read("fpl.player_event_snapshot_publications")
+			.read("fpl.player_event_snapshot_bundles")
 			.select(
-				"event_id, revision, source_checked_at, published_at, row_count, expected_row_count, baseline_verified_at"
+				"event_id, element_id, publication_revision, publication_source_checked_at, publication_published_at, publication_row_count, publication_expected_row_count, publication_content_sha256, publication_baseline_verified_at"
 			)
 			.eq("event_id", event.id)
-			.limit(1);
+			.limit(1000);
 		if (result.error) throw result.error;
-		publication = ((result.data ?? [])[0] as PublicationRow | undefined) ?? null;
+		bundleRows = (result.data ?? []) as PlayerEventSnapshotBundleRow[];
+		const first = bundleRows[0];
+		publication = first
+			? {
+					event_id: first.event_id,
+					revision: first.publication_revision,
+					source_checked_at: first.publication_source_checked_at,
+					published_at: first.publication_published_at,
+					row_count: first.publication_row_count,
+					expected_row_count: first.publication_expected_row_count,
+					baseline_verified_at: first.publication_baseline_verified_at,
+				}
+			: null;
 	} catch (error) {
 		context.logger.warn({ err: error, eventId: event.id }, "Player Stats publication unavailable");
 		return {
@@ -289,13 +298,8 @@ async function resolvePlayerStatsContextUncached(
 	}
 
 	try {
-		const rows = await context.data
-			.read("fpl.player_event_snapshots")
-			.select("element_id, event_id")
-			.eq("event_id", event.id);
-		if (rows.error) throw rows.error;
-		const ids = (rows.data ?? [])
-			.map((row) => Number((row as { element_id?: unknown }).element_id))
+		const ids = bundleRows
+			.map((row) => Number(row.element_id))
 			.filter((id) => Number.isSafeInteger(id) && id > 0);
 		const uniqueIds = new Set(ids);
 		if (ids.length !== header.expectedRowCount || uniqueIds.size !== header.expectedRowCount) {
@@ -533,11 +537,13 @@ export async function getPlayerSeasonStatsByIdsForContext(
 		? QUERY_CACHE_TTL_SECONDS.REPORTING
 		: QUERY_CACHE_TTL_SECONDS.HISTORICAL;
 
-	const { data, error } = await context.data
-		.read("fpl.player_event_snapshots")
+	const statsResult = await context.data
+		.read("fpl.player_event_snapshot_bundles")
 		.select(SEASON_STATS_SELECT)
 		.eq("event_id", eventId)
+		.eq("publication_revision", statsContext.revision)
 		.in("element_id", missingIds);
+	const { data, error } = statsResult;
 
 	if (error) {
 		context.logger.warn(

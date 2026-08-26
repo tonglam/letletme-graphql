@@ -51,6 +51,10 @@ const scoreFromDataRow = (row: ManagerLiveScoreRow | undefined): LiveManagerScor
 		nextRefreshAt: null,
 		reconciliation: "NOT_COMPARABLE",
 		reasonCodes: [],
+		calculationMode: row.calculationMode,
+		algorithmVersion: row.algorithmVersion,
+		provenance: row.provenance,
+		effectiveLineup: row.effectiveLineup,
 	};
 };
 

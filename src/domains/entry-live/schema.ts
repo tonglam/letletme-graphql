@@ -46,21 +46,17 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 
 		This is the GraphQL-native equivalent of the LiveCalcData payload:
 		- static data (entry/player/team/fixtures) comes from cached repositories
-		- dynamic data (event live points) comes from Live domain (short TTL)
-		- calculation is performed server-side for fast client consumption
+		- dynamic data (event live points) comes from the revisioned Data manager-score authority
+		- player detail is joined only when it matches the authority revision
 		"""
-		calcLivePointsByEntry(eventId: Int!, entryId: Int!, includeLive: Boolean): LiveCalcData!
+		calcLivePointsByEntry(eventId: Int!, entryId: Int!): LiveCalcData!
 
 		"""
 		Batch live calculation for multiple entries in a single event.
-		Shares live performance data, fixtures, teams, and players across all entries,
-		then computes each entry in parallel with error tolerance.
+		Shares revisioned manager scores and player detail data across all entries,
+		then returns only rows that reconcile to the same score authority.
 		"""
-		calcLivePointsForEntries(
-			eventId: Int!
-			entryIds: [Int!]!
-			includeLive: Boolean
-		): BatchLiveCalcResult!
+		calcLivePointsForEntries(eventId: Int!, entryIds: [Int!]!): BatchLiveCalcResult!
 	}
 
 	type LiveCalcData {
@@ -107,10 +103,13 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 
 	enum LiveManagerScoreSource {
 		FPL_EVENT_LIVE
-		FPL_ENTRY_SUMMARY
-		FPL_CLASSIC_STANDINGS
 		FPL_FINAL_RESULT
 		UNAVAILABLE
+	}
+
+	enum LiveManagerRankSource {
+		FPL_ENTRY_SUMMARY
+		FPL_CLASSIC_STANDINGS
 	}
 
 	enum LiveManagerScoreState {
@@ -134,6 +133,11 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 		UNKNOWN
 	}
 
+	enum LiveManagerScoreCalculationMode {
+		PROJECTED_AUTOSUBS
+		FINAL_RESULT
+	}
+
 	enum LiveManagerScoreReconciliation {
 		MATCHED
 		SOURCE_SKEW
@@ -152,6 +156,39 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 		SOURCE_SKEW
 	}
 
+	type LiveManagerScoreProvenance {
+		scoreSource: LiveManagerScoreSource!
+		calculationMode: LiveManagerScoreCalculationMode!
+		algorithmVersion: String
+		inputRevision: String!
+		scoreRevision: String!
+		rankRevision: String
+		livePublicationId: String
+		liveRevision: String
+		liveCheckedAt: DateTime
+		picksRevision: String
+		picksCheckedAt: DateTime
+		previousTotalsRevision: String
+		previousTotalsThroughEventId: Int
+		resultRevision: String
+		resultCheckedAt: DateTime
+		dataCheckedAt: DateTime
+		rankSource: LiveManagerRankSource
+		rankCheckedAt: DateTime
+	}
+
+	type LiveManagerScoreEffectiveLineup {
+		elementId: Int!
+		position: Int!
+		sourceMultiplier: Int!
+		effectiveMultiplier: Int!
+		pickActive: Boolean!
+		autoSub: Boolean!
+		isCaptain: Boolean!
+		isViceCaptain: Boolean!
+		captainForScoring: Boolean!
+	}
+
 	type LiveManagerScore {
 		eventPoints: Int
 		netEventPoints: Int
@@ -164,6 +201,10 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 		source: LiveManagerScoreSource!
 		state: LiveManagerScoreState!
 		eventPointSemantics: LiveManagerScoreSemantics!
+		calculationMode: LiveManagerScoreCalculationMode
+		algorithmVersion: String
+		provenance: LiveManagerScoreProvenance
+		effectiveLineup: [LiveManagerScoreEffectiveLineup!]
 		revision: String
 		checkedAt: DateTime
 		upstreamUpdatedAt: DateTime

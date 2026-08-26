@@ -421,7 +421,7 @@ export const homeService = {
 					context,
 					event.id,
 					entryIds,
-					true
+					{}
 				);
 			} catch (error) {
 				context.logger.warn(
