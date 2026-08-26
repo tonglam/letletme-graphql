@@ -79,6 +79,8 @@ add(
 		"marketOwnershipDay",
 		"marketSnapshotContext",
 		"priceChangeBoard",
+		"priceChangeLiveCursor",
+		"priceChangeLiveBoard",
 		"publicLeagueTrends",
 		"publicLeagueSelectionStats",
 		"trendCohorts",

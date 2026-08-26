@@ -24,6 +24,18 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1, rootFields: ["events"] });
 	});
 
+	it("keeps live price-change roots public and bounded", () => {
+		for (const query of [
+			"query { priceChangeLiveCursor { revision state } }",
+			'query { priceChangeLiveBoard(revision: "abcdef0123456789") { revision state } }',
+		]) {
+			expect(validateGraphQLRequestLimits({ query }, schema)).toMatchObject({
+				ok: true,
+				rootFields: [query.includes("Cursor") ? "priceChangeLiveCursor" : "priceChangeLiveBoard"],
+			});
+		}
+	});
+
 	it("identifies a fixture-only read before resolver execution", () => {
 		const result = validateGraphQLRequestLimits({
 			query: "query CoreEventFixtureSchedule { eventFixtures(eventId: 1) { id } }",

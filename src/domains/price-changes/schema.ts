@@ -26,6 +26,12 @@ export const priceChangesTypeDefs = /* GraphQL */ `
 		FPL_BOOTSTRAP
 	}
 
+	enum PriceChangeLiveState {
+		PROVISIONAL
+		DURABLE
+		UNAVAILABLE
+	}
+
 	type PriceChangeProjection {
 		offset: Int!
 		projectedPercent: Float!
@@ -67,7 +73,27 @@ export const priceChangesTypeDefs = /* GraphQL */ `
 		players: [PriceChangePlayer!]!
 	}
 
+	type PriceChangeLiveCursor {
+		seasonCode: String!
+		revision: String
+		state: PriceChangeLiveState!
+		detectedAt: DateTime
+		fetchedAt: DateTime
+		expiresAt: DateTime
+	}
+
+	type PriceChangeLiveBoard {
+		revision: String!
+		state: PriceChangeLiveState!
+		detectedAt: DateTime
+		expiresAt: DateTime
+		durablePublicationId: ID
+		board: PriceChangeBoard!
+	}
+
 	extend type Query {
 		priceChangeBoard: PriceChangeBoard!
+		priceChangeLiveCursor(seasonCode: String): PriceChangeLiveCursor!
+		priceChangeLiveBoard(seasonCode: String, revision: String): PriceChangeLiveBoard!
 	}
 `;

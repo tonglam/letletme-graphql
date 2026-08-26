@@ -213,6 +213,72 @@ const parsePlayer = (value: unknown): PriceChangePlayer | null => {
 	};
 };
 
+/** Validate a board carried by the provisional Redis hot envelope. */
+export const parsePriceChangeBoardValue = (
+	value: unknown,
+	now: Date = new Date()
+): PriceChangeBoard | null => {
+	if (!isRecord(value)) return null;
+	if (
+		(value.status !== "READY" && value.status !== "PARTIAL" && value.status !== "STALE") ||
+		value.source !== "FPL_BOOTSTRAP" ||
+		(value.deadline !== null && !isDateTimeString(value.deadline)) ||
+		!Array.isArray(value.nextDeadlines) ||
+		!value.nextDeadlines.every(isDateTimeString) ||
+		(value.fetchedAt !== null && !isDateTimeString(value.fetchedAt)) ||
+		(value.staleAt !== null && !isDateTimeString(value.staleAt)) ||
+		typeof value.revision !== "string" ||
+		!isGraphQLInt(value.expectedPlayerCount) ||
+		!isGraphQLInt(value.observedPlayerCount) ||
+		!Array.isArray(value.players)
+	) {
+		return null;
+	}
+	if (
+		value.deadline !== null &&
+		(value.nextDeadlines.length === 0 || value.deadline !== value.nextDeadlines[0])
+	) {
+		return null;
+	}
+	const players = value.players.map(parsePlayer);
+	if (
+		players.some((player) => player === null) ||
+		value.expectedPlayerCount <= 0 ||
+		value.observedPlayerCount <= 0 ||
+		value.expectedPlayerCount !== value.observedPlayerCount ||
+		value.players.length !== value.observedPlayerCount
+	) {
+		return null;
+	}
+	const parsedPlayers = players as PriceChangePlayer[];
+	const playerIds = new Set(parsedPlayers.map((player) => player.playerId));
+	if (playerIds.size !== parsedPlayers.length || playerIds.size !== value.expectedPlayerCount) {
+		return null;
+	}
+	if (value.fetchedAt !== null) {
+		const fetchedAt = Date.parse(value.fetchedAt);
+		if (
+			!Number.isFinite(fetchedAt) ||
+			now.getTime() < fetchedAt ||
+			now.getTime() - fetchedAt > PRICE_CHANGE_MAX_AGE_MS
+		) {
+			return null;
+		}
+	}
+	return {
+		status: value.status,
+		source: "FPL_BOOTSTRAP",
+		deadline: value.deadline,
+		nextDeadlines: [...value.nextDeadlines],
+		fetchedAt: value.fetchedAt,
+		staleAt: value.staleAt,
+		revision: value.revision,
+		expectedPlayerCount: value.expectedPlayerCount,
+		observedPlayerCount: value.observedPlayerCount,
+		players: [...parsedPlayers].sort((left, right) => left.playerId - right.playerId),
+	};
+};
+
 const unavailableBoard = (): PriceChangeBoard => ({
 	status: "UNAVAILABLE",
 	source: "FPL_BOOTSTRAP",
