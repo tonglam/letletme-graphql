@@ -154,6 +154,62 @@ describe("entriesRepository.getEntrySnapshotById", () => {
 	});
 });
 
+describe("entriesRepository.getEntryNameUsage", () => {
+	const contextFor = (rows: unknown[]) => {
+		let selected = "";
+		const context = {
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			data: {
+				read: (relation: string) => {
+					expect(relation).toBe("competition.entries");
+					return {
+						select: (fields: string) => {
+							selected = fields;
+							return {
+								eq: () => ({
+									limit: async () => ({ data: rows, error: null }),
+								}),
+							};
+						},
+					};
+				},
+			},
+			logger: { error: () => undefined },
+		} as never;
+		return { context, getSelected: () => selected };
+	};
+
+	it("deduplicates observed names, preserves order, and adds the current name", async () => {
+		const { context, getSelected } = contextFor([
+			{
+				id: 101,
+				entry_name: "Name B",
+				used_entry_names: ["Name A", "name a", "Name B", "Name A"],
+			},
+		]);
+
+		await expect(entriesRepository.getEntryNameUsage(context, 101)).resolves.toEqual({
+			entryId: 101,
+			currentEntryName: "Name B",
+			usedEntryNames: ["Name A", "name a", "Name B"],
+			usedEntryNameCount: 3,
+		});
+		expect(getSelected()).toContain("used_entry_names");
+	});
+
+	it("defensively adds the current name for an empty history and returns null for unknown IDs", async () => {
+		const fixture = contextFor([{ id: 101, entry_name: "Current", used_entry_names: [] }]);
+		await expect(entriesRepository.getEntryNameUsage(fixture.context, 101)).resolves.toMatchObject({
+			usedEntryNames: ["Current"],
+			usedEntryNameCount: 1,
+		});
+
+		const unknown = contextFor([]);
+		await expect(entriesRepository.getEntryNameUsage(unknown.context, 999_999)).resolves.toBeNull();
+		await expect(entriesRepository.getEntryNameUsage(unknown.context, 0)).resolves.toBeNull();
+	});
+});
+
 describe("entriesRepository.getEntryHistoryInfo", () => {
 	const checkpointRow = (checkedAt: string | null, count: number | null) => ({
 		past_seasons_checked_at: checkedAt,

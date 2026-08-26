@@ -199,6 +199,23 @@ describe("Data Platform read client", () => {
 		expect(queries[0]?.text).toContain("league_type = entry_league.league_type");
 	});
 
+	it("resolves league event result names from the current entry identity", async () => {
+		const { executor, queries } = makeExecutor();
+
+		await clientFor(executor)
+			.read("competition.league_event_results")
+			.select("entry_id, event_id, entry_name")
+			.eq("league_id", 7)
+			.eq("event_id", 10);
+
+		expect(queries).toHaveLength(1);
+		expect(queries[0]?.text).toContain("entry.entry_name AS entry_name");
+		expect(queries[0]?.text).toContain("JOIN competition.entries entry");
+		expect(queries[0]?.text).toContain("entry.season_id = result.season_id");
+		expect(queries[0]?.text).toContain("entry.entry_id = result.entry_id");
+		expect(queries[0]?.text).not.toContain("result.entry_name");
+	});
+
 	it("returns market snapshot dates as calendar-date text", async () => {
 		const { executor, queries } = makeExecutor();
 

@@ -5,6 +5,7 @@ import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { getCoreEventSnapshot } from "../../infra/data-snapshot";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import { entriesService } from "../entries/service";
 import {
 	GroupMode,
 	TournamentSetupStatus,
@@ -45,11 +46,13 @@ export type MyFplSnapshotMeta = {
 /** Internal dependency seam used by hermetic My FPL behavior tests. */
 export type MyFplRepositoryDependencies = {
 	getCoreEventSnapshot: typeof getCoreEventSnapshot;
+	getEntriesByIds: typeof entriesService.getEntriesByIds;
 	tournamentsRepository: typeof tournamentsRepository;
 };
 
 const defaultDependencies: MyFplRepositoryDependencies = {
 	getCoreEventSnapshot,
+	getEntriesByIds: entriesService.getEntriesByIds,
 	tournamentsRepository,
 };
 
@@ -71,6 +74,24 @@ const withDependencies = async <T>(
 		if (previous) dependencyOverrides.set(context, previous);
 		else dependencyOverrides.delete(context);
 	}
+};
+
+const loadCurrentEntryNames = async (
+	context: GraphQLContext,
+	entryIds: readonly number[]
+): Promise<Map<number, string>> => {
+	const uniqueEntryIds = [
+		...new Set(entryIds.filter((entryId) => Number.isSafeInteger(entryId) && entryId > 0)),
+	];
+	if (uniqueEntryIds.length === 0) return new Map();
+
+	const entries = await dependenciesFor(context).getEntriesByIds(context, uniqueEntryIds);
+	const names = new Map<number, string>();
+	for (const entryId of uniqueEntryIds) {
+		const entry = entries.get(entryId);
+		if (entry) names.set(entryId, entry.entryName);
+	}
+	return names;
 };
 
 type LoadedReviewContext = {
@@ -344,6 +365,77 @@ export type MyFplCompetitionAggregate = {
 	captainDistribution: MyFplCompetitionDistribution[];
 	chipDistribution: MyFplCompetitionDistribution[];
 	snapshotMeta?: MyFplSnapshotMeta | null;
+};
+
+const applyCurrentEntryName = (
+	entry: MyFplEntryIdentity | null,
+	currentEntryName: string
+): MyFplEntryIdentity | null => (entry ? { ...entry, entryName: currentEntryName } : null);
+
+const applyCurrentEntryNamesToBoardPage = async (
+	context: GraphQLContext,
+	page: MyFplCompetitionBoardPage
+): Promise<MyFplCompetitionBoardPage> => {
+	const entryIds = [
+		...page.rows.map((row) => row.entryId),
+		...(page.viewerRow ? [page.viewerRow.entryId] : []),
+	];
+	const names = await loadCurrentEntryNames(context, entryIds);
+	const applyRowName = (row: MyFplCompetitionBoardRow | null): MyFplCompetitionBoardRow | null => {
+		if (!row) return null;
+		const currentEntryName = names.get(row.entryId);
+		return currentEntryName === undefined ? row : { ...row, entryName: currentEntryName };
+	};
+	return {
+		...page,
+		rows: page.rows
+			.map(applyRowName)
+			.filter((row): row is MyFplCompetitionBoardRow => row !== null),
+		viewerRow: applyRowName(page.viewerRow),
+	};
+};
+
+const applyCurrentEntryNamesToAggregate = async (
+	context: GraphQLContext,
+	aggregate: MyFplCompetitionAggregate
+): Promise<MyFplCompetitionAggregate> => {
+	const entryIds = [
+		...aggregate.metrics.map((metric) => metric.leaderEntryId),
+		...aggregate.topPerformers.map((performance) => performance.entryId),
+		...aggregate.risers.map((performance) => performance.entryId),
+		...aggregate.fallers.map((performance) => performance.entryId),
+	].filter(
+		(entryId): entryId is number =>
+			typeof entryId === "number" && Number.isSafeInteger(entryId) && entryId > 0
+	);
+	const names = await loadCurrentEntryNames(context, entryIds);
+	const currentNameFor = (entryId: number, fallback: string | null): string | null =>
+		names.get(entryId) ?? fallback;
+	return {
+		...aggregate,
+		metrics: aggregate.metrics.map((metric) => {
+			const leaderEntryId = metric.leaderEntryId;
+			return {
+				...metric,
+				leaderEntryName:
+					leaderEntryId === null
+						? metric.leaderEntryName
+						: currentNameFor(leaderEntryId, metric.leaderEntryName),
+			};
+		}),
+		topPerformers: aggregate.topPerformers.map((performance) => ({
+			...performance,
+			entryName: currentNameFor(performance.entryId, performance.entryName),
+		})),
+		risers: aggregate.risers.map((performance) => ({
+			...performance,
+			entryName: currentNameFor(performance.entryId, performance.entryName),
+		})),
+		fallers: aggregate.fallers.map((performance) => ({
+			...performance,
+			entryName: currentNameFor(performance.entryId, performance.entryName),
+		})),
+	};
 };
 
 export type MyFplCompetitionsDesk = {
@@ -1319,6 +1411,17 @@ const parseSnapshotEntryPayload = (value: unknown): SnapshotEntryPayload | null 
 	};
 };
 
+const applyCurrentEntryNameToSnapshot = async (
+	context: GraphQLContext,
+	payload: SnapshotEntryPayload
+): Promise<SnapshotEntryPayload> => {
+	const currentEntryName = (await loadCurrentEntryNames(context, [payload.entry.id])).get(
+		payload.entry.id
+	);
+	if (currentEntryName === undefined) return payload;
+	return { ...payload, entry: applyCurrentEntryName(payload.entry, currentEntryName)! };
+};
+
 type LoadedSnapshotEntry = {
 	publication: MyFplSnapshotPublication;
 	payload: SnapshotEntryPayload;
@@ -1361,7 +1464,13 @@ const loadSnapshotEntry = async (
 			parsed.payload.gameweek.eventId === eventId
 		);
 	});
-	if (cached) return { ...cached, publication };
+	if (cached) {
+		return {
+			...cached,
+			publication,
+			payload: await applyCurrentEntryNameToSnapshot(context, cached.payload),
+		};
+	}
 	const result = await context.database.query<
 		QueryResultRow & {
 			payload: unknown;
@@ -1434,7 +1543,11 @@ const loadSnapshotEntry = async (
 	) {
 		return null;
 	}
-	const loaded = { publication, payload, isEmpty: row.is_empty };
+	const loaded = {
+		publication,
+		payload: await applyCurrentEntryNameToSnapshot(context, payload),
+		isEmpty: row.is_empty,
+	};
 	await writeQueryCache(
 		context,
 		cacheKey,
@@ -1493,7 +1606,13 @@ const loadTeamGameweekPrepared = async (
 		cacheKey,
 		(value): value is MyFplTeamGameweek => isTeamGameweekCache(value) && value.eventId === eventId
 	);
-	if (cached) return { ...cached, snapshotMeta: snapshot.publication };
+	if (cached) {
+		return {
+			...cached,
+			entry: applyCurrentEntryName(cached.entry, snapshotEntry.entryName),
+			snapshotMeta: snapshot.publication,
+		};
+	}
 	const payload: MyFplTeamGameweek = {
 		...base,
 		state: "READY",
@@ -1563,10 +1682,18 @@ const loadTeamDesk = async (
 	);
 	const cached = await readCache(context, cacheKey, isTeamDeskCache);
 	if (cached) {
+		const currentEntryName = snapshot.payload.entry.entryName;
 		return {
 			...cached,
+			entry: applyCurrentEntryName(cached.entry, currentEntryName),
 			snapshotMeta: snapshot.publication,
-			gameweek: cached.gameweek ? { ...cached.gameweek, snapshotMeta: snapshot.publication } : null,
+			gameweek: cached.gameweek
+				? {
+						...cached.gameweek,
+						entry: applyCurrentEntryName(cached.gameweek.entry, currentEntryName),
+						snapshotMeta: snapshot.publication,
+					}
+				: null,
 		};
 	}
 	const entry = snapshot.payload.entry;
@@ -1911,7 +2038,12 @@ const loadCompetitionBoardPrepared = async (
 		(value): value is MyFplCompetitionBoardPage =>
 			isCompetitionBoardCache(value) && value.eventId === eventId
 	);
-	if (cached) return { ...cached, snapshotMeta: snapshot.publication };
+	if (cached) {
+		return {
+			...(await applyCurrentEntryNamesToBoardPage(context, cached)),
+			snapshotMeta: snapshot.publication,
+		};
+	}
 	const offset = (page - 1) * pageSize;
 	const result = await context.database.query<{
 		field_size: number;
@@ -1922,8 +2054,12 @@ const loadCompetitionBoardPrepared = async (
 		viewer_row: unknown;
 	}>(
 		`WITH board AS MATERIALIZED (
-			   SELECT snapshot.entry_id, snapshot.payload
+			   SELECT snapshot.entry_id,
+			          snapshot.payload || jsonb_build_object('entryName', entry.entry_name) AS payload
 			   FROM competition.my_fpl_snapshot_tournament_rows snapshot
+			   JOIN competition.entries entry
+			     ON entry.season_id = snapshot.season_id
+			    AND entry.entry_id = snapshot.entry_id
 			   WHERE snapshot.season_id = $1 AND snapshot.event_id = $2
 			     AND snapshot.revision = $3::bigint AND snapshot.tournament_id = $4
 			 ), filtered AS MATERIALIZED (
@@ -2006,7 +2142,7 @@ const loadCompetitionBoardPrepared = async (
 	) {
 		return empty("PENDING", snapshot.publication);
 	}
-	const payload: MyFplCompetitionBoardPage = {
+	const payload: MyFplCompetitionBoardPage = await applyCurrentEntryNamesToBoardPage(context, {
 		state: "READY",
 		eventId,
 		page,
@@ -2017,7 +2153,7 @@ const loadCompetitionBoardPrepared = async (
 		rows,
 		viewerRow,
 		snapshotMeta: snapshot.publication,
-	};
+	});
 	if (cacheableState(payload.state)) {
 		await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(payload.state));
 	}
@@ -2045,7 +2181,12 @@ const loadCompetitionAggregateSnapshot = async (
 		(value): value is MyFplCompetitionAggregate =>
 			isCompetitionAggregateCache(value) && value.eventId === eventId
 	);
-	if (cached) return { ...cached, snapshotMeta: snapshot };
+	if (cached) {
+		return {
+			...(await applyCurrentEntryNamesToAggregate(context, cached)),
+			snapshotMeta: snapshot,
+		};
+	}
 	const result = await context.database.query<{ payload: unknown }>(
 		`SELECT aggregate.payload
 		 FROM competition.my_fpl_snapshot_tournament_aggregates aggregate
@@ -2071,13 +2212,14 @@ const loadCompetitionAggregateSnapshot = async (
 	void _viewers;
 	const normalized = { ...aggregatePayload, viewer, snapshotMeta: snapshot };
 	if (!isCompetitionAggregateCache(normalized) || normalized.eventId !== eventId) return null;
+	const current = await applyCurrentEntryNamesToAggregate(context, normalized);
 	await writeQueryCache(
 		context,
 		cacheKey,
-		JSON.stringify(normalized),
+		JSON.stringify(current),
 		QUERY_CACHE_TTL_SECONDS.REPORTING
 	);
-	return normalized;
+	return current;
 };
 
 const parseSnapshotSeasonPathPoints = (
