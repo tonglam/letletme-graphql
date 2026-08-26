@@ -358,8 +358,7 @@ const parseRow = (value: unknown): ManagerLiveScoreRow | null => {
 		provenance.picksCheckedAt === null ||
 		provenance.previousTotalsRevision !== null ||
 		provenance.resultRevision === null ||
-		provenance.resultCheckedAt === null ||
-		provenance.dataCheckedAt === null
+		provenance.resultCheckedAt === null
 	) {
 		return null;
 	}
