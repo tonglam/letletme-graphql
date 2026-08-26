@@ -151,6 +151,7 @@ export const marketTypeDefs = /* GraphQL */ `
 	type MarketSnapshotContext {
 		season: String!
 		revision: String!
+		completeness: DataCompletenessMeta
 		source: MarketSnapshotSource!
 		snapshotDate: String
 		capturedAt: DateTime

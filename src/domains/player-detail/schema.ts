@@ -23,6 +23,7 @@ export const playerDetailTypeDefs = /* GraphQL */ `
 		publishedAt: DateTime
 		rowCount: Int!
 		expectedRowCount: Int!
+		completeness: DataCompletenessMeta
 	}
 
 	type PlayerAvailability {

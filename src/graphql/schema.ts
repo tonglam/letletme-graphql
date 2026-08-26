@@ -52,10 +52,12 @@ import { briefingResolvers } from "../domains/briefing/resolvers";
 import { briefingTypeDefs } from "../domains/briefing/schema";
 import { teamSelectionResolvers } from "../domains/team-selection/resolvers";
 import { teamSelectionTypeDefs } from "../domains/team-selection/schema";
+import { dataCompletenessTypeDefs } from "./data-completeness";
 
 export const schema = makeExecutableSchema({
 	typeDefs: [
 		baseTypeDefs, // Must be first to define Query
+		dataCompletenessTypeDefs,
 		authTypeDefs,
 		eventsTypeDefs,
 		gameweekTypeDefs,

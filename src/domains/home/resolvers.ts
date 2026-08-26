@@ -8,6 +8,7 @@ import {
 	type HomePublicBootstrap,
 } from "./service";
 import { normalizeMarketPulseDays } from "../market/resolvers";
+import { buildDataCompleteness } from "../../graphql/data-completeness";
 
 export const homeResolvers = {
 	Query: {
@@ -37,5 +38,29 @@ export const homeResolvers = {
 			_args: Record<string, never>,
 			context: GraphQLContext
 		): Promise<HomeMarketDesk> => homeService.getMarketDesk(context),
+	},
+	HomePersonalDesk: {
+		completeness: (parent: HomePersonalDesk, _args: unknown, context: GraphQLContext) =>
+			buildDataCompleteness({
+				contractKey: "league-tournament",
+				scopeKey: `season:${context.currentSeason.seasonCode}:entry:${parent.entryId}`,
+				// The legacy home SQL projection has no publication revision. Do not
+				// infer one from a timestamp; expose an explicit invalid evidence state
+				// until the producer adds its checkpoint revision.
+				revision: null,
+				sourceCheckedAt: parent.sourceCheckedAt,
+				complete: false,
+				eligibility: "INVALID",
+			}),
+	},
+	HomeMarketDesk: {
+		completeness: (parent: HomeMarketDesk, _args: unknown, context: GraphQLContext) =>
+			buildDataCompleteness({
+				contractKey: "market-price",
+				scopeKey: `season:${context.currentSeason.seasonCode}:home-market`,
+				revision: parent.revision,
+				sourceCheckedAt: parent.capturedAt,
+				complete: parent.revision.length > 0 && parent.capturedAt !== null,
+			}),
 	},
 };

@@ -175,6 +175,7 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		awaitingSchedule: Boolean!
 		scoreSource: OfficialH2HScoreSource!
 		scoreRevision: String
+		completeness: DataCompletenessMeta
 		scoreCheckedAt: DateTime
 		standings: [OfficialH2HStanding!]!
 		matches: [OfficialH2HMatch!]!
@@ -466,6 +467,7 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		awaitingSchedule: Boolean!
 		scoreSource: OfficialH2HScoreSource!
 		scoreRevision: String
+		completeness: DataCompletenessMeta
 		scoreCheckedAt: DateTime
 		standings: [OfficialH2HStanding!]!
 		matches: [OfficialH2HMatch!]!

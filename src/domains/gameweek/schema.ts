@@ -69,6 +69,7 @@ export const gameweekTypeDefs = /* GraphQL */ `
 		season: String!
 		coreRevision: String!
 		liveRevision: String
+		completeness: DataCompletenessMeta
 		anchorEventId: Int!
 		eventId: Int!
 		currentEventId: Int

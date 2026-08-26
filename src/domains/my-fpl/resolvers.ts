@@ -11,7 +11,9 @@ import {
 	type MyFplTeamDesk,
 	type MyFplTeamGameweek,
 	type MyFplTeamTransfers,
+	type MyFplSnapshotMeta,
 } from "./repository";
+import { buildDataCompleteness } from "../../graphql/data-completeness";
 
 type TeamDeskArgs = { eventId?: number | null; snapshotRevision?: string | null };
 type TeamGameweekArgs = { eventId: number; snapshotRevision?: string | null };
@@ -103,6 +105,16 @@ export const createMyFplResolvers = (repository: MyFplRepository = myFplReposito
 			measureRequestStage(context.requestTiming, "myFplCompetitionSetupStatus", () =>
 				repository.loadCompetitionSetupStatus(context, args.tournamentId)
 			),
+	},
+	MyFplSnapshotMeta: {
+		completeness: (parent: MyFplSnapshotMeta, _args: unknown, context: GraphQLContext) =>
+			buildDataCompleteness({
+				contractKey: "my-fpl",
+				scopeKey: `season:${context.currentSeason.seasonCode}:event:${parent.eventId}`,
+				revision: parent.revision,
+				sourceCheckedAt: parent.sourceCheckedAt,
+				complete: parent.revision.length > 0 && parent.freshness !== "STALE",
+			}),
 	},
 });
 
