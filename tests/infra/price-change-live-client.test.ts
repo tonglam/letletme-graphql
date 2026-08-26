@@ -27,14 +27,14 @@ class FakeRedis {
 	}
 }
 
-const validBoard = (fetchedAt: string) => ({
+const validBoard = (fetchedAt: string, revision = "abcdef0123456789") => ({
 	status: "READY",
 	source: "FPL_BOOTSTRAP",
 	deadline: new Date(Date.parse(fetchedAt) + 60 * 60 * 1_000).toISOString(),
 	nextDeadlines: [new Date(Date.parse(fetchedAt) + 60 * 60 * 1_000).toISOString()],
 	fetchedAt,
 	staleAt: new Date(Date.parse(fetchedAt) + 10 * 60 * 1_000).toISOString(),
-	revision: "abcdef0123456789",
+	revision,
 	expectedPlayerCount: 1,
 	observedPlayerCount: 1,
 	players: [
@@ -80,9 +80,9 @@ function publishHot(redis: FakeRedis, snapshot: Record<string, unknown>): void {
 	redis.set(payloadKey, snapshot);
 }
 
-function hotSnapshot(ageMs = 1_000): Record<string, unknown> {
+function hotSnapshot(ageMs = 1_000, revision = "abcdef0123456789"): Record<string, unknown> {
 	const detectedAt = new Date(Date.now() - ageMs).toISOString();
-	const board = validBoard(detectedAt);
+	const board = validBoard(detectedAt, revision);
 	return {
 		schemaVersion: 1,
 		seasonCode,
@@ -133,6 +133,29 @@ describe("price-change live client", () => {
 		(snapshot.board as { expectedPlayerCount: number }).expectedPlayerCount = 2;
 		publishHot(damagedRedis, snapshot);
 		assert.equal((await readPriceChangeLiveCursor(context(damagedRedis))).state, "UNAVAILABLE");
+	});
+
+	it("serves the exact requested revision even after the active pointer advances", async () => {
+		const redis = new FakeRedis();
+		const oldSnapshot = hotSnapshot(1_000, "abcdef0123456789");
+		const newerSnapshot = hotSnapshot(500, "0123456789abcdef");
+		publishHot(redis, oldSnapshot);
+		publishHot(redis, newerSnapshot);
+
+		const board = await readPriceChangeLiveBoard(context(redis), "abcdef0123456789");
+		assert.equal(board.revision, "abcdef0123456789");
+		assert.equal(board.board.revision, "abcdef0123456789");
+	});
+
+	it("rejects an envelope whose board fetchedAt is not identical", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		(snapshot.board as { fetchedAt: string }).fetchedAt = new Date(
+			Date.parse(String(snapshot.fetchedAt)) + 1
+		).toISOString();
+		publishHot(redis, snapshot);
+
+		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
 	});
 
 	it("returns unavailable without a durable or hot publication", async () => {

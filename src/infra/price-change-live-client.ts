@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../graphql/context";
+import { GraphQLError } from "graphql";
 import {
 	parsePriceChangeBoardValue,
 	readPriceChangePredictions,
@@ -7,6 +8,7 @@ import {
 
 const HOT_KEY_PREFIX = "fpl:price-changes:hot";
 const HOT_TTL_MS = 15 * 60 * 1000;
+const HOT_REVISION_PATTERN = /^[0-9a-f]{16}$/;
 
 export type PriceChangeLiveState = "PROVISIONAL" | "DURABLE" | "UNAVAILABLE";
 
@@ -115,6 +117,7 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 		!board ||
 		board.status !== "READY" ||
 		board.revision !== value.revision ||
+		board.fetchedAt !== value.fetchedAt ||
 		board.deadline !== value.deadline ||
 		value.expectedPlayerCount !== board.expectedPlayerCount ||
 		value.observedPlayerCount !== board.observedPlayerCount ||
@@ -186,17 +189,34 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 	};
 };
 
-async function readHotSnapshot(context: GraphQLContext, now: Date): Promise<HotSnapshot | null> {
+const hotPayloadKey = (seasonCode: string, revision: string): string =>
+	`${HOT_KEY_PREFIX}:${seasonCode}:${revision}`;
+
+async function readHotSnapshot(
+	context: GraphQLContext,
+	now: Date,
+	requestedRevision?: string | null
+): Promise<HotSnapshot | null> {
 	try {
-		const pointer = parsePointer(
-			await context.redis.get(hotPointerKey(context.currentSeason.seasonCode))
-		);
-		if (!pointer) return null;
-		const raw = await context.redis.get(pointer.payloadKey);
+		const pointer = requestedRevision
+			? null
+			: parsePointer(await context.redis.get(hotPointerKey(context.currentSeason.seasonCode)));
+		if (!requestedRevision && !pointer) return null;
+		const payloadKey = requestedRevision
+			? hotPayloadKey(context.currentSeason.seasonCode, requestedRevision)
+			: pointer!.payloadKey;
+		const raw = await context.redis.get(payloadKey);
 		if (!raw) return null;
 		const parsed: unknown = JSON.parse(raw);
 		const snapshot = parseHotSnapshot(parsed, context.currentSeason.seasonCode, now);
-		return snapshot?.revision === pointer.revision ? snapshot : null;
+		if (!snapshot) return null;
+		return requestedRevision
+			? snapshot.revision === requestedRevision
+				? snapshot
+				: null
+			: snapshot.revision === pointer!.revision
+				? snapshot
+				: null;
 	} catch (error) {
 		context.logger.warn({ err: error }, "Failed to load price-change hot snapshot");
 		return null;
@@ -264,10 +284,32 @@ export async function readPriceChangeLiveBoard(
 	_requestedRevision?: string | null
 ): Promise<PriceChangeLiveBoard> {
 	const now = new Date();
+	const requestedRevision = _requestedRevision?.trim() || null;
+	if (requestedRevision && !HOT_REVISION_PATTERN.test(requestedRevision)) {
+		throw new GraphQLError("The requested live price revision is invalid", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
 	const [hot, durable] = await Promise.all([
-		readHotSnapshot(context, now),
+		readHotSnapshot(context, now, requestedRevision),
 		readPriceChangePredictions(context),
 	]);
+	if (requestedRevision) {
+		if (!hot) {
+			throw new GraphQLError("The requested live price revision is unavailable", {
+				extensions: { code: "PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE" },
+			});
+		}
+		return {
+			revision: hot.revision,
+			state: hot.reconciliation.state === "reconciled" ? "DURABLE" : "PROVISIONAL",
+			detectedAt: hot.detectedAt,
+			expiresAt: hot.expiresAt,
+			durablePublicationId:
+				hot.reconciliation.durablePublicationId ?? durablePublicationId(durable, hot),
+			board: hot.board,
+		};
+	}
 	if (isNewerHotSnapshot(hot, durable)) {
 		return {
 			revision: hot!.revision,

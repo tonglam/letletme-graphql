@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { schema } from "../../../src/graphql/schema";
+import { LIGHTWEIGHT_CORE_FIELDS } from "../../../src/graphql/root-field-policy";
 
 describe("price-change board schema", () => {
 	it("exposes the official prediction board as a public query", () => {
@@ -20,6 +21,11 @@ describe("price-change board schema", () => {
 		const liveBoard = schema.getType("PriceChangeLiveBoard");
 		const liveBoardFields = liveBoard && "getFields" in liveBoard ? liveBoard.getFields() : {};
 		expect(liveBoardFields.durablePublicationId?.type.toString()).toBe("ID");
+	});
+
+	it("classifies live price roots as lightweight", () => {
+		expect(LIGHTWEIGHT_CORE_FIELDS.has("priceChangeLiveCursor")).toBe(true);
+		expect(LIGHTWEIGHT_CORE_FIELDS.has("priceChangeLiveBoard")).toBe(true);
 	});
 
 	it("keeps purchase and selling prices out of the prediction contract", () => {

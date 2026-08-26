@@ -219,6 +219,8 @@ const lightweightFields = [
 	"marketSnapshotContext",
 	"marketPulse",
 	"priceChangeBoard",
+	"priceChangeLiveCursor",
+	"priceChangeLiveBoard",
 	"marketOwnershipOverview",
 	"marketOwnershipDay",
 	"topTransfersIn",

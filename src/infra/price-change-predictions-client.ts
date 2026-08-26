@@ -251,6 +251,18 @@ export const parsePriceChangeBoardValue = (
 		return null;
 	}
 	const parsedPlayers = players as PriceChangePlayer[];
+	const nextDeadlines = value.nextDeadlines as string[];
+	if (
+		parsedPlayers.some(
+			(player) =>
+				player.projections.length !== nextDeadlines.length ||
+				player.projections.some(
+					(projection) => projection.offset < 0 || projection.offset >= nextDeadlines.length
+				)
+		)
+	) {
+		return null;
+	}
 	const playerIds = new Set(parsedPlayers.map((player) => player.playerId));
 	if (playerIds.size !== parsedPlayers.length || playerIds.size !== value.expectedPlayerCount) {
 		return null;
@@ -269,7 +281,7 @@ export const parsePriceChangeBoardValue = (
 		status: value.status,
 		source: "FPL_BOOTSTRAP",
 		deadline: value.deadline,
-		nextDeadlines: [...value.nextDeadlines],
+		nextDeadlines: [...nextDeadlines],
 		fetchedAt: value.fetchedAt,
 		staleAt: value.staleAt,
 		revision: value.revision,
