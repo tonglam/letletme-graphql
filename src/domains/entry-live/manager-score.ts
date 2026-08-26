@@ -150,8 +150,11 @@ const rowMatchesEventLiveScore = (
 	if (row.eventPointSemantics === "GROSS" || row.eventPointSemantics === "ZERO_COST_EQUIVALENT") {
 		return row.eventPoints === grossEventPoints;
 	}
-	if (typeof row.netEventPoints === "number") return row.netEventPoints === netEventPoints;
-	return row.eventPoints === grossEventPoints;
+	// UNKNOWN is not an authority for either gross or net points. It may only
+	// reconcile when both values independently match the pinned detail
+	// calculation; a matching net value alone must not bless an arbitrary
+	// headline eventPoints value.
+	return row.eventPoints === grossEventPoints && row.netEventPoints === netEventPoints;
 };
 
 /** Build the score contract and flat headline aliases from the single Data authority row. */
@@ -214,7 +217,7 @@ export function buildManagerScore(params: {
 				? netEventPoints === eventPoints
 				: row.eventPointSemantics === "GROSS" || row.eventPointSemantics === "ZERO_COST_EQUIVALENT"
 					? netEventPoints === eventPoints - effectiveTransferCost
-					: true
+					: eventPoints === detailEventPoints && netEventPoints === detailNetEventPoints
 			: false;
 	const reconciliation: LiveManagerScoreReconciliation = !available
 		? "NO_LINEUP"

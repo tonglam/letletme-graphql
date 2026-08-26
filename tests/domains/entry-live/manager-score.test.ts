@@ -190,6 +190,23 @@ describe("Data manager score contract", () => {
 		});
 	});
 
+	it("does not match an unknown-semantics row from net points alone", () => {
+		const result = buildManagerScore({
+			row: row({
+				eventPoints: 999,
+				netEventPoints: 42,
+				eventPointSemantics: "UNKNOWN",
+			}),
+			upstreamErrorCode: null,
+			provisional: true,
+			available: true,
+			transferCost: 0,
+			detailEventPoints: 42,
+		});
+		expect(result.score.reconciliation).toBe("SOURCE_SKEW");
+		expect(result.score.reasonCodes).toContain("SOURCE_SKEW");
+	});
+
 	it("fails closed when the Data row has no score values", () => {
 		const result = buildManagerScore({
 			row: row({ eventPoints: null, netEventPoints: null, totalPoints: null }),
