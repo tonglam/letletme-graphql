@@ -6,6 +6,7 @@ import {
 	splitManagerLiveEntryIds,
 } from "../../../src/domains/entry-live/manager-score-batches";
 import type { ManagerLiveScoreRow } from "../../../src/infra/manager-live-client";
+import { managerScoresAlignedWithLiveSnapshot } from "../../../src/domains/live-desks/resolvers";
 import {
 	buildFullFieldLiveBoardIndex,
 	type FullFieldLiveBoardIndexInput,
@@ -145,6 +146,42 @@ describe("full-field live board bounded manager loads", () => {
 			managerRevision: null,
 			error: "INCONSISTENT_MANAGER_REVISION",
 		});
+	});
+
+	it("does not claim complete coverage when a chunk lacks a roster revision", () => {
+		const first = makeLoad([makeManagerRow(1, 10)], 2);
+		const second = makeLoad([makeManagerRow(2, 11)], 2);
+		const merged = mergeManagerScoreLoads(
+			[
+				first,
+				{
+					...second,
+					tournamentCoverage: {
+						...second.tournamentCoverage!,
+						rosterRevision: null,
+					},
+				},
+			],
+			[1, 2]
+		);
+
+		expect(merged.tournamentCoverage).toMatchObject({
+			state: "PARTIAL",
+			rosterRevision: null,
+			error: "INCONSISTENT_ROSTER_REVISION",
+		});
+	});
+
+	it("requires final-result rows before a finalized field can be globally ranked", () => {
+		const liveLoad = makeLoad([makeManagerRow(1, 10)], 1);
+		const finalLoad = makeLoad([{ ...makeManagerRow(1, 10), source: "FPL_FINAL_RESULT" }], 1);
+
+		expect(
+			managerScoresAlignedWithLiveSnapshot(liveLoad, { finished: true, dataChecked: true }, null)
+		).toBe(false);
+		expect(
+			managerScoresAlignedWithLiveSnapshot(finalLoad, { finished: true, dataChecked: true }, null)
+		).toBe(true);
 	});
 
 	it("loads 1,567 managers two chunks at a time and merges all rows", async () => {

@@ -11,6 +11,7 @@ import type {
 import {
 	buildScheduledEntryLiveCompetitionBoard,
 	buildEntryLiveCompetitionBoard,
+	enrichEntryLiveCompetitionBoardRow,
 	entryLiveCompetitionBoardCacheKey,
 	entryLiveCompetitionManagerStatusRevision,
 	entryLiveCompetitionRosterRevision,
@@ -459,6 +460,29 @@ describe("entry live competition board filtering and paging", () => {
 				})
 			).filteredEntries
 		).toBe(0);
+	});
+
+	it("uses the persisted event team value for a finalized bounded row", () => {
+		const built = buildEntryLiveCompetitionBoard({
+			season: "2627",
+			eventId: 7,
+			tournamentId: 10,
+			coreRevision: "core-1",
+			playerRevision: "player-1",
+			managerRevision: "manager-1",
+			eventResults: new Map([[3, { teamValue: 812 }]]),
+			rows: [liveRow({ entry: 3 })],
+			totalEntries: 1,
+		});
+
+		expect(built.rows[0]?.teamValue).toBe(81.2);
+	});
+
+	it("preserves the indexed team value when enriching a full-field page row", () => {
+		const calculated = liveRow({ entry: 3 });
+		const indexed = { ...board([calculated]).rows[0]!, teamValue: 81.2 };
+
+		expect(enrichEntryLiveCompetitionBoardRow(indexed, calculated).teamValue).toBe(81.2);
 	});
 
 	it("searches team, manager and exact entry ID text", () => {

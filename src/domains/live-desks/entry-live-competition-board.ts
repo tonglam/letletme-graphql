@@ -3,6 +3,7 @@ import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import type { LiveCalcData } from "../entry-live/calc-service";
+import type { EntryEventResult } from "../entries/repository";
 import {
 	MANAGER_SCORE_REFRESH_SECONDS,
 	type LiveManagerScore,
@@ -563,15 +564,20 @@ export const buildEntryLiveCompetitionBoard = (input: {
 	rosterRevision?: string;
 	windowRevision?: string;
 	eventTeamIds?: ReadonlyMap<number, number>;
+	eventResults?: ReadonlyMap<number, Pick<EntryEventResult, "teamValue">>;
 	rows: readonly LiveCalcData[];
 	totalEntries: number;
 	failedEntryIds?: readonly number[];
 	unavailableEntryIds?: readonly number[];
 	requireNet?: boolean;
 }): CachedEntryLiveCompetitionBoard => {
-	const rows = input.rows.map((row) =>
-		projectEntryLiveCompetitionBoardRow(row, input.eventTeamIds)
-	);
+	const rows = input.rows.map((row) => {
+		const projected = projectEntryLiveCompetitionBoardRow(row, input.eventTeamIds);
+		const eventTeamValue = input.eventResults?.get(row.entry)?.teamValue;
+		return typeof eventTeamValue === "number"
+			? { ...projected, teamValue: eventTeamValue / 10 }
+			: projected;
+	});
 	const requireNet = input.requireNet === true;
 	const officialRows = rows.filter((row) => scoreHasOfficialEventMetric(row.score, requireNet));
 	const unavailableEntryIds = rows
@@ -722,6 +728,16 @@ export const toPublicEntryLiveCompetitionBoardRow = ({
 	teamBench: _teamBench,
 	...row
 }: IndexedEntryLiveCompetitionBoardRow): EntryLiveCompetitionBoardRow => row;
+
+/** Merge page-only live calculations without replacing event-scoped index fields. */
+export const enrichEntryLiveCompetitionBoardRow = (
+	indexedRow: Pick<EntryLiveCompetitionBoardRow, "rank" | "teamValue">,
+	calculatedRow: LiveCalcData
+): EntryLiveCompetitionBoardRow => ({
+	...toPublicEntryLiveCompetitionBoardRow(projectEntryLiveCompetitionBoardRow(calculatedRow)),
+	teamValue: indexedRow.teamValue,
+	rank: indexedRow.rank,
+});
 
 export const queryEntryLiveCompetitionBoard = (
 	board: CachedEntryLiveCompetitionBoard,

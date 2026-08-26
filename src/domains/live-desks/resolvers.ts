@@ -41,11 +41,10 @@ import {
 	entryLiveCompetitionBoardCacheKey,
 	entryLiveCompetitionManagerStatusRevision,
 	entryLiveCompetitionRosterRevision,
+	enrichEntryLiveCompetitionBoardRow,
 	getOrBuildEntryLiveCompetitionBoard,
 	normalizeEntryLiveCompetitionBoardRequest,
 	queryEntryLiveCompetitionBoard,
-	toPublicEntryLiveCompetitionBoardRow,
-	projectEntryLiveCompetitionBoardRow,
 } from "./entry-live-competition-board";
 import { buildFullFieldLiveBoardIndex } from "./full-field-live-board";
 import { selectTournamentDeskEntryWindow } from "./tournament-entry-window";
@@ -408,7 +407,7 @@ const managerLoadRevision = (input: {
 		.slice(0, 20);
 };
 
-const managerScoresAlignedWithLiveSnapshot = (
+export const managerScoresAlignedWithLiveSnapshot = (
 	managerScores: ManagerScoreLoad,
 	event: { finished: boolean; dataChecked: boolean },
 	snapshot: LiveDataSnapshot | null
@@ -418,9 +417,9 @@ const managerScoresAlignedWithLiveSnapshot = (
 	// may already have advanced. Final-result rows are independently durable,
 	// so a complete load made only of those rows remains valid after settlement.
 	if (event.finished && event.dataChecked) {
-		if (managerScores.dataAvailability === "FRESH") return true;
 		return (
-			managerScores.dataAvailability === "LAST_GOOD" &&
+			(managerScores.dataAvailability === "FRESH" ||
+				managerScores.dataAvailability === "LAST_GOOD") &&
 			managerScores.rows.size > 0 &&
 			Array.from(managerScores.rows.values()).every((row) => row.source === "FPL_FINAL_RESULT")
 		);
@@ -876,6 +875,14 @@ export const liveDesksResolvers = {
 							Array.from(result.results.values()),
 							{ useNet: requireNet }
 						);
+						const eventResults =
+							event.finished && event.dataChecked
+								? await entriesService.getEntryEventResultsByEntryIds(
+										context,
+										entryIds,
+										request.eventId
+									)
+								: undefined;
 						const playerIds = Array.from(
 							new Set(rankedRows.flatMap((row) => row.pickList.map((pick) => pick.element)))
 						);
@@ -898,6 +905,7 @@ export const liveDesksResolvers = {
 							...cacheIdentity,
 							windowRevision,
 							eventTeamIds,
+							eventResults,
 							rows: rankedRows,
 							totalEntries: allEntryIds.length,
 							failedEntryIds: result.errors.map((error) => error.entryId),
@@ -936,12 +944,7 @@ export const liveDesksResolvers = {
 					const enrich = (row: (typeof page.rows)[number]) => {
 						const calculatedRow = calculated.results.get(row.entry);
 						if (!calculatedRow) return row;
-						return {
-							...toPublicEntryLiveCompetitionBoardRow(
-								projectEntryLiveCompetitionBoardRow(calculatedRow)
-							),
-							rank: row.rank,
-						};
+						return enrichEntryLiveCompetitionBoardRow(row, calculatedRow);
 					};
 					page = {
 						...page,

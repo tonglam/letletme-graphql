@@ -129,6 +129,13 @@ const mergeCoverage = (
 			.map((coverage) => coverage.rosterRevision)
 			.filter((revision): revision is string => revision !== null)
 	);
+	const hasMissingRosterRevision = coverages.some(
+		(coverage) =>
+			typeof coverage.rosterRevision !== "string" || coverage.rosterRevision.trim().length === 0
+	);
+	const hasConsistentRosterRevision =
+		coverages.length > 0 && !hasMissingRosterRevision && rosterRevisions.size === 1;
+	const inconsistentRosterRevision = !hasConsistentRosterRevision;
 	const coverageManagerRevisions = new Set(
 		coverages
 			.map((coverage) => coverage.managerRevision)
@@ -143,9 +150,10 @@ const mergeCoverage = (
 	const hasConsistentManagerRevision =
 		coverages.length > 0 && !hasMissingManagerRevision && coverageManagerRevisions.size === 1;
 	const inconsistentManagerRevision = !hasConsistentManagerRevision;
+	const inconsistentCoverageRevision = inconsistentRosterRevision || inconsistentManagerRevision;
 	const fullyFetchedAt = latestTimestamp(coverages.map((coverage) => coverage.fullyFetchedAt));
 	const inheritedState = leastCompleteCoverageState(coverages);
-	const state: ManagerLiveCoverageState = inconsistentManagerRevision
+	const state: ManagerLiveCoverageState = inconsistentCoverageRevision
 		? "PARTIAL"
 		: missingCoverage
 			? resolvedEntries === 0
@@ -161,7 +169,7 @@ const mergeCoverage = (
 						? "PARTIAL"
 						: "COMPLETE";
 	return {
-		rosterRevision: rosterRevisions.size === 1 ? [...rosterRevisions][0]! : null,
+		rosterRevision: hasConsistentRosterRevision ? [...rosterRevisions][0]! : null,
 		expectedEntries: Math.max(
 			expectedEntries,
 			...coverages.map((coverage) => coverage.expectedEntries)
@@ -174,9 +182,11 @@ const mergeCoverage = (
 		managerRevision: hasConsistentManagerRevision ? [...coverageManagerRevisions][0]! : null,
 		error:
 			errorCode ??
-			(inconsistentManagerRevision
-				? "INCONSISTENT_MANAGER_REVISION"
-				: (coverages.find((coverage) => coverage.error)?.error ?? null)),
+			(inconsistentRosterRevision
+				? "INCONSISTENT_ROSTER_REVISION"
+				: inconsistentManagerRevision
+					? "INCONSISTENT_MANAGER_REVISION"
+					: (coverages.find((coverage) => coverage.error)?.error ?? null)),
 		state,
 	};
 };
