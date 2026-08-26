@@ -189,6 +189,33 @@ describe("price-change publication reader", () => {
 		assert.equal(databaseCalls, 0);
 	});
 
+	it("accepts freshness-window metadata added by the Data publication contract", async () => {
+		const publication = await createPublication(9 * 60 * 1_000);
+		const manifest = {
+			...publication.manifest,
+			freshnessWindowId: 17,
+			freshnessWindowIds: [17, 18],
+		};
+		publication.redis.set(
+			activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode: "2026" }),
+			JSON.stringify(manifest)
+		);
+
+		const board = await readPriceChangePredictions(
+			makeContext(
+				publication.redis,
+				{
+					query: async () => {
+						throw new Error("PostgreSQL should not be needed");
+					},
+				} as unknown as QueryExecutor
+			)
+		);
+
+		assert.equal(board.status, "READY");
+		assert.equal(board.revision, publication.manifest.publicationId);
+	});
+
 	it("falls back to the matching PostgreSQL publication when Redis is damaged", async () => {
 		const publication = await createPublication(9 * 60 * 1_000);
 		const playersItem = publication.manifest.items.find((item) => item.name === "players");

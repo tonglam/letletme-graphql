@@ -29,6 +29,8 @@ export type DataPublicationManifest = Readonly<{
 	publicationId: string;
 	sourceCheckedAt: string;
 	lastSuccessfulFetchAt?: string;
+	freshnessWindowId?: number;
+	freshnessWindowIds?: readonly number[];
 	publishedAt: string;
 	state: "active" | "scheduled" | "live" | "settled";
 	items: readonly DataPublicationManifestItem[];
@@ -66,12 +68,21 @@ const MANIFEST_FIELDS = [
 	"state",
 	"items",
 ] as const;
-const OPTIONAL_MANIFEST_FIELDS = ["lastSuccessfulFetchAt"] as const;
+const OPTIONAL_MANIFEST_FIELDS = [
+	"lastSuccessfulFetchAt",
+	"freshnessWindowId",
+	"freshnessWindowIds",
+] as const;
 const MANIFEST_ITEM_FIELDS = ["name", "key", "type", "count", "bytes", "sha256"] as const;
 
-const hasManifestFields = (value: Record<string, unknown>): boolean =>
-	hasExactFields(value, MANIFEST_FIELDS) ||
-	hasExactFields(value, [...MANIFEST_FIELDS, ...OPTIONAL_MANIFEST_FIELDS]);
+const hasManifestFields = (value: Record<string, unknown>): boolean => {
+	const actual = Object.keys(value);
+	const allowed = new Set<string>([...MANIFEST_FIELDS, ...OPTIONAL_MANIFEST_FIELDS]);
+	return (
+		MANIFEST_FIELDS.every((field) => actual.includes(field)) &&
+		actual.every((field) => allowed.has(field))
+	);
+};
 const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
 	"fpl:core": [
 		"events",
@@ -206,6 +217,16 @@ export const parseDataPublicationManifest = (
 			!isDataPublicationId(value.publicationId) ||
 			!isIsoDate(value.sourceCheckedAt) ||
 			(value.lastSuccessfulFetchAt !== undefined && !isIsoDate(value.lastSuccessfulFetchAt)) ||
+			(value.freshnessWindowId !== undefined &&
+				(!Number.isSafeInteger(value.freshnessWindowId) || value.freshnessWindowId <= 0)) ||
+			(value.freshnessWindowIds !== undefined &&
+				(!Array.isArray(value.freshnessWindowIds) ||
+					value.freshnessWindowIds.some(
+						(windowId) =>
+							typeof windowId !== "number" ||
+							!Number.isSafeInteger(windowId) ||
+							windowId <= 0
+					))),
 			!isIsoDate(value.publishedAt) ||
 			!isCanonicalState(dataset, value.state) ||
 			!Array.isArray(value.items)
