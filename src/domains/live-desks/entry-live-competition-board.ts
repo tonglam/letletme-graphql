@@ -232,8 +232,7 @@ const isCachedManagerScore = (value: unknown): value is LiveManagerScore => {
 		provenance.picksCheckedAt.length > 0 &&
 		provenance.previousTotalsRevision === null &&
 		provenance.resultRevision !== null &&
-		provenance.resultCheckedAt !== null &&
-		provenance.dataCheckedAt !== null
+		provenance.resultCheckedAt !== null
 	);
 };
 
