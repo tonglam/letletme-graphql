@@ -46,6 +46,10 @@ import {
 	queryEntryLiveCompetitionBoard,
 } from "./entry-live-competition-board";
 import { buildFullFieldLiveBoardIndex } from "./full-field-live-board";
+import {
+	claimLivePublicationFailureLog,
+	livePublicationFailureDetails,
+} from "./publication-observability";
 import { selectTournamentDeskEntryWindow } from "./tournament-entry-window";
 import { resolveLiveWindow, type LiveWindow } from "./window";
 
@@ -220,12 +224,24 @@ const resolveSnapshot = async (
 			extensions: { code: "LIVE_REVISION_GONE" },
 		});
 	}
-	const snapshot = await getLiveDataSnapshot(
-		context,
-		ref?.eventId ?? (await getCoreEventSnapshot(context)).currentEventId ?? 0
-	).catch((error) => {
+	const eventId = ref?.eventId ?? (await getCoreEventSnapshot(context)).currentEventId ?? 0;
+	const snapshot = await getLiveDataSnapshot(context, eventId).catch((error) => {
+		const failure = livePublicationFailureDetails(error, context.currentSeason.seasonCode, eventId);
+		if (
+			claimLivePublicationFailureLog(context.requestScope ?? context, eventId, failure.revision)
+		) {
+			context.logger.warn(
+				{
+					season: context.currentSeason.seasonCode,
+					eventId,
+					revision: failure.revision,
+					reason: failure.reason,
+				},
+				"Live publication snapshot is unavailable"
+			);
+		}
 		throw new GraphQLError("Live publication is unavailable", {
-			extensions: { code: "LIVE_PUBLICATION_UNAVAILABLE", cause: error },
+			extensions: { code: "LIVE_PUBLICATION_UNAVAILABLE" },
 		});
 	});
 	if (ref && snapshot.revision !== ref.revision) {

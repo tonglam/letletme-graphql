@@ -30,6 +30,20 @@ describe("live desks tournament selection index", () => {
 		);
 	});
 
+	it("logs bounded metadata when a fixture-player snapshot is unavailable", async () => {
+		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const snapshotResolver = source.slice(
+			source.indexOf("const resolveSnapshot"),
+			source.indexOf("const teamName")
+		);
+		expect(snapshotResolver).toContain("context.logger.warn");
+		expect(snapshotResolver).toContain("claimLivePublicationFailureLog");
+		expect(snapshotResolver).toContain("livePublicationFailureDetails(");
+		expect(snapshotResolver).not.toContain("ref?.revision ?? null");
+		expect(snapshotResolver).not.toContain("cause: error");
+		expect(snapshotResolver).not.toContain("err: error");
+	});
+
 	it("revalidates the selected membership before reading a cached competition board", async () => {
 		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
 		const desk = source.slice(
