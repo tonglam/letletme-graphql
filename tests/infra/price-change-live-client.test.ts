@@ -291,6 +291,7 @@ describe("price-change live client", () => {
 							{
 								publication_id: retained.manifest.publicationId,
 								revision: String(retained.manifest.revision),
+								status: "retired",
 								manifest: retained.manifest,
 							},
 						],
@@ -299,6 +300,7 @@ describe("price-change live client", () => {
 				if (sql.includes("FROM ops.dataset_publications")) return { rows: [] };
 				return {
 					rows: retained.manifest.items.map((item) => ({
+						publication_id: retained.manifest.publicationId,
 						item_name: item.name,
 						item_count: item.count,
 						checksum: item.sha256,
