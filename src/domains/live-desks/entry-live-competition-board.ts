@@ -614,6 +614,31 @@ export const buildEntryLiveCompetitionBoard = (input: {
 	};
 };
 
+/**
+ * A future event has no picks or live manager scores yet. Keep that normal
+ * pre-deadline state empty and non-partial instead of manufacturing one
+ * unavailable row per roster entry through the batch calculator.
+ */
+export const buildScheduledEntryLiveCompetitionBoard = (input: {
+	season: string;
+	eventId: number;
+	tournamentId: number;
+	coreRevision: string;
+	playerRevision: string;
+	rosterRevision: string;
+	windowRevision: string;
+	totalEntries: number;
+}): CachedEntryLiveCompetitionBoard => ({
+	...buildEntryLiveCompetitionBoard({
+		...input,
+		managerRevision: null,
+		rows: [],
+		failedEntryIds: [],
+		unavailableEntryIds: [],
+	}),
+	partial: false,
+});
+
 const idsForScope = (
 	row: IndexedEntryLiveCompetitionBoardRow,
 	scope: EntryLiveCompetitionPickScope

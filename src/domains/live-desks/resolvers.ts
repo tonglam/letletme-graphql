@@ -37,6 +37,7 @@ import {
 } from "./competition-board-cache";
 import {
 	buildEntryLiveCompetitionBoard,
+	buildScheduledEntryLiveCompetitionBoard,
 	entryLiveCompetitionBoardCacheKey,
 	entryLiveCompetitionManagerStatusRevision,
 	entryLiveCompetitionRosterRevision,
@@ -616,6 +617,63 @@ export const liveDesksResolvers = {
 					extensions: { code: "LIVE_EVENT_NOT_FOUND" },
 				});
 			}
+			const corePlayerRevision = `core-${eventCore.revision}`;
+			const rosterRevision = entryLiveCompetitionRosterRevision(allEntryIds);
+			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
+			const isScheduledEvent =
+				event.id > (eventCore.currentEventId ?? 0) ||
+				(request.eventId === window.anchorEventId && window.dataAvailability === "SCHEDULED");
+			if (isScheduledEvent) {
+				if (ref) {
+					throw new GraphQLError("Requested live revision has expired", {
+						extensions: { code: "LIVE_BOARD_REVISION_GONE" },
+					});
+				}
+				const scheduledBoard = buildScheduledEntryLiveCompetitionBoard({
+					season: context.currentSeason.seasonCode,
+					eventId: request.eventId,
+					tournamentId: request.tournamentId,
+					coreRevision: eventCore.revision,
+					playerRevision: corePlayerRevision,
+					rosterRevision,
+					windowRevision,
+					totalEntries: allEntryIds.length,
+				});
+				const scheduledPage = queryEntryLiveCompetitionBoard(scheduledBoard, request);
+				return {
+					season: context.currentSeason.seasonCode,
+					eventId: request.eventId,
+					tournamentId: request.tournamentId,
+					boardRevision: scheduledBoard.boardRevision,
+					playerRevision: scheduledBoard.playerRevision,
+					managerRevision: null,
+					dataAvailability: "SCHEDULED",
+					managerDataAvailability: "SCHEDULED",
+					managerServedFrom: "NONE",
+					managerRefreshQueued: false,
+					managerCheckedAt: null,
+					managerNextRefreshAt: null,
+					coverageState: "UNAVAILABLE",
+					rankScope: "AVAILABLE_ROWS",
+					computedEntries: 0,
+					deferredEntryCount: 0,
+					failedEntryCount: 0,
+					unavailableEntryCount: 0,
+					officialCoverage: 0,
+					unavailableEntryIds: [],
+					failedEntryIds: [],
+					partial: false,
+					totalEntries: allEntryIds.length,
+					filteredEntries: scheduledPage.filteredEntries,
+					page: request.page,
+					pageSize: request.pageSize,
+					hasMore: scheduledPage.hasMore,
+					highestEventPoints: null,
+					averageEventPoints: null,
+					rows: scheduledPage.rows,
+					viewerRow: scheduledPage.viewerRow,
+				};
+			}
 
 			const [snapshot, initialManagerScores] = await Promise.all([
 				getLiveDataSnapshot(context, request.eventId).catch(() => null),
@@ -627,9 +685,7 @@ export const liveDesksResolvers = {
 				});
 			}
 
-			const playerRevision = snapshot?.revision ?? `core-${eventCore.revision}`;
-			const rosterRevision = entryLiveCompetitionRosterRevision(allEntryIds);
-			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
+			const playerRevision = snapshot?.revision ?? corePlayerRevision;
 			const requireNet = memberTournament.leagueType === LeagueType.H2H;
 			const requiresNetMetric = requireNet || request.sort === "NET_EVENT_POINTS";
 			const hasComparableRankMetric = (
@@ -879,11 +935,12 @@ export const liveDesksResolvers = {
 				}
 			}
 			const managerCoverageState = managerScores.tournamentCoverage?.state;
+			const effectiveDeferredEntryIds = fullFieldBoard ? [] : deferredEntryIds;
 			const derivedCoverageState =
 				managerCoverageState ??
 				(board.rows.length === board.totalEntries &&
 				board.failedEntryIds.length === 0 &&
-				deferredEntryIds.length === 0
+				effectiveDeferredEntryIds.length === 0
 					? "COMPLETE"
 					: board.rows.length > 0
 						? "PARTIAL"
@@ -904,7 +961,7 @@ export const liveDesksResolvers = {
 				managerScores.missingEntryIds.length === 0 &&
 				board.rows.length === board.totalEntries &&
 				managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
-			const deferredIds = new Set(deferredEntryIds);
+			const deferredIds = new Set(effectiveDeferredEntryIds);
 			const failedIds = new Set(calculatedFailedEntryIds);
 			const unavailableEntryCount = board.unavailableEntryIds.filter(
 				(entryId) => !deferredIds.has(entryId) && !failedIds.has(entryId)
@@ -935,14 +992,16 @@ export const liveDesksResolvers = {
 				coverageState,
 				rankScope: fullFieldReady ? "FULL_FIELD" : "AVAILABLE_ROWS",
 				computedEntries: board.rows.length,
-				deferredEntryCount: fullFieldBoard ? 0 : deferredEntryIds.length,
+				deferredEntryCount: effectiveDeferredEntryIds.length,
 				failedEntryCount: calculatedFailedEntryIds.length,
 				unavailableEntryCount,
 				officialCoverage: board.officialCoverage,
 				unavailableEntryIds: board.unavailableEntryIds,
 				failedEntryIds: calculatedFailedEntryIds,
 				partial:
-					board.partial || calculatedFailedEntryIds.length > 0 || deferredEntryIds.length > 0,
+					board.partial ||
+					calculatedFailedEntryIds.length > 0 ||
+					effectiveDeferredEntryIds.length > 0,
 				totalEntries: board.totalEntries,
 				filteredEntries: page.filteredEntries,
 				page: request.page,

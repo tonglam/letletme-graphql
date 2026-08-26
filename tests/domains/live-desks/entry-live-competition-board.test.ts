@@ -9,6 +9,7 @@ import type {
 	ManagerScoreLoad,
 } from "../../../src/domains/entry-live/manager-score";
 import {
+	buildScheduledEntryLiveCompetitionBoard,
 	buildEntryLiveCompetitionBoard,
 	entryLiveCompetitionBoardCacheKey,
 	entryLiveCompetitionManagerStatusRevision,
@@ -188,6 +189,25 @@ const request = (
 });
 
 describe("entry live competition board request validation", () => {
+	it("represents a scheduled event as an empty non-partial board", () => {
+		const board = buildScheduledEntryLiveCompetitionBoard({
+			season: "2627",
+			eventId: 6,
+			tournamentId: 10,
+			coreRevision: "core-1",
+			playerRevision: "core-1",
+			rosterRevision: "roster-1",
+			windowRevision: "window-1",
+			totalEntries: 1567,
+		});
+
+		expect(board.rows).toEqual([]);
+		expect(board.totalEntries).toBe(1567);
+		expect(board.officialCoverage).toBe(0);
+		expect(board.partial).toBe(false);
+		expect(board.unavailableEntryIds).toEqual([]);
+	});
+
 	it("applies the documented first-page defaults", () => {
 		expect(
 			normalizeEntryLiveCompetitionBoardRequest({ entryId: 1, tournamentId: 2, eventId: 3 })
