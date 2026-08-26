@@ -470,6 +470,9 @@ const computeSingleEntry = (
 		pick.multiplier = row.effectiveMultiplier;
 		pick.pickActive = row.pickActive;
 		pick.autoSub = row.autoSub;
+		pick.position = row.position;
+		pick.isCaptain = row.isCaptain;
+		pick.isViceCaptain = row.isViceCaptain;
 	}
 	const activePicks = pickList.filter((pick) => pick.pickActive);
 	const captainForScoring =
@@ -748,16 +751,19 @@ export const entryLiveBatchService = {
 		let targetedLiveError: Error | null = null;
 		const loadTargetedLive = async (): Promise<TargetedLiveRead | null> => {
 			if (!useTargetedLiveRead) return null;
-			if (detailReferenceUnavailable || detailLiveReference === null) {
-				return null;
-			}
+			// During the live phase the detail read must be pinned to the same
+			// publication as the headline. Once the event is settled there is no
+			// live ref to pin: use the repository's unpinned targeted read, which
+			// selects the durable final player rows when the live publication is
+			// gone. Never turn a missing provisional ref into an unpinned read.
+			if (detailReferenceUnavailable) return null;
 			const stopSnapshot = context.requestTiming?.start("entryLive.liveSnapshot");
 			try {
 				return await liveRepository.getTargetedLiveRead(
 					context,
 					eventId,
 					playerIds,
-					detailLiveReference
+					detailLiveReference ?? null
 				);
 			} catch (error) {
 				targetedLiveError = error instanceof Error ? error : new Error("Live data unavailable");

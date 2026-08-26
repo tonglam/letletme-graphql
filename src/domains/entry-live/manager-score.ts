@@ -208,11 +208,19 @@ export function buildManagerScore(params: {
 	const eventPoints = row.eventPoints;
 	const netEventPoints = row.netEventPoints;
 	const detailNetEventPoints = detailEventPoints - effectiveTransferCost;
+	const scoreIdentityMatches =
+		typeof eventPoints === "number" && typeof netEventPoints === "number"
+			? row.eventPointSemantics === "NET"
+				? netEventPoints === eventPoints
+				: row.eventPointSemantics === "GROSS" || row.eventPointSemantics === "ZERO_COST_EQUIVALENT"
+					? netEventPoints === eventPoints - effectiveTransferCost
+					: true
+			: false;
 	const reconciliation: LiveManagerScoreReconciliation = !available
 		? "NO_LINEUP"
 		: typeof eventPoints === "number" && typeof netEventPoints === "number"
 			? rowMatchesEventLiveScore(row, detailEventPoints, detailNetEventPoints) &&
-				netEventPoints === eventPoints - effectiveTransferCost
+				scoreIdentityMatches
 				? "MATCHED"
 				: "SOURCE_SKEW"
 			: "NOT_COMPARABLE";

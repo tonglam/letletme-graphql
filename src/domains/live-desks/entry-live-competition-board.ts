@@ -6,8 +6,10 @@ import type { LiveCalcData } from "../entry-live/calc-service";
 import type { EntryEventResult } from "../entries/repository";
 import {
 	MANAGER_SCORE_REFRESH_SECONDS,
+	isTraceableOfficialManagerScore,
 	type LiveManagerScore,
 	type ManagerScoreLoad,
+	unavailableManagerScore,
 } from "../entry-live/manager-score";
 
 // The cache envelope now includes the revisioned Data score authority. A new
@@ -175,11 +177,17 @@ const isCachedManagerScore = (value: unknown): value is LiveManagerScore => {
 		isNullableString(value.nextRefreshAt) &&
 		LIVE_MANAGER_SCORE_RECONCILIATIONS.has(String(value.reconciliation)) &&
 		isStringArray(value.reasonCodes) &&
-		LIVE_MANAGER_SCORE_CALCULATION_MODES.has(String(value.calculationMode)) &&
-		(value.algorithmVersion === null || typeof value.algorithmVersion === "string") &&
-		isRecord(value.provenance)
+		(value.calculationMode === null ||
+			LIVE_MANAGER_SCORE_CALCULATION_MODES.has(String(value.calculationMode))) &&
+		(value.algorithmVersion === null || typeof value.algorithmVersion === "string")
 	))
 		return false;
+	if (value.source === "UNAVAILABLE") {
+		return (
+			value.calculationMode === null && value.algorithmVersion === null && value.provenance === null
+		);
+	}
+	if (!isRecord(value.provenance) || value.calculationMode === null) return false;
 	const provenance = value.provenance;
 	if (
 		provenance.scoreSource !== value.source ||
@@ -228,6 +236,16 @@ const isCachedManagerScore = (value: unknown): value is LiveManagerScore => {
 		provenance.dataCheckedAt !== null
 	);
 };
+
+/**
+ * Only a traceable, non-skewed score may be copied into a board row. A missing
+ * lineup is still safe for a score-only board (the headline remains official),
+ * while SOURCE_SKEW and unprovable semantics are neutralized before caching.
+ */
+const isPublishableManagerScore = (score: LiveManagerScore): boolean =>
+	isCachedManagerScore(score) &&
+	isTraceableOfficialManagerScore(score) &&
+	(score.reconciliation === "MATCHED" || score.reconciliation === "NO_LINEUP");
 
 const isCachedBoardRow = (value: unknown): value is IndexedEntryLiveCompetitionBoardRow => {
 	if (!isRecord(value)) return false;
@@ -458,6 +476,21 @@ export const projectEntryLiveCompetitionBoardRow = (
 	row: LiveCalcData,
 	eventTeamIds?: ReadonlyMap<number, number>
 ): IndexedEntryLiveCompetitionBoardRow => {
+	const scoreIsPublishable = isPublishableManagerScore(row.score);
+	const boardScore = scoreIsPublishable
+		? row.score
+		: (() => {
+				const neutralized = unavailableManagerScore(
+					Number.isFinite(row.score.transferCost) && row.score.transferCost >= 0
+						? row.score.transferCost
+						: 0
+				);
+				if (row.score.reconciliation === "SOURCE_SKEW") {
+					neutralized.reconciliation = "SOURCE_SKEW";
+					neutralized.reasonCodes = ["SOURCE_SKEW"];
+				}
+				return neutralized;
+			})();
 	const ownerAny = new Set<number>();
 	const ownerStarter = new Set<number>();
 	const ownerBench = new Set<number>();
@@ -491,20 +524,20 @@ export const projectEntryLiveCompetitionBoardRow = (
 		entry: row.entry,
 		entryName: row.entryName,
 		playerName: row.playerName,
-		rank: row.rank,
-		overallRank: row.score.overallRank ?? row.overallRank,
+		rank: scoreIsPublishable ? row.rank : 0,
+		overallRank: scoreIsPublishable ? (boardScore.overallRank ?? row.overallRank) : 0,
 		teamValue: row.teamValue,
 		chip: row.chip,
-		livePoints: row.livePoints,
-		transferCost: row.score.transferCost ?? row.transferCost,
-		liveNetPoints: row.liveNetPoints,
-		liveTotalPoints: row.liveTotalPoints,
+		livePoints: scoreIsPublishable ? row.livePoints : 0,
+		transferCost: boardScore.transferCost ?? row.transferCost,
+		liveNetPoints: scoreIsPublishable ? row.liveNetPoints : 0,
+		liveTotalPoints: scoreIsPublishable ? row.liveTotalPoints : 0,
 		played: row.played,
 		toPlay: row.toPlay,
 		captainId,
 		captainName,
-		captainPoints: row.activeCaptain.points,
-		score: row.score,
+		captainPoints: scoreIsPublishable ? row.activeCaptain.points : 0,
+		score: boardScore,
 		searchText: `${row.entry} ${row.entryName} ${row.playerName}`.toLocaleLowerCase(),
 		ownerAny: Array.from(ownerAny).sort((left, right) => left - right),
 		ownerStarter: Array.from(ownerStarter).sort((left, right) => left - right),
