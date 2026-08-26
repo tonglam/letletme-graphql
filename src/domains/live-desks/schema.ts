@@ -137,8 +137,127 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		totalEntries: Int!
 	}
 
+	enum EntryLiveCompetitionBoardSort {
+		EVENT_POINTS
+		NET_EVENT_POINTS
+		TRANSFER_COST
+		PLAYED
+		TOTAL_POINTS
+		OVERALL_RANK
+		TEAM_VALUE
+		RANK
+		ENTRY_NAME
+	}
+
+	enum EntryLiveCompetitionBoardSortDirection {
+		ASC
+		DESC
+	}
+
+	enum EntryLiveCompetitionPickScope {
+		ANY
+		STARTER
+		BENCH
+	}
+
+	enum EntryLiveCompetitionCaptainMode {
+		ANY
+		CAPTAIN
+		VICE
+	}
+
+	enum ManagerLiveServedFrom {
+		REDIS
+		POSTGRES
+		MIXED
+		NONE
+	}
+
+	enum EntryLiveCompetitionBoardCoverageState {
+		WARMING
+		COMPLETE
+		PARTIAL
+		UNAVAILABLE
+	}
+
+	enum EntryLiveCompetitionRankScope {
+		FULL_FIELD
+		AVAILABLE_ROWS
+	}
+
+	input EntryLiveCompetitionOwnershipFilterInput {
+		playerIds: [Int!]!
+		scope: EntryLiveCompetitionPickScope = ANY
+		captainMode: EntryLiveCompetitionCaptainMode = ANY
+	}
+
+	input EntryLiveCompetitionTeamCountRuleInput {
+		teamId: Int!
+		exactCount: Int!
+		scope: EntryLiveCompetitionPickScope = ANY
+	}
+
+	type EntryLiveCompetitionBoardRow {
+		entry: Int!
+		entryName: String!
+		playerName: String!
+		rank: Int!
+		overallRank: Int!
+		teamValue: Float!
+		chip: String!
+		livePoints: Int!
+		transferCost: Int!
+		liveNetPoints: Int!
+		liveTotalPoints: Int!
+		played: Int!
+		toPlay: Int!
+		captainId: Int!
+		captainName: String!
+		captainPoints: Int!
+		score: LiveManagerScore!
+	}
+
+	type EntryLiveCompetitionBoardPage {
+		season: String!
+		eventId: Int!
+		tournamentId: Int!
+		boardRevision: String!
+		playerRevision: String!
+		managerRevision: String
+		dataAvailability: LiveDataAvailability!
+		managerDataAvailability: LiveDataAvailability!
+		managerServedFrom: ManagerLiveServedFrom!
+		managerRefreshQueued: Boolean!
+		managerCheckedAt: DateTime
+		managerNextRefreshAt: DateTime
+		coverageState: EntryLiveCompetitionBoardCoverageState!
+		rankScope: EntryLiveCompetitionRankScope!
+		computedEntries: Int!
+		deferredEntryCount: Int!
+		failedEntryCount: Int!
+		unavailableEntryCount: Int!
+		officialCoverage: Float!
+		unavailableEntryIds: [Int!]!
+		failedEntryIds: [Int!]!
+		partial: Boolean!
+		totalEntries: Int!
+		filteredEntries: Int!
+		page: Int!
+		pageSize: Int!
+		hasMore: Boolean!
+		highestEventPoints: Int
+		averageEventPoints: Float
+		rows: [EntryLiveCompetitionBoardRow!]!
+		viewerRow: EntryLiveCompetitionBoardRow
+	}
+
 	type TournamentSelectionIndexRow {
 		playerId: Int!
+		playerName: String!
+		teamId: Int!
+		teamName: String!
+		teamShortName: String!
+		position: Position!
 		count: Int!
 		percentage: Float!
 	}
@@ -167,6 +286,22 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 			selectedTournamentId: Int
 			ref: LiveRevisionRefInput
 		): EntryLiveCompetitionsDesk!
+		entryLiveCompetitionBoard(
+			entryId: Int!
+			tournamentId: Int!
+			eventId: Int!
+			ref: LiveRevisionRefInput
+			page: Int = 1
+			pageSize: Int = 20
+			sort: EntryLiveCompetitionBoardSort = EVENT_POINTS
+			direction: EntryLiveCompetitionBoardSortDirection = DESC
+			search: String
+			chips: [String!]
+			captainPlayerIds: [Int!]
+			ownership: EntryLiveCompetitionOwnershipFilterInput
+			teamCountRules: [EntryLiveCompetitionTeamCountRuleInput!]
+			expectedBoardRevision: String
+		): EntryLiveCompetitionBoardPage!
 		tournamentSelectionIndex(
 			entryId: Int!
 			tournamentId: Int!

@@ -68,6 +68,12 @@ const miniViewerPrincipal: Principal = {
 	fplEntryVerifiedAt: null,
 };
 
+const miniBoundDifferentViewerPrincipal: Principal = {
+	...miniViewerPrincipal,
+	fplEntryId: 456,
+	fplEntryVerifiedAt: "2026-08-21T00:00:00.000Z",
+};
+
 const platformAdminPrincipal: Principal = {
 	userId: "platform-admin",
 	source: "website",
@@ -358,6 +364,17 @@ describe("authorizeGraphQLRequest", () => {
 			websitePrincipal
 		);
 		expect(result.ok).toBe(true);
+	});
+
+	it("requires manageable tournament listings to use the verified FPL identity", async () => {
+		const query = `query Managed($entryId: Int!) {
+			manageableTournaments(entryId: $entryId) { id }
+		}`;
+		expect(await authorize(query, { entryId: 123 }, websitePrincipal)).toEqual({ ok: true });
+		expect(
+			await authorize(query, { entryId: 123 }, miniBoundDifferentViewerPrincipal)
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+		expect(await authorize(query, { entryId: 6953 }, platformAdminPrincipal)).toEqual({ ok: true });
 	});
 
 	it("rejects participant inspection by a non-member who is not the retained administrator", async () => {

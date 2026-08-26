@@ -15,22 +15,55 @@ import {
 } from "../../infra/data-snapshot";
 import type { DataPublicationManifest } from "../../infra/data-publication";
 import { entryLiveBatchService } from "../entry-live/batch-service";
+import { entryLiveRepository } from "../entry-live/repository";
 import {
+	loadManagerScores,
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
+	type ManagerScoreLoad,
 } from "../entry-live/manager-score";
-import { getTournamentSelectionIndexRows } from "../event-stats/repository";
+import { loadManagerScoresInChunks } from "../entry-live/manager-score-batches";
+import { entriesService } from "../entries/service";
+import { getPlayerAndTeamMaps, getTournamentSelectionIndexRows } from "../event-stats/repository";
 import { LeagueType } from "../leagues/repository";
+import { playersService } from "../players/service";
+import { Position } from "../players/repository";
 import { tournamentsService } from "../tournaments/service";
 import {
 	competitionBoardCacheKey,
 	readCompetitionBoardCache,
 	writeCompetitionBoardCache,
 } from "./competition-board-cache";
+import {
+	buildEntryLiveCompetitionBoard,
+	buildScheduledEntryLiveCompetitionBoard,
+	entryLiveCompetitionBoardCacheKey,
+	entryLiveCompetitionManagerStatusRevision,
+	entryLiveCompetitionRosterRevision,
+	enrichEntryLiveCompetitionBoardRow,
+	getOrBuildEntryLiveCompetitionBoard,
+	normalizeEntryLiveCompetitionBoardRequest,
+	queryEntryLiveCompetitionBoard,
+} from "./entry-live-competition-board";
+import { buildFullFieldLiveBoardIndex } from "./full-field-live-board";
 import { selectTournamentDeskEntryWindow } from "./tournament-entry-window";
 import { resolveLiveWindow, type LiveWindow } from "./window";
 
 type LiveRef = { season: string; eventId: number; revision: string };
+
+const selectionPositionName = (position: number): keyof typeof Position => {
+	switch (position) {
+		case Position.GOALKEEPER:
+			return "GOALKEEPER";
+		case Position.DEFENDER:
+			return "DEFENDER";
+		case Position.FORWARD:
+			return "FORWARD";
+		case Position.MIDFIELDER:
+		default:
+			return "MIDFIELDER";
+	}
+};
 
 const manifestSourceCheckedAt = (
 	manifest: DataPublicationManifest | null,
@@ -78,6 +111,12 @@ const snapshotStateForWindow = (window: LiveWindow): "SCHEDULED" | "LIVE" | "SET
 		return "SETTLED";
 	return "LIVE";
 };
+
+export const selectManagerScoresForBoard = (
+	initial: ManagerScoreLoad,
+	expanded: ManagerScoreLoad | null,
+	fullFieldDataReady: boolean
+): ManagerScoreLoad => (fullFieldDataReady && expanded ? expanded : initial);
 
 const livePublicationState = (
 	manifest: DataPublicationManifest | null
@@ -286,6 +325,31 @@ const assertMember = async (context: GraphQLContext, tournamentId: number, entry
 	return tournament;
 };
 
+const assertMemberOrManager = async (
+	context: GraphQLContext,
+	tournamentId: number,
+	entryId: number
+) => {
+	const member = await tournamentsService.getTournamentForMember(context, tournamentId, entryId);
+	if (member) return member;
+	const verifiedManagerEntryId =
+		typeof context.principal?.fplEntryId === "number" &&
+		context.principal.fplEntryId > 0 &&
+		Boolean(context.principal.fplEntryVerifiedAt)
+			? context.principal.fplEntryId
+			: null;
+	const managed =
+		verifiedManagerEntryId === null
+			? null
+			: await tournamentsService.getManagedTournament(
+					context,
+					tournamentId,
+					verifiedManagerEntryId
+				);
+	if (managed) return managed;
+	throw new GraphQLError("Tournament access denied", { extensions: { code: "FORBIDDEN" } });
+};
+
 const managerBoardMeta = (
 	board: Array<{
 		entry: number;
@@ -326,6 +390,123 @@ const managerBoardMeta = (
 				: officialRows.length / (options.totalEntries ?? board.length),
 		unavailableEntryIds,
 	};
+};
+
+const managerLoadRevision = (input: {
+	managerRevision: string | null;
+	rows: ReadonlyMap<number, { revision: string }>;
+	missingEntryIds: readonly number[];
+}): string | null => {
+	if (input.managerRevision) return input.managerRevision;
+	if (input.rows.size === 0 && input.missingEntryIds.length === 0) return null;
+	return createHash("sha256")
+		.update(
+			JSON.stringify({
+				rows: Array.from(input.rows, ([entryId, row]) => [entryId, row.revision]).sort(
+					(left, right) => Number(left[0]) - Number(right[0])
+				),
+				missingEntryIds: [...input.missingEntryIds].sort((left, right) => left - right),
+			})
+		)
+		.digest("hex")
+		.slice(0, 20);
+};
+
+export const managerScoresAlignedWithLiveSnapshot = (
+	managerScores: ManagerScoreLoad,
+	event: { finished: boolean; dataChecked: boolean },
+	snapshot: LiveDataSnapshot | null
+): boolean => {
+	// LAST_GOOD is useful for a bounded retained result, but it cannot define
+	// the global order of a full-field board while the player-live publication
+	// may already have advanced. Final-result rows are independently durable,
+	// so a complete load made only of those rows remains valid after settlement.
+	if (event.finished && event.dataChecked) {
+		return (
+			(managerScores.dataAvailability === "FRESH" ||
+				managerScores.dataAvailability === "LAST_GOOD") &&
+			managerScores.rows.size > 0 &&
+			Array.from(managerScores.rows.values()).every((row) => row.source === "FPL_FINAL_RESULT")
+		);
+	}
+	if (managerScores.dataAvailability !== "FRESH") return false;
+	if (!snapshot) return false;
+	const livePublishedAt = Date.parse(snapshot.publishedAt || snapshot.lastSuccessfulFetchAt);
+	if (!Number.isFinite(livePublishedAt)) return false;
+	const liveRevisionPrefix = snapshot.publicationId
+		? `fpl:live:${snapshot.publicationId}:${snapshot.revision}:`
+		: null;
+	return Array.from(managerScores.rows.values()).every((row) => {
+		const managerCheckedAt = Date.parse(row.checkedAt);
+		return (
+			row.source === "FPL_EVENT_LIVE" &&
+			Number.isFinite(managerCheckedAt) &&
+			managerCheckedAt >= livePublishedAt &&
+			(liveRevisionPrefix === null || row.revision.startsWith(liveRevisionPrefix))
+		);
+	});
+};
+
+type ComparableManagerRankRow = {
+	eventPoints: number | null;
+	netEventPoints: number | null;
+	eventPointSemantics: string;
+};
+
+export const hasComparableManagerRankMetric = (
+	row: ComparableManagerRankRow | undefined,
+	useNet: boolean
+): boolean =>
+	Boolean(
+		row &&
+		(useNet
+			? typeof row.netEventPoints === "number" && row.eventPointSemantics !== "UNKNOWN"
+			: typeof row.eventPoints === "number" &&
+				(row.eventPointSemantics === "GROSS" || row.eventPointSemantics === "ZERO_COST_EQUIVALENT"))
+	);
+
+export const hasComparableFullFieldManagerMetric = (
+	row: ComparableManagerRankRow | undefined,
+	options: { requireNet: boolean; requestedNet: boolean }
+): boolean => {
+	const requiresNet = options.requireNet || options.requestedNet;
+	const requiresGross = !options.requestedNet || !options.requireNet;
+	return (
+		(!requiresNet || hasComparableManagerRankMetric(row, true)) &&
+		(!requiresGross || hasComparableManagerRankMetric(row, false))
+	);
+};
+
+export const isScheduledTournamentEvent = (input: {
+	eventId: number;
+	currentEventId: number | null;
+	anchorEventId: number | null;
+	dataAvailability: string;
+	finished: boolean;
+	dataChecked: boolean;
+}): boolean => {
+	const isFinishedEvent = input.finished;
+	return (
+		!isFinishedEvent &&
+		(input.eventId > (input.currentEventId ?? 0) ||
+			(input.eventId === input.anchorEventId && input.dataAvailability === "SCHEDULED"))
+	);
+};
+
+export const classifyEntryLiveCompetitionDataAvailability = (input: {
+	eventId: number;
+	anchorEventId: number | null;
+	anchorDataAvailability: string;
+	currentEventId: number | null;
+	finished: boolean;
+	dataChecked: boolean;
+	snapshotAvailable: boolean;
+}): string => {
+	if (input.eventId === input.anchorEventId) return input.anchorDataAvailability;
+	if (input.finished && input.dataChecked) return "FINAL";
+	if (input.snapshotAvailable) return "LAST_GOOD";
+	if (!input.finished && input.eventId > (input.currentEventId ?? 0)) return "SCHEDULED";
+	return "UNAVAILABLE";
 };
 
 export const liveDesksResolvers = {
@@ -474,6 +655,479 @@ export const liveDesksResolvers = {
 				revision: snapshot.revision,
 				fixtureId: args.fixtureId,
 				players: snapshot.eventLives.filter((row) => playerIds.has(row.playerId)),
+			};
+		},
+		entryLiveCompetitionBoard: async (
+			_parent: unknown,
+			args: Record<string, unknown>,
+			context: GraphQLContext
+		) => {
+			const request = normalizeEntryLiveCompetitionBoardRequest(args);
+			const ref = (args.ref as LiveRef | null | undefined) ?? null;
+			if (ref && ref.season !== context.currentSeason.seasonCode) {
+				throw new GraphQLError("Live revision belongs to another season", {
+					extensions: { code: "LIVE_REVISION_GONE" },
+				});
+			}
+			if (ref && ref.eventId !== request.eventId) {
+				throw new GraphQLError("Live revision belongs to another event", {
+					extensions: { code: "LIVE_REVISION_GONE" },
+				});
+			}
+
+			const boardAccess = await assertMemberOrManager(
+				context,
+				request.tournamentId,
+				request.entryId
+			);
+			const memberTournament = boardAccess;
+			const [liveWindow, tournamentEntryIds] = await Promise.all([
+				readLiveWindow(context),
+				tournamentsService.getTournamentEntryIdsUncached(context, request.tournamentId),
+			]);
+			const allEntryIds = Array.from(
+				new Set(
+					tournamentEntryIds.filter(
+						(entryId): entryId is number =>
+							typeof entryId === "number" && Number.isSafeInteger(entryId) && entryId > 0
+					)
+				)
+			).sort((left, right) => left - right);
+			const { entryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
+				allEntryIds,
+				request.entryId
+			);
+			const { eventCore, window } = liveWindow;
+			const event = eventCore.events.find((candidate) => candidate.id === request.eventId);
+			if (!event) {
+				throw new GraphQLError("Event does not belong to the active season", {
+					extensions: { code: "LIVE_EVENT_NOT_FOUND" },
+				});
+			}
+			const corePlayerRevision = `core-${eventCore.revision}`;
+			const rosterRevision = entryLiveCompetitionRosterRevision(allEntryIds);
+			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
+			const isScheduledEvent = isScheduledTournamentEvent({
+				eventId: event.id,
+				currentEventId: eventCore.currentEventId,
+				anchorEventId: window.anchorEventId,
+				dataAvailability: window.dataAvailability,
+				finished: event.finished,
+				dataChecked: event.dataChecked,
+			});
+			if (isScheduledEvent) {
+				if (ref) {
+					throw new GraphQLError("Requested live revision has expired", {
+						extensions: { code: "LIVE_BOARD_REVISION_GONE" },
+					});
+				}
+				const scheduledBoard = buildScheduledEntryLiveCompetitionBoard({
+					season: context.currentSeason.seasonCode,
+					eventId: request.eventId,
+					tournamentId: request.tournamentId,
+					coreRevision: eventCore.revision,
+					playerRevision: corePlayerRevision,
+					rosterRevision,
+					windowRevision,
+					totalEntries: allEntryIds.length,
+				});
+				const scheduledPage = queryEntryLiveCompetitionBoard(scheduledBoard, request);
+				return {
+					season: context.currentSeason.seasonCode,
+					eventId: request.eventId,
+					tournamentId: request.tournamentId,
+					boardRevision: scheduledBoard.boardRevision,
+					playerRevision: scheduledBoard.playerRevision,
+					managerRevision: null,
+					dataAvailability: "SCHEDULED",
+					managerDataAvailability: "SCHEDULED",
+					managerServedFrom: "NONE",
+					managerRefreshQueued: false,
+					managerCheckedAt: null,
+					managerNextRefreshAt: null,
+					coverageState: "UNAVAILABLE",
+					rankScope: "AVAILABLE_ROWS",
+					computedEntries: 0,
+					deferredEntryCount: 0,
+					failedEntryCount: 0,
+					unavailableEntryCount: 0,
+					officialCoverage: 0,
+					unavailableEntryIds: [],
+					failedEntryIds: [],
+					partial: false,
+					totalEntries: allEntryIds.length,
+					filteredEntries: scheduledPage.filteredEntries,
+					page: request.page,
+					pageSize: request.pageSize,
+					hasMore: scheduledPage.hasMore,
+					highestEventPoints: null,
+					averageEventPoints: null,
+					rows: scheduledPage.rows,
+					viewerRow: scheduledPage.viewerRow,
+				};
+			}
+
+			const [snapshot, initialManagerScores] = await Promise.all([
+				getLiveDataSnapshot(context, request.eventId).catch(() => null),
+				loadManagerScores(context, request.eventId, entryIds, request.tournamentId),
+			]);
+			if (ref && (!snapshot || snapshot.revision !== ref.revision)) {
+				throw new GraphQLError("Requested live revision has expired", {
+					extensions: { code: "LIVE_BOARD_REVISION_GONE" },
+				});
+			}
+
+			const playerRevision = snapshot?.revision ?? corePlayerRevision;
+			const requireNet = memberTournament.leagueType === LeagueType.H2H;
+			const requestedNet = request.sort === "NET_EVENT_POINTS";
+			const fullFieldEnabled =
+				(Bun.env.FULL_FIELD_LIVE_BOARD_ENABLED ?? process.env.FULL_FIELD_LIVE_BOARD_ENABLED) ===
+				"true";
+			const initialCoverage = initialManagerScores.tournamentCoverage;
+			const initialHasComparableOverallTotals = allEntryIds.every((entryId) => {
+				const row = initialManagerScores.rows.get(entryId);
+				return row?.totalScope === "OVERALL" && typeof row.totalPoints === "number";
+			});
+			const canAttemptFullField =
+				fullFieldEnabled &&
+				request.sort !== "PLAYED" &&
+				(request.sort !== "TOTAL_POINTS" ||
+					(allEntryIds.length <= entryIds.length && initialHasComparableOverallTotals)) &&
+				request.captainPlayerIds.length === 0 &&
+				(request.ownership?.captainMode ?? "ANY") === "ANY" &&
+				initialCoverage?.state === "COMPLETE" &&
+				initialCoverage.rosterRevision === rosterRevision &&
+				initialCoverage.expectedEntries === allEntryIds.length &&
+				initialCoverage.resolvedEntries === allEntryIds.length;
+			let expandedManagerScores: ManagerScoreLoad | null = null;
+			let fullFieldDataReady = false;
+			if (canAttemptFullField && allEntryIds.length > entryIds.length) {
+				try {
+					const completeManagerScores = await loadManagerScoresInChunks(
+						allEntryIds,
+						(chunk) => loadManagerScores(context, request.eventId, chunk, request.tournamentId),
+						2
+					);
+					expandedManagerScores = completeManagerScores;
+					const coverage = completeManagerScores.tournamentCoverage;
+					const hasAllRankMetrics = allEntryIds.every((entryId) => {
+						return hasComparableFullFieldManagerMetric(completeManagerScores.rows.get(entryId), {
+							requireNet,
+							requestedNet,
+						});
+					});
+					fullFieldDataReady =
+						coverage?.state === "COMPLETE" &&
+						typeof coverage.managerRevision === "string" &&
+						coverage.rosterRevision === rosterRevision &&
+						coverage.expectedEntries === allEntryIds.length &&
+						coverage.resolvedEntries === allEntryIds.length &&
+						completeManagerScores.rows.size === allEntryIds.length &&
+						completeManagerScores.missingEntryIds.length === 0 &&
+						hasAllRankMetrics &&
+						managerScoresAlignedWithLiveSnapshot(completeManagerScores, event, snapshot);
+				} catch (error) {
+					context.logger.warn(
+						{ err: error, eventId: request.eventId, tournamentId: request.tournamentId },
+						"Full-field manager expansion unavailable; retaining bounded manager load"
+					);
+				}
+			} else {
+				const managerScores = initialManagerScores;
+				const hasAllRankMetrics = allEntryIds.every((entryId) => {
+					return hasComparableFullFieldManagerMetric(managerScores.rows.get(entryId), {
+						requireNet,
+						requestedNet,
+					});
+				});
+				fullFieldDataReady =
+					canAttemptFullField &&
+					managerScores.rows.size === allEntryIds.length &&
+					managerScores.missingEntryIds.length === 0 &&
+					hasAllRankMetrics &&
+					managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
+			}
+			const managerScores = selectManagerScoresForBoard(
+				initialManagerScores,
+				expandedManagerScores,
+				fullFieldDataReady
+			);
+			const managerRevision = managerLoadRevision(managerScores);
+			const managerStatusRevision = entryLiveCompetitionManagerStatusRevision(managerScores);
+			const cacheIdentity = {
+				season: context.currentSeason.seasonCode,
+				eventId: request.eventId,
+				tournamentId: request.tournamentId,
+				coreRevision: eventCore.revision,
+				playerRevision,
+				managerRevision,
+				rosterRevision,
+			};
+			const makeCacheKey = (
+				boardWindowRevision: string,
+				projectionMode: "BOUNDED" | "FULL_FIELD"
+			): string =>
+				entryLiveCompetitionBoardCacheKey(context, {
+					...cacheIdentity,
+					windowRevision: boardWindowRevision,
+					projectionMode,
+					managerStatusRevision,
+					requireTeamValue: request.sort === "TEAM_VALUE",
+					requireEventTeamIds: request.teamCountRules.length > 0,
+				});
+			let fullFieldBoard = false;
+			let board;
+			if (fullFieldDataReady) {
+				try {
+					board = await getOrBuildEntryLiveCompetitionBoard(
+						context,
+						makeCacheKey(rosterRevision, "FULL_FIELD"),
+						async () => {
+							const [entries, picks, eventResults] = await Promise.all([
+								entriesService.getEntriesByIds(context, allEntryIds),
+								entryLiveRepository.getEntryEventPicksByIds(context, allEntryIds, request.eventId),
+								entriesService.getEntryEventResultsByEntryIds(
+									context,
+									allEntryIds,
+									request.eventId
+								),
+							]);
+							const playerIds = Array.from(
+								new Set(
+									Array.from(picks.values()).flatMap((pick) =>
+										pick.picks.map((selected) => selected.element)
+									)
+								)
+							);
+							const [players, eventPlayers] = await Promise.all([
+								playersService.getPlayersByIdsForEvent(context, playerIds, request.eventId),
+								getPlayerAndTeamMaps(
+									context,
+									playerIds,
+									request.eventId,
+									context.currentSeason.seasonCode
+								),
+							]);
+							if (request.teamCountRules.length > 0 && !eventPlayers.eventTeamResolutionComplete) {
+								throw new Error("Event-scoped team metadata unavailable for full-field filters");
+							}
+							return buildFullFieldLiveBoardIndex({
+								...cacheIdentity,
+								managerRows: managerScores.rows,
+								allEntryIds,
+								entries,
+								eventResults,
+								picks,
+								players,
+								playerTeamIds: eventPlayers.eventTeamResolutionComplete
+									? new Map(
+											Array.from(eventPlayers.playerMap.entries()).map(([id, player]) => [
+												id,
+												player.team_id,
+											])
+										)
+									: undefined,
+								managerRevision,
+								rosterRevision,
+								requireNet,
+								allowFinalNoCaptainBoost: event.finished && event.dataChecked,
+								requireEventTeamValue: event.finished && event.dataChecked,
+								requireTeamValue: request.sort === "TEAM_VALUE",
+							});
+						}
+					);
+					fullFieldBoard = true;
+				} catch (error) {
+					context.logger.warn(
+						{ err: error, eventId: request.eventId, tournamentId: request.tournamentId },
+						"Full-field live board index unavailable; falling back to bounded window"
+					);
+				}
+			}
+			if (!board) {
+				board = await getOrBuildEntryLiveCompetitionBoard(
+					context,
+					makeCacheKey(windowRevision, "BOUNDED"),
+					async () => {
+						const result = await entryLiveBatchService.calcLivePointsForEntries(
+							context,
+							request.eventId,
+							entryIds,
+							true,
+							{
+								tournamentId: request.tournamentId,
+								managerScores,
+							}
+						);
+						const rankedRows = rankTournamentRowsByOfficialEventPoints(
+							Array.from(result.results.values()),
+							{ useNet: requireNet }
+						);
+						const eventResults =
+							event.finished && event.dataChecked
+								? await entriesService.getEntryEventResultsByEntryIds(
+										context,
+										entryIds,
+										request.eventId
+									)
+								: undefined;
+						const playerIds = Array.from(
+							new Set(rankedRows.flatMap((row) => row.pickList.map((pick) => pick.element)))
+						);
+						let eventTeamIds: ReadonlyMap<number, number> | undefined;
+						if (playerIds.length > 0) {
+							const eventPlayers = await getPlayerAndTeamMaps(
+								context,
+								playerIds,
+								request.eventId,
+								context.currentSeason.seasonCode
+							);
+							if (request.teamCountRules.length > 0 && !eventPlayers.eventTeamResolutionComplete) {
+								throw new Error("Event-scoped team metadata unavailable for board filters");
+							}
+							eventTeamIds = eventPlayers.eventTeamResolutionComplete
+								? new Map(
+										Array.from(eventPlayers.playerMap.entries()).map(([id, player]) => [
+											id,
+											player.team_id,
+										])
+									)
+								: undefined;
+						}
+						return buildEntryLiveCompetitionBoard({
+							...cacheIdentity,
+							windowRevision,
+							eventTeamIds,
+							eventResults,
+							rows: rankedRows,
+							totalEntries: allEntryIds.length,
+							failedEntryIds: result.errors.map((error) => error.entryId),
+							unavailableEntryIds: deferredEntryIds,
+							requireNet,
+						});
+					}
+				);
+			}
+
+			let page = queryEntryLiveCompetitionBoard(board, request);
+			let calculatedFailedEntryIds = board.failedEntryIds;
+			if (fullFieldBoard) {
+				const pageEntryIds = Array.from(
+					new Set([
+						...page.rows.map((row) => row.entry),
+						...(page.viewerRow ? [page.viewerRow.entry] : []),
+					])
+				);
+				try {
+					const calculated = await entryLiveBatchService.calcLivePointsForEntries(
+						context,
+						request.eventId,
+						pageEntryIds,
+						true,
+						{ tournamentId: request.tournamentId, managerScores }
+					);
+					const calculatedFailed = calculated.errors.map((error) => error.entryId);
+					const calculatedIds = new Set(calculated.results.keys());
+					calculatedFailedEntryIds = Array.from(
+						new Set([
+							...calculatedFailed,
+							...pageEntryIds.filter((entryId) => !calculatedIds.has(entryId)),
+						])
+					).sort((left, right) => left - right);
+					const enrich = (row: (typeof page.rows)[number]) => {
+						const calculatedRow = calculated.results.get(row.entry);
+						if (!calculatedRow) return row;
+						return enrichEntryLiveCompetitionBoardRow(row, calculatedRow);
+					};
+					page = {
+						...page,
+						rows: page.rows.map(enrich),
+						viewerRow: page.viewerRow ? enrich(page.viewerRow) : null,
+					};
+				} catch (error) {
+					calculatedFailedEntryIds = pageEntryIds;
+					context.logger.warn(
+						{ err: error, eventId: request.eventId, tournamentId: request.tournamentId },
+						"Full-field live page calculation failed"
+					);
+				}
+			}
+			const managerCoverageState = managerScores.tournamentCoverage?.state;
+			const effectiveDeferredEntryIds = fullFieldBoard ? [] : deferredEntryIds;
+			const derivedCoverageState =
+				managerCoverageState ??
+				(board.rows.length === board.totalEntries &&
+				board.failedEntryIds.length === 0 &&
+				effectiveDeferredEntryIds.length === 0
+					? "COMPLETE"
+					: board.rows.length > 0
+						? "PARTIAL"
+						: "UNAVAILABLE");
+			const coverageState =
+				derivedCoverageState === "WARMING" ||
+				derivedCoverageState === "COMPLETE" ||
+				derivedCoverageState === "PARTIAL"
+					? derivedCoverageState
+					: "UNAVAILABLE";
+			const fullFieldReady =
+				fullFieldBoard &&
+				coverageState === "COMPLETE" &&
+				managerScores.tournamentCoverage?.rosterRevision === rosterRevision &&
+				managerScores.tournamentCoverage?.expectedEntries === allEntryIds.length &&
+				managerScores.tournamentCoverage?.resolvedEntries === allEntryIds.length &&
+				managerScores.rows.size === allEntryIds.length &&
+				managerScores.missingEntryIds.length === 0 &&
+				board.rows.length === board.totalEntries &&
+				managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
+			const deferredIds = new Set(effectiveDeferredEntryIds);
+			const failedIds = new Set(calculatedFailedEntryIds);
+			const unavailableEntryCount = board.unavailableEntryIds.filter(
+				(entryId) => !deferredIds.has(entryId) && !failedIds.has(entryId)
+			).length;
+			const dataAvailability = classifyEntryLiveCompetitionDataAvailability({
+				eventId: request.eventId,
+				anchorEventId: window.anchorEventId,
+				anchorDataAvailability: window.dataAvailability,
+				currentEventId: eventCore.currentEventId,
+				finished: event.finished,
+				dataChecked: event.dataChecked,
+				snapshotAvailable: Boolean(snapshot),
+			});
+			return {
+				season: context.currentSeason.seasonCode,
+				eventId: request.eventId,
+				tournamentId: request.tournamentId,
+				boardRevision: board.boardRevision,
+				playerRevision: board.playerRevision,
+				managerRevision: board.managerRevision,
+				dataAvailability,
+				managerDataAvailability: managerScores.dataAvailability,
+				managerServedFrom: managerScores.servedFrom,
+				managerRefreshQueued: managerScores.refreshQueued,
+				managerCheckedAt: managerScores.checkedAt,
+				managerNextRefreshAt: managerScores.nextRefreshAt,
+				coverageState,
+				rankScope: fullFieldReady ? "FULL_FIELD" : "AVAILABLE_ROWS",
+				computedEntries: board.rows.length,
+				deferredEntryCount: effectiveDeferredEntryIds.length,
+				failedEntryCount: calculatedFailedEntryIds.length,
+				unavailableEntryCount,
+				officialCoverage: board.officialCoverage,
+				unavailableEntryIds: board.unavailableEntryIds,
+				failedEntryIds: calculatedFailedEntryIds,
+				partial:
+					board.partial ||
+					calculatedFailedEntryIds.length > 0 ||
+					effectiveDeferredEntryIds.length > 0,
+				totalEntries: board.totalEntries,
+				filteredEntries: page.filteredEntries,
+				page: request.page,
+				pageSize: request.pageSize,
+				hasMore: page.hasMore,
+				highestEventPoints: board.highestEventPoints,
+				averageEventPoints: board.averageEventPoints,
+				rows: page.rows,
+				viewerRow: page.viewerRow,
 			};
 		},
 		entryLiveCompetitionsDesk: async (
@@ -684,11 +1338,34 @@ export const liveDesksResolvers = {
 				args.tournamentId,
 				snapshot.eventId
 			);
+			const eventMaps = await getPlayerAndTeamMaps(
+				context,
+				rows.map((row) => row.playerId),
+				snapshot.eventId,
+				context.currentSeason.seasonCode
+			);
+			if (!eventMaps.eventTeamResolutionComplete) {
+				throw new Error("Historical player team metadata unavailable for selection index");
+			}
 			return {
 				tournamentId: args.tournamentId,
 				eventId: snapshot.eventId,
 				revision: snapshot.revision,
-				rows,
+				rows: rows.map((row) => {
+					const player = eventMaps.playerMap.get(row.playerId);
+					const eventTeam = player ? eventMaps.teamMap.get(player.team_id) : undefined;
+					if (!player || !eventTeam) {
+						throw new Error(`Historical selection metadata unavailable for player ${row.playerId}`);
+					}
+					return {
+						...row,
+						playerName: player.web_name,
+						teamId: player.team_id,
+						teamName: eventTeam.name,
+						teamShortName: eventTeam.short_name,
+						position: selectionPositionName(player.type),
+					};
+				}),
 			};
 		},
 		tournamentEntrySquads: async (

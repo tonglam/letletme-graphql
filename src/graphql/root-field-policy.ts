@@ -4,6 +4,7 @@ export type RootFieldAccess =
 	| "viewerEntryArg"
 	| "viewerTournamentMember"
 	| "verifiedEntry"
+	| "verifiedEntryArg"
 	| "tournamentAdmin"
 	| "leagueMember"
 	| "calcOwnEntries";
@@ -106,6 +107,8 @@ add(
 		"entryH2HMatchResults",
 		"entryOfficialH2HDesk",
 		"entryTournaments",
+		"entryParticipatingTournaments",
+		"manageableTournaments",
 		"entryLiveCompetitionsDesk",
 		"tournamentSelectionIndex",
 		"tournamentEntrySquads",
@@ -117,6 +120,11 @@ add(
 	"viewerEntryArg",
 	{ arg: "entryId" }
 );
+
+// Management listings are keyed by the administrator's bound FPL entry, not
+// by the currently selected viewer entry. This keeps a Mini Program's
+// followed team from becoming an authorization identity for management data.
+registry.set("manageableTournaments", policy("verifiedEntryArg", { arg: "entryId" }));
 
 add(
 	[
@@ -132,6 +140,7 @@ add(
 		"tournamentLiveParticipants",
 		"tournamentDetailDesk",
 		"myFplCompetitionBoard",
+		"entryLiveCompetitionBoard",
 		"myFplCompetitionSeasonPath",
 		"myFplCompetitionSetupStatus",
 	],
@@ -153,6 +162,7 @@ for (const field of [
 	"tournament",
 	"tournamentDetailDesk",
 	"tournamentEntryRankingSummary",
+	"entryLiveCompetitionBoard",
 ]) {
 	const current = registry.get(field);
 	if (current) registry.set(field, { ...current, ownEntryArg: "entryId" });
@@ -169,7 +179,12 @@ registry.set("leagueEventResults", policy("leagueMember", { arg: "leagueId" }));
 registry.set("calcLivePointsForEntries", policy("calcOwnEntries", { arg: "entryIds" }));
 registry.set("homePersonalDesk", policy("viewerEntry"));
 
-for (const field of ["tournamentParticipants", "tournamentDetailDesk", "tournament"]) {
+for (const field of [
+	"tournamentParticipants",
+	"tournamentDetailDesk",
+	"tournament",
+	"entryLiveCompetitionBoard",
+]) {
 	const current = registry.get(field);
 	if (current) registry.set(field, { ...current, retainedAdmin: true, tournamentMember: true });
 }
@@ -210,6 +225,8 @@ const lightweightFields = [
 	"briefingStory",
 	"entrySnapshot",
 	"entryTournaments",
+	"entryParticipatingTournaments",
+	"manageableTournaments",
 	"tournament",
 	"managedTournament",
 	"tournamentParticipants",

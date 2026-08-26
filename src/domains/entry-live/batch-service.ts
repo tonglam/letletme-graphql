@@ -22,6 +22,7 @@ import {
 	loadManagerScores,
 	unavailableManagerScore,
 	type OfficialManagerScoreRow,
+	type ManagerScoreLoad,
 } from "./manager-score";
 import { eventsService } from "../events/service";
 import type { EntryEventPick, EntryEventTransferRow } from "./repository";
@@ -314,7 +315,7 @@ const buildTeamMatchInfo = (params: {
 	};
 };
 
-const normalizeChip = (raw: string | null | undefined): string => {
+export const normalizeChip = (raw: string | null | undefined): string => {
 	const value = (raw ?? "").toUpperCase().trim();
 	const compactValue = value.replace(/[^A-Z0-9]/g, "");
 	if (
@@ -337,6 +338,7 @@ const normalizeChip = (raw: string | null | undefined): string => {
 		return "FREE_HIT";
 	if (value === "WILDCARD" || compactValue === "WILDCARD" || compactValue === "WC")
 		return "WILDCARD";
+	if (value === "MANAGER" || compactValue === "MANAGER" || compactValue === "AM") return "MANAGER";
 	if (compactValue === "NONE" || compactValue === "NA" || compactValue === "") return "NONE";
 	return "NONE";
 };
@@ -538,6 +540,7 @@ export const entryLiveBatchService = {
 			teams?: Promise<Team[]>;
 			picksByEntry?: Promise<Map<number, EntryEventPick>>;
 			tournamentId?: number;
+			managerScores?: ManagerScoreLoad;
 		}
 	): Promise<BatchLiveCalcResult> {
 		assertValidEntryBatch(entryIds);
@@ -561,7 +564,8 @@ export const entryLiveBatchService = {
 				eventId > 1
 					? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
 					: Promise.resolve(new Map<number, EntryEventResult>()),
-				loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
+				prefetched?.managerScores ??
+					loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
 				eventsService.getEventById(context, eventId).catch(() => null),
 			]);
 		// Manager headline availability is independent from lineup availability.

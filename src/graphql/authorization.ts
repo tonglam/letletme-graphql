@@ -334,13 +334,28 @@ const authorizeRootField = async (
 	if (!principal) return identity;
 	const viewerEntryId = viewerEntryIdForPrincipal(principal);
 
-	if (fieldPolicy.access === "verifiedEntry" && !hasVerifiedEntry(principal)) {
+	if (
+		(fieldPolicy.access === "verifiedEntry" || fieldPolicy.access === "verifiedEntryArg") &&
+		!hasVerifiedEntry(principal)
+	) {
 		return {
 			ok: false,
 			status: 403,
 			code: "FORBIDDEN",
 			message: "A verified FPL binding is required",
 		};
+	}
+
+	if (fieldPolicy.access === "verifiedEntryArg") {
+		const entryId = asPositiveInt(field.args[fieldPolicy.arg ?? "entryId"]);
+		if (!entryId || entryId !== principal.fplEntryId) {
+			return {
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+				message: "Requested entry is not the verified administrator identity",
+			};
+		}
 	}
 
 	if (

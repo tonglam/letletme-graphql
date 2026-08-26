@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { entryLiveBatchService } from "../../../src/domains/entry-live/batch-service";
+import {
+	entryLiveBatchService,
+	normalizeChip,
+} from "../../../src/domains/entry-live/batch-service";
 import { entryLiveRepository } from "../../../src/domains/entry-live/repository";
 import { entriesService } from "../../../src/domains/entries/service";
 import { eventsService } from "../../../src/domains/events/service";
@@ -117,6 +120,11 @@ const makeMockContext = (options: {
 };
 
 describe("entryLiveBatchService.calcLivePointsForEntries", () => {
+	it("canonicalizes the manager chip and its persisted AM alias", () => {
+		expect(normalizeChip("MANAGER")).toBe("MANAGER");
+		expect(normalizeChip("AM")).toBe("MANAGER");
+	});
+
 	it("returns empty results for empty entry IDs", async () => {
 		const context = makeMockContext({});
 		const result = await entryLiveBatchService.calcLivePointsForEntries(context, 33, []);
