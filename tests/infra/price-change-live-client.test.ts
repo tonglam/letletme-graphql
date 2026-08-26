@@ -209,6 +209,17 @@ describe("price-change live client", () => {
 		assert.equal((await readPriceChangeLiveCursor(context(damagedRedis))).state, "UNAVAILABLE");
 	});
 
+	it("rejects metadata whose source is older than the durable maximum age", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		(snapshot as { fetchedAt: string }).fetchedAt = new Date(
+			Date.now() - 61 * 60 * 1_000
+		).toISOString();
+		publishHot(redis, snapshot);
+
+		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
+	});
+
 	it("downgrades a hot board after its ready window", async () => {
 		const redis = new FakeRedis();
 		const snapshot = hotSnapshot(10 * 60 * 1_000 + 1_000);

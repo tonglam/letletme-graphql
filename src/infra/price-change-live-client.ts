@@ -135,6 +135,7 @@ const parseHotSnapshotMetadata = (
 		!Number.isFinite(expiresAt) ||
 		detectedAt > now.getTime() ||
 		fetchedAt > now.getTime() ||
+		fetchedAt < now.getTime() - PRICE_CHANGE_MAX_AGE_MS ||
 		expiresAt <= now.getTime() ||
 		expiresAt !== detectedAt + HOT_TTL_MS
 	) {
