@@ -1785,21 +1785,20 @@ async function loadEventLiveH2HScoreBatch(
 	entryIds: readonly number[]
 ): Promise<EventLiveH2HScoreBatch | null> {
 	if (entryIds.length === 0 || entryIds.length > 500) return null;
-	const result = await entryLiveBatchService.calcLivePointsForEntries(
-		context,
-		eventId,
-		[...entryIds],
-		true
-	);
+	const result = await entryLiveBatchService.calcLivePointsForEntries(context, eventId, [
+		...entryIds,
+	]);
 	if (result.errors.length > 0 || result.results.size !== entryIds.length) return null;
 
 	const scores = new Map<number, number>();
+	let livePublicationId: string | null = null;
 	let snapshotRevision: string | null = null;
 	let checkedAt: string | null = null;
 	let state: EventLiveH2HScoreBatch["state"] | null = null;
 	const managerRevisions: Array<{ entryId: number; revision: string }> = [];
 	for (const entryId of entryIds) {
 		const row = result.results.get(entryId);
+		const liveProvenance = row?.score.provenance;
 		if (
 			!row ||
 			!isTraceableOfficialManagerScore(row.score) ||
@@ -1808,19 +1807,26 @@ async function loadEventLiveH2HScoreBatch(
 			typeof row.score.revision !== "string" ||
 			row.score.revision.trim().length === 0 ||
 			!row.snapshot ||
-			row.score.checkedAt !== row.snapshot.checkedAt
+			!liveProvenance ||
+			liveProvenance.scoreSource !== "FPL_EVENT_LIVE" ||
+			liveProvenance.livePublicationId === null ||
+			liveProvenance.liveRevision === null ||
+			liveProvenance.liveCheckedAt === null ||
+			row.snapshot.revision !== liveProvenance.liveRevision
 		) {
 			return null;
 		}
 		if (
-			(snapshotRevision !== null && snapshotRevision !== row.snapshot.revision) ||
-			(checkedAt !== null && checkedAt !== row.snapshot.checkedAt) ||
+			(livePublicationId !== null && livePublicationId !== liveProvenance.livePublicationId) ||
+			(snapshotRevision !== null && snapshotRevision !== liveProvenance.liveRevision) ||
+			(checkedAt !== null && checkedAt !== liveProvenance.liveCheckedAt) ||
 			(state !== null && state !== row.snapshot.state)
 		) {
 			return null;
 		}
-		snapshotRevision = row.snapshot.revision;
-		checkedAt = row.snapshot.checkedAt;
+		livePublicationId = liveProvenance.livePublicationId;
+		snapshotRevision = liveProvenance.liveRevision;
+		checkedAt = liveProvenance.liveCheckedAt;
 		state = row.snapshot.state;
 		scores.set(entryId, row.score.netEventPoints);
 		managerRevisions.push({ entryId, revision: row.score.revision });
@@ -1828,7 +1834,10 @@ async function loadEventLiveH2HScoreBatch(
 	if (!snapshotRevision || !checkedAt || !state) return null;
 	managerRevisions.sort((left, right) => left.entryId - right.entryId);
 	const revisionHash = createHash("sha256")
-		.update(stableStringify({ eventId, snapshotRevision, managerRevisions }), "utf8")
+		.update(
+			stableStringify({ eventId, livePublicationId, snapshotRevision, managerRevisions }),
+			"utf8"
+		)
 		.digest("hex")
 		.slice(0, 24);
 	return {
@@ -4560,8 +4569,17 @@ export const tournamentsRepository: TournamentsRepository = {
 							context,
 							requestedEventId,
 							boundedEntryIds,
-							true,
-							{ tournamentId }
+							{
+								tournamentId,
+								...(snapshot?.publicationId
+									? {
+											liveRef: {
+												publicationId: snapshot.publicationId,
+												revision: snapshot.revision,
+											},
+										}
+									: {}),
+							}
 						);
 				const liveData = cached ?? {
 					rows: rankTournamentRowsByOfficialEventPoints(Array.from(result?.results.values() ?? [])),

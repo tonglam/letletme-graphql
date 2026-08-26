@@ -12,6 +12,11 @@ export const myFplTypeDefs = /* GraphQL */ `
 		FINAL
 	}
 
+	enum MyFplScoreSource {
+		FPL_EVENT_LIVE
+		FPL_FINAL_RESULT
+	}
+
 	enum MyFplSnapshotFreshness {
 		CURRENT
 		GENERATING
@@ -27,6 +32,12 @@ export const myFplTypeDefs = /* GraphQL */ `
 		publishedAt: DateTime!
 		kind: MyFplSnapshotKind!
 		freshness: MyFplSnapshotFreshness!
+		scoreSource: MyFplScoreSource!
+		livePublicationId: String
+		liveRevision: String
+		algorithmVersion: String
+		sourceMinCheckedAt: DateTime!
+		sourceMaxCheckedAt: DateTime!
 	}
 
 	type MyFplReviewContext {

@@ -33,6 +33,8 @@ const errorPriority: Record<NonNullable<ManagerScoreLoad["errorCode"]>, number> 
 	UPSTREAM_RATE_LIMITED: 3,
 	UPSTREAM_UNAVAILABLE: 2,
 	UNSUPPORTED_H2H_LIVE: 1,
+	REVISION_UNAVAILABLE: 2,
+	INPUT_INCOMPLETE: 2,
 };
 
 const chooseError = (loads: readonly ManagerScoreLoad[]): ManagerScoreLoad["errorCode"] =>

@@ -2,7 +2,9 @@ import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import type { LiveDataSnapshot } from "../../infra/data-snapshot";
 
-export const LIVE_COMPETITION_PROJECTION_VERSION = "v3";
+// v4 invalidates boards produced before Data-owned score provenance and
+// traceability became mandatory for final competition rows.
+export const LIVE_COMPETITION_PROJECTION_VERSION = "v4";
 
 export type CachedCompetitionBoard = {
 	board: unknown[];

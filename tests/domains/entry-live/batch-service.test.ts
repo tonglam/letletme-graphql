@@ -62,6 +62,102 @@ const livePerformance = (
 	...overrides,
 });
 
+const originalFetch = globalThis.fetch;
+const originalDataUrl = process.env.LETLETME_DATA_URL;
+
+const installManagerLiveResponse = (
+	eventId: number,
+	rows: readonly Record<string, unknown>[],
+	requestedEntryIds: readonly number[] = rows.flatMap((row) =>
+		typeof row.entryId === "number" ? [row.entryId] : []
+	)
+) => {
+	process.env.LETLETME_DATA_URL = "http://manager-live.test";
+	const checkedAt = new Date().toISOString();
+	const rowEntryIds = new Set(
+		rows.flatMap((row) => (typeof row.entryId === "number" ? [row.entryId] : []))
+	);
+	const missingEntryIds = requestedEntryIds.filter((entryId) => !rowEntryIds.has(entryId));
+	globalThis.fetch = (async () =>
+		new Response(
+			JSON.stringify({
+				success: true,
+				data: {
+					season: "2627",
+					eventId,
+					checkedAt,
+					servedAt: checkedAt,
+					calculationMode: rows[0]?.calculationMode ?? "PROJECTED_AUTOSUBS",
+					rows,
+					missingEntryIds,
+					partial: missingEntryIds.length > 0,
+					errorCode: null,
+					nextRefreshAt: new Date(Date.parse(checkedAt) + 30_000).toISOString(),
+				},
+			}),
+			{ status: 200, headers: { "content-type": "application/json" } }
+		)) as unknown as typeof fetch;
+};
+
+const restoreManagerLiveResponse = (): void => {
+	globalThis.fetch = originalFetch;
+	if (originalDataUrl === undefined) delete process.env.LETLETME_DATA_URL;
+	else process.env.LETLETME_DATA_URL = originalDataUrl;
+};
+
+const managerRow = (
+	entryId: number,
+	eventId: number,
+	overrides: Record<string, unknown> = {}
+): Record<string, unknown> => {
+	const now = new Date().toISOString();
+	const source = overrides.source ?? "FPL_EVENT_LIVE";
+	const calculationMode = overrides.calculationMode ?? "PROJECTED_AUTOSUBS";
+	return {
+		season: "2627",
+		eventId,
+		entryId,
+		eventPoints: 17,
+		netEventPoints: 17,
+		totalPoints: 17,
+		totalScope: "OVERALL",
+		eventRank: null,
+		overallRank: null,
+		leagueRank: null,
+		transferCost: 0,
+		eventPointSemantics: "ZERO_COST_EQUIVALENT",
+		source,
+		revision: `score-${entryId}`,
+		checkedAt: now,
+		upstreamUpdatedAt: now,
+		staleAt: new Date(Date.parse(now) + 90_000).toISOString(),
+		calculationMode,
+		algorithmVersion: calculationMode === "FINAL_RESULT" ? null : "fpl-projected-autosubs-v1",
+		provenance: {
+			scoreSource: source,
+			calculationMode,
+			algorithmVersion: calculationMode === "FINAL_RESULT" ? null : "fpl-projected-autosubs-v1",
+			inputRevision: `input-${entryId}`,
+			scoreRevision: `score-${entryId}`,
+			rankRevision: null,
+			livePublicationId:
+				calculationMode === "FINAL_RESULT" ? null : "00000000-0000-4000-8000-000000000008",
+			liveRevision: calculationMode === "FINAL_RESULT" ? null : "8",
+			liveCheckedAt: calculationMode === "FINAL_RESULT" ? null : now,
+			picksRevision: `picks-${entryId}`,
+			picksCheckedAt: now,
+			previousTotalsRevision: `totals-${entryId}`,
+			previousTotalsThroughEventId: eventId > 1 ? eventId - 1 : null,
+			resultRevision: calculationMode === "FINAL_RESULT" ? `result-${entryId}` : null,
+			resultCheckedAt: calculationMode === "FINAL_RESULT" ? now : null,
+			dataCheckedAt: calculationMode === "FINAL_RESULT" ? now : null,
+			rankSource: null,
+			rankCheckedAt: null,
+		},
+		...overrides,
+	};
+};
+
 const makeMockContext = (options: {
 	livePerformances?: Map<number, LivePerformance>;
 	fixtures?: unknown[];
@@ -123,6 +219,163 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 	it("canonicalizes the manager chip and its persisted AM alias", () => {
 		expect(normalizeChip("MANAGER")).toBe("MANAGER");
 		expect(normalizeChip("AM")).toBe("MANAGER");
+	});
+
+	it("fails closed when the effective lineup has the wrong player membership", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		const originalTransfers = entryLiveRepository.getEntryEventTransfersByIds;
+		const core = buildTestCoreData(1);
+		const context = buildSnapshotContext(
+			new TestRedis(
+				buildCorePublication("2627", 7, core),
+				buildLivePublication(core, 1, "2627", 8, {
+					sourceCheckedAt: new Date().toISOString(),
+				})
+			)
+		);
+		const picks = completePick(101, 1);
+		const liveByPlayer = new Map(
+			picks.picks.map((pick) => [pick.element, livePerformance(pick.element)] as const)
+		);
+		const effectiveLineup = picks.picks.map((pick, index) => ({
+			elementId: index === 14 ? 16 : pick.element,
+			position: pick.position,
+			sourceMultiplier: pick.multiplier,
+			effectiveMultiplier: pick.multiplier,
+			pickActive: pick.multiplier > 0,
+			autoSub: false,
+			isCaptain: pick.isCaptain,
+			isViceCaptain: pick.isViceCaptain,
+			captainForScoring: pick.isCaptain,
+		}));
+		entriesService.getEntriesByIds = async () =>
+			new Map([
+				[
+					101,
+					{
+						id: 101,
+						entryName: "Membership Team",
+						playerName: "Membership Player",
+						region: null,
+						startedEvent: 1,
+						overallPoints: 0,
+						overallRank: null,
+						bank: 0,
+						teamValue: 1000,
+						totalTransfers: 0,
+						lastEventId: null,
+						lastOverallPoints: null,
+						lastOverallRank: null,
+						lastTeamValue: null,
+						lastBank: null,
+					},
+				],
+			]);
+		entryLiveRepository.getEntryEventTransfersByIds = async () => new Map();
+		installManagerLiveResponse(1, [
+			managerRow(101, 1, {
+				eventPoints: 0,
+				netEventPoints: 0,
+				totalPoints: 0,
+				effectiveLineup,
+			}),
+		]);
+		try {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(context, 1, [101], {
+				liveByPlayer: Promise.resolve(liveByPlayer),
+				fixtures: Promise.resolve([]),
+				teams: Promise.resolve(core.teams as never),
+				picksByEntry: Promise.resolve(new Map([[101, picks]]) as never),
+			});
+			const calc = result.results.get(101);
+			expect(calc?.score.reconciliation).toBe("NO_LINEUP");
+			expect(calc?.score.reasonCodes).toContain("MISSING_LINEUP");
+			expect(calc?.pickList).toEqual([]);
+			expect(calc?.snapshot).toBeNull();
+		} finally {
+			restoreManagerLiveResponse();
+			entriesService.getEntriesByIds = originalEntries;
+			entryLiveRepository.getEntryEventTransfersByIds = originalTransfers;
+		}
+	});
+
+	it("clears all detail fields when headline reconciliation fails", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		const originalTransfers = entryLiveRepository.getEntryEventTransfersByIds;
+		const core = buildTestCoreData(1);
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), buildLivePublication(core, 1, "2627", 8))
+		);
+		const picks = completePick(101, 1);
+		const liveByPlayer = new Map(
+			picks.picks.map((pick) => [pick.element, livePerformance(pick.element)] as const)
+		);
+		const effectiveLineup = picks.picks.map((pick) => ({
+			elementId: pick.element,
+			position: pick.position,
+			sourceMultiplier: pick.multiplier,
+			effectiveMultiplier: pick.multiplier,
+			pickActive: pick.multiplier > 0,
+			autoSub: false,
+			isCaptain: pick.isCaptain,
+			isViceCaptain: pick.isViceCaptain,
+			captainForScoring: pick.isCaptain,
+		}));
+		entriesService.getEntriesByIds = async () =>
+			new Map([
+				[
+					101,
+					{
+						id: 101,
+						entryName: "Skew Team",
+						playerName: "Skew Player",
+						region: null,
+						startedEvent: 1,
+						overallPoints: 0,
+						overallRank: null,
+						bank: 0,
+						teamValue: 1000,
+						totalTransfers: 0,
+						lastEventId: null,
+						lastOverallPoints: null,
+						lastOverallRank: null,
+						lastTeamValue: null,
+						lastBank: null,
+					},
+				],
+			]);
+		entryLiveRepository.getEntryEventTransfersByIds = async () => new Map();
+		installManagerLiveResponse(1, [
+			managerRow(101, 1, {
+				eventPoints: 99,
+				netEventPoints: 99,
+				totalPoints: 99,
+				effectiveLineup,
+			}),
+		]);
+		try {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(context, 1, [101], {
+				liveByPlayer: Promise.resolve(liveByPlayer),
+				fixtures: Promise.resolve([]),
+				teams: Promise.resolve(core.teams as never),
+				picksByEntry: Promise.resolve(new Map([[101, picks]]) as never),
+			});
+			const calc = result.results.get(101);
+			expect(calc?.score.reconciliation).toBe("SOURCE_SKEW");
+			expect(calc).toMatchObject({
+				pickList: [],
+				activeCaptain: { id: 0, name: "", points: 0 },
+				snapshot: null,
+				played: 0,
+				toPlay: 0,
+				playedCaptain: 0,
+				captainName: "",
+			});
+		} finally {
+			restoreManagerLiveResponse();
+			entriesService.getEntriesByIds = originalEntries;
+			entryLiveRepository.getEntryEventTransfersByIds = originalTransfers;
+		}
 	});
 
 	it("returns empty results for empty entry IDs", async () => {
@@ -204,10 +457,8 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				overallPoints: 99,
 				lastOverallPoints: 90,
 				lastOverallRank: 110,
-				lastValue: 99,
-				bank: 1,
-				teamValue: 100,
 				pickList: [],
+				score: { source: "UNAVAILABLE", reconciliation: "NO_LINEUP" },
 			});
 			expect(result.meta.succeededCount).toBe(1);
 		} finally {
@@ -316,7 +567,48 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			return new Map();
 		};
 		eventsService.getEventById = async () =>
-			({ id: 2, finished: true, dataChecked: true }) as never;
+			({
+				id: 2,
+				finished: true,
+				dataChecked: true,
+				dataCheckedAt: "2026-08-24T00:00:00.000Z",
+			}) as never;
+		installManagerLiveResponse(2, [
+			managerRow(1001, 2, {
+				source: "FPL_FINAL_RESULT",
+				calculationMode: "FINAL_RESULT",
+				algorithmVersion: null,
+				eventPoints: 41,
+				netEventPoints: 37,
+				totalPoints: 137,
+				transferCost: 4,
+				eventPointSemantics: "GROSS",
+				revision: "final-score-1001-79",
+				checkedAt: "2026-08-24T00:09:00.000Z",
+				upstreamUpdatedAt: "2026-08-24T00:09:00.000Z",
+				eventRank: finalEventRank,
+				provenance: {
+					scoreSource: "FPL_FINAL_RESULT",
+					calculationMode: "FINAL_RESULT",
+					algorithmVersion: null,
+					inputRevision: "input-1001",
+					scoreRevision: "score-1001",
+					rankRevision: "rank-1001",
+					livePublicationId: null,
+					liveRevision: null,
+					liveCheckedAt: null,
+					picksRevision: "picks-1001",
+					picksCheckedAt: "2026-08-24T00:09:00.000Z",
+					previousTotalsRevision: null,
+					previousTotalsThroughEventId: 1,
+					resultRevision: "result-1001",
+					resultCheckedAt: "2026-08-24T00:09:00.000Z",
+					dataCheckedAt: "2026-08-24T00:00:00.000Z",
+					rankSource: null,
+					rankCheckedAt: null,
+				},
+			}),
+		]);
 
 		try {
 			const result = await entryLiveBatchService.calcLivePointsForEntries(
@@ -342,11 +634,45 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 					reconciliation: "NO_LINEUP",
 				},
 			});
-			const finalPickCall = pickCalls.find((call) => call.forceRefresh === false);
-			expect(finalPickCall).toMatchObject({ entryIds: [1001], forceRefresh: false });
-			expect(finalPickCall?.finalizationRevision).toMatch(/^event-result:2:[0-9a-f]{24}$/);
+			expect(pickCalls.some((call) => call.finalizationRevision !== undefined)).toBe(false);
 			const firstScoreRevision = result.results.get(1001)?.score.revision;
 			finalEventRank = 80;
+			restoreManagerLiveResponse();
+			installManagerLiveResponse(2, [
+				managerRow(1001, 2, {
+					source: "FPL_FINAL_RESULT",
+					calculationMode: "FINAL_RESULT",
+					algorithmVersion: null,
+					eventPoints: 41,
+					netEventPoints: 37,
+					totalPoints: 137,
+					transferCost: 4,
+					eventPointSemantics: "GROSS",
+					revision: "final-score-1001-80",
+					checkedAt: "2026-08-24T00:09:00.000Z",
+					eventRank: finalEventRank,
+					provenance: {
+						scoreSource: "FPL_FINAL_RESULT",
+						calculationMode: "FINAL_RESULT",
+						algorithmVersion: null,
+						inputRevision: "input-1001",
+						scoreRevision: "score-1001",
+						rankRevision: "rank-1001-80",
+						livePublicationId: null,
+						liveRevision: null,
+						liveCheckedAt: null,
+						picksRevision: "picks-1001",
+						picksCheckedAt: "2026-08-24T00:09:00.000Z",
+						previousTotalsRevision: null,
+						previousTotalsThroughEventId: 1,
+						resultRevision: "result-1001",
+						resultCheckedAt: "2026-08-24T00:09:00.000Z",
+						dataCheckedAt: "2026-08-24T00:00:00.000Z",
+						rankSource: null,
+						rankCheckedAt: null,
+					},
+				}),
+			]);
 			const reranked = await entryLiveBatchService.calcLivePointsForEntries(
 				makeMockContext({}),
 				2,
@@ -354,6 +680,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			);
 			expect(reranked.results.get(1001)?.score.revision).not.toBe(firstScoreRevision);
 		} finally {
+			restoreManagerLiveResponse();
 			entriesService.getEntriesByIds = originalEntries;
 			entriesService.getEntryEventResultsByEntryIds = originalResults;
 			entryLiveRepository.getEntryEventPicksByIds = originalPicks;
@@ -437,6 +764,26 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				return [element, livePerformance(element)] as const;
 			})
 		);
+		const effectiveLineup = elements.map((element, index) => {
+			const isCaptain = element === 4;
+			const isViceCaptain = element === 3;
+			const isSubstitute = element === 13;
+			const pickActive = !isCaptain && (index < 11 || isSubstitute);
+			return {
+				elementId: element,
+				position: index + 1,
+				sourceMultiplier: isCaptain ? 2 : index < 11 ? 1 : 0,
+				effectiveMultiplier: isCaptain ? 0 : isViceCaptain ? 2 : pickActive ? 1 : 0,
+				pickActive,
+				autoSub: isSubstitute,
+				isCaptain,
+				isViceCaptain,
+				captainForScoring: isViceCaptain,
+			};
+		});
+		installManagerLiveResponse(1, [
+			managerRow(101, 1, { effectiveLineup, eventPoints: 17, netEventPoints: 17, totalPoints: 17 }),
+		]);
 		const fixtures = core.fixtures
 			.filter((fixture) => fixture.eventId === 1)
 			.map((fixture) => ({
@@ -472,7 +819,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		entryLiveRepository.getEntryEventTransfersByIds = async () => new Map();
 
 		try {
-			const result = await entryLiveBatchService.calcLivePointsForEntries(context, 1, [101], true, {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(context, 1, [101], {
 				liveByPlayer: Promise.resolve(liveByPlayer),
 				fixtures: Promise.resolve(fixtures),
 				teams: Promise.resolve(core.teams as never),
@@ -491,10 +838,9 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 					netEventPoints: 17,
 					totalPoints: 17,
 					source: "FPL_EVENT_LIVE",
-					reconciliation: "NOT_COMPARABLE",
+					reconciliation: "MATCHED",
 				},
 			});
-			expect(calc?.score.revision).toContain("lineup:projected");
 			expect(calc?.pickList.find((pick) => pick.element === 4)).toMatchObject({
 				pickActive: false,
 				multiplier: 0,
@@ -505,6 +851,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				multiplier: 1,
 			});
 		} finally {
+			restoreManagerLiveResponse();
 			entriesService.getEntriesByIds = originalEntries;
 			entryLiveRepository.getEntryEventTransfersByIds = originalTransfers;
 		}
@@ -540,28 +887,48 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				[202, entry(202)],
 			]);
 		entryLiveRepository.getEntryEventTransfersByIds = async () => new Map();
+		const inputPicks = completePick(101, 1).picks;
+		installManagerLiveResponse(
+			1,
+			[
+				managerRow(101, 1, {
+					eventPoints: 0,
+					netEventPoints: 0,
+					totalPoints: 0,
+					effectiveLineup: inputPicks.map((pick) => ({
+						elementId: pick.element,
+						position: pick.position,
+						sourceMultiplier: pick.multiplier,
+						effectiveMultiplier: pick.multiplier,
+						pickActive: pick.multiplier > 0,
+						autoSub: false,
+						isCaptain: pick.isCaptain,
+						isViceCaptain: pick.isViceCaptain,
+						captainForScoring: pick.isCaptain,
+					})),
+				}),
+			],
+			[101, 202]
+		);
 		try {
-			const result = await entryLiveBatchService.calcLivePointsForEntries(
-				context,
-				1,
-				[101, 202],
-				true,
-				{
-					liveByPlayer: Promise.resolve(new Map()),
-					fixtures: Promise.resolve([]),
-					teams: Promise.resolve(core.teams as never),
-					picksByEntry: Promise.resolve(new Map([[101, completePick(101, 1)]]) as never),
-				}
-			);
+			const result = await entryLiveBatchService.calcLivePointsForEntries(context, 1, [101, 202], {
+				liveByPlayer: Promise.resolve(new Map()),
+				fixtures: Promise.resolve([]),
+				teams: Promise.resolve(core.teams as never),
+				picksByEntry: Promise.resolve(
+					new Map([[101, { ...completePick(101, 1), picks: inputPicks }]]) as never
+				),
+			});
 
 			expect([...result.results.keys()]).toEqual([101, 202]);
 			expect([...result.results.values()].map((value) => value.availability)).toEqual([
 				"READY",
 				"NO_PICKS",
 			]);
-			expect(result.results.get(101)?.snapshot?.revision).toBe("8");
+			expect(result.results.get(101)?.snapshot).toBeNull();
 			expect(result.results.get(202)?.snapshot).toBeNull();
 		} finally {
+			restoreManagerLiveResponse();
 			entriesService.getEntriesByIds = originalEntries;
 			entryLiveRepository.getEntryEventTransfersByIds = originalTransfers;
 		}

@@ -5,7 +5,6 @@ import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { getCoreEventSnapshot } from "../../infra/data-snapshot";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
-import { COMPETITION_AGGREGATE_SQL } from "./competition-aggregate-sql";
 import {
 	GroupMode,
 	TournamentSetupStatus,
@@ -26,6 +25,7 @@ export type MyFplReviewContext = {
 
 export type MyFplSnapshotKind = "PROVISIONAL" | "FINAL";
 export type MyFplSnapshotFreshness = "CURRENT" | "GENERATING" | "STALE";
+export type MyFplScoreSource = "FPL_EVENT_LIVE" | "FPL_FINAL_RESULT";
 export type MyFplSnapshotMeta = {
 	revision: string;
 	eventId: number;
@@ -34,6 +34,12 @@ export type MyFplSnapshotMeta = {
 	publishedAt: string;
 	kind: MyFplSnapshotKind;
 	freshness: MyFplSnapshotFreshness;
+	scoreSource: MyFplScoreSource;
+	livePublicationId: string | null;
+	liveRevision: string | null;
+	algorithmVersion: string | null;
+	sourceMinCheckedAt: string;
+	sourceMaxCheckedAt: string;
 };
 
 /** Internal dependency seam used by hermetic My FPL behavior tests. */
@@ -406,114 +412,13 @@ type DbSnapshotPublicationRow = QueryResultRow & {
 	expected_tournament_count: number;
 	ready_tournament_count: number;
 	content_sha256: string;
+	score_source: MyFplScoreSource | null;
+	live_publication_id: string | null;
+	live_revision: string | null;
+	algorithm_version: string | null;
+	source_min_checked_at: Date | string | null;
+	source_max_checked_at: Date | string | null;
 };
-
-type DbEntryRow = QueryResultRow & {
-	entry_id: number;
-	entry_name: string;
-	player_name: string;
-	region: string | null;
-	started_event: number | null;
-	overall_points: number | null;
-	overall_rank: number | null;
-	bank: number | null;
-	team_value: number | null;
-	total_transfers: number | null;
-	transfers_synced_through_event_id: number | null;
-	past_seasons_checked_at: Date | string | null;
-	past_seasons_count: number | null;
-};
-
-type MyFplEntryIdentityRecord = MyFplEntryIdentity & {
-	pastSeasonsCheckedAt: string | null;
-	pastSeasonsCount: number | null;
-};
-
-type DbHistoryRow = QueryResultRow & {
-	event_id: number;
-	event_points: number;
-	event_rank: number | null;
-	overall_points: number;
-	overall_rank: number;
-	event_transfers: number;
-	event_transfers_cost: number;
-	event_net_points: number;
-	event_bench_points: number | null;
-	event_chip: string | null;
-	captain_points: number | null;
-	captain_web_name: string | null;
-	captain_team_short_name: string | null;
-	team_value: number | null;
-	bank: number | null;
-};
-
-type DbPastSeasonRow = QueryResultRow & {
-	season: string;
-	total_points: number;
-	overall_rank: number;
-};
-
-type DbGameweekRow = QueryResultRow & {
-	event_id: number;
-	event_points: number;
-	overall_points: number;
-	overall_rank: number;
-	event_transfers: number;
-	event_transfers_cost: number;
-	event_net_points: number;
-	event_bench_points: number | null;
-	event_chip: string | null;
-	captain_points: number | null;
-	played_captain_web_name: string | null;
-	team_value: number | null;
-	bank: number | null;
-	element_id: number | null;
-	position: number | null;
-	web_name: string | null;
-	team_short_name: string | null;
-	team_name: string | null;
-	element_type: number | null;
-	is_captain: boolean | null;
-	is_vice_captain: boolean | null;
-	multiplier: number | null;
-	total_points: number | null;
-	minutes: number | null;
-	goals_scored: number | null;
-	assists: number | null;
-	clean_sheets: number | null;
-	goals_conceded: number | null;
-	yellow_cards: number | null;
-	red_cards: number | null;
-	saves: number | null;
-	bonus: number | null;
-	bps: number | null;
-	expected_goals: string | number | null;
-	expected_assists: string | number | null;
-	expected_goal_involvements: string | number | null;
-	expected_goals_conceded: string | number | null;
-	against_short_name: string | null;
-	was_home: string | null;
-	score: string | null;
-	fixture_count: number | string | null;
-	automatic_substitutions: unknown;
-};
-
-type DbTransferRow = QueryResultRow & {
-	event_id: number;
-	event_transfers: number;
-	event_transfers_cost: number;
-	element_in_web_name: string | null;
-	element_in_type: number | null;
-	element_in_team_short_name: string | null;
-	element_in_cost: number | null;
-	element_out_web_name: string | null;
-	element_out_type: number | null;
-	element_out_team_short_name: string | null;
-	element_out_cost: number | null;
-	transfer_time: Date | string;
-};
-
-type DbBoardPayloadRow = QueryResultRow & { payload: unknown };
 
 type DbBoardJsonRow = {
 	event_id: number;
@@ -539,17 +444,6 @@ type DbBoardJsonRow = {
 	bank: number | null;
 };
 
-type DbSeasonPathRow = QueryResultRow & {
-	event_id: number;
-	tournament_rank: number | string | null;
-	field_size: number;
-	overall_points: number | null;
-	leader_overall_points: number | null;
-	average_overall_points: string | number | null;
-	gap_to_leader: number | null;
-	points_vs_average: string | number | null;
-};
-
 type DbSetupStatusRow = QueryResultRow & {
 	setup_status?: string | null;
 	setup_phase?: string | null;
@@ -561,24 +455,16 @@ type DbSetupStatusRow = QueryResultRow & {
 	setup_warning_count?: number | null;
 };
 
-// Keep the legacy prefix so old cache entries can be invalidated naturally;
-// snapshotRevision is part of every snapshot-backed key below.
+// Snapshot revision is part of every snapshot-backed key below.
 const PROJECTION_VERSION = "v10";
 const NULLABLE_STATE_CACHE_TTL_SECONDS = 30;
 // Keep OFFSET bounded for the fixed-cost board root. Page 100 is the maximum
 // 10,000-row window at the maximum page size.
 const MAX_COMPETITION_BOARD_PAGE = 100;
-// Roll out the immutable publication reader only after Data has generated the
-// first shadow/publication revisions.  When enabled, My FPL never falls back
-// to mutable canonical rows for a product response.
-const snapshotReadEnabled = (): boolean => process.env.MY_FPL_SNAPSHOT_READ_ENABLED === "true";
-
 const defaultReviewEventId = (context: LoadedReviewContext): number | null =>
-	snapshotReadEnabled()
-		? (context.value.latestPublishedEventId ??
-			context.value.currentEventId ??
-			context.value.latestFinalizedEventId)
-		: context.value.latestFinalizedEventId;
+	context.value.latestPublishedEventId ??
+	context.value.currentEventId ??
+	context.value.latestFinalizedEventId;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -720,6 +606,12 @@ const isSnapshotMeta = (value: unknown): value is MyFplSnapshotMeta =>
 		kind: (candidate) => candidate === "PROVISIONAL" || candidate === "FINAL",
 		freshness: (candidate) =>
 			candidate === "CURRENT" || candidate === "GENERATING" || candidate === "STALE",
+		scoreSource: (candidate) => candidate === "FPL_EVENT_LIVE" || candidate === "FPL_FINAL_RESULT",
+		livePublicationId: isNullableString,
+		liveRevision: isNullableString,
+		algorithmVersion: isNullableString,
+		sourceMinCheckedAt: isIsoDateTime,
+		sourceMaxCheckedAt: isIsoDateTime,
 	});
 
 const isNullableSafeInteger = (value: unknown): value is number | null =>
@@ -906,22 +798,6 @@ const isTransferMoveCache = (value: unknown): value is MyFplTransferMove =>
 		elementOutTeamShortName: (candidate) => typeof candidate === "string",
 		elementOutCost: isSafeInteger,
 		time: isIsoDateTime,
-	});
-
-const isTransferGameweekCache = (value: unknown): value is MyFplTransferGameweek =>
-	isTypedRecord(value, {
-		eventId: isSafeInteger,
-		eventTransfers: isSafeInteger,
-		eventTransfersCost: isSafeInteger,
-		transfers: (candidate) => Array.isArray(candidate) && candidate.every(isTransferMoveCache),
-	});
-
-const isTeamTransfersCache = (value: unknown): value is MyFplTeamTransfers =>
-	isTypedRecord(value, {
-		state: isReviewState,
-		context: isReviewContext,
-		gameweeks: (candidate) => Array.isArray(candidate) && candidate.every(isTransferGameweekCache),
-		snapshotMeta: (candidate) => candidate === null || isSnapshotMeta(candidate),
 	});
 
 const isCompetitionBoardRowCache = (value: unknown): value is MyFplCompetitionBoardRow =>
@@ -1168,21 +1044,54 @@ const snapshotFreshness = (
 		: "STALE";
 };
 
-const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =>
-	Number.isSafeInteger(row.expected_entry_count) &&
-	row.expected_entry_count >= 0 &&
-	Number.isSafeInteger(row.ready_entry_count) &&
-	Number.isSafeInteger(row.empty_entry_count) &&
-	row.ready_entry_count >= 0 &&
-	row.empty_entry_count >= 0 &&
-	row.ready_entry_count + row.empty_entry_count === row.expected_entry_count &&
-	Number.isSafeInteger(row.expected_tournament_count) &&
-	row.expected_tournament_count >= 0 &&
-	Number.isSafeInteger(row.ready_tournament_count) &&
-	row.ready_tournament_count === row.expected_tournament_count &&
-	/^[0-9a-f]{64}$/.test(row.content_sha256) &&
-	Boolean(isoString(row.source_checked_at)) &&
-	Boolean(isoString(row.published_at));
+const SNAPSHOT_PUBLICATION_UUID_RE =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SNAPSHOT_ALGORITHM_VERSION = "fpl-projected-autosubs-v1";
+
+const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean => {
+	const sourceCheckedAt = isoString(row.source_checked_at);
+	const sourceMinCheckedAt = isoString(row.source_min_checked_at);
+	const sourceMaxCheckedAt = isoString(row.source_max_checked_at);
+	if (
+		!Number.isSafeInteger(row.expected_entry_count) ||
+		row.expected_entry_count < 0 ||
+		!Number.isSafeInteger(row.ready_entry_count) ||
+		!Number.isSafeInteger(row.empty_entry_count) ||
+		row.ready_entry_count < 0 ||
+		row.empty_entry_count < 0 ||
+		row.ready_entry_count + row.empty_entry_count !== row.expected_entry_count ||
+		!Number.isSafeInteger(row.expected_tournament_count) ||
+		row.expected_tournament_count < 0 ||
+		!Number.isSafeInteger(row.ready_tournament_count) ||
+		row.ready_tournament_count !== row.expected_tournament_count ||
+		!/^[0-9a-f]{64}$/.test(row.content_sha256) ||
+		!sourceCheckedAt ||
+		!sourceMinCheckedAt ||
+		!sourceMaxCheckedAt ||
+		Date.parse(sourceCheckedAt) !== Date.parse(sourceMinCheckedAt) ||
+		Date.parse(sourceMinCheckedAt) > Date.parse(sourceMaxCheckedAt)
+	) {
+		return false;
+	}
+	if (row.kind === "PROVISIONAL") {
+		return (
+			row.score_source === "FPL_EVENT_LIVE" &&
+			typeof row.live_publication_id === "string" &&
+			SNAPSHOT_PUBLICATION_UUID_RE.test(row.live_publication_id) &&
+			typeof row.live_revision === "string" &&
+			row.live_revision.trim() !== "" &&
+			typeof row.algorithm_version === "string" &&
+			row.algorithm_version === SNAPSHOT_ALGORITHM_VERSION
+		);
+	}
+	return (
+		row.kind === "FINAL" &&
+		row.score_source === "FPL_FINAL_RESULT" &&
+		row.live_publication_id === null &&
+		row.live_revision === null &&
+		row.algorithm_version === null
+	);
+};
 
 const publicationFromRow = (row: DbSnapshotPublicationRow): MyFplSnapshotPublication => ({
 	revision: String(row.revision),
@@ -1192,6 +1101,12 @@ const publicationFromRow = (row: DbSnapshotPublicationRow): MyFplSnapshotPublica
 	publishedAt: isoString(row.published_at) ?? new Date(0).toISOString(),
 	kind: row.kind,
 	freshness: snapshotFreshness(snapshotDateKey(row.snapshot_date), row.kind),
+	scoreSource: row.score_source!,
+	livePublicationId: row.live_publication_id,
+	liveRevision: row.live_revision,
+	algorithmVersion: row.algorithm_version,
+	sourceMinCheckedAt: isoString(row.source_min_checked_at)!,
+	sourceMaxCheckedAt: isoString(row.source_max_checked_at)!,
 	expectedEntryCount: row.expected_entry_count,
 	readyEntryCount: row.ready_entry_count,
 	emptyEntryCount: row.empty_entry_count,
@@ -1203,7 +1118,23 @@ const publicationFromRow = (row: DbSnapshotPublicationRow): MyFplSnapshotPublica
 const isSnapshotPublicationCache = (value: unknown): value is MyFplSnapshotPublication => {
 	if (!isRecord(value) || !isSnapshotMeta(value)) return false;
 	const candidate = value as MyFplSnapshotPublication;
+	const sourceShapeValid =
+		candidate.kind === "PROVISIONAL"
+			? candidate.scoreSource === "FPL_EVENT_LIVE" &&
+				candidate.livePublicationId !== null &&
+				SNAPSHOT_PUBLICATION_UUID_RE.test(candidate.livePublicationId) &&
+				candidate.liveRevision !== null &&
+				candidate.liveRevision.trim() !== "" &&
+				candidate.algorithmVersion !== null &&
+				candidate.algorithmVersion === SNAPSHOT_ALGORITHM_VERSION
+			: candidate.scoreSource === "FPL_FINAL_RESULT" &&
+				candidate.livePublicationId === null &&
+				candidate.liveRevision === null &&
+				candidate.algorithmVersion === null;
 	return (
+		sourceShapeValid &&
+		Date.parse(candidate.sourceCheckedAt) === Date.parse(candidate.sourceMinCheckedAt) &&
+		Date.parse(candidate.sourceMinCheckedAt) <= Date.parse(candidate.sourceMaxCheckedAt) &&
 		isSafeInteger(candidate.expectedEntryCount) &&
 		candidate.expectedEntryCount >= 0 &&
 		isSafeInteger(candidate.readyEntryCount) &&
@@ -1231,18 +1162,18 @@ const loadReviewContext = async (context: GraphQLContext): Promise<LoadedReviewC
 		/* c8 ignore stop */
 		[context.currentSeason.seasonId]
 	);
-	const publicationPromise = snapshotReadEnabled()
-		? context.database.query<DbSnapshotPublicationRow>(
-				`SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
-					        published_at, kind, expected_entry_count, ready_entry_count,
-					        empty_entry_count, expected_tournament_count,
-					        ready_tournament_count, content_sha256
-					 FROM competition.my_fpl_snapshot_publications
-					 WHERE season_id = $1 AND active
-					 ORDER BY event_id`,
-				[context.currentSeason.seasonId]
-			)
-		: Promise.resolve({ rows: [] as DbSnapshotPublicationRow[] });
+	const publicationPromise = context.database.query<DbSnapshotPublicationRow>(
+		`SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
+		        published_at, kind, expected_entry_count, ready_entry_count,
+		        empty_entry_count, expected_tournament_count,
+		        ready_tournament_count, content_sha256, score_source,
+		        live_publication_id, live_revision, algorithm_version,
+		        source_min_checked_at, source_max_checked_at
+		 FROM competition.my_fpl_snapshot_publications
+		 WHERE season_id = $1 AND active
+		 ORDER BY event_id`,
+		[context.currentSeason.seasonId]
+	);
 	const [snapshot, lifecycle, publicationResult] = await Promise.all([
 		snapshotPromise,
 		lifecyclePromise,
@@ -1270,8 +1201,7 @@ const loadReviewContext = async (context: GraphQLContext): Promise<LoadedReviewC
 		publications.set(row.event_id, publicationFromRow(row));
 	}
 	const latestPublishedEventId =
-		publicationResult.rows
-			.map((row) => row.event_id)
+		[...publications.keys()]
 			.filter((eventId) => Number.isSafeInteger(eventId) && eventId > 0)
 			.sort((left, right) => right - left)[0] ?? null;
 	return {
@@ -1305,7 +1235,9 @@ const loadSnapshotPublication = async (
 		`SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
 		        published_at, kind, expected_entry_count, ready_entry_count,
 		        empty_entry_count, expected_tournament_count,
-		        ready_tournament_count, content_sha256
+		        ready_tournament_count, content_sha256, score_source,
+		        live_publication_id, live_revision, algorithm_version,
+		        source_min_checked_at, source_max_checked_at
 		 FROM competition.my_fpl_snapshot_publications
 		 WHERE season_id = $1
 		   AND event_id = $2
@@ -1315,7 +1247,7 @@ const loadSnapshotPublication = async (
 	);
 	const row = result.rows[0];
 	if (row && isValidSnapshotPublicationRow(row)) return publicationFromRow(row);
-	return active && compareSnapshotRevisions(active.revision, pinned) > 0 ? active : null;
+	return null;
 };
 
 const loadSnapshotPublicationByRevision = async (
@@ -1332,7 +1264,9 @@ const loadSnapshotPublicationByRevision = async (
 		`SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
 		        published_at, kind, expected_entry_count, ready_entry_count,
 		        empty_entry_count, expected_tournament_count,
-		        ready_tournament_count, content_sha256
+		        ready_tournament_count, content_sha256, score_source,
+		        live_publication_id, live_revision, algorithm_version,
+		        source_min_checked_at, source_max_checked_at
 		 FROM competition.my_fpl_snapshot_publications
 		 WHERE season_id = $1
 		   AND revision = $2::bigint
@@ -1342,43 +1276,7 @@ const loadSnapshotPublicationByRevision = async (
 	);
 	const row = result.rows[0];
 	if (row && isValidSnapshotPublicationRow(row)) return publicationFromRow(row);
-	const fallbackEventId = defaultReviewEventId(loadedContext);
-	const active = fallbackEventId === null ? null : loadedContext.publications.get(fallbackEventId);
-	return active && compareSnapshotRevisions(active.revision, pinned) > 0 ? active : null;
-};
-
-const loadEntry = async (
-	context: GraphQLContext,
-	entryId: number
-): Promise<MyFplEntryIdentityRecord | null> => {
-	const result = await context.database.query<DbEntryRow>(
-		`SELECT entry_id, entry_name, player_name, region, started_event,
-				        overall_points, overall_rank, bank, team_value, total_transfers,
-				        transfers_synced_through_event_id, past_seasons_checked_at,
-				        past_seasons_count
-		 FROM competition.entries
-		 WHERE season_id = $1 AND entry_id = $2
-		 LIMIT 1`,
-		[context.currentSeason.seasonId, entryId]
-	);
-	const row = result.rows[0];
-	return row
-		? {
-				id: row.entry_id,
-				entryName: row.entry_name,
-				playerName: row.player_name,
-				region: row.region,
-				startedEvent: row.started_event,
-				overallPoints: row.overall_points,
-				overallRank: row.overall_rank,
-				bank: row.bank,
-				teamValue: row.team_value,
-				totalTransfers: row.total_transfers,
-				transfersSyncedThroughEventId: row.transfers_synced_through_event_id,
-				pastSeasonsCheckedAt: isoString(row.past_seasons_checked_at),
-				pastSeasonsCount: row.past_seasons_count,
-			}
-		: null;
+	return null;
 };
 
 type SnapshotEntryPayload = {
@@ -1546,255 +1444,22 @@ const loadSnapshotEntry = async (
 	return loaded;
 };
 
-const loadTeamHistory = async (
-	context: GraphQLContext,
-	entryId: number
-): Promise<MyFplTeamHistoryRow[]> => {
-	const result = await context.database.query<DbHistoryRow>(
-		`SELECT result.event_id, result.event_points, result.event_rank,
-		        result.overall_points, result.overall_rank, result.event_transfers,
-		        result.event_transfers_cost, result.event_net_points,
-		        result.event_bench_points, result.event_chip::text,
-		        result.captain_points, player.web_name AS captain_web_name,
-		        team.short_name AS captain_team_short_name,
-		        result.team_value, result.bank
-		 FROM competition.entry_event_results result
-		 JOIN fpl.events event
-		   ON event.season_id = result.season_id
-		  AND event.event_id = result.event_id
-		  AND event.finished
-		  AND event.data_checked
-		  AND event.live_snapshot_finalized_at IS NOT NULL
-		 LEFT JOIN fpl.players player
-		   ON player.season_id = result.season_id
-		  AND player.element_id = result.played_captain_element_id
-		 LEFT JOIN LATERAL (
-		   SELECT fixture_stats.team_id
-		   FROM fpl.player_fixture_stats fixture_stats
-		   WHERE fixture_stats.season_id = result.season_id
-		     AND fixture_stats.event_id = result.event_id
-		     AND fixture_stats.element_id = result.played_captain_element_id
-		   ORDER BY fixture_stats.fixture_id
-		   LIMIT 1
-		 ) captain_historical_team ON TRUE
-		 LEFT JOIN fpl.teams team
-		   ON team.season_id = player.season_id
-		  AND team.team_id = COALESCE(captain_historical_team.team_id, player.team_id)
-		 WHERE result.season_id = $1
-		   AND result.entry_id = $2
-		   AND result.rich_synced_at IS NOT NULL
-		 ORDER BY result.event_id`,
-		[context.currentSeason.seasonId, entryId]
-	);
-	return result.rows.map((row) => ({
-		eventId: row.event_id,
-		eventPoints: row.event_points,
-		eventRank: row.event_rank,
-		overallPoints: row.overall_points,
-		overallRank: row.overall_rank,
-		eventTransfers: row.event_transfers,
-		eventTransfersCost: row.event_transfers_cost,
-		eventNetPoints: row.event_net_points,
-		eventBenchPoints: row.event_bench_points ?? 0,
-		eventChip: normalizeChip(row.event_chip),
-		eventCaptainPoints: row.captain_points ?? 0,
-		captainWebName: row.captain_web_name,
-		captainTeamShortName: row.captain_team_short_name,
-		teamValue: row.team_value,
-		bank: row.bank,
-	}));
-};
-
-const loadPastSeasons = async (
-	context: GraphQLContext,
-	entryId: number
-): Promise<MyFplPastSeason[]> => {
-	const result = await context.database.query<DbPastSeasonRow>(
-		`SELECT source_season_label AS season, total_points, overall_rank
-		 FROM competition.entry_past_seasons
-		 WHERE entry_season_id = $1
-		   AND entry_id = $2
-		 ORDER BY source_season_id`,
-		[context.currentSeason.seasonId, entryId]
-	);
-	return result.rows.map((row) => ({
-		season: row.season,
-		totalPoints: row.total_points,
-		overallRank: row.overall_rank,
-	}));
-};
-
-const officialAutoSubElements = (value: unknown): Set<number> => {
-	if (!Array.isArray(value)) return new Set();
-	const elements = new Set<number>();
-	for (const candidate of value) {
-		if (!isRecord(candidate)) continue;
-		const elementIn = asInteger(candidate.element_in ?? candidate.elementIn);
-		if (elementIn !== null && elementIn > 0) elements.add(elementIn);
-	}
-	return elements;
-};
-
-const mapGameweekPick = (
-	row: DbGameweekRow,
-	autoSubElements: ReadonlySet<number>
-): MyFplTeamPick | null => {
-	if (row.element_id === null || row.position === null || row.web_name === null) {
-		return null;
-	}
-	const minutes = row.minutes ?? 0;
-	const yellowCards = row.yellow_cards ?? 0;
-	const redCards = row.red_cards ?? 0;
-	const fixtureCount = asInteger(row.fixture_count) ?? 0;
-	return {
-		element: row.element_id,
-		position: row.position,
-		webName: row.web_name,
-		// A missing event-scoped team is a valid historical blank-week signal.
-		// Never replace it with the player's current club.
-		teamShortName: row.team_short_name ?? "",
-		teamName: row.team_name ?? "",
-		elementTypeName: positionName(row.element_type),
-		isCaptain: row.is_captain ?? false,
-		isViceCaptain: row.is_vice_captain ?? false,
-		multiplier: row.multiplier ?? 0,
-		totalPoints: row.total_points ?? 0,
-		minutes,
-		goalsScored: row.goals_scored ?? 0,
-		assists: row.assists ?? 0,
-		cleanSheets: row.clean_sheets ?? 0,
-		goalsConceded: row.goals_conceded ?? 0,
-		yellowCards,
-		redCards,
-		saves: row.saves ?? 0,
-		bonus: row.bonus ?? 0,
-		bps: row.bps ?? 0,
-		againstShortName: row.against_short_name ?? "",
-		wasHome: row.was_home ?? "",
-		score: row.score ?? "",
-		fixtureCount,
-		bgw: fixtureCount === 0,
-		dgw: fixtureCount > 1,
-		isPlayed: minutes > 0 || yellowCards > 0 || redCards > 0,
-		autoSub: autoSubElements.has(row.element_id),
-		expectedGoals: asFiniteNumber(row.expected_goals),
-		expectedAssists: asFiniteNumber(row.expected_assists),
-		expectedGoalInvolvements: asFiniteNumber(row.expected_goal_involvements),
-		expectedGoalsConceded: asFiniteNumber(row.expected_goals_conceded),
-	};
-};
-
-const loadTeamGameweekRows = async (
-	context: GraphQLContext,
-	entryId: number,
-	eventId: number
-): Promise<DbGameweekRow[]> => {
-	const result = await context.database.query<DbGameweekRow>(
-		`SELECT result.event_id, result.event_points, result.overall_points,
-		        result.overall_rank, result.event_transfers, result.event_transfers_cost,
-		        result.event_net_points, result.event_bench_points,
-				result.event_chip::text, result.captain_points,
-				captain.web_name AS played_captain_web_name,
-				result.team_value, result.bank,
-				result.automatic_substitutions,
-		        pick.element_id, pick.position, player.web_name, team.short_name AS team_short_name,
-		        team.name AS team_name, player.element_type, pick.is_captain,
-		        pick.is_vice_captain, pick.multiplier, stats.total_points, stats.minutes,
-		        stats.goals_scored, stats.assists, stats.clean_sheets, stats.goals_conceded,
-		        stats.yellow_cards, stats.red_cards, stats.saves, stats.bonus, stats.bps,
-		        stats.expected_goals, stats.expected_assists,
-		        stats.expected_goal_involvements, stats.expected_goals_conceded,
-		        fixture.against_short_name, fixture.was_home, fixture.score, fixture.fixture_count
-		 FROM competition.entry_event_results result
-		 LEFT JOIN fpl.players captain
-		   ON captain.season_id = result.season_id
-		  AND captain.element_id = result.played_captain_element_id
-		 LEFT JOIN competition.entry_event_picks pick
-		   ON pick.season_id = result.season_id
-		  AND pick.entry_id = result.entry_id
-		  AND pick.event_id = result.event_id
-		 LEFT JOIN fpl.players player
-		   ON player.season_id = pick.season_id
-		  AND player.element_id = pick.element_id
-		 LEFT JOIN LATERAL (
-		   SELECT fixture_stats.team_id
-		   FROM fpl.player_fixture_stats fixture_stats
-		   WHERE fixture_stats.season_id = pick.season_id
-		     AND fixture_stats.event_id = pick.event_id
-		     AND fixture_stats.element_id = pick.element_id
-		   ORDER BY fixture_stats.fixture_id
-		   LIMIT 1
-		 ) historical_team ON TRUE
-		 LEFT JOIN fpl.teams team
-		   ON team.season_id = player.season_id
-		  AND team.team_id = historical_team.team_id
-		 LEFT JOIN fpl.player_gameweek_stats stats
-		   ON stats.season_id = pick.season_id
-		  AND stats.event_id = pick.event_id
-		  AND stats.element_id = pick.element_id
-		 LEFT JOIN LATERAL (
-			SELECT
-			  count(DISTINCT match.fixture_id)::integer AS fixture_count,
-			  string_agg(opponent.short_name, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS against_short_name,
-		     string_agg(CASE WHEN match.team_h_id = fixture_stats.team_id THEN 'H' ELSE 'A' END, ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id) AS was_home,
-		     string_agg(
-		       CASE
-		         WHEN match.team_h_score IS NULL OR match.team_a_score IS NULL THEN ''
-		         WHEN match.team_h_id = fixture_stats.team_id THEN match.team_h_score || '-' || match.team_a_score
-		         ELSE match.team_a_score || '-' || match.team_h_score
-		       END,
-		       ' / ' ORDER BY match.kickoff_time NULLS LAST, match.fixture_id
-		     ) AS score
-		   FROM fpl.fixtures match
-			JOIN fpl.player_fixture_stats fixture_stats
-			  ON fixture_stats.season_id = match.season_id
-			 AND fixture_stats.event_id = match.event_id
-			 AND fixture_stats.fixture_id = match.fixture_id
-			 AND fixture_stats.element_id = pick.element_id
-			JOIN fpl.teams opponent
-			  ON opponent.season_id = match.season_id
-			 AND opponent.team_id = CASE
-		      WHEN match.team_h_id = fixture_stats.team_id THEN match.team_a_id
-			      ELSE match.team_h_id
-			    END
-		   WHERE match.season_id = result.season_id
-		     AND match.event_id = result.event_id
-		     AND fixture_stats.team_id IN (match.team_h_id, match.team_a_id)
-		 ) fixture ON TRUE
-		 WHERE result.season_id = $1
-		   AND result.entry_id = $2
-		   AND result.event_id = $3
-		   AND result.rich_synced_at IS NOT NULL
-		 ORDER BY pick.position NULLS LAST`,
-		[context.currentSeason.seasonId, entryId, eventId]
-	);
-	return result.rows;
-};
-
 const loadTeamGameweekPrepared = async (
 	context: GraphQLContext,
 	loadedContext: LoadedReviewContext,
 	entryId: number,
 	eventId: number,
-	entry?: MyFplEntryIdentity | null,
 	snapshotRevision?: string | null
 ): Promise<MyFplTeamGameweek> => {
 	validateEventId(eventId);
-	const snapshot =
-		snapshotReadEnabled() || Boolean(snapshotRevision?.trim())
-			? await loadSnapshotEntry(context, loadedContext, entryId, eventId, snapshotRevision)
-			: null;
-	if (snapshotRevision && !snapshot) {
-		return {
-			context: loadedContext.value,
-			eventId,
-			entry: entry ?? null,
-			state: "PENDING",
-			result: null,
-			snapshotMeta: null,
-		};
-	}
-	if (snapshotReadEnabled() && !snapshot) {
+	const snapshot = await loadSnapshotEntry(
+		context,
+		loadedContext,
+		entryId,
+		eventId,
+		snapshotRevision
+	);
+	if (!snapshot) {
 		return {
 			context: loadedContext.value,
 			eventId,
@@ -1804,98 +1469,36 @@ const loadTeamGameweekPrepared = async (
 			snapshotMeta: null,
 		};
 	}
-	if (snapshot) {
-		const snapshotEntry = snapshot.payload.entry;
-		const snapshotGameweek = snapshot.payload.gameweek;
-		const result = snapshotGameweek.result;
-		const base = {
-			context: loadedContext.value,
-			eventId,
-			entry: snapshotEntry,
-			snapshotMeta: snapshot.publication,
-		};
-		if (snapshot.isEmpty || snapshotGameweek.state === "EMPTY") {
-			return { ...base, state: "EMPTY", result: null };
-		}
-		if (!result || result.eventId !== eventId || result.picks.length !== 15) {
-			return { ...base, state: "PENDING", result: null };
-		}
-		const cacheKey = gqlCacheKey(
-			context,
-			`my-fpl:${PROJECTION_VERSION}:team-gameweek:${entryId}:${eventId}:rev:${snapshot.publication.revision}`
-		);
-		const cached = await readCache(
-			context,
-			cacheKey,
-			(value): value is MyFplTeamGameweek => isTeamGameweekCache(value) && value.eventId === eventId
-		);
-		if (cached) return { ...cached, snapshotMeta: snapshot.publication };
-		const payload: MyFplTeamGameweek = {
-			...base,
-			state: "READY",
-			result,
-		};
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(payload),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
-		return payload;
-	}
+	const snapshotEntry = snapshot.payload.entry;
+	const snapshotGameweek = snapshot.payload.gameweek;
+	const result = snapshotGameweek.result;
 	const base = {
 		context: loadedContext.value,
 		eventId,
-		entry: entry === undefined ? await loadEntry(context, entryId) : entry,
-		snapshotMeta: null,
+		entry: snapshotEntry,
+		snapshotMeta: snapshot.publication,
 	};
-	if (!loadedContext.finalizedEventIds.has(eventId)) {
-		return { ...base, state: "PENDING", result: null };
-	}
-	if (!base.entry || base.entry.startedEvent === null || base.entry.startedEvent > eventId) {
+	if (snapshot.isEmpty || snapshotGameweek.state === "EMPTY") {
 		return { ...base, state: "EMPTY", result: null };
 	}
-
+	if (!result || result.eventId !== eventId || result.picks.length !== 15) {
+		return { ...base, state: "PENDING", result: null };
+	}
 	const cacheKey = gqlCacheKey(
 		context,
-		`my-fpl:${PROJECTION_VERSION}:team-gameweek:${entryId}:${eventId}`
+		`my-fpl:${PROJECTION_VERSION}:team-gameweek:${entryId}:${eventId}:rev:${snapshot.publication.revision}`
 	);
 	const cached = await readCache(
 		context,
 		cacheKey,
 		(value): value is MyFplTeamGameweek => isTeamGameweekCache(value) && value.eventId === eventId
 	);
-	if (cached) return cached;
-
-	const rows = await loadTeamGameweekRows(context, entryId, eventId);
-	if (rows.length === 0) {
-		return { ...base, state: "PENDING", result: null };
-	}
-	const picks = rows
-		.map((row) => mapGameweekPick(row, officialAutoSubElements(row.automatic_substitutions)))
-		.filter((pick): pick is MyFplTeamPick => pick !== null);
-	if (rows.length !== 15 || picks.length !== 15) {
-		return { ...base, state: "PENDING", result: null };
-	}
-	const first = rows[0];
+	if (cached) return { ...cached, snapshotMeta: snapshot.publication };
 	const payload: MyFplTeamGameweek = {
 		...base,
 		state: "READY",
 		result: {
-			eventId,
-			eventPoints: first.event_points,
-			overallPoints: first.overall_points,
-			overallRank: first.overall_rank,
-			eventTransfers: first.event_transfers,
-			eventTransfersCost: first.event_transfers_cost,
-			eventNetPoints: first.event_net_points,
-			eventBenchPoints: first.event_bench_points ?? 0,
-			eventChip: normalizeChip(first.event_chip),
-			eventCaptainPoints: first.captain_points ?? 0,
-			playedCaptainWebName: first.played_captain_web_name,
-			teamValue: first.team_value,
-			bank: first.bank,
-			picks,
+			...result,
 		},
 	};
 	await writeQueryCache(
@@ -1919,18 +1522,31 @@ const loadTeamDesk = async (
 	const pinnedPublication = snapshotRevision?.trim()
 		? await loadSnapshotPublicationByRevision(context, loadedContext, snapshotRevision)
 		: null;
-	const snapshotRequested = snapshotReadEnabled() || Boolean(snapshotRevision?.trim());
 	const selectedEventId =
-		eventId ??
-		pinnedPublication?.eventId ??
-		(snapshotRequested ? defaultReviewEventId(loadedContext) : null);
-	const snapshot =
-		selectedEventId !== null && snapshotRequested
-			? await loadSnapshotEntry(context, loadedContext, entryId, selectedEventId, snapshotRevision)
-			: null;
-	if (snapshotRequested && !snapshot) {
+		eventId ?? pinnedPublication?.eventId ?? defaultReviewEventId(loadedContext);
+	if (selectedEventId === null) {
 		return {
-			state: selectedEventId === null && !snapshotRevision?.trim() ? "PRESEASON" : "PENDING",
+			state: "PRESEASON",
+			context: loadedContext.value,
+			entry: null,
+			history: [],
+			pastSeasons: [],
+			pastSeasonsState: "PENDING",
+			selectedEventId,
+			gameweek: null,
+			snapshotMeta: null,
+		};
+	}
+	const snapshot = await loadSnapshotEntry(
+		context,
+		loadedContext,
+		entryId,
+		selectedEventId,
+		snapshotRevision
+	);
+	if (!snapshot) {
+		return {
+			state: "PENDING",
 			context: loadedContext.value,
 			entry: null,
 			history: [],
@@ -1943,86 +1559,40 @@ const loadTeamDesk = async (
 	}
 	const cacheKey = gqlCacheKey(
 		context,
-		`my-fpl:${PROJECTION_VERSION}:team-desk:${entryId}:${eventId ?? "season"}${
-			snapshot?.publication.revision ? `:rev:${snapshot.publication.revision}` : ""
-		}`
+		`my-fpl:${PROJECTION_VERSION}:team-desk:${entryId}:${eventId ?? "season"}:rev:${snapshot.publication.revision}`
 	);
 	const cached = await readCache(context, cacheKey, isTeamDeskCache);
-	if (cached && snapshot) {
+	if (cached) {
 		return {
 			...cached,
 			snapshotMeta: snapshot.publication,
 			gameweek: cached.gameweek ? { ...cached.gameweek, snapshotMeta: snapshot.publication } : null,
 		};
 	}
-	if (cached) return cached;
-
-	const [fallbackEntry, fallbackHistory, fallbackPastSeasons] = snapshotRequested
-		? [null, [] as MyFplTeamHistoryRow[], [] as MyFplPastSeason[]]
-		: await Promise.all([
-				loadEntry(context, entryId),
-				loadTeamHistory(context, entryId),
-				loadPastSeasons(context, entryId),
-			]);
-	const entry = snapshot?.payload.entry ?? fallbackEntry;
-	const history = snapshot?.payload.history ?? fallbackHistory;
-	const pastSeasons = snapshot?.payload.pastSeasons ?? fallbackPastSeasons;
-	const gameweek =
-		selectedEventId === null
-			? null
-			: await loadTeamGameweekPrepared(
-					context,
-					loadedContext,
-					entryId,
-					selectedEventId,
-					entry,
-					snapshot?.publication.revision ?? snapshotRevision
-				);
-	const historyEventIds = new Set(history.map((row) => row.eventId));
-	const expectedHistoryEventIds =
-		!snapshot &&
-		entry?.startedEvent !== null &&
-		entry?.startedEvent !== undefined &&
-		loadedContext.value.latestFinalizedEventId !== null
-			? [...loadedContext.finalizedEventIds].filter(
-					(finalizedEventId) => finalizedEventId >= entry.startedEvent!
-				)
-			: [];
-	const historyComplete = snapshot
-		? true
-		: expectedHistoryEventIds.length > 0 &&
-			expectedHistoryEventIds.every((finalizedEventId) => historyEventIds.has(finalizedEventId));
-	const historyPending = expectedHistoryEventIds.length > 0 && !historyComplete;
-	let state: MyFplReviewState;
-	if (gameweek) {
-		state = gameweek.state;
-		if ((state === "READY" || state === "EMPTY") && historyPending) state = "PENDING";
-	} else if (!entry) state = "EMPTY";
-	else if (snapshot) state = snapshot.payload.gameweek.state;
-	else if (loadedContext.value.latestFinalizedEventId === null) state = "PRESEASON";
-	else if (selectedEventId === null) state = historyComplete ? "READY" : "PENDING";
-	else if (entry.startedEvent === null || entry.startedEvent > selectedEventId) state = "EMPTY";
-	else state = historyComplete ? "READY" : "PENDING";
-	const snapshotPastSeasonsCount = entry?.pastSeasonsCount;
-	const pastSeasonsState: MyFplReviewState = snapshot
-		? typeof entry?.pastSeasonsCheckedAt === "string" &&
-			Number.isFinite(Date.parse(entry.pastSeasonsCheckedAt)) &&
-			typeof snapshotPastSeasonsCount === "number" &&
-			Number.isSafeInteger(snapshotPastSeasonsCount) &&
-			snapshotPastSeasonsCount >= 0 &&
-			snapshotPastSeasonsCount === pastSeasons.length
+	const entry = snapshot.payload.entry;
+	const history = snapshot.payload.history;
+	const pastSeasons = snapshot.payload.pastSeasons;
+	const snapshotGameweek = snapshot.payload.gameweek;
+	const gameweek: MyFplTeamGameweek = {
+		context: loadedContext.value,
+		eventId: selectedEventId,
+		entry,
+		state: snapshotGameweek.state,
+		result: snapshotGameweek.result,
+		snapshotMeta: snapshot.publication,
+	};
+	const pastSeasonsState: MyFplReviewState =
+		typeof entry.pastSeasonsCheckedAt === "string" &&
+		Number.isFinite(Date.parse(entry.pastSeasonsCheckedAt)) &&
+		typeof entry.pastSeasonsCount === "number" &&
+		Number.isSafeInteger(entry.pastSeasonsCount) &&
+		entry.pastSeasonsCount >= 0 &&
+		entry.pastSeasonsCount === pastSeasons.length
 			? "READY"
-			: "PENDING"
-		: !entry
-			? "EMPTY"
-			: entry.pastSeasonsCheckedAt !== null &&
-				  entry.pastSeasonsCount !== null &&
-				  entry.pastSeasonsCount === pastSeasons.length
-				? "READY"
-				: "PENDING";
+			: "PENDING";
 
 	const payload: MyFplTeamDesk = {
-		state,
+		state: gameweek.state,
 		context: loadedContext.value,
 		entry,
 		history,
@@ -2030,11 +1600,11 @@ const loadTeamDesk = async (
 		pastSeasonsState,
 		selectedEventId,
 		gameweek,
-		snapshotMeta: snapshot?.publication ?? gameweek?.snapshotMeta ?? null,
+		snapshotMeta: snapshot.publication,
 	};
 	const cacheState: MyFplReviewState =
-		state === "PENDING" || pastSeasonsState === "PENDING" ? "PENDING" : state;
-	if (cacheableState(state)) {
+		gameweek.state === "PENDING" || pastSeasonsState === "PENDING" ? "PENDING" : gameweek.state;
+	if (cacheableState(gameweek.state)) {
 		await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(cacheState));
 	}
 	return payload;
@@ -2048,14 +1618,7 @@ const loadTeamGameweek = async (
 	validateEventId(eventId);
 	const entryId = requireViewerEntryId(context);
 	const loadedContext = await loadReviewContext(context);
-	return loadTeamGameweekPrepared(
-		context,
-		loadedContext,
-		entryId,
-		eventId,
-		undefined,
-		snapshotRevision
-	);
+	return loadTeamGameweekPrepared(context, loadedContext, entryId, eventId, snapshotRevision);
 };
 
 const loadTeamTransfers = async (
@@ -2068,209 +1631,63 @@ const loadTeamTransfers = async (
 		? await loadSnapshotPublicationByRevision(context, loadedContext, snapshotRevision)
 		: null;
 	const selectedEventId = pinnedPublication?.eventId ?? defaultReviewEventId(loadedContext);
-	const snapshotRequested = snapshotReadEnabled() || Boolean(snapshotRevision?.trim());
-	if (selectedEventId === null && !snapshotRevision?.trim()) {
+	if (selectedEventId === null) {
 		return { state: "PRESEASON", context: loadedContext.value, gameweeks: [], snapshotMeta: null };
 	}
-	const hasSnapshot =
-		selectedEventId !== null &&
-		snapshotRequested &&
-		(Boolean(pinnedPublication) || loadedContext.publications.has(selectedEventId));
-	if (snapshotRequested && !hasSnapshot) {
+	const snapshot = await loadSnapshotEntry(
+		context,
+		loadedContext,
+		entryId,
+		selectedEventId,
+		snapshotRevision
+	);
+	if (!snapshot) {
 		return { state: "PENDING", context: loadedContext.value, gameweeks: [], snapshotMeta: null };
 	}
-	if (selectedEventId !== null && hasSnapshot) {
-		const snapshot = await loadSnapshotEntry(
-			context,
-			loadedContext,
-			entryId,
-			selectedEventId,
-			snapshotRevision
-		);
-		if (!snapshot) {
-			return {
-				state: "PENDING",
-				context: loadedContext.value,
-				gameweeks: [],
-				snapshotMeta: null,
-			};
-		}
-		if (snapshot.isEmpty) {
-			return {
-				state: "EMPTY",
-				context: loadedContext.value,
-				gameweeks: [],
-				snapshotMeta: snapshot.publication,
-			};
-		}
-		const historyByEvent = new Map(snapshot.payload.history.map((row) => [row.eventId, row]));
-		const transferCounts = new Map<number, number>();
-		for (const move of snapshot.payload.transfers) {
-			transferCounts.set(move.eventId, (transferCounts.get(move.eventId) ?? 0) + 1);
-		}
-		if (
-			snapshot.payload.history.some(
-				(row) =>
-					row.eventTransfers < 0 || (transferCounts.get(row.eventId) ?? 0) !== row.eventTransfers
-			) ||
-			snapshot.payload.transfers.some((move) => !historyByEvent.has(move.eventId))
-		) {
-			return {
-				state: "PENDING",
-				context: loadedContext.value,
-				gameweeks: [],
-				snapshotMeta: snapshot.publication,
-			};
-		}
-		const grouped = new Map<number, MyFplTransferGameweek>();
-		for (const move of snapshot.payload.transfers) {
-			const existing = grouped.get(move.eventId) ?? {
-				eventId: move.eventId,
-				eventTransfers: historyByEvent.get(move.eventId)?.eventTransfers ?? 0,
-				eventTransfersCost: historyByEvent.get(move.eventId)?.eventTransfersCost ?? 0,
-				transfers: [],
-			};
-			existing.transfers.push(move);
-			grouped.set(move.eventId, existing);
-		}
+	if (snapshot.isEmpty) {
 		return {
-			state: grouped.size > 0 ? "READY" : "EMPTY",
+			state: "EMPTY",
 			context: loadedContext.value,
-			gameweeks: [...grouped.values()].sort((left, right) => left.eventId - right.eventId),
+			gameweeks: [],
 			snapshotMeta: snapshot.publication,
 		};
 	}
-	if (loadedContext.value.latestFinalizedEventId === null) {
-		return { state: "PRESEASON", context: loadedContext.value, gameweeks: [], snapshotMeta: null };
-	}
-	const entry = await loadEntry(context, entryId);
-	if (!entry)
-		return { state: "EMPTY", context: loadedContext.value, gameweeks: [], snapshotMeta: null };
-	if (
-		entry.startedEvent === null ||
-		entry.startedEvent > loadedContext.value.latestFinalizedEventId
-	) {
-		return { state: "EMPTY", context: loadedContext.value, gameweeks: [], snapshotMeta: null };
+	const historyByEvent = new Map(snapshot.payload.history.map((row) => [row.eventId, row]));
+	const transferCounts = new Map<number, number>();
+	for (const move of snapshot.payload.transfers) {
+		transferCounts.set(move.eventId, (transferCounts.get(move.eventId) ?? 0) + 1);
 	}
 	if (
-		entry.transfersSyncedThroughEventId === null ||
-		entry.transfersSyncedThroughEventId < loadedContext.value.latestFinalizedEventId
+		snapshot.payload.history.some(
+			(row) =>
+				row.eventTransfers < 0 || (transferCounts.get(row.eventId) ?? 0) !== row.eventTransfers
+		) ||
+		snapshot.payload.transfers.some((move) => !historyByEvent.has(move.eventId))
 	) {
-		return { state: "PENDING", context: loadedContext.value, gameweeks: [], snapshotMeta: null };
+		return {
+			state: "PENDING",
+			context: loadedContext.value,
+			gameweeks: [],
+			snapshotMeta: snapshot.publication,
+		};
 	}
-	const expectedTransferEventIds = [...loadedContext.finalizedEventIds].filter(
-		(finalizedEventId) => finalizedEventId >= entry.startedEvent!
-	);
-	if (expectedTransferEventIds.length > 0) {
-		const enrichment = await context.database.query<{ enriched_event_count: number | string }>(
-			`SELECT count(DISTINCT event_id)::integer AS enriched_event_count
-			 FROM competition.entry_event_results
-			 WHERE season_id = $1
-			   AND entry_id = $2
-			   AND event_id = ANY($3::integer[])
-			   AND rich_synced_at IS NOT NULL`,
-			[context.currentSeason.seasonId, entryId, expectedTransferEventIds]
-		);
-		if (Number(enrichment.rows[0]?.enriched_event_count ?? 0) < expectedTransferEventIds.length) {
-			return { state: "PENDING", context: loadedContext.value, gameweeks: [], snapshotMeta: null };
-		}
-	}
-	const cacheKey = gqlCacheKey(context, `my-fpl:${PROJECTION_VERSION}:team-transfers:${entryId}`);
-	const cached = await readCache(context, cacheKey, isTeamTransfersCache);
-	if (cached) return cached;
-
-	const result = await context.database.query<DbTransferRow>(
-		`SELECT transfer.event_id, result.event_transfers, result.event_transfers_cost,
-		        player_in.web_name AS element_in_web_name,
-		        player_in.element_type AS element_in_type,
-		        team_in.short_name AS element_in_team_short_name,
-		        transfer.element_in_cost,
-		        player_out.web_name AS element_out_web_name,
-		        player_out.element_type AS element_out_type,
-		        team_out.short_name AS element_out_team_short_name,
-		        transfer.element_out_cost, transfer.transfer_time
-		 FROM competition.entry_event_transfers transfer
-		 JOIN competition.entry_event_results result
-		   ON result.season_id = transfer.season_id
-		  AND result.entry_id = transfer.entry_id
-		  AND result.event_id = transfer.event_id
-		  AND result.rich_synced_at IS NOT NULL
-		 JOIN fpl.events event
-		   ON event.season_id = transfer.season_id
-		  AND event.event_id = transfer.event_id
-		  AND event.finished
-		  AND event.data_checked
-		  AND event.live_snapshot_finalized_at IS NOT NULL
-		 LEFT JOIN fpl.players player_in
-		   ON player_in.season_id = transfer.season_id
-		  AND player_in.element_id = transfer.element_in_id
-		 LEFT JOIN LATERAL (
-		   SELECT fixture_stats.team_id
-		   FROM fpl.player_fixture_stats fixture_stats
-		   WHERE fixture_stats.season_id = transfer.season_id
-		     AND fixture_stats.event_id = transfer.event_id
-		     AND fixture_stats.element_id = transfer.element_in_id
-		   ORDER BY fixture_stats.fixture_id
-		   LIMIT 1
-		 ) historical_team_in ON TRUE
-		 LEFT JOIN fpl.teams team_in
-		   ON team_in.season_id = player_in.season_id
-		  AND team_in.team_id = COALESCE(historical_team_in.team_id, player_in.team_id)
-		 LEFT JOIN fpl.players player_out
-		   ON player_out.season_id = transfer.season_id
-		  AND player_out.element_id = transfer.element_out_id
-		 LEFT JOIN LATERAL (
-		   SELECT fixture_stats.team_id
-		   FROM fpl.player_fixture_stats fixture_stats
-		   WHERE fixture_stats.season_id = transfer.season_id
-		     AND fixture_stats.event_id = transfer.event_id
-		     AND fixture_stats.element_id = transfer.element_out_id
-		   ORDER BY fixture_stats.fixture_id
-		   LIMIT 1
-		 ) historical_team_out ON TRUE
-		 LEFT JOIN fpl.teams team_out
-		   ON team_out.season_id = player_out.season_id
-		  AND team_out.team_id = COALESCE(historical_team_out.team_id, player_out.team_id)
-		 WHERE transfer.season_id = $1 AND transfer.entry_id = $2
-		 ORDER BY transfer.event_id, transfer.transfer_time, transfer.transfer_id`,
-		[context.currentSeason.seasonId, entryId]
-	);
 	const grouped = new Map<number, MyFplTransferGameweek>();
-	for (const row of result.rows) {
-		const gameweek = grouped.get(row.event_id) ?? {
-			eventId: row.event_id,
-			eventTransfers: row.event_transfers,
-			eventTransfersCost: row.event_transfers_cost,
+	for (const move of snapshot.payload.transfers) {
+		const existing = grouped.get(move.eventId) ?? {
+			eventId: move.eventId,
+			eventTransfers: historyByEvent.get(move.eventId)?.eventTransfers ?? 0,
+			eventTransfersCost: historyByEvent.get(move.eventId)?.eventTransfersCost ?? 0,
 			transfers: [],
 		};
-		gameweek.transfers.push({
-			eventId: row.event_id,
-			elementInWebName: row.element_in_web_name ?? "",
-			elementInTypeName: positionName(row.element_in_type),
-			elementInTeamShortName: row.element_in_team_short_name ?? "",
-			elementInCost: row.element_in_cost ?? 0,
-			elementOutWebName: row.element_out_web_name ?? "",
-			elementOutTypeName: positionName(row.element_out_type),
-			elementOutTeamShortName: row.element_out_team_short_name ?? "",
-			elementOutCost: row.element_out_cost ?? 0,
-			time: isoString(row.transfer_time) ?? new Date(0).toISOString(),
-		});
-		grouped.set(row.event_id, gameweek);
+		existing.transfers.push(move);
+		grouped.set(move.eventId, existing);
 	}
-	const gameweeks = [...grouped.values()].sort((left, right) => left.eventId - right.eventId);
-	const payload: MyFplTeamTransfers = {
-		state: gameweeks.length > 0 ? "READY" : "EMPTY",
+	return {
+		state: grouped.size > 0 ? "READY" : "EMPTY",
 		context: loadedContext.value,
-		gameweeks,
-		snapshotMeta: null,
+		gameweeks: [...grouped.values()].sort((left, right) => left.eventId - right.eventId),
+		snapshotMeta: snapshot.publication,
 	};
-	await writeQueryCache(
-		context,
-		cacheKey,
-		JSON.stringify(payload),
-		QUERY_CACHE_TTL_SECONDS.REPORTING
-	);
-	return payload;
 };
 
 const CURRENT_TOURNAMENT_MEMBERSHIPS_SQL = `
@@ -2426,26 +1843,6 @@ const mapSnapshotBoardRow = (
 	};
 };
 
-const parseBoardPayload = (
-	value: unknown
-): {
-	fieldSize: number;
-	totalRows: number;
-	rows: MyFplCompetitionBoardRow[];
-	viewerRow: MyFplCompetitionBoardRow | null;
-} => {
-	if (!isRecord(value)) throw new Error("Tournament board payload is malformed");
-	const rows = Array.isArray(value.rows) ? value.rows : [];
-	if (!rows.every(isRecord)) throw new Error("Tournament board rows are malformed");
-	const viewer = value.viewerRow ?? value.viewer_row;
-	return {
-		fieldSize: asInteger(value.fieldSize ?? value.field_size) ?? 0,
-		totalRows: asInteger(value.totalRows ?? value.total_rows) ?? 0,
-		rows: (rows as DbBoardJsonRow[]).map(mapBoardJsonRow),
-		viewerRow: isRecord(viewer) ? mapBoardJsonRow(viewer as DbBoardJsonRow) : null,
-	};
-};
-
 const loadCompetitionBoardPrepared = async (
 	context: GraphQLContext,
 	loadedContext: LoadedReviewContext,
@@ -2495,35 +1892,36 @@ const loadCompetitionBoardPrepared = async (
 	});
 	if (!metadata) return empty("EMPTY");
 	if (metadata.groupMode !== GroupMode.POINTS_RACES) return empty("UNAVAILABLE");
-	const snapshot =
-		snapshotReadEnabled() || Boolean(snapshotRevision?.trim())
-			? await loadSnapshotEntry(context, loadedContext, entryId, eventId, snapshotRevision)
-			: null;
-	if (snapshotRevision && !snapshot) return empty("PENDING");
-	if (snapshotReadEnabled() && !snapshot) return empty("PENDING");
-	if (snapshot) {
-		const revision = snapshot.publication.revision;
-		const cacheKey = gqlCacheKey(
-			context,
-			`my-fpl:${PROJECTION_VERSION}:competition-board:${tournamentId}:${eventId}:${page}:${pageSize}:${normalizeSearch(search).toLocaleLowerCase("en-US")}:${entryId}:rev:${revision}`
-		);
-		const cached = await readCache(
-			context,
-			cacheKey,
-			(value): value is MyFplCompetitionBoardPage =>
-				isCompetitionBoardCache(value) && value.eventId === eventId
-		);
-		if (cached) return { ...cached, snapshotMeta: snapshot.publication };
-		const offset = (page - 1) * pageSize;
-		const result = await context.database.query<{
-			field_size: number;
-			total_rows: number;
-			expected_field_size: number | null;
-			invalid_row_count: number;
-			rows: unknown;
-			viewer_row: unknown;
-		}>(
-			`WITH board AS MATERIALIZED (
+	const snapshot = await loadSnapshotEntry(
+		context,
+		loadedContext,
+		entryId,
+		eventId,
+		snapshotRevision
+	);
+	if (!snapshot) return empty("PENDING");
+	const revision = snapshot.publication.revision;
+	const cacheKey = gqlCacheKey(
+		context,
+		`my-fpl:${PROJECTION_VERSION}:competition-board:${tournamentId}:${eventId}:${page}:${pageSize}:${normalizedSearch.toLocaleLowerCase("en-US")}:${entryId}:rev:${revision}`
+	);
+	const cached = await readCache(
+		context,
+		cacheKey,
+		(value): value is MyFplCompetitionBoardPage =>
+			isCompetitionBoardCache(value) && value.eventId === eventId
+	);
+	if (cached) return { ...cached, snapshotMeta: snapshot.publication };
+	const offset = (page - 1) * pageSize;
+	const result = await context.database.query<{
+		field_size: number;
+		total_rows: number;
+		expected_field_size: number | null;
+		invalid_row_count: number;
+		rows: unknown;
+		viewer_row: unknown;
+	}>(
+		`WITH board AS MATERIALIZED (
 			   SELECT snapshot.entry_id, snapshot.payload
 			   FROM competition.my_fpl_snapshot_tournament_rows snapshot
 			   WHERE snapshot.season_id = $1 AND snapshot.event_id = $2
@@ -2549,9 +1947,11 @@ const loadCompetitionBoardPrepared = async (
 			   (SELECT count(*)::integer FROM filtered) AS total_rows,
 				   COALESCE((SELECT jsonb_agg(payload || jsonb_build_object('__snapshotEntryId', entry_id)
 				                               ORDER BY CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
-				                                      THEN (payload->>'groupId')::integer END NULLS LAST,
+				                                      THEN CASE WHEN (payload->>'groupId')::numeric BETWEEN -2147483648 AND 2147483647
+				                                                THEN (payload->>'groupId')::integer END END NULLS LAST,
 				                                      CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
-				                                      THEN (payload->>'rank')::integer END NULLS LAST,
+				                                      THEN CASE WHEN (payload->>'rank')::numeric BETWEEN -2147483648 AND 2147483647
+				                                                THEN (payload->>'rank')::integer END END NULLS LAST,
 				                                      entry_id) FROM paged), '[]'::jsonb) AS rows,
 				   (SELECT count(*)::integer FROM board
 				     WHERE ((payload->>'groupId') IS NOT NULL
@@ -2572,228 +1972,56 @@ const loadCompetitionBoardPrepared = async (
 			   ) AS expected_field_size,
 				   (SELECT payload || jsonb_build_object('__snapshotEntryId', entry_id)
 				      FROM board WHERE entry_id = $8 LIMIT 1) AS viewer_row`,
-			[
-				context.currentSeason.seasonId,
-				eventId,
-				revision,
-				tournamentId,
-				normalizeSearch(search),
-				pageSize,
-				offset,
-				entryId,
-			]
-		);
-		const fieldSize = asInteger(result.rows[0]?.field_size) ?? 0;
-		const totalRows = asInteger(result.rows[0]?.total_rows) ?? 0;
-		const expectedFieldSize = asInteger(result.rows[0]?.expected_field_size);
-		const invalidRowCount = asInteger(result.rows[0]?.invalid_row_count);
-		const rawRows = Array.isArray(result.rows[0]?.rows) ? result.rows[0]?.rows : [];
-		const rows = rawRows
-			.map((value) => mapSnapshotBoardRow(value, eventId))
-			.filter((row): row is MyFplCompetitionBoardRow => row !== null);
-		const viewerRow = mapSnapshotBoardRow(result.rows[0]?.viewer_row, eventId);
-		if (
-			fieldSize < 0 ||
-			totalRows < 0 ||
-			totalRows > fieldSize ||
-			invalidRowCount !== 0 ||
-			expectedFieldSize === null ||
-			expectedFieldSize <= 0 ||
-			fieldSize !== expectedFieldSize ||
-			rawRows.length !== rows.length ||
-			fieldSize === 0 ||
-			viewerRow === null
-		) {
-			return empty("PENDING", snapshot.publication);
-		}
-		const payload: MyFplCompetitionBoardPage = {
-			state: "READY",
-			eventId,
-			page,
-			pageSize,
-			totalRows,
-			totalPages: totalRows === 0 ? 0 : Math.ceil(totalRows / pageSize),
-			fieldSize,
-			rows,
-			viewerRow,
-			snapshotMeta: snapshot.publication,
-		};
-		if (cacheableState(payload.state)) {
-			await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(payload.state));
-		}
-		return payload;
-	}
-	if (!loadedContext.finalizedEventIds.has(eventId)) return empty("PENDING");
-	if (
-		metadata.setupStatus !== TournamentSetupStatus.READY ||
-		!metadata.standingsReadyAt ||
-		!metadata.insightsReadyAt
-	) {
-		return empty("PENDING");
-	}
-
-	const cacheKey = gqlCacheKey(
-		context,
-		`my-fpl:${PROJECTION_VERSION}:competition-board:${tournamentId}:${eventId}:${page}:${pageSize}:${normalizedSearch.toLocaleLowerCase("en-US")}:${entryId}`
-	);
-	const cached = await readCache(
-		context,
-		cacheKey,
-		(value): value is MyFplCompetitionBoardPage =>
-			isCompetitionBoardCache(value) && value.eventId === eventId
-	);
-	if (cached) return cached;
-
-	const offset = (page - 1) * pageSize;
-	const result = await context.database.query<DbBoardPayloadRow>(
-		`WITH board AS MATERIALIZED (
-		   SELECT summary.event_id,
-		          group_result.group_id,
-		          summary.entry_id,
-		          entry.entry_name,
-		          entry.player_name,
-		          COALESCE(group_result.event_group_rank, summary.tournament_event_rank)::integer AS rank,
-		          COALESCE(previous_group.event_group_rank, previous_summary.tournament_event_rank)::integer AS previous_rank,
-			          -- tournament_event_rank is the published full-field rank. Do
-			          -- not rank by raw FPL totals: a points race may start after
-			          -- the season begins or use a different scoring window.
-			          summary.tournament_event_rank::integer AS field_rank,
-		          summary.event_points,
-		          summary.event_transfers_cost AS event_cost,
-		          summary.event_net_points,
-		          summary.event_rank,
-		          summary.overall_points,
-		          summary.overall_rank,
-		          summary.event_chip::text,
-		          summary.played_captain_element_id AS captain_id,
-		          captain.web_name AS captain_web_name,
-		          captain_team.short_name AS captain_team_short_name,
-		          summary.captain_points,
-		          summary.team_value,
-		          summary.bank
-		   FROM reporting.tournament_entry_event_summaries summary
-		   JOIN competition.entries entry
-		     ON entry.season_id = summary.season_id
-		    AND entry.entry_id = summary.entry_id
-		   LEFT JOIN competition.tournament_points_group_results group_result
-		     ON group_result.season_id = summary.season_id
-		    AND group_result.tournament_id = summary.tournament_id
-		    AND group_result.event_id = summary.event_id
-		    AND group_result.entry_id = summary.entry_id
-		   LEFT JOIN reporting.tournament_entry_event_summaries previous_summary
-		     ON previous_summary.season_id = summary.season_id
-		    AND previous_summary.tournament_id = summary.tournament_id
-		    AND previous_summary.event_id = summary.event_id - 1
-		    AND previous_summary.entry_id = summary.entry_id
-		   LEFT JOIN competition.tournament_points_group_results previous_group
-		     ON previous_group.season_id = summary.season_id
-		    AND previous_group.tournament_id = summary.tournament_id
-		    AND previous_group.event_id = summary.event_id - 1
-		    AND previous_group.entry_id = summary.entry_id
-		   LEFT JOIN fpl.players captain
-		     ON captain.season_id = summary.season_id
-		    AND captain.element_id = summary.played_captain_element_id
-			LEFT JOIN LATERAL (
-			  SELECT fixture_stats.team_id
-			  FROM fpl.player_fixture_stats fixture_stats
-			  JOIN fpl.fixtures fixture
-			    ON fixture.season_id = fixture_stats.season_id
-			   AND fixture.fixture_id = fixture_stats.fixture_id
-			  WHERE fixture_stats.season_id = summary.season_id
-			    AND fixture_stats.event_id = summary.event_id
-			    AND fixture_stats.element_id = summary.played_captain_element_id
-			  ORDER BY fixture.kickoff_time NULLS LAST,
-			           fixture.fixture_id,
-			           fixture_stats.fixture_id
-			  LIMIT 1
-		   ) captain_historical_team ON TRUE
-		   LEFT JOIN fpl.teams captain_team
-		     ON captain_team.season_id = captain.season_id
-		    AND captain_team.team_id = COALESCE(captain_historical_team.team_id, captain.team_id)
-		   WHERE summary.season_id = $1
-		     AND summary.tournament_id = $2
-		     AND summary.event_id = $3
-		 ), filtered AS MATERIALIZED (
-		   SELECT * FROM board
-		   WHERE $4 = ''
-		      OR entry_name ILIKE '%' || $4 || '%'
-		      OR player_name ILIKE '%' || $4 || '%'
-		 ), paged AS (
-		   SELECT * FROM filtered
-		   ORDER BY group_id NULLS LAST, rank NULLS LAST, entry_id
-		   LIMIT $5 OFFSET $6
-		 )
-		 SELECT jsonb_build_object(
-		   'fieldSize', (SELECT count(*)::integer FROM board),
-		   'totalRows', (SELECT count(*)::integer FROM filtered),
-		   'rows', COALESCE((SELECT jsonb_agg(to_jsonb(paged) ORDER BY group_id NULLS LAST, rank NULLS LAST, entry_id) FROM paged), '[]'::jsonb),
-		   'viewerRow', (SELECT to_jsonb(board) FROM board WHERE entry_id = $7 LIMIT 1)
-		 ) AS payload`,
 		[
 			context.currentSeason.seasonId,
-			tournamentId,
 			eventId,
+			revision,
+			tournamentId,
 			normalizedSearch,
 			pageSize,
 			offset,
 			entryId,
 		]
 	);
-	const parsed = parseBoardPayload(result.rows[0]?.payload);
-	const state: MyFplReviewState =
-		parsed.fieldSize > 0 && parsed.viewerRow !== null ? "READY" : "PENDING";
+	const fieldSize = asInteger(result.rows[0]?.field_size) ?? 0;
+	const totalRows = asInteger(result.rows[0]?.total_rows) ?? 0;
+	const expectedFieldSize = asInteger(result.rows[0]?.expected_field_size);
+	const invalidRowCount = asInteger(result.rows[0]?.invalid_row_count);
+	const rawRows = Array.isArray(result.rows[0]?.rows) ? result.rows[0]?.rows : [];
+	const rows = rawRows
+		.map((value) => mapSnapshotBoardRow(value, eventId))
+		.filter((row): row is MyFplCompetitionBoardRow => row !== null);
+	const viewerRow = mapSnapshotBoardRow(result.rows[0]?.viewer_row, eventId);
+	if (
+		fieldSize < 0 ||
+		totalRows < 0 ||
+		totalRows > fieldSize ||
+		invalidRowCount !== 0 ||
+		expectedFieldSize === null ||
+		expectedFieldSize <= 0 ||
+		fieldSize !== expectedFieldSize ||
+		rawRows.length !== rows.length ||
+		fieldSize === 0 ||
+		viewerRow === null
+	) {
+		return empty("PENDING", snapshot.publication);
+	}
 	const payload: MyFplCompetitionBoardPage = {
-		state,
+		state: "READY",
 		eventId,
 		page,
 		pageSize,
-		totalRows: parsed.totalRows,
-		totalPages: parsed.totalRows === 0 ? 0 : Math.ceil(parsed.totalRows / pageSize),
-		fieldSize: parsed.fieldSize,
-		rows: parsed.rows,
-		viewerRow: parsed.viewerRow,
-		snapshotMeta: null,
+		totalRows,
+		totalPages: totalRows === 0 ? 0 : Math.ceil(totalRows / pageSize),
+		fieldSize,
+		rows,
+		viewerRow,
+		snapshotMeta: snapshot.publication,
 	};
-	if (cacheableState(state)) {
-		await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(state));
+	if (cacheableState(payload.state)) {
+		await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(payload.state));
 	}
 	return payload;
-};
-
-const loadCompetitionAggregate = async (
-	context: GraphQLContext,
-	tournamentId: number,
-	eventId: number,
-	entryId: number
-): Promise<MyFplCompetitionAggregate | null> => {
-	const cacheKey = gqlCacheKey(
-		context,
-		`my-fpl:${PROJECTION_VERSION}:competition-aggregate:${tournamentId}:${eventId}:${entryId}`
-	);
-	const cached = await readCache(
-		context,
-		cacheKey,
-		(value): value is MyFplCompetitionAggregate =>
-			isCompetitionAggregateCache(value) && value.eventId === eventId
-	);
-	if (cached) return cached;
-	const result = await context.database.query<{ payload: unknown }>(COMPETITION_AGGREGATE_SQL, [
-		context.currentSeason.seasonId,
-		tournamentId,
-		eventId,
-		entryId,
-	]);
-	const payload = result.rows[0]?.payload;
-	const normalizedPayload = isRecord(payload) ? { ...payload, snapshotMeta: null } : payload;
-	if (!isCompetitionAggregateCache(normalizedPayload) || normalizedPayload.eventId !== eventId)
-		return null;
-	await writeQueryCache(
-		context,
-		cacheKey,
-		JSON.stringify(normalizedPayload),
-		QUERY_CACHE_TTL_SECONDS.REPORTING
-	);
-	return normalizedPayload;
 };
 
 const loadCompetitionAggregateSnapshot = async (
@@ -3012,9 +2240,10 @@ const loadCompetitionsDesk = async (
 		selectedTournament,
 		snapshotRevision
 	);
-	const hasSnapshot = loadedContext.publications.has(selectedEventId) || Boolean(snapshotRevision);
+	const hasSnapshot =
+		loadedContext.publications.has(selectedEventId) || Boolean(snapshotRevision?.trim());
 	const canLoadAggregate =
-		(hasSnapshot || loadedContext.finalizedEventIds.has(selectedEventId)) &&
+		hasSnapshot &&
 		selectedTournament.groupMode === GroupMode.POINTS_RACES &&
 		selectedTournament.setupStatus === TournamentSetupStatus.READY &&
 		Boolean(selectedTournament.standingsReadyAt) &&
@@ -3022,16 +2251,14 @@ const loadCompetitionsDesk = async (
 	const [board, aggregateCandidate] = canLoadAggregate
 		? await Promise.all([
 				boardPromise,
-				hasSnapshot
-					? loadCompetitionAggregateSnapshot(
-							context,
-							loadedContext,
-							selectedTournament.id,
-							selectedEventId,
-							entryId,
-							snapshotRevision
-						)
-					: loadCompetitionAggregate(context, selectedTournament.id, selectedEventId, entryId),
+				loadCompetitionAggregateSnapshot(
+					context,
+					loadedContext,
+					selectedTournament.id,
+					selectedEventId,
+					entryId,
+					snapshotRevision
+				),
 			])
 		: [await boardPromise, null];
 	const aggregate = board.state === "READY" ? aggregateCandidate : null;
@@ -3085,59 +2312,18 @@ const loadCompetitionSeasonPath = async (
 	) {
 		return empty("PENDING");
 	}
-	const snapshot =
-		snapshotReadEnabled() || Boolean(snapshotRevision?.trim())
-			? await loadSnapshotEntry(context, loadedContext, entryId, throughEventId, snapshotRevision)
-			: null;
-	if (snapshotRevision && !snapshot) return empty("PENDING");
-	if (snapshotReadEnabled() && !snapshot) return empty("PENDING");
-	if (snapshot) {
-		const revision = snapshot.publication.revision;
-		const cacheKey = gqlCacheKey(
-			context,
-			`my-fpl:${PROJECTION_VERSION}:competition-season-path:${tournamentId}:${entryId}:${throughEventId}:rev:${revision}`
-		);
-		const cached = await readCache(
-			context,
-			cacheKey,
-			(value): value is MyFplCompetitionSeasonPath =>
-				isCompetitionSeasonPathCache(value) && value.throughEventId === throughEventId
-		);
-		if (cached) return { ...cached, snapshotMeta: snapshot.publication };
-		const result = await context.database.query<{ payload: unknown }>(
-			`SELECT payload
-			 FROM competition.my_fpl_snapshot_tournament_aggregates
-			 WHERE season_id = $1 AND event_id = $2 AND revision = $3::bigint AND tournament_id = $4
-			 LIMIT 1`,
-			[context.currentSeason.seasonId, throughEventId, revision, tournamentId]
-		);
-		const raw = result.rows[0]?.payload;
-		const rawPoints =
-			isRecord(raw) && isRecord(raw.seasonPaths)
-				? raw.seasonPaths[String(entryId)]
-				: isRecord(raw)
-					? raw.seasonPath
-					: null;
-		const points = parseSnapshotSeasonPathPoints(rawPoints);
-		if (points === null) return empty("PENDING", snapshot.publication);
-		const payload: MyFplCompetitionSeasonPath = {
-			state: points.some((point) => point.gameweek === throughEventId) ? "READY" : "PENDING",
-			context: loadedContext.value,
-			tournamentId,
-			throughEventId,
-			points,
-			snapshotMeta: snapshot.publication,
-		};
-		if (cacheableState(payload.state)) {
-			await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(payload.state));
-		}
-		return payload;
-	}
-	if (!loadedContext.finalizedEventIds.has(throughEventId)) return empty("PENDING");
-
+	const snapshot = await loadSnapshotEntry(
+		context,
+		loadedContext,
+		entryId,
+		throughEventId,
+		snapshotRevision
+	);
+	if (!snapshot) return empty("PENDING");
+	const revision = snapshot.publication.revision;
 	const cacheKey = gqlCacheKey(
 		context,
-		`my-fpl:${PROJECTION_VERSION}:competition-season-path:${tournamentId}:${entryId}:${throughEventId}`
+		`my-fpl:${PROJECTION_VERSION}:competition-season-path:${tournamentId}:${entryId}:${throughEventId}:rev:${revision}`
 	);
 	const cached = await readCache(
 		context,
@@ -3145,64 +2331,30 @@ const loadCompetitionSeasonPath = async (
 		(value): value is MyFplCompetitionSeasonPath =>
 			isCompetitionSeasonPathCache(value) && value.throughEventId === throughEventId
 	);
-	if (cached) return cached;
-
-	const result = await context.database.query<DbSeasonPathRow>(
-		`WITH field AS MATERIALIZED (
-		   SELECT event_id,
-		          count(*)::integer AS field_size,
-		          max(overall_points) AS leader_overall_points,
-		          avg(overall_points)::numeric AS average_overall_points
-		   FROM reporting.tournament_entry_event_summaries
-		   WHERE season_id = $1
-		     AND tournament_id = $2
-		     AND event_id BETWEEN 1 AND $3
-		   GROUP BY event_id
-		 ), mine AS MATERIALIZED (
-		   SELECT summary.event_id,
-		          COALESCE(group_result.event_group_rank, summary.tournament_event_rank)::integer AS tournament_rank,
-		          summary.overall_points
-		   FROM reporting.tournament_entry_event_summaries summary
-		   LEFT JOIN competition.tournament_points_group_results group_result
-		     ON group_result.season_id = summary.season_id
-		    AND group_result.tournament_id = summary.tournament_id
-		    AND group_result.event_id = summary.event_id
-		    AND group_result.entry_id = summary.entry_id
-		   WHERE summary.season_id = $1
-		     AND summary.tournament_id = $2
-		     AND summary.entry_id = $4
-		     AND summary.event_id BETWEEN 1 AND $3
-		 )
-		 SELECT mine.event_id, mine.tournament_rank, field.field_size,
-		        mine.overall_points, field.leader_overall_points,
-		        field.average_overall_points,
-		        CASE WHEN mine.overall_points IS NULL OR field.leader_overall_points IS NULL
-		             THEN NULL ELSE GREATEST(0, field.leader_overall_points - mine.overall_points) END AS gap_to_leader,
-		        CASE WHEN mine.overall_points IS NULL OR field.average_overall_points IS NULL
-		             THEN NULL ELSE mine.overall_points - field.average_overall_points END AS points_vs_average
-		 FROM mine
-		 JOIN field USING (event_id)
-		 ORDER BY mine.event_id`,
-		[context.currentSeason.seasonId, tournamentId, throughEventId, entryId]
+	if (cached) return { ...cached, snapshotMeta: snapshot.publication };
+	const result = await context.database.query<{ payload: unknown }>(
+		`SELECT payload
+			 FROM competition.my_fpl_snapshot_tournament_aggregates
+			 WHERE season_id = $1 AND event_id = $2 AND revision = $3::bigint AND tournament_id = $4
+			 LIMIT 1`,
+		[context.currentSeason.seasonId, throughEventId, revision, tournamentId]
 	);
-	const points = result.rows.map((row) => ({
-		gameweek: row.event_id,
-		tournamentRank: asInteger(row.tournament_rank),
-		gapToLeader: row.gap_to_leader,
-		pointsVsAverage: asFiniteNumber(row.points_vs_average),
-		fieldSize: row.field_size,
-		overallPoints: row.overall_points,
-		leaderOverallPoints: row.leader_overall_points,
-		averageOverallPoints: asFiniteNumber(row.average_overall_points),
-	}));
-	const hasRequestedEvent = points.some((point) => point.gameweek === throughEventId);
+	const raw = result.rows[0]?.payload;
+	const rawPoints =
+		isRecord(raw) && isRecord(raw.seasonPaths)
+			? raw.seasonPaths[String(entryId)]
+			: isRecord(raw)
+				? raw.seasonPath
+				: null;
+	const points = parseSnapshotSeasonPathPoints(rawPoints);
+	if (points === null) return empty("PENDING", snapshot.publication);
 	const payload: MyFplCompetitionSeasonPath = {
-		state: hasRequestedEvent ? "READY" : "PENDING",
+		state: points.some((point) => point.gameweek === throughEventId) ? "READY" : "PENDING",
 		context: loadedContext.value,
 		tournamentId,
 		throughEventId,
 		points,
-		snapshotMeta: null,
+		snapshotMeta: snapshot.publication,
 	};
 	if (cacheableState(payload.state)) {
 		await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(payload.state));

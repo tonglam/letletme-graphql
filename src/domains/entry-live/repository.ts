@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import type { EntryEventResult } from "../entries/repository";
 
 const NULL_SENTINEL = "__entry-live:null__";
 
@@ -11,6 +12,25 @@ export type EntryEventPick = {
 	transfersCost: number;
 	picks: Pick[];
 };
+
+/**
+ * Finalized score rows carry the official post-substitution picks. Keep the
+ * final path on that immutable result payload instead of rereading the mutable
+ * entry-picks table after the data-checked fence.
+ */
+export const entryEventPickFromFinalResult = (result: {
+	entryId: EntryEventResult["entryId"];
+	eventId: EntryEventResult["eventId"];
+	eventChip: EntryEventResult["eventChip"];
+	eventTransfersCost: EntryEventResult["eventTransfersCost"];
+	eventPicks: EntryEventResult["eventPicks"];
+}): EntryEventPick => ({
+	entryId: result.entryId,
+	eventId: result.eventId,
+	chip: result.eventChip,
+	transfersCost: result.eventTransfersCost,
+	picks: parsePicks(result.eventPicks, { entryId: result.entryId, eventId: result.eventId }),
+});
 
 export type Pick = {
 	eventId: number;

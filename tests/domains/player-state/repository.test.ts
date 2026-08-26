@@ -4,7 +4,7 @@ import type { GraphQLContext } from "../../../src/graphql/context";
 import type { QueryExecutor } from "../../../src/infra/database";
 import type { CoreDataSnapshot } from "../../../src/infra/data-snapshot";
 import {
-	createPlayerStateRepository,
+	createPlayerStateRepository as createProductionPlayerStateRepository,
 	PLAYER_STATE_NULL_CACHE_TTL_SECONDS,
 	PLAYER_STATE_SUCCESS_CACHE_TTL_SECONDS,
 } from "../../../src/domains/player-state/repository";
@@ -405,6 +405,26 @@ const makeContext = (
 		database: {},
 		data: {},
 	}) as unknown as GraphQLContext;
+
+const createPlayerStateRepository = (
+	dependencies: Parameters<typeof createProductionPlayerStateRepository>[0] = {}
+) =>
+	createProductionPlayerStateRepository({
+		...dependencies,
+		resolveStatsContext:
+			dependencies.resolveStatsContext ??
+			(async () => ({
+				scope: "CURRENT_SEASON" as const,
+				season: "2526",
+				asOfEventId: 10,
+				status: "AVAILABLE" as const,
+				revision: "stats-revision-1",
+				sourceCheckedAt: "2026-08-08T00:00:00.000Z",
+				publishedAt: "2026-08-08T00:00:01.000Z",
+				rowCount: 220,
+				expectedRowCount: 220,
+			})),
+	});
 
 describe("Player State repository", () => {
 	it("batch-reads two profile cache keys with one Redis MGET", async () => {

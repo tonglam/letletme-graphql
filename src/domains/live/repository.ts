@@ -12,6 +12,7 @@ import {
 	loadLiveSnapshotMeta,
 	rememberLiveSnapshotMeta,
 	type LiveSnapshotMeta,
+	type LiveSnapshotReference,
 } from "./snapshot-meta";
 
 export type LivePerformance = {
@@ -899,7 +900,8 @@ interface LiveRepository {
 	getTargetedLiveRead(
 		context: GraphQLContext,
 		eventId: number,
-		playerIds: number[]
+		playerIds: number[],
+		expectedMeta?: LiveSnapshotMeta | LiveSnapshotReference | null
 	): Promise<TargetedLiveRead>;
 	getLivePerformancesForEventsAndPlayers(
 		context: GraphQLContext,
@@ -908,7 +910,8 @@ interface LiveRepository {
 	): Promise<LivePerformance[]>;
 	getAllLivePerformances(
 		context: GraphQLContext,
-		eventId: number
+		eventId: number,
+		expectedMeta?: LiveSnapshotMeta | LiveSnapshotReference | null
 	): Promise<Map<number, LivePerformance>>;
 	getDurableGameweekBoardPerformances(
 		context: GraphQLContext,
@@ -1418,7 +1421,8 @@ const loadLiveExplainsWithSingleflight = (
 export const liveRepository: LiveRepository = {
 	async getAllLivePerformances(
 		context: GraphQLContext,
-		eventId: number
+		eventId: number,
+		expectedMeta?: LiveSnapshotMeta | LiveSnapshotReference | null
 	): Promise<Map<number, LivePerformance>> {
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) {
 			return new Map();
@@ -1426,10 +1430,36 @@ export const liveRepository: LiveRepository = {
 		const snapshot = await getLiveDataSnapshot(context, eventId).catch(async (error) => {
 			context.logger.info(
 				{ eventId, err: error instanceof Error ? error.message : "unknown" },
-				"Live publication unavailable; returning durable last-good player rows"
+				expectedMeta?.publicationId
+					? "Pinned live publication unavailable; returning no player rows"
+					: "Live publication unavailable; returning durable last-good player rows"
 			);
 			return null;
 		});
+		if (expectedMeta?.publicationId && !snapshot) {
+			// A caller that pinned a live revision must never silently fall back to
+			// durable rows from an older publication. Return an empty detail set so
+			// the score-only headline can remain visible and reconciliation can fail
+			// closed at the boundary.
+			return new Map();
+		}
+		if (
+			snapshot &&
+			expectedMeta?.publicationId &&
+			(snapshot.publicationId !== expectedMeta.publicationId ||
+				snapshot.revision !== expectedMeta.revision ||
+				(expectedMeta.eventLiveCount !== undefined &&
+					snapshot.eventLives.length !== expectedMeta.eventLiveCount) ||
+				(expectedMeta.fixtureCount !== undefined &&
+					snapshot.fixtures.length !== expectedMeta.fixtureCount) ||
+				(expectedMeta.state !== undefined && snapshot.state !== expectedMeta.state))
+		) {
+			context.logger.info(
+				{ eventId, expectedRevision: expectedMeta.revision, actualRevision: snapshot.revision },
+				"Pinned live publication differs from detail snapshot; returning no player rows"
+			);
+			return new Map();
+		}
 		if (!snapshot) {
 			return new Map(
 				(await fetchLivePerformancesFromDbByEvents(context, [eventId])).map((performance) => [
@@ -1594,7 +1624,8 @@ export const liveRepository: LiveRepository = {
 	async getTargetedLiveRead(
 		context: GraphQLContext,
 		eventId: number,
-		playerIds: number[]
+		playerIds: number[],
+		expectedMeta?: LiveSnapshotMeta | LiveSnapshotReference | null
 	): Promise<TargetedLiveRead> {
 		const readDurableRows = async (): Promise<TargetedLiveRead> => ({
 			performances: await fetchLivePerformanceFromDbByEventsAndPlayerIds(
@@ -1605,18 +1636,30 @@ export const liveRepository: LiveRepository = {
 			meta: null,
 		});
 		try {
-			const publishedMeta = await loadLivePublicationMeta(context, eventId);
+			const publishedMeta = expectedMeta ?? (await loadLivePublicationMeta(context, eventId));
 			if (!publishedMeta?.publicationId) return readDurableRows();
 			const snapshot = await getTargetedLiveDataSnapshot(context, eventId, playerIds, {
 				publicationId: publishedMeta.publicationId,
 				revision: publishedMeta.revision,
-				sourceCheckedAt: publishedMeta.checkedAt,
-				publishedAt: publishedMeta.publishedAt,
-				state: publishedMeta.state,
-				eventLiveCount: publishedMeta.eventLiveCount,
-				fixtureCount: publishedMeta.fixtureCount,
-				fixtureTeamCount: publishedMeta.fixtureTeamCount,
-				bonusTeamCount: publishedMeta.bonusTeamCount,
+				...(publishedMeta.checkedAt === undefined
+					? {}
+					: { sourceCheckedAt: publishedMeta.checkedAt }),
+				...(publishedMeta.publishedAt === undefined
+					? {}
+					: { publishedAt: publishedMeta.publishedAt }),
+				...(publishedMeta.state === undefined ? {} : { state: publishedMeta.state }),
+				...(publishedMeta.eventLiveCount === undefined
+					? {}
+					: { eventLiveCount: publishedMeta.eventLiveCount }),
+				...(publishedMeta.fixtureCount === undefined
+					? {}
+					: { fixtureCount: publishedMeta.fixtureCount }),
+				...(publishedMeta.fixtureTeamCount === undefined
+					? {}
+					: { fixtureTeamCount: publishedMeta.fixtureTeamCount }),
+				...(publishedMeta.bonusTeamCount === undefined
+					? {}
+					: { bonusTeamCount: publishedMeta.bonusTeamCount }),
 			});
 			const meta: LiveSnapshotMeta = {
 				season: snapshot.seasonCode,
@@ -1639,8 +1682,11 @@ export const liveRepository: LiveRepository = {
 		} catch (error) {
 			context.logger.info(
 				{ eventId, err: error instanceof Error ? error.message : "unknown" },
-				"Live publication targeted read unavailable; reading durable player rows"
+				expectedMeta?.publicationId
+					? "Pinned live publication targeted read unavailable; returning no player rows"
+					: "Live publication targeted read unavailable; reading durable player rows"
 			);
+			if (expectedMeta?.publicationId) return { performances: [], meta: null };
 			return readDurableRows();
 		}
 	},

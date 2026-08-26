@@ -3,7 +3,6 @@ import { enqueueEntryPicksSync } from "../../infra/entry-info-sync";
 import type { Entry, EntryEventResult } from "../entries/repository";
 import { entriesService } from "../entries/service";
 import { eventsService } from "../events/service";
-import type { LivePerformance } from "../live/repository";
 import type { LiveSnapshotMeta } from "../live/snapshot-meta";
 import { resolvePreviousEventBaseline } from "./baseline";
 import type { EntryEventTransfersData } from "./transfer-enrichment";
@@ -109,25 +108,6 @@ export type ElementEventResultData = {
 	dgw: boolean;
 };
 
-/** Official event-live total_points is already the complete scoring authority. */
-export const calcOfficialTotalWithEffectiveBonus = (
-	live: LivePerformance | undefined,
-	_effectiveBonus?: number
-): number => {
-	if (!live) return 0;
-	return typeof live.totalPoints === "number" && Number.isFinite(live.totalPoints)
-		? live.totalPoints
-		: 0;
-};
-
-export const calcElementLivePoints = (
-	live: LivePerformance | undefined,
-	_effectiveBonus?: number
-): number => calcOfficialTotalWithEffectiveBonus(live);
-
-// Compatibility export for existing callers and focused FPL-rule tests.
-export { applyAutoSubs } from "./legacy-h2h-adapter";
-
 const scaledEntryValue = (value: number | null | undefined): number =>
 	typeof value === "number" ? value / 10 : 0;
 
@@ -203,8 +183,7 @@ export const entryLiveCalcService = {
 	async calcLivePointsByEntry(
 		context: GraphQLContext,
 		eventId: number,
-		entryId: number,
-		includeLive = true
+		entryId: number
 	): Promise<LiveCalcData> {
 		if (
 			!Number.isSafeInteger(eventId) ||
@@ -223,7 +202,7 @@ export const entryLiveCalcService = {
 				// finalized, the batch service must be able to roll over to its
 				// finalization-scoped cache and observe official multipliers,
 				// automatic_subs, and captain changes.
-				.calcLivePointsForEntries(context, eventId, [entryId], includeLive)
+				.calcLivePointsForEntries(context, eventId, [entryId])
 				.finally(() => stopAggregate?.());
 			const result = batch.results.get(entryId);
 			if (result) return result;
@@ -263,7 +242,9 @@ export const entryLiveCalcService = {
 			// player-level score instead of permanently returning NO_PICKS.
 			enqueueEntryPicksSync(entryId, eventId);
 			const noPicks = buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
-			const managerScores = await loadManagerScores(context, eventId, [entryId]);
+			const managerScores = await loadManagerScores(context, eventId, [entryId], undefined, {
+				includeEffectiveLineup: true,
+			});
 			const manager = buildManagerScore({
 				row: managerScores.rows.get(entryId),
 				upstreamErrorCode: managerScores.errorCode,

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import type { Player, Team } from "../../infra/types";
@@ -8,7 +7,7 @@ import type { Fixture } from "../fixtures/repository";
 import { fixturesService } from "../fixtures/service";
 import type { LivePerformance, TargetedLiveRead } from "../live/repository";
 import { liveRepository } from "../live/repository";
-import { loadLiveSnapshotMeta } from "../live/snapshot-meta";
+import { loadLiveSnapshotMeta, type LiveSnapshotReference } from "../live/snapshot-meta";
 import { playersRepository } from "../players/repository";
 import {
 	type ActiveCaptainData,
@@ -16,7 +15,6 @@ import {
 	type ElementEventResultData,
 	type LiveCalcData,
 } from "./calc-service";
-import { projectLiveLineup } from "./legacy-h2h-adapter";
 import {
 	buildManagerScore,
 	loadManagerScores,
@@ -26,7 +24,11 @@ import {
 } from "./manager-score";
 import { eventsService } from "../events/service";
 import type { EntryEventPick, EntryEventTransferRow } from "./repository";
-import { entryLiveRepository, hasCompleteEntryEventPick } from "./repository";
+import {
+	entryEventPickFromFinalResult,
+	entryLiveRepository,
+	hasCompleteEntryEventPick,
+} from "./repository";
 import { resolvePreviousEventBaseline } from "./baseline";
 import type { EntryEventResult } from "../entries/repository";
 import {
@@ -34,7 +36,7 @@ import {
 	type EntryEventTransfersData,
 	enrichTransferRows,
 } from "./transfer-enrichment";
-import { stableStringify } from "../../infra/stringify";
+import type { EffectiveLineupRow } from "../../infra/manager-live-client";
 
 export type BatchLiveCalcResult = {
 	results: Map<number, LiveCalcData>;
@@ -48,6 +50,40 @@ export type BatchLiveCalcResult = {
 };
 
 const MAX_ENTRY_BATCH = 500;
+
+/**
+ * Data fixes one event-live publication for the whole manager-live request.
+ * When GraphQL could not resolve the publication manifest before the request,
+ * use the identity returned by Data and fence the player-detail read to the
+ * same publication. A conflicting set of refs is a hard detail-read miss; it
+ * is never converted into a synthetic publication identity.
+ */
+type DataLiveReferenceResolution = {
+	reference: LiveSnapshotReference | null;
+	conflict: boolean;
+};
+
+const dataLiveReferenceFromRows = (
+	rows: ReadonlyMap<number, OfficialManagerScoreRow>
+): DataLiveReferenceResolution => {
+	let reference: LiveSnapshotReference | null = null;
+	for (const row of rows.values()) {
+		const provenance = row.provenance;
+		if (!provenance?.livePublicationId || !provenance.liveRevision) continue;
+		const next = {
+			publicationId: provenance.livePublicationId,
+			revision: provenance.liveRevision,
+		};
+		if (!reference) {
+			reference = next;
+			continue;
+		}
+		if (reference.publicationId !== next.publicationId || reference.revision !== next.revision) {
+			return { reference: null, conflict: true };
+		}
+	}
+	return { reference, conflict: false };
+};
 
 export const assertValidEntryBatch = (entryIds: readonly number[]): void => {
 	if (entryIds.length > MAX_ENTRY_BATCH) {
@@ -77,6 +113,21 @@ type PerEntryData = {
 	previousResult: EntryEventResult | null;
 };
 
+const hasCompleteLineupMembership = (
+	picks: readonly { element: number }[],
+	authorityLineup: readonly EffectiveLineupRow[]
+): boolean => {
+	if (picks.length !== authorityLineup.length) return false;
+	const pickElements = new Set(picks.map((pick) => pick.element));
+	const authorityElements = new Set(authorityLineup.map((row) => row.elementId));
+	return (
+		pickElements.size === picks.length &&
+		authorityElements.size === authorityLineup.length &&
+		pickElements.size === authorityElements.size &&
+		[...pickElements].every((elementId) => authorityElements.has(elementId))
+	);
+};
+
 const PLAY_STATUS = {
 	BLANK: 0,
 	NOT_STARTED: 1,
@@ -99,68 +150,6 @@ const parseNullableFloat = (value: string | null | undefined): number | null => 
 	}
 	const parsed = Number.parseFloat(value);
 	return Number.isFinite(parsed) ? parsed : null;
-};
-
-const buildFinalManagerScoreRow = (
-	season: string,
-	eventId: number,
-	entryId: number,
-	finalized: EntryEventResult,
-	checkedAt: string
-): OfficialManagerScoreRow => {
-	const revisionHash = createHash("sha256")
-		.update(
-			stableStringify({
-				season,
-				eventId,
-				entryId,
-				eventPoints: finalized.eventPoints,
-				netEventPoints: finalized.eventNetPoints,
-				eventRank: finalized.eventRank,
-				overallPoints: finalized.overallPoints,
-				overallRank: finalized.overallRank,
-				transferCost: finalized.eventTransfersCost,
-				checkedAt,
-			}),
-			"utf8"
-		)
-		.digest("hex")
-		.slice(0, 24);
-	return {
-		season,
-		eventId,
-		entryId,
-		eventPoints: finalized.eventPoints,
-		netEventPoints: finalized.eventNetPoints,
-		totalPoints: finalized.overallPoints,
-		totalScope: "OVERALL",
-		eventRank: finalized.eventRank,
-		overallRank: finalized.overallRank,
-		leagueRank: null,
-		transferCost: finalized.eventTransfersCost,
-		eventPointSemantics:
-			finalized.eventPoints === finalized.eventNetPoints && finalized.eventTransfersCost === 0
-				? "ZERO_COST_EQUIVALENT"
-				: finalized.eventPoints - finalized.eventTransfersCost === finalized.eventNetPoints
-					? "GROSS"
-					: "UNKNOWN",
-		source: "FPL_FINAL_RESULT",
-		revision: `final:${eventId}:${entryId}:${revisionHash}`,
-		checkedAt,
-		upstreamUpdatedAt: checkedAt,
-		staleAt: new Date(Date.parse(checkedAt) + 90_000).toISOString(),
-	};
-};
-
-const finalizedPicksRevision = (eventId: number, results: readonly EntryEventResult[]): string => {
-	const evidence = results
-		.map((result) => ({ entryId: result.entryId, richSyncedAt: result.richSyncedAt }))
-		.sort((left, right) => left.entryId - right.entryId);
-	const digest = createHash("sha256")
-		.update(stableStringify({ eventId, evidence }), "utf8")
-		.digest("hex")
-		.slice(0, 24);
-	return `event-result:${eventId}:${digest}`;
 };
 
 const elementTypeName = (player: Player | null): string => {
@@ -348,7 +337,8 @@ const computeSingleEntry = (
 	eventId: number,
 	perEntry: PerEntryData,
 	shared: SharedData,
-	provisional: boolean
+	provisional: boolean,
+	authorityLineup: readonly EffectiveLineupRow[]
 ): LiveCalcData => {
 	const { entry, pickEntity, transferRows, previousResult } = perEntry;
 	const { liveByPlayer, fixturesByTeam, teamsById, playersById } = shared;
@@ -437,39 +427,72 @@ const computeSingleEntry = (
 		};
 	});
 
-	const isBenchBoost = chip === "BENCH_BOOST";
-	// FPL publishes final automatic_subs and the effective captain only when the
-	// Gameweek settles. Until then, project the same bench-order and formation
-	// rules from the revision-pinned live player payload. Final rows continue to
-	// use the official multipliers unchanged.
-	let activePicks: ElementEventResultData[];
-	let captainForScoring: ElementEventResultData | null;
-	let livePoints: number;
-	if (provisional) {
-		const projection = projectLiveLineup(pickList, chip);
-		activePicks = projection.activePicks;
-		captainForScoring = projection.captainForScoring;
-		livePoints = projection.points;
-	} else {
-		activePicks = [];
-		for (const pick of pickList) {
-			const isActive = pick.multiplier > 0;
-			pick.pickActive = isActive;
-			pick.autoSub = !isBenchBoost && pick.position > 11 && pick.multiplier > 0;
-			if (isActive) activePicks.push(pick);
-		}
-		captainForScoring =
-			pickList.find((pick) => pick.multiplier >= 2) ??
-			pickList.find((pick) => pick.isCaptain) ??
-			null;
-		livePoints = activePicks.reduce((sum, pick) => sum + pick.totalPoints * pick.multiplier, 0);
-	}
-
-	const liveNetPoints = livePoints - transferCost;
 	const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
 	const lastOverallPoints = baseline.overallPoints;
 	const lastOverallRank = baseline.overallRank ?? 0;
 	const lastValue = asScaled(baseline.teamValue, 10);
+	const transfersList: EntryEventTransfersData[] = enrichTransferRows({
+		entryId,
+		eventId,
+		transferRows,
+		playersById,
+		teamsById,
+		liveByPlayer,
+	});
+
+	const authorityByElement = new Map(authorityLineup.map((row) => [row.elementId, row] as const));
+	const hasCompleteAuthorityLineup = hasCompleteLineupMembership(pickList, authorityLineup);
+	if (!hasCompleteAuthorityLineup) {
+		return {
+			availability: pickEntity && pickEntity.picks.length > 0 ? "READY" : "NO_PICKS",
+			provisional,
+			snapshot: null,
+			score: unavailableManagerScore(transferCost),
+			rank: 0,
+			event: eventId,
+			entry: entryId,
+			entryName: entry?.entryName ?? "",
+			playerName: entry?.playerName ?? "",
+			region: entry?.region ?? null,
+			startedEvent: safeInt(entry?.startedEvent),
+			overallPoints: safeInt(entry?.overallPoints),
+			overallRank: safeInt(entry?.overallRank),
+			value: asScaled(entry?.teamValue ?? null, 10),
+			bank: asScaled(entry?.bank ?? null, 10),
+			teamValue: asScaled(entry?.teamValue ?? null, 10),
+			totalTransfers: safeInt(entry?.totalTransfers),
+			lastOverallPoints,
+			lastOverallRank,
+			lastValue,
+			chip,
+			livePoints: 0,
+			transferCost,
+			liveNetPoints: 0,
+			liveTotalPoints: 0,
+			played: 0,
+			toPlay: 0,
+			playedCaptain: 0,
+			captainName: "",
+			pickList: [],
+			transfersList,
+			activeCaptain: { id: 0, name: "", points: 0 },
+		};
+	}
+	for (const pick of pickList) {
+		const row = authorityByElement.get(pick.element)!;
+		pick.multiplier = row.effectiveMultiplier;
+		pick.pickActive = row.pickActive;
+		pick.autoSub = row.autoSub;
+		pick.position = row.position;
+		pick.isCaptain = row.isCaptain;
+		pick.isViceCaptain = row.isViceCaptain;
+	}
+	const activePicks = pickList.filter((pick) => pick.pickActive);
+	const captainForScoring =
+		pickList.find((pick) => authorityByElement.get(pick.element)?.captainForScoring) ?? null;
+	const livePoints = activePicks.reduce((sum, pick) => sum + pick.totalPoints * pick.multiplier, 0);
+
+	const liveNetPoints = livePoints - transferCost;
 	const liveTotalPoints = lastOverallPoints + liveNetPoints;
 
 	const played = activePicks.filter((p) => p.isPlayed || p.bgw || p.isGwFinished).length;
@@ -482,15 +505,6 @@ const computeSingleEntry = (
 		name: captainForScoring?.webName ?? "",
 		points: captainForScoring?.totalPoints ?? 0,
 	};
-
-	const transfersList: EntryEventTransfersData[] = enrichTransferRows({
-		entryId,
-		eventId,
-		transferRows,
-		playersById,
-		teamsById,
-		liveByPlayer,
-	});
 
 	return {
 		availability: pickEntity && pickEntity.picks.length > 0 ? "READY" : "NO_PICKS",
@@ -533,7 +547,6 @@ export const entryLiveBatchService = {
 		context: GraphQLContext,
 		eventId: number,
 		entryIds: number[],
-		_includeLive = true,
 		prefetched?: {
 			liveByPlayer?: Promise<Map<number, LivePerformance>>;
 			fixtures?: Promise<Fixture[]>;
@@ -541,6 +554,7 @@ export const entryLiveBatchService = {
 			picksByEntry?: Promise<Map<number, EntryEventPick>>;
 			tournamentId?: number;
 			managerScores?: ManagerScoreLoad;
+			liveRef?: LiveSnapshotReference;
 		}
 	): Promise<BatchLiveCalcResult> {
 		assertValidEntryBatch(entryIds);
@@ -554,9 +568,9 @@ export const entryLiveBatchService = {
 			};
 		}
 
-		// Phase 1: resolve identity and picks. Entries without picks must not enter
-		// Live, fixture, player, transfer or bonus acquisition.
-		const [entriesById, picksByEntry, previousResultsByEntry, managerScores, event] =
+		// Phase 1: resolve identity and picks. Every active score is produced by
+		// Data's projected materialization and its revision-pinned effective lineup.
+		const [entriesById, picksByEntry, previousResultsByEntry, event, loadedLiveMeta] =
 			await Promise.all([
 				entriesService.getEntriesByIds(context, entryIds),
 				prefetched?.picksByEntry ??
@@ -564,14 +578,57 @@ export const entryLiveBatchService = {
 				eventId > 1
 					? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
 					: Promise.resolve(new Map<number, EntryEventResult>()),
-				prefetched?.managerScores ??
-					loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId),
 				eventsService.getEventById(context, eventId).catch(() => null),
+				loadLiveSnapshotMeta(context, eventId).catch(() => null),
 			]);
+		const pinnedLiveMeta = prefetched?.liveRef ?? loadedLiveMeta;
+		const fullSnapshotMeta =
+			loadedLiveMeta &&
+			(prefetched?.liveRef === undefined ||
+				(loadedLiveMeta.publicationId === prefetched.liveRef.publicationId &&
+					loadedLiveMeta.revision === prefetched.liveRef.revision))
+				? loadedLiveMeta
+				: null;
+		const provisional = !(event?.finished === true && event.dataChecked === true);
+		const prefetchedManagerScores = prefetched?.managerScores;
+		const prefetchedManagerScoresAreUsable =
+			prefetchedManagerScores !== undefined &&
+			entryIds.every((entryId) => {
+				const row = prefetchedManagerScores.rows.get(entryId);
+				if (!row?.effectiveLineup || row.effectiveLineup.length !== 15) return false;
+				if (!provisional || !pinnedLiveMeta?.publicationId) return true;
+				return (
+					row.provenance?.livePublicationId === pinnedLiveMeta.publicationId &&
+					row.provenance.liveRevision === pinnedLiveMeta.revision
+				);
+			});
+		const managerScores = prefetchedManagerScoresAreUsable
+			? prefetchedManagerScores
+			: await loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId, {
+					includeEffectiveLineup: true,
+					...(pinnedLiveMeta?.publicationId
+						? {
+								liveRef: {
+									publicationId: pinnedLiveMeta.publicationId,
+									revision: pinnedLiveMeta.revision,
+								},
+							}
+						: {}),
+				});
+		const dataLiveReference = dataLiveReferenceFromRows(managerScores.rows);
+		// A manifest resolved before the Data call wins; otherwise use the exact
+		// publication identity returned by Data. Both reads in this operation must
+		// be fenced to one revision.
+		const detailLiveReference = provisional
+			? pinnedLiveMeta?.publicationId
+				? pinnedLiveMeta
+				: dataLiveReference.reference
+			: null;
+		const detailReferenceUnavailable =
+			provisional && (dataLiveReference.conflict || detailLiveReference === null);
 		// Manager headline availability is independent from lineup availability.
 		// Keep NO_PICKS metadata cheap while still resolving the official manager
 		// score; final lifecycle evidence requires a persisted lineup/result pair.
-		const provisional = !(event?.finished === true && event.dataChecked === true);
 		let finalizedResultsByEntry = new Map<number, EntryEventResult>();
 		if (!provisional) {
 			// FPL can publish automatic_subs and the effective captain after the
@@ -582,22 +639,38 @@ export const entryLiveBatchService = {
 				entryIds,
 				eventId
 			);
-			finalizedResultsByEntry = finalizedResults;
-			const durableEntryIds = entryIds.filter((entryId) => finalizedResults.has(entryId));
-			const settlingEntryIds = entryIds.filter((entryId) => !finalizedResults.has(entryId));
+			// A final result is usable only when its rich publication is at or after
+			// FPL's data_checked_at fence. Historical/backfilled events may carry the
+			// accepted `dataChecked=true` flag without a timestamp; in that case the
+			// rich result's own checked timestamp is the only available final-result
+			// freshness signal, so retain it instead of silently discarding canonical
+			// result picks.
+			const finalFreshAfter = event?.dataCheckedAt ? Date.parse(event.dataCheckedAt) : null;
+			const freshFinalizedResults = new Map(
+				[...finalizedResults].filter(([, result]) => {
+					const richSyncedAt = Date.parse(result.richSyncedAt);
+					return (
+						Number.isFinite(richSyncedAt) &&
+						(finalFreshAfter === null ||
+							(!Number.isNaN(finalFreshAfter) && richSyncedAt >= finalFreshAfter))
+					);
+				})
+			);
+			finalizedResultsByEntry = freshFinalizedResults;
+			const durableEntryIds = entryIds.filter((entryId) => freshFinalizedResults.has(entryId));
+			const settlingEntryIds = entryIds.filter((entryId) => !freshFinalizedResults.has(entryId));
 			const durableResults = durableEntryIds
-				.map((entryId) => finalizedResults.get(entryId))
+				.map((entryId) => freshFinalizedResults.get(entryId))
 				.filter((result): result is EntryEventResult => result !== undefined);
 			const [durablePicks, settlingPicks] = await Promise.all([
-				durableEntryIds.length > 0
-					? entryLiveRepository.getEntryEventPicksByIds(
-							context,
-							durableEntryIds,
-							eventId,
-							false,
-							finalizedPicksRevision(eventId, durableResults)
-						)
-					: Promise.resolve(new Map<number, EntryEventPick>()),
+				Promise.resolve(
+					new Map(
+						durableResults.flatMap((result) => {
+							const pick = entryEventPickFromFinalResult(result);
+							return [[result.entryId, pick] as const];
+						})
+					)
+				),
 				settlingEntryIds.length > 0
 					? entryLiveRepository.getEntryEventPicksByIds(context, settlingEntryIds, eventId, true)
 					: Promise.resolve(new Map<number, EntryEventPick>()),
@@ -615,30 +688,16 @@ export const entryLiveBatchService = {
 			if (!readyEntryIdSet.has(entryId)) {
 				const entry = entriesById.get(entryId) ?? null;
 				const previousResult = previousResultsByEntry.get(entryId) ?? null;
-				const baseline = resolvePreviousEventBaseline(entry, eventId, previousResult);
 				const finalized = finalizedResultsByEntry.get(entryId);
-				const finalRow = finalized
-					? buildFinalManagerScoreRow(
-							context.currentSeason.seasonCode,
-							eventId,
-							entryId,
-							finalized,
-							finalized.richSyncedAt
-						)
-					: undefined;
+				const authoritativeRow = managerScores.rows.get(entryId);
 				const noPicks = buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
 				const manager = buildManagerScore({
-					row: finalRow ?? managerScores.rows.get(entryId),
+					row: authoritativeRow,
 					upstreamErrorCode: managerScores.errorCode,
 					provisional,
 					available: false,
 					transferCost: finalized?.eventTransfersCost ?? 0,
 					detailEventPoints: finalized?.eventPoints ?? 0,
-					previousOverallPoints: finalized
-						? finalized.overallPoints - finalized.eventNetPoints
-						: baseline.resolved
-							? baseline.overallPoints
-							: null,
 					nextRefreshAt: managerScores.nextRefreshAt,
 				});
 				results.set(entryId, {
@@ -673,27 +732,25 @@ export const entryLiveBatchService = {
 
 		// Phase 2: load reusable data only for entries that actually have picks.
 		// Finalized and historical desks still need the durable player projection
-		// for detail rows. Only the manager headline switches to the official final
-		// result; suppressing this read made finalized entries silently lose details.
+		// for detail rows. The headline remains the Data final-result row after the
+		// event is data_checked.
 		// A caller may omit the heavy display detail, but every active score still
-		// requires the coherent event-live payload. includeLive is never allowed to
-		// switch the manager headline to another scoring source.
+		// requires the coherent event-live payload. Detail reads never switch the
+		// manager headline to another scoring source.
 		const needsLiveDetails = readyEntryIds.length > 0;
 		const useTargetedLiveRead =
 			needsLiveDetails && readyEntryIds.length === 1 && prefetched?.liveByPlayer === undefined;
-		const [liveByPlayerRaw, fixtures, teams, transfersByEntry, fullSnapshotMeta] =
-			await Promise.all([
-				prefetched?.liveByPlayer ??
+		const [liveByPlayerRaw, fixtures, teams, transfersByEntry] = await Promise.all([
+			detailReferenceUnavailable
+				? Promise.resolve(new Map<number, LivePerformance>())
+				: (prefetched?.liveByPlayer ??
 					(needsLiveDetails && !useTargetedLiveRead
-						? liveRepository.getAllLivePerformances(context, eventId)
-						: Promise.resolve(new Map<number, LivePerformance>())),
-				prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
-				prefetched?.teams ?? playersRepository.listTeams(context),
-				entryLiveRepository.getEntryEventTransfersByIds(context, readyEntryIds, eventId),
-				needsLiveDetails && !useTargetedLiveRead
-					? loadLiveSnapshotMeta(context, eventId)
-					: Promise.resolve(null),
-			]);
+						? liveRepository.getAllLivePerformances(context, eventId, detailLiveReference)
+						: Promise.resolve(new Map<number, LivePerformance>()))),
+			prefetched?.fixtures ?? fixturesService.getEventFixtures(context, eventId),
+			prefetched?.teams ?? playersRepository.listTeams(context),
+			entryLiveRepository.getEntryEventTransfersByIds(context, readyEntryIds, eventId),
+		]);
 
 		// Collect all unique player IDs from picks and transfers
 		const allPlayerIds = new Set<number>();
@@ -714,9 +771,20 @@ export const entryLiveBatchService = {
 		let targetedLiveError: Error | null = null;
 		const loadTargetedLive = async (): Promise<TargetedLiveRead | null> => {
 			if (!useTargetedLiveRead) return null;
+			// During the live phase the detail read must be pinned to the same
+			// publication as the headline. Once the event is settled there is no
+			// live ref to pin: use the repository's unpinned targeted read, which
+			// selects the durable final player rows when the live publication is
+			// gone. Never turn a missing provisional ref into an unpinned read.
+			if (detailReferenceUnavailable) return null;
 			const stopSnapshot = context.requestTiming?.start("entryLive.liveSnapshot");
 			try {
-				return await liveRepository.getTargetedLiveRead(context, eventId, playerIds);
+				return await liveRepository.getTargetedLiveRead(
+					context,
+					eventId,
+					playerIds,
+					detailLiveReference ?? null
+				);
 			} catch (error) {
 				targetedLiveError = error instanceof Error ? error : new Error("Live data unavailable");
 				context.logger.info(
@@ -771,7 +839,9 @@ export const entryLiveBatchService = {
 		// Phase 4: Compute per-entry (pure CPU, zero I/O)
 		for (const entryId of readyEntryIds) {
 			try {
-				if (targetedLiveError) throw targetedLiveError;
+				if (targetedLiveError) {
+					throw targetedLiveError;
+				}
 				const perEntry: PerEntryData = {
 					entryId,
 					entry: entriesById.get(entryId) ?? null,
@@ -779,49 +849,52 @@ export const entryLiveBatchService = {
 					transferRows: transfersByEntry.get(entryId) ?? [],
 					previousResult: previousResultsByEntry.get(entryId) ?? null,
 				};
+				const authorityLineup = managerScores.rows.get(entryId)?.effectiveLineup ?? [];
 
 				const calcData = {
-					...computeSingleEntry(entryId, eventId, perEntry, shared, provisional),
+					...computeSingleEntry(entryId, eventId, perEntry, shared, provisional, authorityLineup),
 					snapshot: targetedLive?.meta ?? fullSnapshotMeta,
 				};
+				const pickRows = perEntry.pickEntity?.picks ?? [];
+				const detailHasAllLiveRows = pickRows.every((pick) => liveByPlayerMap.has(pick.element));
+				// A pinned publication mismatch is represented as an empty live map by
+				// the repository. Require every pick to have a row so a failed fence
+				// cannot be mistaken for a valid zero-point detail payload. The lineup
+				// membership check also prevents a same-length but different effective
+				// lineup from being treated as a complete detail payload.
+				const detailAvailable =
+					!targetedLiveError &&
+					detailHasAllLiveRows &&
+					hasCompleteLineupMembership(pickRows, authorityLineup);
 				const finalized = finalizedResultsByEntry.get(entryId);
-				const finalRow = finalized
-					? buildFinalManagerScoreRow(
-							context.currentSeason.seasonCode,
-							eventId,
-							entryId,
-							finalized,
-							finalized.richSyncedAt
-						)
-					: undefined;
-				const baseline = resolvePreviousEventBaseline(
-					perEntry.entry,
-					eventId,
-					perEntry.previousResult
-				);
+				const authoritativeRow = managerScores.rows.get(entryId);
 				const manager = buildManagerScore({
-					row: finalRow ?? managerScores.rows.get(entryId),
+					row: authoritativeRow,
 					upstreamErrorCode: managerScores.errorCode,
 					provisional,
-					available: true,
+					available: detailAvailable,
 					transferCost: calcData.transferCost,
 					detailEventPoints: calcData.livePoints,
-					previousOverallPoints: finalized
-						? finalized.overallPoints - finalized.eventNetPoints
-						: baseline.resolved
-							? baseline.overallPoints
-							: null,
-					eventLiveAuthority: calcData.snapshot
-						? {
-								revision: calcData.snapshot.revision,
-								checkedAt: calcData.snapshot.checkedAt,
-							}
-						: null,
-					projectedLineup: provisional,
 					nextRefreshAt: managerScores.nextRefreshAt,
 				});
+				// Never compose a player detail payload from a revision that failed to
+				// reconcile with the authoritative headline.
+				const detailFailedClosed =
+					manager.score.reconciliation === "SOURCE_SKEW" ||
+					manager.score.reconciliation === "NO_LINEUP";
 				results.set(entryId, {
 					...calcData,
+					...(detailFailedClosed
+						? {
+								pickList: [],
+								activeCaptain: { id: 0, name: "", points: 0 },
+								snapshot: null,
+								played: 0,
+								toPlay: 0,
+								playedCaptain: 0,
+								captainName: "",
+							}
+						: {}),
 					score: manager.score,
 					rank: manager.headline.rank,
 					eventTransfers: finalized?.eventTransfers ?? calcData.transfersList.length,

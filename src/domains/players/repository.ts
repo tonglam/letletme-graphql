@@ -2,7 +2,7 @@ import { GraphQLError } from "graphql";
 import type { QueryResultRow } from "pg";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCoreDataSnapshot, getCoreEventSnapshot } from "../../infra/data-snapshot";
+import { getCoreDataSnapshot } from "../../infra/data-snapshot";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
@@ -74,6 +74,18 @@ const applyPlayerEventStats = (player: Player, stats: PlayerEventStatsOverlay): 
 	totalPoints: stats.totalPoints ?? player.totalPoints,
 	selectedByPercent: stats.selectedByPercent ?? player.selectedByPercent,
 });
+
+const eventStatsRevision = async (
+	context: GraphQLContext,
+	eventId: number
+): Promise<string | null> => {
+	const statsContext = await resolvePlayerStatsContext(context, eventId);
+	return statsContext.status === "AVAILABLE" &&
+		statsContext.asOfEventId === eventId &&
+		statsContext.revision !== null
+		? statsContext.revision
+		: null;
+};
 
 const readJsonCache = async <T>(
 	context: GraphQLContext,
@@ -473,11 +485,14 @@ const fetchTopTransferRows = async (
 	direction: "in" | "out",
 	limit: number
 ): Promise<RawTransferRow[]> => {
+	const revision = await eventStatsRevision(context, eventId);
+	if (!revision) return [];
 	const col = direction === "in" ? "transfers_in_event" : "transfers_out_event";
 	const { data, error } = await context.data
-		.read("fpl.player_event_snapshots")
+		.read("fpl.player_event_snapshot_bundles")
 		.select("element_id, event_id, transfers_in_event, transfers_out_event")
 		.eq("event_id", eventId)
+		.eq("publication_revision", revision)
 		.not(col, "is", null)
 		.order(col, { ascending: false })
 		.limit(limit);
@@ -506,25 +521,27 @@ export const playersRepository: PlayersRepository = {
 	): Promise<Player | null> {
 		if (!Number.isSafeInteger(id) || id <= 0) return null;
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) return null;
-		const cacheKey = gqlCacheKey(context, `players:event-stats:${id}:${eventId}`);
-
-		const [basePlayer, cachedStats] = await Promise.all([
+		const [basePlayer, revision] = await Promise.all([
 			this.getPlayerById(context, id),
-			readJsonCache(context, cacheKey, isPlayerEventStatsOverlay),
+			eventStatsRevision(context, eventId),
 		]);
 
 		if (!basePlayer) {
 			return null;
 		}
+		if (!revision) return basePlayer;
+		const cacheKey = gqlCacheKey(context, `players:event-stats:${id}:${eventId}:${revision}`);
+		const cachedStats = await readJsonCache(context, cacheKey, isPlayerEventStatsOverlay);
 		if (cachedStats) {
 			return applyPlayerEventStats(basePlayer, cachedStats);
 		}
 
 		const statsResult = await context.data
-			.read("fpl.player_event_snapshots")
+			.read("fpl.player_event_snapshot_bundles")
 			.select("total_points, selected_by_percent")
 			.eq("event_id", eventId)
 			.eq("element_id", id)
+			.eq("publication_revision", revision)
 			.limit(1);
 
 		if (statsResult.error) {
@@ -568,15 +585,16 @@ export const playersRepository: PlayersRepository = {
 		if (!Number.isSafeInteger(eventId) || eventId <= 0) return new Map();
 		const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0)));
 		if (uniqueIds.length === 0) return new Map();
-		// Lightweight roots do not initialize the full core snapshot at the HTTP
-		// boundary. Pin the event publication before constructing revisioned cache
-		// keys so standalone top-transfer reads remain coherent and cache-safe.
-		if (!context.dataRevision) await getCoreEventSnapshot(context);
+		const [basePlayers, revision] = await Promise.all([
+			this.getPlayersByIds(context, uniqueIds),
+			eventStatsRevision(context, eventId),
+		]);
+		const baseById = new Map(basePlayers.map((player) => [player.id, player]));
+		if (!revision) return baseById;
 		const keys = uniqueIds.map((id) =>
-			gqlCacheKey(context, `players:event-stats:${id}:${eventId}`)
+			gqlCacheKey(context, `players:event-stats:${id}:${eventId}:${revision}`)
 		);
 		let rawValues: (string | null)[];
-		const basePlayersPromise = this.getPlayersByIds(context, uniqueIds);
 		try {
 			rawValues = await context.redis.mget(...keys);
 		} catch (error) {
@@ -584,8 +602,6 @@ export const playersRepository: PlayersRepository = {
 			rawValues = Array.from({ length: uniqueIds.length }, () => null);
 		}
 
-		const basePlayers = await basePlayersPromise;
-		const baseById = new Map(basePlayers.map((player) => [player.id, player]));
 		const overlays = new Map<number, PlayerEventStatsOverlay>();
 		const missIds: number[] = [];
 		for (let i = 0; i < uniqueIds.length; i++) {
@@ -609,9 +625,10 @@ export const playersRepository: PlayersRepository = {
 
 		if (missIds.length > 0) {
 			const statsResult = await context.data
-				.read("fpl.player_event_snapshots")
+				.read("fpl.player_event_snapshot_bundles")
 				.select("element_id, total_points, selected_by_percent")
 				.eq("event_id", eventId)
+				.eq("publication_revision", revision)
 				.in("element_id", missIds);
 
 			if (statsResult.error) {
@@ -637,7 +654,7 @@ export const playersRepository: PlayersRepository = {
 					};
 					overlays.set(id, overlay);
 					pipeline.set(
-						gqlCacheKey(context, `players:event-stats:${id}:${eventId}`),
+						gqlCacheKey(context, `players:event-stats:${id}:${eventId}:${revision}`),
 						JSON.stringify(overlay),
 						"EX",
 						QUERY_CACHE_TTL_SECONDS.HISTORICAL
@@ -699,8 +716,8 @@ export const playersRepository: PlayersRepository = {
 			return null;
 		});
 		const cacheRevision = marketContext
-			? `${context.dataRevision ?? "core-postgres"}.${marketContext.revision}`
-			: (context.dataRevision ?? "core-postgres");
+			? `${context.dataRevision ?? "core-postgres"}.${marketContext.revision}.${statsContext.revision ?? "stats-unavailable"}`
+			: `${context.dataRevision ?? "core-postgres"}.${statsContext.revision ?? "stats-unavailable"}`;
 		const cacheKey = gqlCacheKey(
 			context,
 			`players:picker:v2:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${ownershipBand ?? "ANY"}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`,
@@ -783,10 +800,16 @@ export const playersRepository: PlayersRepository = {
 				FROM fpl.players player
 				JOIN fpl.teams team
 				  ON team.season_id = player.season_id AND team.team_id = player.team_id
+				LEFT JOIN fpl.player_event_snapshot_publications event_stats_publication
+				  ON event_stats_publication.season_id = player.season_id
+				 AND event_stats_publication.event_id = $2
+				 AND event_stats_publication.revision::text = $14
 				LEFT JOIN fpl.player_event_snapshots event_stats
 				  ON event_stats.season_id = player.season_id
 				 AND event_stats.element_id = player.element_id
 				 AND event_stats.event_id = $2
+				 AND event_stats_publication.season_id = event_stats.season_id
+				 AND event_stats_publication.event_id = event_stats.event_id
 				LEFT JOIN latest_market latest ON TRUE
 				LEFT JOIN fpl.player_market_snapshots market
 				  ON market.season_id = player.season_id
@@ -828,6 +851,7 @@ export const playersRepository: PlayersRepository = {
 			pinnedCoreRevision,
 			marketContext?.snapshotDate ?? null,
 			marketContext?.capturedAt ?? null,
+			statsContext.revision,
 		];
 		const result = await context.database.query<SqlPickerRow>(sql, pickerParams);
 		const returnedItems = result.rows.map(mapSqlPickerRow);
@@ -883,6 +907,7 @@ export const playersRepository: PlayersRepository = {
 					pinnedCoreRevision,
 					marketContext?.snapshotDate ?? null,
 					marketContext?.capturedAt ?? null,
+					statsContext.revision,
 				]
 			);
 			totalCount = Number(countResult.rows[0]?.total_count ?? 0);

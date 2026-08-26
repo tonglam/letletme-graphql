@@ -1,21 +1,19 @@
 /**
  * Thin client for the Data service's official manager-live publication.
  *
- * During an active event, GraphQL uses this endpoint only for manager/rank
- * metadata and reconciliation. The score itself is rebuilt from the coherent
- * event-live publication. After data_checked, the final result row is
- * authoritative.
+ * Data is the sole manager-score authority. Active events use the projected
+ * event-live materialization; after data_checked the final result row is used.
  */
 
 import { metrics } from "./metrics";
 
-// GraphQL only reads Data's cache/checkpoint. Refresh work belongs to the Data
-// worker, so an internal miss must degrade to a bounded unavailable result
-// instead of consuming the Web/GraphQL 15-second request budget.
-const MANAGER_LIVE_TIMEOUT_MS = 1_000;
+// A cold classic tournament request can refresh standings and enrich the
+// roster with official entry summaries. Keep enough room for that bounded
+// upstream crawl before treating the Data service as unavailable.
+const MANAGER_LIVE_TIMEOUT_MS = 15_000;
+const PROJECTED_ALGORITHM_VERSION = "fpl-projected-autosubs-v1";
 
-export type ManagerLiveSource =
-	"FPL_EVENT_LIVE" | "FPL_ENTRY_SUMMARY" | "FPL_CLASSIC_STANDINGS" | "FPL_FINAL_RESULT";
+export type ManagerLiveSource = "FPL_EVENT_LIVE" | "FPL_FINAL_RESULT";
 export type ManagerLiveTotalScope = "OVERALL" | "CLASSIC_PHASE";
 export type ManagerLiveDataAvailability = "FRESH" | "LAST_GOOD" | "PARTIAL" | "UNAVAILABLE";
 export type ManagerLiveServedFrom = "REDIS" | "POSTGRES" | "MIXED" | "NONE";
@@ -29,6 +27,41 @@ export type ManagerLiveTournamentCoverage = {
 	managerRevision: string | null;
 	error: string | null;
 	state: ManagerLiveCoverageState;
+};
+
+export type ManagerLiveCalculationMode = "PROJECTED_AUTOSUBS" | "FINAL_RESULT";
+
+export type ManagerScoreProvenance = {
+	scoreSource: "FPL_EVENT_LIVE" | "FPL_FINAL_RESULT";
+	calculationMode: ManagerLiveCalculationMode;
+	algorithmVersion: string | null;
+	inputRevision: string;
+	scoreRevision: string;
+	rankRevision: string | null;
+	livePublicationId: string | null;
+	liveRevision: string | null;
+	liveCheckedAt: string | null;
+	picksRevision: string | null;
+	picksCheckedAt: string | null;
+	previousTotalsRevision: string | null;
+	previousTotalsThroughEventId: number | null;
+	resultRevision: string | null;
+	resultCheckedAt: string | null;
+	dataCheckedAt: string | null;
+	rankSource: "FPL_ENTRY_SUMMARY" | "FPL_CLASSIC_STANDINGS" | null;
+	rankCheckedAt: string | null;
+};
+
+export type EffectiveLineupRow = {
+	elementId: number;
+	position: number;
+	sourceMultiplier: number;
+	effectiveMultiplier: number;
+	pickActive: boolean;
+	autoSub: boolean;
+	isCaptain: boolean;
+	isViceCaptain: boolean;
+	captainForScoring: boolean;
 };
 
 export type ManagerLiveScoreRow = {
@@ -49,6 +82,10 @@ export type ManagerLiveScoreRow = {
 	checkedAt: string;
 	upstreamUpdatedAt: string | null;
 	staleAt: string;
+	calculationMode: ManagerLiveCalculationMode;
+	algorithmVersion: string | null;
+	provenance: ManagerScoreProvenance;
+	effectiveLineup?: EffectiveLineupRow[];
 };
 
 export type ManagerLiveResolveResult = {
@@ -61,9 +98,17 @@ export type ManagerLiveResolveResult = {
 	rows: ManagerLiveScoreRow[];
 	missingEntryIds: number[];
 	partial: boolean;
-	errorCode: "UNSUPPORTED_H2H_LIVE" | "UPSTREAM_UNAVAILABLE" | "UPSTREAM_RATE_LIMITED" | null;
+	errorCode:
+		| "UNSUPPORTED_H2H_LIVE"
+		| "UPSTREAM_UNAVAILABLE"
+		| "UPSTREAM_RATE_LIMITED"
+		| "REVISION_UNAVAILABLE"
+		| "INPUT_INCOMPLETE"
+		| null;
 	checkedAt: string;
-	nextRefreshAt: string | null;
+	servedAt?: string;
+	calculationMode: ManagerLiveCalculationMode;
+	nextRefreshAt: string;
 	tournamentCoverage?: ManagerLiveTournamentCoverage | null;
 };
 
@@ -79,16 +124,119 @@ export type ManagerLiveFetchResult = {
 	checkedAt: string | null;
 	tournamentCoverage?: ManagerLiveTournamentCoverage | null;
 	nextRefreshAt: string | null;
+	servedAt?: string;
+	calculationMode?: ManagerLiveCalculationMode;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
-const isNullableNumber = (value: unknown): value is number | null | undefined =>
-	value === null || value === undefined || (typeof value === "number" && Number.isFinite(value));
+const isNullableSafeInteger = (value: unknown): value is number | null =>
+	value === null || (typeof value === "number" && Number.isSafeInteger(value));
 
-const isNullableString = (value: unknown): value is string | null | undefined =>
-	value === null || value === undefined || typeof value === "string";
+const isIsoDateTime = (value: unknown): value is string =>
+	typeof value === "string" && value.trim() !== "" && Number.isFinite(Date.parse(value));
+
+const isNullableIsoDateTime = (value: unknown): value is string | null =>
+	value === null || isIsoDateTime(value);
+
+const isNonEmptyString = (value: unknown): value is string =>
+	typeof value === "string" && value.trim() !== "";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const isCalculationMode = (value: unknown): value is ManagerLiveCalculationMode =>
+	value === "PROJECTED_AUTOSUBS" || value === "FINAL_RESULT";
+
+const parsePositiveSafeIntegerArray = (value: unknown): number[] | null => {
+	if (!Array.isArray(value)) return null;
+	const result: number[] = [];
+	for (const item of value as unknown[]) {
+		if (typeof item !== "number" || !Number.isSafeInteger(item) || item <= 0) return null;
+		result.push(item);
+	}
+	return result;
+};
+
+const parseProvenance = (value: unknown): ManagerScoreProvenance | null => {
+	if (!isRecord(value)) return null;
+	if (
+		(value.scoreSource !== "FPL_EVENT_LIVE" && value.scoreSource !== "FPL_FINAL_RESULT") ||
+		!isCalculationMode(value.calculationMode) ||
+		(value.algorithmVersion !== null && !isNonEmptyString(value.algorithmVersion)) ||
+		!isNonEmptyString(value.inputRevision) ||
+		!isNonEmptyString(value.scoreRevision) ||
+		(value.rankRevision !== null && !isNonEmptyString(value.rankRevision)) ||
+		(value.livePublicationId !== null &&
+			(!isNonEmptyString(value.livePublicationId) || !UUID_RE.test(value.livePublicationId))) ||
+		(value.liveRevision !== null && !isNonEmptyString(value.liveRevision)) ||
+		!isNullableIsoDateTime(value.liveCheckedAt) ||
+		(value.picksRevision !== null && !isNonEmptyString(value.picksRevision)) ||
+		!isNullableIsoDateTime(value.picksCheckedAt) ||
+		(value.previousTotalsRevision !== null && !isNonEmptyString(value.previousTotalsRevision)) ||
+		!isNullableSafeInteger(value.previousTotalsThroughEventId) ||
+		(value.previousTotalsThroughEventId !== null && value.previousTotalsThroughEventId < 0) ||
+		(value.resultRevision !== null && !isNonEmptyString(value.resultRevision)) ||
+		!isNullableIsoDateTime(value.resultCheckedAt) ||
+		!isNullableIsoDateTime(value.dataCheckedAt) ||
+		(value.rankSource !== "FPL_ENTRY_SUMMARY" &&
+			value.rankSource !== "FPL_CLASSIC_STANDINGS" &&
+			value.rankSource !== null) ||
+		!isNullableIsoDateTime(value.rankCheckedAt)
+	) {
+		return null;
+	}
+	return value as unknown as ManagerScoreProvenance;
+};
+
+const parseEffectiveLineup = (value: unknown): EffectiveLineupRow[] | undefined => {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || value.length !== 15) return undefined;
+	const rows: EffectiveLineupRow[] = [];
+	for (const item of value) {
+		if (!isRecord(item)) return undefined;
+		if (
+			typeof item.elementId !== "number" ||
+			!Number.isSafeInteger(item.elementId) ||
+			item.elementId <= 0 ||
+			typeof item.position !== "number" ||
+			!Number.isSafeInteger(item.position) ||
+			item.position < 1 ||
+			item.position > 15 ||
+			typeof item.sourceMultiplier !== "number" ||
+			!Number.isSafeInteger(item.sourceMultiplier) ||
+			item.sourceMultiplier < 0 ||
+			item.sourceMultiplier > 3 ||
+			typeof item.effectiveMultiplier !== "number" ||
+			!Number.isSafeInteger(item.effectiveMultiplier) ||
+			item.effectiveMultiplier < 0 ||
+			item.effectiveMultiplier > 3 ||
+			typeof item.pickActive !== "boolean" ||
+			typeof item.autoSub !== "boolean" ||
+			typeof item.isCaptain !== "boolean" ||
+			typeof item.isViceCaptain !== "boolean" ||
+			typeof item.captainForScoring !== "boolean"
+		) {
+			return undefined;
+		}
+		if (item.pickActive ? item.effectiveMultiplier <= 0 : item.effectiveMultiplier !== 0) {
+			return undefined;
+		}
+		rows.push(item as unknown as EffectiveLineupRow);
+	}
+	if (
+		new Set(rows.map((row) => row.elementId)).size !== rows.length ||
+		new Set(rows.map((row) => row.position)).size !== rows.length ||
+		rows.filter((row) => row.isCaptain).length !== 1 ||
+		rows.filter((row) => row.isViceCaptain).length !== 1 ||
+		rows.some((row) => row.isCaptain && row.isViceCaptain) ||
+		rows.filter((row) => row.captainForScoring).length > 1 ||
+		rows.some((row) => row.captainForScoring && (!row.pickActive || row.effectiveMultiplier <= 0))
+	) {
+		return undefined;
+	}
+	return rows;
+};
 
 const readEnv = (key: "LETLETME_DATA_URL" | "LETLETME_DATA_API_KEY"): string => {
 	const value = Bun.env[key] ?? process.env[key];
@@ -142,35 +290,96 @@ const parseRow = (value: unknown): ManagerLiveScoreRow | null => {
 	if (
 		typeof value.entryId !== "number" ||
 		!Number.isSafeInteger(value.entryId) ||
+		value.entryId <= 0 ||
 		typeof value.eventId !== "number" ||
 		!Number.isSafeInteger(value.eventId) ||
-		typeof value.checkedAt !== "string" ||
-		typeof value.revision !== "string" ||
-		(value.source !== "FPL_EVENT_LIVE" &&
-			value.source !== "FPL_ENTRY_SUMMARY" &&
-			value.source !== "FPL_CLASSIC_STANDINGS" &&
-			value.source !== "FPL_FINAL_RESULT") ||
+		value.eventId <= 0 ||
+		!isIsoDateTime(value.checkedAt) ||
+		!isNonEmptyString(value.revision) ||
+		(value.source !== "FPL_EVENT_LIVE" && value.source !== "FPL_FINAL_RESULT") ||
 		(value.totalScope !== "OVERALL" && value.totalScope !== "CLASSIC_PHASE") ||
 		typeof value.season !== "string" ||
-		typeof value.staleAt !== "string" ||
-		!isNullableNumber(value.eventPoints) ||
-		!isNullableNumber(value.netEventPoints) ||
-		!isNullableNumber(value.totalPoints) ||
-		!isNullableNumber(value.eventRank) ||
-		!isNullableNumber(value.overallRank) ||
-		!isNullableNumber(value.leagueRank) ||
-		!isNullableNumber(value.transferCost) ||
+		value.season.trim() === "" ||
+		!isIsoDateTime(value.staleAt) ||
+		!isNullableSafeInteger(value.eventPoints) ||
+		!isNullableSafeInteger(value.netEventPoints) ||
+		!isNullableSafeInteger(value.totalPoints) ||
+		!isNullableSafeInteger(value.eventRank) ||
+		!isNullableSafeInteger(value.overallRank) ||
+		!isNullableSafeInteger(value.leagueRank) ||
+		!isNullableSafeInteger(value.transferCost) ||
 		(value.eventPointSemantics !== "GROSS" &&
 			value.eventPointSemantics !== "NET" &&
 			value.eventPointSemantics !== "ZERO_COST_EQUIVALENT" &&
 			value.eventPointSemantics !== "UNKNOWN") ||
-		!isNullableString(value.upstreamUpdatedAt)
+		!isNullableIsoDateTime(value.upstreamUpdatedAt)
 	) {
 		return null;
 	}
+	const calculationMode = value.calculationMode;
+	if (!isCalculationMode(calculationMode)) return null;
+	if (
+		value.algorithmVersion === undefined ||
+		(value.algorithmVersion !== null && !isNonEmptyString(value.algorithmVersion))
+	)
+		return null;
+	const provenance = parseProvenance(value.provenance);
+	if (!provenance) return null;
+	if (
+		provenance.scoreSource !== value.source ||
+		provenance.calculationMode !== calculationMode ||
+		provenance.algorithmVersion !== value.algorithmVersion ||
+		(provenance.rankSource !== null &&
+			(provenance.rankRevision === null || provenance.rankCheckedAt === null))
+	)
+		return null;
+	if (calculationMode === "PROJECTED_AUTOSUBS") {
+		if (
+			value.source !== "FPL_EVENT_LIVE" ||
+			value.algorithmVersion !== PROJECTED_ALGORITHM_VERSION ||
+			provenance.livePublicationId === null ||
+			provenance.liveRevision === null ||
+			provenance.liveCheckedAt === null ||
+			provenance.picksRevision === null ||
+			provenance.picksCheckedAt === null ||
+			provenance.previousTotalsRevision === null ||
+			provenance.resultRevision !== null ||
+			provenance.resultCheckedAt !== null ||
+			provenance.dataCheckedAt !== null
+		)
+			return null;
+	} else if (
+		value.source !== "FPL_FINAL_RESULT" ||
+		value.algorithmVersion !== null ||
+		provenance.livePublicationId !== null ||
+		provenance.liveRevision !== null ||
+		provenance.liveCheckedAt !== null ||
+		provenance.picksRevision === null ||
+		provenance.picksCheckedAt === null ||
+		provenance.previousTotalsRevision !== null ||
+		provenance.resultRevision === null ||
+		provenance.resultCheckedAt === null
+	) {
+		return null;
+	}
+	if (
+		value.eventPoints !== null &&
+		value.netEventPoints !== null &&
+		value.transferCost !== null &&
+		(value.eventPointSemantics === "GROSS" ||
+			value.eventPointSemantics === "ZERO_COST_EQUIVALENT") &&
+		value.netEventPoints !== value.eventPoints - value.transferCost
+	)
+		return null;
+	const effectiveLineup = parseEffectiveLineup(value.effectiveLineup);
+	if (value.effectiveLineup !== undefined && effectiveLineup === undefined) return null;
 	return {
 		...(value as unknown as ManagerLiveScoreRow),
 		netEventPoints: typeof value.netEventPoints === "number" ? value.netEventPoints : null,
+		calculationMode,
+		algorithmVersion: value.algorithmVersion as string | null,
+		provenance,
+		...(effectiveLineup === undefined ? {} : { effectiveLineup }),
 	};
 };
 
@@ -181,6 +390,8 @@ export async function requestManagerLiveScores(params: {
 	tournamentId?: number;
 	readMode?: "CACHE_ONLY" | "READ_THROUGH";
 	logger?: { warn: (obj: Record<string, unknown>, msg: string) => void };
+	includeEffectiveLineup?: boolean;
+	liveRef?: { publicationId: string; revision: string };
 }): Promise<ManagerLiveFetchResult> {
 	const baseUrl = readEnv("LETLETME_DATA_URL").replace(/\/+$/, "");
 	if (!baseUrl || params.entryIds.length === 0) {
@@ -203,7 +414,11 @@ export async function requestManagerLiveScores(params: {
 				eventId: params.eventId,
 				entryIds: params.entryIds,
 				...(params.tournamentId === undefined ? {} : { tournamentId: params.tournamentId }),
-				readMode: params.readMode ?? "CACHE_ONLY",
+				readMode: params.readMode ?? "READ_THROUGH",
+				...(params.includeEffectiveLineup === undefined
+					? {}
+					: { includeEffectiveLineup: params.includeEffectiveLineup }),
+				...(params.liveRef === undefined ? {} : { liveRef: params.liveRef }),
 			}),
 			signal: controller.signal,
 		});
@@ -230,23 +445,72 @@ export async function requestManagerLiveScores(params: {
 			!Number.isSafeInteger(data.eventId) ||
 			data.eventId !== params.eventId ||
 			typeof data.season !== "string" ||
-			typeof data.checkedAt !== "string"
+			data.season.trim() === "" ||
+			!isIsoDateTime(data.checkedAt) ||
+			!isCalculationMode(data.calculationMode)
 		) {
 			metrics.managerLiveUpstreamRequestsTotal.labels("invalid_response").inc();
 			return emptyResult();
 		}
-		const parsedRows = Array.isArray(data.rows)
-			? data.rows
-					.map(parseRow)
-					.filter(
-						(row): row is ManagerLiveScoreRow => row !== null && row.eventId === params.eventId
-					)
-			: [];
+		if (!Array.isArray(data.rows)) {
+			metrics.managerLiveUpstreamRequestsTotal.labels("invalid_response").inc();
+			return emptyResult();
+		}
+		const missingEntryIds = parsePositiveSafeIntegerArray(data.missingEntryIds);
+		if (
+			missingEntryIds === null ||
+			new Set(missingEntryIds).size !== missingEntryIds.length ||
+			typeof data.partial !== "boolean" ||
+			data.partial !== missingEntryIds.length > 0 ||
+			(data.errorCode !== null &&
+				data.errorCode !== "UNSUPPORTED_H2H_LIVE" &&
+				data.errorCode !== "UPSTREAM_UNAVAILABLE" &&
+				data.errorCode !== "UPSTREAM_RATE_LIMITED" &&
+				data.errorCode !== "REVISION_UNAVAILABLE" &&
+				data.errorCode !== "INPUT_INCOMPLETE") ||
+			!isIsoDateTime(data.servedAt) ||
+			!isIsoDateTime(data.nextRefreshAt)
+		) {
+			metrics.managerLiveUpstreamRequestsTotal.labels("invalid_response").inc();
+			return emptyResult();
+		}
+		const parsedRows: ManagerLiveScoreRow[] = [];
+		for (const rawRow of data.rows) {
+			const row = parseRow(rawRow);
+			if (!row || row.eventId !== params.eventId || row.season !== data.season) {
+				metrics.managerLiveUpstreamRequestsTotal.labels("invalid_response").inc();
+				return emptyResult();
+			}
+			parsedRows.push(row);
+		}
+		if (
+			new Set(parsedRows.map((row) => row.entryId)).size !== parsedRows.length ||
+			parsedRows.some((row) => row.calculationMode !== data.calculationMode) ||
+			parsedRows.some((row) => !params.entryIds.includes(row.entryId)) ||
+			new Set([...parsedRows.map((row) => row.entryId), ...missingEntryIds]).size !==
+				new Set(params.entryIds).size ||
+			params.entryIds.some(
+				(entryId) =>
+					!parsedRows.some((row) => row.entryId === entryId) && !missingEntryIds.includes(entryId)
+			) ||
+			(data.calculationMode === "PROJECTED_AUTOSUBS" &&
+				params.liveRef !== undefined &&
+				parsedRows.some(
+					(row) =>
+						row.provenance.livePublicationId !== params.liveRef?.publicationId ||
+						row.provenance.liveRevision !== params.liveRef?.revision
+				))
+		) {
+			metrics.managerLiveUpstreamRequestsTotal.labels("invalid_response").inc();
+			return emptyResult();
+		}
 		const rows = new Map(parsedRows.map((row) => [row.entryId, row]));
 		const errorCode =
 			data.errorCode === "UNSUPPORTED_H2H_LIVE" ||
 			data.errorCode === "UPSTREAM_UNAVAILABLE" ||
-			data.errorCode === "UPSTREAM_RATE_LIMITED"
+			data.errorCode === "UPSTREAM_RATE_LIMITED" ||
+			data.errorCode === "REVISION_UNAVAILABLE" ||
+			data.errorCode === "INPUT_INCOMPLETE"
 				? data.errorCode
 				: null;
 		metrics.managerLiveUpstreamRequestsTotal.labels(errorCode ? "partial" : "success").inc();
@@ -280,7 +544,9 @@ export async function requestManagerLiveScores(params: {
 				: params.entryIds.filter((entryId) => !rows.has(entryId)),
 			checkedAt: data.checkedAt,
 			tournamentCoverage: parseCoverage(data.tournamentCoverage),
-			nextRefreshAt: typeof data.nextRefreshAt === "string" ? data.nextRefreshAt : null,
+			calculationMode: data.calculationMode,
+			servedAt: data.servedAt,
+			nextRefreshAt: data.nextRefreshAt,
 		};
 	} catch (error) {
 		metrics.managerLiveUpstreamRequestsTotal.labels("error").inc();
