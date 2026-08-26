@@ -632,6 +632,23 @@ export const liveDesksResolvers = {
 			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
 			const requireNet = memberTournament.leagueType === LeagueType.H2H;
 			const requiresNetMetric = requireNet || request.sort === "NET_EVENT_POINTS";
+			const hasComparableRankMetric = (
+				row:
+					| {
+							eventPoints: number | null;
+							netEventPoints: number | null;
+							eventPointSemantics: string;
+					  }
+					| undefined
+			): boolean =>
+				Boolean(
+					row &&
+					(requiresNetMetric
+						? typeof row.netEventPoints === "number" && row.eventPointSemantics !== "UNKNOWN"
+						: typeof row.eventPoints === "number" &&
+							(row.eventPointSemantics === "GROSS" ||
+								row.eventPointSemantics === "ZERO_COST_EQUIVALENT"))
+				);
 			const fullFieldEnabled =
 				(Bun.env.FULL_FIELD_LIVE_BOARD_ENABLED ?? process.env.FULL_FIELD_LIVE_BOARD_ENABLED) ===
 				"true";
@@ -662,13 +679,7 @@ export const liveDesksResolvers = {
 				managerScores = completeManagerScores;
 				const coverage = completeManagerScores.tournamentCoverage;
 				const hasAllRankMetrics = allEntryIds.every((entryId) => {
-					const row = completeManagerScores.rows.get(entryId);
-					return Boolean(
-						row &&
-						(requiresNetMetric
-							? typeof row.netEventPoints === "number" && row.eventPointSemantics !== "UNKNOWN"
-							: typeof row.eventPoints === "number")
-					);
+					return hasComparableRankMetric(completeManagerScores.rows.get(entryId));
 				});
 				fullFieldDataReady =
 					coverage?.state === "COMPLETE" &&
@@ -681,13 +692,7 @@ export const liveDesksResolvers = {
 					managerScoresAlignedWithLiveSnapshot(completeManagerScores, event, snapshot);
 			} else {
 				const hasAllRankMetrics = allEntryIds.every((entryId) => {
-					const row = managerScores.rows.get(entryId);
-					return Boolean(
-						row &&
-						(requiresNetMetric
-							? typeof row.netEventPoints === "number" && row.eventPointSemantics !== "UNKNOWN"
-							: typeof row.eventPoints === "number")
-					);
+					return hasComparableRankMetric(managerScores.rows.get(entryId));
 				});
 				fullFieldDataReady =
 					canAttemptFullField &&
