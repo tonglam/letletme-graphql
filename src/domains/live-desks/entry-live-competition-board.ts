@@ -109,6 +109,107 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isPositiveSafeInteger = (value: unknown): value is number =>
 	typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 
+const isNonNegativeSafeInteger = (value: unknown): value is number =>
+	typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+const isFiniteNumber = (value: unknown): value is number =>
+	typeof value === "number" && Number.isFinite(value);
+
+const isNullableFiniteNumber = (value: unknown): value is number | null =>
+	value === null || isFiniteNumber(value);
+
+const isNullableString = (value: unknown): value is string | null =>
+	value === null || typeof value === "string";
+
+const isStringArray = (value: unknown): value is string[] =>
+	Array.isArray(value) && value.every((item) => typeof item === "string");
+
+const isPositiveIdArray = (value: unknown): value is number[] =>
+	Array.isArray(value) && value.every(isPositiveSafeInteger);
+
+const isCountPairArray = (value: unknown): value is CountPair[] =>
+	Array.isArray(value) &&
+	value.every(
+		(pair) =>
+			Array.isArray(pair) &&
+			pair.length === 2 &&
+			isPositiveSafeInteger(pair[0]) &&
+			isNonNegativeSafeInteger(pair[1])
+	);
+
+const LIVE_MANAGER_SCORE_SOURCES = new Set([
+	"FPL_EVENT_LIVE",
+	"FPL_ENTRY_SUMMARY",
+	"FPL_CLASSIC_STANDINGS",
+	"FPL_FINAL_RESULT",
+	"UNAVAILABLE",
+]);
+const LIVE_MANAGER_SCORE_STATES = new Set(["FRESH", "STALE", "SETTLING", "FINAL", "UNAVAILABLE"]);
+const LIVE_MANAGER_SCORE_SCOPES = new Set(["OVERALL", "CLASSIC_PHASE", "UNKNOWN"]);
+const LIVE_MANAGER_SCORE_SEMANTICS = new Set(["GROSS", "NET", "ZERO_COST_EQUIVALENT", "UNKNOWN"]);
+const LIVE_MANAGER_SCORE_RECONCILIATIONS = new Set([
+	"MATCHED",
+	"SOURCE_SKEW",
+	"NOT_COMPARABLE",
+	"NO_LINEUP",
+]);
+
+const isCachedManagerScore = (value: unknown): value is LiveManagerScore => {
+	if (!isRecord(value)) return false;
+	return (
+		isNullableFiniteNumber(value.eventPoints) &&
+		isNullableFiniteNumber(value.netEventPoints) &&
+		isNullableFiniteNumber(value.totalPoints) &&
+		LIVE_MANAGER_SCORE_SCOPES.has(String(value.totalScope)) &&
+		isNullableFiniteNumber(value.eventRank) &&
+		isNullableFiniteNumber(value.overallRank) &&
+		isNullableFiniteNumber(value.leagueRank) &&
+		isFiniteNumber(value.transferCost) &&
+		LIVE_MANAGER_SCORE_SOURCES.has(String(value.source)) &&
+		LIVE_MANAGER_SCORE_STATES.has(String(value.state)) &&
+		LIVE_MANAGER_SCORE_SEMANTICS.has(String(value.eventPointSemantics)) &&
+		isNullableString(value.revision) &&
+		isNullableString(value.checkedAt) &&
+		isNullableString(value.upstreamUpdatedAt) &&
+		isNullableString(value.staleAt) &&
+		isNullableString(value.nextRefreshAt) &&
+		LIVE_MANAGER_SCORE_RECONCILIATIONS.has(String(value.reconciliation)) &&
+		isStringArray(value.reasonCodes)
+	);
+};
+
+const isCachedBoardRow = (value: unknown): value is IndexedEntryLiveCompetitionBoardRow => {
+	if (!isRecord(value)) return false;
+	return (
+		isPositiveSafeInteger(value.entry) &&
+		typeof value.entryName === "string" &&
+		typeof value.playerName === "string" &&
+		isNonNegativeSafeInteger(value.rank) &&
+		isNonNegativeSafeInteger(value.overallRank) &&
+		isFiniteNumber(value.teamValue) &&
+		typeof value.chip === "string" &&
+		isFiniteNumber(value.livePoints) &&
+		isFiniteNumber(value.transferCost) &&
+		isFiniteNumber(value.liveNetPoints) &&
+		isFiniteNumber(value.liveTotalPoints) &&
+		isNonNegativeSafeInteger(value.played) &&
+		isNonNegativeSafeInteger(value.toPlay) &&
+		isNonNegativeSafeInteger(value.captainId) &&
+		typeof value.captainName === "string" &&
+		isFiniteNumber(value.captainPoints) &&
+		isCachedManagerScore(value.score) &&
+		typeof value.searchText === "string" &&
+		isPositiveIdArray(value.ownerAny) &&
+		isPositiveIdArray(value.ownerStarter) &&
+		isPositiveIdArray(value.ownerBench) &&
+		isPositiveIdArray(value.captains) &&
+		isPositiveIdArray(value.viceCaptains) &&
+		isCountPairArray(value.teamAny) &&
+		isCountPairArray(value.teamStarter) &&
+		isCountPairArray(value.teamBench)
+	);
+};
+
 const optionalString = (value: unknown): string => (typeof value === "string" ? value : "");
 
 const uniquePositiveIds = (value: unknown, field: string, max: number): number[] => {
@@ -688,14 +789,16 @@ const isCachedBoard = (value: unknown): value is CachedEntryLiveCompetitionBoard
 		typeof value.playerRevision === "string" &&
 		(value.managerRevision === null || typeof value.managerRevision === "string") &&
 		Array.isArray(value.rows) &&
-		value.rows.every(
-			(row) => isRecord(row) && isPositiveSafeInteger(row.entry) && Array.isArray(row.ownerAny)
-		) &&
-		typeof value.officialCoverage === "number" &&
-		Array.isArray(value.unavailableEntryIds) &&
+		value.rows.every(isCachedBoardRow) &&
+		isFiniteNumber(value.officialCoverage) &&
+		value.officialCoverage >= 0 &&
+		value.officialCoverage <= 1 &&
+		isPositiveIdArray(value.unavailableEntryIds) &&
 		typeof value.partial === "boolean" &&
-		Array.isArray(value.failedEntryIds) &&
-		Number.isSafeInteger(value.totalEntries)
+		isPositiveIdArray(value.failedEntryIds) &&
+		isNonNegativeSafeInteger(value.totalEntries) &&
+		isNullableFiniteNumber(value.highestEventPoints) &&
+		isNullableFiniteNumber(value.averageEventPoints)
 	);
 };
 

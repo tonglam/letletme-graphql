@@ -113,6 +113,15 @@ describe("full-field live board bounded manager loads", () => {
 		expect(merged.dataAvailability).toBe("PARTIAL");
 	});
 
+	it("does not synthesize complete coverage when a manager chunk omits coverage", () => {
+		const complete = makeLoad([makeManagerRow(1, 10)], 2);
+		const missingCoverage = { ...makeLoad([makeManagerRow(2, 11)], 2), tournamentCoverage: null };
+		const merged = mergeManagerScoreLoads([complete, missingCoverage], [1, 2]);
+
+		expect(merged.rows.size).toBe(2);
+		expect(merged.tournamentCoverage?.state).toBe("PARTIAL");
+	});
+
 	it("loads 1,567 managers two chunks at a time and merges all rows", async () => {
 		const entryIds = Array.from({ length: 1567 }, (_, index) => index + 1);
 		let active = 0;

@@ -15,6 +15,7 @@ import {
 	entryLiveCompetitionRosterRevision,
 	normalizeEntryLiveCompetitionBoardRequest,
 	queryEntryLiveCompetitionBoard,
+	readEntryLiveCompetitionBoard,
 	type EntryLiveCompetitionBoardRequest,
 } from "../../../src/domains/live-desks/entry-live-competition-board";
 
@@ -636,6 +637,22 @@ describe("entry live competition board filtering and paging", () => {
 			failedEntryIds: [],
 			partial: true,
 		});
+	});
+
+	it("rejects cached boards with incomplete indexed rows", async () => {
+		const valid = board([liveRow({ entry: 1 })]);
+		let cached: unknown = {
+			...valid,
+			rows: [{ entry: 1, ownerAny: [] }],
+		};
+		const context = {
+			redis: { get: async () => JSON.stringify(cached) },
+			logger: { warn: () => undefined },
+		} as unknown as GraphQLContext;
+
+		expect(await readEntryLiveCompetitionBoard(context, "board-key")).toBeNull();
+		cached = valid;
+		expect(await readEntryLiveCompetitionBoard(context, "board-key")).toEqual(valid);
 	});
 });
 

@@ -103,13 +103,27 @@ const mergeCoverage = (
 	managerRevision: string | null,
 	errorCode: ManagerScoreLoad["errorCode"]
 ): ManagerLiveTournamentCoverage | null => {
+	const missingCoverage = loads.some(
+		(load) => load.tournamentCoverage === null || load.tournamentCoverage === undefined
+	);
 	const coverages = loads
 		.map((load) => load.tournamentCoverage)
 		.filter(
 			(coverage): coverage is ManagerLiveTournamentCoverage =>
 				coverage !== null && coverage !== undefined
 		);
-	if (coverages.length === 0) return null;
+	if (coverages.length === 0) {
+		if (!missingCoverage) return null;
+		return {
+			rosterRevision: null,
+			expectedEntries,
+			resolvedEntries: Math.min(expectedEntries, resolvedEntries),
+			fullyFetchedAt: null,
+			managerRevision,
+			error: errorCode ?? "MISSING_COVERAGE",
+			state: resolvedEntries === 0 ? "UNAVAILABLE" : "PARTIAL",
+		};
+	}
 	const rosterRevisions = new Set(
 		coverages
 			.map((coverage) => coverage.rosterRevision)
@@ -117,15 +131,19 @@ const mergeCoverage = (
 	);
 	const fullyFetchedAt = latestTimestamp(coverages.map((coverage) => coverage.fullyFetchedAt));
 	const inheritedState = leastCompleteCoverageState(coverages);
-	const state: ManagerLiveCoverageState = errorCode
-		? inheritedState === "UNAVAILABLE" || resolvedEntries === 0
+	const state: ManagerLiveCoverageState = missingCoverage
+		? resolvedEntries === 0
 			? "UNAVAILABLE"
 			: "PARTIAL"
-		: inheritedState && inheritedState !== "COMPLETE"
-			? inheritedState
-			: resolvedEntries < expectedEntries
-				? "PARTIAL"
-				: "COMPLETE";
+		: errorCode
+			? inheritedState === "UNAVAILABLE" || resolvedEntries === 0
+				? "UNAVAILABLE"
+				: "PARTIAL"
+			: inheritedState && inheritedState !== "COMPLETE"
+				? inheritedState
+				: resolvedEntries < expectedEntries
+					? "PARTIAL"
+					: "COMPLETE";
 	return {
 		rosterRevision: rosterRevisions.size === 1 ? [...rosterRevisions][0]! : null,
 		expectedEntries: Math.max(

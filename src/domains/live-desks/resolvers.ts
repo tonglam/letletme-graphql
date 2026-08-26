@@ -597,7 +597,7 @@ export const liveDesksResolvers = {
 							typeof entryId === "number" && Number.isSafeInteger(entryId) && entryId > 0
 					)
 				)
-			);
+			).sort((left, right) => left - right);
 			const { entryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
 				allEntryIds,
 				request.entryId

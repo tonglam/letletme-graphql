@@ -4532,9 +4532,10 @@ export const tournamentsRepository: TournamentsRepository = {
 				// A finalized board with deferred rows is viewer-specific because the
 				// bounded window retains the requesting manager. Do not read or write
 				// the shared event/tournament cache for that shape.
-				const cachedCandidate = liveCacheKey && deferredEntryIds.length === 0
-					? await readCompetitionBoardCache(context, liveCacheKey)
-					: null;
+				const cachedCandidate =
+					liveCacheKey && deferredEntryIds.length === 0
+						? await readCompetitionBoardCache(context, liveCacheKey)
+						: null;
 				const cachedRows = cachedCandidate?.board as
 					| Array<{
 							entry: number;
