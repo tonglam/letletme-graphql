@@ -1,10 +1,12 @@
 import type { GraphQLContext } from "../graphql/context";
 import { GraphQLError } from "graphql";
 import {
+	PRICE_CHANGE_READY_MS,
 	parsePriceChangeBoardValue,
 	readPriceChangePredictions,
 	type PriceChangeBoard,
 } from "./price-change-predictions-client";
+import { isDataPublicationId } from "./data-publication";
 
 const HOT_KEY_PREFIX = "fpl:price-changes:hot";
 const HOT_TTL_MS = 15 * 60 * 1000;
@@ -115,10 +117,11 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 	const board = parsePriceChangeBoardValue(value.board, now);
 	if (
 		!board ||
-		board.status !== "READY" ||
+		(board.status !== "READY" && board.status !== "STALE") ||
 		board.revision !== value.revision ||
 		board.fetchedAt !== value.fetchedAt ||
 		board.deadline !== value.deadline ||
+		board.staleAt !== new Date(fetchedAt + PRICE_CHANGE_READY_MS).toISOString() ||
 		value.expectedPlayerCount !== board.expectedPlayerCount ||
 		value.observedPlayerCount !== board.observedPlayerCount ||
 		value.expectedPlayerCount !== value.observedPlayerCount
@@ -146,6 +149,9 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 		reconciliation.state === "reconciled" &&
 		(reconciliation.durablePublicationId === null ||
 			reconciliation.durableRevision === null ||
+			!isDataPublicationId(reconciliation.durablePublicationId) ||
+			typeof reconciliation.durableRevision !== "number" ||
+			reconciliation.durableRevision <= 0 ||
 			reconciliation.error !== null)
 	) {
 		return null;
@@ -179,7 +185,10 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 			value.corePlayerDelta === null || Number.isSafeInteger(value.corePlayerDelta)
 				? (value.corePlayerDelta as number | null)
 				: null,
-		board,
+		board: {
+			...board,
+			status: now.getTime() - fetchedAt < PRICE_CHANGE_READY_MS ? "READY" : "STALE",
+		},
 		reconciliation: {
 			state: reconciliation.state as HotSnapshot["reconciliation"]["state"],
 			durablePublicationId: reconciliation.durablePublicationId as string | null,
@@ -202,6 +211,13 @@ async function readHotSnapshot(
 			? null
 			: parsePointer(await context.redis.get(hotPointerKey(context.currentSeason.seasonCode)));
 		if (!requestedRevision && !pointer) return null;
+		if (
+			pointer &&
+			(pointer.payloadKey !== hotPayloadKey(context.currentSeason.seasonCode, pointer.revision) ||
+				!HOT_REVISION_PATTERN.test(pointer.revision))
+		) {
+			return null;
+		}
 		const payloadKey = requestedRevision
 			? hotPayloadKey(context.currentSeason.seasonCode, requestedRevision)
 			: pointer!.payloadKey;
@@ -270,7 +286,7 @@ export async function readPriceChangeLiveCursor(
 		return {
 			seasonCode: context.currentSeason.seasonCode,
 			revision: hot!.revision,
-			state: "PROVISIONAL",
+			state: hot!.reconciliation.state === "reconciled" ? "DURABLE" : "PROVISIONAL",
 			detectedAt: hot!.detectedAt,
 			fetchedAt: hot!.fetchedAt,
 			expiresAt: hot!.expiresAt,
@@ -285,7 +301,9 @@ export async function readPriceChangeLiveBoard(
 ): Promise<PriceChangeLiveBoard> {
 	const now = new Date();
 	const requestedRevision = _requestedRevision?.trim() || null;
-	if (requestedRevision && !HOT_REVISION_PATTERN.test(requestedRevision)) {
+	const requestedHotRevision = requestedRevision && HOT_REVISION_PATTERN.test(requestedRevision);
+	const requestedDurableRevision = requestedRevision && isDataPublicationId(requestedRevision);
+	if (requestedRevision && !requestedHotRevision && !requestedDurableRevision) {
 		throw new GraphQLError("The requested live price revision is invalid", {
 			extensions: { code: "BAD_USER_INPUT" },
 		});
@@ -295,6 +313,21 @@ export async function readPriceChangeLiveBoard(
 		readPriceChangePredictions(context),
 	]);
 	if (requestedRevision) {
+		if (requestedDurableRevision) {
+			if (durable.status === "UNAVAILABLE" || durable.revision !== requestedRevision) {
+				throw new GraphQLError("The requested durable price revision is unavailable", {
+					extensions: { code: "PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE" },
+				});
+			}
+			return {
+				revision: durable.revision,
+				state: "DURABLE",
+				detectedAt: durable.fetchedAt,
+				expiresAt: durable.staleAt,
+				durablePublicationId: durable.revision,
+				board: durable,
+			};
+		}
 		if (!hot) {
 			throw new GraphQLError("The requested live price revision is unavailable", {
 				extensions: { code: "PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE" },
@@ -313,10 +346,11 @@ export async function readPriceChangeLiveBoard(
 	if (isNewerHotSnapshot(hot, durable)) {
 		return {
 			revision: hot!.revision,
-			state: "PROVISIONAL",
+			state: hot!.reconciliation.state === "reconciled" ? "DURABLE" : "PROVISIONAL",
 			detectedAt: hot!.detectedAt,
 			expiresAt: hot!.expiresAt,
-			durablePublicationId: durablePublicationId(durable, hot),
+			durablePublicationId:
+				hot!.reconciliation.durablePublicationId ?? durablePublicationId(durable, hot),
 			board: hot!.board,
 		};
 	}

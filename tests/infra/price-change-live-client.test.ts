@@ -135,6 +135,57 @@ describe("price-change live client", () => {
 		assert.equal((await readPriceChangeLiveCursor(context(damagedRedis))).state, "UNAVAILABLE");
 	});
 
+	it("downgrades a hot board after its ready window", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot(10 * 60 * 1_000 + 1_000);
+		publishHot(redis, snapshot);
+
+		const board = await readPriceChangeLiveBoard(context(redis));
+		assert.equal(board.state, "PROVISIONAL");
+		assert.equal(board.board.status, "STALE");
+	});
+
+	it("fails closed for malformed reconciliation metadata", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		snapshot.reconciliation = {
+			state: "reconciled",
+			durablePublicationId: "not-a-publication-id",
+			durableRevision: 0,
+			error: null,
+		};
+		publishHot(redis, snapshot);
+
+		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
+	});
+
+	it("fails closed for non-chronological hot deadlines", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		const deadline = String(snapshot.deadline);
+		(snapshot.board as { nextDeadlines: string[] }).nextDeadlines = [deadline, deadline];
+		(snapshot.board as { players: Array<{ projections: unknown[] }> }).players[0]!.projections = [
+			{ offset: 0, projectedPercent: 0.5, likelihood: 4 },
+			{ offset: 1, projectedPercent: 0.5, likelihood: 4 },
+		];
+		publishHot(redis, snapshot);
+
+		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
+	});
+
+	it("rejects a pointer that does not name its revision payload", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		redis.set(`${HOT_PREFIX}:${seasonCode}:active`, {
+			revision: snapshot.revision,
+			payloadKey: `${HOT_PREFIX}:${seasonCode}:other-revision`,
+			detectedAtMs: Date.parse(String(snapshot.detectedAt)),
+		});
+		redis.set(`${HOT_PREFIX}:${seasonCode}:${snapshot.revision}`, snapshot);
+
+		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
+	});
+
 	it("serves the exact requested revision even after the active pointer advances", async () => {
 		const redis = new FakeRedis();
 		const oldSnapshot = hotSnapshot(1_000, "abcdef0123456789");

@@ -252,6 +252,11 @@ export const parsePriceChangeBoardValue = (
 	}
 	const parsedPlayers = players as PriceChangePlayer[];
 	const nextDeadlines = value.nextDeadlines as string[];
+	for (let index = 1; index < nextDeadlines.length; index += 1) {
+		if (Date.parse(nextDeadlines[index - 1]!) >= Date.parse(nextDeadlines[index]!)) {
+			return null;
+		}
+	}
 	if (
 		parsedPlayers.some(
 			(player) =>
