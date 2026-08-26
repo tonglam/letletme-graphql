@@ -181,7 +181,7 @@ describe("playersRepository.getPlayersForPicker", () => {
 		// One query pins the PostgreSQL market metadata; the second reads the picker rows.
 		expect(queryCount()).toBe(2);
 		const cacheWrite = redis.setCalls.find(([key]) => key.includes(":players-picker:"));
-		expect(cacheWrite?.[0]).toMatch(/^llm:gql:core-7:players-picker:/);
+		expect(cacheWrite?.[0]).toMatch(/^llm:gql:core-7\.stats-unavailable:players-picker:/);
 		expect(cacheWrite?.slice(-2)).toEqual(["EX", 300]);
 	});
 

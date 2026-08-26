@@ -627,12 +627,19 @@ export const entryLiveBatchService = {
 				eventId
 			);
 			// A final result is usable only when its rich publication is at or after
-			// FPL's data_checked_at fence.
-			const finalFreshAfter = event?.dataCheckedAt ? Date.parse(event.dataCheckedAt) : NaN;
+			// FPL's data_checked_at fence. Historical/backfilled events may carry the
+			// accepted `dataChecked=true` flag without a timestamp; in that case the
+			// rich result's own checked timestamp is the only available final-result
+			// freshness signal, so retain it instead of silently discarding canonical
+			// result picks.
+			const finalFreshAfter = event?.dataCheckedAt ? Date.parse(event.dataCheckedAt) : null;
 			const freshFinalizedResults = new Map(
 				[...finalizedResults].filter(([, result]) => {
+					const richSyncedAt = Date.parse(result.richSyncedAt);
 					return (
-						Number.isFinite(finalFreshAfter) && Date.parse(result.richSyncedAt) >= finalFreshAfter
+						Number.isFinite(richSyncedAt) &&
+						(finalFreshAfter === null ||
+							(!Number.isNaN(finalFreshAfter) && richSyncedAt >= finalFreshAfter))
 					);
 				})
 			);

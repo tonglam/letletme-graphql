@@ -716,8 +716,8 @@ export const playersRepository: PlayersRepository = {
 			return null;
 		});
 		const cacheRevision = marketContext
-			? `${context.dataRevision ?? "core-postgres"}.${marketContext.revision}`
-			: (context.dataRevision ?? "core-postgres");
+			? `${context.dataRevision ?? "core-postgres"}.${marketContext.revision}.${statsContext.revision ?? "stats-unavailable"}`
+			: `${context.dataRevision ?? "core-postgres"}.${statsContext.revision ?? "stats-unavailable"}`;
 		const cacheKey = gqlCacheKey(
 			context,
 			`players:picker:v2:${statsContext.asOfEventId ?? 0}:${searchKey}:${JSON.stringify(safeFilter ?? {})}:${ownershipBand ?? "ANY"}:${sort}:${safeLimit}:${cursor && Number.isSafeInteger(cursor) ? cursor : 0}`,
@@ -800,11 +800,16 @@ export const playersRepository: PlayersRepository = {
 				FROM fpl.players player
 				JOIN fpl.teams team
 				  ON team.season_id = player.season_id AND team.team_id = player.team_id
-				LEFT JOIN fpl.player_event_snapshot_bundles event_stats
+				LEFT JOIN fpl.player_event_snapshot_publications event_stats_publication
+				  ON event_stats_publication.season_id = player.season_id
+				 AND event_stats_publication.event_id = $2
+				 AND event_stats_publication.revision::text = $14
+				LEFT JOIN fpl.player_event_snapshots event_stats
 				  ON event_stats.season_id = player.season_id
 				 AND event_stats.element_id = player.element_id
 				 AND event_stats.event_id = $2
-				 AND event_stats.publication_revision = $14
+				 AND event_stats_publication.season_id = event_stats.season_id
+				 AND event_stats_publication.event_id = event_stats.event_id
 				LEFT JOIN latest_market latest ON TRUE
 				LEFT JOIN fpl.player_market_snapshots market
 				  ON market.season_id = player.season_id
@@ -902,6 +907,7 @@ export const playersRepository: PlayersRepository = {
 					pinnedCoreRevision,
 					marketContext?.snapshotDate ?? null,
 					marketContext?.capturedAt ?? null,
+					statsContext.revision,
 				]
 			);
 			totalCount = Number(countResult.rows[0]?.total_count ?? 0);
