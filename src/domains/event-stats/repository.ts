@@ -275,9 +275,14 @@ export async function getPlayerAndTeamMaps(
 ): Promise<{
 	playerMap: Map<number, { id: number; web_name: string; team_id: number; type: number }>;
 	teamMap: Map<number, { id: number; name: string; short_name: string }>;
+	eventTeamResolutionComplete: boolean;
 }> {
 	if (playerIds.length === 0) {
-		return { playerMap: new Map(), teamMap: new Map() };
+		return {
+			playerMap: new Map(),
+			teamMap: new Map(),
+			eventTeamResolutionComplete: true,
+		};
 	}
 
 	const [fullPlayerMap, fullTeamMap] = await Promise.all([
@@ -300,15 +305,21 @@ export async function getPlayerAndTeamMaps(
 		}
 	}
 
+	let eventTeamResolutionComplete = true;
 	// Resolve player teams at the requested event for historical accuracy.
 	if (eventId !== null && eventId !== undefined && season !== null && season !== undefined) {
+		eventTeamResolutionComplete = false;
 		try {
-			const playerCodes = [...filteredPlayerMap.values()].map((p) => {
-				const full = fullPlayerMap.get(p.id);
-				return full?.code ?? 0;
-			});
-			const validCodes = playerCodes.filter((c) => c > 0);
-			if (validCodes.length > 0) {
+			const requestedPlayerIds = [...new Set(playerIds)];
+			const playerCodesById = new Map<number, number>();
+			for (const playerId of requestedPlayerIds) {
+				const full = fullPlayerMap.get(playerId);
+				if (full?.code && full.code > 0 && filteredPlayerMap.has(playerId)) {
+					playerCodesById.set(playerId, full.code);
+				}
+			}
+			const validCodes = [...playerCodesById.values()];
+			if (validCodes.length === requestedPlayerIds.length) {
 				const { data, error } = await context.data
 					.read("fpl.player_fixture_stats")
 					.select("player_code, team_id")
@@ -325,13 +336,16 @@ export async function getPlayerAndTeamMaps(
 						}
 					}
 					for (const [id, player] of filteredPlayerMap) {
-						const full = fullPlayerMap.get(id);
-						const code = full?.code ?? 0;
+						const code = playerCodesById.get(id) ?? 0;
 						const eventTeamId = code > 0 ? eventTeamMap.get(code) : undefined;
 						if (eventTeamId !== undefined && eventTeamId > 0) {
 							filteredPlayerMap.set(id, { ...player, team_id: eventTeamId });
 						}
 					}
+					eventTeamResolutionComplete = requestedPlayerIds.every((playerId) => {
+						const code = playerCodesById.get(playerId);
+						return code !== undefined && eventTeamMap.has(code);
+					});
 				}
 			}
 		} catch (err) {
@@ -350,7 +364,11 @@ export async function getPlayerAndTeamMaps(
 		}
 	}
 
-	return { playerMap: filteredPlayerMap, teamMap: filteredTeamMap };
+	return {
+		playerMap: filteredPlayerMap,
+		teamMap: filteredTeamMap,
+		eventTeamResolutionComplete,
+	};
 }
 
 const EMPTY_STATS: TournamentSelectionStats = {

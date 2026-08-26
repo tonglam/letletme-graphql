@@ -251,6 +251,12 @@ describe("full-field live board bounded manager loads", () => {
 		expect(
 			hasComparableFullFieldManagerMetric(netOnly, { requireNet: true, requestedNet: true })
 		).toBe(true);
+		expect(
+			hasComparableFullFieldManagerMetric(netOnly, { requireNet: true, requestedNet: false })
+		).toBe(false);
+		expect(
+			hasComparableFullFieldManagerMetric(gross, { requireNet: true, requestedNet: false })
+		).toBe(true);
 	});
 
 	it("does not short-circuit finalized events as scheduled when current event is null", () => {
@@ -274,6 +280,16 @@ describe("full-field live board bounded manager loads", () => {
 				dataChecked: false,
 			})
 		).toBe(true);
+		expect(
+			isScheduledTournamentEvent({
+				eventId: 38,
+				currentEventId: null,
+				anchorEventId: 38,
+				dataAvailability: "SCHEDULED",
+				finished: true,
+				dataChecked: false,
+			})
+		).toBe(false);
 	});
 
 	it("loads 1,567 managers two chunks at a time and merges all rows", async () => {

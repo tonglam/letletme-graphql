@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import {
-	getCoreDataSnapshot,
 	getCoreEventSnapshot,
 	getCoreFixtureSnapshot,
 	getCoreLiveIdentitySnapshot,
@@ -463,9 +462,14 @@ export const hasComparableManagerRankMetric = (
 export const hasComparableFullFieldManagerMetric = (
 	row: ComparableManagerRankRow | undefined,
 	options: { requireNet: boolean; requestedNet: boolean }
-): boolean =>
-	hasComparableManagerRankMetric(row, options.requireNet || options.requestedNet) &&
-	(options.requireNet || !options.requestedNet || hasComparableManagerRankMetric(row, false));
+): boolean => {
+	const requiresNet = options.requireNet || options.requestedNet;
+	const requiresGross = !options.requestedNet || !options.requireNet;
+	return (
+		(!requiresNet || hasComparableManagerRankMetric(row, true)) &&
+		(!requiresGross || hasComparableManagerRankMetric(row, false))
+	);
+};
 
 export const isScheduledTournamentEvent = (input: {
 	eventId: number;
@@ -475,9 +479,9 @@ export const isScheduledTournamentEvent = (input: {
 	finished: boolean;
 	dataChecked: boolean;
 }): boolean => {
-	const isFinalizedEvent = input.finished && input.dataChecked;
+	const isFinishedEvent = input.finished;
 	return (
-		!isFinalizedEvent &&
+		!isFinishedEvent &&
 		(input.eventId > (input.currentEventId ?? 0) ||
 			(input.eventId === input.anchorEventId && input.dataAvailability === "SCHEDULED"))
 	);
@@ -868,6 +872,9 @@ export const liveDesksResolvers = {
 									context.currentSeason.seasonCode
 								),
 							]);
+							if (request.teamCountRules.length > 0 && !eventPlayers.eventTeamResolutionComplete) {
+								throw new Error("Event-scoped team metadata unavailable for full-field filters");
+							}
 							return buildFullFieldLiveBoardIndex({
 								...cacheIdentity,
 								managerRows: managerScores.rows,
@@ -876,12 +883,14 @@ export const liveDesksResolvers = {
 								eventResults,
 								picks,
 								players,
-								playerTeamIds: new Map(
-									Array.from(eventPlayers.playerMap.entries()).map(([id, player]) => [
-										id,
-										player.team_id,
-									])
-								),
+								playerTeamIds: eventPlayers.eventTeamResolutionComplete
+									? new Map(
+											Array.from(eventPlayers.playerMap.entries()).map(([id, player]) => [
+												id,
+												player.team_id,
+											])
+										)
+									: undefined,
 								managerRevision,
 								rosterRevision,
 								requireNet,
@@ -937,12 +946,17 @@ export const liveDesksResolvers = {
 								request.eventId,
 								context.currentSeason.seasonCode
 							);
-							eventTeamIds = new Map(
-								Array.from(eventPlayers.playerMap.entries()).map(([id, player]) => [
-									id,
-									player.team_id,
-								])
-							);
+							if (request.teamCountRules.length > 0 && !eventPlayers.eventTeamResolutionComplete) {
+								throw new Error("Event-scoped team metadata unavailable for board filters");
+							}
+							eventTeamIds = eventPlayers.eventTeamResolutionComplete
+								? new Map(
+										Array.from(eventPlayers.playerMap.entries()).map(([id, player]) => [
+											id,
+											player.team_id,
+										])
+									)
+								: undefined;
 						}
 						return buildEntryLiveCompetitionBoard({
 							...cacheIdentity,
@@ -1284,36 +1298,38 @@ export const liveDesksResolvers = {
 		) => {
 			await assertMember(context, args.tournamentId, args.entryId);
 			const { snapshot } = await resolveSnapshot(context, args.ref);
-			const [rows, core] = await Promise.all([
-				getTournamentSelectionIndexRows(context, args.tournamentId, snapshot.eventId),
-				getCoreDataSnapshot(context),
-			]);
+			const rows = await getTournamentSelectionIndexRows(
+				context,
+				args.tournamentId,
+				snapshot.eventId
+			);
 			const eventMaps = await getPlayerAndTeamMaps(
 				context,
 				rows.map((row) => row.playerId),
 				snapshot.eventId,
 				context.currentSeason.seasonCode
 			);
-			const teams = new Map(core.teams.map((team) => [team.id, team] as const));
+			if (!eventMaps.eventTeamResolutionComplete) {
+				throw new Error("Historical player team metadata unavailable for selection index");
+			}
 			return {
 				tournamentId: args.tournamentId,
 				eventId: snapshot.eventId,
 				revision: snapshot.revision,
-				rows: rows.flatMap((row) => {
+				rows: rows.map((row) => {
 					const player = eventMaps.playerMap.get(row.playerId);
 					const eventTeam = player ? eventMaps.teamMap.get(player.team_id) : undefined;
-					const team = player ? teams.get(player.team_id) : undefined;
-					if (!player || (!eventTeam && !team)) return [];
-					return [
-						{
-							...row,
-							playerName: player.web_name,
-							teamId: player.team_id,
-							teamName: eventTeam?.name ?? team?.name ?? "",
-							teamShortName: eventTeam?.short_name ?? team?.shortName ?? "",
-							position: selectionPositionName(player.type),
-						},
-					];
+					if (!player || !eventTeam) {
+						throw new Error(`Historical selection metadata unavailable for player ${row.playerId}`);
+					}
+					return {
+						...row,
+						playerName: player.web_name,
+						teamId: player.team_id,
+						teamName: eventTeam.name,
+						teamShortName: eventTeam.short_name,
+						position: selectionPositionName(player.type),
+					};
 				}),
 			};
 		},
