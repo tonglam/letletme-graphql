@@ -95,7 +95,10 @@ export type FullFieldLiveBoardIndexInput = {
 	rosterRevision: string;
 	allEntryIds: readonly number[];
 	entries: ReadonlyMap<number, Entry>;
-	eventResults?: ReadonlyMap<number, Pick<EntryEventResult, "teamValue">>;
+	eventResults?: ReadonlyMap<
+		number,
+		Pick<EntryEventResult, "teamValue"> & Partial<Pick<EntryEventResult, "overallRank">>
+	>;
 	picks: ReadonlyMap<number, EntryEventPick>;
 	players: ReadonlyMap<number, Player>;
 	/** Event-scoped team ids; current player rows are only a name/value fallback. */
@@ -126,7 +129,8 @@ export const buildFullFieldLiveBoardIndex = (
 		if (!hasCompleteEntryEventPick(pick, input.eventId, entryId, input.allowFinalNoCaptainBoost)) {
 			throw new Error(`Entry ${entryId} has no complete event pick row`);
 		}
-		const eventTeamValue = input.eventResults?.get(entryId)?.teamValue;
+		const eventResult = input.eventResults?.get(entryId);
+		const eventTeamValue = eventResult?.teamValue;
 		const teamValue =
 			typeof eventTeamValue === "number"
 				? eventTeamValue
@@ -185,7 +189,7 @@ export const buildFullFieldLiveBoardIndex = (
 			entryName: entry.entryName,
 			playerName: entry.playerName,
 			rank: 0,
-			overallRank: score.overallRank ?? entry?.overallRank ?? 0,
+			overallRank: eventResult?.overallRank ?? score.overallRank ?? entry.overallRank ?? 0,
 			teamValue: typeof teamValue === "number" ? teamValue / 10 : 0,
 			chip: canonicalChip(pick?.chip ?? null),
 			livePoints: score.eventPoints ?? 0,

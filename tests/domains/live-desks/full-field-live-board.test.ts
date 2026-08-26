@@ -473,16 +473,27 @@ describe("full-field live board index", () => {
 			})
 		).toThrow("Entry 3 has no team value for TEAM_VALUE sorting");
 
-		const eventResults = new Map<number, { teamValue: number }>(
-			entryIds.map((entryId) => [entryId, { teamValue: 800 + entryId }])
+		const eventResults = new Map<number, { teamValue: number; overallRank: number }>(
+			entryIds.map((entryId) => [
+				entryId,
+				{ teamValue: 800 + entryId, overallRank: 1000 - entryId },
+			])
+		);
+		const historicalManagerRows = new Map(
+			Array.from(
+				boardInput.managerRows,
+				([entryId, row]) => [entryId, { ...row, overallRank: null }] as const
+			)
 		);
 		const historicalBoard = buildFullFieldLiveBoardIndex({
 			...boardInput,
 			eventResults,
+			managerRows: historicalManagerRows,
 			requireEventTeamValue: true,
 			requireTeamValue: true,
 		});
 		expect(historicalBoard.rows.map((row) => row.teamValue)).toEqual([80.1, 80.2, 80.3]);
+		expect(historicalBoard.rows.map((row) => row.overallRank)).toEqual([999, 998, 997]);
 		const missingHistoricalResult = new Map(eventResults);
 		missingHistoricalResult.delete(3);
 		expect(() =>

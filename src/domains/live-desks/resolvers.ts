@@ -838,6 +838,7 @@ export const liveDesksResolvers = {
 					projectionMode,
 					managerStatusRevision,
 					requireTeamValue: request.sort === "TEAM_VALUE",
+					requireEventTeamIds: request.teamCountRules.length > 0,
 				});
 			let fullFieldBoard = false;
 			let board;
