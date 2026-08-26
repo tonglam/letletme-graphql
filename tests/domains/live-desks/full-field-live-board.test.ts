@@ -6,7 +6,12 @@ import {
 	splitManagerLiveEntryIds,
 } from "../../../src/domains/entry-live/manager-score-batches";
 import type { ManagerLiveScoreRow } from "../../../src/infra/manager-live-client";
-import { managerScoresAlignedWithLiveSnapshot } from "../../../src/domains/live-desks/resolvers";
+import type { LiveDataSnapshot } from "../../../src/infra/data-snapshot";
+import {
+	hasComparableFullFieldManagerMetric,
+	isScheduledTournamentEvent,
+	managerScoresAlignedWithLiveSnapshot,
+} from "../../../src/domains/live-desks/resolvers";
 import {
 	buildFullFieldLiveBoardIndex,
 	type FullFieldLiveBoardIndexInput,
@@ -173,14 +178,101 @@ describe("full-field live board bounded manager loads", () => {
 	});
 
 	it("requires final-result rows before a finalized field can be globally ranked", () => {
-		const liveLoad = makeLoad([makeManagerRow(1, 10)], 1);
+		const summaryLoad = makeLoad([makeManagerRow(1, 10)], 1);
 		const finalLoad = makeLoad([{ ...makeManagerRow(1, 10), source: "FPL_FINAL_RESULT" }], 1);
 
 		expect(
-			managerScoresAlignedWithLiveSnapshot(liveLoad, { finished: true, dataChecked: true }, null)
+			managerScoresAlignedWithLiveSnapshot(summaryLoad, { finished: true, dataChecked: true }, null)
 		).toBe(false);
 		expect(
 			managerScoresAlignedWithLiveSnapshot(finalLoad, { finished: true, dataChecked: true }, null)
+		).toBe(true);
+	});
+
+	it("requires active rows to use the current event-live publication", () => {
+		const snapshot = {
+			source: "redis",
+			seasonCode: "2026",
+			eventId: 38,
+			revision: "38",
+			publicationId: "publication",
+			sourceCheckedAt: "2026-08-25T00:00:00.000Z",
+			lastSuccessfulFetchAt: "2026-08-25T00:00:00.000Z",
+			publishedAt: "2026-08-25T00:00:00.000Z",
+			state: "live",
+			eventLives: [],
+			fixtures: [],
+			liveFixtures: {},
+			liveBonus: {},
+		} satisfies LiveDataSnapshot;
+		const summaryLoad = makeLoad([makeManagerRow(1, 10)], 1);
+		const liveLoad = makeLoad(
+			[
+				{
+					...makeManagerRow(1, 10),
+					source: "FPL_EVENT_LIVE",
+					revision: "fpl:live:publication:38:entry:1:hash",
+				},
+			],
+			1
+		);
+
+		expect(
+			managerScoresAlignedWithLiveSnapshot(
+				summaryLoad,
+				{ finished: false, dataChecked: false },
+				snapshot
+			)
+		).toBe(false);
+		expect(
+			managerScoresAlignedWithLiveSnapshot(
+				liveLoad,
+				{ finished: false, dataChecked: false },
+				snapshot
+			)
+		).toBe(true);
+	});
+
+	it("requires gross evidence when a classic field is requested in net order", () => {
+		const gross = makeManagerRow(1, 10);
+		const netOnly = {
+			...gross,
+			eventPoints: null,
+			netEventPoints: 10,
+			eventPointSemantics: "NET" as const,
+		};
+
+		expect(
+			hasComparableFullFieldManagerMetric(gross, { requireNet: false, requestedNet: true })
+		).toBe(true);
+		expect(
+			hasComparableFullFieldManagerMetric(netOnly, { requireNet: false, requestedNet: true })
+		).toBe(false);
+		expect(
+			hasComparableFullFieldManagerMetric(netOnly, { requireNet: true, requestedNet: true })
+		).toBe(true);
+	});
+
+	it("does not short-circuit finalized events as scheduled when current event is null", () => {
+		expect(
+			isScheduledTournamentEvent({
+				eventId: 38,
+				currentEventId: null,
+				anchorEventId: 38,
+				dataAvailability: "SCHEDULED",
+				finished: true,
+				dataChecked: true,
+			})
+		).toBe(false);
+		expect(
+			isScheduledTournamentEvent({
+				eventId: 38,
+				currentEventId: 37,
+				anchorEventId: 38,
+				dataAvailability: "SCHEDULED",
+				finished: false,
+				dataChecked: false,
+			})
 		).toBe(true);
 	});
 

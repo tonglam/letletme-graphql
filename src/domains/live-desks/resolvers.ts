@@ -428,10 +428,59 @@ export const managerScoresAlignedWithLiveSnapshot = (
 	if (!snapshot) return false;
 	const livePublishedAt = Date.parse(snapshot.publishedAt || snapshot.lastSuccessfulFetchAt);
 	if (!Number.isFinite(livePublishedAt)) return false;
+	const liveRevisionPrefix = snapshot.publicationId
+		? `fpl:live:${snapshot.publicationId}:${snapshot.revision}:`
+		: null;
 	return Array.from(managerScores.rows.values()).every((row) => {
 		const managerCheckedAt = Date.parse(row.checkedAt);
-		return Number.isFinite(managerCheckedAt) && managerCheckedAt >= livePublishedAt;
+		return (
+			row.source === "FPL_EVENT_LIVE" &&
+			Number.isFinite(managerCheckedAt) &&
+			managerCheckedAt >= livePublishedAt &&
+			(liveRevisionPrefix === null || row.revision.startsWith(liveRevisionPrefix))
+		);
 	});
+};
+
+type ComparableManagerRankRow = {
+	eventPoints: number | null;
+	netEventPoints: number | null;
+	eventPointSemantics: string;
+};
+
+export const hasComparableManagerRankMetric = (
+	row: ComparableManagerRankRow | undefined,
+	useNet: boolean
+): boolean =>
+	Boolean(
+		row &&
+		(useNet
+			? typeof row.netEventPoints === "number" && row.eventPointSemantics !== "UNKNOWN"
+			: typeof row.eventPoints === "number" &&
+				(row.eventPointSemantics === "GROSS" || row.eventPointSemantics === "ZERO_COST_EQUIVALENT"))
+	);
+
+export const hasComparableFullFieldManagerMetric = (
+	row: ComparableManagerRankRow | undefined,
+	options: { requireNet: boolean; requestedNet: boolean }
+): boolean =>
+	hasComparableManagerRankMetric(row, options.requireNet || options.requestedNet) &&
+	(options.requireNet || !options.requestedNet || hasComparableManagerRankMetric(row, false));
+
+export const isScheduledTournamentEvent = (input: {
+	eventId: number;
+	currentEventId: number | null;
+	anchorEventId: number | null;
+	dataAvailability: string;
+	finished: boolean;
+	dataChecked: boolean;
+}): boolean => {
+	const isFinalizedEvent = input.finished && input.dataChecked;
+	return (
+		!isFinalizedEvent &&
+		(input.eventId > (input.currentEventId ?? 0) ||
+			(input.eventId === input.anchorEventId && input.dataAvailability === "SCHEDULED"))
+	);
 };
 
 export const liveDesksResolvers = {
@@ -632,9 +681,14 @@ export const liveDesksResolvers = {
 			const corePlayerRevision = `core-${eventCore.revision}`;
 			const rosterRevision = entryLiveCompetitionRosterRevision(allEntryIds);
 			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
-			const isScheduledEvent =
-				event.id > (eventCore.currentEventId ?? 0) ||
-				(request.eventId === window.anchorEventId && window.dataAvailability === "SCHEDULED");
+			const isScheduledEvent = isScheduledTournamentEvent({
+				eventId: event.id,
+				currentEventId: eventCore.currentEventId,
+				anchorEventId: window.anchorEventId,
+				dataAvailability: window.dataAvailability,
+				finished: event.finished,
+				dataChecked: event.dataChecked,
+			});
 			if (isScheduledEvent) {
 				if (ref) {
 					throw new GraphQLError("Requested live revision has expired", {
@@ -699,24 +753,7 @@ export const liveDesksResolvers = {
 
 			const playerRevision = snapshot?.revision ?? corePlayerRevision;
 			const requireNet = memberTournament.leagueType === LeagueType.H2H;
-			const requiresNetMetric = requireNet || request.sort === "NET_EVENT_POINTS";
-			const hasComparableRankMetric = (
-				row:
-					| {
-							eventPoints: number | null;
-							netEventPoints: number | null;
-							eventPointSemantics: string;
-					  }
-					| undefined
-			): boolean =>
-				Boolean(
-					row &&
-					(requiresNetMetric
-						? typeof row.netEventPoints === "number" && row.eventPointSemantics !== "UNKNOWN"
-						: typeof row.eventPoints === "number" &&
-							(row.eventPointSemantics === "GROSS" ||
-								row.eventPointSemantics === "ZERO_COST_EQUIVALENT"))
-				);
+			const requestedNet = request.sort === "NET_EVENT_POINTS";
 			const fullFieldEnabled =
 				(Bun.env.FULL_FIELD_LIVE_BOARD_ENABLED ?? process.env.FULL_FIELD_LIVE_BOARD_ENABLED) ===
 				"true";
@@ -747,7 +784,10 @@ export const liveDesksResolvers = {
 				managerScores = completeManagerScores;
 				const coverage = completeManagerScores.tournamentCoverage;
 				const hasAllRankMetrics = allEntryIds.every((entryId) => {
-					return hasComparableRankMetric(completeManagerScores.rows.get(entryId));
+					return hasComparableFullFieldManagerMetric(completeManagerScores.rows.get(entryId), {
+						requireNet,
+						requestedNet,
+					});
 				});
 				fullFieldDataReady =
 					coverage?.state === "COMPLETE" &&
@@ -761,7 +801,10 @@ export const liveDesksResolvers = {
 					managerScoresAlignedWithLiveSnapshot(completeManagerScores, event, snapshot);
 			} else {
 				const hasAllRankMetrics = allEntryIds.every((entryId) => {
-					return hasComparableRankMetric(managerScores.rows.get(entryId));
+					return hasComparableFullFieldManagerMetric(managerScores.rows.get(entryId), {
+						requireNet,
+						requestedNet,
+					});
 				});
 				fullFieldDataReady =
 					canAttemptFullField &&
