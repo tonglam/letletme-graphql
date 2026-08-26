@@ -64,6 +64,8 @@ export type PriceChangeBoard = {
 	deadline: string | null;
 	nextDeadlines: string[];
 	fetchedAt: string | null;
+	/** Provider request-start ordering evidence; internal to GraphQL. */
+	sourceCheckedAt?: string | null;
 	staleAt: string | null;
 	revision: string;
 	expectedPlayerCount: number;
@@ -74,6 +76,7 @@ export type PriceChangeBoard = {
 export type PriceChangeDurableCursor = Readonly<{
 	revision: string;
 	fetchedAt: string;
+	sourceCheckedAt: string;
 	hardExpiresAt: string;
 	state: "READY" | "STALE";
 }>;
@@ -423,6 +426,7 @@ const parsePublicationBoard = (
 		deadline: context.deadline,
 		nextDeadlines: [...context.nextDeadlines],
 		fetchedAt: context.fetchedAt,
+		sourceCheckedAt: publication.manifest.sourceCheckedAt,
 		staleAt: context.staleAt,
 		revision: publication.manifest.publicationId,
 		expectedPlayerCount: context.expectedPlayerCount,
@@ -697,6 +701,7 @@ export async function readPriceChangePredictionsCursor(
 		return {
 			revision: manifest.publicationId,
 			fetchedAt: publicationContext.fetchedAt,
+			sourceCheckedAt: manifest.sourceCheckedAt,
 			hardExpiresAt: publicationContext.hardExpiresAt,
 			state: ageMs < PRICE_CHANGE_READY_MS ? "READY" : "STALE",
 		};

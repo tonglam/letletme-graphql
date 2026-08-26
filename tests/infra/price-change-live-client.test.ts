@@ -20,12 +20,14 @@ const seasonCode = "2026";
 
 class FakeRedis {
 	private readonly values = new Map<string, string>();
+	readonly reads: string[] = [];
 
 	set(key: string, value: unknown): void {
 		this.values.set(key, typeof value === "string" ? value : JSON.stringify(value));
 	}
 
 	async get(key: string): Promise<string | null> {
+		this.reads.push(key);
 		return this.values.get(key) ?? null;
 	}
 
@@ -136,12 +138,15 @@ function context(redis: FakeRedis, database?: QueryExecutor): GraphQLContext {
 
 function publishHot(redis: FakeRedis, snapshot: Record<string, unknown>): void {
 	const payloadKey = `${HOT_PREFIX}:${seasonCode}:${snapshot.revision}`;
+	const metadataKey = `${payloadKey}:metadata`;
 	redis.set(`${HOT_PREFIX}:${seasonCode}:active`, {
 		revision: snapshot.revision,
 		payloadKey,
 		detectedAtMs: Date.parse(String(snapshot.detectedAt)),
 	});
 	redis.set(payloadKey, snapshot);
+	const { board: _board, ...metadata } = snapshot;
+	redis.set(metadataKey, metadata);
 }
 
 function hotSnapshot(ageMs = 1_000, revision = "abcdef0123456789"): Record<string, unknown> {
@@ -181,6 +186,10 @@ describe("price-change live client", () => {
 		const liveCursor = await readPriceChangeLiveCursor(context(redis));
 		assert.equal(liveCursor.state, "PROVISIONAL");
 		assert.equal(liveCursor.revision, snapshot.revision);
+		assert.ok(
+			!redis.reads.includes(`${HOT_PREFIX}:${seasonCode}:${snapshot.revision}`),
+			"cursor polling must not materialize the full hot board"
+		);
 
 		const liveBoard = await readPriceChangeLiveBoard(context(redis), snapshot.revision as string);
 		assert.equal(liveBoard.state, "PROVISIONAL");
@@ -195,6 +204,7 @@ describe("price-change live client", () => {
 		const damagedRedis = new FakeRedis();
 		const snapshot = hotSnapshot();
 		(snapshot.board as { expectedPlayerCount: number }).expectedPlayerCount = 2;
+		(snapshot as { observedPlayerCount: number }).observedPlayerCount = 2;
 		publishHot(damagedRedis, snapshot);
 		assert.equal((await readPriceChangeLiveCursor(context(damagedRedis))).state, "UNAVAILABLE");
 	});
@@ -234,7 +244,7 @@ describe("price-change live client", () => {
 		];
 		publishHot(redis, snapshot);
 
-		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
+		assert.equal((await readPriceChangeLiveBoard(context(redis))).state, "UNAVAILABLE");
 	});
 
 	it("rejects a pointer that does not name its revision payload", async () => {
@@ -319,7 +329,7 @@ describe("price-change live client", () => {
 		).toISOString();
 		publishHot(redis, snapshot);
 
-		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
+		assert.equal((await readPriceChangeLiveBoard(context(redis))).state, "UNAVAILABLE");
 	});
 
 	it("returns unavailable without a durable or hot publication", async () => {

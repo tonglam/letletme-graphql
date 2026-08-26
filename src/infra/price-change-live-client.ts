@@ -61,6 +61,8 @@ type HotSnapshot = {
 	};
 };
 
+type HotSnapshotMetadata = Omit<HotSnapshot, "board">;
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -93,7 +95,11 @@ const parsePointer = (value: string | null): { revision: string; payloadKey: str
 	}
 };
 
-const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSnapshot | null => {
+const parseHotSnapshotMetadata = (
+	value: unknown,
+	seasonCode: string,
+	now: Date
+): HotSnapshotMetadata | null => {
 	if (!isRecord(value)) return null;
 	if (
 		value.schemaVersion !== 1 ||
@@ -105,12 +111,15 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 		typeof value.sourceHash !== "string" ||
 		!/^[0-9a-f]{64}$/.test(value.sourceHash) ||
 		(value.artifactId !== null && typeof value.artifactId !== "string") ||
-		(value.deadline !== null && typeof value.deadline !== "string") ||
+		(value.deadline !== null && !isDateTimeString(value.deadline)) ||
 		!isDateTimeString(value.detectedAt) ||
 		!isDateTimeString(value.fetchedAt) ||
 		!isDateTimeString(value.expiresAt) ||
 		!Number.isSafeInteger(value.expectedPlayerCount) ||
 		!Number.isSafeInteger(value.observedPlayerCount) ||
+		(value.expectedPlayerCount as number) <= 0 ||
+		(value.observedPlayerCount as number) <= 0 ||
+		(value.expectedPlayerCount as number) !== (value.observedPlayerCount as number) ||
 		(value.corePlayerCount !== null && !Number.isSafeInteger(value.corePlayerCount)) ||
 		(value.corePlayerDelta !== null && !Number.isSafeInteger(value.corePlayerDelta)) ||
 		!isRecord(value.reconciliation)
@@ -125,22 +134,9 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 		!Number.isFinite(fetchedAt) ||
 		!Number.isFinite(expiresAt) ||
 		detectedAt > now.getTime() ||
+		fetchedAt > now.getTime() ||
 		expiresAt <= now.getTime() ||
 		expiresAt !== detectedAt + HOT_TTL_MS
-	) {
-		return null;
-	}
-	const board = parsePriceChangeBoardValue(value.board, now);
-	if (
-		!board ||
-		(board.status !== "READY" && board.status !== "STALE") ||
-		board.revision !== value.revision ||
-		board.fetchedAt !== value.fetchedAt ||
-		board.deadline !== value.deadline ||
-		board.staleAt !== new Date(fetchedAt + PRICE_CHANGE_READY_MS).toISOString() ||
-		value.expectedPlayerCount !== board.expectedPlayerCount ||
-		value.observedPlayerCount !== board.observedPlayerCount ||
-		value.expectedPlayerCount !== value.observedPlayerCount
 	) {
 		return null;
 	}
@@ -191,20 +187,10 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 		detectedAt: value.detectedAt,
 		fetchedAt: value.fetchedAt,
 		expiresAt: value.expiresAt,
-		expectedPlayerCount: value.expectedPlayerCount,
-		observedPlayerCount: value.observedPlayerCount,
-		corePlayerCount:
-			value.corePlayerCount === null || Number.isSafeInteger(value.corePlayerCount)
-				? (value.corePlayerCount as number | null)
-				: null,
-		corePlayerDelta:
-			value.corePlayerDelta === null || Number.isSafeInteger(value.corePlayerDelta)
-				? (value.corePlayerDelta as number | null)
-				: null,
-		board: {
-			...board,
-			status: now.getTime() - fetchedAt < PRICE_CHANGE_READY_MS ? "READY" : "STALE",
-		},
+		expectedPlayerCount: value.expectedPlayerCount as number,
+		observedPlayerCount: value.observedPlayerCount as number,
+		corePlayerCount: value.corePlayerCount as number | null,
+		corePlayerDelta: value.corePlayerDelta as number | null,
 		reconciliation: {
 			state: reconciliation.state as HotSnapshot["reconciliation"]["state"],
 			durablePublicationId: reconciliation.durablePublicationId as string | null,
@@ -214,8 +200,38 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 	};
 };
 
+const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSnapshot | null => {
+	const metadata = parseHotSnapshotMetadata(value, seasonCode, now);
+	if (!metadata || !isRecord(value)) return null;
+	const fetchedAt = Date.parse(metadata.fetchedAt);
+	const board = parsePriceChangeBoardValue(value.board, now);
+	if (
+		!board ||
+		(board.status !== "READY" && board.status !== "STALE") ||
+		board.revision !== metadata.revision ||
+		board.fetchedAt !== metadata.fetchedAt ||
+		board.deadline !== metadata.deadline ||
+		board.staleAt !== new Date(fetchedAt + PRICE_CHANGE_READY_MS).toISOString() ||
+		metadata.expectedPlayerCount !== board.expectedPlayerCount ||
+		metadata.observedPlayerCount !== board.observedPlayerCount ||
+		metadata.expectedPlayerCount !== metadata.observedPlayerCount
+	) {
+		return null;
+	}
+	return {
+		...metadata,
+		board: {
+			...board,
+			status: now.getTime() - fetchedAt < PRICE_CHANGE_READY_MS ? "READY" : "STALE",
+		},
+	};
+};
+
 const hotPayloadKey = (seasonCode: string, revision: string): string =>
 	`${HOT_KEY_PREFIX}:${seasonCode}:${revision}`;
+
+const hotMetadataKey = (seasonCode: string, revision: string): string =>
+	`${HOT_KEY_PREFIX}:${seasonCode}:${revision}:metadata`;
 
 async function readHotSnapshot(
 	context: GraphQLContext,
@@ -255,15 +271,51 @@ async function readHotSnapshot(
 	}
 }
 
+/**
+ * Read only the active hot envelope metadata for cursor polling. The board
+ * payload is intentionally not touched here; it is fetched only after the
+ * client observes a new revision and asks for the revision-bound board.
+ */
+async function readHotSnapshotMetadata(
+	context: GraphQLContext,
+	now: Date
+): Promise<HotSnapshotMetadata | null> {
+	try {
+		const pointer = parsePointer(
+			await context.redis.get(hotPointerKey(context.currentSeason.seasonCode))
+		);
+		if (
+			!pointer ||
+			pointer.payloadKey !== hotPayloadKey(context.currentSeason.seasonCode, pointer.revision) ||
+			!HOT_REVISION_PATTERN.test(pointer.revision)
+		) {
+			return null;
+		}
+		const raw = await context.redis.get(
+			hotMetadataKey(context.currentSeason.seasonCode, pointer.revision)
+		);
+		if (!raw) return null;
+		const parsed: unknown = JSON.parse(raw);
+		const metadata = parseHotSnapshotMetadata(parsed, context.currentSeason.seasonCode, now);
+		return metadata?.revision === pointer.revision ? metadata : null;
+	} catch (error) {
+		context.logger.warn({ err: error }, "Failed to load price-change hot snapshot metadata");
+		return null;
+	}
+}
+
 function isNewerHotSnapshot(
-	hot: HotSnapshot | null,
-	durable: Pick<PriceChangeBoard, "status" | "fetchedAt"> | PriceChangeDurableCursor | null
+	hot: HotSnapshotMetadata | null,
+	durable:
+		| Pick<PriceChangeBoard, "status" | "fetchedAt" | "sourceCheckedAt">
+		| PriceChangeDurableCursor
+		| null
 ): boolean {
 	const durableStatus = durable && "status" in durable ? durable.status : durable?.state;
 	if (!hot || !durable || durableStatus === "UNAVAILABLE" || !durable.fetchedAt)
 		return Boolean(hot);
-	const hotAt = Date.parse(hot.fetchedAt);
-	const durableAt = Date.parse(durable.fetchedAt);
+	const hotAt = Date.parse(hot.detectedAt);
+	const durableAt = Date.parse(durable.sourceCheckedAt ?? durable.fetchedAt);
 	return Number.isFinite(hotAt) && (!Number.isFinite(durableAt) || hotAt > durableAt);
 }
 
@@ -311,7 +363,7 @@ export async function readPriceChangeLiveCursor(
 ): Promise<PriceChangeLiveCursor> {
 	const now = new Date();
 	const [hot, durable] = await Promise.all([
-		readHotSnapshot(context, now),
+		readHotSnapshotMetadata(context, now),
 		readPriceChangePredictionsCursor(context, now),
 	]);
 	if (isNewerHotSnapshot(hot, durable)) {
