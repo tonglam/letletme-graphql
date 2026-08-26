@@ -333,4 +333,45 @@ describe("price-change live client", () => {
 			expiresAt: null,
 		});
 	});
+
+	it("falls back to durable cursor metadata from PostgreSQL without loading players", async () => {
+		const redis = new FakeRedis();
+		const durable = durableFixture(1_000, "11111111-1111-4111-8111-111111111111", 1);
+		const queries: string[] = [];
+		const database = {
+			query: async (sql: string) => {
+				queries.push(sql);
+				if (sql.includes("FROM ops.dataset_publications")) {
+					return {
+						rows: [
+							{
+								publication_id: durable.manifest.publicationId,
+								revision: String(durable.manifest.revision),
+								manifest: durable.manifest,
+							},
+						],
+					};
+				}
+				return {
+					rows: [
+						{
+							item_name: "context",
+							item_count: durable.manifest.items.find((item) => item.name === "context")?.count,
+							checksum: durable.manifest.items.find((item) => item.name === "context")?.sha256,
+							payload: durable.items.context,
+						},
+					],
+				};
+			},
+		};
+
+		const cursor = await readPriceChangeLiveCursor(
+			context(redis, database as unknown as QueryExecutor)
+		);
+		assert.equal(cursor.state, "DURABLE");
+		assert.equal(cursor.revision, durable.manifest.publicationId);
+		assert.equal(queries.length, 2);
+		assert.ok(queries[1]?.includes("item_name = 'context'"));
+		assert.ok(!queries[1]?.includes("ORDER BY item_name"));
+	});
 });

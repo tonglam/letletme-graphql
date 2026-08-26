@@ -9,6 +9,7 @@ import {
 	readDataPublicationItemsObserved,
 	isDataPublicationId,
 	type DataPublication,
+	type DataPublicationManifest,
 } from "./data-publication";
 import { hasExactFields } from "./exact-fields";
 
@@ -481,6 +482,20 @@ const ACTIVE_PUBLICATION_SQL = `
 	LIMIT 2
 `;
 
+// Cursor polling must remain cheap even when Redis is unavailable. Keep this
+// query limited to the active authority row and read only the context item
+// below; the player array is fetched only by the revision-bound board query.
+const ACTIVE_PUBLICATION_CURSOR_SQL = `
+	SELECT publication_id::text AS publication_id, revision::text AS revision, manifest
+	FROM ops.dataset_publications
+	WHERE dataset = 'fpl:price-changes'
+	  AND season_id = $1
+	  AND event_id IS NULL
+	  AND status = 'active'
+	ORDER BY revision DESC
+	LIMIT 2
+`;
+
 const PUBLICATION_BY_ID_SQL = `
 	SELECT publication_id::text AS publication_id, revision::text AS revision, manifest
 	FROM ops.dataset_publications
@@ -498,6 +513,14 @@ const PUBLICATION_ITEMS_SQL = `
 	FROM ops.dataset_publication_items
 	WHERE publication_id = $1::uuid
 	ORDER BY item_name
+`;
+
+const PUBLICATION_CONTEXT_SQL = `
+	SELECT item_name, item_count, checksum, payload
+	FROM ops.dataset_publication_items
+	WHERE publication_id = $1::uuid
+	  AND item_name = 'context'
+	LIMIT 2
 `;
 
 const loadPriceChangePublicationFromPostgres = async (
@@ -643,25 +666,23 @@ export async function readPriceChangePredictionsCursor(
 		dataset: PRICE_CHANGE_DATASET,
 		seasonCode: context.currentSeason.seasonCode,
 	} as const;
-	try {
-		const manifest = await readDataPublicationManifest(context.redis, scope);
-		if (
-			!manifest ||
-			manifest.eventId !== null ||
-			manifest.state !== "active" ||
-			manifest.items.length !== PRICE_CHANGE_ITEMS.length ||
+	const isPriceChangeManifest = (
+		manifest: DataPublicationManifest | null
+	): manifest is DataPublicationManifest =>
+		Boolean(
+			manifest &&
+			manifest.eventId === null &&
+			manifest.state === "active" &&
+			manifest.items.length === PRICE_CHANGE_ITEMS.length &&
 			manifest.items
 				.map((item) => item.name)
 				.sort()
-				.join(",") !== [...PRICE_CHANGE_ITEMS].sort().join(",")
-		) {
-			return null;
-		}
-		const publication = await readDataPublicationItemsAtManifest(context.redis, manifest, [
-			"context",
-		]);
-		const publicationContext = publication ? parseContext(publication.items.context) : null;
-		if (!publicationContext) return null;
+				.join(",") === [...PRICE_CHANGE_ITEMS].sort().join(",")
+		);
+	const cursorFromContext = (
+		manifest: DataPublicationManifest,
+		publicationContext: PriceChangePublicationContext
+	): PriceChangeDurableCursor | null => {
 		const fetchedAt = Date.parse(publicationContext.fetchedAt);
 		const hardExpiresAt = Date.parse(publicationContext.hardExpiresAt);
 		const ageMs = now.getTime() - fetchedAt;
@@ -679,6 +700,23 @@ export async function readPriceChangePredictionsCursor(
 			hardExpiresAt: publicationContext.hardExpiresAt,
 			state: ageMs < PRICE_CHANGE_READY_MS ? "READY" : "STALE",
 		};
+	};
+
+	// Redis is the normal low-latency path. If its pointer or context payload
+	// is missing/stale, fall through to PostgreSQL instead of reporting an
+	// unavailable cursor while a durable publication still exists.
+	try {
+		const manifest = await readDataPublicationManifest(context.redis, scope);
+		if (isPriceChangeManifest(manifest)) {
+			const publication = await readDataPublicationItemsAtManifest(context.redis, manifest, [
+				"context",
+			]);
+			const publicationContext = publication ? parseContext(publication.items.context) : null;
+			if (publicationContext) {
+				const cursor = cursorFromContext(manifest, publicationContext);
+				if (cursor) return cursor;
+			}
+		}
 	} catch (error) {
 		context.logger.warn(
 			{
@@ -687,6 +725,69 @@ export async function readPriceChangePredictionsCursor(
 				seasonCode: context.currentSeason.seasonCode,
 			},
 			"Failed to load price-change cursor metadata"
+		);
+	}
+
+	try {
+		const authority = await context.database.query<ActivePublicationRow>(
+			ACTIVE_PUBLICATION_CURSOR_SQL,
+			[context.currentSeason.seasonId]
+		);
+		if (authority.rows.length !== 1) return null;
+		const row = authority.rows[0];
+		const rawManifest =
+			typeof row.manifest === "string" ? row.manifest : (JSON.stringify(row.manifest) ?? "");
+		const manifest = parseDataPublicationManifest(rawManifest, scope);
+		const revision = Number(row.revision);
+		if (
+			!manifest ||
+			!isPriceChangeManifest(manifest) ||
+			!Number.isSafeInteger(revision) ||
+			manifest.publicationId !== row.publication_id ||
+			manifest.revision !== revision
+		) {
+			return null;
+		}
+
+		const itemResult = await context.database.query<PublicationItemRow>(PUBLICATION_CONTEXT_SQL, [
+			row.publication_id,
+		]);
+		if (itemResult.rows.length !== 1) return null;
+		const item = itemResult.rows[0];
+		const manifestItem = manifest.items.find((candidate) => candidate.name === "context");
+		if (
+			item.item_name !== "context" ||
+			!manifestItem ||
+			typeof item.checksum !== "string" ||
+			item.checksum !== manifestItem.sha256
+		) {
+			return null;
+		}
+		let payload: unknown;
+		try {
+			payload = typeof item.payload === "string" ? JSON.parse(item.payload) : item.payload;
+			const serialized = canonicalJson(payload);
+			if (
+				Number(item.item_count) !== manifestItem.count ||
+				payloadCount(payload) !== manifestItem.count ||
+				Buffer.byteLength(serialized, "utf8") !== manifestItem.bytes ||
+				sha256(serialized) !== manifestItem.sha256
+			) {
+				return null;
+			}
+		} catch {
+			return null;
+		}
+		const publicationContext = parseContext(payload);
+		return publicationContext ? cursorFromContext(manifest, publicationContext) : null;
+	} catch (error) {
+		context.logger.warn(
+			{
+				err: error,
+				dataset: PRICE_CHANGE_DATASET,
+				seasonCode: context.currentSeason.seasonCode,
+			},
+			"Failed to load price-change cursor metadata from PostgreSQL"
 		);
 		return null;
 	}
