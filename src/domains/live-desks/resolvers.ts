@@ -21,6 +21,7 @@ import {
 	loadManagerScores,
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
+	type ManagerScoreLoad,
 } from "../entry-live/manager-score";
 import { loadManagerScoresInChunks } from "../entry-live/manager-score-batches";
 import { entriesService } from "../entries/service";
@@ -393,6 +394,26 @@ const managerLoadRevision = (input: {
 		.slice(0, 20);
 };
 
+const managerScoresAlignedWithLiveSnapshot = (
+	managerScores: ManagerScoreLoad,
+	event: { finished: boolean; dataChecked: boolean },
+	snapshot: LiveDataSnapshot | null
+): boolean => {
+	// LAST_GOOD is useful for a bounded retained result, but it cannot define
+	// the global order of a full-field board while the player-live publication
+	// may already have advanced. Final-result rows are independently durable,
+	// so they only need the normal complete manager load gate below.
+	if (managerScores.dataAvailability !== "FRESH") return false;
+	if (event.finished && event.dataChecked) return true;
+	if (!snapshot) return false;
+	const livePublishedAt = Date.parse(snapshot.publishedAt || snapshot.lastSuccessfulFetchAt);
+	if (!Number.isFinite(livePublishedAt)) return false;
+	return Array.from(managerScores.rows.values()).every((row) => {
+		const managerCheckedAt = Date.parse(row.checkedAt);
+		return Number.isFinite(managerCheckedAt) && managerCheckedAt >= livePublishedAt;
+	});
+};
+
 export const liveDesksResolvers = {
 	Query: {
 		liveContext: async (_parent: unknown, _args: unknown, context: GraphQLContext) => {
@@ -649,7 +670,8 @@ export const liveDesksResolvers = {
 					coverage.resolvedEntries === allEntryIds.length &&
 					completeManagerScores.rows.size === allEntryIds.length &&
 					completeManagerScores.missingEntryIds.length === 0 &&
-					hasAllRankMetrics;
+					hasAllRankMetrics &&
+					managerScoresAlignedWithLiveSnapshot(completeManagerScores, event, snapshot);
 			} else {
 				const hasAllRankMetrics = allEntryIds.every((entryId) => {
 					const row = managerScores.rows.get(entryId);
@@ -664,7 +686,8 @@ export const liveDesksResolvers = {
 					canAttemptFullField &&
 					managerScores.rows.size === allEntryIds.length &&
 					managerScores.missingEntryIds.length === 0 &&
-					hasAllRankMetrics;
+					hasAllRankMetrics &&
+					managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
 			}
 			const managerRevision = managerLoadRevision(managerScores);
 			const managerStatusRevision = entryLiveCompetitionManagerStatusRevision(managerScores);
@@ -730,7 +753,9 @@ export const liveDesksResolvers = {
 								),
 								managerRevision,
 								rosterRevision,
-								requireNet: requiresNetMetric,
+								requireNet,
+								allowFinalNoCaptainBoost: event.finished && event.dataChecked,
+								requireTeamValue: request.sort === "TEAM_VALUE",
 							});
 						}
 					);
@@ -865,7 +890,8 @@ export const liveDesksResolvers = {
 				managerScores.tournamentCoverage?.resolvedEntries === allEntryIds.length &&
 				managerScores.rows.size === allEntryIds.length &&
 				managerScores.missingEntryIds.length === 0 &&
-				board.rows.length === board.totalEntries;
+				board.rows.length === board.totalEntries &&
+				managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
 			const deferredIds = new Set(deferredEntryIds);
 			const failedIds = new Set(calculatedFailedEntryIds);
 			const unavailableEntryCount = board.unavailableEntryIds.filter(

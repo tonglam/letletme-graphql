@@ -315,7 +315,7 @@ const buildTeamMatchInfo = (params: {
 	};
 };
 
-const normalizeChip = (raw: string | null | undefined): string => {
+export const normalizeChip = (raw: string | null | undefined): string => {
 	const value = (raw ?? "").toUpperCase().trim();
 	const compactValue = value.replace(/[^A-Z0-9]/g, "");
 	if (
@@ -338,6 +338,7 @@ const normalizeChip = (raw: string | null | undefined): string => {
 		return "FREE_HIT";
 	if (value === "WILDCARD" || compactValue === "WILDCARD" || compactValue === "WC")
 		return "WILDCARD";
+	if (value === "MANAGER" || compactValue === "MANAGER" || compactValue === "AM") return "MANAGER";
 	if (compactValue === "NONE" || compactValue === "NA" || compactValue === "") return "NONE";
 	return "NONE";
 };

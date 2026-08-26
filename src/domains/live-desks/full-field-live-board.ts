@@ -18,7 +18,7 @@ const canonicalChip = (raw: string | null): string => {
 	if (value === "TRIPLECAPTAIN" || value === "3XC" || value === "TC") return "TRIPLE_CAPTAIN";
 	if (value === "FREEHIT" || value === "FH") return "FREE_HIT";
 	if (value === "WILDCARD" || value === "WC") return "WILDCARD";
-	if (value === "MANAGER") return "MANAGER";
+	if (value === "MANAGER" || value === "AM") return "MANAGER";
 	return "NONE";
 };
 
@@ -101,6 +101,10 @@ export type FullFieldLiveBoardIndexInput = {
 	playerTeamIds?: ReadonlyMap<number, number>;
 	managerRows: ReadonlyMap<number, ManagerLiveScoreRow>;
 	requireNet: boolean;
+	/** Finalized FPL rows may legitimately have no captain boost. */
+	allowFinalNoCaptainBoost?: boolean;
+	/** TEAM_VALUE sorting must never turn an unknown value into zero. */
+	requireTeamValue?: boolean;
 };
 
 /**
@@ -116,8 +120,11 @@ export const buildFullFieldLiveBoardIndex = (
 		const entry = input.entries.get(entryId);
 		if (!entry) throw new Error(`Entry ${entryId} has no entry metadata`);
 		const pick = input.picks.get(entryId);
-		if (!hasCompleteEntryEventPick(pick, input.eventId, entryId)) {
+		if (!hasCompleteEntryEventPick(pick, input.eventId, entryId, input.allowFinalNoCaptainBoost)) {
 			throw new Error(`Entry ${entryId} has no complete event pick row`);
+		}
+		if (input.requireTeamValue && typeof entry.teamValue !== "number") {
+			throw new Error(`Entry ${entryId} has no team value for TEAM_VALUE sorting`);
 		}
 		const ownerAny = new Set<number>();
 		const ownerStarter = new Set<number>();
@@ -158,7 +165,7 @@ export const buildFullFieldLiveBoardIndex = (
 			playerName: entry.playerName,
 			rank: 0,
 			overallRank: score.overallRank ?? entry?.overallRank ?? 0,
-			teamValue: (entry.teamValue ?? 0) / 10,
+			teamValue: typeof entry.teamValue === "number" ? entry.teamValue / 10 : 0,
 			chip: canonicalChip(pick?.chip ?? null),
 			livePoints: score.eventPoints ?? 0,
 			transferCost,

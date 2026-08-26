@@ -6,7 +6,10 @@ import {
 	splitManagerLiveEntryIds,
 } from "../../../src/domains/entry-live/manager-score-batches";
 import type { ManagerLiveScoreRow } from "../../../src/infra/manager-live-client";
-import { buildFullFieldLiveBoardIndex } from "../../../src/domains/live-desks/full-field-live-board";
+import {
+	buildFullFieldLiveBoardIndex,
+	type FullFieldLiveBoardIndexInput,
+} from "../../../src/domains/live-desks/full-field-live-board";
 import {
 	queryEntryLiveCompetitionBoard,
 	type EntryLiveCompetitionBoardRequest,
@@ -194,7 +197,7 @@ describe("full-field live board index", () => {
 				},
 			])
 		);
-		const boardInput = {
+		const boardInput: FullFieldLiveBoardIndexInput = {
 			season: "2026",
 			eventId: 38,
 			tournamentId: 8,
@@ -234,6 +237,62 @@ describe("full-field live board index", () => {
 		expect(page.filteredEntries).toBe(1);
 		expect(page.rows[0]?.entry).toBe(1);
 		expect(page.rows[0]?.score.source).toBe("FPL_CLASSIC_STANDINGS");
+
+		const grossFirstManagerRows = new Map(boardInput.managerRows);
+		const grossFirst = grossFirstManagerRows.get(1);
+		const netSecond = grossFirstManagerRows.get(2);
+		if (!grossFirst || !netSecond) throw new Error("test manager rows missing");
+		grossFirstManagerRows.set(1, { ...grossFirst, eventPoints: 30, netEventPoints: 10 });
+		grossFirstManagerRows.set(2, { ...netSecond, eventPoints: 20, netEventPoints: 20 });
+		const grossRankedBoard = buildFullFieldLiveBoardIndex({
+			...boardInput,
+			managerRows: grossFirstManagerRows,
+			requireNet: false,
+		});
+		expect(grossRankedBoard.rows.map((row) => row.rank)).toEqual([1, 2, 3]);
+
+		const managerAliasPick = boardInput.picks.get(2);
+		if (!managerAliasPick) throw new Error("test manager alias pick missing");
+		const managerAliasBoard = buildFullFieldLiveBoardIndex({
+			...boardInput,
+			picks: new Map(boardInput.picks).set(2, { ...managerAliasPick, chip: "AM" }),
+		});
+		expect(managerAliasBoard.rows.find((row) => row.entry === 2)?.chip).toBe("MANAGER");
+
+		const finalNoCaptainPick = boardInput.picks.get(1);
+		if (!finalNoCaptainPick) throw new Error("test finalized pick missing");
+		const finalNoCaptainPicks = finalNoCaptainPick.picks.map((selected, index) => ({
+			...selected,
+			multiplier: index >= 2 && index <= 12 ? 1 : 0,
+			isCaptain: index === 0,
+			isViceCaptain: index === 1,
+		}));
+		const finalPicks = new Map(boardInput.picks).set(1, {
+			...finalNoCaptainPick,
+			picks: finalNoCaptainPicks,
+		});
+		expect(() => buildFullFieldLiveBoardIndex({ ...boardInput, picks: finalPicks })).toThrow(
+			"Entry 1 has no complete event pick row"
+		);
+		expect(() =>
+			buildFullFieldLiveBoardIndex({
+				...boardInput,
+				picks: finalPicks,
+				allowFinalNoCaptainBoost: true,
+			})
+		).not.toThrow();
+
+		const missingTeamValueEntries = new Map(boardInput.entries);
+		const missingTeamValueEntry = missingTeamValueEntries.get(3);
+		if (!missingTeamValueEntry) throw new Error("test team value entry missing");
+		missingTeamValueEntries.set(3, { ...missingTeamValueEntry, teamValue: null });
+		expect(() =>
+			buildFullFieldLiveBoardIndex({
+				...boardInput,
+				entries: missingTeamValueEntries,
+				requireTeamValue: true,
+			})
+		).toThrow("Entry 3 has no team value for TEAM_VALUE sorting");
 
 		const eventScopedBoard = buildFullFieldLiveBoardIndex({
 			...boardInput,
