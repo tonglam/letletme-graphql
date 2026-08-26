@@ -78,6 +78,7 @@ export const gameweekTypeDefs = /* GraphQL */ `
 		lifecycle: GameweekLifecycleState!
 		deadlineTime: DateTime
 		publishedAt: DateTime
+		sourceCheckedAt: DateTime
 		overviewState: GameweekSectionState!
 		boardsState: GameweekSectionState!
 		overview: GameweekOverview

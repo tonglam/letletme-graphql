@@ -20,6 +20,7 @@ export const priceChangesResolvers = {
 				sourceCheckedAt: parent.fetchedAt,
 				expectedCount: parent.expectedPlayerCount,
 				observedCount: parent.observedPlayerCount,
+				eligibility: parent.status === "UNAVAILABLE" ? "INVALID" : undefined,
 				complete: parent.status === "READY",
 			}),
 	},

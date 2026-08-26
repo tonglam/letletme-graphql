@@ -60,7 +60,12 @@ export const homeResolvers = {
 				scopeKey: `season:${context.currentSeason.seasonCode}:home-market`,
 				revision: parent.revision,
 				sourceCheckedAt: parent.capturedAt,
-				complete: parent.revision.length > 0 && parent.capturedAt !== null,
+				complete:
+					parent.revision.length > 0 &&
+					parent.capturedAt !== null &&
+					parent.ownershipState !== "UNAVAILABLE" &&
+					parent.priceChangesState !== "UNAVAILABLE" &&
+					parent.availabilityState !== "UNAVAILABLE",
 			}),
 	},
 };

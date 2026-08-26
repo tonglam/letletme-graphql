@@ -15,8 +15,9 @@ export const gameweekResolvers = {
 			buildDataCompleteness({
 				contractKey: "live-snapshot",
 				scopeKey: `season:${parent.season}:event:${parent.eventId}`,
-				revision: parent.liveRevision ?? parent.coreRevision,
-				sourceCheckedAt: parent.publishedAt,
+				revision: parent.liveRevision,
+				sourceCheckedAt: parent.sourceCheckedAt,
+				eligibility: parent.liveRevision === null ? "INVALID" : undefined,
 				complete:
 					parent.lifecycle !== "SCHEDULED" &&
 					parent.overviewState === "AVAILABLE" &&

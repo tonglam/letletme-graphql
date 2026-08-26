@@ -493,6 +493,7 @@ export const tournamentsResolvers = {
 	},
 	TournamentOfficialH2HBoard: {
 		completeness: (parent: {
+			tournament: TournamentInfo;
 			eventId: number;
 			awaitingSchedule: boolean;
 			scoreSource: string;
@@ -502,7 +503,7 @@ export const tournamentsResolvers = {
 		}) =>
 			buildDataCompleteness({
 				contractKey: "official-h2h",
-				scopeKey: `event:${parent.eventId}`,
+				scopeKey: `tournament:${parent.tournament.id}:event:${parent.eventId}`,
 				revision: parent.scoreRevision,
 				sourceCheckedAt: parent.scoreCheckedAt,
 				expectedCount: parent.matches.length,
