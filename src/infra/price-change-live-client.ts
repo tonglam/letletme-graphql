@@ -367,12 +367,21 @@ function isNewerHotSnapshot(
 		| PriceChangeDurableCursor
 		| null
 ): boolean {
-	const durableStatus = durable && "status" in durable ? durable.status : durable?.state;
-	if (!hot || !durable || durableStatus === "UNAVAILABLE" || !durable.fetchedAt)
-		return Boolean(hot);
+	if (!hot) return false;
 	const hotDetectedAt = Date.parse(hot.detectedAt);
 	const hotFetchedAt = Date.parse(hot.fetchedAt);
 	const now = Date.now();
+	if (
+		!Number.isFinite(hotDetectedAt) ||
+		!Number.isFinite(hotFetchedAt) ||
+		hotDetectedAt > now ||
+		hotFetchedAt > now ||
+		hotFetchedAt < hotDetectedAt
+	) {
+		return false;
+	}
+	const durableStatus = durable && "status" in durable ? durable.status : durable?.state;
+	if (!durable || durableStatus === "UNAVAILABLE" || !durable.fetchedAt) return true;
 	const sourceCheckedAt = Date.parse(durable.sourceCheckedAt ?? "");
 	const fetchedAt = Date.parse(durable.fetchedAt);
 	// A future source timestamp cannot be ordering evidence. It may be clock
@@ -384,13 +393,6 @@ function isNewerHotSnapshot(
 			: Number.isFinite(fetchedAt) && fetchedAt <= now
 				? fetchedAt
 				: NaN;
-	if (
-		!Number.isFinite(hotDetectedAt) ||
-		!Number.isFinite(hotFetchedAt) ||
-		hotFetchedAt < hotDetectedAt
-	) {
-		return false;
-	}
 	// A hot response whose source was fetched before the durable boundary cannot
 	// replace that durable publication, even when its request-start timestamp is
 	// newer. This keeps slow/replayed provider bytes from winning the race.
@@ -501,6 +503,20 @@ export async function readPriceChangeLiveBoard(
 		};
 	}
 	if (requestedRevision && requestedDurableRevision) {
+		// The active durable Redis publication is already validated by the normal
+		// reader. Prefer it for the cursor's exact active revision so a temporary
+		// PostgreSQL outage does not turn an otherwise available board into a 503.
+		const activeDurable = await readPriceChangePredictions(context);
+		if (activeDurable.status !== "UNAVAILABLE" && activeDurable.revision === requestedRevision) {
+			return {
+				revision: activeDurable.revision,
+				state: "DURABLE",
+				detectedAt: activeDurable.fetchedAt,
+				expiresAt: durableHardExpiresAt(activeDurable),
+				durablePublicationId: activeDurable.revision,
+				board: activeDurable,
+			};
+		}
 		const requestedDurable = await readPriceChangePredictionsByPublicationId(
 			context,
 			requestedRevision

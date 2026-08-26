@@ -308,6 +308,49 @@ describe("price-change live client", () => {
 		assert.equal(cursor.revision, durable.manifest.publicationId);
 	});
 
+	it("rejects an incoherent hot source even when durable metadata is unavailable", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		const detectedAt = String(snapshot.detectedAt);
+		const fetchedAt = new Date(Date.parse(detectedAt) - 1_000).toISOString();
+		(snapshot as { fetchedAt: string }).fetchedAt = fetchedAt;
+		(snapshot.board as { fetchedAt: string; staleAt: string }).fetchedAt = fetchedAt;
+		(snapshot.board as { staleAt: string }).staleAt = new Date(
+			Date.parse(fetchedAt) + 10 * 60 * 1_000
+		).toISOString();
+		(snapshot as { payloadHash: string }).payloadHash = hotEnvelopePayloadHash(snapshot);
+		(snapshot as { metadataHash: string }).metadataHash = hotEnvelopeMetadataHash(snapshot);
+		publishHot(redis, snapshot);
+
+		const cursor = await readPriceChangeLiveCursor(context(redis));
+		assert.equal(cursor.state, "UNAVAILABLE");
+	});
+
+	it("serves a matching active durable revision from Redis during a PostgreSQL outage", async () => {
+		const redis = new FakeRedis();
+		const durable = durableFixture(1_000, "11111111-1111-4111-8111-111111111111", 1);
+		redis.set(
+			activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode }),
+			JSON.stringify(durable.manifest)
+		);
+		for (const item of durable.manifest.items) {
+			redis.set(item.key, canonicalJson(durable.items[item.name as "context" | "players"]));
+		}
+		const database = {
+			query: async () => {
+				throw new Error("postgres temporarily unavailable");
+			},
+		};
+
+		const result = await readPriceChangeLiveBoard(
+			context(redis, database as unknown as QueryExecutor),
+			durable.manifest.publicationId
+		);
+		assert.equal(result.state, "DURABLE");
+		assert.equal(result.revision, durable.manifest.publicationId);
+		assert.equal(result.board.players.length, 1);
+	});
+
 	it("fails closed for malformed reconciliation metadata", async () => {
 		const redis = new FakeRedis();
 		const snapshot = hotSnapshot();
@@ -453,6 +496,18 @@ describe("price-change live client", () => {
 		assert.equal((await readPriceChangeLiveBoard(context(redis))).state, "UNAVAILABLE");
 	});
 
+	it("rejects a hot horizon without its primary deadline", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		(snapshot as { deadline: string | null }).deadline = null;
+		(snapshot.board as { deadline: string | null }).deadline = null;
+		(snapshot as { payloadHash: string }).payloadHash = hotEnvelopePayloadHash(snapshot);
+		(snapshot as { metadataHash: string }).metadataHash = hotEnvelopeMetadataHash(snapshot);
+		publishHot(redis, snapshot);
+
+		assert.equal((await readPriceChangeLiveBoard(context(redis))).state, "UNAVAILABLE");
+	});
+
 	it("returns unavailable without a durable or hot publication", async () => {
 		const cursor = await readPriceChangeLiveCursor(context(new FakeRedis()));
 		assert.deepEqual(cursor, {
@@ -553,5 +608,42 @@ describe("price-change live client", () => {
 			(error: unknown) =>
 				error instanceof GraphQLError && error.extensions.code === "BAD_USER_INPUT"
 		);
+	});
+
+	it("normalizes uppercase durable UUIDs before loading publication items", async () => {
+		const redis = new FakeRedis();
+		const durable = durableFixture(1_000, "11111111-1111-4111-8111-111111111111", 1);
+		const database = {
+			query: async (sql: string) => {
+				if (sql.includes("publication_id = $1")) {
+					return {
+						rows: [
+							{
+								publication_id: durable.manifest.publicationId,
+								revision: String(durable.manifest.revision),
+								status: "active",
+								manifest: durable.manifest,
+							},
+						],
+					};
+				}
+				return {
+					rows: durable.manifest.items.map((item) => ({
+						publication_id: durable.manifest.publicationId,
+						item_name: item.name,
+						item_count: item.count,
+						checksum: item.sha256,
+						payload: durable.items[item.name as "context" | "players"],
+					})),
+				};
+			},
+		};
+
+		const board = await readPriceChangePredictionsByPublicationId(
+			context(redis, database as unknown as QueryExecutor),
+			durable.manifest.publicationId.toUpperCase()
+		);
+		assert.ok(board);
+		assert.equal(board.revision, durable.manifest.publicationId);
 	});
 });

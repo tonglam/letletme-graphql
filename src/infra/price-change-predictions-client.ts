@@ -249,8 +249,9 @@ export const parsePriceChangeBoardValue = (
 		return null;
 	}
 	if (
-		value.deadline !== null &&
-		(value.nextDeadlines.length === 0 || value.deadline !== value.nextDeadlines[0])
+		value.nextDeadlines.length === 0 ||
+		value.deadline === null ||
+		value.deadline !== value.nextDeadlines[0]
 	) {
 		return null;
 	}
@@ -692,8 +693,9 @@ const loadPriceChangePublicationById = async (
 	context: GraphQLContext,
 	publicationId: string
 ): Promise<LoadedPriceChangePublicationCandidate | null> => {
+	const normalizedPublicationId = publicationId.toLowerCase();
 	const authority = await context.database.query<PublicationCandidateRow>(PUBLICATION_BY_ID_SQL, [
-		publicationId,
+		normalizedPublicationId,
 		context.currentSeason.seasonId,
 	]);
 	if (authority.rows.length !== 1) return null;
@@ -714,7 +716,7 @@ const loadPriceChangePublicationById = async (
 	)
 		return null;
 	const [loaded] = await loadPriceChangePublicationItems(context, [
-		{ status: row.status, publicationId, revision, manifest },
+		{ status: row.status, publicationId: row.publication_id, revision, manifest },
 	]);
 	return loaded ?? null;
 };

@@ -501,7 +501,6 @@ const accepted = ({
 		"marketAvailabilityPage",
 		"marketPulse",
 		"priceChangeBoard",
-		"priceChangeLiveCursor",
 		"priceChangeLiveBoard",
 		"marketOwnershipOverview",
 		"marketOwnershipDay",

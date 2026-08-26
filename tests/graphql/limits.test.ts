@@ -36,6 +36,14 @@ describe("GraphQL request limits", () => {
 		}
 	});
 
+	it("charges the metadata-only live cursor at its one-unit floor", () => {
+		const result = validateGraphQLRequestLimits(
+			{ query: "query { priceChangeLiveCursor { revision state } }" },
+			schema
+		);
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1 });
+	});
+
 	it("identifies a fixture-only read before resolver execution", () => {
 		const result = validateGraphQLRequestLimits({
 			query: "query CoreEventFixtureSchedule { eventFixtures(eventId: 1) { id } }",
