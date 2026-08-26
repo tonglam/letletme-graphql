@@ -29,6 +29,8 @@ export type DataPublicationManifest = Readonly<{
 	publicationId: string;
 	sourceCheckedAt: string;
 	lastSuccessfulFetchAt?: string;
+	freshnessWindowId?: number;
+	freshnessWindowIds?: readonly number[];
 	publishedAt: string;
 	state: "active" | "scheduled" | "live" | "settled";
 	items: readonly DataPublicationManifestItem[];
@@ -66,12 +68,21 @@ const MANIFEST_FIELDS = [
 	"state",
 	"items",
 ] as const;
-const OPTIONAL_MANIFEST_FIELDS = ["lastSuccessfulFetchAt"] as const;
+const OPTIONAL_MANIFEST_FIELDS = [
+	"lastSuccessfulFetchAt",
+	"freshnessWindowId",
+	"freshnessWindowIds",
+] as const;
 const MANIFEST_ITEM_FIELDS = ["name", "key", "type", "count", "bytes", "sha256"] as const;
 
-const hasManifestFields = (value: Record<string, unknown>): boolean =>
-	hasExactFields(value, MANIFEST_FIELDS) ||
-	hasExactFields(value, [...MANIFEST_FIELDS, ...OPTIONAL_MANIFEST_FIELDS]);
+const hasManifestFields = (value: Record<string, unknown>): boolean => {
+	const actual = Object.keys(value);
+	const allowed = new Set<string>([...MANIFEST_FIELDS, ...OPTIONAL_MANIFEST_FIELDS]);
+	return (
+		MANIFEST_FIELDS.every((field) => actual.includes(field)) &&
+		actual.every((field) => allowed.has(field))
+	);
+};
 const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
 	"fpl:core": [
 		"events",
@@ -131,6 +142,9 @@ export const isDataPublicationId = (value: unknown): value is string =>
 
 const isIsoDate = (value: unknown): value is string =>
 	typeof value === "string" && Number.isFinite(Date.parse(value));
+
+const isPositiveSafeInteger = (value: unknown): value is number =>
+	typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 
 const assertScope = (scope: DataPublicationScope): void => {
 	if (!/^\d{4}$/.test(scope.seasonCode)) throw new Error("Invalid Data publication season");
@@ -201,11 +215,14 @@ export const parseDataPublicationManifest = (
 		if (
 			typeof value.seasonCode !== "string" ||
 			!/^\d{4}$/.test(value.seasonCode) ||
-			!Number.isSafeInteger(value.revision) ||
-			Number(value.revision) <= 0 ||
+			!isPositiveSafeInteger(value.revision) ||
 			!isDataPublicationId(value.publicationId) ||
 			!isIsoDate(value.sourceCheckedAt) ||
 			(value.lastSuccessfulFetchAt !== undefined && !isIsoDate(value.lastSuccessfulFetchAt)) ||
+			(value.freshnessWindowId !== undefined && !isPositiveSafeInteger(value.freshnessWindowId)) ||
+			(value.freshnessWindowIds !== undefined &&
+				(!Array.isArray(value.freshnessWindowIds) ||
+					value.freshnessWindowIds.some((windowId) => !isPositiveSafeInteger(windowId)))) ||
 			!isIsoDate(value.publishedAt) ||
 			!isCanonicalState(dataset, value.state) ||
 			!Array.isArray(value.items)
