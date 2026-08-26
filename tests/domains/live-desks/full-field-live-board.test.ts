@@ -305,7 +305,11 @@ describe("full-field live board index", () => {
 
 		const eventScopedBoard = buildFullFieldLiveBoardIndex({
 			...boardInput,
-			playerTeamIds: new Map([[100, 9]]),
+			playerTeamIds: new Map(
+				Array.from(players.values(), (player): [number, number] => [player.id, player.teamId]).map(
+					([id, teamId]): [number, number] => [id, id === 100 ? 9 : teamId]
+				)
+			),
 		});
 		const eventScopedPage = queryEntryLiveCompetitionBoard(eventScopedBoard, {
 			...request,
@@ -347,5 +351,20 @@ describe("full-field live board index", () => {
 		expect(() => buildFullFieldLiveBoardIndex({ ...boardInput, entries: missingEntries })).toThrow(
 			"Entry 3 has no entry metadata"
 		);
+
+		const missingPlayers = new Map(boardInput.players);
+		missingPlayers.delete(100);
+		expect(() => buildFullFieldLiveBoardIndex({ ...boardInput, players: missingPlayers })).toThrow(
+			"Entry 1 pick 100 has no player metadata"
+		);
+
+		const missingEventTeam = new Map(
+			Array.from(players.values(), (player): [number, number] => [player.id, player.teamId]).filter(
+				([id]) => id !== 101
+			)
+		);
+		expect(() =>
+			buildFullFieldLiveBoardIndex({ ...boardInput, playerTeamIds: missingEventTeam })
+		).toThrow("Entry 1 pick 101 has no team metadata");
 	});
 });

@@ -136,7 +136,15 @@ export const buildFullFieldLiveBoardIndex = (
 		const teamBench = new Map<number, number>();
 		for (const selected of pick?.picks ?? []) {
 			const player = input.players.get(selected.element);
-			const teamId = input.playerTeamIds?.get(selected.element) ?? player?.teamId ?? 0;
+			if (!player) {
+				throw new Error(`Entry ${entryId} pick ${selected.element} has no player metadata`);
+			}
+			const teamId = input.playerTeamIds
+				? input.playerTeamIds.get(selected.element)
+				: player.teamId;
+			if (typeof teamId !== "number" || !Number.isSafeInteger(teamId) || teamId <= 0) {
+				throw new Error(`Entry ${entryId} pick ${selected.element} has no team metadata`);
+			}
 			ownerAny.add(selected.element);
 			add(teamAny, teamId);
 			if (selected.position <= 11) {

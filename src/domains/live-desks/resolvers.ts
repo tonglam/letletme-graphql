@@ -402,9 +402,16 @@ const managerScoresAlignedWithLiveSnapshot = (
 	// LAST_GOOD is useful for a bounded retained result, but it cannot define
 	// the global order of a full-field board while the player-live publication
 	// may already have advanced. Final-result rows are independently durable,
-	// so they only need the normal complete manager load gate below.
+	// so a complete load made only of those rows remains valid after settlement.
+	if (event.finished && event.dataChecked) {
+		if (managerScores.dataAvailability === "FRESH") return true;
+		return (
+			managerScores.dataAvailability === "LAST_GOOD" &&
+			managerScores.rows.size > 0 &&
+			Array.from(managerScores.rows.values()).every((row) => row.source === "FPL_FINAL_RESULT")
+		);
+	}
 	if (managerScores.dataAvailability !== "FRESH") return false;
-	if (event.finished && event.dataChecked) return true;
 	if (!snapshot) return false;
 	const livePublishedAt = Date.parse(snapshot.publishedAt || snapshot.lastSuccessfulFetchAt);
 	if (!Number.isFinite(livePublishedAt)) return false;
