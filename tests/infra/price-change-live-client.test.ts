@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { createHash } from "node:crypto";
 import type Redis from "ioredis";
 import type { GraphQLContext } from "../../src/graphql/context";
 import type { QueryExecutor } from "../../src/infra/database";
 import {
+	activeDataPublicationKey,
+	dataPublicationItemKey,
+	type DataPublicationManifest,
+} from "../../src/infra/data-publication";
+import {
 	readPriceChangeLiveBoard,
 	readPriceChangeLiveCursor,
 } from "../../src/infra/price-change-live-client";
+import { readPriceChangePredictionsByPublicationId } from "../../src/infra/price-change-predictions-client";
 
 const HOT_PREFIX = "fpl:price-changes:hot";
 const seasonCode = "2026";
@@ -61,10 +68,67 @@ const validBoard = (fetchedAt: string, revision = "abcdef0123456789") => ({
 	],
 });
 
-function context(redis: FakeRedis): GraphQLContext {
+const canonicalJson = (value: unknown): string => {
+	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+	if (value !== null && typeof value === "object") {
+		const record = value as Record<string, unknown>;
+		return `{${Object.keys(record)
+			.sort()
+			.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value);
+};
+
+const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
+
+function durableFixture(ageMs: number, publicationId: string, revision: number) {
+	const fetchedAt = new Date(Date.now() - ageMs).toISOString();
+	const board = validBoard(fetchedAt, publicationId);
+	const contextValue = {
+		schemaVersion: 1,
+		source: "FPL_BOOTSTRAP",
+		fetchedAt,
+		staleAt: board.staleAt,
+		hardExpiresAt: new Date(Date.parse(fetchedAt) + 60 * 60 * 1_000).toISOString(),
+		deadline: board.deadline,
+		nextDeadlines: board.nextDeadlines,
+		expectedPlayerCount: 1,
+		observedPlayerCount: 1,
+	};
+	const items = { context: contextValue, players: board.players };
+	const scope = { dataset: "fpl:price-changes" as const, seasonCode };
+	const manifestItems = (Object.entries(items) as ["context" | "players", unknown][]).map(
+		([name, value]) => {
+			const payload = canonicalJson(value);
+			return {
+				name,
+				key: dataPublicationItemKey(scope, revision, name),
+				type: "string" as const,
+				count: Array.isArray(value) ? value.length : Object.keys(value as object).length,
+				bytes: Buffer.byteLength(payload, "utf8"),
+				sha256: sha256(payload),
+			};
+		}
+	);
+	const manifest: DataPublicationManifest = {
+		dataset: "fpl:price-changes",
+		seasonCode,
+		eventId: null,
+		revision,
+		publicationId,
+		sourceCheckedAt: fetchedAt,
+		publishedAt: new Date().toISOString(),
+		state: "active",
+		items: manifestItems,
+	};
+	return { manifest, items, board, hardExpiresAt: contextValue.hardExpiresAt };
+}
+
+function context(redis: FakeRedis, database?: QueryExecutor): GraphQLContext {
 	return {
 		redis: redis as unknown as Redis,
-		database: { query: async () => ({ rows: [] }) } as unknown as QueryExecutor,
+		database: database ?? ({ query: async () => ({ rows: [] }) } as unknown as QueryExecutor),
 		currentSeason: { seasonId: 2026, seasonCode },
 		logger: { warn: () => undefined } as unknown as GraphQLContext["logger"],
 	} as GraphQLContext;
@@ -184,6 +248,55 @@ describe("price-change live client", () => {
 		redis.set(`${HOT_PREFIX}:${seasonCode}:${snapshot.revision}`, snapshot);
 
 		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
+	});
+
+	it("pins a durable cursor to a retained publication after the active one advances", async () => {
+		const redis = new FakeRedis();
+		const current = durableFixture(8 * 60 * 1_000, "22222222-2222-4222-8222-222222222222", 2);
+		redis.set(
+			activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode }),
+			JSON.stringify(current.manifest)
+		);
+		for (const item of current.manifest.items) {
+			redis.set(item.key, canonicalJson(current.items[item.name as "context" | "players"]));
+		}
+
+		const retained = durableFixture(9 * 60 * 1_000, "11111111-1111-4111-8111-111111111111", 1);
+		const database = {
+			query: async (sql: string) => {
+				if (sql.includes("FROM ops.dataset_publications") && sql.includes("publication_id = $1")) {
+					return {
+						rows: [
+							{
+								publication_id: retained.manifest.publicationId,
+								revision: String(retained.manifest.revision),
+								manifest: retained.manifest,
+							},
+						],
+					};
+				}
+				if (sql.includes("FROM ops.dataset_publications")) return { rows: [] };
+				return {
+					rows: retained.manifest.items.map((item) => ({
+						item_name: item.name,
+						item_count: item.count,
+						checksum: item.sha256,
+						payload: retained.items[item.name as "context" | "players"],
+					})),
+				};
+			},
+		};
+
+		const gqlContext = context(redis, database as unknown as QueryExecutor);
+		const retainedBoard = await readPriceChangePredictionsByPublicationId(
+			gqlContext,
+			retained.manifest.publicationId
+		);
+		assert.ok(retainedBoard);
+		const result = await readPriceChangeLiveBoard(gqlContext, retained.manifest.publicationId);
+		assert.equal(result.revision, retained.manifest.publicationId);
+		assert.equal(result.durablePublicationId, retained.manifest.publicationId);
+		assert.equal(result.expiresAt, retained.hardExpiresAt);
 	});
 
 	it("serves the exact requested revision even after the active pointer advances", async () => {

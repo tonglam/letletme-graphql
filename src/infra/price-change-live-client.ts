@@ -2,8 +2,10 @@ import type { GraphQLContext } from "../graphql/context";
 import { GraphQLError } from "graphql";
 import {
 	PRICE_CHANGE_READY_MS,
+	PRICE_CHANGE_MAX_AGE_MS,
 	parsePriceChangeBoardValue,
 	readPriceChangePredictions,
+	readPriceChangePredictionsByPublicationId,
 	type PriceChangeBoard,
 } from "./price-change-predictions-client";
 import { isDataPublicationId } from "./data-publication";
@@ -263,8 +265,16 @@ function durableCursor(seasonCode: string, board: PriceChangeBoard): PriceChange
 		state: "DURABLE",
 		detectedAt: board.fetchedAt,
 		fetchedAt: board.fetchedAt,
-		expiresAt: board.staleAt,
+		expiresAt: durableHardExpiresAt(board),
 	};
+}
+
+function durableHardExpiresAt(board: PriceChangeBoard): string | null {
+	if (!board.fetchedAt) return null;
+	const fetchedAt = Date.parse(board.fetchedAt);
+	return Number.isFinite(fetchedAt)
+		? new Date(fetchedAt + PRICE_CHANGE_MAX_AGE_MS).toISOString()
+		: null;
 }
 
 function durablePublicationId(durable: PriceChangeBoard, hot: HotSnapshot | null): string | null {
@@ -314,18 +324,22 @@ export async function readPriceChangeLiveBoard(
 	]);
 	if (requestedRevision) {
 		if (requestedDurableRevision) {
-			if (durable.status === "UNAVAILABLE" || durable.revision !== requestedRevision) {
+			const requestedDurable =
+				durable.revision === requestedRevision
+					? durable
+					: await readPriceChangePredictionsByPublicationId(context, requestedRevision);
+			if (!requestedDurable || requestedDurable.status === "UNAVAILABLE") {
 				throw new GraphQLError("The requested durable price revision is unavailable", {
 					extensions: { code: "PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE" },
 				});
 			}
 			return {
-				revision: durable.revision,
+				revision: requestedDurable.revision,
 				state: "DURABLE",
-				detectedAt: durable.fetchedAt,
-				expiresAt: durable.staleAt,
-				durablePublicationId: durable.revision,
-				board: durable,
+				detectedAt: requestedDurable.fetchedAt,
+				expiresAt: durableHardExpiresAt(requestedDurable),
+				durablePublicationId: requestedDurable.revision,
+				board: requestedDurable,
 			};
 		}
 		if (!hot) {
@@ -358,7 +372,7 @@ export async function readPriceChangeLiveBoard(
 		revision: durable.revision,
 		state: durable.status === "UNAVAILABLE" ? "UNAVAILABLE" : "DURABLE",
 		detectedAt: durable.fetchedAt,
-		expiresAt: durable.staleAt,
+		expiresAt: durableHardExpiresAt(durable),
 		durablePublicationId: durablePublicationId(durable, hot),
 		board: durable,
 	};

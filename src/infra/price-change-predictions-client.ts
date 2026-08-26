@@ -5,6 +5,7 @@ import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
 	readDataPublicationItemsObserved,
+	isDataPublicationId,
 	type DataPublication,
 } from "./data-publication";
 import { hasExactFields } from "./exact-fields";
@@ -447,214 +448,146 @@ const payloadCount = (value: unknown): number => {
 
 const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 
-type PublicationCandidateRow = QueryResultRow & {
+type ActivePublicationRow = QueryResultRow & {
 	publication_id: string;
 	revision: string | number;
-	status: "active" | "retired";
 	manifest: unknown;
 };
 
 type PublicationItemRow = QueryResultRow & {
-	publication_id: string;
 	item_name: string;
 	item_count: string | number;
 	checksum: string;
 	payload: unknown;
 };
 
-type ParsedPriceChangePublicationCandidate = {
-	status: "active" | "retired";
-	publicationId: string;
-	revision: number;
-	manifest: DataPublication["manifest"];
-};
+const ACTIVE_PUBLICATION_SQL = `
+	SELECT publication_id::text AS publication_id, revision::text AS revision, manifest
+	FROM ops.dataset_publications
+	WHERE dataset = 'fpl:price-changes'
+	  AND season_id = $1
+	  AND event_id IS NULL
+	  AND status = 'active'
+	ORDER BY revision DESC
+	LIMIT 2
+`;
 
-type LoadedPriceChangePublicationCandidate = {
-	status: "active" | "retired";
-	publication: DataPublication;
-};
-
-// Price predictions publish every five minutes; twelve retired candidates cover
-// the complete one-hour hard-expiry window without an unbounded history scan.
-const RETIRED_PUBLICATION_LIMIT = 12;
-
-const PUBLICATION_CANDIDATES_SQL = `
-	WITH active_candidates AS (
-		SELECT publication_id::text AS publication_id, revision::text AS revision, status, manifest
-		FROM ops.dataset_publications
-		WHERE dataset = 'fpl:price-changes'
-		  AND season_id = $1
-		  AND event_id IS NULL
-		  AND status = 'active'
-		ORDER BY revision DESC
-		LIMIT 2
-	), retired_candidates AS (
-		SELECT publication_id::text AS publication_id, revision::text AS revision, status, manifest
-		FROM ops.dataset_publications
-		WHERE dataset = 'fpl:price-changes'
-		  AND season_id = $1
-		  AND event_id IS NULL
-		  AND status = 'retired'
-		ORDER BY revision DESC
-		LIMIT ${RETIRED_PUBLICATION_LIMIT}
-	)
-	SELECT publication_id, revision, status, manifest FROM active_candidates
-	UNION ALL
-	SELECT publication_id, revision, status, manifest FROM retired_candidates
+const PUBLICATION_BY_ID_SQL = `
+	SELECT publication_id::text AS publication_id, revision::text AS revision, manifest
+	FROM ops.dataset_publications
+	WHERE publication_id = $1::uuid
+	  AND dataset = 'fpl:price-changes'
+	  AND season_id = $2
+	  AND event_id IS NULL
+	  AND status IN ('active', 'retired')
+	  AND (expires_at IS NULL OR expires_at > now())
+	LIMIT 1
 `;
 
 const PUBLICATION_ITEMS_SQL = `
-	SELECT publication_id::text AS publication_id, item_name, item_count, checksum, payload
+	SELECT item_name, item_count, checksum, payload
 	FROM ops.dataset_publication_items
-	WHERE publication_id = ANY($1::uuid[])
-	ORDER BY publication_id, item_name
+	WHERE publication_id = $1::uuid
+	ORDER BY item_name
 `;
 
-const loadPriceChangePublicationItems = async (
+const loadPriceChangePublicationFromPostgres = async (
 	context: GraphQLContext,
-	candidates: ParsedPriceChangePublicationCandidate[]
-): Promise<LoadedPriceChangePublicationCandidate[]> => {
-	if (candidates.length === 0) return [];
-	const publicationIds = candidates.map((candidate) => candidate.publicationId);
-	const publicationIdSet = new Set(publicationIds);
+	publicationId?: string
+): Promise<DataPublication | null> => {
+	const authority = await context.database.query<ActivePublicationRow>(
+		publicationId ? PUBLICATION_BY_ID_SQL : ACTIVE_PUBLICATION_SQL,
+		publicationId
+			? [publicationId, context.currentSeason.seasonId]
+			: [context.currentSeason.seasonId]
+	);
+	if (authority.rows.length !== 1) return null;
+	const row = authority.rows[0];
+	const rawManifest =
+		typeof row.manifest === "string" ? row.manifest : (JSON.stringify(row.manifest) ?? "");
+	const manifest = parseDataPublicationManifest(rawManifest, {
+		dataset: PRICE_CHANGE_DATASET,
+		seasonCode: context.currentSeason.seasonCode,
+	});
+	const revision = Number(row.revision);
+	if (
+		!manifest ||
+		!Number.isSafeInteger(revision) ||
+		manifest.publicationId !== row.publication_id ||
+		manifest.revision !== revision ||
+		manifest.items.length !== PRICE_CHANGE_ITEMS.length
+	) {
+		return null;
+	}
 	const itemResult = await context.database.query<PublicationItemRow>(PUBLICATION_ITEMS_SQL, [
-		publicationIds,
+		row.publication_id,
 	]);
-	const rowsByPublication = new Map<string, PublicationItemRow[]>();
+	if (itemResult.rows.length !== PRICE_CHANGE_ITEMS.length) return null;
+	const items: Record<string, unknown> = {};
+	const seen = new Set<string>();
 	for (const item of itemResult.rows) {
-		if (!publicationIdSet.has(item.publication_id)) continue;
-		const rows = rowsByPublication.get(item.publication_id) ?? [];
-		rows.push(item);
-		rowsByPublication.set(item.publication_id, rows);
-	}
-	const publications: LoadedPriceChangePublicationCandidate[] = [];
-	for (const candidate of candidates) {
-		const publicationItems = rowsByPublication.get(candidate.publicationId) ?? [];
-		if (publicationItems.length !== PRICE_CHANGE_ITEMS.length) continue;
-		const items: Record<string, unknown> = {};
-		const seen = new Set<string>();
-		let valid = true;
-		for (const item of publicationItems) {
-			if (
-				seen.has(item.item_name) ||
-				!PRICE_CHANGE_ITEMS.includes(item.item_name as (typeof PRICE_CHANGE_ITEMS)[number])
-			) {
-				valid = false;
-				break;
-			}
-			const manifestItem = candidate.manifest.items.find(
-				(manifestCandidate) => manifestCandidate.name === item.item_name
-			);
-			if (
-				!manifestItem ||
-				typeof item.checksum !== "string" ||
-				item.checksum !== manifestItem.sha256
-			) {
-				valid = false;
-				break;
-			}
-			try {
-				const payload: unknown =
-					typeof item.payload === "string" ? (JSON.parse(item.payload) as unknown) : item.payload;
-				const serialized = canonicalJson(payload);
-				if (
-					Number(item.item_count) !== manifestItem.count ||
-					payloadCount(payload) !== manifestItem.count ||
-					Buffer.byteLength(serialized, "utf8") !== manifestItem.bytes ||
-					sha256(serialized) !== manifestItem.sha256
-				) {
-					valid = false;
-					break;
-				}
-				seen.add(item.item_name);
-				items[item.item_name] = payload;
-			} catch {
-				valid = false;
-				break;
-			}
+		if (
+			seen.has(item.item_name) ||
+			!PRICE_CHANGE_ITEMS.includes(item.item_name as (typeof PRICE_CHANGE_ITEMS)[number])
+		) {
+			return null;
 		}
-		if (!valid || seen.size !== PRICE_CHANGE_ITEMS.length) continue;
-		publications.push({
-			status: candidate.status,
-			publication: { manifest: candidate.manifest, items },
-		});
+		const manifestItem = manifest.items.find((candidate) => candidate.name === item.item_name);
+		if (
+			!manifestItem ||
+			typeof item.checksum !== "string" ||
+			item.checksum !== manifestItem.sha256
+		) {
+			return null;
+		}
+		let payload: unknown;
+		try {
+			payload = typeof item.payload === "string" ? JSON.parse(item.payload) : item.payload;
+			const serialized = canonicalJson(payload);
+			if (
+				Number(item.item_count) !== manifestItem.count ||
+				payloadCount(payload) !== manifestItem.count ||
+				Buffer.byteLength(serialized, "utf8") !== manifestItem.bytes ||
+				sha256(serialized) !== manifestItem.sha256
+			) {
+				return null;
+			}
+		} catch {
+			return null;
+		}
+		seen.add(item.item_name);
+		items[item.item_name] = payload;
 	}
-	return publications;
+	if (seen.size !== PRICE_CHANGE_ITEMS.length) return null;
+	return { manifest, items };
 };
 
-const loadPriceChangeBoardFromPostgres = async (
+/** Read one retained durable publication by its immutable UUID. */
+export async function readPriceChangePredictionsByPublicationId(
 	context: GraphQLContext,
-	now: Date
-): Promise<PriceChangeBoard | null> => {
-	const authority = await context.database.query<PublicationCandidateRow>(
-		PUBLICATION_CANDIDATES_SQL,
-		[context.currentSeason.seasonId]
-	);
-	const activeRows = authority.rows.filter((row) => row.status === "active");
-	if (activeRows.length > 1) return null;
-	const activeRevision = activeRows.length === 1 ? Number(activeRows[0]!.revision) : null;
-	const parsedCandidates = authority.rows
-		.filter((row) => row.status === "active" || row.status === "retired")
-		.map((row) => ({ row, revision: Number(row.revision) }))
-		.filter(
-			(candidate) =>
-				Number.isSafeInteger(candidate.revision) &&
-				candidate.revision > 0 &&
-				(candidate.row.status === "active" ||
-					activeRevision === null ||
-					!Number.isSafeInteger(activeRevision) ||
-					candidate.revision < activeRevision)
-		)
-		.sort((left, right) => {
-			if (left.row.status !== right.row.status) return left.row.status === "active" ? -1 : 1;
-			return right.revision - left.revision;
-		})
-		.flatMap<ParsedPriceChangePublicationCandidate>(({ row, revision }) => {
-			const rawManifest =
-				typeof row.manifest === "string" ? row.manifest : (JSON.stringify(row.manifest) ?? "");
-			const manifest = parseDataPublicationManifest(rawManifest, {
+	publicationId: string
+): Promise<PriceChangeBoard | null> {
+	if (!isDataPublicationId(publicationId)) return null;
+	try {
+		const publication = await loadPriceChangePublicationFromPostgres(context, publicationId);
+		return publication ? parsePublicationBoard(publication, new Date()) : null;
+	} catch (error) {
+		context.logger.warn(
+			{
+				err: error,
 				dataset: PRICE_CHANGE_DATASET,
 				seasonCode: context.currentSeason.seasonCode,
-			});
-			if (
-				!manifest ||
-				manifest.publicationId !== row.publication_id ||
-				manifest.revision !== revision ||
-				manifest.items.length !== PRICE_CHANGE_ITEMS.length
-			) {
-				return [];
-			}
-			return [
-				{
-					status: row.status,
-					publicationId: row.publication_id,
-					revision,
-					manifest,
-				},
-			];
-		});
-	const activeCandidate = parsedCandidates.find((candidate) => candidate.status === "active");
-	if (activeCandidate) {
-		const [activePublication] = await loadPriceChangePublicationItems(context, [activeCandidate]);
-		if (activePublication) {
-			const board = parsePublicationBoard(activePublication.publication, now);
-			if (board) return board;
-		}
+				publicationId,
+			},
+			"Failed to load requested price-change publication from PostgreSQL"
+		);
+		return null;
 	}
-	const retiredCandidates = parsedCandidates.filter((candidate) => candidate.status === "retired");
-	const retiredPublications = await loadPriceChangePublicationItems(context, retiredCandidates);
-	for (const candidate of retiredPublications) {
-		const board = parsePublicationBoard(candidate.publication, now);
-		// A coherent retired revision remains usable, but it is never the current authority.
-		if (board) return { ...board, status: "STALE" };
-	}
-	return null;
-};
+}
 
 export async function readPriceChangePredictions(
 	context: GraphQLContext
 ): Promise<PriceChangeBoard> {
-	const now = new Date();
 	const scope = {
 		dataset: PRICE_CHANGE_DATASET,
 		seasonCode: context.currentSeason.seasonCode,
@@ -665,12 +598,12 @@ export async function readPriceChangePredictions(
 		PRICE_CHANGE_ITEMS
 	);
 	if (redisRead.publication) {
-		const board = parsePublicationBoard(redisRead.publication, now);
+		const board = parsePublicationBoard(redisRead.publication, new Date());
 		if (board) return board;
 	}
-	let postgresBoard: PriceChangeBoard | null = null;
+	let postgresPublication: DataPublication | null = null;
 	try {
-		postgresBoard = await loadPriceChangeBoardFromPostgres(context, now);
+		postgresPublication = await loadPriceChangePublicationFromPostgres(context);
 	} catch (error) {
 		context.logger.warn(
 			{
@@ -681,7 +614,10 @@ export async function readPriceChangePredictions(
 			"Failed to load price-change publication from PostgreSQL"
 		);
 	}
-	if (postgresBoard) return postgresBoard;
+	if (postgresPublication) {
+		const board = parsePublicationBoard(postgresPublication, new Date());
+		if (board) return board;
+	}
 	return unavailableBoard();
 }
 
