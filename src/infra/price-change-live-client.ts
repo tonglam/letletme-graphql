@@ -174,6 +174,7 @@ const parseHotSnapshotMetadata = (
 		!Number.isFinite(expiresAt) ||
 		detectedAt > now.getTime() ||
 		fetchedAt > now.getTime() ||
+		fetchedAt < detectedAt ||
 		fetchedAt < now.getTime() - PRICE_CHANGE_MAX_AGE_MS ||
 		expiresAt <= now.getTime() ||
 		expiresAt !== detectedAt + HOT_TTL_MS
@@ -480,7 +481,10 @@ export async function readPriceChangeLiveBoard(
 		});
 	}
 	const requestedHotRevision = requestedRevision && HOT_REVISION_PATTERN.test(requestedRevision);
-	const requestedDurableRevision = requestedRevision && isDataPublicationId(requestedRevision);
+	const requestedDurableRevision =
+		requestedRevision && isDataPublicationId(requestedRevision)
+			? requestedRevision.toLowerCase()
+			: null;
 	if (requestedRevision && !requestedHotRevision && !requestedDurableRevision) {
 		throw new GraphQLError("The requested live price revision is invalid", {
 			extensions: { code: "BAD_USER_INPUT" },

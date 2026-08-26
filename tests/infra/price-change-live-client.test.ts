@@ -324,6 +324,12 @@ describe("price-change live client", () => {
 
 		const cursor = await readPriceChangeLiveCursor(context(redis));
 		assert.equal(cursor.state, "UNAVAILABLE");
+		await assert.rejects(
+			() => readPriceChangeLiveBoard(context(redis), String(snapshot.revision)),
+			(error: unknown) =>
+				error instanceof GraphQLError &&
+				error.extensions.code === "PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE"
+		);
 	});
 
 	it("serves a matching active durable revision from Redis during a PostgreSQL outage", async () => {
@@ -349,6 +355,31 @@ describe("price-change live client", () => {
 		assert.equal(result.state, "DURABLE");
 		assert.equal(result.revision, durable.manifest.publicationId);
 		assert.equal(result.board.players.length, 1);
+	});
+
+	it("matches an uppercase durable revision against the active Redis publication", async () => {
+		const redis = new FakeRedis();
+		const durable = durableFixture(1_000, "11111111-1111-4111-8111-111111111111", 1);
+		redis.set(
+			activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode }),
+			JSON.stringify(durable.manifest)
+		);
+		for (const item of durable.manifest.items) {
+			redis.set(item.key, canonicalJson(durable.items[item.name as "context" | "players"]));
+		}
+		const database = {
+			query: async () => {
+				throw new Error("postgres temporarily unavailable");
+			},
+		};
+
+		const result = await readPriceChangeLiveBoard(
+			context(redis, database as unknown as QueryExecutor),
+			durable.manifest.publicationId.toUpperCase()
+		);
+		assert.equal(result.state, "DURABLE");
+		assert.equal(result.revision, durable.manifest.publicationId);
+		assert.equal(result.durablePublicationId, durable.manifest.publicationId);
 	});
 
 	it("fails closed for malformed reconciliation metadata", async () => {
