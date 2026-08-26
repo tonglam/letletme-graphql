@@ -663,7 +663,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 		`,
 	},
 	[READ_MODELS.entryEventResults]: {
-		sourceRelations: ["competition.entry_event_results", "competition.entry_event_picks"],
+		sourceRelations: ["competition.entry_event_results"],
 		sql: `
 			SELECT
 				result.source_result_id AS id,
@@ -679,7 +679,7 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 				result.event_chip,
 				result.played_captain_element_id AS event_played_captain,
 				result.captain_points AS event_captain_points,
-				COALESCE(picks.picks, '[]'::jsonb) AS event_picks,
+				result.event_picks,
 				result.automatic_substitutions AS event_auto_sub,
 				result.overall_points,
 				result.overall_rank,
@@ -689,22 +689,6 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 				result.updated_at,
 				result.rich_synced_at
 			FROM competition.entry_event_results result
-			LEFT JOIN LATERAL (
-				SELECT jsonb_agg(
-					jsonb_build_object(
-						'element', pick.element_id,
-						'position', pick.position,
-						'multiplier', pick.multiplier,
-						'is_captain', pick.is_captain,
-						'is_vice_captain', pick.is_vice_captain
-					)
-					ORDER BY pick.position
-				) AS picks
-				FROM competition.entry_event_picks pick
-				WHERE pick.season_id = result.season_id
-				  AND pick.entry_id = result.entry_id
-				  AND pick.event_id = result.event_id
-			) picks ON TRUE
 			WHERE result.season_id = $1
 		`,
 	},
