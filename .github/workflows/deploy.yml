@@ -661,12 +661,40 @@ jobs:
               if (context.liveRevision !== null && (!eventId || typeof context.liveRevision !== "string")) {
                 throw new Error("GraphQL deployment live revision contract failed");
               }
+              const priceChanges = await request(`query PriceChangeDeploymentSmoke {
+                priceChangeBoard {
+                  status
+                  revision
+                  expectedPlayerCount
+                  observedPlayerCount
+                }
+              }`);
+              const priceChangeBoard = priceChanges?.priceChangeBoard;
+              if (
+                priceChangeBoard?.status !== "READY" ||
+                typeof priceChangeBoard?.revision !== "string" ||
+                !priceChangeBoard.revision ||
+                priceChangeBoard.revision === "unavailable" ||
+                !Number.isInteger(priceChangeBoard.expectedPlayerCount) ||
+                priceChangeBoard.expectedPlayerCount <= 0 ||
+                !Number.isInteger(priceChangeBoard.observedPlayerCount) ||
+                priceChangeBoard.observedPlayerCount <= 0
+              ) {
+                throw new Error(
+                  "GraphQL deployment price-change publication contract failed: " +
+                    JSON.stringify(priceChangeBoard)
+                );
+              }
               console.log(JSON.stringify({
                 status: "graphql_deployment_contract_passed",
                 season: info.season,
                 eventId,
                 liveState: context.state,
                 liveRevision: context.liveRevision,
+                priceChangeStatus: priceChangeBoard.status,
+                priceChangeRevision: priceChangeBoard.revision,
+                priceChangeExpectedPlayers: priceChangeBoard.expectedPlayerCount,
+                priceChangeObservedPlayers: priceChangeBoard.observedPlayerCount,
               }));
             '
 

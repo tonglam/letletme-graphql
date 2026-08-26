@@ -78,7 +78,8 @@ const validPlayer = {
 
 async function createPublication(
 	ageMs: number,
-	publicationId = "11111111-1111-4111-8111-111111111111"
+	publicationId = "11111111-1111-4111-8111-111111111111",
+	revision = 1
 ): Promise<{
 	manifest: DataPublicationManifest;
 	context: Record<string, unknown>;
@@ -107,7 +108,7 @@ async function createPublication(
 			const payload = canonicalJson(value);
 			return {
 				name,
-				key: dataPublicationItemKey(scope, 1, name),
+				key: dataPublicationItemKey(scope, revision, name),
 				type: "string" as const,
 				count: Array.isArray(value) ? value.length : Object.keys(value as object).length,
 				bytes: Buffer.byteLength(payload, "utf8"),
@@ -119,7 +120,7 @@ async function createPublication(
 		dataset: "fpl:price-changes",
 		seasonCode: "2026",
 		eventId: null,
-		revision: 1,
+		revision,
 		publicationId,
 		sourceCheckedAt: fetchedAt,
 		publishedAt: new Date().toISOString(),
@@ -151,22 +152,41 @@ function makeDatabase(
 	publication: Awaited<ReturnType<typeof createPublication>>,
 	mutate?: (rows: Array<Record<string, unknown>>) => void
 ): QueryExecutor {
-	const authority = {
+	return makeCandidateDatabase([{ publication, status: "active" }], mutate);
+}
+
+function makeCandidateDatabase(
+	candidates: Array<{
+		publication: Awaited<ReturnType<typeof createPublication>>;
+		status: "active" | "retired";
+	}>,
+	mutate?: (rows: Array<Record<string, unknown>>) => void,
+	queries: string[] = []
+): QueryExecutor {
+	const authority = candidates.map(({ publication, status }) => ({
 		publication_id: publication.manifest.publicationId,
 		revision: String(publication.manifest.revision),
+		status,
 		manifest: publication.manifest,
-	};
-	const rows = publication.manifest.items.map((item) => ({
-		item_name: item.name,
-		item_count: item.count,
-		checksum: item.sha256,
-		payload: publication.items[item.name],
 	}));
+	const rows = candidates.flatMap(({ publication }) =>
+		publication.manifest.items.map((item) => ({
+			publication_id: publication.manifest.publicationId,
+			item_name: item.name,
+			item_count: item.count,
+			checksum: item.sha256,
+			payload: publication.items[item.name],
+		}))
+	);
 	mutate?.(rows);
 	return {
-		query: async (sql: string) => {
-			if (sql.includes("dataset_publications")) return { rows: [authority] };
-			return { rows };
+		query: async (sql: string, values?: readonly unknown[]) => {
+			queries.push(sql);
+			if (sql.includes("dataset_publications")) return { rows: authority };
+			const publicationIds = new Set(Array.isArray(values?.[0]) ? values[0] : []);
+			return {
+				rows: rows.filter((row) => publicationIds.has(row.publication_id)),
+			};
 		},
 	} as QueryExecutor;
 }
@@ -240,6 +260,123 @@ describe("price-change publication reader", () => {
 		);
 		assert.equal(board.status, "READY");
 		assert.equal(board.revision, freshPostgresPublication.manifest.publicationId);
+	});
+
+	it("serves the newest complete retired publication as STALE when active is unreadable", async () => {
+		const active = await createPublication(60 * 1_000, "33333333-3333-4333-8333-333333333333", 3);
+		const lastAvailable = await createPublication(
+			9 * 60 * 1_000,
+			"22222222-2222-4222-8222-222222222222",
+			2
+		);
+		const incompatibleManifest = { ...active.manifest, futureMetadata: true };
+		active.redis.set(
+			activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode: "2026" }),
+			JSON.stringify(incompatibleManifest)
+		);
+		const queries: string[] = [];
+		const database = makeCandidateDatabase(
+			[
+				{
+					publication: {
+						...active,
+						manifest: incompatibleManifest as DataPublicationManifest,
+					},
+					status: "active",
+				},
+				{ publication: lastAvailable, status: "retired" },
+			],
+			undefined,
+			queries
+		);
+
+		const board = await readPriceChangePredictions(makeContext(active.redis, database));
+
+		assert.equal(board.status, "STALE");
+		assert.equal(board.revision, lastAvailable.manifest.publicationId);
+		assert.equal(board.expectedPlayerCount, 1);
+		assert.equal(board.observedPlayerCount, 1);
+		assert.equal(board.players[0]?.playerId, 1);
+		assert.equal(queries.length, 2);
+		assert.match(queries[0]!, /status = 'retired'/);
+		assert.match(queries[0]!, /LIMIT 12/);
+		assert.match(queries[1]!, /publication_id = ANY\(\$1::uuid\[\]\)/);
+	});
+
+	it("skips a corrupt retired candidate without mixing publication revisions", async () => {
+		const active = await createPublication(60 * 1_000, "44444444-4444-4444-8444-444444444444", 4);
+		const corruptRetired = await createPublication(
+			5 * 60 * 1_000,
+			"33333333-3333-4333-8333-333333333333",
+			3
+		);
+		const lastAvailable = await createPublication(
+			9 * 60 * 1_000,
+			"22222222-2222-4222-8222-222222222222",
+			2
+		);
+		const incompatibleManifest = { ...active.manifest, futureMetadata: true };
+		active.redis.set(
+			activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode: "2026" }),
+			JSON.stringify(incompatibleManifest)
+		);
+		const database = makeCandidateDatabase(
+			[
+				{
+					publication: {
+						...active,
+						manifest: incompatibleManifest as DataPublicationManifest,
+					},
+					status: "active",
+				},
+				{ publication: corruptRetired, status: "retired" },
+				{ publication: lastAvailable, status: "retired" },
+			],
+			(rows) => {
+				const corruptPlayerItem = rows.find(
+					(row) =>
+						row.publication_id === corruptRetired.manifest.publicationId &&
+						row.item_name === "players"
+				);
+				assert.ok(corruptPlayerItem);
+				corruptPlayerItem.checksum = "0".repeat(64);
+			}
+		);
+
+		const board = await readPriceChangePredictions(makeContext(active.redis, database));
+
+		assert.equal(board.status, "STALE");
+		assert.equal(board.revision, lastAvailable.manifest.publicationId);
+		assert.equal(board.players.length, 1);
+	});
+
+	it("does not serve a retired publication beyond the hard-expiry window", async () => {
+		const active = await createPublication(60 * 1_000, "33333333-3333-4333-8333-333333333333", 3);
+		const expiredRetired = await createPublication(
+			PRICE_CHANGE_MAX_AGE_MS + 1_000,
+			"22222222-2222-4222-8222-222222222222",
+			2
+		);
+		const incompatibleManifest = { ...active.manifest, futureMetadata: true };
+		active.redis.set(
+			activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode: "2026" }),
+			JSON.stringify(incompatibleManifest)
+		);
+		const database = makeCandidateDatabase([
+			{
+				publication: {
+					...active,
+					manifest: incompatibleManifest as DataPublicationManifest,
+				},
+				status: "active",
+			},
+			{ publication: expiredRetired, status: "retired" },
+		]);
+
+		const board = await readPriceChangePredictions(makeContext(active.redis, database));
+
+		assert.equal(board.status, "UNAVAILABLE");
+		assert.equal(board.revision, "unavailable");
 	});
 
 	it("fails closed when PostgreSQL item checksum proof is wrong", async () => {
