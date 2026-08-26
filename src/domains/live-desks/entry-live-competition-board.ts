@@ -337,6 +337,8 @@ export const projectEntryLiveCompetitionBoardRow = (
 	}
 	const captainId = row.activeCaptain.id || row.playedCaptain || 0;
 	const captainName = row.activeCaptain.name || row.captainName;
+	captains.clear();
+	if (captainId > 0) captains.add(captainId);
 	return {
 		entry: row.entry,
 		entryName: row.entryName,

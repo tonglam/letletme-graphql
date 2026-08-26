@@ -603,6 +603,7 @@ export const liveDesksResolvers = {
 			const rosterRevision = entryLiveCompetitionRosterRevision(allEntryIds);
 			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
 			const requireNet = memberTournament.leagueType === LeagueType.H2H;
+			const requiresNetMetric = requireNet || request.sort === "NET_EVENT_POINTS";
 			const fullFieldEnabled =
 				(Bun.env.FULL_FIELD_LIVE_BOARD_ENABLED ?? process.env.FULL_FIELD_LIVE_BOARD_ENABLED) ===
 				"true";
@@ -636,7 +637,7 @@ export const liveDesksResolvers = {
 					const row = completeManagerScores.rows.get(entryId);
 					return Boolean(
 						row &&
-						(requireNet
+						(requiresNetMetric
 							? typeof row.netEventPoints === "number" && row.eventPointSemantics !== "UNKNOWN"
 							: typeof row.eventPoints === "number")
 					);
@@ -654,7 +655,7 @@ export const liveDesksResolvers = {
 					const row = managerScores.rows.get(entryId);
 					return Boolean(
 						row &&
-						(requireNet
+						(requiresNetMetric
 							? typeof row.netEventPoints === "number" && row.eventPointSemantics !== "UNKNOWN"
 							: typeof row.eventPoints === "number")
 					);
@@ -729,7 +730,7 @@ export const liveDesksResolvers = {
 								),
 								managerRevision,
 								rosterRevision,
-								requireNet,
+								requireNet: requiresNetMetric,
 							});
 						}
 					);
@@ -760,25 +761,23 @@ export const liveDesksResolvers = {
 							Array.from(result.results.values()),
 							{ useNet: requireNet }
 						);
+						const playerIds = Array.from(
+							new Set(rankedRows.flatMap((row) => row.pickList.map((pick) => pick.element)))
+						);
 						let eventTeamIds: ReadonlyMap<number, number> | undefined;
-						if (request.teamCountRules.length > 0) {
-							const playerIds = Array.from(
-								new Set(rankedRows.flatMap((row) => row.pickList.map((pick) => pick.element)))
+						if (playerIds.length > 0) {
+							const eventPlayers = await getPlayerAndTeamMaps(
+								context,
+								playerIds,
+								request.eventId,
+								context.currentSeason.seasonCode
 							);
-							if (playerIds.length > 0) {
-								const eventPlayers = await getPlayerAndTeamMaps(
-									context,
-									playerIds,
-									request.eventId,
-									context.currentSeason.seasonCode
-								);
-								eventTeamIds = new Map(
-									Array.from(eventPlayers.playerMap.entries()).map(([id, player]) => [
-										id,
-										player.team_id,
-									])
-								);
-							}
+							eventTeamIds = new Map(
+								Array.from(eventPlayers.playerMap.entries()).map(([id, player]) => [
+									id,
+									player.team_id,
+								])
+							);
 						}
 						return buildEntryLiveCompetitionBoard({
 							...cacheIdentity,

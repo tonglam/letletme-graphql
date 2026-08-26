@@ -50,6 +50,8 @@ const chooseAvailability = (
 ): ManagerScoreLoad["dataAvailability"] => {
 	if (rows === 0 && errorCode) return "UNAVAILABLE";
 	if (rows < expected || errorCode) return "PARTIAL";
+	if (loads.some((load) => load.dataAvailability === "UNAVAILABLE")) return "UNAVAILABLE";
+	if (loads.some((load) => load.dataAvailability === "PARTIAL")) return "PARTIAL";
 	return loads.every((load) => load.dataAvailability === "FRESH") ? "FRESH" : "LAST_GOOD";
 };
 

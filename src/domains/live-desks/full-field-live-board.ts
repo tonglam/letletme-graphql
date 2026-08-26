@@ -114,6 +114,7 @@ export const buildFullFieldLiveBoardIndex = (
 	const rows: IndexedEntryLiveCompetitionBoardRow[] = [];
 	for (const entryId of input.allEntryIds) {
 		const entry = input.entries.get(entryId);
+		if (!entry) throw new Error(`Entry ${entryId} has no entry metadata`);
 		const pick = input.picks.get(entryId);
 		if (!hasCompleteEntryEventPick(pick, input.eventId, entryId)) {
 			throw new Error(`Entry ${entryId} has no complete event pick row`);
@@ -153,11 +154,11 @@ export const buildFullFieldLiveBoardIndex = (
 			loadedScore.transferCost === transferCost ? loadedScore : { ...loadedScore, transferCost };
 		rows.push({
 			entry: entryId,
-			entryName: entry?.entryName ?? "",
-			playerName: entry?.playerName ?? "",
+			entryName: entry.entryName,
+			playerName: entry.playerName,
 			rank: 0,
 			overallRank: score.overallRank ?? entry?.overallRank ?? 0,
-			teamValue: (entry?.teamValue ?? 0) / 10,
+			teamValue: (entry.teamValue ?? 0) / 10,
 			chip: canonicalChip(pick?.chip ?? null),
 			livePoints: score.eventPoints ?? 0,
 			transferCost,

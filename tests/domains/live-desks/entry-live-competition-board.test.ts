@@ -109,6 +109,8 @@ const liveRow = (input: {
 	chip?: string;
 	picks?: PickInput[];
 	source?: LiveManagerScore["source"];
+	activeCaptainId?: number;
+	playedCaptain?: number;
 }): LiveCalcData => {
 	const base = buildNoPicksLiveCalcData(input.entry, 1);
 	const managerScore = score({
@@ -124,6 +126,7 @@ const liveRow = (input: {
 		pick
 	);
 	const captain = picks.find((item) => item.isCaptain) ?? picks[0];
+	const effectiveCaptainId = input.activeCaptainId ?? captain?.element ?? 0;
 	return {
 		...base,
 		availability: "READY",
@@ -141,11 +144,11 @@ const liveRow = (input: {
 		liveTotalPoints: managerScore.totalPoints ?? 0,
 		played: input.played ?? 0,
 		toPlay: Math.max(0, 11 - (input.played ?? 0)),
-		playedCaptain: captain?.element ?? 0,
+		playedCaptain: input.playedCaptain ?? effectiveCaptainId,
 		captainName: captain ? `Player ${captain.element}` : "",
 		activeCaptain: {
-			id: captain?.element ?? 0,
-			name: captain ? `Player ${captain.element}` : "",
+			id: effectiveCaptainId,
+			name: effectiveCaptainId > 0 ? `Player ${effectiveCaptainId}` : "",
 			points: managerScore.eventPoints ?? 0,
 		},
 		pickList: picks,
@@ -327,6 +330,37 @@ describe("entry live competition board filtering and paging", () => {
 				})
 			).rows.map((row) => row.entry)
 		).toEqual([1]);
+	});
+
+	it("uses the effective promoted captain for captain ownership filters", () => {
+		const built = board([
+			liveRow({
+				entry: 1,
+				picks: [
+					{ element: 101, teamId: 1, captain: true },
+					{ element: 102, teamId: 1, vice: true },
+				],
+				activeCaptainId: 102,
+				playedCaptain: 102,
+			}),
+		]);
+
+		expect(
+			queryEntryLiveCompetitionBoard(
+				built,
+				request({
+					ownership: { playerIds: [102], scope: "ANY", captainMode: "CAPTAIN" },
+				})
+			).filteredEntries
+		).toBe(1);
+		expect(
+			queryEntryLiveCompetitionBoard(
+				built,
+				request({
+					ownership: { playerIds: [101], scope: "ANY", captainMode: "CAPTAIN" },
+				})
+			).filteredEntries
+		).toBe(0);
 	});
 
 	it("keeps starter and bench scopes tied to selected positions", () => {

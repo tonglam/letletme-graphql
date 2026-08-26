@@ -94,6 +94,22 @@ describe("full-field live board bounded manager loads", () => {
 		expect(merged.tournamentCoverage?.state).toBe("PARTIAL");
 	});
 
+	it("preserves partial manager availability when all rows are present", () => {
+		const load = makeLoad([makeManagerRow(1, 10), makeManagerRow(2, 11)], 2);
+		const merged = mergeManagerScoreLoads(
+			[
+				{
+					...load,
+					dataAvailability: "PARTIAL",
+				},
+			],
+			[1, 2]
+		);
+
+		expect(merged.rows.size).toBe(2);
+		expect(merged.dataAvailability).toBe("PARTIAL");
+	});
+
 	it("loads 1,567 managers two chunks at a time and merges all rows", async () => {
 		const entryIds = Array.from({ length: 1567 }, (_, index) => index + 1);
 		let active = 0;
@@ -256,6 +272,12 @@ describe("full-field live board index", () => {
 		partialPicks.set(3, { ...partialPick, picks: partialPick.picks.slice(0, 14) });
 		expect(() => buildFullFieldLiveBoardIndex({ ...boardInput, picks: partialPicks })).toThrow(
 			"Entry 3 has no complete event pick row"
+		);
+
+		const missingEntries = new Map(boardInput.entries);
+		missingEntries.delete(3);
+		expect(() => buildFullFieldLiveBoardIndex({ ...boardInput, entries: missingEntries })).toThrow(
+			"Entry 3 has no entry metadata"
 		);
 	});
 });
