@@ -156,7 +156,7 @@ function hotSnapshot(ageMs = 1_000, revision = "abcdef0123456789"): Record<strin
 	const detectedAt = new Date(Date.now() - ageMs).toISOString();
 	const board = validBoard(detectedAt, revision);
 	const base = {
-		schemaVersion: 2,
+		schemaVersion: 3,
 		seasonCode,
 		revision: board.revision,
 		triggerFingerprint: "a".repeat(64),
@@ -165,6 +165,7 @@ function hotSnapshot(ageMs = 1_000, revision = "abcdef0123456789"): Record<strin
 		metadataHash: "",
 		artifactId: "11111111-1111-4111-8111-111111111111",
 		deadline: board.deadline,
+		nextDeadlines: board.nextDeadlines,
 		detectedAt,
 		fetchedAt: detectedAt,
 		expiresAt: new Date(Date.parse(detectedAt) + 15 * 60 * 1_000).toISOString(),
@@ -543,6 +544,19 @@ describe("price-change live client", () => {
 		const redis = new FakeRedis();
 		const snapshot = hotSnapshot();
 		(snapshot as { deadline: string | null }).deadline = null;
+		(snapshot as { metadataHash: string }).metadataHash = hotEnvelopeMetadataHash(snapshot);
+		publishHot(redis, snapshot);
+
+		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
+	});
+
+	it("does not advertise a metadata cursor with a non-chronological horizon", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		(snapshot as { nextDeadlines: string[] }).nextDeadlines = [
+			String(snapshot.deadline),
+			String(snapshot.deadline),
+		];
 		(snapshot as { metadataHash: string }).metadataHash = hotEnvelopeMetadataHash(snapshot);
 		publishHot(redis, snapshot);
 

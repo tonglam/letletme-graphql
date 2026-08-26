@@ -16,7 +16,10 @@ import { isDataPublicationId } from "./data-publication";
 
 const HOT_KEY_PREFIX = "fpl:price-changes:hot";
 const HOT_TTL_MS = 15 * 60 * 1000;
-const HOT_SCHEMA_VERSION = 2;
+// The metadata-only cursor carries the validated deadline horizon. Keep an
+// explicit envelope version so older hot payloads without that evidence are
+// ignored rather than advertised by the lightweight cursor path.
+const HOT_SCHEMA_VERSION = 3;
 const HOT_REVISION_PATTERN = /^[0-9a-f]{16}$/;
 
 export type PriceChangeLiveState = "PROVISIONAL" | "DURABLE" | "UNAVAILABLE";
@@ -49,6 +52,7 @@ type HotSnapshot = {
 	metadataHash: string;
 	artifactId: string | null;
 	deadline: string | null;
+	nextDeadlines: string[];
 	detectedAt: string;
 	fetchedAt: string;
 	expiresAt: string;
@@ -98,6 +102,14 @@ const isDateTimeString = (value: unknown): value is string => {
 	} catch {
 		return false;
 	}
+};
+
+const isStrictlyIncreasingDateTimeList = (value: unknown): value is string[] => {
+	if (!Array.isArray(value) || value.length === 0 || !value.every(isDateTimeString)) return false;
+	for (let index = 1; index < value.length; index += 1) {
+		if (Date.parse(value[index - 1]!) >= Date.parse(value[index]!)) return false;
+	}
+	return true;
 };
 
 const hotPointerKey = (seasonCode: string): string => `${HOT_KEY_PREFIX}:${seasonCode}:active`;
@@ -151,6 +163,8 @@ const parseHotSnapshotMetadata = (
 		!/^[0-9a-f]{64}$/.test(value.metadataHash) ||
 		(value.artifactId !== null && typeof value.artifactId !== "string") ||
 		!isDateTimeString(value.deadline) ||
+		!isStrictlyIncreasingDateTimeList(value.nextDeadlines) ||
+		value.deadline !== value.nextDeadlines[0] ||
 		!isDateTimeString(value.detectedAt) ||
 		!isDateTimeString(value.fetchedAt) ||
 		!isDateTimeString(value.expiresAt) ||
@@ -228,6 +242,7 @@ const parseHotSnapshotMetadata = (
 		metadataHash: value.metadataHash,
 		artifactId: value.artifactId,
 		deadline: value.deadline,
+		nextDeadlines: value.nextDeadlines,
 		detectedAt: value.detectedAt,
 		fetchedAt: value.fetchedAt,
 		expiresAt: value.expiresAt,
@@ -256,6 +271,8 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 		board.revision !== metadata.revision ||
 		board.fetchedAt !== metadata.fetchedAt ||
 		board.deadline !== metadata.deadline ||
+		board.nextDeadlines.length !== metadata.nextDeadlines.length ||
+		board.nextDeadlines.some((deadline, index) => deadline !== metadata.nextDeadlines[index]) ||
 		board.staleAt !== new Date(fetchedAt + PRICE_CHANGE_READY_MS).toISOString() ||
 		metadata.expectedPlayerCount !== board.expectedPlayerCount ||
 		metadata.observedPlayerCount !== board.observedPlayerCount ||
