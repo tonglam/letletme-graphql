@@ -230,6 +230,29 @@ describe("price-change live client", () => {
 		assert.equal(board.board.status, "STALE");
 	});
 
+	it("does not let a future durable source timestamp suppress a newer hot snapshot", async () => {
+		const redis = new FakeRedis();
+		const durable = durableFixture(8 * 60 * 1_000, "11111111-1111-4111-8111-111111111111", 1);
+		const futureManifest = {
+			...durable.manifest,
+			sourceCheckedAt: new Date(Date.now() + 60 * 1_000).toISOString(),
+		};
+		redis.set(
+			activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode }),
+			JSON.stringify(futureManifest)
+		);
+		for (const item of futureManifest.items) {
+			redis.set(item.key, canonicalJson(durable.items[item.name as "context" | "players"]));
+		}
+
+		const hot = hotSnapshot(1_000);
+		publishHot(redis, hot);
+
+		const cursor = await readPriceChangeLiveCursor(context(redis));
+		assert.equal(cursor.state, "PROVISIONAL");
+		assert.equal(cursor.revision, hot.revision);
+	});
+
 	it("fails closed for malformed reconciliation metadata", async () => {
 		const redis = new FakeRedis();
 		const snapshot = hotSnapshot();
@@ -316,6 +339,7 @@ describe("price-change live client", () => {
 			retained.manifest.publicationId
 		);
 		assert.ok(retainedBoard);
+		assert.equal(retainedBoard.status, "STALE");
 		const result = await readPriceChangeLiveBoard(gqlContext, retained.manifest.publicationId);
 		assert.equal(result.revision, retained.manifest.publicationId);
 		assert.equal(result.durablePublicationId, retained.manifest.publicationId);
@@ -379,6 +403,7 @@ describe("price-change live client", () => {
 				return {
 					rows: [
 						{
+							publication_id: durable.manifest.publicationId,
 							item_name: "context",
 							item_count: durable.manifest.items.find((item) => item.name === "context")?.count,
 							checksum: durable.manifest.items.find((item) => item.name === "context")?.sha256,
@@ -419,6 +444,7 @@ describe("price-change live client", () => {
 				return {
 					rows: [
 						{
+							publication_id: retained.manifest.publicationId,
 							item_name: "context",
 							item_count: retained.manifest.items.find((item) => item.name === "context")?.count,
 							checksum: retained.manifest.items.find((item) => item.name === "context")?.sha256,

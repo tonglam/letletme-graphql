@@ -537,12 +537,12 @@ const PUBLICATION_ITEMS_SQL = `
 	ORDER BY publication_id, item_name
 `;
 
-const PUBLICATION_CONTEXT_SQL = `
-	SELECT item_name, item_count, checksum, payload
+const PUBLICATION_CONTEXT_ITEMS_SQL = `
+	SELECT publication_id::text AS publication_id, item_name, item_count, checksum, payload
 	FROM ops.dataset_publication_items
-	WHERE publication_id = $1::uuid
+	WHERE publication_id = ANY($1::uuid[])
 	  AND item_name = 'context'
-	LIMIT 2
+	ORDER BY publication_id
 `;
 
 const loadPriceChangePublicationItems = async (
@@ -689,7 +689,7 @@ const loadPriceChangeBoardFromPostgres = async (
 const loadPriceChangePublicationById = async (
 	context: GraphQLContext,
 	publicationId: string
-): Promise<DataPublication | null> => {
+): Promise<LoadedPriceChangePublicationCandidate | null> => {
 	const authority = await context.database.query<PublicationCandidateRow>(PUBLICATION_BY_ID_SQL, [
 		publicationId,
 		context.currentSeason.seasonId,
@@ -714,7 +714,7 @@ const loadPriceChangePublicationById = async (
 	const [loaded] = await loadPriceChangePublicationItems(context, [
 		{ status: row.status, publicationId, revision, manifest },
 	]);
-	return loaded?.publication ?? null;
+	return loaded ?? null;
 };
 
 /** Read one retained durable publication by its immutable UUID. */
@@ -724,8 +724,10 @@ export async function readPriceChangePredictionsByPublicationId(
 ): Promise<PriceChangeBoard | null> {
 	if (!isDataPublicationId(publicationId)) return null;
 	try {
-		const publication = await loadPriceChangePublicationById(context, publicationId);
-		return publication ? parsePublicationBoard(publication, new Date()) : null;
+		const loaded = await loadPriceChangePublicationById(context, publicationId);
+		if (!loaded) return null;
+		const board = parsePublicationBoard(loaded.publication, new Date());
+		return board && loaded.status === "retired" ? { ...board, status: "STALE" } : board;
 	} catch (error) {
 		context.logger.warn(
 			{
@@ -876,6 +878,16 @@ export async function readPriceChangePredictionsCursor(
 				if (left.row.status !== right.row.status) return left.row.status === "active" ? -1 : 1;
 				return right.revision - left.revision;
 			});
+		const contextRows = await context.database.query<PublicationItemRow>(
+			PUBLICATION_CONTEXT_ITEMS_SQL,
+			[candidates.map(({ row }) => row.publication_id)]
+		);
+		const contextRowsByPublication = new Map<string, PublicationItemRow[]>();
+		for (const item of contextRows.rows) {
+			const rows = contextRowsByPublication.get(item.publication_id) ?? [];
+			rows.push(item);
+			contextRowsByPublication.set(item.publication_id, rows);
+		}
 		for (const { row, revision } of candidates) {
 			const rawManifest =
 				typeof row.manifest === "string" ? row.manifest : (JSON.stringify(row.manifest) ?? "");
@@ -889,11 +901,9 @@ export async function readPriceChangePredictionsCursor(
 			) {
 				continue;
 			}
-			const itemResult = await context.database.query<PublicationItemRow>(PUBLICATION_CONTEXT_SQL, [
-				row.publication_id,
-			]);
-			if (itemResult.rows.length !== 1) continue;
-			const item = itemResult.rows[0];
+			const itemRows = contextRowsByPublication.get(row.publication_id) ?? [];
+			if (itemRows.length !== 1) continue;
+			const item = itemRows[0];
 			const manifestItem = manifest.items.find((candidate) => candidate.name === "context");
 			if (
 				item.item_name !== "context" ||

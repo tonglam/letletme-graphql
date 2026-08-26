@@ -316,7 +316,18 @@ function isNewerHotSnapshot(
 	if (!hot || !durable || durableStatus === "UNAVAILABLE" || !durable.fetchedAt)
 		return Boolean(hot);
 	const hotAt = Date.parse(hot.detectedAt);
-	const durableAt = Date.parse(durable.sourceCheckedAt ?? durable.fetchedAt);
+	const now = Date.now();
+	const sourceCheckedAt = Date.parse(durable.sourceCheckedAt ?? "");
+	const fetchedAt = Date.parse(durable.fetchedAt);
+	// A future source timestamp cannot be ordering evidence. It may be clock
+	// skew or corrupted publication metadata; fall back to the validated fetch
+	// timestamp rather than suppressing a newer hot snapshot indefinitely.
+	const durableAt =
+		Number.isFinite(sourceCheckedAt) && sourceCheckedAt <= now
+			? sourceCheckedAt
+			: Number.isFinite(fetchedAt) && fetchedAt <= now
+				? fetchedAt
+				: NaN;
 	return Number.isFinite(hotAt) && (!Number.isFinite(durableAt) || hotAt > durableAt);
 }
 
