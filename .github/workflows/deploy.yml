@@ -671,7 +671,7 @@ jobs:
               }`);
               const priceChangeBoard = priceChanges?.priceChangeBoard;
               if (
-                priceChangeBoard?.status === "UNAVAILABLE" ||
+                priceChangeBoard?.status !== "READY" ||
                 typeof priceChangeBoard?.revision !== "string" ||
                 !priceChangeBoard.revision ||
                 priceChangeBoard.revision === "unavailable" ||

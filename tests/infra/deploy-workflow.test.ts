@@ -83,7 +83,7 @@ describe("production deployment workflow", () => {
 		expect(workflow).not.toContain("schema" + "Version");
 	});
 
-	test("rejects deployments that cannot read the durable price-change publication", () => {
+	test("requires a READY durable price-change publication before committing a deployment", () => {
 		const liveSmokeAt = workflow.indexOf("query LiveDeploymentSmoke");
 		const priceChangeSmokeAt = workflow.indexOf("query PriceChangeDeploymentSmoke");
 		const smokeFinishedAt = workflow.indexOf("finish_stage", priceChangeSmokeAt);
@@ -91,7 +91,7 @@ describe("production deployment workflow", () => {
 		expect(priceChangeSmokeAt).toBeGreaterThan(liveSmokeAt);
 		expect(smokeFinishedAt).toBeGreaterThan(priceChangeSmokeAt);
 		expect(workflow).toContain("priceChangeBoard {");
-		expect(workflow).toContain('priceChangeBoard?.status === "UNAVAILABLE"');
+		expect(workflow).toContain('priceChangeBoard?.status !== "READY"');
 		expect(workflow).toContain('priceChangeBoard.revision === "unavailable"');
 		expect(workflow).toContain("priceChangeBoard.expectedPlayerCount <= 0");
 		expect(workflow).toContain("priceChangeBoard.observedPlayerCount <= 0");
