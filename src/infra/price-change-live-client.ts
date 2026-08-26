@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { GraphQLContext } from "../graphql/context";
 import { GraphQLError } from "graphql";
 import { DateTimeResolver } from "graphql-scalars";
@@ -15,6 +16,7 @@ import { isDataPublicationId } from "./data-publication";
 
 const HOT_KEY_PREFIX = "fpl:price-changes:hot";
 const HOT_TTL_MS = 15 * 60 * 1000;
+const HOT_SCHEMA_VERSION = 2;
 const HOT_REVISION_PATTERN = /^[0-9a-f]{16}$/;
 
 export type PriceChangeLiveState = "PROVISIONAL" | "DURABLE" | "UNAVAILABLE";
@@ -38,11 +40,13 @@ export type PriceChangeLiveBoard = {
 };
 
 type HotSnapshot = {
-	schemaVersion: 1;
+	schemaVersion: typeof HOT_SCHEMA_VERSION;
 	seasonCode: string;
 	revision: string;
 	triggerFingerprint: string;
 	sourceHash: string;
+	payloadHash: string;
+	metadataHash: string;
 	artifactId: string | null;
 	deadline: string | null;
 	detectedAt: string;
@@ -63,6 +67,26 @@ type HotSnapshot = {
 
 type HotSnapshotMetadata = Omit<HotSnapshot, "board">;
 
+const hotPayloadHash = (value: Record<string, unknown>): string => {
+	const {
+		payloadHash: _payloadHash,
+		metadataHash: _metadataHash,
+		reconciliation: _reconciliation,
+		...immutable
+	} = value;
+	return createHash("sha256").update(JSON.stringify(immutable), "utf8").digest("hex");
+};
+
+const hotMetadataHash = (value: Record<string, unknown>): string => {
+	const {
+		metadataHash: _metadataHash,
+		reconciliation: _reconciliation,
+		board: _board,
+		...immutable
+	} = value;
+	return createHash("sha256").update(JSON.stringify(immutable), "utf8").digest("hex");
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -78,18 +102,29 @@ const isDateTimeString = (value: unknown): value is string => {
 
 const hotPointerKey = (seasonCode: string): string => `${HOT_KEY_PREFIX}:${seasonCode}:active`;
 
-const parsePointer = (value: string | null): { revision: string; payloadKey: string } | null => {
+const parsePointer = (
+	value: string | null
+): { revision: string; payloadKey: string; payloadHash: string; metadataHash: string } | null => {
 	if (!value) return null;
 	try {
 		const parsed: unknown = JSON.parse(value);
 		if (
 			!isRecord(parsed) ||
 			typeof parsed.revision !== "string" ||
-			typeof parsed.payloadKey !== "string"
+			typeof parsed.payloadKey !== "string" ||
+			typeof parsed.payloadHash !== "string" ||
+			!/^[0-9a-f]{64}$/.test(parsed.payloadHash) ||
+			typeof parsed.metadataHash !== "string" ||
+			!/^[0-9a-f]{64}$/.test(parsed.metadataHash)
 		) {
 			return null;
 		}
-		return { revision: parsed.revision, payloadKey: parsed.payloadKey };
+		return {
+			revision: parsed.revision,
+			payloadKey: parsed.payloadKey,
+			payloadHash: parsed.payloadHash,
+			metadataHash: parsed.metadataHash,
+		};
 	} catch {
 		return null;
 	}
@@ -102,7 +137,7 @@ const parseHotSnapshotMetadata = (
 ): HotSnapshotMetadata | null => {
 	if (!isRecord(value)) return null;
 	if (
-		value.schemaVersion !== 1 ||
+		value.schemaVersion !== HOT_SCHEMA_VERSION ||
 		value.seasonCode !== seasonCode ||
 		typeof value.revision !== "string" ||
 		!/^[0-9a-f]{16}$/.test(value.revision) ||
@@ -110,6 +145,10 @@ const parseHotSnapshotMetadata = (
 		!/^[0-9a-f]{64}$/.test(value.triggerFingerprint) ||
 		typeof value.sourceHash !== "string" ||
 		!/^[0-9a-f]{64}$/.test(value.sourceHash) ||
+		typeof value.payloadHash !== "string" ||
+		!/^[0-9a-f]{64}$/.test(value.payloadHash) ||
+		typeof value.metadataHash !== "string" ||
+		!/^[0-9a-f]{64}$/.test(value.metadataHash) ||
 		(value.artifactId !== null && typeof value.artifactId !== "string") ||
 		(value.deadline !== null && !isDateTimeString(value.deadline)) ||
 		!isDateTimeString(value.detectedAt) ||
@@ -177,12 +216,15 @@ const parseHotSnapshotMetadata = (
 	) {
 		return null;
 	}
+	if (hotMetadataHash(value) !== value.metadataHash) return null;
 	return {
-		schemaVersion: 1,
+		schemaVersion: HOT_SCHEMA_VERSION,
 		seasonCode,
 		revision: value.revision,
 		triggerFingerprint: value.triggerFingerprint,
 		sourceHash: value.sourceHash,
+		payloadHash: value.payloadHash,
+		metadataHash: value.metadataHash,
 		artifactId: value.artifactId,
 		deadline: value.deadline,
 		detectedAt: value.detectedAt,
@@ -204,6 +246,7 @@ const parseHotSnapshotMetadata = (
 const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSnapshot | null => {
 	const metadata = parseHotSnapshotMetadata(value, seasonCode, now);
 	if (!metadata || !isRecord(value)) return null;
+	if (hotPayloadHash(value) !== metadata.payloadHash) return null;
 	const fetchedAt = Date.parse(metadata.fetchedAt);
 	const board = parsePriceChangeBoardValue(value.board, now);
 	if (
@@ -259,6 +302,13 @@ async function readHotSnapshot(
 		const parsed: unknown = JSON.parse(raw);
 		const snapshot = parseHotSnapshot(parsed, context.currentSeason.seasonCode, now);
 		if (!snapshot) return null;
+		if (
+			pointer &&
+			(snapshot.payloadHash !== pointer.payloadHash ||
+				snapshot.metadataHash !== pointer.metadataHash)
+		) {
+			return null;
+		}
 		return requestedRevision
 			? snapshot.revision === requestedRevision
 				? snapshot
@@ -298,7 +348,12 @@ async function readHotSnapshotMetadata(
 		if (!raw) return null;
 		const parsed: unknown = JSON.parse(raw);
 		const metadata = parseHotSnapshotMetadata(parsed, context.currentSeason.seasonCode, now);
-		return metadata?.revision === pointer.revision ? metadata : null;
+		return metadata &&
+			metadata.revision === pointer.revision &&
+			metadata.payloadHash === pointer.payloadHash &&
+			metadata.metadataHash === pointer.metadataHash
+			? metadata
+			: null;
 	} catch (error) {
 		context.logger.warn({ err: error }, "Failed to load price-change hot snapshot metadata");
 		return null;
@@ -315,7 +370,8 @@ function isNewerHotSnapshot(
 	const durableStatus = durable && "status" in durable ? durable.status : durable?.state;
 	if (!hot || !durable || durableStatus === "UNAVAILABLE" || !durable.fetchedAt)
 		return Boolean(hot);
-	const hotAt = Date.parse(hot.detectedAt);
+	const hotDetectedAt = Date.parse(hot.detectedAt);
+	const hotFetchedAt = Date.parse(hot.fetchedAt);
 	const now = Date.now();
 	const sourceCheckedAt = Date.parse(durable.sourceCheckedAt ?? "");
 	const fetchedAt = Date.parse(durable.fetchedAt);
@@ -328,7 +384,18 @@ function isNewerHotSnapshot(
 			: Number.isFinite(fetchedAt) && fetchedAt <= now
 				? fetchedAt
 				: NaN;
-	return Number.isFinite(hotAt) && (!Number.isFinite(durableAt) || hotAt > durableAt);
+	if (
+		!Number.isFinite(hotDetectedAt) ||
+		!Number.isFinite(hotFetchedAt) ||
+		hotFetchedAt < hotDetectedAt
+	) {
+		return false;
+	}
+	// A hot response whose source was fetched before the durable boundary cannot
+	// replace that durable publication, even when its request-start timestamp is
+	// newer. This keeps slow/replayed provider bytes from winning the race.
+	if (Number.isFinite(durableAt) && hotFetchedAt < durableAt) return false;
+	return !Number.isFinite(durableAt) || hotFetchedAt > durableAt;
 }
 
 function durableCursor(
@@ -396,7 +463,20 @@ export async function readPriceChangeLiveBoard(
 	_requestedRevision?: string | null
 ): Promise<PriceChangeLiveBoard> {
 	const now = new Date();
-	const requestedRevision = _requestedRevision?.trim() || null;
+	const requestedRevisionInput = _requestedRevision;
+	const requestedRevision =
+		requestedRevisionInput === undefined || requestedRevisionInput === null
+			? null
+			: requestedRevisionInput.trim();
+	if (
+		requestedRevisionInput !== undefined &&
+		requestedRevisionInput !== null &&
+		!requestedRevision
+	) {
+		throw new GraphQLError("The requested live price revision is invalid", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
 	const requestedHotRevision = requestedRevision && HOT_REVISION_PATTERN.test(requestedRevision);
 	const requestedDurableRevision = requestedRevision && isDataPublicationId(requestedRevision);
 	if (requestedRevision && !requestedHotRevision && !requestedDurableRevision) {
@@ -420,30 +500,30 @@ export async function readPriceChangeLiveBoard(
 			board: hot.board,
 		};
 	}
+	if (requestedRevision && requestedDurableRevision) {
+		const requestedDurable = await readPriceChangePredictionsByPublicationId(
+			context,
+			requestedRevision
+		);
+		if (!requestedDurable || requestedDurable.status === "UNAVAILABLE") {
+			throw new GraphQLError("The requested durable price revision is unavailable", {
+				extensions: { code: "PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE" },
+			});
+		}
+		return {
+			revision: requestedDurable.revision,
+			state: "DURABLE",
+			detectedAt: requestedDurable.fetchedAt,
+			expiresAt: durableHardExpiresAt(requestedDurable),
+			durablePublicationId: requestedDurable.revision,
+			board: requestedDurable,
+		};
+	}
 	const [hot, durable] = await Promise.all([
 		readHotSnapshot(context, now, requestedRevision),
 		readPriceChangePredictions(context),
 	]);
 	if (requestedRevision) {
-		if (requestedDurableRevision) {
-			const requestedDurable =
-				durable.revision === requestedRevision
-					? durable
-					: await readPriceChangePredictionsByPublicationId(context, requestedRevision);
-			if (!requestedDurable || requestedDurable.status === "UNAVAILABLE") {
-				throw new GraphQLError("The requested durable price revision is unavailable", {
-					extensions: { code: "PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE" },
-				});
-			}
-			return {
-				revision: requestedDurable.revision,
-				state: "DURABLE",
-				detectedAt: requestedDurable.fetchedAt,
-				expiresAt: durableHardExpiresAt(requestedDurable),
-				durablePublicationId: requestedDurable.revision,
-				board: requestedDurable,
-			};
-		}
 		if (!hot)
 			throw new GraphQLError("The requested live price revision is unavailable", {
 				extensions: { code: "PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE" },

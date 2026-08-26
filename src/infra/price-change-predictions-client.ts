@@ -501,6 +501,7 @@ const PUBLICATION_CANDIDATES_SQL = `
 		  AND season_id = $1
 		  AND event_id IS NULL
 		  AND status = 'active'
+		  AND (expires_at IS NULL OR expires_at > now())
 		ORDER BY revision DESC
 		LIMIT 2
 	), retired_candidates AS (
@@ -510,6 +511,7 @@ const PUBLICATION_CANDIDATES_SQL = `
 		  AND season_id = $1
 		  AND event_id IS NULL
 		  AND status = 'retired'
+		  AND (expires_at IS NULL OR expires_at > now())
 		ORDER BY revision DESC
 		LIMIT ${RETIRED_PUBLICATION_LIMIT}
 	)

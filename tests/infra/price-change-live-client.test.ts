@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createHash } from "node:crypto";
 import type Redis from "ioredis";
+import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../src/graphql/context";
 import type { QueryExecutor } from "../../src/infra/database";
 import {
@@ -143,6 +144,8 @@ function publishHot(redis: FakeRedis, snapshot: Record<string, unknown>): void {
 		revision: snapshot.revision,
 		payloadKey,
 		detectedAtMs: Date.parse(String(snapshot.detectedAt)),
+		payloadHash: snapshot.payloadHash,
+		metadataHash: snapshot.metadataHash,
 	});
 	redis.set(payloadKey, snapshot);
 	const { board: _board, ...metadata } = snapshot;
@@ -152,12 +155,14 @@ function publishHot(redis: FakeRedis, snapshot: Record<string, unknown>): void {
 function hotSnapshot(ageMs = 1_000, revision = "abcdef0123456789"): Record<string, unknown> {
 	const detectedAt = new Date(Date.now() - ageMs).toISOString();
 	const board = validBoard(detectedAt, revision);
-	return {
-		schemaVersion: 1,
+	const base = {
+		schemaVersion: 2,
 		seasonCode,
 		revision: board.revision,
 		triggerFingerprint: "a".repeat(64),
 		sourceHash: "b".repeat(64),
+		payloadHash: "",
+		metadataHash: "",
 		artifactId: "11111111-1111-4111-8111-111111111111",
 		deadline: board.deadline,
 		detectedAt,
@@ -175,6 +180,29 @@ function hotSnapshot(ageMs = 1_000, revision = "abcdef0123456789"): Record<strin
 			error: null,
 		},
 	};
+	const payloadHash = hotEnvelopePayloadHash(base);
+	const withPayloadHash = { ...base, payloadHash };
+	return { ...withPayloadHash, metadataHash: hotEnvelopeMetadataHash(withPayloadHash) };
+}
+
+function hotEnvelopePayloadHash(value: Record<string, unknown>): string {
+	const {
+		payloadHash: _payloadHash,
+		metadataHash: _metadataHash,
+		reconciliation: _reconciliation,
+		...immutable
+	} = value;
+	return sha256(JSON.stringify(immutable));
+}
+
+function hotEnvelopeMetadataHash(value: Record<string, unknown>): string {
+	const {
+		metadataHash: _metadataHash,
+		reconciliation: _reconciliation,
+		board: _board,
+		...immutable
+	} = value;
+	return sha256(JSON.stringify(immutable));
 }
 
 describe("price-change live client", () => {
@@ -253,6 +281,31 @@ describe("price-change live client", () => {
 		assert.equal(cursor.revision, hot.revision);
 	});
 
+	it("does not let a hot response fetched before durable data replace it", async () => {
+		const redis = new FakeRedis();
+		const durable = durableFixture(2 * 60 * 1_000, "11111111-1111-4111-8111-111111111111", 1);
+		redis.set(
+			activeDataPublicationKey({ dataset: "fpl:price-changes", seasonCode }),
+			JSON.stringify(durable.manifest)
+		);
+		for (const item of durable.manifest.items) {
+			redis.set(item.key, canonicalJson(durable.items[item.name as "context" | "players"]));
+		}
+
+		const hot = hotSnapshot(1_000);
+		const oldFetchedAt = new Date(Date.now() - 4 * 60 * 1_000).toISOString();
+		(hot as { fetchedAt: string }).fetchedAt = oldFetchedAt;
+		(hot.board as { fetchedAt: string; staleAt: string }).fetchedAt = oldFetchedAt;
+		(hot.board as { staleAt: string }).staleAt = new Date(
+			Date.parse(oldFetchedAt) + 10 * 60 * 1_000
+		).toISOString();
+		publishHot(redis, hot);
+
+		const cursor = await readPriceChangeLiveCursor(context(redis));
+		assert.equal(cursor.state, "DURABLE");
+		assert.equal(cursor.revision, durable.manifest.publicationId);
+	});
+
 	it("fails closed for malformed reconciliation metadata", async () => {
 		const redis = new FakeRedis();
 		const snapshot = hotSnapshot();
@@ -294,6 +347,19 @@ describe("price-change live client", () => {
 		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
 	});
 
+	it("rejects metadata whose immutable binding no longer matches the hot envelope", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		publishHot(redis, snapshot);
+		redis.set(`${HOT_PREFIX}:${seasonCode}:${snapshot.revision}:metadata`, {
+			...snapshot,
+			detectedAt: new Date(Date.parse(String(snapshot.detectedAt)) + 1_000).toISOString(),
+			board: undefined,
+		});
+
+		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
+	});
+
 	it("pins a durable cursor to a retained publication after the active one advances", async () => {
 		const redis = new FakeRedis();
 		const current = durableFixture(8 * 60 * 1_000, "22222222-2222-4222-8222-222222222222", 2);
@@ -306,8 +372,10 @@ describe("price-change live client", () => {
 		}
 
 		const retained = durableFixture(9 * 60 * 1_000, "11111111-1111-4111-8111-111111111111", 1);
+		const queries: string[] = [];
 		const database = {
 			query: async (sql: string) => {
+				queries.push(sql);
 				if (sql.includes("FROM ops.dataset_publications") && sql.includes("publication_id = $1")) {
 					return {
 						rows: [
@@ -340,10 +408,13 @@ describe("price-change live client", () => {
 		);
 		assert.ok(retainedBoard);
 		assert.equal(retainedBoard.status, "STALE");
+		queries.length = 0;
 		const result = await readPriceChangeLiveBoard(gqlContext, retained.manifest.publicationId);
 		assert.equal(result.revision, retained.manifest.publicationId);
 		assert.equal(result.durablePublicationId, retained.manifest.publicationId);
 		assert.equal(result.expiresAt, retained.hardExpiresAt);
+		assert.equal(result.board.status, "STALE");
+		assert.equal(queries.filter((sql) => sql.includes("FROM ops.dataset_publications")).length, 1);
 	});
 
 	it("serves the exact requested revision even after the active pointer advances", async () => {
@@ -432,7 +503,8 @@ describe("price-change live client", () => {
 		assert.equal(cursor.revision, durable.manifest.publicationId);
 		assert.equal(queries.length, 2);
 		assert.ok(queries[1]?.includes("item_name = 'context'"));
-		assert.ok(!queries[1]?.includes("ORDER BY item_name"));
+		assert.ok(queries[1]?.includes("ANY($1::uuid[])"));
+		assert.ok(queries[0]?.includes("expires_at > now()"));
 	});
 
 	it("falls back to retained durable cursor metadata when the active publication is unreadable", async () => {
@@ -471,5 +543,13 @@ describe("price-change live client", () => {
 		);
 		assert.equal(cursor.revision, retained.manifest.publicationId);
 		assert.equal(cursor.state, "DURABLE");
+	});
+
+	it("rejects an explicitly blank requested revision", async () => {
+		await assert.rejects(
+			() => readPriceChangeLiveBoard(context(new FakeRedis()), "  "),
+			(error: unknown) =>
+				error instanceof GraphQLError && error.extensions.code === "BAD_USER_INPUT"
+		);
 	});
 });
