@@ -14,6 +14,7 @@ import {
 	type LiveDataSnapshot,
 } from "../../infra/data-snapshot";
 import type { DataPublicationManifest } from "../../infra/data-publication";
+import { metrics } from "../../infra/metrics";
 import { entryLiveBatchService } from "../entry-live/batch-service";
 import { entryLiveRepository } from "../entry-live/repository";
 import {
@@ -220,6 +221,7 @@ const resolveSnapshot = async (
 	ref?: LiveRef | null
 ): Promise<{ snapshot: LiveDataSnapshot; core: CoreLiveIdentitySnapshot }> => {
 	if (ref && ref.season !== context.currentSeason.seasonCode) {
+		metrics.livePublicationEventsTotal.labels("revision_gone").inc();
 		throw new GraphQLError("Live revision belongs to another season", {
 			extensions: { code: "LIVE_REVISION_GONE" },
 		});
@@ -227,6 +229,9 @@ const resolveSnapshot = async (
 	const eventId = ref?.eventId ?? (await getCoreEventSnapshot(context)).currentEventId ?? 0;
 	const snapshot = await getLiveDataSnapshot(context, eventId).catch((error) => {
 		const failure = livePublicationFailureDetails(error, context.currentSeason.seasonCode, eventId);
+		metrics.livePublicationEventsTotal
+			.labels(failure.reason === "LIVE_PUBLICATION_UNAVAILABLE" ? "unavailable" : "load_failed")
+			.inc();
 		if (
 			claimLivePublicationFailureLog(context.requestScope ?? context, eventId, failure.revision)
 		) {
@@ -245,6 +250,7 @@ const resolveSnapshot = async (
 		});
 	});
 	if (ref && snapshot.revision !== ref.revision) {
+		metrics.livePublicationEventsTotal.labels("revision_gone").inc();
 		throw new GraphQLError("Requested live revision has expired", {
 			extensions: { code: "LIVE_REVISION_GONE" },
 		});
@@ -561,6 +567,7 @@ export const liveDesksResolvers = {
 			context: GraphQLContext
 		) => {
 			if (args.ref && args.ref.season !== context.currentSeason.seasonCode) {
+				metrics.livePublicationEventsTotal.labels("revision_gone").inc();
 				throw new GraphQLError("Live revision belongs to another season", {
 					extensions: { code: "LIVE_REVISION_GONE" },
 				});
@@ -596,6 +603,7 @@ export const liveDesksResolvers = {
 				snapshot = await getLiveDataSnapshot(context, eventId).catch(() => null);
 			}
 			if (args.ref && (!snapshot || snapshot.revision !== args.ref.revision)) {
+				metrics.livePublicationEventsTotal.labels("revision_gone").inc();
 				throw new GraphQLError("Requested live revision has expired", {
 					extensions: { code: "LIVE_REVISION_GONE" },
 				});
@@ -683,11 +691,13 @@ export const liveDesksResolvers = {
 			const request = normalizeEntryLiveCompetitionBoardRequest(args);
 			const ref = (args.ref as LiveRef | null | undefined) ?? null;
 			if (ref && ref.season !== context.currentSeason.seasonCode) {
+				metrics.livePublicationEventsTotal.labels("revision_gone").inc();
 				throw new GraphQLError("Live revision belongs to another season", {
 					extensions: { code: "LIVE_REVISION_GONE" },
 				});
 			}
 			if (ref && ref.eventId !== request.eventId) {
+				metrics.livePublicationEventsTotal.labels("revision_gone").inc();
 				throw new GraphQLError("Live revision belongs to another event", {
 					extensions: { code: "LIVE_REVISION_GONE" },
 				});
@@ -1198,6 +1208,7 @@ export const liveDesksResolvers = {
 			context: GraphQLContext
 		) => {
 			if (args.ref && args.ref.season !== context.currentSeason.seasonCode) {
+				metrics.livePublicationEventsTotal.labels("revision_gone").inc();
 				throw new GraphQLError("Live revision belongs to another season", {
 					extensions: { code: "LIVE_REVISION_GONE" },
 				});
@@ -1211,6 +1222,7 @@ export const liveDesksResolvers = {
 			const snapshot =
 				eventId > 0 ? await getLiveDataSnapshot(context, eventId).catch(() => null) : null;
 			if (args.ref && (!snapshot || snapshot.revision !== args.ref.revision)) {
+				metrics.livePublicationEventsTotal.labels("revision_gone").inc();
 				throw new GraphQLError("Requested live revision has expired", {
 					extensions: { code: "LIVE_REVISION_GONE" },
 				});

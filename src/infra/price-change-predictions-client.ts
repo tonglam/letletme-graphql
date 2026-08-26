@@ -322,7 +322,7 @@ const parsePublicationBoard = (
 		return null;
 	}
 	const ageMs = now.getTime() - Date.parse(context.fetchedAt);
-	if (ageMs < 0 || ageMs > PRICE_CHANGE_MAX_AGE_MS) return null;
+	if (ageMs < 0 || ageMs >= PRICE_CHANGE_MAX_AGE_MS) return null;
 	return {
 		status: ageMs < PRICE_CHANGE_READY_MS ? "READY" : "STALE",
 		source: "FPL_BOOTSTRAP",
