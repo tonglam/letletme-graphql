@@ -17,7 +17,7 @@ import {
 } from "../entry-live/transfer-enrichment";
 import type { LivePerformance } from "../live/repository";
 import { liveRepository } from "../live/repository";
-import type { Entry, EntryEventResult, EntryHistoryInfo } from "./repository";
+import type { Entry, EntryEventResult, EntryHistoryInfo, EntryNameUsage } from "./repository";
 import { entriesRepository } from "./repository";
 
 const FPL_ENTRY_NEGATIVE_TTL_SECONDS = 60;
@@ -504,6 +504,10 @@ export const entriesService = {
 
 	getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {
 		return entriesRepository.getEntriesByIds(context, ids);
+	},
+
+	getEntryNameUsage(context: GraphQLContext, entryId: number): Promise<EntryNameUsage | null> {
+		return entriesRepository.getEntryNameUsage(context, entryId);
 	},
 
 	searchEntries(context: GraphQLContext, query: string, limit: number): Promise<Entry[]> {

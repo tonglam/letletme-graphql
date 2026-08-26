@@ -3,7 +3,7 @@ import type { GraphQLContext } from "../../graphql/context";
 import type { ElementEventResultData } from "../entry-live/calc-service";
 import type { Player } from "../players/repository";
 import { playersService } from "../players/service";
-import type { Entry, EntryEventResult, EntryHistoryInfo } from "./repository";
+import type { Entry, EntryEventResult, EntryHistoryInfo, EntryNameUsage } from "./repository";
 import {
 	SEARCH_ENTRIES_DEFAULT_LIMIT,
 	SEARCH_ENTRIES_MAX_LIMIT,
@@ -74,6 +74,10 @@ type SearchEntriesArgs = {
 };
 
 type EntryHistoryArgs = {
+	entryId: number;
+};
+
+type EntryNameUsageArgs = {
 	entryId: number;
 };
 
@@ -164,6 +168,12 @@ export const entriesResolvers = {
 			args: EntryArgs,
 			context: GraphQLContext
 		): Promise<Entry | null> => entriesService.getEntryById(context, args.id),
+
+		entryNameUsage: async (
+			_parent: unknown,
+			args: EntryNameUsageArgs,
+			context: GraphQLContext
+		): Promise<EntryNameUsage | null> => entriesService.getEntryNameUsage(context, args.entryId),
 
 		searchEntries: async (
 			_parent: unknown,

@@ -47,6 +47,13 @@ export const entriesTypeDefs = /* GraphQL */ `
 		overallRank: Int!
 	}
 
+	type EntryNameUsage {
+		entryId: Int!
+		currentEntryName: String!
+		usedEntryNames: [String!]!
+		usedEntryNameCount: Int!
+	}
+
 	type EntryHistoryPayload {
 		results: [EntryEventResult!]!
 		history: [EntryHistoryInfo!]!
@@ -75,6 +82,7 @@ export const entriesTypeDefs = /* GraphQL */ `
 		Unknown IDs return null.
 		"""
 		entrySnapshot(id: Int!): Entry
+		entryNameUsage(entryId: Int!): EntryNameUsage
 		"""
 		Fuzzy public lookup of synced FPL entries by team name or manager name.
 		Results are bounded and do not grant access to protected entry history.

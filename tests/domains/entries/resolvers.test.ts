@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import type { Entry, EntryEventResult } from "../../../src/domains/entries/repository";
+import type {
+	Entry,
+	EntryEventResult,
+	EntryNameUsage,
+} from "../../../src/domains/entries/repository";
 import {
 	entriesResolvers,
 	entryResultChipToEnum,
@@ -102,6 +106,29 @@ describe("entry search argument guards", () => {
 			).resolves.toBeNull();
 		} finally {
 			entriesService.getEntrySnapshot = original;
+		}
+	});
+
+	it("forwards entry name usage through the persisted service path", async () => {
+		const original = entriesService.getEntryNameUsage;
+		const context = {} as GraphQLContext;
+		const usage: EntryNameUsage = {
+			entryId: 101,
+			currentEntryName: "Current XI",
+			usedEntryNames: ["Original XI", "Current XI"],
+			usedEntryNameCount: 2,
+		};
+		entriesService.getEntryNameUsage = async (inputContext, id) => {
+			expect(inputContext).toBe(context);
+			expect(id).toBe(101);
+			return usage;
+		};
+		try {
+			await expect(
+				entriesResolvers.Query.entryNameUsage(null, { entryId: 101 }, context)
+			).resolves.toBe(usage);
+		} finally {
+			entriesService.getEntryNameUsage = original;
 		}
 	});
 

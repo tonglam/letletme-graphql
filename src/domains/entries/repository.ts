@@ -52,6 +52,13 @@ export type EntryHistoryInfo = {
 	overallRank: number;
 };
 
+export type EntryNameUsage = {
+	entryId: number;
+	currentEntryName: string;
+	usedEntryNames: string[];
+	usedEntryNameCount: number;
+};
+
 type DbEntryRow = {
 	id: number;
 	entry_name: string;
@@ -100,6 +107,20 @@ type DbEntryHistoryInfoRow = {
 type DbEntryHistoryCheckpointRow = {
 	past_seasons_checked_at: string | Date | null;
 	past_seasons_count: number | null;
+};
+
+type DbEntryNameUsageRow = {
+	id: number;
+	entry_name: string;
+	used_entry_names: unknown;
+};
+
+const normalizeUsedEntryNames = (currentEntryName: string, usedEntryNames: unknown): string[] => {
+	const names = Array.isArray(usedEntryNames)
+		? usedEntryNames.filter((name): name is string => typeof name === "string")
+		: [];
+	if (!names.includes(currentEntryName)) names.push(currentEntryName);
+	return [...new Set(names)];
 };
 
 const mapEntry = (row: DbEntryRow): Entry => ({
@@ -305,6 +326,7 @@ interface EntriesRepository {
 	getEntryById(context: GraphQLContext, id: number): Promise<Entry | null>;
 	getEntrySnapshotById(context: GraphQLContext, id: number): Promise<Entry | null>;
 	getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>>;
+	getEntryNameUsage(context: GraphQLContext, entryId: number): Promise<EntryNameUsage | null>;
 	searchEntries(context: GraphQLContext, query: string, limit: number): Promise<Entry[]>;
 	getEntryHistory(context: GraphQLContext, entryId: number): Promise<EntryEventResult[]>;
 	getEntryHistoryInfo(context: GraphQLContext, entryId: number): Promise<EntryHistoryInfo[]>;
@@ -342,6 +364,34 @@ export const entriesRepository: EntriesRepository = {
 
 		const row = ((data as DbEntryRow[] | null) ?? [])[0];
 		return row ? mapEntry(row) : null;
+	},
+
+	async getEntryNameUsage(
+		context: GraphQLContext,
+		entryId: number
+	): Promise<EntryNameUsage | null> {
+		if (!Number.isSafeInteger(entryId) || entryId <= 0) return null;
+
+		const { data, error } = await context.data
+			.read("competition.entries")
+			.select("id, entry_name, used_entry_names")
+			.eq("id", entryId)
+			.limit(1);
+
+		if (error) {
+			context.logger.error({ err: error, entryId }, "Failed to fetch entry name usage");
+			throw new Error("Failed to fetch entry name usage");
+		}
+
+		const row = ((data as DbEntryNameUsageRow[] | null) ?? [])[0];
+		if (!row) return null;
+		const usedEntryNames = normalizeUsedEntryNames(row.entry_name, row.used_entry_names);
+		return {
+			entryId: row.id,
+			currentEntryName: row.entry_name,
+			usedEntryNames,
+			usedEntryNameCount: usedEntryNames.length,
+		};
 	},
 
 	async getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {

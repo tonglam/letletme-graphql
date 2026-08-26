@@ -233,6 +233,7 @@ type FixtureOptions = {
 	boardPayload?: unknown;
 	publicationRows?: unknown[];
 	pinnedPublicationRows?: unknown[];
+	currentEntryNames?: Record<number, string>;
 	snapshotEntryRow?: unknown;
 	snapshotBoardRow?: unknown;
 	snapshotAggregatePayload?: unknown;
@@ -871,6 +872,17 @@ const makeFixture = (options: FixtureOptions = {}) => {
 	const dependencies: MyFplRepositoryDependencies = {
 		getCoreEventSnapshot: async () =>
 			snapshotFor(options.currentEventId === undefined ? 2 : options.currentEventId) as never,
+		getEntriesByIds: async (_context: GraphQLContext, ids: number[]) =>
+			new Map(
+				ids.map((id) => [
+					id,
+					{
+						...snapshotPayload().entry,
+						id,
+						entryName: options.currentEntryNames?.[id] ?? snapshotPayload().entry.entryName,
+					},
+				])
+			) as never,
 		tournamentsRepository: tournamentsRepository as never,
 	};
 	return {
@@ -1107,6 +1119,24 @@ describe("My FPL review repository", () => {
 			fplEntryVerifiedAt: null,
 		};
 		expect((await miniViewer.repository.loadTeamDesk(miniViewer.context)).entry?.id).toBe(123);
+	});
+
+	it("overlays the current entry name on historical My FPL team payloads", async () => {
+		const snapshotEntry = snapshotEntryRow();
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			publicationRows: [snapshotPublicationRow],
+			snapshotEntryRow: snapshotEntry,
+			currentEntryNames: { 123: "Renamed XI" },
+		});
+
+		const desk = await fixture.repository.loadTeamDesk(fixture.context, 1);
+
+		expect(desk.entry?.entryName).toBe("Renamed XI");
+		expect(desk.gameweek?.entry?.entryName).toBe("Renamed XI");
+		expect((snapshotEntry.payload as { entry: { entryName: string } }).entry.entryName).toBe(
+			"Codex XI"
+		);
 	});
 
 	it("reports PRESEASON, EMPTY, PENDING and READY from durable checkpoints", async () => {
@@ -1414,6 +1444,7 @@ describe("My FPL review repository", () => {
 				rows: [boardSnapshotRow],
 				viewer_row: boardSnapshotRow,
 			},
+			currentEntryNames: { 123: "Current Foo" },
 		});
 		const page = await fixture.repository.loadCompetitionBoard(fixture.context, {
 			tournamentId: 7,
@@ -1427,6 +1458,9 @@ describe("My FPL review repository", () => {
 		const boardQuery = fixture.queries.find((query) => query.sql.includes("LIMIT $6 OFFSET $7"));
 		expect(boardQuery?.params.slice(4, 7)).toEqual(["Foo", 1, 1]);
 		expect(boardQuery?.sql).toContain("FROM competition.my_fpl_snapshot_tournament_rows");
+		expect(boardQuery?.sql).toContain("JOIN competition.entries entry");
+		expect(boardQuery?.sql).toContain("jsonb_build_object('entryName', entry.entry_name)");
+		expect(page.rows[0]?.entryName).toBe("Current Foo");
 		const queryCount = fixture.queries.filter((query) =>
 			query.sql.includes("LIMIT $6 OFFSET $7")
 		).length;
@@ -1585,6 +1619,17 @@ describe("My FPL review repository", () => {
 			secondOverallPoints: 90,
 			gapFirstSecond: 10,
 			averageOverallPoints: 90,
+			metrics: [
+				{
+					key: "OVERALL_POINTS",
+					leaderValue: 100,
+					leaderEntryId: 123,
+					leaderEntryName: "Foo",
+					leaderPlayerName: "A",
+					averageValue: 90,
+					higherIsBetter: true,
+				},
+			],
 			topPerformers: [distributionPerformance],
 			risers: [distributionPerformance],
 			fallers: [{ ...distributionPerformance, entryId: 125, entryName: "Baz", playerName: "C" }],
@@ -1632,6 +1677,7 @@ describe("My FPL review repository", () => {
 				viewer_row: boardSnapshotRow,
 			},
 			snapshotAggregatePayload: distributionAggregate,
+			currentEntryNames: { 123: "Current Foo", 125: "Current Baz" },
 			boardPayload: {
 				fieldSize: 3,
 				totalRows: 3,
@@ -1708,8 +1754,11 @@ describe("My FPL review repository", () => {
 		const aggregate = desk.aggregate;
 		expect(aggregate?.entryCount).toBe(3);
 		expect(aggregate?.topPerformers[0]?.entryId).toBe(123);
+		expect(aggregate?.topPerformers[0]?.entryName).toBe("Current Foo");
 		expect(aggregate?.risers[0]?.entryId).toBe(123);
 		expect(aggregate?.fallers[0]?.entryId).toBe(125);
+		expect(aggregate?.fallers[0]?.entryName).toBe("Current Baz");
+		expect(aggregate?.metrics[0]?.leaderEntryName).toBe("Current Foo");
 		expect(aggregate?.captainDistribution[0]).toMatchObject({
 			key: "11",
 			teamShortName: "ARS",
