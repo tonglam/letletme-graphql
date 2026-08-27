@@ -1,8 +1,6 @@
 import Redis from "ioredis";
 import { env } from "./env";
-
-let client: Redis | null = null;
-let rateLimitClient: Redis | null = null;
+import { RedisClientRegistry } from "./redis-client-registry";
 
 const createRedisClient = (url: string, role: "primary" | "rate-limit"): Redis =>
 	new Redis(url, {
@@ -15,26 +13,15 @@ const createRedisClient = (url: string, role: "primary" | "rate-limit"): Redis =
 		connectionName: `letletme-graphql-${role}`,
 	});
 
-export const getRedis = (): Redis => {
-	if (!client) {
-		client = createRedisClient(env.REDIS_URL, "primary");
-	}
-	return client;
-};
+const redisClients = new RedisClientRegistry<Redis>(
+	{ primary: env.REDIS_URL, rateLimit: env.RATE_LIMIT_REDIS_URL },
+	createRedisClient
+);
+
+export const getRedis = (): Redis => redisClients.getPrimary();
 
 /** Keep security admission isolated from publication and query-cache bursts. */
-export const getRateLimitRedis = (): Redis => {
-	if (!rateLimitClient) {
-		rateLimitClient = createRedisClient(env.RATE_LIMIT_REDIS_URL, "rate-limit");
-	}
-	return rateLimitClient;
-};
-
-const connectClient = async (redis: Redis): Promise<void> => {
-	if (redis.status === "end" || redis.status === "wait") {
-		await redis.connect();
-	}
-};
+export const getRateLimitRedis = (): Redis => redisClients.getRateLimit();
 
 const redisInfoValue = (info: string, key: string): string | undefined => {
 	const line = info.split("\n").find((entry) => entry.startsWith(`${key}:`));
@@ -72,15 +59,9 @@ export const assertRedisWorkloadIsolation = async (): Promise<void> => {
 };
 
 export const connectRedis = async (): Promise<Redis> => {
-	const redis = getRedis();
-	await Promise.all([connectClient(redis), connectClient(getRateLimitRedis())]);
+	const redis = await redisClients.connectAll();
 	await assertRedisWorkloadIsolation();
 	return redis;
 };
 
-export const closeRedis = async (): Promise<void> => {
-	const clients = [client, rateLimitClient].filter((value): value is Redis => value !== null);
-	client = null;
-	rateLimitClient = null;
-	await Promise.all(clients.map((current) => current.quit()));
-};
+export const closeRedis = async (): Promise<void> => redisClients.closeAll();

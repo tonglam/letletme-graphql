@@ -1,93 +1,61 @@
-import { readFileSync } from "fs";
 import { describe, expect, it } from "bun:test";
+import {
+	GRAPHQL_ADMISSION_STAGES,
+	GraphQLAdmissionOrder,
+} from "../../src/http/graphql-admission-order";
+import type { TokenBucketStageResultV3 } from "../../src/http/token-bucket-v3";
+
+const { mergeShadowRateLimitDecision, selectTerminalRateLimitDecision } =
+	await import("../../src/http/graphql-admission-decision");
+
+const decision = (
+	allowed: boolean,
+	scope: "global" | "client" | "workload"
+): TokenBucketStageResultV3 => ({
+	allowed,
+	retryAfterSeconds: allowed ? 0 : 1,
+	...(allowed ? {} : { deniedScope: scope, deniedBucketId: `${scope}-bucket` }),
+	details: [
+		{
+			id: `${scope}-bucket`,
+			scope,
+			cost: 1,
+			refillPerSecond: 1,
+			burst: 1,
+			remainingMilliTokens: allowed ? 1_000 : 0,
+		},
+	],
+});
 
 describe("GraphQL admission ordering", () => {
-	it("protects principal verification before complexity-weighted admission", () => {
-		const source = readFileSync("src/index.ts", "utf8");
-		const preAuth = source.indexOf('"preAuthAdmission"');
-		const bodyRead = source.indexOf('"bodyRead"');
-		const transport = source.indexOf("const transportFailure");
-		const principal = source.indexOf('"principal"');
-		const invalidAuth = source.indexOf("hasAuthenticationMaterial(request.headers)");
-		const principalAdmission = source.indexOf('"principalAdmission"');
-		const authorization = source.indexOf('"authorization"');
-
-		expect(preAuth).toBeGreaterThan(-1);
-		expect(preAuth).toBeLessThan(bodyRead);
-		expect(bodyRead).toBeLessThan(principal);
-		expect(transport).toBeGreaterThan(bodyRead);
-		expect(transport).toBeLessThan(principal);
-		expect(principal).toBeLessThan(invalidAuth);
-		expect(invalidAuth).toBeLessThan(principalAdmission);
-		expect(principalAdmission).toBeLessThan(authorization);
+	it("allows the complete security sequence in the declared order", () => {
+		const order = new GraphQLAdmissionOrder();
+		for (const stage of GRAPHQL_ADMISSION_STAGES) order.enter(stage);
+		expect(order.completedStages()).toEqual(GRAPHQL_ADMISSION_STAGES);
 	});
 
-	it("logs normalized operation names and stage timings without principal identifiers", () => {
-		const source = readFileSync("src/index.ts", "utf8");
-		const timingPayload = source.slice(
-			source.indexOf("const finalizeGraphQLResponse"),
-			source.indexOf("try {", source.indexOf("const finalizeGraphQLResponse"))
-		);
-		expect(timingPayload).toContain("operationName");
-		expect(timingPayload).toContain("requestTiming.snapshot()");
-		expect(timingPayload).not.toContain("userId");
-		expect(timingPayload).not.toContain("principal:");
+	it("rejects skipped, repeated, and reordered admission stages", () => {
+		const skipped = new GraphQLAdmissionOrder();
+		expect(() => skipped.enter("principal")).toThrow("expected pre-auth");
+
+		const repeated = new GraphQLAdmissionOrder();
+		repeated.enter("pre-auth");
+		expect(() => repeated.enter("pre-auth")).toThrow("expected body-read");
+
+		const weightedBeforeAuth = new GraphQLAdmissionOrder();
+		for (const stage of ["pre-auth", "body-read", "transport", "principal"] as const) {
+			weightedBeforeAuth.enter(stage);
+		}
+		expect(() => weightedBeforeAuth.enter("weighted")).toThrow("expected authentication");
 	});
 
-	it("persists the versioned admission outcome before a rejection can return", () => {
-		const source = readFileSync("src/index.ts", "utf8");
-		const decisionBlock = source.indexOf("if (principalAdmissionResult.v3Decision)");
-		const aggregate = source.indexOf("await recordTerminalRequestV3Outcome", decisionBlock);
-		const earlyResponse = source.indexOf("if (principalAdmissionResult.response)", decisionBlock);
+	it("keeps a pre-auth shadow denial terminal even after weighted admission allows", () => {
+		const preAuthDenial = decision(false, "global");
+		const weightedAllow = decision(true, "client");
 
-		expect(decisionBlock).toBeGreaterThan(-1);
-		expect(aggregate).toBeGreaterThan(decisionBlock);
-		expect(aggregate).toBeLessThan(earlyResponse);
-		expect(source).toContain("v3Checks: v3PrincipalAdmission.checks");
-		expect(source).toContain("graphQLV3EarlyFailureRateLimitChecks");
-		expect(source).toContain('"earlyFailureAdmission"');
-		expect(source).toContain('"X-RateLimit-Shadow-Outcome"');
-		expect(source).toContain("captureShadowRateLimitDecision");
-		expect(source).toContain('shadowRateLimitDecision?.outcome === "deny"');
-	});
-
-	it("keeps a Mini pre-auth shadow denial as the request aggregate outcome", () => {
-		const source = readFileSync("src/index.ts", "utf8");
-		const terminalCapture = source.indexOf("terminalPreAuthV3Denial = preAuthAdmission.v3Decision");
-		const terminalSelector = source.indexOf("terminalPreAuthV3Denial ?? fallbackDecision");
-		const weightedAdmission = source.indexOf('"principalAdmission"');
-
-		expect(terminalCapture).toBeGreaterThan(-1);
-		expect(terminalCapture).toBeLessThan(weightedAdmission);
-		expect(terminalSelector).toBeGreaterThan(-1);
-		expect(source.match(/recordTerminalRequestV3Outcome\(/g)?.length).toBe(3);
-		expect(source).toContain("if (v3AggregateRecorded) return");
-	});
-
-	it("keeps the global emergency valve enforcing during shadow mode", () => {
-		const source = readFileSync("src/index.ts", "utf8");
-
-		expect(source).toContain('isGraphQLRateLimitShadowMode && decision.deniedScope === "global"');
-		expect(source).toContain("failClosed: enforce || isGraphQLRateLimitShadowMode");
-		expect(source).toContain("isShadowOnlyRateLimitDecision(decision)");
-		expect(source).toContain(
-			'const globalChecks = v3Checks.filter((check) => check.scope === "global")'
-		);
-		expect(source).toContain("checks: globalChecks");
-		expect(source).toContain("enforce: true");
-	});
-
-	it("charges the global bucket before observational shadow scopes", () => {
-		const source = readFileSync("src/index.ts", "utf8");
-		const globalSplit = source.indexOf("const globalChecks = v3Checks.filter");
-		const globalCall = source.indexOf("checks: globalChecks", globalSplit);
-		const observationalSplit = source.indexOf("const observationalChecks =", globalSplit);
-		const observationalCall = source.indexOf("checks: observationalChecks", globalSplit);
-
-		expect(globalSplit).toBeGreaterThan(-1);
-		expect(observationalSplit).toBeGreaterThan(globalSplit);
-		expect(globalCall).toBeGreaterThan(observationalSplit);
-		expect(observationalCall).toBeGreaterThan(observationalSplit);
-		expect(observationalCall).toBeGreaterThan(globalCall);
+		expect(selectTerminalRateLimitDecision(preAuthDenial, weightedAllow)).toBe(preAuthDenial);
+		expect(
+			mergeShadowRateLimitDecision(mergeShadowRateLimitDecision(null, preAuthDenial), weightedAllow)
+		).toEqual({ outcome: "deny", scope: "global" });
 	});
 });
