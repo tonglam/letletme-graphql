@@ -35,6 +35,11 @@ export const GRAPHQL_LIMITS = {
 const TOURNAMENT_DETAIL_DESK_MAX_AST_NODES = 400;
 const PLAYER_STATS_DESK_MAX_AST_NODES = 240;
 const PLAYER_STATE_PROFILE_MAX_AST_NODES = 240;
+// The single-entry live-points response projects a fixed 15-player squad plus
+// revision provenance and the bounded effective lineup. Give only this exact
+// root enough document room while retaining every weighted-complexity, depth,
+// alias, root-field, and rate-limit guard below.
+const CALC_LIVE_POINTS_MAX_AST_NODES = 260;
 
 const MAX_LIST_ARGUMENT_WEIGHT = 200;
 
@@ -602,6 +607,14 @@ export const validateGraphQLPayloadLimits = (
 		rootNames.every(
 			(field) => field.name === "playerStateProfile" && field.responseKey === "playerStateProfile"
 		);
+	const usesCalcLivePointsByEntry =
+		onlyReachableDefinitions &&
+		responseKeys.size === 1 &&
+		rootNames.length > 0 &&
+		rootNames.every(
+			(field) =>
+				field.name === "calcLivePointsByEntry" && field.responseKey === "calcLivePointsByEntry"
+		);
 	const maxAstNodes = usesTournamentDetailDesk
 		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
 		: usesMyFplCompetitionsDesk
@@ -610,7 +623,9 @@ export const validateGraphQLPayloadLimits = (
 				? PLAYER_STATS_DESK_MAX_AST_NODES
 				: usesPlayerStateProfile
 					? PLAYER_STATE_PROFILE_MAX_AST_NODES
-					: GRAPHQL_LIMITS.maxAstNodes;
+					: usesCalcLivePointsByEntry
+						? CALC_LIVE_POINTS_MAX_AST_NODES
+						: GRAPHQL_LIMITS.maxAstNodes;
 	let astNodes = 0;
 	visit(document, { enter: () => void (astNodes += 1) });
 	if (astNodes > maxAstNodes) {

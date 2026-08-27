@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { getIntrospectionQuery } from "graphql";
+import { getIntrospectionQuery, parse, visit } from "graphql";
 import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
 import { schema } from "../../src/graphql/schema";
 
@@ -234,6 +234,62 @@ describe("GraphQL request limits", () => {
 		expect(
 			validateGraphQLRequestLimits(
 				{ query: `query { playerStateProfile(playerId: 1) { ${oversized} } }` },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+	});
+
+	it("accepts the exact bounded Web live-points projection", async () => {
+		const query = await Bun.file(
+			new URL("../fixtures/web-get-live-calc-points.graphql", import.meta.url)
+		).text();
+		let astNodes = 0;
+		visit(parse(query), { enter: () => void (astNodes += 1) });
+
+		expect(astNodes).toBe(238);
+		expect(
+			validateGraphQLRequestLimits({ query, variables: { eventId: 1, entryId: 1 } }, schema)
+		).toMatchObject({
+			ok: true,
+			weightedComplexity: 104,
+			rateLimitCostUnits: 11,
+			rootFields: ["calcLivePointsByEntry"],
+		});
+	});
+
+	it("keeps the live-points AST allowance scoped to one exact bounded root", () => {
+		const fieldsWithinAllowance = Array.from({ length: 110 }, () => "__typename").join(" ");
+		const fieldsAboveAllowance = Array.from({ length: 130 }, () => "__typename").join(" ");
+
+		expect(
+			validateGraphQLRequestLimits(
+				{
+					query: `query { calcLivePointsByEntry(eventId: 1, entryId: 1) { ${fieldsWithinAllowance} } }`,
+				},
+				schema
+			)
+		).toMatchObject({ ok: true, rootFields: ["calcLivePointsByEntry"] });
+		expect(
+			validateGraphQLRequestLimits(
+				{
+					query: `query { live: calcLivePointsByEntry(eventId: 1, entryId: 1) { ${fieldsWithinAllowance} } }`,
+				},
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+		expect(
+			validateGraphQLRequestLimits(
+				{
+					query: `query { calcLivePointsByEntry(eventId: 1, entryId: 1) { ${fieldsWithinAllowance} } events { id } }`,
+				},
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+		expect(
+			validateGraphQLRequestLimits(
+				{
+					query: `query { calcLivePointsByEntry(eventId: 1, entryId: 1) { ${fieldsAboveAllowance} } }`,
+				},
 				schema
 			)
 		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
