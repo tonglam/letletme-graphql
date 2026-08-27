@@ -548,6 +548,7 @@ export const entryLiveBatchService = {
 		eventId: number,
 		entryIds: number[],
 		prefetched?: {
+			entriesById?: ReadonlyMap<number, Entry>;
 			liveByPlayer?: Promise<Map<number, LivePerformance>>;
 			fixtures?: Promise<Fixture[]>;
 			teams?: Promise<Team[]>;
@@ -572,7 +573,7 @@ export const entryLiveBatchService = {
 		// Data's projected materialization and its revision-pinned effective lineup.
 		const [entriesById, picksByEntry, previousResultsByEntry, event, loadedLiveMeta] =
 			await Promise.all([
-				entriesService.getEntriesByIds(context, entryIds),
+				prefetched?.entriesById ?? entriesService.getEntriesByIds(context, entryIds),
 				prefetched?.picksByEntry ??
 					entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
 				eventId > 1

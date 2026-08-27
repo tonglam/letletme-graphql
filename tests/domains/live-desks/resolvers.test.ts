@@ -67,4 +67,32 @@ describe("live desks tournament selection index", () => {
 		expect(helper).toContain("getManagedTournament");
 		expect(helper).not.toMatch(/getManagedTournament\(context, tournamentId, entryId\)/);
 	});
+
+	it("uses event-qualified membership for every live tournament board", async () => {
+		const resolverSource = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const pagedBoard = resolverSource.slice(
+			resolverSource.indexOf("entryLiveCompetitionBoard: async"),
+			resolverSource.indexOf("entryLiveCompetitionsDesk: async")
+		);
+		const legacyBoard = resolverSource.slice(
+			resolverSource.indexOf("entryLiveCompetitionsDesk: async"),
+			resolverSource.indexOf("liveTournamentSelectionStats: async")
+		);
+		for (const board of [pagedBoard, legacyBoard]) {
+			expect(board).toContain("loadTournamentEventEligibility");
+			expect(board.indexOf("loadTournamentEventEligibility")).toBeLessThan(
+				board.indexOf("selectTournamentDeskEntryWindow")
+			);
+		}
+
+		const repositorySource = await Bun.file("src/domains/tournaments/repository.ts").text();
+		const detailBoard = repositorySource.slice(
+			repositorySource.indexOf("async getTournamentDetailDesk"),
+			repositorySource.indexOf("async getManagedTournamentStatus")
+		);
+		expect(detailBoard).toContain("loadTournamentEventEligibility");
+		expect(detailBoard.indexOf("loadTournamentEventEligibility")).toBeLessThan(
+			detailBoard.indexOf("selectTournamentDeskEntryWindow")
+		);
+	});
 });
