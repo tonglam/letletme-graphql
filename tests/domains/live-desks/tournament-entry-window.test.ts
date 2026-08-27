@@ -1,10 +1,51 @@
 import { describe, expect, it } from "bun:test";
 import {
+	filterTournamentEventEligibleEntryIds,
+	loadTournamentEventEligibility,
 	MAX_TOURNAMENT_DESK_ENTRIES,
 	selectTournamentDeskEntryWindow,
 } from "../../../src/domains/live-desks/tournament-entry-window";
 
 describe("live tournament entry window", () => {
+	it("excludes entries from events before their FPL start event", () => {
+		const entries = new Map([
+			[101, { startedEvent: 1 }],
+			[202, { startedEvent: 2 }],
+			[303, { startedEvent: null }],
+		]);
+
+		expect(filterTournamentEventEligibleEntryIds([101, 202, 303, 404], entries, 1)).toEqual([
+			101, 303, 404,
+		]);
+	});
+
+	it("includes a late-starting entry from its first eligible event", () => {
+		const entries = new Map([[202, { startedEvent: 2 }]]);
+		expect(filterTournamentEventEligibleEntryIds([202], entries, 2)).toEqual([202]);
+	});
+
+	it("rejects an invalid event before calculating eligibility", () => {
+		expect(() => filterTournamentEventEligibleEntryIds([101], new Map(), 0)).toThrow(
+			"Tournament event must be a positive integer"
+		);
+	});
+
+	it("loads eligibility metadata without exceeding the live desk batch limit", async () => {
+		const requestedChunks: number[][] = [];
+		const allEntryIds = Array.from({ length: 501 }, (_, index) => index + 1);
+		const eligibility = await loadTournamentEventEligibility(allEntryIds, 1, async (entryIds) => {
+			requestedChunks.push(entryIds);
+			return new Map(
+				entryIds.map((entryId) => [entryId, { startedEvent: entryId === 501 ? 2 : 1 }])
+			);
+		});
+
+		expect(requestedChunks.map((chunk) => chunk.length)).toEqual([500, 1]);
+		expect(eligibility.entryIds).toHaveLength(500);
+		expect(eligibility.entryIds).not.toContain(501);
+		expect(eligibility.entriesById.size).toBe(501);
+	});
+
 	it("keeps ordinary tournaments complete", () => {
 		expect(selectTournamentDeskEntryWindow([1, 2, 3], 2)).toEqual({
 			entryIds: [1, 2, 3],

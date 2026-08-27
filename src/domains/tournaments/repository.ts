@@ -13,6 +13,7 @@ import {
 import { stableStringify } from "../../infra/stringify";
 import { LeagueType } from "../leagues/repository";
 import { entryLiveBatchService } from "../entry-live/batch-service";
+import { entriesService } from "../entries/service";
 import {
 	isTraceableOfficialManagerScore,
 	managerScoreBoardIsFinal,
@@ -24,7 +25,10 @@ import {
 	readCompetitionBoardCache,
 	writeCompetitionBoardCache,
 } from "../live-desks/competition-board-cache";
-import { selectTournamentDeskEntryWindow } from "../live-desks/tournament-entry-window";
+import {
+	loadTournamentEventEligibility,
+	selectTournamentDeskEntryWindow,
+} from "../live-desks/tournament-entry-window";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -4526,10 +4530,16 @@ export const tournamentsRepository: TournamentsRepository = {
 				// Provisional live points can change when the core event flips to
 				// finished/data_checked. Only final scoring boards are reusable.
 				const scoringPhase = event?.finished === true && event.dataChecked === true;
-				const rosterEntryIds = await tournamentsRepository.getTournamentEntryIdsUncached(
+				const currentRosterEntryIds = await tournamentsRepository.getTournamentEntryIdsUncached(
 					context,
 					tournamentId
 				);
+				const eligibility = await loadTournamentEventEligibility(
+					currentRosterEntryIds,
+					requestedEventId,
+					(entryIds) => entriesService.getEntriesByIds(context, entryIds)
+				);
+				const rosterEntryIds = eligibility.entryIds;
 				const { entryIds: boundedEntryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
 					rosterEntryIds,
 					entryId
@@ -4570,6 +4580,7 @@ export const tournamentsRepository: TournamentsRepository = {
 							requestedEventId,
 							boundedEntryIds,
 							{
+								entriesById: eligibility.entriesById,
 								tournamentId,
 								...(snapshot?.publicationId
 									? {

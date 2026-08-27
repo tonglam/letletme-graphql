@@ -51,7 +51,10 @@ import {
 	claimLivePublicationFailureLog,
 	livePublicationFailureDetails,
 } from "./publication-observability";
-import { selectTournamentDeskEntryWindow } from "./tournament-entry-window";
+import {
+	loadTournamentEventEligibility,
+	selectTournamentDeskEntryWindow,
+} from "./tournament-entry-window";
 import { resolveLiveWindow, type LiveWindow } from "./window";
 
 type LiveRef = { season: string; eventId: number; revision: string };
@@ -713,7 +716,7 @@ export const liveDesksResolvers = {
 				readLiveWindow(context),
 				tournamentsService.getTournamentEntryIdsUncached(context, request.tournamentId),
 			]);
-			const allEntryIds = Array.from(
+			const rosterEntryIds = Array.from(
 				new Set(
 					tournamentEntryIds.filter(
 						(entryId): entryId is number =>
@@ -721,10 +724,6 @@ export const liveDesksResolvers = {
 					)
 				)
 			).sort((left, right) => left - right);
-			const { entryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
-				allEntryIds,
-				request.entryId
-			);
 			const { eventCore, window } = liveWindow;
 			const event = eventCore.events.find((candidate) => candidate.id === request.eventId);
 			if (!event) {
@@ -733,8 +732,6 @@ export const liveDesksResolvers = {
 				});
 			}
 			const corePlayerRevision = `core-${eventCore.revision}`;
-			const rosterRevision = entryLiveCompetitionRosterRevision(allEntryIds);
-			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
 			const isScheduledEvent = isScheduledTournamentEvent({
 				eventId: event.id,
 				currentEventId: eventCore.currentEventId,
@@ -749,15 +746,16 @@ export const liveDesksResolvers = {
 						extensions: { code: "LIVE_BOARD_REVISION_GONE" },
 					});
 				}
+				const scheduledRosterRevision = entryLiveCompetitionRosterRevision(rosterEntryIds);
 				const scheduledBoard = buildScheduledEntryLiveCompetitionBoard({
 					season: context.currentSeason.seasonCode,
 					eventId: request.eventId,
 					tournamentId: request.tournamentId,
 					coreRevision: eventCore.revision,
 					playerRevision: corePlayerRevision,
-					rosterRevision,
-					windowRevision,
-					totalEntries: allEntryIds.length,
+					rosterRevision: scheduledRosterRevision,
+					windowRevision: scheduledRosterRevision,
+					totalEntries: rosterEntryIds.length,
 				});
 				const scheduledPage = queryEntryLiveCompetitionBoard(scheduledBoard, request);
 				return {
@@ -783,7 +781,7 @@ export const liveDesksResolvers = {
 					unavailableEntryIds: [],
 					failedEntryIds: [],
 					partial: false,
-					totalEntries: allEntryIds.length,
+					totalEntries: rosterEntryIds.length,
 					filteredEntries: scheduledPage.filteredEntries,
 					page: request.page,
 					pageSize: request.pageSize,
@@ -794,6 +792,19 @@ export const liveDesksResolvers = {
 					viewerRow: scheduledPage.viewerRow,
 				};
 			}
+			const eligibility = await loadTournamentEventEligibility(
+				rosterEntryIds,
+				request.eventId,
+				(entryIds) => entriesService.getEntriesByIds(context, entryIds)
+			);
+			const allEntryIds = eligibility.entryIds;
+			const rosterEntries = eligibility.entriesById;
+			const { entryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
+				allEntryIds,
+				request.entryId
+			);
+			const rosterRevision = entryLiveCompetitionRosterRevision(allEntryIds);
+			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
 
 			const snapshot = await getLiveDataSnapshot(context, request.eventId).catch(() => null);
 			const initialManagerScores = await loadManagerScores(
@@ -937,7 +948,7 @@ export const liveDesksResolvers = {
 						makeCacheKey(rosterRevision, "FULL_FIELD"),
 						async () => {
 							const [entries, picks, eventResults] = await Promise.all([
-								entriesService.getEntriesByIds(context, allEntryIds),
+								Promise.resolve(rosterEntries),
 								entryLiveRepository.getEntryEventPicksByIds(context, allEntryIds, request.eventId),
 								event.finished && event.dataChecked
 									? entriesService.getEntryEventResultsByEntryIds(
@@ -1009,6 +1020,7 @@ export const liveDesksResolvers = {
 							request.eventId,
 							entryIds,
 							{
+								entriesById: rosterEntries,
 								tournamentId: request.tournamentId,
 								managerScores,
 								...(snapshot?.publicationId
@@ -1086,6 +1098,7 @@ export const liveDesksResolvers = {
 						request.eventId,
 						pageEntryIds,
 						{
+							entriesById: rosterEntries,
 							tournamentId: request.tournamentId,
 							managerScores,
 							...(snapshot?.publicationId
@@ -1337,7 +1350,14 @@ export const liveDesksResolvers = {
 					...cachedBoard,
 				};
 			}
-			const allEntryIds = await tournamentsService.getTournamentEntryIds(context, selected);
+			const rosterEntryIds = await tournamentsService.getTournamentEntryIds(context, selected);
+			const eligibility = await loadTournamentEventEligibility(
+				rosterEntryIds,
+				eventId,
+				(entryIds) => entriesService.getEntriesByIds(context, entryIds)
+			);
+			const allEntryIds = eligibility.entryIds;
+			const rosterEntries = eligibility.entriesById;
 			const { entryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
 				allEntryIds,
 				args.entryId
@@ -1347,6 +1367,7 @@ export const liveDesksResolvers = {
 				eventId,
 				entryIds,
 				{
+					entriesById: rosterEntries,
 					tournamentId: selected,
 					...(snapshot?.publicationId
 						? {
