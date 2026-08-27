@@ -29,7 +29,7 @@
 		"@graphql-tools/schema": "^10.0.38",
 		"graphql": "^16.14.2",
 		"graphql-depth-limit": "^1.1.0",
-		"graphql-scalars": "^1.25.0",
+		"graphql-scalars": "^2.0.0",
 		"ioredis": "^5.11.1",
 		"pg": "^8.22.0",
 		"pino": "^10.3.1",
