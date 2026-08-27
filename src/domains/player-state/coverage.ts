@@ -5,6 +5,7 @@ import type {
 	PlayerStateProviderScope,
 	PlayerStateSourceCoverage,
 } from "./types";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 
 export const PLAYER_STATE_FRESHNESS_STALE_SECONDS = 36 * 60 * 60;
 
@@ -14,9 +15,6 @@ export type ProviderLinkRow = {
 	left_entity_id: string | null;
 	evidence: unknown;
 };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 export const confirmedPlayerLinkSeasons = (evidence: unknown): string[] => {
 	if (!isRecord(evidence) || !Array.isArray(evidence.confirmedSeasons)) return [];

@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { getCoreDataSnapshot, type CoreEventData } from "../../infra/data-snapshot";
 
 export type ChipPlay = {
@@ -38,9 +39,6 @@ export type EventResult = {
 export interface EventOverallResultRepository {
 	getEventOverallResult(context: GraphQLContext, eventId?: number | null): Promise<EventResult[]>;
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 function mapEventResult(row: CoreEventData): EventResult {
 	const chipPlays = (row.chipPlays ?? [])

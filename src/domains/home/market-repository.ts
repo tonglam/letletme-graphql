@@ -1,5 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import {
 	QUERY_CACHE_TTL_SECONDS,
@@ -341,9 +342,6 @@ export const HOME_MARKET_AVAILABILITY_SQL = `
 	ORDER BY observed_date DESC, selected_by_percent DESC, element_id ASC
 `;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
-
 const HOME_MARKET_CONTRACT_VALUES = [
 	2026,
 	"2025-08-28",
@@ -369,7 +367,6 @@ export const HOME_MARKET_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		values: [...HOME_MARKET_CONTRACT_VALUES.slice(0, 4), HOME_AVAILABILITY_QUERY_LIMIT],
 	},
 ];
-
 const numberValue = (value: unknown, field: string): number => {
 	const parsed = typeof value === "number" ? value : Number(value);
 	if (!Number.isFinite(parsed)) throw new Error(`Invalid Home market ${field}`);

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isPlainRecord as isRecord } from "../contracts/guards";
 import type { GraphQLContext } from "../graphql/context";
 import { GraphQLError } from "graphql";
 import { DateTimeResolver } from "graphql-scalars";
@@ -91,9 +92,6 @@ const hotMetadataHash = (value: Record<string, unknown>): string => {
 	} = value;
 	return createHash("sha256").update(JSON.stringify(immutable), "utf8").digest("hex");
 };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const isGraphQLInt = (value: unknown): value is number =>
 	typeof value === "number" &&

@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { getCoreEventSnapshot, type CoreEventData } from "../../infra/data-snapshot";
 import { getCurrentSeason } from "../../infra/season";
 
@@ -46,9 +47,6 @@ export type EventsFilter = {
 	finished?: boolean | null;
 	dataChecked?: boolean | null;
 };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 export const normalizeDeadlineTime = (
 	deadlineTime: unknown,

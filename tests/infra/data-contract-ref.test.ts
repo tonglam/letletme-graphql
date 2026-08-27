@@ -42,8 +42,8 @@ describe("Data Platform contract pin", () => {
 		expect(baselineAt).toBeGreaterThan(-1);
 		expect(identitiesAt).toBeGreaterThan(baselineAt);
 		expect(repeatAt).toBeGreaterThan(identitiesAt);
-		expect(compatibilityWorkflow).toContain("bunx tsc --noEmit");
-		expect(compatibilityWorkflow).not.toContain("bun run docs:check");
+		expect(compatibilityWorkflow).toContain("bun run docs:check");
+		expect(compatibilityWorkflow).toContain("bun run typecheck");
 		expect(compatibilityProbe).toContain("validateDatabaseContract(database)");
 		expect(compatibilityProbe).toContain("validateDirectDataSqlContract(database)");
 		expect(compatibilityProbe).toContain("directSqlProbeCount");

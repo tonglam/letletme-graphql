@@ -4,18 +4,17 @@ import {
 	isInterfaceType,
 	isObjectType,
 	isUnionType,
-	parse,
 	valueFromASTUntyped,
 	visit,
 	type GraphQLArgument,
 	type GraphQLCompositeType,
 	type GraphQLNamedType,
 	type GraphQLSchema,
-	type DocumentNode,
 	type FragmentDefinitionNode,
 	type OperationDefinitionNode,
 	type SelectionSetNode,
 } from "graphql";
+import { analyzeGraphQLOperation, type GraphQLRequestPayload } from "./operation-ast";
 
 export const GRAPHQL_LIMITS = {
 	maxDepth: 10,
@@ -52,11 +51,7 @@ const MAX_LIST_ARGUMENT_WEIGHT = 200;
 // Charge the requested list once, but do not multiply unrelated siblings by it.
 const NON_PROPAGATING_LIMIT_ROOTS = new Set(["playerStatsBootstrap"]);
 
-type GraphQLPayload = {
-	query?: unknown;
-	variables?: unknown;
-	operationName?: unknown;
-};
+type GraphQLPayload = GraphQLRequestPayload;
 
 export type GraphQLRequestShape = "query" | "mutation" | "subscription" | "unknown";
 
@@ -78,35 +73,6 @@ export type GraphQLLimitResult =
 				| "INVALID_GRAPHQL_REQUEST";
 	  };
 
-const asVariables = (value: unknown): Record<string, unknown> =>
-	value && typeof value === "object" && !Array.isArray(value)
-		? (value as Record<string, unknown>)
-		: {};
-
-const operationFor = (
-	document: DocumentNode,
-	operationName: string | null
-): OperationDefinitionNode | null => {
-	const operations = document.definitions.filter(
-		(definition): definition is OperationDefinitionNode =>
-			definition.kind === Kind.OPERATION_DEFINITION
-	);
-	if (operationName) {
-		return operations.find((operation) => operation.name?.value === operationName) ?? null;
-	}
-	return operations.length === 1 ? (operations[0] ?? null) : null;
-};
-
-const fragmentsFor = (document: DocumentNode): Map<string, FragmentDefinitionNode> =>
-	new Map(
-		document.definitions
-			.filter(
-				(definition): definition is FragmentDefinitionNode =>
-					definition.kind === Kind.FRAGMENT_DEFINITION
-			)
-			.map((fragment) => [fragment.name.value, fragment])
-	);
-
 type EffectiveRootField = {
 	name: string;
 	responseKey: string;
@@ -114,7 +80,7 @@ type EffectiveRootField = {
 
 const effectiveRootFieldsFor = (
 	operation: OperationDefinitionNode,
-	fragments: Map<string, FragmentDefinitionNode>
+	fragments: ReadonlyMap<string, FragmentDefinitionNode>
 ): { fields: EffectiveRootField[]; reachableFragments: Set<string> } => {
 	const fields: EffectiveRootField[] = [];
 	const reachableFragments = new Set<string>();
@@ -249,20 +215,6 @@ const listWeight = (
 	};
 };
 
-const variablesWithDefaults = (
-	operation: OperationDefinitionNode,
-	suppliedVariables: Record<string, unknown>
-): Record<string, unknown> => {
-	const variables = { ...suppliedVariables };
-	for (const definition of operation.variableDefinitions ?? []) {
-		const name = definition.variable.name.value;
-		if (!Object.hasOwn(variables, name) && definition.defaultValue) {
-			variables[name] = valueFromASTUntyped(definition.defaultValue);
-		}
-	}
-	return variables;
-};
-
 const inspectSelectionSet = ({
 	selectionSet,
 	fragments,
@@ -274,7 +226,7 @@ const inspectSelectionSet = ({
 	parentType,
 }: {
 	selectionSet: SelectionSetNode;
-	fragments: Map<string, FragmentDefinitionNode>;
+	fragments: ReadonlyMap<string, FragmentDefinitionNode>;
 	variables: Record<string, unknown>;
 	depth: number;
 	multiplier: number;
@@ -427,7 +379,7 @@ const reject = (
 	message,
 });
 
-const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
+export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["liveScores", 5],
 	["eventLive", 5],
 	["eventLiveExplains", 5],
@@ -555,18 +507,14 @@ export const validateGraphQLPayloadLimits = (
 		return reject("GraphQL request body must contain a query string", "INVALID_GRAPHQL_REQUEST");
 	}
 
-	let document: DocumentNode;
+	let analysis: ReturnType<typeof analyzeGraphQLOperation>;
 	try {
-		document = parse(payload.query);
+		analysis = analyzeGraphQLOperation(payload);
 	} catch {
 		return accepted({ shape: "unknown" });
 	}
 
-	const operation = operationFor(
-		document,
-		typeof payload.operationName === "string" ? payload.operationName : null
-	);
-	const fragments = fragmentsFor(document);
+	const { document, operation, fragments, variables } = analysis;
 	const rootInspection = operation
 		? effectiveRootFieldsFor(operation, fragments)
 		: { fields: [], reachableFragments: new Set<string>() };
@@ -651,10 +599,9 @@ export const validateGraphQLPayloadLimits = (
 		return accepted({ shape: "unknown" });
 	}
 
-	const variables = variablesWithDefaults(operation, asVariables(payload.variables));
 	const inspection = inspectSelectionSet({
 		selectionSet: operation.selectionSet,
-		fragments: fragmentsFor(document),
+		fragments,
 		variables,
 		depth: 1,
 		multiplier: 1,

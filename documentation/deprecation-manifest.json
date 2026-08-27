@@ -1,0 +1,42 @@
+[
+  {
+    "id": "entry-root-field",
+    "symbol": "Query.entry",
+    "owner": "graphql",
+    "introducedAt": "2024-01-01",
+    "removedAt": "2026-08-28",
+    "status": "removed",
+    "usageMetric": "graphql_request_outcomes_total",
+    "notes": "Hard cut in favour of Query.entryLookup; no compatibility resolver."
+  },
+  {
+    "id": "player-detail-availability",
+    "symbol": "PlayerDetail.availability",
+    "owner": "graphql",
+    "introducedAt": "2024-01-01",
+    "removedAt": "2026-08-28",
+    "status": "removed",
+    "usageMetric": "player_detail_data_availability_total",
+    "notes": "Hard cut in favour of injuryAvailability and dataAvailability."
+  },
+  {
+    "id": "live-calc-rank",
+    "symbol": "LiveCalcData.rank",
+    "owner": "graphql",
+    "introducedAt": "2024-01-01",
+    "removalTarget": "2027-03-01",
+    "status": "deprecated",
+    "usageMetric": "graphql_request_outcomes_total",
+    "notes": "Use score.eventRank or score.leagueRank."
+  },
+  {
+    "id": "live-calc-total-fields",
+    "symbol": "LiveCalcData.livePoints/liveNetPoints/liveTotalPoints",
+    "owner": "graphql",
+    "introducedAt": "2024-01-01",
+    "removalTarget": "2027-03-01",
+    "status": "deprecated",
+    "usageMetric": "graphql_request_outcomes_total",
+    "notes": "Use the official score projection."
+  }
+]

@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import type Redis from "ioredis";
+import { isPlainRecord as isRecord } from "../contracts/guards";
 import { hasExactFields } from "./exact-fields";
 
 export const DATA_CACHE_NAMESPACE = "llm:data";
@@ -53,9 +54,6 @@ type CachedPublication = Readonly<{
 
 const publicationCache = new WeakMap<object, Map<string, CachedPublication>>();
 const publicationReadFlights = new WeakMap<object, Map<string, Promise<DataPublicationRead>>>();
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const MANIFEST_FIELDS = [
 	"dataset",

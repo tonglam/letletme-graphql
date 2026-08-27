@@ -56,7 +56,16 @@ jobs:
         run: bun run lint
 
       - name: Typecheck
-        run: bunx tsc --noEmit
+        run: bun run typecheck
+
+      - name: Layer dependency check
+        run: bun run layers:check
+
+      - name: GraphQL domain manifest
+        run: bun run docs:check
+
+      - name: Deprecation manifest
+        run: bun run deprecation:check
 
       - name: Test
         run: bun test --coverage

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import type { QueryExecutor as DatabaseQueryExecutor } from "../../infra/database";
@@ -474,10 +475,6 @@ export const PLAYER_STATE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		runtime: "must-return-player-state-gameweeks",
 	},
 ];
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
-
 const asNumber = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) return value;
 	if (typeof value === "string" && value.trim() !== "") {

@@ -1,29 +1,15 @@
 import {
-	Kind,
-	parse,
-	valueFromASTUntyped,
-	type ArgumentNode,
-	type DocumentNode,
-	type FragmentDefinitionNode,
-	type OperationDefinitionNode,
-	type SelectionSetNode,
-} from "graphql";
+	analyzeGraphQLOperation,
+	type GraphQLRequestPayload,
+	type GraphQLRootField,
+} from "./operation-ast";
 import type { Logger } from "../infra/logger";
 import type { Principal } from "../infra/principal";
 import type { ReadModelClient } from "../infra/read-model-client";
 import { getRootFieldPolicy, ROOT_FIELD_POLICIES } from "./root-field-policy";
 export { isGraphQLRootFieldClassified } from "./root-field-policy";
 
-type GraphQLRequestPayload = {
-	query?: unknown;
-	variables?: unknown;
-	operationName?: unknown;
-};
-
-type RootField = {
-	name: string;
-	args: Record<string, unknown>;
-};
+type RootField = GraphQLRootField;
 
 type AuthorizationInput = {
 	body: unknown;
@@ -55,70 +41,6 @@ const protectedFields = new Set(
 	[...ROOT_FIELD_POLICIES].filter(([, value]) => value.access !== "public").map(([key]) => key)
 );
 
-const getOperation = (
-	document: DocumentNode,
-	operationName: string | null
-): OperationDefinitionNode | null => {
-	const operations = document.definitions.filter(
-		(definition): definition is OperationDefinitionNode =>
-			definition.kind === Kind.OPERATION_DEFINITION
-	);
-	if (operationName) {
-		return operations.find((operation) => operation.name?.value === operationName) ?? null;
-	}
-	return operations.length === 1 ? operations[0] : null;
-};
-
-const getFragments = (document: DocumentNode): Map<string, FragmentDefinitionNode> => {
-	const fragments = new Map<string, FragmentDefinitionNode>();
-	for (const definition of document.definitions) {
-		if (definition.kind === Kind.FRAGMENT_DEFINITION) {
-			fragments.set(definition.name.value, definition);
-		}
-	}
-	return fragments;
-};
-
-const readArgs = (
-	args: readonly ArgumentNode[] | undefined,
-	variables: Record<string, unknown>
-): Record<string, unknown> => {
-	const values: Record<string, unknown> = {};
-	for (const arg of args ?? []) {
-		values[arg.name.value] = valueFromASTUntyped(arg.value, variables);
-	}
-	return values;
-};
-
-const collectRootFields = (
-	selectionSet: SelectionSetNode,
-	fragments: Map<string, FragmentDefinitionNode>,
-	variables: Record<string, unknown>,
-	fields: RootField[] = [],
-	seenFragments = new Set<string>()
-): RootField[] => {
-	for (const selection of selectionSet.selections) {
-		if (selection.kind === Kind.FIELD) {
-			fields.push({
-				name: selection.name.value,
-				args: readArgs(selection.arguments, variables),
-			});
-			continue;
-		}
-		if (selection.kind === Kind.INLINE_FRAGMENT) {
-			collectRootFields(selection.selectionSet, fragments, variables, fields, seenFragments);
-			continue;
-		}
-		const fragmentName = selection.name.value;
-		if (seenFragments.has(fragmentName)) continue;
-		const fragment = fragments.get(fragmentName);
-		if (!fragment) continue;
-		seenFragments.add(fragmentName);
-		collectRootFields(fragment.selectionSet, fragments, variables, fields, seenFragments);
-	}
-	return fields;
-};
-
 const getRequestPayloads = (body: unknown): GraphQLRequestPayload[] => {
 	if (Array.isArray(body)) {
 		return body as GraphQLRequestPayload[];
@@ -128,11 +50,6 @@ const getRequestPayloads = (body: unknown): GraphQLRequestPayload[] => {
 	}
 	return [];
 };
-
-const asVariables = (value: unknown): Record<string, unknown> =>
-	value && typeof value === "object" && !Array.isArray(value)
-		? (value as Record<string, unknown>)
-		: {};
 
 const asPositiveInt = (value: unknown): number | null =>
 	typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
@@ -509,15 +426,10 @@ const authorizePayload = async ({
 }): Promise<AuthorizationResult> => {
 	if (typeof payload.query !== "string") return { ok: true };
 
-	const document = parse(payload.query);
-	const operationName = typeof payload.operationName === "string" ? payload.operationName : null;
-	const operation = getOperation(document, operationName);
-	if (!operation) return { ok: true };
+	const analysis = analyzeGraphQLOperation(payload);
+	if (!analysis.operation) return { ok: true };
 
-	const variables = asVariables(payload.variables);
-	const fields = collectRootFields(operation.selectionSet, getFragments(document), variables);
-
-	for (const field of fields) {
+	for (const field of analysis.rootFields) {
 		const result = await authorizeRootField(
 			field,
 			principal,
