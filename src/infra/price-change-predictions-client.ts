@@ -4,8 +4,12 @@ import { DateTimeResolver } from "graphql-scalars";
 import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
+	readDataPublicationItemsAtManifest,
+	readDataPublicationManifest,
 	readDataPublicationItemsObserved,
+	isDataPublicationId,
 	type DataPublication,
+	type DataPublicationManifest,
 } from "./data-publication";
 import { hasExactFields } from "./exact-fields";
 
@@ -60,12 +64,22 @@ export type PriceChangeBoard = {
 	deadline: string | null;
 	nextDeadlines: string[];
 	fetchedAt: string | null;
+	/** Provider request-start ordering evidence; internal to GraphQL. */
+	sourceCheckedAt?: string | null;
 	staleAt: string | null;
 	revision: string;
 	expectedPlayerCount: number;
 	observedPlayerCount: number;
 	players: PriceChangePlayer[];
 };
+
+export type PriceChangeDurableCursor = Readonly<{
+	revision: string;
+	fetchedAt: string;
+	sourceCheckedAt: string;
+	hardExpiresAt: string;
+	state: "READY" | "STALE";
+}>;
 
 type PriceChangePublicationContext = {
 	schemaVersion: 1;
@@ -213,6 +227,90 @@ const parsePlayer = (value: unknown): PriceChangePlayer | null => {
 	};
 };
 
+/** Validate a board carried by the provisional Redis hot envelope. */
+export const parsePriceChangeBoardValue = (
+	value: unknown,
+	now: Date = new Date()
+): PriceChangeBoard | null => {
+	if (!isRecord(value)) return null;
+	if (
+		(value.status !== "READY" && value.status !== "PARTIAL" && value.status !== "STALE") ||
+		value.source !== "FPL_BOOTSTRAP" ||
+		(value.deadline !== null && !isDateTimeString(value.deadline)) ||
+		!Array.isArray(value.nextDeadlines) ||
+		!value.nextDeadlines.every(isDateTimeString) ||
+		(value.fetchedAt !== null && !isDateTimeString(value.fetchedAt)) ||
+		(value.staleAt !== null && !isDateTimeString(value.staleAt)) ||
+		typeof value.revision !== "string" ||
+		!isGraphQLInt(value.expectedPlayerCount) ||
+		!isGraphQLInt(value.observedPlayerCount) ||
+		!Array.isArray(value.players)
+	) {
+		return null;
+	}
+	if (
+		value.nextDeadlines.length === 0 ||
+		value.deadline === null ||
+		value.deadline !== value.nextDeadlines[0]
+	) {
+		return null;
+	}
+	const players = value.players.map(parsePlayer);
+	if (
+		players.some((player) => player === null) ||
+		value.expectedPlayerCount <= 0 ||
+		value.observedPlayerCount <= 0 ||
+		value.expectedPlayerCount !== value.observedPlayerCount ||
+		value.players.length !== value.observedPlayerCount
+	) {
+		return null;
+	}
+	const parsedPlayers = players as PriceChangePlayer[];
+	const nextDeadlines = value.nextDeadlines as string[];
+	for (let index = 1; index < nextDeadlines.length; index += 1) {
+		if (Date.parse(nextDeadlines[index - 1]!) >= Date.parse(nextDeadlines[index]!)) {
+			return null;
+		}
+	}
+	if (
+		parsedPlayers.some(
+			(player) =>
+				player.projections.length !== nextDeadlines.length ||
+				player.projections.some(
+					(projection) => projection.offset < 0 || projection.offset >= nextDeadlines.length
+				)
+		)
+	) {
+		return null;
+	}
+	const playerIds = new Set(parsedPlayers.map((player) => player.playerId));
+	if (playerIds.size !== parsedPlayers.length || playerIds.size !== value.expectedPlayerCount) {
+		return null;
+	}
+	if (value.fetchedAt !== null) {
+		const fetchedAt = Date.parse(value.fetchedAt);
+		if (
+			!Number.isFinite(fetchedAt) ||
+			now.getTime() < fetchedAt ||
+			now.getTime() - fetchedAt > PRICE_CHANGE_MAX_AGE_MS
+		) {
+			return null;
+		}
+	}
+	return {
+		status: value.status,
+		source: "FPL_BOOTSTRAP",
+		deadline: value.deadline,
+		nextDeadlines: [...nextDeadlines],
+		fetchedAt: value.fetchedAt,
+		staleAt: value.staleAt,
+		revision: value.revision,
+		expectedPlayerCount: value.expectedPlayerCount,
+		observedPlayerCount: value.observedPlayerCount,
+		players: [...parsedPlayers].sort((left, right) => left.playerId - right.playerId),
+	};
+};
+
 const unavailableBoard = (): PriceChangeBoard => ({
 	status: "UNAVAILABLE",
 	source: "FPL_BOOTSTRAP",
@@ -329,6 +427,7 @@ const parsePublicationBoard = (
 		deadline: context.deadline,
 		nextDeadlines: [...context.nextDeadlines],
 		fetchedAt: context.fetchedAt,
+		sourceCheckedAt: publication.manifest.sourceCheckedAt,
 		staleAt: context.staleAt,
 		revision: publication.manifest.publicationId,
 		expectedPlayerCount: context.expectedPlayerCount,
@@ -379,6 +478,14 @@ type PublicationItemRow = QueryResultRow & {
 	payload: unknown;
 };
 
+type PublicationItemMetadataRow = QueryResultRow & {
+	publication_id: string;
+	item_name: string;
+	item_count: string | number;
+	checksum: string;
+	payload_bytes: string | number;
+};
+
 type ParsedPriceChangePublicationCandidate = {
 	status: "active" | "retired";
 	publicationId: string;
@@ -403,6 +510,7 @@ const PUBLICATION_CANDIDATES_SQL = `
 		  AND season_id = $1
 		  AND event_id IS NULL
 		  AND status = 'active'
+		  AND (expires_at IS NULL OR expires_at > now())
 		ORDER BY revision DESC
 		LIMIT 2
 	), retired_candidates AS (
@@ -412,6 +520,7 @@ const PUBLICATION_CANDIDATES_SQL = `
 		  AND season_id = $1
 		  AND event_id IS NULL
 		  AND status = 'retired'
+		  AND (expires_at IS NULL OR expires_at > now())
 		ORDER BY revision DESC
 		LIMIT ${RETIRED_PUBLICATION_LIMIT}
 	)
@@ -420,10 +529,39 @@ const PUBLICATION_CANDIDATES_SQL = `
 	SELECT publication_id, revision, status, manifest FROM retired_candidates
 `;
 
+const PUBLICATION_BY_ID_SQL = `
+	SELECT publication_id::text AS publication_id, revision::text AS revision, status, manifest
+	FROM ops.dataset_publications
+	WHERE publication_id = $1::uuid
+	  AND dataset = 'fpl:price-changes'
+	  AND season_id = $2
+	  AND event_id IS NULL
+	  AND status IN ('active', 'retired')
+	  AND (expires_at IS NULL OR expires_at > now())
+	LIMIT 1
+`;
+
 const PUBLICATION_ITEMS_SQL = `
 	SELECT publication_id::text AS publication_id, item_name, item_count, checksum, payload
 	FROM ops.dataset_publication_items
 	WHERE publication_id = ANY($1::uuid[])
+	ORDER BY publication_id, item_name
+`;
+
+const PUBLICATION_CONTEXT_ITEMS_SQL = `
+	SELECT publication_id::text AS publication_id, item_name, item_count, checksum, payload
+	FROM ops.dataset_publication_items
+	WHERE publication_id = ANY($1::uuid[])
+	  AND item_name = 'context'
+	ORDER BY publication_id
+`;
+
+const PUBLICATION_ITEM_METADATA_SQL = `
+	SELECT publication_id::text AS publication_id, item_name, item_count, checksum,
+	       octet_length(payload) AS payload_bytes
+	FROM ops.dataset_publication_items
+	WHERE publication_id = ANY($1::uuid[])
+	  AND item_name = ANY($2::text[])
 	ORDER BY publication_id, item_name
 `;
 
@@ -568,10 +706,66 @@ const loadPriceChangeBoardFromPostgres = async (
 	return null;
 };
 
+const loadPriceChangePublicationById = async (
+	context: GraphQLContext,
+	publicationId: string
+): Promise<LoadedPriceChangePublicationCandidate | null> => {
+	const normalizedPublicationId = publicationId.toLowerCase();
+	const authority = await context.database.query<PublicationCandidateRow>(PUBLICATION_BY_ID_SQL, [
+		normalizedPublicationId,
+		context.currentSeason.seasonId,
+	]);
+	if (authority.rows.length !== 1) return null;
+	const row = authority.rows[0];
+	const revision = Number(row.revision);
+	const rawManifest =
+		typeof row.manifest === "string" ? row.manifest : (JSON.stringify(row.manifest) ?? "");
+	const manifest = parseDataPublicationManifest(rawManifest, {
+		dataset: PRICE_CHANGE_DATASET,
+		seasonCode: context.currentSeason.seasonCode,
+	});
+	if (
+		!manifest ||
+		manifest.publicationId !== row.publication_id ||
+		!Number.isSafeInteger(revision) ||
+		manifest.revision !== revision ||
+		manifest.items.length !== PRICE_CHANGE_ITEMS.length
+	)
+		return null;
+	const [loaded] = await loadPriceChangePublicationItems(context, [
+		{ status: row.status, publicationId: row.publication_id, revision, manifest },
+	]);
+	return loaded ?? null;
+};
+
+/** Read one retained durable publication by its immutable UUID. */
+export async function readPriceChangePredictionsByPublicationId(
+	context: GraphQLContext,
+	publicationId: string
+): Promise<PriceChangeBoard | null> {
+	if (!isDataPublicationId(publicationId)) return null;
+	try {
+		const loaded = await loadPriceChangePublicationById(context, publicationId);
+		if (!loaded) return null;
+		const board = parsePublicationBoard(loaded.publication, new Date());
+		return board && loaded.status === "retired" ? { ...board, status: "STALE" } : board;
+	} catch (error) {
+		context.logger.warn(
+			{
+				err: error,
+				dataset: PRICE_CHANGE_DATASET,
+				seasonCode: context.currentSeason.seasonCode,
+				publicationId,
+			},
+			"Failed to load requested price-change publication from PostgreSQL"
+		);
+		return null;
+	}
+}
+
 export async function readPriceChangePredictions(
 	context: GraphQLContext
 ): Promise<PriceChangeBoard> {
-	const now = new Date();
 	const scope = {
 		dataset: PRICE_CHANGE_DATASET,
 		seasonCode: context.currentSeason.seasonCode,
@@ -582,12 +776,12 @@ export async function readPriceChangePredictions(
 		PRICE_CHANGE_ITEMS
 	);
 	if (redisRead.publication) {
-		const board = parsePublicationBoard(redisRead.publication, now);
+		const board = parsePublicationBoard(redisRead.publication, new Date());
 		if (board) return board;
 	}
 	let postgresBoard: PriceChangeBoard | null = null;
 	try {
-		postgresBoard = await loadPriceChangeBoardFromPostgres(context, now);
+		postgresBoard = await loadPriceChangeBoardFromPostgres(context, new Date());
 	} catch (error) {
 		context.logger.warn(
 			{
@@ -600,6 +794,207 @@ export async function readPriceChangePredictions(
 	}
 	if (postgresBoard) return postgresBoard;
 	return unavailableBoard();
+}
+
+/**
+ * Read only the active publication manifest and context for cursor polling.
+ * The cursor never needs to materialize the player array; a full board read is
+ * reserved for the subsequent revision-bound board request.
+ */
+export async function readPriceChangePredictionsCursor(
+	context: GraphQLContext,
+	now: Date = new Date()
+): Promise<PriceChangeDurableCursor | null> {
+	const scope = {
+		dataset: PRICE_CHANGE_DATASET,
+		seasonCode: context.currentSeason.seasonCode,
+	} as const;
+	const isPriceChangeManifest = (
+		manifest: DataPublicationManifest | null
+	): manifest is DataPublicationManifest =>
+		Boolean(
+			manifest &&
+			manifest.eventId === null &&
+			manifest.state === "active" &&
+			manifest.items.length === PRICE_CHANGE_ITEMS.length &&
+			manifest.items
+				.map((item) => item.name)
+				.sort()
+				.join(",") === [...PRICE_CHANGE_ITEMS].sort().join(",")
+		);
+	const cursorFromContext = (
+		manifest: DataPublicationManifest,
+		publicationContext: PriceChangePublicationContext
+	): PriceChangeDurableCursor | null => {
+		const fetchedAt = Date.parse(publicationContext.fetchedAt);
+		const hardExpiresAt = Date.parse(publicationContext.hardExpiresAt);
+		const ageMs = now.getTime() - fetchedAt;
+		if (
+			!Number.isFinite(fetchedAt) ||
+			!Number.isFinite(hardExpiresAt) ||
+			ageMs < 0 ||
+			ageMs > PRICE_CHANGE_MAX_AGE_MS
+		) {
+			return null;
+		}
+		return {
+			revision: manifest.publicationId,
+			fetchedAt: publicationContext.fetchedAt,
+			sourceCheckedAt: manifest.sourceCheckedAt,
+			hardExpiresAt: publicationContext.hardExpiresAt,
+			state: ageMs < PRICE_CHANGE_READY_MS ? "READY" : "STALE",
+		};
+	};
+
+	// Redis is the normal low-latency path. If its pointer or context payload
+	// is missing/stale, fall through to PostgreSQL instead of reporting an
+	// unavailable cursor while a durable publication still exists.
+	try {
+		const manifest = await readDataPublicationManifest(context.redis, scope);
+		if (isPriceChangeManifest(manifest)) {
+			const publication = await readDataPublicationItemsAtManifest(context.redis, manifest, [
+				"context",
+			]);
+			const publicationContext = publication ? parseContext(publication.items.context) : null;
+			if (publicationContext) {
+				const cursor = cursorFromContext(manifest, publicationContext);
+				if (cursor) return cursor;
+			}
+		}
+	} catch (error) {
+		context.logger.warn(
+			{
+				err: error,
+				dataset: PRICE_CHANGE_DATASET,
+				seasonCode: context.currentSeason.seasonCode,
+			},
+			"Failed to load price-change cursor metadata"
+		);
+	}
+
+	try {
+		// Keep the cursor fallback bounded to the same active plus twelve retained
+		// candidates used by the board reader. Only the context item is fetched;
+		// player arrays remain exclusive to the revision-bound board query.
+		const authority = await context.database.query<PublicationCandidateRow>(
+			PUBLICATION_CANDIDATES_SQL,
+			[context.currentSeason.seasonId]
+		);
+		const activeRows = authority.rows.filter((row) => row.status === "active");
+		if (activeRows.length > 1) return null;
+		const activeRevision = activeRows.length === 1 ? Number(activeRows[0]!.revision) : null;
+		const candidates = authority.rows
+			.filter((row) => row.status === "active" || row.status === "retired")
+			.map((row) => ({ row, revision: Number(row.revision) }))
+			.filter(
+				(candidate) =>
+					Number.isSafeInteger(candidate.revision) &&
+					candidate.revision > 0 &&
+					(candidate.row.status === "active" ||
+						activeRevision === null ||
+						!Number.isSafeInteger(activeRevision) ||
+						candidate.revision < activeRevision)
+			)
+			.sort((left, right) => {
+				if (left.row.status !== right.row.status) return left.row.status === "active" ? -1 : 1;
+				return right.revision - left.revision;
+			});
+		const itemMetadata = await context.database.query<PublicationItemMetadataRow>(
+			PUBLICATION_ITEM_METADATA_SQL,
+			[candidates.map(({ row }) => row.publication_id), [...PRICE_CHANGE_ITEMS]]
+		);
+		const metadataRowsByPublication = new Map<string, PublicationItemMetadataRow[]>();
+		for (const item of itemMetadata.rows) {
+			const rows = metadataRowsByPublication.get(item.publication_id) ?? [];
+			rows.push(item);
+			metadataRowsByPublication.set(item.publication_id, rows);
+		}
+		const contextRows = await context.database.query<PublicationItemRow>(
+			PUBLICATION_CONTEXT_ITEMS_SQL,
+			[candidates.map(({ row }) => row.publication_id)]
+		);
+		const contextRowsByPublication = new Map<string, PublicationItemRow[]>();
+		for (const item of contextRows.rows) {
+			const rows = contextRowsByPublication.get(item.publication_id) ?? [];
+			rows.push(item);
+			contextRowsByPublication.set(item.publication_id, rows);
+		}
+		for (const { row, revision } of candidates) {
+			const rawManifest =
+				typeof row.manifest === "string" ? row.manifest : (JSON.stringify(row.manifest) ?? "");
+			const manifest = parseDataPublicationManifest(rawManifest, scope);
+			if (
+				!manifest ||
+				!isPriceChangeManifest(manifest) ||
+				!Number.isSafeInteger(revision) ||
+				manifest.publicationId !== row.publication_id ||
+				manifest.revision !== revision
+			) {
+				continue;
+			}
+			const metadataRows = metadataRowsByPublication.get(row.publication_id) ?? [];
+			if (metadataRows.length !== PRICE_CHANGE_ITEMS.length) continue;
+			const metadataByName = new Map(metadataRows.map((item) => [item.item_name, item]));
+			if (metadataByName.size !== PRICE_CHANGE_ITEMS.length) continue;
+			let metadataValid = true;
+			for (const itemName of PRICE_CHANGE_ITEMS) {
+				const item = metadataByName.get(itemName);
+				const manifestItem = manifest.items.find((candidate) => candidate.name === itemName);
+				if (
+					!item ||
+					!manifestItem ||
+					Number(item.item_count) !== manifestItem.count ||
+					item.checksum !== manifestItem.sha256 ||
+					Number(item.payload_bytes) !== manifestItem.bytes
+				) {
+					metadataValid = false;
+					break;
+				}
+			}
+			if (!metadataValid) continue;
+			const itemRows = contextRowsByPublication.get(row.publication_id) ?? [];
+			if (itemRows.length !== 1) continue;
+			const item = itemRows[0];
+			const manifestItem = manifest.items.find((candidate) => candidate.name === "context");
+			if (
+				item.item_name !== "context" ||
+				!manifestItem ||
+				typeof item.checksum !== "string" ||
+				item.checksum !== manifestItem.sha256
+			) {
+				continue;
+			}
+			let payload: unknown;
+			try {
+				payload = typeof item.payload === "string" ? JSON.parse(item.payload) : item.payload;
+				const serialized = canonicalJson(payload);
+				if (
+					Number(item.item_count) !== manifestItem.count ||
+					payloadCount(payload) !== manifestItem.count ||
+					Buffer.byteLength(serialized, "utf8") !== manifestItem.bytes ||
+					sha256(serialized) !== manifestItem.sha256
+				) {
+					continue;
+				}
+			} catch {
+				continue;
+			}
+			const publicationContext = parseContext(payload);
+			const cursor = publicationContext ? cursorFromContext(manifest, publicationContext) : null;
+			if (cursor) return row.status === "retired" ? { ...cursor, state: "STALE" } : cursor;
+		}
+		return null;
+	} catch (error) {
+		context.logger.warn(
+			{
+				err: error,
+				dataset: PRICE_CHANGE_DATASET,
+				seasonCode: context.currentSeason.seasonCode,
+			},
+			"Failed to load price-change cursor metadata from PostgreSQL"
+		);
+		return null;
+	}
 }
 
 /** Kept as a local name for callers while the implementation is now a pure publication reader. */
