@@ -1,6 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { enqueueEntryInfoSync } from "../../infra/entry-info-sync";
+import { requestEntryInfoSync } from "../../infra/entry-info-sync";
 import { lookupFplEntryResult, type FplEntryLookupResult } from "../../infra/fpl-entry-lookup";
 import { metrics } from "../../infra/metrics";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
@@ -20,6 +21,17 @@ import { liveRepository } from "../live/repository";
 import type { Entry, EntryEventResult, EntryHistoryInfo, EntryNameUsage } from "./repository";
 import { entriesRepository } from "./repository";
 
+export type EntryLookupStatus = "FOUND" | "NOT_FOUND" | "INVALID_ID" | "SATURATED" | "UNAVAILABLE";
+export type EntryLookupSource = "DATABASE" | "FPL";
+export type EntryPersistenceState = "NOT_REQUIRED" | "QUEUED" | "FAILED_RETRYABLE";
+export type EntryLookupResult = Readonly<{
+	status: EntryLookupStatus;
+	entry: Entry | null;
+	retryable: boolean;
+	source: EntryLookupSource | null;
+	persistenceState: EntryPersistenceState | null;
+}>;
+
 const FPL_ENTRY_NEGATIVE_TTL_SECONDS = 60;
 const FPL_ENTRY_NEGATIVE_SENTINEL = "__entry_fpl:not_found__";
 const MAX_FPL_ENTRY_IN_FLIGHT = 8;
@@ -27,9 +39,23 @@ const fplEntryFlights = new Map<number, Promise<FplEntryLookupResult>>();
 let fplEntryInFlight = 0;
 
 const countEntryAdmission = (
-	event: "negative_hit" | "not_found" | "unavailable" | "saturated" | "found"
+	event:
+		| "negative_hit"
+		| "not_found"
+		| "unavailable"
+		| "saturated"
+		| "found"
+		| "invalid_id"
+		| "persistence_failed"
 ): void => {
 	metrics.cacheRepositoryEvents.labels("entry_fpl", event).inc();
+};
+
+const recordEntryLookup = (result: EntryLookupResult): EntryLookupResult => {
+	metrics.entryLookupOutcomes
+		.labels(result.status, result.source ?? "NONE", result.persistenceState ?? "NONE")
+		.inc();
+	return result;
 };
 
 const readNegativeEntryCache = async (context: GraphQLContext, id: number): Promise<boolean> => {
@@ -149,9 +175,6 @@ type StoredEntryPick = {
 	isCaptain: boolean;
 	isViceCaptain: boolean;
 };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const asNumber = (value: unknown): number | null =>
 	typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -466,40 +489,130 @@ export const entriesService = {
 		return entriesRepository.getEntrySnapshotById(context, id);
 	},
 
-	async getEntryById(context: GraphQLContext, id: number): Promise<Entry | null> {
-		if (!Number.isSafeInteger(id) || id <= 0) return null;
-		const stored = await entriesRepository.getEntryById(context, id);
+	async lookupEntryById(context: GraphQLContext, id: number): Promise<EntryLookupResult> {
+		if (!Number.isSafeInteger(id) || id <= 0) {
+			countEntryAdmission("invalid_id");
+			return recordEntryLookup({
+				status: "INVALID_ID",
+				entry: null,
+				retryable: false,
+				source: null,
+				persistenceState: null,
+			});
+		}
+		let stored: Entry | null;
+		try {
+			stored = await entriesRepository.getEntryById(context, id);
+		} catch (error) {
+			countEntryAdmission("unavailable");
+			context.logger.error(
+				{ err: error, id, requestId: context.requestId },
+				"Entry database lookup failed"
+			);
+			return recordEntryLookup({
+				status: "UNAVAILABLE",
+				entry: null,
+				retryable: true,
+				source: null,
+				persistenceState: null,
+			});
+		}
 		if (stored) {
-			return stored;
+			return recordEntryLookup({
+				status: "FOUND",
+				entry: stored,
+				retryable: false,
+				source: "DATABASE",
+				persistenceState: "NOT_REQUIRED",
+			});
 		}
 
-		if (await readNegativeEntryCache(context, id)) return null;
+		if (await readNegativeEntryCache(context, id)) {
+			return recordEntryLookup({
+				status: "NOT_FOUND",
+				entry: null,
+				retryable: false,
+				source: "FPL",
+				persistenceState: null,
+			});
+		}
 		const admission = lookupAdmission(id);
 		if (!admission) {
 			countEntryAdmission("saturated");
-			return null;
+			return recordEntryLookup({
+				status: "SATURATED",
+				entry: null,
+				retryable: true,
+				source: null,
+				persistenceState: null,
+			});
 		}
-		const result = await admission;
+		let result: FplEntryLookupResult;
+		try {
+			result = await admission;
+		} catch (error) {
+			countEntryAdmission("unavailable");
+			context.logger.error(
+				{ err: error, id, requestId: context.requestId },
+				"FPL entry lookup failed"
+			);
+			return recordEntryLookup({
+				status: "UNAVAILABLE",
+				entry: null,
+				retryable: true,
+				source: null,
+				persistenceState: null,
+			});
+		}
 		if (result.status === "not_found") {
 			countEntryAdmission("not_found");
 			await writeNegativeEntryCache(context, id);
-			return null;
+			return recordEntryLookup({
+				status: "NOT_FOUND",
+				entry: null,
+				retryable: false,
+				source: "FPL",
+				persistenceState: null,
+			});
 		}
 		if (result.status === "unavailable") {
 			countEntryAdmission("unavailable");
-			return null;
+			context.logger.warn(
+				{ id, reason: result.reason, requestId: context.requestId },
+				"FPL entry lookup dependency unavailable"
+			);
+			return recordEntryLookup({
+				status: "UNAVAILABLE",
+				entry: null,
+				retryable: true,
+				source: null,
+				persistenceState: null,
+			});
 		}
 		countEntryAdmission("found");
 		const live = result.entry;
 
-		enqueueEntryInfoSync(id);
-		await writeQueryCache(
-			context,
-			gqlCacheKey(context, `entries:info:${id}`),
-			JSON.stringify(live),
-			QUERY_CACHE_TTL_SECONDS.METADATA
-		);
-		return live;
+		const persistence = await requestEntryInfoSync(id);
+		const persistenceState: EntryPersistenceState = persistence.ok ? "QUEUED" : "FAILED_RETRYABLE";
+		if (!persistence.ok) {
+			countEntryAdmission("persistence_failed");
+			context.logger.warn(
+				{ id, reason: persistence.reason, requestId: context.requestId },
+				"FPL entry lookup persistence enqueue failed"
+			);
+		}
+		return recordEntryLookup({
+			status: "FOUND",
+			entry: live,
+			retryable: false,
+			source: "FPL",
+			persistenceState,
+		});
+	},
+
+	async getEntryById(context: GraphQLContext, id: number): Promise<Entry | null> {
+		const result = await this.lookupEntryById(context, id);
+		return result.entry;
 	},
 
 	getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {

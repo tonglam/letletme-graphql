@@ -21,6 +21,33 @@ export const entriesTypeDefs = /* GraphQL */ `
 		totalTransfers: Int
 	}
 
+	enum EntryLookupStatus {
+		FOUND
+		NOT_FOUND
+		INVALID_ID
+		SATURATED
+		UNAVAILABLE
+	}
+
+	enum EntryLookupSource {
+		DATABASE
+		FPL
+	}
+
+	enum EntryPersistenceState {
+		NOT_REQUIRED
+		QUEUED
+		FAILED_RETRYABLE
+	}
+
+	type EntryLookupResult {
+		status: EntryLookupStatus!
+		entry: Entry
+		retryable: Boolean!
+		source: EntryLookupSource
+		persistenceState: EntryPersistenceState
+	}
+
 	type EntryEventResult {
 		entry: Entry!
 		eventId: Int!
@@ -75,7 +102,7 @@ export const entriesTypeDefs = /* GraphQL */ `
 		This does not write PostgreSQL, establish an identity binding, or grant
 		access to protected entry history.
 		"""
-		entry(id: Int!): Entry
+		entryLookup(id: Int!): EntryLookupResult!
 		"""
 		Persisted public entry snapshot for read-only consumers. This resolver
 		never calls the public FPL API, enqueues Data work, or writes query caches.

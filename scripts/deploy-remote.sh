@@ -270,9 +270,13 @@ compose exec -T graphql bun -e '
   };
   const data = await request(`query CandidateContract {
     currentEventInfo { season }
+    entryLookup(id: -1) { status retryable entry source persistenceState }
   }`);
   if (!/^[0-9]{4}$/.test(data?.currentEventInfo?.season ?? "")) {
     throw new Error("Current-season contract failed");
+  }
+  if (data?.entryLookup?.status !== "INVALID_ID" || data.entryLookup.retryable !== false || data.entryLookup.entry !== null) {
+    throw new Error("Entry lookup contract failed");
   }
   const price = await request(`query CandidatePriceBoard {
     priceChangeBoard { status revision expectedPlayerCount observedPlayerCount }
@@ -382,12 +386,16 @@ compose exec -T -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e '
     headers: { "Content-Type": "application/json", "X-GraphQL-Service-Token": token },
     body: JSON.stringify({ query: `query PublicContract {
       currentEventInfo { season }
+      entryLookup(id: -1) { status retryable entry source persistenceState }
     }` }),
     signal: AbortSignal.timeout(5000),
   });
   const payload = await response.json();
   if (response.status !== 200 || payload.errors) throw new Error("Public GraphQL contract failed");
-  if (!/^[0-9]{4}$/.test(payload.data?.currentEventInfo?.season ?? "")) {
+  if (!/^[0-9]{4}$/.test(payload.data?.currentEventInfo?.season ?? "") ||
+      payload.data?.entryLookup?.status !== "INVALID_ID" ||
+      payload.data.entryLookup.retryable !== false ||
+      payload.data.entryLookup.entry !== null) {
     throw new Error("Public GraphQL fields do not match the candidate contract");
   }
   console.log(JSON.stringify({ status: "public_contract_passed", season: payload.data.currentEventInfo.season }));

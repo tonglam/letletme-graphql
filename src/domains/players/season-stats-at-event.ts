@@ -482,11 +482,16 @@ const SEASON_STATS_SELECT = [
 	"ict_index",
 ].join(", ");
 
-export async function getPlayerSeasonStatsByIdsForContext(
+export type PlayerSeasonStatsLoad = Readonly<{
+	stats: Map<number, PlayerSeasonStatsAtEvent>;
+	sourceAvailable: boolean;
+}>;
+
+export async function getPlayerSeasonStatsLoadForContext(
 	context: GraphQLContext,
 	elementIds: number[],
 	statsContext: PlayerStatsContext
-): Promise<Map<number, PlayerSeasonStatsAtEvent>> {
+): Promise<PlayerSeasonStatsLoad> {
 	const uniqueIds = Array.from(
 		new Set(elementIds.filter((id) => Number.isSafeInteger(id) && id > 0))
 	);
@@ -499,7 +504,7 @@ export async function getPlayerSeasonStatsByIdsForContext(
 		eventId === null ||
 		statsContext.revision === null
 	) {
-		return result;
+		return { stats: result, sourceAvailable: true };
 	}
 
 	const keys = uniqueIds.map((id) => cacheKey(context, id, eventId, statsContext.revision!));
@@ -532,25 +537,33 @@ export async function getPlayerSeasonStatsByIdsForContext(
 		missingIds.push(id);
 	}
 
-	if (missingIds.length === 0) return result;
+	if (missingIds.length === 0) return { stats: result, sourceAvailable: true };
 	const cacheTtl = (await isUnfinishedCurrentEvent(context, eventId))
 		? QUERY_CACHE_TTL_SECONDS.REPORTING
 		: QUERY_CACHE_TTL_SECONDS.HISTORICAL;
 
-	const statsResult = await context.data
-		.read("fpl.player_event_snapshot_bundles")
-		.select(SEASON_STATS_SELECT)
-		.eq("event_id", eventId)
-		.eq("publication_revision", statsContext.revision)
-		.in("element_id", missingIds);
-	const { data, error } = statsResult;
-
-	if (error) {
+	let data: unknown[] | null;
+	try {
+		const statsResult = await context.data
+			.read("fpl.player_event_snapshot_bundles")
+			.select(SEASON_STATS_SELECT)
+			.eq("event_id", eventId)
+			.eq("publication_revision", statsContext.revision)
+			.in("element_id", missingIds);
+		if (statsResult.error) {
+			context.logger.warn(
+				{ err: statsResult.error, eventId, playerIds: missingIds },
+				"Failed to fetch season-as-of-event player stats"
+			);
+			return { stats: result, sourceAvailable: false };
+		}
+		data = (statsResult.data ?? null) as unknown[] | null;
+	} catch (error) {
 		context.logger.warn(
 			{ err: error, eventId, playerIds: missingIds },
 			"Failed to fetch season-as-of-event player stats"
 		);
-		return result;
+		return { stats: result, sourceAvailable: false };
 	}
 
 	const pipeline = context.redis.pipeline();
@@ -585,7 +598,15 @@ export async function getPlayerSeasonStatsByIdsForContext(
 		context.logger.warn({ err: error, eventId }, "Failed to cache player season stats");
 	}
 
-	return result;
+	return { stats: result, sourceAvailable: true };
+}
+
+export async function getPlayerSeasonStatsByIdsForContext(
+	context: GraphQLContext,
+	elementIds: number[],
+	statsContext: PlayerStatsContext
+): Promise<Map<number, PlayerSeasonStatsAtEvent>> {
+	return (await getPlayerSeasonStatsLoadForContext(context, elementIds, statsContext)).stats;
 }
 
 export async function getPlayerSeasonStatsForContext(

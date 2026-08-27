@@ -204,7 +204,7 @@ describe("GraphQL request limits", () => {
 	});
 
 	it("allows the bounded player stats timeline projection above the generic AST ceiling", () => {
-		const fields = Array.from({ length: 110 }, () => "__typename").join(" ");
+		const fields = Array.from({ length: 130 }, () => "__typename").join(" ");
 		expect(
 			validateGraphQLRequestLimits(
 				{ query: `query { playerStatsDesk(playerIds: [1], eventId: 1) { ${fields} } }` },
@@ -212,7 +212,7 @@ describe("GraphQL request limits", () => {
 			)
 		).toMatchObject({ ok: true, rootFields: ["playerStatsDesk"] });
 
-		const oversized = Array.from({ length: 205 }, () => "__typename").join(" ");
+		const oversized = Array.from({ length: 140 }, () => "__typename").join(" ");
 		expect(
 			validateGraphQLRequestLimits(
 				{ query: `query { playerStatsDesk(playerIds: [1], eventId: 1) { ${oversized} } }` },

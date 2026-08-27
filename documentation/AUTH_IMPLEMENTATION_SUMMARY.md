@@ -10,7 +10,7 @@ Implemented here:
 - Exact Web-signed envelopes and Web-owned Mini Program session hashes resolve
   to one principal type behind verified ingress.
 - Verified FPL entry state is required for protected entry-scoped authorization;
-  public entry lookup and live calculation remain explicitly documented
+  public `entryLookup` and live calculation remain explicitly documented
   exceptions.
 - GraphQL payload, depth, alias, AST, complexity, batch, and Redis rate limits
   are enforced with fail-closed security routes.

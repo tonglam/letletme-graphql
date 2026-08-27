@@ -72,7 +72,8 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("docker inspect --format '{{.Config.Image}}'");
 		expect(deployScript).toContain("org.opencontainers.image.revision");
 		expect(deployScript).toContain('test "$anonymous_status" = 401');
-		expect(deployScript).not.toContain("entryLookup(id: -1)");
+		expect(deployScript).toContain("entryLookup(id: -1)");
+		expect(deployScript).toContain('status !== "INVALID_ID"');
 		expect(deployScript).toContain("priceChangeBoard");
 		expect(deployScript).toContain('status === "READY"');
 		expect(deployScript).toContain("candidate_contract_passed");

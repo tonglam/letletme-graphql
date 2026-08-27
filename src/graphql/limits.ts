@@ -23,7 +23,7 @@ export const GRAPHQL_LIMITS = {
 	maxAliases: 20,
 	maxAstNodes: 200,
 	maxBoundedDeskAstNodes: 400,
-	maxPlayerStatsDeskAstNodes: 240,
+	maxPlayerStatsDeskAstNodes: 280,
 	maxPlayerStateProfileAstNodes: 240,
 	maxComplexity: 600,
 } as const;
@@ -33,7 +33,7 @@ export const GRAPHQL_LIMITS = {
 // general document cap strict, but give this one bounded root enough AST room
 // without relaxing depth, alias, root-field, or weighted-complexity guards.
 const TOURNAMENT_DETAIL_DESK_MAX_AST_NODES = 400;
-const PLAYER_STATS_DESK_MAX_AST_NODES = 240;
+const PLAYER_STATS_DESK_MAX_AST_NODES = 280;
 const PLAYER_STATE_PROFILE_MAX_AST_NODES = 240;
 // The single-entry live-points response projects a fixed 15-player squad plus
 // revision provenance and the bounded effective lineup. Give only this exact
@@ -451,7 +451,6 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["marketSnapshotContext", 1],
 	["playerValues", 5],
 	["eventFixtures", 5],
-	["currentEvent", 1],
 	["currentEventInfo", 1],
 	["teams", 2],
 	["miniProgramNotice", 1],
@@ -461,7 +460,7 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["trendCohortSnapshot", 10],
 	["calcLivePointsByEntry", 10],
 	["searchEntries", 10],
-	["entry", 5],
+	["entryLookup", 5],
 	["entryNameUsage", 5],
 	["tournamentEventResults", 30],
 	["tournamentSelectionStats", 10],
@@ -512,10 +511,10 @@ const accepted = ({
 		"marketSnapshotContext",
 		"playerValues",
 		"eventFixtures",
-		"currentEvent",
 		"currentEventInfo",
 		"teams",
 		"miniProgramNotice",
+		"entryLookup",
 	]);
 	const boundedPublicDeskRequest =
 		rootFields.length > 0 && rootFields.every((field) => boundedPublicDeskRoots.has(field.name));
