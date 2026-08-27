@@ -28,6 +28,7 @@ export type PriceChangeLiveState = "PROVISIONAL" | "DURABLE" | "UNAVAILABLE";
 export type PriceChangeLiveCursor = {
 	seasonCode: string;
 	revision: string | null;
+	sourceHash: string | null;
 	state: PriceChangeLiveState;
 	detectedAt: string | null;
 	fetchedAt: string | null;
@@ -36,6 +37,7 @@ export type PriceChangeLiveCursor = {
 
 export type PriceChangeLiveBoard = {
 	revision: string;
+	sourceHash: string | null;
 	state: PriceChangeLiveState;
 	detectedAt: string | null;
 	expiresAt: string | null;
@@ -319,7 +321,8 @@ const isSourceBoundHotPayloadKey = (
 async function readHotSnapshot(
 	context: GraphQLContext,
 	now: Date,
-	requestedRevision?: string | null
+	requestedRevision?: string | null,
+	requestedSourceHash?: string | null
 ): Promise<HotSnapshot | null> {
 	try {
 		const pointer = requestedRevision
@@ -327,16 +330,32 @@ async function readHotSnapshot(
 			: parsePointer(await context.redis.get(hotPointerKey(context.currentSeason.seasonCode)));
 		if (!requestedRevision && !pointer) return null;
 		if (pointer && !HOT_REVISION_PATTERN.test(pointer.revision)) return null;
+		if (requestedSourceHash && !HOT_SOURCE_HASH_PATTERN.test(requestedSourceHash)) return null;
 		const payloadKeys = requestedRevision
-			? await context.redis.smembers(
-					hotRevisionIndexKey(context.currentSeason.seasonCode, requestedRevision)
-				)
+			? requestedSourceHash
+				? [
+						sourceBoundHotPayloadKey(
+							context.currentSeason.seasonCode,
+							requestedRevision,
+							requestedSourceHash
+						),
+					]
+				: await context.redis.smembers(
+						hotRevisionIndexKey(context.currentSeason.seasonCode, requestedRevision)
+					)
 			: [pointer!.payloadKey];
 		let newest: HotSnapshot | null = null;
 		for (const payloadKey of payloadKeys) {
 			const raw = await context.redis.get(payloadKey);
 			if (!raw) continue;
-			const parsed: unknown = JSON.parse(raw);
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(raw);
+			} catch {
+				// A malformed member must not poison other source variants retained
+				// for the same board revision.
+				continue;
+			}
 			const snapshot = parseHotSnapshot(parsed, context.currentSeason.seasonCode, now);
 			if (
 				!snapshot ||
@@ -456,6 +475,7 @@ function durableCursor(
 		return {
 			seasonCode,
 			revision: null,
+			sourceHash: null,
 			state: "UNAVAILABLE",
 			detectedAt: null,
 			fetchedAt: null,
@@ -465,6 +485,7 @@ function durableCursor(
 	return {
 		seasonCode,
 		revision: durable.revision,
+		sourceHash: null,
 		state: "DURABLE",
 		detectedAt: durable.fetchedAt,
 		fetchedAt: durable.fetchedAt,
@@ -499,6 +520,7 @@ export async function readPriceChangeLiveCursor(
 		return {
 			seasonCode: context.currentSeason.seasonCode,
 			revision: hot!.revision,
+			sourceHash: hot!.sourceHash,
 			state: hot!.reconciliation.state === "reconciled" ? "DURABLE" : "PROVISIONAL",
 			detectedAt: hot!.detectedAt,
 			fetchedAt: hot!.fetchedAt,
@@ -510,7 +532,8 @@ export async function readPriceChangeLiveCursor(
 
 export async function readPriceChangeLiveBoard(
 	context: GraphQLContext,
-	_requestedRevision?: string | null
+	_requestedRevision?: string | null,
+	_requestedSourceHash?: string | null
 ): Promise<PriceChangeLiveBoard> {
 	const now = new Date();
 	const requestedRevisionInput = _requestedRevision;
@@ -518,6 +541,11 @@ export async function readPriceChangeLiveBoard(
 		requestedRevisionInput === undefined || requestedRevisionInput === null
 			? null
 			: requestedRevisionInput.trim();
+	const requestedSourceHashInput = _requestedSourceHash;
+	const requestedSourceHash =
+		requestedSourceHashInput === undefined || requestedSourceHashInput === null
+			? null
+			: requestedSourceHashInput.trim();
 	if (
 		requestedRevisionInput !== undefined &&
 		requestedRevisionInput !== null &&
@@ -527,18 +555,33 @@ export async function readPriceChangeLiveBoard(
 			extensions: { code: "BAD_USER_INPUT" },
 		});
 	}
+	if (requestedSourceHash && !HOT_SOURCE_HASH_PATTERN.test(requestedSourceHash)) {
+		throw new GraphQLError("The requested live price source identity is invalid", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
+	if (requestedSourceHash && !requestedRevision) {
+		throw new GraphQLError("A live price source identity requires a revision", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
 	const requestedHotRevision = requestedRevision && HOT_REVISION_PATTERN.test(requestedRevision);
 	const requestedDurableRevision =
 		requestedRevision && isDataPublicationId(requestedRevision)
 			? requestedRevision.toLowerCase()
 			: null;
+	if (requestedSourceHash && !requestedHotRevision) {
+		throw new GraphQLError("A live price source identity requires a hot revision", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
 	if (requestedRevision && !requestedHotRevision && !requestedDurableRevision) {
 		throw new GraphQLError("The requested live price revision is invalid", {
 			extensions: { code: "BAD_USER_INPUT" },
 		});
 	}
 	if (requestedRevision && requestedHotRevision) {
-		const hot = await readHotSnapshot(context, now, requestedRevision);
+		const hot = await readHotSnapshot(context, now, requestedRevision, requestedSourceHash);
 		if (!hot) {
 			throw new GraphQLError("The requested live price revision is unavailable", {
 				extensions: { code: "PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE" },
@@ -546,6 +589,7 @@ export async function readPriceChangeLiveBoard(
 		}
 		return {
 			revision: hot.revision,
+			sourceHash: hot.sourceHash,
 			state: hot.reconciliation.state === "reconciled" ? "DURABLE" : "PROVISIONAL",
 			detectedAt: hot.detectedAt,
 			expiresAt: hot.expiresAt,
@@ -561,6 +605,7 @@ export async function readPriceChangeLiveBoard(
 		if (activeDurable.status !== "UNAVAILABLE" && activeDurable.revision === requestedRevision) {
 			return {
 				revision: activeDurable.revision,
+				sourceHash: null,
 				state: "DURABLE",
 				detectedAt: activeDurable.fetchedAt,
 				expiresAt: durableHardExpiresAt(activeDurable),
@@ -579,6 +624,7 @@ export async function readPriceChangeLiveBoard(
 		}
 		return {
 			revision: requestedDurable.revision,
+			sourceHash: null,
 			state: "DURABLE",
 			detectedAt: requestedDurable.fetchedAt,
 			expiresAt: durableHardExpiresAt(requestedDurable),
@@ -587,7 +633,7 @@ export async function readPriceChangeLiveBoard(
 		};
 	}
 	const [hot, durable] = await Promise.all([
-		readHotSnapshot(context, now, requestedRevision),
+		readHotSnapshot(context, now, requestedRevision, requestedSourceHash),
 		readPriceChangePredictions(context),
 	]);
 	if (requestedRevision) {
@@ -597,6 +643,7 @@ export async function readPriceChangeLiveBoard(
 			});
 		return {
 			revision: hot.revision,
+			sourceHash: hot.sourceHash,
 			state: hot.reconciliation.state === "reconciled" ? "DURABLE" : "PROVISIONAL",
 			detectedAt: hot.detectedAt,
 			expiresAt: hot.expiresAt,
@@ -608,6 +655,7 @@ export async function readPriceChangeLiveBoard(
 	if (isNewerHotSnapshot(hot, durable)) {
 		return {
 			revision: hot!.revision,
+			sourceHash: hot!.sourceHash,
 			state: hot!.reconciliation.state === "reconciled" ? "DURABLE" : "PROVISIONAL",
 			detectedAt: hot!.detectedAt,
 			expiresAt: hot!.expiresAt,
@@ -618,6 +666,7 @@ export async function readPriceChangeLiveBoard(
 	}
 	return {
 		revision: durable.revision,
+		sourceHash: null,
 		state: durable.status === "UNAVAILABLE" ? "UNAVAILABLE" : "DURABLE",
 		detectedAt: durable.fetchedAt,
 		expiresAt: durableHardExpiresAt(durable),

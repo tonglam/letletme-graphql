@@ -17,6 +17,7 @@ describe("price-change board schema", () => {
 		expect(fields?.priceChangeLiveBoard?.args.map((arg) => arg.name)).toEqual([
 			"seasonCode",
 			"revision",
+			"sourceHash",
 		]);
 		const liveBoard = schema.getType("PriceChangeLiveBoard");
 		const liveBoardFields = liveBoard && "getFields" in liveBoard ? liveBoard.getFields() : {};

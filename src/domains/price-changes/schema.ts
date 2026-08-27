@@ -76,6 +76,7 @@ export const priceChangesTypeDefs = /* GraphQL */ `
 	type PriceChangeLiveCursor {
 		seasonCode: String!
 		revision: String
+		sourceHash: String
 		state: PriceChangeLiveState!
 		detectedAt: DateTime
 		fetchedAt: DateTime
@@ -84,6 +85,7 @@ export const priceChangesTypeDefs = /* GraphQL */ `
 
 	type PriceChangeLiveBoard {
 		revision: String!
+		sourceHash: String
 		state: PriceChangeLiveState!
 		detectedAt: DateTime
 		expiresAt: DateTime
@@ -94,6 +96,10 @@ export const priceChangesTypeDefs = /* GraphQL */ `
 	extend type Query {
 		priceChangeBoard: PriceChangeBoard!
 		priceChangeLiveCursor(seasonCode: String): PriceChangeLiveCursor!
-		priceChangeLiveBoard(seasonCode: String, revision: String): PriceChangeLiveBoard!
+		priceChangeLiveBoard(
+			seasonCode: String
+			revision: String
+			sourceHash: String
+		): PriceChangeLiveBoard!
 	}
 `;

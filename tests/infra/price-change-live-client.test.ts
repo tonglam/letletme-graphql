@@ -238,6 +238,39 @@ describe("price-change live client", () => {
 		assert.equal(liveBoard.board.players[0]?.currentPrice, 100);
 	});
 
+	it("binds a revision-bound board request to the cursor source identity", async () => {
+		const redis = new FakeRedis();
+		const first = hotSnapshot(2_000);
+		publishHot(redis, first);
+		const cursor = await readPriceChangeLiveCursor(context(redis));
+		const second = hotSnapshot(1_000, String(first.revision));
+		(second as { sourceHash: string }).sourceHash = "c".repeat(64);
+		(second as { payloadHash: string }).payloadHash = hotEnvelopePayloadHash(second);
+		(second as { metadataHash: string }).metadataHash = hotEnvelopeMetadataHash(second);
+		publishHot(redis, second);
+
+		const board = await readPriceChangeLiveBoard(
+			context(redis),
+			String(cursor.revision),
+			String(first.sourceHash)
+		);
+		assert.equal(board.sourceHash, first.sourceHash);
+	});
+
+	it("skips malformed indexed source variants when a valid one remains", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		publishHot(redis, snapshot);
+		redis.sadd(
+			`${HOT_PREFIX}:${seasonCode}:revision:${snapshot.revision}:sources`,
+			`${HOT_PREFIX}:${seasonCode}:${snapshot.revision}:d${"e".repeat(63)}`
+		);
+		redis.set(`${HOT_PREFIX}:${seasonCode}:${snapshot.revision}:d${"e".repeat(63)}`, "not-json");
+
+		const board = await readPriceChangeLiveBoard(context(redis), String(snapshot.revision));
+		assert.equal(board.sourceHash, snapshot.sourceHash);
+	});
+
 	it("fails closed for an expired or damaged hot payload", async () => {
 		const expiredRedis = new FakeRedis();
 		publishHot(expiredRedis, hotSnapshot(16 * 60 * 1_000));
@@ -595,6 +628,7 @@ describe("price-change live client", () => {
 		assert.deepEqual(cursor, {
 			seasonCode,
 			revision: null,
+			sourceHash: null,
 			state: "UNAVAILABLE",
 			detectedAt: null,
 			fetchedAt: null,
@@ -621,6 +655,17 @@ describe("price-change live client", () => {
 						],
 					};
 				}
+				if (sql.includes("octet_length(payload)")) {
+					return {
+						rows: durable.manifest.items.map((item) => ({
+							publication_id: durable.manifest.publicationId,
+							item_name: item.name,
+							item_count: item.count,
+							checksum: item.sha256,
+							payload_bytes: item.bytes,
+						})),
+					};
+				}
 				return {
 					rows: [
 						{
@@ -640,9 +685,10 @@ describe("price-change live client", () => {
 		);
 		assert.equal(cursor.state, "DURABLE");
 		assert.equal(cursor.revision, durable.manifest.publicationId);
-		assert.equal(queries.length, 2);
-		assert.ok(queries[1]?.includes("item_name = 'context'"));
-		assert.ok(queries[1]?.includes("ANY($1::uuid[])"));
+		assert.equal(queries.length, 3);
+		assert.ok(queries[2]?.includes("item_name = 'context'"));
+		assert.ok(queries[2]?.includes("ANY($1::uuid[])"));
+		assert.ok(queries[1]?.includes("octet_length(payload)"));
 		assert.ok(queries[0]?.includes("expires_at > now()"));
 	});
 
@@ -661,6 +707,17 @@ describe("price-change live client", () => {
 								manifest: retained.manifest,
 							},
 						],
+					};
+				}
+				if (sql.includes("octet_length(payload)")) {
+					return {
+						rows: retained.manifest.items.map((item) => ({
+							publication_id: retained.manifest.publicationId,
+							item_name: item.name,
+							item_count: item.count,
+							checksum: item.sha256,
+							payload_bytes: item.bytes,
+						})),
 					};
 				}
 				return {

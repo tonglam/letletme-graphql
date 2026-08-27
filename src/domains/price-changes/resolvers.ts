@@ -42,11 +42,11 @@ export const priceChangesResolvers = {
 		},
 		priceChangeLiveBoard: async (
 			_parent: unknown,
-			args: { seasonCode?: string | null; revision?: string | null },
+			args: { seasonCode?: string | null; revision?: string | null; sourceHash?: string | null },
 			context: GraphQLContext
 		): Promise<PriceChangeLiveBoard> => {
 			assertCurrentSeason(args.seasonCode, context);
-			return readPriceChangeLiveBoard(context, args.revision);
+			return readPriceChangeLiveBoard(context, args.revision, args.sourceHash);
 		},
 	},
 	PriceChangeBoard: {

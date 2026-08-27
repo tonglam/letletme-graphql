@@ -478,6 +478,14 @@ type PublicationItemRow = QueryResultRow & {
 	payload: unknown;
 };
 
+type PublicationItemMetadataRow = QueryResultRow & {
+	publication_id: string;
+	item_name: string;
+	item_count: string | number;
+	checksum: string;
+	payload_bytes: string | number;
+};
+
 type ParsedPriceChangePublicationCandidate = {
 	status: "active" | "retired";
 	publicationId: string;
@@ -546,6 +554,15 @@ const PUBLICATION_CONTEXT_ITEMS_SQL = `
 	WHERE publication_id = ANY($1::uuid[])
 	  AND item_name = 'context'
 	ORDER BY publication_id
+`;
+
+const PUBLICATION_ITEM_METADATA_SQL = `
+	SELECT publication_id::text AS publication_id, item_name, item_count, checksum,
+	       octet_length(payload) AS payload_bytes
+	FROM ops.dataset_publication_items
+	WHERE publication_id = ANY($1::uuid[])
+	  AND item_name = ANY($2::text[])
+	ORDER BY publication_id, item_name
 `;
 
 const loadPriceChangePublicationItems = async (
@@ -882,6 +899,16 @@ export async function readPriceChangePredictionsCursor(
 				if (left.row.status !== right.row.status) return left.row.status === "active" ? -1 : 1;
 				return right.revision - left.revision;
 			});
+		const itemMetadata = await context.database.query<PublicationItemMetadataRow>(
+			PUBLICATION_ITEM_METADATA_SQL,
+			[candidates.map(({ row }) => row.publication_id), [...PRICE_CHANGE_ITEMS]]
+		);
+		const metadataRowsByPublication = new Map<string, PublicationItemMetadataRow[]>();
+		for (const item of itemMetadata.rows) {
+			const rows = metadataRowsByPublication.get(item.publication_id) ?? [];
+			rows.push(item);
+			metadataRowsByPublication.set(item.publication_id, rows);
+		}
 		const contextRows = await context.database.query<PublicationItemRow>(
 			PUBLICATION_CONTEXT_ITEMS_SQL,
 			[candidates.map(({ row }) => row.publication_id)]
@@ -905,6 +932,26 @@ export async function readPriceChangePredictionsCursor(
 			) {
 				continue;
 			}
+			const metadataRows = metadataRowsByPublication.get(row.publication_id) ?? [];
+			if (metadataRows.length !== PRICE_CHANGE_ITEMS.length) continue;
+			const metadataByName = new Map(metadataRows.map((item) => [item.item_name, item]));
+			if (metadataByName.size !== PRICE_CHANGE_ITEMS.length) continue;
+			let metadataValid = true;
+			for (const itemName of PRICE_CHANGE_ITEMS) {
+				const item = metadataByName.get(itemName);
+				const manifestItem = manifest.items.find((candidate) => candidate.name === itemName);
+				if (
+					!item ||
+					!manifestItem ||
+					Number(item.item_count) !== manifestItem.count ||
+					item.checksum !== manifestItem.sha256 ||
+					Number(item.payload_bytes) !== manifestItem.bytes
+				) {
+					metadataValid = false;
+					break;
+				}
+			}
+			if (!metadataValid) continue;
 			const itemRows = contextRowsByPublication.get(row.publication_id) ?? [];
 			if (itemRows.length !== 1) continue;
 			const item = itemRows[0];
