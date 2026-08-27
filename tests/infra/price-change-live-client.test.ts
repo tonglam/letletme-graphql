@@ -21,6 +21,7 @@ const seasonCode = "2026";
 
 class FakeRedis {
 	private readonly values = new Map<string, string>();
+	private readonly sets = new Map<string, Set<string>>();
 	readonly reads: string[] = [];
 
 	set(key: string, value: unknown): void {
@@ -34,6 +35,16 @@ class FakeRedis {
 
 	async mget(...keys: string[]): Promise<(string | null)[]> {
 		return keys.map((key) => this.values.get(key) ?? null);
+	}
+
+	sadd(key: string, ...members: string[]): void {
+		const set = this.sets.get(key) ?? new Set<string>();
+		for (const member of members) set.add(member);
+		this.sets.set(key, set);
+	}
+
+	async smembers(key: string): Promise<string[]> {
+		return [...(this.sets.get(key) ?? [])];
 	}
 }
 
@@ -138,8 +149,9 @@ function context(redis: FakeRedis, database?: QueryExecutor): GraphQLContext {
 }
 
 function publishHot(redis: FakeRedis, snapshot: Record<string, unknown>): void {
-	const payloadKey = `${HOT_PREFIX}:${seasonCode}:${snapshot.revision}`;
+	const payloadKey = `${HOT_PREFIX}:${seasonCode}:${snapshot.revision}:${snapshot.sourceHash}`;
 	const metadataKey = `${payloadKey}:metadata`;
+	const indexKey = `${HOT_PREFIX}:${seasonCode}:revision:${snapshot.revision}:sources`;
 	redis.set(`${HOT_PREFIX}:${seasonCode}:active`, {
 		revision: snapshot.revision,
 		payloadKey,
@@ -150,6 +162,7 @@ function publishHot(redis: FakeRedis, snapshot: Record<string, unknown>): void {
 	redis.set(payloadKey, snapshot);
 	const { board: _board, ...metadata } = snapshot;
 	redis.set(metadataKey, metadata);
+	redis.sadd(indexKey, payloadKey);
 }
 
 function hotSnapshot(ageMs = 1_000, revision = "abcdef0123456789"): Record<string, unknown> {
@@ -236,6 +249,20 @@ describe("price-change live client", () => {
 		(snapshot as { observedPlayerCount: number }).observedPlayerCount = 2;
 		publishHot(damagedRedis, snapshot);
 		assert.equal((await readPriceChangeLiveCursor(context(damagedRedis))).state, "UNAVAILABLE");
+	});
+
+	it("fails closed when hot player counts exceed GraphQL Int bounds", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		(snapshot as { expectedPlayerCount: number }).expectedPlayerCount = 2_147_483_648;
+		(snapshot as { observedPlayerCount: number }).observedPlayerCount = 2_147_483_648;
+		(snapshot.board as { expectedPlayerCount: number }).expectedPlayerCount = 2_147_483_648;
+		(snapshot.board as { observedPlayerCount: number }).observedPlayerCount = 2_147_483_648;
+		(snapshot as { payloadHash: string }).payloadHash = hotEnvelopePayloadHash(snapshot);
+		(snapshot as { metadataHash: string }).metadataHash = hotEnvelopeMetadataHash(snapshot);
+		publishHot(redis, snapshot);
+
+		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
 	});
 
 	it("rejects metadata whose source is older than the durable maximum age", async () => {
@@ -428,7 +455,7 @@ describe("price-change live client", () => {
 		const redis = new FakeRedis();
 		const snapshot = hotSnapshot();
 		publishHot(redis, snapshot);
-		redis.set(`${HOT_PREFIX}:${seasonCode}:${snapshot.revision}:metadata`, {
+		redis.set(`${HOT_PREFIX}:${seasonCode}:${snapshot.revision}:${snapshot.sourceHash}:metadata`, {
 			...snapshot,
 			detectedAt: new Date(Date.parse(String(snapshot.detectedAt)) + 1_000).toISOString(),
 			board: undefined,

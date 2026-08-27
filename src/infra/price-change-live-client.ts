@@ -21,6 +21,7 @@ const HOT_TTL_MS = 15 * 60 * 1000;
 // ignored rather than advertised by the lightweight cursor path.
 const HOT_SCHEMA_VERSION = 3;
 const HOT_REVISION_PATTERN = /^[0-9a-f]{16}$/;
+const HOT_SOURCE_HASH_PATTERN = /^[0-9a-f]{64}$/;
 
 export type PriceChangeLiveState = "PROVISIONAL" | "DURABLE" | "UNAVAILABLE";
 
@@ -93,6 +94,12 @@ const hotMetadataHash = (value: Record<string, unknown>): string => {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isGraphQLInt = (value: unknown): value is number =>
+	typeof value === "number" &&
+	Number.isInteger(value) &&
+	value >= -2_147_483_648 &&
+	value <= 2_147_483_647;
 
 const isDateTimeString = (value: unknown): value is string => {
 	if (typeof value !== "string") return false;
@@ -169,7 +176,9 @@ const parseHotSnapshotMetadata = (
 		!isDateTimeString(value.fetchedAt) ||
 		!isDateTimeString(value.expiresAt) ||
 		!Number.isSafeInteger(value.expectedPlayerCount) ||
+		!isGraphQLInt(value.expectedPlayerCount) ||
 		!Number.isSafeInteger(value.observedPlayerCount) ||
+		!isGraphQLInt(value.observedPlayerCount) ||
 		(value.expectedPlayerCount as number) <= 0 ||
 		(value.observedPlayerCount as number) <= 0 ||
 		(value.expectedPlayerCount as number) !== (value.observedPlayerCount as number) ||
@@ -289,11 +298,23 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 	};
 };
 
-const hotPayloadKey = (seasonCode: string, revision: string): string =>
-	`${HOT_KEY_PREFIX}:${seasonCode}:${revision}`;
+const sourceBoundHotPayloadKey = (
+	seasonCode: string,
+	revision: string,
+	sourceHash: string
+): string => `${HOT_KEY_PREFIX}:${seasonCode}:${revision}:${sourceHash}`;
 
-const hotMetadataKey = (seasonCode: string, revision: string): string =>
-	`${HOT_KEY_PREFIX}:${seasonCode}:${revision}:metadata`;
+const hotRevisionIndexKey = (seasonCode: string, revision: string): string =>
+	`${HOT_KEY_PREFIX}:${seasonCode}:revision:${revision}:sources`;
+
+const hotMetadataKey = (payloadKey: string): string => `${payloadKey}:metadata`;
+
+const isSourceBoundHotPayloadKey = (
+	seasonCode: string,
+	revision: string,
+	sourceHash: string,
+	payloadKey: string
+): boolean => payloadKey === sourceBoundHotPayloadKey(seasonCode, revision, sourceHash);
 
 async function readHotSnapshot(
 	context: GraphQLContext,
@@ -305,35 +326,43 @@ async function readHotSnapshot(
 			? null
 			: parsePointer(await context.redis.get(hotPointerKey(context.currentSeason.seasonCode)));
 		if (!requestedRevision && !pointer) return null;
-		if (
-			pointer &&
-			(pointer.payloadKey !== hotPayloadKey(context.currentSeason.seasonCode, pointer.revision) ||
-				!HOT_REVISION_PATTERN.test(pointer.revision))
-		) {
-			return null;
+		if (pointer && !HOT_REVISION_PATTERN.test(pointer.revision)) return null;
+		const payloadKeys = requestedRevision
+			? await context.redis.smembers(
+					hotRevisionIndexKey(context.currentSeason.seasonCode, requestedRevision)
+				)
+			: [pointer!.payloadKey];
+		let newest: HotSnapshot | null = null;
+		for (const payloadKey of payloadKeys) {
+			const raw = await context.redis.get(payloadKey);
+			if (!raw) continue;
+			const parsed: unknown = JSON.parse(raw);
+			const snapshot = parseHotSnapshot(parsed, context.currentSeason.seasonCode, now);
+			if (
+				!snapshot ||
+				!HOT_REVISION_PATTERN.test(snapshot.revision) ||
+				!HOT_SOURCE_HASH_PATTERN.test(snapshot.sourceHash) ||
+				!isSourceBoundHotPayloadKey(
+					context.currentSeason.seasonCode,
+					snapshot.revision,
+					snapshot.sourceHash,
+					payloadKey
+				) ||
+				(requestedRevision !== undefined &&
+					requestedRevision !== null &&
+					snapshot.revision !== requestedRevision) ||
+				(pointer &&
+					(snapshot.revision !== pointer.revision ||
+						snapshot.payloadHash !== pointer.payloadHash ||
+						snapshot.metadataHash !== pointer.metadataHash))
+			) {
+				continue;
+			}
+			if (!newest || Date.parse(snapshot.detectedAt) > Date.parse(newest.detectedAt)) {
+				newest = snapshot;
+			}
 		}
-		const payloadKey = requestedRevision
-			? hotPayloadKey(context.currentSeason.seasonCode, requestedRevision)
-			: pointer!.payloadKey;
-		const raw = await context.redis.get(payloadKey);
-		if (!raw) return null;
-		const parsed: unknown = JSON.parse(raw);
-		const snapshot = parseHotSnapshot(parsed, context.currentSeason.seasonCode, now);
-		if (!snapshot) return null;
-		if (
-			pointer &&
-			(snapshot.payloadHash !== pointer.payloadHash ||
-				snapshot.metadataHash !== pointer.metadataHash)
-		) {
-			return null;
-		}
-		return requestedRevision
-			? snapshot.revision === requestedRevision
-				? snapshot
-				: null
-			: snapshot.revision === pointer!.revision
-				? snapshot
-				: null;
+		return newest;
 	} catch (error) {
 		context.logger.warn({ err: error }, "Failed to load price-change hot snapshot");
 		return null;
@@ -353,23 +382,24 @@ async function readHotSnapshotMetadata(
 		const pointer = parsePointer(
 			await context.redis.get(hotPointerKey(context.currentSeason.seasonCode))
 		);
-		if (
-			!pointer ||
-			pointer.payloadKey !== hotPayloadKey(context.currentSeason.seasonCode, pointer.revision) ||
-			!HOT_REVISION_PATTERN.test(pointer.revision)
-		) {
+		if (!pointer || !HOT_REVISION_PATTERN.test(pointer.revision)) {
 			return null;
 		}
-		const raw = await context.redis.get(
-			hotMetadataKey(context.currentSeason.seasonCode, pointer.revision)
-		);
+		const raw = await context.redis.get(hotMetadataKey(pointer.payloadKey));
 		if (!raw) return null;
 		const parsed: unknown = JSON.parse(raw);
 		const metadata = parseHotSnapshotMetadata(parsed, context.currentSeason.seasonCode, now);
 		return metadata &&
 			metadata.revision === pointer.revision &&
 			metadata.payloadHash === pointer.payloadHash &&
-			metadata.metadataHash === pointer.metadataHash
+			metadata.metadataHash === pointer.metadataHash &&
+			HOT_SOURCE_HASH_PATTERN.test(metadata.sourceHash) &&
+			isSourceBoundHotPayloadKey(
+				context.currentSeason.seasonCode,
+				metadata.revision,
+				metadata.sourceHash,
+				pointer.payloadKey
+			)
 			? metadata
 			: null;
 	} catch (error) {
