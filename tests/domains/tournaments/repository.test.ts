@@ -156,7 +156,6 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 
 		expect(projected.snapshot).toMatchObject({
 			scoreSource: "FPL_EVENT_LIVE",
-			scoreRevision: "event-live-gw1-r8",
 			scoreCheckedAt: "2026-08-24T00:01:00.000Z",
 			matches: [
 				{
@@ -166,6 +165,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 				},
 			],
 		});
+		expect(projected.snapshot.scoreRevision).toMatch(/^event-live-h2h:1:[0-9a-f]{24}$/);
 		expect(projected.snapshot.standings).toEqual([
 			expect.objectContaining({ entryId: 101, matchPoints: 3, pointsFor: 37 }),
 			expect.objectContaining({ entryId: 102, matchPoints: 0, pointsFor: 31 }),
@@ -316,7 +316,6 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 
 		expect(projected.snapshot).toMatchObject({
 			scoreSource: "FPL_EVENT_LIVE",
-			scoreRevision: "event-live-gw1-knockout",
 			matches: [
 				{
 					phase: "KNOCKOUT",
@@ -326,6 +325,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 				},
 			],
 		});
+		expect(projected.snapshot.scoreRevision).toMatch(/^event-live-h2h:1:[0-9a-f]{24}$/);
 	});
 
 	it("preserves a deterministic knockout bye winner during the live overlay", () => {
@@ -603,7 +603,127 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 });
 
 describe("applyActiveOfficialH2HScoreAuthority", () => {
-	it("isolates event-live score acquisition per tournament", async () => {
+	const liveBatchResult = (
+		entryIds: readonly number[],
+		liveRevision = "8",
+		checkedAt = "2026-08-24T00:08:00.000Z"
+	) => ({
+		results: new Map(
+			entryIds.map((entryId, index) => [
+				entryId,
+				{
+					score: {
+						revision: `event-live:${liveRevision}:${entryId}:lineup`,
+						checkedAt,
+						source: "FPL_EVENT_LIVE",
+						state: "FRESH",
+						netEventPoints: 37 - (index % 10),
+						provenance: {
+							scoreSource: "FPL_EVENT_LIVE",
+							calculationMode: "PROJECTED_AUTOSUBS",
+							algorithmVersion: "fpl-projected-autosubs-v1",
+							inputRevision: `input-${entryId}`,
+							scoreRevision: `event-live:${liveRevision}:${entryId}:lineup`,
+							rankRevision: null,
+							livePublicationId: "00000000-0000-4000-8000-000000000008",
+							liveRevision,
+							liveCheckedAt: checkedAt,
+							picksRevision: `picks-${entryId}`,
+							picksCheckedAt: checkedAt,
+							previousTotalsRevision: `totals-${entryId}`,
+							previousTotalsThroughEventId: null,
+							resultRevision: null,
+							resultCheckedAt: null,
+							dataCheckedAt: null,
+							rankSource: null,
+							rankCheckedAt: null,
+						},
+					},
+					snapshot: { revision: liveRevision, checkedAt, state: "live" },
+				} as never,
+			])
+		),
+		errors: [],
+		meta: {
+			eventId: 1,
+			totalEntries: entryIds.length,
+			succeededCount: entryIds.length,
+			failedCount: 0,
+		},
+	});
+
+	it("chunks unique entry IDs by 500 with a concurrency ceiling of two", async () => {
+		const original = entryLiveBatchService.calcLivePointsForEntries;
+		const entryIds = Array.from({ length: 1001 }, (_, index) => 10_000 + index);
+		const calls: number[][] = [];
+		let active = 0;
+		let maxActive = 0;
+		entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, ids) => {
+			calls.push([...ids]);
+			active += 1;
+			maxActive = Math.max(maxActive, active);
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			active -= 1;
+			return liveBatchResult(ids);
+		};
+
+		try {
+			const batch = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
+				{ logger: { warn: () => undefined } } as never,
+				1,
+				[...entryIds, entryIds[0]!, entryIds[500]!]
+			);
+
+			expect(calls).toHaveLength(Math.ceil(entryIds.length / 500));
+			expect(calls.map((ids) => ids.length)).toEqual([500, 500, 1]);
+			expect(calls.flat()).toEqual(entryIds);
+			expect(maxActive).toBe(2);
+			expect(batch?.scores.size).toBe(entryIds.length);
+			expect(batch?.revision).toMatch(/^event-live-h2h:1:[0-9a-f]{24}$/);
+		} finally {
+			entryLiveBatchService.calcLivePointsForEntries = original;
+		}
+	});
+
+	it("fails the entire score batch when chunk revisions disagree or a chunk fails", async () => {
+		const original = entryLiveBatchService.calcLivePointsForEntries;
+		const entryIds = Array.from({ length: 501 }, (_, index) => 20_000 + index);
+		let callIndex = 0;
+		entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, ids) => {
+			const current = callIndex;
+			callIndex += 1;
+			return liveBatchResult(ids, current === 0 ? "8" : "9");
+		};
+
+		try {
+			const mixed = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
+				{ logger: { warn: () => undefined } } as never,
+				1,
+				entryIds
+			);
+			expect(mixed).toBeNull();
+			expect(callIndex).toBe(2);
+
+			callIndex = 0;
+			entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, ids) => {
+				const current = callIndex;
+				callIndex += 1;
+				if (current === 1) throw new Error("chunk unavailable");
+				return liveBatchResult(ids);
+			};
+			const failed = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
+				{ logger: { warn: () => undefined } } as never,
+				1,
+				entryIds
+			);
+			expect(failed).toBeNull();
+			expect(callIndex).toBe(2);
+		} finally {
+			entryLiveBatchService.calcLivePointsForEntries = original;
+		}
+	});
+
+	it("uses one coherent event-live batch across tournaments", async () => {
 		const first = activeOfficialH2HLoad();
 		const second = activeOfficialH2HLoad();
 		second.snapshot.tournament = { ...second.snapshot.tournament, id: 10 };
@@ -690,11 +810,11 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 				new Set()
 			);
 
-			expect(calls.map((entryIds) => entryIds.join(",")).sort()).toEqual(["101,102", "201,202"]);
-			expect(projected.get(9)?.snapshot.scoreSource).toBe("FPL_EVENT_LIVE");
+			expect(calls.map((entryIds) => entryIds.join(","))).toEqual(["101,102,201,202"]);
+			expect(projected.get(9)?.snapshot.scoreSource).toBe("UNAVAILABLE");
 			expect(projected.get(10)?.snapshot.scoreSource).toBe("UNAVAILABLE");
 			const firstRevision = projected.get(9)?.snapshot.scoreRevision;
-			expect(firstRevision).toMatch(/^event-live-h2h:1:[0-9a-f]{24}$/);
+			expect(firstRevision).toBeNull();
 
 			lineupRevision = "lineup-b";
 			const refreshed = await tournamentCacheTestables.applyActiveOfficialH2HScoreAuthority(
@@ -703,10 +823,53 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 				1,
 				new Set()
 			);
+			expect(refreshed.get(9)?.snapshot.scoreRevision).toMatch(/^event-live-h2h:1:[0-9a-f]{24}$/);
 			expect(refreshed.get(9)?.snapshot.scoreRevision).not.toBe(firstRevision);
 		} finally {
 			entryLiveBatchService.calcLivePointsForEntries = original;
 		}
+	});
+
+	it("keeps a tournament revision stable when unrelated tournament scores change", () => {
+		const loaded = activeOfficialH2HLoad();
+		const batch = {
+			scores: new Map([
+				[101, 37],
+				[102, 31],
+				[999, 80],
+			]),
+			revision: "shared-batch-a",
+			checkedAt: "2026-08-24T00:08:00.000Z",
+			state: "live" as const,
+			livePublicationId: "00000000-0000-4000-8000-000000000008",
+			snapshotRevision: "8",
+		};
+		const unrelatedChange = {
+			...batch,
+			revision: "shared-batch-b",
+			scores: new Map([
+				[101, 37],
+				[102, 31],
+				[999, 1],
+				[1000, 99],
+			]),
+		};
+		const relevantChange = {
+			...unrelatedChange,
+			scores: new Map([
+				[101, 38],
+				[102, 31],
+				[999, 1],
+			]),
+		};
+
+		const first = projectOfficialH2HEventLiveSnapshot(loaded, 1, batch, new Set());
+		const second = projectOfficialH2HEventLiveSnapshot(loaded, 1, unrelatedChange, new Set());
+		const changed = projectOfficialH2HEventLiveSnapshot(loaded, 1, relevantChange, new Set());
+
+		expect(first.snapshot.scoreRevision).toMatch(/^event-live-h2h:1:[0-9a-f]{24}$/);
+		expect(second.snapshot.scoreRevision).toBe(first.snapshot.scoreRevision);
+		expect(changed.snapshot.scoreRevision).not.toBe(first.snapshot.scoreRevision);
 	});
 });
 

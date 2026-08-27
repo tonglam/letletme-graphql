@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { normalizeFplChip } from "../../contracts/fpl-chip";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import type { GraphQLContext } from "../../graphql/context";
 import { GraphQLError } from "graphql";
 import { getCoreEventSnapshot, getLiveDataSnapshot } from "../../infra/data-snapshot";
@@ -29,9 +31,6 @@ import {
 	loadTournamentEventEligibility,
 	selectTournamentDeskEntryWindow,
 } from "../live-desks/tournament-entry-window";
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 export enum TournamentMode {
 	NORMAL = "normal",
@@ -1523,6 +1522,9 @@ export type EventLiveH2HScoreBatch = {
 	revision: string;
 	checkedAt: string;
 	state: "scheduled" | "live" | "settled";
+	/** Shared source identity used when several bounded chunks form one round. */
+	livePublicationId?: string | null;
+	snapshotRevision?: string | null;
 };
 
 const latestOfficialH2HCheckedAt = (matches: readonly OfficialH2HMatch[]): string | null =>
@@ -1589,6 +1591,31 @@ function activeOfficialH2HScoreEntryIds(
 				.filter((entryId): entryId is number => entryId !== null)
 		),
 	];
+}
+
+function tournamentEventLiveScoreRevision(
+	loaded: OfficialH2HSnapshotLoad,
+	eventId: number,
+	batch: EventLiveH2HScoreBatch
+): string {
+	const entryScores = activeOfficialH2HScoreEntryIds(loaded, eventId)
+		.sort((left, right) => left - right)
+		.map((entryId) => ({ entryId, score: batch.scores.get(entryId) ?? null }));
+	const revisionHash = createHash("sha256")
+		.update(
+			stableStringify({
+				eventId,
+				livePublicationId: batch.livePublicationId ?? null,
+				snapshotRevision: batch.snapshotRevision ?? null,
+				checkedAt: batch.checkedAt,
+				state: batch.state,
+				entryScores,
+			}),
+			"utf8"
+		)
+		.digest("hex")
+		.slice(0, 24);
+	return `event-live-h2h:${eventId}:${revisionHash}`;
 }
 
 function suppressActiveOfficialH2HScores(
@@ -1775,7 +1802,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 		snapshot: {
 			...loaded.snapshot,
 			scoreSource: "FPL_EVENT_LIVE",
-			scoreRevision: batch.revision,
+			scoreRevision: tournamentEventLiveScoreRevision(loaded, eventId, batch),
 			scoreCheckedAt: batch.checkedAt,
 			standings,
 			matches,
@@ -1816,7 +1843,8 @@ async function loadEventLiveH2HScoreBatch(
 			liveProvenance.livePublicationId === null ||
 			liveProvenance.liveRevision === null ||
 			liveProvenance.liveCheckedAt === null ||
-			row.snapshot.revision !== liveProvenance.liveRevision
+			row.snapshot.revision !== liveProvenance.liveRevision ||
+			row.snapshot.checkedAt !== liveProvenance.liveCheckedAt
 		) {
 			return null;
 		}
@@ -1849,6 +1877,94 @@ async function loadEventLiveH2HScoreBatch(
 		revision: `event-live-h2h:${eventId}:${revisionHash}`,
 		checkedAt,
 		state,
+		livePublicationId,
+		snapshotRevision,
+	};
+}
+
+const chunkEntryIds = (entryIds: readonly number[], size: number): number[][] => {
+	const chunks: number[][] = [];
+	for (let index = 0; index < entryIds.length; index += size) {
+		chunks.push([...entryIds.slice(index, index + size)]);
+	}
+	return chunks;
+};
+
+/** Load one coherent event-live source across all active tournaments. */
+async function loadEventLiveH2HScoreBatches(
+	context: GraphQLContext,
+	eventId: number,
+	entryIds: readonly number[]
+): Promise<EventLiveH2HScoreBatch | null> {
+	const uniqueEntryIds = [...new Set(entryIds)].sort((left, right) => left - right);
+	if (uniqueEntryIds.length === 0) return null;
+	const chunks = chunkEntryIds(uniqueEntryIds, 500);
+	const batches: Array<EventLiveH2HScoreBatch | null> = new Array<EventLiveH2HScoreBatch | null>(
+		chunks.length
+	).fill(null);
+	let nextChunk = 0;
+	const worker = async (): Promise<void> => {
+		while (nextChunk < chunks.length) {
+			const chunkIndex = nextChunk;
+			nextChunk += 1;
+			const chunk = chunks[chunkIndex]!;
+			batches[chunkIndex] = await loadEventLiveH2HScoreBatch(context, eventId, chunk).catch(
+				(error) => {
+					context.logger.warn(
+						{ eventId, chunkIndex, chunkSize: chunk.length, err: error },
+						"Event-live H2H score chunk unavailable"
+					);
+					return null;
+				}
+			);
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(2, chunks.length) }, () => worker()));
+	if (batches.some((batch) => batch === null)) return null;
+	const completeBatches = batches as EventLiveH2HScoreBatch[];
+	const first = completeBatches[0];
+	if (!first) return null;
+	for (const batch of completeBatches.slice(1)) {
+		if (
+			batch.checkedAt !== first.checkedAt ||
+			batch.state !== first.state ||
+			batch.livePublicationId !== first.livePublicationId ||
+			batch.snapshotRevision !== first.snapshotRevision
+		) {
+			context.logger.warn(
+				{
+					eventId,
+					expectedRevision: first.snapshotRevision,
+					observedRevision: batch.snapshotRevision,
+				},
+				"Event-live H2H score chunks observed mixed publication metadata"
+			);
+			return null;
+		}
+	}
+	const scores = new Map<number, number>();
+	for (const batch of completeBatches) {
+		for (const [entryId, score] of batch.scores) scores.set(entryId, score);
+	}
+	const revisionHash = createHash("sha256")
+		.update(
+			stableStringify({
+				eventId,
+				livePublicationId: first.livePublicationId,
+				snapshotRevision: first.snapshotRevision,
+				checkedAt: first.checkedAt,
+				chunks: completeBatches.map((batch) => batch.revision),
+			})
+		)
+		.digest("hex")
+		.slice(0, 24);
+	return {
+		scores,
+		revision: `event-live-h2h:${eventId}:${revisionHash}`,
+		checkedAt: first.checkedAt,
+		state: first.state,
+		livePublicationId: first.livePublicationId,
+		snapshotRevision: first.snapshotRevision,
 	};
 }
 
@@ -1867,30 +1983,31 @@ async function applyActiveOfficialH2HScoreAuthority(
 		);
 	}
 
-	const projected = await Promise.all(
-		[...loaded].map(async ([tournamentId, snapshot]) => {
-			const baseline = suppressActiveOfficialH2HScores(snapshot, eventId, finalizedEventIds);
-			const entryIds = activeOfficialH2HScoreEntryIds(snapshot, eventId);
-			const batch = await loadEventLiveH2HScoreBatch(context, eventId, entryIds).catch((error) => {
-				context.logger.warn(
-					{
-						tournamentId,
-						eventId,
-						err: error instanceof Error ? error.message : "unknown",
-					},
-					"Event-live H2H score projection unavailable"
-				);
-				return null;
-			});
-			return [
-				tournamentId,
-				batch
-					? projectOfficialH2HEventLiveSnapshot(snapshot, eventId, batch, finalizedEventIds)
-					: baseline,
-			] as const;
-		})
+	const baselines = new Map(
+		[...loaded].map(
+			([tournamentId, snapshot]) =>
+				[
+					tournamentId,
+					suppressActiveOfficialH2HScores(snapshot, eventId, finalizedEventIds),
+				] as const
+		)
 	);
-	return new Map(projected);
+	const entryIds = [
+		...new Set(
+			[...loaded].flatMap(([, snapshot]) => activeOfficialH2HScoreEntryIds(snapshot, eventId))
+		),
+	].sort((left, right) => left - right);
+	const batch = await loadEventLiveH2HScoreBatches(context, eventId, entryIds);
+	if (!batch) return baselines;
+	return new Map(
+		[...loaded].map(
+			([tournamentId, snapshot]) =>
+				[
+					tournamentId,
+					projectOfficialH2HEventLiveSnapshot(snapshot, eventId, batch, finalizedEventIds),
+				] as const
+		)
+	);
 }
 
 type DbTournamentEventSnapshotRow = {
@@ -1951,45 +2068,8 @@ const isNullableFiniteNumber = (value: unknown): value is number | null =>
 const isNullableString = (value: unknown): value is string | null =>
 	value === null || typeof value === "string";
 
-const normalizeTournamentChip = (value: unknown): string | null => {
-	if (typeof value !== "string") return null;
-	const normalized = value.toUpperCase().trim();
-	const compact = normalized.replace(/[^A-Z0-9]/g, "");
-	if (
-		normalized === "NONE" ||
-		normalized === "NO_CHIP" ||
-		compact === "NONE" ||
-		compact === "NOCHIP"
-	) {
-		return "NONE";
-	}
-	if (
-		normalized === "BENCH_BOOST" ||
-		compact === "BENCHBOOST" ||
-		compact === "BBOOST" ||
-		compact === "BB"
-	) {
-		return "BENCH_BOOST";
-	}
-	if (
-		normalized === "TRIPLE_CAPTAIN" ||
-		compact === "TRIPLECAPTAIN" ||
-		compact === "3XC" ||
-		compact === "TC"
-	) {
-		return "TRIPLE_CAPTAIN";
-	}
-	if (normalized === "FREE_HIT" || compact === "FREEHIT" || compact === "FH") {
-		return "FREE_HIT";
-	}
-	if (normalized === "WILDCARD" || compact === "WILDCARD" || compact === "WC") {
-		return "WILDCARD";
-	}
-	if (normalized === "MANAGER" || compact === "MANAGER" || compact === "AM") {
-		return "MANAGER";
-	}
-	return null;
-};
+const normalizeTournamentChip = (value: unknown): string | null =>
+	normalizeFplChip(value, null, { emptyAsNone: false });
 
 const isNullableChip = (value: unknown): value is string | null =>
 	value === null || normalizeTournamentChip(value) === value;
@@ -3256,6 +3336,7 @@ export const tournamentCacheTestables = {
 	officialH2HCurrentEventIsComplete,
 	selectCurrentOfficialH2HProjection,
 	suppressActiveOfficialH2HScores,
+	loadEventLiveH2HScoreBatches,
 	applyActiveOfficialH2HScoreAuthority,
 	tournamentCacheKey,
 };
