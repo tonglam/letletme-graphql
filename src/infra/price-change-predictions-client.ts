@@ -833,7 +833,7 @@ export async function readPriceChangePredictionsCursor(
 			!Number.isFinite(fetchedAt) ||
 			!Number.isFinite(hardExpiresAt) ||
 			ageMs < 0 ||
-			ageMs > PRICE_CHANGE_MAX_AGE_MS
+			ageMs >= PRICE_CHANGE_MAX_AGE_MS
 		) {
 			return null;
 		}

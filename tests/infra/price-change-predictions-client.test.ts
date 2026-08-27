@@ -12,6 +12,7 @@ import {
 	PRICE_CHANGE_MAX_AGE_MS,
 	PRICE_CHANGE_READY_MS,
 	readPriceChangePredictions,
+	readPriceChangePredictionsCursor,
 } from "../../src/infra/price-change-predictions-client";
 
 class FakeRedis {
@@ -407,6 +408,20 @@ describe("price-change publication reader", () => {
 			);
 			assert.equal(board.status, expected);
 		}
+	});
+
+	it("does not expose a durable cursor at the inclusive hard-expiry boundary", async () => {
+		const publication = await createPublication(PRICE_CHANGE_MAX_AGE_MS);
+		const exactExpiry = new Date(
+			Date.parse(String(publication.context.fetchedAt)) + PRICE_CHANGE_MAX_AGE_MS
+		);
+
+		const cursor = await readPriceChangePredictionsCursor(
+			makeContext(publication.redis, makeDatabase(publication)),
+			exactExpiry
+		);
+
+		assert.equal(cursor, null);
 	});
 
 	it("fails closed when fetchedAt is in the future", async () => {
