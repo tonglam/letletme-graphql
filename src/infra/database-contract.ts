@@ -4,7 +4,7 @@ import { loadCurrentSeason, type CurrentSeason } from "./season";
 import { ReadModelClient } from "./read-model-client";
 import { isDataPublicationId, parseDataPublicationManifest } from "./data-publication";
 
-const DATA_SCHEMAS = [
+export const GRAPHQL_DATA_SCHEMAS = [
 	"fpl",
 	"competition",
 	"reporting",
@@ -13,6 +13,7 @@ const DATA_SCHEMAS = [
 	"bridge",
 	"content",
 ] as const;
+const DATA_SCHEMAS = GRAPHQL_DATA_SCHEMAS;
 const GRAPHQL_RUNTIME_CAPABILITY_ROLE = "letletme_graphql_reader";
 const GRAPHQL_AUTH_READ_COLUMNS = [
 	{
@@ -41,6 +42,26 @@ const GRAPHQL_AUTH_COLUMN_KEYS = new Set(
 		columnNames.map((columnName) => `${relationName}.${columnName}`)
 	)
 );
+
+/** Relations consumed by GraphQL. Keep this list executable and reusable by
+ * the Data-main compatibility probe so the consumer check cannot drift from
+ * the startup contract. */
+export const GRAPHQL_CONTRACT_RELATIONS = [
+	...new Set([
+		...ReadModelClient.sourceRelations(),
+		"fpl.phases",
+		"competition.public_league_trends",
+		"ops.dataset_publications",
+		"ops.dataset_publication_items",
+		"ops.live_lifecycle_status",
+		"content.briefing_active_publication",
+		"content.publication_payloads",
+		"competition.my_fpl_snapshot_publications",
+		"competition.my_fpl_snapshot_entries",
+		"competition.my_fpl_snapshot_tournament_rows",
+		"competition.my_fpl_snapshot_tournament_aggregates",
+	]),
+].sort();
 
 type RoleRow = QueryResultRow & {
 	session_user: string;
@@ -252,26 +273,7 @@ export const validateDatabaseContract = async (
 		);
 	}
 
-	const requiredRelations = [
-		...new Set([
-			...ReadModelClient.sourceRelations(),
-			// Used only when Redis has no coherent core publication.
-			"fpl.phases",
-			"competition.public_league_trends",
-			"ops.dataset_publications",
-			"ops.dataset_publication_items",
-			"ops.live_lifecycle_status",
-			"content.briefing_active_publication",
-			"content.publication_payloads",
-			// My FPL immutable daily snapshot projections are read directly by
-			// the review roots, so keep them in the same preflight boundary as
-			// the generated read models.
-			"competition.my_fpl_snapshot_publications",
-			"competition.my_fpl_snapshot_entries",
-			"competition.my_fpl_snapshot_tournament_rows",
-			"competition.my_fpl_snapshot_tournament_aggregates",
-		]),
-	].sort();
+	const requiredRelations = GRAPHQL_CONTRACT_RELATIONS;
 	const relationPrivileges = (
 		await database.query<RelationPrivilegeRow>(
 			`SELECT

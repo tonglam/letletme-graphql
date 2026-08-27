@@ -1456,9 +1456,10 @@ export class ReadModelClient {
 	async probe(): Promise<void> {
 		for (const [model, definition] of Object.entries(READ_MODEL_DEFINITIONS)) {
 			try {
-				await this.executor.query(`SELECT * FROM (${definition.sql}) AS read_model LIMIT 0`, [
-					this.currentSeason.seasonId,
-				]);
+				await this.executor.query(
+					`EXPLAIN (FORMAT JSON, COSTS OFF) SELECT * FROM (${definition.sql}) AS read_model LIMIT 0`,
+					[this.currentSeason.seasonId]
+				);
 			} catch (error) {
 				throw new Error(`Data Platform read model is unavailable: ${model}`, { cause: error });
 			}

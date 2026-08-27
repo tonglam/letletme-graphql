@@ -144,6 +144,9 @@ describe("Data Platform read client", () => {
 
 		expect(queries).toHaveLength(Object.keys(READ_MODELS).length);
 		expect(queries.every((query) => query.values[0] === 2026)).toBe(true);
+		expect(queries.every((query) => query.text.includes("EXPLAIN (FORMAT JSON, COSTS OFF)"))).toBe(
+			true
+		);
 		expect(queries.every((query) => query.text.includes("LIMIT 0"))).toBe(true);
 
 		const relations = ReadModelClient.sourceRelations();

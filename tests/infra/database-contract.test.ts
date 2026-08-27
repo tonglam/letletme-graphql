@@ -222,7 +222,7 @@ const makeContractExecutor = (
 };
 
 describe("GraphQL startup database contract", () => {
-	it("accepts the exact canonical publication through SELECT-only startup queries", async () => {
+	it("accepts the exact canonical publication through read-only startup queries", async () => {
 		const { executor, queries } = makeContractExecutor();
 		await expect(validateDatabaseContract(executor)).resolves.toEqual({
 			roleName: "graphql_runtime",
@@ -232,7 +232,8 @@ describe("GraphQL startup database contract", () => {
 		});
 
 		expect(queries.length).toBeGreaterThan(20);
-		expect(queries.every((query) => query.trimStart().startsWith("SELECT"))).toBe(true);
+		expect(queries.every((query) => /^(SELECT|EXPLAIN)\b/.test(query.trimStart()))).toBe(true);
+		expect(queries.some((query) => query.trimStart().startsWith("EXPLAIN"))).toBe(true);
 	});
 
 	it("fails closed when a required relation is missing", async () => {

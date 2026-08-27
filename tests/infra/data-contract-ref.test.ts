@@ -3,6 +3,11 @@ import { describe, expect, test } from "bun:test";
 const ref = (await Bun.file(".github/data-platform-contract-ref").text()).trim();
 const workflow = await Bun.file(".github/workflows/ci.yml").text();
 const securityWorkflow = await Bun.file(".github/workflows/security.yml").text();
+const compatibilityWorkflow = await Bun.file(
+	".github/workflows/data-main-compatibility.yml"
+).text();
+const compatibilityProbe = await Bun.file("scripts/check-data-main-compatibility.ts").text();
+const contractFixture = await Bun.file("tests/fixtures/database-contract.sql").text();
 
 describe("Data Platform contract pin", () => {
 	test("uses a fixed full SHA for required CI", () => {
@@ -16,5 +21,37 @@ describe("Data Platform contract pin", () => {
 		expect(securityWorkflow).toContain("fixed Data SHA:");
 		expect(securityWorkflow).toContain("Data main SHA:");
 		expect(securityWorkflow).toContain("contract-drift:");
+	});
+
+	test("runs a scheduled Data main migration and the complete GraphQL consumer contract", () => {
+		expect(compatibilityWorkflow).toContain("repository: tonglam/letletme_data");
+		expect(compatibilityWorkflow).toContain("ref: main");
+		expect(compatibilityWorkflow).toContain("bun run db:migrate");
+		expect(compatibilityWorkflow).toContain("tests/fixtures/database-contract.sql");
+		expect(compatibilityWorkflow).toContain("check-data-main-compatibility.ts");
+		expect(compatibilityWorkflow).toContain('RUN_DATABASE_CONTRACT_INTEGRATION: "1"');
+		expect(compatibilityWorkflow).toContain("RATE_LIMIT_REDIS_URL: redis://127.0.0.1:6380");
+		const baselineAt = compatibilityWorkflow.indexOf("Apply Data main baseline");
+		const identitiesAt = compatibilityWorkflow.indexOf("Provide plain-PG Supabase identities");
+		const repeatAt = compatibilityWorkflow.indexOf("Verify Data main migration is repeatable");
+		expect(baselineAt).toBeGreaterThan(-1);
+		expect(identitiesAt).toBeGreaterThan(baselineAt);
+		expect(repeatAt).toBeGreaterThan(identitiesAt);
+		expect(compatibilityWorkflow).toContain("bunx tsc --noEmit");
+		expect(compatibilityWorkflow).not.toContain("bun run docs:check");
+		expect(compatibilityProbe).toContain("validateDatabaseContract(database)");
+		expect(compatibilityProbe).not.toContain("to_regclass");
+		expect(contractFixture).toContain("GRANT letletme_graphql_reader TO graphql_ci");
+		expect(contractFixture).not.toContain("REFRESH MATERIALIZED VIEW");
+		expect(contractFixture).not.toContain("GRANT USAGE ON SCHEMA content");
+		expect(contractFixture).not.toContain("GRANT SELECT ON content.");
+		expect(contractFixture).not.toContain(
+			"CREATE OR REPLACE VIEW content.briefing_active_publication"
+		);
+	});
+
+	test("uses the same consumer fixture for the pinned Data contract", () => {
+		expect(workflow).toContain("tests/fixtures/database-contract.sql");
+		expect(workflow).toContain("bun run contract:check");
 	});
 });
