@@ -508,7 +508,7 @@ export const gameweekService = {
 					context.logger.warn(
 						{
 							eventId,
-							reason: error instanceof Error ? error.message : "UNKNOWN",
+							err: error,
 						},
 						"Gameweek boards are unavailable"
 					);

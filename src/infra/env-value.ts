@@ -23,3 +23,15 @@ export const parseBoundedPositiveIntegerEnv = (
 	}
 	return value;
 };
+
+export const parseBooleanEnv = (
+	raw: string | undefined,
+	key: string,
+	fallback: boolean
+): boolean => {
+	if (raw === undefined || raw.trim() === "") return fallback;
+	const normalized = raw.trim().toLowerCase();
+	if (normalized === "true") return true;
+	if (normalized === "false") return false;
+	throw new Error(`${key} must be true or false`);
+};

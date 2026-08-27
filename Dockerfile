@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1
 
 FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS base
-RUN apk upgrade --no-cache libcrypto3 libssl3
 WORKDIR /app
 
 FROM base AS deps
@@ -13,6 +12,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 ARG VCS_REVISION=unknown
+ENV APP_REVISION=${VCS_REVISION}
 LABEL org.opencontainers.image.source="https://github.com/tonglam/letletme-graphql" \
 	org.opencontainers.image.revision="${VCS_REVISION}"
 

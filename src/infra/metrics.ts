@@ -63,6 +63,30 @@ const cacheRepositoryEvents = new Counter({
 	labelNames: ["domain", "event"] as const,
 });
 
+const entryLookupOutcomes = new Counter({
+	name: "entry_lookup_outcomes_total",
+	help: "Entry lookup outcomes by status, source, and persistence state",
+	labelNames: ["status", "source", "persistence"] as const,
+});
+
+const entrySyncRequestsTotal = new Counter({
+	name: "entry_sync_requests_total",
+	help: "GraphQL to Data entry persistence enqueue outcomes",
+	labelNames: ["kind", "outcome"] as const,
+});
+
+const playerDetailDataAvailability = new Counter({
+	name: "player_detail_data_availability_total",
+	help: "Player detail section authority states observed while serving requests",
+	labelNames: ["section", "state"] as const,
+});
+
+const seasonAuthorityRefreshes = new Counter({
+	name: "season_authority_refreshes_total",
+	help: "Current-season authority refresh outcomes",
+	labelNames: ["outcome", "reason"] as const,
+});
+
 const briefingPublicationReaderEvents = new Counter({
 	name: "briefing_publication_reader_events_total",
 	help: "Briefing publication reader fallback, corruption, repair, and Redis availability events",
@@ -149,6 +173,10 @@ registry.registerMetric(graphqlRateLimitV3Decisions);
 registry.registerMetric(graphqlRequestOutcomes);
 registry.registerMetric(livePublicationEventsTotal);
 registry.registerMetric(cacheRepositoryEvents);
+registry.registerMetric(entryLookupOutcomes);
+registry.registerMetric(entrySyncRequestsTotal);
+registry.registerMetric(playerDetailDataAvailability);
+registry.registerMetric(seasonAuthorityRefreshes);
 registry.registerMetric(briefingPublicationReaderEvents);
 registry.registerMetric(playerStateProfiles);
 registry.registerMetric(playerStateProviderStale);
@@ -175,6 +203,10 @@ export const metrics = {
 	graphqlRequestOutcomes,
 	livePublicationEventsTotal,
 	cacheRepositoryEvents,
+	entryLookupOutcomes,
+	entrySyncRequestsTotal,
+	playerDetailDataAvailability,
+	seasonAuthorityRefreshes,
 	briefingPublicationReaderEvents,
 	playerStateProfiles,
 	playerStateProviderStale,

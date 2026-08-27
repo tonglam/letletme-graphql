@@ -103,3 +103,6 @@ out/
 # Deploy secrets
 .env.deploy
 .env.deploy.local
+
+# Local agent/editor settings may contain credentials or permissions.
+.claude/settings.local.json

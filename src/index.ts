@@ -70,6 +70,7 @@ import {
 	type TokenBucketStageResultV3,
 } from "./http/token-bucket-v3";
 import { validateGraphQLTransportPayload } from "./http/graphql-request";
+import { sanitizeGraphQLMultipartChunk, sanitizeGraphQLResponseBody } from "./http/graphql-error";
 import { runHealthChecks } from "./http/health";
 import { createShutdownHandler } from "./http/shutdown";
 import { LIGHTWEIGHT_CORE_FIELDS } from "./graphql/root-field-policy";
@@ -105,9 +106,12 @@ const graphQLRateLimitConfig: GraphQLRateLimitConfig = {
 	windowSeconds: productionGraphQLRateLimitPolicy.legacyV2.windowSeconds,
 	globalAdmission: productionGraphQLRateLimitPolicy.legacyV2.globalRequest,
 	sharedPublic: productionGraphQLRateLimitPolicy.legacyV2.sharedPublicWeighted,
-	browserIngress: env.GRAPHQL_BROWSER_INGRESS_RATE_LIMIT,
-	authenticated: env.GRAPHQL_AUTHENTICATED_RATE_LIMIT,
-	anonymous: env.GRAPHQL_ANONYMOUS_RATE_LIMIT,
+	// The v2 comparison buckets are fixed to the reviewed policy. They are
+	// retained only as an internal shadow baseline; no environment override is
+	// accepted after the hard configuration cut.
+	browserIngress: productionGraphQLRateLimitPolicy.legacyV2.browserIngress,
+	authenticated: productionGraphQLRateLimitPolicy.legacyV2.authenticatedWeighted,
+	anonymous: productionGraphQLRateLimitPolicy.legacyV2.anonymousWeighted,
 };
 
 const graphQLVersionedPreAuthRateLimitChecks = (
@@ -191,14 +195,27 @@ const jsonError = (
 	corsHeaders: Record<string, string>,
 	extraHeaders: Record<string, string> = {}
 ): Response =>
-	new Response(JSON.stringify({ errors: [{ message, extensions: { code } }] }), {
-		status,
-		headers: {
-			"Content-Type": "application/json",
-			...extraHeaders,
-			...corsHeaders,
-		},
-	});
+	new Response(
+		JSON.stringify({
+			errors: [
+				{
+					message,
+					extensions: {
+						code,
+						requestId: corsHeaders["X-Request-Id"] ?? "unavailable",
+					},
+				},
+			],
+		}),
+		{
+			status,
+			headers: {
+				"Content-Type": "application/json",
+				...extraHeaders,
+				...corsHeaders,
+			},
+		}
+	);
 
 type GraphQLRateLimitStageExecution = {
 	readonly response: Response | null;
@@ -343,10 +360,6 @@ const runGraphQLRateLimitStage = async ({
 	shadowSkipLegacy?: boolean;
 	rateLimitWorkload?: string;
 }): Promise<GraphQLRateLimitStageExecution> => {
-	if (env.GRAPHQL_RATE_LIMIT_MODE === "legacy") {
-		const legacy = await checkLegacyGraphQLRateLimits({ checks: legacyChecks, corsHeaders });
-		return { response: legacy.response, legacyDecision: legacy.decision };
-	}
 	if (isGraphQLRateLimitShadowMode) {
 		const v3Promise: Promise<{
 			response: Response | null;
@@ -465,7 +478,7 @@ const terminalV3Outcome = (decision: TokenBucketStageResultV3): RateLimitAggrega
 			? "allowed"
 			: "denied";
 
-const healthCheck = async (): Promise<{ ok: boolean; body: string }> => {
+const healthCheck = async (forceSeasonRefresh = true): Promise<{ ok: boolean; body: string }> => {
 	const result = await runHealthChecks({
 		redis: async () => {
 			if ((await getRedis().ping()) !== "PONG")
@@ -480,13 +493,21 @@ const healthCheck = async (): Promise<{ ok: boolean; body: string }> => {
 			await databaseHealthCheck();
 		},
 		season: async () => {
-			currentSeasonProvider.get();
+			if (forceSeasonRefresh) {
+				await currentSeasonProvider.refresh(database, 0);
+			} else {
+				currentSeasonProvider.get();
+			}
 		},
 	});
 	if (!result.ok) logger.warn({ checks: result.checks }, "Health readiness degraded");
 	return {
 		ok: result.ok,
-		body: JSON.stringify({ status: result.ok ? "ok" : "degraded", checks: result.checks }),
+		body: JSON.stringify({
+			status: result.ok ? "ok" : "degraded",
+			revision: env.APP_REVISION,
+			checks: result.checks,
+		}),
 	};
 };
 
@@ -567,8 +588,18 @@ const startServer = async (): Promise<void> => {
 				});
 			}
 
-			if (url.pathname === "/health") {
-				const health = await healthCheck();
+			if (url.pathname === "/health/live") {
+				return new Response(JSON.stringify({ status: "ok", revision: env.APP_REVISION }), {
+					status: 200,
+					headers: {
+						"Content-Type": "application/json",
+						...corsHeaders,
+					},
+				});
+			}
+
+			if (url.pathname === "/health" || url.pathname === "/health/ready") {
+				const health = await healthCheck(true);
 				return new Response(health.body, {
 					status: health.ok ? 200 : 503,
 					headers: {
@@ -594,6 +625,7 @@ const startServer = async (): Promise<void> => {
 			if (url.pathname === "/graphql") {
 				const requestTiming = new RequestTiming();
 				const requestId = resolveRequestId(request.headers.get("X-Request-Id"));
+				corsHeaders["X-Request-Id"] = requestId;
 				let operationName = "anonymous";
 				let ingressClass = "unclassified";
 				let trafficClass = "legacy";
@@ -876,9 +908,7 @@ const startServer = async (): Promise<void> => {
 						principal,
 						cost: limits.rateLimitCostUnits,
 					});
-					if (env.GRAPHQL_RATE_LIMIT_MODE !== "legacy") {
-						rateLimitAudience = v3PrincipalAdmission.audience;
-					}
+					rateLimitAudience = v3PrincipalAdmission.audience;
 					const legacyPrincipalChecks = [principalAdmission.check];
 					const principalAdmissionResult = await requestTiming.measure("principalAdmission", () =>
 						runGraphQLRateLimitStage({
@@ -889,9 +919,7 @@ const startServer = async (): Promise<void> => {
 							rateLimitWorkload: ingress.workload,
 						})
 					);
-					if (env.GRAPHQL_RATE_LIMIT_MODE !== "legacy") {
-						v3AdmissionEvaluated = true;
-					}
+					v3AdmissionEvaluated = true;
 					if (principalAdmissionResult.v3Decision) {
 						captureShadowRateLimitDecision(principalAdmissionResult.v3Decision);
 						logV3RateLimitDecision({
@@ -939,7 +967,23 @@ const startServer = async (): Promise<void> => {
 						});
 					}
 
-					const currentSeason = currentSeasonProvider.get();
+					let currentSeason: GraphQLContext["currentSeason"];
+					try {
+						currentSeason = await requestTiming.measure("season", () =>
+							currentSeasonProvider.refresh(database, 5_000)
+						);
+					} catch (error) {
+						logger.warn({ err: error, requestId }, "Current season authority unavailable");
+						return finalizePostPreAuthResponse(
+							jsonError(
+								503,
+								"SEASON_AUTHORITY_UNAVAILABLE",
+								"Current season metadata is temporarily unavailable",
+								corsHeaders
+							),
+							"season_authority_unavailable"
+						);
+					}
 					const data = new ReadModelClient(database, currentSeason);
 					const requestScope = {};
 					const authorizedTournamentMemberships = new Set<number>();
@@ -955,7 +999,7 @@ const startServer = async (): Promise<void> => {
 					);
 					if (!authorization.ok) {
 						return finalizeGraphQLResponse(
-							graphQLErrorResponse(authorization, corsHeaders),
+							graphQLErrorResponse(authorization, corsHeaders, requestId),
 							"authorization_rejected"
 						);
 					}
@@ -994,7 +1038,7 @@ const startServer = async (): Promise<void> => {
 							return finalizePostPreAuthResponse(
 								jsonError(
 									503,
-									"DATA_PUBLICATION_UNAVAILABLE",
+									"DEPENDENCY_UNAVAILABLE",
 									"Data publication is temporarily unavailable",
 									corsHeaders
 								),
@@ -1039,7 +1083,7 @@ const startServer = async (): Promise<void> => {
 					let responseBody: string | ReadableStream;
 					let graphQLResponseHasErrors = false;
 					if (httpGraphQLResponse.body.kind === "complete") {
-						responseBody = httpGraphQLResponse.body.string;
+						responseBody = sanitizeGraphQLResponseBody(httpGraphQLResponse.body.string, requestId);
 						try {
 							const parsed = JSON.parse(responseBody) as { errors?: unknown };
 							graphQLResponseHasErrors = Array.isArray(parsed.errors) && parsed.errors.length > 0;
@@ -1050,10 +1094,20 @@ const startServer = async (): Promise<void> => {
 						const { asyncIterator } = httpGraphQLResponse.body;
 						responseBody = new ReadableStream({
 							async start(controller): Promise<void> {
-								for await (const chunk of asyncIterator) {
-									controller.enqueue(new TextEncoder().encode(chunk));
+								try {
+									for await (const chunk of asyncIterator) {
+										controller.enqueue(
+											new TextEncoder().encode(sanitizeGraphQLMultipartChunk(chunk, requestId))
+										);
+									}
+									controller.close();
+								} catch (error) {
+									logger.error(
+										{ err: error, requestId },
+										"GraphQL multipart response sanitization failed"
+									);
+									controller.error(error);
 								}
-								controller.close();
 							},
 						});
 					}
@@ -1094,7 +1148,12 @@ const startServer = async (): Promise<void> => {
 					return finalizePostPreAuthResponse(
 						new Response(
 							JSON.stringify({
-								errors: [{ message: "Internal server error" }],
+								errors: [
+									{
+										message: "Internal server error",
+										extensions: { code: "INTERNAL_SERVER_ERROR", requestId },
+									},
+								],
 							}),
 							{
 								status: 500,

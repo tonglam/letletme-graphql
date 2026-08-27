@@ -1,6 +1,7 @@
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../graphql/context";
 import type { QueryExecutor } from "./database";
+import { metrics } from "./metrics";
 
 export type CurrentSeason = Readonly<{
 	seasonId: number;
@@ -22,20 +23,40 @@ const CURRENT_SEASON_LIFECYCLE_STATES = [
 	"closed",
 ] as const;
 
+export type SeasonAuthorityFailureReason =
+	| "not_loaded"
+	| "database_query_failed"
+	| "row_count_invalid"
+	| "season_id_invalid"
+	| "season_code_invalid"
+	| "lifecycle_state_invalid";
+
+/** Safe public error; driver/SQL details never enter GraphQL extensions. */
+export class SeasonAuthorityError extends GraphQLError {
+	readonly reason: SeasonAuthorityFailureReason;
+
+	constructor(reason: SeasonAuthorityFailureReason) {
+		super("Current season metadata is unavailable", {
+			extensions: {
+				code: "SEASON_AUTHORITY_UNAVAILABLE",
+				http: { status: 503 },
+			},
+		});
+		this.name = "SeasonAuthorityError";
+		this.reason = reason;
+	}
+}
+
 export const parseSeason = (value: string | null): string | null => {
 	if (!value) return null;
 	const trimmed = value.trim();
 	return /^\d{4}$/.test(trimmed) ? trimmed : null;
 };
 
-const unavailable = (cause?: unknown): GraphQLError =>
-	new GraphQLError("Current season metadata is unavailable", {
-		extensions: {
-			code: "DATABASE_METADATA_UNAVAILABLE",
-			http: { status: 503 },
-			...(cause === undefined ? {} : { cause }),
-		},
-	});
+const unavailable = (reason: SeasonAuthorityFailureReason): SeasonAuthorityError => {
+	metrics.seasonAuthorityRefreshes.labels("failed", reason).inc();
+	return new SeasonAuthorityError(reason);
+};
 
 export const loadCurrentSeason = async (database: QueryExecutor): Promise<CurrentSeason> => {
 	let rows: CurrentSeasonRow[];
@@ -48,32 +69,34 @@ export const loadCurrentSeason = async (database: QueryExecutor): Promise<Curren
 			 LIMIT 2`
 		);
 		rows = result.rows;
-	} catch (error) {
-		throw unavailable(error);
+	} catch {
+		throw unavailable("database_query_failed");
 	}
 
-	if (rows.length !== 1) throw unavailable();
+	if (rows.length !== 1) throw unavailable("row_count_invalid");
 	const row = rows[0];
 	const seasonCode = parseSeason(row.season_code);
 	const lifecycleState = row.lifecycle_state;
-	if (!Number.isInteger(row.season_id) || row.season_id < 2000 || !seasonCode) {
-		throw unavailable();
-	}
+	if (!Number.isInteger(row.season_id) || row.season_id < 2000)
+		throw unavailable("season_id_invalid");
+	if (!seasonCode) throw unavailable("season_code_invalid");
 	if (
 		lifecycleState !== undefined &&
 		!CURRENT_SEASON_LIFECYCLE_STATES.includes(
 			lifecycleState as (typeof CURRENT_SEASON_LIFECYCLE_STATES)[number]
 		)
 	) {
-		throw unavailable();
+		throw unavailable("lifecycle_state_invalid");
 	}
-	return {
+	const season = {
 		seasonId: row.season_id,
 		seasonCode,
 		...(lifecycleState === undefined
 			? {}
 			: { lifecycleState: lifecycleState as CurrentSeason["lifecycleState"] }),
 	};
+	metrics.seasonAuthorityRefreshes.labels("succeeded", "authoritative").inc();
+	return season;
 };
 
 export class CurrentSeasonProvider {
@@ -89,7 +112,7 @@ export class CurrentSeasonProvider {
 	}
 
 	get(): CurrentSeason {
-		if (!this.value) throw unavailable();
+		if (!this.value) throw unavailable("not_loaded");
 		return this.value;
 	}
 

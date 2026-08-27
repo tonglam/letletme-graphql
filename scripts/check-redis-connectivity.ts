@@ -61,9 +61,11 @@ try {
 		JSON.stringify({
 			event: "redis_connectivity_check",
 			status: "passed",
-			host: env.REDIS_HOST,
-			port: env.REDIS_PORT,
-			clients: pongs.map(([name]) => name),
+			clients: pongs.map(([name]) => ({
+				name,
+				endpoint: name === "primary" ? "primary" : "rate-limit",
+			})),
+			isolated: env.REDIS_ENDPOINT_IDENTITY !== env.RATE_LIMIT_REDIS_ENDPOINT_IDENTITY,
 		})
 	);
 } catch (error) {
@@ -71,8 +73,6 @@ try {
 		JSON.stringify({
 			event: "redis_connectivity_check",
 			status: "failed",
-			host: env.REDIS_HOST,
-			port: env.REDIS_PORT,
 			reason: classifyError(observedError ?? error),
 		})
 	);

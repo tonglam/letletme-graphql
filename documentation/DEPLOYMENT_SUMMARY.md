@@ -6,10 +6,13 @@ Data Platform business schema and publication; `letletme-web` owns `bauth`.
 ## Runtime contract
 
 - Bun, Apollo Server 5, PostgreSQL 15, and Redis.
-- `POST /graphql`, `GET /health`, and token-protected `GET /metrics`.
-- `/health` is ready only when PostgreSQL, the current-season authority, the
+- `POST /graphql`, `GET /health/live`, `GET /health/ready`, and token-protected
+  `GET /metrics`.
+- `/health/live` proves only process liveness. `/health/ready` is ready only when PostgreSQL, the current-season authority, the
   publication/cache Redis client, and the isolated rate-limit Redis client all
   answer within the bounded probe window.
+- `/health` remains a compatibility alias for `/health/ready`; new monitors
+  must use the explicit paths.
 - `DATABASE_STATEMENT_TIMEOUT_MS` defaults to 12 seconds and must stay below
   the Web proxy's 15-second upstream timeout.
 - A dedicated read-only PostgreSQL login inherits
@@ -19,6 +22,11 @@ Data Platform business schema and publication; `letletme-web` owns `bauth`.
   present.
 - GraphQL has no business migration command. Data migrations run only from the
   accepted `letletme_data` build before GraphQL deployment.
+- Runtime deployment uses two immutable GraphQL slots (`blue` on 4000 and
+  `green` on 4002). The VPS-owned Nginx include is switched atomically only
+  after `/health/ready`, schema, and core-query probes pass. Public validation
+  failure rolls back the active slot without rebuilding the previous
+  container.
 
 ## Verification
 
@@ -32,4 +40,4 @@ docker compose config --quiet
 ```
 
 Main deployment builds one image, deploys its immutable digest, runs the
-startup contract, and verifies `/health` before completion.
+startup contract, and verifies `/health/ready` before completion.

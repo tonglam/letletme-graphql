@@ -6,6 +6,8 @@
  */
 
 import { metrics } from "./metrics";
+import { isPlainRecord as isRecord } from "../contracts/guards";
+import { getDataServiceConfig } from "./env";
 
 // A cold classic tournament request can refresh standings and enrich the
 // roster with official entry summaries. Keep enough room for that bounded
@@ -128,9 +130,6 @@ export type ManagerLiveFetchResult = {
 	calculationMode?: ManagerLiveCalculationMode;
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
-
 const isNullableSafeInteger = (value: unknown): value is number | null =>
 	value === null || (typeof value === "number" && Number.isSafeInteger(value));
 
@@ -236,11 +235,6 @@ const parseEffectiveLineup = (value: unknown): EffectiveLineupRow[] | undefined 
 		return undefined;
 	}
 	return rows;
-};
-
-const readEnv = (key: "LETLETME_DATA_URL" | "LETLETME_DATA_API_KEY"): string => {
-	const value = Bun.env[key] ?? process.env[key];
-	return typeof value === "string" ? value.trim() : "";
 };
 
 const emptyResult = (
@@ -393,7 +387,8 @@ export async function requestManagerLiveScores(params: {
 	includeEffectiveLineup?: boolean;
 	liveRef?: { publicationId: string; revision: string };
 }): Promise<ManagerLiveFetchResult> {
-	const baseUrl = readEnv("LETLETME_DATA_URL").replace(/\/+$/, "");
+	const config = getDataServiceConfig();
+	const baseUrl = config.url.replace(/\/+$/, "");
 	if (!baseUrl || params.entryIds.length === 0) {
 		metrics.managerLiveUpstreamRequestsTotal.labels("not_configured").inc();
 		return emptyResult();
@@ -402,8 +397,7 @@ export async function requestManagerLiveScores(params: {
 	const controller = new AbortController();
 	const timeoutId = setTimeout(() => controller.abort(), MANAGER_LIVE_TIMEOUT_MS);
 	const headers = new Headers({ Accept: "application/json", "Content-Type": "application/json" });
-	const apiKey = readEnv("LETLETME_DATA_API_KEY");
-	if (apiKey) headers.set("x-api-key", apiKey);
+	if (config.apiKey) headers.set("x-api-key", config.apiKey);
 	const startedAt = performance.now();
 
 	try {
@@ -551,7 +545,7 @@ export async function requestManagerLiveScores(params: {
 	} catch (error) {
 		metrics.managerLiveUpstreamRequestsTotal.labels("error").inc();
 		params.logger?.warn(
-			{ eventId: params.eventId, error: error instanceof Error ? error.message : String(error) },
+			{ eventId: params.eventId, err: error },
 			"Official manager live endpoint unavailable"
 		);
 		return emptyResult();

@@ -240,7 +240,10 @@ export const entryLiveCalcService = {
 			// service normally fan-outs event picks for tournament rosters. Queue
 			// this missing entry on demand so the next refresh can calculate the
 			// player-level score instead of permanently returning NO_PICKS.
-			enqueueEntryPicksSync(entryId, eventId);
+			enqueueEntryPicksSync(entryId, eventId, {
+				logger: context.logger,
+				requestId: context.requestId,
+			});
 			const noPicks = buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
 			const managerScores = await loadManagerScores(context, eventId, [entryId], undefined, {
 				includeEffectiveLineup: true,

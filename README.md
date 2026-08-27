@@ -14,7 +14,8 @@ PostgreSQL 15, and Redis.
   publications.
 - PostgreSQL is the business source of truth. Redis contains validated Data
   publications, expiring query results, security counters, and queue state.
-- Exactly one `fpl.seasons.is_current = true` row selects the current season.
+- Exactly one `fpl.seasons.is_current = true` row selects the current season;
+  each non-health request pins that identity for its full execution.
 
 ## Request trust boundary
 
@@ -70,32 +71,27 @@ bun run dev
 The service exposes:
 
 - `POST /graphql` for trusted Web traffic;
-- `GET /health` for PostgreSQL, both Redis clients, and current-season readiness; and
+- `GET /health/live` for liveness and `GET /health/ready` for PostgreSQL, both
+  Redis clients, and current-season readiness; and
 - `GET /metrics`, protected by `METRICS_TOKEN`.
 
 Requests are bounded by body size, depth, root-field count, aliases, AST nodes,
 weighted complexity, unique entry IDs, and Redis-backed rate limits.
 
-GraphQL admission supports `legacy`, `shadow-v3`, `enforce-v3`, `shadow-v4`,
-and `enforce-v4` modes. v4 is parallel to v3 and is not enabled by default.
-The versioned profile is `src/config/rate-limit/production.json`. v3 uses
-Redis-time continuous token buckets, a global emergency request gate, isolated
-Mini device/user and NAT-abuse buckets, workload-specific Web RSC budgets, and
-an independent service budget. `enforce-v3` refuses to start until the profile
-contains reviewed 300-concurrent capacity evidence with at least 40% headroom.
-The v4 profile is `src/config/rate-limit/production-v4.json`; it adds separate
-Mini anonymous/session aggregate ceilings and identity-plus-workload buckets.
-Its aggregate ceilings must equal the sum of the workload buckets, and
-`enforce-v4` refuses to start until generated capacity evidence is validated.
-
-The three legacy-v2 limits remain environment variables only for compatibility
-and rollback: `GRAPHQL_BROWSER_INGRESS_RATE_LIMIT`,
-`GRAPHQL_AUTHENTICATED_RATE_LIMIT`, and
-`GRAPHQL_ANONYMOUS_RATE_LIMIT`. Select the runtime with
-`GRAPHQL_RATE_LIMIT_MODE=legacy|shadow-v3|enforce-v3|shadow-v4|enforce-v4`. The deploy workflow has
-explicit persisted rollout profiles for P0, shadow, enforce, compatibility
-restoration, and rollback; P0 captures the previous environment, image, SHA,
-health, metrics, and container resource baseline before replacement.
+GraphQL admission supports only the versioned `shadow-v3`, `enforce-v3`,
+`shadow-v4`, and `enforce-v4` modes. The old legacy mode and legacy-v2 limit
+environment variables were removed in the hard configuration cut; supplying
+them now fails startup and deployment validation. v4 is parallel to v3 and is
+not enabled by default. The versioned profile is
+`src/config/rate-limit/production.json`. v3 uses Redis-time continuous token
+buckets, a global emergency request gate, isolated Mini device/user and
+NAT-abuse buckets, workload-specific Web RSC budgets, and an independent
+service budget. `enforce-v3` refuses to start until the profile contains
+reviewed 300-concurrent capacity evidence with at least 40% headroom. The v4
+profile is `src/config/rate-limit/production-v4.json`; it adds separate Mini
+anonymous/session aggregate ceilings and identity-plus-workload buckets. Its
+aggregate ceilings must equal the sum of the workload buckets, and `enforce-v4`
+refuses to start until generated capacity evidence is validated.
 
 Live manager headlines use the official FPL entry/Classic standings read-through.
 When the official row is outside its freshness window, GraphQL returns an explicit
@@ -175,6 +171,15 @@ Deploy the generated profile in `shadow-v4` first. The monitor must observe a
 full 24-hour window covering production peak, with zero storage failures and
 global would-deny, no more than 1% organic Mini workload would-deny, and zero
 player-stats would-deny before `enforce-v4` is considered.
+
+## Blue/green deployment
+
+GraphQL runs two immutable Compose projects: `letletme_graphql_blue` on local
+port 4000 and `letletme_graphql_green` on local port 4002. VPS Ops owns the
+Nginx active-slot include and root-only switch helper. A candidate is promoted
+only after readiness, schema, revision, and public proxy probes pass; a failed
+public probe switches back to the previous slot without rebuilding it. Images
+are addressed by their exact commit and digest, never by `latest` as an input.
 
 ## Verification
 

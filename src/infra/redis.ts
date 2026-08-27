@@ -4,22 +4,20 @@ import { env } from "./env";
 let client: Redis | null = null;
 let rateLimitClient: Redis | null = null;
 
-const createRedisClient = (): Redis =>
-	new Redis({
-		host: env.REDIS_HOST,
-		port: env.REDIS_PORT,
-		password: env.REDIS_PASSWORD || undefined,
+const createRedisClient = (url: string, role: "primary" | "rate-limit"): Redis =>
+	new Redis(url, {
 		lazyConnect: true,
 		maxRetriesPerRequest: 2,
 		enableReadyCheck: true,
 		enableAutoPipelining: true,
 		connectTimeout: 2_000,
 		commandTimeout: 2_000,
+		connectionName: `letletme-graphql-${role}`,
 	});
 
 export const getRedis = (): Redis => {
 	if (!client) {
-		client = createRedisClient();
+		client = createRedisClient(env.REDIS_URL, "primary");
 	}
 	return client;
 };
@@ -27,7 +25,7 @@ export const getRedis = (): Redis => {
 /** Keep security admission isolated from publication and query-cache bursts. */
 export const getRateLimitRedis = (): Redis => {
 	if (!rateLimitClient) {
-		rateLimitClient = createRedisClient();
+		rateLimitClient = createRedisClient(env.RATE_LIMIT_REDIS_URL, "rate-limit");
 	}
 	return rateLimitClient;
 };

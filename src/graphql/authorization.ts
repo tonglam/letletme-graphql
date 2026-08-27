@@ -572,14 +572,15 @@ export const authorizeGraphQLRequest = async (
 
 export const graphQLErrorResponse = (
 	result: Exclude<AuthorizationResult, { ok: true }>,
-	corsHeaders: Record<string, string>
+	corsHeaders: Record<string, string>,
+	requestId = corsHeaders["X-Request-Id"] ?? "unavailable"
 ): Response =>
 	new Response(
 		JSON.stringify({
 			errors: [
 				{
 					message: result.message,
-					extensions: { code: result.code },
+					extensions: { code: result.code, requestId },
 				},
 			],
 		}),
