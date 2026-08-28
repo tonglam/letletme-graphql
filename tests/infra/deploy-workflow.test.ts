@@ -82,11 +82,17 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("public_contract_passed");
 	});
 
+	test("isolates streamed deployment stdin from container probes", () => {
+		expect(deployScript).toContain("compose_exec() {");
+		expect(deployScript).toContain('compose exec -T "$@" < /dev/null');
+		expect(deployScript.match(/^compose_exec(?: |\n)/gm) ?? []).toHaveLength(3);
+	});
+
 	test("allowlists exact public GraphQL routes before switching or forwarding credentials", () => {
 		const validationAt = deployScript.indexOf('const expectedOrigin = "https://api.letletme.top";');
 		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
 		const publicTokenRequestAt = deployScript.indexOf(
-			'compose exec -T -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e'
+			'compose_exec -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e'
 		);
 		expect(validationAt).toBeGreaterThan(-1);
 		expect(deployScript).toContain("parsed.pathname !== expectedPathname");
