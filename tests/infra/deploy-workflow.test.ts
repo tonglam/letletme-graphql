@@ -151,8 +151,10 @@ describe("production deployment workflow", () => {
 		expect(deployStep).toContain("remote_env=$(mktemp /tmp/letletme-graphql-env.XXXXXX)");
 		expect(deployStep).toContain("remote_token=$(mktemp /tmp/letletme-graphql-token.XXXXXX)");
 		expect(deployStep).toContain("trap cleanup_remote EXIT");
-		expect(deployStep).toContain('base64 -d > "$remote_env"');
-		expect(deployStep).toContain('base64 -d > "$remote_token"');
+		expect(deployStep).toContain('base64 --decode > "$remote_env"; then');
+		expect(deployStep).toContain('base64 --decode > "$remote_token"; then');
+		expect(deployStep).toContain("GraphQL environment payload failed remote base64 decode");
+		expect(deployStep).toContain("GHCR token payload failed remote base64 decode");
 		expect(deployStep).not.toContain("remote_env=$(ssh");
 		expect(deployStep).not.toContain("cleanup_remote() {\n            set +e\n            ssh");
 	});
@@ -219,17 +221,13 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain(
 			'base64 --wrap=0 < "$payload_dir/token.expected" > "$payload_dir/token.b64"'
 		);
+		expect(workflow).toContain('cmp -s "$payload_dir/env.expected" "$payload_dir/env.decoded"');
+		expect(workflow).toContain('cmp -s "$payload_dir/token.expected" "$payload_dir/token.decoded"');
 		expect(workflow).toContain(
-			'cmp -s "$payload_dir/env.expected" "$payload_dir/env.decoded"'
+			"printf 'if ! printf %%s %s | base64 --decode > \"$remote_env\"; then\\n'"
 		);
 		expect(workflow).toContain(
-			'cmp -s "$payload_dir/token.expected" "$payload_dir/token.decoded"'
-		);
-		expect(workflow).toContain(
-			'printf \'if ! printf %%s %s | base64 --decode > "$remote_env"; then\\n\''
-		);
-		expect(workflow).toContain(
-			'printf \'if ! printf %%s %s | base64 --decode > "$remote_token"; then\\n\''
+			"printf 'if ! printf %%s %s | base64 --decode > \"$remote_token\"; then\\n'"
 		);
 		expect(workflow).toContain("GraphQL environment payload failed remote base64 decode");
 		expect(workflow).toContain("GHCR token payload failed remote base64 decode");
