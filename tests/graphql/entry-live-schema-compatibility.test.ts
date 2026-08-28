@@ -1,25 +1,30 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { graphql } from "graphql";
 import type { GraphQLContext } from "../../src/graphql/context";
-import { entryLiveRepository } from "../../src/domains/entry-live/repository";
-import { entriesService } from "../../src/domains/entries/service";
+import { entryLiveBatchService } from "../../src/domains/entry-live/batch-service";
+import type { LiveCalcData } from "../../src/domains/entry-live/calc-service";
 import { schema } from "../../src/graphql/schema";
 
-const originalGetPick = entryLiveRepository.getEntryEventPick;
-const originalGetEntry = entriesService.getEntryById;
-const originalGetPrevious = entriesService.getEntryEventResult;
+const originalBatchCalc = entryLiveBatchService.calcLivePointsForEntries;
 
 afterEach(() => {
-	entryLiveRepository.getEntryEventPick = originalGetPick;
-	entriesService.getEntryById = originalGetEntry;
-	entriesService.getEntryEventResult = originalGetPrevious;
+	entryLiveBatchService.calcLivePointsForEntries = originalBatchCalc;
 });
 
 describe("calcLivePointsByEntry additive schema compatibility", () => {
 	it("keeps the legacy selection executable and exposes explicit no-picks availability", async () => {
-		entryLiveRepository.getEntryEventPick = async () => null;
-		entriesService.getEntryById = async () => null;
-		entriesService.getEntryEventResult = async () => null;
+		const noPicks = {
+			availability: "NO_PICKS",
+			event: 7,
+			entry: 123,
+			livePoints: 0,
+			pickList: [],
+		} as unknown as LiveCalcData;
+		entryLiveBatchService.calcLivePointsForEntries = async () => ({
+			results: new Map([[123, noPicks]]),
+			errors: [],
+			meta: { eventId: 7, totalEntries: 1, succeededCount: 1, failedCount: 0 },
+		});
 		const context = {} as GraphQLContext;
 
 		const legacy = await graphql({

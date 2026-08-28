@@ -288,6 +288,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				picksByEntry: Promise.resolve(new Map([[101, picks]]) as never),
 			});
 			const calc = result.results.get(101);
+			expect(calc?.availability).toBe("LINEUP_UNAVAILABLE");
 			expect(calc?.score.reconciliation).toBe("NO_LINEUP");
 			expect(calc?.score.reasonCodes).toContain("MISSING_LINEUP");
 			expect(calc?.pickList).toEqual([]);
@@ -363,6 +364,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			const calc = result.results.get(101);
 			expect(calc?.score.reconciliation).toBe("SOURCE_SKEW");
 			expect(calc).toMatchObject({
+				availability: "LINEUP_UNAVAILABLE",
 				pickList: [],
 				activeCaptain: { id: 0, name: "", points: 0 },
 				snapshot: null,
@@ -400,6 +402,58 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		expect(
 			entryLiveBatchService.calcLivePointsForEntries(context, 33, [1001, 1001])
 		).rejects.toMatchObject({ extensions: { code: "DUPLICATE_ENTRY_IDS" } });
+	});
+
+	it("starts the authoritative manager request before independent entry reads finish", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		let releaseEntries = (): void => undefined;
+		let entryReadSettled = false;
+		entriesService.getEntriesByIds = async () =>
+			new Promise((resolve) => {
+				releaseEntries = () => {
+					entryReadSettled = true;
+					resolve(new Map());
+				};
+			});
+		installManagerLiveResponse(1, [], [1001]);
+		const managerFetch = globalThis.fetch;
+		let signalManagerRequest = (): void => undefined;
+		const managerRequestStarted = new Promise<void>((resolve) => {
+			signalManagerRequest = resolve;
+		});
+		let managerStartedBeforeEntries = false;
+		globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+			managerStartedBeforeEntries = !entryReadSettled;
+			signalManagerRequest();
+			return managerFetch(...args);
+		}) as typeof fetch;
+
+		const calculation = entryLiveBatchService.calcLivePointsForEntries(
+			makeMockContext({}),
+			1,
+			[1001],
+			{
+				picksByEntry: Promise.resolve(new Map()),
+			}
+		);
+
+		try {
+			const requestStartedPromptly = await Promise.race([
+				managerRequestStarted.then(() => true),
+				new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
+			]);
+			releaseEntries();
+			const result = await calculation;
+
+			expect(requestStartedPromptly).toBe(true);
+			expect(managerStartedBeforeEntries).toBe(true);
+			expect(result.results.get(1001)?.availability).toBe("NO_PICKS");
+		} finally {
+			releaseEntries();
+			await calculation.catch(() => undefined);
+			restoreManagerLiveResponse();
+			entriesService.getEntriesByIds = originalEntries;
+		}
 	});
 
 	it("returns NO_PICKS with entry metadata before heavy acquisition", async () => {
@@ -922,7 +976,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 
 			expect([...result.results.keys()]).toEqual([101, 202]);
 			expect([...result.results.values()].map((value) => value.availability)).toEqual([
-				"READY",
+				"LINEUP_UNAVAILABLE",
 				"NO_PICKS",
 			]);
 			expect(result.results.get(101)?.snapshot).toBeNull();

@@ -804,7 +804,12 @@ export const liveDesksResolvers = {
 				allEntryIds,
 				request.entryId
 			);
-			const rosterRevision = entryLiveCompetitionRosterRevision(allEntryIds);
+			// Data's coverage revision describes the current tournament roster, while
+			// expected/resolved counts describe the event-eligible subset. Keep that
+			// durable membership identity separate from the historical calculation
+			// window so a manager who joined in GW2 cannot invalidate a complete GW1
+			// board.
+			const rosterRevision = entryLiveCompetitionRosterRevision(rosterEntryIds);
 			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
 
 			const snapshot = await getLiveDataSnapshot(context, request.eventId).catch(() => null);
@@ -1154,7 +1159,6 @@ export const liveDesksResolvers = {
 					? derivedCoverageState
 					: "UNAVAILABLE";
 			const fullFieldReady =
-				fullFieldBoard &&
 				coverageState === "COMPLETE" &&
 				managerScores.tournamentCoverage?.rosterRevision === rosterRevision &&
 				managerScores.tournamentCoverage?.expectedEntries === allEntryIds.length &&
@@ -1162,6 +1166,8 @@ export const liveDesksResolvers = {
 				managerScores.rows.size === allEntryIds.length &&
 				managerScores.missingEntryIds.length === 0 &&
 				board.rows.length === board.totalEntries &&
+				board.officialCoverage === 1 &&
+				board.unavailableEntryIds.length === 0 &&
 				managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
 			const deferredIds = new Set(effectiveDeferredEntryIds);
 			const failedIds = new Set(calculatedFailedEntryIds);

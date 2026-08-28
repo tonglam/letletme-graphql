@@ -1,15 +1,12 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { enqueueEntryPicksSync } from "../../infra/entry-info-sync";
 import type { Entry, EntryEventResult } from "../entries/repository";
-import { entriesService } from "../entries/service";
-import { eventsService } from "../events/service";
 import type { LiveSnapshotMeta } from "../live/snapshot-meta";
 import { resolvePreviousEventBaseline } from "./baseline";
 import type { EntryEventTransfersData } from "./transfer-enrichment";
-import { entryLiveRepository, hasCompleteEntryEventPick } from "./repository";
-import { buildManagerScore, loadManagerScores, type LiveManagerScore } from "./manager-score";
+import type { LiveManagerScore } from "./manager-score";
 
-export type EntryLiveAvailability = "READY" | "NO_PICKS";
+export type EntryLiveAvailability = "READY" | "NO_PICKS" | "LINEUP_UNAVAILABLE";
 
 export type ActiveCaptainData = {
 	id: number;
@@ -194,79 +191,29 @@ export const entryLiveCalcService = {
 			return buildNoPicksLiveCalcData(entryId);
 		}
 
-		const calculate = async (): Promise<LiveCalcData> => {
-			const { entryLiveBatchService } = await import("./batch-service");
-			const stopAggregate = context.requestTiming?.start("entryLive.aggregate");
-			const batch = await entryLiveBatchService
-				// Do not prefetch picks into the batch path. Once the event is
-				// finalized, the batch service must be able to roll over to its
-				// finalization-scoped cache and observe official multipliers,
-				// automatic_subs, and captain changes.
-				.calcLivePointsForEntries(context, eventId, [entryId])
-				.finally(() => stopAggregate?.());
-			const result = batch.results.get(entryId);
-			if (result) return result;
-			const message = batch.errors.find((error) => error.entryId === entryId)?.message;
-			throw new Error(message ?? `Live points calculation failed for entry ${entryId}`);
-		};
-
-		const stopPicks = context.requestTiming?.start("entryLive.picks");
-		const pickEntity = await entryLiveRepository
-			.getEntryEventPick(context, entryId, eventId)
-			.finally(() => stopPicks?.());
-		// A normal live pick miss can race final publication. Delegate finalized
-		// events to the batch path, which refreshes finalization-scoped picks and
-		// retains the durable official result even if rich picks remain unavailable.
-		if (!hasCompleteEntryEventPick(pickEntity, eventId, entryId)) {
-			const event = await eventsService.getEventById(context, eventId).catch(() => null);
-			if (event?.finished === true && event.dataChecked === true) {
-				return calculate();
+		// The batch engine is the canonical owner of picks, lifecycle rollover,
+		// manager-score provenance and player-detail reconciliation. Calling it
+		// once avoids the former single-entry preflight reading the same pick row a
+		// second time, while preserving its finalized-picks refresh semantics.
+		const { entryLiveBatchService } = await import("./batch-service");
+		const stopAggregate = context.requestTiming?.start("entryLive.aggregate");
+		const batch = await entryLiveBatchService
+			.calcLivePointsForEntries(context, eventId, [entryId])
+			.finally(() => stopAggregate?.());
+		const result = batch.results.get(entryId);
+		if (result) {
+			// Public live-points pages accept any valid FPL entry. Queue only a true
+			// durable pick miss; a revision-skewed LINEUP_UNAVAILABLE response must
+			// wait for its canonical publication instead of launching a redundant sync.
+			if (result.availability === "NO_PICKS") {
+				enqueueEntryPicksSync(entryId, eventId, {
+					logger: context.logger,
+					requestId: context.requestId,
+				});
 			}
+			return result;
 		}
-		if (!hasCompleteEntryEventPick(pickEntity, eventId, entryId)) {
-			const [entry, previousResult] = await Promise.all([
-				entriesService.getEntryById(context, entryId).catch((error) => {
-					context.logger?.warn(
-						{ err: error, entryId, eventId },
-						"Entry metadata unavailable for no-picks response"
-					);
-					return null;
-				}),
-				eventId > 1
-					? entriesService.getEntryEventResult(context, entryId, eventId - 1)
-					: Promise.resolve(null),
-			]);
-			// Public live-points pages accept any valid FPL entry, while the Data
-			// service normally fan-outs event picks for tournament rosters. Queue
-			// this missing entry on demand so the next refresh can calculate the
-			// player-level score instead of permanently returning NO_PICKS.
-			enqueueEntryPicksSync(entryId, eventId, {
-				logger: context.logger,
-				requestId: context.requestId,
-			});
-			const noPicks = buildNoPicksLiveCalcData(entryId, eventId, entry, previousResult);
-			const managerScores = await loadManagerScores(context, eventId, [entryId], undefined, {
-				includeEffectiveLineup: true,
-			});
-			const manager = buildManagerScore({
-				row: managerScores.rows.get(entryId),
-				upstreamErrorCode: managerScores.errorCode,
-				provisional: true,
-				available: false,
-				transferCost: 0,
-				detailEventPoints: 0,
-				nextRefreshAt: managerScores.nextRefreshAt,
-			});
-			return {
-				...noPicks,
-				provisional: true,
-				score: manager.score,
-				rank: manager.headline.rank,
-				livePoints: manager.headline.livePoints,
-				liveNetPoints: manager.headline.liveNetPoints,
-				liveTotalPoints: manager.headline.liveTotalPoints,
-			};
-		}
-		return calculate();
+		const message = batch.errors.find((error) => error.entryId === entryId)?.message;
+		throw new Error(message ?? `Live points calculation failed for entry ${entryId}`);
 	},
 };
