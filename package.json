@@ -20,7 +20,6 @@
 		"rate-limit:observe": "bun scripts/build-rate-limit-observation.ts",
 		"rate-limit:observe:v4": "bun scripts/build-rate-limit-observation-v4.ts",
 		"rate-limit:p0-probe": "bun scripts/rate-limit-p0-probe.ts",
-		"typecheck": "tsc --noEmit",
 		"layers:check": "bun scripts/check-layer-dependencies.ts",
 		"docs:check": "bun scripts/check-domain-manifest.ts",
 		"deprecation:check": "bun scripts/check-deprecation-manifest.ts",

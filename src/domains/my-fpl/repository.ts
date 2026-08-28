@@ -1093,8 +1093,7 @@ const compareSnapshotRevisions = (left: string, right: string): number => {
 	return normalizedLeft === normalizedRight ? 0 : normalizedLeft > normalizedRight ? 1 : -1;
 };
 
-const normalizeChip = (value: string | null): string =>
-	normalizeFplChip(value, "NONE") ?? "NONE";
+const normalizeChip = (value: string | null): string => normalizeFplChip(value, "NONE") ?? "NONE";
 
 const normalizeNullableChip = (value: string | null): string | null =>
 	value === null ? null : normalizeChip(value);
