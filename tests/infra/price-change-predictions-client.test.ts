@@ -80,7 +80,8 @@ const validPlayer = {
 async function createPublication(
 	ageMs: number,
 	publicationId = "11111111-1111-4111-8111-111111111111",
-	revision = 1
+	revision = 1,
+	options: { latestEvent?: Record<string, unknown> | null } = {}
 ): Promise<{
 	manifest: DataPublicationManifest;
 	context: Record<string, unknown>;
@@ -91,7 +92,7 @@ async function createPublication(
 	const fetchedAt = new Date(Date.now() - ageMs).toISOString();
 	const deadline = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
 	const context = {
-		schemaVersion: 1,
+		schemaVersion: options.latestEvent !== undefined ? 2 : 1,
 		source: "FPL_BOOTSTRAP",
 		fetchedAt,
 		staleAt: new Date(Date.parse(fetchedAt) + PRICE_CHANGE_READY_MS).toISOString(),
@@ -100,6 +101,7 @@ async function createPublication(
 		nextDeadlines: [deadline],
 		expectedPlayerCount: 1,
 		observedPlayerCount: 1,
+		...(options.latestEvent !== undefined ? { latestEvent: options.latestEvent } : {}),
 	};
 	const players = [validPlayer];
 	const scope = { dataset: "fpl:price-changes" as const, seasonCode: "2026" };
@@ -232,6 +234,73 @@ describe("price-change publication reader", () => {
 
 		assert.equal(board.status, "READY");
 		assert.equal(board.revision, publication.manifest.publicationId);
+	});
+
+	it("reads the v2 latest observed event with its publication", async () => {
+		const ageMs = 9 * 60 * 1_000;
+		const observedAt = new Date(Date.now() - ageMs).toISOString();
+		const deadline = new Date(Date.parse(observedAt) - 1_000).toISOString();
+		const changeDate = new Intl.DateTimeFormat("en-CA", {
+			timeZone: "Asia/Shanghai",
+			year: "numeric",
+			month: "2-digit",
+			day: "2-digit",
+		}).format(new Date(deadline));
+		const publication = await createPublication(ageMs, "55555555-5555-4555-8555-555555555555", 5, {
+			latestEvent: {
+				deadline,
+				changeDate,
+				observedAt,
+				outcome: "CHANGED",
+				baselineRevision: "baseline-revision",
+				changedPlayerCount: 1,
+				changes: [{ playerId: 1, oldPrice: 99, newPrice: 100 }],
+			},
+		});
+
+		const board = await readPriceChangePredictions(
+			makeContext(publication.redis, {
+				query: async () => {
+					throw new Error("PostgreSQL should not be needed");
+				},
+			} as unknown as QueryExecutor)
+		);
+
+		assert.equal(board.latestEvent?.outcome, "CHANGED");
+		assert.deepEqual(board.latestEvent?.changes, [{ playerId: 1, oldPrice: 99, newPrice: 100 }]);
+	});
+
+	it("fails closed when an observed event price disagrees with its player payload", async () => {
+		const ageMs = 9 * 60 * 1_000;
+		const observedAt = new Date(Date.now() - ageMs).toISOString();
+		const deadline = new Date(Date.parse(observedAt) - 1_000).toISOString();
+		const changeDate = new Intl.DateTimeFormat("en-CA", {
+			timeZone: "Asia/Shanghai",
+			year: "numeric",
+			month: "2-digit",
+			day: "2-digit",
+		}).format(new Date(deadline));
+		const publication = await createPublication(ageMs, "66666666-6666-4666-8666-666666666666", 6, {
+			latestEvent: {
+				deadline,
+				changeDate,
+				observedAt,
+				outcome: "CHANGED",
+				baselineRevision: "baseline-revision",
+				changedPlayerCount: 1,
+				changes: [{ playerId: 1, oldPrice: 99, newPrice: 101 }],
+			},
+		});
+
+		const board = await readPriceChangePredictions(
+			makeContext(publication.redis, {
+				query: async () => {
+					throw new Error("PostgreSQL should not be needed");
+				},
+			} as unknown as QueryExecutor)
+		);
+
+		assert.equal(board.status, "UNAVAILABLE");
 	});
 
 	it("falls back to the matching PostgreSQL publication when Redis is damaged", async () => {

@@ -32,6 +32,11 @@ export const priceChangesTypeDefs = /* GraphQL */ `
 		UNAVAILABLE
 	}
 
+	enum PriceChangeObservedOutcome {
+		CHANGED
+		NO_CHANGE
+	}
+
 	type PriceChangeProjection {
 		offset: Int!
 		projectedPercent: Float!
@@ -59,6 +64,15 @@ export const priceChangesTypeDefs = /* GraphQL */ `
 		projections: [PriceChangeProjection!]!
 	}
 
+	type PriceChangeObservedEvent {
+		deadline: DateTime!
+		changeDate: Date!
+		observedAt: DateTime!
+		outcome: PriceChangeObservedOutcome!
+		changedPlayerCount: Int!
+		changes: [MarketPriceChange!]!
+	}
+
 	type PriceChangeBoard {
 		status: PriceChangeBoardStatus!
 		source: PriceChangeSource!
@@ -71,6 +85,7 @@ export const priceChangesTypeDefs = /* GraphQL */ `
 		expectedPlayerCount: Int!
 		observedPlayerCount: Int!
 		players: [PriceChangePlayer!]!
+		latestEvent: PriceChangeObservedEvent
 	}
 
 	type PriceChangeLiveCursor {

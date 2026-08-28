@@ -35,4 +35,16 @@ describe("price-change board schema", () => {
 		expect(fieldNames).not.toContain("purchasePrice");
 		expect(fieldNames).not.toContain("sellingPrice");
 	});
+
+	it("exposes the observed event as an additive board field", () => {
+		const board = schema.getType("PriceChangeBoard");
+		const boardFields = board && "getFields" in board ? board.getFields() : {};
+		expect(boardFields.latestEvent?.type.toString()).toBe("PriceChangeObservedEvent");
+		const event = schema.getType("PriceChangeObservedEvent");
+		const eventFields = event && "getFields" in event ? event.getFields() : {};
+		expect(eventFields.changes?.type.toString()).toBe("[MarketPriceChange!]!");
+		const outcome = schema.getType("PriceChangeObservedOutcome");
+		const outcomeValues = outcome && "getValues" in outcome ? outcome.getValues() : [];
+		expect(outcomeValues.map((value) => value.name)).toEqual(["CHANGED", "NO_CHANGE"]);
+	});
 });
