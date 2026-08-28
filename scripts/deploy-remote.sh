@@ -367,9 +367,29 @@ rollback_on_error() {
   fi
   exit "$status"
 }
+rollback_on_signal() {
+  local signal="$1"
+  local status=143
+  case "$signal" in
+    INT) status=130 ;;
+    HUP) status=129 ;;
+  esac
+  # A signal can arrive while the cutover is being verified. Disable the
+  # signal traps while running the idempotent helper so a second signal cannot
+  # interrupt rollback halfway through and recurse into this handler.
+  trap - INT TERM HUP
+  trap - ERR
+  if ! rollback_switch; then
+    echo "deploy received $signal and rollback could not be verified" >&2
+  fi
+  exit "$status"
+}
 trap rollback_on_error ERR
-candidate_cleanup_armed=false
 switched=true
+candidate_cleanup_armed=false
+trap 'rollback_on_signal INT' INT
+trap 'rollback_on_signal TERM' TERM
+trap 'rollback_on_signal HUP' HUP
 sudo -n "$SWITCH_HELPER" "$inactive_slot"
 
 public_health_url="$PUBLIC_GRAPHQL_HEALTH_URL"

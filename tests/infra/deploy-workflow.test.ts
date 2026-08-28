@@ -146,6 +146,22 @@ describe("production deployment workflow", () => {
 		expect(rollbackRearmAt).toBeGreaterThan(rollbackAuthorityCheckAt);
 	});
 
+	test("rolls back an interrupted cutover before the release manifest is durable", () => {
+		const rollbackAt = deployScript.indexOf("rollback_switch()");
+		const signalHandlerAt = deployScript.indexOf("rollback_on_signal()");
+		const signalTrapAt = deployScript.indexOf("trap 'rollback_on_signal TERM' TERM");
+		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
+		const manifestAt = deployScript.indexOf(
+			'mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"'
+		);
+		expect(signalHandlerAt).toBeGreaterThan(-1);
+		expect(deployScript).toContain("trap - INT TERM HUP");
+		expect(deployScript).toContain("deploy received $signal and rollback could not be verified");
+		expect(signalTrapAt).toBeGreaterThan(signalHandlerAt);
+		expect(signalTrapAt).toBeLessThan(switchAt);
+		expect(rollbackAt).toBeLessThan(manifestAt);
+	});
+
 	test("retires the implicit legacy project only before canonical blue reuses port 4000", () => {
 		const retireAt = deployScript.indexOf("retire_legacy_bootstrap_before_blue");
 		const candidateUpAt = deployScript.indexOf(
