@@ -26,7 +26,10 @@ import {
 	parsePlayerStateSeasonRow,
 	PLAYER_STATE_DATA_SQL_CONTRACT,
 } from "../../src/domains/player-state/repository";
-import { PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/public-league-trends/repository";
+import {
+	parsePublicLeagueSelectionPublication,
+	PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT,
+} from "../../src/domains/public-league-trends/repository";
 import { TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/trends/repository";
 import {
 	BRIEFING_DATA_SQL_CONTRACT,
@@ -91,7 +94,7 @@ const RESULT_TYPE_SQL = `
 	SELECT
 		target.relation_name,
 		target.column_name,
-		format_type(attribute.atttypid, attribute.atttypmod) AS actual_type
+		format_type(attribute.atttypid, NULL) AS actual_type
 	FROM unnest($1::text[], $2::text[]) AS target(relation_name, column_name)
 	LEFT JOIN pg_class relation
 		ON relation.oid = to_regclass(target.relation_name)
@@ -409,7 +412,9 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 						player_name?: unknown;
 						team_short_name?: unknown;
 					};
+					const publication = parsePublicLeagueSelectionPublication(result.rows[0]);
 					if (
+						!publication ||
 						!Number.isInteger(Number(selection.element_id)) ||
 						Number(selection.element_id) <= 0 ||
 						typeof selection.player_name !== "string" ||

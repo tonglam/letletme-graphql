@@ -21,9 +21,9 @@ const emptyStats: TournamentSelectionStats = {
 };
 
 const selectionPublicationRow = (overrides: Record<string, unknown> = {}) => ({
-	publication_id: "publication-1",
+	publication_id: "1",
 	expected_entries: 10,
-	revision: "revision-1",
+	revision: "1",
 	ownership_state: "READY",
 	captaincy_state: "READY",
 	vice_captaincy_state: "READY",
@@ -232,6 +232,29 @@ describe("public league trends repository", () => {
 			12
 		);
 		expect(result).toEqual(emptyStats);
+	});
+
+	it("fails closed when selection publication metadata is not decoder-compatible", async () => {
+		const repository = createPublicLeagueTrendsRepository({
+			query: async (sql) => {
+				if (sql === PUBLIC_LEAGUE_ACCESS_SQL) {
+					return {
+						rows: [
+							{
+								catalog_revision: "2026-08-08T00:00:00.000Z",
+								snapshot_revision: "2026-08-08T01:00:00.000Z",
+							},
+						],
+					};
+				}
+				if (sql === PUBLIC_LEAGUE_SELECTION_SQL) {
+					return { rows: [selectionPublicationRow({ expected_entries: "not-a-number" })] };
+				}
+				throw new Error(`unexpected SQL: ${sql}`);
+			},
+		});
+
+		expect(await repository.getSelectionStats(context().value, 7, 3, 12)).toBeNull();
 	});
 
 	it("does not fall back when the publication query fails", async () => {

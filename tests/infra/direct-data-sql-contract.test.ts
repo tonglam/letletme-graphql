@@ -660,7 +660,7 @@ describe("direct Data SQL contract", () => {
 	test("fails the candidate contract when a decoded payload column is text", async () => {
 		const database: QueryExecutor = {
 			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {
-				if (text.includes("format_type(attribute.atttypid, attribute.atttypmod)")) {
+				if (text.includes("format_type(attribute.atttypid, NULL)")) {
 					const relations = values[0] as readonly string[];
 					const columns = values[1] as readonly string[];
 					return {
@@ -737,7 +737,20 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-selection-row") {
 					return {
-						rows: [{ element_id: 1, player_name: "Contract Player", team_short_name: "GCT" }],
+						rows: [
+							{
+								publication_id: "1",
+								expected_entries: "1",
+								revision: "1",
+								ownership_state: "READY",
+								captaincy_state: "READY",
+								vice_captaincy_state: "READY",
+								transfers_state: "READY",
+								element_id: 1,
+								player_name: "Contract Player",
+								team_short_name: "GCT",
+							},
+						],
 					} as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-row") {
@@ -902,7 +915,7 @@ describe("direct Data SQL contract", () => {
 	test("accepts JSON for every decoded JSON contract column", async () => {
 		const database: QueryExecutor = {
 			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {
-				if (text.includes("format_type(attribute.atttypid, attribute.atttypmod)")) {
+				if (text.includes("format_type(attribute.atttypid, NULL)")) {
 					const relations = values[0] as readonly string[];
 					const columns = values[1] as readonly string[];
 					return {
@@ -976,7 +989,20 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-selection-row") {
 					return {
-						rows: [{ element_id: 1, player_name: "Contract Player", team_short_name: "GCT" }],
+						rows: [
+							{
+								publication_id: "1",
+								expected_entries: "1",
+								revision: "1",
+								ownership_state: "READY",
+								captaincy_state: "READY",
+								vice_captaincy_state: "READY",
+								transfers_state: "READY",
+								element_id: 1,
+								player_name: "Contract Player",
+								team_short_name: "GCT",
+							},
+						],
 					} as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-row") {
@@ -991,7 +1017,7 @@ describe("direct Data SQL contract", () => {
 	test("fails closed when the runtime reader cannot see the authority fixture", async () => {
 		const database: QueryExecutor = {
 			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {
-				if (text.includes("format_type(attribute.atttypid, attribute.atttypmod)")) {
+				if (text.includes("format_type(attribute.atttypid, NULL)")) {
 					const relations = values[0] as readonly string[];
 					const columns = values[1] as readonly string[];
 					return {
@@ -1014,7 +1040,7 @@ describe("direct Data SQL contract", () => {
 		)?.sql;
 		const database: QueryExecutor = {
 			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {
-				if (text.includes("format_type(attribute.atttypid, attribute.atttypmod)")) {
+				if (text.includes("format_type(attribute.atttypid, NULL)")) {
 					const relations = values[0] as readonly string[];
 					const columns = values[1] as readonly string[];
 					return {
@@ -1080,7 +1106,20 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-selection-row") {
 					return {
-						rows: [{ element_id: 1, player_name: "Contract Player", team_short_name: "GCT" }],
+						rows: [
+							{
+								publication_id: "1",
+								expected_entries: "1",
+								revision: "1",
+								ownership_state: "READY",
+								captaincy_state: "READY",
+								vice_captaincy_state: "READY",
+								transfers_state: "READY",
+								element_id: 1,
+								player_name: "Contract Player",
+								team_short_name: "GCT",
+							},
+						],
 					} as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime) {

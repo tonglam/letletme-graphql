@@ -37,9 +37,82 @@ type AccessRow = {
 	snapshot_revision: string | Date;
 };
 
+type SelectionCapabilityState = "READY" | "NOT_READY" | "FAILED" | "UNSUPPORTED";
+
+export type PublicLeagueSelectionPublication = Readonly<{
+	publicationId: number;
+	expectedEntries: number;
+	revision: number;
+	ownershipState: SelectionCapabilityState;
+	captaincyState: SelectionCapabilityState;
+	viceCaptaincyState: SelectionCapabilityState;
+	transfersState: SelectionCapabilityState;
+}>;
+
+const SELECTION_CAPABILITY_STATES: readonly SelectionCapabilityState[] = [
+	"READY",
+	"NOT_READY",
+	"FAILED",
+	"UNSUPPORTED",
+];
+
+const sqlSafeInteger = (value: unknown, minimum: number): number | null => {
+	const candidate =
+		typeof value === "number"
+			? value
+			: typeof value === "string" && value.trim() !== ""
+				? Number(value)
+				: null;
+	return candidate !== null && Number.isSafeInteger(candidate) && candidate >= minimum
+		? candidate
+		: null;
+};
+
+const isSelectionCapabilityState = (value: unknown): value is SelectionCapabilityState =>
+	typeof value === "string" && SELECTION_CAPABILITY_STATES.includes(value as SelectionCapabilityState);
+
+/**
+ * Decode the publication metadata consumed by the public selection reader.
+ * PostgreSQL bigint values may arrive as strings, so numeric coercion is
+ * explicit and bounded before any percentage calculation is attempted.
+ */
+export const parsePublicLeagueSelectionPublication = (
+	value: unknown
+): PublicLeagueSelectionPublication | null => {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	const row = value as Record<string, unknown>;
+	const publicationId = sqlSafeInteger(row.publication_id, 1);
+	const expectedEntries = sqlSafeInteger(row.expected_entries, 0);
+	const revision = sqlSafeInteger(row.revision, 1);
+	const states = [
+		row.ownership_state,
+		row.captaincy_state,
+		row.vice_captaincy_state,
+		row.transfers_state,
+	];
+	if (
+		publicationId === null ||
+		expectedEntries === null ||
+		revision === null ||
+		states.some((state) => !isSelectionCapabilityState(state))
+	) {
+		return null;
+	}
+	return {
+		publicationId,
+		expectedEntries,
+		revision,
+		ownershipState: row.ownership_state as SelectionCapabilityState,
+		captaincyState: row.captaincy_state as SelectionCapabilityState,
+		viceCaptaincyState: row.vice_captaincy_state as SelectionCapabilityState,
+		transfersState: row.transfers_state as SelectionCapabilityState,
+	};
+};
+
 export const PUBLIC_LEAGUE_SELECTION_SQL = `
 	SELECT publication.publication_id, publication.expected_entries, publication.revision,
-		publication.ownership_state, publication.captaincy_state, publication.transfers_state,
+		publication.ownership_state, publication.captaincy_state, publication.vice_captaincy_state,
+		publication.transfers_state,
 		rows.element_id, rows.selected_count, rows.effective_selection_count,
 		rows.captain_count, rows.vice_captain_count, rows.transfer_in_count,
 		rows.transfer_out_count, rows.player_name, rows.player_position, rows.team_short_name
@@ -71,8 +144,9 @@ async function readPublishedSelectionStats(
 		])) as { rows: Record<string, unknown>[] };
 		const first = result.rows[0];
 		if (!first) return null;
-		if (first.ownership_state !== "READY") return null;
-		const totalEntries = Number(first.expected_entries ?? 0);
+		const publication = parsePublicLeagueSelectionPublication(first);
+		if (!publication || publication.ownershipState !== "READY") return null;
+		const totalEntries = publication.expectedEntries;
 		const percent = (value: number) => (totalEntries > 0 ? (value / totalEntries) * 100 : 0);
 		const rows = result.rows.filter(
 			(row) => row.element_id !== null && row.element_id !== undefined
@@ -90,7 +164,7 @@ async function readPublishedSelectionStats(
 			};
 		});
 		const captain =
-			first.captaincy_state === "READY"
+			publication.captaincyState === "READY"
 				? rows
 						.map((row) => ({
 							id: Number(row.element_id),
@@ -107,7 +181,7 @@ async function readPublishedSelectionStats(
 						.slice(0, limit)
 				: [];
 		const viceCaptain =
-			first.vice_captaincy_state === "READY"
+			publication.viceCaptaincyState === "READY"
 				? rows
 						.map((row) => ({
 							id: Number(row.element_id),
@@ -123,7 +197,7 @@ async function readPublishedSelectionStats(
 						)
 						.slice(0, limit)
 				: [];
-		const transfersAvailable = first.transfers_state === "READY";
+		const transfersAvailable = publication.transfersState === "READY";
 		const transferRows = (direction: "in" | "out") =>
 			rows
 				.filter(
