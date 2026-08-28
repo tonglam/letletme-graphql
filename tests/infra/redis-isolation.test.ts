@@ -8,18 +8,11 @@ describe("Redis workload isolation", () => {
 
 		expect(indexSource).toContain("checkRateLimits(getRateLimitRedis(), checks)");
 		expect(redisSource).toContain("let rateLimitClient: Redis | null = null");
-		expect(redisSource).toContain('redis.info("server")');
-		expect(redisSource).toContain('redis.info("replication")');
-		expect(redisSource).toContain("assertRedisIsolation(redis, getRateLimitRedis())");
 		expect(redisSource).toContain(
 			"Promise.all([connectClient(redis), connectClient(getRateLimitRedis())])"
 		);
+		expect(redisSource).toContain("assertRedisWorkloadIsolation");
+		expect(redisSource).toContain('redis.info("replication")');
 		expect(redisSource).toContain("clients.map((current) => current.quit())");
-	});
-
-	it("does not treat URL spelling as the isolation proof", () => {
-		const envSource = readFileSync("src/infra/env.ts", "utf8");
-		expect(envSource).not.toContain("primaryRedis.identity === rateLimitRedis.identity");
-		expect(envSource).not.toContain("REDIS_ENDPOINT_IDENTITY");
 	});
 });

@@ -483,7 +483,7 @@ describe("entriesService.getEntrySnapshot", () => {
 	});
 });
 
-describe("entriesService.getEntryById", () => {
+describe("entriesService entry lookup fallback", () => {
 	const originalGetEntryById = entriesRepository.getEntryById;
 	const originalFetch = globalThis.fetch;
 
@@ -521,7 +521,7 @@ describe("entriesService.getEntryById", () => {
 		expect(fetched).toBe(false);
 	});
 
-	it("falls back to FPL and caches the live summary when the row is missing", async () => {
+	it("falls back to FPL without publishing the unpersisted summary as a database cache hit", async () => {
 		entriesRepository.getEntryById = async () => null;
 		globalThis.fetch = (async () =>
 			new Response(
@@ -553,12 +553,7 @@ describe("entriesService.getEntryById", () => {
 		const entry = await entriesService.getEntryById(context, 424242);
 		expect(entry?.entryName).toBe("Let Let Me");
 		expect(entry?.playerName).toBe("Tong Lam");
-		expect(written).toHaveLength(1);
-		expect(written[0]?.key.startsWith("llm:gql:core-17:entries-info:")).toBe(true);
-		expect(JSON.parse(written[0]?.value ?? "{}")).toMatchObject({
-			id: 424242,
-			entryName: "Let Let Me",
-		});
+		expect(written).toEqual([]);
 	});
 
 	it("writes a short negative cache only for a real FPL 404", async () => {
@@ -615,11 +610,288 @@ describe("entriesService.getEntryById", () => {
 			logger: { warn: () => undefined },
 		} as unknown as GraphQLContext;
 		const calls = Array.from({ length: 10 }, (_, index) =>
-			entriesService.getEntryById(context, 620000 + index)
+			entriesService.lookupEntryById(context, 620000 + index)
 		);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(fetches).toBe(8);
 		release();
-		expect((await Promise.all(calls)).every((entry) => entry === null)).toBe(true);
+		const results = await Promise.all(calls);
+		expect(results.filter((result) => result.status === "SATURATED")).toHaveLength(2);
+		expect(results.filter((result) => result.status === "UNAVAILABLE")).toHaveLength(8);
+	});
+});
+
+describe("entriesService.lookupEntryById", () => {
+	const originalGetEntryById = entriesRepository.getEntryById;
+	const originalFetch = globalThis.fetch;
+	const originalDataUrl = process.env.LETLETME_DATA_URL;
+	const originalDataKey = process.env.LETLETME_DATA_API_KEY;
+
+	const restoreEnv = (
+		key: "LETLETME_DATA_URL" | "LETLETME_DATA_API_KEY",
+		value: string | undefined
+	): void => {
+		if (value === undefined) {
+			delete process.env[key];
+			delete Bun.env[key];
+		} else {
+			process.env[key] = value;
+			Bun.env[key] = value;
+		}
+	};
+
+	const contextForLookup = (overrides: Record<string, unknown> = {}): GraphQLContext =>
+		({
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+			dataRevision: "core-entry-lookup",
+			requestId: "entry-lookup-test",
+			redis: {
+				get: async () => null,
+				set: async () => "OK",
+				del: async () => 0,
+			},
+			logger: { error: () => undefined, warn: () => undefined },
+			...overrides,
+		}) as unknown as GraphQLContext;
+
+	const fplFoundResponse = (id: number): Response =>
+		new Response(
+			JSON.stringify({
+				id,
+				name: "Explicit Result",
+				player_first_name: "Test",
+				player_last_name: "Manager",
+			}),
+			{ status: 200, headers: { "Content-Type": "application/json" } }
+		);
+
+	afterEach(() => {
+		entriesRepository.getEntryById = originalGetEntryById;
+		globalThis.fetch = originalFetch;
+		restoreEnv("LETLETME_DATA_URL", originalDataUrl);
+		restoreEnv("LETLETME_DATA_API_KEY", originalDataKey);
+	});
+
+	it("returns a deterministic INVALID_ID result without touching dependencies", async () => {
+		const result = await entriesService.lookupEntryById({} as GraphQLContext, 0);
+		expect(result).toEqual({
+			status: "INVALID_ID",
+			entry: null,
+			retryable: false,
+			source: null,
+			persistenceState: null,
+		});
+	});
+
+	it("maps a database failure to a retryable UNAVAILABLE result", async () => {
+		entriesRepository.getEntryById = async (_context, _entryId) => {
+			throw new Error("database offline");
+		};
+		const result = await entriesService.lookupEntryById(
+			{
+				requestId: "entry-lookup-test",
+				logger: { error: () => undefined },
+			} as unknown as GraphQLContext,
+			101
+		);
+		expect(result).toMatchObject({
+			status: "UNAVAILABLE",
+			retryable: true,
+			source: null,
+			persistenceState: null,
+		});
+	});
+
+	it("preserves retryable lookup failures for nullable internal callers", async () => {
+		entriesRepository.getEntryById = async () => {
+			throw new Error("database offline");
+		};
+		await expect(entriesService.getEntryById(contextForLookup(), 101)).rejects.toMatchObject({
+			extensions: { code: "DEPENDENCY_UNAVAILABLE" },
+		});
+	});
+
+	it("returns the authoritative database hit without FPL or persistence work", async () => {
+		entriesRepository.getEntryById = async () => ({
+			id: 101,
+			entryName: "Stored",
+			playerName: "Manager",
+			region: null,
+			startedEvent: 1,
+			overallPoints: 10,
+			overallRank: 20,
+			bank: 1,
+			teamValue: 1000,
+			totalTransfers: 0,
+			lastEventId: 1,
+			lastOverallPoints: 10,
+			lastOverallRank: 20,
+			lastTeamValue: 1000,
+			lastBank: 1,
+		});
+		globalThis.fetch = (async () => {
+			throw new Error("dependencies must not be called");
+		}) as unknown as typeof fetch;
+
+		expect(await entriesService.lookupEntryById(contextForLookup(), 101)).toMatchObject({
+			status: "FOUND",
+			retryable: false,
+			source: "DATABASE",
+			persistenceState: "NOT_REQUIRED",
+		});
+	});
+
+	it("returns deterministic NOT_FOUND and caches only the verified FPL miss", async () => {
+		entriesRepository.getEntryById = async () => null;
+		globalThis.fetch = (async () =>
+			new Response("missing", { status: 404 })) as unknown as typeof fetch;
+		const writes: string[] = [];
+		const context = contextForLookup({
+			redis: {
+				get: async () => null,
+				set: async (_key: string, value: string) => {
+					writes.push(value);
+					return "OK";
+				},
+				del: async () => 0,
+			},
+		});
+
+		expect(await entriesService.lookupEntryById(context, 202)).toEqual({
+			status: "NOT_FOUND",
+			entry: null,
+			retryable: false,
+			source: "FPL",
+			persistenceState: null,
+		});
+		expect(writes).toHaveLength(1);
+	});
+
+	it("returns UNAVAILABLE without a null sentinel for a transient FPL failure", async () => {
+		entriesRepository.getEntryById = async () => null;
+		globalThis.fetch = (async () =>
+			new Response("busy", { status: 503 })) as unknown as typeof fetch;
+		let writes = 0;
+		const context = contextForLookup({
+			redis: {
+				get: async () => null,
+				set: async () => {
+					writes += 1;
+					return "OK";
+				},
+				del: async () => 0,
+			},
+		});
+
+		expect(await entriesService.lookupEntryById(context, 303)).toMatchObject({
+			status: "UNAVAILABLE",
+			entry: null,
+			retryable: true,
+			source: null,
+			persistenceState: null,
+		});
+		expect(writes).toBe(0);
+	});
+
+	it("reports QUEUED after a bounded authenticated Data enqueue", async () => {
+		entriesRepository.getEntryById = async () => null;
+		restoreEnv("LETLETME_DATA_URL", "https://data.example.test/");
+		restoreEnv("LETLETME_DATA_API_KEY", "entry-sync-key");
+		let calls = 0;
+		globalThis.fetch = (async (input: URL | string, init?: RequestInit) => {
+			calls += 1;
+			if (String(input).includes("fantasy.premierleague.com")) return fplFoundResponse(404);
+			expect(String(input)).toBe("https://data.example.test/entry-info/404/sync");
+			expect(new Headers(init?.headers).get("x-api-key")).toBe("entry-sync-key");
+			return new Response(JSON.stringify({ status: "queued", jobId: "entry-404" }), {
+				status: 202,
+				headers: { "Content-Type": "application/json" },
+			});
+		}) as unknown as typeof fetch;
+
+		expect(await entriesService.lookupEntryById(contextForLookup(), 404)).toMatchObject({
+			status: "FOUND",
+			retryable: false,
+			source: "FPL",
+			persistenceState: "QUEUED",
+		});
+		expect(calls).toBe(2);
+	});
+
+	it("returns the FPL hit with FAILED_RETRYABLE without attempting a shared metadata write", async () => {
+		entriesRepository.getEntryById = async () => null;
+		restoreEnv("LETLETME_DATA_URL", undefined);
+		restoreEnv("LETLETME_DATA_API_KEY", undefined);
+		globalThis.fetch = (async () => fplFoundResponse(505)) as unknown as typeof fetch;
+		const warnings: Array<Record<string, unknown>> = [];
+		let sharedWrites = 0;
+		const context = contextForLookup({
+			redis: {
+				get: async () => null,
+				set: async () => {
+					sharedWrites += 1;
+					throw new Error("shared writes are prohibited for FPL fallbacks");
+				},
+				del: async () => 0,
+			},
+			logger: {
+				error: () => undefined,
+				warn: (fields: Record<string, unknown>) => warnings.push(fields),
+			},
+		});
+
+		const result = await entriesService.lookupEntryById(context, 505);
+		expect(result).toMatchObject({
+			status: "FOUND",
+			retryable: false,
+			source: "FPL",
+			persistenceState: "FAILED_RETRYABLE",
+		});
+		expect(result.entry?.id).toBe(505);
+		expect(sharedWrites).toBe(0);
+		expect(warnings.some((fields) => fields.requestId === "entry-lookup-test")).toBe(true);
+	});
+
+	it("memoizes FPL persistence within a request and retries in a new request", async () => {
+		entriesRepository.getEntryById = async () => null;
+		restoreEnv("LETLETME_DATA_URL", "https://data.example.test/");
+		restoreEnv("LETLETME_DATA_API_KEY", "entry-sync-key");
+		let fplCalls = 0;
+		let dataCalls = 0;
+		globalThis.fetch = (async (input: URL | string) => {
+			if (String(input).includes("fantasy.premierleague.com")) {
+				fplCalls += 1;
+				return fplFoundResponse(606);
+			}
+			dataCalls += 1;
+			return new Response(JSON.stringify({ status: "queued", jobId: `entry-606-${dataCalls}` }), {
+				status: 202,
+				headers: { "Content-Type": "application/json" },
+			});
+		}) as unknown as typeof fetch;
+		let sharedWrites = 0;
+		const context = contextForLookup({
+			redis: {
+				get: async () => null,
+				set: async () => {
+					sharedWrites += 1;
+					return "OK";
+				},
+				del: async () => 0,
+			},
+		});
+
+		const first = await entriesService.lookupEntryById(context, 606);
+		const second = await entriesService.lookupEntryById(context, 606);
+		const third = await entriesService.lookupEntryById(contextForLookup(), 606);
+
+		expect(first).toMatchObject({ source: "FPL", persistenceState: "QUEUED" });
+		expect(second).toMatchObject({ source: "FPL", persistenceState: "QUEUED" });
+		expect(third).toMatchObject({ source: "FPL", persistenceState: "QUEUED" });
+		expect({ fplCalls, dataCalls, sharedWrites }).toEqual({
+			fplCalls: 2,
+			dataCalls: 2,
+			sharedWrites: 0,
+		});
 	});
 });

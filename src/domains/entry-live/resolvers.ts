@@ -1,6 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type { Entry } from "../entries/repository";
-import { entriesService } from "../entries/service";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
 import { withLiveSnapshotRoot } from "../live/snapshot-meta";
@@ -72,11 +71,7 @@ export const entryLiveResolvers = {
 			}),
 	},
 	EntryLive: {
-		entry: async (
-			parent: EntryLiveModel,
-			_args: Record<string, never>,
-			context: GraphQLContext
-		): Promise<Entry | null> => entriesService.getEntryById(context, parent.entry.id),
+		entry: (parent: EntryLiveModel): Entry => parent.entry,
 		event: async (
 			parent: EntryLiveModel,
 			_args: Record<string, never>,

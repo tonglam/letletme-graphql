@@ -1,4 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
+import type { Entry } from "../../contracts/entry";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 
@@ -6,24 +8,11 @@ const NULL_SENTINEL = "__entries:null__";
 // v4 requires the durable rich-publication timestamp used as final score provenance.
 const ENTRY_RESULT_CACHE_VERSION = "v4";
 const ENTRY_HISTORY_INFO_CACHE_VERSION = "v2";
+// Entry info values must be durable database rows. Bump the namespace so a
+// pre-hard-cut FPL fallback can never be interpreted as a persisted entry.
+const ENTRY_INFO_CACHE_VERSION = "v2";
 
-export type Entry = {
-	id: number;
-	entryName: string;
-	playerName: string;
-	region: string | null;
-	startedEvent: number | null;
-	overallPoints: number | null;
-	overallRank: number | null;
-	bank: number | null;
-	teamValue: number | null;
-	totalTransfers: number | null;
-	lastEventId: number | null;
-	lastOverallPoints: number | null;
-	lastOverallRank: number | null;
-	lastTeamValue: number | null;
-	lastBank: number | null;
-};
+export type { Entry } from "../../contracts/entry";
 
 export type EntryEventResult = {
 	entryId: number;
@@ -196,9 +185,6 @@ const mapEntryHistoryInfo = (row: DbEntryHistoryInfoRow): EntryHistoryInfo => ({
 	totalPoints: row.total_points,
 	overallRank: row.overall_rank,
 });
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const isNullableFiniteNumber = (value: unknown): boolean =>
 	value === null || (typeof value === "number" && Number.isFinite(value));
@@ -399,7 +385,9 @@ export const entriesRepository: EntriesRepository = {
 		if (uniqueIds.length === 0) {
 			return new Map();
 		}
-		const cacheKeys = uniqueIds.map((id) => gqlCacheKey(context, `entries:info:${id}`));
+		const cacheKeys = uniqueIds.map((id) =>
+			gqlCacheKey(context, `entries:info:${ENTRY_INFO_CACHE_VERSION}:${id}`)
+		);
 		const entries = new Map<number, Entry>();
 		const missingIds: number[] = [];
 
@@ -451,7 +439,7 @@ export const entriesRepository: EntriesRepository = {
 			const pipeline = context.redis.pipeline();
 			for (const entry of fetched) {
 				pipeline.set(
-					gqlCacheKey(context, `entries:info:${entry.id}`),
+					gqlCacheKey(context, `entries:info:${ENTRY_INFO_CACHE_VERSION}:${entry.id}`),
 					JSON.stringify(entry),
 					"EX",
 					QUERY_CACHE_TTL_SECONDS.METADATA

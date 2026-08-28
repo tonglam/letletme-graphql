@@ -555,10 +555,10 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 	if (ids.entryId) {
 		add(
 			"entries",
-			"entry",
-			"query Entry($id: Int!) { entry(id: $id) { id entryName } }",
+			"entryLookup",
+			"query EntryLookup($id: Int!) { entryLookup(id: $id) { status retryable source persistenceState entry { id entryName } } }",
 			{ id: ids.entryId },
-			"entry"
+			"entryLookup"
 		);
 		add(
 			"entries",

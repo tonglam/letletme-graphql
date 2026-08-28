@@ -18,7 +18,7 @@ Auth, serve `/api/auth/*`, issue device sessions, or accept cookie sessions.
 4. Public server-rendered Web reads use the independent GraphQL service token.
 
 Protected entry-scoped fields require a verified entry binding. The public
-`entry` lookup and `calcLivePointsByEntry` live calculation are deliberate
+`entryLookup` result and `calcLivePointsByEntry` live calculation are deliberate
 exceptions used by public comparison/live-score pages; they do not establish
 identity or grant access to history, transfers, leagues, My FPL, or tournament
 data. The `fpl_entry_id` column alone is not sufficient for protected fields;
@@ -41,7 +41,7 @@ the verified web account.
 
 ## Public GraphQL boundary
 
-`me`, public `entry`, and public live calculation remain available behind the
+`me`, public `entryLookup`, and public live calculation remain available behind the
 trusted ingress where documented by the schema. History, transfers, league,
 My FPL, and tournament fields are authorized against the resolved principal.
 Removed fields include `myDevices`, `revokeDevice`,

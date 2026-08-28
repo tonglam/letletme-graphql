@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import {
-	lookupFplEntry,
-	lookupFplEntryResult,
-	mapFplEntrySummaryToEntry,
-} from "../../src/infra/fpl-entry-lookup";
+import { lookupFplEntryResult, mapFplEntrySummaryToEntry } from "../../src/infra/fpl-entry-lookup";
 
 const originalFetch = globalThis.fetch;
 
@@ -47,8 +43,8 @@ describe("mapFplEntrySummaryToEntry", () => {
 	});
 });
 
-describe("lookupFplEntry", () => {
-	it("returns a mapped entry when FPL has the team", async () => {
+describe("lookupFplEntryResult", () => {
+	it("returns an explicit found result when FPL has the team", async () => {
 		globalThis.fetch = (async (input: URL | string) => {
 			expect(String(input)).toBe("https://fantasy.premierleague.com/api/entry/424242/");
 			return new Response(
@@ -64,22 +60,27 @@ describe("lookupFplEntry", () => {
 			);
 		}) as unknown as typeof fetch;
 
-		const entry = await lookupFplEntry(424242);
-		expect(entry?.id).toBe(424242);
-		expect(entry?.entryName).toBe("Let Let Me");
-		expect(entry?.playerName).toBe("Tong Lam");
+		const result = await lookupFplEntryResult(424242);
+		expect(result.status).toBe("found");
+		if (result.status !== "found") throw new Error("expected found result");
+		expect(result.entry.id).toBe(424242);
+		expect(result.entry.entryName).toBe("Let Let Me");
+		expect(result.entry.playerName).toBe("Tong Lam");
 	});
 
-	it("returns null for a missing or malformed FPL team", async () => {
+	it("distinguishes a missing team from a malformed response", async () => {
 		globalThis.fetch = (async () =>
 			new Response("Not found", { status: 404 })) as unknown as typeof fetch;
-		expect(await lookupFplEntry(1)).toBeNull();
+		expect(await lookupFplEntryResult(1)).toEqual({ status: "not_found" });
 
 		globalThis.fetch = (async () =>
 			new Response(JSON.stringify({ id: 2, name: "Wrong" }), {
 				status: 200,
 			})) as unknown as typeof fetch;
-		expect(await lookupFplEntry(1)).toBeNull();
+		expect(await lookupFplEntryResult(1)).toEqual({
+			status: "unavailable",
+			reason: "invalid_response",
+		});
 	});
 
 	it("classifies 404 and transient responses separately", async () => {

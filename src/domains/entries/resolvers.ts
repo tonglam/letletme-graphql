@@ -1,4 +1,5 @@
 import { GraphQLError } from "graphql";
+import { normalizeFplChip } from "../../contracts/fpl-chip";
 import type { GraphQLContext } from "../../graphql/context";
 import type { ElementEventResultData } from "../entry-live/calc-service";
 import type { Player } from "../players/repository";
@@ -10,7 +11,7 @@ import {
 	SEARCH_ENTRIES_MAX_QUERY_LENGTH,
 	SEARCH_ENTRIES_MIN_QUERY_LENGTH,
 } from "./repository";
-import type { EntryGameweekTransfers } from "./service";
+import type { EntryGameweekTransfers, EntryLookupResult } from "./service";
 import { entriesService } from "./service";
 
 /**
@@ -120,54 +121,22 @@ export const normalizeEntrySearchLimit = (limit: number | null | undefined): num
 	return normalized;
 };
 
-export const entryResultChipToEnum = (raw: string | null): string => {
-	if (raw === null) {
-		return "NONE";
-	}
-
-	const value = raw.toUpperCase().trim();
-	const compactValue = value.replace(/[^A-Z0-9]/g, "");
-	if (
-		value === "BENCH_BOOST" ||
-		compactValue === "BENCHBOOST" ||
-		compactValue === "BBOOST" ||
-		compactValue === "BB"
-	) {
-		return "BENCH_BOOST";
-	}
-	if (
-		value === "TRIPLE_CAPTAIN" ||
-		compactValue === "TRIPLECAPTAIN" ||
-		compactValue === "3XC" ||
-		compactValue === "TC"
-	) {
-		return "TRIPLE_CAPTAIN";
-	}
-	if (value === "FREE_HIT" || compactValue === "FREEHIT" || compactValue === "FH") {
-		return "FREE_HIT";
-	}
-	if (value === "WILDCARD" || compactValue === "WILDCARD" || compactValue === "WC") {
-		return "WILDCARD";
-	}
-	if (value === "MANAGER" || compactValue === "MANAGER" || compactValue === "AM") {
-		return "MANAGER";
-	}
-	return "NONE";
-};
+export const entryResultChipToEnum = (raw: string | null): string =>
+	normalizeFplChip(raw, "NONE") ?? "NONE";
 
 export const entriesResolvers = {
 	Query: {
+		entryLookup: async (
+			_parent: unknown,
+			args: EntryArgs,
+			context: GraphQLContext
+		): Promise<EntryLookupResult> => entriesService.lookupEntryById(context, args.id),
+
 		entrySnapshot: async (
 			_parent: unknown,
 			args: EntryArgs,
 			context: GraphQLContext
 		): Promise<Entry | null> => entriesService.getEntrySnapshot(context, args.id),
-
-		entry: async (
-			_parent: unknown,
-			args: EntryArgs,
-			context: GraphQLContext
-		): Promise<Entry | null> => entriesService.getEntryById(context, args.id),
 
 		entryNameUsage: async (
 			_parent: unknown,

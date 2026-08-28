@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	getPlayerSeasonStatsLoadForContext,
 	resolvePlayerStatsContext,
 	resolvePlayerStatsFreshnessBudgetMs,
 } from "../../../src/domains/players/season-stats-at-event";
@@ -9,6 +10,7 @@ import {
 	buildTestCoreData,
 	TestRedis,
 } from "../../helpers/data-publication";
+import { gqlCacheKey } from "../../../src/infra/cache-key";
 
 const queryBuilder = (rows: unknown[]) => {
 	let selectedRows = [...rows];
@@ -18,6 +20,13 @@ const queryBuilder = (rows: unknown[]) => {
 			selectedRows = selectedRows.filter((row) => {
 				const actual = (row as Record<string, unknown>)[column];
 				return actual === value || String(actual) === String(value);
+			});
+			return builder;
+		},
+		in: (column: string, values: unknown[]) => {
+			selectedRows = selectedRows.filter((row) => {
+				const actual = (row as Record<string, unknown>)[column];
+				return values.some((value) => actual === value || String(actual) === String(value));
 			});
 			return builder;
 		},
@@ -225,5 +234,40 @@ describe("resolvePlayerStatsContext", () => {
 			rowCount: 0,
 			expectedRowCount: 0,
 		});
+	});
+
+	it("does not accept a pre-hard-cut available:false cache record as authoritative", async () => {
+		const core = buildTestCoreData(3);
+		const redis = new TestRedis(buildCorePublication("2627", 7, core));
+		const context = buildSnapshotContext(redis);
+		installPlayerStatsReads(context, core);
+		const key = gqlCacheKey(context, "players:season-stats:9:3:11");
+		redis.values.set(
+			key,
+			JSON.stringify({
+				elementId: 9,
+				eventId: 3,
+				available: false,
+				totalPoints: null,
+				form: null,
+			})
+		);
+
+		const load = await getPlayerSeasonStatsLoadForContext(context, [9], {
+			scope: "CURRENT_SEASON",
+			season: "2627",
+			asOfEventId: 3,
+			status: "AVAILABLE",
+			revision: "11",
+			sourceCheckedAt: null,
+			publishedAt: null,
+			rowCount: 220,
+			expectedRowCount: 220,
+		});
+
+		expect(load.sourceAvailable).toBe(true);
+		expect(load.stats.get(9)?.available).toBe(true);
+		expect(load.stats.get(9)?.eventId).toBe(3);
+		expect(key).not.toBe(gqlCacheKey(context, "players:season-stats:v2:9:3:11"));
 	});
 });

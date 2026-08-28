@@ -66,11 +66,9 @@ export async function requestEntryInfoSync(entryId: number): Promise<EntrySyncRe
 		return { ok: false, reason: "invalid entry id" };
 	}
 
-	return requestQueuedEntrySync(`/entry-info/${entryId}/sync`);
-}
-
-export function enqueueEntryInfoSync(entryId: number): void {
-	void requestEntryInfoSync(entryId);
+	const result = await requestQueuedEntrySync(`/entry-info/${entryId}/sync`);
+	metrics.entrySyncRequestsTotal.labels("entry_info", result.ok ? "queued" : "failed").inc();
+	return result;
 }
 
 /**

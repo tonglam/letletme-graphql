@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import type { LiveCalcData } from "../../../src/domains/entry-live/calc-service";
+import { entryLiveResolvers } from "../../../src/domains/entry-live/resolvers";
 import { projectEntryLiveFromCalc } from "../../../src/domains/entry-live/service";
 import type { Entry } from "../../../src/domains/entries/repository";
 import type { Event } from "../../../src/domains/events/repository";
@@ -113,5 +114,11 @@ describe("entryLive score authority", () => {
 			eventTransfers: 2,
 			score: { source: "FPL_FINAL_RESULT", state: "FINAL" },
 		});
+	});
+
+	it("reuses the entry already resolved by the root service", () => {
+		const projected = projectEntryLiveFromCalc({ entry, event, calc: eventLiveCalc });
+		expect(projected).not.toBeNull();
+		expect(entryLiveResolvers.EntryLive.entry(projected!)).toBe(entry);
 	});
 });

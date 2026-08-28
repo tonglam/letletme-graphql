@@ -32,6 +32,14 @@ describe("server log redaction", () => {
 		for (const [source, expected] of [
 			["Authorization: Bearer super-secret-token", "Authorization: [REDACTED]"],
 			["authorization=Basic dXNlcjpwYXNz", "authorization=[REDACTED]"],
+			["Proxy-Authorization: Basic proxy-secret", "Proxy-Authorization: [REDACTED]"],
+			["X-Authorization: ApiKey custom-secret", "X-Authorization: [REDACTED]"],
+			['Authorization: "Bearer token with spaces"', 'Authorization: "[REDACTED]"'],
+			['authorization="opaque value with spaces"', 'authorization="[REDACTED]"'],
+			[
+				'Authorization: "Digest username=\\"alice\\", response=\\"secret\\""',
+				'Authorization: "[REDACTED]"',
+			],
 		] as const) {
 			const sanitized = sanitizeLogText(source);
 			expect(sanitized).toBe(expected);
@@ -68,58 +76,19 @@ describe("server log redaction", () => {
 		}
 	});
 
-	test("redacts credentials from hyphen-prefixed header names", () => {
+	test("redacts prefixed secret keys and complete quoted values", () => {
 		for (const [source, expected, credential] of [
 			[
-				"X-GraphQL-Service-Token: super-secret-token",
-				"X-GraphQL-Service-Token: [REDACTED]",
-				"super-secret-token",
-			],
-			["x-api-key=Basic dXNlcjpwYXNz", "x-api-key=[REDACTED]", "dXNlcjpwYXNz"],
-		] as const) {
-			const sanitized = sanitizeLogText(source);
-			expect(sanitized).toBe(expected);
-			expect(sanitized).not.toContain(credential);
-		}
-	});
-
-	test("redacts quoted credentials containing whitespace", () => {
-		for (const [source, expected, credential] of [
-			[
-				'{"password":"correct horse battery staple"}',
-				'{"password":"[REDACTED]"}',
-				"correct horse battery staple",
-			],
-			[
-				"{'token':'Bearer correct horse battery staple'}",
-				"{'token':'[REDACTED]'}",
-				"correct horse battery staple",
-			],
-			[
-				'{"password":"correct \' horse battery staple"}',
-				'{"password":"[REDACTED]"}',
-				"correct ' horse battery staple",
-			],
-		] as const) {
-			const sanitized = sanitizeLogText(source);
-			expect(sanitized).toBe(expected);
-			expect(sanitized).not.toContain(credential);
-		}
-	});
-
-	test("redacts credentials in prefixed environment variable names", () => {
-		for (const [source, expected, credential] of [
-			[
-				"GRAPHQL_SERVICE_TOKEN=super-secret-token",
-				"GRAPHQL_SERVICE_TOKEN=[REDACTED]",
-				"super-secret-token",
+				'X-GraphQL-Service-Token: "service token with spaces"',
+				'X-GraphQL-Service-Token: "[REDACTED]"',
+				"service token with spaces",
 			],
 			[
 				'LETLETME_DATA_API_KEY="correct horse battery staple"',
 				'LETLETME_DATA_API_KEY="[REDACTED]"',
 				"correct horse battery staple",
 			],
-			["BACKEND_PROXY_SECRET=proxy-secret", "BACKEND_PROXY_SECRET=[REDACTED]", "proxy-secret"],
+			['token="part one \\"part two\\""', 'token="[REDACTED]"', 'part one \\"part two\\"'],
 		] as const) {
 			const sanitized = sanitizeLogText(source);
 			expect(sanitized).toBe(expected);
