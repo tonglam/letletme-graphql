@@ -1,4 +1,5 @@
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
+import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixture-identities";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
@@ -267,12 +268,12 @@ export const PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 	{
 		name: "public-league-trends.access",
 		sql: PUBLIC_LEAGUE_ACCESS_SQL,
-		values: [2026, 1, 1],
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1],
 	},
 	{
 		name: "public-league-trends.selection",
 		sql: PUBLIC_LEAGUE_SELECTION_SQL,
-		values: [2026, 1, 1],
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1],
 	},
 ];
 

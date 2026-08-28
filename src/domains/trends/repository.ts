@@ -1,6 +1,7 @@
 import { GraphQLError } from "graphql";
 import { createHash } from "crypto";
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
+import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixture-identities";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
 import type { GraphQLContext } from "../../graphql/context";
 import { authorizeViewerEntry, viewerEntryIdForPrincipal } from "../../graphql/authorization";
@@ -199,14 +200,18 @@ export const TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "trends.snapshot-cohort-public",
 		sql: TRENDS_SNAPSHOT_COHORT_PUBLIC_SQL,
-		values: [2026, 1, 1],
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1],
 	},
 	{
 		name: "trends.snapshot-cohort-mine",
 		sql: TRENDS_SNAPSHOT_COHORT_MINE_SQL,
-		values: [2026, 1, 1, 1],
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1, 1],
 	},
-	{ name: "trends.membership", sql: TRENDS_MEMBERSHIP_SQL, values: [2026, 1, 1] },
+	{
+		name: "trends.membership",
+		sql: TRENDS_MEMBERSHIP_SQL,
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1],
+	},
 	{
 		name: "trends.aggregate-union",
 		sql: TRENDS_AGGREGATE_UNION_SQL,

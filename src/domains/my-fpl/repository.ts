@@ -1,6 +1,7 @@
 import { GraphQLError } from "graphql";
 import type { QueryResultRow } from "pg";
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
+import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixture-identities";
 import type { GraphQLContext } from "../../graphql/context";
 import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
@@ -13,6 +14,7 @@ import {
 	tournamentsRepository,
 	type TournamentInfo,
 } from "../tournaments/repository";
+
 
 export const MY_FPL_EVENT_LIFECYCLE_SQL = `
 	SELECT event_id, finished, data_checked, live_snapshot_finalized_at
@@ -255,7 +257,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "my-fpl.snapshot-tournament-row-visibility",
 		sql: MY_FPL_SNAPSHOT_TOURNAMENT_ROW_VISIBILITY_SQL,
-		values: [2026, 1, "7", 1, 1],
+		values: [2026, 1, "7", GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1],
 		runtime: "must-return-row",
 		resultTypes: [
 			{
@@ -269,7 +271,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "my-fpl.assert-tournament-membership",
 		sql: MY_FPL_ASSERT_TOURNAMENT_MEMBERSHIP_SQL,
-		values: [2026, 1, 1],
+		values: [2026, 1, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID],
 		runtime: "must-return-row",
 	},
 	{
@@ -281,7 +283,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "my-fpl.competition-board",
 		sql: MY_FPL_COMPETITION_BOARD_SQL,
-		values: [2026, 1, "7", 1, "", 100, 0, 1],
+		values: [2026, 1, "7", GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, "", 100, 0, 1],
 		runtime: "must-return-board",
 		resultTypes: [
 			{
@@ -301,7 +303,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "my-fpl.competition-aggregate",
 		sql: MY_FPL_COMPETITION_AGGREGATE_SQL,
-		values: [2026, 1, "7", 1],
+		values: [2026, 1, "7", GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID],
 		runtime: "must-return-row",
 		resultTypes: [
 			{
@@ -315,7 +317,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "my-fpl.competition-season-path",
 		sql: MY_FPL_COMPETITION_SEASON_PATH_SQL,
-		values: [2026, 1, "7", 1],
+		values: [2026, 1, "7", GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID],
 		resultTypes: [
 			{
 				relation: "competition.my_fpl_snapshot_tournament_aggregates",
@@ -328,7 +330,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "my-fpl.competition-setup-status",
 		sql: MY_FPL_COMPETITION_SETUP_STATUS_SQL,
-		values: [2026, 1],
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID],
 	},
 ];
 
