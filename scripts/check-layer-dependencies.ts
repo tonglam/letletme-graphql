@@ -180,6 +180,17 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		}
 		return scopeFor(identifier);
 	};
+	const loaderAliasScopeFor = (declaration: ts.VariableDeclaration): ts.Node => {
+		const declarationList = declaration.parent;
+		const isVarDeclaration =
+			(declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0;
+		if (!isVarDeclaration) return scopeFor(declaration.name);
+		let scope: ts.Node | undefined = scopeFor(declaration.name);
+		while (scope && !ts.isFunctionLike(scope) && !ts.isSourceFile(scope)) {
+			scope = parentScope(scope);
+		}
+		return scope ?? sourceFile;
+	};
 	const isVisibleLoaderAlias = (identifier: ts.Identifier, name: string): boolean => {
 		if (!requireLoaderBindings.has(name) || name === "require") return false;
 		const referenceScope = scopeFor(identifier);
@@ -265,7 +276,11 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 						? !isShadowed(declaration.initializer, "require", true)
 						: isVisibleLoaderAlias(declaration.initializer, declaration.initializer.text))
 				) {
-					registerLoaderAlias(declaration.name.text, declaration.name);
+					registerLoaderAlias(
+						declaration.name.text,
+						declaration.name,
+						loaderAliasScopeFor(declaration)
+					);
 				}
 				const importedModule = declaration.initializer
 					? moduleSpecifierFromLoader(declaration.initializer)
