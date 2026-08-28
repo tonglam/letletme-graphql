@@ -60,6 +60,33 @@ test("layer checker recognizes TypeScript import-type expressions", () => {
 	]);
 });
 
+test("layer checker rejects nonliteral dynamic module specifiers", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'const target = "../domains/entries/service"; import(target); require(target);',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([
+		{ value: "", line: 1, dynamic: true },
+		{ value: "", line: 1, dynamic: true },
+	]);
+});
+
+test("layer checker recognizes relative module augmentations", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'declare module "../domains/entries/service" { export type Marker = string; }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
+	]);
+});
+
 test("layer checker recognizes triple-slash path references", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.ts",

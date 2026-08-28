@@ -25,6 +25,12 @@ export const isTypeScriptSourceFile = (file: string): boolean =>
 export const scriptKindForSourceFile = (file: string): ts.ScriptKind =>
 	extname(file) === ".tsx" ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
 
+export type ModuleSpecifier = {
+	value: string;
+	line: number;
+	dynamic?: boolean;
+};
+
 const sourceFilesUnder = (directory: string): string[] => {
 	const files: string[] = [];
 	for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -35,15 +41,17 @@ const sourceFilesUnder = (directory: string): string[] => {
 	return files;
 };
 
-export const moduleSpecifiers = (
-	sourceFile: ts.SourceFile
-): Array<{ value: string; line: number }> => {
-	const modules: Array<{ value: string; line: number }> = [];
+export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] => {
+	const modules: ModuleSpecifier[] = [];
 	const add = (node: ts.Node, value: string): void => {
 		if (value.startsWith(".")) {
 			const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 			modules.push({ value, line });
 		}
+	};
+	const addUnresolvedDynamic = (node: ts.Node): void => {
+		const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+		modules.push({ value: "", line, dynamic: true });
 	};
 	ts.forEachChild(sourceFile, function visit(node): void {
 		if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
@@ -59,6 +67,9 @@ export const moduleSpecifiers = (
 			const literal = node.argument.literal;
 			if (ts.isStringLiteralLike(literal)) add(literal, literal.text);
 		}
+		if (ts.isModuleDeclaration(node) && ts.isStringLiteralLike(node.name)) {
+			add(node.name, node.name.text);
+		}
 		if (ts.isCallExpression(node)) {
 			const expression = node.expression;
 			if (
@@ -70,6 +81,7 @@ export const moduleSpecifiers = (
 			) {
 				const argument = node.arguments[0];
 				if (argument && ts.isStringLiteralLike(argument)) add(argument, argument.text);
+				else if (argument) addUnresolvedDynamic(node);
 			}
 		}
 		ts.forEachChild(node, visit);
@@ -108,7 +120,13 @@ export const collectLayerDependencyFindings = (): string[] => {
 				true,
 				scriptKindForSourceFile(file)
 			);
-			for (const { value, line } of moduleSpecifiers(sourceFile)) {
+			for (const { value, line, dynamic } of moduleSpecifiers(sourceFile)) {
+				if (dynamic) {
+					findings.push(
+						`${relative(repositoryRoot, file)}:${line} uses a nonliteral dynamic module specifier that cannot be checked`
+					);
+					continue;
+				}
 				const target = resolveSourceModule(file, value);
 				if (!target) continue;
 				const forbidden = forbiddenRoots.find((root) => under(target, root));

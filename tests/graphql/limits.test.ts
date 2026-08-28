@@ -174,6 +174,19 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, deprecatedSymbols: ["@legacy(note:)"] });
 	});
 
+	it("reports deprecated arguments on variable-definition directives", () => {
+		const directiveSchema = buildSchema(`
+			directive @legacy(note: String @deprecated(reason: "Use current"))
+				on VARIABLE_DEFINITION | FIELD
+			type Query { current: String }
+		`);
+		const result = validateGraphQLRequestLimits(
+			{ query: 'query Usage($id: ID! @legacy(note: "old")) { current }' },
+			directiveSchema
+		);
+		expect(result).toMatchObject({ ok: true, deprecatedSymbols: ["@legacy(note:)"] });
+	});
+
 	it("reports deprecated enum and input values passed through executable directives", () => {
 		const directiveSchema = buildSchema(`
 			enum LegacyMode {

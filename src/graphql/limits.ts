@@ -15,6 +15,7 @@ import {
 	visit,
 	visitWithTypeInfo,
 	type GraphQLArgument,
+	type ASTNode,
 	type GraphQLCompositeType,
 	type DirectiveNode,
 	type GraphQLInputType,
@@ -530,15 +531,18 @@ const selectedDeprecatedSymbols = (
 	};
 	const typeInfo = new TypeInfo(schema);
 	const symbols = new Set<string>();
+	const variableDefaultValueNodes = new WeakSet<ASTNode>();
+	for (const definition of operation.variableDefinitions ?? []) {
+		if (!definition.defaultValue) continue;
+		visit(definition.defaultValue, {
+			enter(node) {
+				variableDefaultValueNodes.add(node);
+			},
+		});
+	}
 	visit(
 		selectedDocument,
 		visitWithTypeInfo(typeInfo, {
-			VariableDefinition() {
-				// Variable defaults are accounted for from the effective value below.
-				// Walking them here would also count a deprecated default when the
-				// caller supplied a non-deprecated runtime value.
-				return false;
-			},
 			Field: {
 				enter(node) {
 					if (!executableSelectionIsIncluded(node.directives, variables)) return false;
@@ -572,6 +576,7 @@ const selectedDeprecatedSymbols = (
 				}
 			},
 			ObjectField(node) {
+				if (variableDefaultValueNodes.has(node)) return;
 				const parentInputType = typeInfo.getParentInputType();
 				if (!parentInputType) return;
 				const namedParent = getNamedType(parentInputType);
@@ -581,7 +586,8 @@ const selectedDeprecatedSymbols = (
 					symbols.add(`${namedParent.name}.${field.name}`);
 				}
 			},
-			EnumValue() {
+			EnumValue(node) {
+				if (variableDefaultValueNodes.has(node)) return;
 				const inputType = typeInfo.getInputType();
 				const enumValue = typeInfo.getEnumValue();
 				if (!inputType || enumValue?.deprecationReason === undefined) return;
