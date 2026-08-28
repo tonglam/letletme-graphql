@@ -48,7 +48,11 @@ describe("Data Platform contract pin", () => {
 		expect(compatibilityProbe).toContain("validateDirectDataSqlContract(database)");
 		expect(compatibilityProbe).toContain("directSqlProbeCount");
 		expect(directSqlContract).toContain("BRIEFING_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("ENTRIES_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("GAMEWEEK_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("HOME_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("MY_FPL_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("PLAYER_DETAIL_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("PLAYERS_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("PLAYER_VALUES_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("PLAYER_STATE_DATA_SQL_CONTRACT");

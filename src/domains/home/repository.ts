@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import {
 	OfficialLeagueKind,
 	mapFplOfficialKind,
@@ -257,6 +258,14 @@ export const HOME_PERSONAL_DESK_SQL = `
 	ORDER BY l.league_id ASC NULLS LAST,
 		l.league_type ASC NULLS LAST
 `;
+
+export const HOME_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "home.personal-desk",
+		sql: HOME_PERSONAL_DESK_SQL,
+		values: [2026, 1],
+	},
+];
 
 const isoDate = (value: string | Date | null): string | null => {
 	if (value === null) return null;

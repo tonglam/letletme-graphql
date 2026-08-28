@@ -1,5 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type { Entry } from "../../contracts/entry";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
@@ -301,6 +302,14 @@ export const SEARCH_ENTRIES_SQL = `
 		entry_id ASC
 	LIMIT $3
 `;
+
+export const ENTRIES_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "entries.search",
+		sql: SEARCH_ENTRIES_SQL,
+		values: [2026, "manager", 10],
+	},
+];
 
 export const escapeIlikePattern = (value: string): string =>
 	value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");

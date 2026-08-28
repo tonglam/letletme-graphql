@@ -14,7 +14,10 @@ import {
 	readPriceChangeLiveBoard,
 	readPriceChangeLiveCursor,
 } from "../../src/infra/price-change-live-client";
-import { readPriceChangePredictionsByPublicationId } from "../../src/infra/price-change-predictions-client";
+import {
+	PUBLICATION_ITEM_METADATA_SQL,
+	readPriceChangePredictionsByPublicationId,
+} from "../../src/infra/price-change-predictions-client";
 
 const HOT_PREFIX = "fpl:price-changes:hot";
 const seasonCode = "2026";
@@ -700,14 +703,13 @@ describe("price-change live client", () => {
 						],
 					};
 				}
-				if (sql.includes("octet_length(payload)")) {
+				if (sql === PUBLICATION_ITEM_METADATA_SQL) {
 					return {
 						rows: durable.manifest.items.map((item) => ({
 							publication_id: durable.manifest.publicationId,
 							item_name: item.name,
 							item_count: item.count,
 							checksum: item.sha256,
-							payload_bytes: item.bytes,
 						})),
 					};
 				}
@@ -733,7 +735,8 @@ describe("price-change live client", () => {
 		assert.equal(queries.length, 3);
 		assert.ok(queries[2]?.includes("item_name = 'context'"));
 		assert.ok(queries[2]?.includes("ANY($1::uuid[])"));
-		assert.ok(queries[1]?.includes("octet_length(payload)"));
+		assert.equal(queries[1], PUBLICATION_ITEM_METADATA_SQL);
+		assert.ok(!queries[1]?.includes("payload"));
 		assert.ok(queries[0]?.includes("expires_at > now()"));
 	});
 
@@ -754,14 +757,13 @@ describe("price-change live client", () => {
 						],
 					};
 				}
-				if (sql.includes("octet_length(payload)")) {
+				if (sql === PUBLICATION_ITEM_METADATA_SQL) {
 					return {
 						rows: retained.manifest.items.map((item) => ({
 							publication_id: retained.manifest.publicationId,
 							item_name: item.name,
 							item_count: item.count,
 							checksum: item.sha256,
-							payload_bytes: item.bytes,
 						})),
 					};
 				}

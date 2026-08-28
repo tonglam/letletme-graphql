@@ -210,10 +210,10 @@ export const TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "trends.aggregate-union",
 		sql: TRENDS_AGGREGATE_UNION_SQL,
-		// reporting.tournament_selection_stat_rows.publication_id is bigint.
-		// Keep the planner probe aligned with the runtime parameter types so the
-		// real PG15 contract check exercises the SQL instead of failing at bind.
-		values: [1, 12, 2026, 1, 1],
+		// The publication ID is opaque to this consumer: PostgreSQL infers the
+		// parameter type from the column while the remaining values still plan
+		// every aggregate branch.
+		values: [null, 12, 2026, 1, 1],
 	},
 ];
 

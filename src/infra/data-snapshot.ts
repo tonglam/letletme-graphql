@@ -1,4 +1,5 @@
 import type { QueryResultRow } from "pg";
+import type { DataSqlContractProbe } from "../contracts/data-sql-contract";
 import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
@@ -1294,7 +1295,7 @@ type CoreFallbackRow = QueryResultRow & {
 	source_metadata: unknown;
 };
 
-const CORE_FALLBACK_SQL = `
+export const CORE_FALLBACK_SQL = `
 	WITH active_publication AS MATERIALIZED (
 		SELECT
 			publication_id::text,
@@ -1459,7 +1460,7 @@ type LiveFallbackRow = QueryResultRow & {
  * item rows are never mixed with Redis or rebuilt from mutable tables: both
  * item checksums, counts, and the single active manifest must agree.
  */
-const LIVE_FALLBACK_SQL = `
+export const LIVE_FALLBACK_SQL = `
 	WITH active_publication AS MATERIALIZED (
 		SELECT
 			publication_id::text,
@@ -1677,7 +1678,7 @@ const CORE_TEAM_FALLBACK_SQL = `
 	FROM authority
 `;
 
-const CORE_LIVE_IDENTITY_FALLBACK_SQL = `
+export const CORE_LIVE_IDENTITY_FALLBACK_SQL = `
 	WITH active_publication AS MATERIALIZED (
 		SELECT
 			publication_id::text,
@@ -1710,6 +1711,16 @@ const CORE_LIVE_IDENTITY_FALLBACK_SQL = `
 		), '[]'::jsonb) AS players
 	FROM authority
 `;
+
+export const DATA_SNAPSHOT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{ name: "data-snapshot.core-fallback", sql: CORE_FALLBACK_SQL, values: [2026] },
+	{ name: "data-snapshot.live-fallback", sql: LIVE_FALLBACK_SQL, values: [2026, 1] },
+	{
+		name: "data-snapshot.core-live-identity-fallback",
+		sql: CORE_LIVE_IDENTITY_FALLBACK_SQL,
+		values: [2026],
+	},
+];
 
 const validateTargetedCoreAuthority = (
 	context: GraphQLContext,

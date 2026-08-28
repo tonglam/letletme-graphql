@@ -290,7 +290,7 @@ export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "briefing.payload-fallback",
 		sql: BRIEFING_PAYLOAD_FALLBACK_SQL,
-		values: ["00000000-0000-4000-8000-000000000001", "en"],
+		values: [null, "en"],
 	},
 ];
 

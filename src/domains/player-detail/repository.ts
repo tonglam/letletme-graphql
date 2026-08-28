@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import {
@@ -25,6 +26,23 @@ const NULL_SENTINEL = "__pd:null__";
 // by the previous runtime did not carry enough provenance to distinguish a
 // mutable recent-gameweek read from an authoritative publication.
 const PLAYER_DETAIL_CACHE_VERSION = "v2";
+
+export const PLAYER_DETAIL_HISTORICAL_TEAMS_SQL = `
+	SELECT DISTINCT ON (event_id) event_id, team_id
+	FROM fpl.player_fixture_stats
+	WHERE season_id = $1
+	  AND player_code = $2
+	  AND event_id = ANY($3::integer[])
+	ORDER BY event_id, fixture_id DESC
+`;
+
+export const PLAYER_DETAIL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "player-detail.historical-teams",
+		sql: PLAYER_DETAIL_HISTORICAL_TEAMS_SQL,
+		values: [1, 10_001, [1]],
+	},
+];
 
 export type PlayerAvailability = {
 	status: string;
@@ -526,12 +544,7 @@ async function loadHistoricalTeamIds(
 	if (eventIds.length === 0) return { values: new Map(), complete: true };
 	try {
 		const result = await context.database.query<{ event_id: number; team_id: number }>(
-			`SELECT DISTINCT ON (event_id) event_id, team_id
-			 FROM fpl.player_fixture_stats
-			 WHERE season_id = $1
-			   AND player_code = $2
-			   AND event_id = ANY($3::integer[])
-			 ORDER BY event_id, fixture_id DESC`,
+			PLAYER_DETAIL_HISTORICAL_TEAMS_SQL,
 			[context.currentSeason.seasonId, playerCode, eventIds]
 		);
 		const values = new Map(

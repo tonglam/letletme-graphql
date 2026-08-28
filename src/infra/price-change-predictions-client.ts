@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
-import { DateResolver, DateTimeResolver } from "graphql-scalars";
+<<<<<<< HEAD
+import { DateTimeResolver } from "graphql-scalars";
+import type { DataSqlContractProbe } from "../contracts/data-sql-contract";
 import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
@@ -641,7 +643,6 @@ type PublicationItemMetadataRow = QueryResultRow & {
 	item_name: string;
 	item_count: string | number;
 	checksum: string;
-	payload_bytes: string | number;
 };
 
 type ParsedPriceChangePublicationCandidate = {
@@ -660,7 +661,7 @@ type LoadedPriceChangePublicationCandidate = {
 // the complete one-hour hard-expiry window without an unbounded history scan.
 const RETIRED_PUBLICATION_LIMIT = 12;
 
-const PUBLICATION_CANDIDATES_SQL = `
+export const PUBLICATION_CANDIDATES_SQL = `
 	WITH active_candidates AS (
 		SELECT publication_id::text AS publication_id, revision::text AS revision, status, manifest
 		FROM ops.dataset_publications
@@ -687,7 +688,7 @@ const PUBLICATION_CANDIDATES_SQL = `
 	SELECT publication_id, revision, status, manifest FROM retired_candidates
 `;
 
-const PUBLICATION_BY_ID_SQL = `
+export const PUBLICATION_BY_ID_SQL = `
 	SELECT publication_id::text AS publication_id, revision::text AS revision, status, manifest
 	FROM ops.dataset_publications
 	WHERE publication_id = $1::uuid
@@ -699,14 +700,14 @@ const PUBLICATION_BY_ID_SQL = `
 	LIMIT 1
 `;
 
-const PUBLICATION_ITEMS_SQL = `
+export const PUBLICATION_ITEMS_SQL = `
 	SELECT publication_id::text AS publication_id, item_name, item_count, checksum, payload
 	FROM ops.dataset_publication_items
 	WHERE publication_id = ANY($1::uuid[])
 	ORDER BY publication_id, item_name
 `;
 
-const PUBLICATION_CONTEXT_ITEMS_SQL = `
+export const PUBLICATION_CONTEXT_ITEMS_SQL = `
 	SELECT publication_id::text AS publication_id, item_name, item_count, checksum, payload
 	FROM ops.dataset_publication_items
 	WHERE publication_id = ANY($1::uuid[])
@@ -714,14 +715,43 @@ const PUBLICATION_CONTEXT_ITEMS_SQL = `
 	ORDER BY publication_id
 `;
 
-const PUBLICATION_ITEM_METADATA_SQL = `
-	SELECT publication_id::text AS publication_id, item_name, item_count, checksum,
-	       octet_length(payload) AS payload_bytes
+export const PUBLICATION_ITEM_METADATA_SQL = `
+	SELECT publication_id::text AS publication_id, item_name, item_count, checksum
 	FROM ops.dataset_publication_items
 	WHERE publication_id = ANY($1::uuid[])
 	  AND item_name = ANY($2::text[])
 	ORDER BY publication_id, item_name
 `;
+
+const PRICE_CHANGE_CONTRACT_PUBLICATION_ID = "00000000-0000-4000-8000-000000000001";
+
+export const PRICE_CHANGE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "price-change.publication-candidates",
+		sql: PUBLICATION_CANDIDATES_SQL,
+		values: [2026],
+	},
+	{
+		name: "price-change.publication-by-id",
+		sql: PUBLICATION_BY_ID_SQL,
+		values: [PRICE_CHANGE_CONTRACT_PUBLICATION_ID, 2026],
+	},
+	{
+		name: "price-change.publication-items",
+		sql: PUBLICATION_ITEMS_SQL,
+		values: [[PRICE_CHANGE_CONTRACT_PUBLICATION_ID]],
+	},
+	{
+		name: "price-change.publication-context-items",
+		sql: PUBLICATION_CONTEXT_ITEMS_SQL,
+		values: [[PRICE_CHANGE_CONTRACT_PUBLICATION_ID]],
+	},
+	{
+		name: "price-change.publication-item-metadata",
+		sql: PUBLICATION_ITEM_METADATA_SQL,
+		values: [[PRICE_CHANGE_CONTRACT_PUBLICATION_ID], PRICE_CHANGE_ITEMS],
+	},
+];
 
 const loadPriceChangePublicationItems = async (
 	context: GraphQLContext,
@@ -1033,7 +1063,9 @@ export async function readPriceChangePredictionsCursor(
 	try {
 		// Keep the cursor fallback bounded to the same active plus twelve retained
 		// candidates used by the board reader. Only the context item is fetched;
-		// player arrays remain exclusive to the revision-bound board query.
+		// player arrays remain exclusive to the revision-bound board query. The
+		// metadata row is checked against the manifest checksum and count; the
+		// fetched context payload is then verified byte-for-byte below.
 		const authority = await context.database.query<PublicationCandidateRow>(
 			PUBLICATION_CANDIDATES_SQL,
 			[context.currentSeason.seasonId]
@@ -1102,8 +1134,7 @@ export async function readPriceChangePredictionsCursor(
 					!item ||
 					!manifestItem ||
 					Number(item.item_count) !== manifestItem.count ||
-					item.checksum !== manifestItem.sha256 ||
-					Number(item.payload_bytes) !== manifestItem.bytes
+					item.checksum !== manifestItem.sha256
 				) {
 					metadataValid = false;
 					break;

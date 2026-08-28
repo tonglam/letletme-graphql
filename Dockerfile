@@ -49,6 +49,7 @@ COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
 COPY --chown=bun:bun src ./src
 COPY --chown=bun:bun scripts/check-database-contract.ts ./scripts/check-database-contract.ts
 COPY --chown=bun:bun scripts/check-redis-connectivity.ts ./scripts/check-redis-connectivity.ts
+COPY --chown=bun:bun scripts/lib ./scripts/lib
 COPY --chown=bun:bun scripts/rate-limit-report.ts ./scripts/rate-limit-report.ts
 
 USER bun
