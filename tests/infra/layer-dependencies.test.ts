@@ -74,6 +74,17 @@ test("layer checker rejects nonliteral dynamic module specifiers", () => {
 	]);
 });
 
+test("layer checker rejects createRequire loaders in checked layers", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'import { createRequire as makeRequire } from "node:module"; const load = makeRequire(import.meta.url); load("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
+});
+
 test("layer checker recognizes relative module augmentations", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.ts",

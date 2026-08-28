@@ -45,6 +45,19 @@ describe("GraphQL domain manifest", () => {
 				access: "viewerEntry",
 			},
 		]);
+		const myFpl = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "my-fpl");
+		expect(myFpl?.conditionalAuth).toEqual([
+			{
+				field: "myFplCompetitionsDesk",
+				argument: "tournamentId",
+				when: "provided",
+				access: "viewerTournamentMember",
+			},
+		]);
+		expect(myFpl?.authByRootField.myFplCompetitionsDesk).toEqual([
+			"viewerEntry",
+			"viewerTournamentMember",
+		]);
 		const players = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "players");
 		expect(players?.rateLimitBudget.playersForPicker).toBe(5);
 		expect(players?.rateLimitBudget.teams).toBe(5);

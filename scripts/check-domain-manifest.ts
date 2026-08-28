@@ -33,7 +33,13 @@ const generated = [
 			.map(([field, budget]) => `${field}=${budget}`)
 			.join(", ");
 		const conditional = entry.conditionalAuth
-			.map((rule) => `${rule.field}: ${rule.argument}=${String(rule.equals)} -> ${rule.access}`)
+			.map((rule) => {
+				const condition =
+					rule.when === "provided"
+						? `${rule.argument}=provided`
+						: `${rule.argument}=${String(rule.equals)}`;
+				return `${rule.field}: ${condition} -> ${rule.access}`;
+			})
 			.join(", ");
 		const perRootAuth = Object.entries(entry.authByRootField)
 			.map(([field, accesses]) => `${field}=${accesses.join("+")}`)

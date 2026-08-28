@@ -20,7 +20,8 @@ export type RootFieldPolicy = Readonly<{
 
 export type RootFieldConditionalAccess = Readonly<{
 	argument: string;
-	equals: string | number | boolean;
+	equals?: string | number | boolean;
+	when?: "provided";
 	access: RootFieldAccess;
 }>;
 
@@ -265,6 +266,10 @@ export const ROOT_FIELD_CONDITIONAL_ACCESS: ReadonlyMap<
 > = new Map([
 	["trendCohorts", [{ argument: "access", equals: "MINE", access: "viewerEntry" }]],
 	["trendCohortSnapshot", [{ argument: "access", equals: "MINE", access: "viewerEntry" }]],
+	[
+		"myFplCompetitionsDesk",
+		[{ argument: "tournamentId", when: "provided", access: "viewerTournamentMember" }],
+	],
 ]);
 export const LIGHTWEIGHT_CORE_FIELDS: ReadonlySet<string> = new Set(
 	[...ROOT_FIELD_POLICIES]
@@ -279,8 +284,10 @@ export const getConditionalRootFieldAccess = (
 	fieldName: string,
 	args: Readonly<Record<string, unknown>>
 ): RootFieldAccess | undefined =>
-	ROOT_FIELD_CONDITIONAL_ACCESS.get(fieldName)?.find(
-		(condition) => args[condition.argument] === condition.equals
+	ROOT_FIELD_CONDITIONAL_ACCESS.get(fieldName)?.find((condition) =>
+		condition.when === "provided"
+			? args[condition.argument] !== null && args[condition.argument] !== undefined
+			: args[condition.argument] === condition.equals
 	)?.access;
 
 export const isGraphQLRootFieldClassified = (fieldName: string): boolean =>

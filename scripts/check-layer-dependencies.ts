@@ -43,6 +43,22 @@ const sourceFilesUnder = (directory: string): string[] => {
 
 export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] => {
 	const modules: ModuleSpecifier[] = [];
+	const createRequireBindings = new Set(["createRequire"]);
+	ts.forEachChild(sourceFile, (node) => {
+		if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier)) return;
+		if (node.moduleSpecifier.text !== "node:module" && node.moduleSpecifier.text !== "module")
+			return;
+		if (!node.importClause?.namedBindings || !ts.isNamedImports(node.importClause.namedBindings))
+			return;
+		for (const specifier of node.importClause.namedBindings.elements) {
+			if (
+				specifier.propertyName?.text === "createRequire" ||
+				specifier.name.text === "createRequire"
+			) {
+				createRequireBindings.add(specifier.name.text);
+			}
+		}
+	});
 	const add = (node: ts.Node, value: string): void => {
 		if (value.startsWith(".")) {
 			const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
@@ -72,6 +88,15 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		}
 		if (ts.isCallExpression(node)) {
 			const expression = node.expression;
+			if (
+				(ts.isIdentifier(expression) && createRequireBindings.has(expression.text)) ||
+				(ts.isPropertyAccessExpression(expression) && expression.name.text === "createRequire")
+			) {
+				// A createRequire loader can reach any runtime module through a later
+				// identifier call. Reject the loader in checked layers rather than
+				// attempting to infer every alias and closure that it can produce.
+				addUnresolvedDynamic(node);
+			}
 			if (
 				(ts.isIdentifier(expression) && expression.text === "require") ||
 				// Dynamic import may carry a second import-options argument. The

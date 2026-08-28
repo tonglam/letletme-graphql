@@ -9,7 +9,8 @@ import { effectiveRootRateLimitFloor } from "./limits";
 export type GraphQLConditionalAuth = Readonly<{
 	field: string;
 	argument: string;
-	equals: string | number | boolean;
+	equals?: string | number | boolean;
+	when?: "provided";
 	access: RootFieldAccess;
 }>;
 
