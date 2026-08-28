@@ -125,7 +125,11 @@ describe("direct Data SQL contract", () => {
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
-				if (text === DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.runtime)?.sql) {
+				if (
+					new Set(
+						DIRECT_DATA_SQL_CONTRACT.filter((probe) => probe.runtime).map((probe) => probe.sql)
+					).has(text)
+				) {
 					return { rows: [{}] } as unknown as QueryResult<Row>;
 				}
 				return { rows: [] } as unknown as QueryResult<Row>;
@@ -175,7 +179,11 @@ describe("direct Data SQL contract", () => {
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
-				if (text === DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.runtime)?.sql) {
+				if (
+					new Set(
+						DIRECT_DATA_SQL_CONTRACT.filter((probe) => probe.runtime).map((probe) => probe.sql)
+					).has(text)
+				) {
 					return { rows: [{}] } as unknown as QueryResult<Row>;
 				}
 				return { rows: [] } as unknown as QueryResult<Row>;
@@ -289,10 +297,16 @@ describe("direct Data SQL contract", () => {
 	});
 
 	test("requires the My FPL authority fixture to be visible to the runtime reader", () => {
-		const probe = DIRECT_DATA_SQL_CONTRACT.find(
-			(candidate) => candidate.name === "my-fpl.active-publications"
+		const runtimeProbes = DIRECT_DATA_SQL_CONTRACT.filter((probe) => probe.runtime);
+		expect(runtimeProbes.map((probe) => probe.name)).toEqual(
+			expect.arrayContaining([
+				"my-fpl.active-publications",
+				"my-fpl.snapshot-entry",
+				"my-fpl.snapshot-tournament-row-visibility",
+				"my-fpl.competition-aggregate",
+			])
 		);
-		expect(probe?.runtime).toBe("must-return-row");
+		expect(runtimeProbes.every((probe) => probe.runtime === "must-return-row")).toBe(true);
 	});
 
 	test("lets PostgreSQL infer the opaque Trends publication identity", () => {

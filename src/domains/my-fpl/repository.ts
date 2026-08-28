@@ -86,6 +86,17 @@ export const MY_FPL_SNAPSHOT_ENTRY_SQL = `
 	LIMIT 1
 `;
 
+export const MY_FPL_SNAPSHOT_TOURNAMENT_ROW_VISIBILITY_SQL = `
+	SELECT payload
+	FROM competition.my_fpl_snapshot_tournament_rows
+	WHERE season_id = $1
+		AND event_id = $2
+		AND revision = $3::bigint
+		AND tournament_id = $4
+		AND entry_id = $5
+	LIMIT 1
+`;
+
 export const MY_FPL_CURRENT_TOURNAMENT_MEMBERSHIPS_SQL = `
 	SELECT tournament_id
 	FROM competition.tournament_entries
@@ -231,9 +242,24 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.snapshot-entry",
 		sql: MY_FPL_SNAPSHOT_ENTRY_SQL,
 		values: [2026, 1, 1, "7"],
+		runtime: "must-return-row",
 		resultTypes: [
 			{
 				relation: "competition.my_fpl_snapshot_entries",
+				column: "payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+		],
+	},
+	{
+		name: "my-fpl.snapshot-tournament-row-visibility",
+		sql: MY_FPL_SNAPSHOT_TOURNAMENT_ROW_VISIBILITY_SQL,
+		values: [2026, 1, "7", 1, 1],
+		runtime: "must-return-row",
+		resultTypes: [
+			{
+				relation: "competition.my_fpl_snapshot_tournament_rows",
 				column: "payload",
 				pgType: "jsonb",
 				acceptedPgTypes: ["json", "jsonb"],
@@ -273,6 +299,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.competition-aggregate",
 		sql: MY_FPL_COMPETITION_AGGREGATE_SQL,
 		values: [2026, 1, "7", 1],
+		runtime: "must-return-row",
 		resultTypes: [
 			{
 				relation: "competition.my_fpl_snapshot_tournament_aggregates",
