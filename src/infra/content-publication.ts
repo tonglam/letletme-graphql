@@ -269,6 +269,13 @@ export const BRIEFING_EVENT_CONTEXT_SQL = `
 	) AS exists
 `;
 
+export const BRIEFING_PAYLOAD_FALLBACK_SQL = `
+	SELECT payload, payload_bytes, payload_sha256
+	FROM content.publication_payloads
+	WHERE publication_id = $1 AND locale = $2
+	LIMIT 1
+`;
+
 export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "briefing.active-metadata",
@@ -279,6 +286,11 @@ export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "briefing.event-context",
 		sql: BRIEFING_EVENT_CONTEXT_SQL,
 		values: [],
+	},
+	{
+		name: "briefing.payload-fallback",
+		sql: BRIEFING_PAYLOAD_FALLBACK_SQL,
+		values: ["00000000-0000-4000-8000-000000000001", "en"],
 	},
 ];
 
@@ -486,10 +498,7 @@ export async function readBriefingWeek(
 				payload: unknown;
 				payload_bytes: number;
 				payload_sha256: string;
-			}>(
-				`SELECT payload, payload_bytes, payload_sha256 FROM content.publication_payloads WHERE publication_id = $1 AND locale = $2 LIMIT 1`,
-				[metadata.publication_id, locale]
-			);
+			}>(BRIEFING_PAYLOAD_FALLBACK_SQL, [metadata.publication_id, locale]);
 			const row = fallback.rows[0];
 			const parsed = row ? parseBriefingWeekPayload(row.payload, locale) : null;
 			const manifest = metadata.locale_manifest[locale];

@@ -14,6 +14,9 @@ describe("direct Data SQL contract", () => {
 
 	test("contains the direct reporting relations and only read statements", () => {
 		const sql = DIRECT_DATA_SQL_CONTRACT.map((probe) => probe.sql).join("\n");
+		expect(sql).toContain("content.publication_payloads");
+		expect(sql).toContain("payload_bytes");
+		expect(sql).toContain("payload_sha256");
 		expect(sql).toContain("reporting.player_season_summary_rows");
 		expect(sql).toContain("reporting.tournament_selection_stat_publications");
 		expect(sql).toContain("reporting.tournament_selection_stat_rows");
@@ -22,6 +25,13 @@ describe("direct Data SQL contract", () => {
 			expect(statement).toMatch(/^(SELECT|WITH)\b/);
 			expect(Array.isArray(probe.values)).toBe(true);
 		}
+	});
+
+	test("uses the runtime Briefing payload fallback as a planner probe", () => {
+		const fallback = DIRECT_DATA_SQL_CONTRACT.find(
+			(probe) => probe.name === "briefing.payload-fallback"
+		);
+		expect(fallback?.values).toEqual(["00000000-0000-4000-8000-000000000001", "en"]);
 	});
 
 	test("binds the Trends aggregate publication identity as a bigint", () => {
