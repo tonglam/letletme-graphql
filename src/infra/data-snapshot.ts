@@ -1446,7 +1446,7 @@ type CoreLiveIdentityFallbackRow = CoreTeamFallbackRow & {
 	players: unknown;
 };
 
-type LiveLifecycleStatusRow = QueryResultRow & {
+export type LiveLifecycleStatusRow = QueryResultRow & {
 	event_id: string | number;
 	state: string;
 	observed_at: string | Date;
@@ -1485,7 +1485,7 @@ const LIVE_LIFECYCLE_STATES = new Set<LiveLifecycleState>([
 	"FINALIZED",
 ]);
 
-const mapLiveLifecycleStatus = (
+export const mapLiveLifecycleStatus = (
 	row: LiveLifecycleStatusRow | undefined
 ): LiveLifecycleStatus | null => {
 	if (!row) return null;
@@ -1951,7 +1951,7 @@ export const DATA_SNAPSHOT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = 
 		name: "data-snapshot.live-lifecycle-status",
 		sql: LIVE_LIFECYCLE_STATUS_SQL,
 		values: [2026, 1],
-		runtime: "must-return-row",
+		runtime: "must-return-live-lifecycle",
 		resultTypes: [
 			{
 				relation: "ops.live_lifecycle_status",

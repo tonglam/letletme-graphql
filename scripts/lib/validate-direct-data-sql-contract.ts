@@ -2,7 +2,10 @@ import type {
 	DataSqlContractProbe,
 	DataSqlContractResultType,
 } from "../../src/contracts/data-sql-contract";
-import { ENTRIES_DATA_SQL_CONTRACT } from "../../src/domains/entries/repository";
+import {
+	ENTRIES_DATA_SQL_CONTRACT,
+	parseEntrySearchRow,
+} from "../../src/domains/entries/repository";
 import { GAMEWEEK_DATA_SQL_CONTRACT } from "../../src/domains/gameweek/service";
 import { HOME_MARKET_DATA_SQL_CONTRACT } from "../../src/domains/home/market-repository";
 import { HOME_DATA_SQL_CONTRACT } from "../../src/domains/home/repository";
@@ -39,9 +42,11 @@ import {
 } from "../../src/infra/content-publication";
 import {
 	DATA_SNAPSHOT_DATA_SQL_CONTRACT,
+	mapLiveLifecycleStatus,
 	parseCoreFallbackRow,
 	parseLiveFallbackRow,
 	type LiveFallbackRow,
+	type LiveLifecycleStatusRow,
 } from "../../src/infra/data-snapshot";
 import type { QueryExecutor } from "../../src/infra/database";
 import {
@@ -171,6 +176,16 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 				const result = await database.query(probe.sql, probe.values);
 				if (result.rows.length === 0) {
 					throw new Error("runtime reader role cannot see the Data-owned authority fixture row");
+				}
+				if (probe.runtime === "must-return-entry-search") {
+					const entry = result.rows
+						.map(parseEntrySearchRow)
+						.find((candidate) => candidate !== null);
+					if (!entry) {
+						throw new Error(
+							"runtime reader role returned an Entry search row that the production decoder rejects"
+						);
+					}
 				}
 				if (probe.runtime === "must-return-publication") {
 					const publication = result.rows
@@ -309,6 +324,16 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					if (!live) {
 						throw new Error(
 							"runtime reader role returned a live publication that the production decoder rejects"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-live-lifecycle") {
+					const lifecycle = mapLiveLifecycleStatus(
+						result.rows[0] as LiveLifecycleStatusRow | undefined
+					);
+					if (!lifecycle || lifecycle.eventId !== Number(probe.values[1])) {
+						throw new Error(
+							"runtime reader role returned a live lifecycle row that the production decoder rejects"
 						);
 					}
 				}

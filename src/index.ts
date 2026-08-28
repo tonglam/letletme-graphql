@@ -291,6 +291,37 @@ const runGraphQLRateLimitStage = async ({
 	rateLimitWorkload?: string;
 }): Promise<GraphQLRateLimitStageExecution> => {
 	if (v3Checks.length === 0) return { response: null };
+	// In shadow mode the global emergency valve is still an enforcing safety
+	// control.  The token-bucket script intentionally performs an all-or-none
+	// debit, so evaluating global and observational buckets together would let a
+	// client/workload denial consume nothing from global.  Split the global
+	// check first: an exhausted global budget must immediately reject, while the
+	// remaining scopes stay observational until enforce mode is enabled.
+	if (isGraphQLRateLimitShadowMode && v3Checks.length > 1) {
+		const globalChecks = v3Checks.filter((check) => check.scope === "global");
+		const observationalChecks = v3Checks.filter((check) => check.scope !== "global");
+		if (globalChecks.length > 0 && observationalChecks.length > 0) {
+			const global = await checkV3GraphQLRateLimits({
+				checks: globalChecks,
+				corsHeaders,
+				enforce: true,
+				rateLimitWorkload,
+			});
+			if (global.response || observationalChecks.length === 0) {
+				return { response: global.response, v3Decision: global.decision };
+			}
+			const observational = await checkV3GraphQLRateLimits({
+				checks: observationalChecks,
+				corsHeaders,
+				enforce: false,
+				rateLimitWorkload,
+			});
+			return {
+				response: observational.response,
+				v3Decision: observational.decision,
+			};
+		}
+	}
 	const v3 = await checkV3GraphQLRateLimits({
 		checks: v3Checks,
 		corsHeaders,

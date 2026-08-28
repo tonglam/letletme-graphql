@@ -213,6 +213,18 @@ const isEntry = (value: unknown): value is Entry => {
 	);
 };
 
+/**
+ * Validate the row shape returned by the direct search statement.  Search
+ * aliases `entry_id` to `id`, so the production mapper and the contract probe
+ * must agree on the exact persisted-entry shape rather than accepting any
+ * non-empty row from PostgreSQL.
+ */
+export const parseEntrySearchRow = (value: unknown): Entry | null => {
+	if (!isRecord(value)) return null;
+	const mapped = mapEntry(value as DbEntryRow);
+	return isEntry(mapped) ? mapped : null;
+};
+
 const evictMalformedCache = async (context: GraphQLContext, key: string): Promise<void> => {
 	try {
 		await context.redis.del(key);
@@ -308,6 +320,7 @@ export const ENTRIES_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "entries.search",
 		sql: SEARCH_ENTRIES_SQL,
 		values: [2026, "manager", 10],
+		runtime: "must-return-entry-search",
 	},
 ];
 

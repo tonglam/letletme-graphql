@@ -62,6 +62,24 @@ const mockSnapshotEntryPayload = {
 	transfers: [],
 } as const;
 
+const mockEntrySearchRow = {
+	id: 1,
+	entry_name: "Contract Entry",
+	player_name: "Contract Player",
+	region: null,
+	started_event: 1,
+	overall_points: 42,
+	overall_rank: 1,
+	bank: 0,
+	team_value: 1000,
+	total_transfers: 0,
+	last_event_id: 1,
+	last_overall_points: 42,
+	last_overall_rank: 1,
+	last_team_value: 1000,
+	last_bank: 0,
+} as const;
+
 const CONTRACT_PUBLICATION_ID = "00000000-0000-4000-8000-000000000001";
 const CONTRACT_CORE_PUBLICATION_ID = "00000000-0000-4000-8000-000000000007";
 
@@ -301,6 +319,17 @@ const mockLiveFallbackRow = {
 	fixture_payload_bytes: 2,
 	event_live_payload_sha256: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
 	fixture_payload_sha256: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+} as const;
+
+const mockLiveLifecycleStatusRow = {
+	event_id: 1,
+	state: "LIVE_ACTIVE",
+	observed_at: "2026-08-10T00:00:00.000Z",
+	last_changed_at: "2026-08-10T00:00:00.000Z",
+	next_refresh_at: "2026-08-10T00:01:00.000Z",
+	live_revision: "1",
+	publication_id: CONTRACT_PUBLICATION_ID,
+	source_checked_at: "2026-08-10T00:00:00.000Z",
 } as const;
 
 const mockMarketRow = {
@@ -677,6 +706,9 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-entry-search") {
+					return { rows: [mockEntrySearchRow] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-publication") {
 					return { rows: [mockSnapshotPublication] } as unknown as QueryResult<Row>;
 				}
@@ -729,6 +761,9 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-live") {
 					return { rows: [mockLiveFallbackRow] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-live-lifecycle") {
+					return { rows: [mockLiveLifecycleStatusRow] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-tournament") {
 					return {
@@ -929,6 +964,9 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-entry-search") {
+					return { rows: [mockEntrySearchRow] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-publication") {
 					return { rows: [mockSnapshotPublication] } as unknown as QueryResult<Row>;
 				}
@@ -963,6 +1001,9 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-live") {
 					return { rows: [mockLiveFallbackRow] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-live-lifecycle") {
+					return { rows: [mockLiveLifecycleStatusRow] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
@@ -1057,6 +1098,9 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-entry-search") {
+					return { rows: [mockEntrySearchRow] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-publication") {
 					return { rows: [mockSnapshotPublication] } as unknown as QueryResult<Row>;
 				}
@@ -1254,6 +1298,7 @@ describe("direct Data SQL contract", () => {
 			runtimeProbes.every(
 				(probe) =>
 					probe.runtime === "must-return-row" ||
+					probe.runtime === "must-return-entry-search" ||
 					probe.runtime === "must-return-publication" ||
 					probe.runtime === "must-return-snapshot-entry" ||
 					probe.runtime === "must-return-briefing" ||
@@ -1265,6 +1310,7 @@ describe("direct Data SQL contract", () => {
 					probe.runtime === "must-return-season-path" ||
 					probe.runtime === "must-return-briefing-metadata" ||
 					probe.runtime === "must-return-live" ||
+					probe.runtime === "must-return-live-lifecycle" ||
 					probe.runtime === "must-return-market" ||
 					probe.runtime === "must-return-player-state-revision" ||
 					probe.runtime === "must-return-historical-team" ||

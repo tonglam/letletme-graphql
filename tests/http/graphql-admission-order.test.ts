@@ -70,5 +70,24 @@ describe("GraphQL admission ordering", () => {
 		expect(source).toContain('isGraphQLRateLimitShadowMode && decision.deniedScope === "global"');
 		expect(source).toContain("failClosed: enforce || isGraphQLRateLimitShadowMode");
 		expect(source).toContain("isShadowOnlyRateLimitDecision(decision)");
+		expect(source).toContain(
+			'const globalChecks = v3Checks.filter((check) => check.scope === "global")'
+		);
+		expect(source).toContain("checks: globalChecks");
+		expect(source).toContain("enforce: true");
+	});
+
+	it("charges the global bucket before observational shadow scopes", () => {
+		const source = readFileSync("src/index.ts", "utf8");
+		const globalSplit = source.indexOf("const globalChecks = v3Checks.filter");
+		const globalCall = source.indexOf("checks: globalChecks", globalSplit);
+		const observationalSplit = source.indexOf("const observationalChecks =", globalSplit);
+		const observationalCall = source.indexOf("checks: observationalChecks", globalSplit);
+
+		expect(globalSplit).toBeGreaterThan(-1);
+		expect(observationalSplit).toBeGreaterThan(globalSplit);
+		expect(globalCall).toBeGreaterThan(observationalSplit);
+		expect(observationalCall).toBeGreaterThan(observationalSplit);
+		expect(observationalCall).toBeGreaterThan(globalCall);
 	});
 });
