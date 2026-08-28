@@ -168,34 +168,29 @@ jobs:
             -o BatchMode=yes -o StrictHostKeyChecking=yes
             -o IdentitiesOnly=yes -o UserKnownHostsFile="$SSH_DIR/known_hosts")
           target="$VPS_USER@$VPS_HOST"
-          remote_env=$(ssh "${ssh_common[@]}" "$target" 'umask 077; mktemp /tmp/letletme-graphql-env.XXXXXX')
-          remote_token=$(ssh "${ssh_common[@]}" "$target" 'umask 077; mktemp /tmp/letletme-graphql-token.XXXXXX')
-          cleanup_remote() {
-            set +e
-            ssh "${ssh_common[@]}" "$target" "rm -f -- $(printf '%q' "$remote_env") $(printf '%q' "$remote_token")"
-          }
-          trap cleanup_remote EXIT
-          printf '%s' "$GRAPHQL_ENV" | ssh "${ssh_common[@]}" "$target" "cat > $(printf '%q' "$remote_env")"
-          printf '%s' "$GHCR_TOKEN" | ssh "${ssh_common[@]}" "$target" "cat > $(printf '%q' "$remote_token")"
+          env_b64=$(printf '%s' "$GRAPHQL_ENV" | base64 | tr -d '\n')
+          token_b64=$(printf '%s' "$GHCR_TOKEN" | base64 | tr -d '\n')
           printf -v deploy_sha_q '%q' "$DEPLOY_SHA"
           printf -v image_ref_q '%q' "$IMAGE_REF"
           printf -v ghcr_user_q '%q' "$GHCR_USER"
           printf -v workdir_q '%q' "$VPS_WORKDIR"
-          printf -v env_q '%q' "$remote_env"
-          printf -v token_q '%q' "$remote_token"
           printf -v active_file_q '%q' "${ACTIVE_SLOT_FILE:-/var/lib/letletme-graphql/active-slot}"
           printf -v helper_q '%q' "${SWITCH_HELPER:-/usr/local/sbin/letletme-graphql-switch-slot}"
           printf -v public_health_q '%q' "$PUBLIC_GRAPHQL_HEALTH_URL"
           printf -v public_graphql_q '%q' "$PUBLIC_GRAPHQL_URL"
           printf -v rollout_q '%q' "$RATE_LIMIT_ROLLOUT"
-          # Keep the staged secret files under a remote-side trap. The runner
-          # cleanup below remains a best-effort fallback, but a dropped SSH
-          # session must not leave credentials behind on the VPS.
+          # Create and populate both secret files inside the same remote shell
+          # that installs cleanup traps. If this SSH session drops while either
+          # payload is being uploaded, the remote EXIT trap still removes the
+          # files; no second connection is required for cleanup.
           {
             cat <<'REMOTE_WRAPPER'
           set -euo pipefail
+          remote_env=""
+          remote_token=""
           cleanup_staged_secrets() {
-            rm -f -- "$REMOTE_ENV_FILE" "$REMOTE_TOKEN_FILE" || true
+            if [ -n "$remote_env" ]; then rm -f -- "$remote_env" || true; fi
+            if [ -n "$remote_token" ]; then rm -f -- "$remote_token" || true; fi
           }
           cleanup_on_exit() {
             local cleanup_status=$?
@@ -213,11 +208,30 @@ jobs:
           trap 'cleanup_on_signal 130' INT
           trap 'cleanup_on_signal 143' TERM
           trap 'cleanup_on_signal 129' HUP
+          remote_env=$(umask 077; mktemp /tmp/letletme-graphql-env.XXXXXX)
+          remote_token=$(umask 077; mktemp /tmp/letletme-graphql-token.XXXXXX)
+          IFS= read -r env_marker
+          test "$env_marker" = "__LETLETME_GRAPHQL_ENV_B64__"
+          IFS= read -r env_payload
+          test -n "$env_payload"
+          printf '%s' "$env_payload" | base64 --decode > "$remote_env"
+          IFS= read -r token_marker
+          test "$token_marker" = "__LETLETME_GHCR_TOKEN_B64__"
+          IFS= read -r token_payload
+          test -n "$token_payload"
+          printf '%s' "$token_payload" | base64 --decode > "$remote_token"
+          chmod 600 "$remote_env" "$remote_token"
+          export GRAPHQL_ENV_FILE="$remote_env"
+          export GHCR_TOKEN_FILE="$remote_token"
           bash -s
           REMOTE_WRAPPER
+            printf '%s\n' "__LETLETME_GRAPHQL_ENV_B64__"
+            printf '%s\n' "$env_b64"
+            printf '%s\n' "__LETLETME_GHCR_TOKEN_B64__"
+            printf '%s\n' "$token_b64"
             cat scripts/deploy-remote.sh
           } | ssh "${ssh_common[@]}" "$target" \
-            "REMOTE_ENV_FILE=$env_q REMOTE_TOKEN_FILE=$token_q DEPLOY_SHA=$deploy_sha_q IMAGE_REF=$image_ref_q GHCR_USER=$ghcr_user_q GHCR_TOKEN_FILE=$token_q GRAPHQL_ENV_FILE=$env_q VPS_WORKDIR=$workdir_q ACTIVE_SLOT_FILE=$active_file_q SWITCH_HELPER=$helper_q PUBLIC_GRAPHQL_HEALTH_URL=$public_health_q PUBLIC_GRAPHQL_URL=$public_graphql_q RATE_LIMIT_ROLLOUT=$rollout_q bash -s"
+            "DEPLOY_SHA=$deploy_sha_q IMAGE_REF=$image_ref_q GHCR_USER=$ghcr_user_q VPS_WORKDIR=$workdir_q ACTIVE_SLOT_FILE=$active_file_q SWITCH_HELPER=$helper_q PUBLIC_GRAPHQL_HEALTH_URL=$public_health_q PUBLIC_GRAPHQL_URL=$public_graphql_q RATE_LIMIT_ROLLOUT=$rollout_q bash -s"
 
       - name: Promote verified digest to latest
         run: |

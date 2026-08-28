@@ -232,14 +232,21 @@ describe("production deployment workflow", () => {
 
 	test("cleans staged deployment secrets from the remote shell", () => {
 		expect(workflow).toContain("cleanup_staged_secrets()");
-		expect(workflow).toContain('rm -f -- "$REMOTE_ENV_FILE" "$REMOTE_TOKEN_FILE"');
+		expect(workflow).toContain('remote_env=$(umask 077; mktemp /tmp/letletme-graphql-env.XXXXXX)');
+		expect(workflow).toContain('remote_token=$(umask 077; mktemp /tmp/letletme-graphql-token.XXXXXX)');
+		expect(workflow).toContain('printf \'%s\' "$env_payload" | base64 --decode > "$remote_env"');
+		expect(workflow).toContain('printf \'%s\' "$token_payload" | base64 --decode > "$remote_token"');
 		expect(workflow).toContain("trap cleanup_on_exit EXIT");
 		expect(workflow).toContain("trap 'cleanup_on_signal 130' INT");
 		expect(workflow).toContain("trap 'cleanup_on_signal 143' TERM");
 		expect(workflow).toContain("trap 'cleanup_on_signal 129' HUP");
-		expect(workflow).toContain("REMOTE_ENV_FILE=$env_q REMOTE_TOKEN_FILE=$token_q");
+		expect(workflow).toContain('printf \'%s\\n\' "__LETLETME_GRAPHQL_ENV_B64__"');
+		expect(workflow).toContain('printf \'%s\\n\' "__LETLETME_GHCR_TOKEN_B64__"');
+		expect(workflow).toContain("DEPLOY_SHA=$deploy_sha_q IMAGE_REF=$image_ref_q GHCR_USER=$ghcr_user_q");
 		expect(workflow).toContain("cat scripts/deploy-remote.sh");
-	});
+		expect(workflow).not.toContain("remote_env=$(ssh");
+		expect(workflow).not.toContain("remote_token=$(ssh");
+});
 
 	test("binds image and container identity to the exact commit", () => {
 		expect(dockerfile).toContain("ARG VCS_REVISION=unknown");
