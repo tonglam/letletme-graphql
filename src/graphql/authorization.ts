@@ -24,7 +24,7 @@ type AuthorizationInput = {
 	principal?: Principal | null;
 	data: ReadModelClient;
 	logger: Logger;
-	schema?: GraphQLSchema;
+	schema: GraphQLSchema;
 	requestScope?: object;
 	authorizedTournamentMemberships?: Set<number>;
 };
@@ -552,7 +552,7 @@ const authorizePayload = async ({
 	principal?: Principal | null;
 	data: ReadModelClient;
 	requestScope?: object;
-	schema?: GraphQLSchema;
+	schema: GraphQLSchema;
 	authorizedTournamentMemberships?: Set<number>;
 }): Promise<AuthorizationResult> => {
 	if (typeof payload.query !== "string") return { ok: true };
