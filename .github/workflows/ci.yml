@@ -194,6 +194,9 @@ jobs:
       - name: Validate startup against the real PG15 catalog
         run: bun run contract:check
 
+      - name: Validate GraphQL direct Data SQL contract against the fixture
+        run: bun run data:contract:check
+
       - name: Validate isolated Redis clients
         run: bun run redis:check
 

@@ -10,6 +10,7 @@
 		"coverage:critical": "bun scripts/check-critical-coverage.ts",
 		"test:watch": "bun test --watch src",
 		"contract:check": "bun scripts/check-database-contract.ts",
+		"data:contract:check": "bun scripts/check-data-main-compatibility.ts",
 		"redis:check": "bun scripts/check-redis-connectivity.ts",
 		"rate-limit:report": "bun scripts/rate-limit-report.ts",
 		"rate-limit:profile": "bun scripts/generate-rate-limit-profile.ts",

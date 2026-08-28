@@ -75,6 +75,8 @@ describe("Data Platform contract pin", () => {
 		expect(workflow).toContain("data-platform/tests/fixtures/graphql-consumer-authority.sql");
 		expect(workflow).toContain("tests/fixtures/database-contract.sql");
 		expect(workflow).toContain("bun run contract:check");
-		expect(pinnedContractProbe).toContain("validateDirectDataSqlContract(database)");
+		expect(workflow).toContain("bun run data:contract:check");
+		expect(pinnedContractProbe).not.toContain("validateDirectDataSqlContract(database)");
+		expect(compatibilityProbe).toContain("validateDirectDataSqlContract(database)");
 	});
 });
