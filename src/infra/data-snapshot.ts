@@ -1344,6 +1344,14 @@ export const CORE_FALLBACK_SQL = `
 	FROM authority
 `;
 
+/** Explicitly binds the phase columns consumed by mapCorePhase. */
+export const CORE_PHASE_SHAPE_SQL = `
+	SELECT phase_id, name, start_event, stop_event, highest_score
+	FROM fpl.phases
+	WHERE season_id = $1
+	ORDER BY phase_id
+`;
+
 type CoreEventFallbackRow = QueryResultRow & {
 	authority_count: string | number;
 	publication_id: string | null;
@@ -1714,6 +1722,7 @@ export const CORE_LIVE_IDENTITY_FALLBACK_SQL = `
 
 export const DATA_SNAPSHOT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{ name: "data-snapshot.core-fallback", sql: CORE_FALLBACK_SQL, values: [2026] },
+	{ name: "data-snapshot.core-phase-shape", sql: CORE_PHASE_SHAPE_SQL, values: [2026] },
 	{
 		name: "data-snapshot.live-fallback",
 		sql: LIVE_FALLBACK_SQL,

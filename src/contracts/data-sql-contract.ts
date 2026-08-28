@@ -23,4 +23,6 @@ export type DataSqlContractProbe = Readonly<{
 	sql: string;
 	values: readonly unknown[];
 	resultTypes?: readonly DataSqlContractResultType[];
+	/** Execute the statement with the runtime reader role and require a visible fixture row. */
+	runtime?: "must-return-row";
 }>;

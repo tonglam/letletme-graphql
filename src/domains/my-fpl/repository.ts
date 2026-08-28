@@ -211,7 +211,12 @@ export const MY_FPL_COMPETITION_SETUP_STATUS_SQL = `
 
 export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{ name: "my-fpl.event-lifecycle", sql: MY_FPL_EVENT_LIFECYCLE_SQL, values: [2026] },
-	{ name: "my-fpl.active-publications", sql: MY_FPL_ACTIVE_PUBLICATIONS_SQL, values: [2026] },
+	{
+		name: "my-fpl.active-publications",
+		sql: MY_FPL_ACTIVE_PUBLICATIONS_SQL,
+		values: [2026],
+		runtime: "must-return-row",
+	},
 	{
 		name: "my-fpl.publication-by-event-revision",
 		sql: MY_FPL_PUBLICATION_BY_EVENT_REVISION_SQL,

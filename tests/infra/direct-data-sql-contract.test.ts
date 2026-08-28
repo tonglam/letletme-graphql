@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	DIRECT_DATA_SQL_CONTRACT,
+	allowedResultTypes,
 	validateDirectDataSqlContract,
 } from "../../scripts/lib/validate-direct-data-sql-contract";
 import type { QueryResult, QueryResultRow } from "pg";
@@ -21,6 +22,7 @@ import { PLAYER_DETAIL_HISTORICAL_TEAMS_SQL } from "../../src/domains/player-det
 import {
 	CORE_FALLBACK_SQL,
 	CORE_LIVE_IDENTITY_FALLBACK_SQL,
+	CORE_PHASE_SHAPE_SQL,
 	LIVE_FALLBACK_SQL,
 	LIVE_LIFECYCLE_STATUS_SQL,
 } from "../../src/infra/data-snapshot";
@@ -123,6 +125,9 @@ describe("direct Data SQL contract", () => {
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
+				if (text === DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.runtime)?.sql) {
+					return { rows: [{}] } as unknown as QueryResult<Row>;
+				}
 				return { rows: [] } as unknown as QueryResult<Row>;
 			},
 		};
@@ -145,6 +150,17 @@ describe("direct Data SQL contract", () => {
 		]);
 	});
 
+	test("always keeps the primary PostgreSQL type in the accepted type set", () => {
+		expect(
+			allowedResultTypes({
+				relation: "content.publication_payloads",
+				column: "payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json"],
+			})
+		).toEqual(["json", "jsonb"]);
+	});
+
 	test("accepts JSON for every decoded JSON contract column", async () => {
 		const database: QueryExecutor = {
 			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {
@@ -159,10 +175,33 @@ describe("direct Data SQL contract", () => {
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
+				if (text === DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.runtime)?.sql) {
+					return { rows: [{}] } as unknown as QueryResult<Row>;
+				}
 				return { rows: [] } as unknown as QueryResult<Row>;
 			},
 		};
 		expect(await validateDirectDataSqlContract(database)).toBe(DIRECT_DATA_SQL_CONTRACT.length);
+	});
+
+	test("fails closed when the runtime reader cannot see the authority fixture", async () => {
+		const database: QueryExecutor = {
+			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {
+				if (text.includes("format_type(attribute.atttypid, attribute.atttypmod)")) {
+					const relations = values[0] as readonly string[];
+					const columns = values[1] as readonly string[];
+					return {
+						rows: relations.map((relation, index) => ({
+							relation_name: relation,
+							column_name: columns[index],
+							actual_type: "jsonb",
+						})) as unknown as Row[],
+					} as unknown as QueryResult<Row>;
+				}
+				return { rows: [] } as unknown as QueryResult<Row>;
+			},
+		};
+		await expect(validateDirectDataSqlContract(database)).rejects.toThrow(/runtime visibility/);
 	});
 
 	test("uses the runtime Briefing payload fallback as a planner probe", () => {
@@ -233,6 +272,9 @@ describe("direct Data SQL contract", () => {
 			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "data-snapshot.core-fallback")?.sql
 		).toBe(CORE_FALLBACK_SQL);
 		expect(
+			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "data-snapshot.core-phase-shape")?.sql
+		).toBe(CORE_PHASE_SHAPE_SQL);
+		expect(
 			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "data-snapshot.live-fallback")?.sql
 		).toBe(LIVE_FALLBACK_SQL);
 		expect(
@@ -244,6 +286,13 @@ describe("direct Data SQL contract", () => {
 			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "data-snapshot.live-lifecycle-status")
 				?.sql
 		).toBe(LIVE_LIFECYCLE_STATUS_SQL);
+	});
+
+	test("requires the My FPL authority fixture to be visible to the runtime reader", () => {
+		const probe = DIRECT_DATA_SQL_CONTRACT.find(
+			(candidate) => candidate.name === "my-fpl.active-publications"
+		);
+		expect(probe?.runtime).toBe("must-return-row");
 	});
 
 	test("lets PostgreSQL infer the opaque Trends publication identity", () => {

@@ -59,8 +59,8 @@ const RESULT_TYPE_SQL = `
 	ORDER BY target.relation_name, target.column_name
 `;
 
-const allowedResultTypes = (assertion: DataSqlContractResultType): readonly string[] =>
-	[...new Set(assertion.acceptedPgTypes ?? [assertion.pgType])].sort();
+export const allowedResultTypes = (assertion: DataSqlContractResultType): readonly string[] =>
+	[...new Set([assertion.pgType, ...(assertion.acceptedPgTypes ?? [])])].sort();
 
 const resultTypeAssertions = (): readonly DataSqlContractResultType[] => {
 	const assertions = new Map<string, DataSqlContractResultType>();
@@ -120,10 +120,19 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 		names.add(probe.name);
 		try {
 			await database.query(`EXPLAIN (FORMAT JSON, COSTS OFF) ${probe.sql}`, probe.values);
+			if (probe.runtime === "must-return-row") {
+				const result = await database.query(probe.sql, probe.values);
+				if (result.rows.length === 0) {
+					throw new Error("runtime reader role cannot see the Data-owned authority fixture row");
+				}
+			}
 		} catch (cause) {
-			throw new Error(`Data candidate direct SQL contract is unavailable: ${probe.name}`, {
-				cause,
-			});
+			throw new Error(
+				`Data candidate direct SQL contract is unavailable: ${probe.name}${
+					probe.runtime === "must-return-row" ? " (runtime visibility)" : ""
+				}`,
+				{ cause }
+			);
 		}
 	}
 	return names.size;
