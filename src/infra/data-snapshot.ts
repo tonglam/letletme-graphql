@@ -1648,6 +1648,8 @@ export const parseLiveFallbackRow = (
 	const fixtureItem = manifest?.items.find((item) => item.name === "fixtures");
 	const eventLives = row?.event_lives;
 	const fixtures = row?.fixtures;
+	const decodedEventLives = mapArray(eventLives, mapLivePerformance);
+	const decodedFixtures = mapArray(fixtures, mapCoreFixture);
 	const eventLiveCount = integer(row?.event_live_item_count);
 	const fixtureCount = integer(row?.fixture_item_count);
 	const eventLivePayloadBytes = integer(row?.event_live_payload_bytes);
@@ -1666,6 +1668,8 @@ export const parseLiveFallbackRow = (
 		!fixtureItem ||
 		!Array.isArray(eventLives) ||
 		!Array.isArray(fixtures) ||
+		!decodedEventLives ||
+		!decodedFixtures ||
 		eventLiveCount === null ||
 		fixtureCount === null ||
 		eventLiveCount !== eventLives.length ||

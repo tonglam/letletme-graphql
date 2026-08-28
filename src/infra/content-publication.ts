@@ -279,6 +279,10 @@ export const parseBriefingActiveMetadata = (
 		typeof value.season_code !== "string" ||
 		(value.target_event_id !== null && !Number.isSafeInteger(value.target_event_id)) ||
 		(value.event_name !== null && typeof value.event_name !== "string") ||
+		!iso(value.source_checked_at) ||
+		!iso(value.published_at) ||
+		(value.deadline_time !== null && !iso(value.deadline_time)) ||
+		(value.valid_until !== null && !iso(value.valid_until)) ||
 		!hasLocalePair(value.locale_manifest)
 	) {
 		return null;
@@ -398,12 +402,28 @@ export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 			},
 		],
 	},
+	{
+		name: "briefing.payload-fallback-zh-CN",
+		sql: BRIEFING_PAYLOAD_FALLBACK_CONTRACT_SQL,
+		values: ["week", "zh-CN"],
+		runtime: "must-return-briefing",
+		resultTypes: [
+			{
+				relation: "content.publication_payloads",
+				column: "payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+		],
+	},
 ];
 
 async function activeMetadata(database: QueryExecutor): Promise<ActiveMetadata | null> {
 	const result = await database.query<ActiveMetadata>(BRIEFING_ACTIVE_METADATA_SQL, ["week"]);
 	const row = result.rows[0];
-	return row ? toMetadata(row) : null;
+	return row && typeof row.publication_id === "string"
+		? parseBriefingActiveMetadata(row, row.publication_id)
+		: null;
 }
 
 const payloadKey = (revision: number, locale: BriefingLocale): string =>

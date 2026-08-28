@@ -571,7 +571,7 @@ type LoadedReviewContext = {
 	publications: Map<number, MyFplSnapshotPublication>;
 };
 
-type MyFplSnapshotPublication = MyFplSnapshotMeta & {
+export type MyFplSnapshotPublication = MyFplSnapshotMeta & {
 	expectedEntryCount: number;
 	readyEntryCount: number;
 	emptyEntryCount: number;
@@ -1880,6 +1880,53 @@ export const parseSnapshotEntryPayload = (value: unknown): SnapshotEntryPayload 
 	};
 };
 
+export type SnapshotEntryContractRow = Readonly<{
+	payload: SnapshotEntryPayload;
+	isEmpty: boolean;
+	picksCount: number;
+	entryRowCount: number;
+	aggregateRowCount: number;
+}>;
+
+/**
+ * Decode the complete snapshot-entry envelope consumed by the PostgreSQL
+ * reader. The payload codec alone cannot detect a producer count or empty
+ * sentinel drift, so contract probes and runtime reads share this guard.
+ */
+export const parseSnapshotEntryContractRow = (
+	value: unknown,
+	publication: Pick<MyFplSnapshotPublication, "expectedEntryCount" | "expectedTournamentCount">,
+	entryId: number,
+	eventId: number
+): SnapshotEntryContractRow | null => {
+	if (!isRecord(value)) return null;
+	const payload = parseSnapshotEntryPayload(value.payload);
+	const isEmpty = value.is_empty;
+	const picksCount = asInteger(value.picks_count);
+	const entryRowCount = asInteger(value.entry_row_count);
+	const aggregateRowCount = asInteger(value.aggregate_row_count);
+	if (
+		!payload ||
+		typeof isEmpty !== "boolean" ||
+		picksCount === null ||
+		picksCount < 0 ||
+		picksCount > 15 ||
+		entryRowCount === null ||
+		aggregateRowCount === null ||
+		payload.entry.id !== entryId ||
+		payload.gameweek.eventId !== eventId ||
+		picksCount !== (payload.gameweek.result?.picks.length ?? 0) ||
+		isEmpty !== (payload.gameweek.state === "EMPTY") ||
+		(isEmpty && picksCount !== 0) ||
+		(!isEmpty && (payload.gameweek.state !== "READY" || picksCount !== 15)) ||
+		entryRowCount !== publication.expectedEntryCount ||
+		aggregateRowCount !== publication.expectedTournamentCount
+	) {
+		return null;
+	}
+	return { payload, isEmpty, picksCount, entryRowCount, aggregateRowCount };
+};
+
 const applyCurrentEntryNameToSnapshot = async (
 	context: GraphQLContext,
 	payload: SnapshotEntryPayload
@@ -1950,10 +1997,9 @@ const loadSnapshotEntry = async (
 		}
 	>(MY_FPL_SNAPSHOT_ENTRY_SQL, [context.currentSeason.seasonId, entryId, eventId, pinned]);
 	const row = result.rows[0];
-	if (!row || row.picks_count < 0 || row.picks_count > 15) return null;
-	const payload = parseSnapshotEntryPayload(row.payload);
-	if (!payload) return null;
-	if (payload.entry.id !== entryId) return null;
+	const envelope = parseSnapshotEntryContractRow(row, publication, entryId, eventId);
+	if (!envelope) return null;
+	const { payload } = envelope;
 	const historyEventIds = payload.history.map((historyRow) => historyRow.eventId);
 	const uniqueHistoryEventIds = new Set(historyEventIds);
 	const expectedHistoryEventIds = [...loadedContext.settledEventIds].filter(
@@ -1971,27 +2017,10 @@ const loadSnapshotEntry = async (
 	) {
 		return null;
 	}
-	const pickCount = payload.gameweek.result?.picks.length ?? 0;
-	if (
-		payload.gameweek.eventId !== eventId ||
-		row.picks_count !== pickCount ||
-		row.is_empty !== (payload.gameweek.state === "EMPTY") ||
-		(row.is_empty && pickCount !== 0) ||
-		(!row.is_empty && (payload.gameweek.state !== "READY" || pickCount !== 15))
-	)
-		return null;
-	if (
-		!Number.isSafeInteger(row.entry_row_count) ||
-		row.entry_row_count !== publication.expectedEntryCount ||
-		!Number.isSafeInteger(row.aggregate_row_count) ||
-		row.aggregate_row_count !== publication.expectedTournamentCount
-	) {
-		return null;
-	}
 	const loaded = {
 		publication,
 		payload: await applyCurrentEntryNameToSnapshot(context, payload),
-		isEmpty: row.is_empty,
+		isEmpty: envelope.isEmpty,
 	};
 	await writeQueryCache(
 		context,

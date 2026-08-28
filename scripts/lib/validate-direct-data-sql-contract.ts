@@ -2,6 +2,7 @@ import type {
 	DataSqlContractProbe,
 	DataSqlContractResultType,
 } from "../../src/contracts/data-sql-contract";
+import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../src/contracts/data-fixture-identities";
 import {
 	ENTRIES_DATA_SQL_CONTRACT,
 	parseEntrySearchRow,
@@ -11,12 +12,13 @@ import { HOME_MARKET_DATA_SQL_CONTRACT } from "../../src/domains/home/market-rep
 import { HOME_DATA_SQL_CONTRACT } from "../../src/domains/home/repository";
 import { MARKET_DATA_SQL_CONTRACT } from "../../src/domains/market/repository";
 import {
+	MY_FPL_ACTIVE_PUBLICATIONS_SQL,
 	MY_FPL_DATA_SQL_CONTRACT,
 	parseCompetitionAggregatePayload,
 	parseCompetitionBoardProbe,
 	parseCompetitionSeasonPathPoints,
 	parseSnapshotPublicationRow,
-	parseSnapshotEntryPayload,
+	parseSnapshotEntryContractRow,
 } from "../../src/domains/my-fpl/repository";
 import { buildMarketPulse, type MarketSnapshotRow } from "../../src/domains/market/repository";
 import { PLAYER_DETAIL_DATA_SQL_CONTRACT } from "../../src/domains/player-detail/repository";
@@ -31,9 +33,13 @@ import {
 } from "../../src/domains/player-state/repository";
 import {
 	parsePublicLeagueSelectionPublication,
+	parsePublicLeagueSelectionRow,
 	PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT,
 } from "../../src/domains/public-league-trends/repository";
-import { TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/trends/repository";
+import {
+	TRENDS_CONTRACT_PUBLICATION_ID_SQL,
+	TRENDS_DATA_SQL_CONTRACT,
+} from "../../src/domains/trends/repository";
 import {
 	BRIEFING_DATA_SQL_CONTRACT,
 	BRIEFING_ACTIVE_METADATA_SQL,
@@ -159,6 +165,57 @@ const validateResultTypes = async (database: QueryExecutor): Promise<void> => {
 	}
 };
 
+const resolveTrendsContractPublicationId = async (
+	database: QueryExecutor,
+	values: readonly unknown[]
+): Promise<number> => {
+	const seasonId = Number(values[2]);
+	const eventId = Number(values[4]);
+	if (!Number.isSafeInteger(seasonId) || !Number.isSafeInteger(eventId)) {
+		throw new Error("Trends contract probe has invalid season/event bind values");
+	}
+	const result = await database.query<{ publication_id?: unknown }>(
+		TRENDS_CONTRACT_PUBLICATION_ID_SQL,
+		[seasonId, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, eventId]
+	);
+	const publicationId = result.rows[0]?.publication_id;
+	const parsed =
+		typeof publicationId === "number"
+			? publicationId
+			: typeof publicationId === "string" && publicationId.trim() !== ""
+				? Number(publicationId)
+				: NaN;
+	if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+		throw new Error("runtime reader role cannot see an active Trends publication fixture");
+	}
+	return parsed;
+};
+
+const isValidTrendsRow = (row: unknown, requirePickPosition: boolean): boolean => {
+	if (!isRecord(row)) return false;
+	const elementId = Number(row.element_id);
+	const playerPosition = Number(row.player_position);
+	const count = Number(row.count);
+	return (
+		Number.isSafeInteger(elementId) &&
+		elementId > 0 &&
+		Number.isSafeInteger(playerPosition) &&
+		playerPosition >= 1 &&
+		playerPosition <= 4 &&
+		Number.isSafeInteger(count) &&
+		count >= 0 &&
+		typeof row.player_name === "string" &&
+		row.player_name.trim() !== "" &&
+		typeof row.team_short_name === "string" &&
+		row.team_short_name.trim() !== "" &&
+		(requirePickPosition
+			? Number.isSafeInteger(Number(row.pick_position)) &&
+				Number(row.pick_position) >= 1 &&
+				Number(row.pick_position) <= CONTRACT_FPL_SQUAD_SIZE
+			: row.pick_position === null || row.pick_position === undefined)
+	);
+};
+
 export const validateDirectDataSqlContract = async (database: QueryExecutor): Promise<number> => {
 	try {
 		await validateResultTypes(database);
@@ -173,7 +230,14 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 		try {
 			await database.query(`EXPLAIN (FORMAT JSON, COSTS OFF) ${probe.sql}`, probe.values);
 			if (probe.runtime) {
-				const result = await database.query(probe.sql, probe.values);
+				const runtimeValues =
+					probe.runtime === "must-return-trends-personal" && probe.values[0] === null
+						? [
+								await resolveTrendsContractPublicationId(database, probe.values),
+								...probe.values.slice(1),
+							]
+						: probe.values;
+				const result = await database.query(probe.sql, runtimeValues);
 				if (result.rows.length === 0) {
 					throw new Error("runtime reader role cannot see the Data-owned authority fixture row");
 				}
@@ -257,6 +321,29 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					const personalRows = result.rows.filter(
 						(row) => (row as { capability?: unknown }).capability === "PERSONAL_EXPOSURE"
 					);
+					const aggregateCapabilities = new Set([
+						"OWNERSHIP",
+						"EFFECTIVE_OWNERSHIP",
+						"CAPTAINCY",
+						"VICE_CAPTAINCY",
+						"TRANSFERS",
+					]);
+					const aggregateRows = result.rows.filter((row) =>
+						aggregateCapabilities.has(String((row as { capability?: unknown }).capability))
+					);
+					const aggregateRowsByCapability = new Map<string, number>();
+					for (const row of aggregateRows) {
+						const capability = String((row as { capability?: unknown }).capability);
+						if (isValidTrendsRow(row, false)) {
+							aggregateRowsByCapability.set(
+								capability,
+								(aggregateRowsByCapability.get(capability) ?? 0) + 1
+							);
+						}
+					}
+					const allAggregateCapabilitiesPresent = [...aggregateCapabilities].every(
+						(capability) => (aggregateRowsByCapability.get(capability) ?? 0) > 0
+					);
 					const elementIds = new Set(
 						personalRows.map((row) => Number((row as { element_id?: unknown }).element_id))
 					);
@@ -267,24 +354,9 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 						personalRows.length !== CONTRACT_FPL_SQUAD_SIZE ||
 						elementIds.size !== CONTRACT_FPL_SQUAD_SIZE ||
 						pickPositions.size !== CONTRACT_FPL_SQUAD_SIZE ||
+						!allAggregateCapabilitiesPresent ||
 						personalRows.some((row) => {
-							const selection = row as {
-								element_id?: unknown;
-								player_name?: unknown;
-								team_short_name?: unknown;
-								pick_position?: unknown;
-							};
-							return (
-								!Number.isInteger(Number(selection.element_id)) ||
-								Number(selection.element_id) <= 0 ||
-								typeof selection.player_name !== "string" ||
-								selection.player_name.trim() === "" ||
-								typeof selection.team_short_name !== "string" ||
-								selection.team_short_name.trim() === "" ||
-								!Number.isInteger(Number(selection.pick_position)) ||
-								Number(selection.pick_position) < 1 ||
-								Number(selection.pick_position) > CONTRACT_FPL_SQUAD_SIZE
-							);
+							return !isValidTrendsRow(row, true);
 						})
 					) {
 						throw new Error(
@@ -411,10 +483,28 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					}
 				}
 				if (probe.runtime === "must-return-snapshot-entry") {
-					const snapshotEntry = result.rows[0] as { payload?: unknown };
-					if (!parseSnapshotEntryPayload(snapshotEntry.payload)) {
+					const publicationResult = await database.query(MY_FPL_ACTIVE_PUBLICATIONS_SQL, [
+						Number(probe.values[0]),
+					]);
+					const publication = publicationResult.rows
+						.map(parseSnapshotPublicationRow)
+						.find(
+							(candidate) =>
+								candidate !== null &&
+								candidate.eventId === Number(probe.values[2]) &&
+								candidate.revision === String(probe.values[3])
+						);
+					const snapshotEntry = publication
+						? parseSnapshotEntryContractRow(
+								result.rows[0],
+								publication,
+								Number(probe.values[1]),
+								Number(probe.values[2])
+							)
+						: null;
+					if (!snapshotEntry) {
 						throw new Error(
-							"runtime reader role returned a snapshot entry payload that the production decoder rejects"
+							"runtime reader role returned a snapshot entry envelope that the production decoder rejects"
 						);
 					}
 				}
@@ -432,20 +522,14 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					}
 				}
 				if (probe.runtime === "must-return-selection-row") {
-					const selection = result.rows[0] as {
-						element_id?: unknown;
-						player_name?: unknown;
-						team_short_name?: unknown;
-					};
 					const publication = parsePublicLeagueSelectionPublication(result.rows[0]);
+					const nonNullRows = result.rows.filter(
+						(row) => (row as { element_id?: unknown }).element_id !== null
+					);
 					if (
 						!publication ||
-						!Number.isInteger(Number(selection.element_id)) ||
-						Number(selection.element_id) <= 0 ||
-						typeof selection.player_name !== "string" ||
-						selection.player_name.trim() === "" ||
-						typeof selection.team_short_name !== "string" ||
-						selection.team_short_name.trim() === ""
+						nonNullRows.length === 0 ||
+						nonNullRows.some((row) => parsePublicLeagueSelectionRow(row) === null)
 					) {
 						throw new Error("runtime reader role cannot see a non-null public selection row");
 					}

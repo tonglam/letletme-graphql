@@ -194,6 +194,24 @@ export const TRENDS_MEMBERSHIP_SQL = `
 	WHERE tournament.season_id = $1 AND tournament.tournament_id = $2 AND tournament.setup_status = 'ready'
 `;
 
+/**
+ * Contract-only lookup used to bind the direct aggregate probe to the
+ * fixture's active publication. Production always passes an already
+ * authorized publication id to TRENDS_AGGREGATE_UNION_SQL; the probe resolves
+ * the same id dynamically so rerunning the fixture never relies on an
+ * identity sequence value.
+ */
+export const TRENDS_CONTRACT_PUBLICATION_ID_SQL = `
+	SELECT publication_id
+	FROM reporting.tournament_selection_stat_publications
+	WHERE season_id = $1
+		AND tournament_id = $2
+		AND event_id = $3
+		AND is_active
+	ORDER BY revision DESC
+	LIMIT 1
+`;
+
 export const TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "trends.cohorts-public",

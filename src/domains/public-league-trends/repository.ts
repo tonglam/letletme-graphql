@@ -51,6 +51,24 @@ export type PublicLeagueSelectionPublication = Readonly<{
 	transfersState: SelectionCapabilityState;
 }>;
 
+/**
+ * One non-null row from the immutable selection publication.  Keep this
+ * decoder next to the SQL reader so an invalid player position/count cannot
+ * turn into NaN or an invented midfielder while mapping the whole result.
+ */
+export type PublicLeagueSelectionRow = Readonly<{
+	elementId: number;
+	selectedCount: number;
+	effectiveSelectionCount: number;
+	captainCount: number;
+	viceCaptainCount: number;
+	transferInCount: number;
+	transferOutCount: number;
+	playerName: string;
+	playerPosition: number;
+	teamShortName: string;
+}>;
+
 const SELECTION_CAPABILITY_STATES: readonly SelectionCapabilityState[] = [
 	"READY",
 	"NOT_READY",
@@ -112,6 +130,51 @@ export const parsePublicLeagueSelectionPublication = (
 	};
 };
 
+const selectionCount = (value: unknown): number | null => sqlSafeInteger(value, 0);
+
+/** Decode one selection row with the same bounds used by the production map. */
+export const parsePublicLeagueSelectionRow = (value: unknown): PublicLeagueSelectionRow | null => {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	const row = value as Record<string, unknown>;
+	const elementId = sqlSafeInteger(row.element_id, 1);
+	const playerPosition = sqlSafeInteger(row.player_position, 1);
+	const selectedCount = selectionCount(row.selected_count);
+	const effectiveSelectionCount = selectionCount(row.effective_selection_count);
+	const captainCount = selectionCount(row.captain_count);
+	const viceCaptainCount = selectionCount(row.vice_captain_count);
+	const transferInCount = selectionCount(row.transfer_in_count);
+	const transferOutCount = selectionCount(row.transfer_out_count);
+	if (
+		elementId === null ||
+		playerPosition === null ||
+		playerPosition > 4 ||
+		selectedCount === null ||
+		effectiveSelectionCount === null ||
+		captainCount === null ||
+		viceCaptainCount === null ||
+		transferInCount === null ||
+		transferOutCount === null ||
+		typeof row.player_name !== "string" ||
+		row.player_name.trim() === "" ||
+		typeof row.team_short_name !== "string" ||
+		row.team_short_name.trim() === ""
+	) {
+		return null;
+	}
+	return {
+		elementId,
+		selectedCount,
+		effectiveSelectionCount,
+		captainCount,
+		viceCaptainCount,
+		transferInCount,
+		transferOutCount,
+		playerName: row.player_name,
+		playerPosition,
+		teamShortName: row.team_short_name,
+	};
+};
+
 export const PUBLIC_LEAGUE_SELECTION_SQL = `
 	SELECT publication.publication_id, publication.expected_entries, publication.revision,
 		publication.ownership_state, publication.captaincy_state, publication.vice_captaincy_state,
@@ -158,32 +221,33 @@ async function readPublishedSelectionStats(
 		if (!publication || publication.ownershipState !== "READY") return null;
 		const totalEntries = publication.expectedEntries;
 		const percent = (value: number) => (totalEntries > 0 ? (value / totalEntries) * 100 : 0);
-		const rows = result.rows.filter(
+		const rawRows = result.rows.filter(
 			(row) => row.element_id !== null && row.element_id !== undefined
 		);
+		const decodedRows = rawRows.map(parsePublicLeagueSelectionRow);
+		if (decodedRows.some((row) => row === null)) return null;
+		const rows = decodedRows as PublicLeagueSelectionRow[];
 		const selection = rows.map((row) => {
-			const selected = Number(row.selected_count ?? 0);
-			const effective = Number(row.effective_selection_count ?? 0);
 			return {
-				id: Number(row.element_id),
-				webName: String(row.player_name),
-				teamShortName: String(row.team_short_name),
-				position: publicationPosition(Number(row.player_position)),
-				selectedByPercent: percent(selected),
-				eoByPercent: percent(effective),
+				id: row.elementId,
+				webName: row.playerName,
+				teamShortName: row.teamShortName,
+				position: publicationPosition(row.playerPosition),
+				selectedByPercent: percent(row.selectedCount),
+				eoByPercent: percent(row.effectiveSelectionCount),
 			};
 		});
 		const captain =
 			publication.captaincyState === "READY"
 				? rows
 						.map((row) => ({
-							id: Number(row.element_id),
-							webName: String(row.player_name),
-							teamShortName: String(row.team_short_name),
-							position: publicationPosition(Number(row.player_position)),
-							captainByPercent: percent(Number(row.captain_count ?? 0)),
-							selectedByPercent: percent(Number(row.selected_count ?? 0)),
-							eoByPercent: percent(Number(row.effective_selection_count ?? 0)),
+							id: row.elementId,
+							webName: row.playerName,
+							teamShortName: row.teamShortName,
+							position: publicationPosition(row.playerPosition),
+							captainByPercent: percent(row.captainCount),
+							selectedByPercent: percent(row.selectedCount),
+							eoByPercent: percent(row.effectiveSelectionCount),
 						}))
 						.sort(
 							(left, right) => right.captainByPercent - left.captainByPercent || left.id - right.id
@@ -194,13 +258,13 @@ async function readPublishedSelectionStats(
 			publication.viceCaptaincyState === "READY"
 				? rows
 						.map((row) => ({
-							id: Number(row.element_id),
-							webName: String(row.player_name),
-							teamShortName: String(row.team_short_name),
-							position: publicationPosition(Number(row.player_position)),
-							captainByPercent: (Number(row.vice_captain_count ?? 0) / totalEntries) * 100,
-							selectedByPercent: percent(Number(row.selected_count ?? 0)),
-							eoByPercent: percent(Number(row.effective_selection_count ?? 0)),
+							id: row.elementId,
+							webName: row.playerName,
+							teamShortName: row.teamShortName,
+							position: publicationPosition(row.playerPosition),
+							captainByPercent: (row.viceCaptainCount / totalEntries) * 100,
+							selectedByPercent: percent(row.selectedCount),
+							eoByPercent: percent(row.effectiveSelectionCount),
 						}))
 						.sort(
 							(left, right) => right.captainByPercent - left.captainByPercent || left.id - right.id
@@ -210,21 +274,14 @@ async function readPublishedSelectionStats(
 		const transfersAvailable = publication.transfersState === "READY";
 		const transferRows = (direction: "in" | "out") =>
 			rows
-				.filter(
-					(row) =>
-						transfersAvailable &&
-						row[direction === "in" ? "transfer_in_count" : "transfer_out_count"] !== null &&
-						row[direction === "in" ? "transfer_in_count" : "transfer_out_count"] !== undefined
-				)
+				.filter(() => transfersAvailable)
 				.map((row) => ({
-					id: Number(row.element_id),
-					webName: String(row.player_name),
-					teamShortName: String(row.team_short_name),
-					position: publicationPosition(Number(row.player_position)),
-					transfersEvent: Number(
-						row[direction === "in" ? "transfer_in_count" : "transfer_out_count"] ?? 0
-					),
-					selectedByPercent: percent(Number(row.selected_count ?? 0)),
+					id: row.elementId,
+					webName: row.playerName,
+					teamShortName: row.teamShortName,
+					position: publicationPosition(row.playerPosition),
+					transfersEvent: direction === "in" ? row.transferInCount : row.transferOutCount,
+					selectedByPercent: percent(row.selectedCount),
 				}))
 				.sort((left, right) => right.transfersEvent - left.transfersEvent || left.id - right.id)
 				.slice(0, limit);

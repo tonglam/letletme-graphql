@@ -19,6 +19,7 @@ import {
 import { HOME_PERSONAL_DESK_SQL } from "../../src/domains/home/repository";
 import { MARKET_QUERY } from "../../src/domains/market/repository";
 import { PLAYER_DETAIL_HISTORICAL_TEAMS_SQL } from "../../src/domains/player-detail/repository";
+import { MY_FPL_ACTIVE_PUBLICATIONS_SQL } from "../../src/domains/my-fpl/repository";
 import {
 	CORE_FALLBACK_SQL,
 	CORE_LIVE_IDENTITY_FALLBACK_SQL,
@@ -26,6 +27,7 @@ import {
 	LIVE_FALLBACK_SQL,
 	LIVE_LIFECYCLE_STATUS_SQL,
 } from "../../src/infra/data-snapshot";
+import { createHash } from "node:crypto";
 import {
 	PUBLICATION_BY_ID_SQL,
 	PUBLICATION_CANDIDATES_SQL,
@@ -34,6 +36,7 @@ import {
 	PUBLICATION_ITEMS_SQL,
 	PRICE_CHANGE_PUBLICATION_CONTRACT_SQL,
 } from "../../src/infra/price-change-predictions-client";
+import { TRENDS_CONTRACT_PUBLICATION_ID_SQL } from "../../src/domains/trends/repository";
 
 const mockContractResultType = (relation: string, column: string, jsonType: string): string => {
 	const assertion = DIRECT_DATA_SQL_CONTRACT.flatMap((probe) => probe.resultTypes ?? []).find(
@@ -83,27 +86,47 @@ const mockEntrySearchRow = {
 const CONTRACT_PUBLICATION_ID = "00000000-0000-4000-8000-000000000001";
 const CONTRACT_CORE_PUBLICATION_ID = "00000000-0000-4000-8000-000000000007";
 
-const mockBriefingPayload = {
+const canonicalJson = (value: unknown): string => {
+	if (Array.isArray(value))
+		return JSON.stringify(value.map((item) => JSON.parse(canonicalJson(item))));
+	if (value !== null && typeof value === "object") {
+		const record = value as Record<string, unknown>;
+		return JSON.stringify(
+			Object.fromEntries(
+				Object.keys(record)
+					.sort()
+					.map((key) => [key, JSON.parse(canonicalJson(record[key]))])
+			)
+		);
+	}
+	return JSON.stringify(value);
+};
+
+const mockBriefingPayload = (locale: "en" | "zh-CN") => ({
 	schemaVersion: 1,
 	scopeKind: "SURFACE",
 	scopeKey: "week",
 	revision: 1,
 	publicationId: CONTRACT_PUBLICATION_ID,
-	state: "READY",
-	locale: "en",
+	state: "EMPTY",
+	locale,
 	publishedAt: "2026-08-10T00:00:00.000Z",
 	sourceCheckedAt: "2026-08-10T00:00:00.000Z",
 	validUntil: null,
 	event: null,
 	featured: [],
 	sections: [],
-} as const;
+});
 
-const mockBriefingFallbackRow = {
-	payload: mockBriefingPayload,
-	payload_bytes: 302,
-	payload_sha256: "c5edbdd3f6b66c7ee01dfd4c8734f484b0e148eab0c7de0de9b0c434274db0d5",
-} as const;
+const mockBriefingFallbackRow = (locale: "en" | "zh-CN" = "en") => {
+	const payload = mockBriefingPayload(locale);
+	const canonical = canonicalJson(payload);
+	return {
+		payload,
+		payload_bytes: Buffer.byteLength(canonical, "utf8"),
+		payload_sha256: createHash("sha256").update(canonical, "utf8").digest("hex"),
+	};
+};
 
 const mockCompetitionAggregatePayload = {
 	eventId: 1,
@@ -245,12 +268,15 @@ const mockBriefingMetadata = {
 	valid_until: null,
 	locale_manifest: {
 		en: {
-			bytes: 302,
-			sha256: "c5edbdd3f6b66c7ee01dfd4c8734f484b0e148eab0c7de0de9b0c434274db0d5",
+			bytes: mockBriefingFallbackRow("en").payload_bytes,
+			sha256: mockBriefingFallbackRow("en").payload_sha256,
 		},
-		"zh-CN": { bytes: 0, sha256: "0".repeat(64) },
+		"zh-CN": {
+			bytes: mockBriefingFallbackRow("zh-CN").payload_bytes,
+			sha256: mockBriefingFallbackRow("zh-CN").payload_sha256,
+		},
 	},
-} as const;
+};
 
 const mockCompetitionBoardRow = {
 	eventId: 1,
@@ -470,10 +496,29 @@ const mockTrendsPersonalRows = Array.from({ length: 15 }, (_, index) => ({
 	capability: "PERSONAL_EXPOSURE",
 	element_id: index + 1,
 	player_name: `Contract Player ${index + 1}`,
+	player_position: (index % 4) + 1,
 	team_short_name: "GCT",
 	pick_position: index + 1,
 	count: index === 0 ? 2 : 1,
 }));
+
+const mockTrendsAggregateRows = [
+	"OWNERSHIP",
+	"EFFECTIVE_OWNERSHIP",
+	"CAPTAINCY",
+	"VICE_CAPTAINCY",
+	"TRANSFERS",
+].map((capability) => ({
+	capability,
+	element_id: 1,
+	player_name: "Contract Player 1",
+	player_position: 1,
+	team_short_name: "GCT",
+	count: 1,
+	pick_position: null,
+}));
+
+const mockTrendsRows = [...mockTrendsPersonalRows, ...mockTrendsAggregateRows];
 
 const mockCoreFallbackRow = (() => {
 	const events = Array.from({ length: 38 }, (_, index) => ({
@@ -703,6 +748,9 @@ describe("direct Data SQL contract", () => {
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
+				if (text === TRENDS_CONTRACT_PUBLICATION_ID_SQL) {
+					return { rows: [{ publication_id: 2 }] } as unknown as QueryResult<Row>;
+				}
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
@@ -713,7 +761,9 @@ describe("direct Data SQL contract", () => {
 					return { rows: [mockSnapshotPublication] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-briefing") {
-					return { rows: [mockBriefingFallbackRow] } as unknown as QueryResult<Row>;
+					return {
+						rows: [mockBriefingFallbackRow(values[1] === "zh-CN" ? "zh-CN" : "en")],
+					} as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-briefing-metadata") {
 					return { rows: [mockBriefingMetadata] } as unknown as QueryResult<Row>;
@@ -730,7 +780,7 @@ describe("direct Data SQL contract", () => {
 					return { rows: [mockPriceChangePublication] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-trends-personal") {
-					return { rows: mockTrendsPersonalRows } as unknown as QueryResult<Row>;
+					return { rows: mockTrendsRows } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
@@ -751,7 +801,17 @@ describe("direct Data SQL contract", () => {
 					return { rows: [mockSetupStatus] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
-					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
+					return {
+						rows: [
+							{
+								payload: mockSnapshotEntryPayload,
+								is_empty: true,
+								picks_count: 0,
+								entry_row_count: 0,
+								aggregate_row_count: 2,
+							},
+						],
+					} as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-board") {
 					return { rows: [mockCompetitionBoardProbe] } as unknown as QueryResult<Row>;
@@ -782,6 +842,13 @@ describe("direct Data SQL contract", () => {
 								vice_captaincy_state: "READY",
 								transfers_state: "READY",
 								element_id: 1,
+								selected_count: 1,
+								effective_selection_count: 1,
+								captain_count: 1,
+								vice_captain_count: 0,
+								transfer_in_count: 0,
+								transfer_out_count: 0,
+								player_position: 1,
 								player_name: "Contract Player",
 								team_short_name: "GCT",
 							},
@@ -961,6 +1028,9 @@ describe("direct Data SQL contract", () => {
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
+				if (text === TRENDS_CONTRACT_PUBLICATION_ID_SQL) {
+					return { rows: [{ publication_id: 2 }] } as unknown as QueryResult<Row>;
+				}
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
@@ -971,7 +1041,9 @@ describe("direct Data SQL contract", () => {
 					return { rows: [mockSnapshotPublication] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-briefing") {
-					return { rows: [mockBriefingFallbackRow] } as unknown as QueryResult<Row>;
+					return {
+						rows: [mockBriefingFallbackRow(values[1] === "zh-CN" ? "zh-CN" : "en")],
+					} as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-briefing-metadata") {
 					return { rows: [mockBriefingMetadata] } as unknown as QueryResult<Row>;
@@ -988,10 +1060,20 @@ describe("direct Data SQL contract", () => {
 					return { rows: [mockPriceChangePublication] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-trends-personal") {
-					return { rows: mockTrendsPersonalRows } as unknown as QueryResult<Row>;
+					return { rows: mockTrendsRows } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
-					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
+					return {
+						rows: [
+							{
+								payload: mockSnapshotEntryPayload,
+								is_empty: true,
+								picks_count: 0,
+								entry_row_count: 0,
+								aggregate_row_count: 2,
+							},
+						],
+					} as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-board") {
 					return { rows: [mockCompetitionBoardProbe] } as unknown as QueryResult<Row>;
@@ -1040,6 +1122,13 @@ describe("direct Data SQL contract", () => {
 								vice_captaincy_state: "READY",
 								transfers_state: "READY",
 								element_id: 1,
+								selected_count: 1,
+								effective_selection_count: 1,
+								captain_count: 1,
+								vice_captain_count: 0,
+								transfer_in_count: 0,
+								transfer_out_count: 0,
+								player_position: 1,
 								player_name: "Contract Player",
 								team_short_name: "GCT",
 							},
@@ -1095,6 +1184,9 @@ describe("direct Data SQL contract", () => {
 				if (text === boardSql) {
 					return { rows: [{ field_size: 0, viewer_row: null }] } as unknown as QueryResult<Row>;
 				}
+				if (text === TRENDS_CONTRACT_PUBLICATION_ID_SQL) {
+					return { rows: [{ publication_id: 2 }] } as unknown as QueryResult<Row>;
+				}
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
@@ -1105,7 +1197,9 @@ describe("direct Data SQL contract", () => {
 					return { rows: [mockSnapshotPublication] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-briefing") {
-					return { rows: [mockBriefingFallbackRow] } as unknown as QueryResult<Row>;
+					return {
+						rows: [mockBriefingFallbackRow(values[1] === "zh-CN" ? "zh-CN" : "en")],
+					} as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-briefing-metadata") {
 					return { rows: [mockBriefingMetadata] } as unknown as QueryResult<Row>;
@@ -1122,7 +1216,7 @@ describe("direct Data SQL contract", () => {
 					return { rows: [mockPriceChangePublication] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-trends-personal") {
-					return { rows: mockTrendsPersonalRows } as unknown as QueryResult<Row>;
+					return { rows: mockTrendsRows } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
@@ -1143,7 +1237,17 @@ describe("direct Data SQL contract", () => {
 					return { rows: [mockSetupStatus] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
-					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
+					return {
+						rows: [
+							{
+								payload: mockSnapshotEntryPayload,
+								is_empty: true,
+								picks_count: 0,
+								entry_row_count: 0,
+								aggregate_row_count: 2,
+							},
+						],
+					} as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-tournament") {
 					return { rows: [{ tournament_id: values[2] }] } as unknown as QueryResult<Row>;
@@ -1160,6 +1264,13 @@ describe("direct Data SQL contract", () => {
 								vice_captaincy_state: "READY",
 								transfers_state: "READY",
 								element_id: 1,
+								selected_count: 1,
+								effective_selection_count: 1,
+								captain_count: 1,
+								vice_captain_count: 0,
+								transfer_in_count: 0,
+								transfer_out_count: 0,
+								player_position: 1,
 								player_name: "Contract Player",
 								team_short_name: "GCT",
 							},
