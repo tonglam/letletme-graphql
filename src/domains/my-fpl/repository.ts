@@ -226,6 +226,13 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.snapshot-entry",
 		sql: MY_FPL_SNAPSHOT_ENTRY_SQL,
 		values: [2026, 1, 1, "7"],
+		resultTypes: [
+			{
+				relation: "competition.my_fpl_snapshot_entries",
+				column: "payload",
+				pgType: "jsonb",
+			},
+		],
 	},
 	{
 		name: "my-fpl.assert-tournament-membership",
@@ -241,16 +248,42 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.competition-board",
 		sql: MY_FPL_COMPETITION_BOARD_SQL,
 		values: [2026, 1, "7", 1, "", 100, 0, 1],
+		resultTypes: [
+			{
+				relation: "competition.my_fpl_snapshot_tournament_rows",
+				column: "payload",
+				pgType: "jsonb",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_tournament_aggregates",
+				column: "payload",
+				pgType: "jsonb",
+			},
+		],
 	},
 	{
 		name: "my-fpl.competition-aggregate",
 		sql: MY_FPL_COMPETITION_AGGREGATE_SQL,
 		values: [2026, 1, "7", 1],
+		resultTypes: [
+			{
+				relation: "competition.my_fpl_snapshot_tournament_aggregates",
+				column: "payload",
+				pgType: "jsonb",
+			},
+		],
 	},
 	{
 		name: "my-fpl.competition-season-path",
 		sql: MY_FPL_COMPETITION_SEASON_PATH_SQL,
 		values: [2026, 1, "7", 1],
+		resultTypes: [
+			{
+				relation: "competition.my_fpl_snapshot_tournament_aggregates",
+				column: "payload",
+				pgType: "jsonb",
+			},
+		],
 	},
 	{
 		name: "my-fpl.competition-setup-status",

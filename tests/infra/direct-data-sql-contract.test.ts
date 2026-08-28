@@ -89,6 +89,16 @@ describe("direct Data SQL contract", () => {
 				}),
 			])
 		);
+		const expectedRelations = new Set(payloadAssertions.map(({ relation }) => relation));
+		expect(expectedRelations).toEqual(
+			new Set([
+				"content.publication_payloads",
+				"ops.dataset_publication_items",
+				"competition.my_fpl_snapshot_entries",
+				"competition.my_fpl_snapshot_tournament_rows",
+				"competition.my_fpl_snapshot_tournament_aggregates",
+			])
+		);
 	});
 
 	test("fails the candidate contract when a decoded payload column is text", async () => {

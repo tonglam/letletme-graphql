@@ -281,6 +281,13 @@ export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "briefing.active-metadata",
 		sql: BRIEFING_ACTIVE_METADATA_SQL,
 		values: ["week"],
+		resultTypes: [
+			{
+				relation: "content.briefing_active_publication",
+				column: "locale_manifest",
+				pgType: "jsonb",
+			},
+		],
 	},
 	{
 		name: "briefing.event-context",
