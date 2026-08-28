@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { DIRECT_DATA_SQL_CONTRACT } from "../../scripts/lib/validate-direct-data-sql-contract";
+import {
+	DIRECT_DATA_SQL_CONTRACT,
+	validateDirectDataSqlContract,
+} from "../../scripts/lib/validate-direct-data-sql-contract";
+import type { QueryResult, QueryResultRow } from "pg";
+import type { QueryExecutor } from "../../src/infra/database";
 import { SEARCH_ENTRIES_SQL } from "../../src/domains/entries/repository";
 import {
 	GAMEWEEK_HISTORICAL_TEAM_AS_OF_SQL,
@@ -62,6 +67,50 @@ describe("direct Data SQL contract", () => {
 			expect(statement).toMatch(/^(SELECT|WITH)\b/);
 			expect(Array.isArray(probe.values)).toBe(true);
 		}
+	});
+
+	test("asserts JSONB for payload columns decoded by the runtime", () => {
+		const payloadAssertions = DIRECT_DATA_SQL_CONTRACT.flatMap(
+			(probe) => probe.resultTypes ?? []
+		).filter(({ column }) => column === "payload");
+		expect(payloadAssertions.length).toBeGreaterThan(0);
+		expect(payloadAssertions.every(({ pgType }) => pgType === "jsonb")).toBe(true);
+		expect(payloadAssertions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					relation: "ops.dataset_publication_items",
+					column: "payload",
+					pgType: "jsonb",
+				}),
+				expect.objectContaining({
+					relation: "content.publication_payloads",
+					column: "payload",
+					pgType: "jsonb",
+				}),
+			])
+		);
+	});
+
+	test("fails the candidate contract when a decoded payload column is text", async () => {
+		const database: QueryExecutor = {
+			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {
+				if (text.includes("format_type(attribute.atttypid, attribute.atttypmod)")) {
+					const relations = values[0] as readonly string[];
+					const columns = values[1] as readonly string[];
+					return {
+						rows: relations.map((relation, index) => ({
+							relation_name: relation,
+							column_name: columns[index],
+							actual_type: "text",
+						})) as unknown as Row[],
+					} as unknown as QueryResult<Row>;
+				}
+				return { rows: [] } as unknown as QueryResult<Row>;
+			},
+		};
+		await expect(validateDirectDataSqlContract(database)).rejects.toThrow(
+			/expected jsonb, got text/
+		);
 	});
 
 	test("uses the runtime Briefing payload fallback as a planner probe", () => {

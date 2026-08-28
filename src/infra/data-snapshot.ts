@@ -1714,7 +1714,18 @@ export const CORE_LIVE_IDENTITY_FALLBACK_SQL = `
 
 export const DATA_SNAPSHOT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{ name: "data-snapshot.core-fallback", sql: CORE_FALLBACK_SQL, values: [2026] },
-	{ name: "data-snapshot.live-fallback", sql: LIVE_FALLBACK_SQL, values: [2026, 1] },
+	{
+		name: "data-snapshot.live-fallback",
+		sql: LIVE_FALLBACK_SQL,
+		values: [2026, 1],
+		resultTypes: [
+			{
+				relation: "ops.dataset_publication_items",
+				column: "payload",
+				pgType: "jsonb",
+			},
+		],
+	},
 	{
 		name: "data-snapshot.live-lifecycle-status",
 		sql: LIVE_LIFECYCLE_STATUS_SQL,

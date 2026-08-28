@@ -1,4 +1,7 @@
-import type { DataSqlContractProbe } from "../../src/contracts/data-sql-contract";
+import type {
+	DataSqlContractProbe,
+	DataSqlContractResultType,
+} from "../../src/contracts/data-sql-contract";
 import { ENTRIES_DATA_SQL_CONTRACT } from "../../src/domains/entries/repository";
 import { GAMEWEEK_DATA_SQL_CONTRACT } from "../../src/domains/gameweek/service";
 import { HOME_MARKET_DATA_SQL_CONTRACT } from "../../src/domains/home/market-repository";
@@ -34,7 +37,75 @@ export const DIRECT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	...PRICE_CHANGE_DATA_SQL_CONTRACT,
 ];
 
+type ResultTypeRow = {
+	relation_name: string;
+	column_name: string;
+	actual_type: string | null;
+};
+
+const RESULT_TYPE_SQL = `
+	SELECT
+		target.relation_name,
+		target.column_name,
+		format_type(attribute.atttypid, attribute.atttypmod) AS actual_type
+	FROM unnest($1::text[], $2::text[]) AS target(relation_name, column_name)
+	LEFT JOIN pg_class relation
+		ON relation.oid = to_regclass(target.relation_name)
+	LEFT JOIN pg_attribute attribute
+		ON attribute.attrelid = relation.oid
+		AND attribute.attname = target.column_name
+		AND attribute.attnum > 0
+		AND NOT attribute.attisdropped
+	ORDER BY target.relation_name, target.column_name
+`;
+
+const resultTypeAssertions = (): readonly DataSqlContractResultType[] => {
+	const assertions = new Map<string, DataSqlContractResultType>();
+	for (const probe of DIRECT_DATA_SQL_CONTRACT) {
+		for (const assertion of probe.resultTypes ?? []) {
+			const key = `${assertion.relation}.${assertion.column}`;
+			const previous = assertions.get(key);
+			if (previous && previous.pgType !== assertion.pgType) {
+				throw new Error(
+					`Conflicting direct SQL result type contract for ${key}: ${previous.pgType} vs ${assertion.pgType}`
+				);
+			}
+			assertions.set(key, assertion);
+		}
+	}
+	return [...assertions.values()].sort((left, right) =>
+		`${left.relation}.${left.column}`.localeCompare(`${right.relation}.${right.column}`)
+	);
+};
+
+const validateResultTypes = async (database: QueryExecutor): Promise<void> => {
+	const assertions = resultTypeAssertions();
+	if (assertions.length === 0) return;
+	const result = await database.query<ResultTypeRow>(RESULT_TYPE_SQL, [
+		assertions.map((assertion) => assertion.relation),
+		assertions.map((assertion) => assertion.column),
+	]);
+	const actualByKey = new Map(
+		result.rows.map((row) => [`${row.relation_name}.${row.column_name}`, row.actual_type])
+	);
+	for (const assertion of assertions) {
+		const key = `${assertion.relation}.${assertion.column}`;
+		const actualType = actualByKey.get(key) ?? null;
+		if (actualType !== assertion.pgType) {
+			throw new Error(
+				`Data candidate result type contract is unavailable: ${key} expected ${assertion.pgType}, got ${actualType ?? "missing"}`
+			);
+		}
+	}
+};
+
 export const validateDirectDataSqlContract = async (database: QueryExecutor): Promise<number> => {
+	try {
+		await validateResultTypes(database);
+	} catch (cause) {
+		const detail = cause instanceof Error ? `: ${cause.message}` : "";
+		throw new Error(`Data candidate result type contract is unavailable${detail}`, { cause });
+	}
 	const names = new Set<string>();
 	for (const probe of DIRECT_DATA_SQL_CONTRACT) {
 		if (names.has(probe.name)) throw new Error(`Duplicate direct SQL contract name: ${probe.name}`);

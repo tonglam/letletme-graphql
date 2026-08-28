@@ -291,6 +291,13 @@ export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "briefing.payload-fallback",
 		sql: BRIEFING_PAYLOAD_FALLBACK_SQL,
 		values: [null, "en"],
+		resultTypes: [
+			{
+				relation: "content.publication_payloads",
+				column: "payload",
+				pgType: "jsonb",
+			},
+		],
 	},
 ];
 
