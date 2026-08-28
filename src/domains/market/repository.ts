@@ -5,6 +5,7 @@ import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cach
 import {
 	createMarketPinFailure,
 	getMarketSnapshotContext,
+	MARKET_POSTGRES_METADATA_SQL,
 	refreshMarketSnapshotContext,
 	type MarketSnapshotContext,
 } from "./context";
@@ -264,6 +265,24 @@ export const MARKET_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 				column: "position",
 				pgType: "text",
 				acceptedPgTypes: ["character varying"],
+			},
+		],
+	},
+	{
+		name: "market.snapshot-authority",
+		sql: MARKET_POSTGRES_METADATA_SQL,
+		values: [2026],
+		runtime: "must-return-market-authority",
+		resultTypes: [
+			{
+				relation: "fpl.player_market_snapshots",
+				column: "snapshot_date",
+				pgType: "date",
+			},
+			{
+				relation: "fpl.player_market_snapshots",
+				column: "captured_at",
+				pgType: "timestamp with time zone",
 			},
 		],
 	},

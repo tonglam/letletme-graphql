@@ -389,11 +389,42 @@ const mockMarketRow = {
 	previous_chance_next_round: null,
 } as const;
 
+const mockMarketAuthority = {
+	snapshot_date: "2025-08-28",
+	captured_at: "2025-08-28T00:00:00.000Z",
+	row_count: 1,
+	capture_count: 1,
+} as const;
+
 const mockPlayerStateRevision = {
 	revision: "1",
 	method_version: "1",
 	source_updated_at: "2026-08-10T00:00:00.000Z",
 	refreshed_at: "2026-08-10T00:00:00.000Z",
+} as const;
+
+const mockPlayerStateCurrentPeer = {
+	element_id: 1,
+	total_points: 42,
+	minutes: 90,
+	bonus: 0,
+	starts: 1,
+	goals_scored: 0,
+	assists: 0,
+	clean_sheets: 1,
+	saves: 0,
+	bps: 10,
+	return_count: 1,
+	gameweeks_available: 1,
+} as const;
+
+const mockPlayerStateGameweek = {
+	element_id: 1,
+	event_id: 1,
+	total_points: 42,
+	minutes: 90,
+	started: true,
+	bonus: 0,
 } as const;
 
 const mockHistoricalTeam = {
@@ -785,8 +816,17 @@ describe("direct Data SQL contract", () => {
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
 				}
+				if (runtimeProbe?.runtime === "must-return-market-authority") {
+					return { rows: [mockMarketAuthority] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-player-state-revision") {
 					return { rows: [mockPlayerStateRevision] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-current-peers") {
+					return { rows: [mockPlayerStateCurrentPeer] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-gameweeks") {
+					return { rows: [mockPlayerStateGameweek] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-player-picker") {
 					return { rows: [mockPlayerPickerRow] } as unknown as QueryResult<Row>;
@@ -1090,8 +1130,17 @@ describe("direct Data SQL contract", () => {
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
 				}
+				if (runtimeProbe?.runtime === "must-return-market-authority") {
+					return { rows: [mockMarketAuthority] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-player-state-revision") {
 					return { rows: [mockPlayerStateRevision] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-current-peers") {
+					return { rows: [mockPlayerStateCurrentPeer] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-gameweeks") {
+					return { rows: [mockPlayerStateGameweek] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-player-picker") {
 					return { rows: [mockPlayerPickerRow] } as unknown as QueryResult<Row>;
@@ -1221,8 +1270,17 @@ describe("direct Data SQL contract", () => {
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
 				}
+				if (runtimeProbe?.runtime === "must-return-market-authority") {
+					return { rows: [mockMarketAuthority] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-player-state-revision") {
 					return { rows: [mockPlayerStateRevision] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-current-peers") {
+					return { rows: [mockPlayerStateCurrentPeer] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-gameweeks") {
+					return { rows: [mockPlayerStateGameweek] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-player-picker") {
 					return { rows: [mockPlayerPickerRow] } as unknown as QueryResult<Row>;
@@ -1423,7 +1481,10 @@ describe("direct Data SQL contract", () => {
 					probe.runtime === "must-return-live" ||
 					probe.runtime === "must-return-live-lifecycle" ||
 					probe.runtime === "must-return-market" ||
+					probe.runtime === "must-return-market-authority" ||
 					probe.runtime === "must-return-player-state-revision" ||
+					probe.runtime === "must-return-player-state-current-peers" ||
+					probe.runtime === "must-return-player-state-gameweeks" ||
 					probe.runtime === "must-return-historical-team" ||
 					probe.runtime === "must-return-setup-status" ||
 					probe.runtime === "must-return-tournament" ||

@@ -154,6 +154,88 @@ type CurrentPeerGameweekRow = QueryResultRow & {
 	bonus: number | null;
 };
 
+const nullableSafeNonNegativeInteger = (value: unknown): number | null | undefined => {
+	if (value === null || value === undefined) return null;
+	const parsed = typeof value === "number" ? value : Number(value);
+	return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+};
+
+/** Decode a current peer summary row before it enters metric calculations. */
+export const parsePlayerStateCurrentPeerRow = (value: unknown): CurrentPeerRow | null => {
+	if (!isRecord(value)) return null;
+	const elementId = nullableSafeNonNegativeInteger(value.element_id);
+	if (elementId === null || elementId === undefined || elementId === 0) return null;
+	const fields = [
+		"total_points",
+		"minutes",
+		"bonus",
+		"starts",
+		"goals_scored",
+		"assists",
+		"clean_sheets",
+		"saves",
+		"bps",
+		"expected_goal_involvements",
+		"return_count",
+		"gameweeks_available",
+	] as const;
+	const parsed = Object.fromEntries(
+		fields.map((field) => [field, nullableSafeNonNegativeInteger(value[field])])
+	) as Record<(typeof fields)[number], number | null | undefined>;
+	if (Object.values(parsed).some((field) => field === undefined)) return null;
+	return {
+		element_id: elementId,
+		total_points: parsed.total_points!,
+		minutes: parsed.minutes!,
+		bonus: parsed.bonus!,
+		starts: parsed.starts!,
+		goals_scored: parsed.goals_scored!,
+		assists: parsed.assists!,
+		clean_sheets: parsed.clean_sheets!,
+		saves: parsed.saves!,
+		bps: parsed.bps!,
+		expected_goal_involvements: parsed.expected_goal_involvements!,
+		return_count: parsed.return_count!,
+		gameweeks_available: parsed.gameweeks_available!,
+	};
+};
+
+/** Decode one canonical current-season gameweek stat row. */
+export const parsePlayerStateCurrentPeerGameweekRow = (
+	value: unknown
+): CurrentPeerGameweekRow | null => {
+	if (!isRecord(value)) return null;
+	const elementId = nullableSafeNonNegativeInteger(value.element_id);
+	const eventId = nullableSafeNonNegativeInteger(value.event_id);
+	const totalPoints = nullableSafeNonNegativeInteger(value.total_points);
+	const minutes = nullableSafeNonNegativeInteger(value.minutes);
+	const bonus = nullableSafeNonNegativeInteger(value.bonus);
+	const started = value.started;
+	if (
+		elementId === null ||
+		elementId === undefined ||
+		elementId === 0 ||
+		eventId === null ||
+		eventId === undefined ||
+		eventId === 0 ||
+		totalPoints === null ||
+		totalPoints === undefined ||
+		minutes === undefined ||
+		bonus === undefined ||
+		(started !== null && started !== undefined && typeof started !== "boolean")
+	) {
+		return null;
+	}
+	return {
+		element_id: elementId,
+		event_id: eventId,
+		total_points: totalPoints,
+		minutes,
+		started: started ?? null,
+		bonus,
+	};
+};
+
 type CurrentMetricRow = {
 	elementId: number;
 	pointsPer90: number | null;
@@ -369,11 +451,13 @@ export const PLAYER_STATE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "player-state.current-peers",
 		sql: PLAYER_STATE_CURRENT_PEERS_SQL,
 		values: [2026, 1],
+		runtime: "must-return-player-state-current-peers",
 	},
 	{
 		name: "player-state.current-gameweeks",
 		sql: PLAYER_STATE_CURRENT_PEER_GAMEWEEKS_SQL,
 		values: [2026, 1, [1]],
+		runtime: "must-return-player-state-gameweeks",
 	},
 ];
 
@@ -864,8 +948,12 @@ const loadCurrentCohort = (
 					eventIds,
 				]),
 	]).then(([peers, gameweeks]) => ({
-		peerRows: peers.rows,
-		gameweekRows: gameweeks.rows,
+		peerRows: peers.rows
+			.map(parsePlayerStateCurrentPeerRow)
+			.filter((row): row is CurrentPeerRow => row !== null),
+		gameweekRows: gameweeks.rows
+			.map(parsePlayerStateCurrentPeerGameweekRow)
+			.filter((row): row is CurrentPeerGameweekRow => row !== null),
 	}));
 	memo.set(key, loading);
 	void loading.catch(() => {

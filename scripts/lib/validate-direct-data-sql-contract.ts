@@ -28,6 +28,8 @@ import {
 	PLAYERS_DATA_SQL_CONTRACT,
 } from "../../src/domains/players/repository";
 import {
+	parsePlayerStateCurrentPeerGameweekRow,
+	parsePlayerStateCurrentPeerRow,
 	parsePlayerStateSeasonRow,
 	PLAYER_STATE_DATA_SQL_CONTRACT,
 } from "../../src/domains/player-state/repository";
@@ -46,6 +48,7 @@ import {
 	parseBriefingActiveMetadata,
 	parseBriefingFallbackRow,
 } from "../../src/infra/content-publication";
+import { parsePostgresMarketMetadata } from "../../src/domains/market/context";
 import {
 	DATA_SNAPSHOT_DATA_SQL_CONTRACT,
 	mapLiveLifecycleStatus,
@@ -424,6 +427,14 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 						);
 					}
 				}
+				if (probe.runtime === "must-return-market-authority") {
+					const metadata = parsePostgresMarketMetadata(result.rows[0]);
+					if (!metadata) {
+						throw new Error(
+							"runtime reader role returned market authority metadata that the production reader rejects"
+						);
+					}
+				}
 				if (probe.runtime === "must-return-player-state-revision") {
 					const row = result.rows[0] as {
 						revision?: unknown;
@@ -442,6 +453,29 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 						throw new Error(
 							"runtime reader role returned an invalid Player State dataset revision row"
 						);
+					}
+				}
+				if (probe.runtime === "must-return-player-state-current-peers") {
+					const row = result.rows
+						.map(parsePlayerStateCurrentPeerRow)
+						.find((candidate) => candidate?.element_id === CONTRACT_PLAYER_ID);
+					if (!row) {
+						throw new Error(
+							"runtime reader role cannot see a valid Player State current-peer fixture"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-player-state-gameweeks") {
+					const expectedEventId = Number(probe.values[2]);
+					const row = result.rows
+						.map(parsePlayerStateCurrentPeerGameweekRow)
+						.find(
+							(candidate) =>
+								candidate?.element_id === CONTRACT_PLAYER_ID &&
+								candidate.event_id === expectedEventId
+						);
+					if (!row) {
+						throw new Error("runtime reader role cannot see a valid Player State gameweek fixture");
 					}
 				}
 				if (probe.runtime === "must-return-historical-team") {
