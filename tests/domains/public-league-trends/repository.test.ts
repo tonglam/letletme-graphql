@@ -118,7 +118,7 @@ describe("public league trends repository", () => {
 		let publicationRevision = "1";
 		let reads = 0;
 		const repository = createPublicLeagueTrendsRepository({
-			query: async (sql) => {
+			query: async (sql, values) => {
 				if (sql === PUBLIC_LEAGUE_ACCESS_SQL) {
 					return {
 						rows: [
@@ -133,7 +133,8 @@ describe("public league trends repository", () => {
 				}
 				if (sql === PUBLIC_LEAGUE_SELECTION_SQL) {
 					reads += 1;
-					return { rows: [selectionPublicationRow()] };
+					expect(values).toEqual([2026, 7, 3, 1, reads]);
+					return { rows: [selectionPublicationRow({ revision: String(reads) })] };
 				}
 				throw new Error(`unexpected SQL: ${sql}`);
 			},

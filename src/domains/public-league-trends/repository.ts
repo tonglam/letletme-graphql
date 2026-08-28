@@ -123,7 +123,10 @@ export const PUBLIC_LEAGUE_SELECTION_SQL = `
 	LEFT JOIN reporting.tournament_selection_stat_rows rows
 		ON rows.publication_id = publication.publication_id
 	WHERE publication.season_id = $1 AND publication.tournament_id = $2
-		AND publication.event_id = $3 AND publication.is_active
+		AND publication.event_id = $3
+		AND publication.publication_id = $4::bigint
+		AND publication.revision = $5::bigint
+		AND publication.is_active
 	ORDER BY rows.selected_count DESC NULLS LAST, rows.element_id
 `;
 
@@ -135,6 +138,8 @@ async function readPublishedSelectionStats(
 	executor: QueryExecutor,
 	tournamentId: number,
 	eventId: number,
+	publicationId: number,
+	publicationRevision: number,
 	limit: number
 ): Promise<TournamentSelectionStats | null> {
 	try {
@@ -144,6 +149,8 @@ async function readPublishedSelectionStats(
 			context.currentSeason.seasonId,
 			tournamentId,
 			eventId,
+			publicationId,
+			publicationRevision,
 		])) as { rows: Record<string, unknown>[] };
 		const first = result.rows[0];
 		if (!first) return null;
@@ -345,7 +352,9 @@ export const PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 	{
 		name: "public-league-trends.selection",
 		sql: PUBLIC_LEAGUE_SELECTION_SQL,
-		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 2],
+		// The authority fixture inserts event 1 then the eligible event 2
+		// publication at identity 2, revision 7, on a fresh database.
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 2, 2, 7],
 		runtime: "must-return-selection-row",
 	},
 ];
@@ -454,18 +463,20 @@ export const createPublicLeagueTrendsRepository = (
 			eventId,
 		]);
 		const access = accessResult.rows[0] as AccessRow | undefined;
+		const selectionPublicationId = sqlSafeInteger(access?.selection_publication_id, 1);
+		const selectionRevision = sqlSafeInteger(access?.selection_revision, 1);
 		if (
 			!access?.catalog_revision ||
 			!access.snapshot_revision ||
-			access.selection_publication_id === undefined ||
-			access.selection_revision === undefined
+			selectionPublicationId === null ||
+			selectionRevision === null
 		) {
 			return null;
 		}
 		const safeLimit = Math.min(Math.max(limit, 1), 12);
 		const cacheKey = gqlCacheKey(
 			context,
-			`public-league-selection:${iso(access.catalog_revision)}:${tournamentId}:${eventId}:${safeLimit}:${iso(access.snapshot_revision)}:${String(access.selection_publication_id)}:${String(access.selection_revision)}`
+			`public-league-selection:${iso(access.catalog_revision)}:${tournamentId}:${eventId}:${safeLimit}:${iso(access.snapshot_revision)}:${selectionPublicationId}:${selectionRevision}`
 		);
 		try {
 			const cached = await context.redis.get(cacheKey);
@@ -482,6 +493,8 @@ export const createPublicLeagueTrendsRepository = (
 			executor ?? context.database,
 			tournamentId,
 			eventId,
+			selectionPublicationId,
+			selectionRevision,
 			safeLimit
 		);
 		await writeQueryCache(
