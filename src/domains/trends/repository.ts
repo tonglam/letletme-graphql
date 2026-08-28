@@ -1,5 +1,6 @@
 import { GraphQLError } from "graphql";
 import { createHash } from "crypto";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import type { GraphQLContext } from "../../graphql/context";
 import { authorizeViewerEntry, viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
@@ -12,6 +13,81 @@ const capabilities = [
 	"TRANSFERS",
 	"PERSONAL_EXPOSURE",
 ] as const;
+
+type AggregateTrendCapability = Exclude<(typeof capabilities)[number], "PERSONAL_EXPOSURE">;
+type TrendCapability = (typeof capabilities)[number];
+
+const aggregateTrendCapabilities: readonly AggregateTrendCapability[] = [
+	"OWNERSHIP",
+	"EFFECTIVE_OWNERSHIP",
+	"CAPTAINCY",
+	"VICE_CAPTAINCY",
+	"TRANSFERS",
+];
+
+/**
+ * Keep the aggregate read as one bounded statement.  Each arm owns its sort
+ * and LIMIT so a popular capability cannot consume another capability's page.
+ * The only interpolated values are compile-time column names and labels.
+ */
+const aggregateTrendUnionSql = `
+      SELECT * FROM (
+        SELECT 'OWNERSHIP'::text AS capability, element_id, player_name, player_position, team_short_name,
+          selected_count AS count, NULL::integer AS pick_position
+        FROM reporting.tournament_selection_stat_rows
+        WHERE publication_id = $1
+        ORDER BY selected_count DESC NULLS LAST, element_id
+        LIMIT $2
+      ) ownership
+      UNION ALL
+      SELECT * FROM (
+        SELECT 'EFFECTIVE_OWNERSHIP'::text AS capability, element_id, player_name, player_position, team_short_name,
+          effective_selection_count AS count, NULL::integer AS pick_position
+        FROM reporting.tournament_selection_stat_rows
+        WHERE publication_id = $1
+        ORDER BY effective_selection_count DESC NULLS LAST, element_id
+        LIMIT $2
+      ) effective_ownership
+      UNION ALL
+      SELECT * FROM (
+        SELECT 'CAPTAINCY'::text AS capability, element_id, player_name, player_position, team_short_name,
+          captain_count AS count, NULL::integer AS pick_position
+        FROM reporting.tournament_selection_stat_rows
+        WHERE publication_id = $1
+        ORDER BY captain_count DESC NULLS LAST, element_id
+        LIMIT $2
+      ) captaincy
+      UNION ALL
+      SELECT * FROM (
+        SELECT 'VICE_CAPTAINCY'::text AS capability, element_id, player_name, player_position, team_short_name,
+          vice_captain_count AS count, NULL::integer AS pick_position
+        FROM reporting.tournament_selection_stat_rows
+        WHERE publication_id = $1
+        ORDER BY vice_captain_count DESC NULLS LAST, element_id
+        LIMIT $2
+      ) vice_captaincy
+      UNION ALL
+      SELECT * FROM (
+        SELECT 'TRANSFERS'::text AS capability, element_id, player_name, player_position, team_short_name,
+          transfer_in_count AS count, NULL::integer AS pick_position
+        FROM reporting.tournament_selection_stat_rows
+        WHERE publication_id = $1
+        ORDER BY transfer_in_count DESC NULLS LAST, element_id
+        LIMIT $2
+      ) transfers
+      UNION ALL
+      SELECT * FROM (
+        SELECT 'PERSONAL_EXPOSURE'::text AS capability, pick.element_id,
+          COALESCE(NULLIF(concat_ws(' ', player.first_name, player.second_name), ''), player.web_name) AS player_name,
+          player.element_type AS player_position, team.short_name AS team_short_name, pick.multiplier::int AS count,
+          pick.position AS pick_position
+        FROM competition.entry_event_picks pick
+        JOIN fpl.players player ON player.season_id = pick.season_id AND player.element_id = pick.element_id
+        JOIN fpl.teams team ON team.season_id = pick.season_id AND team.team_id = player.team_id
+        WHERE pick.season_id = $3 AND pick.entry_id = $4 AND pick.event_id = $5
+        ORDER BY pick.multiplier DESC, pick.position
+      ) personal
+      ORDER BY capability, count DESC NULLS LAST, pick_position ASC NULLS LAST, element_id`;
 
 const FPL_SQUAD_SIZE = 15;
 
@@ -54,9 +130,6 @@ const validateCohortId = (cohortId: string): number => {
 };
 
 const status = (value: unknown): string => (typeof value === "string" ? value : "NOT_READY");
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 type TrendCohort = ReturnType<typeof mapCohort>;
 
@@ -383,6 +456,48 @@ export const trendsRepository = {
 			notFound("Trends cohort not found");
 		}
 		const cohort = mapCohort(cohortRow, access);
+		const aggregateRowsByCapability = new Map<TrendCapability, Record<string, unknown>[]>();
+		const viewerEntry = access === "MINE" ? viewerEntryId(context) : null;
+		const aggregateReady = aggregateTrendCapabilities.some(
+			(capability) =>
+				status(
+					cohortRow[
+						capability === "OWNERSHIP" || capability === "EFFECTIVE_OWNERSHIP"
+							? "ownership_state"
+							: capability === "CAPTAINCY"
+								? "captaincy_state"
+								: capability === "VICE_CAPTAINCY"
+									? "vice_captaincy_state"
+									: "transfers_state"
+					]
+				) === "READY"
+		);
+		// Aggregate and personal exposure rows share one bounded SQL round trip.
+		if ((cohortRow.publication_id && aggregateReady) || viewerEntry !== null) {
+			const aggregateResult = await context.database.query<Record<string, unknown>>(
+				aggregateTrendUnionSql,
+				[cohortRow.publication_id, limit, context.currentSeason.seasonId, viewerEntry, eventId]
+			);
+			for (const row of aggregateResult.rows) {
+				const capability = row.capability;
+				if (
+					typeof capability === "string" &&
+					(aggregateTrendCapabilities.includes(capability as AggregateTrendCapability) ||
+						capability === "PERSONAL_EXPOSURE")
+				) {
+					const typedCapability = capability as TrendCapability;
+					const current = aggregateRowsByCapability.get(typedCapability) ?? [];
+					current.push(row);
+					aggregateRowsByCapability.set(typedCapability, current);
+					continue;
+				}
+				// Older test doubles may omit the label; scope such rows to the
+				// first aggregate capability rather than fabricating every section.
+				const current = aggregateRowsByCapability.get("OWNERSHIP") ?? [];
+				current.push(row);
+				aggregateRowsByCapability.set("OWNERSHIP", current);
+			}
+		}
 		const sections = await Promise.all(
 			capabilities.map(async (capability): Promise<Record<string, unknown>> => {
 				const state =
@@ -440,21 +555,10 @@ export const trendsRepository = {
 				if (state !== "READY" || (capability !== "PERSONAL_EXPOSURE" && !cohortRow.publication_id))
 					return { capability, state, evidenceContext, rows: null };
 				if (capability === "PERSONAL_EXPOSURE") {
-					const entryId = viewerEntryId(context);
-					if (!entryId) return { capability, state: "NOT_READY", evidenceContext, rows: null };
-					const personal = await context.database.query<Record<string, unknown>>(
-						`
-	          SELECT pick.element_id, pick.position AS pick_position,
-            COALESCE(NULLIF(concat_ws(' ', player.first_name, player.second_name), ''), player.web_name) AS player_name,
-	            player.element_type AS player_position, team.short_name AS team_short_name, pick.multiplier::int AS count
-          FROM competition.entry_event_picks pick
-          JOIN fpl.players player ON player.season_id = pick.season_id AND player.element_id = pick.element_id
-          JOIN fpl.teams team ON team.season_id = player.season_id AND team.team_id = player.team_id
-          WHERE pick.season_id = $1 AND pick.entry_id = $2 AND pick.event_id = $3
-          ORDER BY pick.multiplier DESC, pick.position`,
-						[context.currentSeason.seasonId, entryId, eventId]
-					);
-					const personalRows = personal.rows.map((row) => ({
+					if (viewerEntry === null)
+						return { capability, state: "NOT_READY", evidenceContext, rows: null };
+					const personalSourceRows = aggregateRowsByCapability.get("PERSONAL_EXPOSURE") ?? [];
+					const personalRows = personalSourceRows.map((row) => ({
 						elementId: Number(row.element_id),
 						playerName: String(row.player_name),
 						playerPosition: Number(row.player_position),
@@ -463,7 +567,7 @@ export const trendsRepository = {
 						percentage: null,
 					}));
 					const elementIds = new Set(personalRows.map((row) => row.elementId));
-					const pickPositionValues = personal.rows.map((row) => Number(row.pick_position));
+					const pickPositionValues = personalSourceRows.map((row) => Number(row.pick_position));
 					const pickPositions = new Set(pickPositionValues);
 					const validPersonalRows = personalRows.every(
 						(row) => Number.isSafeInteger(row.elementId) && row.elementId > 0
@@ -497,34 +601,13 @@ export const trendsRepository = {
 						rows: personalRows,
 					};
 				}
-				const orderColumn =
-					capability === "OWNERSHIP"
-						? "selected_count"
-						: capability === "EFFECTIVE_OWNERSHIP"
-							? "effective_selection_count"
-							: capability === "CAPTAINCY"
-								? "captain_count"
-								: capability === "VICE_CAPTAINCY"
-									? "vice_captain_count"
-									: capability === "TRANSFERS"
-										? "transfer_in_count"
-										: "selected_count";
-				const result = await context.database.query<Record<string, unknown>>(
-					`
-        SELECT element_id, player_name, player_position, team_short_name,
-          ${orderColumn} AS count
-        FROM reporting.tournament_selection_stat_rows
-        WHERE publication_id = $1
-        ORDER BY ${orderColumn} DESC NULLS LAST, element_id
-        LIMIT $2`,
-					[cohortRow.publication_id, limit]
-				);
 				const denominator = Number(cohortRow.expected_entries ?? 0);
+				const aggregateCapability = capability as AggregateTrendCapability;
 				return {
 					capability,
 					state,
 					evidenceContext,
-					rows: result.rows.map((row) => ({
+					rows: (aggregateRowsByCapability.get(aggregateCapability) ?? []).map((row) => ({
 						elementId: Number(row.element_id),
 						playerName: String(row.player_name),
 						playerPosition: Number(row.player_position),

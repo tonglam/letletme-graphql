@@ -114,6 +114,13 @@ describe("Trends private access", () => {
 			team_short_name: "ARS",
 			count: index === 0 ? 2 : 1,
 		}));
+	const aggregateCapabilities = [
+		"OWNERSHIP",
+		"EFFECTIVE_OWNERSHIP",
+		"CAPTAINCY",
+		"VICE_CAPTAINCY",
+		"TRANSFERS",
+	] as const;
 
 	const snapshotContext = (
 		rows: Record<string, unknown>[],
@@ -128,7 +135,12 @@ describe("Trends private access", () => {
 		};
 		context.database.query = (async (sql: string) => ({
 			rows: sql.includes("entry_event_picks")
-				? rows
+				? [
+						...aggregateRows.flatMap((row) =>
+							aggregateCapabilities.map((capability) => ({ ...row, capability }))
+						),
+						...rows.map((row) => ({ ...row, capability: "PERSONAL_EXPOSURE" })),
+					]
 				: sql.includes("tournament_selection_stat_rows")
 					? aggregateRows
 					: [snapshotCohort],
@@ -151,6 +163,26 @@ describe("Trends private access", () => {
 			evidenceContext: { denominator: 6, sampleSize: 6, availabilityState: "READY" },
 		});
 		expect(section?.rows).toHaveLength(15);
+	});
+
+	it("uses exactly two SQL round trips and one fixed UNION for a MINE snapshot", async () => {
+		const context = snapshotContext(personalRows(15));
+		const originalQuery = context.database.query;
+		const calls: Array<{ sql: string; params: unknown[] | undefined }> = [];
+		context.database.query = (async (sql: string, params?: unknown[]) => {
+			calls.push({ sql, params });
+			return originalQuery(sql, params);
+		}) as typeof context.database.query;
+
+		await trendsRepository.snapshot(context, "competition:7", 1, 12, "MINE");
+
+		expect(calls).toHaveLength(2);
+		expect(calls[1]?.sql.match(/UNION ALL/g)).toHaveLength(5);
+		expect(calls[1]?.sql.match(/LIMIT \$2/g)).toHaveLength(5);
+		expect(calls[1]?.sql.trim()).toEndWith(
+			"ORDER BY capability, count DESC NULLS LAST, pick_position ASC NULLS LAST, element_id"
+		);
+		expect(calls[1]?.params).toEqual([99, 12, 2025, 123, 1]);
 	});
 
 	it("recomputes aggregate percentages from the evidence denominator", async () => {
