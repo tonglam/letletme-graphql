@@ -319,7 +319,7 @@ export const ENTRIES_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "entries.search",
 		sql: SEARCH_ENTRIES_SQL,
-		values: [2026, "manager", 10],
+		values: [2026, "contract", 10],
 		runtime: "must-return-entry-search",
 	},
 ];
