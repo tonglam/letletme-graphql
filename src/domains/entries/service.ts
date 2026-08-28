@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { GraphQLError } from "graphql";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { requestEntryInfoSync } from "../../infra/entry-info-sync";
@@ -612,7 +613,11 @@ export const entriesService = {
 
 	async getEntryById(context: GraphQLContext, id: number): Promise<Entry | null> {
 		const result = await this.lookupEntryById(context, id);
-		return result.entry;
+		if (result.status === "FOUND") return result.entry;
+		if (result.status === "NOT_FOUND" || result.status === "INVALID_ID") return null;
+		throw new GraphQLError("Entry lookup is temporarily unavailable", {
+			extensions: { code: "DEPENDENCY_UNAVAILABLE" },
+		});
 	},
 
 	getEntriesByIds(context: GraphQLContext, ids: number[]): Promise<Map<number, Entry>> {

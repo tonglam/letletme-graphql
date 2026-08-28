@@ -45,6 +45,7 @@ export type PlayerDataSectionAvailability = {
 
 export type PlayerDetailDataAvailability = {
 	isFullyAuthoritative: boolean;
+	seasonStats: PlayerDataSectionAvailability;
 	market: PlayerDataSectionAvailability;
 	historicalTeam: PlayerDataSectionAvailability;
 	fixtures: PlayerDataSectionAvailability;
@@ -218,7 +219,13 @@ const isDataAvailability = (value: unknown): value is PlayerDetailDataAvailabili
 	isRecord(value) &&
 	typeof value.isFullyAuthoritative === "boolean" &&
 	(() => {
-		const sections = [value.market, value.historicalTeam, value.fixtures, value.recentGameweeks];
+		const sections = [
+			value.seasonStats,
+			value.market,
+			value.historicalTeam,
+			value.fixtures,
+			value.recentGameweeks,
+		];
 		if (!sections.every(isSectionAvailability)) return false;
 		return (
 			value.isFullyAuthoritative ===
@@ -235,6 +242,17 @@ const isPlayerDetail = (value: unknown): value is PlayerDetail =>
 	!Object.prototype.hasOwnProperty.call(value, "availability") &&
 	Array.isArray(value.recentGameweeks) &&
 	Array.isArray(value.fixtures);
+
+const hasSameStatsAuthority = (cached: PlayerStatsContext, current: PlayerStatsContext): boolean =>
+	cached.scope === current.scope &&
+	cached.season === current.season &&
+	cached.asOfEventId === current.asOfEventId &&
+	cached.status === current.status &&
+	cached.revision === current.revision &&
+	cached.sourceCheckedAt === current.sourceCheckedAt &&
+	cached.publishedAt === current.publishedAt &&
+	cached.rowCount === current.rowCount &&
+	cached.expectedRowCount === current.expectedRowCount;
 
 const asNullableNumber = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -826,11 +844,46 @@ const currentSeasonStats = (
 		? stats
 		: null;
 
+const playerSeasonStatsAvailability = (
+	statsContext: PlayerStatsContext,
+	seasonStats: PlayerSeasonStatsAtEvent | null,
+	sourceAvailable: boolean
+): PlayerDataSectionAvailability => {
+	const metadata = {
+		revision: statsContext.revision,
+		sourceCheckedAt: statsContext.sourceCheckedAt,
+	};
+	if (statsContext.status === "PRESEASON") {
+		return { state: "NOT_APPLICABLE", reasonCode: "season_stats_preseason", ...metadata };
+	}
+	if (statsContext.scope === "UNAVAILABLE") {
+		return { state: "UNAVAILABLE", reasonCode: "season_stats_scope_unavailable", ...metadata };
+	}
+	if (statsContext.scope !== "CURRENT_SEASON") {
+		return { state: "NOT_APPLICABLE", reasonCode: "season_stats_not_applicable", ...metadata };
+	}
+	if (statsContext.status === "STALE") {
+		return { state: "STALE", reasonCode: "season_stats_stale", ...metadata };
+	}
+	if (statsContext.status === "INCOMPLETE") {
+		return { state: "FALLBACK", reasonCode: "season_stats_incomplete", ...metadata };
+	}
+	if (statsContext.status !== "AVAILABLE" || !sourceAvailable) {
+		return { state: "UNAVAILABLE", reasonCode: "season_stats_read_failed", ...metadata };
+	}
+	return {
+		state: seasonStats?.available ? "READY" : "EMPTY",
+		reasonCode: null,
+		...metadata,
+	};
+};
+
 function assemblePlayerDetail(args: {
 	playerId: number;
 	player: NonNullable<Awaited<ReturnType<typeof playersRepository.getPlayerById>>>;
 	statsContext: PlayerStatsContext;
 	seasonStats: PlayerSeasonStatsAtEvent | null;
+	seasonStatsAvailability: PlayerDataSectionAvailability;
 	market: LatestMarketSnapshot | null;
 	marketAvailability: PlayerDataSectionAvailability;
 	historicalTeamAvailability: PlayerDataSectionAvailability;
@@ -858,10 +911,12 @@ function assemblePlayerDetail(args: {
 		injuryAvailability: args.market?.availability ?? null,
 		dataAvailability: {
 			isFullyAuthoritative:
+				isAuthoritativeSection(args.seasonStatsAvailability) &&
 				isAuthoritativeSection(args.marketAvailability) &&
 				isAuthoritativeSection(args.historicalTeamAvailability) &&
 				isAuthoritativeSection(args.fixturesAvailability) &&
 				isAuthoritativeSection(args.recentGameweeksAvailability),
+			seasonStats: args.seasonStatsAvailability,
 			market: args.marketAvailability,
 			historicalTeam: args.historicalTeamAvailability,
 			fixtures: args.fixturesAvailability,
@@ -951,8 +1006,22 @@ export const playerDetailRepository: PlayerDetailRepository = {
 		const cacheKey = gqlCacheKey(context, playerDetailCacheKey(playerId, eventId));
 		const cached = await readPlayerDetailCache(context, cacheKey);
 		if (cached !== undefined) {
-			if (cached) recordDataAvailability(cached);
-			return cached;
+			if (cached === null) return null;
+			const currentStatsContext = await resolvePlayerStatsContext(context, eventId);
+			if (hasSameStatsAuthority(cached.statsContext, currentStatsContext)) {
+				recordDataAvailability(cached);
+				return cached;
+			}
+			context.logger.warn(
+				{ playerId, eventId, requestId: context.requestId },
+				"Expired player-detail stats authority"
+			);
+			try {
+				await context.redis.del(cacheKey);
+			} catch (error) {
+				context.logger.warn({ err: error, key: cacheKey }, "Failed to evict player-detail cache");
+			}
+			requestPlayerDetailCacheMemo(context).set(cacheKey, undefined);
 		}
 
 		const [player, statsContext, marketResult, currentEvent] = await Promise.all([
@@ -994,19 +1063,17 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			fixtureDesk.value.fixtures,
 			fixtureDesk.availability
 		);
-		const recentGameweeksAvailability = seasonStatsLoad.sourceAvailable
-			? recentGameweeks.availability
-			: {
-					state: "UNAVAILABLE" as const,
-					reasonCode: "season_stats_read_failed",
-					revision: statsContext.revision,
-					sourceCheckedAt: statsContext.sourceCheckedAt,
-				};
+		const seasonStatsAvailability = playerSeasonStatsAvailability(
+			statsContext,
+			seasonStats,
+			seasonStatsLoad.sourceAvailable
+		);
 		const detail = assemblePlayerDetail({
 			playerId,
 			player,
 			statsContext,
 			seasonStats,
+			seasonStatsAvailability,
 			market: marketResult.value,
 			marketAvailability: marketResult.availability,
 			historicalTeamAvailability: historicalTeam.availability,
@@ -1016,7 +1083,7 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			fixtures: fixtureDesk.value.fixtures,
 			fixturesAvailability: fixtureDesk.availability,
 			recentGameweeks: recentGameweeks.value,
-			recentGameweeksAvailability,
+			recentGameweeksAvailability: recentGameweeks.availability,
 		});
 		if (detail.dataAvailability.isFullyAuthoritative) {
 			await writeQueryCache(

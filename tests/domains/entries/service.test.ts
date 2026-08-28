@@ -702,6 +702,15 @@ describe("entriesService.lookupEntryById", () => {
 		});
 	});
 
+	it("preserves retryable lookup failures for nullable internal callers", async () => {
+		entriesRepository.getEntryById = async () => {
+			throw new Error("database offline");
+		};
+		await expect(entriesService.getEntryById(contextForLookup(), 101)).rejects.toMatchObject({
+			extensions: { code: "DEPENDENCY_UNAVAILABLE" },
+		});
+	});
+
 	it("returns the authoritative database hit without FPL or persistence work", async () => {
 		entriesRepository.getEntryById = async () => ({
 			id: 101,

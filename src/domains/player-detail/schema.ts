@@ -55,6 +55,7 @@ export const playerDetailTypeDefs = /* GraphQL */ `
 
 	type PlayerDetailDataAvailability {
 		isFullyAuthoritative: Boolean!
+		seasonStats: PlayerDataSectionAvailability!
 		market: PlayerDataSectionAvailability!
 		historicalTeam: PlayerDataSectionAvailability!
 		fixtures: PlayerDataSectionAvailability!

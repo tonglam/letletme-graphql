@@ -346,40 +346,6 @@ export async function resolvePlayerStatsContext(
 	return loading;
 }
 
-const emptySeasonStats = (elementId: number, eventId: number): PlayerSeasonStatsAtEvent => ({
-	elementId,
-	eventId,
-	available: false,
-	totalPoints: null,
-	selectedByPercent: null,
-	form: null,
-	seasonTransfersIn: null,
-	seasonTransfersOut: null,
-	transfersInEvent: null,
-	transfersOutEvent: null,
-	minutes: null,
-	starts: null,
-	goalsScored: null,
-	assists: null,
-	cleanSheets: null,
-	goalsConceded: null,
-	ownGoals: null,
-	penaltiesSaved: null,
-	yellowCards: null,
-	redCards: null,
-	saves: null,
-	bonus: null,
-	bps: null,
-	expectedGoals: null,
-	expectedAssists: null,
-	expectedGoalInvolvements: null,
-	expectedGoalsConceded: null,
-	influence: null,
-	creativity: null,
-	threat: null,
-	ictIndex: null,
-});
-
 const mapDbRow = (
 	eventId: number,
 	row: Record<string, unknown>
@@ -566,7 +532,6 @@ export async function getPlayerSeasonStatsLoadForContext(
 		return { stats: result, sourceAvailable: false };
 	}
 
-	const pipeline = context.redis.pipeline();
 	const found = new Set<number>();
 	for (const raw of (data ?? []) as unknown[]) {
 		if (!isRecord(raw)) continue;
@@ -574,22 +539,30 @@ export async function getPlayerSeasonStatsLoadForContext(
 		if (!mapped) continue;
 		found.add(mapped.elementId);
 		result.set(mapped.elementId, mapped);
+	}
+	const unresolvedIds = missingIds.filter((id) => !found.has(id));
+	if (unresolvedIds.length > 0) {
+		context.logger.warn(
+			{
+				eventId,
+				revision: statsContext.revision,
+				missingPlayerCount: unresolvedIds.length,
+				playerIds: unresolvedIds.slice(0, 25),
+				requestId: context.requestId,
+			},
+			"Pinned player season-stat revision is missing expected rows"
+		);
+		return { stats: result, sourceAvailable: false };
+	}
+
+	const pipeline = context.redis.pipeline();
+	for (const mapped of result.values()) {
+		if (!found.has(mapped.elementId)) continue;
 		pipeline.set(
 			cacheKey(context, mapped.elementId, eventId, statsContext.revision!),
 			JSON.stringify(mapped),
 			"EX",
 			cacheTtl
-		);
-	}
-	for (const id of missingIds) {
-		if (found.has(id)) continue;
-		const empty = emptySeasonStats(id, eventId);
-		result.set(id, empty);
-		pipeline.set(
-			cacheKey(context, id, eventId, statsContext.revision!),
-			JSON.stringify(empty),
-			"EX",
-			QUERY_CACHE_TTL_SECONDS.METADATA
 		);
 	}
 	try {

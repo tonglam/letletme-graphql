@@ -540,11 +540,65 @@ describe("playerDetailRepository", () => {
 		expect(bundleReads).toBe(2);
 		expect(detail?.totalPoints).toBeNull();
 		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "historical_team_partial",
+		});
+		expect(detail?.dataAvailability.seasonStats).toMatchObject({
 			state: "UNAVAILABLE",
 			reasonCode: "season_stats_read_failed",
 			revision: "11",
 		});
 		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
+	});
+
+	it("fails closed when a pinned complete stats revision no longer returns the known player", async () => {
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 0,
+						saves: 0,
+						bonus: 0,
+						bps: 10,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+		const originalRead = context.data.read.bind(context.data);
+		let bundleReads = 0;
+		context.data = {
+			read: (table: Parameters<typeof originalRead>[0]) => {
+				if (table === "fpl.player_event_snapshot_bundles") {
+					bundleReads += 1;
+					if (bundleReads === 2) return queryBuilder([]);
+				}
+				return originalRead(table);
+			},
+		} as never;
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+		const redis = context.redis as unknown as TestRedis;
+
+		expect(bundleReads).toBe(2);
+		expect(detail?.totalPoints).toBeNull();
+		expect(detail?.dataAvailability.seasonStats).toMatchObject({
+			state: "UNAVAILABLE",
+			reasonCode: "season_stats_read_failed",
+			revision: "11",
+		});
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(redis.setCalls.some(([key]) => key.includes("players:season-stats"))).toBe(false);
 		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
 	});
 
@@ -612,6 +666,53 @@ describe("playerDetailRepository", () => {
 		expect(deleteCount).toBe(1);
 		expect(detail?.dataAvailability.market.state).toBe("READY");
 		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(true);
+	});
+
+	it("revalidates player-stat authority before returning a shared detail cache hit", async () => {
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3 }],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+		const authoritative = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+		if (!authoritative) throw new Error("expected authoritative player detail");
+
+		const nextContext = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3 }],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+		const redis = nextContext.redis as unknown as TestRedis;
+		const key = gqlCacheKey(nextContext, "player-detail:9:3");
+		redis.values.set(
+			key,
+			JSON.stringify({
+				...authoritative,
+				webName: "Stale cached name",
+				statsContext: {
+					...authoritative.statsContext,
+					sourceCheckedAt: "2026-01-01T00:00:00.000Z",
+				},
+			})
+		);
+		let deleteCount = 0;
+		const originalDelete = redis.del;
+		redis.del = async (...keys: string[]) => {
+			deleteCount += 1;
+			return originalDelete(...keys);
+		};
+
+		const detail = await playerDetailRepository.getPlayerDetail(nextContext, 9, 3);
+
+		expect(deleteCount).toBe(1);
+		expect(detail?.webName).toBe("Test Player");
+		expect(detail?.statsContext.sourceCheckedAt).not.toBe("2026-01-01T00:00:00.000Z");
 	});
 
 	it("keeps event-scoped transfer counts for a past event", async () => {
