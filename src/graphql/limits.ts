@@ -20,6 +20,7 @@ import {
 	type GraphQLInputType,
 	type GraphQLNamedType,
 	type GraphQLSchema,
+	type ArgumentNode,
 	type FragmentDefinitionNode,
 	type OperationDefinitionNode,
 	type SelectionSetNode,
@@ -437,6 +438,28 @@ const executableSelectionIsIncluded = (
 	return true;
 };
 
+const collectVariableReferences = (
+	argumentsList: readonly ArgumentNode[] | undefined,
+	usedVariables: Set<string>
+): void => {
+	for (const argument of argumentsList ?? []) {
+		visit(argument.value, {
+			Variable(node) {
+				usedVariables.add(node.name.value);
+			},
+		});
+	}
+};
+
+const collectDirectiveVariableReferences = (
+	directives: readonly DirectiveNode[] | undefined,
+	usedVariables: Set<string>
+): void => {
+	for (const directive of directives ?? []) {
+		collectVariableReferences(directive.arguments, usedVariables);
+	}
+};
+
 const activeDeprecatedTelemetrySelections = (
 	operation: OperationDefinitionNode,
 	fragments: ReadonlyMap<string, FragmentDefinitionNode>,
@@ -449,14 +472,9 @@ const activeDeprecatedTelemetrySelections = (
 	const inspect = (selectionSet: SelectionSetNode): void => {
 		for (const selection of selectionSet.selections) {
 			if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
+			collectDirectiveVariableReferences(selection.directives, usedVariables);
 			if (selection.kind === Kind.FIELD) {
-				for (const argument of selection.arguments ?? []) {
-					visit(argument.value, {
-						Variable(node) {
-							usedVariables.add(node.name.value);
-						},
-					});
-				}
+				collectVariableReferences(selection.arguments, usedVariables);
 				if (selection.selectionSet) inspect(selection.selectionSet);
 				continue;
 			}
@@ -470,10 +488,12 @@ const activeDeprecatedTelemetrySelections = (
 			if (!fragment) continue;
 			analyzedFragments.add(fragmentName);
 			active.add(fragmentName);
+			collectDirectiveVariableReferences(fragment.directives, usedVariables);
 			inspect(fragment.selectionSet);
 		}
 	};
 	inspect(operation.selectionSet);
+	collectDirectiveVariableReferences(operation.directives, usedVariables);
 	return { fragments: active, variables: usedVariables };
 };
 

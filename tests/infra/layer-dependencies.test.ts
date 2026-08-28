@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import {
+	scriptKindForSourceFile,
 	isTypeScriptSourceFile,
 	moduleSpecifiers,
 	resolveSourceModule,
@@ -69,6 +70,32 @@ test("layer checker recognizes triple-slash path references", () => {
 	);
 	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
 		"../domains/entries/service.ts",
+	]);
+});
+
+test("layer checker recognizes triple-slash type references", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'/// <reference types="../domains/entries/service" />',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
+	]);
+});
+
+test("layer checker parses TSX with the TSX script kind", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.tsx",
+		'const View = () => <div>{import("../domains/entries/service")}</div>;',
+		ts.ScriptTarget.Latest,
+		true,
+		scriptKindForSourceFile("fixture.tsx")
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
 	]);
 });
 

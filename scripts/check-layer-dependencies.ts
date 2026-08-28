@@ -22,6 +22,8 @@ const compilerOptions = ts.parseJsonConfigFileContent(
 export const TYPESCRIPT_SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 export const isTypeScriptSourceFile = (file: string): boolean =>
 	TYPESCRIPT_SOURCE_EXTENSIONS.has(extname(file));
+export const scriptKindForSourceFile = (file: string): ts.ScriptKind =>
+	extname(file) === ".tsx" ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
 
 const sourceFilesUnder = (directory: string): string[] => {
 	const files: string[] = [];
@@ -77,6 +79,11 @@ export const moduleSpecifiers = (
 		const line = sourceFile.getLineAndCharacterOfPosition(reference.pos).line + 1;
 		modules.push({ value: reference.fileName, line });
 	}
+	for (const reference of sourceFile.typeReferenceDirectives) {
+		if (!reference.fileName.startsWith(".")) continue;
+		const line = sourceFile.getLineAndCharacterOfPosition(reference.pos).line + 1;
+		modules.push({ value: reference.fileName, line });
+	}
 	return modules;
 };
 
@@ -99,7 +106,7 @@ export const collectLayerDependencyFindings = (): string[] => {
 				source,
 				ts.ScriptTarget.Latest,
 				true,
-				ts.ScriptKind.TS
+				scriptKindForSourceFile(file)
 			);
 			for (const { value, line } of moduleSpecifiers(sourceFile)) {
 				const target = resolveSourceModule(file, value);

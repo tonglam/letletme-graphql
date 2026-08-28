@@ -174,6 +174,42 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, deprecatedSymbols: ["@legacy(note:)"] });
 	});
 
+	it("reports deprecated enum and input values passed through executable directives", () => {
+		const directiveSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			input LegacyInput {
+				old: String @deprecated(reason: "Use current")
+				current: String
+			}
+			directive @legacy(
+				mode: LegacyMode @deprecated(reason: "Use currentMode")
+				input: LegacyInput
+			) on FIELD | INLINE_FRAGMENT | FRAGMENT_SPREAD
+			type Query { current: String }
+		`);
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query Usage($mode: LegacyMode!, $input: LegacyInput!) {
+						current @legacy(mode: $mode, input: $input)
+						...Active @legacy(mode: $mode, input: $input)
+						... on Query @legacy(mode: $mode, input: $input) { current }
+					}
+					fragment Active on Query { current }
+				`,
+				variables: { mode: "OLD", input: { old: "legacy" } },
+			},
+			directiveSchema
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["@legacy(mode:)", "LegacyInput.old", "LegacyMode.OLD"],
+		});
+	});
+
 	it("accounts for only the effective deprecated variable value", () => {
 		const deprecatedKindsSchema = buildSchema(`
 			enum LegacyMode {
