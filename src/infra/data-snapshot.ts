@@ -1344,6 +1344,78 @@ export const CORE_FALLBACK_SQL = `
 	FROM authority
 `;
 
+/**
+ * Decode a Core fallback row with the same identity and shape checks used by
+ * the PostgreSQL reader. The Data contract runner calls this function against
+ * the producer-owned fixture so RLS omissions or nested field drift fail the
+ * contract before a Redis miss can expose an unavailable Core snapshot.
+ */
+export const parseCoreFallbackRow = (
+	value: unknown,
+	seasonCode: string,
+	expectedManifest?: DataPublicationManifest | null
+): CoreDataSnapshot | null => {
+	if (!isRecord(value)) return null;
+	const row = value as CoreFallbackRow;
+	const revision = integer(row.revision);
+	const sourceCheckedAt = isoDate(row.source_checked_at);
+	const events = mapArray(row.events, mapCoreEvent);
+	const teams = mapArray(row.teams, mapCoreTeam);
+	const players = mapArray(row.players, mapCorePlayer);
+	const phases = mapArray(row.phases, mapCorePhase);
+	const fixtures = mapArray(row.fixtures, mapCoreFixture);
+	const sourceMetadata = isRecord(row.source_metadata) ? row.source_metadata : null;
+	const manifest = row.manifest
+		? parseDataPublicationManifest(JSON.stringify(row.manifest), {
+				dataset: "fpl:core",
+				seasonCode,
+			})
+		: null;
+	const coreIdentityComplete =
+		events !== null &&
+		teams !== null &&
+		players !== null &&
+		phases !== null &&
+		fixtures !== null &&
+		hasCompleteCoreIdentity(events, teams, players, phases, fixtures);
+	if (
+		integer(row.authority_count) !== 1 ||
+		typeof row.publication_id !== "string" ||
+		revision === null ||
+		revision <= 0 ||
+		!manifest ||
+		manifest.publicationId !== row.publication_id ||
+		manifest.revision !== revision ||
+		(expectedManifest !== null &&
+			expectedManifest !== undefined &&
+			(manifest.publicationId !== expectedManifest.publicationId ||
+				manifest.revision !== expectedManifest.revision)) ||
+		!sourceCheckedAt ||
+		!events ||
+		!teams ||
+		!players ||
+		!phases ||
+		!fixtures ||
+		!coreIdentityComplete
+	) {
+		return null;
+	}
+	return {
+		source: "postgres",
+		seasonCode,
+		revision: String(revision),
+		publicationId: row.publication_id,
+		sourceCheckedAt,
+		events,
+		teams,
+		players,
+		phases,
+		fixtures,
+		currentEventId: resolveCurrentEventId(events, undefined, sourceCheckedAt),
+		selectionRules: mapCoreSelectionRules(sourceMetadata?.selectionRules),
+	};
+};
+
 /** Explicitly binds the phase columns consumed by mapCorePhase. */
 export const CORE_PHASE_SHAPE_SQL = `
 	SELECT phase_id, name, start_event, stop_event, highest_score
@@ -1725,6 +1797,7 @@ export const DATA_SNAPSHOT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = 
 		name: "data-snapshot.core-fallback",
 		sql: CORE_FALLBACK_SQL,
 		values: [2026],
+		runtime: "must-return-core",
 		resultTypes: [
 			{ relation: "fpl.events", column: "event_id", pgType: "integer" },
 			{
@@ -1987,72 +2060,15 @@ const loadCoreSnapshotFromPostgres = async (
 	const result = await context.database.query<CoreFallbackRow>(CORE_FALLBACK_SQL, [
 		context.currentSeason.seasonId,
 	]);
-	const row = result.rows[0];
-	const revision = integer(row?.revision);
-	const sourceCheckedAt = isoDate(row?.source_checked_at);
-	const events = mapArray(row?.events, mapCoreEvent);
-	const teams = mapArray(row?.teams, mapCoreTeam);
-	const players = mapArray(row?.players, mapCorePlayer);
-	const phases = mapArray(row?.phases, mapCorePhase);
-	const fixtures = mapArray(row?.fixtures, mapCoreFixture);
-	const sourceMetadata = isRecord(row?.source_metadata) ? row.source_metadata : null;
-	const manifest = row?.manifest
-		? parseDataPublicationManifest(JSON.stringify(row.manifest), {
-				dataset: "fpl:core",
-				seasonCode: context.currentSeason.seasonCode,
-			})
-		: null;
-	const preservesPinnedPublication =
-		expectedManifest !== null &&
-		expectedManifest !== undefined &&
-		manifest?.publicationId === expectedManifest.publicationId &&
-		manifest.revision === expectedManifest.revision;
-	const coreIdentityComplete =
-		events !== null &&
-		teams !== null &&
-		players !== null &&
-		phases !== null &&
-		fixtures !== null &&
-		hasCompleteCoreIdentity(events, teams, players, phases, fixtures);
-	if (
-		!row ||
-		integer(row.authority_count) !== 1 ||
-		typeof row.publication_id !== "string" ||
-		revision === null ||
-		revision <= 0 ||
-		!manifest ||
-		manifest.publicationId !== row.publication_id ||
-		manifest.revision !== revision ||
-		(expectedManifest !== null && expectedManifest !== undefined && !preservesPinnedPublication) ||
-		!sourceCheckedAt ||
-		!events ||
-		!teams ||
-		!players ||
-		!phases ||
-		!fixtures ||
-		!coreIdentityComplete
-	) {
-		throw new Error(
-			`Coherent PostgreSQL core publication is unavailable ` +
-				`(events=${events?.length ?? "invalid"}, teams=${teams?.length ?? "invalid"}, ` +
-				`players=${players?.length ?? "invalid"}, phases=${phases?.length ?? "invalid"}, ` +
-				`fixtures=${fixtures?.length ?? "invalid"}, identity=${coreIdentityComplete})`
-		);
+	const snapshot = parseCoreFallbackRow(
+		result.rows[0],
+		context.currentSeason.seasonCode,
+		expectedManifest
+	);
+	if (!snapshot) {
+		throw new Error("Coherent PostgreSQL core publication is unavailable");
 	}
-	return {
-		source: "postgres",
-		seasonCode: context.currentSeason.seasonCode,
-		revision: String(revision),
-		publicationId: row.publication_id,
-		sourceCheckedAt,
-		events,
-		teams,
-		players,
-		phases,
-		fixtures,
-		currentEventId: resolveCurrentEventId(events, undefined, sourceCheckedAt),
-		selectionRules: mapCoreSelectionRules(sourceMetadata?.selectionRules),
-	};
+	return snapshot;
 };
 
 type LiveFixtureEntry = Readonly<{

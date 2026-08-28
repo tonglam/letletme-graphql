@@ -525,7 +525,7 @@ const parseContext = (value: unknown): PriceChangePublicationContext | null => {
 	};
 };
 
-const parsePublicationBoard = (
+export const parsePublicationBoard = (
 	publication: DataPublication,
 	now: Date
 ): PriceChangeBoard | null => {
@@ -707,6 +707,35 @@ export const PUBLICATION_ITEMS_SQL = `
 	ORDER BY publication_id, item_name
 `;
 
+/**
+ * Contract-only read of one immutable publication and its two payloads. This
+ * deliberately mirrors the producer rows consumed by the PostgreSQL reader;
+ * the contract runner executes it and sends the resulting manifest/items
+ * through parsePublicationBoard rather than accepting a non-empty JSON value.
+ */
+export const PRICE_CHANGE_PUBLICATION_CONTRACT_SQL = `
+	SELECT publication.publication_id::text AS publication_id,
+		publication.revision::text AS revision,
+		publication.status,
+		publication.manifest,
+		COALESCE(
+			jsonb_object_agg(item.item_name, item.payload ORDER BY item.item_name)
+				FILTER (WHERE item.item_name IS NOT NULL),
+			'{}'::jsonb
+		) AS items
+	FROM ops.dataset_publications publication
+	LEFT JOIN ops.dataset_publication_items item
+		ON item.publication_id = publication.publication_id
+	WHERE publication.publication_id = $1::uuid
+		AND publication.dataset = 'fpl:price-changes'
+		AND publication.season_id = $2
+		AND publication.event_id IS NULL
+		AND publication.status IN ('active', 'retired')
+		AND (publication.expires_at IS NULL OR publication.expires_at > now())
+	GROUP BY publication.publication_id, publication.revision, publication.status, publication.manifest
+	LIMIT 1
+`;
+
 export const PUBLICATION_CONTEXT_ITEMS_SQL = `
 	SELECT publication_id::text AS publication_id, item_name, item_count, checksum, payload
 	FROM ops.dataset_publication_items
@@ -735,6 +764,20 @@ export const PRICE_CHANGE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "price-change.publication-by-id",
 		sql: PUBLICATION_BY_ID_SQL,
 		values: [PRICE_CHANGE_CONTRACT_PUBLICATION_ID, 2026],
+	},
+	{
+		name: "price-change.publication-decoder",
+		sql: PRICE_CHANGE_PUBLICATION_CONTRACT_SQL,
+		values: [PRICE_CHANGE_CONTRACT_PUBLICATION_ID, 2026],
+		runtime: "must-return-price-change",
+		resultTypes: [
+			{
+				relation: "ops.dataset_publications",
+				column: "manifest",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+		],
 	},
 	{
 		name: "price-change.publication-items",

@@ -27,6 +27,11 @@ export type DataSqlContractProbe = Readonly<{
 	runtime?:
 		| "must-return-row"
 		| "must-return-snapshot-entry"
+		| "must-return-briefing"
+		| "must-return-core"
+		| "must-return-competition-aggregate"
+		| "must-return-price-change"
+		| "must-return-trends-personal"
 		| "must-return-board"
 		| "must-return-tournament"
 		| "must-return-selection-row";

@@ -9,6 +9,7 @@ import { HOME_DATA_SQL_CONTRACT } from "../../src/domains/home/repository";
 import { MARKET_DATA_SQL_CONTRACT } from "../../src/domains/market/repository";
 import {
 	MY_FPL_DATA_SQL_CONTRACT,
+	parseCompetitionAggregatePayload,
 	parseSnapshotEntryPayload,
 } from "../../src/domains/my-fpl/repository";
 import { PLAYER_DETAIL_DATA_SQL_CONTRACT } from "../../src/domains/player-detail/repository";
@@ -17,10 +18,20 @@ import { PLAYERS_DATA_SQL_CONTRACT } from "../../src/domains/players/repository"
 import { PLAYER_STATE_DATA_SQL_CONTRACT } from "../../src/domains/player-state/repository";
 import { PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/public-league-trends/repository";
 import { TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/trends/repository";
-import { BRIEFING_DATA_SQL_CONTRACT } from "../../src/infra/content-publication";
-import { DATA_SNAPSHOT_DATA_SQL_CONTRACT } from "../../src/infra/data-snapshot";
+import {
+	BRIEFING_DATA_SQL_CONTRACT,
+	parseBriefingWeekPayload,
+} from "../../src/infra/content-publication";
+import {
+	DATA_SNAPSHOT_DATA_SQL_CONTRACT,
+	parseCoreFallbackRow,
+} from "../../src/infra/data-snapshot";
 import type { QueryExecutor } from "../../src/infra/database";
-import { PRICE_CHANGE_DATA_SQL_CONTRACT } from "../../src/infra/price-change-predictions-client";
+import {
+	PRICE_CHANGE_DATA_SQL_CONTRACT,
+	parsePublicationBoard,
+} from "../../src/infra/price-change-predictions-client";
+import { parseDataPublicationManifest } from "../../src/infra/data-publication";
 
 export const DIRECT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	...BRIEFING_DATA_SQL_CONTRACT,
@@ -45,6 +56,12 @@ type ResultTypeRow = {
 	column_name: string;
 	actual_type: string | null;
 };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const CONTRACT_SEASON_CODE = "2627";
+const CONTRACT_ENTRY_ID = 1;
 
 const RESULT_TYPE_SQL = `
 	SELECT
@@ -127,6 +144,96 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 				const result = await database.query(probe.sql, probe.values);
 				if (result.rows.length === 0) {
 					throw new Error("runtime reader role cannot see the Data-owned authority fixture row");
+				}
+				if (probe.runtime === "must-return-briefing") {
+					const payload = (result.rows[0] as { payload?: unknown }).payload;
+					const parsed = parseBriefingWeekPayload(payload, "en");
+					if (
+						!parsed ||
+						parsed.publicationId !== String(probe.values[0]) ||
+						parsed.locale !== String(probe.values[1])
+					) {
+						throw new Error(
+							"runtime reader role returned a Briefing payload that the production decoder rejects"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-core") {
+					const core = parseCoreFallbackRow(result.rows[0], CONTRACT_SEASON_CODE);
+					if (!core) {
+						throw new Error(
+							"runtime reader role returned a Core fallback row that the production decoder rejects"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-competition-aggregate") {
+					const aggregate = parseCompetitionAggregatePayload(
+						(result.rows[0] as { payload?: unknown }).payload,
+						CONTRACT_ENTRY_ID
+					);
+					if (!aggregate || aggregate.eventId !== Number(probe.values[1])) {
+						throw new Error(
+							"runtime reader role returned an aggregate payload that the production decoder rejects"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-price-change") {
+					const row = result.rows[0] as {
+						publication_id?: unknown;
+						revision?: unknown;
+						manifest?: unknown;
+						items?: unknown;
+					};
+					const rawManifest =
+						typeof row.manifest === "string" ? row.manifest : JSON.stringify(row.manifest);
+					const manifest = rawManifest ? parseDataPublicationManifest(rawManifest) : null;
+					const items = isRecord(row.items) ? row.items : null;
+					const context = items && isRecord(items.context) ? items.context : null;
+					const now =
+						context && typeof context.fetchedAt === "string"
+							? new Date(context.fetchedAt)
+							: new Date();
+					const board =
+						manifest &&
+						items &&
+						typeof row.publication_id === "string" &&
+						Number(row.revision) === manifest.revision &&
+						manifest.publicationId === row.publication_id &&
+						Number.isFinite(now.getTime())
+							? parsePublicationBoard({ manifest, items }, now)
+							: null;
+					if (!board) {
+						throw new Error(
+							"runtime reader role returned a price-change publication that the production decoder rejects"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-trends-personal") {
+					const personalRows = result.rows.filter(
+						(row) => (row as { capability?: unknown }).capability === "PERSONAL_EXPOSURE"
+					);
+					if (
+						personalRows.length === 0 ||
+						personalRows.some((row) => {
+							const selection = row as {
+								element_id?: unknown;
+								player_name?: unknown;
+								team_short_name?: unknown;
+							};
+							return (
+								!Number.isInteger(Number(selection.element_id)) ||
+								Number(selection.element_id) <= 0 ||
+								typeof selection.player_name !== "string" ||
+								selection.player_name.trim() === "" ||
+								typeof selection.team_short_name !== "string" ||
+								selection.team_short_name.trim() === ""
+							);
+						})
+					) {
+						throw new Error(
+							"runtime reader role cannot see a valid personal Trends selection fixture"
+						);
+					}
 				}
 				if (probe.runtime === "must-return-board") {
 					const board = result.rows[0] as {

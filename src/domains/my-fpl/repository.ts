@@ -260,6 +260,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 				relation: "competition.my_fpl_snapshot_publications",
 				column: "event_id",
 				pgType: "integer",
+				acceptedPgTypes: ["smallint"],
 			},
 			{
 				relation: "competition.my_fpl_snapshot_publications",
@@ -433,7 +434,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.competition-aggregate",
 		sql: MY_FPL_COMPETITION_AGGREGATE_SQL,
 		values: [2026, 1, "7", GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID],
-		runtime: "must-return-row",
+		runtime: "must-return-competition-aggregate",
 		resultTypes: [
 			{
 				relation: "competition.my_fpl_snapshot_tournament_aggregates",
@@ -1471,6 +1472,27 @@ const isCompetitionAggregateCache = (value: unknown): value is MyFplCompetitionA
 		snapshotMeta: (candidate) => candidate === null || isSnapshotMeta(candidate),
 	});
 
+/**
+ * Decode the producer-owned aggregate payload exactly as the PostgreSQL
+ * reader does. The durable payload stores viewer summaries under `viewers`;
+ * the request's entry id selects one summary before the cache shape is
+ * validated. Contract checks call this same decoder so a nested payload drift
+ * cannot pass merely because the SQL returned a non-empty JSON object.
+ */
+export const parseCompetitionAggregatePayload = (
+	value: unknown,
+	entryId: number
+): MyFplCompetitionAggregate | null => {
+	if (!isRecord(value) || !Number.isSafeInteger(entryId) || entryId <= 0) return null;
+	const viewers = isRecord(value.viewers) ? value.viewers : {};
+	const viewer = viewers[String(entryId)] ?? null;
+	if (!isRecord(viewer) || viewer.entryId !== entryId) return null;
+	const { viewers: _viewers, ...aggregatePayload } = value;
+	void _viewers;
+	const normalized = { ...aggregatePayload, viewer, snapshotMeta: null };
+	return isCompetitionAggregateCache(normalized) ? normalized : null;
+};
+
 const isCompetitionSeasonPathPointCache = (
 	value: unknown
 ): value is MyFplCompetitionSeasonPathPoint =>
@@ -2504,15 +2526,12 @@ const loadCompetitionAggregateSnapshot = async (
 		[context.currentSeason.seasonId, eventId, revision, tournamentId]
 	);
 	const raw = result.rows[0]?.payload;
-	if (!isRecord(raw)) return null;
-	const viewers = isRecord(raw.viewers) ? raw.viewers : {};
-	const viewer = viewers[String(entryId)] ?? null;
-	if (!isRecord(viewer) || viewer.entryId !== entryId) return null;
-	const { viewers: _viewers, ...aggregatePayload } = raw;
-	void _viewers;
-	const normalized = { ...aggregatePayload, viewer, snapshotMeta: snapshot };
-	if (!isCompetitionAggregateCache(normalized) || normalized.eventId !== eventId) return null;
-	const current = await applyCurrentEntryNamesToAggregate(context, normalized);
+	const normalized = parseCompetitionAggregatePayload(raw, entryId);
+	if (!normalized || normalized.eventId !== eventId) return null;
+	const current = await applyCurrentEntryNamesToAggregate(context, {
+		...normalized,
+		snapshotMeta: snapshot,
+	});
 	await writeQueryCache(
 		context,
 		cacheKey,

@@ -32,6 +32,7 @@ import {
 	PUBLICATION_CONTEXT_ITEMS_SQL,
 	PUBLICATION_ITEM_METADATA_SQL,
 	PUBLICATION_ITEMS_SQL,
+	PRICE_CHANGE_PUBLICATION_CONTRACT_SQL,
 } from "../../src/infra/price-change-predictions-client";
 
 const mockContractResultType = (relation: string, column: string, jsonType: string): string => {
@@ -60,6 +61,269 @@ const mockSnapshotEntryPayload = {
 	gameweek: { state: "EMPTY", eventId: 1, result: null },
 	transfers: [],
 } as const;
+
+const CONTRACT_PUBLICATION_ID = "00000000-0000-4000-8000-000000000001";
+const CONTRACT_CORE_PUBLICATION_ID = "00000000-0000-4000-8000-000000000007";
+
+const mockBriefingPayload = {
+	schemaVersion: 1,
+	scopeKind: "SURFACE",
+	scopeKey: "week",
+	revision: 1,
+	publicationId: CONTRACT_PUBLICATION_ID,
+	state: "READY",
+	locale: "en",
+	publishedAt: "2026-08-10T00:00:00.000Z",
+	sourceCheckedAt: "2026-08-10T00:00:00.000Z",
+	validUntil: null,
+	event: null,
+	featured: [],
+	sections: [],
+} as const;
+
+const mockCompetitionAggregatePayload = {
+	eventId: 1,
+	entryCount: 1,
+	leaderOverallPoints: null,
+	secondOverallPoints: null,
+	gapFirstSecond: null,
+	averageOverallPoints: null,
+	metrics: [
+		"OVERALL_POINTS",
+		"TEAM_VALUE",
+		"TRANSFERS",
+		"TOTAL_COSTS",
+		"BENCH_POINTS",
+		"AUTO_SUB_POINTS",
+	].map((key) => ({
+		key,
+		leaderValue: null,
+		leaderEntryId: null,
+		leaderEntryName: null,
+		leaderPlayerName: null,
+		averageValue: null,
+		higherIsBetter: true,
+	})),
+	viewers: {
+		"1": {
+			entryId: 1,
+			overallRank: null,
+			tournamentOverallRank: null,
+			teamValue: null,
+			tournamentTeamValueRank: null,
+			transfersNum: 0,
+			tournamentTransfersRank: null,
+			totalCosts: 0,
+			tournamentCostsRank: null,
+			totalBenchPoints: 0,
+			tournamentBenchPointsRank: null,
+			autoSubPoints: 0,
+			tournamentAutoSubRank: null,
+			overallPoints: null,
+			leaderOverallPoints: null,
+			gapToLeader: null,
+			pointsBehindNext: null,
+			pointsAheadOfPrev: null,
+		},
+	},
+	topPerformers: [],
+	risers: [],
+	fallers: [],
+	captainDistribution: [],
+	chipDistribution: [],
+} as const;
+
+const mockPriceChangePublication = {
+	publication_id: CONTRACT_PUBLICATION_ID,
+	revision: "1",
+	manifest: {
+		dataset: "fpl:price-changes",
+		seasonCode: "2627",
+		eventId: null,
+		revision: 1,
+		publicationId: CONTRACT_PUBLICATION_ID,
+		sourceCheckedAt: "2026-08-10T00:00:00.000Z",
+		publishedAt: "2026-08-10T00:00:00.000Z",
+		state: "active",
+		items: ["context", "players"].map((name) => ({
+			name,
+			key: `llm:data:fpl:price-changes:2627:1:${name}`,
+			type: "string",
+			count: 1,
+			bytes: 1,
+			sha256: "0".repeat(64),
+		})),
+	},
+	items: {
+		context: {
+			schemaVersion: 1,
+			source: "FPL_BOOTSTRAP",
+			fetchedAt: "2026-08-10T00:00:00.000Z",
+			staleAt: "2026-08-10T00:10:00.000Z",
+			hardExpiresAt: "2026-08-10T01:00:00.000Z",
+			deadline: "2026-08-10T00:30:00.000Z",
+			nextDeadlines: ["2026-08-10T00:30:00.000Z"],
+			expectedPlayerCount: 1,
+			observedPlayerCount: 1,
+		},
+		players: [
+			{
+				playerId: 1,
+				playerCode: 1,
+				webName: "Contract Player",
+				teamId: 1,
+				teamName: "Contract Team",
+				teamShortName: "GCT",
+				position: "GKP",
+				currentPrice: 50,
+				selectedByPercent: 1,
+				progressPercent: 0,
+				hourlyRate: 0,
+				status: "UNLIKELY",
+				ownershipTrend: "FLAT",
+				transfersInEvent: 0,
+				transfersOutEvent: 0,
+				lockedUntil: null,
+				calibrating: false,
+				projections: [{ offset: 0, projectedPercent: 0, likelihood: 0 }],
+			},
+		],
+	},
+} as const;
+
+const mockCoreFallbackRow = (() => {
+	const events = Array.from({ length: 38 }, (_, index) => ({
+		event_id: index + 1,
+		name: `Gameweek ${index + 1}`,
+		deadline_time: `2026-08-${String((index % 28) + 1).padStart(2, "0")}T11:00:00.000Z`,
+		finished: true,
+		data_checked: true,
+		data_checked_at: "2026-08-10T00:00:00.000Z",
+		is_previous: index === 0,
+		is_current: index === 1,
+		is_next: index === 2,
+		cup_league_create: false,
+		h2h_ko_matches_created: false,
+		average_entry_score: null,
+		highest_scoring_entry: null,
+		deadline_time_epoch: null,
+		deadline_time_game_offset: null,
+		highest_score: null,
+		chip_plays: [],
+		most_selected: null,
+		most_transferred_in: null,
+		top_element: null,
+		top_element_info: null,
+		transfers_made: null,
+		most_captained: null,
+		most_vice_captained: null,
+	}));
+	const teams = Array.from({ length: 20 }, (_, index) => ({
+		team_id: index + 1,
+		code: 100 + index,
+		name: `Contract Team ${index + 1}`,
+		short_name: `C${String(index + 1).padStart(2, "0")}`,
+		strength: null,
+		position: index + 1,
+		points: 0,
+		played: 0,
+		win: 0,
+		draw: 0,
+		loss: 0,
+		form: null,
+		strength_overall_home: 1000,
+		strength_overall_away: 1000,
+		strength_attack_home: 1000,
+		strength_attack_away: 1000,
+		strength_defence_home: 1000,
+		strength_defence_away: 1000,
+	}));
+	const players = Array.from({ length: 20 * 11 }, (_, index) => {
+		const teamId = Math.floor(index / 11) + 1;
+		return {
+			element_id: index + 1,
+			code: 1000 + index,
+			element_type: (index % 4) + 1,
+			team_id: teamId,
+			price: 50,
+			start_price: 50,
+			first_name: "Contract",
+			second_name: `Player ${index + 1}`,
+			web_name: `CP${index + 1}`,
+			total_points: 0,
+		};
+	});
+	const phases = [
+		{ phase_id: 1, name: "Overall", start_event: 1, stop_event: 38, highest_score: null },
+	];
+	const fixtures: Record<string, unknown>[] = [];
+	let fixtureId = 1;
+	for (let home = 1; home <= 20; home += 1) {
+		for (let away = home + 1; away <= 20; away += 1) {
+			for (const [teamHId, teamAId] of [
+				[home, away],
+				[away, home],
+			] as const) {
+				fixtures.push({
+					fixture_id: fixtureId,
+					code: 5000 + fixtureId,
+					event_id: ((fixtureId - 1) % 38) + 1,
+					kickoff_time: null,
+					started: false,
+					finished: false,
+					finished_provisional: false,
+					minutes: 0,
+					team_h_id: teamHId,
+					team_a_id: teamAId,
+					team_h_score: null,
+					team_a_score: null,
+					team_h_difficulty: null,
+					team_a_difficulty: null,
+				});
+				fixtureId += 1;
+			}
+		}
+	}
+	const manifestItems = [
+		"events",
+		"teams",
+		"players",
+		"phases",
+		"fixtures",
+		"currentEventId",
+		"selectionRules",
+	];
+	return {
+		authority_count: "1",
+		publication_id: CONTRACT_CORE_PUBLICATION_ID,
+		revision: "7",
+		manifest: {
+			dataset: "fpl:core",
+			seasonCode: "2627",
+			eventId: null,
+			revision: 7,
+			publicationId: CONTRACT_CORE_PUBLICATION_ID,
+			sourceCheckedAt: "2026-08-10T00:00:00.000Z",
+			publishedAt: "2026-08-10T00:00:00.000Z",
+			state: "active",
+			items: manifestItems.map((name) => ({
+				name,
+				key: `llm:data:fpl:core:2627:7:${name}`,
+				type: "string",
+				count: 0,
+				bytes: 0,
+				sha256: "0".repeat(64),
+			})),
+		},
+		source_checked_at: "2026-08-10T00:00:00.000Z",
+		events,
+		teams,
+		players,
+		phases,
+		fixtures,
+		source_metadata: {},
+	};
+})();
 
 describe("direct Data SQL contract", () => {
 	test("has unique named planner probes for every hard-cut consumer family", () => {
@@ -155,6 +419,32 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-briefing") {
+					return { rows: [{ payload: mockBriefingPayload }] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-core") {
+					return { rows: [mockCoreFallbackRow] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-competition-aggregate") {
+					return {
+						rows: [{ payload: mockCompetitionAggregatePayload }],
+					} as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-price-change") {
+					return { rows: [mockPriceChangePublication] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-trends-personal") {
+					return {
+						rows: [
+							{
+								capability: "PERSONAL_EXPOSURE",
+								element_id: 1,
+								player_name: "Contract Player",
+								team_short_name: "GCT",
+							},
+						],
+					} as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
 					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
 				}
@@ -347,6 +637,32 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-briefing") {
+					return { rows: [{ payload: mockBriefingPayload }] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-core") {
+					return { rows: [mockCoreFallbackRow] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-competition-aggregate") {
+					return {
+						rows: [{ payload: mockCompetitionAggregatePayload }],
+					} as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-price-change") {
+					return { rows: [mockPriceChangePublication] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-trends-personal") {
+					return {
+						rows: [
+							{
+								capability: "PERSONAL_EXPOSURE",
+								element_id: 1,
+								player_name: "Contract Player",
+								team_short_name: "GCT",
+							},
+						],
+					} as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
 					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
 				}
@@ -417,6 +733,32 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-briefing") {
+					return { rows: [{ payload: mockBriefingPayload }] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-core") {
+					return { rows: [mockCoreFallbackRow] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-competition-aggregate") {
+					return {
+						rows: [{ payload: mockCompetitionAggregatePayload }],
+					} as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-price-change") {
+					return { rows: [mockPriceChangePublication] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-trends-personal") {
+					return {
+						rows: [
+							{
+								capability: "PERSONAL_EXPOSURE",
+								element_id: 1,
+								player_name: "Contract Player",
+								team_short_name: "GCT",
+							},
+						],
+					} as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
 					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
 				}
@@ -443,7 +785,8 @@ describe("direct Data SQL contract", () => {
 		const fallback = DIRECT_DATA_SQL_CONTRACT.find(
 			(probe) => probe.name === "briefing.payload-fallback"
 		);
-		expect(fallback?.values).toEqual([null, "en"]);
+		expect(fallback?.values).toEqual([CONTRACT_PUBLICATION_ID, "en"]);
+		expect(fallback?.runtime).toBe("must-return-briefing");
 	});
 
 	test("uses the runtime historical-team statements as planner probes", () => {
@@ -500,6 +843,10 @@ describe("direct Data SQL contract", () => {
 			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "price-change.publication-by-id")?.sql
 		).toBe(PUBLICATION_BY_ID_SQL);
 		expect(
+			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "price-change.publication-decoder")
+				?.sql
+		).toBe(PRICE_CHANGE_PUBLICATION_CONTRACT_SQL);
+		expect(
 			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "price-change.publication-items")?.sql
 		).toBe(PUBLICATION_ITEMS_SQL);
 		expect(
@@ -552,6 +899,11 @@ describe("direct Data SQL contract", () => {
 				(probe) =>
 					probe.runtime === "must-return-row" ||
 					probe.runtime === "must-return-snapshot-entry" ||
+					probe.runtime === "must-return-briefing" ||
+					probe.runtime === "must-return-core" ||
+					probe.runtime === "must-return-competition-aggregate" ||
+					probe.runtime === "must-return-price-change" ||
+					probe.runtime === "must-return-trends-personal" ||
 					probe.runtime === "must-return-board" ||
 					probe.runtime === "must-return-tournament" ||
 					probe.runtime === "must-return-selection-row"
@@ -563,6 +915,7 @@ describe("direct Data SQL contract", () => {
 		const aggregate = DIRECT_DATA_SQL_CONTRACT.find(
 			(probe) => probe.name === "trends.aggregate-union"
 		);
-		expect(aggregate?.values).toEqual([null, 12, 2026, 1, 1]);
+		expect(aggregate?.values).toEqual([null, 12, 2026, 1, 2]);
+		expect(aggregate?.runtime).toBe("must-return-trends-personal");
 	});
 });

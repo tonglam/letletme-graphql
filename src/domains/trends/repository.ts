@@ -218,7 +218,8 @@ export const TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		// The publication ID is opaque to this consumer: PostgreSQL infers the
 		// parameter type from the column while the remaining values still plan
 		// every aggregate branch.
-		values: [null, 12, 2026, 1, 1],
+		values: [null, 12, 2026, 1, 2],
+		runtime: "must-return-trends-personal",
 	},
 ];
 
