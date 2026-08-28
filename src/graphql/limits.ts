@@ -1,21 +1,34 @@
 import {
 	Kind,
+	TypeInfo,
 	getNamedType,
+	isEnumType,
+	isInputType,
+	isInputObjectType,
 	isInterfaceType,
+	isListType,
+	isNonNullType,
 	isObjectType,
 	isUnionType,
-	parse,
+	typeFromAST,
 	valueFromASTUntyped,
 	visit,
+	visitWithTypeInfo,
 	type GraphQLArgument,
+	type ASTNode,
 	type GraphQLCompositeType,
+	type DirectiveNode,
+	type GraphQLInputType,
 	type GraphQLNamedType,
 	type GraphQLSchema,
-	type DocumentNode,
+	type ArgumentNode,
 	type FragmentDefinitionNode,
+	type InlineFragmentNode,
 	type OperationDefinitionNode,
 	type SelectionSetNode,
 } from "graphql";
+import { analyzeGraphQLOperation, type GraphQLRequestPayload } from "./operation-ast";
+import { deprecationPathOwner, deprecationTypeOwnerSegment } from "./deprecation-observability";
 
 export const GRAPHQL_LIMITS = {
 	maxDepth: 10,
@@ -52,11 +65,7 @@ const MAX_LIST_ARGUMENT_WEIGHT = 200;
 // Charge the requested list once, but do not multiply unrelated siblings by it.
 const NON_PROPAGATING_LIMIT_ROOTS = new Set(["playerStatsBootstrap"]);
 
-type GraphQLPayload = {
-	query?: unknown;
-	variables?: unknown;
-	operationName?: unknown;
-};
+type GraphQLPayload = GraphQLRequestPayload;
 
 export type GraphQLRequestShape = "query" | "mutation" | "subscription" | "unknown";
 
@@ -67,6 +76,10 @@ export type GraphQLLimitResult =
 			weightedComplexity: number;
 			rateLimitCostUnits: number;
 			rootFields: readonly string[];
+			deprecatedSymbols: readonly string[];
+			deprecatedSymbolOwners: Readonly<Record<string, readonly string[]>>;
+			/** Deprecated symbols used outside any field occurrence (for example, an operation directive). */
+			deprecatedSymbolGlobalSymbols: readonly string[];
 	  }
 	| {
 			ok: false;
@@ -78,35 +91,6 @@ export type GraphQLLimitResult =
 				| "INVALID_GRAPHQL_REQUEST";
 	  };
 
-const asVariables = (value: unknown): Record<string, unknown> =>
-	value && typeof value === "object" && !Array.isArray(value)
-		? (value as Record<string, unknown>)
-		: {};
-
-const operationFor = (
-	document: DocumentNode,
-	operationName: string | null
-): OperationDefinitionNode | null => {
-	const operations = document.definitions.filter(
-		(definition): definition is OperationDefinitionNode =>
-			definition.kind === Kind.OPERATION_DEFINITION
-	);
-	if (operationName) {
-		return operations.find((operation) => operation.name?.value === operationName) ?? null;
-	}
-	return operations.length === 1 ? (operations[0] ?? null) : null;
-};
-
-const fragmentsFor = (document: DocumentNode): Map<string, FragmentDefinitionNode> =>
-	new Map(
-		document.definitions
-			.filter(
-				(definition): definition is FragmentDefinitionNode =>
-					definition.kind === Kind.FRAGMENT_DEFINITION
-			)
-			.map((fragment) => [fragment.name.value, fragment])
-	);
-
 type EffectiveRootField = {
 	name: string;
 	responseKey: string;
@@ -114,7 +98,7 @@ type EffectiveRootField = {
 
 const effectiveRootFieldsFor = (
 	operation: OperationDefinitionNode,
-	fragments: Map<string, FragmentDefinitionNode>
+	fragments: ReadonlyMap<string, FragmentDefinitionNode>
 ): { fields: EffectiveRootField[]; reachableFragments: Set<string> } => {
 	const fields: EffectiveRootField[] = [];
 	const reachableFragments = new Set<string>();
@@ -249,20 +233,6 @@ const listWeight = (
 	};
 };
 
-const variablesWithDefaults = (
-	operation: OperationDefinitionNode,
-	suppliedVariables: Record<string, unknown>
-): Record<string, unknown> => {
-	const variables = { ...suppliedVariables };
-	for (const definition of operation.variableDefinitions ?? []) {
-		const name = definition.variable.name.value;
-		if (!Object.hasOwn(variables, name) && definition.defaultValue) {
-			variables[name] = valueFromASTUntyped(definition.defaultValue);
-		}
-	}
-	return variables;
-};
-
 const inspectSelectionSet = ({
 	selectionSet,
 	fragments,
@@ -274,7 +244,7 @@ const inspectSelectionSet = ({
 	parentType,
 }: {
 	selectionSet: SelectionSetNode;
-	fragments: Map<string, FragmentDefinitionNode>;
+	fragments: ReadonlyMap<string, FragmentDefinitionNode>;
 	variables: Record<string, unknown>;
 	depth: number;
 	multiplier: number;
@@ -427,7 +397,706 @@ const reject = (
 	message,
 });
 
-const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
+const collectDeprecatedVariableSymbols = (
+	value: unknown,
+	inputType: GraphQLInputType,
+	addSymbol: (symbol: string) => void
+): void => {
+	if (isNonNullType(inputType)) {
+		collectDeprecatedVariableSymbols(value, inputType.ofType, addSymbol);
+		return;
+	}
+	if (value === null || value === undefined) return;
+	if (isListType(inputType)) {
+		for (const item of Array.isArray(value) ? value : [value]) {
+			collectDeprecatedVariableSymbols(item, inputType.ofType, addSymbol);
+		}
+		return;
+	}
+	if (isEnumType(inputType)) {
+		if (typeof value !== "string") return;
+		const enumValue = inputType.getValue(value);
+		if (enumValue?.deprecationReason !== undefined) {
+			addSymbol(`${inputType.name}.${enumValue.name}`);
+		}
+		return;
+	}
+	if (!isInputObjectType(inputType) || typeof value !== "object" || Array.isArray(value)) return;
+	const inputValue = value as Record<string, unknown>;
+	for (const field of Object.values(inputType.getFields())) {
+		// `valueFromASTUntyped` retains an object key whose value is an
+		// omitted variable as `undefined`; GraphQL treats that key as absent.
+		const supplied = Object.hasOwn(inputValue, field.name) && inputValue[field.name] !== undefined;
+		if (!supplied && field.defaultValue === undefined) continue;
+		const fieldValue = supplied ? inputValue[field.name] : field.defaultValue;
+		if (field.deprecationReason !== undefined) addSymbol(`${inputType.name}.${field.name}`);
+		collectDeprecatedVariableSymbols(fieldValue, field.type, addSymbol);
+	}
+};
+
+const collectDeprecatedSchemaArgumentDefaults = (
+	argumentsList: readonly ArgumentNode[] | undefined,
+	schemaArguments: readonly GraphQLArgument[],
+	variables: Record<string, unknown>,
+	variableDefaults: ReadonlyMap<string, unknown>,
+	addSymbol: (symbol: string) => void,
+	addArgumentSymbol?: (argument: GraphQLArgument) => void
+): void => {
+	const suppliedArguments = new Set((argumentsList ?? []).map((argument) => argument.name.value));
+	for (const argumentNode of argumentsList ?? []) {
+		if (
+			argumentNode.value.kind !== Kind.VARIABLE ||
+			Object.hasOwn(variables, argumentNode.value.name.value) ||
+			variableDefaults.has(argumentNode.value.name.value)
+		) {
+			continue;
+		}
+		suppliedArguments.delete(argumentNode.name.value);
+	}
+	for (const argument of schemaArguments) {
+		if (suppliedArguments.has(argument.name) || argument.defaultValue === undefined) continue;
+		addArgumentSymbol?.(argument);
+		collectDeprecatedVariableSymbols(argument.defaultValue, argument.type, addSymbol);
+	}
+};
+
+const collectDeprecatedArgumentValue = (
+	argumentNode: ArgumentNode,
+	argument: GraphQLArgument | undefined,
+	variables: Record<string, unknown>,
+	addSymbol: (symbol: string) => void
+): void => {
+	if (!argument) return;
+	collectDeprecatedVariableSymbols(
+		valueFromASTUntyped(argumentNode.value, variables),
+		argument.type,
+		addSymbol
+	);
+};
+
+const collectDeprecatedArgumentDefaultsAndValues = (
+	argumentsList: readonly ArgumentNode[] | undefined,
+	schemaArguments: readonly GraphQLArgument[],
+	variables: Record<string, unknown>,
+	variableDefaults: ReadonlyMap<string, unknown>,
+	addSymbol: (symbol: string) => void,
+	addArgumentSymbol?: (argument: GraphQLArgument) => void
+): void => {
+	collectDeprecatedSchemaArgumentDefaults(
+		argumentsList,
+		schemaArguments,
+		variables,
+		variableDefaults,
+		addSymbol,
+		addArgumentSymbol
+	);
+	const argumentsByName = new Map(schemaArguments.map((argument) => [argument.name, argument]));
+	const effectiveVariables = {
+		...Object.fromEntries(variableDefaults),
+		...variables,
+	};
+	for (const argumentNode of argumentsList ?? []) {
+		collectDeprecatedArgumentValue(
+			argumentNode,
+			argumentsByName.get(argumentNode.name.value),
+			effectiveVariables,
+			addSymbol
+		);
+	}
+};
+
+/*
+	The schema can inject defaults before a resolver runs. Walk those effective
+	values as well as client-supplied AST nodes so deprecated enum/input values
+	used only by a schema default still appear in request telemetry.
+*/
+const collectDeprecatedFieldDefaults = (
+	field: ReturnType<TypeInfo["getFieldDef"]>,
+	argumentsList: readonly ArgumentNode[] | undefined,
+	variables: Record<string, unknown>,
+	variableDefaults: ReadonlyMap<string, unknown>,
+	addSymbol: (symbol: string) => void,
+	addArgumentSymbol?: (argument: GraphQLArgument) => void
+): void => {
+	if (!field) return;
+	collectDeprecatedArgumentDefaultsAndValues(
+		argumentsList,
+		field.args,
+		variables,
+		variableDefaults,
+		addSymbol,
+		(argument) => {
+			if (argument.deprecationReason !== undefined) addArgumentSymbol?.(argument);
+		}
+	);
+};
+
+const executableSelectionIsIncluded = (
+	directives: readonly DirectiveNode[] | undefined,
+	variables: Record<string, unknown>
+): boolean => {
+	for (const directive of directives ?? []) {
+		if (directive.name.value !== "skip" && directive.name.value !== "include") continue;
+		const condition = directive.arguments?.find((argument) => argument.name.value === "if");
+		const value = condition ? valueFromASTUntyped(condition.value, variables) : undefined;
+		if (directive.name.value === "skip" && value === true) return false;
+		if (directive.name.value === "include" && value === false) return false;
+	}
+	return true;
+};
+
+const collectVariableReferences = (
+	argumentsList: readonly ArgumentNode[] | undefined,
+	usedVariables: Set<string>,
+	variableOwners?: Map<string, Set<string | undefined>>,
+	owner?: string
+): void => {
+	for (const argument of argumentsList ?? []) {
+		visit(argument.value, {
+			Variable(node) {
+				usedVariables.add(node.name.value);
+				if (variableOwners) {
+					const owners = variableOwners.get(node.name.value) ?? new Set<string | undefined>();
+					owners.add(owner);
+					variableOwners.set(node.name.value, owners);
+				}
+			},
+		});
+	}
+};
+
+const collectDirectiveVariableReferences = (
+	directives: readonly DirectiveNode[] | undefined,
+	usedVariables: Set<string>,
+	variableOwners?: Map<string, Set<string | undefined>>,
+	owner?: string
+): void => {
+	for (const directive of directives ?? []) {
+		collectVariableReferences(directive.arguments, usedVariables, variableOwners, owner);
+	}
+};
+
+const activeDeprecatedTelemetrySelections = (
+	operation: OperationDefinitionNode,
+	fragments: ReadonlyMap<string, FragmentDefinitionNode>,
+	reachableFragments: ReadonlySet<string>,
+	variables: Record<string, unknown>,
+	schema: GraphQLSchema
+): {
+	fragments: Set<string>;
+	variables: Set<string>;
+	variableOwners: Map<string, Set<string | undefined>>;
+	fragmentDirectiveOwners: Map<string, Set<string>>;
+	selectionDirectiveOwners: Map<DirectiveNode, Set<string>>;
+} => {
+	const active = new Set<string>();
+	const usedVariables = new Set<string>();
+	const variableOwners = new Map<string, Set<string | undefined>>();
+	const fragmentDirectiveOwners = new Map<string, Set<string>>();
+	const selectionDirectiveOwners = new Map<DirectiveNode, Set<string>>();
+	const fragmentFieldOwnerMemo = new Map<string, Set<string>>();
+	const fragmentOccurrenceOwnerMemo = new Map<string, Set<string>>();
+	const possibleRuntimeTypesFor = (typeCondition: string): readonly string[] => {
+		const type = schema.getType(typeCondition);
+		if (type && (isInterfaceType(type) || isUnionType(type))) {
+			const possibleTypes = schema.getPossibleTypes(type);
+			if (possibleTypes.length > 0) return possibleTypes.map((possibleType) => possibleType.name);
+		}
+		return [type?.name ?? typeCondition];
+	};
+	const pathsForRuntimeTypeCondition = (
+		path: readonly string[],
+		typeCondition: string
+	): readonly (readonly string[])[] => {
+		const possibleTypes = possibleRuntimeTypesFor(typeCondition);
+		const currentTypeMarker = path.at(-1);
+		if (currentTypeMarker?.startsWith("__type:")) {
+			const currentType = currentTypeMarker.slice("__type:".length);
+			return possibleTypes.includes(currentType) ? [path] : [];
+		}
+		return possibleTypes.map((typeName) => [...path, deprecationTypeOwnerSegment(typeName)]);
+	};
+	const branchPathsFor = (
+		selection: InlineFragmentNode,
+		path: readonly string[]
+	): readonly (readonly string[])[] =>
+		selection.typeCondition
+			? pathsForRuntimeTypeCondition(path, selection.typeCondition.name.value)
+			: [path];
+	const collectFragmentFieldOwners = (
+		fragmentName: string,
+		seen: ReadonlySet<string> = new Set()
+	): Set<string> => {
+		if (seen.has(fragmentName)) return new Set();
+		const memoized = fragmentFieldOwnerMemo.get(fragmentName);
+		if (memoized) return new Set(memoized);
+		const fragment = fragments.get(fragmentName);
+		if (!fragment) return new Set();
+		const nextSeen = new Set(seen);
+		nextSeen.add(fragmentName);
+		const owners = new Set<string>();
+		const collect = (selectionSet: SelectionSetNode): void => {
+			for (const selection of selectionSet.selections) {
+				if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
+				if (selection.kind === Kind.FIELD) {
+					if (selection.loc) owners.add(`field:${selection.loc.start}`);
+					if (selection.selectionSet) collect(selection.selectionSet);
+					continue;
+				}
+				if (selection.kind === Kind.INLINE_FRAGMENT) {
+					collect(selection.selectionSet);
+					continue;
+				}
+				if (nextSeen.has(selection.name.value)) continue;
+				for (const owner of collectFragmentFieldOwners(selection.name.value, nextSeen)) {
+					owners.add(owner);
+				}
+			}
+		};
+		collect(fragment.selectionSet);
+		fragmentFieldOwnerMemo.set(fragmentName, new Set(owners));
+		return owners;
+	};
+	const collectSelectionOccurrenceOwners = (
+		selectionSet: SelectionSetNode,
+		pathPrefix: readonly string[],
+		seenFragments: ReadonlySet<string> = new Set()
+	): Set<string> => {
+		const owners = new Set<string>();
+		for (const selection of selectionSet.selections) {
+			if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
+			if (selection.kind === Kind.FIELD) {
+				const responseKey = selection.alias?.value ?? selection.name.value;
+				owners.add(deprecationPathOwner([...pathPrefix, responseKey]));
+				if (selection.selectionSet) {
+					for (const owner of collectSelectionOccurrenceOwners(
+						selection.selectionSet,
+						[...pathPrefix, responseKey],
+						seenFragments
+					)) {
+						owners.add(owner);
+					}
+				}
+				continue;
+			}
+			if (selection.kind === Kind.INLINE_FRAGMENT) {
+				for (const branchPath of branchPathsFor(selection, pathPrefix)) {
+					for (const owner of collectSelectionOccurrenceOwners(
+						selection.selectionSet,
+						branchPath,
+						seenFragments
+					)) {
+						owners.add(owner);
+					}
+				}
+				continue;
+			}
+			for (const owner of collectFragmentOccurrenceOwners(
+				selection.name.value,
+				pathPrefix,
+				seenFragments
+			)) {
+				owners.add(owner);
+			}
+		}
+		return owners;
+	};
+	const collectFragmentOccurrenceOwners = (
+		fragmentName: string,
+		pathPrefix: readonly string[],
+		seen: ReadonlySet<string> = new Set()
+	): Set<string> => {
+		if (seen.has(fragmentName)) return new Set();
+		const memoKey = `${fragmentName}|${pathPrefix.join(".")}`;
+		const memoized = fragmentOccurrenceOwnerMemo.get(memoKey);
+		if (memoized) return new Set(memoized);
+		const fragment = fragments.get(fragmentName);
+		if (!fragment) return new Set();
+		const nextSeen = new Set(seen);
+		nextSeen.add(fragmentName);
+		const occurrencePaths = pathsForRuntimeTypeCondition(
+			pathPrefix,
+			fragment.typeCondition.name.value
+		);
+		const owners = new Set<string>();
+		for (const occurrencePath of occurrencePaths) {
+			for (const owner of collectSelectionOccurrenceOwners(
+				fragment.selectionSet,
+				occurrencePath,
+				nextSeen
+			)) {
+				owners.add(owner);
+			}
+		}
+		fragmentOccurrenceOwnerMemo.set(memoKey, new Set(owners));
+		return owners;
+	};
+	const registerSelectionDirectiveOwners = (
+		directives: readonly DirectiveNode[] | undefined,
+		owners: ReadonlySet<string>
+	): void => {
+		for (const directive of directives ?? []) {
+			const registered = selectionDirectiveOwners.get(directive) ?? new Set<string>();
+			for (const owner of owners) registered.add(owner);
+			selectionDirectiveOwners.set(directive, registered);
+			// A directive on an inline fragment or fragment spread is effective
+			// only when one of the fields in that branch executes.
+			for (const owner of owners) {
+				collectDirectiveVariableReferences([directive], usedVariables, variableOwners, owner);
+			}
+		}
+	};
+	const registerFragmentDirectiveOwners = (
+		fragment: FragmentDefinitionNode,
+		occurrenceOwners?: ReadonlySet<string>
+	): void => {
+		const owners = occurrenceOwners ?? collectFragmentFieldOwners(fragment.name.value);
+		const registered = fragmentDirectiveOwners.get(fragment.name.value) ?? new Set<string>();
+		for (const owner of owners) registered.add(owner);
+		fragmentDirectiveOwners.set(fragment.name.value, registered);
+		// Variables referenced by a fragment-definition directive are effective
+		// only when one of that fragment's field occurrences executes. Keep the
+		// variable telemetry on those occurrences instead of making it global.
+		for (const owner of owners) {
+			collectDirectiveVariableReferences(fragment.directives, usedVariables, variableOwners, owner);
+		}
+	};
+	const inspect = (
+		selectionSet: SelectionSetNode,
+		currentOwner?: string,
+		pathPrefix: readonly string[] = [],
+		seenFragments: ReadonlySet<string> = new Set()
+	): void => {
+		for (const selection of selectionSet.selections) {
+			if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
+			if (selection.kind === Kind.FIELD) {
+				const owner = selection.loc ? `field:${selection.loc.start}` : undefined;
+				collectDirectiveVariableReferences(
+					selection.directives,
+					usedVariables,
+					variableOwners,
+					owner
+				);
+				collectVariableReferences(selection.arguments, usedVariables, variableOwners, owner);
+				if (selection.selectionSet) {
+					inspect(
+						selection.selectionSet,
+						owner,
+						[...pathPrefix, selection.alias?.value ?? selection.name.value],
+						seenFragments
+					);
+				}
+				continue;
+			}
+			if (selection.kind === Kind.INLINE_FRAGMENT) {
+				const directiveOwners = new Set<string>();
+				for (const branchPath of branchPathsFor(selection, pathPrefix)) {
+					for (const owner of collectSelectionOccurrenceOwners(
+						selection.selectionSet,
+						branchPath
+					)) {
+						directiveOwners.add(owner);
+					}
+				}
+				registerSelectionDirectiveOwners(selection.directives, directiveOwners);
+				for (const branchPath of branchPathsFor(selection, pathPrefix)) {
+					inspect(selection.selectionSet, currentOwner, branchPath, seenFragments);
+				}
+				continue;
+			}
+			const fragmentName = selection.name.value;
+			const occurrenceOwners = collectFragmentOccurrenceOwners(fragmentName, pathPrefix);
+			registerSelectionDirectiveOwners(selection.directives, occurrenceOwners);
+			if (!reachableFragments.has(fragmentName)) continue;
+			const fragment = fragments.get(fragmentName);
+			if (!fragment) continue;
+			registerFragmentDirectiveOwners(fragment, occurrenceOwners);
+			active.add(fragmentName);
+			if (seenFragments.has(fragmentName)) continue;
+			const nextSeenFragments = new Set(seenFragments);
+			nextSeenFragments.add(fragmentName);
+			// A named fragment's type condition is part of every nested
+			// occurrence. Preserve the condition-specific path while walking its
+			// selections; otherwise a directive-bearing nested spread can be
+			// registered for a sibling runtime type even though this fragment
+			// occurrence never executes there.
+			for (const occurrencePath of pathsForRuntimeTypeCondition(
+				pathPrefix,
+				fragment.typeCondition.name.value
+			)) {
+				inspect(fragment.selectionSet, currentOwner, occurrencePath, nextSeenFragments);
+			}
+		}
+	};
+	inspect(operation.selectionSet);
+	collectDirectiveVariableReferences(
+		operation.directives,
+		usedVariables,
+		variableOwners,
+		undefined
+	);
+	return {
+		fragments: active,
+		variables: usedVariables,
+		variableOwners,
+		fragmentDirectiveOwners,
+		selectionDirectiveOwners,
+	};
+};
+
+const selectedDeprecatedSymbols = (
+	document: ReturnType<typeof analyzeGraphQLOperation>["document"],
+	operation: OperationDefinitionNode,
+	reachableFragments: ReadonlySet<string>,
+	variables: Record<string, unknown>,
+	schema?: GraphQLSchema
+): {
+	symbols: readonly string[];
+	owners: Readonly<Record<string, readonly string[]>>;
+	globalSymbols: readonly string[];
+} => {
+	if (!schema) return { symbols: [], owners: {}, globalSymbols: [] };
+	const fragments = new Map(
+		document.definitions
+			.filter(
+				(definition): definition is FragmentDefinitionNode =>
+					definition.kind === Kind.FRAGMENT_DEFINITION
+			)
+			.map((fragment) => [fragment.name.value, fragment])
+	);
+	const activeSelections = activeDeprecatedTelemetrySelections(
+		operation,
+		fragments,
+		reachableFragments,
+		variables,
+		schema
+	);
+	const fragmentDirectiveOwners = new Map<DirectiveNode, ReadonlySet<string>>();
+	for (const [fragmentName, owners] of activeSelections.fragmentDirectiveOwners) {
+		const fragment = fragments.get(fragmentName);
+		if (!fragment) continue;
+		for (const directive of fragment.directives ?? []) {
+			fragmentDirectiveOwners.set(directive, owners);
+		}
+	}
+	for (const [directive, owners] of activeSelections.selectionDirectiveOwners) {
+		fragmentDirectiveOwners.set(directive, owners);
+	}
+	const selectedDocument = {
+		...document,
+		definitions: document.definitions.filter(
+			(definition) =>
+				definition === operation ||
+				(definition.kind === Kind.FRAGMENT_DEFINITION &&
+					activeSelections.fragments.has(definition.name.value))
+		),
+	};
+	const typeInfo = new TypeInfo(schema);
+	const symbols = new Set<string>();
+	const owners = new Map<string, Set<string>>();
+	const globalSymbols = new Set<string>();
+	const fieldOwners: Array<string | undefined> = [];
+	const directiveOwnerStack: Array<ReadonlySet<string> | undefined> = [];
+	const addSymbol = (symbol: string, owner?: string): void => {
+		symbols.add(symbol);
+		if (!owner) {
+			globalSymbols.add(symbol);
+			return;
+		}
+		const owned = owners.get(owner) ?? new Set<string>();
+		owned.add(symbol);
+		owners.set(owner, owned);
+	};
+	const currentFieldOwner = (): string | undefined => fieldOwners.at(-1);
+	const addDirectiveSymbol = (
+		symbol: string,
+		ownersForDirective: ReadonlySet<string> | undefined
+	): void => {
+		if (ownersForDirective !== undefined) {
+			for (const owner of ownersForDirective) addSymbol(symbol, owner);
+			return;
+		}
+		addSymbol(symbol, currentFieldOwner());
+	};
+	const variableDefaultValueNodes = new WeakSet<ASTNode>();
+	const variableDefaults = new Map<string, unknown>();
+	for (const definition of operation.variableDefinitions ?? []) {
+		if (!definition.defaultValue) continue;
+		variableDefaults.set(
+			definition.variable.name.value,
+			valueFromASTUntyped(definition.defaultValue)
+		);
+		visit(definition.defaultValue, {
+			enter(node) {
+				variableDefaultValueNodes.add(node);
+			},
+		});
+	}
+	visit(
+		selectedDocument,
+		visitWithTypeInfo(typeInfo, {
+			Field: {
+				enter(node) {
+					const parentType = typeInfo.getParentType();
+					const field = typeInfo.getFieldDef();
+					const owner = node.loc
+						? `field:${node.loc.start}`
+						: parentType && field
+							? `${parentType.name}.${field.name}`
+							: undefined;
+					fieldOwners.push(owner);
+					if (!executableSelectionIsIncluded(node.directives, variables)) {
+						fieldOwners.pop();
+						return false;
+					}
+					collectDeprecatedFieldDefaults(
+						field,
+						node.arguments,
+						variables,
+						variableDefaults,
+						(symbol) => addSymbol(symbol, owner),
+						(argument) => {
+							if (parentType && field) {
+								addSymbol(`${parentType.name}.${field.name}(${argument.name}:)`, owner);
+							}
+						}
+					);
+					if (parentType && field?.deprecationReason !== undefined) {
+						addSymbol(`${parentType.name}.${node.name.value}`, owner);
+					}
+				},
+				leave() {
+					fieldOwners.pop();
+				},
+			},
+			InlineFragment: {
+				enter(node) {
+					if (!executableSelectionIsIncluded(node.directives, variables)) return false;
+				},
+			},
+			FragmentSpread: {
+				enter(node) {
+					if (!executableSelectionIsIncluded(node.directives, variables)) return false;
+				},
+			},
+			Directive: {
+				enter(node) {
+					const ownersForDirective = fragmentDirectiveOwners.get(node);
+					directiveOwnerStack.push(ownersForDirective);
+					const directive = schema.getDirective(node.name.value);
+					if (!directive) return;
+					collectDeprecatedArgumentDefaultsAndValues(
+						node.arguments,
+						directive.args,
+						variables,
+						variableDefaults,
+						(symbol) => addDirectiveSymbol(symbol, ownersForDirective),
+						(argument) => {
+							if (argument.deprecationReason !== undefined) {
+								addDirectiveSymbol(`@${directive.name}(${argument.name}:)`, ownersForDirective);
+							}
+						}
+					);
+				},
+				leave() {
+					directiveOwnerStack.pop();
+				},
+			},
+			Argument(node) {
+				const parentType = typeInfo.getParentType();
+				const field = typeInfo.getFieldDef();
+				const argument = typeInfo.getArgument();
+				const directive = typeInfo.getDirective();
+				// An optional variable that is omitted makes the argument absent after
+				// GraphQL coercion, even though the argument node remains in the AST.
+				// Do not report a deprecated argument that the resolver never receives;
+				// operation defaults and explicitly supplied nulls are effective values.
+				if (
+					node.value.kind === Kind.VARIABLE &&
+					!Object.hasOwn(variables, node.value.name.value) &&
+					!variableDefaults.has(node.value.name.value)
+				) {
+					return;
+				}
+				if (!directive && parentType && field && argument?.deprecationReason !== undefined) {
+					addSymbol(`${parentType.name}.${field.name}(${node.name.value}:)`, currentFieldOwner());
+				}
+				if (directive && argument?.deprecationReason !== undefined) {
+					addDirectiveSymbol(`@${directive.name}(${node.name.value}:)`, directiveOwnerStack.at(-1));
+				}
+			},
+			ObjectField(node) {
+				if (variableDefaultValueNodes.has(node)) return;
+				if (
+					node.value.kind === Kind.VARIABLE &&
+					!Object.hasOwn(variables, node.value.name.value) &&
+					!variableDefaults.has(node.value.name.value)
+				) {
+					// An omitted optional variable contributes no input object value;
+					// do not report deprecated fields that appear only in its AST
+					// shape. Supplied values and operation defaults are handled below.
+					return;
+				}
+				const parentInputType = typeInfo.getParentInputType();
+				if (!parentInputType) return;
+				const namedParent = getNamedType(parentInputType);
+				if (!isInputObjectType(namedParent)) return;
+				const field = namedParent.getFields()[node.name.value];
+				if (field?.deprecationReason === undefined) return;
+				const symbol = `${namedParent.name}.${field.name}`;
+				if (typeInfo.getDirective()) {
+					addDirectiveSymbol(symbol, directiveOwnerStack.at(-1));
+				} else {
+					addSymbol(symbol, currentFieldOwner());
+				}
+			},
+			EnumValue(node) {
+				if (variableDefaultValueNodes.has(node)) return;
+				const inputType = typeInfo.getInputType();
+				const enumValue = typeInfo.getEnumValue();
+				if (!inputType || enumValue?.deprecationReason === undefined) return;
+				const namedInput = getNamedType(inputType);
+				if (isEnumType(namedInput)) {
+					const symbol = `${namedInput.name}.${enumValue.name}`;
+					if (typeInfo.getDirective()) {
+						addDirectiveSymbol(symbol, directiveOwnerStack.at(-1));
+					} else {
+						addSymbol(symbol, currentFieldOwner());
+					}
+				}
+			},
+		})
+	);
+	for (const definition of operation.variableDefinitions ?? []) {
+		const variableName = definition.variable.name.value;
+		if (!activeSelections.variables.has(variableName)) continue;
+		const effectiveValue = Object.hasOwn(variables, variableName)
+			? variables[variableName]
+			: definition.defaultValue
+				? valueFromASTUntyped(definition.defaultValue)
+				: undefined;
+		const inputType = typeFromAST(schema, definition.type);
+		if (inputType && isInputType(inputType)) {
+			const ownersForVariable = activeSelections.variableOwners.get(variableName);
+			if (ownersForVariable && ownersForVariable.size > 0) {
+				collectDeprecatedVariableSymbols(effectiveValue, inputType, (symbol) => {
+					for (const owner of ownersForVariable) addSymbol(symbol, owner);
+				});
+			} else {
+				collectDeprecatedVariableSymbols(effectiveValue, inputType, (symbol) => addSymbol(symbol));
+			}
+		}
+	}
+	return {
+		symbols: [...symbols].sort(),
+		owners: Object.fromEntries(
+			[...owners.entries()].map(([owner, ownedSymbols]) => [owner, [...ownedSymbols].sort()])
+		),
+		globalSymbols: [...globalSymbols].sort(),
+	};
+};
+
+export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["liveScores", 5],
 	["eventLive", 5],
 	["eventLiveExplains", 5],
@@ -458,12 +1127,14 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["eventFixtures", 5],
 	["currentEventInfo", 1],
 	["teams", 2],
+	["playersForPicker", 5],
 	["miniProgramNotice", 1],
 	["publicLeagueTrends", 10],
 	["publicLeagueSelectionStats", 10],
 	["trendCohorts", 5],
 	["trendCohortSnapshot", 10],
 	["calcLivePointsByEntry", 10],
+	["calcLivePointsForEntries", 10],
 	["searchEntries", 10],
 	["entryLookup", 5],
 	["entryNameUsage", 5],
@@ -485,6 +1156,33 @@ const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["myFplCompetitionSetupStatus", 5],
 ]);
 
+export const BOUNDED_PUBLIC_ROOT_RATE_LIMIT_FLOOR = 5;
+
+export const BOUNDED_PUBLIC_DESK_ROOTS: ReadonlySet<string> = new Set([
+	"playersForPicker",
+	"playerStatsBootstrap",
+	"marketAvailabilityPage",
+	"marketPulse",
+	"priceChangeBoard",
+	"priceChangeLiveBoard",
+	"marketOwnershipOverview",
+	"marketOwnershipDay",
+	"marketSnapshotContext",
+	"playerValues",
+	"eventFixtures",
+	"currentEventInfo",
+	"teams",
+	"miniProgramNotice",
+	"entryLookup",
+]);
+
+export const effectiveRootRateLimitFloor = (field: string): number =>
+	Math.max(
+		1,
+		ROOT_RATE_LIMIT_FLOORS.get(field) ?? 0,
+		BOUNDED_PUBLIC_DESK_ROOTS.has(field) ? BOUNDED_PUBLIC_ROOT_RATE_LIMIT_FLOOR : 0
+	);
+
 const heavyRootCost = (
 	rootFields: Array<{ name: string; uniqueEntryCount: number | null }>
 ): number =>
@@ -492,37 +1190,31 @@ const heavyRootCost = (
 		if (field.name === "calcLivePointsForEntries") {
 			return total + Math.max(10, field.uniqueEntryCount ?? 0);
 		}
-		return total + (ROOT_RATE_LIMIT_FLOORS.get(field.name) ?? 0);
+		// The effective floor includes bounded-public roots whose registered
+		// value is intentionally lower than the work they expose (for example,
+		// `teams` is registered at 2 but must cost at least 5).  Use the same
+		// effective value for mixed operations as for a bounded-only operation;
+		// otherwise adding a cheap sibling root would bypass the bounded floor.
+		return total + effectiveRootRateLimitFloor(field.name);
 	}, 0);
 
 const accepted = ({
 	shape,
 	weightedComplexity = 0,
 	rootFields = [],
+	deprecatedSymbols = [],
+	deprecatedSymbolOwners = {},
+	deprecatedSymbolGlobalSymbols = [],
 }: {
 	shape: GraphQLRequestShape;
 	weightedComplexity?: number;
 	rootFields?: Array<{ name: string; uniqueEntryCount: number | null }>;
+	deprecatedSymbols?: readonly string[];
+	deprecatedSymbolOwners?: Readonly<Record<string, readonly string[]>>;
+	deprecatedSymbolGlobalSymbols?: readonly string[];
 }): GraphQLLimitResult => {
-	const boundedPublicDeskRoots = new Set([
-		"playersForPicker",
-		"playerStatsBootstrap",
-		"marketAvailabilityPage",
-		"marketPulse",
-		"priceChangeBoard",
-		"priceChangeLiveBoard",
-		"marketOwnershipOverview",
-		"marketOwnershipDay",
-		"marketSnapshotContext",
-		"playerValues",
-		"eventFixtures",
-		"currentEventInfo",
-		"teams",
-		"miniProgramNotice",
-		"entryLookup",
-	]);
 	const boundedPublicDeskRequest =
-		rootFields.length > 0 && rootFields.every((field) => boundedPublicDeskRoots.has(field.name));
+		rootFields.length > 0 && rootFields.every((field) => BOUNDED_PUBLIC_DESK_ROOTS.has(field.name));
 	const optimizedMyFplRoots = new Set([
 		"myFplTeamDesk",
 		"myFplTeamGameweek",
@@ -539,11 +1231,17 @@ const accepted = ({
 		shape,
 		weightedComplexity,
 		rateLimitCostUnits: boundedPublicDeskRequest
-			? Math.max(5 * rootFields.length, heavyRootCost(rootFields))
+			? Math.max(
+					BOUNDED_PUBLIC_ROOT_RATE_LIMIT_FLOOR * rootFields.length,
+					heavyRootCost(rootFields)
+				)
 			: optimizedMyFplRequest
 				? heavyRootCost(rootFields)
 				: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
 		rootFields: rootFields.map((field) => field.name),
+		deprecatedSymbols,
+		deprecatedSymbolOwners,
+		deprecatedSymbolGlobalSymbols,
 	};
 };
 
@@ -555,18 +1253,14 @@ export const validateGraphQLPayloadLimits = (
 		return reject("GraphQL request body must contain a query string", "INVALID_GRAPHQL_REQUEST");
 	}
 
-	let document: DocumentNode;
+	let analysis: ReturnType<typeof analyzeGraphQLOperation>;
 	try {
-		document = parse(payload.query);
+		analysis = analyzeGraphQLOperation(payload, schema);
 	} catch {
 		return accepted({ shape: "unknown" });
 	}
 
-	const operation = operationFor(
-		document,
-		typeof payload.operationName === "string" ? payload.operationName : null
-	);
-	const fragments = fragmentsFor(document);
+	const { document, operation, fragments, variables } = analysis;
 	const rootInspection = operation
 		? effectiveRootFieldsFor(operation, fragments)
 		: { fields: [], reachableFragments: new Set<string>() };
@@ -650,11 +1344,17 @@ export const validateGraphQLPayloadLimits = (
 	if (!operation) {
 		return accepted({ shape: "unknown" });
 	}
+	const deprecatedTelemetry = selectedDeprecatedSymbols(
+		document,
+		operation,
+		rootInspection.reachableFragments,
+		variables,
+		schema
+	);
 
-	const variables = variablesWithDefaults(operation, asVariables(payload.variables));
 	const inspection = inspectSelectionSet({
 		selectionSet: operation.selectionSet,
-		fragments: fragmentsFor(document),
+		fragments,
 		variables,
 		depth: 1,
 		multiplier: 1,
@@ -696,6 +1396,9 @@ export const validateGraphQLPayloadLimits = (
 		shape: operation.operation,
 		weightedComplexity: inspection.complexity,
 		rootFields: inspection.rootFields,
+		deprecatedSymbols: deprecatedTelemetry.symbols,
+		deprecatedSymbolOwners: deprecatedTelemetry.owners,
+		deprecatedSymbolGlobalSymbols: deprecatedTelemetry.globalSymbols,
 	});
 };
 
@@ -714,6 +1417,9 @@ export const validateGraphQLRequestLimits = (
 	let weightedComplexity = 0;
 	let rateLimitCostUnits = 0;
 	const rootFields: string[] = [];
+	const deprecatedSymbols = new Set<string>();
+	const deprecatedSymbolOwners = new Map<string, Set<string>>();
+	const deprecatedSymbolGlobalSymbols = new Set<string>();
 	for (const payload of payloads) {
 		if (!payload || typeof payload !== "object") {
 			return reject("GraphQL request body must be an object", "INVALID_GRAPHQL_REQUEST");
@@ -725,6 +1431,15 @@ export const validateGraphQLRequestLimits = (
 		weightedComplexity += result.weightedComplexity;
 		rateLimitCostUnits += result.rateLimitCostUnits;
 		rootFields.push(...result.rootFields);
+		for (const symbol of result.deprecatedSymbols) deprecatedSymbols.add(symbol);
+		for (const symbol of result.deprecatedSymbolGlobalSymbols) {
+			deprecatedSymbolGlobalSymbols.add(symbol);
+		}
+		for (const [owner, symbols] of Object.entries(result.deprecatedSymbolOwners)) {
+			const owned = deprecatedSymbolOwners.get(owner) ?? new Set<string>();
+			for (const symbol of symbols) owned.add(symbol);
+			deprecatedSymbolOwners.set(owner, owned);
+		}
 	}
 	return {
 		ok: true,
@@ -732,5 +1447,10 @@ export const validateGraphQLRequestLimits = (
 		weightedComplexity,
 		rateLimitCostUnits: Math.max(1, rateLimitCostUnits),
 		rootFields,
+		deprecatedSymbols: [...deprecatedSymbols].sort(),
+		deprecatedSymbolOwners: Object.fromEntries(
+			[...deprecatedSymbolOwners.entries()].map(([owner, symbols]) => [owner, [...symbols].sort()])
+		),
+		deprecatedSymbolGlobalSymbols: [...deprecatedSymbolGlobalSymbols].sort(),
 	};
 };

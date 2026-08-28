@@ -1,5 +1,6 @@
 import type { QueryResultRow } from "pg";
 import type { DataSqlContractProbe } from "../contracts/data-sql-contract";
+import { isPlainRecord as isRecord } from "../contracts/guards";
 import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
@@ -517,9 +518,6 @@ export const getLiveDataPublicationManifest = async (
 	eventId: number
 ): Promise<DataPublicationManifest | null> =>
 	(await getLiveDataPublicationManifestWithSource(context, eventId))?.manifest ?? null;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const pick = (row: Record<string, unknown>, camel: string, snake: string): unknown =>
 	Object.hasOwn(row, camel) ? row[camel] : row[snake];

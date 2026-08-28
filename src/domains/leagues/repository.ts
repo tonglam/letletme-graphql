@@ -1,12 +1,10 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { stableStringify } from "../../infra/stringify";
 import type { OfficialLeagueKind } from "./display-order";
 import { mapFplOfficialKind, sortLeaguesForOfficialDisplay } from "./display-order";
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const readJsonCache = async <T>(
 	context: GraphQLContext,

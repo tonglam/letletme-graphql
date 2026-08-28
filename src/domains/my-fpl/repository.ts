@@ -5,6 +5,8 @@ import {
 	GRAPHQL_DATA_CONTRACT_LEAGUE_ONLY_TOURNAMENT_ID,
 	GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID,
 } from "../../contracts/data-fixture-identities";
+import { normalizeFplChip } from "../../contracts/fpl-chip";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import type { GraphQLContext } from "../../graphql/context";
 import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
@@ -1035,9 +1037,6 @@ const defaultReviewEventId = (context: LoadedReviewContext): number | null =>
 	context.value.currentEventId ??
 	context.value.latestFinalizedEventId;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
-
 const asFiniteNumber = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) return value;
 	if (typeof value === "string" && value.trim() !== "") {
@@ -1094,17 +1093,7 @@ const compareSnapshotRevisions = (left: string, right: string): number => {
 	return normalizedLeft === normalizedRight ? 0 : normalizedLeft > normalizedRight ? 1 : -1;
 };
 
-const normalizeChip = (value: string | null): string => {
-	const compact = String(value ?? "NONE")
-		.toUpperCase()
-		.replace(/[^A-Z0-9]/g, "");
-	if (["BENCHBOOST", "BBOOST", "BB"].includes(compact)) return "BENCH_BOOST";
-	if (["TRIPLECAPTAIN", "3XC", "TC"].includes(compact)) return "TRIPLE_CAPTAIN";
-	if (["FREEHIT", "FH"].includes(compact)) return "FREE_HIT";
-	if (["WILDCARD", "WC"].includes(compact)) return "WILDCARD";
-	if (["MANAGER", "AM"].includes(compact)) return "MANAGER";
-	return "NONE";
-};
+const normalizeChip = (value: string | null): string => normalizeFplChip(value, "NONE") ?? "NONE";
 
 const normalizeNullableChip = (value: string | null): string | null =>
 	value === null ? null : normalizeChip(value);

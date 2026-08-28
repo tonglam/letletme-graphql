@@ -1,0 +1,132 @@
+[
+	{
+		"id": "entry-root-field",
+		"symbol": "Query.entry",
+		"owner": "graphql",
+		"introducedAt": "2024-01-01",
+		"removedAt": "2026-08-28",
+		"status": "removed",
+		"usageMetric": "graphql_request_outcomes_total",
+		"notes": "Hard cut in favour of Query.entryLookup; no compatibility resolver."
+	},
+	{
+		"id": "player-detail-availability",
+		"symbol": "PlayerDetail.availability",
+		"owner": "graphql-player-detail",
+		"introducedAt": "2024-01-01",
+		"removedAt": "2026-08-28",
+		"status": "removed",
+		"usageMetric": "player_detail_data_availability_total",
+		"notes": "Hard cut in favour of injuryAvailability and dataAvailability."
+	},
+	{
+		"id": "query-entry-tournaments",
+		"symbol": "Query.entryTournaments",
+		"owner": "graphql-tournaments",
+		"introducedAt": "2024-01-01",
+		"removedAt": "2026-08-28",
+		"status": "removed",
+		"usageMetric": "graphql_request_outcomes_total",
+		"notes": "Hard cut; no compatibility resolver."
+	},
+	{
+		"id": "live-calc-rank",
+		"symbol": "LiveCalcData.rank",
+		"owner": "graphql-entry-live",
+		"introducedAt": "2024-01-01",
+		"removalTarget": "2027-03-01",
+		"status": "deprecated",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveCalcData.rank\"}",
+		"notes": "Use score.eventRank or score.leagueRank."
+	},
+	{
+		"id": "live-calc-live-points",
+		"symbol": "LiveCalcData.livePoints",
+		"owner": "graphql-entry-live",
+		"introducedAt": "2024-01-01",
+		"removalTarget": "2027-03-01",
+		"status": "deprecated",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveCalcData.livePoints\"}",
+		"notes": "Use score.eventPoints."
+	},
+	{
+		"id": "live-calc-live-net-points",
+		"symbol": "LiveCalcData.liveNetPoints",
+		"owner": "graphql-entry-live",
+		"introducedAt": "2024-01-01",
+		"removalTarget": "2027-03-01",
+		"status": "deprecated",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveCalcData.liveNetPoints\"}",
+		"notes": "Use score.netEventPoints."
+	},
+	{
+		"id": "live-calc-live-total-points",
+		"symbol": "LiveCalcData.liveTotalPoints",
+		"owner": "graphql-entry-live",
+		"introducedAt": "2024-01-01",
+		"removalTarget": "2027-03-01",
+		"status": "deprecated",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveCalcData.liveTotalPoints\"}",
+		"notes": "Use score.totalPoints when totalScope is OVERALL."
+	},
+	{
+		"id": "tournament-info-setup-warnings",
+		"symbol": "TournamentInfo.setupHasWarnings",
+		"owner": "graphql-tournaments",
+		"introducedAt": "2024-01-01",
+		"removalTarget": "2027-03-01",
+		"status": "deprecated",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"TournamentInfo.setupHasWarnings\"}",
+		"notes": "Use warningSummaries and capability timestamps."
+	},
+	{
+		"id": "managed-tournament-status-setup-warnings",
+		"symbol": "ManagedTournamentStatus.setupHasWarnings",
+		"owner": "graphql-tournaments",
+		"introducedAt": "2024-01-01",
+		"removalTarget": "2027-03-01",
+		"status": "deprecated",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"ManagedTournamentStatus.setupHasWarnings\"}",
+		"notes": "Use warningSummaries and capability timestamps."
+	},
+	{
+		"id": "my-fpl-setup-warnings",
+		"symbol": "MyFplCompetitionSetupStatus.setupHasWarnings",
+		"owner": "graphql-my-fpl",
+		"introducedAt": "2024-01-01",
+		"removalTarget": "2027-03-01",
+		"status": "deprecated",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"MyFplCompetitionSetupStatus.setupHasWarnings\"}",
+		"notes": "Use insightsReadyAt."
+	},
+	{
+		"id": "live-match-home-short-name",
+		"symbol": "LiveMatchSummary.homeTeamShortName",
+		"owner": "graphql-live-desks",
+		"introducedAt": "2024-01-01",
+		"removalTarget": "2027-03-01",
+		"status": "deprecated",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveMatchSummary.homeTeamShortName\"}",
+		"notes": "Use core team identity."
+	},
+	{
+		"id": "live-match-away-short-name",
+		"symbol": "LiveMatchSummary.awayTeamShortName",
+		"owner": "graphql-live-desks",
+		"introducedAt": "2024-01-01",
+		"removalTarget": "2027-03-01",
+		"status": "deprecated",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveMatchSummary.awayTeamShortName\"}",
+		"notes": "Use core team identity."
+	},
+	{
+		"id": "live-matchday-next-fixtures",
+		"symbol": "LiveMatchdayDesk.nextFixtures",
+		"owner": "graphql-live-desks",
+		"introducedAt": "2024-01-01",
+		"removalTarget": "2027-03-01",
+		"status": "deprecated",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveMatchdayDesk.nextFixtures\"}",
+		"notes": "Use core eventFixtures for next-event schedule."
+	}
+]

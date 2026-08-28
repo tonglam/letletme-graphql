@@ -1,7 +1,6 @@
 import {
 	ApolloServer,
 	HeaderMap,
-	type GraphQLRequestExecutionListener,
 	type GraphQLRequestListener,
 	type GraphQLRequestListenerParsingDidEnd,
 	type GraphQLRequestListenerValidationDidEnd,
@@ -10,6 +9,7 @@ import { timingSafeEqual } from "crypto";
 import depthLimit from "graphql-depth-limit";
 import { authorizeGraphQLRequest, graphQLErrorResponse } from "./graphql/authorization";
 import type { GraphQLContext } from "./graphql/context";
+import { createDeprecatedSchemaUsageExecutionListener } from "./graphql/deprecation-observability";
 import { validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
 import { validateDatabaseContract } from "./infra/database-contract";
@@ -478,6 +478,8 @@ const startServer = async (): Promise<void> => {
 		plugins: [
 			{
 				async requestDidStart(): Promise<GraphQLRequestListener<GraphQLContext>> {
+					let executionHadErrors = false;
+					let deferredDeprecatedGlobalCommit: (() => void) | undefined;
 					return {
 						async parsingDidStart(requestContext): Promise<GraphQLRequestListenerParsingDidEnd> {
 							const stop = requestContext.contextValue.requestTiming?.start("apolloParse");
@@ -493,15 +495,36 @@ const startServer = async (): Promise<void> => {
 								stop?.();
 							};
 						},
-						async executionDidStart(
-							requestContext
-						): Promise<GraphQLRequestExecutionListener<GraphQLContext>> {
+						async didEncounterErrors(): Promise<void> {
+							executionHadErrors = true;
+						},
+						async willSendResponse(): Promise<void> {
+							// Global deprecated symbols are committed only after Apollo has
+							// dispatched didEncounterErrors. This prevents variable-coercion
+							// failures, which execute no resolver, from being counted as
+							// successful usage.
+							deferredDeprecatedGlobalCommit?.();
+							deferredDeprecatedGlobalCommit = undefined;
+						},
+						async executionDidStart(requestContext) {
 							const stop = requestContext.contextValue.requestTiming?.start("apolloExecute");
-							return {
-								async executionDidEnd(): Promise<void> {
-									stop?.();
+							// Apollo skips validationDidStart for document-cache hits and performs variable
+							// coercion only after executionDidStart. The first resolver hook is therefore
+							// the earliest lifecycle point that covers cached documents while proving both
+							// document validation and variable coercion succeeded.
+							return createDeprecatedSchemaUsageExecutionListener<GraphQLContext>({
+								symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+								symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+								globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols ?? [],
+								increment: (symbol) => metrics.graphqlDeprecatedSchemaUsages.labels(symbol).inc(),
+								isExecutionSuccessful: () =>
+									!executionHadErrors && !(requestContext.errors?.length ?? 0),
+								deferGlobalSymbols: true,
+								registerDeferredGlobalCommit: (commit) => {
+									deferredDeprecatedGlobalCommit = commit;
 								},
-							};
+								onExecutionEnd: stop,
+							});
 						},
 					};
 				},
@@ -868,6 +891,7 @@ const startServer = async (): Promise<void> => {
 							principal,
 							data,
 							logger,
+							schema,
 							requestScope,
 							authorizedTournamentMemberships,
 						})
@@ -878,7 +902,6 @@ const startServer = async (): Promise<void> => {
 							"authorization_rejected"
 						);
 					}
-
 					graphQLContext = {
 						data,
 						database,
@@ -891,6 +914,9 @@ const startServer = async (): Promise<void> => {
 						logger,
 						requestId,
 						operationName,
+						deprecatedSymbols: limits.deprecatedSymbols,
+						deprecatedSymbolOwners: limits.deprecatedSymbolOwners,
+						deprecatedSymbolGlobalSymbols: limits.deprecatedSymbolGlobalSymbols,
 						requestTiming,
 						requestScope,
 						authorizedTournamentMemberships,

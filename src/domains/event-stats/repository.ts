@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { hasExactFields } from "../../infra/exact-fields";
 import {
@@ -9,9 +10,6 @@ import {
 import { getCurrentSeason } from "../../infra/season";
 import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const isFiniteNumber = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value);

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { GraphQLError } from "graphql";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import type { LiveCalcData } from "../entry-live/calc-service";
@@ -108,9 +109,6 @@ export type CachedEntryLiveCompetitionBoard = {
 	highestEventPoints: number | null;
 	averageEventPoints: number | null;
 };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const isPositiveSafeInteger = (value: unknown): value is number =>
 	typeof value === "number" && Number.isSafeInteger(value) && value > 0;

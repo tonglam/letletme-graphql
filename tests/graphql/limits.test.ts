@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { getIntrospectionQuery, parse, visit } from "graphql";
+import { buildSchema, getIntrospectionQuery, parse, visit } from "graphql";
 import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
 import { schema } from "../../src/graphql/schema";
 
@@ -24,6 +24,567 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1, rootFields: ["events"] });
 	});
 
+	it("reports only deprecated schema symbols selected by the active operation", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query Usage {
+						calcLivePointsByEntry(eventId: 1, entryId: 1) {
+							rank
+							livePoints
+							score { eventPoints }
+						}
+					}
+					fragment UnusedLegacyFields on LiveCalcData {
+						liveNetPoints
+						liveTotalPoints
+					}
+				`,
+			},
+			schema
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LiveCalcData.livePoints", "LiveCalcData.rank"],
+		});
+		const owners = (result as { deprecatedSymbolOwners?: Record<string, string[]> })
+			.deprecatedSymbolOwners;
+		expect(Object.values(owners ?? {})).toEqual(
+			expect.arrayContaining([["LiveCalcData.livePoints"], ["LiveCalcData.rank"]])
+		);
+	});
+
+	it("does not report deprecated selections excluded by skip/include directives", () => {
+		const directiveSchema = buildSchema(`
+			input LegacyInput {
+				old: String @deprecated(reason: "Use current")
+			}
+			type Query {
+				current: String
+				legacy(
+					oldArg: String @deprecated(reason: "Use currentArg")
+					input: LegacyInput
+				): String
+					@deprecated(reason: "Use current")
+			}
+		`);
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query Usage($showLegacy: Boolean! = false, $input: LegacyInput!) {
+						current
+						legacy(oldArg: "ignored", input: $input) @skip(if: true)
+						legacy @include(if: $showLegacy)
+						...SkippedLegacy @skip(if: true)
+						... on Query @include(if: false) { legacy }
+					}
+					fragment SkippedLegacy on Query { legacy }
+				`,
+				variables: { input: { old: "ignored" } },
+			},
+			directiveSchema
+		);
+		expect(result).toMatchObject({ ok: true, deprecatedSymbols: [] });
+	});
+
+	it("reports deprecated selections from executable directive branches", () => {
+		const directiveSchema = buildSchema(`
+			type Query {
+				legacy: String @deprecated(reason: "Use current")
+			}
+		`);
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query Usage($showLegacy: Boolean!) {
+						...ActiveLegacy @include(if: $showLegacy)
+					}
+					fragment ActiveLegacy on Query { legacy }
+				`,
+				variables: { showLegacy: true },
+			},
+			directiveSchema
+		);
+		expect(result).toMatchObject({ ok: true, deprecatedSymbols: ["Query.legacy"] });
+	});
+
+	it("bounds deprecated telemetry traversal for repeated fragment DAGs", () => {
+		const fragmentCount = 24;
+		const fragments = Array.from({ length: fragmentCount }, (_, index) =>
+			index === 0
+				? "fragment F0 on Query { legacy }"
+				: `fragment F${index} on Query { ...F${index - 1} ...F${index - 1} }`
+		).join("\n");
+		const deprecatedSchema = buildSchema(`
+				type Query {
+					legacy: String @deprecated(reason: "Use current")
+				}
+			`);
+		const result = validateGraphQLRequestLimits(
+			{ query: `query { ...F${fragmentCount - 1} }\n${fragments}` },
+			deprecatedSchema
+		);
+
+		expect(result).toEqual({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL document exceeds 200 AST nodes",
+		});
+	}, 1_000);
+
+	it("reports deprecated arguments and variable-backed input and enum symbols", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			input LegacyInput {
+				old: String @deprecated(reason: "Use current")
+				current: String
+			}
+			type Query {
+				example(
+					oldArg: String @deprecated(reason: "Use currentArg")
+					input: LegacyInput
+					mode: LegacyMode
+				): String
+			}
+		`);
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query Usage($input: LegacyInput!, $mode: LegacyMode!) {
+						example(oldArg: "legacy", input: $input, mode: $mode)
+					}
+				`,
+				variables: { input: { old: "legacy" }, mode: "OLD" },
+			},
+			deprecatedKindsSchema
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyInput.old", "LegacyMode.OLD", "Query.example(oldArg:)"],
+		});
+	});
+
+	it("does not report a deprecated argument backed by an omitted optional variable", () => {
+		const deprecatedArgumentSchema = buildSchema(`
+			type Query {
+				example(oldArg: String @deprecated(reason: "Use current")): String
+			}
+		`);
+		const result = validateGraphQLRequestLimits(
+			{
+				query: "query Usage($old: String) { example(oldArg: $old) }",
+				variables: {},
+			},
+			deprecatedArgumentSchema
+		);
+		expect(result).toMatchObject({ ok: true, deprecatedSymbols: [] });
+	});
+
+	it("keeps global deprecated symbols separate from field-owned occurrences", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on QUERY | FIELD
+			type Query { parent: Child }
+			type Child { value(mode: LegacyMode): String }
+		`);
+		const query = "query @legacy(mode: OLD) { parent { value(mode: OLD) } }";
+		const result = validateGraphQLRequestLimits({ query }, deprecatedKindsSchema);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+			deprecatedSymbolGlobalSymbols: ["LegacyMode.OLD"],
+		});
+		if (!result.ok) throw new Error(result.message);
+		const valueOffset = query.indexOf("value(mode: OLD)");
+		expect(result.deprecatedSymbolOwners[`field:${valueOffset}`]).toEqual(["LegacyMode.OLD"]);
+	});
+
+	it("reports deprecated arguments on executable directives", () => {
+		const directiveSchema = buildSchema(`
+			directive @legacy(note: String @deprecated(reason: "Use current")) on FIELD
+			type Query { current: String }
+		`);
+		const result = validateGraphQLRequestLimits(
+			{ query: `{ current @legacy(note: "old") }` },
+			directiveSchema
+		);
+		expect(result).toMatchObject({ ok: true, deprecatedSymbols: ["@legacy(note:)"] });
+	});
+
+	it("reports deprecated arguments on variable-definition directives", () => {
+		const directiveSchema = buildSchema(`
+			directive @legacy(note: String @deprecated(reason: "Use current"))
+				on VARIABLE_DEFINITION | FIELD
+			type Query { current: String }
+		`);
+		const result = validateGraphQLRequestLimits(
+			{ query: 'query Usage($id: ID! @legacy(note: "old")) { current }' },
+			directiveSchema
+		);
+		expect(result).toMatchObject({ ok: true, deprecatedSymbols: ["@legacy(note:)"] });
+	});
+
+	it("reports deprecated enum and input values passed through executable directives", () => {
+		const directiveSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			input LegacyInput {
+				old: String @deprecated(reason: "Use current")
+				current: String
+			}
+			directive @legacy(
+				mode: LegacyMode @deprecated(reason: "Use currentMode")
+				input: LegacyInput
+			) on FIELD | INLINE_FRAGMENT | FRAGMENT_SPREAD
+			type Query { current: String }
+		`);
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query Usage($mode: LegacyMode!, $input: LegacyInput!) {
+						current @legacy(mode: $mode, input: $input)
+						...Active @legacy(mode: $mode, input: $input)
+						... on Query @legacy(mode: $mode, input: $input) { current }
+					}
+					fragment Active on Query { current }
+				`,
+				variables: { mode: "OLD", input: { old: "legacy" } },
+			},
+			directiveSchema
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["@legacy(mode:)", "LegacyInput.old", "LegacyMode.OLD"],
+		});
+	});
+
+	it("accounts for only the effective deprecated variable value", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			type Query { example(mode: LegacyMode): String }
+		`);
+		const query = `query Usage($mode: LegacyMode = OLD) { example(mode: $mode) }`;
+
+		expect(
+			validateGraphQLRequestLimits({ query, variables: { mode: "NEW" } }, deprecatedKindsSchema)
+		).toMatchObject({ ok: true, deprecatedSymbols: [] });
+		expect(validateGraphQLRequestLimits({ query }, deprecatedKindsSchema)).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+		});
+	});
+
+	it("reports deprecated values supplied by omitted schema defaults", () => {
+		const defaultsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			input LegacyInput {
+				mode: LegacyMode = OLD
+			}
+			directive @legacy(mode: LegacyMode = OLD, input: LegacyInput = {}) on FIELD
+			type Query {
+				example(mode: LegacyMode = OLD, input: LegacyInput = {}): String
+			}
+		`);
+		const result = validateGraphQLRequestLimits(
+			{ query: "query { example @legacy }" },
+			defaultsSchema
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+		});
+	});
+
+	it("applies field argument defaults when an optional variable is omitted", () => {
+		const defaultsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			type Query { example(mode: LegacyMode = OLD): String }
+		`);
+		const query = "query Usage($mode: LegacyMode) { example(mode: $mode) }";
+		expect(validateGraphQLRequestLimits({ query }, defaultsSchema)).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+		});
+		expect(
+			validateGraphQLRequestLimits({ query, variables: { mode: "NEW" } }, defaultsSchema)
+		).toMatchObject({ ok: true, deprecatedSymbols: [] });
+		expect(
+			validateGraphQLRequestLimits({ query, variables: { mode: null } }, defaultsSchema)
+		).toMatchObject({ ok: true, deprecatedSymbols: [] });
+	});
+
+	it("keeps variable-backed deprecated values owned by their field occurrence", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			type Query { parent: Child }
+			type Child { value(mode: LegacyMode): String }
+		`);
+		const query = "query Usage($mode: LegacyMode!) { parent { value(mode: $mode) } }";
+		const result = validateGraphQLRequestLimits(
+			{ query, variables: { mode: "OLD" } },
+			deprecatedKindsSchema
+		);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		const valueOffset = query.indexOf("value(mode: $mode)");
+		expect(result.deprecatedSymbolOwners[`field:${valueOffset}`]).toEqual(["LegacyMode.OLD"]);
+	});
+
+	it("keeps fragment-definition directive values owned by active field occurrences", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(
+				mode: LegacyMode
+				note: String @deprecated(reason: "Use current")
+			) on FRAGMENT_DEFINITION
+			type Query { parent: Child }
+			type Child { value: String }
+		`);
+		const query = `
+			query Usage($mode: LegacyMode!) {
+				parent { ...ChildFields }
+			}
+			fragment ChildFields on Child @legacy(mode: $mode, note: "old") { value }
+		`;
+		const result = validateGraphQLRequestLimits(
+			{ query, variables: { mode: "OLD" } },
+			deprecatedKindsSchema
+		);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["@legacy(note:)", "LegacyMode.OLD"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		expect(result.deprecatedSymbolOwners["path:parent.__type:Child.value"]).toEqual([
+			"@legacy(note:)",
+			"LegacyMode.OLD",
+		]);
+	});
+
+	it("keys repeated fragment-spread directive values by response occurrence", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				LEFT @deprecated(reason: "Use NEW")
+				RIGHT @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on FRAGMENT_SPREAD
+			type Query { left: Wrapper, right: Wrapper }
+			type Wrapper { value: String }
+		`);
+		const query = `
+			query Usage {
+				left { ...Fields @legacy(mode: LEFT) }
+				right { ...Fields @legacy(mode: RIGHT) }
+			}
+			fragment Fields on Wrapper { value }
+		`;
+		const result = validateGraphQLRequestLimits({ query }, deprecatedKindsSchema);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.LEFT", "LegacyMode.RIGHT"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		expect(result.deprecatedSymbolOwners["path:left.__type:Wrapper.value"]).toEqual([
+			"LegacyMode.LEFT",
+		]);
+		expect(result.deprecatedSymbolOwners["path:right.__type:Wrapper.value"]).toEqual([
+			"LegacyMode.RIGHT",
+		]);
+	});
+
+	it("disambiguates fragment-spread directives across conditional type branches", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				CAT @deprecated(reason: "Use NEW")
+				DOG @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on FRAGMENT_SPREAD
+			interface Node { id: ID!, value: String }
+			type Cat implements Node { id: ID!, value: String }
+			type Dog implements Node { id: ID!, value: String }
+			type Query { node: Node }
+		`);
+		const query = `
+			query Usage {
+				node {
+					... on Cat { ...Fields @legacy(mode: CAT) }
+					... on Dog { ...Fields @legacy(mode: DOG) }
+				}
+			}
+			fragment Fields on Node { value }
+		`;
+		const result = validateGraphQLRequestLimits({ query }, deprecatedKindsSchema);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.CAT", "LegacyMode.DOG"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Cat.value"]).toEqual(["LegacyMode.CAT"]);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Dog.value"]).toEqual(["LegacyMode.DOG"]);
+	});
+
+	it("includes named fragment type conditions in occurrence owners", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				CAT @deprecated(reason: "Use NEW")
+				DOG @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on FRAGMENT_SPREAD
+			interface Node { id: ID!, value: String }
+			type Cat implements Node { id: ID!, value: String }
+			type Dog implements Node { id: ID!, value: String }
+			type Query { node: Node }
+		`);
+		const query = `
+			query Usage {
+				node { ...CatFields @legacy(mode: CAT) ...DogFields @legacy(mode: DOG) }
+			}
+			fragment CatFields on Cat { value }
+			fragment DogFields on Dog { value }
+		`;
+		const result = validateGraphQLRequestLimits({ query }, deprecatedKindsSchema);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.CAT", "LegacyMode.DOG"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Cat.value"]).toEqual(["LegacyMode.CAT"]);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Dog.value"]).toEqual(["LegacyMode.DOG"]);
+	});
+
+	it("does not retain shared field owners for conditional inline directives", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				CAT @deprecated(reason: "Use NEW")
+				DOG @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on INLINE_FRAGMENT
+			interface Node { id: ID!, value: String }
+			type Cat implements Node { id: ID!, value: String }
+			type Dog implements Node { id: ID!, value: String }
+			type Query { node: Node }
+		`);
+		const query = `
+			query Usage {
+				node {
+					... on Cat @legacy(mode: CAT) { ...Fields }
+					... on Dog @legacy(mode: DOG) { ...Fields }
+				}
+			}
+			fragment Fields on Node { value }
+		`;
+		const result = validateGraphQLRequestLimits({ query }, deprecatedKindsSchema);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.CAT", "LegacyMode.DOG"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Cat.value"]).toEqual(["LegacyMode.CAT"]);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Dog.value"]).toEqual(["LegacyMode.DOG"]);
+	});
+
+	it("keeps inline fragment directive values owned by fields in its type branch", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on INLINE_FRAGMENT | FRAGMENT_SPREAD
+			interface Node { id: ID! }
+			type Cat implements Node { id: ID!, catValue: String }
+			type Dog implements Node { id: ID!, dogValue: String }
+			type Query { node: Node }
+		`);
+		const query = `
+			query Usage($mode: LegacyMode!) {
+				node {
+					... on Dog @legacy(mode: $mode) { dogValue }
+				}
+			}
+		`;
+		const result = validateGraphQLRequestLimits(
+			{ query, variables: { mode: "OLD" } },
+			deprecatedKindsSchema
+		);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		const nodeOffset = query.indexOf("node {");
+		expect(result.deprecatedSymbolOwners["path:node.__type:Dog.dogValue"]).toEqual([
+			"LegacyMode.OLD",
+		]);
+		expect(result.deprecatedSymbolOwners[`field:${nodeOffset}`]).toBeUndefined();
+	});
+
+	it("does not report deprecated input fields whose optional variable is omitted", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			input LegacyInput {
+				old: String @deprecated(reason: "Use current")
+				current: String
+			}
+			type Query { example(input: LegacyInput): String }
+		`);
+		const query = "query Usage($value: String) { example(input: { old: $value }) }";
+
+		expect(validateGraphQLRequestLimits({ query }, deprecatedKindsSchema)).toMatchObject({
+			ok: true,
+			deprecatedSymbols: [],
+		});
+		expect(
+			validateGraphQLRequestLimits({ query, variables: { value: "legacy" } }, deprecatedKindsSchema)
+		).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyInput.old"],
+		});
+	});
+
 	it("keeps live price-change roots public and bounded", () => {
 		for (const query of [
 			"query { priceChangeLiveCursor { revision state } }",
@@ -42,6 +603,29 @@ describe("GraphQL request limits", () => {
 			schema
 		);
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1 });
+	});
+
+	it("charges every bounded public root at its effective five-unit floor", () => {
+		for (const [query, rootField] of [
+			["query { marketSnapshotContext { revision } }", "marketSnapshotContext"],
+			["query { teams { id } }", "teams"],
+			["query { miniProgramNotice }", "miniProgramNotice"],
+		] as const) {
+			expect(validateGraphQLRequestLimits({ query }, schema)).toMatchObject({
+				ok: true,
+				rootFields: [rootField],
+				rateLimitCostUnits: 5,
+			});
+		}
+	});
+
+	it("preserves bounded floors when a bounded root is mixed with ordinary roots", () => {
+		const result = validateGraphQLRequestLimits({ query: "query { teams { id } _empty }" }, schema);
+		expect(result).toMatchObject({ ok: true, rootFields: ["teams", "_empty"] });
+		if (!result.ok) throw new Error(result.message);
+		// `teams` is registered at 2 but its bounded effective floor is 5;
+		// `_empty` contributes its normal one-unit root floor.
+		expect(result.rateLimitCostUnits).toBeGreaterThanOrEqual(6);
 	});
 
 	it("identifies a fixture-only read before resolver execution", () => {

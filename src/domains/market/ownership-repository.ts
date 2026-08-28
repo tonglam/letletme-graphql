@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import {
 	QUERY_CACHE_TTL_SECONDS,
@@ -148,9 +149,6 @@ const OWNERSHIP_QUERY = [
 	") AS ownership_rows",
 	"FROM bounded",
 ].join("\n");
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const numberValue = (value: unknown, field: string): number => {
 	const parsed = typeof value === "number" ? value : Number(value);

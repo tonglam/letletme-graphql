@@ -1,0 +1,382 @@
+import { expect, test } from "bun:test";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
+import {
+	scriptKindForSourceFile,
+	isTypeScriptSourceFile,
+	moduleSpecifiers,
+	resolveSourceModule,
+} from "../../scripts/check-layer-dependencies";
+
+const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+
+test("layer checker applies TypeScript extension substitution to ESM .js imports", () => {
+	const resolved = resolveSourceModule(
+		resolve(repositoryRoot, "src/infra/env.ts"),
+		"../domains/entries/service.js"
+	);
+	expect(resolved).toBe(resolve(repositoryRoot, "src/domains/entries/service.ts"));
+});
+
+test("layer checker recognizes static template literals in dynamic imports and require calls", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		"const service = import(`../domains/entries/service`); const legacy = require(`../index`);",
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
+		"../index",
+	]);
+});
+
+test("layer checker recognizes dynamic imports with import options", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'const service = import("../domains/entries/service", { with: {} });',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
+	]);
+});
+
+test("layer checker recognizes TypeScript import-type expressions", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'type Service = import("../domains/entries/service").Service; type Entrypoint = typeof import("../index");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
+		"../index",
+	]);
+});
+
+test("layer checker rejects nonliteral dynamic module specifiers", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'const target = "../domains/entries/service"; import(target); require(target);',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([
+		{ value: "", line: 1, dynamic: true },
+		{ value: "", line: 1, dynamic: true },
+	]);
+});
+
+test("layer checker tracks aliases of the CommonJS require loader", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'const load = require; const loadAgain = load; loadAgain("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
+test("layer checker unwraps TypeScript assertions around require aliases", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'const load = require as (specifier: string) => unknown; load("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
+test("layer checker unwraps transparent call callees before loader checks", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'(require as NodeRequire)("../domains/entries/service"); (require)("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
+		"../domains/entries/service",
+	]);
+});
+
+test("layer checker tracks a require alias in its declaring block", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'function loadService() { const load = require; load("../domains/entries/service"); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
+test("layer checker tracks aliases referenced from earlier function bodies", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'function loadService() { load("../domains/entries/service"); } const load = require; loadService();',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
+test("layer checker resolves transitive loader aliases independent of traversal order", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'function run() { const load2 = load; load2("../domains/entries/service"); } const load = require; run();',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
+test("layer checker does not let an inner same-name binding hide an outer require alias", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'const load = require; { const load = getLoader(); load("../domains/entries/service"); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([]);
+});
+
+test("layer checker tracks CommonJS require aliases assigned after declaration", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'let load; load = require; load("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
+test("layer checker resolves assigned loader aliases in their declaration scope", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'let load; { load = require; } load("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
+test("layer checker rejects createRequire loaders in checked layers", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'import { createRequire as makeRequire } from "node:module"; const load = makeRequire(import.meta.url); load("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
+});
+
+test("layer checker respects lexical shadowing of imported createRequire aliases", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'import { createRequire as factory } from "node:module"; function map(factory: (value: string) => unknown) { return factory("../domains/entries/service"); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([]);
+});
+
+test("layer checker respects lexical shadowing of CommonJS createRequire aliases", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'const { createRequire: factory } = require("node:module"); function map(factory: (value: string) => unknown) { return factory("../domains/entries/service"); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([]);
+});
+
+test("layer checker rejects CommonJS createRequire destructuring loaders", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'const { createRequire: makeRequire } = require("node:module"); const load = makeRequire(import.meta.url);',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
+});
+
+test("does not treat a lexical require parameter as the ambient loader", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'function load(require: (specifier: string) => unknown) { require("../domains/entries/service"); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([]);
+});
+
+test("layer checker finds createRequire bindings nested inside functions", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'function loadService() { const { createRequire: makeRequire } = require("node:module"); return makeRequire(import.meta.url); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
+});
+
+test("layer checker does not treat an unrelated local createRequire function as a loader", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'function createRequire(path: string) { return path; } const load = createRequire("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([]);
+});
+
+test("layer checker does not treat an unrelated property as a createRequire loader", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'const helper = { createRequire(path: string) { return path; } }; helper.createRequire("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([]);
+});
+
+test("layer checker rejects createRequire calls from proven module namespaces", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'import * as Module from "node:module"; const load = Module.createRequire(import.meta.url);',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
+});
+
+test("layer checker inspects CommonJS module.require calls", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'module.require("../domains/entries/service"); module.require(target);',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([
+		{ value: "../domains/entries/service", line: 1 },
+		{ value: "", line: 1, dynamic: true },
+	]);
+});
+
+test("layer checker finds createRequire aliases from dynamic node:module imports", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'async function loadService() { const { createRequire: makeRequire } = await import("node:module"); return makeRequire(import.meta.url); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
+});
+
+test("layer checker recognizes relative module augmentations", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'declare module "../domains/entries/service" { export type Marker = string; }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
+	]);
+});
+
+test("layer checker recognizes triple-slash path references", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'/// <reference path="../domains/entries/service.ts" />',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service.ts",
+	]);
+});
+
+test("layer checker recognizes triple-slash type references", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'/// <reference types="../domains/entries/service" />',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
+	]);
+});
+
+test("layer checker parses TSX with the TSX script kind", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.tsx",
+		'const View = () => <div>{import("../domains/entries/service")}</div>;',
+		ts.ScriptTarget.Latest,
+		true,
+		scriptKindForSourceFile("fixture.tsx")
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
+	]);
+});
+
+test("layer checker includes every TypeScript module extension", () => {
+	expect(isTypeScriptSourceFile("src/infra/runtime.ts")).toBe(true);
+	expect(isTypeScriptSourceFile("src/infra/runtime.tsx")).toBe(true);
+	expect(isTypeScriptSourceFile("src/infra/runtime.mts")).toBe(true);
+	expect(isTypeScriptSourceFile("src/infra/runtime.cts")).toBe(true);
+	expect(isTypeScriptSourceFile("src/infra/runtime.js")).toBe(false);
+});

@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import {
 	getCoreEventSnapshot,
@@ -114,9 +115,6 @@ export type PlayerSeasonStatsAtEvent = {
 	threat: number | null;
 	ictIndex: number | null;
 };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const asNullableNumber = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) return value;

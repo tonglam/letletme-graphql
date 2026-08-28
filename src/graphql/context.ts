@@ -22,6 +22,12 @@ export type GraphQLContext = {
 	requestId?: string;
 	/** Named GraphQL operation only; variables and query text are never logged. */
 	operationName?: string;
+	/** Controlled manifest symbols selected by this request, committed after variable coercion. */
+	deprecatedSymbols?: readonly string[];
+	/** Per-field ownership for deprecated symbols, used to avoid counting unreachable selections. */
+	deprecatedSymbolOwners?: Readonly<Record<string, readonly string[]>>;
+	/** Deprecated symbols selected outside any field occurrence, such as operation directives. */
+	deprecatedSymbolGlobalSymbols?: readonly string[];
 	/** Request-local low-cardinality stage timings. */
 	requestTiming?: RequestTiming;
 	/** Stable identity shared by Apollo's shallow context clone for request-local memoization. */

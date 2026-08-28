@@ -11,8 +11,8 @@ afterEach(() => {
 	entryLiveBatchService.calcLivePointsForEntries = originalBatchCalc;
 });
 
-describe("calcLivePointsByEntry additive schema compatibility", () => {
-	it("keeps the legacy selection executable and exposes explicit no-picks availability", async () => {
+describe("calcLivePointsByEntry availability contract", () => {
+	it("keeps the base selection executable and exposes explicit no-picks availability", async () => {
 		const noPicks = {
 			availability: "NO_PICKS",
 			event: 7,
@@ -25,12 +25,16 @@ describe("calcLivePointsByEntry additive schema compatibility", () => {
 			errors: [],
 			meta: { eventId: 7, totalEntries: 1, succeededCount: 1, failedCount: 0 },
 		});
-		const context = {} as GraphQLContext;
+		const context = {
+			logger: { warn: () => undefined },
+			dataRevision: "test-revision",
+			currentSeason: { seasonId: 2026, seasonCode: "2627" },
+		} as unknown as GraphQLContext;
 
-		const legacy = await graphql({
+		const base = await graphql({
 			schema,
 			source: `
-				query LegacyCalc($eventId: Int!, $entryId: Int!) {
+				query BaseCalc($eventId: Int!, $entryId: Int!) {
 					calcLivePointsByEntry(eventId: $eventId, entryId: $entryId) {
 						entry
 						event
@@ -42,8 +46,8 @@ describe("calcLivePointsByEntry additive schema compatibility", () => {
 			variableValues: { eventId: 7, entryId: 123 },
 			contextValue: context,
 		});
-		expect(legacy.errors).toBeUndefined();
-		expect(legacy.data?.calcLivePointsByEntry).toEqual({
+		expect(base.errors).toBeUndefined();
+		expect(base.data?.calcLivePointsByEntry).toEqual({
 			entry: 123,
 			event: 7,
 			livePoints: 0,

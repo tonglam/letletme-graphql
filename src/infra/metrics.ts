@@ -51,6 +51,12 @@ const graphqlRequestOutcomes = new Counter({
 	labelNames: GRAPHQL_REQUEST_OUTCOME_LABELS,
 });
 
+const graphqlDeprecatedSchemaUsages = new Counter({
+	name: "graphql_deprecated_schema_usages_total",
+	help: "Executable GraphQL requests using a deprecated executable schema symbol",
+	labelNames: ["symbol"] as const,
+});
+
 const livePublicationEventsTotal = new Counter({
 	name: "live_publication_events_total",
 	help: "Live publication contract events using a controlled reason label",
@@ -171,6 +177,7 @@ registry.registerMetric(graphqlIngressRequests);
 registry.registerMetric(graphqlRateLimitDecisions);
 registry.registerMetric(graphqlRateLimitV3Decisions);
 registry.registerMetric(graphqlRequestOutcomes);
+registry.registerMetric(graphqlDeprecatedSchemaUsages);
 registry.registerMetric(livePublicationEventsTotal);
 registry.registerMetric(cacheRepositoryEvents);
 registry.registerMetric(entryLookupOutcomes);
@@ -201,6 +208,7 @@ export const metrics = {
 	graphqlRateLimitDecisions,
 	graphqlRateLimitV3Decisions,
 	graphqlRequestOutcomes,
+	graphqlDeprecatedSchemaUsages,
 	livePublicationEventsTotal,
 	cacheRepositoryEvents,
 	entryLookupOutcomes,

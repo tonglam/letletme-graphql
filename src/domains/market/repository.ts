@@ -1,5 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import {
@@ -250,9 +251,6 @@ export const MARKET_QUERY = `
 			AND annotated.captured_at <= bounds.latest_captured_at))
 `;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
-
 export const MARKET_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "market.snapshot-window",
@@ -287,7 +285,6 @@ export const MARKET_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		],
 	},
 ];
-
 const toNumber = (value: string | number, field: string): number => {
 	const parsed = typeof value === "number" ? value : Number(value);
 	if (!Number.isFinite(parsed)) {

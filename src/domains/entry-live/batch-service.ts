@@ -1,4 +1,5 @@
 import { GraphQLError } from "graphql";
+import { normalizeFplChip } from "../../contracts/fpl-chip";
 import type { GraphQLContext } from "../../graphql/context";
 import type { Player, Team } from "../../infra/types";
 import type { Entry } from "../entries/repository";
@@ -304,33 +305,8 @@ const buildTeamMatchInfo = (params: {
 	};
 };
 
-export const normalizeChip = (raw: string | null | undefined): string => {
-	const value = (raw ?? "").toUpperCase().trim();
-	const compactValue = value.replace(/[^A-Z0-9]/g, "");
-	if (
-		value === "BENCH_BOOST" ||
-		compactValue === "BENCHBOOST" ||
-		compactValue === "BBOOST" ||
-		compactValue === "BB"
-	) {
-		return "BENCH_BOOST";
-	}
-	if (
-		value === "TRIPLE_CAPTAIN" ||
-		compactValue === "TRIPLECAPTAIN" ||
-		compactValue === "3XC" ||
-		compactValue === "TC"
-	) {
-		return "TRIPLE_CAPTAIN";
-	}
-	if (value === "FREE_HIT" || compactValue === "FREEHIT" || compactValue === "FH")
-		return "FREE_HIT";
-	if (value === "WILDCARD" || compactValue === "WILDCARD" || compactValue === "WC")
-		return "WILDCARD";
-	if (value === "MANAGER" || compactValue === "MANAGER" || compactValue === "AM") return "MANAGER";
-	if (compactValue === "NONE" || compactValue === "NA" || compactValue === "") return "NONE";
-	return "NONE";
-};
+export const normalizeChip = (raw: string | null | undefined): string =>
+	normalizeFplChip(raw, "NONE") ?? "NONE";
 
 const computeSingleEntry = (
 	entryId: number,

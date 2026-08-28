@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import type { EntryEventResult } from "../entries/repository";
@@ -157,9 +158,6 @@ export class EntryTransferRepositoryError extends Error {
 		this.name = "EntryTransferRepositoryError";
 	}
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const asNumber = (value: unknown): number | null => {
 	if (typeof value === "number") return Number.isFinite(value) ? value : null;

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
 import { DateResolver, DateTimeResolver } from "graphql-scalars";
 import type { DataSqlContractProbe } from "../contracts/data-sql-contract";
+import { isPlainRecord as isRecord } from "../contracts/guards";
 import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
@@ -126,9 +127,6 @@ const CONTEXT_FIELDS = [
 	"observedPlayerCount",
 	"latestEvent",
 ] as const;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const isFiniteNumber = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value);

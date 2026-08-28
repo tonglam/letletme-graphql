@@ -18,6 +18,13 @@ export type RootFieldPolicy = Readonly<{
 	core: "lightweight" | "full";
 }>;
 
+export type RootFieldConditionalAccess = Readonly<{
+	argument: string;
+	equals?: string | number | boolean;
+	when?: "provided";
+	access: RootFieldAccess;
+}>;
+
 const policy = (
 	access: RootFieldAccess,
 	options: Partial<Omit<RootFieldPolicy, "access">> = {}
@@ -253,6 +260,17 @@ for (const field of lightweightFields) {
 }
 
 export const ROOT_FIELD_POLICIES: ReadonlyMap<string, RootFieldPolicy> = registry;
+export const ROOT_FIELD_CONDITIONAL_ACCESS: ReadonlyMap<
+	string,
+	readonly RootFieldConditionalAccess[]
+> = new Map([
+	["trendCohorts", [{ argument: "access", equals: "MINE", access: "viewerEntry" }]],
+	["trendCohortSnapshot", [{ argument: "access", equals: "MINE", access: "viewerEntry" }]],
+	[
+		"myFplCompetitionsDesk",
+		[{ argument: "tournamentId", when: "provided", access: "viewerTournamentMember" }],
+	],
+]);
 export const LIGHTWEIGHT_CORE_FIELDS: ReadonlySet<string> = new Set(
 	[...ROOT_FIELD_POLICIES]
 		.filter(([, fieldPolicy]) => fieldPolicy.core === "lightweight")
@@ -261,6 +279,22 @@ export const LIGHTWEIGHT_CORE_FIELDS: ReadonlySet<string> = new Set(
 
 export const getRootFieldPolicy = (fieldName: string): RootFieldPolicy | undefined =>
 	ROOT_FIELD_POLICIES.get(fieldName);
+
+export const getConditionalRootFieldConditions = (
+	fieldName: string,
+	args: Readonly<Record<string, unknown>>
+): readonly RootFieldConditionalAccess[] =>
+	(ROOT_FIELD_CONDITIONAL_ACCESS.get(fieldName) ?? []).filter((condition) =>
+		condition.when === "provided"
+			? args[condition.argument] !== null && args[condition.argument] !== undefined
+			: args[condition.argument] === condition.equals
+	);
+
+export const getConditionalRootFieldAccesses = (
+	fieldName: string,
+	args: Readonly<Record<string, unknown>>
+): readonly RootFieldAccess[] =>
+	getConditionalRootFieldConditions(fieldName, args).map((condition) => condition.access);
 
 export const isGraphQLRootFieldClassified = (fieldName: string): boolean =>
 	ROOT_FIELD_POLICIES.has(fieldName);

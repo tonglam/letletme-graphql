@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type Redis from "ioredis";
 import type { DataSqlContractProbe } from "../contracts/data-sql-contract";
+import { isPlainRecord as isRecord } from "../contracts/guards";
 import type { QueryExecutor } from "./database";
 import { metrics } from "./metrics";
 
@@ -93,9 +94,6 @@ type ActivePointer = {
 	locales: BriefingLocale[];
 	hashes: Record<BriefingLocale, string>;
 };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	value !== null && typeof value === "object" && !Array.isArray(value);
 
 const iso = (value: unknown): string | null => {
 	if (value instanceof Date) return value.toISOString();

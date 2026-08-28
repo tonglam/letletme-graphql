@@ -92,6 +92,7 @@ const authorize = (
 		principal,
 		data,
 		logger,
+		schema,
 	});
 
 describe("authorizeGraphQLRequest", () => {
@@ -254,6 +255,7 @@ describe("authorizeGraphQLRequest", () => {
 			principal: websitePrincipal,
 			data: countedData,
 			logger,
+			schema,
 			authorizedTournamentMemberships,
 		});
 		expect(result).toEqual({ ok: true });
