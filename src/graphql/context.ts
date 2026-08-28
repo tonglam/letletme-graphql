@@ -22,7 +22,7 @@ export type GraphQLContext = {
 	requestId?: string;
 	/** Named GraphQL operation only; variables and query text are never logged. */
 	operationName?: string;
-	/** Controlled manifest symbols selected by this request, committed only after validation. */
+	/** Controlled manifest symbols selected by this request, committed after variable coercion. */
 	deprecatedSymbols?: readonly string[];
 	/** Request-local low-cardinality stage timings. */
 	requestTiming?: RequestTiming;

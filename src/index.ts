@@ -1,7 +1,6 @@
 import {
 	ApolloServer,
 	HeaderMap,
-	type GraphQLRequestExecutionListener,
 	type GraphQLRequestListener,
 	type GraphQLRequestListenerParsingDidEnd,
 	type GraphQLRequestListenerValidationDidEnd,
@@ -10,7 +9,7 @@ import { timingSafeEqual } from "crypto";
 import depthLimit from "graphql-depth-limit";
 import { authorizeGraphQLRequest, graphQLErrorResponse } from "./graphql/authorization";
 import type { GraphQLContext } from "./graphql/context";
-import { recordDeprecatedSchemaUsages } from "./graphql/deprecation-observability";
+import { createDeprecatedSchemaUsageExecutionListener } from "./graphql/deprecation-observability";
 import { validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
 import { validateDatabaseContract } from "./infra/database-contract";
@@ -490,24 +489,21 @@ const startServer = async (): Promise<void> => {
 							requestContext
 						): Promise<GraphQLRequestListenerValidationDidEnd> {
 							const stop = requestContext.contextValue.requestTiming?.start("apolloValidate");
-							return async (validationErrors): Promise<void> => {
+							return async (): Promise<void> => {
 								stop?.();
-								recordDeprecatedSchemaUsages({
-									validationErrors,
-									symbols: requestContext.contextValue.deprecatedSymbols ?? [],
-									increment: (symbol) => metrics.graphqlDeprecatedSchemaUsages.labels(symbol).inc(),
-								});
 							};
 						},
-						async executionDidStart(
-							requestContext
-						): Promise<GraphQLRequestExecutionListener<GraphQLContext>> {
+						async executionDidStart(requestContext) {
 							const stop = requestContext.contextValue.requestTiming?.start("apolloExecute");
-							return {
-								async executionDidEnd(): Promise<void> {
-									stop?.();
-								},
-							};
+							// Apollo skips validationDidStart for document-cache hits and performs variable
+							// coercion only after executionDidStart. The first resolver hook is therefore
+							// the earliest lifecycle point that covers cached documents while proving both
+							// document validation and variable coercion succeeded.
+							return createDeprecatedSchemaUsageExecutionListener<GraphQLContext>({
+								symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+								increment: (symbol) => metrics.graphqlDeprecatedSchemaUsages.labels(symbol).inc(),
+								onExecutionEnd: stop,
+							});
 						},
 					};
 				},

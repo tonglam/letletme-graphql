@@ -1,11 +1,23 @@
 import { readFileSync, readdirSync } from "node:fs";
-import { dirname, extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import ts from "typescript";
 
 const repositoryRoot = resolve(new URL("..", import.meta.url).pathname);
 const sourceRoot = join(repositoryRoot, "src");
 const checkedRoots = [join(sourceRoot, "infra"), join(sourceRoot, "http")];
 const forbiddenRoots = [join(sourceRoot, "domains"), join(sourceRoot, "index.ts")];
+const tsconfigPath = join(repositoryRoot, "tsconfig.json");
+const tsconfig = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
+if (tsconfig.error) {
+	throw new Error(ts.flattenDiagnosticMessageText(tsconfig.error.messageText, "\n"));
+}
+const compilerOptions = ts.parseJsonConfigFileContent(
+	tsconfig.config,
+	ts.sys,
+	repositoryRoot,
+	undefined,
+	tsconfigPath
+).options;
 
 const sourceFilesUnder = (directory: string): string[] => {
 	const files: string[] = [];
@@ -50,52 +62,48 @@ const moduleSpecifiers = (sourceFile: ts.SourceFile): Array<{ value: string; lin
 	return modules;
 };
 
-const resolveSourceModule = (fromFile: string, specifier: string): string | null => {
-	const base = resolve(dirname(fromFile), specifier);
-	const candidates = [base, `${base}.ts`, `${base}.tsx`, join(base, "index.ts")];
-	return (
-		candidates.find((candidate) => {
-			try {
-				return readFileSync(candidate, "utf8") !== undefined;
-			} catch {
-				return false;
-			}
-		}) ?? null
-	);
-};
+export const resolveSourceModule = (fromFile: string, specifier: string): string | null =>
+	ts.resolveModuleName(specifier, fromFile, compilerOptions, ts.sys).resolvedModule
+		?.resolvedFileName ?? null;
 
 const under = (file: string, root: string): boolean => {
 	const path = normalize(relative(root, file));
 	return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 };
 
-const findings: string[] = [];
-for (const root of checkedRoots) {
-	for (const file of sourceFilesUnder(root)) {
-		const source = readFileSync(file, "utf8");
-		const sourceFile = ts.createSourceFile(
-			file,
-			source,
-			ts.ScriptTarget.Latest,
-			true,
-			ts.ScriptKind.TS
-		);
-		for (const { value, line } of moduleSpecifiers(sourceFile)) {
-			const target = resolveSourceModule(file, value);
-			if (!target) continue;
-			const forbidden = forbiddenRoots.find((root) => under(target, root));
-			if (forbidden) {
-				findings.push(
-					`${relative(repositoryRoot, file)}:${line} imports forbidden layer ${relative(repositoryRoot, target)}`
-				);
+export const collectLayerDependencyFindings = (): string[] => {
+	const findings: string[] = [];
+	for (const root of checkedRoots) {
+		for (const file of sourceFilesUnder(root)) {
+			const source = readFileSync(file, "utf8");
+			const sourceFile = ts.createSourceFile(
+				file,
+				source,
+				ts.ScriptTarget.Latest,
+				true,
+				ts.ScriptKind.TS
+			);
+			for (const { value, line } of moduleSpecifiers(sourceFile)) {
+				const target = resolveSourceModule(file, value);
+				if (!target) continue;
+				const forbidden = forbiddenRoots.find((root) => under(target, root));
+				if (forbidden) {
+					findings.push(
+						`${relative(repositoryRoot, file)}:${line} imports forbidden layer ${relative(repositoryRoot, target)}`
+					);
+				}
 			}
 		}
 	}
-}
+	return findings;
+};
 
-if (findings.length > 0) {
-	console.error(findings.join("\n"));
-	process.exit(1);
-}
+if (import.meta.main) {
+	const findings = collectLayerDependencyFindings();
+	if (findings.length > 0) {
+		console.error(findings.join("\n"));
+		process.exit(1);
+	}
 
-console.log("Layer dependency check OK (infra/http do not import domains or src/index.ts)");
+	console.log("Layer dependency check OK (infra/http do not import domains or src/index.ts)");
+}

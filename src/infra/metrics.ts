@@ -53,7 +53,7 @@ const graphqlRequestOutcomes = new Counter({
 
 const graphqlDeprecatedSchemaUsages = new Counter({
 	name: "graphql_deprecated_schema_usages_total",
-	help: "Validated GraphQL requests using a deprecated executable schema symbol",
+	help: "Executable GraphQL requests using a deprecated executable schema symbol",
 	labelNames: ["symbol"] as const,
 });
 
