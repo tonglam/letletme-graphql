@@ -179,7 +179,14 @@ jobs:
           bun run db:migrate
           bun run db:migrate:status
 
-      - name: Install GraphQL consumer contract fixture
+      - name: Install Data-owned GraphQL authority fixture
+        env:
+          DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+        run: >-
+          psql "$DATA_DATABASE_URL" -f
+          data-platform/tests/fixtures/graphql-consumer-authority.sql
+
+      - name: Install GraphQL external-boundary contract fixture
         env:
           DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: psql "$DATA_DATABASE_URL" -f tests/fixtures/database-contract.sql

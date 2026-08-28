@@ -7,6 +7,8 @@ describe("direct Data SQL contract", () => {
 		expect(new Set(names).size).toBe(names.length);
 		expect(names.some((name) => name.startsWith("briefing."))).toBe(true);
 		expect(names.some((name) => name.startsWith("my-fpl."))).toBe(true);
+		expect(names.some((name) => name.startsWith("players."))).toBe(true);
+		expect(names.some((name) => name.startsWith("player-values."))).toBe(true);
 		expect(names.some((name) => name.startsWith("player-state."))).toBe(true);
 		expect(names.some((name) => name.startsWith("public-league-trends."))).toBe(true);
 		expect(names.some((name) => name.startsWith("trends."))).toBe(true);
@@ -20,6 +22,7 @@ describe("direct Data SQL contract", () => {
 		expect(sql).toContain("reporting.player_season_summary_rows");
 		expect(sql).toContain("reporting.tournament_selection_stat_publications");
 		expect(sql).toContain("reporting.tournament_selection_stat_rows");
+		expect(sql).toContain("captured_at = $3::timestamptz");
 		for (const probe of DIRECT_DATA_SQL_CONTRACT) {
 			const statement = probe.sql.trimStart().replace(/^\/\*[\s\S]*?\*\/\s*/, "");
 			expect(statement).toMatch(/^(SELECT|WITH)\b/);

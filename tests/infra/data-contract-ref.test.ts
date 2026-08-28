@@ -29,6 +29,9 @@ describe("Data Platform contract pin", () => {
 		expect(compatibilityWorkflow).toContain("repository: tonglam/letletme_data");
 		expect(compatibilityWorkflow).toContain("ref: main");
 		expect(compatibilityWorkflow).toContain("bun run db:migrate");
+		expect(compatibilityWorkflow).toContain(
+			"data-platform/tests/fixtures/graphql-consumer-authority.sql"
+		);
 		expect(compatibilityWorkflow).toContain("tests/fixtures/database-contract.sql");
 		expect(compatibilityWorkflow).toContain("check-data-main-compatibility.ts");
 		expect(compatibilityWorkflow).toContain('RUN_DATABASE_CONTRACT_INTEGRATION: "1"');
@@ -46,12 +49,16 @@ describe("Data Platform contract pin", () => {
 		expect(compatibilityProbe).toContain("directSqlProbeCount");
 		expect(directSqlContract).toContain("BRIEFING_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("MY_FPL_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("PLAYERS_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("PLAYER_VALUES_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("PLAYER_STATE_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("TRENDS_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("EXPLAIN (FORMAT JSON, COSTS OFF)");
 		expect(compatibilityProbe).not.toContain("to_regclass");
 		expect(contractFixture).toContain("GRANT letletme_graphql_reader TO graphql_ci");
+		expect(contractFixture).not.toContain("INSERT INTO fpl.seasons");
+		expect(contractFixture).not.toContain("INSERT INTO ops.dataset_publications");
 		expect(contractFixture).not.toContain("REFRESH MATERIALIZED VIEW");
 		expect(contractFixture).not.toContain("GRANT USAGE ON SCHEMA content");
 		expect(contractFixture).not.toContain("GRANT SELECT ON content.");
@@ -61,6 +68,7 @@ describe("Data Platform contract pin", () => {
 	});
 
 	test("uses the same consumer fixture for the pinned Data contract", () => {
+		expect(workflow).toContain("data-platform/tests/fixtures/graphql-consumer-authority.sql");
 		expect(workflow).toContain("tests/fixtures/database-contract.sql");
 		expect(workflow).toContain("bun run contract:check");
 		expect(pinnedContractProbe).toContain("validateDirectDataSqlContract(database)");

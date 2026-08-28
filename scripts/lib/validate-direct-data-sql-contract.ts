@@ -1,5 +1,7 @@
 import type { DataSqlContractProbe } from "../../src/contracts/data-sql-contract";
 import { MY_FPL_DATA_SQL_CONTRACT } from "../../src/domains/my-fpl/repository";
+import { PLAYER_VALUES_DATA_SQL_CONTRACT } from "../../src/domains/player-values/repository";
+import { PLAYERS_DATA_SQL_CONTRACT } from "../../src/domains/players/repository";
 import { PLAYER_STATE_DATA_SQL_CONTRACT } from "../../src/domains/player-state/repository";
 import { PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/public-league-trends/repository";
 import { TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/trends/repository";
@@ -9,6 +11,8 @@ import type { QueryExecutor } from "../../src/infra/database";
 export const DIRECT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	...BRIEFING_DATA_SQL_CONTRACT,
 	...MY_FPL_DATA_SQL_CONTRACT,
+	...PLAYERS_DATA_SQL_CONTRACT,
+	...PLAYER_VALUES_DATA_SQL_CONTRACT,
 	...PLAYER_STATE_DATA_SQL_CONTRACT,
 	...PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT,
 	...TRENDS_DATA_SQL_CONTRACT,

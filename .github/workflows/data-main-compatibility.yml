@@ -112,7 +112,12 @@ jobs:
       - name: Install GraphQL dependencies
         run: bun install --frozen-lockfile
 
-      - name: Install GraphQL consumer contract fixture
+      - name: Install Data-owned GraphQL authority fixture
+        run: >-
+          psql "$CONTRACT_ADMIN_DATABASE_URL" -f
+          data-platform/tests/fixtures/graphql-consumer-authority.sql
+
+      - name: Install GraphQL external-boundary contract fixture
         run: psql "$CONTRACT_ADMIN_DATABASE_URL" -f tests/fixtures/database-contract.sql
 
       - name: Run complete GraphQL startup contract against Data main

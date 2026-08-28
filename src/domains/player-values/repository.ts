@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
 import { getCoreDataSnapshot } from "../../infra/data-snapshot";
@@ -9,6 +10,7 @@ import {
 	refreshMarketSnapshotContext,
 	type MarketSnapshotContext,
 } from "../market/context";
+import { MARKET_SNAPSHOT_PIN_EXISTS_SQL } from "../market/sql";
 
 export type PositionEnum = "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD";
 
@@ -505,13 +507,7 @@ const marketSnapshotExists = async (
 ): Promise<boolean> => {
 	try {
 		const result = await context.database.query<{ present: boolean | string }>(
-			`SELECT EXISTS (
-				SELECT 1
-				FROM fpl.player_market_snapshots
-				WHERE season_id = $1
-				  AND snapshot_date = $2::date
-				  AND captured_at = $3::timestamptz
-			) AS present`,
+			MARKET_SNAPSHOT_PIN_EXISTS_SQL,
 			[context.currentSeason.seasonId, marketContext.snapshotDate, marketContext.capturedAt]
 		);
 		const present = result.rows[0]?.present;
@@ -521,6 +517,14 @@ const marketSnapshotExists = async (
 		return false;
 	}
 };
+
+export const PLAYER_VALUES_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "player-values.market-snapshot-pin",
+		sql: MARKET_SNAPSHOT_PIN_EXISTS_SQL,
+		values: [2026, "2026-08-10", "2026-08-10T00:00:00.000Z"],
+	},
+];
 
 export const playerValuesRepository: PlayerValuesRepository = {
 	async getPlayerValues(context: GraphQLContext, changeDate: Date): Promise<PlayerValue[]> {
