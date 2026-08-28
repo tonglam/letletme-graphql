@@ -417,12 +417,73 @@ const collectDeprecatedVariableSymbols = (
 		return;
 	}
 	if (!isInputObjectType(inputType) || typeof value !== "object" || Array.isArray(value)) return;
-	for (const [fieldName, fieldValue] of Object.entries(value as Record<string, unknown>)) {
-		const field = inputType.getFields()[fieldName];
-		if (!field) continue;
+	const inputValue = value as Record<string, unknown>;
+	for (const field of Object.values(inputType.getFields())) {
+		const supplied = Object.hasOwn(inputValue, field.name);
+		if (!supplied && field.defaultValue === undefined) continue;
+		const fieldValue = supplied ? inputValue[field.name] : field.defaultValue;
 		if (field.deprecationReason !== undefined) symbols.add(`${inputType.name}.${field.name}`);
 		collectDeprecatedVariableSymbols(fieldValue, field.type, symbols);
 	}
+};
+
+const collectDeprecatedSchemaArgumentDefaults = (
+	argumentsList: readonly ArgumentNode[] | undefined,
+	schemaArguments: readonly GraphQLArgument[],
+	symbols: Set<string>
+): void => {
+	const suppliedArguments = new Set((argumentsList ?? []).map((argument) => argument.name.value));
+	for (const argument of schemaArguments) {
+		if (suppliedArguments.has(argument.name) || argument.defaultValue === undefined) continue;
+		collectDeprecatedVariableSymbols(argument.defaultValue, argument.type, symbols);
+	}
+};
+
+const collectDeprecatedArgumentValue = (
+	argumentNode: ArgumentNode,
+	argument: GraphQLArgument | undefined,
+	variables: Record<string, unknown>,
+	symbols: Set<string>
+): void => {
+	if (!argument) return;
+	collectDeprecatedVariableSymbols(
+		valueFromASTUntyped(argumentNode.value, variables),
+		argument.type,
+		symbols
+	);
+};
+
+const collectDeprecatedArgumentDefaultsAndValues = (
+	argumentsList: readonly ArgumentNode[] | undefined,
+	schemaArguments: readonly GraphQLArgument[],
+	variables: Record<string, unknown>,
+	symbols: Set<string>
+): void => {
+	collectDeprecatedSchemaArgumentDefaults(argumentsList, schemaArguments, symbols);
+	const argumentsByName = new Map(schemaArguments.map((argument) => [argument.name, argument]));
+	for (const argumentNode of argumentsList ?? []) {
+		collectDeprecatedArgumentValue(
+			argumentNode,
+			argumentsByName.get(argumentNode.name.value),
+			variables,
+			symbols
+		);
+	}
+};
+
+/*
+	The schema can inject defaults before a resolver runs. Walk those effective
+	values as well as client-supplied AST nodes so deprecated enum/input values
+	used only by a schema default still appear in request telemetry.
+*/
+const collectDeprecatedFieldDefaults = (
+	field: ReturnType<TypeInfo["getFieldDef"]>,
+	argumentsList: readonly ArgumentNode[] | undefined,
+	variables: Record<string, unknown>,
+	symbols: Set<string>
+): void => {
+	if (!field) return;
+	collectDeprecatedArgumentDefaultsAndValues(argumentsList, field.args, variables, symbols);
 };
 
 const executableSelectionIsIncluded = (
@@ -548,6 +609,7 @@ const selectedDeprecatedSymbols = (
 					if (!executableSelectionIsIncluded(node.directives, variables)) return false;
 					const parentType = typeInfo.getParentType();
 					const field = typeInfo.getFieldDef();
+					collectDeprecatedFieldDefaults(field, node.arguments, variables, symbols);
 					if (parentType && field?.deprecationReason !== undefined) {
 						symbols.add(`${parentType.name}.${node.name.value}`);
 					}
@@ -562,6 +624,16 @@ const selectedDeprecatedSymbols = (
 				enter(node) {
 					if (!executableSelectionIsIncluded(node.directives, variables)) return false;
 				},
+			},
+			Directive(node) {
+				const directive = schema.getDirective(node.name.value);
+				if (!directive) return;
+				collectDeprecatedArgumentDefaultsAndValues(
+					node.arguments,
+					directive.args,
+					variables,
+					symbols
+				);
 			},
 			Argument(node) {
 				const parentType = typeInfo.getParentType();

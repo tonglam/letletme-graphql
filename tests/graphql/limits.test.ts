@@ -242,6 +242,30 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("reports deprecated values supplied by omitted schema defaults", () => {
+		const defaultsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			input LegacyInput {
+				mode: LegacyMode = OLD
+			}
+			directive @legacy(mode: LegacyMode = OLD, input: LegacyInput = {}) on FIELD
+			type Query {
+				example(mode: LegacyMode = OLD, input: LegacyInput = {}): String
+			}
+		`);
+		const result = validateGraphQLRequestLimits(
+			{ query: "query { example @legacy }" },
+			defaultsSchema
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+		});
+	});
+
 	it("keeps live price-change roots public and bounded", () => {
 		for (const query of [
 			"query { priceChangeLiveCursor { revision state } }",
