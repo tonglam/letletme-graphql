@@ -27,6 +27,8 @@ PUBLIC_GRAPHQL_HEALTH_URL=${PUBLIC_GRAPHQL_HEALTH_URL:-}
 PUBLIC_GRAPHQL_URL=${PUBLIC_GRAPHQL_URL:-}
 RELEASE_MANIFEST_DIR=${RELEASE_MANIFEST_DIR:-$VPS_WORKDIR/releases}
 CANDIDATE_READY_ATTEMPTS=${CANDIDATE_READY_ATTEMPTS:-30}
+PUBLIC_HEALTH_ATTEMPTS=${PUBLIC_HEALTH_ATTEMPTS:-15}
+PUBLIC_HEALTH_DELAY_SECONDS=${PUBLIC_HEALTH_DELAY_SECONDS:-1}
 RATE_LIMIT_ROLLOUT=${RATE_LIMIT_ROLLOUT:-preserve}
 DEPLOY_LOCK_PATH=${DEPLOY_LOCK_PATH:-/var/lock/letletme-platform-deploy.lock}
 
@@ -38,6 +40,8 @@ test -n "$PUBLIC_GRAPHQL_URL" || {
   echo "PUBLIC_GRAPHQL_URL is required for public field-level verification" >&2
   exit 1
 }
+[[ "$PUBLIC_HEALTH_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]
+[[ "$PUBLIC_HEALTH_DELAY_SECONDS" =~ ^[0-9]+$ ]]
 
 case "$DEPLOY_LOCK_PATH" in
   /*) ;;
@@ -394,16 +398,26 @@ switched=true
 sudo -n "$SWITCH_HELPER" "$inactive_slot"
 
 public_health_url="$PUBLIC_GRAPHQL_HEALTH_URL"
-public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url") || {
-  echo "public GraphQL health probe failed after switching to $inactive_slot" >&2
-  if ! rollback_switch; then
-    echo "public probe failed and rollback could not be verified" >&2
+public_health=""
+public_health_ready=false
+for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS"); do
+  if public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url"); then
+    if jq -e --arg revision "$DEPLOY_SHA" \
+      '.status == "ok" and .revision == $revision' <<<"$public_health" >/dev/null; then
+      public_health_ready=true
+      break
+    fi
   fi
-  exit 1
-}
-if ! jq -e --arg revision "$DEPLOY_SHA" \
-  '.status == "ok" and .revision == $revision' <<<"$public_health" >/dev/null; then
-  echo "public GraphQL health identity does not match $DEPLOY_SHA" >&2
+  if [ "$attempt" -lt "$PUBLIC_HEALTH_ATTEMPTS" ]; then
+    sleep "$PUBLIC_HEALTH_DELAY_SECONDS"
+  fi
+done
+if [ "$public_health_ready" != true ]; then
+  if [ -n "$public_health" ]; then
+    echo "public GraphQL health identity does not match $DEPLOY_SHA after ${PUBLIC_HEALTH_ATTEMPTS} attempts" >&2
+  else
+    echo "public GraphQL health probe failed after switching to $inactive_slot" >&2
+  fi
   if ! rollback_switch; then
     echo "public identity mismatch and rollback could not be verified" >&2
   fi

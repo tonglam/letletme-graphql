@@ -123,6 +123,10 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("manifest=$(mktemp");
 		expect(deployScript).toContain("oldSlot:$oldSlot,newSlot:$newSlot");
 		expect(deployScript).toContain("Public GraphQL contract failed");
+		expect(deployScript).toContain("PUBLIC_HEALTH_ATTEMPTS=${PUBLIC_HEALTH_ATTEMPTS:-15}");
+		expect(deployScript).toContain("public_health_ready=false");
+		expect(deployScript).toContain('for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS")');
+		expect(deployScript).toContain('sleep "$PUBLIC_HEALTH_DELAY_SECONDS"');
 		expect(deployScript.indexOf("switched=true")).toBeLessThan(
 			deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"')
 		);
