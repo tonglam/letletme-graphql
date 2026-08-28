@@ -270,11 +270,13 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.assert-tournament-membership",
 		sql: MY_FPL_ASSERT_TOURNAMENT_MEMBERSHIP_SQL,
 		values: [2026, 1, 1],
+		runtime: "must-return-row",
 	},
 	{
 		name: "my-fpl.list-tournament-memberships",
 		sql: MY_FPL_LIST_TOURNAMENT_MEMBERSHIPS_SQL,
 		values: [2026, 1],
+		runtime: "must-return-row",
 	},
 	{
 		name: "my-fpl.competition-board",

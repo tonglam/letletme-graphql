@@ -257,6 +257,13 @@ export const MARKET_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "market.snapshot-window",
 		sql: MARKET_QUERY,
 		values: [2026, 7, "2025-08-28", "2025-08-28T00:00:00.000Z"],
+		resultTypes: [
+			{
+				relation: "fpl.player_market_snapshots",
+				column: "position",
+				pgType: "text",
+			},
+		],
 	},
 ];
 

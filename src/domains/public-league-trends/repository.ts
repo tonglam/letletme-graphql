@@ -262,6 +262,7 @@ export const PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 		name: "public-league-trends.catalog",
 		sql: PUBLIC_LEAGUE_CATALOG_SQL,
 		values: [2026],
+		runtime: "must-return-row",
 	},
 	{
 		name: "public-league-trends.access",

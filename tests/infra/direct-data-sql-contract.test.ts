@@ -179,7 +179,10 @@ describe("direct Data SQL contract", () => {
 						rows: relations.map((relation, index) => ({
 							relation_name: relation,
 							column_name: columns[index],
-							actual_type: "json",
+							actual_type:
+								relation === "fpl.player_market_snapshots" && columns[index] === "position"
+									? "text"
+									: "json",
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
@@ -210,7 +213,10 @@ describe("direct Data SQL contract", () => {
 						rows: relations.map((relation, index) => ({
 							relation_name: relation,
 							column_name: columns[index],
-							actual_type: "jsonb",
+							actual_type:
+								relation === "fpl.player_market_snapshots" && columns[index] === "position"
+									? "text"
+									: "jsonb",
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
@@ -229,11 +235,14 @@ describe("direct Data SQL contract", () => {
 				if (text.includes("format_type(attribute.atttypid, attribute.atttypmod)")) {
 					const relations = values[0] as readonly string[];
 					const columns = values[1] as readonly string[];
-					return {
+						return {
 						rows: relations.map((relation, index) => ({
 							relation_name: relation,
 							column_name: columns[index],
-							actual_type: "jsonb",
+							actual_type:
+								relation === "fpl.player_market_snapshots" && columns[index] === "position"
+									? "text"
+									: "jsonb",
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
@@ -280,9 +289,15 @@ describe("direct Data SQL contract", () => {
 	});
 
 	test("uses the runtime Market statements as planner probes", () => {
-		expect(
-			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "market.snapshot-window")?.sql
-		).toBe(MARKET_QUERY);
+		const market = DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "market.snapshot-window");
+		expect(market?.sql).toBe(MARKET_QUERY);
+		expect(market?.resultTypes).toEqual([
+			expect.objectContaining({
+				relation: "fpl.player_market_snapshots",
+				column: "position",
+				pgType: "text",
+			}),
+		]);
 		expect(
 			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "home-market.ownership")?.sql
 		).toBe(HOME_MARKET_OWNERSHIP_SQL);
@@ -343,8 +358,11 @@ describe("direct Data SQL contract", () => {
 				"my-fpl.snapshot-entry",
 				"my-fpl.snapshot-tournament-row-visibility",
 				"my-fpl.competition-aggregate",
+				"my-fpl.assert-tournament-membership",
+				"my-fpl.list-tournament-memberships",
 			])
 		);
+		expect(runtimeProbes.map((probe) => probe.name)).toContain("public-league-trends.catalog");
 		expect(
 			runtimeProbes.every(
 				(probe) => probe.runtime === "must-return-row" || probe.runtime === "must-return-board"
