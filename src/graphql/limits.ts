@@ -586,7 +586,6 @@ const activeDeprecatedTelemetrySelections = (
 	const variableOwners = new Map<string, Set<string | undefined>>();
 	const fragmentDirectiveOwners = new Map<string, Set<string>>();
 	const selectionDirectiveOwners = new Map<DirectiveNode, Set<string>>();
-	const analyzedFragments = new Set<string>();
 	const fragmentFieldOwnerMemo = new Map<string, Set<string>>();
 	const fragmentOccurrenceOwnerMemo = new Map<string, Set<string>>();
 	const possibleRuntimeTypesFor = (typeCondition: string): readonly string[] => {
@@ -757,7 +756,8 @@ const activeDeprecatedTelemetrySelections = (
 	const inspect = (
 		selectionSet: SelectionSetNode,
 		currentOwner?: string,
-		pathPrefix: readonly string[] = []
+		pathPrefix: readonly string[] = [],
+		seenFragments: ReadonlySet<string> = new Set()
 	): void => {
 		for (const selection of selectionSet.selections) {
 			if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
@@ -771,10 +771,12 @@ const activeDeprecatedTelemetrySelections = (
 				);
 				collectVariableReferences(selection.arguments, usedVariables, variableOwners, owner);
 				if (selection.selectionSet) {
-					inspect(selection.selectionSet, owner, [
-						...pathPrefix,
-						selection.alias?.value ?? selection.name.value,
-					]);
+					inspect(
+						selection.selectionSet,
+						owner,
+						[...pathPrefix, selection.alias?.value ?? selection.name.value],
+						seenFragments
+					);
 				}
 				continue;
 			}
@@ -790,7 +792,7 @@ const activeDeprecatedTelemetrySelections = (
 				}
 				registerSelectionDirectiveOwners(selection.directives, directiveOwners);
 				for (const branchPath of branchPathsFor(selection, pathPrefix)) {
-					inspect(selection.selectionSet, currentOwner, branchPath);
+					inspect(selection.selectionSet, currentOwner, branchPath, seenFragments);
 				}
 				continue;
 			}
@@ -801,10 +803,11 @@ const activeDeprecatedTelemetrySelections = (
 			const fragment = fragments.get(fragmentName);
 			if (!fragment) continue;
 			registerFragmentDirectiveOwners(fragment, occurrenceOwners);
-			if (analyzedFragments.has(fragmentName)) continue;
-			analyzedFragments.add(fragmentName);
 			active.add(fragmentName);
-			inspect(fragment.selectionSet, currentOwner, pathPrefix);
+			if (seenFragments.has(fragmentName)) continue;
+			const nextSeenFragments = new Set(seenFragments);
+			nextSeenFragments.add(fragmentName);
+			inspect(fragment.selectionSet, currentOwner, pathPrefix, nextSeenFragments);
 		}
 	};
 	inspect(operation.selectionSet);

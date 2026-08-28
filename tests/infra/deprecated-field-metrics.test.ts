@@ -360,6 +360,64 @@ test("deprecated fragment-spread directives follow their response-path occurrenc
 	expect(observed).toEqual(["LegacyMode.LIVE"]);
 });
 
+test("deprecated nested fragment directives are collected for every fragment occurrence", async () => {
+	const observed: string[] = [];
+	const typeDefs = `
+		enum LegacyMode { LIVE @deprecated(reason: "Use NEW") NEW }
+		directive @legacy(mode: LegacyMode) on FRAGMENT_SPREAD
+		type Query { missing: Wrapper, live: Wrapper }
+		type Wrapper { child: Wrapper, value: String }
+	`;
+	const server = new ApolloServer<TestContext>({
+		typeDefs,
+		resolvers: {
+			Query: { missing: () => null, live: () => ({ child: {} }) },
+			Wrapper: { child: (value: { child?: unknown }) => value.child ?? null, value: () => "ok" },
+		},
+		plugins: [
+			{
+				async requestDidStart() {
+					return {
+						async executionDidStart(requestContext) {
+							return createDeprecatedSchemaUsageExecutionListener<TestContext>({
+								symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+								symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+								globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols,
+								increment: (symbol) => observed.push(symbol),
+							});
+						},
+					};
+				},
+			},
+		],
+	});
+	servers.push(server);
+	await server.start();
+
+	const query = `
+		query {
+			missing { ...Outer }
+			live { ...Outer }
+		}
+		fragment Outer on Wrapper { child { ...Inner @legacy(mode: LIVE) } }
+		fragment Inner on Wrapper { value }
+	`;
+	const limits = validateGraphQLRequestLimits({ query }, buildSchema(typeDefs));
+	if (!limits.ok) throw new Error(limits.message);
+	await server.executeOperation(
+		{ query },
+		{
+			contextValue: {
+				deprecatedSymbols: limits.deprecatedSymbols,
+				deprecatedSymbolOwners: limits.deprecatedSymbolOwners,
+				deprecatedSymbolGlobalSymbols: limits.deprecatedSymbolGlobalSymbols,
+			},
+		}
+	);
+
+	expect(observed).toEqual(["LegacyMode.LIVE"]);
+});
+
 test("deprecated fragment-spread directives keep conditional runtime branches separate", async () => {
 	const observed: string[] = [];
 	const typeDefs = `
