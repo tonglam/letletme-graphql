@@ -35,6 +35,8 @@ type CatalogRow = {
 type AccessRow = {
 	catalog_revision: string | Date;
 	snapshot_revision: string | Date;
+	selection_publication_id: string | number;
+	selection_revision: string | number;
 };
 
 type SelectionCapabilityState = "READY" | "NOT_READY" | "FAILED" | "UNSUPPORTED";
@@ -69,7 +71,8 @@ const sqlSafeInteger = (value: unknown, minimum: number): number | null => {
 };
 
 const isSelectionCapabilityState = (value: unknown): value is SelectionCapabilityState =>
-	typeof value === "string" && SELECTION_CAPABILITY_STATES.includes(value as SelectionCapabilityState);
+	typeof value === "string" &&
+	SELECTION_CAPABILITY_STATES.includes(value as SelectionCapabilityState);
 
 /**
  * Decode the publication metadata consumed by the public selection reader.
@@ -243,20 +246,10 @@ export const PUBLIC_LEAGUE_CATALOG_SQL = `
 		catalog.sort_order,
 		catalog.published_at,
 		catalog.updated_at,
-		CASE
-			WHEN publication.event_id IS NOT NULL
-				AND (snapshot.event_id IS NULL OR publication.event_id >= snapshot.event_id)
-				THEN publication.event_id
-			ELSE snapshot.event_id
-		END AS latest_event_id,
-		CASE
-			WHEN publication.event_id IS NOT NULL
-				AND (snapshot.event_id IS NULL OR publication.event_id >= snapshot.event_id)
-				THEN publication.expected_entries
-			ELSE snapshot.total_entries
-		END AS total_entries,
+		publication.event_id AS latest_event_id,
+		publication.expected_entries AS total_entries,
 		MAX(catalog.updated_at) OVER () AS catalog_revision,
-			GREATEST(tournament.updated_at, COALESCE(publication.published_at, tournament.updated_at)) AS snapshot_revision,
+		GREATEST(tournament.updated_at, COALESCE(publication.published_at, tournament.updated_at)) AS snapshot_revision,
 		(
 			SELECT MAX(tournament_revision.updated_at)
 			FROM competition.public_league_trends catalog_revision
@@ -270,7 +263,7 @@ export const PUBLIC_LEAGUE_CATALOG_SQL = `
 		ON tournament.season_id = catalog.season_id
 		AND tournament.tournament_id = catalog.tournament_id
 		AND tournament.setup_status = 'ready'
-	LEFT JOIN LATERAL (
+	JOIN LATERAL (
 		SELECT publication.event_id, publication.expected_entries, publication.revision,
 			publication.published_at
 		FROM reporting.tournament_selection_stat_publications publication
@@ -280,46 +273,32 @@ export const PUBLIC_LEAGUE_CATALOG_SQL = `
 		ORDER BY publication.event_id DESC, publication.revision DESC
 		LIMIT 1
 	) publication ON true
-	LEFT JOIN LATERAL (
-		SELECT
-			stats.event_id,
-			MAX(stats.total_entries)::integer AS total_entries
-		FROM reporting.tournament_selection_stats stats
-		WHERE stats.season_id = catalog.season_id
-			AND stats.tournament_id = catalog.tournament_id
-		GROUP BY stats.event_id
-		ORDER BY stats.event_id DESC
-		LIMIT 1
-	) snapshot ON true
 	WHERE catalog.season_id = $1
 		AND catalog.enabled = true
-		AND (publication.event_id IS NOT NULL OR snapshot.event_id IS NOT NULL)
 	ORDER BY catalog.sort_order ASC, catalog.display_name ASC, catalog.tournament_id ASC
 `;
 
 export const PUBLIC_LEAGUE_ACCESS_SQL = `
 	SELECT
 		catalog.updated_at AS catalog_revision,
-		GREATEST(catalog.updated_at, tournament.updated_at) AS snapshot_revision
+		GREATEST(catalog.updated_at, tournament.updated_at, COALESCE(publication.published_at, tournament.updated_at)) AS snapshot_revision,
+		publication.publication_id AS selection_publication_id,
+		publication.revision AS selection_revision
 	FROM competition.public_league_trends catalog
 	JOIN competition.tournaments tournament
 		ON tournament.season_id = catalog.season_id
 		AND tournament.tournament_id = catalog.tournament_id
 		AND tournament.setup_status = 'ready'
-	LEFT JOIN reporting.tournament_selection_stat_publications publication
+	JOIN reporting.tournament_selection_stat_publications publication
 		ON publication.season_id = catalog.season_id
 		AND publication.tournament_id = catalog.tournament_id
 		AND publication.event_id = $3
 		AND publication.is_active
-	LEFT JOIN reporting.tournament_selection_stats stats
-		ON stats.season_id = catalog.season_id
-		AND stats.tournament_id = catalog.tournament_id
-		AND stats.event_id = $3
 	WHERE catalog.enabled = true
 		AND catalog.season_id = $1
 		AND catalog.tournament_id = $2
-		AND (publication.publication_id IS NOT NULL OR stats.event_id IS NOT NULL)
-	GROUP BY catalog.updated_at, tournament.updated_at
+	GROUP BY catalog.updated_at, tournament.updated_at, publication.published_at,
+		publication.publication_id, publication.revision
 `;
 
 export const PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
@@ -345,6 +324,23 @@ export const PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 		name: "public-league-trends.access",
 		sql: PUBLIC_LEAGUE_ACCESS_SQL,
 		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 2],
+		resultTypes: [
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "publication_id",
+				pgType: "bigint",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "revision",
+				pgType: "bigint",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+		],
 	},
 	{
 		name: "public-league-trends.selection",
@@ -458,11 +454,18 @@ export const createPublicLeagueTrendsRepository = (
 			eventId,
 		]);
 		const access = accessResult.rows[0] as AccessRow | undefined;
-		if (!access?.catalog_revision || !access.snapshot_revision) return null;
+		if (
+			!access?.catalog_revision ||
+			!access.snapshot_revision ||
+			access.selection_publication_id === undefined ||
+			access.selection_revision === undefined
+		) {
+			return null;
+		}
 		const safeLimit = Math.min(Math.max(limit, 1), 12);
 		const cacheKey = gqlCacheKey(
 			context,
-			`public-league-selection:${iso(access.catalog_revision)}:${tournamentId}:${eventId}:${safeLimit}:${iso(access.snapshot_revision)}`
+			`public-league-selection:${iso(access.catalog_revision)}:${tournamentId}:${eventId}:${safeLimit}:${iso(access.snapshot_revision)}:${String(access.selection_publication_id)}:${String(access.selection_revision)}`
 		);
 		try {
 			const cached = await context.redis.get(cacheKey);

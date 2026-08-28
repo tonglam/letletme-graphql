@@ -63,4 +63,12 @@ describe("GraphQL admission ordering", () => {
 		expect(source.match(/recordTerminalRequestV3Outcome\(/g)?.length).toBe(3);
 		expect(source).toContain("if (v3AggregateRecorded) return");
 	});
+
+	it("keeps the global emergency valve enforcing during shadow mode", () => {
+		const source = readFileSync("src/index.ts", "utf8");
+
+		expect(source).toContain('isGraphQLRateLimitShadowMode && decision.deniedScope === "global"');
+		expect(source).toContain("failClosed: enforce || isGraphQLRateLimitShadowMode");
+		expect(source).toContain("isShadowOnlyRateLimitDecision(decision)");
+	});
 });

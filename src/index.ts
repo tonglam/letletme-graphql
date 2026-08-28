@@ -98,6 +98,20 @@ const activeGraphQLRateLimitPolicy = isGraphQLV4Mode
 	? productionGraphQLRateLimitPolicyV4
 	: productionGraphQLRateLimitPolicy;
 
+/**
+ * Shadow mode still keeps the global emergency valve live. Per-client and
+ * workload decisions remain observational until an enforcing policy is
+ * explicitly enabled, but an exhausted global budget must protect the
+ * service instead of merely reporting that it would have denied a request.
+ */
+const isShadowOnlyRateLimitDecision = (decision: TokenBucketStageResultV3): boolean =>
+	isGraphQLRateLimitShadowMode && !(decision.deniedScope === "global" && !decision.allowed);
+
+const shouldEnforceRateLimitDecision = (
+	decision: TokenBucketStageResultV3,
+	enforce: boolean
+): boolean => enforce || (isGraphQLRateLimitShadowMode && decision.deniedScope === "global");
+
 const graphQLVersionedPreAuthRateLimitChecks = (
 	ingress: GraphQLIngress
 ): readonly TokenBucketCheckV3[] =>
@@ -230,7 +244,7 @@ const checkV3GraphQLRateLimits = async ({
 }): Promise<{ response: Response | null; decision?: TokenBucketStageResultV3 }> => {
 	try {
 		const decision = await checkTokenBucketStageV3(getRateLimitRedis(), checks);
-		if (!decision.allowed && enforce) {
+		if (!decision.allowed && shouldEnforceRateLimitDecision(decision, enforce)) {
 			return {
 				decision,
 				response: jsonError(429, "RATE_LIMITED", "Too many requests", corsHeaders, {
@@ -249,7 +263,7 @@ const checkV3GraphQLRateLimits = async ({
 		try {
 			handleRateLimitStorageFailure({
 				error,
-				failClosed: enforce,
+				failClosed: enforce || isGraphQLRateLimitShadowMode,
 				scope,
 				logger,
 			});
@@ -325,7 +339,7 @@ const logV3RateLimitDecision = ({
 			remaining: (selected?.remainingMilliTokens ?? 0) / 1000,
 			retryAfter: decision.retryAfterSeconds,
 			allowed: decision.allowed,
-			outcome: isGraphQLRateLimitShadowMode
+			outcome: isShadowOnlyRateLimitDecision(decision)
 				? decision.allowed
 					? "would_allow"
 					: "would_deny"
@@ -362,7 +376,7 @@ const recordRequestRateLimitOutcome = async ({
 			});
 
 const terminalV3Outcome = (decision: TokenBucketStageResultV3): RateLimitAggregateOutcome =>
-	isGraphQLRateLimitShadowMode
+	isShadowOnlyRateLimitDecision(decision)
 		? decision.allowed
 			? "would_allow"
 			: "would_deny"
@@ -536,7 +550,7 @@ const startServer = async (): Promise<void> => {
 					scope: GraphQLRateLimitHeaderScope;
 				} | null = null;
 				const captureShadowRateLimitDecision = (decision: TokenBucketStageResultV3): void => {
-					if (!isGraphQLRateLimitShadowMode) return;
+					if (!isGraphQLRateLimitShadowMode || !isShadowOnlyRateLimitDecision(decision)) return;
 					if (shadowRateLimitDecision?.outcome === "deny") return;
 					shadowRateLimitDecision = {
 						outcome: decision.allowed ? "allow" : "deny",

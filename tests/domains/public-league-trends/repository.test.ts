@@ -115,7 +115,7 @@ describe("public league trends repository", () => {
 	});
 
 	it("authorizes every public snapshot and changes the cache key with its revision", async () => {
-		let revision = "2026-08-08T01:00:00.000Z";
+		let publicationRevision = "1";
 		let reads = 0;
 		const repository = createPublicLeagueTrendsRepository({
 			query: async (sql) => {
@@ -124,7 +124,9 @@ describe("public league trends repository", () => {
 						rows: [
 							{
 								catalog_revision: "2026-08-08T00:00:00.000Z",
-								snapshot_revision: revision,
+								snapshot_revision: "2026-08-08T01:00:00.000Z",
+								selection_publication_id: "1",
+								selection_revision: publicationRevision,
 							},
 						],
 					};
@@ -141,7 +143,7 @@ describe("public league trends repository", () => {
 		expect(await repository.getSelectionStats(ctx.value, 7, 3, 12)).toEqual(emptyStats);
 		expect(reads).toBe(1);
 
-		revision = "2026-08-08T02:00:00.000Z";
+		publicationRevision = "2";
 		expect(await repository.getSelectionStats(ctx.value, 7, 3, 12)).toEqual(emptyStats);
 		expect(reads).toBe(2);
 	});
@@ -214,6 +216,8 @@ describe("public league trends repository", () => {
 							{
 								catalog_revision: "2026-08-08T00:00:00.000Z",
 								snapshot_revision: "2026-08-08T01:00:00.000Z",
+								selection_publication_id: "1",
+								selection_revision: "1",
 							},
 						],
 					};
@@ -243,6 +247,8 @@ describe("public league trends repository", () => {
 							{
 								catalog_revision: "2026-08-08T00:00:00.000Z",
 								snapshot_revision: "2026-08-08T01:00:00.000Z",
+								selection_publication_id: "1",
+								selection_revision: "1",
 							},
 						],
 					};
@@ -266,6 +272,8 @@ describe("public league trends repository", () => {
 							{
 								catalog_revision: "2026-08-08T00:00:00.000Z",
 								snapshot_revision: "2026-08-08T01:00:00.000Z",
+								selection_publication_id: "1",
+								selection_revision: "1",
 							},
 						],
 					};
