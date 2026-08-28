@@ -820,6 +820,7 @@ export const liveDesksResolvers = {
 				request.tournamentId,
 				{
 					includeEffectiveLineup: true,
+					readMode: "CACHE_ONLY",
 					...(snapshot?.publicationId
 						? {
 								liveRef: {
@@ -865,6 +866,7 @@ export const liveDesksResolvers = {
 						(chunk) =>
 							loadManagerScores(context, request.eventId, chunk, request.tournamentId, {
 								includeEffectiveLineup: true,
+								readMode: "CACHE_ONLY",
 								...(snapshot?.publicationId
 									? {
 											liveRef: {
@@ -1027,6 +1029,7 @@ export const liveDesksResolvers = {
 								entriesById: rosterEntries,
 								tournamentId: request.tournamentId,
 								managerScores,
+								managerReadMode: "CACHE_ONLY",
 								...(snapshot?.publicationId
 									? {
 											liveRef: {
@@ -1105,6 +1108,7 @@ export const liveDesksResolvers = {
 							entriesById: rosterEntries,
 							tournamentId: request.tournamentId,
 							managerScores,
+							managerReadMode: "CACHE_ONLY",
 							...(snapshot?.publicationId
 								? {
 										liveRef: {

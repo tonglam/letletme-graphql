@@ -688,7 +688,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 
 		try {
 			const batch = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
-				{ logger: { warn: () => undefined } } as never,
+				{ dataRevision: "core-test", logger: { warn: () => undefined } } as never,
 				1,
 				[...entryIds, entryIds[0]!, entryIds[500]!]
 			);
@@ -716,7 +716,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 
 		try {
 			const mixed = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
-				{ logger: { warn: () => undefined } } as never,
+				{ dataRevision: "core-test", logger: { warn: () => undefined } } as never,
 				1,
 				entryIds
 			);
@@ -731,7 +731,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 				return liveBatchResult(ids);
 			};
 			const failed = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
-				{ logger: { warn: () => undefined } } as never,
+				{ dataRevision: "core-test", logger: { warn: () => undefined } } as never,
 				1,
 				entryIds
 			);
@@ -749,7 +749,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 
 		try {
 			const coherent = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
-				{ logger: { warn: () => undefined } } as never,
+				{ dataRevision: "core-test", logger: { warn: () => undefined } } as never,
 				1,
 				[101, 102]
 			);
@@ -764,7 +764,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 					"00000000-0000-4000-8000-000000000009"
 				);
 			const mismatchedPublication = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
-				{ logger: { warn: () => undefined } } as never,
+				{ dataRevision: "core-test", logger: { warn: () => undefined } } as never,
 				1,
 				[101, 102]
 			);
@@ -772,6 +772,19 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 		} finally {
 			entryLiveBatchService.calcLivePointsForEntries = original;
 		}
+	});
+
+	it("pins Core revision and uses durable manager heads for the active overlay", async () => {
+		const source = await Bun.file("src/domains/tournaments/repository.ts").text();
+		const batch = source.slice(
+			source.indexOf("async function loadEventLiveH2HScoreBatch"),
+			source.indexOf("async function applyActiveOfficialH2HScoreAuthority")
+		);
+		expect(batch).toContain("if (!context.dataRevision) await getCoreDataSnapshot(context)");
+		expect(batch.indexOf("getCoreDataSnapshot(context)")).toBeLessThan(
+			batch.indexOf("calcLivePointsForEntries")
+		);
+		expect(batch).toContain('managerReadMode: "CACHE_ONLY"');
 	});
 
 	it("uses one coherent event-live batch across tournaments", async () => {
@@ -800,8 +813,14 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 		const original = entryLiveBatchService.calcLivePointsForEntries;
 		const calls: number[][] = [];
 		let lineupRevision = "lineup-a";
-		entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, entryIds) => {
+		entryLiveBatchService.calcLivePointsForEntries = async (
+			_context,
+			_eventId,
+			entryIds,
+			prefetched
+		) => {
 			calls.push([...entryIds]);
+			expect(prefetched?.managerReadMode).toBe("CACHE_ONLY");
 			if (entryIds.includes(201)) throw new Error("second tournament unavailable");
 			const checkedAt = "2026-08-24T00:08:00.000Z";
 			return {
@@ -857,7 +876,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 
 		try {
 			const projected = await tournamentCacheTestables.applyActiveOfficialH2HScoreAuthority(
-				{ logger: { warn: () => undefined } } as never,
+				{ dataRevision: "core-test", logger: { warn: () => undefined } } as never,
 				new Map([
 					[9, first],
 					[10, second],
@@ -874,7 +893,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 
 			lineupRevision = "lineup-b";
 			const refreshed = await tournamentCacheTestables.applyActiveOfficialH2HScoreAuthority(
-				{ logger: { warn: () => undefined } } as never,
+				{ dataRevision: "core-test", logger: { warn: () => undefined } } as never,
 				new Map([[9, first]]),
 				1,
 				new Set()
