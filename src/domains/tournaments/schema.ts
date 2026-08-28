@@ -492,8 +492,6 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 	}
 
 	extend type Query {
-		entryTournaments(entryId: Int!): [TournamentInfo!]!
-			@deprecated(reason: "Use entryParticipatingTournaments or manageableTournaments")
 		entryParticipatingTournaments(entryId: Int!): [TournamentInfo!]!
 		manageableTournaments(entryId: Int!): [TournamentInfo!]!
 		tournament(tournamentId: Int!, entryId: Int!): TournamentInfo

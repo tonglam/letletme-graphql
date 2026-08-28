@@ -651,15 +651,6 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 	}
 
 	/* tournaments */
-	if (ids.entryId) {
-		add(
-			"tournaments",
-			"entryTournaments",
-			"query EntryTournaments($entryId: Int!) { entryTournaments(entryId: $entryId) { id name } }",
-			{ entryId: ids.entryId },
-			"entryTournaments"
-		);
-	}
 	if (ids.tournamentId) {
 		add(
 			"tournaments",

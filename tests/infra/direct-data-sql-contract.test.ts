@@ -437,6 +437,15 @@ const mockPlayerStateSeasonRow = {
 	refreshed_at: "2026-08-10T00:00:00.000Z",
 } as const;
 
+const mockTrendsPersonalRows = Array.from({ length: 15 }, (_, index) => ({
+	capability: "PERSONAL_EXPOSURE",
+	element_id: index + 1,
+	player_name: `Contract Player ${index + 1}`,
+	team_short_name: "GCT",
+	pick_position: index + 1,
+	count: index === 0 ? 2 : 1,
+}));
+
 const mockCoreFallbackRow = (() => {
 	const events = Array.from({ length: 38 }, (_, index) => ({
 		event_id: index + 1,
@@ -658,7 +667,10 @@ describe("direct Data SQL contract", () => {
 						rows: relations.map((relation, index) => ({
 							relation_name: relation,
 							column_name: columns[index],
-							actual_type: "text",
+							actual_type:
+								relation === "content.publication_payloads" && columns[index] === "payload"
+									? "text"
+									: mockContractResultType(relation, columns[index]!, "jsonb"),
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
@@ -686,16 +698,7 @@ describe("direct Data SQL contract", () => {
 					return { rows: [mockPriceChangePublication] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-trends-personal") {
-					return {
-						rows: [
-							{
-								capability: "PERSONAL_EXPOSURE",
-								element_id: 1,
-								player_name: "Contract Player",
-								team_short_name: "GCT",
-							},
-						],
-					} as unknown as QueryResult<Row>;
+					return { rows: mockTrendsPersonalRows } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
@@ -934,16 +937,7 @@ describe("direct Data SQL contract", () => {
 					return { rows: [mockPriceChangePublication] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-trends-personal") {
-					return {
-						rows: [
-							{
-								capability: "PERSONAL_EXPOSURE",
-								element_id: 1,
-								player_name: "Contract Player",
-								team_short_name: "GCT",
-							},
-						],
-					} as unknown as QueryResult<Row>;
+					return { rows: mockTrendsPersonalRows } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
 					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
@@ -1058,16 +1052,7 @@ describe("direct Data SQL contract", () => {
 					return { rows: [mockPriceChangePublication] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-trends-personal") {
-					return {
-						rows: [
-							{
-								capability: "PERSONAL_EXPOSURE",
-								element_id: 1,
-								player_name: "Contract Player",
-								team_short_name: "GCT",
-							},
-						],
-					} as unknown as QueryResult<Row>;
+					return { rows: mockTrendsPersonalRows } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;

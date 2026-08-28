@@ -86,6 +86,7 @@ const CONTRACT_PLAYER_CODE = 26001;
 const CONTRACT_PLAYER_EVENT_STATS_REVISION = "1";
 const CONTRACT_PLAYER_EVENT_TOTAL_POINTS = 42;
 const CONTRACT_PLAYER_EVENT_FORM = 4.2;
+const CONTRACT_FPL_SQUAD_SIZE = 15;
 
 const RESULT_TYPE_SQL = `
 	SELECT
@@ -236,13 +237,22 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					const personalRows = result.rows.filter(
 						(row) => (row as { capability?: unknown }).capability === "PERSONAL_EXPOSURE"
 					);
+					const elementIds = new Set(
+						personalRows.map((row) => Number((row as { element_id?: unknown }).element_id))
+					);
+					const pickPositions = new Set(
+						personalRows.map((row) => Number((row as { pick_position?: unknown }).pick_position))
+					);
 					if (
-						personalRows.length === 0 ||
+						personalRows.length !== CONTRACT_FPL_SQUAD_SIZE ||
+						elementIds.size !== CONTRACT_FPL_SQUAD_SIZE ||
+						pickPositions.size !== CONTRACT_FPL_SQUAD_SIZE ||
 						personalRows.some((row) => {
 							const selection = row as {
 								element_id?: unknown;
 								player_name?: unknown;
 								team_short_name?: unknown;
+								pick_position?: unknown;
 							};
 							return (
 								!Number.isInteger(Number(selection.element_id)) ||
@@ -250,7 +260,10 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 								typeof selection.player_name !== "string" ||
 								selection.player_name.trim() === "" ||
 								typeof selection.team_short_name !== "string" ||
-								selection.team_short_name.trim() === ""
+								selection.team_short_name.trim() === "" ||
+								!Number.isInteger(Number(selection.pick_position)) ||
+								Number(selection.pick_position) < 1 ||
+								Number(selection.pick_position) > CONTRACT_FPL_SQUAD_SIZE
 							);
 						})
 					) {

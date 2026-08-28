@@ -264,6 +264,13 @@ export const HOME_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "home.personal-desk",
 		sql: HOME_PERSONAL_DESK_SQL,
 		values: [2026, 1],
+		resultTypes: [
+			{
+				relation: "competition.entries",
+				column: "updated_at",
+				pgType: "timestamp with time zone",
+			},
+		],
 	},
 ];
 
