@@ -80,6 +80,19 @@ test("deprecated usage is counted for cached documents only after variable coerc
 	expect(observed).toEqual(["Query.legacy", "Query.legacy"]);
 });
 
+test("deprecated global symbols commit for a successful fieldless execution", async () => {
+	const observed: string[] = [];
+	const listener = createDeprecatedSchemaUsageExecutionListener<TestContext>({
+		symbols: ["LegacyMode.OLD"],
+		globalSymbols: ["LegacyMode.OLD"],
+		increment: (symbol) => observed.push(symbol),
+	});
+
+	await listener.executionDidEnd?.();
+
+	expect(observed).toEqual(["LegacyMode.OLD"]);
+});
+
 test("deprecated usage excludes nested fields skipped by a null parent", async () => {
 	const observed: string[] = [];
 	const plugin: ApolloServerPlugin<TestContext> = {
@@ -181,6 +194,69 @@ test("deprecated fragment-definition values are not committed when their parent 
 		}
 	);
 
+	expect(observed).toEqual([]);
+});
+
+test("deprecated inline-fragment directives follow the runtime type branch", async () => {
+	const observed: string[] = [];
+	const typeDefs = `
+		enum LegacyMode { OLD @deprecated(reason: "Use NEW") NEW }
+		directive @legacy(mode: LegacyMode) on INLINE_FRAGMENT | FRAGMENT_SPREAD
+		interface Node { id: ID! }
+		type Cat implements Node { id: ID!, catValue: String }
+		type Dog implements Node { id: ID!, dogValue: String }
+		type Query { node: Node }
+	`;
+	const server = new ApolloServer<TestContext>({
+		typeDefs,
+		resolvers: {
+			Query: { node: () => ({ __typename: "Cat", id: "cat" }) },
+			Node: { __resolveType: (value: { __typename: string }) => value.__typename },
+		},
+		plugins: [
+			{
+				async requestDidStart() {
+					return {
+						async executionDidStart(requestContext) {
+							return createDeprecatedSchemaUsageExecutionListener<TestContext>({
+								symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+								symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+								globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols,
+								increment: (symbol) => observed.push(symbol),
+							});
+						},
+					};
+				},
+			},
+		],
+	});
+	servers.push(server);
+	await server.start();
+
+	const query = `
+		query Usage($mode: LegacyMode!) {
+			node { ... on Dog @legacy(mode: $mode) { dogValue } }
+		}
+	`;
+	const limits = validateGraphQLRequestLimits(
+		{ query, variables: { mode: "OLD" } },
+		buildSchema(typeDefs)
+	);
+	if (!limits.ok) throw new Error(limits.message);
+
+	await server.executeOperation(
+		{ query, variables: { mode: "OLD" } },
+		{
+			contextValue: {
+				deprecatedSymbols: limits.deprecatedSymbols,
+				deprecatedSymbolOwners: limits.deprecatedSymbolOwners,
+				deprecatedSymbolGlobalSymbols: limits.deprecatedSymbolGlobalSymbols,
+			},
+		}
+	);
+
+	// The Cat result never executes the Dog inline-fragment field, so the
+	// branch-owned directive usage must not be recorded.
 	expect(observed).toEqual([]);
 });
 

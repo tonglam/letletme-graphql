@@ -371,6 +371,64 @@ describe("GraphQL request limits", () => {
 		expect(result.deprecatedSymbolOwners[`field:${valueOffset}`]).toEqual(["LegacyMode.OLD"]);
 	});
 
+	it("keeps inline fragment directive values owned by fields in its type branch", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on INLINE_FRAGMENT | FRAGMENT_SPREAD
+			interface Node { id: ID! }
+			type Cat implements Node { id: ID!, catValue: String }
+			type Dog implements Node { id: ID!, dogValue: String }
+			type Query { node: Node }
+		`);
+		const query = `
+			query Usage($mode: LegacyMode!) {
+				node {
+					... on Dog @legacy(mode: $mode) { dogValue }
+				}
+			}
+		`;
+		const result = validateGraphQLRequestLimits(
+			{ query, variables: { mode: "OLD" } },
+			deprecatedKindsSchema
+		);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		const dogValueOffset = query.indexOf("dogValue");
+		const nodeOffset = query.indexOf("node {");
+		expect(result.deprecatedSymbolOwners[`field:${dogValueOffset}`]).toEqual(["LegacyMode.OLD"]);
+		expect(result.deprecatedSymbolOwners[`field:${nodeOffset}`]).toBeUndefined();
+	});
+
+	it("does not report deprecated input fields whose optional variable is omitted", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			input LegacyInput {
+				old: String @deprecated(reason: "Use current")
+				current: String
+			}
+			type Query { example(input: LegacyInput): String }
+		`);
+		const query = "query Usage($value: String) { example(input: { old: $value }) }";
+
+		expect(validateGraphQLRequestLimits({ query }, deprecatedKindsSchema)).toMatchObject({
+			ok: true,
+			deprecatedSymbols: [],
+		});
+		expect(
+			validateGraphQLRequestLimits({ query, variables: { value: "legacy" } }, deprecatedKindsSchema)
+		).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyInput.old"],
+		});
+	});
+
 	it("keeps live price-change roots public and bounded", () => {
 		for (const query of [
 			"query { priceChangeLiveCursor { revision state } }",

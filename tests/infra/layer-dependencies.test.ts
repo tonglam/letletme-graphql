@@ -21,7 +21,7 @@ test("layer checker applies TypeScript extension substitution to ESM .js imports
 
 test("layer checker recognizes static template literals in dynamic imports and require calls", () => {
 	const sourceFile = ts.createSourceFile(
-		"fixture.ts",
+		"fixture.cts",
 		"const service = import(`../domains/entries/service`); const legacy = require(`../index`);",
 		ts.ScriptTarget.Latest,
 		true,
@@ -35,7 +35,7 @@ test("layer checker recognizes static template literals in dynamic imports and r
 
 test("layer checker recognizes dynamic imports with import options", () => {
 	const sourceFile = ts.createSourceFile(
-		"fixture.ts",
+		"fixture.cts",
 		'const service = import("../domains/entries/service", { with: {} });',
 		ts.ScriptTarget.Latest,
 		true,
@@ -115,13 +115,24 @@ test("layer checker rejects createRequire loaders in checked layers", () => {
 
 test("layer checker rejects CommonJS createRequire destructuring loaders", () => {
 	const sourceFile = ts.createSourceFile(
-		"fixture.ts",
+		"fixture.cts",
 		'const { createRequire: makeRequire } = require("node:module"); const load = makeRequire(import.meta.url);',
 		ts.ScriptTarget.Latest,
 		true,
 		ts.ScriptKind.TS
 	);
 	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
+});
+
+test("does not treat a lexical require parameter as the ambient loader", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'function load(require: (specifier: string) => unknown) { require("../domains/entries/service"); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([]);
 });
 
 test("layer checker finds createRequire bindings nested inside functions", () => {

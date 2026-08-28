@@ -43,12 +43,91 @@ const sourceFilesUnder = (directory: string): string[] => {
 
 export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] => {
 	const modules: ModuleSpecifier[] = [];
-	// `require` is an ambient CommonJS loader in `.cts` files. Keep a small
-	// alias set so a checked layer cannot hide a relative import behind
-	// `const load = require; load(...)` (or an equivalent assignment).
+	// `require` is an ambient CommonJS loader when no lexical binding shadows
+	// it. Keep a small alias set so a checked layer cannot hide a relative
+	// import behind `const load = require; load(...)` (or an equivalent
+	// assignment), while local helpers named `require` remain ordinary calls.
 	const requireLoaderBindings = new Set<string>(["require"]);
 	const createRequireBindings = new Set<string>();
 	const createRequireNamespaceBindings = new Set<string>();
+	const bindingContains = (binding: ts.BindingName, name: string): boolean => {
+		if (ts.isIdentifier(binding)) return binding.text === name;
+		return binding.elements.some((element) => {
+			if (ts.isOmittedExpression(element)) return false;
+			return bindingContains(element.name, name);
+		});
+	};
+	const scopeHasBinding = (scope: ts.Node, name: string): boolean => {
+		if (ts.isFunctionLike(scope)) {
+			if (scope.name && ts.isIdentifier(scope.name) && scope.name.text === name) return true;
+			if (scope.parameters.some((parameter) => bindingContains(parameter.name, name))) return true;
+		}
+		if (ts.isCatchClause(scope) && scope.variableDeclaration) {
+			if (bindingContains(scope.variableDeclaration.name, name)) return true;
+		}
+		if (ts.isSourceFile(scope) || ts.isBlock(scope) || ts.isModuleBlock(scope)) {
+			for (const statement of scope.statements) {
+				if (ts.isVariableStatement(statement)) {
+					if (
+						statement.declarationList.declarations.some((declaration) =>
+							bindingContains(declaration.name, name)
+						)
+					) {
+						return true;
+					}
+				}
+				if (
+					(ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+					statement.name?.text === name
+				) {
+					return true;
+				}
+				if (ts.isImportDeclaration(statement)) {
+					const bindings = statement.importClause?.namedBindings;
+					if (
+						statement.importClause?.name?.text === name ||
+						(bindings && ts.isNamespaceImport(bindings) && bindings.name.text === name) ||
+						(bindings &&
+							ts.isNamedImports(bindings) &&
+							bindings.elements.some((element) => element.name.text === name))
+					) {
+						return true;
+					}
+				}
+			}
+		}
+		if (ts.isForStatement(scope)) {
+			const initializer = scope.initializer;
+			if (initializer && ts.isVariableDeclarationList(initializer)) {
+				return initializer.declarations.some((declaration) =>
+					bindingContains(declaration.name, name)
+				);
+			}
+		}
+		if (ts.isForInStatement(scope) || ts.isForOfStatement(scope)) {
+			const initializer = scope.initializer;
+			if (ts.isVariableDeclarationList(initializer)) {
+				return initializer.declarations.some((declaration) =>
+					bindingContains(declaration.name, name)
+				);
+			}
+		}
+		return false;
+	};
+	const isShadowed = (
+		identifier: ts.Identifier,
+		name: string,
+		includeSourceFile = false
+	): boolean => {
+		let scope: ts.Node | undefined = identifier.parent;
+		while (scope) {
+			if ((!ts.isSourceFile(scope) || includeSourceFile) && scopeHasBinding(scope, name))
+				return true;
+			if (ts.isSourceFile(scope)) break;
+			scope = scope.parent;
+		}
+		return false;
+	};
 	const moduleSpecifierFromLoader = (initializer: ts.Expression): string | undefined => {
 		let expression = initializer;
 		while (ts.isAwaitExpression(expression) || ts.isParenthesizedExpression(expression)) {
@@ -62,7 +141,12 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 			return undefined;
 		}
 		const callee = expression.expression;
-		if (ts.isIdentifier(callee) && callee.text === "require") return expression.arguments[0].text;
+		if (
+			ts.isIdentifier(callee) &&
+			callee.text === "require" &&
+			!isShadowed(callee, "require", true)
+		)
+			return expression.arguments[0].text;
 		if (callee.kind === ts.SyntaxKind.ImportKeyword) return expression.arguments[0].text;
 		return undefined;
 	};
@@ -96,7 +180,12 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 					ts.isIdentifier(declaration.name) &&
 					declaration.initializer &&
 					ts.isIdentifier(declaration.initializer) &&
-					requireLoaderBindings.has(declaration.initializer.text)
+					requireLoaderBindings.has(declaration.initializer.text) &&
+					!isShadowed(
+						declaration.initializer,
+						declaration.initializer.text,
+						declaration.initializer.text === "require"
+					)
 				) {
 					requireLoaderBindings.add(declaration.name.text);
 				}
@@ -128,7 +217,8 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 			node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
 			ts.isIdentifier(node.left) &&
 			ts.isIdentifier(node.right) &&
-			requireLoaderBindings.has(node.right.text)
+			requireLoaderBindings.has(node.right.text) &&
+			!isShadowed(node.right, node.right.text, node.right.text === "require")
 		) {
 			requireLoaderBindings.add(node.left.text);
 		}
@@ -179,10 +269,13 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 				addUnresolvedDynamic(node);
 			}
 			if (
-				(ts.isIdentifier(expression) && requireLoaderBindings.has(expression.text)) ||
+				(ts.isIdentifier(expression) &&
+					requireLoaderBindings.has(expression.text) &&
+					!isShadowed(expression, expression.text, expression.text === "require")) ||
 				(ts.isPropertyAccessExpression(expression) &&
 					ts.isIdentifier(expression.expression) &&
 					expression.expression.text === "module" &&
+					!isShadowed(expression.expression, "module", true) &&
 					expression.name.text === "require") ||
 				// Dynamic import may carry a second import-options argument. The
 				// module specifier is still always its first argument, so inspect it

@@ -422,7 +422,9 @@ const collectDeprecatedVariableSymbols = (
 	if (!isInputObjectType(inputType) || typeof value !== "object" || Array.isArray(value)) return;
 	const inputValue = value as Record<string, unknown>;
 	for (const field of Object.values(inputType.getFields())) {
-		const supplied = Object.hasOwn(inputValue, field.name);
+		// `valueFromASTUntyped` retains an object key whose value is an
+		// omitted variable as `undefined`; GraphQL treats that key as absent.
+		const supplied = Object.hasOwn(inputValue, field.name) && inputValue[field.name] !== undefined;
 		if (!supplied && field.defaultValue === undefined) continue;
 		const fieldValue = supplied ? inputValue[field.name] : field.defaultValue;
 		if (field.deprecationReason !== undefined) addSymbol(`${inputType.name}.${field.name}`);
@@ -574,11 +576,13 @@ const activeDeprecatedTelemetrySelections = (
 	variables: Set<string>;
 	variableOwners: Map<string, Set<string | undefined>>;
 	fragmentDirectiveOwners: Map<string, Set<string>>;
+	selectionDirectiveOwners: Map<DirectiveNode, Set<string>>;
 } => {
 	const active = new Set<string>();
 	const usedVariables = new Set<string>();
 	const variableOwners = new Map<string, Set<string | undefined>>();
 	const fragmentDirectiveOwners = new Map<string, Set<string>>();
+	const selectionDirectiveOwners = new Map<DirectiveNode, Set<string>>();
 	const analyzedFragments = new Set<string>();
 	const fragmentFieldOwnerMemo = new Map<string, Set<string>>();
 	const collectFragmentFieldOwners = (
@@ -615,6 +619,49 @@ const activeDeprecatedTelemetrySelections = (
 		fragmentFieldOwnerMemo.set(fragmentName, new Set(owners));
 		return owners;
 	};
+	const collectSelectionFieldOwners = (
+		selectionSet: SelectionSetNode,
+		seenFragments: ReadonlySet<string> = new Set()
+	): Set<string> => {
+		const owners = new Set<string>();
+		for (const selection of selectionSet.selections) {
+			if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
+			if (selection.kind === Kind.FIELD) {
+				if (selection.loc) owners.add(`field:${selection.loc.start}`);
+				if (selection.selectionSet) {
+					for (const owner of collectSelectionFieldOwners(selection.selectionSet, seenFragments)) {
+						owners.add(owner);
+					}
+				}
+				continue;
+			}
+			if (selection.kind === Kind.INLINE_FRAGMENT) {
+				for (const owner of collectSelectionFieldOwners(selection.selectionSet, seenFragments)) {
+					owners.add(owner);
+				}
+				continue;
+			}
+			for (const owner of collectFragmentFieldOwners(selection.name.value, seenFragments)) {
+				owners.add(owner);
+			}
+		}
+		return owners;
+	};
+	const registerSelectionDirectiveOwners = (
+		directives: readonly DirectiveNode[] | undefined,
+		owners: ReadonlySet<string>
+	): void => {
+		for (const directive of directives ?? []) {
+			const registered = selectionDirectiveOwners.get(directive) ?? new Set<string>();
+			for (const owner of owners) registered.add(owner);
+			selectionDirectiveOwners.set(directive, registered);
+			// A directive on an inline fragment or fragment spread is effective
+			// only when one of the fields in that branch executes.
+			for (const owner of owners) {
+				collectDirectiveVariableReferences([directive], usedVariables, variableOwners, owner);
+			}
+		}
+	};
 	const registerFragmentDirectiveOwners = (fragment: FragmentDefinitionNode): void => {
 		const owners = collectFragmentFieldOwners(fragment.name.value);
 		const registered = fragmentDirectiveOwners.get(fragment.name.value) ?? new Set<string>();
@@ -643,22 +690,18 @@ const activeDeprecatedTelemetrySelections = (
 				continue;
 			}
 			if (selection.kind === Kind.INLINE_FRAGMENT) {
-				collectDirectiveVariableReferences(
+				registerSelectionDirectiveOwners(
 					selection.directives,
-					usedVariables,
-					variableOwners,
-					currentOwner
+					collectSelectionFieldOwners(selection.selectionSet)
 				);
 				inspect(selection.selectionSet, currentOwner);
 				continue;
 			}
-			collectDirectiveVariableReferences(
-				selection.directives,
-				usedVariables,
-				variableOwners,
-				currentOwner
-			);
 			const fragmentName = selection.name.value;
+			registerSelectionDirectiveOwners(
+				selection.directives,
+				collectFragmentFieldOwners(fragmentName)
+			);
 			if (!reachableFragments.has(fragmentName) || analyzedFragments.has(fragmentName)) continue;
 			const fragment = fragments.get(fragmentName);
 			if (!fragment) continue;
@@ -680,6 +723,7 @@ const activeDeprecatedTelemetrySelections = (
 		variables: usedVariables,
 		variableOwners,
 		fragmentDirectiveOwners,
+		selectionDirectiveOwners,
 	};
 };
 
@@ -716,6 +760,9 @@ const selectedDeprecatedSymbols = (
 		for (const directive of fragment.directives ?? []) {
 			fragmentDirectiveOwners.set(directive, owners);
 		}
+	}
+	for (const [directive, owners] of activeSelections.selectionDirectiveOwners) {
+		fragmentDirectiveOwners.set(directive, owners);
 	}
 	const selectedDocument = {
 		...document,
@@ -830,6 +877,16 @@ const selectedDeprecatedSymbols = (
 			},
 			ObjectField(node) {
 				if (variableDefaultValueNodes.has(node)) return;
+				if (
+					node.value.kind === Kind.VARIABLE &&
+					!Object.hasOwn(variables, node.value.name.value) &&
+					!variableDefaults.has(node.value.name.value)
+				) {
+					// An omitted optional variable contributes no input object value;
+					// do not report deprecated fields that appear only in its AST
+					// shape. Supplied values and operation defaults are handled below.
+					return;
+				}
 				const parentInputType = typeInfo.getParentInputType();
 				if (!parentInputType) return;
 				const namedParent = getNamedType(parentInputType);

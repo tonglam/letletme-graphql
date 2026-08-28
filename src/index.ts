@@ -478,6 +478,7 @@ const startServer = async (): Promise<void> => {
 		plugins: [
 			{
 				async requestDidStart(): Promise<GraphQLRequestListener<GraphQLContext>> {
+					let executionHadErrors = false;
 					return {
 						async parsingDidStart(requestContext): Promise<GraphQLRequestListenerParsingDidEnd> {
 							const stop = requestContext.contextValue.requestTiming?.start("apolloParse");
@@ -493,6 +494,9 @@ const startServer = async (): Promise<void> => {
 								stop?.();
 							};
 						},
+						async didEncounterErrors(): Promise<void> {
+							executionHadErrors = true;
+						},
 						async executionDidStart(requestContext) {
 							const stop = requestContext.contextValue.requestTiming?.start("apolloExecute");
 							// Apollo skips validationDidStart for document-cache hits and performs variable
@@ -504,6 +508,7 @@ const startServer = async (): Promise<void> => {
 								symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
 								globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols ?? [],
 								increment: (symbol) => metrics.graphqlDeprecatedSchemaUsages.labels(symbol).inc(),
+								isExecutionSuccessful: () => !executionHadErrors,
 								onExecutionEnd: stop,
 							});
 						},
