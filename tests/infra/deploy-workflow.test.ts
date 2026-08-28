@@ -151,8 +151,10 @@ describe("production deployment workflow", () => {
 		expect(deployStep).toContain("remote_env=$(mktemp /tmp/letletme-graphql-env.XXXXXX)");
 		expect(deployStep).toContain("remote_token=$(mktemp /tmp/letletme-graphql-token.XXXXXX)");
 		expect(deployStep).toContain("trap cleanup_remote EXIT");
-		expect(deployStep).toContain('base64 -d > "$remote_env"');
-		expect(deployStep).toContain('base64 -d > "$remote_token"');
+		expect(deployStep).toContain('base64 --decode > "$remote_env"; then');
+		expect(deployStep).toContain('base64 --decode > "$remote_token"; then');
+		expect(deployStep).toContain("GraphQL environment payload failed remote base64 decode");
+		expect(deployStep).toContain("GHCR token payload failed remote base64 decode");
 		expect(deployStep).not.toContain("remote_env=$(ssh");
 		expect(deployStep).not.toContain("cleanup_remote() {\n            set +e\n            ssh");
 	});
@@ -207,6 +209,40 @@ describe("production deployment workflow", () => {
 		expect(deployScript.indexOf("export DOCKER_CONFIG")).toBeLessThan(
 			deployScript.indexOf("docker login ghcr.io")
 		);
+	});
+
+	test("validates secret payloads before and during the remote transfer", () => {
+		expect(workflow).toContain(
+			'payload_dir=$(mktemp -d "$RUNNER_TEMP/letletme-graphql-payload.XXXXXX")'
+		);
+		expect(workflow).toContain(
+			'base64 --wrap=0 < "$payload_dir/env.expected" > "$payload_dir/env.b64"'
+		);
+		expect(workflow).toContain(
+			'base64 --wrap=0 < "$payload_dir/token.expected" > "$payload_dir/token.b64"'
+		);
+		expect(workflow).toContain(
+			"env_sha=$(sha256sum \"$payload_dir/env.expected\" | awk '{print $1}')"
+		);
+		expect(workflow).toContain(
+			"token_sha=$(sha256sum \"$payload_dir/token.expected\" | awk '{print $1}')"
+		);
+		expect(workflow).toContain('cmp -s "$payload_dir/env.expected" "$payload_dir/env.decoded"');
+		expect(workflow).toContain('cmp -s "$payload_dir/token.expected" "$payload_dir/token.decoded"');
+		expect(workflow).toContain(
+			"printf 'if ! printf %%s %s | base64 --decode > \"$remote_env\"; then\\n'"
+		);
+		expect(workflow).toContain(
+			"printf 'if ! printf %%s %s | base64 --decode > \"$remote_token\"; then\\n'"
+		);
+		expect(workflow).toContain("verify_payload() {");
+		expect(workflow).toContain("printf 'verify_payload GRAPHQL_ENV \"$remote_env\" %s %s\\n'");
+		expect(workflow).toContain("printf 'verify_payload GHCR_TOKEN \"$remote_token\" %s %s\\n'");
+		expect(workflow).toContain("payload changed during remote transport");
+		expect(workflow).toContain("GraphQL environment payload failed remote base64 decode");
+		expect(workflow).toContain("GHCR token payload failed remote base64 decode");
+		expect(workflow).not.toContain("base64 | tr -d '\\n'");
+		expect(workflow).not.toContain("REMOTE_WRAPPER");
 	});
 
 	test("binds image and container identity to the exact commit", () => {
