@@ -37,9 +37,7 @@ const connectClient = async (redis: Redis): Promise<void> => {
 };
 
 const infoValue = (info: string, key: string): string | undefined => {
-	const line = info
-		.split("\n")
-		.find((candidate) => candidate.startsWith(`${key}:`));
+	const line = info.split("\n").find((candidate) => candidate.startsWith(`${key}:`));
 	return line?.slice(key.length + 1).trim() || undefined;
 };
 
