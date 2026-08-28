@@ -1,5 +1,6 @@
 import { GraphQLError } from "graphql";
 import type { QueryResultRow } from "pg";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { GraphQLContext } from "../../graphql/context";
 import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
@@ -12,6 +13,251 @@ import {
 	tournamentsRepository,
 	type TournamentInfo,
 } from "../tournaments/repository";
+
+export const MY_FPL_EVENT_LIFECYCLE_SQL = `
+	SELECT event_id, finished, data_checked, live_snapshot_finalized_at
+	FROM fpl.events
+	WHERE season_id = $1
+	ORDER BY event_id
+`;
+
+export const MY_FPL_ACTIVE_PUBLICATIONS_SQL = `
+	SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
+		published_at, kind, expected_entry_count, ready_entry_count,
+		empty_entry_count, expected_tournament_count,
+		ready_tournament_count, content_sha256, score_source,
+		live_publication_id, live_revision, algorithm_version,
+		source_min_checked_at, source_max_checked_at
+	FROM competition.my_fpl_snapshot_publications
+	WHERE season_id = $1 AND active
+	ORDER BY event_id
+`;
+
+export const MY_FPL_PUBLICATION_BY_EVENT_REVISION_SQL = `
+	SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
+		published_at, kind, expected_entry_count, ready_entry_count,
+		empty_entry_count, expected_tournament_count,
+		ready_tournament_count, content_sha256, score_source,
+		live_publication_id, live_revision, algorithm_version,
+		source_min_checked_at, source_max_checked_at
+	FROM competition.my_fpl_snapshot_publications
+	WHERE season_id = $1
+		AND event_id = $2
+		AND revision = $3::bigint
+	LIMIT 1
+`;
+
+export const MY_FPL_PUBLICATION_BY_REVISION_SQL = `
+	SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
+		published_at, kind, expected_entry_count, ready_entry_count,
+		empty_entry_count, expected_tournament_count,
+		ready_tournament_count, content_sha256, score_source,
+		live_publication_id, live_revision, algorithm_version,
+		source_min_checked_at, source_max_checked_at
+	FROM competition.my_fpl_snapshot_publications
+	WHERE season_id = $1
+		AND revision = $2::bigint
+	ORDER BY event_id
+	LIMIT 1
+`;
+
+export const MY_FPL_SNAPSHOT_ENTRY_SQL = `
+	SELECT
+		(SELECT count(*)::integer
+			FROM competition.my_fpl_snapshot_entries all_entries
+			WHERE all_entries.season_id = publication.season_id
+				AND all_entries.event_id = publication.event_id
+				AND all_entries.revision = publication.revision) AS entry_row_count,
+		(SELECT count(*)::integer
+			FROM competition.my_fpl_snapshot_tournament_aggregates all_aggregates
+			WHERE all_aggregates.season_id = publication.season_id
+				AND all_aggregates.event_id = publication.event_id
+				AND all_aggregates.revision = publication.revision) AS aggregate_row_count,
+		snapshot.payload, snapshot.is_empty, snapshot.picks_count
+	FROM competition.my_fpl_snapshot_publications publication
+	JOIN competition.my_fpl_snapshot_entries snapshot
+		ON snapshot.season_id = publication.season_id
+		AND snapshot.event_id = publication.event_id
+		AND snapshot.revision = publication.revision
+		AND snapshot.entry_id = $2
+	WHERE publication.season_id = $1
+		AND publication.event_id = $3
+		AND publication.revision = $4::bigint
+	LIMIT 1
+`;
+
+export const MY_FPL_CURRENT_TOURNAMENT_MEMBERSHIPS_SQL = `
+	SELECT tournament_id
+	FROM competition.tournament_entries
+	WHERE season_id = $1 AND entry_id = $2
+	UNION
+	SELECT tracked_tournament.tournament_id
+	FROM competition.entry_leagues entry_league
+	JOIN LATERAL (
+		SELECT tournament.tournament_id
+		FROM competition.tournaments tournament
+		WHERE tournament.season_id = entry_league.season_id
+			AND tournament.league_id = entry_league.league_id
+			AND tournament.league_type = entry_league.league_type
+		ORDER BY tournament.tournament_id
+		LIMIT 1
+	) tracked_tournament ON TRUE
+	WHERE entry_league.season_id = $1 AND entry_league.entry_id = $2
+`;
+
+export const MY_FPL_ASSERT_TOURNAMENT_MEMBERSHIP_SQL = `
+	SELECT 1
+	FROM (${MY_FPL_CURRENT_TOURNAMENT_MEMBERSHIPS_SQL}) membership
+	WHERE tournament_id = $3
+	LIMIT 1
+`;
+
+export const MY_FPL_LIST_TOURNAMENT_MEMBERSHIPS_SQL = `
+	SELECT tournament_id
+	FROM (${MY_FPL_CURRENT_TOURNAMENT_MEMBERSHIPS_SQL}) membership
+	ORDER BY tournament_id
+`;
+
+export const MY_FPL_COMPETITION_BOARD_SQL = `
+	WITH board AS MATERIALIZED (
+		SELECT snapshot.entry_id,
+			snapshot.payload || jsonb_build_object('entryName', entry.entry_name) AS payload
+		FROM competition.my_fpl_snapshot_tournament_rows snapshot
+		JOIN competition.entries entry
+			ON entry.season_id = snapshot.season_id
+			AND entry.entry_id = snapshot.entry_id
+		WHERE snapshot.season_id = $1 AND snapshot.event_id = $2
+			AND snapshot.revision = $3::bigint AND snapshot.tournament_id = $4
+	), filtered AS MATERIALIZED (
+		SELECT * FROM board
+		WHERE $5 = ''
+			OR payload->>'entryName' ILIKE '%' || $5 || '%'
+			OR payload->>'playerName' ILIKE '%' || $5 || '%'
+	), paged AS (
+		SELECT * FROM filtered
+		ORDER BY CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
+			THEN CASE WHEN (payload->>'groupId')::numeric BETWEEN -2147483648 AND 2147483647
+				THEN (payload->>'groupId')::integer END END NULLS LAST,
+			CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
+			THEN CASE WHEN (payload->>'rank')::numeric BETWEEN -2147483648 AND 2147483647
+				THEN (payload->>'rank')::integer END END NULLS LAST,
+			entry_id
+		LIMIT $6 OFFSET $7
+	)
+	SELECT
+		(SELECT count(*)::integer FROM board) AS field_size,
+		(SELECT count(*)::integer FROM filtered) AS total_rows,
+		COALESCE((SELECT jsonb_agg(payload || jsonb_build_object('__snapshotEntryId', entry_id)
+			ORDER BY CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
+			THEN CASE WHEN (payload->>'groupId')::numeric BETWEEN -2147483648 AND 2147483647
+				THEN (payload->>'groupId')::integer END END NULLS LAST,
+			CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
+			THEN CASE WHEN (payload->>'rank')::numeric BETWEEN -2147483648 AND 2147483647
+				THEN (payload->>'rank')::integer END END NULLS LAST,
+			entry_id) FROM paged), '[]'::jsonb) AS rows,
+		(SELECT count(*)::integer FROM board
+			WHERE ((payload->>'groupId') IS NOT NULL
+				AND CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
+				THEN (payload->>'groupId')::numeric NOT BETWEEN -2147483648 AND 2147483647
+				ELSE TRUE END)
+			OR ((payload->>'rank') IS NOT NULL
+				AND CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
+				THEN (payload->>'rank')::numeric NOT BETWEEN -2147483648 AND 2147483647
+				ELSE TRUE END)) AS invalid_row_count,
+		(SELECT CASE WHEN aggregate.payload->>'entryCount' ~ '^[0-9]+$'
+			THEN (aggregate.payload->>'entryCount')::integer END
+		FROM competition.my_fpl_snapshot_tournament_aggregates aggregate
+		WHERE aggregate.season_id = $1
+			AND aggregate.event_id = $2
+			AND aggregate.revision = $3::bigint
+			AND aggregate.tournament_id = $4
+		) AS expected_field_size,
+		(SELECT payload || jsonb_build_object('__snapshotEntryId', entry_id)
+			FROM board WHERE entry_id = $8 LIMIT 1) AS viewer_row
+`;
+
+export const MY_FPL_COMPETITION_AGGREGATE_SQL = `
+	SELECT aggregate.payload
+	FROM competition.my_fpl_snapshot_tournament_aggregates aggregate
+	WHERE aggregate.season_id = $1
+		AND aggregate.event_id = $2
+		AND aggregate.revision = $3::bigint
+		AND aggregate.tournament_id = $4
+		AND EXISTS (
+			SELECT 1 FROM competition.my_fpl_snapshot_publications publication
+			WHERE publication.season_id = aggregate.season_id
+				AND publication.event_id = aggregate.event_id
+				AND publication.revision = aggregate.revision
+		)
+	LIMIT 1
+`;
+
+export const MY_FPL_COMPETITION_SEASON_PATH_SQL = `
+	SELECT payload
+	FROM competition.my_fpl_snapshot_tournament_aggregates
+	WHERE season_id = $1 AND event_id = $2 AND revision = $3::bigint AND tournament_id = $4
+	LIMIT 1
+`;
+
+export const MY_FPL_COMPETITION_SETUP_STATUS_SQL = `
+	SELECT setup_status::text, setup_phase::text, setup_completed_units,
+		setup_total_units, setup_progress_updated_at, standings_ready_at,
+		insights_ready_at,
+		setup_warning_count
+	FROM competition.tournaments
+	WHERE season_id = $1 AND tournament_id = $2
+	LIMIT 1
+`;
+
+export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{ name: "my-fpl.event-lifecycle", sql: MY_FPL_EVENT_LIFECYCLE_SQL, values: [2026] },
+	{ name: "my-fpl.active-publications", sql: MY_FPL_ACTIVE_PUBLICATIONS_SQL, values: [2026] },
+	{
+		name: "my-fpl.publication-by-event-revision",
+		sql: MY_FPL_PUBLICATION_BY_EVENT_REVISION_SQL,
+		values: [2026, 1, "7"],
+	},
+	{
+		name: "my-fpl.publication-by-revision",
+		sql: MY_FPL_PUBLICATION_BY_REVISION_SQL,
+		values: [2026, "7"],
+	},
+	{
+		name: "my-fpl.snapshot-entry",
+		sql: MY_FPL_SNAPSHOT_ENTRY_SQL,
+		values: [2026, 1, 1, "7"],
+	},
+	{
+		name: "my-fpl.assert-tournament-membership",
+		sql: MY_FPL_ASSERT_TOURNAMENT_MEMBERSHIP_SQL,
+		values: [2026, 1, 1],
+	},
+	{
+		name: "my-fpl.list-tournament-memberships",
+		sql: MY_FPL_LIST_TOURNAMENT_MEMBERSHIPS_SQL,
+		values: [2026, 1],
+	},
+	{
+		name: "my-fpl.competition-board",
+		sql: MY_FPL_COMPETITION_BOARD_SQL,
+		values: [2026, 1, "7", 1, "", 100, 0, 1],
+	},
+	{
+		name: "my-fpl.competition-aggregate",
+		sql: MY_FPL_COMPETITION_AGGREGATE_SQL,
+		values: [2026, 1, "7", 1],
+	},
+	{
+		name: "my-fpl.competition-season-path",
+		sql: MY_FPL_COMPETITION_SEASON_PATH_SQL,
+		values: [2026, 1, "7", 1],
+	},
+	{
+		name: "my-fpl.competition-setup-status",
+		sql: MY_FPL_COMPETITION_SETUP_STATUS_SQL,
+		values: [2026, 1],
+	},
+];
 
 export type MyFplReviewState = "PRESEASON" | "PENDING" | "READY" | "EMPTY" | "UNAVAILABLE";
 
@@ -1245,25 +1491,11 @@ const isSnapshotPublicationCache = (value: unknown): value is MyFplSnapshotPubli
 
 const loadReviewContext = async (context: GraphQLContext): Promise<LoadedReviewContext> => {
 	const snapshotPromise = dependenciesFor(context).getCoreEventSnapshot(context);
-	const lifecyclePromise = context.database.query<DbEventLifecycleRow>(
-		/* c8 ignore start -- SQL text is not executable application logic. */
-		`SELECT event_id, finished, data_checked, live_snapshot_finalized_at
-		 FROM fpl.events
-		 WHERE season_id = $1
-		 ORDER BY event_id`,
-		/* c8 ignore stop */
-		[context.currentSeason.seasonId]
-	);
+	const lifecyclePromise = context.database.query<DbEventLifecycleRow>(MY_FPL_EVENT_LIFECYCLE_SQL, [
+		context.currentSeason.seasonId,
+	]);
 	const publicationPromise = context.database.query<DbSnapshotPublicationRow>(
-		`SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
-		        published_at, kind, expected_entry_count, ready_entry_count,
-		        empty_entry_count, expected_tournament_count,
-		        ready_tournament_count, content_sha256, score_source,
-		        live_publication_id, live_revision, algorithm_version,
-		        source_min_checked_at, source_max_checked_at
-		 FROM competition.my_fpl_snapshot_publications
-		 WHERE season_id = $1 AND active
-		 ORDER BY event_id`,
+		MY_FPL_ACTIVE_PUBLICATIONS_SQL,
 		[context.currentSeason.seasonId]
 	);
 	const [snapshot, lifecycle, publicationResult] = await Promise.all([
@@ -1324,17 +1556,7 @@ const loadSnapshotPublication = async (
 	if (!pinned) return active ?? null;
 	if (active?.revision === pinned) return active;
 	const result = await context.database.query<DbSnapshotPublicationRow>(
-		`SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
-		        published_at, kind, expected_entry_count, ready_entry_count,
-		        empty_entry_count, expected_tournament_count,
-		        ready_tournament_count, content_sha256, score_source,
-		        live_publication_id, live_revision, algorithm_version,
-		        source_min_checked_at, source_max_checked_at
-		 FROM competition.my_fpl_snapshot_publications
-		 WHERE season_id = $1
-		   AND event_id = $2
-		   AND revision = $3::bigint
-		 LIMIT 1`,
+		MY_FPL_PUBLICATION_BY_EVENT_REVISION_SQL,
 		[context.currentSeason.seasonId, eventId, pinned]
 	);
 	const row = result.rows[0];
@@ -1353,17 +1575,7 @@ const loadSnapshotPublicationByRevision = async (
 		if (publication.revision === pinned) return publication;
 	}
 	const result = await context.database.query<DbSnapshotPublicationRow>(
-		`SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
-		        published_at, kind, expected_entry_count, ready_entry_count,
-		        empty_entry_count, expected_tournament_count,
-		        ready_tournament_count, content_sha256, score_source,
-		        live_publication_id, live_revision, algorithm_version,
-		        source_min_checked_at, source_max_checked_at
-		 FROM competition.my_fpl_snapshot_publications
-		 WHERE season_id = $1
-		   AND revision = $2::bigint
-		 ORDER BY event_id
-		 LIMIT 1`,
+		MY_FPL_PUBLICATION_BY_REVISION_SQL,
 		[context.currentSeason.seasonId, pinned]
 	);
 	const row = result.rows[0];
@@ -1479,31 +1691,7 @@ const loadSnapshotEntry = async (
 			entry_row_count: number;
 			aggregate_row_count: number;
 		}
-	>(
-		`SELECT
-		        (SELECT count(*)::integer
-		           FROM competition.my_fpl_snapshot_entries all_entries
-			          WHERE all_entries.season_id = publication.season_id
-			            AND all_entries.event_id = publication.event_id
-			            AND all_entries.revision = publication.revision) AS entry_row_count,
-			        (SELECT count(*)::integer
-			           FROM competition.my_fpl_snapshot_tournament_aggregates all_aggregates
-			          WHERE all_aggregates.season_id = publication.season_id
-			            AND all_aggregates.event_id = publication.event_id
-			            AND all_aggregates.revision = publication.revision) AS aggregate_row_count,
-		        snapshot.payload, snapshot.is_empty, snapshot.picks_count
-		 FROM competition.my_fpl_snapshot_publications publication
-		 JOIN competition.my_fpl_snapshot_entries snapshot
-		   ON snapshot.season_id = publication.season_id
-		  AND snapshot.event_id = publication.event_id
-		  AND snapshot.revision = publication.revision
-		  AND snapshot.entry_id = $2
-		 WHERE publication.season_id = $1
-		   AND publication.event_id = $3
-		   AND publication.revision = $4::bigint
-		 LIMIT 1`,
-		[context.currentSeason.seasonId, entryId, eventId, pinned]
-	);
+	>(MY_FPL_SNAPSHOT_ENTRY_SQL, [context.currentSeason.seasonId, entryId, eventId, pinned]);
 	const row = result.rows[0];
 	if (!row || row.picks_count < 0 || row.picks_count > 15) return null;
 	const payload = parseSnapshotEntryPayload(row.payload);
@@ -1817,38 +2005,17 @@ const loadTeamTransfers = async (
 	};
 };
 
-const CURRENT_TOURNAMENT_MEMBERSHIPS_SQL = `
-	SELECT tournament_id
-	FROM competition.tournament_entries
-	WHERE season_id = $1 AND entry_id = $2
-	UNION
-	SELECT tracked_tournament.tournament_id
-	FROM competition.entry_leagues entry_league
-	JOIN LATERAL (
-		SELECT tournament.tournament_id
-		FROM competition.tournaments tournament
-		WHERE tournament.season_id = entry_league.season_id
-		  AND tournament.league_id = entry_league.league_id
-		  AND tournament.league_type = entry_league.league_type
-		ORDER BY tournament.tournament_id
-		LIMIT 1
-	) tracked_tournament ON TRUE
-	WHERE entry_league.season_id = $1 AND entry_league.entry_id = $2
-`;
-
 const assertTournamentMembership = async (
 	context: GraphQLContext,
 	tournamentId: number,
 	entryId: number
 ): Promise<void> => {
 	if (context.authorizedTournamentMemberships?.has(tournamentId)) return;
-	const result = await context.database.query(
-		`SELECT 1
-		 FROM (${CURRENT_TOURNAMENT_MEMBERSHIPS_SQL}) membership
-		 WHERE tournament_id = $3
-		 LIMIT 1`,
-		[context.currentSeason.seasonId, entryId, tournamentId]
-	);
+	const result = await context.database.query(MY_FPL_ASSERT_TOURNAMENT_MEMBERSHIP_SQL, [
+		context.currentSeason.seasonId,
+		entryId,
+		tournamentId,
+	]);
 	if (result.rowCount !== 1) {
 		throw new GraphQLError("User is not a member of this tournament", {
 			extensions: { code: "FORBIDDEN" },
@@ -1865,9 +2032,7 @@ const filterCurrentTournamentMemberships = async (
 	tournaments: TournamentInfo[]
 ): Promise<TournamentInfo[]> => {
 	const result = await context.database.query<DbTournamentMembershipRow>(
-		`SELECT tournament_id
-		 FROM (${CURRENT_TOURNAMENT_MEMBERSHIPS_SQL}) membership
-		 ORDER BY tournament_id`,
+		MY_FPL_LIST_TOURNAMENT_MEMBERSHIPS_SQL,
 		[context.currentSeason.seasonId, entryId]
 	);
 	const currentTournamentIds = result.rows.map((row) => row.tournament_id);
@@ -2052,73 +2217,16 @@ const loadCompetitionBoardPrepared = async (
 		invalid_row_count: number;
 		rows: unknown;
 		viewer_row: unknown;
-	}>(
-		`WITH board AS MATERIALIZED (
-			   SELECT snapshot.entry_id,
-			          snapshot.payload || jsonb_build_object('entryName', entry.entry_name) AS payload
-			   FROM competition.my_fpl_snapshot_tournament_rows snapshot
-			   JOIN competition.entries entry
-			     ON entry.season_id = snapshot.season_id
-			    AND entry.entry_id = snapshot.entry_id
-			   WHERE snapshot.season_id = $1 AND snapshot.event_id = $2
-			     AND snapshot.revision = $3::bigint AND snapshot.tournament_id = $4
-			 ), filtered AS MATERIALIZED (
-			   SELECT * FROM board
-			   WHERE $5 = ''
-			      OR payload->>'entryName' ILIKE '%' || $5 || '%'
-			      OR payload->>'playerName' ILIKE '%' || $5 || '%'
-			 ), paged AS (
-			   SELECT * FROM filtered
-				   ORDER BY CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
-				                THEN CASE WHEN (payload->>'groupId')::numeric BETWEEN -2147483648 AND 2147483647
-				                          THEN (payload->>'groupId')::integer END END NULLS LAST,
-				            CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
-				                THEN CASE WHEN (payload->>'rank')::numeric BETWEEN -2147483648 AND 2147483647
-				                          THEN (payload->>'rank')::integer END END NULLS LAST,
-			            entry_id
-			   LIMIT $6 OFFSET $7
-			 )
-			 SELECT
-			   (SELECT count(*)::integer FROM board) AS field_size,
-			   (SELECT count(*)::integer FROM filtered) AS total_rows,
-				   COALESCE((SELECT jsonb_agg(payload || jsonb_build_object('__snapshotEntryId', entry_id)
-				                               ORDER BY CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
-				                                      THEN CASE WHEN (payload->>'groupId')::numeric BETWEEN -2147483648 AND 2147483647
-				                                                THEN (payload->>'groupId')::integer END END NULLS LAST,
-				                                      CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
-				                                      THEN CASE WHEN (payload->>'rank')::numeric BETWEEN -2147483648 AND 2147483647
-				                                                THEN (payload->>'rank')::integer END END NULLS LAST,
-				                                      entry_id) FROM paged), '[]'::jsonb) AS rows,
-				   (SELECT count(*)::integer FROM board
-				     WHERE ((payload->>'groupId') IS NOT NULL
-				             AND CASE WHEN payload->>'groupId' ~ '^-?[0-9]+$'
-				                      THEN (payload->>'groupId')::numeric NOT BETWEEN -2147483648 AND 2147483647
-				                      ELSE TRUE END)
-				        OR ((payload->>'rank') IS NOT NULL
-				             AND CASE WHEN payload->>'rank' ~ '^-?[0-9]+$'
-				                      THEN (payload->>'rank')::numeric NOT BETWEEN -2147483648 AND 2147483647
-				                      ELSE TRUE END)) AS invalid_row_count,
-				   (SELECT CASE WHEN aggregate.payload->>'entryCount' ~ '^[0-9]+$'
-				                   THEN (aggregate.payload->>'entryCount')::integer END
-			      FROM competition.my_fpl_snapshot_tournament_aggregates aggregate
-			     WHERE aggregate.season_id = $1
-			       AND aggregate.event_id = $2
-			       AND aggregate.revision = $3::bigint
-			       AND aggregate.tournament_id = $4
-			   ) AS expected_field_size,
-				   (SELECT payload || jsonb_build_object('__snapshotEntryId', entry_id)
-				      FROM board WHERE entry_id = $8 LIMIT 1) AS viewer_row`,
-		[
-			context.currentSeason.seasonId,
-			eventId,
-			revision,
-			tournamentId,
-			normalizedSearch,
-			pageSize,
-			offset,
-			entryId,
-		]
-	);
+	}>(MY_FPL_COMPETITION_BOARD_SQL, [
+		context.currentSeason.seasonId,
+		eventId,
+		revision,
+		tournamentId,
+		normalizedSearch,
+		pageSize,
+		offset,
+		entryId,
+	]);
 	const fieldSize = asInteger(result.rows[0]?.field_size) ?? 0;
 	const totalRows = asInteger(result.rows[0]?.total_rows) ?? 0;
 	const expectedFieldSize = asInteger(result.rows[0]?.expected_field_size);
@@ -2188,19 +2296,7 @@ const loadCompetitionAggregateSnapshot = async (
 		};
 	}
 	const result = await context.database.query<{ payload: unknown }>(
-		`SELECT aggregate.payload
-		 FROM competition.my_fpl_snapshot_tournament_aggregates aggregate
-		 WHERE aggregate.season_id = $1
-		   AND aggregate.event_id = $2
-		   AND aggregate.revision = $3::bigint
-		   AND aggregate.tournament_id = $4
-		   AND EXISTS (
-		     SELECT 1 FROM competition.my_fpl_snapshot_publications publication
-		     WHERE publication.season_id = aggregate.season_id
-		       AND publication.event_id = aggregate.event_id
-		       AND publication.revision = aggregate.revision
-		   )
-		 LIMIT 1`,
+		MY_FPL_COMPETITION_AGGREGATE_SQL,
 		[context.currentSeason.seasonId, eventId, revision, tournamentId]
 	);
 	const raw = result.rows[0]?.payload;
@@ -2475,10 +2571,7 @@ const loadCompetitionSeasonPath = async (
 	);
 	if (cached) return { ...cached, snapshotMeta: snapshot.publication };
 	const result = await context.database.query<{ payload: unknown }>(
-		`SELECT payload
-			 FROM competition.my_fpl_snapshot_tournament_aggregates
-			 WHERE season_id = $1 AND event_id = $2 AND revision = $3::bigint AND tournament_id = $4
-			 LIMIT 1`,
+		MY_FPL_COMPETITION_SEASON_PATH_SQL,
 		[context.currentSeason.seasonId, throughEventId, revision, tournamentId]
 	);
 	const raw = result.rows[0]?.payload;
@@ -2513,13 +2606,7 @@ const loadCompetitionSetupStatus = async (
 	await dependenciesFor(context).getCoreEventSnapshot(context);
 	await assertTournamentMembership(context, tournamentId, entryId);
 	const result = await context.database.query<DbSetupStatusRow>(
-		`SELECT setup_status::text, setup_phase::text, setup_completed_units,
-		        setup_total_units, setup_progress_updated_at, standings_ready_at,
-		        insights_ready_at,
-		        setup_warning_count
-		 FROM competition.tournaments
-		 WHERE season_id = $1 AND tournament_id = $2
-		 LIMIT 1`,
+		MY_FPL_COMPETITION_SETUP_STATUS_SQL,
 		[context.currentSeason.seasonId, tournamentId]
 	);
 	const row = result.rows[0];

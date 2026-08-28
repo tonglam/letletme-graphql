@@ -7,6 +7,8 @@ const compatibilityWorkflow = await Bun.file(
 	".github/workflows/data-main-compatibility.yml"
 ).text();
 const compatibilityProbe = await Bun.file("scripts/check-data-main-compatibility.ts").text();
+const directSqlContract = await Bun.file("scripts/lib/validate-direct-data-sql-contract.ts").text();
+const pinnedContractProbe = await Bun.file("scripts/check-database-contract.ts").text();
 const contractFixture = await Bun.file("tests/fixtures/database-contract.sql").text();
 
 describe("Data Platform contract pin", () => {
@@ -40,6 +42,14 @@ describe("Data Platform contract pin", () => {
 		expect(compatibilityWorkflow).toContain("bunx tsc --noEmit");
 		expect(compatibilityWorkflow).not.toContain("bun run docs:check");
 		expect(compatibilityProbe).toContain("validateDatabaseContract(database)");
+		expect(compatibilityProbe).toContain("validateDirectDataSqlContract(database)");
+		expect(compatibilityProbe).toContain("directSqlProbeCount");
+		expect(directSqlContract).toContain("BRIEFING_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("MY_FPL_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("PLAYER_STATE_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("TRENDS_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("EXPLAIN (FORMAT JSON, COSTS OFF)");
 		expect(compatibilityProbe).not.toContain("to_regclass");
 		expect(contractFixture).toContain("GRANT letletme_graphql_reader TO graphql_ci");
 		expect(contractFixture).not.toContain("REFRESH MATERIALIZED VIEW");
@@ -53,5 +63,6 @@ describe("Data Platform contract pin", () => {
 	test("uses the same consumer fixture for the pinned Data contract", () => {
 		expect(workflow).toContain("tests/fixtures/database-contract.sql");
 		expect(workflow).toContain("bun run contract:check");
+		expect(pinnedContractProbe).toContain("validateDirectDataSqlContract(database)");
 	});
 });

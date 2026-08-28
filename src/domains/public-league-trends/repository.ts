@@ -1,3 +1,4 @@
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
@@ -38,6 +39,20 @@ type AccessRow = {
 	snapshot_revision: string | Date;
 };
 
+export const PUBLIC_LEAGUE_SELECTION_SQL = `
+	SELECT publication.publication_id, publication.expected_entries, publication.revision,
+		publication.ownership_state, publication.captaincy_state, publication.transfers_state,
+		rows.element_id, rows.selected_count, rows.effective_selection_count,
+		rows.captain_count, rows.vice_captain_count, rows.transfer_in_count,
+		rows.transfer_out_count, rows.player_name, rows.player_position, rows.team_short_name
+	FROM reporting.tournament_selection_stat_publications publication
+	LEFT JOIN reporting.tournament_selection_stat_rows rows
+		ON rows.publication_id = publication.publication_id
+	WHERE publication.season_id = $1 AND publication.tournament_id = $2
+		AND publication.event_id = $3 AND publication.is_active
+	ORDER BY rows.selected_count DESC NULLS LAST, rows.element_id
+`;
+
 const publicationPosition = (value: number): string =>
 	value === 1 ? "GOALKEEPER" : value === 2 ? "DEFENDER" : value === 4 ? "FORWARD" : "MIDFIELDER";
 
@@ -50,24 +65,14 @@ async function readPublishedSelectionStats(
 	try {
 		// The publication table is not itself a public-access boundary. Check the
 		// catalog and tournament readiness before accepting any new publication.
-		const accessResult = await context.database.query(ACCESS_SQL, [
+		const accessResult = await context.database.query(PUBLIC_LEAGUE_ACCESS_SQL, [
 			context.currentSeason.seasonId,
 			tournamentId,
 			eventId,
 		]);
 		if (!accessResult.rows[0]) return null;
 		const result = await context.database.query<Record<string, unknown>>(
-			`SELECT publication.publication_id, publication.expected_entries, publication.revision,
-				publication.ownership_state, publication.captaincy_state, publication.transfers_state,
-				rows.element_id, rows.selected_count, rows.effective_selection_count,
-				rows.captain_count, rows.vice_captain_count, rows.transfer_in_count,
-				rows.transfer_out_count, rows.player_name, rows.player_position, rows.team_short_name
-			 FROM reporting.tournament_selection_stat_publications publication
-		 LEFT JOIN reporting.tournament_selection_stat_rows rows
-			 ON rows.publication_id = publication.publication_id
-			WHERE publication.season_id = $1 AND publication.tournament_id = $2
-			  AND publication.event_id = $3 AND publication.is_active
-			ORDER BY rows.selected_count DESC NULLS LAST, rows.element_id`,
+			PUBLIC_LEAGUE_SELECTION_SQL,
 			[context.currentSeason.seasonId, tournamentId, eventId]
 		);
 		const first = result.rows[0];
@@ -166,7 +171,7 @@ async function readPublishedSelectionStats(
 	}
 }
 
-const CATALOG_SQL = `
+export const PUBLIC_LEAGUE_CATALOG_SQL = `
 	SELECT
 		catalog.tournament_id,
 		catalog.display_name,
@@ -227,7 +232,7 @@ const CATALOG_SQL = `
 	ORDER BY catalog.sort_order ASC, catalog.display_name ASC, catalog.tournament_id ASC
 `;
 
-const ACCESS_SQL = `
+export const PUBLIC_LEAGUE_ACCESS_SQL = `
 	SELECT
 		catalog.updated_at AS catalog_revision,
 		GREATEST(catalog.updated_at, tournament.updated_at) AS snapshot_revision
@@ -251,6 +256,24 @@ const ACCESS_SQL = `
 		AND (publication.publication_id IS NOT NULL OR stats.event_id IS NOT NULL)
 	GROUP BY catalog.updated_at, tournament.updated_at
 `;
+
+export const PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "public-league-trends.catalog",
+		sql: PUBLIC_LEAGUE_CATALOG_SQL,
+		values: [2026],
+	},
+	{
+		name: "public-league-trends.access",
+		sql: PUBLIC_LEAGUE_ACCESS_SQL,
+		values: [2026, 1, 1],
+	},
+	{
+		name: "public-league-trends.selection",
+		sql: PUBLIC_LEAGUE_SELECTION_SQL,
+		values: [2026, 1, 1],
+	},
+];
 
 const iso = (value: string | Date): string => {
 	const date = value instanceof Date ? value : new Date(value);
@@ -297,7 +320,7 @@ export const createPublicLeagueTrendsRepository = (
 	readSelectionStats: ReadSelectionStats = getTournamentSelectionStatsReadModel
 ): PublicLeagueTrendsRepository => ({
 	async list(context): Promise<PublicLeagueTrend[]> {
-		const result = await (executor ?? context.database).query(CATALOG_SQL, [
+		const result = await (executor ?? context.database).query(PUBLIC_LEAGUE_CATALOG_SQL, [
 			context.currentSeason.seasonId,
 		]);
 		const rows = result.rows as CatalogRow[];
@@ -357,7 +380,7 @@ export const createPublicLeagueTrendsRepository = (
 			const published = await readPublishedSelectionStats(context, tournamentId, eventId, limit);
 			if (published !== undefined) return published;
 		}
-		const accessResult = await (executor ?? context.database).query(ACCESS_SQL, [
+		const accessResult = await (executor ?? context.database).query(PUBLIC_LEAGUE_ACCESS_SQL, [
 			context.currentSeason.seasonId,
 			tournamentId,
 			eventId,

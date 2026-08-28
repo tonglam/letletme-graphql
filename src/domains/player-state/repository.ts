@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import type { QueryExecutor as DatabaseQueryExecutor } from "../../infra/database";
@@ -212,7 +213,7 @@ type UnderstatProcessResult = {
 	historySeasons: string[];
 };
 
-const marketsSql = `
+export const PLAYER_STATE_MARKETS_SQL = `
 	/* player-state:markets-batch */
 	SELECT DISTINCT ON (element_id)
 		status,
@@ -224,14 +225,14 @@ const marketsSql = `
 	ORDER BY element_id, snapshot_date DESC, captured_at DESC
 `;
 
-const datasetRevisionSql = `
+export const PLAYER_STATE_DATASET_REVISION_SQL = `
 	/* player-state:dataset-revision */
 	SELECT revision, method_version, source_updated_at, refreshed_at
 	FROM reporting.player_state_dataset_metadata
 	WHERE dataset_key = 'player_state'
 `;
 
-const seasonRowsSql = `
+export const PLAYER_STATE_SEASON_ROWS_SQL = `
 	/* player-state:season-rows */
 	SELECT
 		season_id,
@@ -280,7 +281,7 @@ const seasonRowsSql = `
 	ORDER BY player_code, season_id DESC
 `;
 
-const currentPeersSql = `
+export const PLAYER_STATE_CURRENT_PEERS_SQL = `
 	/* player-state:current-peers */
 	SELECT
 		summary.element_id,
@@ -304,7 +305,7 @@ const currentPeersSql = `
 	ORDER BY summary.element_id
 `;
 
-const currentPeerGameweeksSql = `
+export const PLAYER_STATE_CURRENT_PEER_GAMEWEEKS_SQL = `
 	/* player-state:current-gameweeks */
 	SELECT
 		stats.element_id,
@@ -322,6 +323,34 @@ const currentPeerGameweeksSql = `
 		AND stats.event_id = ANY($3::integer[])
 	ORDER BY stats.event_id, stats.element_id
 `;
+
+export const PLAYER_STATE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "player-state.market-snapshots",
+		sql: PLAYER_STATE_MARKETS_SQL,
+		values: [2026, [1]],
+	},
+	{
+		name: "player-state.dataset-revision",
+		sql: PLAYER_STATE_DATASET_REVISION_SQL,
+		values: [],
+	},
+	{
+		name: "player-state.season-rows",
+		sql: PLAYER_STATE_SEASON_ROWS_SQL,
+		values: [[1]],
+	},
+	{
+		name: "player-state.current-peers",
+		sql: PLAYER_STATE_CURRENT_PEERS_SQL,
+		values: [2026, 1],
+	},
+	{
+		name: "player-state.current-gameweeks",
+		sql: PLAYER_STATE_CURRENT_PEER_GAMEWEEKS_SQL,
+		values: [2026, 1, [1]],
+	},
+];
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -555,7 +584,8 @@ const loadDatasetRevision = async (
 ): Promise<PlayerStateDatasetRevision> => {
 	const cached = datasetRevisionMemo;
 	if (cached && cached.expiresAt > Date.now()) return cached.value;
-	const row = (await executor.query<DatasetRevisionRow>(datasetRevisionSql, [])).rows[0];
+	const row = (await executor.query<DatasetRevisionRow>(PLAYER_STATE_DATASET_REVISION_SQL, []))
+		.rows[0];
 	if (!row) throw new Error("Player State dataset revision is unavailable");
 	const value = {
 		revision: String(row.revision),
@@ -618,10 +648,13 @@ const loadSharedProfileData = (
 	const loading = Promise.all([
 		codes.length === 0
 			? Promise.resolve({ rows: [] as PlayerStateSeasonRow[] })
-			: executor.query<PlayerStateSeasonRow>(seasonRowsSql, [codes]),
+			: executor.query<PlayerStateSeasonRow>(PLAYER_STATE_SEASON_ROWS_SQL, [codes]),
 		ids.length === 0
 			? Promise.resolve({ rows: [] as MarketRow[] })
-			: executor.query<MarketRow & { element_id: number }>(marketsSql, [seasonId, ids]),
+			: executor.query<MarketRow & { element_id: number }>(PLAYER_STATE_MARKETS_SQL, [
+					seasonId,
+					ids,
+				]),
 	]).then(([seasonRows, markets]) => {
 		const seasonRowsByCode = new Map<number, PlayerStateSeasonRow[]>();
 		for (const row of seasonRows.rows) {
@@ -664,10 +697,10 @@ const loadCurrentCohort = (
 	const loading = Promise.all([
 		!includeCurrent
 			? Promise.resolve({ rows: [] as CurrentPeerRow[] })
-			: executor.query<CurrentPeerRow>(currentPeersSql, [seasonId, position]),
+			: executor.query<CurrentPeerRow>(PLAYER_STATE_CURRENT_PEERS_SQL, [seasonId, position]),
 		eventIds.length === 0
 			? Promise.resolve({ rows: [] as CurrentPeerGameweekRow[] })
-			: executor.query<CurrentPeerGameweekRow>(currentPeerGameweeksSql, [
+			: executor.query<CurrentPeerGameweekRow>(PLAYER_STATE_CURRENT_PEER_GAMEWEEKS_SQL, [
 					seasonId,
 					position,
 					eventIds,

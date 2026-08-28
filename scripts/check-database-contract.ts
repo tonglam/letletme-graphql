@@ -1,10 +1,12 @@
 import { validateDatabaseContract } from "../src/infra/database-contract";
 import { database } from "../src/infra/database";
 import { closeDbPool } from "../src/infra/db-pool";
+import { validateDirectDataSqlContract } from "./lib/validate-direct-data-sql-contract";
 
 try {
 	const contract = await validateDatabaseContract(database);
-	console.log(JSON.stringify(contract));
+	const directSqlProbeCount = await validateDirectDataSqlContract(database);
+	console.log(JSON.stringify({ ...contract, directSqlProbeCount }));
 } finally {
 	await closeDbPool();
 }

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type Redis from "ioredis";
+import type { DataSqlContractProbe } from "../contracts/data-sql-contract";
 import type { QueryExecutor } from "./database";
 import { metrics } from "./metrics";
 
@@ -251,15 +252,38 @@ const toMetadata = (row: ActiveMetadata): ActiveMetadata => ({
 	locale_manifest: row.locale_manifest ?? {},
 });
 
+export const BRIEFING_ACTIVE_METADATA_SQL = `
+	SELECT publication_id, scope_key, revision, schema_version, season_code, target_event_id, event_name, deadline_time, state, servable, source_checked_at, published_at, valid_until, locale_manifest
+	FROM content.briefing_active_publication
+	WHERE scope_key = $1
+	ORDER BY revision DESC
+	LIMIT 1
+`;
+
+export const BRIEFING_EVENT_CONTEXT_SQL = `
+	SELECT EXISTS (
+		SELECT 1
+		FROM fpl.events event
+		JOIN fpl.seasons season ON season.season_id = event.season_id
+		WHERE season.is_current AND (event.is_current OR event.is_next)
+	) AS exists
+`;
+
+export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "briefing.active-metadata",
+		sql: BRIEFING_ACTIVE_METADATA_SQL,
+		values: ["week"],
+	},
+	{
+		name: "briefing.event-context",
+		sql: BRIEFING_EVENT_CONTEXT_SQL,
+		values: [],
+	},
+];
+
 async function activeMetadata(database: QueryExecutor): Promise<ActiveMetadata | null> {
-	const result = await database.query<ActiveMetadata>(
-		`SELECT publication_id, scope_key, revision, schema_version, season_code, target_event_id, event_name, deadline_time, state, servable, source_checked_at, published_at, valid_until, locale_manifest
-		 FROM content.briefing_active_publication
-		 WHERE scope_key = $1
-		 ORDER BY revision DESC
-		 LIMIT 1`,
-		["week"]
-	);
+	const result = await database.query<ActiveMetadata>(BRIEFING_ACTIVE_METADATA_SQL, ["week"]);
 	const row = result.rows[0];
 	return row ? toMetadata(row) : null;
 }
@@ -311,14 +335,7 @@ const unavailable = (state: BriefingState = "UNAVAILABLE"): BriefingWeekRead => 
 
 async function hasCurrentOrNextEvent(database: QueryExecutor): Promise<boolean> {
 	try {
-		const result = await database.query<{ exists: boolean }>(
-			`SELECT EXISTS (
-				SELECT 1
-				FROM fpl.events event
-				JOIN fpl.seasons season ON season.season_id = event.season_id
-				WHERE season.is_current AND (event.is_current OR event.is_next)
-			) AS exists`
-		);
+		const result = await database.query<{ exists: boolean }>(BRIEFING_EVENT_CONTEXT_SQL);
 		return result.rows[0]?.exists === true;
 	} catch {
 		// Content publication must fail closed as NOT_PUBLISHED when lifecycle

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { QueryExecutor } from "../../src/infra/database";
-import { DatabaseContractError, validateDatabaseContract } from "../../src/infra/database-contract";
+import {
+	DatabaseContractError,
+	GRAPHQL_CONTRACT_RELATIONS,
+	validateDatabaseContract,
+} from "../../src/infra/database-contract";
 
 type ContractOptions = Readonly<{
 	missingRelation?: string;
@@ -241,6 +245,14 @@ describe("GraphQL startup database contract", () => {
 		await expect(validateDatabaseContract(executor)).rejects.toThrow(
 			"invalid fpl.players relation boundary"
 		);
+	});
+
+	it("includes direct Player State and Trends relations in the executable boundary", () => {
+		expect(GRAPHQL_CONTRACT_RELATIONS).toContain("reporting.player_season_summary_rows");
+		expect(GRAPHQL_CONTRACT_RELATIONS).toContain(
+			"reporting.tournament_selection_stat_publications"
+		);
+		expect(GRAPHQL_CONTRACT_RELATIONS).toContain("reporting.tournament_selection_stat_rows");
 	});
 
 	it("requires read access to Web Mini Program auth relations", async () => {
