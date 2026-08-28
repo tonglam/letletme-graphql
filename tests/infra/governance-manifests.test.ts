@@ -9,10 +9,11 @@ import {
 	GRAPHQL_DOMAIN_MANIFEST,
 	validateGraphQLDomainManifest,
 } from "../../src/graphql/domain-manifest";
+import { schema } from "../../src/graphql/schema";
 
 describe("GraphQL domain manifest", () => {
 	test("points every declared schema and resolver module at an existing source file", async () => {
-		expect(validateGraphQLDomainManifest()).toEqual([]);
+		expect(validateGraphQLDomainManifest(schema)).toEqual([]);
 		const foundation = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "foundation");
 		expect(foundation).toMatchObject({
 			typeDefsModules: ["src/graphql/base-schema.ts", "src/graphql/data-completeness.ts"],
@@ -23,6 +24,14 @@ describe("GraphQL domain manifest", () => {
 				expect(await Bun.file(modulePath).exists()).toBe(true);
 			}
 		}
+	});
+
+	test("compares declared roots bidirectionally with the executable schema", () => {
+		const errors = validateGraphQLDomainManifest(
+			buildSchema("type Query { _empty: String invented: String }")
+		);
+		expect(errors).toContain("manifest root field is not executable: me");
+		expect(errors).toContain("unassigned executable root field: invented");
 	});
 
 	test("documents effective special floors and argument-sensitive authorization", () => {
@@ -38,6 +47,11 @@ describe("GraphQL domain manifest", () => {
 		]);
 		const players = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "players");
 		expect(players?.rateLimitBudget.playersForPicker).toBe(5);
+		expect(players?.rateLimitBudget.teams).toBe(5);
+		const market = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "market");
+		expect(market?.rateLimitBudget.marketSnapshotContext).toBe(5);
+		const miniProgram = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "mini-program");
+		expect(miniProgram?.rateLimitBudget.miniProgramNotice).toBe(5);
 		const entryLive = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "entry-live");
 		expect(entryLive?.rateLimitBudget.calcLivePointsForEntries).toBe(10);
 	});
@@ -143,5 +157,23 @@ describe("deprecation manifest validation", () => {
 				deprecatedSchema
 			)
 		).toEqual([]);
+	});
+
+	test("rejects a removed symbol reintroduced without a deprecation marker", () => {
+		const reintroducedSchema = buildSchema(`type Query { entry: String current: String }`);
+		const errors = validateSchemaDeprecationCoverage(
+			[
+				{
+					...valid,
+					id: "entry-hard-cut",
+					symbol: "Query.entry",
+					status: "removed",
+					removedAt: "2026-08-28",
+					removalTarget: undefined,
+				},
+			],
+			reintroducedSchema
+		);
+		expect(errors).toContain("entry-hard-cut: removed symbol is present in the executable schema");
 	});
 });

@@ -3,12 +3,13 @@ import {
 	GRAPHQL_DOMAIN_MANIFEST,
 	validateGraphQLDomainManifest,
 } from "../src/graphql/domain-manifest";
+import { schema } from "../src/graphql/schema";
 
 const documentationPath = new URL("../documentation/GRAPHQL_DOMAIN_MANIFEST.md", import.meta.url);
 const begin = "<!-- BEGIN GENERATED GRAPHQL DOMAIN MANIFEST -->";
 const end = "<!-- END GENERATED GRAPHQL DOMAIN MANIFEST -->";
 
-const errors = [...validateGraphQLDomainManifest()];
+const errors = [...validateGraphQLDomainManifest(schema)];
 for (const entry of GRAPHQL_DOMAIN_MANIFEST) {
 	for (const modulePath of [...entry.typeDefsModules, ...entry.resolversModules]) {
 		try {

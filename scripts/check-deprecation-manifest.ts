@@ -79,16 +79,19 @@ export const validateDeprecationManifest = (
 export const deprecatedSchemaUsageMetric = (symbol: string): string =>
 	`graphql_deprecated_schema_usages_total{symbol="${symbol}"}`;
 
-export const deprecatedSchemaSymbols = (schema: GraphQLSchema): readonly string[] => {
+const collectExecutableSchemaSymbols = (
+	schema: GraphQLSchema,
+	deprecatedOnly: boolean
+): readonly string[] => {
 	const symbols = new Set<string>();
 	for (const type of Object.values(schema.getTypeMap())) {
 		if (type.name.startsWith("__")) continue;
 		if (isObjectType(type) || isInterfaceType(type)) {
 			for (const field of Object.values(type.getFields())) {
 				const fieldSymbol = `${type.name}.${field.name}`;
-				if (field.deprecationReason !== undefined) symbols.add(fieldSymbol);
+				if (!deprecatedOnly || field.deprecationReason !== undefined) symbols.add(fieldSymbol);
 				for (const argument of field.args) {
-					if (argument.deprecationReason !== undefined) {
+					if (!deprecatedOnly || argument.deprecationReason !== undefined) {
 						symbols.add(`${fieldSymbol}(${argument.name}:)`);
 					}
 				}
@@ -97,18 +100,28 @@ export const deprecatedSchemaSymbols = (schema: GraphQLSchema): readonly string[
 		}
 		if (isInputObjectType(type)) {
 			for (const field of Object.values(type.getFields())) {
-				if (field.deprecationReason !== undefined) symbols.add(`${type.name}.${field.name}`);
+				if (!deprecatedOnly || field.deprecationReason !== undefined) {
+					symbols.add(`${type.name}.${field.name}`);
+				}
 			}
 			continue;
 		}
 		if (isEnumType(type)) {
 			for (const value of type.getValues()) {
-				if (value.deprecationReason !== undefined) symbols.add(`${type.name}.${value.name}`);
+				if (!deprecatedOnly || value.deprecationReason !== undefined) {
+					symbols.add(`${type.name}.${value.name}`);
+				}
 			}
 		}
 	}
 	return [...symbols].sort();
 };
+
+export const executableSchemaSymbols = (schema: GraphQLSchema): readonly string[] =>
+	collectExecutableSchemaSymbols(schema, false);
+
+export const deprecatedSchemaSymbols = (schema: GraphQLSchema): readonly string[] =>
+	collectExecutableSchemaSymbols(schema, true);
 
 export const validateSchemaDeprecationCoverage = (
 	value: unknown,
@@ -125,6 +138,7 @@ export const validateSchemaDeprecationCoverage = (
 		rowsBySymbol.set(row.symbol, rows);
 	}
 	const schemaSymbols = new Set(deprecatedSchemaSymbols(schema));
+	const executableSymbols = new Set(executableSchemaSymbols(schema));
 	for (const symbol of schemaSymbols) {
 		const rows = rowsBySymbol.get(symbol) ?? [];
 		if (rows.length === 0) {
@@ -144,6 +158,10 @@ export const validateSchemaDeprecationCoverage = (
 	}
 	for (const [symbol, rows] of rowsBySymbol) {
 		for (const row of rows) {
+			if (row.status === "removed" && executableSymbols.has(symbol)) {
+				const id = typeof row.id === "string" ? row.id : symbol;
+				errors.push(`${id}: removed symbol is present in the executable schema`);
+			}
 			if (row.status === "deprecated" && !schemaSymbols.has(symbol)) {
 				const id = typeof row.id === "string" ? row.id : symbol;
 				errors.push(`${id}: deprecated symbol is not in the executable schema`);

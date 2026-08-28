@@ -16,6 +16,7 @@ import {
 	visitWithTypeInfo,
 	type GraphQLArgument,
 	type GraphQLCompositeType,
+	type DirectiveNode,
 	type GraphQLInputType,
 	type GraphQLNamedType,
 	type GraphQLSchema,
@@ -422,6 +423,60 @@ const collectDeprecatedVariableSymbols = (
 	}
 };
 
+const executableSelectionIsIncluded = (
+	directives: readonly DirectiveNode[] | undefined,
+	variables: Record<string, unknown>
+): boolean => {
+	for (const directive of directives ?? []) {
+		if (directive.name.value !== "skip" && directive.name.value !== "include") continue;
+		const condition = directive.arguments?.find((argument) => argument.name.value === "if");
+		const value = condition ? valueFromASTUntyped(condition.value, variables) : undefined;
+		if (directive.name.value === "skip" && value === true) return false;
+		if (directive.name.value === "include" && value === false) return false;
+	}
+	return true;
+};
+
+const activeDeprecatedTelemetrySelections = (
+	operation: OperationDefinitionNode,
+	fragments: ReadonlyMap<string, FragmentDefinitionNode>,
+	reachableFragments: ReadonlySet<string>,
+	variables: Record<string, unknown>
+): { fragments: Set<string>; variables: Set<string> } => {
+	const active = new Set<string>();
+	const usedVariables = new Set<string>();
+	const analyzedFragments = new Set<string>();
+	const inspect = (selectionSet: SelectionSetNode): void => {
+		for (const selection of selectionSet.selections) {
+			if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
+			if (selection.kind === Kind.FIELD) {
+				for (const argument of selection.arguments ?? []) {
+					visit(argument.value, {
+						Variable(node) {
+							usedVariables.add(node.name.value);
+						},
+					});
+				}
+				if (selection.selectionSet) inspect(selection.selectionSet);
+				continue;
+			}
+			if (selection.kind === Kind.INLINE_FRAGMENT) {
+				inspect(selection.selectionSet);
+				continue;
+			}
+			const fragmentName = selection.name.value;
+			if (!reachableFragments.has(fragmentName) || analyzedFragments.has(fragmentName)) continue;
+			const fragment = fragments.get(fragmentName);
+			if (!fragment) continue;
+			analyzedFragments.add(fragmentName);
+			active.add(fragmentName);
+			inspect(fragment.selectionSet);
+		}
+	};
+	inspect(operation.selectionSet);
+	return { fragments: active, variables: usedVariables };
+};
+
 const selectedDeprecatedSymbols = (
 	document: ReturnType<typeof analyzeGraphQLOperation>["document"],
 	operation: OperationDefinitionNode,
@@ -430,13 +485,27 @@ const selectedDeprecatedSymbols = (
 	schema?: GraphQLSchema
 ): readonly string[] => {
 	if (!schema) return [];
+	const fragments = new Map(
+		document.definitions
+			.filter(
+				(definition): definition is FragmentDefinitionNode =>
+					definition.kind === Kind.FRAGMENT_DEFINITION
+			)
+			.map((fragment) => [fragment.name.value, fragment])
+	);
+	const activeSelections = activeDeprecatedTelemetrySelections(
+		operation,
+		fragments,
+		reachableFragments,
+		variables
+	);
 	const selectedDocument = {
 		...document,
 		definitions: document.definitions.filter(
 			(definition) =>
 				definition === operation ||
 				(definition.kind === Kind.FRAGMENT_DEFINITION &&
-					reachableFragments.has(definition.name.value))
+					activeSelections.fragments.has(definition.name.value))
 		),
 	};
 	const typeInfo = new TypeInfo(schema);
@@ -444,12 +513,31 @@ const selectedDeprecatedSymbols = (
 	visit(
 		selectedDocument,
 		visitWithTypeInfo(typeInfo, {
-			Field(node) {
-				const parentType = typeInfo.getParentType();
-				const field = typeInfo.getFieldDef();
-				if (parentType && field?.deprecationReason !== undefined) {
-					symbols.add(`${parentType.name}.${node.name.value}`);
-				}
+			VariableDefinition() {
+				// Variable defaults are accounted for from the effective value below.
+				// Walking them here would also count a deprecated default when the
+				// caller supplied a non-deprecated runtime value.
+				return false;
+			},
+			Field: {
+				enter(node) {
+					if (!executableSelectionIsIncluded(node.directives, variables)) return false;
+					const parentType = typeInfo.getParentType();
+					const field = typeInfo.getFieldDef();
+					if (parentType && field?.deprecationReason !== undefined) {
+						symbols.add(`${parentType.name}.${node.name.value}`);
+					}
+				},
+			},
+			InlineFragment: {
+				enter(node) {
+					if (!executableSelectionIsIncluded(node.directives, variables)) return false;
+				},
+			},
+			FragmentSpread: {
+				enter(node) {
+					if (!executableSelectionIsIncluded(node.directives, variables)) return false;
+				},
 			},
 			Argument(node) {
 				const parentType = typeInfo.getParentType();
@@ -480,10 +568,15 @@ const selectedDeprecatedSymbols = (
 	);
 	for (const definition of operation.variableDefinitions ?? []) {
 		const variableName = definition.variable.name.value;
-		if (!Object.hasOwn(variables, variableName)) continue;
+		if (!activeSelections.variables.has(variableName)) continue;
+		const effectiveValue = Object.hasOwn(variables, variableName)
+			? variables[variableName]
+			: definition.defaultValue
+				? valueFromASTUntyped(definition.defaultValue)
+				: undefined;
 		const inputType = typeFromAST(schema, definition.type);
 		if (inputType && isInputType(inputType)) {
-			collectDeprecatedVariableSymbols(variables[variableName], inputType, symbols);
+			collectDeprecatedVariableSymbols(effectiveValue, inputType, symbols);
 		}
 	}
 	return [...symbols].sort();
@@ -549,6 +642,33 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["myFplCompetitionSetupStatus", 5],
 ]);
 
+export const BOUNDED_PUBLIC_ROOT_RATE_LIMIT_FLOOR = 5;
+
+export const BOUNDED_PUBLIC_DESK_ROOTS: ReadonlySet<string> = new Set([
+	"playersForPicker",
+	"playerStatsBootstrap",
+	"marketAvailabilityPage",
+	"marketPulse",
+	"priceChangeBoard",
+	"priceChangeLiveBoard",
+	"marketOwnershipOverview",
+	"marketOwnershipDay",
+	"marketSnapshotContext",
+	"playerValues",
+	"eventFixtures",
+	"currentEventInfo",
+	"teams",
+	"miniProgramNotice",
+	"entryLookup",
+]);
+
+export const effectiveRootRateLimitFloor = (field: string): number =>
+	Math.max(
+		1,
+		ROOT_RATE_LIMIT_FLOORS.get(field) ?? 0,
+		BOUNDED_PUBLIC_DESK_ROOTS.has(field) ? BOUNDED_PUBLIC_ROOT_RATE_LIMIT_FLOOR : 0
+	);
+
 const heavyRootCost = (
 	rootFields: Array<{ name: string; uniqueEntryCount: number | null }>
 ): number =>
@@ -570,25 +690,8 @@ const accepted = ({
 	rootFields?: Array<{ name: string; uniqueEntryCount: number | null }>;
 	deprecatedSymbols?: readonly string[];
 }): GraphQLLimitResult => {
-	const boundedPublicDeskRoots = new Set([
-		"playersForPicker",
-		"playerStatsBootstrap",
-		"marketAvailabilityPage",
-		"marketPulse",
-		"priceChangeBoard",
-		"priceChangeLiveBoard",
-		"marketOwnershipOverview",
-		"marketOwnershipDay",
-		"marketSnapshotContext",
-		"playerValues",
-		"eventFixtures",
-		"currentEventInfo",
-		"teams",
-		"miniProgramNotice",
-		"entryLookup",
-	]);
 	const boundedPublicDeskRequest =
-		rootFields.length > 0 && rootFields.every((field) => boundedPublicDeskRoots.has(field.name));
+		rootFields.length > 0 && rootFields.every((field) => BOUNDED_PUBLIC_DESK_ROOTS.has(field.name));
 	const optimizedMyFplRoots = new Set([
 		"myFplTeamDesk",
 		"myFplTeamGameweek",
@@ -605,7 +708,10 @@ const accepted = ({
 		shape,
 		weightedComplexity,
 		rateLimitCostUnits: boundedPublicDeskRequest
-			? Math.max(5 * rootFields.length, heavyRootCost(rootFields))
+			? Math.max(
+					BOUNDED_PUBLIC_ROOT_RATE_LIMIT_FLOOR * rootFields.length,
+					heavyRootCost(rootFields)
+				)
 			: optimizedMyFplRequest
 				? heavyRootCost(rootFields)
 				: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),

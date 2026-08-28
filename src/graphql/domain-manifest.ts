@@ -1,9 +1,10 @@
+import type { GraphQLSchema } from "graphql";
 import {
 	ROOT_FIELD_CONDITIONAL_ACCESS,
 	ROOT_FIELD_POLICIES,
 	type RootFieldAccess,
 } from "./root-field-policy";
-import { ROOT_RATE_LIMIT_FLOORS } from "./limits";
+import { effectiveRootRateLimitFloor } from "./limits";
 
 export type GraphQLConditionalAuth = Readonly<{
 	field: string;
@@ -45,7 +46,7 @@ const domain = (
 		])
 	) as RootFieldAccess[];
 	const rateLimitBudget = Object.fromEntries(
-		rootFields.map((field) => [field, ROOT_RATE_LIMIT_FLOORS.get(field) ?? 1])
+		rootFields.map((field) => [field, effectiveRootRateLimitFloor(field)])
 	);
 	return {
 		name,
@@ -184,13 +185,31 @@ export const GRAPHQL_DOMAIN_MANIFEST: readonly GraphQLDomainManifestEntry[] = [
 	domain("team-selection", "team-selection", ["teamSelectionDesk"]),
 ] as const;
 
-export const validateGraphQLDomainManifest = (): readonly string[] => {
+const INTROSPECTION_ROOT_FIELDS = ["__typename", "__schema", "__type"] as const;
+
+export const executableSchemaRootFields = (schema: GraphQLSchema): ReadonlySet<string> => {
+	const fields = new Set<string>(INTROSPECTION_ROOT_FIELDS);
+	for (const rootType of [
+		schema.getQueryType(),
+		schema.getMutationType(),
+		schema.getSubscriptionType(),
+	]) {
+		if (!rootType) continue;
+		for (const field of Object.keys(rootType.getFields())) fields.add(field);
+	}
+	return fields;
+};
+
+export const validateGraphQLDomainManifest = (schema: GraphQLSchema): readonly string[] => {
 	const errors: string[] = [];
 	const seen = new Set<string>();
+	const executableFields = executableSchemaRootFields(schema);
 	for (const entry of GRAPHQL_DOMAIN_MANIFEST) {
 		for (const field of entry.rootFields) {
 			if (seen.has(field)) errors.push(`duplicate root field: ${field}`);
 			seen.add(field);
+			if (!executableFields.has(field))
+				errors.push(`manifest root field is not executable: ${field}`);
 			if (!ROOT_FIELD_POLICIES.has(field)) errors.push(`unclassified root field: ${field}`);
 			if (!(field in entry.rateLimitBudget)) errors.push(`missing rate-limit budget: ${field}`);
 			if (entry.rateLimitBudget[field] < 1) errors.push(`invalid rate-limit floor: ${field}`);
@@ -201,6 +220,9 @@ export const validateGraphQLDomainManifest = (): readonly string[] => {
 	}
 	for (const field of ROOT_FIELD_CONDITIONAL_ACCESS.keys()) {
 		if (!seen.has(field)) errors.push(`unassigned conditional auth field: ${field}`);
+	}
+	for (const field of executableFields) {
+		if (!seen.has(field)) errors.push(`unassigned executable root field: ${field}`);
 	}
 	return errors;
 };

@@ -49,6 +49,84 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("does not report deprecated selections excluded by skip/include directives", () => {
+		const directiveSchema = buildSchema(`
+			input LegacyInput {
+				old: String @deprecated(reason: "Use current")
+			}
+			type Query {
+				current: String
+				legacy(
+					oldArg: String @deprecated(reason: "Use currentArg")
+					input: LegacyInput
+				): String
+					@deprecated(reason: "Use current")
+			}
+		`);
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query Usage($showLegacy: Boolean! = false, $input: LegacyInput!) {
+						current
+						legacy(oldArg: "ignored", input: $input) @skip(if: true)
+						legacy @include(if: $showLegacy)
+						...SkippedLegacy @skip(if: true)
+						... on Query @include(if: false) { legacy }
+					}
+					fragment SkippedLegacy on Query { legacy }
+				`,
+				variables: { input: { old: "ignored" } },
+			},
+			directiveSchema
+		);
+		expect(result).toMatchObject({ ok: true, deprecatedSymbols: [] });
+	});
+
+	it("reports deprecated selections from executable directive branches", () => {
+		const directiveSchema = buildSchema(`
+			type Query {
+				legacy: String @deprecated(reason: "Use current")
+			}
+		`);
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query Usage($showLegacy: Boolean!) {
+						...ActiveLegacy @include(if: $showLegacy)
+					}
+					fragment ActiveLegacy on Query { legacy }
+				`,
+				variables: { showLegacy: true },
+			},
+			directiveSchema
+		);
+		expect(result).toMatchObject({ ok: true, deprecatedSymbols: ["Query.legacy"] });
+	});
+
+	it("bounds deprecated telemetry traversal for repeated fragment DAGs", () => {
+		const fragmentCount = 24;
+		const fragments = Array.from({ length: fragmentCount }, (_, index) =>
+			index === 0
+				? "fragment F0 on Query { legacy }"
+				: `fragment F${index} on Query { ...F${index - 1} ...F${index - 1} }`
+		).join("\n");
+		const deprecatedSchema = buildSchema(`
+				type Query {
+					legacy: String @deprecated(reason: "Use current")
+				}
+			`);
+		const result = validateGraphQLRequestLimits(
+			{ query: `query { ...F${fragmentCount - 1} }\n${fragments}` },
+			deprecatedSchema
+		);
+
+		expect(result).toEqual({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL document exceeds 200 AST nodes",
+		});
+	}, 1_000);
+
 	it("reports deprecated arguments and variable-backed input and enum symbols", () => {
 		const deprecatedKindsSchema = buildSchema(`
 			enum LegacyMode {
@@ -84,6 +162,25 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("accounts for only the effective deprecated variable value", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			type Query { example(mode: LegacyMode): String }
+		`);
+		const query = `query Usage($mode: LegacyMode = OLD) { example(mode: $mode) }`;
+
+		expect(
+			validateGraphQLRequestLimits({ query, variables: { mode: "NEW" } }, deprecatedKindsSchema)
+		).toMatchObject({ ok: true, deprecatedSymbols: [] });
+		expect(validateGraphQLRequestLimits({ query }, deprecatedKindsSchema)).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+		});
+	});
+
 	it("keeps live price-change roots public and bounded", () => {
 		for (const query of [
 			"query { priceChangeLiveCursor { revision state } }",
@@ -102,6 +199,20 @@ describe("GraphQL request limits", () => {
 			schema
 		);
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1 });
+	});
+
+	it("charges every bounded public root at its effective five-unit floor", () => {
+		for (const [query, rootField] of [
+			["query { marketSnapshotContext { revision } }", "marketSnapshotContext"],
+			["query { teams { id } }", "teams"],
+			["query { miniProgramNotice }", "miniProgramNotice"],
+		] as const) {
+			expect(validateGraphQLRequestLimits({ query }, schema)).toMatchObject({
+				ok: true,
+				rootFields: [rootField],
+				rateLimitCostUnits: 5,
+			});
+		}
 	});
 
 	it("identifies a fixture-only read before resolver execution", () => {

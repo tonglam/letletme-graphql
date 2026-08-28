@@ -29,7 +29,9 @@ const sourceFilesUnder = (directory: string): string[] => {
 	return files;
 };
 
-const moduleSpecifiers = (sourceFile: ts.SourceFile): Array<{ value: string; line: number }> => {
+export const moduleSpecifiers = (
+	sourceFile: ts.SourceFile
+): Array<{ value: string; line: number }> => {
 	const modules: Array<{ value: string; line: number }> = [];
 	const add = (node: ts.Node, value: string): void => {
 		if (value.startsWith(".")) {
@@ -39,13 +41,17 @@ const moduleSpecifiers = (sourceFile: ts.SourceFile): Array<{ value: string; lin
 	};
 	ts.forEachChild(sourceFile, function visit(node): void {
 		if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
-			if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+			if (node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) {
 				add(node.moduleSpecifier, node.moduleSpecifier.text);
 			}
 		}
 		if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
 			const expression = node.moduleReference.expression;
-			if (expression && ts.isStringLiteral(expression)) add(expression, expression.text);
+			if (expression && ts.isStringLiteralLike(expression)) add(expression, expression.text);
+		}
+		if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+			const literal = node.argument.literal;
+			if (ts.isStringLiteralLike(literal)) add(literal, literal.text);
 		}
 		if (ts.isCallExpression(node)) {
 			const expression = node.expression;
@@ -54,7 +60,7 @@ const moduleSpecifiers = (sourceFile: ts.SourceFile): Array<{ value: string; lin
 				(expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments.length === 1)
 			) {
 				const argument = node.arguments[0];
-				if (argument && ts.isStringLiteral(argument)) add(argument, argument.text);
+				if (argument && ts.isStringLiteralLike(argument)) add(argument, argument.text);
 			}
 		}
 		ts.forEachChild(node, visit);
