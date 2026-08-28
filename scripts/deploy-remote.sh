@@ -361,14 +361,26 @@ old_slot="$active_slot"
 switched=false
 old_public_health=""
 old_public_revision=""
+old_local_revision=""
+old_active_container=$(docker ps --all \
+  --filter "label=com.docker.compose.project=$active_project" \
+  --filter "label=com.docker.compose.service=graphql" \
+  --format '{{.ID}}' | head -n 1)
+if [ -n "$old_active_container" ]; then
+  old_local_revision=$(docker inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$old_active_container" || true)
+fi
 if old_public_health=$(curl --fail --silent --show-error --max-time 5 "$PUBLIC_GRAPHQL_HEALTH_URL"); then
   old_public_revision=$(jq -r \
     'select(.status == "ok" and (.revision | type == "string") and (.revision | length > 0)) | .revision' \
     <<<"$old_public_health" || true)
 fi
 if [ -z "$old_public_revision" ]; then
-  echo "current public GraphQL health identity could not be established" >&2
-  exit 1
+  old_public_revision="$old_local_revision"
+fi
+if [ -z "$old_public_revision" ]; then
+  echo "previous public GraphQL identity unavailable; cutover will require the new revision" >&2
 fi
 rollback_switch() {
   if [ "$switched" != true ]; then return 0; fi
@@ -424,7 +436,7 @@ for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS"); do
     public_health_ready=true
     break
   fi
-  if ! jq -e --arg revision "$old_public_revision" \
+  if [ -z "$old_public_revision" ] || ! jq -e --arg revision "$old_public_revision" \
     '.status == "ok" and .revision == $revision' <<<"$public_health" >/dev/null; then
     echo "public GraphQL health identity is neither the new nor previous revision" >&2
     if ! rollback_switch; then

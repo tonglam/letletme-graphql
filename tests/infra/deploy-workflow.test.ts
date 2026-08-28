@@ -125,10 +125,11 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("Public GraphQL contract failed");
 		expect(deployScript).toContain("PUBLIC_HEALTH_ATTEMPTS=${PUBLIC_HEALTH_ATTEMPTS:-15}");
 		expect(deployScript).toContain("public_health_ready=false");
-		expect(deployScript).toContain('old_public_revision=""');
+		expect(deployScript).toContain('old_local_revision=""');
 		expect(deployScript).toContain(
-			"current public GraphQL health identity could not be established"
+			"previous public GraphQL identity unavailable; cutover will require the new revision"
 		);
+		expect(deployScript).toContain('old_public_revision="$old_local_revision"');
 		expect(deployScript).toContain('for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS")');
 		expect(deployScript).toContain('sleep "$PUBLIC_HEALTH_DELAY_SECONDS"');
 		expect(deployScript).toContain(
