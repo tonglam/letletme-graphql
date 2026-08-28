@@ -15,7 +15,8 @@ export const playerStatsTypeDefs = /* GraphQL */ `
 		price: Float!
 		startPrice: Float!
 		statsContext: PlayerStatsContext!
-		availability: PlayerAvailability
+		injuryAvailability: PlayerAvailability
+		dataAvailability: PlayerDetailDataAvailability!
 		totalPoints: Int
 		selectedByPercent: Float
 		form: Float

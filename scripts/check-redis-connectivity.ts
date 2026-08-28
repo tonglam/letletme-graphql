@@ -1,4 +1,5 @@
 import type Redis from "ioredis";
+import { env } from "../src/infra/env";
 import { connectRedis, getRateLimitRedis, getRedis } from "../src/infra/redis";
 
 const timeoutMs = 15_000;
@@ -64,10 +65,7 @@ try {
 				name,
 				endpoint: name === "primary" ? "primary" : "rate-limit",
 			})),
-			// connectRedis has already authenticated both clients and compared
-			// their resolved Redis server identities. A successful probe therefore
-			// proves isolation even when the configured URLs use aliases.
-			isolated: true,
+			isolated: env.REDIS_ENDPOINT_IDENTITY !== env.RATE_LIMIT_REDIS_ENDPOINT_IDENTITY,
 		})
 	);
 } catch (error) {

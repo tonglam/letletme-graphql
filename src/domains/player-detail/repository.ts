@@ -1,4 +1,5 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import {
 	getCoreEventSnapshot,
@@ -7,9 +8,10 @@ import {
 } from "../../infra/data-snapshot";
 import { getCurrentEvent, type CurrentEventCache } from "../../infra/event";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
+import { metrics } from "../../infra/metrics";
 import { playersRepository } from "../players/repository";
 import {
-	getPlayerSeasonStatsForContext,
+	getPlayerSeasonStatsLoadForContext,
 	resolvePlayerStatsContext,
 	type PlayerSeasonStatsAtEvent,
 	type PlayerStatsContext,
@@ -19,6 +21,10 @@ const MARKET_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
 const RECENT_GAMEWEEK_LIMIT = 5;
 const UPCOMING_GAMEWEEK_LIMIT = 8;
 const NULL_SENTINEL = "__pd:null__";
+// Bump the namespace for the hard-cut availability contract. Values written
+// by the previous runtime did not carry enough provenance to distinguish a
+// mutable recent-gameweek read from an authoritative publication.
+const PLAYER_DETAIL_CACHE_VERSION = "v2";
 
 export type PlayerAvailability = {
 	status: string;
@@ -29,6 +35,25 @@ export type PlayerAvailability = {
 	chanceOfPlayingThisRound: number | null;
 	chanceOfPlayingNextRound: number | null;
 	stale: boolean;
+};
+
+export type PlayerDataState =
+	"READY" | "EMPTY" | "STALE" | "FALLBACK" | "UNAVAILABLE" | "NOT_APPLICABLE";
+
+export type PlayerDataSectionAvailability = {
+	state: PlayerDataState;
+	reasonCode: string | null;
+	revision: string | null;
+	sourceCheckedAt: string | null;
+};
+
+export type PlayerDetailDataAvailability = {
+	isFullyAuthoritative: boolean;
+	seasonStats: PlayerDataSectionAvailability;
+	market: PlayerDataSectionAvailability;
+	historicalTeam: PlayerDataSectionAvailability;
+	fixtures: PlayerDataSectionAvailability;
+	recentGameweeks: PlayerDataSectionAvailability;
 };
 
 export type PlayerRecentOpponent = {
@@ -72,7 +97,8 @@ export type PlayerDetail = {
 	price: number;
 	startPrice: number;
 	statsContext: PlayerStatsContext;
-	availability: PlayerAvailability | null;
+	injuryAvailability: PlayerAvailability | null;
+	dataAvailability: PlayerDetailDataAvailability;
 	totalPoints: number | null;
 	selectedByPercent: number | null;
 	form: number | null;
@@ -148,16 +174,89 @@ type ResolvedEventState = {
 	finished: boolean;
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
+type SectionResult<T> = {
+	value: T;
+	availability: PlayerDataSectionAvailability;
+};
+
+const section = <T>(
+	value: T,
+	state: PlayerDataState,
+	reasonCode: string | null = null,
+	revision: string | null = null,
+	sourceCheckedAt: string | null = null
+): SectionResult<T> => ({
+	value,
+	availability: { state, reasonCode, revision, sourceCheckedAt },
+});
+
+const isAuthoritativeSection = (value: PlayerDataSectionAvailability): boolean =>
+	value.state === "READY" || value.state === "EMPTY" || value.state === "NOT_APPLICABLE";
+
+const recordDataAvailability = (detail: PlayerDetail): void => {
+	for (const [sectionName, sectionAvailability] of Object.entries(detail.dataAvailability)) {
+		if (sectionName === "isFullyAuthoritative") continue;
+		metrics.playerDetailDataAvailability
+			.labels(sectionName, (sectionAvailability as PlayerDataSectionAvailability).state)
+			.inc();
+	}
+};
+
+const PLAYER_DATA_STATES: ReadonlySet<PlayerDataState> = new Set([
+	"READY",
+	"EMPTY",
+	"STALE",
+	"FALLBACK",
+	"UNAVAILABLE",
+	"NOT_APPLICABLE",
+]);
+
+const isSectionAvailability = (value: unknown): value is PlayerDataSectionAvailability =>
+	isRecord(value) &&
+	typeof value.state === "string" &&
+	PLAYER_DATA_STATES.has(value.state as PlayerDataState) &&
+	(value.reasonCode === null || typeof value.reasonCode === "string") &&
+	(value.revision === null || typeof value.revision === "string") &&
+	(value.sourceCheckedAt === null || typeof value.sourceCheckedAt === "string");
+
+const isDataAvailability = (value: unknown): value is PlayerDetailDataAvailability =>
+	isRecord(value) &&
+	typeof value.isFullyAuthoritative === "boolean" &&
+	(() => {
+		const sections = [
+			value.seasonStats,
+			value.market,
+			value.historicalTeam,
+			value.fixtures,
+			value.recentGameweeks,
+		];
+		if (!sections.every(isSectionAvailability)) return false;
+		return (
+			value.isFullyAuthoritative ===
+			sections.every((item) => isAuthoritativeSection(item as PlayerDataSectionAvailability))
+		);
+	})();
 
 const isPlayerDetail = (value: unknown): value is PlayerDetail =>
 	isRecord(value) &&
 	typeof value.id === "number" &&
 	typeof value.webName === "string" &&
 	isRecord(value.statsContext) &&
+	isDataAvailability(value.dataAvailability) &&
+	!Object.prototype.hasOwnProperty.call(value, "availability") &&
 	Array.isArray(value.recentGameweeks) &&
 	Array.isArray(value.fixtures);
+
+const hasSameStatsAuthority = (cached: PlayerStatsContext, current: PlayerStatsContext): boolean =>
+	cached.scope === current.scope &&
+	cached.season === current.season &&
+	cached.asOfEventId === current.asOfEventId &&
+	cached.status === current.status &&
+	cached.revision === current.revision &&
+	cached.sourceCheckedAt === current.sourceCheckedAt &&
+	cached.publishedAt === current.publishedAt &&
+	cached.rowCount === current.rowCount &&
+	cached.expectedRowCount === current.expectedRowCount;
 
 const asNullableNumber = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -194,8 +293,8 @@ const elementTypeToName = (type: number): string => {
 	}
 };
 
-const playerDetailCacheKey = (playerId: number, eventId: number): string =>
-	`player-detail:${playerId}:${eventId}`;
+export const playerDetailCacheKey = (playerId: number, eventId: number): string =>
+	`player-detail:${PLAYER_DETAIL_CACHE_VERSION}:${playerId}:${eventId}`;
 
 const playerDetailCacheReadMemo = new WeakMap<
 	object,
@@ -216,12 +315,24 @@ const requestPlayerDetailCacheMemo = (
 
 const parsePlayerDetailCacheValue = (
 	raw: string | null
-): PlayerDetail | null | undefined | "malformed" => {
+): PlayerDetail | null | undefined | "malformed" | "expired" => {
 	if (raw === null) return undefined;
 	if (raw === NULL_SENTINEL) return null;
 	try {
 		const parsed: unknown = JSON.parse(raw);
-		return isPlayerDetail(parsed) ? parsed : "malformed";
+		if (!isPlayerDetail(parsed)) return "malformed";
+		// Non-authoritative results are request-local only. Evict any value left
+		// by a pre-hard-cut runtime instead of letting degraded evidence regain
+		// authority through a shared-cache hit.
+		if (!parsed.dataAvailability.isFullyAuthoritative) return "malformed";
+		const market = parsed.dataAvailability.market;
+		if (market.state === "READY") {
+			const checkedAt = market.sourceCheckedAt ? Date.parse(market.sourceCheckedAt) : Number.NaN;
+			if (!Number.isFinite(checkedAt) || Date.now() - checkedAt > MARKET_STALE_AFTER_MS) {
+				return "expired";
+			}
+		}
+		return parsed;
 	} catch {
 		return "malformed";
 	}
@@ -242,11 +353,14 @@ async function readPlayerDetailCache(
 		return undefined;
 	}
 	const parsed = parsePlayerDetailCacheValue(cached);
-	if (parsed !== "malformed") {
+	if (parsed !== "malformed" && parsed !== "expired") {
 		memo.set(key, parsed);
 		return parsed;
 	}
-	context.logger.warn({ key }, "Malformed player-detail cache");
+	context.logger.warn(
+		{ key },
+		parsed === "expired" ? "Expired player-detail cache" : "Malformed player-detail cache"
+	);
 	try {
 		await context.redis.del(key);
 	} catch (error) {
@@ -271,19 +385,19 @@ async function readPlayerDetailCaches(context: GraphQLContext, keys: string[]): 
 		for (const key of missingKeys) memo.set(key, undefined);
 		return;
 	}
-	const malformedKeys: string[] = [];
+	const invalidKeys: string[] = [];
 	for (let index = 0; index < missingKeys.length; index += 1) {
 		const key = missingKeys[index]!;
 		const parsed = parsePlayerDetailCacheValue(values[index] ?? null);
-		if (parsed === "malformed") {
+		if (parsed === "malformed" || parsed === "expired") {
 			memo.set(key, undefined);
-			malformedKeys.push(key);
+			invalidKeys.push(key);
 		} else {
 			memo.set(key, parsed);
 		}
 	}
 	await Promise.all(
-		malformedKeys.map(async (key) => {
+		invalidKeys.map(async (key) => {
 			try {
 				await context.redis.del(key);
 			} catch (error) {
@@ -296,7 +410,7 @@ async function readPlayerDetailCaches(context: GraphQLContext, keys: string[]): 
 async function loadLatestMarketSnapshot(
 	context: GraphQLContext,
 	playerId: number
-): Promise<LatestMarketSnapshot | null> {
+): Promise<SectionResult<LatestMarketSnapshot | null>> {
 	try {
 		const { data, error } = await context.data
 			.read("fpl.player_market_snapshots")
@@ -309,17 +423,22 @@ async function loadLatestMarketSnapshot(
 			.limit(1);
 		if (error) {
 			context.logger.warn({ err: error, playerId }, "Failed to load latest player market snapshot");
-			return null;
+			return section(null, "UNAVAILABLE", "market_read_failed");
 		}
 		const row = data?.[0] as MarketSnapshotRow | undefined;
-		if (!row) return null;
+		// An FPL player should have a market row in an authoritative market
+		// publication. Treating a missing row as EMPTY would allow core fallback
+		// values to enter the shared cache as if the section were complete.
+		if (!row) return section(null, "FALLBACK", "market_snapshot_missing");
 
 		const capturedAt = toIsoTimestamp(row.captured_at);
 		const observedDate = toCalendarDate(row.snapshot_date);
 		const selectedByPercent = asNullableNumber(row.selected_by_percent);
-		if (capturedAt === null || observedDate === null || selectedByPercent === null) return null;
+		if (capturedAt === null || observedDate === null || selectedByPercent === null) {
+			return section(null, "UNAVAILABLE", "market_snapshot_malformed");
+		}
 
-		return {
+		const value: LatestMarketSnapshot = {
 			selectedByPercent,
 			seasonTransfersIn: row.transfers_in,
 			seasonTransfersOut: row.transfers_out,
@@ -336,9 +455,16 @@ async function loadLatestMarketSnapshot(
 				stale: Math.max(Date.now() - Date.parse(capturedAt), 0) > MARKET_STALE_AFTER_MS,
 			},
 		};
+		return section(
+			value,
+			value.availability.stale ? "STALE" : "READY",
+			value.availability.stale ? "market_snapshot_stale" : null,
+			`${observedDate}:${capturedAt}`,
+			value.availability.capturedAt
+		);
 	} catch (error) {
 		context.logger.warn({ err: error, playerId }, "Failed to load latest player market snapshot");
-		return null;
+		return section(null, "UNAVAILABLE", "market_read_failed");
 	}
 }
 
@@ -358,8 +484,9 @@ async function loadHistoricalTeamId(
 	playerCode: number,
 	eventId: number | null,
 	fallbackTeamId: number
-): Promise<number> {
-	if (eventId === null) return fallbackTeamId;
+): Promise<SectionResult<number>> {
+	if (eventId === null)
+		return section(fallbackTeamId, "NOT_APPLICABLE", "historical_event_missing");
 	try {
 		const { data, error } = await context.data
 			.read("fpl.player_fixture_stats")
@@ -375,16 +502,18 @@ async function loadHistoricalTeamId(
 				{ err: error, playerCode, eventId },
 				"Failed to load historical player team"
 			);
-			return fallbackTeamId;
+			return section(fallbackTeamId, "FALLBACK", "historical_team_read_failed");
 		}
 		const teamId = asNullableNumber((data?.[0] as { team_id?: unknown } | undefined)?.team_id);
-		return teamId !== null && teamId > 0 ? teamId : fallbackTeamId;
+		return teamId !== null && teamId > 0
+			? section(teamId, "READY")
+			: section(fallbackTeamId, "FALLBACK", "historical_team_missing");
 	} catch (error) {
 		context.logger.warn(
 			{ err: error, playerCode, eventId },
 			"Failed to load historical player team"
 		);
-		return fallbackTeamId;
+		return section(fallbackTeamId, "FALLBACK", "historical_team_read_failed");
 	}
 }
 
@@ -393,8 +522,8 @@ async function loadHistoricalTeamIds(
 	playerCode: number,
 	eventIds: number[],
 	fallbackTeamId: number
-): Promise<Map<number, number>> {
-	if (eventIds.length === 0) return new Map();
+): Promise<{ values: Map<number, number>; complete: boolean }> {
+	if (eventIds.length === 0) return { values: new Map(), complete: true };
 	try {
 		const result = await context.database.query<{ event_id: number; team_id: number }>(
 			`SELECT DISTINCT ON (event_id) event_id, team_id
@@ -405,18 +534,22 @@ async function loadHistoricalTeamIds(
 			 ORDER BY event_id, fixture_id DESC`,
 			[context.currentSeason.seasonId, playerCode, eventIds]
 		);
-		return new Map(
+		const values = new Map(
 			eventIds.map((eventId) => {
 				const row = result.rows.find((candidate) => candidate.event_id === eventId);
 				return [eventId, row?.team_id ?? fallbackTeamId] as const;
 			})
 		);
+		return { values, complete: result.rows.length === new Set(eventIds).size };
 	} catch (error) {
 		context.logger.warn(
 			{ err: error, playerCode, eventIds },
 			"Failed to batch historical player teams"
 		);
-		return new Map(eventIds.map((eventId) => [eventId, fallbackTeamId] as const));
+		return {
+			values: new Map(eventIds.map((eventId) => [eventId, fallbackTeamId] as const)),
+			complete: false,
+		};
 	}
 }
 
@@ -431,23 +564,41 @@ async function loadTeamFixtureDesk(
 	context: GraphQLContext,
 	teamId: number,
 	fromEventId: number
-): Promise<{ teamShortName: string; fixtures: PlayerFixture[] }> {
+): Promise<
+	SectionResult<{
+		teamShortName: string;
+		fixtures: PlayerFixture[];
+	}>
+> {
 	try {
 		const [fixtureSnapshot, eventSnapshot] = await Promise.all([
 			getCoreFixtureSnapshot(context),
 			getCoreEventSnapshot(context),
 		]);
 		const teams = new Map(fixtureSnapshot.teams.map((team) => [team.id, team] as const));
+		const team = teams.get(teamId);
+		if (!team) {
+			return section(
+				{ teamShortName: "", fixtures: [] },
+				"UNAVAILABLE",
+				"fixture_team_missing",
+				fixtureSnapshot.revision,
+				fixtureSnapshot.sourceCheckedAt
+			);
+		}
+		let missingOpponentIdentity = false;
 		const mapped = fixtureSnapshot.fixtures
 			.filter((fixture) => fixture.teamHId === teamId || fixture.teamAId === teamId)
 			.filter((fixture) => fixture.eventId !== null)
 			.map((fixture): PlayerFixture => {
 				const wasHome = fixture.teamHId === teamId;
 				const opponentId = wasHome ? fixture.teamAId : fixture.teamHId;
+				const opponent = teams.get(opponentId);
+				if (!opponent) missingOpponentIdentity = true;
 				return {
 					id: fixture.id,
 					event: fixture.eventId!,
-					againstTeamShortName: teams.get(opponentId)?.shortName ?? "",
+					againstTeamShortName: opponent?.shortName ?? "",
 					wasHome,
 					finished: fixture.finished,
 					kickoffTime: fixture.kickoffTime,
@@ -492,10 +643,16 @@ async function loadTeamFixtureDesk(
 				(a.kickoffTime ?? "9999").localeCompare(b.kickoffTime ?? "9999") ||
 				a.id - b.id
 		);
-		return { teamShortName: teams.get(teamId)?.shortName ?? "", fixtures: mapped };
+		return section(
+			{ teamShortName: team.shortName, fixtures: mapped },
+			missingOpponentIdentity ? "FALLBACK" : mapped.length === 0 ? "EMPTY" : "READY",
+			missingOpponentIdentity ? "fixture_opponent_missing" : null,
+			fixtureSnapshot.revision,
+			fixtureSnapshot.sourceCheckedAt
+		);
 	} catch (error) {
 		context.logger.warn({ err: error, teamId }, "Failed to load player fixture desk");
-		return { teamShortName: "", fixtures: [] };
+		return section({ teamShortName: "", fixtures: [] }, "UNAVAILABLE", "fixtures_read_failed");
 	}
 }
 
@@ -518,16 +675,66 @@ async function loadRecentGameweeks(
 	currentEvent: CurrentEventCache | null,
 	resolvedEvent: ResolvedEventState | null,
 	fallbackTeamId: number,
-	knownFixtures: PlayerFixture[]
-): Promise<PlayerRecentGameweek[]> {
-	if (
-		statsContext.scope !== "CURRENT_SEASON" ||
-		statsContext.status !== "AVAILABLE" ||
-		statsContext.asOfEventId === null
-	)
-		return [];
+	knownFixtures: PlayerFixture[],
+	knownFixturesAvailability: PlayerDataSectionAvailability
+): Promise<SectionResult<PlayerRecentGameweek[]>> {
+	if (statsContext.scope === "UNAVAILABLE") {
+		return statsContext.status === "PRESEASON"
+			? section(
+					[],
+					"EMPTY",
+					"recent_stats_preseason",
+					statsContext.revision,
+					statsContext.sourceCheckedAt
+				)
+			: section(
+					[],
+					"UNAVAILABLE",
+					"recent_stats_unavailable",
+					statsContext.revision,
+					statsContext.sourceCheckedAt
+				);
+	}
+	if (statsContext.scope === "PREVIOUS_SEASON")
+		return section(
+			[],
+			"NOT_APPLICABLE",
+			"recent_stats_previous_season",
+			statsContext.revision,
+			statsContext.sourceCheckedAt
+		);
+	if (statsContext.status !== "AVAILABLE") {
+		const state: PlayerDataState =
+			statsContext.status === "PRESEASON"
+				? "EMPTY"
+				: statsContext.status === "STALE"
+					? "STALE"
+					: statsContext.status === "INCOMPLETE"
+						? "FALLBACK"
+						: "UNAVAILABLE";
+		return section(
+			[],
+			state,
+			`recent_stats_${statsContext.status.toLowerCase()}`,
+			statsContext.revision,
+			statsContext.sourceCheckedAt
+		);
+	}
+	if (statsContext.asOfEventId === null) {
+		return section(
+			[],
+			"EMPTY",
+			"recent_event_missing",
+			statsContext.revision,
+			statsContext.sourceCheckedAt
+		);
+	}
 	try {
 		const { data, error } = await context.data
+			// The mutable player_gameweek_stats table has no publication revision.
+			// Keep its rows request-local and mark the section non-authoritative
+			// below; it must never be labelled with statsContext.revision or enter
+			// the shared player-detail cache.
 			.read("fpl.player_gameweek_stats")
 			.select(
 				"event_id, total_points, minutes, starts, goals_scored, assists, clean_sheets, saves, bonus, bps"
@@ -538,31 +745,47 @@ async function loadRecentGameweeks(
 			.limit(RECENT_GAMEWEEK_LIMIT);
 		if (error) {
 			context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
-			return [];
+			return section([], "UNAVAILABLE", "recent_gameweeks_read_failed");
 		}
 		const rows = (data ?? []) as RecentGameweekRow[];
-		const teamIdByEvent = await loadHistoricalTeamIds(
+		if (rows.length === 0) {
+			return section([], "FALLBACK", "recent_gameweeks_revision_unverified");
+		}
+		const historicalTeams = await loadHistoricalTeamIds(
 			context,
 			playerCode,
 			rows.map((row) => row.event_id),
 			fallbackTeamId
 		);
-		const teamIds = rows.map((row) => teamIdByEvent.get(row.event_id) ?? fallbackTeamId);
+		const teamIds = rows.map((row) => historicalTeams.values.get(row.event_id) ?? fallbackTeamId);
 		const uniqueTeamIds = Array.from(new Set(teamIds));
-		const deskEntries = await Promise.all(
+		const deskResults = await Promise.all(
 			uniqueTeamIds.map(async (teamId) => {
-				if (teamId === fallbackTeamId) return [teamId, knownFixtures] as const;
+				if (teamId === fallbackTeamId) {
+					return {
+						teamId,
+						fixtures: knownFixtures,
+						availability: knownFixturesAvailability,
+					};
+				}
 				const desk = await loadTeamFixtureDesk(
 					context,
 					teamId,
 					Math.min(...rows.map((row) => row.event_id), statsContext.asOfEventId ?? 1)
 				);
-				return [teamId, desk.fixtures] as const;
+				return { teamId, fixtures: desk.value.fixtures, availability: desk.availability };
 			})
 		);
+		const fixturesUnavailable = deskResults.some(
+			({ availability }) => availability.state === "UNAVAILABLE"
+		);
+		const fixturesFallback = deskResults.some(
+			({ availability }) => availability.state === "FALLBACK" || availability.state === "STALE"
+		);
+		const deskEntries = deskResults.map(({ teamId, fixtures }) => [teamId, fixtures] as const);
 		const fixturesByTeam = new Map(deskEntries);
 		const provisionalEvent = currentEvent ?? resolvedEvent;
-		return rows.map((row, index) => {
+		const value = rows.map((row, index) => {
 			const teamId = teamIds[index] ?? fallbackTeamId;
 			const opponents = opponentsByEvent(fixturesByTeam.get(teamId) ?? []).get(row.event_id) ?? [];
 			return {
@@ -580,9 +803,21 @@ async function loadRecentGameweeks(
 				opponents,
 			};
 		});
+		const fixtureState: PlayerDataState = fixturesUnavailable
+			? "UNAVAILABLE"
+			: fixturesFallback || !historicalTeams.complete
+				? "FALLBACK"
+				: "READY";
+		return section(
+			value,
+			fixtureState === "UNAVAILABLE" ? "UNAVAILABLE" : "FALLBACK",
+			fixtureState === "UNAVAILABLE"
+				? "recent_fixture_read_failed"
+				: "recent_gameweeks_revision_unverified"
+		);
 	} catch (error) {
 		context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
-		return [];
+		return section([], "UNAVAILABLE", "recent_gameweeks_read_failed");
 	}
 }
 
@@ -594,16 +829,55 @@ const currentSeasonStats = (
 		? stats
 		: null;
 
+const playerSeasonStatsAvailability = (
+	statsContext: PlayerStatsContext,
+	seasonStats: PlayerSeasonStatsAtEvent | null,
+	sourceAvailable: boolean
+): PlayerDataSectionAvailability => {
+	const metadata = {
+		revision: statsContext.revision,
+		sourceCheckedAt: statsContext.sourceCheckedAt,
+	};
+	if (statsContext.status === "PRESEASON") {
+		return { state: "NOT_APPLICABLE", reasonCode: "season_stats_preseason", ...metadata };
+	}
+	if (statsContext.scope === "UNAVAILABLE") {
+		return { state: "UNAVAILABLE", reasonCode: "season_stats_scope_unavailable", ...metadata };
+	}
+	if (statsContext.scope !== "CURRENT_SEASON") {
+		return { state: "NOT_APPLICABLE", reasonCode: "season_stats_not_applicable", ...metadata };
+	}
+	if (statsContext.status === "STALE") {
+		return { state: "STALE", reasonCode: "season_stats_stale", ...metadata };
+	}
+	if (statsContext.status === "INCOMPLETE") {
+		return { state: "FALLBACK", reasonCode: "season_stats_incomplete", ...metadata };
+	}
+	if (statsContext.status !== "AVAILABLE" || !sourceAvailable) {
+		return { state: "UNAVAILABLE", reasonCode: "season_stats_read_failed", ...metadata };
+	}
+	return {
+		state: seasonStats?.available ? "READY" : "EMPTY",
+		reasonCode: null,
+		...metadata,
+	};
+};
+
 function assemblePlayerDetail(args: {
 	playerId: number;
 	player: NonNullable<Awaited<ReturnType<typeof playersRepository.getPlayerById>>>;
 	statsContext: PlayerStatsContext;
 	seasonStats: PlayerSeasonStatsAtEvent | null;
+	seasonStatsAvailability: PlayerDataSectionAvailability;
 	market: LatestMarketSnapshot | null;
+	marketAvailability: PlayerDataSectionAvailability;
+	historicalTeamAvailability: PlayerDataSectionAvailability;
 	marketMatchesStatsEvent: boolean;
 	teamShortName: string;
 	fixtures: PlayerFixture[];
+	fixturesAvailability: PlayerDataSectionAvailability;
 	recentGameweeks: PlayerRecentGameweek[];
+	recentGameweeksAvailability: PlayerDataSectionAvailability;
 }): PlayerDetail {
 	const stats = currentSeasonStats(args.statsContext, args.seasonStats);
 	const freshMarket = args.market !== null && !args.market.availability.stale;
@@ -619,7 +893,20 @@ function assemblePlayerDetail(args: {
 		price: args.player.price,
 		startPrice: args.player.startPrice,
 		statsContext: args.statsContext,
-		availability: args.market?.availability ?? null,
+		injuryAvailability: args.market?.availability ?? null,
+		dataAvailability: {
+			isFullyAuthoritative:
+				isAuthoritativeSection(args.seasonStatsAvailability) &&
+				isAuthoritativeSection(args.marketAvailability) &&
+				isAuthoritativeSection(args.historicalTeamAvailability) &&
+				isAuthoritativeSection(args.fixturesAvailability) &&
+				isAuthoritativeSection(args.recentGameweeksAvailability),
+			seasonStats: args.seasonStatsAvailability,
+			market: args.marketAvailability,
+			historicalTeam: args.historicalTeamAvailability,
+			fixtures: args.fixturesAvailability,
+			recentGameweeks: args.recentGameweeksAvailability,
+		},
 		totalPoints: stats?.totalPoints ?? null,
 		selectedByPercent:
 			(freshMarket ? args.market?.selectedByPercent : null) ??
@@ -703,9 +990,26 @@ export const playerDetailRepository: PlayerDetailRepository = {
 
 		const cacheKey = gqlCacheKey(context, playerDetailCacheKey(playerId, eventId));
 		const cached = await readPlayerDetailCache(context, cacheKey);
-		if (cached !== undefined) return cached;
+		if (cached !== undefined) {
+			if (cached === null) return null;
+			const currentStatsContext = await resolvePlayerStatsContext(context, eventId);
+			if (hasSameStatsAuthority(cached.statsContext, currentStatsContext)) {
+				recordDataAvailability(cached);
+				return cached;
+			}
+			context.logger.warn(
+				{ playerId, eventId, requestId: context.requestId },
+				"Expired player-detail stats authority"
+			);
+			try {
+				await context.redis.del(cacheKey);
+			} catch (error) {
+				context.logger.warn({ err: error, key: cacheKey }, "Failed to evict player-detail cache");
+			}
+			requestPlayerDetailCacheMemo(context).set(cacheKey, undefined);
+		}
 
-		const [player, statsContext, market, currentEvent] = await Promise.all([
+		const [player, statsContext, marketResult, currentEvent] = await Promise.all([
 			playersRepository.getPlayerById(context, playerId),
 			resolvePlayerStatsContext(context, eventId),
 			loadLatestMarketSnapshot(context, playerId),
@@ -717,7 +1021,7 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			return null;
 		}
 		const resolvedEvent = await loadResolvedEventState(context, statsContext.asOfEventId);
-		const resolvedTeamId = await loadHistoricalTeamId(
+		const historicalTeam = await loadHistoricalTeamId(
 			context,
 			statsContext.season,
 			player.code,
@@ -728,10 +1032,11 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			player.teamId
 		);
 
-		const [{ teamShortName, fixtures }, seasonStats] = await Promise.all([
-			loadTeamFixtureDesk(context, resolvedTeamId, eventId),
-			getPlayerSeasonStatsForContext(context, playerId, statsContext),
+		const [fixtureDesk, seasonStatsLoad] = await Promise.all([
+			loadTeamFixtureDesk(context, historicalTeam.value, eventId),
+			getPlayerSeasonStatsLoadForContext(context, [playerId], statsContext),
 		]);
+		const seasonStats = seasonStatsLoad.stats.get(playerId) ?? null;
 		const recentGameweeks = await loadRecentGameweeks(
 			context,
 			playerId,
@@ -739,28 +1044,47 @@ export const playerDetailRepository: PlayerDetailRepository = {
 			statsContext,
 			currentEvent,
 			resolvedEvent,
-			resolvedTeamId,
-			fixtures
+			historicalTeam.value,
+			fixtureDesk.value.fixtures,
+			fixtureDesk.availability
+		);
+		const seasonStatsAvailability = playerSeasonStatsAvailability(
+			statsContext,
+			seasonStats,
+			seasonStatsLoad.sourceAvailable
 		);
 		const detail = assemblePlayerDetail({
 			playerId,
 			player,
 			statsContext,
 			seasonStats,
-			market,
+			seasonStatsAvailability,
+			market: marketResult.value,
+			marketAvailability: marketResult.availability,
+			historicalTeamAvailability: historicalTeam.availability,
 			marketMatchesStatsEvent:
 				statsContext.asOfEventId === null || currentEvent?.id === statsContext.asOfEventId,
-			teamShortName,
-			fixtures,
-			recentGameweeks,
+			teamShortName: fixtureDesk.value.teamShortName,
+			fixtures: fixtureDesk.value.fixtures,
+			fixturesAvailability: fixtureDesk.availability,
+			recentGameweeks: recentGameweeks.value,
+			recentGameweeksAvailability: recentGameweeks.availability,
 		});
-		await writeQueryCache(
-			context,
-			cacheKey,
-			JSON.stringify(detail),
-			QUERY_CACHE_TTL_SECONDS.REPORTING
-		);
+		if (detail.dataAvailability.isFullyAuthoritative) {
+			await writeQueryCache(
+				context,
+				cacheKey,
+				JSON.stringify(detail),
+				QUERY_CACHE_TTL_SECONDS.REPORTING
+			);
+		} else {
+			context.logger.warn(
+				{ playerId, eventId, requestId: context.requestId },
+				"Skipping shared player-detail cache for non-authoritative sections"
+			);
+		}
 		requestPlayerDetailCacheMemo(context).set(cacheKey, detail);
+		recordDataAvailability(detail);
 		return detail;
 	},
 };

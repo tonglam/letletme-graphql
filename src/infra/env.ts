@@ -46,6 +46,7 @@ const readNumber = (key: EnvKey, fallback: number): number => {
 
 type RedisEndpoint = Readonly<{
 	url: string;
+	identity: string;
 }>;
 
 const parseRedisEndpoint = (urlKey: "REDIS_URL" | "RATE_LIMIT_REDIS_URL"): RedisEndpoint => {
@@ -68,6 +69,10 @@ const parseRedisEndpoint = (urlKey: "REDIS_URL" | "RATE_LIMIT_REDIS_URL"): Redis
 	}
 	return {
 		url: configuredUrl,
+		// Isolation is about the backing endpoint, not transport. Treating
+		// redis:// and rediss:// on the same host/port as different stores
+		// would allow an accidental shared Redis to pass the production gate.
+		identity: `${parsed.hostname}:${port}`,
 	};
 };
 
@@ -129,6 +134,9 @@ if (isProduction && !CORS_ORIGIN) {
 const primaryRedis = parseRedisEndpoint("REDIS_URL");
 
 const rateLimitRedis = parseRedisEndpoint("RATE_LIMIT_REDIS_URL");
+if (primaryRedis.identity === rateLimitRedis.identity) {
+	throw new Error("Primary and rate-limit Redis endpoints must be different");
+}
 
 const parseDataServiceUrl = (value: string): string => {
 	if (!value) return "";
@@ -186,6 +194,8 @@ export const env = {
 	),
 	REDIS_URL: primaryRedis.url,
 	RATE_LIMIT_REDIS_URL: rateLimitRedis.url,
+	REDIS_ENDPOINT_IDENTITY: primaryRedis.identity,
+	RATE_LIMIT_REDIS_ENDPOINT_IDENTITY: rateLimitRedis.identity,
 	APP_REVISION,
 	PORT: readNumber("PORT", 4000),
 	LOG_LEVEL: readEnv("LOG_LEVEL") ?? "info",

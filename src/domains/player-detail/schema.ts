@@ -37,6 +37,31 @@ export const playerDetailTypeDefs = /* GraphQL */ `
 		stale: Boolean!
 	}
 
+	enum PlayerDataState {
+		READY
+		EMPTY
+		STALE
+		FALLBACK
+		UNAVAILABLE
+		NOT_APPLICABLE
+	}
+
+	type PlayerDataSectionAvailability {
+		state: PlayerDataState!
+		reasonCode: String
+		revision: String
+		sourceCheckedAt: String
+	}
+
+	type PlayerDetailDataAvailability {
+		isFullyAuthoritative: Boolean!
+		seasonStats: PlayerDataSectionAvailability!
+		market: PlayerDataSectionAvailability!
+		historicalTeam: PlayerDataSectionAvailability!
+		fixtures: PlayerDataSectionAvailability!
+		recentGameweeks: PlayerDataSectionAvailability!
+	}
+
 	type PlayerRecentOpponent {
 		teamShortName: String!
 		wasHome: Boolean!
@@ -66,7 +91,8 @@ export const playerDetailTypeDefs = /* GraphQL */ `
 		price: Float!
 		startPrice: Float!
 		statsContext: PlayerStatsContext!
-		availability: PlayerAvailability
+		injuryAvailability: PlayerAvailability
+		dataAvailability: PlayerDetailDataAvailability!
 
 		totalPoints: Int
 		selectedByPercent: Float

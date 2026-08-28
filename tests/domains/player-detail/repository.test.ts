@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { playerDetailRepository } from "../../../src/domains/player-detail/repository";
+import {
+	playerDetailCacheKey,
+	playerDetailRepository,
+} from "../../../src/domains/player-detail/repository";
+import { gqlCacheKey } from "../../../src/infra/cache-key";
 import {
 	buildCorePublication,
 	buildSnapshotContext,
@@ -9,7 +13,7 @@ import {
 
 type TableRows = Record<string, unknown[]>;
 
-const queryBuilder = (rows: unknown[]) => {
+const queryBuilder = (rows: unknown[], queryError: unknown = null) => {
 	let selectedRows = [...rows];
 	const builder = {
 		select: () => builder,
@@ -54,11 +58,16 @@ const queryBuilder = (rows: unknown[]) => {
 			selectedRows = selectedRows.slice(from, to + 1);
 			return builder;
 		},
-		then: <TResult1 = { data: unknown[]; error: null }, TResult2 = never>(
+		then: <TResult1 = { data: unknown[] | null; error: unknown }, TResult2 = never>(
 			onfulfilled?:
-				((value: { data: unknown[]; error: null }) => TResult1 | PromiseLike<TResult1>) | null,
+				| ((value: { data: unknown[] | null; error: unknown }) => TResult1 | PromiseLike<TResult1>)
+				| null,
 			onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
-		) => Promise.resolve({ data: selectedRows, error: null }).then(onfulfilled, onrejected),
+		) =>
+			Promise.resolve({ data: queryError === null ? selectedRows : null, error: queryError }).then(
+				onfulfilled,
+				onrejected
+			),
 	};
 	return builder;
 };
@@ -67,6 +76,7 @@ function createContext(args: {
 	currentEvent: Record<string, unknown> | null;
 	tables: TableRows;
 	fromCalls?: string[];
+	lifecycleState?: "reference_only" | "completed" | "preseason" | "active" | "closed";
 }) {
 	const fromCalls = args.fromCalls ?? [];
 	const explicitCurrent = Number(args.currentEvent?.id);
@@ -168,6 +178,9 @@ function createContext(args: {
 	const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
 		dataRevision: "core-7",
 	});
+	if (args.lifecycleState) {
+		context.currentSeason = { ...context.currentSeason, lifecycleState: args.lifecycleState };
+	}
 	context.data = {
 		read: (table: string) => {
 			fromCalls.push(table);
@@ -257,6 +270,7 @@ describe("playerDetailRepository", () => {
 		const fromCalls: string[] = [];
 		const context = createContext({
 			currentEvent: null,
+			lifecycleState: "preseason",
 			fromCalls,
 			tables: {
 				"fpl.events": [
@@ -279,7 +293,7 @@ describe("playerDetailRepository", () => {
 			scope: "UNAVAILABLE",
 			season: "2627",
 			asOfEventId: null,
-			status: "UNAVAILABLE",
+			status: "PRESEASON",
 			revision: null,
 			sourceCheckedAt: null,
 			publishedAt: null,
@@ -290,7 +304,9 @@ describe("playerDetailRepository", () => {
 		expect(detail?.form).toBeNull();
 		expect(detail?.selectedByPercent).toBe(12.5);
 		expect(detail?.transfersInEvent).toBe(321);
-		expect(detail?.availability?.status).toBe("a");
+		expect(detail?.injuryAvailability?.status).toBe("a");
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(true);
+		expect(detail?.dataAvailability.recentGameweeks.state).toBe("EMPTY");
 		expect(detail?.recentGameweeks).toEqual([]);
 		expect(detail?.fixtures).toHaveLength(38);
 		expect(detail?.fixtures.filter((fixture) => fixture.bgw)).toHaveLength(0);
@@ -450,6 +466,373 @@ describe("playerDetailRepository", () => {
 		});
 		expect(detail?.recentGameweeks[0].opponents).toHaveLength(2);
 		expect(detail?.fixtures.filter((fixture) => fixture.event === 3)).toHaveLength(2);
+	});
+
+	it("marks mutable recent gameweeks non-authoritative and excludes the shared cache", async () => {
+		const fromCalls: string[] = [];
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			fromCalls,
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+		const redis = context.redis as unknown as TestRedis;
+
+		expect(detail?.recentGameweeks[0]).toMatchObject({ eventId: 3, totalPoints: 9 });
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_revision_unverified",
+			revision: null,
+			sourceCheckedAt: null,
+		});
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(fromCalls).toContain("fpl.player_gameweek_stats");
+		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
+	});
+
+	it("keeps an empty mutable recent-gameweek read non-authoritative", async () => {
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+		const redis = context.redis as unknown as TestRedis;
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
+		expect(detail?.recentGameweeks).toEqual([]);
+		expect(detail?.dataAvailability.recentGameweeks).toEqual({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_revision_unverified",
+			revision: null,
+			sourceCheckedAt: null,
+		});
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
+	});
+
+	it("does not write a shared cache entry when a data section is unavailable", async () => {
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow({ selected_by_percent: "not-a-number" })],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 0,
+						assists: 0,
+						clean_sheets: 0,
+						saves: 0,
+						bonus: 0,
+						bps: 10,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+		const redis = context.redis as unknown as TestRedis;
+
+		expect(detail?.dataAvailability.market.state).toBe("UNAVAILABLE");
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
+	});
+
+	it("marks season-stat read failures unavailable and never caches the partial detail", async () => {
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 0,
+						saves: 0,
+						bonus: 0,
+						bps: 10,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+		const originalRead = context.data.read.bind(context.data);
+		let bundleReads = 0;
+		context.data = {
+			read: (table: Parameters<typeof originalRead>[0]) => {
+				if (table === "fpl.player_event_snapshot_bundles") {
+					bundleReads += 1;
+					if (bundleReads === 2) {
+						return queryBuilder([], { message: "database unavailable" });
+					}
+				}
+				return originalRead(table);
+			},
+		} as never;
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+		const redis = context.redis as unknown as TestRedis;
+
+		expect(bundleReads).toBe(2);
+		expect(detail?.totalPoints).toBeNull();
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_revision_unverified",
+		});
+		expect(detail?.dataAvailability.seasonStats).toMatchObject({
+			state: "UNAVAILABLE",
+			reasonCode: "season_stats_read_failed",
+			revision: "11",
+		});
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
+	});
+
+	it("fails closed when a pinned complete stats revision no longer returns the known player", async () => {
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 0,
+						saves: 0,
+						bonus: 0,
+						bps: 10,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+		const originalRead = context.data.read.bind(context.data);
+		let bundleReads = 0;
+		context.data = {
+			read: (table: Parameters<typeof originalRead>[0]) => {
+				if (table === "fpl.player_event_snapshot_bundles") {
+					bundleReads += 1;
+					if (bundleReads === 2) return queryBuilder([]);
+				}
+				return originalRead(table);
+			},
+		} as never;
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+		const redis = context.redis as unknown as TestRedis;
+
+		expect(bundleReads).toBe(2);
+		expect(detail?.totalPoints).toBeNull();
+		expect(detail?.dataAvailability.seasonStats).toMatchObject({
+			state: "UNAVAILABLE",
+			reasonCode: "season_stats_read_failed",
+			revision: "11",
+		});
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(redis.setCalls.some(([key]) => key.includes("players:season-stats"))).toBe(false);
+		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
+	});
+
+	it("does not treat an unavailable stats scope as authoritative preseason emptiness", async () => {
+		const context = createContext({
+			currentEvent: null,
+			tables: {
+				"fpl.events": [
+					{
+						id: 1,
+						finished: false,
+						is_current: false,
+						deadline_time_epoch: Math.floor(Date.now() / 1000) + 86_400,
+					},
+				],
+				"fpl.player_market_snapshots": [marketRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 1);
+		const redis = context.redis as unknown as TestRedis;
+
+		expect(detail?.statsContext.status).toBe("UNAVAILABLE");
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "UNAVAILABLE",
+			reasonCode: "recent_stats_unavailable",
+		});
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
+	});
+
+	it("evicts a pre-hard-cut non-authoritative shared cache value", async () => {
+		const degradedContext = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow({ selected_by_percent: "bad" })],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3 }],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+		const degraded = await playerDetailRepository.getPlayerDetail(degradedContext, 9, 3);
+		if (!degraded) throw new Error("expected degraded player detail");
+		expect(degraded.dataAvailability.isFullyAuthoritative).toBe(false);
+
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+		const redis = context.redis as unknown as TestRedis;
+		const key = gqlCacheKey(context, playerDetailCacheKey(9, 3));
+		redis.values.set(key, JSON.stringify(degraded));
+		let deleteCount = 0;
+		const originalDelete = redis.del;
+		redis.del = async (...keys: string[]) => {
+			deleteCount += 1;
+			return originalDelete(...keys);
+		};
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
+		expect(deleteCount).toBe(1);
+		expect(detail?.dataAvailability.market.state).toBe("READY");
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_revision_unverified",
+			revision: null,
+			sourceCheckedAt: null,
+		});
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(redis.setCalls.some(([cachedKey]) => cachedKey.includes("player-detail"))).toBe(false);
+	});
+
+	it("does not read the pre-hard-cut player-detail cache namespace", async () => {
+		const args = {
+			currentEvent: null,
+			lifecycleState: "preseason" as const,
+			tables: {
+				"fpl.events": [
+					{
+						id: 1,
+						finished: false,
+						is_current: false,
+						deadline_time_epoch: Math.floor(Date.now() / 1000) + 86_400,
+					},
+				],
+				"fpl.player_market_snapshots": [marketRow()],
+			},
+		};
+		const sourceContext = createContext(args);
+		const source = await playerDetailRepository.getPlayerDetail(sourceContext, 9, 1);
+		if (!source) throw new Error("expected preseason player detail");
+
+		const context = createContext(args);
+		const redis = context.redis as unknown as TestRedis;
+		const legacyKey = gqlCacheKey(context, "player-detail:9:1");
+		redis.values.set(legacyKey, JSON.stringify({ ...source, webName: "Legacy cached name" }));
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 1);
+
+		expect(detail?.webName).toBe("Test Player");
+		expect(redis.values.has(legacyKey)).toBe(true);
+	});
+
+	it("revalidates player-stat authority before returning a shared detail cache hit", async () => {
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3 }],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+		const authoritative = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+		if (!authoritative) throw new Error("expected authoritative player detail");
+
+		const nextContext = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3 }],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+		const redis = nextContext.redis as unknown as TestRedis;
+		const key = gqlCacheKey(nextContext, playerDetailCacheKey(9, 3));
+		redis.values.set(
+			key,
+			JSON.stringify({
+				...authoritative,
+				webName: "Stale cached name",
+				statsContext: {
+					...authoritative.statsContext,
+					sourceCheckedAt: "2026-01-01T00:00:00.000Z",
+				},
+			})
+		);
+		let deleteCount = 0;
+		const originalDelete = redis.del;
+		redis.del = async (...keys: string[]) => {
+			deleteCount += 1;
+			return originalDelete(...keys);
+		};
+
+		const detail = await playerDetailRepository.getPlayerDetail(nextContext, 9, 3);
+
+		expect(deleteCount).toBe(1);
+		expect(detail?.webName).toBe("Test Player");
+		expect(detail?.statsContext.sourceCheckedAt).not.toBe("2026-01-01T00:00:00.000Z");
 	});
 
 	it("keeps event-scoped transfer counts for a past event", async () => {

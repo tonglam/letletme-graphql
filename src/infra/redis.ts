@@ -36,46 +36,45 @@ const connectClient = async (redis: Redis): Promise<void> => {
 	}
 };
 
-const infoValue = (info: string, key: string): string | undefined => {
-	const line = info.split("\n").find((candidate) => candidate.startsWith(`${key}:`));
+const redisInfoValue = (info: string, key: string): string | undefined => {
+	const line = info.split("\n").find((entry) => entry.startsWith(`${key}:`));
 	return line?.slice(key.length + 1).trim() || undefined;
 };
 
-const serverIdentity = async (redis: Pick<Redis, "info">): Promise<string> => {
+const connectedRedisIdentity = async (redis: Redis): Promise<string> => {
 	const [serverInfo, replicationInfo] = await Promise.all([
 		redis.info("server"),
 		redis.info("replication"),
 	]);
-	// master_replid is shared by all replicas of one Redis primary, while
-	// run_id identifies a standalone server. Comparing the resolved server
-	// identity after authentication catches URL aliases and DNS aliases that
-	// cannot be detected by comparing the configured hostname strings.
-	const masterReplicationId = infoValue(replicationInfo, "master_replid");
-	const runId = infoValue(serverInfo, "run_id");
-	const identity = masterReplicationId ?? runId;
-	if (!identity) {
-		throw new Error("Redis server identity is unavailable; refusing shared-endpoint configuration");
-	}
+	// Replicas of one Redis primary have different run_id values but share the
+	// primary's master_replid. Prefer that durable replication identity and use
+	// run_id for standalone servers that have not exposed one yet.
+	const masterReplId = redisInfoValue(replicationInfo, "master_replid");
+	const runId = redisInfoValue(serverInfo, "run_id");
+	const identity = masterReplId && masterReplId !== "-" ? `master:${masterReplId}` : runId;
+	if (!identity) throw new Error("Redis server identity is unavailable");
 	return identity;
 };
 
-export const assertRedisIsolation = async (
-	primary: Pick<Redis, "info"> = getRedis(),
-	rateLimit: Pick<Redis, "info"> = getRateLimitRedis()
-): Promise<void> => {
+/**
+ * Verify workload isolation against connected Redis servers, not just URL
+ * spelling. DNS aliases and different database numbers can still point at
+ * the same Redis authority, which would let cache traffic starve admission.
+ */
+export const assertRedisWorkloadIsolation = async (): Promise<void> => {
 	const [primaryIdentity, rateLimitIdentity] = await Promise.all([
-		serverIdentity(primary),
-		serverIdentity(rateLimit),
+		connectedRedisIdentity(getRedis()),
+		connectedRedisIdentity(getRateLimitRedis()),
 	]);
 	if (primaryIdentity === rateLimitIdentity) {
-		throw new Error("Primary and rate-limit Redis endpoints resolve to the same Redis server");
+		throw new Error("Primary and rate-limit Redis servers must have different identities");
 	}
 };
 
 export const connectRedis = async (): Promise<Redis> => {
 	const redis = getRedis();
 	await Promise.all([connectClient(redis), connectClient(getRateLimitRedis())]);
-	await assertRedisIsolation(redis, getRateLimitRedis());
+	await assertRedisWorkloadIsolation();
 	return redis;
 };
 

@@ -4,6 +4,7 @@ import {
 	type Entry,
 	type EntryEventResult,
 } from "../../../src/domains/entries/repository";
+import { gqlCacheKey } from "../../../src/infra/cache-key";
 
 const entryRow = (id: number) => ({
 	id,
@@ -367,8 +368,10 @@ describe("entriesRepository.getEntriesByIds", () => {
 		expect([...entries.keys()]).toEqual([101, 102]);
 		expect(readKeys).toHaveLength(2);
 		expect(writtenKeys).toHaveLength(2);
+		const legacyKeys = [101, 102].map((id) => gqlCacheKey(context, `entries:info:${id}`));
 		for (const key of [...readKeys, ...writtenKeys]) {
 			expect(key.startsWith("llm:gql:core-17:entries-info:")).toBe(true);
+			expect(legacyKeys).not.toContain(key);
 			expect(key).not.toContain("EntryInfo:");
 		}
 	});

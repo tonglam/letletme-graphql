@@ -91,7 +91,7 @@ add(
 		"briefingWeek",
 		"briefingStory",
 		"eventOverallResult",
-		"entry",
+		"entryLookup",
 		"entrySnapshot",
 		"entryNameUsage",
 		"searchEntries",

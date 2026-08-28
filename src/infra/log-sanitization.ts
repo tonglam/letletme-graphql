@@ -2,10 +2,25 @@ const DATABASE_STATEMENT =
 	/\b(?:select|insert\s+into|update\s+\S+\s+set|delete\s+from|alter\s+table|create\s+table|drop\s+table)\b/i;
 const CONNECTION_URL = /\b(?:postgres(?:ql)?|redis|rediss):\/\/[^\s"']+/gi;
 const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)([^@\s/]+)@/gi;
-const AUTHORIZATION_CREDENTIAL =
-	/(?<![a-z0-9])(["']?)(authorization)\1(\s*[=:]\s*)(?:(['"])(?:(?:bearer|basic)\s+)?(?:\\[\s\S]|(?!\4)[\s\S])*\4|(?:(?:bearer|basic)\s+)?[^"'\s,;}]+)/gi;
-const SECRET_ASSIGNMENT =
-	/(?<![a-z0-9])(["']?)(password|passwd|pwd|token|secret|api[_-]?key)\1(\s*[=:]\s*)(?:(['"])(?:(?:bearer|basic)\s+)?(?:\\[\s\S]|(?!\4)[\s\S])*\4|(?:(?:bearer|basic)\s+)?[^"'\s,;}]+)/gi;
+const AUTHORIZATION_KEY = "(?:[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*[_-])?authorization";
+const AUTHORIZATION_CREDENTIAL_QUOTED = new RegExp(
+	`(?<![a-z0-9_-])(["']?)(${AUTHORIZATION_KEY})\\1(\\s*[=:]\\s*)(["'])(?:\\\\[\\s\\S]|(?!\\4)[\\s\\S])*\\4`,
+	"gi"
+);
+const AUTHORIZATION_CREDENTIAL_UNQUOTED = new RegExp(
+	`(?<![a-z0-9_-])(["']?)(${AUTHORIZATION_KEY})\\1(\\s*[=:]\\s*)(?:(?:[a-z][a-z0-9._-]*)\\s+)?(?!["'])([^\\s,;}]+)`,
+	"gi"
+);
+const SECRET_KEY =
+	"(?:(?:[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*)[_-])?(?:password|passwd|pwd|token|secret|api[_-]?key)";
+const SECRET_ASSIGNMENT_QUOTED = new RegExp(
+	`(?<![a-z0-9_-])(["']?)(${SECRET_KEY})\\1(\\s*[=:]\\s*)(?:(?:bearer|basic)\\s+)?(["'])(?:\\\\[\\s\\S]|(?!\\4)[\\s\\S])*\\4`,
+	"gi"
+);
+const SECRET_ASSIGNMENT_UNQUOTED = new RegExp(
+	`(?<![a-z0-9_-])(["']?)(${SECRET_KEY})\\1(\\s*[=:]\\s*)(?:(?:bearer|basic)\\s+)?(?!["'])([^\\s,;}]+)`,
+	"gi"
+);
 const NETWORK_HOST =
 	/\b(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|[a-z0-9-]+(?:\.[a-z0-9-]+)+)(?::\d{1,5})?\b/gi;
 const BRACKETED_IPV6 = /\[[0-9a-f:]+\](?::\d{1,5})?/gi;
@@ -15,16 +30,10 @@ export const sanitizeLogText = (value: string): string => {
 	return value
 		.replace(CONNECTION_URL, (url) => `${url.split(":", 1)[0]}://[REDACTED]`)
 		.replace(URL_CREDENTIALS, "$1[REDACTED]@")
-		.replace(
-			AUTHORIZATION_CREDENTIAL,
-			(_match, keyQuote, key, separator, valueQuote) =>
-				`${keyQuote}${key}${keyQuote}${separator}${valueQuote ? `${valueQuote}[REDACTED]${valueQuote}` : "[REDACTED]"}`
-		)
-		.replace(
-			SECRET_ASSIGNMENT,
-			(_match, keyQuote, key, separator, valueQuote) =>
-				`${keyQuote}${key}${keyQuote}${separator}${valueQuote ? `${valueQuote}[REDACTED]${valueQuote}` : "[REDACTED]"}`
-		)
+		.replace(AUTHORIZATION_CREDENTIAL_QUOTED, "$1$2$1$3$4[REDACTED]$4")
+		.replace(AUTHORIZATION_CREDENTIAL_UNQUOTED, "$1$2$1$3[REDACTED]")
+		.replace(SECRET_ASSIGNMENT_QUOTED, "$1$2$1$3$4[REDACTED]$4")
+		.replace(SECRET_ASSIGNMENT_UNQUOTED, "$1$2$1$3[REDACTED]")
 		.replace(NETWORK_HOST, "[REDACTED_HOST]")
 		.replace(BRACKETED_IPV6, "[REDACTED_HOST]")
 		.slice(0, 500);

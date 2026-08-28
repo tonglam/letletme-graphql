@@ -109,22 +109,23 @@ candidate_env_next=$(mktemp "$VPS_WORKDIR/.env.deploy.$inactive_slot.next.XXXXXX
 docker_config_dir=$(mktemp -d "$VPS_WORKDIR/.docker-config.XXXXXX")
 chmod 700 "$docker_config_dir"
 export DOCKER_CONFIG="$docker_config_dir"
+candidate_started=false
+promotion_committed=false
+rollback_verified=false
+manifest=""
 cleanup_sensitive_files() {
+  if [ "${candidate_started:-false}" = true ] && [ "${promotion_committed:-false}" != true ]; then
+    if [ "${switched:-false}" != true ] || [ "${rollback_verified:-false}" = true ]; then
+      compose down --remove-orphans >/dev/null 2>&1 || true
+    else
+      echo "preserving candidate slot because active-slot rollback is unverified" >&2
+    fi
+  fi
   if [ -n "$candidate_env_next" ]; then rm -f -- "$candidate_env_next"; fi
+  if [ -n "$manifest" ]; then rm -f -- "$manifest"; fi
   if [ -n "$docker_config_dir" ]; then rm -rf -- "$docker_config_dir"; fi
 }
-candidate_started=false
-candidate_cleanup_armed=true
-cleanup_on_exit() {
-  local exit_status=$?
-  trap - EXIT
-  if [ "$candidate_started" = true ] && [ "$candidate_cleanup_armed" = true ]; then
-    compose down --remove-orphans || true
-  fi
-  cleanup_sensitive_files
-  exit "$exit_status"
-}
-trap cleanup_on_exit EXIT
+trap cleanup_sensitive_files EXIT
 if [ -n "$env_source" ]; then
   test -f "$env_source"
   cp "$env_source" "$candidate_env_next"
@@ -256,9 +257,8 @@ test -n "$candidate_container"
 test "$(docker inspect --format '{{.Config.Image}}' "$candidate_container")" = "$IMAGE_REF"
 test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$candidate_container")" = "$DEPLOY_SHA"
 
-anonymous_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-	--max-time 5 \
-	--header 'Content-Type: application/json' \
+anonymous_status=$(curl --silent --show-error --max-time 5 --output /dev/null --write-out '%{http_code}' \
+  --header 'Content-Type: application/json' \
   --data '{"query":"query { currentEventInfo { season } }"}' \
   "$candidate_url/graphql")
 test "$anonymous_status" = 401
@@ -271,9 +271,9 @@ compose exec -T graphql bun -e '
   const request = async (query, variables = {}) => {
     const response = await fetch("http://127.0.0.1:4000/graphql", {
       method: "POST",
+      redirect: "error",
       headers: { "Content-Type": "application/json", "X-GraphQL-Service-Token": token },
       body: JSON.stringify({ query, variables }),
-      redirect: "error",
       signal: AbortSignal.timeout(5000),
     });
     const payload = await response.json();
@@ -284,9 +284,13 @@ compose exec -T graphql bun -e '
   };
   const data = await request(`query CandidateContract {
     currentEventInfo { season }
+    entryLookup(id: -1) { status retryable entry { id } source persistenceState }
   }`);
   if (!/^[0-9]{4}$/.test(data?.currentEventInfo?.season ?? "")) {
     throw new Error("Current-season contract failed");
+  }
+  if (data?.entryLookup?.status !== "INVALID_ID" || data.entryLookup.retryable !== false || data.entryLookup.entry !== null) {
+    throw new Error("Entry lookup contract failed");
   }
   const price = await request(`query CandidatePriceBoard {
     priceChangeBoard { status revision expectedPlayerCount observedPlayerCount }
@@ -343,10 +347,9 @@ compose exec -T \
 
 old_slot="$active_slot"
 switched=false
-commit_critical=false
-pending_signal=""
 rollback_switch() {
   if [ "$switched" != true ]; then return 0; fi
+  rollback_verified=false
   if ! sudo -n "$SWITCH_HELPER" "$old_slot"; then
     echo "slot rollback helper failed; active routing is uncertain" >&2
     return 1
@@ -355,51 +358,31 @@ rollback_switch() {
     echo "slot rollback did not restore active slot $old_slot" >&2
     return 1
   fi
-  # Only tear down the rejected candidate after the rollback helper and its
-  # durable active-slot authority both prove that routing is back on old_slot.
-  # If either check fails, leave cleanup disarmed because the candidate may
-  # still be serving traffic or remain the only known rollback target.
-  candidate_cleanup_armed=true
+  rollback_verified=true
   switched=false
 }
 rollback_on_error() {
   local status=$?
   trap - ERR
-  if ! rollback_switch; then
+  trap - INT TERM HUP
+  if [ "${promotion_committed:-false}" != true ] && ! rollback_switch; then
     echo "automatic rollback could not prove restoration of $old_slot" >&2
   fi
   exit "$status"
 }
+trap rollback_on_error ERR
 rollback_on_signal() {
-	local signal="$1"
-	local status=143
-	case "$signal" in
-	  INT) status=130 ;;
-	  HUP) status=129 ;;
-	esac
-	if [ "$commit_critical" = true ]; then
-		# Bash traps are not queued while an external command runs. Latch the
-		# signal and handle it immediately after the manifest commit point, once
-		# rollback has been disarmed, instead of silently discarding cancellation.
-		pending_signal="$signal"
-		return 0
-	fi
-	# A signal can arrive while the cutover is being verified. Disable the
-  # signal traps while running the idempotent helper so a second signal cannot
-  # interrupt rollback halfway through and recurse into this handler.
-  trap - INT TERM HUP
-  trap - ERR
-  if ! rollback_switch; then
-    echo "deploy received $signal and rollback could not be verified" >&2
+  local status="$1"
+  trap - ERR INT TERM HUP
+  if [ "${promotion_committed:-false}" != true ] && ! rollback_switch; then
+    echo "signal interrupted cutover and rollback could not be verified" >&2
   fi
   exit "$status"
 }
-trap rollback_on_error ERR
+trap 'rollback_on_signal 129' HUP
+trap 'rollback_on_signal 130' INT
+trap 'rollback_on_signal 143' TERM
 switched=true
-candidate_cleanup_armed=false
-trap 'rollback_on_signal INT' INT
-trap 'rollback_on_signal TERM' TERM
-trap 'rollback_on_signal HUP' HUP
 sudo -n "$SWITCH_HELPER" "$inactive_slot"
 
 public_health_url="$PUBLIC_GRAPHQL_HEALTH_URL"
@@ -428,16 +411,20 @@ compose exec -T -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e '
   if (!token || !url) throw new Error("Missing public acceptance configuration");
   const response = await fetch(url, {
     method: "POST",
+    redirect: "error",
     headers: { "Content-Type": "application/json", "X-GraphQL-Service-Token": token },
     body: JSON.stringify({ query: `query PublicContract {
       currentEventInfo { season }
+      entryLookup(id: -1) { status retryable entry { id } source persistenceState }
     }` }),
-    redirect: "error",
     signal: AbortSignal.timeout(5000),
   });
   const payload = await response.json();
   if (response.status !== 200 || payload.errors) throw new Error("Public GraphQL contract failed");
-  if (!/^[0-9]{4}$/.test(payload.data?.currentEventInfo?.season ?? "")) {
+  if (!/^[0-9]{4}$/.test(payload.data?.currentEventInfo?.season ?? "") ||
+      payload.data?.entryLookup?.status !== "INVALID_ID" ||
+      payload.data.entryLookup.retryable !== false ||
+      payload.data.entryLookup.entry !== null) {
     throw new Error("Public GraphQL fields do not match the candidate contract");
   }
   console.log(JSON.stringify({ status: "public_contract_passed", season: payload.data.currentEventInfo.season }));
@@ -470,23 +457,12 @@ jq -n \
   '{deployedAt:$deployedAt,commit:$commit,image:$image,oldSlot:$oldSlot,newSlot:$newSlot,oldImage:$oldImage}' \
   > "$manifest"
 chmod 600 "$manifest"
-# The manifest rename and rollback disarm are one commit point. Latch
-# termination signals while these two commands run, then process the pending
-# cancellation after the durable manifest has disarmed rollback.
-commit_critical=true
+trap '' INT TERM HUP
 mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"
+manifest=""
+promotion_committed=true
 switched=false
-commit_critical=false
-trap 'rollback_on_signal INT' INT
-trap 'rollback_on_signal TERM' TERM
-trap 'rollback_on_signal HUP' HUP
-if [ -n "$pending_signal" ]; then
-	case "$pending_signal" in
-		INT) exit 130 ;;
-		HUP) exit 129 ;;
-		TERM) exit 143 ;;
-	esac
-fi
+trap - INT TERM HUP
 
 # The durable manifest is the point after which cleanup is allowed. Keep both
 # slot image IDs and remove only older images in this repository; Docker also

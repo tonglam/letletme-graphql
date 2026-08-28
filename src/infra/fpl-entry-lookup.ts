@@ -1,4 +1,5 @@
-import type { Entry } from "../domains/entries/repository";
+import type { Entry } from "../contracts/entry";
+import { isPlainRecord as isRecord } from "../contracts/guards";
 
 const FPL_ENTRY_URL = "https://fantasy.premierleague.com/api/entry";
 const FPL_ENTRY_TIMEOUT_MS = 4_000;
@@ -24,9 +25,6 @@ export type FplEntryLookupResult =
 	| { status: "found"; entry: Entry }
 	| { status: "not_found" }
 	| { status: "unavailable"; reason: "transient" | "invalid_response" | "invalid_id" };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const asFiniteNumber = (value: unknown): number | null =>
 	typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -108,10 +106,4 @@ export async function lookupFplEntryResult(entryId: number): Promise<FplEntryLoo
 	} finally {
 		clearTimeout(timeoutId);
 	}
-}
-
-/** Backwards-compatible nullable helper used by non-admission callers. */
-export async function lookupFplEntry(entryId: number): Promise<Entry | null> {
-	const result = await lookupFplEntryResult(entryId);
-	return result.status === "found" ? result.entry : null;
 }

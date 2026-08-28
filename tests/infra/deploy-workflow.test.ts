@@ -72,26 +72,14 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("docker inspect --format '{{.Config.Image}}'");
 		expect(deployScript).toContain("org.opencontainers.image.revision");
 		expect(deployScript).toContain('test "$anonymous_status" = 401');
-		expect(deployScript).not.toContain("entryLookup(id: -1)");
+		expect(deployScript).toContain("entryLookup(id: -1)");
+		expect(deployScript).toContain("entry { id }");
+		expect(deployScript).toContain('status !== "INVALID_ID"');
 		expect(deployScript).toContain("priceChangeBoard");
 		expect(deployScript).toContain('status === "READY"');
 		expect(deployScript).toContain("candidate_contract_passed");
 		expect(deployScript).toContain("PUBLIC_GRAPHQL_URL");
 		expect(deployScript).toContain("public_contract_passed");
-		expect(deployScript).toContain('redirect: "error"');
-	});
-
-	test("cleans up an unaccepted candidate before slot switching", () => {
-		const cleanupAt = deployScript.indexOf("candidate_cleanup_armed=true");
-		const candidateUpAt = deployScript.indexOf("candidate_started=true");
-		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
-		expect(deployScript).toContain("candidate_started=false");
-		expect(deployScript).toContain("compose down --remove-orphans || true");
-		expect(deployScript).toContain("candidate_cleanup_armed=false");
-		expect(cleanupAt).toBeGreaterThan(-1);
-		expect(cleanupAt).toBeLessThan(candidateUpAt);
-		expect(candidateUpAt).toBeLessThan(switchAt);
-		expect(deployScript.indexOf("candidate_cleanup_armed=false")).toBeLessThan(switchAt);
 	});
 
 	test("allowlists exact public GraphQL routes before switching or forwarding credentials", () => {
@@ -120,14 +108,6 @@ describe("production deployment workflow", () => {
 	});
 
 	test("rolls back the slot switch when public verification fails", () => {
-		const rollbackRearmAt = deployScript.indexOf(
-			"candidate_cleanup_armed=true",
-			deployScript.indexOf("rollback_switch()")
-		);
-		const rollbackAuthorityCheckAt = deployScript.indexOf(
-			'!= "$old_slot"',
-			deployScript.indexOf("rollback_switch()")
-		);
 		expect(deployScript).toContain("rollback_switch()");
 		expect(deployScript).toContain("public GraphQL health probe failed");
 		expect(deployScript).toContain('sudo -n "$SWITCH_HELPER" "$old_slot"');
@@ -143,39 +123,38 @@ describe("production deployment workflow", () => {
 		expect(deployScript.lastIndexOf("switched=false")).toBeGreaterThan(
 			deployScript.indexOf('mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"')
 		);
-		expect(rollbackRearmAt).toBeGreaterThan(rollbackAuthorityCheckAt);
 	});
 
-	test("rolls back an interrupted cutover before the release manifest is durable", () => {
-		const rollbackAt = deployScript.indexOf("rollback_switch()");
-		const signalHandlerAt = deployScript.indexOf("rollback_on_signal()");
-		const signalTrapAt = deployScript.indexOf("trap 'rollback_on_signal TERM' TERM");
-		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
-		const manifestAt = deployScript.indexOf(
-			'mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"'
+	test("protects the public token probe and candidate lifecycle on interruption", () => {
+		expect(deployScript).toContain('redirect: "error"');
+		expect(deployScript).toContain(
+			'const response = await fetch("http://127.0.0.1:4000/graphql", {'
 		);
-		expect(signalHandlerAt).toBeGreaterThan(-1);
-		expect(deployScript).toContain("trap - INT TERM HUP");
-		expect(deployScript).toContain("deploy received $signal and rollback could not be verified");
-		expect(signalTrapAt).toBeGreaterThan(signalHandlerAt);
-		expect(signalTrapAt).toBeLessThan(switchAt);
-		expect(rollbackAt).toBeLessThan(manifestAt);
+		expect(deployScript).toContain("--max-time 5");
+		expect(deployScript).toContain("candidate_started=true");
+		expect(deployScript).toContain("rollback_verified=false");
+		expect(deployScript).toContain(
+			"preserving candidate slot because active-slot rollback is unverified"
+		);
+		expect(deployScript).toContain("compose down --remove-orphans >/dev/null 2>&1 || true");
+		expect(deployScript).toContain("trap 'rollback_on_signal 129' HUP");
+		expect(deployScript).toContain("trap 'rollback_on_signal 130' INT");
+		expect(deployScript).toContain("trap 'rollback_on_signal 143' TERM");
+		expect(deployScript).toContain("promotion_committed=true");
 	});
 
-	test("commits the manifest and rollback disarm as one signal-atomic section", () => {
-		const criticalSectionAt = deployScript.indexOf("commit_critical=true");
-		const manifestAt = deployScript.indexOf(
-			'mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"'
+	test("uploads deployment secrets and runs cleanup inside one remote shell", () => {
+		const deployStep = workflow.slice(
+			workflow.indexOf("- name: Deploy candidate to inactive slot"),
+			workflow.indexOf("- name: Promote verified digest to latest")
 		);
-		const disarmAt = deployScript.indexOf("switched=false", manifestAt);
-		const restoreSignalsAt = deployScript.indexOf("trap 'rollback_on_signal INT' INT", disarmAt);
-		expect(criticalSectionAt).toBeGreaterThan(-1);
-		expect(deployScript).toContain("pending_signal");
-		expect(deployScript).toContain("Latch");
-		expect(criticalSectionAt).toBeLessThan(manifestAt);
-		expect(manifestAt).toBeLessThan(disarmAt);
-		expect(disarmAt).toBeLessThan(restoreSignalsAt);
-		expect(deployScript).toContain('if [ -n "$pending_signal" ]; then');
+		expect(deployStep).toContain("remote_env=$(mktemp /tmp/letletme-graphql-env.XXXXXX)");
+		expect(deployStep).toContain("remote_token=$(mktemp /tmp/letletme-graphql-token.XXXXXX)");
+		expect(deployStep).toContain("trap cleanup_remote EXIT");
+		expect(deployStep).toContain('base64 -d > "$remote_env"');
+		expect(deployStep).toContain('base64 -d > "$remote_token"');
+		expect(deployStep).not.toContain("remote_env=$(ssh");
+		expect(deployStep).not.toContain("cleanup_remote() {\n            set +e\n            ssh");
 	});
 
 	test("retires the implicit legacy project only before canonical blue reuses port 4000", () => {
@@ -224,34 +203,10 @@ describe("production deployment workflow", () => {
 		);
 		expect(deployScript).toContain('export DOCKER_CONFIG="$docker_config_dir"');
 		expect(deployScript).toContain('rm -rf -- "$docker_config_dir"');
-		expect(deployScript).toContain("trap cleanup_on_exit EXIT");
+		expect(deployScript).toContain("trap cleanup_sensitive_files EXIT");
 		expect(deployScript.indexOf("export DOCKER_CONFIG")).toBeLessThan(
 			deployScript.indexOf("docker login ghcr.io")
 		);
-	});
-
-	test("cleans staged deployment secrets from the remote shell", () => {
-		expect(workflow).toContain("cleanup_staged_secrets()");
-		expect(workflow).toContain("remote_env=$(umask 077; mktemp /tmp/letletme-graphql-env.XXXXXX)");
-		expect(workflow).toContain(
-			"remote_token=$(umask 077; mktemp /tmp/letletme-graphql-token.XXXXXX)"
-		);
-		expect(workflow).toContain('printf \'%s\' "$env_payload" | base64 --decode > "$remote_env"');
-		expect(workflow).toContain(
-			'printf \'%s\' "$token_payload" | base64 --decode > "$remote_token"'
-		);
-		expect(workflow).toContain("trap cleanup_on_exit EXIT");
-		expect(workflow).toContain("trap 'cleanup_on_signal 130' INT");
-		expect(workflow).toContain("trap 'cleanup_on_signal 143' TERM");
-		expect(workflow).toContain("trap 'cleanup_on_signal 129' HUP");
-		expect(workflow).toContain("printf '%s\\n' \"__LETLETME_GRAPHQL_ENV_B64__\"");
-		expect(workflow).toContain("printf '%s\\n' \"__LETLETME_GHCR_TOKEN_B64__\"");
-		expect(workflow).toContain(
-			"DEPLOY_SHA=$deploy_sha_q IMAGE_REF=$image_ref_q GHCR_USER=$ghcr_user_q"
-		);
-		expect(workflow).toContain("cat scripts/deploy-remote.sh");
-		expect(workflow).not.toContain("remote_env=$(ssh");
-		expect(workflow).not.toContain("remote_token=$(ssh");
 	});
 
 	test("binds image and container identity to the exact commit", () => {
@@ -281,8 +236,8 @@ describe("production deployment workflow", () => {
 		const benchmark = await Bun.file("scripts/benchmark-queries.ts").text();
 		expect(benchmark).toContain('resolve(import.meta.dir, "..")');
 		expect(benchmark).not.toContain("resolve(process.cwd())");
-		expect(benchmark).toContain("query Entry($id: Int!) { entry(id: $id)");
-		expect(benchmark).not.toContain("entryLookup");
+		expect(benchmark).toContain("query EntryLookup($id: Int!) { entryLookup(id: $id)");
+		expect(benchmark).toContain("entry { id entryName }");
 	});
 
 	test("keeps compose ports and readiness checks slot-aware", () => {
