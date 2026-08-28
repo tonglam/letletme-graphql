@@ -17,7 +17,6 @@ services:
     environment:
       TZ: Asia/Shanghai
     networks:
-      - default
       - graphql_shared
     logging: *default-logging
     ports:

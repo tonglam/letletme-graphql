@@ -293,6 +293,11 @@ describe("production deployment workflow", () => {
 
 	test("attaches both slots to the shared primary Redis network", () => {
 		expect(compose).toContain("- graphql_shared");
+		// The shared network is also the primary Redis egress path. An implicit
+		// per-slot default network can win Docker's default route and make a
+		// freshly started candidate unable to reach Redis while the active slot
+		// remains healthy.
+		expect(compose).not.toContain("      - default\n");
 		expect(compose).toContain("graphql_shared:");
 		expect(compose).toContain("external: true");
 		expect(compose).toContain("name: ${GRAPHQL_SHARED_NETWORK:-letletme_graphql_default}");
