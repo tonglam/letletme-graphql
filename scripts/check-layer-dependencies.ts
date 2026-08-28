@@ -175,7 +175,25 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 	const declarationScopeFor = (identifier: ts.Identifier, name: string): ts.Node => {
 		let scope: ts.Node | undefined = scopeFor(identifier);
 		while (scope) {
-			if (scopeHasBinding(scope, name)) return scope;
+			if (scopeHasBinding(scope, name)) {
+				const declarations = ts.isVariableStatement(scope)
+					? scope.declarationList.declarations
+					: ts.isForStatement(scope) || ts.isForInStatement(scope) || ts.isForOfStatement(scope)
+						? scope.initializer && ts.isVariableDeclarationList(scope.initializer)
+							? scope.initializer.declarations
+							: undefined
+						: ts.isBlock(scope) || ts.isModuleBlock(scope) || ts.isSourceFile(scope)
+							? scope.statements.flatMap((statement) =>
+									ts.isVariableStatement(statement)
+										? [...statement.declarationList.declarations]
+										: []
+								)
+							: undefined;
+				const declaration = declarations?.find((candidate) =>
+					bindingContains(candidate.name, name)
+				);
+				return declaration ? loaderAliasScopeFor(declaration) : scope;
+			}
 			scope = parentScope(scope);
 		}
 		return scopeFor(identifier);
