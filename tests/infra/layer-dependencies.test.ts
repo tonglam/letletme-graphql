@@ -144,6 +144,20 @@ test("layer checker tracks aliases referenced from earlier function bodies", () 
 	});
 });
 
+test("layer checker resolves transitive loader aliases independent of traversal order", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'function run() { const load2 = load; load2("../domains/entries/service"); } const load = require; run();',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
 test("layer checker does not let an inner same-name binding hide an outer require alias", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.cts",

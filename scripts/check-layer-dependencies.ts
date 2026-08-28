@@ -233,6 +233,7 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		const bindings = namespace
 			? createRequireNamespaceBindingProvenance
 			: createRequireBindingProvenance;
+		if (bindings.some((binding) => binding.name === name && binding.scope === scope)) return;
 		bindings.push({ name, scope });
 	};
 	const isVisibleCreateRequireBinding = (
@@ -411,7 +412,14 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		}
 		ts.forEachChild(node, collectCreateRequireBindings);
 	};
-	collectCreateRequireBindings(sourceFile);
+	// Alias declarations can appear in a function body before the outer alias
+	// they reference. Revisit the source until no new loader name is proven so
+	// detection does not depend on declaration/traversal order.
+	let knownLoaderCount = -1;
+	while (knownLoaderCount !== requireLoaderBindings.size) {
+		knownLoaderCount = requireLoaderBindings.size;
+		collectCreateRequireBindings(sourceFile);
+	}
 	const add = (node: ts.Node, value: string): void => {
 		if (value.startsWith(".")) {
 			const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
