@@ -74,6 +74,34 @@ test("layer checker rejects nonliteral dynamic module specifiers", () => {
 	]);
 });
 
+test("layer checker tracks aliases of the CommonJS require loader", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'const load = require; const loadAgain = load; loadAgain("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
+test("layer checker tracks CommonJS require aliases assigned after declaration", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'let load; load = require; load("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
 test("layer checker rejects createRequire loaders in checked layers", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.ts",

@@ -340,6 +340,37 @@ describe("GraphQL request limits", () => {
 		expect(result.deprecatedSymbolOwners[`field:${valueOffset}`]).toEqual(["LegacyMode.OLD"]);
 	});
 
+	it("keeps fragment-definition directive values owned by active field occurrences", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on FRAGMENT_DEFINITION
+			type Query { parent: Child }
+			type Child { value: String }
+		`);
+		const query = `
+			query Usage($mode: LegacyMode!) {
+				parent { ...ChildFields }
+			}
+			fragment ChildFields on Child @legacy(mode: $mode) { value }
+		`;
+		const result = validateGraphQLRequestLimits(
+			{ query, variables: { mode: "OLD" } },
+			deprecatedKindsSchema
+		);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		const valueOffset = query.indexOf("value }");
+		expect(result.deprecatedSymbolOwners[`field:${valueOffset}`]).toEqual(["LegacyMode.OLD"]);
+	});
+
 	it("keeps live price-change roots public and bounded", () => {
 		for (const query of [
 			"query { priceChangeLiveCursor { revision state } }",

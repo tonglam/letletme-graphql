@@ -573,11 +573,56 @@ const activeDeprecatedTelemetrySelections = (
 	fragments: Set<string>;
 	variables: Set<string>;
 	variableOwners: Map<string, Set<string | undefined>>;
+	fragmentDirectiveOwners: Map<string, Set<string>>;
 } => {
 	const active = new Set<string>();
 	const usedVariables = new Set<string>();
 	const variableOwners = new Map<string, Set<string | undefined>>();
+	const fragmentDirectiveOwners = new Map<string, Set<string>>();
 	const analyzedFragments = new Set<string>();
+	const collectFragmentFieldOwners = (
+		fragmentName: string,
+		seen: ReadonlySet<string> = new Set()
+	): Set<string> => {
+		if (seen.has(fragmentName)) return new Set();
+		const fragment = fragments.get(fragmentName);
+		if (!fragment) return new Set();
+		const nextSeen = new Set(seen);
+		nextSeen.add(fragmentName);
+		const owners = new Set<string>();
+		const collect = (selectionSet: SelectionSetNode): void => {
+			for (const selection of selectionSet.selections) {
+				if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
+				if (selection.kind === Kind.FIELD) {
+					if (selection.loc) owners.add(`field:${selection.loc.start}`);
+					if (selection.selectionSet) collect(selection.selectionSet);
+					continue;
+				}
+				if (selection.kind === Kind.INLINE_FRAGMENT) {
+					collect(selection.selectionSet);
+					continue;
+				}
+				if (nextSeen.has(selection.name.value)) continue;
+				for (const owner of collectFragmentFieldOwners(selection.name.value, nextSeen)) {
+					owners.add(owner);
+				}
+			}
+		};
+		collect(fragment.selectionSet);
+		return owners;
+	};
+	const registerFragmentDirectiveOwners = (fragment: FragmentDefinitionNode): void => {
+		const owners = collectFragmentFieldOwners(fragment.name.value);
+		const registered = fragmentDirectiveOwners.get(fragment.name.value) ?? new Set<string>();
+		for (const owner of owners) registered.add(owner);
+		fragmentDirectiveOwners.set(fragment.name.value, registered);
+		// Variables referenced by a fragment-definition directive are effective
+		// only when one of that fragment's field occurrences executes. Keep the
+		// variable telemetry on those occurrences instead of making it global.
+		for (const owner of owners) {
+			collectDirectiveVariableReferences(fragment.directives, usedVariables, variableOwners, owner);
+		}
+	};
 	const inspect = (selectionSet: SelectionSetNode, currentOwner?: string): void => {
 		for (const selection of selectionSet.selections) {
 			if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
@@ -613,14 +658,9 @@ const activeDeprecatedTelemetrySelections = (
 			if (!reachableFragments.has(fragmentName) || analyzedFragments.has(fragmentName)) continue;
 			const fragment = fragments.get(fragmentName);
 			if (!fragment) continue;
+			registerFragmentDirectiveOwners(fragment);
 			analyzedFragments.add(fragmentName);
 			active.add(fragmentName);
-			collectDirectiveVariableReferences(
-				fragment.directives,
-				usedVariables,
-				variableOwners,
-				undefined
-			);
 			inspect(fragment.selectionSet);
 		}
 	};
@@ -631,7 +671,12 @@ const activeDeprecatedTelemetrySelections = (
 		variableOwners,
 		undefined
 	);
-	return { fragments: active, variables: usedVariables, variableOwners };
+	return {
+		fragments: active,
+		variables: usedVariables,
+		variableOwners,
+		fragmentDirectiveOwners,
+	};
 };
 
 const selectedDeprecatedSymbols = (
@@ -660,6 +705,14 @@ const selectedDeprecatedSymbols = (
 		reachableFragments,
 		variables
 	);
+	const fragmentDirectiveOwners = new Map<DirectiveNode, ReadonlySet<string>>();
+	for (const [fragmentName, owners] of activeSelections.fragmentDirectiveOwners) {
+		const fragment = fragments.get(fragmentName);
+		if (!fragment) continue;
+		for (const directive of fragment.directives ?? []) {
+			fragmentDirectiveOwners.set(directive, owners);
+		}
+	}
 	const selectedDocument = {
 		...document,
 		definitions: document.definitions.filter(
@@ -744,12 +797,19 @@ const selectedDeprecatedSymbols = (
 			Directive(node) {
 				const directive = schema.getDirective(node.name.value);
 				if (!directive) return;
+				const ownersForDirective = fragmentDirectiveOwners.get(node);
 				collectDeprecatedArgumentDefaultsAndValues(
 					node.arguments,
 					directive.args,
 					variables,
 					variableDefaults,
-					(symbol) => addSymbol(symbol, currentFieldOwner())
+					(symbol) => {
+						if (ownersForDirective) {
+							for (const owner of ownersForDirective) addSymbol(symbol, owner);
+							return;
+						}
+						addSymbol(symbol, currentFieldOwner());
+					}
 				);
 			},
 			Argument(node) {

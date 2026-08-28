@@ -129,6 +129,61 @@ test("deprecated usage excludes nested fields skipped by a null parent", async (
 	expect(observed).toEqual([]);
 });
 
+test("deprecated fragment-definition values are not committed when their parent is null", async () => {
+	const observed: string[] = [];
+	const plugin: ApolloServerPlugin<TestContext> = {
+		async requestDidStart() {
+			return {
+				async executionDidStart(requestContext) {
+					return createDeprecatedSchemaUsageExecutionListener<TestContext>({
+						symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+						symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+						globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols,
+						increment: (symbol) => observed.push(symbol),
+					});
+				},
+			};
+		},
+	};
+	const typeDefs = `
+		enum LegacyMode { OLD @deprecated(reason: "Use NEW") NEW }
+		directive @legacy(mode: LegacyMode) on FRAGMENT_DEFINITION
+		type Query { parent: Child }
+		type Child { value: String }
+	`;
+	const server = new ApolloServer<TestContext>({
+		typeDefs,
+		resolvers: { Query: { parent: () => null } },
+		plugins: [plugin],
+	});
+	servers.push(server);
+	await server.start();
+
+	const query = `
+		query Usage($mode: LegacyMode!) {
+			parent { ...ChildFields }
+		}
+		fragment ChildFields on Child @legacy(mode: $mode) { value }
+	`;
+	const limits = validateGraphQLRequestLimits(
+		{ query, variables: { mode: "OLD" } },
+		buildSchema(typeDefs)
+	);
+	if (!limits.ok) throw new Error(limits.message);
+	await server.executeOperation(
+		{ query, variables: { mode: "OLD" } },
+		{
+			contextValue: {
+				deprecatedSymbols: limits.deprecatedSymbols,
+				deprecatedSymbolOwners: limits.deprecatedSymbolOwners,
+				deprecatedSymbolGlobalSymbols: limits.deprecatedSymbolGlobalSymbols,
+			},
+		}
+	);
+
+	expect(observed).toEqual([]);
+});
+
 test("deprecated usage keeps field occurrences separate across response branches", async () => {
 	const observed: string[] = [];
 	const plugin: ApolloServerPlugin<TestContext> = {

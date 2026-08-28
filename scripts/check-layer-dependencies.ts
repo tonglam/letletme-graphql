@@ -43,6 +43,10 @@ const sourceFilesUnder = (directory: string): string[] => {
 
 export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] => {
 	const modules: ModuleSpecifier[] = [];
+	// `require` is an ambient CommonJS loader in `.cts` files. Keep a small
+	// alias set so a checked layer cannot hide a relative import behind
+	// `const load = require; load(...)` (or an equivalent assignment).
+	const requireLoaderBindings = new Set<string>(["require"]);
 	const createRequireBindings = new Set<string>();
 	const createRequireNamespaceBindings = new Set<string>();
 	const moduleSpecifierFromLoader = (initializer: ts.Expression): string | undefined => {
@@ -88,6 +92,14 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		}
 		if (ts.isVariableStatement(node)) {
 			for (const declaration of node.declarationList.declarations) {
+				if (
+					ts.isIdentifier(declaration.name) &&
+					declaration.initializer &&
+					ts.isIdentifier(declaration.initializer) &&
+					requireLoaderBindings.has(declaration.initializer.text)
+				) {
+					requireLoaderBindings.add(declaration.name.text);
+				}
 				const importedModule = declaration.initializer
 					? moduleSpecifierFromLoader(declaration.initializer)
 					: undefined;
@@ -110,6 +122,15 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 					}
 				}
 			}
+		}
+		if (
+			ts.isBinaryExpression(node) &&
+			node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+			ts.isIdentifier(node.left) &&
+			ts.isIdentifier(node.right) &&
+			requireLoaderBindings.has(node.right.text)
+		) {
+			requireLoaderBindings.add(node.left.text);
 		}
 		ts.forEachChild(node, collectCreateRequireBindings);
 	};
@@ -158,7 +179,7 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 				addUnresolvedDynamic(node);
 			}
 			if (
-				(ts.isIdentifier(expression) && expression.text === "require") ||
+				(ts.isIdentifier(expression) && requireLoaderBindings.has(expression.text)) ||
 				(ts.isPropertyAccessExpression(expression) &&
 					ts.isIdentifier(expression.expression) &&
 					expression.expression.text === "module" &&
