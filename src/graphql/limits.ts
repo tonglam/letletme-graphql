@@ -430,9 +430,21 @@ const collectDeprecatedVariableSymbols = (
 const collectDeprecatedSchemaArgumentDefaults = (
 	argumentsList: readonly ArgumentNode[] | undefined,
 	schemaArguments: readonly GraphQLArgument[],
+	variables: Record<string, unknown>,
+	variableDefaults: ReadonlyMap<string, unknown>,
 	symbols: Set<string>
 ): void => {
 	const suppliedArguments = new Set((argumentsList ?? []).map((argument) => argument.name.value));
+	for (const argumentNode of argumentsList ?? []) {
+		if (
+			argumentNode.value.kind !== Kind.VARIABLE ||
+			Object.hasOwn(variables, argumentNode.value.name.value) ||
+			variableDefaults.has(argumentNode.value.name.value)
+		) {
+			continue;
+		}
+		suppliedArguments.delete(argumentNode.name.value);
+	}
 	for (const argument of schemaArguments) {
 		if (suppliedArguments.has(argument.name) || argument.defaultValue === undefined) continue;
 		collectDeprecatedVariableSymbols(argument.defaultValue, argument.type, symbols);
@@ -457,15 +469,26 @@ const collectDeprecatedArgumentDefaultsAndValues = (
 	argumentsList: readonly ArgumentNode[] | undefined,
 	schemaArguments: readonly GraphQLArgument[],
 	variables: Record<string, unknown>,
+	variableDefaults: ReadonlyMap<string, unknown>,
 	symbols: Set<string>
 ): void => {
-	collectDeprecatedSchemaArgumentDefaults(argumentsList, schemaArguments, symbols);
+	collectDeprecatedSchemaArgumentDefaults(
+		argumentsList,
+		schemaArguments,
+		variables,
+		variableDefaults,
+		symbols
+	);
 	const argumentsByName = new Map(schemaArguments.map((argument) => [argument.name, argument]));
+	const effectiveVariables = {
+		...Object.fromEntries(variableDefaults),
+		...variables,
+	};
 	for (const argumentNode of argumentsList ?? []) {
 		collectDeprecatedArgumentValue(
 			argumentNode,
 			argumentsByName.get(argumentNode.name.value),
-			variables,
+			effectiveVariables,
 			symbols
 		);
 	}
@@ -480,10 +503,17 @@ const collectDeprecatedFieldDefaults = (
 	field: ReturnType<TypeInfo["getFieldDef"]>,
 	argumentsList: readonly ArgumentNode[] | undefined,
 	variables: Record<string, unknown>,
+	variableDefaults: ReadonlyMap<string, unknown>,
 	symbols: Set<string>
 ): void => {
 	if (!field) return;
-	collectDeprecatedArgumentDefaultsAndValues(argumentsList, field.args, variables, symbols);
+	collectDeprecatedArgumentDefaultsAndValues(
+		argumentsList,
+		field.args,
+		variables,
+		variableDefaults,
+		symbols
+	);
 };
 
 const executableSelectionIsIncluded = (
@@ -593,8 +623,13 @@ const selectedDeprecatedSymbols = (
 	const typeInfo = new TypeInfo(schema);
 	const symbols = new Set<string>();
 	const variableDefaultValueNodes = new WeakSet<ASTNode>();
+	const variableDefaults = new Map<string, unknown>();
 	for (const definition of operation.variableDefinitions ?? []) {
 		if (!definition.defaultValue) continue;
+		variableDefaults.set(
+			definition.variable.name.value,
+			valueFromASTUntyped(definition.defaultValue)
+		);
 		visit(definition.defaultValue, {
 			enter(node) {
 				variableDefaultValueNodes.add(node);
@@ -609,7 +644,13 @@ const selectedDeprecatedSymbols = (
 					if (!executableSelectionIsIncluded(node.directives, variables)) return false;
 					const parentType = typeInfo.getParentType();
 					const field = typeInfo.getFieldDef();
-					collectDeprecatedFieldDefaults(field, node.arguments, variables, symbols);
+					collectDeprecatedFieldDefaults(
+						field,
+						node.arguments,
+						variables,
+						variableDefaults,
+						symbols
+					);
 					if (parentType && field?.deprecationReason !== undefined) {
 						symbols.add(`${parentType.name}.${node.name.value}`);
 					}
@@ -632,6 +673,7 @@ const selectedDeprecatedSymbols = (
 					node.arguments,
 					directive.args,
 					variables,
+					variableDefaults,
 					symbols
 				);
 			},

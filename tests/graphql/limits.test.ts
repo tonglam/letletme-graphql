@@ -266,6 +266,27 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("applies field argument defaults when an optional variable is omitted", () => {
+		const defaultsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			type Query { example(mode: LegacyMode = OLD): String }
+		`);
+		const query = "query Usage($mode: LegacyMode) { example(mode: $mode) }";
+		expect(validateGraphQLRequestLimits({ query }, defaultsSchema)).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+		});
+		expect(
+			validateGraphQLRequestLimits({ query, variables: { mode: "NEW" } }, defaultsSchema)
+		).toMatchObject({ ok: true, deprecatedSymbols: [] });
+		expect(
+			validateGraphQLRequestLimits({ query, variables: { mode: null } }, defaultsSchema)
+		).toMatchObject({ ok: true, deprecatedSymbols: [] });
+	});
+
 	it("keeps live price-change roots public and bounded", () => {
 		for (const query of [
 			"query { priceChangeLiveCursor { revision state } }",
