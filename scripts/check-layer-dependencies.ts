@@ -57,7 +57,10 @@ export const moduleSpecifiers = (
 			const expression = node.expression;
 			if (
 				(ts.isIdentifier(expression) && expression.text === "require") ||
-				(expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments.length === 1)
+				// Dynamic import may carry a second import-options argument. The
+				// module specifier is still always its first argument, so inspect it
+				// regardless of the options object's presence.
+				(expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments.length >= 1)
 			) {
 				const argument = node.arguments[0];
 				if (argument && ts.isStringLiteralLike(argument)) add(argument, argument.text);

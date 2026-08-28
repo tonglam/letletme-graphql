@@ -35,7 +35,10 @@ const generated = [
 		const conditional = entry.conditionalAuth
 			.map((rule) => `${rule.field}: ${rule.argument}=${String(rule.equals)} -> ${rule.access}`)
 			.join(", ");
-		return `| ${entry.name} | ${entry.typeDefsModules.map((module) => `\`${module}\``).join("<br>")} | ${entry.resolversModules.map((module) => `\`${module}\``).join("<br>") || "none"} | ${entry.rootFields.join(", ")} | ${entry.auth.join(", ") || "none"}${conditional ? `<br>conditional: ${conditional}` : ""} | ${budgets} |`;
+		const perRootAuth = Object.entries(entry.authByRootField)
+			.map(([field, accesses]) => `${field}=${accesses.join("+")}`)
+			.join(", ");
+		return `| ${entry.name} | ${entry.typeDefsModules.map((module) => `\`${module}\``).join("<br>")} | ${entry.resolversModules.map((module) => `\`${module}\``).join("<br>") || "none"} | ${entry.rootFields.join(", ")} | ${entry.auth.join(", ") || "none"}${conditional ? `<br>conditional: ${conditional}` : ""}<br>by field: ${perRootAuth} | ${budgets} |`;
 	}),
 	end,
 ].join("\n");

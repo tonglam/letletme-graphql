@@ -676,7 +676,12 @@ const heavyRootCost = (
 		if (field.name === "calcLivePointsForEntries") {
 			return total + Math.max(10, field.uniqueEntryCount ?? 0);
 		}
-		return total + (ROOT_RATE_LIMIT_FLOORS.get(field.name) ?? 0);
+		// The effective floor includes bounded-public roots whose registered
+		// value is intentionally lower than the work they expose (for example,
+		// `teams` is registered at 2 but must cost at least 5).  Use the same
+		// effective value for mixed operations as for a bounded-only operation;
+		// otherwise adding a cheap sibling root would bypass the bounded floor.
+		return total + effectiveRootRateLimitFloor(field.name);
 	}, 0);
 
 const accepted = ({

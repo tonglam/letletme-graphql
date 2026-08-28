@@ -19,6 +19,8 @@ export type GraphQLDomainManifestEntry = Readonly<{
 	resolversModules: readonly string[];
 	rootFields: readonly string[];
 	auth: readonly RootFieldAccess[];
+	/** Effective authorization classes for each executable root in this domain. */
+	authByRootField: Readonly<Record<string, readonly RootFieldAccess[]>>;
 	conditionalAuth: readonly GraphQLConditionalAuth[];
 	rateLimitBudget: Readonly<Record<string, number>>;
 }>;
@@ -39,12 +41,18 @@ const domain = (
 			...condition,
 		}))
 	);
-	const auth = Array.from(
-		new Set([
-			...rootFields.map((field) => ROOT_FIELD_POLICIES.get(field)?.access).filter(Boolean),
-			...conditionalAuth.map((condition) => condition.access),
-		])
-	) as RootFieldAccess[];
+	const authByRootField = Object.fromEntries(
+		rootFields.map((field) => {
+			const accesses = new Set<RootFieldAccess>();
+			const staticAccess = ROOT_FIELD_POLICIES.get(field)?.access;
+			if (staticAccess) accesses.add(staticAccess);
+			for (const condition of ROOT_FIELD_CONDITIONAL_ACCESS.get(field) ?? []) {
+				accesses.add(condition.access);
+			}
+			return [field, [...accesses] as readonly RootFieldAccess[]];
+		})
+	) as Readonly<Record<string, readonly RootFieldAccess[]>>;
+	const auth = Array.from(new Set(Object.values(authByRootField).flat())) as RootFieldAccess[];
 	const rateLimitBudget = Object.fromEntries(
 		rootFields.map((field) => [field, effectiveRootRateLimitFloor(field)])
 	);
@@ -54,6 +62,7 @@ const domain = (
 		resolversModules: moduleFiles.resolvers.map((file) => `${moduleRoot}/${file}`),
 		rootFields,
 		auth,
+		authByRootField,
 		conditionalAuth,
 		rateLimitBudget,
 	};
@@ -204,7 +213,22 @@ export const validateGraphQLDomainManifest = (schema: GraphQLSchema): readonly s
 	const errors: string[] = [];
 	const seen = new Set<string>();
 	const executableFields = executableSchemaRootFields(schema);
+	const expectedAuthFor = (field: string): ReadonlySet<RootFieldAccess> => {
+		const expected = new Set<RootFieldAccess>();
+		const staticAccess = ROOT_FIELD_POLICIES.get(field)?.access;
+		if (staticAccess) expected.add(staticAccess);
+		for (const condition of ROOT_FIELD_CONDITIONAL_ACCESS.get(field) ?? []) {
+			expected.add(condition.access);
+		}
+		return expected;
+	};
 	for (const entry of GRAPHQL_DOMAIN_MANIFEST) {
+		const declaredAuthFields = new Set(Object.keys(entry.authByRootField));
+		for (const field of declaredAuthFields) {
+			if (!entry.rootFields.includes(field)) {
+				errors.push(`auth mapping is not a declared root field: ${field}`);
+			}
+		}
 		for (const field of entry.rootFields) {
 			if (seen.has(field)) errors.push(`duplicate root field: ${field}`);
 			seen.add(field);
@@ -213,6 +237,23 @@ export const validateGraphQLDomainManifest = (schema: GraphQLSchema): readonly s
 			if (!ROOT_FIELD_POLICIES.has(field)) errors.push(`unclassified root field: ${field}`);
 			if (!(field in entry.rateLimitBudget)) errors.push(`missing rate-limit budget: ${field}`);
 			if (entry.rateLimitBudget[field] < 1) errors.push(`invalid rate-limit floor: ${field}`);
+			const expectedAuth = expectedAuthFor(field);
+			const actualAuth = entry.authByRootField[field];
+			if (!actualAuth) {
+				errors.push(`missing per-root auth mapping: ${field}`);
+			} else {
+				const actual = new Set(actualAuth);
+				for (const access of expectedAuth) {
+					if (!actual.has(access)) {
+						errors.push(`missing per-root auth class: ${field} -> ${access}`);
+					}
+				}
+				for (const access of actual) {
+					if (!expectedAuth.has(access)) {
+						errors.push(`unexpected per-root auth class: ${field} -> ${access}`);
+					}
+				}
+			}
 		}
 	}
 	for (const field of ROOT_FIELD_POLICIES.keys()) {

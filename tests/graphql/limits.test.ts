@@ -215,6 +215,15 @@ describe("GraphQL request limits", () => {
 		}
 	});
 
+	it("preserves bounded floors when a bounded root is mixed with ordinary roots", () => {
+		const result = validateGraphQLRequestLimits({ query: "query { teams { id } _empty }" }, schema);
+		expect(result).toMatchObject({ ok: true, rootFields: ["teams", "_empty"] });
+		if (!result.ok) throw new Error(result.message);
+		// `teams` is registered at 2 but its bounded effective floor is 5;
+		// `_empty` contributes its normal one-unit root floor.
+		expect(result.rateLimitCostUnits).toBeGreaterThanOrEqual(6);
+	});
+
 	it("identifies a fixture-only read before resolver execution", () => {
 		const result = validateGraphQLRequestLimits({
 			query: "query CoreEventFixtureSchedule { eventFixtures(eventId: 1) { id } }",

@@ -335,7 +335,9 @@ describe("production deployment workflow", () => {
 		expect(query).toBeTruthy();
 		expect(validateGraphQLRequestLimits({ query })).toMatchObject({
 			ok: true,
-			rateLimitCostUnits: 2,
+			// currentEventInfo is a bounded public root and keeps its effective
+			// five-unit floor even when mixed with the ordinary events root.
+			rateLimitCostUnits: 6,
 		});
 		expect(p0Probe).toContain('P0_PROBE_REQUESTS ?? "700"');
 		expect(p0Probe).toContain("unexpected");

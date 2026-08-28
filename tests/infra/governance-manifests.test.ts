@@ -54,6 +54,20 @@ describe("GraphQL domain manifest", () => {
 		expect(miniProgram?.rateLimitBudget.miniProgramNotice).toBe(5);
 		const entryLive = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "entry-live");
 		expect(entryLive?.rateLimitBudget.calcLivePointsForEntries).toBe(10);
+		expect(players?.authByRootField).toMatchObject({
+			players: ["public"],
+			teams: ["public"],
+		});
+		expect(
+			GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "home")?.authByRootField
+		).toMatchObject({
+			homePublicBootstrap: ["public"],
+			homePersonalDesk: ["viewerEntry"],
+		});
+		expect(trends?.authByRootField).toMatchObject({
+			trendCohorts: ["public", "viewerEntry"],
+			trendCohortSnapshot: ["public", "viewerEntry"],
+		});
 	});
 });
 

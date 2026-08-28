@@ -28,6 +28,19 @@ test("layer checker recognizes static template literals in dynamic imports and r
 	]);
 });
 
+test("layer checker recognizes dynamic imports with import options", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'const service = import("../domains/entries/service", { with: {} });',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
+	]);
+});
+
 test("layer checker recognizes TypeScript import-type expressions", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.ts",
