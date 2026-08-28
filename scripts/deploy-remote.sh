@@ -318,7 +318,7 @@ compose exec -T \
   -e PUBLIC_GRAPHQL_HEALTH_URL="$PUBLIC_GRAPHQL_HEALTH_URL" \
   -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" \
   graphql bun -e '
-  const expectedOrigin = "https://letletme.top";
+  const expectedOrigin = "https://api.letletme.top";
   const validate = (name, raw, expectedPathname) => {
     let parsed;
     try {
