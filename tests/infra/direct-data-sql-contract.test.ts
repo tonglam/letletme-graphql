@@ -81,6 +81,12 @@ const mockBriefingPayload = {
 	sections: [],
 } as const;
 
+const mockBriefingFallbackRow = {
+	payload: mockBriefingPayload,
+	payload_bytes: 302,
+	payload_sha256: "c5edbdd3f6b66c7ee01dfd4c8734f484b0e148eab0c7de0de9b0c434274db0d5",
+} as const;
+
 const mockCompetitionAggregatePayload = {
 	eventId: 1,
 	entryCount: 1,
@@ -149,46 +155,59 @@ const mockPriceChangePublication = {
 			name,
 			key: `llm:data:fpl:price-changes:2627:1:${name}`,
 			type: "string",
-			count: 1,
-			bytes: 1,
-			sha256: "0".repeat(64),
+			count: name === "context" ? 9 : 1,
+			bytes: name === "context" ? 294 : 402,
+			sha256:
+				name === "context"
+					? "8203cdbf5fdd4ab5244fd34ee092b54567f05f23991553f9fa06bb6ad3d0b8f3"
+					: "a7c6d5db29d03c28c312029d420f6a8554f458d25be6d0db602966bd32ad1cc6",
 		})),
 	},
-	items: {
-		context: {
-			schemaVersion: 1,
-			source: "FPL_BOOTSTRAP",
-			fetchedAt: "2026-08-10T00:00:00.000Z",
-			staleAt: "2026-08-10T00:10:00.000Z",
-			hardExpiresAt: "2026-08-10T01:00:00.000Z",
-			deadline: "2026-08-10T00:30:00.000Z",
-			nextDeadlines: ["2026-08-10T00:30:00.000Z"],
-			expectedPlayerCount: 1,
-			observedPlayerCount: 1,
-		},
-		players: [
-			{
-				playerId: 1,
-				playerCode: 1,
-				webName: "Contract Player",
-				teamId: 1,
-				teamName: "Contract Team",
-				teamShortName: "GCT",
-				position: "GKP",
-				currentPrice: 50,
-				selectedByPercent: 1,
-				progressPercent: 0,
-				hourlyRate: 0,
-				status: "UNLIKELY",
-				ownershipTrend: "FLAT",
-				transfersInEvent: 0,
-				transfersOutEvent: 0,
-				lockedUntil: null,
-				calibrating: false,
-				projections: [{ offset: 0, projectedPercent: 0, likelihood: 0 }],
+	item_rows: [
+		{
+			name: "context",
+			itemCount: 9,
+			checksum: "8203cdbf5fdd4ab5244fd34ee092b54567f05f23991553f9fa06bb6ad3d0b8f3",
+			payload: {
+				schemaVersion: 1,
+				source: "FPL_BOOTSTRAP",
+				fetchedAt: "2026-08-10T00:00:00.000Z",
+				staleAt: "2026-08-10T00:10:00.000Z",
+				hardExpiresAt: "2026-08-10T01:00:00.000Z",
+				deadline: "2026-08-10T00:30:00.000Z",
+				nextDeadlines: ["2026-08-10T00:30:00.000Z"],
+				expectedPlayerCount: 1,
+				observedPlayerCount: 1,
 			},
-		],
-	},
+		},
+		{
+			name: "players",
+			itemCount: 1,
+			checksum: "a7c6d5db29d03c28c312029d420f6a8554f458d25be6d0db602966bd32ad1cc6",
+			payload: [
+				{
+					playerId: 1,
+					playerCode: 1,
+					webName: "Contract Player",
+					teamId: 1,
+					teamName: "Contract Team",
+					teamShortName: "GCT",
+					position: "GKP",
+					currentPrice: 50,
+					selectedByPercent: 1,
+					progressPercent: 0,
+					hourlyRate: 0,
+					status: "UNLIKELY",
+					ownershipTrend: "FLAT",
+					transfersInEvent: 0,
+					transfersOutEvent: 0,
+					lockedUntil: null,
+					calibrating: false,
+					projections: [{ offset: 0, projectedPercent: 0, likelihood: 0 }],
+				},
+			],
+		},
+	],
 } as const;
 
 const mockBriefingMetadata = {
@@ -206,7 +225,10 @@ const mockBriefingMetadata = {
 	published_at: "2026-08-10T00:00:00.000Z",
 	valid_until: null,
 	locale_manifest: {
-		en: { bytes: 0, sha256: "0".repeat(64) },
+		en: {
+			bytes: 302,
+			sha256: "c5edbdd3f6b66c7ee01dfd4c8734f484b0e148eab0c7de0de9b0c434274db0d5",
+		},
 		"zh-CN": { bytes: 0, sha256: "0".repeat(64) },
 	},
 } as const;
@@ -309,6 +331,26 @@ const mockMarketRow = {
 	previous_news: null,
 	previous_chance_this_round: null,
 	previous_chance_next_round: null,
+} as const;
+
+const mockPlayerStateRevision = {
+	revision: "1",
+	method_version: "1",
+	source_updated_at: "2026-08-10T00:00:00.000Z",
+	refreshed_at: "2026-08-10T00:00:00.000Z",
+} as const;
+
+const mockHistoricalTeam = {
+	player_code: 26001,
+	team_id: 1,
+} as const;
+
+const mockSetupStatus = {
+	setup_status: "ready",
+	setup_phase: "ready",
+	setup_progress_updated_at: "2026-08-10T00:00:00.000Z",
+	standings_ready_at: "2026-08-10T00:00:00.000Z",
+	insights_ready_at: "2026-08-10T00:00:00.000Z",
 } as const;
 
 const mockCoreFallbackRow = (() => {
@@ -540,7 +582,7 @@ describe("direct Data SQL contract", () => {
 					(probe) => probe.runtime && probe.sql === text
 				);
 				if (runtimeProbe?.runtime === "must-return-briefing") {
-					return { rows: [{ payload: mockBriefingPayload }] } as unknown as QueryResult<Row>;
+					return { rows: [mockBriefingFallbackRow] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-briefing-metadata") {
 					return { rows: [mockBriefingMetadata] } as unknown as QueryResult<Row>;
@@ -570,6 +612,15 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-revision") {
+					return { rows: [mockPlayerStateRevision] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-historical-team") {
+					return { rows: [mockHistoricalTeam] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-setup-status") {
+					return { rows: [mockSetupStatus] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
 					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
@@ -608,19 +659,21 @@ describe("direct Data SQL contract", () => {
 		const metadata = DIRECT_DATA_SQL_CONTRACT.find(
 			(probe) => probe.name === "briefing.active-metadata"
 		);
-		expect(metadata?.resultTypes).toEqual([
-			expect.objectContaining({
-				relation: "content.briefing_active_publication",
-				column: "servable",
-				pgType: "boolean",
-			}),
-			expect.objectContaining({
-				relation: "content.briefing_active_publication",
-				column: "locale_manifest",
-				pgType: "jsonb",
-				acceptedPgTypes: ["json", "jsonb"],
-			}),
-		]);
+		expect(metadata?.resultTypes).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					relation: "content.briefing_active_publication",
+					column: "servable",
+					pgType: "boolean",
+				}),
+				expect.objectContaining({
+					relation: "content.briefing_active_publication",
+					column: "locale_manifest",
+					pgType: "jsonb",
+					acceptedPgTypes: ["json", "jsonb"],
+				}),
+			])
+		);
 	});
 
 	test("always keeps the primary PostgreSQL type in the accepted type set", () => {
@@ -768,7 +821,7 @@ describe("direct Data SQL contract", () => {
 					(probe) => probe.runtime && probe.sql === text
 				);
 				if (runtimeProbe?.runtime === "must-return-briefing") {
-					return { rows: [{ payload: mockBriefingPayload }] } as unknown as QueryResult<Row>;
+					return { rows: [mockBriefingFallbackRow] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-briefing-metadata") {
 					return { rows: [mockBriefingMetadata] } as unknown as QueryResult<Row>;
@@ -810,6 +863,15 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-revision") {
+					return { rows: [mockPlayerStateRevision] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-historical-team") {
+					return { rows: [mockHistoricalTeam] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-setup-status") {
+					return { rows: [mockSetupStatus] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-tournament") {
 					return {
@@ -874,7 +936,7 @@ describe("direct Data SQL contract", () => {
 					(probe) => probe.runtime && probe.sql === text
 				);
 				if (runtimeProbe?.runtime === "must-return-briefing") {
-					return { rows: [{ payload: mockBriefingPayload }] } as unknown as QueryResult<Row>;
+					return { rows: [mockBriefingFallbackRow] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-briefing-metadata") {
 					return { rows: [mockBriefingMetadata] } as unknown as QueryResult<Row>;
@@ -904,6 +966,15 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-revision") {
+					return { rows: [mockPlayerStateRevision] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-historical-team") {
+					return { rows: [mockHistoricalTeam] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-setup-status") {
+					return { rows: [mockSetupStatus] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
 					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
@@ -1057,6 +1128,9 @@ describe("direct Data SQL contract", () => {
 					probe.runtime === "must-return-briefing-metadata" ||
 					probe.runtime === "must-return-live" ||
 					probe.runtime === "must-return-market" ||
+					probe.runtime === "must-return-player-state-revision" ||
+					probe.runtime === "must-return-historical-team" ||
+					probe.runtime === "must-return-setup-status" ||
 					probe.runtime === "must-return-tournament" ||
 					probe.runtime === "must-return-selection-row"
 			)

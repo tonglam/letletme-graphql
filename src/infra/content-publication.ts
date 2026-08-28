@@ -325,6 +325,26 @@ export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		resultTypes: [
 			{
 				relation: "content.briefing_active_publication",
+				column: "deadline_time",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "content.briefing_active_publication",
+				column: "source_checked_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "content.briefing_active_publication",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "content.briefing_active_publication",
+				column: "valid_until",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "content.briefing_active_publication",
 				column: "servable",
 				pgType: "boolean",
 			},
@@ -333,6 +353,17 @@ export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 				column: "locale_manifest",
 				pgType: "jsonb",
 				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{
+				relation: "content.publication_payloads",
+				column: "payload_bytes",
+				pgType: "integer",
+			},
+			{
+				relation: "content.publication_payloads",
+				column: "payload_sha256",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
 			},
 		],
 	},
@@ -384,6 +415,32 @@ const validateAgainstMetadata = (
 		Buffer.byteLength(canonicalRaw, "utf8") === Number(manifest.bytes) &&
 		sha256(canonicalRaw) === manifest.sha256
 	);
+};
+
+/**
+ * Decode one PostgreSQL fallback row using the same payload integrity checks
+ * as the production reader. The direct Data contract calls this helper with
+ * a real authority row, so a schema-compatible JSON value cannot hide a
+ * payload checksum, byte-count, publication, or revision mismatch.
+ */
+export const parseBriefingFallbackRow = (
+	row: unknown,
+	locale: BriefingLocale,
+	metadata: ActiveMetadata
+): BriefingWeekPayload | null => {
+	if (!isRecord(row)) return null;
+	const payload = parseBriefingWeekPayload(row.payload, locale);
+	if (!payload) return null;
+	const manifest = metadata.locale_manifest[locale];
+	if (!manifest || typeof row.payload_sha256 !== "string") return null;
+	const canonicalRaw = serialized(payload);
+	if (
+		Number(row.payload_bytes) !== Buffer.byteLength(canonicalRaw, "utf8") ||
+		row.payload_sha256 !== manifest.sha256
+	) {
+		return null;
+	}
+	return validateAgainstMetadata(payload, locale, metadata, canonicalRaw) ? payload : null;
 };
 
 export type BriefingWeekRead = {
@@ -563,16 +620,7 @@ export async function readBriefingWeek(
 				payload_sha256: string;
 			}>(BRIEFING_PAYLOAD_FALLBACK_SQL, [metadata.publication_id, locale]);
 			const row = fallback.rows[0];
-			const parsed = row ? parseBriefingWeekPayload(row.payload, locale) : null;
-			const manifest = metadata.locale_manifest[locale];
-			if (
-				parsed &&
-				manifest &&
-				Number(row.payload_bytes) === Buffer.byteLength(serialized(parsed), "utf8") &&
-				row.payload_sha256 === manifest.sha256 &&
-				validateAgainstMetadata(parsed, locale, metadata, serialized(parsed))
-			)
-				payload = parsed;
+			payload = row ? parseBriefingFallbackRow(row, locale, metadata) : null;
 			if (payload && !redisUnavailable) recordReaderEvent("repair");
 		} catch {
 			return {

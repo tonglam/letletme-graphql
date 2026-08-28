@@ -462,6 +462,24 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.competition-setup-status",
 		sql: MY_FPL_COMPETITION_SETUP_STATUS_SQL,
 		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID],
+		runtime: "must-return-setup-status",
+		resultTypes: [
+			{
+				relation: "competition.tournaments",
+				column: "setup_progress_updated_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.tournaments",
+				column: "standings_ready_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.tournaments",
+				column: "insights_ready_at",
+				pgType: "timestamp with time zone",
+			},
+		],
 	},
 ];
 

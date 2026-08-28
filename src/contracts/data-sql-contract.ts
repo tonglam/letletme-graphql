@@ -37,6 +37,9 @@ export type DataSqlContractProbe = Readonly<{
 		| "must-return-briefing-metadata"
 		| "must-return-live"
 		| "must-return-market"
+		| "must-return-player-state-revision"
+		| "must-return-historical-team"
+		| "must-return-setup-status"
 		| "must-return-tournament"
 		| "must-return-selection-row";
 }>;

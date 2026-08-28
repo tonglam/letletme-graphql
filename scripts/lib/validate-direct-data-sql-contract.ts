@@ -23,9 +23,10 @@ import { PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/public
 import { TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/trends/repository";
 import {
 	BRIEFING_DATA_SQL_CONTRACT,
+	BRIEFING_ACTIVE_METADATA_SQL,
 	BRIEFING_CONTRACT_PUBLICATION_ID,
 	parseBriefingActiveMetadata,
-	parseBriefingWeekPayload,
+	parseBriefingFallbackRow,
 } from "../../src/infra/content-publication";
 import {
 	DATA_SNAPSHOT_DATA_SQL_CONTRACT,
@@ -36,9 +37,8 @@ import {
 import type { QueryExecutor } from "../../src/infra/database";
 import {
 	PRICE_CHANGE_DATA_SQL_CONTRACT,
-	parsePublicationBoard,
+	parsePriceChangeContractRow,
 } from "../../src/infra/price-change-predictions-client";
-import { parseDataPublicationManifest } from "../../src/infra/data-publication";
 
 export const DIRECT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	...BRIEFING_DATA_SQL_CONTRACT,
@@ -66,6 +66,11 @@ type ResultTypeRow = {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isValidTimestamp = (value: unknown): boolean => {
+	if (value instanceof Date) return Number.isFinite(value.getTime());
+	return typeof value === "string" && Number.isFinite(Date.parse(value));
+};
 
 const CONTRACT_SEASON_CODE = "2627";
 const CONTRACT_ENTRY_ID = 1;
@@ -153,13 +158,15 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					throw new Error("runtime reader role cannot see the Data-owned authority fixture row");
 				}
 				if (probe.runtime === "must-return-briefing") {
-					const payload = (result.rows[0] as { payload?: unknown }).payload;
-					const parsed = parseBriefingWeekPayload(payload, "en");
-					if (
-						!parsed ||
-						parsed.publicationId !== String(probe.values[0]) ||
-						parsed.locale !== String(probe.values[1])
-					) {
+					const metadataResult = await database.query(BRIEFING_ACTIVE_METADATA_SQL, ["week"]);
+					const metadata = metadataResult.rows[0]
+						? parseBriefingActiveMetadata(metadataResult.rows[0], BRIEFING_CONTRACT_PUBLICATION_ID)
+						: null;
+					const locale =
+						probe.values[1] === "en" || probe.values[1] === "zh-CN" ? probe.values[1] : null;
+					const parsed =
+						metadata && locale ? parseBriefingFallbackRow(result.rows[0], locale, metadata) : null;
+					if (!parsed || parsed.publicationId !== String(probe.values[0])) {
 						throw new Error(
 							"runtime reader role returned a Briefing payload that the production decoder rejects"
 						);
@@ -196,30 +203,7 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					}
 				}
 				if (probe.runtime === "must-return-price-change") {
-					const row = result.rows[0] as {
-						publication_id?: unknown;
-						revision?: unknown;
-						manifest?: unknown;
-						items?: unknown;
-					};
-					const rawManifest =
-						typeof row.manifest === "string" ? row.manifest : JSON.stringify(row.manifest);
-					const manifest = rawManifest ? parseDataPublicationManifest(rawManifest) : null;
-					const items = isRecord(row.items) ? row.items : null;
-					const context = items && isRecord(items.context) ? items.context : null;
-					const now =
-						context && typeof context.fetchedAt === "string"
-							? new Date(context.fetchedAt)
-							: new Date();
-					const board =
-						manifest &&
-						items &&
-						typeof row.publication_id === "string" &&
-						Number(row.revision) === manifest.revision &&
-						manifest.publicationId === row.publication_id &&
-						Number.isFinite(now.getTime())
-							? parsePublicationBoard({ manifest, items }, now)
-							: null;
+					const board = parsePriceChangeContractRow(result.rows[0]);
 					if (!board) {
 						throw new Error(
 							"runtime reader role returned a price-change publication that the production decoder rejects"
@@ -302,6 +286,64 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 						throw new Error(
 							"runtime reader role returned a market payload that the production decoder rejects"
 						);
+					}
+				}
+				if (probe.runtime === "must-return-player-state-revision") {
+					const row = result.rows[0] as {
+						revision?: unknown;
+						method_version?: unknown;
+						source_updated_at?: unknown;
+						refreshed_at?: unknown;
+					};
+					if (
+						!Number.isSafeInteger(Number(row.revision)) ||
+						Number(row.revision) <= 0 ||
+						typeof row.method_version !== "string" ||
+						row.method_version.trim() === "" ||
+						!isValidTimestamp(row.source_updated_at) ||
+						!isValidTimestamp(row.refreshed_at)
+					) {
+						throw new Error(
+							"runtime reader role returned an invalid Player State dataset revision row"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-historical-team") {
+					const requestedPlayers = Array.isArray(probe.values[1]) ? probe.values[1] : [];
+					const expectedPlayerCode = Number(requestedPlayers[0]);
+					const hasExpectedMapping = result.rows.some((row) => {
+						const mapping = row as { player_code?: unknown; team_id?: unknown };
+						return (
+							Number(mapping.player_code) === expectedPlayerCode &&
+							Number.isInteger(Number(mapping.team_id)) &&
+							Number(mapping.team_id) > 0
+						);
+					});
+					if (!hasExpectedMapping) {
+						throw new Error(
+							"runtime reader role cannot see the expected historical-team mapping fixture"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-setup-status") {
+					const row = result.rows[0] as {
+						setup_status?: unknown;
+						setup_phase?: unknown;
+						setup_progress_updated_at?: unknown;
+						standings_ready_at?: unknown;
+						insights_ready_at?: unknown;
+					};
+					if (
+						typeof row.setup_status !== "string" ||
+						row.setup_status.trim() === "" ||
+						typeof row.setup_phase !== "string" ||
+						row.setup_phase.trim() === "" ||
+						(row.setup_progress_updated_at !== null &&
+							!isValidTimestamp(row.setup_progress_updated_at)) ||
+						(row.standings_ready_at !== null && !isValidTimestamp(row.standings_ready_at)) ||
+						(row.insights_ready_at !== null && !isValidTimestamp(row.insights_ready_at))
+					) {
+						throw new Error("runtime reader role returned an invalid tournament setup-status row");
 					}
 				}
 				if (probe.runtime === "must-return-snapshot-entry") {

@@ -623,6 +623,80 @@ const payloadCount = (value: unknown): number => {
 
 const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 
+type PriceChangeContractItemRow = Readonly<{
+	name?: unknown;
+	payload?: unknown;
+	itemCount?: unknown;
+	checksum?: unknown;
+}>;
+
+/**
+ * Decode the immutable Price Change publication row returned by the direct
+ * Data contract. This is deliberately the same manifest, payload, count,
+ * checksum, and board decoder used by the PostgreSQL fallback path.
+ */
+export const parsePriceChangeContractRow = (value: unknown): PriceChangeBoard | null => {
+	if (!isRecord(value)) return null;
+	const rawManifest =
+		typeof value.manifest === "string" ? value.manifest : (JSON.stringify(value.manifest) ?? "");
+	const manifest = parseDataPublicationManifest(rawManifest, {
+		dataset: PRICE_CHANGE_DATASET,
+		seasonCode: "2627",
+	});
+	if (
+		!manifest ||
+		manifest.eventId !== null ||
+		manifest.state !== "active" ||
+		manifest.items.length !== PRICE_CHANGE_ITEMS.length ||
+		manifest.items
+			.map((item) => item.name)
+			.sort()
+			.join(",") !== [...PRICE_CHANGE_ITEMS].sort().join(",") ||
+		typeof value.publication_id !== "string" ||
+		manifest.publicationId !== value.publication_id ||
+		Number(value.revision) !== manifest.revision
+	) {
+		return null;
+	}
+	if (!Array.isArray(value.item_rows)) return null;
+	const items: Record<string, unknown> = {};
+	const seen = new Set<string>();
+	for (const candidate of value.item_rows as PriceChangeContractItemRow[]) {
+		if (!isRecord(candidate) || typeof candidate.name !== "string") return null;
+		const itemName = candidate.name;
+		if (
+			seen.has(itemName) ||
+			!PRICE_CHANGE_ITEMS.includes(itemName as (typeof PRICE_CHANGE_ITEMS)[number]) ||
+			typeof candidate.checksum !== "string"
+		) {
+			return null;
+		}
+		const manifestItem = manifest.items.find((item) => item.name === itemName);
+		if (!manifestItem || candidate.checksum !== manifestItem.sha256) return null;
+		let payload: unknown = candidate.payload;
+		try {
+			payload = typeof payload === "string" ? JSON.parse(payload) : payload;
+			const serialized = canonicalJson(payload);
+			if (
+				Number(candidate.itemCount) !== manifestItem.count ||
+				payloadCount(payload) !== manifestItem.count ||
+				Buffer.byteLength(serialized, "utf8") !== manifestItem.bytes ||
+				sha256(serialized) !== manifestItem.sha256
+			) {
+				return null;
+			}
+		} catch {
+			return null;
+		}
+		seen.add(itemName);
+		items[itemName] = payload;
+	}
+	if (seen.size !== PRICE_CHANGE_ITEMS.length) return null;
+	const context = parseContext(items.context);
+	if (!context) return null;
+	return parsePublicationBoard({ manifest, items }, new Date(context.fetchedAt));
+};
+
 type PublicationCandidateRow = QueryResultRow & {
 	publication_id: string;
 	revision: string | number;
@@ -730,12 +804,16 @@ export const PRICE_CHANGE_PUBLICATION_CONTRACT_SQL = `
 	), items AS (
 		SELECT publication_id::text AS publication_id,
 			COALESCE(
-				jsonb_object_agg(
-					item_name,
-					payload::jsonb
+				jsonb_agg(
+					jsonb_build_object(
+						'name', item_name,
+						'payload', payload::jsonb,
+						'itemCount', item_count,
+						'checksum', checksum
+					)
 					ORDER BY item_name
 				) FILTER (WHERE item_name IS NOT NULL),
-				'{}'::jsonb
+				'[]'::jsonb
 			) AS items
 		FROM ops.dataset_publication_items
 		WHERE publication_id = $1::uuid
@@ -745,7 +823,7 @@ export const PRICE_CHANGE_PUBLICATION_CONTRACT_SQL = `
 		publication.revision,
 		publication.status,
 		publication.manifest,
-		COALESCE(items.items, '{}'::jsonb) AS items
+		COALESCE(items.items, '[]'::jsonb) AS item_rows
 	FROM publication
 	LEFT JOIN items USING (publication_id)
 `;

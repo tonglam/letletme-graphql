@@ -334,6 +334,30 @@ export const PLAYER_STATE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "player-state.dataset-revision",
 		sql: PLAYER_STATE_DATASET_REVISION_SQL,
 		values: [],
+		runtime: "must-return-player-state-revision",
+		resultTypes: [
+			{
+				relation: "reporting.player_state_dataset_metadata",
+				column: "revision",
+				pgType: "bigint",
+			},
+			{
+				relation: "reporting.player_state_dataset_metadata",
+				column: "method_version",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "reporting.player_state_dataset_metadata",
+				column: "source_updated_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "reporting.player_state_dataset_metadata",
+				column: "refreshed_at",
+				pgType: "timestamp with time zone",
+			},
+		],
 	},
 	{
 		name: "player-state.season-rows",

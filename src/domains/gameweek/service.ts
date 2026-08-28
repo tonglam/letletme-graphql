@@ -35,12 +35,22 @@ export const GAMEWEEK_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "gameweek.historical-team-exact",
 		sql: GAMEWEEK_HISTORICAL_TEAM_EXACT_SQL,
-		values: [1, [10_001], 1],
+		values: [2026, [26_001], 1],
+		runtime: "must-return-historical-team",
+		resultTypes: [
+			{ relation: "fpl.player_fixture_stats", column: "player_code", pgType: "integer" },
+			{ relation: "fpl.player_fixture_stats", column: "team_id", pgType: "integer" },
+		],
 	},
 	{
 		name: "gameweek.historical-team-as-of",
 		sql: GAMEWEEK_HISTORICAL_TEAM_AS_OF_SQL,
-		values: [1, [10_001], 1],
+		values: [2026, [26_001], 1],
+		runtime: "must-return-historical-team",
+		resultTypes: [
+			{ relation: "fpl.player_fixture_stats", column: "player_code", pgType: "integer" },
+			{ relation: "fpl.player_fixture_stats", column: "team_id", pgType: "integer" },
+		],
 	},
 ];
 
