@@ -167,7 +167,7 @@ compose up -d --no-deps --no-build --force-recreate graphql
 
 candidate_url="http://127.0.0.1:$candidate_port"
 candidate_ready=false
-for attempt in $(seq 1 "$CANDIDATE_READY_ATTEMPTS"); do
+for _ in $(seq 1 "$CANDIDATE_READY_ATTEMPTS"); do
   if candidate_health=$(curl --fail --silent --show-error --max-time 3 "$candidate_url/health/ready"); then
     if jq -e --arg revision "$DEPLOY_SHA" \
       '.status == "ok" and .revision == $revision' <<<"$candidate_health" >/dev/null; then
@@ -241,25 +241,43 @@ compose exec -T graphql bun -e '
 old_slot="$active_slot"
 switched=false
 rollback_switch() {
-  if [ "$switched" = true ]; then
-    sudo -n "$SWITCH_HELPER" "$old_slot" || true
-    switched=false
+  if [ "$switched" != true ]; then return 0; fi
+  if ! sudo -n "$SWITCH_HELPER" "$old_slot"; then
+    echo "slot rollback helper failed; active routing is uncertain" >&2
+    return 1
   fi
+  if [ ! -f "$ACTIVE_SLOT_FILE" ] || [ "$(tr -d '[:space:]' < "$ACTIVE_SLOT_FILE")" != "$old_slot" ]; then
+    echo "slot rollback did not restore active slot $old_slot" >&2
+    return 1
+  fi
+  switched=false
 }
-trap rollback_switch ERR
+rollback_on_error() {
+  local status=$?
+  trap - ERR
+  if ! rollback_switch; then
+    echo "automatic rollback could not prove restoration of $old_slot" >&2
+  fi
+  exit "$status"
+}
+trap rollback_on_error ERR
 sudo -n "$SWITCH_HELPER" "$inactive_slot"
 switched=true
 
 public_health_url="$PUBLIC_GRAPHQL_HEALTH_URL"
 public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url") || {
   echo "public GraphQL health probe failed after switching to $inactive_slot" >&2
-  rollback_switch
+  if ! rollback_switch; then
+    echo "public probe failed and rollback could not be verified" >&2
+  fi
   exit 1
 }
 if ! jq -e --arg revision "$DEPLOY_SHA" \
   '.status == "ok" and .revision == $revision' <<<"$public_health" >/dev/null; then
   echo "public GraphQL health identity does not match $DEPLOY_SHA" >&2
-  rollback_switch
+  if ! rollback_switch; then
+    echo "public identity mismatch and rollback could not be verified" >&2
+  fi
   exit 1
 fi
 
@@ -288,10 +306,11 @@ compose exec -T -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e '
 
 if [ ! -f "$ACTIVE_SLOT_FILE" ] || [ "$(tr -d '[:space:]' < "$ACTIVE_SLOT_FILE")" != "$inactive_slot" ]; then
 	echo "slot switch helper did not persist active slot $inactive_slot" >&2
-	sudo -n "$SWITCH_HELPER" "$old_slot" || true
+	if ! rollback_switch; then
+		echo "invalid active-slot authority and rollback could not be verified" >&2
+	fi
 	exit 1
 fi
-switched=false
 
 manifest=$(mktemp "$RELEASE_MANIFEST_DIR/release.XXXXXX")
 old_image=$(APP_ENV_FILE="$VPS_WORKDIR/.env.deploy.$old_slot" APP_IMAGE="$IMAGE_REF" \
@@ -308,4 +327,5 @@ jq -n \
   > "$manifest"
 chmod 600 "$manifest"
 mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"
+switched=false
 echo "blue-green deployment switched $old_slot -> $inactive_slot at $DEPLOY_SHA"

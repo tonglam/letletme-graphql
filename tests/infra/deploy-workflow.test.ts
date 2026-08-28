@@ -73,9 +73,15 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("rollback_switch()");
 		expect(deployScript).toContain("public GraphQL health probe failed");
 		expect(deployScript).toContain('sudo -n "$SWITCH_HELPER" "$old_slot"');
+		expect(deployScript).not.toContain('sudo -n "$SWITCH_HELPER" "$old_slot" || true');
+		expect(deployScript).toContain('!= "$old_slot"');
+		expect(deployScript).toContain("rollback could not be verified");
 		expect(deployScript).toContain("manifest=$(mktemp");
 		expect(deployScript).toContain("oldSlot:$oldSlot,newSlot:$newSlot");
 		expect(deployScript).toContain("Public GraphQL contract failed");
+		expect(deployScript.lastIndexOf("switched=false")).toBeGreaterThan(
+			deployScript.indexOf('mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"')
+		);
 	});
 
 	test("scans the immutable digest and promotes latest only after deployment", () => {
@@ -126,6 +132,8 @@ describe("production deployment workflow", () => {
 		const benchmark = await Bun.file("scripts/benchmark-queries.ts").text();
 		expect(benchmark).toContain('resolve(import.meta.dir, "..")');
 		expect(benchmark).not.toContain("resolve(process.cwd())");
+		expect(benchmark).toContain("query Entry($id: Int!) { entry(id: $id)");
+		expect(benchmark).not.toContain("entryLookup");
 	});
 
 	test("keeps compose ports and readiness checks slot-aware", () => {
