@@ -160,13 +160,24 @@ const nullableSafeNonNegativeInteger = (value: unknown): number | null | undefin
 	return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
 };
 
+const nullableSafeInteger = (value: unknown): number | null | undefined => {
+	if (value === null || value === undefined) return null;
+	const parsed = typeof value === "number" ? value : Number(value);
+	return Number.isSafeInteger(parsed) ? parsed : undefined;
+};
+
+const nullableFiniteNumber = (value: unknown): number | null | undefined => {
+	if (value === null || value === undefined) return null;
+	const parsed = typeof value === "number" ? value : Number(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+};
+
 /** Decode a current peer summary row before it enters metric calculations. */
 export const parsePlayerStateCurrentPeerRow = (value: unknown): CurrentPeerRow | null => {
 	if (!isRecord(value)) return null;
 	const elementId = nullableSafeNonNegativeInteger(value.element_id);
 	if (elementId === null || elementId === undefined || elementId === 0) return null;
 	const fields = [
-		"total_points",
 		"minutes",
 		"bonus",
 		"starts",
@@ -174,8 +185,6 @@ export const parsePlayerStateCurrentPeerRow = (value: unknown): CurrentPeerRow |
 		"assists",
 		"clean_sheets",
 		"saves",
-		"bps",
-		"expected_goal_involvements",
 		"return_count",
 		"gameweeks_available",
 	] as const;
@@ -183,9 +192,14 @@ export const parsePlayerStateCurrentPeerRow = (value: unknown): CurrentPeerRow |
 		fields.map((field) => [field, nullableSafeNonNegativeInteger(value[field])])
 	) as Record<(typeof fields)[number], number | null | undefined>;
 	if (Object.values(parsed).some((field) => field === undefined)) return null;
+	const totalPoints = nullableSafeInteger(value.total_points);
+	const bps = nullableSafeInteger(value.bps);
+	const expectedGoalInvolvements = nullableFiniteNumber(value.expected_goal_involvements);
+	if (totalPoints === undefined || bps === undefined || expectedGoalInvolvements === undefined)
+		return null;
 	return {
 		element_id: elementId,
-		total_points: parsed.total_points!,
+		total_points: totalPoints,
 		minutes: parsed.minutes!,
 		bonus: parsed.bonus!,
 		starts: parsed.starts!,
@@ -193,8 +207,8 @@ export const parsePlayerStateCurrentPeerRow = (value: unknown): CurrentPeerRow |
 		assists: parsed.assists!,
 		clean_sheets: parsed.clean_sheets!,
 		saves: parsed.saves!,
-		bps: parsed.bps!,
-		expected_goal_involvements: parsed.expected_goal_involvements!,
+		bps,
+		expected_goal_involvements: expectedGoalInvolvements,
 		return_count: parsed.return_count!,
 		gameweeks_available: parsed.gameweeks_available!,
 	};
@@ -207,7 +221,7 @@ export const parsePlayerStateCurrentPeerGameweekRow = (
 	if (!isRecord(value)) return null;
 	const elementId = nullableSafeNonNegativeInteger(value.element_id);
 	const eventId = nullableSafeNonNegativeInteger(value.event_id);
-	const totalPoints = nullableSafeNonNegativeInteger(value.total_points);
+	const totalPoints = nullableSafeInteger(value.total_points);
 	const minutes = nullableSafeNonNegativeInteger(value.minutes);
 	const bonus = nullableSafeNonNegativeInteger(value.bonus);
 	const started = value.started;
