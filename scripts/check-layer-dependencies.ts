@@ -48,6 +48,12 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 	// import behind `const load = require; load(...)` (or an equivalent
 	// assignment), while local helpers named `require` remain ordinary calls.
 	const requireLoaderBindings = new Set<string>(["require"]);
+	type LoaderAliasBinding = {
+		name: string;
+		marker: ts.Identifier;
+		scope: ts.Node;
+	};
+	const loaderAliasBindings: LoaderAliasBinding[] = [];
 	const createRequireBindings = new Set<string>();
 	const createRequireNamespaceBindings = new Set<string>();
 	const bindingContains = (binding: ts.BindingName, name: string): boolean => {
@@ -128,6 +134,70 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		}
 		return false;
 	};
+	const isLexicalScope = (node: ts.Node): boolean =>
+		ts.isSourceFile(node) ||
+		ts.isBlock(node) ||
+		ts.isModuleBlock(node) ||
+		ts.isFunctionLike(node) ||
+		ts.isCatchClause(node) ||
+		ts.isForStatement(node) ||
+		ts.isForInStatement(node) ||
+		ts.isForOfStatement(node);
+	const scopeFor = (node: ts.Node): ts.Node => {
+		let scope: ts.Node | undefined = node.parent;
+		while (scope && !isLexicalScope(scope)) scope = scope.parent;
+		return scope ?? sourceFile;
+	};
+	const parentScope = (scope: ts.Node): ts.Node | undefined => {
+		let parent: ts.Node | undefined = scope.parent;
+		while (parent && !isLexicalScope(parent)) parent = parent.parent;
+		return parent;
+	};
+	const scopeContains = (scope: ts.Node, node: ts.Node): boolean => {
+		let current: ts.Node | undefined = node;
+		while (current) {
+			if (current === scope) return true;
+			current = current.parent;
+		}
+		return false;
+	};
+	const registerLoaderAlias = (name: string, marker: ts.Identifier): void => {
+		requireLoaderBindings.add(name);
+		if (loaderAliasBindings.some((binding) => binding.marker === marker)) return;
+		loaderAliasBindings.push({ name, marker, scope: scopeFor(marker) });
+	};
+	const isVisibleLoaderAlias = (identifier: ts.Identifier, name: string): boolean => {
+		if (!requireLoaderBindings.has(name) || name === "require") return false;
+		const referenceScope = scopeFor(identifier);
+		const referencePosition = identifier.getStart(sourceFile);
+		return loaderAliasBindings
+			.filter(
+				(binding) =>
+					binding.name === name &&
+					binding.marker.getStart(sourceFile) <= referencePosition &&
+					scopeContains(binding.scope, identifier)
+			)
+			.sort((left, right) => {
+				const depth = (scope: ts.Node): number => {
+					let value = 0;
+					let current: ts.Node | undefined = scope;
+					while (current) {
+						value += 1;
+						current = parentScope(current);
+					}
+					return value;
+				};
+				return depth(right.scope) - depth(left.scope);
+			})
+			.some((binding) => {
+				let scope: ts.Node | undefined = referenceScope;
+				while (scope && scope !== binding.scope) {
+					if (scopeHasBinding(scope, name)) return false;
+					scope = parentScope(scope);
+				}
+				return scope === binding.scope;
+			});
+	};
 	const moduleSpecifierFromLoader = (initializer: ts.Expression): string | undefined => {
 		let expression = initializer;
 		while (ts.isAwaitExpression(expression) || ts.isParenthesizedExpression(expression)) {
@@ -181,13 +251,11 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 					declaration.initializer &&
 					ts.isIdentifier(declaration.initializer) &&
 					requireLoaderBindings.has(declaration.initializer.text) &&
-					!isShadowed(
-						declaration.initializer,
-						declaration.initializer.text,
-						declaration.initializer.text === "require"
-					)
+					(declaration.initializer.text === "require"
+						? !isShadowed(declaration.initializer, "require", true)
+						: isVisibleLoaderAlias(declaration.initializer, declaration.initializer.text))
 				) {
-					requireLoaderBindings.add(declaration.name.text);
+					registerLoaderAlias(declaration.name.text, declaration.name);
 				}
 				const importedModule = declaration.initializer
 					? moduleSpecifierFromLoader(declaration.initializer)
@@ -218,9 +286,11 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 			ts.isIdentifier(node.left) &&
 			ts.isIdentifier(node.right) &&
 			requireLoaderBindings.has(node.right.text) &&
-			!isShadowed(node.right, node.right.text, node.right.text === "require")
+			(node.right.text === "require"
+				? !isShadowed(node.right, "require", true)
+				: isVisibleLoaderAlias(node.right, node.right.text))
 		) {
-			requireLoaderBindings.add(node.left.text);
+			registerLoaderAlias(node.left.text, node.left);
 		}
 		ts.forEachChild(node, collectCreateRequireBindings);
 	};
@@ -270,8 +340,8 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 			}
 			if (
 				(ts.isIdentifier(expression) &&
-					requireLoaderBindings.has(expression.text) &&
-					!isShadowed(expression, expression.text, expression.text === "require")) ||
+					((expression.text === "require" && !isShadowed(expression, "require", true)) ||
+						isVisibleLoaderAlias(expression, expression.text))) ||
 				(ts.isPropertyAccessExpression(expression) &&
 					ts.isIdentifier(expression.expression) &&
 					expression.expression.text === "module" &&

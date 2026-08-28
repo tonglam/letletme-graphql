@@ -260,6 +260,67 @@ test("deprecated inline-fragment directives follow the runtime type branch", asy
 	expect(observed).toEqual([]);
 });
 
+test("deprecated fragment-spread directives follow their response-path occurrence", async () => {
+	const observed: string[] = [];
+	const typeDefs = `
+		enum LegacyMode {
+			MISSING @deprecated(reason: "Use NEW")
+			LIVE @deprecated(reason: "Use NEW")
+			NEW
+		}
+		directive @legacy(mode: LegacyMode) on FRAGMENT_SPREAD
+		type Query { missing: Wrapper, live: Wrapper }
+		type Wrapper { value: String }
+	`;
+	const server = new ApolloServer<TestContext>({
+		typeDefs,
+		resolvers: {
+			Query: { missing: () => null, live: () => ({}) },
+			Wrapper: { value: () => "ok" },
+		},
+		plugins: [
+			{
+				async requestDidStart() {
+					return {
+						async executionDidStart(requestContext) {
+							return createDeprecatedSchemaUsageExecutionListener<TestContext>({
+								symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+								symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+								globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols,
+								increment: (symbol) => observed.push(symbol),
+							});
+						},
+					};
+				},
+			},
+		],
+	});
+	servers.push(server);
+	await server.start();
+
+	const query = `
+		query {
+			missing { ...Fields @legacy(mode: MISSING) }
+			live { ...Fields @legacy(mode: LIVE) }
+		}
+		fragment Fields on Wrapper { value }
+	`;
+	const limits = validateGraphQLRequestLimits({ query }, buildSchema(typeDefs));
+	if (!limits.ok) throw new Error(limits.message);
+	await server.executeOperation(
+		{ query },
+		{
+			contextValue: {
+				deprecatedSymbols: limits.deprecatedSymbols,
+				deprecatedSymbolOwners: limits.deprecatedSymbolOwners,
+				deprecatedSymbolGlobalSymbols: limits.deprecatedSymbolGlobalSymbols,
+			},
+		}
+	);
+
+	expect(observed).toEqual(["LegacyMode.LIVE"]);
+});
+
 test("deprecated usage keeps field occurrences separate across response branches", async () => {
 	const observed: string[] = [];
 	const plugin: ApolloServerPlugin<TestContext> = {

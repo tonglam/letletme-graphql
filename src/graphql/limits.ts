@@ -27,6 +27,7 @@ import {
 	type SelectionSetNode,
 } from "graphql";
 import { analyzeGraphQLOperation, type GraphQLRequestPayload } from "./operation-ast";
+import { deprecationPathOwner } from "./deprecation-observability";
 
 export const GRAPHQL_LIMITS = {
 	maxDepth: 10,
@@ -585,6 +586,7 @@ const activeDeprecatedTelemetrySelections = (
 	const selectionDirectiveOwners = new Map<DirectiveNode, Set<string>>();
 	const analyzedFragments = new Set<string>();
 	const fragmentFieldOwnerMemo = new Map<string, Set<string>>();
+	const fragmentOccurrenceOwnerMemo = new Map<string, Set<string>>();
 	const collectFragmentFieldOwners = (
 		fragmentName: string,
 		seen: ReadonlySet<string> = new Set()
@@ -647,6 +649,51 @@ const activeDeprecatedTelemetrySelections = (
 		}
 		return owners;
 	};
+	const collectFragmentOccurrenceOwners = (
+		fragmentName: string,
+		pathPrefix: readonly string[],
+		seen: ReadonlySet<string> = new Set()
+	): Set<string> => {
+		if (seen.has(fragmentName)) return new Set();
+		const memoKey = `${fragmentName}|${pathPrefix.join(".")}`;
+		const memoized = fragmentOccurrenceOwnerMemo.get(memoKey);
+		if (memoized) return new Set(memoized);
+		const fragment = fragments.get(fragmentName);
+		if (!fragment) return new Set();
+		const nextSeen = new Set(seen);
+		nextSeen.add(fragmentName);
+		const owners = new Set<string>();
+		const collect = (
+			selectionSet: SelectionSetNode,
+			path: readonly string[],
+			selectionSeen: ReadonlySet<string>
+		): void => {
+			for (const selection of selectionSet.selections) {
+				if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
+				if (selection.kind === Kind.FIELD) {
+					const responseKey = selection.alias?.value ?? selection.name.value;
+					owners.add(deprecationPathOwner([...path, responseKey]));
+					if (selection.selectionSet) {
+						collect(selection.selectionSet, [...path, responseKey], selectionSeen);
+					}
+					continue;
+				}
+				if (selection.kind === Kind.INLINE_FRAGMENT) {
+					collect(selection.selectionSet, path, selectionSeen);
+					continue;
+				}
+				if (selectionSeen.has(selection.name.value)) continue;
+				const nestedFragment = fragments.get(selection.name.value);
+				if (!nestedFragment) continue;
+				const nestedSeen = new Set(selectionSeen);
+				nestedSeen.add(selection.name.value);
+				collect(nestedFragment.selectionSet, path, nestedSeen);
+			}
+		};
+		collect(fragment.selectionSet, pathPrefix, nextSeen);
+		fragmentOccurrenceOwnerMemo.set(memoKey, new Set(owners));
+		return owners;
+	};
 	const registerSelectionDirectiveOwners = (
 		directives: readonly DirectiveNode[] | undefined,
 		owners: ReadonlySet<string>
@@ -662,8 +709,11 @@ const activeDeprecatedTelemetrySelections = (
 			}
 		}
 	};
-	const registerFragmentDirectiveOwners = (fragment: FragmentDefinitionNode): void => {
-		const owners = collectFragmentFieldOwners(fragment.name.value);
+	const registerFragmentDirectiveOwners = (
+		fragment: FragmentDefinitionNode,
+		occurrenceOwners?: ReadonlySet<string>
+	): void => {
+		const owners = occurrenceOwners ?? collectFragmentFieldOwners(fragment.name.value);
 		const registered = fragmentDirectiveOwners.get(fragment.name.value) ?? new Set<string>();
 		for (const owner of owners) registered.add(owner);
 		fragmentDirectiveOwners.set(fragment.name.value, registered);
@@ -674,7 +724,11 @@ const activeDeprecatedTelemetrySelections = (
 			collectDirectiveVariableReferences(fragment.directives, usedVariables, variableOwners, owner);
 		}
 	};
-	const inspect = (selectionSet: SelectionSetNode, currentOwner?: string): void => {
+	const inspect = (
+		selectionSet: SelectionSetNode,
+		currentOwner?: string,
+		pathPrefix: readonly string[] = []
+	): void => {
 		for (const selection of selectionSet.selections) {
 			if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
 			if (selection.kind === Kind.FIELD) {
@@ -686,7 +740,12 @@ const activeDeprecatedTelemetrySelections = (
 					owner
 				);
 				collectVariableReferences(selection.arguments, usedVariables, variableOwners, owner);
-				if (selection.selectionSet) inspect(selection.selectionSet, owner);
+				if (selection.selectionSet) {
+					inspect(selection.selectionSet, owner, [
+						...pathPrefix,
+						selection.alias?.value ?? selection.name.value,
+					]);
+				}
 				continue;
 			}
 			if (selection.kind === Kind.INLINE_FRAGMENT) {
@@ -694,21 +753,20 @@ const activeDeprecatedTelemetrySelections = (
 					selection.directives,
 					collectSelectionFieldOwners(selection.selectionSet)
 				);
-				inspect(selection.selectionSet, currentOwner);
+				inspect(selection.selectionSet, currentOwner, pathPrefix);
 				continue;
 			}
 			const fragmentName = selection.name.value;
-			registerSelectionDirectiveOwners(
-				selection.directives,
-				collectFragmentFieldOwners(fragmentName)
-			);
-			if (!reachableFragments.has(fragmentName) || analyzedFragments.has(fragmentName)) continue;
+			const occurrenceOwners = collectFragmentOccurrenceOwners(fragmentName, pathPrefix);
+			registerSelectionDirectiveOwners(selection.directives, occurrenceOwners);
+			if (!reachableFragments.has(fragmentName)) continue;
 			const fragment = fragments.get(fragmentName);
 			if (!fragment) continue;
-			registerFragmentDirectiveOwners(fragment);
+			registerFragmentDirectiveOwners(fragment, occurrenceOwners);
+			if (analyzedFragments.has(fragmentName)) continue;
 			analyzedFragments.add(fragmentName);
 			active.add(fragmentName);
-			inspect(fragment.selectionSet);
+			inspect(fragment.selectionSet, currentOwner, pathPrefix);
 		}
 	};
 	inspect(operation.selectionSet);
@@ -903,8 +961,12 @@ const selectedDeprecatedSymbols = (
 				const namedParent = getNamedType(parentInputType);
 				if (!isInputObjectType(namedParent)) return;
 				const field = namedParent.getFields()[node.name.value];
-				if (field?.deprecationReason !== undefined) {
-					addSymbol(`${namedParent.name}.${field.name}`, currentFieldOwner());
+				if (field?.deprecationReason === undefined) return;
+				const symbol = `${namedParent.name}.${field.name}`;
+				if (typeInfo.getDirective()) {
+					addDirectiveSymbol(symbol, directiveOwnerStack.at(-1));
+				} else {
+					addSymbol(symbol, currentFieldOwner());
 				}
 			},
 			EnumValue(node) {
@@ -913,8 +975,14 @@ const selectedDeprecatedSymbols = (
 				const enumValue = typeInfo.getEnumValue();
 				if (!inputType || enumValue?.deprecationReason === undefined) return;
 				const namedInput = getNamedType(inputType);
-				if (isEnumType(namedInput))
-					addSymbol(`${namedInput.name}.${enumValue.name}`, currentFieldOwner());
+				if (isEnumType(namedInput)) {
+					const symbol = `${namedInput.name}.${enumValue.name}`;
+					if (typeInfo.getDirective()) {
+						addDirectiveSymbol(symbol, directiveOwnerStack.at(-1));
+					} else {
+						addSymbol(symbol, currentFieldOwner());
+					}
+				}
 			},
 		})
 	);

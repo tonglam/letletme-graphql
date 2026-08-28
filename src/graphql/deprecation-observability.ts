@@ -1,5 +1,15 @@
 import type { BaseContext, GraphQLRequestExecutionListener } from "@apollo/server";
 
+export type DeprecationResponsePathSegment = string | number;
+
+/**
+ * Convert a GraphQL response path into a stable owner key. List indexes are
+ * intentionally omitted because one fragment occurrence can execute once per
+ * item; response object keys still distinguish separate branches/aliases.
+ */
+export const deprecationPathOwner = (path: readonly DeprecationResponsePathSegment[]): string =>
+	`path:${path.filter((segment): segment is string => typeof segment === "string").join(".")}`;
+
 export const recordDeprecatedSchemaUsages = ({
 	symbols,
 	increment,
@@ -42,6 +52,15 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 						for (const fieldNode of info.fieldNodes) {
 							if (fieldNode.loc) executedOwners.add(`field:${fieldNode.loc.start}`);
 						}
+						const path: DeprecationResponsePathSegment[] = [];
+						for (
+							let current: typeof info.path | undefined = info.path;
+							current;
+							current = current.prev
+						) {
+							path.push(current.key);
+						}
+						executedOwners.add(deprecationPathOwner(path.reverse()));
 						executedOwners.add(`${info.parentType.name}.${info.fieldName}`);
 					},
 				}

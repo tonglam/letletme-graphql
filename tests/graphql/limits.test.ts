@@ -370,11 +370,40 @@ describe("GraphQL request limits", () => {
 			deprecatedSymbolGlobalSymbols: [],
 		});
 		if (!result.ok) throw new Error(result.message);
-		const valueOffset = query.indexOf("value }");
-		expect(result.deprecatedSymbolOwners[`field:${valueOffset}`]).toEqual([
+		expect(result.deprecatedSymbolOwners["path:parent.value"]).toEqual([
 			"@legacy(note:)",
 			"LegacyMode.OLD",
 		]);
+	});
+
+	it("keys repeated fragment-spread directive values by response occurrence", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				LEFT @deprecated(reason: "Use NEW")
+				RIGHT @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on FRAGMENT_SPREAD
+			type Query { left: Wrapper, right: Wrapper }
+			type Wrapper { value: String }
+		`);
+		const query = `
+			query Usage {
+				left { ...Fields @legacy(mode: LEFT) }
+				right { ...Fields @legacy(mode: RIGHT) }
+			}
+			fragment Fields on Wrapper { value }
+		`;
+		const result = validateGraphQLRequestLimits({ query }, deprecatedKindsSchema);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.LEFT", "LegacyMode.RIGHT"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		expect(result.deprecatedSymbolOwners["path:left.value"]).toEqual(["LegacyMode.LEFT"]);
+		expect(result.deprecatedSymbolOwners["path:right.value"]).toEqual(["LegacyMode.RIGHT"]);
 	});
 
 	it("keeps inline fragment directive values owned by fields in its type branch", () => {
