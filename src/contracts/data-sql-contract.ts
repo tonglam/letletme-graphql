@@ -24,5 +24,9 @@ export type DataSqlContractProbe = Readonly<{
 	values: readonly unknown[];
 	resultTypes?: readonly DataSqlContractResultType[];
 	/** Execute the statement with the runtime reader role and assert its fixture-backed result shape. */
-	runtime?: "must-return-row" | "must-return-board";
+	runtime?:
+		| "must-return-row"
+		| "must-return-board"
+		| "must-return-tournament"
+		| "must-return-selection-row";
 }>;

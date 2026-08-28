@@ -268,12 +268,13 @@ export const PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 	{
 		name: "public-league-trends.access",
 		sql: PUBLIC_LEAGUE_ACCESS_SQL,
-		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1],
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 2],
 	},
 	{
 		name: "public-league-trends.selection",
 		sql: PUBLIC_LEAGUE_SELECTION_SQL,
-		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1],
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 2],
+		runtime: "must-return-selection-row",
 	},
 ];
 

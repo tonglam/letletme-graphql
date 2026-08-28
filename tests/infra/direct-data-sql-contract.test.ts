@@ -133,6 +133,16 @@ describe("direct Data SQL contract", () => {
 						rows: [{ field_size: 1, viewer_row: { entryId: 1 } }],
 					} as unknown as QueryResult<Row>;
 				}
+				if (runtimeProbe?.runtime === "must-return-tournament") {
+					return {
+						rows: [{ tournament_id: values[2] }],
+					} as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-selection-row") {
+					return {
+						rows: [{ element_id: 1, player_name: "Contract Player", team_short_name: "GCT" }],
+					} as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-row") {
 					return { rows: [{}] } as unknown as QueryResult<Row>;
 				}
@@ -190,7 +200,10 @@ describe("direct Data SQL contract", () => {
 							actual_type:
 								relation === "fpl.player_market_snapshots" && columns[index] === "position"
 									? "text"
-									: "json",
+									: relation === "ops.live_lifecycle_status" &&
+										  (columns[index] === "observed_at" || columns[index] === "last_changed_at")
+										? "timestamp with time zone"
+										: "json",
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
@@ -200,6 +213,16 @@ describe("direct Data SQL contract", () => {
 				if (runtimeProbe?.runtime === "must-return-board") {
 					return {
 						rows: [{ field_size: 1, viewer_row: { entryId: 1 } }],
+					} as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-tournament") {
+					return {
+						rows: [{ tournament_id: values[2] }],
+					} as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-selection-row") {
+					return {
+						rows: [{ element_id: 1, player_name: "Contract Player", team_short_name: "GCT" }],
 					} as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-row") {
@@ -224,7 +247,10 @@ describe("direct Data SQL contract", () => {
 							actual_type:
 								relation === "fpl.player_market_snapshots" && columns[index] === "position"
 									? "text"
-									: "jsonb",
+									: relation === "ops.live_lifecycle_status" &&
+										  (columns[index] === "observed_at" || columns[index] === "last_changed_at")
+										? "timestamp with time zone"
+										: "jsonb",
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
@@ -250,14 +276,28 @@ describe("direct Data SQL contract", () => {
 							actual_type:
 								relation === "fpl.player_market_snapshots" && columns[index] === "position"
 									? "text"
-									: "jsonb",
+									: relation === "ops.live_lifecycle_status" &&
+										  (columns[index] === "observed_at" || columns[index] === "last_changed_at")
+										? "timestamp with time zone"
+										: "jsonb",
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
 				if (text === boardSql) {
 					return { rows: [{ field_size: 0, viewer_row: null }] } as unknown as QueryResult<Row>;
 				}
-				if (DIRECT_DATA_SQL_CONTRACT.some((probe) => probe.runtime && probe.sql === text)) {
+				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
+					(probe) => probe.runtime && probe.sql === text
+				);
+				if (runtimeProbe?.runtime === "must-return-tournament") {
+					return { rows: [{ tournament_id: values[2] }] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-selection-row") {
+					return {
+						rows: [{ element_id: 1, player_name: "Contract Player", team_short_name: "GCT" }],
+					} as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime) {
 					return { rows: [{}] } as unknown as QueryResult<Row>;
 				}
 				return { rows: [] } as unknown as QueryResult<Row>;
@@ -370,13 +410,19 @@ describe("direct Data SQL contract", () => {
 				"my-fpl.snapshot-tournament-row-visibility",
 				"my-fpl.competition-aggregate",
 				"my-fpl.assert-tournament-membership",
+				"my-fpl.assert-league-only-membership",
 				"my-fpl.list-tournament-memberships",
 			])
 		);
 		expect(runtimeProbes.map((probe) => probe.name)).toContain("public-league-trends.catalog");
+		expect(runtimeProbes.map((probe) => probe.name)).toContain("public-league-trends.selection");
 		expect(
 			runtimeProbes.every(
-				(probe) => probe.runtime === "must-return-row" || probe.runtime === "must-return-board"
+				(probe) =>
+					probe.runtime === "must-return-row" ||
+					probe.runtime === "must-return-board" ||
+					probe.runtime === "must-return-tournament" ||
+					probe.runtime === "must-return-selection-row"
 			)
 		).toBe(true);
 	});

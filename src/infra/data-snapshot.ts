@@ -1740,6 +1740,19 @@ export const DATA_SNAPSHOT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = 
 		name: "data-snapshot.live-lifecycle-status",
 		sql: LIVE_LIFECYCLE_STATUS_SQL,
 		values: [2026, 1],
+		runtime: "must-return-row",
+		resultTypes: [
+			{
+				relation: "ops.live_lifecycle_status",
+				column: "observed_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "ops.live_lifecycle_status",
+				column: "last_changed_at",
+				pgType: "timestamp with time zone",
+			},
+		],
 	},
 	{
 		name: "data-snapshot.core-live-identity-fallback",

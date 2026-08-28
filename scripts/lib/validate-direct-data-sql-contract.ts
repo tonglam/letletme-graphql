@@ -142,6 +142,36 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 						);
 					}
 				}
+				if (probe.runtime === "must-return-tournament") {
+					const tournament = result.rows[0] as { tournament_id?: unknown };
+					const expectedTournamentId = Number(probe.values[2]);
+					if (
+						tournament.tournament_id === null ||
+						tournament.tournament_id === undefined ||
+						Number(tournament.tournament_id) !== expectedTournamentId
+					) {
+						throw new Error(
+							`runtime reader role returned the wrong tournament membership row (expected ${expectedTournamentId})`
+						);
+					}
+				}
+				if (probe.runtime === "must-return-selection-row") {
+					const selection = result.rows[0] as {
+						element_id?: unknown;
+						player_name?: unknown;
+						team_short_name?: unknown;
+					};
+					if (
+						!Number.isInteger(Number(selection.element_id)) ||
+						Number(selection.element_id) <= 0 ||
+						typeof selection.player_name !== "string" ||
+						selection.player_name.trim() === "" ||
+						typeof selection.team_short_name !== "string" ||
+						selection.team_short_name.trim() === ""
+					) {
+						throw new Error("runtime reader role cannot see a non-null public selection row");
+					}
+				}
 			}
 		} catch (cause) {
 			throw new Error(

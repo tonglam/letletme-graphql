@@ -1,7 +1,10 @@
 import { GraphQLError } from "graphql";
 import type { QueryResultRow } from "pg";
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
-import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixture-identities";
+import {
+	GRAPHQL_DATA_CONTRACT_LEAGUE_ONLY_TOURNAMENT_ID,
+	GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID,
+} from "../../contracts/data-fixture-identities";
 import type { GraphQLContext } from "../../graphql/context";
 import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
@@ -14,7 +17,6 @@ import {
 	tournamentsRepository,
 	type TournamentInfo,
 } from "../tournaments/repository";
-
 
 export const MY_FPL_EVENT_LIFECYCLE_SQL = `
 	SELECT event_id, finished, data_checked, live_snapshot_finalized_at
@@ -119,9 +121,28 @@ export const MY_FPL_CURRENT_TOURNAMENT_MEMBERSHIPS_SQL = `
 `;
 
 export const MY_FPL_ASSERT_TOURNAMENT_MEMBERSHIP_SQL = `
-	SELECT 1
+	SELECT tournament_id
 	FROM (${MY_FPL_CURRENT_TOURNAMENT_MEMBERSHIPS_SQL}) membership
 	WHERE tournament_id = $3
+	LIMIT 1
+`;
+
+/** A direct probe for the tracked-league source, independent of roster membership. */
+export const MY_FPL_LEAGUE_ONLY_MEMBERSHIP_SQL = `
+	SELECT tracked_tournament.tournament_id
+	FROM competition.entry_leagues entry_league
+	JOIN LATERAL (
+		SELECT tournament.tournament_id
+		FROM competition.tournaments tournament
+		WHERE tournament.season_id = entry_league.season_id
+			AND tournament.league_id = entry_league.league_id
+			AND tournament.league_type = entry_league.league_type
+		ORDER BY tournament.tournament_id
+		LIMIT 1
+	) tracked_tournament ON TRUE
+	WHERE entry_league.season_id = $1
+		AND entry_league.entry_id = $2
+		AND tracked_tournament.tournament_id = $3
 	LIMIT 1
 `;
 
@@ -272,7 +293,13 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.assert-tournament-membership",
 		sql: MY_FPL_ASSERT_TOURNAMENT_MEMBERSHIP_SQL,
 		values: [2026, 1, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID],
-		runtime: "must-return-row",
+		runtime: "must-return-tournament",
+	},
+	{
+		name: "my-fpl.assert-league-only-membership",
+		sql: MY_FPL_LEAGUE_ONLY_MEMBERSHIP_SQL,
+		values: [2026, 1, GRAPHQL_DATA_CONTRACT_LEAGUE_ONLY_TOURNAMENT_ID],
+		runtime: "must-return-tournament",
 	},
 	{
 		name: "my-fpl.list-tournament-memberships",
