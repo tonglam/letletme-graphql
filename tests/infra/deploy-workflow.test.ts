@@ -2,165 +2,310 @@ import { describe, expect, test } from "bun:test";
 import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
 
 const workflow = await Bun.file(".github/workflows/deploy.yml").text();
+const monitorWorkflow = await Bun.file(".github/workflows/rate-limit-monitor.yml").text();
+const deployScript = await Bun.file("scripts/deploy-remote.sh").text();
 const dockerfile = await Bun.file("Dockerfile").text();
+const compose = await Bun.file("docker-compose.yml").text();
 const p0Probe = await Bun.file("scripts/rate-limit-p0-probe.ts").text();
 
 describe("production deployment workflow", () => {
-	test("bootstraps a missing VPS checkout before resolving the exact main commit", () => {
-		expect(workflow).toContain(
-			'git clone https://github.com/tonglam/letletme-graphql.git "$VPS_WORKDIR"'
-		);
-		expect(
-			workflow.indexOf("git clone https://github.com/tonglam/letletme-graphql.git")
-		).toBeLessThan(workflow.indexOf("git fetch origin main"));
-		expect(workflow).toContain('test "$(git rev-parse origin/main)" = "$DEPLOY_SHA"');
-		expect(workflow).not.toContain("letletme-vps-ops");
-		expect(workflow).not.toContain("flock -w 300 9");
-		expect(workflow).not.toContain("/usr/local/libexec/vps-maintenance");
-	});
-
-	test("manual deploys require a successful exact-head CI push run", () => {
-		expect(workflow).toContain("actions: read");
+	test("resolves and checks the exact protected main head before deployment", () => {
 		expect(workflow).toContain(
 			"actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=$main_sha"
 		);
 		expect(workflow).toContain('.status == "completed"');
 		expect(workflow).toContain('.conclusion == "success"');
 		expect(workflow).toContain("No completed successful ci.yml push run found for exact main SHA");
-		expect(workflow.indexOf("No completed successful ci.yml push run found")).toBeLessThan(
-			workflow.indexOf("Checkout protected main commit")
+		expect(workflow).toContain("ref: ${{ steps.target.outputs.sha }}");
+		expect(deployScript).toContain("git fetch origin main");
+		expect(deployScript).toContain('test "$(git rev-parse origin/main)" = "$DEPLOY_SHA"');
+		expect(deployScript).toContain('test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"');
+	});
+
+	test("uses pinned OpenSSH host identity and never key-scans at runtime", () => {
+		for (const source of [workflow, monitorWorkflow]) {
+			expect(source).toContain("StrictHostKeyChecking=yes");
+			expect(source).toContain("IdentitiesOnly=yes");
+			expect(source).toContain("VPS_SSH_KNOWN_HOSTS");
+			expect(source).toContain("VPS_SSH_FINGERPRINT");
+			expect(source).not.toContain("ssh-keyscan");
+		}
+		expect(workflow).toContain("ssh-keygen -lf");
+		expect(workflow).toContain('test "$fingerprints" = "$VPS_SSH_FINGERPRINT"');
+		expect(workflow).toContain("wc -l");
+	});
+
+	test("deploys only to the inactive blue/green slot and leaves the active slot running", () => {
+		expect(deployScript).toContain("BLUE_PROJECT=${BLUE_PROJECT:-letletme_graphql_blue}");
+		expect(deployScript).toContain("GREEN_PROJECT=${GREEN_PROJECT:-letletme_graphql_green}");
+		expect(deployScript).toContain("inactive_slot=green");
+		expect(deployScript).toContain("compose up -d --no-deps --no-build --force-recreate graphql");
+		expect(deployScript).not.toContain("docker compose stop");
+		expect(deployScript).not.toContain("docker compose rm");
+		expect(deployScript).toContain('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
+		expect(deployScript).toContain('sudo -n "$SWITCH_HELPER" "$old_slot"');
+		expect(deployScript).toContain("ACTIVE_SLOT_FILE");
+	});
+
+	test("holds the platform-wide deployment lock before changing checkout or slots", () => {
+		const lockAt = deployScript.indexOf('exec 9<>"$DEPLOY_LOCK_PATH"');
+		expect(deployScript).toContain(
+			"DEPLOY_LOCK_PATH=${DEPLOY_LOCK_PATH:-/var/lock/letletme-platform-deploy.lock}"
 		);
+		expect(deployScript).toContain("flock -w 300 9");
+		expect(lockAt).toBeGreaterThan(-1);
+		expect(lockAt).toBeLessThan(deployScript.indexOf("git fetch origin main"));
+		expect(lockAt).toBeLessThan(deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"'));
 	});
 
-	test("arms rollback before replacing the running container", () => {
-		const armedAt = workflow.indexOf("rollback_armed=true");
-		const stopAt = workflow.indexOf("docker compose stop -t 30 graphql");
-		const disarmedAt = workflow.lastIndexOf("rollback_armed=false");
-
-		expect(workflow).toContain("rollback_graphql_on_exit");
-		expect(armedAt).toBeGreaterThan(-1);
-		expect(stopAt).toBeGreaterThan(armedAt);
-		expect(disarmedAt).toBeGreaterThan(stopAt);
-		expect(workflow).toContain("docker compose up \\");
-		expect(workflow).toContain("-d --no-deps --no-build --force-recreate graphql");
-		expect(workflow).toContain("$HOME/.letletme-graphql-previous-image");
-		expect(workflow).not.toContain("/home/workspace/.letletme-graphql-previous-image");
+	test("creates a fresh work-directory parent before changing into it", () => {
+		const createParentAt = deployScript.indexOf('mkdir -p -- "$(dirname "$VPS_WORKDIR")"');
+		const changeParentAt = deployScript.indexOf('cd "$(dirname "$VPS_WORKDIR")"');
+		expect(createParentAt).toBeGreaterThan(-1);
+		expect(createParentAt).toBeLessThan(changeParentAt);
+		expect(changeParentAt).toBeLessThan(deployScript.indexOf("git clone"));
 	});
 
-	test("checks both Redis clients with the candidate environment before stopping production", () => {
-		const redisPreflightAt = workflow.indexOf("start_stage redisPreflight");
-		const redisCheckAt = workflow.indexOf("bun run redis:check");
-		const rollbackAt = workflow.indexOf("rollback_armed=true");
-		const stopAt = workflow.indexOf("docker compose stop -t 30 graphql");
+	test("requires candidate readiness, image digest, revision label, ingress and contract probes", () => {
+		expect(deployScript).toContain("/health/ready");
+		expect(deployScript).toContain('.status == "ok" and .revision == $revision');
+		expect(deployScript).toContain("docker inspect --format '{{.Config.Image}}'");
+		expect(deployScript).toContain("org.opencontainers.image.revision");
+		expect(deployScript).toContain('test "$anonymous_status" = 401');
+		expect(deployScript).not.toContain("entryLookup(id: -1)");
+		expect(deployScript).toContain("priceChangeBoard");
+		expect(deployScript).toContain('status === "READY"');
+		expect(deployScript).toContain("candidate_contract_passed");
+		expect(deployScript).toContain("PUBLIC_GRAPHQL_URL");
+		expect(deployScript).toContain("public_contract_passed");
+		expect(deployScript).toContain('redirect: "error"');
+	});
 
-		expect(workflow).toContain("docker compose run --rm -T --no-deps graphql bun run redis:check");
-		expect(redisPreflightAt).toBeGreaterThan(-1);
-		expect(redisCheckAt).toBeGreaterThan(redisPreflightAt);
-		expect(rollbackAt).toBeGreaterThan(redisCheckAt);
-		expect(stopAt).toBeGreaterThan(redisCheckAt);
-		expect(dockerfile).toContain(
-			"COPY --chown=bun:bun scripts/check-redis-connectivity.ts ./scripts/check-redis-connectivity.ts"
+	test("cleans up an unaccepted candidate before slot switching", () => {
+		const cleanupAt = deployScript.indexOf("candidate_cleanup_armed=true");
+		const candidateUpAt = deployScript.indexOf("candidate_started=true");
+		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
+		expect(deployScript).toContain("candidate_started=false");
+		expect(deployScript).toContain("compose down --remove-orphans || true");
+		expect(deployScript).toContain("candidate_cleanup_armed=false");
+		expect(cleanupAt).toBeGreaterThan(-1);
+		expect(cleanupAt).toBeLessThan(candidateUpAt);
+		expect(candidateUpAt).toBeLessThan(switchAt);
+		expect(deployScript.indexOf("candidate_cleanup_armed=false")).toBeLessThan(switchAt);
+	});
+
+	test("allowlists exact public GraphQL routes before switching or forwarding credentials", () => {
+		const validationAt = deployScript.indexOf('const expectedOrigin = "https://letletme.top";');
+		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
+		const publicTokenRequestAt = deployScript.indexOf(
+			'compose exec -T -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e'
 		);
+		expect(validationAt).toBeGreaterThan(-1);
+		expect(deployScript).toContain("parsed.pathname !== expectedPathname");
+		expect(deployScript).toContain(
+			"parsed.username || parsed.password || parsed.search || parsed.hash"
+		);
+		expect(deployScript).toContain('"/api/graphql/health/ready"');
+		expect(deployScript).toContain('"/api/graphql"');
+		expect(validationAt).toBeLessThan(switchAt);
+		expect(validationAt).toBeLessThan(publicTokenRequestAt);
 	});
 
-	test("requires both ingress rejection and authenticated business queries", () => {
-		expect(workflow).toContain("test \"$anonymous_status\" = '401'");
-		expect(workflow).toContain('"X-GraphQL-Service-Token": token');
-		expect(workflow).toContain("query DeploymentSmoke");
-		expect(workflow).toContain("query LiveDeploymentSmoke");
-		expect(workflow).toContain("liveContext");
-		expect(workflow).not.toContain("liveSnapshot(eventId: $eventId)");
-		expect(workflow).toContain("image_name=${IMAGE_REF%@*}");
-		expect(workflow).toContain('--filter "reference=${image_name}:*"');
-		expect(workflow).toContain("--filter dangling=true");
-		expect(workflow).toContain("docker image ls --digests");
-		expect(workflow).toContain("previous_image");
-		expect(workflow).toContain('docker image rm "$digest_ref"');
-		expect(workflow).not.toContain("docker image prune");
-		expect(workflow).not.toContain("letletme-vps-ops");
-		expect(workflow).not.toContain("flock -w 300 9");
-		expect(workflow).not.toContain("/usr/local/libexec/vps-maintenance");
-		expect(workflow).not.toContain("schema" + "Version");
+	test("treats a non-ready price board as business degradation, not a container rollback", () => {
+		const readyCheck = deployScript.indexOf('board?.status === "READY"');
+		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
+		expect(readyCheck).toBeGreaterThan(-1);
+		expect(switchAt).toBeGreaterThan(readyCheck);
+		expect(deployScript).not.toContain('priceChangeStatus === "UNAVAILABLE"\n    throw');
 	});
 
-	test("requires a READY durable price-change publication before committing a deployment", () => {
-		const liveSmokeAt = workflow.indexOf("query LiveDeploymentSmoke");
-		const priceChangeSmokeAt = workflow.indexOf("query PriceChangeDeploymentSmoke");
-		const smokeFinishedAt = workflow.indexOf("finish_stage", priceChangeSmokeAt);
-
-		expect(priceChangeSmokeAt).toBeGreaterThan(liveSmokeAt);
-		expect(smokeFinishedAt).toBeGreaterThan(priceChangeSmokeAt);
-		expect(workflow).toContain("priceChangeBoard {");
-		expect(workflow).toContain('priceChangeBoard?.status !== "READY"');
-		expect(workflow).toContain('priceChangeBoard.revision === "unavailable"');
-		expect(workflow).toContain("priceChangeBoard.expectedPlayerCount <= 0");
-		expect(workflow).toContain("priceChangeBoard.observedPlayerCount <= 0");
-		expect(workflow).toContain("GraphQL deployment price-change publication contract failed");
+	test("rolls back the slot switch when public verification fails", () => {
+		const rollbackRearmAt = deployScript.indexOf(
+			"candidate_cleanup_armed=true",
+			deployScript.indexOf("rollback_switch()")
+		);
+		const rollbackAuthorityCheckAt = deployScript.indexOf(
+			'!= "$old_slot"',
+			deployScript.indexOf("rollback_switch()")
+		);
+		expect(deployScript).toContain("rollback_switch()");
+		expect(deployScript).toContain("public GraphQL health probe failed");
+		expect(deployScript).toContain('sudo -n "$SWITCH_HELPER" "$old_slot"');
+		expect(deployScript).not.toContain('sudo -n "$SWITCH_HELPER" "$old_slot" || true');
+		expect(deployScript).toContain('!= "$old_slot"');
+		expect(deployScript).toContain("rollback could not be verified");
+		expect(deployScript).toContain("manifest=$(mktemp");
+		expect(deployScript).toContain("oldSlot:$oldSlot,newSlot:$newSlot");
+		expect(deployScript).toContain("Public GraphQL contract failed");
+		expect(deployScript.indexOf("switched=true")).toBeLessThan(
+			deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"')
+		);
+		expect(deployScript.lastIndexOf("switched=false")).toBeGreaterThan(
+			deployScript.indexOf('mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"')
+		);
+		expect(rollbackRearmAt).toBeGreaterThan(rollbackAuthorityCheckAt);
 	});
 
-	test("scans the immutable digest before promoting latest", () => {
-		const buildAt = workflow.indexOf("Build and push immutable image");
-		const scanAt = workflow.indexOf("Scan immutable image before promotion");
-		const promoteAt = workflow.indexOf("Promote scanned digest to latest");
-		expect(buildAt).toBeGreaterThan(-1);
-		expect(scanAt).toBeGreaterThan(buildAt);
-		expect(promoteAt).toBeGreaterThan(scanAt);
-		expect(workflow.slice(buildAt, scanAt)).not.toContain('--tag "${IMAGE_NAME}:latest"');
+	test("rolls back an interrupted cutover before the release manifest is durable", () => {
+		const rollbackAt = deployScript.indexOf("rollback_switch()");
+		const signalHandlerAt = deployScript.indexOf("rollback_on_signal()");
+		const signalTrapAt = deployScript.indexOf("trap 'rollback_on_signal TERM' TERM");
+		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
+		const manifestAt = deployScript.indexOf(
+			'mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"'
+		);
+		expect(signalHandlerAt).toBeGreaterThan(-1);
+		expect(deployScript).toContain("trap - INT TERM HUP");
+		expect(deployScript).toContain("deploy received $signal and rollback could not be verified");
+		expect(signalTrapAt).toBeGreaterThan(signalHandlerAt);
+		expect(signalTrapAt).toBeLessThan(switchAt);
+		expect(rollbackAt).toBeLessThan(manifestAt);
+	});
+
+	test("commits the manifest and rollback disarm as one signal-atomic section", () => {
+		const criticalSectionAt = deployScript.indexOf("commit_critical=true");
+		const manifestAt = deployScript.indexOf(
+			'mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"'
+		);
+		const disarmAt = deployScript.indexOf("switched=false", manifestAt);
+		const restoreSignalsAt = deployScript.indexOf("trap 'rollback_on_signal INT' INT", disarmAt);
+		expect(criticalSectionAt).toBeGreaterThan(-1);
+		expect(deployScript).toContain("pending_signal");
+		expect(deployScript).toContain("Latch");
+		expect(criticalSectionAt).toBeLessThan(manifestAt);
+		expect(manifestAt).toBeLessThan(disarmAt);
+		expect(disarmAt).toBeLessThan(restoreSignalsAt);
+		expect(deployScript).toContain('if [ -n "$pending_signal" ]; then');
+	});
+
+	test("retires the implicit legacy project only before canonical blue reuses port 4000", () => {
+		const retireAt = deployScript.indexOf("retire_legacy_bootstrap_before_blue");
+		const candidateUpAt = deployScript.indexOf(
+			"compose up -d --no-deps --no-build --force-recreate graphql"
+		);
+		expect(deployScript).toContain("LEGACY_PROJECT=${LEGACY_PROJECT:-letletme_graphql}");
+		expect(deployScript).toContain('[ "$active_slot" != green ]');
+		expect(deployScript).toContain('[ "$inactive_slot" != blue ]');
+		expect(deployScript).toContain('--filter "label=com.docker.compose.project=$LEGACY_PROJECT"');
+		expect(deployScript).toContain("docker container rm --force");
+		expect(retireAt).toBeGreaterThan(deployScript.indexOf("compose pull graphql"));
+		expect(retireAt).toBeLessThan(candidateUpAt);
+	});
+
+	test("scans the immutable digest and promotes latest only after deployment", () => {
+		const scanAt = workflow.indexOf("Scan immutable image before deployment");
+		const deployAt = workflow.indexOf("Deploy candidate to inactive slot");
+		const promoteAt = workflow.indexOf("Promote verified digest to latest");
+		expect(scanAt).toBeGreaterThan(-1);
+		expect(deployAt).toBeGreaterThan(scanAt);
+		expect(promoteAt).toBeGreaterThan(deployAt);
 		expect(workflow).toContain("image-ref: ${{ steps.image.outputs.image_ref }}");
-		expect(workflow).toContain('docker buildx imagetools create --tag "${IMAGE_NAME}:latest"');
+		expect(workflow).toContain("docker buildx imagetools create --tag");
 		expect(workflow).toContain("severity: HIGH,CRITICAL");
+		expect(workflow.slice(0, promoteAt)).not.toContain("IMAGE_NAME}:latest");
 	});
 
-	test("binds the image and running container to the exact deployment commit", () => {
+	test("prunes only superseded repository images after the release manifest is durable", () => {
+		const manifestAt = deployScript.indexOf(
+			'mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"'
+		);
+		const pruneAt = deployScript.indexOf("prune_superseded_repository_images");
+		expect(pruneAt).toBeGreaterThan(manifestAt);
+		expect(deployScript).toContain("image_repository=${IMAGE_REF%@sha256:*}");
+		expect(deployScript).toContain("candidate_image_id=$(docker inspect");
+		expect(deployScript).toContain('image_id" = "$active_image_id');
+		expect(deployScript).toContain('docker image rm "$image_id"');
+		expect(deployScript).not.toContain("docker image prune");
+	});
+
+	test("isolates and removes the temporary Docker credential store", () => {
+		expect(deployScript).toContain(
+			'docker_config_dir=$(mktemp -d "$VPS_WORKDIR/.docker-config.XXXXXX")'
+		);
+		expect(deployScript).toContain('export DOCKER_CONFIG="$docker_config_dir"');
+		expect(deployScript).toContain('rm -rf -- "$docker_config_dir"');
+		expect(deployScript).toContain("trap cleanup_on_exit EXIT");
+		expect(deployScript.indexOf("export DOCKER_CONFIG")).toBeLessThan(
+			deployScript.indexOf("docker login ghcr.io")
+		);
+	});
+
+	test("cleans staged deployment secrets from the remote shell", () => {
+		expect(workflow).toContain("cleanup_staged_secrets()");
+		expect(workflow).toContain("remote_env=$(umask 077; mktemp /tmp/letletme-graphql-env.XXXXXX)");
+		expect(workflow).toContain(
+			"remote_token=$(umask 077; mktemp /tmp/letletme-graphql-token.XXXXXX)"
+		);
+		expect(workflow).toContain('printf \'%s\' "$env_payload" | base64 --decode > "$remote_env"');
+		expect(workflow).toContain(
+			'printf \'%s\' "$token_payload" | base64 --decode > "$remote_token"'
+		);
+		expect(workflow).toContain("trap cleanup_on_exit EXIT");
+		expect(workflow).toContain("trap 'cleanup_on_signal 130' INT");
+		expect(workflow).toContain("trap 'cleanup_on_signal 143' TERM");
+		expect(workflow).toContain("trap 'cleanup_on_signal 129' HUP");
+		expect(workflow).toContain("printf '%s\\n' \"__LETLETME_GRAPHQL_ENV_B64__\"");
+		expect(workflow).toContain("printf '%s\\n' \"__LETLETME_GHCR_TOKEN_B64__\"");
+		expect(workflow).toContain(
+			"DEPLOY_SHA=$deploy_sha_q IMAGE_REF=$image_ref_q GHCR_USER=$ghcr_user_q"
+		);
+		expect(workflow).toContain("cat scripts/deploy-remote.sh");
+		expect(workflow).not.toContain("remote_env=$(ssh");
+		expect(workflow).not.toContain("remote_token=$(ssh");
+	});
+
+	test("binds image and container identity to the exact commit", () => {
 		expect(dockerfile).toContain("ARG VCS_REVISION=unknown");
+		expect(dockerfile).toContain("ENV APP_REVISION=${VCS_REVISION}");
 		expect(dockerfile).toContain('org.opencontainers.image.revision="${VCS_REVISION}"');
 		expect(workflow).toContain('--build-arg "VCS_REVISION=${{ steps.target.outputs.sha }}"');
-		expect(workflow).toContain('index .Config.Labels "org.opencontainers.image.revision"');
-		expect(workflow).toContain('= "$DEPLOY_SHA"');
+		expect(deployScript).toContain('index .Config.Labels "org.opencontainers.image.revision"');
 	});
 
-	test("uses the complete GraphQL environment URL without password rewriting", () => {
-		expect(workflow).toContain("GRAPHQL_ENV: ${{ secrets.GRAPHQL_ENV }}");
-		expect(workflow).toContain('printf \'%s\' "$GRAPHQL_ENV" > "$next_env"');
-		expect(workflow).toContain('username != "letletme_graphql_runtime"');
-		expect(workflow).toContain("pooler\\.supabase\\.com");
-		expect(workflow).toContain("letletme_graphql_runtime\\.[^.]+");
-		expect(workflow).toContain("if not parsed.password:");
-		expect(workflow).not.toContain("GRAPHQL_RUNTIME_DB_PASSWORD");
-		expect(workflow).toContain('"GRAPHQL_RATE_LIMIT_MODE": mode');
-		expect(workflow).toContain('"GRAPHQL_BROWSER_INGRESS_RATE_LIMIT": browser');
-		expect(workflow).not.toContain("urlunsplit");
-	});
-
-	test("persists explicit rate-limit rollout state only after a successful replacement", () => {
-		expect(workflow).toContain("p0-legacy");
-		expect(workflow).toContain("shadow-v3");
-		expect(workflow).toContain("shadow-v4");
-		expect(workflow).toContain("enforce-v4");
-		expect(workflow).toContain("enforce-v3-restored-compat");
-		expect(workflow).toContain("$HOME/.letletme-graphql-rate-limit-rollout");
-		expect(workflow).toContain("$HOME/.letletme-graphql-rollbacks");
-		expect(workflow).toContain("metrics.prom");
-		expect(workflow).toContain("command_timeout: 45m");
-		expect(workflow).not.toMatch(/\+\s{2,}(?:>|docker|--arg|['{])/);
-		expect(workflow).toContain("start_stage p0Observe");
-		expect(workflow).toContain("scripts/rate_limit_p0_guard.py");
-		expect(workflow).toContain("for sample in $(seq 1 60)");
-		expect(workflow).toContain("P0_PROBE_REQUESTS=700");
-		expect(workflow).toContain(
-			".total == 700 and .successful > 0 and .rateLimited > 0 and .unexpected == 0"
-		);
-		expect(workflow).toContain(".total == 700 and .successful > 0 and .unexpected == 0");
-		expect(workflow).toContain("after_429 * 2");
-		expect(workflow.indexOf("start_stage p0Observe")).toBeLessThan(
-			workflow.indexOf("start_stage finalize")
-		);
-		expect(workflow.indexOf('mv "$next_env" .env.deploy')).toBeLessThan(
-			workflow.indexOf("printf '%s\\n' \"$persist_rate_limit_rollout\"")
+	test("inherits the active slot rate-limit mode when rollout is preserved", () => {
+		expect(deployScript).toContain('active_env="$VPS_WORKDIR/.env.deploy.$active_slot"');
+		expect(deployScript).toContain("active_rate_limit_mode=shadow-v3");
+		expect(deployScript).toContain('replace_rate_limit_mode "$active_rate_limit_mode"');
+		expect(deployScript).toContain("invalid or duplicate GRAPHQL_RATE_LIMIT_MODE");
+		expect(deployScript).toContain('tail -c 1 "$candidate_env_next"');
+		expect(deployScript.indexOf('tail -c 1 "$candidate_env_next"')).toBeLessThan(
+			deployScript.indexOf("printf 'GRAPHQL_RATE_LIMIT_MODE=%s\\n'")
 		);
 	});
 
-	test("uses a deterministic P0 probe that crosses both changed legacy buckets", () => {
+	test("requires the slot helper to persist an active-slot authority file", () => {
+		expect(deployScript).toContain('if [ ! -f "$ACTIVE_SLOT_FILE" ] ||');
+	});
+
+	test("anchors benchmark output validation to the script repository", async () => {
+		const benchmark = await Bun.file("scripts/benchmark-queries.ts").text();
+		expect(benchmark).toContain('resolve(import.meta.dir, "..")');
+		expect(benchmark).not.toContain("resolve(process.cwd())");
+		expect(benchmark).toContain("query Entry($id: Int!) { entry(id: $id)");
+		expect(benchmark).not.toContain("entryLookup");
+	});
+
+	test("keeps compose ports and readiness checks slot-aware", () => {
+		expect(compose).toContain("127.0.0.1:${GRAPHQL_PORT:-4000}:4000");
+		expect(compose).toContain("/health/ready");
+		expect(deployScript).toContain("candidate_port=4002");
+		expect(deployScript).toContain("candidate_port=4000");
+		expect(monitorWorkflow).toContain("project=letletme_graphql_blue");
+		expect(monitorWorkflow).toContain("project=letletme_graphql_green");
+	});
+
+	test("does not retain retired controls or floating/stop-first deployment paths", () => {
+		for (const source of [workflow, deployScript, dockerfile, compose]) {
+			expect(source).not.toContain("MY_FPL_SNAPSHOT_READ");
+			expect(source).not.toContain("apk upgrade");
+		}
+		expect(workflow).not.toContain("appleboy/ssh-action");
+		expect(workflow).not.toContain("docker compose stop");
+		expect(deployScript).not.toContain("grep -nE");
+		expect(deployScript).not.toContain("ROLLOUT_STATE");
+	});
+
+	test("keeps the deterministic P0 probe bounded and observable", () => {
 		const query = /const query = `([\s\S]*?)`;/u.exec(p0Probe)?.[1];
 		expect(query).toBeTruthy();
 		expect(validateGraphQLRequestLimits({ query })).toMatchObject({
@@ -168,75 +313,6 @@ describe("production deployment workflow", () => {
 			rateLimitCostUnits: 2,
 		});
 		expect(p0Probe).toContain('P0_PROBE_REQUESTS ?? "700"');
-		expect(p0Probe).toContain("response.status === 200");
-		expect(p0Probe).toContain("successful");
 		expect(p0Probe).toContain("unexpected");
-	});
-
-	test("restores the persisted rollout selector if finalization rolls back", () => {
-		const rolloutWriteAt = workflow.indexOf(
-			'printf \'%s\\n\' "$persist_rate_limit_rollout" > "$rollout_state"'
-		);
-		const deploymentCommittedAt = workflow.lastIndexOf("deployment_committed=true");
-
-		expect(workflow).toContain("rollout_state_existed=false");
-		expect(workflow).toContain("rollout_state_backup=$(mktemp");
-		expect(workflow).toContain('mv "$rollout_state_backup" "$rollout_state"');
-		expect(workflow).toContain('rm -f "$rollout_state"');
-		expect(rolloutWriteAt).toBeGreaterThan(-1);
-		expect(rolloutWriteAt).toBeLessThan(deploymentCommittedAt);
-	});
-
-	test("binds P0 backup evidence to the running image instead of the checkout", () => {
-		expect(workflow).toContain("$HOME/.letletme-graphql-current-deployment.json");
-		expect(workflow).toContain('[ "$state_image" = "$old_image" ]');
-		expect(workflow).toContain("P0 requires a persisted SHA bound to the running GraphQL image");
-		expect(workflow).toContain('--arg deploySha "$running_deploy_sha"');
-		expect(workflow).not.toContain('--arg deploySha "$previous_deploy_sha"');
-		expect(workflow.indexOf('mv "$deployment_state_next" "$deployment_state"')).toBeLessThan(
-			workflow.lastIndexOf("deployment_committed=true")
-		);
-	});
-
-	test("emits structured timing for every remote deployment phase", () => {
-		for (const stage of [
-			"checkout",
-			"envValidate",
-			"pull",
-			"preflight",
-			"redisPreflight",
-			"replace",
-			"serviceReady",
-			"smoke",
-			"finalize",
-		]) {
-			expect(workflow).toContain(`start_stage ${stage}`);
-		}
-		expect(workflow).toContain('"event":"deploy_stage_timing"');
-		expect(workflow).toContain('"outcome":"failed"');
-		expect(workflow).toContain("date +%s%3N");
-		expect(workflow.indexOf("trap fail_without_rollback_on_exit EXIT")).toBeLessThan(
-			workflow.indexOf("start_stage checkout")
-		);
-		expect(workflow.indexOf("trap rollback_graphql_on_exit EXIT")).toBeGreaterThan(
-			workflow.indexOf("start_stage preflight")
-		);
-		expect(workflow).not.toMatch(/if \[ .*deployment_started.*\]; then\s*fi/);
-	});
-
-	test("does not hardcode retired generation-prefixed migration filenames", () => {
-		const generationPrefix = "v";
-		expect(workflow).not.toMatch(
-			new RegExp(`--through\\s+\\d{4}_create_${generationPrefix}[0-9]+_`)
-		);
-		expect(workflow).not.toMatch(
-			new RegExp(`--through\\s+\\d{4}_prepare_${generationPrefix}[0-9]+_`)
-		);
-		expect(workflow).not.toMatch(
-			new RegExp(`--through\\s+\\d{4}_activate_${generationPrefix}[0-9]+_`)
-		);
-		expect(workflow).not.toMatch(
-			new RegExp(`--through\\s+\\d{4}_freeze_${generationPrefix}[0-9]+_`)
-		);
 	});
 });

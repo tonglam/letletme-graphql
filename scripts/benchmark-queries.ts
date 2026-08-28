@@ -6,17 +6,18 @@
  * This script is read-only from Redis' perspective: cache-delete and cache-write
  * commands are blocked so benchmark runs do not mutate verified live keys.
  *
- * Reports are grouped by domain and printed to stdout + saved as JSON.
+ * Reports are grouped by domain and printed to stdout. Persist JSON only when
+ * BENCHMARK_OUTPUT_FILE explicitly points outside the repository.
  */
 
 import { ApolloServer } from "@apollo/server";
+import { isAbsolute, relative, resolve } from "node:path";
 import type Redis from "ioredis";
 import type { QueryResultRow } from "pg";
 import type { GraphQLContext } from "../src/graphql/context";
 import { schema } from "../src/graphql/schema";
 import { validateDatabaseContract } from "../src/infra/database-contract";
 import { database } from "../src/infra/database";
-import { env } from "../src/infra/env";
 import { logger } from "../src/infra/logger";
 import { connectRedis, getRedis } from "../src/infra/redis";
 import { ReadModelClient } from "../src/infra/read-model-client";
@@ -70,6 +71,22 @@ const readBoundedInt = (
 
 const BENCHMARK_ITERATIONS = readBoundedInt(Bun.env.BENCHMARK_ITERATIONS, 5, 1, 20);
 const QUERY_TIMEOUT_MS = readBoundedInt(Bun.env.BENCHMARK_TIMEOUT_MS, 30_000, 1000, 300_000);
+const BENCHMARK_OUTPUT_FILE = Bun.env.BENCHMARK_OUTPUT_FILE?.trim() || null;
+
+const resolveExternalOutputFile = (value: string | null): string | null => {
+	if (!value) return null;
+	if (!isAbsolute(value))
+		throw new Error("BENCHMARK_OUTPUT_FILE must be an absolute path outside the repository");
+	const candidate = resolve(value);
+	const repositoryRoot = resolve(import.meta.dir, "..");
+	const relativePath = relative(repositoryRoot, candidate);
+	if (relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath))) {
+		throw new Error("BENCHMARK_OUTPUT_FILE must point outside the current repository");
+	}
+	return candidate;
+};
+
+const benchmarkOutputFile = resolveExternalOutputFile(BENCHMARK_OUTPUT_FILE);
 
 const nowIso = (): string => new Date().toISOString();
 
@@ -809,7 +826,7 @@ async function runBenchmark(): Promise<void> {
 	console.log(`\n${"=".repeat(100)}`);
 	console.log("GRAPHQL QUERY BENCHMARK RESULTS");
 	console.log(`Timestamp: ${nowIso()}`);
-	console.log(`Redis:     ${env.REDIS_HOST}:${env.REDIS_PORT}`);
+	console.log("Redis:     configured primary read-only endpoint (address redacted)");
 	console.log("Postgres:  read-only Data Platform");
 	console.log(`Mode:      read-only Redis, ${BENCHMARK_ITERATIONS} samples/query`);
 	console.log(`Timeout:   ${QUERY_TIMEOUT_MS} ms/query sample`);
@@ -858,12 +875,9 @@ async function runBenchmark(): Promise<void> {
 	console.log("=".repeat(100));
 
 	// Write JSON report
-	const reportFile = `benchmark-results-${Date.now()}.json`;
 	const report = {
 		meta: {
 			timestamp: nowIso(),
-			redisHost: env.REDIS_HOST,
-			redisPort: env.REDIS_PORT,
 			databaseMode: "read-only",
 			datasetRevision: contract.datasetRevision,
 			totalQueries: results.length,
@@ -882,8 +896,14 @@ async function runBenchmark(): Promise<void> {
 		results,
 	};
 
-	await Bun.write(reportFile, JSON.stringify(report, null, 2));
-	console.log(`\n📄 JSON report saved to: ${reportFile}\n`);
+	if (benchmarkOutputFile) {
+		await Bun.write(benchmarkOutputFile, JSON.stringify(report, null, 2));
+		console.log(`\nJSON report saved outside the repository: ${benchmarkOutputFile}\n`);
+	} else {
+		console.log(
+			"\nJSON report was not written; set BENCHMARK_OUTPUT_FILE to an absolute path outside the repository to persist it.\n"
+		);
+	}
 }
 
 runBenchmark().catch((err) => {

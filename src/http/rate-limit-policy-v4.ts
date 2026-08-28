@@ -1,4 +1,5 @@
 import rawProductionPolicy from "../config/rate-limit/production-v4.json";
+import { isPlainRecord } from "../contracts/guards";
 import type { GraphQLWorkload } from "../infra/ingress-envelope";
 import {
 	parseGraphQLRateLimitPolicyV3,
@@ -36,9 +37,6 @@ export type GraphQLRateLimitPolicyV4 = Omit<
 	};
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
-
 const exactKeys = (
 	value: Record<string, unknown>,
 	expected: readonly string[],
@@ -59,7 +57,7 @@ const positiveInteger = (value: unknown, path: string): number => {
 };
 
 const bucket = (value: unknown, path: string): TokenBucketPolicy => {
-	if (!isRecord(value)) throw new Error(`${path} must be an object`);
+	if (!isPlainRecord(value)) throw new Error(`${path} must be an object`);
 	exactKeys(value, ["burst", "refillPerSecond"], path);
 	return {
 		refillPerSecond: positiveInteger(value.refillPerSecond, `${path}.refillPerSecond`),
@@ -68,7 +66,7 @@ const bucket = (value: unknown, path: string): TokenBucketPolicy => {
 };
 
 const workloadBuckets = (value: unknown, path: string): WorkloadPolicies => {
-	if (!isRecord(value)) throw new Error(`${path} must be an object`);
+	if (!isPlainRecord(value)) throw new Error(`${path} must be an object`);
 	exactKeys(value, WORKLOADS, path);
 	return Object.fromEntries(
 		WORKLOADS.map((workload) => [workload, bucket(value[workload], `${path}.${workload}`)])
@@ -81,7 +79,7 @@ const sumBucket = (buckets: WorkloadPolicies): TokenBucketPolicy => ({
 });
 
 export const parseGraphQLRateLimitPolicyV4 = (value: unknown): GraphQLRateLimitPolicyV4 => {
-	if (!isRecord(value)) throw new Error("GraphQL rate-limit policy must be an object");
+	if (!isPlainRecord(value)) throw new Error("GraphQL rate-limit policy must be an object");
 	exactKeys(
 		value,
 		["schemaVersion", "policyVersion", "capacity", "legacyV2", "global", "trafficClasses"],
@@ -90,14 +88,15 @@ export const parseGraphQLRateLimitPolicyV4 = (value: unknown): GraphQLRateLimitP
 	if (value.schemaVersion !== 4 || value.policyVersion !== "graphql-v4") {
 		throw new Error("GraphQL rate-limit policy version must be graphql-v4/schema 4");
 	}
-	if (!isRecord(value.trafficClasses)) throw new Error("policy.trafficClasses must be an object");
+	if (!isPlainRecord(value.trafficClasses))
+		throw new Error("policy.trafficClasses must be an object");
 	exactKeys(
 		value.trafficClasses,
 		["mini", "web_browser", "web_rsc", "service", "legacy"],
 		"policy.trafficClasses"
 	);
 	const mini = value.trafficClasses.mini;
-	if (!isRecord(mini)) throw new Error("policy.trafficClasses.mini must be an object");
+	if (!isPlainRecord(mini)) throw new Error("policy.trafficClasses.mini must be an object");
 	exactKeys(
 		mini,
 		[
@@ -175,7 +174,7 @@ export const productionGraphQLRateLimitPolicyV4 =
 	parseGraphQLRateLimitPolicyV4(rawProductionPolicy);
 
 export const assertGraphQLRateLimitV4ModeCanStart = (
-	mode: "legacy" | "shadow-v4" | "enforce-v4",
+	mode: "shadow-v4" | "enforce-v4",
 	policy: GraphQLRateLimitPolicyV4
 ): void => {
 	if (mode === "enforce-v4" && !policy.capacity.validated) {

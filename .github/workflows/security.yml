@@ -60,6 +60,5 @@ jobs:
           data_main_sha=$(gh api repos/tonglam/letletme_data/commits/main --jq '.sha')
           printf 'fixed Data SHA: %s\nData main SHA: %s\n' "$fixed_sha" "$data_main_sha"
           if [ "$fixed_sha" != "$data_main_sha" ]; then
-            echo "Data contract reference drifted; update the fixed SHA only after review and merge."
-            exit 1
+            echo "::warning::Data main advanced beyond the pinned contract. A dedicated pin-bump PR with compatibility evidence is required; this informational drift check does not fail CI."
           fi

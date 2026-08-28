@@ -15,6 +15,7 @@ import {
 } from "../../infra/data-snapshot";
 import type { DataPublicationManifest } from "../../infra/data-publication";
 import { metrics } from "../../infra/metrics";
+import { env } from "../../infra/env";
 import { entryLiveBatchService } from "../entry-live/batch-service";
 import { entryLiveRepository } from "../entry-live/repository";
 import {
@@ -833,9 +834,7 @@ export const liveDesksResolvers = {
 			const playerRevision = snapshot?.revision ?? corePlayerRevision;
 			const requireNet = memberTournament.leagueType === LeagueType.H2H;
 			const requestedNet = request.sort === "NET_EVENT_POINTS";
-			const fullFieldEnabled =
-				(Bun.env.FULL_FIELD_LIVE_BOARD_ENABLED ?? process.env.FULL_FIELD_LIVE_BOARD_ENABLED) ===
-				"true";
+			const fullFieldEnabled = env.FULL_FIELD_LIVE_BOARD_ENABLED;
 			const initialCoverage = initialManagerScores.tournamentCoverage;
 			const initialHasComparableOverallTotals = allEntryIds.every((entryId) => {
 				const row = initialManagerScores.rows.get(entryId);

@@ -21,19 +21,30 @@ jobs:
         env:
           VPS_HOST: ${{ vars.VPS_HOST }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          VPS_SSH_FINGERPRINT: ${{ secrets.VPS_SSH_FINGERPRINT }}
         run: |
           set -euo pipefail
-          install -m 700 -d "$HOME/.ssh"
-          printf '%s\n' "$VPS_SSH_KEY" > "$HOME/.ssh/letletme_graphql"
-          chmod 600 "$HOME/.ssh/letletme_graphql"
-          ssh-keyscan -H "$VPS_HOST" > "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/known_hosts"
+          test -n "$VPS_HOST"
+          test -n "$VPS_SSH_KEY"
+          test -n "$VPS_SSH_KNOWN_HOSTS"
+          test -n "$VPS_SSH_FINGERPRINT"
+          ssh_dir="$RUNNER_TEMP/letletme-graphql-monitor-ssh"
+          install -m 700 -d "$ssh_dir"
+          printf '%s\n' "$VPS_SSH_KEY" > "$ssh_dir/id_ed25519"
+          printf '%s\n' "$VPS_SSH_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          chmod 600 "$ssh_dir/id_ed25519" "$ssh_dir/known_hosts"
+          fingerprints=$(ssh-keygen -lf "$ssh_dir/known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "$(printf '%s\n' "$fingerprints" | sed '/^$/d' | wc -l)" -eq 1
+          test "$fingerprints" = "$VPS_SSH_FINGERPRINT"
+          echo "SSH_DIR=$ssh_dir" >> "$GITHUB_ENV"
 
       - name: Read aggregate and enforce recent alert gates
         env:
           VPS_HOST: ${{ vars.VPS_HOST }}
           VPS_USER: ${{ vars.VPS_USER }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          VPS_ACTIVE_SLOT_FILE: ${{ vars.VPS_ACTIVE_SLOT_FILE }}
         run: |
           set -euo pipefail
           case "$VPS_WORKDIR" in
@@ -42,10 +53,15 @@ jobs:
           esac
           test "$VPS_WORKDIR" != "/"
           remote_workdir=$(printf '%q' "$VPS_WORKDIR")
-          ssh -i "$HOME/.ssh/letletme_graphql" \
+          active_slot_file=${VPS_ACTIVE_SLOT_FILE:-/var/lib/letletme-graphql/active-slot}
+          remote_active_slot_file=$(printf '%q' "$active_slot_file")
+          ssh -i "$SSH_DIR/id_ed25519" \
             -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile="$SSH_DIR/known_hosts" \
             "$VPS_USER@$VPS_HOST" \
-            "cd $remote_workdir && APP_ENV_FILE=.env.deploy docker compose exec -T graphql bun run rate-limit:report --days 2 --recent-minutes 10 --include-live-storage-failures --json" \
+            "set -euo pipefail; active=\$(tr -d '[:space:]' < $remote_active_slot_file); case \"\$active\" in blue) project=letletme_graphql_blue; port=4000;; green) project=letletme_graphql_green; port=4002;; *) echo 'invalid active slot' >&2; exit 1;; esac; cd $remote_workdir; APP_ENV_FILE=.env.deploy.\$active GRAPHQL_PORT=\$port docker compose -p \"\$project\" exec -T graphql bun run rate-limit:report --days 2 --recent-minutes 10 --include-live-storage-failures --json" \
             > "$RUNNER_TEMP/rate-limit-report.json"
           jq -e '
             (.policy == "graphql-v3" or .policy == "graphql-v4") and
@@ -54,7 +70,6 @@ jobs:
             .live.rateLimitStorageFailures == 0 and
             .recent.summary.totalDecisions > 0 and
             (
-              .mode == "legacy" or
               (.mode == "shadow-v3" and .recent.summary.shadowDecisions > 0) or
               (.mode == "enforce-v3" and .recent.summary.enforcedDecisions > 0) or
               (.mode == "shadow-v4" and .policy == "graphql-v4" and .recent.summary.shadowDecisions > 0) or
@@ -90,3 +105,12 @@ jobs:
           path: ${{ runner.temp }}/rate-limit-report.json
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Remove temporary SSH credentials
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${SSH_DIR:-}" ] && [ -d "$SSH_DIR" ]; then
+            rm -f -- "$SSH_DIR/id_ed25519" "$SSH_DIR/known_hosts"
+            rmdir -- "$SSH_DIR" || true
+          fi

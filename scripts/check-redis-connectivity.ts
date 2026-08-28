@@ -1,5 +1,4 @@
 import type Redis from "ioredis";
-import { env } from "../src/infra/env";
 import { connectRedis, getRateLimitRedis, getRedis } from "../src/infra/redis";
 
 const timeoutMs = 15_000;
@@ -61,9 +60,14 @@ try {
 		JSON.stringify({
 			event: "redis_connectivity_check",
 			status: "passed",
-			host: env.REDIS_HOST,
-			port: env.REDIS_PORT,
-			clients: pongs.map(([name]) => name),
+			clients: pongs.map(([name]) => ({
+				name,
+				endpoint: name === "primary" ? "primary" : "rate-limit",
+			})),
+			// connectRedis has already authenticated both clients and compared
+			// their resolved Redis server identities. A successful probe therefore
+			// proves isolation even when the configured URLs use aliases.
+			isolated: true,
 		})
 	);
 } catch (error) {
@@ -71,8 +75,6 @@ try {
 		JSON.stringify({
 			event: "redis_connectivity_check",
 			status: "failed",
-			host: env.REDIS_HOST,
-			port: env.REDIS_PORT,
 			reason: classifyError(observedError ?? error),
 		})
 	);

@@ -1,5 +1,9 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { requestEntryInfoSync, requestEntryPicksSync } from "../../src/infra/entry-info-sync";
+import { afterEach, describe, expect, it, mock } from "bun:test";
+import {
+	enqueueEntryPicksSync,
+	requestEntryInfoSync,
+	requestEntryPicksSync,
+} from "../../src/infra/entry-info-sync";
 
 const originalFetch = globalThis.fetch;
 const originalUrl = process.env.LETLETME_DATA_URL;
@@ -67,5 +71,27 @@ describe("requestEntryInfoSync", () => {
 			status: "queued",
 			jobId: "job-picks-9",
 		});
+	});
+
+	it("logs a background picks enqueue failure with its request ID", async () => {
+		delete process.env.LETLETME_DATA_URL;
+		delete Bun.env.LETLETME_DATA_URL;
+		const warn = mock(() => undefined);
+
+		enqueueEntryPicksSync(424242, 8, {
+			logger: { warn } as never,
+			requestId: "req-entry-picks",
+		});
+		await Bun.sleep(1);
+
+		expect(warn).toHaveBeenCalledWith(
+			{
+				entryId: 424242,
+				eventId: 8,
+				reason: "LETLETME_DATA_URL is not configured",
+				requestId: "req-entry-picks",
+			},
+			"Entry picks persistence enqueue failed"
+		);
 	});
 });

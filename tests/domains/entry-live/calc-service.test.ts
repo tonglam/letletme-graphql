@@ -49,6 +49,7 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 				teamValue: 995,
 			}) as never;
 		const context = {
+			logger: { warn: () => undefined },
 			requestTiming: {
 				start: (stage: string) => {
 					stages.push(stage);

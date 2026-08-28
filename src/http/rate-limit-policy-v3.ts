@@ -1,8 +1,8 @@
 import rawProductionPolicy from "../config/rate-limit/production.json";
+import { isPlainRecord } from "../contracts/guards";
 import type { GraphQLWorkload } from "../infra/ingress-envelope";
 
 export const GRAPHQL_RATE_LIMIT_MODES = [
-	"legacy",
 	"shadow-v3",
 	"enforce-v3",
 	"shadow-v4",
@@ -61,9 +61,6 @@ export type GraphQLRateLimitPolicyV3 = {
 	};
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null && !Array.isArray(value);
-
 const positiveInteger = (value: unknown, path: string): number => {
 	if (!Number.isSafeInteger(value) || Number(value) < 1) {
 		throw new Error(`${path} must be a positive integer`);
@@ -72,7 +69,7 @@ const positiveInteger = (value: unknown, path: string): number => {
 };
 
 const bucket = (value: unknown, path: string): TokenBucketPolicy => {
-	if (!isRecord(value)) throw new Error(`${path} must be an object`);
+	if (!isPlainRecord(value)) throw new Error(`${path} must be an object`);
 	const keys = Object.keys(value).sort();
 	if (keys.join(",") !== "burst,refillPerSecond") {
 		throw new Error(`${path} must contain only burst and refillPerSecond`);
@@ -106,7 +103,7 @@ const WORKLOADS = [
 ] as const satisfies readonly GraphQLWorkload[];
 
 export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitPolicyV3 => {
-	if (!isRecord(value)) throw new Error("GraphQL rate-limit policy must be an object");
+	if (!isPlainRecord(value)) throw new Error("GraphQL rate-limit policy must be an object");
 	exactKeys(
 		value,
 		["schemaVersion", "policyVersion", "capacity", "legacyV2", "global", "trafficClasses"],
@@ -116,7 +113,7 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 		throw new Error("GraphQL rate-limit policy version must be graphql-v3/schema 3");
 	}
 
-	if (!isRecord(value.capacity)) throw new Error("policy.capacity must be an object");
+	if (!isPlainRecord(value.capacity)) throw new Error("policy.capacity must be an object");
 	exactKeys(
 		value.capacity,
 		["validated", "sustainableRps", "targetConcurrent", "requiredHeadroomRatio", "evidence"],
@@ -141,7 +138,7 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 		throw new Error("policy.capacity.evidence must be a string or null");
 	}
 
-	if (!isRecord(value.legacyV2)) throw new Error("policy.legacyV2 must be an object");
+	if (!isPlainRecord(value.legacyV2)) throw new Error("policy.legacyV2 must be an object");
 	exactKeys(
 		value.legacyV2,
 		[
@@ -155,7 +152,7 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 		"policy.legacyV2"
 	);
 
-	if (!isRecord(value.trafficClasses)) {
+	if (!isPlainRecord(value.trafficClasses)) {
 		throw new Error("policy.trafficClasses must be an object");
 	}
 	exactKeys(
@@ -169,13 +166,13 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 	const webRsc = classes.web_rsc;
 	const service = classes.service;
 	const legacy = classes.legacy;
-	if (!isRecord(mini)) throw new Error("policy.trafficClasses.mini must be an object");
-	if (!isRecord(webBrowser)) {
+	if (!isPlainRecord(mini)) throw new Error("policy.trafficClasses.mini must be an object");
+	if (!isPlainRecord(webBrowser)) {
 		throw new Error("policy.trafficClasses.web_browser must be an object");
 	}
-	if (!isRecord(webRsc)) throw new Error("policy.trafficClasses.web_rsc must be an object");
-	if (!isRecord(service)) throw new Error("policy.trafficClasses.service must be an object");
-	if (!isRecord(legacy)) throw new Error("policy.trafficClasses.legacy must be an object");
+	if (!isPlainRecord(webRsc)) throw new Error("policy.trafficClasses.web_rsc must be an object");
+	if (!isPlainRecord(service)) throw new Error("policy.trafficClasses.service must be an object");
+	if (!isPlainRecord(legacy)) throw new Error("policy.trafficClasses.legacy must be an object");
 	exactKeys(
 		mini,
 		["abuseRequest", "anonymousWeighted", "sessionWeighted"],
@@ -189,7 +186,7 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 	exactKeys(webRsc, ["classRequest", "workloads"], "policy.trafficClasses.web_rsc");
 	exactKeys(service, ["classRequest", "weighted"], "policy.trafficClasses.service");
 	exactKeys(legacy, ["classRequest", "weighted"], "policy.trafficClasses.legacy");
-	if (!isRecord(webRsc.workloads)) {
+	if (!isPlainRecord(webRsc.workloads)) {
 		throw new Error("policy.trafficClasses.web_rsc.workloads must be an object");
 	}
 	const workloadPolicies = webRsc.workloads;
@@ -293,7 +290,7 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 };
 
 export const parseGraphQLRateLimitMode = (value: string | undefined): GraphQLRateLimitMode => {
-	const mode = value ?? "legacy";
+	const mode = value ?? "shadow-v3";
 	if (!GRAPHQL_RATE_LIMIT_MODES.includes(mode as GraphQLRateLimitMode)) {
 		throw new Error(
 			`GRAPHQL_RATE_LIMIT_MODE must be one of ${GRAPHQL_RATE_LIMIT_MODES.join(", ")}`

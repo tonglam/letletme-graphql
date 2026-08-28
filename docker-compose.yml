@@ -18,7 +18,7 @@ services:
       TZ: Asia/Shanghai
     logging: *default-logging
     ports:
-      - "127.0.0.1:4000:4000"
+      - "127.0.0.1:${GRAPHQL_PORT:-4000}:4000"
     restart: unless-stopped
     healthcheck:
       test:
@@ -26,7 +26,7 @@ services:
           "CMD",
           "bun",
           "-e",
-          "fetch('http://127.0.0.1:4000/health').then((res) => { if (!res.ok) process.exit(1); }).catch(() => process.exit(1))",
+          "fetch('http://127.0.0.1:4000/health/ready').then((res) => { if (!res.ok) process.exit(1); }).catch(() => process.exit(1))",
         ]
       interval: 30s
       timeout: 5s
