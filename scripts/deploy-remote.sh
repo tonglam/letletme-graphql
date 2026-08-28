@@ -200,6 +200,14 @@ compose() {
     docker compose -p "$candidate_project" "$@"
 }
 
+# This script is streamed to the remote shell through stdin. Keep container
+# probes from consuming the remaining deployment script as their own stdin;
+# otherwise the remote shell can reach EOF after a successful probe and report
+# a false-positive deployment before the slot switch and public checks run.
+compose_exec() {
+  compose exec -T "$@" < /dev/null
+}
+
 compose config --quiet
 compose pull graphql
 
@@ -265,7 +273,7 @@ test "$anonymous_status" = 401
 
 # The candidate contract probe is deliberately executed inside the container,
 # where the service token is already supplied by the candidate environment.
-compose exec -T graphql bun -e '
+compose_exec graphql bun -e '
   const token = process.env.GRAPHQL_SERVICE_TOKEN;
   if (!token) throw new Error("Missing GRAPHQL_SERVICE_TOKEN");
   const request = async (query, variables = {}) => {
@@ -314,7 +322,7 @@ compose exec -T graphql bun -e '
 # or forwarding the service token. These exact routes are owned by the VPS Ops
 # Nginx contract; a pair of attacker-controlled URLs must not be able to approve
 # a cutover or receive GraphQL credentials.
-compose exec -T \
+compose_exec \
   -e PUBLIC_GRAPHQL_HEALTH_URL="$PUBLIC_GRAPHQL_HEALTH_URL" \
   -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" \
   graphql bun -e '
@@ -405,7 +413,7 @@ fi
 # Health alone does not prove Nginx is routing the expected GraphQL protocol.
 # Execute the same hard-cut fields through the public TLS endpoint before the
 # old slot is released as the rollback target.
-compose exec -T -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e '
+compose_exec -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e '
   const token = process.env.GRAPHQL_SERVICE_TOKEN;
   const url = process.env.PUBLIC_GRAPHQL_URL;
   if (!token || !url) throw new Error("Missing public acceptance configuration");
