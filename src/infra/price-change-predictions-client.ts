@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
-import { DateTimeResolver } from "graphql-scalars";
+import { DateResolver, DateTimeResolver } from "graphql-scalars";
 import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
@@ -56,6 +56,24 @@ export type PriceChangePlayer = {
 	projections: PriceChangeProjection[];
 };
 
+export type PriceChangeObservedOutcome = "CHANGED" | "NO_CHANGE";
+
+export type PriceChangeObservedChange = {
+	playerId: number;
+	oldPrice: number;
+	newPrice: number;
+};
+
+export type PriceChangeObservedEvent = {
+	deadline: string;
+	changeDate: string;
+	observedAt: string;
+	outcome: PriceChangeObservedOutcome;
+	baselineRevision: string;
+	changedPlayerCount: number;
+	changes: PriceChangeObservedChange[];
+};
+
 export type PriceChangeBoardStatus = "READY" | "PARTIAL" | "STALE" | "UNAVAILABLE";
 
 export type PriceChangeBoard = {
@@ -71,6 +89,7 @@ export type PriceChangeBoard = {
 	expectedPlayerCount: number;
 	observedPlayerCount: number;
 	players: PriceChangePlayer[];
+	latestEvent?: PriceChangeObservedEvent | null;
 };
 
 export type PriceChangeDurableCursor = Readonly<{
@@ -82,7 +101,7 @@ export type PriceChangeDurableCursor = Readonly<{
 }>;
 
 type PriceChangePublicationContext = {
-	schemaVersion: 1;
+	schemaVersion: 1 | 2;
 	source: "FPL_BOOTSTRAP";
 	fetchedAt: string;
 	staleAt: string;
@@ -91,9 +110,10 @@ type PriceChangePublicationContext = {
 	nextDeadlines: string[];
 	expectedPlayerCount: number;
 	observedPlayerCount: number;
+	latestEvent?: PriceChangeObservedEvent | null;
 };
 
-const CONTEXT_FIELDS = [
+const CONTEXT_FIELDS_V1 = [
 	"schemaVersion",
 	"source",
 	"fetchedAt",
@@ -104,6 +124,8 @@ const CONTEXT_FIELDS = [
 	"expectedPlayerCount",
 	"observedPlayerCount",
 ] as const;
+
+const CONTEXT_FIELDS_V2 = [...CONTEXT_FIELDS_V1, "latestEvent"] as const;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -130,6 +152,28 @@ const isDateTimeString = (value: unknown): value is string => {
 const isNullableDateTimeString = (value: unknown): value is string | null =>
 	value === null || isDateTimeString(value);
 
+const isDateString = (value: unknown): value is string => {
+	if (typeof value !== "string") return false;
+	try {
+		DateResolver.parseValue(value);
+		return true;
+	} catch {
+		return false;
+	}
+};
+
+const utc8DateFormatter = new Intl.DateTimeFormat("en-CA", {
+	timeZone: "Asia/Shanghai",
+	year: "numeric",
+	month: "2-digit",
+	day: "2-digit",
+});
+
+const utc8CalendarDate = (value: string): string | null => {
+	const timestamp = Date.parse(value);
+	return Number.isFinite(timestamp) ? utc8DateFormatter.format(new Date(timestamp)) : null;
+};
+
 const isStatus = (value: unknown): value is PriceChangePredictionStatus =>
 	value === "VERY_LIKELY_RISE" ||
 	value === "LIKELY_RISE" ||
@@ -141,6 +185,92 @@ const isStatus = (value: unknown): value is PriceChangePredictionStatus =>
 
 const isOwnershipTrend = (value: unknown): value is PriceChangeOwnershipTrend =>
 	value === "UP" || value === "DOWN" || value === "FLAT";
+
+const parseObservedEvent = (
+	value: unknown,
+	players?: readonly PriceChangePlayer[],
+	now: Date = new Date()
+): PriceChangeObservedEvent | null => {
+	if (value === null) return null;
+	if (
+		!isRecord(value) ||
+		!hasExactFields(value, [
+			"deadline",
+			"changeDate",
+			"observedAt",
+			"outcome",
+			"baselineRevision",
+			"changedPlayerCount",
+			"changes",
+		]) ||
+		!isDateTimeString(value.deadline) ||
+		!isDateString(value.changeDate) ||
+		!isDateTimeString(value.observedAt) ||
+		(value.outcome !== "CHANGED" && value.outcome !== "NO_CHANGE") ||
+		typeof value.baselineRevision !== "string" ||
+		value.baselineRevision.trim().length === 0 ||
+		!isGraphQLInt(value.changedPlayerCount) ||
+		value.changedPlayerCount < 0 ||
+		!Array.isArray(value.changes)
+	) {
+		return null;
+	}
+	const deadlineMs = Date.parse(value.deadline);
+	const observedAtMs = Date.parse(value.observedAt);
+	if (
+		!Number.isFinite(deadlineMs) ||
+		!Number.isFinite(observedAtMs) ||
+		deadlineMs > observedAtMs ||
+		observedAtMs > now.getTime() ||
+		utc8CalendarDate(value.deadline) !== value.changeDate
+	) {
+		return null;
+	}
+	const playersById = players ? new Map(players.map((player) => [player.playerId, player])) : null;
+	const changes: PriceChangeObservedChange[] = [];
+	let previousPlayerId = 0;
+	for (const rawChange of value.changes) {
+		if (
+			!isRecord(rawChange) ||
+			!hasExactFields(rawChange, ["playerId", "oldPrice", "newPrice"]) ||
+			!isGraphQLInt(rawChange.playerId) ||
+			rawChange.playerId <= 0 ||
+			rawChange.playerId <= previousPlayerId ||
+			!isGraphQLInt(rawChange.oldPrice) ||
+			rawChange.oldPrice < 0 ||
+			!isGraphQLInt(rawChange.newPrice) ||
+			rawChange.newPrice < 0 ||
+			rawChange.oldPrice === rawChange.newPrice ||
+			(playersById !== null &&
+				(!playersById.has(rawChange.playerId) ||
+					playersById.get(rawChange.playerId)?.currentPrice !== rawChange.newPrice))
+		) {
+			return null;
+		}
+		changes.push({
+			playerId: rawChange.playerId,
+			oldPrice: rawChange.oldPrice,
+			newPrice: rawChange.newPrice,
+		});
+		previousPlayerId = rawChange.playerId;
+	}
+	if (
+		value.changedPlayerCount !== changes.length ||
+		(value.outcome === "CHANGED" && changes.length === 0) ||
+		(value.outcome === "NO_CHANGE" && changes.length !== 0)
+	) {
+		return null;
+	}
+	return {
+		deadline: value.deadline,
+		changeDate: value.changeDate,
+		observedAt: value.observedAt,
+		outcome: value.outcome,
+		baselineRevision: value.baselineRevision,
+		changedPlayerCount: value.changedPlayerCount,
+		changes,
+	};
+};
 
 const parseProjection = (value: unknown): PriceChangeProjection | null => {
 	if (!isRecord(value)) return null;
@@ -287,12 +417,20 @@ export const parsePriceChangeBoardValue = (
 	if (playerIds.size !== parsedPlayers.length || playerIds.size !== value.expectedPlayerCount) {
 		return null;
 	}
+	const hasLatestEvent = Object.prototype.hasOwnProperty.call(value, "latestEvent");
+	const latestEvent = parseObservedEvent(
+		hasLatestEvent ? value.latestEvent : null,
+		parsedPlayers,
+		now
+	);
+	if (hasLatestEvent && value.latestEvent !== null && latestEvent === null) return null;
 	if (value.fetchedAt !== null) {
 		const fetchedAt = Date.parse(value.fetchedAt);
 		if (
 			!Number.isFinite(fetchedAt) ||
 			now.getTime() < fetchedAt ||
-			now.getTime() - fetchedAt > PRICE_CHANGE_MAX_AGE_MS
+			now.getTime() - fetchedAt > PRICE_CHANGE_MAX_AGE_MS ||
+			(latestEvent !== null && Date.parse(latestEvent.observedAt) > fetchedAt)
 		) {
 			return null;
 		}
@@ -308,6 +446,7 @@ export const parsePriceChangeBoardValue = (
 		expectedPlayerCount: value.expectedPlayerCount,
 		observedPlayerCount: value.observedPlayerCount,
 		players: [...parsedPlayers].sort((left, right) => left.playerId - right.playerId),
+		latestEvent,
 	};
 };
 
@@ -322,12 +461,19 @@ const unavailableBoard = (): PriceChangeBoard => ({
 	expectedPlayerCount: 0,
 	observedPlayerCount: 0,
 	players: [],
+	latestEvent: null,
 });
 
 const parseContext = (value: unknown): PriceChangePublicationContext | null => {
-	if (!isRecord(value) || !hasExactFields(value, CONTEXT_FIELDS)) return null;
+	if (!isRecord(value)) return null;
+	const schemaVersion = value.schemaVersion;
 	if (
-		value.schemaVersion !== 1 ||
+		(schemaVersion !== 1 && schemaVersion !== 2) ||
+		!hasExactFields(value, schemaVersion === 1 ? CONTEXT_FIELDS_V1 : CONTEXT_FIELDS_V2)
+	) {
+		return null;
+	}
+	if (
 		value.source !== "FPL_BOOTSTRAP" ||
 		!isDateTimeString(value.fetchedAt) ||
 		!isDateTimeString(value.staleAt) ||
@@ -359,8 +505,12 @@ const parseContext = (value: unknown): PriceChangePublicationContext | null => {
 			return null;
 		}
 	}
+	const latestEvent = schemaVersion === 2 ? parseObservedEvent(value.latestEvent) : null;
+	if (schemaVersion === 2 && value.latestEvent !== null && latestEvent === null) {
+		return null;
+	}
 	return {
-		schemaVersion: 1,
+		schemaVersion,
 		source: "FPL_BOOTSTRAP",
 		fetchedAt: value.fetchedAt,
 		staleAt: value.staleAt,
@@ -369,6 +519,7 @@ const parseContext = (value: unknown): PriceChangePublicationContext | null => {
 		nextDeadlines: value.nextDeadlines,
 		expectedPlayerCount: value.expectedPlayerCount,
 		observedPlayerCount: value.observedPlayerCount,
+		latestEvent,
 	};
 };
 
@@ -419,6 +570,12 @@ const parsePublicationBoard = (
 	if (playerIds.size !== players.length || playerIds.size !== context.expectedPlayerCount) {
 		return null;
 	}
+	const latestEvent = context.latestEvent
+		? parseObservedEvent(context.latestEvent, players, now)
+		: null;
+	if (context.latestEvent && latestEvent === null) return null;
+	if (latestEvent && Date.parse(latestEvent.observedAt) > Date.parse(context.fetchedAt))
+		return null;
 	const ageMs = now.getTime() - Date.parse(context.fetchedAt);
 	if (ageMs < 0 || ageMs >= PRICE_CHANGE_MAX_AGE_MS) return null;
 	return {
@@ -433,6 +590,7 @@ const parsePublicationBoard = (
 		expectedPlayerCount: context.expectedPlayerCount,
 		observedPlayerCount: context.observedPlayerCount,
 		players: [...players].sort((left, right) => left.playerId - right.playerId),
+		latestEvent,
 	};
 };
 

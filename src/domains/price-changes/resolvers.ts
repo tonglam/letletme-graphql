@@ -1,6 +1,9 @@
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
-import type { PriceChangeBoard } from "../../infra/price-change-predictions-client";
+import type {
+	PriceChangeBoard,
+	PriceChangeObservedEvent,
+} from "../../infra/price-change-predictions-client";
 import {
 	readPriceChangeLiveBoard,
 	readPriceChangeLiveCursor,
@@ -23,6 +26,41 @@ function assertCurrentSeason(
 			extensions: { code: "BAD_USER_INPUT" },
 		});
 	}
+}
+
+function marketPriceChangeForObservedEvent(
+	board: PriceChangeBoard,
+	event: PriceChangeObservedEvent,
+	playerId: number,
+	oldPrice: number,
+	newPrice: number
+) {
+	const player = board.players.find((candidate) => candidate.playerId === playerId);
+	if (!player) return null;
+	const position = {
+		GKP: "GOALKEEPER",
+		DEF: "DEFENDER",
+		MID: "MIDFIELDER",
+		FWD: "FORWARD",
+	} as const;
+	return {
+		player: {
+			playerId: player.playerId,
+			playerCode: player.playerCode,
+			webName: player.webName,
+			teamId: player.teamId,
+			teamName: player.teamName,
+			teamShortName: player.teamShortName,
+			position: position[player.position],
+			price: newPrice,
+			selectedByPercent: player.selectedByPercent,
+		},
+		changeDate: event.changeDate,
+		oldPrice,
+		newPrice,
+		change: newPrice - oldPrice,
+		direction: newPrice > oldPrice ? "RISE" : "FALL",
+	};
 }
 
 export const priceChangesResolvers = {
@@ -50,6 +88,20 @@ export const priceChangesResolvers = {
 		},
 	},
 	PriceChangeBoard: {
+		latestEvent: (parent: PriceChangeBoard) => {
+			const event = parent.latestEvent;
+			if (!event) return null;
+			const changes = event.changes.map((change) =>
+				marketPriceChangeForObservedEvent(
+					parent,
+					event,
+					change.playerId,
+					change.oldPrice,
+					change.newPrice
+				)
+			);
+			return changes.some((change) => change === null) ? null : { ...event, changes };
+		},
 		completeness: (parent: PriceChangeBoard, _args: unknown, context: GraphQLContext) =>
 			buildDataCompleteness({
 				contractKey: "market-price",

@@ -58,6 +58,7 @@ const validBoard = (fetchedAt: string, revision = "abcdef0123456789") => ({
 	revision,
 	expectedPlayerCount: 1,
 	observedPlayerCount: 1,
+	latestEvent: null,
 	players: [
 		{
 			playerId: 1,
@@ -165,11 +166,20 @@ function publishHot(redis: FakeRedis, snapshot: Record<string, unknown>): void {
 	redis.sadd(indexKey, payloadKey);
 }
 
-function hotSnapshot(ageMs = 1_000, revision = "abcdef0123456789"): Record<string, unknown> {
+function hotSnapshot(
+	ageMs = 1_000,
+	revision = "abcdef0123456789",
+	options: { schemaVersion?: 3 | 4; latestEvent?: Record<string, unknown> } = {}
+): Record<string, unknown> {
 	const detectedAt = new Date(Date.now() - ageMs).toISOString();
 	const board = validBoard(detectedAt, revision);
+	if (options.latestEvent) {
+		(board as { latestEvent: Record<string, unknown> | null }).latestEvent = options.latestEvent;
+		board.deadline = String(options.latestEvent.deadline);
+		board.nextDeadlines = [String(options.latestEvent.deadline)];
+	}
 	const base = {
-		schemaVersion: 3,
+		schemaVersion: options.schemaVersion ?? 3,
 		seasonCode,
 		revision: board.revision,
 		triggerFingerprint: "a".repeat(64),
@@ -236,6 +246,41 @@ describe("price-change live client", () => {
 		const liveBoard = await readPriceChangeLiveBoard(context(redis), snapshot.revision as string);
 		assert.equal(liveBoard.state, "PROVISIONAL");
 		assert.equal(liveBoard.board.players[0]?.currentPrice, 100);
+	});
+
+	it("reads the v4 hot event without changing the v3 compatibility path", async () => {
+		const redis = new FakeRedis();
+		const detectedAt = new Date(Date.now() - 1_000).toISOString();
+		const deadline = new Date(Date.parse(detectedAt) - 1_000).toISOString();
+		const changeDate = new Intl.DateTimeFormat("en-CA", {
+			timeZone: "Asia/Shanghai",
+			year: "numeric",
+			month: "2-digit",
+			day: "2-digit",
+		}).format(new Date(deadline));
+		const snapshot = hotSnapshot(1_000, "fedcba9876543210", {
+			schemaVersion: 4,
+			latestEvent: {
+				deadline,
+				changeDate,
+				observedAt: detectedAt,
+				outcome: "CHANGED",
+				baselineRevision: "baseline-revision",
+				changedPlayerCount: 1,
+				changes: [{ playerId: 1, oldPrice: 99, newPrice: 100 }],
+			},
+		});
+		publishHot(redis, snapshot);
+
+		const liveBoard = await readPriceChangeLiveBoard(
+			context(redis),
+			String(snapshot.revision),
+			String(snapshot.sourceHash)
+		);
+		assert.equal(liveBoard.board.latestEvent?.outcome, "CHANGED");
+		assert.deepEqual(liveBoard.board.latestEvent?.changes, [
+			{ playerId: 1, oldPrice: 99, newPrice: 100 },
+		]);
 	});
 
 	it("binds a revision-bound board request to the cursor source identity", async () => {
