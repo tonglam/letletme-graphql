@@ -169,8 +169,36 @@ jobs:
             -o BatchMode=yes -o StrictHostKeyChecking=yes
             -o IdentitiesOnly=yes -o UserKnownHostsFile="$SSH_DIR/known_hosts")
           target="$VPS_USER@$VPS_HOST"
-          env_b64=$(printf '%s' "$GRAPHQL_ENV" | base64 | tr -d '\n')
-          token_b64=$(printf '%s' "$GHCR_TOKEN" | base64 | tr -d '\n')
+          umask 077
+          payload_dir=$(mktemp -d "$RUNNER_TEMP/letletme-graphql-payload.XXXXXX")
+          cleanup_payloads() {
+            rm -rf -- "$payload_dir"
+          }
+          trap cleanup_payloads EXIT
+          printf '%s' "$GRAPHQL_ENV" > "$payload_dir/env.expected"
+          printf '%s' "$GHCR_TOKEN" > "$payload_dir/token.expected"
+          base64 --wrap=0 < "$payload_dir/env.expected" > "$payload_dir/env.b64"
+          base64 --wrap=0 < "$payload_dir/token.expected" > "$payload_dir/token.b64"
+          base64 --decode "$payload_dir/env.b64" > "$payload_dir/env.decoded"
+          base64 --decode "$payload_dir/token.b64" > "$payload_dir/token.decoded"
+          env_bytes=$(wc -c < "$payload_dir/env.expected" | tr -d '[:space:]')
+          token_bytes=$(wc -c < "$payload_dir/token.expected" | tr -d '[:space:]')
+          env_sha=$(sha256sum "$payload_dir/env.expected" | awk '{print $1}')
+          token_sha=$(sha256sum "$payload_dir/token.expected" | awk '{print $1}')
+          [[ "$env_bytes" =~ ^[0-9]+$ ]]
+          [[ "$token_bytes" =~ ^[0-9]+$ ]]
+          [[ "$env_sha" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$token_sha" =~ ^[a-f0-9]{64}$ ]]
+          cmp -s "$payload_dir/env.expected" "$payload_dir/env.decoded" || {
+            echo "GraphQL environment payload failed local base64 round-trip" >&2
+            exit 1
+          }
+          cmp -s "$payload_dir/token.expected" "$payload_dir/token.decoded" || {
+            echo "GHCR token payload failed local base64 round-trip" >&2
+            exit 1
+          }
+          env_b64=$(<"$payload_dir/env.b64")
+          token_b64=$(<"$payload_dir/token.b64")
           printf -v deploy_sha_q '%q' "$DEPLOY_SHA"
           printf -v image_ref_q '%q' "$IMAGE_REF"
           printf -v ghcr_user_q '%q' "$GHCR_USER"
@@ -180,6 +208,10 @@ jobs:
           printf -v public_health_q '%q' "$PUBLIC_GRAPHQL_HEALTH_URL"
           printf -v public_graphql_q '%q' "$PUBLIC_GRAPHQL_URL"
           printf -v rollout_q '%q' "$RATE_LIMIT_ROLLOUT"
+          printf -v env_bytes_q '%q' "$env_bytes"
+          printf -v token_bytes_q '%q' "$token_bytes"
+          printf -v env_sha_q '%q' "$env_sha"
+          printf -v token_sha_q '%q' "$token_sha"
           printf -v env_b64_q '%q' "$env_b64"
           printf -v token_b64_q '%q' "$token_b64"
           {
@@ -192,8 +224,26 @@ jobs:
             printf '%s\n' 'trap '\''cleanup_remote; exit 129'\'' HUP'
             printf '%s\n' 'trap '\''cleanup_remote; exit 130'\'' INT'
             printf '%s\n' 'trap '\''cleanup_remote; exit 143'\'' TERM'
-            printf 'printf %%s %s | base64 -d > "$remote_env"\n' "$env_b64_q"
-            printf 'printf %%s %s | base64 -d > "$remote_token"\n' "$token_b64_q"
+            printf '%s\n' 'verify_payload() {'
+            printf '%s\n' '  local label="$1" path="$2" expected_bytes="$3" expected_sha="$4"'
+            printf '%s\n' '  local observed_bytes observed_sha'
+            printf '%s\n' '  observed_bytes=$(wc -c < "$path" | tr -d "[:space:]")'
+            printf '%s\n' '  observed_sha=$(sha256sum "$path" | awk '\''{print $1}'\'')'
+            printf '%s\n' '  if [ "$observed_bytes" != "$expected_bytes" ] || [ "$observed_sha" != "$expected_sha" ]; then'
+            printf '%s\n' '    echo "$label payload changed during remote transport" >&2'
+            printf '%s\n' '    exit 1'
+            printf '%s\n' '  fi'
+            printf '%s\n' '}'
+            printf 'if ! printf %%s %s | base64 --decode > "$remote_env"; then\n' "$env_b64_q"
+            printf '%s\n' '  echo "GraphQL environment payload failed remote base64 decode" >&2'
+            printf '%s\n' '  exit 1'
+            printf '%s\n' 'fi'
+            printf 'verify_payload GRAPHQL_ENV "$remote_env" %s %s\n' "$env_bytes_q" "$env_sha_q"
+            printf 'if ! printf %%s %s | base64 --decode > "$remote_token"; then\n' "$token_b64_q"
+            printf '%s\n' '  echo "GHCR token payload failed remote base64 decode" >&2'
+            printf '%s\n' '  exit 1'
+            printf '%s\n' 'fi'
+            printf 'verify_payload GHCR_TOKEN "$remote_token" %s %s\n' "$token_bytes_q" "$token_sha_q"
             printf 'DEPLOY_SHA=%s IMAGE_REF=%s GHCR_USER=%s GHCR_TOKEN_FILE="$remote_token" GRAPHQL_ENV_FILE="$remote_env" VPS_WORKDIR=%s ACTIVE_SLOT_FILE=%s SWITCH_HELPER=%s PUBLIC_GRAPHQL_HEALTH_URL=%s PUBLIC_GRAPHQL_URL=%s RATE_LIMIT_ROLLOUT=%s bash -s <<'\''__LETLETME_DEPLOY__'\''\n' \
               "$deploy_sha_q" "$image_ref_q" "$ghcr_user_q" "$workdir_q" "$active_file_q" "$helper_q" "$public_health_q" "$public_graphql_q" "$rollout_q"
             cat scripts/deploy-remote.sh
