@@ -275,13 +275,12 @@ export const parseBriefingActiveMetadata = (
 		revision <= 0 ||
 		value.schema_version !== 1 ||
 		(state !== "READY" && state !== "EMPTY") ||
-		value.servable !== true ||
+		typeof value.servable !== "boolean" ||
 		typeof value.season_code !== "string" ||
 		(value.target_event_id !== null && !Number.isSafeInteger(value.target_event_id)) ||
 		(value.event_name !== null && typeof value.event_name !== "string") ||
 		!iso(value.source_checked_at) ||
 		!iso(value.published_at) ||
-		(value.deadline_time !== null && !iso(value.deadline_time)) ||
 		(value.valid_until !== null && !iso(value.valid_until)) ||
 		!hasLocalePair(value.locale_manifest)
 	) {
@@ -418,12 +417,61 @@ export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	},
 ];
 
-async function activeMetadata(database: QueryExecutor): Promise<ActiveMetadata | null> {
+type ActiveMetadataRead = {
+	metadata: ActiveMetadata | null;
+	invalid: boolean;
+	publicationId: string | null;
+	revision: number | null;
+	sourceCheckedAt: string | null;
+	publishedAt: string | null;
+};
+
+const emptyActiveMetadataRead = (): ActiveMetadataRead => ({
+	metadata: null,
+	invalid: false,
+	publicationId: null,
+	revision: null,
+	sourceCheckedAt: null,
+	publishedAt: null,
+});
+
+const observedMetadata = (row: unknown): Omit<ActiveMetadataRead, "metadata" | "invalid"> => {
+	if (!isRecord(row)) {
+		return {
+			publicationId: null,
+			revision: null,
+			sourceCheckedAt: null,
+			publishedAt: null,
+		};
+	}
+	const revision = typeof row.revision === "number" ? row.revision : Number(row.revision);
+	return {
+		publicationId: typeof row.publication_id === "string" ? row.publication_id : null,
+		revision: Number.isSafeInteger(revision) && revision > 0 ? revision : null,
+		sourceCheckedAt: metadataDate(
+			typeof row.source_checked_at === "string" || row.source_checked_at instanceof Date
+				? row.source_checked_at
+				: null
+		),
+		publishedAt: metadataDate(
+			typeof row.published_at === "string" || row.published_at instanceof Date
+				? row.published_at
+				: null
+		),
+	};
+};
+
+async function activeMetadata(database: QueryExecutor): Promise<ActiveMetadataRead> {
 	const result = await database.query<ActiveMetadata>(BRIEFING_ACTIVE_METADATA_SQL, ["week"]);
-	const row = result.rows[0];
-	return row && typeof row.publication_id === "string"
-		? parseBriefingActiveMetadata(row, row.publication_id)
-		: null;
+	const row: unknown = result.rows[0];
+	if (row === undefined || row === null) return emptyActiveMetadataRead();
+	const observed = observedMetadata(row);
+	const publicationId = observed.publicationId;
+	const metadata =
+		publicationId === null ? null : parseBriefingActiveMetadata(row, publicationId);
+	return metadata
+		? { metadata, invalid: false, ...observed }
+		: { metadata: null, invalid: true, ...observed };
 }
 
 const payloadKey = (revision: number, locale: BriefingLocale): string =>
@@ -514,12 +562,23 @@ export async function readBriefingWeek(
 	redis: Redis,
 	locale: BriefingLocale
 ): Promise<BriefingWeekRead> {
-	let metadata: ActiveMetadata | null;
+	let active: ActiveMetadataRead;
 	try {
-		metadata = await activeMetadata(database);
+		active = await activeMetadata(database);
 	} catch {
 		return unavailable();
 	}
+	if (active.invalid) {
+		recordReaderEvent("corruption");
+		return {
+			...unavailable(),
+			publicationId: active.publicationId,
+			revision: active.revision,
+			sourceCheckedAt: active.sourceCheckedAt,
+			publishedAt: active.publishedAt,
+		};
+	}
+	const metadata = active.metadata;
 	if (!metadata)
 		return (await hasCurrentOrNextEvent(database))
 			? unavailable("NOT_PUBLISHED")
