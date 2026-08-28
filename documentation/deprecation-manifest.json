@@ -80,16 +80,6 @@
 		"notes": "Use warningSummaries and capability timestamps."
 	},
 	{
-		"id": "query-entry-tournaments",
-		"symbol": "Query.entryTournaments",
-		"owner": "graphql-tournaments",
-		"introducedAt": "2024-01-01",
-		"removalTarget": "2027-03-01",
-		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"Query.entryTournaments\"}",
-		"notes": "Use entryParticipatingTournaments or manageableTournaments."
-	},
-	{
 		"id": "my-fpl-setup-warnings",
 		"symbol": "MyFplCompetitionSetupStatus.setupHasWarnings",
 		"owner": "graphql-my-fpl",
