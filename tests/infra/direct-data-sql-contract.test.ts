@@ -125,11 +125,15 @@ describe("direct Data SQL contract", () => {
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
-				if (
-					new Set(
-						DIRECT_DATA_SQL_CONTRACT.filter((probe) => probe.runtime).map((probe) => probe.sql)
-					).has(text)
-				) {
+				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
+					(probe) => probe.runtime && probe.sql === text
+				);
+				if (runtimeProbe?.runtime === "must-return-board") {
+					return {
+						rows: [{ field_size: 1, viewer_row: { entryId: 1 } }],
+					} as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-row") {
 					return { rows: [{}] } as unknown as QueryResult<Row>;
 				}
 				return { rows: [] } as unknown as QueryResult<Row>;
@@ -179,11 +183,15 @@ describe("direct Data SQL contract", () => {
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
-				if (
-					new Set(
-						DIRECT_DATA_SQL_CONTRACT.filter((probe) => probe.runtime).map((probe) => probe.sql)
-					).has(text)
-				) {
+				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
+					(probe) => probe.runtime && probe.sql === text
+				);
+				if (runtimeProbe?.runtime === "must-return-board") {
+					return {
+						rows: [{ field_size: 1, viewer_row: { entryId: 1 } }],
+					} as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-row") {
 					return { rows: [{}] } as unknown as QueryResult<Row>;
 				}
 				return { rows: [] } as unknown as QueryResult<Row>;
@@ -210,6 +218,37 @@ describe("direct Data SQL contract", () => {
 			},
 		};
 		await expect(validateDirectDataSqlContract(database)).rejects.toThrow(/runtime visibility/);
+	});
+
+	test("fails closed when the runtime board join is empty or has no viewer row", async () => {
+		const boardSql = DIRECT_DATA_SQL_CONTRACT.find(
+			(probe) => probe.name === "my-fpl.competition-board"
+		)?.sql;
+		const database: QueryExecutor = {
+			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {
+				if (text.includes("format_type(attribute.atttypid, attribute.atttypmod)")) {
+					const relations = values[0] as readonly string[];
+					const columns = values[1] as readonly string[];
+					return {
+						rows: relations.map((relation, index) => ({
+							relation_name: relation,
+							column_name: columns[index],
+							actual_type: "jsonb",
+						})) as unknown as Row[],
+					} as unknown as QueryResult<Row>;
+				}
+				if (text === boardSql) {
+					return { rows: [{ field_size: 0, viewer_row: null }] } as unknown as QueryResult<Row>;
+				}
+				if (DIRECT_DATA_SQL_CONTRACT.some((probe) => probe.runtime && probe.sql === text)) {
+					return { rows: [{}] } as unknown as QueryResult<Row>;
+				}
+				return { rows: [] } as unknown as QueryResult<Row>;
+			},
+		};
+		await expect(validateDirectDataSqlContract(database)).rejects.toThrow(
+			/my-fpl\.competition-board/
+		);
 	});
 
 	test("uses the runtime Briefing payload fallback as a planner probe", () => {
@@ -306,7 +345,11 @@ describe("direct Data SQL contract", () => {
 				"my-fpl.competition-aggregate",
 			])
 		);
-		expect(runtimeProbes.every((probe) => probe.runtime === "must-return-row")).toBe(true);
+		expect(
+			runtimeProbes.every(
+				(probe) => probe.runtime === "must-return-row" || probe.runtime === "must-return-board"
+			)
+		).toBe(true);
 	});
 
 	test("lets PostgreSQL infer the opaque Trends publication identity", () => {

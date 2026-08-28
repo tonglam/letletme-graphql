@@ -120,16 +120,33 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 		names.add(probe.name);
 		try {
 			await database.query(`EXPLAIN (FORMAT JSON, COSTS OFF) ${probe.sql}`, probe.values);
-			if (probe.runtime === "must-return-row") {
+			if (probe.runtime) {
 				const result = await database.query(probe.sql, probe.values);
 				if (result.rows.length === 0) {
 					throw new Error("runtime reader role cannot see the Data-owned authority fixture row");
+				}
+				if (probe.runtime === "must-return-board") {
+					const board = result.rows[0] as {
+						field_size?: unknown;
+						viewer_row?: unknown;
+					};
+					if (
+						typeof board.field_size !== "number" ||
+						!Number.isInteger(board.field_size) ||
+						board.field_size <= 0 ||
+						board.viewer_row === null ||
+						board.viewer_row === undefined
+					) {
+						throw new Error(
+							"runtime reader role cannot see a positive competition board field or viewer row"
+						);
+					}
 				}
 			}
 		} catch (cause) {
 			throw new Error(
 				`Data candidate direct SQL contract is unavailable: ${probe.name}${
-					probe.runtime === "must-return-row" ? " (runtime visibility)" : ""
+					probe.runtime ? " (runtime visibility)" : ""
 				}`,
 				{ cause }
 			);

@@ -280,6 +280,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.competition-board",
 		sql: MY_FPL_COMPETITION_BOARD_SQL,
 		values: [2026, 1, "7", 1, "", 100, 0, 1],
+		runtime: "must-return-board",
 		resultTypes: [
 			{
 				relation: "competition.my_fpl_snapshot_tournament_rows",
