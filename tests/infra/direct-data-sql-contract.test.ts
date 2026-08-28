@@ -17,6 +17,7 @@ import {
 	CORE_FALLBACK_SQL,
 	CORE_LIVE_IDENTITY_FALLBACK_SQL,
 	LIVE_FALLBACK_SQL,
+	LIVE_LIFECYCLE_STATUS_SQL,
 } from "../../src/infra/data-snapshot";
 import {
 	PUBLICATION_BY_ID_SQL,
@@ -138,6 +139,10 @@ describe("direct Data SQL contract", () => {
 				(probe) => probe.name === "data-snapshot.core-live-identity-fallback"
 			)?.sql
 		).toBe(CORE_LIVE_IDENTITY_FALLBACK_SQL);
+		expect(
+			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "data-snapshot.live-lifecycle-status")
+				?.sql
+		).toBe(LIVE_LIFECYCLE_STATUS_SQL);
 	});
 
 	test("lets PostgreSQL infer the opaque Trends publication identity", () => {

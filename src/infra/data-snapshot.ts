@@ -1377,7 +1377,7 @@ type LiveLifecycleStatusRow = QueryResultRow & {
 	source_checked_at: string | Date | null;
 };
 
-const LIVE_LIFECYCLE_STATUS_SQL = `
+export const LIVE_LIFECYCLE_STATUS_SQL = `
 	SELECT
 		event_id,
 		state,
@@ -1715,6 +1715,11 @@ export const CORE_LIVE_IDENTITY_FALLBACK_SQL = `
 export const DATA_SNAPSHOT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{ name: "data-snapshot.core-fallback", sql: CORE_FALLBACK_SQL, values: [2026] },
 	{ name: "data-snapshot.live-fallback", sql: LIVE_FALLBACK_SQL, values: [2026, 1] },
+	{
+		name: "data-snapshot.live-lifecycle-status",
+		sql: LIVE_LIFECYCLE_STATUS_SQL,
+		values: [2026, 1],
+	},
 	{
 		name: "data-snapshot.core-live-identity-fallback",
 		sql: CORE_LIVE_IDENTITY_FALLBACK_SQL,
