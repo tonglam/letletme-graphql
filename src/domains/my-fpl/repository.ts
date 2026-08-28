@@ -28,7 +28,7 @@ export const MY_FPL_EVENT_LIFECYCLE_SQL = `
 export const MY_FPL_ACTIVE_PUBLICATIONS_SQL = `
 	SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
 		published_at, kind, expected_entry_count, ready_entry_count,
-		empty_entry_count, expected_tournament_count,
+		empty_entry_count, not_applicable_entry_count, expected_tournament_count,
 		ready_tournament_count, content_sha256, score_source,
 		live_publication_id, live_revision, algorithm_version,
 		source_min_checked_at, source_max_checked_at
@@ -40,7 +40,7 @@ export const MY_FPL_ACTIVE_PUBLICATIONS_SQL = `
 export const MY_FPL_PUBLICATION_BY_EVENT_REVISION_SQL = `
 	SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
 		published_at, kind, expected_entry_count, ready_entry_count,
-		empty_entry_count, expected_tournament_count,
+		empty_entry_count, not_applicable_entry_count, expected_tournament_count,
 		ready_tournament_count, content_sha256, score_source,
 		live_publication_id, live_revision, algorithm_version,
 		source_min_checked_at, source_max_checked_at
@@ -54,7 +54,7 @@ export const MY_FPL_PUBLICATION_BY_EVENT_REVISION_SQL = `
 export const MY_FPL_PUBLICATION_BY_REVISION_SQL = `
 	SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
 		published_at, kind, expected_entry_count, ready_entry_count,
-		empty_entry_count, expected_tournament_count,
+		empty_entry_count, not_applicable_entry_count, expected_tournament_count,
 		ready_tournament_count, content_sha256, score_source,
 		live_publication_id, live_revision, algorithm_version,
 		source_min_checked_at, source_max_checked_at
@@ -301,6 +301,11 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 			{
 				relation: "competition.my_fpl_snapshot_publications",
 				column: "empty_entry_count",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "not_applicable_entry_count",
 				pgType: "integer",
 			},
 			{
@@ -575,6 +580,7 @@ export type MyFplSnapshotPublication = MyFplSnapshotMeta & {
 	expectedEntryCount: number;
 	readyEntryCount: number;
 	emptyEntryCount: number;
+	notApplicableEntryCount: number;
 	expectedTournamentCount: number;
 	readyTournamentCount: number;
 	contentSha256: string;
@@ -971,6 +977,7 @@ type DbSnapshotPublicationRow = QueryResultRow & {
 	expected_entry_count: number;
 	ready_entry_count: number;
 	empty_entry_count: number;
+	not_applicable_entry_count: number;
 	expected_tournament_count: number;
 	ready_tournament_count: number;
 	content_sha256: string;
@@ -1642,6 +1649,8 @@ const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =
 		!Number.isSafeInteger(row.empty_entry_count) ||
 		row.ready_entry_count < 0 ||
 		row.empty_entry_count < 0 ||
+		!Number.isSafeInteger(row.not_applicable_entry_count) ||
+		row.not_applicable_entry_count < 0 ||
 		row.ready_entry_count + row.empty_entry_count !== row.expected_entry_count ||
 		!Number.isSafeInteger(row.expected_tournament_count) ||
 		row.expected_tournament_count < 0 ||
@@ -1693,6 +1702,7 @@ const publicationFromRow = (row: DbSnapshotPublicationRow): MyFplSnapshotPublica
 	expectedEntryCount: row.expected_entry_count,
 	readyEntryCount: row.ready_entry_count,
 	emptyEntryCount: row.empty_entry_count,
+	notApplicableEntryCount: row.not_applicable_entry_count,
 	expectedTournamentCount: row.expected_tournament_count,
 	readyTournamentCount: row.ready_tournament_count,
 	contentSha256: row.content_sha256,
@@ -1737,6 +1747,8 @@ const isSnapshotPublicationCache = (value: unknown): value is MyFplSnapshotPubli
 		candidate.readyEntryCount >= 0 &&
 		isSafeInteger(candidate.emptyEntryCount) &&
 		candidate.emptyEntryCount >= 0 &&
+		isSafeInteger(candidate.notApplicableEntryCount) &&
+		candidate.notApplicableEntryCount >= 0 &&
 		candidate.readyEntryCount + candidate.emptyEntryCount === candidate.expectedEntryCount &&
 		isSafeInteger(candidate.expectedTournamentCount) &&
 		candidate.expectedTournamentCount >= 0 &&
@@ -1895,7 +1907,10 @@ export type SnapshotEntryContractRow = Readonly<{
  */
 export const parseSnapshotEntryContractRow = (
 	value: unknown,
-	publication: Pick<MyFplSnapshotPublication, "expectedEntryCount" | "expectedTournamentCount">,
+	publication: Pick<
+		MyFplSnapshotPublication,
+		"expectedEntryCount" | "notApplicableEntryCount" | "expectedTournamentCount"
+	>,
 	entryId: number,
 	eventId: number
 ): SnapshotEntryContractRow | null => {
@@ -1919,7 +1934,7 @@ export const parseSnapshotEntryContractRow = (
 		isEmpty !== (payload.gameweek.state === "EMPTY") ||
 		(isEmpty && picksCount !== 0) ||
 		(!isEmpty && (payload.gameweek.state !== "READY" || picksCount !== 15)) ||
-		entryRowCount !== publication.expectedEntryCount ||
+		entryRowCount !== publication.expectedEntryCount + publication.notApplicableEntryCount ||
 		aggregateRowCount !== publication.expectedTournamentCount
 	) {
 		return null;

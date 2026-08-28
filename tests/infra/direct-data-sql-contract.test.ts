@@ -453,6 +453,7 @@ const mockSnapshotPublication = {
 	expected_entry_count: 0,
 	ready_entry_count: 0,
 	empty_entry_count: 0,
+	not_applicable_entry_count: 0,
 	expected_tournament_count: 2,
 	ready_tournament_count: 2,
 	content_sha256: "a".repeat(64),
