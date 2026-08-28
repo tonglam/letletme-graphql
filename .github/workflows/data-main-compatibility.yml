@@ -117,6 +117,13 @@ jobs:
           psql "$CONTRACT_ADMIN_DATABASE_URL" -f
           data-platform/tests/fixtures/graphql-consumer-authority.sql
 
+      - name: Refresh reporting materialized views for the authority fixture
+        run: |
+          psql "$CONTRACT_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          REFRESH MATERIALIZED VIEW reporting.tournament_entry_event_summaries;
+          REFRESH MATERIALIZED VIEW reporting.tournament_selection_stats;
+          SQL
+
       - name: Install GraphQL external-boundary contract fixture
         run: psql "$CONTRACT_ADMIN_DATABASE_URL" -f tests/fixtures/database-contract.sql
 

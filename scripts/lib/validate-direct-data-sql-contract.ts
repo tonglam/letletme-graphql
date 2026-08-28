@@ -31,7 +31,6 @@ import { TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/trends/repository";
 import {
 	BRIEFING_DATA_SQL_CONTRACT,
 	BRIEFING_ACTIVE_METADATA_SQL,
-	BRIEFING_CONTRACT_PUBLICATION_ID,
 	parseBriefingActiveMetadata,
 	parseBriefingFallbackRow,
 } from "../../src/infra/content-publication";
@@ -182,24 +181,27 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 				}
 				if (probe.runtime === "must-return-briefing") {
 					const metadataResult = await database.query(BRIEFING_ACTIVE_METADATA_SQL, ["week"]);
-					const metadata = metadataResult.rows[0]
-						? parseBriefingActiveMetadata(metadataResult.rows[0], BRIEFING_CONTRACT_PUBLICATION_ID)
-						: null;
+					const activeRow = metadataResult.rows[0] as { publication_id?: unknown } | undefined;
+					const metadata =
+						activeRow && typeof activeRow.publication_id === "string"
+							? parseBriefingActiveMetadata(activeRow, activeRow.publication_id)
+							: null;
 					const locale =
 						probe.values[1] === "en" || probe.values[1] === "zh-CN" ? probe.values[1] : null;
 					const parsed =
 						metadata && locale ? parseBriefingFallbackRow(result.rows[0], locale, metadata) : null;
-					if (!parsed || parsed.publicationId !== String(probe.values[0])) {
+					if (!parsed || !metadata || parsed.publicationId !== metadata.publication_id) {
 						throw new Error(
 							"runtime reader role returned a Briefing payload that the production decoder rejects"
 						);
 					}
 				}
 				if (probe.runtime === "must-return-briefing-metadata") {
-					const metadata = parseBriefingActiveMetadata(
-						result.rows[0],
-						BRIEFING_CONTRACT_PUBLICATION_ID
-					);
+					const activeRow = result.rows[0] as { publication_id?: unknown };
+					const metadata =
+						typeof activeRow.publication_id === "string"
+							? parseBriefingActiveMetadata(activeRow, activeRow.publication_id)
+							: null;
 					if (!metadata) {
 						throw new Error(
 							"runtime reader role returned active Briefing metadata that the production decoder rejects"

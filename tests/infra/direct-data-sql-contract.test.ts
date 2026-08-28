@@ -1098,7 +1098,7 @@ describe("direct Data SQL contract", () => {
 		const fallback = DIRECT_DATA_SQL_CONTRACT.find(
 			(probe) => probe.name === "briefing.payload-fallback"
 		);
-		expect(fallback?.values).toEqual([CONTRACT_PUBLICATION_ID, "en"]);
+		expect(fallback?.values).toEqual(["week", "en"]);
 		expect(fallback?.runtime).toBe("must-return-briefing");
 	});
 

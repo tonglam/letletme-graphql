@@ -314,7 +314,19 @@ export const BRIEFING_PAYLOAD_FALLBACK_SQL = `
 	LIMIT 1
 `;
 
-export const BRIEFING_CONTRACT_PUBLICATION_ID = "00000000-0000-4000-8000-000000000001";
+const BRIEFING_PAYLOAD_FALLBACK_CONTRACT_SQL = `
+	SELECT payload, payload_bytes, payload_sha256
+	FROM content.publication_payloads
+	WHERE publication_id = (
+		SELECT publication_id
+		FROM content.briefing_active_publication
+		WHERE scope_key = $1
+		ORDER BY revision DESC
+		LIMIT 1
+	)
+	AND locale = $2
+	LIMIT 1
+`;
 
 export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
@@ -374,8 +386,8 @@ export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	},
 	{
 		name: "briefing.payload-fallback",
-		sql: BRIEFING_PAYLOAD_FALLBACK_SQL,
-		values: [BRIEFING_CONTRACT_PUBLICATION_ID, "en"],
+		sql: BRIEFING_PAYLOAD_FALLBACK_CONTRACT_SQL,
+		values: ["week", "en"],
 		runtime: "must-return-briefing",
 		resultTypes: [
 			{
