@@ -257,7 +257,8 @@ test "$(docker inspect --format '{{.Config.Image}}' "$candidate_container")" = "
 test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$candidate_container")" = "$DEPLOY_SHA"
 
 anonymous_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-  --header 'Content-Type: application/json' \
+	--max-time 5 \
+	--header 'Content-Type: application/json' \
   --data '{"query":"query { currentEventInfo { season } }"}' \
   "$candidate_url/graphql")
 test "$anonymous_status" = 401
@@ -342,6 +343,8 @@ compose exec -T \
 
 old_slot="$active_slot"
 switched=false
+commit_critical=false
+pending_signal=""
 rollback_switch() {
   if [ "$switched" != true ]; then return 0; fi
   if ! sudo -n "$SWITCH_HELPER" "$old_slot"; then
@@ -368,13 +371,20 @@ rollback_on_error() {
   exit "$status"
 }
 rollback_on_signal() {
-  local signal="$1"
-  local status=143
-  case "$signal" in
-    INT) status=130 ;;
-    HUP) status=129 ;;
-  esac
-  # A signal can arrive while the cutover is being verified. Disable the
+	local signal="$1"
+	local status=143
+	case "$signal" in
+	  INT) status=130 ;;
+	  HUP) status=129 ;;
+	esac
+	if [ "$commit_critical" = true ]; then
+		# Bash traps are not queued while an external command runs. Latch the
+		# signal and handle it immediately after the manifest commit point, once
+		# rollback has been disarmed, instead of silently discarding cancellation.
+		pending_signal="$signal"
+		return 0
+	fi
+	# A signal can arrive while the cutover is being verified. Disable the
   # signal traps while running the idempotent helper so a second signal cannot
   # interrupt rollback halfway through and recurse into this handler.
   trap - INT TERM HUP
@@ -460,15 +470,23 @@ jq -n \
   '{deployedAt:$deployedAt,commit:$commit,image:$image,oldSlot:$oldSlot,newSlot:$newSlot,oldImage:$oldImage}' \
   > "$manifest"
 chmod 600 "$manifest"
-# The manifest rename and rollback disarm are one commit point. Ignore
-# termination signals for these two commands so a pending signal cannot roll
-# routing back after the durable manifest says the new slot is active.
-trap '' INT TERM HUP
+# The manifest rename and rollback disarm are one commit point. Latch
+# termination signals while these two commands run, then process the pending
+# cancellation after the durable manifest has disarmed rollback.
+commit_critical=true
 mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"
 switched=false
+commit_critical=false
 trap 'rollback_on_signal INT' INT
 trap 'rollback_on_signal TERM' TERM
 trap 'rollback_on_signal HUP' HUP
+if [ -n "$pending_signal" ]; then
+	case "$pending_signal" in
+		INT) exit 130 ;;
+		HUP) exit 129 ;;
+		TERM) exit 143 ;;
+	esac
+fi
 
 # The durable manifest is the point after which cleanup is allowed. Keep both
 # slot image IDs and remove only older images in this repository; Docker also

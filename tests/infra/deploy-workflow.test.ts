@@ -163,16 +163,19 @@ describe("production deployment workflow", () => {
 	});
 
 	test("commits the manifest and rollback disarm as one signal-atomic section", () => {
-		const ignoreSignalsAt = deployScript.indexOf("trap '' INT TERM HUP");
+		const criticalSectionAt = deployScript.indexOf("commit_critical=true");
 		const manifestAt = deployScript.indexOf(
 			'mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"'
 		);
 		const disarmAt = deployScript.indexOf("switched=false", manifestAt);
 		const restoreSignalsAt = deployScript.indexOf("trap 'rollback_on_signal INT' INT", disarmAt);
-		expect(ignoreSignalsAt).toBeGreaterThan(-1);
-		expect(ignoreSignalsAt).toBeLessThan(manifestAt);
+		expect(criticalSectionAt).toBeGreaterThan(-1);
+		expect(deployScript).toContain("pending_signal");
+		expect(deployScript).toContain("Latch");
+		expect(criticalSectionAt).toBeLessThan(manifestAt);
 		expect(manifestAt).toBeLessThan(disarmAt);
 		expect(disarmAt).toBeLessThan(restoreSignalsAt);
+		expect(deployScript).toContain('if [ -n "$pending_signal" ]; then');
 	});
 
 	test("retires the implicit legacy project only before canonical blue reuses port 4000", () => {
