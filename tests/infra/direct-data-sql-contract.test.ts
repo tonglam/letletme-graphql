@@ -19,7 +19,6 @@ import {
 import { HOME_PERSONAL_DESK_SQL } from "../../src/domains/home/repository";
 import { MARKET_QUERY } from "../../src/domains/market/repository";
 import { PLAYER_DETAIL_HISTORICAL_TEAMS_SQL } from "../../src/domains/player-detail/repository";
-import { MY_FPL_ACTIVE_PUBLICATIONS_SQL } from "../../src/domains/my-fpl/repository";
 import {
 	CORE_FALLBACK_SQL,
 	CORE_LIVE_IDENTITY_FALLBACK_SQL,
@@ -86,20 +85,23 @@ const mockEntrySearchRow = {
 const CONTRACT_PUBLICATION_ID = "00000000-0000-4000-8000-000000000001";
 const CONTRACT_CORE_PUBLICATION_ID = "00000000-0000-4000-8000-000000000007";
 
-const canonicalJson = (value: unknown): string => {
-	if (Array.isArray(value))
-		return JSON.stringify(value.map((item) => JSON.parse(canonicalJson(item))));
+const canonicalValue = (value: unknown): unknown => {
+	if (Array.isArray(value)) return value.map(canonicalValue);
 	if (value !== null && typeof value === "object") {
 		const record = value as Record<string, unknown>;
-		return JSON.stringify(
-			Object.fromEntries(
-				Object.keys(record)
-					.sort()
-					.map((key) => [key, JSON.parse(canonicalJson(record[key]))])
-			)
+		return Object.fromEntries(
+			Object.keys(record)
+				.sort()
+				.map((key) => [key, canonicalValue(record[key])])
 		);
 	}
-	return JSON.stringify(value);
+	return value;
+};
+
+const canonicalJson = (value: unknown): string => {
+	const serialized = JSON.stringify(canonicalValue(value));
+	if (serialized === undefined) throw new Error("Mock payload is not JSON serializable");
+	return serialized;
 };
 
 const mockBriefingPayload = (locale: "en" | "zh-CN") => ({
