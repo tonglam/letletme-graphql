@@ -169,6 +169,14 @@ describe("direct Data SQL contract", () => {
 		).toEqual(["json", "jsonb"]);
 	});
 
+	test("accepts character varying for the decoded Market position", () => {
+		const market = DIRECT_DATA_SQL_CONTRACT.find(
+			(probe) => probe.name === "market.snapshot-window"
+		);
+		const position = market?.resultTypes?.find((assertion) => assertion.column === "position");
+		expect(position && allowedResultTypes(position)).toEqual(["character varying", "text"]);
+	});
+
 	test("accepts JSON for every decoded JSON contract column", async () => {
 		const database: QueryExecutor = {
 			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {
@@ -235,7 +243,7 @@ describe("direct Data SQL contract", () => {
 				if (text.includes("format_type(attribute.atttypid, attribute.atttypmod)")) {
 					const relations = values[0] as readonly string[];
 					const columns = values[1] as readonly string[];
-						return {
+					return {
 						rows: relations.map((relation, index) => ({
 							relation_name: relation,
 							column_name: columns[index],
@@ -289,13 +297,16 @@ describe("direct Data SQL contract", () => {
 	});
 
 	test("uses the runtime Market statements as planner probes", () => {
-		const market = DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "market.snapshot-window");
+		const market = DIRECT_DATA_SQL_CONTRACT.find(
+			(probe) => probe.name === "market.snapshot-window"
+		);
 		expect(market?.sql).toBe(MARKET_QUERY);
 		expect(market?.resultTypes).toEqual([
 			expect.objectContaining({
 				relation: "fpl.player_market_snapshots",
 				column: "position",
 				pgType: "text",
+				acceptedPgTypes: ["character varying"],
 			}),
 		]);
 		expect(

@@ -262,6 +262,7 @@ export const MARKET_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 				relation: "fpl.player_market_snapshots",
 				column: "position",
 				pgType: "text",
+				acceptedPgTypes: ["character varying"],
 			},
 		],
 	},
