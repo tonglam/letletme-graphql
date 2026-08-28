@@ -418,6 +418,89 @@ test("deprecated nested fragment directives are collected for every fragment occ
 	expect(observed).toEqual(["LegacyMode.LIVE"]);
 });
 
+test("deprecated nested directives retain enclosing named-fragment conditions", async () => {
+	const observed: string[] = [];
+	const typeDefs = `
+		enum LegacyMode {
+			CAT @deprecated(reason: "Use NEW")
+			DOG @deprecated(reason: "Use NEW")
+			NEW
+		}
+		directive @legacy(mode: LegacyMode) on FRAGMENT_SPREAD
+		interface Node { id: ID!, child: Node, value: String }
+		type Cat implements Node { id: ID!, child: Node, value: String }
+		type Dog implements Node { id: ID!, child: Node, value: String }
+		type Query { node: Node }
+	`;
+	const server = new ApolloServer<TestContext>({
+		typeDefs,
+		resolvers: {
+			Query: {
+				node: () => ({
+					__typename: "Dog",
+					id: "root",
+					child: { __typename: "Dog", id: "child" },
+				}),
+			},
+			Node: { __resolveType: (value: { __typename: string }) => value.__typename },
+			Dog: {
+				child: (value: { child?: unknown }) => value.child ?? null,
+				value: () => "ok",
+			},
+		},
+		plugins: [
+			{
+				async requestDidStart() {
+					return {
+						async executionDidStart(requestContext) {
+							return createDeprecatedSchemaUsageExecutionListener<TestContext>({
+								symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+								symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+								globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols,
+								increment: (symbol) => observed.push(symbol),
+							});
+						},
+					};
+				},
+			},
+		],
+	});
+	servers.push(server);
+	await server.start();
+
+	const query = `
+		query {
+			node {
+				...CatBranch
+				... on Dog {
+					child { ...FieldsDog @legacy(mode: DOG) }
+				}
+			}
+		}
+		fragment CatBranch on Cat {
+			child { ...FieldsCat @legacy(mode: CAT) }
+		}
+		fragment FieldsCat on Node { value }
+		fragment FieldsDog on Node { value }
+	`;
+	const limits = validateGraphQLRequestLimits({ query }, buildSchema(typeDefs));
+	if (!limits.ok) throw new Error(limits.message);
+	await server.executeOperation(
+		{ query },
+		{
+			contextValue: {
+				deprecatedSymbols: limits.deprecatedSymbols,
+				deprecatedSymbolOwners: limits.deprecatedSymbolOwners,
+				deprecatedSymbolGlobalSymbols: limits.deprecatedSymbolGlobalSymbols,
+			},
+		}
+	);
+
+	// The root is Dog, so CatBranch is skipped even though its nested spread
+	// resolves the same response path as the executed Dog branch.
+	expect(observed).toEqual(["LegacyMode.DOG"]);
+});
+
 test("deprecated fragment-spread directives keep conditional runtime branches separate", async () => {
 	const observed: string[] = [];
 	const typeDefs = `

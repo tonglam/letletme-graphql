@@ -807,7 +807,17 @@ const activeDeprecatedTelemetrySelections = (
 			if (seenFragments.has(fragmentName)) continue;
 			const nextSeenFragments = new Set(seenFragments);
 			nextSeenFragments.add(fragmentName);
-			inspect(fragment.selectionSet, currentOwner, pathPrefix, nextSeenFragments);
+			// A named fragment's type condition is part of every nested
+			// occurrence. Preserve the condition-specific path while walking its
+			// selections; otherwise a directive-bearing nested spread can be
+			// registered for a sibling runtime type even though this fragment
+			// occurrence never executes there.
+			for (const occurrencePath of pathsForRuntimeTypeCondition(
+				pathPrefix,
+				fragment.typeCondition.name.value
+			)) {
+				inspect(fragment.selectionSet, currentOwner, occurrencePath, nextSeenFragments);
+			}
 		}
 	};
 	inspect(operation.selectionSet);
