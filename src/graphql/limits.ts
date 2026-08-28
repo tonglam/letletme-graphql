@@ -580,11 +580,14 @@ const activeDeprecatedTelemetrySelections = (
 	const variableOwners = new Map<string, Set<string | undefined>>();
 	const fragmentDirectiveOwners = new Map<string, Set<string>>();
 	const analyzedFragments = new Set<string>();
+	const fragmentFieldOwnerMemo = new Map<string, Set<string>>();
 	const collectFragmentFieldOwners = (
 		fragmentName: string,
 		seen: ReadonlySet<string> = new Set()
 	): Set<string> => {
 		if (seen.has(fragmentName)) return new Set();
+		const memoized = fragmentFieldOwnerMemo.get(fragmentName);
+		if (memoized) return new Set(memoized);
 		const fragment = fragments.get(fragmentName);
 		if (!fragment) return new Set();
 		const nextSeen = new Set(seen);
@@ -609,6 +612,7 @@ const activeDeprecatedTelemetrySelections = (
 			}
 		};
 		collect(fragment.selectionSet);
+		fragmentFieldOwnerMemo.set(fragmentName, new Set(owners));
 		return owners;
 	};
 	const registerFragmentDirectiveOwners = (fragment: FragmentDefinitionNode): void => {
