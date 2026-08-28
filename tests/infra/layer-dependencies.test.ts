@@ -2,7 +2,11 @@ import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { moduleSpecifiers, resolveSourceModule } from "../../scripts/check-layer-dependencies";
+import {
+	isTypeScriptSourceFile,
+	moduleSpecifiers,
+	resolveSourceModule,
+} from "../../scripts/check-layer-dependencies";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
@@ -53,4 +57,12 @@ test("layer checker recognizes TypeScript import-type expressions", () => {
 		"../domains/entries/service",
 		"../index",
 	]);
+});
+
+test("layer checker includes every TypeScript module extension", () => {
+	expect(isTypeScriptSourceFile("src/infra/runtime.ts")).toBe(true);
+	expect(isTypeScriptSourceFile("src/infra/runtime.tsx")).toBe(true);
+	expect(isTypeScriptSourceFile("src/infra/runtime.mts")).toBe(true);
+	expect(isTypeScriptSourceFile("src/infra/runtime.cts")).toBe(true);
+	expect(isTypeScriptSourceFile("src/infra/runtime.js")).toBe(false);
 });

@@ -19,12 +19,16 @@ const compilerOptions = ts.parseJsonConfigFileContent(
 	tsconfigPath
 ).options;
 
+export const TYPESCRIPT_SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts"]);
+export const isTypeScriptSourceFile = (file: string): boolean =>
+	TYPESCRIPT_SOURCE_EXTENSIONS.has(extname(file));
+
 const sourceFilesUnder = (directory: string): string[] => {
 	const files: string[] = [];
 	for (const entry of readdirSync(directory, { withFileTypes: true })) {
 		const file = join(directory, entry.name);
 		if (entry.isDirectory()) files.push(...sourceFilesUnder(file));
-		else if (entry.isFile() && [".ts", ".tsx"].includes(extname(file))) files.push(file);
+		else if (entry.isFile() && isTypeScriptSourceFile(file)) files.push(file);
 	}
 	return files;
 };
