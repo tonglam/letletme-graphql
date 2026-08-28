@@ -27,4 +27,16 @@ describe("server log redaction", () => {
 		expect(sanitized).not.toHaveProperty("stack");
 		expect(sanitized).not.toHaveProperty("cause");
 	});
+
+	test("removes complete Authorization credentials including spaced schemes", () => {
+		for (const [source, expected] of [
+			["Authorization: Bearer super-secret-token", "Authorization: [REDACTED]"],
+			["authorization=Basic dXNlcjpwYXNz", "authorization=[REDACTED]"],
+		] as const) {
+			const sanitized = sanitizeLogText(source);
+			expect(sanitized).toBe(expected);
+			expect(sanitized).not.toContain("super-secret-token");
+			expect(sanitized).not.toContain("dXNlcjpwYXNz");
+		}
+	});
 });

@@ -136,7 +136,21 @@ if (primaryRedis.identity === rateLimitRedis.identity) {
 	throw new Error("Primary and rate-limit Redis endpoints must be different");
 }
 
-const LETLETME_DATA_URL = readEnv("LETLETME_DATA_URL")?.trim() ?? "";
+const parseDataServiceUrl = (value: string): string => {
+	if (!value) return "";
+	let parsed: URL;
+	try {
+		parsed = new URL(value);
+	} catch {
+		throw new Error("LETLETME_DATA_URL must be a valid HTTP(S) URL");
+	}
+	if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+		throw new Error("LETLETME_DATA_URL must be a valid HTTP(S) URL");
+	}
+	return value;
+};
+
+const LETLETME_DATA_URL = parseDataServiceUrl(readEnv("LETLETME_DATA_URL")?.trim() ?? "");
 const LETLETME_DATA_API_KEY = readEnv("LETLETME_DATA_API_KEY")?.trim() ?? "";
 if (isProduction && (!LETLETME_DATA_URL || !LETLETME_DATA_API_KEY)) {
 	throw new Error("Production LETLETME_DATA_URL and LETLETME_DATA_API_KEY are required");
@@ -153,7 +167,7 @@ export type DataServiceConfig = Readonly<{
  * startup above and no retired alias is read here.
  */
 export const getDataServiceConfig = (): DataServiceConfig => ({
-	url: readEnv("LETLETME_DATA_URL")?.trim() ?? "",
+	url: parseDataServiceUrl(readEnv("LETLETME_DATA_URL")?.trim() ?? ""),
 	apiKey: readEnv("LETLETME_DATA_API_KEY")?.trim() ?? "",
 });
 

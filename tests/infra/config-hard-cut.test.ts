@@ -157,6 +157,17 @@ describe("hard-cut runtime configuration", () => {
 		expect(`${missingDataKey.stdout}${missingDataKey.stderr}`).toContain(
 			"Production LETLETME_DATA_URL and LETLETME_DATA_API_KEY are required"
 		);
+
+		for (const invalidUrl of ["not-a-url", "redis://data.internal:6379"]) {
+			const invalidDataUrl = importEnvInChild({
+				NODE_ENV: "production",
+				LETLETME_DATA_URL: invalidUrl,
+			});
+			expect(invalidDataUrl.status).not.toBe(0);
+			expect(`${invalidDataUrl.stdout}${invalidDataUrl.stderr}`).toContain(
+				"LETLETME_DATA_URL must be a valid HTTP(S) URL"
+			);
+		}
 	});
 
 	test("requires an exact immutable image revision in production", () => {

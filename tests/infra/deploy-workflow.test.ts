@@ -146,6 +146,10 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("active_rate_limit_mode=shadow-v3");
 		expect(deployScript).toContain('replace_rate_limit_mode "$active_rate_limit_mode"');
 		expect(deployScript).toContain("invalid or duplicate GRAPHQL_RATE_LIMIT_MODE");
+		expect(deployScript).toContain('tail -c 1 "$candidate_env_next"');
+		expect(deployScript.indexOf('tail -c 1 "$candidate_env_next"')).toBeLessThan(
+			deployScript.indexOf("printf 'GRAPHQL_RATE_LIMIT_MODE=%s\\n'")
+		);
 	});
 
 	test("requires the slot helper to persist an active-slot authority file", () => {

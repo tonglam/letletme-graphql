@@ -145,6 +145,9 @@ printf '%s' "$ghcr_token" | docker login ghcr.io -u "$lower_user" --password-std
 replace_rate_limit_mode() {
   local mode="$1"
   sed -i "/^GRAPHQL_RATE_LIMIT_MODE=/d" "$candidate_env_next"
+  if [ -s "$candidate_env_next" ] && [ -n "$(tail -c 1 "$candidate_env_next")" ]; then
+    printf '\n' >> "$candidate_env_next"
+  fi
   printf 'GRAPHQL_RATE_LIMIT_MODE=%s\n' "$mode" >> "$candidate_env_next"
 }
 
