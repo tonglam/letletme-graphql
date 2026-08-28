@@ -6,6 +6,7 @@ import { metrics } from "../../src/infra/metrics";
 type TestContext = {
 	deprecatedSymbols?: readonly string[];
 	deprecatedSymbolOwners?: Readonly<Record<string, readonly string[]>>;
+	deprecatedSymbolGlobalSymbols?: readonly string[];
 };
 const servers: ApolloServer<TestContext>[] = [];
 
@@ -34,6 +35,7 @@ test("deprecated usage is counted for cached documents only after variable coerc
 					return createDeprecatedSchemaUsageExecutionListener<TestContext>({
 						symbols: requestContext.contextValue.deprecatedSymbols ?? [],
 						symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+						globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols,
 						increment: (symbol) => observed.push(symbol),
 					});
 				},
@@ -85,6 +87,7 @@ test("deprecated usage excludes nested fields skipped by a null parent", async (
 					return createDeprecatedSchemaUsageExecutionListener<TestContext>({
 						symbols: requestContext.contextValue.deprecatedSymbols ?? [],
 						symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+						globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols,
 						increment: (symbol) => observed.push(symbol),
 					});
 				},
@@ -124,6 +127,7 @@ test("deprecated usage keeps field occurrences separate across response branches
 					return createDeprecatedSchemaUsageExecutionListener<TestContext>({
 						symbols: requestContext.contextValue.deprecatedSymbols ?? [],
 						symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+						globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols,
 						increment: (symbol) => observed.push(symbol),
 					});
 				},
@@ -158,4 +162,51 @@ test("deprecated usage keeps field occurrences separate across response branches
 	);
 
 	expect(observed).toEqual([]);
+});
+
+test("deprecated usage keeps global symbols when an owned occurrence is unreachable", async () => {
+	const observed: string[] = [];
+	const plugin: ApolloServerPlugin<TestContext> = {
+		async requestDidStart() {
+			return {
+				async executionDidStart(requestContext) {
+					return createDeprecatedSchemaUsageExecutionListener<TestContext>({
+						symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+						symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+						globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols,
+						increment: (symbol) => observed.push(symbol),
+					});
+				},
+			};
+		},
+	};
+	const server = new ApolloServer<TestContext>({
+		typeDefs: `
+			enum LegacyMode { OLD @deprecated(reason: "Use NEW") NEW }
+			directive @legacy(mode: LegacyMode) on QUERY | FIELD
+			type Query { parent: Child }
+			type Child { value(mode: LegacyMode): String }
+		`,
+		resolvers: { Query: { parent: () => null } },
+		plugins: [plugin],
+	});
+	servers.push(server);
+	await server.start();
+
+	const query = "query @legacy(mode: OLD) { parent { value(mode: OLD) } }";
+	const firstValueOffset = query.indexOf("value(mode: OLD)");
+	await server.executeOperation(
+		{ query },
+		{
+			contextValue: {
+				deprecatedSymbols: ["LegacyMode.OLD"],
+				deprecatedSymbolGlobalSymbols: ["LegacyMode.OLD"],
+				deprecatedSymbolOwners: { [`field:${firstValueOffset}`]: ["LegacyMode.OLD"] },
+			},
+		}
+	);
+
+	// The operation-level symbol is global and must be counted even though the
+	// only owned field occurrence sits below a null parent.
+	expect(observed).toEqual(["LegacyMode.OLD"]);
 });

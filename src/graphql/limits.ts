@@ -76,6 +76,8 @@ export type GraphQLLimitResult =
 			rootFields: readonly string[];
 			deprecatedSymbols: readonly string[];
 			deprecatedSymbolOwners: Readonly<Record<string, readonly string[]>>;
+			/** Deprecated symbols used outside any field occurrence (for example, an operation directive). */
+			deprecatedSymbolGlobalSymbols: readonly string[];
 	  }
 	| {
 			ok: false;
@@ -599,8 +601,9 @@ const selectedDeprecatedSymbols = (
 ): {
 	symbols: readonly string[];
 	owners: Readonly<Record<string, readonly string[]>>;
+	globalSymbols: readonly string[];
 } => {
-	if (!schema) return { symbols: [], owners: {} };
+	if (!schema) return { symbols: [], owners: {}, globalSymbols: [] };
 	const fragments = new Map(
 		document.definitions
 			.filter(
@@ -627,10 +630,14 @@ const selectedDeprecatedSymbols = (
 	const typeInfo = new TypeInfo(schema);
 	const symbols = new Set<string>();
 	const owners = new Map<string, Set<string>>();
+	const globalSymbols = new Set<string>();
 	const fieldOwners: Array<string | undefined> = [];
 	const addSymbol = (symbol: string, owner?: string): void => {
 		symbols.add(symbol);
-		if (!owner) return;
+		if (!owner) {
+			globalSymbols.add(symbol);
+			return;
+		}
 		const owned = owners.get(owner) ?? new Set<string>();
 		owned.add(symbol);
 		owners.set(owner, owned);
@@ -755,6 +762,7 @@ const selectedDeprecatedSymbols = (
 		owners: Object.fromEntries(
 			[...owners.entries()].map(([owner, ownedSymbols]) => [owner, [...ownedSymbols].sort()])
 		),
+		globalSymbols: [...globalSymbols].sort(),
 	};
 };
 
@@ -866,12 +874,14 @@ const accepted = ({
 	rootFields = [],
 	deprecatedSymbols = [],
 	deprecatedSymbolOwners = {},
+	deprecatedSymbolGlobalSymbols = [],
 }: {
 	shape: GraphQLRequestShape;
 	weightedComplexity?: number;
 	rootFields?: Array<{ name: string; uniqueEntryCount: number | null }>;
 	deprecatedSymbols?: readonly string[];
 	deprecatedSymbolOwners?: Readonly<Record<string, readonly string[]>>;
+	deprecatedSymbolGlobalSymbols?: readonly string[];
 }): GraphQLLimitResult => {
 	const boundedPublicDeskRequest =
 		rootFields.length > 0 && rootFields.every((field) => BOUNDED_PUBLIC_DESK_ROOTS.has(field.name));
@@ -901,6 +911,7 @@ const accepted = ({
 		rootFields: rootFields.map((field) => field.name),
 		deprecatedSymbols,
 		deprecatedSymbolOwners,
+		deprecatedSymbolGlobalSymbols,
 	};
 };
 
@@ -932,7 +943,7 @@ export const validateGraphQLPayloadLimits = (
 				variables,
 				schema
 			)
-		: { symbols: [], owners: {} };
+		: { symbols: [], owners: {}, globalSymbols: [] };
 	const onlyReachableDefinitions =
 		operation !== null &&
 		document.definitions.every((definition) =>
@@ -1059,6 +1070,7 @@ export const validateGraphQLPayloadLimits = (
 		rootFields: inspection.rootFields,
 		deprecatedSymbols: deprecatedTelemetry.symbols,
 		deprecatedSymbolOwners: deprecatedTelemetry.owners,
+		deprecatedSymbolGlobalSymbols: deprecatedTelemetry.globalSymbols,
 	});
 };
 
@@ -1079,6 +1091,7 @@ export const validateGraphQLRequestLimits = (
 	const rootFields: string[] = [];
 	const deprecatedSymbols = new Set<string>();
 	const deprecatedSymbolOwners = new Map<string, Set<string>>();
+	const deprecatedSymbolGlobalSymbols = new Set<string>();
 	for (const payload of payloads) {
 		if (!payload || typeof payload !== "object") {
 			return reject("GraphQL request body must be an object", "INVALID_GRAPHQL_REQUEST");
@@ -1091,6 +1104,9 @@ export const validateGraphQLRequestLimits = (
 		rateLimitCostUnits += result.rateLimitCostUnits;
 		rootFields.push(...result.rootFields);
 		for (const symbol of result.deprecatedSymbols) deprecatedSymbols.add(symbol);
+		for (const symbol of result.deprecatedSymbolGlobalSymbols) {
+			deprecatedSymbolGlobalSymbols.add(symbol);
+		}
 		for (const [owner, symbols] of Object.entries(result.deprecatedSymbolOwners)) {
 			const owned = deprecatedSymbolOwners.get(owner) ?? new Set<string>();
 			for (const symbol of symbols) owned.add(symbol);
@@ -1107,5 +1123,6 @@ export const validateGraphQLRequestLimits = (
 		deprecatedSymbolOwners: Object.fromEntries(
 			[...deprecatedSymbolOwners.entries()].map(([owner, symbols]) => [owner, [...symbols].sort()])
 		),
+		deprecatedSymbolGlobalSymbols: [...deprecatedSymbolGlobalSymbols].sort(),
 	};
 };

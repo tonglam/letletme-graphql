@@ -118,6 +118,28 @@ test("layer checker does not treat an unrelated local createRequire function as 
 	expect(moduleSpecifiers(sourceFile)).toEqual([]);
 });
 
+test("layer checker does not treat an unrelated property as a createRequire loader", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'const helper = { createRequire(path: string) { return path; } }; helper.createRequire("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([]);
+});
+
+test("layer checker rejects createRequire calls from proven module namespaces", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'import * as Module from "node:module"; const load = Module.createRequire(import.meta.url);',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
+});
+
 test("layer checker inspects CommonJS module.require calls", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.cts",

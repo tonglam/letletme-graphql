@@ -167,6 +167,29 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("keeps global deprecated symbols separate from field-owned occurrences", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on QUERY | FIELD
+			type Query { parent: Child }
+			type Child { value(mode: LegacyMode): String }
+		`);
+		const query = "query @legacy(mode: OLD) { parent { value(mode: OLD) } }";
+		const result = validateGraphQLRequestLimits({ query }, deprecatedKindsSchema);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+			deprecatedSymbolGlobalSymbols: ["LegacyMode.OLD"],
+		});
+		if (!result.ok) throw new Error(result.message);
+		const valueOffset = query.indexOf("value(mode: OLD)");
+		expect(result.deprecatedSymbolOwners[`field:${valueOffset}`]).toEqual(["LegacyMode.OLD"]);
+	});
+
 	it("reports deprecated arguments on executable directives", () => {
 		const directiveSchema = buildSchema(`
 			directive @legacy(note: String @deprecated(reason: "Use current")) on FIELD

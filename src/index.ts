@@ -502,6 +502,7 @@ const startServer = async (): Promise<void> => {
 							return createDeprecatedSchemaUsageExecutionListener<GraphQLContext>({
 								symbols: requestContext.contextValue.deprecatedSymbols ?? [],
 								symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+								globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols ?? [],
 								increment: (symbol) => metrics.graphqlDeprecatedSchemaUsages.labels(symbol).inc(),
 								onExecutionEnd: stop,
 							});
@@ -895,6 +896,7 @@ const startServer = async (): Promise<void> => {
 						operationName,
 						deprecatedSymbols: limits.deprecatedSymbols,
 						deprecatedSymbolOwners: limits.deprecatedSymbolOwners,
+						deprecatedSymbolGlobalSymbols: limits.deprecatedSymbolGlobalSymbols,
 						requestTiming,
 						requestScope,
 						authorizedTournamentMemberships,

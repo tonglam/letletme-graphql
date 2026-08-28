@@ -44,6 +44,7 @@ const sourceFilesUnder = (directory: string): string[] => {
 export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] => {
 	const modules: ModuleSpecifier[] = [];
 	const createRequireBindings = new Set<string>();
+	const createRequireNamespaceBindings = new Set<string>();
 	const moduleSpecifierFromLoader = (initializer: ts.Expression): string | undefined => {
 		let expression = initializer;
 		while (ts.isAwaitExpression(expression) || ts.isParenthesizedExpression(expression)) {
@@ -66,6 +67,12 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 			if (node.moduleSpecifier.text === "node:module" || node.moduleSpecifier.text === "module") {
 				if (
 					node.importClause?.namedBindings &&
+					ts.isNamespaceImport(node.importClause.namedBindings)
+				) {
+					createRequireNamespaceBindings.add(node.importClause.namedBindings.name.text);
+				}
+				if (
+					node.importClause?.namedBindings &&
 					ts.isNamedImports(node.importClause.namedBindings)
 				) {
 					for (const specifier of node.importClause.namedBindings.elements) {
@@ -84,12 +91,14 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 				const importedModule = declaration.initializer
 					? moduleSpecifierFromLoader(declaration.initializer)
 					: undefined;
-				if (
-					(importedModule !== "node:module" && importedModule !== "module") ||
-					!ts.isObjectBindingPattern(declaration.name)
-				) {
+				if (importedModule !== "node:module" && importedModule !== "module") {
 					continue;
 				}
+				if (ts.isIdentifier(declaration.name)) {
+					createRequireNamespaceBindings.add(declaration.name.text);
+					continue;
+				}
+				if (!ts.isObjectBindingPattern(declaration.name)) continue;
 				for (const element of declaration.name.elements) {
 					const importedName =
 						element.propertyName &&
@@ -134,9 +143,14 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		}
 		if (ts.isCallExpression(node)) {
 			const expression = node.expression;
+			const isCreateRequireNamespaceCall =
+				ts.isPropertyAccessExpression(expression) &&
+				ts.isIdentifier(expression.expression) &&
+				expression.name.text === "createRequire" &&
+				createRequireNamespaceBindings.has(expression.expression.text);
 			if (
 				(ts.isIdentifier(expression) && createRequireBindings.has(expression.text)) ||
-				(ts.isPropertyAccessExpression(expression) && expression.name.text === "createRequire")
+				isCreateRequireNamespaceCall
 			) {
 				// A createRequire loader can reach any runtime module through a later
 				// identifier call. Reject the loader in checked layers rather than
