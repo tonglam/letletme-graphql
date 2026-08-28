@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { ApolloServer, type ApolloServerPlugin } from "@apollo/server";
+import { buildSchema } from "graphql";
 import { createDeprecatedSchemaUsageExecutionListener } from "../../src/graphql/deprecation-observability";
+import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
 import { metrics } from "../../src/infra/metrics";
 
 type TestContext = {
@@ -94,23 +96,32 @@ test("deprecated usage excludes nested fields skipped by a null parent", async (
 			};
 		},
 	};
+	const typeDefs = `
+		enum LegacyMode { OLD @deprecated(reason: "Use NEW") NEW }
+		type Query { parent: Child }
+		type Child { legacy(mode: LegacyMode): String }
+	`;
 	const server = new ApolloServer<TestContext>({
-		typeDefs: `
-			type Query { parent: Child }
-			type Child { legacy: String @deprecated(reason: "Use current") }
-		`,
+		typeDefs,
 		resolvers: { Query: { parent: () => null } },
 		plugins: [plugin],
 	});
 	servers.push(server);
 	await server.start();
 
+	const query = "query Usage($mode: LegacyMode!) { parent { legacy(mode: $mode) } }";
+	const limits = validateGraphQLRequestLimits(
+		{ query, variables: { mode: "OLD" } },
+		buildSchema(typeDefs)
+	);
+	if (!limits.ok) throw new Error(limits.message);
 	await server.executeOperation(
-		{ query: "{ parent { legacy } }" },
+		{ query, variables: { mode: "OLD" } },
 		{
 			contextValue: {
-				deprecatedSymbols: ["Child.legacy"],
-				deprecatedSymbolOwners: { "Child.legacy": ["Child.legacy"] },
+				deprecatedSymbols: limits.deprecatedSymbols,
+				deprecatedSymbolOwners: limits.deprecatedSymbolOwners,
+				deprecatedSymbolGlobalSymbols: limits.deprecatedSymbolGlobalSymbols,
 			},
 		}
 	);

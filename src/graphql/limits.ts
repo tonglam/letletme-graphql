@@ -535,12 +535,19 @@ const executableSelectionIsIncluded = (
 
 const collectVariableReferences = (
 	argumentsList: readonly ArgumentNode[] | undefined,
-	usedVariables: Set<string>
+	usedVariables: Set<string>,
+	variableOwners?: Map<string, Set<string | undefined>>,
+	owner?: string
 ): void => {
 	for (const argument of argumentsList ?? []) {
 		visit(argument.value, {
 			Variable(node) {
 				usedVariables.add(node.name.value);
+				if (variableOwners) {
+					const owners = variableOwners.get(node.name.value) ?? new Set<string | undefined>();
+					owners.add(owner);
+					variableOwners.set(node.name.value, owners);
+				}
 			},
 		});
 	}
@@ -548,10 +555,12 @@ const collectVariableReferences = (
 
 const collectDirectiveVariableReferences = (
 	directives: readonly DirectiveNode[] | undefined,
-	usedVariables: Set<string>
+	usedVariables: Set<string>,
+	variableOwners?: Map<string, Set<string | undefined>>,
+	owner?: string
 ): void => {
 	for (const directive of directives ?? []) {
-		collectVariableReferences(directive.arguments, usedVariables);
+		collectVariableReferences(directive.arguments, usedVariables, variableOwners, owner);
 	}
 };
 
@@ -560,36 +569,69 @@ const activeDeprecatedTelemetrySelections = (
 	fragments: ReadonlyMap<string, FragmentDefinitionNode>,
 	reachableFragments: ReadonlySet<string>,
 	variables: Record<string, unknown>
-): { fragments: Set<string>; variables: Set<string> } => {
+): {
+	fragments: Set<string>;
+	variables: Set<string>;
+	variableOwners: Map<string, Set<string | undefined>>;
+} => {
 	const active = new Set<string>();
 	const usedVariables = new Set<string>();
+	const variableOwners = new Map<string, Set<string | undefined>>();
 	const analyzedFragments = new Set<string>();
-	const inspect = (selectionSet: SelectionSetNode): void => {
+	const inspect = (selectionSet: SelectionSetNode, currentOwner?: string): void => {
 		for (const selection of selectionSet.selections) {
 			if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
-			collectDirectiveVariableReferences(selection.directives, usedVariables);
 			if (selection.kind === Kind.FIELD) {
-				collectVariableReferences(selection.arguments, usedVariables);
-				if (selection.selectionSet) inspect(selection.selectionSet);
+				const owner = selection.loc ? `field:${selection.loc.start}` : undefined;
+				collectDirectiveVariableReferences(
+					selection.directives,
+					usedVariables,
+					variableOwners,
+					owner
+				);
+				collectVariableReferences(selection.arguments, usedVariables, variableOwners, owner);
+				if (selection.selectionSet) inspect(selection.selectionSet, owner);
 				continue;
 			}
 			if (selection.kind === Kind.INLINE_FRAGMENT) {
-				inspect(selection.selectionSet);
+				collectDirectiveVariableReferences(
+					selection.directives,
+					usedVariables,
+					variableOwners,
+					currentOwner
+				);
+				inspect(selection.selectionSet, currentOwner);
 				continue;
 			}
+			collectDirectiveVariableReferences(
+				selection.directives,
+				usedVariables,
+				variableOwners,
+				currentOwner
+			);
 			const fragmentName = selection.name.value;
 			if (!reachableFragments.has(fragmentName) || analyzedFragments.has(fragmentName)) continue;
 			const fragment = fragments.get(fragmentName);
 			if (!fragment) continue;
 			analyzedFragments.add(fragmentName);
 			active.add(fragmentName);
-			collectDirectiveVariableReferences(fragment.directives, usedVariables);
+			collectDirectiveVariableReferences(
+				fragment.directives,
+				usedVariables,
+				variableOwners,
+				undefined
+			);
 			inspect(fragment.selectionSet);
 		}
 	};
 	inspect(operation.selectionSet);
-	collectDirectiveVariableReferences(operation.directives, usedVariables);
-	return { fragments: active, variables: usedVariables };
+	collectDirectiveVariableReferences(
+		operation.directives,
+		usedVariables,
+		variableOwners,
+		undefined
+	);
+	return { fragments: active, variables: usedVariables, variableOwners };
 };
 
 const selectedDeprecatedSymbols = (
@@ -754,7 +796,14 @@ const selectedDeprecatedSymbols = (
 				: undefined;
 		const inputType = typeFromAST(schema, definition.type);
 		if (inputType && isInputType(inputType)) {
-			collectDeprecatedVariableSymbols(effectiveValue, inputType, (symbol) => addSymbol(symbol));
+			const ownersForVariable = activeSelections.variableOwners.get(variableName);
+			if (ownersForVariable && ownersForVariable.size > 0) {
+				collectDeprecatedVariableSymbols(effectiveValue, inputType, (symbol) => {
+					for (const owner of ownersForVariable) addSymbol(symbol, owner);
+				});
+			} else {
+				collectDeprecatedVariableSymbols(effectiveValue, inputType, (symbol) => addSymbol(symbol));
+			}
 		}
 	}
 	return {

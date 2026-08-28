@@ -315,6 +315,31 @@ describe("GraphQL request limits", () => {
 		).toMatchObject({ ok: true, deprecatedSymbols: [] });
 	});
 
+	it("keeps variable-backed deprecated values owned by their field occurrence", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			type Query { parent: Child }
+			type Child { value(mode: LegacyMode): String }
+		`);
+		const query = "query Usage($mode: LegacyMode!) { parent { value(mode: $mode) } }";
+		const result = validateGraphQLRequestLimits(
+			{ query, variables: { mode: "OLD" } },
+			deprecatedKindsSchema
+		);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.OLD"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		const valueOffset = query.indexOf("value(mode: $mode)");
+		expect(result.deprecatedSymbolOwners[`field:${valueOffset}`]).toEqual(["LegacyMode.OLD"]);
+	});
+
 	it("keeps live price-change roots public and bounded", () => {
 		for (const query of [
 			"query { priceChangeLiveCursor { revision state } }",
