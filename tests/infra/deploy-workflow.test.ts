@@ -83,7 +83,7 @@ describe("production deployment workflow", () => {
 	});
 
 	test("allowlists exact public GraphQL routes before switching or forwarding credentials", () => {
-		const validationAt = deployScript.indexOf('const expectedOrigin = "https://letletme.top";');
+		const validationAt = deployScript.indexOf('const expectedOrigin = "https://api.letletme.top";');
 		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
 		const publicTokenRequestAt = deployScript.indexOf(
 			'compose exec -T -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e'
