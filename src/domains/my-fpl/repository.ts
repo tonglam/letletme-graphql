@@ -249,7 +249,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.active-publications",
 		sql: MY_FPL_ACTIVE_PUBLICATIONS_SQL,
 		values: [2026],
-		runtime: "must-return-row",
+		runtime: "must-return-publication",
 		resultTypes: [
 			{
 				relation: "competition.my_fpl_snapshot_publications",
@@ -1698,6 +1698,19 @@ const publicationFromRow = (row: DbSnapshotPublicationRow): MyFplSnapshotPublica
 	contentSha256: row.content_sha256,
 });
 
+/**
+ * Decode the active-publication row exactly as the PostgreSQL fallback reader
+ * does.  The direct Data contract uses this function rather than accepting a
+ * merely non-empty row, so count, hash, timestamp, and score provenance drift
+ * cannot silently turn a published My FPL review into PENDING.
+ */
+export const parseSnapshotPublicationRow = (row: unknown): MyFplSnapshotPublication | null => {
+	if (!isRecord(row)) return null;
+	return isValidSnapshotPublicationRow(row as DbSnapshotPublicationRow)
+		? publicationFromRow(row as DbSnapshotPublicationRow)
+		: null;
+};
+
 const isSnapshotPublicationCache = (value: unknown): value is MyFplSnapshotPublication => {
 	if (!isRecord(value) || !isSnapshotMeta(value)) return false;
 	const candidate = value as MyFplSnapshotPublication;
@@ -1766,8 +1779,9 @@ const loadReviewContext = async (context: GraphQLContext): Promise<LoadedReviewC
 			: sortedEvents.find((event) => event.isNext)?.id) ?? null;
 	const publications = new Map<number, MyFplSnapshotPublication>();
 	for (const row of publicationResult.rows) {
-		if (!isValidSnapshotPublicationRow(row)) continue;
-		publications.set(row.event_id, publicationFromRow(row));
+		const publication = parseSnapshotPublicationRow(row);
+		if (!publication) continue;
+		publications.set(row.event_id, publication);
 	}
 	const latestPublishedEventId =
 		[...publications.keys()]
@@ -1805,8 +1819,7 @@ const loadSnapshotPublication = async (
 		[context.currentSeason.seasonId, eventId, pinned]
 	);
 	const row = result.rows[0];
-	if (row && isValidSnapshotPublicationRow(row)) return publicationFromRow(row);
-	return null;
+	return row ? parseSnapshotPublicationRow(row) : null;
 };
 
 const loadSnapshotPublicationByRevision = async (
@@ -1824,8 +1837,7 @@ const loadSnapshotPublicationByRevision = async (
 		[context.currentSeason.seasonId, pinned]
 	);
 	const row = result.rows[0];
-	if (row && isValidSnapshotPublicationRow(row)) return publicationFromRow(row);
-	return null;
+	return row ? parseSnapshotPublicationRow(row) : null;
 };
 
 type SnapshotEntryPayload = {

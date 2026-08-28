@@ -195,17 +195,63 @@ export const TRENDS_MEMBERSHIP_SQL = `
 `;
 
 export const TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
-	{ name: "trends.cohorts-public", sql: TRENDS_COHORTS_PUBLIC_SQL, values: [2026] },
-	{ name: "trends.cohorts-mine", sql: TRENDS_COHORTS_MINE_SQL, values: [2026, 1] },
+	{
+		name: "trends.cohorts-public",
+		sql: TRENDS_COHORTS_PUBLIC_SQL,
+		values: [2026],
+		resultTypes: [
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "captured_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
+	{
+		name: "trends.cohorts-mine",
+		sql: TRENDS_COHORTS_MINE_SQL,
+		values: [2026, 1],
+		resultTypes: [
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "captured_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
 	{
 		name: "trends.snapshot-cohort-public",
 		sql: TRENDS_SNAPSHOT_COHORT_PUBLIC_SQL,
 		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1],
+		resultTypes: [
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "captured_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+		],
 	},
 	{
 		name: "trends.snapshot-cohort-mine",
 		sql: TRENDS_SNAPSHOT_COHORT_MINE_SQL,
 		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1, 1],
+		resultTypes: [
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "captured_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+		],
 	},
 	{
 		name: "trends.membership",

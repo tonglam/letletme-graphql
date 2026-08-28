@@ -189,6 +189,8 @@ type SqlPickerRow = QueryResultRow & {
 	total_points: number | string | null;
 	form: number | string | null;
 	total_count: number | string;
+	event_stats_revision?: string | null;
+	event_stats_present?: boolean;
 	market_snapshot_present?: boolean;
 };
 
@@ -232,6 +234,8 @@ export const buildPlayerPickerSql = (sort: Exclude<PlayerPickerSort, "AUTO">): s
 			COALESCE(market.selected_by_percent, event_stats.selected_by_percent) AS selected_by_percent,
 			COALESCE(event_stats.total_points, player.total_points) AS total_points,
 			event_stats.form,
+			event_stats_publication.revision::text AS event_stats_revision,
+			(event_stats.element_id IS NOT NULL) AS event_stats_present,
 			EXISTS (SELECT 1 FROM latest_market) AS market_snapshot_present
 		FROM fpl.players player
 		JOIN fpl.teams team
@@ -299,6 +303,7 @@ export const PLAYERS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 			"2026-08-10T00:00:00.000Z",
 			"1",
 		],
+		runtime: "must-return-player-picker",
 	},
 ];
 
@@ -321,20 +326,75 @@ const marketPinPresentForEmptyPicker = async (
 	}
 };
 
-const mapSqlPickerRow = (row: SqlPickerRow): PlayerPickerItem => ({
-	id: Number(row.id),
-	webName: row.web_name,
-	position: Number(row.element_type) as Position,
-	team: {
-		id: Number(row.team_id),
-		name: row.team_name,
-		shortName: row.team_short_name,
-	},
-	price: Number(row.price),
-	selectedByPercent: asNullableNumber(row.selected_by_percent),
-	totalPoints: asNullableNumber(row.total_points),
-	form: asNullableNumber(row.form),
-});
+const asSafeInteger = (value: unknown): number | null => {
+	const parsed = asNullableNumber(value);
+	return parsed !== null && Number.isSafeInteger(parsed) ? parsed : null;
+};
+
+/** Decode a PostgreSQL picker row through the same shape used by production. */
+export const parsePlayerPickerRow = (value: unknown): PlayerPickerItem | null => {
+	if (!isObject(value)) return null;
+	const id = asSafeInteger(value.id);
+	const position = asSafeInteger(value.element_type);
+	const teamId = asSafeInteger(value.team_id);
+	const price = asNullableNumber(value.price);
+	const totalCount = asSafeInteger(value.total_count);
+	const webName = value.web_name;
+	const teamName = value.team_name;
+	const teamShortName = value.team_short_name;
+	const selectedByPercent =
+		value.selected_by_percent === null || value.selected_by_percent === undefined
+			? null
+			: asNullableNumber(value.selected_by_percent);
+	const totalPoints =
+		value.total_points === null || value.total_points === undefined
+			? null
+			: asNullableNumber(value.total_points);
+	const form =
+		value.form === null || value.form === undefined ? null : asNullableNumber(value.form);
+	if (
+		id === null ||
+		id <= 0 ||
+		position === null ||
+		position < Position.GOALKEEPER ||
+		position > Position.FORWARD ||
+		teamId === null ||
+		teamId <= 0 ||
+		price === null ||
+		!Number.isFinite(price) ||
+		totalCount === null ||
+		totalCount < 0 ||
+		typeof webName !== "string" ||
+		webName.trim() === "" ||
+		typeof teamName !== "string" ||
+		teamName.trim() === "" ||
+		typeof teamShortName !== "string" ||
+		teamShortName.trim() === "" ||
+		(value.selected_by_percent !== null &&
+			value.selected_by_percent !== undefined &&
+			selectedByPercent === null) ||
+		(value.total_points !== null && value.total_points !== undefined && totalPoints === null) ||
+		(value.form !== null && value.form !== undefined && form === null)
+	) {
+		return null;
+	}
+	return {
+		id,
+		webName,
+		position: position as Position,
+		team: { id: teamId, name: teamName, shortName: teamShortName },
+		price,
+		selectedByPercent,
+		totalPoints,
+		form,
+	};
+};
+
+const mapSqlPickerRow = (row: SqlPickerRow): PlayerPickerItem => {
+	const parsed = parsePlayerPickerRow(row);
+	if (!parsed) throw new Error("Player picker SQL row failed production decoding");
+	return parsed;
+};
 
 const encodePickerCursor = (sort: PlayerPickerSort, offset: number): number =>
 	-(PICKER_SORT_CODES[sort] * PICKER_CURSOR_SORT_STRIDE + offset + 1);

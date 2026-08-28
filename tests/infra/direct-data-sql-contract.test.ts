@@ -353,6 +353,89 @@ const mockSetupStatus = {
 	insights_ready_at: "2026-08-10T00:00:00.000Z",
 } as const;
 
+const mockSnapshotPublication = {
+	season_id: 2026,
+	event_id: 1,
+	revision: "7",
+	snapshot_date: "2026-08-10",
+	source_checked_at: "2026-08-10T00:00:00.000Z",
+	published_at: "2026-08-10T00:00:01.000Z",
+	kind: "FINAL",
+	expected_entry_count: 0,
+	ready_entry_count: 0,
+	empty_entry_count: 0,
+	expected_tournament_count: 2,
+	ready_tournament_count: 2,
+	content_sha256: "a".repeat(64),
+	score_source: "FPL_FINAL_RESULT",
+	live_publication_id: null,
+	live_revision: null,
+	algorithm_version: null,
+	source_min_checked_at: "2026-08-10T00:00:00.000Z",
+	source_max_checked_at: "2026-08-10T00:00:00.000Z",
+} as const;
+
+const mockPlayerPickerRow = {
+	id: 1,
+	web_name: "GC1",
+	element_type: 1,
+	team_id: 1,
+	team_name: "GraphQL Contract Team",
+	team_short_name: "GCT",
+	price: 50,
+	selected_by_percent: 1,
+	total_points: 42,
+	form: 4.2,
+	total_count: 1,
+	event_stats_revision: "1",
+	event_stats_present: true,
+	market_snapshot_present: true,
+} as const;
+
+const mockPlayerStateSeasonRow = {
+	season_id: 2026,
+	season_code: "2627",
+	lifecycle_state: "active",
+	player_code: 26001,
+	element_id: 1,
+	element_type: 1,
+	fpl_minutes: 90,
+	fpl_gameweeks: 1,
+	fpl_total_points: 42,
+	fpl_starts: 1,
+	fpl_clean_sheets: 1,
+	fpl_saves: 0,
+	fpl_points_per_90: 42,
+	fpl_return_rate: 100,
+	fpl_bonus_per_90: 0,
+	fpl_position_percentile: 75,
+	fpl_peer_count: 1,
+	expected_metrics_available: true,
+	fpl_source_hash: "graphql-contract-player-state-2627",
+	fpl_source_updated_at: "2026-08-10T00:00:00.000Z",
+	understat_mapping_status: "UNAVAILABLE",
+	understat_player_id: null,
+	understat_season_state: null,
+	understat_minutes: null,
+	understat_npxg_per_90: null,
+	understat_xa_per_90: null,
+	understat_shots_per_90: null,
+	understat_key_passes_per_90: null,
+	understat_xg_chain_per_90: null,
+	understat_xg_buildup_per_90: null,
+	understat_npxg_percentile: null,
+	understat_xa_percentile: null,
+	understat_shots_percentile: null,
+	understat_key_passes_percentile: null,
+	understat_xg_chain_percentile: null,
+	understat_xg_buildup_percentile: null,
+	understat_process_percentile: null,
+	understat_peer_count: 0,
+	understat_source_hash: null,
+	understat_source_updated_at: null,
+	refreshed_at: "2026-08-10T00:00:00.000Z",
+} as const;
+
 const mockCoreFallbackRow = (() => {
 	const events = Array.from({ length: 38 }, (_, index) => ({
 		event_id: index + 1,
@@ -581,6 +664,9 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-publication") {
+					return { rows: [mockSnapshotPublication] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-briefing") {
 					return { rows: [mockBriefingFallbackRow] } as unknown as QueryResult<Row>;
 				}
@@ -615,6 +701,12 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-player-state-revision") {
 					return { rows: [mockPlayerStateRevision] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-picker") {
+					return { rows: [mockPlayerPickerRow] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-row") {
+					return { rows: [mockPlayerStateSeasonRow] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-historical-team") {
 					return { rows: [mockHistoricalTeam] } as unknown as QueryResult<Row>;
@@ -820,6 +912,9 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-publication") {
+					return { rows: [mockSnapshotPublication] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-briefing") {
 					return { rows: [mockBriefingFallbackRow] } as unknown as QueryResult<Row>;
 				}
@@ -866,6 +961,12 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-player-state-revision") {
 					return { rows: [mockPlayerStateRevision] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-picker") {
+					return { rows: [mockPlayerPickerRow] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-row") {
+					return { rows: [mockPlayerStateSeasonRow] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-historical-team") {
 					return { rows: [mockHistoricalTeam] } as unknown as QueryResult<Row>;
@@ -935,6 +1036,9 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-publication") {
+					return { rows: [mockSnapshotPublication] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-briefing") {
 					return { rows: [mockBriefingFallbackRow] } as unknown as QueryResult<Row>;
 				}
@@ -969,6 +1073,12 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-player-state-revision") {
 					return { rows: [mockPlayerStateRevision] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-picker") {
+					return { rows: [mockPlayerPickerRow] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-player-state-row") {
+					return { rows: [mockPlayerStateSeasonRow] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-historical-team") {
 					return { rows: [mockHistoricalTeam] } as unknown as QueryResult<Row>;
@@ -1113,10 +1223,13 @@ describe("direct Data SQL contract", () => {
 		);
 		expect(runtimeProbes.map((probe) => probe.name)).toContain("public-league-trends.catalog");
 		expect(runtimeProbes.map((probe) => probe.name)).toContain("public-league-trends.selection");
+		expect(runtimeProbes.map((probe) => probe.name)).toContain("players.picker");
+		expect(runtimeProbes.map((probe) => probe.name)).toContain("player-state.season-rows");
 		expect(
 			runtimeProbes.every(
 				(probe) =>
 					probe.runtime === "must-return-row" ||
+					probe.runtime === "must-return-publication" ||
 					probe.runtime === "must-return-snapshot-entry" ||
 					probe.runtime === "must-return-briefing" ||
 					probe.runtime === "must-return-core" ||
@@ -1132,7 +1245,9 @@ describe("direct Data SQL contract", () => {
 					probe.runtime === "must-return-historical-team" ||
 					probe.runtime === "must-return-setup-status" ||
 					probe.runtime === "must-return-tournament" ||
-					probe.runtime === "must-return-selection-row"
+					probe.runtime === "must-return-selection-row" ||
+					probe.runtime === "must-return-player-picker" ||
+					probe.runtime === "must-return-player-state-row"
 			)
 		).toBe(true);
 	});

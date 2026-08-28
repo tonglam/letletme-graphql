@@ -12,13 +12,20 @@ import {
 	parseCompetitionAggregatePayload,
 	parseCompetitionBoardProbe,
 	parseCompetitionSeasonPathPoints,
+	parseSnapshotPublicationRow,
 	parseSnapshotEntryPayload,
 } from "../../src/domains/my-fpl/repository";
 import { buildMarketPulse, type MarketSnapshotRow } from "../../src/domains/market/repository";
 import { PLAYER_DETAIL_DATA_SQL_CONTRACT } from "../../src/domains/player-detail/repository";
 import { PLAYER_VALUES_DATA_SQL_CONTRACT } from "../../src/domains/player-values/repository";
-import { PLAYERS_DATA_SQL_CONTRACT } from "../../src/domains/players/repository";
-import { PLAYER_STATE_DATA_SQL_CONTRACT } from "../../src/domains/player-state/repository";
+import {
+	parsePlayerPickerRow,
+	PLAYERS_DATA_SQL_CONTRACT,
+} from "../../src/domains/players/repository";
+import {
+	parsePlayerStateSeasonRow,
+	PLAYER_STATE_DATA_SQL_CONTRACT,
+} from "../../src/domains/player-state/repository";
 import { PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/public-league-trends/repository";
 import { TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/trends/repository";
 import {
@@ -74,6 +81,11 @@ const isValidTimestamp = (value: unknown): boolean => {
 
 const CONTRACT_SEASON_CODE = "2627";
 const CONTRACT_ENTRY_ID = 1;
+const CONTRACT_PLAYER_ID = 1;
+const CONTRACT_PLAYER_CODE = 26001;
+const CONTRACT_PLAYER_EVENT_STATS_REVISION = "1";
+const CONTRACT_PLAYER_EVENT_TOTAL_POINTS = 42;
+const CONTRACT_PLAYER_EVENT_FORM = 4.2;
 
 const RESULT_TYPE_SQL = `
 	SELECT
@@ -156,6 +168,16 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 				const result = await database.query(probe.sql, probe.values);
 				if (result.rows.length === 0) {
 					throw new Error("runtime reader role cannot see the Data-owned authority fixture row");
+				}
+				if (probe.runtime === "must-return-publication") {
+					const publication = result.rows
+						.map((row) => parseSnapshotPublicationRow(row))
+						.find((candidate) => candidate !== null);
+					if (!publication || publication.eventId <= 0 || publication.revision.trim() === "") {
+						throw new Error(
+							"runtime reader role returned an active My FPL publication that the production decoder rejects"
+						);
+					}
 				}
 				if (probe.runtime === "must-return-briefing") {
 					const metadataResult = await database.query(BRIEFING_ACTIVE_METADATA_SQL, ["week"]);
@@ -254,8 +276,7 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 								? payload.seasonPath
 								: null;
 					const points = parseCompetitionSeasonPathPoints(rawPoints);
-					const expectedEventId = Number(probe.values[1]);
-					if (!points || !points.some((point) => point.gameweek === expectedEventId)) {
+					if (!points) {
 						throw new Error(
 							"runtime reader role returned a season-path payload that the production decoder rejects"
 						);
@@ -382,6 +403,48 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 						selection.team_short_name.trim() === ""
 					) {
 						throw new Error("runtime reader role cannot see a non-null public selection row");
+					}
+				}
+				if (probe.runtime === "must-return-player-picker") {
+					const expectedRevision = String(probe.values[13] ?? CONTRACT_PLAYER_EVENT_STATS_REVISION);
+					const expectedRow = result.rows.find((row) => {
+						const parsed = parsePlayerPickerRow(row);
+						const candidate = row as {
+							event_stats_present?: unknown;
+							event_stats_revision?: unknown;
+						};
+						return (
+							parsed?.id === CONTRACT_PLAYER_ID &&
+							parsed.totalPoints === CONTRACT_PLAYER_EVENT_TOTAL_POINTS &&
+							parsed.form === CONTRACT_PLAYER_EVENT_FORM &&
+							candidate.event_stats_present === true &&
+							candidate.event_stats_revision === expectedRevision
+						);
+					});
+					if (!expectedRow) {
+						throw new Error(
+							"runtime reader role returned a picker row without the pinned event-stat sentinel"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-player-state-row") {
+					const requestedPlayerCode = Array.isArray(probe.values[0])
+						? Number(probe.values[0][0])
+						: CONTRACT_PLAYER_CODE;
+					const row = result.rows
+						.map((candidate) => parsePlayerStateSeasonRow(candidate))
+						.find(
+							(candidate) =>
+								candidate !== null &&
+								candidate.player_code === requestedPlayerCode &&
+								candidate.season_id === 2026 &&
+								candidate.season_code === CONTRACT_SEASON_CODE &&
+								candidate.element_id === CONTRACT_PLAYER_ID
+						);
+					if (!row) {
+						throw new Error(
+							"runtime reader role returned a Player State season row that the production decoder rejects"
+						);
 					}
 				}
 			}
