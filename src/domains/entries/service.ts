@@ -38,6 +38,19 @@ const FPL_ENTRY_NEGATIVE_SENTINEL = "__entry_fpl:not_found__";
 const MAX_FPL_ENTRY_IN_FLIGHT = 8;
 const fplEntryFlights = new Map<number, Promise<FplEntryLookupResult>>();
 let fplEntryInFlight = 0;
+const entryLookupMemos = new WeakMap<object, Map<number, Promise<EntryLookupResult>>>();
+
+const requestEntryLookupMemo = (
+	context: GraphQLContext
+): Map<number, Promise<EntryLookupResult>> => {
+	const scope = context.requestScope ?? context;
+	let memo = entryLookupMemos.get(scope);
+	if (!memo) {
+		memo = new Map();
+		entryLookupMemos.set(scope, memo);
+	}
+	return memo;
+};
 
 const countEntryAdmission = (
 	event:
@@ -485,7 +498,7 @@ async function buildLiveMapForEvents(
 	return result;
 }
 
-export const entriesService = {
+const entriesServiceBase = {
 	getEntrySnapshot(context: GraphQLContext, id: number): Promise<Entry | null> {
 		return entriesRepository.getEntrySnapshotById(context, id);
 	},
@@ -816,5 +829,25 @@ export const entriesService = {
 			QUERY_CACHE_TTL_SECONDS.HISTORICAL
 		);
 		return enriched;
+	},
+};
+
+export const entriesService = {
+	...entriesServiceBase,
+	async lookupEntryById(context: GraphQLContext, id: number): Promise<EntryLookupResult> {
+		if (!Number.isSafeInteger(id) || id <= 0) {
+			return entriesServiceBase.lookupEntryById(context, id);
+		}
+		const memo = requestEntryLookupMemo(context);
+		const existing = memo.get(id);
+		if (existing) return existing;
+		const pending = entriesServiceBase.lookupEntryById(context, id);
+		memo.set(id, pending);
+		try {
+			return await pending;
+		} catch (error) {
+			memo.delete(id);
+			throw error;
+		}
 	},
 };

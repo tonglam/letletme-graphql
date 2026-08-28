@@ -21,6 +21,10 @@ const MARKET_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
 const RECENT_GAMEWEEK_LIMIT = 5;
 const UPCOMING_GAMEWEEK_LIMIT = 8;
 const NULL_SENTINEL = "__pd:null__";
+// Bump the namespace for the hard-cut availability contract. Values written
+// by the previous runtime did not carry enough provenance to distinguish a
+// mutable recent-gameweek read from an authoritative publication.
+const PLAYER_DETAIL_CACHE_VERSION = "v2";
 
 export type PlayerAvailability = {
 	status: string;
@@ -289,8 +293,8 @@ const elementTypeToName = (type: number): string => {
 	}
 };
 
-const playerDetailCacheKey = (playerId: number, eventId: number): string =>
-	`player-detail:${playerId}:${eventId}`;
+export const playerDetailCacheKey = (playerId: number, eventId: number): string =>
+	`player-detail:${PLAYER_DETAIL_CACHE_VERSION}:${playerId}:${eventId}`;
 
 const playerDetailCacheReadMemo = new WeakMap<
 	object,
@@ -753,8 +757,8 @@ async function loadRecentGameweeks(
 		if (rows.length === 0) {
 			return section(
 				[],
-				"EMPTY",
-				"recent_gameweeks_empty",
+				"FALLBACK",
+				"recent_gameweeks_revision_unverified",
 				statsContext.revision,
 				statsContext.sourceCheckedAt
 			);

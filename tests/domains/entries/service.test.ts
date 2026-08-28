@@ -852,7 +852,7 @@ describe("entriesService.lookupEntryById", () => {
 		expect(warnings.some((fields) => fields.requestId === "entry-lookup-test")).toBe(true);
 	});
 
-	it("retries FPL and Data persistence until the database becomes authoritative", async () => {
+	it("memoizes FPL persistence within a request and retries in a new request", async () => {
 		entriesRepository.getEntryById = async () => null;
 		restoreEnv("LETLETME_DATA_URL", "https://data.example.test/");
 		restoreEnv("LETLETME_DATA_API_KEY", "entry-sync-key");
@@ -883,9 +883,11 @@ describe("entriesService.lookupEntryById", () => {
 
 		const first = await entriesService.lookupEntryById(context, 606);
 		const second = await entriesService.lookupEntryById(context, 606);
+		const third = await entriesService.lookupEntryById(contextForLookup(), 606);
 
 		expect(first).toMatchObject({ source: "FPL", persistenceState: "QUEUED" });
 		expect(second).toMatchObject({ source: "FPL", persistenceState: "QUEUED" });
+		expect(third).toMatchObject({ source: "FPL", persistenceState: "QUEUED" });
 		expect({ fplCalls, dataCalls, sharedWrites }).toEqual({
 			fplCalls: 2,
 			dataCalls: 2,

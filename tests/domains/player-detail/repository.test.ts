@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { playerDetailRepository } from "../../../src/domains/player-detail/repository";
+import {
+	playerDetailCacheKey,
+	playerDetailRepository,
+} from "../../../src/domains/player-detail/repository";
 import { gqlCacheKey } from "../../../src/infra/cache-key";
 import {
 	buildCorePublication,
@@ -505,6 +508,29 @@ describe("playerDetailRepository", () => {
 		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
 	});
 
+	it("keeps an empty mutable recent-gameweek read non-authoritative", async () => {
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+		const redis = context.redis as unknown as TestRedis;
+
+		expect(detail?.recentGameweeks).toEqual([]);
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_revision_unverified",
+			revision: "11",
+		});
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
+	});
+
 	it("does not write a shared cache entry when a data section is unavailable", async () => {
 		const context = createContext({
 			currentEvent: { id: 3, isCurrent: true, finished: false },
@@ -692,7 +718,7 @@ describe("playerDetailRepository", () => {
 			},
 		});
 		const redis = context.redis as unknown as TestRedis;
-		const key = gqlCacheKey(context, "player-detail:9:3");
+		const key = gqlCacheKey(context, playerDetailCacheKey(9, 3));
 		redis.values.set(key, JSON.stringify(degraded));
 		let deleteCount = 0;
 		const originalDelete = redis.del;
@@ -705,7 +731,38 @@ describe("playerDetailRepository", () => {
 
 		expect(deleteCount).toBe(1);
 		expect(detail?.dataAvailability.market.state).toBe("READY");
-		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(true);
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+	});
+
+	it("does not read the pre-hard-cut player-detail cache namespace", async () => {
+		const args = {
+			currentEvent: null,
+			lifecycleState: "preseason" as const,
+			tables: {
+				"fpl.events": [
+					{
+						id: 1,
+						finished: false,
+						is_current: false,
+						deadline_time_epoch: Math.floor(Date.now() / 1000) + 86_400,
+					},
+				],
+				"fpl.player_market_snapshots": [marketRow()],
+			},
+		};
+		const sourceContext = createContext(args);
+		const source = await playerDetailRepository.getPlayerDetail(sourceContext, 9, 1);
+		if (!source) throw new Error("expected preseason player detail");
+
+		const context = createContext(args);
+		const redis = context.redis as unknown as TestRedis;
+		const legacyKey = gqlCacheKey(context, "player-detail:9:1");
+		redis.values.set(legacyKey, JSON.stringify({ ...source, webName: "Legacy cached name" }));
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 1);
+
+		expect(detail?.webName).toBe("Test Player");
+		expect(redis.values.has(legacyKey)).toBe(true);
 	});
 
 	it("revalidates player-stat authority before returning a shared detail cache hit", async () => {
@@ -729,7 +786,7 @@ describe("playerDetailRepository", () => {
 			},
 		});
 		const redis = nextContext.redis as unknown as TestRedis;
-		const key = gqlCacheKey(nextContext, "player-detail:9:3");
+		const key = gqlCacheKey(nextContext, playerDetailCacheKey(9, 3));
 		redis.values.set(
 			key,
 			JSON.stringify({
