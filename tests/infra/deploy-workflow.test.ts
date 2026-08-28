@@ -285,6 +285,13 @@ describe("production deployment workflow", () => {
 		expect(monitorWorkflow).toContain("project=letletme_graphql_green");
 	});
 
+	test("attaches both slots to the shared primary Redis network", () => {
+		expect(compose).toContain("- graphql_shared");
+		expect(compose).toContain("graphql_shared:");
+		expect(compose).toContain("external: true");
+		expect(compose).toContain("name: ${GRAPHQL_SHARED_NETWORK:-letletme_graphql_default}");
+	});
+
 	test("does not retain retired controls or floating/stop-first deployment paths", () => {
 		for (const source of [workflow, deployScript, dockerfile, compose]) {
 			expect(source).not.toContain("MY_FPL_SNAPSHOT_READ");

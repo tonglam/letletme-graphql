@@ -16,6 +16,9 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       TZ: Asia/Shanghai
+    networks:
+      - default
+      - graphql_shared
     logging: *default-logging
     ports:
       - "127.0.0.1:${GRAPHQL_PORT:-4000}:4000"
@@ -32,3 +35,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+networks:
+  graphql_shared:
+    external: true
+    name: ${GRAPHQL_SHARED_NETWORK:-letletme_graphql_default}
