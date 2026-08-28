@@ -23,11 +23,12 @@ import {
 	type GraphQLSchema,
 	type ArgumentNode,
 	type FragmentDefinitionNode,
+	type InlineFragmentNode,
 	type OperationDefinitionNode,
 	type SelectionSetNode,
 } from "graphql";
 import { analyzeGraphQLOperation, type GraphQLRequestPayload } from "./operation-ast";
-import { deprecationPathOwner } from "./deprecation-observability";
+import { deprecationPathOwner, deprecationTypeOwnerSegment } from "./deprecation-observability";
 
 export const GRAPHQL_LIMITS = {
 	maxDepth: 10,
@@ -571,7 +572,8 @@ const activeDeprecatedTelemetrySelections = (
 	operation: OperationDefinitionNode,
 	fragments: ReadonlyMap<string, FragmentDefinitionNode>,
 	reachableFragments: ReadonlySet<string>,
-	variables: Record<string, unknown>
+	variables: Record<string, unknown>,
+	schema: GraphQLSchema
 ): {
 	fragments: Set<string>;
 	variables: Set<string>;
@@ -587,6 +589,24 @@ const activeDeprecatedTelemetrySelections = (
 	const analyzedFragments = new Set<string>();
 	const fragmentFieldOwnerMemo = new Map<string, Set<string>>();
 	const fragmentOccurrenceOwnerMemo = new Map<string, Set<string>>();
+	const possibleRuntimeTypesFor = (typeCondition: string): readonly string[] => {
+		const type = schema.getType(typeCondition);
+		if (type && (isInterfaceType(type) || isUnionType(type))) {
+			const possibleTypes = schema.getPossibleTypes(type);
+			if (possibleTypes.length > 0) return possibleTypes.map((possibleType) => possibleType.name);
+		}
+		return [type?.name ?? typeCondition];
+	};
+	const branchPathsFor = (
+		selection: InlineFragmentNode,
+		path: readonly string[]
+	): readonly (readonly string[])[] =>
+		selection.typeCondition
+			? possibleRuntimeTypesFor(selection.typeCondition.name.value).map((typeName) => [
+					...path,
+					deprecationTypeOwnerSegment(typeName),
+				])
+			: [path];
 	const collectFragmentFieldOwners = (
 		fragmentName: string,
 		seen: ReadonlySet<string> = new Set()
@@ -649,6 +669,55 @@ const activeDeprecatedTelemetrySelections = (
 		}
 		return owners;
 	};
+	const collectSelectionOccurrenceOwners = (
+		selectionSet: SelectionSetNode,
+		pathPrefix: readonly string[],
+		seenFragments: ReadonlySet<string> = new Set()
+	): Set<string> => {
+		const owners = new Set<string>();
+		for (const selection of selectionSet.selections) {
+			if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
+			if (selection.kind === Kind.FIELD) {
+				const responseKey = selection.alias?.value ?? selection.name.value;
+				owners.add(deprecationPathOwner([...pathPrefix, responseKey]));
+				if (selection.selectionSet) {
+					for (const owner of collectSelectionOccurrenceOwners(
+						selection.selectionSet,
+						[...pathPrefix, responseKey],
+						seenFragments
+					)) {
+						owners.add(owner);
+					}
+				}
+				continue;
+			}
+			if (selection.kind === Kind.INLINE_FRAGMENT) {
+				for (const branchPath of branchPathsFor(selection, pathPrefix)) {
+					for (const owner of collectSelectionOccurrenceOwners(
+						selection.selectionSet,
+						branchPath,
+						seenFragments
+					)) {
+						owners.add(owner);
+					}
+				}
+				continue;
+			}
+			if (seenFragments.has(selection.name.value)) continue;
+			const nestedFragment = fragments.get(selection.name.value);
+			if (!nestedFragment) continue;
+			const nestedSeen = new Set(seenFragments);
+			nestedSeen.add(selection.name.value);
+			for (const owner of collectSelectionOccurrenceOwners(
+				nestedFragment.selectionSet,
+				pathPrefix,
+				nestedSeen
+			)) {
+				owners.add(owner);
+			}
+		}
+		return owners;
+	};
 	const collectFragmentOccurrenceOwners = (
 		fragmentName: string,
 		pathPrefix: readonly string[],
@@ -662,35 +731,7 @@ const activeDeprecatedTelemetrySelections = (
 		if (!fragment) return new Set();
 		const nextSeen = new Set(seen);
 		nextSeen.add(fragmentName);
-		const owners = new Set<string>();
-		const collect = (
-			selectionSet: SelectionSetNode,
-			path: readonly string[],
-			selectionSeen: ReadonlySet<string>
-		): void => {
-			for (const selection of selectionSet.selections) {
-				if (!executableSelectionIsIncluded(selection.directives, variables)) continue;
-				if (selection.kind === Kind.FIELD) {
-					const responseKey = selection.alias?.value ?? selection.name.value;
-					owners.add(deprecationPathOwner([...path, responseKey]));
-					if (selection.selectionSet) {
-						collect(selection.selectionSet, [...path, responseKey], selectionSeen);
-					}
-					continue;
-				}
-				if (selection.kind === Kind.INLINE_FRAGMENT) {
-					collect(selection.selectionSet, path, selectionSeen);
-					continue;
-				}
-				if (selectionSeen.has(selection.name.value)) continue;
-				const nestedFragment = fragments.get(selection.name.value);
-				if (!nestedFragment) continue;
-				const nestedSeen = new Set(selectionSeen);
-				nestedSeen.add(selection.name.value);
-				collect(nestedFragment.selectionSet, path, nestedSeen);
-			}
-		};
-		collect(fragment.selectionSet, pathPrefix, nextSeen);
+		const owners = collectSelectionOccurrenceOwners(fragment.selectionSet, pathPrefix, nextSeen);
 		fragmentOccurrenceOwnerMemo.set(memoKey, new Set(owners));
 		return owners;
 	};
@@ -749,11 +790,19 @@ const activeDeprecatedTelemetrySelections = (
 				continue;
 			}
 			if (selection.kind === Kind.INLINE_FRAGMENT) {
-				registerSelectionDirectiveOwners(
-					selection.directives,
-					collectSelectionFieldOwners(selection.selectionSet)
-				);
-				inspect(selection.selectionSet, currentOwner, pathPrefix);
+				const directiveOwners = collectSelectionFieldOwners(selection.selectionSet);
+				for (const branchPath of branchPathsFor(selection, pathPrefix)) {
+					for (const owner of collectSelectionOccurrenceOwners(
+						selection.selectionSet,
+						branchPath
+					)) {
+						directiveOwners.add(owner);
+					}
+				}
+				registerSelectionDirectiveOwners(selection.directives, directiveOwners);
+				for (const branchPath of branchPathsFor(selection, pathPrefix)) {
+					inspect(selection.selectionSet, currentOwner, branchPath);
+				}
 				continue;
 			}
 			const fragmentName = selection.name.value;
@@ -809,7 +858,8 @@ const selectedDeprecatedSymbols = (
 		operation,
 		fragments,
 		reachableFragments,
-		variables
+		variables,
+		schema
 	);
 	const fragmentDirectiveOwners = new Map<DirectiveNode, ReadonlySet<string>>();
 	for (const [fragmentName, owners] of activeSelections.fragmentDirectiveOwners) {

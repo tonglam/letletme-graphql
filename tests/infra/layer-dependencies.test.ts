@@ -102,6 +102,20 @@ test("layer checker tracks a require alias in its declaring block", () => {
 	});
 });
 
+test("layer checker tracks aliases referenced from earlier function bodies", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'function loadService() { load("../domains/entries/service"); } const load = require; loadService();',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
 test("layer checker does not let an inner same-name binding hide an outer require alias", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.cts",

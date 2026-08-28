@@ -169,14 +169,8 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 	const isVisibleLoaderAlias = (identifier: ts.Identifier, name: string): boolean => {
 		if (!requireLoaderBindings.has(name) || name === "require") return false;
 		const referenceScope = scopeFor(identifier);
-		const referencePosition = identifier.getStart(sourceFile);
 		return loaderAliasBindings
-			.filter(
-				(binding) =>
-					binding.name === name &&
-					binding.marker.getStart(sourceFile) <= referencePosition &&
-					scopeContains(binding.scope, identifier)
-			)
+			.filter((binding) => binding.name === name && scopeContains(binding.scope, identifier))
 			.sort((left, right) => {
 				const depth = (scope: ts.Node): number => {
 					let value = 0;

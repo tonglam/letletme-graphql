@@ -406,6 +406,40 @@ describe("GraphQL request limits", () => {
 		expect(result.deprecatedSymbolOwners["path:right.value"]).toEqual(["LegacyMode.RIGHT"]);
 	});
 
+	it("disambiguates fragment-spread directives across conditional type branches", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				CAT @deprecated(reason: "Use NEW")
+				DOG @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on FRAGMENT_SPREAD
+			interface Node { id: ID!, value: String }
+			type Cat implements Node { id: ID!, value: String }
+			type Dog implements Node { id: ID!, value: String }
+			type Query { node: Node }
+		`);
+		const query = `
+			query Usage {
+				node {
+					... on Cat { ...Fields @legacy(mode: CAT) }
+					... on Dog { ...Fields @legacy(mode: DOG) }
+				}
+			}
+			fragment Fields on Node { value }
+		`;
+		const result = validateGraphQLRequestLimits({ query }, deprecatedKindsSchema);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.CAT", "LegacyMode.DOG"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Cat.value"]).toEqual(["LegacyMode.CAT"]);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Dog.value"]).toEqual(["LegacyMode.DOG"]);
+	});
+
 	it("keeps inline fragment directive values owned by fields in its type branch", () => {
 		const deprecatedKindsSchema = buildSchema(`
 			enum LegacyMode {
@@ -439,6 +473,9 @@ describe("GraphQL request limits", () => {
 		const dogValueOffset = query.indexOf("dogValue");
 		const nodeOffset = query.indexOf("node {");
 		expect(result.deprecatedSymbolOwners[`field:${dogValueOffset}`]).toEqual(["LegacyMode.OLD"]);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Dog.dogValue"]).toEqual([
+			"LegacyMode.OLD",
+		]);
 		expect(result.deprecatedSymbolOwners[`field:${nodeOffset}`]).toBeUndefined();
 	});
 

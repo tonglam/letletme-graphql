@@ -317,8 +317,74 @@ test("deprecated fragment-spread directives follow their response-path occurrenc
 			},
 		}
 	);
-
 	expect(observed).toEqual(["LegacyMode.LIVE"]);
+});
+
+test("deprecated fragment-spread directives keep conditional runtime branches separate", async () => {
+	const observed: string[] = [];
+	const typeDefs = `
+		enum LegacyMode {
+			CAT @deprecated(reason: "Use NEW")
+			DOG @deprecated(reason: "Use NEW")
+			NEW
+		}
+		directive @legacy(mode: LegacyMode) on FRAGMENT_SPREAD
+		interface Node { id: ID!, value: String }
+		type Cat implements Node { id: ID!, value: String }
+		type Dog implements Node { id: ID!, value: String }
+		type Query { nodes: [Node!]! }
+	`;
+	const server = new ApolloServer<TestContext>({
+		typeDefs,
+		resolvers: {
+			Query: { nodes: () => [{ __typename: "Cat", id: "cat", value: "ok" }] },
+			Node: { __resolveType: (value: { __typename: string }) => value.__typename },
+		},
+		plugins: [
+			{
+				async requestDidStart() {
+					return {
+						async executionDidStart(requestContext) {
+							return createDeprecatedSchemaUsageExecutionListener<TestContext>({
+								symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+								symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+								globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols,
+								increment: (symbol) => observed.push(symbol),
+							});
+						},
+					};
+				},
+			},
+		],
+	});
+	servers.push(server);
+	await server.start();
+
+	const query = `
+		query {
+			nodes {
+				... on Cat { ...Fields @legacy(mode: CAT) }
+				... on Dog { ...Fields @legacy(mode: DOG) }
+			}
+		}
+		fragment Fields on Node { value }
+	`;
+	const limits = validateGraphQLRequestLimits({ query }, buildSchema(typeDefs));
+	if (!limits.ok) throw new Error(limits.message);
+
+	await server.executeOperation(
+		{ query },
+		{
+			contextValue: {
+				deprecatedSymbols: limits.deprecatedSymbols,
+				deprecatedSymbolOwners: limits.deprecatedSymbolOwners,
+				deprecatedSymbolGlobalSymbols: limits.deprecatedSymbolGlobalSymbols,
+			},
+		}
+	);
+	// Only the Cat item executes, so the Dog branch's same response path must not
+	// cause its directive value to be counted.
+	expect(observed).toEqual(["LegacyMode.CAT"]);
 });
 
 test("deprecated usage keeps field occurrences separate across response branches", async () => {
