@@ -3,8 +3,11 @@
 FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS base
 WORKDIR /app
 
-# Apply the Alpine security updates that are newer than the pinned Bun image.
-RUN apk add --no-cache --upgrade libcrypto3 libssl3
+# Apply fixed Alpine security package versions that are newer than the pinned
+# Bun image; do not resolve an unconstrained upgrade at build time.
+RUN apk add --no-cache \
+	libcrypto3=3.5.8-r0 \
+	libssl3=3.5.8-r0
 
 FROM base AS deps
 COPY bun.lock package.json ./
