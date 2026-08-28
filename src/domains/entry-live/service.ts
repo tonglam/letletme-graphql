@@ -30,6 +30,7 @@ export const projectEntryLiveFromCalc = (params: {
 	const { calc } = params;
 	const hasProjectableAvailability =
 		calc.availability === "READY" ||
+		calc.availability === "LINEUP_UNAVAILABLE" ||
 		(calc.availability === "NO_PICKS" &&
 			calc.score.source === "FPL_FINAL_RESULT" &&
 			calc.score.state === "FINAL");

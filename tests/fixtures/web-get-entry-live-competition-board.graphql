@@ -1,0 +1,134 @@
+query GetEntryLiveCompetitionBoard(
+	$entryId: Int!
+	$tournamentId: Int!
+	$eventId: Int!
+	$ref: LiveRevisionRefInput
+	$page: Int
+	$pageSize: Int
+	$sort: EntryLiveCompetitionBoardSort
+	$direction: EntryLiveCompetitionBoardSortDirection
+	$search: String
+	$chips: [String!]
+	$captainPlayerIds: [Int!]
+	$ownership: EntryLiveCompetitionOwnershipFilterInput
+	$teamCountRules: [EntryLiveCompetitionTeamCountRuleInput!]
+	$expectedBoardRevision: String
+) {
+	entryLiveCompetitionBoard(
+		entryId: $entryId
+		tournamentId: $tournamentId
+		eventId: $eventId
+		ref: $ref
+		page: $page
+		pageSize: $pageSize
+		sort: $sort
+		direction: $direction
+		search: $search
+		chips: $chips
+		captainPlayerIds: $captainPlayerIds
+		ownership: $ownership
+		teamCountRules: $teamCountRules
+		expectedBoardRevision: $expectedBoardRevision
+	) {
+		season
+		eventId
+		tournamentId
+		boardRevision
+		playerRevision
+		managerRevision
+		dataAvailability
+		managerDataAvailability
+		managerServedFrom
+		managerRefreshQueued
+		managerCheckedAt
+		managerNextRefreshAt
+		coverageState
+		rankScope
+		computedEntries
+		deferredEntryCount
+		failedEntryCount
+		unavailableEntryCount
+		officialCoverage
+		unavailableEntryIds
+		failedEntryIds
+		partial
+		totalEntries
+		filteredEntries
+		page
+		pageSize
+		hasMore
+		highestEventPoints
+		averageEventPoints
+		rows {
+			...EntryLiveCompetitionBoardRowFields
+		}
+		viewerRow {
+			...EntryLiveCompetitionBoardRowFields
+		}
+	}
+}
+
+fragment EntryLiveCompetitionBoardRowFields on EntryLiveCompetitionBoardRow {
+	entry
+	entryName
+	playerName
+	rank
+	overallRank
+	teamValue
+	chip
+	livePoints
+	transferCost
+	liveNetPoints
+	liveTotalPoints
+	played
+	toPlay
+	captainId
+	captainName
+	captainPoints
+	score {
+		...EntryLiveCompetitionScoreFields
+	}
+}
+
+fragment EntryLiveCompetitionScoreFields on LiveManagerScore {
+	eventPoints
+	netEventPoints
+	totalPoints
+	totalScope
+	eventRank
+	overallRank
+	leagueRank
+	transferCost
+	source
+	state
+	eventPointSemantics
+	revision
+	checkedAt
+	upstreamUpdatedAt
+	calculationMode
+	algorithmVersion
+	provenance {
+		scoreSource
+		calculationMode
+		algorithmVersion
+		inputRevision
+		scoreRevision
+		rankRevision
+		livePublicationId
+		liveRevision
+		liveCheckedAt
+		picksRevision
+		picksCheckedAt
+		previousTotalsRevision
+		previousTotalsThroughEventId
+		resultRevision
+		resultCheckedAt
+		dataCheckedAt
+		rankSource
+		rankCheckedAt
+	}
+	staleAt
+	nextRefreshAt
+	reconciliation
+	reasonCodes
+}

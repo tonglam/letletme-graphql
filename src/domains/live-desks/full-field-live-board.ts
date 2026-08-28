@@ -1,6 +1,7 @@
 import type { Entry, EntryEventResult } from "../entries/repository";
 import { hasCompleteEntryEventPick, type EntryEventPick } from "../entry-live/repository";
 import { unavailableManagerScore, type LiveManagerScore } from "../entry-live/manager-score";
+import { parseFullFieldLiveBoardEnabled } from "../../infra/env-value";
 import type { ManagerLiveScoreRow, ManagerLiveSource } from "../../infra/manager-live-client";
 import type { Player } from "../players/repository";
 import {
@@ -8,6 +9,15 @@ import {
 	type CachedEntryLiveCompetitionBoard,
 	type IndexedEntryLiveCompetitionBoardRow,
 } from "./entry-live-competition-board";
+
+/**
+ * The lightweight full-field index is the normal paginated-board path. Keep an
+ * explicit kill switch for incident mitigation, but do not silently fall back
+ * to calculating every manager when the deployment omits the rollout flag.
+ */
+export const fullFieldLiveBoardEnabled = (value: string | undefined): boolean => {
+	return parseFullFieldLiveBoardEnabled(value);
+};
 
 const canonicalChip = (raw: string | null): string => {
 	const value = (raw ?? "")

@@ -99,6 +99,7 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 	enum EntryLiveAvailability {
 		READY
 		NO_PICKS
+		LINEUP_UNAVAILABLE
 	}
 
 	enum LiveManagerScoreSource {

@@ -52,6 +52,24 @@ describe("entryLive score authority", () => {
 		});
 	});
 
+	it("keeps a traceable event-live headline when lineup details fail closed", () => {
+		const lineupUnavailable = {
+			...eventLiveCalc,
+			availability: "LINEUP_UNAVAILABLE",
+			score: { ...eventLiveCalc.score, reconciliation: "NO_LINEUP" },
+		} as LiveCalcData;
+
+		expect(projectEntryLiveFromCalc({ entry, event, calc: lineupUnavailable })).toMatchObject({
+			eventPoints: 37,
+			overallPoints: 37,
+			liveTotalPoints: 37,
+			score: {
+				source: "FPL_EVENT_LIVE",
+				reconciliation: "NO_LINEUP",
+			},
+		});
+	});
+
 	it("fails closed when no traceable live score is available", () => {
 		const unavailable = {
 			...eventLiveCalc,

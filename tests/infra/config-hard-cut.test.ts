@@ -47,11 +47,15 @@ const importEnvInChild = (overrides: Record<string, string | undefined>) => {
 		if (value === undefined) delete childEnvironment[key];
 		else childEnvironment[key] = value;
 	}
-	return spawnSync(process.execPath, ["-e", 'import("./src/infra/env.ts")'], {
-		cwd: process.cwd(),
-		env: childEnvironment,
-		encoding: "utf8",
-	});
+	return spawnSync(
+		process.execPath,
+		["--env-file=/dev/null", "-e", 'await import("./src/infra/env.ts")'],
+		{
+			cwd: process.cwd(),
+			env: childEnvironment,
+			encoding: "utf8",
+		}
+	);
 };
 
 describe("hard-cut runtime configuration", () => {
@@ -149,6 +153,18 @@ describe("hard-cut runtime configuration", () => {
 		expect(retiredMode.status).not.toBe(0);
 		expect(`${retiredMode.stdout}${retiredMode.stderr}`).toContain(
 			"GRAPHQL_RATE_LIMIT_MODE must be one of shadow-v3, enforce-v3, shadow-v4, enforce-v4"
+		);
+	});
+
+	test("accepts the full-field live board kill-switch spellings at runtime", () => {
+		for (const value of ["true", "1", "yes", "on", "false", "0", "no", "off"]) {
+			const result = importEnvInChild({ FULL_FIELD_LIVE_BOARD_ENABLED: value });
+			expect(result.status).toBe(0);
+		}
+		const invalid = importEnvInChild({ FULL_FIELD_LIVE_BOARD_ENABLED: "maybe" });
+		expect(invalid.status).not.toBe(0);
+		expect(`${invalid.stdout}${invalid.stderr}`).toContain(
+			"FULL_FIELD_LIVE_BOARD_ENABLED must be one of"
 		);
 	});
 
