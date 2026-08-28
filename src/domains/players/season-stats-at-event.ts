@@ -395,7 +395,7 @@ const isPlayerSeasonStatsAtEvent = (value: unknown): value is PlayerSeasonStatsA
 	isRecord(value) &&
 	typeof value.elementId === "number" &&
 	typeof value.eventId === "number" &&
-	typeof value.available === "boolean" &&
+	value.available === true &&
 	(value.totalPoints === null || typeof value.totalPoints === "number") &&
 	(value.form === null || typeof value.form === "number");
 

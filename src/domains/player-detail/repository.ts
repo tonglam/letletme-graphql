@@ -727,6 +727,10 @@ async function loadRecentGameweeks(
 	}
 	try {
 		const { data, error } = await context.data
+			// The mutable player_gameweek_stats table has no publication revision.
+			// Keep its rows request-local and mark the section non-authoritative
+			// below; it must never be labelled with statsContext.revision or enter
+			// the shared player-detail cache.
 			.read("fpl.player_gameweek_stats")
 			.select(
 				"event_id, total_points, minutes, starts, goals_scored, assists, clean_sheets, saves, bonus, bps"
@@ -807,20 +811,17 @@ async function loadRecentGameweeks(
 				opponents,
 			};
 		});
+		const fixtureState: PlayerDataState = fixturesUnavailable
+			? "UNAVAILABLE"
+			: fixturesFallback || !historicalTeams.complete
+				? "FALLBACK"
+				: "READY";
 		return section(
 			value,
-			fixturesUnavailable
-				? "UNAVAILABLE"
-				: fixturesFallback || !historicalTeams.complete
-					? "FALLBACK"
-					: "READY",
-			fixturesUnavailable
+			fixtureState === "UNAVAILABLE" ? "UNAVAILABLE" : "FALLBACK",
+			fixtureState === "UNAVAILABLE"
 				? "recent_fixture_read_failed"
-				: fixturesFallback
-					? "recent_fixture_stale"
-					: historicalTeams.complete
-						? null
-						: "historical_team_partial",
+				: "recent_gameweeks_revision_unverified",
 			statsContext.revision,
 			statsContext.sourceCheckedAt
 		);

@@ -465,6 +465,46 @@ describe("playerDetailRepository", () => {
 		expect(detail?.fixtures.filter((fixture) => fixture.event === 3)).toHaveLength(2);
 	});
 
+	it("marks mutable recent gameweeks non-authoritative and excludes the shared cache", async () => {
+		const fromCalls: string[] = [];
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			fromCalls,
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+		const redis = context.redis as unknown as TestRedis;
+
+		expect(detail?.recentGameweeks[0]).toMatchObject({ eventId: 3, totalPoints: 9 });
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_revision_unverified",
+			revision: "11",
+		});
+		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(fromCalls).toContain("fpl.player_gameweek_stats");
+		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
+	});
+
 	it("does not write a shared cache entry when a data section is unavailable", async () => {
 		const context = createContext({
 			currentEvent: { id: 3, isCurrent: true, finished: false },
@@ -541,7 +581,7 @@ describe("playerDetailRepository", () => {
 		expect(detail?.totalPoints).toBeNull();
 		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
 			state: "FALLBACK",
-			reasonCode: "historical_team_partial",
+			reasonCode: "recent_gameweeks_revision_unverified",
 		});
 		expect(detail?.dataAvailability.seasonStats).toMatchObject({
 			state: "UNAVAILABLE",

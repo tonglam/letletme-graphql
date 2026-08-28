@@ -8,6 +8,9 @@ const NULL_SENTINEL = "__entries:null__";
 // v4 requires the durable rich-publication timestamp used as final score provenance.
 const ENTRY_RESULT_CACHE_VERSION = "v4";
 const ENTRY_HISTORY_INFO_CACHE_VERSION = "v2";
+// Entry info values must be durable database rows. Bump the namespace so a
+// pre-hard-cut FPL fallback can never be interpreted as a persisted entry.
+const ENTRY_INFO_CACHE_VERSION = "v2";
 
 export type { Entry } from "../../contracts/entry";
 
@@ -382,7 +385,9 @@ export const entriesRepository: EntriesRepository = {
 		if (uniqueIds.length === 0) {
 			return new Map();
 		}
-		const cacheKeys = uniqueIds.map((id) => gqlCacheKey(context, `entries:info:${id}`));
+		const cacheKeys = uniqueIds.map((id) =>
+			gqlCacheKey(context, `entries:info:${ENTRY_INFO_CACHE_VERSION}:${id}`)
+		);
 		const entries = new Map<number, Entry>();
 		const missingIds: number[] = [];
 
@@ -434,7 +439,7 @@ export const entriesRepository: EntriesRepository = {
 			const pipeline = context.redis.pipeline();
 			for (const entry of fetched) {
 				pipeline.set(
-					gqlCacheKey(context, `entries:info:${entry.id}`),
+					gqlCacheKey(context, `entries:info:${ENTRY_INFO_CACHE_VERSION}:${entry.id}`),
 					JSON.stringify(entry),
 					"EX",
 					QUERY_CACHE_TTL_SECONDS.METADATA
