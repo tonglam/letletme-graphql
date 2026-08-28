@@ -9,6 +9,16 @@ import {
 	type IndexedEntryLiveCompetitionBoardRow,
 } from "./entry-live-competition-board";
 
+/**
+ * The lightweight full-field index is the normal paginated-board path. Keep an
+ * explicit kill switch for incident mitigation, but do not silently fall back
+ * to calculating every manager when the deployment omits the rollout flag.
+ */
+export const fullFieldLiveBoardEnabled = (value: string | undefined): boolean => {
+	const normalized = value?.trim().toLowerCase();
+	return !normalized || !["0", "false", "no", "off"].includes(normalized);
+};
+
 const canonicalChip = (raw: string | null): string => {
 	const value = (raw ?? "")
 		.trim()

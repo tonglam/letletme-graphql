@@ -444,7 +444,7 @@ const computeSingleEntry = (
 	const hasCompleteAuthorityLineup = hasCompleteLineupMembership(pickList, authorityLineup);
 	if (!hasCompleteAuthorityLineup) {
 		return {
-			availability: pickEntity && pickEntity.picks.length > 0 ? "READY" : "NO_PICKS",
+			availability: "LINEUP_UNAVAILABLE",
 			provisional,
 			snapshot: null,
 			score: unavailableManagerScore(transferCost),
@@ -507,7 +507,7 @@ const computeSingleEntry = (
 	};
 
 	return {
-		availability: pickEntity && pickEntity.picks.length > 0 ? "READY" : "NO_PICKS",
+		availability: "READY",
 		provisional,
 		snapshot: null,
 		score: unavailableManagerScore(transferCost),
@@ -569,27 +569,55 @@ export const entryLiveBatchService = {
 			};
 		}
 
-		// Phase 1: resolve identity and picks. Every active score is produced by
-		// Data's projected materialization and its revision-pinned effective lineup.
-		const [entriesById, picksByEntry, previousResultsByEntry, event, loadedLiveMeta] =
-			await Promise.all([
-				prefetched?.entriesById ?? entriesService.getEntriesByIds(context, entryIds),
-				prefetched?.picksByEntry ??
-					entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
-				eventId > 1
-					? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
-					: Promise.resolve(new Map<number, EntryEventResult>()),
-				eventsService.getEventById(context, eventId).catch(() => null),
-				loadLiveSnapshotMeta(context, eventId).catch(() => null),
-			]);
+		// Phase 1: resolve identity, picks, and the authoritative manager score in
+		// parallel. When the caller has no publication fence, Data fixes one for the
+		// request and returns it with the score. Waiting for GraphQL's independent
+		// manifest read here would recreate the slow serial preflight this batch is
+		// designed to avoid.
+		const loadedLiveMetaPromise = loadLiveSnapshotMeta(context, eventId).catch(() => null);
+		const loadAuthoritativeManagerScores = async (
+			liveRef: LiveSnapshotReference | undefined
+		): Promise<ManagerScoreLoad> => {
+			const stopManagerScores = context.requestTiming?.start("entryLive.managerScores");
+			try {
+				return await loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId, {
+					includeEffectiveLineup: true,
+					...(liveRef?.publicationId
+						? {
+								liveRef: {
+									publicationId: liveRef.publicationId,
+									revision: liveRef.revision,
+								},
+							}
+						: {}),
+				});
+			} finally {
+				stopManagerScores?.();
+			}
+		};
+		const eagerManagerScoresPromise = prefetched?.managerScores
+			? null
+			: loadAuthoritativeManagerScores(prefetched?.liveRef);
+		const stopPhaseOne = context.requestTiming?.start("entryLive.phase1");
+		const [
+			entriesById,
+			picksByEntry,
+			previousResultsByEntry,
+			event,
+			loadedLiveMeta,
+			eagerManagerScores,
+		] = await Promise.all([
+			prefetched?.entriesById ?? entriesService.getEntriesByIds(context, entryIds),
+			prefetched?.picksByEntry ??
+				entryLiveRepository.getEntryEventPicksByIds(context, entryIds, eventId),
+			eventId > 1
+				? entriesService.getEntryEventResultsByEntryIds(context, entryIds, eventId - 1)
+				: Promise.resolve(new Map<number, EntryEventResult>()),
+			eventsService.getEventById(context, eventId).catch(() => null),
+			loadedLiveMetaPromise,
+			eagerManagerScoresPromise,
+		]).finally(() => stopPhaseOne?.());
 		const pinnedLiveMeta = prefetched?.liveRef ?? loadedLiveMeta;
-		const fullSnapshotMeta =
-			loadedLiveMeta &&
-			(prefetched?.liveRef === undefined ||
-				(loadedLiveMeta.publicationId === prefetched.liveRef.publicationId &&
-					loadedLiveMeta.revision === prefetched.liveRef.revision))
-				? loadedLiveMeta
-				: null;
 		const provisional = !(event?.finished === true && event.dataChecked === true);
 		const prefetchedManagerScores = prefetched?.managerScores;
 		const prefetchedManagerScoresAreUsable =
@@ -605,26 +633,23 @@ export const entryLiveBatchService = {
 			});
 		const managerScores = prefetchedManagerScoresAreUsable
 			? prefetchedManagerScores
-			: await loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId, {
-					includeEffectiveLineup: true,
-					...(pinnedLiveMeta?.publicationId
-						? {
-								liveRef: {
-									publicationId: pinnedLiveMeta.publicationId,
-									revision: pinnedLiveMeta.revision,
-								},
-							}
-						: {}),
-				});
+			: (eagerManagerScores ?? (await loadAuthoritativeManagerScores(pinnedLiveMeta ?? undefined)));
 		const dataLiveReference = dataLiveReferenceFromRows(managerScores.rows);
-		// A manifest resolved before the Data call wins; otherwise use the exact
-		// publication identity returned by Data. Both reads in this operation must
-		// be fenced to one revision.
+		// An explicit caller fence wins. Otherwise use the exact publication fixed
+		// by Data for the manager score, falling back to GraphQL's manifest only when
+		// the manager response has no publication identity. Headline and detail must
+		// always stay on one revision.
 		const detailLiveReference = provisional
-			? pinnedLiveMeta?.publicationId
-				? pinnedLiveMeta
-				: dataLiveReference.reference
+			? (prefetched?.liveRef ?? dataLiveReference.reference ?? loadedLiveMeta)
 			: null;
+		const fullSnapshotMeta =
+			loadedLiveMeta &&
+			(!provisional ||
+				(detailLiveReference !== null &&
+					loadedLiveMeta.publicationId === detailLiveReference.publicationId &&
+					loadedLiveMeta.revision === detailLiveReference.revision))
+				? loadedLiveMeta
+				: null;
 		const detailReferenceUnavailable =
 			provisional && (dataLiveReference.conflict || detailLiveReference === null);
 		// Manager headline availability is independent from lineup availability.
@@ -887,6 +912,7 @@ export const entryLiveBatchService = {
 					...calcData,
 					...(detailFailedClosed
 						? {
+								availability: "LINEUP_UNAVAILABLE" as const,
 								pickList: [],
 								activeCaptain: { id: 0, name: "", points: 0 },
 								snapshot: null,

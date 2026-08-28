@@ -40,6 +40,11 @@ const PLAYER_STATE_PROFILE_MAX_AST_NODES = 240;
 // root enough document room while retaining every weighted-complexity, depth,
 // alias, root-field, and rate-limit guard below.
 const CALC_LIVE_POINTS_MAX_AST_NODES = 260;
+// The live competition board returns at most one bounded page plus the viewer
+// row, but each score carries the same traceability contract as live points.
+// Scope the larger document allowance to this sole unaliased root; page-size,
+// weighted-complexity, depth and rate-limit guards remain unchanged.
+const ENTRY_LIVE_COMPETITION_BOARD_MAX_AST_NODES = 400;
 
 const MAX_LIST_ARGUMENT_WEIGHT = 200;
 
@@ -615,6 +620,15 @@ export const validateGraphQLPayloadLimits = (
 			(field) =>
 				field.name === "calcLivePointsByEntry" && field.responseKey === "calcLivePointsByEntry"
 		);
+	const usesEntryLiveCompetitionBoard =
+		onlyReachableDefinitions &&
+		responseKeys.size === 1 &&
+		rootNames.length > 0 &&
+		rootNames.every(
+			(field) =>
+				field.name === "entryLiveCompetitionBoard" &&
+				field.responseKey === "entryLiveCompetitionBoard"
+		);
 	const maxAstNodes = usesTournamentDetailDesk
 		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
 		: usesMyFplCompetitionsDesk
@@ -625,7 +639,9 @@ export const validateGraphQLPayloadLimits = (
 					? PLAYER_STATE_PROFILE_MAX_AST_NODES
 					: usesCalcLivePointsByEntry
 						? CALC_LIVE_POINTS_MAX_AST_NODES
-						: GRAPHQL_LIMITS.maxAstNodes;
+						: usesEntryLiveCompetitionBoard
+							? ENTRY_LIVE_COMPETITION_BOARD_MAX_AST_NODES
+							: GRAPHQL_LIMITS.maxAstNodes;
 	let astNodes = 0;
 	visit(document, { enter: () => void (astNodes += 1) });
 	if (astNodes > maxAstNodes) {

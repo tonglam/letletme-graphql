@@ -295,6 +295,60 @@ describe("GraphQL request limits", () => {
 		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
 	});
 
+	it("accepts the exact bounded Web live-competition board projection", async () => {
+		const query = await Bun.file(
+			new URL("../fixtures/web-get-entry-live-competition-board.graphql", import.meta.url)
+		).text();
+		let astNodes = 0;
+		visit(parse(query), { enter: () => void (astNodes += 1) });
+
+		expect(astNodes).toBe(336);
+		expect(
+			validateGraphQLRequestLimits(
+				{
+					query,
+					variables: { entryId: 1, tournamentId: 1, eventId: 1, page: 1, pageSize: 20 },
+				},
+				schema
+			)
+		).toMatchObject({
+			ok: true,
+			rootFields: ["entryLiveCompetitionBoard"],
+		});
+	});
+
+	it("keeps the live-board AST allowance scoped to one exact bounded root", () => {
+		const fieldsWithinAllowance = Array.from({ length: 170 }, () => "__typename").join(" ");
+		const fieldsAboveAllowance = Array.from({ length: 205 }, () => "__typename").join(" ");
+		const root = (fields: string) =>
+			"entryLiveCompetitionBoard(entryId: 1, tournamentId: 1, eventId: 1) { " + fields + " }";
+
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { " + root(fieldsWithinAllowance) + " }" },
+				schema
+			)
+		).toMatchObject({ ok: true, rootFields: ["entryLiveCompetitionBoard"] });
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { board: " + root(fieldsWithinAllowance) + " }" },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { " + root(fieldsWithinAllowance) + " events { id } }" },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { " + root(fieldsAboveAllowance) + " }" },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+	});
+
 	it("allows standard introspection where Apollo has enabled it", () => {
 		const result = validateGraphQLRequestLimits({ query: getIntrospectionQuery() }, schema);
 		expect(result).toMatchObject({

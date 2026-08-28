@@ -199,7 +199,7 @@ export const env = {
 	FULL_FIELD_LIVE_BOARD_ENABLED: parseBooleanEnv(
 		readEnv("FULL_FIELD_LIVE_BOARD_ENABLED"),
 		"FULL_FIELD_LIVE_BOARD_ENABLED",
-		false
+		true
 	),
 
 	// CORS

@@ -47,11 +47,15 @@ const importEnvInChild = (overrides: Record<string, string | undefined>) => {
 		if (value === undefined) delete childEnvironment[key];
 		else childEnvironment[key] = value;
 	}
-	return spawnSync(process.execPath, ["-e", 'import("./src/infra/env.ts")'], {
-		cwd: process.cwd(),
-		env: childEnvironment,
-		encoding: "utf8",
-	});
+	return spawnSync(
+		process.execPath,
+		["--env-file=/dev/null", "-e", 'await import("./src/infra/env.ts")'],
+		{
+			cwd: process.cwd(),
+			env: childEnvironment,
+			encoding: "utf8",
+		}
+	);
 };
 
 describe("hard-cut runtime configuration", () => {

@@ -16,6 +16,7 @@ import {
 } from "../../../src/domains/live-desks/resolvers";
 import {
 	buildFullFieldLiveBoardIndex,
+	fullFieldLiveBoardEnabled,
 	type FullFieldLiveBoardIndexInput,
 } from "../../../src/domains/live-desks/full-field-live-board";
 import {
@@ -85,6 +86,20 @@ const makeLoad = (rows: ManagerLiveScoreRow[], expectedEntries: number): Manager
 		error: null,
 		state: "COMPLETE",
 	},
+});
+
+describe("full-field live board rollout", () => {
+	it("uses the lightweight paginated index by default", () => {
+		expect(fullFieldLiveBoardEnabled(undefined)).toBe(true);
+		expect(fullFieldLiveBoardEnabled("")).toBe(true);
+		expect(fullFieldLiveBoardEnabled("true")).toBe(true);
+	});
+
+	it("retains an explicit incident kill switch", () => {
+		for (const value of ["false", "0", "off", "NO"]) {
+			expect(fullFieldLiveBoardEnabled(value)).toBe(false);
+		}
+	});
 });
 
 describe("full-field live board bounded manager loads", () => {
