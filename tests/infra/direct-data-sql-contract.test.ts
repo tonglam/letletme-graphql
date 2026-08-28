@@ -23,4 +23,11 @@ describe("direct Data SQL contract", () => {
 			expect(Array.isArray(probe.values)).toBe(true);
 		}
 	});
+
+	test("binds the Trends aggregate publication identity as a bigint", () => {
+		const aggregate = DIRECT_DATA_SQL_CONTRACT.find(
+			(probe) => probe.name === "trends.aggregate-union"
+		);
+		expect(aggregate?.values).toEqual([1, 12, 2026, 1, 1]);
+	});
 });

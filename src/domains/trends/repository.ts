@@ -210,7 +210,10 @@ export const TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "trends.aggregate-union",
 		sql: TRENDS_AGGREGATE_UNION_SQL,
-		values: ["00000000-0000-4000-8000-000000000007", 12, 2026, 1, 1],
+		// reporting.tournament_selection_stat_rows.publication_id is bigint.
+		// Keep the planner probe aligned with the runtime parameter types so the
+		// real PG15 contract check exercises the SQL instead of failing at bind.
+		values: [1, 12, 2026, 1, 1],
 	},
 ];
 
