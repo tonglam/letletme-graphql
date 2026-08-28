@@ -778,6 +778,7 @@ const selectedDeprecatedSymbols = (
 	const owners = new Map<string, Set<string>>();
 	const globalSymbols = new Set<string>();
 	const fieldOwners: Array<string | undefined> = [];
+	const directiveOwnerStack: Array<ReadonlySet<string> | undefined> = [];
 	const addSymbol = (symbol: string, owner?: string): void => {
 		symbols.add(symbol);
 		if (!owner) {
@@ -789,6 +790,16 @@ const selectedDeprecatedSymbols = (
 		owners.set(owner, owned);
 	};
 	const currentFieldOwner = (): string | undefined => fieldOwners.at(-1);
+	const addDirectiveSymbol = (
+		symbol: string,
+		ownersForDirective: ReadonlySet<string> | undefined
+	): void => {
+		if (ownersForDirective !== undefined) {
+			for (const owner of ownersForDirective) addSymbol(symbol, owner);
+			return;
+		}
+		addSymbol(symbol, currentFieldOwner());
+	};
 	const variableDefaultValueNodes = new WeakSet<ASTNode>();
 	const variableDefaults = new Map<string, unknown>();
 	for (const definition of operation.variableDefinitions ?? []) {
@@ -845,23 +856,23 @@ const selectedDeprecatedSymbols = (
 					if (!executableSelectionIsIncluded(node.directives, variables)) return false;
 				},
 			},
-			Directive(node) {
-				const directive = schema.getDirective(node.name.value);
-				if (!directive) return;
-				const ownersForDirective = fragmentDirectiveOwners.get(node);
-				collectDeprecatedArgumentDefaultsAndValues(
-					node.arguments,
-					directive.args,
-					variables,
-					variableDefaults,
-					(symbol) => {
-						if (ownersForDirective) {
-							for (const owner of ownersForDirective) addSymbol(symbol, owner);
-							return;
-						}
-						addSymbol(symbol, currentFieldOwner());
-					}
-				);
+			Directive: {
+				enter(node) {
+					const ownersForDirective = fragmentDirectiveOwners.get(node);
+					directiveOwnerStack.push(ownersForDirective);
+					const directive = schema.getDirective(node.name.value);
+					if (!directive) return;
+					collectDeprecatedArgumentDefaultsAndValues(
+						node.arguments,
+						directive.args,
+						variables,
+						variableDefaults,
+						(symbol) => addDirectiveSymbol(symbol, ownersForDirective)
+					);
+				},
+				leave() {
+					directiveOwnerStack.pop();
+				},
 			},
 			Argument(node) {
 				const parentType = typeInfo.getParentType();
@@ -872,7 +883,7 @@ const selectedDeprecatedSymbols = (
 					addSymbol(`${parentType.name}.${field.name}(${node.name.value}:)`, currentFieldOwner());
 				}
 				if (directive && argument?.deprecationReason !== undefined) {
-					addSymbol(`@${directive.name}(${node.name.value}:)`, currentFieldOwner());
+					addDirectiveSymbol(`@${directive.name}(${node.name.value}:)`, directiveOwnerStack.at(-1));
 				}
 			},
 			ObjectField(node) {
@@ -1105,15 +1116,6 @@ export const validateGraphQLPayloadLimits = (
 		? effectiveRootFieldsFor(operation, fragments)
 		: { fields: [], reachableFragments: new Set<string>() };
 	const rootNames = rootInspection.fields;
-	const deprecatedTelemetry = operation
-		? selectedDeprecatedSymbols(
-				document,
-				operation,
-				rootInspection.reachableFragments,
-				variables,
-				schema
-			)
-		: { symbols: [], owners: {}, globalSymbols: [] };
 	const onlyReachableDefinitions =
 		operation !== null &&
 		document.definitions.every((definition) =>
@@ -1193,6 +1195,13 @@ export const validateGraphQLPayloadLimits = (
 	if (!operation) {
 		return accepted({ shape: "unknown" });
 	}
+	const deprecatedTelemetry = selectedDeprecatedSymbols(
+		document,
+		operation,
+		rootInspection.reachableFragments,
+		variables,
+		schema
+	);
 
 	const inspection = inspectSelectionSet({
 		selectionSet: operation.selectionSet,

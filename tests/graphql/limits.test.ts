@@ -346,7 +346,10 @@ describe("GraphQL request limits", () => {
 				OLD @deprecated(reason: "Use NEW")
 				NEW
 			}
-			directive @legacy(mode: LegacyMode) on FRAGMENT_DEFINITION
+			directive @legacy(
+				mode: LegacyMode
+				note: String @deprecated(reason: "Use current")
+			) on FRAGMENT_DEFINITION
 			type Query { parent: Child }
 			type Child { value: String }
 		`);
@@ -354,7 +357,7 @@ describe("GraphQL request limits", () => {
 			query Usage($mode: LegacyMode!) {
 				parent { ...ChildFields }
 			}
-			fragment ChildFields on Child @legacy(mode: $mode) { value }
+			fragment ChildFields on Child @legacy(mode: $mode, note: "old") { value }
 		`;
 		const result = validateGraphQLRequestLimits(
 			{ query, variables: { mode: "OLD" } },
@@ -363,12 +366,15 @@ describe("GraphQL request limits", () => {
 
 		expect(result).toMatchObject({
 			ok: true,
-			deprecatedSymbols: ["LegacyMode.OLD"],
+			deprecatedSymbols: ["@legacy(note:)", "LegacyMode.OLD"],
 			deprecatedSymbolGlobalSymbols: [],
 		});
 		if (!result.ok) throw new Error(result.message);
 		const valueOffset = query.indexOf("value }");
-		expect(result.deprecatedSymbolOwners[`field:${valueOffset}`]).toEqual(["LegacyMode.OLD"]);
+		expect(result.deprecatedSymbolOwners[`field:${valueOffset}`]).toEqual([
+			"@legacy(note:)",
+			"LegacyMode.OLD",
+		]);
 	});
 
 	it("keeps inline fragment directive values owned by fields in its type branch", () => {
