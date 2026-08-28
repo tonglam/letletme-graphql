@@ -351,6 +351,11 @@ rollback_switch() {
     echo "slot rollback did not restore active slot $old_slot" >&2
     return 1
   fi
+  # Only tear down the rejected candidate after the rollback helper and its
+  # durable active-slot authority both prove that routing is back on old_slot.
+  # If either check fails, leave cleanup disarmed because the candidate may
+  # still be serving traffic or remain the only known rollback target.
+  candidate_cleanup_armed=true
   switched=false
 }
 rollback_on_error() {

@@ -119,6 +119,14 @@ describe("production deployment workflow", () => {
 	});
 
 	test("rolls back the slot switch when public verification fails", () => {
+		const rollbackRearmAt = deployScript.indexOf(
+			"candidate_cleanup_armed=true",
+			deployScript.indexOf("rollback_switch()")
+		);
+		const rollbackAuthorityCheckAt = deployScript.indexOf(
+			'!= "$old_slot"',
+			deployScript.indexOf("rollback_switch()")
+		);
 		expect(deployScript).toContain("rollback_switch()");
 		expect(deployScript).toContain("public GraphQL health probe failed");
 		expect(deployScript).toContain('sudo -n "$SWITCH_HELPER" "$old_slot"');
@@ -134,6 +142,7 @@ describe("production deployment workflow", () => {
 		expect(deployScript.lastIndexOf("switched=false")).toBeGreaterThan(
 			deployScript.indexOf('mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"')
 		);
+		expect(rollbackRearmAt).toBeGreaterThan(rollbackAuthorityCheckAt);
 	});
 
 	test("retires the implicit legacy project only before canonical blue reuses port 4000", () => {
