@@ -95,4 +95,14 @@ describe("live desks tournament selection index", () => {
 			detailBoard.indexOf("selectTournamentDeskEntryWindow")
 		);
 	});
+
+	it("keeps the live competition board on durable manager heads", async () => {
+		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const board = source.slice(
+			source.indexOf("entryLiveCompetitionBoard: async"),
+			source.indexOf("entryLiveCompetitionsDesk: async")
+		);
+		expect(board.match(/readMode: "CACHE_ONLY"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+		expect(board.match(/managerReadMode: "CACHE_ONLY"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+	});
 });

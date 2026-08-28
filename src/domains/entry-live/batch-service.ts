@@ -531,6 +531,7 @@ export const entryLiveBatchService = {
 			picksByEntry?: Promise<Map<number, EntryEventPick>>;
 			tournamentId?: number;
 			managerScores?: ManagerScoreLoad;
+			managerReadMode?: "CACHE_ONLY" | "READ_THROUGH";
 			liveRef?: LiveSnapshotReference;
 		}
 	): Promise<BatchLiveCalcResult> {
@@ -558,6 +559,7 @@ export const entryLiveBatchService = {
 			try {
 				return await loadManagerScores(context, eventId, entryIds, prefetched?.tournamentId, {
 					includeEffectiveLineup: true,
+					readMode: prefetched?.managerReadMode,
 					...(liveRef?.publicationId
 						? {
 								liveRef: {

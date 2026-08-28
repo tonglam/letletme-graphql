@@ -96,6 +96,7 @@ export async function loadManagerScores(
 	options: {
 		includeEffectiveLineup?: boolean;
 		liveRef?: { publicationId: string; revision: string };
+		readMode?: "CACHE_ONLY" | "READ_THROUGH";
 	} = {}
 ): Promise<ManagerScoreLoad> {
 	return requestManagerLiveScores({

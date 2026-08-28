@@ -3,7 +3,11 @@ import { normalizeFplChip } from "../../contracts/fpl-chip";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
 import type { GraphQLContext } from "../../graphql/context";
 import { GraphQLError } from "graphql";
-import { getCoreEventSnapshot, getLiveDataSnapshot } from "../../infra/data-snapshot";
+import {
+	getCoreDataSnapshot,
+	getCoreEventSnapshot,
+	getLiveDataSnapshot,
+} from "../../infra/data-snapshot";
 import { eventsService } from "../events/service";
 import { gqlCacheKey } from "../../infra/cache-key";
 import {
@@ -1825,9 +1829,17 @@ async function loadEventLiveH2HScoreBatch(
 	entryIds: readonly number[]
 ): Promise<EventLiveH2HScoreBatch | null> {
 	if (entryIds.length === 0 || entryIds.length > 500) return null;
-	const result = await entryLiveBatchService.calcLivePointsForEntries(context, eventId, [
-		...entryIds,
-	]);
+	// Official-H2H roots are otherwise lightweight, but the active score overlay
+	// enters revision-keyed GraphQL caches through entry-live. Pin the Core
+	// publication lazily before that path so a valid live batch is not silently
+	// suppressed for lacking a dataset revision.
+	if (!context.dataRevision) await getCoreDataSnapshot(context);
+	const result = await entryLiveBatchService.calcLivePointsForEntries(
+		context,
+		eventId,
+		[...entryIds],
+		{ managerReadMode: "CACHE_ONLY" }
+	);
 	if (result.errors.length > 0 || result.results.size !== entryIds.length) return null;
 
 	const scores = new Map<number, number>();
