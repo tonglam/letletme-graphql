@@ -27,6 +27,7 @@ PUBLIC_GRAPHQL_URL=${PUBLIC_GRAPHQL_URL:-}
 RELEASE_MANIFEST_DIR=${RELEASE_MANIFEST_DIR:-$VPS_WORKDIR/releases}
 CANDIDATE_READY_ATTEMPTS=${CANDIDATE_READY_ATTEMPTS:-30}
 RATE_LIMIT_ROLLOUT=${RATE_LIMIT_ROLLOUT:-preserve}
+DEPLOY_LOCK_PATH=${DEPLOY_LOCK_PATH:-/var/lock/letletme-platform-deploy.lock}
 
 test -n "$PUBLIC_GRAPHQL_HEALTH_URL" || {
   echo "PUBLIC_GRAPHQL_HEALTH_URL is required for public cutover verification" >&2
@@ -36,6 +37,25 @@ test -n "$PUBLIC_GRAPHQL_URL" || {
   echo "PUBLIC_GRAPHQL_URL is required for public field-level verification" >&2
   exit 1
 }
+
+case "$DEPLOY_LOCK_PATH" in
+  /*) ;;
+  *) echo "DEPLOY_LOCK_PATH must be an absolute path" >&2; exit 1 ;;
+esac
+test "$DEPLOY_LOCK_PATH" != "/"
+command -v flock >/dev/null 2>&1 || {
+  echo "flock is required for deployment serialization" >&2
+  exit 1
+}
+if [ -L "$DEPLOY_LOCK_PATH" ] || [ ! -f "$DEPLOY_LOCK_PATH" ]; then
+  echo "deployment lock must be a provisioned regular file: $DEPLOY_LOCK_PATH" >&2
+  exit 1
+fi
+exec 9<>"$DEPLOY_LOCK_PATH"
+if ! flock -w 300 9; then
+  echo "timed out waiting for the platform deployment lock" >&2
+  exit 1
+fi
 
 cd "$(dirname "$VPS_WORKDIR")"
 if [ ! -d "$VPS_WORKDIR/.git" ]; then
@@ -67,12 +87,10 @@ inactive_slot=green
 
 if [ "$active_slot" = blue ]; then
   active_project="$BLUE_PROJECT"
-  active_port=4000
   candidate_project="$GREEN_PROJECT"
   candidate_port=4002
 else
   active_project="$GREEN_PROJECT"
-  active_port=4002
   candidate_project="$BLUE_PROJECT"
   candidate_port=4000
 fi
@@ -313,9 +331,14 @@ if [ ! -f "$ACTIVE_SLOT_FILE" ] || [ "$(tr -d '[:space:]' < "$ACTIVE_SLOT_FILE")
 fi
 
 manifest=$(mktemp "$RELEASE_MANIFEST_DIR/release.XXXXXX")
-old_image=$(APP_ENV_FILE="$VPS_WORKDIR/.env.deploy.$old_slot" APP_IMAGE="$IMAGE_REF" \
-  GRAPHQL_PORT="$active_port" docker compose -p "$active_project" ps --all -q graphql | head -n 1 | \
-  xargs -r docker inspect --format '{{.Config.Image}}' || true)
+active_container=$(docker ps --all \
+  --filter "label=com.docker.compose.project=$active_project" \
+  --filter "label=com.docker.compose.service=graphql" \
+  --format '{{.ID}}' | head -n 1)
+old_image=""
+if [ -n "$active_container" ]; then
+  old_image=$(docker inspect --format '{{.Config.Image}}' "$active_container" || true)
+fi
 jq -n \
   --arg deployedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg commit "$DEPLOY_SHA" \
@@ -328,4 +351,27 @@ jq -n \
 chmod 600 "$manifest"
 mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"
 switched=false
+
+# The durable manifest is the point after which cleanup is allowed. Keep both
+# slot image IDs and remove only older images in this repository; Docker also
+# refuses to remove an image referenced by any unexpected container.
+prune_superseded_repository_images() {
+  local image_repository active_image_id candidate_image_id image_id
+  image_repository=${IMAGE_REF%@sha256:*}
+  active_image_id=""
+  candidate_image_id=$(docker inspect --format '{{.Image}}' "$candidate_container")
+  if [ -n "$active_container" ]; then
+    active_image_id=$(docker inspect --format '{{.Image}}' "$active_container" || true)
+  fi
+  while IFS= read -r image_id; do
+    [ -n "$image_id" ] || continue
+    if [ "$image_id" = "$active_image_id" ] || [ "$image_id" = "$candidate_image_id" ]; then
+      continue
+    fi
+    if ! docker image rm "$image_id" >/dev/null; then
+      echo "retained superseded GraphQL image still referenced by a container: $image_id" >&2
+    fi
+  done < <(docker image ls --no-trunc --format '{{.ID}}' "$image_repository" | sort -u)
+}
+prune_superseded_repository_images
 echo "blue-green deployment switched $old_slot -> $inactive_slot at $DEPLOY_SHA"

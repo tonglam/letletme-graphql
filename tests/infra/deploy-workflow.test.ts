@@ -47,6 +47,17 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("ACTIVE_SLOT_FILE");
 	});
 
+	test("holds the platform-wide deployment lock before changing checkout or slots", () => {
+		const lockAt = deployScript.indexOf('exec 9<>"$DEPLOY_LOCK_PATH"');
+		expect(deployScript).toContain(
+			"DEPLOY_LOCK_PATH=${DEPLOY_LOCK_PATH:-/var/lock/letletme-platform-deploy.lock}"
+		);
+		expect(deployScript).toContain("flock -w 300 9");
+		expect(lockAt).toBeGreaterThan(-1);
+		expect(lockAt).toBeLessThan(deployScript.indexOf("git fetch origin main"));
+		expect(lockAt).toBeLessThan(deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"'));
+	});
+
 	test("requires candidate readiness, image digest, revision label, ingress and contract probes", () => {
 		expect(deployScript).toContain("/health/ready");
 		expect(deployScript).toContain('.status == "ok" and .revision == $revision');
@@ -95,6 +106,19 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain("docker buildx imagetools create --tag");
 		expect(workflow).toContain("severity: HIGH,CRITICAL");
 		expect(workflow.slice(0, promoteAt)).not.toContain("IMAGE_NAME}:latest");
+	});
+
+	test("prunes only superseded repository images after the release manifest is durable", () => {
+		const manifestAt = deployScript.indexOf(
+			'mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"'
+		);
+		const pruneAt = deployScript.indexOf("prune_superseded_repository_images");
+		expect(pruneAt).toBeGreaterThan(manifestAt);
+		expect(deployScript).toContain("image_repository=${IMAGE_REF%@sha256:*}");
+		expect(deployScript).toContain("candidate_image_id=$(docker inspect");
+		expect(deployScript).toContain('image_id" = "$active_image_id');
+		expect(deployScript).toContain('docker image rm "$image_id"');
+		expect(deployScript).not.toContain("docker image prune");
 	});
 
 	test("isolates and removes the temporary Docker credential store", () => {

@@ -31,12 +31,14 @@ const SAFE_CLIENT_CODES = new Set([
 	"TOURNAMENT_INSIGHTS_NOT_READY",
 	"TOURNAMENT_STANDINGS_NOT_READY",
 	"UNTRUSTED_INGRESS",
+	"DATA_UNAVAILABLE",
 	"DEPENDENCY_UNAVAILABLE",
 	"SEASON_AUTHORITY_UNAVAILABLE",
 	"INTERNAL_SERVER_ERROR",
 ]);
 
 const PUBLIC_MESSAGES: Record<string, string> = {
+	DATA_UNAVAILABLE: "Gameweek data is temporarily unavailable",
 	DEPENDENCY_UNAVAILABLE: "A required data dependency is temporarily unavailable",
 	SEASON_AUTHORITY_UNAVAILABLE: "Current season metadata is temporarily unavailable",
 	INTERNAL_SERVER_ERROR: "Internal server error",

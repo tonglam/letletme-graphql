@@ -51,6 +51,27 @@ describe("GraphQL public error sanitization", () => {
 		]);
 	});
 
+	test("preserves the stable gameweek data-unavailable contract", () => {
+		const body = sanitizeGraphQLResponseBody(
+			JSON.stringify({
+				errors: [
+					{
+						message: "private dependency detail",
+						extensions: { code: "DATA_UNAVAILABLE", cause: "postgres.internal" },
+					},
+				],
+			}),
+			"req-gameweek"
+		);
+		expect((JSON.parse(body) as { errors: unknown[] }).errors).toEqual([
+			{
+				message: "Gameweek data is temporarily unavailable",
+				extensions: { code: "DATA_UNAVAILABLE", requestId: "req-gameweek" },
+			},
+		]);
+		expect(body).not.toContain("postgres.internal");
+	});
+
 	test("preserves intentional domain codes while dropping private extensions", () => {
 		const body = sanitizeGraphQLResponseBody(
 			JSON.stringify({
