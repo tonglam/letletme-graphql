@@ -264,6 +264,18 @@ export const PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 		sql: PUBLIC_LEAGUE_CATALOG_SQL,
 		values: [2026],
 		runtime: "must-return-row",
+		resultTypes: [
+			{
+				relation: "competition.public_league_trends",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.public_league_trends",
+				column: "updated_at",
+				pgType: "timestamp with time zone",
+			},
+		],
 	},
 	{
 		name: "public-league-trends.access",

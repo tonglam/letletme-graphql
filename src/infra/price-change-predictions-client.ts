@@ -766,6 +766,30 @@ export const PRICE_CHANGE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "price-change.publication-item-metadata",
 		sql: PUBLICATION_ITEM_METADATA_SQL,
 		values: [[PRICE_CHANGE_CONTRACT_PUBLICATION_ID], PRICE_CHANGE_ITEMS],
+		resultTypes: [
+			{
+				relation: "ops.dataset_publication_items",
+				column: "publication_id",
+				pgType: "uuid",
+			},
+			{
+				relation: "ops.dataset_publication_items",
+				column: "item_name",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "ops.dataset_publication_items",
+				column: "item_count",
+				pgType: "integer",
+			},
+			{
+				relation: "ops.dataset_publication_items",
+				column: "checksum",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+		],
 	},
 ];
 

@@ -194,6 +194,84 @@ describe("direct Data SQL contract", () => {
 		expect(position && allowedResultTypes(position)).toEqual(["character varying", "text"]);
 	});
 
+	test("covers decoder-sensitive Core, publication, catalog and price metadata fields", () => {
+		const core = DIRECT_DATA_SQL_CONTRACT.find(
+			(probe) => probe.name === "data-snapshot.core-fallback"
+		)?.resultTypes;
+		for (const column of [
+			"name",
+			"short_name",
+			"form",
+			"strength_overall_home",
+			"strength_overall_away",
+			"strength_attack_home",
+			"strength_attack_away",
+			"strength_defence_home",
+			"strength_defence_away",
+		]) {
+			expect(core).toEqual(expect.arrayContaining([expect.objectContaining({ column })]));
+		}
+		for (const column of [
+			"source_checked_at",
+			"published_at",
+			"source_min_checked_at",
+			"source_max_checked_at",
+		]) {
+			expect(
+				DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "my-fpl.active-publications")
+					?.resultTypes
+			).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						relation: "competition.my_fpl_snapshot_publications",
+						column,
+						pgType: "timestamp with time zone",
+					}),
+				])
+			);
+		}
+		expect(
+			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "public-league-trends.catalog")
+				?.resultTypes
+		).toEqual(
+			expect.arrayContaining([
+				{
+					relation: "competition.public_league_trends",
+					column: "published_at",
+					pgType: "timestamp with time zone",
+				},
+				{
+					relation: "competition.public_league_trends",
+					column: "updated_at",
+					pgType: "timestamp with time zone",
+				},
+			])
+		);
+		expect(
+			DIRECT_DATA_SQL_CONTRACT.find(
+				(probe) => probe.name === "price-change.publication-item-metadata"
+			)?.resultTypes
+		).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					relation: "ops.dataset_publication_items",
+					column: "publication_id",
+					pgType: "uuid",
+				}),
+				expect.objectContaining({
+					relation: "ops.dataset_publication_items",
+					column: "item_count",
+					pgType: "integer",
+				}),
+				expect.objectContaining({
+					relation: "ops.dataset_publication_items",
+					column: "checksum",
+					pgType: "text",
+				}),
+			])
+		);
+	});
+
 	test("accepts JSON for every decoded JSON contract column", async () => {
 		const database: QueryExecutor = {
 			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {

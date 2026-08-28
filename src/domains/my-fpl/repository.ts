@@ -250,6 +250,108 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		sql: MY_FPL_ACTIVE_PUBLICATIONS_SQL,
 		values: [2026],
 		runtime: "must-return-row",
+		resultTypes: [
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "season_id",
+				pgType: "smallint",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "event_id",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "revision",
+				pgType: "bigint",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "snapshot_date",
+				pgType: "date",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "source_checked_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "kind",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "expected_entry_count",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "ready_entry_count",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "empty_entry_count",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "expected_tournament_count",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "ready_tournament_count",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "content_sha256",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "score_source",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "live_publication_id",
+				pgType: "uuid",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "live_revision",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "algorithm_version",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "source_min_checked_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "source_max_checked_at",
+				pgType: "timestamp with time zone",
+			},
+		],
 	},
 	{
 		name: "my-fpl.publication-by-event-revision",
