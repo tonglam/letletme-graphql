@@ -236,10 +236,27 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain(
 			"remote_token=$(umask 077; mktemp /tmp/letletme-graphql-token.XXXXXX)"
 		);
+		expect(workflow).toContain(
+			'base64 --wrap=0 < "$payload_dir/env.expected" > "$payload_dir/env.b64"'
+		);
+		expect(workflow).toContain(
+			'base64 --wrap=0 < "$payload_dir/token.expected" > "$payload_dir/token.b64"'
+		);
+		expect(workflow).toContain(
+			'base64 --decode "$payload_dir/env.b64" > "$payload_dir/env.decoded"'
+		);
+		expect(workflow).toContain(
+			'base64 --decode "$payload_dir/token.b64" > "$payload_dir/token.decoded"'
+		);
+		expect(workflow).toContain('cmp -s "$payload_dir/env.expected" "$payload_dir/env.decoded"');
+		expect(workflow).toContain('cmp -s "$payload_dir/token.expected" "$payload_dir/token.decoded"');
 		expect(workflow).toContain('printf \'%s\' "$env_payload" | base64 --decode > "$remote_env"');
 		expect(workflow).toContain(
 			'printf \'%s\' "$token_payload" | base64 --decode > "$remote_token"'
 		);
+		expect(workflow).toContain("GraphQL environment payload failed remote base64 decode");
+		expect(workflow).toContain("GHCR token payload failed remote base64 decode");
+		expect(workflow).not.toContain("base64 | tr -d '\\n'");
 		expect(workflow).toContain("trap cleanup_on_exit EXIT");
 		expect(workflow).toContain("trap 'cleanup_on_signal 130' INT");
 		expect(workflow).toContain("trap 'cleanup_on_signal 143' TERM");
