@@ -467,8 +467,7 @@ async function activeMetadata(database: QueryExecutor): Promise<ActiveMetadataRe
 	if (row === undefined || row === null) return emptyActiveMetadataRead();
 	const observed = observedMetadata(row);
 	const publicationId = observed.publicationId;
-	const metadata =
-		publicationId === null ? null : parseBriefingActiveMetadata(row, publicationId);
+	const metadata = publicationId === null ? null : parseBriefingActiveMetadata(row, publicationId);
 	return metadata
 		? { metadata, invalid: false, ...observed }
 		: { metadata: null, invalid: true, ...observed };
