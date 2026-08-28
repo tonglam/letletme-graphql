@@ -657,7 +657,11 @@ const selectedDeprecatedSymbols = (
 				enter(node) {
 					const parentType = typeInfo.getParentType();
 					const field = typeInfo.getFieldDef();
-					const owner = parentType && field ? `${parentType.name}.${field.name}` : undefined;
+					const owner = node.loc
+						? `field:${node.loc.start}`
+						: parentType && field
+							? `${parentType.name}.${field.name}`
+							: undefined;
 					fieldOwners.push(owner);
 					if (!executableSelectionIsIncluded(node.directives, variables)) {
 						fieldOwners.pop();

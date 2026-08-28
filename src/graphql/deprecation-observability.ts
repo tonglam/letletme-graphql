@@ -33,6 +33,9 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 			? {
 					willResolveField({ info }): void {
 						executedField = true;
+						for (const fieldNode of info.fieldNodes) {
+							if (fieldNode.loc) executedOwners.add(`field:${fieldNode.loc.start}`);
+						}
 						executedOwners.add(`${info.parentType.name}.${info.fieldName}`);
 					},
 				}

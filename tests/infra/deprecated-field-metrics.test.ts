@@ -114,3 +114,48 @@ test("deprecated usage excludes nested fields skipped by a null parent", async (
 
 	expect(observed).toEqual([]);
 });
+
+test("deprecated usage keeps field occurrences separate across response branches", async () => {
+	const observed: string[] = [];
+	const plugin: ApolloServerPlugin<TestContext> = {
+		async requestDidStart() {
+			return {
+				async executionDidStart(requestContext) {
+					return createDeprecatedSchemaUsageExecutionListener<TestContext>({
+						symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+						symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+						increment: (symbol) => observed.push(symbol),
+					});
+				},
+			};
+		},
+	};
+	const server = new ApolloServer<TestContext>({
+		typeDefs: `
+			enum LegacyMode { OLD @deprecated(reason: "Use NEW") NEW }
+			type Query { missing: Wrapper, live: Wrapper }
+			type Wrapper { value(mode: LegacyMode): String }
+		`,
+		resolvers: {
+			Query: { missing: () => null, live: () => ({}) },
+			Wrapper: { value: () => "ok" },
+		},
+		plugins: [plugin],
+	});
+	servers.push(server);
+	await server.start();
+
+	const query = "{ missing { value(mode: OLD) } live { value(mode: NEW) } }";
+	const firstValueOffset = query.indexOf("value(mode: OLD)");
+	await server.executeOperation(
+		{ query },
+		{
+			contextValue: {
+				deprecatedSymbols: ["LegacyMode.OLD"],
+				deprecatedSymbolOwners: { [`field:${firstValueOffset}`]: ["LegacyMode.OLD"] },
+			},
+		}
+	);
+
+	expect(observed).toEqual([]);
+});

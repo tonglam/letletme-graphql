@@ -46,11 +46,12 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({
 			ok: true,
 			deprecatedSymbols: ["LiveCalcData.livePoints", "LiveCalcData.rank"],
-			deprecatedSymbolOwners: {
-				"LiveCalcData.livePoints": ["LiveCalcData.livePoints"],
-				"LiveCalcData.rank": ["LiveCalcData.rank"],
-			},
 		});
+		const owners = (result as { deprecatedSymbolOwners?: Record<string, string[]> })
+			.deprecatedSymbolOwners;
+		expect(Object.values(owners ?? {})).toEqual(
+			expect.arrayContaining([["LiveCalcData.livePoints"], ["LiveCalcData.rank"]])
+		);
 	});
 
 	it("does not report deprecated selections excluded by skip/include directives", () => {
