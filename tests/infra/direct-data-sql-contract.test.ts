@@ -34,6 +34,13 @@ import {
 	PUBLICATION_ITEMS_SQL,
 } from "../../src/infra/price-change-predictions-client";
 
+const mockContractResultType = (relation: string, column: string, jsonType: string): string => {
+	const assertion = DIRECT_DATA_SQL_CONTRACT.flatMap((probe) => probe.resultTypes ?? []).find(
+		(candidate) => candidate.relation === relation && candidate.column === column
+	);
+	return assertion?.pgType === "jsonb" ? jsonType : (assertion?.pgType ?? jsonType);
+};
+
 describe("direct Data SQL contract", () => {
 	test("has unique named planner probes for every hard-cut consumer family", () => {
 		const names = DIRECT_DATA_SQL_CONTRACT.map((probe) => probe.name);
@@ -197,13 +204,7 @@ describe("direct Data SQL contract", () => {
 						rows: relations.map((relation, index) => ({
 							relation_name: relation,
 							column_name: columns[index],
-							actual_type:
-								relation === "fpl.player_market_snapshots" && columns[index] === "position"
-									? "text"
-									: relation === "ops.live_lifecycle_status" &&
-										  (columns[index] === "observed_at" || columns[index] === "last_changed_at")
-										? "timestamp with time zone"
-										: "json",
+							actual_type: mockContractResultType(relation, columns[index]!, "json"),
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
@@ -244,13 +245,7 @@ describe("direct Data SQL contract", () => {
 						rows: relations.map((relation, index) => ({
 							relation_name: relation,
 							column_name: columns[index],
-							actual_type:
-								relation === "fpl.player_market_snapshots" && columns[index] === "position"
-									? "text"
-									: relation === "ops.live_lifecycle_status" &&
-										  (columns[index] === "observed_at" || columns[index] === "last_changed_at")
-										? "timestamp with time zone"
-										: "jsonb",
+							actual_type: mockContractResultType(relation, columns[index]!, "jsonb"),
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
@@ -273,13 +268,7 @@ describe("direct Data SQL contract", () => {
 						rows: relations.map((relation, index) => ({
 							relation_name: relation,
 							column_name: columns[index],
-							actual_type:
-								relation === "fpl.player_market_snapshots" && columns[index] === "position"
-									? "text"
-									: relation === "ops.live_lifecycle_status" &&
-										  (columns[index] === "observed_at" || columns[index] === "last_changed_at")
-										? "timestamp with time zone"
-										: "jsonb",
+							actual_type: mockContractResultType(relation, columns[index]!, "jsonb"),
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}
