@@ -59,6 +59,19 @@ test("layer checker recognizes TypeScript import-type expressions", () => {
 	]);
 });
 
+test("layer checker recognizes triple-slash path references", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'/// <reference path="../domains/entries/service.ts" />',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service.ts",
+	]);
+});
+
 test("layer checker includes every TypeScript module extension", () => {
 	expect(isTypeScriptSourceFile("src/infra/runtime.ts")).toBe(true);
 	expect(isTypeScriptSourceFile("src/infra/runtime.tsx")).toBe(true);

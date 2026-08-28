@@ -72,6 +72,11 @@ export const moduleSpecifiers = (
 		}
 		ts.forEachChild(node, visit);
 	});
+	for (const reference of sourceFile.referencedFiles) {
+		if (!reference.fileName.startsWith(".")) continue;
+		const line = sourceFile.getLineAndCharacterOfPosition(reference.pos).line + 1;
+		modules.push({ value: reference.fileName, line });
+	}
 	return modules;
 };
 

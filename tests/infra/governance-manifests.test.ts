@@ -173,6 +173,29 @@ describe("deprecation manifest validation", () => {
 		).toEqual([]);
 	});
 
+	test("requires manifest coverage for deprecated directive arguments", () => {
+		const directiveSchema = buildSchema(`
+			directive @legacy(note: String @deprecated(reason: "Use current")) on FIELD
+			type Query { current: String }
+		`);
+		const symbol = "@legacy(note:)";
+		expect(validateSchemaDeprecationCoverage([], directiveSchema)).toEqual([
+			`missing schema deprecation: ${symbol}`,
+		]);
+		expect(
+			validateSchemaDeprecationCoverage(
+				[
+					{
+						...valid,
+						symbol,
+						usageMetric: deprecatedSchemaUsageMetric(symbol),
+					},
+				],
+				directiveSchema
+			)
+		).toEqual([]);
+	});
+
 	test("rejects a removed symbol reintroduced without a deprecation marker", () => {
 		const reintroducedSchema = buildSchema(`type Query { entry: String current: String }`);
 		const errors = validateSchemaDeprecationCoverage(

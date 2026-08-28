@@ -162,6 +162,18 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("reports deprecated arguments on executable directives", () => {
+		const directiveSchema = buildSchema(`
+			directive @legacy(note: String @deprecated(reason: "Use current")) on FIELD
+			type Query { current: String }
+		`);
+		const result = validateGraphQLRequestLimits(
+			{ query: `{ current @legacy(note: "old") }` },
+			directiveSchema
+		);
+		expect(result).toMatchObject({ ok: true, deprecatedSymbols: ["@legacy(note:)"] });
+	});
+
 	it("accounts for only the effective deprecated variable value", () => {
 		const deprecatedKindsSchema = buildSchema(`
 			enum LegacyMode {

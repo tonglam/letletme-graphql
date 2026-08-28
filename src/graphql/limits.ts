@@ -543,8 +543,12 @@ const selectedDeprecatedSymbols = (
 				const parentType = typeInfo.getParentType();
 				const field = typeInfo.getFieldDef();
 				const argument = typeInfo.getArgument();
-				if (parentType && field && argument?.deprecationReason !== undefined) {
+				const directive = typeInfo.getDirective();
+				if (!directive && parentType && field && argument?.deprecationReason !== undefined) {
 					symbols.add(`${parentType.name}.${field.name}(${node.name.value}:)`);
+				}
+				if (directive && argument?.deprecationReason !== undefined) {
+					symbols.add(`@${directive.name}(${node.name.value}:)`);
 				}
 			},
 			ObjectField(node) {

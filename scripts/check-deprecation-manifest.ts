@@ -114,6 +114,13 @@ const collectExecutableSchemaSymbols = (
 			}
 		}
 	}
+	for (const directive of schema.getDirectives()) {
+		for (const argument of directive.args) {
+			if (!deprecatedOnly || argument.deprecationReason !== undefined) {
+				symbols.add(`@${directive.name}(${argument.name}:)`);
+			}
+		}
+	}
 	return [...symbols].sort();
 };
 
