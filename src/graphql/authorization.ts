@@ -3,6 +3,7 @@ import {
 	type GraphQLRequestPayload,
 	type GraphQLRootField,
 } from "./operation-ast";
+import type { GraphQLSchema } from "graphql";
 import type { Logger } from "../infra/logger";
 import type { Principal } from "../infra/principal";
 import type { ReadModelClient } from "../infra/read-model-client";
@@ -23,6 +24,7 @@ type AuthorizationInput = {
 	principal?: Principal | null;
 	data: ReadModelClient;
 	logger: Logger;
+	schema?: GraphQLSchema;
 	requestScope?: object;
 	authorizedTournamentMemberships?: Set<number>;
 };
@@ -543,17 +545,19 @@ const authorizePayload = async ({
 	principal,
 	data,
 	requestScope,
+	schema,
 	authorizedTournamentMemberships,
 }: {
 	payload: GraphQLRequestPayload;
 	principal?: Principal | null;
 	data: ReadModelClient;
 	requestScope?: object;
+	schema?: GraphQLSchema;
 	authorizedTournamentMemberships?: Set<number>;
 }): Promise<AuthorizationResult> => {
 	if (typeof payload.query !== "string") return { ok: true };
 
-	const analysis = analyzeGraphQLOperation(payload);
+	const analysis = analyzeGraphQLOperation(payload, schema);
 	if (!analysis.operation) return { ok: true };
 
 	for (const field of analysis.rootFields) {
@@ -591,6 +595,7 @@ export const authorizeGraphQLRequest = async (
 				payload,
 				principal: input.principal,
 				data: input.data,
+				schema: input.schema,
 				requestScope: input.requestScope,
 				authorizedTournamentMemberships: input.authorizedTournamentMemberships,
 			});

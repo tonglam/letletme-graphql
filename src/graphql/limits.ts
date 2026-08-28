@@ -439,7 +439,8 @@ const collectDeprecatedSchemaArgumentDefaults = (
 	schemaArguments: readonly GraphQLArgument[],
 	variables: Record<string, unknown>,
 	variableDefaults: ReadonlyMap<string, unknown>,
-	addSymbol: (symbol: string) => void
+	addSymbol: (symbol: string) => void,
+	addArgumentSymbol?: (argument: GraphQLArgument) => void
 ): void => {
 	const suppliedArguments = new Set((argumentsList ?? []).map((argument) => argument.name.value));
 	for (const argumentNode of argumentsList ?? []) {
@@ -454,6 +455,7 @@ const collectDeprecatedSchemaArgumentDefaults = (
 	}
 	for (const argument of schemaArguments) {
 		if (suppliedArguments.has(argument.name) || argument.defaultValue === undefined) continue;
+		addArgumentSymbol?.(argument);
 		collectDeprecatedVariableSymbols(argument.defaultValue, argument.type, addSymbol);
 	}
 };
@@ -477,14 +479,16 @@ const collectDeprecatedArgumentDefaultsAndValues = (
 	schemaArguments: readonly GraphQLArgument[],
 	variables: Record<string, unknown>,
 	variableDefaults: ReadonlyMap<string, unknown>,
-	addSymbol: (symbol: string) => void
+	addSymbol: (symbol: string) => void,
+	addArgumentSymbol?: (argument: GraphQLArgument) => void
 ): void => {
 	collectDeprecatedSchemaArgumentDefaults(
 		argumentsList,
 		schemaArguments,
 		variables,
 		variableDefaults,
-		addSymbol
+		addSymbol,
+		addArgumentSymbol
 	);
 	const argumentsByName = new Map(schemaArguments.map((argument) => [argument.name, argument]));
 	const effectiveVariables = {
@@ -511,7 +515,8 @@ const collectDeprecatedFieldDefaults = (
 	argumentsList: readonly ArgumentNode[] | undefined,
 	variables: Record<string, unknown>,
 	variableDefaults: ReadonlyMap<string, unknown>,
-	addSymbol: (symbol: string) => void
+	addSymbol: (symbol: string) => void,
+	addArgumentSymbol?: (argument: GraphQLArgument) => void
 ): void => {
 	if (!field) return;
 	collectDeprecatedArgumentDefaultsAndValues(
@@ -519,7 +524,10 @@ const collectDeprecatedFieldDefaults = (
 		field.args,
 		variables,
 		variableDefaults,
-		addSymbol
+		addSymbol,
+		(argument) => {
+			if (argument.deprecationReason !== undefined) addArgumentSymbol?.(argument);
+		}
 	);
 };
 
@@ -946,7 +954,12 @@ const selectedDeprecatedSymbols = (
 						node.arguments,
 						variables,
 						variableDefaults,
-						(symbol) => addSymbol(symbol, owner)
+						(symbol) => addSymbol(symbol, owner),
+						(argument) => {
+							if (parentType && field) {
+								addSymbol(`${parentType.name}.${field.name}(${argument.name}:)`, owner);
+							}
+						}
 					);
 					if (parentType && field?.deprecationReason !== undefined) {
 						addSymbol(`${parentType.name}.${node.name.value}`, owner);
@@ -977,7 +990,12 @@ const selectedDeprecatedSymbols = (
 						directive.args,
 						variables,
 						variableDefaults,
-						(symbol) => addDirectiveSymbol(symbol, ownersForDirective)
+						(symbol) => addDirectiveSymbol(symbol, ownersForDirective),
+						(argument) => {
+							if (argument.deprecationReason !== undefined) {
+								addDirectiveSymbol(`@${directive.name}(${argument.name}:)`, ownersForDirective);
+							}
+						}
 					);
 				},
 				leave() {
@@ -1237,7 +1255,7 @@ export const validateGraphQLPayloadLimits = (
 
 	let analysis: ReturnType<typeof analyzeGraphQLOperation>;
 	try {
-		analysis = analyzeGraphQLOperation(payload);
+		analysis = analyzeGraphQLOperation(payload, schema);
 	} catch {
 		return accepted({ shape: "unknown" });
 	}

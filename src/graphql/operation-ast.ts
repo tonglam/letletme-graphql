@@ -5,6 +5,8 @@ import {
 	type ArgumentNode,
 	type DocumentNode,
 	type FragmentDefinitionNode,
+	type GraphQLObjectType,
+	type GraphQLSchema,
 	type OperationDefinitionNode,
 	type SelectionSetNode,
 } from "graphql";
@@ -59,11 +61,24 @@ export const graphQLFragments = (document: DocumentNode): Map<string, FragmentDe
 
 const readArgs = (
 	args: readonly ArgumentNode[] | undefined,
-	variables: Record<string, unknown>
+	variables: Record<string, unknown>,
+	rootType?: GraphQLObjectType | null,
+	fieldName?: string
 ): Record<string, unknown> => {
 	const values: Record<string, unknown> = {};
 	for (const arg of args ?? []) {
 		values[arg.name.value] = valueFromASTUntyped(arg.value, variables);
+	}
+	const field = fieldName ? rootType?.getFields()[fieldName] : undefined;
+	for (const argument of field?.args ?? []) {
+		if (argument.defaultValue === undefined) continue;
+		const node = args?.find((candidate) => candidate.name.value === argument.name);
+		// A missing argument and a variable whose value is omitted both receive
+		// the schema default during GraphQL input coercion. An explicit literal
+		// null remains null and must not be replaced by that default.
+		if (!node || (node.value.kind === Kind.VARIABLE && values[argument.name] === undefined)) {
+			values[argument.name] = argument.defaultValue;
+		}
 	}
 	return values;
 };
@@ -87,6 +102,7 @@ const collectRootFields = (
 	selectionSet: SelectionSetNode,
 	fragments: ReadonlyMap<string, FragmentDefinitionNode>,
 	variables: Record<string, unknown>,
+	rootType: GraphQLObjectType | null | undefined,
 	fields: GraphQLRootField[] = [],
 	seenFragments = new Set<string>()
 ): GraphQLRootField[] => {
@@ -94,12 +110,19 @@ const collectRootFields = (
 		if (selection.kind === Kind.FIELD) {
 			fields.push({
 				name: selection.name.value,
-				args: readArgs(selection.arguments, variables),
+				args: readArgs(selection.arguments, variables, rootType, selection.name.value),
 			});
 			continue;
 		}
 		if (selection.kind === Kind.INLINE_FRAGMENT) {
-			collectRootFields(selection.selectionSet, fragments, variables, fields, seenFragments);
+			collectRootFields(
+				selection.selectionSet,
+				fragments,
+				variables,
+				rootType,
+				fields,
+				seenFragments
+			);
 			continue;
 		}
 		const fragmentName = selection.name.value;
@@ -107,7 +130,7 @@ const collectRootFields = (
 		const fragment = fragments.get(fragmentName);
 		if (!fragment) continue;
 		seenFragments.add(fragmentName);
-		collectRootFields(fragment.selectionSet, fragments, variables, fields, seenFragments);
+		collectRootFields(fragment.selectionSet, fragments, variables, rootType, fields, seenFragments);
 	}
 	return fields;
 };
@@ -118,7 +141,8 @@ const collectRootFields = (
  * fragment reachability, and root-field arguments or their policies can drift.
  */
 export const analyzeGraphQLOperation = (
-	payload: GraphQLRequestPayload
+	payload: GraphQLRequestPayload,
+	schema?: GraphQLSchema
 ): GraphQLOperationAnalysis => {
 	if (typeof payload.query !== "string") {
 		throw new TypeError("GraphQL request body must contain a query string");
@@ -130,11 +154,20 @@ export const analyzeGraphQLOperation = (
 	);
 	const fragments = graphQLFragments(document);
 	const variables = variablesWithDefaults(operation, asGraphQLVariables(payload.variables));
+	const rootType = operation
+		? operation.operation === "query"
+			? schema?.getQueryType()
+			: operation.operation === "mutation"
+				? schema?.getMutationType()
+				: schema?.getSubscriptionType()
+		: undefined;
 	return {
 		document,
 		operation,
 		fragments,
 		variables,
-		rootFields: operation ? collectRootFields(operation.selectionSet, fragments, variables) : [],
+		rootFields: operation
+			? collectRootFields(operation.selectionSet, fragments, variables, rootType)
+			: [],
 	};
 };

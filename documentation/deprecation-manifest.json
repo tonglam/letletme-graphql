@@ -20,6 +20,16 @@
 		"notes": "Hard cut in favour of injuryAvailability and dataAvailability."
 	},
 	{
+		"id": "query-entry-tournaments",
+		"symbol": "Query.entryTournaments",
+		"owner": "graphql-tournaments",
+		"introducedAt": "2024-01-01",
+		"removedAt": "2026-08-28",
+		"status": "removed",
+		"usageMetric": "graphql_request_outcomes_total",
+		"notes": "Hard cut; no compatibility resolver."
+	},
+	{
 		"id": "live-calc-rank",
 		"symbol": "LiveCalcData.rank",
 		"owner": "graphql-entry-live",

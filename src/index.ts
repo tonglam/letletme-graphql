@@ -891,6 +891,7 @@ const startServer = async (): Promise<void> => {
 							principal,
 							data,
 							logger,
+							schema,
 							requestScope,
 							authorizedTournamentMemberships,
 						})
