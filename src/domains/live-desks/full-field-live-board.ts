@@ -1,6 +1,7 @@
 import type { Entry, EntryEventResult } from "../entries/repository";
 import { hasCompleteEntryEventPick, type EntryEventPick } from "../entry-live/repository";
 import { unavailableManagerScore, type LiveManagerScore } from "../entry-live/manager-score";
+import { parseFullFieldLiveBoardEnabled } from "../../infra/env-value";
 import type { ManagerLiveScoreRow, ManagerLiveSource } from "../../infra/manager-live-client";
 import type { Player } from "../players/repository";
 import {
@@ -15,8 +16,7 @@ import {
  * to calculating every manager when the deployment omits the rollout flag.
  */
 export const fullFieldLiveBoardEnabled = (value: string | undefined): boolean => {
-	const normalized = value?.trim().toLowerCase();
-	return !normalized || !["0", "false", "no", "off"].includes(normalized);
+	return parseFullFieldLiveBoardEnabled(value);
 };
 
 const canonicalChip = (raw: string | null): string => {

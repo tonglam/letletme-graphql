@@ -156,6 +156,18 @@ describe("hard-cut runtime configuration", () => {
 		);
 	});
 
+	test("accepts the full-field live board kill-switch spellings at runtime", () => {
+		for (const value of ["true", "1", "yes", "on", "false", "0", "no", "off"]) {
+			const result = importEnvInChild({ FULL_FIELD_LIVE_BOARD_ENABLED: value });
+			expect(result.status).toBe(0);
+		}
+		const invalid = importEnvInChild({ FULL_FIELD_LIVE_BOARD_ENABLED: "maybe" });
+		expect(invalid.status).not.toBe(0);
+		expect(`${invalid.stdout}${invalid.stderr}`).toContain(
+			"FULL_FIELD_LIVE_BOARD_ENABLED must be one of"
+		);
+	});
+
 	test("requires canonical Data service settings in production", () => {
 		const missingDataKey = importEnvInChild({
 			NODE_ENV: "production",

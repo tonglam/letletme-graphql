@@ -1,5 +1,5 @@
 import { parseDatabasePoolMax } from "./database-pool-config";
-import { parseBooleanEnv, parseBoundedPositiveIntegerEnv } from "./env-value";
+import { parseBoundedPositiveIntegerEnv, parseFullFieldLiveBoardEnabled } from "./env-value";
 import { readRuntimeEnv } from "./runtime-env";
 import { parseGraphQLRateLimitMode } from "../http/rate-limit-policy-v3";
 
@@ -196,10 +196,8 @@ export const env = {
 	METRICS_TOKEN: readEnv("METRICS_TOKEN") ?? "",
 	LETLETME_DATA_URL,
 	LETLETME_DATA_API_KEY,
-	FULL_FIELD_LIVE_BOARD_ENABLED: parseBooleanEnv(
-		readEnv("FULL_FIELD_LIVE_BOARD_ENABLED"),
-		"FULL_FIELD_LIVE_BOARD_ENABLED",
-		true
+	FULL_FIELD_LIVE_BOARD_ENABLED: parseFullFieldLiveBoardEnabled(
+		readEnv("FULL_FIELD_LIVE_BOARD_ENABLED")
 	),
 
 	// CORS
