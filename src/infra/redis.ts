@@ -36,9 +36,48 @@ const connectClient = async (redis: Redis): Promise<void> => {
 	}
 };
 
+const infoValue = (info: string, key: string): string | undefined => {
+	const line = info
+		.split("\n")
+		.find((candidate) => candidate.startsWith(`${key}:`));
+	return line?.slice(key.length + 1).trim() || undefined;
+};
+
+const serverIdentity = async (redis: Pick<Redis, "info">): Promise<string> => {
+	const [serverInfo, replicationInfo] = await Promise.all([
+		redis.info("server"),
+		redis.info("replication"),
+	]);
+	// master_replid is shared by all replicas of one Redis primary, while
+	// run_id identifies a standalone server. Comparing the resolved server
+	// identity after authentication catches URL aliases and DNS aliases that
+	// cannot be detected by comparing the configured hostname strings.
+	const masterReplicationId = infoValue(replicationInfo, "master_replid");
+	const runId = infoValue(serverInfo, "run_id");
+	const identity = masterReplicationId ?? runId;
+	if (!identity) {
+		throw new Error("Redis server identity is unavailable; refusing shared-endpoint configuration");
+	}
+	return identity;
+};
+
+export const assertRedisIsolation = async (
+	primary: Pick<Redis, "info"> = getRedis(),
+	rateLimit: Pick<Redis, "info"> = getRateLimitRedis()
+): Promise<void> => {
+	const [primaryIdentity, rateLimitIdentity] = await Promise.all([
+		serverIdentity(primary),
+		serverIdentity(rateLimit),
+	]);
+	if (primaryIdentity === rateLimitIdentity) {
+		throw new Error("Primary and rate-limit Redis endpoints resolve to the same Redis server");
+	}
+};
+
 export const connectRedis = async (): Promise<Redis> => {
 	const redis = getRedis();
 	await Promise.all([connectClient(redis), connectClient(getRateLimitRedis())]);
+	await assertRedisIsolation(redis, getRateLimitRedis());
 	return redis;
 };
 

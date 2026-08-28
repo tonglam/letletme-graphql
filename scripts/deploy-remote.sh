@@ -460,8 +460,15 @@ jq -n \
   '{deployedAt:$deployedAt,commit:$commit,image:$image,oldSlot:$oldSlot,newSlot:$newSlot,oldImage:$oldImage}' \
   > "$manifest"
 chmod 600 "$manifest"
+# The manifest rename and rollback disarm are one commit point. Ignore
+# termination signals for these two commands so a pending signal cannot roll
+# routing back after the durable manifest says the new slot is active.
+trap '' INT TERM HUP
 mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"
 switched=false
+trap 'rollback_on_signal INT' INT
+trap 'rollback_on_signal TERM' TERM
+trap 'rollback_on_signal HUP' HUP
 
 # The durable manifest is the point after which cleanup is allowed. Keep both
 # slot image IDs and remove only older images in this repository; Docker also
