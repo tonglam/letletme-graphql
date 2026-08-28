@@ -88,6 +88,20 @@ test("layer checker tracks aliases of the CommonJS require loader", () => {
 	});
 });
 
+test("layer checker unwraps TypeScript assertions around require aliases", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'const load = require as (specifier: string) => unknown; load("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
 test("layer checker tracks a require alias in its declaring block", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.cts",

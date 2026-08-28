@@ -280,15 +280,21 @@ export const LIGHTWEIGHT_CORE_FIELDS: ReadonlySet<string> = new Set(
 export const getRootFieldPolicy = (fieldName: string): RootFieldPolicy | undefined =>
 	ROOT_FIELD_POLICIES.get(fieldName);
 
-export const getConditionalRootFieldAccess = (
+export const getConditionalRootFieldConditions = (
 	fieldName: string,
 	args: Readonly<Record<string, unknown>>
-): RootFieldAccess | undefined =>
-	ROOT_FIELD_CONDITIONAL_ACCESS.get(fieldName)?.find((condition) =>
+): readonly RootFieldConditionalAccess[] =>
+	(ROOT_FIELD_CONDITIONAL_ACCESS.get(fieldName) ?? []).filter((condition) =>
 		condition.when === "provided"
 			? args[condition.argument] !== null && args[condition.argument] !== undefined
 			: args[condition.argument] === condition.equals
-	)?.access;
+	);
+
+export const getConditionalRootFieldAccesses = (
+	fieldName: string,
+	args: Readonly<Record<string, unknown>>
+): readonly RootFieldAccess[] =>
+	getConditionalRootFieldConditions(fieldName, args).map((condition) => condition.access);
 
 export const isGraphQLRootFieldClassified = (fieldName: string): boolean =>
 	ROOT_FIELD_POLICIES.has(fieldName);

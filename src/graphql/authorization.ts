@@ -7,9 +7,12 @@ import type { Logger } from "../infra/logger";
 import type { Principal } from "../infra/principal";
 import type { ReadModelClient } from "../infra/read-model-client";
 import {
-	getConditionalRootFieldAccess,
+	getConditionalRootFieldConditions,
 	getRootFieldPolicy,
 	ROOT_FIELD_POLICIES,
+	type RootFieldConditionalAccess,
+	type RootFieldPolicy,
+	type RootFieldAccess,
 } from "./root-field-policy";
 export { isGraphQLRootFieldClassified } from "./root-field-policy";
 
@@ -219,6 +222,147 @@ const isTournamentAdmin = async (
 	return value;
 };
 
+const authorizeConditionalAccess = async ({
+	condition,
+	field,
+	fieldPolicy,
+	principal,
+	dataClient,
+	requestScope,
+	authorizedTournamentMemberships,
+}: {
+	condition: RootFieldConditionalAccess;
+	field: RootField;
+	fieldPolicy: RootFieldPolicy | undefined;
+	principal: Principal | null | undefined;
+	dataClient: ReadModelClient;
+	requestScope?: object;
+	authorizedTournamentMemberships?: Set<number>;
+}): Promise<AuthorizationResult> => {
+	const access: RootFieldAccess = condition.access;
+	switch (access) {
+		case "public":
+			return { ok: true };
+		case "viewerEntry":
+			return authorizeViewerEntry(principal);
+		case "viewerEntryArg": {
+			const identity = authorizeViewerEntry(principal);
+			if (!identity.ok) return identity;
+			if (!principal) return identity;
+			return requireViewerEntry(principal, asPositiveInt(field.args[condition.argument]));
+		}
+		case "viewerTournamentMember": {
+			const identity = authorizeViewerEntry(principal);
+			if (!identity.ok) return identity;
+			if (!principal) return identity;
+			const tournamentId = asPositiveInt(field.args[condition.argument]);
+			const viewerEntryId = viewerEntryIdForPrincipal(principal);
+			if (!tournamentId || !viewerEntryId) {
+				return {
+					ok: false,
+					status: 403,
+					code: "FORBIDDEN",
+					message: "User is not a member of this tournament",
+				};
+			}
+			if (hasPlatformAdminAccess(principal)) return { ok: true };
+			const isMember = await hasTournamentMembership(
+				dataClient,
+				tournamentId,
+				viewerEntryId,
+				requestScope,
+				authorizedTournamentMemberships
+			);
+			const isRetainedAdmin =
+				fieldPolicy?.retainedAdmin === true &&
+				!isMember &&
+				hasVerifiedEntry(principal) &&
+				(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope));
+			if (isMember || isRetainedAdmin) return { ok: true };
+			return {
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+				message: "User is not a member of this tournament",
+			};
+		}
+		case "verifiedEntry":
+			return authorizeProtectedBinding(principal);
+		case "verifiedEntryArg": {
+			const identity = authorizeProtectedBinding(principal);
+			if (!identity.ok) return identity;
+			if (!principal) return identity;
+			const entryId = asPositiveInt(field.args[condition.argument]);
+			if (entryId && entryId === principal.fplEntryId) return { ok: true };
+			return {
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+				message: "Requested entry is not the verified administrator identity",
+			};
+		}
+		case "tournamentAdmin": {
+			const identity = authorizeProtectedBinding(principal);
+			if (!identity.ok) return identity;
+			if (!principal) return identity;
+			const tournamentId = asPositiveInt(field.args[condition.argument]);
+			if (
+				tournamentId &&
+				(hasPlatformAdminAccess(principal) ||
+					(await isTournamentAdmin(dataClient, tournamentId, principal.fplEntryId!, requestScope)))
+			) {
+				return { ok: true };
+			}
+			return {
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+				message: "User is not the administrator of this tournament",
+			};
+		}
+		case "leagueMember": {
+			const identity = authorizeProtectedBinding(principal);
+			if (!identity.ok) return identity;
+			if (!principal) return identity;
+			const leagueId = asPositiveInt(field.args[condition.argument]);
+			if (
+				leagueId &&
+				(hasPlatformAdminAccess(principal) ||
+					(await hasLeagueMembership(dataClient, leagueId, principal.fplEntryId!)))
+			) {
+				return { ok: true };
+			}
+			return {
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+				message: "User is not a member of this league",
+			};
+		}
+		case "calcOwnEntries": {
+			const identity = authorizeProtectedBinding(principal);
+			if (!identity.ok) return identity;
+			if (!principal) return identity;
+			const entryIds = Array.isArray(field.args[condition.argument])
+				? field.args[condition.argument]
+				: [];
+			if (
+				Array.isArray(entryIds) &&
+				entryIds.length > 0 &&
+				entryIds.every((entryId) => entryId === principal.fplEntryId)
+			) {
+				return { ok: true };
+			}
+			return {
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+				message: "Requested entries are not bound to this user",
+			};
+		}
+	}
+};
+
 const authorizeRootField = async (
 	field: RootField,
 	principal: Principal | null | undefined,
@@ -227,8 +371,17 @@ const authorizeRootField = async (
 	authorizedTournamentMemberships?: Set<number>
 ): Promise<AuthorizationResult> => {
 	const fieldPolicy = getRootFieldPolicy(field.name);
-	if (getConditionalRootFieldAccess(field.name, field.args) === "viewerEntry") {
-		return authorizeViewerEntry(principal);
+	for (const condition of getConditionalRootFieldConditions(field.name, field.args)) {
+		const result = await authorizeConditionalAccess({
+			condition,
+			field,
+			fieldPolicy,
+			principal,
+			dataClient,
+			requestScope,
+			authorizedTournamentMemberships,
+		});
+		if (!result.ok) return result;
 	}
 	if (fieldPolicy?.access === "public") return { ok: true };
 	if (!fieldPolicy || !protectedFields.has(field.name)) {
@@ -271,32 +424,6 @@ const authorizeRootField = async (
 				status: 403,
 				code: "FORBIDDEN",
 				message: "Requested entry is not the verified administrator identity",
-			};
-		}
-	}
-
-	if (
-		field.name === "myFplCompetitionsDesk" &&
-		field.args.tournamentId !== null &&
-		field.args.tournamentId !== undefined
-	) {
-		const tournamentId = asPositiveInt(field.args.tournamentId);
-		if (
-			!tournamentId ||
-			(!hasPlatformAdminAccess(principal) &&
-				!(await hasTournamentMembership(
-					dataClient,
-					tournamentId,
-					viewerEntryId!,
-					requestScope,
-					authorizedTournamentMemberships
-				)))
-		) {
-			return {
-				ok: false,
-				status: 403,
-				code: "FORBIDDEN",
-				message: "User is not a member of this tournament",
 			};
 		}
 	}

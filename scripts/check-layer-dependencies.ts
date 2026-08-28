@@ -172,6 +172,19 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		if (loaderAliasBindings.some((binding) => binding.marker === marker)) return;
 		loaderAliasBindings.push({ name, marker, scope: aliasScope });
 	};
+	const unwrapTransparentExpression = (expression: ts.Expression): ts.Expression => {
+		let current = expression;
+		while (
+			ts.isParenthesizedExpression(current) ||
+			ts.isAsExpression(current) ||
+			ts.isTypeAssertionExpression(current) ||
+			ts.isNonNullExpression(current) ||
+			ts.isSatisfiesExpression(current)
+		) {
+			current = current.expression;
+		}
+		return current;
+	};
 	const declarationScopeFor = (identifier: ts.Identifier, name: string): ts.Node => {
 		let scope: ts.Node | undefined = scopeFor(identifier);
 		while (scope) {
@@ -236,9 +249,9 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 			});
 	};
 	const moduleSpecifierFromLoader = (initializer: ts.Expression): string | undefined => {
-		let expression = initializer;
-		while (ts.isAwaitExpression(expression) || ts.isParenthesizedExpression(expression)) {
-			expression = expression.expression;
+		let expression = unwrapTransparentExpression(initializer);
+		while (ts.isAwaitExpression(expression)) {
+			expression = unwrapTransparentExpression(expression.expression);
 		}
 		if (
 			!ts.isCallExpression(expression) ||
@@ -285,14 +298,17 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		}
 		if (ts.isVariableStatement(node)) {
 			for (const declaration of node.declarationList.declarations) {
+				const initializer = declaration.initializer
+					? unwrapTransparentExpression(declaration.initializer)
+					: undefined;
 				if (
 					ts.isIdentifier(declaration.name) &&
-					declaration.initializer &&
-					ts.isIdentifier(declaration.initializer) &&
-					requireLoaderBindings.has(declaration.initializer.text) &&
-					(declaration.initializer.text === "require"
-						? !isShadowed(declaration.initializer, "require", true)
-						: isVisibleLoaderAlias(declaration.initializer, declaration.initializer.text))
+					initializer &&
+					ts.isIdentifier(initializer) &&
+					requireLoaderBindings.has(initializer.text) &&
+					(initializer.text === "require"
+						? !isShadowed(initializer, "require", true)
+						: isVisibleLoaderAlias(initializer, initializer.text))
 				) {
 					registerLoaderAlias(
 						declaration.name.text,
@@ -323,21 +339,22 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 				}
 			}
 		}
-		if (
-			ts.isBinaryExpression(node) &&
-			node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-			ts.isIdentifier(node.left) &&
-			ts.isIdentifier(node.right) &&
-			requireLoaderBindings.has(node.right.text) &&
-			(node.right.text === "require"
-				? !isShadowed(node.right, "require", true)
-				: isVisibleLoaderAlias(node.right, node.right.text))
-		) {
-			registerLoaderAlias(
-				node.left.text,
-				node.left,
-				declarationScopeFor(node.left, node.left.text)
-			);
+		if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+			const right = unwrapTransparentExpression(node.right);
+			if (
+				ts.isIdentifier(node.left) &&
+				ts.isIdentifier(right) &&
+				requireLoaderBindings.has(right.text) &&
+				(right.text === "require"
+					? !isShadowed(right, "require", true)
+					: isVisibleLoaderAlias(right, right.text))
+			) {
+				registerLoaderAlias(
+					node.left.text,
+					node.left,
+					declarationScopeFor(node.left, node.left.text)
+				);
+			}
 		}
 		ts.forEachChild(node, collectCreateRequireBindings);
 	};

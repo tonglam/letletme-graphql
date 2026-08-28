@@ -167,6 +167,22 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("does not report a deprecated argument backed by an omitted optional variable", () => {
+		const deprecatedArgumentSchema = buildSchema(`
+			type Query {
+				example(oldArg: String @deprecated(reason: "Use current")): String
+			}
+		`);
+		const result = validateGraphQLRequestLimits(
+			{
+				query: "query Usage($old: String) { example(oldArg: $old) }",
+				variables: {},
+			},
+			deprecatedArgumentSchema
+		);
+		expect(result).toMatchObject({ ok: true, deprecatedSymbols: [] });
+	});
+
 	it("keeps global deprecated symbols separate from field-owned occurrences", () => {
 		const deprecatedKindsSchema = buildSchema(`
 			enum LegacyMode {

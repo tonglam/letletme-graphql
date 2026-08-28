@@ -979,6 +979,17 @@ const selectedDeprecatedSymbols = (
 				const field = typeInfo.getFieldDef();
 				const argument = typeInfo.getArgument();
 				const directive = typeInfo.getDirective();
+				// An optional variable that is omitted makes the argument absent after
+				// GraphQL coercion, even though the argument node remains in the AST.
+				// Do not report a deprecated argument that the resolver never receives;
+				// operation defaults and explicitly supplied nulls are effective values.
+				if (
+					node.value.kind === Kind.VARIABLE &&
+					!Object.hasOwn(variables, node.value.name.value) &&
+					!variableDefaults.has(node.value.name.value)
+				) {
+					return;
+				}
 				if (!directive && parentType && field && argument?.deprecationReason !== undefined) {
 					addSymbol(`${parentType.name}.${field.name}(${node.name.value}:)`, currentFieldOwner());
 				}
