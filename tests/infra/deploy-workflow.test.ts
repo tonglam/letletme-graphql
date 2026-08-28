@@ -221,6 +221,12 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain(
 			'base64 --wrap=0 < "$payload_dir/token.expected" > "$payload_dir/token.b64"'
 		);
+		expect(workflow).toContain(
+			"env_sha=$(sha256sum \"$payload_dir/env.expected\" | awk '{print $1}')"
+		);
+		expect(workflow).toContain(
+			"token_sha=$(sha256sum \"$payload_dir/token.expected\" | awk '{print $1}')"
+		);
 		expect(workflow).toContain('cmp -s "$payload_dir/env.expected" "$payload_dir/env.decoded"');
 		expect(workflow).toContain('cmp -s "$payload_dir/token.expected" "$payload_dir/token.decoded"');
 		expect(workflow).toContain(
@@ -229,6 +235,10 @@ describe("production deployment workflow", () => {
 		expect(workflow).toContain(
 			"printf 'if ! printf %%s %s | base64 --decode > \"$remote_token\"; then\\n'"
 		);
+		expect(workflow).toContain("verify_payload() {");
+		expect(workflow).toContain("printf 'verify_payload GRAPHQL_ENV \"$remote_env\" %s %s\\n'");
+		expect(workflow).toContain("printf 'verify_payload GHCR_TOKEN \"$remote_token\" %s %s\\n'");
+		expect(workflow).toContain("payload changed during remote transport");
 		expect(workflow).toContain("GraphQL environment payload failed remote base64 decode");
 		expect(workflow).toContain("GHCR token payload failed remote base64 decode");
 		expect(workflow).not.toContain("base64 | tr -d '\\n'");
