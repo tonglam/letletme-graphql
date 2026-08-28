@@ -45,17 +45,47 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 	const modules: ModuleSpecifier[] = [];
 	const createRequireBindings = new Set(["createRequire"]);
 	ts.forEachChild(sourceFile, (node) => {
-		if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier)) return;
-		if (node.moduleSpecifier.text !== "node:module" && node.moduleSpecifier.text !== "module")
-			return;
-		if (!node.importClause?.namedBindings || !ts.isNamedImports(node.importClause.namedBindings))
-			return;
-		for (const specifier of node.importClause.namedBindings.elements) {
+		if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+			if (node.moduleSpecifier.text === "node:module" || node.moduleSpecifier.text === "module") {
+				if (
+					node.importClause?.namedBindings &&
+					ts.isNamedImports(node.importClause.namedBindings)
+				) {
+					for (const specifier of node.importClause.namedBindings.elements) {
+						if (
+							specifier.propertyName?.text === "createRequire" ||
+							specifier.name.text === "createRequire"
+						) {
+							createRequireBindings.add(specifier.name.text);
+						}
+					}
+				}
+			}
+		}
+		if (!ts.isVariableStatement(node)) return;
+		for (const declaration of node.declarationList.declarations) {
 			if (
-				specifier.propertyName?.text === "createRequire" ||
-				specifier.name.text === "createRequire"
+				!declaration.initializer ||
+				!ts.isCallExpression(declaration.initializer) ||
+				!ts.isIdentifier(declaration.initializer.expression) ||
+				declaration.initializer.expression.text !== "require" ||
+				declaration.initializer.arguments.length !== 1 ||
+				!ts.isStringLiteralLike(declaration.initializer.arguments[0]) ||
+				(declaration.initializer.arguments[0].text !== "node:module" &&
+					declaration.initializer.arguments[0].text !== "module") ||
+				!ts.isObjectBindingPattern(declaration.name)
 			) {
-				createRequireBindings.add(specifier.name.text);
+				continue;
+			}
+			for (const element of declaration.name.elements) {
+				const importedName =
+					element.propertyName &&
+					(ts.isIdentifier(element.propertyName) || ts.isStringLiteralLike(element.propertyName))
+						? element.propertyName.text
+						: element.name.getText(sourceFile);
+				if (importedName === "createRequire" && ts.isIdentifier(element.name)) {
+					createRequireBindings.add(element.name.text);
+				}
 			}
 		}
 	});
