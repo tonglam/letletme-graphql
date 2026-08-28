@@ -11,8 +11,7 @@ Data Platform business schema and publication; `letletme-web` owns `bauth`.
 - `/health/live` proves only process liveness. `/health/ready` is ready only when PostgreSQL, the current-season authority, the
   publication/cache Redis client, and the isolated rate-limit Redis client all
   answer within the bounded probe window.
-- `/health` remains a compatibility alias for `/health/ready`; new monitors
-  must use the explicit paths.
+- `/health` is intentionally not exposed; monitors must use `/health/ready`.
 - `DATABASE_STATEMENT_TIMEOUT_MS` defaults to 12 seconds and must stay below
   the Web proxy's 15-second upstream timeout.
 - A dedicated read-only PostgreSQL login inherits

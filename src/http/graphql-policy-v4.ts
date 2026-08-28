@@ -65,7 +65,7 @@ export const graphQLV4EarlyFailureRateLimitChecks = (
 ): readonly TokenBucketCheckV3[] => [globalRequestCheck(policy)];
 
 export type GraphQLV4PrincipalAdmission = {
-	readonly audience: "authenticated" | "anonymous" | "workload" | "service" | "legacy";
+	readonly audience: "authenticated" | "anonymous" | "workload" | "service";
 	readonly checks: readonly TokenBucketCheckV3[];
 };
 
@@ -175,25 +175,7 @@ export const graphQLV4PrincipalAdmission = ({
 					}),
 				],
 			};
-		case "legacy":
-			return {
-				audience: "legacy",
-				checks: [
-					globalRequest,
-					check({
-						id: "v4-legacy-class-request",
-						scope: "client",
-						subject: requiredSubject(ingress),
-						policy: policy.trafficClasses.legacy.classRequest,
-					}),
-					check({
-						id: "v4-legacy-weighted",
-						scope: "client",
-						subject: principal ? graphQLPrincipalSubject(principal) : requiredSubject(ingress),
-						policy: policy.trafficClasses.legacy.weighted,
-						cost: boundedCost,
-					}),
-				],
-			};
+		default:
+			throw new Error("Untrusted ingress cannot enter rate-limit admission");
 	}
 };

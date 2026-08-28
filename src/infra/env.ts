@@ -213,7 +213,7 @@ export const env = {
 	// CORS
 	CORS_ORIGIN,
 
-	// Admission uses the versioned v3/v4 profile. Legacy-v2 environment
-	// overrides are intentionally rejected by the hard-cut configuration gate.
+	// Admission uses only the reviewed versioned profile. Retired overrides are
+	// rejected by the hard-cut configuration gate above.
 	GRAPHQL_RATE_LIMIT_MODE: parseGraphQLRateLimitMode(readEnv("GRAPHQL_RATE_LIMIT_MODE")),
 } as const;

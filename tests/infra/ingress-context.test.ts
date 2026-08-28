@@ -28,18 +28,7 @@ describe("signed web ingress context", () => {
 		);
 	});
 
-	test("accepts the exact canonical envelope for at most sixty seconds", () => {
-		const headers = signed({ aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 });
-		expect(verifyIngressContext(headers, 120)).toEqual({
-			version: 1,
-			subject,
-			abuseSubject: null,
-			trafficClass: "legacy",
-			workload: "public-other",
-		});
-	});
-
-	test("accepts the exact v2 identity and workload envelope", () => {
+	test("accepts only the exact signed ingress envelope", () => {
 		const abuseSubject = "b".repeat(64);
 		const headers = signed({
 			v: 2,
@@ -60,7 +49,7 @@ describe("signed web ingress context", () => {
 		});
 	});
 
-	test("requires an abuse subject for Mini v2 ingress", () => {
+	test("requires an abuse subject for Mini ingress", () => {
 		expect(
 			verifyIngressContext(
 				signed({
@@ -78,32 +67,45 @@ describe("signed web ingress context", () => {
 		).toBeNull();
 	});
 
-	test("rejects spoofed, expired, overlong, wrong-audience, and extra-field envelopes", () => {
-		const base = { aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 };
+	test("rejects unversioned, spoofed, expired, overlong, wrong-audience, and extra-field envelopes", () => {
+		const base = {
+			v: 2,
+			aud: "letletme-graphql",
+			trafficClass: "web_browser",
+			subject,
+			abuseSubject: null,
+			workload: "public-other",
+			iat: 100,
+			exp: 160,
+		};
+		expect(
+			verifyIngressContext(
+				signed({ aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 }),
+				120
+			)
+		).toBeNull();
+		expect(verifyIngressContext(signed({ ...base, v: 1 }), 120)).toBeNull();
 		expect(verifyIngressContext(signed(base, "attacker-secret"), 120)).toBeNull();
 		expect(verifyIngressContext(signed(base), 161)).toBeNull();
 		expect(verifyIngressContext(signed({ ...base, exp: 161 }), 120)).toBeNull();
 		expect(verifyIngressContext(signed({ ...base, aud: "other" }), 120)).toBeNull();
 		expect(verifyIngressContext(signed({ ...base, unexpectedField: true }), 120)).toBeNull();
 		expect(
-			verifyIngressContext(
-				signed({
-					v: 2,
-					aud: "letletme-graphql",
-					trafficClass: "legacy",
-					subject,
-					abuseSubject: null,
-					workload: "market",
-					iat: 100,
-					exp: 160,
-				}),
-				120
-			)
+			verifyIngressContext(signed({ ...base, trafficClass: "legacy", workload: "market" }), 120)
 		).toBeNull();
 	});
 
 	test("classifies signed ingress ahead of forwarded user credentials", () => {
-		const headers = signed({ aud: "letletme-graphql", sub: subject, iat: 100, exp: 160 });
+		const headers = signed({
+			v: 2,
+			aud: "letletme-graphql",
+			trafficClass: "web_rsc",
+			subject,
+			abuseSubject: null,
+			workload: "public-other",
+			iat: 100,
+			exp: 160,
+		});
 		headers.set("Authorization", `Bearer ${"b".repeat(43)}`);
 		expect(
 			classifyGraphQLIngress(headers, {

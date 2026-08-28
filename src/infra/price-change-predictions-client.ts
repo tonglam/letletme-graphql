@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
-<<<<<<< HEAD
-import { DateTimeResolver } from "graphql-scalars";
+import { DateResolver, DateTimeResolver } from "graphql-scalars";
 import type { DataSqlContractProbe } from "../contracts/data-sql-contract";
 import type { GraphQLContext } from "../graphql/context";
 import {
@@ -91,7 +90,7 @@ export type PriceChangeBoard = {
 	expectedPlayerCount: number;
 	observedPlayerCount: number;
 	players: PriceChangePlayer[];
-	latestEvent?: PriceChangeObservedEvent | null;
+	latestEvent: PriceChangeObservedEvent | null;
 };
 
 export type PriceChangeDurableCursor = Readonly<{
@@ -103,7 +102,7 @@ export type PriceChangeDurableCursor = Readonly<{
 }>;
 
 type PriceChangePublicationContext = {
-	schemaVersion: 1 | 2;
+	schemaVersion: 2;
 	source: "FPL_BOOTSTRAP";
 	fetchedAt: string;
 	staleAt: string;
@@ -112,10 +111,10 @@ type PriceChangePublicationContext = {
 	nextDeadlines: string[];
 	expectedPlayerCount: number;
 	observedPlayerCount: number;
-	latestEvent?: PriceChangeObservedEvent | null;
+	latestEvent: PriceChangeObservedEvent | null;
 };
 
-const CONTEXT_FIELDS_V1 = [
+const CONTEXT_FIELDS = [
 	"schemaVersion",
 	"source",
 	"fetchedAt",
@@ -125,9 +124,8 @@ const CONTEXT_FIELDS_V1 = [
 	"nextDeadlines",
 	"expectedPlayerCount",
 	"observedPlayerCount",
+	"latestEvent",
 ] as const;
-
-const CONTEXT_FIELDS_V2 = [...CONTEXT_FIELDS_V1, "latestEvent"] as const;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -419,13 +417,8 @@ export const parsePriceChangeBoardValue = (
 	if (playerIds.size !== parsedPlayers.length || playerIds.size !== value.expectedPlayerCount) {
 		return null;
 	}
-	const hasLatestEvent = Object.prototype.hasOwnProperty.call(value, "latestEvent");
-	const latestEvent = parseObservedEvent(
-		hasLatestEvent ? value.latestEvent : null,
-		parsedPlayers,
-		now
-	);
-	if (hasLatestEvent && value.latestEvent !== null && latestEvent === null) return null;
+	const latestEvent = parseObservedEvent(value.latestEvent, parsedPlayers, now);
+	if (value.latestEvent !== null && latestEvent === null) return null;
 	if (value.fetchedAt !== null) {
 		const fetchedAt = Date.parse(value.fetchedAt);
 		if (
@@ -468,11 +461,7 @@ const unavailableBoard = (): PriceChangeBoard => ({
 
 const parseContext = (value: unknown): PriceChangePublicationContext | null => {
 	if (!isRecord(value)) return null;
-	const schemaVersion = value.schemaVersion;
-	if (
-		(schemaVersion !== 1 && schemaVersion !== 2) ||
-		!hasExactFields(value, schemaVersion === 1 ? CONTEXT_FIELDS_V1 : CONTEXT_FIELDS_V2)
-	) {
+	if (value.schemaVersion !== 2 || !hasExactFields(value, CONTEXT_FIELDS)) {
 		return null;
 	}
 	if (
@@ -507,12 +496,12 @@ const parseContext = (value: unknown): PriceChangePublicationContext | null => {
 			return null;
 		}
 	}
-	const latestEvent = schemaVersion === 2 ? parseObservedEvent(value.latestEvent) : null;
-	if (schemaVersion === 2 && value.latestEvent !== null && latestEvent === null) {
+	const latestEvent = parseObservedEvent(value.latestEvent);
+	if (value.latestEvent !== null && latestEvent === null) {
 		return null;
 	}
 	return {
-		schemaVersion,
+		schemaVersion: 2,
 		source: "FPL_BOOTSTRAP",
 		fetchedAt: value.fetchedAt,
 		staleAt: value.staleAt,
@@ -794,12 +783,12 @@ export const PRICE_CHANGE_PUBLICATION_CONTRACT_SQL = `
 			status,
 			manifest
 		FROM ops.dataset_publications
-		WHERE publication_id = $1::uuid
-			AND dataset = 'fpl:price-changes'
-			AND season_id = $2
+		WHERE dataset = 'fpl:price-changes'
+			AND season_id = $1
 			AND event_id IS NULL
-			AND status IN ('active', 'retired')
+			AND status = 'active'
 			AND (expires_at IS NULL OR expires_at > now())
+		ORDER BY revision DESC
 		LIMIT 1
 	), items AS (
 		SELECT publication_id::text AS publication_id,
@@ -816,7 +805,7 @@ export const PRICE_CHANGE_PUBLICATION_CONTRACT_SQL = `
 				'[]'::jsonb
 			) AS items
 		FROM ops.dataset_publication_items
-		WHERE publication_id = $1::uuid
+		WHERE publication_id = (SELECT publication_id::uuid FROM publication)
 		GROUP BY publication_id
 	)
 	SELECT publication.publication_id,
@@ -860,7 +849,7 @@ export const PRICE_CHANGE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "price-change.publication-decoder",
 		sql: PRICE_CHANGE_PUBLICATION_CONTRACT_SQL,
-		values: [PRICE_CHANGE_CONTRACT_PUBLICATION_ID, 2026],
+		values: [2026],
 		runtime: "must-return-price-change",
 		resultTypes: [
 			{

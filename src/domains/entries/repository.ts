@@ -578,7 +578,7 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		// Include the successful checkpoint in the key so a new authoritative
-		// history replacement cannot reuse the previous legacy payload.
+		// history replacement cannot reuse an older payload.
 		const cacheKey = gqlCacheKey(
 			context,
 			`entries:history-info:${ENTRY_HISTORY_INFO_CACHE_VERSION}:${entryId}:${String(
@@ -618,7 +618,7 @@ export const entriesRepository: EntriesRepository = {
 		const historyInfo = (data as DbEntryHistoryInfoRow[] | null)?.map(mapEntryHistoryInfo) ?? [];
 		if (historyInfo.length !== pastSeasonsCount) {
 			// A checkpoint without its complete row set is not proof of a ready
-			// legacy result. Do not cache or expose a partial array.
+			// result. Do not cache or expose a partial array.
 			return [];
 		}
 		await writeQueryCache(

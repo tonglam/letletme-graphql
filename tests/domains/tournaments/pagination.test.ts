@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { normalizeTournamentEventResultsPagination } from "../../../src/domains/tournaments/repository";
 
 describe("tournament event result pagination", () => {
-	it("keeps the legacy complete-result shape when pagination is omitted", () => {
+	it("keeps the complete-result shape when pagination is omitted", () => {
 		expect(normalizeTournamentEventResultsPagination(null, null)).toEqual({
 			limit: null,
 			offset: null,

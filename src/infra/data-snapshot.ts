@@ -595,7 +595,7 @@ const hasSameIds = <T, U>(
 	return ids.size === left.length && right.every((value) => ids.has(rightId(value)));
 };
 
-const hasCompatibleLivePlayerIds = (
+const hasMatchingLivePlayerIds = (
 	eventLives: readonly LivePerformanceData[],
 	players: readonly CorePlayerData[],
 	state: DataPublicationManifest["state"]
@@ -2189,7 +2189,7 @@ const publicationLiveSnapshot = (
 		fixtures.some((fixture) => fixture.eventId !== eventId) ||
 		!hasUniquePositiveIds(eventLives, (row) => row.playerId) ||
 		!hasUniquePositiveIds(fixtures, (fixture) => fixture.id) ||
-		!hasCompatibleLivePlayerIds(eventLives, core.players, state) ||
+		!hasMatchingLivePlayerIds(eventLives, core.players, state) ||
 		!validateLiveFixtureView(liveFixtures, fixtures, core) ||
 		state !== liveStateFromFixtures(fixtures)
 	) {

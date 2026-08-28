@@ -6,7 +6,7 @@ describe("Redis workload isolation", () => {
 		const indexSource = readFileSync("src/index.ts", "utf8");
 		const redisSource = readFileSync("src/infra/redis.ts", "utf8");
 
-		expect(indexSource).toContain("checkRateLimits(getRateLimitRedis(), checks)");
+		expect(indexSource).toContain("checkTokenBucketStageV3(getRateLimitRedis(), checks)");
 		expect(redisSource).toContain("let rateLimitClient: Redis | null = null");
 		expect(redisSource).toContain(
 			"Promise.all([connectClient(redis), connectClient(getRateLimitRedis())])"

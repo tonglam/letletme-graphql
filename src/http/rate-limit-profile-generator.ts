@@ -1,6 +1,7 @@
 import type { GraphQLWorkload } from "../infra/ingress-context";
 import {
-	parseGraphQLRateLimitPolicyV3,
+	parseGraphQLRateLimitPolicyBody,
+	type GraphQLRateLimitPolicyBody,
 	type GraphQLRateLimitPolicyV3,
 	type TokenBucketPolicy,
 } from "./rate-limit-policy-v3";
@@ -34,15 +35,15 @@ const measuredBucket = (perSecond: number, maximumRequestCost = 1): TokenBucketP
 	};
 };
 
-export const generateValidatedRateLimitProfile = ({
+export const generateValidatedRateLimitPolicyBody = ({
 	base,
 	observation,
 	evidence,
 }: {
-	base: GraphQLRateLimitPolicyV3;
+	base: GraphQLRateLimitPolicyBody;
 	observation: RateLimitTargetObservation;
 	evidence: string;
-}): GraphQLRateLimitPolicyV3 => {
+}): GraphQLRateLimitPolicyBody => {
 	const sustainableRps = observation.sustainableRps;
 	if (!Number.isSafeInteger(sustainableRps) || sustainableRps < 2) {
 		throw new Error("sustainableRps must be an integer of at least 2");
@@ -130,5 +131,27 @@ export const generateValidatedRateLimitProfile = ({
 			},
 		},
 	};
-	return parseGraphQLRateLimitPolicyV3(candidate);
+	return parseGraphQLRateLimitPolicyBody(candidate);
 };
+
+export const generateValidatedRateLimitProfile = ({
+	base,
+	observation,
+	evidence,
+}: {
+	base: GraphQLRateLimitPolicyV3;
+	observation: RateLimitTargetObservation;
+	evidence: string;
+}): GraphQLRateLimitPolicyV3 => ({
+	schemaVersion: 3,
+	policyVersion: "graphql-v3",
+	...generateValidatedRateLimitPolicyBody({
+		base: {
+			capacity: base.capacity,
+			global: base.global,
+			trafficClasses: base.trafficClasses,
+		},
+		observation,
+		evidence,
+	}),
+});

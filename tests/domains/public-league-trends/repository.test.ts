@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { TournamentSelectionStats } from "../../../src/domains/event-stats/repository";
-import { createPublicLeagueTrendsRepository } from "../../../src/domains/public-league-trends/repository";
+import {
+	PUBLIC_LEAGUE_ACCESS_SQL,
+	PUBLIC_LEAGUE_CATALOG_SQL,
+	PUBLIC_LEAGUE_SELECTION_SQL,
+	createPublicLeagueTrendsRepository,
+} from "../../../src/domains/public-league-trends/repository";
 
 const emptyStats: TournamentSelectionStats = {
 	totalEntries: 10,
@@ -14,6 +19,27 @@ const emptyStats: TournamentSelectionStats = {
 	mostTransferIn: [],
 	mostTransferOut: [],
 };
+
+const selectionPublicationRow = (overrides: Record<string, unknown> = {}) => ({
+	publication_id: "publication-1",
+	expected_entries: 10,
+	revision: "revision-1",
+	ownership_state: "READY",
+	captaincy_state: "READY",
+	vice_captaincy_state: "READY",
+	transfers_state: "READY",
+	element_id: null,
+	selected_count: null,
+	effective_selection_count: null,
+	captain_count: null,
+	vice_captain_count: null,
+	transfer_in_count: null,
+	transfer_out_count: null,
+	player_name: null,
+	player_position: null,
+	team_short_name: null,
+	...overrides,
+});
 
 const context = (options: { failRedisWrites?: boolean } = {}) => {
 	const strings = new Map<string, string>();
@@ -40,40 +66,38 @@ const context = (options: { failRedisWrites?: boolean } = {}) => {
 describe("public league trends repository", () => {
 	it("returns an empty catalog when no public league is enabled", async () => {
 		let reads = 0;
-		const repository = createPublicLeagueTrendsRepository(
-			{
-				query: async () => ({ rows: [] }),
-			},
-			async () => {
+		const repository = createPublicLeagueTrendsRepository({
+			query: async () => {
 				reads += 1;
-				return emptyStats;
-			}
-		);
+				return { rows: [] };
+			},
+		});
 		const ctx = context();
 		expect(await repository.list(ctx.value)).toEqual([]);
 		expect(await repository.getSelectionStats(ctx.value, 1, 1, 12)).toBeNull();
-		expect(reads).toBe(0);
+		expect(reads).toBe(2);
 	});
 
 	it("lists only the catalog query projection and maps its public fields", async () => {
 		const repository = createPublicLeagueTrendsRepository({
 			query: async (sql) => {
-				if (sql.includes("to_regclass"))
-					return { rows: [{ catalog: "public_league_trends_catalog" }] };
-				return {
-					rows: [
-						{
-							tournament_id: 7,
-							display_name: "Perth FPL",
-							sort_order: 2,
-							published_at: "2026-08-01T00:00:00.000Z",
-							updated_at: "2026-08-08T00:00:00.000Z",
-							latest_event_id: 3,
-							total_entries: 125,
-							catalog_revision: "2026-08-08T00:00:00.000Z",
-						},
-					],
-				};
+				if (sql === PUBLIC_LEAGUE_CATALOG_SQL) {
+					return {
+						rows: [
+							{
+								tournament_id: 7,
+								display_name: "Perth FPL",
+								sort_order: 2,
+								published_at: "2026-08-01T00:00:00.000Z",
+								updated_at: "2026-08-08T00:00:00.000Z",
+								latest_event_id: 3,
+								total_entries: 125,
+								catalog_revision: "2026-08-08T00:00:00.000Z",
+							},
+						],
+					};
+				}
+				throw new Error(`unexpected SQL: ${sql}`);
 			},
 		});
 		const result = await repository.list(context().value);
@@ -93,12 +117,9 @@ describe("public league trends repository", () => {
 	it("authorizes every public snapshot and changes the cache key with its revision", async () => {
 		let revision = "2026-08-08T01:00:00.000Z";
 		let reads = 0;
-		const repository = createPublicLeagueTrendsRepository(
-			{
-				query: async (sql) => {
-					if (sql.includes("to_regclass")) {
-						return { rows: [{ catalog: "public_league_trends_catalog" }] };
-					}
+		const repository = createPublicLeagueTrendsRepository({
+			query: async (sql) => {
+				if (sql === PUBLIC_LEAGUE_ACCESS_SQL) {
 					return {
 						rows: [
 							{
@@ -107,14 +128,14 @@ describe("public league trends repository", () => {
 							},
 						],
 					};
-				},
+				}
+				if (sql === PUBLIC_LEAGUE_SELECTION_SQL) {
+					reads += 1;
+					return { rows: [selectionPublicationRow()] };
+				}
+				throw new Error(`unexpected SQL: ${sql}`);
 			},
-			async (_context, tournamentId, eventId, limit) => {
-				reads += 1;
-				expect([tournamentId, eventId, limit]).toEqual([7, 3, 12]);
-				return emptyStats;
-			}
-		);
+		});
 		const ctx = context();
 		expect(await repository.getSelectionStats(ctx.value, 7, 3, 12)).toEqual(emptyStats);
 		expect(await repository.getSelectionStats(ctx.value, 7, 3, 12)).toEqual(emptyStats);
@@ -129,22 +150,23 @@ describe("public league trends repository", () => {
 		let totalEntries = 125;
 		const repository = createPublicLeagueTrendsRepository({
 			query: async (sql) => {
-				if (sql.includes("to_regclass"))
-					return { rows: [{ catalog: "public_league_trends_catalog" }] };
-				return {
-					rows: [
-						{
-							tournament_id: 7,
-							display_name: "Perth FPL",
-							sort_order: 1,
-							published_at: "2026-08-01T00:00:00.000Z",
-							updated_at: "2026-08-08T00:00:00.000Z",
-							latest_event_id: 3,
-							total_entries: totalEntries,
-							catalog_revision: "2026-08-08T00:00:00.000Z",
-						},
-					],
-				};
+				if (sql === PUBLIC_LEAGUE_CATALOG_SQL) {
+					return {
+						rows: [
+							{
+								tournament_id: 7,
+								display_name: "Perth FPL",
+								sort_order: 1,
+								published_at: "2026-08-01T00:00:00.000Z",
+								updated_at: "2026-08-08T00:00:00.000Z",
+								latest_event_id: 3,
+								total_entries: totalEntries,
+								catalog_revision: "2026-08-08T00:00:00.000Z",
+							},
+						],
+					};
+				}
+				throw new Error(`unexpected SQL: ${sql}`);
 			},
 		});
 		const ctx = context();
@@ -159,23 +181,23 @@ describe("public league trends repository", () => {
 	it("returns public catalog rows when Redis cache writes fail", async () => {
 		const repository = createPublicLeagueTrendsRepository({
 			query: async (sql) => {
-				if (sql.includes("to_regclass")) {
-					return { rows: [{ catalog: "public_league_trends_catalog" }] };
+				if (sql === PUBLIC_LEAGUE_CATALOG_SQL) {
+					return {
+						rows: [
+							{
+								tournament_id: 7,
+								display_name: "Perth FPL",
+								sort_order: 2,
+								published_at: "2026-08-01T00:00:00.000Z",
+								updated_at: "2026-08-08T00:00:00.000Z",
+								latest_event_id: 3,
+								total_entries: 125,
+								catalog_revision: "2026-08-08T00:00:00.000Z",
+							},
+						],
+					};
 				}
-				return {
-					rows: [
-						{
-							tournament_id: 7,
-							display_name: "Perth FPL",
-							sort_order: 2,
-							published_at: "2026-08-01T00:00:00.000Z",
-							updated_at: "2026-08-08T00:00:00.000Z",
-							latest_event_id: 3,
-							total_entries: 125,
-							catalog_revision: "2026-08-08T00:00:00.000Z",
-						},
-					],
-				};
+				throw new Error(`unexpected SQL: ${sql}`);
 			},
 		});
 
@@ -184,12 +206,9 @@ describe("public league trends repository", () => {
 	});
 
 	it("returns public selection stats when Redis cache writes fail", async () => {
-		const repository = createPublicLeagueTrendsRepository(
-			{
-				query: async (sql) => {
-					if (sql.includes("to_regclass")) {
-						return { rows: [{ catalog: "public_league_trends_catalog" }] };
-					}
+		const repository = createPublicLeagueTrendsRepository({
+			query: async (sql) => {
+				if (sql === PUBLIC_LEAGUE_ACCESS_SQL) {
 					return {
 						rows: [
 							{
@@ -198,10 +217,13 @@ describe("public league trends repository", () => {
 							},
 						],
 					};
-				},
+				}
+				if (sql === PUBLIC_LEAGUE_SELECTION_SQL) {
+					return { rows: [selectionPublicationRow()] };
+				}
+				throw new Error(`unexpected SQL: ${sql}`);
 			},
-			async () => emptyStats
-		);
+		});
 
 		const result = await repository.getSelectionStats(
 			context({ failRedisWrites: true }).value,
@@ -210,5 +232,28 @@ describe("public league trends repository", () => {
 			12
 		);
 		expect(result).toEqual(emptyStats);
+	});
+
+	it("does not fall back when the publication query fails", async () => {
+		const repository = createPublicLeagueTrendsRepository({
+			query: async (sql) => {
+				if (sql === PUBLIC_LEAGUE_ACCESS_SQL) {
+					return {
+						rows: [
+							{
+								catalog_revision: "2026-08-08T00:00:00.000Z",
+								snapshot_revision: "2026-08-08T01:00:00.000Z",
+							},
+						],
+					};
+				}
+				if (sql === PUBLIC_LEAGUE_SELECTION_SQL) throw new Error("publication unavailable");
+				throw new Error(`unexpected SQL: ${sql}`);
+			},
+		});
+
+		await expect(repository.getSelectionStats(context().value, 7, 3, 12)).rejects.toThrow(
+			"publication unavailable"
+		);
 	});
 });

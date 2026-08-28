@@ -3,10 +3,7 @@ import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixtur
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
-import {
-	getTournamentSelectionStatsReadModel,
-	type TournamentSelectionStats,
-} from "../event-stats/repository";
+import { type TournamentSelectionStats } from "../event-stats/repository";
 
 export type PublicLeagueTrend = {
 	tournamentId: number;
@@ -59,25 +56,21 @@ const publicationPosition = (value: number): string =>
 
 async function readPublishedSelectionStats(
 	context: GraphQLContext,
+	executor: QueryExecutor,
 	tournamentId: number,
 	eventId: number,
 	limit: number
-): Promise<TournamentSelectionStats | null | undefined> {
+): Promise<TournamentSelectionStats | null> {
 	try {
-		// The publication table is not itself a public-access boundary. Check the
-		// catalog and tournament readiness before accepting any new publication.
-		const accessResult = await context.database.query(PUBLIC_LEAGUE_ACCESS_SQL, [
+		// getSelectionStats has already authorized the publication through the
+		// catalog/readiness query. Keep this read to one publication SQL round trip.
+		const result = (await executor.query(PUBLIC_LEAGUE_SELECTION_SQL, [
 			context.currentSeason.seasonId,
 			tournamentId,
 			eventId,
-		]);
-		if (!accessResult.rows[0]) return null;
-		const result = await context.database.query<Record<string, unknown>>(
-			PUBLIC_LEAGUE_SELECTION_SQL,
-			[context.currentSeason.seasonId, tournamentId, eventId]
-		);
+		])) as { rows: Record<string, unknown>[] };
 		const first = result.rows[0];
-		if (!first) return undefined;
+		if (!first) return null;
 		if (first.ownership_state !== "READY") return null;
 		const totalEntries = Number(first.expected_entries ?? 0);
 		const percent = (value: number) => (totalEntries > 0 ? (value / totalEntries) * 100 : 0);
@@ -164,11 +157,8 @@ async function readPublishedSelectionStats(
 			mostTransferOut: transferRows("out"),
 		};
 	} catch (error) {
-		context.logger.warn(
-			{ err: error },
-			"New Trends publication read unavailable; using legacy adapter"
-		);
-		return undefined;
+		context.logger.error({ err: error }, "Trends publication read unavailable");
+		throw error;
 	}
 }
 
@@ -328,11 +318,8 @@ export type PublicLeagueTrendsRepository = {
 	): Promise<TournamentSelectionStats | null>;
 };
 
-type ReadSelectionStats = typeof getTournamentSelectionStatsReadModel;
-
 export const createPublicLeagueTrendsRepository = (
-	executor?: QueryExecutor,
-	readSelectionStats: ReadSelectionStats = getTournamentSelectionStatsReadModel
+	executor?: QueryExecutor
 ): PublicLeagueTrendsRepository => ({
 	async list(context): Promise<PublicLeagueTrend[]> {
 		const result = await (executor ?? context.database).query(PUBLIC_LEAGUE_CATALOG_SQL, [
@@ -391,10 +378,6 @@ export const createPublicLeagueTrendsRepository = (
 		eventId,
 		limit
 	): Promise<TournamentSelectionStats | null> {
-		if (!executor) {
-			const published = await readPublishedSelectionStats(context, tournamentId, eventId, limit);
-			if (published !== undefined) return published;
-		}
 		const accessResult = await (executor ?? context.database).query(PUBLIC_LEAGUE_ACCESS_SQL, [
 			context.currentSeason.seasonId,
 			tournamentId,
@@ -417,7 +400,13 @@ export const createPublicLeagueTrendsRepository = (
 		} catch (error) {
 			context.logger.warn({ err: error, cacheKey }, "Failed to read public league stats cache");
 		}
-		const stats = await readSelectionStats(context, tournamentId, eventId, safeLimit);
+		const stats = await readPublishedSelectionStats(
+			context,
+			executor ?? context.database,
+			tournamentId,
+			eventId,
+			safeLimit
+		);
 		await writeQueryCache(
 			context,
 			cacheKey,

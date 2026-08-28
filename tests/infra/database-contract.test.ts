@@ -28,7 +28,15 @@ type ContractOptions = Readonly<{
 	inheritedRoles?: readonly string[];
 }>;
 
-const CORE_ITEM_NAMES = ["events", "teams", "players", "phases", "fixtures", "currentEventId"];
+const CORE_ITEM_NAMES = [
+	"events",
+	"teams",
+	"players",
+	"phases",
+	"fixtures",
+	"currentEventId",
+	"selectionRules",
+];
 
 const makeCoreManifest = (invalid = false): Record<string, unknown> => ({
 	dataset: "fpl:core",

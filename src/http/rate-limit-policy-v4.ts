@@ -2,7 +2,7 @@ import rawProductionPolicy from "../config/rate-limit/production-v4.json";
 import { isPlainRecord } from "../contracts/guards";
 import type { GraphQLWorkload } from "../infra/ingress-envelope";
 import {
-	parseGraphQLRateLimitPolicyV3,
+	parseGraphQLRateLimitPolicyBody,
 	type GraphQLRateLimitPolicyV3,
 	type TokenBucketPolicy,
 } from "./rate-limit-policy-v3";
@@ -82,7 +82,7 @@ export const parseGraphQLRateLimitPolicyV4 = (value: unknown): GraphQLRateLimitP
 	if (!isPlainRecord(value)) throw new Error("GraphQL rate-limit policy must be an object");
 	exactKeys(
 		value,
-		["schemaVersion", "policyVersion", "capacity", "legacyV2", "global", "trafficClasses"],
+		["schemaVersion", "policyVersion", "capacity", "global", "trafficClasses"],
 		"policy"
 	);
 	if (value.schemaVersion !== 4 || value.policyVersion !== "graphql-v4") {
@@ -92,7 +92,7 @@ export const parseGraphQLRateLimitPolicyV4 = (value: unknown): GraphQLRateLimitP
 		throw new Error("policy.trafficClasses must be an object");
 	exactKeys(
 		value.trafficClasses,
-		["mini", "web_browser", "web_rsc", "service", "legacy"],
+		["mini", "web_browser", "web_rsc", "service"],
 		"policy.trafficClasses"
 	);
 	const mini = value.trafficClasses.mini;
@@ -139,10 +139,9 @@ export const parseGraphQLRateLimitPolicyV4 = (value: unknown): GraphQLRateLimitP
 		throw new Error("Mini session aggregate ceiling must equal the sum of workload capacities");
 	}
 
-	const v3Compatible = parseGraphQLRateLimitPolicyV3({
-		...value,
-		schemaVersion: 3,
-		policyVersion: "graphql-v3",
+	const sharedPolicy = parseGraphQLRateLimitPolicyBody({
+		capacity: value.capacity,
+		global: value.global,
 		trafficClasses: {
 			...value.trafficClasses,
 			mini: {
@@ -154,11 +153,11 @@ export const parseGraphQLRateLimitPolicyV4 = (value: unknown): GraphQLRateLimitP
 	});
 
 	return {
-		...v3Compatible,
+		...sharedPolicy,
 		schemaVersion: 4,
 		policyVersion: "graphql-v4",
 		trafficClasses: {
-			...v3Compatible.trafficClasses,
+			...sharedPolicy.trafficClasses,
 			mini: {
 				abuseRequest: bucket(mini.abuseRequest, "policy.trafficClasses.mini.abuseRequest"),
 				aggregateAnonymousWeighted,

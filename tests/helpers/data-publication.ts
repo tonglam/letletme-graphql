@@ -245,6 +245,7 @@ export const buildCorePublication = (
 		phases: core.phases,
 		fixtures: core.fixtures.map(toPublicationFixture),
 		currentEventId: core.currentEventId,
+		selectionRules: null,
 	});
 
 export const toPublicationFixture = (fixture: CoreFixtureData): Record<string, unknown> => ({

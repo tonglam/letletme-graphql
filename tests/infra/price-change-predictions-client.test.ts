@@ -11,6 +11,7 @@ import {
 import {
 	PRICE_CHANGE_MAX_AGE_MS,
 	PRICE_CHANGE_READY_MS,
+	parsePublicationBoard,
 	readPriceChangePredictions,
 	readPriceChangePredictionsCursor,
 } from "../../src/infra/price-change-predictions-client";
@@ -92,7 +93,7 @@ async function createPublication(
 	const fetchedAt = new Date(Date.now() - ageMs).toISOString();
 	const deadline = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
 	const context = {
-		schemaVersion: options.latestEvent !== undefined ? 2 : 1,
+		schemaVersion: 2,
 		source: "FPL_BOOTSTRAP",
 		fetchedAt,
 		staleAt: new Date(Date.parse(fetchedAt) + PRICE_CHANGE_READY_MS).toISOString(),
@@ -101,7 +102,7 @@ async function createPublication(
 		nextDeadlines: [deadline],
 		expectedPlayerCount: 1,
 		observedPlayerCount: 1,
-		...(options.latestEvent !== undefined ? { latestEvent: options.latestEvent } : {}),
+		latestEvent: options.latestEvent ?? null,
 	};
 	const players = [validPlayer];
 	const scope = { dataset: "fpl:price-changes" as const, seasonCode: "2026" };
@@ -210,6 +211,26 @@ describe("price-change publication reader", () => {
 		assert.equal(board.revision, publication.manifest.publicationId);
 		assert.equal(board.players.length, 1);
 		assert.equal(databaseCalls, 0);
+	});
+
+	it("rejects the removed v1 publication context instead of adapting it", async () => {
+		const publication = await createPublication(9 * 60 * 1_000);
+		const removedV1Context = { ...publication.context, schemaVersion: 1 } as Record<
+			string,
+			unknown
+		>;
+		delete removedV1Context.latestEvent;
+
+		assert.equal(
+			parsePublicationBoard(
+				{
+					manifest: publication.manifest,
+					items: { context: removedV1Context, players: publication.players },
+				},
+				new Date()
+			),
+			null
+		);
 	});
 
 	it("accepts freshness-window metadata added by the Data publication contract", async () => {

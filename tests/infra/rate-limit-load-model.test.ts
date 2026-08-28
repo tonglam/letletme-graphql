@@ -63,7 +63,8 @@ describe("GraphQL v3 capacity model", () => {
 		expect(source).toContain("serverRequests / elapsedSeconds");
 		expect(source).toContain("serverGraphQLRequests: counterDelta(");
 		expect(source).toContain("elapsedSeconds");
-		expect(source).toContain('outcome="legacy_denied"');
+		expect(source).toContain('outcome="denied"');
+		expect(source).not.toContain("signedLegacyHeaders");
 	});
 
 	it("derives sustainable RPS from passing probes without a manual profile override", () => {

@@ -79,10 +79,10 @@ Requests are bounded by body size, depth, root-field count, aliases, AST nodes,
 weighted complexity, unique entry IDs, and Redis-backed rate limits.
 
 GraphQL admission supports only the versioned `shadow-v3`, `enforce-v3`,
-`shadow-v4`, and `enforce-v4` modes. The old legacy mode and legacy-v2 limit
-environment variables were removed in the hard configuration cut; supplying
-them now fails startup and deployment validation. v4 is parallel to v3 and is
-not enabled by default. The versioned profile is
+`shadow-v4`, and `enforce-v4` modes. There is no legacy request-count limiter,
+legacy ingress class, or compatibility adapter. Supplying retired environment
+variables or an old ingress envelope fails startup/request verification. v4 is
+parallel to v3 and is not enabled by default. The versioned profile is
 `src/config/rate-limit/production.json`. v3 uses Redis-time continuous token
 buckets, a global emergency request gate, isolated Mini device/user and
 NAT-abuse buckets, workload-specific Web RSC budgets, and an independent
@@ -112,8 +112,8 @@ The five-minute monitor fails when actual interactive 429s exceed 1% or any
 global 429 occurs and retains the non-sensitive report as a workflow artifact.
 Run the capacity harness from an external load generator, with secrets supplied
 only through its process environment. It executes the exact 180 Mini / 60 RSC /
-45 signed-in / 15 compatibility-service model at 50, 100, 200, and 300
-concurrency, the 10-second burst, the one-device abuse isolation check, and
+45 signed-in / 15 service model at 50, 100, 200, and 300 concurrency, the
+10-second burst, the one-device abuse isolation check, and
 five-minute higher-throughput probes that stop at the first failed level. The
 report gates GraphQL 429 and non-429 errors, p95/p99, readiness, PostgreSQL pool
 waiting, CPU, memory, NAT-peer isolation, and the required 40% headroom. It

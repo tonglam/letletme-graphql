@@ -155,21 +155,21 @@ const mockPriceChangePublication = {
 			name,
 			key: `llm:data:fpl:price-changes:2627:1:${name}`,
 			type: "string",
-			count: name === "context" ? 9 : 1,
-			bytes: name === "context" ? 294 : 402,
+			count: name === "context" ? 10 : 1,
+			bytes: name === "context" ? 313 : 402,
 			sha256:
 				name === "context"
-					? "8203cdbf5fdd4ab5244fd34ee092b54567f05f23991553f9fa06bb6ad3d0b8f3"
+					? "27f14e433ab759b4e348f43c61a4d0770653bbb041f99da28face3c5dd797ee2"
 					: "a7c6d5db29d03c28c312029d420f6a8554f458d25be6d0db602966bd32ad1cc6",
 		})),
 	},
 	item_rows: [
 		{
 			name: "context",
-			itemCount: 9,
-			checksum: "8203cdbf5fdd4ab5244fd34ee092b54567f05f23991553f9fa06bb6ad3d0b8f3",
+			itemCount: 10,
+			checksum: "27f14e433ab759b4e348f43c61a4d0770653bbb041f99da28face3c5dd797ee2",
 			payload: {
-				schemaVersion: 1,
+				schemaVersion: 2,
 				source: "FPL_BOOTSTRAP",
 				fetchedAt: "2026-08-10T00:00:00.000Z",
 				staleAt: "2026-08-10T00:10:00.000Z",
@@ -178,6 +178,7 @@ const mockPriceChangePublication = {
 				nextDeadlines: ["2026-08-10T00:30:00.000Z"],
 				expectedPlayerCount: 1,
 				observedPlayerCount: 1,
+				latestEvent: null,
 			},
 		},
 		{

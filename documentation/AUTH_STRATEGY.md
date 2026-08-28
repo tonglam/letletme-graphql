@@ -9,12 +9,12 @@ Auth, serve `/api/auth/*`, issue device sessions, or accept cookie sessions.
    Web-signed ingress context.
 2. Website users additionally carry `X-User-Context` and
    `X-User-Context-Sig`. The exact base64url envelope contains `aud`, `uid`,
-   `eid`, `evat`, `iat`, and `exp` and expires within 60 seconds. An FPL entry
+   `eid`, `evat`, `adm`, `iat`, and `exp` and expires within 60 seconds. An FPL entry
    is trusted only when `evat` is non-null.
 3. Mini Program requests carry a Web-issued bearer token. GraphQL hashes the
    token and validates it against `bauth.mini_program_session` only after the
-   ingress signature succeeds. The joined `bauth."user"` read loads only the
-   legacy `fpl_entry_id` and `fpl_entry_verified_at` binding fields.
+   ingress signature succeeds. The joined account read resolves the verified
+   FPL binding used by the current session contract.
 4. Public server-rendered Web reads use the independent GraphQL service token.
 
 Protected entry-scoped fields require a verified entry binding. The public

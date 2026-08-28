@@ -16,11 +16,8 @@ import { isDataPublicationId } from "./data-publication";
 
 const HOT_KEY_PREFIX = "fpl:price-changes:hot";
 const HOT_TTL_MS = 15 * 60 * 1000;
-// The metadata-only cursor carries the validated deadline horizon. Keep an
-// explicit envelope version so older hot payloads without that evidence are
-// ignored rather than advertised by the lightweight cursor path.
+// The metadata-only cursor carries the validated deadline horizon.
 const HOT_SCHEMA_VERSION = 4;
-const HOT_LEGACY_SCHEMA_VERSION = 3;
 const HOT_REVISION_PATTERN = /^[0-9a-f]{16}$/;
 const HOT_SOURCE_HASH_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -47,7 +44,7 @@ export type PriceChangeLiveBoard = {
 };
 
 type HotSnapshot = {
-	schemaVersion: typeof HOT_LEGACY_SCHEMA_VERSION | typeof HOT_SCHEMA_VERSION;
+	schemaVersion: typeof HOT_SCHEMA_VERSION;
 	seasonCode: string;
 	revision: string;
 	triggerFingerprint: string;
@@ -159,8 +156,7 @@ const parseHotSnapshotMetadata = (
 ): HotSnapshotMetadata | null => {
 	if (!isRecord(value)) return null;
 	if (
-		(value.schemaVersion !== HOT_LEGACY_SCHEMA_VERSION &&
-			value.schemaVersion !== HOT_SCHEMA_VERSION) ||
+		value.schemaVersion !== HOT_SCHEMA_VERSION ||
 		value.seasonCode !== seasonCode ||
 		typeof value.revision !== "string" ||
 		!/^[0-9a-f]{16}$/.test(value.revision) ||
@@ -246,7 +242,7 @@ const parseHotSnapshotMetadata = (
 	}
 	if (hotMetadataHash(value) !== value.metadataHash) return null;
 	return {
-		schemaVersion: value.schemaVersion as HotSnapshot["schemaVersion"],
+		schemaVersion: HOT_SCHEMA_VERSION,
 		seasonCode,
 		revision: value.revision,
 		triggerFingerprint: value.triggerFingerprint,
@@ -291,8 +287,8 @@ const parseHotSnapshot = (value: unknown, seasonCode: string, now: Date): HotSna
 		metadata.expectedPlayerCount !== board.expectedPlayerCount ||
 		metadata.observedPlayerCount !== board.observedPlayerCount ||
 		metadata.expectedPlayerCount !== metadata.observedPlayerCount ||
-		(metadata.schemaVersion === HOT_SCHEMA_VERSION &&
-			(boardRecord === null || !("latestEvent" in boardRecord)))
+		boardRecord === null ||
+		!("latestEvent" in boardRecord)
 	) {
 		return null;
 	}
