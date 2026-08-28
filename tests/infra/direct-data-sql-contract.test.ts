@@ -69,23 +69,31 @@ describe("direct Data SQL contract", () => {
 		}
 	});
 
-	test("asserts JSONB for payload columns decoded by the runtime", () => {
+	test("asserts JSON-compatible types for payload columns decoded by the runtime", () => {
 		const payloadAssertions = DIRECT_DATA_SQL_CONTRACT.flatMap(
 			(probe) => probe.resultTypes ?? []
 		).filter(({ column }) => column === "payload");
 		expect(payloadAssertions.length).toBeGreaterThan(0);
 		expect(payloadAssertions.every(({ pgType }) => pgType === "jsonb")).toBe(true);
+		expect(
+			payloadAssertions.every(
+				({ acceptedPgTypes }) =>
+					JSON.stringify(acceptedPgTypes) === JSON.stringify(["json", "jsonb"])
+			)
+		).toBe(true);
 		expect(payloadAssertions).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
 					relation: "ops.dataset_publication_items",
 					column: "payload",
 					pgType: "jsonb",
+					acceptedPgTypes: ["json", "jsonb"],
 				}),
 				expect.objectContaining({
 					relation: "content.publication_payloads",
 					column: "payload",
 					pgType: "jsonb",
+					acceptedPgTypes: ["json", "jsonb"],
 				}),
 			])
 		);
@@ -119,7 +127,7 @@ describe("direct Data SQL contract", () => {
 			},
 		};
 		await expect(validateDirectDataSqlContract(database)).rejects.toThrow(
-			/expected jsonb, got text/
+			/expected json or jsonb, got text/
 		);
 	});
 
@@ -137,7 +145,7 @@ describe("direct Data SQL contract", () => {
 		]);
 	});
 
-	test("accepts JSON for the Briefing locale manifest while keeping payloads strict", async () => {
+	test("accepts JSON for every decoded JSON contract column", async () => {
 		const database: QueryExecutor = {
 			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {
 				if (text.includes("format_type(attribute.atttypid, attribute.atttypmod)")) {
@@ -147,11 +155,7 @@ describe("direct Data SQL contract", () => {
 						rows: relations.map((relation, index) => ({
 							relation_name: relation,
 							column_name: columns[index],
-							actual_type:
-								relation === "content.briefing_active_publication" &&
-								columns[index] === "locale_manifest"
-									? "json"
-									: "jsonb",
+							actual_type: "json",
 						})) as unknown as Row[],
 					} as unknown as QueryResult<Row>;
 				}

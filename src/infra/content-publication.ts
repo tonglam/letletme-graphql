@@ -304,6 +304,7 @@ export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 				relation: "content.publication_payloads",
 				column: "payload",
 				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
 			},
 		],
 	},

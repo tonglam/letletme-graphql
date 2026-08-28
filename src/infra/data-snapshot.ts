@@ -1723,6 +1723,7 @@ export const DATA_SNAPSHOT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = 
 				relation: "ops.dataset_publication_items",
 				column: "payload",
 				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
 			},
 		],
 	},
