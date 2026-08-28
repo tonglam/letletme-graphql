@@ -59,15 +59,22 @@ const RESULT_TYPE_SQL = `
 	ORDER BY target.relation_name, target.column_name
 `;
 
+const allowedResultTypes = (assertion: DataSqlContractResultType): readonly string[] =>
+	[...new Set(assertion.acceptedPgTypes ?? [assertion.pgType])].sort();
+
 const resultTypeAssertions = (): readonly DataSqlContractResultType[] => {
 	const assertions = new Map<string, DataSqlContractResultType>();
 	for (const probe of DIRECT_DATA_SQL_CONTRACT) {
 		for (const assertion of probe.resultTypes ?? []) {
 			const key = `${assertion.relation}.${assertion.column}`;
 			const previous = assertions.get(key);
-			if (previous && previous.pgType !== assertion.pgType) {
+			if (
+				previous &&
+				JSON.stringify(allowedResultTypes(previous)) !==
+					JSON.stringify(allowedResultTypes(assertion))
+			) {
 				throw new Error(
-					`Conflicting direct SQL result type contract for ${key}: ${previous.pgType} vs ${assertion.pgType}`
+					`Conflicting direct SQL result type contract for ${key}: ${allowedResultTypes(previous).join(", ")} vs ${allowedResultTypes(assertion).join(", ")}`
 				);
 			}
 			assertions.set(key, assertion);
@@ -91,9 +98,10 @@ const validateResultTypes = async (database: QueryExecutor): Promise<void> => {
 	for (const assertion of assertions) {
 		const key = `${assertion.relation}.${assertion.column}`;
 		const actualType = actualByKey.get(key) ?? null;
-		if (actualType !== assertion.pgType) {
+		const expectedTypes = allowedResultTypes(assertion);
+		if (!actualType || !expectedTypes.includes(actualType)) {
 			throw new Error(
-				`Data candidate result type contract is unavailable: ${key} expected ${assertion.pgType}, got ${actualType ?? "missing"}`
+				`Data candidate result type contract is unavailable: ${key} expected ${expectedTypes.join(" or ")}, got ${actualType ?? "missing"}`
 			);
 		}
 	}

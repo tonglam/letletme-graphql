@@ -123,6 +123,44 @@ describe("direct Data SQL contract", () => {
 		);
 	});
 
+	test("allows equivalent JSON and JSONB decoded types only where declared", () => {
+		const metadata = DIRECT_DATA_SQL_CONTRACT.find(
+			(probe) => probe.name === "briefing.active-metadata"
+		);
+		expect(metadata?.resultTypes).toEqual([
+			expect.objectContaining({
+				relation: "content.briefing_active_publication",
+				column: "locale_manifest",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			}),
+		]);
+	});
+
+	test("accepts JSON for the Briefing locale manifest while keeping payloads strict", async () => {
+		const database: QueryExecutor = {
+			query: async <Row extends QueryResultRow>(text: string, values: readonly unknown[] = []) => {
+				if (text.includes("format_type(attribute.atttypid, attribute.atttypmod)")) {
+					const relations = values[0] as readonly string[];
+					const columns = values[1] as readonly string[];
+					return {
+						rows: relations.map((relation, index) => ({
+							relation_name: relation,
+							column_name: columns[index],
+							actual_type:
+								relation === "content.briefing_active_publication" &&
+								columns[index] === "locale_manifest"
+									? "json"
+									: "jsonb",
+						})) as unknown as Row[],
+					} as unknown as QueryResult<Row>;
+				}
+				return { rows: [] } as unknown as QueryResult<Row>;
+			},
+		};
+		expect(await validateDirectDataSqlContract(database)).toBe(DIRECT_DATA_SQL_CONTRACT.length);
+	});
+
 	test("uses the runtime Briefing payload fallback as a planner probe", () => {
 		const fallback = DIRECT_DATA_SQL_CONTRACT.find(
 			(probe) => probe.name === "briefing.payload-fallback"

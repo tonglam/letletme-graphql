@@ -2,6 +2,8 @@ export type DataSqlContractResultType = Readonly<{
 	relation: string;
 	column: string;
 	pgType: string;
+	/** Additional PostgreSQL types with the same node-postgres decoded shape. */
+	acceptedPgTypes?: readonly string[];
 }>;
 
 /**
@@ -13,6 +15,8 @@ export type DataSqlContractResultType = Readonly<{
  * second, hand-maintained schema description.  Result type assertions cover
  * columns whose node-postgres value shape is part of the consumer contract;
  * EXPLAIN alone cannot detect a jsonb-to-text drift when no rows are read.
+ * A small allowlist is available for PostgreSQL types such as json/jsonb
+ * that are decoded to the same JavaScript shape by node-postgres.
  */
 export type DataSqlContractProbe = Readonly<{
 	name: string;
