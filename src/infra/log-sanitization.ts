@@ -2,10 +2,15 @@ const DATABASE_STATEMENT =
 	/\b(?:select|insert\s+into|update\s+\S+\s+set|delete\s+from|alter\s+table|create\s+table|drop\s+table)\b/i;
 const CONNECTION_URL = /\b(?:postgres(?:ql)?|redis|rediss):\/\/[^\s"']+/gi;
 const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)([^@\s/]+)@/gi;
-const AUTHORIZATION_CREDENTIAL_QUOTED =
-	/(?<![a-z0-9_-])(["']?)(authorization)\1(\s*[=:]\s*)(["'])(?:\\[\s\S]|(?!\4)[\s\S])*\4/gi;
-const AUTHORIZATION_CREDENTIAL_UNQUOTED =
-	/(?<![a-z0-9_-])(["']?)(authorization)\1(\s*[=:]\s*)(?:(?:bearer|basic)\s+)?(?!["'])([^\s,;}]+)/gi;
+const AUTHORIZATION_KEY = "(?:[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*[_-])?authorization";
+const AUTHORIZATION_CREDENTIAL_QUOTED = new RegExp(
+	`(?<![a-z0-9_-])(["']?)(${AUTHORIZATION_KEY})\\1(\\s*[=:]\\s*)(["'])(?:\\\\[\\s\\S]|(?!\\4)[\\s\\S])*\\4`,
+	"gi"
+);
+const AUTHORIZATION_CREDENTIAL_UNQUOTED = new RegExp(
+	`(?<![a-z0-9_-])(["']?)(${AUTHORIZATION_KEY})\\1(\\s*[=:]\\s*)(?:(?:[a-z][a-z0-9._-]*)\\s+)?(?!["'])([^\\s,;}]+)`,
+	"gi"
+);
 const SECRET_KEY =
 	"(?:(?:[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*)[_-])?(?:password|passwd|pwd|token|secret|api[_-]?key)";
 const SECRET_ASSIGNMENT_QUOTED = new RegExp(

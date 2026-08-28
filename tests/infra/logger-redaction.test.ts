@@ -32,6 +32,8 @@ describe("server log redaction", () => {
 		for (const [source, expected] of [
 			["Authorization: Bearer super-secret-token", "Authorization: [REDACTED]"],
 			["authorization=Basic dXNlcjpwYXNz", "authorization=[REDACTED]"],
+			["Proxy-Authorization: Basic proxy-secret", "Proxy-Authorization: [REDACTED]"],
+			["X-Authorization: ApiKey custom-secret", "X-Authorization: [REDACTED]"],
 			['Authorization: "Bearer token with spaces"', 'Authorization: "[REDACTED]"'],
 			['authorization="opaque value with spaces"', 'authorization="[REDACTED]"'],
 			[
