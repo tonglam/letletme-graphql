@@ -3,9 +3,9 @@ const DATABASE_STATEMENT =
 const CONNECTION_URL = /\b(?:postgres(?:ql)?|redis|rediss):\/\/[^\s"']+/gi;
 const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)([^@\s/]+)@/gi;
 const AUTHORIZATION_CREDENTIAL =
-	/(?<![a-z0-9_-])(["']?)(authorization)\1(\s*[=:]\s*)(?:(['"])(?:(?:bearer|basic)\s+)?(?:\\[\s\S]|(?!\4)[\s\S])*\4|(?:(?:bearer|basic)\s+)?[^"'\s,;}]+)/gi;
+	/(?<![a-z0-9-])(["']?)(authorization)\1(\s*[=:]\s*)(?:(['"])(?:(?:bearer|basic)\s+)?(?:\\[\s\S]|(?!\4)[\s\S])*\4|(?:(?:bearer|basic)\s+)?[^"'\s,;}]+)/gi;
 const SECRET_ASSIGNMENT =
-	/(?<![a-z0-9_-])(["']?)(password|passwd|pwd|token|secret|api[_-]?key)\1(\s*[=:]\s*)(?:(['"])(?:(?:bearer|basic)\s+)?(?:\\[\s\S]|(?!\4)[\s\S])*\4|(?:(?:bearer|basic)\s+)?[^"'\s,;}]+)/gi;
+	/(?<![a-z0-9-])(["']?)(password|passwd|pwd|token|secret|api[_-]?key)\1(\s*[=:]\s*)(?:(['"])(?:(?:bearer|basic)\s+)?(?:\\[\s\S]|(?!\4)[\s\S])*\4|(?:(?:bearer|basic)\s+)?[^"'\s,;}]+)/gi;
 const NETWORK_HOST =
 	/\b(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|[a-z0-9-]+(?:\.[a-z0-9-]+)+)(?::\d{1,5})?\b/gi;
 const BRACKETED_IPV6 = /\[[0-9a-f:]+\](?::\d{1,5})?/gi;

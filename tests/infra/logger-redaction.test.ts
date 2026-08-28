@@ -91,4 +91,24 @@ describe("server log redaction", () => {
 			expect(sanitized).not.toContain(credential);
 		}
 	});
+
+	test("redacts credentials in prefixed environment variable names", () => {
+		for (const [source, expected, credential] of [
+			[
+				"GRAPHQL_SERVICE_TOKEN=super-secret-token",
+				"GRAPHQL_SERVICE_TOKEN=[REDACTED]",
+				"super-secret-token",
+			],
+			[
+				'LETLETME_DATA_API_KEY="correct horse battery staple"',
+				'LETLETME_DATA_API_KEY="[REDACTED]"',
+				"correct horse battery staple",
+			],
+			["BACKEND_PROXY_SECRET=proxy-secret", "BACKEND_PROXY_SECRET=[REDACTED]", "proxy-secret"],
+		] as const) {
+			const sanitized = sanitizeLogText(source);
+			expect(sanitized).toBe(expected);
+			expect(sanitized).not.toContain(credential);
+		}
+	});
 });

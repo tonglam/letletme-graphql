@@ -80,6 +80,19 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("public_contract_passed");
 	});
 
+	test("cleans up an unaccepted candidate before slot switching", () => {
+		const cleanupAt = deployScript.indexOf("candidate_cleanup_armed=true");
+		const candidateUpAt = deployScript.indexOf("candidate_started=true");
+		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
+		expect(deployScript).toContain("candidate_started=false");
+		expect(deployScript).toContain("compose down --remove-orphans || true");
+		expect(deployScript).toContain("candidate_cleanup_armed=false");
+		expect(cleanupAt).toBeGreaterThan(-1);
+		expect(cleanupAt).toBeLessThan(candidateUpAt);
+		expect(candidateUpAt).toBeLessThan(switchAt);
+		expect(deployScript.indexOf("candidate_cleanup_armed=false")).toBeLessThan(switchAt);
+	});
+
 	test("allowlists exact public GraphQL routes before switching or forwarding credentials", () => {
 		const validationAt = deployScript.indexOf('const expectedOrigin = "https://letletme.top";');
 		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
@@ -169,7 +182,7 @@ describe("production deployment workflow", () => {
 		);
 		expect(deployScript).toContain('export DOCKER_CONFIG="$docker_config_dir"');
 		expect(deployScript).toContain('rm -rf -- "$docker_config_dir"');
-		expect(deployScript).toContain("trap cleanup_sensitive_files EXIT");
+		expect(deployScript).toContain("trap cleanup_on_exit EXIT");
 		expect(deployScript.indexOf("export DOCKER_CONFIG")).toBeLessThan(
 			deployScript.indexOf("docker login ghcr.io")
 		);

@@ -113,7 +113,18 @@ cleanup_sensitive_files() {
   if [ -n "$candidate_env_next" ]; then rm -f -- "$candidate_env_next"; fi
   if [ -n "$docker_config_dir" ]; then rm -rf -- "$docker_config_dir"; fi
 }
-trap cleanup_sensitive_files EXIT
+candidate_started=false
+candidate_cleanup_armed=true
+cleanup_on_exit() {
+  local exit_status=$?
+  trap - EXIT
+  if [ "$candidate_started" = true ] && [ "$candidate_cleanup_armed" = true ]; then
+    compose down --remove-orphans || true
+  fi
+  cleanup_sensitive_files
+  exit "$exit_status"
+}
+trap cleanup_on_exit EXIT
 if [ -n "$env_source" ]; then
   test -f "$env_source"
   cp "$env_source" "$candidate_env_next"
@@ -217,6 +228,7 @@ retire_legacy_bootstrap_before_blue() {
   fi
 }
 retire_legacy_bootstrap_before_blue
+candidate_started=true
 compose up -d --no-deps --no-build --force-recreate graphql
 
 candidate_url="http://127.0.0.1:$candidate_port"
@@ -350,6 +362,7 @@ rollback_on_error() {
   exit "$status"
 }
 trap rollback_on_error ERR
+candidate_cleanup_armed=false
 switched=true
 sudo -n "$SWITCH_HELPER" "$inactive_slot"
 
