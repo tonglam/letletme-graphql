@@ -10,8 +10,11 @@ import { MARKET_DATA_SQL_CONTRACT } from "../../src/domains/market/repository";
 import {
 	MY_FPL_DATA_SQL_CONTRACT,
 	parseCompetitionAggregatePayload,
+	parseCompetitionBoardProbe,
+	parseCompetitionSeasonPathPoints,
 	parseSnapshotEntryPayload,
 } from "../../src/domains/my-fpl/repository";
+import { buildMarketPulse, type MarketSnapshotRow } from "../../src/domains/market/repository";
 import { PLAYER_DETAIL_DATA_SQL_CONTRACT } from "../../src/domains/player-detail/repository";
 import { PLAYER_VALUES_DATA_SQL_CONTRACT } from "../../src/domains/player-values/repository";
 import { PLAYERS_DATA_SQL_CONTRACT } from "../../src/domains/players/repository";
@@ -20,11 +23,15 @@ import { PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/public
 import { TRENDS_DATA_SQL_CONTRACT } from "../../src/domains/trends/repository";
 import {
 	BRIEFING_DATA_SQL_CONTRACT,
+	BRIEFING_CONTRACT_PUBLICATION_ID,
+	parseBriefingActiveMetadata,
 	parseBriefingWeekPayload,
 } from "../../src/infra/content-publication";
 import {
 	DATA_SNAPSHOT_DATA_SQL_CONTRACT,
 	parseCoreFallbackRow,
+	parseLiveFallbackRow,
+	type LiveFallbackRow,
 } from "../../src/infra/data-snapshot";
 import type { QueryExecutor } from "../../src/infra/database";
 import {
@@ -158,6 +165,17 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 						);
 					}
 				}
+				if (probe.runtime === "must-return-briefing-metadata") {
+					const metadata = parseBriefingActiveMetadata(
+						result.rows[0],
+						BRIEFING_CONTRACT_PUBLICATION_ID
+					);
+					if (!metadata) {
+						throw new Error(
+							"runtime reader role returned active Briefing metadata that the production decoder rejects"
+						);
+					}
+				}
 				if (probe.runtime === "must-return-core") {
 					const core = parseCoreFallbackRow(result.rows[0], CONTRACT_SEASON_CODE);
 					if (!core) {
@@ -236,19 +254,53 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					}
 				}
 				if (probe.runtime === "must-return-board") {
-					const board = result.rows[0] as {
-						field_size?: unknown;
-						viewer_row?: unknown;
-					};
-					if (
-						typeof board.field_size !== "number" ||
-						!Number.isInteger(board.field_size) ||
-						board.field_size <= 0 ||
-						board.viewer_row === null ||
-						board.viewer_row === undefined
-					) {
+					const board = parseCompetitionBoardProbe(result.rows[0], Number(probe.values[1]));
+					if (!board) {
 						throw new Error(
-							"runtime reader role cannot see a positive competition board field or viewer row"
+							"runtime reader role returned a competition board payload that the production decoder rejects"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-season-path") {
+					const payload = (result.rows[0] as { payload?: unknown }).payload;
+					const rawPoints =
+						isRecord(payload) && isRecord(payload.seasonPaths)
+							? payload.seasonPaths[String(CONTRACT_ENTRY_ID)]
+							: isRecord(payload)
+								? payload.seasonPath
+								: null;
+					const points = parseCompetitionSeasonPathPoints(rawPoints);
+					const expectedEventId = Number(probe.values[1]);
+					if (!points || !points.some((point) => point.gameweek === expectedEventId)) {
+						throw new Error(
+							"runtime reader role returned a season-path payload that the production decoder rejects"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-live") {
+					const live = parseLiveFallbackRow(
+						result.rows[0] as LiveFallbackRow,
+						Number(probe.values[1]),
+						CONTRACT_SEASON_CODE
+					);
+					if (!live) {
+						throw new Error(
+							"runtime reader role returned a live publication that the production decoder rejects"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-market") {
+					const marketRows = (result.rows[0] as { market_rows?: unknown }).market_rows;
+					if (!Array.isArray(marketRows) || marketRows.length === 0) {
+						throw new Error("runtime reader role cannot see a non-empty market snapshot fixture");
+					}
+					const pulse = buildMarketPulse(
+						marketRows as MarketSnapshotRow[],
+						Number(probe.values[1])
+					);
+					if (!pulse.coverage.latestDate || pulse.mostSelected.length === 0) {
+						throw new Error(
+							"runtime reader role returned a market payload that the production decoder rejects"
 						);
 					}
 				}

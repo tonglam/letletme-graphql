@@ -448,6 +448,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.competition-season-path",
 		sql: MY_FPL_COMPETITION_SEASON_PATH_SQL,
 		values: [2026, 1, "7", GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID],
+		runtime: "must-return-season-path",
 		resultTypes: [
 			{
 				relation: "competition.my_fpl_snapshot_tournament_aggregates",
@@ -2312,7 +2313,7 @@ const mapBoardJsonRow = (row: DbBoardJsonRow): MyFplCompetitionBoardRow => ({
 	bank: row.bank,
 });
 
-const mapSnapshotBoardRow = (
+export const mapSnapshotBoardRow = (
 	value: unknown,
 	expectedEventId: number
 ): MyFplCompetitionBoardRow | null => {
@@ -2359,6 +2360,55 @@ const mapSnapshotBoardRow = (
 		teamValue: integerOrNull(value.teamValue),
 		bank: integerOrNull(value.bank),
 	};
+};
+
+export type CompetitionBoardProbe = Readonly<{
+	fieldSize: number;
+	totalRows: number;
+	expectedFieldSize: number;
+	invalidRowCount: number;
+	rows: MyFplCompetitionBoardRow[];
+	viewerRow: MyFplCompetitionBoardRow;
+}>;
+
+/**
+ * Decode and validate the complete board SQL result used by the production
+ * reader.  A non-empty field alone is not sufficient: every returned JSON
+ * row, the aggregate field-size fence, and the viewer row must agree before
+ * the board can be served or accepted by the Data contract probe.
+ */
+export const parseCompetitionBoardProbe = (
+	value: unknown,
+	expectedEventId: number
+): CompetitionBoardProbe | null => {
+	if (!isRecord(value)) return null;
+	const fieldSize = asInteger(value.field_size);
+	const totalRows = asInteger(value.total_rows);
+	const expectedFieldSize = asInteger(value.expected_field_size);
+	const invalidRowCount = asInteger(value.invalid_row_count);
+	const rawRows = Array.isArray(value.rows) ? value.rows : [];
+	const rows = rawRows
+		.map((row) => mapSnapshotBoardRow(row, expectedEventId))
+		.filter((row): row is MyFplCompetitionBoardRow => row !== null);
+	const viewerRow = mapSnapshotBoardRow(value.viewer_row, expectedEventId);
+	if (
+		fieldSize === null ||
+		totalRows === null ||
+		expectedFieldSize === null ||
+		invalidRowCount === null ||
+		viewerRow === null ||
+		fieldSize < 0 ||
+		totalRows < 0 ||
+		totalRows > fieldSize ||
+		invalidRowCount !== 0 ||
+		expectedFieldSize <= 0 ||
+		fieldSize !== expectedFieldSize ||
+		rawRows.length !== rows.length ||
+		fieldSize === 0
+	) {
+		return null;
+	}
+	return { fieldSize, totalRows, expectedFieldSize, invalidRowCount, rows, viewerRow };
 };
 
 const loadCompetitionBoardPrepared = async (
@@ -2453,29 +2503,11 @@ const loadCompetitionBoardPrepared = async (
 		offset,
 		entryId,
 	]);
-	const fieldSize = asInteger(result.rows[0]?.field_size) ?? 0;
-	const totalRows = asInteger(result.rows[0]?.total_rows) ?? 0;
-	const expectedFieldSize = asInteger(result.rows[0]?.expected_field_size);
-	const invalidRowCount = asInteger(result.rows[0]?.invalid_row_count);
-	const rawRows = Array.isArray(result.rows[0]?.rows) ? result.rows[0]?.rows : [];
-	const rows = rawRows
-		.map((value) => mapSnapshotBoardRow(value, eventId))
-		.filter((row): row is MyFplCompetitionBoardRow => row !== null);
-	const viewerRow = mapSnapshotBoardRow(result.rows[0]?.viewer_row, eventId);
-	if (
-		fieldSize < 0 ||
-		totalRows < 0 ||
-		totalRows > fieldSize ||
-		invalidRowCount !== 0 ||
-		expectedFieldSize === null ||
-		expectedFieldSize <= 0 ||
-		fieldSize !== expectedFieldSize ||
-		rawRows.length !== rows.length ||
-		fieldSize === 0 ||
-		viewerRow === null
-	) {
+	const board = parseCompetitionBoardProbe(result.rows[0], eventId);
+	if (!board) {
 		return empty("PENDING", snapshot.publication);
 	}
+	const { fieldSize, totalRows, rows, viewerRow } = board;
 	const payload: MyFplCompetitionBoardPage = await applyCurrentEntryNamesToBoardPage(context, {
 		state: "READY",
 		eventId,
@@ -2541,7 +2573,7 @@ const loadCompetitionAggregateSnapshot = async (
 	return current;
 };
 
-const parseSnapshotSeasonPathPoints = (
+export const parseCompetitionSeasonPathPoints = (
 	value: unknown
 ): MyFplCompetitionSeasonPathPoint[] | null => {
 	if (!Array.isArray(value)) return null;
@@ -2804,7 +2836,7 @@ const loadCompetitionSeasonPath = async (
 			: isRecord(raw)
 				? raw.seasonPath
 				: null;
-	const points = parseSnapshotSeasonPathPoints(rawPoints);
+	const points = parseCompetitionSeasonPathPoints(rawPoints);
 	if (points === null) return empty("PENDING", snapshot.publication);
 	const payload: MyFplCompetitionSeasonPath = {
 		state: points.some((point) => point.gameweek === throughEventId) ? "READY" : "PENDING",

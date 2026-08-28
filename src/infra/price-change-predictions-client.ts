@@ -714,26 +714,40 @@ export const PUBLICATION_ITEMS_SQL = `
  * through parsePublicationBoard rather than accepting a non-empty JSON value.
  */
 export const PRICE_CHANGE_PUBLICATION_CONTRACT_SQL = `
-	SELECT publication.publication_id::text AS publication_id,
-		publication.revision::text AS revision,
+	WITH publication AS (
+		SELECT publication_id::text AS publication_id,
+			revision::text AS revision,
+			status,
+			manifest
+		FROM ops.dataset_publications
+		WHERE publication_id = $1::uuid
+			AND dataset = 'fpl:price-changes'
+			AND season_id = $2
+			AND event_id IS NULL
+			AND status IN ('active', 'retired')
+			AND (expires_at IS NULL OR expires_at > now())
+		LIMIT 1
+	), items AS (
+		SELECT publication_id::text AS publication_id,
+			COALESCE(
+				jsonb_object_agg(
+					item_name,
+					payload::jsonb
+					ORDER BY item_name
+				) FILTER (WHERE item_name IS NOT NULL),
+				'{}'::jsonb
+			) AS items
+		FROM ops.dataset_publication_items
+		WHERE publication_id = $1::uuid
+		GROUP BY publication_id
+	)
+	SELECT publication.publication_id,
+		publication.revision,
 		publication.status,
 		publication.manifest,
-		COALESCE(
-			jsonb_object_agg(item.item_name, item.payload ORDER BY item.item_name)
-				FILTER (WHERE item.item_name IS NOT NULL),
-			'{}'::jsonb
-		) AS items
-	FROM ops.dataset_publications publication
-	LEFT JOIN ops.dataset_publication_items item
-		ON item.publication_id = publication.publication_id
-	WHERE publication.publication_id = $1::uuid
-		AND publication.dataset = 'fpl:price-changes'
-		AND publication.season_id = $2
-		AND publication.event_id IS NULL
-		AND publication.status IN ('active', 'retired')
-		AND (publication.expires_at IS NULL OR publication.expires_at > now())
-	GROUP BY publication.publication_id, publication.revision, publication.status, publication.manifest
-	LIMIT 1
+		COALESCE(items.items, '{}'::jsonb) AS items
+	FROM publication
+	LEFT JOIN items USING (publication_id)
 `;
 
 export const PUBLICATION_CONTEXT_ITEMS_SQL = `

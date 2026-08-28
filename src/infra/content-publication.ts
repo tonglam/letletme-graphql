@@ -68,7 +68,7 @@ export type BriefingWeekPayload = {
 	sections: BriefingSection[];
 };
 
-type ActiveMetadata = {
+export type ActiveMetadata = {
 	publication_id: string;
 	scope_key: string;
 	revision: string | number;
@@ -232,8 +232,9 @@ export function parseBriefingWeekPayload(
 const metadataDate = (value: string | Date | null): string | null => iso(value);
 
 const hasLocalePair = (
-	manifest: ActiveMetadata["locale_manifest"]
+	manifest: unknown
 ): manifest is Record<BriefingLocale, { bytes: number; sha256: string }> =>
+	isRecord(manifest) &&
 	["en", "zh-CN"].every((locale) => {
 		const entry: unknown = manifest[locale];
 		return (
@@ -251,6 +252,43 @@ const toMetadata = (row: ActiveMetadata): ActiveMetadata => ({
 	revision: Number(row.revision),
 	locale_manifest: row.locale_manifest ?? {},
 });
+
+/**
+ * Validate the active Briefing metadata row before it is treated as an
+ * authority record.  The direct Data contract calls this same shape guard
+ * after executing the reader-role query, so a planner-visible row cannot
+ * mask a missing publication, invalid revision, or incomplete locale
+ * manifest.
+ */
+export const parseBriefingActiveMetadata = (
+	value: unknown,
+	expectedPublicationId: string
+): ActiveMetadata | null => {
+	if (!isRecord(value)) return null;
+	const revision = typeof value.revision === "number" ? value.revision : Number(value.revision);
+	const state = value.state;
+	if (
+		typeof value.publication_id !== "string" ||
+		value.publication_id !== expectedPublicationId ||
+		value.scope_key !== "week" ||
+		!Number.isSafeInteger(revision) ||
+		revision <= 0 ||
+		value.schema_version !== 1 ||
+		(state !== "READY" && state !== "EMPTY") ||
+		value.servable !== true ||
+		typeof value.season_code !== "string" ||
+		(value.target_event_id !== null && !Number.isSafeInteger(value.target_event_id)) ||
+		(value.event_name !== null && typeof value.event_name !== "string") ||
+		!hasLocalePair(value.locale_manifest)
+	) {
+		return null;
+	}
+	return toMetadata({
+		...(value as Omit<ActiveMetadata, "revision" | "locale_manifest">),
+		revision,
+		locale_manifest: value.locale_manifest,
+	});
+};
 
 export const BRIEFING_ACTIVE_METADATA_SQL = `
 	SELECT publication_id, scope_key, revision, schema_version, season_code, target_event_id, event_name, deadline_time, state, servable, source_checked_at, published_at, valid_until, locale_manifest
@@ -276,13 +314,14 @@ export const BRIEFING_PAYLOAD_FALLBACK_SQL = `
 	LIMIT 1
 `;
 
-const BRIEFING_CONTRACT_PUBLICATION_ID = "00000000-0000-4000-8000-000000000001";
+export const BRIEFING_CONTRACT_PUBLICATION_ID = "00000000-0000-4000-8000-000000000001";
 
 export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "briefing.active-metadata",
 		sql: BRIEFING_ACTIVE_METADATA_SQL,
 		values: ["week"],
+		runtime: "must-return-briefing-metadata",
 		resultTypes: [
 			{
 				relation: "content.briefing_active_publication",

@@ -191,6 +191,126 @@ const mockPriceChangePublication = {
 	},
 } as const;
 
+const mockBriefingMetadata = {
+	publication_id: CONTRACT_PUBLICATION_ID,
+	scope_key: "week",
+	revision: 1,
+	schema_version: 1,
+	season_code: "2627",
+	target_event_id: null,
+	event_name: null,
+	deadline_time: null,
+	state: "EMPTY",
+	servable: true,
+	source_checked_at: "2026-08-10T00:00:00.000Z",
+	published_at: "2026-08-10T00:00:00.000Z",
+	valid_until: null,
+	locale_manifest: {
+		en: { bytes: 0, sha256: "0".repeat(64) },
+		"zh-CN": { bytes: 0, sha256: "0".repeat(64) },
+	},
+} as const;
+
+const mockCompetitionBoardRow = {
+	eventId: 1,
+	entryId: 1,
+	__snapshotEntryId: 1,
+	groupId: 1,
+	rank: 1,
+} as const;
+
+const mockCompetitionBoardProbe = {
+	field_size: 1,
+	total_rows: 1,
+	expected_field_size: 1,
+	invalid_row_count: 0,
+	rows: [mockCompetitionBoardRow],
+	viewer_row: mockCompetitionBoardRow,
+} as const;
+
+const mockSeasonPathPayload = {
+	seasonPaths: {
+		"1": [
+			{
+				gameweek: 1,
+				fieldSize: 1,
+				tournamentRank: 1,
+				gapToLeader: 0,
+				pointsVsAverage: 0,
+				overallPoints: 0,
+				leaderOverallPoints: 0,
+				averageOverallPoints: 0,
+			},
+		],
+	},
+} as const;
+
+const mockLiveFallbackRow = {
+	authority_count: "1",
+	publication_id: CONTRACT_PUBLICATION_ID,
+	revision: "1",
+	manifest: {
+		dataset: "fpl:live",
+		seasonCode: "2627",
+		eventId: 1,
+		revision: 1,
+		publicationId: CONTRACT_PUBLICATION_ID,
+		sourceCheckedAt: "2026-08-10T00:00:00.000Z",
+		publishedAt: "2026-08-10T00:00:00.000Z",
+		state: "live",
+		items: ["eventLive", "fixtures"].map((name) => ({
+			name,
+			key: `llm:data:fpl:live:2627:1:1:${name}`,
+			type: "string",
+			count: 0,
+			bytes: 2,
+			sha256: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+		})),
+	},
+	source_checked_at: "2026-08-10T00:00:00.000Z",
+	event_lives: [],
+	fixtures: [],
+	event_live_item_count: 0,
+	fixture_item_count: 0,
+	event_live_checksum: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+	fixture_checksum: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+	event_live_payload_bytes: 2,
+	fixture_payload_bytes: 2,
+	event_live_payload_sha256: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+	fixture_payload_sha256: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+} as const;
+
+const mockMarketRow = {
+	snapshot_date: "2025-08-28",
+	captured_at: "2025-08-28T00:00:00.000Z",
+	element_id: 1,
+	player_code: 26001,
+	web_name: "GC1",
+	team_id: 1,
+	team_name: "GraphQL Contract Team",
+	team_short_name: "GCT",
+	element_type: 1,
+	position: "GKP",
+	price: 50,
+	selected_by_percent: 1,
+	transfers_in: 0,
+	transfers_out: 0,
+	status: "a",
+	news: "",
+	news_added: null,
+	chance_of_playing_this_round: 100,
+	chance_of_playing_next_round: 100,
+	baseline_date: "2025-08-28",
+	first_observed_date: "2025-08-28",
+	previous_price: null,
+	previous_transfers_in: null,
+	previous_transfers_out: null,
+	previous_status: null,
+	previous_news: null,
+	previous_chance_this_round: null,
+	previous_chance_next_round: null,
+} as const;
+
 const mockCoreFallbackRow = (() => {
 	const events = Array.from({ length: 38 }, (_, index) => ({
 		event_id: index + 1,
@@ -422,6 +542,9 @@ describe("direct Data SQL contract", () => {
 				if (runtimeProbe?.runtime === "must-return-briefing") {
 					return { rows: [{ payload: mockBriefingPayload }] } as unknown as QueryResult<Row>;
 				}
+				if (runtimeProbe?.runtime === "must-return-briefing-metadata") {
+					return { rows: [mockBriefingMetadata] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-core") {
 					return { rows: [mockCoreFallbackRow] } as unknown as QueryResult<Row>;
 				}
@@ -445,13 +568,20 @@ describe("direct Data SQL contract", () => {
 						],
 					} as unknown as QueryResult<Row>;
 				}
+				if (runtimeProbe?.runtime === "must-return-market") {
+					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
 					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-board") {
-					return {
-						rows: [{ field_size: 1, viewer_row: { entryId: 1 } }],
-					} as unknown as QueryResult<Row>;
+					return { rows: [mockCompetitionBoardProbe] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-season-path") {
+					return { rows: [{ payload: mockSeasonPathPayload }] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-live") {
+					return { rows: [mockLiveFallbackRow] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-tournament") {
 					return {
@@ -640,6 +770,9 @@ describe("direct Data SQL contract", () => {
 				if (runtimeProbe?.runtime === "must-return-briefing") {
 					return { rows: [{ payload: mockBriefingPayload }] } as unknown as QueryResult<Row>;
 				}
+				if (runtimeProbe?.runtime === "must-return-briefing-metadata") {
+					return { rows: [mockBriefingMetadata] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-core") {
 					return { rows: [mockCoreFallbackRow] } as unknown as QueryResult<Row>;
 				}
@@ -667,9 +800,16 @@ describe("direct Data SQL contract", () => {
 					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-board") {
-					return {
-						rows: [{ field_size: 1, viewer_row: { entryId: 1 } }],
-					} as unknown as QueryResult<Row>;
+					return { rows: [mockCompetitionBoardProbe] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-season-path") {
+					return { rows: [{ payload: mockSeasonPathPayload }] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-live") {
+					return { rows: [mockLiveFallbackRow] } as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-market") {
+					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-tournament") {
 					return {
@@ -736,6 +876,9 @@ describe("direct Data SQL contract", () => {
 				if (runtimeProbe?.runtime === "must-return-briefing") {
 					return { rows: [{ payload: mockBriefingPayload }] } as unknown as QueryResult<Row>;
 				}
+				if (runtimeProbe?.runtime === "must-return-briefing-metadata") {
+					return { rows: [mockBriefingMetadata] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-core") {
 					return { rows: [mockCoreFallbackRow] } as unknown as QueryResult<Row>;
 				}
@@ -758,6 +901,9 @@ describe("direct Data SQL contract", () => {
 							},
 						],
 					} as unknown as QueryResult<Row>;
+				}
+				if (runtimeProbe?.runtime === "must-return-market") {
+					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
 					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
@@ -887,6 +1033,8 @@ describe("direct Data SQL contract", () => {
 				"my-fpl.snapshot-entry",
 				"my-fpl.snapshot-tournament-row-visibility",
 				"my-fpl.competition-aggregate",
+				"my-fpl.competition-board",
+				"my-fpl.competition-season-path",
 				"my-fpl.assert-tournament-membership",
 				"my-fpl.assert-league-only-membership",
 				"my-fpl.list-tournament-memberships",
@@ -905,6 +1053,10 @@ describe("direct Data SQL contract", () => {
 					probe.runtime === "must-return-price-change" ||
 					probe.runtime === "must-return-trends-personal" ||
 					probe.runtime === "must-return-board" ||
+					probe.runtime === "must-return-season-path" ||
+					probe.runtime === "must-return-briefing-metadata" ||
+					probe.runtime === "must-return-live" ||
+					probe.runtime === "must-return-market" ||
 					probe.runtime === "must-return-tournament" ||
 					probe.runtime === "must-return-selection-row"
 			)

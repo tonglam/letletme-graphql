@@ -1517,7 +1517,7 @@ const mapLiveLifecycleStatus = (
 	};
 };
 
-type LiveFallbackRow = QueryResultRow & {
+export type LiveFallbackRow = QueryResultRow & {
 	authority_count: string | number;
 	publication_id: string | null;
 	revision: string | number | null;
@@ -1630,17 +1630,17 @@ export const LIVE_FALLBACK_SQL = `
 	FROM authority
 `;
 
-const liveFallbackPublication = (
-	context: GraphQLContext,
+export const parseLiveFallbackRow = (
 	row: LiveFallbackRow | undefined,
 	eventId: number,
+	seasonCode: string,
 	expectedManifest?: DataPublicationManifest | null
 ): DataPublication | null => {
 	const revision = integer(row?.revision);
 	const manifest = row?.manifest
 		? parseDataPublicationManifest(JSON.stringify(row.manifest), {
 				dataset: "fpl:live",
-				seasonCode: context.currentSeason.seasonCode,
+				seasonCode,
 				eventId,
 			})
 		: null;
@@ -1685,6 +1685,14 @@ const liveFallbackPublication = (
 	}
 	return { manifest, items: { eventLive: eventLives, fixtures } };
 };
+
+const liveFallbackPublication = (
+	context: GraphQLContext,
+	row: LiveFallbackRow | undefined,
+	eventId: number,
+	expectedManifest?: DataPublicationManifest | null
+): DataPublication | null =>
+	parseLiveFallbackRow(row, eventId, context.currentSeason.seasonCode, expectedManifest);
 
 async function loadLivePublicationFromPostgres(
 	context: GraphQLContext,
@@ -1929,6 +1937,7 @@ export const DATA_SNAPSHOT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = 
 		name: "data-snapshot.live-fallback",
 		sql: LIVE_FALLBACK_SQL,
 		values: [2026, 1],
+		runtime: "must-return-live",
 		resultTypes: [
 			{
 				relation: "ops.dataset_publication_items",
