@@ -46,6 +46,10 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({
 			ok: true,
 			deprecatedSymbols: ["LiveCalcData.livePoints", "LiveCalcData.rank"],
+			deprecatedSymbolOwners: {
+				"LiveCalcData.livePoints": ["LiveCalcData.livePoints"],
+				"LiveCalcData.rank": ["LiveCalcData.rank"],
+			},
 		});
 	});
 

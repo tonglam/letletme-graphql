@@ -3,7 +3,10 @@ import { ApolloServer, type ApolloServerPlugin } from "@apollo/server";
 import { createDeprecatedSchemaUsageExecutionListener } from "../../src/graphql/deprecation-observability";
 import { metrics } from "../../src/infra/metrics";
 
-type TestContext = { deprecatedSymbols?: readonly string[] };
+type TestContext = {
+	deprecatedSymbols?: readonly string[];
+	deprecatedSymbolOwners?: Readonly<Record<string, readonly string[]>>;
+};
 const servers: ApolloServer<TestContext>[] = [];
 
 afterEach(async () => {
@@ -30,6 +33,7 @@ test("deprecated usage is counted for cached documents only after variable coerc
 				async executionDidStart(requestContext) {
 					return createDeprecatedSchemaUsageExecutionListener<TestContext>({
 						symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+						symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
 						increment: (symbol) => observed.push(symbol),
 					});
 				},
@@ -70,4 +74,43 @@ test("deprecated usage is counted for cached documents only after variable coerc
 	}
 	// Variable coercion fails before the first resolver hook, so no usage is recorded.
 	expect(observed).toEqual(["Query.legacy", "Query.legacy"]);
+});
+
+test("deprecated usage excludes nested fields skipped by a null parent", async () => {
+	const observed: string[] = [];
+	const plugin: ApolloServerPlugin<TestContext> = {
+		async requestDidStart() {
+			return {
+				async executionDidStart(requestContext) {
+					return createDeprecatedSchemaUsageExecutionListener<TestContext>({
+						symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+						symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+						increment: (symbol) => observed.push(symbol),
+					});
+				},
+			};
+		},
+	};
+	const server = new ApolloServer<TestContext>({
+		typeDefs: `
+			type Query { parent: Child }
+			type Child { legacy: String @deprecated(reason: "Use current") }
+		`,
+		resolvers: { Query: { parent: () => null } },
+		plugins: [plugin],
+	});
+	servers.push(server);
+	await server.start();
+
+	await server.executeOperation(
+		{ query: "{ parent { legacy } }" },
+		{
+			contextValue: {
+				deprecatedSymbols: ["Child.legacy"],
+				deprecatedSymbolOwners: { "Child.legacy": ["Child.legacy"] },
+			},
+		}
+	);
+
+	expect(observed).toEqual([]);
 });

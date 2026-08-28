@@ -14,25 +14,38 @@ export const recordDeprecatedSchemaUsages = ({
 
 export const createDeprecatedSchemaUsageExecutionListener = <TContext extends BaseContext>({
 	symbols,
+	symbolOwners = {},
 	increment,
 	onExecutionEnd,
 }: {
 	symbols: readonly string[];
+	symbolOwners?: Readonly<Record<string, readonly string[]>>;
 	increment: (symbol: string) => void;
 	onExecutionEnd?: () => void;
 }): GraphQLRequestExecutionListener<TContext> => {
 	let committed = false;
+	let executedField = false;
+	const ownedSymbols = new Set(Object.values(symbolOwners).flat());
+	const globalSymbols = symbols.filter((symbol) => !ownedSymbols.has(symbol));
+	const executedOwners = new Set<string>();
 	return {
 		...(symbols.length > 0
 			? {
-					willResolveField(): void {
-						if (committed) return;
-						committed = true;
-						recordDeprecatedSchemaUsages({ symbols, increment });
+					willResolveField({ info }): void {
+						executedField = true;
+						executedOwners.add(`${info.parentType.name}.${info.fieldName}`);
 					},
 				}
 			: {}),
 		async executionDidEnd(): Promise<void> {
+			if (!committed && executedField) {
+				const executedSymbols = new Set(globalSymbols);
+				for (const owner of executedOwners) {
+					for (const symbol of symbolOwners[owner] ?? []) executedSymbols.add(symbol);
+				}
+				recordDeprecatedSchemaUsages({ symbols: [...executedSymbols], increment });
+				committed = true;
+			}
 			onExecutionEnd?.();
 		},
 	};

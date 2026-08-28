@@ -96,6 +96,42 @@ test("layer checker rejects CommonJS createRequire destructuring loaders", () =>
 	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
 });
 
+test("layer checker finds createRequire bindings nested inside functions", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'function loadService() { const { createRequire: makeRequire } = require("node:module"); return makeRequire(import.meta.url); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
+});
+
+test("layer checker does not treat an unrelated local createRequire function as a loader", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'function createRequire(path: string) { return path; } const load = createRequire("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([]);
+});
+
+test("layer checker inspects CommonJS module.require calls", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'module.require("../domains/entries/service"); module.require(target);',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([
+		{ value: "../domains/entries/service", line: 1 },
+		{ value: "", line: 1, dynamic: true },
+	]);
+});
+
 test("layer checker recognizes relative module augmentations", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.ts",

@@ -43,8 +43,8 @@ const sourceFilesUnder = (directory: string): string[] => {
 
 export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] => {
 	const modules: ModuleSpecifier[] = [];
-	const createRequireBindings = new Set(["createRequire"]);
-	ts.forEachChild(sourceFile, (node) => {
+	const createRequireBindings = new Set<string>();
+	const collectCreateRequireBindings = (node: ts.Node): void => {
 		if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
 			if (node.moduleSpecifier.text === "node:module" || node.moduleSpecifier.text === "module") {
 				if (
@@ -62,33 +62,36 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 				}
 			}
 		}
-		if (!ts.isVariableStatement(node)) return;
-		for (const declaration of node.declarationList.declarations) {
-			if (
-				!declaration.initializer ||
-				!ts.isCallExpression(declaration.initializer) ||
-				!ts.isIdentifier(declaration.initializer.expression) ||
-				declaration.initializer.expression.text !== "require" ||
-				declaration.initializer.arguments.length !== 1 ||
-				!ts.isStringLiteralLike(declaration.initializer.arguments[0]) ||
-				(declaration.initializer.arguments[0].text !== "node:module" &&
-					declaration.initializer.arguments[0].text !== "module") ||
-				!ts.isObjectBindingPattern(declaration.name)
-			) {
-				continue;
-			}
-			for (const element of declaration.name.elements) {
-				const importedName =
-					element.propertyName &&
-					(ts.isIdentifier(element.propertyName) || ts.isStringLiteralLike(element.propertyName))
-						? element.propertyName.text
-						: element.name.getText(sourceFile);
-				if (importedName === "createRequire" && ts.isIdentifier(element.name)) {
-					createRequireBindings.add(element.name.text);
+		if (ts.isVariableStatement(node)) {
+			for (const declaration of node.declarationList.declarations) {
+				if (
+					!declaration.initializer ||
+					!ts.isCallExpression(declaration.initializer) ||
+					!ts.isIdentifier(declaration.initializer.expression) ||
+					declaration.initializer.expression.text !== "require" ||
+					declaration.initializer.arguments.length !== 1 ||
+					!ts.isStringLiteralLike(declaration.initializer.arguments[0]) ||
+					(declaration.initializer.arguments[0].text !== "node:module" &&
+						declaration.initializer.arguments[0].text !== "module") ||
+					!ts.isObjectBindingPattern(declaration.name)
+				) {
+					continue;
+				}
+				for (const element of declaration.name.elements) {
+					const importedName =
+						element.propertyName &&
+						(ts.isIdentifier(element.propertyName) || ts.isStringLiteralLike(element.propertyName))
+							? element.propertyName.text
+							: element.name.getText(sourceFile);
+					if (importedName === "createRequire" && ts.isIdentifier(element.name)) {
+						createRequireBindings.add(element.name.text);
+					}
 				}
 			}
 		}
-	});
+		ts.forEachChild(node, collectCreateRequireBindings);
+	};
+	collectCreateRequireBindings(sourceFile);
 	const add = (node: ts.Node, value: string): void => {
 		if (value.startsWith(".")) {
 			const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
@@ -129,6 +132,10 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 			}
 			if (
 				(ts.isIdentifier(expression) && expression.text === "require") ||
+				(ts.isPropertyAccessExpression(expression) &&
+					ts.isIdentifier(expression.expression) &&
+					expression.expression.text === "module" &&
+					expression.name.text === "require") ||
 				// Dynamic import may carry a second import-options argument. The
 				// module specifier is still always its first argument, so inspect it
 				// regardless of the options object's presence.

@@ -24,6 +24,8 @@ export type GraphQLContext = {
 	operationName?: string;
 	/** Controlled manifest symbols selected by this request, committed after variable coercion. */
 	deprecatedSymbols?: readonly string[];
+	/** Per-field ownership for deprecated symbols, used to avoid counting unreachable selections. */
+	deprecatedSymbolOwners?: Readonly<Record<string, readonly string[]>>;
 	/** Request-local low-cardinality stage timings. */
 	requestTiming?: RequestTiming;
 	/** Stable identity shared by Apollo's shallow context clone for request-local memoization. */

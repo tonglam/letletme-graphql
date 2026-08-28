@@ -75,6 +75,7 @@ export type GraphQLLimitResult =
 			rateLimitCostUnits: number;
 			rootFields: readonly string[];
 			deprecatedSymbols: readonly string[];
+			deprecatedSymbolOwners: Readonly<Record<string, readonly string[]>>;
 	  }
 	| {
 			ok: false;
@@ -395,16 +396,16 @@ const reject = (
 const collectDeprecatedVariableSymbols = (
 	value: unknown,
 	inputType: GraphQLInputType,
-	symbols: Set<string>
+	addSymbol: (symbol: string) => void
 ): void => {
 	if (isNonNullType(inputType)) {
-		collectDeprecatedVariableSymbols(value, inputType.ofType, symbols);
+		collectDeprecatedVariableSymbols(value, inputType.ofType, addSymbol);
 		return;
 	}
 	if (value === null || value === undefined) return;
 	if (isListType(inputType)) {
 		for (const item of Array.isArray(value) ? value : [value]) {
-			collectDeprecatedVariableSymbols(item, inputType.ofType, symbols);
+			collectDeprecatedVariableSymbols(item, inputType.ofType, addSymbol);
 		}
 		return;
 	}
@@ -412,7 +413,7 @@ const collectDeprecatedVariableSymbols = (
 		if (typeof value !== "string") return;
 		const enumValue = inputType.getValue(value);
 		if (enumValue?.deprecationReason !== undefined) {
-			symbols.add(`${inputType.name}.${enumValue.name}`);
+			addSymbol(`${inputType.name}.${enumValue.name}`);
 		}
 		return;
 	}
@@ -422,8 +423,8 @@ const collectDeprecatedVariableSymbols = (
 		const supplied = Object.hasOwn(inputValue, field.name);
 		if (!supplied && field.defaultValue === undefined) continue;
 		const fieldValue = supplied ? inputValue[field.name] : field.defaultValue;
-		if (field.deprecationReason !== undefined) symbols.add(`${inputType.name}.${field.name}`);
-		collectDeprecatedVariableSymbols(fieldValue, field.type, symbols);
+		if (field.deprecationReason !== undefined) addSymbol(`${inputType.name}.${field.name}`);
+		collectDeprecatedVariableSymbols(fieldValue, field.type, addSymbol);
 	}
 };
 
@@ -432,7 +433,7 @@ const collectDeprecatedSchemaArgumentDefaults = (
 	schemaArguments: readonly GraphQLArgument[],
 	variables: Record<string, unknown>,
 	variableDefaults: ReadonlyMap<string, unknown>,
-	symbols: Set<string>
+	addSymbol: (symbol: string) => void
 ): void => {
 	const suppliedArguments = new Set((argumentsList ?? []).map((argument) => argument.name.value));
 	for (const argumentNode of argumentsList ?? []) {
@@ -447,7 +448,7 @@ const collectDeprecatedSchemaArgumentDefaults = (
 	}
 	for (const argument of schemaArguments) {
 		if (suppliedArguments.has(argument.name) || argument.defaultValue === undefined) continue;
-		collectDeprecatedVariableSymbols(argument.defaultValue, argument.type, symbols);
+		collectDeprecatedVariableSymbols(argument.defaultValue, argument.type, addSymbol);
 	}
 };
 
@@ -455,13 +456,13 @@ const collectDeprecatedArgumentValue = (
 	argumentNode: ArgumentNode,
 	argument: GraphQLArgument | undefined,
 	variables: Record<string, unknown>,
-	symbols: Set<string>
+	addSymbol: (symbol: string) => void
 ): void => {
 	if (!argument) return;
 	collectDeprecatedVariableSymbols(
 		valueFromASTUntyped(argumentNode.value, variables),
 		argument.type,
-		symbols
+		addSymbol
 	);
 };
 
@@ -470,14 +471,14 @@ const collectDeprecatedArgumentDefaultsAndValues = (
 	schemaArguments: readonly GraphQLArgument[],
 	variables: Record<string, unknown>,
 	variableDefaults: ReadonlyMap<string, unknown>,
-	symbols: Set<string>
+	addSymbol: (symbol: string) => void
 ): void => {
 	collectDeprecatedSchemaArgumentDefaults(
 		argumentsList,
 		schemaArguments,
 		variables,
 		variableDefaults,
-		symbols
+		addSymbol
 	);
 	const argumentsByName = new Map(schemaArguments.map((argument) => [argument.name, argument]));
 	const effectiveVariables = {
@@ -489,7 +490,7 @@ const collectDeprecatedArgumentDefaultsAndValues = (
 			argumentNode,
 			argumentsByName.get(argumentNode.name.value),
 			effectiveVariables,
-			symbols
+			addSymbol
 		);
 	}
 };
@@ -504,7 +505,7 @@ const collectDeprecatedFieldDefaults = (
 	argumentsList: readonly ArgumentNode[] | undefined,
 	variables: Record<string, unknown>,
 	variableDefaults: ReadonlyMap<string, unknown>,
-	symbols: Set<string>
+	addSymbol: (symbol: string) => void
 ): void => {
 	if (!field) return;
 	collectDeprecatedArgumentDefaultsAndValues(
@@ -512,7 +513,7 @@ const collectDeprecatedFieldDefaults = (
 		field.args,
 		variables,
 		variableDefaults,
-		symbols
+		addSymbol
 	);
 };
 
@@ -595,8 +596,11 @@ const selectedDeprecatedSymbols = (
 	reachableFragments: ReadonlySet<string>,
 	variables: Record<string, unknown>,
 	schema?: GraphQLSchema
-): readonly string[] => {
-	if (!schema) return [];
+): {
+	symbols: readonly string[];
+	owners: Readonly<Record<string, readonly string[]>>;
+} => {
+	if (!schema) return { symbols: [], owners: {} };
 	const fragments = new Map(
 		document.definitions
 			.filter(
@@ -622,6 +626,16 @@ const selectedDeprecatedSymbols = (
 	};
 	const typeInfo = new TypeInfo(schema);
 	const symbols = new Set<string>();
+	const owners = new Map<string, Set<string>>();
+	const fieldOwners: Array<string | undefined> = [];
+	const addSymbol = (symbol: string, owner?: string): void => {
+		symbols.add(symbol);
+		if (!owner) return;
+		const owned = owners.get(owner) ?? new Set<string>();
+		owned.add(symbol);
+		owners.set(owner, owned);
+	};
+	const currentFieldOwner = (): string | undefined => fieldOwners.at(-1);
 	const variableDefaultValueNodes = new WeakSet<ASTNode>();
 	const variableDefaults = new Map<string, unknown>();
 	for (const definition of operation.variableDefinitions ?? []) {
@@ -641,19 +655,27 @@ const selectedDeprecatedSymbols = (
 		visitWithTypeInfo(typeInfo, {
 			Field: {
 				enter(node) {
-					if (!executableSelectionIsIncluded(node.directives, variables)) return false;
 					const parentType = typeInfo.getParentType();
 					const field = typeInfo.getFieldDef();
+					const owner = parentType && field ? `${parentType.name}.${field.name}` : undefined;
+					fieldOwners.push(owner);
+					if (!executableSelectionIsIncluded(node.directives, variables)) {
+						fieldOwners.pop();
+						return false;
+					}
 					collectDeprecatedFieldDefaults(
 						field,
 						node.arguments,
 						variables,
 						variableDefaults,
-						symbols
+						(symbol) => addSymbol(symbol, owner)
 					);
 					if (parentType && field?.deprecationReason !== undefined) {
-						symbols.add(`${parentType.name}.${node.name.value}`);
+						addSymbol(`${parentType.name}.${node.name.value}`, owner);
 					}
+				},
+				leave() {
+					fieldOwners.pop();
 				},
 			},
 			InlineFragment: {
@@ -674,7 +696,7 @@ const selectedDeprecatedSymbols = (
 					directive.args,
 					variables,
 					variableDefaults,
-					symbols
+					(symbol) => addSymbol(symbol, currentFieldOwner())
 				);
 			},
 			Argument(node) {
@@ -683,10 +705,10 @@ const selectedDeprecatedSymbols = (
 				const argument = typeInfo.getArgument();
 				const directive = typeInfo.getDirective();
 				if (!directive && parentType && field && argument?.deprecationReason !== undefined) {
-					symbols.add(`${parentType.name}.${field.name}(${node.name.value}:)`);
+					addSymbol(`${parentType.name}.${field.name}(${node.name.value}:)`, currentFieldOwner());
 				}
 				if (directive && argument?.deprecationReason !== undefined) {
-					symbols.add(`@${directive.name}(${node.name.value}:)`);
+					addSymbol(`@${directive.name}(${node.name.value}:)`, currentFieldOwner());
 				}
 			},
 			ObjectField(node) {
@@ -697,7 +719,7 @@ const selectedDeprecatedSymbols = (
 				if (!isInputObjectType(namedParent)) return;
 				const field = namedParent.getFields()[node.name.value];
 				if (field?.deprecationReason !== undefined) {
-					symbols.add(`${namedParent.name}.${field.name}`);
+					addSymbol(`${namedParent.name}.${field.name}`, currentFieldOwner());
 				}
 			},
 			EnumValue(node) {
@@ -706,7 +728,8 @@ const selectedDeprecatedSymbols = (
 				const enumValue = typeInfo.getEnumValue();
 				if (!inputType || enumValue?.deprecationReason === undefined) return;
 				const namedInput = getNamedType(inputType);
-				if (isEnumType(namedInput)) symbols.add(`${namedInput.name}.${enumValue.name}`);
+				if (isEnumType(namedInput))
+					addSymbol(`${namedInput.name}.${enumValue.name}`, currentFieldOwner());
 			},
 		})
 	);
@@ -720,10 +743,15 @@ const selectedDeprecatedSymbols = (
 				: undefined;
 		const inputType = typeFromAST(schema, definition.type);
 		if (inputType && isInputType(inputType)) {
-			collectDeprecatedVariableSymbols(effectiveValue, inputType, symbols);
+			collectDeprecatedVariableSymbols(effectiveValue, inputType, (symbol) => addSymbol(symbol));
 		}
 	}
-	return [...symbols].sort();
+	return {
+		symbols: [...symbols].sort(),
+		owners: Object.fromEntries(
+			[...owners.entries()].map(([owner, ownedSymbols]) => [owner, [...ownedSymbols].sort()])
+		),
+	};
 };
 
 export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
@@ -833,11 +861,13 @@ const accepted = ({
 	weightedComplexity = 0,
 	rootFields = [],
 	deprecatedSymbols = [],
+	deprecatedSymbolOwners = {},
 }: {
 	shape: GraphQLRequestShape;
 	weightedComplexity?: number;
 	rootFields?: Array<{ name: string; uniqueEntryCount: number | null }>;
 	deprecatedSymbols?: readonly string[];
+	deprecatedSymbolOwners?: Readonly<Record<string, readonly string[]>>;
 }): GraphQLLimitResult => {
 	const boundedPublicDeskRequest =
 		rootFields.length > 0 && rootFields.every((field) => BOUNDED_PUBLIC_DESK_ROOTS.has(field.name));
@@ -866,6 +896,7 @@ const accepted = ({
 				: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
 		rootFields: rootFields.map((field) => field.name),
 		deprecatedSymbols,
+		deprecatedSymbolOwners,
 	};
 };
 
@@ -889,7 +920,7 @@ export const validateGraphQLPayloadLimits = (
 		? effectiveRootFieldsFor(operation, fragments)
 		: { fields: [], reachableFragments: new Set<string>() };
 	const rootNames = rootInspection.fields;
-	const deprecatedSymbols = operation
+	const deprecatedTelemetry = operation
 		? selectedDeprecatedSymbols(
 				document,
 				operation,
@@ -897,7 +928,7 @@ export const validateGraphQLPayloadLimits = (
 				variables,
 				schema
 			)
-		: [];
+		: { symbols: [], owners: {} };
 	const onlyReachableDefinitions =
 		operation !== null &&
 		document.definitions.every((definition) =>
@@ -1022,7 +1053,8 @@ export const validateGraphQLPayloadLimits = (
 		shape: operation.operation,
 		weightedComplexity: inspection.complexity,
 		rootFields: inspection.rootFields,
-		deprecatedSymbols,
+		deprecatedSymbols: deprecatedTelemetry.symbols,
+		deprecatedSymbolOwners: deprecatedTelemetry.owners,
 	});
 };
 
@@ -1042,6 +1074,7 @@ export const validateGraphQLRequestLimits = (
 	let rateLimitCostUnits = 0;
 	const rootFields: string[] = [];
 	const deprecatedSymbols = new Set<string>();
+	const deprecatedSymbolOwners = new Map<string, Set<string>>();
 	for (const payload of payloads) {
 		if (!payload || typeof payload !== "object") {
 			return reject("GraphQL request body must be an object", "INVALID_GRAPHQL_REQUEST");
@@ -1054,6 +1087,11 @@ export const validateGraphQLRequestLimits = (
 		rateLimitCostUnits += result.rateLimitCostUnits;
 		rootFields.push(...result.rootFields);
 		for (const symbol of result.deprecatedSymbols) deprecatedSymbols.add(symbol);
+		for (const [owner, symbols] of Object.entries(result.deprecatedSymbolOwners)) {
+			const owned = deprecatedSymbolOwners.get(owner) ?? new Set<string>();
+			for (const symbol of symbols) owned.add(symbol);
+			deprecatedSymbolOwners.set(owner, owned);
+		}
 	}
 	return {
 		ok: true,
@@ -1062,5 +1100,8 @@ export const validateGraphQLRequestLimits = (
 		rateLimitCostUnits: Math.max(1, rateLimitCostUnits),
 		rootFields,
 		deprecatedSymbols: [...deprecatedSymbols].sort(),
+		deprecatedSymbolOwners: Object.fromEntries(
+			[...deprecatedSymbolOwners.entries()].map(([owner, symbols]) => [owner, [...symbols].sort()])
+		),
 	};
 };
