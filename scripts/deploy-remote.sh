@@ -272,6 +272,7 @@ compose exec -T graphql bun -e '
       method: "POST",
       headers: { "Content-Type": "application/json", "X-GraphQL-Service-Token": token },
       body: JSON.stringify({ query, variables }),
+      redirect: "error",
       signal: AbortSignal.timeout(5000),
     });
     const payload = await response.json();
@@ -401,6 +402,7 @@ compose exec -T -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e '
     body: JSON.stringify({ query: `query PublicContract {
       currentEventInfo { season }
     }` }),
+    redirect: "error",
     signal: AbortSignal.timeout(5000),
   });
   const payload = await response.json();

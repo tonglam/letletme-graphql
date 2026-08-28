@@ -78,6 +78,7 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("candidate_contract_passed");
 		expect(deployScript).toContain("PUBLIC_GRAPHQL_URL");
 		expect(deployScript).toContain("public_contract_passed");
+		expect(deployScript).toContain('redirect: "error"');
 	});
 
 	test("cleans up an unaccepted candidate before slot switching", () => {
