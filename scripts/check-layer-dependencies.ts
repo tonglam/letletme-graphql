@@ -44,6 +44,23 @@ const sourceFilesUnder = (directory: string): string[] => {
 export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] => {
 	const modules: ModuleSpecifier[] = [];
 	const createRequireBindings = new Set<string>();
+	const moduleSpecifierFromLoader = (initializer: ts.Expression): string | undefined => {
+		let expression = initializer;
+		while (ts.isAwaitExpression(expression) || ts.isParenthesizedExpression(expression)) {
+			expression = expression.expression;
+		}
+		if (
+			!ts.isCallExpression(expression) ||
+			expression.arguments.length < 1 ||
+			!ts.isStringLiteralLike(expression.arguments[0])
+		) {
+			return undefined;
+		}
+		const callee = expression.expression;
+		if (ts.isIdentifier(callee) && callee.text === "require") return expression.arguments[0].text;
+		if (callee.kind === ts.SyntaxKind.ImportKeyword) return expression.arguments[0].text;
+		return undefined;
+	};
 	const collectCreateRequireBindings = (node: ts.Node): void => {
 		if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
 			if (node.moduleSpecifier.text === "node:module" || node.moduleSpecifier.text === "module") {
@@ -64,15 +81,11 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		}
 		if (ts.isVariableStatement(node)) {
 			for (const declaration of node.declarationList.declarations) {
+				const importedModule = declaration.initializer
+					? moduleSpecifierFromLoader(declaration.initializer)
+					: undefined;
 				if (
-					!declaration.initializer ||
-					!ts.isCallExpression(declaration.initializer) ||
-					!ts.isIdentifier(declaration.initializer.expression) ||
-					declaration.initializer.expression.text !== "require" ||
-					declaration.initializer.arguments.length !== 1 ||
-					!ts.isStringLiteralLike(declaration.initializer.arguments[0]) ||
-					(declaration.initializer.arguments[0].text !== "node:module" &&
-						declaration.initializer.arguments[0].text !== "module") ||
+					(importedModule !== "node:module" && importedModule !== "module") ||
 					!ts.isObjectBindingPattern(declaration.name)
 				) {
 					continue;

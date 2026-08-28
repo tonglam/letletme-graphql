@@ -132,6 +132,17 @@ test("layer checker inspects CommonJS module.require calls", () => {
 	]);
 });
 
+test("layer checker finds createRequire aliases from dynamic node:module imports", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'async function loadService() { const { createRequire: makeRequire } = await import("node:module"); return makeRequire(import.meta.url); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
+});
+
 test("layer checker recognizes relative module augmentations", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.ts",
