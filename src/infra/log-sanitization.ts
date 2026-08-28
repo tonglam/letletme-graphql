@@ -3,13 +3,13 @@ const DATABASE_STATEMENT =
 const CONNECTION_URL = /\b(?:postgres(?:ql)?|redis|rediss):\/\/[^\s"']+/gi;
 const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)([^@\s/]+)@/gi;
 const AUTHORIZATION_CREDENTIAL_QUOTED =
-	/(?<![a-z0-9_-])(["']?)(authorization)\1(\s*[=:]\s*)(["'])([\s\S]*?)\4/gi;
+	/(?<![a-z0-9_-])(["']?)(authorization)\1(\s*[=:]\s*)(["'])(?:\\[\s\S]|(?!\4)[\s\S])*\4/gi;
 const AUTHORIZATION_CREDENTIAL_UNQUOTED =
 	/(?<![a-z0-9_-])(["']?)(authorization)\1(\s*[=:]\s*)(?:(?:bearer|basic)\s+)?(?!["'])([^\s,;}]+)/gi;
 const SECRET_KEY =
 	"(?:(?:[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*)[_-])?(?:password|passwd|pwd|token|secret|api[_-]?key)";
 const SECRET_ASSIGNMENT_QUOTED = new RegExp(
-	`(?<![a-z0-9_-])(["']?)(${SECRET_KEY})\\1(\\s*[=:]\\s*)(?:(?:bearer|basic)\\s+)?(["'])([\\s\\S]*?)\\4`,
+	`(?<![a-z0-9_-])(["']?)(${SECRET_KEY})\\1(\\s*[=:]\\s*)(?:(?:bearer|basic)\\s+)?(["'])(?:\\\\[\\s\\S]|(?!\\4)[\\s\\S])*\\4`,
 	"gi"
 );
 const SECRET_ASSIGNMENT_UNQUOTED = new RegExp(

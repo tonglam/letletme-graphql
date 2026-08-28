@@ -34,6 +34,10 @@ describe("server log redaction", () => {
 			["authorization=Basic dXNlcjpwYXNz", "authorization=[REDACTED]"],
 			['Authorization: "Bearer token with spaces"', 'Authorization: "[REDACTED]"'],
 			['authorization="opaque value with spaces"', 'authorization="[REDACTED]"'],
+			[
+				'Authorization: "Digest username=\\"alice\\", response=\\"secret\\""',
+				'Authorization: "[REDACTED]"',
+			],
 		] as const) {
 			const sanitized = sanitizeLogText(source);
 			expect(sanitized).toBe(expected);
@@ -82,6 +86,7 @@ describe("server log redaction", () => {
 				'LETLETME_DATA_API_KEY="[REDACTED]"',
 				"correct horse battery staple",
 			],
+			['token="part one \\"part two\\""', 'token="[REDACTED]"', 'part one \\"part two\\"'],
 		] as const) {
 			const sanitized = sanitizeLogText(source);
 			expect(sanitized).toBe(expected);
