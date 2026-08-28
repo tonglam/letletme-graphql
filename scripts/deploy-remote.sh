@@ -109,8 +109,15 @@ candidate_env_next=$(mktemp "$VPS_WORKDIR/.env.deploy.$inactive_slot.next.XXXXXX
 docker_config_dir=$(mktemp -d "$VPS_WORKDIR/.docker-config.XXXXXX")
 chmod 700 "$docker_config_dir"
 export DOCKER_CONFIG="$docker_config_dir"
+candidate_started=false
+promotion_committed=false
+manifest=""
 cleanup_sensitive_files() {
+  if [ "${candidate_started:-false}" = true ] && [ "${promotion_committed:-false}" != true ]; then
+    compose down --remove-orphans >/dev/null 2>&1 || true
+  fi
   if [ -n "$candidate_env_next" ]; then rm -f -- "$candidate_env_next"; fi
+  if [ -n "$manifest" ]; then rm -f -- "$manifest"; fi
   if [ -n "$docker_config_dir" ]; then rm -rf -- "$docker_config_dir"; fi
 }
 trap cleanup_sensitive_files EXIT
@@ -217,6 +224,7 @@ retire_legacy_bootstrap_before_blue() {
   fi
 }
 retire_legacy_bootstrap_before_blue
+candidate_started=true
 compose up -d --no-deps --no-build --force-recreate graphql
 
 candidate_url="http://127.0.0.1:$candidate_port"
@@ -244,7 +252,7 @@ test -n "$candidate_container"
 test "$(docker inspect --format '{{.Config.Image}}' "$candidate_container")" = "$IMAGE_REF"
 test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$candidate_container")" = "$DEPLOY_SHA"
 
-anonymous_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+anonymous_status=$(curl --silent --show-error --max-time 5 --output /dev/null --write-out '%{http_code}' \
   --header 'Content-Type: application/json' \
   --data '{"query":"query { currentEventInfo { season } }"}' \
   "$candidate_url/graphql")
@@ -348,12 +356,24 @@ rollback_switch() {
 rollback_on_error() {
   local status=$?
   trap - ERR
-  if ! rollback_switch; then
+  trap - INT TERM HUP
+  if [ "${promotion_committed:-false}" != true ] && ! rollback_switch; then
     echo "automatic rollback could not prove restoration of $old_slot" >&2
   fi
   exit "$status"
 }
 trap rollback_on_error ERR
+rollback_on_signal() {
+  local status="$1"
+  trap - ERR INT TERM HUP
+  if [ "${promotion_committed:-false}" != true ] && ! rollback_switch; then
+    echo "signal interrupted cutover and rollback could not be verified" >&2
+  fi
+  exit "$status"
+}
+trap 'rollback_on_signal 129' HUP
+trap 'rollback_on_signal 130' INT
+trap 'rollback_on_signal 143' TERM
 switched=true
 sudo -n "$SWITCH_HELPER" "$inactive_slot"
 
@@ -383,6 +403,7 @@ compose exec -T -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e '
   if (!token || !url) throw new Error("Missing public acceptance configuration");
   const response = await fetch(url, {
     method: "POST",
+    redirect: "error",
     headers: { "Content-Type": "application/json", "X-GraphQL-Service-Token": token },
     body: JSON.stringify({ query: `query PublicContract {
       currentEventInfo { season }
@@ -428,8 +449,12 @@ jq -n \
   '{deployedAt:$deployedAt,commit:$commit,image:$image,oldSlot:$oldSlot,newSlot:$newSlot,oldImage:$oldImage}' \
   > "$manifest"
 chmod 600 "$manifest"
+trap '' INT TERM HUP
 mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"
+manifest=""
+promotion_committed=true
 switched=false
+trap - INT TERM HUP
 
 # The durable manifest is the point after which cleanup is allowed. Keep both
 # slot image IDs and remove only older images in this repository; Docker also

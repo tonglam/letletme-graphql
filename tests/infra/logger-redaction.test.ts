@@ -67,4 +67,23 @@ describe("server log redaction", () => {
 			expect(sanitized).not.toContain(credential);
 		}
 	});
+
+	test("redacts prefixed secret keys and complete quoted values", () => {
+		for (const [source, expected, credential] of [
+			[
+				'X-GraphQL-Service-Token: "service token with spaces"',
+				'X-GraphQL-Service-Token: "[REDACTED]"',
+				"service token with spaces",
+			],
+			[
+				'LETLETME_DATA_API_KEY="correct horse battery staple"',
+				'LETLETME_DATA_API_KEY="[REDACTED]"',
+				"correct horse battery staple",
+			],
+		] as const) {
+			const sanitized = sanitizeLogText(source);
+			expect(sanitized).toBe(expected);
+			expect(sanitized).not.toContain(credential);
+		}
+	});
 });

@@ -11,6 +11,8 @@ describe("Redis workload isolation", () => {
 		expect(redisSource).toContain(
 			"Promise.all([connectClient(redis), connectClient(getRateLimitRedis())])"
 		);
+		expect(redisSource).toContain("assertRedisWorkloadIsolation");
+		expect(redisSource).toContain('redis.info("replication")');
 		expect(redisSource).toContain("clients.map((current) => current.quit())");
 	});
 });

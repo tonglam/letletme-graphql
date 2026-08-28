@@ -164,33 +164,41 @@ jobs:
           test -n "$VPS_HOST"
           test -n "$VPS_USER"
           test -n "$GRAPHQL_ENV"
+          test -n "$GHCR_TOKEN"
           ssh_common=(-i "$SSH_DIR/id_ed25519"
             -o BatchMode=yes -o StrictHostKeyChecking=yes
             -o IdentitiesOnly=yes -o UserKnownHostsFile="$SSH_DIR/known_hosts")
           target="$VPS_USER@$VPS_HOST"
-          remote_env=$(ssh "${ssh_common[@]}" "$target" 'umask 077; mktemp /tmp/letletme-graphql-env.XXXXXX')
-          remote_token=$(ssh "${ssh_common[@]}" "$target" 'umask 077; mktemp /tmp/letletme-graphql-token.XXXXXX')
-          cleanup_remote() {
-            set +e
-            ssh "${ssh_common[@]}" "$target" "rm -f -- $(printf '%q' "$remote_env") $(printf '%q' "$remote_token")"
-          }
-          trap cleanup_remote EXIT
-          printf '%s' "$GRAPHQL_ENV" | ssh "${ssh_common[@]}" "$target" "cat > $(printf '%q' "$remote_env")"
-          printf '%s' "$GHCR_TOKEN" | ssh "${ssh_common[@]}" "$target" "cat > $(printf '%q' "$remote_token")"
+          env_b64=$(printf '%s' "$GRAPHQL_ENV" | base64 | tr -d '\n')
+          token_b64=$(printf '%s' "$GHCR_TOKEN" | base64 | tr -d '\n')
           printf -v deploy_sha_q '%q' "$DEPLOY_SHA"
           printf -v image_ref_q '%q' "$IMAGE_REF"
           printf -v ghcr_user_q '%q' "$GHCR_USER"
           printf -v workdir_q '%q' "$VPS_WORKDIR"
-          printf -v env_q '%q' "$remote_env"
-          printf -v token_q '%q' "$remote_token"
           printf -v active_file_q '%q' "${ACTIVE_SLOT_FILE:-/var/lib/letletme-graphql/active-slot}"
           printf -v helper_q '%q' "${SWITCH_HELPER:-/usr/local/sbin/letletme-graphql-switch-slot}"
           printf -v public_health_q '%q' "$PUBLIC_GRAPHQL_HEALTH_URL"
           printf -v public_graphql_q '%q' "$PUBLIC_GRAPHQL_URL"
           printf -v rollout_q '%q' "$RATE_LIMIT_ROLLOUT"
-          ssh "${ssh_common[@]}" "$target" \
-            "DEPLOY_SHA=$deploy_sha_q IMAGE_REF=$image_ref_q GHCR_USER=$ghcr_user_q GHCR_TOKEN_FILE=$token_q GRAPHQL_ENV_FILE=$env_q VPS_WORKDIR=$workdir_q ACTIVE_SLOT_FILE=$active_file_q SWITCH_HELPER=$helper_q PUBLIC_GRAPHQL_HEALTH_URL=$public_health_q PUBLIC_GRAPHQL_URL=$public_graphql_q RATE_LIMIT_ROLLOUT=$rollout_q bash -s" \
-            < scripts/deploy-remote.sh
+          printf -v env_b64_q '%q' "$env_b64"
+          printf -v token_b64_q '%q' "$token_b64"
+          {
+            printf '%s\n' 'set -euo pipefail'
+            printf '%s\n' 'umask 077'
+            printf '%s\n' 'remote_env=$(mktemp /tmp/letletme-graphql-env.XXXXXX)'
+            printf '%s\n' 'remote_token=$(mktemp /tmp/letletme-graphql-token.XXXXXX)'
+            printf '%s\n' 'cleanup_remote() { rm -f -- "$remote_env" "$remote_token"; }'
+            printf '%s\n' 'trap cleanup_remote EXIT'
+            printf '%s\n' 'trap '\''cleanup_remote; exit 129'\'' HUP'
+            printf '%s\n' 'trap '\''cleanup_remote; exit 130'\'' INT'
+            printf '%s\n' 'trap '\''cleanup_remote; exit 143'\'' TERM'
+            printf 'printf %%s %s | base64 -d > "$remote_env"\n' "$env_b64_q"
+            printf 'printf %%s %s | base64 -d > "$remote_token"\n' "$token_b64_q"
+            printf 'DEPLOY_SHA=%s IMAGE_REF=%s GHCR_USER=%s GHCR_TOKEN_FILE="$remote_token" GRAPHQL_ENV_FILE="$remote_env" VPS_WORKDIR=%s ACTIVE_SLOT_FILE=%s SWITCH_HELPER=%s PUBLIC_GRAPHQL_HEALTH_URL=%s PUBLIC_GRAPHQL_URL=%s RATE_LIMIT_ROLLOUT=%s bash -s <<'\''__LETLETME_DEPLOY__'\''\n' \
+              "$deploy_sha_q" "$image_ref_q" "$ghcr_user_q" "$workdir_q" "$active_file_q" "$helper_q" "$public_health_q" "$public_graphql_q" "$rollout_q"
+            cat scripts/deploy-remote.sh
+            printf '%s\n' '__LETLETME_DEPLOY__'
+          } | ssh "${ssh_common[@]}" "$target" bash -s
 
       - name: Promote verified digest to latest
         run: |

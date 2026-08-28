@@ -125,6 +125,31 @@ describe("production deployment workflow", () => {
 		);
 	});
 
+	test("protects the public token probe and candidate lifecycle on interruption", () => {
+		expect(deployScript).toContain('redirect: "error"');
+		expect(deployScript).toContain("--max-time 5");
+		expect(deployScript).toContain("candidate_started=true");
+		expect(deployScript).toContain("compose down --remove-orphans >/dev/null 2>&1 || true");
+		expect(deployScript).toContain("trap 'rollback_on_signal 129' HUP");
+		expect(deployScript).toContain("trap 'rollback_on_signal 130' INT");
+		expect(deployScript).toContain("trap 'rollback_on_signal 143' TERM");
+		expect(deployScript).toContain("promotion_committed=true");
+	});
+
+	test("uploads deployment secrets and runs cleanup inside one remote shell", () => {
+		const deployStep = workflow.slice(
+			workflow.indexOf("- name: Deploy candidate to inactive slot"),
+			workflow.indexOf("- name: Promote verified digest to latest")
+		);
+		expect(deployStep).toContain("remote_env=$(mktemp /tmp/letletme-graphql-env.XXXXXX)");
+		expect(deployStep).toContain("remote_token=$(mktemp /tmp/letletme-graphql-token.XXXXXX)");
+		expect(deployStep).toContain("trap cleanup_remote EXIT");
+		expect(deployStep).toContain('base64 -d > "$remote_env"');
+		expect(deployStep).toContain('base64 -d > "$remote_token"');
+		expect(deployStep).not.toContain("remote_env=$(ssh");
+		expect(deployStep).not.toContain("cleanup_remote() {\n            set +e\n            ssh");
+	});
+
 	test("retires the implicit legacy project only before canonical blue reuses port 4000", () => {
 		const retireAt = deployScript.indexOf("retire_legacy_bootstrap_before_blue");
 		const candidateUpAt = deployScript.indexOf(
