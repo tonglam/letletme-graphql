@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type Redis from "ioredis";
+import type { DataSqlContractProbe } from "../contracts/data-sql-contract";
 import type { QueryExecutor } from "./database";
 import { metrics } from "./metrics";
 
@@ -67,7 +68,7 @@ export type BriefingWeekPayload = {
 	sections: BriefingSection[];
 };
 
-type ActiveMetadata = {
+export type ActiveMetadata = {
 	publication_id: string;
 	scope_key: string;
 	revision: string | number;
@@ -231,8 +232,9 @@ export function parseBriefingWeekPayload(
 const metadataDate = (value: string | Date | null): string | null => iso(value);
 
 const hasLocalePair = (
-	manifest: ActiveMetadata["locale_manifest"]
+	manifest: unknown
 ): manifest is Record<BriefingLocale, { bytes: number; sha256: string }> =>
+	isRecord(manifest) &&
 	["en", "zh-CN"].every((locale) => {
 		const entry: unknown = manifest[locale];
 		return (
@@ -251,17 +253,224 @@ const toMetadata = (row: ActiveMetadata): ActiveMetadata => ({
 	locale_manifest: row.locale_manifest ?? {},
 });
 
-async function activeMetadata(database: QueryExecutor): Promise<ActiveMetadata | null> {
-	const result = await database.query<ActiveMetadata>(
-		`SELECT publication_id, scope_key, revision, schema_version, season_code, target_event_id, event_name, deadline_time, state, servable, source_checked_at, published_at, valid_until, locale_manifest
-		 FROM content.briefing_active_publication
-		 WHERE scope_key = $1
-		 ORDER BY revision DESC
-		 LIMIT 1`,
-		["week"]
-	);
-	const row = result.rows[0];
-	return row ? toMetadata(row) : null;
+/**
+ * Validate the active Briefing metadata row before it is treated as an
+ * authority record.  The direct Data contract calls this same shape guard
+ * after executing the reader-role query, so a planner-visible row cannot
+ * mask a missing publication, invalid revision, or incomplete locale
+ * manifest.
+ */
+export const parseBriefingActiveMetadata = (
+	value: unknown,
+	expectedPublicationId: string
+): ActiveMetadata | null => {
+	if (!isRecord(value)) return null;
+	const revision = typeof value.revision === "number" ? value.revision : Number(value.revision);
+	const state = value.state;
+	if (
+		typeof value.publication_id !== "string" ||
+		value.publication_id !== expectedPublicationId ||
+		value.scope_key !== "week" ||
+		!Number.isSafeInteger(revision) ||
+		revision <= 0 ||
+		value.schema_version !== 1 ||
+		(state !== "READY" && state !== "EMPTY") ||
+		typeof value.servable !== "boolean" ||
+		typeof value.season_code !== "string" ||
+		(value.target_event_id !== null && !Number.isSafeInteger(value.target_event_id)) ||
+		(value.event_name !== null && typeof value.event_name !== "string") ||
+		!iso(value.source_checked_at) ||
+		!iso(value.published_at) ||
+		(value.valid_until !== null && !iso(value.valid_until)) ||
+		!hasLocalePair(value.locale_manifest)
+	) {
+		return null;
+	}
+	return toMetadata({
+		...(value as Omit<ActiveMetadata, "revision" | "locale_manifest">),
+		revision,
+		locale_manifest: value.locale_manifest,
+	});
+};
+
+export const BRIEFING_ACTIVE_METADATA_SQL = `
+	SELECT publication_id, scope_key, revision, schema_version, season_code, target_event_id, event_name, deadline_time, state, servable, source_checked_at, published_at, valid_until, locale_manifest
+	FROM content.briefing_active_publication
+	WHERE scope_key = $1
+	ORDER BY revision DESC
+	LIMIT 1
+`;
+
+export const BRIEFING_EVENT_CONTEXT_SQL = `
+	SELECT EXISTS (
+		SELECT 1
+		FROM fpl.events event
+		JOIN fpl.seasons season ON season.season_id = event.season_id
+		WHERE season.is_current AND (event.is_current OR event.is_next)
+	) AS exists
+`;
+
+export const BRIEFING_PAYLOAD_FALLBACK_SQL = `
+	SELECT payload, payload_bytes, payload_sha256
+	FROM content.publication_payloads
+	WHERE publication_id = $1 AND locale = $2
+	LIMIT 1
+`;
+
+const BRIEFING_PAYLOAD_FALLBACK_CONTRACT_SQL = `
+	SELECT payload, payload_bytes, payload_sha256
+	FROM content.publication_payloads
+	WHERE publication_id = (
+		SELECT publication_id
+		FROM content.briefing_active_publication
+		WHERE scope_key = $1
+		ORDER BY revision DESC
+		LIMIT 1
+	)
+	AND locale = $2
+	LIMIT 1
+`;
+
+export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "briefing.active-metadata",
+		sql: BRIEFING_ACTIVE_METADATA_SQL,
+		values: ["week"],
+		runtime: "must-return-briefing-metadata",
+		resultTypes: [
+			{
+				relation: "content.briefing_active_publication",
+				column: "deadline_time",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "content.briefing_active_publication",
+				column: "source_checked_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "content.briefing_active_publication",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "content.briefing_active_publication",
+				column: "valid_until",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "content.briefing_active_publication",
+				column: "servable",
+				pgType: "boolean",
+			},
+			{
+				relation: "content.briefing_active_publication",
+				column: "locale_manifest",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{
+				relation: "content.publication_payloads",
+				column: "payload_bytes",
+				pgType: "integer",
+			},
+			{
+				relation: "content.publication_payloads",
+				column: "payload_sha256",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+		],
+	},
+	{
+		name: "briefing.event-context",
+		sql: BRIEFING_EVENT_CONTEXT_SQL,
+		values: [],
+	},
+	{
+		name: "briefing.payload-fallback",
+		sql: BRIEFING_PAYLOAD_FALLBACK_CONTRACT_SQL,
+		values: ["week", "en"],
+		runtime: "must-return-briefing",
+		resultTypes: [
+			{
+				relation: "content.publication_payloads",
+				column: "payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+		],
+	},
+	{
+		name: "briefing.payload-fallback-zh-CN",
+		sql: BRIEFING_PAYLOAD_FALLBACK_CONTRACT_SQL,
+		values: ["week", "zh-CN"],
+		runtime: "must-return-briefing",
+		resultTypes: [
+			{
+				relation: "content.publication_payloads",
+				column: "payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+		],
+	},
+];
+
+type ActiveMetadataRead = {
+	metadata: ActiveMetadata | null;
+	invalid: boolean;
+	publicationId: string | null;
+	revision: number | null;
+	sourceCheckedAt: string | null;
+	publishedAt: string | null;
+};
+
+const emptyActiveMetadataRead = (): ActiveMetadataRead => ({
+	metadata: null,
+	invalid: false,
+	publicationId: null,
+	revision: null,
+	sourceCheckedAt: null,
+	publishedAt: null,
+});
+
+const observedMetadata = (row: unknown): Omit<ActiveMetadataRead, "metadata" | "invalid"> => {
+	if (!isRecord(row)) {
+		return {
+			publicationId: null,
+			revision: null,
+			sourceCheckedAt: null,
+			publishedAt: null,
+		};
+	}
+	const revision = typeof row.revision === "number" ? row.revision : Number(row.revision);
+	return {
+		publicationId: typeof row.publication_id === "string" ? row.publication_id : null,
+		revision: Number.isSafeInteger(revision) && revision > 0 ? revision : null,
+		sourceCheckedAt: metadataDate(
+			typeof row.source_checked_at === "string" || row.source_checked_at instanceof Date
+				? row.source_checked_at
+				: null
+		),
+		publishedAt: metadataDate(
+			typeof row.published_at === "string" || row.published_at instanceof Date
+				? row.published_at
+				: null
+		),
+	};
+};
+
+async function activeMetadata(database: QueryExecutor): Promise<ActiveMetadataRead> {
+	const result = await database.query<ActiveMetadata>(BRIEFING_ACTIVE_METADATA_SQL, ["week"]);
+	const row: unknown = result.rows[0];
+	if (row === undefined || row === null) return emptyActiveMetadataRead();
+	const observed = observedMetadata(row);
+	const publicationId = observed.publicationId;
+	const metadata = publicationId === null ? null : parseBriefingActiveMetadata(row, publicationId);
+	return metadata
+		? { metadata, invalid: false, ...observed }
+		: { metadata: null, invalid: true, ...observed };
 }
 
 const payloadKey = (revision: number, locale: BriefingLocale): string =>
@@ -285,6 +494,32 @@ const validateAgainstMetadata = (
 		Buffer.byteLength(canonicalRaw, "utf8") === Number(manifest.bytes) &&
 		sha256(canonicalRaw) === manifest.sha256
 	);
+};
+
+/**
+ * Decode one PostgreSQL fallback row using the same payload integrity checks
+ * as the production reader. The direct Data contract calls this helper with
+ * a real authority row, so a schema-compatible JSON value cannot hide a
+ * payload checksum, byte-count, publication, or revision mismatch.
+ */
+export const parseBriefingFallbackRow = (
+	row: unknown,
+	locale: BriefingLocale,
+	metadata: ActiveMetadata
+): BriefingWeekPayload | null => {
+	if (!isRecord(row)) return null;
+	const payload = parseBriefingWeekPayload(row.payload, locale);
+	if (!payload) return null;
+	const manifest = metadata.locale_manifest[locale];
+	if (!manifest || typeof row.payload_sha256 !== "string") return null;
+	const canonicalRaw = serialized(payload);
+	if (
+		Number(row.payload_bytes) !== Buffer.byteLength(canonicalRaw, "utf8") ||
+		row.payload_sha256 !== manifest.sha256
+	) {
+		return null;
+	}
+	return validateAgainstMetadata(payload, locale, metadata, canonicalRaw) ? payload : null;
 };
 
 export type BriefingWeekRead = {
@@ -311,14 +546,7 @@ const unavailable = (state: BriefingState = "UNAVAILABLE"): BriefingWeekRead => 
 
 async function hasCurrentOrNextEvent(database: QueryExecutor): Promise<boolean> {
 	try {
-		const result = await database.query<{ exists: boolean }>(
-			`SELECT EXISTS (
-				SELECT 1
-				FROM fpl.events event
-				JOIN fpl.seasons season ON season.season_id = event.season_id
-				WHERE season.is_current AND (event.is_current OR event.is_next)
-			) AS exists`
-		);
+		const result = await database.query<{ exists: boolean }>(BRIEFING_EVENT_CONTEXT_SQL);
 		return result.rows[0]?.exists === true;
 	} catch {
 		// Content publication must fail closed as NOT_PUBLISHED when lifecycle
@@ -333,12 +561,23 @@ export async function readBriefingWeek(
 	redis: Redis,
 	locale: BriefingLocale
 ): Promise<BriefingWeekRead> {
-	let metadata: ActiveMetadata | null;
+	let active: ActiveMetadataRead;
 	try {
-		metadata = await activeMetadata(database);
+		active = await activeMetadata(database);
 	} catch {
 		return unavailable();
 	}
+	if (active.invalid) {
+		recordReaderEvent("corruption");
+		return {
+			...unavailable(),
+			publicationId: active.publicationId,
+			revision: active.revision,
+			sourceCheckedAt: active.sourceCheckedAt,
+			publishedAt: active.publishedAt,
+		};
+	}
+	const metadata = active.metadata;
 	if (!metadata)
 		return (await hasCurrentOrNextEvent(database))
 			? unavailable("NOT_PUBLISHED")
@@ -469,21 +708,9 @@ export async function readBriefingWeek(
 				payload: unknown;
 				payload_bytes: number;
 				payload_sha256: string;
-			}>(
-				`SELECT payload, payload_bytes, payload_sha256 FROM content.publication_payloads WHERE publication_id = $1 AND locale = $2 LIMIT 1`,
-				[metadata.publication_id, locale]
-			);
+			}>(BRIEFING_PAYLOAD_FALLBACK_SQL, [metadata.publication_id, locale]);
 			const row = fallback.rows[0];
-			const parsed = row ? parseBriefingWeekPayload(row.payload, locale) : null;
-			const manifest = metadata.locale_manifest[locale];
-			if (
-				parsed &&
-				manifest &&
-				Number(row.payload_bytes) === Buffer.byteLength(serialized(parsed), "utf8") &&
-				row.payload_sha256 === manifest.sha256 &&
-				validateAgainstMetadata(parsed, locale, metadata, serialized(parsed))
-			)
-				payload = parsed;
+			payload = row ? parseBriefingFallbackRow(row, locale, metadata) : null;
 			if (payload && !redisUnavailable) recordReaderEvent("repair");
 		} catch {
 			return {

@@ -88,8 +88,7 @@ export const verifyWebsitePrincipal = (headers: Headers): Principal | null => {
 		typeof envelope.iat === "number" && Number.isSafeInteger(envelope.iat) ? envelope.iat : null;
 	const expiresAt =
 		typeof envelope.exp === "number" && Number.isSafeInteger(envelope.exp) ? envelope.exp : null;
-	const hasLegacyFields = hasExactFields(envelope, ["aud", "uid", "eid", "evat", "iat", "exp"]);
-	const hasPlatformAdminFields = hasExactFields(envelope, [
+	const hasCanonicalFields = hasExactFields(envelope, [
 		"aud",
 		"uid",
 		"eid",
@@ -99,11 +98,11 @@ export const verifyWebsitePrincipal = (headers: Headers): Principal | null => {
 		"exp",
 	]);
 	if (
-		(!hasLegacyFields && !hasPlatformAdminFields) ||
+		!hasCanonicalFields ||
 		envelope.aud !== "letletme-graphql" ||
 		typeof envelope.uid !== "string" ||
 		envelope.uid.length === 0 ||
-		(envelope.adm !== undefined && typeof envelope.adm !== "boolean") ||
+		typeof envelope.adm !== "boolean" ||
 		issuedAt === null ||
 		expiresAt === null ||
 		issuedAt > now + 30 ||

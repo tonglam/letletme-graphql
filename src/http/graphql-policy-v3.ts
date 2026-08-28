@@ -53,9 +53,7 @@ export const graphQLV3PreAuthRateLimitChecks = (
 	if (ingress.trafficClass !== "mini") return [];
 	// The IP bucket is strictly an ingress abuse guard. Charging it before
 	// session validation bounds invalid-token database work, while leaving the
-	// global and weighted buckets together in the later atomic stage. Verified
-	// Mini v2 envelopes always carry abuseSubject; the device subject is a safe
-	// bounded fallback for manually constructed contexts.
+	// global and weighted buckets together in the later atomic stage.
 	return [
 		check({
 			id: ingress.abuseSubject ? "mini-ip-abuse-request" : "mini-ingress-request",
@@ -76,7 +74,7 @@ export const graphQLV3EarlyFailureRateLimitChecks = (
 ): readonly TokenBucketCheckV3[] => [globalRequestCheck(policy)];
 
 export type GraphQLV3PrincipalAdmission = {
-	readonly audience: "authenticated" | "anonymous" | "workload" | "service" | "legacy";
+	readonly audience: "authenticated" | "anonymous" | "workload" | "service";
 	readonly checks: readonly TokenBucketCheckV3[];
 };
 
@@ -170,25 +168,7 @@ export const graphQLV3PrincipalAdmission = ({
 					}),
 				],
 			};
-		case "legacy":
-			return {
-				audience: "legacy",
-				checks: [
-					globalRequest,
-					check({
-						id: "legacy-class-request",
-						scope: "client",
-						subject: requiredSubject(ingress),
-						policy: policy.trafficClasses.legacy.classRequest,
-					}),
-					check({
-						id: "legacy-weighted",
-						scope: "client",
-						subject: principal ? graphQLPrincipalSubject(principal) : requiredSubject(ingress),
-						policy: policy.trafficClasses.legacy.weighted,
-						cost: boundedCost,
-					}),
-				],
-			};
+		default:
+			throw new Error("Untrusted ingress cannot enter rate-limit admission");
 	}
 };

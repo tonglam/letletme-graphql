@@ -1,4 +1,5 @@
 import { GraphQLError } from "graphql";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { GraphQLContext } from "../../graphql/context";
 import { getCoreFixtureSnapshot, type CoreFixtureData } from "../../infra/data-snapshot";
 import { eventsService } from "../events/service";
@@ -11,6 +12,47 @@ import { playersService } from "../players/service";
 import { measureRequestStage } from "../../http/request-timing";
 
 export const MAX_GAMEWEEK_ID = 38;
+
+export const GAMEWEEK_HISTORICAL_TEAM_EXACT_SQL = `
+	SELECT DISTINCT ON (player_code) player_code, team_id
+	FROM fpl.player_fixture_stats
+	WHERE season_id = $1
+	  AND player_code = ANY($2::integer[])
+	  AND event_id = $3
+	ORDER BY player_code, event_id DESC, fixture_id DESC
+`;
+
+export const GAMEWEEK_HISTORICAL_TEAM_AS_OF_SQL = `
+	SELECT DISTINCT ON (player_code) player_code, team_id
+	FROM fpl.player_fixture_stats
+	WHERE season_id = $1
+	  AND player_code = ANY($2::integer[])
+	  AND event_id <= $3
+	ORDER BY player_code, event_id DESC, fixture_id DESC
+`;
+
+export const GAMEWEEK_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "gameweek.historical-team-exact",
+		sql: GAMEWEEK_HISTORICAL_TEAM_EXACT_SQL,
+		values: [2026, [26_001], 1],
+		runtime: "must-return-historical-team",
+		resultTypes: [
+			{ relation: "fpl.player_fixture_stats", column: "player_code", pgType: "integer" },
+			{ relation: "fpl.player_fixture_stats", column: "team_id", pgType: "integer" },
+		],
+	},
+	{
+		name: "gameweek.historical-team-as-of",
+		sql: GAMEWEEK_HISTORICAL_TEAM_AS_OF_SQL,
+		values: [2026, [26_001], 1],
+		runtime: "must-return-historical-team",
+		resultTypes: [
+			{ relation: "fpl.player_fixture_stats", column: "player_code", pgType: "integer" },
+			{ relation: "fpl.player_fixture_stats", column: "team_id", pgType: "integer" },
+		],
+	},
+];
 
 export type GameweekLifecycleState = "SCHEDULED" | "PROVISIONAL" | "SETTLED";
 export type GameweekSectionState = "PENDING" | "AVAILABLE" | "UNAVAILABLE";
@@ -316,15 +358,15 @@ const resolveHistoricalTeamIds = async (
 		.filter((code) => Number.isSafeInteger(code) && code > 0);
 	if (playerCodes.length === 0) return fallback;
 	try {
-		const result = await context.database.query<{ player_code: number; team_id: number }>(
-			`SELECT DISTINCT ON (player_code) player_code, team_id
-				 FROM fpl.player_fixture_stats
-				 WHERE season_id = $1
-				   AND player_code = ANY($2::integer[])
-				   AND event_id ${eventId === upperBoundEventId ? "= $3" : "<= $3"}
-				 ORDER BY player_code, event_id DESC, fixture_id DESC`,
-			[context.currentSeason.seasonId, playerCodes, eventId]
-		);
+		const sql =
+			eventId === upperBoundEventId
+				? GAMEWEEK_HISTORICAL_TEAM_EXACT_SQL
+				: GAMEWEEK_HISTORICAL_TEAM_AS_OF_SQL;
+		const result = await context.database.query<{ player_code: number; team_id: number }>(sql, [
+			context.currentSeason.seasonId,
+			playerCodes,
+			eventId,
+		]);
 		const teamByCode = new Map(
 			result.rows
 				.filter(

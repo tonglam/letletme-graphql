@@ -100,8 +100,8 @@ rate_limit_storage_failures_total{scope="service-weighted",mode="closed"} 3
 	it("reports enforced and shadow rollout alarms independently", () => {
 		const summary = summarizeRateLimitTotals(
 			new Map([
-				["mini|market|workload|legacy_allowed", 90],
-				["mini|market|workload|legacy_denied", 10],
+				["mini|market|workload|allowed", 90],
+				["mini|market|workload|denied", 10],
 				["mini|market|workload|would_allow", 60],
 				["mini|market|workload|would_deny", 40],
 				["mini|market|global|would_deny", 2],
@@ -109,8 +109,8 @@ rate_limit_storage_failures_total{scope="service-weighted",mode="closed"} 3
 		);
 		expect(summary.interactiveDeniedRate).toBe(0.1);
 		expect(summary.totalDecisions).toBe(202);
-		expect(summary.v3Decisions).toBe(102);
-		expect(summary.enforcedDecisions).toBe(0);
+		expect(summary.v3Decisions).toBe(202);
+		expect(summary.enforcedDecisions).toBe(100);
 		expect(summary.shadowDecisions).toBe(102);
 		expect(summary.shadowInteractiveDeniedRate).toBe(42 / 102);
 		expect(summary.globalDenied).toBe(0);
@@ -118,11 +118,11 @@ rate_limit_storage_failures_total{scope="service-weighted",mode="closed"} 3
 		expect(summary.miniWorkloadShadowDeniedRate.market).toBe(40 / 100);
 	});
 
-	it("does not treat legacy-only traffic as v3 rollout evidence", () => {
+	it("does not treat unknown outcome labels as rollout evidence", () => {
 		const summary = summarizeRateLimitTotals(
 			new Map([
-				["mini|market|client|legacy_allowed", 90],
-				["mini|market|client|legacy_denied", 10],
+				["mini|market|client|removed_allowed", 90],
+				["mini|market|client|removed_denied", 10],
 			])
 		);
 		expect(summary.totalDecisions).toBe(100);

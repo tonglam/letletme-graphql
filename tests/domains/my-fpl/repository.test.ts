@@ -526,6 +526,7 @@ const snapshotPublicationRow = {
 	expected_entry_count: 1,
 	ready_entry_count: 1,
 	empty_entry_count: 0,
+	not_applicable_entry_count: 0,
 	expected_tournament_count: 1,
 	ready_tournament_count: 1,
 	content_sha256: "0".repeat(64),

@@ -1,9 +1,11 @@
 import type { GraphQLContext } from "../../graphql/context";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import {
 	createMarketPinFailure,
 	getMarketSnapshotContext,
+	MARKET_POSTGRES_METADATA_SQL,
 	refreshMarketSnapshotContext,
 	type MarketSnapshotContext,
 } from "./context";
@@ -166,7 +168,7 @@ export function buildMarketAvailabilityPage(
 	};
 }
 
-const MARKET_QUERY = `
+export const MARKET_QUERY = `
 	WITH raw_bounds AS (
 		SELECT MIN(snapshot_date) AS baseline_date, MAX(snapshot_date) AS latest_date
 		FROM fpl.player_market_snapshots
@@ -250,6 +252,41 @@ const MARKET_QUERY = `
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
+
+export const MARKET_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "market.snapshot-window",
+		sql: MARKET_QUERY,
+		values: [2026, 7, "2025-08-28", "2025-08-28T00:00:00.000Z"],
+		runtime: "must-return-market",
+		resultTypes: [
+			{
+				relation: "fpl.player_market_snapshots",
+				column: "position",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+		],
+	},
+	{
+		name: "market.snapshot-authority",
+		sql: MARKET_POSTGRES_METADATA_SQL,
+		values: [2026],
+		runtime: "must-return-market-authority",
+		resultTypes: [
+			{
+				relation: "fpl.player_market_snapshots",
+				column: "snapshot_date",
+				pgType: "date",
+			},
+			{
+				relation: "fpl.player_market_snapshots",
+				column: "captured_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
+];
 
 const toNumber = (value: string | number, field: string): number => {
 	const parsed = typeof value === "number" ? value : Number(value);

@@ -64,50 +64,55 @@ const countMarketEvent = (
 	metrics.cacheRepositoryEvents.labels("market_context", event).inc();
 };
 
-type PostgresMarketMetadata = {
+export type PostgresMarketMetadata = {
 	snapshotDate: string;
 	capturedAt: string;
 	rowCount: number;
 	captureCount: number;
 };
 
-const loadPostgresMetadata = async (
-	context: GraphQLContext
-): Promise<PostgresMarketMetadata | null> => {
-	const result = await context.database.query<{
-		snapshot_date: string | Date | null;
-		captured_at: string | Date | null;
-		row_count: number | string | null;
-		capture_count: number | string | null;
-	}>(
-		`WITH latest_date AS (
-			SELECT MAX(snapshot_date) AS snapshot_date
-			FROM fpl.player_market_snapshots
-			WHERE season_id = $1
-		), latest_batch AS (
-			SELECT snapshot.snapshot_date::text AS snapshot_date,
-				MAX(captured_at) AS captured_at,
-				COUNT(*)::integer AS row_count,
-				COUNT(DISTINCT captured_at)::integer AS capture_count
-			FROM fpl.player_market_snapshots snapshot
-			JOIN latest_date ON latest_date.snapshot_date = snapshot.snapshot_date
-			WHERE snapshot.season_id = $1
-			GROUP BY snapshot.snapshot_date
-		)
-		SELECT snapshot_date, captured_at, row_count, capture_count
-		FROM latest_batch
-		LIMIT 1`,
-		[context.currentSeason.seasonId]
-	);
-	const row = result.rows[0];
-	const snapshotDate = asDate(row?.snapshot_date);
-	const capturedAt = asTimestamp(row?.captured_at);
-	const rowCount = integer(row?.row_count);
-	const captureCount = integer(row?.capture_count);
+export const MARKET_POSTGRES_METADATA_SQL = `
+	WITH latest_date AS (
+		SELECT MAX(snapshot_date) AS snapshot_date
+		FROM fpl.player_market_snapshots
+		WHERE season_id = $1
+	), latest_batch AS (
+		SELECT snapshot.snapshot_date::text AS snapshot_date,
+			MAX(captured_at) AS captured_at,
+			COUNT(*)::integer AS row_count,
+			COUNT(DISTINCT captured_at)::integer AS capture_count
+		FROM fpl.player_market_snapshots snapshot
+		JOIN latest_date ON latest_date.snapshot_date = snapshot.snapshot_date
+		WHERE snapshot.season_id = $1
+		GROUP BY snapshot.snapshot_date
+	)
+	SELECT snapshot_date, captured_at, row_count, capture_count
+	FROM latest_batch
+	LIMIT 1
+`;
+
+/** Decode the single latest market capture used as the Postgres authority. */
+export const parsePostgresMarketMetadata = (value: unknown): PostgresMarketMetadata | null => {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	const row = value as Record<string, unknown>;
+	const snapshotDate = asDate(row.snapshot_date);
+	const capturedAt = asTimestamp(row.captured_at);
+	const rowCount = integer(row.row_count);
+	const captureCount = integer(row.capture_count);
 	if (!snapshotDate || !capturedAt || rowCount === null || rowCount === 0 || captureCount !== 1) {
 		return null;
 	}
 	return { snapshotDate, capturedAt, rowCount, captureCount };
+};
+
+const loadPostgresMetadata = async (
+	context: GraphQLContext
+): Promise<PostgresMarketMetadata | null> => {
+	const result = await context.database.query(MARKET_POSTGRES_METADATA_SQL, [
+		context.currentSeason.seasonId,
+	]);
+	const row = result.rows[0];
+	return parsePostgresMarketMetadata(row);
 };
 
 const loadPostgresMetadataSafely = async (

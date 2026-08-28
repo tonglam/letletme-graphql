@@ -257,12 +257,6 @@ export const tournamentResultChipToEnum = (raw: string | null): string | null =>
 
 export const tournamentsResolvers = {
 	Query: {
-		entryTournaments: async (
-			_parent: unknown,
-			args: EntryTournamentsArgs,
-			context: GraphQLContext
-		): Promise<TournamentInfo[]> => tournamentsService.getEntryTournaments(context, args.entryId),
-
 		entryParticipatingTournaments: async (
 			_parent: unknown,
 			args: EntryTournamentsArgs,

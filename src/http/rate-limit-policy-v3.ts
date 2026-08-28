@@ -27,14 +27,6 @@ export type GraphQLRateLimitPolicyV3 = {
 		readonly requiredHeadroomRatio: number;
 		readonly evidence: string | null;
 	};
-	readonly legacyV2: {
-		readonly windowSeconds: number;
-		readonly globalRequest: number;
-		readonly sharedPublicWeighted: number;
-		readonly browserIngress: number;
-		readonly authenticatedWeighted: number;
-		readonly anonymousWeighted: number;
-	};
 	readonly global: TokenBucketPolicy;
 	readonly trafficClasses: {
 		readonly mini: {
@@ -51,10 +43,6 @@ export type GraphQLRateLimitPolicyV3 = {
 			readonly workloads: WorkloadPolicies;
 		};
 		readonly service: {
-			readonly classRequest: TokenBucketPolicy;
-			readonly weighted: TokenBucketPolicy;
-		};
-		readonly legacy: {
 			readonly classRequest: TokenBucketPolicy;
 			readonly weighted: TokenBucketPolicy;
 		};
@@ -102,16 +90,19 @@ const WORKLOADS = [
 	"public-other",
 ] as const satisfies readonly GraphQLWorkload[];
 
-export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitPolicyV3 => {
+export type GraphQLRateLimitPolicyBody = Omit<
+	GraphQLRateLimitPolicyV3,
+	"schemaVersion" | "policyVersion"
+>;
+
+/**
+ * Parse the shared rate-limit policy body without manufacturing another
+ * protocol revision. Revision-specific parsers own their exact envelope and
+ * call this structural validator only after normalizing their current shape.
+ */
+export const parseGraphQLRateLimitPolicyBody = (value: unknown): GraphQLRateLimitPolicyBody => {
 	if (!isPlainRecord(value)) throw new Error("GraphQL rate-limit policy must be an object");
-	exactKeys(
-		value,
-		["schemaVersion", "policyVersion", "capacity", "legacyV2", "global", "trafficClasses"],
-		"policy"
-	);
-	if (value.schemaVersion !== 3 || value.policyVersion !== "graphql-v3") {
-		throw new Error("GraphQL rate-limit policy version must be graphql-v3/schema 3");
-	}
+	exactKeys(value, ["capacity", "global", "trafficClasses"], "policy");
 
 	if (!isPlainRecord(value.capacity)) throw new Error("policy.capacity must be an object");
 	exactKeys(
@@ -138,26 +129,12 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 		throw new Error("policy.capacity.evidence must be a string or null");
 	}
 
-	if (!isPlainRecord(value.legacyV2)) throw new Error("policy.legacyV2 must be an object");
-	exactKeys(
-		value.legacyV2,
-		[
-			"windowSeconds",
-			"globalRequest",
-			"sharedPublicWeighted",
-			"browserIngress",
-			"authenticatedWeighted",
-			"anonymousWeighted",
-		],
-		"policy.legacyV2"
-	);
-
 	if (!isPlainRecord(value.trafficClasses)) {
 		throw new Error("policy.trafficClasses must be an object");
 	}
 	exactKeys(
 		value.trafficClasses,
-		["mini", "web_browser", "web_rsc", "service", "legacy"],
+		["mini", "web_browser", "web_rsc", "service"],
 		"policy.trafficClasses"
 	);
 	const classes = value.trafficClasses;
@@ -165,14 +142,12 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 	const webBrowser = classes.web_browser;
 	const webRsc = classes.web_rsc;
 	const service = classes.service;
-	const legacy = classes.legacy;
 	if (!isPlainRecord(mini)) throw new Error("policy.trafficClasses.mini must be an object");
 	if (!isPlainRecord(webBrowser)) {
 		throw new Error("policy.trafficClasses.web_browser must be an object");
 	}
 	if (!isPlainRecord(webRsc)) throw new Error("policy.trafficClasses.web_rsc must be an object");
 	if (!isPlainRecord(service)) throw new Error("policy.trafficClasses.service must be an object");
-	if (!isPlainRecord(legacy)) throw new Error("policy.trafficClasses.legacy must be an object");
 	exactKeys(
 		mini,
 		["abuseRequest", "anonymousWeighted", "sessionWeighted"],
@@ -185,16 +160,13 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 	);
 	exactKeys(webRsc, ["classRequest", "workloads"], "policy.trafficClasses.web_rsc");
 	exactKeys(service, ["classRequest", "weighted"], "policy.trafficClasses.service");
-	exactKeys(legacy, ["classRequest", "weighted"], "policy.trafficClasses.legacy");
 	if (!isPlainRecord(webRsc.workloads)) {
 		throw new Error("policy.trafficClasses.web_rsc.workloads must be an object");
 	}
 	const workloadPolicies = webRsc.workloads;
 	exactKeys(workloadPolicies, WORKLOADS, "policy.trafficClasses.web_rsc.workloads");
 
-	const parsed: GraphQLRateLimitPolicyV3 = {
-		schemaVersion: 3,
-		policyVersion: "graphql-v3",
+	const parsed: GraphQLRateLimitPolicyBody = {
 		capacity: {
 			validated: value.capacity.validated,
 			sustainableRps,
@@ -204,26 +176,6 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 			),
 			requiredHeadroomRatio,
 			evidence: value.capacity.evidence as string | null,
-		},
-		legacyV2: {
-			windowSeconds: positiveInteger(value.legacyV2.windowSeconds, "policy.legacyV2.windowSeconds"),
-			globalRequest: positiveInteger(value.legacyV2.globalRequest, "policy.legacyV2.globalRequest"),
-			sharedPublicWeighted: positiveInteger(
-				value.legacyV2.sharedPublicWeighted,
-				"policy.legacyV2.sharedPublicWeighted"
-			),
-			browserIngress: positiveInteger(
-				value.legacyV2.browserIngress,
-				"policy.legacyV2.browserIngress"
-			),
-			authenticatedWeighted: positiveInteger(
-				value.legacyV2.authenticatedWeighted,
-				"policy.legacyV2.authenticatedWeighted"
-			),
-			anonymousWeighted: positiveInteger(
-				value.legacyV2.anonymousWeighted,
-				"policy.legacyV2.anonymousWeighted"
-			),
 		},
 		global: bucket(value.global, "policy.global"),
 		trafficClasses: {
@@ -261,10 +213,6 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 				classRequest: bucket(service.classRequest, "policy.trafficClasses.service.classRequest"),
 				weighted: bucket(service.weighted, "policy.trafficClasses.service.weighted"),
 			},
-			legacy: {
-				classRequest: bucket(legacy.classRequest, "policy.trafficClasses.legacy.classRequest"),
-				weighted: bucket(legacy.weighted, "policy.trafficClasses.legacy.weighted"),
-			},
 		},
 	};
 
@@ -287,6 +235,27 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 	}
 
 	return parsed;
+};
+
+export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitPolicyV3 => {
+	if (!isPlainRecord(value)) throw new Error("GraphQL rate-limit policy must be an object");
+	exactKeys(
+		value,
+		["schemaVersion", "policyVersion", "capacity", "global", "trafficClasses"],
+		"policy"
+	);
+	if (value.schemaVersion !== 3 || value.policyVersion !== "graphql-v3") {
+		throw new Error("GraphQL rate-limit policy version must be graphql-v3/schema 3");
+	}
+	return {
+		schemaVersion: 3,
+		policyVersion: "graphql-v3",
+		...parseGraphQLRateLimitPolicyBody({
+			capacity: value.capacity,
+			global: value.global,
+			trafficClasses: value.trafficClasses,
+		}),
+	};
 };
 
 export const parseGraphQLRateLimitMode = (value: string | undefined): GraphQLRateLimitMode => {

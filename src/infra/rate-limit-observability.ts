@@ -9,16 +9,11 @@ import { metrics } from "./metrics";
 export const RATE_LIMIT_AGGREGATE_RETENTION_SECONDS = 14 * 24 * 60 * 60;
 export const RATE_LIMIT_RECENT_RETENTION_SECONDS = 2 * 60 * 60;
 
-export type RateLimitAggregateOutcome =
-	"allowed" | "denied" | "would_allow" | "would_deny" | "legacy_allowed" | "legacy_denied";
+export type RateLimitAggregateOutcome = "allowed" | "denied" | "would_allow" | "would_deny";
 
 export type GraphQLRateLimitPolicyVersion = "graphql-v3" | "graphql-v4";
 
-const deniedOutcomes = new Set<RateLimitAggregateOutcome>([
-	"denied",
-	"would_deny",
-	"legacy_denied",
-]);
+const deniedOutcomes = new Set<RateLimitAggregateOutcome>(["denied", "would_deny"]);
 
 export const rateLimitFingerprint = (
 	subject: string | null,
@@ -142,15 +137,15 @@ export const summarizeRateLimitTotals = (
 		totalDecisions += count;
 		if (outcome === "allowed" || outcome === "denied") enforcedDecisions += count;
 		if (outcome === "would_allow" || outcome === "would_deny") shadowDecisions += count;
-		if (interactive && (outcome === "allowed" || outcome === "legacy_allowed")) {
+		if (interactive && outcome === "allowed") {
 			interactiveAllowed += count;
 		}
-		if (interactive && (outcome === "denied" || outcome === "legacy_denied")) {
+		if (interactive && outcome === "denied") {
 			interactiveDenied += count;
 		}
 		if (interactive && outcome === "would_allow") shadowInteractiveAllowed += count;
 		if (interactive && outcome === "would_deny") shadowInteractiveDenied += count;
-		if (scope === "global" && (outcome === "denied" || outcome === "legacy_denied")) {
+		if (scope === "global" && outcome === "denied") {
 			globalDenied += count;
 		}
 		if (scope === "global" && outcome === "would_deny") globalWouldDenied += count;

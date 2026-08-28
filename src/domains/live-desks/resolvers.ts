@@ -90,7 +90,7 @@ const mergeLiveSnapshotFixtures = (
 	];
 };
 
-const compatibilityState = (
+const lifecycleStateForWindow = (
 	window: LiveWindow
 ): "LIVE_ACTIVE" | "GW_REVIEW" | "FINALIZED" | "SCHEDULED" => {
 	switch (window.windowState) {
@@ -549,7 +549,7 @@ export const liveDesksResolvers = {
 				anchorEventId: window.anchorEventId,
 				latestFinalizedEventId: window.latestFinalizedEventId,
 				liveRevision: window.liveRevision,
-				state: compatibilityState(window),
+				state: lifecycleStateForWindow(window),
 				windowState: window.windowState,
 				producerState: window.producerState,
 				anchorMode: window.anchorMode,

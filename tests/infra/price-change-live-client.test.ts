@@ -14,7 +14,10 @@ import {
 	readPriceChangeLiveBoard,
 	readPriceChangeLiveCursor,
 } from "../../src/infra/price-change-live-client";
-import { readPriceChangePredictionsByPublicationId } from "../../src/infra/price-change-predictions-client";
+import {
+	PUBLICATION_ITEM_METADATA_SQL,
+	readPriceChangePredictionsByPublicationId,
+} from "../../src/infra/price-change-predictions-client";
 
 const HOT_PREFIX = "fpl:price-changes:hot";
 const seasonCode = "2026";
@@ -101,7 +104,7 @@ function durableFixture(ageMs: number, publicationId: string, revision: number) 
 	const fetchedAt = new Date(Date.now() - ageMs).toISOString();
 	const board = validBoard(fetchedAt, publicationId);
 	const contextValue = {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		source: "FPL_BOOTSTRAP",
 		fetchedAt,
 		staleAt: board.staleAt,
@@ -110,6 +113,7 @@ function durableFixture(ageMs: number, publicationId: string, revision: number) 
 		nextDeadlines: board.nextDeadlines,
 		expectedPlayerCount: 1,
 		observedPlayerCount: 1,
+		latestEvent: null,
 	};
 	const items = { context: contextValue, players: board.players };
 	const scope = { dataset: "fpl:price-changes" as const, seasonCode };
@@ -169,7 +173,7 @@ function publishHot(redis: FakeRedis, snapshot: Record<string, unknown>): void {
 function hotSnapshot(
 	ageMs = 1_000,
 	revision = "abcdef0123456789",
-	options: { schemaVersion?: 3 | 4; latestEvent?: Record<string, unknown> } = {}
+	options: { schemaVersion?: 4; latestEvent?: Record<string, unknown> } = {}
 ): Record<string, unknown> {
 	const detectedAt = new Date(Date.now() - ageMs).toISOString();
 	const board = validBoard(detectedAt, revision);
@@ -179,7 +183,7 @@ function hotSnapshot(
 		board.nextDeadlines = [String(options.latestEvent.deadline)];
 	}
 	const base = {
-		schemaVersion: options.schemaVersion ?? 3,
+		schemaVersion: options.schemaVersion ?? 4,
 		seasonCode,
 		revision: board.revision,
 		triggerFingerprint: "a".repeat(64),
@@ -248,7 +252,7 @@ describe("price-change live client", () => {
 		assert.equal(liveBoard.board.players[0]?.currentPrice, 100);
 	});
 
-	it("reads the v4 hot event without changing the v3 compatibility path", async () => {
+	it("reads the canonical hot event envelope", async () => {
 		const redis = new FakeRedis();
 		const detectedAt = new Date(Date.now() - 1_000).toISOString();
 		const deadline = new Date(Date.parse(detectedAt) - 1_000).toISOString();
@@ -281,6 +285,17 @@ describe("price-change live client", () => {
 		assert.deepEqual(liveBoard.board.latestEvent?.changes, [
 			{ playerId: 1, oldPrice: 99, newPrice: 100 },
 		]);
+	});
+
+	it("rejects the removed hot envelope revision", async () => {
+		const redis = new FakeRedis();
+		const snapshot = hotSnapshot();
+		(snapshot as { schemaVersion: number }).schemaVersion = 3;
+		(snapshot as { payloadHash: string }).payloadHash = hotEnvelopePayloadHash(snapshot);
+		(snapshot as { metadataHash: string }).metadataHash = hotEnvelopeMetadataHash(snapshot);
+		publishHot(redis, snapshot);
+
+		assert.equal((await readPriceChangeLiveCursor(context(redis))).state, "UNAVAILABLE");
 	});
 
 	it("binds a revision-bound board request to the cursor source identity", async () => {
@@ -700,14 +715,13 @@ describe("price-change live client", () => {
 						],
 					};
 				}
-				if (sql.includes("octet_length(payload)")) {
+				if (sql === PUBLICATION_ITEM_METADATA_SQL) {
 					return {
 						rows: durable.manifest.items.map((item) => ({
 							publication_id: durable.manifest.publicationId,
 							item_name: item.name,
 							item_count: item.count,
 							checksum: item.sha256,
-							payload_bytes: item.bytes,
 						})),
 					};
 				}
@@ -733,7 +747,8 @@ describe("price-change live client", () => {
 		assert.equal(queries.length, 3);
 		assert.ok(queries[2]?.includes("item_name = 'context'"));
 		assert.ok(queries[2]?.includes("ANY($1::uuid[])"));
-		assert.ok(queries[1]?.includes("octet_length(payload)"));
+		assert.equal(queries[1], PUBLICATION_ITEM_METADATA_SQL);
+		assert.ok(!queries[1]?.includes("payload"));
 		assert.ok(queries[0]?.includes("expires_at > now()"));
 	});
 
@@ -754,14 +769,13 @@ describe("price-change live client", () => {
 						],
 					};
 				}
-				if (sql.includes("octet_length(payload)")) {
+				if (sql === PUBLICATION_ITEM_METADATA_SQL) {
 					return {
 						rows: retained.manifest.items.map((item) => ({
 							publication_id: retained.manifest.publicationId,
 							item_name: item.name,
 							item_count: item.count,
 							checksum: item.sha256,
-							payload_bytes: item.bytes,
 						})),
 					};
 				}

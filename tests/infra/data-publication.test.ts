@@ -29,6 +29,7 @@ const publication = (): TestPublication =>
 		phases: [],
 		fixtures: [],
 		currentEventId: 1,
+		selectionRules: null,
 	});
 
 type MutableManifestItem = Omit<
@@ -83,6 +84,7 @@ describe("Data publication reader", () => {
 			phases: [],
 			fixtures: [],
 			currentEventId: 1,
+			selectionRules: null,
 		});
 		for (const [key, value] of next.store) redis.values.set(key, value);
 		const nextRead = await readDataPublication(redis as never, scope, expectedItems);

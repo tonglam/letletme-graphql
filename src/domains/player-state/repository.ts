@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import type { QueryExecutor as DatabaseQueryExecutor } from "../../infra/database";
@@ -70,7 +71,7 @@ type MarketRow = QueryResultRow & {
 	captured_at: Date | string;
 };
 
-type PlayerStateSeasonRow = QueryResultRow & {
+export type PlayerStateSeasonRow = QueryResultRow & {
 	season_id: number;
 	season_code: string;
 	lifecycle_state: string;
@@ -153,6 +154,102 @@ type CurrentPeerGameweekRow = QueryResultRow & {
 	bonus: number | null;
 };
 
+const nullableSafeNonNegativeInteger = (value: unknown): number | null | undefined => {
+	if (value === null || value === undefined) return null;
+	const parsed = typeof value === "number" ? value : Number(value);
+	return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+};
+
+const nullableSafeInteger = (value: unknown): number | null | undefined => {
+	if (value === null || value === undefined) return null;
+	const parsed = typeof value === "number" ? value : Number(value);
+	return Number.isSafeInteger(parsed) ? parsed : undefined;
+};
+
+const nullableFiniteNumber = (value: unknown): number | null | undefined => {
+	if (value === null || value === undefined) return null;
+	const parsed = typeof value === "number" ? value : Number(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+/** Decode a current peer summary row before it enters metric calculations. */
+export const parsePlayerStateCurrentPeerRow = (value: unknown): CurrentPeerRow | null => {
+	if (!isRecord(value)) return null;
+	const elementId = nullableSafeNonNegativeInteger(value.element_id);
+	if (elementId === null || elementId === undefined || elementId === 0) return null;
+	const fields = [
+		"minutes",
+		"bonus",
+		"starts",
+		"goals_scored",
+		"assists",
+		"clean_sheets",
+		"saves",
+		"return_count",
+		"gameweeks_available",
+	] as const;
+	const parsed = Object.fromEntries(
+		fields.map((field) => [field, nullableSafeNonNegativeInteger(value[field])])
+	) as Record<(typeof fields)[number], number | null | undefined>;
+	if (Object.values(parsed).some((field) => field === undefined)) return null;
+	const totalPoints = nullableSafeInteger(value.total_points);
+	const bps = nullableSafeInteger(value.bps);
+	const expectedGoalInvolvements = nullableFiniteNumber(value.expected_goal_involvements);
+	if (totalPoints === undefined || bps === undefined || expectedGoalInvolvements === undefined)
+		return null;
+	return {
+		element_id: elementId,
+		total_points: totalPoints,
+		minutes: parsed.minutes!,
+		bonus: parsed.bonus!,
+		starts: parsed.starts!,
+		goals_scored: parsed.goals_scored!,
+		assists: parsed.assists!,
+		clean_sheets: parsed.clean_sheets!,
+		saves: parsed.saves!,
+		bps,
+		expected_goal_involvements: expectedGoalInvolvements,
+		return_count: parsed.return_count!,
+		gameweeks_available: parsed.gameweeks_available!,
+	};
+};
+
+/** Decode one canonical current-season gameweek stat row. */
+export const parsePlayerStateCurrentPeerGameweekRow = (
+	value: unknown
+): CurrentPeerGameweekRow | null => {
+	if (!isRecord(value)) return null;
+	const elementId = nullableSafeNonNegativeInteger(value.element_id);
+	const eventId = nullableSafeNonNegativeInteger(value.event_id);
+	const totalPoints = nullableSafeInteger(value.total_points);
+	const minutes = nullableSafeNonNegativeInteger(value.minutes);
+	const bonus = nullableSafeNonNegativeInteger(value.bonus);
+	const started = value.started;
+	if (
+		elementId === null ||
+		elementId === undefined ||
+		elementId === 0 ||
+		eventId === null ||
+		eventId === undefined ||
+		eventId === 0 ||
+		totalPoints === null ||
+		totalPoints === undefined ||
+		minutes === undefined ||
+		bonus === undefined ||
+		(started !== null && started !== undefined && typeof started !== "boolean")
+	) {
+		return null;
+	}
+	return {
+		element_id: elementId,
+		event_id: eventId,
+		total_points: totalPoints,
+		minutes,
+		started: started ?? null,
+		bonus,
+	};
+};
+
 type CurrentMetricRow = {
 	elementId: number;
 	pointsPer90: number | null;
@@ -212,7 +309,7 @@ type UnderstatProcessResult = {
 	historySeasons: string[];
 };
 
-const marketsSql = `
+export const PLAYER_STATE_MARKETS_SQL = `
 	/* player-state:markets-batch */
 	SELECT DISTINCT ON (element_id)
 		status,
@@ -224,14 +321,14 @@ const marketsSql = `
 	ORDER BY element_id, snapshot_date DESC, captured_at DESC
 `;
 
-const datasetRevisionSql = `
+export const PLAYER_STATE_DATASET_REVISION_SQL = `
 	/* player-state:dataset-revision */
 	SELECT revision, method_version, source_updated_at, refreshed_at
 	FROM reporting.player_state_dataset_metadata
 	WHERE dataset_key = 'player_state'
 `;
 
-const seasonRowsSql = `
+export const PLAYER_STATE_SEASON_ROWS_SQL = `
 	/* player-state:season-rows */
 	SELECT
 		season_id,
@@ -280,7 +377,7 @@ const seasonRowsSql = `
 	ORDER BY player_code, season_id DESC
 `;
 
-const currentPeersSql = `
+export const PLAYER_STATE_CURRENT_PEERS_SQL = `
 	/* player-state:current-peers */
 	SELECT
 		summary.element_id,
@@ -304,7 +401,7 @@ const currentPeersSql = `
 	ORDER BY summary.element_id
 `;
 
-const currentPeerGameweeksSql = `
+export const PLAYER_STATE_CURRENT_PEER_GAMEWEEKS_SQL = `
 	/* player-state:current-gameweeks */
 	SELECT
 		stats.element_id,
@@ -323,6 +420,61 @@ const currentPeerGameweeksSql = `
 	ORDER BY stats.event_id, stats.element_id
 `;
 
+export const PLAYER_STATE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "player-state.market-snapshots",
+		sql: PLAYER_STATE_MARKETS_SQL,
+		values: [2026, [1]],
+	},
+	{
+		name: "player-state.dataset-revision",
+		sql: PLAYER_STATE_DATASET_REVISION_SQL,
+		values: [],
+		runtime: "must-return-player-state-revision",
+		resultTypes: [
+			{
+				relation: "reporting.player_state_dataset_metadata",
+				column: "revision",
+				pgType: "bigint",
+			},
+			{
+				relation: "reporting.player_state_dataset_metadata",
+				column: "method_version",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "reporting.player_state_dataset_metadata",
+				column: "source_updated_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "reporting.player_state_dataset_metadata",
+				column: "refreshed_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
+	{
+		name: "player-state.season-rows",
+		sql: PLAYER_STATE_SEASON_ROWS_SQL,
+		values: [[26001]],
+		runtime: "must-return-player-state-row",
+	},
+	{
+		name: "player-state.current-peers",
+		sql: PLAYER_STATE_CURRENT_PEERS_SQL,
+		values: [2026, 1],
+		runtime: "must-return-player-state-current-peers",
+	},
+	{
+		name: "player-state.current-gameweeks",
+		sql: PLAYER_STATE_CURRENT_PEER_GAMEWEEKS_SQL,
+		values: [2026, 1, [1]],
+		runtime: "must-return-player-state-gameweeks",
+	},
+];
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -333,6 +485,137 @@ const asNumber = (value: unknown): number | null => {
 		return Number.isFinite(parsed) ? parsed : null;
 	}
 	return null;
+};
+
+const asSafeInteger = (value: unknown): number | null => {
+	const parsed = asNumber(value);
+	return parsed !== null && Number.isSafeInteger(parsed) ? parsed : null;
+};
+
+const isOptionalFiniteNumber = (value: unknown): boolean =>
+	value === null || value === undefined || asNumber(value) !== null;
+
+const isOptionalNonNegativeInteger = (value: unknown): boolean => {
+	if (value === null || value === undefined) return true;
+	const parsed = asSafeInteger(value);
+	return parsed !== null && parsed >= 0;
+};
+
+const isValidTimestamp = (value: unknown): boolean => {
+	if (value instanceof Date) return Number.isFinite(value.getTime());
+	return typeof value === "string" && Number.isFinite(Date.parse(value));
+};
+
+const PLAYER_STATE_LIFECYCLE_STATES = new Set([
+	"reference_only",
+	"completed",
+	"preseason",
+	"active",
+	"closed",
+]);
+const PLAYER_STATE_MAPPING_STATUSES = new Set([
+	"VERIFIED",
+	"UNVERIFIED",
+	"AMBIGUOUS",
+	"QUARANTINED",
+	"UNAVAILABLE",
+	"NOT_APPLICABLE",
+]);
+
+/**
+ * Decode a reporting season row through the shape consumed by Player State.
+ * The direct Data contract calls this same decoder so an RLS-hidden or
+ * partially migrated row cannot be accepted as an empty history.
+ */
+export const parsePlayerStateSeasonRow = (value: unknown): PlayerStateSeasonRow | null => {
+	if (!isRecord(value)) return null;
+	const seasonId = asSafeInteger(value.season_id);
+	const playerCode = asSafeInteger(value.player_code);
+	const elementId = asSafeInteger(value.element_id);
+	const elementType = asSafeInteger(value.element_type);
+	const fplMinutes = asSafeInteger(value.fpl_minutes);
+	const fplGameweeks = asSafeInteger(value.fpl_gameweeks);
+	const fplTotalPoints = asSafeInteger(value.fpl_total_points);
+	const fplStarts = asSafeInteger(value.fpl_starts);
+	const fplCleanSheets = asSafeInteger(value.fpl_clean_sheets);
+	const fplSaves = asSafeInteger(value.fpl_saves);
+	const fplPeerCount = asSafeInteger(value.fpl_peer_count);
+	const understatPeerCount = asSafeInteger(value.understat_peer_count);
+	const seasonCode = value.season_code;
+	const lifecycleState = value.lifecycle_state;
+	const expectedMetricsAvailable = value.expected_metrics_available;
+	const fplSourceHash = value.fpl_source_hash;
+	const mappingStatus = value.understat_mapping_status;
+	if (
+		seasonId === null ||
+		seasonId <= 0 ||
+		playerCode === null ||
+		playerCode <= 0 ||
+		elementId === null ||
+		elementId <= 0 ||
+		elementType === null ||
+		elementType < 1 ||
+		elementType > 4 ||
+		fplMinutes === null ||
+		fplMinutes < 0 ||
+		fplGameweeks === null ||
+		fplGameweeks < 0 ||
+		fplTotalPoints === null ||
+		fplStarts === null ||
+		fplStarts < 0 ||
+		fplCleanSheets === null ||
+		fplCleanSheets < 0 ||
+		fplSaves === null ||
+		fplSaves < 0 ||
+		fplPeerCount === null ||
+		fplPeerCount < 0 ||
+		understatPeerCount === null ||
+		understatPeerCount < 0 ||
+		typeof seasonCode !== "string" ||
+		!/^[0-9]{4}$/.test(seasonCode) ||
+		typeof lifecycleState !== "string" ||
+		!PLAYER_STATE_LIFECYCLE_STATES.has(lifecycleState) ||
+		typeof expectedMetricsAvailable !== "boolean" ||
+		typeof fplSourceHash !== "string" ||
+		fplSourceHash.trim() === "" ||
+		!isValidTimestamp(value.fpl_source_updated_at) ||
+		typeof mappingStatus !== "string" ||
+		!PLAYER_STATE_MAPPING_STATUSES.has(mappingStatus) ||
+		!isOptionalNonNegativeInteger(value.understat_player_id) ||
+		(value.understat_season_state !== null &&
+			value.understat_season_state !== undefined &&
+			(typeof value.understat_season_state !== "string" ||
+				value.understat_season_state.trim() === "")) ||
+		!isOptionalNonNegativeInteger(value.understat_minutes) ||
+		!isOptionalFiniteNumber(value.fpl_points_per_90) ||
+		!isOptionalFiniteNumber(value.fpl_return_rate) ||
+		!isOptionalFiniteNumber(value.fpl_bonus_per_90) ||
+		!isOptionalFiniteNumber(value.fpl_position_percentile) ||
+		!isOptionalFiniteNumber(value.understat_npxg_per_90) ||
+		!isOptionalFiniteNumber(value.understat_xa_per_90) ||
+		!isOptionalFiniteNumber(value.understat_shots_per_90) ||
+		!isOptionalFiniteNumber(value.understat_key_passes_per_90) ||
+		!isOptionalFiniteNumber(value.understat_xg_chain_per_90) ||
+		!isOptionalFiniteNumber(value.understat_xg_buildup_per_90) ||
+		!isOptionalFiniteNumber(value.understat_npxg_percentile) ||
+		!isOptionalFiniteNumber(value.understat_xa_percentile) ||
+		!isOptionalFiniteNumber(value.understat_shots_percentile) ||
+		!isOptionalFiniteNumber(value.understat_key_passes_percentile) ||
+		!isOptionalFiniteNumber(value.understat_xg_chain_percentile) ||
+		!isOptionalFiniteNumber(value.understat_xg_buildup_percentile) ||
+		!isOptionalFiniteNumber(value.understat_process_percentile) ||
+		(value.understat_source_hash !== null &&
+			value.understat_source_hash !== undefined &&
+			(typeof value.understat_source_hash !== "string" ||
+				value.understat_source_hash.trim() === "")) ||
+		(value.understat_source_updated_at !== null &&
+			value.understat_source_updated_at !== undefined &&
+			!isValidTimestamp(value.understat_source_updated_at)) ||
+		!isValidTimestamp(value.refreshed_at)
+	) {
+		return null;
+	}
+	return value as PlayerStateSeasonRow;
 };
 
 const iso = (value: Date | string | null): string | null => {
@@ -555,7 +838,8 @@ const loadDatasetRevision = async (
 ): Promise<PlayerStateDatasetRevision> => {
 	const cached = datasetRevisionMemo;
 	if (cached && cached.expiresAt > Date.now()) return cached.value;
-	const row = (await executor.query<DatasetRevisionRow>(datasetRevisionSql, [])).rows[0];
+	const row = (await executor.query<DatasetRevisionRow>(PLAYER_STATE_DATASET_REVISION_SQL, []))
+		.rows[0];
 	if (!row) throw new Error("Player State dataset revision is unavailable");
 	const value = {
 		revision: String(row.revision),
@@ -618,13 +902,18 @@ const loadSharedProfileData = (
 	const loading = Promise.all([
 		codes.length === 0
 			? Promise.resolve({ rows: [] as PlayerStateSeasonRow[] })
-			: executor.query<PlayerStateSeasonRow>(seasonRowsSql, [codes]),
+			: executor.query<PlayerStateSeasonRow>(PLAYER_STATE_SEASON_ROWS_SQL, [codes]),
 		ids.length === 0
 			? Promise.resolve({ rows: [] as MarketRow[] })
-			: executor.query<MarketRow & { element_id: number }>(marketsSql, [seasonId, ids]),
+			: executor.query<MarketRow & { element_id: number }>(PLAYER_STATE_MARKETS_SQL, [
+					seasonId,
+					ids,
+				]),
 	]).then(([seasonRows, markets]) => {
 		const seasonRowsByCode = new Map<number, PlayerStateSeasonRow[]>();
-		for (const row of seasonRows.rows) {
+		for (const rawRow of seasonRows.rows) {
+			const row = parsePlayerStateSeasonRow(rawRow);
+			if (!row) continue;
 			const rows = seasonRowsByCode.get(row.player_code) ?? [];
 			rows.push(row);
 			seasonRowsByCode.set(row.player_code, rows);
@@ -664,17 +953,21 @@ const loadCurrentCohort = (
 	const loading = Promise.all([
 		!includeCurrent
 			? Promise.resolve({ rows: [] as CurrentPeerRow[] })
-			: executor.query<CurrentPeerRow>(currentPeersSql, [seasonId, position]),
+			: executor.query<CurrentPeerRow>(PLAYER_STATE_CURRENT_PEERS_SQL, [seasonId, position]),
 		eventIds.length === 0
 			? Promise.resolve({ rows: [] as CurrentPeerGameweekRow[] })
-			: executor.query<CurrentPeerGameweekRow>(currentPeerGameweeksSql, [
+			: executor.query<CurrentPeerGameweekRow>(PLAYER_STATE_CURRENT_PEER_GAMEWEEKS_SQL, [
 					seasonId,
 					position,
 					eventIds,
 				]),
 	]).then(([peers, gameweeks]) => ({
-		peerRows: peers.rows,
-		gameweekRows: gameweeks.rows,
+		peerRows: peers.rows
+			.map(parsePlayerStateCurrentPeerRow)
+			.filter((row): row is CurrentPeerRow => row !== null),
+		gameweekRows: gameweeks.rows
+			.map(parsePlayerStateCurrentPeerGameweekRow)
+			.filter((row): row is CurrentPeerGameweekRow => row !== null),
 	}));
 	memo.set(key, loading);
 	void loading.catch(() => {

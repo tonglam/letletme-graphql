@@ -1,5 +1,7 @@
 import { GraphQLError } from "graphql";
 import { createHash } from "crypto";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
+import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixture-identities";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
 import type { GraphQLContext } from "../../graphql/context";
 import { authorizeViewerEntry, viewerEntryIdForPrincipal } from "../../graphql/authorization";
@@ -30,7 +32,7 @@ const aggregateTrendCapabilities: readonly AggregateTrendCapability[] = [
  * and LIMIT so a popular capability cannot consume another capability's page.
  * The only interpolated values are compile-time column names and labels.
  */
-const aggregateTrendUnionSql = `
+export const TRENDS_AGGREGATE_UNION_SQL = `
       SELECT * FROM (
         SELECT 'OWNERSHIP'::text AS capability, element_id, player_name, player_position, team_short_name,
           selected_count AS count, NULL::integer AS pick_position
@@ -88,6 +90,202 @@ const aggregateTrendUnionSql = `
         ORDER BY pick.multiplier DESC, pick.position
       ) personal
       ORDER BY capability, count DESC NULLS LAST, pick_position ASC NULLS LAST, element_id`;
+
+export const TRENDS_COHORTS_MINE_SQL = `
+	SELECT tournament.tournament_id, tournament.setup_status,
+		COALESCE(catalog.display_name, tournament.name) AS display_name,
+		latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
+		latest.captured_at AS source_checked_at,
+		latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state, latest.transfers_state
+	FROM competition.tournament_entries member
+	JOIN competition.tournaments tournament
+		ON tournament.season_id = member.season_id
+		AND tournament.tournament_id = member.tournament_id
+	LEFT JOIN competition.public_league_trends catalog
+		ON catalog.season_id = tournament.season_id AND catalog.tournament_id = tournament.tournament_id
+	LEFT JOIN LATERAL (
+		SELECT publication.event_id, publication.revision, publication.publication_state,
+			publication.captured_at,
+			publication.ownership_state, publication.captaincy_state, publication.vice_captaincy_state,
+			publication.transfers_state
+		FROM reporting.tournament_selection_stat_publications publication
+		WHERE publication.season_id = tournament.season_id
+			AND publication.tournament_id = tournament.tournament_id AND publication.is_active
+		ORDER BY publication.event_id DESC, publication.revision DESC LIMIT 1
+	) latest ON true
+	WHERE member.season_id = $1 AND member.entry_id = $2
+	ORDER BY COALESCE(catalog.sort_order, 0), tournament.tournament_id
+`;
+
+export const TRENDS_COHORTS_PUBLIC_SQL = `
+	SELECT catalog.tournament_id, tournament.setup_status, catalog.display_name,
+		latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
+		latest.captured_at AS source_checked_at,
+		latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state, latest.transfers_state
+	FROM competition.public_league_trends catalog
+	JOIN competition.tournaments tournament
+		ON tournament.season_id = catalog.season_id
+		AND tournament.tournament_id = catalog.tournament_id
+		AND tournament.setup_status = 'ready'
+	LEFT JOIN LATERAL (
+		SELECT publication.event_id, publication.revision, publication.publication_state,
+			publication.captured_at,
+			publication.ownership_state, publication.captaincy_state, publication.vice_captaincy_state, publication.transfers_state
+		FROM reporting.tournament_selection_stat_publications publication
+		WHERE publication.season_id = catalog.season_id
+			AND publication.tournament_id = catalog.tournament_id AND publication.is_active
+		ORDER BY publication.event_id DESC, publication.revision DESC LIMIT 1
+	) latest ON true
+	WHERE catalog.season_id = $1 AND catalog.enabled = TRUE
+	ORDER BY catalog.sort_order, catalog.tournament_id
+`;
+
+export const TRENDS_SNAPSHOT_COHORT_PUBLIC_SQL = `
+	SELECT tournament.tournament_id, tournament.setup_status,
+		COALESCE(catalog.display_name, tournament.name) AS display_name, publication.event_id AS latest_event_id,
+		publication.revision, publication.publication_state, publication.ownership_state,
+		publication.captaincy_state, publication.vice_captaincy_state, publication.transfers_state,
+		publication.publication_id, publication.expected_entries, publication.captured_at, publication.published_at
+	FROM competition.tournaments tournament
+	LEFT JOIN competition.public_league_trends catalog
+		ON catalog.season_id = tournament.season_id AND catalog.tournament_id = tournament.tournament_id
+	LEFT JOIN reporting.tournament_selection_stat_publications publication
+		ON publication.season_id = tournament.season_id AND publication.tournament_id = tournament.tournament_id
+		AND publication.event_id = $3 AND publication.is_active
+	WHERE tournament.season_id = $1 AND tournament.tournament_id = $2 AND tournament.setup_status = 'ready'
+		AND catalog.enabled = TRUE
+	LIMIT 1
+`;
+
+export const TRENDS_SNAPSHOT_COHORT_MINE_SQL = `
+	SELECT tournament.tournament_id, tournament.setup_status,
+		COALESCE(catalog.display_name, tournament.name) AS display_name, publication.event_id AS latest_event_id,
+		publication.revision, publication.publication_state, publication.ownership_state,
+		publication.captaincy_state, publication.vice_captaincy_state, publication.transfers_state,
+		publication.publication_id, publication.expected_entries, publication.captured_at, publication.published_at
+	FROM competition.tournaments tournament
+	LEFT JOIN competition.public_league_trends catalog
+		ON catalog.season_id = tournament.season_id AND catalog.tournament_id = tournament.tournament_id
+	LEFT JOIN reporting.tournament_selection_stat_publications publication
+		ON publication.season_id = tournament.season_id AND publication.tournament_id = tournament.tournament_id
+		AND publication.event_id = $3 AND publication.is_active
+	WHERE tournament.season_id = $1 AND tournament.tournament_id = $2 AND tournament.setup_status = 'ready'
+		AND TRUE
+		AND EXISTS (
+			SELECT 1
+			FROM competition.tournament_entries member
+			WHERE member.season_id = tournament.season_id
+				AND member.tournament_id = tournament.tournament_id
+				AND member.entry_id = $4
+		)
+	LIMIT 1
+`;
+
+export const TRENDS_MEMBERSHIP_SQL = `
+	SELECT tournament.tournament_id,
+		EXISTS (
+			SELECT 1
+			FROM competition.tournament_entries member
+			WHERE member.season_id = tournament.season_id
+				AND member.tournament_id = tournament.tournament_id
+				AND member.entry_id = $3
+		) AS is_member
+	FROM competition.tournaments tournament
+	WHERE tournament.season_id = $1 AND tournament.tournament_id = $2 AND tournament.setup_status = 'ready'
+`;
+
+/**
+ * Contract-only lookup used to bind the direct aggregate probe to the
+ * fixture's active publication. Production always passes an already
+ * authorized publication id to TRENDS_AGGREGATE_UNION_SQL; the probe resolves
+ * the same id dynamically so rerunning the fixture never relies on an
+ * identity sequence value.
+ */
+export const TRENDS_CONTRACT_PUBLICATION_ID_SQL = `
+	SELECT publication_id
+	FROM reporting.tournament_selection_stat_publications
+	WHERE season_id = $1
+		AND tournament_id = $2
+		AND event_id = $3
+		AND is_active
+	ORDER BY revision DESC
+	LIMIT 1
+`;
+
+export const TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "trends.cohorts-public",
+		sql: TRENDS_COHORTS_PUBLIC_SQL,
+		values: [2026],
+		resultTypes: [
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "captured_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
+	{
+		name: "trends.cohorts-mine",
+		sql: TRENDS_COHORTS_MINE_SQL,
+		values: [2026, 1],
+		resultTypes: [
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "captured_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
+	{
+		name: "trends.snapshot-cohort-public",
+		sql: TRENDS_SNAPSHOT_COHORT_PUBLIC_SQL,
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1],
+		resultTypes: [
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "captured_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
+	{
+		name: "trends.snapshot-cohort-mine",
+		sql: TRENDS_SNAPSHOT_COHORT_MINE_SQL,
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1, 1],
+		resultTypes: [
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "captured_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
+	{
+		name: "trends.membership",
+		sql: TRENDS_MEMBERSHIP_SQL,
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1],
+	},
+	{
+		name: "trends.aggregate-union",
+		sql: TRENDS_AGGREGATE_UNION_SQL,
+		// The publication ID is opaque to this consumer: PostgreSQL infers the
+		// parameter type from the column while the remaining values still plan
+		// every aggregate branch.
+		values: [null, 12, 2026, 1, 2],
+		runtime: "must-return-trends-personal",
+	},
+];
 
 const FPL_SQUAD_SIZE = 15;
 
@@ -304,58 +502,10 @@ export const trendsRepository = {
 			if (cached) return cached;
 		}
 		const params: unknown[] = [context.currentSeason.seasonId];
-		let sql =
-			access === "MINE"
-				? `
-      SELECT tournament.tournament_id, tournament.setup_status,
-        COALESCE(catalog.display_name, tournament.name) AS display_name,
-        latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
-					latest.captured_at AS source_checked_at,
-        latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state, latest.transfers_state
-      FROM competition.tournament_entries member
-      JOIN competition.tournaments tournament
-        ON tournament.season_id = member.season_id
-        AND tournament.tournament_id = member.tournament_id
-      LEFT JOIN competition.public_league_trends catalog
-        ON catalog.season_id = tournament.season_id AND catalog.tournament_id = tournament.tournament_id
-      LEFT JOIN LATERAL (
-        SELECT publication.event_id, publication.revision, publication.publication_state,
-          publication.captured_at,
-          publication.ownership_state, publication.captaincy_state, publication.vice_captaincy_state,
-          publication.transfers_state
-        FROM reporting.tournament_selection_stat_publications publication
-        WHERE publication.season_id = tournament.season_id
-          AND publication.tournament_id = tournament.tournament_id AND publication.is_active
-        ORDER BY publication.event_id DESC, publication.revision DESC LIMIT 1
-      ) latest ON true
-      WHERE member.season_id = $1 AND member.entry_id = $2`
-				: `
-      SELECT catalog.tournament_id, tournament.setup_status, catalog.display_name,
-        latest.event_id AS latest_event_id, latest.revision, latest.publication_state,
-				latest.captured_at AS source_checked_at,
-        latest.ownership_state, latest.captaincy_state, latest.vice_captaincy_state, latest.transfers_state
-      FROM competition.public_league_trends catalog
-      JOIN competition.tournaments tournament
-        ON tournament.season_id = catalog.season_id
-        AND tournament.tournament_id = catalog.tournament_id
-        AND tournament.setup_status = 'ready'
-      LEFT JOIN LATERAL (
-        SELECT publication.event_id, publication.revision, publication.publication_state,
-          publication.captured_at,
-          publication.ownership_state, publication.captaincy_state, publication.vice_captaincy_state, publication.transfers_state
-        FROM reporting.tournament_selection_stat_publications publication
-        WHERE publication.season_id = catalog.season_id
-          AND publication.tournament_id = catalog.tournament_id AND publication.is_active
-        ORDER BY publication.event_id DESC, publication.revision DESC LIMIT 1
-      ) latest ON true
-      WHERE catalog.season_id = $1 AND catalog.enabled = TRUE`;
 		if (access === "MINE") {
 			params.push(viewerEntryId(context)!);
 		}
-		sql +=
-			access === "MINE"
-				? " ORDER BY COALESCE(catalog.sort_order, 0), tournament.tournament_id"
-				: " ORDER BY catalog.sort_order, catalog.tournament_id";
+		const sql = access === "MINE" ? TRENDS_COHORTS_MINE_SQL : TRENDS_COHORTS_PUBLIC_SQL;
 		const result = await context.database.query<Record<string, unknown>>(sql, params);
 		const hasPublishedRows = result.rows.some(
 			(row) => row.revision !== null && row.revision !== undefined
@@ -418,22 +568,7 @@ export const trendsRepository = {
 			params.push(viewerEntryId(context)!);
 		}
 		const cohortResult = await context.database.query<Record<string, unknown>>(
-			`
-      SELECT tournament.tournament_id, tournament.setup_status,
-        COALESCE(catalog.display_name, tournament.name) AS display_name, publication.event_id AS latest_event_id,
-        publication.revision, publication.publication_state, publication.ownership_state,
-        publication.captaincy_state, publication.vice_captaincy_state, publication.transfers_state,
-        publication.publication_id, publication.expected_entries, publication.captured_at, publication.published_at
-      FROM competition.tournaments tournament
-      LEFT JOIN competition.public_league_trends catalog
-        ON catalog.season_id = tournament.season_id AND catalog.tournament_id = tournament.tournament_id
-      LEFT JOIN reporting.tournament_selection_stat_publications publication
-        ON publication.season_id = tournament.season_id AND publication.tournament_id = tournament.tournament_id
-       AND publication.event_id = $3 AND publication.is_active
-      WHERE tournament.season_id = $1 AND tournament.tournament_id = $2 AND tournament.setup_status = 'ready'
-        AND ${access === "PUBLIC" ? "catalog.enabled = TRUE" : "TRUE"}
-        ${access === "MINE" ? "AND EXISTS (SELECT 1 FROM competition.tournament_entries member WHERE member.season_id = tournament.season_id AND member.tournament_id = tournament.tournament_id AND member.entry_id = $4)" : ""}
-      LIMIT 1`,
+			access === "MINE" ? TRENDS_SNAPSHOT_COHORT_MINE_SQL : TRENDS_SNAPSHOT_COHORT_PUBLIC_SQL,
 			params
 		);
 		const cohortRow = cohortResult.rows[0];
@@ -443,13 +578,7 @@ export const trendsRepository = {
 				const membership = await context.database.query<{
 					tournament_id: number;
 					is_member: boolean;
-				}>(
-					`SELECT tournament.tournament_id,
-            EXISTS (SELECT 1 FROM competition.tournament_entries member WHERE member.season_id = tournament.season_id AND member.tournament_id = tournament.tournament_id AND member.entry_id = $3) AS is_member
-           FROM competition.tournaments tournament
-           WHERE tournament.season_id = $1 AND tournament.tournament_id = $2 AND tournament.setup_status = 'ready'`,
-					[context.currentSeason.seasonId, tournamentId, entryId]
-				);
+				}>(TRENDS_MEMBERSHIP_SQL, [context.currentSeason.seasonId, tournamentId, entryId]);
 				if (membership.rows[0] && !membership.rows[0].is_member)
 					forbidden("User is not a member of this Trends cohort");
 			}
@@ -475,7 +604,7 @@ export const trendsRepository = {
 		// Aggregate and personal exposure rows share one bounded SQL round trip.
 		if ((cohortRow.publication_id && aggregateReady) || viewerEntry !== null) {
 			const aggregateResult = await context.database.query<Record<string, unknown>>(
-				aggregateTrendUnionSql,
+				TRENDS_AGGREGATE_UNION_SQL,
 				[cohortRow.publication_id, limit, context.currentSeason.seasonId, viewerEntry, eventId]
 			);
 			for (const row of aggregateResult.rows) {

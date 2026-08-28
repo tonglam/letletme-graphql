@@ -1,5 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import type { Entry } from "../../contracts/entry";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
@@ -212,6 +213,18 @@ const isEntry = (value: unknown): value is Entry => {
 	);
 };
 
+/**
+ * Validate the row shape returned by the direct search statement.  Search
+ * aliases `entry_id` to `id`, so the production mapper and the contract probe
+ * must agree on the exact persisted-entry shape rather than accepting any
+ * non-empty row from PostgreSQL.
+ */
+export const parseEntrySearchRow = (value: unknown): Entry | null => {
+	if (!isRecord(value)) return null;
+	const mapped = mapEntry(value as DbEntryRow);
+	return isEntry(mapped) ? mapped : null;
+};
+
 const evictMalformedCache = async (context: GraphQLContext, key: string): Promise<void> => {
 	try {
 		await context.redis.del(key);
@@ -301,6 +314,15 @@ export const SEARCH_ENTRIES_SQL = `
 		entry_id ASC
 	LIMIT $3
 `;
+
+export const ENTRIES_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "entries.search",
+		sql: SEARCH_ENTRIES_SQL,
+		values: [2026, "contract", 10],
+		runtime: "must-return-entry-search",
+	},
+];
 
 export const escapeIlikePattern = (value: string): string =>
 	value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
@@ -569,7 +591,7 @@ export const entriesRepository: EntriesRepository = {
 		}
 
 		// Include the successful checkpoint in the key so a new authoritative
-		// history replacement cannot reuse the previous legacy payload.
+		// history replacement cannot reuse an older payload.
 		const cacheKey = gqlCacheKey(
 			context,
 			`entries:history-info:${ENTRY_HISTORY_INFO_CACHE_VERSION}:${entryId}:${String(
@@ -609,7 +631,7 @@ export const entriesRepository: EntriesRepository = {
 		const historyInfo = (data as DbEntryHistoryInfoRow[] | null)?.map(mapEntryHistoryInfo) ?? [];
 		if (historyInfo.length !== pastSeasonsCount) {
 			// A checkpoint without its complete row set is not proof of a ready
-			// legacy result. Do not cache or expose a partial array.
+			// result. Do not cache or expose a partial array.
 			return [];
 		}
 		await writeQueryCache(

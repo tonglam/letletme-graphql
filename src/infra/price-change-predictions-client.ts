@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
 import { DateResolver, DateTimeResolver } from "graphql-scalars";
+import type { DataSqlContractProbe } from "../contracts/data-sql-contract";
 import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
@@ -89,7 +90,7 @@ export type PriceChangeBoard = {
 	expectedPlayerCount: number;
 	observedPlayerCount: number;
 	players: PriceChangePlayer[];
-	latestEvent?: PriceChangeObservedEvent | null;
+	latestEvent: PriceChangeObservedEvent | null;
 };
 
 export type PriceChangeDurableCursor = Readonly<{
@@ -101,7 +102,7 @@ export type PriceChangeDurableCursor = Readonly<{
 }>;
 
 type PriceChangePublicationContext = {
-	schemaVersion: 1 | 2;
+	schemaVersion: 2;
 	source: "FPL_BOOTSTRAP";
 	fetchedAt: string;
 	staleAt: string;
@@ -110,10 +111,10 @@ type PriceChangePublicationContext = {
 	nextDeadlines: string[];
 	expectedPlayerCount: number;
 	observedPlayerCount: number;
-	latestEvent?: PriceChangeObservedEvent | null;
+	latestEvent: PriceChangeObservedEvent | null;
 };
 
-const CONTEXT_FIELDS_V1 = [
+const CONTEXT_FIELDS = [
 	"schemaVersion",
 	"source",
 	"fetchedAt",
@@ -123,9 +124,8 @@ const CONTEXT_FIELDS_V1 = [
 	"nextDeadlines",
 	"expectedPlayerCount",
 	"observedPlayerCount",
+	"latestEvent",
 ] as const;
-
-const CONTEXT_FIELDS_V2 = [...CONTEXT_FIELDS_V1, "latestEvent"] as const;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -417,13 +417,8 @@ export const parsePriceChangeBoardValue = (
 	if (playerIds.size !== parsedPlayers.length || playerIds.size !== value.expectedPlayerCount) {
 		return null;
 	}
-	const hasLatestEvent = Object.prototype.hasOwnProperty.call(value, "latestEvent");
-	const latestEvent = parseObservedEvent(
-		hasLatestEvent ? value.latestEvent : null,
-		parsedPlayers,
-		now
-	);
-	if (hasLatestEvent && value.latestEvent !== null && latestEvent === null) return null;
+	const latestEvent = parseObservedEvent(value.latestEvent, parsedPlayers, now);
+	if (value.latestEvent !== null && latestEvent === null) return null;
 	if (value.fetchedAt !== null) {
 		const fetchedAt = Date.parse(value.fetchedAt);
 		if (
@@ -466,11 +461,7 @@ const unavailableBoard = (): PriceChangeBoard => ({
 
 const parseContext = (value: unknown): PriceChangePublicationContext | null => {
 	if (!isRecord(value)) return null;
-	const schemaVersion = value.schemaVersion;
-	if (
-		(schemaVersion !== 1 && schemaVersion !== 2) ||
-		!hasExactFields(value, schemaVersion === 1 ? CONTEXT_FIELDS_V1 : CONTEXT_FIELDS_V2)
-	) {
+	if (value.schemaVersion !== 2 || !hasExactFields(value, CONTEXT_FIELDS)) {
 		return null;
 	}
 	if (
@@ -505,12 +496,12 @@ const parseContext = (value: unknown): PriceChangePublicationContext | null => {
 			return null;
 		}
 	}
-	const latestEvent = schemaVersion === 2 ? parseObservedEvent(value.latestEvent) : null;
-	if (schemaVersion === 2 && value.latestEvent !== null && latestEvent === null) {
+	const latestEvent = parseObservedEvent(value.latestEvent);
+	if (value.latestEvent !== null && latestEvent === null) {
 		return null;
 	}
 	return {
-		schemaVersion,
+		schemaVersion: 2,
 		source: "FPL_BOOTSTRAP",
 		fetchedAt: value.fetchedAt,
 		staleAt: value.staleAt,
@@ -523,7 +514,7 @@ const parseContext = (value: unknown): PriceChangePublicationContext | null => {
 	};
 };
 
-const parsePublicationBoard = (
+export const parsePublicationBoard = (
 	publication: DataPublication,
 	now: Date
 ): PriceChangeBoard | null => {
@@ -621,6 +612,80 @@ const payloadCount = (value: unknown): number => {
 
 const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 
+type PriceChangeContractItemRow = Readonly<{
+	name?: unknown;
+	payload?: unknown;
+	itemCount?: unknown;
+	checksum?: unknown;
+}>;
+
+/**
+ * Decode the immutable Price Change publication row returned by the direct
+ * Data contract. This is deliberately the same manifest, payload, count,
+ * checksum, and board decoder used by the PostgreSQL fallback path.
+ */
+export const parsePriceChangeContractRow = (value: unknown): PriceChangeBoard | null => {
+	if (!isRecord(value)) return null;
+	const rawManifest =
+		typeof value.manifest === "string" ? value.manifest : (JSON.stringify(value.manifest) ?? "");
+	const manifest = parseDataPublicationManifest(rawManifest, {
+		dataset: PRICE_CHANGE_DATASET,
+		seasonCode: "2627",
+	});
+	if (
+		!manifest ||
+		manifest.eventId !== null ||
+		manifest.state !== "active" ||
+		manifest.items.length !== PRICE_CHANGE_ITEMS.length ||
+		manifest.items
+			.map((item) => item.name)
+			.sort()
+			.join(",") !== [...PRICE_CHANGE_ITEMS].sort().join(",") ||
+		typeof value.publication_id !== "string" ||
+		manifest.publicationId !== value.publication_id ||
+		Number(value.revision) !== manifest.revision
+	) {
+		return null;
+	}
+	if (!Array.isArray(value.item_rows)) return null;
+	const items: Record<string, unknown> = {};
+	const seen = new Set<string>();
+	for (const candidate of value.item_rows as PriceChangeContractItemRow[]) {
+		if (!isRecord(candidate) || typeof candidate.name !== "string") return null;
+		const itemName = candidate.name;
+		if (
+			seen.has(itemName) ||
+			!PRICE_CHANGE_ITEMS.includes(itemName as (typeof PRICE_CHANGE_ITEMS)[number]) ||
+			typeof candidate.checksum !== "string"
+		) {
+			return null;
+		}
+		const manifestItem = manifest.items.find((item) => item.name === itemName);
+		if (!manifestItem || candidate.checksum !== manifestItem.sha256) return null;
+		let payload: unknown = candidate.payload;
+		try {
+			payload = typeof payload === "string" ? JSON.parse(payload) : payload;
+			const serialized = canonicalJson(payload);
+			if (
+				Number(candidate.itemCount) !== manifestItem.count ||
+				payloadCount(payload) !== manifestItem.count ||
+				Buffer.byteLength(serialized, "utf8") !== manifestItem.bytes ||
+				sha256(serialized) !== manifestItem.sha256
+			) {
+				return null;
+			}
+		} catch {
+			return null;
+		}
+		seen.add(itemName);
+		items[itemName] = payload;
+	}
+	if (seen.size !== PRICE_CHANGE_ITEMS.length) return null;
+	const context = parseContext(items.context);
+	if (!context) return null;
+	return parsePublicationBoard({ manifest, items }, new Date(context.fetchedAt));
+};
+
 type PublicationCandidateRow = QueryResultRow & {
 	publication_id: string;
 	revision: string | number;
@@ -641,7 +706,6 @@ type PublicationItemMetadataRow = QueryResultRow & {
 	item_name: string;
 	item_count: string | number;
 	checksum: string;
-	payload_bytes: string | number;
 };
 
 type ParsedPriceChangePublicationCandidate = {
@@ -660,7 +724,7 @@ type LoadedPriceChangePublicationCandidate = {
 // the complete one-hour hard-expiry window without an unbounded history scan.
 const RETIRED_PUBLICATION_LIMIT = 12;
 
-const PUBLICATION_CANDIDATES_SQL = `
+export const PUBLICATION_CANDIDATES_SQL = `
 	WITH active_candidates AS (
 		SELECT publication_id::text AS publication_id, revision::text AS revision, status, manifest
 		FROM ops.dataset_publications
@@ -687,7 +751,7 @@ const PUBLICATION_CANDIDATES_SQL = `
 	SELECT publication_id, revision, status, manifest FROM retired_candidates
 `;
 
-const PUBLICATION_BY_ID_SQL = `
+export const PUBLICATION_BY_ID_SQL = `
 	SELECT publication_id::text AS publication_id, revision::text AS revision, status, manifest
 	FROM ops.dataset_publications
 	WHERE publication_id = $1::uuid
@@ -699,14 +763,61 @@ const PUBLICATION_BY_ID_SQL = `
 	LIMIT 1
 `;
 
-const PUBLICATION_ITEMS_SQL = `
+export const PUBLICATION_ITEMS_SQL = `
 	SELECT publication_id::text AS publication_id, item_name, item_count, checksum, payload
 	FROM ops.dataset_publication_items
 	WHERE publication_id = ANY($1::uuid[])
 	ORDER BY publication_id, item_name
 `;
 
-const PUBLICATION_CONTEXT_ITEMS_SQL = `
+/**
+ * Contract-only read of one immutable publication and its two payloads. This
+ * deliberately mirrors the producer rows consumed by the PostgreSQL reader;
+ * the contract runner executes it and sends the resulting manifest/items
+ * through parsePublicationBoard rather than accepting a non-empty JSON value.
+ */
+export const PRICE_CHANGE_PUBLICATION_CONTRACT_SQL = `
+	WITH publication AS (
+		SELECT publication_id::text AS publication_id,
+			revision::text AS revision,
+			status,
+			manifest
+		FROM ops.dataset_publications
+		WHERE dataset = 'fpl:price-changes'
+			AND season_id = $1
+			AND event_id IS NULL
+			AND status = 'active'
+			AND (expires_at IS NULL OR expires_at > now())
+		ORDER BY revision DESC
+		LIMIT 1
+	), items AS (
+		SELECT publication_id::text AS publication_id,
+			COALESCE(
+				jsonb_agg(
+					jsonb_build_object(
+						'name', item_name,
+						'payload', payload::jsonb,
+						'itemCount', item_count,
+						'checksum', checksum
+					)
+					ORDER BY item_name
+				) FILTER (WHERE item_name IS NOT NULL),
+				'[]'::jsonb
+			) AS items
+		FROM ops.dataset_publication_items
+		WHERE publication_id = (SELECT publication_id::uuid FROM publication)
+		GROUP BY publication_id
+	)
+	SELECT publication.publication_id,
+		publication.revision,
+		publication.status,
+		publication.manifest,
+		COALESCE(items.items, '[]'::jsonb) AS item_rows
+	FROM publication
+	LEFT JOIN items USING (publication_id)
+`;
+
+export const PUBLICATION_CONTEXT_ITEMS_SQL = `
 	SELECT publication_id::text AS publication_id, item_name, item_count, checksum, payload
 	FROM ops.dataset_publication_items
 	WHERE publication_id = ANY($1::uuid[])
@@ -714,14 +825,97 @@ const PUBLICATION_CONTEXT_ITEMS_SQL = `
 	ORDER BY publication_id
 `;
 
-const PUBLICATION_ITEM_METADATA_SQL = `
-	SELECT publication_id::text AS publication_id, item_name, item_count, checksum,
-	       octet_length(payload) AS payload_bytes
+export const PUBLICATION_ITEM_METADATA_SQL = `
+	SELECT publication_id::text AS publication_id, item_name, item_count, checksum
 	FROM ops.dataset_publication_items
 	WHERE publication_id = ANY($1::uuid[])
 	  AND item_name = ANY($2::text[])
 	ORDER BY publication_id, item_name
 `;
+
+const PRICE_CHANGE_CONTRACT_PUBLICATION_ID = "00000000-0000-4000-8000-000000000001";
+
+export const PRICE_CHANGE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "price-change.publication-candidates",
+		sql: PUBLICATION_CANDIDATES_SQL,
+		values: [2026],
+	},
+	{
+		name: "price-change.publication-by-id",
+		sql: PUBLICATION_BY_ID_SQL,
+		values: [PRICE_CHANGE_CONTRACT_PUBLICATION_ID, 2026],
+	},
+	{
+		name: "price-change.publication-decoder",
+		sql: PRICE_CHANGE_PUBLICATION_CONTRACT_SQL,
+		values: [2026],
+		runtime: "must-return-price-change",
+		resultTypes: [
+			{
+				relation: "ops.dataset_publications",
+				column: "manifest",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+		],
+	},
+	{
+		name: "price-change.publication-items",
+		sql: PUBLICATION_ITEMS_SQL,
+		values: [[PRICE_CHANGE_CONTRACT_PUBLICATION_ID]],
+		resultTypes: [
+			{
+				relation: "ops.dataset_publication_items",
+				column: "payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+		],
+	},
+	{
+		name: "price-change.publication-context-items",
+		sql: PUBLICATION_CONTEXT_ITEMS_SQL,
+		values: [[PRICE_CHANGE_CONTRACT_PUBLICATION_ID]],
+		resultTypes: [
+			{
+				relation: "ops.dataset_publication_items",
+				column: "payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+		],
+	},
+	{
+		name: "price-change.publication-item-metadata",
+		sql: PUBLICATION_ITEM_METADATA_SQL,
+		values: [[PRICE_CHANGE_CONTRACT_PUBLICATION_ID], PRICE_CHANGE_ITEMS],
+		resultTypes: [
+			{
+				relation: "ops.dataset_publication_items",
+				column: "publication_id",
+				pgType: "uuid",
+			},
+			{
+				relation: "ops.dataset_publication_items",
+				column: "item_name",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "ops.dataset_publication_items",
+				column: "item_count",
+				pgType: "integer",
+			},
+			{
+				relation: "ops.dataset_publication_items",
+				column: "checksum",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+		],
+	},
+];
 
 const loadPriceChangePublicationItems = async (
 	context: GraphQLContext,
@@ -1033,7 +1227,9 @@ export async function readPriceChangePredictionsCursor(
 	try {
 		// Keep the cursor fallback bounded to the same active plus twelve retained
 		// candidates used by the board reader. Only the context item is fetched;
-		// player arrays remain exclusive to the revision-bound board query.
+		// player arrays remain exclusive to the revision-bound board query. The
+		// metadata row is checked against the manifest checksum and count; the
+		// fetched context payload is then verified byte-for-byte below.
 		const authority = await context.database.query<PublicationCandidateRow>(
 			PUBLICATION_CANDIDATES_SQL,
 			[context.currentSeason.seasonId]
@@ -1102,8 +1298,7 @@ export async function readPriceChangePredictionsCursor(
 					!item ||
 					!manifestItem ||
 					Number(item.item_count) !== manifestItem.count ||
-					item.checksum !== manifestItem.sha256 ||
-					Number(item.payload_bytes) !== manifestItem.bytes
+					item.checksum !== manifestItem.sha256
 				) {
 					metadataValid = false;
 					break;

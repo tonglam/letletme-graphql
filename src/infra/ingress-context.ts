@@ -15,14 +15,7 @@ export {
 	type GraphQLWorkload,
 } from "./ingress-envelope";
 
-type IngressEnvelopeV1 = {
-	aud?: unknown;
-	sub?: unknown;
-	iat?: unknown;
-	exp?: unknown;
-};
-
-type IngressEnvelopeV2 = {
+type IngressEnvelope = {
 	v?: unknown;
 	aud?: unknown;
 	trafficClass?: unknown;
@@ -34,7 +27,8 @@ type IngressEnvelopeV2 = {
 };
 
 export type VerifiedIngressContext = {
-	readonly version: 1 | 2;
+	/** The only accepted signed ingress envelope revision. */
+	readonly version: 2;
 	readonly subject: string;
 	readonly abuseSubject: string | null;
 	readonly trafficClass: GraphQLTrafficClass;
@@ -43,19 +37,20 @@ export type VerifiedIngressContext = {
 
 export const GRAPHQL_SERVICE_TOKEN_HEADER = "X-GraphQL-Service-Token";
 export const GRAPHQL_SERVICE_RATE_LIMIT_SUBJECT = "service:web-public-rsc";
-// v1 compatibility only. New public RSC callers use a v2 web_rsc envelope.
 export const WEB_PUBLIC_RSC_RATE_LIMIT_SUBJECT = createHmac("sha256", env.BACKEND_PROXY_SECRET)
 	.update("rate-limit:web-public-rsc")
 	.digest("hex");
 
 export type GraphQLIngressClass = "signed" | "service" | "untrusted";
 
+type GraphQLIngressTrafficClass = GraphQLTrafficClass | "untrusted";
+
 export type GraphQLIngress = {
 	readonly class: GraphQLIngressClass;
 	readonly trusted: boolean;
 	readonly subject: string | null;
 	readonly abuseSubject: string | null;
-	readonly trafficClass: GraphQLTrafficClass;
+	readonly trafficClass: GraphQLIngressTrafficClass;
 	readonly workload: GraphQLWorkload;
 	readonly ingressContext: VerifiedIngressContext | null;
 };
@@ -90,29 +85,8 @@ const validLifetime = (envelope: { iat?: unknown; exp?: unknown }, nowSeconds: n
 	);
 };
 
-const verifyEnvelopeV1 = (
-	envelope: IngressEnvelopeV1,
-	nowSeconds: number
-): VerifiedIngressContext | null => {
-	if (
-		!hasExactFields(envelope, ["aud", "sub", "iat", "exp"]) ||
-		envelope.aud !== "letletme-graphql" ||
-		!isOpaqueSubject(envelope.sub) ||
-		!validLifetime(envelope, nowSeconds)
-	) {
-		return null;
-	}
-	return {
-		version: 1,
-		subject: envelope.sub,
-		abuseSubject: null,
-		trafficClass: "legacy",
-		workload: "public-other",
-	};
-};
-
 const verifyEnvelopeV2 = (
-	envelope: IngressEnvelopeV2,
+	envelope: IngressEnvelope,
 	nowSeconds: number
 ): VerifiedIngressContext | null => {
 	if (
@@ -129,7 +103,6 @@ const verifyEnvelopeV2 = (
 		envelope.v !== 2 ||
 		envelope.aud !== "letletme-graphql" ||
 		!GRAPHQL_TRAFFIC_CLASSES.includes(envelope.trafficClass as GraphQLTrafficClass) ||
-		envelope.trafficClass === "legacy" ||
 		!isOpaqueSubject(envelope.subject) ||
 		!(envelope.abuseSubject === null || isOpaqueSubject(envelope.abuseSubject)) ||
 		(envelope.trafficClass === "mini" && envelope.abuseSubject === null) ||
@@ -158,10 +131,10 @@ export const verifyIngressContext = (
 	if (!contextHeader || !signature) return null;
 
 	let payload: string;
-	let envelope: IngressEnvelopeV1 | IngressEnvelopeV2;
+	let envelope: IngressEnvelope;
 	try {
 		payload = Buffer.from(contextHeader, "base64url").toString("utf8");
-		envelope = JSON.parse(payload) as IngressEnvelopeV1 | IngressEnvelopeV2;
+		envelope = JSON.parse(payload) as IngressEnvelope;
 	} catch {
 		return null;
 	}
@@ -171,9 +144,7 @@ export const verifyIngressContext = (
 		.digest("base64url");
 	if (!equalBase64Url(signature, expected)) return null;
 
-	return "v" in envelope
-		? verifyEnvelopeV2(envelope as IngressEnvelopeV2, nowSeconds)
-		: verifyEnvelopeV1(envelope as IngressEnvelopeV1, nowSeconds);
+	return verifyEnvelopeV2(envelope, nowSeconds);
 };
 
 export const verifyGraphQLServiceToken = (
@@ -213,7 +184,7 @@ export const classifyGraphQLIngress = (
 			trusted: false,
 			subject: null,
 			abuseSubject: null,
-			trafficClass: "legacy",
+			trafficClass: "untrusted",
 			workload: "public-other",
 			ingressContext: null,
 		};
@@ -237,7 +208,7 @@ export const classifyGraphQLIngress = (
 		trusted: false,
 		subject: null,
 		abuseSubject: null,
-		trafficClass: "legacy",
+		trafficClass: "untrusted",
 		workload: "public-other",
 		ingressContext: null,
 	};

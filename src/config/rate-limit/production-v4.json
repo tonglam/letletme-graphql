@@ -8,14 +8,6 @@
 		"requiredHeadroomRatio": 0.4,
 		"evidence": null
 	},
-	"legacyV2": {
-		"windowSeconds": 60,
-		"globalRequest": 1500,
-		"sharedPublicWeighted": 1200,
-		"browserIngress": 480,
-		"authenticatedWeighted": 900,
-		"anonymousWeighted": 600
-	},
 	"global": {
 		"refillPerSecond": 100,
 		"burst": 1000
@@ -63,10 +55,6 @@
 		"service": {
 			"classRequest": { "refillPerSecond": 5, "burst": 60 },
 			"weighted": { "refillPerSecond": 15, "burst": 900 }
-		},
-		"legacy": {
-			"classRequest": { "refillPerSecond": 8, "burst": 480 },
-			"weighted": { "refillPerSecond": 10, "burst": 600 }
 		}
 	}
 }

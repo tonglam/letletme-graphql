@@ -4,7 +4,7 @@ import { capacityRunRequestIdPrefix } from "../src/http/capacity-run-id";
 type Workload =
 	"interactive" | "home" | "fixtures" | "market" | "player-stats" | "gameweek" | "public-other";
 
-type ActorKind = "mini" | "web_rsc" | "session" | "legacy" | "service";
+type ActorKind = "mini" | "web_rsc" | "session" | "service";
 
 type Actor = {
 	id: string;
@@ -161,22 +161,6 @@ const capacityRunSignature = createHmac("sha256", backendSecret)
 	.update(`capacity-run:${runId}`)
 	.digest("base64url");
 
-const signedLegacyHeaders = (actorId: string): Record<string, string> => {
-	const now = Math.floor(Date.now() / 1000);
-	const payload = JSON.stringify({
-		aud: "letletme-graphql",
-		sub: sha256(`load:${runId}:${actorId}`),
-		iat: now,
-		exp: now + 60,
-	});
-	return {
-		"X-Ingress-Context": Buffer.from(payload).toString("base64url"),
-		"X-Ingress-Context-Sig": createHmac("sha256", backendSecret)
-			.update(payload)
-			.digest("base64url"),
-	};
-};
-
 const queryForWorkload = (
 	workload: Workload
 ): { query: string; variables: Record<string, unknown>; operationName: string } => {
@@ -287,15 +271,12 @@ const buildActors = (): Actor[] => {
 		path: index % 2 === 0 ? "/en/my-fpl/team" : "/en/live/points",
 		cookie: sessionCookies[index] ?? sessionCookies[index % Math.max(1, sessionCookies.length)],
 	}));
-	const compatibilityActors: Actor[] = Array.from({ length: 15 }, (_, index) => {
-		const kind: "legacy" | "service" = index % 2 === 0 ? "legacy" : "service";
-		return {
-			id: `${kind}-${index + 1}`,
-			kind,
-			workload: "public-other" as const,
-		};
-	});
-	return [...miniActors, ...rscActors, ...sessionActors, ...compatibilityActors];
+	const serviceActors: Actor[] = Array.from({ length: 15 }, (_, index) => ({
+		id: `service-${index + 1}`,
+		kind: "service" as const,
+		workload: "public-other" as const,
+	}));
+	return [...miniActors, ...rscActors, ...sessionActors, ...serviceActors];
 };
 
 const actors = buildActors();
@@ -324,8 +305,6 @@ const graphQLRequest = async (
 		headers["X-Letletme-Client"] = "wechat-miniprogram";
 		headers["X-Letletme-Device-Id"] = `load-${runId}-${actor.id}`.slice(0, 128);
 		if (actor.miniToken) headers.Authorization = `Bearer ${actor.miniToken}`;
-	} else if (actor.kind === "legacy") {
-		Object.assign(headers, signedLegacyHeaders(actor.id));
 	} else if (actor.kind === "service") {
 		headers["X-GraphQL-Service-Token"] = serviceToken;
 	}
@@ -450,14 +429,12 @@ const runStage = async (concurrent: number, durationSeconds: number): Promise<vo
 	const miniCount = Math.round(concurrent * 0.6);
 	const rscCount = Math.round(concurrent * 0.2);
 	const sessionCount = Math.round(concurrent * 0.15);
-	const compatibilityCount = concurrent - miniCount - rscCount - sessionCount;
+	const serviceCount = concurrent - miniCount - rscCount - sessionCount;
 	const selected = [
 		...actors.filter((actor) => actor.kind === "mini").slice(0, miniCount),
 		...actors.filter((actor) => actor.kind === "web_rsc").slice(0, rscCount),
 		...actors.filter((actor) => actor.kind === "session").slice(0, sessionCount),
-		...actors
-			.filter((actor) => actor.kind === "legacy" || actor.kind === "service")
-			.slice(0, compatibilityCount),
+		...actors.filter((actor) => actor.kind === "service").slice(0, serviceCount),
 	];
 	const deadline = Date.now() + durationSeconds * 1000;
 	await Promise.all(
@@ -703,7 +680,7 @@ const collectRuntimeSample = async (): Promise<void> => {
 	let metricsBody = "";
 	try {
 		const [healthResponse, metricsResponse] = await Promise.all([
-			fetch(`${graphQLOrigin}/health`, { signal: AbortSignal.timeout(5_000) }),
+			fetch(`${graphQLOrigin}/health/ready`, { signal: AbortSignal.timeout(5_000) }),
 			fetch(`${graphQLOrigin}/metrics`, {
 				headers: { "X-Metrics-Token": metricsToken },
 				signal: AbortSignal.timeout(5_000),
@@ -735,9 +712,7 @@ const collectRuntimeSample = async (): Promise<void> => {
 		globalDenied: metricSum(
 			metricsBody,
 			"graphql_rate_limit_v3_decisions_total",
-			(labels) =>
-				labels.includes('scope="global"') &&
-				(labels.includes('outcome="denied"') || labels.includes('outcome="legacy_denied"'))
+			(labels) => labels.includes('scope="global"') && labels.includes('outcome="denied"')
 		),
 		globalWouldDenied: metricSum(
 			metricsBody,
@@ -747,9 +722,7 @@ const collectRuntimeSample = async (): Promise<void> => {
 		nonMiniDenied: metricSum(
 			metricsBody,
 			"graphql_rate_limit_v3_decisions_total",
-			(labels) =>
-				!labels.includes('traffic_class="mini"') &&
-				(labels.includes('outcome="denied"') || labels.includes('outcome="legacy_denied"'))
+			(labels) => !labels.includes('traffic_class="mini"') && labels.includes('outcome="denied"')
 		),
 		wouldDenied: metricSum(metricsBody, "graphql_rate_limit_v3_decisions_total", (labels) =>
 			labels.includes('outcome="would_deny"')
@@ -1060,8 +1033,7 @@ const report = {
 		sharedNatMini: 100,
 		webRsc: { total: 60, playerStats: 30, fixtures: 18, market: 12 },
 		session: 45,
-		legacy: 8,
-		service: 7,
+		service: 15,
 		stagesSeconds: {
 			50: stageSeconds,
 			100: stageSeconds,

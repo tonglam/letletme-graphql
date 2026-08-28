@@ -1,10 +1,9 @@
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
+import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixture-identities";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
-import {
-	getTournamentSelectionStatsReadModel,
-	type TournamentSelectionStats,
-} from "../event-stats/repository";
+import { type TournamentSelectionStats } from "../event-stats/repository";
 
 export type PublicLeagueTrend = {
 	tournamentId: number;
@@ -36,71 +35,219 @@ type CatalogRow = {
 type AccessRow = {
 	catalog_revision: string | Date;
 	snapshot_revision: string | Date;
+	selection_publication_id: string | number;
+	selection_revision: string | number;
 };
+
+type SelectionCapabilityState = "READY" | "NOT_READY" | "FAILED" | "UNSUPPORTED";
+
+export type PublicLeagueSelectionPublication = Readonly<{
+	publicationId: number;
+	expectedEntries: number;
+	revision: number;
+	ownershipState: SelectionCapabilityState;
+	captaincyState: SelectionCapabilityState;
+	viceCaptaincyState: SelectionCapabilityState;
+	transfersState: SelectionCapabilityState;
+}>;
+
+/**
+ * One non-null row from the immutable selection publication.  Keep this
+ * decoder next to the SQL reader so an invalid player position/count cannot
+ * turn into NaN or an invented midfielder while mapping the whole result.
+ */
+export type PublicLeagueSelectionRow = Readonly<{
+	elementId: number;
+	selectedCount: number;
+	effectiveSelectionCount: number;
+	captainCount: number;
+	viceCaptainCount: number;
+	transferInCount: number;
+	transferOutCount: number;
+	playerName: string;
+	playerPosition: number;
+	teamShortName: string;
+}>;
+
+const SELECTION_CAPABILITY_STATES: readonly SelectionCapabilityState[] = [
+	"READY",
+	"NOT_READY",
+	"FAILED",
+	"UNSUPPORTED",
+];
+
+const sqlSafeInteger = (value: unknown, minimum: number): number | null => {
+	const candidate =
+		typeof value === "number"
+			? value
+			: typeof value === "string" && value.trim() !== ""
+				? Number(value)
+				: null;
+	return candidate !== null && Number.isSafeInteger(candidate) && candidate >= minimum
+		? candidate
+		: null;
+};
+
+const isSelectionCapabilityState = (value: unknown): value is SelectionCapabilityState =>
+	typeof value === "string" &&
+	SELECTION_CAPABILITY_STATES.includes(value as SelectionCapabilityState);
+
+/**
+ * Decode the publication metadata consumed by the public selection reader.
+ * PostgreSQL bigint values may arrive as strings, so numeric coercion is
+ * explicit and bounded before any percentage calculation is attempted.
+ */
+export const parsePublicLeagueSelectionPublication = (
+	value: unknown
+): PublicLeagueSelectionPublication | null => {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	const row = value as Record<string, unknown>;
+	const publicationId = sqlSafeInteger(row.publication_id, 1);
+	const expectedEntries = sqlSafeInteger(row.expected_entries, 0);
+	const revision = sqlSafeInteger(row.revision, 1);
+	const states = [
+		row.ownership_state,
+		row.captaincy_state,
+		row.vice_captaincy_state,
+		row.transfers_state,
+	];
+	if (
+		publicationId === null ||
+		expectedEntries === null ||
+		revision === null ||
+		states.some((state) => !isSelectionCapabilityState(state))
+	) {
+		return null;
+	}
+	return {
+		publicationId,
+		expectedEntries,
+		revision,
+		ownershipState: row.ownership_state as SelectionCapabilityState,
+		captaincyState: row.captaincy_state as SelectionCapabilityState,
+		viceCaptaincyState: row.vice_captaincy_state as SelectionCapabilityState,
+		transfersState: row.transfers_state as SelectionCapabilityState,
+	};
+};
+
+const selectionCount = (value: unknown): number | null => sqlSafeInteger(value, 0);
+
+/** Decode one selection row with the same bounds used by the production map. */
+export const parsePublicLeagueSelectionRow = (value: unknown): PublicLeagueSelectionRow | null => {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	const row = value as Record<string, unknown>;
+	const elementId = sqlSafeInteger(row.element_id, 1);
+	const playerPosition = sqlSafeInteger(row.player_position, 1);
+	const selectedCount = selectionCount(row.selected_count);
+	const effectiveSelectionCount = selectionCount(row.effective_selection_count);
+	const captainCount = selectionCount(row.captain_count);
+	const viceCaptainCount = selectionCount(row.vice_captain_count);
+	const transferInCount = selectionCount(row.transfer_in_count);
+	const transferOutCount = selectionCount(row.transfer_out_count);
+	if (
+		elementId === null ||
+		playerPosition === null ||
+		playerPosition > 4 ||
+		selectedCount === null ||
+		effectiveSelectionCount === null ||
+		captainCount === null ||
+		viceCaptainCount === null ||
+		transferInCount === null ||
+		transferOutCount === null ||
+		typeof row.player_name !== "string" ||
+		row.player_name.trim() === "" ||
+		typeof row.team_short_name !== "string" ||
+		row.team_short_name.trim() === ""
+	) {
+		return null;
+	}
+	return {
+		elementId,
+		selectedCount,
+		effectiveSelectionCount,
+		captainCount,
+		viceCaptainCount,
+		transferInCount,
+		transferOutCount,
+		playerName: row.player_name,
+		playerPosition,
+		teamShortName: row.team_short_name,
+	};
+};
+
+export const PUBLIC_LEAGUE_SELECTION_SQL = `
+	SELECT publication.publication_id, publication.expected_entries, publication.revision,
+		publication.ownership_state, publication.captaincy_state, publication.vice_captaincy_state,
+		publication.transfers_state,
+		rows.element_id, rows.selected_count, rows.effective_selection_count,
+		rows.captain_count, rows.vice_captain_count, rows.transfer_in_count,
+		rows.transfer_out_count, rows.player_name, rows.player_position, rows.team_short_name
+	FROM reporting.tournament_selection_stat_publications publication
+	LEFT JOIN reporting.tournament_selection_stat_rows rows
+		ON rows.publication_id = publication.publication_id
+	WHERE publication.season_id = $1 AND publication.tournament_id = $2
+		AND publication.event_id = $3
+		AND publication.publication_id = $4::bigint
+		AND publication.revision = $5::bigint
+		AND publication.is_active
+	ORDER BY rows.selected_count DESC NULLS LAST, rows.element_id
+`;
 
 const publicationPosition = (value: number): string =>
 	value === 1 ? "GOALKEEPER" : value === 2 ? "DEFENDER" : value === 4 ? "FORWARD" : "MIDFIELDER";
 
 async function readPublishedSelectionStats(
 	context: GraphQLContext,
+	executor: QueryExecutor,
 	tournamentId: number,
 	eventId: number,
+	publicationId: number,
+	publicationRevision: number,
 	limit: number
-): Promise<TournamentSelectionStats | null | undefined> {
+): Promise<TournamentSelectionStats | null> {
 	try {
-		// The publication table is not itself a public-access boundary. Check the
-		// catalog and tournament readiness before accepting any new publication.
-		const accessResult = await context.database.query(ACCESS_SQL, [
+		// getSelectionStats has already authorized the publication through the
+		// catalog/readiness query. Keep this read to one publication SQL round trip.
+		const result = (await executor.query(PUBLIC_LEAGUE_SELECTION_SQL, [
 			context.currentSeason.seasonId,
 			tournamentId,
 			eventId,
-		]);
-		if (!accessResult.rows[0]) return null;
-		const result = await context.database.query<Record<string, unknown>>(
-			`SELECT publication.publication_id, publication.expected_entries, publication.revision,
-				publication.ownership_state, publication.captaincy_state, publication.transfers_state,
-				rows.element_id, rows.selected_count, rows.effective_selection_count,
-				rows.captain_count, rows.vice_captain_count, rows.transfer_in_count,
-				rows.transfer_out_count, rows.player_name, rows.player_position, rows.team_short_name
-			 FROM reporting.tournament_selection_stat_publications publication
-		 LEFT JOIN reporting.tournament_selection_stat_rows rows
-			 ON rows.publication_id = publication.publication_id
-			WHERE publication.season_id = $1 AND publication.tournament_id = $2
-			  AND publication.event_id = $3 AND publication.is_active
-			ORDER BY rows.selected_count DESC NULLS LAST, rows.element_id`,
-			[context.currentSeason.seasonId, tournamentId, eventId]
-		);
+			publicationId,
+			publicationRevision,
+		])) as { rows: Record<string, unknown>[] };
 		const first = result.rows[0];
-		if (!first) return undefined;
-		if (first.ownership_state !== "READY") return null;
-		const totalEntries = Number(first.expected_entries ?? 0);
+		if (!first) return null;
+		const publication = parsePublicLeagueSelectionPublication(first);
+		if (!publication || publication.ownershipState !== "READY") return null;
+		const totalEntries = publication.expectedEntries;
 		const percent = (value: number) => (totalEntries > 0 ? (value / totalEntries) * 100 : 0);
-		const rows = result.rows.filter(
+		const rawRows = result.rows.filter(
 			(row) => row.element_id !== null && row.element_id !== undefined
 		);
+		const decodedRows = rawRows.map(parsePublicLeagueSelectionRow);
+		if (decodedRows.some((row) => row === null)) return null;
+		const rows = decodedRows as PublicLeagueSelectionRow[];
 		const selection = rows.map((row) => {
-			const selected = Number(row.selected_count ?? 0);
-			const effective = Number(row.effective_selection_count ?? 0);
 			return {
-				id: Number(row.element_id),
-				webName: String(row.player_name),
-				teamShortName: String(row.team_short_name),
-				position: publicationPosition(Number(row.player_position)),
-				selectedByPercent: percent(selected),
-				eoByPercent: percent(effective),
+				id: row.elementId,
+				webName: row.playerName,
+				teamShortName: row.teamShortName,
+				position: publicationPosition(row.playerPosition),
+				selectedByPercent: percent(row.selectedCount),
+				eoByPercent: percent(row.effectiveSelectionCount),
 			};
 		});
 		const captain =
-			first.captaincy_state === "READY"
+			publication.captaincyState === "READY"
 				? rows
 						.map((row) => ({
-							id: Number(row.element_id),
-							webName: String(row.player_name),
-							teamShortName: String(row.team_short_name),
-							position: publicationPosition(Number(row.player_position)),
-							captainByPercent: percent(Number(row.captain_count ?? 0)),
-							selectedByPercent: percent(Number(row.selected_count ?? 0)),
-							eoByPercent: percent(Number(row.effective_selection_count ?? 0)),
+							id: row.elementId,
+							webName: row.playerName,
+							teamShortName: row.teamShortName,
+							position: publicationPosition(row.playerPosition),
+							captainByPercent: percent(row.captainCount),
+							selectedByPercent: percent(row.selectedCount),
+							eoByPercent: percent(row.effectiveSelectionCount),
 						}))
 						.sort(
 							(left, right) => right.captainByPercent - left.captainByPercent || left.id - right.id
@@ -108,40 +255,33 @@ async function readPublishedSelectionStats(
 						.slice(0, limit)
 				: [];
 		const viceCaptain =
-			first.vice_captaincy_state === "READY"
+			publication.viceCaptaincyState === "READY"
 				? rows
 						.map((row) => ({
-							id: Number(row.element_id),
-							webName: String(row.player_name),
-							teamShortName: String(row.team_short_name),
-							position: publicationPosition(Number(row.player_position)),
-							captainByPercent: (Number(row.vice_captain_count ?? 0) / totalEntries) * 100,
-							selectedByPercent: percent(Number(row.selected_count ?? 0)),
-							eoByPercent: percent(Number(row.effective_selection_count ?? 0)),
+							id: row.elementId,
+							webName: row.playerName,
+							teamShortName: row.teamShortName,
+							position: publicationPosition(row.playerPosition),
+							captainByPercent: (row.viceCaptainCount / totalEntries) * 100,
+							selectedByPercent: percent(row.selectedCount),
+							eoByPercent: percent(row.effectiveSelectionCount),
 						}))
 						.sort(
 							(left, right) => right.captainByPercent - left.captainByPercent || left.id - right.id
 						)
 						.slice(0, limit)
 				: [];
-		const transfersAvailable = first.transfers_state === "READY";
+		const transfersAvailable = publication.transfersState === "READY";
 		const transferRows = (direction: "in" | "out") =>
 			rows
-				.filter(
-					(row) =>
-						transfersAvailable &&
-						row[direction === "in" ? "transfer_in_count" : "transfer_out_count"] !== null &&
-						row[direction === "in" ? "transfer_in_count" : "transfer_out_count"] !== undefined
-				)
+				.filter(() => transfersAvailable)
 				.map((row) => ({
-					id: Number(row.element_id),
-					webName: String(row.player_name),
-					teamShortName: String(row.team_short_name),
-					position: publicationPosition(Number(row.player_position)),
-					transfersEvent: Number(
-						row[direction === "in" ? "transfer_in_count" : "transfer_out_count"] ?? 0
-					),
-					selectedByPercent: percent(Number(row.selected_count ?? 0)),
+					id: row.elementId,
+					webName: row.playerName,
+					teamShortName: row.teamShortName,
+					position: publicationPosition(row.playerPosition),
+					transfersEvent: direction === "in" ? row.transferInCount : row.transferOutCount,
+					selectedByPercent: percent(row.selectedCount),
 				}))
 				.sort((left, right) => right.transfersEvent - left.transfersEvent || left.id - right.id)
 				.slice(0, limit);
@@ -158,35 +298,22 @@ async function readPublishedSelectionStats(
 			mostTransferOut: transferRows("out"),
 		};
 	} catch (error) {
-		context.logger.warn(
-			{ err: error },
-			"New Trends publication read unavailable; using legacy adapter"
-		);
-		return undefined;
+		context.logger.error({ err: error }, "Trends publication read unavailable");
+		throw error;
 	}
 }
 
-const CATALOG_SQL = `
+export const PUBLIC_LEAGUE_CATALOG_SQL = `
 	SELECT
 		catalog.tournament_id,
 		catalog.display_name,
 		catalog.sort_order,
 		catalog.published_at,
 		catalog.updated_at,
-		CASE
-			WHEN publication.event_id IS NOT NULL
-				AND (snapshot.event_id IS NULL OR publication.event_id >= snapshot.event_id)
-				THEN publication.event_id
-			ELSE snapshot.event_id
-		END AS latest_event_id,
-		CASE
-			WHEN publication.event_id IS NOT NULL
-				AND (snapshot.event_id IS NULL OR publication.event_id >= snapshot.event_id)
-				THEN publication.expected_entries
-			ELSE snapshot.total_entries
-		END AS total_entries,
+		publication.event_id AS latest_event_id,
+		publication.expected_entries AS total_entries,
 		MAX(catalog.updated_at) OVER () AS catalog_revision,
-			GREATEST(tournament.updated_at, COALESCE(publication.published_at, tournament.updated_at)) AS snapshot_revision,
+		GREATEST(tournament.updated_at, COALESCE(publication.published_at, tournament.updated_at)) AS snapshot_revision,
 		(
 			SELECT MAX(tournament_revision.updated_at)
 			FROM competition.public_league_trends catalog_revision
@@ -200,7 +327,7 @@ const CATALOG_SQL = `
 		ON tournament.season_id = catalog.season_id
 		AND tournament.tournament_id = catalog.tournament_id
 		AND tournament.setup_status = 'ready'
-	LEFT JOIN LATERAL (
+	JOIN LATERAL (
 		SELECT publication.event_id, publication.expected_entries, publication.revision,
 			publication.published_at
 		FROM reporting.tournament_selection_stat_publications publication
@@ -210,47 +337,84 @@ const CATALOG_SQL = `
 		ORDER BY publication.event_id DESC, publication.revision DESC
 		LIMIT 1
 	) publication ON true
-	LEFT JOIN LATERAL (
-		SELECT
-			stats.event_id,
-			MAX(stats.total_entries)::integer AS total_entries
-		FROM reporting.tournament_selection_stats stats
-		WHERE stats.season_id = catalog.season_id
-			AND stats.tournament_id = catalog.tournament_id
-		GROUP BY stats.event_id
-		ORDER BY stats.event_id DESC
-		LIMIT 1
-	) snapshot ON true
 	WHERE catalog.season_id = $1
 		AND catalog.enabled = true
-		AND (publication.event_id IS NOT NULL OR snapshot.event_id IS NOT NULL)
 	ORDER BY catalog.sort_order ASC, catalog.display_name ASC, catalog.tournament_id ASC
 `;
 
-const ACCESS_SQL = `
+export const PUBLIC_LEAGUE_ACCESS_SQL = `
 	SELECT
 		catalog.updated_at AS catalog_revision,
-		GREATEST(catalog.updated_at, tournament.updated_at) AS snapshot_revision
+		GREATEST(catalog.updated_at, tournament.updated_at, COALESCE(publication.published_at, tournament.updated_at)) AS snapshot_revision,
+		publication.publication_id AS selection_publication_id,
+		publication.revision AS selection_revision
 	FROM competition.public_league_trends catalog
 	JOIN competition.tournaments tournament
 		ON tournament.season_id = catalog.season_id
 		AND tournament.tournament_id = catalog.tournament_id
 		AND tournament.setup_status = 'ready'
-	LEFT JOIN reporting.tournament_selection_stat_publications publication
+	JOIN reporting.tournament_selection_stat_publications publication
 		ON publication.season_id = catalog.season_id
 		AND publication.tournament_id = catalog.tournament_id
 		AND publication.event_id = $3
 		AND publication.is_active
-	LEFT JOIN reporting.tournament_selection_stats stats
-		ON stats.season_id = catalog.season_id
-		AND stats.tournament_id = catalog.tournament_id
-		AND stats.event_id = $3
 	WHERE catalog.enabled = true
 		AND catalog.season_id = $1
 		AND catalog.tournament_id = $2
-		AND (publication.publication_id IS NOT NULL OR stats.event_id IS NOT NULL)
-	GROUP BY catalog.updated_at, tournament.updated_at
+	GROUP BY catalog.updated_at, tournament.updated_at, publication.published_at,
+		publication.publication_id, publication.revision
 `;
+
+export const PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "public-league-trends.catalog",
+		sql: PUBLIC_LEAGUE_CATALOG_SQL,
+		values: [2026],
+		runtime: "must-return-row",
+		resultTypes: [
+			{
+				relation: "competition.public_league_trends",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.public_league_trends",
+				column: "updated_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
+	{
+		name: "public-league-trends.access",
+		sql: PUBLIC_LEAGUE_ACCESS_SQL,
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 2],
+		resultTypes: [
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "publication_id",
+				pgType: "bigint",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "revision",
+				pgType: "bigint",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
+	{
+		name: "public-league-trends.selection",
+		sql: PUBLIC_LEAGUE_SELECTION_SQL,
+		// The authority fixture inserts event 1 then the eligible event 2
+		// publication at identity 2, revision 7, on a fresh database.
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 2, 2, 7],
+		runtime: "must-return-selection-row",
+	},
+];
 
 const iso = (value: string | Date): string => {
 	const date = value instanceof Date ? value : new Date(value);
@@ -290,14 +454,11 @@ export type PublicLeagueTrendsRepository = {
 	): Promise<TournamentSelectionStats | null>;
 };
 
-type ReadSelectionStats = typeof getTournamentSelectionStatsReadModel;
-
 export const createPublicLeagueTrendsRepository = (
-	executor?: QueryExecutor,
-	readSelectionStats: ReadSelectionStats = getTournamentSelectionStatsReadModel
+	executor?: QueryExecutor
 ): PublicLeagueTrendsRepository => ({
 	async list(context): Promise<PublicLeagueTrend[]> {
-		const result = await (executor ?? context.database).query(CATALOG_SQL, [
+		const result = await (executor ?? context.database).query(PUBLIC_LEAGUE_CATALOG_SQL, [
 			context.currentSeason.seasonId,
 		]);
 		const rows = result.rows as CatalogRow[];
@@ -353,21 +514,26 @@ export const createPublicLeagueTrendsRepository = (
 		eventId,
 		limit
 	): Promise<TournamentSelectionStats | null> {
-		if (!executor) {
-			const published = await readPublishedSelectionStats(context, tournamentId, eventId, limit);
-			if (published !== undefined) return published;
-		}
-		const accessResult = await (executor ?? context.database).query(ACCESS_SQL, [
+		const accessResult = await (executor ?? context.database).query(PUBLIC_LEAGUE_ACCESS_SQL, [
 			context.currentSeason.seasonId,
 			tournamentId,
 			eventId,
 		]);
 		const access = accessResult.rows[0] as AccessRow | undefined;
-		if (!access?.catalog_revision || !access.snapshot_revision) return null;
+		const selectionPublicationId = sqlSafeInteger(access?.selection_publication_id, 1);
+		const selectionRevision = sqlSafeInteger(access?.selection_revision, 1);
+		if (
+			!access?.catalog_revision ||
+			!access.snapshot_revision ||
+			selectionPublicationId === null ||
+			selectionRevision === null
+		) {
+			return null;
+		}
 		const safeLimit = Math.min(Math.max(limit, 1), 12);
 		const cacheKey = gqlCacheKey(
 			context,
-			`public-league-selection:${iso(access.catalog_revision)}:${tournamentId}:${eventId}:${safeLimit}:${iso(access.snapshot_revision)}`
+			`public-league-selection:${iso(access.catalog_revision)}:${tournamentId}:${eventId}:${safeLimit}:${iso(access.snapshot_revision)}:${selectionPublicationId}:${selectionRevision}`
 		);
 		try {
 			const cached = await context.redis.get(cacheKey);
@@ -379,7 +545,15 @@ export const createPublicLeagueTrendsRepository = (
 		} catch (error) {
 			context.logger.warn({ err: error, cacheKey }, "Failed to read public league stats cache");
 		}
-		const stats = await readSelectionStats(context, tournamentId, eventId, safeLimit);
+		const stats = await readPublishedSelectionStats(
+			context,
+			executor ?? context.database,
+			tournamentId,
+			eventId,
+			selectionPublicationId,
+			selectionRevision,
+			safeLimit
+		);
 		await writeQueryCache(
 			context,
 			cacheKey,

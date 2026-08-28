@@ -1,9 +1,9 @@
 import type { GraphQLWorkload } from "../infra/ingress-context";
 import {
-	generateValidatedRateLimitProfile,
+	generateValidatedRateLimitPolicyBody,
 	type RateLimitTargetObservation,
 } from "./rate-limit-profile-generator";
-import { parseGraphQLRateLimitPolicyV3, type TokenBucketPolicy } from "./rate-limit-policy-v3";
+import { parseGraphQLRateLimitPolicyBody, type TokenBucketPolicy } from "./rate-limit-policy-v3";
 import {
 	parseGraphQLRateLimitPolicyV4,
 	type GraphQLRateLimitPolicyV4,
@@ -96,10 +96,9 @@ export const generateValidatedRateLimitProfileV4 = ({
 		"mini.session"
 	);
 
-	const v3Base = parseGraphQLRateLimitPolicyV3({
-		...base,
-		schemaVersion: 3,
-		policyVersion: "graphql-v3",
+	const sharedBase = parseGraphQLRateLimitPolicyBody({
+		capacity: base.capacity,
+		global: base.global,
 		trafficClasses: {
 			...base.trafficClasses,
 			mini: {
@@ -109,17 +108,17 @@ export const generateValidatedRateLimitProfileV4 = ({
 			},
 		},
 	});
-	const generatedV3 = generateValidatedRateLimitProfile({
-		base: v3Base,
+	const generatedBody = generateValidatedRateLimitPolicyBody({
+		base: sharedBase,
 		observation,
 		evidence,
 	});
 	return parseGraphQLRateLimitPolicyV4({
-		...generatedV3,
+		...generatedBody,
 		schemaVersion: 4,
 		policyVersion: "graphql-v4",
 		trafficClasses: {
-			...generatedV3.trafficClasses,
+			...generatedBody.trafficClasses,
 			mini: {
 				abuseRequest: base.trafficClasses.mini.abuseRequest,
 				aggregateAnonymousWeighted: aggregate(anonymousWorkloads),

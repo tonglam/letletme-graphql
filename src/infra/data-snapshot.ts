@@ -1,4 +1,5 @@
 import type { QueryResultRow } from "pg";
+import type { DataSqlContractProbe } from "../contracts/data-sql-contract";
 import type { GraphQLContext } from "../graphql/context";
 import {
 	parseDataPublicationManifest,
@@ -594,7 +595,7 @@ const hasSameIds = <T, U>(
 	return ids.size === left.length && right.every((value) => ids.has(rightId(value)));
 };
 
-const hasCompatibleLivePlayerIds = (
+const hasMatchingLivePlayerIds = (
 	eventLives: readonly LivePerformanceData[],
 	players: readonly CorePlayerData[],
 	state: DataPublicationManifest["state"]
@@ -1294,7 +1295,7 @@ type CoreFallbackRow = QueryResultRow & {
 	source_metadata: unknown;
 };
 
-const CORE_FALLBACK_SQL = `
+export const CORE_FALLBACK_SQL = `
 	WITH active_publication AS MATERIALIZED (
 		SELECT
 			publication_id::text,
@@ -1343,6 +1344,86 @@ const CORE_FALLBACK_SQL = `
 	FROM authority
 `;
 
+/**
+ * Decode a Core fallback row with the same identity and shape checks used by
+ * the PostgreSQL reader. The Data contract runner calls this function against
+ * the producer-owned fixture so RLS omissions or nested field drift fail the
+ * contract before a Redis miss can expose an unavailable Core snapshot.
+ */
+export const parseCoreFallbackRow = (
+	value: unknown,
+	seasonCode: string,
+	expectedManifest?: DataPublicationManifest | null
+): CoreDataSnapshot | null => {
+	if (!isRecord(value)) return null;
+	const row = value as CoreFallbackRow;
+	const revision = integer(row.revision);
+	const sourceCheckedAt = isoDate(row.source_checked_at);
+	const events = mapArray(row.events, mapCoreEvent);
+	const teams = mapArray(row.teams, mapCoreTeam);
+	const players = mapArray(row.players, mapCorePlayer);
+	const phases = mapArray(row.phases, mapCorePhase);
+	const fixtures = mapArray(row.fixtures, mapCoreFixture);
+	const sourceMetadata = isRecord(row.source_metadata) ? row.source_metadata : null;
+	const manifest = row.manifest
+		? parseDataPublicationManifest(JSON.stringify(row.manifest), {
+				dataset: "fpl:core",
+				seasonCode,
+			})
+		: null;
+	const coreIdentityComplete =
+		events !== null &&
+		teams !== null &&
+		players !== null &&
+		phases !== null &&
+		fixtures !== null &&
+		hasCompleteCoreIdentity(events, teams, players, phases, fixtures);
+	if (
+		integer(row.authority_count) !== 1 ||
+		typeof row.publication_id !== "string" ||
+		revision === null ||
+		revision <= 0 ||
+		!manifest ||
+		manifest.publicationId !== row.publication_id ||
+		manifest.revision !== revision ||
+		(expectedManifest !== null &&
+			expectedManifest !== undefined &&
+			(manifest.publicationId !== expectedManifest.publicationId ||
+				manifest.revision !== expectedManifest.revision)) ||
+		!sourceCheckedAt ||
+		!events ||
+		!teams ||
+		!players ||
+		!phases ||
+		!fixtures ||
+		!coreIdentityComplete
+	) {
+		return null;
+	}
+	return {
+		source: "postgres",
+		seasonCode,
+		revision: String(revision),
+		publicationId: row.publication_id,
+		sourceCheckedAt,
+		events,
+		teams,
+		players,
+		phases,
+		fixtures,
+		currentEventId: resolveCurrentEventId(events, undefined, sourceCheckedAt),
+		selectionRules: mapCoreSelectionRules(sourceMetadata?.selectionRules),
+	};
+};
+
+/** Explicitly binds the phase columns consumed by mapCorePhase. */
+export const CORE_PHASE_SHAPE_SQL = `
+	SELECT phase_id, name, start_event, stop_event, highest_score
+	FROM fpl.phases
+	WHERE season_id = $1
+	ORDER BY phase_id
+`;
+
 type CoreEventFallbackRow = QueryResultRow & {
 	authority_count: string | number;
 	publication_id: string | null;
@@ -1365,7 +1446,7 @@ type CoreLiveIdentityFallbackRow = CoreTeamFallbackRow & {
 	players: unknown;
 };
 
-type LiveLifecycleStatusRow = QueryResultRow & {
+export type LiveLifecycleStatusRow = QueryResultRow & {
 	event_id: string | number;
 	state: string;
 	observed_at: string | Date;
@@ -1376,7 +1457,7 @@ type LiveLifecycleStatusRow = QueryResultRow & {
 	source_checked_at: string | Date | null;
 };
 
-const LIVE_LIFECYCLE_STATUS_SQL = `
+export const LIVE_LIFECYCLE_STATUS_SQL = `
 	SELECT
 		event_id,
 		state,
@@ -1404,7 +1485,7 @@ const LIVE_LIFECYCLE_STATES = new Set<LiveLifecycleState>([
 	"FINALIZED",
 ]);
 
-const mapLiveLifecycleStatus = (
+export const mapLiveLifecycleStatus = (
 	row: LiveLifecycleStatusRow | undefined
 ): LiveLifecycleStatus | null => {
 	if (!row) return null;
@@ -1436,7 +1517,7 @@ const mapLiveLifecycleStatus = (
 	};
 };
 
-type LiveFallbackRow = QueryResultRow & {
+export type LiveFallbackRow = QueryResultRow & {
 	authority_count: string | number;
 	publication_id: string | null;
 	revision: string | number | null;
@@ -1459,7 +1540,7 @@ type LiveFallbackRow = QueryResultRow & {
  * item rows are never mixed with Redis or rebuilt from mutable tables: both
  * item checksums, counts, and the single active manifest must agree.
  */
-const LIVE_FALLBACK_SQL = `
+export const LIVE_FALLBACK_SQL = `
 	WITH active_publication AS MATERIALIZED (
 		SELECT
 			publication_id::text,
@@ -1549,17 +1630,17 @@ const LIVE_FALLBACK_SQL = `
 	FROM authority
 `;
 
-const liveFallbackPublication = (
-	context: GraphQLContext,
+export const parseLiveFallbackRow = (
 	row: LiveFallbackRow | undefined,
 	eventId: number,
+	seasonCode: string,
 	expectedManifest?: DataPublicationManifest | null
 ): DataPublication | null => {
 	const revision = integer(row?.revision);
 	const manifest = row?.manifest
 		? parseDataPublicationManifest(JSON.stringify(row.manifest), {
 				dataset: "fpl:live",
-				seasonCode: context.currentSeason.seasonCode,
+				seasonCode,
 				eventId,
 			})
 		: null;
@@ -1567,6 +1648,8 @@ const liveFallbackPublication = (
 	const fixtureItem = manifest?.items.find((item) => item.name === "fixtures");
 	const eventLives = row?.event_lives;
 	const fixtures = row?.fixtures;
+	const decodedEventLives = mapArray(eventLives, mapLivePerformance);
+	const decodedFixtures = mapArray(fixtures, mapCoreFixture);
 	const eventLiveCount = integer(row?.event_live_item_count);
 	const fixtureCount = integer(row?.fixture_item_count);
 	const eventLivePayloadBytes = integer(row?.event_live_payload_bytes);
@@ -1585,6 +1668,8 @@ const liveFallbackPublication = (
 		!fixtureItem ||
 		!Array.isArray(eventLives) ||
 		!Array.isArray(fixtures) ||
+		!decodedEventLives ||
+		!decodedFixtures ||
 		eventLiveCount === null ||
 		fixtureCount === null ||
 		eventLiveCount !== eventLives.length ||
@@ -1604,6 +1689,14 @@ const liveFallbackPublication = (
 	}
 	return { manifest, items: { eventLive: eventLives, fixtures } };
 };
+
+const liveFallbackPublication = (
+	context: GraphQLContext,
+	row: LiveFallbackRow | undefined,
+	eventId: number,
+	expectedManifest?: DataPublicationManifest | null
+): DataPublication | null =>
+	parseLiveFallbackRow(row, eventId, context.currentSeason.seasonCode, expectedManifest);
 
 async function loadLivePublicationFromPostgres(
 	context: GraphQLContext,
@@ -1677,7 +1770,7 @@ const CORE_TEAM_FALLBACK_SQL = `
 	FROM authority
 `;
 
-const CORE_LIVE_IDENTITY_FALLBACK_SQL = `
+export const CORE_LIVE_IDENTITY_FALLBACK_SQL = `
 	WITH active_publication AS MATERIALIZED (
 		SELECT
 			publication_id::text,
@@ -1710,6 +1803,188 @@ const CORE_LIVE_IDENTITY_FALLBACK_SQL = `
 		), '[]'::jsonb) AS players
 	FROM authority
 `;
+
+export const DATA_SNAPSHOT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "data-snapshot.core-fallback",
+		sql: CORE_FALLBACK_SQL,
+		values: [2026],
+		runtime: "must-return-core",
+		resultTypes: [
+			{ relation: "fpl.events", column: "event_id", pgType: "integer" },
+			{
+				relation: "fpl.events",
+				column: "name",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{ relation: "fpl.events", column: "deadline_time", pgType: "timestamp with time zone" },
+			{ relation: "fpl.events", column: "finished", pgType: "boolean" },
+			{ relation: "fpl.events", column: "data_checked", pgType: "boolean" },
+			{ relation: "fpl.events", column: "data_checked_at", pgType: "timestamp with time zone" },
+			{ relation: "fpl.events", column: "average_entry_score", pgType: "integer" },
+			{ relation: "fpl.events", column: "highest_score", pgType: "integer" },
+			{ relation: "fpl.events", column: "is_previous", pgType: "boolean" },
+			{ relation: "fpl.events", column: "is_current", pgType: "boolean" },
+			{ relation: "fpl.events", column: "is_next", pgType: "boolean" },
+			{ relation: "fpl.events", column: "cup_league_create", pgType: "boolean" },
+			{ relation: "fpl.events", column: "h2h_ko_matches_created", pgType: "boolean" },
+			{
+				relation: "fpl.events",
+				column: "chip_plays",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{ relation: "fpl.events", column: "average_entry_score", pgType: "integer" },
+			{ relation: "fpl.events", column: "highest_scoring_entry", pgType: "bigint" },
+			{ relation: "fpl.events", column: "deadline_time_epoch", pgType: "bigint" },
+			{ relation: "fpl.events", column: "deadline_time_game_offset", pgType: "integer" },
+			{ relation: "fpl.events", column: "highest_score", pgType: "integer" },
+			{ relation: "fpl.events", column: "most_selected", pgType: "integer" },
+			{ relation: "fpl.events", column: "most_transferred_in", pgType: "integer" },
+			{ relation: "fpl.events", column: "top_element", pgType: "integer" },
+			{
+				relation: "fpl.events",
+				column: "top_element_info",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{ relation: "fpl.events", column: "transfers_made", pgType: "bigint" },
+			{ relation: "fpl.events", column: "most_captained", pgType: "integer" },
+			{ relation: "fpl.events", column: "most_vice_captained", pgType: "integer" },
+			{ relation: "fpl.teams", column: "team_id", pgType: "integer" },
+			{ relation: "fpl.teams", column: "code", pgType: "integer" },
+			{
+				relation: "fpl.teams",
+				column: "name",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "fpl.teams",
+				column: "short_name",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{ relation: "fpl.teams", column: "strength", pgType: "integer" },
+			{ relation: "fpl.teams", column: "position", pgType: "integer" },
+			{ relation: "fpl.teams", column: "points", pgType: "integer" },
+			{ relation: "fpl.teams", column: "played", pgType: "integer" },
+			{ relation: "fpl.teams", column: "win", pgType: "integer" },
+			{ relation: "fpl.teams", column: "draw", pgType: "integer" },
+			{ relation: "fpl.teams", column: "loss", pgType: "integer" },
+			{
+				relation: "fpl.teams",
+				column: "form",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{ relation: "fpl.teams", column: "strength_overall_home", pgType: "integer" },
+			{ relation: "fpl.teams", column: "strength_overall_away", pgType: "integer" },
+			{ relation: "fpl.teams", column: "strength_attack_home", pgType: "integer" },
+			{ relation: "fpl.teams", column: "strength_attack_away", pgType: "integer" },
+			{ relation: "fpl.teams", column: "strength_defence_home", pgType: "integer" },
+			{ relation: "fpl.teams", column: "strength_defence_away", pgType: "integer" },
+			{ relation: "fpl.players", column: "element_id", pgType: "integer" },
+			{ relation: "fpl.players", column: "code", pgType: "integer" },
+			{ relation: "fpl.players", column: "element_type", pgType: "integer" },
+			{ relation: "fpl.players", column: "team_id", pgType: "integer" },
+			{ relation: "fpl.players", column: "price", pgType: "integer" },
+			{ relation: "fpl.players", column: "start_price", pgType: "integer" },
+			{
+				relation: "fpl.players",
+				column: "first_name",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "fpl.players",
+				column: "second_name",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "fpl.players",
+				column: "web_name",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{ relation: "fpl.players", column: "total_points", pgType: "integer" },
+			{ relation: "fpl.phases", column: "phase_id", pgType: "integer" },
+			{
+				relation: "fpl.phases",
+				column: "name",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{ relation: "fpl.phases", column: "start_event", pgType: "integer" },
+			{ relation: "fpl.phases", column: "stop_event", pgType: "integer" },
+			{ relation: "fpl.phases", column: "highest_score", pgType: "integer" },
+			{ relation: "fpl.fixtures", column: "fixture_id", pgType: "integer" },
+			{ relation: "fpl.fixtures", column: "code", pgType: "integer" },
+			{ relation: "fpl.fixtures", column: "event_id", pgType: "integer" },
+			{ relation: "fpl.fixtures", column: "kickoff_time", pgType: "timestamp with time zone" },
+			{ relation: "fpl.fixtures", column: "started", pgType: "boolean" },
+			{ relation: "fpl.fixtures", column: "finished", pgType: "boolean" },
+			{ relation: "fpl.fixtures", column: "finished_provisional", pgType: "boolean" },
+			{ relation: "fpl.fixtures", column: "minutes", pgType: "integer" },
+			{ relation: "fpl.fixtures", column: "team_h_id", pgType: "integer" },
+			{ relation: "fpl.fixtures", column: "team_a_id", pgType: "integer" },
+			{ relation: "fpl.fixtures", column: "team_h_score", pgType: "integer" },
+			{ relation: "fpl.fixtures", column: "team_a_score", pgType: "integer" },
+			{ relation: "fpl.fixtures", column: "team_h_difficulty", pgType: "integer" },
+			{ relation: "fpl.fixtures", column: "team_a_difficulty", pgType: "integer" },
+		],
+	},
+	{ name: "data-snapshot.core-phase-shape", sql: CORE_PHASE_SHAPE_SQL, values: [2026] },
+	{
+		name: "data-snapshot.live-fallback",
+		sql: LIVE_FALLBACK_SQL,
+		values: [2026, 1],
+		runtime: "must-return-live",
+		resultTypes: [
+			{
+				relation: "ops.dataset_publication_items",
+				column: "payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+		],
+	},
+	{
+		name: "data-snapshot.live-lifecycle-status",
+		sql: LIVE_LIFECYCLE_STATUS_SQL,
+		values: [2026, 1],
+		runtime: "must-return-live-lifecycle",
+		resultTypes: [
+			{
+				relation: "ops.live_lifecycle_status",
+				column: "observed_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "ops.live_lifecycle_status",
+				column: "last_changed_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "ops.live_lifecycle_status",
+				column: "next_refresh_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "ops.live_lifecycle_status",
+				column: "source_checked_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
+	{
+		name: "data-snapshot.core-live-identity-fallback",
+		sql: CORE_LIVE_IDENTITY_FALLBACK_SQL,
+		values: [2026],
+	},
+];
 
 const validateTargetedCoreAuthority = (
 	context: GraphQLContext,
@@ -1798,72 +2073,15 @@ const loadCoreSnapshotFromPostgres = async (
 	const result = await context.database.query<CoreFallbackRow>(CORE_FALLBACK_SQL, [
 		context.currentSeason.seasonId,
 	]);
-	const row = result.rows[0];
-	const revision = integer(row?.revision);
-	const sourceCheckedAt = isoDate(row?.source_checked_at);
-	const events = mapArray(row?.events, mapCoreEvent);
-	const teams = mapArray(row?.teams, mapCoreTeam);
-	const players = mapArray(row?.players, mapCorePlayer);
-	const phases = mapArray(row?.phases, mapCorePhase);
-	const fixtures = mapArray(row?.fixtures, mapCoreFixture);
-	const sourceMetadata = isRecord(row?.source_metadata) ? row.source_metadata : null;
-	const manifest = row?.manifest
-		? parseDataPublicationManifest(JSON.stringify(row.manifest), {
-				dataset: "fpl:core",
-				seasonCode: context.currentSeason.seasonCode,
-			})
-		: null;
-	const preservesPinnedPublication =
-		expectedManifest !== null &&
-		expectedManifest !== undefined &&
-		manifest?.publicationId === expectedManifest.publicationId &&
-		manifest.revision === expectedManifest.revision;
-	const coreIdentityComplete =
-		events !== null &&
-		teams !== null &&
-		players !== null &&
-		phases !== null &&
-		fixtures !== null &&
-		hasCompleteCoreIdentity(events, teams, players, phases, fixtures);
-	if (
-		!row ||
-		integer(row.authority_count) !== 1 ||
-		typeof row.publication_id !== "string" ||
-		revision === null ||
-		revision <= 0 ||
-		!manifest ||
-		manifest.publicationId !== row.publication_id ||
-		manifest.revision !== revision ||
-		(expectedManifest !== null && expectedManifest !== undefined && !preservesPinnedPublication) ||
-		!sourceCheckedAt ||
-		!events ||
-		!teams ||
-		!players ||
-		!phases ||
-		!fixtures ||
-		!coreIdentityComplete
-	) {
-		throw new Error(
-			`Coherent PostgreSQL core publication is unavailable ` +
-				`(events=${events?.length ?? "invalid"}, teams=${teams?.length ?? "invalid"}, ` +
-				`players=${players?.length ?? "invalid"}, phases=${phases?.length ?? "invalid"}, ` +
-				`fixtures=${fixtures?.length ?? "invalid"}, identity=${coreIdentityComplete})`
-		);
+	const snapshot = parseCoreFallbackRow(
+		result.rows[0],
+		context.currentSeason.seasonCode,
+		expectedManifest
+	);
+	if (!snapshot) {
+		throw new Error("Coherent PostgreSQL core publication is unavailable");
 	}
-	return {
-		source: "postgres",
-		seasonCode: context.currentSeason.seasonCode,
-		revision: String(revision),
-		publicationId: row.publication_id,
-		sourceCheckedAt,
-		events,
-		teams,
-		players,
-		phases,
-		fixtures,
-		currentEventId: resolveCurrentEventId(events, undefined, sourceCheckedAt),
-		selectionRules: mapCoreSelectionRules(sourceMetadata?.selectionRules),
-	};
+	return snapshot;
 };
 
 type LiveFixtureEntry = Readonly<{
@@ -1975,7 +2193,7 @@ const publicationLiveSnapshot = (
 		fixtures.some((fixture) => fixture.eventId !== eventId) ||
 		!hasUniquePositiveIds(eventLives, (row) => row.playerId) ||
 		!hasUniquePositiveIds(fixtures, (fixture) => fixture.id) ||
-		!hasCompatibleLivePlayerIds(eventLives, core.players, state) ||
+		!hasMatchingLivePlayerIds(eventLives, core.players, state) ||
 		!validateLiveFixtureView(liveFixtures, fixtures, core) ||
 		state !== liveStateFromFixtures(fixtures)
 	) {

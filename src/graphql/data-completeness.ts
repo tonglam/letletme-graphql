@@ -30,7 +30,7 @@ type CompletenessInput = {
 	eligibility?: DataEligibilityState;
 	/**
 	 * Optional second revision from the business payload.  A mismatch is
-	 * fail-closed: the response remains readable for compatibility, but the
+	 * fail-closed: the response remains readable while the
 	 * metadata cannot claim completeness.
 	 */
 	payloadRevision?: string | number | null;

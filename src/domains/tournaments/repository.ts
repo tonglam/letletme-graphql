@@ -3477,9 +3477,8 @@ export const tournamentsRepository: TournamentsRepository = {
 	},
 
 	async getEntryTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]> {
-		// Mutable metadata is read directly for lightweight roots. Legacy callers
-		// that already pinned a core revision retain the existing bounded cache
-		// contract during the rolling migration.
+		// Mutable metadata is read directly for lightweight roots. Only callers
+		// with a pinned core revision use the bounded cache contract.
 		const platformAdmin = hasPlatformAdminAccess(context, entryId);
 		const cacheScope = platformAdmin ? "platform-admin" : "entry";
 		const cacheKey = context.dataRevision

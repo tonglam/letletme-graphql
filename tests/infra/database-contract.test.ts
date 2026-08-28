@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { QueryExecutor } from "../../src/infra/database";
-import { DatabaseContractError, validateDatabaseContract } from "../../src/infra/database-contract";
+import {
+	DatabaseContractError,
+	GRAPHQL_CONTRACT_RELATIONS,
+	validateDatabaseContract,
+} from "../../src/infra/database-contract";
 
 type ContractOptions = Readonly<{
 	missingRelation?: string;
@@ -24,7 +28,15 @@ type ContractOptions = Readonly<{
 	inheritedRoles?: readonly string[];
 }>;
 
-const CORE_ITEM_NAMES = ["events", "teams", "players", "phases", "fixtures", "currentEventId"];
+const CORE_ITEM_NAMES = [
+	"events",
+	"teams",
+	"players",
+	"phases",
+	"fixtures",
+	"currentEventId",
+	"selectionRules",
+];
 
 const makeCoreManifest = (invalid = false): Record<string, unknown> => ({
 	dataset: "fpl:core",
@@ -222,7 +234,7 @@ const makeContractExecutor = (
 };
 
 describe("GraphQL startup database contract", () => {
-	it("accepts the exact canonical publication through SELECT-only startup queries", async () => {
+	it("accepts the exact canonical publication through read-only startup queries", async () => {
 		const { executor, queries } = makeContractExecutor();
 		await expect(validateDatabaseContract(executor)).resolves.toEqual({
 			roleName: "graphql_runtime",
@@ -232,7 +244,8 @@ describe("GraphQL startup database contract", () => {
 		});
 
 		expect(queries.length).toBeGreaterThan(20);
-		expect(queries.every((query) => query.trimStart().startsWith("SELECT"))).toBe(true);
+		expect(queries.every((query) => /^(SELECT|EXPLAIN)\b/.test(query.trimStart()))).toBe(true);
+		expect(queries.some((query) => query.trimStart().startsWith("EXPLAIN"))).toBe(true);
 	});
 
 	it("fails closed when a required relation is missing", async () => {
@@ -240,6 +253,14 @@ describe("GraphQL startup database contract", () => {
 		await expect(validateDatabaseContract(executor)).rejects.toThrow(
 			"invalid fpl.players relation boundary"
 		);
+	});
+
+	it("includes direct Player State and Trends relations in the executable boundary", () => {
+		expect(GRAPHQL_CONTRACT_RELATIONS).toContain("reporting.player_season_summary_rows");
+		expect(GRAPHQL_CONTRACT_RELATIONS).toContain(
+			"reporting.tournament_selection_stat_publications"
+		);
+		expect(GRAPHQL_CONTRACT_RELATIONS).toContain("reporting.tournament_selection_stat_rows");
 	});
 
 	it("requires read access to Web Mini Program auth relations", async () => {

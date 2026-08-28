@@ -34,7 +34,7 @@ describe("GraphQL admission ordering", () => {
 		expect(timingPayload).not.toContain("principal:");
 	});
 
-	it("persists the v3 shadow outcome before a legacy rejection can return", () => {
+	it("persists the versioned admission outcome before a rejection can return", () => {
 		const source = readFileSync("src/index.ts", "utf8");
 		const decisionBlock = source.indexOf("if (principalAdmissionResult.v3Decision)");
 		const aggregate = source.indexOf("await recordTerminalRequestV3Outcome", decisionBlock);
@@ -43,8 +43,6 @@ describe("GraphQL admission ordering", () => {
 		expect(decisionBlock).toBeGreaterThan(-1);
 		expect(aggregate).toBeGreaterThan(decisionBlock);
 		expect(aggregate).toBeLessThan(earlyResponse);
-		expect(source).toContain("shadowLegacyPreAuthResponse = preAuthAdmission.response");
-		expect(source).toContain("shadowSkipLegacy: shadowLegacyPreAuthResponse !== null");
 		expect(source).toContain("v3Checks: v3PrincipalAdmission.checks");
 		expect(source).toContain("graphQLV3EarlyFailureRateLimitChecks");
 		expect(source).toContain('"earlyFailureAdmission"');
@@ -64,5 +62,32 @@ describe("GraphQL admission ordering", () => {
 		expect(terminalSelector).toBeGreaterThan(-1);
 		expect(source.match(/recordTerminalRequestV3Outcome\(/g)?.length).toBe(3);
 		expect(source).toContain("if (v3AggregateRecorded) return");
+	});
+
+	it("keeps the global emergency valve enforcing during shadow mode", () => {
+		const source = readFileSync("src/index.ts", "utf8");
+
+		expect(source).toContain('isGraphQLRateLimitShadowMode && decision.deniedScope === "global"');
+		expect(source).toContain("failClosed: enforce || isGraphQLRateLimitShadowMode");
+		expect(source).toContain("isShadowOnlyRateLimitDecision(decision)");
+		expect(source).toContain(
+			'const globalChecks = v3Checks.filter((check) => check.scope === "global")'
+		);
+		expect(source).toContain("checks: globalChecks");
+		expect(source).toContain("enforce: true");
+	});
+
+	it("charges the global bucket before observational shadow scopes", () => {
+		const source = readFileSync("src/index.ts", "utf8");
+		const globalSplit = source.indexOf("const globalChecks = v3Checks.filter");
+		const globalCall = source.indexOf("checks: globalChecks", globalSplit);
+		const observationalSplit = source.indexOf("const observationalChecks =", globalSplit);
+		const observationalCall = source.indexOf("checks: observationalChecks", globalSplit);
+
+		expect(globalSplit).toBeGreaterThan(-1);
+		expect(observationalSplit).toBeGreaterThan(globalSplit);
+		expect(globalCall).toBeGreaterThan(observationalSplit);
+		expect(observationalCall).toBeGreaterThan(observationalSplit);
+		expect(observationalCall).toBeGreaterThan(globalCall);
 	});
 });

@@ -44,7 +44,7 @@ export const homeResolvers = {
 			buildDataCompleteness({
 				contractKey: "league-tournament",
 				scopeKey: `season:${context.currentSeason.seasonCode}:entry:${parent.entryId}`,
-				// The legacy home SQL projection has no publication revision. Do not
+				// The unversioned home SQL projection has no publication revision. Do not
 				// infer one from a timestamp; expose an explicit invalid evidence state
 				// until the producer adds its checkpoint revision.
 				revision: null,

@@ -3,7 +3,7 @@ import { getNamedType, isObjectType } from "graphql";
 import { buildDataCompleteness, revisionsAgree } from "../../src/graphql/data-completeness";
 import { schema } from "../../src/graphql/schema";
 
-describe("additive data completeness metadata", () => {
+describe("data completeness metadata", () => {
 	it("fails closed when the metadata and payload revisions diverge", () => {
 		expect(revisionsAgree("r1", "r1")).toBe(true);
 		expect(revisionsAgree("r1", "r2")).toBe(false);
@@ -44,7 +44,7 @@ describe("additive data completeness metadata", () => {
 		).toMatchObject({ complete: false, expectedCount: 10, observedCount: null });
 	});
 
-	it("exposes metadata on the business envelopes without replacing legacy fields", () => {
+	it("exposes metadata on the business envelopes without replacing business fields", () => {
 		for (const typeName of [
 			"CoreEventContext",
 			"LiveSnapshotMeta",

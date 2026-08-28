@@ -1,5 +1,6 @@
 import { GraphQLError } from "graphql";
 import type { QueryResultRow } from "pg";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { GraphQLContext } from "../../graphql/context";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { getCoreDataSnapshot } from "../../infra/data-snapshot";
@@ -14,6 +15,7 @@ import {
 	refreshMarketSnapshotContext,
 	type MarketSnapshotContext,
 } from "../market/context";
+import { MARKET_SNAPSHOT_PIN_EXISTS_SQL } from "../market/sql";
 
 export enum Position {
 	GOALKEEPER = 1,
@@ -187,6 +189,8 @@ type SqlPickerRow = QueryResultRow & {
 	total_points: number | string | null;
 	form: number | string | null;
 	total_count: number | string;
+	event_stats_revision?: string | null;
+	event_stats_present?: boolean;
 	market_snapshot_present?: boolean;
 };
 
@@ -199,6 +203,110 @@ const pickerOrderSql: Record<Exclude<PlayerPickerSort, "AUTO">, string> = {
 	OWNERSHIP_DESC: "selected_by_percent DESC NULLS LAST, lower(web_name) ASC, id ASC",
 };
 
+export const buildPlayerPickerSql = (sort: Exclude<PlayerPickerSort, "AUTO">): string => `
+	WITH pinned_core AS MATERIALIZED (
+		SELECT 1
+		FROM ops.dataset_publications
+		WHERE dataset = 'fpl:core'
+		  AND season_id = $1
+		  AND event_id IS NULL
+		  AND status = 'active'
+		  AND revision::text = $11
+		LIMIT 1
+	), latest_market AS MATERIALIZED (
+		SELECT snapshot_date, captured_at
+		FROM fpl.player_market_snapshots
+		WHERE season_id = $1
+		  AND ($12::date IS NULL OR snapshot_date = $12::date)
+		  AND ($13::timestamptz IS NULL OR captured_at = $13::timestamptz)
+		  AND ($12::date IS NOT NULL OR captured_at >= NOW() - INTERVAL '36 hours')
+		ORDER BY snapshot_date DESC, captured_at DESC
+		LIMIT 1
+	), picker_rows AS MATERIALIZED (
+		SELECT
+			player.element_id AS id,
+			player.web_name,
+			player.element_type,
+			player.team_id,
+			team.name AS team_name,
+			team.short_name AS team_short_name,
+			COALESCE(market.price, player.price) AS price,
+			COALESCE(market.selected_by_percent, event_stats.selected_by_percent) AS selected_by_percent,
+			COALESCE(event_stats.total_points, player.total_points) AS total_points,
+			event_stats.form,
+			event_stats_publication.revision::text AS event_stats_revision,
+			(event_stats.element_id IS NOT NULL) AS event_stats_present,
+			EXISTS (SELECT 1 FROM latest_market) AS market_snapshot_present
+		FROM fpl.players player
+		JOIN fpl.teams team
+		  ON team.season_id = player.season_id AND team.team_id = player.team_id
+		LEFT JOIN fpl.player_event_snapshot_publications event_stats_publication
+		  ON event_stats_publication.season_id = player.season_id
+		 AND event_stats_publication.event_id = $2
+		 AND event_stats_publication.revision::text = $14
+		LEFT JOIN fpl.player_event_snapshots event_stats
+		  ON event_stats.season_id = player.season_id
+		 AND event_stats.element_id = player.element_id
+		 AND event_stats.event_id = $2
+		 AND event_stats_publication.season_id = event_stats.season_id
+		 AND event_stats_publication.event_id = event_stats.event_id
+		LEFT JOIN latest_market latest ON TRUE
+		LEFT JOIN fpl.player_market_snapshots market
+		  ON market.season_id = player.season_id
+		 AND market.element_id = player.element_id
+		 AND market.snapshot_date = latest.snapshot_date
+		 AND market.captured_at = latest.captured_at
+		WHERE player.season_id = $1
+		  AND EXISTS (SELECT 1 FROM pinned_core)
+		  AND ($3::text IS NULL OR player.web_name ILIKE '%' || $3 || '%')
+		  AND ($4::integer IS NULL OR player.element_type = $4)
+		  AND ($5::integer IS NULL OR player.team_id = $5)
+		  AND ($6::integer IS NULL OR COALESCE(market.price, player.price) >= $6)
+		  AND ($7::integer IS NULL OR COALESCE(market.price, player.price) <= $7)
+	), filtered AS (
+		SELECT *
+		FROM picker_rows
+		WHERE $8::text IS NULL
+		   OR ($8 = 'LE5' AND selected_by_percent <= 5)
+		   OR ($8 = 'GT5_LE15' AND selected_by_percent > 5 AND selected_by_percent <= 15)
+		   OR ($8 = 'GT15_LE40' AND selected_by_percent > 15 AND selected_by_percent <= 40)
+		   OR ($8 = 'GT40' AND selected_by_percent > 40)
+	)
+	SELECT filtered.*, count(*) OVER ()::integer AS total_count
+	FROM filtered
+	ORDER BY ${pickerOrderSql[sort]}
+	LIMIT $9 OFFSET $10
+`;
+
+export const PLAYERS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "players.market-snapshot-pin",
+		sql: MARKET_SNAPSHOT_PIN_EXISTS_SQL,
+		values: [2026, "2026-08-10", "2026-08-10T00:00:00.000Z"],
+	},
+	{
+		name: "players.picker",
+		sql: buildPlayerPickerSql("NAME_ASC"),
+		values: [
+			2026,
+			1,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			20,
+			0,
+			"7",
+			"2026-08-10",
+			"2026-08-10T00:00:00.000Z",
+			"1",
+		],
+		runtime: "must-return-player-picker",
+	},
+];
+
 const pickerPinRetryScopes = new WeakMap<object, number>();
 
 const marketPinPresentForEmptyPicker = async (
@@ -207,13 +315,7 @@ const marketPinPresentForEmptyPicker = async (
 ): Promise<boolean> => {
 	try {
 		const result = await context.database.query<{ present: boolean | string }>(
-			`SELECT EXISTS (
-				SELECT 1
-				FROM fpl.player_market_snapshots
-				WHERE season_id = $1
-				  AND snapshot_date = $2::date
-				  AND captured_at = $3::timestamptz
-			) AS present`,
+			MARKET_SNAPSHOT_PIN_EXISTS_SQL,
 			[context.currentSeason.seasonId, marketContext.snapshotDate, marketContext.capturedAt]
 		);
 		const present = result.rows[0]?.present;
@@ -224,20 +326,75 @@ const marketPinPresentForEmptyPicker = async (
 	}
 };
 
-const mapSqlPickerRow = (row: SqlPickerRow): PlayerPickerItem => ({
-	id: Number(row.id),
-	webName: row.web_name,
-	position: Number(row.element_type) as Position,
-	team: {
-		id: Number(row.team_id),
-		name: row.team_name,
-		shortName: row.team_short_name,
-	},
-	price: Number(row.price),
-	selectedByPercent: asNullableNumber(row.selected_by_percent),
-	totalPoints: asNullableNumber(row.total_points),
-	form: asNullableNumber(row.form),
-});
+const asSafeInteger = (value: unknown): number | null => {
+	const parsed = asNullableNumber(value);
+	return parsed !== null && Number.isSafeInteger(parsed) ? parsed : null;
+};
+
+/** Decode a PostgreSQL picker row through the same shape used by production. */
+export const parsePlayerPickerRow = (value: unknown): PlayerPickerItem | null => {
+	if (!isObject(value)) return null;
+	const id = asSafeInteger(value.id);
+	const position = asSafeInteger(value.element_type);
+	const teamId = asSafeInteger(value.team_id);
+	const price = asNullableNumber(value.price);
+	const totalCount = asSafeInteger(value.total_count);
+	const webName = value.web_name;
+	const teamName = value.team_name;
+	const teamShortName = value.team_short_name;
+	const selectedByPercent =
+		value.selected_by_percent === null || value.selected_by_percent === undefined
+			? null
+			: asNullableNumber(value.selected_by_percent);
+	const totalPoints =
+		value.total_points === null || value.total_points === undefined
+			? null
+			: asNullableNumber(value.total_points);
+	const form =
+		value.form === null || value.form === undefined ? null : asNullableNumber(value.form);
+	if (
+		id === null ||
+		id <= 0 ||
+		position === null ||
+		position < Position.GOALKEEPER ||
+		position > Position.FORWARD ||
+		teamId === null ||
+		teamId <= 0 ||
+		price === null ||
+		!Number.isFinite(price) ||
+		totalCount === null ||
+		totalCount < 0 ||
+		typeof webName !== "string" ||
+		webName.trim() === "" ||
+		typeof teamName !== "string" ||
+		teamName.trim() === "" ||
+		typeof teamShortName !== "string" ||
+		teamShortName.trim() === "" ||
+		(value.selected_by_percent !== null &&
+			value.selected_by_percent !== undefined &&
+			selectedByPercent === null) ||
+		(value.total_points !== null && value.total_points !== undefined && totalPoints === null) ||
+		(value.form !== null && value.form !== undefined && form === null)
+	) {
+		return null;
+	}
+	return {
+		id,
+		webName,
+		position: position as Position,
+		team: { id: teamId, name: teamName, shortName: teamShortName },
+		price,
+		selectedByPercent,
+		totalPoints,
+		form,
+	};
+};
+
+const mapSqlPickerRow = (row: SqlPickerRow): PlayerPickerItem => {
+	const parsed = parsePlayerPickerRow(row);
+	if (!parsed) throw new Error("Player picker SQL row failed production decoding");
+	return parsed;
+};
 
 const encodePickerCursor = (sort: PlayerPickerSort, offset: number): number =>
 	-(PICKER_SORT_CODES[sort] * PICKER_CURSOR_SORT_STRIDE + offset + 1);
@@ -765,78 +922,7 @@ export const playersRepository: PlayersRepository = {
 			);
 		}
 
-		const sql = `
-			WITH pinned_core AS MATERIALIZED (
-				SELECT 1
-				FROM ops.dataset_publications
-				WHERE dataset = 'fpl:core'
-				  AND season_id = $1
-				  AND event_id IS NULL
-				  AND status = 'active'
-				  AND revision::text = $11
-				LIMIT 1
-			), latest_market AS MATERIALIZED (
-				SELECT snapshot_date, captured_at
-				FROM fpl.player_market_snapshots
-				WHERE season_id = $1
-				  AND ($12::date IS NULL OR snapshot_date = $12::date)
-				  AND ($13::timestamptz IS NULL OR captured_at = $13::timestamptz)
-				  AND ($12::date IS NOT NULL OR captured_at >= NOW() - INTERVAL '36 hours')
-				ORDER BY snapshot_date DESC, captured_at DESC
-				LIMIT 1
-			), picker_rows AS MATERIALIZED (
-				SELECT
-					player.element_id AS id,
-					player.web_name,
-					player.element_type,
-					player.team_id,
-					team.name AS team_name,
-					team.short_name AS team_short_name,
-					COALESCE(market.price, player.price) AS price,
-						COALESCE(market.selected_by_percent, event_stats.selected_by_percent) AS selected_by_percent,
-						COALESCE(event_stats.total_points, player.total_points) AS total_points,
-						event_stats.form,
-						EXISTS (SELECT 1 FROM latest_market) AS market_snapshot_present
-				FROM fpl.players player
-				JOIN fpl.teams team
-				  ON team.season_id = player.season_id AND team.team_id = player.team_id
-				LEFT JOIN fpl.player_event_snapshot_publications event_stats_publication
-				  ON event_stats_publication.season_id = player.season_id
-				 AND event_stats_publication.event_id = $2
-				 AND event_stats_publication.revision::text = $14
-				LEFT JOIN fpl.player_event_snapshots event_stats
-				  ON event_stats.season_id = player.season_id
-				 AND event_stats.element_id = player.element_id
-				 AND event_stats.event_id = $2
-				 AND event_stats_publication.season_id = event_stats.season_id
-				 AND event_stats_publication.event_id = event_stats.event_id
-				LEFT JOIN latest_market latest ON TRUE
-				LEFT JOIN fpl.player_market_snapshots market
-				  ON market.season_id = player.season_id
-				 AND market.element_id = player.element_id
-				 AND market.snapshot_date = latest.snapshot_date
-				 AND market.captured_at = latest.captured_at
-				WHERE player.season_id = $1
-				  AND EXISTS (SELECT 1 FROM pinned_core)
-				  AND ($3::text IS NULL OR player.web_name ILIKE '%' || $3 || '%')
-				  AND ($4::integer IS NULL OR player.element_type = $4)
-				  AND ($5::integer IS NULL OR player.team_id = $5)
-				  AND ($6::integer IS NULL OR COALESCE(market.price, player.price) >= $6)
-				  AND ($7::integer IS NULL OR COALESCE(market.price, player.price) <= $7)
-			), filtered AS (
-				SELECT *
-				FROM picker_rows
-				WHERE $8::text IS NULL
-				   OR ($8 = 'LE5' AND selected_by_percent <= 5)
-				   OR ($8 = 'GT5_LE15' AND selected_by_percent > 5 AND selected_by_percent <= 15)
-				   OR ($8 = 'GT15_LE40' AND selected_by_percent > 15 AND selected_by_percent <= 40)
-				   OR ($8 = 'GT40' AND selected_by_percent > 40)
-			)
-			SELECT filtered.*, count(*) OVER ()::integer AS total_count
-			FROM filtered
-			ORDER BY ${pickerOrderSql[effectiveSort]}
-			LIMIT $9 OFFSET $10
-		`;
+		const sql = buildPlayerPickerSql(effectiveSort);
 		const pickerParams = [
 			context.currentSeason.seasonId,
 			statsContext.asOfEventId ?? 0,

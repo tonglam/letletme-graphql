@@ -1,10 +1,4 @@
-export const GRAPHQL_TRAFFIC_CLASSES = [
-	"mini",
-	"web_browser",
-	"web_rsc",
-	"service",
-	"legacy",
-] as const;
+export const GRAPHQL_TRAFFIC_CLASSES = ["mini", "web_browser", "web_rsc", "service"] as const;
 export type GraphQLTrafficClass = (typeof GRAPHQL_TRAFFIC_CLASSES)[number];
 
 export const GRAPHQL_WORKLOADS = [

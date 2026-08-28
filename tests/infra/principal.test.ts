@@ -23,8 +23,12 @@ const addSignedHeader = (
 const canonicalIngress = (headers = new Headers()): Headers => {
 	const now = Math.floor(Date.now() / 1000);
 	addSignedHeader(headers, "X-Ingress-Context", {
+		v: 2,
 		aud: "letletme-graphql",
-		sub: "a".repeat(64),
+		trafficClass: "web_browser",
+		subject: "a".repeat(64),
+		abuseSubject: null,
+		workload: "public-other",
 		iat: now,
 		exp: now + 60,
 	});
@@ -46,6 +50,7 @@ describe("website principal envelope", () => {
 				uid: "user-1",
 				eid: 123,
 				evat: null,
+				adm: false,
 				iat: now,
 				exp: now + 60,
 			})
@@ -62,6 +67,7 @@ describe("website principal envelope", () => {
 			uid: "user-1",
 			eid: 123,
 			evat: "2026-07-18T00:00:00.000Z",
+			adm: false,
 			iat: now,
 			exp: now + 60,
 		});
@@ -73,6 +79,7 @@ describe("website principal envelope", () => {
 			uid: "user-1",
 			eid: null,
 			evat: null,
+			adm: false,
 			iat: now,
 			exp: now + 60,
 			unexpectedField: true,
@@ -80,19 +87,36 @@ describe("website principal envelope", () => {
 		expect(verifyWebsitePrincipal(websiteHeaders(payload))).toBeNull();
 	});
 
-	test("accepts a signed platform role and keeps legacy envelopes non-admin", () => {
+	test("rejects the pre-role envelope instead of treating a missing role as false", () => {
 		const now = Math.floor(Date.now() / 1000);
-		const legacy = verifyWebsitePrincipal(
+		expect(
+			verifyWebsitePrincipal(
+				websiteHeaders({
+					aud: "letletme-graphql",
+					uid: "user-1",
+					eid: null,
+					evat: null,
+					iat: now,
+					exp: now + 60,
+				})
+			)
+		).toBeNull();
+	});
+
+	test("accepts a signed platform role and keeps ordinary users non-admin", () => {
+		const now = Math.floor(Date.now() / 1000);
+		const ordinaryUser = verifyWebsitePrincipal(
 			websiteHeaders({
 				aud: "letletme-graphql",
-				uid: "legacy-user",
+				uid: "ordinary-user",
 				eid: 6953,
 				evat: "2026-08-21T00:00:00.000Z",
+				adm: false,
 				iat: now,
 				exp: now + 60,
 			})
 		);
-		expect(legacy?.platformAdmin).toBe(false);
+		expect(ordinaryUser?.platformAdmin).toBe(false);
 
 		const platformAdmin = verifyWebsitePrincipal(
 			websiteHeaders({
@@ -125,7 +149,7 @@ describe("website principal envelope", () => {
 		).toBeNull();
 	});
 
-	test("rejects the deferred v2 envelope instead of downgrading it to v1", () => {
+	test("rejects a signed user envelope with an unsupported shape", () => {
 		const now = Math.floor(Date.now() / 1000);
 		expect(
 			verifyWebsitePrincipal(
@@ -135,6 +159,7 @@ describe("website principal envelope", () => {
 					uid: "user-1",
 					eid: null,
 					evat: null,
+					adm: false,
 					bs: null,
 					ba: null,
 					bp: null,
@@ -154,6 +179,7 @@ describe("website principal envelope", () => {
 					uid: "user-1",
 					eid: null,
 					evat: null,
+					adm: false,
 					iat: now,
 					exp: now,
 				})
@@ -243,6 +269,7 @@ describe("Mini Program session authentication", () => {
 			uid: "website-user",
 			eid: null,
 			evat: null,
+			adm: false,
 			iat: now,
 			exp: now + 60,
 		});

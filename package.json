@@ -7,9 +7,11 @@
 		"dev": "bun --watch src/index.ts",
 		"start": "bun src/index.ts",
 		"test": "bun test",
+		"typecheck": "tsc --noEmit",
 		"coverage:critical": "bun scripts/check-critical-coverage.ts",
-		"test:watch": "bun test --watch src",
+		"test:watch": "bun test --watch tests",
 		"contract:check": "bun scripts/check-database-contract.ts",
+		"data:contract:check": "bun scripts/check-data-main-compatibility.ts",
 		"redis:check": "bun scripts/check-redis-connectivity.ts",
 		"rate-limit:report": "bun scripts/rate-limit-report.ts",
 		"rate-limit:profile": "bun scripts/generate-rate-limit-profile.ts",
@@ -45,7 +47,8 @@
 		"bun-types": "^1.4.0",
 		"eslint": "^10.7.0",
 		"eslint-config-prettier": "^10.1.8",
-		"prettier": "^3.9.5"
+		"prettier": "^3.9.5",
+		"typescript": "5.9.3"
 	},
 	"overrides": {
 		"@protobufjs/utf8": "1.1.1",

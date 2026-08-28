@@ -30,19 +30,14 @@ import { closeRedis, connectRedis, getRateLimitRedis, getRedis } from "./infra/r
 import { CurrentSeasonProvider } from "./infra/season";
 import { ReadModelClient } from "./infra/read-model-client";
 import {
-	checkRateLimits,
 	handleRateLimitStorageFailure,
 	PayloadTooLargeError,
 	readRequestBody,
-	type RateLimitBatchResult,
 } from "./http/security";
 import {
-	graphQLPreAuthRateLimitChecks,
-	graphQLPrincipalAdmission,
 	graphQLIngressFailure,
 	graphQLMethodFailure,
 	hasAuthenticationMaterial,
-	type GraphQLRateLimitConfig,
 } from "./http/graphql-policy";
 import {
 	graphQLV3EarlyFailureRateLimitChecks,
@@ -102,17 +97,20 @@ const isGraphQLRateLimitEnforceMode =
 const activeGraphQLRateLimitPolicy = isGraphQLV4Mode
 	? productionGraphQLRateLimitPolicyV4
 	: productionGraphQLRateLimitPolicy;
-const graphQLRateLimitConfig: GraphQLRateLimitConfig = {
-	windowSeconds: productionGraphQLRateLimitPolicy.legacyV2.windowSeconds,
-	globalAdmission: productionGraphQLRateLimitPolicy.legacyV2.globalRequest,
-	sharedPublic: productionGraphQLRateLimitPolicy.legacyV2.sharedPublicWeighted,
-	// The v2 comparison buckets are fixed to the reviewed policy. They are
-	// retained only as an internal shadow baseline; no environment override is
-	// accepted after the hard configuration cut.
-	browserIngress: productionGraphQLRateLimitPolicy.legacyV2.browserIngress,
-	authenticated: productionGraphQLRateLimitPolicy.legacyV2.authenticatedWeighted,
-	anonymous: productionGraphQLRateLimitPolicy.legacyV2.anonymousWeighted,
-};
+
+/**
+ * Shadow mode still keeps the global emergency valve live. Per-client and
+ * workload decisions remain observational until an enforcing policy is
+ * explicitly enabled, but an exhausted global budget must protect the
+ * service instead of merely reporting that it would have denied a request.
+ */
+const isShadowOnlyRateLimitDecision = (decision: TokenBucketStageResultV3): boolean =>
+	isGraphQLRateLimitShadowMode && !(decision.deniedScope === "global" && !decision.allowed);
+
+const shouldEnforceRateLimitDecision = (
+	decision: TokenBucketStageResultV3,
+	enforce: boolean
+): boolean => enforce || (isGraphQLRateLimitShadowMode && decision.deniedScope === "global");
 
 const graphQLVersionedPreAuthRateLimitChecks = (
 	ingress: GraphQLIngress
@@ -219,7 +217,6 @@ const jsonError = (
 
 type GraphQLRateLimitStageExecution = {
 	readonly response: Response | null;
-	readonly legacyDecision?: RateLimitBatchResult;
 	readonly v3Decision?: TokenBucketStageResultV3;
 };
 
@@ -232,69 +229,6 @@ const graphQLMetricResult = (response: Response, outcome: string): GraphQLMetric
 	if (response.status >= 500) return "server_error";
 	if (response.status >= 400) return "client_error";
 	return "ok";
-};
-
-const legacyDecisionScope = (
-	checks: Parameters<typeof checkRateLimits>[1],
-	decision: RateLimitBatchResult
-): GraphQLRateLimitHeaderScope => {
-	const deniedCheck = checks[decision.deniedCheckIndex ?? 0];
-	if (decision.deniedCheckIndex === 0 && checks.length > 1) return "global";
-	return deniedCheck?.scope.includes("shared-public") ? "workload" : "client";
-};
-
-const checkLegacyGraphQLRateLimits = async ({
-	checks,
-	corsHeaders,
-}: {
-	checks: Parameters<typeof checkRateLimits>[1];
-	corsHeaders: Record<string, string>;
-}): Promise<{ response: Response | null; decision?: RateLimitBatchResult }> => {
-	let decision: RateLimitBatchResult;
-	try {
-		decision = await checkRateLimits(getRateLimitRedis(), checks);
-	} catch (error) {
-		const storageScope = checks[0]?.scope ?? "graphql-ingress-v2";
-		metrics.graphqlRateLimitDecisions.labels(storageScope, "storage_unavailable").inc();
-		try {
-			const fallback = handleRateLimitStorageFailure({
-				error,
-				failClosed: true,
-				scope: storageScope,
-				logger,
-			});
-			decision = { ...fallback };
-		} catch {
-			return {
-				response: jsonError(
-					503,
-					"RATE_LIMIT_STORAGE_UNAVAILABLE",
-					"Request safety checks are temporarily unavailable",
-					corsHeaders
-				),
-			};
-		}
-	}
-
-	if (!decision.allowed) {
-		metrics.graphqlRateLimitDecisions
-			.labels(decision.deniedScope ?? "graphql-admission", "limited")
-			.inc();
-		const scope = legacyDecisionScope(checks, decision);
-		return {
-			decision,
-			response: jsonError(429, "RATE_LIMITED", "Too many requests", corsHeaders, {
-				"Retry-After": String(decision.retryAfterSeconds),
-				"X-RateLimit-Policy": "graphql-v2",
-				"X-RateLimit-Scope": scope,
-			}),
-		};
-	}
-
-	for (const scope of new Set(checks.map((check) => check.scope))) {
-		metrics.graphqlRateLimitDecisions.labels(scope, "allowed").inc();
-	}
-	return { decision, response: null };
 };
 
 const checkV3GraphQLRateLimits = async ({
@@ -310,7 +244,7 @@ const checkV3GraphQLRateLimits = async ({
 }): Promise<{ response: Response | null; decision?: TokenBucketStageResultV3 }> => {
 	try {
 		const decision = await checkTokenBucketStageV3(getRateLimitRedis(), checks);
-		if (!decision.allowed && enforce) {
+		if (!decision.allowed && shouldEnforceRateLimitDecision(decision, enforce)) {
 			return {
 				decision,
 				response: jsonError(429, "RATE_LIMITED", "Too many requests", corsHeaders, {
@@ -329,7 +263,7 @@ const checkV3GraphQLRateLimits = async ({
 		try {
 			handleRateLimitStorageFailure({
 				error,
-				failClosed: enforce,
+				failClosed: enforce || isGraphQLRateLimitShadowMode,
 				scope,
 				logger,
 			});
@@ -348,49 +282,50 @@ const checkV3GraphQLRateLimits = async ({
 };
 
 const runGraphQLRateLimitStage = async ({
-	legacyChecks,
 	v3Checks,
 	corsHeaders,
-	shadowSkipLegacy = false,
 	rateLimitWorkload,
 }: {
-	legacyChecks: Parameters<typeof checkRateLimits>[1];
 	v3Checks: readonly TokenBucketCheckV3[];
 	corsHeaders: Record<string, string>;
-	shadowSkipLegacy?: boolean;
 	rateLimitWorkload?: string;
 }): Promise<GraphQLRateLimitStageExecution> => {
-	if (isGraphQLRateLimitShadowMode) {
-		const v3Promise: Promise<{
-			response: Response | null;
-			decision?: TokenBucketStageResultV3;
-		}> =
-			v3Checks.length > 0
-				? checkV3GraphQLRateLimits({
-						checks: v3Checks,
-						corsHeaders,
-						enforce: false,
-						rateLimitWorkload,
-					})
-				: Promise.resolve({ response: null });
-		const legacyPromise: Promise<{
-			response: Response | null;
-			decision?: RateLimitBatchResult;
-		}> = shadowSkipLegacy
-			? Promise.resolve({ response: null })
-			: checkLegacyGraphQLRateLimits({ checks: legacyChecks, corsHeaders });
-		const [legacy, v3] = await Promise.all([legacyPromise, v3Promise]);
-		return {
-			response: legacy.response,
-			legacyDecision: legacy.decision,
-			v3Decision: v3.decision,
-		};
-	}
 	if (v3Checks.length === 0) return { response: null };
+	// In shadow mode the global emergency valve is still an enforcing safety
+	// control.  The token-bucket script intentionally performs an all-or-none
+	// debit, so evaluating global and observational buckets together would let a
+	// client/workload denial consume nothing from global.  Split the global
+	// check first: an exhausted global budget must immediately reject, while the
+	// remaining scopes stay observational until enforce mode is enabled.
+	if (isGraphQLRateLimitShadowMode && v3Checks.length > 1) {
+		const globalChecks = v3Checks.filter((check) => check.scope === "global");
+		const observationalChecks = v3Checks.filter((check) => check.scope !== "global");
+		if (globalChecks.length > 0 && observationalChecks.length > 0) {
+			const global = await checkV3GraphQLRateLimits({
+				checks: globalChecks,
+				corsHeaders,
+				enforce: true,
+				rateLimitWorkload,
+			});
+			if (global.response || observationalChecks.length === 0) {
+				return { response: global.response, v3Decision: global.decision };
+			}
+			const observational = await checkV3GraphQLRateLimits({
+				checks: observationalChecks,
+				corsHeaders,
+				enforce: false,
+				rateLimitWorkload,
+			});
+			return {
+				response: observational.response,
+				v3Decision: observational.decision,
+			};
+		}
+	}
 	const v3 = await checkV3GraphQLRateLimits({
 		checks: v3Checks,
 		corsHeaders,
-		enforce: true,
+		enforce: isGraphQLRateLimitEnforceMode,
 		rateLimitWorkload,
 	});
 	return { response: v3.response, v3Decision: v3.decision };
@@ -435,7 +370,7 @@ const logV3RateLimitDecision = ({
 			remaining: (selected?.remainingMilliTokens ?? 0) / 1000,
 			retryAfter: decision.retryAfterSeconds,
 			allowed: decision.allowed,
-			outcome: isGraphQLRateLimitShadowMode
+			outcome: isShadowOnlyRateLimitDecision(decision)
 				? decision.allowed
 					? "would_allow"
 					: "would_deny"
@@ -458,19 +393,21 @@ const recordRequestRateLimitOutcome = async ({
 	scope: GraphQLRateLimitHeaderScope;
 	outcome: RateLimitAggregateOutcome;
 }): Promise<void> =>
-	recordRateLimitAggregate({
-		redis: getRateLimitRedis(),
-		trafficClass: ingress.trafficClass,
-		workload: ingress.workload,
-		scope,
-		outcome,
-		fingerprint: rateLimitFingerprint(ingress.subject),
-		policyVersion: activeGraphQLRateLimitPolicy.policyVersion,
-		logger,
-	});
+	ingress.trafficClass === "untrusted"
+		? Promise.resolve()
+		: recordRateLimitAggregate({
+				redis: getRateLimitRedis(),
+				trafficClass: ingress.trafficClass,
+				workload: ingress.workload,
+				scope,
+				outcome,
+				fingerprint: rateLimitFingerprint(ingress.subject),
+				policyVersion: activeGraphQLRateLimitPolicy.policyVersion,
+				logger,
+			});
 
 const terminalV3Outcome = (decision: TokenBucketStageResultV3): RateLimitAggregateOutcome =>
-	isGraphQLRateLimitShadowMode
+	isShadowOnlyRateLimitDecision(decision)
 		? decision.allowed
 			? "would_allow"
 			: "would_deny"
@@ -598,7 +535,7 @@ const startServer = async (): Promise<void> => {
 				});
 			}
 
-			if (url.pathname === "/health" || url.pathname === "/health/ready") {
+			if (url.pathname === "/health/ready") {
 				const health = await healthCheck(true);
 				return new Response(health.body, {
 					status: health.ok ? 200 : 503,
@@ -628,14 +565,13 @@ const startServer = async (): Promise<void> => {
 				corsHeaders["X-Request-Id"] = requestId;
 				let operationName = "anonymous";
 				let ingressClass = "unclassified";
-				let trafficClass = "legacy";
+				let trafficClass = "untrusted";
 				let workload = "public-other";
 				let subjectFingerprint = "unresolved";
 				let rootFields: readonly string[] = [];
 				let rateLimitAudience = "unresolved";
 				let fullCoreLoaded = false;
 				let graphQLContext: GraphQLContext | undefined;
-				let shadowLegacyPreAuthResponse: Response | null = null;
 				let trustedIngress: GraphQLIngress | null = null;
 				let v3AdmissionEvaluated = false;
 				let terminalPreAuthV3Denial: TokenBucketStageResultV3 | null = null;
@@ -645,7 +581,7 @@ const startServer = async (): Promise<void> => {
 					scope: GraphQLRateLimitHeaderScope;
 				} | null = null;
 				const captureShadowRateLimitDecision = (decision: TokenBucketStageResultV3): void => {
-					if (!isGraphQLRateLimitShadowMode) return;
+					if (!isGraphQLRateLimitShadowMode || !isShadowOnlyRateLimitDecision(decision)) return;
 					if (shadowRateLimitDecision?.outcome === "deny") return;
 					shadowRateLimitDecision = {
 						outcome: decision.allowed ? "allow" : "deny",
@@ -743,9 +679,7 @@ const startServer = async (): Promise<void> => {
 							);
 						}
 					}
-					return shadowLegacyPreAuthResponse
-						? finalizeGraphQLResponse(shadowLegacyPreAuthResponse, "pre_auth_admission_rejected")
-						: finalizeGraphQLResponse(response, outcome);
+					return finalizeGraphQLResponse(response, outcome);
 				};
 
 				try {
@@ -785,13 +719,8 @@ const startServer = async (): Promise<void> => {
 					}
 					trustedIngress = ingress;
 
-					const legacyPreAuthChecks = graphQLPreAuthRateLimitChecks(
-						ingress,
-						graphQLRateLimitConfig
-					);
 					const preAuthAdmission = await requestTiming.measure("preAuthAdmission", () =>
 						runGraphQLRateLimitStage({
-							legacyChecks: legacyPreAuthChecks,
 							v3Checks: graphQLVersionedPreAuthRateLimitChecks(ingress),
 							corsHeaders,
 							rateLimitWorkload: ingress.workload,
@@ -812,13 +741,6 @@ const startServer = async (): Promise<void> => {
 						});
 					}
 					if (preAuthAdmission.response) {
-						if (preAuthAdmission.legacyDecision && !preAuthAdmission.legacyDecision.allowed) {
-							await recordRequestRateLimitOutcome({
-								ingress,
-								scope: legacyDecisionScope(legacyPreAuthChecks, preAuthAdmission.legacyDecision),
-								outcome: "legacy_denied",
-							});
-						}
 						if (
 							isGraphQLRateLimitEnforceMode &&
 							preAuthAdmission.v3Decision &&
@@ -826,20 +748,10 @@ const startServer = async (): Promise<void> => {
 						) {
 							await recordTerminalRequestV3Outcome(ingress, preAuthAdmission.v3Decision);
 						}
-						if (
-							isGraphQLRateLimitShadowMode &&
-							preAuthAdmission.legacyDecision &&
-							!preAuthAdmission.legacyDecision.allowed
-						) {
-							// Preserve the v2 response, but continue through bounded parsing and
-							// principal resolution so the v3 weighted decision is still observed.
-							shadowLegacyPreAuthResponse = preAuthAdmission.response;
-						} else {
-							return finalizeGraphQLResponse(
-								preAuthAdmission.response,
-								"pre_auth_admission_rejected"
-							);
-						}
+						return finalizeGraphQLResponse(
+							preAuthAdmission.response,
+							"pre_auth_admission_rejected"
+						);
 					}
 
 					const body = await requestTiming.measure("bodyRead", () => readRequestBody(request));
@@ -896,26 +808,16 @@ const startServer = async (): Promise<void> => {
 						);
 					}
 
-					const principalAdmission = graphQLPrincipalAdmission({
-						ingress,
-						principal,
-						cost: limits.rateLimitCostUnits,
-						config: graphQLRateLimitConfig,
-					});
-					rateLimitAudience = principalAdmission.audience;
 					const v3PrincipalAdmission = graphQLVersionedPrincipalAdmission({
 						ingress,
 						principal,
 						cost: limits.rateLimitCostUnits,
 					});
 					rateLimitAudience = v3PrincipalAdmission.audience;
-					const legacyPrincipalChecks = [principalAdmission.check];
 					const principalAdmissionResult = await requestTiming.measure("principalAdmission", () =>
 						runGraphQLRateLimitStage({
-							legacyChecks: legacyPrincipalChecks,
 							v3Checks: v3PrincipalAdmission.checks,
 							corsHeaders,
-							shadowSkipLegacy: shadowLegacyPreAuthResponse !== null,
 							rateLimitWorkload: ingress.workload,
 						})
 					);
@@ -934,39 +836,12 @@ const startServer = async (): Promise<void> => {
 						});
 						await recordTerminalRequestV3Outcome(ingress, principalAdmissionResult.v3Decision);
 					}
-					if (shadowLegacyPreAuthResponse) {
-						return finalizeGraphQLResponse(
-							shadowLegacyPreAuthResponse,
-							"pre_auth_admission_rejected"
-						);
-					}
 					if (principalAdmissionResult.response) {
-						if (
-							principalAdmissionResult.legacyDecision &&
-							!principalAdmissionResult.legacyDecision.allowed
-						) {
-							await recordRequestRateLimitOutcome({
-								ingress,
-								scope: legacyDecisionScope(
-									legacyPrincipalChecks,
-									principalAdmissionResult.legacyDecision
-								),
-								outcome: "legacy_denied",
-							});
-						}
 						return finalizeGraphQLResponse(
 							principalAdmissionResult.response,
 							"principal_admission_rejected"
 						);
 					}
-					if (principalAdmissionResult.legacyDecision?.allowed) {
-						await recordRequestRateLimitOutcome({
-							ingress,
-							scope: principalAdmission.audience === "shared_public" ? "workload" : "client",
-							outcome: "legacy_allowed",
-						});
-					}
-
 					let currentSeason: GraphQLContext["currentSeason"];
 					try {
 						currentSeason = await requestTiming.measure("season", () =>
