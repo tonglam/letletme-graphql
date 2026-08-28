@@ -127,8 +127,15 @@ describe("production deployment workflow", () => {
 
 	test("protects the public token probe and candidate lifecycle on interruption", () => {
 		expect(deployScript).toContain('redirect: "error"');
+		expect(deployScript).toContain(
+			'const response = await fetch("http://127.0.0.1:4000/graphql", {'
+		);
 		expect(deployScript).toContain("--max-time 5");
 		expect(deployScript).toContain("candidate_started=true");
+		expect(deployScript).toContain("rollback_verified=false");
+		expect(deployScript).toContain(
+			"preserving candidate slot because active-slot rollback is unverified"
+		);
 		expect(deployScript).toContain("compose down --remove-orphans >/dev/null 2>&1 || true");
 		expect(deployScript).toContain("trap 'rollback_on_signal 129' HUP");
 		expect(deployScript).toContain("trap 'rollback_on_signal 130' INT");

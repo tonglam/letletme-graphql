@@ -32,6 +32,8 @@ describe("server log redaction", () => {
 		for (const [source, expected] of [
 			["Authorization: Bearer super-secret-token", "Authorization: [REDACTED]"],
 			["authorization=Basic dXNlcjpwYXNz", "authorization=[REDACTED]"],
+			['Authorization: "Bearer token with spaces"', 'Authorization: "[REDACTED]"'],
+			['authorization="opaque value with spaces"', 'authorization="[REDACTED]"'],
 		] as const) {
 			const sanitized = sanitizeLogText(source);
 			expect(sanitized).toBe(expected);

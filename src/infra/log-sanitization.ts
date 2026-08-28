@@ -2,8 +2,10 @@ const DATABASE_STATEMENT =
 	/\b(?:select|insert\s+into|update\s+\S+\s+set|delete\s+from|alter\s+table|create\s+table|drop\s+table)\b/i;
 const CONNECTION_URL = /\b(?:postgres(?:ql)?|redis|rediss):\/\/[^\s"']+/gi;
 const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)([^@\s/]+)@/gi;
-const AUTHORIZATION_CREDENTIAL =
-	/(?<![a-z0-9_-])(["']?)(authorization)\1(\s*[=:]\s*)(["']?)(?:(?:bearer|basic)\s+)?([^"'\s,;}]+)\4/gi;
+const AUTHORIZATION_CREDENTIAL_QUOTED =
+	/(?<![a-z0-9_-])(["']?)(authorization)\1(\s*[=:]\s*)(["'])([\s\S]*?)\4/gi;
+const AUTHORIZATION_CREDENTIAL_UNQUOTED =
+	/(?<![a-z0-9_-])(["']?)(authorization)\1(\s*[=:]\s*)(?:(?:bearer|basic)\s+)?(?!["'])([^\s,;}]+)/gi;
 const SECRET_KEY =
 	"(?:(?:[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*)[_-])?(?:password|passwd|pwd|token|secret|api[_-]?key)";
 const SECRET_ASSIGNMENT_QUOTED = new RegExp(
@@ -23,7 +25,8 @@ export const sanitizeLogText = (value: string): string => {
 	return value
 		.replace(CONNECTION_URL, (url) => `${url.split(":", 1)[0]}://[REDACTED]`)
 		.replace(URL_CREDENTIALS, "$1[REDACTED]@")
-		.replace(AUTHORIZATION_CREDENTIAL, "$1$2$1$3$4[REDACTED]$4")
+		.replace(AUTHORIZATION_CREDENTIAL_QUOTED, "$1$2$1$3$4[REDACTED]$4")
+		.replace(AUTHORIZATION_CREDENTIAL_UNQUOTED, "$1$2$1$3[REDACTED]")
 		.replace(SECRET_ASSIGNMENT_QUOTED, "$1$2$1$3$4[REDACTED]$4")
 		.replace(SECRET_ASSIGNMENT_UNQUOTED, "$1$2$1$3[REDACTED]")
 		.replace(NETWORK_HOST, "[REDACTED_HOST]")

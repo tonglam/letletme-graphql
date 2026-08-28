@@ -111,10 +111,15 @@ chmod 700 "$docker_config_dir"
 export DOCKER_CONFIG="$docker_config_dir"
 candidate_started=false
 promotion_committed=false
+rollback_verified=false
 manifest=""
 cleanup_sensitive_files() {
   if [ "${candidate_started:-false}" = true ] && [ "${promotion_committed:-false}" != true ]; then
-    compose down --remove-orphans >/dev/null 2>&1 || true
+    if [ "${switched:-false}" != true ] || [ "${rollback_verified:-false}" = true ]; then
+      compose down --remove-orphans >/dev/null 2>&1 || true
+    else
+      echo "preserving candidate slot because active-slot rollback is unverified" >&2
+    fi
   fi
   if [ -n "$candidate_env_next" ]; then rm -f -- "$candidate_env_next"; fi
   if [ -n "$manifest" ]; then rm -f -- "$manifest"; fi
@@ -266,6 +271,7 @@ compose exec -T graphql bun -e '
   const request = async (query, variables = {}) => {
     const response = await fetch("http://127.0.0.1:4000/graphql", {
       method: "POST",
+      redirect: "error",
       headers: { "Content-Type": "application/json", "X-GraphQL-Service-Token": token },
       body: JSON.stringify({ query, variables }),
       signal: AbortSignal.timeout(5000),
@@ -343,6 +349,7 @@ old_slot="$active_slot"
 switched=false
 rollback_switch() {
   if [ "$switched" != true ]; then return 0; fi
+  rollback_verified=false
   if ! sudo -n "$SWITCH_HELPER" "$old_slot"; then
     echo "slot rollback helper failed; active routing is uncertain" >&2
     return 1
@@ -351,6 +358,7 @@ rollback_switch() {
     echo "slot rollback did not restore active slot $old_slot" >&2
     return 1
   fi
+  rollback_verified=true
   switched=false
 }
 rollback_on_error() {
