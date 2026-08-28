@@ -102,6 +102,20 @@ test("layer checker unwraps TypeScript assertions around require aliases", () =>
 	});
 });
 
+test("layer checker unwraps transparent call callees before loader checks", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'(require as NodeRequire)("../domains/entries/service"); (require)("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile).map(({ value }) => value)).toEqual([
+		"../domains/entries/service",
+		"../domains/entries/service",
+	]);
+});
+
 test("layer checker tracks a require alias in its declaring block", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.cts",
@@ -184,6 +198,17 @@ test("layer checker respects lexical shadowing of imported createRequire aliases
 	const sourceFile = ts.createSourceFile(
 		"fixture.ts",
 		'import { createRequire as factory } from "node:module"; function map(factory: (value: string) => unknown) { return factory("../domains/entries/service"); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([]);
+});
+
+test("layer checker respects lexical shadowing of CommonJS createRequire aliases", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'const { createRequire: factory } = require("node:module"); function map(factory: (value: string) => unknown) { return factory("../domains/entries/service"); }',
 		ts.ScriptTarget.Latest,
 		true,
 		ts.ScriptKind.TS

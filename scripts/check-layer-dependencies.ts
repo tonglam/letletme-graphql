@@ -54,10 +54,12 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		scope: ts.Node;
 	};
 	const loaderAliasBindings: LoaderAliasBinding[] = [];
-	const createRequireBindings = new Set<string>();
-	const createRequireNamespaceBindings = new Set<string>();
-	const importedCreateRequireBindings = new Set<string>();
-	const importedCreateRequireNamespaceBindings = new Set<string>();
+	type ProvenCreateRequireBinding = {
+		name: string;
+		scope: ts.Node;
+	};
+	const createRequireBindingProvenance: ProvenCreateRequireBinding[] = [];
+	const createRequireNamespaceBindingProvenance: ProvenCreateRequireBinding[] = [];
 	const bindingContains = (binding: ts.BindingName, name: string): boolean => {
 		if (ts.isIdentifier(binding)) return binding.text === name;
 		return binding.elements.some((element) => {
@@ -222,6 +224,48 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		}
 		return scope ?? sourceFile;
 	};
+	const registerCreateRequireBinding = (
+		name: string,
+		marker: ts.Identifier,
+		options: { namespace?: boolean; scope?: ts.Node } = {}
+	): void => {
+		const { namespace = false, scope = scopeFor(marker) } = options;
+		const bindings = namespace
+			? createRequireNamespaceBindingProvenance
+			: createRequireBindingProvenance;
+		bindings.push({ name, scope });
+	};
+	const isVisibleCreateRequireBinding = (
+		identifier: ts.Identifier,
+		name: string,
+		namespace = false
+	): boolean => {
+		const bindings = namespace
+			? createRequireNamespaceBindingProvenance
+			: createRequireBindingProvenance;
+		if (bindings.length === 0) return false;
+		const referenceScope = scopeFor(identifier);
+		const depth = (scope: ts.Node): number => {
+			let value = 0;
+			let current: ts.Node | undefined = scope;
+			while (current) {
+				value += 1;
+				current = parentScope(current);
+			}
+			return value;
+		};
+		return bindings
+			.filter((binding) => binding.name === name && scopeContains(binding.scope, identifier))
+			.sort((left, right) => depth(right.scope) - depth(left.scope))
+			.some((binding) => {
+				let scope: ts.Node | undefined = referenceScope;
+				while (scope && scope !== binding.scope) {
+					if (scopeHasBinding(scope, name)) return false;
+					scope = parentScope(scope);
+				}
+				return scope === binding.scope;
+			});
+	};
 	const isVisibleLoaderAlias = (identifier: ts.Identifier, name: string): boolean => {
 		if (!requireLoaderBindings.has(name) || name === "require") return false;
 		const referenceScope = scopeFor(identifier);
@@ -260,7 +304,7 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		) {
 			return undefined;
 		}
-		const callee = expression.expression;
+		const callee = unwrapTransparentExpression(expression.expression);
 		if (
 			ts.isIdentifier(callee) &&
 			callee.text === "require" &&
@@ -277,8 +321,11 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 					node.importClause?.namedBindings &&
 					ts.isNamespaceImport(node.importClause.namedBindings)
 				) {
-					createRequireNamespaceBindings.add(node.importClause.namedBindings.name.text);
-					importedCreateRequireNamespaceBindings.add(node.importClause.namedBindings.name.text);
+					registerCreateRequireBinding(
+						node.importClause.namedBindings.name.text,
+						node.importClause.namedBindings.name,
+						{ namespace: true, scope: sourceFile }
+					);
 				}
 				if (
 					node.importClause?.namedBindings &&
@@ -289,8 +336,9 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 							specifier.propertyName?.text === "createRequire" ||
 							specifier.name.text === "createRequire"
 						) {
-							createRequireBindings.add(specifier.name.text);
-							importedCreateRequireBindings.add(specifier.name.text);
+							registerCreateRequireBinding(specifier.name.text, specifier.name, {
+								scope: sourceFile,
+							});
 						}
 					}
 				}
@@ -323,7 +371,10 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 					continue;
 				}
 				if (ts.isIdentifier(declaration.name)) {
-					createRequireNamespaceBindings.add(declaration.name.text);
+					registerCreateRequireBinding(declaration.name.text, declaration.name, {
+						namespace: true,
+						scope: loaderAliasScopeFor(declaration),
+					});
 					continue;
 				}
 				if (!ts.isObjectBindingPattern(declaration.name)) continue;
@@ -334,7 +385,9 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 							? element.propertyName.text
 							: element.name.getText(sourceFile);
 					if (importedName === "createRequire" && ts.isIdentifier(element.name)) {
-						createRequireBindings.add(element.name.text);
+						registerCreateRequireBinding(element.name.text, element.name, {
+							scope: loaderAliasScopeFor(declaration),
+						});
 					}
 				}
 			}
@@ -387,19 +440,15 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 			add(node.name, node.name.text);
 		}
 		if (ts.isCallExpression(node)) {
-			const expression = node.expression;
+			const expression = unwrapTransparentExpression(node.expression);
 			const isCreateRequireNamespaceCall =
 				ts.isPropertyAccessExpression(expression) &&
 				ts.isIdentifier(expression.expression) &&
 				expression.name.text === "createRequire" &&
-				createRequireNamespaceBindings.has(expression.expression.text) &&
-				(!importedCreateRequireNamespaceBindings.has(expression.expression.text) ||
-					!isShadowed(expression.expression, expression.expression.text, false));
+				isVisibleCreateRequireBinding(expression.expression, expression.expression.text, true);
 			if (
 				(ts.isIdentifier(expression) &&
-					createRequireBindings.has(expression.text) &&
-					(!importedCreateRequireBindings.has(expression.text) ||
-						!isShadowed(expression, expression.text, false))) ||
+					isVisibleCreateRequireBinding(expression, expression.text)) ||
 				isCreateRequireNamespaceCall
 			) {
 				// A createRequire loader can reach any runtime module through a later

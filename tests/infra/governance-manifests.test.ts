@@ -7,6 +7,7 @@ import {
 } from "../../scripts/check-deprecation-manifest";
 import {
 	GRAPHQL_DOMAIN_MANIFEST,
+	validateGraphQLConditionalAuthAgainstSchema,
 	validateGraphQLDomainManifest,
 } from "../../src/graphql/domain-manifest";
 import { schema } from "../../src/graphql/schema";
@@ -81,6 +82,45 @@ describe("GraphQL domain manifest", () => {
 			trendCohorts: ["public", "viewerEntry"],
 			trendCohortSnapshot: ["public", "viewerEntry"],
 		});
+	});
+
+	test("validates conditional auth arguments and predicates against GraphQL types", () => {
+		const validSchema = buildSchema(`
+			enum TrendCohortAccess { PUBLIC MINE }
+			type Query {
+				trendCohorts(access: TrendCohortAccess!): String
+				trendCohortSnapshot(access: TrendCohortAccess = PUBLIC): String
+				myFplCompetitionsDesk(tournamentId: Int): String
+			}
+		`);
+		expect(validateGraphQLConditionalAuthAgainstSchema(validSchema)).toEqual([]);
+
+		const typoSchema = buildSchema(`
+			enum TrendCohortAccess { PUBLIC MINE }
+			type Query {
+				trendCohorts(access: TrendCohortAccess!): String
+				trendCohortSnapshot(access: TrendCohortAccess): String
+				myFplCompetitionsDesk(tournamentID: Int): String
+			}
+		`);
+		const errors = validateGraphQLConditionalAuthAgainstSchema(typoSchema);
+		expect(errors).toContain(
+			"Query.myFplCompetitionsDesk.tournamentId: conditional auth argument is not defined in the schema"
+		);
+	});
+
+	test("rejects conditional equality values that do not match the argument type", () => {
+		const schemaWithInvalidEnum = buildSchema(`
+			enum TrendCohortAccess { PUBLIC }
+			type Query {
+				trendCohorts(access: TrendCohortAccess!): String
+				trendCohortSnapshot(access: TrendCohortAccess): String
+				myFplCompetitionsDesk(tournamentId: Int): String
+			}
+		`);
+		expect(validateGraphQLConditionalAuthAgainstSchema(schemaWithInvalidEnum)).toContain(
+			"Query.trendCohorts.access: equals must name a value in enum TrendCohortAccess"
+		);
 	});
 });
 

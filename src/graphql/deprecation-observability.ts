@@ -58,6 +58,8 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 	increment,
 	onExecutionEnd,
 	isExecutionSuccessful,
+	deferGlobalSymbols = false,
+	registerDeferredGlobalCommit,
 }: {
 	symbols: readonly string[];
 	symbolOwners?: Readonly<Record<string, readonly string[]>>;
@@ -65,6 +67,14 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 	increment: (symbol: string) => void;
 	onExecutionEnd?: () => void;
 	isExecutionSuccessful?: () => boolean;
+	/**
+	 * Defer usage commits until the request response is known to be successful.
+	 * Apollo may report variable-coercion or resolver errors after the execution
+	 * listener has finished, so committing at executionDidEnd can count a
+	 * directive from an operation that did not complete successfully.
+	 */
+	deferGlobalSymbols?: boolean;
+	registerDeferredGlobalCommit?: (commit: () => void) => void;
 }): GraphQLRequestExecutionListener<TContext> => {
 	let committed = false;
 	let executedField = false;
@@ -101,6 +111,15 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 		runtimePathOwnersByResponsePath.set(responsePath, [...owners, { owner, markers }]);
 	}
 	const runtimeTypeByExecutionParentPath = new Map<string, string>();
+	const commitGlobalSymbols = (): void => {
+		if (committed || !(isExecutionSuccessful?.() ?? true)) return;
+		recordDeprecatedSchemaUsages({ symbols: effectiveGlobalSymbols, increment });
+		committed = true;
+	};
+	const deferCommit = (commit: () => void): void => {
+		if (deferGlobalSymbols && registerDeferredGlobalCommit) registerDeferredGlobalCommit(commit);
+		else commit();
+	};
 	return {
 		...(symbols.length > 0
 			? {
@@ -151,20 +170,23 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 			// field is excluded by an @skip directive) but still use a deprecated
 			// operation-level/directive symbol. Commit global symbols in that case;
 			// field-owned symbols remain gated on an actually executed field.
-			if (
+			if (!error && !committed && executedField) {
+				deferCommit(() => {
+					if (committed || !(isExecutionSuccessful?.() ?? true)) return;
+					const executedSymbols = new Set(effectiveGlobalSymbols);
+					for (const owner of executedOwners) {
+						for (const symbol of symbolOwners[owner] ?? []) executedSymbols.add(symbol);
+					}
+					recordDeprecatedSchemaUsages({ symbols: [...executedSymbols], increment });
+					committed = true;
+				});
+			} else if (
 				!error &&
 				!committed &&
-				(executedField ||
-					(hasExplicitGlobalSymbols &&
-						effectiveGlobalSymbols.length > 0 &&
-						(isExecutionSuccessful?.() ?? true)))
+				hasExplicitGlobalSymbols &&
+				effectiveGlobalSymbols.length > 0
 			) {
-				const executedSymbols = new Set(effectiveGlobalSymbols);
-				for (const owner of executedOwners) {
-					for (const symbol of symbolOwners[owner] ?? []) executedSymbols.add(symbol);
-				}
-				recordDeprecatedSchemaUsages({ symbols: [...executedSymbols], increment });
-				committed = true;
+				deferCommit(commitGlobalSymbols);
 			}
 			onExecutionEnd?.();
 		},

@@ -83,6 +83,62 @@ test("deprecated usage is counted for cached documents only after variable coerc
 	expect(observed).toEqual(["Query.legacy", "Query.legacy"]);
 });
 
+test("deprecated global usage is not committed when variable coercion fails", async () => {
+	const observed: string[] = [];
+	const plugin: ApolloServerPlugin<TestContext> = {
+		async requestDidStart() {
+			let executionHadErrors = false;
+			let deferredCommit: (() => void) | undefined;
+			return {
+				async didEncounterErrors() {
+					executionHadErrors = true;
+				},
+				async willSendResponse() {
+					deferredCommit?.();
+					deferredCommit = undefined;
+				},
+				async executionDidStart(requestContext) {
+					return createDeprecatedSchemaUsageExecutionListener<TestContext>({
+						symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+						globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols,
+						increment: (symbol) => observed.push(symbol),
+						isExecutionSuccessful: () => !executionHadErrors,
+						deferGlobalSymbols: true,
+						registerDeferredGlobalCommit: (commit) => {
+							deferredCommit = commit;
+						},
+					});
+				},
+			};
+		},
+	};
+	const server = new ApolloServer<TestContext>({
+		typeDefs: `type Query { current(required: Int!): String }`,
+		resolvers: { Query: { current: () => "ok" } },
+		plugins: [plugin],
+	});
+	servers.push(server);
+	await server.start();
+	const contextValue = {
+		deprecatedSymbols: ["LegacyMode.OLD"],
+		deprecatedSymbolGlobalSymbols: ["LegacyMode.OLD"],
+	};
+	await server.executeOperation(
+		{ query: "query Usage($required: Int!) { current(required: $required) }" },
+		{ contextValue }
+	);
+	expect(observed).toEqual([]);
+
+	await server.executeOperation(
+		{
+			query: "query Usage($required: Int!) { current(required: $required) }",
+			variables: { required: 1 },
+		},
+		{ contextValue }
+	);
+	expect(observed).toEqual(["LegacyMode.OLD"]);
+});
+
 test("deprecated global symbols commit for a successful fieldless execution", async () => {
 	const observed: string[] = [];
 	const listener = createDeprecatedSchemaUsageExecutionListener<TestContext>({

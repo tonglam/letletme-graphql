@@ -1,4 +1,16 @@
-import type { GraphQLSchema } from "graphql";
+import {
+	getNamedType,
+	isEnumType,
+	isInputObjectType,
+	isListType,
+	isNonNullType,
+	isScalarType,
+	type GraphQLArgument,
+	type GraphQLField,
+	type GraphQLNamedType,
+	type GraphQLSchema,
+	type GraphQLType,
+} from "graphql";
 import {
 	ROOT_FIELD_CONDITIONAL_ACCESS,
 	ROOT_FIELD_POLICIES,
@@ -209,8 +221,137 @@ export const executableSchemaRootFields = (schema: GraphQLSchema): ReadonlySet<s
 	return fields;
 };
 
-export const validateGraphQLDomainManifest = (schema: GraphQLSchema): readonly string[] => {
+const conditionalRootField = (
+	schema: GraphQLSchema,
+	fieldName: string
+): readonly { rootTypeName: string; field: GraphQLField<unknown, unknown> }[] => {
+	const matches: { rootTypeName: string; field: GraphQLField<unknown, unknown> }[] = [];
+	for (const rootType of [
+		schema.getQueryType(),
+		schema.getMutationType(),
+		schema.getSubscriptionType(),
+	]) {
+		if (!rootType) continue;
+		const field = rootType.getFields()[fieldName];
+		if (field) matches.push({ rootTypeName: rootType.name, field });
+	}
+	return matches;
+};
+
+const conditionalArgument = (
+	field: GraphQLField<unknown, unknown>,
+	argumentName: string
+): GraphQLArgument | undefined => field.args.find((argument) => argument.name === argumentName);
+
+const describeGraphQLType = (type: GraphQLType): string => {
+	if (isNonNullType(type)) return `${describeGraphQLType(type.ofType)}!`;
+	if (isListType(type)) return `[${describeGraphQLType(type.ofType)}]`;
+	return type.name;
+};
+
+const validateConditionalEquals = (
+	argument: GraphQLArgument,
+	value: string | number | boolean,
+	location: string
+): string | undefined => {
+	const nullableType = isNonNullType(argument.type) ? argument.type.ofType : argument.type;
+	const inputType = getNamedType(nullableType) as GraphQLNamedType;
+	if (isListType(nullableType) || isInputObjectType(inputType)) {
+		return `${location}: equals is not supported for list or input-object argument type ${describeGraphQLType(argument.type)}`;
+	}
+	if (isEnumType(inputType)) {
+		return typeof value === "string" && inputType.getValue(value)
+			? undefined
+			: `${location}: equals must name a value in enum ${inputType.name}`;
+	}
+	if (inputType.name === "Boolean") {
+		return typeof value === "boolean"
+			? undefined
+			: `${location}: equals must be a Boolean for ${inputType.name}`;
+	}
+	if (inputType.name === "Int") {
+		return typeof value === "number" &&
+			Number.isInteger(value) &&
+			value >= -2147483648 &&
+			value <= 2147483647
+			? undefined
+			: `${location}: equals must be a 32-bit integer for ${inputType.name}`;
+	}
+	if (inputType.name === "Float") {
+		return typeof value === "number" && Number.isFinite(value)
+			? undefined
+			: `${location}: equals must be a finite number for ${inputType.name}`;
+	}
+	if (inputType.name === "ID") {
+		return (typeof value === "string" && value.length > 0) ||
+			(typeof value === "number" && Number.isInteger(value) && Number.isSafeInteger(value))
+			? undefined
+			: `${location}: equals must be a string or integer for ID`;
+	}
+	if (inputType.name === "String") {
+		return typeof value === "string"
+			? undefined
+			: `${location}: equals must be a string for ${inputType.name}`;
+	}
+	if (isScalarType(inputType)) {
+		return `${location}: equals requires an explicit validator for custom scalar ${inputType.name}`;
+	}
+	return `${location}: equals has unsupported argument type ${describeGraphQLType(argument.type)}`;
+};
+
+/**
+ * Validate conditional authorization rules against the executable schema, not
+ * only against the TypeScript registry. A typo in an argument name otherwise
+ * turns a conditional rule into a no-op at runtime and silently weakens auth.
+ */
+export const validateGraphQLConditionalAuthAgainstSchema = (
+	schema: GraphQLSchema
+): readonly string[] => {
 	const errors: string[] = [];
+	for (const [fieldName, conditions] of ROOT_FIELD_CONDITIONAL_ACCESS) {
+		const fields = conditionalRootField(schema, fieldName);
+		if (fields.length === 0) {
+			errors.push(`conditional auth field is not executable: ${fieldName}`);
+			continue;
+		}
+		for (const condition of conditions) {
+			const hasWhen = condition.when !== undefined;
+			const hasEquals = Object.hasOwn(condition, "equals");
+			if (hasWhen === hasEquals) {
+				errors.push(
+					`${fieldName}.${condition.argument}: conditional auth must specify exactly one of when or equals`
+				);
+				continue;
+			}
+			if (hasWhen && condition.when !== "provided") {
+				errors.push(`${fieldName}.${condition.argument}: unsupported conditional auth predicate`);
+				continue;
+			}
+			for (const { rootTypeName, field } of fields) {
+				const location = `${rootTypeName}.${fieldName}.${condition.argument}`;
+				const argument = conditionalArgument(field, condition.argument);
+				if (!argument) {
+					errors.push(`${location}: conditional auth argument is not defined in the schema`);
+					continue;
+				}
+				if (hasWhen) {
+					if (isNonNullType(argument.type)) {
+						errors.push(
+							`${location}: when=provided cannot target a non-null argument ${describeGraphQLType(argument.type)}`
+						);
+					}
+					continue;
+				}
+				const equalsError = validateConditionalEquals(argument, condition.equals!, location);
+				if (equalsError) errors.push(equalsError);
+			}
+		}
+	}
+	return errors;
+};
+
+export const validateGraphQLDomainManifest = (schema: GraphQLSchema): readonly string[] => {
+	const errors: string[] = [...validateGraphQLConditionalAuthAgainstSchema(schema)];
 	const seen = new Set<string>();
 	const executableFields = executableSchemaRootFields(schema);
 	const expectedAuthFor = (field: string): ReadonlySet<RootFieldAccess> => {
