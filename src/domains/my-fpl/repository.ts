@@ -367,7 +367,7 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		name: "my-fpl.snapshot-entry",
 		sql: MY_FPL_SNAPSHOT_ENTRY_SQL,
 		values: [2026, 1, 1, "7"],
-		runtime: "must-return-row",
+		runtime: "must-return-snapshot-entry",
 		resultTypes: [
 			{
 				relation: "competition.my_fpl_snapshot_entries",
@@ -1795,7 +1795,7 @@ type SnapshotEntryPayload = {
 	transfers: MyFplTransferMove[];
 };
 
-const parseSnapshotEntryPayload = (value: unknown): SnapshotEntryPayload | null => {
+export const parseSnapshotEntryPayload = (value: unknown): SnapshotEntryPayload | null => {
 	if (!isRecord(value) || !isEntryIdentityCache(value.entry)) return null;
 	if (!Array.isArray(value.history) || !value.history.every(isTeamHistoryRowCache)) return null;
 	if (!Array.isArray(value.pastSeasons) || !value.pastSeasons.every(isPastSeasonCache)) return null;

@@ -7,7 +7,10 @@ import { GAMEWEEK_DATA_SQL_CONTRACT } from "../../src/domains/gameweek/service";
 import { HOME_MARKET_DATA_SQL_CONTRACT } from "../../src/domains/home/market-repository";
 import { HOME_DATA_SQL_CONTRACT } from "../../src/domains/home/repository";
 import { MARKET_DATA_SQL_CONTRACT } from "../../src/domains/market/repository";
-import { MY_FPL_DATA_SQL_CONTRACT } from "../../src/domains/my-fpl/repository";
+import {
+	MY_FPL_DATA_SQL_CONTRACT,
+	parseSnapshotEntryPayload,
+} from "../../src/domains/my-fpl/repository";
 import { PLAYER_DETAIL_DATA_SQL_CONTRACT } from "../../src/domains/player-detail/repository";
 import { PLAYER_VALUES_DATA_SQL_CONTRACT } from "../../src/domains/player-values/repository";
 import { PLAYERS_DATA_SQL_CONTRACT } from "../../src/domains/players/repository";
@@ -139,6 +142,14 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					) {
 						throw new Error(
 							"runtime reader role cannot see a positive competition board field or viewer row"
+						);
+					}
+				}
+				if (probe.runtime === "must-return-snapshot-entry") {
+					const snapshotEntry = result.rows[0] as { payload?: unknown };
+					if (!parseSnapshotEntryPayload(snapshotEntry.payload)) {
+						throw new Error(
+							"runtime reader role returned a snapshot entry payload that the production decoder rejects"
 						);
 					}
 				}

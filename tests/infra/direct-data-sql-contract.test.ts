@@ -41,6 +41,26 @@ const mockContractResultType = (relation: string, column: string, jsonType: stri
 	return assertion?.pgType === "jsonb" ? jsonType : (assertion?.pgType ?? jsonType);
 };
 
+const mockSnapshotEntryPayload = {
+	entry: {
+		id: 1,
+		entryName: "Contract Entry",
+		playerName: "Contract Player",
+		region: null,
+		startedEvent: null,
+		overallPoints: 0,
+		overallRank: 1,
+		bank: 0,
+		teamValue: 1000,
+		totalTransfers: 0,
+		transfersSyncedThroughEventId: null,
+	},
+	history: [],
+	pastSeasons: [],
+	gameweek: { state: "EMPTY", eventId: 1, result: null },
+	transfers: [],
+} as const;
+
 describe("direct Data SQL contract", () => {
 	test("has unique named planner probes for every hard-cut consumer family", () => {
 		const names = DIRECT_DATA_SQL_CONTRACT.map((probe) => probe.name);
@@ -135,6 +155,9 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
+					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-board") {
 					return {
 						rows: [{ field_size: 1, viewer_row: { entryId: 1 } }],
@@ -166,6 +189,11 @@ describe("direct Data SQL contract", () => {
 			(probe) => probe.name === "briefing.active-metadata"
 		);
 		expect(metadata?.resultTypes).toEqual([
+			expect.objectContaining({
+				relation: "content.briefing_active_publication",
+				column: "servable",
+				pgType: "boolean",
+			}),
 			expect.objectContaining({
 				relation: "content.briefing_active_publication",
 				column: "locale_manifest",
@@ -210,6 +238,36 @@ describe("direct Data SQL contract", () => {
 			"strength_defence_away",
 		]) {
 			expect(core).toEqual(expect.arrayContaining([expect.objectContaining({ column })]));
+		}
+		for (const column of [
+			"cup_league_create",
+			"h2h_ko_matches_created",
+			"average_entry_score",
+			"highest_scoring_entry",
+			"deadline_time_epoch",
+			"deadline_time_game_offset",
+			"highest_score",
+			"chip_plays",
+			"most_selected",
+			"most_transferred_in",
+			"top_element",
+			"top_element_info",
+			"transfers_made",
+			"most_captained",
+			"most_vice_captained",
+		]) {
+			expect(core).toEqual(expect.arrayContaining([expect.objectContaining({ column })]));
+		}
+		const lifecycle = DIRECT_DATA_SQL_CONTRACT.find(
+			(probe) => probe.name === "data-snapshot.live-lifecycle-status"
+		)?.resultTypes;
+		for (const column of [
+			"observed_at",
+			"last_changed_at",
+			"next_refresh_at",
+			"source_checked_at",
+		]) {
+			expect(lifecycle).toEqual(expect.arrayContaining([expect.objectContaining({ column })]));
 		}
 		for (const column of [
 			"source_checked_at",
@@ -289,6 +347,9 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
+					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-board") {
 					return {
 						rows: [{ field_size: 1, viewer_row: { entryId: 1 } }],
@@ -356,6 +417,9 @@ describe("direct Data SQL contract", () => {
 				const runtimeProbe = DIRECT_DATA_SQL_CONTRACT.find(
 					(probe) => probe.runtime && probe.sql === text
 				);
+				if (runtimeProbe?.runtime === "must-return-snapshot-entry") {
+					return { rows: [{ payload: mockSnapshotEntryPayload }] } as unknown as QueryResult<Row>;
+				}
 				if (runtimeProbe?.runtime === "must-return-tournament") {
 					return { rows: [{ tournament_id: values[2] }] } as unknown as QueryResult<Row>;
 				}
@@ -487,6 +551,7 @@ describe("direct Data SQL contract", () => {
 			runtimeProbes.every(
 				(probe) =>
 					probe.runtime === "must-return-row" ||
+					probe.runtime === "must-return-snapshot-entry" ||
 					probe.runtime === "must-return-board" ||
 					probe.runtime === "must-return-tournament" ||
 					probe.runtime === "must-return-selection-row"

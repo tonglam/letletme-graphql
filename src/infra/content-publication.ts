@@ -284,6 +284,11 @@ export const BRIEFING_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 		resultTypes: [
 			{
 				relation: "content.briefing_active_publication",
+				column: "servable",
+				pgType: "boolean",
+			},
+			{
+				relation: "content.briefing_active_publication",
 				column: "locale_manifest",
 				pgType: "jsonb",
 				acceptedPgTypes: ["json", "jsonb"],

@@ -26,6 +26,7 @@ export type DataSqlContractProbe = Readonly<{
 	/** Execute the statement with the runtime reader role and assert its fixture-backed result shape. */
 	runtime?:
 		| "must-return-row"
+		| "must-return-snapshot-entry"
 		| "must-return-board"
 		| "must-return-tournament"
 		| "must-return-selection-row";
