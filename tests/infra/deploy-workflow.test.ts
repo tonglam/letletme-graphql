@@ -58,6 +58,14 @@ describe("production deployment workflow", () => {
 		expect(lockAt).toBeLessThan(deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"'));
 	});
 
+	test("creates a fresh work-directory parent before changing into it", () => {
+		const createParentAt = deployScript.indexOf('mkdir -p -- "$(dirname "$VPS_WORKDIR")"');
+		const changeParentAt = deployScript.indexOf('cd "$(dirname "$VPS_WORKDIR")"');
+		expect(createParentAt).toBeGreaterThan(-1);
+		expect(createParentAt).toBeLessThan(changeParentAt);
+		expect(changeParentAt).toBeLessThan(deployScript.indexOf("git clone"));
+	});
+
 	test("requires candidate readiness, image digest, revision label, ingress and contract probes", () => {
 		expect(deployScript).toContain("/health/ready");
 		expect(deployScript).toContain('.status == "ok" and .revision == $revision');
@@ -70,6 +78,23 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("candidate_contract_passed");
 		expect(deployScript).toContain("PUBLIC_GRAPHQL_URL");
 		expect(deployScript).toContain("public_contract_passed");
+	});
+
+	test("allowlists exact public GraphQL routes before switching or forwarding credentials", () => {
+		const validationAt = deployScript.indexOf('const expectedOrigin = "https://letletme.top";');
+		const switchAt = deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"');
+		const publicTokenRequestAt = deployScript.indexOf(
+			'compose exec -T -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e'
+		);
+		expect(validationAt).toBeGreaterThan(-1);
+		expect(deployScript).toContain("parsed.pathname !== expectedPathname");
+		expect(deployScript).toContain(
+			"parsed.username || parsed.password || parsed.search || parsed.hash"
+		);
+		expect(deployScript).toContain('"/api/graphql/health/ready"');
+		expect(deployScript).toContain('"/api/graphql"');
+		expect(validationAt).toBeLessThan(switchAt);
+		expect(validationAt).toBeLessThan(publicTokenRequestAt);
 	});
 
 	test("treats a non-ready price board as business degradation, not a container rollback", () => {
@@ -90,9 +115,26 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("manifest=$(mktemp");
 		expect(deployScript).toContain("oldSlot:$oldSlot,newSlot:$newSlot");
 		expect(deployScript).toContain("Public GraphQL contract failed");
+		expect(deployScript.indexOf("switched=true")).toBeLessThan(
+			deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"')
+		);
 		expect(deployScript.lastIndexOf("switched=false")).toBeGreaterThan(
 			deployScript.indexOf('mv "$manifest" "$RELEASE_MANIFEST_DIR/$DEPLOY_SHA.json"')
 		);
+	});
+
+	test("retires the implicit legacy project only before canonical blue reuses port 4000", () => {
+		const retireAt = deployScript.indexOf("retire_legacy_bootstrap_before_blue");
+		const candidateUpAt = deployScript.indexOf(
+			"compose up -d --no-deps --no-build --force-recreate graphql"
+		);
+		expect(deployScript).toContain("LEGACY_PROJECT=${LEGACY_PROJECT:-letletme_graphql}");
+		expect(deployScript).toContain('[ "$active_slot" != green ]');
+		expect(deployScript).toContain('[ "$inactive_slot" != blue ]');
+		expect(deployScript).toContain('--filter "label=com.docker.compose.project=$LEGACY_PROJECT"');
+		expect(deployScript).toContain("docker container rm --force");
+		expect(retireAt).toBeGreaterThan(deployScript.indexOf("compose pull graphql"));
+		expect(retireAt).toBeLessThan(candidateUpAt);
 	});
 
 	test("scans the immutable digest and promotes latest only after deployment", () => {

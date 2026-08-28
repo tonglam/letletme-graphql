@@ -19,6 +19,8 @@ const retiredEnvironmentNames = [
 	"MY_FPL_SNAPSHOT_READ_ENABLED",
 	"DATA_API_URL",
 	"DATA_API_KEY",
+	"DATA_URL",
+	"DATA_AUTH_HEADER",
 	"LETLETME_GRAPHQL_REDIS_HOST",
 	"LETLETME_GRAPHQL_REDIS_PORT",
 	"LETLETME_GRAPHQL_REDIS_PASSWORD",
@@ -126,12 +128,14 @@ describe("hard-cut runtime configuration", () => {
 		expect(unexpected).toEqual([]);
 	});
 
-	test("rejects retired variables before accepting a canonical environment", () => {
-		const result = importEnvInChild({ REDIS_HOST: "127.0.0.1" });
-		expect(result.status).not.toBe(0);
-		expect(`${result.stdout}${result.stderr}`).toContain(
-			"Unsupported retired environment variables: REDIS_HOST"
-		);
+	test("rejects every retired variable before accepting a canonical environment", () => {
+		for (const name of retiredEnvironmentNames) {
+			const result = importEnvInChild({ [name]: "retired" });
+			expect(result.status).not.toBe(0);
+			expect(`${result.stdout}${result.stderr}`).toContain(
+				`Unsupported retired environment variables: ${name}`
+			);
+		}
 	});
 
 	test("requires both canonical Redis endpoints and rejects the retired rate mode", () => {
@@ -158,7 +162,13 @@ describe("hard-cut runtime configuration", () => {
 			"Production LETLETME_DATA_URL and LETLETME_DATA_API_KEY are required"
 		);
 
-		for (const invalidUrl of ["not-a-url", "redis://data.internal:6379"]) {
+		for (const invalidUrl of [
+			"not-a-url",
+			"redis://data.internal:6379",
+			"https://data.internal/base?mode=sync",
+			"https://data.internal/base#fragment",
+			"https://user:password@data.internal",
+		]) {
 			const invalidDataUrl = importEnvInChild({
 				NODE_ENV: "production",
 				LETLETME_DATA_URL: invalidUrl,

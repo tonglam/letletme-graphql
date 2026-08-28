@@ -20,6 +20,7 @@ test "$VPS_WORKDIR" != "/"
 
 BLUE_PROJECT=${BLUE_PROJECT:-letletme_graphql_blue}
 GREEN_PROJECT=${GREEN_PROJECT:-letletme_graphql_green}
+LEGACY_PROJECT=${LEGACY_PROJECT:-letletme_graphql}
 ACTIVE_SLOT_FILE=${ACTIVE_SLOT_FILE:-/var/lib/letletme-graphql/active-slot}
 SWITCH_HELPER=${SWITCH_HELPER:-/usr/local/sbin/letletme-graphql-switch-slot}
 PUBLIC_GRAPHQL_HEALTH_URL=${PUBLIC_GRAPHQL_HEALTH_URL:-}
@@ -57,6 +58,7 @@ if ! flock -w 300 9; then
   exit 1
 fi
 
+mkdir -p -- "$(dirname "$VPS_WORKDIR")"
 cd "$(dirname "$VPS_WORKDIR")"
 if [ ! -d "$VPS_WORKDIR/.git" ]; then
   if [ -d "$VPS_WORKDIR" ] && [ -n "$(find "$VPS_WORKDIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
@@ -94,6 +96,10 @@ else
   candidate_project="$BLUE_PROJECT"
   candidate_port=4000
 fi
+if [ "$LEGACY_PROJECT" = "$BLUE_PROJECT" ] || [ "$LEGACY_PROJECT" = "$GREEN_PROJECT" ]; then
+  echo "LEGACY_PROJECT must be distinct from the canonical slot projects" >&2
+  exit 1
+fi
 
 umask 077
 mkdir -p "$VPS_WORKDIR" "$RELEASE_MANIFEST_DIR"
@@ -123,7 +129,7 @@ chmod 600 "$candidate_env_next"
 # boundary too. Do not silently translate or ignore names from the retired
 # runtime; an operator must remove them from the source secret first.
 retired_snapshot_key="MY_FPL""_SNAPSHOT_READ_ENABLED"
-if grep -qE "^[[:space:]]*(REDIS_HOST|REDIS_PORT|REDIS_PASSWORD|RATE_LIMIT_REDIS_HOST|RATE_LIMIT_REDIS_PORT|RATE_LIMIT_REDIS_PASSWORD|GRAPHQL_BROWSER_INGRESS_RATE_LIMIT|GRAPHQL_AUTHENTICATED_RATE_LIMIT|GRAPHQL_ANONYMOUS_RATE_LIMIT|${retired_snapshot_key}|DATA_API_URL|DATA_API_KEY|LETLETME_GRAPHQL_REDIS_HOST|LETLETME_GRAPHQL_REDIS_PORT|LETLETME_GRAPHQL_REDIS_PASSWORD)[[:space:]]*=" "$candidate_env_next"; then
+if grep -qE "^[[:space:]]*(REDIS_HOST|REDIS_PORT|REDIS_PASSWORD|RATE_LIMIT_REDIS_HOST|RATE_LIMIT_REDIS_PORT|RATE_LIMIT_REDIS_PASSWORD|GRAPHQL_BROWSER_INGRESS_RATE_LIMIT|GRAPHQL_AUTHENTICATED_RATE_LIMIT|GRAPHQL_ANONYMOUS_RATE_LIMIT|${retired_snapshot_key}|DATA_API_URL|DATA_API_KEY|DATA_URL|DATA_AUTH_HEADER|LETLETME_GRAPHQL_REDIS_HOST|LETLETME_GRAPHQL_REDIS_PORT|LETLETME_GRAPHQL_REDIS_PASSWORD)[[:space:]]*=" "$candidate_env_next"; then
   echo "candidate GraphQL environment contains retired variable(s); use REDIS_URL, RATE_LIMIT_REDIS_URL, LETLETME_DATA_URL and LETLETME_DATA_API_KEY" >&2
   exit 1
 fi
@@ -184,6 +190,33 @@ compose() {
 
 compose config --quiet
 compose pull graphql
+
+# The pre-blue/green service owns port 4000 under Docker Compose's implicit
+# work-directory project. Keep it available as the first green cutover's
+# rollback target, then retire it only when green is already authoritative and
+# a later deployment is about to reuse port 4000 for canonical blue.
+retire_legacy_bootstrap_before_blue() {
+  local container remaining
+  if [ "$active_slot" != green ] || [ "$inactive_slot" != blue ]; then
+    return 0
+  fi
+  while IFS= read -r container; do
+    [ -n "$container" ] || continue
+    docker container rm --force "$container" >/dev/null
+  done < <(docker ps --all \
+    --filter "label=com.docker.compose.project=$LEGACY_PROJECT" \
+    --filter "label=com.docker.compose.service=graphql" \
+    --format '{{.ID}}')
+  remaining=$(docker ps --all \
+    --filter "label=com.docker.compose.project=$LEGACY_PROJECT" \
+    --filter "label=com.docker.compose.service=graphql" \
+    --format '{{.ID}}' | head -n 1)
+  if [ -n "$remaining" ]; then
+    echo "legacy GraphQL bootstrap project could not be retired" >&2
+    return 1
+  fi
+}
+retire_legacy_bootstrap_before_blue
 compose up -d --no-deps --no-build --force-recreate graphql
 
 candidate_url="http://127.0.0.1:$candidate_port"
@@ -259,6 +292,41 @@ compose exec -T graphql bun -e '
   }));
 '
 
+# Validate the immutable public acceptance destinations before switching slots
+# or forwarding the service token. These exact routes are owned by the VPS Ops
+# Nginx contract; a pair of attacker-controlled URLs must not be able to approve
+# a cutover or receive GraphQL credentials.
+compose exec -T \
+  -e PUBLIC_GRAPHQL_HEALTH_URL="$PUBLIC_GRAPHQL_HEALTH_URL" \
+  -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" \
+  graphql bun -e '
+  const expectedOrigin = "https://letletme.top";
+  const validate = (name, raw, expectedPathname) => {
+    let parsed;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      throw new Error(`${name} is not a valid URL`);
+    }
+    if (parsed.origin !== expectedOrigin ||
+        parsed.pathname !== expectedPathname ||
+        parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error(`${name} is outside the allowlisted public GraphQL route`);
+    }
+  };
+  validate(
+    "PUBLIC_GRAPHQL_HEALTH_URL",
+    process.env.PUBLIC_GRAPHQL_HEALTH_URL,
+    "/api/graphql/health/ready",
+  );
+  validate(
+    "PUBLIC_GRAPHQL_URL",
+    process.env.PUBLIC_GRAPHQL_URL,
+    "/api/graphql",
+  );
+  console.log(JSON.stringify({ status: "public_graphql_urls_validated" }));
+'
+
 old_slot="$active_slot"
 switched=false
 rollback_switch() {
@@ -282,8 +350,8 @@ rollback_on_error() {
   exit "$status"
 }
 trap rollback_on_error ERR
-sudo -n "$SWITCH_HELPER" "$inactive_slot"
 switched=true
+sudo -n "$SWITCH_HELPER" "$inactive_slot"
 
 public_health_url="$PUBLIC_GRAPHQL_HEALTH_URL"
 public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url") || {

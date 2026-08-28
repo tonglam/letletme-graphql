@@ -39,4 +39,32 @@ describe("server log redaction", () => {
 			expect(sanitized).not.toContain("dXNlcjpwYXNz");
 		}
 	});
+
+	test("removes schemes and credentials from generic secret assignments", () => {
+		for (const [source, expected] of [
+			["token: Bearer super-secret-token", "token: [REDACTED]"],
+			["api-key=Basic dXNlcjpwYXNz", "api-key=[REDACTED]"],
+		] as const) {
+			const sanitized = sanitizeLogText(source);
+			expect(sanitized).toBe(expected);
+			expect(sanitized).not.toContain("super-secret-token");
+			expect(sanitized).not.toContain("dXNlcjpwYXNz");
+		}
+	});
+
+	test("removes credentials from serialized JSON error fields", () => {
+		for (const [source, expected, credential] of [
+			[
+				'{"authorization":"Bearer serialized-secret"}',
+				'{"authorization":"[REDACTED]"}',
+				"serialized-secret",
+			],
+			['{"token":"super-secret"}', '{"token":"[REDACTED]"}', "super-secret"],
+			["{'api-key':'Basic encoded-secret'}", "{'api-key':'[REDACTED]'}", "encoded-secret"],
+		] as const) {
+			const sanitized = sanitizeLogText(source);
+			expect(sanitized).toBe(expected);
+			expect(sanitized).not.toContain(credential);
+		}
+	});
 });

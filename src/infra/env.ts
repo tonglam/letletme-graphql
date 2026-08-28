@@ -100,6 +100,8 @@ const RETIRED_ENV_KEYS = [
 	"MY_FPL_SNAPSHOT_READ_ENABLED",
 	"DATA_API_URL",
 	"DATA_API_KEY",
+	"DATA_URL",
+	"DATA_AUTH_HEADER",
 	"LETLETME_GRAPHQL_REDIS_HOST",
 	"LETLETME_GRAPHQL_REDIS_PORT",
 	"LETLETME_GRAPHQL_REDIS_PASSWORD",
@@ -144,7 +146,14 @@ const parseDataServiceUrl = (value: string): string => {
 	} catch {
 		throw new Error("LETLETME_DATA_URL must be a valid HTTP(S) URL");
 	}
-	if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+	if (
+		(parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+		!parsed.hostname ||
+		parsed.username !== "" ||
+		parsed.password !== "" ||
+		parsed.search !== "" ||
+		parsed.hash !== ""
+	) {
 		throw new Error("LETLETME_DATA_URL must be a valid HTTP(S) URL");
 	}
 	return value;
