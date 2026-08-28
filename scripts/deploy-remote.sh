@@ -270,7 +270,7 @@ compose exec -T graphql bun -e '
   };
   const data = await request(`query CandidateContract {
     currentEventInfo { season }
-    entryLookup(id: -1) { status retryable entry source persistenceState }
+    entryLookup(id: -1) { status retryable entry { id } source persistenceState }
   }`);
   if (!/^[0-9]{4}$/.test(data?.currentEventInfo?.season ?? "")) {
     throw new Error("Current-season contract failed");
@@ -386,7 +386,7 @@ compose exec -T -e PUBLIC_GRAPHQL_URL="$PUBLIC_GRAPHQL_URL" graphql bun -e '
     headers: { "Content-Type": "application/json", "X-GraphQL-Service-Token": token },
     body: JSON.stringify({ query: `query PublicContract {
       currentEventInfo { season }
-      entryLookup(id: -1) { status retryable entry source persistenceState }
+      entryLookup(id: -1) { status retryable entry { id } source persistenceState }
     }` }),
     signal: AbortSignal.timeout(5000),
   });

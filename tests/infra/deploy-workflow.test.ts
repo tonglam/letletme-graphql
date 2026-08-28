@@ -73,6 +73,7 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("org.opencontainers.image.revision");
 		expect(deployScript).toContain('test "$anonymous_status" = 401');
 		expect(deployScript).toContain("entryLookup(id: -1)");
+		expect(deployScript).toContain("entry { id }");
 		expect(deployScript).toContain('status !== "INVALID_ID"');
 		expect(deployScript).toContain("priceChangeBoard");
 		expect(deployScript).toContain('status === "READY"');
@@ -203,8 +204,8 @@ describe("production deployment workflow", () => {
 		const benchmark = await Bun.file("scripts/benchmark-queries.ts").text();
 		expect(benchmark).toContain('resolve(import.meta.dir, "..")');
 		expect(benchmark).not.toContain("resolve(process.cwd())");
-		expect(benchmark).toContain("query Entry($id: Int!) { entry(id: $id)");
-		expect(benchmark).not.toContain("entryLookup");
+		expect(benchmark).toContain("query EntryLookup($id: Int!) { entryLookup(id: $id)");
+		expect(benchmark).toContain("entry { id entryName }");
 	});
 
 	test("keeps compose ports and readiness checks slot-aware", () => {
