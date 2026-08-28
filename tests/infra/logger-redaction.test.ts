@@ -67,4 +67,28 @@ describe("server log redaction", () => {
 			expect(sanitized).not.toContain(credential);
 		}
 	});
+
+	test("redacts quoted credentials containing whitespace", () => {
+		for (const [source, expected, credential] of [
+			[
+				'{"password":"correct horse battery staple"}',
+				'{"password":"[REDACTED]"}',
+				"correct horse battery staple",
+			],
+			[
+				"{'token':'Bearer correct horse battery staple'}",
+				"{'token':'[REDACTED]'}",
+				"correct horse battery staple",
+			],
+			[
+				'{"password":"correct \' horse battery staple"}',
+				'{"password":"[REDACTED]"}',
+				"correct ' horse battery staple",
+			],
+		] as const) {
+			const sanitized = sanitizeLogText(source);
+			expect(sanitized).toBe(expected);
+			expect(sanitized).not.toContain(credential);
+		}
+	});
 });
