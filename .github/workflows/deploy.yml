@@ -188,9 +188,36 @@ jobs:
           printf -v public_health_q '%q' "$PUBLIC_GRAPHQL_HEALTH_URL"
           printf -v public_graphql_q '%q' "$PUBLIC_GRAPHQL_URL"
           printf -v rollout_q '%q' "$RATE_LIMIT_ROLLOUT"
-          ssh "${ssh_common[@]}" "$target" \
-            "DEPLOY_SHA=$deploy_sha_q IMAGE_REF=$image_ref_q GHCR_USER=$ghcr_user_q GHCR_TOKEN_FILE=$token_q GRAPHQL_ENV_FILE=$env_q VPS_WORKDIR=$workdir_q ACTIVE_SLOT_FILE=$active_file_q SWITCH_HELPER=$helper_q PUBLIC_GRAPHQL_HEALTH_URL=$public_health_q PUBLIC_GRAPHQL_URL=$public_graphql_q RATE_LIMIT_ROLLOUT=$rollout_q bash -s" \
-            < scripts/deploy-remote.sh
+          # Keep the staged secret files under a remote-side trap. The runner
+          # cleanup below remains a best-effort fallback, but a dropped SSH
+          # session must not leave credentials behind on the VPS.
+          {
+            cat <<'REMOTE_WRAPPER'
+          set -euo pipefail
+          cleanup_staged_secrets() {
+            rm -f -- "$REMOTE_ENV_FILE" "$REMOTE_TOKEN_FILE" || true
+          }
+          cleanup_on_exit() {
+            local cleanup_status=$?
+            trap - EXIT INT TERM HUP
+            cleanup_staged_secrets
+            exit "$cleanup_status"
+          }
+          cleanup_on_signal() {
+            local cleanup_status="$1"
+            trap - EXIT INT TERM HUP
+            cleanup_staged_secrets
+            exit "$cleanup_status"
+          }
+          trap cleanup_on_exit EXIT
+          trap 'cleanup_on_signal 130' INT
+          trap 'cleanup_on_signal 143' TERM
+          trap 'cleanup_on_signal 129' HUP
+          bash -s
+          REMOTE_WRAPPER
+            cat scripts/deploy-remote.sh
+          } | ssh "${ssh_common[@]}" "$target" \
+            "REMOTE_ENV_FILE=$env_q REMOTE_TOKEN_FILE=$token_q DEPLOY_SHA=$deploy_sha_q IMAGE_REF=$image_ref_q GHCR_USER=$ghcr_user_q GHCR_TOKEN_FILE=$token_q GRAPHQL_ENV_FILE=$env_q VPS_WORKDIR=$workdir_q ACTIVE_SLOT_FILE=$active_file_q SWITCH_HELPER=$helper_q PUBLIC_GRAPHQL_HEALTH_URL=$public_health_q PUBLIC_GRAPHQL_URL=$public_graphql_q RATE_LIMIT_ROLLOUT=$rollout_q bash -s"
 
       - name: Promote verified digest to latest
         run: |

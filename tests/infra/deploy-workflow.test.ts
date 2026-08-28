@@ -230,6 +230,17 @@ describe("production deployment workflow", () => {
 		);
 	});
 
+	test("cleans staged deployment secrets from the remote shell", () => {
+		expect(workflow).toContain("cleanup_staged_secrets()");
+		expect(workflow).toContain('rm -f -- "$REMOTE_ENV_FILE" "$REMOTE_TOKEN_FILE"');
+		expect(workflow).toContain("trap cleanup_on_exit EXIT");
+		expect(workflow).toContain("trap 'cleanup_on_signal 130' INT");
+		expect(workflow).toContain("trap 'cleanup_on_signal 143' TERM");
+		expect(workflow).toContain("trap 'cleanup_on_signal 129' HUP");
+		expect(workflow).toContain("REMOTE_ENV_FILE=$env_q REMOTE_TOKEN_FILE=$token_q");
+		expect(workflow).toContain("cat scripts/deploy-remote.sh");
+	});
+
 	test("binds image and container identity to the exact commit", () => {
 		expect(dockerfile).toContain("ARG VCS_REVISION=unknown");
 		expect(dockerfile).toContain("ENV APP_REVISION=${VCS_REVISION}");

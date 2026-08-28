@@ -68,6 +68,21 @@ describe("server log redaction", () => {
 		}
 	});
 
+	test("redacts credentials from hyphen-prefixed header names", () => {
+		for (const [source, expected, credential] of [
+			[
+				"X-GraphQL-Service-Token: super-secret-token",
+				"X-GraphQL-Service-Token: [REDACTED]",
+				"super-secret-token",
+			],
+			["x-api-key=Basic dXNlcjpwYXNz", "x-api-key=[REDACTED]", "dXNlcjpwYXNz"],
+		] as const) {
+			const sanitized = sanitizeLogText(source);
+			expect(sanitized).toBe(expected);
+			expect(sanitized).not.toContain(credential);
+		}
+	});
+
 	test("redacts quoted credentials containing whitespace", () => {
 		for (const [source, expected, credential] of [
 			[
