@@ -597,15 +597,24 @@ const activeDeprecatedTelemetrySelections = (
 		}
 		return [type?.name ?? typeCondition];
 	};
+	const pathsForRuntimeTypeCondition = (
+		path: readonly string[],
+		typeCondition: string
+	): readonly (readonly string[])[] => {
+		const possibleTypes = possibleRuntimeTypesFor(typeCondition);
+		const currentTypeMarker = path.at(-1);
+		if (currentTypeMarker?.startsWith("__type:")) {
+			const currentType = currentTypeMarker.slice("__type:".length);
+			return possibleTypes.includes(currentType) ? [path] : [];
+		}
+		return possibleTypes.map((typeName) => [...path, deprecationTypeOwnerSegment(typeName)]);
+	};
 	const branchPathsFor = (
 		selection: InlineFragmentNode,
 		path: readonly string[]
 	): readonly (readonly string[])[] =>
 		selection.typeCondition
-			? possibleRuntimeTypesFor(selection.typeCondition.name.value).map((typeName) => [
-					...path,
-					deprecationTypeOwnerSegment(typeName),
-				])
+			? pathsForRuntimeTypeCondition(path, selection.typeCondition.name.value)
 			: [path];
 	const collectFragmentFieldOwners = (
 		fragmentName: string,
@@ -698,17 +707,10 @@ const activeDeprecatedTelemetrySelections = (
 		if (!fragment) return new Set();
 		const nextSeen = new Set(seen);
 		nextSeen.add(fragmentName);
-		const fragmentType = schema.getType(fragment.typeCondition.name.value);
-		const fragmentTypeOwner =
-			fragmentType && isObjectType(fragmentType)
-				? deprecationTypeOwnerSegment(fragmentType.name)
-				: undefined;
-		const occurrencePaths =
-			fragmentTypeOwner && pathPrefix.at(-1) === fragmentTypeOwner
-				? [pathPrefix]
-				: fragmentTypeOwner
-					? [[...pathPrefix, fragmentTypeOwner]]
-					: [pathPrefix];
+		const occurrencePaths = pathsForRuntimeTypeCondition(
+			pathPrefix,
+			fragment.typeCondition.name.value
+		);
 		const owners = new Set<string>();
 		for (const occurrencePath of occurrencePaths) {
 			for (const owner of collectSelectionOccurrenceOwners(

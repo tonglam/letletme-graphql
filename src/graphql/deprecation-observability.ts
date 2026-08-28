@@ -17,7 +17,27 @@ export const deprecationTypeOwnerSegment = (typeName: string): string => `__type
 export const deprecationPathOwner = (path: readonly DeprecationResponsePathSegment[]): string =>
 	`path:${path.filter((segment): segment is string => typeof segment === "string").join(".")}`;
 
-const MAX_RUNTIME_TYPE_OWNER_VARIANTS = 128;
+const executionPathKey = (path: readonly DeprecationResponsePathSegment[]): string =>
+	path
+		.map((segment) => (typeof segment === "number" ? `number:${segment}` : `string:${segment}`))
+		.join("/");
+
+const executionParentPathForResponseSegments = (
+	path: readonly DeprecationResponsePathSegment[],
+	responseSegmentCount: number
+): readonly DeprecationResponsePathSegment[] | undefined => {
+	if (responseSegmentCount === 0) return [];
+	let seenResponseSegments = 0;
+	for (let index = 0; index < path.length; index += 1) {
+		if (typeof path[index] !== "string") continue;
+		seenResponseSegments += 1;
+		if (seenResponseSegments !== responseSegmentCount) continue;
+		let end = index + 1;
+		while (typeof path[end] === "number") end += 1;
+		return path.slice(0, end);
+	}
+	return undefined;
+};
 
 export const recordDeprecatedSchemaUsages = ({
 	symbols,
@@ -53,60 +73,34 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 	const effectiveGlobalSymbols =
 		globalSymbols ?? symbols.filter((symbol) => !ownedSymbols.has(symbol));
 	const executedOwners = new Set<string>();
-	const runtimeTypesByParentPath = new Map<string, Set<string>>();
-	const latestRuntimeTypeByParentPath = new Map<string, string>();
-	const addRuntimePathOwners = (path: readonly DeprecationResponsePathSegment[]): void => {
-		const responsePath = path.filter((segment): segment is string => typeof segment === "string");
-		let generatedVariants = 0;
-		const visitPath = (index: number, output: string[]): void => {
-			if (generatedVariants >= MAX_RUNTIME_TYPE_OWNER_VARIANTS) return;
-			if (index === responsePath.length) {
-				if (output.some((segment) => segment.startsWith("__type:"))) {
-					executedOwners.add(deprecationPathOwner(output));
-					generatedVariants += 1;
-				}
-				return;
-			}
-			const prefixOwner = deprecationPathOwner(responsePath.slice(0, index));
-			const runtimeTypes = runtimeTypesByParentPath.get(prefixOwner);
-			if (!runtimeTypes || runtimeTypes.size === 0) {
-				visitPath(index + 1, [...output, responsePath[index]]);
-				return;
-			}
-			for (const typeName of [...runtimeTypes].sort()) {
-				visitPath(index + 1, [
-					...output,
-					deprecationTypeOwnerSegment(typeName),
-					responsePath[index],
-				]);
-			}
-			// Keep the unannotated owner as well: a conditional branch may begin
-			// deeper in the response path, and ordinary field ownership must remain
-			// stable when no branch marker is present at this prefix.
-			visitPath(index + 1, [...output, responsePath[index]]);
-		};
-		visitPath(0, []);
-	};
-	const addActualRuntimePathOwner = (
-		path: readonly DeprecationResponsePathSegment[],
-		currentParentType: string
-	): void => {
-		const responsePath = path.filter((segment): segment is string => typeof segment === "string");
-		const output: string[] = [];
-		for (let index = 0; index < responsePath.length; index += 1) {
-			const parentPathOwner = deprecationPathOwner(responsePath.slice(0, index));
-			const runtimeType =
-				index === responsePath.length - 1
-					? currentParentType
-					: (latestRuntimeTypeByParentPath.get(parentPathOwner) ??
-						[...(runtimeTypesByParentPath.get(parentPathOwner) ?? [])].sort()[0]);
-			if (runtimeType) output.push(deprecationTypeOwnerSegment(runtimeType));
-			output.push(responsePath[index]);
-		}
-		if (output.some((segment) => segment.startsWith("__type:"))) {
-			executedOwners.add(deprecationPathOwner(output));
-		}
-	};
+	const runtimePathOwnersByResponsePath = new Map<
+		string,
+		readonly {
+			owner: string;
+			markers: readonly { typeName: string; responseSegmentCount: number }[];
+		}[]
+	>();
+	for (const owner of Object.keys(symbolOwners)) {
+		if (!owner.startsWith("path:")) continue;
+		const segments = owner.slice("path:".length).split(".");
+		const markers = segments.flatMap((segment, index) =>
+			segment.startsWith("__type:")
+				? [
+						{
+							typeName: segment.slice("__type:".length),
+							responseSegmentCount: segments
+								.slice(0, index)
+								.filter((candidate) => !candidate.startsWith("__type:")).length,
+						},
+					]
+				: []
+		);
+		if (markers.length === 0) continue;
+		const responsePath = segments.filter((segment) => !segment.startsWith("__type:")).join(".");
+		const owners = runtimePathOwnersByResponsePath.get(responsePath) ?? [];
+		runtimePathOwnersByResponsePath.set(responsePath, [...owners, { owner, markers }]);
+	}
+	const runtimeTypeByExecutionParentPath = new Map<string, string>();
 	return {
 		...(symbols.length > 0
 			? {
@@ -124,14 +118,30 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 							path.push(current.key);
 						}
 						const responsePath = path.reverse();
-						const parentPathOwner = deprecationPathOwner(responsePath.slice(0, -1));
-						const runtimeTypes = runtimeTypesByParentPath.get(parentPathOwner) ?? new Set<string>();
-						runtimeTypes.add(info.parentType.name);
-						runtimeTypesByParentPath.set(parentPathOwner, runtimeTypes);
-						latestRuntimeTypeByParentPath.set(parentPathOwner, info.parentType.name);
+						const executionParentPath = responsePath.slice(0, -1);
+						runtimeTypeByExecutionParentPath.set(
+							executionPathKey(executionParentPath),
+							info.parentType.name
+						);
 						executedOwners.add(deprecationPathOwner(responsePath));
-						addRuntimePathOwners(responsePath);
-						addActualRuntimePathOwner(responsePath, info.parentType.name);
+						const responsePathKey = responsePath
+							.filter((segment): segment is string => typeof segment === "string")
+							.join(".");
+						for (const runtimePathOwner of runtimePathOwnersByResponsePath.get(responsePathKey) ??
+							[]) {
+							const matches = runtimePathOwner.markers.every((marker) => {
+								const parentPath = executionParentPathForResponseSegments(
+									responsePath,
+									marker.responseSegmentCount
+								);
+								return (
+									parentPath !== undefined &&
+									runtimeTypeByExecutionParentPath.get(executionPathKey(parentPath)) ===
+										marker.typeName
+								);
+							});
+							if (matches) executedOwners.add(runtimePathOwner.owner);
+						}
 						executedOwners.add(`${info.parentType.name}.${info.fieldName}`);
 					},
 				}
