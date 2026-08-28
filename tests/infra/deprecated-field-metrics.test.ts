@@ -1,7 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
 import { ApolloServer, type ApolloServerPlugin } from "@apollo/server";
 import { buildSchema } from "graphql";
-import { createDeprecatedSchemaUsageExecutionListener } from "../../src/graphql/deprecation-observability";
+import {
+	createDeprecatedSchemaUsageExecutionListener,
+	deprecationTypeOwnerSegment,
+} from "../../src/graphql/deprecation-observability";
 import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
 import { metrics } from "../../src/infra/metrics";
 
@@ -87,6 +90,43 @@ test("deprecated global symbols commit for a successful fieldless execution", as
 		globalSymbols: ["LegacyMode.OLD"],
 		increment: (symbol) => observed.push(symbol),
 	});
+
+	await listener.executionDidEnd?.();
+
+	expect(observed).toEqual(["LegacyMode.OLD"]);
+});
+
+test("deprecated telemetry keeps the actual typed owner beyond the variant cap", async () => {
+	const observed: string[] = [];
+	const listener = createDeprecatedSchemaUsageExecutionListener<TestContext>({
+		symbols: ["LegacyMode.OLD"],
+		symbolOwners: {
+			["path:" +
+			Array.from(
+				{ length: 9 },
+				(_, index) => `${deprecationTypeOwnerSegment(`Type${index}`)}.field${index}`
+			).join(".")]: ["LegacyMode.OLD"],
+		},
+		increment: (symbol) => observed.push(symbol),
+	});
+	const fields = Array.from({ length: 9 }, (_, index) => `field${index}`);
+	const pathFor = (segments: readonly string[]): unknown => {
+		let path: unknown;
+		for (let index = 0; index < segments.length; index += 1) {
+			path = { key: segments[index], prev: path };
+		}
+		return path;
+	};
+	for (let length = 1; length <= fields.length; length += 1) {
+		listener.willResolveField?.({
+			info: {
+				path: pathFor(fields.slice(0, length)),
+				parentType: { name: `Type${length - 1}` },
+				fieldName: fields[length - 1],
+				fieldNodes: [],
+			},
+		} as never);
+	}
 
 	await listener.executionDidEnd?.();
 

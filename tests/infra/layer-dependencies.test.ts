@@ -141,6 +141,20 @@ test("layer checker tracks CommonJS require aliases assigned after declaration",
 	});
 });
 
+test("layer checker resolves assigned loader aliases in their declaration scope", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.cts",
+		'let load; { load = require; } load("../domains/entries/service");',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toContainEqual({
+		value: "../domains/entries/service",
+		line: 1,
+	});
+});
+
 test("layer checker rejects createRequire loaders in checked layers", () => {
 	const sourceFile = ts.createSourceFile(
 		"fixture.ts",
@@ -150,6 +164,17 @@ test("layer checker rejects createRequire loaders in checked layers", () => {
 		ts.ScriptKind.TS
 	);
 	expect(moduleSpecifiers(sourceFile)).toContainEqual({ value: "", line: 1, dynamic: true });
+});
+
+test("layer checker respects lexical shadowing of imported createRequire aliases", () => {
+	const sourceFile = ts.createSourceFile(
+		"fixture.ts",
+		'import { createRequire as factory } from "node:module"; function map(factory: (value: string) => unknown) { return factory("../domains/entries/service"); }',
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	expect(moduleSpecifiers(sourceFile)).toEqual([]);
 });
 
 test("layer checker rejects CommonJS createRequire destructuring loaders", () => {

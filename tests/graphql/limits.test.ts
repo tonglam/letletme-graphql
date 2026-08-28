@@ -370,7 +370,7 @@ describe("GraphQL request limits", () => {
 			deprecatedSymbolGlobalSymbols: [],
 		});
 		if (!result.ok) throw new Error(result.message);
-		expect(result.deprecatedSymbolOwners["path:parent.value"]).toEqual([
+		expect(result.deprecatedSymbolOwners["path:parent.__type:Child.value"]).toEqual([
 			"@legacy(note:)",
 			"LegacyMode.OLD",
 		]);
@@ -402,8 +402,12 @@ describe("GraphQL request limits", () => {
 			deprecatedSymbolGlobalSymbols: [],
 		});
 		if (!result.ok) throw new Error(result.message);
-		expect(result.deprecatedSymbolOwners["path:left.value"]).toEqual(["LegacyMode.LEFT"]);
-		expect(result.deprecatedSymbolOwners["path:right.value"]).toEqual(["LegacyMode.RIGHT"]);
+		expect(result.deprecatedSymbolOwners["path:left.__type:Wrapper.value"]).toEqual([
+			"LegacyMode.LEFT",
+		]);
+		expect(result.deprecatedSymbolOwners["path:right.__type:Wrapper.value"]).toEqual([
+			"LegacyMode.RIGHT",
+		]);
 	});
 
 	it("disambiguates fragment-spread directives across conditional type branches", () => {
@@ -424,6 +428,72 @@ describe("GraphQL request limits", () => {
 				node {
 					... on Cat { ...Fields @legacy(mode: CAT) }
 					... on Dog { ...Fields @legacy(mode: DOG) }
+				}
+			}
+			fragment Fields on Node { value }
+		`;
+		const result = validateGraphQLRequestLimits({ query }, deprecatedKindsSchema);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.CAT", "LegacyMode.DOG"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Cat.value"]).toEqual(["LegacyMode.CAT"]);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Dog.value"]).toEqual(["LegacyMode.DOG"]);
+	});
+
+	it("includes named fragment type conditions in occurrence owners", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				CAT @deprecated(reason: "Use NEW")
+				DOG @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on FRAGMENT_SPREAD
+			interface Node { id: ID!, value: String }
+			type Cat implements Node { id: ID!, value: String }
+			type Dog implements Node { id: ID!, value: String }
+			type Query { node: Node }
+		`);
+		const query = `
+			query Usage {
+				node { ...CatFields @legacy(mode: CAT) ...DogFields @legacy(mode: DOG) }
+			}
+			fragment CatFields on Cat { value }
+			fragment DogFields on Dog { value }
+		`;
+		const result = validateGraphQLRequestLimits({ query }, deprecatedKindsSchema);
+
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyMode.CAT", "LegacyMode.DOG"],
+			deprecatedSymbolGlobalSymbols: [],
+		});
+		if (!result.ok) throw new Error(result.message);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Cat.value"]).toEqual(["LegacyMode.CAT"]);
+		expect(result.deprecatedSymbolOwners["path:node.__type:Dog.value"]).toEqual(["LegacyMode.DOG"]);
+	});
+
+	it("does not retain shared field owners for conditional inline directives", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				CAT @deprecated(reason: "Use NEW")
+				DOG @deprecated(reason: "Use NEW")
+				NEW
+			}
+			directive @legacy(mode: LegacyMode) on INLINE_FRAGMENT
+			interface Node { id: ID!, value: String }
+			type Cat implements Node { id: ID!, value: String }
+			type Dog implements Node { id: ID!, value: String }
+			type Query { node: Node }
+		`);
+		const query = `
+			query Usage {
+				node {
+					... on Cat @legacy(mode: CAT) { ...Fields }
+					... on Dog @legacy(mode: DOG) { ...Fields }
 				}
 			}
 			fragment Fields on Node { value }
@@ -470,9 +540,7 @@ describe("GraphQL request limits", () => {
 			deprecatedSymbolGlobalSymbols: [],
 		});
 		if (!result.ok) throw new Error(result.message);
-		const dogValueOffset = query.indexOf("dogValue");
 		const nodeOffset = query.indexOf("node {");
-		expect(result.deprecatedSymbolOwners[`field:${dogValueOffset}`]).toEqual(["LegacyMode.OLD"]);
 		expect(result.deprecatedSymbolOwners["path:node.__type:Dog.dogValue"]).toEqual([
 			"LegacyMode.OLD",
 		]);

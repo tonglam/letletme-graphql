@@ -54,6 +54,7 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 		globalSymbols ?? symbols.filter((symbol) => !ownedSymbols.has(symbol));
 	const executedOwners = new Set<string>();
 	const runtimeTypesByParentPath = new Map<string, Set<string>>();
+	const latestRuntimeTypeByParentPath = new Map<string, string>();
 	const addRuntimePathOwners = (path: readonly DeprecationResponsePathSegment[]): void => {
 		const responsePath = path.filter((segment): segment is string => typeof segment === "string");
 		let generatedVariants = 0;
@@ -72,10 +73,6 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 				visitPath(index + 1, [...output, responsePath[index]]);
 				return;
 			}
-			// Keep the unannotated owner as well: a conditional branch may begin
-			// deeper in the response path, and ordinary field ownership must remain
-			// stable when no branch marker is present at this prefix.
-			visitPath(index + 1, [...output, responsePath[index]]);
 			for (const typeName of [...runtimeTypes].sort()) {
 				visitPath(index + 1, [
 					...output,
@@ -83,8 +80,32 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 					responsePath[index],
 				]);
 			}
+			// Keep the unannotated owner as well: a conditional branch may begin
+			// deeper in the response path, and ordinary field ownership must remain
+			// stable when no branch marker is present at this prefix.
+			visitPath(index + 1, [...output, responsePath[index]]);
 		};
 		visitPath(0, []);
+	};
+	const addActualRuntimePathOwner = (
+		path: readonly DeprecationResponsePathSegment[],
+		currentParentType: string
+	): void => {
+		const responsePath = path.filter((segment): segment is string => typeof segment === "string");
+		const output: string[] = [];
+		for (let index = 0; index < responsePath.length; index += 1) {
+			const parentPathOwner = deprecationPathOwner(responsePath.slice(0, index));
+			const runtimeType =
+				index === responsePath.length - 1
+					? currentParentType
+					: (latestRuntimeTypeByParentPath.get(parentPathOwner) ??
+						[...(runtimeTypesByParentPath.get(parentPathOwner) ?? [])].sort()[0]);
+			if (runtimeType) output.push(deprecationTypeOwnerSegment(runtimeType));
+			output.push(responsePath[index]);
+		}
+		if (output.some((segment) => segment.startsWith("__type:"))) {
+			executedOwners.add(deprecationPathOwner(output));
+		}
 	};
 	return {
 		...(symbols.length > 0
@@ -107,8 +128,10 @@ export const createDeprecatedSchemaUsageExecutionListener = <TContext extends Ba
 						const runtimeTypes = runtimeTypesByParentPath.get(parentPathOwner) ?? new Set<string>();
 						runtimeTypes.add(info.parentType.name);
 						runtimeTypesByParentPath.set(parentPathOwner, runtimeTypes);
+						latestRuntimeTypeByParentPath.set(parentPathOwner, info.parentType.name);
 						executedOwners.add(deprecationPathOwner(responsePath));
 						addRuntimePathOwners(responsePath);
+						addActualRuntimePathOwner(responsePath, info.parentType.name);
 						executedOwners.add(`${info.parentType.name}.${info.fieldName}`);
 					},
 				}

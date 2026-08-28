@@ -56,6 +56,8 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 	const loaderAliasBindings: LoaderAliasBinding[] = [];
 	const createRequireBindings = new Set<string>();
 	const createRequireNamespaceBindings = new Set<string>();
+	const importedCreateRequireBindings = new Set<string>();
+	const importedCreateRequireNamespaceBindings = new Set<string>();
 	const bindingContains = (binding: ts.BindingName, name: string): boolean => {
 		if (ts.isIdentifier(binding)) return binding.text === name;
 		return binding.elements.some((element) => {
@@ -161,10 +163,22 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 		}
 		return false;
 	};
-	const registerLoaderAlias = (name: string, marker: ts.Identifier): void => {
+	const registerLoaderAlias = (
+		name: string,
+		marker: ts.Identifier,
+		aliasScope: ts.Node = scopeFor(marker)
+	): void => {
 		requireLoaderBindings.add(name);
 		if (loaderAliasBindings.some((binding) => binding.marker === marker)) return;
-		loaderAliasBindings.push({ name, marker, scope: scopeFor(marker) });
+		loaderAliasBindings.push({ name, marker, scope: aliasScope });
+	};
+	const declarationScopeFor = (identifier: ts.Identifier, name: string): ts.Node => {
+		let scope: ts.Node | undefined = scopeFor(identifier);
+		while (scope) {
+			if (scopeHasBinding(scope, name)) return scope;
+			scope = parentScope(scope);
+		}
+		return scopeFor(identifier);
 	};
 	const isVisibleLoaderAlias = (identifier: ts.Identifier, name: string): boolean => {
 		if (!requireLoaderBindings.has(name) || name === "require") return false;
@@ -222,6 +236,7 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 					ts.isNamespaceImport(node.importClause.namedBindings)
 				) {
 					createRequireNamespaceBindings.add(node.importClause.namedBindings.name.text);
+					importedCreateRequireNamespaceBindings.add(node.importClause.namedBindings.name.text);
 				}
 				if (
 					node.importClause?.namedBindings &&
@@ -233,6 +248,7 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 							specifier.name.text === "createRequire"
 						) {
 							createRequireBindings.add(specifier.name.text);
+							importedCreateRequireBindings.add(specifier.name.text);
 						}
 					}
 				}
@@ -284,7 +300,11 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 				? !isShadowed(node.right, "require", true)
 				: isVisibleLoaderAlias(node.right, node.right.text))
 		) {
-			registerLoaderAlias(node.left.text, node.left);
+			registerLoaderAlias(
+				node.left.text,
+				node.left,
+				declarationScopeFor(node.left, node.left.text)
+			);
 		}
 		ts.forEachChild(node, collectCreateRequireBindings);
 	};
@@ -322,9 +342,14 @@ export const moduleSpecifiers = (sourceFile: ts.SourceFile): ModuleSpecifier[] =
 				ts.isPropertyAccessExpression(expression) &&
 				ts.isIdentifier(expression.expression) &&
 				expression.name.text === "createRequire" &&
-				createRequireNamespaceBindings.has(expression.expression.text);
+				createRequireNamespaceBindings.has(expression.expression.text) &&
+				(!importedCreateRequireNamespaceBindings.has(expression.expression.text) ||
+					!isShadowed(expression.expression, expression.expression.text, false));
 			if (
-				(ts.isIdentifier(expression) && createRequireBindings.has(expression.text)) ||
+				(ts.isIdentifier(expression) &&
+					createRequireBindings.has(expression.text) &&
+					(!importedCreateRequireBindings.has(expression.text) ||
+						!isShadowed(expression, expression.text, false))) ||
 				isCreateRequireNamespaceCall
 			) {
 				// A createRequire loader can reach any runtime module through a later
