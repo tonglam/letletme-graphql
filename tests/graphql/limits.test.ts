@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { getIntrospectionQuery, parse, visit } from "graphql";
+import { buildSchema, getIntrospectionQuery, parse, visit } from "graphql";
 import { validateGraphQLRequestLimits } from "../../src/graphql/limits";
 import { schema } from "../../src/graphql/schema";
 
@@ -24,7 +24,7 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1, rootFields: ["events"] });
 	});
 
-	it("reports only deprecated fields selected by the active operation", () => {
+	it("reports only deprecated schema symbols selected by the active operation", () => {
 		const result = validateGraphQLRequestLimits(
 			{
 				query: `
@@ -45,7 +45,42 @@ describe("GraphQL request limits", () => {
 		);
 		expect(result).toMatchObject({
 			ok: true,
-			deprecatedFields: ["LiveCalcData.livePoints", "LiveCalcData.rank"],
+			deprecatedSymbols: ["LiveCalcData.livePoints", "LiveCalcData.rank"],
+		});
+	});
+
+	it("reports deprecated arguments and variable-backed input and enum symbols", () => {
+		const deprecatedKindsSchema = buildSchema(`
+			enum LegacyMode {
+				OLD @deprecated(reason: "Use NEW")
+				NEW
+			}
+			input LegacyInput {
+				old: String @deprecated(reason: "Use current")
+				current: String
+			}
+			type Query {
+				example(
+					oldArg: String @deprecated(reason: "Use currentArg")
+					input: LegacyInput
+					mode: LegacyMode
+				): String
+			}
+		`);
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query Usage($input: LegacyInput!, $mode: LegacyMode!) {
+						example(oldArg: "legacy", input: $input, mode: $mode)
+					}
+				`,
+				variables: { input: { old: "legacy" }, mode: "OLD" },
+			},
+			deprecatedKindsSchema
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedSymbols: ["LegacyInput.old", "LegacyMode.OLD", "Query.example(oldArg:)"],
 		});
 	});
 

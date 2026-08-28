@@ -51,9 +51,9 @@ const graphqlRequestOutcomes = new Counter({
 	labelNames: GRAPHQL_REQUEST_OUTCOME_LABELS,
 });
 
-const graphqlDeprecatedFieldSelections = new Counter({
-	name: "graphql_deprecated_field_selections_total",
-	help: "Accepted GraphQL requests selecting a deprecated executable schema field",
+const graphqlDeprecatedSchemaUsages = new Counter({
+	name: "graphql_deprecated_schema_usages_total",
+	help: "Validated GraphQL requests using a deprecated executable schema symbol",
 	labelNames: ["symbol"] as const,
 });
 
@@ -177,7 +177,7 @@ registry.registerMetric(graphqlIngressRequests);
 registry.registerMetric(graphqlRateLimitDecisions);
 registry.registerMetric(graphqlRateLimitV3Decisions);
 registry.registerMetric(graphqlRequestOutcomes);
-registry.registerMetric(graphqlDeprecatedFieldSelections);
+registry.registerMetric(graphqlDeprecatedSchemaUsages);
 registry.registerMetric(livePublicationEventsTotal);
 registry.registerMetric(cacheRepositoryEvents);
 registry.registerMetric(entryLookupOutcomes);
@@ -208,7 +208,7 @@ export const metrics = {
 	graphqlRateLimitDecisions,
 	graphqlRateLimitV3Decisions,
 	graphqlRequestOutcomes,
-	graphqlDeprecatedFieldSelections,
+	graphqlDeprecatedSchemaUsages,
 	livePublicationEventsTotal,
 	cacheRepositoryEvents,
 	entryLookupOutcomes,

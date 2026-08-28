@@ -26,7 +26,7 @@
 		"introducedAt": "2024-01-01",
 		"removalTarget": "2027-03-01",
 		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_field_selections_total{symbol=\"LiveCalcData.rank\"}",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveCalcData.rank\"}",
 		"notes": "Use score.eventRank or score.leagueRank."
 	},
 	{
@@ -36,7 +36,7 @@
 		"introducedAt": "2024-01-01",
 		"removalTarget": "2027-03-01",
 		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_field_selections_total{symbol=\"LiveCalcData.livePoints\"}",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveCalcData.livePoints\"}",
 		"notes": "Use score.eventPoints."
 	},
 	{
@@ -46,7 +46,7 @@
 		"introducedAt": "2024-01-01",
 		"removalTarget": "2027-03-01",
 		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_field_selections_total{symbol=\"LiveCalcData.liveNetPoints\"}",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveCalcData.liveNetPoints\"}",
 		"notes": "Use score.netEventPoints."
 	},
 	{
@@ -56,7 +56,7 @@
 		"introducedAt": "2024-01-01",
 		"removalTarget": "2027-03-01",
 		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_field_selections_total{symbol=\"LiveCalcData.liveTotalPoints\"}",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveCalcData.liveTotalPoints\"}",
 		"notes": "Use score.totalPoints when totalScope is OVERALL."
 	},
 	{
@@ -66,7 +66,7 @@
 		"introducedAt": "2024-01-01",
 		"removalTarget": "2027-03-01",
 		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_field_selections_total{symbol=\"TournamentInfo.setupHasWarnings\"}",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"TournamentInfo.setupHasWarnings\"}",
 		"notes": "Use warningSummaries and capability timestamps."
 	},
 	{
@@ -76,7 +76,7 @@
 		"introducedAt": "2024-01-01",
 		"removalTarget": "2027-03-01",
 		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_field_selections_total{symbol=\"ManagedTournamentStatus.setupHasWarnings\"}",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"ManagedTournamentStatus.setupHasWarnings\"}",
 		"notes": "Use warningSummaries and capability timestamps."
 	},
 	{
@@ -86,7 +86,7 @@
 		"introducedAt": "2024-01-01",
 		"removalTarget": "2027-03-01",
 		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_field_selections_total{symbol=\"Query.entryTournaments\"}",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"Query.entryTournaments\"}",
 		"notes": "Use entryParticipatingTournaments or manageableTournaments."
 	},
 	{
@@ -96,7 +96,7 @@
 		"introducedAt": "2024-01-01",
 		"removalTarget": "2027-03-01",
 		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_field_selections_total{symbol=\"MyFplCompetitionSetupStatus.setupHasWarnings\"}",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"MyFplCompetitionSetupStatus.setupHasWarnings\"}",
 		"notes": "Use insightsReadyAt."
 	},
 	{
@@ -106,7 +106,7 @@
 		"introducedAt": "2024-01-01",
 		"removalTarget": "2027-03-01",
 		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_field_selections_total{symbol=\"LiveMatchSummary.homeTeamShortName\"}",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveMatchSummary.homeTeamShortName\"}",
 		"notes": "Use core team identity."
 	},
 	{
@@ -116,7 +116,7 @@
 		"introducedAt": "2024-01-01",
 		"removalTarget": "2027-03-01",
 		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_field_selections_total{symbol=\"LiveMatchSummary.awayTeamShortName\"}",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveMatchSummary.awayTeamShortName\"}",
 		"notes": "Use core team identity."
 	},
 	{
@@ -126,7 +126,7 @@
 		"introducedAt": "2024-01-01",
 		"removalTarget": "2027-03-01",
 		"status": "deprecated",
-		"usageMetric": "graphql_deprecated_field_selections_total{symbol=\"LiveMatchdayDesk.nextFixtures\"}",
+		"usageMetric": "graphql_deprecated_schema_usages_total{symbol=\"LiveMatchdayDesk.nextFixtures\"}",
 		"notes": "Use core eventFixtures for next-event schedule."
 	}
 ]

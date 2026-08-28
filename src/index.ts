@@ -10,6 +10,7 @@ import { timingSafeEqual } from "crypto";
 import depthLimit from "graphql-depth-limit";
 import { authorizeGraphQLRequest, graphQLErrorResponse } from "./graphql/authorization";
 import type { GraphQLContext } from "./graphql/context";
+import { recordDeprecatedSchemaUsages } from "./graphql/deprecation-observability";
 import { validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
 import { validateDatabaseContract } from "./infra/database-contract";
@@ -489,8 +490,13 @@ const startServer = async (): Promise<void> => {
 							requestContext
 						): Promise<GraphQLRequestListenerValidationDidEnd> {
 							const stop = requestContext.contextValue.requestTiming?.start("apolloValidate");
-							return async (): Promise<void> => {
+							return async (validationErrors): Promise<void> => {
 								stop?.();
+								recordDeprecatedSchemaUsages({
+									validationErrors,
+									symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+									increment: (symbol) => metrics.graphqlDeprecatedSchemaUsages.labels(symbol).inc(),
+								});
 							};
 						},
 						async executionDidStart(
@@ -878,10 +884,6 @@ const startServer = async (): Promise<void> => {
 							"authorization_rejected"
 						);
 					}
-					for (const symbol of limits.deprecatedFields) {
-						metrics.graphqlDeprecatedFieldSelections.labels(symbol).inc();
-					}
-
 					graphQLContext = {
 						data,
 						database,
@@ -894,6 +896,7 @@ const startServer = async (): Promise<void> => {
 						logger,
 						requestId,
 						operationName,
+						deprecatedSymbols: limits.deprecatedSymbols,
 						requestTiming,
 						requestScope,
 						authorizedTournamentMemberships,

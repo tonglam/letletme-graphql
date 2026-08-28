@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildSchema } from "graphql";
 import {
-	deprecatedFieldUsageMetric,
+	deprecatedSchemaUsageMetric,
 	validateDeprecationManifest,
 	validateSchemaDeprecationCoverage,
 } from "../../scripts/check-deprecation-manifest";
@@ -107,14 +107,20 @@ describe("deprecation manifest validation", () => {
 					removedAt: "2025-08-01",
 					removalTarget: undefined,
 				},
+				{
+					...valid,
+					id: "field-c",
+					introducedAt: "2026-08-29",
+				},
 			],
 			"2026-08-28"
 		);
 		expect(errors).toContain("field-a: removedAt cannot be in the future");
 		expect(errors).toContain("field-b: removedAt cannot predate introducedAt");
+		expect(errors).toContain("field-c: introducedAt cannot be in the future");
 	});
 
-	test("requires every executable deprecation and its field-level metric", () => {
+	test("requires every executable deprecation and its symbol-level metric", () => {
 		const deprecatedSchema = buildSchema(`
 			type Query {
 				legacy: String @deprecated(reason: "Use current")
@@ -131,7 +137,7 @@ describe("deprecation manifest validation", () => {
 					{
 						...valid,
 						symbol,
-						usageMetric: deprecatedFieldUsageMetric(symbol),
+						usageMetric: deprecatedSchemaUsageMetric(symbol),
 					},
 				],
 				deprecatedSchema

@@ -44,7 +44,11 @@ export const validateDeprecationManifest = (
 		for (const key of ["id", "symbol", "owner", "introducedAt", "status", "usageMetric"] as const) {
 			if (typeof row[key] !== "string" || row[key] === "") errors.push(`${id}: missing ${key}`);
 		}
-		if (!isCanonicalDate(row.introducedAt)) errors.push(`${id}: introducedAt must be YYYY-MM-DD`);
+		if (!isCanonicalDate(row.introducedAt)) {
+			errors.push(`${id}: introducedAt must be YYYY-MM-DD`);
+		} else if (row.introducedAt > today) {
+			errors.push(`${id}: introducedAt cannot be in the future`);
+		}
 		if (row.status !== "deprecated" && row.status !== "removed") {
 			errors.push(`${id}: status must be deprecated or removed`);
 			continue;
@@ -72,8 +76,8 @@ export const validateDeprecationManifest = (
 	return errors;
 };
 
-export const deprecatedFieldUsageMetric = (symbol: string): string =>
-	`graphql_deprecated_field_selections_total{symbol="${symbol}"}`;
+export const deprecatedSchemaUsageMetric = (symbol: string): string =>
+	`graphql_deprecated_schema_usages_total{symbol="${symbol}"}`;
 
 export const deprecatedSchemaSymbols = (schema: GraphQLSchema): readonly string[] => {
 	const symbols = new Set<string>();
@@ -133,7 +137,7 @@ export const validateSchemaDeprecationCoverage = (
 		if (row.status !== "deprecated") {
 			errors.push(`${id}: executable schema deprecation must have deprecated status`);
 		}
-		const expectedMetric = deprecatedFieldUsageMetric(symbol);
+		const expectedMetric = deprecatedSchemaUsageMetric(symbol);
 		if (row.usageMetric !== expectedMetric) {
 			errors.push(`${id}: usageMetric must be ${expectedMetric}`);
 		}

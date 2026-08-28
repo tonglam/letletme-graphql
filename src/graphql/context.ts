@@ -22,6 +22,8 @@ export type GraphQLContext = {
 	requestId?: string;
 	/** Named GraphQL operation only; variables and query text are never logged. */
 	operationName?: string;
+	/** Controlled manifest symbols selected by this request, committed only after validation. */
+	deprecatedSymbols?: readonly string[];
 	/** Request-local low-cardinality stage timings. */
 	requestTiming?: RequestTiming;
 	/** Stable identity shared by Apollo's shallow context clone for request-local memoization. */

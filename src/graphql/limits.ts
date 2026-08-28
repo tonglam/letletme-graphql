@@ -2,14 +2,21 @@ import {
 	Kind,
 	TypeInfo,
 	getNamedType,
+	isEnumType,
+	isInputType,
+	isInputObjectType,
 	isInterfaceType,
+	isListType,
+	isNonNullType,
 	isObjectType,
 	isUnionType,
+	typeFromAST,
 	valueFromASTUntyped,
 	visit,
 	visitWithTypeInfo,
 	type GraphQLArgument,
 	type GraphQLCompositeType,
+	type GraphQLInputType,
 	type GraphQLNamedType,
 	type GraphQLSchema,
 	type FragmentDefinitionNode,
@@ -64,7 +71,7 @@ export type GraphQLLimitResult =
 			weightedComplexity: number;
 			rateLimitCostUnits: number;
 			rootFields: readonly string[];
-			deprecatedFields: readonly string[];
+			deprecatedSymbols: readonly string[];
 	  }
 	| {
 			ok: false;
@@ -382,10 +389,44 @@ const reject = (
 	message,
 });
 
-const selectedDeprecatedFields = (
+const collectDeprecatedVariableSymbols = (
+	value: unknown,
+	inputType: GraphQLInputType,
+	symbols: Set<string>
+): void => {
+	if (isNonNullType(inputType)) {
+		collectDeprecatedVariableSymbols(value, inputType.ofType, symbols);
+		return;
+	}
+	if (value === null || value === undefined) return;
+	if (isListType(inputType)) {
+		for (const item of Array.isArray(value) ? value : [value]) {
+			collectDeprecatedVariableSymbols(item, inputType.ofType, symbols);
+		}
+		return;
+	}
+	if (isEnumType(inputType)) {
+		if (typeof value !== "string") return;
+		const enumValue = inputType.getValue(value);
+		if (enumValue?.deprecationReason !== undefined) {
+			symbols.add(`${inputType.name}.${enumValue.name}`);
+		}
+		return;
+	}
+	if (!isInputObjectType(inputType) || typeof value !== "object" || Array.isArray(value)) return;
+	for (const [fieldName, fieldValue] of Object.entries(value as Record<string, unknown>)) {
+		const field = inputType.getFields()[fieldName];
+		if (!field) continue;
+		if (field.deprecationReason !== undefined) symbols.add(`${inputType.name}.${field.name}`);
+		collectDeprecatedVariableSymbols(fieldValue, field.type, symbols);
+	}
+};
+
+const selectedDeprecatedSymbols = (
 	document: ReturnType<typeof analyzeGraphQLOperation>["document"],
 	operation: OperationDefinitionNode,
 	reachableFragments: ReadonlySet<string>,
+	variables: Record<string, unknown>,
 	schema?: GraphQLSchema
 ): readonly string[] => {
 	if (!schema) return [];
@@ -410,8 +451,41 @@ const selectedDeprecatedFields = (
 					symbols.add(`${parentType.name}.${node.name.value}`);
 				}
 			},
+			Argument(node) {
+				const parentType = typeInfo.getParentType();
+				const field = typeInfo.getFieldDef();
+				const argument = typeInfo.getArgument();
+				if (parentType && field && argument?.deprecationReason !== undefined) {
+					symbols.add(`${parentType.name}.${field.name}(${node.name.value}:)`);
+				}
+			},
+			ObjectField(node) {
+				const parentInputType = typeInfo.getParentInputType();
+				if (!parentInputType) return;
+				const namedParent = getNamedType(parentInputType);
+				if (!isInputObjectType(namedParent)) return;
+				const field = namedParent.getFields()[node.name.value];
+				if (field?.deprecationReason !== undefined) {
+					symbols.add(`${namedParent.name}.${field.name}`);
+				}
+			},
+			EnumValue() {
+				const inputType = typeInfo.getInputType();
+				const enumValue = typeInfo.getEnumValue();
+				if (!inputType || enumValue?.deprecationReason === undefined) return;
+				const namedInput = getNamedType(inputType);
+				if (isEnumType(namedInput)) symbols.add(`${namedInput.name}.${enumValue.name}`);
+			},
 		})
 	);
+	for (const definition of operation.variableDefinitions ?? []) {
+		const variableName = definition.variable.name.value;
+		if (!Object.hasOwn(variables, variableName)) continue;
+		const inputType = typeFromAST(schema, definition.type);
+		if (inputType && isInputType(inputType)) {
+			collectDeprecatedVariableSymbols(variables[variableName], inputType, symbols);
+		}
+	}
 	return [...symbols].sort();
 };
 
@@ -489,12 +563,12 @@ const accepted = ({
 	shape,
 	weightedComplexity = 0,
 	rootFields = [],
-	deprecatedFields = [],
+	deprecatedSymbols = [],
 }: {
 	shape: GraphQLRequestShape;
 	weightedComplexity?: number;
 	rootFields?: Array<{ name: string; uniqueEntryCount: number | null }>;
-	deprecatedFields?: readonly string[];
+	deprecatedSymbols?: readonly string[];
 }): GraphQLLimitResult => {
 	const boundedPublicDeskRoots = new Set([
 		"playersForPicker",
@@ -536,7 +610,7 @@ const accepted = ({
 				? heavyRootCost(rootFields)
 				: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
 		rootFields: rootFields.map((field) => field.name),
-		deprecatedFields,
+		deprecatedSymbols,
 	};
 };
 
@@ -560,8 +634,14 @@ export const validateGraphQLPayloadLimits = (
 		? effectiveRootFieldsFor(operation, fragments)
 		: { fields: [], reachableFragments: new Set<string>() };
 	const rootNames = rootInspection.fields;
-	const deprecatedFields = operation
-		? selectedDeprecatedFields(document, operation, rootInspection.reachableFragments, schema)
+	const deprecatedSymbols = operation
+		? selectedDeprecatedSymbols(
+				document,
+				operation,
+				rootInspection.reachableFragments,
+				variables,
+				schema
+			)
 		: [];
 	const onlyReachableDefinitions =
 		operation !== null &&
@@ -687,7 +767,7 @@ export const validateGraphQLPayloadLimits = (
 		shape: operation.operation,
 		weightedComplexity: inspection.complexity,
 		rootFields: inspection.rootFields,
-		deprecatedFields,
+		deprecatedSymbols,
 	});
 };
 
@@ -706,7 +786,7 @@ export const validateGraphQLRequestLimits = (
 	let weightedComplexity = 0;
 	let rateLimitCostUnits = 0;
 	const rootFields: string[] = [];
-	const deprecatedFields = new Set<string>();
+	const deprecatedSymbols = new Set<string>();
 	for (const payload of payloads) {
 		if (!payload || typeof payload !== "object") {
 			return reject("GraphQL request body must be an object", "INVALID_GRAPHQL_REQUEST");
@@ -718,7 +798,7 @@ export const validateGraphQLRequestLimits = (
 		weightedComplexity += result.weightedComplexity;
 		rateLimitCostUnits += result.rateLimitCostUnits;
 		rootFields.push(...result.rootFields);
-		for (const symbol of result.deprecatedFields) deprecatedFields.add(symbol);
+		for (const symbol of result.deprecatedSymbols) deprecatedSymbols.add(symbol);
 	}
 	return {
 		ok: true,
@@ -726,6 +806,6 @@ export const validateGraphQLRequestLimits = (
 		weightedComplexity,
 		rateLimitCostUnits: Math.max(1, rateLimitCostUnits),
 		rootFields,
-		deprecatedFields: [...deprecatedFields].sort(),
+		deprecatedSymbols: [...deprecatedSymbols].sort(),
 	};
 };
