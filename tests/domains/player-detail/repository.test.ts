@@ -501,7 +501,8 @@ describe("playerDetailRepository", () => {
 		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
 			state: "FALLBACK",
 			reasonCode: "recent_gameweeks_revision_unverified",
-			revision: "11",
+			revision: null,
+			sourceCheckedAt: null,
 		});
 		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
 		expect(fromCalls).toContain("fpl.player_gameweek_stats");
@@ -517,15 +518,16 @@ describe("playerDetailRepository", () => {
 				"fpl.fixtures": [fixtureRow()],
 			},
 		});
-
-		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
 		const redis = context.redis as unknown as TestRedis;
 
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
 		expect(detail?.recentGameweeks).toEqual([]);
-		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+		expect(detail?.dataAvailability.recentGameweeks).toEqual({
 			state: "FALLBACK",
 			reasonCode: "recent_gameweeks_revision_unverified",
-			revision: "11",
+			revision: null,
+			sourceCheckedAt: null,
 		});
 		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
 		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
@@ -714,6 +716,20 @@ describe("playerDetailRepository", () => {
 			tables: {
 				"fpl.player_market_snapshots": [marketRow()],
 				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
 				"fpl.fixtures": [fixtureRow()],
 			},
 		});
@@ -731,7 +747,14 @@ describe("playerDetailRepository", () => {
 
 		expect(deleteCount).toBe(1);
 		expect(detail?.dataAvailability.market.state).toBe("READY");
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_revision_unverified",
+			revision: null,
+			sourceCheckedAt: null,
+		});
 		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
+		expect(redis.setCalls.some(([cachedKey]) => cachedKey.includes("player-detail"))).toBe(false);
 	});
 
 	it("does not read the pre-hard-cut player-detail cache namespace", async () => {

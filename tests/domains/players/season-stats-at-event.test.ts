@@ -268,5 +268,6 @@ describe("resolvePlayerStatsContext", () => {
 		expect(load.sourceAvailable).toBe(true);
 		expect(load.stats.get(9)?.available).toBe(true);
 		expect(load.stats.get(9)?.eventId).toBe(3);
+		expect(key).not.toBe(gqlCacheKey(context, "players:season-stats:v2:9:3:11"));
 	});
 });

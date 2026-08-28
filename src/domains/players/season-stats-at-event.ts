@@ -30,6 +30,7 @@ const PLAYER_STATS_REPAIR_FRESHNESS_MS = 6 * 60_000;
 const LIVE_LIFECYCLE_HEARTBEAT_FALLBACK_MAX_AGE_MS = 2 * 60_000;
 const LIVE_LIFECYCLE_HEARTBEAT_GRACE_MS = 2 * 60_000;
 const LIVE_LIFECYCLE_HEARTBEAT_HARD_MAX_AGE_MS = 15 * 60_000;
+const PLAYER_SEASON_STATS_CACHE_VERSION = "v2";
 
 /**
  * Match the read-side freshness budget to the producer's lifecycle cadence.
@@ -404,7 +405,11 @@ const cacheKey = (
 	elementId: number,
 	eventId: number,
 	revision: string
-): string => gqlCacheKey(context, `players:season-stats:${elementId}:${eventId}:${revision}`);
+): string =>
+	gqlCacheKey(
+		context,
+		`players:season-stats:${PLAYER_SEASON_STATS_CACHE_VERSION}:${elementId}:${eventId}:${revision}`
+	);
 
 async function isUnfinishedCurrentEvent(
 	context: GraphQLContext,

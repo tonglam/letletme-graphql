@@ -745,23 +745,11 @@ async function loadRecentGameweeks(
 			.limit(RECENT_GAMEWEEK_LIMIT);
 		if (error) {
 			context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
-			return section(
-				[],
-				"UNAVAILABLE",
-				"recent_gameweeks_read_failed",
-				statsContext.revision,
-				statsContext.sourceCheckedAt
-			);
+			return section([], "UNAVAILABLE", "recent_gameweeks_read_failed");
 		}
 		const rows = (data ?? []) as RecentGameweekRow[];
 		if (rows.length === 0) {
-			return section(
-				[],
-				"FALLBACK",
-				"recent_gameweeks_revision_unverified",
-				statsContext.revision,
-				statsContext.sourceCheckedAt
-			);
+			return section([], "FALLBACK", "recent_gameweeks_revision_unverified");
 		}
 		const historicalTeams = await loadHistoricalTeamIds(
 			context,
@@ -825,19 +813,11 @@ async function loadRecentGameweeks(
 			fixtureState === "UNAVAILABLE" ? "UNAVAILABLE" : "FALLBACK",
 			fixtureState === "UNAVAILABLE"
 				? "recent_fixture_read_failed"
-				: "recent_gameweeks_revision_unverified",
-			statsContext.revision,
-			statsContext.sourceCheckedAt
+				: "recent_gameweeks_revision_unverified"
 		);
 	} catch (error) {
 		context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
-		return section(
-			[],
-			"UNAVAILABLE",
-			"recent_gameweeks_read_failed",
-			statsContext.revision,
-			statsContext.sourceCheckedAt
-		);
+		return section([], "UNAVAILABLE", "recent_gameweeks_read_failed");
 	}
 }
 
