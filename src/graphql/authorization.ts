@@ -6,7 +6,11 @@ import {
 import type { Logger } from "../infra/logger";
 import type { Principal } from "../infra/principal";
 import type { ReadModelClient } from "../infra/read-model-client";
-import { getRootFieldPolicy, ROOT_FIELD_POLICIES } from "./root-field-policy";
+import {
+	getConditionalRootFieldAccess,
+	getRootFieldPolicy,
+	ROOT_FIELD_POLICIES,
+} from "./root-field-policy";
 export { isGraphQLRootFieldClassified } from "./root-field-policy";
 
 type RootField = GraphQLRootField;
@@ -127,10 +131,6 @@ export const authorizeProtectedBinding = (
 	return { ok: true };
 };
 
-const isPrivateTrendsAccess = (field: RootField): boolean =>
-	(field.name === "trendCohorts" || field.name === "trendCohortSnapshot") &&
-	field.args.access === "MINE";
-
 const hasTournamentMembership = async (
 	dataClient: ReadModelClient,
 	tournamentId: number,
@@ -227,7 +227,7 @@ const authorizeRootField = async (
 	authorizedTournamentMemberships?: Set<number>
 ): Promise<AuthorizationResult> => {
 	const fieldPolicy = getRootFieldPolicy(field.name);
-	if (isPrivateTrendsAccess(field)) {
+	if (getConditionalRootFieldAccess(field.name, field.args) === "viewerEntry") {
 		return authorizeViewerEntry(principal);
 	}
 	if (fieldPolicy?.access === "public") return { ok: true };

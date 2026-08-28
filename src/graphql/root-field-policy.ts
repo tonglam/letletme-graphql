@@ -18,6 +18,12 @@ export type RootFieldPolicy = Readonly<{
 	core: "lightweight" | "full";
 }>;
 
+export type RootFieldConditionalAccess = Readonly<{
+	argument: string;
+	equals: string | number | boolean;
+	access: RootFieldAccess;
+}>;
+
 const policy = (
 	access: RootFieldAccess,
 	options: Partial<Omit<RootFieldPolicy, "access">> = {}
@@ -253,6 +259,13 @@ for (const field of lightweightFields) {
 }
 
 export const ROOT_FIELD_POLICIES: ReadonlyMap<string, RootFieldPolicy> = registry;
+export const ROOT_FIELD_CONDITIONAL_ACCESS: ReadonlyMap<
+	string,
+	readonly RootFieldConditionalAccess[]
+> = new Map([
+	["trendCohorts", [{ argument: "access", equals: "MINE", access: "viewerEntry" }]],
+	["trendCohortSnapshot", [{ argument: "access", equals: "MINE", access: "viewerEntry" }]],
+]);
 export const LIGHTWEIGHT_CORE_FIELDS: ReadonlySet<string> = new Set(
 	[...ROOT_FIELD_POLICIES]
 		.filter(([, fieldPolicy]) => fieldPolicy.core === "lightweight")
@@ -261,6 +274,14 @@ export const LIGHTWEIGHT_CORE_FIELDS: ReadonlySet<string> = new Set(
 
 export const getRootFieldPolicy = (fieldName: string): RootFieldPolicy | undefined =>
 	ROOT_FIELD_POLICIES.get(fieldName);
+
+export const getConditionalRootFieldAccess = (
+	fieldName: string,
+	args: Readonly<Record<string, unknown>>
+): RootFieldAccess | undefined =>
+	ROOT_FIELD_CONDITIONAL_ACCESS.get(fieldName)?.find(
+		(condition) => args[condition.argument] === condition.equals
+	)?.access;
 
 export const isGraphQLRootFieldClassified = (fieldName: string): boolean =>
 	ROOT_FIELD_POLICIES.has(fieldName);

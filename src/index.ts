@@ -878,6 +878,9 @@ const startServer = async (): Promise<void> => {
 							"authorization_rejected"
 						);
 					}
+					for (const symbol of limits.deprecatedFields) {
+						metrics.graphqlDeprecatedFieldSelections.labels(symbol).inc();
+					}
 
 					graphQLContext = {
 						data,

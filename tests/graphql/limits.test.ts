@@ -24,6 +24,31 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1, rootFields: ["events"] });
 	});
 
+	it("reports only deprecated fields selected by the active operation", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query: `
+					query Usage {
+						calcLivePointsByEntry(eventId: 1, entryId: 1) {
+							rank
+							livePoints
+							score { eventPoints }
+						}
+					}
+					fragment UnusedLegacyFields on LiveCalcData {
+						liveNetPoints
+						liveTotalPoints
+					}
+				`,
+			},
+			schema
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			deprecatedFields: ["LiveCalcData.livePoints", "LiveCalcData.rank"],
+		});
+	});
+
 	it("keeps live price-change roots public and bounded", () => {
 		for (const query of [
 			"query { priceChangeLiveCursor { revision state } }",

@@ -1,11 +1,13 @@
 import {
 	Kind,
+	TypeInfo,
 	getNamedType,
 	isInterfaceType,
 	isObjectType,
 	isUnionType,
 	valueFromASTUntyped,
 	visit,
+	visitWithTypeInfo,
 	type GraphQLArgument,
 	type GraphQLCompositeType,
 	type GraphQLNamedType,
@@ -62,6 +64,7 @@ export type GraphQLLimitResult =
 			weightedComplexity: number;
 			rateLimitCostUnits: number;
 			rootFields: readonly string[];
+			deprecatedFields: readonly string[];
 	  }
 	| {
 			ok: false;
@@ -379,6 +382,39 @@ const reject = (
 	message,
 });
 
+const selectedDeprecatedFields = (
+	document: ReturnType<typeof analyzeGraphQLOperation>["document"],
+	operation: OperationDefinitionNode,
+	reachableFragments: ReadonlySet<string>,
+	schema?: GraphQLSchema
+): readonly string[] => {
+	if (!schema) return [];
+	const selectedDocument = {
+		...document,
+		definitions: document.definitions.filter(
+			(definition) =>
+				definition === operation ||
+				(definition.kind === Kind.FRAGMENT_DEFINITION &&
+					reachableFragments.has(definition.name.value))
+		),
+	};
+	const typeInfo = new TypeInfo(schema);
+	const symbols = new Set<string>();
+	visit(
+		selectedDocument,
+		visitWithTypeInfo(typeInfo, {
+			Field(node) {
+				const parentType = typeInfo.getParentType();
+				const field = typeInfo.getFieldDef();
+				if (parentType && field?.deprecationReason !== undefined) {
+					symbols.add(`${parentType.name}.${node.name.value}`);
+				}
+			},
+		})
+	);
+	return [...symbols].sort();
+};
+
 export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["liveScores", 5],
 	["eventLive", 5],
@@ -410,12 +446,14 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["eventFixtures", 5],
 	["currentEventInfo", 1],
 	["teams", 2],
+	["playersForPicker", 5],
 	["miniProgramNotice", 1],
 	["publicLeagueTrends", 10],
 	["publicLeagueSelectionStats", 10],
 	["trendCohorts", 5],
 	["trendCohortSnapshot", 10],
 	["calcLivePointsByEntry", 10],
+	["calcLivePointsForEntries", 10],
 	["searchEntries", 10],
 	["entryLookup", 5],
 	["entryNameUsage", 5],
@@ -451,10 +489,12 @@ const accepted = ({
 	shape,
 	weightedComplexity = 0,
 	rootFields = [],
+	deprecatedFields = [],
 }: {
 	shape: GraphQLRequestShape;
 	weightedComplexity?: number;
 	rootFields?: Array<{ name: string; uniqueEntryCount: number | null }>;
+	deprecatedFields?: readonly string[];
 }): GraphQLLimitResult => {
 	const boundedPublicDeskRoots = new Set([
 		"playersForPicker",
@@ -496,6 +536,7 @@ const accepted = ({
 				? heavyRootCost(rootFields)
 				: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
 		rootFields: rootFields.map((field) => field.name),
+		deprecatedFields,
 	};
 };
 
@@ -519,6 +560,9 @@ export const validateGraphQLPayloadLimits = (
 		? effectiveRootFieldsFor(operation, fragments)
 		: { fields: [], reachableFragments: new Set<string>() };
 	const rootNames = rootInspection.fields;
+	const deprecatedFields = operation
+		? selectedDeprecatedFields(document, operation, rootInspection.reachableFragments, schema)
+		: [];
 	const onlyReachableDefinitions =
 		operation !== null &&
 		document.definitions.every((definition) =>
@@ -643,6 +687,7 @@ export const validateGraphQLPayloadLimits = (
 		shape: operation.operation,
 		weightedComplexity: inspection.complexity,
 		rootFields: inspection.rootFields,
+		deprecatedFields,
 	});
 };
 
@@ -661,6 +706,7 @@ export const validateGraphQLRequestLimits = (
 	let weightedComplexity = 0;
 	let rateLimitCostUnits = 0;
 	const rootFields: string[] = [];
+	const deprecatedFields = new Set<string>();
 	for (const payload of payloads) {
 		if (!payload || typeof payload !== "object") {
 			return reject("GraphQL request body must be an object", "INVALID_GRAPHQL_REQUEST");
@@ -672,6 +718,7 @@ export const validateGraphQLRequestLimits = (
 		weightedComplexity += result.weightedComplexity;
 		rateLimitCostUnits += result.rateLimitCostUnits;
 		rootFields.push(...result.rootFields);
+		for (const symbol of result.deprecatedFields) deprecatedFields.add(symbol);
 	}
 	return {
 		ok: true,
@@ -679,5 +726,6 @@ export const validateGraphQLRequestLimits = (
 		weightedComplexity,
 		rateLimitCostUnits: Math.max(1, rateLimitCostUnits),
 		rootFields,
+		deprecatedFields: [...deprecatedFields].sort(),
 	};
 };

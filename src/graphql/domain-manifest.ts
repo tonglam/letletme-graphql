@@ -1,12 +1,24 @@
-import { ROOT_FIELD_POLICIES, type RootFieldAccess } from "./root-field-policy";
+import {
+	ROOT_FIELD_CONDITIONAL_ACCESS,
+	ROOT_FIELD_POLICIES,
+	type RootFieldAccess,
+} from "./root-field-policy";
 import { ROOT_RATE_LIMIT_FLOORS } from "./limits";
+
+export type GraphQLConditionalAuth = Readonly<{
+	field: string;
+	argument: string;
+	equals: string | number | boolean;
+	access: RootFieldAccess;
+}>;
 
 export type GraphQLDomainManifestEntry = Readonly<{
 	name: string;
-	typeDefsModule: string;
-	resolversModule: string;
+	typeDefsModules: readonly string[];
+	resolversModules: readonly string[];
 	rootFields: readonly string[];
 	auth: readonly RootFieldAccess[];
+	conditionalAuth: readonly GraphQLConditionalAuth[];
 	rateLimitBudget: Readonly<Record<string, number>>;
 }>;
 
@@ -15,23 +27,33 @@ const domain = (
 	moduleName: string,
 	rootFields: readonly string[],
 	moduleRoot = `src/domains/${moduleName}`,
-	moduleFiles: Readonly<{ typeDefs: string; resolvers: string }> = {
-		typeDefs: "schema.ts",
-		resolvers: "resolvers.ts",
+	moduleFiles: Readonly<{ typeDefs: readonly string[]; resolvers: readonly string[] }> = {
+		typeDefs: ["schema.ts"],
+		resolvers: ["resolvers.ts"],
 	}
 ): GraphQLDomainManifestEntry => {
+	const conditionalAuth = rootFields.flatMap((field) =>
+		(ROOT_FIELD_CONDITIONAL_ACCESS.get(field) ?? []).map((condition) => ({
+			field,
+			...condition,
+		}))
+	);
 	const auth = Array.from(
-		new Set(rootFields.map((field) => ROOT_FIELD_POLICIES.get(field)?.access).filter(Boolean))
+		new Set([
+			...rootFields.map((field) => ROOT_FIELD_POLICIES.get(field)?.access).filter(Boolean),
+			...conditionalAuth.map((condition) => condition.access),
+		])
 	) as RootFieldAccess[];
 	const rateLimitBudget = Object.fromEntries(
-		rootFields.map((field) => [field, ROOT_RATE_LIMIT_FLOORS.get(field) ?? 0])
+		rootFields.map((field) => [field, ROOT_RATE_LIMIT_FLOORS.get(field) ?? 1])
 	);
 	return {
 		name,
-		typeDefsModule: `${moduleRoot}/${moduleFiles.typeDefs}`,
-		resolversModule: `${moduleRoot}/${moduleFiles.resolvers}`,
+		typeDefsModules: moduleFiles.typeDefs.map((file) => `${moduleRoot}/${file}`),
+		resolversModules: moduleFiles.resolvers.map((file) => `${moduleRoot}/${file}`),
 		rootFields,
 		auth,
+		conditionalAuth,
 		rateLimitBudget,
 	};
 };
@@ -48,7 +70,10 @@ export const GRAPHQL_DOMAIN_MANIFEST: readonly GraphQLDomainManifestEntry[] = [
 		"foundation",
 		["_empty", "__typename", "__schema", "__type"],
 		"src/graphql",
-		{ typeDefs: "base-schema.ts", resolvers: "base-schema.ts" }
+		{
+			typeDefs: ["base-schema.ts", "data-completeness.ts"],
+			resolvers: ["base-schema.ts"],
+		}
 	),
 	domain("auth", "auth", ["me"]),
 	domain("events", "events", ["event", "events", "currentEventInfo", "coreEventContext"]),
@@ -168,10 +193,14 @@ export const validateGraphQLDomainManifest = (): readonly string[] => {
 			seen.add(field);
 			if (!ROOT_FIELD_POLICIES.has(field)) errors.push(`unclassified root field: ${field}`);
 			if (!(field in entry.rateLimitBudget)) errors.push(`missing rate-limit budget: ${field}`);
+			if (entry.rateLimitBudget[field] < 1) errors.push(`invalid rate-limit floor: ${field}`);
 		}
 	}
 	for (const field of ROOT_FIELD_POLICIES.keys()) {
 		if (!seen.has(field)) errors.push(`unassigned root field: ${field}`);
+	}
+	for (const field of ROOT_FIELD_CONDITIONAL_ACCESS.keys()) {
+		if (!seen.has(field)) errors.push(`unassigned conditional auth field: ${field}`);
 	}
 	return errors;
 };

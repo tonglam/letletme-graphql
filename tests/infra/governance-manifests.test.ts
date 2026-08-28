@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { validateDeprecationManifest } from "../../scripts/check-deprecation-manifest";
+import { buildSchema } from "graphql";
+import {
+	deprecatedFieldUsageMetric,
+	validateDeprecationManifest,
+	validateSchemaDeprecationCoverage,
+} from "../../scripts/check-deprecation-manifest";
 import {
 	GRAPHQL_DOMAIN_MANIFEST,
 	validateGraphQLDomainManifest,
@@ -10,13 +15,31 @@ describe("GraphQL domain manifest", () => {
 		expect(validateGraphQLDomainManifest()).toEqual([]);
 		const foundation = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "foundation");
 		expect(foundation).toMatchObject({
-			typeDefsModule: "src/graphql/base-schema.ts",
-			resolversModule: "src/graphql/base-schema.ts",
+			typeDefsModules: ["src/graphql/base-schema.ts", "src/graphql/data-completeness.ts"],
+			resolversModules: ["src/graphql/base-schema.ts"],
 		});
 		for (const entry of GRAPHQL_DOMAIN_MANIFEST) {
-			expect(await Bun.file(entry.typeDefsModule).exists()).toBe(true);
-			expect(await Bun.file(entry.resolversModule).exists()).toBe(true);
+			for (const modulePath of [...entry.typeDefsModules, ...entry.resolversModules]) {
+				expect(await Bun.file(modulePath).exists()).toBe(true);
+			}
 		}
+	});
+
+	test("documents effective special floors and argument-sensitive authorization", () => {
+		const trends = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "trends");
+		expect(trends?.conditionalAuth).toEqual([
+			{ field: "trendCohorts", argument: "access", equals: "MINE", access: "viewerEntry" },
+			{
+				field: "trendCohortSnapshot",
+				argument: "access",
+				equals: "MINE",
+				access: "viewerEntry",
+			},
+		]);
+		const players = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "players");
+		expect(players?.rateLimitBudget.playersForPicker).toBe(5);
+		const entryLive = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "entry-live");
+		expect(entryLive?.rateLimitBudget.calcLivePointsForEntries).toBe(10);
 	});
 });
 
@@ -65,5 +88,54 @@ describe("deprecation manifest validation", () => {
 		);
 		expect(errors).toContain("field-a: removalTarget has expired");
 		expect(errors).toContain("field-b: removedAt must be YYYY-MM-DD");
+	});
+
+	test("rejects future and chronologically impossible lifecycle dates", () => {
+		const errors = validateDeprecationManifest(
+			[
+				{
+					...valid,
+					status: "removed",
+					removedAt: "2026-08-29",
+					removalTarget: undefined,
+				},
+				{
+					...valid,
+					id: "field-b",
+					introducedAt: "2026-08-01",
+					status: "removed",
+					removedAt: "2025-08-01",
+					removalTarget: undefined,
+				},
+			],
+			"2026-08-28"
+		);
+		expect(errors).toContain("field-a: removedAt cannot be in the future");
+		expect(errors).toContain("field-b: removedAt cannot predate introducedAt");
+	});
+
+	test("requires every executable deprecation and its field-level metric", () => {
+		const deprecatedSchema = buildSchema(`
+			type Query {
+				legacy: String @deprecated(reason: "Use current")
+				current: String
+			}
+		`);
+		expect(validateSchemaDeprecationCoverage([], deprecatedSchema)).toEqual([
+			"missing schema deprecation: Query.legacy",
+		]);
+		const symbol = "Query.legacy";
+		expect(
+			validateSchemaDeprecationCoverage(
+				[
+					{
+						...valid,
+						symbol,
+						usageMetric: deprecatedFieldUsageMetric(symbol),
+					},
+				],
+				deprecatedSchema
+			)
+		).toEqual([]);
 	});
 });

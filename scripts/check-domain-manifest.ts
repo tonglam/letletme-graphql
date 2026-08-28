@@ -10,7 +10,7 @@ const end = "<!-- END GENERATED GRAPHQL DOMAIN MANIFEST -->";
 
 const errors = [...validateGraphQLDomainManifest()];
 for (const entry of GRAPHQL_DOMAIN_MANIFEST) {
-	for (const modulePath of [entry.typeDefsModule, entry.resolversModule]) {
+	for (const modulePath of [...entry.typeDefsModules, ...entry.resolversModules]) {
 		try {
 			await access(new URL(`../${modulePath}`, import.meta.url));
 		} catch {
@@ -31,7 +31,10 @@ const generated = [
 		const budgets = Object.entries(entry.rateLimitBudget)
 			.map(([field, budget]) => `${field}=${budget}`)
 			.join(", ");
-		return `| ${entry.name} | \`${entry.typeDefsModule}\` | \`${entry.resolversModule}\` | ${entry.rootFields.join(", ")} | ${entry.auth.join(", ") || "none"} | ${budgets} |`;
+		const conditional = entry.conditionalAuth
+			.map((rule) => `${rule.field}: ${rule.argument}=${String(rule.equals)} -> ${rule.access}`)
+			.join(", ");
+		return `| ${entry.name} | ${entry.typeDefsModules.map((module) => `\`${module}\``).join("<br>")} | ${entry.resolversModules.map((module) => `\`${module}\``).join("<br>") || "none"} | ${entry.rootFields.join(", ")} | ${entry.auth.join(", ") || "none"}${conditional ? `<br>conditional: ${conditional}` : ""} | ${budgets} |`;
 	}),
 	end,
 ].join("\n");
