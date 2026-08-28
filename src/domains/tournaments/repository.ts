@@ -1519,6 +1519,7 @@ async function loadOfficialH2HSnapshots(
 
 export type EventLiveH2HScoreBatch = {
 	scores: ReadonlyMap<number, number>;
+	managerRevisions: ReadonlyMap<number, string>;
 	revision: string;
 	checkedAt: string;
 	state: "scheduled" | "live" | "settled";
@@ -1600,7 +1601,11 @@ function tournamentEventLiveScoreRevision(
 ): string {
 	const entryScores = activeOfficialH2HScoreEntryIds(loaded, eventId)
 		.sort((left, right) => left - right)
-		.map((entryId) => ({ entryId, score: batch.scores.get(entryId) ?? null }));
+		.map((entryId) => ({
+			entryId,
+			score: batch.scores.get(entryId) ?? null,
+			managerRevision: batch.managerRevisions.get(entryId) ?? null,
+		}));
 	const revisionHash = createHash("sha256")
 		.update(
 			stableStringify({
@@ -1715,7 +1720,11 @@ export function projectOfficialH2HEventLiveSnapshot(
 		(!hasRegularRound && !hasCompleteKnockoutSchedule) ||
 		currentSourceRows.some((row) => row.home_is_average || row.away_is_average) ||
 		scoreEntryIds.length === 0 ||
-		scoreEntryIds.some((entryId) => typeof batch.scores.get(entryId) !== "number")
+		scoreEntryIds.some(
+			(entryId) =>
+				typeof batch.scores.get(entryId) !== "number" ||
+				typeof batch.managerRevisions.get(entryId) !== "string"
+		)
 	) {
 		return suppressed;
 	}
@@ -1826,7 +1835,7 @@ async function loadEventLiveH2HScoreBatch(
 	let snapshotRevision: string | null = null;
 	let checkedAt: string | null = null;
 	let state: EventLiveH2HScoreBatch["state"] | null = null;
-	const managerRevisions: Array<{ entryId: number; revision: string }> = [];
+	const managerRevisions = new Map<number, string>();
 	for (const entryId of entryIds) {
 		const row = result.results.get(entryId);
 		const liveProvenance = row?.score.provenance;
@@ -1844,7 +1853,7 @@ async function loadEventLiveH2HScoreBatch(
 			liveProvenance.liveRevision === null ||
 			liveProvenance.liveCheckedAt === null ||
 			row.snapshot.revision !== liveProvenance.liveRevision ||
-			row.snapshot.checkedAt !== liveProvenance.liveCheckedAt
+			row.snapshot.publicationId !== liveProvenance.livePublicationId
 		) {
 			return null;
 		}
@@ -1861,19 +1870,27 @@ async function loadEventLiveH2HScoreBatch(
 		checkedAt = liveProvenance.liveCheckedAt;
 		state = row.snapshot.state;
 		scores.set(entryId, row.score.netEventPoints);
-		managerRevisions.push({ entryId, revision: row.score.revision });
+		managerRevisions.set(entryId, row.score.revision);
 	}
 	if (!snapshotRevision || !checkedAt || !state) return null;
-	managerRevisions.sort((left, right) => left.entryId - right.entryId);
+	const orderedManagerRevisions = [...managerRevisions]
+		.sort(([left], [right]) => left - right)
+		.map(([entryId, revision]) => ({ entryId, revision }));
 	const revisionHash = createHash("sha256")
 		.update(
-			stableStringify({ eventId, livePublicationId, snapshotRevision, managerRevisions }),
+			stableStringify({
+				eventId,
+				livePublicationId,
+				snapshotRevision,
+				managerRevisions: orderedManagerRevisions,
+			}),
 			"utf8"
 		)
 		.digest("hex")
 		.slice(0, 24);
 	return {
 		scores,
+		managerRevisions,
 		revision: `event-live-h2h:${eventId}:${revisionHash}`,
 		checkedAt,
 		state,
@@ -1943,8 +1960,12 @@ async function loadEventLiveH2HScoreBatches(
 		}
 	}
 	const scores = new Map<number, number>();
+	const managerRevisions = new Map<number, string>();
 	for (const batch of completeBatches) {
 		for (const [entryId, score] of batch.scores) scores.set(entryId, score);
+		for (const [entryId, revision] of batch.managerRevisions) {
+			managerRevisions.set(entryId, revision);
+		}
 	}
 	const revisionHash = createHash("sha256")
 		.update(
@@ -1960,6 +1981,7 @@ async function loadEventLiveH2HScoreBatches(
 		.slice(0, 24);
 	return {
 		scores,
+		managerRevisions,
 		revision: `event-live-h2h:${eventId}:${revisionHash}`,
 		checkedAt: first.checkedAt,
 		state: first.state,

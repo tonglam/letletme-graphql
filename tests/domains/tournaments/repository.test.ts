@@ -137,6 +137,9 @@ const activeOfficialH2HLoad = (): OfficialH2HSnapshotLoad => ({
 	validatedFinalizedEventIds: new Set(),
 });
 
+const managerRevisionMap = (...entryIds: number[]): Map<number, string> =>
+	new Map(entryIds.map((entryId) => [entryId, `manager-${entryId}-r1`]));
+
 describe("projectOfficialH2HEventLiveSnapshot", () => {
 	it("replaces a lagging official H2H score with one coherent event-live batch", () => {
 		const projected = projectOfficialH2HEventLiveSnapshot(
@@ -147,6 +150,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[101, 37],
 					[102, 31],
 				]),
+				managerRevisions: managerRevisionMap(101, 102),
 				revision: "event-live-gw1-r8",
 				checkedAt: "2026-08-24T00:01:00.000Z",
 				state: "live",
@@ -178,6 +182,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 			1,
 			{
 				scores: new Map([[101, 37]]),
+				managerRevisions: managerRevisionMap(101, 102),
 				revision: "event-live-gw1-r8",
 				checkedAt: "2026-08-24T00:01:00.000Z",
 				state: "live",
@@ -203,6 +208,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[101, 0],
 					[102, 0],
 				]),
+				managerRevisions: managerRevisionMap(101, 102),
 				revision: "event-live-gw1-r9",
 				checkedAt: "2026-08-24T00:02:00.000Z",
 				state: "live",
@@ -229,6 +235,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[101, 37],
 					[102, 31],
 				]),
+				managerRevisions: managerRevisionMap(101, 102),
 				revision: "event-live-gw1-r10",
 				checkedAt: "2026-08-24T00:03:00.000Z",
 				state: "live",
@@ -251,6 +258,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[101, 37],
 					[102, 31],
 				]),
+				managerRevisions: managerRevisionMap(101, 102),
 				revision: "event-live-gw1-r11",
 				checkedAt: "2026-08-24T00:04:00.000Z",
 				state: "settled",
@@ -278,6 +286,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[101, 37],
 					[102, 31],
 				]),
+				managerRevisions: managerRevisionMap(101, 102),
 				revision: "event-live-gw1-r12",
 				checkedAt: "2026-08-24T00:05:00.000Z",
 				state: "live",
@@ -307,6 +316,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[101, 37],
 					[102, 31],
 				]),
+				managerRevisions: managerRevisionMap(101, 102),
 				revision: "event-live-gw1-knockout",
 				checkedAt: "2026-08-24T00:06:00.000Z",
 				state: "live",
@@ -350,6 +360,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 			1,
 			{
 				scores: new Map([[101, 37]]),
+				managerRevisions: managerRevisionMap(101),
 				revision: "event-live-gw1-bye",
 				checkedAt: "2026-08-24T00:06:30.000Z",
 				state: "live",
@@ -389,6 +400,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[101, 37],
 					[102, 31],
 				]),
+				managerRevisions: managerRevisionMap(101, 102),
 				revision: "event-live-gw1-first-leg",
 				checkedAt: "2026-08-24T00:06:45.000Z",
 				state: "live",
@@ -606,7 +618,9 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 	const liveBatchResult = (
 		entryIds: readonly number[],
 		liveRevision = "8",
-		checkedAt = "2026-08-24T00:08:00.000Z"
+		checkedAt = "2026-08-24T00:08:00.000Z",
+		snapshotCheckedAt = checkedAt,
+		snapshotPublicationId = "00000000-0000-4000-8000-000000000008"
 	) => ({
 		results: new Map(
 			entryIds.map((entryId, index) => [
@@ -639,7 +653,12 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 							rankCheckedAt: null,
 						},
 					},
-					snapshot: { revision: liveRevision, checkedAt, state: "live" },
+					snapshot: {
+						revision: liveRevision,
+						publicationId: snapshotPublicationId,
+						checkedAt: snapshotCheckedAt,
+						state: "live",
+					},
 				} as never,
 			])
 		),
@@ -723,6 +742,38 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 		}
 	});
 
+	it("binds H2H scores by publication identity while allowing distinct source timestamps", async () => {
+		const original = entryLiveBatchService.calcLivePointsForEntries;
+		entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, ids) =>
+			liveBatchResult(ids, "8", "2026-08-24T00:08:00.000Z", "2026-08-24T00:09:00.000Z");
+
+		try {
+			const coherent = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
+				{ logger: { warn: () => undefined } } as never,
+				1,
+				[101, 102]
+			);
+			expect(coherent?.checkedAt).toBe("2026-08-24T00:08:00.000Z");
+
+			entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, ids) =>
+				liveBatchResult(
+					ids,
+					"8",
+					"2026-08-24T00:08:00.000Z",
+					"2026-08-24T00:09:00.000Z",
+					"00000000-0000-4000-8000-000000000009"
+				);
+			const mismatchedPublication = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
+				{ logger: { warn: () => undefined } } as never,
+				1,
+				[101, 102]
+			);
+			expect(mismatchedPublication).toBeNull();
+		} finally {
+			entryLiveBatchService.calcLivePointsForEntries = original;
+		}
+	});
+
 	it("uses one coherent event-live batch across tournaments", async () => {
 		const first = activeOfficialH2HLoad();
 		const second = activeOfficialH2HLoad();
@@ -785,7 +836,12 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 									rankCheckedAt: null,
 								},
 							},
-							snapshot: { revision: "8", checkedAt, state: "live" },
+							snapshot: {
+								revision: "8",
+								publicationId: "00000000-0000-4000-8000-000000000008",
+								checkedAt,
+								state: "live",
+							},
 						} as never,
 					])
 				),
@@ -838,6 +894,11 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 				[102, 31],
 				[999, 80],
 			]),
+			managerRevisions: new Map([
+				[101, "manager-101-a"],
+				[102, "manager-102-a"],
+				[999, "manager-999-a"],
+			]),
 			revision: "shared-batch-a",
 			checkedAt: "2026-08-24T00:08:00.000Z",
 			state: "live" as const,
@@ -853,6 +914,20 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 				[999, 1],
 				[1000, 99],
 			]),
+			managerRevisions: new Map([
+				[101, "manager-101-a"],
+				[102, "manager-102-a"],
+				[999, "manager-999-b"],
+				[1000, "manager-1000-a"],
+			]),
+		};
+		const relevantRevisionChange = {
+			...unrelatedChange,
+			managerRevisions: new Map([
+				[101, "manager-101-b"],
+				[102, "manager-102-a"],
+				[999, "manager-999-b"],
+			]),
 		};
 		const relevantChange = {
 			...unrelatedChange,
@@ -865,10 +940,17 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 
 		const first = projectOfficialH2HEventLiveSnapshot(loaded, 1, batch, new Set());
 		const second = projectOfficialH2HEventLiveSnapshot(loaded, 1, unrelatedChange, new Set());
+		const revisionChanged = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			relevantRevisionChange,
+			new Set()
+		);
 		const changed = projectOfficialH2HEventLiveSnapshot(loaded, 1, relevantChange, new Set());
 
 		expect(first.snapshot.scoreRevision).toMatch(/^event-live-h2h:1:[0-9a-f]{24}$/);
 		expect(second.snapshot.scoreRevision).toBe(first.snapshot.scoreRevision);
+		expect(revisionChanged.snapshot.scoreRevision).not.toBe(first.snapshot.scoreRevision);
 		expect(changed.snapshot.scoreRevision).not.toBe(first.snapshot.scoreRevision);
 	});
 });
