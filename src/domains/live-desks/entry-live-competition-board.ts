@@ -525,7 +525,12 @@ export const projectEntryLiveCompetitionBoardRow = (
 		entryName: row.entryName,
 		playerName: row.playerName,
 		rank: scoreIsPublishable ? row.rank : 0,
-		overallRank: scoreIsPublishable ? (boardScore.overallRank ?? row.overallRank) : 0,
+		// Overall rank is an entry-summary observation, not a live-player score.
+		// Keep the last verified value visible when the current live score is
+		// temporarily unavailable or has no rank observation. Clearing it to zero
+		// makes the UI render a dash and incorrectly turns a cadence difference into
+		// missing production data.
+		overallRank: boardScore.overallRank ?? row.overallRank,
 		teamValue: row.teamValue,
 		chip: row.chip,
 		livePoints: scoreIsPublishable ? row.livePoints : 0,
