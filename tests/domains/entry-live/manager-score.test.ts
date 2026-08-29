@@ -197,7 +197,7 @@ describe("Data manager score contract", () => {
 		expect(result.score.reasonCodes).toContain("UPSTREAM_UNAVAILABLE");
 	});
 
-	it("uses a fenced global live heartbeat without mutating immutable row provenance", () => {
+	it("uses a fenced live heartbeat while retaining independently observed ranks", () => {
 		const oldCheckedAt = new Date(Date.now() - 5 * 60_000).toISOString();
 		const heartbeatCheckedAt = new Date().toISOString();
 		const authority = row({
@@ -224,9 +224,10 @@ describe("Data manager score contract", () => {
 		expect(result.score.checkedAt).toBe(oldCheckedAt);
 		expect(result.score.provenance?.liveCheckedAt).toBe(oldCheckedAt);
 		expect(result.score.revision).toBe(authority.revision);
-		expect(result.score.eventRank).toBeNull();
-		expect(result.score.overallRank).toBeNull();
+		expect(result.score.eventRank).toBe(7);
+		expect(result.score.overallRank).toBe(101);
 		expect(result.score.leagueRank).toBeNull();
+		expect(result.score.provenance?.rankCheckedAt).toBe(oldCheckedAt);
 		expect(result.score.nextRefreshAt).toBe(
 			new Date(Date.parse(heartbeatCheckedAt) + 30_000).toISOString()
 		);

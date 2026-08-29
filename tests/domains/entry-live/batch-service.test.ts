@@ -959,11 +959,12 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				captainForScoring: pick.isCaptain,
 			})),
 		});
+		const staleRankCheckedAt = new Date(Date.now() - 5 * 60_000).toISOString();
 		staleRankRow.provenance = {
 			...(staleRankRow.provenance as Record<string, unknown>),
 			rankRevision: "rank-101",
 			rankSource: "FPL_ENTRY_SUMMARY",
-			rankCheckedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+			rankCheckedAt: staleRankCheckedAt,
 		};
 		installManagerLiveResponse(1, [staleRankRow], [101, 202]);
 		try {
@@ -982,8 +983,9 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				"NO_PICKS",
 			]);
 			expect(result.results.get(101)?.snapshot).toBeNull();
-			expect(result.results.get(101)?.score.overallRank).toBeNull();
-			expect(result.results.get(101)?.overallRank).toBe(0);
+			expect(result.results.get(101)?.score.overallRank).toBe(999);
+			expect(result.results.get(101)?.score.provenance?.rankCheckedAt).toBe(staleRankCheckedAt);
+			expect(result.results.get(101)?.overallRank).toBe(999);
 			expect(result.results.get(202)?.snapshot).toBeNull();
 		} finally {
 			restoreManagerLiveResponse();

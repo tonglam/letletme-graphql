@@ -613,7 +613,7 @@ describe("entry live competition board filtering and paging", () => {
 		expect(board([refreshed]).boardRevision).toBe(board([first]).boardRevision);
 	});
 
-	it("recomputes cached row status for no-op polls and freshness transitions", () => {
+	it("recomputes live-score status without expiring independently observed ranks", () => {
 		const first = managerLoad("2026-08-23T00:00:00.000Z");
 		const refreshed = managerLoad("2026-08-23T00:00:30.000Z");
 		const firstStatus = entryLiveCompetitionManagerStatusRevision(
@@ -647,7 +647,7 @@ describe("entry live competition board filtering and paging", () => {
 		expect(refreshedStatus).not.toBe(firstStatus);
 		expect(staleStatus).not.toBe(firstStatus);
 		expect(heartbeatFreshStatus).not.toBe(firstStatus);
-		expect(heartbeatRankStaleStatus).not.toBe(heartbeatRankFreshStatus);
+		expect(heartbeatRankStaleStatus).toBe(heartbeatRankFreshStatus);
 
 		const context = {
 			dataRevision: "core-1",

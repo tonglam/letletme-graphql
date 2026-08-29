@@ -358,35 +358,30 @@ describe("full-field live board bounded manager loads", () => {
 		).toBe(true);
 	});
 
-	it("requires a fresh independent rank observation for provisional overall-rank sorts", () => {
-		const now = Date.parse("2026-08-25T00:02:00.000Z");
-		const freshRank = makeManagerRow(1, 10);
-		freshRank.provenance.rankCheckedAt = "2026-08-25T00:00:31.000Z";
-		const staleRank = makeManagerRow(2, 10);
-		staleRank.provenance.rankCheckedAt = "2026-08-25T00:00:29.000Z";
+	it("requires an observed rank, not a live-heartbeat-aged rank, for overall-rank sorts", () => {
+		const observedRank = makeManagerRow(1, 10);
+		observedRank.provenance.rankCheckedAt = "2026-08-25T00:00:29.000Z";
+		const missingRank = { ...makeManagerRow(2, 10), overallRank: null };
 
 		expect(
-			hasComparableFullFieldManagerMetric(freshRank, {
+			hasComparableFullFieldManagerMetric(observedRank, {
 				requireNet: false,
 				requestedNet: false,
-				requireFreshOverallRank: true,
-				now,
+				requireOverallRank: true,
 			})
 		).toBe(true);
 		expect(
-			hasComparableFullFieldManagerMetric(staleRank, {
+			hasComparableFullFieldManagerMetric(missingRank, {
 				requireNet: false,
 				requestedNet: false,
-				requireFreshOverallRank: true,
-				now,
+				requireOverallRank: true,
 			})
 		).toBe(false);
 		expect(
-			hasComparableFullFieldManagerMetric(staleRank, {
+			hasComparableFullFieldManagerMetric(missingRank, {
 				requireNet: false,
 				requestedNet: false,
-				requireFreshOverallRank: false,
-				now,
+				requireOverallRank: false,
 			})
 		).toBe(true);
 	});
@@ -595,8 +590,12 @@ describe("full-field live board index", () => {
 		expect(freshHeartbeatBoard.rows[0]?.score.staleAt).toBe(
 			new Date(Date.parse(heartbeatCheckedAt) + 90_000).toISOString()
 		);
-		expect(freshHeartbeatBoard.rows[0]?.score.overallRank).toBeNull();
-		expect(freshHeartbeatBoard.rows[0]?.overallRank).toBe(0);
+		expect(freshHeartbeatBoard.rows[0]?.score.overallRank).toBe(1);
+		expect(freshHeartbeatBoard.rows[0]?.score.provenance?.rankCheckedAt).toBe(
+			boardInput.managerRows.get(1)?.provenance.rankCheckedAt ?? null
+		);
+		expect(freshHeartbeatBoard.rows[0]?.overallRank).toBe(1);
+		expect(freshHeartbeatBoard.rows[0]?.teamValue).toBe(100);
 
 		const grossFirstManagerRows = new Map(boardInput.managerRows);
 		const grossFirst = grossFirstManagerRows.get(1);
