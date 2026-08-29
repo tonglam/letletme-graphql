@@ -166,6 +166,29 @@ describe("Data manager score contract", () => {
 		expect(result.score.reasonCodes).toContain("UPSTREAM_UNAVAILABLE");
 	});
 
+	it("uses a fenced global live heartbeat without mutating immutable row provenance", () => {
+		const oldCheckedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+		const authority = row({
+			checkedAt: oldCheckedAt,
+			provenance: { ...provenance, liveCheckedAt: oldCheckedAt },
+		});
+		const result = buildManagerScore({
+			row: authority,
+			upstreamErrorCode: null,
+			provisional: true,
+			available: true,
+			transferCost: 0,
+			detailEventPoints: 42,
+			freshnessCheckedAt: new Date().toISOString(),
+		});
+
+		expect(result.score.state).toBe("FRESH");
+		expect(result.score.reasonCodes).not.toContain("SOURCE_TOO_OLD");
+		expect(result.score.checkedAt).toBe(oldCheckedAt);
+		expect(result.score.provenance?.liveCheckedAt).toBe(oldCheckedAt);
+		expect(result.score.revision).toBe(authority.revision);
+	});
+
 	it("reconciles gross event points, net points, and transfer cost from Data", () => {
 		const result = buildManagerScore({
 			row: row({

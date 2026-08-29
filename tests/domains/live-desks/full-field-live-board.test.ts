@@ -277,6 +277,32 @@ describe("full-field live board bounded manager loads", () => {
 				snapshot
 			)
 		).toBe(true);
+		expect(
+			managerScoresAlignedWithLiveSnapshot(
+				{ ...liveLoad, dataAvailability: "LAST_GOOD" },
+				{ finished: false, dataChecked: false },
+				snapshot
+			)
+		).toBe(true);
+		expect(
+			managerScoresAlignedWithLiveSnapshot(
+				{
+					...liveLoad,
+					dataAvailability: "LAST_GOOD",
+					rows: new Map(
+						[...liveLoad.rows].map(([entryId, managerRow]) => [
+							entryId,
+							{
+								...managerRow,
+								provenance: { ...managerRow.provenance, liveRevision: "older" },
+							},
+						])
+					),
+				},
+				{ finished: false, dataChecked: false },
+				snapshot
+			)
+		).toBe(false);
 	});
 
 	it("requires gross evidence when a classic field is requested in net order", () => {
@@ -476,6 +502,10 @@ describe("full-field live board index", () => {
 			requireNet: false,
 		};
 		const board = buildFullFieldLiveBoardIndex(boardInput);
+		const freshHeartbeatBoard = buildFullFieldLiveBoardIndex({
+			...boardInput,
+			freshnessCheckedAt: new Date().toISOString(),
+		});
 		const request: EntryLiveCompetitionBoardRequest = {
 			entryId: 1,
 			tournamentId: 8,
@@ -496,6 +526,11 @@ describe("full-field live board index", () => {
 		expect(page.filteredEntries).toBe(1);
 		expect(page.rows[0]?.entry).toBe(1);
 		expect(page.rows[0]?.score.source).toBe("FPL_EVENT_LIVE");
+		expect(board.rows[0]?.score.state).toBe("STALE");
+		expect(freshHeartbeatBoard.rows[0]?.score.state).toBe("FRESH");
+		expect(freshHeartbeatBoard.rows[0]?.score.checkedAt).toBe(
+			boardInput.managerRows.get(1)?.checkedAt ?? null
+		);
 
 		const grossFirstManagerRows = new Map(boardInput.managerRows);
 		const grossFirst = grossFirstManagerRows.get(1);

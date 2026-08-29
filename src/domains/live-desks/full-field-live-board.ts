@@ -1,6 +1,10 @@
 import type { Entry, EntryEventResult } from "../entries/repository";
 import { hasCompleteEntryEventPick, type EntryEventPick } from "../entry-live/repository";
-import { unavailableManagerScore, type LiveManagerScore } from "../entry-live/manager-score";
+import {
+	MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS,
+	unavailableManagerScore,
+	type LiveManagerScore,
+} from "../entry-live/manager-score";
 import { parseFullFieldLiveBoardEnabled } from "../../infra/env-value";
 import type { ManagerLiveScoreRow, ManagerLiveSource } from "../../infra/manager-live-client";
 import type { Player } from "../players/repository";
@@ -37,10 +41,16 @@ const isUsableMetric = (score: LiveManagerScore, requireNet: boolean): boolean =
 		? typeof score.netEventPoints === "number" && score.eventPointSemantics !== "UNKNOWN"
 		: typeof score.eventPoints === "number";
 
-const scoreFromDataRow = (row: ManagerLiveScoreRow | undefined): LiveManagerScore => {
+const scoreFromDataRow = (
+	row: ManagerLiveScoreRow | undefined,
+	freshnessCheckedAt?: string | null
+): LiveManagerScore => {
 	if (!row) return unavailableManagerScore();
-	const checkedAt = Date.parse(row.checkedAt);
-	const fresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= 30_000;
+	const checkedAt = Date.parse(freshnessCheckedAt ?? row.checkedAt);
+	const freshnessWindowMs = freshnessCheckedAt
+		? MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS * 1_000
+		: 30_000;
+	const fresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= freshnessWindowMs;
 	const state = row.source === "FPL_FINAL_RESULT" ? "FINAL" : fresh ? "FRESH" : "STALE";
 	return {
 		eventPoints: row.eventPoints,
@@ -118,6 +128,8 @@ export type FullFieldLiveBoardIndexInput = {
 	/** Event-scoped team ids; current player rows are only a name/value fallback. */
 	playerTeamIds?: ReadonlyMap<number, number>;
 	managerRows: ReadonlyMap<number, ManagerLiveScoreRow>;
+	/** Current shared live heartbeat, after exact publication/revision fencing. */
+	freshnessCheckedAt?: string | null;
 	requireNet: boolean;
 	/** Finalized FPL rows may legitimately have no captain boost. */
 	allowFinalNoCaptainBoost?: boolean;
@@ -190,7 +202,7 @@ export const buildFullFieldLiveBoardIndex = (
 		}
 		const captain = (pick?.picks ?? []).find((selected) => selected.isCaptain);
 		const managerRow = input.managerRows.get(entryId);
-		const loadedScore = scoreFromDataRow(managerRow);
+		const loadedScore = scoreFromDataRow(managerRow, input.freshnessCheckedAt);
 		// Data may omit transferCost for a standings row even though the
 		// event-scoped pick row has the official transfer cost. Keep the index's
 		// ordering/filter value faithful to the pick contract in that case.

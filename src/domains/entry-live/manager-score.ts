@@ -56,6 +56,13 @@ export type ManagerScoreLoad = ManagerLiveFetchResult;
 export type OfficialManagerScoreRow = ManagerLiveScoreRow;
 
 export const MANAGER_SCORE_REFRESH_SECONDS = 30;
+/**
+ * The live publication heartbeat is shared by every manager score pinned to
+ * the same immutable publication/revision. It uses the same active-live grace
+ * as the live window: a delayed 30-second poll gets one bounded cycle of
+ * margin without requiring every manager head to be rewritten.
+ */
+export const MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS = 90;
 
 const ageSeconds = (checkedAt: string, now = Date.now()): number => {
 	const timestamp = Date.parse(checkedAt);
@@ -167,6 +174,12 @@ export function buildManagerScore(params: {
 	transferCost: number | null;
 	detailEventPoints: number;
 	nextRefreshAt?: string | null;
+	/**
+	 * A current global live-publication heartbeat, supplied only after the
+	 * caller has proved that the row is pinned to that exact publication and
+	 * revision. The row's own checkedAt/provenance remain unchanged.
+	 */
+	freshnessCheckedAt?: string | null;
 }): {
 	score: LiveManagerScore;
 	headline: { rank: number; livePoints: number; liveNetPoints: number; liveTotalPoints: number };
@@ -228,7 +241,11 @@ export function buildManagerScore(params: {
 				? "MATCHED"
 				: "SOURCE_SKEW"
 			: "NOT_COMPARABLE";
-	const fresh = ageSeconds(row.checkedAt) <= MANAGER_SCORE_REFRESH_SECONDS;
+	const freshnessCheckedAt = params.freshnessCheckedAt ?? row.checkedAt;
+	const freshnessWindowSeconds = params.freshnessCheckedAt
+		? MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS
+		: MANAGER_SCORE_REFRESH_SECONDS;
+	const fresh = ageSeconds(freshnessCheckedAt) <= freshnessWindowSeconds;
 	const reasons: LiveManagerScoreReason[] = [];
 	if (upstreamErrorCode === "UPSTREAM_RATE_LIMITED") reasons.push("UPSTREAM_RATE_LIMITED");
 	else if (upstreamErrorCode && upstreamErrorCode !== "UNSUPPORTED_H2H_LIVE")
@@ -256,7 +273,7 @@ export function buildManagerScore(params: {
 		staleAt: row.staleAt,
 		nextRefreshAt: isFinalRow
 			? null
-			: (params.nextRefreshAt ?? plusSeconds(row.checkedAt, MANAGER_SCORE_REFRESH_SECONDS)),
+			: (params.nextRefreshAt ?? plusSeconds(freshnessCheckedAt, MANAGER_SCORE_REFRESH_SECONDS)),
 		reconciliation,
 		reasonCodes: reasons,
 		calculationMode: row.calculationMode,

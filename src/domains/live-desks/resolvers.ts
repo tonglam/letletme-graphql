@@ -455,22 +455,26 @@ export const managerScoresAlignedWithLiveSnapshot = (
 			Array.from(managerScores.rows.values()).every((row) => row.source === "FPL_FINAL_RESULT")
 		);
 	}
-	if (managerScores.dataAvailability !== "FRESH") return false;
+	if (
+		(managerScores.dataAvailability !== "FRESH" &&
+			managerScores.dataAvailability !== "LAST_GOOD") ||
+		managerScores.errorCode !== null ||
+		managerScores.missingEntryIds.length > 0
+	)
+		return false;
 	if (!snapshot) return false;
-	const livePublishedAt = Date.parse(snapshot.publishedAt || snapshot.lastSuccessfulFetchAt);
-	if (!Number.isFinite(livePublishedAt)) return false;
+	if (typeof snapshot.publicationId !== "string" || snapshot.publicationId.trim() === "")
+		return false;
 	return Array.from(managerScores.rows.values()).every((row) => {
 		const managerCheckedAt = Date.parse(row.checkedAt);
 		const provenance = row.provenance;
 		return (
 			row.source === "FPL_EVENT_LIVE" &&
 			Number.isFinite(managerCheckedAt) &&
-			managerCheckedAt >= livePublishedAt &&
 			provenance?.scoreSource === "FPL_EVENT_LIVE" &&
 			provenance.calculationMode === "PROJECTED_AUTOSUBS" &&
-			(snapshot.publicationId === null ||
-				(provenance.livePublicationId === snapshot.publicationId &&
-					provenance.liveRevision === snapshot.revision))
+			provenance.livePublicationId === snapshot.publicationId &&
+			provenance.liveRevision === snapshot.revision
 		);
 	});
 };
@@ -895,6 +899,7 @@ export const liveDesksResolvers = {
 						completeManagerScores.rows.size === allEntryIds.length &&
 						completeManagerScores.missingEntryIds.length === 0 &&
 						hasAllRankMetrics &&
+						((event.finished && event.dataChecked) || window.dataAvailability === "FRESH") &&
 						managerScoresAlignedWithLiveSnapshot(completeManagerScores, event, snapshot);
 				} catch (error) {
 					context.logger.warn(
@@ -915,6 +920,7 @@ export const liveDesksResolvers = {
 					managerScores.rows.size === allEntryIds.length &&
 					managerScores.missingEntryIds.length === 0 &&
 					hasAllRankMetrics &&
+					((event.finished && event.dataChecked) || window.dataAvailability === "FRESH") &&
 					managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
 			}
 			const managerScores = selectManagerScoresForBoard(
@@ -922,6 +928,18 @@ export const liveDesksResolvers = {
 				expandedManagerScores,
 				fullFieldDataReady
 			);
+			const managerRowsAlignedWithCurrentSnapshot = managerScoresAlignedWithLiveSnapshot(
+				managerScores,
+				event,
+				snapshot
+			);
+			const managerFreshnessCheckedAt =
+				!event.finished &&
+				window.dataAvailability === "FRESH" &&
+				typeof snapshot?.publicationId === "string" &&
+				managerRowsAlignedWithCurrentSnapshot
+					? (snapshot?.lastSuccessfulFetchAt ?? null)
+					: null;
 			const managerRevision = managerLoadRevision(managerScores);
 			const managerStatusRevision = entryLiveCompetitionManagerStatusRevision(managerScores);
 			const cacheIdentity = {
@@ -986,6 +1004,7 @@ export const liveDesksResolvers = {
 							return buildFullFieldLiveBoardIndex({
 								...cacheIdentity,
 								managerRows: managerScores.rows,
+								freshnessCheckedAt: managerFreshnessCheckedAt,
 								allEntryIds,
 								entries,
 								eventResults,
@@ -1172,6 +1191,7 @@ export const liveDesksResolvers = {
 				board.rows.length === board.totalEntries &&
 				board.officialCoverage === 1 &&
 				board.unavailableEntryIds.length === 0 &&
+				((event.finished && event.dataChecked) || window.dataAvailability === "FRESH") &&
 				managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
 			const deferredIds = new Set(effectiveDeferredEntryIds);
 			const failedIds = new Set(calculatedFailedEntryIds);
@@ -1195,11 +1215,13 @@ export const liveDesksResolvers = {
 				playerRevision: board.playerRevision,
 				managerRevision: board.managerRevision,
 				dataAvailability,
-				managerDataAvailability: managerScores.dataAvailability,
+				managerDataAvailability:
+					managerFreshnessCheckedAt !== null ? "FRESH" : managerScores.dataAvailability,
 				managerServedFrom: managerScores.servedFrom,
 				managerRefreshQueued: managerScores.refreshQueued,
-				managerCheckedAt: managerScores.checkedAt,
-				managerNextRefreshAt: managerScores.nextRefreshAt,
+				managerCheckedAt: managerFreshnessCheckedAt ?? managerScores.checkedAt,
+				managerNextRefreshAt:
+					managerFreshnessCheckedAt !== null ? window.nextRefreshAt : managerScores.nextRefreshAt,
 				coverageState,
 				rankScope: fullFieldReady ? "FULL_FIELD" : "AVAILABLE_ROWS",
 				computedEntries: board.rows.length,

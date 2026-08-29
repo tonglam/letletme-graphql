@@ -628,6 +628,13 @@ export const entryLiveBatchService = {
 					loadedLiveMeta.revision === detailLiveReference.revision))
 				? loadedLiveMeta
 				: null;
+		const managerFreshnessCheckedAt =
+			provisional &&
+			fullSnapshotMeta?.publicationId &&
+			dataLiveReference.reference?.publicationId === fullSnapshotMeta.publicationId &&
+			dataLiveReference.reference.revision === fullSnapshotMeta.revision
+				? fullSnapshotMeta.checkedAt
+				: null;
 		const detailReferenceUnavailable =
 			provisional && (dataLiveReference.conflict || detailLiveReference === null);
 		// Manager headline availability is independent from lineup availability.
@@ -703,6 +710,7 @@ export const entryLiveBatchService = {
 					transferCost: finalized?.eventTransfersCost ?? 0,
 					detailEventPoints: finalized?.eventPoints ?? 0,
 					nextRefreshAt: managerScores.nextRefreshAt,
+					freshnessCheckedAt: managerFreshnessCheckedAt,
 				});
 				results.set(entryId, {
 					...noPicks,
@@ -880,6 +888,7 @@ export const entryLiveBatchService = {
 					transferCost: calcData.transferCost,
 					detailEventPoints: calcData.livePoints,
 					nextRefreshAt: managerScores.nextRefreshAt,
+					freshnessCheckedAt: managerFreshnessCheckedAt,
 				});
 				// Never compose a player detail payload from a revision that failed to
 				// reconcile with the authoritative headline.
