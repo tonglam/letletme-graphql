@@ -137,4 +137,16 @@ describe("live desks tournament selection index", () => {
 		expect(board).toContain("isManagerScoreLiveHeartbeatFresh(snapshot?.lastSuccessfulFetchAt)");
 		expect(board.match(/fullFieldManagerFreshnessReady/g)?.length ?? 0).toBeGreaterThanOrEqual(5);
 	});
+
+	it("uses durable last-good heads for ordinary boards without weakening explicit refs", async () => {
+		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const board = source.slice(
+			source.indexOf("entryLiveCompetitionBoard: async"),
+			source.indexOf("entryLiveCompetitionsDesk: async")
+		);
+		expect(board).toContain("const managerLiveRef");
+		expect(board).toContain("managerScoreLoadCanUseLastGood");
+		expect(board).toContain('dataAvailability: "LAST_GOOD"');
+		expect(board).toContain("if (fullFieldBoard && !managerNeedsLastGoodDetailFence)");
+	});
 });

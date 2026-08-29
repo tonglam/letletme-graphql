@@ -482,6 +482,63 @@ export const managerScoresAlignedWithLiveSnapshot = (
 	});
 };
 
+/**
+ * A complete durable manager load is safe to use as a last-good board source
+ * even when its projected rows belong to an older live publication. This is
+ * deliberately separate from `managerScoresAlignedWithLiveSnapshot`: the
+ * latter remains the gate for advertising current FRESH scores.
+ */
+export const managerScoreLoadHasCompleteRows = (
+	managerScores: ManagerScoreLoad,
+	entryIds: readonly number[]
+): boolean => {
+	const expected = new Set(entryIds);
+	return (
+		managerScores.errorCode === null &&
+		managerScores.missingEntryIds.length === 0 &&
+		managerScores.rows.size === expected.size &&
+		Array.from(expected).every((entryId) => managerScores.rows.has(entryId))
+	);
+};
+
+export const managerScoreLoadHasCoherentLastGoodRevision = (
+	managerScores: ManagerScoreLoad,
+	entryIds: readonly number[]
+): boolean => {
+	if (!managerScoreLoadHasCompleteRows(managerScores, entryIds)) return false;
+	const rawLiveReferences = Array.from(managerScores.rows.values()).map((row) => {
+		const publicationId = row.provenance?.livePublicationId;
+		const revision = row.provenance?.liveRevision;
+		return publicationId && revision ? `${publicationId}:${revision}` : null;
+	});
+	if (rawLiveReferences.some((reference) => reference === null)) return false;
+	const liveReferences = new Set(rawLiveReferences as string[]);
+	if (liveReferences.size === 1) return true;
+	// A multi-chunk read may legitimately contain heads from different
+	// publications while Data's durable coverage checkpoint still proves one
+	// complete, internally consistent crawl. Accept that opaque checkpoint only
+	// when it covers exactly this request; otherwise the caller must not claim a
+	// full-field rank scope.
+	const coverage = managerScores.tournamentCoverage;
+	return (
+		liveReferences.size > 1 &&
+		coverage?.state === "COMPLETE" &&
+		coverage.expectedEntries === new Set(entryIds).size &&
+		coverage.resolvedEntries === coverage.expectedEntries &&
+		typeof coverage.managerRevision === "string" &&
+		coverage.managerRevision.trim().length > 0
+	);
+};
+
+export const managerScoreLoadCanUseLastGood = (
+	managerScores: ManagerScoreLoad,
+	entryIds: readonly number[],
+	allowLastGood: boolean
+): boolean =>
+	allowLastGood &&
+	managerScoreLoadHasCoherentLastGoodRevision(managerScores, entryIds) &&
+	(managerScores.dataAvailability === "FRESH" || managerScores.dataAvailability === "LAST_GOOD");
+
 type ComparableManagerRankRow = {
 	eventPoints: number | null;
 	netEventPoints: number | null;
@@ -844,6 +901,20 @@ export const liveDesksResolvers = {
 			const windowRevision = entryLiveCompetitionRosterRevision(entryIds);
 
 			const snapshot = await getLiveDataSnapshot(context, request.eventId).catch(() => null);
+			// A caller-supplied ref is an immutable read contract. Normal board pages
+			// intentionally omit the moving publication fence so Data can return the
+			// newest durable head (LAST_GOOD when the active publication has advanced)
+			// instead of making every page chase a revision that may disappear before
+			// the next chunk is read.
+			if (ref && (!snapshot || snapshot.revision !== ref.revision || !snapshot.publicationId)) {
+				throw new GraphQLError("Requested live revision has expired", {
+					extensions: { code: "LIVE_BOARD_REVISION_GONE" },
+				});
+			}
+			const managerLiveRef =
+				ref && snapshot?.publicationId
+					? { publicationId: snapshot.publicationId, revision: ref.revision }
+					: undefined;
 			const initialManagerScores = await loadManagerScores(
 				context,
 				request.eventId,
@@ -852,23 +923,10 @@ export const liveDesksResolvers = {
 				{
 					includeEffectiveLineup: true,
 					readMode: "CACHE_ONLY",
-					...(snapshot?.publicationId
-						? {
-								liveRef: {
-									publicationId: snapshot.publicationId,
-									revision: snapshot.revision,
-								},
-							}
-						: {}),
+					...(managerLiveRef ? { liveRef: managerLiveRef } : {}),
 				}
 			);
-			if (ref && (!snapshot || snapshot.revision !== ref.revision)) {
-				throw new GraphQLError("Requested live revision has expired", {
-					extensions: { code: "LIVE_BOARD_REVISION_GONE" },
-				});
-			}
 
-			const playerRevision = snapshot?.revision ?? corePlayerRevision;
 			const requireNet = memberTournament.leagueType === LeagueType.H2H;
 			const requestedNet = request.sort === "NET_EVENT_POINTS";
 			const requireOverallRank = request.sort === "OVERALL_RANK";
@@ -879,16 +937,28 @@ export const liveDesksResolvers = {
 				rosterRevision,
 				allEntryIds.length
 			);
+			const initialRowsAreComplete = managerScoreLoadHasCompleteRows(
+				initialManagerScores,
+				entryIds
+			);
+			const initialRowsAlignedWithCurrentSnapshot = managerScoresAlignedWithLiveSnapshot(
+				initialManagerScores,
+				event,
+				snapshot
+			);
+			const initialRowsCanUseLastGood = managerScoreLoadCanUseLastGood(
+				initialManagerScores,
+				entryIds,
+				!ref && !(event.finished && event.dataChecked)
+			);
 			const fullFieldManagerFreshnessReady =
 				(event.finished && event.dataChecked) ||
 				(window.dataAvailability === "FRESH" &&
 					isManagerScoreLiveHeartbeatFresh(snapshot?.lastSuccessfulFetchAt));
 			const initialWindowRowsAreUsable =
-				initialManagerScores.errorCode === null &&
-				initialManagerScores.rows.size === entryIds.length &&
-				initialManagerScores.missingEntryIds.length === 0 &&
-				fullFieldManagerFreshnessReady &&
-				managerScoresAlignedWithLiveSnapshot(initialManagerScores, event, snapshot);
+				initialRowsAreComplete &&
+				((fullFieldManagerFreshnessReady && initialRowsAlignedWithCurrentSnapshot) ||
+					initialRowsCanUseLastGood);
 			const initialHasComparableOverallTotals = allEntryIds.every((entryId) => {
 				const row = initialManagerScores.rows.get(entryId);
 				return row?.totalScope === "OVERALL" && typeof row.totalPoints === "number";
@@ -912,14 +982,7 @@ export const liveDesksResolvers = {
 							loadManagerScores(context, request.eventId, chunk, request.tournamentId, {
 								includeEffectiveLineup: true,
 								readMode: "CACHE_ONLY",
-								...(snapshot?.publicationId
-									? {
-											liveRef: {
-												publicationId: snapshot.publicationId,
-												revision: snapshot.revision,
-											},
-										}
-									: {}),
+								...(managerLiveRef ? { liveRef: managerLiveRef } : {}),
 							}),
 						2
 					);
@@ -937,14 +1000,22 @@ export const liveDesksResolvers = {
 							requireOverallRank,
 						});
 					});
+					const completeRowsAlignedWithCurrentSnapshot = managerScoresAlignedWithLiveSnapshot(
+						completeManagerScores,
+						event,
+						snapshot
+					);
+					const completeRowsCanUseLastGood = managerScoreLoadCanUseLastGood(
+						completeManagerScores,
+						allEntryIds,
+						!ref && !(event.finished && event.dataChecked)
+					);
 					fullFieldDataReady =
 						coverageFenceMatches &&
-						completeManagerScores.errorCode === null &&
-						completeManagerScores.rows.size === allEntryIds.length &&
-						completeManagerScores.missingEntryIds.length === 0 &&
+						managerScoreLoadHasCompleteRows(completeManagerScores, allEntryIds) &&
 						hasAllRankMetrics &&
-						fullFieldManagerFreshnessReady &&
-						managerScoresAlignedWithLiveSnapshot(completeManagerScores, event, snapshot);
+						((fullFieldManagerFreshnessReady && completeRowsAlignedWithCurrentSnapshot) ||
+							completeRowsCanUseLastGood);
 				} catch (error) {
 					context.logger.warn(
 						{ err: error, eventId: request.eventId, tournamentId: request.tournamentId },
@@ -962,28 +1033,54 @@ export const liveDesksResolvers = {
 				});
 				fullFieldDataReady =
 					canAttemptFullField &&
-					managerScores.rows.size === allEntryIds.length &&
-					managerScores.missingEntryIds.length === 0 &&
+					managerScoreLoadHasCompleteRows(managerScores, allEntryIds) &&
 					hasAllRankMetrics &&
-					fullFieldManagerFreshnessReady &&
-					managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
+					((fullFieldManagerFreshnessReady &&
+						managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot)) ||
+						managerScoreLoadCanUseLastGood(
+							managerScores,
+							allEntryIds,
+							!ref && !(event.finished && event.dataChecked)
+						));
 			}
-			const managerScores = selectManagerScoresForBoard(
+			const selectedManagerScores = selectManagerScoresForBoard(
 				initialManagerScores,
 				expandedManagerScores,
 				fullFieldDataReady
 			);
 			const managerRowsAlignedWithCurrentSnapshot = managerScoresAlignedWithLiveSnapshot(
-				managerScores,
+				selectedManagerScores,
 				event,
 				snapshot
 			);
+			const managerRowsAreCurrent =
+				fullFieldManagerFreshnessReady && managerRowsAlignedWithCurrentSnapshot;
+			const managerRowsAreMisaligned = !managerRowsAlignedWithCurrentSnapshot;
+			const managerRowsExpectedEntryIds = fullFieldDataReady ? allEntryIds : entryIds;
+			const managerUsingLastGood = managerScoreLoadCanUseLastGood(
+				selectedManagerScores,
+				managerRowsExpectedEntryIds,
+				!ref && !(event.finished && event.dataChecked) && !managerRowsAreCurrent
+			);
+			const managerNeedsLastGoodDetailFence = managerUsingLastGood && managerRowsAreMisaligned;
+			// Data can legitimately report FRESH based on the head's own checkedAt
+			// even when that head belongs to an older live publication. Normalize
+			// that response before it reaches score builders and page calculators so
+			// consumers see LAST_GOOD/STALE rather than a false current heartbeat.
+			const managerScores =
+				managerUsingLastGood && selectedManagerScores.dataAvailability === "FRESH"
+					? { ...selectedManagerScores, dataAvailability: "LAST_GOOD" as const }
+					: selectedManagerScores;
+			// Keep the public marker tied to the player publication. The web client
+			// uses this field to decide when to poll the live snapshot; replacing it
+			// with a manager-head hash would make every last-good response look like
+			// a new publication and create a refresh loop.
+			const playerRevision = snapshot?.revision ?? corePlayerRevision;
 			const managerFreshnessCheckedAt =
 				!(event.finished && event.dataChecked) &&
 				window.dataAvailability === "FRESH" &&
 				typeof snapshot?.publicationId === "string" &&
-				isManagerScoreLiveHeartbeatFresh(snapshot.lastSuccessfulFetchAt) &&
-				managerRowsAlignedWithCurrentSnapshot
+				managerRowsAreCurrent
 					? (snapshot?.lastSuccessfulFetchAt ?? null)
 					: null;
 			const managerRevision = managerLoadRevision(managerScores);
@@ -1104,14 +1201,8 @@ export const liveDesksResolvers = {
 								tournamentId: request.tournamentId,
 								managerScores,
 								managerReadMode: "CACHE_ONLY",
-								...(snapshot?.publicationId
-									? {
-											liveRef: {
-												publicationId: snapshot.publicationId,
-												revision: snapshot.revision,
-											},
-										}
-									: {}),
+								...(managerLiveRef ? { liveRef: managerLiveRef } : {}),
+								allowLastGoodManagerScores: managerNeedsLastGoodDetailFence,
 							}
 						);
 						const rankedRows = rankTournamentRowsByOfficialEventPoints(
@@ -1166,7 +1257,11 @@ export const liveDesksResolvers = {
 
 			let page = queryEntryLiveCompetitionBoard(board, request);
 			let calculatedFailedEntryIds = board.failedEntryIds;
-			if (fullFieldBoard) {
+			// A last-good full-field index already contains the authoritative durable
+			// headline and filter data. Do not issue a second per-page calculation
+			// against the moving live snapshot: that would reintroduce source skew,
+			// turn rows into unavailable, and enqueue needless refresh work.
+			if (fullFieldBoard && !managerNeedsLastGoodDetailFence) {
 				const pageEntryIds = Array.from(
 					new Set([
 						...page.rows.map((row) => row.entry),
@@ -1183,14 +1278,8 @@ export const liveDesksResolvers = {
 							tournamentId: request.tournamentId,
 							managerScores,
 							managerReadMode: "CACHE_ONLY",
-							...(snapshot?.publicationId
-								? {
-										liveRef: {
-											publicationId: snapshot.publicationId,
-											revision: snapshot.revision,
-										},
-									}
-								: {}),
+							...(managerLiveRef ? { liveRef: managerLiveRef } : {}),
+							allowLastGoodManagerScores: managerNeedsLastGoodDetailFence,
 						}
 					);
 					const calculatedFailed = calculated.errors.map((error) => error.entryId);
@@ -1232,12 +1321,13 @@ export const liveDesksResolvers = {
 						: "UNAVAILABLE");
 			const coverageState =
 				fullFieldBoard &&
-				managerScores.rows.size === allEntryIds.length &&
-				managerScores.missingEntryIds.length === 0 &&
+				managerScoreLoadHasCompleteRows(managerScores, allEntryIds) &&
 				board.rows.length === board.totalEntries &&
 				board.officialCoverage === 1 &&
 				board.unavailableEntryIds.length === 0 &&
-				((event.finished && event.dataChecked) || managerFreshnessCheckedAt !== null)
+				((event.finished && event.dataChecked) ||
+					managerFreshnessCheckedAt !== null ||
+					managerUsingLastGood)
 					? "COMPLETE"
 					: derivedCoverageState === "WARMING" ||
 						  derivedCoverageState === "COMPLETE" ||
@@ -1247,13 +1337,11 @@ export const liveDesksResolvers = {
 			const fullFieldReady =
 				fullFieldBoard &&
 				coverageState === "COMPLETE" &&
-				managerScores.rows.size === allEntryIds.length &&
-				managerScores.missingEntryIds.length === 0 &&
+				managerScoreLoadHasCompleteRows(managerScores, allEntryIds) &&
 				board.rows.length === board.totalEntries &&
 				board.officialCoverage === 1 &&
 				board.unavailableEntryIds.length === 0 &&
-				fullFieldManagerFreshnessReady &&
-				managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
+				((event.finished && event.dataChecked) || managerRowsAreCurrent || managerUsingLastGood);
 			const deferredIds = new Set(effectiveDeferredEntryIds);
 			const failedIds = new Set(calculatedFailedEntryIds);
 			const unavailableEntryCount = board.unavailableEntryIds.filter(
@@ -1277,7 +1365,11 @@ export const liveDesksResolvers = {
 				managerRevision: board.managerRevision,
 				dataAvailability,
 				managerDataAvailability:
-					managerFreshnessCheckedAt !== null ? "FRESH" : managerScores.dataAvailability,
+					managerFreshnessCheckedAt !== null
+						? "FRESH"
+						: managerUsingLastGood
+							? "LAST_GOOD"
+							: managerScores.dataAvailability,
 				managerServedFrom: managerScores.servedFrom,
 				managerRefreshQueued: managerScores.refreshQueued,
 				managerCheckedAt: managerFreshnessCheckedAt ?? managerScores.checkedAt,

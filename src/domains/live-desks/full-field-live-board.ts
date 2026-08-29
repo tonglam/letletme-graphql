@@ -48,9 +48,16 @@ const scoreFromDataRow = (
 ): LiveManagerScore => {
 	if (!row) return unavailableManagerScore();
 	const checkedAt = Date.parse(row.checkedAt);
-	const fresh = freshnessCheckedAt
-		? isManagerScoreLiveHeartbeatFresh(freshnessCheckedAt)
-		: Number.isFinite(checkedAt) && Date.now() - checkedAt <= 30_000;
+	// An explicit null is a negative publication-alignment result supplied by
+	// the resolver. Do not turn a recently written but older-revision head into
+	// FRESH merely because its own checkedAt is young. Undefined retains the
+	// standalone row-age behaviour for callers without a heartbeat fence.
+	const fresh =
+		freshnessCheckedAt === null
+			? false
+			: freshnessCheckedAt !== undefined
+				? isManagerScoreLiveHeartbeatFresh(freshnessCheckedAt)
+				: Number.isFinite(checkedAt) && Date.now() - checkedAt <= 30_000;
 	const state = row.source === "FPL_FINAL_RESULT" ? "FINAL" : fresh ? "FRESH" : "STALE";
 	return {
 		eventPoints: row.eventPoints,
