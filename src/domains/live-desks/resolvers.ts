@@ -509,6 +509,23 @@ export const hasComparableFullFieldManagerMetric = (
 	);
 };
 
+/**
+ * Tournament coverage is an advisory crawl checkpoint. A matching PARTIAL
+ * checkpoint may be behind the immutable manager heads, so it can authorize a
+ * bounded full-field verification; a mismatched roster or UNAVAILABLE fence
+ * must still fail closed.
+ */
+export const managerCoverageFenceMatches = (
+	coverage: ManagerScoreLoad["tournamentCoverage"],
+	rosterRevision: string,
+	expectedEntries: number
+): boolean =>
+	coverage === null ||
+	coverage === undefined ||
+	(coverage.state !== "UNAVAILABLE" &&
+		coverage.rosterRevision === rosterRevision &&
+		coverage.expectedEntries === expectedEntries);
+
 export const isScheduledTournamentEvent = (input: {
 	eventId: number;
 	currentEventId: number | null;
@@ -846,6 +863,17 @@ export const liveDesksResolvers = {
 			const requestedNet = request.sort === "NET_EVENT_POINTS";
 			const fullFieldEnabled = env.FULL_FIELD_LIVE_BOARD_ENABLED;
 			const initialCoverage = initialManagerScores.tournamentCoverage;
+			const initialCoverageFenceMatches = managerCoverageFenceMatches(
+				initialCoverage,
+				rosterRevision,
+				allEntryIds.length
+			);
+			const initialWindowRowsAreUsable =
+				initialManagerScores.errorCode === null &&
+				initialManagerScores.rows.size === entryIds.length &&
+				initialManagerScores.missingEntryIds.length === 0 &&
+				((event.finished && event.dataChecked) || window.dataAvailability === "FRESH") &&
+				managerScoresAlignedWithLiveSnapshot(initialManagerScores, event, snapshot);
 			const initialHasComparableOverallTotals = allEntryIds.every((entryId) => {
 				const row = initialManagerScores.rows.get(entryId);
 				return row?.totalScope === "OVERALL" && typeof row.totalPoints === "number";
@@ -857,10 +885,8 @@ export const liveDesksResolvers = {
 					(allEntryIds.length <= entryIds.length && initialHasComparableOverallTotals)) &&
 				request.captainPlayerIds.length === 0 &&
 				(request.ownership?.captainMode ?? "ANY") === "ANY" &&
-				initialCoverage?.state === "COMPLETE" &&
-				initialCoverage.rosterRevision === rosterRevision &&
-				initialCoverage.expectedEntries === allEntryIds.length &&
-				initialCoverage.resolvedEntries === allEntryIds.length;
+				initialCoverageFenceMatches &&
+				initialWindowRowsAreUsable;
 			let expandedManagerScores: ManagerScoreLoad | null = null;
 			let fullFieldDataReady = false;
 			if (canAttemptFullField && allEntryIds.length > entryIds.length) {
@@ -884,6 +910,11 @@ export const liveDesksResolvers = {
 					);
 					expandedManagerScores = completeManagerScores;
 					const coverage = completeManagerScores.tournamentCoverage;
+					const coverageFenceMatches = managerCoverageFenceMatches(
+						coverage,
+						rosterRevision,
+						allEntryIds.length
+					);
 					const hasAllRankMetrics = allEntryIds.every((entryId) => {
 						return hasComparableFullFieldManagerMetric(completeManagerScores.rows.get(entryId), {
 							requireNet,
@@ -891,11 +922,8 @@ export const liveDesksResolvers = {
 						});
 					});
 					fullFieldDataReady =
-						coverage?.state === "COMPLETE" &&
-						typeof coverage.managerRevision === "string" &&
-						coverage.rosterRevision === rosterRevision &&
-						coverage.expectedEntries === allEntryIds.length &&
-						coverage.resolvedEntries === allEntryIds.length &&
+						coverageFenceMatches &&
+						completeManagerScores.errorCode === null &&
 						completeManagerScores.rows.size === allEntryIds.length &&
 						completeManagerScores.missingEntryIds.length === 0 &&
 						hasAllRankMetrics &&
@@ -1176,16 +1204,22 @@ export const liveDesksResolvers = {
 						? "PARTIAL"
 						: "UNAVAILABLE");
 			const coverageState =
-				derivedCoverageState === "WARMING" ||
-				derivedCoverageState === "COMPLETE" ||
-				derivedCoverageState === "PARTIAL"
-					? derivedCoverageState
-					: "UNAVAILABLE";
+				fullFieldBoard &&
+				managerScores.rows.size === allEntryIds.length &&
+				managerScores.missingEntryIds.length === 0 &&
+				board.rows.length === board.totalEntries &&
+				board.officialCoverage === 1 &&
+				board.unavailableEntryIds.length === 0 &&
+				((event.finished && event.dataChecked) || managerFreshnessCheckedAt !== null)
+					? "COMPLETE"
+					: derivedCoverageState === "WARMING" ||
+						  derivedCoverageState === "COMPLETE" ||
+						  derivedCoverageState === "PARTIAL"
+						? derivedCoverageState
+						: "UNAVAILABLE";
 			const fullFieldReady =
+				fullFieldBoard &&
 				coverageState === "COMPLETE" &&
-				managerScores.tournamentCoverage?.rosterRevision === rosterRevision &&
-				managerScores.tournamentCoverage?.expectedEntries === allEntryIds.length &&
-				managerScores.tournamentCoverage?.resolvedEntries === allEntryIds.length &&
 				managerScores.rows.size === allEntryIds.length &&
 				managerScores.missingEntryIds.length === 0 &&
 				board.rows.length === board.totalEntries &&

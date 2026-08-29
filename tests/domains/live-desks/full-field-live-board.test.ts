@@ -11,6 +11,7 @@ import {
 	classifyEntryLiveCompetitionDataAvailability,
 	hasComparableFullFieldManagerMetric,
 	isScheduledTournamentEvent,
+	managerCoverageFenceMatches,
 	managerScoresAlignedWithLiveSnapshot,
 	selectManagerScoresForBoard,
 } from "../../../src/domains/live-desks/resolvers";
@@ -156,6 +157,32 @@ describe("full-field live board bounded manager loads", () => {
 
 		expect(merged.rows.size).toBe(2);
 		expect(merged.dataAvailability).toBe("PARTIAL");
+	});
+
+	it("allows direct head verification past a matching partial coverage checkpoint", () => {
+		const coverage = makeLoad([makeManagerRow(1, 10)], 2).tournamentCoverage;
+		if (!coverage) throw new Error("test coverage missing");
+		expect(
+			managerCoverageFenceMatches(
+				{ ...coverage, state: "PARTIAL", resolvedEntries: 1 },
+				"roster",
+				2
+			)
+		).toBe(true);
+		expect(
+			managerCoverageFenceMatches(
+				{ ...coverage, state: "UNAVAILABLE", resolvedEntries: 0 },
+				"roster",
+				2
+			)
+		).toBe(false);
+		expect(
+			managerCoverageFenceMatches(
+				{ ...coverage, state: "PARTIAL", rosterRevision: "older", resolvedEntries: 1 },
+				"roster",
+				2
+			)
+		).toBe(false);
 	});
 
 	it("does not synthesize complete coverage when a manager chunk omits coverage", () => {
