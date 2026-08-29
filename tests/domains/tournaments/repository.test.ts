@@ -355,6 +355,49 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 				expect.objectContaining({ entryId: 103, played: 1, pointsFor: 29 }),
 			])
 		);
+
+		loaded.history[0]!.source_checked_at = "2026-08-24T00:04:30.000Z";
+		loaded.history[1]!.source_checked_at = "2026-08-24T00:04:30.000Z";
+		const markerChanged = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+					[103, 29],
+				]),
+				managerRevisions: managerRevisionMap(101, 102, 103),
+				revision: "event-live-gw1-r12",
+				checkedAt: "2026-08-24T00:05:00.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+		expect(markerChanged.snapshot.scoreSource).toBe("FPL_EVENT_LIVE");
+		expect(markerChanged.snapshot.scoreRevision).not.toBe(projected.snapshot.scoreRevision);
+
+		loaded.history[0]!.source_checked_at = "2026-08-24T00:04:00.000Z";
+		loaded.history[1]!.source_checked_at = "2026-08-24T00:04:00.000Z";
+		loaded.history[1]!.away_net_points = 26;
+		const averageChanged = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([
+					[101, 37],
+					[102, 31],
+					[103, 29],
+				]),
+				managerRevisions: managerRevisionMap(101, 102, 103),
+				revision: "event-live-gw1-r12",
+				checkedAt: "2026-08-24T00:05:00.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+		expect(averageChanged.snapshot.scoreSource).toBe("FPL_EVENT_LIVE");
+		expect(averageChanged.snapshot.scoreRevision).not.toBe(projected.snapshot.scoreRevision);
 	});
 
 	for (const [description, sourceCheckedAt] of [
@@ -1061,6 +1104,10 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 				[1000, "manager-1000-a"],
 			]),
 		};
+		const heartbeatOnlyChange = {
+			...batch,
+			checkedAt: "2026-08-24T00:08:30.000Z",
+		};
 		const relevantRevisionChange = {
 			...unrelatedChange,
 			managerRevisions: new Map([
@@ -1079,6 +1126,12 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 		};
 
 		const first = projectOfficialH2HEventLiveSnapshot(loaded, 1, batch, new Set());
+		const heartbeatOnly = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			heartbeatOnlyChange,
+			new Set()
+		);
 		const second = projectOfficialH2HEventLiveSnapshot(loaded, 1, unrelatedChange, new Set());
 		const revisionChanged = projectOfficialH2HEventLiveSnapshot(
 			loaded,
@@ -1089,6 +1142,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 		const changed = projectOfficialH2HEventLiveSnapshot(loaded, 1, relevantChange, new Set());
 
 		expect(first.snapshot.scoreRevision).toMatch(/^event-live-h2h:1:[0-9a-f]{24}$/);
+		expect(heartbeatOnly.snapshot.scoreRevision).toBe(first.snapshot.scoreRevision);
 		expect(second.snapshot.scoreRevision).toBe(first.snapshot.scoreRevision);
 		expect(revisionChanged.snapshot.scoreRevision).not.toBe(first.snapshot.scoreRevision);
 		expect(changed.snapshot.scoreRevision).not.toBe(first.snapshot.scoreRevision);

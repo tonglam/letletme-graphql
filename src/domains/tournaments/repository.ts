@@ -1612,15 +1612,34 @@ function tournamentEventLiveScoreRevision(
 			score: batch.scores.get(entryId) ?? null,
 			managerRevision: batch.managerRevisions.get(entryId) ?? null,
 		}));
+	const retainedAverageScores = loaded.history
+		.filter(
+			(row) =>
+				row.event_id === eventId && (row.home_is_average === true || row.away_is_average === true)
+		)
+		.sort(
+			(left, right) =>
+				(left.source_order ?? Number.MAX_SAFE_INTEGER) -
+					(right.source_order ?? Number.MAX_SAFE_INTEGER) ||
+				(left.official_match_id ?? Number.MAX_SAFE_INTEGER) -
+					(right.official_match_id ?? Number.MAX_SAFE_INTEGER)
+		)
+		.map((row) => ({
+			officialMatchId: row.official_match_id,
+			sourceOrder: row.source_order,
+			sourceCheckedAt: normalizeOfficialH2HSourceCheckedAt(row.source_checked_at),
+			homeAverageScore: row.home_is_average === true ? row.home_net_points : null,
+			awayAverageScore: row.away_is_average === true ? row.away_net_points : null,
+		}));
 	const revisionHash = createHash("sha256")
 		.update(
 			stableStringify({
 				eventId,
 				livePublicationId: batch.livePublicationId ?? null,
 				snapshotRevision: batch.snapshotRevision ?? null,
-				checkedAt: batch.checkedAt,
 				state: batch.state,
 				entryScores,
+				retainedAverageScores,
 			}),
 			"utf8"
 		)
