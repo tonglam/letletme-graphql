@@ -175,6 +175,7 @@ describe("Data manager score contract", () => {
 
 	it("uses a fenced global live heartbeat without mutating immutable row provenance", () => {
 		const oldCheckedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+		const heartbeatCheckedAt = new Date().toISOString();
 		const authority = row({
 			checkedAt: oldCheckedAt,
 			provenance: {
@@ -190,7 +191,8 @@ describe("Data manager score contract", () => {
 			available: true,
 			transferCost: 0,
 			detailEventPoints: 42,
-			freshnessCheckedAt: new Date().toISOString(),
+			nextRefreshAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+			freshnessCheckedAt: heartbeatCheckedAt,
 		});
 
 		expect(result.score.state).toBe("FRESH");
@@ -201,6 +203,9 @@ describe("Data manager score contract", () => {
 		expect(result.score.eventRank).toBeNull();
 		expect(result.score.overallRank).toBeNull();
 		expect(result.score.leagueRank).toBeNull();
+		expect(result.score.nextRefreshAt).toBe(
+			new Date(Date.parse(heartbeatCheckedAt) + 90_000).toISOString()
+		);
 	});
 
 	it("reconciles gross event points, net points, and transfer cost from Data", () => {

@@ -286,7 +286,9 @@ export function buildManagerScore(params: {
 		staleAt: row.staleAt,
 		nextRefreshAt: isFinalRow
 			? null
-			: (params.nextRefreshAt ?? plusSeconds(freshnessCheckedAt, MANAGER_SCORE_REFRESH_SECONDS)),
+			: params.freshnessCheckedAt
+				? plusSeconds(freshnessCheckedAt, MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS)
+				: (params.nextRefreshAt ?? plusSeconds(freshnessCheckedAt, MANAGER_SCORE_REFRESH_SECONDS)),
 		reconciliation,
 		reasonCodes: reasons,
 		calculationMode: row.calculationMode,

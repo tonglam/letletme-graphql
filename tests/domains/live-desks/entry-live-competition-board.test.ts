@@ -633,10 +633,21 @@ describe("entry live competition board filtering and paging", () => {
 			Date.parse("2026-08-23T00:00:10.000Z"),
 			true
 		);
+		const heartbeatRankFreshStatus = entryLiveCompetitionManagerStatusRevision(
+			first,
+			Date.parse("2026-08-23T00:01:00.000Z"),
+			true
+		);
+		const heartbeatRankStaleStatus = entryLiveCompetitionManagerStatusRevision(
+			first,
+			Date.parse("2026-08-23T00:01:31.000Z"),
+			true
+		);
 
 		expect(refreshedStatus).not.toBe(firstStatus);
 		expect(staleStatus).not.toBe(firstStatus);
 		expect(heartbeatFreshStatus).not.toBe(firstStatus);
+		expect(heartbeatRankStaleStatus).not.toBe(heartbeatRankFreshStatus);
 
 		const context = {
 			dataRevision: "core-1",

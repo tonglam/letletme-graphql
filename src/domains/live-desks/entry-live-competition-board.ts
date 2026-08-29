@@ -7,6 +7,7 @@ import type { LiveCalcData } from "../entry-live/calc-service";
 import type { EntryEventResult } from "../entries/repository";
 import {
 	MANAGER_SCORE_REFRESH_SECONDS,
+	isManagerScoreLiveHeartbeatFresh,
 	isTraceableOfficialManagerScore,
 	type LiveManagerScore,
 	type ManagerScoreLoad,
@@ -360,6 +361,9 @@ export const entryLiveCompetitionManagerStatusRevision = (
 						fresh:
 							Number.isFinite(checkedAt) &&
 							Math.max(0, (now - checkedAt) / 1000) <= MANAGER_SCORE_REFRESH_SECONDS,
+						rankFresh:
+							!liveHeartbeatFresh ||
+							isManagerScoreLiveHeartbeatFresh(row.provenance.rankCheckedAt, now),
 					};
 				}).sort((left, right) => left.entryId - right.entryId),
 			})
