@@ -507,8 +507,7 @@ export const hasComparableFullFieldManagerMetric = (
 	options: {
 		requireNet: boolean;
 		requestedNet: boolean;
-		requireFreshOverallRank?: boolean;
-		now?: number;
+		requireOverallRank?: boolean;
 	}
 ): boolean => {
 	const requiresNet = options.requireNet || options.requestedNet;
@@ -516,10 +515,7 @@ export const hasComparableFullFieldManagerMetric = (
 	return (
 		(!requiresNet || hasComparableManagerRankMetric(row, true)) &&
 		(!requiresGross || hasComparableManagerRankMetric(row, false)) &&
-		(!options.requireFreshOverallRank ||
-			(typeof row?.overallRank === "number" &&
-				row.overallRank > 0 &&
-				isManagerScoreLiveHeartbeatFresh(row.provenance?.rankCheckedAt, options.now)))
+		(!options.requireOverallRank || (typeof row?.overallRank === "number" && row.overallRank > 0))
 	);
 };
 
@@ -875,8 +871,7 @@ export const liveDesksResolvers = {
 			const playerRevision = snapshot?.revision ?? corePlayerRevision;
 			const requireNet = memberTournament.leagueType === LeagueType.H2H;
 			const requestedNet = request.sort === "NET_EVENT_POINTS";
-			const requireFreshOverallRank =
-				request.sort === "OVERALL_RANK" && !(event.finished && event.dataChecked);
+			const requireOverallRank = request.sort === "OVERALL_RANK";
 			const fullFieldEnabled = env.FULL_FIELD_LIVE_BOARD_ENABLED;
 			const initialCoverage = initialManagerScores.tournamentCoverage;
 			const initialCoverageFenceMatches = managerCoverageFenceMatches(
@@ -939,7 +934,7 @@ export const liveDesksResolvers = {
 						return hasComparableFullFieldManagerMetric(completeManagerScores.rows.get(entryId), {
 							requireNet,
 							requestedNet,
-							requireFreshOverallRank,
+							requireOverallRank,
 						});
 					});
 					fullFieldDataReady =
@@ -962,7 +957,7 @@ export const liveDesksResolvers = {
 					return hasComparableFullFieldManagerMetric(managerScores.rows.get(entryId), {
 						requireNet,
 						requestedNet,
-						requireFreshOverallRank,
+						requireOverallRank,
 					});
 				});
 				fullFieldDataReady =

@@ -283,13 +283,14 @@ export function buildManagerScore(params: {
 	const fresh = params.freshnessCheckedAt
 		? isManagerScoreLiveHeartbeatFresh(freshnessCheckedAt)
 		: ageSeconds(freshnessCheckedAt) <= MANAGER_SCORE_REFRESH_SECONDS;
-	const rankFresh =
-		params.freshnessCheckedAt === undefined ||
-		params.freshnessCheckedAt === null ||
-		isManagerScoreLiveHeartbeatFresh(row.provenance.rankCheckedAt);
-	const eventRank = rankFresh ? row.eventRank : null;
-	const overallRank = rankFresh ? row.overallRank : null;
-	const leagueRank = rankFresh ? row.leagueRank : null;
+	// Rank observations have an independent source and revision from the live
+	// player publication. Keep the last verified value visible when its source
+	// is older than the score heartbeat; rankCheckedAt still tells consumers how
+	// old that observation is. A live heartbeat may stale the score, but it must
+	// never turn a previously observed rank into missing data.
+	const eventRank = row.eventRank;
+	const overallRank = row.overallRank;
+	const leagueRank = row.leagueRank;
 	const reasons: LiveManagerScoreReason[] = [];
 	if (upstreamErrorCode === "UPSTREAM_RATE_LIMITED") reasons.push("UPSTREAM_RATE_LIMITED");
 	else if (upstreamErrorCode && upstreamErrorCode !== "UNSUPPORTED_H2H_LIVE")

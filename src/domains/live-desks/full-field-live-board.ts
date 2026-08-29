@@ -51,17 +51,17 @@ const scoreFromDataRow = (
 	const fresh = freshnessCheckedAt
 		? isManagerScoreLiveHeartbeatFresh(freshnessCheckedAt)
 		: Number.isFinite(checkedAt) && Date.now() - checkedAt <= 30_000;
-	const rankFresh =
-		!freshnessCheckedAt || isManagerScoreLiveHeartbeatFresh(row.provenance.rankCheckedAt);
 	const state = row.source === "FPL_FINAL_RESULT" ? "FINAL" : fresh ? "FRESH" : "STALE";
 	return {
 		eventPoints: row.eventPoints,
 		netEventPoints: row.netEventPoints,
 		totalPoints: row.totalPoints,
 		totalScope: row.totalScope,
-		eventRank: rankFresh ? row.eventRank : null,
-		overallRank: rankFresh ? row.overallRank : null,
-		leagueRank: rankFresh ? row.leagueRank : null,
+		// Rank provenance is independent of the shared live-score heartbeat. Keep
+		// the last verified observation and expose its age through rankCheckedAt.
+		eventRank: row.eventRank,
+		overallRank: row.overallRank,
+		leagueRank: row.leagueRank,
 		transferCost: row.transferCost ?? 0,
 		source: row.source as ManagerLiveSource,
 		state,
@@ -220,13 +220,10 @@ export const buildFullFieldLiveBoardIndex = (
 			entryName: entry.entryName,
 			playerName: entry.playerName,
 			rank: 0,
-			// A shared live heartbeat only fences the immutable score inputs. Entry
-			// metadata has no independently verified rank timestamp, so it must not
-			// restore a rank that scoreFromDataRow deliberately suppressed as stale.
-			overallRank:
-				eventResult?.overallRank ??
-				score.overallRank ??
-				(input.freshnessCheckedAt ? 0 : (entry.overallRank ?? 0)),
+			// Prefer event-scoped and independently revisioned manager observations,
+			// then retain the last known entry summary. Rank age is provenance, not a
+			// reason to erase a value that is still valid for this season/entry.
+			overallRank: eventResult?.overallRank ?? score.overallRank ?? entry.overallRank ?? 0,
 			teamValue: typeof teamValue === "number" ? teamValue / 10 : 0,
 			chip: canonicalChip(pick?.chip ?? null),
 			livePoints: score.eventPoints ?? 0,
