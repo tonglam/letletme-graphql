@@ -147,6 +147,6 @@ describe("live desks tournament selection index", () => {
 		expect(board).toContain("const managerLiveRef");
 		expect(board).toContain("managerScoreLoadCanUseLastGood");
 		expect(board).toContain('dataAvailability: "LAST_GOOD"');
-		expect(board).toContain("if (fullFieldBoard && !managerUsingLastGood)");
+		expect(board).toContain("if (fullFieldBoard && !managerNeedsLastGoodDetailFence)");
 	});
 });

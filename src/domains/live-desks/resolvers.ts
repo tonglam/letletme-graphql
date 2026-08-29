@@ -501,13 +501,42 @@ export const managerScoreLoadHasCompleteRows = (
 	);
 };
 
+export const managerScoreLoadHasCoherentLastGoodRevision = (
+	managerScores: ManagerScoreLoad,
+	entryIds: readonly number[]
+): boolean => {
+	if (!managerScoreLoadHasCompleteRows(managerScores, entryIds)) return false;
+	const rawLiveReferences = Array.from(managerScores.rows.values()).map((row) => {
+		const publicationId = row.provenance?.livePublicationId;
+		const revision = row.provenance?.liveRevision;
+		return publicationId && revision ? `${publicationId}:${revision}` : null;
+	});
+	if (rawLiveReferences.some((reference) => reference === null)) return false;
+	const liveReferences = new Set(rawLiveReferences as string[]);
+	if (liveReferences.size === 1) return true;
+	// A multi-chunk read may legitimately contain heads from different
+	// publications while Data's durable coverage checkpoint still proves one
+	// complete, internally consistent crawl. Accept that opaque checkpoint only
+	// when it covers exactly this request; otherwise the caller must not claim a
+	// full-field rank scope.
+	const coverage = managerScores.tournamentCoverage;
+	return (
+		liveReferences.size > 1 &&
+		coverage?.state === "COMPLETE" &&
+		coverage.expectedEntries === new Set(entryIds).size &&
+		coverage.resolvedEntries === coverage.expectedEntries &&
+		typeof coverage.managerRevision === "string" &&
+		coverage.managerRevision.trim().length > 0
+	);
+};
+
 export const managerScoreLoadCanUseLastGood = (
 	managerScores: ManagerScoreLoad,
 	entryIds: readonly number[],
 	allowLastGood: boolean
 ): boolean =>
 	allowLastGood &&
-	managerScoreLoadHasCompleteRows(managerScores, entryIds) &&
+	managerScoreLoadHasCoherentLastGoodRevision(managerScores, entryIds) &&
 	(managerScores.dataAvailability === "FRESH" || managerScores.dataAvailability === "LAST_GOOD");
 
 type ComparableManagerRankRow = {
@@ -1026,12 +1055,14 @@ export const liveDesksResolvers = {
 			);
 			const managerRowsAreCurrent =
 				fullFieldManagerFreshnessReady && managerRowsAlignedWithCurrentSnapshot;
+			const managerRowsAreMisaligned = !managerRowsAlignedWithCurrentSnapshot;
 			const managerRowsExpectedEntryIds = fullFieldDataReady ? allEntryIds : entryIds;
 			const managerUsingLastGood = managerScoreLoadCanUseLastGood(
 				selectedManagerScores,
 				managerRowsExpectedEntryIds,
 				!ref && !(event.finished && event.dataChecked) && !managerRowsAreCurrent
 			);
+			const managerNeedsLastGoodDetailFence = managerUsingLastGood && managerRowsAreMisaligned;
 			// Data can legitimately report FRESH based on the head's own checkedAt
 			// even when that head belongs to an older live publication. Normalize
 			// that response before it reaches score builders and page calculators so
@@ -1171,7 +1202,7 @@ export const liveDesksResolvers = {
 								managerScores,
 								managerReadMode: "CACHE_ONLY",
 								...(managerLiveRef ? { liveRef: managerLiveRef } : {}),
-								allowLastGoodManagerScores: managerUsingLastGood,
+								allowLastGoodManagerScores: managerNeedsLastGoodDetailFence,
 							}
 						);
 						const rankedRows = rankTournamentRowsByOfficialEventPoints(
@@ -1230,7 +1261,7 @@ export const liveDesksResolvers = {
 			// headline and filter data. Do not issue a second per-page calculation
 			// against the moving live snapshot: that would reintroduce source skew,
 			// turn rows into unavailable, and enqueue needless refresh work.
-			if (fullFieldBoard && !managerUsingLastGood) {
+			if (fullFieldBoard && !managerNeedsLastGoodDetailFence) {
 				const pageEntryIds = Array.from(
 					new Set([
 						...page.rows.map((row) => row.entry),
@@ -1248,7 +1279,7 @@ export const liveDesksResolvers = {
 							managerScores,
 							managerReadMode: "CACHE_ONLY",
 							...(managerLiveRef ? { liveRef: managerLiveRef } : {}),
-							allowLastGoodManagerScores: managerUsingLastGood,
+							allowLastGoodManagerScores: managerNeedsLastGoodDetailFence,
 						}
 					);
 					const calculatedFailed = calculated.errors.map((error) => error.entryId);
