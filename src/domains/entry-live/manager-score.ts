@@ -83,17 +83,26 @@ const plusSeconds = (iso: string, seconds: number): string => {
 		: new Date(Date.now() + seconds * 1000).toISOString();
 };
 
+export const managerScoreHeartbeatFreshnessDeadline = (checkedAt: string): string =>
+	plusSeconds(checkedAt, MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS);
+
 export const managerScoreHeartbeatRefreshDeadline = (
 	checkedAt: string,
 	candidate: string | null = null
 ): string => {
-	const heartbeatExpiry = plusSeconds(checkedAt, MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS);
+	const checkedAtTimestamp = Date.parse(checkedAt);
+	const heartbeatExpiry = managerScoreHeartbeatFreshnessDeadline(checkedAt);
+	const heartbeatExpiryTimestamp = Date.parse(heartbeatExpiry);
+	const defaultRefreshAt = plusSeconds(checkedAt, MANAGER_SCORE_REFRESH_SECONDS);
 	const candidateTimestamp = candidate === null ? Number.NaN : Date.parse(candidate);
-	return candidate !== null &&
+	if (
+		candidate !== null &&
 		Number.isFinite(candidateTimestamp) &&
-		candidateTimestamp < Date.parse(heartbeatExpiry)
-		? candidate
-		: heartbeatExpiry;
+		candidateTimestamp > checkedAtTimestamp
+	) {
+		return candidateTimestamp < heartbeatExpiryTimestamp ? candidate : heartbeatExpiry;
+	}
+	return defaultRefreshAt;
 };
 
 const hasTraceableRevision = (value: string | null | undefined): value is string =>
@@ -296,11 +305,14 @@ export function buildManagerScore(params: {
 		revision: row.revision,
 		checkedAt: row.checkedAt,
 		upstreamUpdatedAt: row.upstreamUpdatedAt,
-		staleAt: row.staleAt,
+		staleAt:
+			isFinalRow || !params.freshnessCheckedAt
+				? row.staleAt
+				: managerScoreHeartbeatFreshnessDeadline(freshnessCheckedAt),
 		nextRefreshAt: isFinalRow
 			? null
 			: params.freshnessCheckedAt
-				? managerScoreHeartbeatRefreshDeadline(freshnessCheckedAt)
+				? managerScoreHeartbeatRefreshDeadline(freshnessCheckedAt, params.nextRefreshAt)
 				: (params.nextRefreshAt ?? plusSeconds(freshnessCheckedAt, MANAGER_SCORE_REFRESH_SECONDS)),
 		reconciliation,
 		reasonCodes: reasons,

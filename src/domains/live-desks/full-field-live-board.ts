@@ -1,6 +1,7 @@
 import type { Entry, EntryEventResult } from "../entries/repository";
 import { hasCompleteEntryEventPick, type EntryEventPick } from "../entry-live/repository";
 import {
+	managerScoreHeartbeatFreshnessDeadline,
 	isManagerScoreLiveHeartbeatFresh,
 	unavailableManagerScore,
 	type LiveManagerScore,
@@ -68,7 +69,10 @@ const scoreFromDataRow = (
 		revision: row.revision,
 		checkedAt: row.checkedAt,
 		upstreamUpdatedAt: row.upstreamUpdatedAt,
-		staleAt: row.staleAt,
+		staleAt:
+			state === "FINAL" || !freshnessCheckedAt
+				? row.staleAt
+				: managerScoreHeartbeatFreshnessDeadline(freshnessCheckedAt),
 		nextRefreshAt: null,
 		reconciliation: "NOT_COMPARABLE",
 		reasonCodes: [],

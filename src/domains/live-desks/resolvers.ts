@@ -21,6 +21,7 @@ import { entryLiveRepository } from "../entry-live/repository";
 import {
 	isManagerScoreLiveHeartbeatFresh,
 	loadManagerScores,
+	managerScoreHeartbeatFreshnessDeadline,
 	managerScoreHeartbeatRefreshDeadline,
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
@@ -974,7 +975,7 @@ export const liveDesksResolvers = {
 			const managerRevision = managerLoadRevision(managerScores);
 			const managerHeartbeatDeadline =
 				managerFreshnessCheckedAt !== null
-					? managerScoreHeartbeatRefreshDeadline(managerFreshnessCheckedAt)
+					? managerScoreHeartbeatFreshnessDeadline(managerFreshnessCheckedAt)
 					: null;
 			const managerStatusRevision = entryLiveCompetitionManagerStatusRevision(
 				managerScores,

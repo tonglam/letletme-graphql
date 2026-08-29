@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildManagerScore,
 	isManagerScoreLiveHeartbeatFresh,
+	managerScoreHeartbeatFreshnessDeadline,
 	managerScoreHeartbeatRefreshDeadline,
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
@@ -86,10 +87,14 @@ describe("Data manager score contract", () => {
 
 	it("caps a wider live-window refresh deadline at heartbeat expiry", () => {
 		const heartbeat = "2026-08-29T02:00:00.000Z";
+		expect(managerScoreHeartbeatFreshnessDeadline(heartbeat)).toBe("2026-08-29T02:01:30.000Z");
 		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T02:05:00.000Z")).toBe(
 			"2026-08-29T02:01:30.000Z"
 		);
 		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T02:00:30.000Z")).toBe(
+			"2026-08-29T02:00:30.000Z"
+		);
+		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T01:59:30.000Z")).toBe(
 			"2026-08-29T02:00:30.000Z"
 		);
 	});
@@ -215,6 +220,9 @@ describe("Data manager score contract", () => {
 		expect(result.score.overallRank).toBeNull();
 		expect(result.score.leagueRank).toBeNull();
 		expect(result.score.nextRefreshAt).toBe(
+			new Date(Date.parse(heartbeatCheckedAt) + 30_000).toISOString()
+		);
+		expect(result.score.staleAt).toBe(
 			new Date(Date.parse(heartbeatCheckedAt) + 90_000).toISOString()
 		);
 	});

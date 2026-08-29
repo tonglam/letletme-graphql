@@ -529,9 +529,10 @@ describe("full-field live board index", () => {
 			requireNet: false,
 		};
 		const board = buildFullFieldLiveBoardIndex(boardInput);
+		const heartbeatCheckedAt = new Date().toISOString();
 		const freshHeartbeatBoard = buildFullFieldLiveBoardIndex({
 			...boardInput,
-			freshnessCheckedAt: new Date().toISOString(),
+			freshnessCheckedAt: heartbeatCheckedAt,
 		});
 		const request: EntryLiveCompetitionBoardRequest = {
 			entryId: 1,
@@ -557,6 +558,9 @@ describe("full-field live board index", () => {
 		expect(freshHeartbeatBoard.rows[0]?.score.state).toBe("FRESH");
 		expect(freshHeartbeatBoard.rows[0]?.score.checkedAt).toBe(
 			boardInput.managerRows.get(1)?.checkedAt ?? null
+		);
+		expect(freshHeartbeatBoard.rows[0]?.score.staleAt).toBe(
+			new Date(Date.parse(heartbeatCheckedAt) + 90_000).toISOString()
 		);
 		expect(freshHeartbeatBoard.rows[0]?.score.overallRank).toBeNull();
 		expect(freshHeartbeatBoard.rows[0]?.overallRank).toBe(0);
