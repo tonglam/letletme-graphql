@@ -517,6 +517,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 	it("keeps available rows when a cache-only cohort has cold entries", async () => {
 		const originalCalc = entryLiveBatchService.calcLivePointsForEntries;
 		let receivedPrefetched: Record<string, unknown> | undefined;
+		const receivedEntryIds: number[][] = [];
 		entryLiveBatchService.calcLivePointsForEntries = async (
 			_context,
 			eventId,
@@ -524,6 +525,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			prefetched
 		) => {
 			receivedPrefetched = prefetched as Record<string, unknown>;
+			receivedEntryIds.push([...entryIds]);
 			return {
 				results: new Map(
 					entryIds.map((entryId) => [entryId, { entry: entryId, event: eventId } as never])
@@ -540,6 +542,11 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		try {
 			const now = new Date().toISOString();
 			const result = await calcLivePointsForEntriesInChunks(makeMockContext({}), 33, [1, 2, 3], {
+				entriesById: new Map([
+					[1, {} as never],
+					[2, {} as never],
+					[3, {} as never],
+				]),
 				liveRef: { publicationId: "pub", revision: "1" },
 				managerScores: {
 					season: "2627",
@@ -574,8 +581,13 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			});
 			expect([...result.results.keys()]).toEqual([1, 2, 3]);
 			expect(result.errors.map((error) => error.entryId)).toEqual([3]);
+			expect(receivedEntryIds).toEqual([[1, 2]]);
+			expect(result.results.get(3)?.availability).toBe("LINEUP_UNAVAILABLE");
+			expect(result.results.get(3)?.score.reasonCodes).toContain("UPSTREAM_UNAVAILABLE");
 			expect(receivedPrefetched?.allowPartialManagerScores).toBe(true);
-			expect((receivedPrefetched?.managerScores as { errorCode?: unknown })?.errorCode).toBeNull();
+			expect((receivedPrefetched?.managerScores as { errorCode?: unknown })?.errorCode).toBe(
+				"INPUT_INCOMPLETE"
+			);
 		} finally {
 			entryLiveBatchService.calcLivePointsForEntries = originalCalc;
 		}

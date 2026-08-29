@@ -148,6 +148,41 @@ type PerEntryData = {
 	previousResult: EntryEventResult | null;
 };
 
+/**
+ * A cache-only manager miss must not fan out into the player/detail pipeline.
+ * Keep the entry visible with an honest unavailable score and the upstream
+ * reason, while callers can still render the rows that have a durable manager
+ * head.
+ */
+const buildUnavailableManagerLiveCalcData = (input: {
+	entryId: number;
+	eventId: number;
+	entry: Entry | null;
+	managerScores: ManagerScoreLoad;
+	provisional: boolean;
+}): LiveCalcData => {
+	const noPicks = buildNoPicksLiveCalcData(input.entryId, input.eventId, input.entry);
+	const manager = buildManagerScore({
+		upstreamErrorCode: input.managerScores.errorCode,
+		provisional: input.provisional,
+		available: false,
+		transferCost: 0,
+		detailEventPoints: 0,
+		nextRefreshAt: input.managerScores.nextRefreshAt,
+	});
+	return {
+		...noPicks,
+		availability: "LINEUP_UNAVAILABLE",
+		provisional: input.provisional,
+		score: manager.score,
+		rank: manager.headline.rank,
+		livePoints: manager.headline.livePoints,
+		liveNetPoints: manager.headline.liveNetPoints,
+		liveTotalPoints: manager.headline.liveTotalPoints,
+		overallRank: manager.score.overallRank ?? noPicks.overallRank,
+	};
+};
+
 const hasCompleteLineupMembership = (
 	picks: readonly { element: number }[],
 	authorityLineup: readonly EffectiveLineupRow[]
@@ -625,7 +660,6 @@ export const entryLiveBatchService = {
 		const canUseLastGoodManagerScores =
 			prefetched?.allowLastGoodManagerScores === true &&
 			prefetchedManagerScores?.dataAvailability === "LAST_GOOD" &&
-			prefetchedManagerScores.errorCode === null &&
 			(prefetchedManagerScores.missingEntryIds.length === 0 ||
 				prefetched?.allowPartialManagerScores === true);
 		const prefetchedManagerScoresAreUsable =
@@ -1069,16 +1103,11 @@ export const calcLivePointsForEntriesInChunks = async (
 	const allowLastGoodManagerScores =
 		prefetched?.allowLastGoodManagerScores === true ||
 		(!rowsAlignedWithCurrentLive && managerScores.dataAvailability !== "UNAVAILABLE");
-	const managerScoresWithPerEntryErrors =
-		managerScores.missingEntryIds.length > 0
-			? { ...managerScores, errorCode: null }
-			: managerScores;
 	const managerScoresForChunks =
 		allowLastGoodManagerScores &&
-		(managerScoresWithPerEntryErrors.dataAvailability === "FRESH" ||
-			managerScoresWithPerEntryErrors.dataAvailability === "PARTIAL")
-			? { ...managerScoresWithPerEntryErrors, dataAvailability: "LAST_GOOD" as const }
-			: managerScoresWithPerEntryErrors;
+		(managerScores.dataAvailability === "FRESH" || managerScores.dataAvailability === "PARTIAL")
+			? { ...managerScores, dataAvailability: "LAST_GOOD" as const }
+			: managerScores;
 	const chunkPrefetched: EntryLiveBatchPrefetched = {
 		...prefetched,
 		managerScores: managerScoresForChunks,
@@ -1089,9 +1118,40 @@ export const calcLivePointsForEntriesInChunks = async (
 			: {}),
 	};
 
-	const chunks = splitManagerLiveEntryIds(entryIds);
 	const results = new Map<number, LiveCalcData>();
 	const errors: Array<{ entryId: number; message: string }> = [];
+	const missingEntryIdSet = new Set(managerScores.missingEntryIds);
+	const calculationEntryIds = entryIds.filter((entryId) => !missingEntryIdSet.has(entryId));
+	const entriesForMissing = new Map(prefetched?.entriesById ?? []);
+	const missingEntriesToFetch = managerScores.missingEntryIds.filter(
+		(entryId) => !entriesForMissing.has(entryId)
+	);
+	const [fetchedMissingEntries, missingEvent] = await Promise.all([
+		missingEntriesToFetch.length > 0
+			? entriesService.getEntriesByIds(context, missingEntriesToFetch)
+			: Promise.resolve(new Map<number, Entry>()),
+		managerScores.missingEntryIds.length > 0
+			? eventsService.getEventById(context, eventId).catch(() => null)
+			: Promise.resolve(null),
+	]);
+	for (const [entryId, entry] of fetchedMissingEntries) entriesForMissing.set(entryId, entry);
+	if (managerScores.missingEntryIds.length > 0) {
+		const provisional = !(missingEvent?.finished === true && missingEvent.dataChecked === true);
+		for (const entryId of managerScores.missingEntryIds) {
+			results.set(
+				entryId,
+				buildUnavailableManagerLiveCalcData({
+					entryId,
+					eventId,
+					entry: entriesForMissing.get(entryId) ?? null,
+					managerScores,
+					provisional,
+				})
+			);
+		}
+	}
+
+	const chunks = splitManagerLiveEntryIds(calculationEntryIds);
 	for (let offset = 0; offset < chunks.length; offset += MANAGER_LIVE_SCORE_BATCH_CONCURRENCY) {
 		const loaded = await Promise.all(
 			chunks

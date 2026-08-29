@@ -145,6 +145,8 @@ describe("live desks tournament selection index", () => {
 		expect(detail).toContain("calcLivePointsForEntriesInChunks");
 		expect(detail).toContain("const calculationEntryIds = rosterEntryIds");
 		expect(detail).toContain("cachedRowsMatchRoster");
+		expect(detail).toContain("tournamentLiveRowsHaveOfficialMetrics");
+		expect(detail).toContain("!liveData.partial");
 		expect(detail).not.toContain("liveRef: {");
 	});
 

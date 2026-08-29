@@ -32,6 +32,25 @@ import {
 	type EventLiveH2HScoreBatch,
 } from "./h2h-live-score-repository";
 
+const tournamentLiveRowsHaveOfficialMetrics = (
+	rows: ReadonlyArray<{
+		score?: {
+			source?: string;
+			eventPoints?: number | null;
+			netEventPoints?: number | null;
+			eventPointSemantics?: string;
+		};
+	}>,
+	requireNet: boolean
+): boolean =>
+	rows.every((row) => {
+		const score = row.score;
+		if (score?.source !== "FPL_EVENT_LIVE" && score?.source !== "FPL_FINAL_RESULT") return false;
+		return requireNet
+			? typeof score.netEventPoints === "number" && score.eventPointSemantics !== "UNKNOWN"
+			: typeof score.eventPoints === "number";
+	});
+
 export enum TournamentMode {
 	NORMAL = "normal",
 }
@@ -4565,7 +4584,13 @@ export const tournamentsRepository: TournamentsRepository = {
 				const cachedRows = cachedCandidate?.board as
 					| Array<{
 							entry: number;
-							score?: { source?: string; state?: string };
+							score?: {
+								source?: string;
+								state?: string;
+								eventPoints?: number | null;
+								netEventPoints?: number | null;
+								eventPointSemantics?: string;
+							};
 					  }>
 					| undefined;
 				const rosterEntryIdSet = new Set(rosterEntryIds);
@@ -4580,6 +4605,10 @@ export const tournamentsRepository: TournamentsRepository = {
 					cachedRowsMatchRoster &&
 					cachedCandidate.totalEntries === cachedRows.length &&
 					cachedCandidate.totalEntries === rosterEntryIds.length &&
+					tournamentLiveRowsHaveOfficialMetrics(
+						cachedRows,
+						tournament.leagueType === LeagueType.H2H
+					) &&
 					managerScoreBoardIsFinal(cachedRows)
 						? cachedCandidate
 						: null;
@@ -4603,9 +4632,17 @@ export const tournamentsRepository: TournamentsRepository = {
 							// genuine misses without coupling page availability to that refresh.
 							managerReadMode: "CACHE_ONLY",
 						});
+				const calculatedRows = Array.from(result?.results.values() ?? []);
+				const calculatedRowsHaveOfficialMetrics = tournamentLiveRowsHaveOfficialMetrics(
+					calculatedRows,
+					tournament.leagueType === LeagueType.H2H
+				);
 				const liveData = cached ?? {
-					rows: rankTournamentRowsByOfficialEventPoints(Array.from(result?.results.values() ?? [])),
-					partial: (result?.errors.length ?? 0) > 0 || deferredEntryIds.length > 0,
+					rows: rankTournamentRowsByOfficialEventPoints(calculatedRows),
+					partial:
+						(result?.errors.length ?? 0) > 0 ||
+						deferredEntryIds.length > 0 ||
+						!calculatedRowsHaveOfficialMetrics,
 					failedEntryIds: [
 						...(result?.errors.map((error) => error.entryId) ?? []),
 						...deferredEntryIds,
@@ -4624,6 +4661,7 @@ export const tournamentsRepository: TournamentsRepository = {
 					result &&
 					deferredEntryIds.length === 0 &&
 					result.errors.length === 0 &&
+					!liveData.partial &&
 					managerScoreBoardIsFinal(liveData.rows)
 				) {
 					await writeCompetitionBoardCache(
