@@ -689,6 +689,8 @@ function normalizeOfficialH2HSourceCheckedAt(
 	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+const OFFICIAL_H2H_AVERAGE_MAX_SOURCE_SKEW_MS = 15 * 60 * 1000;
+
 function officialMatchSide(
 	entryId: number | null,
 	isAverage: boolean,
@@ -1711,11 +1713,23 @@ export function projectOfficialH2HEventLiveSnapshot(
 	const currentSourceRows = loaded.history.filter((row) => row.event_id === eventId);
 	const scoreEntryIds = activeOfficialH2HScoreEntryIds(loaded, eventId);
 	const hasRegularRound = currentSourceRows.length > 0;
+	const currentSourceMarkers = new Set(
+		currentSourceRows.map((row) => normalizeOfficialH2HSourceCheckedAt(row.source_checked_at))
+	);
+	const currentSourceMarker = currentSourceMarkers.size === 1 ? [...currentSourceMarkers][0] : null;
+	const regularRoundHasAtomicSource =
+		!hasRegularRound || (currentSourceMarker !== null && currentSourceMarkers.size === 1);
+	const sourceCheckedAtMs =
+		currentSourceMarker === null ? Number.NaN : Date.parse(currentSourceMarker);
+	const managerCheckedAtMs = Date.parse(batch.checkedAt);
 	const averageSidesAreCoherent = currentSourceRows.every((row) => {
 		const hasAverageSide = row.home_is_average === true || row.away_is_average === true;
 		if (!hasAverageSide) return true;
 		return (
-			normalizeOfficialH2HSourceCheckedAt(row.source_checked_at) === batch.checkedAt &&
+			Number.isFinite(sourceCheckedAtMs) &&
+			Number.isFinite(managerCheckedAtMs) &&
+			sourceCheckedAtMs <= managerCheckedAtMs &&
+			managerCheckedAtMs - sourceCheckedAtMs <= OFFICIAL_H2H_AVERAGE_MAX_SOURCE_SKEW_MS &&
 			(row.home_is_average !== true || typeof row.home_net_points === "number") &&
 			(row.away_is_average !== true || typeof row.away_net_points === "number")
 		);
@@ -1731,6 +1745,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 		entryIds.length !== expectedEntryCount ||
 		new Set(entryIds).size !== expectedEntryCount ||
 		(!hasRegularRound && !hasCompleteKnockoutSchedule) ||
+		!regularRoundHasAtomicSource ||
 		!averageSidesAreCoherent ||
 		scoreEntryIds.length === 0 ||
 		scoreEntryIds.some(
