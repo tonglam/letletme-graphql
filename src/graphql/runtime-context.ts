@@ -38,7 +38,7 @@ export type RuntimeContextFailure =
 
 export type RuntimeContextResult =
 	| Readonly<{ ok: true; context: GraphQLContext; fullCoreLoaded: boolean }>
-	| Readonly<{ ok: false; failure: RuntimeContextFailure }>;
+	| Readonly<{ ok: false; failure: RuntimeContextFailure; fullCoreLoaded: boolean }>;
 
 export const resolvePrincipalAndUser = async (
 	request: Request
@@ -78,6 +78,7 @@ export const buildGraphQLRuntimeContext = async ({
 		logger.warn({ err: error, requestId }, "Current season authority unavailable");
 		return {
 			ok: false,
+			fullCoreLoaded: false,
 			failure: {
 				kind: "season",
 				status: 503,
@@ -105,6 +106,7 @@ export const buildGraphQLRuntimeContext = async ({
 	if (!authorization.ok) {
 		return {
 			ok: false,
+			fullCoreLoaded: false,
 			failure: { kind: "authorization", authorization, outcome: "authorization_rejected" },
 		};
 	}
@@ -146,6 +148,7 @@ export const buildGraphQLRuntimeContext = async ({
 		logger.error({ err: error, requestId }, "Data publication authority is unavailable");
 		return {
 			ok: false,
+			fullCoreLoaded: true,
 			failure: {
 				kind: "publication",
 				status: 503,

@@ -436,6 +436,7 @@ export const startServer = async (): Promise<void> => {
 						limits,
 					});
 					if (!contextResult.ok) {
+						fullCoreLoaded = contextResult.fullCoreLoaded;
 						const { failure } = contextResult;
 						if (failure.kind === "authorization") {
 							return finalizeGraphQLResponse(
