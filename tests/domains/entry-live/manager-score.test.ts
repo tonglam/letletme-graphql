@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildManagerScore,
 	isManagerScoreLiveHeartbeatFresh,
+	managerScoreHeartbeatRefreshDeadline,
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
 } from "../../../src/domains/entry-live/manager-score";
@@ -81,6 +82,16 @@ describe("Data manager score contract", () => {
 		const now = Date.now();
 		expect(isManagerScoreLiveHeartbeatFresh(new Date(now - 89_000).toISOString(), now)).toBe(true);
 		expect(isManagerScoreLiveHeartbeatFresh(new Date(now - 91_000).toISOString(), now)).toBe(false);
+	});
+
+	it("caps a wider live-window refresh deadline at heartbeat expiry", () => {
+		const heartbeat = "2026-08-29T02:00:00.000Z";
+		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T02:05:00.000Z")).toBe(
+			"2026-08-29T02:01:30.000Z"
+		);
+		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T02:00:30.000Z")).toBe(
+			"2026-08-29T02:00:30.000Z"
+		);
 	});
 
 	it("does not expose a row with the wrong calculation mode as an active authority", () => {

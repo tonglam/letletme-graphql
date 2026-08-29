@@ -83,6 +83,19 @@ const plusSeconds = (iso: string, seconds: number): string => {
 		: new Date(Date.now() + seconds * 1000).toISOString();
 };
 
+export const managerScoreHeartbeatRefreshDeadline = (
+	checkedAt: string,
+	candidate: string | null = null
+): string => {
+	const heartbeatExpiry = plusSeconds(checkedAt, MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS);
+	const candidateTimestamp = candidate === null ? Number.NaN : Date.parse(candidate);
+	return candidate !== null &&
+		Number.isFinite(candidateTimestamp) &&
+		candidateTimestamp < Date.parse(heartbeatExpiry)
+		? candidate
+		: heartbeatExpiry;
+};
+
 const hasTraceableRevision = (value: string | null | undefined): value is string =>
 	typeof value === "string" && value.trim().length > 0;
 
@@ -287,7 +300,7 @@ export function buildManagerScore(params: {
 		nextRefreshAt: isFinalRow
 			? null
 			: params.freshnessCheckedAt
-				? plusSeconds(freshnessCheckedAt, MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS)
+				? managerScoreHeartbeatRefreshDeadline(freshnessCheckedAt)
 				: (params.nextRefreshAt ?? plusSeconds(freshnessCheckedAt, MANAGER_SCORE_REFRESH_SECONDS)),
 		reconciliation,
 		reasonCodes: reasons,

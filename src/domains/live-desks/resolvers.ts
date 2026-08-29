@@ -21,6 +21,7 @@ import { entryLiveRepository } from "../entry-live/repository";
 import {
 	isManagerScoreLiveHeartbeatFresh,
 	loadManagerScores,
+	managerScoreHeartbeatRefreshDeadline,
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
 	type ManagerScoreLoad,
@@ -1261,7 +1262,9 @@ export const liveDesksResolvers = {
 				managerRefreshQueued: managerScores.refreshQueued,
 				managerCheckedAt: managerFreshnessCheckedAt ?? managerScores.checkedAt,
 				managerNextRefreshAt:
-					managerFreshnessCheckedAt !== null ? window.nextRefreshAt : managerScores.nextRefreshAt,
+					managerFreshnessCheckedAt !== null
+						? managerScoreHeartbeatRefreshDeadline(managerFreshnessCheckedAt, window.nextRefreshAt)
+						: managerScores.nextRefreshAt,
 				coverageState,
 				rankScope: fullFieldReady ? "FULL_FIELD" : "AVAILABLE_ROWS",
 				computedEntries: board.rows.length,
