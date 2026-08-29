@@ -689,6 +689,8 @@ function normalizeOfficialH2HSourceCheckedAt(
 	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+const OFFICIAL_H2H_AVERAGE_MAX_SOURCE_SKEW_MS = 15 * 60 * 1000;
+
 function officialMatchSide(
 	entryId: number | null,
 	isAverage: boolean,
@@ -1524,6 +1526,7 @@ async function loadOfficialH2HSnapshots(
 export type EventLiveH2HScoreBatch = {
 	scores: ReadonlyMap<number, number>;
 	managerRevisions: ReadonlyMap<number, string>;
+	checkedAtByEntry: ReadonlyMap<number, string>;
 	revision: string;
 	checkedAt: string;
 	state: "scheduled" | "live" | "settled";
@@ -1598,6 +1601,19 @@ function activeOfficialH2HScoreEntryIds(
 	];
 }
 
+function eventLiveH2HCheckedAtForEntries(
+	batch: EventLiveH2HScoreBatch,
+	entryIds: readonly number[]
+): string | null {
+	const checkedAts: string[] = [];
+	for (const entryId of entryIds) {
+		const checkedAt = normalizeOfficialH2HSourceCheckedAt(batch.checkedAtByEntry.get(entryId));
+		if (checkedAt === null) return null;
+		checkedAts.push(checkedAt);
+	}
+	return checkedAts.sort((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null;
+}
+
 function tournamentEventLiveScoreRevision(
 	loaded: OfficialH2HSnapshotLoad,
 	eventId: number,
@@ -1610,15 +1626,34 @@ function tournamentEventLiveScoreRevision(
 			score: batch.scores.get(entryId) ?? null,
 			managerRevision: batch.managerRevisions.get(entryId) ?? null,
 		}));
+	const retainedAverageScores = loaded.history
+		.filter(
+			(row) =>
+				row.event_id === eventId && (row.home_is_average === true || row.away_is_average === true)
+		)
+		.sort(
+			(left, right) =>
+				(left.source_order ?? Number.MAX_SAFE_INTEGER) -
+					(right.source_order ?? Number.MAX_SAFE_INTEGER) ||
+				(left.official_match_id ?? Number.MAX_SAFE_INTEGER) -
+					(right.official_match_id ?? Number.MAX_SAFE_INTEGER)
+		)
+		.map((row) => ({
+			officialMatchId: row.official_match_id,
+			sourceOrder: row.source_order,
+			sourceCheckedAt: normalizeOfficialH2HSourceCheckedAt(row.source_checked_at),
+			homeAverageScore: row.home_is_average === true ? row.home_net_points : null,
+			awayAverageScore: row.away_is_average === true ? row.away_net_points : null,
+		}));
 	const revisionHash = createHash("sha256")
 		.update(
 			stableStringify({
 				eventId,
 				livePublicationId: batch.livePublicationId ?? null,
 				snapshotRevision: batch.snapshotRevision ?? null,
-				checkedAt: batch.checkedAt,
 				state: batch.state,
 				entryScores,
+				retainedAverageScores,
 			}),
 			"utf8"
 		)
@@ -1710,12 +1745,26 @@ export function projectOfficialH2HEventLiveSnapshot(
 	const expectedEntryCount = loaded.snapshot.tournament.totalTeamNum;
 	const currentSourceRows = loaded.history.filter((row) => row.event_id === eventId);
 	const scoreEntryIds = activeOfficialH2HScoreEntryIds(loaded, eventId);
+	const tournamentCheckedAt = eventLiveH2HCheckedAtForEntries(batch, scoreEntryIds);
 	const hasRegularRound = currentSourceRows.length > 0;
+	const currentSourceMarkers = new Set(
+		currentSourceRows.map((row) => normalizeOfficialH2HSourceCheckedAt(row.source_checked_at))
+	);
+	const currentSourceMarker = currentSourceMarkers.size === 1 ? [...currentSourceMarkers][0] : null;
+	const regularRoundHasAtomicSource =
+		!hasRegularRound || (currentSourceMarker !== null && currentSourceMarkers.size === 1);
+	const sourceCheckedAtMs =
+		currentSourceMarker === null ? Number.NaN : Date.parse(currentSourceMarker);
+	const managerCheckedAtMs =
+		tournamentCheckedAt === null ? Number.NaN : Date.parse(tournamentCheckedAt);
 	const averageSidesAreCoherent = currentSourceRows.every((row) => {
 		const hasAverageSide = row.home_is_average === true || row.away_is_average === true;
 		if (!hasAverageSide) return true;
 		return (
-			normalizeOfficialH2HSourceCheckedAt(row.source_checked_at) === batch.checkedAt &&
+			Number.isFinite(sourceCheckedAtMs) &&
+			Number.isFinite(managerCheckedAtMs) &&
+			sourceCheckedAtMs <= managerCheckedAtMs &&
+			managerCheckedAtMs - sourceCheckedAtMs <= OFFICIAL_H2H_AVERAGE_MAX_SOURCE_SKEW_MS &&
 			(row.home_is_average !== true || typeof row.home_net_points === "number") &&
 			(row.away_is_average !== true || typeof row.away_net_points === "number")
 		);
@@ -1731,7 +1780,9 @@ export function projectOfficialH2HEventLiveSnapshot(
 		entryIds.length !== expectedEntryCount ||
 		new Set(entryIds).size !== expectedEntryCount ||
 		(!hasRegularRound && !hasCompleteKnockoutSchedule) ||
+		!regularRoundHasAtomicSource ||
 		!averageSidesAreCoherent ||
+		tournamentCheckedAt === null ||
 		scoreEntryIds.length === 0 ||
 		scoreEntryIds.some(
 			(entryId) =>
@@ -1758,7 +1809,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 						? row.away_net_points
 						: null
 					: (batch.scores.get(row.away_entry_id) ?? null),
-			source_checked_at: batch.checkedAt,
+			source_checked_at: tournamentCheckedAt,
 		};
 	});
 	const currentRows = projectedHistory.filter((row) => row.event_id === eventId);
@@ -1836,7 +1887,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 					: awayMatchPoints === 3
 						? match.away.entryId
 						: null,
-			sourceCheckedAt: batch.checkedAt,
+			sourceCheckedAt: tournamentCheckedAt,
 		};
 	});
 
@@ -1849,7 +1900,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 			...loaded.snapshot,
 			scoreSource: "FPL_EVENT_LIVE",
 			scoreRevision: tournamentEventLiveScoreRevision(loaded, eventId, batch),
-			scoreCheckedAt: batch.checkedAt,
+			scoreCheckedAt: tournamentCheckedAt,
 			standings,
 			matches,
 		},
@@ -1881,6 +1932,7 @@ async function loadEventLiveH2HScoreBatch(
 	let checkedAt: string | null = null;
 	let state: EventLiveH2HScoreBatch["state"] | null = null;
 	const managerRevisions = new Map<number, string>();
+	const checkedAtByEntry = new Map<number, string>();
 	for (const entryId of entryIds) {
 		const row = result.results.get(entryId);
 		const liveProvenance = row?.score.provenance;
@@ -1905,17 +1957,23 @@ async function loadEventLiveH2HScoreBatch(
 		if (
 			(livePublicationId !== null && livePublicationId !== liveProvenance.livePublicationId) ||
 			(snapshotRevision !== null && snapshotRevision !== liveProvenance.liveRevision) ||
-			(checkedAt !== null && checkedAt !== liveProvenance.liveCheckedAt) ||
 			(state !== null && state !== row.snapshot.state)
 		) {
 			return null;
 		}
+		const normalizedLiveCheckedAt = normalizeOfficialH2HSourceCheckedAt(
+			liveProvenance.liveCheckedAt
+		);
+		if (normalizedLiveCheckedAt === null) return null;
 		livePublicationId = liveProvenance.livePublicationId;
 		snapshotRevision = liveProvenance.liveRevision;
-		checkedAt = liveProvenance.liveCheckedAt;
+		if (checkedAt === null || Date.parse(normalizedLiveCheckedAt) < Date.parse(checkedAt)) {
+			checkedAt = normalizedLiveCheckedAt;
+		}
 		state = row.snapshot.state;
 		scores.set(entryId, row.score.netEventPoints);
 		managerRevisions.set(entryId, row.score.revision);
+		checkedAtByEntry.set(entryId, normalizedLiveCheckedAt);
 	}
 	if (!snapshotRevision || !checkedAt || !state) return null;
 	const orderedManagerRevisions = [...managerRevisions]
@@ -1936,6 +1994,7 @@ async function loadEventLiveH2HScoreBatch(
 	return {
 		scores,
 		managerRevisions,
+		checkedAtByEntry,
 		revision: `event-live-h2h:${eventId}:${revisionHash}`,
 		checkedAt,
 		state,
@@ -1988,7 +2047,6 @@ async function loadEventLiveH2HScoreBatches(
 	if (!first) return null;
 	for (const batch of completeBatches.slice(1)) {
 		if (
-			batch.checkedAt !== first.checkedAt ||
 			batch.state !== first.state ||
 			batch.livePublicationId !== first.livePublicationId ||
 			batch.snapshotRevision !== first.snapshotRevision
@@ -2006,19 +2064,25 @@ async function loadEventLiveH2HScoreBatches(
 	}
 	const scores = new Map<number, number>();
 	const managerRevisions = new Map<number, string>();
+	const checkedAtByEntry = new Map<number, string>();
 	for (const batch of completeBatches) {
 		for (const [entryId, score] of batch.scores) scores.set(entryId, score);
 		for (const [entryId, revision] of batch.managerRevisions) {
 			managerRevisions.set(entryId, revision);
 		}
+		for (const [entryId, entryCheckedAt] of batch.checkedAtByEntry) {
+			checkedAtByEntry.set(entryId, entryCheckedAt);
+		}
 	}
+	const checkedAt = completeBatches
+		.map((batch) => batch.checkedAt)
+		.sort((left, right) => Date.parse(left) - Date.parse(right))[0]!;
 	const revisionHash = createHash("sha256")
 		.update(
 			stableStringify({
 				eventId,
 				livePublicationId: first.livePublicationId,
 				snapshotRevision: first.snapshotRevision,
-				checkedAt: first.checkedAt,
 				chunks: completeBatches.map((batch) => batch.revision),
 			})
 		)
@@ -2027,8 +2091,9 @@ async function loadEventLiveH2HScoreBatches(
 	return {
 		scores,
 		managerRevisions,
+		checkedAtByEntry,
 		revision: `event-live-h2h:${eventId}:${revisionHash}`,
-		checkedAt: first.checkedAt,
+		checkedAt,
 		state: first.state,
 		livePublicationId: first.livePublicationId,
 		snapshotRevision: first.snapshotRevision,
