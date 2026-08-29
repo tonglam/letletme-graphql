@@ -885,6 +885,7 @@ export const entryLiveCompetitionBoardCacheKey = (
 		playerRevision: string;
 		managerRevision: string | null;
 		managerStatusRevision: string;
+		managerHeartbeatDeadline?: string | null;
 		rosterRevision: string;
 		windowRevision: string;
 		projectionMode?: "BOUNDED" | "FULL_FIELD";
@@ -897,6 +898,10 @@ export const entryLiveCompetitionBoardCacheKey = (
 			JSON.stringify({
 				...input,
 				projectionMode: input.projectionMode ?? "BOUNDED",
+				managerHeartbeatDeadline:
+					(input.projectionMode ?? "BOUNDED") === "BOUNDED"
+						? (input.managerHeartbeatDeadline ?? null)
+						: null,
 				requireTeamValue: input.requireTeamValue ?? false,
 				requireEventTeamIds: input.requireEventTeamIds ?? false,
 				projection: ENTRY_LIVE_COMPETITION_BOARD_PROJECTION_VERSION,

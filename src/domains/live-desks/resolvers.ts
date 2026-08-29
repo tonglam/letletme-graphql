@@ -972,6 +972,10 @@ export const liveDesksResolvers = {
 					? (snapshot?.lastSuccessfulFetchAt ?? null)
 					: null;
 			const managerRevision = managerLoadRevision(managerScores);
+			const managerHeartbeatDeadline =
+				managerFreshnessCheckedAt !== null
+					? managerScoreHeartbeatRefreshDeadline(managerFreshnessCheckedAt)
+					: null;
 			const managerStatusRevision = entryLiveCompetitionManagerStatusRevision(
 				managerScores,
 				Date.now(),
@@ -995,6 +999,7 @@ export const liveDesksResolvers = {
 					windowRevision: boardWindowRevision,
 					projectionMode,
 					managerStatusRevision,
+					managerHeartbeatDeadline: projectionMode === "BOUNDED" ? managerHeartbeatDeadline : null,
 					requireTeamValue: request.sort === "TEAM_VALUE",
 					requireEventTeamIds: request.teamCountRules.length > 0,
 				});
