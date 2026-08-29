@@ -140,6 +140,9 @@ const activeOfficialH2HLoad = (): OfficialH2HSnapshotLoad => ({
 const managerRevisionMap = (...entryIds: number[]): Map<number, string> =>
 	new Map(entryIds.map((entryId) => [entryId, `manager-${entryId}-r1`]));
 
+const managerCheckedAtMap = (checkedAt: string, ...entryIds: number[]): Map<number, string> =>
+	new Map(entryIds.map((entryId) => [entryId, checkedAt]));
+
 describe("projectOfficialH2HEventLiveSnapshot", () => {
 	it("replaces a lagging official H2H score with one coherent event-live batch", () => {
 		const projected = projectOfficialH2HEventLiveSnapshot(
@@ -151,6 +154,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[102, 31],
 				]),
 				managerRevisions: managerRevisionMap(101, 102),
+				checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:01:00.000Z", 101, 102),
 				revision: "event-live-gw1-r8",
 				checkedAt: "2026-08-24T00:01:00.000Z",
 				state: "live",
@@ -183,6 +187,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 			{
 				scores: new Map([[101, 37]]),
 				managerRevisions: managerRevisionMap(101, 102),
+				checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:01:00.000Z", 101, 102),
 				revision: "event-live-gw1-r8",
 				checkedAt: "2026-08-24T00:01:00.000Z",
 				state: "live",
@@ -209,6 +214,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[102, 0],
 				]),
 				managerRevisions: managerRevisionMap(101, 102),
+				checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:02:00.000Z", 101, 102),
 				revision: "event-live-gw1-r9",
 				checkedAt: "2026-08-24T00:02:00.000Z",
 				state: "live",
@@ -236,6 +242,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[102, 31],
 				]),
 				managerRevisions: managerRevisionMap(101, 102),
+				checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:03:00.000Z", 101, 102),
 				revision: "event-live-gw1-r10",
 				checkedAt: "2026-08-24T00:03:00.000Z",
 				state: "live",
@@ -259,6 +266,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[102, 31],
 				]),
 				managerRevisions: managerRevisionMap(101, 102),
+				checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:04:00.000Z", 101, 102),
 				revision: "event-live-gw1-r11",
 				checkedAt: "2026-08-24T00:04:00.000Z",
 				state: "settled",
@@ -334,6 +342,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[103, 29],
 				]),
 				managerRevisions: managerRevisionMap(101, 102, 103),
+				checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:05:00.000Z", 101, 102, 103),
 				revision: "event-live-gw1-r12",
 				checkedAt: "2026-08-24T00:05:00.000Z",
 				state: "live",
@@ -368,6 +377,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[103, 29],
 				]),
 				managerRevisions: managerRevisionMap(101, 102, 103),
+				checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:05:00.000Z", 101, 102, 103),
 				revision: "event-live-gw1-r12",
 				checkedAt: "2026-08-24T00:05:00.000Z",
 				state: "live",
@@ -390,6 +400,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[103, 29],
 				]),
 				managerRevisions: managerRevisionMap(101, 102, 103),
+				checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:05:00.000Z", 101, 102, 103),
 				revision: "event-live-gw1-r12",
 				checkedAt: "2026-08-24T00:05:00.000Z",
 				state: "live",
@@ -420,6 +431,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 				{
 					scores: new Map([[101, 37]]),
 					managerRevisions: managerRevisionMap(101),
+					checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:05:00.000Z", 101),
 					revision: "event-live-gw1-r13",
 					checkedAt: "2026-08-24T00:05:00.000Z",
 					state: "live",
@@ -451,6 +463,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[102, 31],
 				]),
 				managerRevisions: managerRevisionMap(101, 102),
+				checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:06:00.000Z", 101, 102),
 				revision: "event-live-gw1-knockout",
 				checkedAt: "2026-08-24T00:06:00.000Z",
 				state: "live",
@@ -495,6 +508,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 			{
 				scores: new Map([[101, 37]]),
 				managerRevisions: managerRevisionMap(101),
+				checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:06:30.000Z", 101),
 				revision: "event-live-gw1-bye",
 				checkedAt: "2026-08-24T00:06:30.000Z",
 				state: "live",
@@ -535,6 +549,7 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 					[102, 31],
 				]),
 				managerRevisions: managerRevisionMap(101, 102),
+				checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:06:45.000Z", 101, 102),
 				revision: "event-live-gw1-first-leg",
 				checkedAt: "2026-08-24T00:06:45.000Z",
 				state: "live",
@@ -938,6 +953,76 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 		}
 	});
 
+	it("derives the Average Team freshness fence from that tournament only", async () => {
+		const oddRoster = activeOfficialH2HLoad();
+		oddRoster.snapshot.tournament.totalTeamNum = 1;
+		oddRoster.snapshot.standings = oddRoster.snapshot.standings.slice(0, 1);
+		oddRoster.snapshot.matches[0]!.away.entryId = null;
+		oddRoster.snapshot.matches[0]!.away.isAverage = true;
+		oddRoster.snapshot.matches[0]!.away.points = 25;
+		oddRoster.history[0]!.away_entry_id = null;
+		oddRoster.history[0]!.away_is_average = true;
+		oddRoster.history[0]!.away_net_points = 25;
+		oddRoster.history[0]!.source_checked_at = "2026-08-24T00:04:00.000Z";
+
+		const unrelated = activeOfficialH2HLoad();
+		unrelated.snapshot.tournament = { ...unrelated.snapshot.tournament, id: 10 };
+		const replaceEntryId = (entryId: number | null): number | null =>
+			entryId === 101 ? 201 : entryId === 102 ? 202 : entryId;
+		unrelated.snapshot.standings = unrelated.snapshot.standings.map((standing) => ({
+			...standing,
+			entryId: replaceEntryId(standing.entryId)!,
+		}));
+		unrelated.snapshot.matches = unrelated.snapshot.matches.map((match) => ({
+			...match,
+			home: { ...match.home, entryId: replaceEntryId(match.home.entryId) },
+			away: { ...match.away, entryId: replaceEntryId(match.away.entryId) },
+			winnerEntryId: replaceEntryId(match.winnerEntryId),
+		}));
+		unrelated.history = unrelated.history.map((row) => ({
+			...row,
+			tournament_id: 10,
+			home_entry_id: replaceEntryId(row.home_entry_id),
+			away_entry_id: replaceEntryId(row.away_entry_id),
+		}));
+
+		const original = entryLiveBatchService.calcLivePointsForEntries;
+		entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, ids) => {
+			const result = liveBatchResult(ids);
+			for (const entryId of ids) {
+				const row = result.results.get(entryId) as unknown as {
+					score: { provenance: { liveCheckedAt: string } };
+				};
+				row.score.provenance.liveCheckedAt =
+					entryId === 101 ? "2026-08-24T00:05:00.000Z" : "2026-08-24T00:00:00.000Z";
+			}
+			return result;
+		};
+
+		try {
+			const projected = await tournamentCacheTestables.applyActiveOfficialH2HScoreAuthority(
+				{ dataRevision: "core-test", logger: { warn: () => undefined } } as never,
+				new Map([
+					[9, oddRoster],
+					[10, unrelated],
+				]),
+				1,
+				new Set()
+			);
+
+			expect(projected.get(9)?.snapshot).toMatchObject({
+				scoreSource: "FPL_EVENT_LIVE",
+				scoreCheckedAt: "2026-08-24T00:05:00.000Z",
+			});
+			expect(projected.get(10)?.snapshot).toMatchObject({
+				scoreSource: "FPL_EVENT_LIVE",
+				scoreCheckedAt: "2026-08-24T00:00:00.000Z",
+			});
+		} finally {
+			entryLiveBatchService.calcLivePointsForEntries = original;
+		}
+	});
+
 	it("pins Core revision and uses durable manager heads for the active overlay", async () => {
 		const source = await Bun.file("src/domains/tournaments/repository.ts").text();
 		const batch = source.slice(
@@ -1082,6 +1167,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 				[102, "manager-102-a"],
 				[999, "manager-999-a"],
 			]),
+			checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:08:00.000Z", 101, 102, 999),
 			revision: "shared-batch-a",
 			checkedAt: "2026-08-24T00:08:00.000Z",
 			state: "live" as const,
@@ -1107,6 +1193,7 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 		const heartbeatOnlyChange = {
 			...batch,
 			checkedAt: "2026-08-24T00:08:30.000Z",
+			checkedAtByEntry: managerCheckedAtMap("2026-08-24T00:08:30.000Z", 101, 102, 999),
 		};
 		const relevantRevisionChange = {
 			...unrelatedChange,

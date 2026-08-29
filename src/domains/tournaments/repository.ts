@@ -1526,6 +1526,7 @@ async function loadOfficialH2HSnapshots(
 export type EventLiveH2HScoreBatch = {
 	scores: ReadonlyMap<number, number>;
 	managerRevisions: ReadonlyMap<number, string>;
+	checkedAtByEntry: ReadonlyMap<number, string>;
 	revision: string;
 	checkedAt: string;
 	state: "scheduled" | "live" | "settled";
@@ -1598,6 +1599,19 @@ function activeOfficialH2HScoreEntryIds(
 				.filter((entryId): entryId is number => entryId !== null)
 		),
 	];
+}
+
+function eventLiveH2HCheckedAtForEntries(
+	batch: EventLiveH2HScoreBatch,
+	entryIds: readonly number[]
+): string | null {
+	const checkedAts: string[] = [];
+	for (const entryId of entryIds) {
+		const checkedAt = normalizeOfficialH2HSourceCheckedAt(batch.checkedAtByEntry.get(entryId));
+		if (checkedAt === null) return null;
+		checkedAts.push(checkedAt);
+	}
+	return checkedAts.sort((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null;
 }
 
 function tournamentEventLiveScoreRevision(
@@ -1731,6 +1745,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 	const expectedEntryCount = loaded.snapshot.tournament.totalTeamNum;
 	const currentSourceRows = loaded.history.filter((row) => row.event_id === eventId);
 	const scoreEntryIds = activeOfficialH2HScoreEntryIds(loaded, eventId);
+	const tournamentCheckedAt = eventLiveH2HCheckedAtForEntries(batch, scoreEntryIds);
 	const hasRegularRound = currentSourceRows.length > 0;
 	const currentSourceMarkers = new Set(
 		currentSourceRows.map((row) => normalizeOfficialH2HSourceCheckedAt(row.source_checked_at))
@@ -1740,7 +1755,8 @@ export function projectOfficialH2HEventLiveSnapshot(
 		!hasRegularRound || (currentSourceMarker !== null && currentSourceMarkers.size === 1);
 	const sourceCheckedAtMs =
 		currentSourceMarker === null ? Number.NaN : Date.parse(currentSourceMarker);
-	const managerCheckedAtMs = Date.parse(batch.checkedAt);
+	const managerCheckedAtMs =
+		tournamentCheckedAt === null ? Number.NaN : Date.parse(tournamentCheckedAt);
 	const averageSidesAreCoherent = currentSourceRows.every((row) => {
 		const hasAverageSide = row.home_is_average === true || row.away_is_average === true;
 		if (!hasAverageSide) return true;
@@ -1766,6 +1782,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 		(!hasRegularRound && !hasCompleteKnockoutSchedule) ||
 		!regularRoundHasAtomicSource ||
 		!averageSidesAreCoherent ||
+		tournamentCheckedAt === null ||
 		scoreEntryIds.length === 0 ||
 		scoreEntryIds.some(
 			(entryId) =>
@@ -1792,7 +1809,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 						? row.away_net_points
 						: null
 					: (batch.scores.get(row.away_entry_id) ?? null),
-			source_checked_at: batch.checkedAt,
+			source_checked_at: tournamentCheckedAt,
 		};
 	});
 	const currentRows = projectedHistory.filter((row) => row.event_id === eventId);
@@ -1870,7 +1887,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 					: awayMatchPoints === 3
 						? match.away.entryId
 						: null,
-			sourceCheckedAt: batch.checkedAt,
+			sourceCheckedAt: tournamentCheckedAt,
 		};
 	});
 
@@ -1883,7 +1900,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 			...loaded.snapshot,
 			scoreSource: "FPL_EVENT_LIVE",
 			scoreRevision: tournamentEventLiveScoreRevision(loaded, eventId, batch),
-			scoreCheckedAt: batch.checkedAt,
+			scoreCheckedAt: tournamentCheckedAt,
 			standings,
 			matches,
 		},
@@ -1915,6 +1932,7 @@ async function loadEventLiveH2HScoreBatch(
 	let checkedAt: string | null = null;
 	let state: EventLiveH2HScoreBatch["state"] | null = null;
 	const managerRevisions = new Map<number, string>();
+	const checkedAtByEntry = new Map<number, string>();
 	for (const entryId of entryIds) {
 		const row = result.results.get(entryId);
 		const liveProvenance = row?.score.provenance;
@@ -1955,6 +1973,7 @@ async function loadEventLiveH2HScoreBatch(
 		state = row.snapshot.state;
 		scores.set(entryId, row.score.netEventPoints);
 		managerRevisions.set(entryId, row.score.revision);
+		checkedAtByEntry.set(entryId, normalizedLiveCheckedAt);
 	}
 	if (!snapshotRevision || !checkedAt || !state) return null;
 	const orderedManagerRevisions = [...managerRevisions]
@@ -1975,6 +1994,7 @@ async function loadEventLiveH2HScoreBatch(
 	return {
 		scores,
 		managerRevisions,
+		checkedAtByEntry,
 		revision: `event-live-h2h:${eventId}:${revisionHash}`,
 		checkedAt,
 		state,
@@ -2044,10 +2064,14 @@ async function loadEventLiveH2HScoreBatches(
 	}
 	const scores = new Map<number, number>();
 	const managerRevisions = new Map<number, string>();
+	const checkedAtByEntry = new Map<number, string>();
 	for (const batch of completeBatches) {
 		for (const [entryId, score] of batch.scores) scores.set(entryId, score);
 		for (const [entryId, revision] of batch.managerRevisions) {
 			managerRevisions.set(entryId, revision);
+		}
+		for (const [entryId, entryCheckedAt] of batch.checkedAtByEntry) {
+			checkedAtByEntry.set(entryId, entryCheckedAt);
 		}
 	}
 	const checkedAt = completeBatches
@@ -2067,6 +2091,7 @@ async function loadEventLiveH2HScoreBatches(
 	return {
 		scores,
 		managerRevisions,
+		checkedAtByEntry,
 		revision: `event-live-h2h:${eventId}:${revisionHash}`,
 		checkedAt,
 		state: first.state,
