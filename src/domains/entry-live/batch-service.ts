@@ -1168,6 +1168,7 @@ export const calcLivePointsForEntriesInChunks = async (
 	const errorIds = new Set(errors.map((error) => error.entryId));
 	for (const entryId of managerScores.missingEntryIds) {
 		if (!errorIds.has(entryId)) {
+			errorIds.add(entryId);
 			errors.push({ entryId, message: "Manager score is missing from the cache-only cohort" });
 		}
 	}
@@ -1181,13 +1182,16 @@ export const calcLivePointsForEntriesInChunks = async (
 		const result = results.get(entryId);
 		if (result) orderedResults.set(entryId, result);
 	}
+	const succeededEntryCount = [...orderedResults.keys()].filter(
+		(entryId) => !errorIds.has(entryId)
+	).length;
 	return {
 		results: orderedResults,
 		errors,
 		meta: {
 			eventId,
 			totalEntries: entryIds.length,
-			succeededCount: orderedResults.size,
+			succeededCount: succeededEntryCount,
 			failedCount: errors.length,
 		},
 	};

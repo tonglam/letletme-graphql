@@ -136,6 +136,7 @@ describe("live desks tournament selection index", () => {
 		expect(desk).toContain("...(args.ref && snapshot?.publicationId");
 		expect(desk).not.toContain("...(snapshot?.publicationId");
 		expect(desk).toContain("cachedRowsMatchEligibility");
+		expect(desk).toContain("unavailableEntryIds.length === 0");
 
 		const repositorySource = await Bun.file("src/domains/tournaments/repository.ts").text();
 		const detail = repositorySource.slice(

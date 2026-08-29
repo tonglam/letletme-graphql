@@ -581,6 +581,8 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			});
 			expect([...result.results.keys()]).toEqual([1, 2, 3]);
 			expect(result.errors.map((error) => error.entryId)).toEqual([3]);
+			expect(result.meta.succeededCount).toBe(2);
+			expect(result.meta.failedCount).toBe(1);
 			expect(receivedEntryIds).toEqual([[1, 2]]);
 			expect(result.results.get(3)?.availability).toBe("LINEUP_UNAVAILABLE");
 			expect(result.results.get(3)?.score.reasonCodes).toContain("UPSTREAM_UNAVAILABLE");

@@ -1628,6 +1628,7 @@ export const liveDesksResolvers = {
 			if (
 				result.errors.length === 0 &&
 				deferredEntryIds.length === 0 &&
+				unavailableEntryIds.length === 0 &&
 				managerScoreBoardIsFinal(board) &&
 				boardCacheKey
 			) {
