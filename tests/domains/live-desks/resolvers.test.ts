@@ -157,6 +157,7 @@ describe("live desks tournament selection index", () => {
 		expect(board).toContain("const fullFieldManagerFreshnessReady");
 		expect(board).toContain("isManagerScoreLiveHeartbeatFresh(snapshot?.lastSuccessfulFetchAt)");
 		expect(board.match(/fullFieldManagerFreshnessReady/g)?.length ?? 0).toBeGreaterThanOrEqual(5);
+		expect(board).toContain("board.unavailableEntryIds.length > 0");
 	});
 
 	it("uses durable last-good heads for ordinary boards without weakening explicit refs", async () => {

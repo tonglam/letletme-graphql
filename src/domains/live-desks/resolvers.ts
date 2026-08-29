@@ -1404,7 +1404,8 @@ export const liveDesksResolvers = {
 				partial:
 					board.partial ||
 					calculatedFailedEntryIds.length > 0 ||
-					effectiveDeferredEntryIds.length > 0,
+					effectiveDeferredEntryIds.length > 0 ||
+					board.unavailableEntryIds.length > 0,
 				totalEntries: board.totalEntries,
 				filteredEntries: page.filteredEntries,
 				page: request.page,
