@@ -269,7 +269,7 @@ describe("production deployment workflow", () => {
 
 	test("binds image and container identity to the exact commit", () => {
 		expect(dockerfile).toContain("ARG VCS_REVISION=unknown");
-		expect(dockerfile).toContain("ENV APP_REVISION=${VCS_REVISION}");
+		expect(dockerfile).toContain("ENV DEPLOY_SHA=${VCS_REVISION}");
 		expect(dockerfile).toContain('org.opencontainers.image.revision="${VCS_REVISION}"');
 		expect(workflow).toContain('--build-arg "VCS_REVISION=${{ steps.target.outputs.sha }}"');
 		expect(deployScript).toContain('index .Config.Labels "org.opencontainers.image.revision"');
@@ -277,7 +277,7 @@ describe("production deployment workflow", () => {
 
 	test("inherits the active slot rate-limit mode when rollout is preserved", () => {
 		expect(deployScript).toContain('active_env="$VPS_WORKDIR/.env.deploy.$active_slot"');
-		expect(deployScript).toContain("active_rate_limit_mode=shadow-v3");
+		expect(deployScript).toContain("active_rate_limit_mode=shadow-v4");
 		expect(deployScript).toContain('replace_rate_limit_mode "$active_rate_limit_mode"');
 		expect(deployScript).toContain("invalid or duplicate GRAPHQL_RATE_LIMIT_MODE");
 		expect(deployScript).toContain('tail -c 1 "$candidate_env_next"');

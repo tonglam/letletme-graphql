@@ -3,7 +3,7 @@ import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { createHash } from "node:crypto";
 import type { GraphQLContext } from "../../graphql/context";
 import { GraphQLError } from "graphql";
-import { getCoreEventSnapshot, getLiveDataSnapshot } from "../../infra/data-snapshot";
+import { getCoreEventSnapshot } from "../../infra/data-snapshot";
 import { eventsService } from "../events/service";
 import { gqlCacheKey } from "../../infra/cache-key";
 import {
@@ -14,42 +14,15 @@ import {
 } from "../../infra/query-cache";
 import { stableStringify } from "../../infra/stringify";
 import { LeagueType } from "../leagues/repository";
-import { calcLivePointsForEntriesInChunks } from "../entry-live/batch-service";
-import { entriesService } from "../entries/service";
 import {
-	managerScoreBoardIsFinal,
-	rankTournamentRowsByOfficialEventPoints,
-} from "../entry-live/manager-score";
-import type { LiveCalcData } from "../entry-live/calc-service";
-import {
-	competitionBoardCacheKey,
-	readCompetitionBoardCache,
-	writeCompetitionBoardCache,
-} from "../live-desks/competition-board-cache";
-import { loadTournamentEventEligibility } from "../live-desks/tournament-entry-window";
+	calcLivePointsForEntriesV2,
+	readLivePublicationV2,
+	type LiveCalcDataV2,
+} from "../entry-live/v2-service";
 import {
 	loadEventLiveH2HScoreBatches,
 	type EventLiveH2HScoreBatch,
 } from "./h2h-live-score-repository";
-
-const tournamentLiveRowsHaveOfficialMetrics = (
-	rows: ReadonlyArray<{
-		score?: {
-			source?: string;
-			eventPoints?: number | null;
-			netEventPoints?: number | null;
-			eventPointSemantics?: string;
-		};
-	}>,
-	requireNet: boolean
-): boolean =>
-	rows.every((row) => {
-		const score = row.score;
-		if (score?.source !== "FPL_EVENT_LIVE" && score?.source !== "FPL_FINAL_RESULT") return false;
-		return requireNet
-			? typeof score.netEventPoints === "number" && score.eventPointSemantics !== "UNKNOWN"
-			: typeof score.eventPoints === "number";
-	});
 
 export enum TournamentMode {
 	NORMAL = "normal",
@@ -240,13 +213,43 @@ export type TournamentDetailDesk = {
 	officialH2H: TournamentOfficialH2H | null;
 	live: {
 		eventId: number;
-		/** Null when durable manager scores exist without a live publication. */
-		revision: string | null;
+		scoreCoreRevision: string | null;
 		state: string;
 		partial: boolean;
 		failedEntryIds: number[];
 		totalEntries: number;
-		rows: LiveCalcData[];
+		revisions: {
+			publicationId: string;
+			generation: number;
+			lifecycle: string;
+			fixtureIdentity: string;
+			scoreCore: string;
+			displayStats: string;
+			explain: string;
+			picksBase: string | null;
+			officialAdjustment: string | null;
+			previousTotals: string | null;
+			finalResult: string | null;
+			rules: string;
+			algorithm: string;
+			input: string;
+		} | null;
+		times: {
+			sourceCheckedAt: string;
+			contentUpdatedAt: string;
+			publishedAt: string;
+			checkpointedAt: string | null;
+			servedAt: string;
+			staleAt: string;
+			nextRefreshAt: string | null;
+		} | null;
+		delivery: {
+			state: "FRESH" | "STALE" | "DEGRADED" | "FINAL" | "UNAVAILABLE";
+			servedFrom:
+				"REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT" | "FINAL_RESULT";
+			reasonCodes: string[];
+		} | null;
+		rows: LiveCalcDataV2[];
 	} | null;
 	revision: string;
 	kind: "setup" | "official_h2h" | "live_points";
@@ -1608,13 +1611,15 @@ function eventLiveH2HCheckedAtForEntries(
 	batch: EventLiveH2HScoreBatch,
 	entryIds: readonly number[]
 ): string | null {
-	const checkedAts: string[] = [];
+	const sourceCheckedAts: string[] = [];
 	for (const entryId of entryIds) {
-		const checkedAt = normalizeOfficialH2HSourceCheckedAt(batch.checkedAtByEntry.get(entryId));
-		if (checkedAt === null) return null;
-		checkedAts.push(checkedAt);
+		const sourceCheckedAt = normalizeOfficialH2HSourceCheckedAt(
+			batch.sourceCheckedAtByEntry.get(entryId)
+		);
+		if (sourceCheckedAt === null) return null;
+		sourceCheckedAts.push(sourceCheckedAt);
 	}
-	return checkedAts.sort((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null;
+	return sourceCheckedAts.sort((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null;
 }
 
 function tournamentEventLiveScoreRevision(
@@ -1627,7 +1632,7 @@ function tournamentEventLiveScoreRevision(
 		.map((entryId) => ({
 			entryId,
 			score: batch.scores.get(entryId) ?? null,
-			managerRevision: batch.managerRevisions.get(entryId) ?? null,
+			inputRevision: batch.inputRevisions.get(entryId) ?? null,
 		}));
 	const retainedAverageScores = loaded.history
 		.filter(
@@ -1653,7 +1658,7 @@ function tournamentEventLiveScoreRevision(
 			stableStringify({
 				eventId,
 				livePublicationId: batch.livePublicationId ?? null,
-				snapshotRevision: batch.snapshotRevision ?? null,
+				scoreCoreRevision: batch.scoreCoreRevision ?? null,
 				state: batch.state,
 				entryScores,
 				retainedAverageScores,
@@ -1790,7 +1795,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 		scoreEntryIds.some(
 			(entryId) =>
 				typeof batch.scores.get(entryId) !== "number" ||
-				typeof batch.managerRevisions.get(entryId) !== "string"
+				typeof batch.inputRevisions.get(entryId) !== "string"
 		)
 	) {
 		return suppressed;
@@ -4525,158 +4530,58 @@ export const tournamentsRepository: TournamentsRepository = {
 		} else if (kind === "live_points") {
 			const eventCore = await getCoreEventSnapshot(context);
 			const event = eventCore.events.find((candidate) => candidate.id === requestedEventId);
-			// Before the first deadline there is no live publication to load. Keep
-			// the desk truthful and render the scheduled empty board instead.
 			const scheduled =
 				event !== undefined &&
 				!event.finished &&
 				!event.isCurrent &&
 				(eventCore.currentEventId === null || event.id > eventCore.currentEventId);
-			if (scheduled) {
-				live = {
-					eventId: requestedEventId,
-					revision: `scheduled-${eventCore.revision}`,
-					state: "SCHEDULED",
-					partial: false,
-					failedEntryIds: [],
-					totalEntries: tournament.totalTeamNum,
-					rows: [],
-				};
-			} else {
-				const snapshot = await getLiveDataSnapshot(context, requestedEventId).catch((error) => {
-					context.logger.info(
-						{
-							eventId: requestedEventId,
-							err: error instanceof Error ? error.message : "unknown",
-						},
-						"Tournament live publication unavailable; calculating the durable manager board"
-					);
-					return null;
-				});
-				// Provisional live points can change when the core event flips to
-				// finished/data_checked. Only final scoring boards are reusable.
-				const scoringPhase = event?.finished === true && event.dataChecked === true;
-				const currentRosterEntryIds = await tournamentsRepository.getTournamentEntryIdsUncached(
-					context,
-					tournamentId
-				);
-				const eligibility = await loadTournamentEventEligibility(
-					currentRosterEntryIds,
-					requestedEventId,
-					(entryIds) => entriesService.getEntriesByIds(context, entryIds)
-				);
-				const rosterEntryIds = eligibility.entryIds;
-				// The detail route is the unpaged tournament view. Calculate the whole
-				// eligible cohort in bounded chunks instead of returning the 500-entry
-				// preview used by the interactive board endpoint.
-				const calculationEntryIds = rosterEntryIds;
-				const deferredEntryIds: number[] = [];
-				const liveCacheKey =
-					scoringPhase && snapshot
-						? competitionBoardCacheKey(context, snapshot, tournamentId)
-						: null;
-				// The detail route now calculates the complete cohort, so a complete
-				// finalized cache is reusable even when the viewer would have fallen
-				// outside the old 500-entry foreground window.
-				const cachedCandidate = liveCacheKey
-					? await readCompetitionBoardCache(context, liveCacheKey)
+			const rosterEntryIds = await tournamentsRepository.getTournamentEntryIdsUncached(
+				context,
+				tournamentId
+			);
+			const publication =
+				requestedEventId > 0
+					? await readLivePublicationV2(context, requestedEventId).catch((error) => {
+							context.logger.warn(
+								{ err: error, eventId: requestedEventId },
+								"Tournament live V2 publication unavailable"
+							);
+							return null;
+						})
 					: null;
-				const cachedRows = cachedCandidate?.board as
-					| Array<{
-							entry: number;
-							score?: {
-								source?: string;
-								state?: string;
-								eventPoints?: number | null;
-								netEventPoints?: number | null;
-								eventPointSemantics?: string;
-							};
-					  }>
-					| undefined;
-				const rosterEntryIdSet = new Set(rosterEntryIds);
-				const cachedRowsMatchRoster =
-					cachedRows !== undefined &&
-					cachedRows.length === rosterEntryIdSet.size &&
-					new Set(cachedRows.map((row) => row.entry)).size === rosterEntryIdSet.size &&
-					cachedRows.every((row) => rosterEntryIdSet.has(row.entry));
-				const cachedBoard =
-					cachedCandidate &&
-					cachedRows &&
-					cachedRowsMatchRoster &&
-					cachedCandidate.totalEntries === cachedRows.length &&
-					cachedCandidate.totalEntries === rosterEntryIds.length &&
-					tournamentLiveRowsHaveOfficialMetrics(
-						cachedRows,
-						tournament.leagueType === LeagueType.H2H
-					) &&
-					managerScoreBoardIsFinal(cachedRows)
-						? cachedCandidate
-						: null;
-				const cached = cachedBoard
-					? {
-							rows: cachedBoard.board as LiveCalcData[],
-							partial: cachedBoard.partial,
-							failedEntryIds: cachedBoard.failedEntryIds,
-							totalEntries: cachedBoard.totalEntries,
-						}
-					: null;
-				const result = cached
-					? null
-					: await calcLivePointsForEntriesInChunks(context, requestedEventId, calculationEntryIds, {
-							entriesById: eligibility.entriesById,
-							tournamentId,
-							// The detail page must render the durable manager heads already
-							// owned by the tournament worker. A synchronous read-through can
-							// spend the whole Web deadline refreshing slow-changing rank data;
-							// CACHE_ONLY returns last-good rows and queues bounded recovery for
-							// genuine misses without coupling page availability to that refresh.
-							managerReadMode: "CACHE_ONLY",
-						});
-				const calculatedRows = Array.from(result?.results.values() ?? []);
-				const calculatedRowsHaveOfficialMetrics = tournamentLiveRowsHaveOfficialMetrics(
-					calculatedRows,
-					tournament.leagueType === LeagueType.H2H
-				);
-				const liveData = cached ?? {
-					rows: rankTournamentRowsByOfficialEventPoints(calculatedRows),
-					partial:
-						(result?.errors.length ?? 0) > 0 ||
-						deferredEntryIds.length > 0 ||
-						!calculatedRowsHaveOfficialMetrics,
-					failedEntryIds: [
-						...(result?.errors.map((error) => error.entryId) ?? []),
-						...deferredEntryIds,
-					],
-					totalEntries: rosterEntryIds.length,
-				};
-				live = {
-					eventId: requestedEventId,
-					revision: snapshot?.revision ?? null,
-					state: snapshot?.state.toUpperCase() ?? (scoringPhase ? "SETTLED" : "LIVE"),
-					...liveData,
-				};
-				if (
-					liveCacheKey &&
-					!cached &&
-					result &&
-					deferredEntryIds.length === 0 &&
-					result.errors.length === 0 &&
-					!liveData.partial &&
-					managerScoreBoardIsFinal(liveData.rows)
-				) {
-					await writeCompetitionBoardCache(
-						context,
-						liveCacheKey,
-						{
-							board: liveData.rows,
-							partial: liveData.partial,
-							failedEntryIds: liveData.failedEntryIds,
-							totalEntries: liveData.totalEntries,
-						},
-						24 * 60 * 60
-					);
-				}
-			}
+			const result = scheduled
+				? null
+				: await calcLivePointsForEntriesV2(context, requestedEventId, rosterEntryIds);
+			const rows = result ? [...result.results.values()] : [];
+			const sample = rows.find((row) => row.availability === "READY") ?? rows[0] ?? null;
+			const failedEntryIds = result?.errors.map((error) => error.entryId) ?? [];
+			const unavailableEntryIds = rosterEntryIds.filter(
+				(rosterEntryId) => rows.find((row) => row.entry === rosterEntryId)?.availability !== "READY"
+			);
+			const state = publication?.publication.state ?? (scheduled ? "PICKS_WAIT" : "UNAVAILABLE");
+			live = {
+				eventId: requestedEventId,
+				scoreCoreRevision:
+					publication?.publication.revisions.scoreCore.revision ??
+					sample?.score.revisions.scoreCore ??
+					null,
+				state,
+				partial:
+					!scheduled &&
+					(failedEntryIds.length > 0 ||
+						unavailableEntryIds.length > 0 ||
+						rows.length !== rosterEntryIds.length),
+				failedEntryIds,
+				totalEntries: rosterEntryIds.length,
+				revisions: sample?.score.revisions ?? null,
+				times: sample?.score.times ?? null,
+				delivery: sample?.delivery ?? {
+					state: "UNAVAILABLE",
+					servedFrom: "PROCESS_LKG",
+					reasonCodes: [scheduled ? "EVENT_NOT_STARTED" : "NO_COMPLETE_PROJECTION"],
+				},
+				rows,
+			};
 		}
 		const officialSourceCheckedAt =
 			officialH2H?.matches
@@ -4711,7 +4616,7 @@ export const tournamentsRepository: TournamentsRepository = {
 			revision: isOfficial
 				? `official:${tournament.officialScheduleHash ?? "none"}:${officialSourceCheckedAt}`
 				: live
-					? `${tournament.updatedAt}:${eventContext.revision}:live-${live.revision ?? `durable-${requestedEventId}`}`
+					? `${tournament.updatedAt}:${eventContext.revision}:live-${live.scoreCoreRevision ?? `durable-${requestedEventId}`}`
 					: `${tournament.updatedAt}:${eventContext.revision}`,
 			kind,
 			context: {

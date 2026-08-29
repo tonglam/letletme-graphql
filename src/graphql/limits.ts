@@ -52,7 +52,7 @@ const PLAYER_STATE_PROFILE_MAX_AST_NODES = 240;
 // revision provenance and the bounded effective lineup. Give only this exact
 // root enough document room while retaining every weighted-complexity, depth,
 // alias, root-field, and rate-limit guard below.
-const CALC_LIVE_POINTS_MAX_AST_NODES = 260;
+const CALC_LIVE_POINTS_MAX_AST_NODES = 280;
 // The live competition board returns at most one bounded page plus the viewer
 // row, but each score carries the same traceability contract as live points.
 // Scope the larger document allowance to this sole unaliased root; page-size,

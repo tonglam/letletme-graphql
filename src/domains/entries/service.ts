@@ -10,15 +10,14 @@ import { buildPlayerMap } from "../../infra/player-map";
 import { buildTeamMap } from "../../infra/team-map";
 import { getCoreFixtureSnapshot } from "../../infra/data-snapshot";
 import type { Player, Team } from "../../infra/types";
-import type { ElementEventResultData } from "../entry-live/calc-service";
+import type { ElementEventResultDataV2 as ElementEventResultData } from "../entry-live/v2-service";
 import type { EntryEventTransferRow } from "../entry-live/repository";
 import { entryLiveRepository } from "../entry-live/repository";
 import {
 	type EntryEventTransfersData,
 	enrichTransferRows,
 } from "../entry-live/transfer-enrichment";
-import type { LivePerformance } from "../live/repository";
-import { liveRepository } from "../live/repository";
+import { readLivePublicationV2, type LivePublicationReadV2 } from "../entry-live/v2-service";
 import type { Entry, EntryEventResult, EntryHistoryInfo, EntryNameUsage } from "./repository";
 import { entriesRepository } from "./repository";
 
@@ -181,6 +180,32 @@ const uniquePositiveIds = (ids: number[]): number[] =>
 	Array.from(new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0)));
 
 const livePerformanceKey = (eventId: number, playerId: number): string => `${eventId}:${playerId}`;
+
+type LivePerformance = {
+	eventId: number;
+	playerId: number;
+	minutes: number | null;
+	goalsScored: number | null;
+	assists: number | null;
+	cleanSheets: number | null;
+	goalsConceded: number | null;
+	ownGoals: number | null;
+	penaltiesSaved: number | null;
+	penaltiesMissed: number | null;
+	yellowCards: number | null;
+	redCards: number | null;
+	saves: number | null;
+	bonus: number | null;
+	bps: number | null;
+	starts: boolean | null;
+	defensiveContribution: number | null;
+	expectedGoals: string | null;
+	expectedAssists: string | null;
+	expectedGoalInvolvements: string | null;
+	expectedGoalsConceded: string | null;
+	inDreamTeam: boolean | null;
+	totalPoints: number;
+};
 
 type StoredEntryPick = {
 	element: number;
@@ -480,20 +505,54 @@ async function buildLiveMapForEvents(
 				])
 			)
 		: null;
-	const performances = await liveRepository.getLivePerformancesForEventsAndPlayers(
-		context,
-		eventIds,
-		uniquePlayerIds
+	const publications = await Promise.all(
+		eventIds.map(async (eventId): Promise<LivePublicationReadV2 | null> => {
+			try {
+				return await readLivePublicationV2(context, eventId);
+			} catch (error) {
+				context.logger.warn(
+					{ err: error, eventId },
+					"Live Points V2 historical projection unavailable"
+				);
+				return null;
+			}
+		})
 	);
-	for (const performance of performances) {
-		if (
-			allowedPlayersByEvent &&
-			!allowedPlayersByEvent.get(performance.eventId)?.has(performance.playerId)
-		) {
-			continue;
+	publications.forEach((publication, index) => {
+		if (!publication) return;
+		const eventId = eventIds[index];
+		if (eventId === undefined) return;
+		const allowed = allowedPlayersByEvent?.get(eventId);
+		for (const row of publication.eventLives) {
+			const playerId = row.elementId;
+			if (allowed && !allowed.has(playerId)) continue;
+			result.set(livePerformanceKey(eventId, playerId), {
+				eventId,
+				playerId,
+				minutes: row.minutes,
+				goalsScored: row.goalsScored,
+				assists: row.assists,
+				cleanSheets: row.cleanSheets,
+				goalsConceded: row.goalsConceded,
+				ownGoals: row.ownGoals,
+				penaltiesSaved: row.penaltiesSaved,
+				penaltiesMissed: row.penaltiesMissed,
+				yellowCards: row.yellowCards,
+				redCards: row.redCards,
+				saves: row.saves,
+				bonus: row.bonus,
+				bps: row.bps,
+				starts: row.starts,
+				defensiveContribution: row.defensiveContribution,
+				expectedGoals: row.expectedGoals,
+				expectedAssists: row.expectedAssists,
+				expectedGoalInvolvements: row.expectedGoalInvolvements,
+				expectedGoalsConceded: row.expectedGoalsConceded,
+				inDreamTeam: row.inDreamTeam,
+				totalPoints: row.totalPoints,
+			});
 		}
-		result.set(livePerformanceKey(performance.eventId, performance.playerId), performance);
-	}
+	});
 
 	return result;
 }

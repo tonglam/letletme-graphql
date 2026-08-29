@@ -24,20 +24,14 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 1, rootFields: ["events"] });
 	});
 
-	it("reports only deprecated schema symbols selected by the active operation", () => {
+	it("does not retain deprecated Live Points fields after the V2 cutover", () => {
 		const result = validateGraphQLRequestLimits(
 			{
 				query: `
 					query Usage {
 						calcLivePointsByEntry(eventId: 1, entryId: 1) {
-							rank
-							livePoints
 							score { eventPoints }
 						}
-					}
-					fragment UnusedLegacyFields on LiveCalcData {
-						liveNetPoints
-						liveTotalPoints
 					}
 				`,
 			},
@@ -45,13 +39,11 @@ describe("GraphQL request limits", () => {
 		);
 		expect(result).toMatchObject({
 			ok: true,
-			deprecatedSymbols: ["LiveCalcData.livePoints", "LiveCalcData.rank"],
+			deprecatedSymbols: [],
 		});
 		const owners = (result as { deprecatedSymbolOwners?: Record<string, string[]> })
 			.deprecatedSymbolOwners;
-		expect(Object.values(owners ?? {})).toEqual(
-			expect.arrayContaining([["LiveCalcData.livePoints"], ["LiveCalcData.rank"]])
-		);
+		expect(owners).toEqual({});
 	});
 
 	it("does not report deprecated selections excluded by skip/include directives", () => {
@@ -830,20 +822,20 @@ describe("GraphQL request limits", () => {
 		let astNodes = 0;
 		visit(parse(query), { enter: () => void (astNodes += 1) });
 
-		expect(astNodes).toBe(238);
+		expect(astNodes).toBe(280);
 		expect(
 			validateGraphQLRequestLimits({ query, variables: { eventId: 1, entryId: 1 } }, schema)
 		).toMatchObject({
 			ok: true,
-			weightedComplexity: 104,
-			rateLimitCostUnits: 11,
+			weightedComplexity: 122,
+			rateLimitCostUnits: 13,
 			rootFields: ["calcLivePointsByEntry"],
 		});
 	});
 
 	it("keeps the live-points AST allowance scoped to one exact bounded root", () => {
 		const fieldsWithinAllowance = Array.from({ length: 110 }, () => "__typename").join(" ");
-		const fieldsAboveAllowance = Array.from({ length: 130 }, () => "__typename").join(" ");
+		const fieldsAboveAllowance = Array.from({ length: 150 }, () => "__typename").join(" ");
 
 		expect(
 			validateGraphQLRequestLimits(
@@ -886,7 +878,7 @@ describe("GraphQL request limits", () => {
 		let astNodes = 0;
 		visit(parse(query), { enter: () => void (astNodes += 1) });
 
-		expect(astNodes).toBe(336);
+		expect(astNodes).toBe(360);
 		expect(
 			validateGraphQLRequestLimits(
 				{

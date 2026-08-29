@@ -56,11 +56,7 @@ import {
 import { parsePostgresMarketMetadata } from "../../src/domains/market/context";
 import {
 	DATA_SNAPSHOT_DATA_SQL_CONTRACT,
-	mapLiveLifecycleStatus,
 	parseCoreFallbackRow,
-	parseLiveFallbackRow,
-	type LiveFallbackRow,
-	type LiveLifecycleStatusRow,
 } from "../../src/infra/data-snapshot";
 import type { QueryExecutor } from "../../src/infra/database";
 import {
@@ -411,28 +407,6 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					if (!points) {
 						throw new Error(
 							"runtime reader role returned a season-path payload that the production decoder rejects"
-						);
-					}
-				}
-				if (probe.runtime === "must-return-live") {
-					const live = parseLiveFallbackRow(
-						result.rows[0] as LiveFallbackRow,
-						Number(probe.values[1]),
-						CONTRACT_SEASON_CODE
-					);
-					if (!live) {
-						throw new Error(
-							"runtime reader role returned a live publication that the production decoder rejects"
-						);
-					}
-				}
-				if (probe.runtime === "must-return-live-lifecycle") {
-					const lifecycle = mapLiveLifecycleStatus(
-						result.rows[0] as LiveLifecycleStatusRow | undefined
-					);
-					if (!lifecycle || lifecycle.eventId !== Number(probe.values[1])) {
-						throw new Error(
-							"runtime reader role returned a live lifecycle row that the production decoder rejects"
 						);
 					}
 				}

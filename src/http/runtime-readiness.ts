@@ -12,7 +12,8 @@ export type RuntimeReadiness = Readonly<{
 
 export const checkRuntimeReadiness = async (
 	currentSeasonProvider: CurrentSeasonProvider,
-	forceSeasonRefresh = true
+	forceSeasonRefresh = false,
+	strict = false
 ): Promise<RuntimeReadiness> => {
 	const result = await runHealthChecks({
 		redis: async () => {
@@ -36,12 +37,19 @@ export const checkRuntimeReadiness = async (
 			}
 		},
 	});
-	if (!result.ok) logger.warn({ checks: result.checks }, "Health readiness degraded");
+	const hotPathReady =
+		result.checks.redis === "ok" &&
+		result.checks.rateLimitRedis === "ok" &&
+		result.checks.season === "ok";
+	const ok = strict ? result.ok : hotPathReady;
+	if (!ok || !result.ok)
+		logger.warn({ checks: result.checks, strict }, "Health readiness degraded");
 	return {
-		ok: result.ok,
+		ok,
 		body: JSON.stringify({
-			status: result.ok ? "ok" : "degraded",
-			revision: env.APP_REVISION,
+			status: ok ? (result.ok ? "ok" : "degraded") : "unavailable",
+			contractVersion: "live-points-v2",
+			deploySha: env.DEPLOY_SHA,
 			checks: result.checks,
 		}),
 	};

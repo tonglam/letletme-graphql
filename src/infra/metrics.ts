@@ -117,34 +117,16 @@ const playerStatsDeskFields = new Counter({
 	labelNames: ["field", "status"] as const,
 });
 
-const managerLiveScoreSourceTotal = new Counter({
-	name: "manager_live_score_source_total",
-	help: "Official manager live score rows by source",
-	labelNames: ["source"] as const,
+const livePointsDeliveryTotal = new Counter({
+	name: "live_points_delivery_total",
+	help: "Live Points V2 responses by delivery state and serving source",
+	labelNames: ["state", "served_from"] as const,
 });
 
-const managerLiveScoreAgeSeconds = new Gauge({
-	name: "manager_live_score_age_seconds",
-	help: "Age of the most recently served manager live score rows",
-	labelNames: ["source"] as const,
-});
-
-const managerLiveScoreReconciliationTotal = new Counter({
-	name: "manager_live_score_reconciliation_total",
-	help: "Manager live headline/detail reconciliation outcomes",
-	labelNames: ["outcome"] as const,
-});
-
-const managerLiveUpstreamRequestsTotal = new Counter({
-	name: "manager_live_upstream_requests_total",
-	help: "GraphQL to Data manager-live upstream request outcomes",
-	labelNames: ["outcome"] as const,
-});
-
-const managerLiveUpstreamLatencySeconds = new Histogram({
-	name: "manager_live_upstream_latency_seconds",
-	help: "Latency of GraphQL to Data manager-live upstream requests",
-	buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
+const livePointsProjectionFailures = new Counter({
+	name: "live_points_projection_failures_total",
+	help: "Live Points V2 projection failures by reason",
+	labelNames: ["reason"] as const,
 });
 
 type DatabasePoolMetrics = {
@@ -188,11 +170,8 @@ registry.registerMetric(briefingPublicationReaderEvents);
 registry.registerMetric(playerStateProfiles);
 registry.registerMetric(playerStateProviderStale);
 registry.registerMetric(playerStatsDeskFields);
-registry.registerMetric(managerLiveScoreSourceTotal);
-registry.registerMetric(managerLiveScoreAgeSeconds);
-registry.registerMetric(managerLiveScoreReconciliationTotal);
-registry.registerMetric(managerLiveUpstreamRequestsTotal);
-registry.registerMetric(managerLiveUpstreamLatencySeconds);
+registry.registerMetric(livePointsDeliveryTotal);
+registry.registerMetric(livePointsProjectionFailures);
 registry.registerMetric(postgresPoolClients);
 
 export const registerDatabasePoolMetrics = (provider: () => DatabasePoolMetrics): void => {
@@ -219,11 +198,8 @@ export const metrics = {
 	playerStateProfiles,
 	playerStateProviderStale,
 	playerStatsDeskFields,
-	managerLiveScoreSourceTotal,
-	managerLiveScoreAgeSeconds,
-	managerLiveScoreReconciliationTotal,
-	managerLiveUpstreamRequestsTotal,
-	managerLiveUpstreamLatencySeconds,
+	livePointsDeliveryTotal,
+	livePointsProjectionFailures,
 	postgresPoolClients,
 };
 

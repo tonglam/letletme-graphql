@@ -17,9 +17,11 @@ import type { EntryOfficialH2HDeskItem } from "../tournaments/repository";
 import { tournamentsService } from "../tournaments/service";
 import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import type { Event } from "../events/repository";
-import { entryLiveBatchService, type BatchLiveCalcResult } from "../entry-live/batch-service";
-import type { LiveCalcData } from "../entry-live/calc-service";
-import { isTraceableOfficialManagerScore } from "../entry-live/manager-score";
+import {
+	calcLivePointsForEntriesV2,
+	type BatchLiveCalcResultV2,
+	type LiveCalcDataV2,
+} from "../entry-live/v2-service";
 
 export type HomePublicBootstrap = {
 	context: CoreEventContext;
@@ -175,13 +177,13 @@ export const applyHomeRankLifecycle = (
 	};
 };
 
-const pointsStateFromCalc = (calc: LiveCalcData): HomePersonalDesk["pointsState"] => {
-	switch (calc.score.state) {
+const pointsStateFromCalc = (calc: LiveCalcDataV2): HomePersonalDesk["pointsState"] => {
+	switch (calc.score.delivery.state) {
 		case "FRESH":
 			return "LIVE";
 		case "STALE":
 			return "STALE";
-		case "SETTLING":
+		case "DEGRADED":
 			return "SETTLING";
 		case "FINAL":
 			return "FINAL";
@@ -190,16 +192,17 @@ const pointsStateFromCalc = (calc: LiveCalcData): HomePersonalDesk["pointsState"
 	}
 };
 
-const scoreCanHeadline = (calc: LiveCalcData | undefined): boolean =>
+const scoreCanHeadline = (calc: LiveCalcDataV2 | undefined): boolean =>
 	calc !== undefined &&
-	isTraceableOfficialManagerScore(calc.score) &&
+	calc.availability === "READY" &&
+	calc.score.source !== "UNAVAILABLE" &&
 	typeof calc.score.totalPoints === "number" &&
 	calc.score.totalScope === "OVERALL";
 
 export const applyHomeScoreLifecycle = (
 	desk: HomePersonalDesk,
 	event: Event | null,
-	calc: LiveCalcData | undefined
+	calc: LiveCalcDataV2 | undefined
 ): HomePersonalDesk => {
 	if (!event) return desk;
 	const final = isFinalEvent(event);
@@ -221,25 +224,26 @@ export const applyHomeScoreLifecycle = (
 			...desk,
 			overallPoints: null,
 			pointsState: final ? "SETTLING" : "UNAVAILABLE",
-			pointsCheckedAt: calc?.score.checkedAt ?? null,
+			pointsCheckedAt: calc?.score.times?.sourceCheckedAt ?? null,
 			rankState: "UPDATING",
 		};
 	}
-	const finalRank = final ? calc.score.overallRank : null;
+	const finalRank = final ? (calc.rank?.overallRank ?? null) : null;
 	return {
 		...desk,
 		overallPoints: calc.score.totalPoints,
 		pointsState: pointsStateFromCalc(calc),
-		pointsCheckedAt: calc.score.checkedAt,
+		pointsCheckedAt: calc.score.times?.sourceCheckedAt ?? null,
 		overallRank: finalRank ?? desk.overallRank,
 		rankState: finalRank === null ? "UPDATING" : "READY",
-		rankCheckedAt: finalRank === null ? desk.rankCheckedAt : calc.score.checkedAt,
+		rankCheckedAt: finalRank === null ? desk.rankCheckedAt : calc.score.times.sourceCheckedAt,
 	};
 };
 
-const pairScore = (calc: LiveCalcData | undefined): number | null =>
+const pairScore = (calc: LiveCalcDataV2 | undefined): number | null =>
 	calc &&
-	isTraceableOfficialManagerScore(calc.score) &&
+	calc.availability === "READY" &&
+	calc.score.source !== "UNAVAILABLE" &&
 	typeof calc.score.netEventPoints === "number"
 		? calc.score.netEventPoints
 		: null;
@@ -257,7 +261,7 @@ const oldestCheckedAt = (...values: Array<string | null | undefined>): string | 
 export const applyHomePairScores = (
 	desk: HomePersonalDesk,
 	event: Event | null,
-	results: BatchLiveCalcResult["results"]
+	results: BatchLiveCalcResultV2["results"]
 ): HomePersonalDesk => {
 	if (!event || isFinalEvent(event)) return desk;
 	return {
@@ -278,8 +282,8 @@ export const applyHomePairScores = (
 						? { ...matchup.opponent, points: pairScore(opponentCalc) }
 						: matchup.opponent,
 					sourceCheckedAt: oldestCheckedAt(
-						viewerCalc?.score.checkedAt,
-						opponentCalc?.score.checkedAt
+						viewerCalc?.score.times?.sourceCheckedAt,
+						opponentCalc?.score.times?.sourceCheckedAt
 					),
 				},
 			};
@@ -405,7 +409,7 @@ export const homeService = {
 		const event = eventId ? await eventsService.getEventById(context, eventId) : null;
 		let desk = applyHomeRankLifecycle(rawDesk, event);
 
-		let batch: BatchLiveCalcResult | null = null;
+		let batch: BatchLiveCalcResultV2 | null = null;
 		if (event && !isFinalEvent(event)) {
 			const pairEntryIds = desk.leagueRanks.flatMap((league) => {
 				const matchup = league.h2hMatchup;
@@ -417,9 +421,7 @@ export const homeService = {
 			});
 			const entryIds = [...new Set([entryId, ...pairEntryIds])];
 			try {
-				batch = await entryLiveBatchService.calcLivePointsForEntries(context, event.id, entryIds, {
-					managerReadMode: "CACHE_ONLY",
-				});
+				batch = await calcLivePointsForEntriesV2(context, event.id, entryIds);
 			} catch (error) {
 				context.logger.warn(
 					{

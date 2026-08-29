@@ -179,7 +179,7 @@ case "$RATE_LIMIT_ROLLOUT" in
     if [ -f "$active_env" ]; then
       active_rate_limit_mode=$(sed -n 's/^GRAPHQL_RATE_LIMIT_MODE=//p' "$active_env")
       if [ -z "$active_rate_limit_mode" ]; then
-        active_rate_limit_mode=shadow-v3
+        active_rate_limit_mode=shadow-v4
       fi
       case "$active_rate_limit_mode" in
         shadow-v3|enforce-v3|shadow-v4|enforce-v4) ;;

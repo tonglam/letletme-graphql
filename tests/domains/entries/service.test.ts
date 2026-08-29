@@ -9,35 +9,36 @@ import {
 import type { GraphQLContext } from "../../../src/graphql/context";
 import {
 	buildCorePublication,
+	buildLivePublication,
 	buildSnapshotContext,
 	buildTestCoreData,
 	TestRedis,
 } from "../../helpers/data-publication";
 
 const liveRow = (eventId: number, elementId: number, totalPoints: number, minutes: number) => ({
-	event_id: eventId,
-	element_id: elementId,
+	eventId,
+	elementId,
 	minutes,
-	goals_scored: 0,
+	goalsScored: 0,
 	assists: 0,
-	clean_sheets: 0,
-	goals_conceded: 0,
-	own_goals: 0,
-	penalties_saved: 0,
-	penalties_missed: 0,
-	yellow_cards: 0,
-	red_cards: 0,
+	cleanSheets: 0,
+	goalsConceded: 0,
+	ownGoals: 0,
+	penaltiesSaved: 0,
+	penaltiesMissed: 0,
+	yellowCards: 0,
+	redCards: 0,
 	saves: 0,
 	bonus: 0,
 	bps: 0,
 	starts: minutes > 0,
-	defensive_contribution: 0,
-	expected_goals: "0.00",
-	expected_assists: "0.00",
-	expected_goal_involvements: "0.00",
-	expected_goals_conceded: "0.00",
-	in_dream_team: false,
-	total_points: totalPoints,
+	defensiveContribution: 0,
+	expectedGoals: "0.00",
+	expectedAssists: "0.00",
+	expectedGoalInvolvements: "0.00",
+	expectedGoalsConceded: "0.00",
+	inDreamTeam: false,
+	totalPoints,
 });
 
 const makeContext = (
@@ -51,11 +52,19 @@ const makeContext = (
 	}> = [],
 	fixtureTeamError: Error | null = null
 ): GraphQLContext => {
-	const context = buildSnapshotContext(new TestRedis(buildCorePublication("2526", 7, core)), {
-		seasonId: 2025,
-		seasonCode: "2526",
-		dataRevision: "core-7",
-	});
+	const context = buildSnapshotContext(
+		new TestRedis(
+			buildCorePublication("2526", 7, core),
+			buildLivePublication(core, liveRows[0]?.eventId ?? 1, "2526", 8, {
+				eventLives: liveRows,
+			})
+		),
+		{
+			seasonId: 2025,
+			seasonCode: "2526",
+			dataRevision: "core-7",
+		}
+	);
 	context.data = {
 		read: (table: string) => {
 			if (table !== "fpl.player_gameweek_stats" && table !== "fpl.player_fixture_stats") {

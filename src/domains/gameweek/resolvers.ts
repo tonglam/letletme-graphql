@@ -15,14 +15,14 @@ export const gameweekResolvers = {
 			buildDataCompleteness({
 				contractKey: "live-snapshot",
 				scopeKey: `season:${parent.season}:event:${parent.eventId}`,
-				revision: parent.liveRevision,
+				revision: parent.scoreCoreRevision,
 				sourceCheckedAt: parent.sourceCheckedAt,
-				eligibility: parent.liveRevision === null ? "INVALID" : undefined,
+				eligibility: parent.scoreCoreRevision === null ? "INVALID" : undefined,
 				complete:
 					parent.lifecycle !== "SCHEDULED" &&
 					parent.overviewState === "AVAILABLE" &&
 					parent.boardsState === "AVAILABLE" &&
-					parent.liveRevision !== null,
+					parent.scoreCoreRevision !== null,
 			}),
 	},
 };

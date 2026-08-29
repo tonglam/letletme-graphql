@@ -13,7 +13,7 @@ type EnvKey =
 	| "FULL_FIELD_LIVE_BOARD_ENABLED"
 	| "REDIS_URL"
 	| "RATE_LIMIT_REDIS_URL"
-	| "APP_REVISION"
+	| "DEPLOY_SHA"
 	| "PORT"
 	| "LOG_LEVEL"
 	| "BACKEND_PROXY_SECRET"
@@ -78,9 +78,9 @@ const parseRedisEndpoint = (urlKey: "REDIS_URL" | "RATE_LIMIT_REDIS_URL"): Redis
 
 const NODE_ENV = readEnv("NODE_ENV") ?? "development";
 const isProduction = NODE_ENV === "production";
-const APP_REVISION = readEnv("APP_REVISION")?.trim() || "unknown";
-if (isProduction && !/^[0-9a-f]{40}$/.test(APP_REVISION)) {
-	throw new Error("APP_REVISION must be the exact 40-character lowercase Git SHA in production");
+const DEPLOY_SHA = readEnv("DEPLOY_SHA")?.trim() || "unknown";
+if (isProduction && !/^[0-9a-f]{40}$/.test(DEPLOY_SHA)) {
+	throw new Error("DEPLOY_SHA must be the exact 40-character lowercase Git SHA in production");
 }
 
 // These names were accepted by the pre-hard-cut runtime. Keeping them in the
@@ -105,6 +105,7 @@ const RETIRED_ENV_KEYS = [
 	"LETLETME_GRAPHQL_REDIS_HOST",
 	"LETLETME_GRAPHQL_REDIS_PORT",
 	"LETLETME_GRAPHQL_REDIS_PASSWORD",
+	"APP_REVISION",
 ] as const;
 const runtimeEnvironmentKeys = new Set([
 	...Object.keys(process.env),
@@ -196,7 +197,7 @@ export const env = {
 	RATE_LIMIT_REDIS_URL: rateLimitRedis.url,
 	REDIS_ENDPOINT_IDENTITY: primaryRedis.identity,
 	RATE_LIMIT_REDIS_ENDPOINT_IDENTITY: rateLimitRedis.identity,
-	APP_REVISION,
+	DEPLOY_SHA,
 	PORT: readNumber("PORT", 4000),
 	LOG_LEVEL: readEnv("LOG_LEVEL") ?? "info",
 

@@ -59,6 +59,7 @@ export const buildGraphQLRuntimeContext = async ({
 	requestId,
 	operationName,
 	limits,
+	livePointsHotPath = false,
 }: {
 	currentSeasonProvider: CurrentSeasonProvider;
 	parsedBody: unknown;
@@ -68,6 +69,7 @@ export const buildGraphQLRuntimeContext = async ({
 	requestId: string;
 	operationName: string;
 	limits: AcceptedGraphQLLimits;
+	livePointsHotPath?: boolean;
 }): Promise<RuntimeContextResult> => {
 	let currentSeason: GraphQLContext["currentSeason"];
 	try {
@@ -75,18 +77,44 @@ export const buildGraphQLRuntimeContext = async ({
 			currentSeasonProvider.refresh(database, 5_000)
 		);
 	} catch (error) {
-		logger.warn({ err: error, requestId }, "Current season authority unavailable");
-		return {
-			ok: false,
-			fullCoreLoaded: false,
-			failure: {
-				kind: "season",
-				status: 503,
-				code: "SEASON_AUTHORITY_UNAVAILABLE",
-				message: "Current season metadata is temporarily unavailable",
-				outcome: "season_authority_unavailable",
-			},
-		};
+		if (livePointsHotPath) {
+			try {
+				// The season identity was pinned at startup. During a PostgreSQL
+				// incident, a V2 live request may continue against that identity;
+				// the publication reader still fences every payload by season/event.
+				currentSeason = currentSeasonProvider.get();
+				logger.warn(
+					{ err: error, requestId },
+					"Season authority unavailable; serving Live Points with startup season LKG"
+				);
+			} catch {
+				logger.warn({ err: error, requestId }, "Current season authority unavailable");
+				return {
+					ok: false,
+					fullCoreLoaded: false,
+					failure: {
+						kind: "season",
+						status: 503,
+						code: "SEASON_AUTHORITY_UNAVAILABLE",
+						message: "Current season metadata is temporarily unavailable",
+						outcome: "season_authority_unavailable",
+					},
+				};
+			}
+		} else {
+			logger.warn({ err: error, requestId }, "Current season authority unavailable");
+			return {
+				ok: false,
+				fullCoreLoaded: false,
+				failure: {
+					kind: "season",
+					status: 503,
+					code: "SEASON_AUTHORITY_UNAVAILABLE",
+					message: "Current season metadata is temporarily unavailable",
+					outcome: "season_authority_unavailable",
+				},
+			};
+		}
 	}
 
 	const data = new ReadModelClient(database, currentSeason);
@@ -129,6 +157,15 @@ export const buildGraphQLRuntimeContext = async ({
 		principal: principal ?? undefined,
 		user: user ?? undefined,
 	};
+
+	// Live Points V2 is a Redis-first projection.  Do not make the request wait
+	// for the full Core publication (or PostgreSQL) before the resolver can
+	// read its same-event current/previous/LKG data.  The V2 resolvers load only
+	// the identity slice they need and retain their own exact-event fallback.
+	if (livePointsHotPath) {
+		context.fullCoreLoaded = false;
+		return { ok: true, context, fullCoreLoaded: false };
+	}
 
 	const lightweightCoreRead =
 		limits.shape === "query" &&

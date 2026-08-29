@@ -9,7 +9,7 @@ import {
 	reconcileHomeOfficialH2HRanks,
 	settleHomeTransfers,
 } from "../../../src/domains/home/service";
-import type { LiveCalcData } from "../../../src/domains/entry-live/calc-service";
+import type { LiveCalcDataV2 as LiveCalcData } from "../../../src/domains/entry-live/v2-service";
 import type { Event } from "../../../src/domains/events/repository";
 import { gameweekService } from "../../../src/domains/gameweek/service";
 import type { MarketPulse } from "../../../src/domains/market/repository";
@@ -22,8 +22,10 @@ import type { GraphQLContext } from "../../../src/graphql/context";
 import type { Principal } from "../../../src/infra/principal";
 import {
 	buildCorePublication,
+	buildLivePublication,
 	buildSnapshotContext,
 	buildTestCoreData,
+	buildTestEventLives,
 	TestRedis,
 } from "../../helpers/data-publication";
 
@@ -104,7 +106,13 @@ const lifecycleCalc = (options: {
 }): LiveCalcData => {
 	const checkedAt = options.checkedAt ?? "2026-08-25T00:00:00.000Z";
 	return {
+		availability: "READY",
 		entry: options.entryId,
+		delivery: {
+			state: options.final ? "FINAL" : "FRESH",
+			servedFrom: "REDIS_CURRENT",
+			reasonCodes: [],
+		},
 		score: {
 			eventPoints: options.netEventPoints,
 			netEventPoints: options.netEventPoints,
@@ -124,37 +132,30 @@ const lifecycleCalc = (options: {
 			nextRefreshAt: null,
 			reconciliation: "NOT_COMPARABLE",
 			reasonCodes: [],
+			delivery: {
+				state: options.final ? "FINAL" : "FRESH",
+				servedFrom: "REDIS_CURRENT",
+				reasonCodes: [],
+			},
+			times: {
+				sourceCheckedAt: checkedAt,
+				contentUpdatedAt: checkedAt,
+				publishedAt: checkedAt,
+				checkpointedAt: checkedAt,
+				servedAt: checkedAt,
+				staleAt: checkedAt,
+				nextRefreshAt: null,
+			},
+		},
+		rank: {
+			eventRank: null,
+			overallRank: options.overallRank ?? null,
+			leagueRank: null,
+			revision: null,
+			contentUpdatedAt: checkedAt,
+			state: options.final ? "FINAL" : "FRESH",
 		},
 	} as unknown as LiveCalcData;
-};
-
-const withDurableBoardRows = (
-	context: ReturnType<typeof buildSnapshotContext>,
-	rowCount = 11
-): void => {
-	context.data = {
-		read: (model: string) => {
-			const rows =
-				model === "fpl.player_gameweek_stats"
-					? Array.from({ length: rowCount }, (_, index) => ({
-							event_id: 1,
-							element_id: index + 1,
-							minutes: 90,
-							in_dream_team: true,
-							total_points: 20 - index,
-						}))
-					: [];
-			const result = Promise.resolve({ data: rows, error: null });
-			const builder = {
-				select: () => builder,
-				eq: () => builder,
-				in: () => builder,
-				or: () => builder,
-				then: result.then.bind(result),
-			};
-			return builder as never;
-		},
-	} as never;
 };
 
 describe("Home GraphQL contracts", () => {
@@ -325,17 +326,35 @@ describe("Home GraphQL contracts", () => {
 		}
 	});
 
-	it("keeps homeGameweek available when settled boards use durable PostgreSQL rows", async () => {
+	it("keeps homeGameweek available when the V2 live publication is present", async () => {
 		const baseCore = buildTestCoreData(1);
 		const core = buildTestCoreData(1, {
 			events: baseCore.events.map((event) =>
 				event.id === 1 ? { ...event, finished: true, dataChecked: true } : event
 			),
 		});
-		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
-			databaseQuery: async () => ({ rows: [] }),
-		});
-		withDurableBoardRows(context);
+		const liveRows = buildTestEventLives(core, 1)
+			.slice(0, 11)
+			.map((row, index) => ({
+				...row,
+				minutes: 90,
+				starts: true,
+				bps: 10,
+				inDreamTeam: true,
+				totalPoints: 20 - index,
+			}));
+		const context = buildSnapshotContext(
+			new TestRedis(
+				buildCorePublication("2627", 7, core),
+				buildLivePublication(core, 1, "2627", 8, {
+					state: "settled",
+					eventLives: liveRows,
+				})
+			),
+			{
+				databaseQuery: async () => ({ rows: [] }),
+			}
+		);
 
 		const result = await graphql({
 			schema,
@@ -343,7 +362,7 @@ describe("Home GraphQL contracts", () => {
 				query {
 					homeGameweek(eventId: 1) {
 						gameweekDesk {
-							lifecycle boardsState liveRevision publishedAt
+							lifecycle boardsState scoreCoreRevision publishedAt
 							dreamTeam { id }
 						}
 					}
@@ -359,8 +378,6 @@ describe("Home GraphQL contracts", () => {
 			gameweekDesk: {
 				lifecycle: "SETTLED",
 				boardsState: "AVAILABLE",
-				liveRevision: null,
-				publishedAt: null,
 			},
 		});
 		expect(homeGameweek?.gameweekDesk?.dreamTeam).toHaveLength(11);

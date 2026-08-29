@@ -31,6 +31,12 @@ import {
 	metricsTokenMatches,
 } from "./http/runtime-http";
 import { checkRuntimeReadiness } from "./http/runtime-readiness";
+import {
+	hasLivePointsV2Contract,
+	LIVE_POINTS_CONTRACT_HEADER,
+	LIVE_POINTS_CONTRACT_VALUE,
+	requiresLivePointsV2Contract,
+} from "./http/live-points-contract";
 import { GraphQLAdmissionOrder } from "./http/graphql-admission-order";
 import {
 	mergeShadowRateLimitDecision,
@@ -105,8 +111,26 @@ export const startServer = async (): Promise<void> => {
 			}
 
 			if (url.pathname === "/health/live") {
-				return new Response(JSON.stringify({ status: "ok", revision: env.APP_REVISION }), {
-					status: 200,
+				return new Response(
+					JSON.stringify({
+						status: "ok",
+						contractVersion: "live-points-v2",
+						deploySha: env.DEPLOY_SHA,
+					}),
+					{
+						status: 200,
+						headers: {
+							"Content-Type": "application/json",
+							...corsHeaders,
+						},
+					}
+				);
+			}
+
+			if (url.pathname === "/health/ready") {
+				const health = await checkRuntimeReadiness(currentSeasonProvider, false, false);
+				return new Response(health.body, {
+					status: health.ok ? 200 : 503,
 					headers: {
 						"Content-Type": "application/json",
 						...corsHeaders,
@@ -114,8 +138,8 @@ export const startServer = async (): Promise<void> => {
 				});
 			}
 
-			if (url.pathname === "/health/ready") {
-				const health = await checkRuntimeReadiness(currentSeasonProvider, true);
+			if (url.pathname === "/health/deploy") {
+				const health = await checkRuntimeReadiness(currentSeasonProvider, true, true);
 				return new Response(health.body, {
 					status: health.ok ? 200 : 503,
 					headers: {
@@ -372,6 +396,19 @@ export const startServer = async (): Promise<void> => {
 						);
 					}
 					rootFields = limits.rootFields;
+					if (
+						requiresLivePointsV2Contract(rootFields) &&
+						!hasLivePointsV2Contract(request.headers)
+					) {
+						const response = jsonError(
+							426,
+							"CLIENT_UPGRADE_REQUIRED",
+							"Live Points requires the live-points-v2 client contract",
+							corsHeaders,
+							{ [LIVE_POINTS_CONTRACT_HEADER]: LIVE_POINTS_CONTRACT_VALUE }
+						);
+						return finalizePostPreAuthResponse(response, "live_points_contract_rejected");
+					}
 					admissionOrder.enter("principal");
 					const { principal, user } = await requestTiming.measure("principal", () =>
 						resolvePrincipalAndUser(request)
@@ -434,6 +471,7 @@ export const startServer = async (): Promise<void> => {
 						requestId,
 						operationName,
 						limits,
+						livePointsHotPath: requiresLivePointsV2Contract(rootFields),
 					});
 					if (!contextResult.ok) {
 						fullCoreLoaded = contextResult.fullCoreLoaded;
