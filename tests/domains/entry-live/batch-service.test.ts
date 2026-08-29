@@ -514,6 +514,73 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		}
 	});
 
+	it("keeps available rows when a cache-only cohort has cold entries", async () => {
+		const originalCalc = entryLiveBatchService.calcLivePointsForEntries;
+		let receivedPrefetched: Record<string, unknown> | undefined;
+		entryLiveBatchService.calcLivePointsForEntries = async (
+			_context,
+			eventId,
+			entryIds,
+			prefetched
+		) => {
+			receivedPrefetched = prefetched as Record<string, unknown>;
+			return {
+				results: new Map(
+					entryIds.map((entryId) => [entryId, { entry: entryId, event: eventId } as never])
+				),
+				errors: [],
+				meta: {
+					eventId,
+					totalEntries: entryIds.length,
+					succeededCount: entryIds.length,
+					failedCount: 0,
+				},
+			};
+		};
+		try {
+			const now = new Date().toISOString();
+			const result = await calcLivePointsForEntriesInChunks(makeMockContext({}), 33, [1, 2, 3], {
+				liveRef: { publicationId: "pub", revision: "1" },
+				managerScores: {
+					season: "2627",
+					rows: new Map([
+						[
+							1,
+							{
+								entryId: 1,
+								source: "FPL_EVENT_LIVE",
+								provenance: { livePublicationId: "pub", liveRevision: "1" },
+							} as never,
+						],
+						[
+							2,
+							{
+								entryId: 2,
+								source: "FPL_EVENT_LIVE",
+								provenance: { livePublicationId: "pub", liveRevision: "1" },
+							} as never,
+						],
+					]),
+					errorCode: "INPUT_INCOMPLETE",
+					managerRevision: "partial",
+					dataAvailability: "PARTIAL",
+					servedFrom: "POSTGRES",
+					refreshQueued: true,
+					missingEntryIds: [3],
+					checkedAt: now,
+					tournamentCoverage: null,
+					nextRefreshAt: now,
+				},
+			});
+			expect([...result.results.keys()]).toEqual([1, 2, 3]);
+			expect(result.errors.map((error) => error.entryId)).toEqual([3]);
+			expect(receivedPrefetched?.allowPartialManagerScores).toBe(true);
+			expect((receivedPrefetched?.managerScores as { errorCode?: unknown })?.errorCode).toBeNull();
+		} finally {
+			entryLiveBatchService.calcLivePointsForEntries = originalCalc;
+		}
+	});
+
 	it("rejects duplicate entry IDs before loading shared data", async () => {
 		const context = makeMockContext({});
 		expect(

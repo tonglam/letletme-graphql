@@ -257,17 +257,23 @@ export const mergeManagerLiveFetchResults = (
  */
 export const managerScoreLoadHasCoherentProvenance = (
 	load: ManagerScoreLoad,
-	entryIds: readonly number[]
+	entryIds: readonly number[],
+	options: { allowMissing?: boolean } = {}
 ): boolean => {
 	const expected = new Set(entryIds);
+	const missing = new Set(load.missingEntryIds);
+	const allowMissing = options.allowMissing === true;
 	if (
-		load.errorCode !== null ||
-		load.missingEntryIds.length > 0 ||
-		load.rows.size !== expected.size ||
-		![...expected].every((entryId) => load.rows.has(entryId))
+		(!allowMissing && load.errorCode !== null) ||
+		(!allowMissing && missing.size > 0) ||
+		[...missing].some((entryId) => !expected.has(entryId)) ||
+		[...load.rows.keys()].some((entryId) => !expected.has(entryId)) ||
+		load.rows.size !== expected.size - missing.size ||
+		![...expected].every((entryId) => missing.has(entryId) || load.rows.has(entryId))
 	)
 		return false;
 	const rows = [...load.rows.values()];
+	if (rows.length === 0) return allowMissing && missing.size === expected.size;
 	if (rows.every((row) => row.source === "FPL_FINAL_RESULT")) return true;
 	if (rows.some((row) => row.source !== "FPL_EVENT_LIVE")) return false;
 	const liveReferences = new Set(

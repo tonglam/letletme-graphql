@@ -72,6 +72,11 @@ export type EntryLiveBatchPrefetched = {
 	 * revision requests never set this escape hatch.
 	 */
 	allowLastGoodManagerScores?: boolean;
+	/**
+	 * A cache-only cohort may have a few cold IDs. Reuse available rows and let
+	 * the normal no-picks contract represent those IDs as unavailable.
+	 */
+	allowPartialManagerScores?: boolean;
 };
 
 const MAX_ENTRY_BATCH = 500;
@@ -621,12 +626,19 @@ export const entryLiveBatchService = {
 			prefetched?.allowLastGoodManagerScores === true &&
 			prefetchedManagerScores?.dataAvailability === "LAST_GOOD" &&
 			prefetchedManagerScores.errorCode === null &&
-			prefetchedManagerScores.missingEntryIds.length === 0;
+			(prefetchedManagerScores.missingEntryIds.length === 0 ||
+				prefetched?.allowPartialManagerScores === true);
 		const prefetchedManagerScoresAreUsable =
 			prefetchedManagerScores !== undefined &&
 			entryIds.every((entryId) => {
 				const row = prefetchedManagerScores.rows.get(entryId);
-				if (!row?.effectiveLineup || row.effectiveLineup.length !== 15) return false;
+				if (!row) {
+					return (
+						prefetched?.allowPartialManagerScores === true &&
+						prefetchedManagerScores.missingEntryIds.includes(entryId)
+					);
+				}
+				if (!row.effectiveLineup || row.effectiveLineup.length !== 15) return false;
 				if (!provisional || !pinnedLiveMeta?.publicationId) return true;
 				if (canUseLastGoodManagerScores) return true;
 				return (
@@ -1012,7 +1024,7 @@ export const calcLivePointsForEntriesInChunks = async (
 					: {}),
 			})
 		));
-	if (!managerScoreLoadHasCoherentProvenance(managerScores, entryIds)) {
+	if (!managerScoreLoadHasCoherentProvenance(managerScores, entryIds, { allowMissing: true })) {
 		return {
 			results: new Map(),
 			errors: entryIds.map((entryId) => ({
@@ -1056,17 +1068,22 @@ export const calcLivePointsForEntriesInChunks = async (
 			singleManagerReference.revision === currentLiveMeta.revision);
 	const allowLastGoodManagerScores =
 		prefetched?.allowLastGoodManagerScores === true ||
-		(!rowsAlignedWithCurrentLive &&
-			managerScores.dataAvailability !== "PARTIAL" &&
-			managerScores.dataAvailability !== "UNAVAILABLE");
-	const managerScoresForChunks =
-		allowLastGoodManagerScores && managerScores.dataAvailability === "FRESH"
-			? { ...managerScores, dataAvailability: "LAST_GOOD" as const }
+		(!rowsAlignedWithCurrentLive && managerScores.dataAvailability !== "UNAVAILABLE");
+	const managerScoresWithPerEntryErrors =
+		managerScores.missingEntryIds.length > 0
+			? { ...managerScores, errorCode: null }
 			: managerScores;
+	const managerScoresForChunks =
+		allowLastGoodManagerScores &&
+		(managerScoresWithPerEntryErrors.dataAvailability === "FRESH" ||
+			managerScoresWithPerEntryErrors.dataAvailability === "PARTIAL")
+			? { ...managerScoresWithPerEntryErrors, dataAvailability: "LAST_GOOD" as const }
+			: managerScoresWithPerEntryErrors;
 	const chunkPrefetched: EntryLiveBatchPrefetched = {
 		...prefetched,
 		managerScores: managerScoresForChunks,
 		allowLastGoodManagerScores,
+		allowPartialManagerScores: managerScores.missingEntryIds.length > 0,
 		...(prefetched?.liveRef === undefined && rowsAlignedWithCurrentLive && singleManagerReference
 			? { liveRef: singleManagerReference }
 			: {}),
@@ -1088,6 +1105,16 @@ export const calcLivePointsForEntriesInChunks = async (
 			errors.push(...batch.errors);
 		}
 	}
+	const errorIds = new Set(errors.map((error) => error.entryId));
+	for (const entryId of managerScores.missingEntryIds) {
+		if (!errorIds.has(entryId)) {
+			errors.push({ entryId, message: "Manager score is missing from the cache-only cohort" });
+		}
+	}
+	const inputOrder = new Map(entryIds.map((entryId, index) => [entryId, index]));
+	errors.sort(
+		(left, right) => (inputOrder.get(left.entryId) ?? 0) - (inputOrder.get(right.entryId) ?? 0)
+	);
 
 	const orderedResults = new Map<number, LiveCalcData>();
 	for (const entryId of entryIds) {

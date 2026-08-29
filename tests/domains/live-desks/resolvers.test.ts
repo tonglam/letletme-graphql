@@ -135,6 +135,7 @@ describe("live desks tournament selection index", () => {
 		expect(desk).toContain("const calculationEntryIds = args.ref ? boundedEntryIds : allEntryIds");
 		expect(desk).toContain("...(args.ref && snapshot?.publicationId");
 		expect(desk).not.toContain("...(snapshot?.publicationId");
+		expect(desk).toContain("cachedRowsMatchEligibility");
 
 		const repositorySource = await Bun.file("src/domains/tournaments/repository.ts").text();
 		const detail = repositorySource.slice(
@@ -143,6 +144,7 @@ describe("live desks tournament selection index", () => {
 		);
 		expect(detail).toContain("calcLivePointsForEntriesInChunks");
 		expect(detail).toContain("const calculationEntryIds = rosterEntryIds");
+		expect(detail).toContain("cachedRowsMatchRoster");
 		expect(detail).not.toContain("liveRef: {");
 	});
 

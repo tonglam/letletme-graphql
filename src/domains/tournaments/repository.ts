@@ -4568,9 +4568,16 @@ export const tournamentsRepository: TournamentsRepository = {
 							score?: { source?: string; state?: string };
 					  }>
 					| undefined;
+				const rosterEntryIdSet = new Set(rosterEntryIds);
+				const cachedRowsMatchRoster =
+					cachedRows !== undefined &&
+					cachedRows.length === rosterEntryIdSet.size &&
+					new Set(cachedRows.map((row) => row.entry)).size === rosterEntryIdSet.size &&
+					cachedRows.every((row) => rosterEntryIdSet.has(row.entry));
 				const cachedBoard =
 					cachedCandidate &&
 					cachedRows &&
+					cachedRowsMatchRoster &&
 					cachedCandidate.totalEntries === cachedRows.length &&
 					cachedCandidate.totalEntries === rosterEntryIds.length &&
 					managerScoreBoardIsFinal(cachedRows)

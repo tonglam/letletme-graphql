@@ -1536,9 +1536,16 @@ export const liveDesksResolvers = {
 						score?: { source?: string; state?: string };
 				  }>
 				| undefined;
+			const eligibleEntryIdSet = new Set(allEntryIds);
+			const cachedRowsMatchEligibility =
+				cachedRows !== undefined &&
+				cachedRows.length === eligibleEntryIdSet.size &&
+				new Set(cachedRows.map((row) => row.entry)).size === eligibleEntryIdSet.size &&
+				cachedRows.every((row) => eligibleEntryIdSet.has(row.entry));
 			const cachedBoard =
 				cachedCandidate &&
 				cachedRows &&
+				cachedRowsMatchEligibility &&
 				cachedCandidate.totalEntries === cachedRows.length &&
 				cachedCandidate.totalEntries === allEntryIds.length &&
 				managerScoreBoardIsFinal(cachedRows)
