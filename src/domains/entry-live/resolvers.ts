@@ -61,7 +61,9 @@ export const entryLiveResolvers = {
 			withLiveSnapshotRoot(context, async () => {
 				assertValidEntryBatch(args.entryIds);
 				const calculate = (): Promise<BatchLiveCalcResult> =>
-					entryLiveBatchService.calcLivePointsForEntries(context, args.eventId, args.entryIds);
+					entryLiveBatchService.calcLivePointsForEntries(context, args.eventId, args.entryIds, {
+						managerReadMode: "CACHE_ONLY",
+					});
 				const result = await calculate();
 				return {
 					results: Array.from(result.results.values()),

@@ -45,10 +45,16 @@ describe("entryLiveCalcService.calcLivePointsByEntry", () => {
 			score: { source: "FPL_EVENT_LIVE", state: "FRESH" },
 		} as LiveCalcData;
 		let calls = 0;
-		entryLiveBatchService.calcLivePointsForEntries = async (_context, eventId, entryIds) => {
+		entryLiveBatchService.calcLivePointsForEntries = async (
+			_context,
+			eventId,
+			entryIds,
+			options
+		) => {
 			calls += 1;
 			expect(eventId).toBe(1);
 			expect(entryIds).toEqual([123]);
+			expect(options?.managerReadMode).toBe("CACHE_ONLY");
 			return {
 				results: new Map([[123, ready]]),
 				errors: [],

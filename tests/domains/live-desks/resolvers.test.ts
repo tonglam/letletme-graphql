@@ -113,6 +113,20 @@ describe("live desks tournament selection index", () => {
 		expect(detailBoard).toContain('managerReadMode: "CACHE_ONLY"');
 	});
 
+	it("keeps every interactive legacy desk and squad comparison on durable manager heads", async () => {
+		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const desk = source.slice(
+			source.indexOf("entryLiveCompetitionsDesk: async"),
+			source.indexOf("tournamentSelectionIndex: async")
+		);
+		const squads = source.slice(
+			source.indexOf("tournamentEntrySquads: async"),
+			source.indexOf("tournamentLiveParticipants: async")
+		);
+		expect(desk).toContain('managerReadMode: "CACHE_ONLY"');
+		expect(squads).toContain('managerReadMode: "CACHE_ONLY"');
+	});
+
 	it("requires a fresh manager heartbeat before advertising provisional full-field ranks", async () => {
 		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
 		const board = source.slice(
