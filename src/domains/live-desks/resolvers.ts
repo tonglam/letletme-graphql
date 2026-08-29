@@ -1463,6 +1463,7 @@ export const liveDesksResolvers = {
 				{
 					entriesById: rosterEntries,
 					tournamentId: selected,
+					managerReadMode: "CACHE_ONLY",
 					...(snapshot?.publicationId
 						? {
 								liveRef: {
@@ -1580,6 +1581,7 @@ export const liveDesksResolvers = {
 				ids,
 				{
 					tournamentId: args.tournamentId,
+					managerReadMode: "CACHE_ONLY",
 					...(snapshot.publicationId
 						? {
 								liveRef: {

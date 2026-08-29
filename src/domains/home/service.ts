@@ -417,12 +417,9 @@ export const homeService = {
 			});
 			const entryIds = [...new Set([entryId, ...pairEntryIds])];
 			try {
-				batch = await entryLiveBatchService.calcLivePointsForEntries(
-					context,
-					event.id,
-					entryIds,
-					{}
-				);
+				batch = await entryLiveBatchService.calcLivePointsForEntries(context, event.id, entryIds, {
+					managerReadMode: "CACHE_ONLY",
+				});
 			} catch (error) {
 				context.logger.warn(
 					{

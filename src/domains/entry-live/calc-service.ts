@@ -198,7 +198,12 @@ export const entryLiveCalcService = {
 		const { entryLiveBatchService } = await import("./batch-service");
 		const stopAggregate = context.requestTiming?.start("entryLive.aggregate");
 		const batch = await entryLiveBatchService
-			.calcLivePointsForEntries(context, eventId, [entryId])
+			.calcLivePointsForEntries(context, eventId, [entryId], {
+				// Interactive reads must not spend the Web request deadline chasing a
+				// moving live revision. Data returns the durable last-good head and
+				// queues bounded recovery when that head genuinely needs refreshing.
+				managerReadMode: "CACHE_ONLY",
+			})
 			.finally(() => stopAggregate?.());
 		const result = batch.results.get(entryId);
 		if (result) {
