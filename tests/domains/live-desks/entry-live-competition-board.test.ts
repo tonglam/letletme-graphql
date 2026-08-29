@@ -906,6 +906,19 @@ describe("entry live competition board sorting and performance envelope", () => 
 		}),
 	];
 
+	it("retains an entry-summary overall rank when the live score is unavailable", () => {
+		const unavailable = liveRow({
+			entry: 9,
+			overallRank: 4321,
+			source: "UNAVAILABLE",
+		});
+		const built = board([unavailable]);
+
+		expect(built.rows[0]?.score.source).toBe("UNAVAILABLE");
+		expect(built.rows[0]?.overallRank).toBe(4321);
+		expect(built.rows[0]?.rank).toBe(0);
+	});
+
 	it("supports the existing table sorts plus lightweight board sorts with entry ID as tie-break", () => {
 		const built = board(rows);
 		const cases: Array<
