@@ -871,11 +871,15 @@ export const liveDesksResolvers = {
 				rosterRevision,
 				allEntryIds.length
 			);
+			const fullFieldManagerFreshnessReady =
+				(event.finished && event.dataChecked) ||
+				(window.dataAvailability === "FRESH" &&
+					isManagerScoreLiveHeartbeatFresh(snapshot?.lastSuccessfulFetchAt));
 			const initialWindowRowsAreUsable =
 				initialManagerScores.errorCode === null &&
 				initialManagerScores.rows.size === entryIds.length &&
 				initialManagerScores.missingEntryIds.length === 0 &&
-				((event.finished && event.dataChecked) || window.dataAvailability === "FRESH") &&
+				fullFieldManagerFreshnessReady &&
 				managerScoresAlignedWithLiveSnapshot(initialManagerScores, event, snapshot);
 			const initialHasComparableOverallTotals = allEntryIds.every((entryId) => {
 				const row = initialManagerScores.rows.get(entryId);
@@ -930,7 +934,7 @@ export const liveDesksResolvers = {
 						completeManagerScores.rows.size === allEntryIds.length &&
 						completeManagerScores.missingEntryIds.length === 0 &&
 						hasAllRankMetrics &&
-						((event.finished && event.dataChecked) || window.dataAvailability === "FRESH") &&
+						fullFieldManagerFreshnessReady &&
 						managerScoresAlignedWithLiveSnapshot(completeManagerScores, event, snapshot);
 				} catch (error) {
 					context.logger.warn(
@@ -951,7 +955,7 @@ export const liveDesksResolvers = {
 					managerScores.rows.size === allEntryIds.length &&
 					managerScores.missingEntryIds.length === 0 &&
 					hasAllRankMetrics &&
-					((event.finished && event.dataChecked) || window.dataAvailability === "FRESH") &&
+					fullFieldManagerFreshnessReady &&
 					managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
 			}
 			const managerScores = selectManagerScoresForBoard(
@@ -1238,7 +1242,7 @@ export const liveDesksResolvers = {
 				board.rows.length === board.totalEntries &&
 				board.officialCoverage === 1 &&
 				board.unavailableEntryIds.length === 0 &&
-				((event.finished && event.dataChecked) || window.dataAvailability === "FRESH") &&
+				fullFieldManagerFreshnessReady &&
 				managerScoresAlignedWithLiveSnapshot(managerScores, event, snapshot);
 			const deferredIds = new Set(effectiveDeferredEntryIds);
 			const failedIds = new Set(calculatedFailedEntryIds);

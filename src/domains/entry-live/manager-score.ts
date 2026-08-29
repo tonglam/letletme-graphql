@@ -88,21 +88,30 @@ export const managerScoreHeartbeatFreshnessDeadline = (checkedAt: string): strin
 
 export const managerScoreHeartbeatRefreshDeadline = (
 	checkedAt: string,
-	candidate: string | null = null
+	candidate: string | null = null,
+	now = Date.now()
 ): string => {
 	const checkedAtTimestamp = Date.parse(checkedAt);
 	const heartbeatExpiry = managerScoreHeartbeatFreshnessDeadline(checkedAt);
 	const heartbeatExpiryTimestamp = Date.parse(heartbeatExpiry);
-	const defaultRefreshAt = plusSeconds(checkedAt, MANAGER_SCORE_REFRESH_SECONDS);
 	const candidateTimestamp = candidate === null ? Number.NaN : Date.parse(candidate);
 	if (
 		candidate !== null &&
 		Number.isFinite(candidateTimestamp) &&
-		candidateTimestamp > checkedAtTimestamp
+		candidateTimestamp > checkedAtTimestamp &&
+		candidateTimestamp > now
 	) {
 		return candidateTimestamp < heartbeatExpiryTimestamp ? candidate : heartbeatExpiry;
 	}
-	return defaultRefreshAt;
+	const elapsedSinceHeartbeat = Number.isFinite(checkedAtTimestamp)
+		? Math.max(0, now - checkedAtTimestamp)
+		: 0;
+	const nextCadence =
+		checkedAtTimestamp +
+		(Math.floor(elapsedSinceHeartbeat / (MANAGER_SCORE_REFRESH_SECONDS * 1000)) + 1) *
+			MANAGER_SCORE_REFRESH_SECONDS *
+			1000;
+	return new Date(Math.min(nextCadence, heartbeatExpiryTimestamp)).toISOString();
 };
 
 const hasTraceableRevision = (value: string | null | undefined): value is string =>

@@ -105,4 +105,15 @@ describe("live desks tournament selection index", () => {
 		expect(board.match(/readMode: "CACHE_ONLY"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
 		expect(board.match(/managerReadMode: "CACHE_ONLY"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
 	});
+
+	it("requires a fresh manager heartbeat before advertising provisional full-field ranks", async () => {
+		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const board = source.slice(
+			source.indexOf("entryLiveCompetitionBoard: async"),
+			source.indexOf("entryLiveCompetitionsDesk: async")
+		);
+		expect(board).toContain("const fullFieldManagerFreshnessReady");
+		expect(board).toContain("isManagerScoreLiveHeartbeatFresh(snapshot?.lastSuccessfulFetchAt)");
+		expect(board.match(/fullFieldManagerFreshnessReady/g)?.length ?? 0).toBeGreaterThanOrEqual(5);
+	});
 });

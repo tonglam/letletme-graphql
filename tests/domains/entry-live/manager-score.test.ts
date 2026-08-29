@@ -87,16 +87,24 @@ describe("Data manager score contract", () => {
 
 	it("caps a wider live-window refresh deadline at heartbeat expiry", () => {
 		const heartbeat = "2026-08-29T02:00:00.000Z";
+		const now = Date.parse("2026-08-29T02:00:10.000Z");
 		expect(managerScoreHeartbeatFreshnessDeadline(heartbeat)).toBe("2026-08-29T02:01:30.000Z");
-		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T02:05:00.000Z")).toBe(
+		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T02:05:00.000Z", now)).toBe(
 			"2026-08-29T02:01:30.000Z"
 		);
-		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T02:00:30.000Z")).toBe(
+		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T02:00:30.000Z", now)).toBe(
 			"2026-08-29T02:00:30.000Z"
 		);
-		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T01:59:30.000Z")).toBe(
+		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T01:59:30.000Z", now)).toBe(
 			"2026-08-29T02:00:30.000Z"
 		);
+		expect(
+			managerScoreHeartbeatRefreshDeadline(
+				heartbeat,
+				"2026-08-29T01:59:30.000Z",
+				Date.parse("2026-08-29T02:00:45.000Z")
+			)
+		).toBe("2026-08-29T02:01:00.000Z");
 	});
 
 	it("does not expose a row with the wrong calculation mode as an active authority", () => {
