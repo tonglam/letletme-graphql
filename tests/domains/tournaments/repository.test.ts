@@ -835,16 +835,46 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 
 	it("binds H2H scores by publication identity while allowing distinct source timestamps", async () => {
 		const original = entryLiveBatchService.calcLivePointsForEntries;
-		entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, ids) =>
-			liveBatchResult(ids, "8", "2026-08-24T00:08:00.000Z", "2026-08-24T00:09:00.000Z");
+		const entryIds = Array.from({ length: 501 }, (_, index) => 30_000 + index);
+		let oldestCheckedAt = "2026-08-24T00:07:00.000Z";
+		entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, ids) => {
+			const result = liveBatchResult(
+				ids,
+				"8",
+				"2026-08-24T00:08:00.000Z",
+				"2026-08-24T00:09:00.000Z"
+			);
+			for (const [index, entryId] of ids.entries()) {
+				const row = result.results.get(entryId) as unknown as {
+					score: { provenance: { liveCheckedAt: string } };
+				};
+				row.score.provenance.liveCheckedAt =
+					index === 0
+						? oldestCheckedAt
+						: index % 2 === 0
+							? "2026-08-24T00:08:00.000Z"
+							: "2026-08-24T00:09:00.000Z";
+			}
+			return result;
+		};
 
 		try {
 			const coherent = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
 				{ dataRevision: "core-test", logger: { warn: () => undefined } } as never,
 				1,
-				[101, 102]
+				entryIds
 			);
-			expect(coherent?.checkedAt).toBe("2026-08-24T00:08:00.000Z");
+			expect(coherent?.scores.size).toBe(entryIds.length);
+			expect(coherent?.checkedAt).toBe(oldestCheckedAt);
+
+			oldestCheckedAt = "2026-08-24T00:07:30.000Z";
+			const reverified = await tournamentCacheTestables.loadEventLiveH2HScoreBatches(
+				{ dataRevision: "core-test", logger: { warn: () => undefined } } as never,
+				1,
+				entryIds
+			);
+			expect(reverified?.checkedAt).toBe(oldestCheckedAt);
+			expect(reverified?.revision).toBe(coherent?.revision);
 
 			entryLiveBatchService.calcLivePointsForEntries = async (_context, _eventId, ids) =>
 				liveBatchResult(

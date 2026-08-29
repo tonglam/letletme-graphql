@@ -1920,14 +1920,19 @@ async function loadEventLiveH2HScoreBatch(
 		if (
 			(livePublicationId !== null && livePublicationId !== liveProvenance.livePublicationId) ||
 			(snapshotRevision !== null && snapshotRevision !== liveProvenance.liveRevision) ||
-			(checkedAt !== null && checkedAt !== liveProvenance.liveCheckedAt) ||
 			(state !== null && state !== row.snapshot.state)
 		) {
 			return null;
 		}
+		const normalizedLiveCheckedAt = normalizeOfficialH2HSourceCheckedAt(
+			liveProvenance.liveCheckedAt
+		);
+		if (normalizedLiveCheckedAt === null) return null;
 		livePublicationId = liveProvenance.livePublicationId;
 		snapshotRevision = liveProvenance.liveRevision;
-		checkedAt = liveProvenance.liveCheckedAt;
+		if (checkedAt === null || Date.parse(normalizedLiveCheckedAt) < Date.parse(checkedAt)) {
+			checkedAt = normalizedLiveCheckedAt;
+		}
 		state = row.snapshot.state;
 		scores.set(entryId, row.score.netEventPoints);
 		managerRevisions.set(entryId, row.score.revision);
@@ -2003,7 +2008,6 @@ async function loadEventLiveH2HScoreBatches(
 	if (!first) return null;
 	for (const batch of completeBatches.slice(1)) {
 		if (
-			batch.checkedAt !== first.checkedAt ||
 			batch.state !== first.state ||
 			batch.livePublicationId !== first.livePublicationId ||
 			batch.snapshotRevision !== first.snapshotRevision
@@ -2027,13 +2031,15 @@ async function loadEventLiveH2HScoreBatches(
 			managerRevisions.set(entryId, revision);
 		}
 	}
+	const checkedAt = completeBatches
+		.map((batch) => batch.checkedAt)
+		.sort((left, right) => Date.parse(left) - Date.parse(right))[0]!;
 	const revisionHash = createHash("sha256")
 		.update(
 			stableStringify({
 				eventId,
 				livePublicationId: first.livePublicationId,
 				snapshotRevision: first.snapshotRevision,
-				checkedAt: first.checkedAt,
 				chunks: completeBatches.map((batch) => batch.revision),
 			})
 		)
@@ -2043,7 +2049,7 @@ async function loadEventLiveH2HScoreBatches(
 		scores,
 		managerRevisions,
 		revision: `event-live-h2h:${eventId}:${revisionHash}`,
-		checkedAt: first.checkedAt,
+		checkedAt,
 		state: first.state,
 		livePublicationId: first.livePublicationId,
 		snapshotRevision: first.snapshotRevision,
