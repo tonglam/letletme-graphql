@@ -23,6 +23,8 @@ export const createGraphQLApolloServer = (): ApolloServer<GraphQLContext> =>
 		plugins: [
 			{
 				async requestDidStart(): Promise<GraphQLRequestListener<GraphQLContext>> {
+					let executionHadErrors = false;
+					let deferredDeprecatedGlobalCommit: (() => void) | undefined;
 					return {
 						async parsingDidStart(requestContext): Promise<GraphQLRequestListenerParsingDidEnd> {
 							const stop = requestContext.contextValue.requestTiming?.start("apolloParse");
@@ -38,6 +40,17 @@ export const createGraphQLApolloServer = (): ApolloServer<GraphQLContext> =>
 								stop?.();
 							};
 						},
+						async didEncounterErrors(): Promise<void> {
+							executionHadErrors = true;
+						},
+						async willSendResponse(): Promise<void> {
+							// Global deprecated symbols are committed only after Apollo has
+							// dispatched didEncounterErrors. This prevents variable-coercion
+							// failures, which execute no resolver, from being counted as
+							// successful usage.
+							deferredDeprecatedGlobalCommit?.();
+							deferredDeprecatedGlobalCommit = undefined;
+						},
 						async executionDidStart(requestContext) {
 							const stop = requestContext.contextValue.requestTiming?.start("apolloExecute");
 							// Apollo skips validationDidStart for document-cache hits and performs variable
@@ -46,7 +59,15 @@ export const createGraphQLApolloServer = (): ApolloServer<GraphQLContext> =>
 							// document validation and variable coercion succeeded.
 							return createDeprecatedSchemaUsageExecutionListener<GraphQLContext>({
 								symbols: requestContext.contextValue.deprecatedSymbols ?? [],
+								symbolOwners: requestContext.contextValue.deprecatedSymbolOwners ?? {},
+								globalSymbols: requestContext.contextValue.deprecatedSymbolGlobalSymbols ?? [],
 								increment: (symbol) => metrics.graphqlDeprecatedSchemaUsages.labels(symbol).inc(),
+								isExecutionSuccessful: () =>
+									!executionHadErrors && !(requestContext.errors?.length ?? 0),
+								deferGlobalSymbols: true,
+								registerDeferredGlobalCommit: (commit) => {
+									deferredDeprecatedGlobalCommit = commit;
+								},
 								onExecutionEnd: stop,
 							});
 						},
