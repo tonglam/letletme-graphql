@@ -1711,6 +1711,15 @@ export function projectOfficialH2HEventLiveSnapshot(
 	const currentSourceRows = loaded.history.filter((row) => row.event_id === eventId);
 	const scoreEntryIds = activeOfficialH2HScoreEntryIds(loaded, eventId);
 	const hasRegularRound = currentSourceRows.length > 0;
+	const averageSidesAreCoherent = currentSourceRows.every((row) => {
+		const hasAverageSide = row.home_is_average === true || row.away_is_average === true;
+		if (!hasAverageSide) return true;
+		return (
+			normalizeOfficialH2HSourceCheckedAt(row.source_checked_at) === batch.checkedAt &&
+			(row.home_is_average !== true || typeof row.home_net_points === "number") &&
+			(row.away_is_average !== true || typeof row.away_net_points === "number")
+		);
+	});
 	const hasCompleteKnockoutSchedule = officialKnockoutMatchesHaveCompleteSchedule(
 		loaded.snapshot.matches,
 		eventId,
@@ -1722,7 +1731,7 @@ export function projectOfficialH2HEventLiveSnapshot(
 		entryIds.length !== expectedEntryCount ||
 		new Set(entryIds).size !== expectedEntryCount ||
 		(!hasRegularRound && !hasCompleteKnockoutSchedule) ||
-		currentSourceRows.some((row) => row.home_is_average || row.away_is_average) ||
+		!averageSidesAreCoherent ||
 		scoreEntryIds.length === 0 ||
 		scoreEntryIds.some(
 			(entryId) =>
@@ -1738,13 +1747,28 @@ export function projectOfficialH2HEventLiveSnapshot(
 		return {
 			...row,
 			home_net_points:
-				row.home_entry_id === null ? null : (batch.scores.get(row.home_entry_id) ?? null),
+				row.home_entry_id === null
+					? row.home_is_average === true
+						? row.home_net_points
+						: null
+					: (batch.scores.get(row.home_entry_id) ?? null),
 			away_net_points:
-				row.away_entry_id === null ? null : (batch.scores.get(row.away_entry_id) ?? null),
+				row.away_entry_id === null
+					? row.away_is_average === true
+						? row.away_net_points
+						: null
+					: (batch.scores.get(row.away_entry_id) ?? null),
 			source_checked_at: batch.checkedAt,
 		};
 	});
 	const currentRows = projectedHistory.filter((row) => row.event_id === eventId);
+	const currentRowByOfficialMatchId = new Map(
+		currentRows.flatMap((row) =>
+			row.official_match_id === null || row.official_match_id === undefined
+				? []
+				: ([[row.official_match_id, row]] as const)
+		)
+	);
 	const options: OfficialH2HProjectionOptions = {
 		finalizedEventIds: loaded.validatedFinalizedEventIds,
 		provisionalEventIds: new Set([eventId]),
@@ -1771,10 +1795,19 @@ export function projectOfficialH2HEventLiveSnapshot(
 	);
 	const matches = loaded.snapshot.matches.map((match) => {
 		if (match.eventId !== eventId) return match;
+		const sourceRow = currentRowByOfficialMatchId.get(match.officialMatchId);
 		const homePoints =
-			match.home.entryId === null ? null : (batch.scores.get(match.home.entryId) ?? null);
+			match.home.entryId === null
+				? match.home.isAverage
+					? (sourceRow?.home_net_points ?? null)
+					: null
+				: (batch.scores.get(match.home.entryId) ?? null);
 		const awayPoints =
-			match.away.entryId === null ? null : (batch.scores.get(match.away.entryId) ?? null);
+			match.away.entryId === null
+				? match.away.isAverage
+					? (sourceRow?.away_net_points ?? null)
+					: null
+				: (batch.scores.get(match.away.entryId) ?? null);
 		// A multi-event knockout winner depends on the aggregate tie. This live
 		// batch contains only the current event, so defer the outcome until Data
 		// publishes the authoritative finalized knockout result.

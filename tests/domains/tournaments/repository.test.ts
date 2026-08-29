@@ -271,13 +271,58 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 		expect(projected.snapshot.matches[0]?.winnerEntryId).toBeNull();
 	});
 
-	it("does not mix an Average Team H2H score into an event-live revision", () => {
+	it("preserves a same-batch Average Team score while projecting every real manager", () => {
 		const loaded = activeOfficialH2HLoad();
-		const row = loaded.history[0]!;
-		row.away_entry_id = null;
-		row.away_is_average = true;
-		loaded.snapshot.matches[0]!.away.entryId = null;
-		loaded.snapshot.matches[0]!.away.isAverage = true;
+		loaded.snapshot.tournament.totalTeamNum = 3;
+		loaded.snapshot.standings.push({
+			entryId: 103,
+			entryName: "Entry 103",
+			playerName: "Manager 103",
+			rank: 3,
+			matchPoints: 0,
+			played: 0,
+			won: 0,
+			drawn: 0,
+			lost: 0,
+			pointsFor: 0,
+		});
+		loaded.history.push({
+			...loaded.history[0]!,
+			id: 7002,
+			official_match_id: 7002,
+			source_order: 2,
+			home_entry_id: 103,
+			home_net_points: 21,
+			home_match_points: 0,
+			away_entry_id: null,
+			away_net_points: 25,
+			away_match_points: 3,
+			away_is_average: true,
+			source_checked_at: "2026-08-24T00:05:00.000Z",
+		});
+		loaded.snapshot.matches.push({
+			...loaded.snapshot.matches[0]!,
+			officialMatchId: 7002,
+			sourceOrder: 2,
+			home: {
+				entryId: 103,
+				entryName: "Entry 103",
+				playerName: "Manager 103",
+				isAverage: false,
+				points: 21,
+				matchPoints: 0,
+			},
+			away: {
+				entryId: null,
+				entryName: "Average Team",
+				playerName: null,
+				isAverage: true,
+				points: 25,
+				matchPoints: 3,
+			},
+			winnerEntryId: null,
+			sourceCheckedAt: "2026-08-24T00:05:00.000Z",
+		});
 		const projected = projectOfficialH2HEventLiveSnapshot(
 			loaded,
 			1,
@@ -285,9 +330,49 @@ describe("projectOfficialH2HEventLiveSnapshot", () => {
 				scores: new Map([
 					[101, 37],
 					[102, 31],
+					[103, 29],
 				]),
-				managerRevisions: managerRevisionMap(101, 102),
+				managerRevisions: managerRevisionMap(101, 102, 103),
 				revision: "event-live-gw1-r12",
+				checkedAt: "2026-08-24T00:05:00.000Z",
+				state: "live",
+			},
+			new Set()
+		);
+
+		expect(projected.snapshot.scoreSource).toBe("FPL_EVENT_LIVE");
+		expect(projected.snapshot.matches[1]).toMatchObject({
+			home: { entryId: 103, points: 29, matchPoints: 3 },
+			away: { entryId: null, isAverage: true, points: 25, matchPoints: 0 },
+			winnerEntryId: 103,
+			sourceCheckedAt: "2026-08-24T00:05:00.000Z",
+		});
+		expect(projected.snapshot.standings).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ entryId: 101, played: 1 }),
+				expect.objectContaining({ entryId: 102, played: 1 }),
+				expect.objectContaining({ entryId: 103, played: 1, pointsFor: 29 }),
+			])
+		);
+	});
+
+	it("fails the whole active H2H round closed when an Average Team score is from another batch", () => {
+		const loaded = activeOfficialH2HLoad();
+		const row = loaded.history[0]!;
+		row.away_entry_id = null;
+		row.away_is_average = true;
+		row.source_checked_at = "2026-08-24T00:04:59.000Z";
+		loaded.snapshot.tournament.totalTeamNum = 1;
+		loaded.snapshot.standings = loaded.snapshot.standings.slice(0, 1);
+		loaded.snapshot.matches[0]!.away.entryId = null;
+		loaded.snapshot.matches[0]!.away.isAverage = true;
+		const projected = projectOfficialH2HEventLiveSnapshot(
+			loaded,
+			1,
+			{
+				scores: new Map([[101, 37]]),
+				managerRevisions: managerRevisionMap(101),
+				revision: "event-live-gw1-r13",
 				checkedAt: "2026-08-24T00:05:00.000Z",
 				state: "live",
 			},
