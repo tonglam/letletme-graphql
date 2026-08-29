@@ -18,6 +18,8 @@ import {
 } from "./calc-service";
 import {
 	MANAGER_LIVE_SCORE_BATCH_CONCURRENCY,
+	loadManagerScoresInChunks,
+	managerScoreLoadHasCoherentProvenance,
 	splitManagerLiveEntryIds,
 } from "./manager-score-batches";
 import {
@@ -123,7 +125,7 @@ export const assertValidEntryBatch = (entryIds: readonly number[]): void => {
 
 type ChunkedEntryLiveBatchPrefetched = Omit<
 	EntryLiveBatchPrefetched,
-	"liveByPlayer" | "fixtures" | "teams" | "picksByEntry" | "managerScores"
+	"liveByPlayer" | "fixtures" | "teams" | "picksByEntry"
 >;
 
 type SharedData = {
@@ -994,6 +996,82 @@ export const calcLivePointsForEntriesInChunks = async (
 		});
 	}
 
+	const managerScores =
+		prefetched?.managerScores ??
+		(await loadManagerScoresInChunks(entryIds, (chunk) =>
+			loadManagerScores(context, eventId, chunk, prefetched?.tournamentId, {
+				includeEffectiveLineup: true,
+				readMode: prefetched?.managerReadMode,
+				...(prefetched?.liveRef?.publicationId
+					? {
+							liveRef: {
+								publicationId: prefetched.liveRef.publicationId,
+								revision: prefetched.liveRef.revision,
+							},
+						}
+					: {}),
+			})
+		));
+	if (!managerScoreLoadHasCoherentProvenance(managerScores, entryIds)) {
+		return {
+			results: new Map(),
+			errors: entryIds.map((entryId) => ({
+				entryId,
+				message: "Manager score revisions are inconsistent for this cohort",
+			})),
+			meta: {
+				eventId,
+				totalEntries: entryIds.length,
+				succeededCount: 0,
+				failedCount: entryIds.length,
+			},
+		};
+	}
+
+	const liveReferences = new Set(
+		[...managerScores.rows.values()].map((row) => {
+			const publicationId = row.provenance?.livePublicationId;
+			const revision = row.provenance?.liveRevision;
+			return publicationId && revision ? `${publicationId}:${revision}` : null;
+		})
+	);
+	const currentLiveMeta = prefetched?.liveRef
+		? null
+		: await loadLiveSnapshotMeta(context, eventId).catch(() => null);
+	const singleManagerReference =
+		liveReferences.size === 1 && !liveReferences.has(null)
+			? (() => {
+					const [value] = [...liveReferences] as string[];
+					const separator = value.lastIndexOf(":");
+					return separator > 0
+						? { publicationId: value.slice(0, separator), revision: value.slice(separator + 1) }
+						: null;
+				})()
+			: null;
+	const rowsAlignedWithCurrentLive =
+		prefetched?.liveRef !== undefined ||
+		(currentLiveMeta !== null &&
+			singleManagerReference !== null &&
+			singleManagerReference.publicationId === currentLiveMeta.publicationId &&
+			singleManagerReference.revision === currentLiveMeta.revision);
+	const allowLastGoodManagerScores =
+		prefetched?.allowLastGoodManagerScores === true ||
+		(!rowsAlignedWithCurrentLive &&
+			managerScores.dataAvailability !== "PARTIAL" &&
+			managerScores.dataAvailability !== "UNAVAILABLE");
+	const managerScoresForChunks =
+		allowLastGoodManagerScores && managerScores.dataAvailability === "FRESH"
+			? { ...managerScores, dataAvailability: "LAST_GOOD" as const }
+			: managerScores;
+	const chunkPrefetched: EntryLiveBatchPrefetched = {
+		...prefetched,
+		managerScores: managerScoresForChunks,
+		allowLastGoodManagerScores,
+		...(prefetched?.liveRef === undefined && rowsAlignedWithCurrentLive && singleManagerReference
+			? { liveRef: singleManagerReference }
+			: {}),
+	};
+
 	const chunks = splitManagerLiveEntryIds(entryIds);
 	const results = new Map<number, LiveCalcData>();
 	const errors: Array<{ entryId: number; message: string }> = [];
@@ -1002,7 +1080,7 @@ export const calcLivePointsForEntriesInChunks = async (
 			chunks
 				.slice(offset, offset + MANAGER_LIVE_SCORE_BATCH_CONCURRENCY)
 				.map((chunk) =>
-					entryLiveBatchService.calcLivePointsForEntries(context, eventId, chunk, prefetched)
+					entryLiveBatchService.calcLivePointsForEntries(context, eventId, chunk, chunkPrefetched)
 				)
 		);
 		for (const batch of loaded) {

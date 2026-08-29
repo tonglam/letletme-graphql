@@ -247,6 +247,50 @@ export const mergeManagerLiveFetchResults = (
 	expectedEntryIds: readonly number[]
 ): ManagerScoreLoad => mergeManagerScoreLoads(loads, expectedEntryIds);
 
+/**
+ * A chunked read must not combine unrelated projected heads and call the
+ * result a complete board. One live publication is the normal case; a
+ * multi-publication response is accepted only when Data's durable tournament
+ * coverage checkpoint proves that the complete cohort was crawled atomically.
+ * Final-result rows have no live publication identity and are independently
+ * durable, so a complete final cohort is coherent by source contract.
+ */
+export const managerScoreLoadHasCoherentProvenance = (
+	load: ManagerScoreLoad,
+	entryIds: readonly number[]
+): boolean => {
+	const expected = new Set(entryIds);
+	if (
+		load.errorCode !== null ||
+		load.missingEntryIds.length > 0 ||
+		load.rows.size !== expected.size ||
+		![...expected].every((entryId) => load.rows.has(entryId))
+	)
+		return false;
+	const rows = [...load.rows.values()];
+	if (rows.every((row) => row.source === "FPL_FINAL_RESULT")) return true;
+	if (rows.some((row) => row.source !== "FPL_EVENT_LIVE")) return false;
+	const liveReferences = new Set(
+		rows.map((row) => {
+			const publicationId = row.provenance?.livePublicationId;
+			const revision = row.provenance?.liveRevision;
+			return publicationId && revision ? `${publicationId}:${revision}` : null;
+		})
+	);
+	if (liveReferences.has(null)) return false;
+	if (liveReferences.size === 1) return true;
+	const coverage = load.tournamentCoverage;
+	return (
+		coverage?.state === "COMPLETE" &&
+		coverage.expectedEntries === expected.size &&
+		coverage.resolvedEntries === coverage.expectedEntries &&
+		typeof coverage.rosterRevision === "string" &&
+		coverage.rosterRevision.trim().length > 0 &&
+		typeof coverage.managerRevision === "string" &&
+		coverage.managerRevision.trim().length > 0
+	);
+};
+
 export type ManagerLiveScoreChunkLoader = (
 	entryIds: readonly number[]
 ) => Promise<ManagerScoreLoad>;

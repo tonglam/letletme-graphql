@@ -1612,7 +1612,8 @@ export const liveDesksResolvers = {
 				...boardMeta,
 				unavailableEntryIds,
 				board,
-				partial: result.errors.length > 0 || deferredEntryIds.length > 0,
+				partial:
+					result.errors.length > 0 || deferredEntryIds.length > 0 || unavailableEntryIds.length > 0,
 				failedEntryIds: result.errors.map((error) => error.entryId),
 				totalEntries: allEntryIds.length,
 			};

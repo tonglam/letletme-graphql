@@ -425,7 +425,31 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		};
 		try {
 			const entryIds = Array.from({ length: 1001 }, (_, index) => index + 1);
-			const result = await calcLivePointsForEntriesInChunks(makeMockContext({}), 33, entryIds);
+			const checkedAt = new Date().toISOString();
+			const result = await calcLivePointsForEntriesInChunks(makeMockContext({}), 33, entryIds, {
+				managerScores: {
+					season: "2627",
+					rows: new Map(
+						entryIds.map((entryId) => [
+							entryId,
+							{
+								entryId,
+								source: "FPL_EVENT_LIVE",
+								provenance: { livePublicationId: "pub", liveRevision: "1" },
+							} as never,
+						])
+					),
+					errorCode: null,
+					managerRevision: "manager-revision",
+					dataAvailability: "FRESH",
+					servedFrom: "POSTGRES",
+					refreshQueued: false,
+					missingEntryIds: [],
+					checkedAt,
+					tournamentCoverage: null,
+					nextRefreshAt: checkedAt,
+				},
+			});
 			expect(calls.map((chunk) => chunk.length)).toEqual([500, 500, 1]);
 			expect(maxActive).toBeLessThanOrEqual(2);
 			expect([...result.results.keys()]).toEqual(entryIds);
@@ -435,6 +459,56 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				succeededCount: 1001,
 				failedCount: 0,
 			});
+		} finally {
+			entryLiveBatchService.calcLivePointsForEntries = originalCalc;
+		}
+	});
+
+	it("rejects an unverified mixed manager revision before calculating chunks", async () => {
+		const originalCalc = entryLiveBatchService.calcLivePointsForEntries;
+		let calls = 0;
+		entryLiveBatchService.calcLivePointsForEntries = async () => {
+			calls += 1;
+			throw new Error("must not calculate an incoherent cohort");
+		};
+		try {
+			const now = new Date().toISOString();
+			const result = await calcLivePointsForEntriesInChunks(makeMockContext({}), 33, [1, 2], {
+				managerScores: {
+					season: "2627",
+					rows: new Map([
+						[
+							1,
+							{
+								entryId: 1,
+								source: "FPL_EVENT_LIVE",
+								provenance: { livePublicationId: "p", liveRevision: "1" },
+							} as never,
+						],
+						[
+							2,
+							{
+								entryId: 2,
+								source: "FPL_EVENT_LIVE",
+								provenance: { livePublicationId: "p", liveRevision: "2" },
+							} as never,
+						],
+					]),
+					errorCode: null,
+					managerRevision: "mixed",
+					dataAvailability: "FRESH",
+					servedFrom: "POSTGRES",
+					refreshQueued: false,
+					missingEntryIds: [],
+					checkedAt: now,
+					tournamentCoverage: null,
+					nextRefreshAt: now,
+				},
+			});
+			expect(calls).toBe(0);
+			expect(result.results.size).toBe(0);
+			expect(result.errors.map((error) => error.entryId)).toEqual([1, 2]);
+			expect(result.meta.failedCount).toBe(2);
 		} finally {
 			entryLiveBatchService.calcLivePointsForEntries = originalCalc;
 		}

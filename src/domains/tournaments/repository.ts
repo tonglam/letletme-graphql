@@ -26,10 +26,7 @@ import {
 	readCompetitionBoardCache,
 	writeCompetitionBoardCache,
 } from "../live-desks/competition-board-cache";
-import {
-	loadTournamentEventEligibility,
-	selectTournamentDeskEntryWindow,
-} from "../live-desks/tournament-entry-window";
+import { loadTournamentEventEligibility } from "../live-desks/tournament-entry-window";
 import {
 	loadEventLiveH2HScoreBatches,
 	type EventLiveH2HScoreBatch,
@@ -4550,25 +4547,21 @@ export const tournamentsRepository: TournamentsRepository = {
 					(entryIds) => entriesService.getEntriesByIds(context, entryIds)
 				);
 				const rosterEntryIds = eligibility.entryIds;
-				const boundedSelection = selectTournamentDeskEntryWindow(rosterEntryIds, entryId);
-				const boundedDeferredEntryIds = boundedSelection.deferredEntryIds;
 				// The detail route is the unpaged tournament view. Calculate the whole
 				// eligible cohort in bounded chunks instead of returning the 500-entry
-				// preview used by the interactive board endpoint. The bounded selection
-				// remains available for cache eligibility and documents the viewer pin.
+				// preview used by the interactive board endpoint.
 				const calculationEntryIds = rosterEntryIds;
 				const deferredEntryIds: number[] = [];
 				const liveCacheKey =
 					scoringPhase && snapshot
 						? competitionBoardCacheKey(context, snapshot, tournamentId)
 						: null;
-				// A finalized board with deferred rows is viewer-specific because the
-				// bounded window retains the requesting manager. Do not read or write
-				// the shared event/tournament cache for that shape.
-				const cachedCandidate =
-					liveCacheKey && boundedDeferredEntryIds.length === 0
-						? await readCompetitionBoardCache(context, liveCacheKey)
-						: null;
+				// The detail route now calculates the complete cohort, so a complete
+				// finalized cache is reusable even when the viewer would have fallen
+				// outside the old 500-entry foreground window.
+				const cachedCandidate = liveCacheKey
+					? await readCompetitionBoardCache(context, liveCacheKey)
+					: null;
 				const cachedRows = cachedCandidate?.board as
 					| Array<{
 							entry: number;

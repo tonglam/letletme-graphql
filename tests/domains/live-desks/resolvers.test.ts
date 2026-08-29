@@ -91,9 +91,7 @@ describe("live desks tournament selection index", () => {
 			repositorySource.indexOf("async getManagedTournamentStatus")
 		);
 		expect(detailBoard).toContain("loadTournamentEventEligibility");
-		expect(detailBoard.indexOf("loadTournamentEventEligibility")).toBeLessThan(
-			detailBoard.indexOf("selectTournamentDeskEntryWindow")
-		);
+		expect(detailBoard).not.toContain("selectTournamentDeskEntryWindow");
 	});
 
 	it("keeps the live competition board on durable manager heads", async () => {
