@@ -11,6 +11,7 @@ import { GAMEWEEK_DATA_SQL_CONTRACT } from "../../src/domains/gameweek/service";
 import { HOME_MARKET_DATA_SQL_CONTRACT } from "../../src/domains/home/market-repository";
 import { HOME_DATA_SQL_CONTRACT } from "../../src/domains/home/repository";
 import { MARKET_DATA_SQL_CONTRACT } from "../../src/domains/market/repository";
+import { TOURNAMENT_SELECTION_INDEX_DATA_SQL_CONTRACT } from "../../src/domains/event-stats/repository";
 import {
 	MY_FPL_ACTIVE_PUBLICATIONS_SQL,
 	MY_FPL_DATA_SQL_CONTRACT,
@@ -75,6 +76,7 @@ export const DIRECT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	...PLAYERS_DATA_SQL_CONTRACT,
 	...PLAYER_VALUES_DATA_SQL_CONTRACT,
 	...PLAYER_STATE_DATA_SQL_CONTRACT,
+	...TOURNAMENT_SELECTION_INDEX_DATA_SQL_CONTRACT,
 	...PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT,
 	...TRENDS_DATA_SQL_CONTRACT,
 	...DATA_SNAPSHOT_DATA_SQL_CONTRACT,

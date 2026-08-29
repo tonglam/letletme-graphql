@@ -703,6 +703,7 @@ describe("direct Data SQL contract", () => {
 		expect(names.some((name) => name.startsWith("players."))).toBe(true);
 		expect(names.some((name) => name.startsWith("player-values."))).toBe(true);
 		expect(names.some((name) => name.startsWith("player-state."))).toBe(true);
+		expect(names).toContain("live-tournament.selection-index");
 		expect(names.some((name) => name.startsWith("public-league-trends."))).toBe(true);
 		expect(names.some((name) => name.startsWith("trends."))).toBe(true);
 		expect(names.some((name) => name.startsWith("data-snapshot."))).toBe(true);
