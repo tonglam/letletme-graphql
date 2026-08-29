@@ -558,6 +558,8 @@ describe("full-field live board index", () => {
 		expect(freshHeartbeatBoard.rows[0]?.score.checkedAt).toBe(
 			boardInput.managerRows.get(1)?.checkedAt ?? null
 		);
+		expect(freshHeartbeatBoard.rows[0]?.score.overallRank).toBeNull();
+		expect(freshHeartbeatBoard.rows[0]?.overallRank).toBe(0);
 
 		const grossFirstManagerRows = new Map(boardInput.managerRows);
 		const grossFirst = grossFirstManagerRows.get(1);

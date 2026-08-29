@@ -216,7 +216,13 @@ export const buildFullFieldLiveBoardIndex = (
 			entryName: entry.entryName,
 			playerName: entry.playerName,
 			rank: 0,
-			overallRank: eventResult?.overallRank ?? score.overallRank ?? entry.overallRank ?? 0,
+			// A shared live heartbeat only fences the immutable score inputs. Entry
+			// metadata has no independently verified rank timestamp, so it must not
+			// restore a rank that scoreFromDataRow deliberately suppressed as stale.
+			overallRank:
+				eventResult?.overallRank ??
+				score.overallRank ??
+				(input.freshnessCheckedAt ? 0 : (entry.overallRank ?? 0)),
 			teamValue: typeof teamValue === "number" ? teamValue / 10 : 0,
 			chip: canonicalChip(pick?.chip ?? null),
 			livePoints: score.eventPoints ?? 0,
