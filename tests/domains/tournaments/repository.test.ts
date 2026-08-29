@@ -1024,10 +1024,10 @@ describe("applyActiveOfficialH2HScoreAuthority", () => {
 	});
 
 	it("pins Core revision and uses durable manager heads for the active overlay", async () => {
-		const source = await Bun.file("src/domains/tournaments/repository.ts").text();
+		const source = await Bun.file("src/domains/tournaments/h2h-live-score-repository.ts").text();
 		const batch = source.slice(
-			source.indexOf("async function loadEventLiveH2HScoreBatch"),
-			source.indexOf("async function applyActiveOfficialH2HScoreAuthority")
+			source.indexOf("const loadEventLiveH2HScoreBatch"),
+			source.indexOf("export const loadEventLiveH2HScoreBatches")
 		);
 		expect(batch).toContain("if (!context.dataRevision) await getCoreDataSnapshot(context)");
 		expect(batch.indexOf("getCoreDataSnapshot(context)")).toBeLessThan(

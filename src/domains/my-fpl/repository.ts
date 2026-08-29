@@ -19,6 +19,8 @@ import {
 	tournamentsRepository,
 	type TournamentInfo,
 } from "../tournaments/repository";
+import { readMyFplCache } from "./cache";
+import { createMyFplEntryNameProjection } from "./entry-name-projection";
 
 export const MY_FPL_EVENT_LIFECYCLE_SQL = `
 	SELECT event_id, finished, data_checked, live_snapshot_finalized_at
@@ -538,6 +540,15 @@ const dependencyOverrides = new WeakMap<object, MyFplRepositoryDependencies>();
 const dependenciesFor = (context: GraphQLContext): MyFplRepositoryDependencies =>
 	dependencyOverrides.get(context) ?? defaultDependencies;
 
+const {
+	loadCurrentEntryNames,
+	applyCurrentEntryName,
+	applyCurrentEntryNamesToBoardPage,
+	applyCurrentEntryNamesToAggregate,
+} = createMyFplEntryNameProjection((context, entryIds) =>
+	dependenciesFor(context).getEntriesByIds(context, [...entryIds])
+);
+
 const withDependencies = async <T>(
 	context: GraphQLContext,
 	dependencies: MyFplRepositoryDependencies,
@@ -551,24 +562,6 @@ const withDependencies = async <T>(
 		if (previous) dependencyOverrides.set(context, previous);
 		else dependencyOverrides.delete(context);
 	}
-};
-
-const loadCurrentEntryNames = async (
-	context: GraphQLContext,
-	entryIds: readonly number[]
-): Promise<Map<number, string>> => {
-	const uniqueEntryIds = [
-		...new Set(entryIds.filter((entryId) => Number.isSafeInteger(entryId) && entryId > 0)),
-	];
-	if (uniqueEntryIds.length === 0) return new Map();
-
-	const entries = await dependenciesFor(context).getEntriesByIds(context, uniqueEntryIds);
-	const names = new Map<number, string>();
-	for (const entryId of uniqueEntryIds) {
-		const entry = entries.get(entryId);
-		if (entry) names.set(entryId, entry.entryName);
-	}
-	return names;
 };
 
 type LoadedReviewContext = {
@@ -843,77 +836,6 @@ export type MyFplCompetitionAggregate = {
 	captainDistribution: MyFplCompetitionDistribution[];
 	chipDistribution: MyFplCompetitionDistribution[];
 	snapshotMeta?: MyFplSnapshotMeta | null;
-};
-
-const applyCurrentEntryName = (
-	entry: MyFplEntryIdentity | null,
-	currentEntryName: string
-): MyFplEntryIdentity | null => (entry ? { ...entry, entryName: currentEntryName } : null);
-
-const applyCurrentEntryNamesToBoardPage = async (
-	context: GraphQLContext,
-	page: MyFplCompetitionBoardPage
-): Promise<MyFplCompetitionBoardPage> => {
-	const entryIds = [
-		...page.rows.map((row) => row.entryId),
-		...(page.viewerRow ? [page.viewerRow.entryId] : []),
-	];
-	const names = await loadCurrentEntryNames(context, entryIds);
-	const applyRowName = (row: MyFplCompetitionBoardRow | null): MyFplCompetitionBoardRow | null => {
-		if (!row) return null;
-		const currentEntryName = names.get(row.entryId);
-		return currentEntryName === undefined ? row : { ...row, entryName: currentEntryName };
-	};
-	return {
-		...page,
-		rows: page.rows
-			.map(applyRowName)
-			.filter((row): row is MyFplCompetitionBoardRow => row !== null),
-		viewerRow: applyRowName(page.viewerRow),
-	};
-};
-
-const applyCurrentEntryNamesToAggregate = async (
-	context: GraphQLContext,
-	aggregate: MyFplCompetitionAggregate
-): Promise<MyFplCompetitionAggregate> => {
-	const entryIds = [
-		...aggregate.metrics.map((metric) => metric.leaderEntryId),
-		...aggregate.topPerformers.map((performance) => performance.entryId),
-		...aggregate.risers.map((performance) => performance.entryId),
-		...aggregate.fallers.map((performance) => performance.entryId),
-	].filter(
-		(entryId): entryId is number =>
-			typeof entryId === "number" && Number.isSafeInteger(entryId) && entryId > 0
-	);
-	const names = await loadCurrentEntryNames(context, entryIds);
-	const currentNameFor = (entryId: number, fallback: string | null): string | null =>
-		names.get(entryId) ?? fallback;
-	return {
-		...aggregate,
-		metrics: aggregate.metrics.map((metric) => {
-			const leaderEntryId = metric.leaderEntryId;
-			return {
-				...metric,
-				leaderEntryName:
-					leaderEntryId === null
-						? metric.leaderEntryName
-						: currentNameFor(leaderEntryId, metric.leaderEntryName),
-			};
-		}),
-		topPerformers: aggregate.topPerformers.map((performance) => ({
-			...performance,
-			entryName: currentNameFor(performance.entryId, performance.entryName),
-		})),
-		risers: aggregate.risers.map((performance) => ({
-			...performance,
-			entryName: currentNameFor(performance.entryId, performance.entryName),
-		})),
-		fallers: aggregate.fallers.map((performance) => ({
-			...performance,
-			entryName: currentNameFor(performance.entryId, performance.entryName),
-		})),
-	};
 };
 
 export type MyFplCompetitionsDesk = {
@@ -1533,33 +1455,6 @@ const isCompetitionSeasonPathCache = (value: unknown): value is MyFplCompetition
 		snapshotMeta: (candidate) => candidate === null || isSnapshotMeta(candidate),
 	});
 
-const readCache = async <T>(
-	context: GraphQLContext,
-	key: string,
-	validate: (value: unknown) => value is T
-): Promise<T | undefined> => {
-	let raw: string | null;
-	try {
-		raw = await context.redis.get(key);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to read My FPL cache");
-		return undefined;
-	}
-	if (raw === null) return undefined;
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (validate(parsed)) return parsed;
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Malformed My FPL cache");
-	}
-	try {
-		await context.redis.del(key);
-	} catch (error) {
-		context.logger.warn({ err: error, key }, "Failed to evict My FPL cache");
-	}
-	return undefined;
-};
-
 const cacheableState = (state: MyFplReviewState): boolean => state !== "UNAVAILABLE";
 
 const stateTtl = (state: MyFplReviewState): number =>
@@ -1974,7 +1869,7 @@ const loadSnapshotEntry = async (
 		context,
 		`my-fpl:${PROJECTION_VERSION}:snapshot-entry:${eventId}:${pinned}:${requireViewerEntryId(context)}`
 	);
-	const cached = await readCache(context, cacheKey, (value): value is LoadedSnapshotEntry => {
+	const cached = await readMyFplCache(context, cacheKey, (value): value is LoadedSnapshotEntry => {
 		const parsed = parseLoadedSnapshotEntryCache(value);
 		return Boolean(
 			parsed &&
@@ -2079,7 +1974,7 @@ const loadTeamGameweekPrepared = async (
 		context,
 		`my-fpl:${PROJECTION_VERSION}:team-gameweek:${entryId}:${eventId}:rev:${snapshot.publication.revision}`
 	);
-	const cached = await readCache(
+	const cached = await readMyFplCache(
 		context,
 		cacheKey,
 		(value): value is MyFplTeamGameweek => isTeamGameweekCache(value) && value.eventId === eventId
@@ -2158,7 +2053,7 @@ const loadTeamDesk = async (
 		context,
 		`my-fpl:${PROJECTION_VERSION}:team-desk:${entryId}:${eventId ?? "season"}:rev:${snapshot.publication.revision}`
 	);
-	const cached = await readCache(context, cacheKey, isTeamDeskCache);
+	const cached = await readMyFplCache(context, cacheKey, isTeamDeskCache);
 	if (cached) {
 		const currentEntryName = snapshot.payload.entry.entryName;
 		return {
@@ -2536,7 +2431,7 @@ const loadCompetitionBoardPrepared = async (
 		context,
 		`my-fpl:${PROJECTION_VERSION}:competition-board:${tournamentId}:${eventId}:${page}:${pageSize}:${normalizedSearch.toLocaleLowerCase("en-US")}:${entryId}:rev:${revision}`
 	);
-	const cached = await readCache(
+	const cached = await readMyFplCache(
 		context,
 		cacheKey,
 		(value): value is MyFplCompetitionBoardPage =>
@@ -2604,7 +2499,7 @@ const loadCompetitionAggregateSnapshot = async (
 		context,
 		`my-fpl:${PROJECTION_VERSION}:competition-aggregate:${tournamentId}:${eventId}:${entryId}:rev:${revision}`
 	);
-	const cached = await readCache(
+	const cached = await readMyFplCache(
 		context,
 		cacheKey,
 		(value): value is MyFplCompetitionAggregate =>
@@ -2881,7 +2776,7 @@ const loadCompetitionSeasonPath = async (
 		context,
 		`my-fpl:${PROJECTION_VERSION}:competition-season-path:${tournamentId}:${entryId}:${throughEventId}:rev:${revision}`
 	);
-	const cached = await readCache(
+	const cached = await readMyFplCache(
 		context,
 		cacheKey,
 		(value): value is MyFplCompetitionSeasonPath =>

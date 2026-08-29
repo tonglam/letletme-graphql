@@ -1,13 +1,9 @@
-import { createHash } from "node:crypto";
 import { normalizeFplChip } from "../../contracts/fpl-chip";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
+import { createHash } from "node:crypto";
 import type { GraphQLContext } from "../../graphql/context";
 import { GraphQLError } from "graphql";
-import {
-	getCoreDataSnapshot,
-	getCoreEventSnapshot,
-	getLiveDataSnapshot,
-} from "../../infra/data-snapshot";
+import { getCoreEventSnapshot, getLiveDataSnapshot } from "../../infra/data-snapshot";
 import { eventsService } from "../events/service";
 import { gqlCacheKey } from "../../infra/cache-key";
 import {
@@ -21,7 +17,6 @@ import { LeagueType } from "../leagues/repository";
 import { entryLiveBatchService } from "../entry-live/batch-service";
 import { entriesService } from "../entries/service";
 import {
-	isTraceableOfficialManagerScore,
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
 } from "../entry-live/manager-score";
@@ -35,6 +30,10 @@ import {
 	loadTournamentEventEligibility,
 	selectTournamentDeskEntryWindow,
 } from "../live-desks/tournament-entry-window";
+import {
+	loadEventLiveH2HScoreBatches,
+	type EventLiveH2HScoreBatch,
+} from "./h2h-live-score-repository";
 
 export enum TournamentMode {
 	NORMAL = "normal",
@@ -1523,18 +1522,6 @@ async function loadOfficialH2HSnapshots(
 	return loaded;
 }
 
-export type EventLiveH2HScoreBatch = {
-	scores: ReadonlyMap<number, number>;
-	managerRevisions: ReadonlyMap<number, string>;
-	checkedAtByEntry: ReadonlyMap<number, string>;
-	revision: string;
-	checkedAt: string;
-	state: "scheduled" | "live" | "settled";
-	/** Shared source identity used when several bounded chunks form one round. */
-	livePublicationId?: string | null;
-	snapshotRevision?: string | null;
-};
-
 const latestOfficialH2HCheckedAt = (matches: readonly OfficialH2HMatch[]): string | null =>
 	matches
 		.map((match) => match.sourceCheckedAt)
@@ -1900,203 +1887,13 @@ export function projectOfficialH2HEventLiveSnapshot(
 			...loaded.snapshot,
 			scoreSource: "FPL_EVENT_LIVE",
 			scoreRevision: tournamentEventLiveScoreRevision(loaded, eventId, batch),
+			// A batch may cover several tournaments whose managers were checked at
+			// different times.  Keep the snapshot freshness fence scoped to this
+			// tournament's scored entries instead of using the batch-wide minimum.
 			scoreCheckedAt: tournamentCheckedAt,
 			standings,
 			matches,
 		},
-	};
-}
-
-async function loadEventLiveH2HScoreBatch(
-	context: GraphQLContext,
-	eventId: number,
-	entryIds: readonly number[]
-): Promise<EventLiveH2HScoreBatch | null> {
-	if (entryIds.length === 0 || entryIds.length > 500) return null;
-	// Official-H2H roots are otherwise lightweight, but the active score overlay
-	// enters revision-keyed GraphQL caches through entry-live. Pin the Core
-	// publication lazily before that path so a valid live batch is not silently
-	// suppressed for lacking a dataset revision.
-	if (!context.dataRevision) await getCoreDataSnapshot(context);
-	const result = await entryLiveBatchService.calcLivePointsForEntries(
-		context,
-		eventId,
-		[...entryIds],
-		{ managerReadMode: "CACHE_ONLY" }
-	);
-	if (result.errors.length > 0 || result.results.size !== entryIds.length) return null;
-
-	const scores = new Map<number, number>();
-	let livePublicationId: string | null = null;
-	let snapshotRevision: string | null = null;
-	let checkedAt: string | null = null;
-	let state: EventLiveH2HScoreBatch["state"] | null = null;
-	const managerRevisions = new Map<number, string>();
-	const checkedAtByEntry = new Map<number, string>();
-	for (const entryId of entryIds) {
-		const row = result.results.get(entryId);
-		const liveProvenance = row?.score.provenance;
-		if (
-			!row ||
-			!isTraceableOfficialManagerScore(row.score) ||
-			row.score.source !== "FPL_EVENT_LIVE" ||
-			typeof row.score.netEventPoints !== "number" ||
-			typeof row.score.revision !== "string" ||
-			row.score.revision.trim().length === 0 ||
-			!row.snapshot ||
-			!liveProvenance ||
-			liveProvenance.scoreSource !== "FPL_EVENT_LIVE" ||
-			liveProvenance.livePublicationId === null ||
-			liveProvenance.liveRevision === null ||
-			liveProvenance.liveCheckedAt === null ||
-			row.snapshot.revision !== liveProvenance.liveRevision ||
-			row.snapshot.publicationId !== liveProvenance.livePublicationId
-		) {
-			return null;
-		}
-		if (
-			(livePublicationId !== null && livePublicationId !== liveProvenance.livePublicationId) ||
-			(snapshotRevision !== null && snapshotRevision !== liveProvenance.liveRevision) ||
-			(state !== null && state !== row.snapshot.state)
-		) {
-			return null;
-		}
-		const normalizedLiveCheckedAt = normalizeOfficialH2HSourceCheckedAt(
-			liveProvenance.liveCheckedAt
-		);
-		if (normalizedLiveCheckedAt === null) return null;
-		livePublicationId = liveProvenance.livePublicationId;
-		snapshotRevision = liveProvenance.liveRevision;
-		if (checkedAt === null || Date.parse(normalizedLiveCheckedAt) < Date.parse(checkedAt)) {
-			checkedAt = normalizedLiveCheckedAt;
-		}
-		state = row.snapshot.state;
-		scores.set(entryId, row.score.netEventPoints);
-		managerRevisions.set(entryId, row.score.revision);
-		checkedAtByEntry.set(entryId, normalizedLiveCheckedAt);
-	}
-	if (!snapshotRevision || !checkedAt || !state) return null;
-	const orderedManagerRevisions = [...managerRevisions]
-		.sort(([left], [right]) => left - right)
-		.map(([entryId, revision]) => ({ entryId, revision }));
-	const revisionHash = createHash("sha256")
-		.update(
-			stableStringify({
-				eventId,
-				livePublicationId,
-				snapshotRevision,
-				managerRevisions: orderedManagerRevisions,
-			}),
-			"utf8"
-		)
-		.digest("hex")
-		.slice(0, 24);
-	return {
-		scores,
-		managerRevisions,
-		checkedAtByEntry,
-		revision: `event-live-h2h:${eventId}:${revisionHash}`,
-		checkedAt,
-		state,
-		livePublicationId,
-		snapshotRevision,
-	};
-}
-
-const chunkEntryIds = (entryIds: readonly number[], size: number): number[][] => {
-	const chunks: number[][] = [];
-	for (let index = 0; index < entryIds.length; index += size) {
-		chunks.push([...entryIds.slice(index, index + size)]);
-	}
-	return chunks;
-};
-
-/** Load one coherent event-live source across all active tournaments. */
-async function loadEventLiveH2HScoreBatches(
-	context: GraphQLContext,
-	eventId: number,
-	entryIds: readonly number[]
-): Promise<EventLiveH2HScoreBatch | null> {
-	const uniqueEntryIds = [...new Set(entryIds)].sort((left, right) => left - right);
-	if (uniqueEntryIds.length === 0) return null;
-	const chunks = chunkEntryIds(uniqueEntryIds, 500);
-	const batches: Array<EventLiveH2HScoreBatch | null> = new Array<EventLiveH2HScoreBatch | null>(
-		chunks.length
-	).fill(null);
-	let nextChunk = 0;
-	const worker = async (): Promise<void> => {
-		while (nextChunk < chunks.length) {
-			const chunkIndex = nextChunk;
-			nextChunk += 1;
-			const chunk = chunks[chunkIndex]!;
-			batches[chunkIndex] = await loadEventLiveH2HScoreBatch(context, eventId, chunk).catch(
-				(error) => {
-					context.logger.warn(
-						{ eventId, chunkIndex, chunkSize: chunk.length, err: error },
-						"Event-live H2H score chunk unavailable"
-					);
-					return null;
-				}
-			);
-		}
-	};
-	await Promise.all(Array.from({ length: Math.min(2, chunks.length) }, () => worker()));
-	if (batches.some((batch) => batch === null)) return null;
-	const completeBatches = batches as EventLiveH2HScoreBatch[];
-	const first = completeBatches[0];
-	if (!first) return null;
-	for (const batch of completeBatches.slice(1)) {
-		if (
-			batch.state !== first.state ||
-			batch.livePublicationId !== first.livePublicationId ||
-			batch.snapshotRevision !== first.snapshotRevision
-		) {
-			context.logger.warn(
-				{
-					eventId,
-					expectedRevision: first.snapshotRevision,
-					observedRevision: batch.snapshotRevision,
-				},
-				"Event-live H2H score chunks observed mixed publication metadata"
-			);
-			return null;
-		}
-	}
-	const scores = new Map<number, number>();
-	const managerRevisions = new Map<number, string>();
-	const checkedAtByEntry = new Map<number, string>();
-	for (const batch of completeBatches) {
-		for (const [entryId, score] of batch.scores) scores.set(entryId, score);
-		for (const [entryId, revision] of batch.managerRevisions) {
-			managerRevisions.set(entryId, revision);
-		}
-		for (const [entryId, entryCheckedAt] of batch.checkedAtByEntry) {
-			checkedAtByEntry.set(entryId, entryCheckedAt);
-		}
-	}
-	const checkedAt = completeBatches
-		.map((batch) => batch.checkedAt)
-		.sort((left, right) => Date.parse(left) - Date.parse(right))[0]!;
-	const revisionHash = createHash("sha256")
-		.update(
-			stableStringify({
-				eventId,
-				livePublicationId: first.livePublicationId,
-				snapshotRevision: first.snapshotRevision,
-				chunks: completeBatches.map((batch) => batch.revision),
-			})
-		)
-		.digest("hex")
-		.slice(0, 24);
-	return {
-		scores,
-		managerRevisions,
-		checkedAtByEntry,
-		revision: `event-live-h2h:${eventId}:${revisionHash}`,
-		checkedAt,
-		state: first.state,
-		livePublicationId: first.livePublicationId,
-		snapshotRevision: first.snapshotRevision,
 	};
 }
 
@@ -3587,8 +3384,9 @@ export const tournamentsRepository: TournamentsRepository = {
 	},
 
 	async getEntryTournaments(context: GraphQLContext, entryId: number): Promise<TournamentInfo[]> {
-		// Mutable metadata is read directly for lightweight roots. Only callers
-		// with a pinned core revision use the bounded cache contract.
+		// Mutable metadata is read directly for lightweight roots. Legacy callers
+		// that already pinned a core revision retain the existing bounded cache
+		// contract during the rolling migration.
 		const platformAdmin = hasPlatformAdminAccess(context, entryId);
 		const cacheScope = platformAdmin ? "platform-admin" : "entry";
 		const cacheKey = context.dataRevision
