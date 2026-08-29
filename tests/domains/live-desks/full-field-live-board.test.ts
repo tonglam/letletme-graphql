@@ -12,6 +12,8 @@ import {
 	hasComparableFullFieldManagerMetric,
 	isScheduledTournamentEvent,
 	managerCoverageFenceMatches,
+	managerScoreLoadCanUseLastGood,
+	managerScoreLoadHasCompleteRows,
 	managerScoresAlignedWithLiveSnapshot,
 	selectManagerScoresForBoard,
 } from "../../../src/domains/live-desks/resolvers";
@@ -157,6 +159,19 @@ describe("full-field live board bounded manager loads", () => {
 
 		expect(merged.rows.size).toBe(2);
 		expect(merged.dataAvailability).toBe("PARTIAL");
+	});
+
+	it("allows a complete durable last-good load without relaxing the current-ref helper", () => {
+		const load = makeLoad([makeManagerRow(1, 10), makeManagerRow(2, 11)], 2);
+		expect(managerScoreLoadHasCompleteRows(load, [1, 2])).toBe(true);
+		expect(
+			managerScoreLoadCanUseLastGood({ ...load, dataAvailability: "LAST_GOOD" }, [1, 2], true)
+		).toBe(true);
+		expect(
+			managerScoreLoadCanUseLastGood({ ...load, dataAvailability: "PARTIAL" }, [1, 2], true)
+		).toBe(false);
+		expect(managerScoreLoadCanUseLastGood(load, [1, 2], false)).toBe(false);
+		expect(managerScoreLoadHasCompleteRows({ ...load, missingEntryIds: [3] }, [1, 2])).toBe(false);
 	});
 
 	it("allows direct head verification past a matching partial coverage checkpoint", () => {

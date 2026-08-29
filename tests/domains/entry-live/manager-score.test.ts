@@ -197,6 +197,20 @@ describe("Data manager score contract", () => {
 		expect(result.score.reasonCodes).toContain("UPSTREAM_UNAVAILABLE");
 	});
 
+	it("keeps an explicitly unaligned projected row stale even when its own head is recent", () => {
+		const result = buildManagerScore({
+			row: row({ checkedAt: new Date().toISOString() }),
+			upstreamErrorCode: null,
+			provisional: true,
+			available: true,
+			transferCost: 0,
+			detailEventPoints: 42,
+			freshnessCheckedAt: null,
+		});
+		expect(result.score.state).toBe("STALE");
+		expect(result.score.reasonCodes).toContain("SOURCE_TOO_OLD");
+	});
+
 	it("uses a fenced live heartbeat while retaining independently observed ranks", () => {
 		const oldCheckedAt = new Date(Date.now() - 5 * 60_000).toISOString();
 		const heartbeatCheckedAt = new Date().toISOString();

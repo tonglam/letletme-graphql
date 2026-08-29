@@ -280,9 +280,17 @@ export function buildManagerScore(params: {
 				: "SOURCE_SKEW"
 			: "NOT_COMPARABLE";
 	const freshnessCheckedAt = params.freshnessCheckedAt ?? row.checkedAt;
-	const fresh = params.freshnessCheckedAt
-		? isManagerScoreLiveHeartbeatFresh(freshnessCheckedAt)
-		: ageSeconds(freshnessCheckedAt) <= MANAGER_SCORE_REFRESH_SECONDS;
+	// `undefined` means that the caller did not have a publication fence and
+	// the row may use its own checkedAt for the short local cadence. `null` is
+	// different: the caller explicitly proved that the row is not aligned with
+	// the current live publication, so it must remain visibly stale even if the
+	// database head was written a few seconds ago.
+	const fresh =
+		params.freshnessCheckedAt === null
+			? false
+			: params.freshnessCheckedAt !== undefined
+				? isManagerScoreLiveHeartbeatFresh(freshnessCheckedAt)
+				: ageSeconds(freshnessCheckedAt) <= MANAGER_SCORE_REFRESH_SECONDS;
 	// Rank observations have an independent source and revision from the live
 	// player publication. Keep the last verified value visible when its source
 	// is older than the score heartbeat; rankCheckedAt still tells consumers how

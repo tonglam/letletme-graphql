@@ -533,6 +533,12 @@ export const entryLiveBatchService = {
 			managerScores?: ManagerScoreLoad;
 			managerReadMode?: "CACHE_ONLY" | "READ_THROUGH";
 			liveRef?: LiveSnapshotReference;
+			/**
+			 * Normal board pages may intentionally use a complete durable last-good
+			 * manager head while the live publication keeps advancing. Explicit
+			 * revision requests never set this escape hatch.
+			 */
+			allowLastGoodManagerScores?: boolean;
 		}
 	): Promise<BatchLiveCalcResult> {
 		assertValidEntryBatch(entryIds);
@@ -598,12 +604,18 @@ export const entryLiveBatchService = {
 		const pinnedLiveMeta = prefetched?.liveRef ?? loadedLiveMeta;
 		const provisional = !(event?.finished === true && event.dataChecked === true);
 		const prefetchedManagerScores = prefetched?.managerScores;
+		const canUseLastGoodManagerScores =
+			prefetched?.allowLastGoodManagerScores === true &&
+			prefetchedManagerScores?.dataAvailability === "LAST_GOOD" &&
+			prefetchedManagerScores.errorCode === null &&
+			prefetchedManagerScores.missingEntryIds.length === 0;
 		const prefetchedManagerScoresAreUsable =
 			prefetchedManagerScores !== undefined &&
 			entryIds.every((entryId) => {
 				const row = prefetchedManagerScores.rows.get(entryId);
 				if (!row?.effectiveLineup || row.effectiveLineup.length !== 15) return false;
 				if (!provisional || !pinnedLiveMeta?.publicationId) return true;
+				if (canUseLastGoodManagerScores) return true;
 				return (
 					row.provenance?.livePublicationId === pinnedLiveMeta.publicationId &&
 					row.provenance.liveRevision === pinnedLiveMeta.revision
@@ -636,7 +648,8 @@ export const entryLiveBatchService = {
 				? fullSnapshotMeta.checkedAt
 				: null;
 		const detailReferenceUnavailable =
-			provisional && (dataLiveReference.conflict || detailLiveReference === null);
+			provisional &&
+			(dataLiveReference.conflict || detailLiveReference === null || canUseLastGoodManagerScores);
 		// Manager headline availability is independent from lineup availability.
 		// Keep NO_PICKS metadata cheap while still resolving the official manager
 		// score; final lifecycle evidence requires a persisted lineup/result pair.
