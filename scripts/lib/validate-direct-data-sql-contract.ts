@@ -14,6 +14,7 @@ import { MARKET_DATA_SQL_CONTRACT } from "../../src/domains/market/repository";
 import {
 	parseTournamentSelectionIndexContractRow,
 	TOURNAMENT_SELECTION_INDEX_DATA_SQL_CONTRACT,
+	type TournamentSelectionIndexContractRow,
 } from "../../src/domains/event-stats/repository";
 import {
 	MY_FPL_ACTIVE_PUBLICATIONS_SQL,
@@ -98,6 +99,24 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isValidTimestamp = (value: unknown): boolean => {
 	if (value instanceof Date) return Number.isFinite(value.getTime());
 	return typeof value === "string" && Number.isFinite(Date.parse(value));
+};
+
+export const validateTournamentSelectionIndexContractRows = (rows: readonly unknown[]): boolean => {
+	const parsedRows: TournamentSelectionIndexContractRow[] = [];
+	for (const row of rows) {
+		const parsed = parseTournamentSelectionIndexContractRow(row);
+		if (parsed === null) return false;
+		parsedRows.push(parsed);
+	}
+	if (parsedRows.length === 0) return false;
+	const publicationKeys = new Set(
+		parsedRows.map(
+			(row) =>
+				`${row.publicationId}:${row.expectedEntries}:${row.completePickEntries}:${row.revision}`
+		)
+	);
+	const playerIds = new Set(parsedRows.map((row) => row.playerId));
+	return publicationKeys.size === 1 && playerIds.size === parsedRows.length;
 };
 
 const CONTRACT_SEASON_CODE = "2627";
@@ -562,8 +581,7 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 				}
 				if (probe.runtime === "must-return-selection-row") {
 					if (probe.name === "live-tournament.selection-index") {
-						const selectionRows = result.rows.map(parseTournamentSelectionIndexContractRow);
-						if (selectionRows.length === 0 || selectionRows.some((row) => row === null)) {
+						if (!validateTournamentSelectionIndexContractRows(result.rows)) {
 							throw new Error("runtime reader role cannot see a valid live selection row");
 						}
 					} else {

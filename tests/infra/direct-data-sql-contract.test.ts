@@ -3,6 +3,7 @@ import {
 	DIRECT_DATA_SQL_CONTRACT,
 	allowedResultTypes,
 	validateDirectDataSqlContract,
+	validateTournamentSelectionIndexContractRows,
 } from "../../scripts/lib/validate-direct-data-sql-contract";
 import type { QueryResult, QueryResultRow } from "pg";
 import type { QueryExecutor } from "../../src/infra/database";
@@ -1503,6 +1504,29 @@ describe("direct Data SQL contract", () => {
 					probe.runtime === "must-return-player-state-row"
 			)
 		).toBe(true);
+	});
+
+	test("validates live picker publication identity and player uniqueness", () => {
+		const row = {
+			publication_id: "1",
+			expected_entries: "2",
+			complete_pick_entries: "2",
+			revision: "7",
+			publication_state: "READY",
+			ownership_state: "READY",
+			element_id: 1,
+			selected_count: 1,
+		};
+		expect(validateTournamentSelectionIndexContractRows([row])).toBe(true);
+		expect(
+			validateTournamentSelectionIndexContractRows([
+				row,
+				{ ...row, publication_id: "2", element_id: 2 },
+			])
+		).toBe(false);
+		expect(validateTournamentSelectionIndexContractRows([row, { ...row, element_id: 1 }])).toBe(
+			false
+		);
 	});
 
 	test("lets PostgreSQL infer the opaque Trends publication identity", () => {
