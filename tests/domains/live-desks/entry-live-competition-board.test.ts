@@ -628,9 +628,15 @@ describe("entry live competition board filtering and paging", () => {
 			first,
 			Date.parse("2026-08-23T00:00:31.000Z")
 		);
+		const heartbeatFreshStatus = entryLiveCompetitionManagerStatusRevision(
+			first,
+			Date.parse("2026-08-23T00:00:10.000Z"),
+			true
+		);
 
 		expect(refreshedStatus).not.toBe(firstStatus);
 		expect(staleStatus).not.toBe(firstStatus);
+		expect(heartbeatFreshStatus).not.toBe(firstStatus);
 
 		const context = {
 			dataRevision: "core-1",

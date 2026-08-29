@@ -19,6 +19,7 @@ import { env } from "../../infra/env";
 import { entryLiveBatchService } from "../entry-live/batch-service";
 import { entryLiveRepository } from "../entry-live/repository";
 import {
+	isManagerScoreLiveHeartbeatFresh,
 	loadManagerScores,
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
@@ -962,14 +963,19 @@ export const liveDesksResolvers = {
 				snapshot
 			);
 			const managerFreshnessCheckedAt =
-				!event.finished &&
+				!(event.finished && event.dataChecked) &&
 				window.dataAvailability === "FRESH" &&
 				typeof snapshot?.publicationId === "string" &&
+				isManagerScoreLiveHeartbeatFresh(snapshot.lastSuccessfulFetchAt) &&
 				managerRowsAlignedWithCurrentSnapshot
 					? (snapshot?.lastSuccessfulFetchAt ?? null)
 					: null;
 			const managerRevision = managerLoadRevision(managerScores);
-			const managerStatusRevision = entryLiveCompetitionManagerStatusRevision(managerScores);
+			const managerStatusRevision = entryLiveCompetitionManagerStatusRevision(
+				managerScores,
+				Date.now(),
+				managerFreshnessCheckedAt !== null
+			);
 			const cacheIdentity = {
 				season: context.currentSeason.seasonCode,
 				eventId: request.eventId,

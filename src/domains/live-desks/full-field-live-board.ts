@@ -1,7 +1,7 @@
 import type { Entry, EntryEventResult } from "../entries/repository";
 import { hasCompleteEntryEventPick, type EntryEventPick } from "../entry-live/repository";
 import {
-	MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS,
+	isManagerScoreLiveHeartbeatFresh,
 	unavailableManagerScore,
 	type LiveManagerScore,
 } from "../entry-live/manager-score";
@@ -46,20 +46,21 @@ const scoreFromDataRow = (
 	freshnessCheckedAt?: string | null
 ): LiveManagerScore => {
 	if (!row) return unavailableManagerScore();
-	const checkedAt = Date.parse(freshnessCheckedAt ?? row.checkedAt);
-	const freshnessWindowMs = freshnessCheckedAt
-		? MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS * 1_000
-		: 30_000;
-	const fresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= freshnessWindowMs;
+	const checkedAt = Date.parse(row.checkedAt);
+	const fresh = freshnessCheckedAt
+		? isManagerScoreLiveHeartbeatFresh(freshnessCheckedAt)
+		: Number.isFinite(checkedAt) && Date.now() - checkedAt <= 30_000;
+	const rankFresh =
+		!freshnessCheckedAt || isManagerScoreLiveHeartbeatFresh(row.provenance.rankCheckedAt);
 	const state = row.source === "FPL_FINAL_RESULT" ? "FINAL" : fresh ? "FRESH" : "STALE";
 	return {
 		eventPoints: row.eventPoints,
 		netEventPoints: row.netEventPoints,
 		totalPoints: row.totalPoints,
 		totalScope: row.totalScope,
-		eventRank: row.eventRank,
-		overallRank: row.overallRank,
-		leagueRank: row.leagueRank,
+		eventRank: rankFresh ? row.eventRank : null,
+		overallRank: rankFresh ? row.overallRank : null,
+		leagueRank: rankFresh ? row.leagueRank : null,
 		transferCost: row.transferCost ?? 0,
 		source: row.source as ManagerLiveSource,
 		state,

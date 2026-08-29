@@ -69,6 +69,13 @@ const ageSeconds = (checkedAt: string, now = Date.now()): number => {
 	return Number.isFinite(timestamp) ? Math.max(0, (now - timestamp) / 1000) : Infinity;
 };
 
+export const isManagerScoreLiveHeartbeatFresh = (
+	checkedAt: string | null | undefined,
+	now = Date.now()
+): boolean =>
+	typeof checkedAt === "string" &&
+	ageSeconds(checkedAt, now) <= MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS;
+
 const plusSeconds = (iso: string, seconds: number): string => {
 	const value = Date.parse(iso);
 	return Number.isFinite(value)
@@ -242,10 +249,16 @@ export function buildManagerScore(params: {
 				: "SOURCE_SKEW"
 			: "NOT_COMPARABLE";
 	const freshnessCheckedAt = params.freshnessCheckedAt ?? row.checkedAt;
-	const freshnessWindowSeconds = params.freshnessCheckedAt
-		? MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS
-		: MANAGER_SCORE_REFRESH_SECONDS;
-	const fresh = ageSeconds(freshnessCheckedAt) <= freshnessWindowSeconds;
+	const fresh = params.freshnessCheckedAt
+		? isManagerScoreLiveHeartbeatFresh(freshnessCheckedAt)
+		: ageSeconds(freshnessCheckedAt) <= MANAGER_SCORE_REFRESH_SECONDS;
+	const rankFresh =
+		params.freshnessCheckedAt === undefined ||
+		params.freshnessCheckedAt === null ||
+		isManagerScoreLiveHeartbeatFresh(row.provenance.rankCheckedAt);
+	const eventRank = rankFresh ? row.eventRank : null;
+	const overallRank = rankFresh ? row.overallRank : null;
+	const leagueRank = rankFresh ? row.leagueRank : null;
 	const reasons: LiveManagerScoreReason[] = [];
 	if (upstreamErrorCode === "UPSTREAM_RATE_LIMITED") reasons.push("UPSTREAM_RATE_LIMITED");
 	else if (upstreamErrorCode && upstreamErrorCode !== "UNSUPPORTED_H2H_LIVE")
@@ -260,9 +273,9 @@ export function buildManagerScore(params: {
 		netEventPoints,
 		totalPoints: row.totalPoints,
 		totalScope: row.totalScope,
-		eventRank: row.eventRank,
-		overallRank: row.overallRank,
-		leagueRank: row.leagueRank,
+		eventRank,
+		overallRank,
+		leagueRank,
 		transferCost: effectiveTransferCost,
 		source: row.source,
 		state: isFinalRow ? "FINAL" : fresh ? "FRESH" : "STALE",
@@ -284,7 +297,7 @@ export function buildManagerScore(params: {
 	const result = {
 		score,
 		headline: {
-			rank: row.eventRank ?? row.leagueRank ?? 0,
+			rank: eventRank ?? leagueRank ?? 0,
 			livePoints: eventPoints ?? 0,
 			liveNetPoints: netEventPoints ?? eventPoints ?? 0,
 			liveTotalPoints: row.totalScope === "OVERALL" ? (row.totalPoints ?? 0) : 0,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	buildManagerScore,
+	isManagerScoreLiveHeartbeatFresh,
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
 } from "../../../src/domains/entry-live/manager-score";
@@ -76,6 +77,12 @@ const finalRow = (overrides: Partial<ManagerLiveScoreRow> = {}): ManagerLiveScor
 	});
 
 describe("Data manager score contract", () => {
+	it("bounds the shared live heartbeat to the active-live grace", () => {
+		const now = Date.now();
+		expect(isManagerScoreLiveHeartbeatFresh(new Date(now - 89_000).toISOString(), now)).toBe(true);
+		expect(isManagerScoreLiveHeartbeatFresh(new Date(now - 91_000).toISOString(), now)).toBe(false);
+	});
+
 	it("does not expose a row with the wrong calculation mode as an active authority", () => {
 		const result = buildManagerScore({
 			row: row({ calculationMode: "FINAL_RESULT" }),
@@ -170,7 +177,11 @@ describe("Data manager score contract", () => {
 		const oldCheckedAt = new Date(Date.now() - 5 * 60_000).toISOString();
 		const authority = row({
 			checkedAt: oldCheckedAt,
-			provenance: { ...provenance, liveCheckedAt: oldCheckedAt },
+			provenance: {
+				...provenance,
+				liveCheckedAt: oldCheckedAt,
+				rankCheckedAt: oldCheckedAt,
+			},
 		});
 		const result = buildManagerScore({
 			row: authority,
@@ -187,6 +198,9 @@ describe("Data manager score contract", () => {
 		expect(result.score.checkedAt).toBe(oldCheckedAt);
 		expect(result.score.provenance?.liveCheckedAt).toBe(oldCheckedAt);
 		expect(result.score.revision).toBe(authority.revision);
+		expect(result.score.eventRank).toBeNull();
+		expect(result.score.overallRank).toBeNull();
+		expect(result.score.leagueRank).toBeNull();
 	});
 
 	it("reconciles gross event points, net points, and transfer cost from Data", () => {

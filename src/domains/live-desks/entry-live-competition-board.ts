@@ -335,11 +335,13 @@ export const entryLiveCompetitionRosterRevision = (entryIds: readonly number[]):
 
 export const entryLiveCompetitionManagerStatusRevision = (
 	input: ManagerScoreLoad,
-	now = Date.now()
+	now = Date.now(),
+	liveHeartbeatFresh = false
 ): string =>
 	createHash("sha256")
 		.update(
 			JSON.stringify({
+				liveHeartbeatFresh,
 				dataAvailability: input.dataAvailability,
 				servedFrom: input.servedFrom,
 				refreshQueued: input.refreshQueued,
