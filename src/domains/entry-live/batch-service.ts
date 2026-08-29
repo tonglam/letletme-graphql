@@ -726,9 +726,7 @@ export const entryLiveBatchService = {
 					livePoints: manager.headline.livePoints,
 					liveNetPoints: manager.headline.liveNetPoints,
 					liveTotalPoints: manager.headline.liveTotalPoints,
-					overallRank:
-						manager.score.overallRank ??
-						(authoritativeRow && managerFreshnessCheckedAt !== null ? 0 : noPicks.overallRank),
+					overallRank: manager.score.overallRank ?? noPicks.overallRank,
 				});
 			}
 		}
@@ -919,9 +917,7 @@ export const entryLiveBatchService = {
 					livePoints: manager.headline.livePoints,
 					liveNetPoints: manager.headline.liveNetPoints,
 					liveTotalPoints: manager.headline.liveTotalPoints,
-					overallRank:
-						manager.score.overallRank ??
-						(authoritativeRow && managerFreshnessCheckedAt !== null ? 0 : calcData.overallRank),
+					overallRank: manager.score.overallRank ?? calcData.overallRank,
 				});
 			} catch (err) {
 				const message = err instanceof Error ? err.message : "Computation error";

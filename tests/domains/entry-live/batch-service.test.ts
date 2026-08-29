@@ -993,4 +993,51 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			entryLiveRepository.getEntryEventTransfersByIds = originalTransfers;
 		}
 	});
+
+	it("retains the entry-summary overall rank when an authoritative live row has no rank", async () => {
+		const originalEntries = entriesService.getEntriesByIds;
+		const core = buildTestCoreData(1);
+		const context = buildSnapshotContext(
+			new TestRedis(buildCorePublication("2627", 7, core), buildLivePublication(core, 1, "2627", 8))
+		);
+		entriesService.getEntriesByIds = async () =>
+			new Map([
+				[
+					101,
+					{
+						id: 101,
+						entryName: "Ranked Team",
+						playerName: "Ranked Player",
+						region: null,
+						startedEvent: 1,
+						overallPoints: 0,
+						overallRank: 4321,
+						bank: 0,
+						teamValue: 1000,
+						totalTransfers: 0,
+						lastEventId: null,
+						lastOverallPoints: null,
+						lastOverallRank: null,
+						lastTeamValue: null,
+						lastBank: null,
+					},
+				],
+			]);
+		installManagerLiveResponse(1, [managerRow(101, 1)]);
+		try {
+			const result = await entryLiveBatchService.calcLivePointsForEntries(context, 1, [101], {
+				liveByPlayer: Promise.resolve(new Map()),
+				fixtures: Promise.resolve([]),
+				teams: Promise.resolve(core.teams as never),
+				picksByEntry: Promise.resolve(new Map()),
+			});
+
+			expect(result.results.get(101)?.availability).toBe("NO_PICKS");
+			expect(result.results.get(101)?.score.overallRank).toBeNull();
+			expect(result.results.get(101)?.overallRank).toBe(4321);
+		} finally {
+			restoreManagerLiveResponse();
+			entriesService.getEntriesByIds = originalEntries;
+		}
+	});
 });
