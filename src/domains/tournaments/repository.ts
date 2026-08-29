@@ -14,7 +14,7 @@ import {
 } from "../../infra/query-cache";
 import { stableStringify } from "../../infra/stringify";
 import { LeagueType } from "../leagues/repository";
-import { entryLiveBatchService } from "../entry-live/batch-service";
+import { calcLivePointsForEntriesInChunks } from "../entry-live/batch-service";
 import { entriesService } from "../entries/service";
 import {
 	managerScoreBoardIsFinal,
@@ -4550,10 +4550,14 @@ export const tournamentsRepository: TournamentsRepository = {
 					(entryIds) => entriesService.getEntriesByIds(context, entryIds)
 				);
 				const rosterEntryIds = eligibility.entryIds;
-				const { entryIds: boundedEntryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
-					rosterEntryIds,
-					entryId
-				);
+				const boundedSelection = selectTournamentDeskEntryWindow(rosterEntryIds, entryId);
+				const boundedDeferredEntryIds = boundedSelection.deferredEntryIds;
+				// The detail route is the unpaged tournament view. Calculate the whole
+				// eligible cohort in bounded chunks instead of returning the 500-entry
+				// preview used by the interactive board endpoint. The bounded selection
+				// remains available for cache eligibility and documents the viewer pin.
+				const calculationEntryIds = rosterEntryIds;
+				const deferredEntryIds: number[] = [];
 				const liveCacheKey =
 					scoringPhase && snapshot
 						? competitionBoardCacheKey(context, snapshot, tournamentId)
@@ -4562,7 +4566,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				// bounded window retains the requesting manager. Do not read or write
 				// the shared event/tournament cache for that shape.
 				const cachedCandidate =
-					liveCacheKey && deferredEntryIds.length === 0
+					liveCacheKey && boundedDeferredEntryIds.length === 0
 						? await readCompetitionBoardCache(context, liveCacheKey)
 						: null;
 				const cachedRows = cachedCandidate?.board as
@@ -4572,7 +4576,11 @@ export const tournamentsRepository: TournamentsRepository = {
 					  }>
 					| undefined;
 				const cachedBoard =
-					cachedCandidate && cachedRows && managerScoreBoardIsFinal(cachedRows)
+					cachedCandidate &&
+					cachedRows &&
+					cachedCandidate.totalEntries === cachedRows.length &&
+					cachedCandidate.totalEntries === rosterEntryIds.length &&
+					managerScoreBoardIsFinal(cachedRows)
 						? cachedCandidate
 						: null;
 				const cached = cachedBoard
@@ -4585,29 +4593,16 @@ export const tournamentsRepository: TournamentsRepository = {
 					: null;
 				const result = cached
 					? null
-					: await entryLiveBatchService.calcLivePointsForEntries(
-							context,
-							requestedEventId,
-							boundedEntryIds,
-							{
-								entriesById: eligibility.entriesById,
-								tournamentId,
-								// The detail page must render the durable manager heads already
-								// owned by the tournament worker. A synchronous read-through can
-								// spend the whole Web deadline refreshing slow-changing rank data;
-								// CACHE_ONLY returns last-good rows and queues bounded recovery for
-								// genuine misses without coupling page availability to that refresh.
-								managerReadMode: "CACHE_ONLY",
-								...(snapshot?.publicationId
-									? {
-											liveRef: {
-												publicationId: snapshot.publicationId,
-												revision: snapshot.revision,
-											},
-										}
-									: {}),
-							}
-						);
+					: await calcLivePointsForEntriesInChunks(context, requestedEventId, calculationEntryIds, {
+							entriesById: eligibility.entriesById,
+							tournamentId,
+							// The detail page must render the durable manager heads already
+							// owned by the tournament worker. A synchronous read-through can
+							// spend the whole Web deadline refreshing slow-changing rank data;
+							// CACHE_ONLY returns last-good rows and queues bounded recovery for
+							// genuine misses without coupling page availability to that refresh.
+							managerReadMode: "CACHE_ONLY",
+						});
 				const liveData = cached ?? {
 					rows: rankTournamentRowsByOfficialEventPoints(Array.from(result?.results.values() ?? [])),
 					partial: (result?.errors.length ?? 0) > 0 || deferredEntryIds.length > 0,

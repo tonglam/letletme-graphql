@@ -16,7 +16,10 @@ import {
 import type { DataPublicationManifest } from "../../infra/data-publication";
 import { metrics } from "../../infra/metrics";
 import { env } from "../../infra/env";
-import { entryLiveBatchService } from "../entry-live/batch-service";
+import {
+	calcLivePointsForEntriesInChunks,
+	entryLiveBatchService,
+} from "../entry-live/batch-service";
 import { entryLiveRepository } from "../entry-live/repository";
 import {
 	isManagerScoreLiveHeartbeatFresh,
@@ -1502,10 +1505,27 @@ export const liveDesksResolvers = {
 			const selectedTournament = tournaments.find((tournament) => tournament.id === selected);
 			const requireNet = selectedTournament?.leagueType === LeagueType.H2H;
 			const boardCacheKey = snapshot ? competitionBoardCacheKey(context, snapshot, selected) : null;
+			const rosterEntryIds = await tournamentsService.getTournamentEntryIds(context, selected);
+			const eligibility = await loadTournamentEventEligibility(
+				rosterEntryIds,
+				eventId,
+				(entryIds) => entriesService.getEntriesByIds(context, entryIds)
+			);
+			const allEntryIds = eligibility.entryIds;
+			const rosterEntries = eligibility.entriesById;
+			const { entryIds: boundedEntryIds, deferredEntryIds: boundedDeferredEntryIds } =
+				selectTournamentDeskEntryWindow(allEntryIds, args.entryId);
+			// The legacy desk is still the initial load path for tournament detail
+			// pages. It must not silently stop at the 500-entry preview used by the
+			// paged board API. Normal requests calculate the complete eligible cohort
+			// in bounded chunks; an explicit immutable ref remains bounded so the
+			// caller's historical contract cannot turn into an unbounded read.
+			const calculationEntryIds = args.ref ? boundedEntryIds : allEntryIds;
+			const deferredEntryIds = args.ref ? boundedDeferredEntryIds : [];
 			// Manager scores have an independent revision from the player-live
 			// publication. Do not serve a provisional board cache keyed only by the
-			// player revision; the Data service's bounded Redis read is the source
-			// of truth for this request.
+			// player revision, and never accept a finalized cache whose row count no
+			// longer covers the current eligible tournament cohort.
 			const cachedCandidate =
 				provisional || !boardCacheKey
 					? null
@@ -1517,7 +1537,11 @@ export const liveDesksResolvers = {
 				  }>
 				| undefined;
 			const cachedBoard =
-				cachedCandidate && cachedRows && managerScoreBoardIsFinal(cachedRows)
+				cachedCandidate &&
+				cachedRows &&
+				cachedCandidate.totalEntries === cachedRows.length &&
+				cachedCandidate.totalEntries === allEntryIds.length &&
+				managerScoreBoardIsFinal(cachedRows)
 					? cachedCandidate
 					: null;
 			if (cachedBoard) {
@@ -1548,36 +1572,19 @@ export const liveDesksResolvers = {
 					...cachedBoard,
 				};
 			}
-			const rosterEntryIds = await tournamentsService.getTournamentEntryIds(context, selected);
-			const eligibility = await loadTournamentEventEligibility(
-				rosterEntryIds,
-				eventId,
-				(entryIds) => entriesService.getEntriesByIds(context, entryIds)
-			);
-			const allEntryIds = eligibility.entryIds;
-			const rosterEntries = eligibility.entriesById;
-			const { entryIds, deferredEntryIds } = selectTournamentDeskEntryWindow(
-				allEntryIds,
-				args.entryId
-			);
-			const result = await entryLiveBatchService.calcLivePointsForEntries(
-				context,
-				eventId,
-				entryIds,
-				{
-					entriesById: rosterEntries,
-					tournamentId: selected,
-					managerReadMode: "CACHE_ONLY",
-					...(snapshot?.publicationId
-						? {
-								liveRef: {
-									publicationId: snapshot.publicationId,
-									revision: snapshot.revision,
-								},
-							}
-						: {}),
-				}
-			);
+			const result = await calcLivePointsForEntriesInChunks(context, eventId, calculationEntryIds, {
+				entriesById: rosterEntries,
+				tournamentId: selected,
+				managerReadMode: "CACHE_ONLY",
+				...(args.ref && snapshot?.publicationId
+					? {
+							liveRef: {
+								publicationId: snapshot.publicationId,
+								revision: snapshot.revision,
+							},
+						}
+					: {}),
+			});
 			const board = rankTournamentRowsByOfficialEventPoints(Array.from(result.results.values()), {
 				useNet: requireNet,
 			});

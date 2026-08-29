@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	calcLivePointsForEntriesInChunks,
 	entryLiveBatchService,
 	normalizeChip,
 } from "../../../src/domains/entry-live/batch-service";
@@ -395,6 +396,48 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 		expect(result.meta.eventId).toBe(33);
 		expect(result.meta.totalEntries).toBe(0);
 		expect(result.meta.failedCount).toBe(0);
+	});
+
+	it("calculates a large cohort in bounded, ordered chunks", async () => {
+		const originalCalc = entryLiveBatchService.calcLivePointsForEntries;
+		const calls: number[][] = [];
+		let active = 0;
+		let maxActive = 0;
+		entryLiveBatchService.calcLivePointsForEntries = async (_context, eventId, entryIds) => {
+			active += 1;
+			maxActive = Math.max(maxActive, active);
+			calls.push([...entryIds]);
+			await Promise.resolve();
+			active -= 1;
+			const results = new Map(
+				entryIds.map((entryId) => [entryId, { entry: entryId, event: eventId } as never])
+			);
+			return {
+				results,
+				errors: [],
+				meta: {
+					eventId,
+					totalEntries: entryIds.length,
+					succeededCount: entryIds.length,
+					failedCount: 0,
+				},
+			};
+		};
+		try {
+			const entryIds = Array.from({ length: 1001 }, (_, index) => index + 1);
+			const result = await calcLivePointsForEntriesInChunks(makeMockContext({}), 33, entryIds);
+			expect(calls.map((chunk) => chunk.length)).toEqual([500, 500, 1]);
+			expect(maxActive).toBeLessThanOrEqual(2);
+			expect([...result.results.keys()]).toEqual(entryIds);
+			expect(result.meta).toEqual({
+				eventId: 33,
+				totalEntries: 1001,
+				succeededCount: 1001,
+				failedCount: 0,
+			});
+		} finally {
+			entryLiveBatchService.calcLivePointsForEntries = originalCalc;
+		}
 	});
 
 	it("rejects duplicate entry IDs before loading shared data", async () => {

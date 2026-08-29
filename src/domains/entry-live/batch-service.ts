@@ -17,6 +17,10 @@ import {
 	type LiveCalcData,
 } from "./calc-service";
 import {
+	MANAGER_LIVE_SCORE_BATCH_CONCURRENCY,
+	splitManagerLiveEntryIds,
+} from "./manager-score-batches";
+import {
 	buildManagerScore,
 	loadManagerScores,
 	unavailableManagerScore,
@@ -48,6 +52,24 @@ export type BatchLiveCalcResult = {
 		succeededCount: number;
 		failedCount: number;
 	};
+};
+
+export type EntryLiveBatchPrefetched = {
+	entriesById?: ReadonlyMap<number, Entry>;
+	liveByPlayer?: Promise<Map<number, LivePerformance>>;
+	fixtures?: Promise<Fixture[]>;
+	teams?: Promise<Team[]>;
+	picksByEntry?: Promise<Map<number, EntryEventPick>>;
+	tournamentId?: number;
+	managerScores?: ManagerScoreLoad;
+	managerReadMode?: "CACHE_ONLY" | "READ_THROUGH";
+	liveRef?: LiveSnapshotReference;
+	/**
+	 * Normal board pages may intentionally use a complete durable last-good
+	 * manager head while the live publication keeps advancing. Explicit
+	 * revision requests never set this escape hatch.
+	 */
+	allowLastGoodManagerScores?: boolean;
 };
 
 const MAX_ENTRY_BATCH = 500;
@@ -98,6 +120,11 @@ export const assertValidEntryBatch = (entryIds: readonly number[]): void => {
 		});
 	}
 };
+
+type ChunkedEntryLiveBatchPrefetched = Omit<
+	EntryLiveBatchPrefetched,
+	"liveByPlayer" | "fixtures" | "teams" | "picksByEntry" | "managerScores"
+>;
 
 type SharedData = {
 	liveByPlayer: Map<number, LivePerformance>;
@@ -523,23 +550,7 @@ export const entryLiveBatchService = {
 		context: GraphQLContext,
 		eventId: number,
 		entryIds: number[],
-		prefetched?: {
-			entriesById?: ReadonlyMap<number, Entry>;
-			liveByPlayer?: Promise<Map<number, LivePerformance>>;
-			fixtures?: Promise<Fixture[]>;
-			teams?: Promise<Team[]>;
-			picksByEntry?: Promise<Map<number, EntryEventPick>>;
-			tournamentId?: number;
-			managerScores?: ManagerScoreLoad;
-			managerReadMode?: "CACHE_ONLY" | "READ_THROUGH";
-			liveRef?: LiveSnapshotReference;
-			/**
-			 * Normal board pages may intentionally use a complete durable last-good
-			 * manager head while the live publication keeps advancing. Explicit
-			 * revision requests never set this escape hatch.
-			 */
-			allowLastGoodManagerScores?: boolean;
-		}
+		prefetched?: EntryLiveBatchPrefetched
 	): Promise<BatchLiveCalcResult> {
 		assertValidEntryBatch(entryIds);
 		const errors: Array<{ entryId: number; message: string }> = [];
@@ -955,4 +966,64 @@ export const entryLiveBatchService = {
 			},
 		};
 	},
+};
+
+/**
+ * Calculate a whole tournament without violating the 500-entry upstream
+ * contract. Chunks are deliberately limited to the manager-live client
+ * concurrency so a large detail page cannot recreate the connection pressure
+ * that caused the original incident. The caller receives one deterministic
+ * result map and can rank it once across the complete cohort.
+ */
+export const calcLivePointsForEntriesInChunks = async (
+	context: GraphQLContext,
+	eventId: number,
+	entryIds: readonly number[],
+	prefetched?: ChunkedEntryLiveBatchPrefetched
+): Promise<BatchLiveCalcResult> => {
+	if (entryIds.length === 0) {
+		return {
+			results: new Map(),
+			errors: [],
+			meta: { eventId, totalEntries: 0, succeededCount: 0, failedCount: 0 },
+		};
+	}
+	if (new Set(entryIds).size !== entryIds.length) {
+		throw new GraphQLError("Entry batch must not contain duplicate entry IDs", {
+			extensions: { code: "DUPLICATE_ENTRY_IDS" },
+		});
+	}
+
+	const chunks = splitManagerLiveEntryIds(entryIds);
+	const results = new Map<number, LiveCalcData>();
+	const errors: Array<{ entryId: number; message: string }> = [];
+	for (let offset = 0; offset < chunks.length; offset += MANAGER_LIVE_SCORE_BATCH_CONCURRENCY) {
+		const loaded = await Promise.all(
+			chunks
+				.slice(offset, offset + MANAGER_LIVE_SCORE_BATCH_CONCURRENCY)
+				.map((chunk) =>
+					entryLiveBatchService.calcLivePointsForEntries(context, eventId, chunk, prefetched)
+				)
+		);
+		for (const batch of loaded) {
+			for (const [entryId, row] of batch.results) results.set(entryId, row);
+			errors.push(...batch.errors);
+		}
+	}
+
+	const orderedResults = new Map<number, LiveCalcData>();
+	for (const entryId of entryIds) {
+		const result = results.get(entryId);
+		if (result) orderedResults.set(entryId, result);
+	}
+	return {
+		results: orderedResults,
+		errors,
+		meta: {
+			eventId,
+			totalEntries: entryIds.length,
+			succeededCount: orderedResults.size,
+			failedCount: errors.length,
+		},
+	};
 };
