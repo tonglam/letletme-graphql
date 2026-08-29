@@ -259,19 +259,8 @@ type TournamentSelectionIndexReadRow = {
 	revision: number | string;
 	publication_state: string;
 	ownership_state: string;
-	captaincy_state: string;
-	vice_captaincy_state: string;
-	transfers_state: string;
 	element_id: number | string | null;
 	selected_count: number | string | null;
-	effective_selection_count: number | string | null;
-	captain_count: number | string | null;
-	vice_captain_count: number | string | null;
-	transfer_in_count: number | string | null;
-	transfer_out_count: number | string | null;
-	player_name: string | null;
-	player_position: number | string | null;
-	team_short_name: string | null;
 };
 
 const parseSelectionIndexInteger = (value: unknown, minimum: number): number | null => {
@@ -284,6 +273,51 @@ const parseSelectionIndexInteger = (value: unknown, minimum: number): number | n
 	return candidate !== null && Number.isSafeInteger(candidate) && candidate >= minimum
 		? candidate
 		: null;
+};
+
+export type TournamentSelectionIndexContractRow = Readonly<{
+	publicationId: number;
+	expectedEntries: number;
+	completePickEntries: number;
+	revision: number;
+	playerId: number;
+	count: number;
+}>;
+
+/** Decode only the fields consumed by the live player picker contract. */
+export const parseTournamentSelectionIndexContractRow = (
+	value: unknown
+): TournamentSelectionIndexContractRow | null => {
+	if (!isRecord(value)) return null;
+	const row = value as Record<string, unknown>;
+	const publicationId = parseSelectionIndexInteger(row.publication_id, 1);
+	const expectedEntries = parseSelectionIndexInteger(row.expected_entries, 1);
+	const completePickEntries = parseSelectionIndexInteger(row.complete_pick_entries, 0);
+	const revision = parseSelectionIndexInteger(row.revision, 1);
+	const playerId = parseSelectionIndexInteger(row.element_id, 1);
+	const count = parseSelectionIndexInteger(row.selected_count, 0);
+	if (
+		publicationId === null ||
+		expectedEntries === null ||
+		completePickEntries === null ||
+		completePickEntries !== expectedEntries ||
+		revision === null ||
+		row.publication_state !== "READY" ||
+		row.ownership_state !== "READY" ||
+		playerId === null ||
+		count === null ||
+		count > expectedEntries
+	) {
+		return null;
+	}
+	return {
+		publicationId,
+		expectedEntries,
+		completePickEntries,
+		revision,
+		playerId,
+		count,
+	};
 };
 
 /**
@@ -300,19 +334,8 @@ export const TOURNAMENT_SELECTION_INDEX_SQL = `
 		publication.revision,
 		publication.publication_state,
 		publication.ownership_state,
-		publication.captaincy_state,
-		publication.vice_captaincy_state,
-		publication.transfers_state,
 		rows.element_id,
-		rows.selected_count,
-		rows.effective_selection_count,
-		rows.captain_count,
-		rows.vice_captain_count,
-		rows.transfer_in_count,
-		rows.transfer_out_count,
-		rows.player_name,
-		rows.player_position,
-		rows.team_short_name
+		rows.selected_count
 	FROM reporting.tournament_selection_stat_publications publication
 	LEFT JOIN reporting.tournament_selection_stat_rows rows
 		ON rows.publication_id = publication.publication_id
@@ -564,64 +587,43 @@ export async function getTournamentSelectionIndexRows(
 	]);
 	const rows = result.rows as unknown as TournamentSelectionIndexReadRow[];
 	if (rows.length === 0) return [];
+	if (rows.every((row) => row.element_id === null)) {
+		throw new Error("Tournament selection index publication has no selection rows");
+	}
 
-	const publication = rows[0]!;
-	const publicationId = parseSelectionIndexInteger(publication.publication_id, 1);
-	const expectedEntries = parseSelectionIndexInteger(publication.expected_entries, 1);
-	const completePickEntries = parseSelectionIndexInteger(publication.complete_pick_entries, 0);
-	const publicationRevision = parseSelectionIndexInteger(publication.revision, 1);
-	if (
-		publicationId === null ||
-		expectedEntries === null ||
-		completePickEntries === null ||
-		completePickEntries !== expectedEntries ||
-		publicationRevision === null ||
-		publication.publication_state !== "READY" ||
-		publication.ownership_state !== "READY"
-	) {
+	const publication = parseTournamentSelectionIndexContractRow(rows[0]);
+	if (publication === null) {
 		throw new Error("Malformed tournament selection index publication");
 	}
 
 	const playerIds = new Set<number>();
 	const projected: TournamentSelectionIndexRow[] = [];
 	for (const row of rows) {
-		const rowPublicationId = parseSelectionIndexInteger(row.publication_id, 1);
-		const rowExpectedEntries = parseSelectionIndexInteger(row.expected_entries, 1);
-		const rowCompletePickEntries = parseSelectionIndexInteger(row.complete_pick_entries, 0);
-		const rowRevision = parseSelectionIndexInteger(row.revision, 1);
-		if (
-			rowPublicationId === null ||
-			rowExpectedEntries === null ||
-			rowCompletePickEntries === null ||
-			rowRevision === null
-		) {
+		const parsed = parseTournamentSelectionIndexContractRow(row);
+		if (parsed === null) {
 			throw new Error("Malformed tournament selection index read model row");
 		}
 		if (
-			rowPublicationId !== publicationId ||
-			rowExpectedEntries !== expectedEntries ||
-			rowCompletePickEntries !== completePickEntries ||
-			rowRevision !== publicationRevision ||
-			row.publication_state !== publication.publication_state ||
-			row.ownership_state !== publication.ownership_state
+			parsed.publicationId !== publication.publicationId ||
+			parsed.expectedEntries !== publication.expectedEntries ||
+			parsed.completePickEntries !== publication.completePickEntries ||
+			parsed.revision !== publication.revision
 		) {
 			throw new Error("Inconsistent tournament selection index publication");
 		}
-		if (row.element_id === null) continue;
-		const playerId = parseSelectionIndexInteger(row.element_id, 1);
-		const count = parseSelectionIndexInteger(row.selected_count, 0);
-		if (playerId === null || count === null || count > expectedEntries) {
-			throw new Error("Malformed tournament selection index read model row");
-		}
+		const playerId = parsed.playerId;
 		if (playerIds.has(playerId)) {
 			throw new Error("Duplicate tournament selection index player");
 		}
 		playerIds.add(playerId);
 		projected.push({
 			playerId,
-			count,
-			percentage: Number(((count * 100) / expectedEntries).toFixed(4)),
+			count: parsed.count,
+			percentage: Number(((parsed.count * 100) / publication.expectedEntries).toFixed(4)),
 		});
+	}
+	if (projected.length === 0) {
+		throw new Error("Tournament selection index publication has no selection rows");
 	}
 	return projected;
 }

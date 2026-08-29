@@ -11,7 +11,10 @@ import { GAMEWEEK_DATA_SQL_CONTRACT } from "../../src/domains/gameweek/service";
 import { HOME_MARKET_DATA_SQL_CONTRACT } from "../../src/domains/home/market-repository";
 import { HOME_DATA_SQL_CONTRACT } from "../../src/domains/home/repository";
 import { MARKET_DATA_SQL_CONTRACT } from "../../src/domains/market/repository";
-import { TOURNAMENT_SELECTION_INDEX_DATA_SQL_CONTRACT } from "../../src/domains/event-stats/repository";
+import {
+	parseTournamentSelectionIndexContractRow,
+	TOURNAMENT_SELECTION_INDEX_DATA_SQL_CONTRACT,
+} from "../../src/domains/event-stats/repository";
 import {
 	MY_FPL_ACTIVE_PUBLICATIONS_SQL,
 	MY_FPL_DATA_SQL_CONTRACT,
@@ -558,16 +561,23 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					}
 				}
 				if (probe.runtime === "must-return-selection-row") {
-					const publication = parsePublicLeagueSelectionPublication(result.rows[0]);
-					const nonNullRows = result.rows.filter(
-						(row) => (row as { element_id?: unknown }).element_id !== null
-					);
-					if (
-						!publication ||
-						nonNullRows.length === 0 ||
-						nonNullRows.some((row) => parsePublicLeagueSelectionRow(row) === null)
-					) {
-						throw new Error("runtime reader role cannot see a non-null public selection row");
+					if (probe.name === "live-tournament.selection-index") {
+						const selectionRows = result.rows.map(parseTournamentSelectionIndexContractRow);
+						if (selectionRows.length === 0 || selectionRows.some((row) => row === null)) {
+							throw new Error("runtime reader role cannot see a valid live selection row");
+						}
+					} else {
+						const publication = parsePublicLeagueSelectionPublication(result.rows[0]);
+						const nonNullRows = result.rows.filter(
+							(row) => (row as { element_id?: unknown }).element_id !== null
+						);
+						if (
+							!publication ||
+							nonNullRows.length === 0 ||
+							nonNullRows.some((row) => parsePublicLeagueSelectionRow(row) === null)
+						) {
+							throw new Error("runtime reader role cannot see a non-null public selection row");
+						}
 					}
 				}
 				if (probe.runtime === "must-return-player-picker") {

@@ -291,13 +291,43 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 		expect(context.__directDatabaseReads()).toBe(1);
 	});
 
+	it("ignores readiness of picker capabilities it does not consume", async () => {
+		const context = createContext({
+			selectionRows: [
+				{
+					...SELECTION_INDEX_ROWS[0]!,
+					captaincy_state: "NOT_READY",
+					vice_captaincy_state: "UNSUPPORTED",
+					transfers_state: "FAILED",
+				},
+			],
+		});
+
+		expect(await getTournamentSelectionIndexRows(context, 1, 10)).toEqual([
+			{ playerId: 1, count: 8, percentage: 80 },
+		]);
+	});
+
 	it("fails closed for malformed or inconsistent live selection rows", async () => {
+		await expect(
+			getTournamentSelectionIndexRows(
+				createContext({
+					selectionRows: [{ ...SELECTION_INDEX_ROWS[0]!, element_id: null }],
+				}),
+				1,
+				10
+			)
+		).rejects.toThrow("no selection rows");
 		await expect(
 			getTournamentSelectionIndexRows(
 				createContext({
 					selectionRows: [
 						SELECTION_INDEX_ROWS[0]!,
-						{ ...SELECTION_INDEX_ROWS[1]!, expected_entries: "9" },
+						{
+							...SELECTION_INDEX_ROWS[1]!,
+							expected_entries: "9",
+							complete_pick_entries: "9",
+						},
 					],
 				}),
 				1,

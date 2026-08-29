@@ -880,7 +880,9 @@ describe("direct Data SQL contract", () => {
 							{
 								publication_id: "1",
 								expected_entries: "1",
+								complete_pick_entries: "1",
 								revision: "1",
+								publication_state: "READY",
 								ownership_state: "READY",
 								captaincy_state: "READY",
 								vice_captaincy_state: "READY",
@@ -1169,7 +1171,9 @@ describe("direct Data SQL contract", () => {
 							{
 								publication_id: "1",
 								expected_entries: "1",
+								complete_pick_entries: "1",
 								revision: "1",
+								publication_state: "READY",
 								ownership_state: "READY",
 								captaincy_state: "READY",
 								vice_captaincy_state: "READY",
@@ -1320,7 +1324,9 @@ describe("direct Data SQL contract", () => {
 							{
 								publication_id: "1",
 								expected_entries: "1",
+								complete_pick_entries: "1",
 								revision: "1",
+								publication_state: "READY",
 								ownership_state: "READY",
 								captaincy_state: "READY",
 								vice_captaincy_state: "READY",
