@@ -516,14 +516,17 @@ export const managerScoreLoadHasCoherentLastGoodRevision = (
 	if (liveReferences.size === 1) return true;
 	// A multi-chunk read may legitimately contain heads from different
 	// publications while Data's durable coverage checkpoint still proves one
-	// complete, internally consistent crawl. Accept that opaque checkpoint only
-	// when it covers exactly this request; otherwise the caller must not claim a
-	// full-field rank scope.
+	// complete, internally consistent crawl. The initial board read is often a
+	// 500-row window into a larger tournament, so the checkpoint may cover a
+	// superset of this request. The caller separately fences that checkpoint to
+	// the tournament roster before attempting full-field expansion.
 	const coverage = managerScores.tournamentCoverage;
 	return (
 		liveReferences.size > 1 &&
 		coverage?.state === "COMPLETE" &&
-		coverage.expectedEntries === new Set(entryIds).size &&
+		typeof coverage.rosterRevision === "string" &&
+		coverage.rosterRevision.trim().length > 0 &&
+		coverage.expectedEntries >= new Set(entryIds).size &&
 		coverage.resolvedEntries === coverage.expectedEntries &&
 		typeof coverage.managerRevision === "string" &&
 		coverage.managerRevision.trim().length > 0
