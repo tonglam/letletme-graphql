@@ -1887,7 +1887,10 @@ export function projectOfficialH2HEventLiveSnapshot(
 			...loaded.snapshot,
 			scoreSource: "FPL_EVENT_LIVE",
 			scoreRevision: tournamentEventLiveScoreRevision(loaded, eventId, batch),
-			scoreCheckedAt: batch.checkedAt,
+			// A batch may cover several tournaments whose managers were checked at
+			// different times.  Keep the snapshot freshness fence scoped to this
+			// tournament's scored entries instead of using the batch-wide minimum.
+			scoreCheckedAt: tournamentCheckedAt,
 			standings,
 			matches,
 		},
