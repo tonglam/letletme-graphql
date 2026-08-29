@@ -925,7 +925,7 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			region: null,
 			startedEvent: 1,
 			overallPoints: 0,
-			overallRank: null,
+			overallRank: id * 10,
 			bank: 0,
 			teamValue: 1000,
 			totalTransfers: 0,
@@ -942,28 +942,30 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 			]);
 		entryLiveRepository.getEntryEventTransfersByIds = async () => new Map();
 		const inputPicks = completePick(101, 1).picks;
-		installManagerLiveResponse(
-			1,
-			[
-				managerRow(101, 1, {
-					eventPoints: 0,
-					netEventPoints: 0,
-					totalPoints: 0,
-					effectiveLineup: inputPicks.map((pick) => ({
-						elementId: pick.element,
-						position: pick.position,
-						sourceMultiplier: pick.multiplier,
-						effectiveMultiplier: pick.multiplier,
-						pickActive: pick.multiplier > 0,
-						autoSub: false,
-						isCaptain: pick.isCaptain,
-						isViceCaptain: pick.isViceCaptain,
-						captainForScoring: pick.isCaptain,
-					})),
-				}),
-			],
-			[101, 202]
-		);
+		const staleRankRow = managerRow(101, 1, {
+			eventPoints: 0,
+			netEventPoints: 0,
+			totalPoints: 0,
+			overallRank: 999,
+			effectiveLineup: inputPicks.map((pick) => ({
+				elementId: pick.element,
+				position: pick.position,
+				sourceMultiplier: pick.multiplier,
+				effectiveMultiplier: pick.multiplier,
+				pickActive: pick.multiplier > 0,
+				autoSub: false,
+				isCaptain: pick.isCaptain,
+				isViceCaptain: pick.isViceCaptain,
+				captainForScoring: pick.isCaptain,
+			})),
+		});
+		staleRankRow.provenance = {
+			...(staleRankRow.provenance as Record<string, unknown>),
+			rankRevision: "rank-101",
+			rankSource: "FPL_ENTRY_SUMMARY",
+			rankCheckedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+		};
+		installManagerLiveResponse(1, [staleRankRow], [101, 202]);
 		try {
 			const result = await entryLiveBatchService.calcLivePointsForEntries(context, 1, [101, 202], {
 				liveByPlayer: Promise.resolve(new Map()),
@@ -980,6 +982,8 @@ describe("entryLiveBatchService.calcLivePointsForEntries", () => {
 				"NO_PICKS",
 			]);
 			expect(result.results.get(101)?.snapshot).toBeNull();
+			expect(result.results.get(101)?.score.overallRank).toBeNull();
+			expect(result.results.get(101)?.overallRank).toBe(0);
 			expect(result.results.get(202)?.snapshot).toBeNull();
 		} finally {
 			restoreManagerLiveResponse();
