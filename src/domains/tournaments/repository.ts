@@ -4794,6 +4794,12 @@ export const tournamentsRepository: TournamentsRepository = {
 							{
 								entriesById: eligibility.entriesById,
 								tournamentId,
+								// The detail page must render the durable manager heads already
+								// owned by the tournament worker. A synchronous read-through can
+								// spend the whole Web deadline refreshing slow-changing rank data;
+								// CACHE_ONLY returns last-good rows and queues bounded recovery for
+								// genuine misses without coupling page availability to that refresh.
+								managerReadMode: "CACHE_ONLY",
 								...(snapshot?.publicationId
 									? {
 											liveRef: {

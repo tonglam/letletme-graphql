@@ -104,6 +104,13 @@ describe("live desks tournament selection index", () => {
 		);
 		expect(board.match(/readMode: "CACHE_ONLY"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
 		expect(board.match(/managerReadMode: "CACHE_ONLY"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+
+		const repositorySource = await Bun.file("src/domains/tournaments/repository.ts").text();
+		const detailBoard = repositorySource.slice(
+			repositorySource.indexOf("async getTournamentDetailDesk"),
+			repositorySource.indexOf("async getManagedTournamentStatus")
+		);
+		expect(detailBoard).toContain('managerReadMode: "CACHE_ONLY"');
 	});
 
 	it("requires a fresh manager heartbeat before advertising provisional full-field ranks", async () => {
