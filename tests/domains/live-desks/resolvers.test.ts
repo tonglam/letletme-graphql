@@ -127,6 +127,27 @@ describe("live desks tournament selection index", () => {
 		expect(squads).toContain('managerReadMode: "CACHE_ONLY"');
 	});
 
+	it("expands ordinary legacy desks without relaxing explicit revision reads", async () => {
+		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
+		const desk = source.slice(
+			source.indexOf("entryLiveCompetitionsDesk: async"),
+			source.indexOf("tournamentSelectionIndex: async")
+		);
+		expect(desk).toContain("calcLivePointsForEntriesInChunks");
+		expect(desk).toContain("const calculationEntryIds = args.ref ? boundedEntryIds : allEntryIds");
+		expect(desk).toContain("...(args.ref && snapshot?.publicationId");
+		expect(desk).not.toContain("...(snapshot?.publicationId");
+
+		const repositorySource = await Bun.file("src/domains/tournaments/repository.ts").text();
+		const detail = repositorySource.slice(
+			repositorySource.indexOf("async getTournamentDetailDesk"),
+			repositorySource.indexOf("async getManagedTournamentStatus")
+		);
+		expect(detail).toContain("calcLivePointsForEntriesInChunks");
+		expect(detail).toContain("const calculationEntryIds = rosterEntryIds");
+		expect(detail).not.toContain("liveRef: {");
+	});
+
 	it("requires a fresh manager heartbeat before advertising provisional full-field ranks", async () => {
 		const source = await Bun.file("src/domains/live-desks/resolvers.ts").text();
 		const board = source.slice(
