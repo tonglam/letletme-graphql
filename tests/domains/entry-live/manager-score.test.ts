@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import {
 	buildManagerScore,
+	isManagerScoreLiveHeartbeatFresh,
+	managerScoreHeartbeatFreshnessDeadline,
+	managerScoreHeartbeatRefreshDeadline,
 	managerScoreBoardIsFinal,
 	rankTournamentRowsByOfficialEventPoints,
 } from "../../../src/domains/entry-live/manager-score";
@@ -76,6 +79,34 @@ const finalRow = (overrides: Partial<ManagerLiveScoreRow> = {}): ManagerLiveScor
 	});
 
 describe("Data manager score contract", () => {
+	it("bounds the shared live heartbeat to the active-live grace", () => {
+		const now = Date.now();
+		expect(isManagerScoreLiveHeartbeatFresh(new Date(now - 89_000).toISOString(), now)).toBe(true);
+		expect(isManagerScoreLiveHeartbeatFresh(new Date(now - 91_000).toISOString(), now)).toBe(false);
+	});
+
+	it("caps a wider live-window refresh deadline at heartbeat expiry", () => {
+		const heartbeat = "2026-08-29T02:00:00.000Z";
+		const now = Date.parse("2026-08-29T02:00:10.000Z");
+		expect(managerScoreHeartbeatFreshnessDeadline(heartbeat)).toBe("2026-08-29T02:01:30.000Z");
+		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T02:05:00.000Z", now)).toBe(
+			"2026-08-29T02:01:30.000Z"
+		);
+		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T02:00:30.000Z", now)).toBe(
+			"2026-08-29T02:00:30.000Z"
+		);
+		expect(managerScoreHeartbeatRefreshDeadline(heartbeat, "2026-08-29T01:59:30.000Z", now)).toBe(
+			"2026-08-29T02:00:30.000Z"
+		);
+		expect(
+			managerScoreHeartbeatRefreshDeadline(
+				heartbeat,
+				"2026-08-29T01:59:30.000Z",
+				Date.parse("2026-08-29T02:00:45.000Z")
+			)
+		).toBe("2026-08-29T02:01:00.000Z");
+	});
+
 	it("does not expose a row with the wrong calculation mode as an active authority", () => {
 		const result = buildManagerScore({
 			row: row({ calculationMode: "FINAL_RESULT" }),
@@ -164,6 +195,44 @@ describe("Data manager score contract", () => {
 		expect(result.score.source).toBe("FPL_EVENT_LIVE");
 		expect(result.score.reasonCodes).toContain("SOURCE_TOO_OLD");
 		expect(result.score.reasonCodes).toContain("UPSTREAM_UNAVAILABLE");
+	});
+
+	it("uses a fenced global live heartbeat without mutating immutable row provenance", () => {
+		const oldCheckedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+		const heartbeatCheckedAt = new Date().toISOString();
+		const authority = row({
+			checkedAt: oldCheckedAt,
+			provenance: {
+				...provenance,
+				liveCheckedAt: oldCheckedAt,
+				rankCheckedAt: oldCheckedAt,
+			},
+		});
+		const result = buildManagerScore({
+			row: authority,
+			upstreamErrorCode: null,
+			provisional: true,
+			available: true,
+			transferCost: 0,
+			detailEventPoints: 42,
+			nextRefreshAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+			freshnessCheckedAt: heartbeatCheckedAt,
+		});
+
+		expect(result.score.state).toBe("FRESH");
+		expect(result.score.reasonCodes).not.toContain("SOURCE_TOO_OLD");
+		expect(result.score.checkedAt).toBe(oldCheckedAt);
+		expect(result.score.provenance?.liveCheckedAt).toBe(oldCheckedAt);
+		expect(result.score.revision).toBe(authority.revision);
+		expect(result.score.eventRank).toBeNull();
+		expect(result.score.overallRank).toBeNull();
+		expect(result.score.leagueRank).toBeNull();
+		expect(result.score.nextRefreshAt).toBe(
+			new Date(Date.parse(heartbeatCheckedAt) + 30_000).toISOString()
+		);
+		expect(result.score.staleAt).toBe(
+			new Date(Date.parse(heartbeatCheckedAt) + 90_000).toISOString()
+		);
 	});
 
 	it("reconciles gross event points, net points, and transfer cost from Data", () => {

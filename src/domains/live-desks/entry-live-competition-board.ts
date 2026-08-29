@@ -7,6 +7,7 @@ import type { LiveCalcData } from "../entry-live/calc-service";
 import type { EntryEventResult } from "../entries/repository";
 import {
 	MANAGER_SCORE_REFRESH_SECONDS,
+	isManagerScoreLiveHeartbeatFresh,
 	isTraceableOfficialManagerScore,
 	type LiveManagerScore,
 	type ManagerScoreLoad,
@@ -335,11 +336,13 @@ export const entryLiveCompetitionRosterRevision = (entryIds: readonly number[]):
 
 export const entryLiveCompetitionManagerStatusRevision = (
 	input: ManagerScoreLoad,
-	now = Date.now()
+	now = Date.now(),
+	liveHeartbeatFresh = false
 ): string =>
 	createHash("sha256")
 		.update(
 			JSON.stringify({
+				liveHeartbeatFresh,
 				dataAvailability: input.dataAvailability,
 				servedFrom: input.servedFrom,
 				refreshQueued: input.refreshQueued,
@@ -358,6 +361,9 @@ export const entryLiveCompetitionManagerStatusRevision = (
 						fresh:
 							Number.isFinite(checkedAt) &&
 							Math.max(0, (now - checkedAt) / 1000) <= MANAGER_SCORE_REFRESH_SECONDS,
+						rankFresh:
+							!liveHeartbeatFresh ||
+							isManagerScoreLiveHeartbeatFresh(row.provenance.rankCheckedAt, now),
 					};
 				}).sort((left, right) => left.entryId - right.entryId),
 			})
@@ -879,6 +885,7 @@ export const entryLiveCompetitionBoardCacheKey = (
 		playerRevision: string;
 		managerRevision: string | null;
 		managerStatusRevision: string;
+		managerHeartbeatDeadline?: string | null;
 		rosterRevision: string;
 		windowRevision: string;
 		projectionMode?: "BOUNDED" | "FULL_FIELD";
@@ -891,6 +898,7 @@ export const entryLiveCompetitionBoardCacheKey = (
 			JSON.stringify({
 				...input,
 				projectionMode: input.projectionMode ?? "BOUNDED",
+				managerHeartbeatDeadline: input.managerHeartbeatDeadline ?? null,
 				requireTeamValue: input.requireTeamValue ?? false,
 				requireEventTeamIds: input.requireEventTeamIds ?? false,
 				projection: ENTRY_LIVE_COMPETITION_BOARD_PROJECTION_VERSION,

@@ -11,6 +11,7 @@ import {
 	classifyEntryLiveCompetitionDataAvailability,
 	hasComparableFullFieldManagerMetric,
 	isScheduledTournamentEvent,
+	managerCoverageFenceMatches,
 	managerScoresAlignedWithLiveSnapshot,
 	selectManagerScoresForBoard,
 } from "../../../src/domains/live-desks/resolvers";
@@ -158,6 +159,32 @@ describe("full-field live board bounded manager loads", () => {
 		expect(merged.dataAvailability).toBe("PARTIAL");
 	});
 
+	it("allows direct head verification past a matching partial coverage checkpoint", () => {
+		const coverage = makeLoad([makeManagerRow(1, 10)], 2).tournamentCoverage;
+		if (!coverage) throw new Error("test coverage missing");
+		expect(
+			managerCoverageFenceMatches(
+				{ ...coverage, state: "PARTIAL", resolvedEntries: 1 },
+				"roster",
+				2
+			)
+		).toBe(true);
+		expect(
+			managerCoverageFenceMatches(
+				{ ...coverage, state: "UNAVAILABLE", resolvedEntries: 0 },
+				"roster",
+				2
+			)
+		).toBe(false);
+		expect(
+			managerCoverageFenceMatches(
+				{ ...coverage, state: "PARTIAL", rosterRevision: "older", resolvedEntries: 1 },
+				"roster",
+				2
+			)
+		).toBe(false);
+	});
+
 	it("does not synthesize complete coverage when a manager chunk omits coverage", () => {
 		const complete = makeLoad([makeManagerRow(1, 10)], 2);
 		const missingCoverage = { ...makeLoad([makeManagerRow(2, 11)], 2), tournamentCoverage: null };
@@ -277,6 +304,32 @@ describe("full-field live board bounded manager loads", () => {
 				snapshot
 			)
 		).toBe(true);
+		expect(
+			managerScoresAlignedWithLiveSnapshot(
+				{ ...liveLoad, dataAvailability: "LAST_GOOD" },
+				{ finished: false, dataChecked: false },
+				snapshot
+			)
+		).toBe(true);
+		expect(
+			managerScoresAlignedWithLiveSnapshot(
+				{
+					...liveLoad,
+					dataAvailability: "LAST_GOOD",
+					rows: new Map(
+						[...liveLoad.rows].map(([entryId, managerRow]) => [
+							entryId,
+							{
+								...managerRow,
+								provenance: { ...managerRow.provenance, liveRevision: "older" },
+							},
+						])
+					),
+				},
+				{ finished: false, dataChecked: false },
+				snapshot
+			)
+		).toBe(false);
 	});
 
 	it("requires gross evidence when a classic field is requested in net order", () => {
@@ -302,6 +355,39 @@ describe("full-field live board bounded manager loads", () => {
 		).toBe(false);
 		expect(
 			hasComparableFullFieldManagerMetric(gross, { requireNet: true, requestedNet: false })
+		).toBe(true);
+	});
+
+	it("requires a fresh independent rank observation for provisional overall-rank sorts", () => {
+		const now = Date.parse("2026-08-25T00:02:00.000Z");
+		const freshRank = makeManagerRow(1, 10);
+		freshRank.provenance.rankCheckedAt = "2026-08-25T00:00:31.000Z";
+		const staleRank = makeManagerRow(2, 10);
+		staleRank.provenance.rankCheckedAt = "2026-08-25T00:00:29.000Z";
+
+		expect(
+			hasComparableFullFieldManagerMetric(freshRank, {
+				requireNet: false,
+				requestedNet: false,
+				requireFreshOverallRank: true,
+				now,
+			})
+		).toBe(true);
+		expect(
+			hasComparableFullFieldManagerMetric(staleRank, {
+				requireNet: false,
+				requestedNet: false,
+				requireFreshOverallRank: true,
+				now,
+			})
+		).toBe(false);
+		expect(
+			hasComparableFullFieldManagerMetric(staleRank, {
+				requireNet: false,
+				requestedNet: false,
+				requireFreshOverallRank: false,
+				now,
+			})
 		).toBe(true);
 	});
 
@@ -476,6 +562,11 @@ describe("full-field live board index", () => {
 			requireNet: false,
 		};
 		const board = buildFullFieldLiveBoardIndex(boardInput);
+		const heartbeatCheckedAt = new Date().toISOString();
+		const freshHeartbeatBoard = buildFullFieldLiveBoardIndex({
+			...boardInput,
+			freshnessCheckedAt: heartbeatCheckedAt,
+		});
 		const request: EntryLiveCompetitionBoardRequest = {
 			entryId: 1,
 			tournamentId: 8,
@@ -496,6 +587,16 @@ describe("full-field live board index", () => {
 		expect(page.filteredEntries).toBe(1);
 		expect(page.rows[0]?.entry).toBe(1);
 		expect(page.rows[0]?.score.source).toBe("FPL_EVENT_LIVE");
+		expect(board.rows[0]?.score.state).toBe("STALE");
+		expect(freshHeartbeatBoard.rows[0]?.score.state).toBe("FRESH");
+		expect(freshHeartbeatBoard.rows[0]?.score.checkedAt).toBe(
+			boardInput.managerRows.get(1)?.checkedAt ?? null
+		);
+		expect(freshHeartbeatBoard.rows[0]?.score.staleAt).toBe(
+			new Date(Date.parse(heartbeatCheckedAt) + 90_000).toISOString()
+		);
+		expect(freshHeartbeatBoard.rows[0]?.score.overallRank).toBeNull();
+		expect(freshHeartbeatBoard.rows[0]?.overallRank).toBe(0);
 
 		const grossFirstManagerRows = new Map(boardInput.managerRows);
 		const grossFirst = grossFirstManagerRows.get(1);

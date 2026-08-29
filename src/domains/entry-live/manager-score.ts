@@ -56,17 +56,62 @@ export type ManagerScoreLoad = ManagerLiveFetchResult;
 export type OfficialManagerScoreRow = ManagerLiveScoreRow;
 
 export const MANAGER_SCORE_REFRESH_SECONDS = 30;
+/**
+ * The live publication heartbeat is shared by every manager score pinned to
+ * the same immutable publication/revision. It uses the same active-live grace
+ * as the live window: a delayed 30-second poll gets one bounded cycle of
+ * margin without requiring every manager head to be rewritten.
+ */
+export const MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS = 90;
 
 const ageSeconds = (checkedAt: string, now = Date.now()): number => {
 	const timestamp = Date.parse(checkedAt);
 	return Number.isFinite(timestamp) ? Math.max(0, (now - timestamp) / 1000) : Infinity;
 };
 
+export const isManagerScoreLiveHeartbeatFresh = (
+	checkedAt: string | null | undefined,
+	now = Date.now()
+): boolean =>
+	typeof checkedAt === "string" &&
+	ageSeconds(checkedAt, now) <= MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS;
+
 const plusSeconds = (iso: string, seconds: number): string => {
 	const value = Date.parse(iso);
 	return Number.isFinite(value)
 		? new Date(value + seconds * 1000).toISOString()
 		: new Date(Date.now() + seconds * 1000).toISOString();
+};
+
+export const managerScoreHeartbeatFreshnessDeadline = (checkedAt: string): string =>
+	plusSeconds(checkedAt, MANAGER_SCORE_LIVE_HEARTBEAT_FRESHNESS_SECONDS);
+
+export const managerScoreHeartbeatRefreshDeadline = (
+	checkedAt: string,
+	candidate: string | null = null,
+	now = Date.now()
+): string => {
+	const checkedAtTimestamp = Date.parse(checkedAt);
+	const heartbeatExpiry = managerScoreHeartbeatFreshnessDeadline(checkedAt);
+	const heartbeatExpiryTimestamp = Date.parse(heartbeatExpiry);
+	const candidateTimestamp = candidate === null ? Number.NaN : Date.parse(candidate);
+	if (
+		candidate !== null &&
+		Number.isFinite(candidateTimestamp) &&
+		candidateTimestamp > checkedAtTimestamp &&
+		candidateTimestamp > now
+	) {
+		return candidateTimestamp < heartbeatExpiryTimestamp ? candidate : heartbeatExpiry;
+	}
+	const elapsedSinceHeartbeat = Number.isFinite(checkedAtTimestamp)
+		? Math.max(0, now - checkedAtTimestamp)
+		: 0;
+	const nextCadence =
+		checkedAtTimestamp +
+		(Math.floor(elapsedSinceHeartbeat / (MANAGER_SCORE_REFRESH_SECONDS * 1000)) + 1) *
+			MANAGER_SCORE_REFRESH_SECONDS *
+			1000;
+	return new Date(Math.min(nextCadence, heartbeatExpiryTimestamp)).toISOString();
 };
 
 const hasTraceableRevision = (value: string | null | undefined): value is string =>
@@ -167,6 +212,12 @@ export function buildManagerScore(params: {
 	transferCost: number | null;
 	detailEventPoints: number;
 	nextRefreshAt?: string | null;
+	/**
+	 * A current global live-publication heartbeat, supplied only after the
+	 * caller has proved that the row is pinned to that exact publication and
+	 * revision. The row's own checkedAt/provenance remain unchanged.
+	 */
+	freshnessCheckedAt?: string | null;
 }): {
 	score: LiveManagerScore;
 	headline: { rank: number; livePoints: number; liveNetPoints: number; liveTotalPoints: number };
@@ -228,7 +279,17 @@ export function buildManagerScore(params: {
 				? "MATCHED"
 				: "SOURCE_SKEW"
 			: "NOT_COMPARABLE";
-	const fresh = ageSeconds(row.checkedAt) <= MANAGER_SCORE_REFRESH_SECONDS;
+	const freshnessCheckedAt = params.freshnessCheckedAt ?? row.checkedAt;
+	const fresh = params.freshnessCheckedAt
+		? isManagerScoreLiveHeartbeatFresh(freshnessCheckedAt)
+		: ageSeconds(freshnessCheckedAt) <= MANAGER_SCORE_REFRESH_SECONDS;
+	const rankFresh =
+		params.freshnessCheckedAt === undefined ||
+		params.freshnessCheckedAt === null ||
+		isManagerScoreLiveHeartbeatFresh(row.provenance.rankCheckedAt);
+	const eventRank = rankFresh ? row.eventRank : null;
+	const overallRank = rankFresh ? row.overallRank : null;
+	const leagueRank = rankFresh ? row.leagueRank : null;
 	const reasons: LiveManagerScoreReason[] = [];
 	if (upstreamErrorCode === "UPSTREAM_RATE_LIMITED") reasons.push("UPSTREAM_RATE_LIMITED");
 	else if (upstreamErrorCode && upstreamErrorCode !== "UNSUPPORTED_H2H_LIVE")
@@ -243,9 +304,9 @@ export function buildManagerScore(params: {
 		netEventPoints,
 		totalPoints: row.totalPoints,
 		totalScope: row.totalScope,
-		eventRank: row.eventRank,
-		overallRank: row.overallRank,
-		leagueRank: row.leagueRank,
+		eventRank,
+		overallRank,
+		leagueRank,
 		transferCost: effectiveTransferCost,
 		source: row.source,
 		state: isFinalRow ? "FINAL" : fresh ? "FRESH" : "STALE",
@@ -253,10 +314,15 @@ export function buildManagerScore(params: {
 		revision: row.revision,
 		checkedAt: row.checkedAt,
 		upstreamUpdatedAt: row.upstreamUpdatedAt,
-		staleAt: row.staleAt,
+		staleAt:
+			isFinalRow || !params.freshnessCheckedAt
+				? row.staleAt
+				: managerScoreHeartbeatFreshnessDeadline(freshnessCheckedAt),
 		nextRefreshAt: isFinalRow
 			? null
-			: (params.nextRefreshAt ?? plusSeconds(row.checkedAt, MANAGER_SCORE_REFRESH_SECONDS)),
+			: params.freshnessCheckedAt
+				? managerScoreHeartbeatRefreshDeadline(freshnessCheckedAt, params.nextRefreshAt)
+				: (params.nextRefreshAt ?? plusSeconds(freshnessCheckedAt, MANAGER_SCORE_REFRESH_SECONDS)),
 		reconciliation,
 		reasonCodes: reasons,
 		calculationMode: row.calculationMode,
@@ -267,7 +333,7 @@ export function buildManagerScore(params: {
 	const result = {
 		score,
 		headline: {
-			rank: row.eventRank ?? row.leagueRank ?? 0,
+			rank: eventRank ?? leagueRank ?? 0,
 			livePoints: eventPoints ?? 0,
 			liveNetPoints: netEventPoints ?? eventPoints ?? 0,
 			liveTotalPoints: row.totalScope === "OVERALL" ? (row.totalPoints ?? 0) : 0,

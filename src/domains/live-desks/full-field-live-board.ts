@@ -1,6 +1,11 @@
 import type { Entry, EntryEventResult } from "../entries/repository";
 import { hasCompleteEntryEventPick, type EntryEventPick } from "../entry-live/repository";
-import { unavailableManagerScore, type LiveManagerScore } from "../entry-live/manager-score";
+import {
+	managerScoreHeartbeatFreshnessDeadline,
+	isManagerScoreLiveHeartbeatFresh,
+	unavailableManagerScore,
+	type LiveManagerScore,
+} from "../entry-live/manager-score";
 import { parseFullFieldLiveBoardEnabled } from "../../infra/env-value";
 import type { ManagerLiveScoreRow, ManagerLiveSource } from "../../infra/manager-live-client";
 import type { Player } from "../players/repository";
@@ -37,19 +42,26 @@ const isUsableMetric = (score: LiveManagerScore, requireNet: boolean): boolean =
 		? typeof score.netEventPoints === "number" && score.eventPointSemantics !== "UNKNOWN"
 		: typeof score.eventPoints === "number";
 
-const scoreFromDataRow = (row: ManagerLiveScoreRow | undefined): LiveManagerScore => {
+const scoreFromDataRow = (
+	row: ManagerLiveScoreRow | undefined,
+	freshnessCheckedAt?: string | null
+): LiveManagerScore => {
 	if (!row) return unavailableManagerScore();
 	const checkedAt = Date.parse(row.checkedAt);
-	const fresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= 30_000;
+	const fresh = freshnessCheckedAt
+		? isManagerScoreLiveHeartbeatFresh(freshnessCheckedAt)
+		: Number.isFinite(checkedAt) && Date.now() - checkedAt <= 30_000;
+	const rankFresh =
+		!freshnessCheckedAt || isManagerScoreLiveHeartbeatFresh(row.provenance.rankCheckedAt);
 	const state = row.source === "FPL_FINAL_RESULT" ? "FINAL" : fresh ? "FRESH" : "STALE";
 	return {
 		eventPoints: row.eventPoints,
 		netEventPoints: row.netEventPoints,
 		totalPoints: row.totalPoints,
 		totalScope: row.totalScope,
-		eventRank: row.eventRank,
-		overallRank: row.overallRank,
-		leagueRank: row.leagueRank,
+		eventRank: rankFresh ? row.eventRank : null,
+		overallRank: rankFresh ? row.overallRank : null,
+		leagueRank: rankFresh ? row.leagueRank : null,
 		transferCost: row.transferCost ?? 0,
 		source: row.source as ManagerLiveSource,
 		state,
@@ -57,7 +69,10 @@ const scoreFromDataRow = (row: ManagerLiveScoreRow | undefined): LiveManagerScor
 		revision: row.revision,
 		checkedAt: row.checkedAt,
 		upstreamUpdatedAt: row.upstreamUpdatedAt,
-		staleAt: row.staleAt,
+		staleAt:
+			state === "FINAL" || !freshnessCheckedAt
+				? row.staleAt
+				: managerScoreHeartbeatFreshnessDeadline(freshnessCheckedAt),
 		nextRefreshAt: null,
 		reconciliation: "NOT_COMPARABLE",
 		reasonCodes: [],
@@ -118,6 +133,8 @@ export type FullFieldLiveBoardIndexInput = {
 	/** Event-scoped team ids; current player rows are only a name/value fallback. */
 	playerTeamIds?: ReadonlyMap<number, number>;
 	managerRows: ReadonlyMap<number, ManagerLiveScoreRow>;
+	/** Current shared live heartbeat, after exact publication/revision fencing. */
+	freshnessCheckedAt?: string | null;
 	requireNet: boolean;
 	/** Finalized FPL rows may legitimately have no captain boost. */
 	allowFinalNoCaptainBoost?: boolean;
@@ -190,7 +207,7 @@ export const buildFullFieldLiveBoardIndex = (
 		}
 		const captain = (pick?.picks ?? []).find((selected) => selected.isCaptain);
 		const managerRow = input.managerRows.get(entryId);
-		const loadedScore = scoreFromDataRow(managerRow);
+		const loadedScore = scoreFromDataRow(managerRow, input.freshnessCheckedAt);
 		// Data may omit transferCost for a standings row even though the
 		// event-scoped pick row has the official transfer cost. Keep the index's
 		// ordering/filter value faithful to the pick contract in that case.
@@ -203,7 +220,13 @@ export const buildFullFieldLiveBoardIndex = (
 			entryName: entry.entryName,
 			playerName: entry.playerName,
 			rank: 0,
-			overallRank: eventResult?.overallRank ?? score.overallRank ?? entry.overallRank ?? 0,
+			// A shared live heartbeat only fences the immutable score inputs. Entry
+			// metadata has no independently verified rank timestamp, so it must not
+			// restore a rank that scoreFromDataRow deliberately suppressed as stale.
+			overallRank:
+				eventResult?.overallRank ??
+				score.overallRank ??
+				(input.freshnessCheckedAt ? 0 : (entry.overallRank ?? 0)),
 			teamValue: typeof teamValue === "number" ? teamValue / 10 : 0,
 			chip: canonicalChip(pick?.chip ?? null),
 			livePoints: score.eventPoints ?? 0,

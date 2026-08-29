@@ -628,9 +628,26 @@ describe("entry live competition board filtering and paging", () => {
 			first,
 			Date.parse("2026-08-23T00:00:31.000Z")
 		);
+		const heartbeatFreshStatus = entryLiveCompetitionManagerStatusRevision(
+			first,
+			Date.parse("2026-08-23T00:00:10.000Z"),
+			true
+		);
+		const heartbeatRankFreshStatus = entryLiveCompetitionManagerStatusRevision(
+			first,
+			Date.parse("2026-08-23T00:01:00.000Z"),
+			true
+		);
+		const heartbeatRankStaleStatus = entryLiveCompetitionManagerStatusRevision(
+			first,
+			Date.parse("2026-08-23T00:01:31.000Z"),
+			true
+		);
 
 		expect(refreshedStatus).not.toBe(firstStatus);
 		expect(staleStatus).not.toBe(firstStatus);
+		expect(heartbeatFreshStatus).not.toBe(firstStatus);
+		expect(heartbeatRankStaleStatus).not.toBe(heartbeatRankFreshStatus);
 
 		const context = {
 			dataRevision: "core-1",
@@ -685,6 +702,53 @@ describe("entry live competition board filtering and paging", () => {
 			entryLiveCompetitionBoardCacheKey(context, {
 				...identity,
 				projectionMode: "FULL_FIELD",
+			})
+		);
+	});
+
+	it("refreshes heartbeat-derived row deadlines in bounded and full-field caches", () => {
+		const context = {
+			dataRevision: "core-1",
+			currentSeason: { seasonCode: "2627" },
+		} as GraphQLContext;
+		const identity = {
+			season: "2627",
+			eventId: 1,
+			tournamentId: 10,
+			coreRevision: "core-1",
+			playerRevision: "player-1",
+			managerRevision: "manager-1",
+			managerStatusRevision: "status-1",
+			rosterRevision: "roster-1",
+			windowRevision: "window-1",
+		};
+		const firstDeadline = "2026-08-29T02:01:30.000Z";
+		const nextDeadline = "2026-08-29T02:02:00.000Z";
+
+		expect(
+			entryLiveCompetitionBoardCacheKey(context, {
+				...identity,
+				projectionMode: "BOUNDED",
+				managerHeartbeatDeadline: firstDeadline,
+			})
+		).not.toBe(
+			entryLiveCompetitionBoardCacheKey(context, {
+				...identity,
+				projectionMode: "BOUNDED",
+				managerHeartbeatDeadline: nextDeadline,
+			})
+		);
+		expect(
+			entryLiveCompetitionBoardCacheKey(context, {
+				...identity,
+				projectionMode: "FULL_FIELD",
+				managerHeartbeatDeadline: firstDeadline,
+			})
+		).not.toBe(
+			entryLiveCompetitionBoardCacheKey(context, {
+				...identity,
+				projectionMode: "FULL_FIELD",
+				managerHeartbeatDeadline: nextDeadline,
 			})
 		);
 	});
