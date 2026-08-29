@@ -706,7 +706,7 @@ describe("entry live competition board filtering and paging", () => {
 		);
 	});
 
-	it("refreshes bounded heartbeat deadlines without churning full-field caches", () => {
+	it("refreshes heartbeat-derived row deadlines in bounded and full-field caches", () => {
 		const context = {
 			dataRevision: "core-1",
 			currentSeason: { seasonCode: "2627" },
@@ -744,7 +744,7 @@ describe("entry live competition board filtering and paging", () => {
 				projectionMode: "FULL_FIELD",
 				managerHeartbeatDeadline: firstDeadline,
 			})
-		).toBe(
+		).not.toBe(
 			entryLiveCompetitionBoardCacheKey(context, {
 				...identity,
 				projectionMode: "FULL_FIELD",

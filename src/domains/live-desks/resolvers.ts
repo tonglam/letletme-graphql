@@ -486,6 +486,8 @@ type ComparableManagerRankRow = {
 	eventPoints: number | null;
 	netEventPoints: number | null;
 	eventPointSemantics: string;
+	overallRank: number | null;
+	provenance?: { rankCheckedAt?: string | null } | null;
 };
 
 export const hasComparableManagerRankMetric = (
@@ -502,13 +504,22 @@ export const hasComparableManagerRankMetric = (
 
 export const hasComparableFullFieldManagerMetric = (
 	row: ComparableManagerRankRow | undefined,
-	options: { requireNet: boolean; requestedNet: boolean }
+	options: {
+		requireNet: boolean;
+		requestedNet: boolean;
+		requireFreshOverallRank?: boolean;
+		now?: number;
+	}
 ): boolean => {
 	const requiresNet = options.requireNet || options.requestedNet;
 	const requiresGross = !options.requestedNet || !options.requireNet;
 	return (
 		(!requiresNet || hasComparableManagerRankMetric(row, true)) &&
-		(!requiresGross || hasComparableManagerRankMetric(row, false))
+		(!requiresGross || hasComparableManagerRankMetric(row, false)) &&
+		(!options.requireFreshOverallRank ||
+			(typeof row?.overallRank === "number" &&
+				row.overallRank > 0 &&
+				isManagerScoreLiveHeartbeatFresh(row.provenance?.rankCheckedAt, options.now)))
 	);
 };
 
@@ -864,6 +875,8 @@ export const liveDesksResolvers = {
 			const playerRevision = snapshot?.revision ?? corePlayerRevision;
 			const requireNet = memberTournament.leagueType === LeagueType.H2H;
 			const requestedNet = request.sort === "NET_EVENT_POINTS";
+			const requireFreshOverallRank =
+				request.sort === "OVERALL_RANK" && !(event.finished && event.dataChecked);
 			const fullFieldEnabled = env.FULL_FIELD_LIVE_BOARD_ENABLED;
 			const initialCoverage = initialManagerScores.tournamentCoverage;
 			const initialCoverageFenceMatches = managerCoverageFenceMatches(
@@ -926,6 +939,7 @@ export const liveDesksResolvers = {
 						return hasComparableFullFieldManagerMetric(completeManagerScores.rows.get(entryId), {
 							requireNet,
 							requestedNet,
+							requireFreshOverallRank,
 						});
 					});
 					fullFieldDataReady =
@@ -948,6 +962,7 @@ export const liveDesksResolvers = {
 					return hasComparableFullFieldManagerMetric(managerScores.rows.get(entryId), {
 						requireNet,
 						requestedNet,
+						requireFreshOverallRank,
 					});
 				});
 				fullFieldDataReady =
@@ -1004,7 +1019,7 @@ export const liveDesksResolvers = {
 					windowRevision: boardWindowRevision,
 					projectionMode,
 					managerStatusRevision,
-					managerHeartbeatDeadline: projectionMode === "BOUNDED" ? managerHeartbeatDeadline : null,
+					managerHeartbeatDeadline,
 					requireTeamValue: request.sort === "TEAM_VALUE",
 					requireEventTeamIds: request.teamCountRules.length > 0,
 				});

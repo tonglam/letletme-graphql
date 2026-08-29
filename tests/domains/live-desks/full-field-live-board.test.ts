@@ -358,6 +358,39 @@ describe("full-field live board bounded manager loads", () => {
 		).toBe(true);
 	});
 
+	it("requires a fresh independent rank observation for provisional overall-rank sorts", () => {
+		const now = Date.parse("2026-08-25T00:02:00.000Z");
+		const freshRank = makeManagerRow(1, 10);
+		freshRank.provenance.rankCheckedAt = "2026-08-25T00:00:31.000Z";
+		const staleRank = makeManagerRow(2, 10);
+		staleRank.provenance.rankCheckedAt = "2026-08-25T00:00:29.000Z";
+
+		expect(
+			hasComparableFullFieldManagerMetric(freshRank, {
+				requireNet: false,
+				requestedNet: false,
+				requireFreshOverallRank: true,
+				now,
+			})
+		).toBe(true);
+		expect(
+			hasComparableFullFieldManagerMetric(staleRank, {
+				requireNet: false,
+				requestedNet: false,
+				requireFreshOverallRank: true,
+				now,
+			})
+		).toBe(false);
+		expect(
+			hasComparableFullFieldManagerMetric(staleRank, {
+				requireNet: false,
+				requestedNet: false,
+				requireFreshOverallRank: false,
+				now,
+			})
+		).toBe(true);
+	});
+
 	it("does not short-circuit finalized events as scheduled when current event is null", () => {
 		expect(
 			isScheduledTournamentEvent({

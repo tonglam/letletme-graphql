@@ -898,10 +898,7 @@ export const entryLiveCompetitionBoardCacheKey = (
 			JSON.stringify({
 				...input,
 				projectionMode: input.projectionMode ?? "BOUNDED",
-				managerHeartbeatDeadline:
-					(input.projectionMode ?? "BOUNDED") === "BOUNDED"
-						? (input.managerHeartbeatDeadline ?? null)
-						: null,
+				managerHeartbeatDeadline: input.managerHeartbeatDeadline ?? null,
 				requireTeamValue: input.requireTeamValue ?? false,
 				requireEventTeamIds: input.requireEventTeamIds ?? false,
 				projection: ENTRY_LIVE_COMPETITION_BOARD_PROJECTION_VERSION,
