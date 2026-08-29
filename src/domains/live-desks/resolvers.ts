@@ -503,7 +503,8 @@ export const managerScoreLoadHasCompleteRows = (
 
 export const managerScoreLoadHasCoherentLastGoodRevision = (
 	managerScores: ManagerScoreLoad,
-	entryIds: readonly number[]
+	entryIds: readonly number[],
+	coverageFence?: Readonly<{ rosterRevision: string; expectedEntries: number }>
 ): boolean => {
 	if (!managerScoreLoadHasCompleteRows(managerScores, entryIds)) return false;
 	const rawLiveReferences = Array.from(managerScores.rows.values()).map((row) => {
@@ -521,12 +522,18 @@ export const managerScoreLoadHasCoherentLastGoodRevision = (
 	// superset of this request. The caller separately fences that checkpoint to
 	// the tournament roster before attempting full-field expansion.
 	const coverage = managerScores.tournamentCoverage;
+	const requestedEntries = new Set(entryIds).size;
+	const coverageMatchesFencedRoster =
+		coverageFence !== undefined &&
+		coverage?.rosterRevision === coverageFence.rosterRevision &&
+		coverage?.expectedEntries === coverageFence.expectedEntries &&
+		(coverage?.expectedEntries ?? 0) >= requestedEntries;
 	return (
 		liveReferences.size > 1 &&
 		coverage?.state === "COMPLETE" &&
 		typeof coverage.rosterRevision === "string" &&
 		coverage.rosterRevision.trim().length > 0 &&
-		coverage.expectedEntries >= new Set(entryIds).size &&
+		(coverage.expectedEntries === requestedEntries || coverageMatchesFencedRoster) &&
 		coverage.resolvedEntries === coverage.expectedEntries &&
 		typeof coverage.managerRevision === "string" &&
 		coverage.managerRevision.trim().length > 0
@@ -536,10 +543,11 @@ export const managerScoreLoadHasCoherentLastGoodRevision = (
 export const managerScoreLoadCanUseLastGood = (
 	managerScores: ManagerScoreLoad,
 	entryIds: readonly number[],
-	allowLastGood: boolean
+	allowLastGood: boolean,
+	coverageFence?: Readonly<{ rosterRevision: string; expectedEntries: number }>
 ): boolean =>
 	allowLastGood &&
-	managerScoreLoadHasCoherentLastGoodRevision(managerScores, entryIds) &&
+	managerScoreLoadHasCoherentLastGoodRevision(managerScores, entryIds, coverageFence) &&
 	(managerScores.dataAvailability === "FRESH" || managerScores.dataAvailability === "LAST_GOOD");
 
 type ComparableManagerRankRow = {
@@ -952,7 +960,8 @@ export const liveDesksResolvers = {
 			const initialRowsCanUseLastGood = managerScoreLoadCanUseLastGood(
 				initialManagerScores,
 				entryIds,
-				!ref && !(event.finished && event.dataChecked)
+				!ref && !(event.finished && event.dataChecked),
+				{ rosterRevision, expectedEntries: allEntryIds.length }
 			);
 			const fullFieldManagerFreshnessReady =
 				(event.finished && event.dataChecked) ||

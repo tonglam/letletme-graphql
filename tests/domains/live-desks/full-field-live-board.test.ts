@@ -206,6 +206,22 @@ describe("full-field live board bounded manager loads", () => {
 				},
 				[1, 2]
 			)
+		).toBe(false);
+		expect(
+			managerScoreLoadHasCoherentLastGoodRevision(
+				{
+					...mixed,
+					tournamentCoverage: {
+						...mixed.tournamentCoverage!,
+						state: "COMPLETE" as const,
+						expectedEntries: 3,
+						resolvedEntries: 3,
+						managerRevision: "coverage:1",
+					},
+				},
+				[1, 2],
+				{ rosterRevision: "roster", expectedEntries: 3 }
+			)
 		).toBe(true);
 	});
 
