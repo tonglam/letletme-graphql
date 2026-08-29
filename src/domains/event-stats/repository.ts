@@ -1,5 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
+import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixture-identities";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { hasExactFields } from "../../infra/exact-fields";
 import {
@@ -250,6 +252,155 @@ export type TournamentSelectionIndexRow = {
 	percentage: number;
 };
 
+type TournamentSelectionIndexReadRow = {
+	publication_id: number | string;
+	expected_entries: number | string;
+	complete_pick_entries: number | string;
+	revision: number | string;
+	publication_state: string;
+	ownership_state: string;
+	element_id: number | string | null;
+	selected_count: number | string | null;
+};
+
+const parseSelectionIndexInteger = (value: unknown, minimum: number): number | null => {
+	const candidate =
+		typeof value === "number"
+			? value
+			: typeof value === "string" && value.trim() !== ""
+				? Number(value)
+				: null;
+	return candidate !== null && Number.isSafeInteger(candidate) && candidate >= minimum
+		? candidate
+		: null;
+};
+
+export type TournamentSelectionIndexContractRow = Readonly<{
+	publicationId: number;
+	expectedEntries: number;
+	completePickEntries: number;
+	revision: number;
+	playerId: number;
+	count: number;
+}>;
+
+/** Decode only the fields consumed by the live player picker contract. */
+export const parseTournamentSelectionIndexContractRow = (
+	value: unknown
+): TournamentSelectionIndexContractRow | null => {
+	if (!isRecord(value)) return null;
+	const row = value as Record<string, unknown>;
+	const publicationId = parseSelectionIndexInteger(row.publication_id, 1);
+	const expectedEntries = parseSelectionIndexInteger(row.expected_entries, 1);
+	const completePickEntries = parseSelectionIndexInteger(row.complete_pick_entries, 0);
+	const revision = parseSelectionIndexInteger(row.revision, 1);
+	const playerId = parseSelectionIndexInteger(row.element_id, 1);
+	const count = parseSelectionIndexInteger(row.selected_count, 0);
+	if (
+		publicationId === null ||
+		expectedEntries === null ||
+		completePickEntries === null ||
+		completePickEntries !== expectedEntries ||
+		revision === null ||
+		row.publication_state !== "READY" ||
+		row.ownership_state !== "READY" ||
+		playerId === null ||
+		count === null ||
+		count > expectedEntries
+	) {
+		return null;
+	}
+	return {
+		publicationId,
+		expectedEntries,
+		completePickEntries,
+		revision,
+		playerId,
+		count,
+	};
+};
+
+/**
+ * Reads the active immutable publication for the live player/team picker.
+ * Keep this separate from the legacy event-stats materialized view: the Data
+ * repair job publishes the immutable scope even while the compatibility view
+ * is being retired.
+ */
+export const TOURNAMENT_SELECTION_INDEX_SQL = `
+	SELECT
+		publication.publication_id,
+		publication.expected_entries,
+		publication.complete_pick_entries,
+		publication.revision,
+		publication.publication_state,
+		publication.ownership_state,
+		rows.element_id,
+		rows.selected_count
+	FROM reporting.tournament_selection_stat_publications publication
+	LEFT JOIN reporting.tournament_selection_stat_rows rows
+		ON rows.publication_id = publication.publication_id
+	WHERE publication.season_id = $1
+		AND publication.tournament_id = $2
+		AND publication.event_id = $3
+		AND publication.is_active
+		AND publication.publication_state = 'READY'
+		AND publication.ownership_state = 'READY'
+		AND publication.expected_entries > 0
+		AND publication.complete_pick_entries = publication.expected_entries
+	ORDER BY rows.selected_count DESC NULLS LAST, rows.element_id
+`;
+
+export const TOURNAMENT_SELECTION_INDEX_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "live-tournament.selection-index",
+		sql: TOURNAMENT_SELECTION_INDEX_SQL,
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 2],
+		resultTypes: [
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "publication_id",
+				pgType: "bigint",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "expected_entries",
+				pgType: "integer",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "complete_pick_entries",
+				pgType: "integer",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "revision",
+				pgType: "bigint",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "publication_state",
+				pgType: "text",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_publications",
+				column: "ownership_state",
+				pgType: "text",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_rows",
+				column: "element_id",
+				pgType: "integer",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_rows",
+				column: "selected_count",
+				pgType: "integer",
+			},
+		],
+		runtime: "must-return-selection-row",
+	},
+];
+
 const positionTypeToEnum = (type: number): string => {
 	switch (type) {
 		case 1:
@@ -429,40 +580,52 @@ export async function getTournamentSelectionIndexRows(
 ): Promise<TournamentSelectionIndexRow[]> {
 	if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) return [];
 	if (!Number.isSafeInteger(eventId) || eventId <= 0) return [];
-	const rows = (await getReadModelRows(context, tournamentId, eventId)) ?? [];
+	const result = await context.database.query(TOURNAMENT_SELECTION_INDEX_SQL, [
+		context.currentSeason.seasonId,
+		tournamentId,
+		eventId,
+	]);
+	const rows = result.rows as unknown as TournamentSelectionIndexReadRow[];
 	if (rows.length === 0) return [];
+	if (rows.every((row) => row.element_id === null)) {
+		throw new Error("Tournament selection index publication has no selection rows");
+	}
 
-	let totalEntries: number | null = null;
+	const publication = parseTournamentSelectionIndexContractRow(rows[0]);
+	if (publication === null) {
+		throw new Error("Malformed tournament selection index publication");
+	}
+
 	const playerIds = new Set<number>();
-	return rows.map((row) => {
-		const playerId = Number(row.element_id);
-		const count = Number(row.pick_count);
-		const rowTotalEntries = Number(row.total_entries);
-		const percentage = Number(row.selection_percentage);
-		if (
-			!Number.isSafeInteger(playerId) ||
-			playerId <= 0 ||
-			!Number.isSafeInteger(count) ||
-			count < 0 ||
-			!Number.isSafeInteger(rowTotalEntries) ||
-			rowTotalEntries <= 0 ||
-			count > rowTotalEntries ||
-			!Number.isFinite(percentage) ||
-			percentage < 0 ||
-			percentage > 100
-		) {
+	const projected: TournamentSelectionIndexRow[] = [];
+	for (const row of rows) {
+		const parsed = parseTournamentSelectionIndexContractRow(row);
+		if (parsed === null) {
 			throw new Error("Malformed tournament selection index read model row");
 		}
-		if (totalEntries === null) totalEntries = rowTotalEntries;
-		if (rowTotalEntries !== totalEntries) {
-			throw new Error("Inconsistent tournament selection index total_entries");
+		if (
+			parsed.publicationId !== publication.publicationId ||
+			parsed.expectedEntries !== publication.expectedEntries ||
+			parsed.completePickEntries !== publication.completePickEntries ||
+			parsed.revision !== publication.revision
+		) {
+			throw new Error("Inconsistent tournament selection index publication");
 		}
+		const playerId = parsed.playerId;
 		if (playerIds.has(playerId)) {
 			throw new Error("Duplicate tournament selection index player");
 		}
 		playerIds.add(playerId);
-		return { playerId, count, percentage };
-	});
+		projected.push({
+			playerId,
+			count: parsed.count,
+			percentage: Number(((parsed.count * 100) / publication.expectedEntries).toFixed(4)),
+		});
+	}
+	if (projected.length === 0) {
+		throw new Error("Tournament selection index publication has no selection rows");
+	}
+	return projected;
 }
 
 function snapshotFromReadModel(rows: DbTournamentSelectionStatRow[]): {

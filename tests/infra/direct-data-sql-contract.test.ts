@@ -3,6 +3,7 @@ import {
 	DIRECT_DATA_SQL_CONTRACT,
 	allowedResultTypes,
 	validateDirectDataSqlContract,
+	validateTournamentSelectionIndexContractRows,
 } from "../../scripts/lib/validate-direct-data-sql-contract";
 import type { QueryResult, QueryResultRow } from "pg";
 import type { QueryExecutor } from "../../src/infra/database";
@@ -703,6 +704,7 @@ describe("direct Data SQL contract", () => {
 		expect(names.some((name) => name.startsWith("players."))).toBe(true);
 		expect(names.some((name) => name.startsWith("player-values."))).toBe(true);
 		expect(names.some((name) => name.startsWith("player-state."))).toBe(true);
+		expect(names).toContain("live-tournament.selection-index");
 		expect(names.some((name) => name.startsWith("public-league-trends."))).toBe(true);
 		expect(names.some((name) => name.startsWith("trends."))).toBe(true);
 		expect(names.some((name) => name.startsWith("data-snapshot."))).toBe(true);
@@ -879,7 +881,9 @@ describe("direct Data SQL contract", () => {
 							{
 								publication_id: "1",
 								expected_entries: "1",
+								complete_pick_entries: "1",
 								revision: "1",
+								publication_state: "READY",
 								ownership_state: "READY",
 								captaincy_state: "READY",
 								vice_captaincy_state: "READY",
@@ -1168,7 +1172,9 @@ describe("direct Data SQL contract", () => {
 							{
 								publication_id: "1",
 								expected_entries: "1",
+								complete_pick_entries: "1",
 								revision: "1",
+								publication_state: "READY",
 								ownership_state: "READY",
 								captaincy_state: "READY",
 								vice_captaincy_state: "READY",
@@ -1319,7 +1325,9 @@ describe("direct Data SQL contract", () => {
 							{
 								publication_id: "1",
 								expected_entries: "1",
+								complete_pick_entries: "1",
 								revision: "1",
+								publication_state: "READY",
 								ownership_state: "READY",
 								captaincy_state: "READY",
 								vice_captaincy_state: "READY",
@@ -1496,6 +1504,29 @@ describe("direct Data SQL contract", () => {
 					probe.runtime === "must-return-player-state-row"
 			)
 		).toBe(true);
+	});
+
+	test("validates live picker publication identity and player uniqueness", () => {
+		const row = {
+			publication_id: "1",
+			expected_entries: "2",
+			complete_pick_entries: "2",
+			revision: "7",
+			publication_state: "READY",
+			ownership_state: "READY",
+			element_id: 1,
+			selected_count: 1,
+		};
+		expect(validateTournamentSelectionIndexContractRows([row])).toBe(true);
+		expect(
+			validateTournamentSelectionIndexContractRows([
+				row,
+				{ ...row, publication_id: "2", element_id: 2 },
+			])
+		).toBe(false);
+		expect(validateTournamentSelectionIndexContractRows([row, { ...row, element_id: 1 }])).toBe(
+			false
+		);
 	});
 
 	test("lets PostgreSQL infer the opaque Trends publication identity", () => {

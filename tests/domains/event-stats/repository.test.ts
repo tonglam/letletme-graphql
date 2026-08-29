@@ -3,6 +3,7 @@ import {
 	eventStatsRepository,
 	getTournamentSelectionIndexRows,
 	getTournamentSelectionStatsReadModel,
+	TOURNAMENT_SELECTION_INDEX_SQL,
 	type DbTournamentSelectionStatRow,
 	type TournamentSelectionStats,
 } from "../../../src/domains/event-stats/repository";
@@ -83,6 +84,28 @@ const ROWS: DbTournamentSelectionStatRow[] = [
 	},
 ];
 
+const SELECTION_INDEX_ROWS = ROWS.map((row) => ({
+	publication_id: "1",
+	expected_entries: "10",
+	complete_pick_entries: "10",
+	revision: "7",
+	publication_state: "READY",
+	ownership_state: "READY",
+	captaincy_state: "READY",
+	vice_captaincy_state: "READY",
+	transfers_state: "READY",
+	element_id: row.element_id,
+	selected_count: row.pick_count,
+	effective_selection_count: row.pick_count,
+	captain_count: row.captain_count,
+	vice_captain_count: row.vice_captain_count,
+	transfer_in_count: row.transfer_in_count,
+	transfer_out_count: row.transfer_out_count,
+	player_name: `Player ${row.element_id}`,
+	player_position: row.element_id,
+	team_short_name: "GCT",
+}));
+
 const makeQuery = (result: { data: unknown[] | null; error: unknown }) => {
 	const promise = Promise.resolve(result);
 	type Builder = typeof promise & {
@@ -114,6 +137,7 @@ type TestContext = GraphQLContext & {
 function createContext(
 	options: {
 		rows?: DbTournamentSelectionStatRow[];
+		selectionRows?: unknown[];
 		error?: unknown;
 		cached?: TournamentSelectionStats;
 	} = {}
@@ -128,8 +152,11 @@ function createContext(
 		dataRevision: "core-test",
 	}) as TestContext;
 	context.database = {
-		query: async () => {
+		query: async (text: string) => {
 			directDatabaseReads += 1;
+			if (text === TOURNAMENT_SELECTION_INDEX_SQL) {
+				return { rows: options.selectionRows ?? [] };
+			}
 			throw new Error("Tournament selections must not aggregate source tables at read time");
 		},
 	} as never;
@@ -252,35 +279,76 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 		expect(context.__directDatabaseReads()).toBe(0);
 	});
 
-	it("projects the live selection index directly from the reporting MV", async () => {
-		const context = createContext({ rows: ROWS });
+	it("projects the live selection index from the immutable reporting publication", async () => {
+		const context = createContext({ selectionRows: SELECTION_INDEX_ROWS });
 		await expect(getTournamentSelectionIndexRows(context, 1, 10)).resolves.toEqual([
 			{ playerId: 1, count: 8, percentage: 80 },
 			{ playerId: 2, count: 7, percentage: 70 },
 			{ playerId: 3, count: 6, percentage: 60 },
 			{ playerId: 4, count: 5, percentage: 50 },
 		]);
-		expect(context.__readModels).toEqual(["reporting.tournament_selection_stats"]);
-		expect(context.__directDatabaseReads()).toBe(0);
+		expect(context.__readModels).toEqual([]);
+		expect(context.__directDatabaseReads()).toBe(1);
+	});
+
+	it("ignores readiness of picker capabilities it does not consume", async () => {
+		const context = createContext({
+			selectionRows: [
+				{
+					...SELECTION_INDEX_ROWS[0]!,
+					captaincy_state: "NOT_READY",
+					vice_captaincy_state: "UNSUPPORTED",
+					transfers_state: "FAILED",
+				},
+			],
+		});
+
+		expect(await getTournamentSelectionIndexRows(context, 1, 10)).toEqual([
+			{ playerId: 1, count: 8, percentage: 80 },
+		]);
 	});
 
 	it("fails closed for malformed or inconsistent live selection rows", async () => {
 		await expect(
 			getTournamentSelectionIndexRows(
-				createContext({ rows: [{ ...ROWS[0]!, total_entries: 9 }, ROWS[1]!] }),
+				createContext({
+					selectionRows: [{ ...SELECTION_INDEX_ROWS[0]!, element_id: null }],
+				}),
+				1,
+				10
+			)
+		).rejects.toThrow("no selection rows");
+		await expect(
+			getTournamentSelectionIndexRows(
+				createContext({
+					selectionRows: [
+						SELECTION_INDEX_ROWS[0]!,
+						{
+							...SELECTION_INDEX_ROWS[1]!,
+							expected_entries: "9",
+							complete_pick_entries: "9",
+						},
+					],
+				}),
 				1,
 				10
 			)
 		).rejects.toThrow("Inconsistent tournament selection index");
 		await expect(
 			getTournamentSelectionIndexRows(
-				createContext({ rows: [{ ...ROWS[0]!, selection_percentage: 101 }] }),
+				createContext({
+					selectionRows: [{ ...SELECTION_INDEX_ROWS[0]!, selected_count: "not-a-count" }],
+				}),
 				1,
 				10
 			)
 		).rejects.toThrow("Malformed tournament selection index");
 		await expect(
-			getTournamentSelectionIndexRows(createContext({ rows: [ROWS[0]!, ROWS[0]!] }), 1, 10)
+			getTournamentSelectionIndexRows(
+				createContext({ selectionRows: [SELECTION_INDEX_ROWS[0]!, SELECTION_INDEX_ROWS[0]!] }),
+				1,
+				10
+			)
 		).rejects.toThrow("Duplicate tournament selection index player");
 	});
 });
