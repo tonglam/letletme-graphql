@@ -54,6 +54,12 @@ describe("GraphQL domain manifest", () => {
 				when: "provided",
 				access: "viewerTournamentMember",
 			},
+			{
+				field: "myTournamentReviewCatalog",
+				argument: "scope",
+				equals: "ALL",
+				access: "platformAdmin",
+			},
 		]);
 		expect(myFpl?.authByRootField.myFplCompetitionsDesk).toEqual([
 			"viewerEntry",
@@ -87,10 +93,12 @@ describe("GraphQL domain manifest", () => {
 	test("validates conditional auth arguments and predicates against GraphQL types", () => {
 		const validSchema = buildSchema(`
 			enum TrendCohortAccess { PUBLIC MINE }
+			enum MyTournamentReviewScope { ACCESSIBLE MANAGED ALL }
 			type Query {
 				trendCohorts(access: TrendCohortAccess!): String
 				trendCohortSnapshot(access: TrendCohortAccess = PUBLIC): String
 				myFplCompetitionsDesk(tournamentId: Int): String
+				myTournamentReviewCatalog(scope: MyTournamentReviewScope = ACCESSIBLE): String
 			}
 		`);
 		expect(validateGraphQLConditionalAuthAgainstSchema(validSchema)).toEqual([]);

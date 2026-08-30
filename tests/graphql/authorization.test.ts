@@ -438,4 +438,40 @@ describe("authorizeGraphQLRequest", () => {
 		);
 		expect(result.ok).toBe(false);
 	});
+
+	it("limits ALL tournament review catalog reads to platform administrators", async () => {
+		expect(
+			await authorize(
+				`query { myTournamentReviewCatalog(scope: ALL) { tournaments { tournamentId } } }`,
+				undefined,
+				platformAdminPrincipal
+			)
+		).toEqual({ ok: true });
+		expect(
+			await authorize(
+				`query { myTournamentReviewCatalog(scope: ALL) { tournaments { tournamentId } } }`,
+				undefined,
+				websitePrincipal
+			)
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+	});
+
+	it("uses the viewer membership gate for tournament review scopes", async () => {
+		for (const query of [
+			`query { myTournamentGameweekReview(tournamentId: 7, eventId: 1) { state } }`,
+			`query { myTournamentSeasonReview(tournamentId: 7, throughEventId: 1) { state } }`,
+			`query { myTournamentReviewStatus(tournamentId: 7) { tournamentId } }`,
+		]) {
+			expect(await authorize(query, undefined, websitePrincipal)).toEqual({ ok: true });
+			expect(await authorize(query, undefined, miniViewerPrincipal)).toEqual({ ok: true });
+			expect(await authorize(query, undefined, websitePrincipal)).toEqual({ ok: true });
+		}
+		expect(
+			await authorize(
+				`query { myTournamentGameweekReview(tournamentId: 9, eventId: 1) { state } }`,
+				undefined,
+				websitePrincipal
+			)
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+	});
 });

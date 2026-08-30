@@ -87,7 +87,7 @@ export const viewerEntryIdForPrincipal = (principal: Principal): number | null =
 	return hasVerifiedEntry(principal) ? principal.fplEntryId : null;
 };
 
-const hasPlatformAdminAccess = (principal: Principal): boolean =>
+export const hasPlatformAdminAccess = (principal: Principal): boolean =>
 	principal.source === "website" && principal.platformAdmin === true && hasVerifiedEntry(principal);
 
 const requireViewerEntry = (principal: Principal, entryId: number | null): AuthorizationResult => {
@@ -245,6 +245,14 @@ const authorizeConditionalAccess = async ({
 	switch (access) {
 		case "public":
 			return { ok: true };
+		case "platformAdmin":
+			if (principal && hasPlatformAdminAccess(principal)) return { ok: true };
+			return {
+				ok: false,
+				status: 403,
+				code: "FORBIDDEN",
+				message: "Platform administrator access is required",
+			};
 		case "viewerEntry":
 			return authorizeViewerEntry(principal);
 		case "viewerEntryArg": {

@@ -339,6 +339,212 @@ export const myFplTypeDefs = /* GraphQL */ `
 		ready: Boolean!
 	}
 
+	"""
+	The V2 read-only review center is backed by finalized, revisioned scopes.
+	"""
+	enum MyTournamentReviewScope {
+		ACCESSIBLE
+		MANAGED
+		ALL
+	}
+
+	enum MyTournamentReviewFormat {
+		POINTS
+		H2H
+		KNOCKOUT
+	}
+
+	enum MyTournamentReviewState {
+		PENDING
+		WAITING_SOURCE
+		READY
+		DEGRADED
+		UNAVAILABLE
+	}
+
+	type MyTournamentReviewFreshness {
+		eventDataCheckedAt: DateTime!
+		sourceMinCheckedAt: DateTime!
+		sourceMaxCheckedAt: DateTime!
+		publishedAt: DateTime!
+		ageSeconds: Int!
+	}
+
+	type MyTournamentReviewScopeMeta {
+		tournamentId: Int!
+		eventId: Int!
+		revision: String!
+		format: MyTournamentReviewFormat!
+		state: MyTournamentReviewState!
+		freshness: MyTournamentReviewFreshness
+		rowCount: Int!
+		expectedSubjectCount: Int!
+		readySubjectCount: Int!
+		notApplicableSubjectCount: Int!
+		contentSha256: String
+	}
+
+	type MyTournamentReviewCatalogItem {
+		tournamentId: Int!
+		name: String!
+		creator: String!
+		leagueId: Int!
+		leagueType: String!
+		totalTeamNum: Int!
+		latestFinalizedEventId: Int
+		latestAvailableEventId: Int
+		latestRevision: String
+		latestFormat: MyTournamentReviewFormat
+		state: MyTournamentReviewState!
+		publishedAt: DateTime
+	}
+
+	type MyTournamentReviewCatalog {
+		state: MyTournamentReviewState!
+		asOf: DateTime!
+		viewerEntryId: Int
+		adminReadAll: Boolean!
+		tournaments: [MyTournamentReviewCatalogItem!]!
+	}
+
+	type MyTournamentReviewPointsRow {
+		entryId: Int!
+		entryName: String!
+		playerName: String!
+		applicable: Boolean!
+		groupId: Int
+		rank: Int
+		previousRank: Int
+		grossPoints: Int
+		transferCost: Int
+		netPoints: Int
+		tournamentScore: Int
+		seasonGrossPoints: Int
+		seasonNetPoints: Int
+		eventRank: Int
+		overallPoints: Int
+		overallRank: Int
+	}
+
+	type MyTournamentReviewPoints {
+		headlineMetric: String!
+		grossPointsTotal: Int!
+		grossPointsAverage: Float!
+		netPointsTotal: Int!
+		seasonGrossPointsTotal: Int!
+		seasonGrossPointsAverage: Float!
+		seasonNetPointsTotal: Int!
+		rows: [MyTournamentReviewPointsRow!]!
+		nextCursor: String
+		hasNextPage: Boolean!
+	}
+
+	type MyTournamentReviewH2HSide {
+		entryId: Int
+		entryName: String!
+		isAverage: Boolean!
+		grossPoints: Int
+		transferCost: Int
+		netPoints: Int
+		matchPoints: Int
+		rank: Int
+	}
+
+	type MyTournamentReviewH2HMatch {
+		matchId: String!
+		groupId: Int!
+		home: MyTournamentReviewH2HSide
+		away: MyTournamentReviewH2HSide
+		isBye: Boolean!
+	}
+
+	type MyTournamentReviewH2HStanding {
+		entryId: Int!
+		entryName: String!
+		rank: Int!
+		played: Int!
+		won: Int!
+		drawn: Int!
+		lost: Int!
+		matchPoints: Int!
+		pointsFor: Int!
+		pointsAgainst: Int!
+	}
+
+	type MyTournamentReviewH2H {
+		matches: [MyTournamentReviewH2HMatch!]!
+		standings: [MyTournamentReviewH2HStanding!]!
+		nextCursor: String
+		hasNextPage: Boolean!
+	}
+
+	type MyTournamentReviewKnockoutSide {
+		entryId: Int!
+		entryName: String!
+		grossPoints: Int
+		transferCost: Int
+		netPoints: Int
+		goalsScored: Int
+		goalsConceded: Int
+	}
+
+	type MyTournamentReviewKnockoutMatch {
+		round: Int
+		name: String
+		matchId: Int!
+		playAgainstId: Int!
+		home: MyTournamentReviewKnockoutSide
+		away: MyTournamentReviewKnockoutSide
+		winnerEntryId: Int
+	}
+
+	type MyTournamentReviewKnockout {
+		matches: [MyTournamentReviewKnockoutMatch!]!
+		nextCursor: String
+		hasNextPage: Boolean!
+	}
+
+	type MyTournamentGameweekReview {
+		state: MyTournamentReviewState!
+		scope: MyTournamentReviewScopeMeta
+		points: MyTournamentReviewPoints
+		h2h: MyTournamentReviewH2H
+		knockout: MyTournamentReviewKnockout
+	}
+
+	type MyTournamentSeasonReview {
+		state: MyTournamentReviewState!
+		tournamentId: Int!
+		throughEventId: Int!
+		latestEventId: Int
+		latestRevision: String
+		format: MyTournamentReviewFormat
+		freshness: MyTournamentReviewFreshness
+		finalizedEventIds: [Int!]!
+		points: MyTournamentReviewPoints
+		h2h: MyTournamentReviewH2H
+		knockout: MyTournamentReviewKnockout
+	}
+
+	type MyTournamentReviewEventStatus {
+		eventId: Int!
+		format: MyTournamentReviewFormat!
+		state: MyTournamentReviewState!
+		nextAttemptAt: DateTime
+		executionAttempts: Int!
+		sourceRechecks: Int!
+		degradedAt: DateTime
+		revision: String
+		publishedAt: DateTime
+	}
+
+	type MyTournamentReviewStatus {
+		tournamentId: Int!
+		latestFinalizedEventId: Int
+		latestAvailableEventId: Int
+		events: [MyTournamentReviewEventStatus!]!
+	}
+
 	extend type Query {
 		myFplTeamDesk(eventId: Int, snapshotRevision: String): MyFplTeamDesk!
 		myFplTeamGameweek(eventId: Int!, snapshotRevision: String): MyFplTeamGameweek!
@@ -366,5 +572,26 @@ export const myFplTypeDefs = /* GraphQL */ `
 		): MyFplCompetitionSeasonPath!
 
 		myFplCompetitionSetupStatus(tournamentId: Int!): MyFplCompetitionSetupStatus!
+
+		myTournamentReviewCatalog(
+			scope: MyTournamentReviewScope = ACCESSIBLE
+		): MyTournamentReviewCatalog!
+
+		myTournamentGameweekReview(
+			tournamentId: Int!
+			eventId: Int!
+			first: Int = 50
+			after: String
+			revision: String
+		): MyTournamentGameweekReview!
+
+		myTournamentSeasonReview(
+			tournamentId: Int!
+			throughEventId: Int!
+			first: Int = 100
+			after: String
+		): MyTournamentSeasonReview!
+
+		myTournamentReviewStatus(tournamentId: Int!): MyTournamentReviewStatus!
 	}
 `;
