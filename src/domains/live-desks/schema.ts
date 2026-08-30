@@ -137,6 +137,7 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		unavailableEntryIds: [Int!]!
 		partial: Boolean!
 		failedEntryIds: [Int!]!
+		deferredEntryCount: Int!
 		totalEntries: Int!
 	}
 

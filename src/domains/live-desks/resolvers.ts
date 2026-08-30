@@ -17,7 +17,10 @@ import { Position } from "../players/repository";
 import { tournamentsService } from "../tournaments/service";
 import { LeagueType } from "../leagues/repository";
 import { entriesRepository } from "../entries/repository";
-import { loadTournamentEventEligibility } from "./tournament-entry-window";
+import {
+	loadTournamentEventEligibility,
+	selectTournamentDeskEntryWindow,
+} from "./tournament-entry-window";
 import {
 	calcLivePointsForEntriesV2,
 	readLivePublicationV2,
@@ -609,6 +612,7 @@ export const liveDesksResolvers = {
 					unavailableEntryIds: [],
 					partial: false,
 					failedEntryIds: [],
+					deferredEntryCount: 0,
 					totalEntries: 0,
 				};
 			await assertMember(context, selected, args.entryId);
@@ -623,9 +627,15 @@ export const liveDesksResolvers = {
 			assertRef(context, args.ref, publication);
 			const allEntryIds = await tournamentsService.getTournamentEntryIdsUncached(context, selected);
 			const entryIds = await eligibleEntryIdsForEvent(context, allEntryIds, eventId);
-			const { results, errors } = await calcLivePointsForEntriesV2(context, eventId, entryIds, {
+			const entryWindow = selectTournamentDeskEntryWindow(entryIds, args.entryId);
+			const { results, errors } = await calcLivePointsForEntriesV2(
+				context,
+				eventId,
+				entryWindow.entryIds,
+				{
 				scoreCoreRevision: args.ref?.scoreCoreRevision,
-			});
+				},
+			);
 			const usable = (row: { availability: string; score: { source: string } }): boolean =>
 				row.availability === "READY" && row.score.source !== "UNAVAILABLE";
 			const sample =
@@ -654,13 +664,15 @@ export const liveDesksResolvers = {
 						? 0
 						: [...results.values()].filter((row) => row.availability === "READY").length /
 							entryIds.length,
-				unavailableEntryIds: entryIds.filter(
+				unavailableEntryIds: entryWindow.entryIds.filter(
 					(entryId) => !results.get(entryId) || results.get(entryId)?.availability !== "READY"
 				),
 				partial:
+					entryWindow.deferredEntryIds.length > 0 ||
 					[...results.values()].some((row) => row.availability !== "READY") ||
-					results.size !== entryIds.length,
+					results.size !== entryWindow.entryIds.length,
 				failedEntryIds: errors.map((error) => error.entryId).sort((left, right) => left - right),
+				deferredEntryCount: entryWindow.deferredEntryIds.length,
 				totalEntries: entryIds.length,
 				revisions: sample?.score.revisions ?? null,
 				times: sample?.score.times ?? null,
