@@ -1131,7 +1131,31 @@ def _validate_skill_inventory(repo: Path, skills: list[Any], errors: list[str]) 
             if not isinstance(value, dict):
                 errors.append(f"{lock_path}: skills must be a mapping")
             else:
-                locked = {str(name) for name in value}
+                for name, metadata in value.items():
+                    skill_name = str(name)
+                    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", skill_name):
+                        errors.append(f"{lock_path}: invalid locked skill name: {skill_name!r}")
+                        continue
+                    if not isinstance(metadata, dict):
+                        errors.append(f"{lock_path}: metadata for {skill_name!r} must be a mapping")
+                        continue
+                    source = metadata.get("source")
+                    source_type = metadata.get("sourceType")
+                    computed_hash = metadata.get("computedHash")
+                    if not isinstance(source, str) or not source.strip():
+                        errors.append(f"{lock_path}: {skill_name!r} must declare a non-empty source")
+                        continue
+                    if not isinstance(source_type, str) or not re.fullmatch(
+                        r"[a-z0-9]+(?:-[a-z0-9]+)*", source_type
+                    ):
+                        errors.append(f"{lock_path}: {skill_name!r} has invalid sourceType")
+                        continue
+                    if not isinstance(computed_hash, str) or not re.fullmatch(
+                        r"[0-9a-fA-F]{64}", computed_hash
+                    ):
+                        errors.append(f"{lock_path}: {skill_name!r} must declare a SHA-256 computedHash")
+                        continue
+                    locked.add(skill_name)
     allowed = contracted | locked
     try:
         children = sorted(root.iterdir(), key=lambda path: path.name)
