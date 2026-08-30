@@ -576,7 +576,7 @@ jobs:
 
           validator = load_tree(
               Path(os.environ["TARGET_VALIDATOR"]),
-              {"parse_yaml_mapping", "validate_asset", "check_agents_claude_consistency", "main", "has_secret", "_has_private_ip_literal", "_looks_like_placeholder", "_validate_skill_inventory"},
+              {"parse_yaml_mapping", "validate_asset", "check_agents_claude_consistency", "main", "has_secret", "has_secret_bytes", "has_locked_skill_secret", "has_locked_skill_secret_bytes", "skill_tree_digest", "validate_locked_skill", "_has_private_ip_literal", "_looks_like_placeholder", "_validate_skill_inventory"},
           )
           provisioner_path = Path(os.environ["TARGET_PROVISIONER"])
           provisioner = load_tree(provisioner_path, {"load_manifest", "verify_registry", "tree_digest", "main"})
@@ -1196,8 +1196,11 @@ jobs:
                   "_validate_instruction_file": function_node(tree, "_validate_instruction_file"),
                   "_validate_global_manifest": function_node(tree, "_validate_global_manifest"),
                   "_validate_skill_inventory": function_node(tree, "_validate_skill_inventory"),
+                  "validate_locked_skill": function_node(tree, "validate_locked_skill"),
                   "has_secret": function_node(tree, "has_secret"),
                   "has_secret_bytes": function_node(tree, "has_secret_bytes"),
+                  "has_locked_skill_secret_bytes": function_node(tree, "has_locked_skill_secret_bytes"),
+                  "skill_tree_digest": function_node(tree, "skill_tree_digest"),
                   "_has_private_ip_literal": function_node(tree, "_has_private_ip_literal"),
                   "_looks_like_placeholder": function_node(tree, "_looks_like_placeholder"),
               }
@@ -1213,8 +1216,11 @@ jobs:
                       "_validate_instruction_file",
                       "_validate_global_manifest",
                       "_validate_skill_inventory",
+                      "validate_locked_skill",
                       "has_secret",
                       "has_secret_bytes",
+                      "has_locked_skill_secret_bytes",
+                      "skill_tree_digest",
                       "_has_private_ip_literal",
                       "_looks_like_placeholder",
                   },
@@ -1235,7 +1241,7 @@ jobs:
                   raise SystemExit("approved validator has_secret_bytes must normalize decoded JSON")
               required_calls = {
                   "parse_yaml_mapping": (parse_yaml, {"_parse_scalar"}),
-                  "validate_asset": (validate, {"validate_skill", "_validate_instruction_file", "_validate_global_manifest", "check_agents_claude_consistency", "_validate_skill_inventory"}),
+                  "validate_asset": (validate, {"validate_skill", "validate_locked_skill", "_validate_instruction_file", "_validate_global_manifest", "check_agents_claude_consistency", "_validate_skill_inventory"}),
                   "main": (main, {"validate_asset"}),
               }
               for label, (node, required_names) in required_calls.items():
@@ -1401,7 +1407,10 @@ jobs:
               check_exception_handlers(main, {"validate_asset"}, "validator main")
               helper_requirements = {
                   "_parse_scalar": {"_strip_yaml_comment", "loads"},
-                  "validate_skill": {"_validate_instruction_file", "rglob", "read_bytes", "has_secret"},
+                  "validate_skill": {"_validate_instruction_file", "rglob", "read_bytes", "has_secret_bytes"},
+                  "validate_locked_skill": {"skill_tree_digest", "rglob", "read_bytes", "is_file", "has_locked_skill_secret_bytes"},
+                  "skill_tree_digest": {"sha256", "rglob", "read_bytes", "relative_to", "as_posix"},
+                  "has_locked_skill_secret_bytes": {"loads", "dumps", "has_locked_skill_secret"},
                   "_validate_instruction_file": {"read_text", "read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json", "read_bytes", "sha256", "resolve"},
                   "_validate_skill_inventory": {"load_json"},
@@ -1418,11 +1427,13 @@ jobs:
                       raise SystemExit(f"approved validator {label} is missing helper operations: {', '.join(missing)}")
               helper_direct = {
                   "_parse_scalar": {"_strip_yaml_comment"},
-                  "validate_skill": {"_validate_instruction_file", "has_secret"},
+                  "validate_skill": {"_validate_instruction_file", "has_secret_bytes"},
+                  "validate_locked_skill": {"skill_tree_digest", "has_locked_skill_secret_bytes"},
                   "_validate_instruction_file": {"read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json"},
                   "_validate_skill_inventory": {"load_json"},
                   "has_secret_bytes": {"has_secret"},
+                  "has_locked_skill_secret_bytes": {"has_locked_skill_secret"},
                   "has_secret": {"_has_private_ip_literal", "_looks_like_placeholder"},
               }
               helper_receivers = {
@@ -1437,8 +1448,25 @@ jobs:
                   "_validate_skill_inventory": {
                       "iterdir": {"root"},
                   },
+                  "validate_locked_skill": {
+                      "is_dir": {"path"},
+                      "is_file": {"entry", "reference"},
+                      "rglob": {"path"},
+                      "read_bytes": {"reference"},
+                  },
+                  "skill_tree_digest": {
+                      "sha256": {"hashlib"},
+                      "rglob": {"path"},
+                      "relative_to": {"item"},
+                      "as_posix": {"relative"},
+                      "read_bytes": {"item"},
+                  },
                   "has_secret_bytes": {
                       "loads": {"json"},
+                  },
+                  "has_locked_skill_secret_bytes": {
+                      "loads": {"json"},
+                      "dumps": {"json"},
                   },
                   "has_secret": {
                       "search": {"PEM_RE", "PRIVATE_ORIGIN_RE"},
@@ -1469,6 +1497,27 @@ jobs:
                   for operation, receivers in operations.items():
                       if not (info.call_receivers.get(operation, set()) & receivers):
                           raise SystemExit(f"approved validator {label} requires an unshadowed {operation} call")
+              locked_validator = helper_nodes["validate_locked_skill"]
+              if "SKILL.md" not in reachable_string_literals(locked_validator):
+                  raise SystemExit("approved validator validate_locked_skill must require the SKILL.md entrypoint")
+              if not any(
+                  isinstance(node, ast.Compare)
+                  and {item.id for item in ast.walk(node) if isinstance(item, ast.Name)} >= {"actual_hash", "expected_hash"}
+                  for node in ast.walk(locked_validator)
+              ):
+                  raise SystemExit("approved validator validate_locked_skill must compare the computed hash with the lock")
+              locked_calls = [
+                  node
+                  for node in ast.walk(validate)
+                  if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Name)
+                  and node.func.id == "validate_locked_skill"
+              ]
+              if not any(
+                  any(keyword.arg == "expected_hash" for keyword in call.keywords)
+                  for call in locked_calls
+              ):
+                  raise SystemExit("approved validator validate_asset must pass each locked skill hash to validate_locked_skill")
               if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(parse_yaml)):
                   raise SystemExit("approved validator parse_yaml_mapping has no parsing control flow")
               if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(validate)):
@@ -2000,14 +2049,14 @@ jobs:
               if run_text.include?("<<") && run_text.lines.any? { |line| line.match?(/^\s*(?:python3?|ruby|node|bash|sh|zsh)\s+(?:trusted|target)\//) }
                 raise "workflow step may not hide an executable validator command in a heredoc"
               end
-              target_execution = %r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec)\b(?:\s+-[^\s;&|]+)*\s+["']?(?:\./)?target/|["']?(?:\./)?target/)}
+              target_execution = %r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:(?:command\s+)?(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec)\b(?:\s+-[^\s;&|]+)*\s+["']?(?:\./)?target/|(?:command\s+)?["']?(?:\./)?target/)}
               target_reference = %r{(?:\btarget(?:/|\b)|\$PWD/target(?:/|\b)|\$GITHUB_WORKSPACE/target(?:/|\b)|\$\([^\n)]*\btarget\b[^\n)]*\)|<\([^\n)]*\btarget/)}
               safe_target_read = %r{^\s*(?:python3\s+-m\s+py_compile\s+target/\.codex/(?:validate_instructions|provision_global_skills)\.py(?:\s+target/\.codex/(?:validate_instructions|provision_global_skills)\.py)*|ruby\s+-e\s+'require \"yaml\"; YAML\.safe_load\(File\.read\(ARGV\.fetch\(0\)\), aliases: false\)'\s+target/\.github/workflows/instruction-integrity\.yml|ruby\s+-ryaml\s+-\s+target/\.github/workflows/instruction-integrity\.yml\s+<<["']?RUBY["']?)\s*$}
               if shell_surface.any? do |line|
                 stripped = line.strip
                 next false if stripped.match?(safe_target_read)
                 stripped.match?(target_execution) || (
-                  stripped.match?(%r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:env\s+)?(?:python3?|ruby|node|bash|sh|zsh|source|exec|eval)\b}) && stripped.match?(target_reference)
+                  stripped.match?(%r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:(?:env|command)\s+)*(?:python3?|ruby|node|bash|sh|zsh|source|exec|eval)\b}) && stripped.match?(target_reference)
                 )
               end
                 raise "workflow step may not execute code from the proposed checkout"

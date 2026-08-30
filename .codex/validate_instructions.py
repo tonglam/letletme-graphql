@@ -771,7 +771,7 @@ def scan_reference_graph(
             is_reference_text = candidate.suffix.casefold() in REFERENCE_TEXT_SUFFIXES or candidate.suffix == ""
             if is_reference_text and candidate.suffix.casefold() == ".md" and candidate.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
                 errors.append(f"{candidate}: referenced instruction exceeds max_skill_bytes")
-            if policy.get("forbid_secrets_in_instructions") and has_secret(reference_text):
+            if policy.get("forbid_secrets_in_instructions") and has_secret_bytes(raw):
                 errors.append(f"{candidate}: possible secret/token pattern")
             # Only recurse through known instruction/config text (plus
             # extensionless files, which are commonly executable instruction
@@ -798,6 +798,8 @@ def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
             r"\b(?:merge|ship|release)\b.{0,160}\b(?:without|even\s+with)\b.{0,80}\b(?:review|finding|thread|ci|cleanup|unresolved|undispositioned)\b",
             r"\b(?:allow|permit)\b.{0,160}\b(?:merge|ship|release)\b.{0,80}\b(?:unresolved|undispositioned)\b",
         )
+        if any(re.search(pattern, section, flags=re.I | re.S) for pattern in conflicts):
+            errors.append(f"{path}: Governance and review section conflicts with the mandatory review rules")
         if any(re.search(pattern, outside, flags=re.I | re.S) for pattern in conflicts):
             errors.append(f"{path}: operative text outside Governance and review conflicts with the mandatory review rules")
     required_clauses = {
@@ -1072,6 +1074,48 @@ def has_secret_bytes(raw: bytes) -> bool:
     return any(has_secret(candidate) for candidate in candidates)
 
 
+def has_locked_skill_secret_bytes(raw: bytes) -> bool:
+    """Scan locked skill bytes across common text encodings."""
+
+    candidates = [raw.decode("latin-1")]
+    for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"):
+        try:
+            decoded = raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        candidates.append(decoded)
+        try:
+            parsed = json.loads(decoded)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        candidates.append(json.dumps(parsed, ensure_ascii=False))
+    return any(has_locked_skill_secret(candidate) for candidate in candidates)
+
+
+def skill_tree_digest(path: Path) -> str:
+    """Hash every regular file by sorted relative path and raw bytes."""
+
+    files: list[tuple[str, bytes]] = []
+    for item in path.rglob("*"):
+        relative = item.relative_to(path)
+        if any(part in {".git", "node_modules"} for part in relative.parts):
+            continue
+        if item.is_symlink():
+            raise ValueError(f"{item}: locked skill tree may not contain a symlink")
+        if item.is_dir():
+            continue
+        if not item.is_file():
+            raise ValueError(f"{item}: locked skill tree contains an unsupported entry")
+        files.append((relative.as_posix(), item.read_bytes()))
+    digest = hashlib.sha256()
+    # ``skills`` computes hashes with JavaScript's default locale ordering;
+    # case-folding is the stable cross-platform equivalent for these paths.
+    for relative, raw in sorted(files, key=lambda value: value[0].casefold()):
+        digest.update(relative.encode("utf-8"))
+        digest.update(raw)
+    return digest.hexdigest()
+
+
 def check_yaml_shape(path: Path, errors: list[str], *, skill_name: str | None = None) -> None:
     text = path.read_text(encoding="utf-8")
     if not text.strip():
@@ -1131,7 +1175,7 @@ def _skill_entrypoints(root: Path, repo: Path) -> Iterable[Path]:
                 pending.append(child)
 
 
-def _validate_skill_inventory(repo: Path, skills: list[Any], errors: list[str]) -> set[str]:
+def _validate_skill_inventory(repo: Path, skills: list[Any], errors: list[str]) -> dict[str, str]:
     """Reject unowned repository skill directories without touching plugins.
 
     ``.agents/skills`` can contain both repository-owned skills and installed
@@ -1143,17 +1187,17 @@ def _validate_skill_inventory(repo: Path, skills: list[Any], errors: list[str]) 
 
     root = repo / ".agents" / "skills"
     if not root.exists() and not root.is_symlink():
-        return set()
+        return {}
     if root.is_symlink():
         errors.append(f"{root}: skill inventory root may not be a symlink")
-        return set()
+        return {}
     contracted: set[str] = set()
     for raw in skills:
         relative = Path(str(raw))
         parts = relative.parts
         if not relative.is_absolute() and len(parts) >= 3 and parts[:2] == (".agents", "skills"):
             contracted.add(parts[2])
-    locked: set[str] = set()
+    locked: dict[str, str] = {}
     lock_path = repo / "skills-lock.json"
     if lock_path.exists():
         try:
@@ -1189,8 +1233,8 @@ def _validate_skill_inventory(repo: Path, skills: list[Any], errors: list[str]) 
                     ):
                         errors.append(f"{lock_path}: {skill_name!r} must declare a SHA-256 computedHash")
                         continue
-                    locked.add(skill_name)
-    allowed = contracted | locked
+                    locked[skill_name] = computed_hash
+    allowed = contracted | set(locked)
     try:
         children = sorted(root.iterdir(), key=lambda path: path.name)
     except OSError as exc:
@@ -1569,17 +1613,36 @@ def validate_skill(
             errors.append(f"{reference}: exceeds max_skill_bytes")
         if is_reference:
             check_reference_links(reference, repo, errors, allow_external=allow_external)
-        if policy.get("forbid_secrets_in_instructions") and has_secret(reference_text):
+        if policy.get("forbid_secrets_in_instructions") and has_secret_bytes(raw):
             errors.append(f"{reference}: possible secret/token pattern")
 
 
-def validate_locked_skill(path: Path, policy: dict[str, Any], errors: list[str]) -> None:
+def validate_locked_skill(
+    path: Path,
+    policy: dict[str, Any],
+    errors: list[str],
+    *,
+    expected_hash: str | None = None,
+) -> None:
     """Check lock-listed plugin bytes while allowing third-party metadata shapes."""
 
     if not path.is_dir():
         errors.append(f"{path}: locked skill must be a directory")
         return
-    for reference in [path / "SKILL.md", *path.rglob("*")]:
+    entry = path / "SKILL.md"
+    if not entry.is_file():
+        errors.append(f"{path}: locked skill must contain a regular SKILL.md entrypoint")
+    if expected_hash:
+        try:
+            actual_hash = skill_tree_digest(path)
+        except (OSError, ValueError) as exc:
+            errors.append(f"{path}: cannot hash locked skill tree: {exc}")
+        else:
+            if actual_hash.casefold() != expected_hash.casefold():
+                errors.append(
+                    f"{path}: locked skill content hash {actual_hash} does not match skills-lock.json computedHash"
+                )
+    for reference in path.rglob("*"):
         if reference.is_symlink():
             errors.append(f"{reference}: locked skill tree may not contain a symlink")
             continue
@@ -1590,11 +1653,7 @@ def validate_locked_skill(path: Path, policy: dict[str, Any], errors: list[str])
         except OSError as exc:
             errors.append(f"{reference}: cannot read locked skill content: {exc}")
             continue
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            text = raw.decode("latin-1")
-        if policy.get("forbid_secrets_in_instructions") and has_locked_skill_secret(text):
+        if policy.get("forbid_secrets_in_instructions") and has_locked_skill_secret_bytes(raw):
             errors.append(f"{reference}: possible secret/token pattern")
 
 
@@ -1687,7 +1746,7 @@ def validate_asset(
         for name in sorted(locked_skills):
             path = repo / ".agents" / "skills" / name
             if path.exists() or path.is_symlink():
-                validate_locked_skill(path, policy, errors)
+                validate_locked_skill(path, policy, errors, expected_hash=locked_skills[name])
 
         discovered = _instruction_paths(repo, include_discovery=asset.get("kind") != "instruction-system")
         discovered_set = set(discovered)
