@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { graphql } from "graphql";
 import { schema } from "../../../src/graphql/schema";
 import {
+	calcLivePointsForEntriesV2,
 	calcLivePointsByEntryV2,
 	clearLivePointsV2Lkg,
 	loadLiveSnapshotMetaV2,
@@ -307,5 +308,29 @@ describe("Live Points V2 projection", () => {
 			delivery: { state: "FRESH" },
 			pickList: [],
 		});
+	});
+
+	it("batches PostgreSQL entry checkpoint fallbacks", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		redis.values.delete("llm:data:v2:fpl:entry-live:2627:1:6953:active");
+		const databaseCalls: Array<{ sql: string; values: unknown[] }> = [];
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (sql, values) => {
+				databaseCalls.push({ sql: String(sql), values: values as unknown[] });
+				return { rows: [] };
+			},
+		});
+		const result = await calcLivePointsForEntriesV2(context, 1, [6953]);
+		expect(result.results.size).toBe(1);
+		expect(result.meta).toEqual({
+			eventId: 1,
+			totalEntries: 1,
+			succeededCount: 1,
+			failedCount: 0,
+		});
+		const checkpointCalls = databaseCalls.filter((call) => call.sql.includes("ANY($2::integer[])"));
+		expect(checkpointCalls).toHaveLength(1);
+		expect(checkpointCalls[0]?.values[1]).toEqual([6953]);
 	});
 });

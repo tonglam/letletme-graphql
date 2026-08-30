@@ -572,14 +572,14 @@ const parseEntryPublication = (
 
 const validPick = (value: unknown): value is Pick =>
 	isRecord(value) &&
-	integer(value.element) !== null &&
-	(integer(value.element) as number) > 0 &&
-	integer(value.position) !== null &&
-	(integer(value.position) as number) >= 1 &&
-	(integer(value.position) as number) <= 15 &&
-	integer(value.multiplier) !== null &&
-	(integer(value.multiplier) as number) >= 0 &&
-	(integer(value.multiplier) as number) <= 3 &&
+	safeInteger(value.element) !== null &&
+	(safeInteger(value.element) as number) > 0 &&
+	safeInteger(value.position) !== null &&
+	(safeInteger(value.position) as number) >= 1 &&
+	(safeInteger(value.position) as number) <= 15 &&
+	safeInteger(value.multiplier) !== null &&
+	(safeInteger(value.multiplier) as number) >= 0 &&
+	(safeInteger(value.multiplier) as number) <= 3 &&
 	typeof value.isCaptain === "boolean" &&
 	typeof value.isViceCaptain === "boolean" &&
 	!(value.isCaptain && value.isViceCaptain);
@@ -596,8 +596,8 @@ const validAutomaticSubs = (
 	const outgoing = new Set<number>();
 	return value.every((item) => {
 		if (!isRecord(item)) return false;
-		const inElement = integer(item.inElement);
-		const outElement = integer(item.outElement);
+		const inElement = safeInteger(item.inElement);
+		const outElement = safeInteger(item.outElement);
 		if (
 			inElement === null ||
 			inElement <= 0 ||
@@ -627,9 +627,7 @@ const validPreviousTotals = (
 	safeInteger(value.throughEventId) !== null &&
 	(safeInteger(value.throughEventId) as number) === expectedThroughEventId &&
 	safeInteger(value.totalPoints) !== null &&
-	(expectedThroughEventId === 0
-		? (safeInteger(value.totalPoints) as number) === 0
-		: (safeInteger(value.totalPoints) as number) >= 0) &&
+	(expectedThroughEventId !== 0 || (safeInteger(value.totalPoints) as number) === 0) &&
 	(value.overallRank === null ||
 		(safeInteger(value.overallRank) !== null && (safeInteger(value.overallRank) as number) > 0));
 
@@ -642,11 +640,11 @@ const validAdjustment = (
 	value.multipliers.every(
 		(item) =>
 			isRecord(item) &&
-			integer(item.element) !== null &&
-			(integer(item.element) as number) > 0 &&
-			integer(item.multiplier) !== null &&
-			(integer(item.multiplier) as number) >= 0 &&
-			(integer(item.multiplier) as number) <= 3
+			safeInteger(item.element) !== null &&
+			(safeInteger(item.element) as number) > 0 &&
+			safeInteger(item.multiplier) !== null &&
+			(safeInteger(item.multiplier) as number) >= 0 &&
+			(safeInteger(item.multiplier) as number) <= 3
 	) &&
 	Array.isArray(value.automaticSubs) &&
 	validAutomaticSubs(value.automaticSubs);
@@ -656,11 +654,8 @@ const validFinalResult = (value: unknown): value is NonNullable<EntryLiveInput["
 		!isRecord(value) ||
 		!validRevisionOnly(value) ||
 		!isRecord(value.score) ||
-		integer(value.score.eventPoints) === null ||
-		(integer(value.score.eventPoints) as number) < 0 ||
-		(value.score.totalPoints !== null &&
-			(integer(value.score.totalPoints) === null ||
-				(integer(value.score.totalPoints) as number) < 0)) ||
+		safeInteger(value.score.eventPoints) === null ||
+		(value.score.totalPoints !== null && safeInteger(value.score.totalPoints) === null) ||
 		!Array.isArray(value.picks) ||
 		value.picks.length !== 15 ||
 		!value.picks.every(validPick) ||
@@ -707,9 +702,10 @@ const validInput = (
 		new Set(picksBase.picks.map((pick) => (pick as Pick).element)).size !== 15 ||
 		picksBase.picks.filter((pick) => (pick as Pick).isCaptain).length !== 1 ||
 		picksBase.picks.filter((pick) => (pick as Pick).isViceCaptain).length !== 1 ||
-		(picksBase.chip !== null && typeof picksBase.chip !== "string") ||
-		integer(picksBase.transferCost) === null ||
-		(integer(picksBase.transferCost) as number) < 0
+		(picksBase.chip !== null &&
+			(typeof picksBase.chip !== "string" || normalizeFplChip(picksBase.chip, null) === null)) ||
+		safeInteger(picksBase.transferCost) === null ||
+		(safeInteger(picksBase.transferCost) as number) < 0
 	)
 		return false;
 	if (!(
@@ -959,29 +955,29 @@ export const GLOBAL_CHECKPOINT_SQL = `
 
 export const ENTRY_CHECKPOINT_SQL = `
 	WITH head AS (
-		SELECT publication_id, generation, picks_base_revision, content_sha256, row_count,
+		SELECT entry_id, publication_id, generation, picks_base_revision, content_sha256, row_count,
 			source_checked_at, content_updated_at, checkpointed_at, state
 		FROM competition.entry_event_pick_heads
-		WHERE season_id = $1 AND entry_id = $2 AND event_id = $3 AND state = 'COMPLETE'
+		WHERE season_id = $1 AND entry_id = ANY($2::integer[]) AND event_id = $3 AND state = 'COMPLETE'
 	), picks AS (
-		SELECT p.position, p.element_id, p.multiplier, p.is_captain, p.is_vice_captain,
+		SELECT p.entry_id, p.position, p.element_id, p.multiplier, p.is_captain, p.is_vice_captain,
 			p.active_chip, p.transfers_cost
 		FROM competition.entry_event_picks p
-		WHERE p.season_id = $1 AND p.entry_id = $2 AND p.event_id = $3
+		WHERE p.season_id = $1 AND p.entry_id = ANY($2::integer[]) AND p.event_id = $3
 	), final_result AS (
-		SELECT result.event_points, result.overall_points, result.event_picks,
+		SELECT DISTINCT ON (result.entry_id) result.entry_id, result.event_points, result.overall_points, result.event_picks,
 			result.automatic_substitutions, result.rich_synced_at, event.data_checked_at
 		FROM competition.entry_event_results result
 		JOIN fpl.events event
 			ON event.season_id = result.season_id AND event.event_id = result.event_id
 		WHERE result.season_id = $1
-			AND result.entry_id = $2
+			AND result.entry_id = ANY($2::integer[])
 			AND result.event_id = $3
 			AND result.rich_synced_at IS NOT NULL
 			AND event.finished = true
 			AND event.data_checked = true
 			AND (event.data_checked_at IS NULL OR result.rich_synced_at >= event.data_checked_at)
-		LIMIT 1
+		ORDER BY result.entry_id, result.rich_synced_at DESC
 	)
 	SELECT head.*, COALESCE(jsonb_agg(jsonb_build_object(
 		'element', picks.element_id,
@@ -998,11 +994,11 @@ export const ENTRY_CHECKPOINT_SQL = `
 		final_result.automatic_substitutions AS final_automatic_substitutions,
 		final_result.rich_synced_at AS final_source_checked_at,
 		final_result.data_checked_at AS data_checked_at
-	FROM head LEFT JOIN picks ON TRUE
-		LEFT JOIN final_result ON TRUE
-	GROUP BY head.publication_id, head.generation, head.picks_base_revision, head.content_sha256,
+	FROM head LEFT JOIN picks ON picks.entry_id = head.entry_id
+		LEFT JOIN final_result ON final_result.entry_id = head.entry_id
+	GROUP BY head.entry_id, head.publication_id, head.generation, head.picks_base_revision, head.content_sha256,
 		head.row_count, head.source_checked_at, head.content_updated_at, head.checkpointed_at, head.state,
-		final_result.event_points, final_result.overall_points, final_result.event_picks,
+		final_result.entry_id, final_result.event_points, final_result.overall_points, final_result.event_picks,
 		final_result.automatic_substitutions, final_result.rich_synced_at, final_result.data_checked_at
 `;
 
@@ -1101,7 +1097,7 @@ export const LIVE_POINTS_V2_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] =
 	{
 		name: "live-points-v2.entry-checkpoint",
 		sql: ENTRY_CHECKPOINT_SQL,
-		values: [2026, 6953, 1],
+		values: [2026, [6953], 1],
 		resultTypes: [
 			{ relation: "competition.entry_event_pick_heads", column: "publication_id", pgType: "text" },
 			{ relation: "competition.entry_event_pick_heads", column: "generation", pgType: "bigint" },
@@ -1330,21 +1326,16 @@ const readDatabaseGlobal = async (
 	}
 };
 
-const readDatabaseEntry = async (
-	context: GraphQLContext,
+const parseDatabaseEntryRow = (
 	season: string,
 	eventId: number,
-	entryId: number
-): Promise<EntryRead | null> => {
+	entryId: number,
+	row: Row | undefined
+): EntryRead | null => {
 	try {
-		const result = await context.database.query<Row>(ENTRY_CHECKPOINT_SQL, [
-			context.currentSeason.seasonId,
-			entryId,
-			eventId,
-		]);
-		const row = result.rows[0];
 		if (
 			!row ||
+			integer(row.entry_id) !== entryId ||
 			row.state !== "COMPLETE" ||
 			integer(row.row_count) !== 15 ||
 			integer(row.generation) === null ||
@@ -1384,8 +1375,7 @@ const readDatabaseEntry = async (
 			finalPicks &&
 			finalAutomaticSubs &&
 			finalEventPoints !== null &&
-			finalEventPoints >= 0 &&
-			(finalTotalPoints === null || finalTotalPoints >= 0) &&
+			(finalTotalPoints === null || Number.isSafeInteger(finalTotalPoints)) &&
 			finalSourceCheckedAt &&
 			(!dataCheckedAt || Date.parse(finalSourceCheckedAt) >= Date.parse(dataCheckedAt))
 		);
@@ -1476,12 +1466,64 @@ const readDatabaseEntry = async (
 			input,
 			servedFrom: "POSTGRES_CHECKPOINT",
 		};
+	} catch {
+		return null;
+	}
+};
+
+const readDatabaseEntry = async (
+	context: GraphQLContext,
+	season: string,
+	eventId: number,
+	entryId: number
+): Promise<EntryRead | null> => {
+	try {
+		const result = await context.database.query<Row>(ENTRY_CHECKPOINT_SQL, [
+			context.currentSeason.seasonId,
+			[entryId],
+			eventId,
+		]);
+		return parseDatabaseEntryRow(season, eventId, entryId, result.rows[0]);
 	} catch (error) {
 		context.logger.warn(
 			{ err: error, entryId, eventId },
 			"Entry Live Points V2 PostgreSQL checkpoint unavailable"
 		);
 		return null;
+	}
+};
+
+const readDatabaseEntries = async (
+	context: GraphQLContext,
+	season: string,
+	eventId: number,
+	entryIds: readonly number[]
+): Promise<Map<number, EntryRead>> => {
+	const uniqueIds = [...new Set(entryIds)].filter(
+		(entryId) => Number.isSafeInteger(entryId) && entryId > 0
+	);
+	if (uniqueIds.length === 0) return new Map();
+	try {
+		const result = await context.database.query<Row>(ENTRY_CHECKPOINT_SQL, [
+			context.currentSeason.seasonId,
+			uniqueIds,
+			eventId,
+		]);
+		const requested = new Set(uniqueIds);
+		const entries = new Map<number, EntryRead>();
+		for (const row of result.rows) {
+			const entryId = integer(row.entry_id);
+			if (entryId === null || !requested.has(entryId)) continue;
+			const parsed = parseDatabaseEntryRow(season, eventId, entryId, row);
+			if (parsed) entries.set(entryId, parsed);
+		}
+		return entries;
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, entryCount: uniqueIds.length, eventId },
+			"Entry Live Points V2 PostgreSQL checkpoint batch unavailable"
+		);
+		return new Map();
 	}
 };
 
@@ -2603,7 +2645,7 @@ export const calcLivePointsByEntryV2 = async (
 	context: GraphQLContext,
 	eventId: number,
 	entryId: number,
-	options: { scoreCoreRevision?: string } = {}
+	options: { scoreCoreRevision?: string; prefetchedEntry?: EntryRead | null } = {}
 ): Promise<LiveCalcDataV2> => {
 	if (
 		!Number.isSafeInteger(eventId) ||
@@ -2643,10 +2685,13 @@ export const calcLivePointsByEntryV2 = async (
 					)
 		);
 	}
-	const redisEntry = await readRedisEntry(context, eventId, entryId);
+	const hasPrefetchedEntry = Object.prototype.hasOwnProperty.call(options, "prefetchedEntry");
+	const redisEntry = hasPrefetchedEntry
+		? (options.prefetchedEntry ?? null)
+		: await readRedisEntry(context, eventId, entryId);
 	const entryRead =
 		redisEntry ??
-		(processLkg
+		(hasPrefetchedEntry || processLkg
 			? null
 			: await readDatabaseEntry(context, context.currentSeason.seasonCode, eventId, entryId));
 	if (!entryRead) {
@@ -2696,6 +2741,46 @@ export const calcLivePointsForEntriesV2 = async (
 	await readCore(context);
 	await preloadEntryMetadata(context, uniqueIds);
 	const concurrency = Math.min(32, Math.max(1, uniqueIds.length));
+	const prefetchedEntries = new Map<number, EntryRead | null>();
+	const processLkgEntryIds = new Set<number>();
+	// Resolve the global publication once before probing entry inputs.  If the
+	// global authority is unavailable, per-entry calls can use their process LKG
+	// without issuing a pointless checkpoint query for every entry.
+	const global = await readGlobal(context, eventId, options.scoreCoreRevision);
+	if (global) {
+		let probeCursor = 0;
+		const probeWorker = async (): Promise<void> => {
+			for (;;) {
+				const index = probeCursor++;
+				if (index >= uniqueIds.length) return;
+				const entryId = uniqueIds[index]!;
+				const lkgKey = [
+					context.currentSeason.seasonCode,
+					eventId,
+					entryId,
+					options.scoreCoreRevision ?? "current",
+				].join(":");
+				if (readLiveLkg(lkgKey)) {
+					processLkgEntryIds.add(entryId);
+					prefetchedEntries.set(entryId, null);
+					continue;
+				}
+				prefetchedEntries.set(entryId, await readRedisEntry(context, eventId, entryId));
+			}
+		};
+		await Promise.all(Array.from({ length: concurrency }, () => probeWorker()));
+		const databaseFallbackIds = uniqueIds.filter(
+			(entryId) => !processLkgEntryIds.has(entryId) && prefetchedEntries.get(entryId) === null
+		);
+		const databaseEntries = await readDatabaseEntries(
+			context,
+			context.currentSeason.seasonCode,
+			eventId,
+			databaseFallbackIds
+		);
+		for (const entryId of databaseFallbackIds)
+			prefetchedEntries.set(entryId, databaseEntries.get(entryId) ?? null);
+	}
 	let cursor = 0;
 	const worker = async (): Promise<void> => {
 		for (;;) {
@@ -2703,7 +2788,13 @@ export const calcLivePointsForEntriesV2 = async (
 			if (index >= uniqueIds.length) return;
 			const entryId = uniqueIds[index]!;
 			try {
-				results.set(entryId, await calcLivePointsByEntryV2(context, eventId, entryId, options));
+				const calculationOptions = prefetchedEntries.has(entryId)
+					? { ...options, prefetchedEntry: prefetchedEntries.get(entryId) ?? null }
+					: options;
+				results.set(
+					entryId,
+					await calcLivePointsByEntryV2(context, eventId, entryId, calculationOptions)
+				);
 			} catch (error) {
 				errors.push({
 					entryId,
