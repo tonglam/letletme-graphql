@@ -67,7 +67,47 @@ def load_manifest(path: Path) -> tuple[dict[str, Any], list[str]]:
     return manifest, skills
 
 
-def source_checkout(registry_source: Path | None, temporary_root: Path) -> Path:
+def _offline_registry_candidates(runtime_root: Path, advertised: list[str]) -> list[Path]:
+    """Find a local Git checkout that can prove the immutable registry pin."""
+
+    candidates: list[Path] = []
+    configured = os.environ.get("CODEX_REGISTRY_SOURCE")
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    skills_root = runtime_root.expanduser().resolve() / "skills"
+    for name in advertised:
+        mount = skills_root / name
+        if not mount.is_symlink():
+            continue
+        try:
+            resolved = mount.resolve(strict=True)
+        except OSError:
+            continue
+        for parent in (resolved, *resolved.parents):
+            if (parent / ".git").exists():
+                candidates.append(parent)
+                break
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+def source_checkout(
+    registry_source: Path | None,
+    temporary_root: Path,
+    *,
+    runtime_root: Path,
+    advertised: list[str],
+) -> Path:
     if registry_source is not None:
         checkout = registry_source.resolve()
         try:
@@ -77,6 +117,15 @@ def source_checkout(registry_source: Path | None, temporary_root: Path) -> Path:
         if inside_worktree != "true":
             raise SystemExit(f"registry source is not a Git checkout: {checkout}")
         return checkout
+    for checkout in _offline_registry_candidates(runtime_root, advertised):
+        try:
+            inside_worktree = git(checkout, "rev-parse", "--is-inside-work-tree", capture=True).strip()
+            git(checkout, "cat-file", "-e", f"{EXPECTED_REGISTRY['ref']}^{{commit}}")
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if inside_worktree == "true":
+            print(f"using verified offline registry source: {checkout}")
+            return checkout
     checkout = temporary_root / "config"
     repository = EXPECTED_REGISTRY["repository"]
     try:
@@ -97,8 +146,8 @@ def source_checkout(registry_source: Path | None, temporary_root: Path) -> Path:
         git(checkout, "fetch", "--depth=1", "origin", EXPECTED_REGISTRY["ref"])
     except subprocess.CalledProcessError as exc:
         raise SystemExit(
-            "unable to fetch the pinned workspace config; provide --registry-source "
-            "with an authenticated checkout"
+            "unable to fetch the pinned workspace config; provide --registry-source, "
+            "set CODEX_REGISTRY_SOURCE, or mount a verified runtime checkout"
         ) from exc
     return checkout
 
@@ -200,14 +249,19 @@ def main() -> int:
     # would turn a symlink into its target and bypass the immutable-manifest
     # requirement enforced by ``load_manifest``.
     manifest, advertised = load_manifest(args.manifest)
+    configured_runtime_root = args.runtime_root
+    runtime_root = configured_runtime_root or Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
     with tempfile.TemporaryDirectory(prefix="codex-global-skills-") as temporary:
         source_root = verify_registry(
-            source_checkout(args.registry_source, Path(temporary)),
+            source_checkout(
+                args.registry_source,
+                Path(temporary),
+                runtime_root=runtime_root,
+                advertised=advertised,
+            ),
             advertised,
             Path(temporary) / "materialized",
         )
-        configured_runtime_root = args.runtime_root
-        runtime_root = configured_runtime_root or Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
         destination_root = runtime_root.expanduser().resolve() / "skills"
         missing: list[str] = []
         for name in advertised:

@@ -1,11 +1,11 @@
 name: instruction-integrity
 
 on:
-  # pull_request is a secret-free, head-associated required check. The
-  # validator itself comes from the trusted base checkout; the proposed tree
-  # is input data only. Run it for every pull request because the contract can
-  # add arbitrary instruction paths that cannot be represented by a fixed
-  # paths filter.
+  # pull_request is an always-running, secret-free bootstrap. It is not the
+  # required gate: the trusted pull_request_target job below publishes the
+  # required check from base-branch workflow code. Keeping this bootstrap is
+  # useful for the first installation, before the base branch has the trusted
+  # workflow and validator.
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
   # The base-branch workflow is trusted; the proposed checkout is data only.
@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 concurrency:
   # pull_request_target exposes the base ref as github.ref; use the PR number
@@ -32,15 +33,8 @@ concurrency:
 jobs:
   bootstrap:
     if: github.event_name == 'pull_request'
-    # This is the head-associated required check.  It executes only the
-    # immutable validator checked out from the base branch against the
-    # proposed tree, so the check reports the exact pull-request head while
-    # never importing contributor-controlled Python.
-    name: instruction-integrity
+    name: instruction-integrity-bootstrap
     env:
-      # A label event is the only head-associated event that can authorize a
-      # canonical-config transition. The trusted target job independently
-      # verifies that the label was applied by the repository owner.
       GOVERNANCE_UPDATE_APPROVED: ${{ github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && github.event.sender.login == github.repository_owner }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -51,7 +45,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           path: target
           persist-credentials: false
-      - name: Checkout trusted base validator (read-only)
+      - name: Checkout trusted base contract (read-only)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -137,19 +131,28 @@ jobs:
           PY
       - name: Validate pull request head with trusted validator
         run: |
-          extra_args=()
-          if test "$GOVERNANCE_UPDATE_APPROVED" = true; then
-            extra_args+=(--allow-config-commit-update)
+          # The first landing may predate the repository validator. Once the
+          # base contains it, run that immutable copy against the PR head; the
+          # structural scaffold check above remains mandatory in either case.
+          if test -f trusted/.codex/validate_instructions.py && \
+             test -f trusted/.codex/instruction-integrity.json && \
+             test -f trusted/.codex/instruction-policy.v1.json; then
+            extra_args=()
+            if test "$GOVERNANCE_UPDATE_APPROVED" = true; then
+              extra_args+=(--allow-config-commit-update)
+            fi
+            python3 trusted/.codex/validate_instructions.py "${extra_args[@]}" \
+              --repo target \
+              --contract target/.codex/instruction-integrity.json \
+              --policy target/.codex/instruction-policy.v1.json \
+              --trusted-contract trusted/.codex/instruction-integrity.json \
+              --trusted-policy trusted/.codex/instruction-policy.v1.json
+          else
+            echo 'initial governance installation: trusted validator is not present on the base; structural bootstrap completed'
           fi
-          python3 trusted/.codex/validate_instructions.py "${extra_args[@]}" \
-            --repo target \
-            --contract target/.codex/instruction-integrity.json \
-            --policy target/.codex/instruction-policy.v1.json \
-            --trusted-contract trusted/.codex/instruction-integrity.json \
-            --trusted-policy trusted/.codex/instruction-policy.v1.json
   validate:
     if: github.event_name == 'pull_request_target' || github.event_name == 'push'
-    name: instruction-integrity-trusted
+    name: instruction-integrity
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -309,6 +312,8 @@ jobs:
                   if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                       continue
                   for node in ast.walk(statement):
+                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in protected:
+                          rebound_required.add(node.name)
                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in protected:
                           rebound_required.add(node.id)
                       if isinstance(node, ast.alias) and node.asname in protected:
@@ -317,7 +322,7 @@ jobs:
                   raise SystemExit(
                       f"{path}: protected definitions are rebound: {', '.join(sorted(rebound_required))}"
                   )
-              missing = sorted(set(required) - definitions)
+              missing = sorted(set(required) - set(definitions))
               if missing:
                   raise SystemExit(f"{path}: missing required definitions: {', '.join(missing)}")
               return tree
@@ -385,6 +390,7 @@ jobs:
                   if not main_calls:
                       raise SystemExit(f"approved {label} module entrypoint does not call main")
                   propagating = False
+                  propagating_line = None
                   for statement in node.body:
                       if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
                           outer = statement.value
@@ -396,6 +402,7 @@ jobs:
                               and any(call in outer.args for call in main_calls)
                           ):
                               propagating = True
+                              propagating_line = statement.lineno
                       if isinstance(statement, ast.Raise) and isinstance(statement.exc, ast.Call):
                           outer = statement.exc
                           if (
@@ -404,8 +411,11 @@ jobs:
                               and any(call in outer.args for call in main_calls)
                           ):
                               propagating = True
+                              propagating_line = statement.lineno
                   if not propagating:
                       raise SystemExit(f"approved {label} module entrypoint must propagate main status")
+                  if any(line < propagating_line for line in direct_terminator_lines(node.body)):
+                      raise SystemExit(f"approved {label} module entrypoint can terminate before main")
                   return
               raise SystemExit(f"approved {label} is missing an __main__ entrypoint")
 
@@ -548,10 +558,46 @@ jobs:
                           lines.extend(direct_terminator_lines(branch))
               return lines
 
+          def module_rebindings(tree, names):
+              """Find module-scope assignments/imports that replace call targets."""
+
+              protected = set(names)
+              defined = set()
+              rebound = set()
+              for statement in tree.body:
+                  if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                      if statement.name in protected:
+                          if isinstance(statement, ast.ClassDef) or statement.name in defined:
+                              rebound.add(statement.name)
+                          defined.add(statement.name)
+                      continue
+                  for node in ast.walk(statement):
+                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in protected:
+                          rebound.add(node.name)
+                      if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in protected:
+                          rebound.add(node.id)
+                      if isinstance(node, ast.alias) and node.asname in protected:
+                          rebound.add(node.asname)
+              return rebound
+
           def check_validator_shape(tree):
               parse_yaml = function_node(tree, "parse_yaml_mapping")
               validate = function_node(tree, "validate_asset")
               main = function_node(tree, "main")
+              rebound = module_rebindings(
+                  tree,
+                  {
+                      "parse_yaml_mapping",
+                      "validate_asset",
+                      "main",
+                      "_parse_scalar",
+                      "validate_skill",
+                      "_validate_instruction_file",
+                      "_validate_global_manifest",
+                  },
+              )
+              if rebound:
+                  raise SystemExit(f"approved validator rebinds protected names: {', '.join(sorted(rebound))}")
               required_calls = {
                   "parse_yaml_mapping": (parse_yaml, {"_parse_scalar"}),
                   "validate_asset": (validate, {"validate_skill", "_validate_instruction_file", "_validate_global_manifest"}),
@@ -594,6 +640,33 @@ jobs:
               raise SystemExit("validator semantic fixture unexpectedly passed")
           check_validator_shape(validator)
           check_module_entrypoint(validator, "validator")
+          call_exit_fixture = ast.parse(
+              "def parse_yaml_mapping():\n  _parse_scalar(); return {}\n"
+              "def validate_asset():\n  import sys; sys.exit(0); validate_skill(); _validate_instruction_file(); _validate_global_manifest()\n"
+              "def main():\n  try: validate_asset()\n  except Exception: raise\n"
+          )
+          try:
+              check_validator_shape(call_exit_fixture)
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("call-exit validator fixture unexpectedly passed")
+          early_entrypoint_fixture = ast.parse(
+              "def main(): return 0\n"
+              "if __name__ == '__main__':\n  sys.exit(0)\n  sys.exit(main())\n"
+          )
+          try:
+              check_module_entrypoint(early_entrypoint_fixture, "validator")
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("early-exit entrypoint fixture unexpectedly passed")
+          rebound_fixture = ast.parse(
+              "def validate_skill(): return None\n"
+              "validate_skill = lambda: None\n"
+          )
+          if "validate_skill" not in module_rebindings(rebound_fixture, {"validate_skill"}):
+              raise SystemExit("module-rebinding fixture unexpectedly passed")
 
           def check_provisioner_shape(tree):
               required_calls = {
@@ -687,49 +760,131 @@ jobs:
             push_branches = Array(push["branches"]).map(&:to_s)
             raise "protected branch push gate is missing" unless %w[main master].all? { |item| push_branches.include?(item) }
             raise "push gate must not be path-filtered" if push.key?("paths") || push.key?("paths-ignore")
+            root_defaults = workflow["defaults"]
+            raise "workflow defaults may not override shell or working directory" if root_defaults.is_a?(Hash) && (root_defaults.dig("run", "shell") || root_defaults.dig("run", "working-directory"))
             jobs = workflow["jobs"]
             raise "missing bootstrap/validate jobs" unless jobs.is_a?(Hash) && jobs["bootstrap"].is_a?(Hash) && jobs["validate"].is_a?(Hash)
             raise "unexpected workflow job is present" unless jobs.keys.map(&:to_s).sort == %w[bootstrap validate]
             jobs.each do |job_name, job|
               next unless job.is_a?(Hash)
+              setup_count = 0
               raise "job-level permissions are not allowed: #{job_name}" if job.key?("permissions")
               raise "job-level failure suppression is not allowed: #{job_name}" if job.key?("continue-on-error")
+              if job.dig("defaults", "run", "shell") || job.dig("defaults", "run", "working-directory")
+                raise "job defaults may not override shell or working directory: #{job_name}"
+              end
+              Array(job["steps"]).each do |step|
+                next unless step.is_a?(Hash)
+                raise "step shell override is not allowed: #{job_name}" if step.key?("shell")
+                if step.key?("uses")
+                  uses = step["uses"].to_s
+                  allowed = [
+                    "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+                    "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+                  ]
+                  raise "unrecognized or unpinned action step: #{uses}" unless allowed.include?(uses)
+                  raise "local action execution is not allowed" if uses.start_with?("./", "/")
+                  setup_count += 1 if uses == "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065"
+                end
+              end
+              raise "each integrity job must pin exactly one setup-python action" unless setup_count == 1
+            end
+            allowed_step_names = {
+              "bootstrap" => [
+                "Checkout proposed tree (read-only)",
+                "Checkout trusted base contract (read-only)",
+                "Require the governance scaffold",
+                "Validate pull request head with trusted validator",
+              ],
+              "validate" => [
+                "Checkout proposed tree (read-only)",
+                "Checkout trusted base contract and validator",
+                "Verify pinned global registry contents",
+                "Protect the integrity gate files",
+                "Protect instruction contents unless explicitly approved",
+                "Validate AGENTS.md and skills",
+                "Publish head-associated instruction-integrity check",
+              ],
+            }
+            jobs.each do |job_name, job|
+              Array(job["steps"]).each do |step|
+                next unless step.is_a?(Hash)
+                name = step["name"].to_s
+                next if step["uses"].to_s == "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065" && name.empty?
+                raise "unrecognized workflow step: #{job_name}/#{name}" unless allowed_step_names.fetch(job_name).include?(name)
+              end
+              names = Array(job["steps"]).map { |step| step.is_a?(Hash) ? step["name"].to_s : nil }.compact
+              allowed_step_names.fetch(job_name).each do |required_name|
+                raise "workflow step is missing or duplicated: #{job_name}/#{required_name}" unless names.count(required_name) == 1
+              end
             end
             bootstrap = jobs["bootstrap"]
             gate = jobs["validate"]
             raise "bootstrap is not limited to pull_request" unless bootstrap["if"].to_s.include?("github.event_name == 'pull_request'")
-            raise "head-associated required check name is missing" unless bootstrap["name"].to_s == "instruction-integrity"
-            raise "trusted gate name is missing" unless gate["name"].to_s == "instruction-integrity-trusted"
+            raise "bootstrap check name is missing" unless bootstrap["name"].to_s == "instruction-integrity-bootstrap"
+            raise "trusted gate name is missing" unless gate["name"].to_s == "instruction-integrity"
             gate_condition = gate["if"].to_s.gsub(/\s+/, " ").strip
             expected_gate_condition = "github.event_name == 'pull_request_target' || github.event_name == 'push'"
             raise "trusted gate condition is incomplete or disabled" unless gate_condition == expected_gate_condition
             expected_approval = "${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') && github.event.sender.login == github.repository_owner }}"
             raise "approval expression is incomplete or broadened" unless gate.dig("env", "GOVERNANCE_UPDATE_APPROVED").to_s == expected_approval
             expected_head_approval = "${{ github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && github.event.sender.login == github.repository_owner }}"
-            raise "head approval expression is incomplete or broadened" unless bootstrap.dig("env", "GOVERNANCE_UPDATE_APPROVED").to_s == expected_head_approval
-            checkout = lambda do |job, path|
-              Array(job["steps"]).find do |step|
+            raise "bootstrap approval expression is incomplete or broadened" unless bootstrap.dig("env", "GOVERNANCE_UPDATE_APPROVED").to_s == expected_head_approval
+            checkout_steps = lambda do |job, path|
+              Array(job["steps"]).select do |step|
                 step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/checkout@") && step.dig("with", "path").to_s == path
               end
             end
-            target_bootstrap = checkout.call(bootstrap, "target")
-            target_gate = checkout.call(gate, "target")
-            trusted_gate = checkout.call(gate, "trusted")
-            trusted_bootstrap = checkout.call(bootstrap, "trusted")
+            %w[bootstrap validate].each do |job_name|
+              job = jobs[job_name]
+              %w[target trusted].each do |path|
+                count = checkout_steps.call(job, path).length
+                raise "expected exactly one #{path} checkout in #{job_name}" unless count == 1
+              end
+            end
+            target_bootstrap = checkout_steps.call(bootstrap, "target").first
+            target_gate = checkout_steps.call(gate, "target").first
+            trusted_gate = checkout_steps.call(gate, "trusted").first
+            trusted_bootstrap = checkout_steps.call(bootstrap, "trusted").first
+            checkout_steps.call(bootstrap, "target").concat(checkout_steps.call(bootstrap, "trusted"), checkout_steps.call(gate, "target"), checkout_steps.call(gate, "trusted")).each do |step|
+              with = step["with"] || {}
+              raise "checkout options are broadened" unless (with.keys.map(&:to_s) - %w[path persist-credentials ref]).empty?
+              raise "checkout credentials must be disabled" unless with["persist-credentials"].to_s == "false"
+              raise "checkout repository must remain the current repository" if with.key?("repository") && with["repository"].to_s != "${{ github.repository }}"
+            end
             raise "bootstrap checkout must pin pull request head" unless target_bootstrap&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha }}"
             raise "bootstrap trusted checkout must pin pull request base" unless trusted_bootstrap&.dig("with", "ref").to_s == "${{ github.event.pull_request.base.sha }}"
             raise "target checkout must pin pull request head" unless target_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha || github.sha }}"
             raise "trusted checkout must pin pull request base" unless trusted_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.base.sha || github.sha }}"
             permissions = workflow["permissions"]
-            raise "workflow must grant only contents: read" unless permissions.is_a?(Hash) && permissions.keys.map(&:to_s) == ["contents"] && permissions["contents"].to_s == "read"
+            raise "workflow permissions must be contents: read plus checks: write" unless permissions.is_a?(Hash) && permissions.keys.map(&:to_s).sort == %w[checks contents] && permissions["contents"].to_s == "read" && permissions["checks"].to_s == "write"
             bootstrap_steps = Array(bootstrap["steps"])
             head_validator = bootstrap_steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate pull request head with trusted validator" }
             raise "head-associated trusted validator step is missing" unless head_validator
             raise "head validator step may be conditionally skipped" if head_validator.key?("if") && !head_validator["if"].to_s.strip.empty?
             raise "head validator step may not ignore failures" if head_validator["continue-on-error"] == true || head_validator["continue-on-error"].to_s.casecmp("true").zero?
             head_run = head_validator["run"].to_s
-            raise "head validator must define a bounded argument array" unless head_run.include?("extra_args=()") && head_run.include?("extra_args+=(--allow-config-commit-update)")
+            raise "head validator may not use a heredoc or failure masking" if head_run.include?("<<") || head_run.include?("||")
+            raise "head validator bootstrap branch is missing" unless head_run.include?("if test -f trusted/.codex/validate_instructions.py") && head_run.include?("initial governance installation")
             raise "head validator must invoke the trusted validator" unless head_run.match?(/python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\\)/)
+            raise "head validator approval branch is missing" unless head_run.include?("if test \"$GOVERNANCE_UPDATE_APPROVED\" = true; then") && head_run.include?("extra_args+=(--allow-config-commit-update)")
+            head_logical_commands = []
+            head_current = ""
+            head_run.each_line do |line|
+              piece = line.strip
+              if piece.end_with?("\\")
+                head_current << piece[0...-1] << " "
+              else
+                head_logical_commands << (head_current + piece)
+                head_current = ""
+              end
+            end
+            head_logical_commands << head_current unless head_current.empty?
+            head_command = head_logical_commands.find do |line|
+              line.match?(/python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\z)/)
+            end
+            raise "head validator command is missing or not executable" unless head_command
+            raise "head validator command must be standalone" if head_command.match?(/[;&|<>]/)
             [
               "--repo target",
               "--contract target/.codex/instruction-integrity.json",
@@ -737,23 +892,24 @@ jobs:
               "--trusted-contract trusted/.codex/instruction-integrity.json",
               "--trusted-policy trusted/.codex/instruction-policy.v1.json",
             ].each do |needle|
-              raise "head validator command is missing #{needle}" unless head_run.include?(needle)
+              raise "head validator command is missing #{needle}" unless head_command.include?(needle)
             end
+            raise "head validator command can terminate before validation" if head_run.lines.any? { |line| line.match?(/\b(?:exit|return|false)\s+0\b/) }
             steps = Array(gate["steps"])
               allowed_trusted_steps = ["Verify pinned global registry contents", "Protect the integrity gate files", "Protect instruction contents unless explicitly approved", "Validate AGENTS.md and skills"]
             steps.each do |step|
               next unless step.is_a?(Hash)
               run_text = step["run"].to_s
               next if run_text.empty?
-              if run_text.match?(/\btrusted(?:\/|\b)/)
+                  if run_text.match?(/\btrusted(?:\/|\b)/)
                 unless allowed_trusted_steps.include?(step["name"].to_s)
                   raise "untrusted workflow step references the trusted checkout"
                 end
-                  if run_text.lines.any? { |line| line.match?(/^\s*(?:cp|install|mkdir|mv|rm|rmdir|touch|truncate|tee|cat|echo|printf)\b[^\n]*\btrusted(?:\/|\b)/) || line.match?(/^\s*(?:python3|ruby|perl|sed)\b[^\n]*(?:>>?|\|\s*tee\b)[^\n]*\btrusted(?:\/|\b)/) || line.match?(/\b(?:write_text|write_bytes|unlink|rename|replace|mkdir)\b[^\n]*\btrusted(?:\/|\b)/) }
+                  if run_text.lines.any? { |line| line.match?(/\b(?:cp|copy|copyfile|install|mkdir|makedirs|mv|move|rm|rmdir|rmtree|touch|truncate|tee|cat|echo|printf|sed|chmod)\b[^\n]*\btrusted(?:\/|\b)/) || line.match?(/\b(?:write_text|write_bytes|unlink|rename|replace|mkdir|chmod)\b[^\n]*\btrusted(?:\/|\b)/) || line.match?(/\bopen\s*\([^\n]*\btrusted(?:\/|\b)[^\n]*[\"'](?:w|a|x|\+)\b/) || line.match?(/\b(?:git|gh)\b[^\n]*\btrusted(?:\/|\b)[^\n]*(?:checkout|reset|clean|apply|write|push|commit)/) }
                   raise "workflow step can mutate the trusted checkout"
                 end
               end
-              if step["working-directory"].to_s == "trusted"
+              if step["working-directory"].to_s == "trusted" || step["working-directory"].to_s.start_with?("trusted/")
                 raise "workflow step may not execute from the trusted checkout"
               end
             end
@@ -772,12 +928,35 @@ jobs:
             ].each do |needle|
               raise "integrity gate-file protection is incomplete: #{needle}" unless gate_files_run.include?(needle)
             end
+            publish_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Publish head-associated instruction-integrity check" }
+            raise "head check publication step is missing" unless publish_step
+            raise "head check publication must run after failures" unless publish_step["if"].to_s.gsub(/\s+/, " ").strip == "always() && github.event_name == 'pull_request_target'"
+            raise "head check publication may not ignore failures" if publish_step["continue-on-error"] == true || publish_step["continue-on-error"].to_s.casecmp("true").zero?
+            publish_run = publish_step["run"].to_s
+            raise "head check publication may not mask failures" if publish_run.match?(/\|\|\s*true\b/)
+            [
+              "set -eu",
+              "case \"$HEAD_SHA\" in",
+              "HEAD_SHA",
+              "VALIDATION_OUTCOME",
+              "head_sha",
+              "instruction-integrity",
+              "conclusion=success",
+              "test \"$VALIDATION_OUTCOME\" = success || conclusion=failure",
+              "conclusion=failure",
+              "gh api --method POST",
+              "check-runs",
+              "--input /tmp/instruction-integrity-check.json",
+            ].each do |needle|
+              raise "head check publication is incomplete: #{needle}" unless publish_run.include?(needle)
+            end
             validate_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate AGENTS.md and skills" }
             raise "trusted validator step is missing" unless validate_step
             raise "trusted validator step may be conditionally skipped" if validate_step.key?("if") && !validate_step["if"].to_s.strip.empty?
             raise "trusted validator step may not ignore failures" if validate_step["continue-on-error"] == true || validate_step["continue-on-error"].to_s.casecmp("true").zero?
             run = validate_step["run"].to_s
             raise "trusted validator step disables errexit" if run.lines.any? { |line| line.strip.match?(/\Aset\s+\+(?:e|o\s+errexit)\b/) }
+            raise "trusted validator step may not use a heredoc or failure masking" if run.include?("<<") || run.include?("||")
             logical_commands = []
             current = ""
             run.each_line do |line|
@@ -803,7 +982,16 @@ jobs:
             %w[--trusted-policy --trusted-contract --registry-source].each do |needle|
               raise "trusted validator command is missing #{needle}" unless command.split.include?(needle) || command.include?("#{needle} ")
             end
+            [
+              "--repo target",
+              "--contract target/.codex/instruction-integrity.json",
+              "--policy target/.codex/instruction-policy.v1.json",
+              "--expected-config-commit",
+            ].each do |needle|
+              raise "trusted validator command is missing #{needle}" unless command.include?(needle)
+            end
             raise "trusted validator command must be standalone and failure-propagating" if command.match?(/[;&|<>]/)
+            raise "trusted validator command can terminate before validation" if run.lines.any? { |line| line.match?(/\b(?:exit|return|false)\s+0\b/) }
             %w[AGENTS.md .codex/global-skills.json .codex/provision_global_skills.py].each do |needle|
               raise "bootstrap protection is missing #{needle}" unless steps.any? { |step| step.is_a?(Hash) && step["run"].to_s.include?(needle) }
             end
@@ -919,6 +1107,7 @@ jobs:
                   raise SystemExit(f"governed instruction changed without instruction-governance-approved label: {relative}")
           PY
       - name: Validate AGENTS.md and skills
+        id: validate_instructions
         run: |
           expected_config_commit="$(python3 -c 'import json; print(json.load(open("trusted/.codex/instruction-integrity.json", encoding="utf-8"))["canonical_config_commit"])')"
           extra_args=()
@@ -934,3 +1123,38 @@ jobs:
             --expected-config-commit "$expected_config_commit" \
             --registry-source registry-source \
             --json
+      - name: Publish head-associated instruction-integrity check
+        if: always() && github.event_name == 'pull_request_target'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          VALIDATION_OUTCOME: ${{ steps.validate_instructions.outcome }}
+        run: |
+          set -eu
+          case "$HEAD_SHA" in
+            ''|*[!0-9a-f]*)
+              echo 'pull request head is not a full lowercase commit SHA' >&2
+              exit 1
+              ;;
+          esac
+          conclusion=success
+          test "$VALIDATION_OUTCOME" = success || conclusion=failure
+          python3 - "$HEAD_SHA" "$conclusion" <<'PY' > /tmp/instruction-integrity-check.json
+          import json
+          import sys
+
+          head_sha, conclusion = sys.argv[1:]
+          print(json.dumps({
+              "name": "instruction-integrity",
+              "head_sha": head_sha,
+              "status": "completed",
+              "conclusion": conclusion,
+              "output": {
+                  "title": "Trusted instruction integrity gate",
+                  "summary": "Published by the base-branch pull_request_target workflow.",
+              },
+          }))
+          PY
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/check-runs" \
+            --input /tmp/instruction-integrity-check.json >/dev/null
