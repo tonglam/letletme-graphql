@@ -10,7 +10,10 @@ on:
       - .codex/**
       - .github/workflows/instruction-integrity.yml
   # The base-branch workflow is trusted; the proposed checkout is data only.
+  # Label changes must re-evaluate the exact labeled head, and removing the
+  # label must revoke the transition immediately.
   pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches:
       - main
@@ -21,8 +24,8 @@ permissions:
 
 concurrency:
   # pull_request_target exposes the base ref as github.ref; use the PR number
-  # so one PR cannot cancel another. Push runs use the unique run id fallback.
-  group: instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}
+  # so one PR cannot cancel another. Push runs remain grouped by branch.
+  group: instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}
   cancel-in-progress: true
 
 jobs:
@@ -86,8 +89,16 @@ jobs:
               fail('global manifest must pin a full commit and content digest')
           if not isinstance(manifest.get('skills'), list) or set(manifest['skills']) != set(contract['required_global_skills']):
               fail('global manifest skill list must match the contract')
-          agents = (root / 'AGENTS.md').read_text(encoding='utf-8')
-          if len(agents.strip()) < 200 or not all(marker in agents.casefold() for marker in ('quota', 'tests', 'scripts', 'finding', 'resolved', 'cleanup')):
+          agents = ' '.join((root / 'AGENTS.md').read_text(encoding='utf-8').casefold().split())
+          required_clauses = (
+              'review may be skipped only after two consecutive explicit quota-limit responses',
+              'every p0-p3 finding must be dispositioned and its thread resolved',
+              'only a finding confined to tests/scripts gets the time exception',
+              'p2/p3 anywhere else must be actually fixed and verified',
+              'merge is prohibited while any finding is undispositioned or any review thread is unresolved',
+              'after merge, clean only the exact corresponding worktree, local branch, and remote branch',
+          )
+          if len(agents) < 200 or not all(clause in agents for clause in required_clauses):
               fail('AGENTS.md is missing the operative governance clauses')
           for raw in contract['required_agents']:
               path = root / raw
@@ -109,7 +120,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      GOVERNANCE_UPDATE_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') }}
+      # Approval is valid only for the labeled event's exact head. A later
+      # synchronize event is unapproved until the maintainer labels that new
+      # head again, so a persistent label cannot authorize unseen commits.
+      GOVERNANCE_UPDATE_APPROVED: ${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') }}
     steps:
       - name: Checkout proposed tree (read-only)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -159,18 +173,36 @@ jobs:
           trusted_root = Path("trusted")
           target_root = Path("target")
           contract = json.loads((trusted_root / ".codex/instruction-integrity.json").read_text())
+
+          def surface(root, raw_paths):
+              files = {}
+              for raw in raw_paths:
+                  relative = Path(raw)
+                  if relative.is_absolute() or ".." in relative.parts:
+                      raise SystemExit(f"trusted contract path is not repository-relative: {raw}")
+                  path = root / relative
+                  if path.is_symlink():
+                      raise SystemExit(f"governed instruction may not be a symlink: {relative}")
+                  if path.is_file():
+                      candidates = [path]
+                  elif path.is_dir():
+                      candidates = [item for item in path.rglob("*") if item.is_file()]
+                  else:
+                      raise SystemExit(f"required instruction missing from trusted/target tree: {relative}")
+                  for item in candidates:
+                      if item.is_symlink():
+                          raise SystemExit(f"governed instruction may not be a symlink: {item.relative_to(root)}")
+                      item_relative = item.relative_to(root)
+                      files[str(item_relative)] = hashlib.sha256(item.read_bytes()).hexdigest()
+              return files
+
           paths = list(contract.get("required_agents", [])) + list(contract.get("required_skills", []))
-          for raw in paths:
-              relative = Path(raw)
-              if relative.is_absolute() or ".." in relative.parts:
-                  raise SystemExit(f"trusted contract path is not repository-relative: {raw}")
-              if relative.name not in {"AGENTS.md", "SKILL.md"}:
-                  relative = relative / "SKILL.md"
-              trusted = trusted_root / relative
-              target = target_root / relative
-              if not trusted.is_file() or not target.is_file():
-                  raise SystemExit(f"required instruction missing from trusted/target tree: {relative}")
-              if hashlib.sha256(trusted.read_bytes()).digest() != hashlib.sha256(target.read_bytes()).digest():
+          trusted_files = surface(trusted_root, paths)
+          target_files = surface(target_root, paths)
+          if set(trusted_files) != set(target_files):
+              raise SystemExit("governed instruction surface changed without instruction-governance-approved label")
+          for relative, digest in trusted_files.items():
+              if target_files[relative] != digest:
                   raise SystemExit(f"governed instruction changed without instruction-governance-approved label: {relative}")
           PY
       - name: Verify pinned global registry contents
@@ -191,6 +223,7 @@ jobs:
               "path": "registry/workspace-assets.json",
               "sha256": "fa1a2a5448e34376c4dccfe43c6c8a901adb9b62df3995b1f11d3aa4b9b77cb6",
           }
+          expected_source_revision = "312eaf56264f65bcc74fd7b81d8981a3517eca02"
           if descriptor != expected:
               raise SystemExit("global registry descriptor is not the trusted immutable pin")
           checkout = Path("registry-source")
@@ -206,6 +239,8 @@ jobs:
           if hashlib.sha256(blob).hexdigest() != descriptor["sha256"]:
               raise SystemExit("pinned registry content digest mismatch")
           source = json.loads(blob)
+          if source.get("source", {}).get("revision") != expected_source_revision:
+              raise SystemExit("pinned registry source revision is not the trusted canonical configuration")
           allowlist = source.get("governance", {}).get("global_skill_allowlist", [])
           names = {Path(item).name for item in allowlist if isinstance(item, str)}
           advertised = manifest.get("skills", [])
@@ -224,7 +259,8 @@ jobs:
           python3 trusted/.codex/validate_instructions.py "${extra_args[@]}" \
             --repo target \
             --contract target/.codex/instruction-integrity.json \
-            --policy trusted/.codex/instruction-policy.v1.json \
+            --policy target/.codex/instruction-policy.v1.json \
+            --trusted-policy trusted/.codex/instruction-policy.v1.json \
             --trusted-contract trusted/.codex/instruction-integrity.json \
             --expected-config-commit "$expected_config_commit" \
             --registry-source registry-source \

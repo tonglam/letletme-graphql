@@ -74,7 +74,8 @@ GLOBAL_REGISTRY_DESCRIPTOR = {
     "path": "registry/workspace-assets.json",
     "sha256": "fa1a2a5448e34376c4dccfe43c6c8a901adb9b62df3995b1f11d3aa4b9b77cb6",
 }
-IGNORED_PARTS = {".git", "node_modules", ".next", "dist"}
+CANONICAL_CONFIG_COMMIT = "312eaf56264f65bcc74fd7b81d8981a3517eca02"
+IGNORED_PARTS = {".git", "node_modules", ".next"}
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -145,6 +146,8 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
         # scalar (for example, "user's route" or "[locale]").
         if value[0] in "!&*@`>|%,?" or value[0] == "#":
             raise ValueError(f"{path}:{line_number}: reserved YAML indicator must be quoted")
+        if re.match(r"[-?:](?:\s|$)", value):
+            raise ValueError(f"{path}:{line_number}: reserved YAML indicator must be quoted")
         if re.search(r":\s", value):
             raise ValueError(f"{path}:{line_number}: colon followed by whitespace must be quoted in a YAML scalar")
         if re.fullmatch(r"(?i)(?:null|~)", value):
@@ -160,33 +163,11 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
                 raise ValueError(f"{path}:{line_number}: YAML number is not a string scalar")
             return float(value) if "." in value else int(value)
         return value
-    if scalar_only:
-        raise ValueError(f"{path}:{line_number}: expected a scalar YAML value")
-    stack: list[str] = []
-    quote: str | None = None
-    escaped = False
-    for char in value:
-        if quote == '"' and escaped:
-            escaped = False
-            continue
-        if quote == '"' and char == "\\":
-            escaped = True
-            continue
-        if quote:
-            if char == quote:
-                quote = None
-            continue
-        if char in {'"', "'"}:
-            quote = char
-        elif char in "[{(":
-            stack.append(char)
-        elif char in "]})":
-            expected = {']': '[', '}': '{', ')': '('}[char]
-            if not stack or stack.pop() != expected:
-                raise ValueError(f"{path}:{line_number}: unbalanced YAML delimiters")
-    if quote or stack or escaped:
-        raise ValueError(f"{path}:{line_number}: unterminated YAML quote or delimiter")
-    return [] if value[0] == "[" else {}
+    # The metadata used by these skills only requires mappings and scalar
+    # interface fields. Reject flow-style collections instead of pretending to
+    # parse them; accepting an empty list/map would let malformed YAML such as
+    # ``[a,,b]`` pass while a real YAML loader rejects it.
+    raise ValueError(f"{path}:{line_number}: flow-style YAML collections are unsupported")
 
 
 def parse_yaml_mapping(text: str, path: Path, *, scalar_fields: bool = False) -> dict[str, Any]:
@@ -339,7 +320,11 @@ def check_reference_links(
         target = raw_target.strip().split("#", 1)[0].strip()
         if not target or target.startswith(("http://", "https://", "mailto:", "data:", "#")):
             continue
-        candidate = (instruction_file.parent / target).resolve()
+        lexical = instruction_file.parent / target
+        candidate = lexical.resolve()
+        if not allow_external and lexical.is_symlink():
+            errors.append(f"{instruction_file}: relative reference may not be a symlink: {target}")
+            continue
         if not allow_external and not _is_within(candidate, repo.resolve()):
             errors.append(f"{instruction_file}: relative reference escapes repository: {target}")
         elif not candidate.exists():
@@ -589,6 +574,46 @@ def _validate_policy(policy: dict[str, Any], errors: list[str]) -> None:
         errors.append("policy review_rules must preserve the narrow tests/scripts exception and all-other-path P2/P3 rule")
 
 
+def _validate_policy_against_trusted(
+    policy: dict[str, Any],
+    trusted: dict[str, Any],
+    errors: list[str],
+) -> None:
+    """Allow reviewed policy evolution only when it cannot weaken the gate."""
+
+    if policy.get("version") != trusted.get("version"):
+        errors.append("proposed policy version differs from the trusted policy")
+    trusted_frontmatter = set(trusted.get("required_frontmatter", []))
+    proposed_frontmatter = set(policy.get("required_frontmatter", []))
+    if trusted_frontmatter - proposed_frontmatter:
+        errors.append("proposed policy removes trusted required frontmatter fields")
+    for key in ("max_agents_bytes", "max_skill_bytes"):
+        try:
+            if int(policy.get(key)) > int(trusted.get(key)):
+                errors.append(f"proposed policy increases {key} and weakens the gate")
+        except (TypeError, ValueError):
+            errors.append(f"proposed policy has an invalid {key}")
+    if policy.get("require_skill_entrypoint") != trusted.get("require_skill_entrypoint"):
+        errors.append("proposed policy changes the required skill entrypoint")
+    if policy.get("reference_policy") != trusted.get("reference_policy"):
+        errors.append("proposed policy changes the reference policy")
+    if policy.get("forbid_secrets_in_instructions") is not True:
+        errors.append("proposed policy must keep forbid_secrets_in_instructions enabled")
+    trusted_rules = trusted.get("review_rules", {})
+    proposed_rules = policy.get("review_rules", {})
+    if not isinstance(trusted_rules, dict) or not isinstance(proposed_rules, dict):
+        errors.append("proposed policy review_rules must remain a mapping")
+        return
+    for key, required in {
+        "all_findings": ("dispositioned", "resolved"),
+        "all_other_paths": ("P2", "P3", "resolved"),
+        "tests_and_scripts": ("tests", "scripts", "P0", "P1", "P2", "P3"),
+    }.items():
+        value = proposed_rules.get(key)
+        if not isinstance(value, str) or not all(marker.casefold() in value.casefold() for marker in required):
+            errors.append(f"proposed policy weakens review_rules.{key}")
+
+
 def _validate_against_trusted_contract(
     contract: dict[str, Any],
     trusted: dict[str, Any],
@@ -602,6 +627,8 @@ def _validate_against_trusted_contract(
         errors.append("contract asset_id does not match the trusted base contract")
     if not allow_config_commit_update and contract.get("canonical_config_commit") != trusted.get("canonical_config_commit"):
         errors.append("contract canonical_config_commit differs from the trusted base contract")
+    if allow_config_commit_update and contract.get("canonical_config_commit") != CANONICAL_CONFIG_COMMIT:
+        errors.append("approved contract canonical_config_commit is not the trusted immutable configuration revision")
     if contract.get("policy_profile") != trusted.get("policy_profile"):
         errors.append("contract policy_profile differs from the trusted base contract")
     for key in ("required_agents", "required_skills", "required_global_skills"):
@@ -658,6 +685,9 @@ def _validate_global_manifest(
         errors.append(f"{manifest_path}: pinned registry content digest does not match its descriptor")
     if not isinstance(source_manifest.get("assets"), list):
         errors.append(f"{manifest_path}: pinned registry does not contain an assets array")
+    source_metadata = source_manifest.get("source")
+    if not isinstance(source_metadata, dict) or source_metadata.get("revision") != CANONICAL_CONFIG_COMMIT:
+        errors.append(f"{manifest_path}: pinned registry source revision is not the trusted canonical configuration")
     governance = source_manifest.get("governance")
     allowlist = governance.get("global_skill_allowlist", []) if isinstance(governance, dict) else []
     source_skill_names = {
@@ -716,6 +746,7 @@ def validate_asset(
     registry_only: bool = False,
     expected_config_commit: str | None = None,
     trusted_contract: dict[str, Any] | None = None,
+    trusted_policy: dict[str, Any] | None = None,
     allow_config_commit_update: bool = False,
     registry_source: Path | None = None,
 ) -> dict[str, Any]:
@@ -732,10 +763,12 @@ def validate_asset(
                 errors,
                 allow_config_commit_update=allow_config_commit_update,
             )
-        if expected_config_commit and not allow_config_commit_update and contract.get("canonical_config_commit") != expected_config_commit:
-            errors.append(
-                f"canonical_config_commit {contract.get('canonical_config_commit')!r} does not match trusted {expected_config_commit!r}"
-            )
+    if trusted_policy is not None:
+        _validate_policy_against_trusted(policy, trusted_policy, errors)
+    if expected_config_commit and not allow_config_commit_update and contract.get("canonical_config_commit") != expected_config_commit:
+        errors.append(
+            f"canonical_config_commit {contract.get('canonical_config_commit')!r} does not match trusted {expected_config_commit!r}"
+        )
     agents = contract.get("required_agents") if contract else asset.get("agents", [])
     skills = contract.get("required_skills") if contract else asset.get("skills", [])
     if not isinstance(agents, list) or not isinstance(skills, list):
@@ -829,6 +862,7 @@ def main() -> int:
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--expected-config-commit")
     parser.add_argument("--trusted-contract", type=Path)
+    parser.add_argument("--trusted-policy", type=Path)
     parser.add_argument(
         "--registry-source",
         type=Path,
@@ -871,12 +905,19 @@ def main() -> int:
         else:
             raise ValueError("one of --contract or --registry is required")
         trusted_contract = load_json(args.trusted_contract) if args.trusted_contract else None
+        trusted_policy = load_json(args.trusted_policy) if args.trusted_policy else None
+        if trusted_policy is not None:
+            trusted_policy_errors: list[str] = []
+            _validate_policy(trusted_policy, trusted_policy_errors)
+            if trusted_policy_errors:
+                raise ValueError("trusted policy is invalid: " + "; ".join(trusted_policy_errors))
         result = validate_asset(
             asset,
             policy,
             registry_only=args.registry_only,
             expected_config_commit=args.expected_config_commit,
             trusted_contract=trusted_contract,
+            trusted_policy=trusted_policy,
             allow_config_commit_update=args.allow_config_commit_update,
             registry_source=args.registry_source,
         )
