@@ -431,7 +431,7 @@ jobs:
           def check_module_entrypoint(tree, label):
               """Require a guarded, failure-propagating call to the inspected main."""
 
-              for node in tree.body:
+              for node_index, node in enumerate(tree.body):
                   if not isinstance(node, ast.If):
                       continue
                   test = node.test
@@ -486,6 +486,8 @@ jobs:
                               propagating_line = statement.lineno
                   if not propagating:
                       raise SystemExit(f"approved {label} module entrypoint must propagate main status")
+                  if direct_terminator_lines(tree.body[:node_index]):
+                      raise SystemExit(f"approved {label} module entrypoint is preceded by a terminating module statement")
                   if any(line < propagating_line for line in direct_terminator_lines(node.body)):
                       raise SystemExit(f"approved {label} module entrypoint can terminate before main")
                   return
@@ -762,6 +764,40 @@ jobs:
                       lines.extend(direct_terminator_lines(statement.finalbody))
               return lines
 
+          def check_exception_handlers(node, required_names, label):
+              """Reject handlers that turn required-operation failures into success."""
+
+              for try_node in ast.walk(node):
+                  if not isinstance(try_node, (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())):
+                      continue
+                  try_calls = {
+                      call.func.id
+                      for statement in try_node.body
+                      for call in ast.walk(statement)
+                      if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                  }
+                  if not (try_calls & set(required_names)):
+                      continue
+                  for handler in try_node.handlers:
+                      handler_calls = {
+                          call.func.id
+                          for statement in handler.body
+                          for call in ast.walk(statement)
+                          if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                      }
+                      if handler_calls & set(required_names):
+                          continue
+                      if any(isinstance(statement, ast.Raise) for statement in handler.body):
+                          continue
+                      if direct_terminator_lines(handler.body):
+                          raise SystemExit(f"approved {label} exception handler suppresses required-operation failure")
+                      # A handler may convert an exception to an explicit
+                      # failed result, but it must not silently continue with
+                      # an unknown/success state.
+                      has_false = any(isinstance(item, ast.Constant) and item.value is False for statement in handler.body for item in ast.walk(statement))
+                      if not has_false:
+                          raise SystemExit(f"approved {label} exception handler does not preserve failure")
+
           def module_rebindings(tree, names):
               """Find module-scope assignments/imports that replace call targets."""
 
@@ -834,6 +870,7 @@ jobs:
                           raise SystemExit(f"approved validator {label} hides {name} behind a process-state branch")
               if not unconditional_calls(main, "validate_asset"):
                   raise SystemExit("approved validator main hides validate_asset behind a runtime branch")
+              check_exception_handlers(main, {"validate_asset"}, "validator main")
               helper_requirements = {
                   "_parse_scalar": {"_strip_yaml_comment", "loads"},
                   "validate_skill": {"_validate_instruction_file", "rglob", "read_bytes", "has_secret"},
@@ -969,6 +1006,7 @@ jobs:
                   for name, (guarded_count, total_count) in runtime_calls.items():
                       if total_count and guarded_count == total_count:
                           raise SystemExit(f"approved provisioner {label} hides {name} behind a process-state branch")
+                  check_exception_handlers(node, required_names, f"provisioner {label}")
               if "archive" not in reachable_string_literals(function_node(tree, "verify_registry")):
                   raise SystemExit("approved provisioner verify_registry is missing the git archive operation")
 
