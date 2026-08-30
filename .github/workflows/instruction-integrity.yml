@@ -212,6 +212,8 @@ jobs:
               entry = skill / "SKILL.md"
               if skill.is_symlink() or entry.is_symlink() or not skill.is_dir() or not entry.is_file():
                   missing_trees.append(name)
+              elif any(item.is_symlink() for item in skill.rglob("*")):
+                  missing_trees.append(name)
           if missing_trees:
               raise SystemExit(f"pinned registry is missing advertised skill trees: {', '.join(sorted(missing_trees))}")
           print("pinned global registry content verified")
@@ -436,6 +438,11 @@ jobs:
                     missing = sorted(required_names - reachable_called_names(node))
                     if missing:
                         raise SystemExit(f"approved provisioner {label} is missing operational calls: {', '.join(missing)}")
+                    info = reachable_info(node)
+                    for name in required_names:
+                        call_lines = info.calls.get(name, [])
+                        if call_lines and any(line < min(call_lines) for line in info.returns):
+                            raise SystemExit(f"approved provisioner {label} can return before calling {name}")
                 if "archive" not in reachable_string_literals(function_node(tree, "verify_registry")):
                     raise SystemExit("approved provisioner verify_registry is missing the git archive operation")
 
@@ -512,6 +519,11 @@ jobs:
               raise "push gate must not be path-filtered" if push.key?("paths") || push.key?("paths-ignore")
               jobs = workflow["jobs"]
               raise "missing bootstrap/validate jobs" unless jobs.is_a?(Hash) && jobs["bootstrap"].is_a?(Hash) && jobs["validate"].is_a?(Hash)
+              jobs.each do |job_name, job|
+                next unless job.is_a?(Hash)
+                raise "job-level permissions are not allowed: #{job_name}" if job.key?("permissions")
+                raise "job-level failure suppression is not allowed: #{job_name}" if job.key?("continue-on-error")
+              end
               bootstrap = jobs["bootstrap"]
               gate = jobs["validate"]
               raise "bootstrap is not limited to pull_request" unless bootstrap["if"].to_s.include?("github.event_name == 'pull_request'")
@@ -557,6 +569,9 @@ jobs:
                 line.match?(/\A(?:[A-Z_][A-Z0-9_]*=\S+\s+)*python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\z)/)
               end
               raise "trusted validator command is missing or not executable" unless command
+              %w[--registry-only --help --version].each do |forbidden|
+                raise "trusted validator command contains a bypass flag: #{forbidden}" if command.split.include?(forbidden)
+              end
               %w[--trusted-policy --trusted-contract --registry-source].each do |needle|
                 raise "trusted validator command is missing #{needle}" unless command.split.include?(needle) || command.include?("#{needle} ")
               end
@@ -564,6 +579,10 @@ jobs:
               %w[AGENTS.md .codex/global-skills.json .codex/provision_global_skills.py].each do |needle|
                 raise "bootstrap protection is missing #{needle}" unless steps.any? { |step| step.is_a?(Hash) && step["run"].to_s.include?(needle) }
               end
+              protection_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Protect instruction contents unless explicitly approved" }
+              raise "instruction protection step is missing" unless protection_step
+              raise "instruction protection step has an unexpected condition" unless protection_step["if"].to_s.strip == "env.GOVERNANCE_UPDATE_APPROVED != 'true'"
+              raise "instruction protection step may not ignore failures" if protection_step["continue-on-error"] == true || protection_step["continue-on-error"].to_s.casecmp("true").zero?
             RUBY
           fi
       - name: Protect instruction contents unless explicitly approved

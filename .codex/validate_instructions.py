@@ -564,7 +564,9 @@ def _looks_like_placeholder(value: str) -> bool:
     if normalized.startswith("${"):
         # Shell defaults such as ${TOKEN:-live-value} are not placeholders;
         # inspect the fallback while retaining ${TOKEN} as a placeholder.
-        body = normalized[2:-1] if normalized.endswith("}") else normalized[2:]
+        if not normalized.endswith("}"):
+            return False
+        body = normalized[2:-1]
         if ":-" in body:
             fallback = body.split(":-", 1)[1]
             return _looks_like_placeholder(fallback)
