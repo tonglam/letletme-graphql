@@ -11,7 +11,7 @@ import {
 	normalizeEntrySearchQuery,
 } from "../../../src/domains/entries/resolvers";
 import { entriesService } from "../../../src/domains/entries/service";
-import type { ElementEventResultData } from "../../../src/domains/entry-live/calc-service";
+import type { ElementEventResultDataV2 as ElementEventResultData } from "../../../src/domains/entry-live/v2-service";
 import { type Player, Position } from "../../../src/domains/players/repository";
 import { playersService } from "../../../src/domains/players/service";
 import type { GraphQLContext } from "../../../src/graphql/context";

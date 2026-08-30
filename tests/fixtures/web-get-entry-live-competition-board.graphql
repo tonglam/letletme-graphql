@@ -2,7 +2,7 @@ query GetEntryLiveCompetitionBoard(
 	$entryId: Int!
 	$tournamentId: Int!
 	$eventId: Int!
-	$ref: LiveRevisionRefInput
+	$ref: LivePublicationRefInput
 	$page: Int
 	$pageSize: Int
 	$sort: EntryLiveCompetitionBoardSort
@@ -34,14 +34,38 @@ query GetEntryLiveCompetitionBoard(
 		eventId
 		tournamentId
 		boardRevision
-		playerRevision
-		managerRevision
+		scoreCoreRevision
 		dataAvailability
-		managerDataAvailability
-		managerServedFrom
-		managerRefreshQueued
-		managerCheckedAt
-		managerNextRefreshAt
+		revisions {
+			publicationId
+			generation
+			lifecycle
+			fixtureIdentity
+			scoreCore
+			displayStats
+			explain
+			picksBase
+			officialAdjustment
+			previousTotals
+			finalResult
+			rules
+			algorithm
+			input
+		}
+		times {
+			sourceCheckedAt
+			contentUpdatedAt
+			publishedAt
+			checkpointedAt
+			servedAt
+			staleAt
+			nextRefreshAt
+		}
+		delivery {
+			state
+			servedFrom
+			reasonCodes
+		}
 		coverageState
 		rankScope
 		computedEntries
@@ -76,59 +100,49 @@ fragment EntryLiveCompetitionBoardRowFields on EntryLiveCompetitionBoardRow {
 	overallRank
 	teamValue
 	chip
-	livePoints
 	transferCost
-	liveNetPoints
-	liveTotalPoints
 	played
 	toPlay
 	captainId
 	captainName
 	captainPoints
 	score {
-		...EntryLiveCompetitionScoreFields
-	}
-}
-
-fragment EntryLiveCompetitionScoreFields on LiveManagerScore {
-	eventPoints
-	netEventPoints
-	totalPoints
-	totalScope
-	eventRank
-	overallRank
-	leagueRank
-	transferCost
-	source
-	state
-	eventPointSemantics
-	revision
-	checkedAt
-	upstreamUpdatedAt
-	calculationMode
-	algorithmVersion
-	provenance {
-		scoreSource
+		eventPoints
+		netEventPoints
+		totalPoints
+		totalScope
+		transferCost
+		source
 		calculationMode
-		algorithmVersion
-		inputRevision
-		scoreRevision
-		rankRevision
-		livePublicationId
-		liveRevision
-		liveCheckedAt
-		picksRevision
-		picksCheckedAt
-		previousTotalsRevision
-		previousTotalsThroughEventId
-		resultRevision
-		resultCheckedAt
-		dataCheckedAt
-		rankSource
-		rankCheckedAt
+		revisions {
+			publicationId
+			generation
+			lifecycle
+			fixtureIdentity
+			scoreCore
+			displayStats
+			explain
+			picksBase
+			officialAdjustment
+			previousTotals
+			finalResult
+			rules
+			algorithm
+			input
+		}
+		times {
+			sourceCheckedAt
+			contentUpdatedAt
+			publishedAt
+			checkpointedAt
+			servedAt
+			staleAt
+			nextRefreshAt
+		}
+		delivery {
+			state
+			servedFrom
+			reasonCodes
+		}
 	}
-	staleAt
-	nextRefreshAt
-	reconciliation
-	reasonCodes
 }

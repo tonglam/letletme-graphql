@@ -69,7 +69,7 @@ describe("production deployment workflow", () => {
 	test("requires candidate readiness, image digest, revision label, ingress and contract probes", () => {
 		expect(dockerfile).toContain("COPY --chown=bun:bun scripts/lib ./scripts/lib");
 		expect(deployScript).toContain("/health/ready");
-		expect(deployScript).toContain('.status == "ok" and .revision == $revision');
+		expect(deployScript).toContain('.status == "ok" and .deploySha == $deploySha');
 		expect(deployScript).toContain("docker inspect --format '{{.Config.Image}}'");
 		expect(deployScript).toContain("org.opencontainers.image.revision");
 		expect(deployScript).toContain('test "$anonymous_status" = 401');
@@ -269,7 +269,7 @@ describe("production deployment workflow", () => {
 
 	test("binds image and container identity to the exact commit", () => {
 		expect(dockerfile).toContain("ARG VCS_REVISION=unknown");
-		expect(dockerfile).toContain("ENV APP_REVISION=${VCS_REVISION}");
+		expect(dockerfile).toContain("ENV DEPLOY_SHA=${VCS_REVISION}");
 		expect(dockerfile).toContain('org.opencontainers.image.revision="${VCS_REVISION}"');
 		expect(workflow).toContain('--build-arg "VCS_REVISION=${{ steps.target.outputs.sha }}"');
 		expect(deployScript).toContain('index .Config.Labels "org.opencontainers.image.revision"');
@@ -277,7 +277,7 @@ describe("production deployment workflow", () => {
 
 	test("inherits the active slot rate-limit mode when rollout is preserved", () => {
 		expect(deployScript).toContain('active_env="$VPS_WORKDIR/.env.deploy.$active_slot"');
-		expect(deployScript).toContain("active_rate_limit_mode=shadow-v3");
+		expect(deployScript).toContain("active_rate_limit_mode=shadow-v4");
 		expect(deployScript).toContain('replace_rate_limit_mode "$active_rate_limit_mode"');
 		expect(deployScript).toContain("invalid or duplicate GRAPHQL_RATE_LIMIT_MODE");
 		expect(deployScript).toContain('tail -c 1 "$candidate_env_next"');
@@ -300,7 +300,7 @@ describe("production deployment workflow", () => {
 
 	test("keeps compose ports and readiness checks slot-aware", () => {
 		expect(compose).toContain("127.0.0.1:${GRAPHQL_PORT:-4000}:4000");
-		expect(compose).toContain("/health/ready");
+		expect(compose).toContain("/health/hot");
 		expect(deployScript).toContain("candidate_port=4002");
 		expect(deployScript).toContain("candidate_port=4000");
 		expect(monitorWorkflow).toContain("project=letletme_graphql_blue");

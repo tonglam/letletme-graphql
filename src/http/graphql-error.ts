@@ -22,9 +22,10 @@ const SAFE_CLIENT_CODES = new Set([
 	"METHOD_NOT_ALLOWED",
 	"INGRESS_NOT_TRUSTED",
 	"LIVE_BOARD_REVISION_GONE",
+	"LIVE_SCORE_REVISION_GONE",
 	"LIVE_EVENT_NOT_FOUND",
 	"LIVE_PUBLICATION_UNAVAILABLE",
-	"LIVE_REVISION_GONE",
+	"LIVE_POINTS_UNAVAILABLE",
 	"NOT_FOUND",
 	"PRICE_CHANGE_LIVE_REVISION_UNAVAILABLE",
 	"QUERY_TOO_COMPLEX",
@@ -41,6 +42,7 @@ const PUBLIC_MESSAGES: Record<string, string> = {
 	DATA_UNAVAILABLE: "Gameweek data is temporarily unavailable",
 	DEPENDENCY_UNAVAILABLE: "A required data dependency is temporarily unavailable",
 	SEASON_AUTHORITY_UNAVAILABLE: "Current season metadata is temporarily unavailable",
+	LIVE_POINTS_UNAVAILABLE: "Live points are temporarily unavailable",
 	INTERNAL_SERVER_ERROR: "Internal server error",
 };
 

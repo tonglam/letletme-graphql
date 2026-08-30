@@ -13,7 +13,7 @@ import {
 const deskQuery = `
 	query Desk($eventId: Int) {
 		gameweekDesk(eventId: $eventId) {
-			season coreRevision liveRevision anchorEventId eventId currentEventId nextEventId
+			season coreRevision scoreCoreRevision anchorEventId eventId currentEventId nextEventId
 			isPreseason lifecycle deadlineTime publishedAt overviewState boardsState
 				overview {
 					averagePoints highestPoints highestScoringEntry mostSelected { id position teamShortName }
@@ -203,7 +203,7 @@ describe("gameweekDesk", () => {
 		});
 	});
 
-	it("recovers settled boards from durable PostgreSQL rows when live publication is missing", async () => {
+	it("does not synthesize a live board from rows outside the V2 checkpoint", async () => {
 		const baseCore = buildTestCoreData(1);
 		const core = buildTestCoreData(1, {
 			events: baseCore.events.map((event) =>
@@ -226,12 +226,12 @@ describe("gameweekDesk", () => {
 		expect(result.data?.gameweekDesk).toMatchObject({
 			eventId: 1,
 			lifecycle: "SETTLED",
-			liveRevision: null,
+			scoreCoreRevision: null,
 			publishedAt: null,
-			boardsState: "AVAILABLE",
+			boardsState: "UNAVAILABLE",
 		});
 		const desk = result.data?.gameweekDesk as { dreamTeam?: unknown[] } | undefined;
-		expect(desk?.dreamTeam).toHaveLength(11);
+		expect(desk?.dreamTeam).toHaveLength(0);
 	});
 
 	it("does not expose an incomplete durable dream team", async () => {

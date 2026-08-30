@@ -47,7 +47,6 @@ describe("data completeness metadata", () => {
 	it("exposes metadata on the business envelopes without replacing business fields", () => {
 		for (const typeName of [
 			"CoreEventContext",
-			"LiveSnapshotMeta",
 			"GameweekDesk",
 			"MarketSnapshotContext",
 			"PriceChangeBoard",

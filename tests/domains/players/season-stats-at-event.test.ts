@@ -94,51 +94,16 @@ const installPlayerStatsReads = (
 };
 
 describe("resolvePlayerStatsContext", () => {
-	it("aligns freshness with live and repair cadences only while lifecycle is healthy", () => {
-		const now = Date.parse("2026-08-25T11:20:00.000Z");
-		const observedAt = new Date(now - 30_000).toISOString();
-		const nextRefreshAt = new Date(now + 9 * 60_000 + 30_000).toISOString();
-
-		expect(
-			resolvePlayerStatsFreshnessBudgetMs({ state: "LIVE_ACTIVE", observedAt, nextRefreshAt }, now)
-		).toBe(90_000);
-		expect(
-			resolvePlayerStatsFreshnessBudgetMs({ state: "DAY_SETTLING", observedAt, nextRefreshAt }, now)
-		).toBe(90_000);
-		for (const state of ["PICKS_SYNC", "BETWEEN_FIXTURES", "GW_REVIEW"] as const) {
-			expect(resolvePlayerStatsFreshnessBudgetMs({ state, observedAt, nextRefreshAt }, now)).toBe(
-				360_000
-			);
-		}
+	it("uses the dedicated active-event cadence without reading live lifecycle state", () => {
+		expect(resolvePlayerStatsFreshnessBudgetMs("ACTIVE_EVENT")).toBe(90_000);
+		expect(resolvePlayerStatsFreshnessBudgetMs("STATIC")).toBe(60_000);
 	});
 
-	it("trusts the persisted lifecycle deadline through scheduler grace and then fails closed", () => {
-		const observedAt = Date.parse("2026-08-25T11:20:00.000Z");
-		const nextRefreshAt = new Date(observedAt + 10 * 60_000).toISOString();
-		const lifecycle = {
-			state: "GW_REVIEW" as const,
-			observedAt: new Date(observedAt).toISOString(),
-			nextRefreshAt,
-		};
-
-		expect(resolvePlayerStatsFreshnessBudgetMs(lifecycle, observedAt + 11 * 60_000)).toBe(360_000);
-		expect(resolvePlayerStatsFreshnessBudgetMs(lifecycle, observedAt + 12 * 60_000 + 1)).toBe(
-			60_000
-		);
-		expect(
-			resolvePlayerStatsFreshnessBudgetMs(
-				{
-					state: "GW_REVIEW",
-					observedAt: new Date(observedAt).toISOString(),
-					nextRefreshAt: new Date(observedAt + 14 * 60_000).toISOString(),
-				},
-				observedAt + 2 * 60_000 + 1
-			)
-		).toBe(60_000);
-		expect(resolvePlayerStatsFreshnessBudgetMs(null, observedAt)).toBe(60_000);
+	it("defaults unknown observer cadence to the static budget", () => {
+		expect(resolvePlayerStatsFreshnessBudgetMs(null)).toBe(60_000);
 	});
 
-	it("keeps a five-minute repair publication available during a healthy GW review", async () => {
+	it("marks an active observer publication stale without reading live lifecycle state", async () => {
 		const now = Date.now();
 		const publication = buildCorePublication("2627", 7, buildTestCoreData(3));
 		const context = buildSnapshotContext(new TestRedis(publication), {
@@ -160,7 +125,7 @@ describe("resolvePlayerStatsContext", () => {
 		installPlayerStatsReads(context, buildTestCoreData(3), new Date(now - 120_000).toISOString());
 
 		await expect(resolvePlayerStatsContext(context)).resolves.toMatchObject({
-			status: "AVAILABLE",
+			status: "STALE",
 			asOfEventId: 3,
 			rowCount: 220,
 			expectedRowCount: 220,

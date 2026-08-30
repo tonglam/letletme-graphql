@@ -39,7 +39,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 ARG VCS_REVISION=unknown
-ENV APP_REVISION=${VCS_REVISION}
+ENV DEPLOY_SHA=${VCS_REVISION}
 LABEL org.opencontainers.image.source="https://github.com/tonglam/letletme-graphql" \
 	org.opencontainers.image.revision="${VCS_REVISION}"
 

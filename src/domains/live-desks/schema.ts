@@ -1,8 +1,8 @@
 export const liveDesksTypeDefs = /* GraphQL */ `
-	input LiveRevisionRefInput {
+	input LivePublicationRefInput {
 		season: String!
 		eventId: Int!
-		revision: String!
+		scoreCoreRevision: String!
 	}
 
 	enum LiveLifecycleState {
@@ -15,19 +15,20 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		DAY_SETTLING
 		GW_REVIEW
 		FINALIZED
-		SCHEDULED
 	}
 
 	enum LiveSnapshotSource {
-		REDIS
-		POSTGRES
-		CORE
-		STALE
+		REDIS_CURRENT
+		REDIS_PREVIOUS
+		POSTGRES_CHECKPOINT
+		PROCESS_LKG
+		FINAL_RESULT
+		UNAVAILABLE
 	}
 
 	enum LiveWindowState {
 		PRESEASON
-		EVENT_SCHEDULED
+		PRE_DEADLINE
 		LIVE_ACTIVE
 		DAY_SETTLING
 		BETWEEN_FIXTURES
@@ -38,11 +39,10 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 	}
 
 	enum LiveDataAvailability {
-		SCHEDULED
 		FRESH
-		LAST_GOOD
+		STALE
+		DEGRADED
 		FINAL
-		PARTIAL
 		UNAVAILABLE
 	}
 
@@ -60,7 +60,7 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		nextEventId: Int
 		anchorEventId: Int
 		latestFinalizedEventId: Int
-		liveRevision: String
+		scoreCoreRevision: String
 		state: LiveLifecycleState!
 		windowState: LiveWindowState!
 		producerState: LiveLifecycleState!
@@ -71,6 +71,9 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		source: LiveSnapshotSource
 		stale: Boolean!
 		nextRefreshAt: DateTime
+		revisions: LiveRevisionVector!
+		times: LiveTimes!
+		delivery: LiveDelivery!
 	}
 
 	type LiveMatchSummary {
@@ -78,10 +81,8 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		eventId: Int!
 		homeTeamId: Int!
 		homeTeamName: String!
-		homeTeamShortName: String! @deprecated(reason: "Use core team identity")
 		awayTeamId: Int!
 		awayTeamName: String!
-		awayTeamShortName: String! @deprecated(reason: "Use core team identity")
 		homeScore: Int
 		awayScore: Int
 		kickoffTime: DateTime
@@ -94,26 +95,26 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 	type LiveMatchdayDesk {
 		season: String!
 		eventId: Int!
-		revision: String!
+		scoreCoreRevision: String!
 		state: LiveSnapshotState!
 		windowState: LiveWindowState!
 		dataAvailability: LiveDataAvailability!
-		liveRevision: String
 		sourceCheckedAt: DateTime!
 		publishedAt: DateTime!
 		source: LiveSnapshotSource!
 		stale: Boolean!
 		nextRefreshAt: DateTime
+		revisions: LiveRevisionVector!
+		times: LiveTimes!
+		delivery: LiveDelivery!
 		matches: [LiveMatchSummary!]!
-		nextFixtures: [LiveMatchSummary!]!
-			@deprecated(reason: "Use core eventFixtures for next-event schedule")
 		highlights: [LivePerformance!]!
 	}
 
 	type LiveFixturePlayers {
 		season: String!
 		eventId: Int!
-		revision: String!
+		scoreCoreRevision: String!
 		fixtureId: Int!
 		players: [LivePerformance!]!
 	}
@@ -121,7 +122,7 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 	type EntryLiveCompetitionsDesk {
 		season: String!
 		eventId: Int!
-		revision: String
+		scoreCoreRevision: String
 		state: LiveSnapshotState!
 		windowState: LiveWindowState!
 		dataAvailability: LiveDataAvailability!
@@ -129,11 +130,14 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		tournaments: [TournamentInfo!]!
 		selectedTournamentId: Int
 		board: [LiveCalcData!]!
-		managerRevision: String
 		officialCoverage: Float!
+		revisions: LiveRevisionVector
+		times: LiveTimes
+		delivery: LiveDelivery
 		unavailableEntryIds: [Int!]!
 		partial: Boolean!
 		failedEntryIds: [Int!]!
+		deferredEntryCount: Int!
 		totalEntries: Int!
 	}
 
@@ -143,7 +147,6 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		TRANSFER_COST
 		PLAYED
 		TOTAL_POINTS
-		OVERALL_RANK
 		TEAM_VALUE
 		RANK
 		ENTRY_NAME
@@ -164,13 +167,6 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		ANY
 		CAPTAIN
 		VICE
-	}
-
-	enum ManagerLiveServedFrom {
-		REDIS
-		POSTGRES
-		MIXED
-		NONE
 	}
 
 	enum EntryLiveCompetitionBoardCoverageState {
@@ -202,19 +198,16 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		entryName: String!
 		playerName: String!
 		rank: Int!
-		overallRank: Int!
+		overallRank: Int
 		teamValue: Float!
 		chip: String!
-		livePoints: Int!
 		transferCost: Int!
-		liveNetPoints: Int!
-		liveTotalPoints: Int!
 		played: Int!
 		toPlay: Int!
 		captainId: Int!
 		captainName: String!
 		captainPoints: Int!
-		score: LiveManagerScore!
+		score: LiveScore!
 	}
 
 	type EntryLiveCompetitionBoardPage {
@@ -222,14 +215,11 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		eventId: Int!
 		tournamentId: Int!
 		boardRevision: String!
-		playerRevision: String!
-		managerRevision: String
+		scoreCoreRevision: String
 		dataAvailability: LiveDataAvailability!
-		managerDataAvailability: LiveDataAvailability!
-		managerServedFrom: ManagerLiveServedFrom!
-		managerRefreshQueued: Boolean!
-		managerCheckedAt: DateTime
-		managerNextRefreshAt: DateTime
+		revisions: LiveRevisionVector!
+		times: LiveTimes!
+		delivery: LiveDelivery!
 		coverageState: EntryLiveCompetitionBoardCoverageState!
 		rankScope: EntryLiveCompetitionRankScope!
 		computedEntries: Int!
@@ -265,32 +255,32 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 	type TournamentSelectionIndex {
 		tournamentId: Int!
 		eventId: Int!
-		revision: String!
+		scoreCoreRevision: String!
 		rows: [TournamentSelectionIndexRow!]!
 	}
 
 	type TournamentEntrySquads {
 		tournamentId: Int!
 		eventId: Int!
-		revision: String!
+		scoreCoreRevision: String!
 		state: LiveSnapshotState!
 		entries: [LiveCalcData!]!
 	}
 
 	extend type Query {
 		liveContext: LiveContext!
-		liveMatchdayDesk(ref: LiveRevisionRefInput): LiveMatchdayDesk!
-		liveFixturePlayers(ref: LiveRevisionRefInput!, fixtureId: Int!): LiveFixturePlayers!
+		liveMatchdayDesk(ref: LivePublicationRefInput): LiveMatchdayDesk!
+		liveFixturePlayers(ref: LivePublicationRefInput!, fixtureId: Int!): LiveFixturePlayers!
 		entryLiveCompetitionsDesk(
 			entryId: Int!
 			selectedTournamentId: Int
-			ref: LiveRevisionRefInput
+			ref: LivePublicationRefInput
 		): EntryLiveCompetitionsDesk!
 		entryLiveCompetitionBoard(
 			entryId: Int!
 			tournamentId: Int!
 			eventId: Int!
-			ref: LiveRevisionRefInput
+			ref: LivePublicationRefInput
 			page: Int = 1
 			pageSize: Int = 20
 			sort: EntryLiveCompetitionBoardSort = EVENT_POINTS
@@ -305,13 +295,13 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		tournamentSelectionIndex(
 			entryId: Int!
 			tournamentId: Int!
-			ref: LiveRevisionRefInput!
+			ref: LivePublicationRefInput!
 		): TournamentSelectionIndex!
 		tournamentEntrySquads(
 			entryId: Int!
 			tournamentId: Int!
 			comparedEntryIds: [Int!]!
-			ref: LiveRevisionRefInput!
+			ref: LivePublicationRefInput!
 		): TournamentEntrySquads!
 		tournamentLiveParticipants(entryId: Int!, tournamentId: Int!): [TournamentParticipant!]!
 	}

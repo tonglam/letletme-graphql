@@ -4,9 +4,8 @@ import type { GraphQLContext } from "../../graphql/context";
 import { getCoreFixtureSnapshot, type CoreFixtureData } from "../../infra/data-snapshot";
 import { eventsService } from "../events/service";
 import type { ChipPlay, Event } from "../events/repository";
-import type { LivePerformance } from "../live/repository";
-import { liveService } from "../live/service";
-import type { LiveSnapshotMeta } from "../live/snapshot-meta";
+import { readLivePublicationV2, type LivePublicationReadV2 } from "../entry-live/v2-service";
+import type { LivePerformanceData } from "../../infra/live-types";
 import { Position, type Player } from "../players/repository";
 import { playersService } from "../players/service";
 import { measureRequestStage } from "../../http/request-timing";
@@ -107,7 +106,7 @@ export type GameweekBoardPlayer = {
 export type GameweekDesk = {
 	season: string;
 	coreRevision: string;
-	liveRevision: string | null;
+	scoreCoreRevision: string | null;
 	anchorEventId: number;
 	eventId: number;
 	currentEventId: number | null;
@@ -179,15 +178,22 @@ const isScheduledLifecycle = (
 };
 
 const lifecycleFromLiveState = (
-	meta: LiveSnapshotMeta | null,
+	meta: LivePublicationReadV2 | null,
 	event: Event,
 	fixtures: readonly CoreFixtureData[],
 	context: CoreEventContext,
 	eventId: number
 ): GameweekLifecycleState => {
-	if (meta?.state === "settled" || (event.finished && event.dataChecked)) return "SETTLED";
-	if (meta?.state === "scheduled") return "SCHEDULED";
-	if (meta?.state === "live") return "PROVISIONAL";
+	if (meta?.publication.state === "FINALIZED" || (event.finished && event.dataChecked))
+		return "SETTLED";
+	if (
+		meta?.publication.state === "PRE_DEADLINE" ||
+		meta?.publication.state === "PICKS_WAIT" ||
+		meta?.publication.state === "PICKS_PROBE" ||
+		meta?.publication.state === "PICKS_SYNC"
+	)
+		return "SCHEDULED";
+	if (meta) return "PROVISIONAL";
 	if (isScheduledLifecycle(event, fixtures, context, eventId)) return "SCHEDULED";
 	return "PROVISIONAL";
 };
@@ -289,7 +295,7 @@ const mapOverview = (
 };
 
 const mapBoardPlayer = (
-	performance: LivePerformance,
+	performance: LivePerformanceData,
 	playersById: ReadonlyMap<number, Player>,
 	teamNames: ReadonlyMap<number, string>,
 	eventTeamIds: ReadonlyMap<number, number>
@@ -312,7 +318,7 @@ const mapBoardPlayer = (
 };
 
 const mapAndSortBoards = (
-	performances: readonly LivePerformance[],
+	performances: readonly LivePerformanceData[],
 	order: "position" | "points",
 	playersById: ReadonlyMap<number, Player>,
 	teamNames: ReadonlyMap<number, string>,
@@ -486,7 +492,7 @@ export const gameweekService = {
 			}
 
 			let boardsState: GameweekSectionState = scheduled ? "PENDING" : "UNAVAILABLE";
-			let liveRevision: string | null = null;
+			let scoreCoreRevision: string | null = null;
 			let publishedAt: string | null = null;
 			let sourceCheckedAt: string | null = null;
 			let lifecycle = initialLifecycle;
@@ -494,17 +500,44 @@ export const gameweekService = {
 			let hauls: GameweekBoardPlayer[] = [];
 
 			if (!scheduled) {
-				const allowDurableFallback = event.finished === true && event.dataChecked === true;
 				try {
 					const boards = await measureRequestStage(
 						context.requestTiming,
 						"gameweek.boards.snapshot",
-						() => liveService.getGameweekBoards(context, eventId, { allowDurableFallback })
+						() => readLivePublicationV2(context, eventId)
+					);
+					if (!boards)
+						throw new Error(`Live Points V2 publication is unavailable for event ${eventId}`);
+					const performances: LivePerformanceData[] = boards.eventLives.map((row) => ({
+						eventId: row.eventId,
+						playerId: row.elementId,
+						minutes: row.minutes,
+						goalsScored: row.goalsScored,
+						assists: row.assists,
+						cleanSheets: row.cleanSheets,
+						goalsConceded: row.goalsConceded,
+						ownGoals: row.ownGoals,
+						penaltiesSaved: row.penaltiesSaved,
+						penaltiesMissed: row.penaltiesMissed,
+						yellowCards: row.yellowCards,
+						redCards: row.redCards,
+						saves: row.saves,
+						bonus: row.bonus,
+						bps: row.bps,
+						starts: row.starts,
+						defensiveContribution: row.defensiveContribution,
+						expectedGoals: row.expectedGoals,
+						expectedAssists: row.expectedAssists,
+						expectedGoalInvolvements: row.expectedGoalInvolvements,
+						expectedGoalsConceded: row.expectedGoalsConceded,
+						inDreamTeam: row.inDreamTeam,
+						totalPoints: row.totalPoints,
+					}));
+					const renderedPerformances = performances.filter(
+						(performance) => performance.inDreamTeam === true || performance.totalPoints >= 10
 					);
 					const playerIds = Array.from(
-						new Set(
-							[...boards.dreamTeam, ...boards.hauls].map((performance) => performance.playerId)
-						)
+						new Set(renderedPerformances.map((performance) => performance.playerId))
 					);
 					const players = await measureRequestStage(
 						context.requestTiming,
@@ -524,23 +557,28 @@ export const gameweekService = {
 							)
 					);
 					dreamTeam = mapAndSortBoards(
-						boards.dreamTeam,
+						renderedPerformances.filter((performance) => performance.inDreamTeam === true),
 						"position",
 						playersById,
 						teamNames,
 						eventTeamIds
 					);
-					hauls = mapAndSortBoards(boards.hauls, "points", playersById, teamNames, eventTeamIds);
-					const meta = boards.meta;
-					liveRevision = meta?.revision ?? null;
-					publishedAt = meta?.publishedAt ?? null;
-					sourceCheckedAt = meta?.checkedAt ?? null;
-					lifecycle = lifecycleFromLiveState(meta, event, fixtures, eventContext, eventId);
+					hauls = mapAndSortBoards(
+						renderedPerformances.filter((performance) => performance.totalPoints >= 10),
+						"points",
+						playersById,
+						teamNames,
+						eventTeamIds
+					);
+					scoreCoreRevision = boards.publication.revisions.scoreCore.revision;
+					publishedAt = boards.publication.publishedAt;
+					sourceCheckedAt = boards.publication.sourceCheckedAt;
+					lifecycle = lifecycleFromLiveState(boards, event, fixtures, eventContext, eventId);
 					boardsState = "AVAILABLE";
 					context.logger.info(
 						{
 							eventId,
-							source: boards.source,
+							source: boards.servedFrom,
 							dreamTeamRows: dreamTeam.length,
 							haulRows: hauls.length,
 						},
@@ -565,7 +603,7 @@ export const gameweekService = {
 				boardsState = "PENDING";
 				dreamTeam = [];
 				hauls = [];
-				liveRevision = null;
+				scoreCoreRevision = null;
 				publishedAt = null;
 				sourceCheckedAt = null;
 			}
@@ -573,7 +611,7 @@ export const gameweekService = {
 			return {
 				season: eventContext.season,
 				coreRevision: eventContext.revision,
-				liveRevision,
+				scoreCoreRevision,
 				anchorEventId: anchorEventId ?? eventId,
 				eventId,
 				currentEventId: eventContext.currentEventId,

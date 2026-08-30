@@ -179,7 +179,7 @@ case "$RATE_LIMIT_ROLLOUT" in
     if [ -f "$active_env" ]; then
       active_rate_limit_mode=$(sed -n 's/^GRAPHQL_RATE_LIMIT_MODE=//p' "$active_env")
       if [ -z "$active_rate_limit_mode" ]; then
-        active_rate_limit_mode=shadow-v3
+        active_rate_limit_mode=shadow-v4
       fi
       case "$active_rate_limit_mode" in
         shadow-v3|enforce-v3|shadow-v4|enforce-v4) ;;
@@ -248,8 +248,8 @@ candidate_url="http://127.0.0.1:$candidate_port"
 candidate_ready=false
 for _ in $(seq 1 "$CANDIDATE_READY_ATTEMPTS"); do
   if candidate_health=$(curl --fail --silent --show-error --max-time 3 "$candidate_url/health/ready"); then
-    if jq -e --arg revision "$DEPLOY_SHA" \
-      '.status == "ok" and .revision == $revision' <<<"$candidate_health" >/dev/null; then
+    if jq -e --arg deploySha "$DEPLOY_SHA" \
+      '.status == "ok" and .deploySha == $deploySha' <<<"$candidate_health" >/dev/null; then
       candidate_ready=true
       break
     fi
@@ -373,7 +373,7 @@ if [ -n "$old_active_container" ]; then
 fi
 if old_public_health=$(curl --fail --silent --show-error --max-time 5 "$PUBLIC_GRAPHQL_HEALTH_URL"); then
   old_public_revision=$(jq -r \
-    'select(.status == "ok" and (.revision | type == "string") and (.revision | length > 0)) | .revision' \
+    'select(.status == "ok" and (.deploySha | type == "string") and (.deploySha | length > 0)) | .deploySha' \
     <<<"$old_public_health" || true)
 fi
 if [ -z "$old_public_revision" ]; then
@@ -431,13 +431,13 @@ for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS"); do
     fi
     exit 1
   fi
-  if jq -e --arg revision "$DEPLOY_SHA" \
-    '.status == "ok" and .revision == $revision' <<<"$public_health" >/dev/null; then
+  if jq -e --arg deploySha "$DEPLOY_SHA" \
+    '.status == "ok" and .deploySha == $deploySha' <<<"$public_health" >/dev/null; then
     public_health_ready=true
     break
   fi
-  if [ -z "$old_public_revision" ] || ! jq -e --arg revision "$old_public_revision" \
-    '.status == "ok" and .revision == $revision' <<<"$public_health" >/dev/null; then
+  if [ -z "$old_public_revision" ] || ! jq -e --arg deploySha "$old_public_revision" \
+    '.status == "ok" and .deploySha == $deploySha' <<<"$public_health" >/dev/null; then
     echo "public GraphQL health identity is neither the new nor previous revision" >&2
     if ! rollback_switch; then
       echo "public identity mismatch and rollback could not be verified" >&2

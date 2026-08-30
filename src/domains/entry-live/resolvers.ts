@@ -1,22 +1,11 @@
 import type { GraphQLContext } from "../../graphql/context";
-import type { Entry } from "../entries/repository";
-import type { Event } from "../events/repository";
-import { eventsService } from "../events/service";
-import { withLiveSnapshotRoot } from "../live/snapshot-meta";
+import { GraphQLError } from "graphql";
 import {
-	assertValidEntryBatch,
-	entryLiveBatchService,
-	type BatchLiveCalcResult,
-} from "./batch-service";
-import type { LiveCalcData } from "./calc-service";
-import { entryLiveCalcService } from "./calc-service";
-import type { EntryLive as EntryLiveModel } from "./service";
-import { entryLiveService } from "./service";
-
-type EntryLiveArgs = {
-	entryId: number;
-	eventId: number;
-};
+	calcLivePointsByEntryV2,
+	calcLivePointsForEntriesV2,
+	type BatchLiveCalcResultV2,
+	type LiveCalcDataV2,
+} from "./v2-service";
 
 type CalcLivePointsByEntryArgs = {
 	eventId: number;
@@ -30,26 +19,18 @@ type CalcLivePointsForEntriesArgs = {
 
 export const entryLiveResolvers = {
 	Query: {
-		entryLive: async (
-			_parent: unknown,
-			args: EntryLiveArgs,
-			context: GraphQLContext
-		): Promise<EntryLiveModel | null> =>
-			entryLiveService.getEntryLive(context, args.entryId, args.eventId),
-
 		calcLivePointsByEntry: async (
 			_parent: unknown,
 			args: CalcLivePointsByEntryArgs,
 			context: GraphQLContext
-		): Promise<LiveCalcData> =>
-			entryLiveCalcService.calcLivePointsByEntry(context, args.eventId, args.entryId),
+		): Promise<LiveCalcDataV2> => calcLivePointsByEntryV2(context, args.eventId, args.entryId),
 
 		calcLivePointsForEntries: async (
 			_parent: unknown,
 			args: CalcLivePointsForEntriesArgs,
 			context: GraphQLContext
 		): Promise<{
-			results: LiveCalcData[];
+			results: LiveCalcDataV2[];
 			errors: Array<{ entryId: number; message: string }>;
 			meta: {
 				eventId: number;
@@ -57,27 +38,27 @@ export const entryLiveResolvers = {
 				succeededCount: number;
 				failedCount: number;
 			};
-		}> =>
-			withLiveSnapshotRoot(context, async () => {
-				assertValidEntryBatch(args.entryIds);
-				const calculate = (): Promise<BatchLiveCalcResult> =>
-					entryLiveBatchService.calcLivePointsForEntries(context, args.eventId, args.entryIds, {
-						managerReadMode: "CACHE_ONLY",
-					});
-				const result = await calculate();
-				return {
-					results: Array.from(result.results.values()),
-					errors: result.errors,
-					meta: result.meta,
-				};
-			}),
-	},
-	EntryLive: {
-		entry: (parent: EntryLiveModel): Entry => parent.entry,
-		event: async (
-			parent: EntryLiveModel,
-			_args: Record<string, never>,
-			context: GraphQLContext
-		): Promise<Event | null> => eventsService.getEventById(context, parent.event.id),
+		}> => {
+			if (args.entryIds.length > 500) {
+				throw new GraphQLError("Entry batch exceeds the 500 entry limit", {
+					extensions: { code: "QUERY_TOO_COMPLEX" },
+				});
+			}
+			if (new Set(args.entryIds).size !== args.entryIds.length) {
+				throw new GraphQLError("Entry batch must not contain duplicate entry IDs", {
+					extensions: { code: "DUPLICATE_ENTRY_IDS" },
+				});
+			}
+			const result: BatchLiveCalcResultV2 = await calcLivePointsForEntriesV2(
+				context,
+				args.eventId,
+				args.entryIds
+			);
+			return {
+				results: Array.from(result.results.values()),
+				errors: result.errors,
+				meta: result.meta,
+			};
+		},
 	},
 };
