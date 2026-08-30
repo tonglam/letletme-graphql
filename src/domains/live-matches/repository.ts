@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type Redis from "ioredis";
 import type { QueryResultRow } from "pg";
 
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { GraphQLContext } from "../../graphql/context";
 
 export const LIVE_MATCHES_CONTRACT_VERSION = "live-matches-v2" as const;
@@ -420,6 +421,130 @@ SELECT
 FROM target_event
 `;
 
+/** Planner, decoded-column, and reader-role gate for the cold fallback. */
+export const LIVE_MATCHES_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "live-matches-v2.checkpoint-fallback",
+		sql: LIVE_MATCH_CHECKPOINT_SQL,
+		values: [2026, 1],
+		runtime: "must-return-row",
+		resultTypes: [
+			{ relation: "fpl.live_match_desk_checkpoints", column: "season_id", pgType: "smallint" },
+			{ relation: "fpl.live_match_desk_checkpoints", column: "event_id", pgType: "integer" },
+			{ relation: "fpl.live_match_desk_checkpoints", column: "publication_id", pgType: "text" },
+			{ relation: "fpl.live_match_desk_checkpoints", column: "generation", pgType: "bigint" },
+			{ relation: "fpl.live_match_desk_checkpoints", column: "state", pgType: "text" },
+			{
+				relation: "fpl.live_match_desk_checkpoints",
+				column: "manifest",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{
+				relation: "fpl.live_match_desk_checkpoints",
+				column: "revisions",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{
+				relation: "fpl.live_match_desk_checkpoints",
+				column: "payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{ relation: "fpl.live_match_desk_checkpoints", column: "row_count", pgType: "integer" },
+			{ relation: "fpl.live_match_desk_checkpoints", column: "payload_bytes", pgType: "integer" },
+			{ relation: "fpl.live_match_desk_checkpoints", column: "payload_sha256", pgType: "text" },
+			{
+				relation: "fpl.live_match_desk_checkpoints",
+				column: "source_checked_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "fpl.live_match_desk_checkpoints",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "fpl.live_match_desk_checkpoints",
+				column: "checkpointed_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "fpl.live_match_desk_checkpoints",
+				column: "expected_next_check_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "fpl.live_match_desk_checkpoints",
+				column: "stale_at",
+				pgType: "timestamp with time zone",
+			},
+			{ relation: "fpl.live_match_detail_checkpoints", column: "season_id", pgType: "smallint" },
+			{ relation: "fpl.live_match_detail_checkpoints", column: "event_id", pgType: "integer" },
+			{ relation: "fpl.live_match_detail_checkpoints", column: "publication_id", pgType: "text" },
+			{ relation: "fpl.live_match_detail_checkpoints", column: "generation", pgType: "bigint" },
+			{ relation: "fpl.live_match_detail_checkpoints", column: "state", pgType: "text" },
+			{
+				relation: "fpl.live_match_detail_checkpoints",
+				column: "observed_desk_generation",
+				pgType: "bigint",
+			},
+			{
+				relation: "fpl.live_match_detail_checkpoints",
+				column: "fixture_identity_revision",
+				pgType: "text",
+			},
+			{
+				relation: "fpl.live_match_detail_checkpoints",
+				column: "manifest",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{
+				relation: "fpl.live_match_detail_checkpoints",
+				column: "revisions",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{
+				relation: "fpl.live_match_detail_checkpoints",
+				column: "payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{ relation: "fpl.live_match_detail_checkpoints", column: "row_count", pgType: "integer" },
+			{ relation: "fpl.live_match_detail_checkpoints", column: "payload_bytes", pgType: "integer" },
+			{ relation: "fpl.live_match_detail_checkpoints", column: "payload_sha256", pgType: "text" },
+			{
+				relation: "fpl.live_match_detail_checkpoints",
+				column: "source_checked_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "fpl.live_match_detail_checkpoints",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "fpl.live_match_detail_checkpoints",
+				column: "checkpointed_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "fpl.live_match_detail_checkpoints",
+				column: "expected_next_check_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "fpl.live_match_detail_checkpoints",
+				column: "stale_at",
+				pgType: "timestamp with time zone",
+			},
+		],
+	},
+];
+
 const validState = (value: unknown): value is MatchLifecycleState =>
 	typeof value === "string" &&
 	new Set<MatchLifecycleState>([
@@ -554,8 +679,7 @@ const parseDetailPublication = (
 		!fixtures.every((item) => validDetailItem(item, season, eventId)) ||
 		fixtures.reduce(
 			(total, item) =>
-				total +
-				(isRecord(item) && safeInteger(item.bytes) !== null ? Number(item.bytes) : 0),
+				total + (isRecord(item) && safeInteger(item.bytes) !== null ? Number(item.bytes) : 0),
 			0
 		) > LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES
 	)
@@ -666,14 +790,7 @@ const validFixtureDetail = (value: unknown): value is MatchFixtureDetail =>
 const validDetailPayload = (value: unknown): value is readonly MatchFixtureDetail[] =>
 	Array.isArray(value) &&
 	value.length <= LIVE_MATCH_MAX_FIXTURES &&
-	value.reduce(
-		(total, fixture) =>
-			total +
-			(isRecord(fixture) && Array.isArray(fixture.players)
-				? canonicalBytes(fixture.players)
-				: 0),
-		0
-	) <= LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES &&
+	canonicalBytes(value) <= LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES &&
 	new Set(value.map((fixture) => (isRecord(fixture) ? fixture.fixtureId : null))).size ===
 		value.length &&
 	value.every(validFixtureDetail);
@@ -797,18 +914,19 @@ const readRedisBundle = async (
 		};
 		const detail = (input: unknown): RedisDetailRaw => {
 			if (!isRecord(input)) return { publication: null, manifest: null, items: [] };
-			const items = Array.isArray(input.items) && input.items.length <= LIVE_MATCH_MAX_FIXTURES
-				? input.items.map((item): RedisDetailItemRaw => {
-						if (!isRecord(item))
-							return { fixtureId: null, key: null, payload: null, metadata: null };
-						return {
-							fixtureId: safeInteger(item.fixtureId),
-							key: typeof item.key === "string" ? item.key : null,
-							payload: typeof item.payload === "string" ? item.payload : null,
-							metadata: typeof item.metadata === "string" ? item.metadata : null,
-						};
-					})
-				: [];
+			const items =
+				Array.isArray(input.items) && input.items.length <= LIVE_MATCH_MAX_FIXTURES
+					? input.items.map((item): RedisDetailItemRaw => {
+							if (!isRecord(item))
+								return { fixtureId: null, key: null, payload: null, metadata: null };
+							return {
+								fixtureId: safeInteger(item.fixtureId),
+								key: typeof item.key === "string" ? item.key : null,
+								payload: typeof item.payload === "string" ? item.payload : null,
+								metadata: typeof item.metadata === "string" ? item.metadata : null,
+							};
+						})
+					: [];
 			return {
 				publication: typeof input.publication === "string" ? input.publication : null,
 				manifest: typeof input.manifest === "string" ? input.manifest : null,
@@ -876,22 +994,18 @@ const chooseDetail = (
 ): MatchDetailCandidate | null =>
 	candidates.find((candidate) => compatibleDetail(desk, candidate)) ?? null;
 
-const checkpointTimestamp = (value: unknown): string | null =>
-	value === null || value === undefined ? null : isIso(value) ? value : null;
-
 const nullableTimestamp = (value: unknown): boolean => value === null || isIso(value);
-
-const rowValue = (value: unknown, key: string): unknown =>
-	isRecord(value) ? value[key] : undefined;
-
-const checkpointRevision = (value: unknown, key: string): StreamRevision | null => {
-	const revision = rowValue(value, key);
-	return validRevision(revision) ? revision : null;
-};
 
 const checkpointPayload = (value: unknown): unknown => {
 	if (typeof value === "string") return parsedJson(value);
 	return value;
+};
+
+const checkpointManifest = (value: unknown): string | null => {
+	const parsed = checkpointPayload(value);
+	if (!isRecord(parsed)) return null;
+	const raw = stableJson(parsed);
+	return Buffer.byteLength(raw, "utf8") <= LIVE_MATCH_MAX_PUBLICATION_BYTES ? raw : null;
 };
 
 const buildPostgresDesk = (
@@ -900,22 +1014,20 @@ const buildPostgresDesk = (
 	eventId: number
 ): MatchDeskCandidate | null => {
 	if (!isRecord(row)) return null;
+	const manifest = checkpointManifest(row.manifest);
+	const publication = parseDeskPublication(manifest, season, eventId);
 	const generation = safeInteger(row.generation);
-	const revisions = row.revisions;
-	const lifecycle = checkpointRevision(revisions, "lifecycle");
-	const fixtureIdentity = checkpointRevision(revisions, "fixtureIdentity");
-	const scoreState = checkpointRevision(revisions, "scoreState");
 	const rowCount = safeInteger(row.row_count);
 	const bytes = safeInteger(row.payload_bytes);
 	const checksum = typeof row.payload_sha256 === "string" ? row.payload_sha256 : null;
 	if (
+		!publication ||
 		generation === null ||
 		generation <= 0 ||
-		!nonEmptyString(row.publication_id) ||
-		!validState(row.state) ||
-		!lifecycle ||
-		!fixtureIdentity ||
-		!scoreState ||
+		row.publication_id !== publication.publicationId ||
+		generation !== publication.generation ||
+		row.state !== publication.state ||
+		stableJson(row.revisions) !== stableJson(publication.revisions) ||
 		rowCount === null ||
 		rowCount < 0 ||
 		rowCount > LIVE_MATCH_MAX_FIXTURES ||
@@ -924,11 +1036,17 @@ const buildPostgresDesk = (
 		bytes > LIVE_MATCH_MAX_DESK_BYTES ||
 		checksum === null ||
 		!/^[0-9a-f]{64}$/.test(checksum) ||
-		!isIso(row.source_checked_at) ||
-		!isIso(row.published_at) ||
-		!nullableTimestamp(row.checkpointed_at) ||
+		row.source_checked_at !== publication.sourceCheckedAt ||
+		row.published_at !== publication.publishedAt ||
+		!isIso(row.checkpointed_at) ||
+		row.checkpointed_at !== publication.checkpointedAt ||
 		!nullableTimestamp(row.expected_next_check_at) ||
-		!nullableTimestamp(row.stale_at)
+		row.expected_next_check_at !== publication.expectedNextCheckAt ||
+		!nullableTimestamp(row.stale_at) ||
+		row.stale_at !== publication.staleAt ||
+		publication.desk.count !== rowCount ||
+		publication.desk.bytes !== bytes ||
+		publication.desk.sha256 !== checksum
 	)
 		return null;
 	const payload = checkpointPayload(row.payload);
@@ -939,28 +1057,6 @@ const buildPostgresDesk = (
 		sha256(payload) !== checksum
 	)
 		return null;
-	const publication: MatchDeskPublication = {
-		contractVersion: LIVE_MATCHES_CONTRACT_VERSION,
-		publicationId: String(row.publication_id),
-		generation,
-		season,
-		eventId,
-		state: row.state,
-		sourceCheckedAt: row.source_checked_at,
-		publishedAt: row.published_at,
-		checkpointedAt: checkpointTimestamp(row.checkpointed_at),
-		expectedNextCheckAt: checkpointTimestamp(row.expected_next_check_at),
-		staleAt: checkpointTimestamp(row.stale_at),
-		revisions: { lifecycle, fixtureIdentity, scoreState },
-		desk: {
-			name: "desk",
-			key: `postgresql:${season}:${eventId}:${generation}:desk`,
-			type: "string",
-			count: rowCount,
-			bytes,
-			sha256: checksum,
-		},
-	};
 	return { publication, fixtures: payload, servedFrom: "POSTGRES_CHECKPOINT" };
 };
 
@@ -970,29 +1066,36 @@ const buildPostgresDetail = (
 	eventId: number
 ): MatchDetailCandidate | null => {
 	if (!isRecord(row)) return null;
+	const manifest = checkpointManifest(row.manifest);
+	const publication = parseDetailPublication(manifest, season, eventId);
 	const generation = safeInteger(row.generation);
 	const observedDeskGeneration = safeInteger(row.observed_desk_generation);
 	const fixtureIdentityRevision =
 		typeof row.fixture_identity_revision === "string" ? row.fixture_identity_revision : null;
-	const detailRevision = checkpointRevision(row.revisions, "detail");
 	const rowCount = safeInteger(row.row_count);
 	const bytes = safeInteger(row.payload_bytes);
 	const checksum = typeof row.payload_sha256 === "string" ? row.payload_sha256 : null;
 	if (
+		!publication ||
 		generation === null ||
 		generation <= 0 ||
-		!nonEmptyString(row.publication_id) ||
-		(row.state !== "PROVISIONAL" && row.state !== "FINALIZED") ||
+		row.publication_id !== publication.publicationId ||
+		generation !== publication.generation ||
+		row.state !== (publication.finalized ? "FINALIZED" : "PROVISIONAL") ||
 		observedDeskGeneration === null ||
 		observedDeskGeneration <= 0 ||
+		observedDeskGeneration !== publication.observedDeskGeneration ||
 		fixtureIdentityRevision === null ||
-		!/^[0-9a-f]{64}$/.test(fixtureIdentityRevision) ||
-		!detailRevision ||
-		!isIso(row.source_checked_at) ||
-		!isIso(row.published_at) ||
-		!nullableTimestamp(row.checkpointed_at) ||
+		fixtureIdentityRevision !== publication.fixtureIdentityRevision ||
+		stableJson(row.revisions) !== stableJson({ detail: publication.detail }) ||
+		row.source_checked_at !== publication.sourceCheckedAt ||
+		row.published_at !== publication.publishedAt ||
+		!isIso(row.checkpointed_at) ||
+		row.checkpointed_at !== publication.checkpointedAt ||
 		!nullableTimestamp(row.expected_next_check_at) ||
+		row.expected_next_check_at !== publication.expectedNextCheckAt ||
 		!nullableTimestamp(row.stale_at) ||
+		row.stale_at !== publication.staleAt ||
 		rowCount === null ||
 		rowCount < 0 ||
 		rowCount > LIVE_MATCH_MAX_FIXTURES ||
@@ -1000,7 +1103,9 @@ const buildPostgresDetail = (
 		bytes < 0 ||
 		bytes > LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES ||
 		checksum === null ||
-		!/^[0-9a-f]{64}$/.test(checksum)
+		!/^[0-9a-f]{64}$/.test(checksum) ||
+		publication.detail.revision !== checksum ||
+		publication.fixtures.length !== rowCount
 	)
 		return null;
 	const payload = checkpointPayload(row.payload);
@@ -1012,30 +1117,17 @@ const buildPostgresDetail = (
 	)
 		return null;
 	const fixtures = payload as readonly MatchFixtureDetail[];
-	const publication: MatchDetailPublication = {
-		contractVersion: LIVE_MATCHES_CONTRACT_VERSION,
-		publicationId: String(row.publication_id),
-		generation,
-		season,
-		eventId,
-		finalized: row.state === "FINALIZED",
-		observedDeskGeneration,
-		fixtureIdentityRevision,
-		sourceCheckedAt: row.source_checked_at,
-		publishedAt: row.published_at,
-		checkpointedAt: checkpointTimestamp(row.checkpointed_at),
-		expectedNextCheckAt: checkpointTimestamp(row.expected_next_check_at),
-		staleAt: checkpointTimestamp(row.stale_at),
-		detail: detailRevision,
-		fixtures: fixtures.map((fixture) => ({
-			fixtureId: fixture.fixtureId,
-			key: `postgresql:${season}:${eventId}:${generation}:${fixture.fixtureId}`,
-			type: "string",
-			count: fixture.players.length,
-			bytes: canonicalBytes(fixture.players),
-			sha256: sha256(fixture.players),
-		})),
-	};
+	for (const [index, fixture] of fixtures.entries()) {
+		const item = publication.fixtures[index];
+		if (
+			!item ||
+			item.fixtureId !== fixture.fixtureId ||
+			item.count !== fixture.players.length ||
+			item.bytes !== canonicalBytes(fixture.players) ||
+			item.sha256 !== sha256(fixture.players)
+		)
+			return null;
+	}
 	return { publication, fixtures, servedFrom: "POSTGRES_CHECKPOINT" };
 };
 

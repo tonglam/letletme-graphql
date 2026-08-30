@@ -64,6 +64,7 @@ import {
 	parsePriceChangeContractRow,
 } from "../../src/infra/price-change-predictions-client";
 import { LIVE_POINTS_V2_DATA_SQL_CONTRACT } from "../../src/domains/entry-live/v2-service";
+import { LIVE_MATCHES_DATA_SQL_CONTRACT } from "../../src/domains/live-matches/repository";
 
 export const DIRECT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	...BRIEFING_DATA_SQL_CONTRACT,
@@ -83,6 +84,7 @@ export const DIRECT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	...DATA_SNAPSHOT_DATA_SQL_CONTRACT,
 	...PRICE_CHANGE_DATA_SQL_CONTRACT,
 	...LIVE_POINTS_V2_DATA_SQL_CONTRACT,
+	...LIVE_MATCHES_DATA_SQL_CONTRACT,
 ];
 
 type ResultTypeRow = {

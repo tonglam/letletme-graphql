@@ -219,7 +219,6 @@ const toResult = (read: LiveMatchdayRead) => {
 		snapshot: {
 			season: read.season,
 			eventId: read.eventId,
-			nextEventId: null,
 			state: read.desk.publication.state,
 			revisions: toRevisionVector(read),
 			times: toTimes(read),

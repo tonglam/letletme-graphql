@@ -104,7 +104,6 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
 	type LiveMatchdaySnapshot {
 		season: String!
 		eventId: Int!
-		nextEventId: Int
 		state: MatchLifecycleState!
 		revisions: LiveMatchRevisionVector!
 		times: LiveMatchTimes!
