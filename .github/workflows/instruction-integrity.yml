@@ -20,14 +20,13 @@ on:
 
 permissions:
   contents: read
-  checks: write
 
 concurrency:
   # pull_request_target exposes the base ref as github.ref; use the PR number
   # so one PR cannot cancel another. Push runs remain grouped by branch.
-  # Keep approval and metadata/base-edit events from cancelling one another;
-  # synchronize runs for the same PR still cancel their older sibling.
-  group: instruction-integrity-${{ github.event_name }}-${{ github.event.action || 'push' }}-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}
+  # All pull-request events for one PR share a group, so removing approval
+  # cancels an in-flight labeled run instead of allowing it to publish late.
+  group: instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}
   cancel-in-progress: true
 
 jobs:
@@ -153,6 +152,9 @@ jobs:
   validate:
     if: github.event_name == 'pull_request_target' || github.event_name == 'push'
     name: instruction-integrity
+    permissions:
+      contents: read
+      checks: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -245,19 +247,20 @@ jobs:
                   missing_trees.append(name)
               elif any(item.is_symlink() for item in skill.rglob("*")):
                   missing_trees.append(name)
-               else:
-                   try:
-                       entry_text = entry.read_text(encoding="utf-8")
-                   except (OSError, UnicodeDecodeError):
-                       missing_trees.append(name)
-                       continue
-                   if (
-                       not re.match(r"\A---\s*\n", entry_text)
-                       or not re.search(r"(?m)^name:\s*\S+", entry_text)
-                       or not re.search(r"(?m)^description:\s*\S+", entry_text)
-                       or not entry_text.split("---", 2)[-1].strip()
-                   ):
-                       missing_trees.append(name)
+              else:
+                  try:
+                      entry_text = entry.read_text(encoding="utf-8")
+                  except (OSError, UnicodeDecodeError):
+                      missing_trees.append(name)
+                      continue
+                  frontmatter = re.match(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", entry_text, flags=re.S)
+                  if (
+                      not frontmatter
+                      or not re.search(r"(?m)^name:\s*\S+\s*$", frontmatter.group(1))
+                      or not re.search(r"(?m)^description:\s*\S+\s*$", frontmatter.group(1))
+                      or not entry_text[frontmatter.end() :].strip()
+                  ):
+                      missing_trees.append(name)
           if missing_trees:
               raise SystemExit(f"pinned registry is missing advertised skill trees: {', '.join(sorted(missing_trees))}")
           print("pinned global registry content verified")
@@ -310,14 +313,16 @@ jobs:
               protected = set(required)
               for statement in tree.body:
                   if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                      if statement.name in protected and getattr(statement, "decorator_list", []):
+                          rebound_required.add(statement.name)
                       continue
                   for node in ast.walk(statement):
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in protected:
                           rebound_required.add(node.name)
                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in protected:
                           rebound_required.add(node.id)
-                      if isinstance(node, ast.alias) and node.asname in protected:
-                          rebound_required.add(node.asname)
+                      if isinstance(node, ast.alias) and (node.asname or node.name) in protected:
+                          rebound_required.add(node.asname or node.name)
               if rebound_required:
                   raise SystemExit(
                       f"{path}: protected definitions are rebound: {', '.join(sorted(rebound_required))}"
@@ -530,6 +535,56 @@ jobs:
                       bindings.add(child.id)
               return bindings
 
+          def unconditional_calls(node, name):
+              """Return calls not hidden behind a runtime branch or loop."""
+
+              found = []
+
+              class Finder(ast.NodeVisitor):
+                  def __init__(self):
+                      self.conditional_depth = 0
+
+                  def visit_Call(self, call):
+                      if self.conditional_depth == 0 and isinstance(call.func, ast.Name) and call.func.id == name:
+                          found.append(call)
+                      self.generic_visit(call)
+
+                  def visit_If(self, branch):
+                      self.visit(branch.test)
+                      self.conditional_depth += 1
+                      for child in branch.body + branch.orelse:
+                          self.visit(child)
+                      self.conditional_depth -= 1
+
+                  def visit_For(self, loop):
+                      self.visit(loop.iter)
+                      self.conditional_depth += 1
+                      for child in loop.body + loop.orelse:
+                          self.visit(child)
+                      self.conditional_depth -= 1
+
+                  visit_AsyncFor = visit_For
+
+                  def visit_While(self, loop):
+                      self.visit(loop.test)
+                      self.conditional_depth += 1
+                      for child in loop.body + loop.orelse:
+                          self.visit(child)
+                      self.conditional_depth -= 1
+
+                  def visit_FunctionDef(self, function):
+                      return
+
+                  visit_AsyncFunctionDef = visit_FunctionDef
+
+                  def visit_Lambda(self, function):
+                      return
+
+              finder = Finder()
+              for statement in node.body:
+                  finder.visit(statement)
+              return found
+
           def direct_terminator_lines(statements):
               """Find unconditional returns, raises, and process exits in a body."""
 
@@ -567,7 +622,7 @@ jobs:
               for statement in tree.body:
                   if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                       if statement.name in protected:
-                          if isinstance(statement, ast.ClassDef) or statement.name in defined:
+                          if isinstance(statement, ast.ClassDef) or statement.name in defined or getattr(statement, "decorator_list", []):
                               rebound.add(statement.name)
                           defined.add(statement.name)
                       continue
@@ -576,8 +631,8 @@ jobs:
                           rebound.add(node.name)
                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in protected:
                           rebound.add(node.id)
-                      if isinstance(node, ast.alias) and node.asname in protected:
-                          rebound.add(node.asname)
+                      if isinstance(node, ast.alias) and (node.asname or node.name) in protected:
+                          rebound.add(node.asname or node.name)
               return rebound
 
           def check_validator_shape(tree):
@@ -617,6 +672,8 @@ jobs:
                       terminators = info.returns + direct_terminator_lines(node.body)
                       if call_lines and any(line < min(call_lines) for line in terminators):
                           raise SystemExit(f"approved validator {label} can terminate before calling {name}")
+              if not unconditional_calls(main, "validate_asset"):
+                  raise SystemExit("approved validator main hides validate_asset behind a runtime branch")
               if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(parse_yaml)):
                   raise SystemExit("approved validator parse_yaml_mapping has no parsing control flow")
               if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(validate)):
@@ -667,6 +724,19 @@ jobs:
           )
           if "validate_skill" not in module_rebindings(rebound_fixture, {"validate_skill"}):
               raise SystemExit("module-rebinding fixture unexpectedly passed")
+          import_fixture = ast.parse(
+              "def main(): return 0\n"
+              "from helper import main\n"
+          )
+          if "main" not in module_rebindings(import_fixture, {"main"}):
+              raise SystemExit("unaliased-import fixture unexpectedly passed")
+          decorator_fixture = ast.parse(
+              "def decorator(function): return lambda: None\n"
+              "@decorator\n"
+              "def main(): return 0\n"
+          )
+          if "main" not in module_rebindings(decorator_fixture, {"main"}):
+              raise SystemExit("decorator fixture unexpectedly passed")
 
           def check_provisioner_shape(tree):
               required_calls = {
@@ -682,7 +752,8 @@ jobs:
                   info = reachable_info(node)
                   for name in required_names:
                       call_lines = info.calls.get(name, [])
-                      if call_lines and any(line < min(call_lines) for line in info.returns):
+                      terminators = info.returns + direct_terminator_lines(node.body)
+                      if call_lines and any(line < min(call_lines) for line in terminators):
                           raise SystemExit(f"approved provisioner {label} can return before calling {name}")
               if "archive" not in reachable_string_literals(function_node(tree, "verify_registry")):
                   raise SystemExit("approved provisioner verify_registry is missing the git archive operation")
@@ -709,6 +780,17 @@ jobs:
               pass
           else:
               raise SystemExit("short-circuit validator fixture unexpectedly passed")
+          runtime_branch_fixture = ast.parse(
+              "def parse_yaml_mapping():\n  _parse_scalar(); return {}\n"
+              "def validate_asset():\n  validate_skill(); _validate_instruction_file(); _validate_global_manifest(); return {'ok': True}\n"
+              "def main():\n  if not os.environ: validate_asset()\n  else: return 0\n"
+          )
+          try:
+              check_validator_shape(runtime_branch_fixture)
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("runtime-branch validator fixture unexpectedly passed")
           check_provisioner_shape(provisioner)
           dead_provisioner_fixture = ast.parse(
               "def load_manifest():\n  if False: loads()\n"
@@ -722,10 +804,29 @@ jobs:
               pass
           else:
               raise SystemExit("dead-code provisioner fixture unexpectedly passed")
+          early_provisioner_fixture = ast.parse(
+              "def load_manifest(): return loads()\n"
+              "def verify_registry(): return check_output(); 'archive'\n"
+              "def tree_digest(): return sha256(); rglob()\n"
+              "def main():\n  import sys; sys.exit(0)\n  load_manifest(); verify_registry(); tree_digest()\n"
+          )
+          try:
+              check_provisioner_shape(early_provisioner_fixture)
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("early-exit provisioner fixture unexpectedly passed")
           check_module_entrypoint(provisioner, "provisioner")
 
           manifest = json.loads(Path("target/.codex/global-skills.json").read_text(encoding="utf-8"))
           contract = json.loads(Path("target/.codex/instruction-integrity.json").read_text(encoding="utf-8"))
+          agents_text = Path("target/AGENTS.md").read_text(encoding="utf-8")
+          descriptor = manifest.get("registry")
+          if not isinstance(descriptor, dict):
+              raise SystemExit("target global registry descriptor is missing")
+          documented_pin = f"{descriptor.get('repository')}@{descriptor.get('ref')}:{descriptor.get('path')}"
+          if documented_pin not in agents_text:
+              raise SystemExit("AGENTS.md does not document the proposed global registry pin")
           if assignment(provisioner, "EXPECTED_REGISTRY") != manifest.get("registry"):
               raise SystemExit("approved provisioner registry pin does not match the manifest")
           if assignment(provisioner, "EXPECTED_SOURCE_REVISION") != contract.get("canonical_config_commit"):
@@ -760,17 +861,29 @@ jobs:
             push_branches = Array(push["branches"]).map(&:to_s)
             raise "protected branch push gate is missing" unless %w[main master].all? { |item| push_branches.include?(item) }
             raise "push gate must not be path-filtered" if push.key?("paths") || push.key?("paths-ignore")
+            concurrency = workflow["concurrency"]
+            raise "workflow concurrency is missing" unless concurrency.is_a?(Hash)
+            expected_group = "instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}"
+            raise "workflow concurrency group must serialize all PR events" unless concurrency["group"].to_s == expected_group
+            raise "workflow concurrency must cancel superseded runs" unless concurrency["cancel-in-progress"] == true
             root_defaults = workflow["defaults"]
-            raise "workflow defaults may not override shell or working directory" if root_defaults.is_a?(Hash) && (root_defaults.dig("run", "shell") || root_defaults.dig("run", "working-directory"))
+            raise "workflow defaults may not override shell or working directory" if root_defaults.is_a?(Hash) && root_defaults.dig("run").is_a?(Hash) && (root_defaults.dig("run").key?("shell") || root_defaults.dig("run").key?("working-directory"))
+            permissions = workflow["permissions"]
+            raise "workflow permissions must be contents: read only" unless permissions.is_a?(Hash) && permissions.keys.map(&:to_s) == ["contents"] && permissions["contents"].to_s == "read"
             jobs = workflow["jobs"]
             raise "missing bootstrap/validate jobs" unless jobs.is_a?(Hash) && jobs["bootstrap"].is_a?(Hash) && jobs["validate"].is_a?(Hash)
             raise "unexpected workflow job is present" unless jobs.keys.map(&:to_s).sort == %w[bootstrap validate]
             jobs.each do |job_name, job|
               next unless job.is_a?(Hash)
               setup_count = 0
-              raise "job-level permissions are not allowed: #{job_name}" if job.key?("permissions")
+              if job_name == "bootstrap"
+                raise "bootstrap job must not request additional permissions" if job.key?("permissions")
+              elsif job_name == "validate"
+                job_permissions = job["permissions"]
+                raise "trusted validate job must scope contents: read and checks: write" unless job_permissions.is_a?(Hash) && job_permissions.keys.map(&:to_s).sort == %w[checks contents] && job_permissions["contents"].to_s == "read" && job_permissions["checks"].to_s == "write"
+              end
               raise "job-level failure suppression is not allowed: #{job_name}" if job.key?("continue-on-error")
-              if job.dig("defaults", "run", "shell") || job.dig("defaults", "run", "working-directory")
+              if job.dig("defaults", "run").is_a?(Hash) && (job.dig("defaults", "run").key?("shell") || job.dig("defaults", "run").key?("working-directory"))
                 raise "job defaults may not override shell or working directory: #{job_name}"
               end
               Array(job["steps"]).each do |step|
@@ -813,10 +926,11 @@ jobs:
                 next if step["uses"].to_s == "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065" && name.empty?
                 raise "unrecognized workflow step: #{job_name}/#{name}" unless allowed_step_names.fetch(job_name).include?(name)
               end
-              names = Array(job["steps"]).map { |step| step.is_a?(Hash) ? step["name"].to_s : nil }.compact
+              names = Array(job["steps"]).map { |step| step.is_a?(Hash) ? step["name"].to_s : nil }.compact.reject(&:empty?)
               allowed_step_names.fetch(job_name).each do |required_name|
                 raise "workflow step is missing or duplicated: #{job_name}/#{required_name}" unless names.count(required_name) == 1
               end
+              raise "workflow step order is not the trusted sequence: #{job_name}" unless names == allowed_step_names.fetch(job_name)
             end
             bootstrap = jobs["bootstrap"]
             gate = jobs["validate"]
@@ -856,8 +970,6 @@ jobs:
             raise "bootstrap trusted checkout must pin pull request base" unless trusted_bootstrap&.dig("with", "ref").to_s == "${{ github.event.pull_request.base.sha }}"
             raise "target checkout must pin pull request head" unless target_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha || github.sha }}"
             raise "trusted checkout must pin pull request base" unless trusted_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.base.sha || github.sha }}"
-            permissions = workflow["permissions"]
-            raise "workflow permissions must be contents: read plus checks: write" unless permissions.is_a?(Hash) && permissions.keys.map(&:to_s).sort == %w[checks contents] && permissions["contents"].to_s == "read" && permissions["checks"].to_s == "write"
             bootstrap_steps = Array(bootstrap["steps"])
             head_validator = bootstrap_steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate pull request head with trusted validator" }
             raise "head-associated trusted validator step is missing" unless head_validator
@@ -896,16 +1008,18 @@ jobs:
             end
             raise "head validator command can terminate before validation" if head_run.lines.any? { |line| line.match?(/\b(?:exit|return|false)\s+0\b/) }
             steps = Array(gate["steps"])
-              allowed_trusted_steps = ["Verify pinned global registry contents", "Protect the integrity gate files", "Protect instruction contents unless explicitly approved", "Validate AGENTS.md and skills"]
+            allowed_trusted_steps = ["Verify pinned global registry contents", "Protect the integrity gate files", "Protect instruction contents unless explicitly approved", "Validate AGENTS.md and skills"]
             steps.each do |step|
               next unless step.is_a?(Hash)
               run_text = step["run"].to_s
               next if run_text.empty?
-                  if run_text.match?(/\btrusted(?:\/|\b)/)
+              if run_text.match?(/\btrusted(?:\/|\b)/)
                 unless allowed_trusted_steps.include?(step["name"].to_s)
                   raise "untrusted workflow step references the trusted checkout"
                 end
-                  if run_text.lines.any? { |line| line.match?(/\b(?:cp|copy|copyfile|install|mkdir|makedirs|mv|move|rm|rmdir|rmtree|touch|truncate|tee|cat|echo|printf|sed|chmod)\b[^\n]*\btrusted(?:\/|\b)/) || line.match?(/\b(?:write_text|write_bytes|unlink|rename|replace|mkdir|chmod)\b[^\n]*\btrusted(?:\/|\b)/) || line.match?(/\bopen\s*\([^\n]*\btrusted(?:\/|\b)[^\n]*[\"'](?:w|a|x|\+)\b/) || line.match?(/\b(?:git|gh)\b[^\n]*\btrusted(?:\/|\b)[^\n]*(?:checkout|reset|clean|apply|write|push|commit)/) }
+                trusted_token = "trusted"
+                mutation = /(?:\A|[;&|]\s*|\bthen\s+)(?:cp|copy|copyfile|dd|install|mkdir|makedirs|mv|move|rm|remove|rmdir|rmtree|touch|truncate|tee|sed|chmod)\b|\.(?:write_text|write_bytes|unlink|rename|replace|mkdir|chmod)\s*\(|\bopen\s*\([^\n]*(?:[\"'](?:w|a|x|\+)[\"'])|(?:>>?|<<)\s*[\"']?#{trusted_token}(?:\/|\b)|(?:\A|[;&|]\s*|\bthen\s+)\b(?:git|gh)\b[^\n]*(?:\b(?:reset|clean|apply|write|push|commit)\b|\bcheckout\s+(?!-))|\b(?:shutil\.)?(?:copy|copy2|copytree)\s*\([^\n]*#{trusted_token}\//
+                if run_text.lines.any? { |line| !line.include?("mutation =") && line.match?(mutation) }
                   raise "workflow step can mutate the trusted checkout"
                 end
               end
@@ -932,6 +1046,9 @@ jobs:
             raise "head check publication step is missing" unless publish_step
             raise "head check publication must run after failures" unless publish_step["if"].to_s.gsub(/\s+/, " ").strip == "always() && github.event_name == 'pull_request_target'"
             raise "head check publication may not ignore failures" if publish_step["continue-on-error"] == true || publish_step["continue-on-error"].to_s.casecmp("true").zero?
+            publish_env = publish_step["env"]
+            raise "head check publication must bind the exact pull request head" unless publish_env.is_a?(Hash) && publish_env["HEAD_SHA"].to_s == "${{ github.event.pull_request.head.sha }}"
+            raise "head check publication must bind the validator outcome" unless publish_env.is_a?(Hash) && publish_env["VALIDATION_OUTCOME"].to_s == "${{ steps.validate_instructions.outcome }}"
             publish_run = publish_step["run"].to_s
             raise "head check publication may not mask failures" if publish_run.match?(/\|\|\s*true\b/)
             [
@@ -952,6 +1069,7 @@ jobs:
             end
             validate_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate AGENTS.md and skills" }
             raise "trusted validator step is missing" unless validate_step
+            raise "trusted validator step must expose the validation outcome" unless validate_step["id"].to_s == "validate_instructions"
             raise "trusted validator step may be conditionally skipped" if validate_step.key?("if") && !validate_step["if"].to_s.strip.empty?
             raise "trusted validator step may not ignore failures" if validate_step["continue-on-error"] == true || validate_step["continue-on-error"].to_s.casecmp("true").zero?
             run = validate_step["run"].to_s

@@ -71,12 +71,27 @@ def _offline_registry_candidates(runtime_root: Path, advertised: list[str]) -> l
     """Find a local Git checkout that can prove the immutable registry pin."""
 
     candidates: list[Path] = []
-    configured = os.environ.get("CODEX_REGISTRY_SOURCE")
-    if configured:
-        candidates.append(Path(configured).expanduser())
+    for variable in ("CODEX_REGISTRY_SOURCE", "CODEX_WORKSPACE_CONFIG_CHECKOUT"):
+        configured = os.environ.get(variable)
+        if configured:
+            candidates.append(Path(configured).expanduser())
     skills_root = runtime_root.expanduser().resolve() / "skills"
     for name in advertised:
         mount = skills_root / name
+        if not mount.is_symlink():
+            continue
+        try:
+            resolved = mount.resolve(strict=True)
+        except OSError:
+            continue
+        for parent in (resolved, *resolved.parents):
+            if (parent / ".git").exists():
+                candidates.append(parent)
+                break
+    # The managed runtime registry is itself a symlink into the config
+    # checkout. It remains an offline source even when a skill mount is
+    # missing or the advertised skill set changed.
+    for mount in (runtime_root.expanduser() / "workspace-assets.json", runtime_root.expanduser() / "AGENTS.md"):
         if not mount.is_symlink():
             continue
         try:
@@ -147,7 +162,8 @@ def source_checkout(
     except subprocess.CalledProcessError as exc:
         raise SystemExit(
             "unable to fetch the pinned workspace config; provide --registry-source, "
-            "set CODEX_REGISTRY_SOURCE, or mount a verified runtime checkout"
+            "set CODEX_REGISTRY_SOURCE or CODEX_WORKSPACE_CONFIG_CHECKOUT, "
+            "or mount a verified runtime checkout"
         ) from exc
     return checkout
 

@@ -27,11 +27,18 @@ REFERENCE_DEF_RE = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(<[^>]*>|[^\s]+)", re.M)
 REFERENCE_TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".txt", ".text", ".rst"}
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 SECRET_VALUE_RES = (
-    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?token|private[_ -]?key|client[_ -]?secret|service[_ -]?(?:role[_ -]?)?key|secret[_ -]?key|app[_ -]?secret|service[_ -]?token|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\s`<>]+))'''),
-    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\s`<>]+))'''),
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?token|private[_ -]?key|client[_ -]?secret|service[_ -]?(?:role[_ -]?)?key|secret[_ -]?key|app[_ -]?secret|service[_ -]?token|signing[_ -]?(?:key|secret)|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
     re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]+:([^\s/@]+)@"),
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[0-9A-Za-z-]{10,}|sk-(?:[A-Za-z0-9]+-)*[A-Za-z0-9]{20,})\b"),
+)
+PRIVATE_ORIGIN_RE = re.compile(
+    r"(?ix)\bhttps?://(?:[^\s/@:]+(?::[^\s/@]*)?@)?"
+    r"((?:localhost|127(?:\.[0-9]{1,3}){3}|10(?:\.[0-9]{1,3}){3}|"
+    r"192\.168(?:\.[0-9]{1,3}){2}|172\.(?:1[6-9]|2[0-9]|3[0-1])(?:\.[0-9]{1,3}){2}|"
+    r"169\.254(?:\.[0-9]{1,3}){2}|0\.0\.0\.0|::1|\[::1\]|"
+    r"[^\s./]+\.(?:local|internal)(?:\.|[:/]|$)|[^\s./]+\.internal\.[^\s/:]+))"
 )
 FORBIDDEN_YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 PLACEHOLDER_VALUES = {
@@ -428,10 +435,25 @@ def _markdown_targets(text: str) -> Iterable[str]:
         marker = text.find("](", cursor)
         if marker < 0:
             break
-        # An escaped opener is literal Markdown text, not an operative link.
-        # Count consecutive backslashes so ``\\[`` remains an operative
-        # opener while ``\[`` is ignored.
-        opener = text.rfind("[", cursor, marker)
+        # Track unescaped bracket nesting so an escaped ``[`` inside the
+        # label cannot steal the opener from the outer link.  ``rfind`` is
+        # insufficient for ``[label \\[ detail](target)`` because it selects
+        # the literal inner bracket.
+        stack: list[int] = []
+        scan = cursor
+        while scan < marker:
+            if text[scan] == "\\":
+                scan += 2
+                continue
+            if text[scan] == "[":
+                stack.append(scan)
+            elif text[scan] == "]" and stack:
+                stack.pop()
+            scan += 1
+        opener = stack[0] if stack else -1
+        if opener < 0:
+            cursor = marker + 2
+            continue
         slashes = 0
         index = opener - 1
         while opener >= 0 and index >= 0 and text[index] == "\\":
@@ -598,16 +620,38 @@ def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
 
 def _looks_like_placeholder(value: str) -> bool:
     normalized = value.strip().strip("'\"").casefold()
-    # Environment lookups name a runtime-provided credential; the instruction
-    # does not contain the credential value itself.  Treat common Python and
-    # JavaScript lookup forms as safe references before applying literal-value
-    # heuristics below.
-    if re.search(r"\b(?:os\.)?environ(?:\s*\[[^\]]+\]|\.[a-z_][a-z0-9_]*)", normalized):
+    # Exempt only a complete environment lookup. A lookup with a literal
+    # fallback (or a literal suffix/prefix) is still a committed value and
+    # must continue through the normal secret heuristics.
+    if re.fullmatch(r"(?:os\.)?environ(?:\s*\[[^\]]+\]|\.[a-z_][a-z0-9_]*)", normalized):
         return True
-    if re.search(r"\bprocess\.env(?:\s*\[[^\]]+\]|\.[a-z_][a-z0-9_]*)", normalized):
+    if re.fullmatch(r"(?:os\.)?environ\.get\(\s*['\"][^'\"]+['\"]\s*\)", normalized):
         return True
-    if re.search(r"\b(?:os\.)?getenv\s*\(", normalized):
+    if re.fullmatch(r"(?:os\.)?getenv\(\s*['\"][^'\"]+['\"]\s*\)", normalized):
         return True
+    if re.fullmatch(r"process\.env(?:\s*\[[^\]]+\]|\.[a-z_][a-z0-9_]*)", normalized):
+        return True
+    fallback = re.fullmatch(
+        r"(?:os\.)?getenv\(\s*['\"][^'\"]+['\"]\s*,\s*(.+)\s*\)",
+        normalized,
+        flags=re.S,
+    )
+    if fallback:
+        return _looks_like_placeholder(fallback.group(1))
+    fallback = re.fullmatch(
+        r"(?:os\.)?environ\.get\(\s*['\"][^'\"]+['\"]\s*,\s*(.+)\s*\)",
+        normalized,
+        flags=re.S,
+    )
+    if fallback:
+        return _looks_like_placeholder(fallback.group(1))
+    fallback = re.fullmatch(
+        r"process\.env(?:\s*\[[^\]]+\]|\.[a-z_][a-z0-9_]*)\s*\|\|\s*(.+)",
+        normalized,
+        flags=re.S,
+    )
+    if fallback:
+        return _looks_like_placeholder(fallback.group(1))
     if normalized.startswith("${"):
         # Shell defaults such as ${TOKEN:-live-value} are not placeholders;
         # inspect the fallback while retaining ${TOKEN} as a placeholder.
@@ -630,7 +674,7 @@ def _looks_like_placeholder(value: str) -> bool:
 
 
 def has_secret(text: str) -> bool:
-    if PEM_RE.search(text):
+    if PEM_RE.search(text) or PRIVATE_ORIGIN_RE.search(text):
         return True
     for pattern in SECRET_VALUE_RES:
         for match in pattern.finditer(text):
