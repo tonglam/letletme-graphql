@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -137,10 +138,35 @@ def verify_registry(checkout: Path, advertised: list[str], materialized_root: Pa
     return source_root
 
 
+def tree_digest(root: Path) -> str:
+    """Return a deterministic digest for a materialized, regular-file tree."""
+
+    digest = hashlib.sha256()
+    for item in sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix()):
+        relative_path = item.relative_to(root)
+        if "__pycache__" in relative_path.parts or item.suffix == ".pyc":
+            continue
+        relative = relative_path.as_posix()
+        if item.is_symlink():
+            raise SystemExit(f"global skill tree contains a symlink: {item}")
+        if item.is_dir():
+            digest.update(f"D:{relative}\0".encode("utf-8"))
+            continue
+        if not item.is_file():
+            raise SystemExit(f"global skill tree contains an unsupported entry: {item}")
+        digest.update(f"F:{relative}\0".encode("utf-8"))
+        digest.update(hashlib.sha256(item.read_bytes()).digest())
+    return digest.hexdigest()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=Path(".codex/global-skills.json"))
-    parser.add_argument("--runtime-root", type=Path, default=Path.home() / ".codex")
+    parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        help="Codex runtime root (defaults to CODEX_HOME or ~/.codex)",
+    )
     parser.add_argument("--registry-source", type=Path, help="authenticated local config checkout")
     parser.add_argument("--apply", action="store_true", help="install only missing skill directories")
     args = parser.parse_args()
@@ -152,7 +178,9 @@ def main() -> int:
             advertised,
             Path(temporary) / "materialized",
         )
-        destination_root = args.runtime_root.expanduser().resolve() / "skills"
+        configured_runtime_root = args.runtime_root
+        runtime_root = configured_runtime_root or Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+        destination_root = runtime_root.expanduser().resolve() / "skills"
         destination_root.mkdir(parents=True, exist_ok=True)
         missing: list[str] = []
         for name in advertised:
@@ -160,11 +188,17 @@ def main() -> int:
             if destination.is_symlink():
                 if not destination.resolve().exists():
                     raise SystemExit(f"global skill mount is a broken symlink: {destination}")
-                print(f"ok mounted {name} -> {destination.resolve()}")
+                installed = destination.resolve()
+                expected = source_root / name
+                if not installed.is_dir() or tree_digest(installed) != tree_digest(expected):
+                    raise SystemExit(f"global skill mount is stale or modified: {destination}")
+                print(f"ok verified mounted {name} -> {installed}")
             elif destination.is_dir():
                 if not (destination / "SKILL.md").is_file():
                     raise SystemExit(f"global skill mount is incomplete: {destination}")
-                print(f"ok installed {name} -> {destination}")
+                if tree_digest(destination) != tree_digest(source_root / name):
+                    raise SystemExit(f"global skill installation is stale or modified: {destination}")
+                print(f"ok verified installed {name} -> {destination}")
             else:
                 missing.append(name)
         if missing and not args.apply:
