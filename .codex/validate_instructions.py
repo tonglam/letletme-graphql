@@ -27,7 +27,7 @@ INLINE_LINK_RE = re.compile(
 # container prefix is still Markdown structure; the destination remains an
 # operative repository reference.
 REFERENCE_DEF_RE = re.compile(
-    r"^(?: {0,3}>[ \t]?| {0,3}(?:[-+*]|\d+[.)])[ \t]+)*(?<!\\)\[([^\]]+)\]:\s*(<[^>]*>|[^\s]+)",
+    r"^(?: {0,3}>[ \t]?| {0,3}(?:[-+*]|\d+[.)])[ \t]+)*(?<!\\)\[((?:\\.|[^\]\\])*)\]:\s*(<[^>]*>|[^\s]+)",
     re.M,
 )
 REFERENCE_TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".txt", ".text", ".rst"}
@@ -353,10 +353,27 @@ def _without_markdown_code(text: str) -> str:
     # operative links.
     # (marker character, minimum run length, quote depth, list content indent)
     fence: tuple[str, int, int, int | None] | None = None
+    active_list_content_indent: int | None = None
     for line in text.splitlines(keepends=True):
         body = line.rstrip("\r\n")
         marker: tuple[str, int, int, str] | None = None
         list_content_indent: int | None = None
+        # A blank line does not end a list item. Remember the content column
+        # so a four-space continuation (``- item`` followed by
+        # ``    [link](required.md)``) is treated as list content rather than
+        # as a top-level indented code block. Reset only when a non-list line
+        # returns to a shallower top-level indentation.
+        list_context = re.match(r"^( {0,3})([-+*]|\d+[.)])([ \t]+)", body)
+        if list_context:
+            active_list_content_indent = (
+                len(list_context.group(1))
+                + len(list_context.group(2))
+                + len(list_context.group(3))
+            )
+        elif body.strip() and not body.startswith(">") and active_list_content_indent is not None:
+            leading = len(body) - len(body.lstrip(" "))
+            if leading < active_list_content_indent:
+                active_list_content_indent = None
         # CommonMark permits up to three spaces before a block-quote marker,
         # an optional space after each marker, and up to three spaces before
         # the fenced-code marker.  Counting ``>`` markers keeps nested quotes
@@ -428,7 +445,8 @@ def _without_markdown_code(text: str) -> str:
         # Four-space indentation is an indented CommonMark code block. Keep
         # its newlines so line-oriented parsing still works, but do not let
         # example links or governance clauses become operative text.
-        if re.match(r"^ {4,}\S", body):
+        code_indent = (active_list_content_indent + 4) if active_list_content_indent is not None else 4
+        if len(body) - len(body.lstrip(" ")) >= code_indent and body.strip():
             lines.append("\n" if line.endswith("\n") else "")
             continue
         # Inline-code spans are masked in one pass below so a delimiter run
@@ -449,6 +467,16 @@ def _without_markdown_code(text: str) -> str:
             end += 1
         delimiter = masked_text[index:end]
         closing = masked_text.find(delimiter, end)
+        while closing >= 0:
+            before = masked_text[closing - 1] if closing else ""
+            after_index = closing + len(delimiter)
+            after = masked_text[after_index] if after_index < len(masked_text) else ""
+            # A delimiter must be an exact-length run. Do not close a
+            # two-backtick span on the first two characters of a
+            # three-backtick run (or vice versa).
+            if before != "`" and after != "`":
+                break
+            closing = masked_text.find(delimiter, closing + 1)
         if closing < 0:
             index = end
             continue
@@ -870,7 +898,7 @@ def _validate_instruction_file(
     # Root instructions establish the policy. A scoped file explicitly listed
     # by a contract is an operative override, so it must repeat the policy
     # rather than silently weakening finding, review, or cleanup rules.
-    if path.name in {"AGENTS.md", "AGENTS.override.md"} and (
+    if path.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"} and (
         path.parent.resolve() == repo.resolve() or require_governance
     ):
         check_governance_binding(path, text, errors)
@@ -1249,7 +1277,13 @@ def validate_asset(
         discovered = _instruction_paths(repo, include_discovery=asset.get("kind") != "instruction-system")
         discovered_set = set(discovered)
         for path in discovered:
-            _validate_instruction_file(path, repo, policy, errors)
+            _validate_instruction_file(
+                path,
+                repo,
+                policy,
+                errors,
+                require_governance=path.name == "CLAUDE.md",
+            )
             # CLAUDE.md is an operative consumer entrypoint in repositories
             # that provide it, even when the legacy contract lists only
             # AGENTS.md. Treat it as governed automatically rather than

@@ -370,6 +370,61 @@ jobs:
                               names.add(key)
               return names
 
+          def is_main_guard(node):
+              if not isinstance(node, ast.If):
+                  return False
+              test = node.test
+              return (
+                  isinstance(test, ast.Compare)
+                  and len(test.ops) == 1
+                  and isinstance(test.ops[0], ast.Eq)
+                  and len(test.comparators) == 1
+                  and (
+                      (
+                          isinstance(test.left, ast.Name)
+                          and test.left.id == "__name__"
+                          and isinstance(test.comparators[0], ast.Constant)
+                          and test.comparators[0].value == "__main__"
+                      )
+                      or (
+                          isinstance(test.left, ast.Constant)
+                          and test.left.value == "__main__"
+                          and isinstance(test.comparators[0], ast.Name)
+                          and test.comparators[0].id == "__name__"
+                      )
+                  )
+              )
+
+          def function_header_nodes(function):
+              nodes = list(getattr(function, "decorator_list", []))
+              nodes.extend(getattr(function.args, "defaults", []))
+              nodes.extend(value for value in getattr(function.args, "kw_defaults", []) if value is not None)
+              arguments = [
+                  *getattr(function.args, "posonlyargs", []),
+                  *getattr(function.args, "args", []),
+                  *getattr(function.args, "kwonlyargs", []),
+              ]
+              nodes.extend(
+                  argument.annotation
+                  for argument in arguments
+                  if getattr(argument, "annotation", None) is not None
+              )
+              if getattr(function.args, "vararg", None) and function.args.vararg.annotation is not None:
+                  nodes.append(function.args.vararg.annotation)
+              if getattr(function.args, "kwarg", None) and function.args.kwarg.annotation is not None:
+                  nodes.append(function.args.kwarg.annotation)
+              if getattr(function, "returns", None) is not None:
+                  nodes.append(function.returns)
+              return nodes
+
+          def is_safe_module_call(call):
+              return (
+                  isinstance(call.func, ast.Attribute)
+                  and isinstance(call.func.value, ast.Name)
+                  and call.func.value.id == "re"
+                  and call.func.attr == "compile"
+              )
+
           def load_tree(path, required):
               tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
               definitions = {}
@@ -386,35 +441,29 @@ jobs:
               rebound_required = set()
               protected = set(required)
               for statement in tree.body:
-                  if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                  if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                      header_nodes = function_header_nodes(statement)
                       if statement.name in protected:
-                          # Decorators, defaults, and annotations execute at
-                          # module definition time. A default such as
-                          # globals().__setitem__("validate_asset", ...)
-                          # can therefore replace a protected function before
-                          # the guarded entrypoint calls it.
-                          header_nodes = list(getattr(statement, "decorator_list", []))
-                          header_nodes.extend(getattr(statement.args, "defaults", []))
-                          header_nodes.extend(value for value in getattr(statement.args, "kw_defaults", []) if value is not None)
-                          arguments = [
-                              *getattr(statement.args, "posonlyargs", []),
-                              *getattr(statement.args, "args", []),
-                              *getattr(statement.args, "kwonlyargs", []),
-                          ]
-                          header_nodes.extend(
-                              argument.annotation
-                              for argument in arguments
-                              if getattr(argument, "annotation", None) is not None
-                          )
-                          if getattr(statement.args, "vararg", None) and statement.args.vararg.annotation is not None:
-                              header_nodes.append(statement.args.vararg.annotation)
-                          if getattr(statement.args, "kwarg", None) and statement.args.kwarg.annotation is not None:
-                              header_nodes.append(statement.args.kwarg.annotation)
-                          if getattr(statement, "returns", None) is not None:
-                              header_nodes.append(statement.returns)
-                          if any(isinstance(node, ast.Call) for root in header_nodes for node in ast.walk(root)):
+                          # A protected decorator or executable default can
+                          # replace the call target before the entrypoint.
+                          if getattr(statement, "decorator_list", []):
                               rebound_required.add(statement.name)
+                      elif getattr(statement, "decorator_list", []):
+                          raise SystemExit(f"{path}: module-scope function decorators are not allowed")
+                      if any(isinstance(node, ast.Call) for root in header_nodes for node in ast.walk(root)):
+                          raise SystemExit(f"{path}: module-scope function header executes a call")
                       continue
+                  if isinstance(statement, ast.ClassDef):
+                      if statement.decorator_list or any(isinstance(node, ast.Call) for node in ast.walk(statement)):
+                          raise SystemExit(f"{path}: module-scope class definition executes a call")
+                      continue
+                  if is_main_guard(statement):
+                      continue
+                  if isinstance(statement, (ast.Import, ast.ImportFrom)):
+                      continue
+                  for node in ast.walk(statement):
+                      if isinstance(node, ast.Call) and not is_safe_module_call(node):
+                          raise SystemExit(f"{path}: module-scope executable call is not allowed")
                   for node in ast.walk(statement):
                       rebound_required.update(dynamic_rebinding_names(node, protected))
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in protected:
@@ -494,6 +543,39 @@ jobs:
                               main_calls.append(call)
                   if not main_calls:
                       raise SystemExit(f"approved {label} module entrypoint does not call main")
+                  def valid_propagation(statement):
+                      outer = None
+                      if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                          outer = statement.value
+                          if not (
+                              isinstance(outer.func, ast.Attribute)
+                              and isinstance(outer.func.value, ast.Name)
+                              and outer.func.value.id == "sys"
+                              and outer.func.attr == "exit"
+                          ):
+                              return False
+                      elif isinstance(statement, ast.Raise) and isinstance(statement.exc, ast.Call):
+                          outer = statement.exc
+                          if not (isinstance(outer.func, ast.Name) and outer.func.id == "SystemExit"):
+                              return False
+                      else:
+                          return False
+                      return (
+                          len(outer.args) == 1
+                          and not outer.keywords
+                          and isinstance(outer.args[0], ast.Call)
+                          and isinstance(outer.args[0].func, ast.Name)
+                          and outer.args[0].func.id == "main"
+                          and not outer.args[0].keywords
+                      )
+                  if not any(valid_propagation(statement) for statement in node.body):
+                      raise SystemExit(f"approved {label} module entrypoint has no exact failure-propagating statement")
+                  if any(
+                      not valid_propagation(statement)
+                      and any(isinstance(item, ast.Call) for item in ast.walk(statement))
+                      for statement in node.body
+                  ):
+                      raise SystemExit(f"approved {label} module entrypoint contains an unexpected executable call")
                   propagating = False
                   propagating_line = None
                   for statement in node.body:
@@ -724,6 +806,23 @@ jobs:
                           self.visit(child)
                       self.conditional_depth -= 1
 
+                  def visit_With(self, context):
+                      for item in context.items:
+                          self.visit(item.context_expr)
+                          if item.optional_vars:
+                              self.visit(item.optional_vars)
+                      # Context managers such as contextlib.suppress can
+                      # swallow the required validator call and let a
+                      # success return continue. Treat every with-body as a
+                      # conditional path for the same reason as exception
+                      # handlers and loops.
+                      self.conditional_depth += 1
+                      for child in context.body:
+                          self.visit(child)
+                      self.conditional_depth -= 1
+
+                  visit_AsyncWith = visit_With
+
                   def visit_BoolOp(self, expression):
                       # In ``a and required()`` / ``a or required()``, every
                       # operand after the first is conditional on short
@@ -903,6 +1002,59 @@ jobs:
                           raise SystemExit(f"approved validator {label} hides {name} behind a process-state branch")
               if not unconditional_calls(main, "validate_asset"):
                   raise SystemExit("approved validator main hides validate_asset behind a runtime branch")
+              validation_results = set()
+              for statement in ast.walk(main):
+                  if isinstance(statement, ast.Assign):
+                      value = statement.value
+                      targets = statement.targets
+                  elif isinstance(statement, ast.AnnAssign):
+                      value = statement.value
+                      targets = [statement.target]
+                  else:
+                      continue
+                  if not (
+                      isinstance(value, ast.Call)
+                      and isinstance(value.func, ast.Name)
+                      and value.func.id == "validate_asset"
+                  ):
+                      continue
+                  for target in targets:
+                      for item in ast.walk(target):
+                          if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store):
+                              validation_results.add(item.id)
+              def reads_validation_ok(expression):
+                  for item in ast.walk(expression):
+                      if isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute) and item.func.attr == "get":
+                          receiver = item.func.value
+                          if (
+                              isinstance(receiver, ast.Name)
+                              and receiver.id in validation_results
+                              and item.args
+                              and isinstance(item.args[0], ast.Constant)
+                              and item.args[0].value == "ok"
+                          ):
+                              return True
+                      if isinstance(item, ast.Subscript) and isinstance(item.value, ast.Name) and item.value.id in validation_results:
+                          key = item.slice.value if isinstance(item.slice, ast.Constant) else None
+                          if key == "ok":
+                              return True
+                  return False
+              def integer_statuses(expression):
+                  return {
+                      item.value
+                      for item in ast.walk(expression)
+                      if isinstance(item, ast.Constant) and isinstance(item.value, int) and not isinstance(item.value, bool)
+                  }
+              propagated = False
+              for statement in ast.walk(main):
+                  if not isinstance(statement, ast.Return) or not isinstance(statement.value, ast.IfExp):
+                      continue
+                  statuses = integer_statuses(statement.value.body) | integer_statuses(statement.value.orelse)
+                  if reads_validation_ok(statement.value.test) and 0 in statuses and any(status != 0 for status in statuses):
+                      propagated = True
+                      break
+              if not propagated:
+                  raise SystemExit("approved validator main does not propagate validate_asset.ok to a failing exit status")
               check_exception_handlers(main, {"validate_asset"}, "validator main")
               helper_requirements = {
                   "_parse_scalar": {"_strip_yaml_comment", "loads"},
@@ -1191,7 +1343,7 @@ jobs:
               Array(job["steps"]).each do |step|
                 next unless step.is_a?(Hash)
                 raise "step shell override is not allowed: #{job_name}" if step.key?("shell")
-                if step["continue-on-error"] == true || step["continue-on-error"].to_s.casecmp("true").zero?
+                if step.key?("continue-on-error")
                   raise "step failure suppression is not allowed: #{job_name}/#{step["name"]}"
                 end
                 expected_step_env = case step["name"].to_s
@@ -1307,7 +1459,7 @@ jobs:
             head_validator = bootstrap_steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate pull request head with trusted validator" }
             raise "head-associated trusted validator step is missing" unless head_validator
             raise "head validator step may be conditionally skipped" if head_validator.key?("if") && !head_validator["if"].to_s.strip.empty?
-            raise "head validator step may not ignore failures" if head_validator["continue-on-error"] == true || head_validator["continue-on-error"].to_s.casecmp("true").zero?
+            raise "head validator step may not ignore failures" if head_validator.key?("continue-on-error")
             head_run = head_validator["run"].to_s
             raise "head validator may not use a heredoc or failure masking" if head_run.include?("<<") || head_run.include?("||")
             raise "head validator bootstrap branch is missing" unless head_run.include?("if test -f trusted/.codex/validate_instructions.py") && head_run.include?("initial governance installation")
@@ -1399,7 +1551,7 @@ jobs:
             gate_files_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Protect the integrity gate files" }
             raise "integrity gate-file protection step is missing" unless gate_files_step
             raise "integrity gate-file protection may be conditionally skipped" if gate_files_step.key?("if") && !gate_files_step["if"].to_s.strip.empty?
-            raise "integrity gate-file protection may not ignore failures" if gate_files_step["continue-on-error"] == true || gate_files_step["continue-on-error"].to_s.casecmp("true").zero?
+            raise "integrity gate-file protection may not ignore failures" if gate_files_step.key?("continue-on-error")
             gate_files_run = gate_files_step["run"].to_s
             [
               "approved=\"$GOVERNANCE_UPDATE_APPROVED\"",
@@ -1426,7 +1578,7 @@ jobs:
             publish_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Publish head-associated instruction-integrity check" }
             raise "head check publication step is missing" unless publish_step
             raise "head check publication must run after failures" unless publish_step["if"].to_s.gsub(/\s+/, " ").strip == "always() && github.event_name == 'pull_request_target'"
-            raise "head check publication may not ignore failures" if publish_step["continue-on-error"] == true || publish_step["continue-on-error"].to_s.casecmp("true").zero?
+            raise "head check publication may not ignore failures" if publish_step.key?("continue-on-error")
             publish_env = publish_step["env"]
             raise "head check publication must bind the exact pull request head" unless publish_env.is_a?(Hash) && publish_env["HEAD_SHA"].to_s == "${{ github.event.pull_request.head.sha }}"
             raise "head check publication must bind the validator outcome" unless publish_env.is_a?(Hash) && publish_env["VALIDATION_OUTCOME"].to_s == "${{ steps.validate_instructions.outcome }}"
@@ -1462,7 +1614,7 @@ jobs:
             raise "trusted validator step is missing" unless validate_step
             raise "trusted validator step must expose the validation outcome" unless validate_step["id"].to_s == "validate_instructions"
             raise "trusted validator step may be conditionally skipped" if validate_step.key?("if") && !validate_step["if"].to_s.strip.empty?
-            raise "trusted validator step may not ignore failures" if validate_step["continue-on-error"] == true || validate_step["continue-on-error"].to_s.casecmp("true").zero?
+            raise "trusted validator step may not ignore failures" if validate_step.key?("continue-on-error")
             run = validate_step["run"].to_s
             raise "trusted validator step disables errexit" if run.lines.any? { |line| line.strip.match?(/\Aset\s+\+(?:e|o\s+errexit)\b/) }
             raise "trusted validator step may not use a heredoc or failure masking" if run.include?("<<") || run.include?("||")
@@ -1516,7 +1668,7 @@ jobs:
             protection_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Protect instruction contents unless explicitly approved" }
             raise "instruction protection step is missing" unless protection_step
             raise "instruction protection step has an unexpected condition" unless protection_step["if"].to_s.strip == "env.GOVERNANCE_UPDATE_APPROVED != 'true'"
-            raise "instruction protection step may not ignore failures" if protection_step["continue-on-error"] == true || protection_step["continue-on-error"].to_s.casecmp("true").zero?
+            raise "instruction protection step may not ignore failures" if protection_step.key?("continue-on-error")
             protection_run = protection_step["run"].to_s
             ["def surface", "trusted_files = surface", "target_files = surface", "hashlib.sha256", "raise SystemExit"].each do |needle|
               raise "instruction protection step is incomplete: #{needle}" unless protection_run.include?(needle)

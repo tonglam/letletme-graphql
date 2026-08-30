@@ -253,7 +253,12 @@ def tree_digest(root: Path) -> str:
         if not item.is_file():
             raise SystemExit(f"global skill tree contains an unsupported entry: {item}")
         digest.update(f"F:{relative}\0".encode("utf-8"))
-        digest.update(f"M:{stat.S_IMODE(item.stat().st_mode):04o}\0".encode("ascii"))
+        # Git tracks only the executable bit for regular files. Normalize
+        # every non-executable file to 0644 and every executable file to 0755
+        # so a umask or shared checkout permissions cannot make byte-identical
+        # skill content appear stale.
+        normalized_mode = 0o755 if stat.S_IMODE(item.stat().st_mode) & 0o111 else 0o644
+        digest.update(f"M:{normalized_mode:04o}\0".encode("ascii"))
         digest.update(hashlib.sha256(item.read_bytes()).digest())
     return digest.hexdigest()
 
