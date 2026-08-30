@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "registry": {"repository": "tonglam/codex-workspace-config", "ref": "7e92336ec04d38f7bb95620e304ce6ec6567c896", "path": "registry/workspace-assets.json", "sha256": "fa1a2a5448e34376c4dccfe43c6c8a901adb9b62df3995b1f11d3aa4b9b77cb6"},
+  "skills": ["workspace-instruction-audit", "gh-codex-review-loop", "letletme-stack-audit", "letletme-release-acceptance"]
+}

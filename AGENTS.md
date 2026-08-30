@@ -57,3 +57,17 @@ Master TypeScript's advanced type system including generics, conditional types, 
 - `.agents/skills/typescript-advanced-types/SKILL.md`
 
 <!-- autoskills:end -->
+
+## Codex-maintained routing
+
+- GraphQL is a read-heavy public boundary. Keep transport/security admission in `src/http` and `src/bootstrap.ts`, domain shaping in `src/domains`, and PostgreSQL/Data Redis as upstream authorities; GraphQL must not write Data tables or repair Data Redis directly.
+- Use `$letletme-graphql-read-path` for ingress, auth, schema/domain, read-model, publication/fallback, cache, or rate-limit work. Use `$letletme-stack-audit` only when a contract crosses Data, Web, Mini, or Ops. The repository-local skill is `.agents/skills/letletme-graphql-read-path/SKILL.md`.
+- Keep root-field auth/rate-limit policy, generated docs, focused tests, and affected client operations synchronized for schema changes. Preserve revision-coherent publications and a PostgreSQL fallback rather than mixing snapshots.
+
+## Governance and review
+
+- Global routes in `.codex/global-skills.json` are provisioned from immutable `tonglam/codex-workspace-config@7e92336ec04d38f7bb95620e304ce6ec6567c896:registry/workspace-assets.json` into the host Codex mount; with an authenticated local checkout, run `python3 .codex/provision_global_skills.py --manifest .codex/global-skills.json --registry-source "$CODEX_WORKSPACE_CONFIG_CHECKOUT" --apply`. When no local checkout is available, omit `--registry-source` and explicitly add `--allow-network` only when approved: `python3 .codex/provision_global_skills.py --manifest .codex/global-skills.json --allow-network --apply`. Do not vendor or copy unrelated global/plugin skills into this repository.
+- Use `$gh-codex-review-loop` for PR work. A review may be skipped only after two consecutive explicit quota-limit responses for the unchanged head; record both responses and the exact SHA. This never waives CI, findings, or cleanup.
+- Every P0-P3 finding must be dispositioned and its thread resolved. Only a finding confined to tests/scripts gets the time exception: implement P0/P1, and explain plus resolve P2/P3 without implementation time. P2/P3 anywhere else must be actually fixed and verified.
+- Keep a complete finding ledger for the exact head; merge is prohibited while any finding is undispositioned or any review thread is unresolved. A quota override can skip only a new review request and never finding resolution.
+- After merge, clean only the exact corresponding worktree, local branch, and remote branch after verifying identity; leave unrelated WIP untouched.
