@@ -212,6 +212,11 @@ def main() -> int:
                 if tree_digest(destination) != tree_digest(source_root / name):
                     raise SystemExit(f"global skill installation is stale or modified: {destination}")
                 print(f"ok verified installed {name} -> {destination}")
+            elif destination.exists():
+                # A regular file or other special node must never be replaced
+                # by a provisioned skill directory. Treat this as an explicit
+                # collision instead of classifying it as merely missing.
+                raise SystemExit(f"global skill mount collides with a non-directory: {destination}")
             else:
                 missing.append(name)
         if missing and not args.apply:
