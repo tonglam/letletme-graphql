@@ -340,7 +340,7 @@ def _without_markdown_code(text: str) -> str:
         # an optional space after each marker, and up to three spaces before
         # the fenced-code marker.  Counting ``>`` markers keeps nested quotes
         # from accidentally closing an outer fence.
-        quote_match = re.match(r"^( {0,3}(?:> ?)+)( {0,3})([`~]{3,})(.*)$", body)
+        quote_match = re.match(r"^( {0,3}(?:> ?)+)( {0,3})(`{3,}|~{3,})(.*)$", body)
         if quote_match:
             prefix = quote_match.group(1)
             run = quote_match.group(3)
@@ -350,7 +350,7 @@ def _without_markdown_code(text: str) -> str:
             # marker is a container prefix, not part of the fence itself;
             # retain the quote depth so a nested quote cannot close it.
             list_match = re.match(
-                r"^( {0,3}(?:> ?)*)( {0,3})(?:[-+*]|\d+[.)])[ \t]+( {0,3})([`~]{3,})(.*)$",
+                r"^( {0,3}(?:> ?)*)( {0,3})(?:[-+*]|\d+[.)])[ \t]+( {0,3})(`{3,}|~{3,})(.*)$",
                 body,
             )
             if list_match:
@@ -364,7 +364,7 @@ def _without_markdown_code(text: str) -> str:
                 )
                 marker = (run[0], len(run), prefix.count(">"), list_match.group(5))
             else:
-                normal_match = re.match(r"^( {0,3})([`~]{3,})(.*)$", body)
+                normal_match = re.match(r"^( {0,3})(`{3,}|~{3,})(.*)$", body)
                 if normal_match:
                     run = normal_match.group(2)
                     marker = (run[0], len(run), 0, normal_match.group(3))
