@@ -28,7 +28,7 @@ concurrency:
   # remains independent so it cannot cancel the trusted gate. Removing
   # approval still cancels an in-flight labeled target run instead of allowing
   # it to publish late.
-  group: instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}-${{ github.event_name }}
+  group: instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}-${{ github.event_name == 'pull_request' && 'bootstrap' || 'trusted' }}
   cancel-in-progress: true
 
 jobs:
@@ -433,7 +433,7 @@ jobs:
           ALLOWED_IMPORT_ROOTS = {
               "__future__", "argparse", "hashlib", "io", "ipaddress", "json", "os",
               "pathlib", "re", "shutil", "stat", "subprocess", "sys", "tarfile",
-              "tempfile", "typing",
+              "tempfile", "typing", "urllib",
           }
 
           def check_imports(path, tree):
@@ -454,6 +454,9 @@ jobs:
                       sibling = path.parent / f"{module}.py"
                       if sibling.exists() and sibling != path:
                           raise SystemExit(f"{path}: local module shadows imported standard module: {sibling.name}")
+                      package = path.parent / module
+                      if package.is_dir() and package != path.parent:
+                          raise SystemExit(f"{path}: local package shadows imported standard module: {package.name}")
 
           def load_tree(path, required):
               tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -567,7 +570,10 @@ jobs:
                   raise SystemExit(f"{path}: missing required definitions: {', '.join(missing)}")
               return tree
 
-          validator = load_tree(Path(os.environ["TARGET_VALIDATOR"]), {"parse_yaml_mapping", "validate_asset", "main"})
+          validator = load_tree(
+              Path(os.environ["TARGET_VALIDATOR"]),
+              {"parse_yaml_mapping", "validate_asset", "main", "has_secret", "_has_private_ip_literal", "_looks_like_placeholder"},
+          )
           provisioner_path = Path(os.environ["TARGET_PROVISIONER"])
           provisioner = load_tree(provisioner_path, {"load_manifest", "verify_registry", "tree_digest", "main"})
 
@@ -763,19 +769,62 @@ jobs:
                   if isinstance(node.value, str):
                       self.strings.add(node.value)
 
+              def _visit_block(self, statements):
+                  """Visit only statements that can execute in this block."""
+
+                  for child in statements:
+                      self.visit(child)
+                      if isinstance(child, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+                          break
+                      if (
+                          isinstance(child, ast.Expr)
+                          and isinstance(child.value, ast.Call)
+                          and (
+                              (isinstance(child.value.func, ast.Name) and child.value.func.id in {"exit", "quit"})
+                              or (
+                                  isinstance(child.value.func, ast.Attribute)
+                                  and isinstance(child.value.func.value, ast.Name)
+                                  and (
+                                      (child.value.func.value.id in {"sys", "builtins"} and child.value.func.attr == "exit")
+                                      or (child.value.func.value.id == "os" and child.value.func.attr == "_exit")
+                                  )
+                              )
+                          )
+                      ):
+                          break
+
               def visit_If(self, node):
                   self.visit(node.test)
                   truth = constant_truth(node.test)
                   branch = node.body if truth is True else node.orelse if truth is False else node.body + node.orelse
-                  for child in branch:
-                      self.visit(child)
+                  self._visit_block(branch)
+
+              def visit_For(self, node):
+                  self.visit(node.target)
+                  self.visit(node.iter)
+                  empty_iter = (
+                      isinstance(node.iter, (ast.Tuple, ast.List, ast.Set, ast.Dict))
+                      and not getattr(node.iter, "elts", getattr(node.iter, "keys", []))
+                  ) or (
+                      isinstance(node.iter, ast.Call)
+                      and isinstance(node.iter.func, ast.Name)
+                      and node.iter.func.id == "range"
+                      and node.iter.args
+                      and all(isinstance(arg, ast.Constant) for arg in node.iter.args)
+                      and len(range(*[arg.value for arg in node.iter.args])) == 0
+                  )
+                  if not empty_iter:
+                      self._visit_block(node.body)
+                  if node.orelse:
+                      self._visit_block(node.orelse)
+
+              visit_AsyncFor = visit_For
 
               def visit_While(self, node):
                   self.visit(node.test)
                   truth = constant_truth(node.test)
                   branch = node.body if truth is not False else node.orelse
-                  for child in branch:
-                      self.visit(child)
+                  self._visit_block(branch)
 
               def visit_Try(self, node):
                   # Exception handlers are conditional recovery paths, not an
@@ -784,8 +833,8 @@ jobs:
                   # succeeds, so a required call there cannot satisfy the
                   # unconditional-path contract. Handlers are recovery paths
                   # and are deliberately excluded as well.
-                  for child in node.body + node.finalbody:
-                      self.visit(child)
+                  self._visit_block(node.body)
+                  self._visit_block(node.finalbody)
 
               visit_TryStar = visit_Try
 
@@ -1053,6 +1102,12 @@ jobs:
               protected = set(names)
               defined = set()
               rebound = set()
+              imported = set()
+              for statement in tree.body:
+                  if isinstance(statement, ast.Import):
+                      imported.update(alias.asname or alias.name.split(".", 1)[0] for alias in statement.names)
+                  elif isinstance(statement, ast.ImportFrom) and statement.module:
+                      imported.update(alias.asname or alias.name for alias in statement.names)
               for statement in tree.body:
                   if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                       if statement.name in protected:
@@ -1062,6 +1117,14 @@ jobs:
                       continue
                   for node in ast.walk(statement):
                       rebound.update(dynamic_rebinding_names(node, protected))
+                      if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+                          targets = node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
+                          for target in targets:
+                              root = target
+                              while isinstance(root, (ast.Attribute, ast.Subscript)):
+                                  root = root.value
+                              if isinstance(root, ast.Name) and root.id in imported and isinstance(target, (ast.Attribute, ast.Subscript)):
+                                  rebound.add(f"{root.id}.*")
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in protected:
                           rebound.add(node.name)
                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in protected:
@@ -1079,6 +1142,9 @@ jobs:
                   "validate_skill": function_node(tree, "validate_skill"),
                   "_validate_instruction_file": function_node(tree, "_validate_instruction_file"),
                   "_validate_global_manifest": function_node(tree, "_validate_global_manifest"),
+                  "has_secret": function_node(tree, "has_secret"),
+                  "_has_private_ip_literal": function_node(tree, "_has_private_ip_literal"),
+                  "_looks_like_placeholder": function_node(tree, "_looks_like_placeholder"),
               }
               rebound = module_rebindings(
                   tree,
@@ -1090,6 +1156,9 @@ jobs:
                       "validate_skill",
                       "_validate_instruction_file",
                       "_validate_global_manifest",
+                      "has_secret",
+                      "_has_private_ip_literal",
+                      "_looks_like_placeholder",
                   },
               )
               if rebound:
@@ -1156,6 +1225,41 @@ jobs:
                           if key == "ok":
                               return True
                   return False
+              def validation_ok_is_positive(expression):
+                  """Return True only when the status branch means validation passed."""
+
+                  def signal(node, inverted=False):
+                      if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+                          return signal(node.operand, not inverted)
+                      if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+                          receiver = node.func.value
+                          if (
+                              isinstance(receiver, ast.Name)
+                              and receiver.id in validation_results
+                              and node.args
+                              and isinstance(node.args[0], ast.Constant)
+                              and node.args[0].value == "ok"
+                          ):
+                              return not inverted
+                      if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id in validation_results:
+                          key = node.slice.value if isinstance(node.slice, ast.Constant) else None
+                          if key == "ok":
+                              return not inverted
+                      if isinstance(node, ast.Compare) and node.comparators:
+                          left_signal = signal(node.left, inverted)
+                          if left_signal is not None and len(node.ops) == 1 and len(node.comparators) == 1 and isinstance(node.comparators[0], ast.Constant):
+                              comparator = node.comparators[0].value
+                              if isinstance(node.ops[0], (ast.Eq, ast.Is)):
+                                  return left_signal if bool(comparator) else not left_signal
+                              if isinstance(node.ops[0], (ast.NotEq, ast.IsNot)):
+                                  return not left_signal if bool(comparator) else left_signal
+                      for child in ast.iter_child_nodes(node):
+                          result = signal(child, inverted)
+                          if result is not None:
+                              return result
+                      return None
+
+                  return signal(expression) is True
               def integer_statuses(expression):
                   return {
                       item.value
@@ -1169,7 +1273,7 @@ jobs:
                   true_statuses = integer_statuses(statement.value.body)
                   false_statuses = integer_statuses(statement.value.orelse)
                   if (
-                      reads_validation_ok(statement.value.test)
+                      validation_ok_is_positive(statement.value.test)
                       and 0 in true_statuses
                       and any(status != 0 for status in false_statuses)
                   ):
@@ -1183,6 +1287,9 @@ jobs:
                   "validate_skill": {"_validate_instruction_file", "rglob", "read_bytes", "has_secret"},
                   "_validate_instruction_file": {"read_text", "read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json", "read_bytes", "sha256", "resolve"},
+                  "has_secret": {"search", "finditer", "_has_private_ip_literal", "_looks_like_placeholder"},
+                  "_has_private_ip_literal": {"finditer", "ip_address"},
+                  "_looks_like_placeholder": {"fullmatch", "match", "search"},
               }
               for label, required_names in helper_requirements.items():
                   helper = helper_nodes[label]
@@ -1195,6 +1302,7 @@ jobs:
                   "validate_skill": {"_validate_instruction_file", "has_secret"},
                   "_validate_instruction_file": {"read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json"},
+                  "has_secret": {"_has_private_ip_literal", "_looks_like_placeholder"},
               }
               helper_receivers = {
                   "_parse_scalar": {"loads": {"json"}},
@@ -1204,6 +1312,19 @@ jobs:
                       "read_bytes": {"source_resolved"},
                       "sha256": {"hashlib"},
                       "resolve": {"registry_source", "source_path"},
+                  },
+                  "has_secret": {
+                      "search": {"PEM_RE", "PRIVATE_ORIGIN_RE"},
+                      "finditer": {"pattern"},
+                  },
+                  "_has_private_ip_literal": {
+                      "finditer": {"IP_LITERAL_RE"},
+                      "ip_address": {"ipaddress"},
+                  },
+                  "_looks_like_placeholder": {
+                      "fullmatch": {"re"},
+                      "match": {"re"},
+                      "search": {"re"},
                   },
               }
               for label, names in helper_direct.items():
@@ -1343,6 +1464,31 @@ jobs:
                   for operation, receivers in operations.items():
                       if not (info.call_receivers.get(operation, set()) & receivers):
                           raise SystemExit(f"approved provisioner {label} requires an unshadowed {operation} call")
+              digest_function = function_node(tree, "tree_digest")
+              digest_names = {
+                  target.id
+                  for node in ast.walk(digest_function)
+                  if isinstance(node, ast.Assign)
+                  and isinstance(node.value, ast.Call)
+                  and isinstance(node.value.func, ast.Attribute)
+                  and isinstance(node.value.func.value, ast.Name)
+                  and node.value.func.value.id == "hashlib"
+                  and node.value.func.attr == "sha256"
+                  for target in node.targets
+                  if isinstance(target, ast.Name)
+              }
+              if not digest_names:
+                  raise SystemExit("approved provisioner tree_digest does not retain the sha256 accumulator")
+              if not any(
+                  isinstance(node, ast.Return)
+                  and isinstance(node.value, ast.Call)
+                  and isinstance(node.value.func, ast.Attribute)
+                  and node.value.func.attr == "hexdigest"
+                  and isinstance(node.value.func.value, ast.Name)
+                  and node.value.func.value.id in digest_names
+                  for node in ast.walk(digest_function)
+              ):
+                  raise SystemExit("approved provisioner tree_digest must return the computed digest")
               if "archive" not in reachable_string_literals(function_node(tree, "verify_registry")):
                   raise SystemExit("approved provisioner verify_registry is missing the git archive operation")
 
@@ -1477,7 +1623,7 @@ jobs:
             raise "push gate must not be filtered" if push.keys.any? { |key| %w[paths paths-ignore branches-ignore].include?(key.to_s) }
             concurrency = workflow["concurrency"]
             raise "workflow concurrency is missing" unless concurrency.is_a?(Hash)
-            expected_group = "instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}-${{ github.event_name }}"
+            expected_group = "instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}-${{ github.event_name == 'pull_request' && 'bootstrap' || 'trusted' }}"
             raise "workflow concurrency group must serialize each event flow" unless concurrency["group"].to_s == expected_group
             raise "workflow concurrency must cancel superseded runs" unless concurrency["cancel-in-progress"] == true
             root_defaults = workflow["defaults"]
@@ -1738,7 +1884,7 @@ jobs:
                   raise "workflow step may not execute an indirect proposed-checkout path"
                 end
               end
-              if shell_text.match?(/\b(?:BASH_ENV|PYTHONPATH|RUBYLIB|NODE_OPTIONS|LD_PRELOAD|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_SSH_COMMAND)\s*=/)
+              if shell_text.match?(/\b(?:PATH|BASH_ENV|PYTHONPATH|RUBYLIB|NODE_OPTIONS|LD_PRELOAD|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_SSH_COMMAND)\s*=/)
                 raise "workflow step may not override the trusted process environment"
               end
               if run_text.match?(/\btrusted(?:\/|\b)/)
@@ -1774,6 +1920,8 @@ jobs:
             ].each do |needle|
               raise "integrity gate-file protection is incomplete: #{needle}" unless gate_files_run.include?(needle)
             end
+            protection_shell_prefix = gate_files_run.split("python3 - <<'PY'", 2).first
+            raise "integrity gate protection may not exit successfully before semantic checks" if protection_shell_prefix.lines.any? { |line| line.strip.match?(/\A(?:exit|return)\s+0\b/) }
             semantic_markers = [
               "TARGET_VALIDATOR=",
               "def check_validator_shape",
@@ -1803,9 +1951,15 @@ jobs:
               "test \"$VALIDATION_OUTCOME\" = success || conclusion=failure",
             ]
             raise "head check publication conclusion flow is not fixed to validator outcome" unless conclusion_lines == expected_conclusion_lines
+            conclusion_assignments = publish_run.lines.map(&:strip).select do |line|
+              line.match?(/\Aconclusion\s*=/) || line.match?(/\|\|\s*conclusion\s*=/)
+            end
+            raise "head check publication conclusion is reassigned" unless conclusion_assignments == expected_conclusion_lines
             raise "head check payload must consume the computed conclusion" unless publish_run.match?(/python3\s+-\s+"\$HEAD_SHA"\s+"\$conclusion"\s+<<['"]?PY['"]?/)
             raise "head check payload must unpack both trusted arguments" unless publish_run.include?("head_sha, conclusion = sys.argv[1:]")
+            raise "head check payload must bind the exact head" unless publish_run.include?("\"head_sha\": head_sha")
             raise "head check payload must publish the computed conclusion" unless publish_run.include?("\"conclusion\": conclusion")
+            raise "head check payload may not hard-code a conclusion" if publish_run.match?(/\"conclusion\"\s*:\s*\"(?:success|failure)\"/)
             raise "head check publisher must issue exactly one API call" unless publish_run.scan(/\bgh api\b/).length == 1
             [
               "set -eu",
@@ -1847,6 +2001,16 @@ jobs:
               line.match?(/\A(?:[A-Z_][A-Z0-9_]*=\S+\s+)*python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\z)/)
             end
             raise "trusted validator command is missing or not executable" unless command
+            shell_depth = 0
+            run.each_line do |line|
+              stripped = line.strip
+              next if stripped.empty? || stripped.start_with?("#")
+              shell_depth += 1 if stripped.start_with?("if ")
+              if stripped.match?(/\A(?:[A-Z_][A-Z0-9_]*=\S+\s+)*python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\z)/)
+                raise "trusted validator command is nested in a conditional shell path" unless shell_depth == 0
+              end
+              shell_depth -= 1 if stripped == "fi"
+            end
             command_index = logical_commands.index(command)
             if logical_commands[0...command_index].any? { |line| line.match?(/\b(?:exit|return|false|kill|exec)\b/) }
               raise "trusted validator command has terminating control flow before validation"
@@ -1883,7 +2047,7 @@ jobs:
             raise "instruction protection step has an unexpected condition" unless protection_step["if"].to_s.strip == "env.GOVERNANCE_UPDATE_APPROVED != 'true'"
             raise "instruction protection step may not ignore failures" if protection_step.key?("continue-on-error")
             protection_run = protection_step["run"].to_s
-            ["def surface", "trusted_files = surface", "target_files = surface", "hashlib.sha256", "raise SystemExit", "(\".claude\", \"agents\")"].each do |needle|
+            ["def surface", "trusted_files = surface", "target_files = surface", "hashlib.sha256", "raise SystemExit", "(\".claude\", \"agents\")", "(\".claude\", \"rules\")", "_normalize_reference_target"].each do |needle|
               raise "instruction protection step is incomplete: #{needle}" unless protection_run.include?(needle)
             end
             protection_shell_lines = protection_run.split("python3 - <<'PY'", 2).first.lines.map(&:strip).reject(&:empty?)
@@ -1908,7 +2072,7 @@ jobs:
           target_root = Path("target")
           contract = json.loads((trusted_root / ".codex/instruction-integrity.json").read_text())
           sys.path.insert(0, str((trusted_root / ".codex").resolve()))
-          from validate_instructions import REFERENCE_TEXT_SUFFIXES, _is_external_target, _is_within, _markdown_targets
+          from validate_instructions import REFERENCE_TEXT_SUFFIXES, _is_external_target, _is_within, _markdown_targets, _normalize_reference_target
 
           def surface(root, raw_paths):
               files = {}
@@ -1924,7 +2088,7 @@ jobs:
                       paths.add(relative)
                   if len(relative.parts) >= 3 and relative.parts[:2] == (".claude", "skills") and item.name == "SKILL.md":
                       paths.add(relative)
-                  if len(relative.parts) >= 3 and relative.parts[:2] == (".claude", "agents") and item.suffix.casefold() == ".md":
+                  if len(relative.parts) >= 3 and relative.parts[:2] in {(".claude", "agents"), (".claude", "rules")} and item.suffix.casefold() == ".md":
                       paths.add(relative)
               for relative in sorted(paths, key=str):
                   if relative.is_absolute() or ".." in relative.parts:
@@ -1962,18 +2126,18 @@ jobs:
                       continue
                   seen.add(relative)
                   path = root / relative
-                  if path.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES or not path.is_file():
+                  if (path.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES and path.suffix != "") or not path.is_file():
                       continue
                   text = path.read_text(encoding="utf-8")
                   for raw_target in _markdown_targets(text):
-                      target = raw_target.strip().split("#", 1)[0].strip()
+                      target = _normalize_reference_target(raw_target)
                       if not target or _is_external_target(target):
                           continue
                       lexical = path.parent / target
                       candidate = lexical.resolve()
                       if lexical.is_symlink():
                           raise SystemExit(f"governed referenced instruction may not be a symlink: {lexical.relative_to(root)}")
-                      if not candidate.is_file() or candidate.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES:
+                      if not candidate.is_file() or (candidate.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES and candidate.suffix != ""):
                           continue
                       if not _is_within(candidate, repo_root):
                           continue

@@ -14,6 +14,7 @@ import ipaddress
 import json
 import re
 import sys
+from urllib.parse import unquote
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -617,6 +618,16 @@ def _unescape_markdown_destination(target: str) -> str:
     return re.sub(r"\\([!\"#$%&'()*+,./:;<=>?@\[\\\]^_`{|}~-])", r"\1", target)
 
 
+def _normalize_reference_target(raw_target: str) -> str:
+    """Decode Markdown escapes/percent-encoding before URI/path handling."""
+
+    target = _unescape_markdown_destination(raw_target.strip())
+    # Percent-encoded schemes (for example ``https%3A//example.test``) must
+    # be classified as external before the path is resolved locally.
+    target = unquote(target)
+    return target.split("#", 1)[0].split("?", 1)[0].strip()
+
+
 def check_reference_links(
     instruction_file: Path,
     repo: Path,
@@ -626,11 +637,8 @@ def check_reference_links(
 ) -> None:
     text = instruction_file.read_text(encoding="utf-8")
     for raw_target in _markdown_targets(text):
-        raw_target = raw_target.strip()
-        if not raw_target or _is_external_target(raw_target):
-            continue
-        target = _unescape_markdown_destination(raw_target.split("#", 1)[0].split("?", 1)[0].strip())
-        if not target:
+        target = _normalize_reference_target(raw_target)
+        if not target or _is_external_target(target):
             continue
         lexical = instruction_file.parent / target
         candidate = lexical.resolve()
@@ -669,11 +677,8 @@ def scan_reference_graph(
         except OSError:
             continue
         for raw_target in _markdown_targets(text):
-            raw_target = raw_target.strip()
-            if not raw_target or _is_external_target(raw_target):
-                continue
-            target = _unescape_markdown_destination(raw_target.split("#", 1)[0].split("?", 1)[0].strip())
-            if not target:
+            target = _normalize_reference_target(raw_target)
+            if not target or _is_external_target(target):
                 continue
             lexical = current.parent / target
             try:
@@ -703,12 +708,18 @@ def scan_reference_graph(
                 continue
             if not reference_text.strip():
                 errors.append(f"{candidate}: referenced instruction is empty")
-            if candidate.suffix.casefold() == ".md" and candidate.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
+            is_reference_text = candidate.suffix.casefold() in REFERENCE_TEXT_SUFFIXES or candidate.suffix == ""
+            if is_reference_text and candidate.suffix.casefold() == ".md" and candidate.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
                 errors.append(f"{candidate}: referenced instruction exceeds max_skill_bytes")
             if policy.get("forbid_secrets_in_instructions") and has_secret(reference_text):
                 errors.append(f"{candidate}: possible secret/token pattern")
-            check_reference_links(candidate, repo, errors, allow_external=allow_external)
-            queue.append(candidate)
+            # Only recurse through known instruction/config text (plus
+            # extensionless files, which are commonly executable instruction
+            # entrypoints). Linked source/binary files are still scanned for
+            # secrets but are not parsed as Markdown.
+            if is_reference_text:
+                check_reference_links(candidate, repo, errors, allow_external=allow_external)
+                queue.append(candidate)
 
 
 def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
@@ -749,7 +760,7 @@ def _looks_like_placeholder(value: str) -> bool:
     # delimiter (for example ``process.env.PASSWORD,``). Remove only trailing
     # delimiters before matching complete environment lookups; literal values
     # remain subject to the normal secret heuristics below.
-    normalized = normalized.rstrip(",;").strip().strip("'\"")
+    normalized = normalized.rstrip(",;").strip()
     # Exempt only a complete environment lookup. A lookup with a literal
     # fallback (or a literal suffix/prefix) is still a committed value and
     # must continue through the normal secret heuristics.
@@ -802,13 +813,43 @@ def _looks_like_placeholder(value: str) -> bool:
         if match:
             return _looks_like_placeholder(match.group(1))
         return True
-    normalized = normalized.rstrip(",;)]}").strip("'\"")
+    normalized = normalized.rstrip(",;").strip()
     if not normalized:
         return True
+    # Strip one complete grouping/container layer and inspect its contents.
+    # This keeps parenthesized literals and literal list/dict values subject
+    # to the secret check instead of treating every bracketed expression as a
+    # harmless placeholder.
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    if normalized[0] in pairs and normalized[-1] == pairs[normalized[0]]:
+        depth = 0
+        balanced = True
+        for index, char in enumerate(normalized):
+            if char in pairs:
+                depth += 1
+            elif char in pairs.values():
+                depth -= 1
+                if depth == 0 and index != len(normalized) - 1:
+                    balanced = False
+                    break
+                if depth < 0:
+                    balanced = False
+                    break
+        if balanced and depth == 0:
+            return _looks_like_placeholder(normalized[1:-1])
+    # A call/expression with embedded quoted literals is only a placeholder
+    # when all embedded literals are placeholders. This prevents
+    # ``decrypt("live-secret")`` and similar wrappers from bypassing scans,
+    # while preserving ordinary ``value.casefold()`` assignments.
+    literals = []
+    for match in re.finditer(r'''"((?:\\.|[^"\\])*)"|'((?:''|[^'])*)' ''', normalized, flags=re.X):
+        literals.append(match.group(1) if match.group(1) is not None else match.group(2))
+    if literals:
+        return all(_looks_like_placeholder(literal) for literal in literals)
     # A generic ``token``/``secret`` variable is frequently assigned from a
-    # parser or environment expression. Those expressions are not embedded
-    # credentials; keep them out of the literal-secret heuristic while the
-    # surrounding source remains subject to normal review.
+    # parser or environment expression. With no embedded literal, keep it out
+    # of the literal-secret heuristic while the surrounding source remains
+    # subject to normal review.
     if re.search(r"[()\[\]{}]", normalized) or re.search(r"\.\w+\s*\(", normalized):
         return True
     return (
@@ -832,6 +873,10 @@ def _has_private_ip_literal(text: str) -> bool:
         # origins are still covered by PRIVATE_ORIGIN_RE above; suppress only
         # this explicit documentation pattern to avoid noisy false positives.
         if value in {"127.0.0.1", "::1"} and re.search(r"\b(?:localhost|loopback|test)\b", text, re.IGNORECASE):
+            continue
+        # TEST-NET ranges are documentation-only and should not be treated as
+        # private deployment origins when they appear in examples.
+        if any(address in ipaddress.ip_network(network) for network in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")):
             continue
         if address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified:
             return True
@@ -936,12 +981,12 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
         for path in _skill_entrypoints(root, repo):
             if not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
                 paths.add(path.absolute())
-    agents_root = repo / ".claude" / "agents"
-    if agents_root.is_dir():
-        for path in agents_root.rglob("*.md"):
-            if path.is_file() or path.is_symlink():
-                if not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
-                    paths.add(path.absolute())
+    for claude_root in (repo / ".claude" / "agents", repo / ".claude" / "rules"):
+        if claude_root.is_dir():
+            for path in claude_root.rglob("*.md"):
+                if path.is_file() or path.is_symlink():
+                    if not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
+                        paths.add(path.absolute())
     return sorted(paths)
 
 
@@ -975,9 +1020,7 @@ def _validate_instruction_file(
     # Root instructions establish the policy. A scoped file explicitly listed
     # by a contract is an operative override, so it must repeat the policy
     # rather than silently weakening finding, review, or cleanup rules.
-    if path.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"} and (
-        path.parent.resolve() == repo.resolve() or require_governance
-    ):
+    if path.parent.resolve() == repo.resolve() or require_governance:
         check_governance_binding(path, text, errors)
     if path.name == "SKILL.md":
         if path.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
@@ -1359,7 +1402,11 @@ def validate_asset(
                 repo,
                 policy,
                 errors,
-                require_governance=path.name == "CLAUDE.md",
+                require_governance=(
+                    path.name == "CLAUDE.md"
+                    or ".claude" in path.relative_to(repo).parts
+                    and any(part in {"agents", "rules"} for part in path.relative_to(repo).parts)
+                ),
             )
             # CLAUDE.md is an operative consumer entrypoint in repositories
             # that provide it, even when the legacy contract lists only
@@ -1367,7 +1414,11 @@ def validate_asset(
             # allowing a conflicting file to hide as an unlisted extra.
             relative_parts = path.relative_to(repo).parts
             if path.name == "CLAUDE.md" or (
-                len(relative_parts) >= 3 and relative_parts[:2] == (".claude", "agents")
+                len(relative_parts) >= 3
+                and relative_parts[:2] == (".claude", "agents")
+            ) or (
+                len(relative_parts) >= 3
+                and relative_parts[:2] == (".claude", "rules")
             ):
                 required_paths.add(path)
         for path in sorted(discovered_set - required_paths):
