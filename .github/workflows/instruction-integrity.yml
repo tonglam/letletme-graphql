@@ -1306,13 +1306,7 @@ jobs:
               "def validate_asset():\n  try: raise RuntimeError()\n  except RuntimeError: return {'ok': True}\n"
               "def main():\n  try: return 0\n  except Exception: raise\n"
           )
-          try:
-              direct_terminator_lines(handler_exit_fixture.body[1].body)
-              if not direct_terminator_lines(handler_exit_fixture.body[1].body):
-                  raise SystemExit("handler terminator not detected")
-          except SystemExit:
-              pass
-          else:
+          if len(direct_terminator_lines(handler_exit_fixture.body[1].body)) < 2:
               raise SystemExit("guaranteed-handler fixture unexpectedly passed")
 
           def check_provisioner_shape(tree):
