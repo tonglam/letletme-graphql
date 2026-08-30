@@ -13,7 +13,7 @@ on:
   # Label changes must re-evaluate the exact labeled head, and removing the
   # label must revoke the transition immediately.
   pull_request_target:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
   push:
     branches:
       - main
@@ -123,7 +123,7 @@ jobs:
       # Approval is valid only for the labeled event's exact head. A later
       # synchronize event is unapproved until the maintainer labels that new
       # head again, so a persistent label cannot authorize unseen commits.
-      GOVERNANCE_UPDATE_APPROVED: ${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') }}
+      GOVERNANCE_UPDATE_APPROVED: ${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') && github.event.sender.login == github.repository_owner }}
     steps:
       - name: Checkout proposed tree (read-only)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -224,6 +224,32 @@ jobs:
               test -s "target/$file" && test ! -L "target/$file"
             fi
           done
+          if test "$approved" = true; then
+            python3 -m py_compile target/.codex/validate_instructions.py
+            TARGET_VALIDATOR="$PWD/target/.codex/validate_instructions.py" python3 - <<'PY'
+            import importlib.util
+            import os
+            from pathlib import Path
+
+            target = Path(os.environ["TARGET_VALIDATOR"])
+            spec = importlib.util.spec_from_file_location("proposed_validator", target)
+            if spec is None or spec.loader is None:
+                raise SystemExit("unable to load proposed validator")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            probe = Path("approved-validator-probe.yml")
+            parsed = module.parse_yaml_mapping('description: "Discuss # literally"\n', probe)
+            if parsed.get("description") != "Discuss # literally":
+                raise SystemExit("proposed validator YAML quote probe failed")
+            try:
+                module.parse_yaml_mapping("description: plain: value\n", probe)
+            except ValueError:
+                pass
+            else:
+                raise SystemExit("proposed validator colon probe failed")
+            print("approved proposed validator compiled and exercised")
+            PY
+          fi
       - name: Protect instruction contents unless explicitly approved
         if: env.GOVERNANCE_UPDATE_APPROVED != 'true'
         run: |
@@ -233,11 +259,14 @@ jobs:
           python3 - <<'PY'
           import hashlib
           import json
+          import sys
           from pathlib import Path
 
           trusted_root = Path("trusted")
           target_root = Path("target")
           contract = json.loads((trusted_root / ".codex/instruction-integrity.json").read_text())
+          sys.path.insert(0, str((trusted_root / ".codex").resolve()))
+          from validate_instructions import REFERENCE_TEXT_SUFFIXES, _is_within, _markdown_targets
 
           def surface(root, raw_paths):
               files = {}
@@ -260,7 +289,14 @@ jobs:
                   if path.is_file():
                       candidates = [path]
                   elif path.is_dir():
-                      candidates = [item for item in path.rglob("*") if item.is_file()]
+                      if path.is_symlink():
+                          raise SystemExit(f"governed instruction directory may not be a symlink: {relative}")
+                      candidates = []
+                      for item in path.rglob("*"):
+                          if item.is_symlink():
+                              raise SystemExit(f"governed instruction may not be a symlink: {item.relative_to(root)}")
+                          if item.is_file():
+                              candidates.append(item)
                   else:
                       raise SystemExit(f"required instruction missing from trusted/target tree: {relative}")
                   for item in candidates:
@@ -268,6 +304,34 @@ jobs:
                           raise SystemExit(f"governed instruction may not be a symlink: {item.relative_to(root)}")
                       item_relative = item.relative_to(root)
                       files[str(item_relative)] = hashlib.sha256(item.read_bytes()).hexdigest()
+              pending = list(files)
+              seen: set[str] = set()
+              repo_root = root.resolve()
+              while pending:
+                  relative = pending.pop()
+                  if relative in seen:
+                      continue
+                  seen.add(relative)
+                  path = root / relative
+                  if path.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES or not path.is_file():
+                      continue
+                  text = path.read_text(encoding="utf-8")
+                  for raw_target in _markdown_targets(text):
+                      target = raw_target.strip().split("#", 1)[0].strip()
+                      if not target or target.startswith(("http://", "https://", "mailto:", "data:", "#")):
+                          continue
+                      lexical = path.parent / target
+                      candidate = lexical.resolve()
+                      if lexical.is_symlink():
+                          raise SystemExit(f"governed referenced instruction may not be a symlink: {lexical.relative_to(root)}")
+                      if not candidate.is_file() or candidate.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES:
+                          continue
+                      if not _is_within(candidate, repo_root):
+                          continue
+                      referenced = str(candidate.relative_to(repo_root))
+                      if referenced not in files:
+                          files[referenced] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+                          pending.append(referenced)
               return files
 
           paths = list(contract.get("required_agents", [])) + list(contract.get("required_skills", []))

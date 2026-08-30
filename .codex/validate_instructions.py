@@ -97,6 +97,12 @@ def load_json(path: Path) -> dict[str, Any]:
 
 
 def _strip_yaml_comment(value: str) -> str:
+    # A quote starts a YAML scalar after a mapping key as well as at column
+    # zero (for example, ``description: "Discuss # literally"``).  Do not
+    # treat an apostrophe in a plain scalar such as ``user's route`` as a
+    # quote opener.
+    mapping = re.match(r"^[A-Za-z_][A-Za-z0-9_-]*:(?:[ \t]+|$)", value)
+    scalar_start = mapping.end() if mapping else 0
     quote: str | None = None
     escaped = False
     for index, char in enumerate(value):
@@ -110,7 +116,7 @@ def _strip_yaml_comment(value: str) -> str:
             # A quote inside a plain scalar (for example, ``user's route``)
             # is ordinary text. Only a quote at the scalar start opens a YAML
             # quoted scalar, so comments after apostrophes are still removed.
-            if quote is None and index == 0:
+            if quote is None and index == scalar_start:
                 quote = char
             elif quote == char:
                 quote = None
@@ -154,6 +160,8 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
             raise ValueError(f"{path}:{line_number}: reserved YAML indicator must be quoted")
         if re.search(r":\s", value):
             raise ValueError(f"{path}:{line_number}: colon followed by whitespace must be quoted in a YAML scalar")
+        if value.endswith(":"):
+            raise ValueError(f"{path}:{line_number}: a plain YAML scalar may not end with a colon")
         if re.fullmatch(r"(?i)(?:null|~)", value):
             if scalar_only:
                 raise ValueError(f"{path}:{line_number}: YAML null is not a string scalar")
@@ -268,14 +276,19 @@ def _without_markdown_code(text: str) -> str:
     """Remove fenced and inline code before extracting operative links."""
 
     lines: list[str] = []
-    fence: str | None = None
+    fence: tuple[str, int] | None = None
     for line in text.splitlines(keepends=True):
         stripped = line.lstrip()
-        if stripped.startswith(("```", "~~~")):
-            marker = stripped[:3]
+        marker: tuple[str, int] | None = None
+        if stripped and stripped[0] in "`~":
+            marker_char = stripped[0]
+            marker_length = len(stripped) - len(stripped.lstrip(marker_char))
+            if marker_length >= 3:
+                marker = (marker_char, marker_length)
+        if marker is not None:
             if fence is None:
                 fence = marker
-            elif marker == fence:
+            elif marker[0] == fence[0] and marker[1] >= fence[1] and not stripped[marker[1] :].rstrip("\r\n").strip():
                 fence = None
             lines.append("\n" if line.endswith("\n") else "")
             continue
@@ -584,11 +597,15 @@ def _validate_contract_shape(contract: dict[str, Any], errors: list[str]) -> Non
         value = contract.get(key)
         if not isinstance(value, list) or not value or not all(isinstance(item, str) and item.strip() for item in value):
             errors.append(f"{key} must be a non-empty list of strings")
+        elif len(set(value)) != len(value):
+            errors.append(f"{key} must not contain duplicate entries")
     globals_value = contract.get("required_global_skills", [])
     if not isinstance(globals_value, list) or not globals_value or not all(
         isinstance(item, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]*", item) for item in globals_value
     ):
         errors.append("required_global_skills must be a non-empty list of skill names")
+    elif len(set(globals_value)) != len(globals_value):
+        errors.append("required_global_skills must not contain duplicate entries")
 
 
 def _validate_policy(policy: dict[str, Any], errors: list[str]) -> None:
@@ -724,6 +741,8 @@ def _validate_global_manifest(
     advertised = manifest.get("skills")
     if not isinstance(advertised, list) or set(advertised) != set(expected_skills):
         errors.append(f"{manifest_path}: advertised skills do not match required_global_skills")
+    elif len(set(advertised)) != len(advertised):
+        errors.append(f"{manifest_path}: advertised skills must not contain duplicates")
     if registry_source is None or not isinstance(registry, dict):
         return
     source_root = registry_source.resolve()
