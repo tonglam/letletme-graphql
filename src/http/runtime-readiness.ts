@@ -30,7 +30,7 @@ export const checkRuntimeReadiness = async (
 			await databaseHealthCheck();
 		},
 		season: async () => {
-			if (forceSeasonRefresh) {
+			if (forceSeasonRefresh || strict) {
 				await currentSeasonProvider.refresh(database, 0);
 			} else {
 				currentSeasonProvider.get();

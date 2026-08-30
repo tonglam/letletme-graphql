@@ -74,7 +74,9 @@ export const buildGraphQLRuntimeContext = async ({
 	let currentSeason: GraphQLContext["currentSeason"];
 	try {
 		currentSeason = await requestTiming.measure("season", () =>
-			currentSeasonProvider.refresh(database, 5_000)
+			livePointsHotPath
+				? Promise.resolve(currentSeasonProvider.get())
+				: currentSeasonProvider.refresh(database, 5_000)
 		);
 	} catch (error) {
 		if (livePointsHotPath) {
