@@ -9,6 +9,7 @@ malformed manifest as a string.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -404,16 +405,30 @@ def scan_reference_graph(
 def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
     """Keep the policy's operative review rules visible in loaded AGENTS.md."""
 
-    lowered = text.casefold()
-    required_groups = {
-        "quota rule": ("quota", "review"),
-        "tests/scripts exception": ("tests", "scripts", "p0", "p1", "p2", "p3"),
-        "all-path severity rule": ("p2", "p3", "fixed"),
-        "finding disposition rule": ("finding", "resolved"),
-        "cleanup rule": ("clean", "remote", "branch"),
+    # Treat wrapped Markdown lines as one clause while retaining word
+    # boundaries; otherwise a harmless line wrap can disable the check.
+    lowered = " ".join(text.casefold().split())
+    required_clauses = {
+        "quota rule": (
+            "a review may be skipped only after two consecutive explicit quota-limit responses",
+            "this never waives ci, findings, or cleanup",
+        ),
+        "tests/scripts exception": (
+            "every p0-p3 finding must be dispositioned and its thread resolved",
+            "only a finding confined to tests/scripts gets the time exception",
+            "implement p0/p1",
+            "explain plus resolve p2/p3",
+        ),
+        "all-path severity rule": ("p2/p3 anywhere else must be actually fixed and verified",),
+        "finding disposition rule": (
+            "merge is prohibited while any finding is undispositioned or any review thread is unresolved",
+        ),
+        "cleanup rule": (
+            "after merge, clean only the exact corresponding worktree, local branch, and remote branch",
+        ),
     }
-    for label, markers in required_groups.items():
-        if not all(marker in lowered for marker in markers):
+    for label, clauses in required_clauses.items():
+        if not all(clause in lowered for clause in clauses):
             errors.append(f"{path}: missing operative {label} clause")
 
 
@@ -465,9 +480,10 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
     if not include_discovery:
         return []
     paths: set[Path] = set()
-    for path in repo.rglob("AGENTS.md"):
-        if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
-            paths.add(path.absolute())
+    for pattern in ("AGENTS.md", "AGENTS.override.md"):
+        for path in repo.rglob(pattern):
+            if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
+                paths.add(path.absolute())
     for pattern in (".agents/**/SKILL.md", "skills/**/SKILL.md"):
         for path in repo.glob(pattern):
             if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
@@ -499,9 +515,9 @@ def _validate_instruction_file(
         return
     if not text.strip():
         errors.append(f"{path}: instruction file is empty")
-    if path.name == "AGENTS.md" and path.stat().st_size > int(policy.get("max_agents_bytes", 32768)):
+    if path.name in {"AGENTS.md", "AGENTS.override.md"} and path.stat().st_size > int(policy.get("max_agents_bytes", 32768)):
         errors.append(f"{path}: exceeds max_agents_bytes")
-    if path.name == "AGENTS.md":
+    if path.name in {"AGENTS.md", "AGENTS.override.md"}:
         check_governance_binding(path, text, errors)
     if path.name == "SKILL.md":
         if path.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
@@ -601,6 +617,8 @@ def _validate_global_manifest(
     manifest: dict[str, Any],
     expected_skills: list[str],
     errors: list[str],
+    *,
+    registry_source: Path | None = None,
 ) -> None:
     unknown = sorted(set(manifest) - GLOBAL_MANIFEST_KEYS)
     if unknown:
@@ -617,6 +635,40 @@ def _validate_global_manifest(
     advertised = manifest.get("skills")
     if not isinstance(advertised, list) or set(advertised) != set(expected_skills):
         errors.append(f"{manifest_path}: advertised skills do not match required_global_skills")
+    if registry_source is None or not isinstance(registry, dict):
+        return
+    source_root = registry_source.resolve()
+    source_path = source_root / str(registry.get("path", ""))
+    try:
+        source_resolved = source_path.resolve()
+    except OSError as exc:
+        errors.append(f"{manifest_path}: pinned registry cannot be resolved from checkout: {exc}")
+        return
+    if source_path.is_symlink() or not _is_within(source_resolved, source_root) or not source_resolved.is_file():
+        errors.append(f"{manifest_path}: pinned registry path is missing, external, or symlinked in checkout")
+        return
+    try:
+        source_bytes = source_resolved.read_bytes()
+        source_manifest = load_json(source_resolved)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        errors.append(f"{manifest_path}: pinned registry content is invalid: {exc}")
+        return
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    if digest != registry.get("sha256"):
+        errors.append(f"{manifest_path}: pinned registry content digest does not match its descriptor")
+    if not isinstance(source_manifest.get("assets"), list):
+        errors.append(f"{manifest_path}: pinned registry does not contain an assets array")
+    governance = source_manifest.get("governance")
+    allowlist = governance.get("global_skill_allowlist", []) if isinstance(governance, dict) else []
+    source_skill_names = {
+        Path(str(item)).name
+        for item in allowlist
+        if isinstance(item, str) and item.strip()
+    }
+    if isinstance(advertised, list):
+        missing = sorted(set(str(item) for item in advertised) - source_skill_names)
+        if missing:
+            errors.append(f"{manifest_path}: pinned registry is missing advertised global skills: {', '.join(missing)}")
 
 
 def validate_skill(
@@ -665,6 +717,7 @@ def validate_asset(
     expected_config_commit: str | None = None,
     trusted_contract: dict[str, Any] | None = None,
     allow_config_commit_update: bool = False,
+    registry_source: Path | None = None,
 ) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -736,7 +789,13 @@ def validate_asset(
             else:
                 try:
                     manifest = load_json(manifest_path)
-                    _validate_global_manifest(manifest_path, manifest, globals_value, errors)
+                    _validate_global_manifest(
+                        manifest_path,
+                        manifest,
+                        globals_value,
+                        errors,
+                        registry_source=registry_source,
+                    )
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
                     errors.append(str(exc))
             if manifest_path.exists():
@@ -770,6 +829,11 @@ def main() -> int:
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--expected-config-commit")
     parser.add_argument("--trusted-contract", type=Path)
+    parser.add_argument(
+        "--registry-source",
+        type=Path,
+        help="optional trusted checkout of the pinned global registry for content verification",
+    )
     parser.add_argument(
         "--allow-config-commit-update",
         action="store_true",
@@ -814,6 +878,7 @@ def main() -> int:
             expected_config_commit=args.expected_config_commit,
             trusted_contract=trusted_contract,
             allow_config_commit_update=args.allow_config_commit_update,
+            registry_source=args.registry_source,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         result = {"ok": False, "errors": [str(exc)], "warnings": []}

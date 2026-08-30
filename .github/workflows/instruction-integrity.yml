@@ -20,7 +20,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: instruction-integrity-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  # pull_request_target exposes the base ref as github.ref; use the PR number
+  # so one PR cannot cancel another. Push runs use the unique run id fallback.
+  group: instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -171,6 +173,47 @@ jobs:
               if hashlib.sha256(trusted.read_bytes()).digest() != hashlib.sha256(target.read_bytes()).digest():
                   raise SystemExit(f"governed instruction changed without instruction-governance-approved label: {relative}")
           PY
+      - name: Verify pinned global registry contents
+        run: |
+          set -eu
+          manifest="target/.codex/global-skills.json"
+          python3 - "$manifest" <<'PY'
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          descriptor = manifest.get("registry")
+          expected = {
+              "repository": "tonglam/codex-workspace-config",
+              "ref": "7e92336ec04d38f7bb95620e304ce6ec6567c896",
+              "path": "registry/workspace-assets.json",
+              "sha256": "fa1a2a5448e34376c4dccfe43c6c8a901adb9b62df3995b1f11d3aa4b9b77cb6",
+          }
+          if descriptor != expected:
+              raise SystemExit("global registry descriptor is not the trusted immutable pin")
+          checkout = Path("registry-source")
+          subprocess.run(
+              ["git", "clone", "--filter=blob:none", "--no-checkout", "--depth=1",
+               f"https://github.com/{descriptor['repository']}.git", str(checkout)],
+              check=True,
+              stdout=subprocess.DEVNULL,
+          )
+          subprocess.run(["git", "-C", str(checkout), "fetch", "--depth=1", "origin", descriptor["ref"]], check=True, stdout=subprocess.DEVNULL)
+          blob = subprocess.check_output(["git", "-C", str(checkout), "show", f"{descriptor['ref']}:{descriptor['path']}"])
+          import hashlib
+          if hashlib.sha256(blob).hexdigest() != descriptor["sha256"]:
+              raise SystemExit("pinned registry content digest mismatch")
+          source = json.loads(blob)
+          allowlist = source.get("governance", {}).get("global_skill_allowlist", [])
+          names = {Path(item).name for item in allowlist if isinstance(item, str)}
+          advertised = manifest.get("skills", [])
+          missing = sorted(set(advertised) - names)
+          if missing:
+              raise SystemExit(f"pinned registry is missing advertised global skills: {', '.join(missing)}")
+          print("pinned global registry content verified")
+          PY
       - name: Validate AGENTS.md and skills
         run: |
           expected_config_commit="$(python3 -c 'import json; print(json.load(open("trusted/.codex/instruction-integrity.json", encoding="utf-8"))["canonical_config_commit"])')"
@@ -184,4 +227,5 @@ jobs:
             --policy trusted/.codex/instruction-policy.v1.json \
             --trusted-contract trusted/.codex/instruction-integrity.json \
             --expected-config-commit "$expected_config_commit" \
+            --registry-source registry-source \
             --json
