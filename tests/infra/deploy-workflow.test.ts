@@ -140,8 +140,10 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain(
 			"public GraphQL health returned an unexpected deployment identity; rolling back"
 		);
-		expect(deployScript).toContain('elif (has("deploySha") | not) then "legacy"');
-		expect(deployScript).toContain('legacy|"$old_slot_deploy_sha")');
+		expect(deployScript).toContain('elif (has("deploySha") | not) then {kind:"legacy"}');
+		expect(deployScript).toContain('{kind:"identity",sha:.deploySha}');
+		expect(deployScript).toContain('case "$public_health_kind" in');
+		expect(deployScript).toContain('[ "$public_identity" = "$old_slot_deploy_sha" ]');
 		expect(deployScript).toContain(
 			"public GraphQL health did not converge to $DEPLOY_SHA after ${PUBLIC_HEALTH_ATTEMPTS} attempts"
 		);
