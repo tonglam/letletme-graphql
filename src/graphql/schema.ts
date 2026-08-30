@@ -23,6 +23,8 @@ import { liveResolvers } from "../domains/live/resolvers";
 import { liveTypeDefs } from "../domains/live/schema";
 import { liveDesksResolvers } from "../domains/live-desks/resolvers";
 import { liveDesksTypeDefs } from "../domains/live-desks/schema";
+import { liveMatchesResolvers } from "../domains/live-matches/resolvers";
+import { liveMatchesTypeDefs } from "../domains/live-matches/schema";
 import { marketResolvers } from "../domains/market/resolvers";
 import { marketTypeDefs } from "../domains/market/schema";
 import { priceChangesResolvers } from "../domains/price-changes/resolvers";
@@ -67,6 +69,7 @@ export const schema = makeExecutableSchema({
 		fixturesTypeDefs,
 		liveTypeDefs,
 		liveDesksTypeDefs,
+		liveMatchesTypeDefs,
 		miniProgramTypeDefs,
 		entryLiveTypeDefs,
 		marketTypeDefs,
@@ -96,6 +99,7 @@ export const schema = makeExecutableSchema({
 		fixturesResolvers,
 		liveResolvers,
 		liveDesksResolvers,
+		liveMatchesResolvers,
 		miniProgramResolvers,
 		marketResolvers,
 		priceChangesResolvers,

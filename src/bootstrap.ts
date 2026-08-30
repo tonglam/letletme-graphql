@@ -38,6 +38,13 @@ import {
 	LIVE_POINTS_CONTRACT_VALUE,
 	requiresLivePointsV2Contract,
 } from "./http/live-points-contract";
+import {
+	hasLiveMatchesV2Contract,
+	LIVE_MATCHES_CONTRACT_HEADER,
+	LIVE_MATCHES_CONTRACT_VALUE,
+	requiresLiveMatchesV2Contract,
+	isLiveMatchesRootField,
+} from "./http/live-matches-contract";
 import { GraphQLAdmissionOrder } from "./http/graphql-admission-order";
 import {
 	mergeShadowRateLimitDecision,
@@ -409,10 +416,19 @@ export const startServer = async (): Promise<void> => {
 					}
 					rootFields = limits.rootFields;
 					const livePointsHotPath = isLivePointsHotPathOperation(rootFields);
-					if (
-						requiresLivePointsV2Contract(rootFields) &&
-						!hasLivePointsV2Contract(request.headers)
-					) {
+					const liveMatchesHotPath = rootFields.some(isLiveMatchesRootField);
+					const requiresLivePointsContract = requiresLivePointsV2Contract(rootFields);
+					const requiresLiveMatchesContract = requiresLiveMatchesV2Contract(rootFields);
+					if (requiresLivePointsContract && requiresLiveMatchesContract) {
+						const response = jsonError(
+							400,
+							"MIXED_LIVE_CONTRACTS",
+							"Live Points and Live Matches must use separate GraphQL operations",
+							corsHeaders
+						);
+						return finalizePostPreAuthResponse(response, "mixed_live_contracts_rejected");
+					}
+					if (requiresLivePointsContract && !hasLivePointsV2Contract(request.headers)) {
 						const response = jsonError(
 							426,
 							"CLIENT_UPGRADE_REQUIRED",
@@ -421,6 +437,16 @@ export const startServer = async (): Promise<void> => {
 							{ [LIVE_POINTS_CONTRACT_HEADER]: LIVE_POINTS_CONTRACT_VALUE }
 						);
 						return finalizePostPreAuthResponse(response, "live_points_contract_rejected");
+					}
+					if (requiresLiveMatchesContract && !hasLiveMatchesV2Contract(request.headers)) {
+						const response = jsonError(
+							426,
+							"CLIENT_UPGRADE_REQUIRED",
+							"Live Matches requires the live-matches-v2 client contract",
+							corsHeaders,
+							{ [LIVE_MATCHES_CONTRACT_HEADER]: LIVE_MATCHES_CONTRACT_VALUE }
+						);
+						return finalizePostPreAuthResponse(response, "live_matches_contract_rejected");
 					}
 					admissionOrder.enter("principal");
 					const { principal, user } = await requestTiming.measure("principal", () =>
@@ -484,7 +510,7 @@ export const startServer = async (): Promise<void> => {
 						requestId,
 						operationName,
 						limits,
-						livePointsHotPath,
+						readOnlyHotPath: livePointsHotPath || liveMatchesHotPath,
 					});
 					if (!contextResult.ok) {
 						fullCoreLoaded = contextResult.fullCoreLoaded;

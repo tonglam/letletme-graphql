@@ -68,8 +68,7 @@ add(
 		"eventLiveExplains",
 		"liveSnapshot",
 		"liveContext",
-		"liveMatchdayDesk",
-		"liveFixturePlayers",
+		"liveMatchday",
 		"player",
 		"players",
 		"playersForPicker",
@@ -260,6 +259,8 @@ for (const field of lightweightFields) {
 	const current = registry.get(field);
 	if (current) registry.set(field, { ...current, core: "lightweight" });
 }
+
+registry.set("liveMatchday", policy("public", { core: "lightweight" }));
 
 export const ROOT_FIELD_POLICIES: ReadonlyMap<string, RootFieldPolicy> = registry;
 export const ROOT_FIELD_CONDITIONAL_ACCESS: ReadonlyMap<

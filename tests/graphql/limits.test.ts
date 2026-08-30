@@ -1151,7 +1151,7 @@ describe("GraphQL request limits", () => {
 	it("sums heavy root floors, including aliases", () => {
 		const result = validateGraphQLRequestLimits({
 			query:
-				"query { first: liveMatchdayDesk { eventId } second: liveMatchdayDesk { eventId } entryLiveCompetitionsDesk(entryId: 1) { eventId } }",
+				"query { first: liveMatchday { snapshot { eventId } } second: liveMatchday { snapshot { eventId } } entryLiveCompetitionsDesk(entryId: 1) { eventId } }",
 		});
 		expect(result).toMatchObject({ ok: true });
 	});
