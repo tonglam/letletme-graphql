@@ -167,10 +167,11 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
             raise ValueError(f"{path}:{line_number}: reserved YAML indicator must be quoted")
         if re.search(r":\s", value):
             raise ValueError(f"{path}:{line_number}: colon followed by whitespace must be quoted in a YAML scalar")
-    if value.endswith(":"):
-        raise ValueError(f"{path}:{line_number}: a plain YAML scalar may not end with a colon")
-        # Instruction metadata is consumed as strings. Reject YAML implicit
-        # scalar forms that a real loader would deserialize as typed values.
+        if value.endswith(":"):
+            raise ValueError(f"{path}:{line_number}: a plain YAML scalar may not end with a colon")
+        # Instruction metadata is consumed as strings. Reject the remaining
+        # YAML implicit scalar forms instead of accepting a value that a real
+        # loader would deserialize as a number, boolean, null, or timestamp.
         implicit_number = re.fullmatch(
             r"(?i)[+-]?(?:(?:0|[1-9][0-9_]*)(?:\.[0-9_]*)?(?:e[+-]?[0-9]+)?|0x[0-9a-f_]+|0o[0-7_]+|0b[01_]+|\.[0-9_]+(?:e[+-]?[0-9]+)?)",
             value,
@@ -181,6 +182,10 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
         if implicit_number or implicit_special or implicit_bool or implicit_timestamp:
             if scalar_only:
                 raise ValueError(f"{path}:{line_number}: YAML scalar uses an implicit non-string type")
+            # The openai.yaml shape validator requires interface fields to be
+            # strings; a typed sentinel keeps the failure explicit without
+            # pretending this dependency-free parser implements every YAML
+            # numeric/date conversion.
             return 0
         if re.fullmatch(r"(?i)(?:null|~)", value):
             if scalar_only:
