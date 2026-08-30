@@ -1226,6 +1226,25 @@ jobs:
                       if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del)):
                           names.add(item.id)
                   return names
+              parents = {}
+              for parent in ast.walk(main):
+                  for child in ast.iter_child_nodes(parent):
+                      parents[child] = parent
+              def inside_exception_handler(node):
+                  current = node
+                  while current in parents:
+                      current = parents[current]
+                      if isinstance(current, ast.ExceptHandler):
+                          return True
+                  return False
+              def explicit_failure_result(statement):
+                  value = getattr(statement, "value", None)
+                  if not isinstance(value, ast.Dict):
+                      return False
+                  for key, item in zip(value.keys, value.values):
+                      if isinstance(key, ast.Constant) and key.value == "ok":
+                          return isinstance(item, ast.Constant) and item.value is False
+                  return False
               for statement in ast.walk(main):
                   if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
                       continue
@@ -1233,7 +1252,8 @@ jobs:
                   for target in targets:
                       for name in assignment_target_names(target):
                           if name in validation_result_bindings and statement.lineno > validation_result_bindings[name]:
-                              raise SystemExit(f"approved validator main reassigns validate_asset result: {name}")
+                              if not inside_exception_handler(statement) or not explicit_failure_result(statement):
+                                  raise SystemExit(f"approved validator main reassigns validate_asset result: {name}")
               def reads_validation_ok(expression):
                   for item in ast.walk(expression):
                       if isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute) and item.func.attr == "get":
@@ -1313,7 +1333,7 @@ jobs:
                   "validate_skill": {"_validate_instruction_file", "rglob", "read_bytes", "has_secret"},
                   "_validate_instruction_file": {"read_text", "read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json", "read_bytes", "sha256", "resolve"},
-                  "_validate_skill_inventory": {"load_json", "iterdir"},
+                  "_validate_skill_inventory": {"load_json"},
                   "has_secret": {"search", "finditer", "_has_private_ip_literal", "_looks_like_placeholder"},
                   "_has_private_ip_literal": {"finditer", "ip_address"},
                   "_looks_like_placeholder": {"fullmatch", "match", "search"},
@@ -1329,7 +1349,7 @@ jobs:
                   "validate_skill": {"_validate_instruction_file", "has_secret"},
                   "_validate_instruction_file": {"read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json"},
-                  "_validate_skill_inventory": {"load_json", "iterdir"},
+                  "_validate_skill_inventory": {"load_json"},
                   "has_secret": {"_has_private_ip_literal", "_looks_like_placeholder"},
               }
               helper_receivers = {
@@ -1342,7 +1362,6 @@ jobs:
                       "resolve": {"registry_source", "source_path"},
                   },
                   "_validate_skill_inventory": {
-                      "load_json": {"lock_path"},
                       "iterdir": {"root"},
                   },
                   "has_secret": {
@@ -2187,8 +2206,6 @@ jobs:
                               raise SystemExit(f"governed referenced instruction may not traverse a symlink: {lexical_relative}")
                       if not candidate.is_file():
                           continue
-                      if candidate.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES and candidate.suffix != "":
-                          continue
                       if not _is_within(candidate, repo_root):
                           continue
                       referenced = str(candidate.relative_to(repo_root))
@@ -2197,7 +2214,8 @@ jobs:
                               hashlib.sha256(candidate.read_bytes()).hexdigest(),
                               stat.S_IMODE(candidate.stat().st_mode),
                           )
-                          pending.append(referenced)
+                          if candidate.suffix.casefold() in REFERENCE_TEXT_SUFFIXES or candidate.suffix == "":
+                              pending.append(referenced)
               return files
 
           paths = list(contract.get("required_agents", [])) + list(contract.get("required_skills", []))
