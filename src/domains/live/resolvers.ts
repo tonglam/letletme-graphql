@@ -271,11 +271,14 @@ const explainForRow = async (
 	eventId: number,
 	elementId: number,
 	includeSelectedBy: boolean,
-	raw: Record<string, unknown>
+	raw: Record<string, unknown>,
+	eventPlayerOverride?: Player | null
 ): Promise<LiveExplain> => {
 	const breakdown = toExplainBreakdown(raw.fixtureBreakdown);
 	const eventPlayer = includeSelectedBy
-		? await playersRepository.getPlayerByIdForEvent(context, elementId, eventId).catch(() => null)
+		? eventPlayerOverride !== undefined
+			? eventPlayerOverride
+			: await playersRepository.getPlayerByIdForEvent(context, elementId, eventId).catch(() => null)
 		: null;
 	const selectedBy = includeSelectedBy ? (eventPlayer?.selectedByPercent ?? null) : null;
 	const contributions = breakdown.flatMap((entry) => entry.stats);
@@ -443,11 +446,45 @@ export const liveResolvers = {
 		): Promise<LiveExplain[]> => {
 			assertValidLiveExplainBatch(args.elementIds);
 			const includeSelectedBy = directSelectionRequestsField(info, "selectedBy");
+			const publication = await readLivePublicationV2(context, args.eventId).catch((error) => {
+				context.logger.warn(
+					{ err: error, eventId: args.eventId },
+					"Live V2 explain publication unavailable"
+				);
+				return null;
+			});
+			const rawByElement = new Map(
+				(publication?.eventLives ?? []).map((row) => [
+					Number(row.elementId),
+					row as unknown as Record<string, unknown>,
+				])
+			);
+			const playersByElement = includeSelectedBy
+				? await playersRepository
+						.getPlayersByIdsForEvent(context, args.elementIds, args.eventId)
+						.catch((error) => {
+							context.logger.warn(
+								{ err: error, eventId: args.eventId, playerCount: args.elementIds.length },
+								"Live V2 explain player enrichment unavailable"
+							);
+							return new Map<number, Player>();
+						})
+				: new Map<number, Player>();
 			const explains = (
 				await Promise.all(
-					args.elementIds.map((elementId) =>
-						findExplain(context, args.eventId, elementId, includeSelectedBy)
-					)
+					args.elementIds.map((elementId) => {
+						const raw = rawByElement.get(elementId);
+						return raw
+							? explainForRow(
+									context,
+									args.eventId,
+									elementId,
+									includeSelectedBy,
+									raw,
+									includeSelectedBy ? (playersByElement.get(elementId) ?? null) : undefined
+								)
+							: null;
+					})
 				)
 			).filter((value): value is LiveExplain => value !== null);
 			if (explains.length > 0 && parentSelectionRequestsField(info, "player")) {

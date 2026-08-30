@@ -8,6 +8,7 @@ import type { Entry } from "../../contracts/entry";
 import type { GraphQLContext } from "../../graphql/context";
 import {
 	getCoreLiveIdentitySnapshot,
+	getCoreEventSnapshot,
 	type CoreLiveIdentitySnapshot,
 	type CorePlayerData,
 	type CoreTeamData,
@@ -398,6 +399,10 @@ const LIVE_LKG_MAX_ENTRIES = 256;
 const LIVE_LKG_RETENTION_MS = 24 * 60 * 60 * 1000;
 const requestRedisGlobalMemo = new WeakMap<object, Map<string, Promise<GlobalRead | null>>>();
 const requestDatabaseGlobalMemo = new WeakMap<object, Map<string, Promise<GlobalRead | null>>>();
+const requestEventRosterMemo = new WeakMap<
+	object,
+	Map<number, Promise<ReadonlySet<number> | null>>
+>();
 const requestCoreMemo = new WeakMap<object, Promise<CoreLiveIdentitySnapshot | null>>();
 const requestEntryMemo = new WeakMap<object, Map<number, Promise<Entry>>>();
 const entryMetadataCircuit = new Map<string, number>();
@@ -879,6 +884,30 @@ const hasCompleteEventLiveRoster = (
 	return [...expectedPlayerIds].every((playerId) => actualPlayerIds.has(playerId));
 };
 
+/**
+ * Historical event-live rows must be checked against the player set that
+ * existed at that event, not today's mutable core roster.  The Data producer
+ * publishes this event-scoped snapshot only after its complete-set header is
+ * verified; this direct read is a request-local expectation lookup and never
+ * gates the hot Redis path on PostgreSQL availability.
+ */
+export const EVENT_ROSTER_SQL = `
+	SELECT
+		snapshot.element_id,
+		publication.row_count AS publication_row_count,
+		publication.expected_row_count AS publication_expected_row_count
+	FROM fpl.player_event_snapshot_publications publication
+	JOIN fpl.player_event_snapshots snapshot
+	  ON snapshot.season_id = publication.season_id
+	 AND snapshot.event_id = publication.event_id
+	WHERE publication.season_id = $1
+	  AND publication.event_id = $2
+	  AND publication.row_count = publication.expected_row_count
+	  AND publication.row_count > 0
+	  AND publication.baseline_verified_at IS NOT NULL
+	ORDER BY snapshot.element_id
+`;
+
 const readRedisGlobalCandidate = async (
 	redis: Redis,
 	season: string,
@@ -1033,6 +1062,24 @@ export const ENTRY_CHECKPOINT_SQL = `
 
 /** Exact SQL/result-shape probes for the V2 PostgreSQL fallback reader. */
 export const LIVE_POINTS_V2_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "live-points-v2.event-roster",
+		sql: EVENT_ROSTER_SQL,
+		values: [2026, 1],
+		resultTypes: [
+			{ relation: "fpl.player_event_snapshots", column: "element_id", pgType: "integer" },
+			{
+				relation: "fpl.player_event_snapshot_publications",
+				column: "row_count",
+				pgType: "integer",
+			},
+			{
+				relation: "fpl.player_event_snapshot_publications",
+				column: "expected_row_count",
+				pgType: "integer",
+			},
+		],
+	},
 	{
 		name: "live-points-v2.global-checkpoint",
 		sql: GLOBAL_CHECKPOINT_SQL,
@@ -1567,7 +1614,7 @@ const entryMetadataKey = (context: GraphQLContext, entryId: number): string =>
 const readRedisGlobal = (
 	context: GraphQLContext,
 	eventId: number,
-	expectedPlayerIds: ReadonlySet<number>,
+	expectedPlayerIds: ReadonlySet<number> | undefined,
 	expectedScoreCoreRevision?: string
 ): Promise<GlobalRead | null> => {
 	const scope = requestScope(context);
@@ -1577,8 +1624,12 @@ const readRedisGlobal = (
 		requestRedisGlobalMemo.set(scope, memo);
 	}
 	// Roster validation is part of the read contract. Keep differently sized or
-	// revisioned core rosters from sharing a memoized publication result.
-	const rosterRevision = hash([...expectedPlayerIds].sort((left, right) => left - right));
+	// revisioned event/core rosters from sharing a memoized publication result.
+	// A historical event without an available event roster deliberately relies on
+	// the producer's complete publication proof instead of today's core roster.
+	const rosterRevision = expectedPlayerIds
+		? hash([...expectedPlayerIds].sort((left, right) => left - right))
+		: "producer-validated";
 	const memoKey =
 		String(eventId) + ":" + (expectedScoreCoreRevision ?? "current") + ":" + rosterRevision;
 	const existing = memo.get(memoKey);
@@ -1651,9 +1702,14 @@ const readDatabaseGlobalMemoized = (
 const requireCompleteGlobalRoster = (
 	context: GraphQLContext,
 	global: GlobalRead | null,
-	expectedPlayerIds: ReadonlySet<number>
+	expectedPlayerIds?: ReadonlySet<number>
 ): GlobalRead | null => {
-	if (!global || hasCompleteEventLiveRoster(global.eventLives, expectedPlayerIds)) return global;
+	if (
+		!global ||
+		!expectedPlayerIds ||
+		hasCompleteEventLiveRoster(global.eventLives, expectedPlayerIds)
+	)
+		return global;
 	metrics.livePublicationEventsTotal.labels("roster_incomplete").inc();
 	context.logger.warn(
 		{
@@ -1673,7 +1729,7 @@ const readGlobal = async (
 ): Promise<GlobalRead | null> => {
 	const core = await readCore(context);
 	if (!core) return null;
-	const expectedPlayerIds = new Set(core.players.map((player) => player.id));
+	const expectedPlayerIds = await expectedPlayerIdsForEvent(context, eventId, core);
 	const redisGlobal = await readRedisGlobal(
 		context,
 		eventId,
@@ -1733,6 +1789,82 @@ const readCore = (context: GraphQLContext): Promise<CoreLiveIdentitySnapshot | n
 	});
 	requestCoreMemo.set(scope, load);
 	return load;
+};
+
+type EventRosterRow = Row & {
+	element_id: unknown;
+	publication_row_count: unknown;
+	publication_expected_row_count: unknown;
+};
+
+const readEventScopedRoster = async (
+	context: GraphQLContext,
+	eventId: number
+): Promise<ReadonlySet<number> | null> => {
+	const scope = requestScope(context);
+	let memo = requestEventRosterMemo.get(scope);
+	if (!memo) {
+		memo = new Map();
+		requestEventRosterMemo.set(scope, memo);
+	}
+	const existing = memo.get(eventId);
+	if (existing) return existing;
+	const load = (async (): Promise<ReadonlySet<number> | null> => {
+		try {
+			const result = await context.database.query<EventRosterRow>(EVENT_ROSTER_SQL, [
+				context.currentSeason.seasonId,
+				eventId,
+			]);
+			if (result.rows.length === 0) return null;
+			const first = result.rows[0]!;
+			const rowCount = integer(first.publication_row_count);
+			const expectedRowCount = integer(first.publication_expected_row_count);
+			const playerIds = result.rows.map((row) => integer(row.element_id));
+			if (
+				rowCount === null ||
+				expectedRowCount === null ||
+				rowCount <= 0 ||
+				rowCount !== expectedRowCount ||
+				result.rows.length !== expectedRowCount ||
+				playerIds.some((playerId) => playerId === null || playerId <= 0) ||
+				new Set(playerIds).size !== playerIds.length
+			)
+				return null;
+			return new Set(playerIds as number[]);
+		} catch (error) {
+			context.logger.warn(
+				{ err: error, eventId },
+				"Historical Live Points V2 event roster unavailable"
+			);
+			return null;
+		}
+	})();
+	memo.set(eventId, load);
+	return load;
+};
+
+const expectedPlayerIdsForEvent = async (
+	context: GraphQLContext,
+	eventId: number,
+	core: CoreLiveIdentitySnapshot
+): Promise<ReadonlySet<number> | undefined> => {
+	const corePlayerIds = new Set(core.players.map((player) => player.id));
+	const eventSnapshot = await getCoreEventSnapshot(context).catch((error) => {
+		context.logger.warn({ err: error, eventId }, "Live Points V2 event lifecycle unavailable");
+		return null;
+	});
+	if (!eventSnapshot) return corePlayerIds;
+	const event = eventSnapshot.events.find((candidate) => candidate.id === eventId);
+	const historical =
+		event?.finished === true ||
+		(eventSnapshot.currentEventId !== null && eventId < eventSnapshot.currentEventId);
+	if (!historical) return corePlayerIds;
+
+	// A missing historical roster must not be replaced with today's core set:
+	// that would reject a valid old publication when players have since joined.
+	// The producer's complete publication proof remains the availability-first
+	// fallback until the event-scoped snapshot can be read again.
+	return (await readEventScopedRoster(context, eventId)) ?? undefined;
 };
 
 const emptyEntry = (entryId: number): Entry => ({
@@ -2027,9 +2159,21 @@ const calculateLineup = (
 	const captain = ordered.find((pick) => pick.isCaptain) ?? null;
 	const vice = ordered.find((pick) => pick.isViceCaptain) ?? null;
 	const activeCaptain =
-		captain && active.has(captain.element)
+		captain &&
+		active.has(captain.element) &&
+		!playerHasCompletedEvent(
+			players.get(captain.element)!,
+			liveByElement.get(captain.element),
+			fixtures
+		)
 			? captain
-			: vice && active.has(vice.element)
+			: vice &&
+				  active.has(vice.element) &&
+				  !playerHasCompletedEvent(
+						players.get(vice.element)!,
+						liveByElement.get(vice.element),
+						fixtures
+				  )
 				? vice
 				: null;
 	const captainMultiplier =
@@ -2119,7 +2263,7 @@ const mapPick = (params: {
 		.map((item) => item.opponentTeam?.shortName ?? "")
 		.filter(Boolean);
 	const isGwStarted = playerFixtures.some(fixtureHasStarted);
-	const allFinished = playerFixtures.length > 0 && playerFixtures.every(fixtureHasFinished);
+	const allFinished = playerHasCompletedEvent(player, live, fixtures);
 	const isActive = lineup.active.has(pick.element);
 	// A projected automatic-substitution entrant normally has the bench's base
 	// multiplier (zero). Once the entrant is promoted into the XI, FPL scoring
@@ -2441,7 +2585,7 @@ const buildReady = async (
 		lastValue: (entry.lastTeamValue ?? 0) / 10,
 		chip,
 		played: rows.filter((row) => row.pickActive && row.isPlayed).length,
-		toPlay: rows.filter((row) => row.pickActive && !row.isPlayed).length,
+		toPlay: rows.filter((row) => row.pickActive && !row.isPlayed && !row.isGwFinished).length,
 		playedCaptain: activeCaptain?.element ?? 0,
 		captainName: captainRow?.webName ?? "",
 		pickList: rows,
@@ -2764,9 +2908,14 @@ export const calcLivePointsByEntryV2 = async (
 		options.scoreCoreRevision ?? "current",
 	].join(":");
 	const core = await readCore(context);
-	const expectedPlayerIds = core ? new Set(core.players.map((player) => player.id)) : null;
-	const redisGlobal = expectedPlayerIds
-		? await readRedisGlobal(context, eventId, expectedPlayerIds, options.scoreCoreRevision)
+	const expectedPlayerIds = core ? await expectedPlayerIdsForEvent(context, eventId, core) : null;
+	const redisGlobal = core
+		? await readRedisGlobal(
+				context,
+				eventId,
+				expectedPlayerIds ?? undefined,
+				options.scoreCoreRevision
+			)
 		: null;
 	const lkgCandidate = readLiveLkg(lkgKey);
 	// The fallback order is intentional: a process LKG is a complete response
@@ -2774,12 +2923,12 @@ export const calcLivePointsByEntryV2 = async (
 	// combine metadata from a different publication.
 	const global =
 		redisGlobal ??
-		(lkgCandidate || !expectedPlayerIds
+		(lkgCandidate || !core
 			? null
 			: requireCompleteGlobalRoster(
 					context,
 					await readDatabaseGlobalMemoized(context, eventId, options.scoreCoreRevision),
-					expectedPlayerIds
+					expectedPlayerIds ?? undefined
 				));
 	const processLkg =
 		lkgCandidate && (!global || lkgMatchesGlobal(lkgCandidate, global)) ? lkgCandidate : null;

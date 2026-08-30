@@ -270,7 +270,9 @@ const rowFor = (value: LiveCalcDataV2, rank: number): IndexedEntryLiveCompetitio
 		ownerAny: [...new Set(ownerAny)].sort((left, right) => left - right),
 		ownerStarter: [...new Set(ownerStarter)].sort((left, right) => left - right),
 		ownerBench: [...new Set(ownerBench)].sort((left, right) => left - right),
-		captains: captain.id > 0 ? [captain.id] : [],
+		// Keep the original squad role for filtering. `captainId` is the
+		// selected scorer and may be the vice after captain promotion.
+		captains: value.pickList.filter((pick) => pick.isCaptain).map((pick) => pick.element),
 		viceCaptains: value.pickList.filter((pick) => pick.isViceCaptain).map((pick) => pick.element),
 		teamAny: count(teamAny),
 		teamStarter: count(teamStarter),
