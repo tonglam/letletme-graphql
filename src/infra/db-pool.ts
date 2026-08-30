@@ -8,9 +8,9 @@ import { env } from "./env";
 export const dbPool = new Pool({
 	connectionString: env.DATABASE_URL,
 	max: env.DATABASE_POOL_MAX,
-	// Keep one cross-region pooler connection available for low-frequency reads.
-	// Additional connections still retire after idleTimeoutMillis.
-	min: 1,
+	// The live hot path is Redis-first. Do not hold an idle database session;
+	// reserve the two-session ceiling for bounded checkpoint/metadata reads.
+	min: 0,
 	idleTimeoutMillis: 30_000,
 	connectionTimeoutMillis: 2_000,
 	statement_timeout: env.DATABASE_STATEMENT_TIMEOUT_MS,

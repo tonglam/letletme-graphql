@@ -65,14 +65,15 @@ bun run contract:check
 bun run dev
 ```
 
-`DATABASE_POOL_MAX` defaults to `5` and accepts only `1` through `10`. Keep the production value at
-`5` unless the shared PostgreSQL connection budget is deliberately rebalanced.
+`DATABASE_POOL_MAX` defaults to `2` and accepts only `1` through `2`. Production must use `1` or `2`
+so the full-stack connection ceiling remains within the V2 release budget.
 
 The service exposes:
 
 - `POST /graphql` for trusted Web traffic;
-- `GET /health/live` for liveness and `GET /health/ready` for PostgreSQL, both
-  Redis clients, and current-season readiness; and
+- `GET /health/live` for liveness, `GET /health/hot` for the Redis/current-season
+  serving path, and `GET /health/ready` for strict PostgreSQL, Redis, and
+  current-season readiness; and
 - `GET /metrics`, protected by `METRICS_TOKEN`.
 
 Requests are bounded by body size, depth, root-field count, aliases, AST nodes,

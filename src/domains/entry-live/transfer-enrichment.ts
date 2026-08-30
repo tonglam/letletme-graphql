@@ -1,5 +1,5 @@
 import type { Player, Team } from "../../infra/types";
-import type { LivePerformance } from "../live/repository";
+import type { LivePerformanceData as LivePerformance } from "../../infra/live-types";
 import type { EntryEventTransferRow } from "./repository";
 
 export type EntryEventTransfersData = {

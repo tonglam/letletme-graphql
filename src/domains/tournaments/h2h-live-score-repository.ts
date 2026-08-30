@@ -1,26 +1,37 @@
 import { createHash } from "node:crypto";
 import type { GraphQLContext } from "../../graphql/context";
-import { getCoreDataSnapshot } from "../../infra/data-snapshot";
 import { stableStringify } from "../../infra/stringify";
-import { entryLiveBatchService } from "../entry-live/batch-service";
-import { isTraceableOfficialManagerScore } from "../entry-live/manager-score";
+import { calcLivePointsForEntriesV2 } from "../entry-live/v2-service";
 
-const normalizeLiveCheckedAt = (value: string | Date | null | undefined): string | null => {
-	if (value === null || value === undefined || value === "") return null;
-	const date = value instanceof Date ? value : new Date(value);
-	return Number.isNaN(date.getTime()) ? null : date.toISOString();
+type LivePublicationState =
+	| "PRE_DEADLINE"
+	| "PICKS_WAIT"
+	| "PICKS_PROBE"
+	| "PICKS_SYNC"
+	| "LIVE_ACTIVE"
+	| "BETWEEN_FIXTURES"
+	| "DAY_SETTLING"
+	| "GW_REVIEW"
+	| "FINALIZED";
+
+/** Keep large official H2H rounds off the synchronous request path. */
+export const MAX_H2H_LIVE_SCORE_ENTRIES = 500;
+
+const h2hState = (state: LivePublicationState): "scheduled" | "live" | "settled" => {
+	if (state === "LIVE_ACTIVE" || state === "BETWEEN_FIXTURES") return "live";
+	if (state === "DAY_SETTLING" || state === "GW_REVIEW" || state === "FINALIZED") return "settled";
+	return "scheduled";
 };
-
 export type EventLiveH2HScoreBatch = {
 	scores: ReadonlyMap<number, number>;
-	managerRevisions: ReadonlyMap<number, string>;
-	checkedAtByEntry: ReadonlyMap<number, string>;
+	inputRevisions: ReadonlyMap<number, string>;
+	sourceCheckedAtByEntry: ReadonlyMap<number, string>;
 	revision: string;
-	checkedAt: string;
+	sourceCheckedAt: string;
 	state: "scheduled" | "live" | "settled";
 	/** Shared source identity used when several bounded chunks form one round. */
 	livePublicationId?: string | null;
-	snapshotRevision?: string | null;
+	scoreCoreRevision?: string | null;
 };
 
 const loadEventLiveH2HScoreBatch = async (
@@ -29,66 +40,61 @@ const loadEventLiveH2HScoreBatch = async (
 	entryIds: readonly number[]
 ): Promise<EventLiveH2HScoreBatch | null> => {
 	if (entryIds.length === 0 || entryIds.length > 500) return null;
-	// H2H overlay reads are cache-only: pin the Core publication before
-	// scoring, and never trigger per-entry provider fetches from this path.
-	if (!context.dataRevision) await getCoreDataSnapshot(context);
-	const result = await entryLiveBatchService.calcLivePointsForEntries(
-		context,
-		eventId,
-		[...entryIds],
-		{ managerReadMode: "CACHE_ONLY" }
-	);
+	// H2H is a consumer of the same V2 Redis publication. It must not call Data,
+	// FPL, or a manager materializer from a request path.
+	const result = await calcLivePointsForEntriesV2(context, eventId, [...entryIds]);
 	if (result.errors.length > 0 || result.results.size !== entryIds.length) return null;
 
 	const scores = new Map<number, number>();
 	let livePublicationId: string | null = null;
-	let snapshotRevision: string | null = null;
-	let checkedAt: string | null = null;
+	let scoreCoreRevision: string | null = null;
+	let sourceCheckedAt: string | null = null;
 	let state: EventLiveH2HScoreBatch["state"] | null = null;
-	const managerRevisions = new Map<number, string>();
-	const checkedAtByEntry = new Map<number, string>();
+	const inputRevisions = new Map<number, string>();
+	const sourceCheckedAtByEntry = new Map<number, string>();
 	for (const entryId of entryIds) {
 		const row = result.results.get(entryId);
-		const liveProvenance = row?.score.provenance;
+		const liveProvenance = row?.snapshot;
 		if (
 			!row ||
-			!isTraceableOfficialManagerScore(row.score) ||
-			row.score.source !== "FPL_EVENT_LIVE" ||
+			row.availability !== "READY" ||
+			(row.score.source !== "FPL_EVENT_LIVE" && row.score.source !== "FPL_FINAL_RESULT") ||
 			typeof row.score.netEventPoints !== "number" ||
-			typeof row.score.revision !== "string" ||
-			row.score.revision.trim().length === 0 ||
-			!row.snapshot ||
 			!liveProvenance ||
-			liveProvenance.scoreSource !== "FPL_EVENT_LIVE" ||
-			liveProvenance.livePublicationId === null ||
-			liveProvenance.liveRevision === null ||
-			liveProvenance.liveCheckedAt === null ||
-			row.snapshot.revision !== liveProvenance.liveRevision ||
-			row.snapshot.publicationId !== liveProvenance.livePublicationId
+			typeof row.score.revisions.input !== "string" ||
+			row.score.revisions.input.trim().length === 0 ||
+			typeof liveProvenance.revisions.publicationId !== "string" ||
+			liveProvenance.revisions.publicationId.length === 0 ||
+			typeof liveProvenance.revisions.scoreCore !== "string" ||
+			liveProvenance.revisions.scoreCore.length === 0 ||
+			typeof liveProvenance.times.sourceCheckedAt !== "string"
 		) {
 			return null;
 		}
 		if (
-			(livePublicationId !== null && livePublicationId !== liveProvenance.livePublicationId) ||
-			(snapshotRevision !== null && snapshotRevision !== liveProvenance.liveRevision) ||
-			(state !== null && state !== row.snapshot.state)
+			(livePublicationId !== null &&
+				livePublicationId !== liveProvenance.revisions.publicationId) ||
+			(scoreCoreRevision !== null && scoreCoreRevision !== liveProvenance.revisions.scoreCore) ||
+			(state !== null && state !== h2hState(liveProvenance.state as LivePublicationState))
 		) {
 			return null;
 		}
-		const normalizedLiveCheckedAt = normalizeLiveCheckedAt(liveProvenance.liveCheckedAt);
-		if (normalizedLiveCheckedAt === null) return null;
-		livePublicationId = liveProvenance.livePublicationId;
-		snapshotRevision = liveProvenance.liveRevision;
-		if (checkedAt === null || Date.parse(normalizedLiveCheckedAt) < Date.parse(checkedAt)) {
-			checkedAt = normalizedLiveCheckedAt;
+		const normalizedLiveCheckedAt = liveProvenance.times.sourceCheckedAt;
+		livePublicationId = liveProvenance.revisions.publicationId;
+		scoreCoreRevision = liveProvenance.revisions.scoreCore;
+		if (
+			sourceCheckedAt === null ||
+			Date.parse(normalizedLiveCheckedAt) < Date.parse(sourceCheckedAt)
+		) {
+			sourceCheckedAt = normalizedLiveCheckedAt;
 		}
-		state = row.snapshot.state;
+		state = h2hState(liveProvenance.state as LivePublicationState);
 		scores.set(entryId, row.score.netEventPoints);
-		managerRevisions.set(entryId, row.score.revision);
-		checkedAtByEntry.set(entryId, normalizedLiveCheckedAt);
+		inputRevisions.set(entryId, row.score.revisions.input);
+		sourceCheckedAtByEntry.set(entryId, normalizedLiveCheckedAt);
 	}
-	if (!snapshotRevision || !checkedAt || !state) return null;
-	const orderedManagerRevisions = [...managerRevisions]
+	if (!scoreCoreRevision || !sourceCheckedAt || !state) return null;
+	const orderedInputRevisions = [...inputRevisions]
 		.sort(([left], [right]) => left - right)
 		.map(([entryId, revision]) => ({ entryId, revision }));
 	const revisionHash = createHash("sha256")
@@ -96,8 +102,8 @@ const loadEventLiveH2HScoreBatch = async (
 			stableStringify({
 				eventId,
 				livePublicationId,
-				snapshotRevision,
-				managerRevisions: orderedManagerRevisions,
+				scoreCoreRevision,
+				inputRevisions: orderedInputRevisions,
 			}),
 			"utf8"
 		)
@@ -105,13 +111,13 @@ const loadEventLiveH2HScoreBatch = async (
 		.slice(0, 24);
 	return {
 		scores,
-		managerRevisions,
-		checkedAtByEntry,
+		inputRevisions,
+		sourceCheckedAtByEntry,
 		revision: `event-live-h2h:${eventId}:${revisionHash}`,
-		checkedAt,
+		sourceCheckedAt,
 		state,
 		livePublicationId,
-		snapshotRevision,
+		scoreCoreRevision,
 	};
 };
 
@@ -134,6 +140,17 @@ export const loadEventLiveH2HScoreBatches = async (
 ): Promise<EventLiveH2HScoreBatch | null> => {
 	const uniqueEntryIds = [...new Set(entryIds)].sort((left, right) => left - right);
 	if (uniqueEntryIds.length === 0) return null;
+	if (uniqueEntryIds.length > MAX_H2H_LIVE_SCORE_ENTRIES) {
+		context.logger.warn(
+			{
+				eventId,
+				entryCount: uniqueEntryIds.length,
+				maxEntryCount: MAX_H2H_LIVE_SCORE_ENTRIES,
+			},
+			"Event-live H2H score request exceeds synchronous admission bound"
+		);
+		return null;
+	}
 	const chunks = chunkH2HEntryIds(uniqueEntryIds);
 	const batches: Array<EventLiveH2HScoreBatch | null> = new Array<EventLiveH2HScoreBatch | null>(
 		chunks.length
@@ -164,13 +181,13 @@ export const loadEventLiveH2HScoreBatches = async (
 		if (
 			batch.state !== first.state ||
 			batch.livePublicationId !== first.livePublicationId ||
-			batch.snapshotRevision !== first.snapshotRevision
+			batch.scoreCoreRevision !== first.scoreCoreRevision
 		) {
 			context.logger.warn(
 				{
 					eventId,
-					expectedRevision: first.snapshotRevision,
-					observedRevision: batch.snapshotRevision,
+					expectedScoreCoreRevision: first.scoreCoreRevision,
+					observedScoreCoreRevision: batch.scoreCoreRevision,
 				},
 				"Event-live H2H score chunks observed mixed publication metadata"
 			);
@@ -178,26 +195,26 @@ export const loadEventLiveH2HScoreBatches = async (
 		}
 	}
 	const scores = new Map<number, number>();
-	const managerRevisions = new Map<number, string>();
-	const checkedAtByEntry = new Map<number, string>();
+	const inputRevisions = new Map<number, string>();
+	const sourceCheckedAtByEntry = new Map<number, string>();
 	for (const batch of completeBatches) {
 		for (const [entryId, score] of batch.scores) scores.set(entryId, score);
-		for (const [entryId, revision] of batch.managerRevisions) {
-			managerRevisions.set(entryId, revision);
+		for (const [entryId, revision] of batch.inputRevisions) {
+			inputRevisions.set(entryId, revision);
 		}
-		for (const [entryId, checkedAt] of batch.checkedAtByEntry) {
-			checkedAtByEntry.set(entryId, checkedAt);
+		for (const [entryId, sourceCheckedAt] of batch.sourceCheckedAtByEntry) {
+			sourceCheckedAtByEntry.set(entryId, sourceCheckedAt);
 		}
 	}
-	const checkedAt = completeBatches
-		.map((batch) => batch.checkedAt)
+	const sourceCheckedAt = completeBatches
+		.map((batch) => batch.sourceCheckedAt)
 		.sort((left, right) => Date.parse(left) - Date.parse(right))[0]!;
 	const revisionHash = createHash("sha256")
 		.update(
 			stableStringify({
 				eventId,
 				livePublicationId: first.livePublicationId,
-				snapshotRevision: first.snapshotRevision,
+				scoreCoreRevision: first.scoreCoreRevision,
 				chunks: completeBatches.map((batch) => batch.revision),
 			})
 		)
@@ -205,12 +222,12 @@ export const loadEventLiveH2HScoreBatches = async (
 		.slice(0, 24);
 	return {
 		scores,
-		managerRevisions,
-		checkedAtByEntry,
+		inputRevisions,
+		sourceCheckedAtByEntry,
 		revision: `event-live-h2h:${eventId}:${revisionHash}`,
-		checkedAt,
+		sourceCheckedAt,
 		state: first.state,
 		livePublicationId: first.livePublicationId,
-		snapshotRevision: first.snapshotRevision,
+		scoreCoreRevision: first.scoreCoreRevision,
 	};
 };

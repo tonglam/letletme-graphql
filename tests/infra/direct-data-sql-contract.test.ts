@@ -24,8 +24,6 @@ import {
 	CORE_FALLBACK_SQL,
 	CORE_LIVE_IDENTITY_FALLBACK_SQL,
 	CORE_PHASE_SHAPE_SQL,
-	LIVE_FALLBACK_SQL,
-	LIVE_LIFECYCLE_STATUS_SQL,
 } from "../../src/infra/data-snapshot";
 import { createHash } from "node:crypto";
 import {
@@ -315,52 +313,6 @@ const mockSeasonPathPayload = {
 	},
 } as const;
 
-const mockLiveFallbackRow = {
-	authority_count: "1",
-	publication_id: CONTRACT_PUBLICATION_ID,
-	revision: "1",
-	manifest: {
-		dataset: "fpl:live",
-		seasonCode: "2627",
-		eventId: 1,
-		revision: 1,
-		publicationId: CONTRACT_PUBLICATION_ID,
-		sourceCheckedAt: "2026-08-10T00:00:00.000Z",
-		publishedAt: "2026-08-10T00:00:00.000Z",
-		state: "live",
-		items: ["eventLive", "fixtures"].map((name) => ({
-			name,
-			key: `llm:data:fpl:live:2627:1:1:${name}`,
-			type: "string",
-			count: 0,
-			bytes: 2,
-			sha256: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-		})),
-	},
-	source_checked_at: "2026-08-10T00:00:00.000Z",
-	event_lives: [],
-	fixtures: [],
-	event_live_item_count: 0,
-	fixture_item_count: 0,
-	event_live_checksum: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-	fixture_checksum: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-	event_live_payload_bytes: 2,
-	fixture_payload_bytes: 2,
-	event_live_payload_sha256: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-	fixture_payload_sha256: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-} as const;
-
-const mockLiveLifecycleStatusRow = {
-	event_id: 1,
-	state: "LIVE_ACTIVE",
-	observed_at: "2026-08-10T00:00:00.000Z",
-	last_changed_at: "2026-08-10T00:00:00.000Z",
-	next_refresh_at: "2026-08-10T00:01:00.000Z",
-	live_revision: "1",
-	publication_id: CONTRACT_PUBLICATION_ID,
-	source_checked_at: "2026-08-10T00:00:00.000Z",
-} as const;
-
 const mockMarketRow = {
 	snapshot_date: "2025-08-28",
 	captured_at: "2025-08-28T00:00:00.000Z",
@@ -540,6 +492,7 @@ const mockTrendsPersonalRows = Array.from({ length: 15 }, (_, index) => ({
 const mockTrendsAggregateRows = [
 	"OWNERSHIP",
 	"EFFECTIVE_OWNERSHIP",
+	"TEMPLATE",
 	"CAPTAINCY",
 	"VICE_CAPTAINCY",
 	"TRANSFERS",
@@ -864,12 +817,6 @@ describe("direct Data SQL contract", () => {
 				if (runtimeProbe?.runtime === "must-return-season-path") {
 					return { rows: [{ payload: mockSeasonPathPayload }] } as unknown as QueryResult<Row>;
 				}
-				if (runtimeProbe?.runtime === "must-return-live") {
-					return { rows: [mockLiveFallbackRow] } as unknown as QueryResult<Row>;
-				}
-				if (runtimeProbe?.runtime === "must-return-live-lifecycle") {
-					return { rows: [mockLiveLifecycleStatusRow] } as unknown as QueryResult<Row>;
-				}
 				if (runtimeProbe?.runtime === "must-return-tournament") {
 					return {
 						rows: [{ tournament_id: values[2] }],
@@ -988,17 +935,6 @@ describe("direct Data SQL contract", () => {
 			"most_vice_captained",
 		]) {
 			expect(core).toEqual(expect.arrayContaining([expect.objectContaining({ column })]));
-		}
-		const lifecycle = DIRECT_DATA_SQL_CONTRACT.find(
-			(probe) => probe.name === "data-snapshot.live-lifecycle-status"
-		)?.resultTypes;
-		for (const column of [
-			"observed_at",
-			"last_changed_at",
-			"next_refresh_at",
-			"source_checked_at",
-		]) {
-			expect(lifecycle).toEqual(expect.arrayContaining([expect.objectContaining({ column })]));
 		}
 		for (const column of [
 			"source_checked_at",
@@ -1127,12 +1063,6 @@ describe("direct Data SQL contract", () => {
 				}
 				if (runtimeProbe?.runtime === "must-return-season-path") {
 					return { rows: [{ payload: mockSeasonPathPayload }] } as unknown as QueryResult<Row>;
-				}
-				if (runtimeProbe?.runtime === "must-return-live") {
-					return { rows: [mockLiveFallbackRow] } as unknown as QueryResult<Row>;
-				}
-				if (runtimeProbe?.runtime === "must-return-live-lifecycle") {
-					return { rows: [mockLiveLifecycleStatusRow] } as unknown as QueryResult<Row>;
 				}
 				if (runtimeProbe?.runtime === "must-return-market") {
 					return { rows: [{ market_rows: [mockMarketRow] }] } as unknown as QueryResult<Row>;
@@ -1442,17 +1372,10 @@ describe("direct Data SQL contract", () => {
 			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "data-snapshot.core-phase-shape")?.sql
 		).toBe(CORE_PHASE_SHAPE_SQL);
 		expect(
-			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "data-snapshot.live-fallback")?.sql
-		).toBe(LIVE_FALLBACK_SQL);
-		expect(
 			DIRECT_DATA_SQL_CONTRACT.find(
 				(probe) => probe.name === "data-snapshot.core-live-identity-fallback"
 			)?.sql
 		).toBe(CORE_LIVE_IDENTITY_FALLBACK_SQL);
-		expect(
-			DIRECT_DATA_SQL_CONTRACT.find((probe) => probe.name === "data-snapshot.live-lifecycle-status")
-				?.sql
-		).toBe(LIVE_LIFECYCLE_STATUS_SQL);
 	});
 
 	test("requires the My FPL authority fixture to be visible to the runtime reader", () => {
@@ -1489,8 +1412,6 @@ describe("direct Data SQL contract", () => {
 					probe.runtime === "must-return-board" ||
 					probe.runtime === "must-return-season-path" ||
 					probe.runtime === "must-return-briefing-metadata" ||
-					probe.runtime === "must-return-live" ||
-					probe.runtime === "must-return-live-lifecycle" ||
 					probe.runtime === "must-return-market" ||
 					probe.runtime === "must-return-market-authority" ||
 					probe.runtime === "must-return-player-state-revision" ||

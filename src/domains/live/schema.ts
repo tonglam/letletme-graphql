@@ -32,23 +32,16 @@ export const liveTypeDefs = /* GraphQL */ `
 	}
 
 	enum LiveSnapshotState {
-		SCHEDULED
-		LIVE
-		SETTLED
-	}
-
-	type LiveSnapshotMeta {
-		season: String!
-		eventId: Int!
-		revision: String!
-		completeness: DataCompletenessMeta
-		state: LiveSnapshotState!
-		publishedAt: String!
-		checkedAt: String!
-		eventLiveCount: Int!
-		fixtureCount: Int!
-		fixtureTeamCount: Int!
-		bonusTeamCount: Int!
+		PRE_DEADLINE
+		PICKS_WAIT
+		PICKS_PROBE
+		PICKS_SYNC
+		LIVE_ACTIVE
+		BETWEEN_FIXTURES
+		DAY_SETTLING
+		GW_REVIEW
+		FINALIZED
+		UNAVAILABLE
 	}
 
 	type EventLive {

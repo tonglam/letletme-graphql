@@ -5,12 +5,12 @@ import { hasExactFields } from "./exact-fields";
 
 export const DATA_CACHE_NAMESPACE = "llm:data";
 
-export type DataPublicationDataset = "fpl:core" | "fpl:live" | "fpl:market" | "fpl:price-changes";
+export type DataPublicationDataset = "fpl:core" | "fpl:market" | "fpl:price-changes";
 
 export type DataPublicationScope = Readonly<{
 	dataset: DataPublicationDataset;
 	seasonCode: string;
-	eventId?: number;
+	eventId?: never;
 }>;
 
 export type DataPublicationManifestItem = Readonly<{
@@ -33,7 +33,7 @@ export type DataPublicationManifest = Readonly<{
 	freshnessWindowId?: number;
 	freshnessWindowIds?: readonly number[];
 	publishedAt: string;
-	state: "active" | "scheduled" | "live" | "settled";
+	state: "active";
 	items: readonly DataPublicationManifestItem[];
 }>;
 
@@ -91,7 +91,6 @@ const DATASET_ITEM_NAMES: Record<DataPublicationDataset, readonly string[]> = {
 		"currentEventId",
 		"selectionRules",
 	],
-	"fpl:live": ["eventLive", "fixtures"],
 	"fpl:market": ["context"],
 	"fpl:price-changes": ["context", "players"],
 };
@@ -103,14 +102,8 @@ const hasExactItemNames = (dataset: DataPublicationDataset, names: readonly stri
 	);
 };
 
-const isCanonicalState = (
-	dataset: DataPublicationDataset,
-	state: unknown
-): state is DataPublicationManifest["state"] => {
-	if (dataset === "fpl:core" || dataset === "fpl:market" || dataset === "fpl:price-changes")
-		return state === "active";
-	return state === "scheduled" || state === "live" || state === "settled";
-};
+const isCanonicalState = (state: unknown): state is DataPublicationManifest["state"] =>
+	state === "active";
 
 export const isDataPublicationId = (value: unknown): value is string =>
 	typeof value === "string" &&
@@ -124,21 +117,15 @@ const isPositiveSafeInteger = (value: unknown): value is number =>
 
 const assertScope = (scope: DataPublicationScope): void => {
 	if (!/^\d{4}$/.test(scope.seasonCode)) throw new Error("Invalid Data publication season");
-	if (scope.dataset === "fpl:live") {
-		if (!Number.isSafeInteger(scope.eventId) || (scope.eventId ?? 0) <= 0) {
-			throw new Error("A live Data publication requires a positive event ID");
-		}
-		return;
-	}
 	if (scope.eventId !== undefined)
-		throw new Error("A core Data publication cannot have an event ID");
+		throw new Error(
+			"A Data publication cannot have an event ID; live points use the V2 publication namespace"
+		);
 };
 
 const scopePrefix = (scope: DataPublicationScope): string => {
 	assertScope(scope);
-	return scope.dataset === "fpl:live"
-		? `${DATA_CACHE_NAMESPACE}:${scope.dataset}:${scope.seasonCode}:${scope.eventId}`
-		: `${DATA_CACHE_NAMESPACE}:${scope.dataset}:${scope.seasonCode}`;
+	return `${DATA_CACHE_NAMESPACE}:${scope.dataset}:${scope.seasonCode}`;
 };
 
 export const activeDataPublicationKey = (scope: DataPublicationScope): string =>
@@ -182,7 +169,6 @@ export const parseDataPublicationManifest = (
 		if (!isRecord(value) || !hasManifestFields(value)) return null;
 		if (
 			value.dataset !== "fpl:core" &&
-			value.dataset !== "fpl:live" &&
 			value.dataset !== "fpl:market" &&
 			value.dataset !== "fpl:price-changes"
 		)
@@ -200,17 +186,14 @@ export const parseDataPublicationManifest = (
 				(!Array.isArray(value.freshnessWindowIds) ||
 					value.freshnessWindowIds.some((windowId) => !isPositiveSafeInteger(windowId)))) ||
 			!isIsoDate(value.publishedAt) ||
-			!isCanonicalState(dataset, value.state) ||
+			value.eventId !== null ||
+			!isCanonicalState(value.state) ||
 			!Array.isArray(value.items)
 		) {
 			return null;
 		}
 
-		const manifestScope: DataPublicationScope = {
-			dataset,
-			seasonCode: value.seasonCode,
-			...(value.eventId === null ? {} : { eventId: value.eventId as number }),
-		};
+		const manifestScope: DataPublicationScope = { dataset, seasonCode: value.seasonCode };
 		assertScope(manifestScope);
 		const revision = value.revision as number;
 		const names = new Set<string>();
@@ -393,7 +376,6 @@ export const readDataPublicationItemsAtManifest = async (
 	const scope: DataPublicationScope = {
 		dataset: manifest.dataset,
 		seasonCode: manifest.seasonCode,
-		...(manifest.eventId === null ? {} : { eventId: manifest.eventId }),
 	};
 	assertScope(scope);
 	const uniqueItemNames = [...new Set(requiredItemNames)];

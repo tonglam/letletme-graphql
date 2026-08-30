@@ -259,7 +259,7 @@ export const parseGraphQLRateLimitPolicyV3 = (value: unknown): GraphQLRateLimitP
 };
 
 export const parseGraphQLRateLimitMode = (value: string | undefined): GraphQLRateLimitMode => {
-	const mode = value ?? "shadow-v3";
+	const mode = value ?? "shadow-v4";
 	if (!GRAPHQL_RATE_LIMIT_MODES.includes(mode as GraphQLRateLimitMode)) {
 		throw new Error(
 			`GRAPHQL_RATE_LIMIT_MODE must be one of ${GRAPHQL_RATE_LIMIT_MODES.join(", ")}`

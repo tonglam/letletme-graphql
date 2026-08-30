@@ -1,11 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
-import {
-	getCoreEventSnapshot,
-	getLiveLifecycleStatus,
-	type LiveLifecycleStatus,
-} from "../../infra/data-snapshot";
+import { getCoreEventSnapshot } from "../../infra/data-snapshot";
 import { QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
 import { getCurrentSeason } from "../../infra/season";
 
@@ -27,57 +23,21 @@ export type PlayerStatsContext = {
 
 const PLAYER_STATS_DEFAULT_FRESHNESS_MS = 60_000;
 const PLAYER_STATS_LIVE_FRESHNESS_MS = 90_000;
-const PLAYER_STATS_REPAIR_FRESHNESS_MS = 6 * 60_000;
-const LIVE_LIFECYCLE_HEARTBEAT_FALLBACK_MAX_AGE_MS = 2 * 60_000;
-const LIVE_LIFECYCLE_HEARTBEAT_GRACE_MS = 2 * 60_000;
-const LIVE_LIFECYCLE_HEARTBEAT_HARD_MAX_AGE_MS = 15 * 60_000;
 const PLAYER_SEASON_STATS_CACHE_VERSION = "v2";
 
+export type PlayerStatsFreshnessCadence = "ACTIVE_EVENT" | "STATIC";
+
 /**
- * Match the read-side freshness budget to the producer's lifecycle cadence.
- * The persisted next refresh deadline is authoritative, but only within a
- * bounded window. A stale or malformed lifecycle heartbeat never relaxes the
- * fail-closed default.
+ * Player statistics have their own observer cadence. They must not read the
+ * live lifecycle table: that table is not on the live-points read path and a
+ * lifecycle heartbeat outage must not turn a player-stats query into a second
+ * live-data dependency.
  */
 export function resolvePlayerStatsFreshnessBudgetMs(
-	lifecycle: Pick<LiveLifecycleStatus, "state" | "observedAt" | "nextRefreshAt"> | null,
-	nowMs = Date.now()
+	cadence: PlayerStatsFreshnessCadence | null
 ): number {
-	if (!lifecycle) return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
-	const observedAtMs = Date.parse(lifecycle.observedAt);
-	const lifecycleAgeMs = nowMs - observedAtMs;
-	if (!Number.isFinite(observedAtMs) || lifecycleAgeMs < 0) {
-		return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
-	}
-
-	let heartbeatExpiresAtMs = observedAtMs + LIVE_LIFECYCLE_HEARTBEAT_FALLBACK_MAX_AGE_MS;
-	if (lifecycle.nextRefreshAt) {
-		const nextRefreshAtMs = Date.parse(lifecycle.nextRefreshAt);
-		const scheduledDelayMs = nextRefreshAtMs - observedAtMs;
-		const maxScheduledDelayMs =
-			LIVE_LIFECYCLE_HEARTBEAT_HARD_MAX_AGE_MS - LIVE_LIFECYCLE_HEARTBEAT_GRACE_MS;
-		if (
-			Number.isFinite(nextRefreshAtMs) &&
-			scheduledDelayMs >= 0 &&
-			scheduledDelayMs <= maxScheduledDelayMs
-		) {
-			heartbeatExpiresAtMs = Math.min(
-				nextRefreshAtMs + LIVE_LIFECYCLE_HEARTBEAT_GRACE_MS,
-				observedAtMs + LIVE_LIFECYCLE_HEARTBEAT_HARD_MAX_AGE_MS
-			);
-		}
-	}
-	if (nowMs > heartbeatExpiresAtMs) return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
-
-	if (lifecycle.state === "LIVE_ACTIVE" || lifecycle.state === "DAY_SETTLING") {
+	if (cadence === "ACTIVE_EVENT") {
 		return PLAYER_STATS_LIVE_FRESHNESS_MS;
-	}
-	if (
-		lifecycle.state === "PICKS_SYNC" ||
-		lifecycle.state === "BETWEEN_FIXTURES" ||
-		lifecycle.state === "GW_REVIEW"
-	) {
-		return PLAYER_STATS_REPAIR_FRESHNESS_MS;
 	}
 	return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
 }
@@ -313,8 +273,8 @@ async function resolvePlayerStatsContextUncached(
 		return publicationContext(season, event.id, publication, "PRESEASON");
 	}
 	const nowMs = Date.now();
-	const lifecycle = event.finished ? null : await getLiveLifecycleStatus(context, event.id);
-	const freshnessBudgetMs = resolvePlayerStatsFreshnessBudgetMs(lifecycle, nowMs);
+	const cadence: PlayerStatsFreshnessCadence = event.finished ? "STATIC" : "ACTIVE_EVENT";
+	const freshnessBudgetMs = resolvePlayerStatsFreshnessBudgetMs(cadence);
 	const sourceAge = nowMs - Date.parse(header.sourceCheckedAt);
 	if (!event.finished && (!Number.isFinite(sourceAge) || sourceAge > freshnessBudgetMs)) {
 		return publicationContext(season, event.id, publication, "STALE");

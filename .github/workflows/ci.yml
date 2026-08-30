@@ -18,7 +18,7 @@ env:
   BACKEND_PROXY_SECRET: test-backend-proxy-secret
   GRAPHQL_SERVICE_TOKEN: test-graphql-service-token-at-least-32-characters
   CORS_ORIGIN: http://localhost:3000
-  GRAPHQL_RATE_LIMIT_MODE: shadow-v3
+  GRAPHQL_RATE_LIMIT_MODE: shadow-v4
 
 jobs:
   verify:

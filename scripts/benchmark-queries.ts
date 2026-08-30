@@ -536,7 +536,7 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 		add(
 			"live",
 			"liveContext",
-			"query LiveContext { liveContext { season coreRevision currentEventId nextEventId liveRevision state } }",
+			"query LiveContext { liveContext { season coreRevision currentEventId nextEventId scoreCoreRevision state dataAvailability delivery { state servedFrom } } }",
 			{},
 			"liveContext"
 		);
@@ -594,34 +594,27 @@ function buildQueries(ids: Awaited<ReturnType<typeof discoverIds>>): QueryDefini
 		}
 	}
 
-	/* entryLive */
+	/* Live Points V2 */
 	if (ids.entryEventEntryId && ids.entryEventId) {
 		add(
-			"entryLive",
-			"entryLive",
-			"query EntryLive($entryId: Int!, $eventId: Int!) { entryLive(entryId: $entryId, eventId: $eventId) { eventPoints overallPoints } }",
-			{ entryId: ids.entryEventEntryId, eventId: ids.entryEventId },
-			"entryLive"
-		);
-		add(
-			"entryLive",
+			"livePoints",
 			"calcLivePointsByEntry",
-			"query CalcLivePointsByEntry($eventId: Int!, $entryId: Int!) { calcLivePointsByEntry(eventId: $eventId, entryId: $entryId) { rank livePoints pickList { element webName } } }",
+			"query CalcLivePointsByEntry($eventId: Int!, $entryId: Int!) { calcLivePointsByEntry(eventId: $eventId, entryId: $entryId) { availability delivery { state servedFrom } score { eventPoints netEventPoints } pickList { element webName } } }",
 			{ eventId: ids.entryEventId, entryId: ids.entryEventEntryId },
 			"calcLivePointsByEntry"
 		);
 		add(
-			"entryLive",
+			"livePoints",
 			"calcLivePointsForEntries_single",
-			"query CalcLivePointsForEntries($eventId: Int!, $entryIds: [Int!]!) { calcLivePointsForEntries(eventId: $eventId, entryIds: $entryIds) { results { rank livePoints } meta { totalEntries succeededCount } } }",
+			"query CalcLivePointsForEntries($eventId: Int!, $entryIds: [Int!]!) { calcLivePointsForEntries(eventId: $eventId, entryIds: $entryIds) { results { availability delivery { state } score { eventPoints } } meta { totalEntries succeededCount } } }",
 			{ eventId: ids.entryEventId, entryIds: [ids.entryEventEntryId] },
 			"calcLivePointsForEntries"
 		);
 		if (ids.entryId && ids.entryId !== ids.entryEventEntryId) {
 			add(
-				"entryLive",
+				"livePoints",
 				"calcLivePointsForEntries_batch",
-				"query CalcLivePointsForEntriesBatch($eventId: Int!, $entryIds: [Int!]!) { calcLivePointsForEntries(eventId: $eventId, entryIds: $entryIds) { results { rank livePoints } meta { totalEntries succeededCount } } }",
+				"query CalcLivePointsForEntriesBatch($eventId: Int!, $entryIds: [Int!]!) { calcLivePointsForEntries(eventId: $eventId, entryIds: $entryIds) { results { availability delivery { state } score { eventPoints } } meta { totalEntries succeededCount } } }",
 				{
 					eventId: ids.entryEventId,
 					entryIds: [ids.entryEventEntryId, ids.entryId],

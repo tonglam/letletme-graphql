@@ -19,9 +19,9 @@ export const getCorsHeaders = (origin: string | null): Record<string, string> =>
 		Vary: "Origin",
 		"Access-Control-Allow-Methods": "POST, OPTIONS",
 		"Access-Control-Allow-Headers":
-			"Content-Type, Authorization, X-Request-Id, X-User-Context, X-User-Context-Sig, X-Ingress-Context, X-Ingress-Context-Sig",
+			"Content-Type, Authorization, X-Request-Id, X-LetLetMe-Contract, X-User-Context, X-User-Context-Sig, X-Ingress-Context, X-Ingress-Context-Sig",
 		"Access-Control-Expose-Headers":
-			"X-Request-Id, Retry-After, X-RateLimit-Policy, X-RateLimit-Scope, X-RateLimit-Workload, X-RateLimit-Shadow-Outcome, X-RateLimit-Shadow-Scope",
+			"X-Request-Id, X-LetLetMe-Contract, Retry-After, X-RateLimit-Policy, X-RateLimit-Scope, X-RateLimit-Workload, X-RateLimit-Shadow-Outcome, X-RateLimit-Shadow-Scope",
 		"Access-Control-Max-Age": "86400",
 	};
 };

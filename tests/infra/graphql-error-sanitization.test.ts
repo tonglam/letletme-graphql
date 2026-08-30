@@ -79,7 +79,7 @@ describe("GraphQL public error sanitization", () => {
 					{
 						message: "Requested live revision has expired",
 						extensions: {
-							code: "LIVE_REVISION_GONE",
+							code: "LIVE_SCORE_REVISION_GONE",
 							http: { status: 410 },
 							cause: "redis://secret@cache.internal",
 						},
@@ -92,7 +92,7 @@ describe("GraphQL public error sanitization", () => {
 		expect((JSON.parse(body) as { errors: unknown[] }).errors).toEqual([
 			{
 				message: "Requested live revision has expired",
-				extensions: { code: "LIVE_REVISION_GONE", requestId: "req-domain" },
+				extensions: { code: "LIVE_SCORE_REVISION_GONE", requestId: "req-domain" },
 			},
 		]);
 		expect(body).not.toContain("cache.internal");

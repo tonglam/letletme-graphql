@@ -112,7 +112,6 @@ add(
 		"entryHistory",
 		"entryEventResult",
 		"entryTransferHistory",
-		"entryLive",
 		"entryLeagues",
 		"entryH2HMatchResults",
 		"entryOfficialH2HDesk",
@@ -253,6 +252,9 @@ const lightweightFields = [
 	"myFplCompetitionBoard",
 	"myFplCompetitionSeasonPath",
 	"myFplCompetitionSetupStatus",
+	"calcLivePointsByEntry",
+	"calcLivePointsForEntries",
+	"liveSnapshot",
 ] as const;
 for (const field of lightweightFields) {
 	const current = registry.get(field);

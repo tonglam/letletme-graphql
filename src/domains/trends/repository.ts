@@ -6,10 +6,12 @@ import { isPlainRecord as isRecord } from "../../contracts/guards";
 import type { GraphQLContext } from "../../graphql/context";
 import { authorizeViewerEntry, viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
+import { buildTrendTemplate, type TrendTemplateCandidate } from "./template";
 
 const capabilities = [
 	"OWNERSHIP",
 	"EFFECTIVE_OWNERSHIP",
+	"TEMPLATE",
 	"CAPTAINCY",
 	"VICE_CAPTAINCY",
 	"TRANSFERS",
@@ -22,20 +24,25 @@ type TrendCapability = (typeof capabilities)[number];
 const aggregateTrendCapabilities: readonly AggregateTrendCapability[] = [
 	"OWNERSHIP",
 	"EFFECTIVE_OWNERSHIP",
+	"TEMPLATE",
 	"CAPTAINCY",
 	"VICE_CAPTAINCY",
 	"TRANSFERS",
 ];
 
 /**
- * Keep the aggregate read as one bounded statement.  Each arm owns its sort
- * and LIMIT so a popular capability cannot consume another capability's page.
- * The only interpolated values are compile-time column names and labels.
+ * Keep the aggregate read as one bounded statement. Each ranked arm owns its
+ * sort and LIMIT so a popular capability cannot consume another capability's
+ * page. The template arm reads the bounded FPL player pool because a valid
+ * 2/5/5/3 squad cannot be formed from a global top-12 list.
  */
+const TREND_TEMPLATE_CANDIDATE_LIMIT = 1_000;
+
 export const TRENDS_AGGREGATE_UNION_SQL = `
       SELECT * FROM (
         SELECT 'OWNERSHIP'::text AS capability, element_id, player_name, player_position, team_short_name,
-          selected_count AS count, NULL::integer AS pick_position
+          selected_count AS count, NULL::integer AS pick_position,
+          NULL::integer AS captain_count, NULL::integer AS vice_captain_count
         FROM reporting.tournament_selection_stat_rows
         WHERE publication_id = $1
         ORDER BY selected_count DESC NULLS LAST, element_id
@@ -44,7 +51,8 @@ export const TRENDS_AGGREGATE_UNION_SQL = `
       UNION ALL
       SELECT * FROM (
         SELECT 'EFFECTIVE_OWNERSHIP'::text AS capability, element_id, player_name, player_position, team_short_name,
-          effective_selection_count AS count, NULL::integer AS pick_position
+          effective_selection_count AS count, NULL::integer AS pick_position,
+          NULL::integer AS captain_count, NULL::integer AS vice_captain_count
         FROM reporting.tournament_selection_stat_rows
         WHERE publication_id = $1
         ORDER BY effective_selection_count DESC NULLS LAST, element_id
@@ -52,8 +60,18 @@ export const TRENDS_AGGREGATE_UNION_SQL = `
       ) effective_ownership
       UNION ALL
       SELECT * FROM (
+        SELECT 'TEMPLATE'::text AS capability, element_id, player_name, player_position, team_short_name,
+          selected_count AS count, NULL::integer AS pick_position, captain_count, vice_captain_count
+        FROM reporting.tournament_selection_stat_rows
+        WHERE publication_id = $1
+        ORDER BY selected_count DESC NULLS LAST, element_id
+        LIMIT ${TREND_TEMPLATE_CANDIDATE_LIMIT}
+      ) template
+      UNION ALL
+      SELECT * FROM (
         SELECT 'CAPTAINCY'::text AS capability, element_id, player_name, player_position, team_short_name,
-          captain_count AS count, NULL::integer AS pick_position
+          captain_count AS count, NULL::integer AS pick_position,
+          NULL::integer AS captain_count, NULL::integer AS vice_captain_count
         FROM reporting.tournament_selection_stat_rows
         WHERE publication_id = $1
         ORDER BY captain_count DESC NULLS LAST, element_id
@@ -62,7 +80,8 @@ export const TRENDS_AGGREGATE_UNION_SQL = `
       UNION ALL
       SELECT * FROM (
         SELECT 'VICE_CAPTAINCY'::text AS capability, element_id, player_name, player_position, team_short_name,
-          vice_captain_count AS count, NULL::integer AS pick_position
+          vice_captain_count AS count, NULL::integer AS pick_position,
+          NULL::integer AS captain_count, NULL::integer AS vice_captain_count
         FROM reporting.tournament_selection_stat_rows
         WHERE publication_id = $1
         ORDER BY vice_captain_count DESC NULLS LAST, element_id
@@ -71,7 +90,8 @@ export const TRENDS_AGGREGATE_UNION_SQL = `
       UNION ALL
       SELECT * FROM (
         SELECT 'TRANSFERS'::text AS capability, element_id, player_name, player_position, team_short_name,
-          transfer_in_count AS count, NULL::integer AS pick_position
+          transfer_in_count AS count, NULL::integer AS pick_position,
+          NULL::integer AS captain_count, NULL::integer AS vice_captain_count
         FROM reporting.tournament_selection_stat_rows
         WHERE publication_id = $1
         ORDER BY transfer_in_count DESC NULLS LAST, element_id
@@ -82,7 +102,8 @@ export const TRENDS_AGGREGATE_UNION_SQL = `
         SELECT 'PERSONAL_EXPOSURE'::text AS capability, pick.element_id,
           COALESCE(NULLIF(concat_ws(' ', player.first_name, player.second_name), ''), player.web_name) AS player_name,
           player.element_type AS player_position, team.short_name AS team_short_name, pick.multiplier::int AS count,
-          pick.position AS pick_position
+          pick.position AS pick_position, NULL::integer AS captain_count,
+          NULL::integer AS vice_captain_count
         FROM competition.entry_event_picks pick
         JOIN fpl.players player ON player.season_id = pick.season_id AND player.element_id = pick.element_id
         JOIN fpl.teams team ON team.season_id = pick.season_id AND team.team_id = player.team_id
@@ -292,7 +313,7 @@ const FPL_SQUAD_SIZE = 15;
 // Trends snapshots are revisioned by their own publication pointer. They are
 // deliberately kept out of the core Data snapshot path, so use an explicit
 // cache-key revision rather than forcing a full core snapshot read.
-const TRENDS_CACHE_SCHEMA_VERSION = "trends-v3";
+const TRENDS_CACHE_SCHEMA_VERSION = "trends-v4";
 
 const trendsRevisionKey = (revision: string): string =>
 	`trends-${createHash("sha256").update(revision, "utf8").digest("hex").slice(0, 24)}`;
@@ -328,6 +349,15 @@ const validateCohortId = (cohortId: string): number => {
 };
 
 const status = (value: unknown): string => (typeof value === "string" ? value : "NOT_READY");
+
+const templateStatus = (row: Record<string, unknown>): string => {
+	const requiredStates = [
+		status(row.ownership_state),
+		status(row.captaincy_state),
+		status(row.vice_captaincy_state),
+	];
+	return requiredStates.find((state) => state !== "READY") ?? "READY";
+};
 
 type TrendCohort = ReturnType<typeof mapCohort>;
 
@@ -440,6 +470,7 @@ function capabilityStatuses(row: Record<string, unknown> | undefined, access: "P
 	return [
 		["OWNERSHIP", setupReady ? status(row?.ownership_state) : "NOT_READY"],
 		["EFFECTIVE_OWNERSHIP", setupReady ? status(row?.ownership_state) : "NOT_READY"],
+		["TEMPLATE", setupReady && row ? templateStatus(row) : "NOT_READY"],
 		["CAPTAINCY", setupReady ? status(row?.captaincy_state) : "NOT_READY"],
 		["VICE_CAPTAINCY", setupReady ? status(row?.vice_captaincy_state) : "NOT_READY"],
 		["TRANSFERS", setupReady ? status(row?.transfers_state) : "NOT_READY"],
@@ -587,19 +618,22 @@ export const trendsRepository = {
 		const cohort = mapCohort(cohortRow, access);
 		const aggregateRowsByCapability = new Map<TrendCapability, Record<string, unknown>[]>();
 		const viewerEntry = access === "MINE" ? viewerEntryId(context) : null;
+		const aggregateCapabilityState = (capability: AggregateTrendCapability): string =>
+			status(
+				capability === "TEMPLATE"
+					? templateStatus(cohortRow)
+					: cohortRow[
+							capability === "OWNERSHIP" || capability === "EFFECTIVE_OWNERSHIP"
+								? "ownership_state"
+								: capability === "CAPTAINCY"
+									? "captaincy_state"
+									: capability === "VICE_CAPTAINCY"
+										? "vice_captaincy_state"
+										: "transfers_state"
+						]
+			);
 		const aggregateReady = aggregateTrendCapabilities.some(
-			(capability) =>
-				status(
-					cohortRow[
-						capability === "OWNERSHIP" || capability === "EFFECTIVE_OWNERSHIP"
-							? "ownership_state"
-							: capability === "CAPTAINCY"
-								? "captaincy_state"
-								: capability === "VICE_CAPTAINCY"
-									? "vice_captaincy_state"
-									: "transfers_state"
-					]
-				) === "READY"
+			(capability) => aggregateCapabilityState(capability) === "READY"
 		);
 		// Aggregate and personal exposure rows share one bounded SQL round trip.
 		if ((cohortRow.publication_id && aggregateReady) || viewerEntry !== null) {
@@ -634,17 +668,7 @@ export const trendsRepository = {
 						? access === "MINE"
 							? status(cohortRow.ownership_state)
 							: "UNSUPPORTED"
-						: status(
-								cohortRow[
-									capability === "OWNERSHIP" || capability === "EFFECTIVE_OWNERSHIP"
-										? "ownership_state"
-										: capability === "CAPTAINCY"
-											? "captaincy_state"
-											: capability === "VICE_CAPTAINCY"
-												? "vice_captaincy_state"
-												: "transfers_state"
-								]
-							);
+						: aggregateCapabilityState(capability);
 				const evidenceContext = {
 					evidenceClass: "official_competition",
 					sourceKey: `competition:${tournamentId}`,
@@ -731,6 +755,53 @@ export const trendsRepository = {
 					};
 				}
 				const denominator = Number(cohortRow.expected_entries ?? 0);
+				if (capability === "TEMPLATE") {
+					const candidates: TrendTemplateCandidate[] = (
+						aggregateRowsByCapability.get("TEMPLATE") ?? []
+					).map((row) => ({
+						elementId: Number(row.element_id),
+						playerName: String(row.player_name),
+						playerPosition: Number(row.player_position),
+						teamShortName: String(row.team_short_name),
+						count: Number(row.count ?? 0),
+						percentage: null,
+						captainCount:
+							row.captain_count === null || row.captain_count === undefined
+								? null
+								: Number(row.captain_count),
+						viceCaptainCount:
+							row.vice_captain_count === null || row.vice_captain_count === undefined
+								? null
+								: Number(row.vice_captain_count),
+					}));
+					const templateRows = buildTrendTemplate(candidates);
+					if (!templateRows) {
+						return {
+							capability,
+							state: "PARTIAL",
+							evidenceContext: {
+								...evidenceContext,
+								truthState: "partial",
+								coverageState: "partial",
+								availabilityState: "PARTIAL",
+								limitations: [
+									...evidenceContext.limitations,
+									"The league snapshot could not form a valid 15-player FPL squad.",
+								],
+							},
+							rows: null,
+						};
+					}
+					return {
+						capability,
+						state,
+						evidenceContext,
+						rows: templateRows.map((row) => ({
+							...row,
+							percentage: denominator > 0 ? (Number(row.count) / denominator) * 100 : null,
+						})),
+					};
+				}
 				const aggregateCapability = capability as AggregateTrendCapability;
 				return {
 					capability,

@@ -69,7 +69,7 @@ describe("production deployment workflow", () => {
 	test("requires candidate readiness, image digest, revision label, ingress and contract probes", () => {
 		expect(dockerfile).toContain("COPY --chown=bun:bun scripts/lib ./scripts/lib");
 		expect(deployScript).toContain("/health/ready");
-		expect(deployScript).toContain('.status == "ok" and .revision == $revision');
+		expect(deployScript).toContain('.status == "ok" and .deploySha == $deploySha');
 		expect(deployScript).toContain("docker inspect --format '{{.Config.Image}}'");
 		expect(deployScript).toContain("org.opencontainers.image.revision");
 		expect(deployScript).toContain('test "$anonymous_status" = 401');
@@ -116,7 +116,7 @@ describe("production deployment workflow", () => {
 
 	test("rolls back the slot switch when public verification fails", () => {
 		expect(deployScript).toContain("rollback_switch()");
-		expect(deployScript).toContain("public GraphQL health probe failed");
+		expect(deployScript).toContain("public GraphQL health did not converge");
 		expect(deployScript).toContain('sudo -n "$SWITCH_HELPER" "$old_slot"');
 		expect(deployScript).not.toContain('sudo -n "$SWITCH_HELPER" "$old_slot" || true');
 		expect(deployScript).toContain('!= "$old_slot"');
@@ -126,19 +126,30 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("Public GraphQL contract failed");
 		expect(deployScript).toContain("PUBLIC_HEALTH_ATTEMPTS=${PUBLIC_HEALTH_ATTEMPTS:-15}");
 		expect(deployScript).toContain("public_health_ready=false");
-		expect(deployScript).toContain('old_local_revision=""');
-		expect(deployScript).toContain(
-			"previous public GraphQL identity unavailable; cutover will require the new revision"
-		);
-		expect(deployScript).toContain('old_public_revision="$old_local_revision"');
+		expect(deployScript).toContain('old_slot_deploy_sha=""');
+		expect(deployScript).toContain("old_slot_deploy_sha");
+		expect(deployScript).toContain("active GraphQL slot has an invalid deployment revision label");
 		expect(deployScript).toContain('for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS")');
 		expect(deployScript).toContain('sleep "$PUBLIC_HEALTH_DELAY_SECONDS"');
 		expect(deployScript).toContain(
 			'if ! public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url"); then'
 		);
 		expect(deployScript).toContain(
-			"public GraphQL health identity is neither the new nor previous revision"
+			"public GraphQL health probe failed after switching to $inactive_slot; rolling back"
 		);
+		expect(deployScript).toContain(
+			"public GraphQL health returned an unexpected deployment identity; rolling back"
+		);
+		expect(deployScript).toContain('elif (has("deploySha") | not) then {kind:"legacy"}');
+		expect(deployScript).toContain('{kind:"identity",sha:.deploySha}');
+		expect(deployScript).toContain("(.deploySha | length) == 40");
+		expect(deployScript).toContain('test("^[0-9a-f]{40}$")');
+		expect(deployScript).toContain('case "$public_health_kind" in');
+		expect(deployScript).toContain('[ "$public_identity" = "$old_slot_deploy_sha" ]');
+		expect(deployScript).toContain(
+			"public GraphQL health did not converge to $DEPLOY_SHA after ${PUBLIC_HEALTH_ATTEMPTS} attempts"
+		);
+		expect(deployScript).not.toContain("neither the new nor previous revision");
 		expect(deployScript.indexOf("switched=true")).toBeLessThan(
 			deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"')
 		);
@@ -269,7 +280,7 @@ describe("production deployment workflow", () => {
 
 	test("binds image and container identity to the exact commit", () => {
 		expect(dockerfile).toContain("ARG VCS_REVISION=unknown");
-		expect(dockerfile).toContain("ENV APP_REVISION=${VCS_REVISION}");
+		expect(dockerfile).toContain("ENV DEPLOY_SHA=${VCS_REVISION}");
 		expect(dockerfile).toContain('org.opencontainers.image.revision="${VCS_REVISION}"');
 		expect(workflow).toContain('--build-arg "VCS_REVISION=${{ steps.target.outputs.sha }}"');
 		expect(deployScript).toContain('index .Config.Labels "org.opencontainers.image.revision"');
@@ -277,7 +288,7 @@ describe("production deployment workflow", () => {
 
 	test("inherits the active slot rate-limit mode when rollout is preserved", () => {
 		expect(deployScript).toContain('active_env="$VPS_WORKDIR/.env.deploy.$active_slot"');
-		expect(deployScript).toContain("active_rate_limit_mode=shadow-v3");
+		expect(deployScript).toContain("active_rate_limit_mode=shadow-v4");
 		expect(deployScript).toContain('replace_rate_limit_mode "$active_rate_limit_mode"');
 		expect(deployScript).toContain("invalid or duplicate GRAPHQL_RATE_LIMIT_MODE");
 		expect(deployScript).toContain('tail -c 1 "$candidate_env_next"');
@@ -300,7 +311,7 @@ describe("production deployment workflow", () => {
 
 	test("keeps compose ports and readiness checks slot-aware", () => {
 		expect(compose).toContain("127.0.0.1:${GRAPHQL_PORT:-4000}:4000");
-		expect(compose).toContain("/health/ready");
+		expect(compose).toContain("/health/hot");
 		expect(deployScript).toContain("candidate_port=4002");
 		expect(deployScript).toContain("candidate_port=4000");
 		expect(monitorWorkflow).toContain("project=letletme_graphql_blue");

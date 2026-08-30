@@ -56,17 +56,14 @@ import {
 import { parsePostgresMarketMetadata } from "../../src/domains/market/context";
 import {
 	DATA_SNAPSHOT_DATA_SQL_CONTRACT,
-	mapLiveLifecycleStatus,
 	parseCoreFallbackRow,
-	parseLiveFallbackRow,
-	type LiveFallbackRow,
-	type LiveLifecycleStatusRow,
 } from "../../src/infra/data-snapshot";
 import type { QueryExecutor } from "../../src/infra/database";
 import {
 	PRICE_CHANGE_DATA_SQL_CONTRACT,
 	parsePriceChangeContractRow,
 } from "../../src/infra/price-change-predictions-client";
+import { LIVE_POINTS_V2_DATA_SQL_CONTRACT } from "../../src/domains/entry-live/v2-service";
 
 export const DIRECT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	...BRIEFING_DATA_SQL_CONTRACT,
@@ -85,6 +82,7 @@ export const DIRECT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	...TRENDS_DATA_SQL_CONTRACT,
 	...DATA_SNAPSHOT_DATA_SQL_CONTRACT,
 	...PRICE_CHANGE_DATA_SQL_CONTRACT,
+	...LIVE_POINTS_V2_DATA_SQL_CONTRACT,
 ];
 
 type ResultTypeRow = {
@@ -351,6 +349,7 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					const aggregateCapabilities = new Set([
 						"OWNERSHIP",
 						"EFFECTIVE_OWNERSHIP",
+						"TEMPLATE",
 						"CAPTAINCY",
 						"VICE_CAPTAINCY",
 						"TRANSFERS",
@@ -411,28 +410,6 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					if (!points) {
 						throw new Error(
 							"runtime reader role returned a season-path payload that the production decoder rejects"
-						);
-					}
-				}
-				if (probe.runtime === "must-return-live") {
-					const live = parseLiveFallbackRow(
-						result.rows[0] as LiveFallbackRow,
-						Number(probe.values[1]),
-						CONTRACT_SEASON_CODE
-					);
-					if (!live) {
-						throw new Error(
-							"runtime reader role returned a live publication that the production decoder rejects"
-						);
-					}
-				}
-				if (probe.runtime === "must-return-live-lifecycle") {
-					const lifecycle = mapLiveLifecycleStatus(
-						result.rows[0] as LiveLifecycleStatusRow | undefined
-					);
-					if (!lifecycle || lifecycle.eventId !== Number(probe.values[1])) {
-						throw new Error(
-							"runtime reader role returned a live lifecycle row that the production decoder rejects"
 						);
 					}
 				}

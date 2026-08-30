@@ -24,6 +24,7 @@ const retiredEnvironmentNames = [
 	"LETLETME_GRAPHQL_REDIS_HOST",
 	"LETLETME_GRAPHQL_REDIS_PORT",
 	"LETLETME_GRAPHQL_REDIS_PASSWORD",
+	"APP_REVISION",
 ] as const;
 const retiredEnvironmentPattern = new RegExp(`\\b(?:${retiredEnvironmentNames.join("|")})\\b`, "g");
 
@@ -33,7 +34,7 @@ const canonicalTestEnvironment = (): NodeJS.ProcessEnv => ({
 	DATABASE_URL: "postgresql://test",
 	REDIS_URL: "redis://127.0.0.1:6379",
 	RATE_LIMIT_REDIS_URL: "redis://127.0.0.1:6380",
-	APP_REVISION: "a".repeat(40),
+	DEPLOY_SHA: "a".repeat(40),
 	LETLETME_DATA_URL: "http://data.test",
 	LETLETME_DATA_API_KEY: "test",
 	BACKEND_PROXY_SECRET: "a".repeat(32),
@@ -66,7 +67,7 @@ describe("hard-cut runtime configuration", () => {
 			"shadow-v4",
 			"enforce-v4",
 		]);
-		expect(parseGraphQLRateLimitMode(undefined)).toBe("shadow-v3");
+		expect(parseGraphQLRateLimitMode(undefined)).toBe("shadow-v4");
 		expect(() => parseGraphQLRateLimitMode("legacy")).toThrow(
 			/GRAPHQL_RATE_LIMIT_MODE must be one of/
 		);
@@ -199,11 +200,11 @@ describe("hard-cut runtime configuration", () => {
 	test("requires an exact immutable image revision in production", () => {
 		const unknownRevision = importEnvInChild({
 			NODE_ENV: "production",
-			APP_REVISION: "unknown",
+			DEPLOY_SHA: "unknown",
 		});
 		expect(unknownRevision.status).not.toBe(0);
 		expect(`${unknownRevision.stdout}${unknownRevision.stderr}`).toContain(
-			"APP_REVISION must be the exact 40-character lowercase Git SHA in production"
+			"DEPLOY_SHA must be the exact 40-character lowercase Git SHA in production"
 		);
 	});
 });

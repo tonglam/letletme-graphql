@@ -183,11 +183,14 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 
 	type TournamentLiveBoard {
 		eventId: Int!
-		revision: String
+		scoreCoreRevision: String
 		state: LiveSnapshotState!
 		partial: Boolean!
 		failedEntryIds: [Int!]!
 		totalEntries: Int!
+		revisions: LiveRevisionVector
+		times: LiveTimes
+		delivery: LiveDelivery
 		rows: [LiveCalcData!]!
 	}
 

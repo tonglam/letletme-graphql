@@ -1,7 +1,7 @@
 import { GraphQLError } from "graphql";
 import { normalizeFplChip } from "../../contracts/fpl-chip";
 import type { GraphQLContext } from "../../graphql/context";
-import type { ElementEventResultData } from "../entry-live/calc-service";
+import type { ElementEventResultDataV2 as ElementEventResultData } from "../entry-live/v2-service";
 import type { Player } from "../players/repository";
 import { playersService } from "../players/service";
 import type { Entry, EntryEventResult, EntryHistoryInfo, EntryNameUsage } from "./repository";

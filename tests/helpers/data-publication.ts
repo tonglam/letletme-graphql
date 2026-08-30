@@ -21,6 +21,45 @@ export type TestPublication = Readonly<{
 	store: ReadonlyMap<string, string>;
 }>;
 
+type TestLivePublication = Readonly<{
+	manifest: Readonly<{
+		contractVersion: "live-points-v2";
+		publicationId: string;
+		generation: number;
+		season: string;
+		eventId: number;
+		state:
+			| "PRE_DEADLINE"
+			| "PICKS_WAIT"
+			| "PICKS_PROBE"
+			| "PICKS_SYNC"
+			| "LIVE_ACTIVE"
+			| "BETWEEN_FIXTURES"
+			| "DAY_SETTLING"
+			| "GW_REVIEW"
+			| "FINALIZED";
+		sourceCheckedAt: string;
+		publishedAt: string;
+		checkpointedAt: string | null;
+		expectedNextCheckAt: string | null;
+		revisions: Readonly<Record<string, { revision: string; contentUpdatedAt: string }>>;
+		items: Readonly<
+			Record<
+				string,
+				Readonly<{
+					name: string;
+					key: string;
+					type: "string";
+					count: number;
+					bytes: number;
+					sha256: string;
+				}>
+			>
+		>;
+	}>;
+	store: ReadonlyMap<string, string>;
+}>;
+
 export type TestCoreData = Readonly<{
 	events: CoreEventData[];
 	teams: CoreTeamData[];
@@ -46,7 +85,6 @@ export const createTestPublication = (
 	revision: number,
 	values: Readonly<Record<string, unknown>>,
 	options: {
-		state?: "scheduled" | "live" | "settled";
 		sourceCheckedAt?: string;
 		lastSuccessfulFetchAt?: string;
 	} = {}
@@ -76,10 +114,7 @@ export const createTestPublication = (
 			? { lastSuccessfulFetchAt: options.lastSuccessfulFetchAt }
 			: {}),
 		publishedAt,
-		state:
-			scope.dataset === "fpl:core" || scope.dataset === "fpl:market"
-				? "active"
-				: (options.state ?? "scheduled"),
+		state: "active",
 		items,
 	};
 	store.set(activeDataPublicationKey(scope), JSON.stringify(manifest));
@@ -277,23 +312,113 @@ export const buildLivePublication = (
 		sourceCheckedAt: string;
 		lastSuccessfulFetchAt?: string;
 	}> = {}
-): TestPublication => {
+): TestLivePublication => {
 	const eventLives = buildTestEventLives(core, eventId);
 	const fixtures =
 		overrides.fixtures ?? core.fixtures.filter((fixture) => fixture.eventId === eventId);
-	return createTestPublication(
-		{ dataset: "fpl:live", seasonCode, eventId },
-		revision,
-		{
-			eventLive: overrides.eventLives ?? eventLives,
-			fixtures: fixtures.map(toPublicationFixture),
-		},
-		{
-			state: overrides.state ?? "scheduled",
-			sourceCheckedAt: overrides.sourceCheckedAt,
-			lastSuccessfulFetchAt: overrides.lastSuccessfulFetchAt,
+	const liveValues = overrides.eventLives ?? eventLives;
+	const fixtureValues = fixtures.map(toPublicationFixture);
+	const state: TestLivePublication["manifest"]["state"] =
+		overrides.state === "live"
+			? "LIVE_ACTIVE"
+			: overrides.state === "settled"
+				? "GW_REVIEW"
+				: "PICKS_WAIT";
+	const sourceCheckedAt = overrides.sourceCheckedAt ?? publishedAt;
+	const publishedAtValue = publishedAt;
+	const canonicalize = (value: unknown): unknown => {
+		if (Array.isArray(value)) return value.map(canonicalize);
+		if (value && typeof value === "object") {
+			return Object.fromEntries(
+				Object.keys(value as Record<string, unknown>)
+					.sort()
+					.map((key) => [key, canonicalize((value as Record<string, unknown>)[key])])
+			);
 		}
-	);
+		return value;
+	};
+	const payload = (value: unknown): string => JSON.stringify(canonicalize(value));
+	const digest = (value: unknown): string =>
+		createHash("sha256").update(payload(value), "utf8").digest("hex");
+	const eventLiveKey = `llm:data:v2:fpl:live:${seasonCode}:${eventId}:${revision}:eventLive`;
+	const fixturesKey = `llm:data:v2:fpl:live:${seasonCode}:${eventId}:${revision}:fixtures`;
+	const eventLivePayload = payload(liveValues);
+	const fixturesPayload = payload(fixtureValues);
+	const store = new Map<string, string>([
+		[eventLiveKey, eventLivePayload],
+		[fixturesKey, fixturesPayload],
+		[
+			`${eventLiveKey}:meta`,
+			`${liveValues.length}|${Buffer.byteLength(eventLivePayload)}|${digest(liveValues)}`,
+		],
+		[
+			`${fixturesKey}:meta`,
+			`${fixtureValues.length}|${Buffer.byteLength(fixturesPayload)}|${digest(fixtureValues)}`,
+		],
+	]);
+	const revisions = {
+		lifecycle: { revision: digest({ state }), contentUpdatedAt: sourceCheckedAt },
+		fixtureIdentity: { revision: digest(fixtureValues), contentUpdatedAt: sourceCheckedAt },
+		scoreCore: {
+			revision: digest(
+				liveValues.map((row) => ({
+					eventId: row.eventId,
+					elementId: row.elementId,
+					minutes: row.minutes,
+					starts: row.starts,
+					totalPoints: row.totalPoints,
+				}))
+			),
+			contentUpdatedAt: sourceCheckedAt,
+		},
+		displayStats: { revision: digest(liveValues), contentUpdatedAt: sourceCheckedAt },
+		explain: {
+			revision: digest(
+				liveValues.map((row) => ({
+					elementId: row.elementId,
+					fixtureBreakdown: row.fixtureBreakdown ?? [],
+				}))
+			),
+			contentUpdatedAt: sourceCheckedAt,
+		},
+		rules: {
+			revision: digest({ rules: "live-points-v2-rules-1" }),
+			contentUpdatedAt: sourceCheckedAt,
+		},
+	};
+	const manifest: TestLivePublication["manifest"] = {
+		contractVersion: "live-points-v2",
+		publicationId: publicationId(revision),
+		generation: revision,
+		season: seasonCode,
+		eventId,
+		state,
+		sourceCheckedAt,
+		publishedAt: publishedAtValue,
+		checkpointedAt: null,
+		expectedNextCheckAt: null,
+		revisions,
+		items: {
+			eventLive: {
+				name: "eventLive",
+				key: eventLiveKey,
+				type: "string",
+				count: liveValues.length,
+				bytes: Buffer.byteLength(eventLivePayload),
+				sha256: digest(liveValues),
+			},
+			fixtures: {
+				name: "fixtures",
+				key: fixturesKey,
+				type: "string",
+				count: fixtureValues.length,
+				bytes: Buffer.byteLength(fixturesPayload),
+				sha256: digest(fixtureValues),
+			},
+		},
+	};
+	store.set(`llm:data:v2:fpl:live:${seasonCode}:${eventId}:active`, JSON.stringify(manifest));
+	return { manifest, store };
 };
 
 export const buildTestEventLives = (
@@ -331,7 +456,7 @@ export class TestRedis {
 	readonly hashes = new Map<string, Map<string, string>>();
 	readonly setCalls: Array<[string, string, ...unknown[]]> = [];
 
-	constructor(...publications: TestPublication[]) {
+	constructor(...publications: Array<{ store: ReadonlyMap<string, string> }>) {
 		for (const publication of publications) {
 			for (const [key, value] of publication.store) this.values.set(key, value);
 		}

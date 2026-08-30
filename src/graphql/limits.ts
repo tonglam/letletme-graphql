@@ -52,7 +52,11 @@ const PLAYER_STATE_PROFILE_MAX_AST_NODES = 240;
 // revision provenance and the bounded effective lineup. Give only this exact
 // root enough document room while retaining every weighted-complexity, depth,
 // alias, root-field, and rate-limit guard below.
-const CALC_LIVE_POINTS_MAX_AST_NODES = 260;
+// The V2 Mini projection includes the complete score/times/delivery trace and
+// the fixed fifteen-player pick list. Its canonical query is 304 nodes, so
+// keep a narrow bounded allowance with headroom for the same immutable root;
+// this is not a general document-limit relaxation.
+const CALC_LIVE_POINTS_MAX_AST_NODES = 320;
 // The live competition board returns at most one bounded page plus the viewer
 // row, but each score carries the same traceability contract as live points.
 // Scope the larger document allowance to this sole unaliased root; page-size,
