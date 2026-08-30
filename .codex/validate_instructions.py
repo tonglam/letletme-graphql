@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import os
 import re
 import sys
 from urllib.parse import unquote
@@ -65,7 +66,7 @@ PRIVATE_ORIGIN_RE = re.compile(
     r"(?=$|[:/?#])"
 )
 SAFE_LOCAL_ORIGIN_RE = re.compile(
-    r"(?i)\bhttps?://(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?(?:[/?#][^\s`<>)]*)?"
+    r"(?i)\bhttps?://(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?(?:[/?#][^\s`<>)]*)?(?![A-Za-z0-9.-])"
 )
 FORBIDDEN_YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 PLACEHOLDER_VALUES = {
@@ -112,6 +113,10 @@ GLOBAL_REGISTRY_DESCRIPTOR = {
 }
 CANONICAL_CONFIG_COMMIT = "312eaf56264f65bcc74fd7b81d8981a3517eca02"
 IGNORED_PARTS = {".git", "node_modules", ".next"}
+UNMANAGED_INSTRUCTION_PREFIXES = {
+    (".agents", "skills"),
+    (".claude", "skills"),
+}
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -329,6 +334,16 @@ def _has_symlink_component(path: Path, root: Path) -> bool:
         if current.is_symlink():
             return True
     return False
+
+
+def _is_unmanaged_instruction_path(relative: Path) -> bool:
+    """Return whether a relative path belongs to an installer-owned tree."""
+
+    parts = relative.parts
+    return any(part in IGNORED_PARTS for part in parts) or any(
+        len(parts) >= len(prefix) and parts[: len(prefix)] == prefix
+        for prefix in UNMANAGED_INSTRUCTION_PREFIXES
+    )
 
 
 def _is_unmanaged_plugin_skill_path(path: Path, repo: Path) -> bool:
@@ -781,13 +796,18 @@ def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
 def _governance_section(text: str) -> str | None:
     """Return a whitespace-normalized governance section for parity checks."""
 
-    lines = text.splitlines()
-    start = next(
-        (index for index, line in enumerate(lines) if re.match(r"^\s*##\s+Governance and review\s*$", line, flags=re.I)),
-        None,
-    )
-    if start is None:
+    # Headings in fenced/indented Markdown examples are not operative.  A
+    # duplicate operative heading is rejected rather than allowing the first
+    # one to hide a contradictory later section.
+    lines = _without_markdown_code(text).splitlines()
+    matches = [
+        index
+        for index, line in enumerate(lines)
+        if re.match(r"^\s*##\s+Governance and review\s*$", line, flags=re.I)
+    ]
+    if len(matches) != 1:
         return None
+    start = matches[0]
     end = len(lines)
     for index in range(start + 1, len(lines)):
         if re.match(r"^\s*##\s+", lines[index]):
@@ -949,7 +969,7 @@ def has_secret(text: str) -> bool:
     # no userinfo. Scrub only that exact host/port/path form; a credentialed
     # URL (or any other private origin) remains visible to the scanner.
     scrubbed = SAFE_LOCAL_ORIGIN_RE.sub(" ", text)
-    if PEM_RE.search(text) or PRIVATE_ORIGIN_RE.search(scrubbed) or _has_private_ip_literal(text):
+    if PEM_RE.search(text) or PRIVATE_ORIGIN_RE.search(scrubbed) or _has_private_ip_literal(scrubbed):
         return True
     for pattern in SECRET_VALUE_RES:
         for match in pattern.finditer(text):
@@ -1038,22 +1058,29 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
     if not include_discovery:
         return []
     paths: set[Path] = set()
-    # Only the repository's own root entrypoints and explicitly governed
-    # Claude agent/rule files are discovered here.  Existing plugin/global
-    # skills under .agents/skills, skills/, and .claude/skills are inputs owned
-    # by their installers; scanning them would turn unrelated third-party
-    # material (including symlinked mounts and nested AGENTS.md files) into a
-    # false repository change.  Contract-listed repository skills are checked
-    # separately by validate_skill below.
-    for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
-        path = repo / name
-        if path.is_file() or path.is_symlink():
-            paths.add(path.absolute())
+    # Discover repository-owned scoped entrypoints at every depth.  Installed
+    # plugin/global skill trees are preserved inputs; their nested instruction
+    # files are not silently promoted into this repository's contract.  The
+    # contract-listed repository skills are checked separately by validate_skill.
+    for root, directories, files in os.walk(repo, followlinks=False):
+        root_path = Path(root)
+        relative_root = root_path.relative_to(repo)
+        if _is_unmanaged_instruction_path(relative_root):
+            directories[:] = []
+            continue
+        directories[:] = [
+            name
+            for name in directories
+            if not _is_unmanaged_instruction_path(relative_root / name)
+        ]
+        for name in files:
+            if name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}:
+                paths.add((root_path / name).absolute())
     for claude_root in (repo / ".claude" / "agents", repo / ".claude" / "rules"):
         if claude_root.is_dir():
             for path in claude_root.rglob("*.md"):
                 if path.is_file() or path.is_symlink():
-                    if not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
+                    if not _is_unmanaged_instruction_path(path.relative_to(repo)):
                         paths.add(path.absolute())
     return sorted(paths)
 
@@ -1197,6 +1224,8 @@ def _validate_policy_against_trusted(
     policy: dict[str, Any],
     trusted: dict[str, Any],
     errors: list[str],
+    *,
+    allow_policy_update: bool = False,
 ) -> None:
     """Allow reviewed policy evolution only when it cannot weaken the gate."""
 
@@ -1223,9 +1252,21 @@ def _validate_policy_against_trusted(
     if not isinstance(trusted_rules, dict) or not isinstance(proposed_rules, dict):
         errors.append("proposed policy review_rules must remain a mapping")
         return
-    for key in REVIEW_RULE_KEYS:
-        if proposed_rules.get(key) != trusted_rules.get(key):
-            errors.append(f"proposed policy changes trusted review_rules.{key}")
+    required_rules = {
+        "codex_quota": ("two", "consecutive", "quota", "unchanged", "head"),
+        "tests_and_scripts": ("tests", "scripts", "P0", "P1", "P2", "P3", "disposition", "resolve"),
+        "all_other_paths": ("P0", "P1", "P2", "P3", "resolved"),
+        "all_findings": ("dispositioned", "resolved"),
+        "post_merge_cleanup": ("exact", "worktree", "local", "branch", "remote"),
+    }
+    for key, required in required_rules.items():
+        value = proposed_rules.get(key)
+        if not isinstance(value, str) or not all(marker.casefold() in value.casefold() for marker in required):
+            errors.append(f"proposed policy weakens review_rules.{key}")
+    if not allow_policy_update:
+        for key in REVIEW_RULE_KEYS:
+            if proposed_rules.get(key) != trusted_rules.get(key):
+                errors.append(f"proposed policy changes trusted review_rules.{key}")
 
 
 def _validate_against_trusted_contract(
@@ -1410,7 +1451,12 @@ def validate_asset(
                 allow_config_commit_update=allow_config_commit_update,
             )
     if trusted_policy is not None:
-        _validate_policy_against_trusted(policy, trusted_policy, errors)
+        _validate_policy_against_trusted(
+            policy,
+            trusted_policy,
+            errors,
+            allow_policy_update=allow_config_commit_update,
+        )
     if expected_config_commit and not allow_config_commit_update and contract.get("canonical_config_commit") != expected_config_commit:
         errors.append(
             f"canonical_config_commit {contract.get('canonical_config_commit')!r} does not match trusted {expected_config_commit!r}"
