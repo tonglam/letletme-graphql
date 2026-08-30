@@ -44,7 +44,7 @@ Keep source, local tests, fixture-backed database/Redis contracts, deployed imag
 
 Run the narrowest domain/http/infra test first. Add typecheck and lint; add `layers:check` for dependency changes, `docs:check` for schema/root fields, `deprecation:check` for hard cuts, and the fixture-backed contract checks for database/publication/Redis changes. Use the one-off CI build command when build evidence matters; do not invent `bun run build`.
 
-If a local `.env` contains retired configuration names, run source-only checks with `bun --no-env-file` and explicit non-production canonical test variables. Do not weaken or bypass the runtime retired-config rejection.
+If a local `.env` contains retired configuration names, run source-only checks with `bun --env-file=/dev/null` and explicit non-production canonical test variables. Do not weaken or bypass the runtime retired-config rejection.
 
 Schema changes require affected Web and Mini operations to validate against the exact schema head. Rate-limit changes require the full checked-in measurement pipeline and reviewed evidence; smoke durations cannot promote an enforcement profile.
 
