@@ -870,12 +870,13 @@ const hasCompleteEventLiveRoster = (
 	eventLives: readonly EventLiveRow[],
 	expectedPlayerIds: ReadonlySet<number>
 ): boolean => {
-	if (expectedPlayerIds.size === 0 || eventLives.length !== expectedPlayerIds.size) return false;
+	// Core is the authoritative minimum roster for the active season. Older
+	// event publications may also retain an event-only player identity that is
+	// no longer present in the current core slice, so extra rows are allowed;
+	// every authoritative core player must still be present.
+	if (expectedPlayerIds.size === 0 || eventLives.length < expectedPlayerIds.size) return false;
 	const actualPlayerIds = new Set(eventLives.map((row) => row.elementId));
-	return (
-		actualPlayerIds.size === expectedPlayerIds.size &&
-		[...expectedPlayerIds].every((playerId) => actualPlayerIds.has(playerId))
-	);
+	return [...expectedPlayerIds].every((playerId) => actualPlayerIds.has(playerId));
 };
 
 const readRedisGlobalCandidate = async (

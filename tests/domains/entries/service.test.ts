@@ -52,11 +52,20 @@ const makeContext = (
 	}> = [],
 	fixtureTeamError: Error | null = null
 ): GraphQLContext => {
+	const eventId = liveRows[0]?.eventId ?? 1;
+	const liveByPlayer = new Map(liveRows.map((row) => [row.elementId, row]));
+	const corePlayerIds = new Set(core.players.map((player) => player.id));
+	const completeLiveRows = [
+		...core.players.map(
+			(player) => liveByPlayer.get(player.id) ?? liveRow(eventId, player.id, 0, 0)
+		),
+		...liveRows.filter((row) => !corePlayerIds.has(row.elementId)),
+	];
 	const context = buildSnapshotContext(
 		new TestRedis(
 			buildCorePublication("2526", 7, core),
-			buildLivePublication(core, liveRows[0]?.eventId ?? 1, "2526", 8, {
-				eventLives: liveRows,
+			buildLivePublication(core, eventId, "2526", 8, {
+				eventLives: completeLiveRows,
 			})
 		),
 		{
