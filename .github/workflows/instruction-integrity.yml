@@ -1670,7 +1670,7 @@ jobs:
             raise "instruction protection step has an unexpected condition" unless protection_step["if"].to_s.strip == "env.GOVERNANCE_UPDATE_APPROVED != 'true'"
             raise "instruction protection step may not ignore failures" if protection_step.key?("continue-on-error")
             protection_run = protection_step["run"].to_s
-            ["def surface", "trusted_files = surface", "target_files = surface", "hashlib.sha256", "raise SystemExit"].each do |needle|
+            ["def surface", "trusted_files = surface", "target_files = surface", "hashlib.sha256", "raise SystemExit", "(\".claude\", \"agents\")"].each do |needle|
               raise "instruction protection step is incomplete: #{needle}" unless protection_run.include?(needle)
             end
             raise "instruction protection step does not compare trusted and target surfaces" unless protection_run.include?("set(trusted_files) != set(target_files)") && protection_run.include?("target_files[relative]")
@@ -1708,6 +1708,8 @@ jobs:
                   if item.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}:
                       paths.add(relative)
                   if len(relative.parts) >= 3 and relative.parts[:2] == (".claude", "skills") and item.name == "SKILL.md":
+                      paths.add(relative)
+                  if len(relative.parts) >= 3 and relative.parts[:2] == (".claude", "agents") and item.suffix.casefold() == ".md":
                       paths.add(relative)
               for relative in sorted(paths, key=str):
                   if relative.is_absolute() or ".." in relative.parts:

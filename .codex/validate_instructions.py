@@ -34,7 +34,7 @@ REFERENCE_TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".txt", ".text", ".r
 URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 SECRET_VALUE_RES = (
-    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?token|private[_ -]?key|client[_ -]?secret|service[_ -]?(?:role[_ -]?)?key|secret[_ -]?key|app[_ -]?secret|service[_ -]?token|signing[_ -]?(?:key|secret)|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?(?:token|key)|private[_ -]?key|client[_ -]?secret|service[_ -]?(?:role[_ -]?)?key|secret[_ -]?(?:access[_ -]?)?key|app[_ -]?secret|service[_ -]?token|signing[_ -]?(?:key|secret)|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     # Server-only names often use a plain ``*_SECRET``/``*_CREDENTIAL``
     # suffix (for example BACKEND_PROXY_SECRET) rather than one of the
     # provider-specific names above. Keep the value capture identical so
@@ -865,6 +865,12 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
         for path in _skill_entrypoints(root, repo):
             if not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
                 paths.add(path.absolute())
+    agents_root = repo / ".claude" / "agents"
+    if agents_root.is_dir():
+        for path in agents_root.rglob("*.md"):
+            if path.is_file() or path.is_symlink():
+                if not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
+                    paths.add(path.absolute())
     return sorted(paths)
 
 
@@ -1288,7 +1294,10 @@ def validate_asset(
             # that provide it, even when the legacy contract lists only
             # AGENTS.md. Treat it as governed automatically rather than
             # allowing a conflicting file to hide as an unlisted extra.
-            if path.name == "CLAUDE.md":
+            relative_parts = path.relative_to(repo).parts
+            if path.name == "CLAUDE.md" or (
+                len(relative_parts) >= 3 and relative_parts[:2] == (".claude", "agents")
+            ):
                 required_paths.add(path)
         for path in sorted(discovered_set - required_paths):
             errors.append(f"{path}: instruction entrypoint is not listed in the contract")
