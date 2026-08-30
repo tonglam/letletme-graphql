@@ -1983,11 +1983,18 @@ const mapPick = (params: {
 		playerFixtures.length > 0 &&
 		playerFixtures.every((item) => item.finished || item.finishedProvisional);
 	const isActive = lineup.active.has(pick.element);
+	// A projected automatic-substitution entrant normally has the bench's base
+	// multiplier (zero). Once the entrant is promoted into the XI, FPL scoring
+	// applies a normal one-point multiplier unless captaincy explicitly changes
+	// it. Keep the original zero only for genuinely inactive bench picks.
+	const effectivePickMultiplier = lineup.autoSubs.has(pick.element)
+		? Math.max(1, pick.multiplier)
+		: pick.multiplier;
 	const captainMultiplier =
 		lineup.activeCaptain?.element === pick.element
 			? lineup.captainMultiplier
 			: isActive
-				? pick.multiplier
+				? effectivePickMultiplier
 				: 0;
 	return {
 		season,
