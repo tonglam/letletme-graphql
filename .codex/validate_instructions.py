@@ -35,6 +35,11 @@ URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 SECRET_VALUE_RES = (
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?token|private[_ -]?key|client[_ -]?secret|service[_ -]?(?:role[_ -]?)?key|secret[_ -]?key|app[_ -]?secret|service[_ -]?token|signing[_ -]?(?:key|secret)|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
+    # Server-only names often use a plain ``*_SECRET``/``*_CREDENTIAL``
+    # suffix (for example BACKEND_PROXY_SECRET) rather than one of the
+    # provider-specific names above. Keep the value capture identical so
+    # documented environment lookups and placeholders remain exempt.
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])+(?:secret|credential)(?:[_-](?:key|token|value))?["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|notification[_ -]?token|notifier[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
     re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]+:([^\s/@]+)@"),

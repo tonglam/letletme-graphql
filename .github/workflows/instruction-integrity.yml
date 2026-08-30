@@ -352,14 +352,22 @@ jobs:
                   key = node.args[1].value if isinstance(node.args[1], ast.Constant) else None
                   if isinstance(key, str) and key in protected:
                       names.add(key)
-              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "update":
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                   receiver = node.func.value
                   if isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name) and receiver.func.id in {"globals", "locals"}:
-                      # Mapping updates can use keyword arguments, a dict,
-                      # or a computed mapping. Treat every protected target
-                      # as potentially rebound rather than trying to execute
-                      # contributor-controlled expressions.
-                      names.update(protected)
+                      method = node.func.attr
+                      if method in {"clear", "popitem"}:
+                          names.update(protected)
+                      elif method == "update":
+                          # Mapping updates can use keyword arguments, a
+                          # dict, or a computed mapping. Treat every
+                          # protected target as potentially rebound rather
+                          # than trying to execute contributor expressions.
+                          names.update(protected)
+                      elif method in {"__setitem__", "setdefault", "pop"} and node.args:
+                          key = node.args[0].value if isinstance(node.args[0], ast.Constant) else None
+                          if isinstance(key, str) and key in protected:
+                              names.add(key)
               return names
 
           def load_tree(path, required):
@@ -379,8 +387,33 @@ jobs:
               protected = set(required)
               for statement in tree.body:
                   if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                      if statement.name in protected and getattr(statement, "decorator_list", []):
-                          rebound_required.add(statement.name)
+                      if statement.name in protected:
+                          # Decorators, defaults, and annotations execute at
+                          # module definition time. A default such as
+                          # globals().__setitem__("validate_asset", ...)
+                          # can therefore replace a protected function before
+                          # the guarded entrypoint calls it.
+                          header_nodes = list(getattr(statement, "decorator_list", []))
+                          header_nodes.extend(getattr(statement.args, "defaults", []))
+                          header_nodes.extend(value for value in getattr(statement.args, "kw_defaults", []) if value is not None)
+                          arguments = [
+                              *getattr(statement.args, "posonlyargs", []),
+                              *getattr(statement.args, "args", []),
+                              *getattr(statement.args, "kwonlyargs", []),
+                          ]
+                          header_nodes.extend(
+                              argument.annotation
+                              for argument in arguments
+                              if getattr(argument, "annotation", None) is not None
+                          )
+                          if getattr(statement.args, "vararg", None) and statement.args.vararg.annotation is not None:
+                              header_nodes.append(statement.args.vararg.annotation)
+                          if getattr(statement.args, "kwarg", None) and statement.args.kwarg.annotation is not None:
+                              header_nodes.append(statement.args.kwarg.annotation)
+                          if getattr(statement, "returns", None) is not None:
+                              header_nodes.append(statement.returns)
+                          if any(isinstance(node, ast.Call) for root in header_nodes for node in ast.walk(root)):
+                              rebound_required.add(statement.name)
                       continue
                   for node in ast.walk(statement):
                       rebound_required.update(dynamic_rebinding_names(node, protected))
@@ -1313,16 +1346,34 @@ jobs:
             raise "pinned registry verification step is missing" unless registry_step
             raise "pinned registry verification must use the GitHub token" unless registry_step["env"] == {"GH_TOKEN" => "${{ github.token }}"}
             registry_run = registry_step["run"].to_s
-            ["GIT_CONFIG_KEY_0", "http.extraheader", "Authorization: Bearer", "git clone", "git fetch", "git show"].each do |needle|
+            ["GIT_CONFIG_KEY_0", "http.extraheader", "Authorization: Bearer", '"git", "clone"', '"fetch"', '"show"'].each do |needle|
               raise "pinned registry verification is not authenticated and immutable: #{needle}" unless registry_run.include?(needle)
             end
             steps.each do |step|
               next unless step.is_a?(Hash)
               run_text = step["run"].to_s
               next if run_text.empty?
-              target_execution = %r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec|env)\b[^\n;&|]*\btarget/|(?:\./)?target/)}
+              target_execution = %r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec)\b(?:\s+-[^\s;&|]+)*\s+["']?(?:\./)?target/|["']?(?:\./)?target/)}
               if run_text.lines.any? { |line| line.strip.match?(target_execution) }
                 raise "workflow step may not execute code from the proposed checkout"
+              end
+              # A contributor can hide the proposed path behind a shell
+              # variable (for example `payload=target/payload.sh` followed by
+              # `bash "$payload"`). Track assignments whose value names the
+              # proposed checkout, then reject every expansion of that
+              # variable. This is intentionally conservative: a trusted gate
+              # must never carry target-controlled paths through shell state.
+              target_variables = []
+              target_assignment = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=.*(?:\$PWD\/target\b|\$GITHUB_WORKSPACE\/target\b|(?:\.\/)?target(?:\/|\b))/
+              run_text.each_line do |line|
+                line.scan(target_assignment) { |match| target_variables << match.first }
+              end
+              target_variables.uniq.each do |name|
+                variable = Regexp.escape(name)
+                executor = %r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:(?:(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec))|env\s+(?:-[^ \t;&|]+\s+)*(?:(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec)))(?:\s+(?:--|-[^\s;&|]+))*\s+["']?\$(?:\{#{variable}\}|#{variable})["']?(?=\s|[;&|]|\z)}
+                if run_text.lines.any? { |line| line.strip.match?(executor) }
+                  raise "workflow step may not execute an indirect proposed-checkout path"
+                end
               end
               if run_text.match?(/\b(?:BASH_ENV|PYTHONPATH|RUBYLIB|NODE_OPTIONS|LD_PRELOAD|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_SSH_COMMAND)\s*=/)
                 raise "workflow step may not override the trusted process environment"
