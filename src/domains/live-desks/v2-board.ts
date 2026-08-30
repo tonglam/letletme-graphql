@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { GraphQLError } from "graphql";
 
 import type { GraphQLContext } from "../../graphql/context";
-import { calcLivePointsForEntriesV2, type LiveCalcDataV2 } from "../entry-live/v2-service";
+import {
+	calcLivePointsForEntriesV2,
+	readLivePublicationV2,
+	type LiveCalcDataV2,
+} from "../entry-live/v2-service";
 
 export type EntryLiveCompetitionBoardSort =
 	| "EVENT_POINTS"
@@ -10,7 +14,6 @@ export type EntryLiveCompetitionBoardSort =
 	| "TRANSFER_COST"
 	| "PLAYED"
 	| "TOTAL_POINTS"
-	| "OVERALL_RANK"
 	| "TEAM_VALUE"
 	| "RANK"
 	| "ENTRY_NAME";
@@ -52,7 +55,7 @@ export type EntryLiveCompetitionBoardRowV2 = {
 	entryName: string;
 	playerName: string;
 	rank: number;
-	overallRank: number;
+	overallRank: number | null;
 	teamValue: number;
 	chip: string;
 	transferCost: number;
@@ -123,7 +126,6 @@ const BOARD_SORTS = new Set<EntryLiveCompetitionBoardSort>([
 	"TRANSFER_COST",
 	"PLAYED",
 	"TOTAL_POINTS",
-	"OVERALL_RANK",
 	"TEAM_VALUE",
 	"RANK",
 	"ENTRY_NAME",
@@ -250,7 +252,7 @@ const rowFor = (value: LiveCalcDataV2, rank: number): IndexedEntryLiveCompetitio
 		entryName: value.entryName,
 		playerName: value.playerName,
 		rank,
-		overallRank: value.rank?.overallRank ?? 0,
+		overallRank: value.rank?.overallRank ?? null,
 		teamValue: value.teamValue,
 		chip: value.chip,
 		transferCost: value.score.transferCost,
@@ -287,8 +289,6 @@ const metric = (
 			return row.played;
 		case "TOTAL_POINTS":
 			return row.score.totalPoints;
-		case "OVERALL_RANK":
-			return row.overallRank > 0 ? row.overallRank : null;
 		case "TEAM_VALUE":
 			return row.teamValue;
 		case "RANK":
@@ -406,10 +406,21 @@ export const buildEntryLiveCompetitionBoardV2 = async (
 	board: EntryLiveCompetitionBoardV2;
 	result: Awaited<ReturnType<typeof calcLivePointsForEntriesV2>>;
 }> => {
+	const publication = await readLivePublicationV2(context, input.eventId).catch(() => null);
 	const result = await calcLivePointsForEntriesV2(context, input.eventId, input.entryIds);
 	const values = [...result.results.values()];
+	const observedScoreCoreRevisions = [
+		...new Set(values.map((value) => value.score.revisions.scoreCore)),
+	];
+	const scoreCoreRevision =
+		publication?.publication.revisions.scoreCore.revision ??
+		(observedScoreCoreRevisions.length === 1 ? observedScoreCoreRevisions[0]! : null);
 	const eligible = values.filter(
-		(value) => value.availability === "READY" && value.score.source !== "UNAVAILABLE"
+		(value) =>
+			value.availability === "READY" &&
+			value.score.source !== "UNAVAILABLE" &&
+			scoreCoreRevision !== null &&
+			value.score.revisions.scoreCore === scoreCoreRevision
 	);
 	const useNet = input.requireNet === true;
 	const ranked = [...eligible].sort((left, right) => {
@@ -430,8 +441,6 @@ export const buildEntryLiveCompetitionBoardV2 = async (
 	const officialPoints = eligible.map((value) =>
 		useNet ? value.score.netEventPoints : value.score.eventPoints
 	);
-	const scoreCoreRevision =
-		values.map((value) => value.score.revisions.scoreCore).sort()[0] ?? null;
 	const unavailableEntryIds = input.entryIds.filter(
 		(entryId) => !eligible.some((value) => value.entry === entryId)
 	);
@@ -446,6 +455,17 @@ export const buildEntryLiveCompetitionBoardV2 = async (
 				revision: row.score.revisions.input,
 				score: row.score.eventPoints,
 				net: row.score.netEventPoints,
+				scoreCore: row.score.revisions.scoreCore,
+				displayStats: row.score.revisions.displayStats,
+				explain: row.score.revisions.explain,
+				picksBase: row.score.revisions.picksBase,
+				officialAdjustment: row.score.revisions.officialAdjustment,
+				previousTotals: row.score.revisions.previousTotals,
+				finalResult: row.score.revisions.finalResult,
+				rules: row.score.revisions.rules,
+				algorithm: row.score.revisions.algorithm,
+				played: row.played,
+				toPlay: row.toPlay,
 			})),
 		}),
 		scoreCoreRevision,

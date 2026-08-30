@@ -3,6 +3,7 @@ import type Redis from "ioredis";
 import type { QueryResultRow } from "pg";
 
 import { normalizeFplChip, type CanonicalFplChip } from "../../contracts/fpl-chip";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { Entry } from "../../contracts/entry";
 import type { GraphQLContext } from "../../graphql/context";
 import {
@@ -351,7 +352,6 @@ export type LiveCalcDataV2 = {
 	playedCaptain: number;
 	captainName: string;
 	pickList: ElementEventResultDataV2[];
-	transfersList: unknown[];
 	activeCaptain: { id: number; name: string; points: number };
 };
 
@@ -368,7 +368,15 @@ export type BatchLiveCalcResultV2 = {
 
 type Row = QueryResultRow & Record<string, unknown>;
 
-const liveLkg = new Map<string, LiveCalcDataV2>();
+type LiveLkgEntry = Readonly<{ value: LiveCalcDataV2; expiresAt: number }>;
+
+const liveLkg = new Map<string, LiveLkgEntry>();
+const LIVE_LKG_MAX_ENTRIES = 256;
+// This is only a bounded process-memory retention policy.  It is not the
+// freshness contract: a retained complete same-event response remains usable
+// while its source is stale, and PostgreSQL remains the next fallback after
+// an eviction.
+const LIVE_LKG_RETENTION_MS = 24 * 60 * 60 * 1000;
 const requestRedisGlobalMemo = new WeakMap<object, Map<number, Promise<GlobalRead | null>>>();
 const requestDatabaseGlobalMemo = new WeakMap<object, Map<number, Promise<GlobalRead | null>>>();
 const requestCoreMemo = new WeakMap<object, Promise<CoreLiveIdentitySnapshot | null>>();
@@ -599,12 +607,13 @@ const validAutomaticSubs = (
 };
 
 const validPreviousTotals = (
-	value: unknown
+	value: unknown,
+	expectedThroughEventId: number
 ): value is NonNullable<EntryLiveInput["previousTotals"]> =>
 	isRecord(value) &&
 	validRevisionOnly(value) &&
 	integer(value.throughEventId) !== null &&
-	(integer(value.throughEventId) as number) > 0 &&
+	(integer(value.throughEventId) as number) === expectedThroughEventId &&
 	integer(value.totalPoints) !== null &&
 	(integer(value.totalPoints) as number) >= 0 &&
 	(value.overallRank === null ||
@@ -689,10 +698,30 @@ const validInput = (
 		(integer(picksBase.transferCost) as number) < 0
 	)
 		return false;
-	if (!(value.previousTotals === null || validPreviousTotals(value.previousTotals))) return false;
-	if (!(value.officialAdjustment === null || validAdjustment(value.officialAdjustment)))
+	if (!(
+		value.previousTotals === null ||
+		validPreviousTotals(value.previousTotals, Math.max(0, eventId - 1))
+	))
 		return false;
-	if (!(value.finalResult === null || validFinalResult(value.finalResult))) return false;
+	const pickElements = new Set(picksBase.picks.map((pick) => (pick as Pick).element));
+	if (
+		value.officialAdjustment !== null &&
+		(!validAdjustment(value.officialAdjustment) ||
+			value.officialAdjustment.multipliers.length !== 15 ||
+			new Set(value.officialAdjustment.multipliers.map((item) => item.element)).size !== 15 ||
+			value.officialAdjustment.multipliers.some((item) => !pickElements.has(item.element)) ||
+			value.officialAdjustment.automaticSubs.some(
+				(substitution) =>
+					!pickElements.has(substitution.inElement) || !pickElements.has(substitution.outElement)
+			))
+	)
+		return false;
+	if (
+		value.finalResult !== null &&
+		(!validFinalResult(value.finalResult) ||
+			value.finalResult.picks.some((pick) => !pickElements.has(pick.element)))
+	)
+		return false;
 	return true;
 };
 
@@ -772,6 +801,9 @@ const isEventLiveArray = (value: unknown): value is EventLiveRow[] => {
 		hasUniquePositiveIds(rows, (row) => integer(row.elementId)) &&
 		rows.every(
 			(row) =>
+				integer(row.eventId) !== null &&
+				integer(row.elementId) !== null &&
+				integer(row.totalPoints) !== null &&
 				integerFields.every((field) => nullableIntegerField(row, field)) &&
 				stringFields.every((field) => nullableStringField(row, field)) &&
 				nullableBooleanField(row, "starts") &&
@@ -887,7 +919,7 @@ const readRedisEntryCandidate = async (
 };
 
 /** The V2 checkpoint relation is deliberately distinct from ops.dataset_publications. */
-const GLOBAL_CHECKPOINT_SQL = `
+export const GLOBAL_CHECKPOINT_SQL = `
 	SELECT
 		publication_id,
 		generation,
@@ -911,7 +943,7 @@ const GLOBAL_CHECKPOINT_SQL = `
 	LIMIT 1
 `;
 
-const ENTRY_CHECKPOINT_SQL = `
+export const ENTRY_CHECKPOINT_SQL = `
 	WITH head AS (
 		SELECT publication_id, generation, picks_base_revision, content_sha256, row_count,
 			source_checked_at, content_updated_at, checkpointed_at, state
@@ -959,6 +991,159 @@ const ENTRY_CHECKPOINT_SQL = `
 		final_result.event_points, final_result.overall_points, final_result.event_picks,
 		final_result.automatic_substitutions, final_result.rich_synced_at, final_result.data_checked_at
 `;
+
+/** Exact SQL/result-shape probes for the V2 PostgreSQL fallback reader. */
+export const LIVE_POINTS_V2_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "live-points-v2.global-checkpoint",
+		sql: GLOBAL_CHECKPOINT_SQL,
+		values: [2026, 1],
+		resultTypes: [
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "publication_id",
+				pgType: "text",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "generation",
+				pgType: "bigint",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "state",
+				pgType: "text",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "source_checked_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "published_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "checkpointed_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "expected_next_check_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "revisions",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json"],
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "event_live",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json"],
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "fixtures",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json"],
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "event_live_bytes",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "fixtures_bytes",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "event_live_sha256",
+				pgType: "text",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "fixtures_sha256",
+				pgType: "text",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "event_live_count",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.live_points_publication_checkpoints",
+				column: "fixtures_count",
+				pgType: "integer",
+			},
+		],
+	},
+	{
+		name: "live-points-v2.entry-checkpoint",
+		sql: ENTRY_CHECKPOINT_SQL,
+		values: [2026, 6953, 1],
+		resultTypes: [
+			{ relation: "competition.entry_event_pick_heads", column: "publication_id", pgType: "text" },
+			{ relation: "competition.entry_event_pick_heads", column: "generation", pgType: "bigint" },
+			{
+				relation: "competition.entry_event_pick_heads",
+				column: "picks_base_revision",
+				pgType: "text",
+			},
+			{ relation: "competition.entry_event_pick_heads", column: "content_sha256", pgType: "text" },
+			{ relation: "competition.entry_event_pick_heads", column: "row_count", pgType: "smallint" },
+			{
+				relation: "competition.entry_event_pick_heads",
+				column: "source_checked_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.entry_event_pick_heads",
+				column: "content_updated_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "competition.entry_event_pick_heads",
+				column: "checkpointed_at",
+				pgType: "timestamp with time zone",
+			},
+			{ relation: "competition.entry_event_pick_heads", column: "state", pgType: "text" },
+			{ relation: "competition.entry_event_picks", column: "position", pgType: "smallint" },
+			{ relation: "competition.entry_event_picks", column: "element_id", pgType: "integer" },
+			{ relation: "competition.entry_event_picks", column: "multiplier", pgType: "smallint" },
+			{ relation: "competition.entry_event_picks", column: "is_captain", pgType: "boolean" },
+			{ relation: "competition.entry_event_picks", column: "is_vice_captain", pgType: "boolean" },
+			{ relation: "competition.entry_event_picks", column: "active_chip", pgType: "text" },
+			{ relation: "competition.entry_event_picks", column: "transfers_cost", pgType: "integer" },
+			{ relation: "competition.entry_event_results", column: "event_points", pgType: "integer" },
+			{ relation: "competition.entry_event_results", column: "overall_points", pgType: "integer" },
+			{
+				relation: "competition.entry_event_results",
+				column: "event_picks",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json"],
+			},
+			{
+				relation: "competition.entry_event_results",
+				column: "automatic_substitutions",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json"],
+			},
+			{
+				relation: "competition.entry_event_results",
+				column: "rich_synced_at",
+				pgType: "timestamp with time zone",
+			},
+			{ relation: "fpl.events", column: "data_checked_at", pgType: "timestamp with time zone" },
+		],
+	},
+];
 
 const dbIso = (value: unknown): string | null => {
 	if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString();
@@ -1383,66 +1568,6 @@ const readCore = (context: GraphQLContext): Promise<CoreLiveIdentitySnapshot | n
 	return load;
 };
 
-/**
- * The live publication already contains the authoritative score rows and the
- * entry input already contains all 15 element ids. If the independent player
- * metadata publication and its cold DB fallback are both unavailable, keep
- * the score/lineup response renderable with explicit degraded metadata rather
- * than turning a complete live version into an empty page.
- */
-const fallbackCoreIdentity = (
-	global: GlobalRead,
-	entryRead: EntryRead
-): CoreLiveIdentitySnapshot => {
-	const fixtureTeamIds = [
-		...new Set(global.fixtures.flatMap((fixture) => [fixture.teamH, fixture.teamA])),
-	].filter((id) => id > 0);
-	const teams: CoreTeamData[] = fixtureTeamIds.map((id) => ({
-		id,
-		code: 0,
-		name: "",
-		shortName: "",
-		strength: null,
-		position: 0,
-		points: 0,
-		played: 0,
-		win: 0,
-		draw: 0,
-		loss: 0,
-		form: null,
-		strengthOverallHome: 0,
-		strengthOverallAway: 0,
-		strengthAttackHome: 0,
-		strengthAttackAway: 0,
-		strengthDefenceHome: 0,
-		strengthDefenceAway: 0,
-	}));
-	const players: CorePlayerData[] = entryRead.input.picksBase.picks.map((pick) => ({
-		id: pick.element,
-		code: 0,
-		type: 0,
-		teamId: 0,
-		price: 0,
-		startPrice: 0,
-		firstName: null,
-		secondName: null,
-		webName: "",
-		totalPoints: 0,
-		selectedByPercent: null,
-	}));
-	return {
-		source: "redis",
-		// This synthetic identity is deliberately not used as a revision fence;
-		// the live publication and entry input remain the only score inputs.
-		revision: "degraded-live-identity",
-		publicationId: "degraded-live-identity",
-		seasonCode: global.publication.season,
-		sourceCheckedAt: global.publication.sourceCheckedAt,
-		teams,
-		players,
-	};
-};
-
 const emptyEntry = (entryId: number): Entry => ({
 	id: entryId,
 	entryName: "",
@@ -1505,22 +1630,26 @@ const preloadEntryMetadata = async (
 	}
 	const missingIds = uniqueIds.filter((entryId) => !memo!.has(entryId));
 	if (missingIds.length === 0) return;
-	try {
-		const entries = await entriesRepository.getEntriesByIds(context, missingIds);
-		for (const entryId of missingIds)
-			memo.set(entryId, Promise.resolve(entries.get(entryId) ?? emptyEntry(entryId)));
-	} catch (error) {
-		for (const entryId of missingIds) {
-			entryMetadataCircuit.set(
-				entryMetadataKey(context, entryId),
-				Date.now() + ENTRY_METADATA_CIRCUIT_COOLDOWN_MS
+	const chunkSize = 500;
+	for (let offset = 0; offset < missingIds.length; offset += chunkSize) {
+		const chunk = missingIds.slice(offset, offset + chunkSize);
+		try {
+			const entries = await entriesRepository.getEntriesByIds(context, chunk);
+			for (const entryId of chunk)
+				memo.set(entryId, Promise.resolve(entries.get(entryId) ?? emptyEntry(entryId)));
+		} catch (error) {
+			for (const entryId of chunk) {
+				entryMetadataCircuit.set(
+					entryMetadataKey(context, entryId),
+					Date.now() + ENTRY_METADATA_CIRCUIT_COOLDOWN_MS
+				);
+				memo.set(entryId, Promise.resolve(emptyEntry(entryId)));
+			}
+			context.logger.warn(
+				{ err: error, entryCount: chunk.length, offset },
+				"Live Points V2 batch entry metadata chunk unavailable"
 			);
-			memo.set(entryId, Promise.resolve(emptyEntry(entryId)));
 		}
-		context.logger.warn(
-			{ err: error, entryCount: missingIds.length },
-			"Live Points V2 batch entry metadata unavailable"
-		);
 	}
 };
 
@@ -1539,6 +1668,75 @@ const eventFixturesForPlayer = (
 	fixtures.filter((fixture) => fixture.teamH === player.teamId || fixture.teamA === player.teamId);
 
 const played = (row: EventLiveRow | undefined): boolean => (row?.minutes ?? 0) > 0;
+
+const fixtureIdFromBreakdown = (value: unknown): number | null => {
+	if (!isRecord(value)) return null;
+	return integer(value.fixtureId ?? value.fixture_id ?? value.fixture);
+};
+
+const explicitTeamIdFromBreakdown = (value: unknown): number | null => {
+	if (!isRecord(value)) return null;
+	return integer(value.teamId ?? value.team_id ?? value.playerTeamId ?? value.player_team_id);
+};
+
+/**
+ * Resolve the player identity for this event before building display rows.
+ * Current-player metadata is only accepted when it is compatible with the
+ * event fixtures (or the event has no fixture evidence yet).  A historical
+ * transfer without event-scoped evidence fails closed instead of displaying a
+ * score against the wrong club.
+ */
+const eventPlayer = (
+	player: CorePlayerData,
+	live: EventLiveRow | undefined,
+	fixtures: readonly FixtureRow[]
+): CorePlayerData | null => {
+	const breakdown = Array.isArray(live?.fixtureBreakdown) ? live.fixtureBreakdown : null;
+	const breakdownFixtureIds = new Set(
+		(breakdown ?? [])
+			.map(fixtureIdFromBreakdown)
+			.filter((fixtureId): fixtureId is number => fixtureId !== null && fixtureId > 0)
+	);
+	const explicitTeamIds = new Set(
+		(breakdown ?? [])
+			.map(explicitTeamIdFromBreakdown)
+			.filter((teamId): teamId is number => teamId !== null && teamId > 0)
+	);
+	if (explicitTeamIds.size === 1) {
+		return { ...player, teamId: [...explicitTeamIds][0]! };
+	}
+	if (explicitTeamIds.size > 1) return null;
+
+	const currentFixtures = eventFixturesForPlayer(fixtures, player);
+	if (breakdownFixtureIds.size > 0) {
+		const currentFixtureIds = new Set(currentFixtures.map((fixture) => fixture.id));
+		if (
+			currentFixtures.length > 0 &&
+			[...breakdownFixtureIds].every((fixtureId) => currentFixtureIds.has(fixtureId))
+		) {
+			return player;
+		}
+		return null;
+	}
+	if (currentFixtures.length > 0 || breakdown?.length === 0 || fixtures.length === 0) {
+		return player;
+	}
+	// A player with no current-event fixture may be a confirmed blank-gameweek
+	// pick.  This is safe only when the source explicitly supplies an empty
+	// breakdown; otherwise an old event/current roster mismatch is ambiguous.
+	return null;
+};
+
+const playerHasCompletedEvent = (
+	player: CorePlayerData,
+	live: EventLiveRow | undefined,
+	fixtures: readonly FixtureRow[]
+): boolean => {
+	const playerFixtures = eventFixturesForPlayer(fixtures, player);
+	if (playerFixtures.length === 0)
+		return Array.isArray(live?.fixtureBreakdown) && live!.fixtureBreakdown!.length === 0;
+	return playerFixtures.every((fixture) => fixture.finished || fixture.finishedProvisional);
+};
 
 type Lineup = {
 	active: Set<number>;
@@ -1568,20 +1766,29 @@ const calculateLineup = (
 	picks: readonly Pick[],
 	players: ReadonlyMap<number, CorePlayerData>,
 	liveByElement: ReadonlyMap<number, EventLiveRow>,
-	chip: CanonicalFplChip
+	chip: CanonicalFplChip,
+	fixtures: readonly FixtureRow[]
 ): Lineup => {
 	const ordered = [...picks].sort((left, right) => left.position - right.position);
 	const starters = ordered.filter((pick) => pick.position <= 11);
 	const bench = ordered.filter((pick) => pick.position > 11);
 	const active = new Set<number>();
 	for (const pick of starters)
-		if (played(liveByElement.get(pick.element))) active.add(pick.element);
+		if (
+			!playerHasCompletedEvent(
+				players.get(pick.element)!,
+				liveByElement.get(pick.element),
+				fixtures
+			)
+		)
+			active.add(pick.element);
 	const autoSubs = new Map<number, number>();
 	if (chip === "BENCH_BOOST") {
-		for (const pick of ordered)
-			if (played(liveByElement.get(pick.element))) active.add(pick.element);
+		for (const pick of ordered) active.add(pick.element);
 	} else {
-		const missing = starters.filter((pick) => !played(liveByElement.get(pick.element)));
+		const missing = starters.filter((pick) =>
+			playerHasCompletedEvent(players.get(pick.element)!, liveByElement.get(pick.element), fixtures)
+		);
 		const maxByType: Record<number, number> = { 1: 1, 2: 5, 3: 5, 4: 3 };
 		const search = (
 			index: number,
@@ -1599,7 +1806,12 @@ const calculateLineup = (
 				if (
 					current.has(candidate.element) ||
 					substitutions.has(candidate.element) ||
-					!played(liveByElement.get(candidate.element))
+					!played(liveByElement.get(candidate.element)) ||
+					playerHasCompletedEvent(
+						players.get(candidate.element)!,
+						liveByElement.get(candidate.element),
+						fixtures
+					)
 				)
 					continue;
 				const missingType = players.get(missingPick.element)?.type;
@@ -1622,17 +1834,19 @@ const calculateLineup = (
 	const captain = ordered.find((pick) => pick.isCaptain) ?? null;
 	const vice = ordered.find((pick) => pick.isViceCaptain) ?? null;
 	const activeCaptain =
-		captain && active.has(captain.element) && played(liveByElement.get(captain.element))
+		captain && active.has(captain.element)
 			? captain
-			: vice && active.has(vice.element) && played(liveByElement.get(vice.element))
+			: vice && active.has(vice.element)
 				? vice
 				: null;
 	const captainMultiplier =
-		activeCaptain?.element === captain?.element
-			? chip === "TRIPLE_CAPTAIN"
+		activeCaptain === null
+			? 0
+			: chip === "TRIPLE_CAPTAIN"
 				? 3
-				: Math.max(2, captain?.multiplier ?? 2)
-			: Math.max(2, vice?.multiplier ?? 2);
+				: activeCaptain.element === captain?.element
+					? Math.max(2, captain?.multiplier ?? 2)
+					: Math.max(2, vice?.multiplier ?? 2);
 	return { active, autoSubs, activeCaptain, captainMultiplier };
 };
 
@@ -1645,7 +1859,7 @@ const calculateFinalLineup = (
 	const ordered = [...picks].sort((left, right) => left.position - right.position);
 	const active = new Set(
 		ordered
-			.filter((pick) => chip === "BENCH_BOOST" || pick.position <= 11)
+			.filter((pick) => (chip === "BENCH_BOOST" || pick.position <= 11) && pick.multiplier > 0)
 			.map((pick) => pick.element)
 	);
 	const autoSubs = new Map(
@@ -1660,15 +1874,19 @@ const calculateFinalLineup = (
 	const captain = ordered.find((pick) => pick.isCaptain) ?? null;
 	const vice = ordered.find((pick) => pick.isViceCaptain) ?? null;
 	const activeCaptain =
-		captain && active.has(captain.element) && played(liveByElement.get(captain.element))
+		captain && active.has(captain.element)
 			? captain
-			: vice && active.has(vice.element) && played(liveByElement.get(vice.element))
+			: vice && active.has(vice.element)
 				? vice
 				: null;
 	const captainMultiplier =
-		activeCaptain?.element === captain?.element
-			? Math.max(2, captain?.multiplier ?? 2)
-			: Math.max(2, vice?.multiplier ?? 2);
+		activeCaptain === null
+			? 0
+			: chip === "TRIPLE_CAPTAIN"
+				? 3
+				: activeCaptain.element === captain?.element
+					? Math.max(2, captain?.multiplier ?? 2)
+					: Math.max(2, vice?.multiplier ?? 2);
 	return { active, autoSubs, activeCaptain, captainMultiplier };
 };
 
@@ -1683,34 +1901,17 @@ const mapPick = (params: {
 	season: string;
 	eventId: number;
 	pick: Pick;
-	player: CorePlayerData | undefined;
-	team: CoreTeamData | undefined;
+	player: CorePlayerData;
+	team: CoreTeamData;
 	fixtures: readonly FixtureRow[];
 	live: EventLiveRow | undefined;
 	lineup: Lineup;
 	teams: ReadonlyMap<number, CoreTeamData>;
 }): ElementEventResultDataV2 => {
 	const { season, eventId, pick, player, team, fixtures, live, lineup } = params;
-	const fallbackPlayer = player ?? {
-		id: pick.element,
-		code: 0,
-		type: 0,
-		teamId: 0,
-		price: 0,
-		startPrice: 0,
-		firstName: null,
-		secondName: null,
-		webName: "",
-		totalPoints: 0,
-		selectedByPercent: null,
-	};
-	const playerFixtures = player ? eventFixturesForPlayer(fixtures, player) : [];
+	const playerFixtures = eventFixturesForPlayer(fixtures, player);
 	const fixture = playerFixtures[0];
-	const opponent = fixture
-		? fixture.teamH === fallbackPlayer.teamId
-			? fixture.teamA
-			: fixture.teamH
-		: 0;
+	const opponent = fixture ? (fixture.teamH === player.teamId ? fixture.teamA : fixture.teamH) : 0;
 	const opponentTeam = params.teams.get(opponent);
 	const allStarted = fixtures.some((item) => item.started === true);
 	const allFinished =
@@ -1720,26 +1921,26 @@ const mapPick = (params: {
 		lineup.activeCaptain?.element === pick.element
 			? lineup.captainMultiplier
 			: isActive
-				? Math.max(1, pick.multiplier || 1)
+				? Math.max(1, pick.multiplier)
 				: 0;
 	return {
 		season,
 		event: eventId,
 		element: pick.element,
-		code: fallbackPlayer.code,
-		webName: fallbackPlayer.webName,
-		price: fallbackPlayer.price / 10,
-		elementType: fallbackPlayer.type,
-		elementTypeName: playerTypeName(fallbackPlayer.type),
-		teamId: fallbackPlayer.teamId,
-		teamCode: team?.code ?? 0,
-		teamName: team?.name ?? "",
-		teamShortName: team?.shortName ?? "",
+		code: player.code,
+		webName: player.webName,
+		price: player.price / 10,
+		elementType: player.type,
+		elementTypeName: playerTypeName(player.type),
+		teamId: player.teamId,
+		teamCode: team.code,
+		teamName: team.name,
+		teamShortName: team.shortName,
 		againstId: opponent,
 		againstName: opponentTeam?.name ?? "",
 		againstShortName: opponentTeam?.shortName ?? "",
-		wasHome: fixture ? (fixture.teamH === fallbackPlayer.teamId ? "H" : "A") : "",
-		score: fixture && player ? fixtureScore(fixture, player) : "-",
+		wasHome: fixture ? (fixture.teamH === player.teamId ? "H" : "A") : "",
+		score: fixture ? fixtureScore(fixture, player) : "-",
 		position: pick.position,
 		multiplier: captainMultiplier,
 		isCaptain: pick.isCaptain,
@@ -1875,13 +2076,32 @@ const buildReady = async (
 	entry: Entry,
 	core: CoreLiveIdentitySnapshot | null
 ): Promise<LiveCalcDataV2> => {
-	const effectiveCore = core ?? fallbackCoreIdentity(global, entryRead);
+	if (!core) throw new Error("CORE_IDENTITY_UNAVAILABLE");
+	const effectiveCore = core;
 	const input = entryRead.input;
 	if (input.finalResult !== null && global.publication.state !== "FINALIZED") {
 		throw new Error("FINAL_RESULT_WITHOUT_FINALIZED_PUBLICATION");
 	}
+	if (global.publication.state === "FINALIZED" && input.finalResult === null) {
+		throw new Error("FINAL_RESULT_REQUIRED");
+	}
 	const finalInput = global.publication.state === "FINALIZED" ? input.finalResult : null;
-	const projectionPicks = finalInput?.picks ?? input.picksBase.picks;
+	const adjustmentMultipliers = new Map(
+		(input.officialAdjustment?.multipliers ?? []).map(
+			(item) => [item.element, item.multiplier] as const
+		)
+	);
+	const baseProjectionPicks = finalInput?.picks ?? input.picksBase.picks;
+	const projectionPicks =
+		!finalInput && input.officialAdjustment
+			? (baseProjectionPicks.map(
+					(pick) =>
+						({
+							...pick,
+							multiplier: adjustmentMultipliers.get(pick.element) ?? pick.multiplier,
+						}) satisfies Pick
+				) as Exactly15Picks)
+			: baseProjectionPicks;
 	const players = new Map(effectiveCore.players.map((player) => [player.id, player]));
 	const teams = new Map(effectiveCore.teams.map((team) => [team.id, team]));
 	const liveByElement = new Map(global.eventLives.map((row) => [row.elementId, row]));
@@ -1893,17 +2113,36 @@ const buildReady = async (
 			`INCOMPLETE_ROSTER_OR_EVENT_LIVE players=${missingPlayers.length} rows=${missingLiveRows.length}`
 		);
 	}
+	const eventPlayers = new Map<number, CorePlayerData>();
+	for (const pick of projectionPicks) {
+		const sourcePlayer = players.get(pick.element);
+		const resolvedPlayer = sourcePlayer
+			? eventPlayer(sourcePlayer, liveByElement.get(pick.element), fixtures)
+			: null;
+		if (!resolvedPlayer || !teams.has(resolvedPlayer.teamId)) {
+			throw new Error(`EVENT_PLAYER_IDENTITY_UNAVAILABLE:${pick.element}`);
+		}
+		eventPlayers.set(pick.element, resolvedPlayer);
+	}
 	const chip = normalizeFplChip(input.picksBase.chip, "NONE") ?? "NONE";
+	const publishedAdjustment = input.officialAdjustment;
 	const lineup = finalInput
 		? calculateFinalLineup(projectionPicks, liveByElement, finalInput.automaticSubs, chip)
-		: calculateLineup(projectionPicks, players, liveByElement, chip);
+		: publishedAdjustment
+			? calculateFinalLineup(
+					projectionPicks,
+					liveByElement,
+					publishedAdjustment.automaticSubs,
+					chip
+				)
+			: calculateLineup(projectionPicks, eventPlayers, liveByElement, chip, fixtures);
 	const rows = projectionPicks.map((pick) =>
 		mapPick({
 			season: global.publication.season,
 			eventId: global.publication.eventId,
 			pick,
-			player: players.get(pick.element),
-			team: teams.get(players.get(pick.element)?.teamId ?? 0),
+			player: eventPlayers.get(pick.element)!,
+			team: teams.get(eventPlayers.get(pick.element)!.teamId)!,
 			fixtures,
 			live: liveByElement.get(pick.element),
 			lineup,
@@ -1915,6 +2154,9 @@ const buildReady = async (
 		0
 	);
 	const eventPoints = finalInput?.score.eventPoints ?? calculatedEventPoints;
+	if (finalInput && calculatedEventPoints !== finalInput.score.eventPoints) {
+		throw new Error("FINAL_RESULT_PROJECTION_MISMATCH");
+	}
 	const transferCost = input.picksBase.transferCost;
 	const netEventPoints = eventPoints - transferCost;
 	const previousTotals = input.previousTotals;
@@ -1985,7 +2227,6 @@ const buildReady = async (
 		playedCaptain: captainRow?.totalPoints ?? 0,
 		captainName: captainRow?.webName ?? "",
 		pickList: rows,
-		transfersList: [],
 		activeCaptain: {
 			id: activeCaptain?.element ?? 0,
 			name: captainRow?.webName ?? "",
@@ -2077,7 +2318,6 @@ const emptyUnavailable = (
 		playedCaptain: 0,
 		captainName: "",
 		pickList: [],
-		transfersList: [],
 		activeCaptain: { id: 0, name: "", points: 0 },
 	};
 };
@@ -2187,6 +2427,29 @@ const degradedLkg = (value: LiveCalcDataV2, reason: string): LiveCalcDataV2 => {
 	};
 };
 
+const readLiveLkg = (key: string): LiveCalcDataV2 | null => {
+	const cached = liveLkg.get(key);
+	if (!cached) return null;
+	if (cached.expiresAt <= Date.now()) {
+		liveLkg.delete(key);
+		return null;
+	}
+	// Map insertion order is our bounded LRU order.
+	liveLkg.delete(key);
+	liveLkg.set(key, cached);
+	return cached.value;
+};
+
+const writeLiveLkg = (key: string, value: LiveCalcDataV2): void => {
+	liveLkg.delete(key);
+	liveLkg.set(key, { value, expiresAt: Date.now() + LIVE_LKG_RETENTION_MS });
+	while (liveLkg.size > LIVE_LKG_MAX_ENTRIES) {
+		const oldest = liveLkg.keys().next().value as string | undefined;
+		if (oldest === undefined) break;
+		liveLkg.delete(oldest);
+	}
+};
+
 export const clearLivePointsV2Lkg = (): void => liveLkg.clear();
 
 export const loadLiveSnapshotMetaV2 = async (
@@ -2271,7 +2534,7 @@ export const calcLivePointsByEntryV2 = async (
 		);
 	const lkgKey = `${context.currentSeason.seasonCode}:${eventId}:${entryId}`;
 	const redisGlobal = await readRedisGlobal(context, eventId);
-	const processLkg = liveLkg.get(lkgKey);
+	const processLkg = readLiveLkg(lkgKey);
 	// The fallback order is intentional: a process LKG is a complete response
 	// for this exact event/entry and is safer than a cold database read that may
 	// combine metadata from a different publication.
@@ -2297,24 +2560,6 @@ export const calcLivePointsByEntryV2 = async (
 			? null
 			: await readDatabaseEntry(context, context.currentSeason.seasonCode, eventId, entryId));
 	if (!entryRead) {
-		if (global.publication.state === "FINALIZED") {
-			const entry = await getEntrySafe(context, entryId);
-			if (entry.entryName || entry.playerName) {
-				return observeLivePointsResult(
-					emptyFromGlobal(context, global, eventId, entryId, "NO_PICKS", "ENTRY_NO_OFFICIAL_PICKS")
-				);
-			}
-			return observeLivePointsResult(
-				emptyFromGlobal(
-					context,
-					global,
-					eventId,
-					entryId,
-					"UNAVAILABLE",
-					"ENTRY_IDENTITY_UNAVAILABLE"
-				)
-			);
-		}
 		return observeLivePointsResult(
 			processLkg
 				? degradedLkg(processLkg, "ENTRY_INPUT_PENDING")
@@ -2330,15 +2575,19 @@ export const calcLivePointsByEntryV2 = async (
 			await getEntrySafe(context, entryId),
 			core
 		);
-		liveLkg.set(lkgKey, result);
+		writeLiveLkg(lkgKey, result);
 		return observeLivePointsResult(result);
 	} catch (error) {
 		context.logger.error({ err: error, eventId, entryId }, "Live Points V2 projection failed");
 		metrics.livePointsProjectionFailures.labels("PROJECTION_FAILED").inc();
+		const reason =
+			error instanceof Error && error.message === "CORE_IDENTITY_UNAVAILABLE"
+				? "CORE_IDENTITY_UNAVAILABLE"
+				: "PROJECTION_FAILED";
 		return observeLivePointsResult(
 			processLkg
-				? degradedLkg(processLkg, "PROJECTION_FAILED")
-				: emptyUnavailable(context, eventId, entryId, "UNAVAILABLE", "PROJECTION_FAILED")
+				? degradedLkg(processLkg, reason)
+				: emptyUnavailable(context, eventId, entryId, "UNAVAILABLE", reason)
 		);
 	}
 };

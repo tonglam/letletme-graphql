@@ -164,7 +164,7 @@ const buildV2Redis = (
 		},
 		previousTotals: {
 			revision: hash({ previous: 1200 }),
-			throughEventId: 1,
+			throughEventId: 0,
 			totalPoints: 1200,
 			overallRank: 5000,
 		},
@@ -277,6 +277,8 @@ describe("Live Points V2 projection", () => {
 	it("keeps a complete same-event projection renderable when player metadata is down", async () => {
 		clearLivePointsV2Lkg();
 		const redis = buildV2Redis();
+		const warm = await calcLivePointsByEntryV2(buildSnapshotContext(redis), 1, 6953);
+		expect(warm.availability).toBe("READY");
 		for (const key of [...redis.values.keys()]) {
 			if (key.startsWith("llm:data:fpl:core:2627:")) redis.values.delete(key);
 		}

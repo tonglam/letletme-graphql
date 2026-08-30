@@ -145,7 +145,6 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		TRANSFER_COST
 		PLAYED
 		TOTAL_POINTS
-		OVERALL_RANK
 		TEAM_VALUE
 		RANK
 		ENTRY_NAME
@@ -197,7 +196,7 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		entryName: String!
 		playerName: String!
 		rank: Int!
-		overallRank: Int!
+		overallRank: Int
 		teamValue: Float!
 		chip: String!
 		transferCost: Int!

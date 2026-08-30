@@ -16,6 +16,8 @@ import { getPlayerAndTeamMaps, getTournamentSelectionIndexRows } from "../event-
 import { Position } from "../players/repository";
 import { tournamentsService } from "../tournaments/service";
 import { LeagueType } from "../leagues/repository";
+import { entriesRepository } from "../entries/repository";
+import { loadTournamentEventEligibility } from "./tournament-entry-window";
 import {
 	calcLivePointsForEntriesV2,
 	readLivePublicationV2,
@@ -330,6 +332,26 @@ const assertMemberOrManager = async (
 	throw new GraphQLError("Tournament access denied", { extensions: { code: "FORBIDDEN" } });
 };
 
+const eligibleEntryIdsForEvent = async (
+	context: GraphQLContext,
+	entryIds: readonly number[],
+	eventId: number
+): Promise<number[]> => {
+	try {
+		return (
+			await loadTournamentEventEligibility(entryIds, eventId, (ids) =>
+				entriesRepository.getEntriesByIds(context, ids)
+			)
+		).entryIds;
+	} catch (error) {
+		// Eligibility is an optimization boundary.  If metadata is unavailable,
+		// retain the roster and let the V2 projector fail closed per entry rather
+		// than taking down the entire live board.
+		context.logger.warn({ err: error, eventId }, "Live board entry eligibility unavailable");
+		return [...new Set(entryIds)];
+	}
+};
+
 const boardResponse = async (
 	context: GraphQLContext,
 	request: EntryLiveCompetitionBoardRequest,
@@ -339,10 +361,11 @@ const boardResponse = async (
 		context,
 		request.tournamentId
 	);
+	const eligibleEntryIds = await eligibleEntryIdsForEvent(context, entryIds, request.eventId);
 	const { board } = await buildEntryLiveCompetitionBoardV2(context, {
 		eventId: request.eventId,
 		tournamentId: request.tournamentId,
-		entryIds,
+		entryIds: eligibleEntryIds,
 		requireNet: memberTournament.leagueType === LeagueType.H2H,
 	});
 	const page = queryEntryLiveCompetitionBoardV2(board, request);
@@ -532,6 +555,8 @@ export const liveDesksResolvers = {
 			context: GraphQLContext
 		) => {
 			const request = normalizeEntryLiveCompetitionBoardRequestV2(args);
+			const publication = await readLivePublicationV2(context, request.eventId).catch(() => null);
+			assertRef(context, (args.ref as LiveRef | null | undefined) ?? null, publication);
 			const memberTournament = await assertMemberOrManager(
 				context,
 				request.tournamentId,
@@ -581,7 +606,8 @@ export const liveDesksResolvers = {
 			const publication =
 				eventId > 0 ? await readLivePublicationV2(context, eventId).catch(() => null) : null;
 			assertRef(context, args.ref, publication);
-			const entryIds = await tournamentsService.getTournamentEntryIdsUncached(context, selected);
+			const allEntryIds = await tournamentsService.getTournamentEntryIdsUncached(context, selected);
+			const entryIds = await eligibleEntryIdsForEvent(context, allEntryIds, eventId);
 			const { results } = await calcLivePointsForEntriesV2(context, eventId, entryIds);
 			const sample = results.get(args.entryId) ?? results.values().next().value ?? null;
 			return {

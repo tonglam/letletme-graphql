@@ -69,7 +69,7 @@ describe("production deployment workflow", () => {
 	test("requires candidate readiness, image digest, revision label, ingress and contract probes", () => {
 		expect(dockerfile).toContain("COPY --chown=bun:bun scripts/lib ./scripts/lib");
 		expect(deployScript).toContain("/health/ready");
-		expect(deployScript).toContain('.status == "ok" and .revision == $revision');
+		expect(deployScript).toContain('.status == "ok" and .deploySha == $deploySha');
 		expect(deployScript).toContain("docker inspect --format '{{.Config.Image}}'");
 		expect(deployScript).toContain("org.opencontainers.image.revision");
 		expect(deployScript).toContain('test "$anonymous_status" = 401');
