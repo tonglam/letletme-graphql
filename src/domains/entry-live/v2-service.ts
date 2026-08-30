@@ -1126,7 +1126,11 @@ export const LIVE_POINTS_V2_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] =
 			{ relation: "competition.entry_event_picks", column: "multiplier", pgType: "smallint" },
 			{ relation: "competition.entry_event_picks", column: "is_captain", pgType: "boolean" },
 			{ relation: "competition.entry_event_picks", column: "is_vice_captain", pgType: "boolean" },
-			{ relation: "competition.entry_event_picks", column: "active_chip", pgType: "competition.chip" },
+			{
+				relation: "competition.entry_event_picks",
+				column: "active_chip",
+				pgType: "competition.chip",
+			},
 			{ relation: "competition.entry_event_picks", column: "transfers_cost", pgType: "integer" },
 			{ relation: "competition.entry_event_results", column: "event_points", pgType: "integer" },
 			{ relation: "competition.entry_event_results", column: "overall_points", pgType: "integer" },
@@ -1958,8 +1962,8 @@ const mapPick = (params: {
 		multiplier: captainMultiplier,
 		isCaptain: pick.isCaptain,
 		isViceCaptain: pick.isViceCaptain,
-			isGwStarted,
-			isGwFinished: allFinished,
+		isGwStarted,
+		isGwFinished: allFinished,
 		isPlayed: played(live),
 		playStatus: played(live) ? 1 : 0,
 		minutes: live?.minutes ?? 0,
@@ -2059,19 +2063,21 @@ const timesFor = (global: LivePublication, entryRead: EntryRead, now: string): L
 			.filter((value): value is string => iso(value))
 			.sort()
 			.at(-1) ?? global.sourceCheckedAt;
-	const contentUpdatedAt =
-		latestTimestamp(
-			global.revisions.lifecycle.contentUpdatedAt,
-			global.revisions.fixtureIdentity.contentUpdatedAt,
-			global.revisions.scoreCore.contentUpdatedAt,
-			global.revisions.displayStats.contentUpdatedAt,
-			global.revisions.explain.contentUpdatedAt,
-			global.revisions.rules.contentUpdatedAt,
-			entry.picksBase.contentUpdatedAt,
-			entryRead.publication.sourceCheckedAt,
-			entryRead.publication.publishedAt
-		);
-	const sourceCheckedAt = latestTimestamp(global.sourceCheckedAt, entryRead.publication.sourceCheckedAt);
+	const contentUpdatedAt = latestTimestamp(
+		global.revisions.lifecycle.contentUpdatedAt,
+		global.revisions.fixtureIdentity.contentUpdatedAt,
+		global.revisions.scoreCore.contentUpdatedAt,
+		global.revisions.displayStats.contentUpdatedAt,
+		global.revisions.explain.contentUpdatedAt,
+		global.revisions.rules.contentUpdatedAt,
+		entry.picksBase.contentUpdatedAt,
+		entryRead.publication.sourceCheckedAt,
+		entryRead.publication.publishedAt
+	);
+	const sourceCheckedAt = latestTimestamp(
+		global.sourceCheckedAt,
+		entryRead.publication.sourceCheckedAt
+	);
 	const publishedAt = latestTimestamp(global.publishedAt, entryRead.publication.publishedAt);
 	const staleAt = new Date(
 		Date.parse(sourceCheckedAt) + LIVE_POINTS_FRESHNESS_SECONDS * 1000

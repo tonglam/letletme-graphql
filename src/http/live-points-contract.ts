@@ -16,9 +16,9 @@ const LIVE_POINTS_ROOT_FIELDS = new Set([
 	"entryLiveCompetitionBoard",
 	"entryLiveCompetitionsDesk",
 	"tournamentSelectionIndex",
-		"tournamentEntrySquads",
-		"tournamentDetailDesk",
-	]);
+	"tournamentEntrySquads",
+	"tournamentDetailDesk",
+]);
 
 export const isLivePointsRootField = (field: string): boolean => LIVE_POINTS_ROOT_FIELDS.has(field);
 

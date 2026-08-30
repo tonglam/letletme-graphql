@@ -410,20 +410,13 @@ const boardResponse = async (
 		scoreCoreRevision: board.scoreCoreRevision,
 		dataAvailability: delivery.state,
 		coverageState:
-			board.computedEntries === 0
-				? "UNAVAILABLE"
-				: board.partial
-					? "PARTIAL"
-					: "COMPLETE",
+			board.computedEntries === 0 ? "UNAVAILABLE" : board.partial ? "PARTIAL" : "COMPLETE",
 		rankScope: board.partial ? "AVAILABLE_ROWS" : "FULL_FIELD",
 		computedEntries: board.computedEntries,
 		deferredEntryCount: board.deferredEntryCount,
 		failedEntryCount: board.failedEntryCount,
 		unavailableEntryCount: board.unavailableEntryCount,
-		officialCoverage:
-			board.totalEntries === 0
-				? 0
-				: board.computedEntries / board.totalEntries,
+		officialCoverage: board.totalEntries === 0 ? 0 : board.computedEntries / board.totalEntries,
 		unavailableEntryIds,
 		failedEntryIds: board.failedEntryIds,
 		partial: board.partial,
@@ -461,13 +454,13 @@ export const liveDesksResolvers = {
 				state: lifecycleForPublication(publication?.publication ?? null),
 				windowState: windowStateForPublication(publication?.publication ?? null),
 				producerState: lifecycleForPublication(publication?.publication ?? null),
-					anchorMode: publication
-						? window.eventCore.currentEventId === publication.publication.eventId
-							? "CURRENT"
-							: "PREVIOUS_FINAL"
-						: window.eventCore.currentEventId === null
-							? "OFFSEASON"
-							: "UPCOMING",
+				anchorMode: publication
+					? window.eventCore.currentEventId === publication.publication.eventId
+						? "CURRENT"
+						: "PREVIOUS_FINAL"
+					: window.eventCore.currentEventId === null
+						? "OFFSEASON"
+						: "UPCOMING",
 				dataAvailability: publicationAvailability(publication),
 				sourceCheckedAt:
 					publication?.publication.sourceCheckedAt ?? window.fixtureCore.sourceCheckedAt,
@@ -601,9 +594,9 @@ export const liveDesksResolvers = {
 					officialCoverage: 0,
 					revisions: null,
 					times: null,
-						delivery: {
-							state: "UNAVAILABLE",
-							servedFrom: "UNAVAILABLE",
+					delivery: {
+						state: "UNAVAILABLE",
+						servedFrom: "UNAVAILABLE",
 						reasonCodes: ["NO_TOURNAMENT"],
 					},
 					unavailableEntryIds: [],
@@ -647,7 +640,7 @@ export const liveDesksResolvers = {
 				totalEntries: entryIds.length,
 				revisions: sample?.score.revisions ?? null,
 				times: sample?.score.times ?? null,
-					delivery: sample?.delivery ?? {
+				delivery: sample?.delivery ?? {
 					state: "UNAVAILABLE",
 					servedFrom: "UNAVAILABLE",
 					reasonCodes: ["NO_COMPLETE_ENTRY_PROJECTION"],

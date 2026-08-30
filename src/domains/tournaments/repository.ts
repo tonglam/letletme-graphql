@@ -245,13 +245,13 @@ export type TournamentDetailDesk = {
 		} | null;
 		delivery: {
 			state: "FRESH" | "STALE" | "DEGRADED" | "FINAL" | "UNAVAILABLE";
-				servedFrom:
-					| "REDIS_CURRENT"
-					| "REDIS_PREVIOUS"
-					| "PROCESS_LKG"
-					| "POSTGRES_CHECKPOINT"
-					| "FINAL_RESULT"
-					| "UNAVAILABLE";
+			servedFrom:
+				| "REDIS_CURRENT"
+				| "REDIS_PREVIOUS"
+				| "PROCESS_LKG"
+				| "POSTGRES_CHECKPOINT"
+				| "FINAL_RESULT"
+				| "UNAVAILABLE";
 			reasonCodes: string[];
 		} | null;
 		rows: LiveCalcDataV2[];
@@ -4557,14 +4557,14 @@ export const tournamentsRepository: TournamentsRepository = {
 			const result = scheduled
 				? null
 				: await calcLivePointsForEntriesV2(context, requestedEventId, rosterEntryIds);
-				const rows = result
-					? [...result.results.values()].sort(
-							(left, right) =>
-								Number(right.availability === "READY") - Number(left.availability === "READY") ||
-								right.score.eventPoints - left.score.eventPoints ||
-								left.entry - right.entry
-							)
-					: [];
+			const rows = result
+				? [...result.results.values()].sort(
+						(left, right) =>
+							Number(right.availability === "READY") - Number(left.availability === "READY") ||
+							right.score.eventPoints - left.score.eventPoints ||
+							left.entry - right.entry
+					)
+				: [];
 			const sample = rows.find((row) => row.availability === "READY") ?? rows[0] ?? null;
 			const failedEntryIds = result?.errors.map((error) => error.entryId) ?? [];
 			const unavailableEntryIds = rosterEntryIds.filter(
@@ -4587,9 +4587,9 @@ export const tournamentsRepository: TournamentsRepository = {
 				totalEntries: rosterEntryIds.length,
 				revisions: sample?.score.revisions ?? null,
 				times: sample?.score.times ?? null,
-					delivery: sample?.delivery ?? {
-						state: "UNAVAILABLE",
-						servedFrom: "UNAVAILABLE",
+				delivery: sample?.delivery ?? {
+					state: "UNAVAILABLE",
+					servedFrom: "UNAVAILABLE",
 					reasonCodes: [scheduled ? "EVENT_NOT_STARTED" : "NO_COMPLETE_PROJECTION"],
 				},
 				rows,
