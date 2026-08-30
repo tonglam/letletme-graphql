@@ -359,6 +359,20 @@ compose_exec \
 
 old_slot="$active_slot"
 switched=false
+old_slot_deploy_sha=""
+old_active_container=$(docker ps --all \
+  --filter "label=com.docker.compose.project=$active_project" \
+  --filter "label=com.docker.compose.service=graphql" \
+  --format '{{.ID}}' | head -n 1)
+if [ -n "$old_active_container" ]; then
+  old_slot_deploy_sha=$(docker inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$old_active_container" || true)
+fi
+if [ -n "$old_slot_deploy_sha" ] && [[ ! "$old_slot_deploy_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "active GraphQL slot has an invalid deployment revision label" >&2
+  exit 1
+fi
 rollback_switch() {
   if [ "$switched" != true ]; then return 0; fi
   rollback_verified=false
@@ -401,14 +415,39 @@ public_health_url="$PUBLIC_GRAPHQL_HEALTH_URL"
 public_health=""
 public_health_ready=false
 for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS"); do
-  if public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url"); then
-    if jq -e --arg deploySha "$DEPLOY_SHA" \
-      '.status == "ok" and .deploySha == $deploySha' <<<"$public_health" >/dev/null; then
-      public_health_ready=true
-      break
+  if ! public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url"); then
+    echo "public GraphQL health probe failed after switching to $inactive_slot; rolling back" >&2
+    if ! rollback_switch; then
+      echo "public probe failed and rollback could not be verified" >&2
     fi
+    exit 1
   fi
-  echo "public GraphQL health has not converged to $DEPLOY_SHA on attempt $attempt" >&2
+  public_identity="invalid"
+  if ! public_identity=$(jq -r '
+    if (type != "object") or (.status != "ok") then "invalid"
+    elif (has("deploySha") | not) then "legacy"
+    elif (.deploySha | type) == "string" and (.deploySha | length) > 0 then .deploySha
+    else "invalid"
+    end
+  ' <<<"$public_health"); then
+    public_identity="invalid"
+  fi
+  if [ "$public_identity" = "$DEPLOY_SHA" ]; then
+    public_health_ready=true
+    break
+  fi
+  case "$public_identity" in
+    legacy|"$old_slot_deploy_sha")
+      echo "public GraphQL health has not converged to $DEPLOY_SHA on attempt $attempt" >&2
+      ;;
+    *)
+      echo "public GraphQL health returned an unexpected deployment identity; rolling back" >&2
+      if ! rollback_switch; then
+        echo "public identity mismatch and rollback could not be verified" >&2
+      fi
+      exit 1
+      ;;
+  esac
   if [ "$attempt" -lt "$PUBLIC_HEALTH_ATTEMPTS" ]; then
     sleep "$PUBLIC_HEALTH_DELAY_SECONDS"
   fi

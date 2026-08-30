@@ -126,16 +126,22 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("Public GraphQL contract failed");
 		expect(deployScript).toContain("PUBLIC_HEALTH_ATTEMPTS=${PUBLIC_HEALTH_ATTEMPTS:-15}");
 		expect(deployScript).toContain("public_health_ready=false");
-		expect(deployScript).not.toContain("old_public_revision");
-		expect(deployScript).not.toContain("old_local_revision");
+		expect(deployScript).toContain('old_slot_deploy_sha=""');
+		expect(deployScript).toContain("old_slot_deploy_sha");
+		expect(deployScript).toContain("active GraphQL slot has an invalid deployment revision label");
 		expect(deployScript).toContain('for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS")');
 		expect(deployScript).toContain('sleep "$PUBLIC_HEALTH_DELAY_SECONDS"');
 		expect(deployScript).toContain(
-			'if public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url"); then'
+			'if ! public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url"); then'
 		);
 		expect(deployScript).toContain(
-			"public GraphQL health has not converged to $DEPLOY_SHA on attempt $attempt"
+			"public GraphQL health probe failed after switching to $inactive_slot; rolling back"
 		);
+		expect(deployScript).toContain(
+			"public GraphQL health returned an unexpected deployment identity; rolling back"
+		);
+		expect(deployScript).toContain('elif (has("deploySha") | not) then "legacy"');
+		expect(deployScript).toContain('legacy|"$old_slot_deploy_sha")');
 		expect(deployScript).toContain(
 			"public GraphQL health did not converge to $DEPLOY_SHA after ${PUBLIC_HEALTH_ATTEMPTS} attempts"
 		);
