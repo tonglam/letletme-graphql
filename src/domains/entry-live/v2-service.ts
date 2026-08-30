@@ -2709,7 +2709,13 @@ export const calcLivePointsByEntryV2 = async (
 		redisEntry ??
 		(hasPrefetchedEntry || processLkg
 			? null
-			: await readDatabaseEntry(context, context.currentSeason.seasonCode, eventId, entryId, global));
+			: await readDatabaseEntry(
+					context,
+					context.currentSeason.seasonCode,
+					eventId,
+					entryId,
+					global
+				));
 	if (!entryRead) {
 		return observeLivePointsResult(
 			processLkg
