@@ -431,7 +431,7 @@ for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS"); do
   if ! public_health_classification=$(jq -c '
     if (type != "object") or (.status != "ok") then {kind:"invalid"}
     elif (has("deploySha") | not) then {kind:"legacy"}
-    elif (.deploySha | type) == "string" and (.deploySha | test("^[0-9a-f]{40}$")) then {kind:"identity",sha:.deploySha}
+    elif (.deploySha | type) == "string" and (.deploySha | length) == 40 and (.deploySha | test("^[0-9a-f]{40}$")) then {kind:"identity",sha:.deploySha}
     else {kind:"invalid"}
     end
   ' <<<"$public_health"); then
