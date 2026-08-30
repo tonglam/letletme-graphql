@@ -28,7 +28,7 @@ INLINE_LINK_RE = re.compile(
 # container prefix is still Markdown structure; the destination remains an
 # operative repository reference.
 REFERENCE_DEF_RE = re.compile(
-    r"^(?: {0,3}>[ \t]?| {0,3}(?:[-+*]|\d+[.)])[ \t]+)*(?<!\\)\[((?:\\.|[^\]\\])*)\]:\s*(<[^>]*>|[^\s]+)",
+    r"^(?: {0,3}>[ \t]?| {0,3}(?:[-+*]|\d+[.)])[ \t]+)* {0,3}(?<!\\)\[((?:\\.|[^\]\\])*)\]:\s*(<[^>]*>|[^\s]+)",
     re.M,
 )
 REFERENCE_TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".txt", ".text", ".rst"}
@@ -507,7 +507,7 @@ def _without_markdown_code(text: str) -> str:
     # markers); inline and backslash-escaped tags remain operative text.
     block_start = r"^(?: {0,3}>[ \t]?)* {0,3}(?<!\\)"
     closed_block = re.compile(
-        block_start + r"<(pre|script|style|textarea|xmp|plaintext)\b[^>]*>.*?(?:</\1\s*>|$)",
+        block_start + r"<(pre|script|style|textarea|xmp|plaintext)\b[^>]*>.*?(?:</\1\s*>|\Z)",
         flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
     )
     blank_terminated = re.compile(
@@ -744,7 +744,12 @@ def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
 
 
 def _looks_like_placeholder(value: str) -> bool:
-    normalized = value.strip().strip("'\"").casefold()
+    normalized = value.strip().casefold()
+    # Secret-value captures often include a JSON/YAML or expression
+    # delimiter (for example ``process.env.PASSWORD,``). Remove only trailing
+    # delimiters before matching complete environment lookups; literal values
+    # remain subject to the normal secret heuristics below.
+    normalized = normalized.rstrip(",;").strip().strip("'\"")
     # Exempt only a complete environment lookup. A lookup with a literal
     # fallback (or a literal suffix/prefix) is still a committed value and
     # must continue through the normal secret heuristics.

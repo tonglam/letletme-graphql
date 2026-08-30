@@ -470,6 +470,13 @@ jobs:
                   )
               rebound_required = set()
               protected = set(required) | set(definitions)
+              for node in tree.body:
+                  if (
+                      isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and node.name in required
+                      and any(isinstance(item, (ast.Yield, ast.YieldFrom)) for item in ast.walk(node))
+                  ):
+                      raise SystemExit(f"{path}: protected definition may not be a generator: {node.name}")
               for statement in tree.body:
                   if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                       header_nodes = function_header_nodes(statement)
@@ -570,8 +577,15 @@ jobs:
           # contents in this job.
           for tree, forbidden in ((validator, {"exec", "eval", "__import__"}), (provisioner, {"exec", "eval", "__import__"})):
               for node in ast.walk(tree):
-                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden:
-                      raise SystemExit(f"approved governance code uses forbidden dynamic call: {node.func.id}")
+                  if not isinstance(node, ast.Call):
+                      continue
+                  called_name = None
+                  if isinstance(node.func, ast.Name):
+                      called_name = node.func.id
+                  elif isinstance(node.func, ast.Attribute):
+                      called_name = node.func.attr
+                  if called_name in forbidden:
+                      raise SystemExit(f"approved governance code uses forbidden dynamic call: {called_name}")
 
           def assignment(tree, name):
               for node in tree.body:
@@ -764,10 +778,12 @@ jobs:
 
               def visit_Try(self, node):
                   # Exception handlers are conditional recovery paths, not an
-                  # unconditional validation path.  Traverse the try body,
-                  # else, and finally blocks while deliberately excluding
-                  # handlers so a required call cannot be hidden there.
-                  for child in node.body + node.orelse + node.finalbody:
+                  # unconditional validation path. Traverse the try body and
+                  # finally blocks; ``else`` runs only when the try body
+                  # succeeds, so a required call there cannot satisfy the
+                  # unconditional-path contract. Handlers are recovery paths
+                  # and are deliberately excluded as well.
+                  for child in node.body + node.finalbody:
                       self.visit(child)
 
               visit_TryStar = visit_Try
@@ -901,6 +917,22 @@ jobs:
 
                   visit_AsyncWith = visit_With
 
+                  def visit_Try(self, statement):
+                      # Calls in handlers and ``else`` blocks execute only
+                      # after a conditional exception outcome. Calls in the
+                      # try/finally path remain visible as unconditional.
+                      for child in statement.body + statement.finalbody:
+                          self.visit(child)
+                      self.conditional_depth += 1
+                      for handler in statement.handlers:
+                          for child in handler.body:
+                              self.visit(child)
+                      for child in statement.orelse:
+                          self.visit(child)
+                      self.conditional_depth -= 1
+
+                  visit_TryStar = visit_Try
+
                   def visit_BoolOp(self, expression):
                       # In ``a and required()`` / ``a or required()``, every
                       # operand after the first is conditional on short
@@ -971,7 +1003,11 @@ jobs:
                           lines.extend(direct_terminator_lines(branch))
                   try_nodes = (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
                   if isinstance(statement, try_nodes):
-                      lines.extend(direct_terminator_lines(statement.body))
+                      body_terminators = direct_terminator_lines(statement.body)
+                      lines.extend(body_terminators)
+                      if body_terminators:
+                          for handler in statement.handlers:
+                              lines.extend(direct_terminator_lines(handler.body))
                       lines.extend(direct_terminator_lines(statement.orelse))
                       lines.extend(direct_terminator_lines(statement.finalbody))
               return lines
@@ -1253,6 +1289,31 @@ jobs:
           )
           if "main" not in module_rebindings(dynamic_fixture, {"main"}):
               raise SystemExit("dynamic-rebinding fixture unexpectedly passed")
+          qualified_dynamic_fixture = ast.parse(
+              "def main(): return 0\n"
+              "builtins.exec('main()')\n"
+          )
+          try:
+              for node in ast.walk(qualified_dynamic_fixture):
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "exec":
+                      raise SystemExit("qualified dynamic execution detected")
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("qualified dynamic execution fixture unexpectedly passed")
+          handler_exit_fixture = ast.parse(
+              "def parse_yaml_mapping():\n  _parse_scalar(); return {}\n"
+              "def validate_asset():\n  try: raise RuntimeError()\n  except RuntimeError: return {'ok': True}\n"
+              "def main():\n  try: return 0\n  except Exception: raise\n"
+          )
+          try:
+              direct_terminator_lines(handler_exit_fixture.body[1].body)
+              if not direct_terminator_lines(handler_exit_fixture.body[1].body):
+                  raise SystemExit("handler terminator not detected")
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("guaranteed-handler fixture unexpectedly passed")
 
           def check_provisioner_shape(tree):
               required_calls = {
@@ -1364,12 +1425,27 @@ jobs:
           manifest = json.loads(Path("target/.codex/global-skills.json").read_text(encoding="utf-8"))
           contract = json.loads(Path("target/.codex/instruction-integrity.json").read_text(encoding="utf-8"))
           agents_text = Path("target/AGENTS.md").read_text(encoding="utf-8")
+          # A registry pin inside an HTML comment or fenced example is not an
+          # operative route. Keep this small Markdown filter deliberately
+          # conservative: remove only block comments/fences, then require the
+          # provisioner command and pin to coexist in live instruction text.
+          operative_agents_lines = []
+          in_fence = False
+          for line in agents_text.splitlines():
+              stripped = line.strip()
+              if stripped.startswith(("```", "~~~")):
+                  in_fence = not in_fence
+                  continue
+              if in_fence:
+                  continue
+              operative_agents_lines.append(line)
+          operative_agents = re.sub(r"<!--.*?-->", "", "\n".join(operative_agents_lines), flags=re.S)
           descriptor = manifest.get("registry")
           if not isinstance(descriptor, dict):
               raise SystemExit("target global registry descriptor is missing")
           documented_pin = f"{descriptor.get('repository')}@{descriptor.get('ref')}:{descriptor.get('path')}"
-          if documented_pin not in agents_text:
-              raise SystemExit("AGENTS.md does not document the proposed global registry pin")
+          if documented_pin not in operative_agents or "python3 .codex/provision_global_skills.py" not in operative_agents:
+              raise SystemExit("AGENTS.md does not contain an operative global registry provisioning route")
           if assignment(provisioner, "EXPECTED_REGISTRY") != manifest.get("registry"):
               raise SystemExit("approved provisioner registry pin does not match the manifest")
           if assignment(provisioner, "EXPECTED_SOURCE_REVISION") != contract.get("canonical_config_commit"):
@@ -1710,6 +1786,8 @@ jobs:
               "check_module_entrypoint",
               "ruby -ryaml",
               "workflow = YAML.safe_load",
+              "operative_agents",
+              "python3 .codex/provision_global_skills.py",
               "approved governance code shape and pins validated without execution",
             ]
             semantic_markers.each do |needle|
