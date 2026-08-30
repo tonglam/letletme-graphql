@@ -1735,7 +1735,7 @@ jobs:
             }
             raise "head check invalidation environment is broadened" unless invalidate_step["env"] == expected_invalidation_env
             invalidation_run = invalidate_step["run"].to_s
-            ["set -eu", "case \"$HEAD_SHA\" in", "commits/${HEAD_SHA}/check-runs", "gh api --method PATCH", "check-runs", "name=instruction-integrity", "head_sha=\"$HEAD_SHA\"", "status=in_progress", "no prior instruction-integrity check to invalidate"].each do |needle|
+            ["set -eu", "case \"$HEAD_SHA\" in", "commits/${HEAD_SHA}/check-runs", "gh api --method PATCH", "check-runs", "check_name=instruction-integrity", "status=in_progress", "no prior instruction-integrity check to invalidate"].each do |needle|
               raise "head check invalidation is incomplete: #{needle}" unless invalidation_run.include?(needle)
             end
             raise "head check invalidation may not mask failures" if invalidation_run.match?(/\|\|\s*true\b/)
