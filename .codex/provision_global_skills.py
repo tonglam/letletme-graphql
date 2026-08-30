@@ -122,6 +122,7 @@ def source_checkout(
     *,
     runtime_root: Path,
     advertised: list[str],
+    allow_network: bool,
 ) -> Path:
     if registry_source is not None:
         checkout = registry_source.resolve()
@@ -141,6 +142,12 @@ def source_checkout(
         if inside_worktree == "true":
             print(f"using verified offline registry source: {checkout}")
             return checkout
+    if not allow_network:
+        raise SystemExit(
+            "offline registry source unavailable; provide --registry-source, set "
+            "CODEX_REGISTRY_SOURCE or CODEX_WORKSPACE_CONFIG_CHECKOUT, mount a verified "
+            "runtime checkout, or explicitly opt in with --allow-network"
+        )
     checkout = temporary_root / "config"
     repository = EXPECTED_REGISTRY["repository"]
     try:
@@ -258,6 +265,11 @@ def main() -> int:
         help="Codex runtime root (defaults to CODEX_HOME or ~/.codex)",
     )
     parser.add_argument("--registry-source", type=Path, help="authenticated local config checkout")
+    parser.add_argument(
+        "--allow-network",
+        action="store_true",
+        help="allow cloning the pinned config when no verified offline source is available",
+    )
     parser.add_argument("--apply", action="store_true", help="install only missing skill directories")
     args = parser.parse_args()
 
@@ -274,6 +286,7 @@ def main() -> int:
                 Path(temporary),
                 runtime_root=runtime_root,
                 advertised=advertised,
+                allow_network=args.allow_network,
             ),
             advertised,
             Path(temporary) / "materialized",

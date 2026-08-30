@@ -494,6 +494,16 @@ jobs:
                   for child in branch:
                       self.visit(child)
 
+              def visit_Try(self, node):
+                  # Exception handlers are conditional recovery paths, not an
+                  # unconditional validation path.  Traverse the try body,
+                  # else, and finally blocks while deliberately excluding
+                  # handlers so a required call cannot be hidden there.
+                  for child in node.body + node.orelse + node.finalbody:
+                      self.visit(child)
+
+              visit_TryStar = visit_Try
+
               def visit_FunctionDef(self, node):
                   # Nested functions are not part of the enclosing function's
                   # reachable validation path.
@@ -791,6 +801,17 @@ jobs:
               pass
           else:
               raise SystemExit("runtime-branch validator fixture unexpectedly passed")
+          exception_handler_fixture = ast.parse(
+              "def parse_yaml_mapping():\n  try: return {}\n  except Exception: _parse_scalar(); return {}\n"
+              "def validate_asset():\n  try: return {'ok': True}\n  except Exception: validate_skill(); _validate_instruction_file(); _validate_global_manifest()\n"
+              "def main():\n  try: return 0\n  except Exception: validate_asset()\n"
+          )
+          try:
+              check_validator_shape(exception_handler_fixture)
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("exception-handler validator fixture unexpectedly passed")
           check_provisioner_shape(provisioner)
           dead_provisioner_fixture = ast.parse(
               "def load_manifest():\n  if False: loads()\n"
@@ -870,18 +891,23 @@ jobs:
             raise "workflow defaults may not override shell or working directory" if root_defaults.is_a?(Hash) && root_defaults.dig("run").is_a?(Hash) && (root_defaults.dig("run").key?("shell") || root_defaults.dig("run").key?("working-directory"))
             permissions = workflow["permissions"]
             raise "workflow permissions must be contents: read only" unless permissions.is_a?(Hash) && permissions.keys.map(&:to_s) == ["contents"] && permissions["contents"].to_s == "read"
+            raise "workflow-level environment overrides are not allowed" if workflow.key?("env")
             jobs = workflow["jobs"]
             raise "missing bootstrap/validate jobs" unless jobs.is_a?(Hash) && jobs["bootstrap"].is_a?(Hash) && jobs["validate"].is_a?(Hash)
             raise "unexpected workflow job is present" unless jobs.keys.map(&:to_s).sort == %w[bootstrap validate]
             jobs.each do |job_name, job|
               next unless job.is_a?(Hash)
               setup_count = 0
+              expected_job_keys = (job_name == "bootstrap" ? %w[env if name runs-on steps timeout-minutes] : %w[env if name permissions runs-on steps timeout-minutes]).sort
+              raise "unexpected job configuration keys: #{job_name}" unless job.keys.map(&:to_s).sort == expected_job_keys
               if job_name == "bootstrap"
                 raise "bootstrap job must not request additional permissions" if job.key?("permissions")
               elsif job_name == "validate"
                 job_permissions = job["permissions"]
                 raise "trusted validate job must scope contents: read and checks: write" unless job_permissions.is_a?(Hash) && job_permissions.keys.map(&:to_s).sort == %w[checks contents] && job_permissions["contents"].to_s == "read" && job_permissions["checks"].to_s == "write"
               end
+              expected_env = {"GOVERNANCE_UPDATE_APPROVED" => job.dig("env", "GOVERNANCE_UPDATE_APPROVED")}
+              raise "job environment must contain only the approval binding: #{job_name}" unless job["env"] == expected_env
               raise "job-level failure suppression is not allowed: #{job_name}" if job.key?("continue-on-error")
               if job.dig("defaults", "run").is_a?(Hash) && (job.dig("defaults", "run").key?("shell") || job.dig("defaults", "run").key?("working-directory"))
                 raise "job defaults may not override shell or working directory: #{job_name}"
@@ -1013,18 +1039,29 @@ jobs:
               next unless step.is_a?(Hash)
               run_text = step["run"].to_s
               next if run_text.empty?
+              target_execution = %r{(?:\A|[;&|]\s*|\bthen\s+)(?:(?:\./)?target/|(?:python3?|ruby|node|bash|sh|zsh|source|exec|env)\s+(?:--\s+)?["']?(?:\./)?target/)}
+              if run_text.lines.any? { |line| line.match?(target_execution) }
+                raise "workflow step may not execute code from the proposed checkout"
+              end
+              if run_text.match?(/\b(?:BASH_ENV|PYTHONPATH|RUBYLIB|NODE_OPTIONS|LD_PRELOAD|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_SSH_COMMAND)\s*=/)
+                raise "workflow step may not override the trusted process environment"
+              end
               if run_text.match?(/\btrusted(?:\/|\b)/)
                 unless allowed_trusted_steps.include?(step["name"].to_s)
                   raise "untrusted workflow step references the trusted checkout"
                 end
                 trusted_token = "trusted"
-                mutation = /(?:\A|[;&|]\s*|\bthen\s+)(?:cp|copy|copyfile|dd|install|mkdir|makedirs|mv|move|rm|remove|rmdir|rmtree|touch|truncate|tee|sed|chmod)\b|\.(?:write_text|write_bytes|unlink|rename|replace|mkdir|chmod)\s*\(|\bopen\s*\([^\n]*(?:[\"'](?:w|a|x|\+)[\"'])|(?:>>?|<<)\s*[\"']?#{trusted_token}(?:\/|\b)|(?:\A|[;&|]\s*|\bthen\s+)\b(?:git|gh)\b[^\n]*(?:\b(?:reset|clean|apply|write|push|commit)\b|\bcheckout\s+(?!-))|\b(?:shutil\.)?(?:copy|copy2|copytree)\s*\([^\n]*#{trusted_token}\//
+                mutation = /(?:\A|[;&|]\s*|\bthen\s+)(?:cp|copy|copyfile|dd|install|mkdir|makedirs|mv|move|rm|remove|rmdir|rmtree|touch|truncate|tee|sed|chmod)\b|\.(?:write_text|write_bytes|unlink|rename|replace|mkdir|chmod)\s*\(|\bopen\s*\([^\n]*(?:[\"'](?:w|a|x|\+)[\"'])|(?<![=])(?:>>?|<<)\s*[\"']?#{trusted_token}(?:\/|\b)|(?:\A|[;&|]\s*|\bthen\s+)\b(?:git|gh)\b[^\n]*(?:\b(?:reset|clean|apply|write|push|commit)\b|\bcheckout\s+(?!-))|\b(?:shutil\.)?(?:copy|copy2|copytree)\s*\([^\n]*#{trusted_token}\//
                 if run_text.lines.any? { |line| !line.include?("mutation =") && line.match?(mutation) }
                   raise "workflow step can mutate the trusted checkout"
                 end
               end
-              if step["working-directory"].to_s == "trusted" || step["working-directory"].to_s.start_with?("trusted/")
+              working_directory = step["working-directory"].to_s
+              if working_directory == "trusted" || working_directory.start_with?("trusted/")
                 raise "workflow step may not execute from the trusted checkout"
+              end
+              if working_directory == "target" || working_directory.start_with?("target/")
+                raise "workflow step may not execute from the proposed checkout"
               end
             end
             gate_files_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Protect the integrity gate files" }
@@ -1051,6 +1088,12 @@ jobs:
             raise "head check publication must bind the validator outcome" unless publish_env.is_a?(Hash) && publish_env["VALIDATION_OUTCOME"].to_s == "${{ steps.validate_instructions.outcome }}"
             publish_run = publish_step["run"].to_s
             raise "head check publication may not mask failures" if publish_run.match?(/\|\|\s*true\b/)
+            conclusion_lines = publish_run.lines.map(&:strip).select { |line| line.match?(/\bconclusion=(?:success|failure)\b/) }
+            expected_conclusion_lines = [
+              "conclusion=success",
+              "test \"$VALIDATION_OUTCOME\" = success || conclusion=failure",
+            ]
+            raise "head check publication conclusion flow is not fixed to validator outcome" unless conclusion_lines == expected_conclusion_lines
             [
               "set -eu",
               "case \"$HEAD_SHA\" in",
@@ -1097,17 +1140,22 @@ jobs:
                 raise "trusted validator arguments contain a bypass flag: #{forbidden}"
               end
             end
-            %w[--trusted-policy --trusted-contract --registry-source].each do |needle|
-              raise "trusted validator command is missing #{needle}" unless command.split.include?(needle) || command.include?("#{needle} ")
+            required_validator_options = {
+              "--repo" => "target",
+              "--contract" => "target/.codex/instruction-integrity.json",
+              "--policy" => "target/.codex/instruction-policy.v1.json",
+              "--trusted-policy" => "trusted/.codex/instruction-policy.v1.json",
+              "--trusted-contract" => "trusted/.codex/instruction-integrity.json",
+              "--registry-source" => "registry-source",
+            }
+            required_validator_options.each do |option, value|
+              token = Regexp.escape(option)
+              occurrences = command.scan(/(?:\A|\s)#{token}(?:\s|=)/).length
+              raise "trusted validator command must contain exactly one #{option}" unless occurrences == 1
+              expected = /(?:\A|\s)#{token}\s+#{Regexp.escape(value)}(?:\s|\z)/
+              raise "trusted validator command must pin #{option} to #{value}" unless command.match?(expected)
             end
-            [
-              "--repo target",
-              "--contract target/.codex/instruction-integrity.json",
-              "--policy target/.codex/instruction-policy.v1.json",
-              "--expected-config-commit",
-            ].each do |needle|
-              raise "trusted validator command is missing #{needle}" unless command.include?(needle)
-            end
+            raise "trusted validator command is missing --expected-config-commit" unless command.match?(/(?:\A|\s)--expected-config-commit(?:\s|\z)/)
             raise "trusted validator command must be standalone and failure-propagating" if command.match?(/[;&|<>]/)
             raise "trusted validator command can terminate before validation" if run.lines.any? { |line| line.match?(/\b(?:exit|return|false)\s+0\b/) }
             %w[AGENTS.md .codex/global-skills.json .codex/provision_global_skills.py].each do |needle|
