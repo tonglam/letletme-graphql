@@ -14,6 +14,9 @@ type LivePublicationState =
 	| "GW_REVIEW"
 	| "FINALIZED";
 
+/** Keep large official H2H rounds off the synchronous request path. */
+export const MAX_H2H_LIVE_SCORE_ENTRIES = 500;
+
 const h2hState = (state: LivePublicationState): "scheduled" | "live" | "settled" => {
 	if (state === "LIVE_ACTIVE" || state === "BETWEEN_FIXTURES") return "live";
 	if (state === "DAY_SETTLING" || state === "GW_REVIEW" || state === "FINALIZED") return "settled";
@@ -137,6 +140,17 @@ export const loadEventLiveH2HScoreBatches = async (
 ): Promise<EventLiveH2HScoreBatch | null> => {
 	const uniqueEntryIds = [...new Set(entryIds)].sort((left, right) => left - right);
 	if (uniqueEntryIds.length === 0) return null;
+	if (uniqueEntryIds.length > MAX_H2H_LIVE_SCORE_ENTRIES) {
+		context.logger.warn(
+			{
+				eventId,
+				entryCount: uniqueEntryIds.length,
+				maxEntryCount: MAX_H2H_LIVE_SCORE_ENTRIES,
+			},
+			"Event-live H2H score request exceeds synchronous admission bound"
+		);
+		return null;
+	}
 	const chunks = chunkH2HEntryIds(uniqueEntryIds);
 	const batches: Array<EventLiveH2HScoreBatch | null> = new Array<EventLiveH2HScoreBatch | null>(
 		chunks.length

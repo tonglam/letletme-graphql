@@ -17,7 +17,7 @@ import {
 	type EntryEventTransfersData,
 	enrichTransferRows,
 } from "../entry-live/transfer-enrichment";
-import { readLivePublicationV2, type LivePublicationReadV2 } from "../entry-live/v2-service";
+import { readLivePublicationsV2, type LivePublicationReadV2 } from "../entry-live/v2-service";
 import type { Entry, EntryEventResult, EntryHistoryInfo, EntryNameUsage } from "./repository";
 import { entriesRepository } from "./repository";
 
@@ -505,31 +505,24 @@ async function buildLiveMapForEvents(
 				])
 			)
 		: null;
-	const publications = await Promise.all(
-		eventIds.map(async (eventId): Promise<LivePublicationReadV2 | null> => {
-			try {
-				return await readLivePublicationV2(context, eventId);
-			} catch (error) {
-				context.logger.warn(
-					{ err: error, eventId },
-					"Live Points V2 historical projection unavailable"
-				);
-				return null;
-			}
-		})
-	);
-	const missingEventIds = publications.flatMap((publication, index) =>
-		publication === null && eventIds[index] !== undefined ? [eventIds[index]!] : []
-	);
+	let publications = new Map<number, LivePublicationReadV2>();
+	try {
+		publications = await readLivePublicationsV2(context, eventIds);
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, eventCount: eventIds.length },
+			"Live Points V2 historical projection unavailable"
+		);
+	}
+	const missingEventIds = eventIds.filter((eventId) => !publications.has(eventId));
 	if (missingEventIds.length > 0) {
 		throw new Error(
 			"Live Points V2 historical publication unavailable for event(s): " + missingEventIds.join(",")
 		);
 	}
-	publications.forEach((publication, index) => {
-		if (!publication) return;
-		const eventId = eventIds[index];
-		if (eventId === undefined) return;
+	for (const eventId of eventIds) {
+		const publication = publications.get(eventId);
+		if (!publication) continue;
 		const allowed = allowedPlayersByEvent?.get(eventId);
 		for (const row of publication.eventLives) {
 			const playerId = row.elementId;
@@ -560,7 +553,7 @@ async function buildLiveMapForEvents(
 				totalPoints: row.totalPoints,
 			});
 		}
-	});
+	}
 
 	return result;
 }

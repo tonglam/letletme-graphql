@@ -26,6 +26,10 @@ import {
 } from "../../../src/domains/tournaments/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
 import { gqlCacheKey } from "../../../src/infra/cache-key";
+import {
+	loadEventLiveH2HScoreBatches,
+	MAX_H2H_LIVE_SCORE_ENTRIES,
+} from "../../../src/domains/tournaments/h2h-live-score-repository";
 
 const testCacheKey = (key: string): string =>
 	gqlCacheKey(
@@ -42,6 +46,25 @@ describe("live points V2 tournament contract", () => {
 		expect(source).toContain("scoreCoreRevision");
 		expect(source).not.toContain("entryLiveBatchService");
 		expect(source).not.toContain("managerLive");
+	});
+
+	it("bounds synchronous H2H score admission before projecting large rounds", async () => {
+		const context = {
+			logger: {
+				warn() {
+					return undefined;
+				},
+			},
+		} as unknown as GraphQLContext;
+		const entryIds = Array.from(
+			{ length: MAX_H2H_LIVE_SCORE_ENTRIES + 1 },
+			(_, index) => index + 1
+		);
+
+		// The bound is checked before the calculator can fan out to Redis or its
+		// PostgreSQL checkpoint fallback.
+		const result = await loadEventLiveH2HScoreBatches(context, 1, entryIds);
+		expect(result).toBeNull();
 	});
 });
 describe("projectHistoricalOfficialH2HStandings", () => {

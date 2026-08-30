@@ -403,6 +403,10 @@ const requestEventRosterMemo = new WeakMap<
 	object,
 	Map<number, Promise<ReadonlySet<number> | null>>
 >();
+const requestEventPlayerMemo = new WeakMap<
+	object,
+	Map<number, Promise<ReadonlyMap<number, CorePlayerData>>>
+>();
 const requestCoreMemo = new WeakMap<object, Promise<CoreLiveIdentitySnapshot | null>>();
 const requestEntryMemo = new WeakMap<object, Map<number, Promise<Entry>>>();
 const entryMetadataCircuit = new Map<string, number>();
@@ -893,6 +897,7 @@ const hasCompleteEventLiveRoster = (
  */
 export const EVENT_ROSTER_SQL = `
 	SELECT
+		snapshot.event_id,
 		snapshot.element_id,
 		publication.row_count AS publication_row_count,
 		publication.expected_row_count AS publication_expected_row_count
@@ -901,6 +906,53 @@ export const EVENT_ROSTER_SQL = `
 	  ON snapshot.season_id = publication.season_id
 	 AND snapshot.event_id = publication.event_id
 	WHERE publication.season_id = $1
+	  AND publication.event_id = ANY($2::integer[])
+	  AND publication.row_count = publication.expected_row_count
+	  AND publication.row_count > 0
+	  AND publication.baseline_verified_at IS NOT NULL
+	ORDER BY snapshot.event_id, snapshot.element_id
+`;
+
+/**
+ * Event-time player identity is only used when the mutable Core identity slice
+ * no longer contains a historical pick.  The complete publication header and
+ * event-scoped snapshot are the authority; current player metadata supplies
+ * labels that are not retained in player_event_snapshots itself, while an
+ * event fixture row supplies the historical club when available.
+ */
+export const EVENT_PLAYER_IDENTITY_SQL = `
+	SELECT
+		snapshot.event_id,
+		snapshot.element_id,
+		snapshot.element_type AS event_element_type,
+		snapshot.selected_by_percent,
+		publication.row_count AS publication_row_count,
+		publication.expected_row_count AS publication_expected_row_count,
+		player.code,
+		player.web_name,
+		player.first_name,
+		player.second_name,
+		COALESCE(event_fixture.team_id, player.team_id) AS team_id,
+		player.price,
+		player.start_price,
+		player.total_points
+	FROM fpl.player_event_snapshot_publications publication
+	JOIN fpl.player_event_snapshots snapshot
+	  ON snapshot.season_id = publication.season_id
+	 AND snapshot.event_id = publication.event_id
+	JOIN fpl.players player
+	  ON player.season_id = snapshot.season_id
+	 AND player.element_id = snapshot.element_id
+	LEFT JOIN LATERAL (
+		SELECT stats.team_id
+		FROM fpl.player_fixture_stats stats
+		WHERE stats.season_id = snapshot.season_id
+		  AND stats.event_id = snapshot.event_id
+		  AND stats.element_id = snapshot.element_id
+		ORDER BY stats.fixture_id
+		LIMIT 1
+	) event_fixture ON TRUE
+	WHERE publication.season_id = $1
 	  AND publication.event_id = $2
 	  AND publication.row_count = publication.expected_row_count
 	  AND publication.row_count > 0
@@ -908,25 +960,16 @@ export const EVENT_ROSTER_SQL = `
 	ORDER BY snapshot.element_id
 `;
 
-const readRedisGlobalCandidate = async (
-	redis: Redis,
+const decodeRedisGlobalCandidate = (
+	raw: string | null,
+	values: readonly (string | null)[],
 	season: string,
 	eventId: number,
 	pointer: "active" | "previous",
 	expectedPlayerIds?: ReadonlySet<number>
-): Promise<GlobalRead | null> => {
-	const publication = parseLivePublication(
-		await redis.get(liveKey(season, eventId, pointer)),
-		season,
-		eventId
-	);
-	if (!publication) return null;
-	const values = await redis.mget(
-		publication.items.eventLive.key,
-		publication.items.fixtures.key,
-		`${publication.items.eventLive.key}:meta`,
-		`${publication.items.fixtures.key}:meta`
-	);
+): GlobalRead | null => {
+	const publication = parseLivePublication(raw, season, eventId);
+	if (!publication || values.length !== 4) return null;
 	if (
 		values[2] !==
 			`${publication.items.eventLive.count}|${publication.items.eventLive.bytes}|${publication.items.eventLive.sha256}` ||
@@ -954,6 +997,65 @@ const readRedisGlobalCandidate = async (
 		fixtures,
 		servedFrom: pointer === "active" ? "REDIS_CURRENT" : "REDIS_PREVIOUS",
 	};
+};
+
+const readRedisGlobalCandidate = async (
+	redis: Redis,
+	season: string,
+	eventId: number,
+	pointer: "active" | "previous",
+	expectedPlayerIds?: ReadonlySet<number>
+): Promise<GlobalRead | null> => {
+	const raw = await redis.get(liveKey(season, eventId, pointer));
+	const publication = parseLivePublication(raw, season, eventId);
+	if (!publication) return null;
+	const values = await redis.mget(
+		publication.items.eventLive.key,
+		publication.items.fixtures.key,
+		`${publication.items.eventLive.key}:meta`,
+		`${publication.items.fixtures.key}:meta`
+	);
+	return decodeRedisGlobalCandidate(raw, values, season, eventId, pointer, expectedPlayerIds);
+};
+
+const readRedisGlobalCandidates = async (
+	redis: Redis,
+	season: string,
+	eventIds: readonly number[],
+	pointer: "active" | "previous",
+	expectedPlayerIdsByEvent: ReadonlyMap<number, ReadonlySet<number> | undefined>
+): Promise<Map<number, GlobalRead>> => {
+	const uniqueEventIds = [...new Set(eventIds)];
+	if (uniqueEventIds.length === 0) return new Map();
+	const pointerValues = await redis.mget(
+		...uniqueEventIds.map((eventId) => liveKey(season, eventId, pointer))
+	);
+	const publications = uniqueEventIds.flatMap((eventId, index) => {
+		const raw = pointerValues[index] ?? null;
+		const publication = parseLivePublication(raw, season, eventId);
+		return publication ? [{ eventId, raw, publication }] : [];
+	});
+	if (publications.length === 0) return new Map();
+	const payloadKeys = publications.flatMap(({ publication }) => [
+		publication.items.eventLive.key,
+		publication.items.fixtures.key,
+		`${publication.items.eventLive.key}:meta`,
+		`${publication.items.fixtures.key}:meta`,
+	]);
+	const payloadValues = await redis.mget(...payloadKeys);
+	const result = new Map<number, GlobalRead>();
+	publications.forEach(({ eventId, raw }, index) => {
+		const candidate = decodeRedisGlobalCandidate(
+			raw,
+			payloadValues.slice(index * 4, index * 4 + 4),
+			season,
+			eventId,
+			pointer,
+			expectedPlayerIdsByEvent.get(eventId)
+		);
+		if (candidate) result.set(eventId, candidate);
+	});
+	return result;
 };
 
 const readRedisEntryCandidate = async (
@@ -1065,8 +1167,9 @@ export const LIVE_POINTS_V2_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] =
 	{
 		name: "live-points-v2.event-roster",
 		sql: EVENT_ROSTER_SQL,
-		values: [2026, 1],
+		values: [2026, [1]],
 		resultTypes: [
+			{ relation: "fpl.player_event_snapshots", column: "event_id", pgType: "integer" },
 			{ relation: "fpl.player_event_snapshots", column: "element_id", pgType: "integer" },
 			{
 				relation: "fpl.player_event_snapshot_publications",
@@ -1078,6 +1181,36 @@ export const LIVE_POINTS_V2_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] =
 				column: "expected_row_count",
 				pgType: "integer",
 			},
+		],
+	},
+	{
+		name: "live-points-v2.event-player-identity",
+		sql: EVENT_PLAYER_IDENTITY_SQL,
+		values: [2026, 1],
+		resultTypes: [
+			{ relation: "fpl.player_event_snapshots", column: "event_id", pgType: "integer" },
+			{ relation: "fpl.player_event_snapshots", column: "element_id", pgType: "integer" },
+			{ relation: "fpl.player_event_snapshots", column: "element_type", pgType: "integer" },
+			{ relation: "fpl.player_event_snapshots", column: "selected_by_percent", pgType: "numeric" },
+			{
+				relation: "fpl.player_event_snapshot_publications",
+				column: "row_count",
+				pgType: "integer",
+			},
+			{
+				relation: "fpl.player_event_snapshot_publications",
+				column: "expected_row_count",
+				pgType: "integer",
+			},
+			{ relation: "fpl.players", column: "code", pgType: "integer" },
+			{ relation: "fpl.players", column: "web_name", pgType: "text" },
+			{ relation: "fpl.players", column: "first_name", pgType: "text" },
+			{ relation: "fpl.players", column: "second_name", pgType: "text" },
+			{ relation: "fpl.players", column: "team_id", pgType: "integer" },
+			{ relation: "fpl.players", column: "price", pgType: "integer" },
+			{ relation: "fpl.players", column: "start_price", pgType: "integer" },
+			{ relation: "fpl.players", column: "total_points", pgType: "integer" },
+			{ relation: "fpl.player_fixture_stats", column: "team_id", pgType: "integer" },
 		],
 	},
 	{
@@ -1752,6 +1885,67 @@ export const readLivePublicationV2 = async (
 	expectedScoreCoreRevision?: string
 ): Promise<LivePublicationReadV2 | null> => readGlobal(context, eventId, expectedScoreCoreRevision);
 
+/**
+ * Read several historical publications with one event-roster SQL query and
+ * batched Redis pointer/item reads.  The payloads still undergo the complete
+ * per-publication checksum validation; batching only removes avoidable
+ * request-round-trip and pool contention from season-sized transfer history.
+ */
+export const readLivePublicationsV2 = async (
+	context: GraphQLContext,
+	eventIds: readonly number[],
+	expectedScoreCoreRevision?: string
+): Promise<Map<number, LivePublicationReadV2>> => {
+	const uniqueEventIds = [...new Set(eventIds)].filter(
+		(eventId) => Number.isSafeInteger(eventId) && eventId > 0
+	);
+	if (uniqueEventIds.length === 0) return new Map();
+	const core = await readCore(context);
+	if (!core) return new Map();
+	const expectedPlayerIdsByEvent = await expectedPlayerIdsForEvents(context, uniqueEventIds, core);
+	const result = new Map<number, GlobalRead>();
+	for (const pointer of ["active", "previous"] as const) {
+		try {
+			const candidates = await readRedisGlobalCandidates(
+				context.redis,
+				context.currentSeason.seasonCode,
+				uniqueEventIds,
+				pointer,
+				expectedPlayerIdsByEvent
+			);
+			for (const [eventId, candidate] of candidates) {
+				if (
+					!result.has(eventId) &&
+					(expectedScoreCoreRevision === undefined ||
+						candidate.publication.revisions.scoreCore.revision === expectedScoreCoreRevision)
+				)
+					result.set(eventId, candidate);
+			}
+		} catch (error) {
+			context.logger.warn(
+				{ err: error, eventCount: uniqueEventIds.length, pointer },
+				"Live Points V2 batched Redis read unavailable"
+			);
+		}
+	}
+	const missingEventIds = uniqueEventIds.filter((eventId) => !result.has(eventId));
+	if (missingEventIds.length > 0) {
+		const databaseValues = await Promise.all(
+			missingEventIds.map(async (eventId) => {
+				const value = await readDatabaseGlobalMemoized(context, eventId, expectedScoreCoreRevision);
+				return [
+					eventId,
+					requireCompleteGlobalRoster(context, value, expectedPlayerIdsByEvent.get(eventId)),
+				] as const;
+			})
+		);
+		for (const [eventId, value] of databaseValues) if (value) result.set(eventId, value);
+	}
+	return new Map(
+		[...result].map(([eventId, value]) => [eventId, value as LivePublicationReadV2] as const)
+	);
+};
+
 const readRedisEntry = async (
 	context: GraphQLContext,
 	eventId: number,
@@ -1792,55 +1986,224 @@ const readCore = (context: GraphQLContext): Promise<CoreLiveIdentitySnapshot | n
 };
 
 type EventRosterRow = Row & {
+	event_id: unknown;
 	element_id: unknown;
 	publication_row_count: unknown;
 	publication_expected_row_count: unknown;
 };
 
-const readEventScopedRoster = async (
+const eventRosterFromRows = (rows: readonly EventRosterRow[]): ReadonlySet<number> | null => {
+	if (rows.length === 0) return null;
+	const first = rows[0]!;
+	const rowCount = integer(first.publication_row_count);
+	const expectedRowCount = integer(first.publication_expected_row_count);
+	const playerIds = rows.map((row) => integer(row.element_id));
+	if (
+		rowCount === null ||
+		expectedRowCount === null ||
+		rowCount <= 0 ||
+		rowCount !== expectedRowCount ||
+		rows.length !== expectedRowCount ||
+		playerIds.some((playerId) => playerId === null || playerId <= 0) ||
+		new Set(playerIds).size !== playerIds.length
+	)
+		return null;
+	return new Set(playerIds as number[]);
+};
+
+const readEventScopedRosters = async (
 	context: GraphQLContext,
-	eventId: number
-): Promise<ReadonlySet<number> | null> => {
+	eventIds: readonly number[]
+): Promise<Map<number, ReadonlySet<number> | undefined>> => {
+	const uniqueEventIds = [...new Set(eventIds)].filter(
+		(eventId) => Number.isSafeInteger(eventId) && eventId > 0
+	);
+	const result = new Map<number, ReadonlySet<number> | undefined>();
+	if (uniqueEventIds.length === 0) return result;
 	const scope = requestScope(context);
 	let memo = requestEventRosterMemo.get(scope);
 	if (!memo) {
 		memo = new Map();
 		requestEventRosterMemo.set(scope, memo);
 	}
+	const missingEventIds = uniqueEventIds.filter((eventId) => !memo!.has(eventId));
+	if (missingEventIds.length > 0) {
+		try {
+			const query = await context.database.query<EventRosterRow>(EVENT_ROSTER_SQL, [
+				context.currentSeason.seasonId,
+				missingEventIds,
+			]);
+			const rowsByEvent = new Map<number, EventRosterRow[]>();
+			for (const row of query.rows) {
+				const eventId = integer(row.event_id);
+				if (eventId === null || !missingEventIds.includes(eventId)) continue;
+				const rows = rowsByEvent.get(eventId) ?? [];
+				rows.push(row);
+				rowsByEvent.set(eventId, rows);
+			}
+			for (const eventId of missingEventIds) {
+				memo.set(eventId, Promise.resolve(eventRosterFromRows(rowsByEvent.get(eventId) ?? [])));
+			}
+		} catch (error) {
+			for (const eventId of missingEventIds) memo.set(eventId, Promise.resolve(null));
+			context.logger.warn(
+				{ err: error, eventIds: missingEventIds },
+				"Historical Live Points V2 event rosters unavailable"
+			);
+		}
+	}
+	for (const eventId of uniqueEventIds) {
+		const roster = await memo.get(eventId)!;
+		result.set(eventId, roster ?? undefined);
+	}
+	return result;
+};
+
+type EventPlayerIdentityRow = Row & {
+	event_id: unknown;
+	element_id: unknown;
+	event_element_type: unknown;
+	selected_by_percent: unknown;
+	publication_row_count: unknown;
+	publication_expected_row_count: unknown;
+	code: unknown;
+	web_name: unknown;
+	first_name: unknown;
+	second_name: unknown;
+	team_id: unknown;
+	price: unknown;
+	start_price: unknown;
+	total_points: unknown;
+};
+
+const nullableText = (value: unknown): string | null =>
+	value === null || value === undefined ? null : typeof value === "string" ? value : null;
+
+const nullableDecimal = (value: unknown): number | null => {
+	if (value === null || value === undefined) return null;
+	const parsed = typeof value === "number" ? value : Number(value);
+	return Number.isFinite(parsed) ? parsed : null;
+};
+
+const readEventScopedPlayers = async (
+	context: GraphQLContext,
+	eventId: number
+): Promise<ReadonlyMap<number, CorePlayerData>> => {
+	const scope = requestScope(context);
+	let memo = requestEventPlayerMemo.get(scope);
+	if (!memo) {
+		memo = new Map();
+		requestEventPlayerMemo.set(scope, memo);
+	}
 	const existing = memo.get(eventId);
 	if (existing) return existing;
-	const load = (async (): Promise<ReadonlySet<number> | null> => {
+	const load = (async (): Promise<ReadonlyMap<number, CorePlayerData>> => {
 		try {
-			const result = await context.database.query<EventRosterRow>(EVENT_ROSTER_SQL, [
-				context.currentSeason.seasonId,
-				eventId,
-			]);
-			if (result.rows.length === 0) return null;
+			const result = await context.database.query<EventPlayerIdentityRow>(
+				EVENT_PLAYER_IDENTITY_SQL,
+				[context.currentSeason.seasonId, eventId]
+			);
+			if (result.rows.length === 0) return new Map();
 			const first = result.rows[0]!;
 			const rowCount = integer(first.publication_row_count);
 			const expectedRowCount = integer(first.publication_expected_row_count);
-			const playerIds = result.rows.map((row) => integer(row.element_id));
 			if (
 				rowCount === null ||
 				expectedRowCount === null ||
 				rowCount <= 0 ||
 				rowCount !== expectedRowCount ||
 				result.rows.length !== expectedRowCount ||
-				playerIds.some((playerId) => playerId === null || playerId <= 0) ||
-				new Set(playerIds).size !== playerIds.length
+				result.rows.some((row) => integer(row.event_id) !== eventId)
 			)
-				return null;
-			return new Set(playerIds as number[]);
+				return new Map();
+			const players = new Map<number, CorePlayerData>();
+			for (const row of result.rows) {
+				const id = integer(row.element_id);
+				const type = integer(row.event_element_type);
+				const code = integer(row.code);
+				const teamId = integer(row.team_id);
+				const price = integer(row.price);
+				const startPrice = integer(row.start_price);
+				const totalPoints = integer(row.total_points);
+				const webName = nullableText(row.web_name);
+				if (
+					id === null ||
+					id <= 0 ||
+					type === null ||
+					type <= 0 ||
+					code === null ||
+					code <= 0 ||
+					teamId === null ||
+					teamId <= 0 ||
+					price === null ||
+					price < 0 ||
+					startPrice === null ||
+					startPrice < 0 ||
+					totalPoints === null ||
+					webName === null ||
+					webName.trim().length === 0 ||
+					players.has(id)
+				)
+					return new Map();
+				players.set(id, {
+					id,
+					code,
+					type,
+					teamId,
+					price,
+					startPrice,
+					firstName: nullableText(row.first_name),
+					secondName: nullableText(row.second_name),
+					webName,
+					totalPoints,
+					selectedByPercent: nullableDecimal(row.selected_by_percent),
+				});
+			}
+			return players.size === expectedRowCount ? players : new Map();
 		} catch (error) {
 			context.logger.warn(
 				{ err: error, eventId },
-				"Historical Live Points V2 event roster unavailable"
+				"Historical Live Points V2 event player identities unavailable"
 			);
-			return null;
+			return new Map();
 		}
 	})();
 	memo.set(eventId, load);
 	return load;
+};
+
+const expectedPlayerIdsForEvents = async (
+	context: GraphQLContext,
+	eventIds: readonly number[],
+	core: CoreLiveIdentitySnapshot
+): Promise<Map<number, ReadonlySet<number> | undefined>> => {
+	const uniqueEventIds = [...new Set(eventIds)];
+	const corePlayerIds = new Set(core.players.map((player) => player.id));
+	const result = new Map<number, ReadonlySet<number> | undefined>();
+	if (uniqueEventIds.length === 0) return result;
+	const eventSnapshot = await getCoreEventSnapshot(context).catch((error) => {
+		context.logger.warn(
+			{ err: error, eventIds: uniqueEventIds },
+			"Live Points V2 event lifecycle unavailable"
+		);
+		return null;
+	});
+	if (!eventSnapshot) {
+		for (const eventId of uniqueEventIds) result.set(eventId, corePlayerIds);
+		return result;
+	}
+	const historicalEventIds: number[] = [];
+	for (const eventId of uniqueEventIds) {
+		const event = eventSnapshot.events.find((candidate) => candidate.id === eventId);
+		const historical =
+			event?.finished === true ||
+			(eventSnapshot.currentEventId !== null && eventId < eventSnapshot.currentEventId);
+		if (historical) historicalEventIds.push(eventId);
+		else result.set(eventId, corePlayerIds);
+	}
+	const historicalRosters = await readEventScopedRosters(context, historicalEventIds);
+	for (const eventId of historicalEventIds) result.set(eventId, historicalRosters.get(eventId));
+	return result;
 };
 
 const expectedPlayerIdsForEvent = async (
@@ -1848,23 +2211,11 @@ const expectedPlayerIdsForEvent = async (
 	eventId: number,
 	core: CoreLiveIdentitySnapshot
 ): Promise<ReadonlySet<number> | undefined> => {
-	const corePlayerIds = new Set(core.players.map((player) => player.id));
-	const eventSnapshot = await getCoreEventSnapshot(context).catch((error) => {
-		context.logger.warn({ err: error, eventId }, "Live Points V2 event lifecycle unavailable");
-		return null;
-	});
-	if (!eventSnapshot) return corePlayerIds;
-	const event = eventSnapshot.events.find((candidate) => candidate.id === eventId);
-	const historical =
-		event?.finished === true ||
-		(eventSnapshot.currentEventId !== null && eventId < eventSnapshot.currentEventId);
-	if (!historical) return corePlayerIds;
-
 	// A missing historical roster must not be replaced with today's core set:
 	// that would reject a valid old publication when players have since joined.
 	// The producer's complete publication proof remains the availability-first
 	// fallback until the event-scoped snapshot can be read again.
-	return (await readEventScopedRoster(context, eventId)) ?? undefined;
+	return (await expectedPlayerIdsForEvents(context, [eventId], core)).get(eventId);
 };
 
 const emptyEntry = (entryId: number): Entry => ({
@@ -1981,6 +2332,18 @@ const fixtureHasStarted = (fixture: FixtureRow): boolean =>
 const fixtureHasFinished = (fixture: FixtureRow): boolean =>
 	fixture.finished || fixture.finishedProvisional;
 
+const playerFixturesAreFinished = (
+	player: CorePlayerData,
+	live: EventLiveRow | undefined,
+	fixtures: readonly FixtureRow[]
+): boolean => {
+	const playerFixtures = eventFixturesForPlayer(fixtures, player);
+	if (playerFixtures.length === 0) {
+		return Array.isArray(live?.fixtureBreakdown) && live.fixtureBreakdown.length === 0;
+	}
+	return playerFixtures.every(fixtureHasFinished);
+};
+
 const playStatusForPlayer = (
 	playerFixtures: readonly FixtureRow[],
 	live: EventLiveRow | undefined
@@ -2056,11 +2419,7 @@ const playerHasCompletedEvent = (
 	live: EventLiveRow | undefined,
 	fixtures: readonly FixtureRow[]
 ): boolean => {
-	if (played(live)) return false;
-	const playerFixtures = eventFixturesForPlayer(fixtures, player);
-	if (playerFixtures.length === 0)
-		return Array.isArray(live?.fixtureBreakdown) && live!.fixtureBreakdown!.length === 0;
-	return playerFixtures.every((fixture) => fixture.finished || fixture.finishedProvisional);
+	return !played(live) && playerFixturesAreFinished(player, live, fixtures);
 };
 
 type Lineup = {
@@ -2263,7 +2622,10 @@ const mapPick = (params: {
 		.map((item) => item.opponentTeam?.shortName ?? "")
 		.filter(Boolean);
 	const isGwStarted = playerFixtures.some(fixtureHasStarted);
-	const allFinished = playerHasCompletedEvent(player, live, fixtures);
+	// A played player is complete when the player's fixture(s) are complete too.
+	// playerHasCompletedEvent intentionally excludes played players because it is
+	// used for DNP/auto-sub/captain promotion decisions, not fixture progress.
+	const allFinished = playerFixturesAreFinished(player, live, fixtures);
 	const isActive = lineup.active.has(pick.element);
 	// A projected automatic-substitution entrant normally has the bench's base
 	// multiplier (zero). Once the entrant is promoted into the XI, FPL scoring
@@ -2469,10 +2831,21 @@ const buildReady = async (
 	const liveByElement = new Map(global.eventLives.map((row) => [row.elementId, row]));
 	const fixtures = global.fixtures;
 	const missingPlayers = projectionPicks.filter((pick) => !players.has(pick.element));
+	if (missingPlayers.length > 0) {
+		// Historical event publications can contain players that are no longer in
+		// today's mutable Core identity slice.  Rehydrate the complete event-time
+		// identity once for this request before declaring the projection incomplete.
+		const eventPlayers = await readEventScopedPlayers(context, global.publication.eventId);
+		for (const pick of missingPlayers) {
+			const eventPlayer = eventPlayers.get(pick.element);
+			if (eventPlayer) players.set(pick.element, eventPlayer);
+		}
+	}
+	const unresolvedPlayers = projectionPicks.filter((pick) => !players.has(pick.element));
 	const missingLiveRows = projectionPicks.filter((pick) => !liveByElement.has(pick.element));
-	if (missingPlayers.length > 0 || missingLiveRows.length > 0) {
+	if (unresolvedPlayers.length > 0 || missingLiveRows.length > 0) {
 		throw new Error(
-			`INCOMPLETE_ROSTER_OR_EVENT_LIVE players=${missingPlayers.length} rows=${missingLiveRows.length}`
+			`INCOMPLETE_ROSTER_OR_EVENT_LIVE players=${unresolvedPlayers.length} rows=${missingLiveRows.length}`
 		);
 	}
 	const eventPlayers = new Map<number, CorePlayerData>();
