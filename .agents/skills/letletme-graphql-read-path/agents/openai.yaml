@@ -1,4 +1,4 @@
 interface:
   display_name: "LetLetMe GraphQL Read Path"
   short_description: "Trace ingress, authorization, reads, caches, and contracts"
-  default_prompt: "Audit or change this LetLetMe GraphQL read path with repository-specific trust and contract gates."
+  default_prompt: "Use $letletme-graphql-read-path to audit or change this LetLetMe GraphQL read path with repository-specific trust and contract gates."

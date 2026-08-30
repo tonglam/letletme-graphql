@@ -26,3 +26,10 @@
 - Use `$letletme-graphql-read-path` for ingress, auth, schema/domain, read-model, publication/fallback, cache, or rate-limit work. Use `$letletme-stack-audit` when a behavior or contract crosses Data/Web/Mini/Ops, and `$letletme-release-acceptance` for an authorized end-to-end release.
 - Deployment uses immutable blue/green slots and the checked-in remote deploy workflow. Liveness is not acceptance: verify exact image/SHA, `/health/ready`, startup/database contract, trusted public query, relevant revision, and representative Web/Mini behavior.
 - Never log or retain tokens, signed envelopes, cookies, bearer values, raw identities, variables, full queries, IPs, or production connection strings. Preserve existing fingerprints and controlled-dimension observability.
+
+## Governance and review
+
+- Global routes in `.codex/global-skills.json` resolve through the versioned `/Users/tong/.codex` mount. If it is unavailable, stop and report the missing dependency.
+- Use `$gh-codex-review-loop` for PR work. A review may be skipped only after two consecutive explicit quota-limit responses for the unchanged head; record both responses and the exact SHA. This never waives CI, findings, or cleanup.
+- Every P0-P3 finding must be dispositioned and its thread resolved. Only a finding confined to tests/scripts gets the time exception: implement P0/P1, and explain plus resolve P2/P3 without implementation time. P2/P3 anywhere else must be actually fixed and verified.
+- After merge, clean only the exact corresponding worktree, local branch, and remote branch after verifying identity; leave unrelated WIP untouched.
