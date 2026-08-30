@@ -216,6 +216,20 @@ type EntryRead = {
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "POSTGRES_CHECKPOINT";
 };
 
+const entryMatchesGlobal = (entry: EntryRead, global: GlobalRead): boolean => {
+	const finalized = global.publication.state === "FINALIZED";
+	return finalized
+		? entry.publication.state === "FINAL" && entry.input.finalResult !== null
+		: entry.publication.state === "PROVISIONAL" && entry.input.finalResult === null;
+};
+
+const lkgMatchesGlobal = (value: LiveCalcDataV2, global: GlobalRead): boolean =>
+	value.event === global.publication.eventId &&
+	value.snapshot.state === global.publication.state &&
+	(global.publication.state === "FINALIZED"
+		? value.score.calculationMode === "FINAL_RESULT"
+		: value.score.calculationMode === "PROJECTED_AUTOSUBS");
+
 export type LiveRevisionVectorV2 = {
 	publicationId: string;
 	generation: number;
@@ -1475,7 +1489,8 @@ const readDatabaseEntry = async (
 	context: GraphQLContext,
 	season: string,
 	eventId: number,
-	entryId: number
+	entryId: number,
+	global: GlobalRead
 ): Promise<EntryRead | null> => {
 	try {
 		const result = await context.database.query<Row>(ENTRY_CHECKPOINT_SQL, [
@@ -1483,7 +1498,8 @@ const readDatabaseEntry = async (
 			[entryId],
 			eventId,
 		]);
-		return parseDatabaseEntryRow(season, eventId, entryId, result.rows[0]);
+		const parsed = parseDatabaseEntryRow(season, eventId, entryId, result.rows[0]);
+		return parsed && entryMatchesGlobal(parsed, global) ? parsed : null;
 	} catch (error) {
 		context.logger.warn(
 			{ err: error, entryId, eventId },
@@ -1497,7 +1513,8 @@ const readDatabaseEntries = async (
 	context: GraphQLContext,
 	season: string,
 	eventId: number,
-	entryIds: readonly number[]
+	entryIds: readonly number[],
+	global: GlobalRead
 ): Promise<Map<number, EntryRead>> => {
 	const uniqueIds = [...new Set(entryIds)].filter(
 		(entryId) => Number.isSafeInteger(entryId) && entryId > 0
@@ -1515,7 +1532,7 @@ const readDatabaseEntries = async (
 			const entryId = integer(row.entry_id);
 			if (entryId === null || !requested.has(entryId)) continue;
 			const parsed = parseDatabaseEntryRow(season, eventId, entryId, row);
-			if (parsed) entries.set(entryId, parsed);
+			if (parsed && entryMatchesGlobal(parsed, global)) entries.set(entryId, parsed);
 		}
 		return entries;
 	} catch (error) {
@@ -1617,26 +1634,21 @@ export const readLivePublicationV2 = async (
 const readRedisEntry = async (
 	context: GraphQLContext,
 	eventId: number,
-	entryId: number
+	entryId: number,
+	global: GlobalRead
 ): Promise<EntryRead | null> => {
 	const season = context.currentSeason.seasonCode;
 	try {
-		const current = await readRedisEntryCandidate(
-			context.redis,
-			season,
-			eventId,
-			entryId,
-			"active"
-		);
-		if (current) return current;
-		const previous = await readRedisEntryCandidate(
-			context.redis,
-			season,
-			eventId,
-			entryId,
-			"previous"
-		);
-		if (previous) return previous;
+		for (const pointer of ["active", "previous"] as const) {
+			const candidate = await readRedisEntryCandidate(
+				context.redis,
+				season,
+				eventId,
+				entryId,
+				pointer
+			);
+			if (candidate && entryMatchesGlobal(candidate, global)) return candidate;
+		}
 	} catch (error) {
 		context.logger.warn(
 			{ err: error, eventId, entryId },
@@ -2663,15 +2675,17 @@ export const calcLivePointsByEntryV2 = async (
 		options.scoreCoreRevision ?? "current",
 	].join(":");
 	const redisGlobal = await readRedisGlobal(context, eventId, options.scoreCoreRevision);
-	const processLkg = readLiveLkg(lkgKey);
+	const lkgCandidate = readLiveLkg(lkgKey);
 	// The fallback order is intentional: a process LKG is a complete response
 	// for this exact event/entry and is safer than a cold database read that may
 	// combine metadata from a different publication.
 	const global =
 		redisGlobal ??
-		(processLkg
+		(lkgCandidate
 			? null
 			: await readDatabaseGlobalMemoized(context, eventId, options.scoreCoreRevision));
+	const processLkg =
+		lkgCandidate && (!global || lkgMatchesGlobal(lkgCandidate, global)) ? lkgCandidate : null;
 	if (!global) {
 		return observeLivePointsResult(
 			processLkg
@@ -2687,13 +2701,15 @@ export const calcLivePointsByEntryV2 = async (
 	}
 	const hasPrefetchedEntry = Object.prototype.hasOwnProperty.call(options, "prefetchedEntry");
 	const redisEntry = hasPrefetchedEntry
-		? (options.prefetchedEntry ?? null)
-		: await readRedisEntry(context, eventId, entryId);
+		? options.prefetchedEntry && entryMatchesGlobal(options.prefetchedEntry, global)
+			? options.prefetchedEntry
+			: null
+		: await readRedisEntry(context, eventId, entryId, global);
 	const entryRead =
 		redisEntry ??
 		(hasPrefetchedEntry || processLkg
 			? null
-			: await readDatabaseEntry(context, context.currentSeason.seasonCode, eventId, entryId));
+			: await readDatabaseEntry(context, context.currentSeason.seasonCode, eventId, entryId, global));
 	if (!entryRead) {
 		return observeLivePointsResult(
 			processLkg
@@ -2760,12 +2776,20 @@ export const calcLivePointsForEntriesV2 = async (
 					entryId,
 					options.scoreCoreRevision ?? "current",
 				].join(":");
-				if (readLiveLkg(lkgKey)) {
+				// Probe Redis before consulting process LKG. A warmed LKG is only a
+				// fallback; it must never suppress a newer healthy entry input.
+				const redisEntry = await readRedisEntry(context, eventId, entryId, global);
+				if (redisEntry) {
+					prefetchedEntries.set(entryId, redisEntry);
+					continue;
+				}
+				const lkg = readLiveLkg(lkgKey);
+				if (lkg && lkgMatchesGlobal(lkg, global)) {
 					processLkgEntryIds.add(entryId);
 					prefetchedEntries.set(entryId, null);
 					continue;
 				}
-				prefetchedEntries.set(entryId, await readRedisEntry(context, eventId, entryId));
+				prefetchedEntries.set(entryId, null);
 			}
 		};
 		await Promise.all(Array.from({ length: concurrency }, () => probeWorker()));
@@ -2776,7 +2800,8 @@ export const calcLivePointsForEntriesV2 = async (
 			context,
 			context.currentSeason.seasonCode,
 			eventId,
-			databaseFallbackIds
+			databaseFallbackIds,
+			global
 		);
 		for (const entryId of databaseFallbackIds)
 			prefetchedEntries.set(entryId, databaseEntries.get(entryId) ?? null);

@@ -293,6 +293,23 @@ describe("Live Points V2 projection", () => {
 		expect(result.pickList).toHaveLength(15);
 	});
 
+	it("probes Redis entry input before using a warmed process LKG", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		const entryPointerReads: string[] = [];
+		const originalGet = redis.get;
+		redis.get = async (key: string) => {
+			if (key.includes(":entry-live:")) entryPointerReads.push(key);
+			return originalGet(key);
+		};
+		await calcLivePointsByEntryV2(buildSnapshotContext(redis), 1, 6953);
+		entryPointerReads.length = 0;
+
+		const result = await calcLivePointsForEntriesV2(buildSnapshotContext(redis), 1, [6953]);
+		expect(result.results.get(6953)?.availability).toBe("READY");
+		expect(entryPointerReads).toContain("llm:data:v2:fpl:entry-live:2627:1:6953:active");
+	});
+
 	it("does not turn an input miss into NO_PICKS", async () => {
 		clearLivePointsV2Lkg();
 		const redis = buildV2Redis();
