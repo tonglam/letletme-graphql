@@ -1,0 +1,38 @@
+name: instruction-integrity
+
+on:
+  pull_request:
+    paths:
+      - AGENTS.md
+      - .agents/**
+      - .codex/**
+      - .github/workflows/instruction-integrity.yml
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - AGENTS.md
+      - .agents/**
+      - .codex/**
+      - .github/workflows/instruction-integrity.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: instruction-integrity-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: instruction-integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Validate AGENTS.md and skills
+        run: python3 .codex/validate_instructions.py --repo . --contract .codex/instruction-integrity.json --policy .codex/instruction-policy.v1.json --json
