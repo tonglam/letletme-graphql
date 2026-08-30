@@ -79,6 +79,8 @@ export const trendsTypeDefs = /* GraphQL */ `
 		teamShortName: String!
 		count: Int!
 		percentage: Float
+		isCaptain: Boolean
+		isViceCaptain: Boolean
 	}
 
 	type TrendCapabilitySection {

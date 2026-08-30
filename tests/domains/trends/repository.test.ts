@@ -47,7 +47,7 @@ describe("Trends revisioned cache", () => {
 			.update("7:2026:10|7:abc", "utf8")
 			.digest("hex")
 			.slice(0, 24)}`;
-		expect(keys.some((key) => key.includes(":trends-v3:"))).toBe(true);
+		expect(keys.some((key) => key.includes(":trends-v4:"))).toBe(true);
 		expect(keys.some((key) => key.includes(`:${revisionKey}:`))).toBe(true);
 	});
 
@@ -68,7 +68,7 @@ describe("Trends revisioned cache", () => {
 		]);
 		await trendsRepository.listCohorts(context, "PUBLIC");
 		const payloadKey = [...values.keys()].find(
-			(key) => key.includes(":trends-v3:") && !key.includes(":pointer:")
+			(key) => key.includes(":trends-v4:") && !key.includes(":pointer:")
 		);
 		expect(payloadKey).toBeDefined();
 		values.set(payloadKey!, JSON.stringify({ invalid: true }));
@@ -81,7 +81,12 @@ describe("Trends revisioned cache", () => {
 
 describe("Trends private access", () => {
 	type TestTrendSection = {
-		rows: Array<{ percentage: number | null }> | null;
+		rows: Array<{
+			elementId?: number;
+			percentage: number | null;
+			isCaptain?: boolean;
+			isViceCaptain?: boolean;
+		}> | null;
 		evidenceContext: {
 			denominator: number | null;
 			limitations: string[];
@@ -117,6 +122,7 @@ describe("Trends private access", () => {
 	const aggregateCapabilities = [
 		"OWNERSHIP",
 		"EFFECTIVE_OWNERSHIP",
+		"TEMPLATE",
 		"CAPTAINCY",
 		"VICE_CAPTAINCY",
 		"TRANSFERS",
@@ -177,12 +183,60 @@ describe("Trends private access", () => {
 		await trendsRepository.snapshot(context, "competition:7", 1, 12, "MINE");
 
 		expect(calls).toHaveLength(2);
-		expect(calls[1]?.sql.match(/UNION ALL/g)).toHaveLength(5);
+		expect(calls[1]?.sql.match(/UNION ALL/g)).toHaveLength(6);
 		expect(calls[1]?.sql.match(/LIMIT \$2/g)).toHaveLength(5);
+		expect(calls[1]?.sql).toContain("LIMIT 1000");
 		expect(calls[1]?.sql.trim()).toEndWith(
 			"ORDER BY capability, count DESC NULLS LAST, pick_position ASC NULLS LAST, element_id"
 		);
 		expect(calls[1]?.params).toEqual([99, 12, 2025, 123, 1]);
+	});
+
+	it("returns a valid 15-player template with captain and vice-captain markers", async () => {
+		const positions = [1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4];
+		const teams = ["ARS", "BHA", "BRE", "CHE", "LIV"];
+		const templateCandidates = positions.map((playerPosition, index) => ({
+			element_id: index + 1,
+			player_name: `Template Player ${index + 1}`,
+			player_position: playerPosition,
+			team_short_name: teams[index % teams.length],
+			count: 100 - index,
+			captain_count: index === 2 ? 100 : 20 - index,
+			vice_captain_count: index === 3 ? 100 : 20 - index,
+		}));
+
+		const payload = await trendsRepository.snapshot(
+			snapshotContext(personalRows(15), templateCandidates),
+			"competition:7",
+			1,
+			12,
+			"MINE"
+		);
+		const section = payload.sections.find((item) => item.capability === "TEMPLATE") as
+			TestTrendSection | undefined;
+
+		expect(section).toMatchObject({ state: "READY", evidenceContext: { denominator: 6 } });
+		expect(section?.rows).toHaveLength(15);
+		expect(section?.rows?.filter((row) => row.isCaptain)).toHaveLength(1);
+		expect(section?.rows?.filter((row) => row.isViceCaptain)).toHaveLength(1);
+		expect(section?.rows?.find((row) => row.isCaptain)?.elementId).toBe(3);
+		expect(section?.rows?.find((row) => row.isViceCaptain)?.elementId).toBe(4);
+	});
+
+	it("keeps the template unavailable until ownership and both role captures are ready", async () => {
+		const { context } = makeContext([
+			{
+				...snapshotCohort,
+				captaincy_state: "NOT_READY",
+			},
+		]);
+
+		const payload = await trendsRepository.listCohorts(context, "PUBLIC");
+		const template = payload.cohorts[0]?.capabilities.find(
+			(item) => item.capability === "TEMPLATE"
+		);
+
+		expect(template).toEqual({ capability: "TEMPLATE", state: "NOT_READY" });
 	});
 
 	it("recomputes aggregate percentages from the evidence denominator", async () => {
