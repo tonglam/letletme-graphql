@@ -349,6 +349,7 @@ export const validateDirectDataSqlContract = async (database: QueryExecutor): Pr
 					const aggregateCapabilities = new Set([
 						"OWNERSHIP",
 						"EFFECTIVE_OWNERSHIP",
+						"TEMPLATE",
 						"CAPTAINCY",
 						"VICE_CAPTAINCY",
 						"TRANSFERS",

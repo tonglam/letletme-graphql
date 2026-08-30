@@ -492,6 +492,7 @@ const mockTrendsPersonalRows = Array.from({ length: 15 }, (_, index) => ({
 const mockTrendsAggregateRows = [
 	"OWNERSHIP",
 	"EFFECTIVE_OWNERSHIP",
+	"TEMPLATE",
 	"CAPTAINCY",
 	"VICE_CAPTAINCY",
 	"TRANSFERS",
