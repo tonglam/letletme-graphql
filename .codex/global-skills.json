@@ -1,5 +1,5 @@
 {
   "version": 1,
-  "registry": "/Users/tong/.codex/workspace-assets.json",
+  "registry": {"repository": "tonglam/codex-workspace-config", "ref": "42d1af4", "path": "registry/workspace-assets.json"},
   "skills": ["workspace-instruction-audit", "gh-codex-review-loop", "letletme-stack-audit", "letletme-release-acceptance"]
 }

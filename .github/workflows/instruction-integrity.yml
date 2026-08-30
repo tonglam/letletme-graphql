@@ -1,6 +1,14 @@
 name: instruction-integrity
 
 on:
+  # pull_request is a minimal, secret-free bootstrap check. Once this workflow
+  # exists on the base branch, pull_request_target is the blocking trusted gate.
+  pull_request:
+    paths:
+      - AGENTS.md
+      - .agents/**
+      - .codex/**
+      - .github/workflows/instruction-integrity.yml
   # The base-branch workflow is trusted; the proposed checkout is data only.
   pull_request_target:
   push:
@@ -12,11 +20,33 @@ permissions:
   contents: read
 
 concurrency:
-  group: instruction-integrity-${{ github.repository }}-${{ github.ref }}
+  group: instruction-integrity-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
+  bootstrap:
+    if: github.event_name == 'pull_request'
+    name: instruction-integrity-bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout proposed tree (read-only)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: target
+          persist-credentials: false
+      - name: Require the governance scaffold
+        working-directory: target
+        run: |
+          test -s AGENTS.md
+          test -s .codex/global-skills.json
+          test -s .codex/instruction-integrity.json
+          test -s .codex/validate_instructions.py
+          test -s .codex/instruction-policy.v1.json
+          test -s .github/workflows/instruction-integrity.yml
   validate:
+    if: github.event_name == 'pull_request_target' || github.event_name == 'push'
     name: instruction-integrity
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -36,6 +66,24 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.x'
+      - name: Protect the integrity gate files
+        run: |
+          for file in \
+            .github/workflows/instruction-integrity.yml \
+            .codex/validate_instructions.py \
+            .codex/instruction-policy.v1.json \
+            .codex/instruction-integrity.json \
+            .codex/global-skills.json; do
+            if test -e "trusted/$file"; then
+              test -f "target/$file"
+              cmp -s "trusted/$file" "target/$file" || {
+                echo "governance gate file changed: $file"
+                exit 1
+              }
+            else
+              test -s "target/$file"
+            fi
+          done
       - name: Validate AGENTS.md and skills
         run: |
           expected_config_commit="$(python3 -c 'import json; print(json.load(open("trusted/.codex/instruction-integrity.json", encoding="utf-8"))["canonical_config_commit"])')"

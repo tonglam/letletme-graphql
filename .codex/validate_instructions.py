@@ -26,6 +26,7 @@ REFERENCE_DEF_RE = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(<[^>]*>|[^\s]+)", re.M)
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 SECRET_VALUE_RES = (
     re.compile(r"(?i)\b(?:api[_ -]?key|access[_ -]?token|private[_ -]?key|client[_ -]?secret|password)\b\s*[:=]\s*([^\s`<>]+)"),
+    re.compile(r"(?i)\b(?:notification[_ -]?api[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)\b\s*[:=]\s*([^\s`<>]+)"),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{20,})\b"),
 )
@@ -57,6 +58,12 @@ REVIEW_RULE_KEYS = {
     "all_other_paths",
     "all_findings",
     "post_merge_cleanup",
+}
+GLOBAL_MANIFEST_KEYS = {"version", "registry", "skills"}
+GLOBAL_REGISTRY_DESCRIPTOR = {
+    "repository": "tonglam/codex-workspace-config",
+    "ref": "42d1af4",
+    "path": "registry/workspace-assets.json",
 }
 IGNORED_PARTS = {".git", "node_modules", ".next", "dist", "build", "coverage", "archive", "output"}
 
@@ -98,7 +105,7 @@ def _strip_yaml_comment(value: str) -> str:
     return value.rstrip()
 
 
-def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool = False) -> str:
+def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool = False) -> Any:
     value = _strip_yaml_comment(value.strip())
     if not value:
         raise ValueError(f"{path}:{line_number}: empty YAML value")
@@ -118,6 +125,18 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
     if value[0] not in "[{":
         # Apostrophes and brackets are ordinary characters in a YAML plain
         # scalar (for example, "user's route" or "[locale]").
+        if re.fullmatch(r"(?i)(?:null|~)", value):
+            if scalar_only:
+                raise ValueError(f"{path}:{line_number}: YAML null is not a string scalar")
+            return None
+        if re.fullmatch(r"(?i)(?:true|false)", value):
+            if scalar_only:
+                raise ValueError(f"{path}:{line_number}: YAML boolean is not a string scalar")
+            return value.casefold() == "true"
+        if re.fullmatch(r"[-+]?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", value):
+            if scalar_only:
+                raise ValueError(f"{path}:{line_number}: YAML number is not a string scalar")
+            return float(value) if "." in value else int(value)
         return value
     if scalar_only:
         raise ValueError(f"{path}:{line_number}: expected a scalar YAML value")
@@ -233,6 +252,8 @@ def resolve_path(
     root = repo.resolve()
     if not allow_external and not _is_within(resolved, root):
         raise ValueError(f"required instruction path escapes the repository: {value}")
+    if not allow_external and candidate.is_symlink():
+        raise ValueError(f"required instruction path may not be a symlink: {value}")
     return resolved
 
 
@@ -309,7 +330,10 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
     if not include_discovery:
         return []
     paths: set[Path] = set()
-    for pattern in ("AGENTS.md", ".agents/**/AGENTS.md", ".agents/**/SKILL.md", "skills/**/SKILL.md"):
+    for path in repo.rglob("AGENTS.md"):
+        if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
+            paths.add(path.resolve())
+    for pattern in (".agents/**/SKILL.md", "skills/**/SKILL.md"):
         for path in repo.glob(pattern):
             if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
                 paths.add(path.resolve())
@@ -324,6 +348,15 @@ def _validate_instruction_file(
     *,
     allow_external: bool = False,
 ) -> None:
+    if not allow_external:
+        try:
+            resolved = path.resolve()
+        except OSError as exc:
+            errors.append(f"{path}: cannot resolve instruction path: {exc}")
+            return
+        if path.is_symlink() or not _is_within(resolved, repo.resolve()):
+            errors.append(f"{path}: instruction path must remain inside the repository and may not be a symlink")
+            return
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -347,9 +380,12 @@ def _validate_instruction_file(
                 errors.append(f"{path}: frontmatter name must match directory {path.parent.name}")
         yaml_path = path.parent / "agents" / "openai.yaml"
         if yaml_path.exists():
-            check_yaml_shape(yaml_path, errors, skill_name=path.parent.name)
-            if policy.get("forbid_secrets_in_instructions") and has_secret(yaml_path.read_text(encoding="utf-8")):
-                errors.append(f"{yaml_path}: possible secret/token pattern")
+            if not allow_external and (yaml_path.is_symlink() or not _is_within(yaml_path.resolve(), repo.resolve())):
+                errors.append(f"{yaml_path}: metadata path must remain inside the repository and may not be a symlink")
+            else:
+                check_yaml_shape(yaml_path, errors, skill_name=path.parent.name)
+                if policy.get("forbid_secrets_in_instructions") and has_secret(yaml_path.read_text(encoding="utf-8")):
+                    errors.append(f"{yaml_path}: possible secret/token pattern")
         else:
             errors.append(f"{path.parent}: missing agents/openai.yaml")
     check_reference_links(path, repo, errors, allow_external=allow_external)
@@ -415,6 +451,27 @@ def _validate_against_trusted_contract(
             errors.append(f"contract {key} removes trusted entries: {', '.join(missing)}")
 
 
+def _validate_global_manifest(
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    expected_skills: list[str],
+    errors: list[str],
+) -> None:
+    unknown = sorted(set(manifest) - GLOBAL_MANIFEST_KEYS)
+    if unknown:
+        errors.append(f"{manifest_path}: global manifest contains unknown keys: {', '.join(unknown)}")
+    if manifest.get("version") != 1:
+        errors.append(f"{manifest_path}: unsupported global manifest version {manifest.get('version')!r}")
+    registry = manifest.get("registry")
+    if registry != GLOBAL_REGISTRY_DESCRIPTOR:
+        errors.append(
+            f"{manifest_path}: registry must pin {GLOBAL_REGISTRY_DESCRIPTOR['repository']}@{GLOBAL_REGISTRY_DESCRIPTOR['ref']}:{GLOBAL_REGISTRY_DESCRIPTOR['path']}"
+        )
+    advertised = manifest.get("skills")
+    if not isinstance(advertised, list) or set(advertised) != set(expected_skills):
+        errors.append(f"{manifest_path}: advertised skills do not match required_global_skills")
+
+
 def validate_skill(
     path: Path,
     repo: Path,
@@ -423,7 +480,10 @@ def validate_skill(
     *,
     allow_external: bool = False,
 ) -> None:
-    entry = path / policy.get("require_skill_entrypoint", "SKILL.md") if path.is_dir() else path
+    if not path.is_dir():
+        errors.append(f"{path}: contracted skill must be a directory containing SKILL.md")
+        return
+    entry = path / policy.get("require_skill_entrypoint", "SKILL.md")
     if not entry.exists():
         errors.append(f"{path}: missing {policy.get('require_skill_entrypoint', 'SKILL.md')}")
         return
@@ -503,9 +563,7 @@ def validate_asset(
             else:
                 try:
                     manifest = load_json(manifest_path)
-                    advertised = manifest.get("skills")
-                    if not isinstance(advertised, list) or set(advertised) != set(globals_value):
-                        errors.append(f"{manifest_path}: advertised skills do not match required_global_skills")
+                    _validate_global_manifest(manifest_path, manifest, globals_value, errors)
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
                     errors.append(str(exc))
             if manifest_path.exists():
@@ -551,7 +609,12 @@ def main() -> int:
         if policy_errors:
             raise ValueError("; ".join(policy_errors))
         if args.contract:
-            contract = load_json(args.contract)
+            contract_path = args.contract
+            repo_root = args.repo.resolve()
+            resolved_contract = contract_path.resolve()
+            if contract_path.is_symlink() or not _is_within(resolved_contract, repo_root):
+                raise ValueError("--contract must be a regular file inside --repo")
+            contract = load_json(resolved_contract)
             contract_errors: list[str] = []
             _validate_contract_shape(contract, contract_errors)
             if contract_errors:
