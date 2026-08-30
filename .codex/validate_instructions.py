@@ -64,6 +64,9 @@ PRIVATE_ORIGIN_RE = re.compile(
     r"[^\s./]+\.local\.?|[^\s./]+\.internal(?:\.[^\s/:?#]+(?:\.[^\s/:?#]+)*)?\.?)"
     r"(?=$|[:/?#])"
 )
+SAFE_LOCAL_ORIGIN_RE = re.compile(
+    r"(?i)\bhttps?://(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?(?:[/?#][^\s`<>)]*)?"
+)
 FORBIDDEN_YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 PLACEHOLDER_VALUES = {
     "example",
@@ -326,6 +329,23 @@ def _has_symlink_component(path: Path, root: Path) -> bool:
         if current.is_symlink():
             return True
     return False
+
+
+def _is_unmanaged_plugin_skill_path(path: Path, repo: Path) -> bool:
+    """Return whether a reference targets the legacy plugin skill mount.
+
+    Repositories may keep `.claude/skills/*` symlinks created by their existing
+    skill installer.  Those links are intentionally outside this governance
+    contract; do not recurse into or reject them while validating a governed
+    root instruction file.  Contract-listed `.agents/skills/*` remain fully
+    governed through ``validate_skill``.
+    """
+
+    try:
+        relative = path.absolute().relative_to(repo.absolute())
+    except ValueError:
+        return False
+    return len(relative.parts) >= 2 and relative.parts[:2] == (".claude", "skills")
 
 
 def resolve_path(
@@ -641,6 +661,8 @@ def check_reference_links(
         if not target or _is_external_target(target):
             continue
         lexical = instruction_file.parent / target
+        if not allow_external and _is_unmanaged_plugin_skill_path(lexical, repo):
+            continue
         candidate = lexical.resolve()
         if not allow_external and _has_symlink_component(lexical, repo):
             errors.append(f"{instruction_file}: relative reference may not be a symlink: {target}")
@@ -681,6 +703,8 @@ def scan_reference_graph(
             if not target or _is_external_target(target):
                 continue
             lexical = current.parent / target
+            if not allow_external and _is_unmanaged_plugin_skill_path(lexical, repo):
+                continue
             try:
                 candidate = lexical.resolve()
             except OSError:
@@ -884,7 +908,11 @@ def _has_private_ip_literal(text: str) -> bool:
 
 
 def has_secret(text: str) -> bool:
-    if PEM_RE.search(text) or PRIVATE_ORIGIN_RE.search(text) or _has_private_ip_literal(text):
+    # Local development endpoints are valid documentation when they contain
+    # no userinfo. Scrub only that exact host/port/path form; a credentialed
+    # URL (or any other private origin) remains visible to the scanner.
+    scrubbed = SAFE_LOCAL_ORIGIN_RE.sub(" ", text)
+    if PEM_RE.search(text) or PRIVATE_ORIGIN_RE.search(scrubbed) or _has_private_ip_literal(text):
         return True
     for pattern in SECRET_VALUE_RES:
         for match in pattern.finditer(text):
@@ -973,14 +1001,17 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
     if not include_discovery:
         return []
     paths: set[Path] = set()
-    for pattern in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
-        for path in repo.rglob(pattern):
-            if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
-                paths.add(path.absolute())
-    for root in (repo / ".agents", repo / "skills", repo / ".claude" / "skills"):
-        for path in _skill_entrypoints(root, repo):
-            if not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
-                paths.add(path.absolute())
+    # Only the repository's own root entrypoints and explicitly governed
+    # Claude agent/rule files are discovered here.  Existing plugin/global
+    # skills under .agents/skills, skills/, and .claude/skills are inputs owned
+    # by their installers; scanning them would turn unrelated third-party
+    # material (including symlinked mounts and nested AGENTS.md files) into a
+    # false repository change.  Contract-listed repository skills are checked
+    # separately by validate_skill below.
+    for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
+        path = repo / name
+        if path.is_file() or path.is_symlink():
+            paths.add(path.absolute())
     for claude_root in (repo / ".claude" / "agents", repo / ".claude" / "rules"):
         if claude_root.is_dir():
             for path in claude_root.rglob("*.md"):

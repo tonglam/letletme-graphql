@@ -2077,16 +2077,14 @@ jobs:
           def surface(root, raw_paths):
               files = {}
               paths = {Path(raw) for raw in raw_paths}
-              # AGENTS.override.md is a scoped instruction surface even when
-              # it is not listed in the root contract. Include every tracked
-              # override so adding or editing one cannot bypass protection.
+              # Root entrypoints are governed even when a legacy contract lists
+              # only AGENTS.md. Do not sweep nested third-party skills: their
+              # AGENTS/CLAUDE files and symlink mounts are not repo-owned.
               for item in root.rglob("*"):
                   relative = item.relative_to(root)
                   if any(part in {".git", "node_modules", ".next"} for part in relative.parts):
                       continue
-                  if item.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}:
-                      paths.add(relative)
-                  if len(relative.parts) >= 3 and relative.parts[:2] == (".claude", "skills") and item.name == "SKILL.md":
+                  if len(relative.parts) == 1 and item.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}:
                       paths.add(relative)
                   if len(relative.parts) >= 3 and relative.parts[:2] in {(".claude", "agents"), (".claude", "rules")} and item.suffix.casefold() == ".md":
                       paths.add(relative)

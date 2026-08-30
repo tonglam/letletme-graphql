@@ -62,8 +62,15 @@ Master TypeScript's advanced type system including generics, conditional types, 
 
 Use `.agents/skills/letletme-graphql-read-path/SKILL.md` for repository-specific
 GraphQL work. Generic skills listed above remain repository inputs; they are not
-replaced or repackaged by this change. Use `$gh-codex-review-loop` for PR work:
-every P0-P3 finding must be dispositioned and its thread resolved, with only
-tests/scripts P2/P3 receiving the disposition-only time exception. A quota
-override skips only a new review request, never findings, CI, or cleanup. After
-merge, clean only the exact matching worktree, local branch, and remote branch.
+replaced or repackaged by this change. Use `$gh-codex-review-loop` for PR work.
+A review may be skipped only after two consecutive explicit quota-limit responses
+for the unchanged head; record both responses and the exact SHA. This never
+waives CI, findings, or cleanup. Every P0-P3 finding must be dispositioned and
+its thread resolved. Only a finding confined to tests/scripts gets the time
+exception: implement P0/P1, and explain plus resolve P2/P3 without
+implementation time. P2/P3 anywhere else must be actually fixed and verified.
+Keep a complete finding ledger for the exact head; merge is prohibited while
+any finding is undispositioned or any review thread is unresolved. A quota
+override can skip only a new review request and never finding resolution. After
+merge, clean only the exact corresponding worktree, local branch, and remote
+branch after verifying identity; leave unrelated WIP untouched.
