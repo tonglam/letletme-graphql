@@ -1973,7 +1973,6 @@ const mapPick = (params: {
 			score: fixtureScore(item, player),
 		};
 	});
-	const fixture = playerFixtures[0];
 	const opponent = fixtureDetails.length === 1 ? (fixtureDetails[0]?.opponentId ?? 0) : 0;
 	const opponentNames = fixtureDetails.map((item) => item.opponentTeam?.name ?? "").filter(Boolean);
 	const opponentShortNames = fixtureDetails
