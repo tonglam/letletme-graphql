@@ -42,6 +42,10 @@ IP_LITERAL_RE = re.compile(
 )
 SECRET_VALUE_RES = (
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?(?:token|key)|private[_ -]?key|client[_ -]?secret|service[_ -]?(?:role[_ -]?)?key|secret[_ -]?(?:access[_ -]?)?key|app[_ -]?secret|service[_ -]?token|signing[_ -]?(?:key|secret)|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
+    # YAML block scalars put the sensitive value on indented following lines,
+    # so there is no literal value beside the key for the normal rule above to
+    # capture. Treat non-placeholder folded/literal blocks as credentials.
+    re.compile(r'''(?im)(?<![A-Za-z0-9_])(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?(?:token|key)|private[_ -]?key|client[_ -]?secret|service[_ -]?(?:role[_ -]?)?key|secret[_ -]?(?:access[_ -]?)?key|app[_ -]?secret|service[_ -]?token|signing[_ -]?(?:key|secret)|token|secret|credential|password)\s*[:=]\s*[|>][-+0-9]*\s*\n((?:[ \t]+[^\n]*(?:\n|$))+)'''),
     # Server-only names often use a plain ``*_SECRET``/``*_CREDENTIAL``
     # suffix (for example BACKEND_PROXY_SECRET) rather than one of the
     # provider-specific names above. Keep the value capture identical so
@@ -859,6 +863,9 @@ def _looks_like_placeholder(value: str) -> bool:
     # delimiters before matching complete environment lookups; literal values
     # remain subject to the normal secret heuristics below.
     normalized = normalized.rstrip(",;").strip()
+    if "\n" in normalized:
+        lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+        return bool(lines) and all(_looks_like_placeholder(line) for line in lines)
     # Exempt only a complete environment lookup. A lookup with a literal
     # fallback (or a literal suffix/prefix) is still a committed value and
     # must continue through the normal secret heuristics.

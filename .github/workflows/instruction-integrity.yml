@@ -1893,6 +1893,9 @@ jobs:
                 heredoc = marker[1] if marker
               end
               shell_text = shell_surface.join
+              if shell_text.match?(%r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:command\s+)?eval(?:\s|$)})
+                raise "workflow step may not invoke eval to redefine an interpreter"
+              end
               if shell_text.match?(/^\s*(?:function\s+)?(?:python3?|ruby|node|bash|sh|zsh)\s*(?:\(\)|\{)/m)
                 raise "workflow step may not redefine a trusted interpreter"
               end
