@@ -241,400 +241,410 @@ jobs:
           done
           if test "$approved" = true; then
             python3 -m py_compile target/.codex/validate_instructions.py target/.codex/provision_global_skills.py
-            TARGET_VALIDATOR="$PWD/target/.codex/validate_instructions.py" \
-            TARGET_PROVISIONER="$PWD/target/.codex/provision_global_skills.py" \
-            python3 - <<'PY'
-            import ast
-            import json
-            import os
-            from pathlib import Path
+          TARGET_VALIDATOR="$PWD/target/.codex/validate_instructions.py" \
+          TARGET_PROVISIONER="$PWD/target/.codex/provision_global_skills.py" \
+          python3 - <<'PY'
+          import ast
+          import json
+          import os
+          from pathlib import Path
 
-            def load_tree(path, required):
-                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-                definitions = {
-                    node.name
-                    for node in tree.body
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                }
-                missing = sorted(set(required) - definitions)
-                if missing:
-                    raise SystemExit(f"{path}: missing required definitions: {', '.join(missing)}")
-                return tree
+          def load_tree(path, required):
+              tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              definitions = {
+                  node.name
+                  for node in tree.body
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+              }
+              missing = sorted(set(required) - definitions)
+              if missing:
+                  raise SystemExit(f"{path}: missing required definitions: {', '.join(missing)}")
+              return tree
 
-            validator = load_tree(Path(os.environ["TARGET_VALIDATOR"]), {"parse_yaml_mapping", "validate_asset", "main"})
-            provisioner_path = Path(os.environ["TARGET_PROVISIONER"])
-            provisioner = load_tree(provisioner_path, {"load_manifest", "verify_registry", "tree_digest", "main"})
+          validator = load_tree(Path(os.environ["TARGET_VALIDATOR"]), {"parse_yaml_mapping", "validate_asset", "main"})
+          provisioner_path = Path(os.environ["TARGET_PROVISIONER"])
+          provisioner = load_tree(provisioner_path, {"load_manifest", "verify_registry", "tree_digest", "main"})
 
-            # Approved target code is contributor-controlled and must not be
-            # imported or executed inside pull_request_target. Check its
-            # executable shape and immutable-pin constants as data only; the
-            # trusted validator below remains the only code executed on target
-            # contents in this job.
-            for tree, forbidden in ((validator, {"exec", "eval", "__import__"}), (provisioner, {"exec", "eval", "__import__"})):
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden:
-                        raise SystemExit(f"approved governance code uses forbidden dynamic call: {node.func.id}")
+          # Approved target code is contributor-controlled and must not be
+          # imported or executed inside pull_request_target. Check its
+          # executable shape and immutable-pin constants as data only; the
+          # trusted validator below remains the only code executed on target
+          # contents in this job.
+          for tree, forbidden in ((validator, {"exec", "eval", "__import__"}), (provisioner, {"exec", "eval", "__import__"})):
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden:
+                      raise SystemExit(f"approved governance code uses forbidden dynamic call: {node.func.id}")
 
-            def assignment(tree, name):
-                for node in tree.body:
-                    if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
-                        try:
-                            return ast.literal_eval(node.value)
-                        except (ValueError, SyntaxError):
-                            raise SystemExit(f"approved governance constant {name} must be a literal")
-                raise SystemExit(f"approved governance constant {name} is missing")
+          def assignment(tree, name):
+              for node in tree.body:
+                  if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+                      try:
+                          return ast.literal_eval(node.value)
+                      except (ValueError, SyntaxError):
+                          raise SystemExit(f"approved governance constant {name} must be a literal")
+              raise SystemExit(f"approved governance constant {name} is missing")
 
-            def function_node(tree, name):
-                for node in tree.body:
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-                        return node
-                raise SystemExit(f"approved validator is missing function {name}")
+          def function_node(tree, name):
+              for node in tree.body:
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+                      return node
+              raise SystemExit(f"approved validator is missing function {name}")
 
-            def constant_truth(node):
-                if isinstance(node, ast.Constant):
-                    return bool(node.value)
-                if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-                    inner = constant_truth(node.operand)
-                    return None if inner is None else not inner
-                if isinstance(node, ast.Compare) and len(node.ops) == len(node.comparators):
-                    values = [node.left, *node.comparators]
-                    if not all(isinstance(value, ast.Constant) for value in values):
-                        return None
-                    result = True
-                    for left, op, right in zip(values, node.ops, node.comparators):
-                        left_value = left.value
-                        right_value = right.value
-                        if isinstance(op, ast.Eq):
-                            result = result and left_value == right_value
-                        elif isinstance(op, ast.NotEq):
-                            result = result and left_value != right_value
-                        elif isinstance(op, ast.Is):
-                            result = result and left_value is right_value
-                        elif isinstance(op, ast.IsNot):
-                            result = result and left_value is not right_value
-                        else:
-                            return None
-                    return result
-                return None
+          def constant_truth(node):
+              if isinstance(node, ast.Constant):
+                  return bool(node.value)
+              if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+                  inner = constant_truth(node.operand)
+                  return None if inner is None else not inner
+              if isinstance(node, ast.Compare) and len(node.ops) == len(node.comparators):
+                  values = [node.left, *node.comparators]
+                  if not all(isinstance(value, ast.Constant) for value in values):
+                      return None
+                  result = True
+                  for left, op, right in zip(values, node.ops, node.comparators):
+                      left_value = left.value
+                      right_value = right.value
+                      if isinstance(op, ast.Eq):
+                          result = result and left_value == right_value
+                      elif isinstance(op, ast.NotEq):
+                          result = result and left_value != right_value
+                      elif isinstance(op, ast.Is):
+                          result = result and left_value is right_value
+                      elif isinstance(op, ast.IsNot):
+                          result = result and left_value is not right_value
+                      else:
+                          return None
+                  return result
+              return None
 
-            class ReachableCalls(ast.NodeVisitor):
-                def __init__(self):
-                    self.names = set()
-                    self.direct_calls = {}
-                    self.strings = set()
-                    self.calls = {}
-                    self.returns = []
-                    self.raises = []
+          class ReachableCalls(ast.NodeVisitor):
+              def __init__(self):
+                  self.names = set()
+                  self.direct_calls = {}
+                  self.strings = set()
+                  self.calls = {}
+                  self.returns = []
 
-                def visit_Call(self, node):
-                    if isinstance(node.func, ast.Name):
-                        name = node.func.id
-                        self.direct_calls.setdefault(name, []).append(node.lineno)
-                    elif isinstance(node.func, ast.Attribute):
-                        name = node.func.attr
-                    else:
-                        name = None
-                    if name:
-                        self.names.add(name)
-                        self.calls.setdefault(name, []).append(node.lineno)
-                    self.generic_visit(node)
+              def visit_Call(self, node):
+                  if isinstance(node.func, ast.Name):
+                      name = node.func.id
+                      self.direct_calls.setdefault(name, []).append(node.lineno)
+                  elif isinstance(node.func, ast.Attribute):
+                      name = node.func.attr
+                  else:
+                      name = None
+                  if name:
+                      self.names.add(name)
+                      self.calls.setdefault(name, []).append(node.lineno)
+                  self.generic_visit(node)
 
-                def visit_Return(self, node):
-                    self.returns.append(node.lineno)
-                    self.generic_visit(node)
+              def visit_Return(self, node):
+                  self.returns.append(node.lineno)
+                  self.generic_visit(node)
 
-                def visit_Raise(self, node):
-                    self.raises.append(node.lineno)
-                    self.generic_visit(node)
+              def visit_Constant(self, node):
+                  if isinstance(node.value, str):
+                      self.strings.add(node.value)
 
-                def visit_Constant(self, node):
-                    if isinstance(node.value, str):
-                        self.strings.add(node.value)
+              def visit_If(self, node):
+                  self.visit(node.test)
+                  truth = constant_truth(node.test)
+                  branch = node.body if truth is True else node.orelse if truth is False else node.body + node.orelse
+                  for child in branch:
+                      self.visit(child)
 
-                def visit_If(self, node):
-                    self.visit(node.test)
-                    truth = constant_truth(node.test)
-                    branch = node.body if truth is True else node.orelse if truth is False else node.body + node.orelse
-                    for child in branch:
-                        self.visit(child)
+              def visit_While(self, node):
+                  self.visit(node.test)
+                  truth = constant_truth(node.test)
+                  branch = node.body if truth is not False else node.orelse
+                  for child in branch:
+                      self.visit(child)
 
-                def visit_While(self, node):
-                    self.visit(node.test)
-                    truth = constant_truth(node.test)
-                    branch = node.body if truth is not False else node.orelse
-                    for child in branch:
-                        self.visit(child)
+              def visit_FunctionDef(self, node):
+                  # Nested functions are not part of the enclosing function's
+                  # reachable validation path.
+                  return
 
-                def visit_FunctionDef(self, node):
-                    # Nested functions are not part of the enclosing function's
-                    # reachable validation path.
-                    return
+              visit_AsyncFunctionDef = visit_FunctionDef
 
-                visit_AsyncFunctionDef = visit_FunctionDef
+              def visit_Lambda(self, node):
+                  return
 
-                def visit_Lambda(self, node):
-                    return
+          def reachable_called_names(node):
+              visitor = ReachableCalls()
+              for statement in node.body:
+                  visitor.visit(statement)
+              return visitor.names
 
-            def reachable_called_names(node):
-                visitor = ReachableCalls()
-                for statement in node.body:
-                    visitor.visit(statement)
-                return visitor.names
+          def reachable_string_literals(node):
+              visitor = ReachableCalls()
+              for statement in node.body:
+                  visitor.visit(statement)
+              return visitor.strings
 
-            def reachable_string_literals(node):
-                visitor = ReachableCalls()
-                for statement in node.body:
-                    visitor.visit(statement)
-                return visitor.strings
+          def reachable_info(node):
+              visitor = ReachableCalls()
+              for statement in node.body:
+                  visitor.visit(statement)
+              return visitor
 
-            def reachable_info(node):
-                visitor = ReachableCalls()
-                for statement in node.body:
-                    visitor.visit(statement)
-                return visitor
+          def function_bindings(node):
+              """Return names locally rebound inside one function."""
 
-            def function_bindings(node):
-                """Return names locally rebound inside one function."""
+              bindings = {argument.arg for argument in node.args.posonlyargs + node.args.args + node.args.kwonlyargs}
+              if node.args.vararg:
+                  bindings.add(node.args.vararg.arg)
+              if node.args.kwarg:
+                  bindings.add(node.args.kwarg.arg)
+              for child in ast.walk(node):
+                  if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                      bindings.add(child.id)
+              return bindings
 
-                bindings = {argument.arg for argument in node.args.posonlyargs + node.args.args + node.args.kwonlyargs}
-                if node.args.vararg:
-                    bindings.add(node.args.vararg.arg)
-                if node.args.kwarg:
-                    bindings.add(node.args.kwarg.arg)
-                for child in ast.walk(node):
-                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
-                        bindings.add(child.id)
-                return bindings
+          def direct_terminator_lines(statements):
+              """Find unconditional return/raise statements in a body."""
 
-            def check_validator_shape(tree):
-                parse_yaml = function_node(tree, "parse_yaml_mapping")
-                validate = function_node(tree, "validate_asset")
-                main = function_node(tree, "main")
-                required_calls = {
-                    "parse_yaml_mapping": (parse_yaml, {"_parse_scalar"}),
-                    "validate_asset": (validate, {"validate_skill", "_validate_instruction_file", "_validate_global_manifest"}),
-                    "main": (main, {"validate_asset"}),
-                }
-                for label, (node, required_names) in required_calls.items():
-                    info = reachable_info(node)
-                    bindings = function_bindings(node)
-                    shadowed = sorted(required_names & bindings)
-                    if shadowed:
-                        raise SystemExit(f"approved validator {label} shadows required calls: {', '.join(shadowed)}")
-                    missing = sorted(required_names - set(info.direct_calls))
-                    if missing:
-                        raise SystemExit(f"approved validator {label} is missing operational calls: {', '.join(missing)}")
-                    for name in required_names:
-                        call_lines = info.direct_calls.get(name, [])
-                        terminators = info.returns + info.raises
-                        if call_lines and any(line < min(call_lines) for line in terminators):
-                            raise SystemExit(f"approved validator {label} can terminate before calling {name}")
-                if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(parse_yaml)):
-                    raise SystemExit("approved validator parse_yaml_mapping has no parsing control flow")
-                if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(validate)):
-                    raise SystemExit("approved validator validate_asset has no validation control flow")
-                if not any(isinstance(node, ast.Try) for node in ast.walk(main)):
-                    raise SystemExit("approved validator main has no guarded validation path")
+              lines = []
+              for statement in statements:
+                  if isinstance(statement, (ast.Return, ast.Raise)):
+                      lines.append(statement.lineno)
+                      continue
+                  if isinstance(statement, ast.If):
+                      truth = constant_truth(statement.test)
+                      branch = statement.body if truth is True else statement.orelse if truth is False else None
+                      if branch is not None:
+                          lines.extend(direct_terminator_lines(branch))
+              return lines
 
-            # Exercise the checker itself against a controlled no-op fixture;
-            # this remains data-only and never imports or executes contributor
-            # code in pull_request_target.
-            no_op_fixture = ast.parse(
-                "def parse_yaml_mapping(): return {}\n"
-                "def validate_asset(): return {'ok': True}\n"
-                "def main(): return 0\n"
-            )
-            try:
-                check_validator_shape(no_op_fixture)
-            except SystemExit:
-                pass
-            else:
-                raise SystemExit("validator semantic fixture unexpectedly passed")
-            check_validator_shape(validator)
+          def check_validator_shape(tree):
+              parse_yaml = function_node(tree, "parse_yaml_mapping")
+              validate = function_node(tree, "validate_asset")
+              main = function_node(tree, "main")
+              required_calls = {
+                  "parse_yaml_mapping": (parse_yaml, {"_parse_scalar"}),
+                  "validate_asset": (validate, {"validate_skill", "_validate_instruction_file", "_validate_global_manifest"}),
+                  "main": (main, {"validate_asset"}),
+              }
+              for label, (node, required_names) in required_calls.items():
+                  info = reachable_info(node)
+                  bindings = function_bindings(node)
+                  shadowed = sorted(required_names & bindings)
+                  if shadowed:
+                      raise SystemExit(f"approved validator {label} shadows required calls: {', '.join(shadowed)}")
+                  missing = sorted(required_names - set(info.direct_calls))
+                  if missing:
+                      raise SystemExit(f"approved validator {label} is missing operational calls: {', '.join(missing)}")
+                  for name in required_names:
+                      call_lines = info.direct_calls.get(name, [])
+                      terminators = info.returns + direct_terminator_lines(node.body)
+                      if call_lines and any(line < min(call_lines) for line in terminators):
+                          raise SystemExit(f"approved validator {label} can terminate before calling {name}")
+              if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(parse_yaml)):
+                  raise SystemExit("approved validator parse_yaml_mapping has no parsing control flow")
+              if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(validate)):
+                  raise SystemExit("approved validator validate_asset has no validation control flow")
+              if not any(isinstance(node, ast.Try) for node in ast.walk(main)):
+                  raise SystemExit("approved validator main has no guarded validation path")
 
-            def check_provisioner_shape(tree):
-                required_calls = {
-                    "load_manifest": (function_node(tree, "load_manifest"), {"loads"}),
-                    "verify_registry": (function_node(tree, "verify_registry"), {"check_output", "loads"}),
-                    "tree_digest": (function_node(tree, "tree_digest"), {"sha256", "rglob"}),
-                    "main": (function_node(tree, "main"), {"load_manifest", "verify_registry", "tree_digest"}),
-                }
-                for label, (node, required_names) in required_calls.items():
-                    missing = sorted(required_names - reachable_called_names(node))
-                    if missing:
-                        raise SystemExit(f"approved provisioner {label} is missing operational calls: {', '.join(missing)}")
-                    info = reachable_info(node)
-                    for name in required_names:
-                        call_lines = info.calls.get(name, [])
-                        if call_lines and any(line < min(call_lines) for line in info.returns):
-                            raise SystemExit(f"approved provisioner {label} can return before calling {name}")
-                if "archive" not in reachable_string_literals(function_node(tree, "verify_registry")):
-                    raise SystemExit("approved provisioner verify_registry is missing the git archive operation")
+          # Exercise the checker itself against a controlled no-op fixture;
+          # this remains data-only and never imports or executes contributor
+          # code in pull_request_target.
+          no_op_fixture = ast.parse(
+              "def parse_yaml_mapping(): return {}\n"
+              "def validate_asset(): return {'ok': True}\n"
+              "def main(): return 0\n"
+          )
+          try:
+              check_validator_shape(no_op_fixture)
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("validator semantic fixture unexpectedly passed")
+          check_validator_shape(validator)
 
-            dead_validator_fixture = ast.parse(
-                "def parse_yaml_mapping():\n  if False: _parse_scalar()\n  return {}\n"
-                "def validate_asset():\n  if False: validate_skill(); _validate_instruction_file(); _validate_global_manifest()\n  return {'ok': True}\n"
-                "def main():\n  if 1 == 0: validate_asset()\n  return 0\n"
-            )
-            try:
-                check_validator_shape(dead_validator_fixture)
-            except SystemExit:
-                pass
-            else:
-                raise SystemExit("dead-code validator fixture unexpectedly passed")
-            short_circuit_fixture = ast.parse(
-                "def parse_yaml_mapping():\n  _parse_scalar(); return {}\n"
-                "def validate_asset():\n  validate_skill(); _validate_instruction_file(); _validate_global_manifest(); return {'ok': True}\n"
-                "def main():\n  if sys.argv: return 0\n  validate_asset()\n"
-            )
-            try:
-                check_validator_shape(short_circuit_fixture)
-            except SystemExit:
-                pass
-            else:
-                raise SystemExit("short-circuit validator fixture unexpectedly passed")
-            check_provisioner_shape(provisioner)
-            dead_provisioner_fixture = ast.parse(
-                "def load_manifest():\n  if False: loads()\n"
-                "def verify_registry():\n  if False: check_output(); loads(); 'archive'\n"
-                "def tree_digest():\n  if False: sha256(); rglob()\n"
-                "def main():\n  if False: load_manifest(); verify_registry(); tree_digest()\n"
-            )
-            try:
-                check_provisioner_shape(dead_provisioner_fixture)
-            except SystemExit:
-                pass
-            else:
-                raise SystemExit("dead-code provisioner fixture unexpectedly passed")
+          def check_provisioner_shape(tree):
+              required_calls = {
+                  "load_manifest": (function_node(tree, "load_manifest"), {"loads"}),
+                  "verify_registry": (function_node(tree, "verify_registry"), {"check_output", "loads"}),
+                  "tree_digest": (function_node(tree, "tree_digest"), {"sha256", "rglob"}),
+                  "main": (function_node(tree, "main"), {"load_manifest", "verify_registry", "tree_digest"}),
+              }
+              for label, (node, required_names) in required_calls.items():
+                  missing = sorted(required_names - reachable_called_names(node))
+                  if missing:
+                      raise SystemExit(f"approved provisioner {label} is missing operational calls: {', '.join(missing)}")
+                  info = reachable_info(node)
+                  for name in required_names:
+                      call_lines = info.calls.get(name, [])
+                      if call_lines and any(line < min(call_lines) for line in info.returns):
+                          raise SystemExit(f"approved provisioner {label} can return before calling {name}")
+              if "archive" not in reachable_string_literals(function_node(tree, "verify_registry")):
+                  raise SystemExit("approved provisioner verify_registry is missing the git archive operation")
 
-            manifest = json.loads(Path("target/.codex/global-skills.json").read_text(encoding="utf-8"))
-            contract = json.loads(Path("target/.codex/instruction-integrity.json").read_text(encoding="utf-8"))
-            if assignment(provisioner, "EXPECTED_REGISTRY") != manifest.get("registry"):
-                raise SystemExit("approved provisioner registry pin does not match the manifest")
-            if assignment(provisioner, "EXPECTED_SOURCE_REVISION") != contract.get("canonical_config_commit"):
-                raise SystemExit("approved provisioner source revision does not match the contract")
-            if assignment(validator, "GLOBAL_REGISTRY_DESCRIPTOR") != manifest.get("registry"):
-                raise SystemExit("approved validator registry pin does not match the manifest")
-            if assignment(validator, "CANONICAL_CONFIG_COMMIT") != contract.get("canonical_config_commit"):
-                raise SystemExit("approved validator source revision does not match the contract")
+          dead_validator_fixture = ast.parse(
+              "def parse_yaml_mapping():\n  if False: _parse_scalar()\n  return {}\n"
+              "def validate_asset():\n  if False: validate_skill(); _validate_instruction_file(); _validate_global_manifest()\n  return {'ok': True}\n"
+              "def main():\n  if 1 == 0: validate_asset()\n  return 0\n"
+          )
+          try:
+              check_validator_shape(dead_validator_fixture)
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("dead-code validator fixture unexpectedly passed")
+          short_circuit_fixture = ast.parse(
+              "def parse_yaml_mapping():\n  _parse_scalar(); return {}\n"
+              "def validate_asset():\n  validate_skill(); _validate_instruction_file(); _validate_global_manifest(); return {'ok': True}\n"
+              "def main():\n  if sys.argv: return 0\n  validate_asset()\n"
+          )
+          try:
+              check_validator_shape(short_circuit_fixture)
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("short-circuit validator fixture unexpectedly passed")
+          check_provisioner_shape(provisioner)
+          dead_provisioner_fixture = ast.parse(
+              "def load_manifest():\n  if False: loads()\n"
+              "def verify_registry():\n  if False: check_output(); loads(); 'archive'\n"
+              "def tree_digest():\n  if False: sha256(); rglob()\n"
+              "def main():\n  if False: load_manifest(); verify_registry(); tree_digest()\n"
+          )
+          try:
+              check_provisioner_shape(dead_provisioner_fixture)
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("dead-code provisioner fixture unexpectedly passed")
 
-            # Parse the proposed workflow without executing any contributor
-            # YAML or action. Ruby/Psych is present on the hosted runner.
-            print("approved governance code shape and pins validated without execution")
-            PY
-            ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: false)' target/.github/workflows/instruction-integrity.yml
-            ruby -ryaml - target/.github/workflows/instruction-integrity.yml <<'RUBY'
-              workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: false)
-              events = workflow["on"] || workflow[true]
-              raise "missing pull_request_target event" unless events.is_a?(Hash)
-              target = events["pull_request_target"]
-              types = target.is_a?(Hash) ? Array(target["types"]).map(&:to_s) : []
-              required = %w[opened synchronize reopened labeled unlabeled edited]
-              raise "pull_request_target types are incomplete" unless required.all? { |item| types.include?(item) }
-              pull_request = events["pull_request"]
-              raise "pull_request bootstrap event is missing" unless pull_request.is_a?(Hash)
-              bootstrap_paths = Array(pull_request["paths"]).map(&:to_s)
-              required_paths = %w[AGENTS.md CLAUDE.md .agents/** .codex/** .github/workflows/instruction-integrity.yml]
-              raise "pull_request bootstrap paths are incomplete" unless required_paths.all? { |item| bootstrap_paths.include?(item) }
-              raise "pull_request_target must not be path-filtered" if target.is_a?(Hash) && (target.key?("paths") || target.key?("paths-ignore"))
-              push = events["push"]
-              raise "push event is missing" unless push.is_a?(Hash)
-              push_branches = Array(push["branches"]).map(&:to_s)
-              raise "protected branch push gate is missing" unless %w[main master].all? { |item| push_branches.include?(item) }
-              raise "push gate must not be path-filtered" if push.key?("paths") || push.key?("paths-ignore")
-              jobs = workflow["jobs"]
-              raise "missing bootstrap/validate jobs" unless jobs.is_a?(Hash) && jobs["bootstrap"].is_a?(Hash) && jobs["validate"].is_a?(Hash)
-              raise "unexpected workflow job is present" unless jobs.keys.map(&:to_s).sort == %w[bootstrap validate]
-              jobs.each do |job_name, job|
-                next unless job.is_a?(Hash)
-                raise "job-level permissions are not allowed: #{job_name}" if job.key?("permissions")
-                raise "job-level failure suppression is not allowed: #{job_name}" if job.key?("continue-on-error")
+          manifest = json.loads(Path("target/.codex/global-skills.json").read_text(encoding="utf-8"))
+          contract = json.loads(Path("target/.codex/instruction-integrity.json").read_text(encoding="utf-8"))
+          if assignment(provisioner, "EXPECTED_REGISTRY") != manifest.get("registry"):
+              raise SystemExit("approved provisioner registry pin does not match the manifest")
+          if assignment(provisioner, "EXPECTED_SOURCE_REVISION") != contract.get("canonical_config_commit"):
+              raise SystemExit("approved provisioner source revision does not match the contract")
+          if assignment(validator, "GLOBAL_REGISTRY_DESCRIPTOR") != manifest.get("registry"):
+              raise SystemExit("approved validator registry pin does not match the manifest")
+          if assignment(validator, "CANONICAL_CONFIG_COMMIT") != contract.get("canonical_config_commit"):
+              raise SystemExit("approved validator source revision does not match the contract")
+
+          # Parse the proposed workflow without executing any contributor
+          # YAML or action. Ruby/Psych is present on the hosted runner.
+          print("approved governance code shape and pins validated without execution")
+          PY
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: false)' target/.github/workflows/instruction-integrity.yml
+          ruby -ryaml - target/.github/workflows/instruction-integrity.yml <<'RUBY'
+            workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: false)
+            events = workflow["on"] || workflow[true]
+            raise "missing pull_request_target event" unless events.is_a?(Hash)
+            target = events["pull_request_target"]
+            types = target.is_a?(Hash) ? Array(target["types"]).map(&:to_s) : []
+            required = %w[opened synchronize reopened labeled unlabeled edited]
+            raise "pull_request_target types are incomplete" unless required.all? { |item| types.include?(item) }
+            pull_request = events["pull_request"]
+            raise "pull_request bootstrap event is missing" unless pull_request.is_a?(Hash)
+            bootstrap_paths = Array(pull_request["paths"]).map(&:to_s)
+            required_paths = %w[AGENTS.md CLAUDE.md .agents/** .codex/** .github/workflows/instruction-integrity.yml]
+            raise "pull_request bootstrap paths are incomplete" unless required_paths.all? { |item| bootstrap_paths.include?(item) }
+            raise "pull_request_target must not be path-filtered" if target.is_a?(Hash) && (target.key?("paths") || target.key?("paths-ignore"))
+            push = events["push"]
+            raise "push event is missing" unless push.is_a?(Hash)
+            push_branches = Array(push["branches"]).map(&:to_s)
+            raise "protected branch push gate is missing" unless %w[main master].all? { |item| push_branches.include?(item) }
+            raise "push gate must not be path-filtered" if push.key?("paths") || push.key?("paths-ignore")
+            jobs = workflow["jobs"]
+            raise "missing bootstrap/validate jobs" unless jobs.is_a?(Hash) && jobs["bootstrap"].is_a?(Hash) && jobs["validate"].is_a?(Hash)
+            raise "unexpected workflow job is present" unless jobs.keys.map(&:to_s).sort == %w[bootstrap validate]
+            jobs.each do |job_name, job|
+              next unless job.is_a?(Hash)
+              raise "job-level permissions are not allowed: #{job_name}" if job.key?("permissions")
+              raise "job-level failure suppression is not allowed: #{job_name}" if job.key?("continue-on-error")
+            end
+            bootstrap = jobs["bootstrap"]
+            gate = jobs["validate"]
+            raise "bootstrap is not limited to pull_request" unless bootstrap["if"].to_s.include?("github.event_name == 'pull_request'")
+            raise "trusted gate name is missing" unless gate["name"].to_s == "instruction-integrity"
+            gate_condition = gate["if"].to_s.gsub(/\s+/, " ").strip
+            expected_gate_condition = "github.event_name == 'pull_request_target' || github.event_name == 'push'"
+            raise "trusted gate condition is incomplete or disabled" unless gate_condition == expected_gate_condition
+            expected_approval = "${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') && github.event.sender.login == github.repository_owner }}"
+            raise "approval expression is incomplete or broadened" unless gate.dig("env", "GOVERNANCE_UPDATE_APPROVED").to_s == expected_approval
+            checkout = lambda do |job, path|
+              Array(job["steps"]).find do |step|
+                step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/checkout@") && step.dig("with", "path").to_s == path
               end
-              bootstrap = jobs["bootstrap"]
-              gate = jobs["validate"]
-              raise "bootstrap is not limited to pull_request" unless bootstrap["if"].to_s.include?("github.event_name == 'pull_request'")
-              raise "trusted gate name is missing" unless gate["name"].to_s == "instruction-integrity"
-              gate_condition = gate["if"].to_s.gsub(/\s+/, " ").strip
-              expected_gate_condition = "github.event_name == 'pull_request_target' || github.event_name == 'push'"
-              raise "trusted gate condition is incomplete or disabled" unless gate_condition == expected_gate_condition
-              expected_approval = "${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') && github.event.sender.login == github.repository_owner }}"
-              raise "approval expression is incomplete or broadened" unless gate.dig("env", "GOVERNANCE_UPDATE_APPROVED").to_s == expected_approval
-              checkout = lambda do |job, path|
-                Array(job["steps"]).find do |step|
-                  step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/checkout@") && step.dig("with", "path").to_s == path
+            end
+            target_bootstrap = checkout.call(bootstrap, "target")
+            target_gate = checkout.call(gate, "target")
+            trusted_gate = checkout.call(gate, "trusted")
+            raise "bootstrap checkout must pin pull request head" unless target_bootstrap&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha }}"
+            raise "target checkout must pin pull request head" unless target_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha || github.sha }}"
+            raise "trusted checkout must pin pull request base" unless trusted_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.base.sha || github.sha }}"
+            permissions = workflow["permissions"]
+            raise "workflow must grant only contents: read" unless permissions.is_a?(Hash) && permissions.keys.map(&:to_s) == ["contents"] && permissions["contents"].to_s == "read"
+            steps = Array(gate["steps"])
+              allowed_trusted_steps = ["Verify pinned global registry contents", "Protect the integrity gate files", "Protect instruction contents unless explicitly approved", "Validate AGENTS.md and skills"]
+            steps.each do |step|
+              next unless step.is_a?(Hash)
+              run_text = step["run"].to_s
+              next if run_text.empty?
+              if run_text.match?(/\btrusted(?:\/|\b)/)
+                unless allowed_trusted_steps.include?(step["name"].to_s)
+                  raise "untrusted workflow step references the trusted checkout"
+                end
+                  if run_text.lines.any? { |line| line.match?(/^\s*(?:cp|install|mkdir|mv|rm|rmdir|touch|truncate|tee|cat|echo|printf)\b[^\n]*\btrusted(?:\/|\b)/) || line.match?(/^\s*(?:python3|ruby|perl|sed)\b[^\n]*(?:>>?|\|\s*tee\b)[^\n]*\btrusted(?:\/|\b)/) || line.match?(/\b(?:write_text|write_bytes|unlink|rename|replace|mkdir)\b[^\n]*\btrusted(?:\/|\b)/) }
+                  raise "workflow step can mutate the trusted checkout"
                 end
               end
-              target_bootstrap = checkout.call(bootstrap, "target")
-              target_gate = checkout.call(gate, "target")
-              trusted_gate = checkout.call(gate, "trusted")
-              raise "bootstrap checkout must pin pull request head" unless target_bootstrap&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha }}"
-              raise "target checkout must pin pull request head" unless target_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha || github.sha }}"
-              raise "trusted checkout must pin pull request base" unless trusted_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.base.sha || github.sha }}"
-              permissions = workflow["permissions"]
-              raise "workflow must grant only contents: read" unless permissions.is_a?(Hash) && permissions.keys.map(&:to_s) == ["contents"] && permissions["contents"].to_s == "read"
-              steps = Array(gate["steps"])
-              allowed_trusted_steps = ["Protect the integrity gate files", "Protect instruction contents unless explicitly approved", "Validate AGENTS.md and skills"]
-              steps.each do |step|
-                next unless step.is_a?(Hash)
-                run_text = step["run"].to_s
-                next if run_text.empty?
-                if run_text.match?(/\btrusted(?:\/|\b)/)
-                  unless allowed_trusted_steps.include?(step["name"].to_s)
-                    raise "untrusted workflow step references the trusted checkout"
-                  end
-                  if run_text.lines.any? { |line| line.match?(/(?:^|\s)(?:>>?|\|\s*tee\b|(?:cp|install|mkdir|mv|rm|rmdir|touch|truncate|sed|perl)\b)[^\n]*\btrusted(?:\/|\b)/) || line.match?(/\btrusted(?:\/|\b)[^\n]*(?:>>?|\|\s*tee\b)/) }
-                    raise "workflow step can mutate the trusted checkout"
-                  end
-                end
-                if step["working-directory"].to_s == "trusted"
-                  raise "workflow step may not execute from the trusted checkout"
-                end
+              if step["working-directory"].to_s == "trusted"
+                raise "workflow step may not execute from the trusted checkout"
               end
-              validate_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate AGENTS.md and skills" }
-              raise "trusted validator step is missing" unless validate_step
-              raise "trusted validator step may be conditionally skipped" if validate_step.key?("if") && !validate_step["if"].to_s.strip.empty?
-              raise "trusted validator step may not ignore failures" if validate_step["continue-on-error"] == true || validate_step["continue-on-error"].to_s.casecmp("true").zero?
-              run = validate_step["run"].to_s
-              raise "trusted validator step disables errexit" if run.lines.any? { |line| line.strip.match?(/\Aset\s+\+(?:e|o\s+errexit)\b/) }
-              logical_commands = []
-              current = ""
-              run.each_line do |line|
-                piece = line.strip
-                if piece.end_with?("\\")
-                  current << piece[0...-1] << " "
-                else
-                  logical_commands << (current + piece)
-                  current = ""
-                end
+            end
+            validate_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate AGENTS.md and skills" }
+            raise "trusted validator step is missing" unless validate_step
+            raise "trusted validator step may be conditionally skipped" if validate_step.key?("if") && !validate_step["if"].to_s.strip.empty?
+            raise "trusted validator step may not ignore failures" if validate_step["continue-on-error"] == true || validate_step["continue-on-error"].to_s.casecmp("true").zero?
+            run = validate_step["run"].to_s
+            raise "trusted validator step disables errexit" if run.lines.any? { |line| line.strip.match?(/\Aset\s+\+(?:e|o\s+errexit)\b/) }
+            logical_commands = []
+            current = ""
+            run.each_line do |line|
+              piece = line.strip
+              if piece.end_with?("\\")
+                current << piece[0...-1] << " "
+              else
+                logical_commands << (current + piece)
+                current = ""
               end
-              logical_commands << current unless current.empty?
-              command = logical_commands.find do |line|
-                line.match?(/\A(?:[A-Z_][A-Z0-9_]*=\S+\s+)*python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\z)/)
+            end
+            logical_commands << current unless current.empty?
+            command = logical_commands.find do |line|
+              line.match?(/\A(?:[A-Z_][A-Z0-9_]*=\S+\s+)*python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\z)/)
+            end
+            raise "trusted validator command is missing or not executable" unless command
+            %w[--registry-only --help --version].each do |forbidden|
+              raise "trusted validator command contains a bypass flag: #{forbidden}" if command.split.include?(forbidden)
+              if run.lines.any? { |line| line.match?(/\bextra_args\s*\+?=.*#{Regexp.escape(forbidden)}/) }
+                raise "trusted validator arguments contain a bypass flag: #{forbidden}"
               end
-              raise "trusted validator command is missing or not executable" unless command
-              %w[--registry-only --help --version].each do |forbidden|
-                raise "trusted validator command contains a bypass flag: #{forbidden}" if command.split.include?(forbidden)
-                if run.lines.any? { |line| line.match?(/\bextra_args\s*\+?=.*#{Regexp.escape(forbidden)}/) }
-                  raise "trusted validator arguments contain a bypass flag: #{forbidden}"
-                end
-              end
-              %w[--trusted-policy --trusted-contract --registry-source].each do |needle|
-                raise "trusted validator command is missing #{needle}" unless command.split.include?(needle) || command.include?("#{needle} ")
-              end
-              raise "trusted validator command must be standalone and failure-propagating" if command.match?(/[;&|<>]/)
-              %w[AGENTS.md .codex/global-skills.json .codex/provision_global_skills.py].each do |needle|
-                raise "bootstrap protection is missing #{needle}" unless steps.any? { |step| step.is_a?(Hash) && step["run"].to_s.include?(needle) }
-              end
-              protection_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Protect instruction contents unless explicitly approved" }
-              raise "instruction protection step is missing" unless protection_step
-              raise "instruction protection step has an unexpected condition" unless protection_step["if"].to_s.strip == "env.GOVERNANCE_UPDATE_APPROVED != 'true'"
-              raise "instruction protection step may not ignore failures" if protection_step["continue-on-error"] == true || protection_step["continue-on-error"].to_s.casecmp("true").zero?
-              protection_run = protection_step["run"].to_s
-              ["def surface", "trusted_files = surface", "target_files = surface", "hashlib.sha256", "raise SystemExit"].each do |needle|
-                raise "instruction protection step is incomplete: #{needle}" unless protection_run.include?(needle)
-              end
-              raise "instruction protection step does not compare trusted and target surfaces" unless protection_run.include?("set(trusted_files) != set(target_files)") && protection_run.include?("target_files[relative]")
-            RUBY
+            end
+            %w[--trusted-policy --trusted-contract --registry-source].each do |needle|
+              raise "trusted validator command is missing #{needle}" unless command.split.include?(needle) || command.include?("#{needle} ")
+            end
+            raise "trusted validator command must be standalone and failure-propagating" if command.match?(/[;&|<>]/)
+            %w[AGENTS.md .codex/global-skills.json .codex/provision_global_skills.py].each do |needle|
+              raise "bootstrap protection is missing #{needle}" unless steps.any? { |step| step.is_a?(Hash) && step["run"].to_s.include?(needle) }
+            end
+            protection_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Protect instruction contents unless explicitly approved" }
+            raise "instruction protection step is missing" unless protection_step
+            raise "instruction protection step has an unexpected condition" unless protection_step["if"].to_s.strip == "env.GOVERNANCE_UPDATE_APPROVED != 'true'"
+            raise "instruction protection step may not ignore failures" if protection_step["continue-on-error"] == true || protection_step["continue-on-error"].to_s.casecmp("true").zero?
+            protection_run = protection_step["run"].to_s
+            ["def surface", "trusted_files = surface", "target_files = surface", "hashlib.sha256", "raise SystemExit"].each do |needle|
+              raise "instruction protection step is incomplete: #{needle}" unless protection_run.include?(needle)
+            end
+            raise "instruction protection step does not compare trusted and target surfaces" unless protection_run.include?("set(trusted_files) != set(target_files)") && protection_run.include?("target_files[relative]")
+          RUBY
           fi
       - name: Protect instruction contents unless explicitly approved
         if: env.GOVERNANCE_UPDATE_APPROVED != 'true'
