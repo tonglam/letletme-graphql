@@ -304,20 +304,37 @@ def _without_markdown_code(text: str) -> str:
     """Remove fenced and inline code before extracting operative links."""
 
     lines: list[str] = []
-    fence: tuple[str, int] | None = None
+    # Keep the block-quote container depth with a fence.  A Markdown fence
+    # inside ``> ...`` is still code, but the leading ``>`` means the old
+    # space-only detector never entered fence mode and scanned its examples as
+    # operative links.
+    fence: tuple[str, int, int] | None = None
     for line in text.splitlines(keepends=True):
-        leading_spaces = len(line) - len(line.lstrip(" "))
-        stripped = line.lstrip(" ")
-        marker: tuple[str, int] | None = None
-        if leading_spaces <= 3 and stripped and stripped[0] in "`~":
-            marker_char = stripped[0]
-            marker_length = len(stripped) - len(stripped.lstrip(marker_char))
-            if marker_length >= 3:
-                marker = (marker_char, marker_length)
+        body = line.rstrip("\r\n")
+        marker: tuple[str, int, int, str] | None = None
+        # CommonMark permits up to three spaces before a block-quote marker,
+        # an optional space after each marker, and up to three spaces before
+        # the fenced-code marker.  Counting ``>`` markers keeps nested quotes
+        # from accidentally closing an outer fence.
+        quote_match = re.match(r"^( {0,3}(?:> ?)+)( {0,3})([`~]{3,})(.*)$", body)
+        if quote_match:
+            prefix = quote_match.group(1)
+            run = quote_match.group(3)
+            marker = (run[0], len(run), prefix.count(">"), quote_match.group(4))
+        else:
+            normal_match = re.match(r"^( {0,3})([`~]{3,})(.*)$", body)
+            if normal_match:
+                run = normal_match.group(2)
+                marker = (run[0], len(run), 0, normal_match.group(3))
         if marker is not None:
             if fence is None:
-                fence = marker
-            elif marker[0] == fence[0] and marker[1] >= fence[1] and not stripped[marker[1] :].rstrip("\r\n").strip():
+                fence = marker[:3]
+            elif (
+                marker[0] == fence[0]
+                and marker[1] >= fence[1]
+                and marker[2] == fence[2]
+                and not marker[3].strip()
+            ):
                 fence = None
             lines.append("\n" if line.endswith("\n") else "")
             continue
