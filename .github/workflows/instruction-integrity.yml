@@ -320,13 +320,16 @@ jobs:
             class ReachableCalls(ast.NodeVisitor):
                 def __init__(self):
                     self.names = set()
+                    self.direct_calls = {}
                     self.strings = set()
                     self.calls = {}
                     self.returns = []
+                    self.raises = []
 
                 def visit_Call(self, node):
                     if isinstance(node.func, ast.Name):
                         name = node.func.id
+                        self.direct_calls.setdefault(name, []).append(node.lineno)
                     elif isinstance(node.func, ast.Attribute):
                         name = node.func.attr
                     else:
@@ -338,6 +341,10 @@ jobs:
 
                 def visit_Return(self, node):
                     self.returns.append(node.lineno)
+                    self.generic_visit(node)
+
+                def visit_Raise(self, node):
+                    self.raises.append(node.lineno)
                     self.generic_visit(node)
 
                 def visit_Constant(self, node):
@@ -386,6 +393,19 @@ jobs:
                     visitor.visit(statement)
                 return visitor
 
+            def function_bindings(node):
+                """Return names locally rebound inside one function."""
+
+                bindings = {argument.arg for argument in node.args.posonlyargs + node.args.args + node.args.kwonlyargs}
+                if node.args.vararg:
+                    bindings.add(node.args.vararg.arg)
+                if node.args.kwarg:
+                    bindings.add(node.args.kwarg.arg)
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                        bindings.add(child.id)
+                return bindings
+
             def check_validator_shape(tree):
                 parse_yaml = function_node(tree, "parse_yaml_mapping")
                 validate = function_node(tree, "validate_asset")
@@ -396,14 +416,19 @@ jobs:
                     "main": (main, {"validate_asset"}),
                 }
                 for label, (node, required_names) in required_calls.items():
-                    missing = sorted(required_names - reachable_called_names(node))
+                    info = reachable_info(node)
+                    bindings = function_bindings(node)
+                    shadowed = sorted(required_names & bindings)
+                    if shadowed:
+                        raise SystemExit(f"approved validator {label} shadows required calls: {', '.join(shadowed)}")
+                    missing = sorted(required_names - set(info.direct_calls))
                     if missing:
                         raise SystemExit(f"approved validator {label} is missing operational calls: {', '.join(missing)}")
-                    info = reachable_info(node)
                     for name in required_names:
-                        call_lines = info.calls.get(name, [])
-                        if call_lines and any(line < min(call_lines) for line in info.returns):
-                            raise SystemExit(f"approved validator {label} can return before calling {name}")
+                        call_lines = info.direct_calls.get(name, [])
+                        terminators = info.returns + info.raises
+                        if call_lines and any(line < min(call_lines) for line in terminators):
+                            raise SystemExit(f"approved validator {label} can terminate before calling {name}")
                 if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(parse_yaml)):
                     raise SystemExit("approved validator parse_yaml_mapping has no parsing control flow")
                 if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(validate)):
@@ -519,6 +544,7 @@ jobs:
               raise "push gate must not be path-filtered" if push.key?("paths") || push.key?("paths-ignore")
               jobs = workflow["jobs"]
               raise "missing bootstrap/validate jobs" unless jobs.is_a?(Hash) && jobs["bootstrap"].is_a?(Hash) && jobs["validate"].is_a?(Hash)
+              raise "unexpected workflow job is present" unless jobs.keys.map(&:to_s).sort == %w[bootstrap validate]
               jobs.each do |job_name, job|
                 next unless job.is_a?(Hash)
                 raise "job-level permissions are not allowed: #{job_name}" if job.key?("permissions")
@@ -545,8 +571,25 @@ jobs:
               raise "target checkout must pin pull request head" unless target_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha || github.sha }}"
               raise "trusted checkout must pin pull request base" unless trusted_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.base.sha || github.sha }}"
               permissions = workflow["permissions"]
-              raise "workflow must be read-only" unless permissions.is_a?(Hash) && permissions["contents"].to_s == "read"
+              raise "workflow must grant only contents: read" unless permissions.is_a?(Hash) && permissions.keys.map(&:to_s) == ["contents"] && permissions["contents"].to_s == "read"
               steps = Array(gate["steps"])
+              allowed_trusted_steps = ["Protect the integrity gate files", "Protect instruction contents unless explicitly approved", "Validate AGENTS.md and skills"]
+              steps.each do |step|
+                next unless step.is_a?(Hash)
+                run_text = step["run"].to_s
+                next if run_text.empty?
+                if run_text.match?(/\btrusted(?:\/|\b)/)
+                  unless allowed_trusted_steps.include?(step["name"].to_s)
+                    raise "untrusted workflow step references the trusted checkout"
+                  end
+                  if run_text.lines.any? { |line| line.match?(/(?:^|\s)(?:>>?|\|\s*tee\b|(?:cp|install|mkdir|mv|rm|rmdir|touch|truncate|sed|perl)\b)[^\n]*\btrusted(?:\/|\b)/) || line.match?(/\btrusted(?:\/|\b)[^\n]*(?:>>?|\|\s*tee\b)/) }
+                    raise "workflow step can mutate the trusted checkout"
+                  end
+                end
+                if step["working-directory"].to_s == "trusted"
+                  raise "workflow step may not execute from the trusted checkout"
+                end
+              end
               validate_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate AGENTS.md and skills" }
               raise "trusted validator step is missing" unless validate_step
               raise "trusted validator step may be conditionally skipped" if validate_step.key?("if") && !validate_step["if"].to_s.strip.empty?
@@ -571,6 +614,9 @@ jobs:
               raise "trusted validator command is missing or not executable" unless command
               %w[--registry-only --help --version].each do |forbidden|
                 raise "trusted validator command contains a bypass flag: #{forbidden}" if command.split.include?(forbidden)
+                if run.lines.any? { |line| line.match?(/\bextra_args\s*\+?=.*#{Regexp.escape(forbidden)}/) }
+                  raise "trusted validator arguments contain a bypass flag: #{forbidden}"
+                end
               end
               %w[--trusted-policy --trusted-contract --registry-source].each do |needle|
                 raise "trusted validator command is missing #{needle}" unless command.split.include?(needle) || command.include?("#{needle} ")
@@ -583,6 +629,11 @@ jobs:
               raise "instruction protection step is missing" unless protection_step
               raise "instruction protection step has an unexpected condition" unless protection_step["if"].to_s.strip == "env.GOVERNANCE_UPDATE_APPROVED != 'true'"
               raise "instruction protection step may not ignore failures" if protection_step["continue-on-error"] == true || protection_step["continue-on-error"].to_s.casecmp("true").zero?
+              protection_run = protection_step["run"].to_s
+              ["def surface", "trusted_files = surface", "target_files = surface", "hashlib.sha256", "raise SystemExit"].each do |needle|
+                raise "instruction protection step is incomplete: #{needle}" unless protection_run.include?(needle)
+              end
+              raise "instruction protection step does not compare trusted and target surfaces" unless protection_run.include?("set(trusted_files) != set(target_files)") && protection_run.include?("target_files[relative]")
             RUBY
           fi
       - name: Protect instruction contents unless explicitly approved

@@ -350,7 +350,7 @@ def _without_markdown_code(text: str) -> str:
             # marker is a container prefix, not part of the fence itself;
             # retain the quote depth so a nested quote cannot close it.
             list_match = re.match(
-                r"^( {0,3}(?:> ?)*)( {0,3})([-+*]|\d+[.)])[ \t]+( {0,3})(`{3,}|~{3,})(.*)$",
+                r"^( {0,3}(?:> ?)*)( {0,3})([-+*]|\d+[.)])([ \t]+)(`{3,}|~{3,})(.*)$",
                 body,
             )
             if list_match:
@@ -407,7 +407,15 @@ def _without_markdown_code(text: str) -> str:
         # Preserve line length while masking inline-code destinations.
         masked = re.sub(r"(?<!\\)(`+)(?:(?!\1).)*\1", lambda match: "".join("\n" if c == "\n" else " " for c in match.group(0)), line)
         lines.append(masked)
-    return "".join(lines)
+    masked_text = "".join(lines)
+    # HTML comments are non-operative Markdown. Mask them after code removal
+    # so links in commented examples cannot become required files.
+    return re.sub(
+        r"<!--.*?(?:-->|$)",
+        lambda match: "".join("\n" if char == "\n" else " " for char in match.group(0)),
+        masked_text,
+        flags=re.S,
+    )
 
 
 def _markdown_targets(text: str) -> Iterable[str]:
@@ -428,7 +436,10 @@ def _markdown_targets(text: str) -> Iterable[str]:
         if text[index] == "<":
             end = text.find(">", index + 1)
             if end < 0:
-                break
+                # A malformed angle destination must not hide later valid
+                # links in the same instruction file.
+                cursor = index + 1
+                continue
             yield text[index + 1 : end]
             cursor = end + 1
             continue
@@ -453,7 +464,10 @@ def _markdown_targets(text: str) -> Iterable[str]:
                     break
                 depth -= 1
         else:
-            break
+            # Keep scanning after an unmatched destination so a later link
+            # can still be validated.
+            cursor = start + 1
+            continue
     for match in REFERENCE_DEF_RE.finditer(text):
         raw = match.group(2)
         yield raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw
@@ -578,9 +592,12 @@ def _looks_like_placeholder(value: str) -> bool:
         if not normalized.endswith("}"):
             return False
         body = normalized[2:-1]
-        if ":-" in body:
-            fallback = body.split(":-", 1)[1]
-            return _looks_like_placeholder(fallback)
+        # Shell parameter expansions support both colon and non-colon forms
+        # (`-`, `=`, `?`, `+`). Inspect every fallback rather than treating
+        # only the `:-` spelling as a placeholder.
+        match = re.match(r"^[A-Za-z_][A-Za-z0-9_]*(?::?[-+=?])(.*)$", body, flags=re.S)
+        if match:
+            return _looks_like_placeholder(match.group(1))
         return True
     normalized = normalized.rstrip(",;)]}").strip("'\"")
     return (
@@ -699,7 +716,7 @@ def _validate_instruction_file(
         return
     if not text.strip():
         errors.append(f"{path}: instruction file is empty")
-    if path.name in {"AGENTS.md", "AGENTS.override.md"} and path.stat().st_size > int(policy.get("max_agents_bytes", 32768)):
+    if path.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"} and path.stat().st_size > int(policy.get("max_agents_bytes", 32768)):
         errors.append(f"{path}: exceeds max_agents_bytes")
     # Governance is inherited from the repository root. Nested instruction
     # files remain validated for syntax, references, and secrets without

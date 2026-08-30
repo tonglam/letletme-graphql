@@ -26,12 +26,21 @@ EXPECTED_REGISTRY = {
 EXPECTED_SOURCE_REVISION = "312eaf56264f65bcc74fd7b81d8981a3517eca02"
 
 
+def _git_env() -> dict[str, str]:
+    """Read Git objects without honoring replacement refs from the checkout."""
+
+    environment = os.environ.copy()
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return environment
+
+
 def git(cwd: Path, *args: str, capture: bool = False) -> str:
     result = subprocess.run(
         ["git", "-C", str(cwd), *args],
         check=True,
         text=True,
         stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+        env=_git_env(),
     )
     return result.stdout if capture else ""
 
@@ -98,7 +107,10 @@ def verify_registry(checkout: Path, advertised: list[str], materialized_root: Pa
     ref = EXPECTED_REGISTRY["ref"]
     path = EXPECTED_REGISTRY["path"]
     try:
-        blob = subprocess.check_output(["git", "-C", str(checkout), "show", f"{ref}:{path}"])
+        blob = subprocess.check_output(
+            ["git", "-C", str(checkout), "show", f"{ref}:{path}"],
+            env=_git_env(),
+        )
     except subprocess.CalledProcessError as exc:
         raise SystemExit("pinned registry object is unavailable in the supplied checkout") from exc
     if hashlib.sha256(blob).hexdigest() != EXPECTED_REGISTRY["sha256"]:
@@ -118,7 +130,8 @@ def verify_registry(checkout: Path, advertised: list[str], materialized_root: Pa
     archive_paths = [f"global/skills/{name}" for name in advertised]
     try:
         archive = subprocess.check_output(
-            ["git", "-C", str(checkout), "archive", ref, "--", *archive_paths]
+            ["git", "-C", str(checkout), "archive", ref, "--", *archive_paths],
+            env=_git_env(),
         )
         materialized_root.mkdir(parents=True, exist_ok=True)
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
@@ -161,6 +174,7 @@ def tree_digest(root: Path) -> str:
             continue
         if item.is_dir():
             digest.update(f"D:{relative}\0".encode("utf-8"))
+            digest.update(f"M:{stat.S_IMODE(item.stat().st_mode):04o}\0".encode("ascii"))
             continue
         if not item.is_file():
             raise SystemExit(f"global skill tree contains an unsupported entry: {item}")
