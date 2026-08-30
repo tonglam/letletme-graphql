@@ -633,8 +633,8 @@ export const liveDesksResolvers = {
 				eventId,
 				entryWindow.entryIds,
 				{
-				scoreCoreRevision: args.ref?.scoreCoreRevision,
-				},
+					scoreCoreRevision: args.ref?.scoreCoreRevision,
+				}
 			);
 			const usable = (row: { availability: string; score: { source: string } }): boolean =>
 				row.availability === "READY" && row.score.source !== "UNAVAILABLE";

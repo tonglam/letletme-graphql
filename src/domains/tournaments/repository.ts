@@ -23,6 +23,7 @@ import {
 	loadEventLiveH2HScoreBatches,
 	type EventLiveH2HScoreBatch,
 } from "./h2h-live-score-repository";
+import { selectTournamentDeskEntryWindow } from "../live-desks/tournament-entry-window";
 
 export enum TournamentMode {
 	NORMAL = "normal",
@@ -4544,6 +4545,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				context,
 				tournamentId
 			);
+			const entryWindow = selectTournamentDeskEntryWindow(rosterEntryIds, entryId);
 			const publication =
 				requestedEventId > 0
 					? await readLivePublicationV2(context, requestedEventId).catch((error) => {
@@ -4554,44 +4556,73 @@ export const tournamentsRepository: TournamentsRepository = {
 							return null;
 						})
 					: null;
+			const scoreCoreRevision = publication?.publication.revisions.scoreCore.revision ?? null;
 			const result = scheduled
 				? null
-				: await calcLivePointsForEntriesV2(context, requestedEventId, rosterEntryIds);
+				: await calcLivePointsForEntriesV2(context, requestedEventId, entryWindow.entryIds, {
+						scoreCoreRevision: scoreCoreRevision ?? undefined,
+					});
+			const revisionMismatchEntryIds = result
+				? [...result.results.values()]
+						.filter(
+							(row) =>
+								row.availability === "READY" &&
+								scoreCoreRevision !== null &&
+								row.score.revisions.scoreCore !== scoreCoreRevision
+						)
+						.map((row) => row.entry)
+				: [];
 			const rows = result
-				? [...result.results.values()].sort(
-						(left, right) =>
-							Number(right.availability === "READY") - Number(left.availability === "READY") ||
-							right.score.eventPoints - left.score.eventPoints ||
-							left.entry - right.entry
-					)
+				? [...result.results.values()]
+						.filter((row) => !revisionMismatchEntryIds.includes(row.entry))
+						.sort(
+							(left, right) =>
+								Number(right.availability === "READY") - Number(left.availability === "READY") ||
+								right.score.eventPoints - left.score.eventPoints ||
+								left.entry - right.entry
+						)
 				: [];
 			const sample = rows.find((row) => row.availability === "READY") ?? rows[0] ?? null;
-			const failedEntryIds = result?.errors.map((error) => error.entryId) ?? [];
+			const failedEntryIds = [
+				...(result?.errors.map((error) => error.entryId) ?? []),
+				...revisionMismatchEntryIds,
+			];
 			const unavailableEntryIds = rosterEntryIds.filter(
 				(rosterEntryId) => rows.find((row) => row.entry === rosterEntryId)?.availability !== "READY"
 			);
+			const additionalReasonCodes = [
+				...(entryWindow.deferredEntryIds.length > 0 ? ["ENTRY_WINDOW_TRUNCATED"] : []),
+				...(revisionMismatchEntryIds.length > 0 ? ["SCORE_CORE_REVISION_MISMATCH"] : []),
+			];
+			const effectiveDelivery = sample
+				? {
+						...sample.delivery,
+						reasonCodes: [...new Set([...sample.delivery.reasonCodes, ...additionalReasonCodes])],
+					}
+				: {
+						state: "UNAVAILABLE" as const,
+						servedFrom: "UNAVAILABLE" as const,
+						reasonCodes: [
+							...(scheduled ? ["EVENT_NOT_STARTED"] : ["NO_COMPLETE_PROJECTION"]),
+							...additionalReasonCodes,
+						],
+					};
 			const state = publication?.publication.state ?? (scheduled ? "PICKS_WAIT" : "UNAVAILABLE");
 			live = {
 				eventId: requestedEventId,
-				scoreCoreRevision:
-					publication?.publication.revisions.scoreCore.revision ??
-					sample?.score.revisions.scoreCore ??
-					null,
+				scoreCoreRevision: scoreCoreRevision ?? sample?.score.revisions.scoreCore ?? null,
 				state,
 				partial:
 					!scheduled &&
-					(failedEntryIds.length > 0 ||
+					(entryWindow.deferredEntryIds.length > 0 ||
+						failedEntryIds.length > 0 ||
 						unavailableEntryIds.length > 0 ||
 						rows.length !== rosterEntryIds.length),
 				failedEntryIds,
 				totalEntries: rosterEntryIds.length,
 				revisions: sample?.score.revisions ?? null,
 				times: sample?.score.times ?? null,
-				delivery: sample?.delivery ?? {
-					state: "UNAVAILABLE",
-					servedFrom: "UNAVAILABLE",
-					reasonCodes: [scheduled ? "EVENT_NOT_STARTED" : "NO_COMPLETE_PROJECTION"],
-				},
+				delivery: effectiveDelivery,
 				rows,
 			};
 		}
@@ -4628,7 +4659,22 @@ export const tournamentsRepository: TournamentsRepository = {
 			revision: isOfficial
 				? `official:${tournament.officialScheduleHash ?? "none"}:${officialSourceCheckedAt}`
 				: live
-					? `${tournament.updatedAt}:${eventContext.revision}:live-${live.scoreCoreRevision ?? `durable-${requestedEventId}`}`
+					? `${tournament.updatedAt}:${eventContext.revision}:live-${live.scoreCoreRevision ?? `durable-${requestedEventId}`}:inputs-${createHash(
+							"sha256"
+						)
+							.update(
+								stableStringify(
+									live.rows
+										.map((row) => ({
+											entry: row.entry,
+											availability: row.availability,
+											revisions: row.score.revisions,
+										}))
+										.sort((left, right) => left.entry - right.entry)
+								)
+							)
+							.digest("hex")
+							.slice(0, 24)}`
 					: `${tournament.updatedAt}:${eventContext.revision}`,
 			kind,
 			context: {
