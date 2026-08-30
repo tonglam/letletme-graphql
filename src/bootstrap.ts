@@ -140,6 +140,17 @@ export const startServer = async (): Promise<void> => {
 				});
 			}
 
+			if (url.pathname === "/health/hot") {
+				const health = await checkRuntimeReadiness(currentSeasonProvider, false, false);
+				return new Response(health.body, {
+					status: health.ok ? 200 : 503,
+					headers: {
+						"Content-Type": "application/json",
+						...corsHeaders,
+					},
+				});
+			}
+
 			if (url.pathname === "/health/deploy") {
 				const health = await checkRuntimeReadiness(currentSeasonProvider, true, true);
 				return new Response(health.body, {

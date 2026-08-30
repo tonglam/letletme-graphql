@@ -71,8 +71,9 @@ so the full-stack connection ceiling remains within the V2 release budget.
 The service exposes:
 
 - `POST /graphql` for trusted Web traffic;
-- `GET /health/live` for liveness and `GET /health/ready` for PostgreSQL, both
-  Redis clients, and current-season readiness; and
+- `GET /health/live` for liveness, `GET /health/hot` for the Redis/current-season
+  serving path, and `GET /health/ready` for strict PostgreSQL, Redis, and
+  current-season readiness; and
 - `GET /metrics`, protected by `METRICS_TOKEN`.
 
 Requests are bounded by body size, depth, root-field count, aliases, AST nodes,

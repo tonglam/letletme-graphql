@@ -300,7 +300,7 @@ describe("production deployment workflow", () => {
 
 	test("keeps compose ports and readiness checks slot-aware", () => {
 		expect(compose).toContain("127.0.0.1:${GRAPHQL_PORT:-4000}:4000");
-		expect(compose).toContain("/health/ready");
+		expect(compose).toContain("/health/hot");
 		expect(deployScript).toContain("candidate_port=4002");
 		expect(deployScript).toContain("candidate_port=4000");
 		expect(monitorWorkflow).toContain("project=letletme_graphql_blue");

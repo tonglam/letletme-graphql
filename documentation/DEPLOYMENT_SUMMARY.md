@@ -6,11 +6,14 @@ Data Platform business schema and publication; `letletme-web` owns `bauth`.
 ## Runtime contract
 
 - Bun, Apollo Server 5, PostgreSQL 15, and Redis.
-- `POST /graphql`, `GET /health/live`, `GET /health/ready`, and token-protected
+- `POST /graphql`, `GET /health/live`, `GET /health/hot`, `GET /health/ready`, and token-protected
   `GET /metrics`.
-- `/health/live` proves only process liveness. `/health/ready` is ready only when PostgreSQL, the current-season authority, the
-  publication/cache Redis client, and the isolated rate-limit Redis client all
-  answer within the bounded probe window.
+- `/health/live` proves only process liveness. `/health/hot` covers the
+  Redis/current-season serving path so a PostgreSQL outage does not remove a
+  live-points-capable instance. `/health/ready` is strict and is ready only
+  when PostgreSQL, the current-season authority, the publication/cache Redis
+  client, and the isolated rate-limit Redis client all answer within the
+  bounded probe window.
 - `/health` is intentionally not exposed; monitors must use `/health/ready`.
 - `DATABASE_STATEMENT_TIMEOUT_MS` defaults to 12 seconds and must stay below
   the Web proxy's 15-second upstream timeout.
