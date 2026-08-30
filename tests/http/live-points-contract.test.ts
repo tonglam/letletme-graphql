@@ -11,6 +11,7 @@ describe("Live Points V2 contract gate", () => {
 	it("requires the V2 header for every live read root, including no-argument roots", () => {
 		expect(requiresLivePointsV2Contract(["calcLivePointsByEntry"])).toBe(true);
 		expect(requiresLivePointsV2Contract(["liveContext"])).toBe(true);
+		expect(requiresLivePointsV2Contract(["homeGameweek"])).toBe(true);
 		expect(requiresLivePointsV2Contract(["events"])).toBe(false);
 	});
 

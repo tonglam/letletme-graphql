@@ -19,6 +19,7 @@ const LIVE_POINTS_ROOT_FIELDS = new Set([
 	"tournamentEntrySquads",
 	"tournamentDetailDesk",
 	"gameweekDesk",
+	"homeGameweek",
 ]);
 
 export const isLivePointsRootField = (field: string): boolean => LIVE_POINTS_ROOT_FIELDS.has(field);
