@@ -109,6 +109,7 @@ export type MyTournamentReviewH2HMatch = {
 };
 
 export type MyTournamentReviewH2HStanding = {
+	groupId: number;
 	entryId: number;
 	entryName: string;
 	rank: number;
@@ -1260,8 +1261,9 @@ function mapH2H(value: unknown): {
 	const standings = Array.isArray(value.standings)
 		? value.standings.map((raw) => {
 				if (!isRecord(raw)) throw integrityError("Review H2H standing payload is invalid");
+				const groupId = positiveInt(raw.groupId);
 				const entryId = positiveInt(raw.entryId);
-				if (!entryId) throw integrityError("Review H2H standing payload is invalid");
+				if (!groupId || !entryId) throw integrityError("Review H2H standing payload is invalid");
 				const rank = Number(raw.rank);
 				const played = Number(raw.played);
 				const won = Number(raw.won);
@@ -1280,6 +1282,7 @@ function mapH2H(value: unknown): {
 					throw integrityError("Review H2H standing payload is invalid");
 				}
 				return {
+					groupId,
 					entryId,
 					entryName:
 						typeof raw.entryName === "string" && raw.entryName.trim()

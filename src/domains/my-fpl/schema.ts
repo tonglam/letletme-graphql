@@ -459,6 +459,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 	}
 
 	type MyTournamentReviewH2HStanding {
+		groupId: Int!
 		entryId: Int!
 		entryName: String!
 		rank: Int!

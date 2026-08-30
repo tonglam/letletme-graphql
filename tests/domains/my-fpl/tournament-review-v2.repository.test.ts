@@ -93,6 +93,7 @@ const h2hPublicationRow = () =>
 				],
 				standings: [
 					{
+						groupId: 1,
 						entryId: 6953,
 						entryName: "Example XI",
 						rank: 1,
