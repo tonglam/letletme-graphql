@@ -338,6 +338,7 @@ jobs:
           import ast
           import json
           import os
+          import re
           from pathlib import Path
 
           def dynamic_rebinding_names(node, protected):
