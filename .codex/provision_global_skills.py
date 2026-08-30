@@ -61,7 +61,11 @@ def load_manifest(path: Path) -> tuple[dict[str, Any], list[str]]:
 def source_checkout(registry_source: Path | None, temporary_root: Path) -> Path:
     if registry_source is not None:
         checkout = registry_source.resolve()
-        if not (checkout / ".git").exists():
+        try:
+            inside_worktree = git(checkout, "rev-parse", "--is-inside-work-tree", capture=True).strip()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise SystemExit(f"registry source is not a Git checkout: {checkout}") from exc
+        if inside_worktree != "true":
             raise SystemExit(f"registry source is not a Git checkout: {checkout}")
         return checkout
     checkout = temporary_root / "config"
@@ -148,13 +152,13 @@ def tree_digest(root: Path) -> str:
         relative = relative_path.as_posix()
         if item.is_symlink():
             raise SystemExit(f"global skill tree contains a symlink: {item}")
-        if "__pycache__" in relative_path.parts:
-            continue
         # Runtime cache directories are ignored, but executable bytecode is
-        # never accepted outside those caches.  A timestamp-valid .pyc could
-        # otherwise be imported without changing the source digest.
+        # never accepted, including inside those caches.  A timestamp-valid
+        # .pyc could otherwise be imported without changing the source digest.
         if item.is_file() and item.suffix.casefold() in {".pyc", ".pyo"}:
             raise SystemExit(f"global skill tree contains executable bytecode: {item}")
+        if "__pycache__" in relative_path.parts:
+            continue
         if item.is_dir():
             digest.update(f"D:{relative}\0".encode("utf-8"))
             continue

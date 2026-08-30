@@ -31,7 +31,7 @@ SECRET_VALUE_RES = (
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\s`<>]+))'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
     re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]+:([^\s/@]+)@"),
-    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|sk-(?:[A-Za-z0-9]+-)*[A-Za-z0-9]{20,})\b"),
+    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[0-9A-Za-z-]{10,}|sk-(?:[A-Za-z0-9]+-)*[A-Za-z0-9]{20,})\b"),
 )
 FORBIDDEN_YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 PLACEHOLDER_VALUES = {
@@ -330,10 +330,12 @@ def _without_markdown_code(text: str) -> str:
     # inside ``> ...`` is still code, but the leading ``>`` means the old
     # space-only detector never entered fence mode and scanned its examples as
     # operative links.
-    fence: tuple[str, int, int] | None = None
+    # (marker character, minimum run length, quote depth, list content indent)
+    fence: tuple[str, int, int, int | None] | None = None
     for line in text.splitlines(keepends=True):
         body = line.rstrip("\r\n")
         marker: tuple[str, int, int, str] | None = None
+        list_content_indent: int | None = None
         # CommonMark permits up to three spaces before a block-quote marker,
         # an optional space after each marker, and up to three spaces before
         # the fenced-code marker.  Counting ``>`` markers keeps nested quotes
@@ -348,13 +350,19 @@ def _without_markdown_code(text: str) -> str:
             # marker is a container prefix, not part of the fence itself;
             # retain the quote depth so a nested quote cannot close it.
             list_match = re.match(
-                r"^( {0,3}(?:> ?)*)(?: {0,3})(?:[-+*]|\d+[.)])[ \t]+( {0,3})([`~]{3,})(.*)$",
+                r"^( {0,3}(?:> ?)*)( {0,3})(?:[-+*]|\d+[.)])[ \t]+( {0,3})([`~]{3,})(.*)$",
                 body,
             )
             if list_match:
                 prefix = list_match.group(1)
-                run = list_match.group(3)
-                marker = (run[0], len(run), prefix.count(">"), list_match.group(4))
+                run = list_match.group(4)
+                list_content_indent = (
+                    (0 if ">" in prefix else len(prefix))
+                    + len(list_match.group(2))
+                    + len(list_match.group(3))
+                    + 2
+                )
+                marker = (run[0], len(run), prefix.count(">"), list_match.group(5))
             else:
                 normal_match = re.match(r"^( {0,3})([`~]{3,})(.*)$", body)
                 if normal_match:
@@ -362,7 +370,7 @@ def _without_markdown_code(text: str) -> str:
                     marker = (run[0], len(run), 0, normal_match.group(3))
         if marker is not None:
             if fence is None:
-                fence = marker[:3]
+                fence = (*marker[:3], list_content_indent)
             elif (
                 marker[0] == fence[0]
                 and marker[1] >= fence[1]
@@ -373,8 +381,18 @@ def _without_markdown_code(text: str) -> str:
             lines.append("\n" if line.endswith("\n") else "")
             continue
         if fence is not None:
-            lines.append("\n" if line.endswith("\n") else "")
-            continue
+            quote_prefix = re.match(r"^ {0,3}(?:> ?)+", body)
+            quote_depth = quote_prefix.group(0).count(">") if quote_prefix else 0
+            if quote_depth < fence[2]:
+                fence = None
+            elif fence[3] is not None and body.strip():
+                prefix = quote_prefix.group(0) if quote_prefix else ""
+                content = body[len(prefix) :]
+                if len(content) - len(content.lstrip(" ")) < fence[3]:
+                    fence = None
+            if fence is not None:
+                lines.append("\n" if line.endswith("\n") else "")
+                continue
         # Preserve line length while masking inline-code destinations.
         masked = re.sub(r"(?<!\\)(`+)(?:(?!\1).)*\1", lambda match: "".join("\n" if c == "\n" else " " for c in match.group(0)), line)
         lines.append(masked)
@@ -626,7 +644,7 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
     if not include_discovery:
         return []
     paths: set[Path] = set()
-    for pattern in ("AGENTS.md", "AGENTS.override.md"):
+    for pattern in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
         for path in repo.rglob(pattern):
             if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
                 paths.add(path.absolute())
@@ -927,9 +945,15 @@ def validate_skill(
     # References are part of the skill's executable instruction surface. Scan
     # them recursively so a secret or broken link cannot hide behind SKILL.md.
     for reference in path.rglob("*"):
-        if not reference.is_file() or reference == entry or reference.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES:
+        if reference == entry:
             continue
-        if not allow_external and (reference.is_symlink() or not _is_within(reference.resolve(), repo.resolve())):
+        if reference.is_symlink():
+            if not allow_external:
+                errors.append(f"{reference}: skill tree may not contain a symlink")
+            continue
+        if not reference.is_file() or reference.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES:
+            continue
+        if not allow_external and not _is_within(reference.resolve(), repo.resolve()):
             errors.append(f"{reference}: skill reference must remain inside the repository and may not be a symlink")
             continue
         try:
@@ -1018,6 +1042,12 @@ def validate_asset(
         discovered_set = set(discovered)
         for path in discovered:
             _validate_instruction_file(path, repo, policy, errors)
+            # CLAUDE.md is an operative consumer entrypoint in repositories
+            # that provide it, even when the legacy contract lists only
+            # AGENTS.md. Treat it as governed automatically rather than
+            # allowing a conflicting file to hide as an unlisted extra.
+            if path.name == "CLAUDE.md":
+                required_paths.add(path)
         for path in sorted(discovered_set - required_paths):
             errors.append(f"{path}: instruction entrypoint is not listed in the contract")
 

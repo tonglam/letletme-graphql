@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - AGENTS.md
+      - CLAUDE.md
       - .agents/**
       - .codex/**
       - .github/workflows/instruction-integrity.yml
@@ -287,16 +288,65 @@ jobs:
                         return node
                 raise SystemExit(f"approved validator is missing function {name}")
 
-            def called_names(node):
-                names = set()
-                for child in ast.walk(node):
-                    if not isinstance(child, ast.Call):
-                        continue
-                    if isinstance(child.func, ast.Name):
-                        names.add(child.func.id)
-                    elif isinstance(child.func, ast.Attribute):
-                        names.add(child.func.attr)
-                return names
+            def constant_truth(node):
+                if isinstance(node, ast.Constant):
+                    return bool(node.value)
+                if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+                    inner = constant_truth(node.operand)
+                    return None if inner is None else not inner
+                return None
+
+            class ReachableCalls(ast.NodeVisitor):
+                def __init__(self):
+                    self.names = set()
+                    self.strings = set()
+
+                def visit_Call(self, node):
+                    if isinstance(node.func, ast.Name):
+                        self.names.add(node.func.id)
+                    elif isinstance(node.func, ast.Attribute):
+                        self.names.add(node.func.attr)
+                    self.generic_visit(node)
+
+                def visit_Constant(self, node):
+                    if isinstance(node.value, str):
+                        self.strings.add(node.value)
+
+                def visit_If(self, node):
+                    self.visit(node.test)
+                    truth = constant_truth(node.test)
+                    branch = node.body if truth is True else node.orelse if truth is False else node.body + node.orelse
+                    for child in branch:
+                        self.visit(child)
+
+                def visit_While(self, node):
+                    self.visit(node.test)
+                    truth = constant_truth(node.test)
+                    branch = node.body if truth is not False else node.orelse
+                    for child in branch:
+                        self.visit(child)
+
+                def visit_FunctionDef(self, node):
+                    # Nested functions are not part of the enclosing function's
+                    # reachable validation path.
+                    return
+
+                visit_AsyncFunctionDef = visit_FunctionDef
+
+                def visit_Lambda(self, node):
+                    return
+
+            def reachable_called_names(node):
+                visitor = ReachableCalls()
+                for statement in node.body:
+                    visitor.visit(statement)
+                return visitor.names
+
+            def reachable_string_literals(node):
+                visitor = ReachableCalls()
+                for statement in node.body:
+                    visitor.visit(statement)
+                return visitor.strings
 
             def check_validator_shape(tree):
                 parse_yaml = function_node(tree, "parse_yaml_mapping")
@@ -308,7 +358,7 @@ jobs:
                     "main": (main, {"validate_asset"}),
                 }
                 for label, (node, required_names) in required_calls.items():
-                    missing = sorted(required_names - called_names(node))
+                    missing = sorted(required_names - reachable_called_names(node))
                     if missing:
                         raise SystemExit(f"approved validator {label} is missing operational calls: {', '.join(missing)}")
                 if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(parse_yaml)):
@@ -333,6 +383,45 @@ jobs:
             else:
                 raise SystemExit("validator semantic fixture unexpectedly passed")
             check_validator_shape(validator)
+
+            def check_provisioner_shape(tree):
+                required_calls = {
+                    "load_manifest": (function_node(tree, "load_manifest"), {"loads"}),
+                    "verify_registry": (function_node(tree, "verify_registry"), {"check_output", "loads"}),
+                    "tree_digest": (function_node(tree, "tree_digest"), {"sha256", "rglob"}),
+                    "main": (function_node(tree, "main"), {"load_manifest", "verify_registry", "tree_digest"}),
+                }
+                for label, (node, required_names) in required_calls.items():
+                    missing = sorted(required_names - reachable_called_names(node))
+                    if missing:
+                        raise SystemExit(f"approved provisioner {label} is missing operational calls: {', '.join(missing)}")
+                if "archive" not in reachable_string_literals(function_node(tree, "verify_registry")):
+                    raise SystemExit("approved provisioner verify_registry is missing the git archive operation")
+
+            dead_validator_fixture = ast.parse(
+                "def parse_yaml_mapping():\n  if False: _parse_scalar()\n  return {}\n"
+                "def validate_asset():\n  if False: validate_skill(); _validate_instruction_file(); _validate_global_manifest()\n  return {'ok': True}\n"
+                "def main():\n  if False: validate_asset()\n  return 0\n"
+            )
+            try:
+                check_validator_shape(dead_validator_fixture)
+            except SystemExit:
+                pass
+            else:
+                raise SystemExit("dead-code validator fixture unexpectedly passed")
+            check_provisioner_shape(provisioner)
+            dead_provisioner_fixture = ast.parse(
+                "def load_manifest():\n  if False: loads()\n"
+                "def verify_registry():\n  if False: check_output(); loads(); 'archive'\n"
+                "def tree_digest():\n  if False: sha256(); rglob()\n"
+                "def main():\n  if False: load_manifest(); verify_registry(); tree_digest()\n"
+            )
+            try:
+                check_provisioner_shape(dead_provisioner_fixture)
+            except SystemExit:
+                pass
+            else:
+                raise SystemExit("dead-code provisioner fixture unexpectedly passed")
 
             manifest = json.loads(Path("target/.codex/global-skills.json").read_text(encoding="utf-8"))
             contract = json.loads(Path("target/.codex/instruction-integrity.json").read_text(encoding="utf-8"))
@@ -364,15 +453,18 @@ jobs:
               gate = jobs["validate"]
               raise "bootstrap is not limited to pull_request" unless bootstrap["if"].to_s.include?("github.event_name == 'pull_request'")
               raise "trusted gate name is missing" unless gate["name"].to_s == "instruction-integrity"
-              raise "trusted gate condition is incomplete" unless gate["if"].to_s.include?("pull_request_target") && gate["if"].to_s.include?("push")
+              gate_condition = gate["if"].to_s.gsub(/\s+/, " ").strip
+              expected_gate_condition = "github.event_name == 'pull_request_target' || github.event_name == 'push'"
+              raise "trusted gate condition is incomplete or disabled" unless gate_condition == expected_gate_condition
               permissions = workflow["permissions"]
               raise "workflow must be read-only" unless permissions.is_a?(Hash) && permissions["contents"].to_s == "read"
               steps = Array(gate["steps"])
               validate_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate AGENTS.md and skills" }
               raise "trusted validator step is missing" unless validate_step
+              raise "trusted validator step may be conditionally skipped" if validate_step.key?("if") && !validate_step["if"].to_s.strip.empty?
               raise "trusted validator step may not ignore failures" if validate_step["continue-on-error"] == true || validate_step["continue-on-error"].to_s.casecmp("true").zero?
               run = validate_step["run"].to_s
-              raise "trusted validator step disables errexit" if run.lines.any? { |line| line.strip == "set +e" }
+              raise "trusted validator step disables errexit" if run.lines.any? { |line| line.strip.match?(/\Aset\s+\+(?:e|o\s+errexit)\b/) }
               logical_commands = []
               current = ""
               run.each_line do |line|
@@ -392,7 +484,7 @@ jobs:
               %w[--trusted-policy --trusted-contract --registry-source].each do |needle|
                 raise "trusted validator command is missing #{needle}" unless command.split.include?(needle) || command.include?("#{needle} ")
               end
-              raise "trusted validator command ignores failures" if command.match?(/\|\|\s*(?:true|:)(?:\s|\z)/)
+              raise "trusted validator command must be standalone and failure-propagating" if command.match?(/[;&|<>]/)
               %w[AGENTS.md .codex/global-skills.json .codex/provision_global_skills.py].each do |needle|
                 raise "bootstrap protection is missing #{needle}" unless steps.any? { |step| step.is_a?(Hash) && step["run"].to_s.include?(needle) }
               end
@@ -407,6 +499,7 @@ jobs:
           python3 - <<'PY'
           import hashlib
           import json
+          import stat
           import sys
           from pathlib import Path
 
@@ -422,11 +515,11 @@ jobs:
               # AGENTS.override.md is a scoped instruction surface even when
               # it is not listed in the root contract. Include every tracked
               # override so adding or editing one cannot bypass protection.
-              for item in root.rglob("AGENTS*.md"):
+              for item in root.rglob("*"):
                   relative = item.relative_to(root)
                   if any(part in {".git", "node_modules", ".next"} for part in relative.parts):
                       continue
-                  if item.name in {"AGENTS.md", "AGENTS.override.md"}:
+                  if item.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}:
                       paths.add(relative)
               for relative in sorted(paths, key=str):
                   if relative.is_absolute() or ".." in relative.parts:
@@ -451,7 +544,10 @@ jobs:
                       if item.is_symlink():
                           raise SystemExit(f"governed instruction may not be a symlink: {item.relative_to(root)}")
                       item_relative = item.relative_to(root)
-                      files[str(item_relative)] = hashlib.sha256(item.read_bytes()).hexdigest()
+                      files[str(item_relative)] = (
+                          hashlib.sha256(item.read_bytes()).hexdigest(),
+                          stat.S_IMODE(item.stat().st_mode),
+                      )
               pending = list(files)
               seen: set[str] = set()
               repo_root = root.resolve()
@@ -478,7 +574,10 @@ jobs:
                           continue
                       referenced = str(candidate.relative_to(repo_root))
                       if referenced not in files:
-                          files[referenced] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+                          files[referenced] = (
+                              hashlib.sha256(candidate.read_bytes()).hexdigest(),
+                              stat.S_IMODE(candidate.stat().st_mode),
+                          )
                           pending.append(referenced)
               return files
 
