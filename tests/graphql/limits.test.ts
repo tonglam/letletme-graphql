@@ -835,7 +835,7 @@ describe("GraphQL request limits", () => {
 
 	it("keeps the live-points AST allowance scoped to one exact bounded root", () => {
 		const fieldsWithinAllowance = Array.from({ length: 110 }, () => "__typename").join(" ");
-		const fieldsAboveAllowance = Array.from({ length: 150 }, () => "__typename").join(" ");
+		const fieldsAboveAllowance = Array.from({ length: 170 }, () => "__typename").join(" ");
 
 		expect(
 			validateGraphQLRequestLimits(
