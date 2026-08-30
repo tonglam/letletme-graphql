@@ -350,19 +350,19 @@ def _without_markdown_code(text: str) -> str:
             # marker is a container prefix, not part of the fence itself;
             # retain the quote depth so a nested quote cannot close it.
             list_match = re.match(
-                r"^( {0,3}(?:> ?)*)( {0,3})(?:[-+*]|\d+[.)])[ \t]+( {0,3})(`{3,}|~{3,})(.*)$",
+                r"^( {0,3}(?:> ?)*)( {0,3})([-+*]|\d+[.)])[ \t]+( {0,3})(`{3,}|~{3,})(.*)$",
                 body,
             )
             if list_match:
                 prefix = list_match.group(1)
-                run = list_match.group(4)
+                run = list_match.group(5)
                 list_content_indent = (
                     (0 if ">" in prefix else len(prefix))
                     + len(list_match.group(2))
                     + len(list_match.group(3))
-                    + 2
+                    + len(list_match.group(4))
                 )
-                marker = (run[0], len(run), prefix.count(">"), list_match.group(5))
+                marker = (run[0], len(run), prefix.count(">"), list_match.group(6))
             else:
                 normal_match = re.match(r"^( {0,3})(`{3,}|~{3,})(.*)$", body)
                 if normal_match:
@@ -381,6 +381,17 @@ def _without_markdown_code(text: str) -> str:
             lines.append("\n" if line.endswith("\n") else "")
             continue
         if fence is not None:
+            if fence[3] is not None:
+                indented_close = re.match(r"^( *)(`{3,}|~{3,})[ \t]*$", body)
+                if (
+                    indented_close
+                    and len(indented_close.group(1)) >= fence[3]
+                    and indented_close.group(2)[0] == fence[0]
+                    and len(indented_close.group(2)) >= fence[1]
+                ):
+                    fence = None
+                    lines.append("\n" if line.endswith("\n") else "")
+                    continue
             quote_prefix = re.match(r"^ {0,3}(?:> ?)+", body)
             quote_depth = quote_prefix.group(0).count(">") if quote_prefix else 0
             if quote_depth < fence[2]:
