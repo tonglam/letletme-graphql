@@ -65,8 +65,8 @@ bun run contract:check
 bun run dev
 ```
 
-`DATABASE_POOL_MAX` defaults to `2` and accepts only `1` through `2`. Keep the production value at
-`5` unless the shared PostgreSQL connection budget is deliberately rebalanced.
+`DATABASE_POOL_MAX` defaults to `2` and accepts only `1` through `2`. Production must use `1` or `2`
+so the full-stack connection ceiling remains within the V2 release budget.
 
 The service exposes:
 
