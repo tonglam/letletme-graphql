@@ -1605,11 +1605,7 @@ def validate_asset(
                 repo,
                 policy,
                 errors,
-                require_governance=(
-                    path.name == "CLAUDE.md"
-                    or ".claude" in path.relative_to(repo).parts
-                    and any(part in {"agents", "rules"} for part in path.relative_to(repo).parts)
-                ),
+                require_governance=path.name == "CLAUDE.md",
             )
             # CLAUDE.md is an operative consumer entrypoint in repositories
             # that provide it, even when the legacy contract lists only
