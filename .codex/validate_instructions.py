@@ -105,21 +105,28 @@ def _strip_yaml_comment(value: str) -> str:
     scalar_start = mapping.end() if mapping else 0
     quote: str | None = None
     escaped = False
+    skip_single_escape = False
     for index, char in enumerate(value):
+        if skip_single_escape:
+            skip_single_escape = False
+            continue
         if quote == '"' and escaped:
             escaped = False
             continue
         if quote == '"' and char == "\\":
             escaped = True
             continue
-        if char in {'"', "'"}:
-            # A quote inside a plain scalar (for example, ``user's route``)
-            # is ordinary text. Only a quote at the scalar start opens a YAML
-            # quoted scalar, so comments after apostrophes are still removed.
-            if quote is None and index == scalar_start:
-                quote = char
-            elif quote == char:
-                quote = None
+        if quote == "'":
+            if char == "'":
+                # YAML escapes an apostrophe inside a single-quoted scalar by
+                # doubling it; it must not close the scalar before a hash.
+                if index + 1 < len(value) and value[index + 1] == "'":
+                    skip_single_escape = True
+                else:
+                    quote = None
+            continue
+        if char in {'"', "'"} and quote is None and index == scalar_start:
+            quote = char
         elif char == "#" and quote is None and (index == 0 or value[index - 1].isspace()):
             return value[:index].rstrip()
     return value.rstrip()
@@ -206,6 +213,9 @@ def parse_yaml_mapping(text: str, path: Path, *, scalar_fields: bool = False) ->
             raise ValueError(f"{path}:{line_number}: invalid YAML indentation")
         if ":" not in content:
             raise ValueError(f"{path}:{line_number}: expected a YAML mapping entry")
+        separator = content.find(":")
+        if separator + 1 < len(content) and not content[separator + 1].isspace():
+            raise ValueError(f"{path}:{line_number}: YAML mapping colon must be followed by whitespace")
         key, value = content.split(":", 1)
         key = key.strip()
         if not KEY_RE.fullmatch(key):
@@ -248,6 +258,23 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _has_symlink_component(path: Path, root: Path) -> bool:
+    """Return whether a repository-relative path traverses a symlink."""
+
+    path = path.absolute()
+    root = root.absolute()
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
+
+
 def resolve_path(
     repo: Path,
     value: str,
@@ -256,20 +283,21 @@ def resolve_path(
     allow_external: bool = False,
 ) -> Path:
     candidate = Path(value)
+    lexical = candidate if candidate.is_absolute() else repo / candidate
     if candidate.is_absolute():
         if not allow_absolute_inside_repo:
             raise ValueError(f"required instruction path must be repository-relative: {value}")
-        resolved = candidate.resolve()
+        resolved = lexical.resolve()
     else:
         if ".." in candidate.parts:
             raise ValueError(f"required instruction path may not escape the repository: {value}")
-        resolved = (repo / candidate).resolve()
+        resolved = lexical.resolve()
     root = repo.resolve()
     if not allow_external and not _is_within(resolved, root):
         raise ValueError(f"required instruction path escapes the repository: {value}")
-    if not allow_external and (repo / candidate).is_symlink():
+    if not allow_external and _has_symlink_component(lexical, repo):
         raise ValueError(f"required instruction path may not be a symlink: {value}")
-    return resolved
+    return lexical.absolute()
 
 
 def _without_markdown_code(text: str) -> str:
@@ -278,9 +306,10 @@ def _without_markdown_code(text: str) -> str:
     lines: list[str] = []
     fence: tuple[str, int] | None = None
     for line in text.splitlines(keepends=True):
-        stripped = line.lstrip()
+        leading_spaces = len(line) - len(line.lstrip(" "))
+        stripped = line.lstrip(" ")
         marker: tuple[str, int] | None = None
-        if stripped and stripped[0] in "`~":
+        if leading_spaces <= 3 and stripped and stripped[0] in "`~":
             marker_char = stripped[0]
             marker_length = len(stripped) - len(stripped.lstrip(marker_char))
             if marker_length >= 3:
@@ -364,7 +393,7 @@ def check_reference_links(
             continue
         lexical = instruction_file.parent / target
         candidate = lexical.resolve()
-        if not allow_external and lexical.is_symlink():
+        if not allow_external and _has_symlink_component(lexical, repo):
             errors.append(f"{instruction_file}: relative reference may not be a symlink: {target}")
             continue
         if not allow_external and not _is_within(candidate, repo.resolve()):
@@ -411,7 +440,7 @@ def scan_reference_graph(
                 continue
             if not candidate.is_file() or candidate.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES:
                 continue
-            if not allow_external and (lexical.is_symlink() or not _is_within(candidate, repo.resolve())):
+            if not allow_external and (_has_symlink_component(lexical, repo) or not _is_within(candidate, repo.resolve())):
                 errors.append(f"{lexical}: referenced instruction must remain inside the repository and may not be a symlink")
                 continue
             try:
@@ -532,7 +561,7 @@ def _validate_instruction_file(
         except OSError as exc:
             errors.append(f"{path}: cannot resolve instruction path: {exc}")
             return
-        if path.is_symlink() or not _is_within(resolved, repo.resolve()):
+        if _has_symlink_component(path, repo) or not _is_within(resolved, repo.resolve()):
             errors.append(f"{path}: instruction path must remain inside the repository and may not be a symlink")
             return
     try:
@@ -566,7 +595,7 @@ def _validate_instruction_file(
                 errors.append(f"{path}: skill instruction body must be nonempty after frontmatter")
         yaml_path = path.parent / "agents" / "openai.yaml"
         if yaml_path.exists():
-            if not allow_external and (yaml_path.is_symlink() or not _is_within(yaml_path.resolve(), repo.resolve())):
+            if not allow_external and (_has_symlink_component(yaml_path, repo) or not _is_within(yaml_path.resolve(), repo.resolve())):
                 errors.append(f"{yaml_path}: metadata path must remain inside the repository and may not be a symlink")
             else:
                 check_yaml_shape(yaml_path, errors, skill_name=path.parent.name)
@@ -619,6 +648,9 @@ def _validate_policy(policy: dict[str, Any], errors: list[str]) -> None:
         "forbid_secrets_in_instructions",
         "review_rules",
     }
+    unknown = sorted(set(policy) - required_keys)
+    if unknown:
+        errors.append(f"policy contains unknown keys: {', '.join(unknown)}")
     missing = sorted(required_keys - set(policy))
     if missing:
         errors.append(f"policy is missing required security keys: {', '.join(missing)}")
@@ -739,10 +771,12 @@ def _validate_global_manifest(
     else:
         errors.append(f"{manifest_path}: registry must be an object")
     advertised = manifest.get("skills")
-    if not isinstance(advertised, list) or set(advertised) != set(expected_skills):
+    if not isinstance(advertised, list):
         errors.append(f"{manifest_path}: advertised skills do not match required_global_skills")
     elif len(set(advertised)) != len(advertised):
         errors.append(f"{manifest_path}: advertised skills must not contain duplicates")
+    elif set(advertised) != set(expected_skills):
+        errors.append(f"{manifest_path}: advertised skills do not match required_global_skills")
     if registry_source is None or not isinstance(registry, dict):
         return
     source_root = registry_source.resolve()

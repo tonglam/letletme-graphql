@@ -72,6 +72,8 @@ jobs:
               value = contract.get(key)
               if not isinstance(value, list) or not value or not all(isinstance(item, str) and item.strip() for item in value):
                   fail(f'contract {key} must be a non-empty string list')
+              if len(set(value)) != len(value):
+                  fail(f'contract {key} must not contain duplicates')
           if not re.fullmatch(r'[0-9a-fA-F]{7,40}', str(contract.get('canonical_config_commit', ''))):
               fail('contract canonical_config_commit must be a hexadecimal revision')
           policy = load_object('.codex/instruction-policy.v1.json')
@@ -87,7 +89,7 @@ jobs:
           registry = manifest.get('registry')
           if manifest.get('version') != 1 or not isinstance(registry, dict) or not re.fullmatch(r'[0-9a-f]{40}', str(registry.get('ref', ''))) or not re.fullmatch(r'[0-9a-f]{64}', str(registry.get('sha256', ''))):
               fail('global manifest must pin a full commit and content digest')
-          if not isinstance(manifest.get('skills'), list) or set(manifest['skills']) != set(contract['required_global_skills']):
+          if not isinstance(manifest.get('skills'), list) or len(set(manifest['skills'])) != len(manifest['skills']) or set(manifest['skills']) != set(contract['required_global_skills']):
               fail('global manifest skill list must match the contract')
           agents = ' '.join((root / 'AGENTS.md').read_text(encoding='utf-8').casefold().split())
           required_clauses = (
@@ -225,30 +227,62 @@ jobs:
             fi
           done
           if test "$approved" = true; then
-            python3 -m py_compile target/.codex/validate_instructions.py
-            TARGET_VALIDATOR="$PWD/target/.codex/validate_instructions.py" python3 - <<'PY'
-            import importlib.util
+            python3 -m py_compile target/.codex/validate_instructions.py target/.codex/provision_global_skills.py
+            TARGET_VALIDATOR="$PWD/target/.codex/validate_instructions.py" \
+            TARGET_PROVISIONER="$PWD/target/.codex/provision_global_skills.py" \
+            python3 - <<'PY'
+            import ast
+            import json
             import os
             from pathlib import Path
 
-            target = Path(os.environ["TARGET_VALIDATOR"])
-            spec = importlib.util.spec_from_file_location("proposed_validator", target)
-            if spec is None or spec.loader is None:
-                raise SystemExit("unable to load proposed validator")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            probe = Path("approved-validator-probe.yml")
-            parsed = module.parse_yaml_mapping('description: "Discuss # literally"\n', probe)
-            if parsed.get("description") != "Discuss # literally":
-                raise SystemExit("proposed validator YAML quote probe failed")
-            try:
-                module.parse_yaml_mapping("description: plain: value\n", probe)
-            except ValueError:
-                pass
-            else:
-                raise SystemExit("proposed validator colon probe failed")
-            print("approved proposed validator compiled and exercised")
+            def load_tree(path, required):
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                definitions = {
+                    node.name
+                    for node in tree.body
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                }
+                missing = sorted(set(required) - definitions)
+                if missing:
+                    raise SystemExit(f"{path}: missing required definitions: {', '.join(missing)}")
+                return tree
+
+            validator = load_tree(Path(os.environ["TARGET_VALIDATOR"]), {"parse_yaml_mapping", "validate_asset", "main"})
+            provisioner_path = Path(os.environ["TARGET_PROVISIONER"])
+            provisioner = load_tree(provisioner_path, {"load_manifest", "verify_registry", "tree_digest", "main"})
+
+            # Approved target code is contributor-controlled and must not be
+            # imported or executed inside pull_request_target. Check its
+            # executable shape and immutable-pin constants as data only; the
+            # trusted validator below remains the only code executed on target
+            # contents in this job.
+            for tree, forbidden in ((validator, {"exec", "eval", "__import__"}), (provisioner, {"exec", "eval", "__import__"})):
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden:
+                        raise SystemExit(f"approved governance code uses forbidden dynamic call: {node.func.id}")
+
+            def assignment(tree, name):
+                for node in tree.body:
+                    if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+                        try:
+                            return ast.literal_eval(node.value)
+                        except (ValueError, SyntaxError):
+                            raise SystemExit(f"approved provisioner constant {name} must be a literal")
+                raise SystemExit(f"approved provisioner constant {name} is missing")
+
+            manifest = json.loads(Path("target/.codex/global-skills.json").read_text(encoding="utf-8"))
+            contract = json.loads(Path("target/.codex/instruction-integrity.json").read_text(encoding="utf-8"))
+            if assignment(provisioner, "EXPECTED_REGISTRY") != manifest.get("registry"):
+                raise SystemExit("approved provisioner registry pin does not match the manifest")
+            if assignment(provisioner, "EXPECTED_SOURCE_REVISION") != contract.get("canonical_config_commit"):
+                raise SystemExit("approved provisioner source revision does not match the contract")
+
+            # Parse the proposed workflow without executing any contributor
+            # YAML or action. Ruby/Psych is present on the hosted runner.
+            print("approved governance code shape and pins validated without execution")
             PY
+            ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: false)' target/.github/workflows/instruction-integrity.yml
           fi
       - name: Protect instruction contents unless explicitly approved
         if: env.GOVERNANCE_UPDATE_APPROVED != 'true'

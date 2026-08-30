@@ -9,6 +9,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -144,17 +145,21 @@ def tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
     for item in sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix()):
         relative_path = item.relative_to(root)
-        if "__pycache__" in relative_path.parts or item.suffix == ".pyc":
-            continue
         relative = relative_path.as_posix()
         if item.is_symlink():
             raise SystemExit(f"global skill tree contains a symlink: {item}")
+        # Runtime bytecode caches are intentionally ignored, but symlinks are
+        # rejected first and sourceless bytecode outside __pycache__ remains
+        # part of the immutable digest.
+        if "__pycache__" in relative_path.parts:
+            continue
         if item.is_dir():
             digest.update(f"D:{relative}\0".encode("utf-8"))
             continue
         if not item.is_file():
             raise SystemExit(f"global skill tree contains an unsupported entry: {item}")
         digest.update(f"F:{relative}\0".encode("utf-8"))
+        digest.update(f"M:{stat.S_IMODE(item.stat().st_mode):04o}\0".encode("ascii"))
         digest.update(hashlib.sha256(item.read_bytes()).digest())
     return digest.hexdigest()
 
@@ -181,7 +186,6 @@ def main() -> int:
         configured_runtime_root = args.runtime_root
         runtime_root = configured_runtime_root or Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
         destination_root = runtime_root.expanduser().resolve() / "skills"
-        destination_root.mkdir(parents=True, exist_ok=True)
         missing: list[str] = []
         for name in advertised:
             destination = destination_root / name
@@ -205,7 +209,8 @@ def main() -> int:
             print("missing global skills: " + ", ".join(missing))
             print("rerun with --apply to install only those advertised directories")
             return 1
-        if args.apply:
+        if args.apply and missing:
+            destination_root.mkdir(parents=True, exist_ok=True)
             for name in missing:
                 destination = destination_root / name
                 staging = destination_root / f".provision-{name}"
