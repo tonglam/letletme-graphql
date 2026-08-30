@@ -1137,6 +1137,55 @@ jobs:
                           rebound.add(node.asname or node.name)
               return rebound
 
+          def check_has_secret_shape(node):
+              """Require secret-detection results to reach a failure return."""
+
+              def calls_receiver(expression, operation, receiver):
+                  return any(
+                      isinstance(item, ast.Call)
+                      and isinstance(item.func, ast.Attribute)
+                      and item.func.attr == operation
+                      and isinstance(item.func.value, ast.Name)
+                      and item.func.value.id == receiver
+                      for item in ast.walk(expression)
+                  )
+
+              def calls_name(expression, name):
+                  return any(
+                      isinstance(item, ast.Call)
+                      and isinstance(item.func, ast.Name)
+                      and item.func.id == name
+                      for item in ast.walk(expression)
+                  )
+
+              def returns_true(statements):
+                  return any(
+                      isinstance(item, ast.Return)
+                      and isinstance(item.value, ast.Constant)
+                      and item.value.value is True
+                      for statement in statements
+                      for item in ast.walk(statement)
+                  )
+
+              precheck = False
+              placeholder_check = False
+              for branch in ast.walk(node):
+                  if not isinstance(branch, ast.If):
+                      continue
+                  if (
+                      calls_receiver(branch.test, "search", "PEM_RE")
+                      and calls_receiver(branch.test, "search", "PRIVATE_ORIGIN_RE")
+                      and calls_name(branch.test, "_has_private_ip_literal")
+                      and returns_true(branch.body)
+                  ):
+                      precheck = True
+                  if calls_name(branch.test, "_looks_like_placeholder") and returns_true(branch.body):
+                      placeholder_check = True
+              if not precheck:
+                  raise SystemExit("approved validator has_secret does not propagate pre-check results")
+              if not placeholder_check:
+                  raise SystemExit("approved validator has_secret does not propagate credential-pattern results")
+
           def check_validator_shape(tree):
               parse_yaml = function_node(tree, "parse_yaml_mapping")
               validate = function_node(tree, "validate_asset")
@@ -1148,6 +1197,7 @@ jobs:
                   "_validate_global_manifest": function_node(tree, "_validate_global_manifest"),
                   "_validate_skill_inventory": function_node(tree, "_validate_skill_inventory"),
                   "has_secret": function_node(tree, "has_secret"),
+                  "has_secret_bytes": function_node(tree, "has_secret_bytes"),
                   "_has_private_ip_literal": function_node(tree, "_has_private_ip_literal"),
                   "_looks_like_placeholder": function_node(tree, "_looks_like_placeholder"),
               }
@@ -1164,12 +1214,14 @@ jobs:
                       "_validate_global_manifest",
                       "_validate_skill_inventory",
                       "has_secret",
+                      "has_secret_bytes",
                       "_has_private_ip_literal",
                       "_looks_like_placeholder",
                   },
               )
               if rebound:
                   raise SystemExit(f"approved validator rebinds protected names: {', '.join(sorted(rebound))}")
+              check_has_secret_shape(helper_nodes["has_secret"])
               required_calls = {
                   "parse_yaml_mapping": (parse_yaml, {"_parse_scalar"}),
                   "validate_asset": (validate, {"validate_skill", "_validate_instruction_file", "_validate_global_manifest", "check_agents_claude_consistency", "_validate_skill_inventory"}),
@@ -1342,6 +1394,7 @@ jobs:
                   "_validate_instruction_file": {"read_text", "read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json", "read_bytes", "sha256", "resolve"},
                   "_validate_skill_inventory": {"load_json"},
+                  "has_secret_bytes": {"loads", "dumps", "has_secret"},
                   "has_secret": {"search", "finditer", "_has_private_ip_literal", "_looks_like_placeholder"},
                   "_has_private_ip_literal": {"finditer", "ip_address"},
                   "_looks_like_placeholder": {"fullmatch", "match", "search"},
@@ -1358,6 +1411,7 @@ jobs:
                   "_validate_instruction_file": {"read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json"},
                   "_validate_skill_inventory": {"load_json"},
+                  "has_secret_bytes": {"has_secret"},
                   "has_secret": {"_has_private_ip_literal", "_looks_like_placeholder"},
               }
               helper_receivers = {
@@ -1371,6 +1425,10 @@ jobs:
                   },
                   "_validate_skill_inventory": {
                       "iterdir": {"root"},
+                  },
+                  "has_secret_bytes": {
+                      "loads": {"json"},
+                      "dumps": {"json"},
                   },
                   "has_secret": {
                       "search": {"PEM_RE", "PRIVATE_ORIGIN_RE"},
@@ -1422,6 +1480,22 @@ jobs:
               pass
           else:
               raise SystemExit("validator semantic fixture unexpectedly passed")
+          secret_result_fixture = ast.parse(
+              "def has_secret(text):\n"
+              "  PEM_RE.search(text)\n"
+              "  PRIVATE_ORIGIN_RE.search(text)\n"
+              "  _has_private_ip_literal(text)\n"
+              "  for pattern in SECRET_VALUE_RES:\n"
+              "    pattern.finditer(text)\n"
+              "  _looks_like_placeholder(text)\n"
+              "  return False\n"
+          )
+          try:
+              check_has_secret_shape(function_node(secret_result_fixture, "has_secret"))
+          except SystemExit:
+              pass
+          else:
+              raise SystemExit("secret-result semantic fixture unexpectedly passed")
           check_validator_shape(validator)
           check_module_entrypoint(validator, "validator")
           call_exit_fixture = ast.parse(

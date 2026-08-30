@@ -1032,7 +1032,17 @@ def has_secret_bytes(raw: bytes) -> bool:
     # ignored and remain covered by the latin-1 scan.
     for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"):
         try:
-            candidates.append(raw.decode(encoding))
+            decoded = raw.decode(encoding)
+            candidates.append(decoded)
+            # JSON consumers decode escaped object keys/values before using
+            # them. Scan a normalized serialization as well so an escaped
+            # ``passw\\u006frd`` key cannot hide a literal credential.
+            try:
+                parsed = json.loads(decoded)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            else:
+                candidates.append(json.dumps(parsed, ensure_ascii=False))
         except UnicodeDecodeError:
             continue
     return any(has_secret(candidate) for candidate in candidates)
