@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import re
 import sys
@@ -31,8 +32,12 @@ REFERENCE_DEF_RE = re.compile(
     re.M,
 )
 REFERENCE_TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".txt", ".text", ".rst"}
-URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:", re.IGNORECASE)
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
+IP_LITERAL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:\[[0-9A-Fa-f:.]+\]|[0-9]{1,3}(?:\.[0-9]{1,3}){3}|"
+    r"[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{0,4}){2,7})(?![A-Za-z0-9_])"
+)
 SECRET_VALUE_RES = (
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?(?:token|key)|private[_ -]?key|client[_ -]?secret|service[_ -]?(?:role[_ -]?)?key|secret[_ -]?(?:access[_ -]?)?key|app[_ -]?secret|service[_ -]?token|signing[_ -]?(?:key|secret)|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     # Server-only names often use a plain ``*_SECRET``/``*_CREDENTIAL``
@@ -42,7 +47,11 @@ SECRET_VALUE_RES = (
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])+(?:secret|credential)(?:[_-](?:key|token|value))?["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|notification[_ -]?token|notifier[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
-    re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]+:([^\s/@]+)@"),
+    re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]*:([^\s/@]+)@"),
+    # Bare generic names are useful for catching literal credentials, but do
+    # not treat ordinary code expressions such as ``token = value.casefold()``
+    # as secrets. Keep the value branch deliberately literal-shaped.
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:token|secret|credential|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[0-9A-Za-z-]{10,}|sk-(?:[A-Za-z0-9]+-)*[A-Za-z0-9]{20,})\b"),
 )
 PRIVATE_ORIGIN_RE = re.compile(
@@ -583,6 +592,14 @@ def _markdown_targets(text: str) -> Iterable[str]:
             # Keep scanning after an unmatched destination so a later link
             # can still be validated.
             continue
+    html_target = re.compile(
+        r'''(?ix)\b(?:href|src)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'<>`]+))'''
+    )
+    for match in html_target.finditer(text):
+        for value in match.groups():
+            if value is not None:
+                yield value
+                break
     for match in REFERENCE_DEF_RE.finditer(text):
         raw = match.group(2)
         yield raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw
@@ -594,6 +611,12 @@ def _is_external_target(target: str) -> bool:
     return target.startswith("#") or bool(URI_SCHEME_RE.match(target))
 
 
+def _unescape_markdown_destination(target: str) -> str:
+    """Decode backslash escapes used by Markdown link destinations."""
+
+    return re.sub(r"\\([!\"#$%&'()*+,./:;<=>?@\[\\\]^_`{|}~-])", r"\1", target)
+
+
 def check_reference_links(
     instruction_file: Path,
     repo: Path,
@@ -603,8 +626,11 @@ def check_reference_links(
 ) -> None:
     text = instruction_file.read_text(encoding="utf-8")
     for raw_target in _markdown_targets(text):
-        target = raw_target.strip().split("#", 1)[0].strip()
-        if not target or _is_external_target(target):
+        raw_target = raw_target.strip()
+        if not raw_target or _is_external_target(raw_target):
+            continue
+        target = _unescape_markdown_destination(raw_target.split("#", 1)[0].split("?", 1)[0].strip())
+        if not target:
             continue
         lexical = instruction_file.parent / target
         candidate = lexical.resolve()
@@ -643,8 +669,11 @@ def scan_reference_graph(
         except OSError:
             continue
         for raw_target in _markdown_targets(text):
-            target = raw_target.strip().split("#", 1)[0].strip()
-            if not target or _is_external_target(target):
+            raw_target = raw_target.strip()
+            if not raw_target or _is_external_target(raw_target):
+                continue
+            target = _unescape_markdown_destination(raw_target.split("#", 1)[0].split("?", 1)[0].strip())
+            if not target:
                 continue
             lexical = current.parent / target
             try:
@@ -653,15 +682,24 @@ def scan_reference_graph(
                 continue
             if not allow_external and not _is_within(candidate, repo.resolve()):
                 continue
-            if not candidate.is_file() or candidate.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES:
+            if not candidate.is_file():
                 continue
             if not allow_external and (_has_symlink_component(lexical, repo) or not _is_within(candidate, repo.resolve())):
                 errors.append(f"{lexical}: referenced instruction must remain inside the repository and may not be a symlink")
                 continue
             try:
-                reference_text = candidate.read_text(encoding="utf-8")
+                raw = candidate.read_bytes()
+                if b"\0" in raw[:8192]:
+                    if policy.get("forbid_secrets_in_instructions") and has_secret_bytes(raw):
+                        errors.append(f"{candidate}: possible secret/token pattern")
+                    continue
+                reference_text = raw.decode("utf-8")
             except OSError as exc:
                 errors.append(f"{candidate}: cannot read referenced instruction: {exc}")
+                continue
+            except UnicodeDecodeError:
+                if policy.get("forbid_secrets_in_instructions") and has_secret_bytes(raw):
+                    errors.append(f"{candidate}: possible secret/token pattern")
                 continue
             if not reference_text.strip():
                 errors.append(f"{candidate}: referenced instruction is empty")
@@ -760,6 +798,14 @@ def _looks_like_placeholder(value: str) -> bool:
             return _looks_like_placeholder(match.group(1))
         return True
     normalized = normalized.rstrip(",;)]}").strip("'\"")
+    if not normalized:
+        return True
+    # A generic ``token``/``secret`` variable is frequently assigned from a
+    # parser or environment expression. Those expressions are not embedded
+    # credentials; keep them out of the literal-secret heuristic while the
+    # surrounding source remains subject to normal review.
+    if re.search(r"[()\[\]{}]", normalized) or re.search(r"\.\w+\s*\(", normalized):
+        return True
     return (
         normalized in PLACEHOLDER_VALUES
         or (normalized.startswith("<") and normalized.endswith(">"))
@@ -767,8 +813,28 @@ def _looks_like_placeholder(value: str) -> bool:
     )
 
 
+def _has_private_ip_literal(text: str) -> bool:
+    """Reject private, loopback, link-local, and unspecified IP literals."""
+
+    for match in IP_LITERAL_RE.finditer(text):
+        value = match.group(0).strip("[]")
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        # Loopback literals are common in test instructions (often alongside
+        # ``localhost``/``loopback`` and a ``*_test`` database). URL-shaped
+        # origins are still covered by PRIVATE_ORIGIN_RE above; suppress only
+        # this explicit documentation pattern to avoid noisy false positives.
+        if value in {"127.0.0.1", "::1"} and re.search(r"\b(?:localhost|loopback|test)\b", text, re.IGNORECASE):
+            continue
+        if address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified:
+            return True
+    return False
+
+
 def has_secret(text: str) -> bool:
-    if PEM_RE.search(text) or PRIVATE_ORIGIN_RE.search(text):
+    if PEM_RE.search(text) or PRIVATE_ORIGIN_RE.search(text) or _has_private_ip_literal(text):
         return True
     for pattern in SECRET_VALUE_RES:
         for match in pattern.finditer(text):

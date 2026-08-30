@@ -331,6 +331,7 @@ jobs:
           done
           if test "$approved" = true; then
             python3 -m py_compile target/.codex/validate_instructions.py target/.codex/provision_global_skills.py
+          fi
           TARGET_VALIDATOR="$PWD/target/.codex/validate_instructions.py" \
           TARGET_PROVISIONER="$PWD/target/.codex/provision_global_skills.py" \
           python3 - <<'PY'
@@ -356,7 +357,7 @@ jobs:
                   receiver = node.func.value
                   if isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name) and receiver.func.id in {"globals", "locals"}:
                       method = node.func.attr
-                      if method in {"clear", "popitem"}:
+                      if method in {"clear", "popitem", "__ior__", "__or__"}:
                           names.update(protected)
                       elif method == "update":
                           # Mapping updates can use keyword arguments, a
@@ -364,10 +365,13 @@ jobs:
                           # protected target as potentially rebound rather
                           # than trying to execute contributor expressions.
                           names.update(protected)
-                      elif method in {"__setitem__", "setdefault", "pop"} and node.args:
-                          key = node.args[0].value if isinstance(node.args[0], ast.Constant) else None
-                          if isinstance(key, str) and key in protected:
-                              names.add(key)
+                      elif method in {"__setitem__", "__delitem__", "setdefault", "pop"}:
+                          if not node.args:
+                              names.update(protected)
+                          else:
+                              key = node.args[0].value if isinstance(node.args[0], ast.Constant) else None
+                              if isinstance(key, str) and key in protected:
+                                  names.add(key)
               return names
 
           def is_main_guard(node):
@@ -425,8 +429,34 @@ jobs:
                   and call.func.attr == "compile"
               )
 
+          ALLOWED_IMPORT_ROOTS = {
+              "__future__", "argparse", "hashlib", "io", "ipaddress", "json", "os",
+              "pathlib", "re", "shutil", "stat", "subprocess", "sys", "tarfile",
+              "tempfile", "typing",
+          }
+
+          def check_imports(path, tree):
+              """Keep protected modules on the standard-library/import-only surface."""
+
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      modules = [alias.name.split(".", 1)[0] for alias in node.names]
+                  elif isinstance(node, ast.ImportFrom):
+                      if node.level:
+                          raise SystemExit(f"{path}: relative imports are not allowed")
+                      modules = [(node.module or "").split(".", 1)[0]]
+                  else:
+                      continue
+                  for module in modules:
+                      if module not in ALLOWED_IMPORT_ROOTS:
+                          raise SystemExit(f"{path}: unrecognized import root: {module}")
+                      sibling = path.parent / f"{module}.py"
+                      if sibling.exists() and sibling != path:
+                          raise SystemExit(f"{path}: local module shadows imported standard module: {sibling.name}")
+
           def load_tree(path, required):
               tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              check_imports(path, tree)
               definitions = {}
               for node in tree.body:
                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -439,14 +469,14 @@ jobs:
                       f"{path}: duplicate protected definitions: {', '.join(duplicate_required)}"
                   )
               rebound_required = set()
-              protected = set(required)
+              protected = set(required) | set(definitions)
               for statement in tree.body:
                   if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                       header_nodes = function_header_nodes(statement)
                       if statement.name in protected:
                           # A protected decorator or executable default can
                           # replace the call target before the entrypoint.
-                          if getattr(statement, "decorator_list", []):
+                          if isinstance(statement, ast.AsyncFunctionDef) or getattr(statement, "decorator_list", []):
                               rebound_required.add(statement.name)
                       elif getattr(statement, "decorator_list", []):
                           raise SystemExit(f"{path}: module-scope function decorators are not allowed")
@@ -458,13 +488,61 @@ jobs:
                           raise SystemExit(f"{path}: module-scope class definition executes a call")
                       continue
                   if is_main_guard(statement):
+                      # The exact entrypoint call is checked separately, but
+                      # assignments/mutations inside the guard can still
+                      # replace a protected dependency before main runs.
+                      for node in ast.walk(statement):
+                          if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+                              targets = []
+                              if isinstance(node, ast.Assign):
+                                  targets = node.targets
+                              elif isinstance(node, ast.AnnAssign):
+                                  targets = [node.target]
+                              elif isinstance(node, ast.AugAssign):
+                                  targets = [node.target]
+                              elif isinstance(node, ast.Delete):
+                                  targets = node.targets
+                              if any(isinstance(target, (ast.Attribute, ast.Subscript)) for target in targets):
+                                  raise SystemExit(f"{path}: module entrypoint mutates an imported or mapping target")
+                              rebound_required.update(dynamic_rebinding_names(node, protected))
+                              if any(
+                                  isinstance(target, ast.Name) and target.id in protected
+                                  for target in targets
+                              ):
+                                  rebound_required.update(
+                                      target.id for target in targets if isinstance(target, ast.Name) and target.id in protected
+                                  )
                       continue
                   if isinstance(statement, (ast.Import, ast.ImportFrom)):
                       continue
+                  if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+                      targets = []
+                      if isinstance(statement, ast.Assign):
+                          targets = statement.targets
+                      elif isinstance(statement, ast.AnnAssign):
+                          targets = [statement.target]
+                      elif isinstance(statement, ast.AugAssign):
+                          targets = [statement.target]
+                      elif isinstance(statement, ast.Delete):
+                          targets = statement.targets
+                      if any(isinstance(target, (ast.Attribute, ast.Subscript)) for target in targets):
+                          raise SystemExit(f"{path}: module-scope mutation of an imported or mapping target is not allowed")
                   for node in ast.walk(statement):
                       if isinstance(node, ast.Call) and not is_safe_module_call(node):
                           raise SystemExit(f"{path}: module-scope executable call is not allowed")
                   for node in ast.walk(statement):
+                      if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+                          targets = []
+                          if isinstance(node, ast.Assign):
+                              targets = node.targets
+                          elif isinstance(node, ast.AnnAssign):
+                              targets = [node.target]
+                          elif isinstance(node, ast.AugAssign):
+                              targets = [node.target]
+                          elif isinstance(node, ast.Delete):
+                              targets = node.targets
+                          if any(isinstance(target, (ast.Attribute, ast.Subscript)) for target in targets):
+                              raise SystemExit(f"{path}: module-scope mutation of an imported or mapping target is not allowed")
                       rebound_required.update(dynamic_rebinding_names(node, protected))
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in protected:
                           rebound_required.add(node.name)
@@ -878,8 +956,10 @@ jobs:
                       ) or (
                           isinstance(call.func, ast.Attribute)
                           and isinstance(call.func.value, ast.Name)
-                          and call.func.value.id in {"sys", "builtins"}
-                          and call.func.attr == "exit"
+                          and (
+                              (call.func.value.id in {"sys", "builtins"} and call.func.attr == "exit")
+                              or (call.func.value.id == "os" and call.func.attr == "_exit")
+                          )
                       )
                       if exits:
                           lines.append(statement.lineno)
@@ -1049,8 +1129,13 @@ jobs:
               for statement in ast.walk(main):
                   if not isinstance(statement, ast.Return) or not isinstance(statement.value, ast.IfExp):
                       continue
-                  statuses = integer_statuses(statement.value.body) | integer_statuses(statement.value.orelse)
-                  if reads_validation_ok(statement.value.test) and 0 in statuses and any(status != 0 for status in statuses):
+                  true_statuses = integer_statuses(statement.value.body)
+                  false_statuses = integer_statuses(statement.value.orelse)
+                  if (
+                      reads_validation_ok(statement.value.test)
+                      and 0 in true_statuses
+                      and any(status != 0 for status in false_statuses)
+                  ):
                       propagated = True
                       break
               if not propagated:
@@ -1192,6 +1277,16 @@ jobs:
                       if total_count and guarded_count == total_count:
                           raise SystemExit(f"approved provisioner {label} hides {name} behind a process-state branch")
                   check_exception_handlers(node, required_names, f"provisioner {label}")
+              helper_receivers = {
+                  "load_manifest": {"loads": {"json"}},
+                  "verify_registry": {"check_output": {"subprocess"}, "loads": {"json"}},
+                  "tree_digest": {"sha256": {"hashlib"}, "rglob": {"root"}},
+              }
+              for label, operations in helper_receivers.items():
+                  info = reachable_info(function_node(tree, label))
+                  for operation, receivers in operations.items():
+                      if not (info.call_receivers.get(operation, set()) & receivers):
+                          raise SystemExit(f"approved provisioner {label} requires an unshadowed {operation} call")
               if "archive" not in reachable_string_literals(function_node(tree, "verify_registry")):
                   raise SystemExit("approved provisioner verify_registry is missing the git archive operation")
 
@@ -1302,13 +1397,13 @@ jobs:
             pull_request_types = Array(pull_request["types"]).map(&:to_s)
             required_pull_request_types = %w[opened synchronize reopened labeled unlabeled]
             raise "pull_request bootstrap event types are incomplete" unless required_pull_request_types.all? { |item| pull_request_types.include?(item) }
-            raise "pull_request bootstrap must not be path-filtered" if pull_request.key?("paths") || pull_request.key?("paths-ignore")
-            raise "pull_request_target must not be path-filtered" if target.is_a?(Hash) && (target.key?("paths") || target.key?("paths-ignore"))
+            raise "pull_request bootstrap must not be filtered" if pull_request.keys.any? { |key| %w[paths paths-ignore branches branches-ignore].include?(key.to_s) }
+            raise "pull_request_target must not be filtered" if target.is_a?(Hash) && target.keys.any? { |key| %w[paths paths-ignore branches branches-ignore].include?(key.to_s) }
             push = events["push"]
             raise "push event is missing" unless push.is_a?(Hash)
             push_branches = Array(push["branches"]).map(&:to_s)
-            raise "protected branch push gate is missing" unless %w[main master].all? { |item| push_branches.include?(item) }
-            raise "push gate must not be path-filtered" if push.key?("paths") || push.key?("paths-ignore")
+            raise "protected branch push gate is not exact" unless push_branches.sort == %w[main master]
+            raise "push gate must not be filtered" if push.keys.any? { |key| %w[paths paths-ignore branches-ignore].include?(key.to_s) }
             concurrency = workflow["concurrency"]
             raise "workflow concurrency is missing" unless concurrency.is_a?(Hash)
             expected_group = "instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}-${{ github.event_name }}"
@@ -1370,6 +1465,7 @@ jobs:
               end
               raise "each integrity job must pin exactly one setup-python action" unless setup_count == 1
             end
+            raise "integrity jobs must remain on the GitHub-hosted runner" unless %w[bootstrap validate].all? { |job_name| jobs[job_name]["runs-on"].to_s == "ubuntu-latest" }
             allowed_step_names = {
               "bootstrap" => [
                 "Checkout proposed tree (read-only)",
@@ -1462,6 +1558,14 @@ jobs:
             raise "head validator step may not ignore failures" if head_validator.key?("continue-on-error")
             head_run = head_validator["run"].to_s
             raise "head validator may not use a heredoc or failure masking" if head_run.include?("<<") || head_run.include?("||")
+            head_shell_lines = head_run.lines.map(&:strip).reject { |line| line.empty? || line.start_with?("#") }
+            raise "head validator bootstrap must be the first shell control flow" unless head_shell_lines.first == "if test -f trusted/.codex/validate_instructions.py && \\"
+            raise "head validator may not disable errexit or short-circuit validation" if head_run.match?(/\bset\s+\+(?:e|o\s+errexit)\b/) || head_run.match?(/\b(?:trap|return|kill|exec)\b/)
+            head_if_lines = head_shell_lines.select { |line| line.start_with?("if ") }
+            raise "head validator contains an unexpected conditional wrapper" unless head_if_lines == [
+              "if test -f trusted/.codex/validate_instructions.py && \\",
+              "if test \"$GOVERNANCE_UPDATE_APPROVED\" = true; then",
+            ]
             raise "head validator bootstrap branch is missing" unless head_run.include?("if test -f trusted/.codex/validate_instructions.py") && head_run.include?("initial governance installation")
             raise "head validator must invoke the trusted validator" unless head_run.match?(/python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\\)/)
             raise "head validator approval branch is missing" unless head_run.include?("if test \"$GOVERNANCE_UPDATE_APPROVED\" = true; then") && head_run.include?("extra_args+=(--allow-config-commit-update)")
@@ -1505,8 +1609,44 @@ jobs:
               next unless step.is_a?(Hash)
               run_text = step["run"].to_s
               next if run_text.empty?
+              # The integrity step contains trusted Python/Ruby checker source
+              # in heredocs. Scan shell commands separately so a literal such
+              # as ``node.target`` in that source is not mistaken for an
+              # executable command from the proposed checkout.
+              shell_surface = []
+              heredoc = nil
+              run_text.each_line do |line|
+                if heredoc
+                  heredoc = nil if line.strip == heredoc
+                  next
+                end
+                shell_surface << line
+                marker = line.match(/<<-?\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?\s*$/)
+                heredoc = marker[1] if marker
+              end
+              shell_text = shell_surface.join
+              if shell_text.match?(/^\s*(?:function\s+)?(?:python3?|ruby|node|bash|sh|zsh)\s*(?:\(\)|\{)/m)
+                raise "workflow step may not redefine a trusted interpreter"
+              end
+              if shell_text.match?(/\bGITHUB_PATH\b/)
+                raise "workflow step may not modify the Actions command-search path"
+              end
+              if shell_text.match?(/(?:^|[;&|]\s*|\bthen\s+)\s*(?:cd|pushd)\s+["']?(?:\$PWD\/)?(?:\.\/)?target(?:\/|["']?\s|$)/)
+                raise "workflow step may not change directory into the proposed checkout"
+              end
+              if run_text.include?("<<") && run_text.lines.any? { |line| line.match?(/^\s*(?:python3?|ruby|node|bash|sh|zsh)\s+(?:trusted|target)\//) }
+                raise "workflow step may not hide an executable validator command in a heredoc"
+              end
               target_execution = %r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec)\b(?:\s+-[^\s;&|]+)*\s+["']?(?:\./)?target/|["']?(?:\./)?target/)}
-              if run_text.lines.any? { |line| line.strip.match?(target_execution) }
+              target_reference = %r{(?:\btarget(?:/|\b)|\$PWD/target(?:/|\b)|\$GITHUB_WORKSPACE/target(?:/|\b)|\$\([^\n)]*\btarget\b[^\n)]*\)|<\([^\n)]*\btarget/)}
+              safe_target_read = %r{^\s*(?:python3\s+-m\s+py_compile\s+target/\.codex/(?:validate_instructions|provision_global_skills)\.py(?:\s+target/\.codex/(?:validate_instructions|provision_global_skills)\.py)*|ruby\s+-e\s+'require \"yaml\"; YAML\.safe_load\(File\.read\(ARGV\.fetch\(0\)\), aliases: false\)'\s+target/\.github/workflows/instruction-integrity\.yml|ruby\s+-ryaml\s+-\s+target/\.github/workflows/instruction-integrity\.yml\s+<<["']?RUBY["']?)\s*$}
+              if shell_surface.any? do |line|
+                stripped = line.strip
+                next false if stripped.match?(safe_target_read)
+                stripped.match?(target_execution) || (
+                  stripped.match?(%r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:env\s+)?(?:python3?|ruby|node|bash|sh|zsh|source|exec|eval)\b}) && stripped.match?(target_reference)
+                )
+              end
                 raise "workflow step may not execute code from the proposed checkout"
               end
               # A contributor can hide the proposed path behind a shell
@@ -1517,17 +1657,17 @@ jobs:
               # must never carry target-controlled paths through shell state.
               target_variables = []
               target_assignment = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=.*(?:\$PWD\/target\b|\$GITHUB_WORKSPACE\/target\b|(?:\.\/)?target(?:\/|\b))/
-              run_text.each_line do |line|
+              shell_surface.each do |line|
                 line.scan(target_assignment) { |match| target_variables << match.first }
               end
               target_variables.uniq.each do |name|
                 variable = Regexp.escape(name)
-                executor = %r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:(?:(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec))|env\s+(?:-[^ \t;&|]+\s+)*(?:(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec)))(?:\s+(?:--|-[^\s;&|]+))*\s+["']?\$(?:\{#{variable}\}|#{variable})["']?(?=\s|[;&|]|\z)}
-                if run_text.lines.any? { |line| line.strip.match?(executor) }
+                executor = %r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:(?:(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec))|env\s+(?:-[^ \t;&|]+\s+)*(?:(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec)))(?:\s+(?:--|-[^\s;&|]+))*\s+["']?\$(?:\{#{variable}\}|#{variable})(?:/[^"']*)?["']?(?=\s|[;&|]|\z)}
+                if shell_surface.any? { |line| line.strip.match?(executor) }
                   raise "workflow step may not execute an indirect proposed-checkout path"
                 end
               end
-              if run_text.match?(/\b(?:BASH_ENV|PYTHONPATH|RUBYLIB|NODE_OPTIONS|LD_PRELOAD|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_SSH_COMMAND)\s*=/)
+              if shell_text.match?(/\b(?:BASH_ENV|PYTHONPATH|RUBYLIB|NODE_OPTIONS|LD_PRELOAD|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_SSH_COMMAND)\s*=/)
                 raise "workflow step may not override the trusted process environment"
               end
               if run_text.match?(/\btrusted(?:\/|\b)/)
@@ -1673,9 +1813,11 @@ jobs:
             ["def surface", "trusted_files = surface", "target_files = surface", "hashlib.sha256", "raise SystemExit", "(\".claude\", \"agents\")"].each do |needle|
               raise "instruction protection step is incomplete: #{needle}" unless protection_run.include?(needle)
             end
+            protection_shell_lines = protection_run.split("python3 - <<'PY'", 2).first.lines.map(&:strip).reject(&:empty?)
+            raise "instruction protection must begin with the trusted contract guard" unless protection_shell_lines.first == "if test ! -f trusted/.codex/instruction-integrity.json; then"
+            raise "instruction protection contains an unexpected pre-validation branch" if protection_shell_lines[1...].any? { |line| line.start_with?("if ") }
             raise "instruction protection step does not compare trusted and target surfaces" unless protection_run.include?("set(trusted_files) != set(target_files)") && protection_run.include?("target_files[relative]")
           RUBY
-          fi
       - name: Protect instruction contents unless explicitly approved
         if: env.GOVERNANCE_UPDATE_APPROVED != 'true'
         run: |

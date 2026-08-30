@@ -14,10 +14,7 @@ responses and the exact SHA. This never waives CI, findings, or cleanup.
 Every P0-P3 finding must be dispositioned and its thread resolved. Only a
 finding confined to tests/scripts gets the time exception: implement P0/P1,
 and explain plus resolve P2/P3 without implementation time. P2/P3 anywhere
-else must be actually fixed and verified. Non-production job/artifact scripts
-may use a disposition-only exception at any priority; this does not apply to
-application, production, workflow/configuration, release, or artifact-output
-paths.
+else must be actually fixed and verified.
 
 Keep a complete finding ledger for the exact head; merge is prohibited while
 any finding is undispositioned or any review thread is unresolved. A quota

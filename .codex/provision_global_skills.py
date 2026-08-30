@@ -45,12 +45,21 @@ def git(cwd: Path, *args: str, capture: bool = False) -> str:
     return result.stdout if capture else ""
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
 def load_manifest(path: Path) -> tuple[dict[str, Any], list[str]]:
     if path.is_symlink() or not path.is_file():
         raise SystemExit(f"manifest must be a regular file: {path}")
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        manifest = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise SystemExit(f"invalid global skill manifest: {exc}") from exc
     if not isinstance(manifest, dict) or manifest.get("version") != 1:
         raise SystemExit("global skill manifest must have version 1")
