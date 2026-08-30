@@ -35,10 +35,11 @@ SECRET_VALUE_RES = (
 )
 PRIVATE_ORIGIN_RE = re.compile(
     r"(?ix)\bhttps?://(?:[^\s/@:]+(?::[^\s/@]*)?@)?"
-    r"((?:localhost|127(?:\.[0-9]{1,3}){3}|10(?:\.[0-9]{1,3}){3}|"
+    r"(?:localhost|127(?:\.[0-9]{1,3}){3}|10(?:\.[0-9]{1,3}){3}|"
     r"192\.168(?:\.[0-9]{1,3}){2}|172\.(?:1[6-9]|2[0-9]|3[0-1])(?:\.[0-9]{1,3}){2}|"
     r"169\.254(?:\.[0-9]{1,3}){2}|0\.0\.0\.0|::1|\[::1\]|"
-    r"[^\s./]+\.(?:local|internal)(?:\.|[:/]|$)|[^\s./]+\.internal\.[^\s/:]+))"
+    r"[^\s./]+\.local|[^\s./]+\.internal(?:\.[^\s/:?#]+(?:\.[^\s/:?#]+)*)?)"
+    r"(?=$|[:/?#])"
 )
 FORBIDDEN_YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 PLACEHOLDER_VALUES = {
@@ -417,11 +418,19 @@ def _without_markdown_code(text: str) -> str:
     masked_text = "".join(lines)
     # HTML comments are non-operative Markdown. Mask them after code removal
     # so links in commented examples cannot become required files.
-    return re.sub(
+    masked_text = re.sub(
         r"<!--.*?(?:-->|$)",
         lambda match: "".join("\n" if char == "\n" else " " for char in match.group(0)),
         masked_text,
         flags=re.S,
+    )
+    # Raw HTML blocks do not contain operative Markdown links. In particular,
+    # ``pre``/``script`` examples frequently embed bracketed text that must
+    # not be treated as a repository reference.
+    return re.sub(
+        r"(?is)<(pre|script|style|textarea|xmp|iframe|noembed|noframes|plaintext)\b[^>]*>.*?(?:</\1\s*>|$)",
+        lambda match: "".join("\n" if char == "\n" else " " for char in match.group(0)),
+        masked_text,
     )
 
 
@@ -430,17 +439,16 @@ def _markdown_targets(text: str) -> Iterable[str]:
     # and rejects legitimate destinations such as ``guide_(v2).md``. Walk the
     # destination so balanced parentheses and escaped characters are retained.
     text = _without_markdown_code(text)
-    cursor = 0
-    while True:
-        marker = text.find("](", cursor)
-        if marker < 0:
-            break
-        # Track unescaped bracket nesting so an escaped ``[`` inside the
-        # label cannot steal the opener from the outer link.  ``rfind`` is
-        # insufficient for ``[label \\[ detail](target)`` because it selects
-        # the literal inner bracket.
+    # Collect markers first instead of advancing past each destination. This
+    # preserves an enclosing marker in linked-image syntax such as
+    # ``[![alt](image.md)](page.md)``.
+    for marker_match in re.finditer(r"\]\(", text):
+        marker = marker_match.start()
+        # Track unescaped bracket nesting. The top of the stack is the opener
+        # for this closing bracket; an enclosing link is visited by its own
+        # later marker.
         stack: list[int] = []
-        scan = cursor
+        scan = 0
         while scan < marker:
             if text[scan] == "\\":
                 scan += 2
@@ -450,9 +458,8 @@ def _markdown_targets(text: str) -> Iterable[str]:
             elif text[scan] == "]" and stack:
                 stack.pop()
             scan += 1
-        opener = stack[0] if stack else -1
+        opener = stack[-1] if stack else -1
         if opener < 0:
-            cursor = marker + 2
             continue
         slashes = 0
         index = opener - 1
@@ -460,22 +467,19 @@ def _markdown_targets(text: str) -> Iterable[str]:
             slashes += 1
             index -= 1
         if opener >= 0 and slashes % 2 == 1:
-            cursor = marker + 2
             continue
         index = marker + 2
         while index < len(text) and text[index].isspace():
             index += 1
         if index >= len(text):
-            break
+            continue
         if text[index] == "<":
             end = text.find(">", index + 1)
             if end < 0:
                 # A malformed angle destination must not hide later valid
                 # links in the same instruction file.
-                cursor = index + 1
                 continue
             yield text[index + 1 : end]
-            cursor = end + 1
             continue
         start = index
         depth = 0
@@ -494,13 +498,11 @@ def _markdown_targets(text: str) -> Iterable[str]:
                 if depth == 0:
                     raw = text[start:index].strip()
                     yield raw.split(None, 1)[0] if raw else raw
-                    cursor = index + 1
                     break
                 depth -= 1
         else:
             # Keep scanning after an unmatched destination so a later link
             # can still be validated.
-            cursor = start + 1
             continue
     for match in REFERENCE_DEF_RE.finditer(text):
         raw = match.group(2)
@@ -1062,12 +1064,16 @@ def validate_skill(
         try:
             raw = reference.read_bytes()
             if b"\0" in raw[:8192]:
+                if policy.get("forbid_secrets_in_instructions") and has_secret(raw.decode("latin-1")):
+                    errors.append(f"{reference}: possible secret/token pattern")
                 continue
             reference_text = raw.decode("utf-8")
         except OSError as exc:
             errors.append(f"{reference}: cannot read skill reference: {exc}")
             continue
         except UnicodeDecodeError:
+            if policy.get("forbid_secrets_in_instructions") and has_secret(raw.decode("latin-1")):
+                errors.append(f"{reference}: possible secret/token pattern")
             continue
         is_reference = reference.suffix.casefold() in REFERENCE_TEXT_SUFFIXES
         if is_reference and not reference_text.strip():

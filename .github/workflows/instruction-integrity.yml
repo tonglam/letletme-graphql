@@ -24,9 +24,11 @@ permissions:
 concurrency:
   # pull_request_target exposes the base ref as github.ref; use the PR number
   # so one PR cannot cancel another. Push runs remain grouped by branch.
-  # All pull-request events for one PR share a group, so removing approval
-  # cancels an in-flight labeled run instead of allowing it to publish late.
-  group: instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}
+  # Target actions for one PR share a group, while the secret-free bootstrap
+  # remains independent so it cannot cancel the trusted gate. Removing
+  # approval still cancels an in-flight labeled target run instead of allowing
+  # it to publish late.
+  group: instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -178,6 +180,24 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.x'
+      - name: Invalidate prior head-associated instruction-integrity check
+        if: github.event_name == 'pull_request_target'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          case "$HEAD_SHA" in
+            ''|*[!0-9a-f]*)
+              echo 'pull request head is not a full lowercase commit SHA' >&2
+              exit 1
+              ;;
+          esac
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/check-runs" \
+            --raw-field name=instruction-integrity \
+            --raw-field head_sha="$HEAD_SHA" \
+            --raw-field status=in_progress >/dev/null
       # Materialize the immutable registry before any proposed instruction
       # filesystem is inspected. The validator below consumes this checkout;
       # it is never allowed to trust a registry file supplied by the PR.
@@ -296,6 +316,20 @@ jobs:
           import os
           from pathlib import Path
 
+          def dynamic_rebinding_name(node, protected):
+              """Return a protected name changed through a dynamic module API."""
+
+              if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Call):
+                  if isinstance(node.value.func, ast.Name) and node.value.func.id in {"globals", "locals"}:
+                      key = node.slice.value if isinstance(node.slice, ast.Constant) else None
+                      if isinstance(key, str) and key in protected:
+                          return key
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "setattr" and len(node.args) >= 2:
+                  key = node.args[1].value if isinstance(node.args[1], ast.Constant) else None
+                  if isinstance(key, str) and key in protected:
+                      return key
+              return None
+
           def load_tree(path, required):
               tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
               definitions = {}
@@ -317,6 +351,9 @@ jobs:
                           rebound_required.add(statement.name)
                       continue
                   for node in ast.walk(statement):
+                      dynamic_name = dynamic_rebinding_name(node, protected)
+                      if dynamic_name:
+                          rebound_required.add(dynamic_name)
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in protected:
                           rebound_required.add(node.name)
                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in protected:
@@ -582,6 +619,15 @@ jobs:
                           self.visit(child)
                       self.conditional_depth -= 1
 
+                  def visit_ListComp(self, comprehension):
+                      self.conditional_depth += 1
+                      self.generic_visit(comprehension)
+                      self.conditional_depth -= 1
+
+                  visit_SetComp = visit_ListComp
+                  visit_DictComp = visit_ListComp
+                  visit_GeneratorExp = visit_ListComp
+
                   def visit_FunctionDef(self, function):
                       return
 
@@ -621,6 +667,11 @@ jobs:
                       branch = statement.body if truth is True else statement.orelse if truth is False else None
                       if branch is not None:
                           lines.extend(direct_terminator_lines(branch))
+                  try_nodes = (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
+                  if isinstance(statement, try_nodes):
+                      lines.extend(direct_terminator_lines(statement.body))
+                      lines.extend(direct_terminator_lines(statement.orelse))
+                      lines.extend(direct_terminator_lines(statement.finalbody))
               return lines
 
           def module_rebindings(tree, names):
@@ -637,6 +688,9 @@ jobs:
                           defined.add(statement.name)
                       continue
                   for node in ast.walk(statement):
+                      dynamic_name = dynamic_rebinding_name(node, protected)
+                      if dynamic_name:
+                          rebound.add(dynamic_name)
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in protected:
                           rebound.add(node.name)
                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in protected:
@@ -649,6 +703,12 @@ jobs:
               parse_yaml = function_node(tree, "parse_yaml_mapping")
               validate = function_node(tree, "validate_asset")
               main = function_node(tree, "main")
+              helper_nodes = {
+                  "_parse_scalar": function_node(tree, "_parse_scalar"),
+                  "validate_skill": function_node(tree, "validate_skill"),
+                  "_validate_instruction_file": function_node(tree, "_validate_instruction_file"),
+                  "_validate_global_manifest": function_node(tree, "_validate_global_manifest"),
+              }
               rebound = module_rebindings(
                   tree,
                   {
@@ -684,6 +744,17 @@ jobs:
                           raise SystemExit(f"approved validator {label} can terminate before calling {name}")
               if not unconditional_calls(main, "validate_asset"):
                   raise SystemExit("approved validator main hides validate_asset behind a runtime branch")
+              helper_requirements = {
+                  "_parse_scalar": {"_strip_yaml_comment", "loads"},
+                  "validate_skill": {"_validate_instruction_file", "rglob", "read_bytes", "has_secret"},
+                  "_validate_instruction_file": {"read_text", "read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
+                  "_validate_global_manifest": {"load_json", "read_bytes", "sha256", "resolve"},
+              }
+              for label, required_names in helper_requirements.items():
+                  info = reachable_info(helper_nodes[label])
+                  missing = sorted(required_names - info.names)
+                  if missing:
+                      raise SystemExit(f"approved validator {label} is missing helper operations: {', '.join(missing)}")
               if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(parse_yaml)):
                   raise SystemExit("approved validator parse_yaml_mapping has no parsing control flow")
               if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(validate)):
@@ -747,6 +818,12 @@ jobs:
           )
           if "main" not in module_rebindings(decorator_fixture, {"main"}):
               raise SystemExit("decorator fixture unexpectedly passed")
+          dynamic_fixture = ast.parse(
+              "def main(): return 0\n"
+              "globals()['main'] = lambda: 0\n"
+          )
+          if "main" not in module_rebindings(dynamic_fixture, {"main"}):
+              raise SystemExit("dynamic-rebinding fixture unexpectedly passed")
 
           def check_provisioner_shape(tree):
               required_calls = {
@@ -884,8 +961,8 @@ jobs:
             raise "push gate must not be path-filtered" if push.key?("paths") || push.key?("paths-ignore")
             concurrency = workflow["concurrency"]
             raise "workflow concurrency is missing" unless concurrency.is_a?(Hash)
-            expected_group = "instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}"
-            raise "workflow concurrency group must serialize all PR events" unless concurrency["group"].to_s == expected_group
+            expected_group = "instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}-${{ github.event_name }}"
+            raise "workflow concurrency group must serialize each event flow" unless concurrency["group"].to_s == expected_group
             raise "workflow concurrency must cancel superseded runs" unless concurrency["cancel-in-progress"] == true
             root_defaults = workflow["defaults"]
             raise "workflow defaults may not override shell or working directory" if root_defaults.is_a?(Hash) && root_defaults.dig("run").is_a?(Hash) && (root_defaults.dig("run").key?("shell") || root_defaults.dig("run").key?("working-directory"))
@@ -938,6 +1015,7 @@ jobs:
               "validate" => [
                 "Checkout proposed tree (read-only)",
                 "Checkout trusted base contract and validator",
+                "Invalidate prior head-associated instruction-integrity check",
                 "Verify pinned global registry contents",
                 "Protect the integrity gate files",
                 "Protect instruction contents unless explicitly approved",
@@ -970,6 +1048,19 @@ jobs:
             raise "approval expression is incomplete or broadened" unless gate.dig("env", "GOVERNANCE_UPDATE_APPROVED").to_s == expected_approval
             expected_head_approval = "${{ github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && github.event.sender.login == github.repository_owner }}"
             raise "bootstrap approval expression is incomplete or broadened" unless bootstrap.dig("env", "GOVERNANCE_UPDATE_APPROVED").to_s == expected_head_approval
+            invalidate_step = Array(gate["steps"]).find { |step| step.is_a?(Hash) && step["name"].to_s == "Invalidate prior head-associated instruction-integrity check" }
+            raise "head check invalidation step is missing" unless invalidate_step
+            raise "head check invalidation must run only for pull_request_target" unless invalidate_step["if"].to_s.strip == "github.event_name == 'pull_request_target'"
+            expected_invalidation_env = {
+              "GH_TOKEN" => "${{ github.token }}",
+              "HEAD_SHA" => "${{ github.event.pull_request.head.sha }}",
+            }
+            raise "head check invalidation environment is broadened" unless invalidate_step["env"] == expected_invalidation_env
+            invalidation_run = invalidate_step["run"].to_s
+            ["set -eu", "case \"$HEAD_SHA\" in", "gh api --method POST", "check-runs", "name=instruction-integrity", "head_sha=\"$HEAD_SHA\"", "status=in_progress"].each do |needle|
+              raise "head check invalidation is incomplete: #{needle}" unless invalidation_run.include?(needle)
+            end
+            raise "head check invalidation may not mask failures" if invalidation_run.match?(/\|\|\s*true\b/)
             checkout_steps = lambda do |job, path|
               Array(job["steps"]).select do |step|
                 step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/checkout@") && step.dig("with", "path").to_s == path
@@ -1134,6 +1225,10 @@ jobs:
               line.match?(/\A(?:[A-Z_][A-Z0-9_]*=\S+\s+)*python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\z)/)
             end
             raise "trusted validator command is missing or not executable" unless command
+            command_index = logical_commands.index(command)
+            if logical_commands[0...command_index].any? { |line| line.match?(/\b(?:exit|return|false|kill)\b/) }
+              raise "trusted validator command has terminating control flow before validation"
+            end
             %w[--registry-only --help --version].each do |forbidden|
               raise "trusted validator command contains a bypass flag: #{forbidden}" if command.split.include?(forbidden)
               if run.lines.any? { |line| line.match?(/\bextra_args\s*\+?=.*#{Regexp.escape(forbidden)}/) }
