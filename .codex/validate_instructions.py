@@ -23,12 +23,19 @@ KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 INLINE_LINK_RE = re.compile(
     r"\[[^\]]*\]\(\s*(<[^>]*>|[^\s)]+)(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*\)"
 )
-REFERENCE_DEF_RE = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(<[^>]*>|[^\s]+)", re.M)
+# Reference definitions may be nested in block quotes or list containers. The
+# container prefix is still Markdown structure; the destination remains an
+# operative repository reference.
+REFERENCE_DEF_RE = re.compile(
+    r"^(?: {0,3}>[ \t]?| {0,3}(?:[-+*]|\d+[.)])[ \t]+)*(?<!\\)\[([^\]]+)\]:\s*(<[^>]*>|[^\s]+)",
+    re.M,
+)
 REFERENCE_TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".txt", ".text", ".rst"}
+URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 SECRET_VALUE_RES = (
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?token|private[_ -]?key|client[_ -]?secret|service[_ -]?(?:role[_ -]?)?key|secret[_ -]?key|app[_ -]?secret|service[_ -]?token|signing[_ -]?(?:key|secret)|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
-    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|notification[_ -]?token|notifier[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
     re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]+:([^\s/@]+)@"),
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[0-9A-Za-z-]{10,}|sk-(?:[A-Za-z0-9]+-)*[A-Za-z0-9]{20,})\b"),
@@ -38,7 +45,8 @@ PRIVATE_ORIGIN_RE = re.compile(
     r"(?:localhost|127(?:\.[0-9]{1,3}){3}|10(?:\.[0-9]{1,3}){3}|"
     r"192\.168(?:\.[0-9]{1,3}){2}|172\.(?:1[6-9]|2[0-9]|3[0-1])(?:\.[0-9]{1,3}){2}|"
     r"169\.254(?:\.[0-9]{1,3}){2}|0\.0\.0\.0|::1|\[::1\]|"
-    r"[^\s./]+\.local|[^\s./]+\.internal(?:\.[^\s/:?#]+(?:\.[^\s/:?#]+)*)?)"
+    r"\[(?:f[c-d][0-9a-f]{2}|fe[89a-f][0-9a-f])(?::[0-9a-f:.]+)*\]|"
+    r"[^\s./]+\.local\.?|[^\s./]+\.internal(?:\.[^\s/:?#]+(?:\.[^\s/:?#]+)*)?\.?)"
     r"(?=$|[:/?#])"
 )
 FORBIDDEN_YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
@@ -412,10 +420,38 @@ def _without_markdown_code(text: str) -> str:
             if fence is not None:
                 lines.append("\n" if line.endswith("\n") else "")
                 continue
-        # Preserve line length while masking inline-code destinations.
-        masked = re.sub(r"(?<!\\)(`+)(?:(?!\1).)*\1", lambda match: "".join("\n" if c == "\n" else " " for c in match.group(0)), line)
-        lines.append(masked)
+        # Four-space indentation is an indented CommonMark code block. Keep
+        # its newlines so line-oriented parsing still works, but do not let
+        # example links or governance clauses become operative text.
+        if re.match(r"^ {4,}\S", body):
+            lines.append("\n" if line.endswith("\n") else "")
+            continue
+        # Inline-code spans are masked in one pass below so a delimiter run
+        # can legally cross a physical newline.
+        lines.append(line)
     masked_text = "".join(lines)
+    # Inline code spans may cross a physical newline. Scan delimiter runs
+    # explicitly so a two-backtick opener cannot be mistaken for two adjacent
+    # one-backtick spans, and preserve all line positions while masking them.
+    masked_chars = list(masked_text)
+    index = 0
+    while index < len(masked_text):
+        if masked_text[index] != "`" or (index and masked_text[index - 1] == "\\"):
+            index += 1
+            continue
+        end = index
+        while end < len(masked_text) and masked_text[end] == "`":
+            end += 1
+        delimiter = masked_text[index:end]
+        closing = masked_text.find(delimiter, end)
+        if closing < 0:
+            index = end
+            continue
+        for position in range(index, closing + len(delimiter)):
+            if masked_chars[position] != "\n":
+                masked_chars[position] = " "
+        index = closing + len(delimiter)
+    masked_text = "".join(masked_chars)
     # HTML comments are non-operative Markdown. Mask them after code removal
     # so links in commented examples cannot become required files.
     masked_text = re.sub(
@@ -424,14 +460,24 @@ def _without_markdown_code(text: str) -> str:
         masked_text,
         flags=re.S,
     )
-    # Raw HTML blocks do not contain operative Markdown links. In particular,
-    # ``pre``/``script`` examples frequently embed bracketed text that must
-    # not be treated as a repository reference.
-    return re.sub(
-        r"(?is)<(pre|script|style|textarea|xmp|iframe|noembed|noframes|plaintext)\b[^>]*>.*?(?:</\1\s*>|$)",
-        lambda match: "".join("\n" if char == "\n" else " " for char in match.group(0)),
-        masked_text,
+    # Raw HTML blocks do not contain operative Markdown links. Only recognize
+    # a tag at a Markdown block start (up to three spaces or block-quote
+    # markers); inline and backslash-escaped tags remain operative text.
+    block_start = r"^(?: {0,3}>[ \t]?)* {0,3}(?<!\\)"
+    closed_block = re.compile(
+        block_start + r"<(pre|script|style|textarea|xmp|plaintext)\b[^>]*>.*?(?:</\1\s*>|$)",
+        flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
     )
+    blank_terminated = re.compile(
+        block_start + r"<(iframe|noembed|noframes)\b[^>]*>.*?(?:</\1\s*>|(?=\n[ \t]*\n|\Z))",
+        flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    for pattern in (closed_block, blank_terminated):
+        masked_text = pattern.sub(
+            lambda match: "".join("\n" if char == "\n" else " " for char in match.group(0)),
+            masked_text,
+        )
+    return masked_text
 
 
 def _markdown_targets(text: str) -> Iterable[str]:
@@ -509,6 +555,12 @@ def _markdown_targets(text: str) -> Iterable[str]:
         yield raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw
 
 
+def _is_external_target(target: str) -> bool:
+    """Return whether a Markdown target is a URI rather than a file path."""
+
+    return target.startswith("#") or bool(URI_SCHEME_RE.match(target))
+
+
 def check_reference_links(
     instruction_file: Path,
     repo: Path,
@@ -519,7 +571,7 @@ def check_reference_links(
     text = instruction_file.read_text(encoding="utf-8")
     for raw_target in _markdown_targets(text):
         target = raw_target.strip().split("#", 1)[0].strip()
-        if not target or target.startswith(("http://", "https://", "mailto:", "data:", "#")):
+        if not target or _is_external_target(target):
             continue
         lexical = instruction_file.parent / target
         candidate = lexical.resolve()
@@ -559,7 +611,7 @@ def scan_reference_graph(
             continue
         for raw_target in _markdown_targets(text):
             target = raw_target.strip().split("#", 1)[0].strip()
-            if not target or target.startswith(("http://", "https://", "mailto:", "data:", "#")):
+            if not target or _is_external_target(target):
                 continue
             lexical = current.parent / target
             try:
@@ -660,6 +712,13 @@ def _looks_like_placeholder(value: str) -> bool:
         if not normalized.endswith("}"):
             return False
         body = normalized[2:-1]
+        # Bash pattern substitution embeds a literal replacement operand. A
+        # secret in `${TOKEN/pattern/replacement}` must not be treated as a
+        # harmless environment placeholder merely because the expansion is
+        # syntactically valid.
+        substitution = re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*//?[^/]*/(.+)", body, flags=re.S)
+        if substitution:
+            return _looks_like_placeholder(substitution.group(1))
         # Shell parameter expansions support both colon and non-colon forms
         # (`-`, `=`, `?`, `+`). Inspect every fallback rather than treating
         # only the `:-` spelling as a placeholder.
@@ -684,6 +743,22 @@ def has_secret(text: str) -> bool:
             if not _looks_like_placeholder(value):
                 return True
     return False
+
+
+def has_secret_bytes(raw: bytes) -> bool:
+    """Scan binary/text references without losing UTF-16/UTF-32 credentials."""
+
+    candidates = [raw.decode("latin-1")]
+    # UTF-16/32 files commonly contain NUL bytes and are otherwise skipped as
+    # binary. Decode the bounded candidate set before falling back to the
+    # byte-preserving representation; malformed encodings are harmlessly
+    # ignored and remain covered by the latin-1 scan.
+    for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"):
+        try:
+            candidates.append(raw.decode(encoding))
+        except UnicodeDecodeError:
+            continue
+    return any(has_secret(candidate) for candidate in candidates)
 
 
 def check_yaml_shape(path: Path, errors: list[str], *, skill_name: str | None = None) -> None:
@@ -753,7 +828,7 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
         for path in repo.rglob(pattern):
             if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
                 paths.add(path.absolute())
-    for root in (repo / ".agents", repo / "skills"):
+    for root in (repo / ".agents", repo / "skills", repo / ".claude" / "skills"):
         for path in _skill_entrypoints(root, repo):
             if not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
                 paths.add(path.absolute())
@@ -767,6 +842,7 @@ def _validate_instruction_file(
     errors: list[str],
     *,
     allow_external: bool = False,
+    require_governance: bool = False,
 ) -> None:
     if not allow_external:
         try:
@@ -786,10 +862,12 @@ def _validate_instruction_file(
         errors.append(f"{path}: instruction file is empty")
     if path.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"} and path.stat().st_size > int(policy.get("max_agents_bytes", 32768)):
         errors.append(f"{path}: exceeds max_agents_bytes")
-    # Governance is inherited from the repository root. Nested instruction
-    # files remain validated for syntax, references, and secrets without
-    # duplicating the global review contract in every scoped directory.
-    if path.name in {"AGENTS.md", "AGENTS.override.md"} and path.parent.resolve() == repo.resolve():
+    # Root instructions establish the policy. A scoped file explicitly listed
+    # by a contract is an operative override, so it must repeat the policy
+    # rather than silently weakening finding, review, or cleanup rules.
+    if path.name in {"AGENTS.md", "AGENTS.override.md"} and (
+        path.parent.resolve() == repo.resolve() or require_governance
+    ):
         check_governance_binding(path, text, errors)
     if path.name == "SKILL.md":
         if path.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
@@ -1064,7 +1142,7 @@ def validate_skill(
         try:
             raw = reference.read_bytes()
             if b"\0" in raw[:8192]:
-                if policy.get("forbid_secrets_in_instructions") and has_secret(raw.decode("latin-1")):
+                if policy.get("forbid_secrets_in_instructions") and has_secret_bytes(raw):
                     errors.append(f"{reference}: possible secret/token pattern")
                 continue
             reference_text = raw.decode("utf-8")
@@ -1072,7 +1150,7 @@ def validate_skill(
             errors.append(f"{reference}: cannot read skill reference: {exc}")
             continue
         except UnicodeDecodeError:
-            if policy.get("forbid_secrets_in_instructions") and has_secret(raw.decode("latin-1")):
+            if policy.get("forbid_secrets_in_instructions") and has_secret_bytes(raw):
                 errors.append(f"{reference}: possible secret/token pattern")
             continue
         is_reference = reference.suffix.casefold() in REFERENCE_TEXT_SUFFIXES
@@ -1141,7 +1219,14 @@ def validate_asset(
             if not path.exists() or not path.is_file():
                 errors.append(f"{path}: missing required AGENTS file")
             else:
-                _validate_instruction_file(path, repo, policy, errors, allow_external=allow_absolute)
+                _validate_instruction_file(
+                    path,
+                    repo,
+                    policy,
+                    errors,
+                    allow_external=allow_absolute,
+                    require_governance=path.parent.resolve() != repo.resolve(),
+                )
         for skill in skills:
             try:
                 path = resolve_path(

@@ -56,17 +56,16 @@ jobs:
         with:
           python-version: '3.x'
       - name: Require the governance scaffold
-        working-directory: target
         run: |
           for file in AGENTS.md .codex/global-skills.json .codex/instruction-integrity.json .codex/validate_instructions.py .codex/provision_global_skills.py .codex/instruction-policy.v1.json .github/workflows/instruction-integrity.yml; do
-            test -s "$file" && test ! -L "$file"
+            test -s "target/$file" && test ! -L "target/$file"
           done
           python3 - <<'PY'
           import json
           import re
           from pathlib import Path
 
-          root = Path('.')
+          root = Path('target')
           def fail(message):
               raise SystemExit(message)
 
@@ -165,6 +164,34 @@ jobs:
       # head again, so a persistent label cannot authorize unseen commits.
       GOVERNANCE_UPDATE_APPROVED: ${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') && github.event.sender.login == github.repository_owner }}
     steps:
+      - name: Invalidate prior head-associated instruction-integrity check
+        if: github.event_name == 'pull_request_target'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          case "$HEAD_SHA" in
+            ''|*[!0-9a-f]*)
+              echo 'pull request head is not a full lowercase commit SHA' >&2
+              exit 1
+              ;;
+          esac
+          check_run_id="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?check_name=instruction-integrity&per_page=100" \
+            --jq '[.check_runs[] | select(.name == "instruction-integrity") | .id] | first // empty')"
+          if test -n "$check_run_id"; then
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/check-runs/${check_run_id}" \
+              --raw-field status=in_progress \
+              --raw-field started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
+          else
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/check-runs" \
+              --raw-field name=instruction-integrity \
+              --raw-field head_sha="$HEAD_SHA" \
+              --raw-field status=in_progress >/dev/null
+          fi
       - name: Checkout proposed tree (read-only)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -180,28 +207,12 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.x'
-      - name: Invalidate prior head-associated instruction-integrity check
-        if: github.event_name == 'pull_request_target'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -eu
-          case "$HEAD_SHA" in
-            ''|*[!0-9a-f]*)
-              echo 'pull request head is not a full lowercase commit SHA' >&2
-              exit 1
-              ;;
-          esac
-          gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/check-runs" \
-            --raw-field name=instruction-integrity \
-            --raw-field head_sha="$HEAD_SHA" \
-            --raw-field status=in_progress >/dev/null
       # Materialize the immutable registry before any proposed instruction
       # filesystem is inspected. The validator below consumes this checkout;
       # it is never allowed to trust a registry file supplied by the PR.
       - name: Verify pinned global registry contents
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           manifest="target/.codex/global-skills.json"
@@ -237,17 +248,29 @@ jobs:
               if not isinstance(expected_source_revision, str) or not re.fullmatch(r"[0-9a-f]{40}", expected_source_revision):
                   raise SystemExit("approved registry transition requires a full canonical source revision")
           checkout = Path("registry-source")
+          token = os.environ.get("GH_TOKEN")
+          if not token:
+              raise SystemExit("trusted registry checkout requires the GitHub token")
+          authenticated_env = os.environ.copy()
+          authenticated_env.update(
+              {
+                  "GIT_CONFIG_COUNT": "1",
+                  "GIT_CONFIG_KEY_0": "http.extraheader",
+                  "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+              }
+          )
           subprocess.run(
               ["git", "clone", "--filter=blob:none", "--no-checkout", "--depth=1", "--no-tags",
                f"https://github.com/{descriptor['repository']}.git", str(checkout)],
               check=True,
               stdout=subprocess.DEVNULL,
+              env=authenticated_env,
           )
-          subprocess.run(["git", "-C", str(checkout), "fetch", "--depth=1", "origin", descriptor["ref"]], check=True, stdout=subprocess.DEVNULL)
-          subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", descriptor["ref"]], check=True, stdout=subprocess.DEVNULL)
+          subprocess.run(["git", "-C", str(checkout), "fetch", "--depth=1", "origin", descriptor["ref"]], check=True, stdout=subprocess.DEVNULL, env=authenticated_env)
+          subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", descriptor["ref"]], check=True, stdout=subprocess.DEVNULL, env=authenticated_env)
           if approved:
-              subprocess.run(["git", "-C", str(checkout), "fetch", "--depth=1", "origin", expected_source_revision], check=True, stdout=subprocess.DEVNULL)
-          blob = subprocess.check_output(["git", "-C", str(checkout), "show", f"{descriptor['ref']}:{descriptor['path']}"])
+              subprocess.run(["git", "-C", str(checkout), "fetch", "--depth=1", "origin", expected_source_revision], check=True, stdout=subprocess.DEVNULL, env=authenticated_env)
+          blob = subprocess.check_output(["git", "-C", str(checkout), "show", f"{descriptor['ref']}:{descriptor['path']}"], env=authenticated_env)
           if hashlib.sha256(blob).hexdigest() != descriptor["sha256"]:
               raise SystemExit("pinned registry content digest mismatch")
           source = json.loads(blob)
@@ -316,19 +339,28 @@ jobs:
           import os
           from pathlib import Path
 
-          def dynamic_rebinding_name(node, protected):
-              """Return a protected name changed through a dynamic module API."""
+          def dynamic_rebinding_names(node, protected):
+              """Return protected names changed through dynamic module APIs."""
 
+              names = set()
               if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Call):
                   if isinstance(node.value.func, ast.Name) and node.value.func.id in {"globals", "locals"}:
                       key = node.slice.value if isinstance(node.slice, ast.Constant) else None
                       if isinstance(key, str) and key in protected:
-                          return key
+                          names.add(key)
               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "setattr" and len(node.args) >= 2:
                   key = node.args[1].value if isinstance(node.args[1], ast.Constant) else None
                   if isinstance(key, str) and key in protected:
-                      return key
-              return None
+                      names.add(key)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "update":
+                  receiver = node.func.value
+                  if isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name) and receiver.func.id in {"globals", "locals"}:
+                      # Mapping updates can use keyword arguments, a dict,
+                      # or a computed mapping. Treat every protected target
+                      # as potentially rebound rather than trying to execute
+                      # contributor-controlled expressions.
+                      names.update(protected)
+              return names
 
           def load_tree(path, required):
               tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -351,9 +383,7 @@ jobs:
                           rebound_required.add(statement.name)
                       continue
                   for node in ast.walk(statement):
-                      dynamic_name = dynamic_rebinding_name(node, protected)
-                      if dynamic_name:
-                          rebound_required.add(dynamic_name)
+                      rebound_required.update(dynamic_rebinding_names(node, protected))
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in protected:
                           rebound_required.add(node.name)
                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in protected:
@@ -492,6 +522,7 @@ jobs:
               def __init__(self):
                   self.names = set()
                   self.direct_calls = {}
+                  self.call_receivers = {}
                   self.strings = set()
                   self.calls = {}
                   self.returns = []
@@ -502,6 +533,11 @@ jobs:
                       self.direct_calls.setdefault(name, []).append(node.lineno)
                   elif isinstance(node.func, ast.Attribute):
                       name = node.func.attr
+                      receiver = node.func.value
+                      while isinstance(receiver, ast.Attribute):
+                          receiver = receiver.value
+                      if isinstance(receiver, ast.Name):
+                          self.call_receivers.setdefault(name, set()).add(receiver.id)
                   else:
                       name = None
                   if name:
@@ -569,6 +605,40 @@ jobs:
                   visitor.visit(statement)
               return visitor
 
+          def runtime_guarded_direct_calls(node, names):
+              """Return protected calls reachable only under process-state guards."""
+
+              counts = {}
+
+              class Finder(ast.NodeVisitor):
+                  def __init__(self):
+                      self.runtime_depth = 0
+
+                  def visit_Call(self, call):
+                      if isinstance(call.func, ast.Name) and call.func.id in names:
+                          guarded_count, total_count = counts.get(call.func.id, (0, 0))
+                          counts[call.func.id] = (guarded_count + bool(self.runtime_depth), total_count + 1)
+                      self.generic_visit(call)
+
+                  def visit_If(self, branch):
+                      process_state = any(
+                          isinstance(item, ast.Name) and item.id in {"sys", "os", "builtins"}
+                          or isinstance(item, ast.Attribute) and item.attr in {"argv", "environ", "getenv"}
+                          for item in ast.walk(branch.test)
+                      )
+                      if process_state:
+                          self.runtime_depth += 1
+                      self.visit(branch.test)
+                      for child in branch.body + branch.orelse:
+                          self.visit(child)
+                      if process_state:
+                          self.runtime_depth -= 1
+
+              finder = Finder()
+              for statement in node.body:
+                  finder.visit(statement)
+              return counts
+
           def function_bindings(node):
               """Return names locally rebound inside one function."""
 
@@ -617,6 +687,24 @@ jobs:
                       self.conditional_depth += 1
                       for child in loop.body + loop.orelse:
                           self.visit(child)
+                      self.conditional_depth -= 1
+
+                  def visit_BoolOp(self, expression):
+                      # In ``a and required()`` / ``a or required()``, every
+                      # operand after the first is conditional on short
+                      # circuit evaluation.
+                      for index, value in enumerate(expression.values):
+                          if index:
+                              self.conditional_depth += 1
+                          self.visit(value)
+                          if index:
+                              self.conditional_depth -= 1
+
+                  def visit_IfExp(self, expression):
+                      self.visit(expression.test)
+                      self.conditional_depth += 1
+                      self.visit(expression.body)
+                      self.visit(expression.orelse)
                       self.conditional_depth -= 1
 
                   def visit_ListComp(self, comprehension):
@@ -688,9 +776,7 @@ jobs:
                           defined.add(statement.name)
                       continue
                   for node in ast.walk(statement):
-                      dynamic_name = dynamic_rebinding_name(node, protected)
-                      if dynamic_name:
-                          rebound.add(dynamic_name)
+                      rebound.update(dynamic_rebinding_names(node, protected))
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in protected:
                           rebound.add(node.name)
                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in protected:
@@ -742,6 +828,10 @@ jobs:
                       terminators = info.returns + direct_terminator_lines(node.body)
                       if call_lines and any(line < min(call_lines) for line in terminators):
                           raise SystemExit(f"approved validator {label} can terminate before calling {name}")
+                  runtime_calls = runtime_guarded_direct_calls(node, required_names)
+                  for name, (guarded_count, total_count) in runtime_calls.items():
+                      if total_count and guarded_count == total_count:
+                          raise SystemExit(f"approved validator {label} hides {name} behind a process-state branch")
               if not unconditional_calls(main, "validate_asset"):
                   raise SystemExit("approved validator main hides validate_asset behind a runtime branch")
               helper_requirements = {
@@ -751,10 +841,42 @@ jobs:
                   "_validate_global_manifest": {"load_json", "read_bytes", "sha256", "resolve"},
               }
               for label, required_names in helper_requirements.items():
-                  info = reachable_info(helper_nodes[label])
+                  helper = helper_nodes[label]
+                  info = reachable_info(helper)
                   missing = sorted(required_names - info.names)
                   if missing:
                       raise SystemExit(f"approved validator {label} is missing helper operations: {', '.join(missing)}")
+              helper_direct = {
+                  "_parse_scalar": {"_strip_yaml_comment"},
+                  "validate_skill": {"_validate_instruction_file", "has_secret"},
+                  "_validate_instruction_file": {"read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
+                  "_validate_global_manifest": {"load_json"},
+              }
+              helper_receivers = {
+                  "_parse_scalar": {"loads": {"json"}},
+                  "validate_skill": {"rglob": {"path"}, "read_bytes": {"reference"}},
+                  "_validate_instruction_file": {"read_text": {"path", "yaml_path"}},
+                  "_validate_global_manifest": {
+                      "read_bytes": {"source_resolved"},
+                      "sha256": {"hashlib"},
+                      "resolve": {"registry_source", "source_path"},
+                  },
+              }
+              for label, names in helper_direct.items():
+                  helper = helper_nodes[label]
+                  info = reachable_info(helper)
+                  bindings = function_bindings(helper)
+                  shadowed = sorted(names & bindings)
+                  if shadowed:
+                      raise SystemExit(f"approved validator {label} shadows helper operations: {', '.join(shadowed)}")
+                  missing = sorted(names - set(info.direct_calls))
+                  if missing:
+                      raise SystemExit(f"approved validator {label} requires direct helper calls: {', '.join(missing)}")
+              for label, operations in helper_receivers.items():
+                  info = reachable_info(helper_nodes[label])
+                  for operation, receivers in operations.items():
+                      if not (info.call_receivers.get(operation, set()) & receivers):
+                          raise SystemExit(f"approved validator {label} requires an unshadowed {operation} call")
               if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(parse_yaml)):
                   raise SystemExit("approved validator parse_yaml_mapping has no parsing control flow")
               if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(validate)):
@@ -833,15 +955,20 @@ jobs:
                   "main": (function_node(tree, "main"), {"load_manifest", "verify_registry", "tree_digest"}),
               }
               for label, (node, required_names) in required_calls.items():
-                  missing = sorted(required_names - reachable_called_names(node))
+                  info = reachable_info(node)
+                  available = set(info.direct_calls) if label == "main" else reachable_called_names(node)
+                  missing = sorted(required_names - available)
                   if missing:
                       raise SystemExit(f"approved provisioner {label} is missing operational calls: {', '.join(missing)}")
-                  info = reachable_info(node)
                   for name in required_names:
-                      call_lines = info.calls.get(name, [])
+                      call_lines = info.direct_calls.get(name, []) if label == "main" else info.calls.get(name, [])
                       terminators = info.returns + direct_terminator_lines(node.body)
                       if call_lines and any(line < min(call_lines) for line in terminators):
                           raise SystemExit(f"approved provisioner {label} can return before calling {name}")
+                  runtime_calls = runtime_guarded_direct_calls(node, required_names)
+                  for name, (guarded_count, total_count) in runtime_calls.items():
+                      if total_count and guarded_count == total_count:
+                          raise SystemExit(f"approved provisioner {label} hides {name} behind a process-state branch")
               if "archive" not in reachable_string_literals(function_node(tree, "verify_registry")):
                   raise SystemExit("approved provisioner verify_registry is missing the git archive operation")
 
@@ -985,6 +1112,7 @@ jobs:
               end
               expected_env = {"GOVERNANCE_UPDATE_APPROVED" => job.dig("env", "GOVERNANCE_UPDATE_APPROVED")}
               raise "job environment must contain only the approval binding: #{job_name}" unless job["env"] == expected_env
+              raise "trusted jobs may not use containers or services: #{job_name}" if job.key?("container") || job.key?("services")
               raise "job-level failure suppression is not allowed: #{job_name}" if job.key?("continue-on-error")
               if job.dig("defaults", "run").is_a?(Hash) && (job.dig("defaults", "run").key?("shell") || job.dig("defaults", "run").key?("working-directory"))
                 raise "job defaults may not override shell or working directory: #{job_name}"
@@ -992,6 +1120,20 @@ jobs:
               Array(job["steps"]).each do |step|
                 next unless step.is_a?(Hash)
                 raise "step shell override is not allowed: #{job_name}" if step.key?("shell")
+                if step["continue-on-error"] == true || step["continue-on-error"].to_s.casecmp("true").zero?
+                  raise "step failure suppression is not allowed: #{job_name}/#{step["name"]}"
+                end
+                expected_step_env = case step["name"].to_s
+                when "Invalidate prior head-associated instruction-integrity check"
+                  {"GH_TOKEN" => "${{ github.token }}", "HEAD_SHA" => "${{ github.event.pull_request.head.sha }}"}
+                when "Verify pinned global registry contents"
+                  {"GH_TOKEN" => "${{ github.token }}"}
+                when "Publish head-associated instruction-integrity check"
+                  {"GH_TOKEN" => "${{ github.token }}", "HEAD_SHA" => "${{ github.event.pull_request.head.sha }}", "VALIDATION_OUTCOME" => "${{ steps.validate_instructions.outcome }}"}
+                else
+                  {}
+                end
+                raise "step environment is broadened: #{job_name}/#{step["name"]}" unless (step["env"] || {}) == expected_step_env
                 if step.key?("uses")
                   uses = step["uses"].to_s
                   allowed = [
@@ -1013,9 +1155,9 @@ jobs:
                 "Validate pull request head with trusted validator",
               ],
               "validate" => [
+                "Invalidate prior head-associated instruction-integrity check",
                 "Checkout proposed tree (read-only)",
                 "Checkout trusted base contract and validator",
-                "Invalidate prior head-associated instruction-integrity check",
                 "Verify pinned global registry contents",
                 "Protect the integrity gate files",
                 "Protect instruction contents unless explicitly approved",
@@ -1038,6 +1180,9 @@ jobs:
             end
             bootstrap = jobs["bootstrap"]
             gate = jobs["validate"]
+            scaffold_step = Array(bootstrap["steps"]).find { |step| step.is_a?(Hash) && step["name"].to_s == "Require the governance scaffold" }
+            raise "governance scaffold must execute from the trusted workspace" unless scaffold_step && !scaffold_step.key?("working-directory")
+            raise "governance scaffold must address target paths explicitly" unless scaffold_step["run"].to_s.include?("target/$file") && scaffold_step["run"].to_s.include?("root = Path('target')")
             raise "bootstrap is not limited to pull_request" unless bootstrap["if"].to_s.include?("github.event_name == 'pull_request'")
             raise "bootstrap check name is missing" unless bootstrap["name"].to_s == "instruction-integrity-bootstrap"
             raise "trusted gate name is missing" unless gate["name"].to_s == "instruction-integrity"
@@ -1057,7 +1202,7 @@ jobs:
             }
             raise "head check invalidation environment is broadened" unless invalidate_step["env"] == expected_invalidation_env
             invalidation_run = invalidate_step["run"].to_s
-            ["set -eu", "case \"$HEAD_SHA\" in", "gh api --method POST", "check-runs", "name=instruction-integrity", "head_sha=\"$HEAD_SHA\"", "status=in_progress"].each do |needle|
+            ["set -eu", "case \"$HEAD_SHA\" in", "commits/${HEAD_SHA}/check-runs", "gh api --method PATCH", "gh api --method POST", "check-runs", "name=instruction-integrity", "head_sha=\"$HEAD_SHA\"", "status=in_progress"].each do |needle|
               raise "head check invalidation is incomplete: #{needle}" unless invalidation_run.include?(needle)
             end
             raise "head check invalidation may not mask failures" if invalidation_run.match?(/\|\|\s*true\b/)
@@ -1123,15 +1268,22 @@ jobs:
             ].each do |needle|
               raise "head validator command is missing #{needle}" unless head_command.include?(needle)
             end
-            raise "head validator command can terminate before validation" if head_run.lines.any? { |line| line.match?(/\b(?:exit|return|false)\s+0\b/) }
+            raise "head validator command can terminate before validation" if head_run.lines.any? { |line| line.match?(/\b(?:exit|return|false|kill|exec)\b/) }
             steps = Array(gate["steps"])
             allowed_trusted_steps = ["Verify pinned global registry contents", "Protect the integrity gate files", "Protect instruction contents unless explicitly approved", "Validate AGENTS.md and skills"]
+            registry_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Verify pinned global registry contents" }
+            raise "pinned registry verification step is missing" unless registry_step
+            raise "pinned registry verification must use the GitHub token" unless registry_step["env"] == {"GH_TOKEN" => "${{ github.token }}"}
+            registry_run = registry_step["run"].to_s
+            ["GIT_CONFIG_KEY_0", "http.extraheader", "Authorization: Bearer", "git clone", "git fetch", "git show"].each do |needle|
+              raise "pinned registry verification is not authenticated and immutable: #{needle}" unless registry_run.include?(needle)
+            end
             steps.each do |step|
               next unless step.is_a?(Hash)
               run_text = step["run"].to_s
               next if run_text.empty?
-              target_execution = %r{(?:\A|[;&|]\s*|\bthen\s+)(?:(?:\./)?target/|(?:python3?|ruby|node|bash|sh|zsh|source|exec|env)\s+(?:--\s+)?["']?(?:\./)?target/)}
-              if run_text.lines.any? { |line| line.match?(target_execution) }
+              target_execution = %r{(?:\A|[;&|]\s*|\bthen\s+)\s*(?:(?:[^ \t;&|]+/)*(?:python3?|ruby|node|bash|sh|zsh|source|exec|env)\b[^\n;&|]*\btarget/|(?:\./)?target/)}
+              if run_text.lines.any? { |line| line.strip.match?(target_execution) }
                 raise "workflow step may not execute code from the proposed checkout"
               end
               if run_text.match?(/\b(?:BASH_ENV|PYTHONPATH|RUBYLIB|NODE_OPTIONS|LD_PRELOAD|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_SSH_COMMAND)\s*=/)
@@ -1142,7 +1294,7 @@ jobs:
                   raise "untrusted workflow step references the trusted checkout"
                 end
                 trusted_token = "trusted"
-                mutation = /(?:\A|[;&|]\s*|\bthen\s+)(?:cp|copy|copyfile|dd|install|mkdir|makedirs|mv|move|rm|remove|rmdir|rmtree|touch|truncate|tee|sed|chmod)\b|\.(?:write_text|write_bytes|unlink|rename|replace|mkdir|chmod)\s*\(|\bopen\s*\([^\n]*(?:[\"'](?:w|a|x|\+)[\"'])|(?<![=])(?:>>?|<<)\s*[\"']?#{trusted_token}(?:\/|\b)|(?:\A|[;&|]\s*|\bthen\s+)\b(?:git|gh)\b[^\n]*(?:\b(?:reset|clean|apply|write|push|commit)\b|\bcheckout\s+(?!-))|\b(?:shutil\.)?(?:copy|copy2|copytree)\s*\([^\n]*#{trusted_token}\//
+                mutation = /(?:\A|[;&|]\s*|\bthen\s+)(?:cp|copy|copyfile|dd|install|mkdir|makedirs|mv|move|rm|remove|rmdir|rmtree|touch|truncate|tee|sed|chmod)\b|\.(?:write_text|write_bytes|unlink|rename|replace|mkdir|chmod)\s*\(|\bopen\s*\([^\n]*(?:[\"'](?:w|a|x|\+)[\"'])|(?<![=])(?:>>?|<<)\s*[\"']?#{trusted_token}(?:\/|\b)|(?:\A|[;&|]\s*|\bthen\s+)\b(?:git|gh)\b[^\n]*(?:\b(?:reset|clean|apply|write|push|commit)\b|\bcheckout\s+(?!-))|\bshutil\.\w+\s*\([^\n]*#{trusted_token}\//
                 if run_text.lines.any? { |line| !line.include?("mutation =") && line.match?(mutation) }
                   raise "workflow step can mutate the trusted checkout"
                 end
@@ -1170,6 +1322,18 @@ jobs:
             ].each do |needle|
               raise "integrity gate-file protection is incomplete: #{needle}" unless gate_files_run.include?(needle)
             end
+            semantic_markers = [
+              "TARGET_VALIDATOR=",
+              "def check_validator_shape",
+              "def check_provisioner_shape",
+              "check_module_entrypoint",
+              "ruby -ryaml",
+              "workflow = YAML.safe_load",
+              "approved governance code shape and pins validated without execution",
+            ]
+            semantic_markers.each do |needle|
+              raise "integrity gate semantic checker is incomplete: #{needle}" unless gate_files_run.include?(needle)
+            end
             publish_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Publish head-associated instruction-integrity check" }
             raise "head check publication step is missing" unless publish_step
             raise "head check publication must run after failures" unless publish_step["if"].to_s.gsub(/\s+/, " ").strip == "always() && github.event_name == 'pull_request_target'"
@@ -1185,6 +1349,10 @@ jobs:
               "test \"$VALIDATION_OUTCOME\" = success || conclusion=failure",
             ]
             raise "head check publication conclusion flow is not fixed to validator outcome" unless conclusion_lines == expected_conclusion_lines
+            raise "head check payload must consume the computed conclusion" unless publish_run.match?(/python3\s+-\s+"\$HEAD_SHA"\s+"\$conclusion"\s+<<['"]?PY['"]?/)
+            raise "head check payload must unpack both trusted arguments" unless publish_run.include?("head_sha, conclusion = sys.argv[1:]")
+            raise "head check payload must publish the computed conclusion" unless publish_run.include?("\"conclusion\": conclusion")
+            raise "head check publisher must issue exactly one API call" unless publish_run.scan(/\bgh api\b/).length == 1
             [
               "set -eu",
               "case \"$HEAD_SHA\" in",
@@ -1226,7 +1394,7 @@ jobs:
             end
             raise "trusted validator command is missing or not executable" unless command
             command_index = logical_commands.index(command)
-            if logical_commands[0...command_index].any? { |line| line.match?(/\b(?:exit|return|false|kill)\b/) }
+            if logical_commands[0...command_index].any? { |line| line.match?(/\b(?:exit|return|false|kill|exec)\b/) }
               raise "trusted validator command has terminating control flow before validation"
             end
             %w[--registry-only --help --version].each do |forbidden|
@@ -1252,7 +1420,7 @@ jobs:
             end
             raise "trusted validator command is missing --expected-config-commit" unless command.match?(/(?:\A|\s)--expected-config-commit(?:\s|\z)/)
             raise "trusted validator command must be standalone and failure-propagating" if command.match?(/[;&|<>]/)
-            raise "trusted validator command can terminate before validation" if run.lines.any? { |line| line.match?(/\b(?:exit|return|false)\s+0\b/) }
+            raise "trusted validator command can terminate before validation" if run.lines.any? { |line| line.match?(/\b(?:exit|return|false|kill|exec)\b/) }
             %w[AGENTS.md .codex/global-skills.json .codex/provision_global_skills.py].each do |needle|
               raise "bootstrap protection is missing #{needle}" unless steps.any? { |step| step.is_a?(Hash) && step["run"].to_s.include?(needle) }
             end
@@ -1284,7 +1452,7 @@ jobs:
           target_root = Path("target")
           contract = json.loads((trusted_root / ".codex/instruction-integrity.json").read_text())
           sys.path.insert(0, str((trusted_root / ".codex").resolve()))
-          from validate_instructions import REFERENCE_TEXT_SUFFIXES, _is_within, _markdown_targets
+          from validate_instructions import REFERENCE_TEXT_SUFFIXES, _is_external_target, _is_within, _markdown_targets
 
           def surface(root, raw_paths):
               files = {}
@@ -1297,6 +1465,8 @@ jobs:
                   if any(part in {".git", "node_modules", ".next"} for part in relative.parts):
                       continue
                   if item.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}:
+                      paths.add(relative)
+                  if len(relative.parts) >= 3 and relative.parts[:2] == (".claude", "skills") and item.name == "SKILL.md":
                       paths.add(relative)
               for relative in sorted(paths, key=str):
                   if relative.is_absolute() or ".." in relative.parts:
@@ -1339,7 +1509,7 @@ jobs:
                   text = path.read_text(encoding="utf-8")
                   for raw_target in _markdown_targets(text):
                       target = raw_target.strip().split("#", 1)[0].strip()
-                      if not target or target.startswith(("http://", "https://", "mailto:", "data:", "#")):
+                      if not target or _is_external_target(target):
                           continue
                       lexical = path.parent / target
                       candidate = lexical.resolve()

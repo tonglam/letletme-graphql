@@ -237,16 +237,18 @@ def tree_digest(root: Path) -> str:
         relative = relative_path.as_posix()
         if item.is_symlink():
             raise SystemExit(f"global skill tree contains a symlink: {item}")
-        # Runtime cache directories are ignored, but executable bytecode is
-        # never accepted, including inside those caches.  A timestamp-valid
-        # .pyc could otherwise be imported without changing the source digest.
-        if item.is_file() and item.suffix.casefold() in {".pyc", ".pyo"}:
-            raise SystemExit(f"global skill tree contains executable bytecode: {item}")
+        # Runtime cache directories are not part of a pinned skill tree. Do
+        # not silently skip their contents: both executable bytecode and a
+        # source file hidden beside it could otherwise alter runtime behavior
+        # without changing the digest.
         if "__pycache__" in relative_path.parts:
-            continue
+            raise SystemExit(f"global skill tree contains an unexpected cache entry: {item}")
         if item.is_dir():
             digest.update(f"D:{relative}\0".encode("utf-8"))
-            digest.update(f"M:{stat.S_IMODE(item.stat().st_mode):04o}\0".encode("ascii"))
+            # Directory permission bits are deployment metadata, not skill
+            # content; normalize them so a umask cannot make a valid mount
+            # appear stale.
+            digest.update(b"M:0755\0")
             continue
         if not item.is_file():
             raise SystemExit(f"global skill tree contains an unsupported entry: {item}")
