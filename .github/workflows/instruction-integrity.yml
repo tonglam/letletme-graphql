@@ -39,17 +39,75 @@ jobs:
       - name: Require the governance scaffold
         working-directory: target
         run: |
-          test -s AGENTS.md
-          test -s .codex/global-skills.json
-          test -s .codex/instruction-integrity.json
-          test -s .codex/validate_instructions.py
-          test -s .codex/instruction-policy.v1.json
-          test -s .github/workflows/instruction-integrity.yml
+          for file in AGENTS.md .codex/global-skills.json .codex/instruction-integrity.json .codex/validate_instructions.py .codex/instruction-policy.v1.json .github/workflows/instruction-integrity.yml; do
+            test -s "$file" && test ! -L "$file"
+          done
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          root = Path('.')
+          def fail(message):
+              raise SystemExit(message)
+
+          def load_object(relative):
+              try:
+                  value = json.loads((root / relative).read_text(encoding='utf-8'))
+              except (OSError, json.JSONDecodeError) as error:
+                  fail(f'{relative}: invalid JSON: {error}')
+              if not isinstance(value, dict):
+                  fail(f'{relative}: expected a JSON object')
+              return value
+
+          contract = load_object('.codex/instruction-integrity.json')
+          if contract.get('version') != 1:
+              fail('contract version must be 1')
+          for key in ('required_agents', 'required_skills', 'required_global_skills'):
+              value = contract.get(key)
+              if not isinstance(value, list) or not value or not all(isinstance(item, str) and item.strip() for item in value):
+                  fail(f'contract {key} must be a non-empty string list')
+          if not re.fullmatch(r'[0-9a-fA-F]{7,40}', str(contract.get('canonical_config_commit', ''))):
+              fail('contract canonical_config_commit must be a hexadecimal revision')
+          policy = load_object('.codex/instruction-policy.v1.json')
+          rules = policy.get('review_rules')
+          required_rules = {'codex_quota', 'tests_and_scripts', 'all_other_paths', 'all_findings', 'post_merge_cleanup'}
+          if policy.get('version') != 1 or not isinstance(rules, dict) or set(rules) != required_rules:
+              fail('policy must contain version 1 and every review rule')
+          if 'tests' not in rules['tests_and_scripts'] or 'scripts' not in rules['tests_and_scripts']:
+              fail('policy must preserve the tests/scripts exception')
+          if 'P2' not in rules['all_other_paths'] or 'P3' not in rules['all_other_paths']:
+              fail('policy must require non-test P2/P3 fixes')
+          manifest = load_object('.codex/global-skills.json')
+          registry = manifest.get('registry')
+          if manifest.get('version') != 1 or not isinstance(registry, dict) or not re.fullmatch(r'[0-9a-f]{40}', str(registry.get('ref', ''))) or not re.fullmatch(r'[0-9a-f]{64}', str(registry.get('sha256', ''))):
+              fail('global manifest must pin a full commit and content digest')
+          if not isinstance(manifest.get('skills'), list) or set(manifest['skills']) != set(contract['required_global_skills']):
+              fail('global manifest skill list must match the contract')
+          agents = (root / 'AGENTS.md').read_text(encoding='utf-8')
+          if len(agents.strip()) < 200 or not all(marker in agents.casefold() for marker in ('quota', 'tests', 'scripts', 'finding', 'resolved', 'cleanup')):
+              fail('AGENTS.md is missing the operative governance clauses')
+          for raw in contract['required_agents']:
+              path = root / raw
+              if not path.is_file() or path.is_symlink() or not path.read_text(encoding='utf-8').strip():
+                  fail(f'required AGENTS file is missing, empty, or symlinked: {raw}')
+          for raw in contract['required_skills']:
+              path = root / raw
+              entry = path if path.name == 'SKILL.md' else path / 'SKILL.md'
+              if not path.is_dir() or not entry.is_file() or entry.is_symlink():
+                  fail(f'required skill entrypoint is missing, not a directory, or symlinked: {raw}')
+              text = entry.read_text(encoding='utf-8')
+              if not re.match(r'\A---\s*\n', text) or not re.search(r'(?m)^name:\s*\S+', text) or not re.search(r'(?m)^description:\s*\S+', text) or not text.split('---', 2)[-1].strip():
+                  fail(f'skill entrypoint has invalid frontmatter or no body: {raw}')
+          print('bootstrap structural and governance checks passed')
+          PY
   validate:
     if: github.event_name == 'pull_request_target' || github.event_name == 'push'
     name: instruction-integrity
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      GOVERNANCE_UPDATE_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') }}
     steps:
       - name: Checkout proposed tree (read-only)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -68,26 +126,59 @@ jobs:
           python-version: '3.x'
       - name: Protect the integrity gate files
         run: |
+          approved="$GOVERNANCE_UPDATE_APPROVED"
           for file in \
             .github/workflows/instruction-integrity.yml \
             .codex/validate_instructions.py \
             .codex/instruction-policy.v1.json \
             .codex/instruction-integrity.json \
             .codex/global-skills.json; do
-            if test -e "trusted/$file"; then
-              test -f "target/$file"
+            if test -e "trusted/$file" && test "$approved" != true; then
+              test -f "target/$file" && test ! -L "target/$file"
               cmp -s "trusted/$file" "target/$file" || {
                 echo "governance gate file changed: $file"
                 exit 1
               }
             else
-              test -s "target/$file"
+              test -s "target/$file" && test ! -L "target/$file"
             fi
           done
+      - name: Protect instruction contents unless explicitly approved
+        if: env.GOVERNANCE_UPDATE_APPROVED != 'true'
+        run: |
+          if test ! -f trusted/.codex/instruction-integrity.json; then
+            exit 0
+          fi
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          trusted_root = Path("trusted")
+          target_root = Path("target")
+          contract = json.loads((trusted_root / ".codex/instruction-integrity.json").read_text())
+          paths = list(contract.get("required_agents", [])) + list(contract.get("required_skills", []))
+          for raw in paths:
+              relative = Path(raw)
+              if relative.is_absolute() or ".." in relative.parts:
+                  raise SystemExit(f"trusted contract path is not repository-relative: {raw}")
+              if relative.name not in {"AGENTS.md", "SKILL.md"}:
+                  relative = relative / "SKILL.md"
+              trusted = trusted_root / relative
+              target = target_root / relative
+              if not trusted.is_file() or not target.is_file():
+                  raise SystemExit(f"required instruction missing from trusted/target tree: {relative}")
+              if hashlib.sha256(trusted.read_bytes()).digest() != hashlib.sha256(target.read_bytes()).digest():
+                  raise SystemExit(f"governed instruction changed without instruction-governance-approved label: {relative}")
+          PY
       - name: Validate AGENTS.md and skills
         run: |
           expected_config_commit="$(python3 -c 'import json; print(json.load(open("trusted/.codex/instruction-integrity.json", encoding="utf-8"))["canonical_config_commit"])')"
-          python3 trusted/.codex/validate_instructions.py \
+          extra_args=()
+          if test "$GOVERNANCE_UPDATE_APPROVED" = true; then
+            extra_args+=(--allow-config-commit-update)
+          fi
+          python3 trusted/.codex/validate_instructions.py "${extra_args[@]}" \
             --repo target \
             --contract target/.codex/instruction-integrity.json \
             --policy trusted/.codex/instruction-policy.v1.json \

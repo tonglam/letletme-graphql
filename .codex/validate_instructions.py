@@ -25,10 +25,11 @@ INLINE_LINK_RE = re.compile(
 REFERENCE_DEF_RE = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(<[^>]*>|[^\s]+)", re.M)
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 SECRET_VALUE_RES = (
-    re.compile(r"(?i)\b(?:api[_ -]?key|access[_ -]?token|private[_ -]?key|client[_ -]?secret|password)\b\s*[:=]\s*([^\s`<>]+)"),
-    re.compile(r"(?i)\b(?:notification[_ -]?api[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)\b\s*[:=]\s*([^\s`<>]+)"),
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?key|access[_ -]?token|private[_ -]?key|client[_ -]?secret|password)["']?\s*[:=]\s*([^\s`<>]+)'''),
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*([^\s`<>]+)'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
-    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{20,})\b"),
+    re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]+:([^\s/@]+)@"),
+    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{20,})\b"),
 )
 PLACEHOLDER_VALUES = {
     "example",
@@ -37,6 +38,12 @@ PLACEHOLDER_VALUES = {
     "redacted",
     "token",
     "value",
+    "pass",
+    "password",
+    "user",
+    "username",
+    "localhost",
+    "127.0.0.1",
     "your-token",
     "<token>",
     "<value>",
@@ -62,10 +69,11 @@ REVIEW_RULE_KEYS = {
 GLOBAL_MANIFEST_KEYS = {"version", "registry", "skills"}
 GLOBAL_REGISTRY_DESCRIPTOR = {
     "repository": "tonglam/codex-workspace-config",
-    "ref": "42d1af4",
+    "ref": "7e92336ec04d38f7bb95620e304ce6ec6567c896",
     "path": "registry/workspace-assets.json",
+    "sha256": "fa1a2a5448e34376c4dccfe43c6c8a901adb9b62df3995b1f11d3aa4b9b77cb6",
 }
-IGNORED_PARTS = {".git", "node_modules", ".next", "dist", "build", "coverage", "archive", "output"}
+IGNORED_PARTS = {".git", "node_modules", ".next", "dist"}
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -121,10 +129,23 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
             if not isinstance(decoded, str):
                 raise ValueError(f"{path}:{line_number}: YAML scalar is not a string")
             return decoded
+        index = 1
+        while index < len(value) - 1:
+            if value[index] != "'":
+                index += 1
+                continue
+            if index + 1 < len(value) - 1 and value[index + 1] == "'":
+                index += 2
+                continue
+            raise ValueError(f"{path}:{line_number}: invalid single-quoted YAML scalar")
         return value[1:-1].replace("''", "'")
     if value[0] not in "[{":
         # Apostrophes and brackets are ordinary characters in a YAML plain
         # scalar (for example, "user's route" or "[locale]").
+        if value[0] in "!&*@`>|%,?" or value[0] == "#":
+            raise ValueError(f"{path}:{line_number}: reserved YAML indicator must be quoted")
+        if re.search(r":\s", value):
+            raise ValueError(f"{path}:{line_number}: colon followed by whitespace must be quoted in a YAML scalar")
         if re.fullmatch(r"(?i)(?:null|~)", value):
             if scalar_only:
                 raise ValueError(f"{path}:{line_number}: YAML null is not a string scalar")
@@ -164,7 +185,7 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
                 raise ValueError(f"{path}:{line_number}: unbalanced YAML delimiters")
     if quote or stack or escaped:
         raise ValueError(f"{path}:{line_number}: unterminated YAML quote or delimiter")
-    return value
+    return [] if value[0] == "[" else {}
 
 
 def parse_yaml_mapping(text: str, path: Path, *, scalar_fields: bool = False) -> dict[str, Any]:
@@ -252,14 +273,54 @@ def resolve_path(
     root = repo.resolve()
     if not allow_external and not _is_within(resolved, root):
         raise ValueError(f"required instruction path escapes the repository: {value}")
-    if not allow_external and candidate.is_symlink():
+    if not allow_external and (repo / candidate).is_symlink():
         raise ValueError(f"required instruction path may not be a symlink: {value}")
     return resolved
 
 
 def _markdown_targets(text: str) -> Iterable[str]:
-    for raw in INLINE_LINK_RE.findall(text):
-        yield raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw
+    # The usual regular expression form stops at the first closing parenthesis
+    # and rejects legitimate destinations such as ``guide_(v2).md``. Walk the
+    # destination so balanced parentheses and escaped characters are retained.
+    cursor = 0
+    while True:
+        marker = text.find("](", cursor)
+        if marker < 0:
+            break
+        index = marker + 2
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        if text[index] == "<":
+            end = text.find(">", index + 1)
+            if end < 0:
+                break
+            yield text[index + 1 : end]
+            cursor = end + 1
+            continue
+        start = index
+        depth = 0
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                if depth == 0:
+                    raw = text[start:index].strip()
+                    yield raw.split(None, 1)[0] if raw else raw
+                    cursor = index + 1
+                    break
+                depth -= 1
+        else:
+            break
     for match in REFERENCE_DEF_RE.finditer(text):
         raw = match.group(2)
         yield raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw
@@ -282,6 +343,78 @@ def check_reference_links(
             errors.append(f"{instruction_file}: relative reference escapes repository: {target}")
         elif not candidate.exists():
             errors.append(f"{instruction_file}: missing relative reference {target}")
+
+
+def scan_reference_graph(
+    entrypoint: Path,
+    repo: Path,
+    policy: dict[str, Any],
+    errors: list[str],
+    *,
+    allow_external: bool = False,
+) -> None:
+    """Scan repository-local Markdown/config references, not just their links."""
+
+    queue = [entrypoint]
+    visited: set[Path] = set()
+    while queue:
+        current = queue.pop()
+        try:
+            current_resolved = current.resolve()
+        except OSError:
+            continue
+        if current_resolved in visited:
+            continue
+        visited.add(current_resolved)
+        try:
+            text = current.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for raw_target in _markdown_targets(text):
+            target = raw_target.strip().split("#", 1)[0].strip()
+            if not target or target.startswith(("http://", "https://", "mailto:", "data:", "#")):
+                continue
+            lexical = current.parent / target
+            try:
+                candidate = lexical.resolve()
+            except OSError:
+                continue
+            if not allow_external and not _is_within(candidate, repo.resolve()):
+                continue
+            if not candidate.is_file() or candidate.suffix.casefold() not in {".md", ".yaml", ".yml", ".json"}:
+                continue
+            if not allow_external and (lexical.is_symlink() or not _is_within(candidate, repo.resolve())):
+                errors.append(f"{lexical}: referenced instruction must remain inside the repository and may not be a symlink")
+                continue
+            try:
+                reference_text = candidate.read_text(encoding="utf-8")
+            except OSError as exc:
+                errors.append(f"{candidate}: cannot read referenced instruction: {exc}")
+                continue
+            if not reference_text.strip():
+                errors.append(f"{candidate}: referenced instruction is empty")
+            if candidate.suffix.casefold() == ".md" and candidate.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
+                errors.append(f"{candidate}: referenced instruction exceeds max_skill_bytes")
+            if policy.get("forbid_secrets_in_instructions") and has_secret(reference_text):
+                errors.append(f"{candidate}: possible secret/token pattern")
+            check_reference_links(candidate, repo, errors, allow_external=allow_external)
+            queue.append(candidate)
+
+
+def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
+    """Keep the policy's operative review rules visible in loaded AGENTS.md."""
+
+    lowered = text.casefold()
+    required_groups = {
+        "quota rule": ("quota", "review"),
+        "tests/scripts exception": ("tests", "scripts", "p0", "p1", "p2", "p3"),
+        "all-path severity rule": ("p2", "p3", "fixed"),
+        "finding disposition rule": ("finding", "resolved"),
+        "cleanup rule": ("clean", "remote", "branch"),
+    }
+    for label, markers in required_groups.items():
+        if not all(marker in lowered for marker in markers):
+            errors.append(f"{path}: missing operative {label} clause")
 
 
 def _looks_like_placeholder(value: str) -> bool:
@@ -322,8 +455,10 @@ def check_yaml_shape(path: Path, errors: list[str], *, skill_name: str | None = 
     for field in ("display_name", "short_description", "default_prompt"):
         if not isinstance(interface.get(field), str) or not interface[field].strip():
             errors.append(f"{path}: interface.{field} must be a nonempty string")
-    if skill_name and isinstance(interface.get("default_prompt"), str) and f"${skill_name}" not in interface["default_prompt"]:
-        errors.append(f"{path}: interface.default_prompt must invoke ${skill_name}")
+    if skill_name and isinstance(interface.get("default_prompt"), str):
+        token = re.compile(rf"\${re.escape(skill_name)}(?![A-Za-z0-9_-])")
+        if not token.search(interface["default_prompt"]):
+            errors.append(f"{path}: interface.default_prompt must invoke ${skill_name}")
 
 
 def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
@@ -332,11 +467,11 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
     paths: set[Path] = set()
     for path in repo.rglob("AGENTS.md"):
         if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
-            paths.add(path.resolve())
+            paths.add(path.absolute())
     for pattern in (".agents/**/SKILL.md", "skills/**/SKILL.md"):
         for path in repo.glob(pattern):
             if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
-                paths.add(path.resolve())
+                paths.add(path.absolute())
     return sorted(paths)
 
 
@@ -366,6 +501,8 @@ def _validate_instruction_file(
         errors.append(f"{path}: instruction file is empty")
     if path.name == "AGENTS.md" and path.stat().st_size > int(policy.get("max_agents_bytes", 32768)):
         errors.append(f"{path}: exceeds max_agents_bytes")
+    if path.name == "AGENTS.md":
+        check_governance_binding(path, text, errors)
     if path.name == "SKILL.md":
         if path.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
             errors.append(f"{path}: exceeds max_skill_bytes")
@@ -378,6 +515,9 @@ def _validate_instruction_file(
                     errors.append(f"{path}: missing frontmatter field {required}")
             if fields.get("name") and fields["name"] != path.parent.name:
                 errors.append(f"{path}: frontmatter name must match directory {path.parent.name}")
+            frontmatter_match = FRONTMATTER_RE.match(text)
+            if not frontmatter_match or not text[frontmatter_match.end() :].strip():
+                errors.append(f"{path}: skill instruction body must be nonempty after frontmatter")
         yaml_path = path.parent / "agents" / "openai.yaml"
         if yaml_path.exists():
             if not allow_external and (yaml_path.is_symlink() or not _is_within(yaml_path.resolve(), repo.resolve())):
@@ -389,6 +529,7 @@ def _validate_instruction_file(
         else:
             errors.append(f"{path.parent}: missing agents/openai.yaml")
     check_reference_links(path, repo, errors, allow_external=allow_external)
+    scan_reference_graph(path, repo, policy, errors, allow_external=allow_external)
     if policy.get("forbid_secrets_in_instructions") and has_secret(text):
         errors.append(f"{path}: possible secret/token pattern")
 
@@ -433,13 +574,17 @@ def _validate_policy(policy: dict[str, Any], errors: list[str]) -> None:
 
 
 def _validate_against_trusted_contract(
-    contract: dict[str, Any], trusted: dict[str, Any], errors: list[str]
+    contract: dict[str, Any],
+    trusted: dict[str, Any],
+    errors: list[str],
+    *,
+    allow_config_commit_update: bool = False,
 ) -> None:
     """Prevent a PR from weakening the protected asset list or config pin."""
 
     if contract.get("asset_id") != trusted.get("asset_id"):
         errors.append("contract asset_id does not match the trusted base contract")
-    if contract.get("canonical_config_commit") != trusted.get("canonical_config_commit"):
+    if not allow_config_commit_update and contract.get("canonical_config_commit") != trusted.get("canonical_config_commit"):
         errors.append("contract canonical_config_commit differs from the trusted base contract")
     if contract.get("policy_profile") != trusted.get("policy_profile"):
         errors.append("contract policy_profile differs from the trusted base contract")
@@ -465,8 +610,10 @@ def _validate_global_manifest(
     registry = manifest.get("registry")
     if registry != GLOBAL_REGISTRY_DESCRIPTOR:
         errors.append(
-            f"{manifest_path}: registry must pin {GLOBAL_REGISTRY_DESCRIPTOR['repository']}@{GLOBAL_REGISTRY_DESCRIPTOR['ref']}:{GLOBAL_REGISTRY_DESCRIPTOR['path']}"
+            f"{manifest_path}: registry must pin {GLOBAL_REGISTRY_DESCRIPTOR['repository']}@{GLOBAL_REGISTRY_DESCRIPTOR['ref']}:{GLOBAL_REGISTRY_DESCRIPTOR['path']} with the trusted content digest"
         )
+    elif not re.fullmatch(r"[0-9a-f]{64}", str(registry.get("sha256", ""))):
+        errors.append(f"{manifest_path}: registry sha256 must be a 64-character lowercase hex digest")
     advertised = manifest.get("skills")
     if not isinstance(advertised, list) or set(advertised) != set(expected_skills):
         errors.append(f"{manifest_path}: advertised skills do not match required_global_skills")
@@ -488,6 +635,26 @@ def validate_skill(
         errors.append(f"{path}: missing {policy.get('require_skill_entrypoint', 'SKILL.md')}")
         return
     _validate_instruction_file(entry, repo, policy, errors, allow_external=allow_external)
+    # References are part of the skill's executable instruction surface. Scan
+    # them recursively so a secret or broken link cannot hide behind SKILL.md.
+    for reference in path.rglob("*"):
+        if not reference.is_file() or reference == entry or reference.suffix.casefold() not in {".md", ".yaml", ".yml", ".json"}:
+            continue
+        if not allow_external and (reference.is_symlink() or not _is_within(reference.resolve(), repo.resolve())):
+            errors.append(f"{reference}: skill reference must remain inside the repository and may not be a symlink")
+            continue
+        try:
+            reference_text = reference.read_text(encoding="utf-8")
+        except OSError as exc:
+            errors.append(f"{reference}: cannot read skill reference: {exc}")
+            continue
+        if not reference_text.strip():
+            errors.append(f"{reference}: skill reference is empty")
+        if reference.suffix.casefold() == ".md" and reference.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
+            errors.append(f"{reference}: exceeds max_skill_bytes")
+        check_reference_links(reference, repo, errors, allow_external=allow_external)
+        if policy.get("forbid_secrets_in_instructions") and has_secret(reference_text):
+            errors.append(f"{reference}: possible secret/token pattern")
 
 
 def validate_asset(
@@ -497,6 +664,7 @@ def validate_asset(
     registry_only: bool = False,
     expected_config_commit: str | None = None,
     trusted_contract: dict[str, Any] | None = None,
+    allow_config_commit_update: bool = False,
 ) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -505,8 +673,13 @@ def validate_asset(
     if contract:
         _validate_contract_shape(contract, errors)
         if trusted_contract:
-            _validate_against_trusted_contract(contract, trusted_contract, errors)
-        if expected_config_commit and contract.get("canonical_config_commit") != expected_config_commit:
+            _validate_against_trusted_contract(
+                contract,
+                trusted_contract,
+                errors,
+                allow_config_commit_update=allow_config_commit_update,
+            )
+        if expected_config_commit and not allow_config_commit_update and contract.get("canonical_config_commit") != expected_config_commit:
             errors.append(
                 f"canonical_config_commit {contract.get('canonical_config_commit')!r} does not match trusted {expected_config_commit!r}"
             )
@@ -597,6 +770,11 @@ def main() -> int:
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--expected-config-commit")
     parser.add_argument("--trusted-contract", type=Path)
+    parser.add_argument(
+        "--allow-config-commit-update",
+        action="store_true",
+        help="allow a maintainer-approved canonical config pin update",
+    )
     parser.add_argument("--registry-only", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--pretty", action="store_true")
@@ -635,6 +813,7 @@ def main() -> int:
             registry_only=args.registry_only,
             expected_config_commit=args.expected_config_commit,
             trusted_contract=trusted_contract,
+            allow_config_commit_update=args.allow_config_commit_update,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         result = {"ok": False, "errors": [str(exc)], "warnings": []}
