@@ -162,12 +162,7 @@ const buildV2Redis = (
 			chip: null,
 			transferCost: 4,
 		},
-		previousTotals: {
-			revision: hash({ previous: 1200 }),
-			throughEventId: 0,
-			totalPoints: 1200,
-			overallRank: 5000,
-		},
+		previousTotals: null,
 		officialAdjustment: null,
 		finalResult: null,
 	};
@@ -212,7 +207,7 @@ describe("Live Points V2 projection", () => {
 		expect(result.pickList).toHaveLength(15);
 		expect(new Set(result.pickList.map((pick) => pick.element)).size).toBe(15);
 		expect(result.score.netEventPoints).toBe(result.score.eventPoints - 4);
-		expect(result.score.totalPoints).toBe(1200 + result.score.netEventPoints);
+		expect(result.score.totalPoints).toBeNull();
 		expect(result.score.revisions.input).not.toBe("unavailable");
 	});
 

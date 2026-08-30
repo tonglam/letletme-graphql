@@ -8,11 +8,10 @@ import {
 	parentSelectionRequestsField,
 } from "../../graphql/selection-set";
 import { getCurrentEventId } from "../../infra/event";
-import { getCoreLiveIdentitySnapshot } from "../../infra/data-snapshot";
 import type { LivePerformanceData } from "../../infra/live-types";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
-import type { Player } from "../players/repository";
+import { playersRepository, type Player } from "../players/repository";
 import { playersService } from "../players/service";
 import {
 	loadLiveSnapshotMetaV2,
@@ -248,7 +247,7 @@ const toExplainBreakdown = (
 	if (!Array.isArray(value)) return [];
 	return value.flatMap((entry) => {
 		if (!isRecord(entry)) return [];
-		const fixtureId = integerOrNull(entry.fixtureId ?? entry.fixture_id);
+		const fixtureId = integerOrNull(entry.fixtureId ?? entry.fixture_id ?? entry.fixture);
 		if (fixtureId === null) return [];
 		let statsValue: unknown = entry.stats;
 		if (typeof statsValue === "string") {
@@ -275,12 +274,10 @@ const explainForRow = async (
 	raw: Record<string, unknown>
 ): Promise<LiveExplain> => {
 	const breakdown = toExplainBreakdown(raw.fixtureBreakdown);
-	const core = includeSelectedBy
-		? await getCoreLiveIdentitySnapshot(context).catch(() => null)
+	const eventPlayer = includeSelectedBy
+		? await playersRepository.getPlayerByIdForEvent(context, elementId, eventId).catch(() => null)
 		: null;
-	const selectedBy = includeSelectedBy
-		? (core?.players.find((player) => player.id === elementId)?.selectedByPercent ?? null)
-		: null;
+	const selectedBy = includeSelectedBy ? (eventPlayer?.selectedByPercent ?? null) : null;
 	const contributions = breakdown.flatMap((entry) => entry.stats);
 	return {
 		eventId,

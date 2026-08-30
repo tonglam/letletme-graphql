@@ -405,13 +405,20 @@ export const buildEntryLiveCompetitionBoardV2 = async (
 		tournamentId: number;
 		entryIds: readonly number[];
 		requireNet?: boolean;
+		scoreCoreRevision?: string;
 	}
 ): Promise<{
 	board: EntryLiveCompetitionBoardV2;
 	result: Awaited<ReturnType<typeof calcLivePointsForEntriesV2>>;
 }> => {
-	const publication = await readLivePublicationV2(context, input.eventId).catch(() => null);
-	const result = await calcLivePointsForEntriesV2(context, input.eventId, input.entryIds);
+	const publication = await readLivePublicationV2(
+		context,
+		input.eventId,
+		input.scoreCoreRevision
+	).catch(() => null);
+	const result = await calcLivePointsForEntriesV2(context, input.eventId, input.entryIds, {
+		scoreCoreRevision: input.scoreCoreRevision,
+	});
 	const values = [...result.results.values()];
 	const observedScoreCoreRevisions = [
 		...new Set(values.map((value) => value.score.revisions.scoreCore)),

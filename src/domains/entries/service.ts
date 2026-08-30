@@ -518,6 +518,14 @@ async function buildLiveMapForEvents(
 			}
 		})
 	);
+	const missingEventIds = publications.flatMap((publication, index) =>
+		publication === null && eventIds[index] !== undefined ? [eventIds[index]!] : []
+	);
+	if (missingEventIds.length > 0) {
+		throw new Error(
+			"Live Points V2 historical publication unavailable for event(s): " + missingEventIds.join(",")
+		);
+	}
 	publications.forEach((publication, index) => {
 		if (!publication) return;
 		const eventId = eventIds[index];

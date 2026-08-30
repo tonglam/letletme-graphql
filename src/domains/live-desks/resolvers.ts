@@ -355,7 +355,8 @@ const eligibleEntryIdsForEvent = async (
 const boardResponse = async (
 	context: GraphQLContext,
 	request: EntryLiveCompetitionBoardRequest,
-	memberTournament: { leagueType?: string | null }
+	memberTournament: { leagueType?: string | null },
+	ref: LiveRef | null
 ) => {
 	const entryIds = await tournamentsService.getTournamentEntryIdsUncached(
 		context,
@@ -367,9 +368,14 @@ const boardResponse = async (
 		tournamentId: request.tournamentId,
 		entryIds: eligibleEntryIds,
 		requireNet: memberTournament.leagueType === LeagueType.H2H,
+		scoreCoreRevision: ref?.scoreCoreRevision,
 	});
 	const page = queryEntryLiveCompetitionBoardV2(board, request);
-	const sample = board.rows.find((row) => row.entry === request.entryId) ?? board.rows[0] ?? null;
+	const sample =
+		board.rows.find((row) => row.entry === request.entryId && row.score.source !== "UNAVAILABLE") ??
+		board.rows.find((row) => row.score.source !== "UNAVAILABLE") ??
+		board.rows[0] ??
+		null;
 	const delivery = sample?.score.delivery ?? {
 		state: "UNAVAILABLE",
 		servedFrom: "UNAVAILABLE",
@@ -559,14 +565,15 @@ export const liveDesksResolvers = {
 			context: GraphQLContext
 		) => {
 			const request = normalizeEntryLiveCompetitionBoardRequestV2(args);
+			const ref = (args.ref as LiveRef | null | undefined) ?? null;
 			const publication = await readLivePublicationV2(context, request.eventId).catch(() => null);
-			assertRef(context, (args.ref as LiveRef | null | undefined) ?? null, publication);
+			assertRef(context, ref, publication);
 			const memberTournament = await assertMemberOrManager(
 				context,
 				request.tournamentId,
 				request.entryId
 			);
-			return boardResponse(context, request, memberTournament);
+			return boardResponse(context, request, memberTournament, ref);
 		},
 		entryLiveCompetitionsDesk: async (
 			_parent: unknown,
@@ -605,15 +612,32 @@ export const liveDesksResolvers = {
 					totalEntries: 0,
 				};
 			await assertMember(context, selected, args.entryId);
+			const eventCore = args.ref ? null : await getCoreEventSnapshot(context);
 			const eventId =
-				args.ref?.eventId ?? (await getCoreEventSnapshot(context)).currentEventId ?? 0;
+				args.ref?.eventId ??
+				eventCore?.currentEventId ??
+				eventCore?.events.find((event) => event.isPrevious)?.id ??
+				0;
 			const publication =
 				eventId > 0 ? await readLivePublicationV2(context, eventId).catch(() => null) : null;
 			assertRef(context, args.ref, publication);
 			const allEntryIds = await tournamentsService.getTournamentEntryIdsUncached(context, selected);
 			const entryIds = await eligibleEntryIdsForEvent(context, allEntryIds, eventId);
-			const { results } = await calcLivePointsForEntriesV2(context, eventId, entryIds);
-			const sample = results.get(args.entryId) ?? results.values().next().value ?? null;
+			const { results, errors } = await calcLivePointsForEntriesV2(context, eventId, entryIds, {
+				scoreCoreRevision: args.ref?.scoreCoreRevision,
+			});
+			const usable = (row: { availability: string; score: { source: string } }): boolean =>
+				row.availability === "READY" && row.score.source !== "UNAVAILABLE";
+			const sample =
+				results.get(args.entryId) && usable(results.get(args.entryId)!)
+					? results.get(args.entryId)!
+					: ([...results.values()].find(usable) ?? results.values().next().value ?? null);
+			const orderedResults = [...results.values()].sort(
+				(left, right) =>
+					Number(usable(right)) - Number(usable(left)) ||
+					right.score.eventPoints - left.score.eventPoints ||
+					left.entry - right.entry
+			);
 			return {
 				season: context.currentSeason.seasonCode,
 				eventId,
@@ -624,7 +648,7 @@ export const liveDesksResolvers = {
 				nextRefreshAt: publication?.publication.expectedNextCheckAt ?? null,
 				tournaments,
 				selectedTournamentId: selected,
-				board: [...results.values()],
+				board: orderedResults,
 				officialCoverage:
 					entryIds.length === 0
 						? 0
@@ -636,7 +660,7 @@ export const liveDesksResolvers = {
 				partial:
 					[...results.values()].some((row) => row.availability !== "READY") ||
 					results.size !== entryIds.length,
-				failedEntryIds: [],
+				failedEntryIds: errors.map((error) => error.entryId).sort((left, right) => left - right),
 				totalEntries: entryIds.length,
 				revisions: sample?.score.revisions ?? null,
 				times: sample?.score.times ?? null,

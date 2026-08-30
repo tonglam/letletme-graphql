@@ -382,8 +382,8 @@ const LIVE_LKG_MAX_ENTRIES = 256;
 // while its source is stale, and PostgreSQL remains the next fallback after
 // an eviction.
 const LIVE_LKG_RETENTION_MS = 24 * 60 * 60 * 1000;
-const requestRedisGlobalMemo = new WeakMap<object, Map<number, Promise<GlobalRead | null>>>();
-const requestDatabaseGlobalMemo = new WeakMap<object, Map<number, Promise<GlobalRead | null>>>();
+const requestRedisGlobalMemo = new WeakMap<object, Map<string, Promise<GlobalRead | null>>>();
+const requestDatabaseGlobalMemo = new WeakMap<object, Map<string, Promise<GlobalRead | null>>>();
 const requestCoreMemo = new WeakMap<object, Promise<CoreLiveIdentitySnapshot | null>>();
 const requestEntryMemo = new WeakMap<object, Map<number, Promise<Entry>>>();
 const entryMetadataCircuit = new Map<string, number>();
@@ -400,6 +400,13 @@ const integer = (value: unknown): number | null => {
 	if (typeof value === "string" && /^-?\d+$/.test(value.trim())) return Number(value);
 	return null;
 };
+
+// JSON numbers are part of the V2 publication contract. Do not accept a
+// numeric string for fields that participate in a revision vector: otherwise
+// a malformed checkpoint can pass validation while retaining a different
+// runtime shape from Redis.
+const safeInteger = (value: unknown): number | null =>
+	typeof value === "number" && Number.isSafeInteger(value) ? value : null;
 
 const jsonValue = (value: unknown): unknown => {
 	if (typeof value !== "string") return value;
@@ -617,14 +624,14 @@ const validPreviousTotals = (
 ): value is NonNullable<EntryLiveInput["previousTotals"]> =>
 	isRecord(value) &&
 	validRevisionOnly(value) &&
-	integer(value.throughEventId) !== null &&
-	(integer(value.throughEventId) as number) === expectedThroughEventId &&
-	integer(value.totalPoints) !== null &&
+	safeInteger(value.throughEventId) !== null &&
+	(safeInteger(value.throughEventId) as number) === expectedThroughEventId &&
+	safeInteger(value.totalPoints) !== null &&
 	(expectedThroughEventId === 0
-		? (integer(value.totalPoints) as number) === 0
-		: (integer(value.totalPoints) as number) >= 0) &&
+		? (safeInteger(value.totalPoints) as number) === 0
+		: (safeInteger(value.totalPoints) as number) >= 0) &&
 	(value.overallRank === null ||
-		(integer(value.overallRank) !== null && (integer(value.overallRank) as number) > 0));
+		(safeInteger(value.overallRank) !== null && (safeInteger(value.overallRank) as number) > 0));
 
 const validAdjustment = (
 	value: unknown
@@ -1483,35 +1490,51 @@ const requestScope = (context: GraphQLContext): object => context.requestScope ?
 const entryMetadataKey = (context: GraphQLContext, entryId: number): string =>
 	`${context.currentSeason.seasonCode}:${entryId}`;
 
-const readRedisGlobal = (context: GraphQLContext, eventId: number): Promise<GlobalRead | null> => {
+const readRedisGlobal = (
+	context: GraphQLContext,
+	eventId: number,
+	expectedScoreCoreRevision?: string
+): Promise<GlobalRead | null> => {
 	const scope = requestScope(context);
 	let memo = requestRedisGlobalMemo.get(scope);
 	if (!memo) {
 		memo = new Map();
 		requestRedisGlobalMemo.set(scope, memo);
 	}
-	const existing = memo.get(eventId);
+	const memoKey = String(eventId) + ":" + (expectedScoreCoreRevision ?? "current");
+	const existing = memo.get(memoKey);
 	if (existing) return existing;
 	const load = (async (): Promise<GlobalRead | null> => {
 		const season = context.currentSeason.seasonCode;
 		try {
 			const redis = context.redis;
 			const redisValue = await readRedisGlobalCandidate(redis, season, eventId, "active");
-			if (redisValue) return redisValue;
+			if (
+				redisValue &&
+				(expectedScoreCoreRevision === undefined ||
+					redisValue.publication.revisions.scoreCore.revision === expectedScoreCoreRevision)
+			)
+				return redisValue;
 			const previous = await readRedisGlobalCandidate(redis, season, eventId, "previous");
-			if (previous) return previous;
+			if (
+				previous &&
+				(expectedScoreCoreRevision === undefined ||
+					previous.publication.revisions.scoreCore.revision === expectedScoreCoreRevision)
+			)
+				return previous;
 		} catch (error) {
 			context.logger.warn({ err: error, eventId }, "Live Points V2 Redis read unavailable");
 		}
 		return null;
 	})();
-	memo.set(eventId, load);
+	memo.set(memoKey, load);
 	return load;
 };
 
 const readDatabaseGlobalMemoized = (
 	context: GraphQLContext,
-	eventId: number
+	eventId: number,
+	expectedScoreCoreRevision?: string
 ): Promise<GlobalRead | null> => {
 	const scope = requestScope(context);
 	let memo = requestDatabaseGlobalMemo.get(scope);
@@ -1519,21 +1542,35 @@ const readDatabaseGlobalMemoized = (
 		memo = new Map();
 		requestDatabaseGlobalMemo.set(scope, memo);
 	}
-	const existing = memo.get(eventId);
+	const memoKey = String(eventId) + ":" + (expectedScoreCoreRevision ?? "current");
+	const existing = memo.get(memoKey);
 	if (existing) return existing;
-	const load = readDatabaseGlobal(context, context.currentSeason.seasonCode, eventId);
-	memo.set(eventId, load);
+	const load = readDatabaseGlobal(context, context.currentSeason.seasonCode, eventId).then(
+		(value) =>
+			value &&
+			(expectedScoreCoreRevision === undefined ||
+				value.publication.revisions.scoreCore.revision === expectedScoreCoreRevision)
+				? value
+				: null
+	);
+	memo.set(memoKey, load);
 	return load;
 };
 
-const readGlobal = async (context: GraphQLContext, eventId: number): Promise<GlobalRead | null> =>
-	(await readRedisGlobal(context, eventId)) ?? (await readDatabaseGlobalMemoized(context, eventId));
+const readGlobal = async (
+	context: GraphQLContext,
+	eventId: number,
+	expectedScoreCoreRevision?: string
+): Promise<GlobalRead | null> =>
+	(await readRedisGlobal(context, eventId, expectedScoreCoreRevision)) ??
+	(await readDatabaseGlobalMemoized(context, eventId, expectedScoreCoreRevision));
 
 /** Read the complete event publication for non-entry live desks. */
 export const readLivePublicationV2 = async (
 	context: GraphQLContext,
-	eventId: number
-): Promise<LivePublicationReadV2 | null> => readGlobal(context, eventId);
+	eventId: number,
+	expectedScoreCoreRevision?: string
+): Promise<LivePublicationReadV2 | null> => readGlobal(context, eventId, expectedScoreCoreRevision);
 
 const readRedisEntry = async (
 	context: GraphQLContext,
@@ -1926,9 +1963,22 @@ const mapPick = (params: {
 }): ElementEventResultDataV2 => {
 	const { season, eventId, pick, player, team, fixtures, live, lineup } = params;
 	const playerFixtures = eventFixturesForPlayer(fixtures, player);
+	const fixtureDetails = playerFixtures.map((item) => {
+		const wasHome = item.teamH === player.teamId;
+		const opponentId = wasHome ? item.teamA : item.teamH;
+		return {
+			opponentId,
+			opponentTeam: params.teams.get(opponentId),
+			wasHome: wasHome ? "H" : "A",
+			score: fixtureScore(item, player),
+		};
+	});
 	const fixture = playerFixtures[0];
-	const opponent = fixture ? (fixture.teamH === player.teamId ? fixture.teamA : fixture.teamH) : 0;
-	const opponentTeam = params.teams.get(opponent);
+	const opponent = fixtureDetails.length === 1 ? (fixtureDetails[0]?.opponentId ?? 0) : 0;
+	const opponentNames = fixtureDetails.map((item) => item.opponentTeam?.name ?? "").filter(Boolean);
+	const opponentShortNames = fixtureDetails
+		.map((item) => item.opponentTeam?.shortName ?? "")
+		.filter(Boolean);
 	const isGwStarted = playerFixtures.some((item) => item.started === true);
 	const allFinished =
 		playerFixtures.length > 0 &&
@@ -1938,7 +1988,7 @@ const mapPick = (params: {
 		lineup.activeCaptain?.element === pick.element
 			? lineup.captainMultiplier
 			: isActive
-				? Math.max(1, pick.multiplier)
+				? pick.multiplier
 				: 0;
 	return {
 		season,
@@ -1954,10 +2004,10 @@ const mapPick = (params: {
 		teamName: team.name,
 		teamShortName: team.shortName,
 		againstId: opponent,
-		againstName: opponentTeam?.name ?? "",
-		againstShortName: opponentTeam?.shortName ?? "",
-		wasHome: fixture ? (fixture.teamH === player.teamId ? "H" : "A") : "",
-		score: fixture ? fixtureScore(fixture, player) : "-",
+		againstName: fixtureDetails.length === 0 ? "BLANK" : opponentNames.join(" / "),
+		againstShortName: fixtureDetails.length === 0 ? "BLANK" : opponentShortNames.join(" / "),
+		wasHome: fixtureDetails.map((item) => item.wasHome).join(" / "),
+		score: fixtureDetails.map((item) => item.score).join(" / "),
 		position: pick.position,
 		multiplier: captainMultiplier,
 		isCaptain: pick.isCaptain,
@@ -2074,10 +2124,10 @@ const timesFor = (global: LivePublication, entryRead: EntryRead, now: string): L
 		entryRead.publication.sourceCheckedAt,
 		entryRead.publication.publishedAt
 	);
-	const sourceCheckedAt = latestTimestamp(
-		global.sourceCheckedAt,
-		entryRead.publication.sourceCheckedAt
-	);
+	// Freshness is the freshness of the global live authority. Entry picks are
+	// immutable/deadline-scoped inputs; a late entry publication must not make a
+	// stale score core appear fresh.
+	const sourceCheckedAt = global.sourceCheckedAt;
 	const publishedAt = latestTimestamp(global.publishedAt, entryRead.publication.publishedAt);
 	const staleAt = new Date(
 		Date.parse(sourceCheckedAt) + LIVE_POINTS_FRESHNESS_SECONDS * 1000
@@ -2546,7 +2596,8 @@ const observeLivePointsResult = (result: LiveCalcDataV2): LiveCalcDataV2 => {
 export const calcLivePointsByEntryV2 = async (
 	context: GraphQLContext,
 	eventId: number,
-	entryId: number
+	entryId: number,
+	options: { scoreCoreRevision?: string } = {}
 ): Promise<LiveCalcDataV2> => {
 	if (
 		!Number.isSafeInteger(eventId) ||
@@ -2557,14 +2608,22 @@ export const calcLivePointsByEntryV2 = async (
 		return observeLivePointsResult(
 			emptyUnavailable(context, eventId, entryId, "UNAVAILABLE", "INVALID_SCOPE")
 		);
-	const lkgKey = `${context.currentSeason.seasonCode}:${eventId}:${entryId}`;
-	const redisGlobal = await readRedisGlobal(context, eventId);
+	const lkgKey = [
+		context.currentSeason.seasonCode,
+		eventId,
+		entryId,
+		options.scoreCoreRevision ?? "current",
+	].join(":");
+	const redisGlobal = await readRedisGlobal(context, eventId, options.scoreCoreRevision);
 	const processLkg = readLiveLkg(lkgKey);
 	// The fallback order is intentional: a process LKG is a complete response
 	// for this exact event/entry and is safer than a cold database read that may
 	// combine metadata from a different publication.
 	const global =
-		redisGlobal ?? (processLkg ? null : await readDatabaseGlobalMemoized(context, eventId));
+		redisGlobal ??
+		(processLkg
+			? null
+			: await readDatabaseGlobalMemoized(context, eventId, options.scoreCoreRevision));
 	if (!global) {
 		return observeLivePointsResult(
 			processLkg
@@ -2620,11 +2679,15 @@ export const calcLivePointsByEntryV2 = async (
 export const calcLivePointsForEntriesV2 = async (
 	context: GraphQLContext,
 	eventId: number,
-	entryIds: readonly number[]
+	entryIds: readonly number[],
+	options: { scoreCoreRevision?: string } = {}
 ): Promise<BatchLiveCalcResultV2> => {
 	const uniqueIds = [...new Set(entryIds)];
 	const results = new Map<number, LiveCalcDataV2>();
 	const errors: Array<{ entryId: number; message: string }> = [];
+	// Entry metadata batching relies on the request's pinned Core identity
+	// revision. Establish that identity before issuing the batch read.
+	await readCore(context);
 	await preloadEntryMetadata(context, uniqueIds);
 	const concurrency = Math.min(32, Math.max(1, uniqueIds.length));
 	let cursor = 0;
@@ -2634,7 +2697,7 @@ export const calcLivePointsForEntriesV2 = async (
 			if (index >= uniqueIds.length) return;
 			const entryId = uniqueIds[index]!;
 			try {
-				results.set(entryId, await calcLivePointsByEntryV2(context, eventId, entryId));
+				results.set(entryId, await calcLivePointsByEntryV2(context, eventId, entryId, options));
 			} catch (error) {
 				errors.push({
 					entryId,
