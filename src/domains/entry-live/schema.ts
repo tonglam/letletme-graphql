@@ -25,6 +25,7 @@ export const entryLiveTypeDefs = /* GraphQL */ `
 		PROCESS_LKG
 		POSTGRES_CHECKPOINT
 		FINAL_RESULT
+		UNAVAILABLE
 	}
 
 	enum LiveScoreSource {

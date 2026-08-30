@@ -23,6 +23,7 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		POSTGRES_CHECKPOINT
 		PROCESS_LKG
 		FINAL_RESULT
+		UNAVAILABLE
 	}
 
 	enum LiveWindowState {

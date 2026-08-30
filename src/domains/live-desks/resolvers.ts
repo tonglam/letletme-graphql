@@ -67,7 +67,7 @@ const publicationDeliveryState = (publication: LivePublicationReadV2 | null): st
 };
 
 const publicationSource = (publication: LivePublicationReadV2 | null): string => {
-	if (!publication) return "PROCESS_LKG";
+	if (!publication) return "UNAVAILABLE";
 	if (publication.publication.state === "FINALIZED") return "FINAL_RESULT";
 	return publication.servedFrom;
 };
@@ -98,7 +98,7 @@ const publicationDelivery = (publication: LivePublicationReadV2 | null) => {
 	const state = publicationDeliveryState(publication);
 	return {
 		state,
-		servedFrom: publication ? publicationSource(publication) : "PROCESS_LKG",
+		servedFrom: publicationSource(publication),
 		reasonCodes:
 			state === "UNAVAILABLE"
 				? ["PUBLICATION_UNAVAILABLE"]
@@ -292,8 +292,8 @@ const assertRef = (
 		ref.scoreCoreRevision !== publication.publication.revisions.scoreCore.revision
 	) {
 		metrics.livePublicationEventsTotal.labels("revision_gone").inc();
-		throw new GraphQLError("Requested live revision is not the current V2 publication", {
-			extensions: { code: "LIVE_REVISION_GONE" },
+		throw new GraphQLError("Requested live score revision is not the current V2 publication", {
+			extensions: { code: "LIVE_SCORE_REVISION_GONE" },
 		});
 	}
 };
@@ -372,7 +372,7 @@ const boardResponse = async (
 	const sample = board.rows.find((row) => row.entry === request.entryId) ?? board.rows[0] ?? null;
 	const delivery = sample?.score.delivery ?? {
 		state: "UNAVAILABLE",
-		servedFrom: "PROCESS_LKG",
+		servedFrom: "UNAVAILABLE",
 		reasonCodes: ["NO_COMPLETE_ENTRY_PROJECTION"],
 	};
 	const revisions = sample?.score.revisions ?? {
@@ -409,16 +409,21 @@ const boardResponse = async (
 		boardRevision: board.boardRevision,
 		scoreCoreRevision: board.scoreCoreRevision,
 		dataAvailability: delivery.state,
-		coverageState: board.partial ? (board.rows.length ? "PARTIAL" : "UNAVAILABLE") : "COMPLETE",
-		rankScope: "AVAILABLE_ROWS",
-		computedEntries: board.rows.length,
-		deferredEntryCount: 0,
-		failedEntryCount: board.failedEntryIds.length,
-		unavailableEntryCount: unavailableEntryIds.length,
+		coverageState:
+			board.computedEntries === 0
+				? "UNAVAILABLE"
+				: board.partial
+					? "PARTIAL"
+					: "COMPLETE",
+		rankScope: board.partial ? "AVAILABLE_ROWS" : "FULL_FIELD",
+		computedEntries: board.computedEntries,
+		deferredEntryCount: board.deferredEntryCount,
+		failedEntryCount: board.failedEntryCount,
+		unavailableEntryCount: board.unavailableEntryCount,
 		officialCoverage:
 			board.totalEntries === 0
 				? 0
-				: (board.totalEntries - unavailableEntryIds.length) / board.totalEntries,
+				: board.computedEntries / board.totalEntries,
 		unavailableEntryIds,
 		failedEntryIds: board.failedEntryIds,
 		partial: board.partial,
@@ -456,7 +461,13 @@ export const liveDesksResolvers = {
 				state: lifecycleForPublication(publication?.publication ?? null),
 				windowState: windowStateForPublication(publication?.publication ?? null),
 				producerState: lifecycleForPublication(publication?.publication ?? null),
-				anchorMode: publication ? "CURRENT" : "UPCOMING",
+					anchorMode: publication
+						? window.eventCore.currentEventId === publication.publication.eventId
+							? "CURRENT"
+							: "PREVIOUS_FINAL"
+						: window.eventCore.currentEventId === null
+							? "OFFSEASON"
+							: "UPCOMING",
 				dataAvailability: publicationAvailability(publication),
 				sourceCheckedAt:
 					publication?.publication.sourceCheckedAt ?? window.fixtureCore.sourceCheckedAt,
@@ -590,9 +601,9 @@ export const liveDesksResolvers = {
 					officialCoverage: 0,
 					revisions: null,
 					times: null,
-					delivery: {
-						state: "UNAVAILABLE",
-						servedFrom: "PROCESS_LKG",
+						delivery: {
+							state: "UNAVAILABLE",
+							servedFrom: "UNAVAILABLE",
 						reasonCodes: ["NO_TOURNAMENT"],
 					},
 					unavailableEntryIds: [],
@@ -636,9 +647,9 @@ export const liveDesksResolvers = {
 				totalEntries: entryIds.length,
 				revisions: sample?.score.revisions ?? null,
 				times: sample?.score.times ?? null,
-				delivery: sample?.delivery ?? {
+					delivery: sample?.delivery ?? {
 					state: "UNAVAILABLE",
-					servedFrom: "PROCESS_LKG",
+					servedFrom: "UNAVAILABLE",
 					reasonCodes: ["NO_COMPLETE_ENTRY_PROJECTION"],
 				},
 			};

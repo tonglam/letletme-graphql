@@ -37,7 +37,12 @@ type LivePublicationState =
 	| "FINALIZED";
 
 type ServedFrom =
-	"REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT" | "FINAL_RESULT";
+	| "REDIS_CURRENT"
+	| "REDIS_PREVIOUS"
+	| "PROCESS_LKG"
+	| "POSTGRES_CHECKPOINT"
+	| "FINAL_RESULT"
+	| "UNAVAILABLE";
 
 type DeliveryState = "FRESH" | "STALE" | "DEGRADED" | "FINAL" | "UNAVAILABLE";
 
@@ -615,7 +620,9 @@ const validPreviousTotals = (
 	integer(value.throughEventId) !== null &&
 	(integer(value.throughEventId) as number) === expectedThroughEventId &&
 	integer(value.totalPoints) !== null &&
-	(integer(value.totalPoints) as number) >= 0 &&
+	(expectedThroughEventId === 0
+		? (integer(value.totalPoints) as number) === 0
+		: (integer(value.totalPoints) as number) >= 0) &&
 	(value.overallRank === null ||
 		(integer(value.overallRank) !== null && (integer(value.overallRank) as number) > 0));
 
@@ -1119,7 +1126,7 @@ export const LIVE_POINTS_V2_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] =
 			{ relation: "competition.entry_event_picks", column: "multiplier", pgType: "smallint" },
 			{ relation: "competition.entry_event_picks", column: "is_captain", pgType: "boolean" },
 			{ relation: "competition.entry_event_picks", column: "is_vice_captain", pgType: "boolean" },
-			{ relation: "competition.entry_event_picks", column: "active_chip", pgType: "text" },
+			{ relation: "competition.entry_event_picks", column: "active_chip", pgType: "competition.chip" },
 			{ relation: "competition.entry_event_picks", column: "transfers_cost", pgType: "integer" },
 			{ relation: "competition.entry_event_results", column: "event_points", pgType: "integer" },
 			{ relation: "competition.entry_event_results", column: "overall_points", pgType: "integer" },
@@ -1628,7 +1635,11 @@ const preloadEntryMetadata = async (
 		memo = new Map();
 		requestEntryMemo.set(scope, memo);
 	}
-	const missingIds = uniqueIds.filter((entryId) => !memo!.has(entryId));
+	const missingIds = uniqueIds.filter(
+		(entryId) =>
+			!memo!.has(entryId) &&
+			(entryMetadataCircuit.get(entryMetadataKey(context, entryId)) ?? 0) <= Date.now()
+	);
 	if (missingIds.length === 0) return;
 	const chunkSize = 500;
 	for (let offset = 0; offset < missingIds.length; offset += chunkSize) {
@@ -1732,6 +1743,7 @@ const playerHasCompletedEvent = (
 	live: EventLiveRow | undefined,
 	fixtures: readonly FixtureRow[]
 ): boolean => {
+	if (played(live)) return false;
 	const playerFixtures = eventFixturesForPlayer(fixtures, player);
 	if (playerFixtures.length === 0)
 		return Array.isArray(live?.fixtureBreakdown) && live!.fixtureBreakdown!.length === 0;
@@ -1913,9 +1925,10 @@ const mapPick = (params: {
 	const fixture = playerFixtures[0];
 	const opponent = fixture ? (fixture.teamH === player.teamId ? fixture.teamA : fixture.teamH) : 0;
 	const opponentTeam = params.teams.get(opponent);
-	const allStarted = fixtures.some((item) => item.started === true);
+	const isGwStarted = playerFixtures.some((item) => item.started === true);
 	const allFinished =
-		fixtures.length > 0 && fixtures.every((item) => item.finished || item.finishedProvisional);
+		playerFixtures.length > 0 &&
+		playerFixtures.every((item) => item.finished || item.finishedProvisional);
 	const isActive = lineup.active.has(pick.element);
 	const captainMultiplier =
 		lineup.activeCaptain?.element === pick.element
@@ -1945,8 +1958,8 @@ const mapPick = (params: {
 		multiplier: captainMultiplier,
 		isCaptain: pick.isCaptain,
 		isViceCaptain: pick.isViceCaptain,
-		isGwStarted: allStarted,
-		isGwFinished: allFinished,
+			isGwStarted,
+			isGwFinished: allFinished,
 		isPlayed: played(live),
 		playStatus: played(live) ? 1 : 0,
 		minutes: live?.minutes ?? 0,
@@ -2041,8 +2054,13 @@ const revisionVector = (
 
 const timesFor = (global: LivePublication, entryRead: EntryRead, now: string): LiveTimesV2 => {
 	const entry = entryRead.input;
+	const latestTimestamp = (...values: readonly (string | null | undefined)[]): string =>
+		values
+			.filter((value): value is string => iso(value))
+			.sort()
+			.at(-1) ?? global.sourceCheckedAt;
 	const contentUpdatedAt =
-		[
+		latestTimestamp(
 			global.revisions.lifecycle.contentUpdatedAt,
 			global.revisions.fixtureIdentity.contentUpdatedAt,
 			global.revisions.scoreCore.contentUpdatedAt,
@@ -2050,18 +2068,18 @@ const timesFor = (global: LivePublication, entryRead: EntryRead, now: string): L
 			global.revisions.explain.contentUpdatedAt,
 			global.revisions.rules.contentUpdatedAt,
 			entry.picksBase.contentUpdatedAt,
-		]
-			.filter((value): value is string => iso(value))
-			.sort()
-			.at(-1) ?? global.sourceCheckedAt;
-	const sourceCheckedAt = global.sourceCheckedAt;
+			entryRead.publication.sourceCheckedAt,
+			entryRead.publication.publishedAt
+		);
+	const sourceCheckedAt = latestTimestamp(global.sourceCheckedAt, entryRead.publication.sourceCheckedAt);
+	const publishedAt = latestTimestamp(global.publishedAt, entryRead.publication.publishedAt);
 	const staleAt = new Date(
 		Date.parse(sourceCheckedAt) + LIVE_POINTS_FRESHNESS_SECONDS * 1000
 	).toISOString();
 	return {
 		sourceCheckedAt,
 		contentUpdatedAt,
-		publishedAt: global.publishedAt,
+		publishedAt,
 		checkpointedAt: global.checkpointedAt,
 		servedAt: now,
 		staleAt,
@@ -2224,7 +2242,7 @@ const buildReady = async (
 		chip,
 		played: rows.filter((row) => row.pickActive && row.isPlayed).length,
 		toPlay: rows.filter((row) => row.pickActive && !row.isPlayed).length,
-		playedCaptain: captainRow?.totalPoints ?? 0,
+		playedCaptain: activeCaptain?.element ?? 0,
 		captainName: captainRow?.webName ?? "",
 		pickList: rows,
 		activeCaptain: {
@@ -2272,7 +2290,7 @@ const emptyUnavailable = (
 	};
 	const delivery: LiveDeliveryV2 = {
 		state: "UNAVAILABLE",
-		servedFrom: "PROCESS_LKG",
+		servedFrom: "UNAVAILABLE",
 		reasonCodes: [reason],
 	};
 	const score: LiveScoreV2 = {
@@ -2413,6 +2431,7 @@ const emptyFromGlobal = (
 };
 
 const degradedLkg = (value: LiveCalcDataV2, reason: string): LiveCalcDataV2 => {
+	const servedAt = nowIso();
 	const delivery: LiveDeliveryV2 = {
 		...value.delivery,
 		state: "DEGRADED",
@@ -2422,8 +2441,8 @@ const degradedLkg = (value: LiveCalcDataV2, reason: string): LiveCalcDataV2 => {
 	return {
 		...value,
 		delivery,
-		score: { ...value.score, delivery },
-		snapshot: { ...value.snapshot, delivery },
+		score: { ...value.score, delivery, times: { ...value.score.times, servedAt } },
+		snapshot: { ...value.snapshot, delivery, times: { ...value.snapshot.times, servedAt } },
 	};
 };
 

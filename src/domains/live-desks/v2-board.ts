@@ -85,6 +85,10 @@ export type EntryLiveCompetitionBoardV2 = {
 	rows: IndexedEntryLiveCompetitionBoardRowV2[];
 	unavailableEntryIds: number[];
 	failedEntryIds: number[];
+	computedEntries: number;
+	deferredEntryCount: number;
+	failedEntryCount: number;
+	unavailableEntryCount: number;
 	totalEntries: number;
 	highestEventPoints: number | null;
 	averageEventPoints: number | null;
@@ -266,7 +270,7 @@ const rowFor = (value: LiveCalcDataV2, rank: number): IndexedEntryLiveCompetitio
 		ownerAny: [...new Set(ownerAny)].sort((left, right) => left - right),
 		ownerStarter: [...new Set(ownerStarter)].sort((left, right) => left - right),
 		ownerBench: [...new Set(ownerBench)].sort((left, right) => left - right),
-		captains: value.pickList.filter((pick) => pick.isCaptain).map((pick) => pick.element),
+		captains: captain.id > 0 ? [captain.id] : [],
 		viceCaptains: value.pickList.filter((pick) => pick.isViceCaptain).map((pick) => pick.element),
 		teamAny: count(teamAny),
 		teamStarter: count(teamStarter),
@@ -441,8 +445,10 @@ export const buildEntryLiveCompetitionBoardV2 = async (
 	const officialPoints = eligible.map((value) =>
 		useNet ? value.score.netEventPoints : value.score.eventPoints
 	);
+	const failedEntrySet = new Set(result.errors.map((error) => error.entryId));
+	const eligibleEntrySet = new Set(eligible.map((value) => value.entry));
 	const unavailableEntryIds = input.entryIds.filter(
-		(entryId) => !eligible.some((value) => value.entry === entryId)
+		(entryId) => !failedEntrySet.has(entryId) && !eligibleEntrySet.has(entryId)
 	);
 	const board = {
 		boardRevision: revision({
@@ -452,6 +458,15 @@ export const buildEntryLiveCompetitionBoardV2 = async (
 			tournamentId: input.tournamentId,
 			rows: rows.map((row) => ({
 				entry: row.entry,
+				entryName: row.entryName,
+				playerName: row.playerName,
+				teamValue: row.teamValue,
+				chip: row.chip,
+				transferCost: row.transferCost,
+				captainId: row.captainId,
+				captainName: row.captainName,
+				captainPoints: row.captainPoints,
+				overallRank: row.overallRank,
 				revision: row.score.revisions.input,
 				score: row.score.eventPoints,
 				net: row.score.netEventPoints,
@@ -466,12 +481,24 @@ export const buildEntryLiveCompetitionBoardV2 = async (
 				algorithm: row.score.revisions.algorithm,
 				played: row.played,
 				toPlay: row.toPlay,
+				ownerAny: row.ownerAny,
+				ownerStarter: row.ownerStarter,
+				ownerBench: row.ownerBench,
+				captains: row.captains,
+				viceCaptains: row.viceCaptains,
+				teamAny: row.teamAny,
+				teamStarter: row.teamStarter,
+				teamBench: row.teamBench,
 			})),
 		}),
 		scoreCoreRevision,
 		rows,
 		unavailableEntryIds: [...new Set(unavailableEntryIds)].sort((a, b) => a - b),
-		failedEntryIds: result.errors.map((error) => error.entryId).sort((a, b) => a - b),
+		failedEntryIds: [...failedEntrySet].sort((a, b) => a - b),
+		computedEntries: eligible.length,
+		deferredEntryCount: 0,
+		failedEntryCount: failedEntrySet.size,
+		unavailableEntryCount: unavailableEntryIds.length,
 		totalEntries: input.entryIds.length,
 		highestEventPoints: officialPoints.length ? Math.max(...officialPoints) : null,
 		averageEventPoints: officialPoints.length
