@@ -27,7 +27,7 @@ REFERENCE_DEF_RE = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(<[^>]*>|[^\s]+)", re.M)
 REFERENCE_TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".txt", ".text", ".rst"}
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 SECRET_VALUE_RES = (
-    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?token|private[_ -]?key|client[_ -]?secret|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\s`<>]+))'''),
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?token|private[_ -]?key|client[_ -]?secret|service[_ -]?(?:role[_ -]?)?key|secret[_ -]?key|app[_ -]?secret|service[_ -]?token|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\s`<>]+))'''),
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\s`<>]+))'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
     re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]+:([^\s/@]+)@"),
@@ -560,11 +560,18 @@ def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
 
 
 def _looks_like_placeholder(value: str) -> bool:
-    normalized = value.strip().strip("'\"")
-    normalized = normalized.rstrip(",;)]}").strip("'\"").casefold()
+    normalized = value.strip().strip("'\"").casefold()
+    if normalized.startswith("${"):
+        # Shell defaults such as ${TOKEN:-live-value} are not placeholders;
+        # inspect the fallback while retaining ${TOKEN} as a placeholder.
+        body = normalized[2:-1] if normalized.endswith("}") else normalized[2:]
+        if ":-" in body:
+            fallback = body.split(":-", 1)[1]
+            return _looks_like_placeholder(fallback)
+        return True
+    normalized = normalized.rstrip(",;)]}").strip("'\"")
     return (
         normalized in PLACEHOLDER_VALUES
-        or normalized.startswith("${")
         or (normalized.startswith("<") and normalized.endswith(">"))
         or normalized in {"your-api-key", "your-access-token", "replace-me"}
     )
@@ -951,21 +958,28 @@ def validate_skill(
             if not allow_external:
                 errors.append(f"{reference}: skill tree may not contain a symlink")
             continue
-        if not reference.is_file() or reference.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES:
+        if not reference.is_file():
             continue
         if not allow_external and not _is_within(reference.resolve(), repo.resolve()):
             errors.append(f"{reference}: skill reference must remain inside the repository and may not be a symlink")
             continue
         try:
-            reference_text = reference.read_text(encoding="utf-8")
+            raw = reference.read_bytes()
+            if b"\0" in raw[:8192]:
+                continue
+            reference_text = raw.decode("utf-8")
         except OSError as exc:
             errors.append(f"{reference}: cannot read skill reference: {exc}")
             continue
-        if not reference_text.strip():
+        except UnicodeDecodeError:
+            continue
+        is_reference = reference.suffix.casefold() in REFERENCE_TEXT_SUFFIXES
+        if is_reference and not reference_text.strip():
             errors.append(f"{reference}: skill reference is empty")
-        if reference.suffix.casefold() == ".md" and reference.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
+        if is_reference and reference.suffix.casefold() == ".md" and reference.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
             errors.append(f"{reference}: exceeds max_skill_bytes")
-        check_reference_links(reference, repo, errors, allow_external=allow_external)
+        if is_reference:
+            check_reference_links(reference, repo, errors, allow_external=allow_external)
         if policy.get("forbid_secrets_in_instructions") and has_secret(reference_text):
             errors.append(f"{reference}: possible secret/token pattern")
 
@@ -1024,6 +1038,8 @@ def validate_asset(
             required_paths.add(path)
             if not path.exists() or not path.is_file():
                 errors.append(f"{path}: missing required AGENTS file")
+            else:
+                _validate_instruction_file(path, repo, policy, errors, allow_external=allow_absolute)
         for skill in skills:
             try:
                 path = resolve_path(

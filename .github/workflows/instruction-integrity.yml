@@ -294,18 +294,48 @@ jobs:
                 if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
                     inner = constant_truth(node.operand)
                     return None if inner is None else not inner
+                if isinstance(node, ast.Compare) and len(node.ops) == len(node.comparators):
+                    values = [node.left, *node.comparators]
+                    if not all(isinstance(value, ast.Constant) for value in values):
+                        return None
+                    result = True
+                    for left, op, right in zip(values, node.ops, node.comparators):
+                        left_value = left.value
+                        right_value = right.value
+                        if isinstance(op, ast.Eq):
+                            result = result and left_value == right_value
+                        elif isinstance(op, ast.NotEq):
+                            result = result and left_value != right_value
+                        elif isinstance(op, ast.Is):
+                            result = result and left_value is right_value
+                        elif isinstance(op, ast.IsNot):
+                            result = result and left_value is not right_value
+                        else:
+                            return None
+                    return result
                 return None
 
             class ReachableCalls(ast.NodeVisitor):
                 def __init__(self):
                     self.names = set()
                     self.strings = set()
+                    self.calls = {}
+                    self.returns = []
 
                 def visit_Call(self, node):
                     if isinstance(node.func, ast.Name):
-                        self.names.add(node.func.id)
+                        name = node.func.id
                     elif isinstance(node.func, ast.Attribute):
-                        self.names.add(node.func.attr)
+                        name = node.func.attr
+                    else:
+                        name = None
+                    if name:
+                        self.names.add(name)
+                        self.calls.setdefault(name, []).append(node.lineno)
+                    self.generic_visit(node)
+
+                def visit_Return(self, node):
+                    self.returns.append(node.lineno)
                     self.generic_visit(node)
 
                 def visit_Constant(self, node):
@@ -348,6 +378,12 @@ jobs:
                     visitor.visit(statement)
                 return visitor.strings
 
+            def reachable_info(node):
+                visitor = ReachableCalls()
+                for statement in node.body:
+                    visitor.visit(statement)
+                return visitor
+
             def check_validator_shape(tree):
                 parse_yaml = function_node(tree, "parse_yaml_mapping")
                 validate = function_node(tree, "validate_asset")
@@ -361,6 +397,11 @@ jobs:
                     missing = sorted(required_names - reachable_called_names(node))
                     if missing:
                         raise SystemExit(f"approved validator {label} is missing operational calls: {', '.join(missing)}")
+                    info = reachable_info(node)
+                    for name in required_names:
+                        call_lines = info.calls.get(name, [])
+                        if call_lines and any(line < min(call_lines) for line in info.returns):
+                            raise SystemExit(f"approved validator {label} can return before calling {name}")
                 if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(parse_yaml)):
                     raise SystemExit("approved validator parse_yaml_mapping has no parsing control flow")
                 if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(validate)):
@@ -401,7 +442,7 @@ jobs:
             dead_validator_fixture = ast.parse(
                 "def parse_yaml_mapping():\n  if False: _parse_scalar()\n  return {}\n"
                 "def validate_asset():\n  if False: validate_skill(); _validate_instruction_file(); _validate_global_manifest()\n  return {'ok': True}\n"
-                "def main():\n  if False: validate_asset()\n  return 0\n"
+                "def main():\n  if 1 == 0: validate_asset()\n  return 0\n"
             )
             try:
                 check_validator_shape(dead_validator_fixture)
@@ -409,6 +450,17 @@ jobs:
                 pass
             else:
                 raise SystemExit("dead-code validator fixture unexpectedly passed")
+            short_circuit_fixture = ast.parse(
+                "def parse_yaml_mapping():\n  _parse_scalar(); return {}\n"
+                "def validate_asset():\n  validate_skill(); _validate_instruction_file(); _validate_global_manifest(); return {'ok': True}\n"
+                "def main():\n  if sys.argv: return 0\n  validate_asset()\n"
+            )
+            try:
+                check_validator_shape(short_circuit_fixture)
+            except SystemExit:
+                pass
+            else:
+                raise SystemExit("short-circuit validator fixture unexpectedly passed")
             check_provisioner_shape(provisioner)
             dead_provisioner_fixture = ast.parse(
                 "def load_manifest():\n  if False: loads()\n"
@@ -447,6 +499,17 @@ jobs:
               types = target.is_a?(Hash) ? Array(target["types"]).map(&:to_s) : []
               required = %w[opened synchronize reopened labeled unlabeled edited]
               raise "pull_request_target types are incomplete" unless required.all? { |item| types.include?(item) }
+              pull_request = events["pull_request"]
+              raise "pull_request bootstrap event is missing" unless pull_request.is_a?(Hash)
+              bootstrap_paths = Array(pull_request["paths"]).map(&:to_s)
+              required_paths = %w[AGENTS.md CLAUDE.md .agents/** .codex/** .github/workflows/instruction-integrity.yml]
+              raise "pull_request bootstrap paths are incomplete" unless required_paths.all? { |item| bootstrap_paths.include?(item) }
+              raise "pull_request_target must not be path-filtered" if target.is_a?(Hash) && (target.key?("paths") || target.key?("paths-ignore"))
+              push = events["push"]
+              raise "push event is missing" unless push.is_a?(Hash)
+              push_branches = Array(push["branches"]).map(&:to_s)
+              raise "protected branch push gate is missing" unless %w[main master].all? { |item| push_branches.include?(item) }
+              raise "push gate must not be path-filtered" if push.key?("paths") || push.key?("paths-ignore")
               jobs = workflow["jobs"]
               raise "missing bootstrap/validate jobs" unless jobs.is_a?(Hash) && jobs["bootstrap"].is_a?(Hash) && jobs["validate"].is_a?(Hash)
               bootstrap = jobs["bootstrap"]
@@ -456,6 +519,19 @@ jobs:
               gate_condition = gate["if"].to_s.gsub(/\s+/, " ").strip
               expected_gate_condition = "github.event_name == 'pull_request_target' || github.event_name == 'push'"
               raise "trusted gate condition is incomplete or disabled" unless gate_condition == expected_gate_condition
+              expected_approval = "${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') && github.event.sender.login == github.repository_owner }}"
+              raise "approval expression is incomplete or broadened" unless gate.dig("env", "GOVERNANCE_UPDATE_APPROVED").to_s == expected_approval
+              checkout = lambda do |job, path|
+                Array(job["steps"]).find do |step|
+                  step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/checkout@") && step.dig("with", "path").to_s == path
+                end
+              end
+              target_bootstrap = checkout.call(bootstrap, "target")
+              target_gate = checkout.call(gate, "target")
+              trusted_gate = checkout.call(gate, "trusted")
+              raise "bootstrap checkout must pin pull request head" unless target_bootstrap&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha }}"
+              raise "target checkout must pin pull request head" unless target_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha || github.sha }}"
+              raise "trusted checkout must pin pull request base" unless trusted_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.base.sha || github.sha }}"
               permissions = workflow["permissions"]
               raise "workflow must be read-only" unless permissions.is_a?(Hash) && permissions["contents"].to_s == "read"
               steps = Array(gate["steps"])
