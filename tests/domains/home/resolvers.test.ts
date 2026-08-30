@@ -333,16 +333,18 @@ describe("Home GraphQL contracts", () => {
 				event.id === 1 ? { ...event, finished: true, dataChecked: true } : event
 			),
 		});
-		const liveRows = buildTestEventLives(core, 1)
-			.slice(0, 11)
-			.map((row, index) => ({
-				...row,
-				minutes: 90,
-				starts: true,
-				bps: 10,
-				inDreamTeam: true,
-				totalPoints: 20 - index,
-			}));
+		const liveRows = buildTestEventLives(core, 1).map((row, index) =>
+			index < 11
+				? {
+						...row,
+						minutes: 90,
+						starts: true,
+						bps: 10,
+						inDreamTeam: true,
+						totalPoints: 20 - index,
+					}
+				: row
+		);
 		const context = buildSnapshotContext(
 			new TestRedis(
 				buildCorePublication("2627", 7, core),
