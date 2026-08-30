@@ -142,6 +142,7 @@ describe("production deployment workflow", () => {
 		);
 		expect(deployScript).toContain('elif (has("deploySha") | not) then {kind:"legacy"}');
 		expect(deployScript).toContain('{kind:"identity",sha:.deploySha}');
+		expect(deployScript).toContain('test("^[0-9a-f]{40}$")');
 		expect(deployScript).toContain('case "$public_health_kind" in');
 		expect(deployScript).toContain('[ "$public_identity" = "$old_slot_deploy_sha" ]');
 		expect(deployScript).toContain(
