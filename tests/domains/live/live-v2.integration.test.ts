@@ -108,6 +108,22 @@ describe("Live Points V2 GraphQL contract", () => {
 		expect(data?.eventLive.performances).toEqual([]);
 	});
 
+	it("reports a missing publication as unavailable for a pinned live ref", async () => {
+		const core = buildTestCoreData(1);
+		const result = await graphql({
+			schema,
+			source: `query {
+				liveMatchdayDesk(ref: { season: "2627", eventId: 1, scoreCoreRevision: "missing" }) {
+					eventId
+				}
+			}`,
+			contextValue: buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core))),
+		});
+
+		expect(result.data).toBeNull();
+		expect(result.errors?.[0]?.extensions?.code).toBe("LIVE_POINTS_UNAVAILABLE");
+	});
+
 	it("does not expose retired V1 live fields or the retired revision input", async () => {
 		const result = await graphql({
 			schema,

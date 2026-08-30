@@ -288,9 +288,14 @@ const assertRef = (
 	publication: LivePublicationReadV2 | null
 ): void => {
 	if (!ref) return;
+	if (!publication) {
+		metrics.livePublicationEventsTotal.labels("publication_unavailable").inc();
+		throw new GraphQLError("Live Points V2 publication is unavailable", {
+			extensions: { code: "LIVE_POINTS_UNAVAILABLE" },
+		});
+	}
 	if (
 		ref.season !== context.currentSeason.seasonCode ||
-		!publication ||
 		ref.eventId !== publication.publication.eventId ||
 		ref.scoreCoreRevision !== publication.publication.revisions.scoreCore.revision
 	) {

@@ -244,6 +244,35 @@ describe("Live Points V2 projection", () => {
 		expect(result.pickList).toHaveLength(0);
 	});
 
+	it("rejects a checksum-valid event-live payload with an incomplete player roster", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		const itemKey = "llm:data:v2:fpl:live:2627:1:1:eventLive";
+		const activeKey = "llm:data:v2:fpl:live:2627:1:active";
+		const truncated = (JSON.parse(redis.values.get(itemKey)!) as unknown[]).slice(1);
+		const payload = canonicalJson(truncated);
+		const checksum = hash(truncated);
+		redis.values.set(itemKey, payload);
+		redis.values.set(
+			`${itemKey}:meta`,
+			`${truncated.length}|${Buffer.byteLength(payload)}|${checksum}`
+		);
+		const manifest = JSON.parse(redis.values.get(activeKey)!) as {
+			items: { eventLive: { count: number; bytes: number; sha256: string } };
+		};
+		manifest.items.eventLive = {
+			count: truncated.length,
+			bytes: Buffer.byteLength(payload),
+			sha256: checksum,
+		};
+		redis.values.set(activeKey, JSON.stringify(manifest));
+
+		const result = await calcLivePointsByEntryV2(buildSnapshotContext(redis), 1, 6953);
+		expect(result.availability).toBe("UNAVAILABLE");
+		expect(result.delivery.state).toBe("UNAVAILABLE");
+		expect(result.pickList).toHaveLength(0);
+	});
+
 	it("keeps the exact same-event projection in process LKG while Redis and PostgreSQL are down", async () => {
 		clearLivePointsV2Lkg();
 		const firstContext = buildSnapshotContext(buildV2Redis());
@@ -322,7 +351,7 @@ describe("Live Points V2 projection", () => {
 		expect(result.errors).toBeUndefined();
 		expect(result.data?.calcLivePointsByEntry).toEqual({
 			availability: "PENDING",
-			delivery: { state: "FRESH" },
+			delivery: { state: "UNAVAILABLE" },
 			pickList: [],
 		});
 	});

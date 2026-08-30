@@ -866,11 +866,24 @@ const isEntryInput =
 	(value: unknown): value is EntryLiveInput =>
 		validInput(value, season, eventId, entryId);
 
+const hasCompleteEventLiveRoster = (
+	eventLives: readonly EventLiveRow[],
+	expectedPlayerIds: ReadonlySet<number>
+): boolean => {
+	if (expectedPlayerIds.size === 0 || eventLives.length !== expectedPlayerIds.size) return false;
+	const actualPlayerIds = new Set(eventLives.map((row) => row.elementId));
+	return (
+		actualPlayerIds.size === expectedPlayerIds.size &&
+		[...expectedPlayerIds].every((playerId) => actualPlayerIds.has(playerId))
+	);
+};
+
 const readRedisGlobalCandidate = async (
 	redis: Redis,
 	season: string,
 	eventId: number,
-	pointer: "active" | "previous"
+	pointer: "active" | "previous",
+	expectedPlayerIds?: ReadonlySet<number>
 ): Promise<GlobalRead | null> => {
 	const publication = parseLivePublication(
 		await redis.get(liveKey(season, eventId, pointer)),
@@ -901,7 +914,8 @@ const readRedisGlobalCandidate = async (
 		!eventLives ||
 		!fixtures ||
 		eventLives.some((row) => row.eventId !== eventId) ||
-		fixtures.some((row) => row.event !== null && row.event !== eventId)
+		fixtures.some((row) => row.event !== null && row.event !== eventId) ||
+		(expectedPlayerIds !== undefined && !hasCompleteEventLiveRoster(eventLives, expectedPlayerIds))
 	)
 		return null;
 	return {
@@ -1552,7 +1566,8 @@ const entryMetadataKey = (context: GraphQLContext, entryId: number): string =>
 const readRedisGlobal = (
 	context: GraphQLContext,
 	eventId: number,
-	expectedScoreCoreRevision?: string
+	expectedScoreCoreRevision?: string,
+	expectedPlayerIds?: ReadonlySet<number>
 ): Promise<GlobalRead | null> => {
 	const scope = requestScope(context);
 	let memo = requestRedisGlobalMemo.get(scope);
@@ -1567,14 +1582,26 @@ const readRedisGlobal = (
 		const season = context.currentSeason.seasonCode;
 		try {
 			const redis = context.redis;
-			const redisValue = await readRedisGlobalCandidate(redis, season, eventId, "active");
+			const redisValue = await readRedisGlobalCandidate(
+				redis,
+				season,
+				eventId,
+				"active",
+				expectedPlayerIds
+			);
 			if (
 				redisValue &&
 				(expectedScoreCoreRevision === undefined ||
 					redisValue.publication.revisions.scoreCore.revision === expectedScoreCoreRevision)
 			)
 				return redisValue;
-			const previous = await readRedisGlobalCandidate(redis, season, eventId, "previous");
+			const previous = await readRedisGlobalCandidate(
+				redis,
+				season,
+				eventId,
+				"previous",
+				expectedPlayerIds
+			);
 			if (
 				previous &&
 				(expectedScoreCoreRevision === undefined ||
@@ -1620,9 +1647,38 @@ const readGlobal = async (
 	context: GraphQLContext,
 	eventId: number,
 	expectedScoreCoreRevision?: string
-): Promise<GlobalRead | null> =>
-	(await readRedisGlobal(context, eventId, expectedScoreCoreRevision)) ??
-	(await readDatabaseGlobalMemoized(context, eventId, expectedScoreCoreRevision));
+): Promise<GlobalRead | null> => {
+	const core = await readCore(context);
+	if (!core) return null;
+	const expectedPlayerIds = new Set(core.players.map((player) => player.id));
+	const redisGlobal = await readRedisGlobal(
+		context,
+		eventId,
+		expectedScoreCoreRevision,
+		expectedPlayerIds
+	);
+	if (redisGlobal) return redisGlobal;
+	const databaseGlobal = await readDatabaseGlobalMemoized(
+		context,
+		eventId,
+		expectedScoreCoreRevision
+	);
+	if (databaseGlobal && hasCompleteEventLiveRoster(databaseGlobal.eventLives, expectedPlayerIds)) {
+		return databaseGlobal;
+	}
+	if (databaseGlobal) {
+		metrics.livePublicationEventsTotal.labels("roster_incomplete").inc();
+		context.logger.warn(
+			{
+				eventId,
+				actualPlayerCount: databaseGlobal.eventLives.length,
+				expectedPlayerCount: expectedPlayerIds.size,
+			},
+			"Live Points V2 publication has incomplete event-live roster"
+		);
+	}
+	return null;
+};
 
 /** Read the complete event publication for non-entry live desks. */
 export const readLivePublicationV2 = async (
@@ -2506,7 +2562,12 @@ const emptyFromGlobal = (
 ): LiveCalcDataV2 => {
 	const now = nowIso();
 	const vector = globalVector(global);
-	const delivery = globalDelivery(global, reason);
+	const snapshotDelivery = globalDelivery(global, reason);
+	const delivery: LiveDeliveryV2 = {
+		state: "UNAVAILABLE",
+		servedFrom: "UNAVAILABLE",
+		reasonCodes: [reason],
+	};
 	const times: LiveTimesV2 = {
 		sourceCheckedAt: global.publication.sourceCheckedAt,
 		contentUpdatedAt: global.publication.revisions.scoreCore.contentUpdatedAt,
@@ -2540,7 +2601,7 @@ const emptyFromGlobal = (
 			state: global.publication.state,
 			revisions: vector,
 			times,
-			delivery,
+			delivery: snapshotDelivery,
 		},
 		score,
 	};
