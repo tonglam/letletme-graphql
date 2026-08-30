@@ -240,12 +240,26 @@ def verify_registry(checkout: Path, advertised: list[str], materialized_root: Pa
 def tree_digest(root: Path) -> str:
     """Return a deterministic digest for a materialized, regular-file tree."""
 
+    resolved_root = root.resolve()
+    for ancestor in (resolved_root, *resolved_root.parents):
+        try:
+            mode = stat.S_IMODE(ancestor.stat().st_mode)
+        except OSError as exc:
+            raise SystemExit(f"cannot inspect global skill tree permissions: {ancestor}") from exc
+        if mode & 0o022:
+            raise SystemExit(f"global skill tree or ancestor is group/world-writable: {ancestor}")
     digest = hashlib.sha256()
     for item in sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix()):
         relative_path = item.relative_to(root)
         relative = relative_path.as_posix()
         if item.is_symlink():
             raise SystemExit(f"global skill tree contains a symlink: {item}")
+        try:
+            mode = stat.S_IMODE(item.stat().st_mode)
+        except OSError as exc:
+            raise SystemExit(f"cannot inspect global skill tree permissions: {item}") from exc
+        if mode & 0o022:
+            raise SystemExit(f"global skill tree entry is group/world-writable: {item}")
         # Runtime cache directories are not part of a pinned skill tree. Do
         # not silently skip their contents: both executable bytecode and a
         # source file hidden beside it could otherwise alter runtime behavior
@@ -266,7 +280,7 @@ def tree_digest(root: Path) -> str:
         # every non-executable file to 0644 and every executable file to 0755
         # so a umask or shared checkout permissions cannot make byte-identical
         # skill content appear stale.
-        normalized_mode = 0o755 if stat.S_IMODE(item.stat().st_mode) & 0o111 else 0o644
+        normalized_mode = 0o755 if mode & 0o111 else 0o644
         digest.update(f"M:{normalized_mode:04o}\0".encode("ascii"))
         digest.update(hashlib.sha256(item.read_bytes()).digest())
     return digest.hexdigest()

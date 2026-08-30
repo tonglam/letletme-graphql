@@ -313,16 +313,24 @@ jobs:
             .codex/instruction-policy.v1.json \
             .codex/instruction-integrity.json \
             .codex/global-skills.json \
-            .codex/provision_global_skills.py; do
-            if test -e "trusted/$file" && test "$approved" != true; then
-              test ! -L "trusted/$file"
-              test -f "target/$file" && test ! -L "target/$file"
-              cmp -s "trusted/$file" "target/$file" || {
-                echo "governance gate file changed: $file"
+            .codex/provision_global_skills.py \
+            skills-lock.json; do
+            if test "$approved" != true; then
+              if test -e "trusted/$file"; then
+                test ! -L "trusted/$file"
+                test -f "target/$file" && test ! -L "target/$file"
+                cmp -s "trusted/$file" "target/$file" || {
+                  echo "governance gate file changed: $file"
+                  exit 1
+                }
+              elif test -e "target/$file"; then
+                echo "governance gate file added: $file"
                 exit 1
-              }
+              fi
             else
-              test -s "target/$file" && test ! -L "target/$file"
+              if test -e "target/$file"; then
+                test -s "target/$file" && test ! -L "target/$file"
+              fi
             fi
           done
           if test "$approved" = true; then
@@ -2093,7 +2101,7 @@ jobs:
             raise "trusted validator command is missing --expected-config-commit" unless command.match?(/(?:\A|\s)--expected-config-commit(?:\s|\z)/)
             raise "trusted validator command must be standalone and failure-propagating" if command.match?(/[;&|<>]/)
             raise "trusted validator command can terminate before validation" if run.lines.any? { |line| line.match?(/\b(?:exit|return|false|kill|exec)\b/) }
-            %w[AGENTS.md .codex/global-skills.json .codex/provision_global_skills.py].each do |needle|
+            %w[AGENTS.md .codex/global-skills.json .codex/provision_global_skills.py skills-lock.json].each do |needle|
               raise "bootstrap protection is missing #{needle}" unless steps.any? { |step| step.is_a?(Hash) && step["run"].to_s.include?(needle) }
             end
             protection_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Protect instruction contents unless explicitly approved" }

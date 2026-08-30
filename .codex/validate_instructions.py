@@ -787,9 +787,19 @@ def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
 
     # Treat wrapped Markdown lines as one clause while retaining word
     # boundaries; otherwise a harmless line wrap can disable the check.
-    operative = _without_markdown_code(text)
-    operative = re.sub(r"<!--.*?(?:-->|$)", " ", operative, flags=re.S)
-    lowered = " ".join(operative.casefold().split())
+    section, outside = _governance_parts(text)
+    if section is None:
+        errors.append(f"{path}: must contain exactly one operative '## Governance and review' section")
+        lowered = ""
+    else:
+        lowered = section.casefold()
+        conflicts = (
+            r"\b(?:ignore|disregard|bypass|waive)\b.{0,160}\b(?:review|finding|thread|ci|cleanup|quota|unresolved|undispositioned)\b",
+            r"\b(?:merge|ship|release)\b.{0,160}\b(?:without|even\s+with)\b.{0,80}\b(?:review|finding|thread|ci|cleanup|unresolved|undispositioned)\b",
+            r"\b(?:allow|permit)\b.{0,160}\b(?:merge|ship|release)\b.{0,80}\b(?:unresolved|undispositioned)\b",
+        )
+        if any(re.search(pattern, outside, flags=re.I | re.S) for pattern in conflicts):
+            errors.append(f"{path}: operative text outside Governance and review conflicts with the mandatory review rules")
     required_clauses = {
         "quota rule": (
             "a review may be skipped only after two consecutive explicit quota-limit responses",
@@ -814,8 +824,8 @@ def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
             errors.append(f"{path}: missing operative {label} clause")
 
 
-def _governance_section(text: str) -> str | None:
-    """Return a whitespace-normalized governance section for parity checks."""
+def _governance_parts(text: str) -> tuple[str | None, str]:
+    """Return the operative governance section and text outside it."""
 
     # Headings in fenced/indented Markdown examples are not operative.  A
     # duplicate operative heading is rejected rather than allowing the first
@@ -827,14 +837,23 @@ def _governance_section(text: str) -> str | None:
         if re.match(r"^\s*##\s+Governance and review\s*$", line, flags=re.I)
     ]
     if len(matches) != 1:
-        return None
+        return None, ""
     start = matches[0]
     end = len(lines)
     for index in range(start + 1, len(lines)):
         if re.match(r"^\s*##\s+", lines[index]):
             end = index
             break
-    return " ".join("\n".join(lines[start:end]).split())
+    section = " ".join("\n".join(lines[start:end]).split())
+    outside = " ".join("\n".join(lines[:start] + lines[end:]).split()).casefold()
+    return section, outside
+
+
+def _governance_section(text: str) -> str | None:
+    """Return a whitespace-normalized governance section for parity checks."""
+
+    section, _ = _governance_parts(text)
+    return section
 
 
 def check_agents_claude_consistency(repo: Path, errors: list[str]) -> None:
