@@ -29,7 +29,7 @@
 
 ## Governance and review
 
-- Global routes in `.codex/global-skills.json` are provisioned from immutable `tonglam/codex-workspace-config@7e92336ec04d38f7bb95620e304ce6ec6567c896:registry/workspace-assets.json` with its recorded SHA-256 content digest into the host Codex mount. Provision that source before invoking a route; if provisioning or the mount is unavailable, stop and report the missing dependency rather than silently substituting it.
+- Global routes in `.codex/global-skills.json` are provisioned from immutable `tonglam/codex-workspace-config@7e92336ec04d38f7bb95620e304ce6ec6567c896:registry/workspace-assets.json` with its recorded SHA-256 content digest into the host Codex mount. Provision that source before invoking a route; run `python3 .codex/provision_global_skills.py --manifest .codex/global-skills.json --apply` when the host mount is absent. If provisioning or the mount is unavailable, stop and report the missing dependency rather than silently substituting it.
 - Use `$gh-codex-review-loop` for PR work. A review may be skipped only after two consecutive explicit quota-limit responses for the unchanged head; record both responses and the exact SHA. This never waives CI, findings, or cleanup.
 - Every P0-P3 finding must be dispositioned and its thread resolved. Only a finding confined to tests/scripts gets the time exception: implement P0/P1, and explain plus resolve P2/P3 without implementation time. P2/P3 anywhere else must be actually fixed and verified.
 - Keep a complete finding ledger for the exact head; merge is prohibited while any finding is undispositioned or any review thread is unresolved. A quota override can skip only a new review request and never finding resolution.

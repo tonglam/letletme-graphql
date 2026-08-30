@@ -44,7 +44,7 @@ jobs:
       - name: Require the governance scaffold
         working-directory: target
         run: |
-          for file in AGENTS.md .codex/global-skills.json .codex/instruction-integrity.json .codex/validate_instructions.py .codex/instruction-policy.v1.json .github/workflows/instruction-integrity.yml; do
+          for file in AGENTS.md .codex/global-skills.json .codex/instruction-integrity.json .codex/validate_instructions.py .codex/provision_global_skills.py .codex/instruction-policy.v1.json .github/workflows/instruction-integrity.yml; do
             test -s "$file" && test ! -L "$file"
           done
           python3 - <<'PY'
@@ -140,6 +140,53 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.x'
+      # Materialize the immutable registry before any proposed instruction
+      # filesystem is inspected. The validator below consumes this checkout;
+      # it is never allowed to trust a registry file supplied by the PR.
+      - name: Verify pinned global registry contents
+        run: |
+          set -eu
+          manifest="target/.codex/global-skills.json"
+          python3 - "$manifest" <<'PY'
+          import hashlib
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          descriptor = manifest.get("registry")
+          expected = {
+              "repository": "tonglam/codex-workspace-config",
+              "ref": "7e92336ec04d38f7bb95620e304ce6ec6567c896",
+              "path": "registry/workspace-assets.json",
+              "sha256": "fa1a2a5448e34376c4dccfe43c6c8a901adb9b62df3995b1f11d3aa4b9b77cb6",
+          }
+          expected_source_revision = "312eaf56264f65bcc74fd7b81d8981a3517eca02"
+          if descriptor != expected:
+              raise SystemExit("global registry descriptor is not the trusted immutable pin")
+          checkout = Path("registry-source")
+          subprocess.run(
+              ["git", "clone", "--filter=blob:none", "--no-checkout", "--depth=1", "--no-tags",
+               f"https://github.com/{descriptor['repository']}.git", str(checkout)],
+              check=True,
+              stdout=subprocess.DEVNULL,
+          )
+          subprocess.run(["git", "-C", str(checkout), "fetch", "--depth=1", "origin", descriptor["ref"]], check=True, stdout=subprocess.DEVNULL)
+          blob = subprocess.check_output(["git", "-C", str(checkout), "show", f"{descriptor['ref']}:{descriptor['path']}"])
+          if hashlib.sha256(blob).hexdigest() != descriptor["sha256"]:
+              raise SystemExit("pinned registry content digest mismatch")
+          source = json.loads(blob)
+          if source.get("source", {}).get("revision") != expected_source_revision:
+              raise SystemExit("pinned registry source revision is not the trusted canonical configuration")
+          allowlist = source.get("governance", {}).get("global_skill_allowlist", [])
+          names = {Path(item).name for item in allowlist if isinstance(item, str)}
+          advertised = manifest.get("skills", [])
+          missing = sorted(set(advertised) - names)
+          if missing:
+              raise SystemExit(f"pinned registry is missing advertised global skills: {', '.join(missing)}")
+          print("pinned global registry content verified")
+          PY
       - name: Protect the integrity gate files
         run: |
           approved="$GOVERNANCE_UPDATE_APPROVED"
@@ -148,7 +195,8 @@ jobs:
             .codex/validate_instructions.py \
             .codex/instruction-policy.v1.json \
             .codex/instruction-integrity.json \
-            .codex/global-skills.json; do
+            .codex/global-skills.json \
+            .codex/provision_global_skills.py; do
             if test -e "trusted/$file" && test "$approved" != true; then
               test -f "target/$file" && test ! -L "target/$file"
               cmp -s "trusted/$file" "target/$file" || {
@@ -176,10 +224,19 @@ jobs:
 
           def surface(root, raw_paths):
               files = {}
-              for raw in raw_paths:
-                  relative = Path(raw)
+              paths = {Path(raw) for raw in raw_paths}
+              # AGENTS.override.md is a scoped instruction surface even when
+              # it is not listed in the root contract. Include every tracked
+              # override so adding or editing one cannot bypass protection.
+              for item in root.rglob("AGENTS*.md"):
+                  relative = item.relative_to(root)
+                  if any(part in {".git", "node_modules", ".next"} for part in relative.parts):
+                      continue
+                  if item.name in {"AGENTS.md", "AGENTS.override.md"}:
+                      paths.add(relative)
+              for relative in sorted(paths, key=str):
                   if relative.is_absolute() or ".." in relative.parts:
-                      raise SystemExit(f"trusted contract path is not repository-relative: {raw}")
+                      raise SystemExit(f"trusted contract path is not repository-relative: {relative}")
                   path = root / relative
                   if path.is_symlink():
                       raise SystemExit(f"governed instruction may not be a symlink: {relative}")
@@ -204,50 +261,6 @@ jobs:
           for relative, digest in trusted_files.items():
               if target_files[relative] != digest:
                   raise SystemExit(f"governed instruction changed without instruction-governance-approved label: {relative}")
-          PY
-      - name: Verify pinned global registry contents
-        run: |
-          set -eu
-          manifest="target/.codex/global-skills.json"
-          python3 - "$manifest" <<'PY'
-          import json
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          descriptor = manifest.get("registry")
-          expected = {
-              "repository": "tonglam/codex-workspace-config",
-              "ref": "7e92336ec04d38f7bb95620e304ce6ec6567c896",
-              "path": "registry/workspace-assets.json",
-              "sha256": "fa1a2a5448e34376c4dccfe43c6c8a901adb9b62df3995b1f11d3aa4b9b77cb6",
-          }
-          expected_source_revision = "312eaf56264f65bcc74fd7b81d8981a3517eca02"
-          if descriptor != expected:
-              raise SystemExit("global registry descriptor is not the trusted immutable pin")
-          checkout = Path("registry-source")
-          subprocess.run(
-              ["git", "clone", "--filter=blob:none", "--no-checkout", "--depth=1",
-               f"https://github.com/{descriptor['repository']}.git", str(checkout)],
-              check=True,
-              stdout=subprocess.DEVNULL,
-          )
-          subprocess.run(["git", "-C", str(checkout), "fetch", "--depth=1", "origin", descriptor["ref"]], check=True, stdout=subprocess.DEVNULL)
-          blob = subprocess.check_output(["git", "-C", str(checkout), "show", f"{descriptor['ref']}:{descriptor['path']}"])
-          import hashlib
-          if hashlib.sha256(blob).hexdigest() != descriptor["sha256"]:
-              raise SystemExit("pinned registry content digest mismatch")
-          source = json.loads(blob)
-          if source.get("source", {}).get("revision") != expected_source_revision:
-              raise SystemExit("pinned registry source revision is not the trusted canonical configuration")
-          allowlist = source.get("governance", {}).get("global_skill_allowlist", [])
-          names = {Path(item).name for item in allowlist if isinstance(item, str)}
-          advertised = manifest.get("skills", [])
-          missing = sorted(set(advertised) - names)
-          if missing:
-              raise SystemExit(f"pinned registry is missing advertised global skills: {', '.join(missing)}")
-          print("pinned global registry content verified")
           PY
       - name: Validate AGENTS.md and skills
         run: |

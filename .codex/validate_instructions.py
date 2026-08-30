@@ -502,7 +502,10 @@ def _validate_instruction_file(
         errors.append(f"{path}: instruction file is empty")
     if path.name in {"AGENTS.md", "AGENTS.override.md"} and path.stat().st_size > int(policy.get("max_agents_bytes", 32768)):
         errors.append(f"{path}: exceeds max_agents_bytes")
-    if path.name in {"AGENTS.md", "AGENTS.override.md"}:
+    # Governance is inherited from the repository root. Nested instruction
+    # files remain validated for syntax, references, and secrets without
+    # duplicating the global review contract in every scoped directory.
+    if path.name in {"AGENTS.md", "AGENTS.override.md"} and path.parent.resolve() == repo.resolve():
         check_governance_binding(path, text, errors)
     if path.name == "SKILL.md":
         if path.stat().st_size > int(policy.get("max_skill_bytes", 32768)):
@@ -560,8 +563,34 @@ def _validate_contract_shape(contract: dict[str, Any], errors: list[str]) -> Non
 
 
 def _validate_policy(policy: dict[str, Any], errors: list[str]) -> None:
+    required_keys = {
+        "version",
+        "required_frontmatter",
+        "max_agents_bytes",
+        "max_skill_bytes",
+        "require_skill_entrypoint",
+        "reference_policy",
+        "forbid_secrets_in_instructions",
+        "review_rules",
+    }
+    missing = sorted(required_keys - set(policy))
+    if missing:
+        errors.append(f"policy is missing required security keys: {', '.join(missing)}")
     if policy.get("version") != SUPPORTED_VERSION:
         errors.append(f"unsupported policy version: {policy.get('version')!r}")
+    frontmatter = policy.get("required_frontmatter")
+    if not isinstance(frontmatter, list) or not frontmatter or not all(isinstance(item, str) and item.strip() for item in frontmatter):
+        errors.append("policy required_frontmatter must be a non-empty string list")
+    for key in ("max_agents_bytes", "max_skill_bytes"):
+        value = policy.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            errors.append(f"policy {key} must be a positive integer")
+    if not isinstance(policy.get("require_skill_entrypoint"), str) or not policy.get("require_skill_entrypoint").strip():
+        errors.append("policy require_skill_entrypoint must be a nonempty string")
+    if not isinstance(policy.get("reference_policy"), str) or not policy.get("reference_policy").strip():
+        errors.append("policy reference_policy must be a nonempty string")
+    if policy.get("forbid_secrets_in_instructions") is not True:
+        errors.append("policy forbid_secrets_in_instructions must remain true")
     rules = policy.get("review_rules")
     if not isinstance(rules, dict) or set(rules) != REVIEW_RULE_KEYS or not all(isinstance(value, str) and value.strip() for value in rules.values()):
         errors.append("policy review_rules must contain every operative review rule")
