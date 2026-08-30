@@ -350,6 +350,7 @@ const eligibleEntryWindowForEvent = async (
 	entryIds: number[];
 	deferredEntryIds: number[];
 	totalEntries: number;
+	eligibilityUnavailable: boolean;
 }> => {
 	const uniqueEntryIds = [...new Set(entryIds)];
 	const admissionWindow = selectTournamentDeskEntryWindow(
@@ -358,18 +359,19 @@ const eligibleEntryWindowForEvent = async (
 		MAX_TOURNAMENT_DESK_ENTRIES
 	);
 	try {
-		const eligibility = await loadTournamentEventEligibility(
-			admissionWindow.entryIds,
-			eventId,
-			(ids) => entriesRepository.getEntriesByIds(context, ids)
+		const eligibility = await loadTournamentEventEligibility(uniqueEntryIds, eventId, (ids) =>
+			entriesRepository.getEntriesByIds(context, ids)
+		);
+		const eligibleWindow = selectTournamentDeskEntryWindow(
+			eligibility.entryIds,
+			requestingEntryId,
+			MAX_TOURNAMENT_DESK_ENTRIES
 		);
 		return {
-			entryIds: eligibility.entryIds,
-			deferredEntryIds: admissionWindow.deferredEntryIds,
-			totalEntries:
-				uniqueEntryIds.length <= MAX_TOURNAMENT_DESK_ENTRIES
-					? eligibility.entryIds.length
-					: uniqueEntryIds.length,
+			entryIds: eligibleWindow.entryIds,
+			deferredEntryIds: eligibleWindow.deferredEntryIds,
+			totalEntries: eligibility.entryIds.length,
+			eligibilityUnavailable: false,
 		};
 	} catch (error) {
 		// Eligibility is an optimization boundary. If metadata is unavailable,
@@ -380,6 +382,7 @@ const eligibleEntryWindowForEvent = async (
 			entryIds: admissionWindow.entryIds,
 			deferredEntryIds: admissionWindow.deferredEntryIds,
 			totalEntries: uniqueEntryIds.length,
+			eligibilityUnavailable: true,
 		};
 	}
 };
@@ -418,6 +421,12 @@ const boardResponse = async (
 		servedFrom: "UNAVAILABLE",
 		reasonCodes: ["NO_COMPLETE_ENTRY_PROJECTION"],
 	};
+	const effectiveDelivery = entryWindow.eligibilityUnavailable
+		? {
+				...delivery,
+				reasonCodes: [...new Set([...delivery.reasonCodes, "ENTRY_ELIGIBILITY_UNAVAILABLE"])],
+			}
+		: delivery;
 	const revisions = sample?.score.revisions ?? {
 		publicationId: `unavailable:${request.eventId}`,
 		generation: 0,
@@ -448,14 +457,17 @@ const boardResponse = async (
 	const totalEntries = entryWindow.totalEntries;
 	const deferredEntryCount = entryWindow.deferredEntryIds.length + board.deferredEntryCount;
 	const partial =
-		entryWindow.deferredEntryIds.length > 0 || board.partial || board.rows.length !== totalEntries;
+		entryWindow.eligibilityUnavailable ||
+		entryWindow.deferredEntryIds.length > 0 ||
+		board.partial ||
+		board.rows.length !== totalEntries;
 	return {
 		season: context.currentSeason.seasonCode,
 		eventId: request.eventId,
 		tournamentId: request.tournamentId,
 		boardRevision: board.boardRevision,
 		scoreCoreRevision: board.scoreCoreRevision,
-		dataAvailability: delivery.state,
+		dataAvailability: effectiveDelivery.state,
 		coverageState: board.computedEntries === 0 ? "UNAVAILABLE" : partial ? "PARTIAL" : "COMPLETE",
 		rankScope: partial ? "AVAILABLE_ROWS" : "FULL_FIELD",
 		computedEntries: board.computedEntries,
@@ -475,7 +487,7 @@ const boardResponse = async (
 		averageEventPoints: board.averageEventPoints,
 		revisions,
 		times,
-		delivery,
+		delivery: effectiveDelivery,
 		rows: page.rows,
 		viewerRow: page.viewerRow,
 	};
@@ -714,6 +726,7 @@ export const liveDesksResolvers = {
 					(entryId) => !results.get(entryId) || results.get(entryId)?.availability !== "READY"
 				),
 				partial:
+					entryWindow.eligibilityUnavailable ||
 					entryWindow.deferredEntryIds.length > 0 ||
 					[...results.values()].some((row) => row.availability !== "READY") ||
 					results.size !== entryWindow.entryIds.length,

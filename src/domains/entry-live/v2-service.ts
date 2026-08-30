@@ -9,6 +9,8 @@ import type { GraphQLContext } from "../../graphql/context";
 import {
 	getCoreLiveIdentitySnapshot,
 	getCoreEventSnapshot,
+	getCoreFixtureSnapshot,
+	type CoreFixtureSnapshot,
 	type CoreLiveIdentitySnapshot,
 	type CorePlayerData,
 	type CoreTeamData,
@@ -217,6 +219,11 @@ type EntryRead = {
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "POSTGRES_CHECKPOINT";
 };
 
+type EntryMetadataRead = Readonly<{
+	entry: Entry;
+	available: boolean;
+}>;
+
 const entryMatchesGlobal = (entry: EntryRead, global: GlobalRead): boolean => {
 	const finalized = global.publication.state === "FINALIZED";
 	return finalized
@@ -408,7 +415,8 @@ const requestEventPlayerMemo = new WeakMap<
 	Map<number, Promise<ReadonlyMap<number, CorePlayerData>>>
 >();
 const requestCoreMemo = new WeakMap<object, Promise<CoreLiveIdentitySnapshot | null>>();
-const requestEntryMemo = new WeakMap<object, Map<number, Promise<Entry>>>();
+const requestCoreFixtureMemo = new WeakMap<object, Promise<CoreFixtureSnapshot | null>>();
+const requestEntryMemo = new WeakMap<object, Map<number, Promise<EntryMetadataRead>>>();
 const entryMetadataCircuit = new Map<string, number>();
 const ENTRY_METADATA_CIRCUIT_COOLDOWN_MS = 5_000;
 
@@ -850,22 +858,22 @@ const isFixtureArray = (value: unknown): value is FixtureRow[] => {
 	if (!Array.isArray(value) || !value.every(isRecord)) return false;
 	const rows = value as Record<string, unknown>[];
 	return (
-		hasUniquePositiveIds(rows, (row) => integer(row.id)) &&
+		hasUniquePositiveIds(rows, (row) => safeInteger(row.id)) &&
 		rows.every(
 			(row) =>
-				(integer(row.code) ?? 0) > 0 &&
-				(row.event === null || (integer(row.event) ?? 0) > 0) &&
+				(safeInteger(row.code) ?? 0) > 0 &&
+				(row.event === null || (safeInteger(row.event) ?? 0) > 0) &&
 				typeof row.finished === "boolean" &&
 				typeof row.finishedProvisional === "boolean" &&
 				nullableStringField(row, "kickoffTime") &&
-				(integer(row.minutes) ?? -1) >= 0 &&
+				(safeInteger(row.minutes) ?? -1) >= 0 &&
 				nullableBooleanField(row, "started") &&
-				(integer(row.teamH) ?? 0) > 0 &&
-				(integer(row.teamA) ?? 0) > 0 &&
-				nullableIntegerField(row, "teamHScore") &&
-				nullableIntegerField(row, "teamAScore") &&
-				nullableIntegerField(row, "teamHDifficulty") &&
-				nullableIntegerField(row, "teamADifficulty")
+				(safeInteger(row.teamH) ?? 0) > 0 &&
+				(safeInteger(row.teamA) ?? 0) > 0 &&
+				(row.teamHScore === null || safeInteger(row.teamHScore) !== null) &&
+				(row.teamAScore === null || safeInteger(row.teamAScore) !== null) &&
+				(row.teamHDifficulty === null || safeInteger(row.teamHDifficulty) !== null) &&
+				(row.teamADifficulty === null || safeInteger(row.teamADifficulty) !== null)
 		)
 	);
 };
@@ -886,6 +894,17 @@ const hasCompleteEventLiveRoster = (
 	if (expectedPlayerIds.size === 0 || eventLives.length < expectedPlayerIds.size) return false;
 	const actualPlayerIds = new Set(eventLives.map((row) => row.elementId));
 	return [...expectedPlayerIds].every((playerId) => actualPlayerIds.has(playerId));
+};
+
+const hasCompleteFixtureCoverage = (
+	fixtures: readonly FixtureRow[],
+	expectedFixtureIds: ReadonlySet<number>
+): boolean => {
+	const actualFixtureIds = new Set(fixtures.map((fixture) => fixture.id));
+	return (
+		actualFixtureIds.size === expectedFixtureIds.size &&
+		[...expectedFixtureIds].every((fixtureId) => actualFixtureIds.has(fixtureId))
+	);
 };
 
 /**
@@ -966,7 +985,8 @@ const decodeRedisGlobalCandidate = (
 	season: string,
 	eventId: number,
 	pointer: "active" | "previous",
-	expectedPlayerIds?: ReadonlySet<number>
+	expectedPlayerIds?: ReadonlySet<number>,
+	expectedFixtureIds?: ReadonlySet<number> | null
 ): GlobalRead | null => {
 	const publication = parseLivePublication(raw, season, eventId);
 	if (!publication || values.length !== 4) return null;
@@ -988,7 +1008,10 @@ const decodeRedisGlobalCandidate = (
 		!fixtures ||
 		eventLives.some((row) => row.eventId !== eventId) ||
 		fixtures.some((row) => row.event !== null && row.event !== eventId) ||
-		(expectedPlayerIds !== undefined && !hasCompleteEventLiveRoster(eventLives, expectedPlayerIds))
+		(expectedPlayerIds !== undefined &&
+			!hasCompleteEventLiveRoster(eventLives, expectedPlayerIds)) ||
+		expectedFixtureIds === null ||
+		(expectedFixtureIds !== undefined && !hasCompleteFixtureCoverage(fixtures, expectedFixtureIds))
 	)
 		return null;
 	return {
@@ -1004,7 +1027,8 @@ const readRedisGlobalCandidate = async (
 	season: string,
 	eventId: number,
 	pointer: "active" | "previous",
-	expectedPlayerIds?: ReadonlySet<number>
+	expectedPlayerIds?: ReadonlySet<number>,
+	expectedFixtureIds?: ReadonlySet<number> | null
 ): Promise<GlobalRead | null> => {
 	const raw = await redis.get(liveKey(season, eventId, pointer));
 	const publication = parseLivePublication(raw, season, eventId);
@@ -1015,7 +1039,15 @@ const readRedisGlobalCandidate = async (
 		`${publication.items.eventLive.key}:meta`,
 		`${publication.items.fixtures.key}:meta`
 	);
-	return decodeRedisGlobalCandidate(raw, values, season, eventId, pointer, expectedPlayerIds);
+	return decodeRedisGlobalCandidate(
+		raw,
+		values,
+		season,
+		eventId,
+		pointer,
+		expectedPlayerIds,
+		expectedFixtureIds
+	);
 };
 
 const readRedisGlobalCandidates = async (
@@ -1023,7 +1055,8 @@ const readRedisGlobalCandidates = async (
 	season: string,
 	eventIds: readonly number[],
 	pointer: "active" | "previous",
-	expectedPlayerIdsByEvent: ReadonlyMap<number, ReadonlySet<number> | undefined>
+	expectedPlayerIdsByEvent: ReadonlyMap<number, ReadonlySet<number> | undefined>,
+	expectedFixtureIdsByEvent: ReadonlyMap<number, ReadonlySet<number> | null | undefined>
 ): Promise<Map<number, GlobalRead>> => {
 	const uniqueEventIds = [...new Set(eventIds)];
 	if (uniqueEventIds.length === 0) return new Map();
@@ -1051,7 +1084,8 @@ const readRedisGlobalCandidates = async (
 			season,
 			eventId,
 			pointer,
-			expectedPlayerIdsByEvent.get(eventId)
+			expectedPlayerIdsByEvent.get(eventId),
+			expectedFixtureIdsByEvent.get(eventId)
 		);
 		if (candidate) result.set(eventId, candidate);
 	});
@@ -1462,7 +1496,8 @@ const normalizeFinalAutomaticSubs = (
 const readDatabaseGlobal = async (
 	context: GraphQLContext,
 	season: string,
-	eventId: number
+	eventId: number,
+	expectedFixtureIds: ReadonlySet<number> | null
 ): Promise<GlobalRead | null> => {
 	try {
 		const result = await context.database.query<Row>(GLOBAL_CHECKPOINT_SQL, [
@@ -1493,7 +1528,9 @@ const readDatabaseGlobal = async (
 			!isFixtureArray(fixtures) ||
 			!validPublicationRevisions(revisions) ||
 			eventLives.some((row) => row.eventId !== eventId) ||
-			fixtures.some((fixture) => fixture.event !== null && fixture.event !== eventId)
+			fixtures.some((fixture) => fixture.event !== null && fixture.event !== eventId) ||
+			expectedFixtureIds === null ||
+			!hasCompleteFixtureCoverage(fixtures, expectedFixtureIds)
 		)
 			return null;
 		const eventLivePayload = stable(eventLives);
@@ -1763,6 +1800,7 @@ const readRedisGlobal = (
 	context: GraphQLContext,
 	eventId: number,
 	expectedPlayerIds: ReadonlySet<number> | undefined,
+	expectedFixtureIds: ReadonlySet<number> | null | undefined,
 	expectedScoreCoreRevision?: string
 ): Promise<GlobalRead | null> => {
 	const scope = requestScope(context);
@@ -1778,8 +1816,20 @@ const readRedisGlobal = (
 	const rosterRevision = expectedPlayerIds
 		? hash([...expectedPlayerIds].sort((left, right) => left - right))
 		: "producer-validated";
+	const fixtureRevision =
+		expectedFixtureIds === undefined
+			? "unchecked"
+			: expectedFixtureIds === null
+				? "authority-unavailable"
+				: hash([...expectedFixtureIds].sort((left, right) => left - right));
 	const memoKey =
-		String(eventId) + ":" + (expectedScoreCoreRevision ?? "current") + ":" + rosterRevision;
+		String(eventId) +
+		":" +
+		(expectedScoreCoreRevision ?? "current") +
+		":" +
+		rosterRevision +
+		":" +
+		fixtureRevision;
 	const existing = memo.get(memoKey);
 	if (existing) return existing;
 	const load = (async (): Promise<GlobalRead | null> => {
@@ -1791,7 +1841,8 @@ const readRedisGlobal = (
 				season,
 				eventId,
 				"active",
-				expectedPlayerIds
+				expectedPlayerIds,
+				expectedFixtureIds
 			);
 			if (
 				redisValue &&
@@ -1804,7 +1855,8 @@ const readRedisGlobal = (
 				season,
 				eventId,
 				"previous",
-				expectedPlayerIds
+				expectedPlayerIds,
+				expectedFixtureIds
 			);
 			if (
 				previous &&
@@ -1824,6 +1876,7 @@ const readRedisGlobal = (
 const readDatabaseGlobalMemoized = (
 	context: GraphQLContext,
 	eventId: number,
+	expectedFixtureIds: ReadonlySet<number> | null,
 	expectedScoreCoreRevision?: string
 ): Promise<GlobalRead | null> => {
 	const scope = requestScope(context);
@@ -1832,16 +1885,25 @@ const readDatabaseGlobalMemoized = (
 		memo = new Map();
 		requestDatabaseGlobalMemo.set(scope, memo);
 	}
-	const memoKey = String(eventId) + ":" + (expectedScoreCoreRevision ?? "current");
+	const fixtureRevision =
+		expectedFixtureIds === null
+			? "authority-unavailable"
+			: hash([...expectedFixtureIds].sort((left, right) => left - right));
+	const memoKey =
+		String(eventId) + ":" + (expectedScoreCoreRevision ?? "current") + ":" + fixtureRevision;
 	const existing = memo.get(memoKey);
 	if (existing) return existing;
-	const load = readDatabaseGlobal(context, context.currentSeason.seasonCode, eventId).then(
-		(value) =>
-			value &&
-			(expectedScoreCoreRevision === undefined ||
-				value.publication.revisions.scoreCore.revision === expectedScoreCoreRevision)
-				? value
-				: null
+	const load = readDatabaseGlobal(
+		context,
+		context.currentSeason.seasonCode,
+		eventId,
+		expectedFixtureIds
+	).then((value) =>
+		value &&
+		(expectedScoreCoreRevision === undefined ||
+			value.publication.revisions.scoreCore.revision === expectedScoreCoreRevision)
+			? value
+			: null
 	);
 	memo.set(memoKey, load);
 	return load;
@@ -1870,6 +1932,30 @@ const requireCompleteGlobalRoster = (
 	return null;
 };
 
+const requireCompleteGlobalPublication = (
+	context: GraphQLContext,
+	global: GlobalRead | null,
+	expectedPlayerIds: ReadonlySet<number> | undefined,
+	expectedFixtureIds: ReadonlySet<number> | null
+): GlobalRead | null => {
+	if (!global || expectedFixtureIds === null) return null;
+	const rosterChecked = requireCompleteGlobalRoster(context, global, expectedPlayerIds);
+	if (!rosterChecked) return null;
+	if (hasCompleteFixtureCoverage(rosterChecked.fixtures, expectedFixtureIds)) {
+		return rosterChecked;
+	}
+	metrics.livePublicationEventsTotal.labels("fixture_incomplete").inc();
+	context.logger.warn(
+		{
+			eventId: rosterChecked.publication.eventId,
+			actualFixtureCount: rosterChecked.fixtures.length,
+			expectedFixtureCount: expectedFixtureIds.size,
+		},
+		"Live Points V2 publication has incomplete fixture coverage"
+	);
+	return null;
+};
+
 const readGlobal = async (
 	context: GraphQLContext,
 	eventId: number,
@@ -1877,20 +1963,45 @@ const readGlobal = async (
 ): Promise<GlobalRead | null> => {
 	const core = await readCore(context);
 	if (!core) return null;
+	// Attempt both Redis pointers without a PostgreSQL roster lookup first.  A
+	// historical event's roster is mutable in today's database and must never
+	// delay or block a complete V2 hot publication.
+	const unvalidatedRedis = await readRedisGlobal(
+		context,
+		eventId,
+		undefined,
+		undefined,
+		expectedScoreCoreRevision
+	);
 	const expectedPlayerIds = await expectedPlayerIdsForEvent(context, eventId, core);
-	const redisGlobal = await readRedisGlobal(
+	const expectedFixtureIds = await expectedFixtureIdsForEvent(context, eventId);
+	const redisGlobal = requireCompleteGlobalPublication(
+		context,
+		unvalidatedRedis,
+		expectedPlayerIds,
+		expectedFixtureIds
+	);
+	if (redisGlobal) return redisGlobal;
+	const validatedRedis = await readRedisGlobal(
 		context,
 		eventId,
 		expectedPlayerIds,
+		expectedFixtureIds,
 		expectedScoreCoreRevision
 	);
-	if (redisGlobal) return redisGlobal;
+	if (validatedRedis) return validatedRedis;
 	const databaseGlobal = await readDatabaseGlobalMemoized(
 		context,
 		eventId,
+		expectedFixtureIds,
 		expectedScoreCoreRevision
 	);
-	return requireCompleteGlobalRoster(context, databaseGlobal, expectedPlayerIds);
+	return requireCompleteGlobalPublication(
+		context,
+		databaseGlobal,
+		expectedPlayerIds,
+		expectedFixtureIds
+	);
 };
 
 /** Read the complete event publication for non-entry live desks. */
@@ -1917,7 +2028,10 @@ export const readLivePublicationsV2 = async (
 	if (uniqueEventIds.length === 0) return new Map();
 	const core = await readCore(context);
 	if (!core) return new Map();
-	const expectedPlayerIdsByEvent = await expectedPlayerIdsForEvents(context, uniqueEventIds, core);
+	// Read both Redis pointers before resolving historical roster expectations.
+	// This keeps the batched hot path independent from a PostgreSQL roster read.
+	const uncheckedPlayerIdsByEvent = new Map<number, ReadonlySet<number> | undefined>();
+	const uncheckedFixtureIdsByEvent = new Map<number, ReadonlySet<number> | null | undefined>();
 	const result = new Map<number, GlobalRead>();
 	for (const pointer of ["active", "previous"] as const) {
 		try {
@@ -1926,7 +2040,8 @@ export const readLivePublicationsV2 = async (
 				context.currentSeason.seasonCode,
 				uniqueEventIds,
 				pointer,
-				expectedPlayerIdsByEvent
+				uncheckedPlayerIdsByEvent,
+				uncheckedFixtureIdsByEvent
 			);
 			for (const [eventId, candidate] of candidates) {
 				if (
@@ -1943,14 +2058,64 @@ export const readLivePublicationsV2 = async (
 			);
 		}
 	}
+	const expectedPlayerIdsByEvent = await expectedPlayerIdsForEvents(context, uniqueEventIds, core);
+	const expectedFixtureIdsByEvent = await expectedFixtureIdsForEvents(context, uniqueEventIds);
+	const invalidRedisEventIds = [...result].flatMap(([eventId, candidate]) =>
+		requireCompleteGlobalPublication(
+			context,
+			candidate,
+			expectedPlayerIdsByEvent.get(eventId),
+			expectedFixtureIdsByEvent.get(eventId) ?? null
+		)
+			? []
+			: [eventId]
+	);
+	for (const eventId of invalidRedisEventIds) result.delete(eventId);
+	if (invalidRedisEventIds.length > 0) {
+		for (const pointer of ["active", "previous"] as const) {
+			try {
+				const candidates = await readRedisGlobalCandidates(
+					context.redis,
+					context.currentSeason.seasonCode,
+					invalidRedisEventIds,
+					pointer,
+					expectedPlayerIdsByEvent,
+					expectedFixtureIdsByEvent
+				);
+				for (const [eventId, candidate] of candidates) {
+					if (
+						!result.has(eventId) &&
+						(expectedScoreCoreRevision === undefined ||
+							candidate.publication.revisions.scoreCore.revision === expectedScoreCoreRevision)
+					)
+						result.set(eventId, candidate);
+				}
+			} catch (error) {
+				context.logger.warn(
+					{ err: error, eventCount: invalidRedisEventIds.length, pointer },
+					"Live Points V2 validated Redis retry unavailable"
+				);
+			}
+		}
+	}
 	const missingEventIds = uniqueEventIds.filter((eventId) => !result.has(eventId));
 	if (missingEventIds.length > 0) {
 		const databaseValues = await Promise.all(
 			missingEventIds.map(async (eventId) => {
-				const value = await readDatabaseGlobalMemoized(context, eventId, expectedScoreCoreRevision);
+				const value = await readDatabaseGlobalMemoized(
+					context,
+					eventId,
+					expectedFixtureIdsByEvent.get(eventId) ?? null,
+					expectedScoreCoreRevision
+				);
 				return [
 					eventId,
-					requireCompleteGlobalRoster(context, value, expectedPlayerIdsByEvent.get(eventId)),
+					requireCompleteGlobalPublication(
+						context,
+						value,
+						expectedPlayerIdsByEvent.get(eventId),
+						expectedFixtureIdsByEvent.get(eventId) ?? null
+					),
 				] as const;
 			})
 		);
@@ -1999,6 +2164,57 @@ const readCore = (context: GraphQLContext): Promise<CoreLiveIdentitySnapshot | n
 	requestCoreMemo.set(scope, load);
 	return load;
 };
+
+const readCoreFixtures = (context: GraphQLContext): Promise<CoreFixtureSnapshot | null> => {
+	const scope = requestScope(context);
+	const existing = requestCoreFixtureMemo.get(scope);
+	if (existing) return existing;
+	const load = getCoreFixtureSnapshot(context).catch((error) => {
+		context.logger.warn({ err: error }, "Live Points V2 core fixture authority unavailable");
+		return null;
+	});
+	requestCoreFixtureMemo.set(scope, load);
+	return load;
+};
+
+/**
+ * A live publication can be checksum-valid and still omit a fixture.  Keep
+ * the expected fixture set on the coherent Core publication and check it only
+ * after the Redis candidate has been attempted, so a historical roster lookup
+ * or fixture fallback can never sit in front of the hot read.
+ */
+const expectedFixtureIdsForEvents = async (
+	context: GraphQLContext,
+	eventIds: readonly number[]
+): Promise<Map<number, ReadonlySet<number> | null>> => {
+	const uniqueEventIds = [...new Set(eventIds)].filter(
+		(eventId) => Number.isSafeInteger(eventId) && eventId > 0
+	);
+	const result = new Map<number, ReadonlySet<number> | null>();
+	if (uniqueEventIds.length === 0) return result;
+	const snapshot = await readCoreFixtures(context);
+	if (!snapshot) {
+		for (const eventId of uniqueEventIds) result.set(eventId, null);
+		return result;
+	}
+	for (const eventId of uniqueEventIds) {
+		result.set(
+			eventId,
+			new Set(
+				snapshot.fixtures
+					.filter((fixture) => fixture.eventId === eventId)
+					.map((fixture) => fixture.id)
+			)
+		);
+	}
+	return result;
+};
+
+const expectedFixtureIdsForEvent = async (
+	context: GraphQLContext,
+	eventId: number
+): Promise<ReadonlySet<number> | null> =>
+	(await expectedFixtureIdsForEvents(context, [eventId])).get(eventId) ?? null;
 
 type EventRosterRow = Row & {
 	event_id: unknown;
@@ -2251,7 +2467,10 @@ const emptyEntry = (entryId: number): Entry => ({
 	lastBank: null,
 });
 
-const getEntrySafe = async (context: GraphQLContext, entryId: number): Promise<Entry> => {
+const getEntrySafe = async (
+	context: GraphQLContext,
+	entryId: number
+): Promise<EntryMetadataRead> => {
 	const scope = requestScope(context);
 	let memo = requestEntryMemo.get(scope);
 	if (!memo) {
@@ -2263,16 +2482,20 @@ const getEntrySafe = async (context: GraphQLContext, entryId: number): Promise<E
 
 	const key = entryMetadataKey(context, entryId);
 	const circuitOpenUntil = entryMetadataCircuit.get(key) ?? 0;
-	const load = (async (): Promise<Entry> => {
-		if (circuitOpenUntil > Date.now()) return emptyEntry(entryId);
+	const load = (async (): Promise<EntryMetadataRead> => {
+		if (circuitOpenUntil > Date.now()) {
+			return { entry: emptyEntry(entryId), available: false };
+		}
 		try {
-			const value = (await entriesRepository.getEntryById(context, entryId)) ?? emptyEntry(entryId);
+			const value = await entriesRepository.getEntryById(context, entryId);
 			entryMetadataCircuit.delete(key);
-			return value;
+			return value
+				? { entry: value, available: true }
+				: { entry: emptyEntry(entryId), available: false };
 		} catch (error) {
 			entryMetadataCircuit.set(key, Date.now() + ENTRY_METADATA_CIRCUIT_COOLDOWN_MS);
 			context.logger.warn({ err: error, entryId }, "Live Points V2 entry metadata unavailable");
-			return emptyEntry(entryId);
+			return { entry: emptyEntry(entryId), available: false };
 		}
 	})();
 	memo.set(entryId, load);
@@ -2304,15 +2527,23 @@ const preloadEntryMetadata = async (
 		const chunk = missingIds.slice(offset, offset + chunkSize);
 		try {
 			const entries = await entriesRepository.getEntriesByIds(context, chunk);
-			for (const entryId of chunk)
-				memo.set(entryId, Promise.resolve(entries.get(entryId) ?? emptyEntry(entryId)));
+			for (const entryId of chunk) {
+				const entry = entries.get(entryId);
+				memo.set(
+					entryId,
+					Promise.resolve({
+						entry: entry ?? emptyEntry(entryId),
+						available: entry !== undefined,
+					})
+				);
+			}
 		} catch (error) {
 			for (const entryId of chunk) {
 				entryMetadataCircuit.set(
 					entryMetadataKey(context, entryId),
 					Date.now() + ENTRY_METADATA_CIRCUIT_COOLDOWN_MS
 				);
-				memo.set(entryId, Promise.resolve(emptyEntry(entryId)));
+				memo.set(entryId, Promise.resolve({ entry: emptyEntry(entryId), available: false }));
 			}
 			context.logger.warn(
 				{ err: error, entryCount: chunk.length, offset },
@@ -2812,11 +3043,12 @@ const buildReady = async (
 	context: GraphQLContext,
 	global: GlobalRead,
 	entryRead: EntryRead,
-	entry: Entry,
+	entryMetadata: EntryMetadataRead,
 	core: CoreLiveIdentitySnapshot | null
 ): Promise<LiveCalcDataV2> => {
 	if (!core) throw new Error("CORE_IDENTITY_UNAVAILABLE");
 	const effectiveCore = core;
+	const entry = entryMetadata.entry;
 	const input = entryRead.input;
 	if (input.finalResult !== null && global.publication.state !== "FINALIZED") {
 		throw new Error("FINAL_RESULT_WITHOUT_FINALIZED_PUBLICATION");
@@ -2930,7 +3162,10 @@ const buildReady = async (
 	const now = nowIso();
 	const vector = revisionVector(global.publication, input, entryRead.publication);
 	const times = timesFor(global.publication, entryRead, now);
-	const delivery = deliveryFor(global, entryRead, now, core ? [] : ["CORE_IDENTITY_UNAVAILABLE"]);
+	const delivery = deliveryFor(global, entryRead, now, [
+		...(core ? [] : ["CORE_IDENTITY_UNAVAILABLE"]),
+		...(entryMetadata.available ? [] : ["ENTRY_METADATA_UNAVAILABLE"]),
+	]);
 	const score: LiveScoreV2 = {
 		eventPoints,
 		netEventPoints,
@@ -3304,27 +3539,61 @@ export const calcLivePointsByEntryV2 = async (
 		options.scoreCoreRevision ?? "current",
 	].join(":");
 	const core = await readCore(context);
-	const expectedPlayerIds = core ? await expectedPlayerIdsForEvent(context, eventId, core) : null;
+	const lkgCandidate = readLiveLkg(lkgKey);
+	// The first Redis attempt is intentionally unchecked against historical
+	// PostgreSQL rosters.  Only after current/previous has been tried do we
+	// resolve the authoritative player and fixture sets needed to accept it.
+	const unvalidatedRedis = core
+		? await readRedisGlobal(context, eventId, undefined, undefined, options.scoreCoreRevision)
+		: null;
+	if (!unvalidatedRedis && lkgCandidate) {
+		return observeLivePointsResult(
+			degradedLkg(
+				lkgCandidate,
+				core ? "GLOBAL_PUBLICATION_UNAVAILABLE" : "CORE_IDENTITY_UNAVAILABLE"
+			)
+		);
+	}
+	const expectedPlayerIds = core
+		? await expectedPlayerIdsForEvent(context, eventId, core)
+		: undefined;
+	const expectedFixtureIds = core ? await expectedFixtureIdsForEvent(context, eventId) : null;
 	const redisGlobal = core
-		? await readRedisGlobal(
+		? requireCompleteGlobalPublication(
 				context,
-				eventId,
-				expectedPlayerIds ?? undefined,
-				options.scoreCoreRevision
+				unvalidatedRedis,
+				expectedPlayerIds,
+				expectedFixtureIds
 			)
 		: null;
-	const lkgCandidate = readLiveLkg(lkgKey);
+	const validatedRedis =
+		core && !redisGlobal
+			? await readRedisGlobal(
+					context,
+					eventId,
+					expectedPlayerIds,
+					expectedFixtureIds,
+					options.scoreCoreRevision
+				)
+			: null;
+	const acceptedRedis = redisGlobal ?? validatedRedis;
 	// The fallback order is intentional: a process LKG is a complete response
 	// for this exact event/entry and is safer than a cold database read that may
 	// combine metadata from a different publication.
 	const global =
-		redisGlobal ??
+		acceptedRedis ??
 		(lkgCandidate || !core
 			? null
-			: requireCompleteGlobalRoster(
+			: requireCompleteGlobalPublication(
 					context,
-					await readDatabaseGlobalMemoized(context, eventId, options.scoreCoreRevision),
-					expectedPlayerIds ?? undefined
+					await readDatabaseGlobalMemoized(
+						context,
+						eventId,
+						expectedFixtureIds,
+						options.scoreCoreRevision
+					),
+					expectedPlayerIds,
+					expectedFixtureIds
 				));
 	const processLkg =
 		lkgCandidate && (!global || lkgMatchesGlobal(lkgCandidate, global)) ? lkgCandidate : null;
@@ -3369,13 +3638,8 @@ export const calcLivePointsByEntryV2 = async (
 		);
 	}
 	try {
-		const result = await buildReady(
-			context,
-			global,
-			entryRead,
-			await getEntrySafe(context, entryId),
-			core
-		);
+		const entryMetadata = await getEntrySafe(context, entryId);
+		const result = await buildReady(context, global, entryRead, entryMetadata, core);
 		writeLiveLkg(lkgKey, result);
 		return observeLivePointsResult(result);
 	} catch (error) {

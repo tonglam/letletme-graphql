@@ -33,7 +33,7 @@ import {
 import { checkRuntimeReadiness } from "./http/runtime-readiness";
 import {
 	hasLivePointsV2Contract,
-	isLivePointsHotPathRootField,
+	isLivePointsHotPathOperation,
 	LIVE_POINTS_CONTRACT_HEADER,
 	LIVE_POINTS_CONTRACT_VALUE,
 	requiresLivePointsV2Contract,
@@ -408,8 +408,7 @@ export const startServer = async (): Promise<void> => {
 						);
 					}
 					rootFields = limits.rootFields;
-					const livePointsHotPath =
-						rootFields.length > 0 && rootFields.every(isLivePointsHotPathRootField);
+					const livePointsHotPath = isLivePointsHotPathOperation(rootFields);
 					if (
 						requiresLivePointsV2Contract(rootFields) &&
 						!hasLivePointsV2Contract(request.headers)

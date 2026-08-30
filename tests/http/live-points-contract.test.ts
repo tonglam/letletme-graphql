@@ -4,6 +4,7 @@ import {
 	LIVE_POINTS_CONTRACT_HEADER,
 	LIVE_POINTS_CONTRACT_VALUE,
 	requiresLivePointsV2Contract,
+	isLivePointsHotPathOperation,
 } from "../../src/http/live-points-contract";
 
 describe("Live Points V2 contract gate", () => {
@@ -30,5 +31,11 @@ describe("Live Points V2 contract gate", () => {
 			);
 		}
 		expect(hasLivePointsV2Contract(new Headers())).toBe(false);
+	});
+
+	it("keeps safe companion roots on the Redis-only hot path", () => {
+		expect(isLivePointsHotPathOperation(["calcLivePointsByEntry", "events"])).toBe(true);
+		expect(isLivePointsHotPathOperation(["calcLivePointsByEntry", "__typename"])).toBe(true);
+		expect(isLivePointsHotPathOperation(["calcLivePointsByEntry", "homePersonalDesk"])).toBe(false);
 	});
 });

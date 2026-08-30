@@ -225,7 +225,8 @@ describe("Live Points V2 projection", () => {
 		});
 		const result = await calcLivePointsByEntryV2(buildSnapshotContext(redis), 1, 6953);
 		expect(result.availability).toBe("READY");
-		expect(result.delivery.state).toBe("FRESH");
+		expect(result.delivery.state).toBe("DEGRADED");
+		expect(result.delivery.reasonCodes).toContain("ENTRY_METADATA_UNAVAILABLE");
 		expect(result.score.times.sourceCheckedAt).toBe(result.snapshot.times.sourceCheckedAt);
 	});
 

@@ -40,6 +40,32 @@ const LIVE_POINTS_HOT_PATH_ROOT_FIELDS = new Set([
 export const isLivePointsHotPathRootField = (field: string): boolean =>
 	LIVE_POINTS_HOT_PATH_ROOT_FIELDS.has(field);
 
+// These roots are bounded, read-only companions that do not require the full
+// Data Core refresh.  A query containing one alongside a V2 live root must
+// stay on the Redis-first admission path.
+const LIVE_POINTS_HOT_PATH_SAFE_COMPANION_ROOT_FIELDS = new Set([
+	"_empty",
+	"__typename",
+	"__schema",
+	"__type",
+	"event",
+	"events",
+	"currentEventInfo",
+	"coreEventContext",
+	"fixtures",
+	"eventFixtures",
+]);
+
+export const isLivePointsHotPathSafeCompanionRootField = (field: string): boolean =>
+	LIVE_POINTS_HOT_PATH_SAFE_COMPANION_ROOT_FIELDS.has(field);
+
+export const isLivePointsHotPathOperation = (rootFields: readonly string[]): boolean =>
+	rootFields.some(isLivePointsHotPathRootField) &&
+	rootFields.every(
+		(field) =>
+			isLivePointsHotPathRootField(field) || isLivePointsHotPathSafeCompanionRootField(field)
+	);
+
 export const requiresLivePointsV2Contract = (rootFields: readonly string[]): boolean =>
 	rootFields.some(isLivePointsRootField);
 

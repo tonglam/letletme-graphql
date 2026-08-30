@@ -4551,44 +4551,50 @@ export const tournamentsRepository: TournamentsRepository = {
 				tournamentId
 			);
 			const uniqueRosterEntryIds = [...new Set(rosterEntryIds)];
-			// Admission must bound the metadata lookup as well as the projector. A
-			// large tournament must never load the complete roster just to discard
-			// it at the next 500-entry boundary.
-			const admissionWindow = selectTournamentDeskEntryWindow(
-				uniqueRosterEntryIds,
-				entryId,
-				MAX_TOURNAMENT_DESK_ENTRIES
-			);
+			// Eligibility is evaluated before admission so late FPL entrants do not
+			// inflate totalEntries or appear as deferred historical rows. The
+			// loader remains chunked at the 500-entry boundary and the eligible set
+			// is then reduced to the same bounded projector window.
 			let eligibilityUnavailable = false;
 			let eligibleRosterEntryIds: number[];
+			let deferredEntryIds: number[];
+			let eligibleEntryCount: number | null = null;
 			try {
-				eligibleRosterEntryIds = (
-					await loadTournamentEventEligibility(
-						admissionWindow.entryIds,
-						requestedEventId,
-						(entryIds) => entriesRepository.getEntriesByIds(context, entryIds)
-					)
-				).entryIds;
+				const eligibility = await loadTournamentEventEligibility(
+					uniqueRosterEntryIds,
+					requestedEventId,
+					(entryIds) => entriesRepository.getEntriesByIds(context, entryIds)
+				);
+				eligibleEntryCount = eligibility.entryIds.length;
+				const eligibleWindow = selectTournamentDeskEntryWindow(
+					eligibility.entryIds,
+					entryId,
+					MAX_TOURNAMENT_DESK_ENTRIES
+				);
+				eligibleRosterEntryIds = eligibleWindow.entryIds;
+				deferredEntryIds = eligibleWindow.deferredEntryIds;
 			} catch (error) {
 				// Entry metadata is an eligibility hint, not the source of live
-				// scores.  Keep the roster visible and let the V2 projector mark
-				// any entries it cannot prove as unavailable instead of failing the
-				// whole detail desk.
+				// scores. Keep the bounded raw window visible and make the result
+				// explicitly partial while eligibility is unavailable.
 				context.logger.warn(
 					{ err: error, eventId: requestedEventId, tournamentId },
 					"Tournament live entry eligibility unavailable"
 				);
 				eligibilityUnavailable = true;
+				const admissionWindow = selectTournamentDeskEntryWindow(
+					uniqueRosterEntryIds,
+					entryId,
+					MAX_TOURNAMENT_DESK_ENTRIES
+				);
 				eligibleRosterEntryIds = admissionWindow.entryIds;
+				deferredEntryIds = admissionWindow.deferredEntryIds;
 			}
 			const entryWindow = {
 				entryIds: eligibleRosterEntryIds,
-				deferredEntryIds: admissionWindow.deferredEntryIds,
+				deferredEntryIds,
 			};
-			const totalEntries =
-				uniqueRosterEntryIds.length <= MAX_TOURNAMENT_DESK_ENTRIES
-					? eligibleRosterEntryIds.length
-					: uniqueRosterEntryIds.length;
+			const totalEntries = eligibleEntryCount ?? uniqueRosterEntryIds.length;
 			const publication =
 				requestedEventId > 0
 					? await readLivePublicationV2(context, requestedEventId).catch((error) => {

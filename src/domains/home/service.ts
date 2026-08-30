@@ -243,13 +243,44 @@ export const applyHomeScoreLifecycle = (
 	};
 };
 
-const pairScore = (calc: LiveCalcDataV2 | undefined): number | null =>
-	calc &&
-	calc.availability === "READY" &&
-	calc.score.source !== "UNAVAILABLE" &&
-	typeof calc.score.netEventPoints === "number"
-		? calc.score.netEventPoints
+type ComparablePairScore = {
+	points: number;
+	publicationId: string;
+	scoreCore: string;
+};
+
+const pairScore = (calc: LiveCalcDataV2 | undefined): ComparablePairScore | null => {
+	const revisions = calc?.score.revisions;
+	return calc &&
+		calc.availability === "READY" &&
+		calc.score.source !== "UNAVAILABLE" &&
+		typeof calc.score.netEventPoints === "number" &&
+		revisions &&
+		typeof revisions.publicationId === "string" &&
+		typeof revisions.scoreCore === "string"
+		? {
+				points: calc.score.netEventPoints,
+				publicationId: revisions.publicationId,
+				scoreCore: revisions.scoreCore,
+			}
 		: null;
+};
+
+const compatiblePairScores = (
+	viewer: LiveCalcDataV2 | undefined,
+	opponent: LiveCalcDataV2 | undefined
+): { viewer: number; opponent: number } | null => {
+	const viewerScore = pairScore(viewer);
+	const opponentScore = pairScore(opponent);
+	if (
+		!viewerScore ||
+		!opponentScore ||
+		viewerScore.publicationId !== opponentScore.publicationId ||
+		viewerScore.scoreCore !== opponentScore.scoreCore
+	)
+		return null;
+	return { viewer: viewerScore.points, opponent: opponentScore.points };
+};
 
 const oldestCheckedAt = (...values: Array<string | null | undefined>): string | null => {
 	const parsed = values
@@ -276,13 +307,17 @@ export const applyHomePairScores = (
 			const opponentCalc = matchup.opponent.entryId
 				? results.get(matchup.opponent.entryId)
 				: undefined;
+			const pair = matchup.opponent.entryId ? compatiblePairScores(viewerCalc, opponentCalc) : null;
 			return {
 				...league,
 				h2hMatchup: {
 					...matchup,
-					viewer: { ...matchup.viewer, points: pairScore(viewerCalc) },
+					viewer: {
+						...matchup.viewer,
+						points: matchup.opponent.entryId ? (pair?.viewer ?? null) : null,
+					},
 					opponent: matchup.opponent.entryId
-						? { ...matchup.opponent, points: pairScore(opponentCalc) }
+						? { ...matchup.opponent, points: pair?.opponent ?? null }
 						: matchup.opponent,
 					sourceCheckedAt: oldestCheckedAt(
 						viewerCalc?.score.times?.sourceCheckedAt,

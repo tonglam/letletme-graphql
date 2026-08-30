@@ -106,12 +106,12 @@ const preloadPlayersByIds = async (
 	try {
 		const players = await playersService.getPlayersByIds(context, uniqueIds);
 		const preload = new Map(context.playersByIdPreload ?? []);
-		for (const id of uniqueIds) preload.set(id, null);
+		for (const id of uniqueIds) if (!preload.has(id)) preload.set(id, null);
 		for (const player of players) preload.set(player.id, player);
 		context.playersByIdPreload = preload;
 	} catch (error) {
 		const preload = new Map(context.playersByIdPreload ?? []);
-		for (const id of uniqueIds) preload.set(id, null);
+		for (const id of uniqueIds) if (!preload.has(id)) preload.set(id, null);
 		context.playersByIdPreload = preload;
 		context.logger.warn(
 			{ err: error, playerCount: uniqueIds.length },

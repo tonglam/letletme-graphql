@@ -104,6 +104,8 @@ const lifecycleCalc = (options: {
 	deliveryState?: "FRESH" | "DEGRADED";
 	overallRank?: number | null;
 	checkedAt?: string;
+	publicationId?: string;
+	scoreCoreRevision?: string;
 }): LiveCalcData => {
 	const checkedAt = options.checkedAt ?? "2026-08-25T00:00:00.000Z";
 	const deliveryState = options.final ? "FINAL" : (options.deliveryState ?? "FRESH");
@@ -134,6 +136,22 @@ const lifecycleCalc = (options: {
 			nextRefreshAt: null,
 			reconciliation: "NOT_COMPARABLE",
 			reasonCodes: [],
+			revisions: {
+				publicationId: options.publicationId ?? "home-publication-1",
+				generation: 1,
+				lifecycle: "lifecycle-1",
+				fixtureIdentity: "fixtures-1",
+				scoreCore: options.scoreCoreRevision ?? "score-core-1",
+				displayStats: "display-1",
+				explain: "explain-1",
+				picksBase: "picks-1",
+				officialAdjustment: null,
+				previousTotals: null,
+				finalResult: null,
+				rules: "rules-1",
+				algorithm: "live-points-v2-algorithm-1",
+				input: `input-${options.entryId}`,
+			},
 			delivery: {
 				state: deliveryState,
 				servedFrom: "REDIS_CURRENT",
@@ -512,6 +530,26 @@ describe("Home GraphQL contracts", () => {
 			opponent: { entryId: 456, points: 29 },
 			sourceCheckedAt: "2026-08-25T00:00:00.000Z",
 		});
+	});
+
+	it("hides an H2H matchup when the two scores use different revisions", () => {
+		const event = lifecycleEvent(false);
+		const results = new Map([
+			[123, lifecycleCalc({ entryId: 123, totalPoints: 71, netEventPoints: 33 })],
+			[
+				456,
+				lifecycleCalc({
+					entryId: 456,
+					totalPoints: 70,
+					netEventPoints: 29,
+					scoreCoreRevision: "score-core-2",
+				}),
+			],
+		]);
+		const result = applyHomePairScores(lifecycleDesk(), event, results);
+
+		expect(result.leagueRanks[0]?.h2hMatchup?.viewer.points).toBeNull();
+		expect(result.leagueRanks[0]?.h2hMatchup?.opponent.points).toBeNull();
 	});
 
 	it("maps tracked official leagues without requiring frozen tournament-roster membership", async () => {
