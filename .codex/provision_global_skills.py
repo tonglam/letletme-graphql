@@ -148,13 +148,13 @@ def tree_digest(root: Path) -> str:
         relative = relative_path.as_posix()
         if item.is_symlink():
             raise SystemExit(f"global skill tree contains a symlink: {item}")
-        # Runtime cache directories are ignored, but executable bytecode is
-        # never accepted. A timestamp-valid .pyc could otherwise be imported
-        # without changing the source digest.
-        if item.is_file() and item.suffix.casefold() in {".pyc", ".pyo"}:
-            raise SystemExit(f"global skill tree contains executable bytecode: {item}")
         if "__pycache__" in relative_path.parts:
             continue
+        # Runtime cache directories are ignored, but executable bytecode is
+        # never accepted outside those caches.  A timestamp-valid .pyc could
+        # otherwise be imported without changing the source digest.
+        if item.is_file() and item.suffix.casefold() in {".pyc", ".pyo"}:
+            raise SystemExit(f"global skill tree contains executable bytecode: {item}")
         if item.is_dir():
             digest.update(f"D:{relative}\0".encode("utf-8"))
             continue
@@ -178,8 +178,9 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="install only missing skill directories")
     args = parser.parse_args()
 
-    # Check the lexical manifest path before resolving it so a symlink cannot
-    # bypass the immutable-manifest requirement.
+    # Check the lexical manifest path before resolving it.  Resolving first
+    # would turn a symlink into its target and bypass the immutable-manifest
+    # requirement enforced by ``load_manifest``.
     manifest, advertised = load_manifest(args.manifest)
     with tempfile.TemporaryDirectory(prefix="codex-global-skills-") as temporary:
         source_root = verify_registry(

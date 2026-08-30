@@ -281,6 +281,59 @@ jobs:
                             raise SystemExit(f"approved governance constant {name} must be a literal")
                 raise SystemExit(f"approved governance constant {name} is missing")
 
+            def function_node(tree, name):
+                for node in tree.body:
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+                        return node
+                raise SystemExit(f"approved validator is missing function {name}")
+
+            def called_names(node):
+                names = set()
+                for child in ast.walk(node):
+                    if not isinstance(child, ast.Call):
+                        continue
+                    if isinstance(child.func, ast.Name):
+                        names.add(child.func.id)
+                    elif isinstance(child.func, ast.Attribute):
+                        names.add(child.func.attr)
+                return names
+
+            def check_validator_shape(tree):
+                parse_yaml = function_node(tree, "parse_yaml_mapping")
+                validate = function_node(tree, "validate_asset")
+                main = function_node(tree, "main")
+                required_calls = {
+                    "parse_yaml_mapping": (parse_yaml, {"_parse_scalar"}),
+                    "validate_asset": (validate, {"validate_skill", "_validate_instruction_file", "_validate_global_manifest"}),
+                    "main": (main, {"validate_asset"}),
+                }
+                for label, (node, required_names) in required_calls.items():
+                    missing = sorted(required_names - called_names(node))
+                    if missing:
+                        raise SystemExit(f"approved validator {label} is missing operational calls: {', '.join(missing)}")
+                if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(parse_yaml)):
+                    raise SystemExit("approved validator parse_yaml_mapping has no parsing control flow")
+                if not any(isinstance(node, (ast.For, ast.While, ast.If, ast.Try)) for node in ast.walk(validate)):
+                    raise SystemExit("approved validator validate_asset has no validation control flow")
+                if not any(isinstance(node, ast.Try) for node in ast.walk(main)):
+                    raise SystemExit("approved validator main has no guarded validation path")
+
+            # Exercise the checker itself against a controlled no-op fixture;
+            # this remains data-only and never imports or executes contributor
+            # code in pull_request_target.
+            no_op_fixture = ast.parse(
+                "def parse_yaml_mapping(): return {}\n"
+                "def validate_asset(): return {'ok': True}\n"
+                "def main(): return 0\n"
+            )
+            try:
+                check_validator_shape(no_op_fixture)
+            except SystemExit:
+                pass
+            else:
+                raise SystemExit("validator semantic fixture unexpectedly passed")
+            check_validator_shape(validator)
+
             manifest = json.loads(Path("target/.codex/global-skills.json").read_text(encoding="utf-8"))
             contract = json.loads(Path("target/.codex/instruction-integrity.json").read_text(encoding="utf-8"))
             if assignment(provisioner, "EXPECTED_REGISTRY") != manifest.get("registry"):
@@ -314,13 +367,34 @@ jobs:
               raise "trusted gate condition is incomplete" unless gate["if"].to_s.include?("pull_request_target") && gate["if"].to_s.include?("push")
               permissions = workflow["permissions"]
               raise "workflow must be read-only" unless permissions.is_a?(Hash) && permissions["contents"].to_s == "read"
-              runs = Array(gate["steps"]).map { |step| step.is_a?(Hash) ? step["run"].to_s : nil }.compact
-              joined = runs.join("\\n")
-              %w[trusted/.codex/validate_instructions.py --trusted-policy --trusted-contract --registry-source].each do |needle|
-                raise "trusted gate command is missing #{needle}" unless joined.include?(needle)
+              steps = Array(gate["steps"])
+              validate_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate AGENTS.md and skills" }
+              raise "trusted validator step is missing" unless validate_step
+              raise "trusted validator step may not ignore failures" if validate_step["continue-on-error"] == true || validate_step["continue-on-error"].to_s.casecmp("true").zero?
+              run = validate_step["run"].to_s
+              raise "trusted validator step disables errexit" if run.lines.any? { |line| line.strip == "set +e" }
+              logical_commands = []
+              current = ""
+              run.each_line do |line|
+                piece = line.strip
+                if piece.end_with?("\\")
+                  current << piece[0...-1] << " "
+                else
+                  logical_commands << (current + piece)
+                  current = ""
+                end
               end
+              logical_commands << current unless current.empty?
+              command = logical_commands.find do |line|
+                line.match?(/\A(?:[A-Z_][A-Z0-9_]*=\S+\s+)*python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\z)/)
+              end
+              raise "trusted validator command is missing or not executable" unless command
+              %w[--trusted-policy --trusted-contract --registry-source].each do |needle|
+                raise "trusted validator command is missing #{needle}" unless command.split.include?(needle) || command.include?("#{needle} ")
+              end
+              raise "trusted validator command ignores failures" if command.match?(/\|\|\s*(?:true|:)(?:\s|\z)/)
               %w[AGENTS.md .codex/global-skills.json .codex/provision_global_skills.py].each do |needle|
-                raise "bootstrap protection is missing #{needle}" unless joined.include?(needle)
+                raise "bootstrap protection is missing #{needle}" unless steps.any? { |step| step.is_a?(Hash) && step["run"].to_s.include?(needle) }
               end
             RUBY
           fi

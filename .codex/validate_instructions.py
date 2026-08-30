@@ -27,12 +27,13 @@ REFERENCE_DEF_RE = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(<[^>]*>|[^\s]+)", re.M)
 REFERENCE_TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".txt", ".text", ".rst"}
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 SECRET_VALUE_RES = (
-    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?token|private[_ -]?key|client[_ -]?secret|password)["']?\s*[:=]\s*([^\s`<>]+)'''),
-    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*([^\s`<>]+)'''),
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?token|private[_ -]?key|client[_ -]?secret|password)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\s`<>]+))'''),
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\s`<>]+))'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
     re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]+:([^\s/@]+)@"),
-    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{20,})\b"),
+    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|sk-(?:[A-Za-z0-9]+-)*[A-Za-z0-9]{20,})\b"),
 )
+FORBIDDEN_YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 PLACEHOLDER_VALUES = {
     "example",
     "example-token",
@@ -136,6 +137,8 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
     value = _strip_yaml_comment(value.strip())
     if not value:
         raise ValueError(f"{path}:{line_number}: empty YAML value")
+    if FORBIDDEN_YAML_CONTROL_RE.search(value):
+        raise ValueError(f"{path}:{line_number}: YAML scalar contains a forbidden control character")
     if value[0] in {'"', "'"}:
         quote = value[0]
         if len(value) < 2 or value[-1] != quote:
@@ -147,6 +150,8 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
                 raise ValueError(f"{path}:{line_number}: invalid double-quoted YAML scalar") from exc
             if not isinstance(decoded, str):
                 raise ValueError(f"{path}:{line_number}: YAML scalar is not a string")
+            if FORBIDDEN_YAML_CONTROL_RE.search(decoded):
+                raise ValueError(f"{path}:{line_number}: YAML scalar contains a forbidden control character")
             return decoded
         index = 1
         while index < len(value) - 1:
@@ -157,7 +162,10 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
                 index += 2
                 continue
             raise ValueError(f"{path}:{line_number}: invalid single-quoted YAML scalar")
-        return value[1:-1].replace("''", "'")
+        decoded = value[1:-1].replace("''", "'")
+        if FORBIDDEN_YAML_CONTROL_RE.search(decoded):
+            raise ValueError(f"{path}:{line_number}: YAML scalar contains a forbidden control character")
+        return decoded
     if value[0] not in "[{":
         # Apostrophes and brackets are ordinary characters in a YAML plain
         # scalar (for example, "user's route" or "[locale]").
@@ -182,10 +190,6 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
         if implicit_number or implicit_special or implicit_bool or implicit_timestamp:
             if scalar_only:
                 raise ValueError(f"{path}:{line_number}: YAML scalar uses an implicit non-string type")
-            # The openai.yaml shape validator requires interface fields to be
-            # strings; a typed sentinel keeps the failure explicit without
-            # pretending this dependency-free parser implements every YAML
-            # numeric/date conversion.
             return 0
         if re.fullmatch(r"(?i)(?:null|~)", value):
             if scalar_only:
@@ -340,10 +344,22 @@ def _without_markdown_code(text: str) -> str:
             run = quote_match.group(3)
             marker = (run[0], len(run), prefix.count(">"), quote_match.group(4))
         else:
-            normal_match = re.match(r"^( {0,3})([`~]{3,})(.*)$", body)
-            if normal_match:
-                run = normal_match.group(2)
-                marker = (run[0], len(run), 0, normal_match.group(3))
+            # A fenced block may be the contents of a list item.  The list
+            # marker is a container prefix, not part of the fence itself;
+            # retain the quote depth so a nested quote cannot close it.
+            list_match = re.match(
+                r"^( {0,3}(?:> ?)*)(?: {0,3})(?:[-+*]|\d+[.)])[ \t]+( {0,3})([`~]{3,})(.*)$",
+                body,
+            )
+            if list_match:
+                prefix = list_match.group(1)
+                run = list_match.group(3)
+                marker = (run[0], len(run), prefix.count(">"), list_match.group(4))
+            else:
+                normal_match = re.match(r"^( {0,3})([`~]{3,})(.*)$", body)
+                if normal_match:
+                    run = normal_match.group(2)
+                    marker = (run[0], len(run), 0, normal_match.group(3))
         if marker is not None:
             if fence is None:
                 fence = marker[:3]
@@ -570,6 +586,42 @@ def check_yaml_shape(path: Path, errors: list[str], *, skill_name: str | None = 
             errors.append(f"{path}: interface.default_prompt must invoke ${skill_name}")
 
 
+def _skill_entrypoints(root: Path, repo: Path) -> Iterable[Path]:
+    """Yield skill entrypoints, including a sentinel for symlinked directories."""
+
+    if not root.exists() and not root.is_symlink():
+        return
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        if current.is_symlink():
+            # Do not descend through a directory symlink.  Yielding its
+            # expected entrypoint lets the normal path validation report the
+            # symlink instead of silently omitting the skill from discovery.
+            if current.name == "SKILL.md":
+                yield current
+            else:
+                yield current / "SKILL.md"
+            continue
+        if not current.is_dir():
+            continue
+        try:
+            children = list(current.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            relative = child.relative_to(repo)
+            if any(part in IGNORED_PARTS for part in relative.parts):
+                continue
+            if child.name == "SKILL.md":
+                yield child
+            elif child.is_symlink():
+                if child.is_dir() or not child.exists():
+                    yield child / "SKILL.md"
+            elif child.is_dir():
+                pending.append(child)
+
+
 def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
     if not include_discovery:
         return []
@@ -578,9 +630,9 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
         for path in repo.rglob(pattern):
             if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
                 paths.add(path.absolute())
-    for pattern in (".agents/**/SKILL.md", "skills/**/SKILL.md"):
-        for path in repo.glob(pattern):
-            if path.is_file() and not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
+    for root in (repo / ".agents", repo / "skills"):
+        for path in _skill_entrypoints(root, repo):
+            if not any(part in IGNORED_PARTS for part in path.relative_to(repo).parts):
                 paths.add(path.absolute())
     return sorted(paths)
 
