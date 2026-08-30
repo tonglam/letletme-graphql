@@ -24,6 +24,7 @@ INLINE_LINK_RE = re.compile(
     r"\[[^\]]*\]\(\s*(<[^>]*>|[^\s)]+)(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*\)"
 )
 REFERENCE_DEF_RE = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(<[^>]*>|[^\s]+)", re.M)
+REFERENCE_TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".txt", ".text", ".rst"}
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 SECRET_VALUE_RES = (
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?key|access[_ -]?token|private[_ -]?key|client[_ -]?secret|password)["']?\s*[:=]\s*([^\s`<>]+)'''),
@@ -106,7 +107,10 @@ def _strip_yaml_comment(value: str) -> str:
             escaped = True
             continue
         if char in {'"', "'"}:
-            if quote is None:
+            # A quote inside a plain scalar (for example, ``user's route``)
+            # is ordinary text. Only a quote at the scalar start opens a YAML
+            # quoted scalar, so comments after apostrophes are still removed.
+            if quote is None and index == 0:
                 quote = char
             elif quote == char:
                 quote = None
@@ -144,7 +148,7 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
     if value[0] not in "[{":
         # Apostrophes and brackets are ordinary characters in a YAML plain
         # scalar (for example, "user's route" or "[locale]").
-        if value[0] in "!&*@`>|%,?" or value[0] == "#":
+        if value[0] in "]}!&*@`>|%,?" or value[0] == "#":
             raise ValueError(f"{path}:{line_number}: reserved YAML indicator must be quoted")
         if re.match(r"[-?:](?:\s|$)", value):
             raise ValueError(f"{path}:{line_number}: reserved YAML indicator must be quoted")
@@ -260,10 +264,35 @@ def resolve_path(
     return resolved
 
 
+def _without_markdown_code(text: str) -> str:
+    """Remove fenced and inline code before extracting operative links."""
+
+    lines: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")):
+            marker = stripped[:3]
+            if fence is None:
+                fence = marker
+            elif marker == fence:
+                fence = None
+            lines.append("\n" if line.endswith("\n") else "")
+            continue
+        if fence is not None:
+            lines.append("\n" if line.endswith("\n") else "")
+            continue
+        # Preserve line length while masking inline-code destinations.
+        masked = re.sub(r"(?<!\\)(`+)(?:(?!\1).)*\1", lambda match: "".join("\n" if c == "\n" else " " for c in match.group(0)), line)
+        lines.append(masked)
+    return "".join(lines)
+
+
 def _markdown_targets(text: str) -> Iterable[str]:
     # The usual regular expression form stops at the first closing parenthesis
     # and rejects legitimate destinations such as ``guide_(v2).md``. Walk the
     # destination so balanced parentheses and escaped characters are retained.
+    text = _without_markdown_code(text)
     cursor = 0
     while True:
         marker = text.find("](", cursor)
@@ -367,7 +396,7 @@ def scan_reference_graph(
                 continue
             if not allow_external and not _is_within(candidate, repo.resolve()):
                 continue
-            if not candidate.is_file() or candidate.suffix.casefold() not in {".md", ".yaml", ".yml", ".json"}:
+            if not candidate.is_file() or candidate.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES:
                 continue
             if not allow_external and (lexical.is_symlink() or not _is_within(candidate, repo.resolve())):
                 errors.append(f"{lexical}: referenced instruction must remain inside the repository and may not be a symlink")
@@ -633,14 +662,9 @@ def _validate_policy_against_trusted(
     if not isinstance(trusted_rules, dict) or not isinstance(proposed_rules, dict):
         errors.append("proposed policy review_rules must remain a mapping")
         return
-    for key, required in {
-        "all_findings": ("dispositioned", "resolved"),
-        "all_other_paths": ("P2", "P3", "resolved"),
-        "tests_and_scripts": ("tests", "scripts", "P0", "P1", "P2", "P3"),
-    }.items():
-        value = proposed_rules.get(key)
-        if not isinstance(value, str) or not all(marker.casefold() in value.casefold() for marker in required):
-            errors.append(f"proposed policy weakens review_rules.{key}")
+    for key in REVIEW_RULE_KEYS:
+        if proposed_rules.get(key) != trusted_rules.get(key):
+            errors.append(f"proposed policy changes trusted review_rules.{key}")
 
 
 def _validate_against_trusted_contract(
@@ -656,8 +680,8 @@ def _validate_against_trusted_contract(
         errors.append("contract asset_id does not match the trusted base contract")
     if not allow_config_commit_update and contract.get("canonical_config_commit") != trusted.get("canonical_config_commit"):
         errors.append("contract canonical_config_commit differs from the trusted base contract")
-    if allow_config_commit_update and contract.get("canonical_config_commit") != CANONICAL_CONFIG_COMMIT:
-        errors.append("approved contract canonical_config_commit is not the trusted immutable configuration revision")
+    if allow_config_commit_update and not re.fullmatch(r"[0-9a-fA-F]{40}", str(contract.get("canonical_config_commit", ""))):
+        errors.append("approved contract canonical_config_commit must be a full 40-character revision")
     if contract.get("policy_profile") != trusted.get("policy_profile"):
         errors.append("contract policy_profile differs from the trusted base contract")
     for key in ("required_agents", "required_skills", "required_global_skills"):
@@ -675,6 +699,8 @@ def _validate_global_manifest(
     errors: list[str],
     *,
     registry_source: Path | None = None,
+    allow_config_commit_update: bool = False,
+    expected_contract_commit: str | None = None,
 ) -> None:
     unknown = sorted(set(manifest) - GLOBAL_MANIFEST_KEYS)
     if unknown:
@@ -682,12 +708,19 @@ def _validate_global_manifest(
     if manifest.get("version") != 1:
         errors.append(f"{manifest_path}: unsupported global manifest version {manifest.get('version')!r}")
     registry = manifest.get("registry")
-    if registry != GLOBAL_REGISTRY_DESCRIPTOR:
+    if not allow_config_commit_update and registry != GLOBAL_REGISTRY_DESCRIPTOR:
         errors.append(
             f"{manifest_path}: registry must pin {GLOBAL_REGISTRY_DESCRIPTOR['repository']}@{GLOBAL_REGISTRY_DESCRIPTOR['ref']}:{GLOBAL_REGISTRY_DESCRIPTOR['path']} with the trusted content digest"
         )
-    elif not re.fullmatch(r"[0-9a-f]{64}", str(registry.get("sha256", ""))):
-        errors.append(f"{manifest_path}: registry sha256 must be a 64-character lowercase hex digest")
+    elif isinstance(registry, dict):
+        if registry.get("repository") != GLOBAL_REGISTRY_DESCRIPTOR["repository"] or registry.get("path") != GLOBAL_REGISTRY_DESCRIPTOR["path"]:
+            errors.append(f"{manifest_path}: registry repository/path must remain the trusted workspace registry")
+        if not re.fullmatch(r"[0-9a-f]{40}", str(registry.get("ref", ""))):
+            errors.append(f"{manifest_path}: registry ref must be a full 40-character lowercase commit")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(registry.get("sha256", ""))):
+            errors.append(f"{manifest_path}: registry sha256 must be a 64-character lowercase hex digest")
+    else:
+        errors.append(f"{manifest_path}: registry must be an object")
     advertised = manifest.get("skills")
     if not isinstance(advertised, list) or set(advertised) != set(expected_skills):
         errors.append(f"{manifest_path}: advertised skills do not match required_global_skills")
@@ -715,7 +748,9 @@ def _validate_global_manifest(
     if not isinstance(source_manifest.get("assets"), list):
         errors.append(f"{manifest_path}: pinned registry does not contain an assets array")
     source_metadata = source_manifest.get("source")
-    if not isinstance(source_metadata, dict) or source_metadata.get("revision") != CANONICAL_CONFIG_COMMIT:
+    source_revision = source_metadata.get("revision") if isinstance(source_metadata, dict) else None
+    expected_revision = expected_contract_commit if allow_config_commit_update else CANONICAL_CONFIG_COMMIT
+    if not isinstance(source_metadata, dict) or source_revision != expected_revision:
         errors.append(f"{manifest_path}: pinned registry source revision is not the trusted canonical configuration")
     governance = source_manifest.get("governance")
     allowlist = governance.get("global_skill_allowlist", []) if isinstance(governance, dict) else []
@@ -749,7 +784,7 @@ def validate_skill(
     # References are part of the skill's executable instruction surface. Scan
     # them recursively so a secret or broken link cannot hide behind SKILL.md.
     for reference in path.rglob("*"):
-        if not reference.is_file() or reference == entry or reference.suffix.casefold() not in {".md", ".yaml", ".yml", ".json"}:
+        if not reference.is_file() or reference == entry or reference.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES:
             continue
         if not allow_external and (reference.is_symlink() or not _is_within(reference.resolve(), repo.resolve())):
             errors.append(f"{reference}: skill reference must remain inside the repository and may not be a symlink")
@@ -857,6 +892,8 @@ def validate_asset(
                         globals_value,
                         errors,
                         registry_source=registry_source,
+                        allow_config_commit_update=allow_config_commit_update,
+                        expected_contract_commit=str(contract.get("canonical_config_commit", "")),
                     )
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
                     errors.append(str(exc))

@@ -25,7 +25,7 @@ permissions:
 concurrency:
   # pull_request_target exposes the base ref as github.ref; use the PR number
   # so one PR cannot cancel another. Push runs remain grouped by branch.
-  group: instruction-integrity-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}
+  group: instruction-integrity-${{ github.event_name }}-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}
   cancel-in-progress: true
 
 jobs:
@@ -123,7 +123,7 @@ jobs:
       # Approval is valid only for the labeled event's exact head. A later
       # synchronize event is unapproved until the maintainer labels that new
       # head again, so a persistent label cannot authorize unseen commits.
-      GOVERNANCE_UPDATE_APPROVED: ${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') }}
+      GOVERNANCE_UPDATE_APPROVED: ${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') }}
     steps:
       - name: Checkout proposed tree (read-only)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -147,9 +147,11 @@ jobs:
         run: |
           set -eu
           manifest="target/.codex/global-skills.json"
-          python3 - "$manifest" <<'PY'
+          GOVERNANCE_UPDATE_APPROVED="$GOVERNANCE_UPDATE_APPROVED" python3 - "$manifest" <<'PY'
           import hashlib
           import json
+          import os
+          import re
           import subprocess
           import sys
           from pathlib import Path
@@ -162,9 +164,20 @@ jobs:
               "path": "registry/workspace-assets.json",
               "sha256": "fa1a2a5448e34376c4dccfe43c6c8a901adb9b62df3995b1f11d3aa4b9b77cb6",
           }
-          expected_source_revision = "312eaf56264f65bcc74fd7b81d8981a3517eca02"
-          if descriptor != expected:
+          approved = os.environ.get("GOVERNANCE_UPDATE_APPROVED") == "true"
+          target_contract = json.loads(Path("target/.codex/instruction-integrity.json").read_text(encoding="utf-8"))
+          expected_source_revision = target_contract.get("canonical_config_commit") if approved else "312eaf56264f65bcc74fd7b81d8981a3517eca02"
+          if not approved and descriptor != expected:
               raise SystemExit("global registry descriptor is not the trusted immutable pin")
+          if approved:
+              if not isinstance(descriptor, dict) or descriptor.get("repository") != expected["repository"] or descriptor.get("path") != expected["path"]:
+                  raise SystemExit("approved registry transition must remain on the trusted workspace registry")
+              if not isinstance(descriptor.get("ref"), str) or not re.fullmatch(r"[0-9a-f]{40}", descriptor["ref"]):
+                  raise SystemExit("approved registry transition requires a full registry commit")
+              if not isinstance(descriptor.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", descriptor["sha256"]):
+                  raise SystemExit("approved registry transition requires a 64-character content digest")
+              if not isinstance(expected_source_revision, str) or not re.fullmatch(r"[0-9a-f]{40}", expected_source_revision):
+                  raise SystemExit("approved registry transition requires a full canonical source revision")
           checkout = Path("registry-source")
           subprocess.run(
               ["git", "clone", "--filter=blob:none", "--no-checkout", "--depth=1", "--no-tags",
@@ -173,6 +186,9 @@ jobs:
               stdout=subprocess.DEVNULL,
           )
           subprocess.run(["git", "-C", str(checkout), "fetch", "--depth=1", "origin", descriptor["ref"]], check=True, stdout=subprocess.DEVNULL)
+          subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", descriptor["ref"]], check=True, stdout=subprocess.DEVNULL)
+          if approved:
+              subprocess.run(["git", "-C", str(checkout), "fetch", "--depth=1", "origin", expected_source_revision], check=True, stdout=subprocess.DEVNULL)
           blob = subprocess.check_output(["git", "-C", str(checkout), "show", f"{descriptor['ref']}:{descriptor['path']}"])
           if hashlib.sha256(blob).hexdigest() != descriptor["sha256"]:
               raise SystemExit("pinned registry content digest mismatch")
@@ -198,6 +214,7 @@ jobs:
             .codex/global-skills.json \
             .codex/provision_global_skills.py; do
             if test -e "trusted/$file" && test "$approved" != true; then
+              test ! -L "trusted/$file"
               test -f "target/$file" && test ! -L "target/$file"
               cmp -s "trusted/$file" "target/$file" || {
                 echo "governance gate file changed: $file"
