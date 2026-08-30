@@ -210,6 +210,11 @@ describe("Live Points V2 projection", () => {
 		expect(result.score.netEventPoints).toBe(result.score.eventPoints - 4);
 		expect(result.score.totalPoints).toBeNull();
 		expect(result.score.revisions.input).not.toBe("unavailable");
+		expect(result.pickList.find((pick) => pick.element === 1)).toMatchObject({
+			elementTypeName: "GKP",
+			playStatus: 2,
+		});
+		expect(result.pickList.find((pick) => pick.element === 15)?.playStatus).toBe(1);
 	});
 
 	it("does not apply the 30-second live heartbeat budget to immutable picks", async () => {
@@ -249,7 +254,11 @@ describe("Live Points V2 projection", () => {
 		const redis = buildV2Redis();
 		const itemKey = "llm:data:v2:fpl:live:2627:1:1:eventLive";
 		const activeKey = "llm:data:v2:fpl:live:2627:1:active";
-		const truncated = (JSON.parse(redis.values.get(itemKey)!) as unknown[]).slice(1);
+		// Remove an authoritative player who is not in entry 6953. The global
+		// publication must still fail closed before the entry projection runs.
+		const truncated = (
+			JSON.parse(redis.values.get(itemKey)!) as Array<{ elementId: number }>
+		).filter((row) => row.elementId !== 5);
 		const payload = canonicalJson(truncated);
 		const checksum = hash(truncated);
 		redis.values.set(itemKey, payload);

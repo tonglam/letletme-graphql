@@ -1567,8 +1567,8 @@ const entryMetadataKey = (context: GraphQLContext, entryId: number): string =>
 const readRedisGlobal = (
 	context: GraphQLContext,
 	eventId: number,
-	expectedScoreCoreRevision?: string,
-	expectedPlayerIds?: ReadonlySet<number>
+	expectedPlayerIds: ReadonlySet<number>,
+	expectedScoreCoreRevision?: string
 ): Promise<GlobalRead | null> => {
 	const scope = requestScope(context);
 	let memo = requestRedisGlobalMemo.get(scope);
@@ -1576,7 +1576,11 @@ const readRedisGlobal = (
 		memo = new Map();
 		requestRedisGlobalMemo.set(scope, memo);
 	}
-	const memoKey = String(eventId) + ":" + (expectedScoreCoreRevision ?? "current");
+	// Roster validation is part of the read contract. Keep differently sized or
+	// revisioned core rosters from sharing a memoized publication result.
+	const rosterRevision = hash([...expectedPlayerIds].sort((left, right) => left - right));
+	const memoKey =
+		String(eventId) + ":" + (expectedScoreCoreRevision ?? "current") + ":" + rosterRevision;
 	const existing = memo.get(memoKey);
 	if (existing) return existing;
 	const load = (async (): Promise<GlobalRead | null> => {
@@ -1644,6 +1648,24 @@ const readDatabaseGlobalMemoized = (
 	return load;
 };
 
+const requireCompleteGlobalRoster = (
+	context: GraphQLContext,
+	global: GlobalRead | null,
+	expectedPlayerIds: ReadonlySet<number>
+): GlobalRead | null => {
+	if (!global || hasCompleteEventLiveRoster(global.eventLives, expectedPlayerIds)) return global;
+	metrics.livePublicationEventsTotal.labels("roster_incomplete").inc();
+	context.logger.warn(
+		{
+			eventId: global.publication.eventId,
+			actualPlayerCount: global.eventLives.length,
+			expectedPlayerCount: expectedPlayerIds.size,
+		},
+		"Live Points V2 publication has incomplete event-live roster"
+	);
+	return null;
+};
+
 const readGlobal = async (
 	context: GraphQLContext,
 	eventId: number,
@@ -1655,8 +1677,8 @@ const readGlobal = async (
 	const redisGlobal = await readRedisGlobal(
 		context,
 		eventId,
-		expectedScoreCoreRevision,
-		expectedPlayerIds
+		expectedPlayerIds,
+		expectedScoreCoreRevision
 	);
 	if (redisGlobal) return redisGlobal;
 	const databaseGlobal = await readDatabaseGlobalMemoized(
@@ -1664,21 +1686,7 @@ const readGlobal = async (
 		eventId,
 		expectedScoreCoreRevision
 	);
-	if (databaseGlobal && hasCompleteEventLiveRoster(databaseGlobal.eventLives, expectedPlayerIds)) {
-		return databaseGlobal;
-	}
-	if (databaseGlobal) {
-		metrics.livePublicationEventsTotal.labels("roster_incomplete").inc();
-		context.logger.warn(
-			{
-				eventId,
-				actualPlayerCount: databaseGlobal.eventLives.length,
-				expectedPlayerCount: expectedPlayerIds.size,
-			},
-			"Live Points V2 publication has incomplete event-live roster"
-		);
-	}
-	return null;
+	return requireCompleteGlobalRoster(context, databaseGlobal, expectedPlayerIds);
 };
 
 /** Read the complete event publication for non-entry live desks. */
@@ -1817,7 +1825,7 @@ const preloadEntryMetadata = async (
 };
 
 const playerTypeName = (type: number): string =>
-	({ 1: "Goalkeeper", 2: "Defender", 3: "Midfielder", 4: "Forward" })[type] ?? "Unknown";
+	({ 1: "GKP", 2: "DEF", 3: "MID", 4: "FWD" })[type] ?? "";
 
 const parseExpected = (value: string | null): number | null => {
 	const parsed = value === null ? Number.NaN : Number(value);
@@ -1831,6 +1839,27 @@ const eventFixturesForPlayer = (
 	fixtures.filter((fixture) => fixture.teamH === player.teamId || fixture.teamA === player.teamId);
 
 const played = (row: EventLiveRow | undefined): boolean => (row?.minutes ?? 0) > 0;
+
+const fixtureHasStarted = (fixture: FixtureRow): boolean =>
+	fixture.started === true ||
+	fixture.finished ||
+	fixture.finishedProvisional ||
+	fixture.minutes > 0;
+
+const fixtureHasFinished = (fixture: FixtureRow): boolean =>
+	fixture.finished || fixture.finishedProvisional;
+
+const playStatusForPlayer = (
+	playerFixtures: readonly FixtureRow[],
+	live: EventLiveRow | undefined
+): number => {
+	if (playerFixtures.length === 0) return 0;
+	const finishedFixtures = playerFixtures.filter(fixtureHasFinished).length;
+	if (finishedFixtures === playerFixtures.length) return 4;
+	if (playerFixtures.length > 1 && finishedFixtures > 0) return 3;
+	if (playerFixtures.some(fixtureHasStarted) || played(live)) return 2;
+	return 1;
+};
 
 const fixtureIdFromBreakdown = (value: unknown): number | null => {
 	if (!isRecord(value)) return null;
@@ -2089,10 +2118,8 @@ const mapPick = (params: {
 	const opponentShortNames = fixtureDetails
 		.map((item) => item.opponentTeam?.shortName ?? "")
 		.filter(Boolean);
-	const isGwStarted = playerFixtures.some((item) => item.started === true);
-	const allFinished =
-		playerFixtures.length > 0 &&
-		playerFixtures.every((item) => item.finished || item.finishedProvisional);
+	const isGwStarted = playerFixtures.some(fixtureHasStarted);
+	const allFinished = playerFixtures.length > 0 && playerFixtures.every(fixtureHasFinished);
 	const isActive = lineup.active.has(pick.element);
 	// A projected automatic-substitution entrant normally has the bench's base
 	// multiplier (zero). Once the entrant is promoted into the XI, FPL scoring
@@ -2132,7 +2159,7 @@ const mapPick = (params: {
 		isGwStarted,
 		isGwFinished: allFinished,
 		isPlayed: played(live),
-		playStatus: played(live) ? 1 : 0,
+		playStatus: playStatusForPlayer(playerFixtures, live),
 		minutes: live?.minutes ?? 0,
 		goalsScored: live?.goalsScored ?? 0,
 		assists: live?.assists ?? 0,
@@ -2736,22 +2763,33 @@ export const calcLivePointsByEntryV2 = async (
 		entryId,
 		options.scoreCoreRevision ?? "current",
 	].join(":");
-	const redisGlobal = await readRedisGlobal(context, eventId, options.scoreCoreRevision);
+	const core = await readCore(context);
+	const expectedPlayerIds = core ? new Set(core.players.map((player) => player.id)) : null;
+	const redisGlobal = expectedPlayerIds
+		? await readRedisGlobal(context, eventId, expectedPlayerIds, options.scoreCoreRevision)
+		: null;
 	const lkgCandidate = readLiveLkg(lkgKey);
 	// The fallback order is intentional: a process LKG is a complete response
 	// for this exact event/entry and is safer than a cold database read that may
 	// combine metadata from a different publication.
 	const global =
 		redisGlobal ??
-		(lkgCandidate
+		(lkgCandidate || !expectedPlayerIds
 			? null
-			: await readDatabaseGlobalMemoized(context, eventId, options.scoreCoreRevision));
+			: requireCompleteGlobalRoster(
+					context,
+					await readDatabaseGlobalMemoized(context, eventId, options.scoreCoreRevision),
+					expectedPlayerIds
+				));
 	const processLkg =
 		lkgCandidate && (!global || lkgMatchesGlobal(lkgCandidate, global)) ? lkgCandidate : null;
 	if (!global) {
 		return observeLivePointsResult(
 			processLkg
-				? degradedLkg(processLkg, "GLOBAL_PUBLICATION_UNAVAILABLE")
+				? degradedLkg(
+						processLkg,
+						core ? "GLOBAL_PUBLICATION_UNAVAILABLE" : "CORE_IDENTITY_UNAVAILABLE"
+					)
 				: emptyUnavailable(
 						context,
 						eventId,
@@ -2785,7 +2823,6 @@ export const calcLivePointsByEntryV2 = async (
 				: emptyFromGlobal(context, global, eventId, entryId, "PENDING", "ENTRY_INPUT_PENDING")
 		);
 	}
-	const core = await readCore(context);
 	try {
 		const result = await buildReady(
 			context,

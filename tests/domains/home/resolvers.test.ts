@@ -101,15 +101,17 @@ const lifecycleCalc = (options: {
 	totalPoints: number;
 	netEventPoints: number;
 	final?: boolean;
+	deliveryState?: "FRESH" | "DEGRADED";
 	overallRank?: number | null;
 	checkedAt?: string;
 }): LiveCalcData => {
 	const checkedAt = options.checkedAt ?? "2026-08-25T00:00:00.000Z";
+	const deliveryState = options.final ? "FINAL" : (options.deliveryState ?? "FRESH");
 	return {
 		availability: "READY",
 		entry: options.entryId,
 		delivery: {
-			state: options.final ? "FINAL" : "FRESH",
+			state: deliveryState,
 			servedFrom: "REDIS_CURRENT",
 			reasonCodes: [],
 		},
@@ -123,7 +125,7 @@ const lifecycleCalc = (options: {
 			leagueRank: null,
 			transferCost: 0,
 			source: options.final ? "FPL_FINAL_RESULT" : "FPL_EVENT_LIVE",
-			state: options.final ? "FINAL" : "FRESH",
+			state: deliveryState,
 			eventPointSemantics: "ZERO_COST_EQUIVALENT",
 			revision: options.final ? "final:1" : "event-live:1:lineup:projected",
 			checkedAt,
@@ -133,7 +135,7 @@ const lifecycleCalc = (options: {
 			reconciliation: "NOT_COMPARABLE",
 			reasonCodes: [],
 			delivery: {
-				state: options.final ? "FINAL" : "FRESH",
+				state: deliveryState,
 				servedFrom: "REDIS_CURRENT",
 				reasonCodes: [],
 			},
@@ -440,6 +442,22 @@ describe("Home GraphQL contracts", () => {
 			rankState: "UPDATING",
 			leagueRanks: [{ rank: 10, rankState: "UPDATING" }],
 		});
+	});
+
+	it("keeps fallback delivery stale without claiming the event is settling", () => {
+		const event = lifecycleEvent(false);
+		const result = applyHomeScoreLifecycle(
+			lifecycleDesk(),
+			event,
+			lifecycleCalc({
+				entryId: 123,
+				totalPoints: 71,
+				netEventPoints: 33,
+				deliveryState: "DEGRADED",
+			})
+		);
+
+		expect(result.pointsState).toBe("STALE");
 	});
 
 	it("switches points and ranks to the fresh official result after finalization", () => {

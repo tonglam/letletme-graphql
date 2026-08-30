@@ -184,7 +184,10 @@ const pointsStateFromCalc = (calc: LiveCalcDataV2): HomePersonalDesk["pointsStat
 		case "STALE":
 			return "STALE";
 		case "DEGRADED":
-			return "SETTLING";
+			// DEGRADED describes delivery fallback, not gameweek lifecycle. A
+			// live event must not be presented as settling just because Redis or
+			// PostgreSQL required an older complete snapshot.
+			return "STALE";
 		case "FINAL":
 			return "FINAL";
 		default:
