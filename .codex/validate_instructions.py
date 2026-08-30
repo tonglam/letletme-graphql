@@ -1022,6 +1022,30 @@ def has_secret(text: str) -> bool:
     return False
 
 
+LOCKED_CREDENTIAL_KEY_RE = re.compile(
+    r"(?i)\b(?:api[_ -]?(?:key|token)|access[_ -]?(?:token|key)|"
+    r"private[_ -]?key|client[_ -]?secret|service[_ -]?(?:role[_ -]?)?"
+    r"(?:key|token)|secret[_ -]?(?:access[_ -]?)?(?:key|token)|"
+    r"notification[_ -]?(?:api[_ -]?)?token|metrics[_ -]?token|"
+    r"telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)"
+)
+
+
+def has_locked_skill_secret(text: str) -> bool:
+    """Scan installed plugin content without enforcing repository skill metadata."""
+
+    if PEM_RE.search(text) or SECRET_VALUE_RES[-1].search(text):
+        return True
+    for pattern in SECRET_VALUE_RES[:-1]:
+        for match in pattern.finditer(text):
+            if not LOCKED_CREDENTIAL_KEY_RE.search(match.group(0)):
+                continue
+            value = match.group(1) if match.lastindex else match.group(0)
+            if not _looks_like_placeholder(value):
+                return True
+    return False
+
+
 def has_secret_bytes(raw: bytes) -> bool:
     """Scan binary/text references without losing UTF-16/UTF-32 credentials."""
 
@@ -1107,7 +1131,7 @@ def _skill_entrypoints(root: Path, repo: Path) -> Iterable[Path]:
                 pending.append(child)
 
 
-def _validate_skill_inventory(repo: Path, skills: list[Any], errors: list[str]) -> None:
+def _validate_skill_inventory(repo: Path, skills: list[Any], errors: list[str]) -> set[str]:
     """Reject unowned repository skill directories without touching plugins.
 
     ``.agents/skills`` can contain both repository-owned skills and installed
@@ -1119,10 +1143,10 @@ def _validate_skill_inventory(repo: Path, skills: list[Any], errors: list[str]) 
 
     root = repo / ".agents" / "skills"
     if not root.exists() and not root.is_symlink():
-        return
+        return set()
     if root.is_symlink():
         errors.append(f"{root}: skill inventory root may not be a symlink")
-        return
+        return set()
     contracted: set[str] = set()
     for raw in skills:
         relative = Path(str(raw))
@@ -1171,12 +1195,13 @@ def _validate_skill_inventory(repo: Path, skills: list[Any], errors: list[str]) 
         children = sorted(root.iterdir(), key=lambda path: path.name)
     except OSError as exc:
         errors.append(f"{root}: cannot inspect skill inventory: {exc}")
-        return
+        return locked
     for child in children:
         if child.name not in allowed:
             errors.append(
                 f"{child}: skill is not listed in the instruction contract or skills-lock.json"
             )
+    return locked
 
 
 def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
@@ -1548,6 +1573,31 @@ def validate_skill(
             errors.append(f"{reference}: possible secret/token pattern")
 
 
+def validate_locked_skill(path: Path, policy: dict[str, Any], errors: list[str]) -> None:
+    """Check lock-listed plugin bytes while allowing third-party metadata shapes."""
+
+    if not path.is_dir():
+        errors.append(f"{path}: locked skill must be a directory")
+        return
+    for reference in [path / "SKILL.md", *path.rglob("*")]:
+        if reference.is_symlink():
+            errors.append(f"{reference}: locked skill tree may not contain a symlink")
+            continue
+        if not reference.is_file():
+            continue
+        try:
+            raw = reference.read_bytes()
+        except OSError as exc:
+            errors.append(f"{reference}: cannot read locked skill content: {exc}")
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
+        if policy.get("forbid_secrets_in_instructions") and has_locked_skill_secret(text):
+            errors.append(f"{reference}: possible secret/token pattern")
+
+
 def validate_asset(
     asset: dict[str, Any],
     policy: dict[str, Any],
@@ -1592,7 +1642,7 @@ def validate_asset(
         errors.append(f"{repo}: root does not exist")
     if not registry_only and repo.exists():
         allow_absolute = asset.get("kind") == "instruction-system"
-        _validate_skill_inventory(repo, skills, errors)
+        locked_skills = _validate_skill_inventory(repo, skills, errors)
         required_paths: set[Path] = set()
         for relative in agents:
             try:
@@ -1630,6 +1680,14 @@ def validate_asset(
                 continue
             required_paths.add((path / policy.get("require_skill_entrypoint", "SKILL.md")) if path.is_dir() else path)
             validate_skill(path, repo, policy, errors, allow_external=allow_absolute)
+        # Lock-listed third-party mounts are still repository-resident input.
+        # Validate their current contents before treating the lock as an
+        # inventory exemption; otherwise a modified plugin tree could hide
+        # secrets or broken references behind its trusted name.
+        for name in sorted(locked_skills):
+            path = repo / ".agents" / "skills" / name
+            if path.exists() or path.is_symlink():
+                validate_locked_skill(path, policy, errors)
 
         discovered = _instruction_paths(repo, include_discovery=asset.get("kind") != "instruction-system")
         discovered_set = set(discovered)

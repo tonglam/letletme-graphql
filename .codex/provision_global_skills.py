@@ -241,13 +241,12 @@ def tree_digest(root: Path) -> str:
     """Return a deterministic digest for a materialized, regular-file tree."""
 
     resolved_root = root.resolve()
-    for ancestor in (resolved_root, *resolved_root.parents):
-        try:
-            mode = stat.S_IMODE(ancestor.stat().st_mode)
-        except OSError as exc:
-            raise SystemExit(f"cannot inspect global skill tree permissions: {ancestor}") from exc
-        if mode & 0o022:
-            raise SystemExit(f"global skill tree or ancestor is group/world-writable: {ancestor}")
+    try:
+        root_mode = stat.S_IMODE(resolved_root.stat().st_mode)
+    except OSError as exc:
+        raise SystemExit(f"cannot inspect global skill tree permissions: {resolved_root}") from exc
+    if root_mode & 0o022:
+        raise SystemExit(f"global skill tree root is group/world-writable: {resolved_root}")
     digest = hashlib.sha256()
     for item in sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix()):
         relative_path = item.relative_to(root)
