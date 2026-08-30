@@ -1,7 +1,7 @@
 {
   "version": 1,
   "asset_id": "letletme-graphql",
-  "canonical_config_commit": "7b7cbce",
+  "canonical_config_commit": "5702001",
   "validator_version": "1",
   "policy_version": "1",
   "required_agents": ["AGENTS.md"],
