@@ -34,7 +34,11 @@ concurrency:
 jobs:
   bootstrap:
     if: github.event_name == 'pull_request'
-    name: instruction-integrity-bootstrap
+    # This is the head-associated required check.  It executes only the
+    # immutable validator checked out from the base branch against the
+    # proposed tree, so the check reports the exact pull-request head while
+    # never importing contributor-controlled Python.
+    name: instruction-integrity
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -44,6 +48,15 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           path: target
           persist-credentials: false
+      - name: Checkout trusted base validator (read-only)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.x'
       - name: Require the governance scaffold
         working-directory: target
         run: |
@@ -119,9 +132,17 @@ jobs:
                   fail(f'skill entrypoint has invalid frontmatter or no body: {raw}')
           print('bootstrap structural and governance checks passed')
           PY
+      - name: Validate pull request head with trusted validator
+        run: |
+          python3 trusted/.codex/validate_instructions.py \
+            --repo target \
+            --contract target/.codex/instruction-integrity.json \
+            --policy target/.codex/instruction-policy.v1.json \
+            --trusted-contract trusted/.codex/instruction-integrity.json \
+            --trusted-policy trusted/.codex/instruction-policy.v1.json
   validate:
     if: github.event_name == 'pull_request_target' || github.event_name == 'push'
-    name: instruction-integrity
+    name: instruction-integrity-trusted
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -251,11 +272,17 @@ jobs:
 
           def load_tree(path, required):
               tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-              definitions = {
-                  node.name
-                  for node in tree.body
-                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-              }
+              definitions = {}
+              for node in tree.body:
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                      definitions.setdefault(node.name, []).append(node.lineno)
+              duplicate_required = sorted(
+                  name for name in required if len(definitions.get(name, [])) > 1
+              )
+              if duplicate_required:
+                  raise SystemExit(
+                      f"{path}: duplicate protected definitions: {', '.join(duplicate_required)}"
+                  )
               missing = sorted(set(required) - definitions)
               if missing:
                   raise SystemExit(f"{path}: missing required definitions: {', '.join(missing)}")
@@ -289,6 +316,64 @@ jobs:
                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
                       return node
               raise SystemExit(f"approved validator is missing function {name}")
+
+          def check_module_entrypoint(tree, label):
+              """Require a guarded, failure-propagating call to the inspected main."""
+
+              for node in tree.body:
+                  if not isinstance(node, ast.If):
+                      continue
+                  test = node.test
+                  guarded = (
+                      isinstance(test, ast.Compare)
+                      and len(test.ops) == 1
+                      and isinstance(test.ops[0], ast.Eq)
+                      and (
+                          (isinstance(test.left, ast.Name) and test.left.id == "__name__"
+                           and len(test.comparators) == 1
+                           and isinstance(test.comparators[0], ast.Constant)
+                           and test.comparators[0].value == "__main__")
+                          or
+                          (len(test.comparators) == 1
+                           and isinstance(test.comparators[0], ast.Name)
+                           and test.comparators[0].id == "__name__"
+                           and isinstance(test.left, ast.Constant)
+                           and test.left.value == "__main__")
+                      )
+                  )
+                  if not guarded:
+                      continue
+                  main_calls = []
+                  for statement in node.body:
+                      for call in ast.walk(statement):
+                          if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "main":
+                              main_calls.append(call)
+                  if not main_calls:
+                      raise SystemExit(f"approved {label} module entrypoint does not call main")
+                  propagating = False
+                  for statement in node.body:
+                      if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                          outer = statement.value
+                          if (
+                              isinstance(outer.func, ast.Attribute)
+                              and isinstance(outer.func.value, ast.Name)
+                              and outer.func.value.id == "sys"
+                              and outer.func.attr == "exit"
+                              and any(call in outer.args for call in main_calls)
+                          ):
+                              propagating = True
+                      if isinstance(statement, ast.Raise) and isinstance(statement.exc, ast.Call):
+                          outer = statement.exc
+                          if (
+                              isinstance(outer.func, ast.Name)
+                              and outer.func.id == "SystemExit"
+                              and any(call in outer.args for call in main_calls)
+                          ):
+                              propagating = True
+                  if not propagating:
+                      raise SystemExit(f"approved {label} module entrypoint must propagate main status")
+                  return
+              raise SystemExit(f"approved {label} is missing an __main__ entrypoint")
 
           def constant_truth(node):
               if isinstance(node, ast.Constant):
@@ -461,6 +546,7 @@ jobs:
           else:
               raise SystemExit("validator semantic fixture unexpectedly passed")
           check_validator_shape(validator)
+          check_module_entrypoint(validator, "validator")
 
           def check_provisioner_shape(tree):
               required_calls = {
@@ -516,6 +602,7 @@ jobs:
               pass
           else:
               raise SystemExit("dead-code provisioner fixture unexpectedly passed")
+          check_module_entrypoint(provisioner, "provisioner")
 
           manifest = json.loads(Path("target/.codex/global-skills.json").read_text(encoding="utf-8"))
           contract = json.loads(Path("target/.codex/instruction-integrity.json").read_text(encoding="utf-8"))
@@ -563,7 +650,8 @@ jobs:
             bootstrap = jobs["bootstrap"]
             gate = jobs["validate"]
             raise "bootstrap is not limited to pull_request" unless bootstrap["if"].to_s.include?("github.event_name == 'pull_request'")
-            raise "trusted gate name is missing" unless gate["name"].to_s == "instruction-integrity"
+            raise "head-associated required check name is missing" unless bootstrap["name"].to_s == "instruction-integrity"
+            raise "trusted gate name is missing" unless gate["name"].to_s == "instruction-integrity-trusted"
             gate_condition = gate["if"].to_s.gsub(/\s+/, " ").strip
             expected_gate_condition = "github.event_name == 'pull_request_target' || github.event_name == 'push'"
             raise "trusted gate condition is incomplete or disabled" unless gate_condition == expected_gate_condition
@@ -577,11 +665,29 @@ jobs:
             target_bootstrap = checkout.call(bootstrap, "target")
             target_gate = checkout.call(gate, "target")
             trusted_gate = checkout.call(gate, "trusted")
+            trusted_bootstrap = checkout.call(bootstrap, "trusted")
             raise "bootstrap checkout must pin pull request head" unless target_bootstrap&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha }}"
+            raise "bootstrap trusted checkout must pin pull request base" unless trusted_bootstrap&.dig("with", "ref").to_s == "${{ github.event.pull_request.base.sha }}"
             raise "target checkout must pin pull request head" unless target_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.head.sha || github.sha }}"
             raise "trusted checkout must pin pull request base" unless trusted_gate&.dig("with", "ref").to_s == "${{ github.event.pull_request.base.sha || github.sha }}"
             permissions = workflow["permissions"]
             raise "workflow must grant only contents: read" unless permissions.is_a?(Hash) && permissions.keys.map(&:to_s) == ["contents"] && permissions["contents"].to_s == "read"
+            bootstrap_steps = Array(bootstrap["steps"])
+            head_validator = bootstrap_steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate pull request head with trusted validator" }
+            raise "head-associated trusted validator step is missing" unless head_validator
+            raise "head validator step may be conditionally skipped" if head_validator.key?("if") && !head_validator["if"].to_s.strip.empty?
+            raise "head validator step may not ignore failures" if head_validator["continue-on-error"] == true || head_validator["continue-on-error"].to_s.casecmp("true").zero?
+            head_run = head_validator["run"].to_s
+            raise "head validator must invoke the trusted validator" unless head_run.match?(/\A\s*python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\\)/)
+            [
+              "--repo target",
+              "--contract target/.codex/instruction-integrity.json",
+              "--policy target/.codex/instruction-policy.v1.json",
+              "--trusted-contract trusted/.codex/instruction-integrity.json",
+              "--trusted-policy trusted/.codex/instruction-policy.v1.json",
+            ].each do |needle|
+              raise "head validator command is missing #{needle}" unless head_run.include?(needle)
+            end
             steps = Array(gate["steps"])
               allowed_trusted_steps = ["Verify pinned global registry contents", "Protect the integrity gate files", "Protect instruction contents unless explicitly approved", "Validate AGENTS.md and skills"]
             steps.each do |step|
@@ -599,6 +705,21 @@ jobs:
               if step["working-directory"].to_s == "trusted"
                 raise "workflow step may not execute from the trusted checkout"
               end
+            end
+            gate_files_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Protect the integrity gate files" }
+            raise "integrity gate-file protection step is missing" unless gate_files_step
+            raise "integrity gate-file protection may be conditionally skipped" if gate_files_step.key?("if") && !gate_files_step["if"].to_s.strip.empty?
+            raise "integrity gate-file protection may not ignore failures" if gate_files_step["continue-on-error"] == true || gate_files_step["continue-on-error"].to_s.casecmp("true").zero?
+            gate_files_run = gate_files_step["run"].to_s
+            [
+              "approved=\"$GOVERNANCE_UPDATE_APPROVED\"",
+              "for file in",
+              "cmp -s \"trusted/$file\" \"target/$file\"",
+              "echo \"governance gate file changed: $file\"",
+              "exit 1",
+              "test -s \"target/$file\"",
+            ].each do |needle|
+              raise "integrity gate-file protection is incomplete: #{needle}" unless gate_files_run.include?(needle)
             end
             validate_step = steps.find { |step| step.is_a?(Hash) && step["name"].to_s == "Validate AGENTS.md and skills" }
             raise "trusted validator step is missing" unless validate_step
