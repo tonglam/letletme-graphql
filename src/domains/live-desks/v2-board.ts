@@ -282,6 +282,10 @@ const metric = (
 	row: IndexedEntryLiveCompetitionBoardRowV2,
 	sort: EntryLiveCompetitionBoardSort
 ): number | null => {
+	// Rank zero is the explicit unavailable/degraded marker produced for rows
+	// that did not participate in the coherent score-core revision.  Do not let
+	// their placeholder score (including zero) displace real negative scores.
+	if (row.rank <= 0) return null;
 	switch (sort) {
 		case "EVENT_POINTS":
 			return row.score.eventPoints;
@@ -369,6 +373,9 @@ export const queryEntryLiveCompetitionBoardV2 = (
 	const direction = request.direction === "ASC" ? 1 : -1;
 	const filtered = board.rows.filter((row) => matches(row, request));
 	filtered.sort((left, right) => {
+		const leftAvailable = left.rank > 0;
+		const rightAvailable = right.rank > 0;
+		if (leftAvailable !== rightAvailable) return leftAvailable ? -1 : 1;
 		const primary =
 			request.sort === "ENTRY_NAME"
 				? left.entryName.localeCompare(right.entryName, undefined, { sensitivity: "base" }) *

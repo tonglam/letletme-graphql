@@ -130,7 +130,7 @@ export const startServer = async (): Promise<void> => {
 			}
 
 			if (url.pathname === "/health/ready") {
-				const health = await checkRuntimeReadiness(currentSeasonProvider, false, false);
+				const health = await checkRuntimeReadiness(currentSeasonProvider, false, true);
 				return new Response(health.body, {
 					status: health.ok ? 200 : 503,
 					headers: {
