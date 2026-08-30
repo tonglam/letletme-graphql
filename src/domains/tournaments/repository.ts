@@ -4549,11 +4549,26 @@ export const tournamentsRepository: TournamentsRepository = {
 				context,
 				tournamentId
 			);
-			const eligibleRosterEntryIds = (
-				await loadTournamentEventEligibility(rosterEntryIds, requestedEventId, (entryIds) =>
-					entriesRepository.getEntriesByIds(context, entryIds)
-				)
-			).entryIds;
+			let eligibilityUnavailable = false;
+			let eligibleRosterEntryIds: number[];
+			try {
+				eligibleRosterEntryIds = (
+					await loadTournamentEventEligibility(rosterEntryIds, requestedEventId, (entryIds) =>
+						entriesRepository.getEntriesByIds(context, entryIds)
+					)
+				).entryIds;
+			} catch (error) {
+				// Entry metadata is an eligibility hint, not the source of live
+				// scores.  Keep the roster visible and let the V2 projector mark
+				// any entries it cannot prove as unavailable instead of failing the
+				// whole detail desk.
+				context.logger.warn(
+					{ err: error, eventId: requestedEventId, tournamentId },
+					"Tournament live entry eligibility unavailable"
+				);
+				eligibilityUnavailable = true;
+				eligibleRosterEntryIds = [...new Set(rosterEntryIds)];
+			}
 			const entryWindow = selectTournamentDeskEntryWindow(eligibleRosterEntryIds, entryId);
 			const publication =
 				requestedEventId > 0
@@ -4600,6 +4615,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				(rosterEntryId) => rows.find((row) => row.entry === rosterEntryId)?.availability !== "READY"
 			);
 			const additionalReasonCodes = [
+				...(eligibilityUnavailable ? ["ENTRY_ELIGIBILITY_UNAVAILABLE"] : []),
 				...(entryWindow.deferredEntryIds.length > 0 ? ["ENTRY_WINDOW_TRUNCATED"] : []),
 				...(revisionMismatchEntryIds.length > 0 ? ["SCORE_CORE_REVISION_MISMATCH"] : []),
 			];
@@ -4623,7 +4639,8 @@ export const tournamentsRepository: TournamentsRepository = {
 				state,
 				partial:
 					!scheduled &&
-					(entryWindow.deferredEntryIds.length > 0 ||
+					(eligibilityUnavailable ||
+						entryWindow.deferredEntryIds.length > 0 ||
 						failedEntryIds.length > 0 ||
 						unavailableEntryIds.length > 0 ||
 						rows.length !== eligibleRosterEntryIds.length),

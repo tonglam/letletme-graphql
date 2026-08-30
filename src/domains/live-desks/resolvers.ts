@@ -366,10 +366,11 @@ const boardResponse = async (
 		request.tournamentId
 	);
 	const eligibleEntryIds = await eligibleEntryIdsForEvent(context, entryIds, request.eventId);
+	const entryWindow = selectTournamentDeskEntryWindow(eligibleEntryIds, request.entryId);
 	const { board } = await buildEntryLiveCompetitionBoardV2(context, {
 		eventId: request.eventId,
 		tournamentId: request.tournamentId,
-		entryIds: eligibleEntryIds,
+		entryIds: entryWindow.entryIds,
 		requireNet: memberTournament.leagueType === LeagueType.H2H,
 		scoreCoreRevision: ref?.scoreCoreRevision,
 	});
@@ -411,6 +412,10 @@ const boardResponse = async (
 		nextRefreshAt: null,
 	};
 	const unavailableEntryIds = board.unavailableEntryIds;
+	const totalEntries = eligibleEntryIds.length;
+	const deferredEntryCount = entryWindow.deferredEntryIds.length + board.deferredEntryCount;
+	const partial =
+		entryWindow.deferredEntryIds.length > 0 || board.partial || board.rows.length !== totalEntries;
 	return {
 		season: context.currentSeason.seasonCode,
 		eventId: request.eventId,
@@ -418,18 +423,17 @@ const boardResponse = async (
 		boardRevision: board.boardRevision,
 		scoreCoreRevision: board.scoreCoreRevision,
 		dataAvailability: delivery.state,
-		coverageState:
-			board.computedEntries === 0 ? "UNAVAILABLE" : board.partial ? "PARTIAL" : "COMPLETE",
-		rankScope: board.partial ? "AVAILABLE_ROWS" : "FULL_FIELD",
+		coverageState: board.computedEntries === 0 ? "UNAVAILABLE" : partial ? "PARTIAL" : "COMPLETE",
+		rankScope: partial ? "AVAILABLE_ROWS" : "FULL_FIELD",
 		computedEntries: board.computedEntries,
-		deferredEntryCount: board.deferredEntryCount,
+		deferredEntryCount,
 		failedEntryCount: board.failedEntryCount,
 		unavailableEntryCount: board.unavailableEntryCount,
-		officialCoverage: board.totalEntries === 0 ? 0 : board.computedEntries / board.totalEntries,
+		officialCoverage: totalEntries === 0 ? 0 : board.computedEntries / totalEntries,
 		unavailableEntryIds,
 		failedEntryIds: board.failedEntryIds,
-		partial: board.partial,
-		totalEntries: board.totalEntries,
+		partial,
+		totalEntries,
 		filteredEntries: page.filteredEntries,
 		page: request.page,
 		pageSize: request.pageSize,
