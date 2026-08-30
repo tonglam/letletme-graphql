@@ -1,15 +1,13 @@
 name: instruction-integrity
 
 on:
-  # pull_request is a minimal, secret-free bootstrap check. Once this workflow
-  # exists on the base branch, pull_request_target is the blocking trusted gate.
+  # pull_request is a secret-free, head-associated required check. The
+  # validator itself comes from the trusted base checkout; the proposed tree
+  # is input data only. Run it for every pull request because the contract can
+  # add arbitrary instruction paths that cannot be represented by a fixed
+  # paths filter.
   pull_request:
-    paths:
-      - AGENTS.md
-      - CLAUDE.md
-      - .agents/**
-      - .codex/**
-      - .github/workflows/instruction-integrity.yml
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   # The base-branch workflow is trusted; the proposed checkout is data only.
   # Label changes must re-evaluate the exact labeled head, and removing the
   # label must revoke the transition immediately.
@@ -39,6 +37,11 @@ jobs:
     # proposed tree, so the check reports the exact pull-request head while
     # never importing contributor-controlled Python.
     name: instruction-integrity
+    env:
+      # A label event is the only head-associated event that can authorize a
+      # canonical-config transition. The trusted target job independently
+      # verifies that the label was applied by the repository owner.
+      GOVERNANCE_UPDATE_APPROVED: ${{ github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && github.event.sender.login == github.repository_owner }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -134,7 +137,11 @@ jobs:
           PY
       - name: Validate pull request head with trusted validator
         run: |
-          python3 trusted/.codex/validate_instructions.py \
+          extra_args=()
+          if test "$GOVERNANCE_UPDATE_APPROVED" = true; then
+            extra_args+=(--allow-config-commit-update)
+          fi
+          python3 trusted/.codex/validate_instructions.py "${extra_args[@]}" \
             --repo target \
             --contract target/.codex/instruction-integrity.json \
             --policy target/.codex/instruction-policy.v1.json \
@@ -235,6 +242,19 @@ jobs:
                   missing_trees.append(name)
               elif any(item.is_symlink() for item in skill.rglob("*")):
                   missing_trees.append(name)
+               else:
+                   try:
+                       entry_text = entry.read_text(encoding="utf-8")
+                   except (OSError, UnicodeDecodeError):
+                       missing_trees.append(name)
+                       continue
+                   if (
+                       not re.match(r"\A---\s*\n", entry_text)
+                       or not re.search(r"(?m)^name:\s*\S+", entry_text)
+                       or not re.search(r"(?m)^description:\s*\S+", entry_text)
+                       or not entry_text.split("---", 2)[-1].strip()
+                   ):
+                       missing_trees.append(name)
           if missing_trees:
               raise SystemExit(f"pinned registry is missing advertised skill trees: {', '.join(sorted(missing_trees))}")
           print("pinned global registry content verified")
@@ -282,6 +302,20 @@ jobs:
               if duplicate_required:
                   raise SystemExit(
                       f"{path}: duplicate protected definitions: {', '.join(duplicate_required)}"
+                  )
+              rebound_required = set()
+              protected = set(required)
+              for statement in tree.body:
+                  if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                      continue
+                  for node in ast.walk(statement):
+                      if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in protected:
+                          rebound_required.add(node.id)
+                      if isinstance(node, ast.alias) and node.asname in protected:
+                          rebound_required.add(node.asname)
+              if rebound_required:
+                  raise SystemExit(
+                      f"{path}: protected definitions are rebound: {', '.join(sorted(rebound_required))}"
                   )
               missing = sorted(set(required) - definitions)
               if missing:
@@ -487,13 +521,26 @@ jobs:
               return bindings
 
           def direct_terminator_lines(statements):
-              """Find unconditional return/raise statements in a body."""
+              """Find unconditional returns, raises, and process exits in a body."""
 
               lines = []
               for statement in statements:
                   if isinstance(statement, (ast.Return, ast.Raise)):
                       lines.append(statement.lineno)
                       continue
+                  if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                      call = statement.value
+                      exits = (
+                          isinstance(call.func, ast.Name) and call.func.id in {"exit", "quit"}
+                      ) or (
+                          isinstance(call.func, ast.Attribute)
+                          and isinstance(call.func.value, ast.Name)
+                          and call.func.value.id in {"sys", "builtins"}
+                          and call.func.attr == "exit"
+                      )
+                      if exits:
+                          lines.append(statement.lineno)
+                          continue
                   if isinstance(statement, ast.If):
                       truth = constant_truth(statement.test)
                       branch = statement.body if truth is True else statement.orelse if truth is False else None
@@ -630,9 +677,10 @@ jobs:
             raise "pull_request_target types are incomplete" unless required.all? { |item| types.include?(item) }
             pull_request = events["pull_request"]
             raise "pull_request bootstrap event is missing" unless pull_request.is_a?(Hash)
-            bootstrap_paths = Array(pull_request["paths"]).map(&:to_s)
-            required_paths = %w[AGENTS.md CLAUDE.md .agents/** .codex/** .github/workflows/instruction-integrity.yml]
-            raise "pull_request bootstrap paths are incomplete" unless required_paths.all? { |item| bootstrap_paths.include?(item) }
+            pull_request_types = Array(pull_request["types"]).map(&:to_s)
+            required_pull_request_types = %w[opened synchronize reopened labeled unlabeled]
+            raise "pull_request bootstrap event types are incomplete" unless required_pull_request_types.all? { |item| pull_request_types.include?(item) }
+            raise "pull_request bootstrap must not be path-filtered" if pull_request.key?("paths") || pull_request.key?("paths-ignore")
             raise "pull_request_target must not be path-filtered" if target.is_a?(Hash) && (target.key?("paths") || target.key?("paths-ignore"))
             push = events["push"]
             raise "push event is missing" unless push.is_a?(Hash)
@@ -657,6 +705,8 @@ jobs:
             raise "trusted gate condition is incomplete or disabled" unless gate_condition == expected_gate_condition
             expected_approval = "${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && contains(github.event.pull_request.labels.*.name, 'instruction-governance-approved') && github.event.sender.login == github.repository_owner }}"
             raise "approval expression is incomplete or broadened" unless gate.dig("env", "GOVERNANCE_UPDATE_APPROVED").to_s == expected_approval
+            expected_head_approval = "${{ github.event.action == 'labeled' && github.event.label.name == 'instruction-governance-approved' && github.event.sender.login == github.repository_owner }}"
+            raise "head approval expression is incomplete or broadened" unless bootstrap.dig("env", "GOVERNANCE_UPDATE_APPROVED").to_s == expected_head_approval
             checkout = lambda do |job, path|
               Array(job["steps"]).find do |step|
                 step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/checkout@") && step.dig("with", "path").to_s == path
@@ -678,7 +728,8 @@ jobs:
             raise "head validator step may be conditionally skipped" if head_validator.key?("if") && !head_validator["if"].to_s.strip.empty?
             raise "head validator step may not ignore failures" if head_validator["continue-on-error"] == true || head_validator["continue-on-error"].to_s.casecmp("true").zero?
             head_run = head_validator["run"].to_s
-            raise "head validator must invoke the trusted validator" unless head_run.match?(/\A\s*python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\\)/)
+            raise "head validator must define a bounded argument array" unless head_run.include?("extra_args=()") && head_run.include?("extra_args+=(--allow-config-commit-update)")
+            raise "head validator must invoke the trusted validator" unless head_run.match?(/python3\s+trusted\/\.codex\/validate_instructions\.py(?:\s|\\)/)
             [
               "--repo target",
               "--contract target/.codex/instruction-integrity.json",

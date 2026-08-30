@@ -428,6 +428,18 @@ def _markdown_targets(text: str) -> Iterable[str]:
         marker = text.find("](", cursor)
         if marker < 0:
             break
+        # An escaped opener is literal Markdown text, not an operative link.
+        # Count consecutive backslashes so ``\\[`` remains an operative
+        # opener while ``\[`` is ignored.
+        opener = text.rfind("[", cursor, marker)
+        slashes = 0
+        index = opener - 1
+        while opener >= 0 and index >= 0 and text[index] == "\\":
+            slashes += 1
+            index -= 1
+        if opener >= 0 and slashes % 2 == 1:
+            cursor = marker + 2
+            continue
         index = marker + 2
         while index < len(text) and text[index].isspace():
             index += 1
@@ -586,6 +598,16 @@ def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
 
 def _looks_like_placeholder(value: str) -> bool:
     normalized = value.strip().strip("'\"").casefold()
+    # Environment lookups name a runtime-provided credential; the instruction
+    # does not contain the credential value itself.  Treat common Python and
+    # JavaScript lookup forms as safe references before applying literal-value
+    # heuristics below.
+    if re.search(r"\b(?:os\.)?environ(?:\s*\[[^\]]+\]|\.[a-z_][a-z0-9_]*)", normalized):
+        return True
+    if re.search(r"\bprocess\.env(?:\s*\[[^\]]+\]|\.[a-z_][a-z0-9_]*)", normalized):
+        return True
+    if re.search(r"\b(?:os\.)?getenv\s*\(", normalized):
+        return True
     if normalized.startswith("${"):
         # Shell defaults such as ${TOKEN:-live-value} are not placeholders;
         # inspect the fallback while retaining ${TOKEN} as a placeholder.
