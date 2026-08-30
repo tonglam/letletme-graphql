@@ -23,7 +23,11 @@ import {
 	loadEventLiveH2HScoreBatches,
 	type EventLiveH2HScoreBatch,
 } from "./h2h-live-score-repository";
-import { selectTournamentDeskEntryWindow } from "../live-desks/tournament-entry-window";
+import {
+	loadTournamentEventEligibility,
+	selectTournamentDeskEntryWindow,
+} from "../live-desks/tournament-entry-window";
+import { entriesRepository } from "../entries/repository";
 
 export enum TournamentMode {
 	NORMAL = "normal",
@@ -4545,7 +4549,12 @@ export const tournamentsRepository: TournamentsRepository = {
 				context,
 				tournamentId
 			);
-			const entryWindow = selectTournamentDeskEntryWindow(rosterEntryIds, entryId);
+			const eligibleRosterEntryIds = (
+				await loadTournamentEventEligibility(rosterEntryIds, requestedEventId, (entryIds) =>
+					entriesRepository.getEntriesByIds(context, entryIds)
+				)
+			).entryIds;
+			const entryWindow = selectTournamentDeskEntryWindow(eligibleRosterEntryIds, entryId);
 			const publication =
 				requestedEventId > 0
 					? await readLivePublicationV2(context, requestedEventId).catch((error) => {
@@ -4587,7 +4596,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				...(result?.errors.map((error) => error.entryId) ?? []),
 				...revisionMismatchEntryIds,
 			];
-			const unavailableEntryIds = rosterEntryIds.filter(
+			const unavailableEntryIds = eligibleRosterEntryIds.filter(
 				(rosterEntryId) => rows.find((row) => row.entry === rosterEntryId)?.availability !== "READY"
 			);
 			const additionalReasonCodes = [
@@ -4617,9 +4626,9 @@ export const tournamentsRepository: TournamentsRepository = {
 					(entryWindow.deferredEntryIds.length > 0 ||
 						failedEntryIds.length > 0 ||
 						unavailableEntryIds.length > 0 ||
-						rows.length !== rosterEntryIds.length),
+						rows.length !== eligibleRosterEntryIds.length),
 				failedEntryIds,
-				totalEntries: rosterEntryIds.length,
+				totalEntries: eligibleRosterEntryIds.length,
 				revisions: sample?.score.revisions ?? null,
 				times: sample?.score.times ?? null,
 				delivery: effectiveDelivery,

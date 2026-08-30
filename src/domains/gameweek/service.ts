@@ -533,8 +533,11 @@ export const gameweekService = {
 						inDreamTeam: row.inDreamTeam,
 						totalPoints: row.totalPoints,
 					}));
+					const renderedPerformances = performances.filter(
+						(performance) => performance.inDreamTeam === true || performance.totalPoints >= 10
+					);
 					const playerIds = Array.from(
-						new Set(performances.map((performance) => performance.playerId))
+						new Set(renderedPerformances.map((performance) => performance.playerId))
 					);
 					const players = await measureRequestStage(
 						context.requestTiming,
@@ -554,14 +557,14 @@ export const gameweekService = {
 							)
 					);
 					dreamTeam = mapAndSortBoards(
-						performances.filter((performance) => performance.inDreamTeam === true),
+						renderedPerformances.filter((performance) => performance.inDreamTeam === true),
 						"position",
 						playersById,
 						teamNames,
 						eventTeamIds
 					);
 					hauls = mapAndSortBoards(
-						performances.filter((performance) => performance.totalPoints >= 10),
+						renderedPerformances.filter((performance) => performance.totalPoints >= 10),
 						"points",
 						playersById,
 						teamNames,

@@ -576,6 +576,7 @@ export const liveDesksResolvers = {
 				request.tournamentId,
 				request.entryId
 			);
+			await getCoreEventSnapshot(context);
 			return boardResponse(context, request, memberTournament, ref);
 		},
 		entryLiveCompetitionsDesk: async (
@@ -616,7 +617,7 @@ export const liveDesksResolvers = {
 					totalEntries: 0,
 				};
 			await assertMember(context, selected, args.entryId);
-			const eventCore = args.ref ? null : await getCoreEventSnapshot(context);
+			const eventCore = await getCoreEventSnapshot(context);
 			const eventId =
 				args.ref?.eventId ??
 				eventCore?.currentEventId ??
