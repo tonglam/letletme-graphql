@@ -359,29 +359,6 @@ compose_exec \
 
 old_slot="$active_slot"
 switched=false
-old_public_health=""
-old_public_revision=""
-old_local_revision=""
-old_active_container=$(docker ps --all \
-  --filter "label=com.docker.compose.project=$active_project" \
-  --filter "label=com.docker.compose.service=graphql" \
-  --format '{{.ID}}' | head -n 1)
-if [ -n "$old_active_container" ]; then
-  old_local_revision=$(docker inspect \
-    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-    "$old_active_container" || true)
-fi
-if old_public_health=$(curl --fail --silent --show-error --max-time 5 "$PUBLIC_GRAPHQL_HEALTH_URL"); then
-  old_public_revision=$(jq -r \
-    'select(.status == "ok" and (.deploySha | type == "string") and (.deploySha | length > 0)) | .deploySha' \
-    <<<"$old_public_health" || true)
-fi
-if [ -z "$old_public_revision" ]; then
-  old_public_revision="$old_local_revision"
-fi
-if [ -z "$old_public_revision" ]; then
-  echo "previous public GraphQL identity unavailable; cutover will require the new revision" >&2
-fi
 rollback_switch() {
   if [ "$switched" != true ]; then return 0; fi
   rollback_verified=false
@@ -424,38 +401,22 @@ public_health_url="$PUBLIC_GRAPHQL_HEALTH_URL"
 public_health=""
 public_health_ready=false
 for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS"); do
-  if ! public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url"); then
-    echo "public GraphQL health probe failed after switching to $inactive_slot on attempt $attempt" >&2
-    if ! rollback_switch; then
-      echo "public probe failed and rollback could not be verified" >&2
+  if public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url"); then
+    if jq -e --arg deploySha "$DEPLOY_SHA" \
+      '.status == "ok" and .deploySha == $deploySha' <<<"$public_health" >/dev/null; then
+      public_health_ready=true
+      break
     fi
-    exit 1
   fi
-  if jq -e --arg deploySha "$DEPLOY_SHA" \
-    '.status == "ok" and .deploySha == $deploySha' <<<"$public_health" >/dev/null; then
-    public_health_ready=true
-    break
-  fi
-  if [ -z "$old_public_revision" ] || ! jq -e --arg deploySha "$old_public_revision" \
-    '.status == "ok" and .deploySha == $deploySha' <<<"$public_health" >/dev/null; then
-    echo "public GraphQL health identity is neither the new nor previous revision" >&2
-    if ! rollback_switch; then
-      echo "public identity mismatch and rollback could not be verified" >&2
-    fi
-    exit 1
-  fi
+  echo "public GraphQL health has not converged to $DEPLOY_SHA on attempt $attempt" >&2
   if [ "$attempt" -lt "$PUBLIC_HEALTH_ATTEMPTS" ]; then
     sleep "$PUBLIC_HEALTH_DELAY_SECONDS"
   fi
 done
 if [ "$public_health_ready" != true ]; then
-  if [ -n "$public_health" ]; then
-    echo "public GraphQL health identity does not match $DEPLOY_SHA after ${PUBLIC_HEALTH_ATTEMPTS} attempts" >&2
-  else
-    echo "public GraphQL health probe failed after switching to $inactive_slot" >&2
-  fi
+  echo "public GraphQL health did not converge to $DEPLOY_SHA after ${PUBLIC_HEALTH_ATTEMPTS} attempts" >&2
   if ! rollback_switch; then
-    echo "public identity mismatch and rollback could not be verified" >&2
+    echo "public health convergence failed and rollback could not be verified" >&2
   fi
   exit 1
 fi

@@ -116,7 +116,7 @@ describe("production deployment workflow", () => {
 
 	test("rolls back the slot switch when public verification fails", () => {
 		expect(deployScript).toContain("rollback_switch()");
-		expect(deployScript).toContain("public GraphQL health probe failed");
+		expect(deployScript).toContain("public GraphQL health did not converge");
 		expect(deployScript).toContain('sudo -n "$SWITCH_HELPER" "$old_slot"');
 		expect(deployScript).not.toContain('sudo -n "$SWITCH_HELPER" "$old_slot" || true');
 		expect(deployScript).toContain('!= "$old_slot"');
@@ -126,19 +126,20 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("Public GraphQL contract failed");
 		expect(deployScript).toContain("PUBLIC_HEALTH_ATTEMPTS=${PUBLIC_HEALTH_ATTEMPTS:-15}");
 		expect(deployScript).toContain("public_health_ready=false");
-		expect(deployScript).toContain('old_local_revision=""');
-		expect(deployScript).toContain(
-			"previous public GraphQL identity unavailable; cutover will require the new revision"
-		);
-		expect(deployScript).toContain('old_public_revision="$old_local_revision"');
+		expect(deployScript).not.toContain("old_public_revision");
+		expect(deployScript).not.toContain("old_local_revision");
 		expect(deployScript).toContain('for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS")');
 		expect(deployScript).toContain('sleep "$PUBLIC_HEALTH_DELAY_SECONDS"');
 		expect(deployScript).toContain(
-			'if ! public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url"); then'
+			'if public_health=$(curl --fail --silent --show-error --max-time 5 "$public_health_url"); then'
 		);
 		expect(deployScript).toContain(
-			"public GraphQL health identity is neither the new nor previous revision"
+			"public GraphQL health has not converged to $DEPLOY_SHA on attempt $attempt"
 		);
+		expect(deployScript).toContain(
+			"public GraphQL health did not converge to $DEPLOY_SHA after ${PUBLIC_HEALTH_ATTEMPTS} attempts"
+		);
+		expect(deployScript).not.toContain("neither the new nor previous revision");
 		expect(deployScript.indexOf("switched=true")).toBeLessThan(
 			deployScript.indexOf('sudo -n "$SWITCH_HELPER" "$inactive_slot"')
 		);
