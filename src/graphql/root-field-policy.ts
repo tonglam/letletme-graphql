@@ -281,7 +281,13 @@ export const ROOT_FIELD_CONDITIONAL_ACCESS: ReadonlyMap<
 		"myFplCompetitionsDesk",
 		[{ argument: "tournamentId", when: "provided", access: "viewerTournamentMember" }],
 	],
-	["myTournamentReviewCatalog", [{ argument: "scope", equals: "ALL", access: "platformAdmin" }]],
+	[
+		"myTournamentReviewCatalog",
+		[
+			{ argument: "scope", equals: "MANAGED", access: "verifiedEntry" },
+			{ argument: "scope", equals: "ALL", access: "platformAdmin" },
+		],
+	],
 ]);
 export const LIGHTWEIGHT_CORE_FIELDS: ReadonlySet<string> = new Set(
 	[...ROOT_FIELD_POLICIES]

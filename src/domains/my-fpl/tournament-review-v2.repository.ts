@@ -1600,10 +1600,12 @@ export type MyTournamentReviewRepository = {
 export const createMyTournamentReviewRepository = (): MyTournamentReviewRepository => ({
 	async loadCatalog(context, scope) {
 		const viewerEntryId = context.principal ? viewerEntryIdForPrincipal(context.principal) : null;
+		const catalogEntryId =
+			scope === "MANAGED" ? (context.principal?.fplEntryId ?? null) : viewerEntryId;
 		const rawRows = await context.database.query<CatalogRow>(MY_TOURNAMENT_REVIEW_CATALOG_SQL, [
 			context.currentSeason.seasonId,
 			scope,
-			viewerEntryId,
+			catalogEntryId,
 		]);
 		const rows = rawRows.rows.map(mapCatalogRow);
 		const revisionKey = rows
@@ -1615,7 +1617,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		const adminReadAll = Boolean(context.principal && hasPlatformAdminAccess(context.principal));
 		const key = gqlCacheKey(
 			context,
-			`my-tournament-review-v2:catalog:${scope}:viewer:${viewerEntryId ?? 0}:admin:${adminReadAll ? 1 : 0}:${revisionKey}`
+			`my-tournament-review-v2:catalog:${scope}:viewer:${viewerEntryId ?? 0}:catalog-entry:${catalogEntryId ?? 0}:admin:${adminReadAll ? 1 : 0}:${revisionKey}`
 		);
 		const cached = await readJsonQueryCache(context, key, (value) =>
 			cacheDecoder<MyTournamentReviewCatalog>(value, catalogCache)

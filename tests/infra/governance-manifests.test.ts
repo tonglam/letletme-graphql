@@ -57,6 +57,12 @@ describe("GraphQL domain manifest", () => {
 			{
 				field: "myTournamentReviewCatalog",
 				argument: "scope",
+				equals: "MANAGED",
+				access: "verifiedEntry",
+			},
+			{
+				field: "myTournamentReviewCatalog",
+				argument: "scope",
 				equals: "ALL",
 				access: "platformAdmin",
 			},

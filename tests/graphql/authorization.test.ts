@@ -456,6 +456,30 @@ describe("authorizeGraphQLRequest", () => {
 		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
 	});
 
+	it("uses the verified administrator identity for MANAGED catalog reads", async () => {
+		expect(
+			await authorize(
+				`query { myTournamentReviewCatalog(scope: MANAGED) { tournaments { tournamentId } } }`,
+				undefined,
+				websitePrincipal
+			)
+		).toEqual({ ok: true });
+		expect(
+			await authorize(
+				`query { myTournamentReviewCatalog(scope: MANAGED) { tournaments { tournamentId } } }`,
+				undefined,
+				miniViewerPrincipal
+			)
+		).toMatchObject({ ok: false, status: 403, code: "FORBIDDEN" });
+		expect(
+			await authorize(
+				`query { myTournamentReviewCatalog(scope: MANAGED) { tournaments { tournamentId } } }`,
+				undefined,
+				miniBoundDifferentViewerPrincipal
+			)
+		).toEqual({ ok: true });
+	});
+
 	it("uses the viewer membership gate for tournament review scopes", async () => {
 		for (const query of [
 			`query { myTournamentGameweekReview(tournamentId: 7, eventId: 1) { state } }`,
