@@ -778,6 +778,43 @@ def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
             errors.append(f"{path}: missing operative {label} clause")
 
 
+def _governance_section(text: str) -> str | None:
+    """Return a whitespace-normalized governance section for parity checks."""
+
+    lines = text.splitlines()
+    start = next(
+        (index for index, line in enumerate(lines) if re.match(r"^\s*##\s+Governance and review\s*$", line, flags=re.I)),
+        None,
+    )
+    if start is None:
+        return None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if re.match(r"^\s*##\s+", lines[index]):
+            end = index
+            break
+    return " ".join("\n".join(lines[start:end]).split())
+
+
+def check_agents_claude_consistency(repo: Path, errors: list[str]) -> None:
+    """Keep an optional Claude consumer's governance section equal to AGENTS."""
+
+    agents_path = repo / "AGENTS.md"
+    claude_path = repo / "CLAUDE.md"
+    if not agents_path.is_file() or not claude_path.is_file():
+        return
+    try:
+        agents_section = _governance_section(agents_path.read_text(encoding="utf-8"))
+        claude_section = _governance_section(claude_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        errors.append(f"{repo}: cannot compare AGENTS.md and CLAUDE.md governance sections: {exc}")
+        return
+    if agents_section is None or claude_section is None:
+        errors.append(f"{claude_path}: must contain the same '## Governance and review' section as AGENTS.md")
+    elif agents_section != claude_section:
+        errors.append(f"{claude_path}: governance section must match AGENTS.md")
+
+
 def _looks_like_placeholder(value: str) -> bool:
     normalized = value.strip().casefold()
     # Secret-value captures often include a JSON/YAML or expression
@@ -1454,6 +1491,7 @@ def validate_asset(
                 required_paths.add(path)
         for path in sorted(discovered_set - required_paths):
             errors.append(f"{path}: instruction entrypoint is not listed in the contract")
+        check_agents_claude_consistency(repo, errors)
 
         manifest_path = repo / ".codex" / "global-skills.json"
         globals_value = contract.get("required_global_skills", []) if contract else []
