@@ -50,6 +50,11 @@ SECRET_VALUE_RES = (
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|notification[_ -]?token|notifier[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
     re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]*:([^\s/@]+)@"),
+    # HTTP(S) and Git userinfo can carry a password/token even when the host
+    # is public. Keep the username optional so ``https://:secret@host`` is
+    # covered as well, while placeholders remain exempt via
+    # ``_looks_like_placeholder``.
+    re.compile(r"(?i)\b(?:https?|git):\/\/[^\s/@:]*:([^\s/@]+)@"),
     # Bare generic names are useful for catching literal credentials, but do
     # not treat ordinary code expressions such as ``token = value.casefold()``
     # as secrets. Keep the value branch deliberately literal-shaped.
@@ -103,6 +108,13 @@ REVIEW_RULE_KEYS = {
     "all_other_paths",
     "all_findings",
     "post_merge_cleanup",
+}
+CANONICAL_REVIEW_RULES = {
+    "codex_quota": "after-two-consecutive-explicit-quota-limit-responses-for-unchanged-head-may-skip-review",
+    "tests_and_scripts": "finding_only_in_tests_or_scripts: implement_P0_P1; disposition_and_resolve_P2_P3_without_implementation_time. This exception applies only to findings confined to tests or scripts.",
+    "all_other_paths": "P0_P1_P2_P3_must_be_actually_resolved; do_not_use_the_tests_scripts_exception",
+    "all_findings": "must_be_dispositioned_and_resolved",
+    "post_merge_cleanup": "only_exact_corresponding_worktree_local_branch_remote_branch",
 }
 GLOBAL_MANIFEST_KEYS = {"version", "registry", "skills"}
 GLOBAL_REGISTRY_DESCRIPTOR = {
@@ -644,7 +656,7 @@ def _markdown_targets(text: str) -> Iterable[str]:
 def _is_external_target(target: str) -> bool:
     """Return whether a Markdown target is a URI rather than a file path."""
 
-    return target.startswith("#") or bool(URI_SCHEME_RE.match(target))
+    return target.startswith(("#", "//")) or bool(URI_SCHEME_RE.match(target))
 
 
 def _unescape_markdown_destination(target: str) -> str:
@@ -657,10 +669,13 @@ def _normalize_reference_target(raw_target: str) -> str:
     """Decode Markdown escapes/percent-encoding before URI/path handling."""
 
     target = _unescape_markdown_destination(raw_target.strip())
+    # Strip literal URI query/fragment delimiters before percent-decoding. A
+    # filename containing an encoded ``%3F``/``%23`` must not be truncated as
+    # if the decoded character had been present in the original destination.
+    target = target.split("#", 1)[0].split("?", 1)[0].strip()
     # Percent-encoded schemes (for example ``https%3A//example.test``) must
     # be classified as external before the path is resolved locally.
-    target = unquote(target)
-    return target.split("#", 1)[0].split("?", 1)[0].strip()
+    return unquote(target).strip()
 
 
 def check_reference_links(
@@ -686,6 +701,8 @@ def check_reference_links(
             errors.append(f"{instruction_file}: relative reference escapes repository: {target}")
         elif not candidate.exists():
             errors.append(f"{instruction_file}: missing relative reference {target}")
+        elif candidate.is_dir():
+            errors.append(f"{instruction_file}: relative reference must target a file: {target}")
 
 
 def scan_reference_graph(
@@ -1054,6 +1071,54 @@ def _skill_entrypoints(root: Path, repo: Path) -> Iterable[Path]:
                 pending.append(child)
 
 
+def _validate_skill_inventory(repo: Path, skills: list[Any], errors: list[str]) -> None:
+    """Reject unowned repository skill directories without touching plugins.
+
+    ``.agents/skills`` can contain both repository-owned skills and installed
+    third-party mounts.  The contract names the former; ``skills-lock.json``
+    records the latter.  Anything else is an untracked skill that could evade
+    the governed surface, so fail closed while leaving the locked plugin trees
+    untouched.
+    """
+
+    root = repo / ".agents" / "skills"
+    if not root.exists() and not root.is_symlink():
+        return
+    if root.is_symlink():
+        errors.append(f"{root}: skill inventory root may not be a symlink")
+        return
+    contracted: set[str] = set()
+    for raw in skills:
+        relative = Path(str(raw))
+        parts = relative.parts
+        if not relative.is_absolute() and len(parts) >= 3 and parts[:2] == (".agents", "skills"):
+            contracted.add(parts[2])
+    locked: set[str] = set()
+    lock_path = repo / "skills-lock.json"
+    if lock_path.exists():
+        try:
+            lock = load_json(lock_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            errors.append(f"{lock_path}: cannot read skill lock: {exc}")
+        else:
+            value = lock.get("skills")
+            if not isinstance(value, dict):
+                errors.append(f"{lock_path}: skills must be a mapping")
+            else:
+                locked = {str(name) for name in value}
+    allowed = contracted | locked
+    try:
+        children = sorted(root.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        errors.append(f"{root}: cannot inspect skill inventory: {exc}")
+        return
+    for child in children:
+        if child.name not in allowed:
+            errors.append(
+                f"{child}: skill is not listed in the instruction contract or skills-lock.json"
+            )
+
+
 def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
     if not include_discovery:
         return []
@@ -1252,18 +1317,15 @@ def _validate_policy_against_trusted(
     if not isinstance(trusted_rules, dict) or not isinstance(proposed_rules, dict):
         errors.append("proposed policy review_rules must remain a mapping")
         return
-    required_rules = {
-        "codex_quota": ("two", "consecutive", "quota", "unchanged", "head"),
-        "tests_and_scripts": ("tests", "scripts", "P0", "P1", "P2", "P3", "disposition", "resolve"),
-        "all_other_paths": ("P0", "P1", "P2", "P3", "resolved"),
-        "all_findings": ("dispositioned", "resolved"),
-        "post_merge_cleanup": ("exact", "worktree", "local", "branch", "remote"),
-    }
-    for key, required in required_rules.items():
-        value = proposed_rules.get(key)
-        if not isinstance(value, str) or not all(marker.casefold() in value.casefold() for marker in required):
-            errors.append(f"proposed policy weakens review_rules.{key}")
-    if not allow_policy_update:
+    if allow_policy_update:
+        # An approved governance update may move the policy pin, but it may
+        # not replace an operative clause with a marker-only paraphrase (or
+        # reverse its meaning while retaining the same keywords). Require the
+        # exact canonical rule text for every review rule.
+        for key, expected in CANONICAL_REVIEW_RULES.items():
+            if proposed_rules.get(key) != expected:
+                errors.append(f"approved policy review_rules.{key} must match the canonical rule")
+    else:
         for key in REVIEW_RULE_KEYS:
             if proposed_rules.get(key) != trusted_rules.get(key):
                 errors.append(f"proposed policy changes trusted review_rules.{key}")
@@ -1470,6 +1532,7 @@ def validate_asset(
         errors.append(f"{repo}: root does not exist")
     if not registry_only and repo.exists():
         allow_absolute = asset.get("kind") == "instruction-system"
+        _validate_skill_inventory(repo, skills, errors)
         required_paths: set[Path] = set()
         for relative in agents:
             try:

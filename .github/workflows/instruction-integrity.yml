@@ -568,7 +568,7 @@ jobs:
 
           validator = load_tree(
               Path(os.environ["TARGET_VALIDATOR"]),
-              {"parse_yaml_mapping", "validate_asset", "check_agents_claude_consistency", "main", "has_secret", "_has_private_ip_literal", "_looks_like_placeholder"},
+              {"parse_yaml_mapping", "validate_asset", "check_agents_claude_consistency", "main", "has_secret", "_has_private_ip_literal", "_looks_like_placeholder", "_validate_skill_inventory"},
           )
           provisioner_path = Path(os.environ["TARGET_PROVISIONER"])
           provisioner = load_tree(provisioner_path, {"load_manifest", "verify_registry", "tree_digest", "main"})
@@ -1138,6 +1138,7 @@ jobs:
                   "validate_skill": function_node(tree, "validate_skill"),
                   "_validate_instruction_file": function_node(tree, "_validate_instruction_file"),
                   "_validate_global_manifest": function_node(tree, "_validate_global_manifest"),
+                  "_validate_skill_inventory": function_node(tree, "_validate_skill_inventory"),
                   "has_secret": function_node(tree, "has_secret"),
                   "_has_private_ip_literal": function_node(tree, "_has_private_ip_literal"),
                   "_looks_like_placeholder": function_node(tree, "_looks_like_placeholder"),
@@ -1153,6 +1154,7 @@ jobs:
                       "validate_skill",
                       "_validate_instruction_file",
                       "_validate_global_manifest",
+                      "_validate_skill_inventory",
                       "has_secret",
                       "_has_private_ip_literal",
                       "_looks_like_placeholder",
@@ -1162,7 +1164,7 @@ jobs:
                   raise SystemExit(f"approved validator rebinds protected names: {', '.join(sorted(rebound))}")
               required_calls = {
                   "parse_yaml_mapping": (parse_yaml, {"_parse_scalar"}),
-                  "validate_asset": (validate, {"validate_skill", "_validate_instruction_file", "_validate_global_manifest", "check_agents_claude_consistency"}),
+                  "validate_asset": (validate, {"validate_skill", "_validate_instruction_file", "_validate_global_manifest", "check_agents_claude_consistency", "_validate_skill_inventory"}),
                   "main": (main, {"validate_asset"}),
               }
               for label, (node, required_names) in required_calls.items():
@@ -1186,6 +1188,7 @@ jobs:
               if not unconditional_calls(main, "validate_asset"):
                   raise SystemExit("approved validator main hides validate_asset behind a runtime branch")
               validation_results = set()
+              validation_result_bindings = {}
               for statement in ast.walk(main):
                   if isinstance(statement, ast.Assign):
                       value = statement.value
@@ -1205,6 +1208,32 @@ jobs:
                       for item in ast.walk(target):
                           if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store):
                               validation_results.add(item.id)
+                              validation_result_bindings[item.id] = min(
+                                  statement.lineno,
+                                  validation_result_bindings.get(item.id, statement.lineno),
+                              )
+              # The final exit status must reflect the actual validate_asset
+              # result. Reassigning or mutating that binding after the call can
+              # turn a failed validation into a synthetic success.
+              def assignment_target_names(target):
+                  names = set()
+                  root = target
+                  while isinstance(root, (ast.Attribute, ast.Subscript)):
+                      root = root.value
+                  if isinstance(root, ast.Name):
+                      names.add(root.id)
+                  for item in ast.walk(target):
+                      if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del)):
+                          names.add(item.id)
+                  return names
+              for statement in ast.walk(main):
+                  if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+                      continue
+                  targets = statement.targets if isinstance(statement, (ast.Assign, ast.Delete)) else [statement.target]
+                  for target in targets:
+                      for name in assignment_target_names(target):
+                          if name in validation_result_bindings and statement.lineno > validation_result_bindings[name]:
+                              raise SystemExit(f"approved validator main reassigns validate_asset result: {name}")
               def reads_validation_ok(expression):
                   for item in ast.walk(expression):
                       if isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute) and item.func.attr == "get":
@@ -1284,6 +1313,7 @@ jobs:
                   "validate_skill": {"_validate_instruction_file", "rglob", "read_bytes", "has_secret"},
                   "_validate_instruction_file": {"read_text", "read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json", "read_bytes", "sha256", "resolve"},
+                  "_validate_skill_inventory": {"load_json", "iterdir"},
                   "has_secret": {"search", "finditer", "_has_private_ip_literal", "_looks_like_placeholder"},
                   "_has_private_ip_literal": {"finditer", "ip_address"},
                   "_looks_like_placeholder": {"fullmatch", "match", "search"},
@@ -1299,6 +1329,7 @@ jobs:
                   "validate_skill": {"_validate_instruction_file", "has_secret"},
                   "_validate_instruction_file": {"read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json"},
+                  "_validate_skill_inventory": {"load_json", "iterdir"},
                   "has_secret": {"_has_private_ip_literal", "_looks_like_placeholder"},
               }
               helper_receivers = {
@@ -1309,6 +1340,10 @@ jobs:
                       "read_bytes": {"source_resolved"},
                       "sha256": {"hashlib"},
                       "resolve": {"registry_source", "source_path"},
+                  },
+                  "_validate_skill_inventory": {
+                      "load_json": {"lock_path"},
+                      "iterdir": {"root"},
                   },
                   "has_secret": {
                       "search": {"PEM_RE", "PRIVATE_ORIGIN_RE"},
@@ -2094,8 +2129,11 @@ jobs:
                   if relative.is_absolute() or ".." in relative.parts:
                       raise SystemExit(f"trusted contract path is not repository-relative: {relative}")
                   path = root / relative
-                  if path.is_symlink():
-                      raise SystemExit(f"governed instruction may not be a symlink: {relative}")
+                  current = root
+                  for part in relative.parts:
+                      current /= part
+                      if current.is_symlink():
+                          raise SystemExit(f"governed instruction may not traverse a symlink: {relative}")
                   if path.is_file():
                       candidates = [path]
                   elif path.is_dir():
@@ -2126,7 +2164,10 @@ jobs:
                       continue
                   seen.add(relative)
                   path = root / relative
-                  if (path.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES and path.suffix != "") or not path.is_file():
+                  if not path.is_file():
+                      continue
+                  is_reference_text = path.suffix.casefold() in REFERENCE_TEXT_SUFFIXES or path.suffix == ""
+                  if not is_reference_text:
                       continue
                   text = path.read_text(encoding="utf-8")
                   for raw_target in _markdown_targets(text):
@@ -2135,9 +2176,18 @@ jobs:
                           continue
                       lexical = path.parent / target
                       candidate = lexical.resolve()
-                      if lexical.is_symlink():
-                          raise SystemExit(f"governed referenced instruction may not be a symlink: {lexical.relative_to(root)}")
-                      if not candidate.is_file() or (candidate.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES and candidate.suffix != ""):
+                      try:
+                          lexical_relative = lexical.absolute().relative_to(root.absolute())
+                      except ValueError:
+                          continue
+                      current = root
+                      for part in lexical_relative.parts:
+                          current /= part
+                          if current.is_symlink():
+                              raise SystemExit(f"governed referenced instruction may not traverse a symlink: {lexical_relative}")
+                      if not candidate.is_file():
+                          continue
+                      if candidate.suffix.casefold() not in REFERENCE_TEXT_SUFFIXES and candidate.suffix != "":
                           continue
                       if not _is_within(candidate, repo_root):
                           continue
