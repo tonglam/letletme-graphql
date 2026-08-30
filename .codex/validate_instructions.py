@@ -27,7 +27,7 @@ REFERENCE_DEF_RE = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(<[^>]*>|[^\s]+)", re.M)
 REFERENCE_TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".txt", ".text", ".rst"}
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 SECRET_VALUE_RES = (
-    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?key|access[_ -]?token|private[_ -]?key|client[_ -]?secret|password)["']?\s*[:=]\s*([^\s`<>]+)'''),
+    re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_ -]?(?:key|token)|access[_ -]?token|private[_ -]?key|client[_ -]?secret|password)["']?\s*[:=]\s*([^\s`<>]+)'''),
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*([^\s`<>]+)'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
     re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]+:([^\s/@]+)@"),
@@ -167,8 +167,21 @@ def _parse_scalar(value: str, path: Path, line_number: int, *, scalar_only: bool
             raise ValueError(f"{path}:{line_number}: reserved YAML indicator must be quoted")
         if re.search(r":\s", value):
             raise ValueError(f"{path}:{line_number}: colon followed by whitespace must be quoted in a YAML scalar")
-        if value.endswith(":"):
-            raise ValueError(f"{path}:{line_number}: a plain YAML scalar may not end with a colon")
+    if value.endswith(":"):
+        raise ValueError(f"{path}:{line_number}: a plain YAML scalar may not end with a colon")
+        # Instruction metadata is consumed as strings. Reject YAML implicit
+        # scalar forms that a real loader would deserialize as typed values.
+        implicit_number = re.fullmatch(
+            r"(?i)[+-]?(?:(?:0|[1-9][0-9_]*)(?:\.[0-9_]*)?(?:e[+-]?[0-9]+)?|0x[0-9a-f_]+|0o[0-7_]+|0b[01_]+|\.[0-9_]+(?:e[+-]?[0-9]+)?)",
+            value,
+        )
+        implicit_special = re.fullmatch(r"(?i)[+-]?\.(?:inf|nan)", value)
+        implicit_bool = re.fullmatch(r"(?i)(?:yes|no|on|off)", value)
+        implicit_timestamp = re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}(?:$|[Tt ][0-9])", value)
+        if implicit_number or implicit_special or implicit_bool or implicit_timestamp:
+            if scalar_only:
+                raise ValueError(f"{path}:{line_number}: YAML scalar uses an implicit non-string type")
+            return 0
         if re.fullmatch(r"(?i)(?:null|~)", value):
             if scalar_only:
                 raise ValueError(f"{path}:{line_number}: YAML null is not a string scalar")
@@ -480,7 +493,9 @@ def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
 
     # Treat wrapped Markdown lines as one clause while retaining word
     # boundaries; otherwise a harmless line wrap can disable the check.
-    lowered = " ".join(text.casefold().split())
+    operative = _without_markdown_code(text)
+    operative = re.sub(r"<!--.*?(?:-->|$)", " ", operative, flags=re.S)
+    lowered = " ".join(operative.casefold().split())
     required_clauses = {
         "quota rule": (
             "a review may be skipped only after two consecutive explicit quota-limit responses",
@@ -506,7 +521,8 @@ def check_governance_binding(path: Path, text: str, errors: list[str]) -> None:
 
 
 def _looks_like_placeholder(value: str) -> bool:
-    normalized = value.strip().strip("'\"").casefold()
+    normalized = value.strip().strip("'\"")
+    normalized = normalized.rstrip(",;)]}").strip("'\"").casefold()
     return (
         normalized in PLACEHOLDER_VALUES
         or normalized.startswith("${")

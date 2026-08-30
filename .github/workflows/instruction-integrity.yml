@@ -25,7 +25,9 @@ permissions:
 concurrency:
   # pull_request_target exposes the base ref as github.ref; use the PR number
   # so one PR cannot cancel another. Push runs remain grouped by branch.
-  group: instruction-integrity-${{ github.event_name }}-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}
+  # Keep approval and metadata/base-edit events from cancelling one another;
+  # synchronize runs for the same PR still cancel their older sibling.
+  group: instruction-integrity-${{ github.event_name }}-${{ github.event.action || 'push' }}-${{ github.repository }}-${{ github.event.pull_request.number || format('push-{0}', github.ref_name) }}
   cancel-in-progress: true
 
 jobs:
@@ -203,6 +205,14 @@ jobs:
           missing = sorted(set(advertised) - names)
           if missing:
               raise SystemExit(f"pinned registry is missing advertised global skills: {', '.join(missing)}")
+          missing_trees = []
+          for name in advertised:
+              skill = checkout / "global" / "skills" / name
+              entry = skill / "SKILL.md"
+              if skill.is_symlink() or entry.is_symlink() or not skill.is_dir() or not entry.is_file():
+                  missing_trees.append(name)
+          if missing_trees:
+              raise SystemExit(f"pinned registry is missing advertised skill trees: {', '.join(sorted(missing_trees))}")
           print("pinned global registry content verified")
           PY
       - name: Protect the integrity gate files
@@ -268,8 +278,8 @@ jobs:
                         try:
                             return ast.literal_eval(node.value)
                         except (ValueError, SyntaxError):
-                            raise SystemExit(f"approved provisioner constant {name} must be a literal")
-                raise SystemExit(f"approved provisioner constant {name} is missing")
+                            raise SystemExit(f"approved governance constant {name} must be a literal")
+                raise SystemExit(f"approved governance constant {name} is missing")
 
             manifest = json.loads(Path("target/.codex/global-skills.json").read_text(encoding="utf-8"))
             contract = json.loads(Path("target/.codex/instruction-integrity.json").read_text(encoding="utf-8"))
@@ -277,12 +287,42 @@ jobs:
                 raise SystemExit("approved provisioner registry pin does not match the manifest")
             if assignment(provisioner, "EXPECTED_SOURCE_REVISION") != contract.get("canonical_config_commit"):
                 raise SystemExit("approved provisioner source revision does not match the contract")
+            if assignment(validator, "GLOBAL_REGISTRY_DESCRIPTOR") != manifest.get("registry"):
+                raise SystemExit("approved validator registry pin does not match the manifest")
+            if assignment(validator, "CANONICAL_CONFIG_COMMIT") != contract.get("canonical_config_commit"):
+                raise SystemExit("approved validator source revision does not match the contract")
 
             # Parse the proposed workflow without executing any contributor
             # YAML or action. Ruby/Psych is present on the hosted runner.
             print("approved governance code shape and pins validated without execution")
             PY
             ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: false)' target/.github/workflows/instruction-integrity.yml
+            ruby -ryaml - target/.github/workflows/instruction-integrity.yml <<'RUBY'
+              workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: false)
+              events = workflow["on"] || workflow[true]
+              raise "missing pull_request_target event" unless events.is_a?(Hash)
+              target = events["pull_request_target"]
+              types = target.is_a?(Hash) ? Array(target["types"]).map(&:to_s) : []
+              required = %w[opened synchronize reopened labeled unlabeled edited]
+              raise "pull_request_target types are incomplete" unless required.all? { |item| types.include?(item) }
+              jobs = workflow["jobs"]
+              raise "missing bootstrap/validate jobs" unless jobs.is_a?(Hash) && jobs["bootstrap"].is_a?(Hash) && jobs["validate"].is_a?(Hash)
+              bootstrap = jobs["bootstrap"]
+              gate = jobs["validate"]
+              raise "bootstrap is not limited to pull_request" unless bootstrap["if"].to_s.include?("github.event_name == 'pull_request'")
+              raise "trusted gate name is missing" unless gate["name"].to_s == "instruction-integrity"
+              raise "trusted gate condition is incomplete" unless gate["if"].to_s.include?("pull_request_target") && gate["if"].to_s.include?("push")
+              permissions = workflow["permissions"]
+              raise "workflow must be read-only" unless permissions.is_a?(Hash) && permissions["contents"].to_s == "read"
+              runs = Array(gate["steps"]).map { |step| step.is_a?(Hash) ? step["run"].to_s : nil }.compact
+              joined = runs.join("\\n")
+              %w[trusted/.codex/validate_instructions.py --trusted-policy --trusted-contract --registry-source].each do |needle|
+                raise "trusted gate command is missing #{needle}" unless joined.include?(needle)
+              end
+              %w[AGENTS.md .codex/global-skills.json .codex/provision_global_skills.py].each do |needle|
+                raise "bootstrap protection is missing #{needle}" unless joined.include?(needle)
+              end
+            RUBY
           fi
       - name: Protect instruction contents unless explicitly approved
         if: env.GOVERNANCE_UPDATE_APPROVED != 'true'
