@@ -25,6 +25,7 @@ import {
 } from "./h2h-live-score-repository";
 import {
 	loadTournamentEventEligibility,
+	MAX_TOURNAMENT_DESK_ENTRIES,
 	selectTournamentDeskEntryWindow,
 } from "../live-desks/tournament-entry-window";
 import { entriesRepository } from "../entries/repository";
@@ -4549,12 +4550,23 @@ export const tournamentsRepository: TournamentsRepository = {
 				context,
 				tournamentId
 			);
+			const uniqueRosterEntryIds = [...new Set(rosterEntryIds)];
+			// Admission must bound the metadata lookup as well as the projector. A
+			// large tournament must never load the complete roster just to discard
+			// it at the next 500-entry boundary.
+			const admissionWindow = selectTournamentDeskEntryWindow(
+				uniqueRosterEntryIds,
+				entryId,
+				MAX_TOURNAMENT_DESK_ENTRIES
+			);
 			let eligibilityUnavailable = false;
 			let eligibleRosterEntryIds: number[];
 			try {
 				eligibleRosterEntryIds = (
-					await loadTournamentEventEligibility(rosterEntryIds, requestedEventId, (entryIds) =>
-						entriesRepository.getEntriesByIds(context, entryIds)
+					await loadTournamentEventEligibility(
+						admissionWindow.entryIds,
+						requestedEventId,
+						(entryIds) => entriesRepository.getEntriesByIds(context, entryIds)
 					)
 				).entryIds;
 			} catch (error) {
@@ -4567,9 +4579,16 @@ export const tournamentsRepository: TournamentsRepository = {
 					"Tournament live entry eligibility unavailable"
 				);
 				eligibilityUnavailable = true;
-				eligibleRosterEntryIds = [...new Set(rosterEntryIds)];
+				eligibleRosterEntryIds = admissionWindow.entryIds;
 			}
-			const entryWindow = selectTournamentDeskEntryWindow(eligibleRosterEntryIds, entryId);
+			const entryWindow = {
+				entryIds: eligibleRosterEntryIds,
+				deferredEntryIds: admissionWindow.deferredEntryIds,
+			};
+			const totalEntries =
+				uniqueRosterEntryIds.length <= MAX_TOURNAMENT_DESK_ENTRIES
+					? eligibleRosterEntryIds.length
+					: uniqueRosterEntryIds.length;
 			const publication =
 				requestedEventId > 0
 					? await readLivePublicationV2(context, requestedEventId).catch((error) => {
@@ -4611,7 +4630,7 @@ export const tournamentsRepository: TournamentsRepository = {
 				...(result?.errors.map((error) => error.entryId) ?? []),
 				...revisionMismatchEntryIds,
 			];
-			const unavailableEntryIds = eligibleRosterEntryIds.filter(
+			const unavailableEntryIds = entryWindow.entryIds.filter(
 				(rosterEntryId) => rows.find((row) => row.entry === rosterEntryId)?.availability !== "READY"
 			);
 			const additionalReasonCodes = [
@@ -4643,9 +4662,9 @@ export const tournamentsRepository: TournamentsRepository = {
 						entryWindow.deferredEntryIds.length > 0 ||
 						failedEntryIds.length > 0 ||
 						unavailableEntryIds.length > 0 ||
-						rows.length !== eligibleRosterEntryIds.length),
+						rows.length !== entryWindow.entryIds.length),
 				failedEntryIds,
-				totalEntries: eligibleRosterEntryIds.length,
+				totalEntries,
 				revisions: sample?.score.revisions ?? null,
 				times: sample?.score.times ?? null,
 				delivery: effectiveDelivery,

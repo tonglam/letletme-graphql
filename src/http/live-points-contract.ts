@@ -18,9 +18,27 @@ const LIVE_POINTS_ROOT_FIELDS = new Set([
 	"tournamentSelectionIndex",
 	"tournamentEntrySquads",
 	"tournamentDetailDesk",
+	"gameweekDesk",
 ]);
 
 export const isLivePointsRootField = (field: string): boolean => LIVE_POINTS_ROOT_FIELDS.has(field);
+
+const LIVE_POINTS_HOT_PATH_ROOT_FIELDS = new Set([
+	"calcLivePointsByEntry",
+	"calcLivePointsForEntries",
+	"liveScores",
+	"playerLive",
+	"eventLive",
+	"eventLiveExplain",
+	"eventLiveExplains",
+	"liveSnapshot",
+	"liveContext",
+	"liveMatchdayDesk",
+	"liveFixturePlayers",
+]);
+
+export const isLivePointsHotPathRootField = (field: string): boolean =>
+	LIVE_POINTS_HOT_PATH_ROOT_FIELDS.has(field);
 
 export const requiresLivePointsV2Contract = (rootFields: readonly string[]): boolean =>
 	rootFields.some(isLivePointsRootField);

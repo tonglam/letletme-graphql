@@ -110,6 +110,9 @@ const preloadPlayersByIds = async (
 		for (const player of players) preload.set(player.id, player);
 		context.playersByIdPreload = preload;
 	} catch (error) {
+		const preload = new Map(context.playersByIdPreload ?? []);
+		for (const id of uniqueIds) preload.set(id, null);
+		context.playersByIdPreload = preload;
 		context.logger.warn(
 			{ err: error, playerCount: uniqueIds.length },
 			"Live V2 player identity preload unavailable"
@@ -229,7 +232,7 @@ const toContribution = (
 		identifier: value.identifier,
 		points,
 		value: numberOrNull(value.value),
-		pointsModification: integerOrNull(value.pointsModification),
+		pointsModification: integerOrNull(value.pointsModification ?? value.points_modification),
 	};
 };
 

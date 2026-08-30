@@ -33,12 +33,11 @@ import {
 import { checkRuntimeReadiness } from "./http/runtime-readiness";
 import {
 	hasLivePointsV2Contract,
-	isLivePointsRootField,
+	isLivePointsHotPathRootField,
 	LIVE_POINTS_CONTRACT_HEADER,
 	LIVE_POINTS_CONTRACT_VALUE,
 	requiresLivePointsV2Contract,
 } from "./http/live-points-contract";
-import { LIGHTWEIGHT_CORE_FIELDS } from "./graphql/root-field-policy";
 import { GraphQLAdmissionOrder } from "./http/graphql-admission-order";
 import {
 	mergeShadowRateLimitDecision,
@@ -410,10 +409,7 @@ export const startServer = async (): Promise<void> => {
 					}
 					rootFields = limits.rootFields;
 					const livePointsHotPath =
-						requiresLivePointsV2Contract(rootFields) &&
-						rootFields.every(
-							(field) => isLivePointsRootField(field) || LIGHTWEIGHT_CORE_FIELDS.has(field)
-						);
+						rootFields.length > 0 && rootFields.every(isLivePointsHotPathRootField);
 					if (
 						requiresLivePointsV2Contract(rootFields) &&
 						!hasLivePointsV2Contract(request.headers)

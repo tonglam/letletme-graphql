@@ -831,11 +831,11 @@ const isEventLiveArray = (value: unknown): value is EventLiveRow[] => {
 		"expectedGoalsConceded",
 	];
 	return (
-		hasUniquePositiveIds(rows, (row) => integer(row.elementId)) &&
+		hasUniquePositiveIds(rows, (row) => safeInteger(row.elementId)) &&
 		rows.every(
 			(row) =>
-				integer(row.eventId) !== null &&
-				integer(row.elementId) !== null &&
+				safeInteger(row.eventId) !== null &&
+				safeInteger(row.elementId) !== null &&
 				integer(row.totalPoints) !== null &&
 				integerFields.every((field) => nullableIntegerField(row, field)) &&
 				stringFields.every((field) => nullableStringField(row, field)) &&
@@ -2845,15 +2845,16 @@ const buildReady = async (
 	const teams = new Map(effectiveCore.teams.map((team) => [team.id, team]));
 	const liveByElement = new Map(global.eventLives.map((row) => [row.elementId, row]));
 	const fixtures = global.fixtures;
+	let eventScopedPlayers: ReadonlyMap<number, CorePlayerData> | undefined;
 	const missingPlayers = projectionPicks.filter((pick) => !players.has(pick.element));
 	if (missingPlayers.length > 0) {
 		// Historical event publications can contain players that are no longer in
 		// today's mutable Core identity slice.  Rehydrate the complete event-time
 		// identity once for this request before declaring the projection incomplete.
-		const eventPlayers = await readEventScopedPlayers(context, global.publication.eventId);
+		eventScopedPlayers = await readEventScopedPlayers(context, global.publication.eventId);
 		for (const pick of missingPlayers) {
-			const eventPlayer = eventPlayers.get(pick.element);
-			if (eventPlayer) players.set(pick.element, eventPlayer);
+			const historicalPlayer = eventScopedPlayers.get(pick.element);
+			if (historicalPlayer) players.set(pick.element, historicalPlayer);
 		}
 	}
 	const unresolvedPlayers = projectionPicks.filter((pick) => !players.has(pick.element));
@@ -2866,9 +2867,16 @@ const buildReady = async (
 	const eventPlayers = new Map<number, CorePlayerData>();
 	for (const pick of projectionPicks) {
 		const sourcePlayer = players.get(pick.element);
-		const resolvedPlayer = sourcePlayer
+		let resolvedPlayer = sourcePlayer
 			? eventPlayer(sourcePlayer, liveByElement.get(pick.element), fixtures)
 			: null;
+		if (!resolvedPlayer) {
+			eventScopedPlayers ??= await readEventScopedPlayers(context, global.publication.eventId);
+			const historicalPlayer = eventScopedPlayers.get(pick.element);
+			resolvedPlayer = historicalPlayer
+				? eventPlayer(historicalPlayer, liveByElement.get(pick.element), fixtures)
+				: null;
+		}
 		if (!resolvedPlayer || !teams.has(resolvedPlayer.teamId)) {
 			throw new Error(`EVENT_PLAYER_IDENTITY_UNAVAILABLE:${pick.element}`);
 		}
