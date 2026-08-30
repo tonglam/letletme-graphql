@@ -1222,6 +1222,17 @@ jobs:
               if rebound:
                   raise SystemExit(f"approved validator rebinds protected names: {', '.join(sorted(rebound))}")
               check_has_secret_shape(helper_nodes["has_secret"])
+              secret_bytes = helper_nodes["has_secret_bytes"]
+              json_operations = {
+                  item.func.attr
+                  for item in ast.walk(secret_bytes)
+                  if isinstance(item, ast.Call)
+                  and isinstance(item.func, ast.Attribute)
+                  and isinstance(item.func.value, ast.Name)
+                  and item.func.value.id == "json"
+              }
+              if not {"loads", "dumps"}.issubset(json_operations):
+                  raise SystemExit("approved validator has_secret_bytes must normalize decoded JSON")
               required_calls = {
                   "parse_yaml_mapping": (parse_yaml, {"_parse_scalar"}),
                   "validate_asset": (validate, {"validate_skill", "_validate_instruction_file", "_validate_global_manifest", "check_agents_claude_consistency", "_validate_skill_inventory"}),
@@ -1394,7 +1405,7 @@ jobs:
                   "_validate_instruction_file": {"read_text", "read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json", "read_bytes", "sha256", "resolve"},
                   "_validate_skill_inventory": {"load_json"},
-                  "has_secret_bytes": {"loads", "dumps", "has_secret"},
+                  "has_secret_bytes": {"loads", "has_secret"},
                   "has_secret": {"search", "finditer", "_has_private_ip_literal", "_looks_like_placeholder"},
                   "_has_private_ip_literal": {"finditer", "ip_address"},
                   "_looks_like_placeholder": {"fullmatch", "match", "search"},
@@ -1428,7 +1439,6 @@ jobs:
                   },
                   "has_secret_bytes": {
                       "loads": {"json"},
-                      "dumps": {"json"},
                   },
                   "has_secret": {
                       "search": {"PEM_RE", "PRIVATE_ORIGIN_RE"},
