@@ -5,6 +5,12 @@ This repository's authoritative instructions are in `AGENTS.md` and
 vendored here; Codex loads them from the versioned global/plugin environment
 listed in `.codex/global-skills.json`.
 
+When Claude is the active client, provision the same pinned routes into its
+skill root before invoking `$gh-codex-review-loop`:
+`python3 .codex/provision_global_skills.py --manifest .codex/global-skills.json --runtime-root "$HOME/.claude" --registry-source "$CODEX_WORKSPACE_CONFIG_CHECKOUT"`.
+If the authenticated registry checkout is unavailable, stop and report the
+missing dependency instead of using an unverified route.
+
 ## Review and cleanup governance
 
 Use `$gh-codex-review-loop` for PR work. A review may be skipped only after two
