@@ -1295,6 +1295,7 @@ describe("My FPL review repository", () => {
 		const pending = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
 		const pendingDesk = await pending.repository.loadManagerReview(pending.context);
 		expect(pendingDesk.state).toBe("PENDING");
+		expect(pendingDesk.throughEventId).toBe(2);
 		const ready = makeFixture({
 			finalizedIds: [1],
 			publicationRows: [snapshotPublicationRow],
@@ -1342,6 +1343,7 @@ describe("My FPL review repository", () => {
 			},
 		});
 		const uncheckedDesk = await unchecked.repository.loadManagerReview(unchecked.context);
+		expect(uncheckedDesk.state).toBe("READY");
 		expect(uncheckedDesk.pastSeasonsState).toBe("PENDING");
 		expect(unchecked.redis.setCalls.at(-1)?.[3]).toBe(300);
 	});
@@ -1422,6 +1424,33 @@ describe("My FPL review repository", () => {
 		await malformed.redis.set(malformedKey, "{");
 		await malformed.repository.loadManagerReview(malformed.context);
 		expect(await malformed.redis.get(malformedKey)).not.toBe("{");
+	});
+
+	it("rejects a cached review whose timeline does not reach its published event", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			publicationRows: [snapshotPublicationRow],
+			snapshotEntryRow: snapshotEntryRow(),
+		});
+		const key = gqlCacheKey(fixture.context, "my-fpl:v11:snapshot-entry:1:42:123");
+		await fixture.repository.loadManagerReview(fixture.context);
+		const cached = JSON.parse((await fixture.redis.get(key)) ?? "null") as {
+			payload: ReturnType<typeof snapshotPayload>;
+		};
+		cached.payload.review.timeline = [];
+		cached.payload.review.summary.gameweeksReviewed = 0;
+		cached.payload.review.summary.provisionalGameweeks = 0;
+		await fixture.redis.set(key, JSON.stringify(cached));
+		const entryQueriesBefore = fixture.queries.filter(({ sql }) =>
+			sql.includes("JOIN competition.my_fpl_snapshot_entries")
+		).length;
+
+		const desk = await fixture.repository.loadManagerReview(fixture.context);
+
+		expect(desk.state).toBe("READY");
+		expect(
+			fixture.queries.filter(({ sql }) => sql.includes("JOIN competition.my_fpl_snapshot_entries"))
+		).toHaveLength(entryQueriesBefore + 1);
 	});
 
 	it("keeps transfer and gameweek readiness fail-closed", async () => {
