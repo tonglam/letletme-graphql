@@ -415,10 +415,7 @@ describe("Live Matches V2 read path", () => {
 		expect(databaseReads).toBe(0);
 		expect(result.data?.liveMatchday).toMatchObject({
 			snapshot: {
-				matches: [
-					{ players: [{ id: 9001 }] },
-					{ players: [{ id: 9001 }] },
-				],
+				matches: [{ players: [{ id: 9001 }] }, { players: [{ id: 9001 }] }],
 			},
 		});
 	});
