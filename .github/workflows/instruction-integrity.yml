@@ -1304,21 +1304,30 @@ jobs:
               def statically_false(expression):
                   return static_truth(expression) is False
 
-              def calls_secret_search(expression):
-                  return any(
-                      isinstance(item, ast.Call)
-                      and isinstance(item.func, ast.Attribute)
-                      and item.func.attr == "search"
-                      and (
-                          (isinstance(item.func.value, ast.Name) and item.func.value.id == "PEM_RE")
-                          or (
-                              isinstance(item.func.value, ast.Subscript)
-                              and isinstance(item.func.value.value, ast.Name)
-                              and item.func.value.value.id == "SECRET_VALUE_RES"
-                          )
-                      )
-                      for item in ast.walk(expression)
-                  )
+              def secret_search_names(expression):
+                  names = set()
+                  for item in ast.walk(expression):
+                      if not (
+                          isinstance(item, ast.Call)
+                          and isinstance(item.func, ast.Attribute)
+                          and item.func.attr in {"search", "finditer"}
+                      ):
+                          continue
+                      receiver = item.func.value
+                      if isinstance(receiver, ast.Name) and receiver.id in {
+                          "PEM_RE",
+                          "BASIC_AUTH_RE",
+                          "CLI_CREDENTIAL_RE",
+                          "AWS_CREDENTIAL_ARGUMENT_RE",
+                      }:
+                          names.add(receiver.id)
+                      elif (
+                          isinstance(receiver, ast.Subscript)
+                          and isinstance(receiver.value, ast.Name)
+                          and receiver.value.id == "SECRET_VALUE_RES"
+                      ):
+                          names.add("SECRET_VALUE_RES")
+                  return names
 
               def returns_true(statements):
                   return any(
@@ -1330,16 +1339,32 @@ jobs:
                   )
 
               positive_lines = []
+              positive_patterns = set()
               for branch in ast.walk(node):
+                  patterns = secret_search_names(branch.test) if isinstance(branch, ast.If) else set()
                   if (
                       isinstance(branch, ast.If)
                       and not statically_false(branch.test)
-                      and calls_secret_search(branch.test)
+                      and patterns
                       and returns_true(branch.body)
                   ):
                       positive_lines.append(branch.lineno)
+                      positive_patterns.update(patterns)
               if not positive_lines:
                   raise SystemExit("approved validator has_locked_skill_secret lacks a positive detection path")
+              required_patterns = {
+                  "PEM_RE",
+                  "BASIC_AUTH_RE",
+                  "CLI_CREDENTIAL_RE",
+                  "AWS_CREDENTIAL_ARGUMENT_RE",
+                  "SECRET_VALUE_RES",
+              }
+              missing_patterns = sorted(required_patterns - positive_patterns)
+              if missing_patterns:
+                  raise SystemExit(
+                      "approved validator has_locked_skill_secret omits positive searches: "
+                      + ", ".join(missing_patterns)
+                  )
               early_terminators = direct_terminator_lines(node.body)
               if early_terminators and min(early_terminators) < min(positive_lines):
                   raise SystemExit("approved validator has_locked_skill_secret can terminate before detection")
@@ -1389,6 +1414,40 @@ jobs:
                   raise SystemExit(f"approved validator rebinds protected names: {', '.join(sorted(rebound))}")
               check_has_secret_shape(helper_nodes["has_secret"])
               check_locked_skill_secret_shape(helper_nodes["has_locked_skill_secret"])
+              secret_value_res = [
+                  statement.value
+                  for statement in tree.body
+                  if isinstance(statement, ast.Assign)
+                  and any(
+                      isinstance(target, ast.Name) and target.id == "SECRET_VALUE_RES"
+                      for target in statement.targets
+                  )
+              ]
+              if len(secret_value_res) != 1:
+                  raise SystemExit("approved validator SECRET_VALUE_RES must have one module assignment")
+              required_secret_patterns = {
+                  "BASIC_AUTH_RE",
+                  "CLI_CREDENTIAL_RE",
+                  "AWS_CREDENTIAL_ARGUMENT_RE",
+              }
+              pattern_refs = {
+                  item.id
+                  for item in ast.walk(secret_value_res[0])
+                  if isinstance(item, ast.Name)
+              }
+              missing_secret_patterns = sorted(required_secret_patterns - pattern_refs)
+              if missing_secret_patterns:
+                  raise SystemExit(
+                      "approved validator SECRET_VALUE_RES omits protected patterns: "
+                      + ", ".join(missing_secret_patterns)
+                  )
+              if not any(
+                  isinstance(item, ast.Name)
+                  and item.id == "SECRET_VALUE_RES"
+                  and isinstance(item.ctx, ast.Load)
+                  for item in ast.walk(helper_nodes["has_secret"])
+              ):
+                  raise SystemExit("approved validator has_secret does not consume SECRET_VALUE_RES")
               secret_bytes = helper_nodes["has_secret_bytes"]
               json_operations = {
                   item.func.attr
@@ -1570,6 +1629,7 @@ jobs:
                   "_parse_scalar": {"_strip_yaml_comment", "loads"},
                   "validate_skill": {"_validate_instruction_file", "rglob", "read_bytes", "has_secret_bytes"},
                   "validate_locked_skill": {"skill_tree_digest", "rglob", "read_bytes", "is_file", "has_locked_skill_secret_bytes"},
+                  "_validate_claude_skill_aliases": {"exists", "is_symlink", "iterdir", "resolve", "is_dir", "is_file", "append"},
                   "skill_tree_digest": {"sha256", "rglob", "read_bytes", "relative_to", "as_posix", "len", "to_bytes"},
                   "has_locked_skill_secret_bytes": {"loads", "dumps", "has_locked_skill_secret"},
                   "_validate_instruction_file": {"read_text", "read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
@@ -1593,6 +1653,7 @@ jobs:
                   "_validate_instruction_file": {"read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json"},
                   "_validate_skill_inventory": {"load_json"},
+                  "_validate_claude_skill_aliases": set(),
                   "has_secret_bytes": {"has_secret"},
                   "has_locked_skill_secret_bytes": {"has_locked_skill_secret"},
                   "has_secret": {"_has_private_ip_literal", "_looks_like_placeholder"},
@@ -1608,6 +1669,15 @@ jobs:
                   },
                   "_validate_skill_inventory": {
                       "iterdir": {"root"},
+                  },
+                  "_validate_claude_skill_aliases": {
+                      "exists": {"root"},
+                      "is_symlink": {"root", "alias"},
+                      "iterdir": {"root"},
+                      "resolve": {"alias", "expected"},
+                      "is_dir": {"expected_target", "alias"},
+                      "is_file": {"entry"},
+                      "append": {"errors"},
                   },
                   "validate_locked_skill": {
                       "is_dir": {"path"},

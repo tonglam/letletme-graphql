@@ -45,7 +45,7 @@ CLI_CREDENTIAL_RE = re.compile(
     r")(?!-)([^\s`<>#]+)"
 )
 AWS_CREDENTIAL_ARGUMENT_RE = re.compile(
-    r"(?ix)\baws\s+configure\s+set\s+(?:aws[_-])?(?:secret[_-]?access[_-]?key|access[_-]?key|session[_-]?token)"
+    r"(?ix)\baws\s+configure\s+set\s+(?:aws[_-])?(?:secret[_-]?access[_-]?key|access[_-]?key(?:[_-]?id)?|session[_-]?token)"
     r"\s+([^\s`<>#]+)"
 )
 IP_LITERAL_RE = re.compile(
@@ -1058,14 +1058,20 @@ def has_locked_skill_secret(text: str) -> bool:
     if (
         PEM_RE.search(text)
         or BASIC_AUTH_RE.search(text)
-        or CLI_CREDENTIAL_RE.search(text)
-        or AWS_CREDENTIAL_ARGUMENT_RE.search(text)
         or SECRET_VALUE_RES[-1].search(text)
     ):
         return True
-    for pattern in SECRET_VALUE_RES[:-1]:
+    for pattern in (CLI_CREDENTIAL_RE, AWS_CREDENTIAL_ARGUMENT_RE):
         for match in pattern.finditer(text):
-            if pattern in {BASIC_AUTH_RE, CLI_CREDENTIAL_RE, AWS_CREDENTIAL_ARGUMENT_RE}:
+            value = match.group(1) if match.lastindex else match.group(0)
+            if not _looks_like_placeholder(value):
+                return True
+    for pattern in SECRET_VALUE_RES[:-1]:
+        if pattern in {CLI_CREDENTIAL_RE, AWS_CREDENTIAL_ARGUMENT_RE}:
+            continue
+        for match in pattern.finditer(text):
+            if pattern is BASIC_AUTH_RE:
+                value = match.group(1) if match.lastindex else match.group(0)
                 return True
             if not LOCKED_CREDENTIAL_KEY_RE.search(match.group(0)):
                 continue
@@ -1073,19 +1079,6 @@ def has_locked_skill_secret(text: str) -> bool:
             if not _looks_like_placeholder(value):
                 return True
     return False
-
-
-def _json_pairs_to_json(value: Any) -> str:
-    """Serialize decoded JSON pairs while retaining duplicate object keys."""
-
-    if isinstance(value, tuple):
-        return "{" + ",".join(
-            json.dumps(key, ensure_ascii=False) + ":" + _json_pairs_to_json(child)
-            for key, child in value
-        ) + "}"
-    if isinstance(value, list):
-        return "[" + ",".join(_json_pairs_to_json(child) for child in value) + "]"
-    return json.dumps(value, ensure_ascii=False)
 
 
 def _json_field_has_secret(field: str, *, locked: bool = False) -> bool:
@@ -1120,22 +1113,21 @@ def has_secret_bytes(raw: bytes) -> bool:
             else:
                 if has_secret(json.dumps(parsed, ensure_ascii=False)):
                     return True
-                pending = [(parsed, None)]
+                pending = [(parsed, None, None)]
                 while pending:
-                    current, field = pending.pop()
-                    if (
-                        field is not None
-                        and isinstance(current, (tuple, list))
-                        and _json_field_has_secret(field)
-                        and has_secret(f'"{field}": {_json_pairs_to_json(current)}')
-                    ):
-                        return True
+                    current, field, inherited_field = pending.pop()
+                    sensitive_field = inherited_field
+                    if field is not None and _json_field_has_secret(field):
+                        sensitive_field = field
                     if isinstance(current, tuple):
                         for key, value in reversed(current):
-                            pending.append((value, key))
+                            pending.append((value, key, sensitive_field))
                     elif isinstance(current, list):
                         for value in reversed(current):
-                            pending.append((value, field))
+                            pending.append((value, field, sensitive_field))
+                    elif sensitive_field is not None:
+                        if has_secret(f'"{sensitive_field}": {json.dumps(current, ensure_ascii=False)}'):
+                            return True
                     elif field is not None:
                         if has_secret(f'"{field}": {json.dumps(current, ensure_ascii=False)}'):
                             return True
@@ -1162,22 +1154,21 @@ def has_locked_skill_secret_bytes(raw: bytes) -> bool:
             continue
         if has_locked_skill_secret(json.dumps(parsed, ensure_ascii=False)):
             return True
-        pending = [(parsed, None)]
+        pending = [(parsed, None, None)]
         while pending:
-            current, field = pending.pop()
-            if (
-                field is not None
-                and isinstance(current, (tuple, list))
-                and _json_field_has_secret(field, locked=True)
-                and has_locked_skill_secret(f'"{field}": {_json_pairs_to_json(current)}')
-            ):
-                return True
+            current, field, inherited_field = pending.pop()
+            sensitive_field = inherited_field
+            if field is not None and _json_field_has_secret(field, locked=True):
+                sensitive_field = field
             if isinstance(current, tuple):
                 for key, value in reversed(current):
-                    pending.append((value, key))
+                    pending.append((value, key, sensitive_field))
             elif isinstance(current, list):
                 for value in reversed(current):
-                    pending.append((value, field))
+                    pending.append((value, field, sensitive_field))
+            elif sensitive_field is not None:
+                if has_locked_skill_secret(f'"{sensitive_field}": {json.dumps(current, ensure_ascii=False)}'):
+                    return True
             elif field is not None:
                 if has_locked_skill_secret(f'"{field}": {json.dumps(current, ensure_ascii=False)}'):
                     return True
@@ -1428,9 +1419,11 @@ def _validate_claude_skill_aliases(
     """Validate legacy Claude skill symlinks without exempting retargets."""
 
     root = repo / ".claude" / "skills"
-    if not root.exists() and not root.is_symlink():
+    root_exists = root.exists()
+    root_symlink = root.is_symlink()
+    if not root_exists and not root_symlink:
         return
-    if root.is_symlink():
+    if root_symlink:
         errors.append(f"{root}: Claude skill alias root may not be a symlink")
         return
     try:
@@ -1456,7 +1449,8 @@ def _validate_claude_skill_aliases(
         if not alias.is_dir():
             errors.append(f"{alias}: Claude skill entry must be a directory or validated symlink")
             continue
-        if not (alias / "SKILL.md").is_file():
+        entry = alias / "SKILL.md"
+        if not entry.is_file():
             errors.append(f"{alias}: regular Claude skill directory must contain SKILL.md")
 
 
