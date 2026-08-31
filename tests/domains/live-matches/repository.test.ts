@@ -5,6 +5,7 @@ import { graphql } from "graphql";
 import { schema } from "../../../src/graphql/schema";
 import {
 	LIVE_MATCHES_READ_BUNDLE_LUA,
+	LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS,
 	LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES,
 	LIVE_MATCH_MAX_FIXTURES,
 	readLiveMatchday,
@@ -61,9 +62,9 @@ type LiveMatchTestBundle = {
 const emptyDesk: DeskBundleSlot = { publication: null, payload: null, metadata: null };
 const emptyDetail: DetailBundleSlot = { publication: null, manifest: null, items: [] };
 
-const fixture = (fixtureId: number, awayTeamId: number, started = true) => ({
+const fixture = (fixtureId: number, awayTeamId: number, started = true, eventId = 1) => ({
 	fixtureId,
-	eventId: 1,
+	eventId,
 	homeTeamId: 1,
 	homeTeamName: "Home",
 	homeTeamShortName: "HOM",
@@ -78,6 +79,36 @@ const fixture = (fixtureId: number, awayTeamId: number, started = true) => ({
 	finished: false,
 	finishedProvisional: false,
 });
+
+const deskLifecycleDigest = (state: "LIVE_ACTIVE" | "FINALIZED"): string => digest({ state });
+
+const deskFixtureIdentityDigest = (fixtures: readonly ReturnType<typeof fixture>[]): string =>
+	digest(
+		fixtures.map((value) => ({
+			fixtureId: value.fixtureId,
+			eventId: value.eventId,
+			homeTeamId: value.homeTeamId,
+			homeTeamName: value.homeTeamName,
+			homeTeamShortName: value.homeTeamShortName,
+			awayTeamId: value.awayTeamId,
+			awayTeamName: value.awayTeamName,
+			awayTeamShortName: value.awayTeamShortName,
+			kickoffTime: value.kickoffTime,
+		}))
+	);
+
+const deskScoreStateDigest = (fixtures: readonly ReturnType<typeof fixture>[]): string =>
+	digest(
+		fixtures.map((value) => ({
+			fixtureId: value.fixtureId,
+			homeScore: value.homeScore,
+			awayScore: value.awayScore,
+			minutes: value.minutes,
+			started: value.started,
+			finished: value.finished,
+			finishedProvisional: value.finishedProvisional,
+		}))
+	);
 
 const player = (totalPoints: number) => ({
 	id: 9001,
@@ -104,36 +135,25 @@ const buildBundle = (
 		omitDetail?: boolean;
 		detailFinalized?: boolean;
 		deskStarted?: boolean;
+		eventId?: number;
 	} = {}
 ) => {
+	const eventId = options.eventId ?? 1;
 	const deskGeneration = options.deskGeneration ?? 2;
 	const deskState = options.deskState ?? "LIVE_ACTIVE";
 	const checkpointedAt = options.checkpointed ? later : null;
 	const detailDeskGeneration = options.detailDeskGeneration ?? deskGeneration;
 	const deskFixtures = [
-		fixture(101, 2, options.deskStarted ?? true),
-		fixture(102, 3, options.deskStarted ?? true),
+		fixture(101, 2, options.deskStarted ?? true, eventId),
+		fixture(102, 3, options.deskStarted ?? true, eventId),
 	];
 	const deskPayload = encode(deskFixtures);
-	const fixtureIdentityRevision = digest(
-		deskFixtures.map(({ fixtureId, homeTeamId, awayTeamId }) => ({
-			fixtureId,
-			homeTeamId,
-			awayTeamId,
-		}))
-	);
+	const fixtureIdentityRevision = deskFixtureIdentityDigest(deskFixtures);
 	const revisions = {
-		lifecycle: { revision: digest({ state: "LIVE_ACTIVE" }), contentUpdatedAt: now },
+		lifecycle: { revision: deskLifecycleDigest(deskState), contentUpdatedAt: now },
 		fixtureIdentity: { revision: fixtureIdentityRevision, contentUpdatedAt: now },
 		scoreState: {
-			revision: digest(
-				deskFixtures.map(({ fixtureId, homeScore, awayScore, minutes }) => ({
-					fixtureId,
-					homeScore,
-					awayScore,
-					minutes,
-				}))
-			),
+			revision: deskScoreStateDigest(deskFixtures),
 			contentUpdatedAt: later,
 		},
 	};
@@ -142,7 +162,7 @@ const buildBundle = (
 		publicationId: publicationId(deskGeneration),
 		generation: deskGeneration,
 		season: "2627",
-		eventId: 1,
+		eventId,
 		state: deskState,
 		sourceCheckedAt: later,
 		publishedAt: later,
@@ -152,7 +172,7 @@ const buildBundle = (
 		revisions,
 		desk: {
 			name: "desk",
-			key: `llm:data:v2:fpl:live-match:desk:2627:1:${deskGeneration}:desk`,
+			key: `llm:data:v2:fpl:live-match:desk:2627:${eventId}:${deskGeneration}:desk`,
 			type: "string",
 			count: deskFixtures.length,
 			bytes: Buffer.byteLength(deskPayload, "utf8"),
@@ -171,7 +191,7 @@ const buildBundle = (
 		const sha = digest(payload);
 		return {
 			fixtureId: detail.fixtureId,
-			key: `llm:data:v2:fpl:live-match:detail:2627:1:${detailItemGeneration}:${detail.fixtureId}:${sha}`,
+			key: `llm:data:v2:fpl:live-match:detail:2627:${eventId}:${detailItemGeneration}:${detail.fixtureId}:${sha}`,
 			type: "string",
 			count: payload.length,
 			bytes: Buffer.byteLength(encode(payload), "utf8"),
@@ -185,7 +205,7 @@ const buildBundle = (
 		publicationId: publicationId(deskGeneration + 10),
 		generation: detailGeneration,
 		season: "2627",
-		eventId: 1,
+		eventId,
 		finalized: options.detailFinalized ?? false,
 		observedDeskGeneration: detailDeskGeneration,
 		fixtureIdentityRevision,
@@ -236,10 +256,10 @@ const buildBundle = (
 	return { bundle, deskPublication, detailPublication, deskFixtures, detailFixtures };
 };
 
-const buildCheckpointRow = () => {
-	const built = buildBundle({ checkpointed: true });
+const buildCheckpointRow = (options: { eventId?: number } = {}) => {
+	const built = buildBundle({ checkpointed: true, eventId: options.eventId });
 	return {
-		event_id: 1,
+		event_id: built.deskPublication.eventId,
 		desk: {
 			publication_id: built.deskPublication.publicationId,
 			generation: built.deskPublication.generation,
@@ -375,6 +395,77 @@ describe("Live Matches V2 read path", () => {
 		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
 		expect(result.desk).not.toBeNull();
 		expect(result.detail).toBeNull();
+	});
+
+	it("rejects an empty detail fixture after its desk has started", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const active = bundle.detail.active;
+		if (active.publication === null || active.items[0] === undefined)
+			throw new Error("missing active detail");
+		const publication = JSON.parse(active.publication) as {
+			fixtures: Array<{
+				fixtureId: number;
+				key: string;
+				count: number;
+				bytes: number;
+				sha256: string;
+			}>;
+			detail: { revision: string };
+		};
+		const first = publication.fixtures[0];
+		if (!first) throw new Error("missing first detail descriptor");
+		const emptyPlayers: unknown[] = [];
+		const emptyPayload = encode(emptyPlayers);
+		const emptySha = digest(emptyPlayers);
+		const emptyKey = first.key.replace(/:[0-9a-f]{64}$/, `:${emptySha}`);
+		publication.fixtures[0] = {
+			...first,
+			key: emptyKey,
+			count: 0,
+			bytes: Buffer.byteLength(emptyPayload, "utf8"),
+			sha256: emptySha,
+		};
+		active.items[0] = {
+			...active.items[0],
+			key: emptyKey,
+			payload: emptyPayload,
+			metadata: itemMeta(emptyPlayers),
+		};
+		publication.detail.revision = digest([
+			{ fixtureId: 101, players: emptyPlayers },
+			{ fixtureId: 102, players: [player(8)] },
+		]);
+		active.publication = JSON.stringify(publication);
+		active.manifest = active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk).not.toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects a desk whose stream revisions do not match its payload", async () => {
+		for (const revisionName of ["lifecycle", "fixtureIdentity", "scoreState"] as const) {
+			const redis = new TestRedis();
+			const bundle = structuredClone(buildBundle().bundle);
+			if (bundle.desk.active.publication === null) throw new Error("missing active desk");
+			const publication = JSON.parse(bundle.desk.active.publication) as {
+				revisions: Record<string, { revision: string; contentUpdatedAt: string }>;
+			};
+			publication.revisions[revisionName] = {
+				...publication.revisions[revisionName],
+				revision: digest({ invalid: revisionName }),
+			};
+			bundle.desk.active.publication = JSON.stringify(publication);
+			attachBundle(redis, bundle);
+
+			const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+			expect(result.desk).toBeNull();
+			expect(result.detail).toBeNull();
+		}
 	});
 
 	it("keeps a complete pre-kickoff desk fresh while detail is pending", async () => {
@@ -588,6 +679,38 @@ describe("Live Matches V2 read path", () => {
 		expect(retained.eventId).toBe(1);
 	});
 
+	it("revalidates the cached active event during a Redis outage", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
+		const nextCheckpoint = buildCheckpointRow({ eventId: 2 });
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (_query, values) => {
+				databaseReads += 1;
+				expect(values).toEqual([2026, null]);
+				return { rows: [nextCheckpoint] };
+			},
+		});
+
+		const warm = await readLiveMatchday(context);
+		expect(warm.eventId).toBe(1);
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+
+		const recovered = await readLiveMatchday(context);
+		const retained = await readLiveMatchday(context);
+
+		expect(recovered.eventId).toBe(2);
+		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(retained.eventId).toBe(2);
+		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(databaseReads).toBe(1);
+		expect(LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS).toBeGreaterThan(0);
+	});
+
 	it("uses the numeric season authority for PostgreSQL cold fallback", async () => {
 		const redis = new TestRedis();
 		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
@@ -722,18 +845,16 @@ describe("Live Matches V2 read path", () => {
 		const deskFixtures = detailFixtures.map((detail, index) =>
 			fixture(detail.fixtureId, 20 + index)
 		);
-		const fixtureIdentityRevision = digest(
-			deskFixtures.map(({ fixtureId, homeTeamId, awayTeamId }) => ({
-				fixtureId,
-				homeTeamId,
-				awayTeamId,
-			}))
-		);
+		const fixtureIdentityRevision = deskFixtureIdentityDigest(deskFixtures);
 		const deskManifest = {
 			...row.desk.manifest,
 			revisions: {
 				...row.desk.manifest.revisions,
 				fixtureIdentity: { revision: fixtureIdentityRevision, contentUpdatedAt: now },
+				scoreState: {
+					revision: deskScoreStateDigest(deskFixtures),
+					contentUpdatedAt: later,
+				},
 			},
 			desk: {
 				...row.desk.manifest.desk,

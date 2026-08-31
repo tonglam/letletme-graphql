@@ -9,6 +9,7 @@ export const LIVE_MATCHES_CONTRACT_VERSION = "live-matches-v2" as const;
 export const LIVE_MATCHES_REDIS_PREFIX = "llm:data:v2:fpl:live-match";
 export const LIVE_MATCHES_POSTGRES_TIMEOUT_MS = 400;
 export const LIVE_MATCHES_PROCESS_LKG_LIMIT = 8;
+export const LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS = 30_000;
 export const LIVE_MATCH_MAX_FIXTURES = 32;
 export const LIVE_MATCH_MAX_PLAYERS_PER_FIXTURE = 64;
 export const LIVE_MATCH_MAX_STATS_PER_PLAYER = 32;
@@ -179,19 +180,19 @@ type CheckpointRow = QueryResultRow & {
 	detail: unknown;
 };
 
+type PostgresCheckpointRead = Readonly<{
+	eventId: number | null;
+	desk: MatchDeskCandidate | null;
+	detail: MatchDetailCandidate | null;
+}>;
+
 const processLkg = new Map<string, SelectedLkg>();
 const processActiveEvent = new Map<string, number>();
+const processActiveEventCheckedAt = new Map<string, number>();
 const postgresDetailMissUntil = new Map<string, number>();
 let postgresCircuitOpenUntil = 0;
 let postgresCircuitFailures = 0;
-const postgresReadFlights = new Map<
-	string,
-	Promise<Readonly<{
-		eventId: number | null;
-		desk: MatchDeskCandidate | null;
-		detail: MatchDetailCandidate | null;
-	}> | null>
->();
+const postgresReadFlights = new Map<string, Promise<PostgresCheckpointRead | null>>();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -231,6 +232,44 @@ const sha256Raw = (value: string): string =>
 	createHash("sha256").update(value, "utf8").digest("hex");
 
 const canonicalBytes = (value: unknown): number => Buffer.byteLength(stableJson(value), "utf8");
+
+const deskLifecycleRevision = (state: MatchLifecycleState): string => sha256({ state });
+
+const deskFixtureIdentityRevision = (fixtures: readonly MatchDeskFixture[]): string =>
+	sha256(
+		fixtures.map((fixture) => ({
+			fixtureId: fixture.fixtureId,
+			eventId: fixture.eventId,
+			homeTeamId: fixture.homeTeamId,
+			homeTeamName: fixture.homeTeamName,
+			homeTeamShortName: fixture.homeTeamShortName,
+			awayTeamId: fixture.awayTeamId,
+			awayTeamName: fixture.awayTeamName,
+			awayTeamShortName: fixture.awayTeamShortName,
+			kickoffTime: fixture.kickoffTime,
+		}))
+	);
+
+const deskScoreStateRevision = (fixtures: readonly MatchDeskFixture[]): string =>
+	sha256(
+		fixtures.map((fixture) => ({
+			fixtureId: fixture.fixtureId,
+			homeScore: fixture.homeScore,
+			awayScore: fixture.awayScore,
+			minutes: fixture.minutes,
+			started: fixture.started,
+			finished: fixture.finished,
+			finishedProvisional: fixture.finishedProvisional,
+		}))
+	);
+
+const deskRevisionsMatchPayload = (
+	publication: MatchDeskPublication,
+	fixtures: readonly MatchDeskFixture[]
+): boolean =>
+	publication.revisions.lifecycle.revision === deskLifecycleRevision(publication.state) &&
+	publication.revisions.fixtureIdentity.revision === deskFixtureIdentityRevision(fixtures) &&
+	publication.revisions.scoreState.revision === deskScoreStateRevision(fixtures);
 
 const parsedJson = (raw: string | null): unknown => {
 	if (raw === null) return null;
@@ -810,7 +849,15 @@ const validDetailForDesk = (
 		const deskFixture = deskByFixture.get(fixture.fixtureId);
 		if (!deskFixture) return false;
 		const allowedTeamIds = new Set([deskFixture.homeTeamId, deskFixture.awayTeamId]);
-		return fixture.players.every((player) => allowedTeamIds.has(player.teamId));
+		const started =
+			deskFixture.started ||
+			deskFixture.finished ||
+			deskFixture.finishedProvisional ||
+			deskFixture.minutes > 0;
+		return (
+			(!started || fixture.players.length > 0) &&
+			fixture.players.every((player) => allowedTeamIds.has(player.teamId))
+		);
 	});
 };
 
@@ -832,7 +879,9 @@ const decodeDeskCandidate = (
 		publication.desk,
 		(value): value is readonly MatchDeskFixture[] => validDeskPayload(value, eventId)
 	);
-	return fixtures && fixtures.length === publication.desk.count
+	return fixtures &&
+		fixtures.length === publication.desk.count &&
+		deskRevisionsMatchPayload(publication, fixtures)
 		? { publication, fixtures, servedFrom }
 		: null;
 };
@@ -1010,7 +1059,10 @@ const compatibleDetail = (
 	const deskFixtures = new Set(desk.fixtures.map((fixture) => fixture.fixtureId));
 	if (!detail.fixtures.every((fixture) => deskFixtures.has(fixture.fixtureId))) return false;
 	const startedDeskFixtures = desk.fixtures
-		.filter((fixture) => fixture.started || fixture.finished || fixture.minutes > 0)
+		.filter(
+			(fixture) =>
+				fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0
+		)
 		.map((fixture) => fixture.fixtureId);
 	const detailFixtures = new Set(detail.fixtures.map((fixture) => fixture.fixtureId));
 	return (
@@ -1092,6 +1144,7 @@ const buildPostgresDesk = (
 		sha256(payload) !== checksum
 	)
 		return null;
+	if (!deskRevisionsMatchPayload(publication, payload)) return null;
 	return { publication, fixtures: payload, servedFrom: "POSTGRES_CHECKPOINT" };
 };
 
@@ -1196,11 +1249,7 @@ const readPostgresCheckpoint = async (
 	seasonId: number,
 	season: string,
 	eventId: number | null
-): Promise<Readonly<{
-	eventId: number | null;
-	desk: MatchDeskCandidate | null;
-	detail: MatchDetailCandidate | null;
-}> | null> => {
+): Promise<PostgresCheckpointRead | null> => {
 	if (!postgresCircuitAllowsRead()) return null;
 	const scope = eventId === null ? `${season}:active` : lkgKey(season, eventId);
 	const existing = postgresReadFlights.get(scope);
@@ -1237,7 +1286,10 @@ const readPostgresCheckpoint = async (
 };
 
 const allFixturesStarted = (desk: MatchDeskCandidate): boolean =>
-	desk.fixtures.some((fixture) => fixture.started || fixture.finished || fixture.minutes > 0);
+	desk.fixtures.some(
+		(fixture) =>
+			fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0
+	);
 
 const detailFallbackKey = (season: string, eventId: number, desk: MatchDeskCandidate): string =>
 	`${season}:${eventId}:${desk.publication.publicationId}:${desk.publication.generation}`;
@@ -1282,21 +1334,43 @@ export const readLiveMatchday = async (
 
 	const redisBundle = await readRedisBundle(context.redis, season, requested);
 	const redisReadFailed = redisBundle === null;
+	const cachedActiveEvent = processActiveEvent.get(season);
+	let unscopedPostgres: PostgresCheckpointRead | null | undefined;
+	const shouldRevalidateActiveEvent =
+		requested === undefined &&
+		(redisBundle === null || redisBundle.eventId === null) &&
+		redisReadFailed &&
+		(cachedActiveEvent === undefined ||
+			Date.now() - (processActiveEventCheckedAt.get(season) ?? 0) >=
+				LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS);
+	if (shouldRevalidateActiveEvent) {
+		unscopedPostgres = await readPostgresCheckpoint(
+			context,
+			context.currentSeason.seasonId,
+			season,
+			null
+		);
+		processActiveEventCheckedAt.set(season, Date.now());
+	}
 	const selectedEventId =
-		requested ?? redisBundle?.eventId ?? processActiveEvent.get(season) ?? null;
+		requested ?? redisBundle?.eventId ?? unscopedPostgres?.eventId ?? cachedActiveEvent ?? null;
 	if (
 		requested === undefined &&
 		redisBundle?.eventId !== null &&
 		redisBundle?.eventId !== undefined
 	)
 		processActiveEvent.set(season, redisBundle.eventId);
+	if (
+		requested === undefined &&
+		selectedEventId !== null &&
+		unscopedPostgres?.eventId === selectedEventId
+	)
+		processActiveEvent.set(season, selectedEventId);
 	if (selectedEventId === null) {
-		const postgres = await readPostgresCheckpoint(
-			context,
-			context.currentSeason.seasonId,
-			season,
-			null
-		);
+		const postgres =
+			unscopedPostgres !== undefined
+				? unscopedPostgres
+				: await readPostgresCheckpoint(context, context.currentSeason.seasonId, season, null);
 		const fallbackEventId = postgres?.eventId ?? null;
 		const fallbackDesk = postgres?.desk ?? null;
 		const fallbackDetail = fallbackDesk
@@ -1337,12 +1411,9 @@ export const readLiveMatchday = async (
 	const processDesk = stored ? asProcessLkg(stored).desk : null;
 	const desk = redisDesk[0] ?? processDesk;
 
-	let postgresReadFailed = false;
-	let postgres: Readonly<{
-		eventId: number | null;
-		desk: MatchDeskCandidate | null;
-		detail: MatchDetailCandidate | null;
-	}> | null = null;
+	let postgresReadFailed = unscopedPostgres === null;
+	let postgres: PostgresCheckpointRead | null =
+		unscopedPostgres?.eventId === selectedEventId ? unscopedPostgres : null;
 	const retainedDetail = desk
 		? chooseDetail(desk, [...redisDetail, stored ? asProcessLkg(stored).detail : null])
 		: null;
@@ -1352,15 +1423,17 @@ export const readLiveMatchday = async (
 			retainedDetail === null &&
 			detailCheckpointMayBeRetried(season, selectedEventId, desk))
 	) {
-		postgres = await readPostgresCheckpoint(
-			context,
-			context.currentSeason.seasonId,
-			season,
-			selectedEventId
-		);
-		postgresReadFailed = postgres === null;
-		if (desk && postgres !== null && chooseDetail(desk, [postgres.detail]) === null)
-			rememberMissingDetailCheckpoint(season, selectedEventId, desk);
+		if (unscopedPostgres === undefined) {
+			postgres = await readPostgresCheckpoint(
+				context,
+				context.currentSeason.seasonId,
+				season,
+				selectedEventId
+			);
+			postgresReadFailed = postgres === null;
+			if (desk && postgres !== null && chooseDetail(desk, [postgres.detail]) === null)
+				rememberMissingDetailCheckpoint(season, selectedEventId, desk);
+		}
 	}
 	const effectiveDesk = desk ?? postgres?.desk ?? null;
 	if (!effectiveDesk)
@@ -1394,6 +1467,7 @@ export const readLiveMatchday = async (
 export const resetLiveMatchProcessStateForTests = (): void => {
 	processLkg.clear();
 	processActiveEvent.clear();
+	processActiveEventCheckedAt.clear();
 	postgresDetailMissUntil.clear();
 	postgresCircuitOpenUntil = 0;
 	postgresCircuitFailures = 0;
