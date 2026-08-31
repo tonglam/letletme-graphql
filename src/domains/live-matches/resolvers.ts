@@ -218,7 +218,10 @@ const toResult = (read: LiveMatchdayRead) => {
 		},
 		snapshot: {
 			season: read.season,
-			eventId: read.eventId,
+			// A non-null snapshot is always anchored by a validated desk
+			// publication; use that authority instead of the nullable lookup
+			// hint carried by the repository result.
+			eventId: read.desk.publication.eventId,
 			state: read.desk.publication.state,
 			revisions: toRevisionVector(read),
 			times: toTimes(read),

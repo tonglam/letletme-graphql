@@ -300,9 +300,15 @@ describe("Live Matches V2 read path", () => {
 	it("serves one root with fixture-specific DGW detail", async () => {
 		const redis = new TestRedis();
 		attachBundle(redis, buildBundle().bundle);
+		let databaseReads = 0;
 		const result = await graphql({
 			schema,
-			contextValue: buildSnapshotContext(redis),
+			contextValue: buildSnapshotContext(redis, {
+				databaseQuery: async () => {
+					databaseReads += 1;
+					throw new Error("warm Live Matches reads must not touch PostgreSQL");
+				},
+			}),
 			source: `query { liveMatchday(eventId: 1) { availability delivery { state servedFrom } snapshot { eventId matches { fixtureId players { id totalPoints stats { identifier points } } } } } }`,
 		});
 
@@ -318,6 +324,22 @@ describe("Live Matches V2 read path", () => {
 				],
 			},
 		});
+		expect(databaseReads).toBe(0);
+	});
+
+	it("rejects a publication with an invalid V2 identity", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		if (bundle.desk.active.publication === null) throw new Error("missing active desk");
+		const publication = JSON.parse(bundle.desk.active.publication) as { publicationId: string };
+		publication.publicationId = "not-a-publication";
+		bundle.desk.active.publication = JSON.stringify(publication);
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk).toBeNull();
+		expect(result.detail).toBeNull();
 	});
 
 	it("does not let an explicit event read populate the active-event fallback", async () => {
@@ -438,6 +460,76 @@ describe("Live Matches V2 read path", () => {
 		const redis = new TestRedis();
 		const built = buildBundle({ detailDeskGeneration: 3 });
 		attachBundle(redis, built.bundle);
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk?.servedFrom).toBe("REDIS_CURRENT");
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects detail players outside the served fixture teams", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const active = bundle.detail.active;
+		if (active.publication === null || active.items[0] === undefined)
+			throw new Error("missing active detail");
+		const publication = JSON.parse(active.publication) as {
+			fixtures: Array<{
+				fixtureId: number;
+				key: string;
+				count: number;
+				bytes: number;
+				sha256: string;
+			}>;
+			detail: { revision: string };
+		};
+		const invalidPlayers = [{ ...player(3), teamId: 999 }];
+		const payload = encode(invalidPlayers);
+		const checksum = digest(invalidPlayers);
+		const item = publication.fixtures[0];
+		if (!item) throw new Error("missing first detail descriptor");
+		const nextKey = item.key.replace(/:[0-9a-f]{64}$/, `:${checksum}`);
+		publication.fixtures[0] = {
+			...item,
+			key: nextKey,
+			bytes: Buffer.byteLength(payload, "utf8"),
+			sha256: checksum,
+		};
+		active.items[0] = {
+			...active.items[0],
+			key: nextKey,
+			payload,
+			metadata: itemMeta(invalidPlayers),
+		};
+		publication.detail.revision = digest([
+			{ fixtureId: 101, players: invalidPlayers },
+			{ fixtureId: 102, players: [player(8)] },
+		]);
+		active.publication = JSON.stringify(publication);
+		active.manifest = active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk?.servedFrom).toBe("REDIS_CURRENT");
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects detail that does not cover every desk fixture", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const active = bundle.detail.active;
+		if (active.publication === null) throw new Error("missing active detail");
+		const publication = JSON.parse(active.publication) as {
+			fixtures: Array<{ fixtureId: number }>;
+			detail: { revision: string };
+		};
+		publication.fixtures.pop();
+		active.items.pop();
+		publication.detail.revision = digest([{ fixtureId: 101, players: [player(3)] }]);
+		active.publication = JSON.stringify(publication);
+		active.manifest = active.publication;
+		attachBundle(redis, bundle);
+
 		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
 
 		expect(result.desk?.servedFrom).toBe("REDIS_CURRENT");

@@ -208,6 +208,12 @@ const finiteNumber = (value: unknown): value is number =>
 const nonEmptyString = (value: unknown): value is string =>
 	typeof value === "string" && value.length > 0;
 
+// Data's V2 checkpoint contract reserves a fixed-width publication identity.
+// Keep the reader boundary equally strict so an arbitrary non-empty value
+// cannot become a trusted publication reference after Redis/PG recovery.
+const validPublicationId = (value: unknown): value is string =>
+	typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value);
+
 const stableJson = (value: unknown): string => {
 	if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
 	if (isRecord(value))
@@ -587,7 +593,7 @@ const validBasePublication = (
 } =>
 	isRecord(value) &&
 	value.contractVersion === LIVE_MATCHES_CONTRACT_VERSION &&
-	nonEmptyString(value.publicationId) &&
+	validPublicationId(value.publicationId) &&
 	safeInteger(value.generation) !== null &&
 	(safeInteger(value.generation) as number) > 0 &&
 	value.season === season &&
@@ -652,7 +658,7 @@ const parseDetailPublication = (
 	if (
 		!isRecord(value) ||
 		value.contractVersion !== LIVE_MATCHES_CONTRACT_VERSION ||
-		!nonEmptyString(value.publicationId) ||
+		!validPublicationId(value.publicationId) ||
 		safeInteger(value.generation) === null ||
 		(safeInteger(value.generation) as number) <= 0 ||
 		value.season !== season ||
@@ -795,6 +801,19 @@ const validDetailPayload = (value: unknown): value is readonly MatchFixtureDetai
 		value.length &&
 	value.every(validFixtureDetail);
 
+const validDetailForDesk = (
+	desk: readonly MatchDeskFixture[],
+	detail: readonly MatchFixtureDetail[]
+): boolean => {
+	const deskByFixture = new Map(desk.map((fixture) => [fixture.fixtureId, fixture]));
+	return detail.every((fixture) => {
+		const deskFixture = deskByFixture.get(fixture.fixtureId);
+		if (!deskFixture) return false;
+		const allowedTeamIds = new Set([deskFixture.homeTeamId, deskFixture.awayTeamId]);
+		return fixture.players.every((player) => allowedTeamIds.has(player.teamId));
+	});
+};
+
 const decodeDeskCandidate = (
 	raw: RedisDeskRaw,
 	season: string,
@@ -813,7 +832,9 @@ const decodeDeskCandidate = (
 		publication.desk,
 		(value): value is readonly MatchDeskFixture[] => validDeskPayload(value, eventId)
 	);
-	return fixtures ? { publication, fixtures, servedFrom } : null;
+	return fixtures && fixtures.length === publication.desk.count
+		? { publication, fixtures, servedFrom }
+		: null;
 };
 
 const sameDetailMetadata = (
@@ -881,9 +902,11 @@ const decodeDetailCandidate = (
 		if (!players) return null;
 		byFixture.set(item.fixtureId, { fixtureId: item.fixtureId, players });
 	}
+	const fixtures = [...byFixture.values()];
+	if (sha256(fixtures) !== publication.detail.revision) return null;
 	return {
 		publication,
-		fixtures: [...byFixture.values()],
+		fixtures,
 		servedFrom,
 	};
 };
@@ -990,7 +1013,10 @@ const compatibleDetail = (
 		.filter((fixture) => fixture.started || fixture.finished || fixture.minutes > 0)
 		.map((fixture) => fixture.fixtureId);
 	const detailFixtures = new Set(detail.fixtures.map((fixture) => fixture.fixtureId));
-	return startedDeskFixtures.every((fixtureId) => detailFixtures.has(fixtureId));
+	return (
+		startedDeskFixtures.every((fixtureId) => detailFixtures.has(fixtureId)) &&
+		validDetailForDesk(desk.fixtures, detail.fixtures)
+	);
 };
 
 const chooseDetail = (
