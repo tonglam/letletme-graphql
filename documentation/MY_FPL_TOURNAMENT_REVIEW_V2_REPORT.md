@@ -3,10 +3,34 @@
 **审查对象**：以 tournament `6953` 为例，覆盖 Data → PostgreSQL →
 GraphQL → Web → WeChat Mini Program → Ops。
 
-**审查日期**：2026-08-30（代码审查与测试证据；不是线上已发布声明）。
+**审查日期**：2026-08-31（代码审查、CI、部署与只读线上证据；不是全链路已发布声明）。
 
-**决策**：V2 是唯一新增业务路径。V1 与 V2 发生语义冲突时以 V2 为准；
-V1 只在所有客户端完成切换前保留为受控的过渡代码，不能再扩展 V1 能力。
+**决策**：V2 是唯一业务路径。V1 与 V2 发生语义冲突时舍弃 V1；不做
+V1 fallback、兼容 alias 或双读。遗留 V1 代码只允许作为后置删除对象，不能再
+承载新语义或进入生产请求路径。
+
+## Executive Summary
+
+这次审查把“我的 LetLetMe 赛事复盘”定义为**已结算快照复盘中心**：Season
+看累计竞争格局，Gameweek 看单轮表现，未结算轮次统一回到 Live；POINTS 的
+“本轮积分”以 Gross 为主指标，cost/Net 作为解释维度，H2H 与淘汰赛使用独立
+布局。平台管理员通过 `ALL` 查看所有赛事；自定义赛事在 `setup_status = ready`
+后走同一条 obligation/reconcile/publication 链路。
+
+链路的结构性基础已经具备：Data 负责 source validation、PostgreSQL immutable
+publication 与 atomic head，GraphQL 负责只读授权、revision pin、fail-closed
+校验与 query cache，Web/Mini 负责 V2 contract header 与格式化页面。Data PR
+`#366` 已以精确 SHA 部署，生产 `/health/deploy`、scheduler、worker 与
+publication consistency 均为 true。
+
+当前仍有三个发布阻断：
+
+1. Data `#368` 需要先把 `source_min_checked_at` 固定在 finalized event checkpoint，
+   否则 Data 合法的历史/静态来源时间会被 GraphQL 误判为过期。
+2. GraphQL `#193` 已 rebase 到最新 `main`，但 exact-head Codex review 尚未完成；
+   Web/Mini 仍 pin 旧 GraphQL schema，不能宣称客户端 contract 已闭环。
+3. 还没有带受保护凭证的 6953 publication/status 样本，因此真实 row count、
+   head parity、Season 全历史窗口和端到端消费结果仍属于未验证项。
 
 ## 1. 业务口径
 
@@ -155,8 +179,11 @@ row 的 `seasonGrossPoints/seasonNetPoints` 映射为 Season 表格值，不会�
    不拼接不同 revision 的兄弟数据。
 4. publication 的 `expected = ready + notApplicable`，且 payload typed key
    必须与 `format` 相同。
-5. `event_data_checked_at <= source_min_checked_at <= source_max_checked_at <= published_at`；
-   任一关键源字段早于 checkpoint 都不能发布。
+5. 消费端要求 `event_data_checked_at <= source_min_checked_at <= source_max_checked_at <= published_at`。
+   Data producer 将 `source_min_checked_at` 固定为 finalized event checkpoint，
+   `source_max_checked_at` 表示所有已验证依赖中的最新时间；当前事件的 source
+   行仍逐项要求不早于 checkpoint。历史/静态依赖可以更早，但不能直接成为
+   persisted source-min 下界。
 6. GraphQL 对坏 schema/metric version、坏计数、坏 hash、坏时间戳、坏 payload row 采取 fail-closed，
    返回数据完整性错误而不把半成品写入缓存。
 7. H2H Season standings 的行数按 `readySubjectCount` 校验；尚未开始的 entry
@@ -168,6 +195,11 @@ row 的 `seasonGrossPoints/seasonNetPoints` 映射为 Season 表格值，不会�
    `source_checked_at/updated_at` 不早于该 event checkpoint；缺轮或过期历史不发布。
 9. GraphQL role 只读；Data writer 负责 publication/head/obligation 写入；
    RLS 与 grants 不允许客户端直接改 Data 表。
+
+> **跨仓库兼容性门**：Data `#352` 的 `0077` migration 原始约束仍同时允许
+> `source_min_checked_at <= event_data_checked_at`。因此在 Data `#368` 的 source-floor
+> 修复部署、reconcile 并生成新 revision 之前，不能把 GraphQL 当前校验当作生产
+> 已兼容；旧 immutable revision 不修改，只由新 head 指向重建后的 revision。
 
 ### 4.2 允许多少秒数据
 
@@ -246,11 +278,15 @@ llm:gql:* query cache (TTL 60s/300s)
 
 ### Data
 
-- `migrations/0075_tournament_review_v2_publications.sql`：publication、head、
+- `migrations/0077_tournament_review_v2_publications.sql`：publication、head、
   obligation、RLS、grants、typed payload/count/source-span 约束。
 - `src/services/tournament-review-publication.service.ts`：三种 format builder、
   immutable revision/hash、repeatable-read + scope advisory lock、lease/retry/
   degraded repair、`6953` bounded status evidence。
+- PR `#368`（当前 head `cd9002882e698cab68c381e94048022602a9d1b1`）补齐 source-floor
+  producer 语义，并新增 `0082_tournament_review_source_floor_requeue.sql`：历史/静态
+  依赖不再把 `source_min_checked_at` 推到 event checkpoint 之前；已经存在的旧
+  READY head 会被有界地撤下并重新入队。该 PR 尚未合并或部署。
 - `src/jobs/maintenance.jobs.ts`、`src/scheduler/job-registry.ts`、
   `src/workers/maintenance.worker.ts`：5 分钟 `my-fpl-orchestration` lane，
   每次最多 20 scopes。
@@ -292,7 +328,7 @@ llm:gql:* query cache (TTL 60s/300s)
   operations，`first/after` cursor、fresh 300s / stale 900s policy。
 - `miniprogram/pages/my-fpl/leagues/leagues.ts/.wxml/.wxss`：V2 作为实际入口，
   管理员 `ALL` toggle、Season/Gameweek tabs、format-specific UI 和“加载更多”；
-  历史 V1 markup 仅作为验收前的受控过渡分支。
+  V1 markup 不得作为 fallback，待 V2 正式切流后删除。
 
 ### Ops
 
@@ -304,22 +340,35 @@ llm:gql:* query cache (TTL 60s/300s)
 
 | 仓库 | 已执行证据 | 结果 |
 | --- | --- | --- |
-| Data | `bun run format:check`、`bun run typecheck`、`bun run lint`；publication/migration/documentation 聚焦测试 | 通过，11 tests / 0 fail / 148 expect() calls |
-| GraphQL | `bun run format:check`、`bun run typecheck`、`bun run lint`、`docs:check`、`deprecation:check`；V2/auth/limits/contract 聚焦测试 | 通过，111 tests / 0 fail / 235 expect() calls |
-| Web | `npm run typecheck`、`npm run lint`、Prettier check；UI regression 聚焦测试 | 通过，30 tests / 0 fail |
-| Mini | `npm run typecheck`、`npm run lint`、完整 `npm test`（含 V2/client 测试） | 通过，595 tests / 0 fail；已有无关 `album-presenter.ts` console warning |
+| Data | `bun run format:check`、`bun run typecheck`、`bun run lint`；`tournament-review-*` 聚焦测试；完整 `bun test tests/unit` | `#368` 本地 1499 tests / 0 fail；source-floor 聚焦 23 / 0 fail；CI 新 head 的 integration 仍待完成 |
+| Data production | PR `#366` merge `9d7d0ae9e8924b2cf97098cdad935bb37f985cc3`；deploy run `33375793861`；三次 `/health/deploy` probe；`/health/ready`、`/health/live` | 已证明部署 identity、scheduler、worker、publicationConsistency 为 true；尚未证明 6953 受保护 publication 消费样本 |
+| GraphQL | PR `#193` 本地 focused 31 / 0 fail；完整 985 / 0 fail；typecheck、lint、format、layers、docs、deprecation、Bun build | 代码门通过；但 `main` 已推进到 `0a03ade36ac4b263c5aa73617cc02c29baafbade`，旧 head `27bf0a09...` 已 BEHIND，必须 rebase 后重新 exact-head review |
+| Web | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 771 tests / 0 fail；PR #266 仍 pin 旧 GraphQL contract，不能作为最终消费者证据 |
+| Mini | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 599 tests / 0 fail；PR #82 当前 CONFLICTING，且仍 pin 旧 GraphQL contract |
 | Ops | `python3 -m unittest tests/test_vps_maintenance.py`、`py_compile`、`git diff --check` | 通过，152 tests / 0 fail |
 
 这些是干净隔离 worktree 的本地代码证据，不等于已经 apply migration、部署或
-线上观测。Web 的 `contract:graphql` 仍需要本地 GraphQL 在
+线上观测。Web/Mini 的 `contract:graphql` 仍需要本地 GraphQL 在
 `127.0.0.1:4000` 运行；连接拒绝时不能把 contract check 记为通过。
+
+### 8.1 Gate ledger
+
+| Gate | 状态 | 证据/缺口 |
+| --- | --- | --- |
+| Data producer source floor | 部分通过 | `#368` 已有 producer 修复与 `0082` requeue；等待 exact-head Codex review、CI integration、merge、migration apply |
+| Data runtime deployment | 已通过（#366） | exact deploy SHA、health probes、scheduler/worker/publication consistency 均有证据；`/jobs/status?tournamentId=6953` 仍需受保护凭证样本 |
+| GraphQL schema/read path | 待最终 gate | 旧 `27bf...` 已落后 `main`；必须 rebase 到 `0a03...`、重跑 gates、重新 review，旧 review 不能复用 |
+| Web/Mini consumer contract | 未通过 | 两个客户端仍 pin 旧 GraphQL ref，Mini PR 还有 merge conflict；必须在 GraphQL merge SHA 后更新 pin、跑 contract 与消费者路径 |
+| 6953 end-to-end publication | 未验证 | 缺少带保护凭证的 head/publication/count/hash/source span/Redis-cache 对账；不能从 health 200 推断 |
+| V1 retirement | 设计已决定，执行未完成 | V1 不再是 fallback/alias/double-read；客户端切流完成后删除遗留 roots、loader、markup、queries 与文档 |
 
 ## 9. 发布前 Gate 与 V1 退出条件
 
 按以下顺序执行，任一项失败都停在当前版本，不做隐式 V1 fallback：
 
-1. 在备份和 migration login contract 通过后 apply `0075`，验证表、索引、
-   grants、RLS 与 runtime reader/writer identity。
+1. 在备份和 migration login contract 通过后 apply 至 `0082`（包含 `0077`
+   publication schema 与 `0082` source-floor requeue），验证表、索引、grants、
+   RLS 与 runtime reader/writer identity。
 2. 对当前 season 运行 reconcile/backfill；用 `6953` 验证至少一个 POINTS、
    H2H 或 KNOCKOUT scope 的 source freshness、payload count、hash、head、
    obligation 全部一致。
@@ -333,9 +382,10 @@ llm:gql:* query cache (TTL 60s/300s)
    head parity、degraded、cache stale、GraphQL/Web/Mini 端到端结果。
 7. 做故障演练：源延迟、worker crash/lease reclaim、publication insert failure、
    head mismatch、Redis unavailable、旧客户端 426；确认每类都按上表行为收敛。
-8. 只有在所有客户端完成 V2 且线上无 V1 请求后，才删除 GraphQL V1 roots、
-   Web 旧 loader、Mini 旧 markup/queries、对应 tests/docs，并重新生成 domain
-   manifest；这一步是后置清理，不得提前破坏其他页面。
+8. V2 是唯一业务路径：旧客户端收到 426，不能路由到 V1。所有客户端完成 V2
+   且线上无 V1 请求后，删除 GraphQL V1 roots、Web 旧 loader、Mini 旧
+   markup/queries、对应 tests/docs，并重新生成 domain manifest；遗留代码在清理
+   前也不得重新进入生产请求路径。
 
 ## 10. 复杂度 trade-off 结论
 
@@ -348,7 +398,7 @@ llm:gql:* query cache (TTL 60s/300s)
 | 5 分钟 cadence / 20 scopes | 可预测 DB/worker 负载 | 大规模赛事会拉长尾部时延 | 用 pending age/queue metrics 观测后再调，不先盲目放大。 |
 | first ≤ 100 + cursor | 防止单请求/DOM/WXML 爆炸 | 前端需要分页体验 | 保留硬上限。 |
 | Season 最新 payload + event-id 窗口 | 低内存、低网络、避免每次扫描历史 JSON | 历史 payload 不在每次 Season read 中重新 hash | Data builder 已增加逐事件计数/来源 checkpoint 门槛；immutable publication、worker hash 和真实历史窗口回放仍需上线前验证。 |
-| V1 过渡保留 | 可做灰度与回滚 | 旧语义可能被误调用 | 仅限验收窗口；V2 客户端上线后删除。 |
+| V1 路径清理 | 可避免双语义、双读和缓存碰撞 | 不能再用旧页面做业务回滚 | V2 上线即拒绝旧 contract；验收后删除遗留 roots/loader/markup。 |
 
 **最终判断**：V2 已把“已结算赛事复盘”从一次性页面查询升级为有 scope、
 revision、head、freshness、retry、auth、cache、Ops evidence 的小型数据产品。
@@ -358,3 +408,39 @@ revision、head、freshness、retry、auth、cache、Ops evidence 的小型数�
 6953 的全部适用 event，确认 120 秒 lease 不会在大 payload 构建期间被错误
 reclaim，并验证超过 20 scopes/5 分钟时 pending tail 的 SLO。以上 Gate 完成
 之前，不应宣称 6953 已生产就绪。
+
+## 11. 范围、方法、限制与后续问题
+
+### 范围与方法
+
+本报告固定一个业务例子 `tournament_id = 6953`，并沿着 source → Data sync/finalize
+→ PostgreSQL publication/head → GraphQL authorization/read model → query cache
+→ Web/Mini consumer → Ops evidence 逐层审查。每一层分别记录代码、测试、CI、部署
+和消费者证据；任何层缺少真实受保护样本，都标记为“未验证”，不以相邻层的健康
+检查替代。时间预算是目标/硬线，不是实测 p95；实测必须在真实结算窗口和受控负载
+下补采。
+
+### 限制
+
+- 本轮没有使用生产写权限、没有手工改 Data 表或 Redis，也没有绕过 migration、
+  auth 或 rate-limit gate。
+- 当前只读证据没有包含 6953 的真实 publication payload、row count、head revision、
+  content hash、source span 或 GraphQL/Web/Mini 消费响应；因此完整性、一致性和
+  freshness 的“设计成立”不能等同于“该赛事已经成立”。
+- Data `/health/deploy` 证明的是部署与依赖状态；`/jobs/status`、内部 job lane 和
+  Redis key 需要受保护凭证并按最小范围采样。
+- Season cumulative 的 event-id 窗口、H2H 每一轮覆盖、淘汰赛 bracket 连续性和
+  自定义赛事 setup-to-ready 需要真实数据回放，不能用单元测试替代。
+
+### 后续问题
+
+1. `#368` merge/deploy 后，`0082` 实际撤下并重建了多少旧 head？6953 的新 revision
+   是否满足 `event_data_checked_at <= source_min <= source_max <= published_at`？
+2. 真实结算窗口中 `eligible → visible` p50/p95/p99、最老 pending age、20 scopes
+   每 5 分钟的 queue tail 是否符合 900s/4500s 硬线？
+3. 大 payload 构建期间 120s lease renewal 是否稳定，是否存在错误 reclaim 或重复
+   publication？
+4. GraphQL merge SHA 更新 Web/Mini pin 后，`ACCESSIBLE`、tournament manager 和
+   platform admin `ALL` 三种身份是否都只读到同一 coherent head？
+5. 自定义赛事创建、setup failure、重试和删除后的 publication/head/缓存清理是否
+   已在真实环境演练，并确认不会恢复 V1 fallback？
