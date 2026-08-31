@@ -41,6 +41,17 @@ const buildV2Redis = (
 		sourceCheckedAt?: string;
 		entrySourceCheckedAt?: string;
 		previous?: boolean;
+		state?:
+			| "PRE_DEADLINE"
+			| "PICKS_WAIT"
+			| "PICKS_PROBE"
+			| "PICKS_SYNC"
+			| "LIVE_ACTIVE"
+			| "BETWEEN_FIXTURES"
+			| "DAY_SETTLING"
+			| "GW_REVIEW"
+			| "FINALIZED";
+		expectedNextCheckAt?: string | null;
 	} = {}
 ) => {
 	const core = buildTestCoreData(1, {
@@ -105,11 +116,11 @@ const buildV2Redis = (
 				generation,
 				season: "2627",
 				eventId: 1,
-				state: "LIVE_ACTIVE",
+				state: options.state ?? "LIVE_ACTIVE",
 				sourceCheckedAt,
 				publishedAt: sourceCheckedAt,
 				checkpointedAt: null,
-				expectedNextCheckAt: null,
+				expectedNextCheckAt: options.expectedNextCheckAt ?? null,
 				revisions,
 				items: {
 					eventLive: {
@@ -228,6 +239,44 @@ describe("Live Points V2 projection", () => {
 		expect(result.delivery.state).toBe("DEGRADED");
 		expect(result.delivery.reasonCodes).toContain("ENTRY_METADATA_UNAVAILABLE");
 		expect(result.score.times.sourceCheckedAt).toBe(result.snapshot.times.sourceCheckedAt);
+	});
+
+	it("uses the producer cadence boundary between fixtures", async () => {
+		clearLivePointsV2Lkg();
+		const sourceCheckedAt = new Date(Date.now() - 60_000).toISOString();
+		const expectedNextCheckAt = new Date(Date.now() + 4 * 60_000).toISOString();
+		const redis = buildV2Redis({
+			sourceCheckedAt,
+			expectedNextCheckAt,
+			state: "BETWEEN_FIXTURES",
+		});
+		const context = buildSnapshotContext(redis);
+		const result = await calcLivePointsByEntryV2(context, 1, 6953);
+		const snapshot = await loadLiveSnapshotMetaV2(context, 1);
+
+		expect(result.availability).toBe("READY");
+		expect(snapshot?.delivery.state).toBe("FRESH");
+		expect(snapshot?.delivery.reasonCodes).not.toContain("SOURCE_OLDER_THAN_30_SECONDS");
+		expect(result.score.times.staleAt).toBe(expectedNextCheckAt);
+		expect(snapshot?.times.staleAt).toBe(expectedNextCheckAt);
+	});
+
+	it("marks a cadence publication stale only after its expected check", async () => {
+		clearLivePointsV2Lkg();
+		const sourceCheckedAt = new Date(Date.now() - 6 * 60_000).toISOString();
+		const expectedNextCheckAt = new Date(Date.now() - 60_000).toISOString();
+		const redis = buildV2Redis({
+			sourceCheckedAt,
+			expectedNextCheckAt,
+			state: "BETWEEN_FIXTURES",
+		});
+		const context = buildSnapshotContext(redis);
+		const result = await calcLivePointsByEntryV2(context, 1, 6953);
+		const snapshot = await loadLiveSnapshotMetaV2(context, 1);
+
+		expect(snapshot?.delivery.state).toBe("STALE");
+		expect(snapshot?.delivery.reasonCodes).toContain("SOURCE_PAST_EXPECTED_REFRESH");
+		expect(result.score.times.staleAt).toBe(expectedNextCheckAt);
 	});
 
 	it("falls back from a corrupt current pointer to the previous complete publication", async () => {

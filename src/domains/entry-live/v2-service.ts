@@ -25,6 +25,7 @@ import { entriesRepository } from "../entries/repository";
  */
 export const LIVE_POINTS_CONTRACT_VERSION = "live-points-v2" as const;
 export const LIVE_POINTS_ALGORITHM_VERSION = "live-points-v2-algorithm-1" as const;
+/** Fallback only for publications without a valid producer cadence boundary. */
 export const LIVE_POINTS_FRESHNESS_SECONDS = 30;
 const UNAVAILABLE_REVISION = "unavailable";
 
@@ -2942,6 +2943,58 @@ const mapPick = (params: {
 
 const nowIso = (): string => new Date().toISOString();
 
+type FreshnessWindow = {
+	staleAtMs: number;
+	reasonCode: LivePointsFreshnessReasonCode;
+};
+
+export type LivePointsFreshnessReasonCode =
+	"SOURCE_OLDER_THAN_30_SECONDS" | "SOURCE_PAST_EXPECTED_REFRESH";
+
+export type LivePointsFreshnessPublication = {
+	sourceCheckedAt: string;
+	expectedNextCheckAt: string | null;
+};
+
+const freshnessWindowFor = (publication: LivePointsFreshnessPublication): FreshnessWindow => {
+	const sourceCheckedAtMs = Date.parse(publication.sourceCheckedAt);
+	const expectedNextCheckAtMs = publication.expectedNextCheckAt
+		? Date.parse(publication.expectedNextCheckAt)
+		: Number.NaN;
+	if (
+		Number.isFinite(expectedNextCheckAtMs) &&
+		Number.isFinite(sourceCheckedAtMs) &&
+		expectedNextCheckAtMs >= sourceCheckedAtMs
+	) {
+		return {
+			staleAtMs: expectedNextCheckAtMs,
+			reasonCode: "SOURCE_PAST_EXPECTED_REFRESH",
+		};
+	}
+	return {
+		staleAtMs: sourceCheckedAtMs + LIVE_POINTS_FRESHNESS_SECONDS * 1000,
+		reasonCode: "SOURCE_OLDER_THAN_30_SECONDS",
+	};
+};
+
+export type LivePointsFreshnessV2 = {
+	staleAt: string;
+	isFresh: boolean;
+	reasonCode: LivePointsFreshnessReasonCode;
+};
+
+export const getLivePointsFreshnessV2 = (
+	publication: LivePointsFreshnessPublication,
+	nowMs = Date.now()
+): LivePointsFreshnessV2 => {
+	const window = freshnessWindowFor(publication);
+	return {
+		staleAt: new Date(window.staleAtMs).toISOString(),
+		isFresh: nowMs <= window.staleAtMs,
+		reasonCode: window.reasonCode,
+	};
+};
+
 const deliveryFor = (
 	global: GlobalRead,
 	entry: EntryRead,
@@ -2951,7 +3004,7 @@ const deliveryFor = (
 	// Picks are a deadline-scoped immutable input, not a 30-second heartbeat.
 	// Only the live score-core publication drives FRESH/STALE.  An older but
 	// complete picks input is valid and must not make every live response stale.
-	const age = Date.now() - Date.parse(global.publication.sourceCheckedAt);
+	const freshness = freshnessWindowFor(global.publication);
 	const fallback =
 		global.servedFrom !== "REDIS_CURRENT" ||
 		entry.servedFrom !== "REDIS_CURRENT" ||
@@ -2962,7 +3015,7 @@ const deliveryFor = (
 		? "FINAL"
 		: fallback
 			? "DEGRADED"
-			: age <= LIVE_POINTS_FRESHNESS_SECONDS * 1000
+			: Date.now() <= freshness.staleAtMs
 				? "FRESH"
 				: "STALE";
 	const servedFrom: ServedFrom = finalResultAvailable
@@ -2976,7 +3029,7 @@ const deliveryFor = (
 		reasonCodes: [
 			...extraReasons,
 			...(fallback ? ["FALLBACK_SERVED"] : []),
-			...(state === "STALE" ? ["SOURCE_OLDER_THAN_30_SECONDS"] : []),
+			...(state === "STALE" ? [freshness.reasonCode] : []),
 		],
 	};
 };
@@ -3025,9 +3078,7 @@ const timesFor = (global: LivePublication, entryRead: EntryRead, now: string): L
 	// stale score core appear fresh.
 	const sourceCheckedAt = global.sourceCheckedAt;
 	const publishedAt = latestTimestamp(global.publishedAt, entryRead.publication.publishedAt);
-	const staleAt = new Date(
-		Date.parse(sourceCheckedAt) + LIVE_POINTS_FRESHNESS_SECONDS * 1000
-	).toISOString();
+	const staleAt = new Date(freshnessWindowFor(global).staleAtMs).toISOString();
 	return {
 		sourceCheckedAt,
 		contentUpdatedAt,
@@ -3334,13 +3385,13 @@ const globalVector = (global: GlobalRead): LiveRevisionVectorV2 => ({
 
 const globalDelivery = (global: GlobalRead, reason: string): LiveDeliveryV2 => {
 	const fallback = global.servedFrom !== "REDIS_CURRENT";
-	const age = Date.now() - Date.parse(global.publication.sourceCheckedAt);
+	const freshness = freshnessWindowFor(global.publication);
 	const state: DeliveryState =
 		global.publication.state === "FINALIZED"
 			? "FINAL"
 			: fallback
 				? "DEGRADED"
-				: age <= LIVE_POINTS_FRESHNESS_SECONDS * 1000
+				: Date.now() <= freshness.staleAtMs
 					? "FRESH"
 					: "STALE";
 	return {
@@ -3349,7 +3400,7 @@ const globalDelivery = (global: GlobalRead, reason: string): LiveDeliveryV2 => {
 		reasonCodes: [
 			reason,
 			...(fallback ? ["FALLBACK_SERVED"] : []),
-			...(state === "STALE" ? ["SOURCE_OLDER_THAN_30_SECONDS"] : []),
+			...(state === "STALE" ? [freshness.reasonCode] : []),
 		],
 	};
 };
@@ -3377,9 +3428,7 @@ const emptyFromGlobal = (
 		publishedAt: global.publication.publishedAt,
 		checkpointedAt: global.publication.checkpointedAt,
 		servedAt: now,
-		staleAt: new Date(
-			Date.parse(global.publication.sourceCheckedAt) + LIVE_POINTS_FRESHNESS_SECONDS * 1000
-		).toISOString(),
+		staleAt: new Date(freshnessWindowFor(global.publication).staleAtMs).toISOString(),
 		nextRefreshAt: global.publication.expectedNextCheckAt,
 	};
 	const score: LiveScoreV2 = {
@@ -3480,25 +3529,26 @@ export const loadLiveSnapshotMetaV2 = async (
 			publishedAt: global.publication.publishedAt,
 			checkpointedAt: global.publication.checkpointedAt,
 			servedAt: now,
-			staleAt: new Date(
-				Date.parse(global.publication.sourceCheckedAt) + LIVE_POINTS_FRESHNESS_SECONDS * 1000
-			).toISOString(),
+			staleAt: new Date(freshnessWindowFor(global.publication).staleAtMs).toISOString(),
 			nextRefreshAt: global.publication.expectedNextCheckAt,
 		};
 		const fallback = global.servedFrom !== "REDIS_CURRENT";
+		const freshness = freshnessWindowFor(global.publication);
 		const state: DeliveryState =
 			global.publication.state === "FINALIZED"
 				? "FINAL"
 				: fallback
 					? "DEGRADED"
-					: Date.now() - Date.parse(global.publication.sourceCheckedAt) <=
-						  LIVE_POINTS_FRESHNESS_SECONDS * 1000
+					: Date.now() <= freshness.staleAtMs
 						? "FRESH"
 						: "STALE";
 		const delivery: LiveDeliveryV2 = {
 			state,
 			servedFrom: global.servedFrom,
-			reasonCodes: fallback ? ["FALLBACK_SERVED"] : [],
+			reasonCodes: [
+				...(fallback ? ["FALLBACK_SERVED"] : []),
+				...(state === "STALE" ? [freshness.reasonCode] : []),
+			],
 		};
 		return {
 			season: global.publication.season,
