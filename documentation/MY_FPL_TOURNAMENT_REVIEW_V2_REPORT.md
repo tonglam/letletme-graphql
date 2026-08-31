@@ -29,12 +29,12 @@ publication consistency 均为 true。
    staging-publication quiescence 安全拦截；`0082_tournament_review_source_floor_requeue.sql`
    尚未 apply，生产仍是 `#366` 的镜像/数据状态。
 2. GraphQL `#193` 当前代码 exact head 是
-   `27b710c0649d1dbf3f62feb9469a65c177c6df18`，verify 与 database-contract CI
+   `16eaea1d98075b6c991fffb11524405a43956a7f`，verify 与 database-contract CI
    已通过；该 head 包含 H2H 结果、POINTS tournament score 和累计成本的
-   fail-closed 校验。前一轮 `8026b6b…` exact-head review 返回的 4 个 P2 已由
-   该代码 head 修复；文档更新后仍必须针对承载最终 artifact 的 PR head 重新取得
-   clean signal，不能把 CI green 当作 review clean。Web/Mini 仍 pin 旧 GraphQL
-   schema，不能宣称客户端 contract 已闭环。
+   fail-closed 校验，并修复了针对 `4dca17f…` exact-head review 返回的 5 个 P2。
+   文档更新后仍必须针对承载最终 artifact 的 PR head 重新取得 clean signal，不能
+   把 CI green 当作 review clean。Web/Mini 仍 pin 旧 GraphQL schema，不能宣称
+   客户端 contract 已闭环。
 3. 还没有带受保护凭证的 6953 publication/status 样本，因此真实 row count、
    head parity、Season 全历史窗口和端到端消费结果仍属于未验证项。
 
@@ -356,7 +356,7 @@ llm:gql:* query cache (TTL 60s/300s)
 | --- | --- | --- |
 | Data | `bun run format:check`、`bun run typecheck`、`bun run lint`；`tournament-review-*` 聚焦测试；完整 `bun test tests/unit` | `#368` 本地 1499 tests / 0 fail；source-floor 聚焦 23 / 0 fail；CI test/integration 通过；部署因两个 staging publication 的 quiescence gate 停止在 migration 前 |
 | Data production | PR `#366` merge `9d7d0ae9e8924b2cf97098cdad935bb37f985cc3`；deploy run `33375793861`；`/health/deploy`、`/health/ready`、`/health/live` | 已证明 #366 部署 identity、scheduler、worker、publicationConsistency 为 true；#368 尚未生效，且尚未证明 6953 受保护 publication 消费样本 |
-| GraphQL | PR `#193` 代码 exact head `27b710c0649d1dbf3f62feb9469a65c177c6df18`；focused 65 / 0 fail；完整 1027 pass、7 skip、0 fail、1 snapshot、3446 expect；typecheck、lint、format、layers、docs、deprecation、Bun build；CI verify/database-contract `33401094034` 均通过（同一 head 的重复 verify `33401087098` 也通过） | `8026b6b…` exact-head review 的 4 个 P2 已在该 code head 修复，待绑定最终 artifact 的 PR head 重新 review；push-only instruction-integrity `33396177943` 失败不属于代码 gate；不得把 CI green 当作 clean review |
+| GraphQL | PR `#193` 代码 exact head `16eaea1d98075b6c991fffb11524405a43956a7f`；focused 80 / 0 fail；完整 1043 pass、7 skip、0 fail、1 snapshot、3484 expect；typecheck、lint、format、layers、docs、deprecation、Bun build；CI verify/database-contract `33408830439`、`33408834529` 均通过 | 针对 `4dca17f…` exact-head review 的 5 个 P2 已在该 code head 修复，待绑定最终 artifact 的 PR head 重新 review；不得把 CI green 当作 clean review |
 | Web | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 771 tests / 0 fail；PR #266 仍 pin 旧 GraphQL contract，不能作为最终消费者证据 |
 | Mini | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 599 tests / 0 fail；PR #82 当前 CONFLICTING，且仍 pin 旧 GraphQL contract |
 | Ops | `python3 -m unittest tests/test_vps_maintenance.py`、`py_compile`、`git diff --check` | 通过，152 tests / 0 fail |
@@ -371,7 +371,7 @@ llm:gql:* query cache (TTL 60s/300s)
 | --- | --- | --- |
 | Data producer source floor | 已合并、未生效 | `#368` merge `530118af...`、CI test/integration 通过；deploy `33382095955`/`33382453786` 因 `Database has 2 staging publication(s)` 停在 migration 前；`0082` apply/reconcile/backfill 未验证 |
 | Data runtime deployment | #366 已通过；#368 阻塞 | #366 有 exact deploy SHA、health probes、scheduler/worker/publication consistency；#368 尚未切 slot，`/jobs/status?tournamentId=6953` 仍需受保护凭证样本 |
-| GraphQL schema/read path | CI/local gate 通过，待最终 exact-head review | 代码 head `27b710c0649d1dbf3f62feb9469a65c177c6df18`；focused 65、完整 1027、CI 4 项通过；`8026b6b…` review 的 4 个 P2 已修复，最终 artifact 承载 commit 必须再取得 clean signal |
+| GraphQL schema/read path | CI/local gate 通过，待最终 exact-head review | 代码 head `16eaea1d98075b6c991fffb11524405a43956a7f`；focused 80、完整 1043、CI 4 项通过；`4dca17f…` exact-head review 的 5 个 P2 已修复，最终 artifact 承载 commit 必须再取得 clean signal |
 | Web/Mini consumer contract | 未通过 | 两个客户端仍 pin 旧 GraphQL ref，Mini PR 还有 merge conflict；必须在 GraphQL merge SHA 后更新 pin、跑 contract 与消费者路径 |
 | 6953 end-to-end publication | 未验证 | 缺少带保护凭证的 head/publication/count/hash/source span/Redis-cache 对账；不能从 health 200 推断 |
 | V1 retirement | 设计已决定，执行未完成 | V1 不再是 fallback/alias/double-read；客户端切流完成后删除遗留 roots、loader、markup、queries 与文档 |
