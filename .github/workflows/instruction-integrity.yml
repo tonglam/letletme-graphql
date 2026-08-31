@@ -1304,6 +1304,9 @@ jobs:
               def statically_false(expression):
                   return static_truth(expression) is False
 
+              def statically_true(expression):
+                  return static_truth(expression) is True
+
               def secret_search_names(expression):
                   direct_pattern_names = {
                       "PEM_RE",
@@ -1356,14 +1359,62 @@ jobs:
                               for item in ast.walk(statement)
                           ):
                               return set()
+                  if static_truth(loop.iter) is False:
+                      return set()
+
+                  def reachable_finditer_calls(statements):
+                      """Collect finditer calls without traversing dead blocks."""
+
+                      found = []
+
+                      def expression_calls(expression):
+                          for item in ast.walk(expression):
+                              if (
+                                  isinstance(item, ast.Call)
+                                  and isinstance(item.func, ast.Attribute)
+                                  and item.func.attr == "finditer"
+                              ):
+                                  found.append(item)
+
+                      def visit(block):
+                          for statement in block:
+                              if isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+                                  break
+                              if isinstance(statement, ast.If):
+                                  if statically_false(statement.test):
+                                      continue
+                                  expression_calls(statement.test)
+                                  visit(statement.body)
+                                  if not statically_true(statement.test):
+                                      visit(statement.orelse)
+                              elif isinstance(statement, (ast.For, ast.AsyncFor)):
+                                  if static_truth(statement.iter) is False:
+                                      continue
+                                  expression_calls(statement.iter)
+                                  visit(statement.body)
+                                  visit(statement.orelse)
+                              elif isinstance(statement, ast.While):
+                                  if statically_false(statement.test):
+                                      continue
+                                  expression_calls(statement.test)
+                                  visit(statement.body)
+                                  visit(statement.orelse)
+                              elif isinstance(statement, ast.Try):
+                                  visit(statement.body)
+                                  for handler in statement.handlers:
+                                      visit(handler.body)
+                                  visit(statement.orelse)
+                                  visit(statement.finalbody)
+                              elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                                  continue
+                              else:
+                                  expression_calls(statement)
+
+                      visit(statements)
+                      return found
+
                   names = set()
-                  for item in ast.walk(loop):
-                      if not (
-                          isinstance(item, ast.Call)
-                          and isinstance(item.func, ast.Attribute)
-                          and item.func.attr == "finditer"
-                      ):
-                          continue
+                  for item in reachable_finditer_calls(loop.body):
                       receiver = item.func.value
                       if isinstance(receiver, ast.Name) and receiver.id in direct_pattern_names:
                           names.add(receiver.id)
