@@ -447,6 +447,6 @@ describe("My Tournament Review V2 repository", () => {
 		expect(result.finalizedEventIds).toEqual([3, 4]);
 		expect(result.points?.rows).toHaveLength(1);
 		expect(result.points?.hasNextPage).toBe(true);
-		expect(result.points?.nextCursor).toBe("MQ");
+		expect(result.points?.nextCursor).toBe("eyJvZmZzZXQiOjEsInJldmlzaW9uIjoiOCJ9");
 	});
 });

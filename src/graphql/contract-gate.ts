@@ -3,6 +3,12 @@ import type { GraphQLContext } from "./context";
 export const MY_TOURNAMENT_REVIEW_CONTRACT = "my-tournament-review-v2";
 export const MY_TOURNAMENT_REVIEW_CONTRACT_HEADER = "x-letletme-contract";
 
+const hasContractToken = (value: string | null | undefined, expected: string): boolean =>
+	(value ?? "")
+		.split(",")
+		.map((token) => token.trim())
+		.some((token) => token === expected);
+
 export type ContractGateFailure = Readonly<{
 	status: 426;
 	code: "CLIENT_UPGRADE_REQUIRED";
@@ -25,8 +31,14 @@ export function validateMyTournamentReviewContract(
 	headers: Headers
 ): ContractGateFailure | null {
 	if (!requiresMyTournamentReviewV2(rootFields)) return null;
-	const contract = headers.get(MY_TOURNAMENT_REVIEW_CONTRACT_HEADER)?.trim();
-	if (contract === MY_TOURNAMENT_REVIEW_CONTRACT) return null;
+	if (
+		hasContractToken(
+			headers.get(MY_TOURNAMENT_REVIEW_CONTRACT_HEADER),
+			MY_TOURNAMENT_REVIEW_CONTRACT
+		)
+	) {
+		return null;
+	}
 	return {
 		status: 426,
 		code: "CLIENT_UPGRADE_REQUIRED",
@@ -42,7 +54,7 @@ export function assertMyTournamentReviewContext(
 ): void {
 	const contract = (context.requestScope as { myTournamentReviewContract?: string } | undefined)
 		?.myTournamentReviewContract;
-	if (contract !== undefined && contract !== MY_TOURNAMENT_REVIEW_CONTRACT) {
+	if (contract !== undefined && !hasContractToken(contract, MY_TOURNAMENT_REVIEW_CONTRACT)) {
 		throw new Error("CLIENT_UPGRADE_REQUIRED");
 	}
 }

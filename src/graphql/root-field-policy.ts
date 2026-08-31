@@ -196,6 +196,9 @@ for (const field of [
 	"tournamentDetailDesk",
 	"tournament",
 	"entryLiveCompetitionBoard",
+	"myTournamentGameweekReview",
+	"myTournamentSeasonReview",
+	"myTournamentReviewStatus",
 ]) {
 	const current = registry.get(field);
 	if (current) registry.set(field, { ...current, retainedAdmin: true, tournamentMember: true });
@@ -259,9 +262,6 @@ const lightweightFields = [
 	"calcLivePointsByEntry",
 	"calcLivePointsForEntries",
 	"liveSnapshot",
-	"myTournamentGameweekReview",
-	"myTournamentSeasonReview",
-	"myTournamentReviewStatus",
 ] as const;
 for (const field of lightweightFields) {
 	const current = registry.get(field);

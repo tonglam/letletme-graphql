@@ -73,7 +73,7 @@ const requirePrincipal = (principal?: Principal | null): AuthorizationResult =>
 				message: "Authentication required",
 			};
 
-const hasVerifiedEntry = (principal: Principal): boolean =>
+export const hasVerifiedEntry = (principal: Principal): boolean =>
 	Boolean(principal.fplEntryId && principal.fplEntryVerifiedAt);
 
 export const viewerEntryIdForPrincipal = (principal: Principal): number | null => {
