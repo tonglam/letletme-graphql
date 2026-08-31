@@ -1347,6 +1347,15 @@ jobs:
                           for item in loop.iter.elts
                           if isinstance(item, ast.Name) and item.id in direct_pattern_names
                       }
+                  if isinstance(loop.target, ast.Name):
+                      for statement in loop.body:
+                          if any(
+                              isinstance(item, ast.Name)
+                              and isinstance(item.ctx, ast.Store)
+                              and item.id == loop.target.id
+                              for item in ast.walk(statement)
+                          ):
+                              return set()
                   names = set()
                   for item in ast.walk(loop):
                       if not (
