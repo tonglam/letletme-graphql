@@ -1140,6 +1140,30 @@ jobs:
           def check_has_secret_shape(node):
               """Require secret-detection results to reach a failure return."""
 
+              def statically_false(expression):
+                  """Reject a secret pre-check hidden behind constant-false logic."""
+
+                  if isinstance(expression, ast.Constant):
+                      return expression.value is False
+                  if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+                      return statically_true(expression.operand)
+                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.And):
+                      return any(statically_false(value) for value in expression.values)
+                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.Or):
+                      return all(statically_false(value) for value in expression.values)
+                  return False
+
+              def statically_true(expression):
+                  if isinstance(expression, ast.Constant):
+                      return expression.value is True
+                  if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+                      return statically_false(expression.operand)
+                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.And):
+                      return all(statically_true(value) for value in expression.values)
+                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.Or):
+                      return any(statically_true(value) for value in expression.values)
+                  return False
+
               def calls_receiver(expression, operation, receiver):
                   return any(
                       isinstance(item, ast.Call)
@@ -1173,6 +1197,8 @@ jobs:
                   if not isinstance(branch, ast.If):
                       continue
                   if (
+                      not statically_false(branch.test)
+                      and
                       calls_receiver(branch.test, "search", "PEM_RE")
                       and calls_receiver(branch.test, "search", "PRIVATE_ORIGIN_RE")
                       and calls_name(branch.test, "_has_private_ip_literal")
@@ -1409,12 +1435,12 @@ jobs:
                   "_parse_scalar": {"_strip_yaml_comment", "loads"},
                   "validate_skill": {"_validate_instruction_file", "rglob", "read_bytes", "has_secret_bytes"},
                   "validate_locked_skill": {"skill_tree_digest", "rglob", "read_bytes", "is_file", "has_locked_skill_secret_bytes"},
-                  "skill_tree_digest": {"sha256", "rglob", "read_bytes", "relative_to", "as_posix"},
+                  "skill_tree_digest": {"sha256", "rglob", "read_bytes", "relative_to", "as_posix", "len", "to_bytes"},
                   "has_locked_skill_secret_bytes": {"loads", "dumps", "has_locked_skill_secret"},
                   "_validate_instruction_file": {"read_text", "read_frontmatter", "check_reference_links", "scan_reference_graph", "has_secret"},
                   "_validate_global_manifest": {"load_json", "read_bytes", "sha256", "resolve"},
                   "_validate_skill_inventory": {"load_json"},
-                  "has_secret_bytes": {"loads", "has_secret"},
+                  "has_secret_bytes": {"loads", "dumps", "has_secret"},
                   "has_secret": {"search", "finditer", "_has_private_ip_literal", "_looks_like_placeholder"},
                   "_has_private_ip_literal": {"finditer", "ip_address"},
                   "_looks_like_placeholder": {"fullmatch", "match", "search"},

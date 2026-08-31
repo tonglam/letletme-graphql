@@ -53,6 +53,7 @@ SECRET_VALUE_RES = (
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])+(?:secret|credential)(?:[_-](?:key|token|value))?["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|notification[_ -]?token|notifier[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
+    re.compile(r"(?i)\bauthorization\s*:\s*basic\s+([A-Za-z0-9+/]{8,}={0,2})"),
     re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]*:([^\s/@]+)@"),
     # HTTP(S) and Git userinfo can carry a password/token even when the host
     # is public. Keep the username optional so ``https://:secret@host`` is
@@ -1064,11 +1065,24 @@ def has_secret_bytes(raw: bytes) -> bool:
             # them. Scan a normalized serialization as well so an escaped
             # ``passw\\u006frd`` key cannot hide a literal credential.
             try:
-                parsed = json.loads(decoded)
+                pairs: list[tuple[str, Any]] = []
+
+                def collect_json_pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+                    pairs.extend(items)
+                    return dict(items)
+
+                parsed = json.loads(decoded, object_pairs_hook=collect_json_pairs)
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
             else:
                 candidates.append(json.dumps(parsed, ensure_ascii=False))
+                # Scan each decoded pair before duplicate keys are collapsed;
+                # otherwise an innocuous later value can hide a credential
+                # carried by an earlier duplicate key.
+                candidates.extend(
+                    json.dumps({key: value}, ensure_ascii=False)
+                    for key, value in pairs
+                )
         except UnicodeDecodeError:
             continue
     return any(has_secret(candidate) for candidate in candidates)
@@ -1085,10 +1099,20 @@ def has_locked_skill_secret_bytes(raw: bytes) -> bool:
             continue
         candidates.append(decoded)
         try:
-            parsed = json.loads(decoded)
+            pairs: list[tuple[str, Any]] = []
+
+            def collect_json_pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+                pairs.extend(items)
+                return dict(items)
+
+            parsed = json.loads(decoded, object_pairs_hook=collect_json_pairs)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         candidates.append(json.dumps(parsed, ensure_ascii=False))
+        candidates.extend(
+            json.dumps({key: value}, ensure_ascii=False)
+            for key, value in pairs
+        )
     return any(has_locked_skill_secret(candidate) for candidate in candidates)
 
 
@@ -1110,8 +1134,13 @@ def skill_tree_digest(path: Path) -> str:
     digest = hashlib.sha256()
     # ``skills`` computes hashes with JavaScript's default locale ordering;
     # case-folding is the stable cross-platform equivalent for these paths.
+    # Length-prefix both fields so concatenation cannot make two distinct
+    # path/content sequences hash identically.
     for relative, raw in sorted(files, key=lambda value: value[0].casefold()):
-        digest.update(relative.encode("utf-8"))
+        relative_bytes = relative.encode("utf-8")
+        digest.update(len(relative_bytes).to_bytes(8, "big"))
+        digest.update(relative_bytes)
+        digest.update(len(raw).to_bytes(8, "big"))
         digest.update(raw)
     return digest.hexdigest()
 
@@ -1751,18 +1780,22 @@ def validate_asset(
         discovered = _instruction_paths(repo, include_discovery=asset.get("kind") != "instruction-system")
         discovered_set = set(discovered)
         for path in discovered:
+            relative_parts = path.relative_to(repo).parts
+            governed_entrypoint = path.name == "CLAUDE.md" or (
+                len(relative_parts) >= 3
+                and relative_parts[:2] in {(".claude", "agents"), (".claude", "rules")}
+            )
             _validate_instruction_file(
                 path,
                 repo,
                 policy,
                 errors,
-                require_governance=path.name == "CLAUDE.md",
+                require_governance=governed_entrypoint,
             )
             # CLAUDE.md is an operative consumer entrypoint in repositories
             # that provide it, even when the legacy contract lists only
             # AGENTS.md. Treat it as governed automatically rather than
             # allowing a conflicting file to hide as an unlisted extra.
-            relative_parts = path.relative_to(repo).parts
             if path.name == "CLAUDE.md" or (
                 len(relative_parts) >= 3
                 and relative_parts[:2] == (".claude", "agents")
