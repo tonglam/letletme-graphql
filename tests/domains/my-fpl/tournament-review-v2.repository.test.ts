@@ -155,6 +155,8 @@ describe("My Tournament Review V2 repository", () => {
 		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
 			"JOIN competition.tournament_review_publications publication"
 		);
+		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain("WITH latest_finalized AS");
+		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain("latest_finalized.latest_finalized_event_id");
 		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
 			"publication.content_sha256 = review_head.content_sha256"
 		);
@@ -162,6 +164,62 @@ describe("My Tournament Review V2 repository", () => {
 			"publication.event_data_checked_at = event.data_checked_at"
 		);
 		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain("publication.format = obligation.format");
+	});
+
+	it("reads status rows and finalized checkpoint from one database snapshot", async () => {
+		let queries = 0;
+		let observedSql = "";
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				queries += 1;
+				observedSql = String(query);
+				return {
+					rows: [
+						{
+							event_id: 4,
+							format: "POINTS",
+							state: "READY",
+							next_attempt_at: null,
+							execution_attempts: 1,
+							source_rechecks: 0,
+							degraded_at: null,
+							revision: 8,
+							published_at: "2026-08-20T00:00:03.000Z",
+							latest_finalized_event_id: 4,
+						},
+					],
+				};
+			},
+		});
+		const result = await createMyTournamentReviewRepository().loadStatus(context, 6953);
+		expect(queries).toBe(1);
+		expect(observedSql).toBe(MY_TOURNAMENT_REVIEW_STATUS_SQL);
+		expect(result).toMatchObject({ latestFinalizedEventId: 4, latestAvailableEventId: 4 });
+		expect(result.events).toHaveLength(1);
+	});
+
+	it("preserves a finalized checkpoint when no obligation row exists", async () => {
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						event_id: null,
+						format: null,
+						state: null,
+						next_attempt_at: null,
+						execution_attempts: null,
+						source_rechecks: null,
+						degraded_at: null,
+						revision: null,
+						published_at: null,
+						latest_finalized_event_id: 4,
+					},
+				],
+			}),
+		});
+		const result = await createMyTournamentReviewRepository().loadStatus(context, 6953);
+		expect(result).toMatchObject({ latestFinalizedEventId: 4, latestAvailableEventId: null });
+		expect(result.events).toEqual([]);
 	});
 
 	it("surfaces the latest obligation state when a newer settled event is pending", async () => {
@@ -1554,5 +1612,58 @@ describe("My Tournament Review V2 repository", () => {
 				eventId: 4,
 			})
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("fails closed when applicable points do not reconcile gross, cost, and net", async () => {
+		const base = publicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const points = payload.points as Record<string, unknown>;
+		const row = (points.rows as Array<Record<string, unknown>>)[0]!;
+		row.transferCost = 2;
+		row.netPoints = 55;
+		points.netPointsTotal = 55;
+		const publication = {
+			...base,
+			payload,
+			content_sha256: postgresJsonbContentHash(payload),
+		};
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [publication] }),
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadGameweekReview(context, {
+				tournamentId: 6953,
+				eventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("rejects a cached points row whose gross, cost, and net do not reconcile", async () => {
+		const redis = new TestRedis();
+		let databaseReads = 0;
+		const publication = publicationRow();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [publication] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			points: { rows: Array<{ transferCost: number; netPoints: number }> };
+		};
+		cached.points.rows[0].transferCost = 2;
+		cached.points.rows[0].netPoints = 55;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+		});
+		expect(databaseReads).toBe(4);
+		expect(result.points?.rows[0]?.netPoints).toBe(51);
 	});
 });

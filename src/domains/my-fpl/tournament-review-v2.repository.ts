@@ -239,15 +239,16 @@ type PublicationRow = {
 };
 
 type ObligationRow = {
-	event_id: number;
-	format: string;
-	state: string;
+	event_id: number | null;
+	format: string | null;
+	state: string | null;
 	next_attempt_at: Date | string | null;
-	execution_attempts: number;
-	source_rechecks: number;
+	execution_attempts: number | null;
+	source_rechecks: number | null;
 	degraded_at: Date | string | null;
 	revision: number | string | null;
 	published_at: Date | string | null;
+	latest_finalized_event_id: number | null;
 };
 
 export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
@@ -541,42 +542,83 @@ export const MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL = `
 `;
 
 export const MY_TOURNAMENT_REVIEW_STATUS_SQL = `
-	SELECT obligation.event_id,
-	       obligation.format,
-	       obligation.state,
-	       obligation.next_attempt_at,
-	       obligation.execution_attempts,
-	       obligation.source_rechecks,
-	       obligation.degraded_at,
-	       head.revision,
-	       head.published_at
-	FROM competition.tournament_review_obligations obligation
-	LEFT JOIN LATERAL (
-		SELECT review_head.revision,
-		       publication.published_at
-		FROM competition.tournament_review_heads review_head
-		JOIN competition.tournament_review_publications publication
-		  ON publication.season_id = review_head.season_id
-		 AND publication.tournament_id = review_head.tournament_id
-		 AND publication.event_id = review_head.event_id
-		 AND publication.revision = review_head.revision
-		 AND publication.content_sha256 = review_head.content_sha256
+	WITH latest_finalized AS (
+		SELECT max(event.event_id)::integer AS latest_finalized_event_id
+		FROM competition.tournaments tournament
 		JOIN fpl.events event
-		  ON event.season_id = publication.season_id
-		 AND event.event_id = publication.event_id
-		 AND event.finished = true
-		 AND event.data_checked = true
-		 AND event.data_checked_at IS NOT NULL
-		 AND publication.event_data_checked_at = event.data_checked_at
-		WHERE review_head.season_id = obligation.season_id
-		  AND review_head.tournament_id = obligation.tournament_id
-		  AND review_head.event_id = obligation.event_id
-		  AND publication.format = obligation.format
-		LIMIT 1
-	) head ON true
-	WHERE obligation.season_id = $1
-	  AND obligation.tournament_id = $2
-	ORDER BY obligation.event_id
+		  ON event.season_id = tournament.season_id
+		WHERE tournament.season_id = $1
+		  AND tournament.tournament_id = $2
+		  AND tournament.setup_status = 'ready'
+		  AND event.finished = true
+		  AND event.data_checked = true
+		  AND event.data_checked_at IS NOT NULL
+		  AND (
+			(
+				tournament.knockout_mode::text <> 'no_knockout'
+				AND tournament.knockout_started_event_id IS NOT NULL
+				AND event.event_id >= tournament.knockout_started_event_id
+				AND (tournament.knockout_ended_event_id IS NULL OR event.event_id <= tournament.knockout_ended_event_id)
+			)
+			OR (
+				tournament.group_mode::text IN ('points_races', 'battle_races')
+				AND tournament.group_started_event_id IS NOT NULL
+				AND event.event_id >= tournament.group_started_event_id
+				AND (tournament.group_ended_event_id IS NULL OR event.event_id <= tournament.group_ended_event_id)
+			)
+		  )
+	), status_rows AS (
+		SELECT obligation.event_id,
+		       obligation.format,
+		       obligation.state,
+		       obligation.next_attempt_at,
+		       obligation.execution_attempts,
+		       obligation.source_rechecks,
+		       obligation.degraded_at,
+		       head.revision,
+		       head.published_at
+		FROM competition.tournament_review_obligations obligation
+		LEFT JOIN LATERAL (
+			SELECT review_head.revision,
+			       publication.published_at
+			FROM competition.tournament_review_heads review_head
+			JOIN competition.tournament_review_publications publication
+			  ON publication.season_id = review_head.season_id
+			 AND publication.tournament_id = review_head.tournament_id
+			 AND publication.event_id = review_head.event_id
+			 AND publication.revision = review_head.revision
+			 AND publication.content_sha256 = review_head.content_sha256
+			JOIN fpl.events event
+			  ON event.season_id = publication.season_id
+			 AND event.event_id = publication.event_id
+			 AND event.finished = true
+			 AND event.data_checked = true
+			 AND event.data_checked_at IS NOT NULL
+			 AND publication.event_data_checked_at = event.data_checked_at
+			WHERE review_head.season_id = obligation.season_id
+			  AND review_head.tournament_id = obligation.tournament_id
+			  AND review_head.event_id = obligation.event_id
+			  AND publication.format = obligation.format
+			LIMIT 1
+		) head ON true
+		WHERE obligation.season_id = $1
+		  AND obligation.tournament_id = $2
+	)
+	SELECT status_rows.event_id,
+	       status_rows.format,
+	       status_rows.state,
+	       status_rows.next_attempt_at,
+	       status_rows.execution_attempts,
+	       status_rows.source_rechecks,
+	       status_rows.degraded_at,
+	       status_rows.revision,
+	       status_rows.published_at,
+	       latest_finalized.latest_finalized_event_id
+	FROM latest_finalized
+	LEFT JOIN status_rows ON true
+	WHERE status_rows.event_id IS NOT NULL
+	   OR latest_finalized.latest_finalized_event_id IS NOT NULL
+	ORDER BY status_rows.event_id NULLS FIRST
 `;
 
 export const MY_TOURNAMENT_REVIEW_FINALIZED_EVENT_SQL = `
@@ -797,6 +839,18 @@ function seasonTransferCost(row: MyTournamentReviewPointsRow): number | null {
 	return transferCost;
 }
 
+function pointsRowMetricsValid(
+	row: Pick<MyTournamentReviewPointsRow, "grossPoints" | "transferCost" | "netPoints">
+): boolean {
+	return (
+		row.grossPoints !== null &&
+		row.transferCost !== null &&
+		row.netPoints !== null &&
+		row.transferCost >= 0 &&
+		row.netPoints === row.grossPoints - row.transferCost
+	);
+}
+
 function nullableNumber(value: unknown): number | null {
 	if (value === null || value === undefined || value === "") return null;
 	return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -978,9 +1032,11 @@ function pointsRowCache(value: unknown): value is MyTournamentReviewPointsRow {
 		!value.applicable ||
 		(strictPositiveInt(value.groupId) !== null &&
 			strictPositiveInt(value.rank) !== null &&
-			[value.grossPoints, value.transferCost, value.netPoints].every(
-				(candidate) => candidate !== null
-			))
+			pointsRowMetricsValid({
+				grossPoints: nullableNumber(value.grossPoints),
+				transferCost: nullableNumber(value.transferCost),
+				netPoints: nullableNumber(value.netPoints),
+			}))
 	);
 }
 
@@ -1588,6 +1644,11 @@ function mapPointsRows(value: unknown): MyTournamentReviewPointsRow[] {
 			(strictPositiveInt(mapped.groupId) === null || strictPositiveInt(mapped.rank) === null)
 		) {
 			throw integrityError("Review applicable points row has invalid group or rank");
+		}
+		if (mapped.applicable && !pointsRowMetricsValid(mapped)) {
+			throw integrityError(
+				"Review applicable points row has inconsistent gross, cost, or net points"
+			);
 		}
 		return mapped;
 	});
@@ -2395,17 +2456,22 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 	},
 
 	async loadStatus(context, tournamentId) {
-		const [result, finalizedResult] = await Promise.all([
-			context.database.query<ObligationRow>(MY_TOURNAMENT_REVIEW_STATUS_SQL, [
-				context.currentSeason.seasonId,
-				tournamentId,
-			]),
-			context.database.query<{ latest_finalized_event_id: number | null }>(
-				MY_TOURNAMENT_REVIEW_FINALIZED_EVENT_SQL,
-				[context.currentSeason.seasonId, tournamentId]
-			),
+		// Keep the obligation rows and finalized checkpoint in one SQL statement.
+		// A pair of pooled reads can observe a new finalized event between
+		// statements and return a status that never existed at one database
+		// snapshot (for example, READY rows paired with a later checkpoint).
+		const result = await context.database.query<ObligationRow>(MY_TOURNAMENT_REVIEW_STATUS_SQL, [
+			context.currentSeason.seasonId,
+			tournamentId,
 		]);
-		const latestFinalizedEventId = finalizedResult.rows[0]?.latest_finalized_event_id;
+		const finalizedValues = result.rows.map((row) => row.latest_finalized_event_id);
+		if (finalizedValues.some((value) => value === undefined)) {
+			throw integrityError("Review status finalized checkpoint is missing");
+		}
+		const latestFinalizedEventId = finalizedValues[0] ?? null;
+		if (finalizedValues.some((value) => value !== latestFinalizedEventId)) {
+			throw integrityError("Review status finalized checkpoint is inconsistent");
+		}
 		if (
 			latestFinalizedEventId !== null &&
 			latestFinalizedEventId !== undefined &&
@@ -2413,45 +2479,48 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		) {
 			throw integrityError("Latest finalized review event metadata is invalid");
 		}
-		const events = result.rows.map((row) => {
-			const eventId = positiveInt(row.event_id);
-			const format = reviewFormat(row.format);
-			const state = reviewState(row.state);
-			const executionAttempts = Number(row.execution_attempts);
-			const sourceRechecks = Number(row.source_rechecks);
-			const revision = row.revision === null ? null : positiveInt(row.revision);
-			const publishedAt = iso(row.published_at);
-			const nextAttemptAt = iso(row.next_attempt_at);
-			const degradedAt = iso(row.degraded_at);
-			if (
-				!eventId ||
-				!format ||
-				state === "UNAVAILABLE" ||
-				!Number.isSafeInteger(executionAttempts) ||
-				executionAttempts < 0 ||
-				!Number.isSafeInteger(sourceRechecks) ||
-				sourceRechecks < 0 ||
-				(row.revision !== null && revision === null) ||
-				(row.revision === null && publishedAt !== null) ||
-				(state === "READY" && (revision === null || publishedAt === null)) ||
-				(row.published_at !== null && publishedAt === null) ||
-				(row.next_attempt_at !== null && nextAttemptAt === null) ||
-				(row.degraded_at !== null && degradedAt === null)
-			) {
-				throw integrityError("Review obligation metadata is invalid");
-			}
-			return {
-				eventId,
-				format,
-				state,
-				nextAttemptAt,
-				executionAttempts,
-				sourceRechecks,
-				degradedAt,
-				revision: revision === null ? null : String(revision),
-				publishedAt,
-			};
-		});
+		const events = result.rows
+			.filter((row) => row.event_id !== null)
+			.map((row) => {
+				const eventId = positiveInt(row.event_id);
+				const format = reviewFormat(row.format);
+				const state = reviewState(row.state);
+				const executionAttempts =
+					row.execution_attempts === null ? NaN : Number(row.execution_attempts);
+				const sourceRechecks = row.source_rechecks === null ? NaN : Number(row.source_rechecks);
+				const revision = row.revision === null ? null : positiveInt(row.revision);
+				const publishedAt = iso(row.published_at);
+				const nextAttemptAt = iso(row.next_attempt_at);
+				const degradedAt = iso(row.degraded_at);
+				if (
+					!eventId ||
+					!format ||
+					state === "UNAVAILABLE" ||
+					!Number.isSafeInteger(executionAttempts) ||
+					executionAttempts < 0 ||
+					!Number.isSafeInteger(sourceRechecks) ||
+					sourceRechecks < 0 ||
+					(row.revision !== null && revision === null) ||
+					(row.revision === null && publishedAt !== null) ||
+					(state === "READY" && (revision === null || publishedAt === null)) ||
+					(row.published_at !== null && publishedAt === null) ||
+					(row.next_attempt_at !== null && nextAttemptAt === null) ||
+					(row.degraded_at !== null && degradedAt === null)
+				) {
+					throw integrityError("Review obligation metadata is invalid");
+				}
+				return {
+					eventId,
+					format,
+					state,
+					nextAttemptAt,
+					executionAttempts,
+					sourceRechecks,
+					degradedAt,
+					revision: revision === null ? null : String(revision),
+					publishedAt,
+				};
+			});
 		const finalizedEventId =
 			latestFinalizedEventId === null || latestFinalizedEventId === undefined
 				? null
