@@ -33,4 +33,14 @@ describe("Live Matches V2 contract gate", () => {
 			);
 		}
 	});
+
+	it("accepts the live-matches token when a review contract shares the header", () => {
+		expect(
+			hasLiveMatchesV2Contract(
+				new Headers({
+					[LIVE_MATCHES_CONTRACT_HEADER]: "live-matches-v2, my-tournament-review-v2",
+				})
+			)
+		).toBe(true);
+	});
 });

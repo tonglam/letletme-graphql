@@ -3,6 +3,7 @@ import {
 	MY_TOURNAMENT_REVIEW_CATALOG_SQL,
 	MY_TOURNAMENT_REVIEW_PUBLICATION_SQL,
 	MY_TOURNAMENT_REVIEW_SEASON_SQL,
+	MY_TOURNAMENT_REVIEW_STATUS_SQL,
 	createMyTournamentReviewRepository,
 	postgresJsonbContentHash,
 } from "../../../src/domains/my-fpl/tournament-review-v2.repository";
@@ -47,7 +48,7 @@ const publicationRow = (overrides: Record<string, unknown> = {}) => {
 		schema_version: "my-tournament-review-v2",
 		metric_version: "descriptive-v1",
 		event_data_checked_at: "2026-08-20T00:00:00.000Z",
-		source_min_checked_at: "2026-08-19T23:59:59.000Z",
+		source_min_checked_at: "2026-08-20T00:00:01.000Z",
 		source_max_checked_at: "2026-08-20T00:00:02.000Z",
 		expected_subject_count: 1,
 		ready_subject_count: 1,
@@ -145,6 +146,18 @@ describe("My Tournament Review V2 repository", () => {
 		);
 		expect(MY_TOURNAMENT_REVIEW_SEASON_SQL).toContain(
 			"JOIN competition.tournament_review_heads head"
+		);
+	});
+
+	it("only reports a status head when its publication and event checkpoint are coherent", () => {
+		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
+			"JOIN competition.tournament_review_publications publication"
+		);
+		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
+			"publication.content_sha256 = review_head.content_sha256"
+		);
+		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
+			"publication.event_data_checked_at = event.data_checked_at"
 		);
 	});
 
@@ -273,13 +286,37 @@ describe("My Tournament Review V2 repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
-	it("fails closed when the source span starts after the event checkpoint", async () => {
+	it("fails closed when the source span starts before the event checkpoint", async () => {
 		const context = buildSnapshotContext(new TestRedis(), {
 			databaseQuery: async () => ({
 				rows: [
 					publicationRow({
-						source_min_checked_at: "2026-08-20T00:00:01.000Z",
+						source_min_checked_at: "2026-08-19T23:59:59.000Z",
 					}),
+				],
+			}),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 })
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("rejects duplicate H2H match identities even when row counts match", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const matches = h2h.matches as Array<Record<string, unknown>>;
+		h2h.matches = [matches[0], { ...matches[0] }];
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						...base,
+						row_count: 2,
+						payload,
+						content_sha256: postgresJsonbContentHash(payload),
+					},
 				],
 			}),
 		});

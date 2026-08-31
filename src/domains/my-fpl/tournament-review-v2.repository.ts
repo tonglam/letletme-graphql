@@ -548,10 +548,28 @@ export const MY_TOURNAMENT_REVIEW_STATUS_SQL = `
 	       head.revision,
 	       head.published_at
 	FROM competition.tournament_review_obligations obligation
-	LEFT JOIN competition.tournament_review_heads head
-	  ON head.season_id = obligation.season_id
-	 AND head.tournament_id = obligation.tournament_id
-	 AND head.event_id = obligation.event_id
+	LEFT JOIN LATERAL (
+		SELECT review_head.revision,
+		       publication.published_at
+		FROM competition.tournament_review_heads review_head
+		JOIN competition.tournament_review_publications publication
+		  ON publication.season_id = review_head.season_id
+		 AND publication.tournament_id = review_head.tournament_id
+		 AND publication.event_id = review_head.event_id
+		 AND publication.revision = review_head.revision
+		 AND publication.content_sha256 = review_head.content_sha256
+		JOIN fpl.events event
+		  ON event.season_id = publication.season_id
+		 AND event.event_id = publication.event_id
+		 AND event.finished = true
+		 AND event.data_checked = true
+		 AND event.data_checked_at IS NOT NULL
+		 AND publication.event_data_checked_at = event.data_checked_at
+		WHERE review_head.season_id = obligation.season_id
+		  AND review_head.tournament_id = obligation.tournament_id
+		  AND review_head.event_id = obligation.event_id
+		LIMIT 1
+	) head ON true
 	WHERE obligation.season_id = $1
 	  AND obligation.tournament_id = $2
 	ORDER BY obligation.event_id
@@ -865,7 +883,7 @@ function freshnessCache(value: unknown): boolean {
 		Number.isFinite(sourceMinCheckedAt) &&
 		Number.isFinite(sourceMaxCheckedAt) &&
 		Number.isFinite(publishedAt) &&
-		sourceMinCheckedAt <= eventDataCheckedAt &&
+		eventDataCheckedAt <= sourceMinCheckedAt &&
 		sourceMinCheckedAt <= sourceMaxCheckedAt &&
 		sourceMaxCheckedAt <= publishedAt
 	);
@@ -1311,7 +1329,7 @@ function mapScopeMeta(row: PublicationRow, now = Date.now()): MyTournamentReview
 		!Number.isFinite(eventCheckedMs) ||
 		!Number.isFinite(sourceMinMs) ||
 		!Number.isFinite(sourceMaxMs) ||
-		sourceMinMs > eventCheckedMs ||
+		sourceMinMs < eventCheckedMs ||
 		sourceMinMs > sourceMaxMs ||
 		Date.parse(publishedAt) < sourceMaxMs ||
 		!/^[0-9a-f]{64}$/.test(row.content_sha256) ||
@@ -1485,6 +1503,7 @@ function mapH2H(value: unknown): {
 	standings: MyTournamentReviewH2HStanding[];
 } {
 	if (!isRecord(value)) return { matches: [], standings: [] };
+	const matchIdentities = new Set<string>();
 	const matches = Array.isArray(value.matches)
 		? value.matches.map((raw) => {
 				if (!isRecord(raw)) throw integrityError("Review H2H match payload is invalid");
@@ -1503,6 +1522,11 @@ function mapH2H(value: unknown): {
 				) {
 					throw integrityError("Review H2H match payload is invalid");
 				}
+				const identity = JSON.stringify([groupId, raw.matchId]);
+				if (matchIdentities.has(identity)) {
+					throw integrityError("Review H2H matches contain duplicate identities");
+				}
+				matchIdentities.add(identity);
 				return {
 					matchId: raw.matchId,
 					groupId,
