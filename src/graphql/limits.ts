@@ -1159,6 +1159,10 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["myFplCompetitionBoard", 10],
 	["myFplCompetitionSeasonPath", 5],
 	["myFplCompetitionSetupStatus", 5],
+	["myTournamentReviewCatalog", 10],
+	["myTournamentGameweekReview", 20],
+	["myTournamentSeasonReview", 20],
+	["myTournamentReviewStatus", 5],
 ]);
 
 export const BOUNDED_PUBLIC_ROOT_RATE_LIMIT_FLOOR = 5;

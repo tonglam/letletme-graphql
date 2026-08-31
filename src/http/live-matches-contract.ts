@@ -23,4 +23,7 @@ export const isLiveMatchesHotPathOperation = (rootFields: readonly string[]): bo
 	);
 
 export const hasLiveMatchesV2Contract = (headers: Headers): boolean =>
-	headers.get(LIVE_MATCHES_CONTRACT_HEADER) === LIVE_MATCHES_CONTRACT_VALUE;
+	(headers.get(LIVE_MATCHES_CONTRACT_HEADER) ?? "")
+		.split(",")
+		.map((token) => token.trim())
+		.includes(LIVE_MATCHES_CONTRACT_VALUE);

@@ -21,6 +21,7 @@ import {
 	hasAuthenticationMaterial,
 } from "./http/graphql-policy";
 import { graphQLPrincipalSubject } from "./http/graphql-policy-v3";
+import { validateMyTournamentReviewContract } from "./graphql/contract-gate";
 import type { TokenBucketStageResultV3 } from "./http/token-bucket-v3";
 import { validateGraphQLTransportPayload } from "./http/graphql-request";
 import { createShutdownHandler } from "./http/shutdown";
@@ -447,6 +448,18 @@ export const startServer = async (): Promise<void> => {
 							{ [LIVE_MATCHES_CONTRACT_HEADER]: LIVE_MATCHES_CONTRACT_VALUE }
 						);
 						return finalizePostPreAuthResponse(response, "live_matches_contract_rejected");
+					}
+					const contractFailure = validateMyTournamentReviewContract(rootFields, request.headers);
+					if (contractFailure) {
+						return finalizePostPreAuthResponse(
+							jsonError(
+								contractFailure.status,
+								contractFailure.code,
+								contractFailure.message,
+								corsHeaders
+							),
+							"client_contract_rejected"
+						);
 					}
 					admissionOrder.enter("principal");
 					const { principal, user } = await requestTiming.measure("principal", () =>

@@ -25,6 +25,7 @@ import {
 	parseSnapshotPublicationRow,
 	parseSnapshotEntryContractRow,
 } from "../../src/domains/my-fpl/repository";
+import { MY_TOURNAMENT_REVIEW_DATA_SQL_CONTRACT } from "../../src/domains/my-fpl/tournament-review-v2.repository";
 import { buildMarketPulse, type MarketSnapshotRow } from "../../src/domains/market/repository";
 import { PLAYER_DETAIL_DATA_SQL_CONTRACT } from "../../src/domains/player-detail/repository";
 import { PLAYER_VALUES_DATA_SQL_CONTRACT } from "../../src/domains/player-values/repository";
@@ -74,6 +75,7 @@ export const DIRECT_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	...HOME_MARKET_DATA_SQL_CONTRACT,
 	...MARKET_DATA_SQL_CONTRACT,
 	...MY_FPL_DATA_SQL_CONTRACT,
+	...MY_TOURNAMENT_REVIEW_DATA_SQL_CONTRACT,
 	...PLAYER_DETAIL_DATA_SQL_CONTRACT,
 	...PLAYERS_DATA_SQL_CONTRACT,
 	...PLAYER_VALUES_DATA_SQL_CONTRACT,

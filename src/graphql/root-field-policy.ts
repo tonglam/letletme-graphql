@@ -1,5 +1,6 @@
 export type RootFieldAccess =
 	| "public"
+	| "platformAdmin"
 	| "viewerEntry"
 	| "viewerEntryArg"
 	| "viewerTournamentMember"
@@ -150,6 +151,9 @@ add(
 		"entryLiveCompetitionBoard",
 		"myFplCompetitionSeasonPath",
 		"myFplCompetitionSetupStatus",
+		"myTournamentGameweekReview",
+		"myTournamentSeasonReview",
+		"myTournamentReviewStatus",
 	],
 	"viewerTournamentMember",
 	{ arg: "tournamentId" }
@@ -163,6 +167,7 @@ for (const field of [
 ]) {
 	registry.set(field, policy("viewerEntry"));
 }
+registry.set("myTournamentReviewCatalog", policy("viewerEntry"));
 
 for (const field of [
 	"managedTournament",
@@ -191,6 +196,9 @@ for (const field of [
 	"tournamentDetailDesk",
 	"tournament",
 	"entryLiveCompetitionBoard",
+	"myTournamentGameweekReview",
+	"myTournamentSeasonReview",
+	"myTournamentReviewStatus",
 ]) {
 	const current = registry.get(field);
 	if (current) registry.set(field, { ...current, retainedAdmin: true, tournamentMember: true });
@@ -254,6 +262,10 @@ const lightweightFields = [
 	"calcLivePointsByEntry",
 	"calcLivePointsForEntries",
 	"liveSnapshot",
+	"myTournamentReviewCatalog",
+	"myTournamentGameweekReview",
+	"myTournamentSeasonReview",
+	"myTournamentReviewStatus",
 ] as const;
 for (const field of lightweightFields) {
 	const current = registry.get(field);
@@ -272,6 +284,13 @@ export const ROOT_FIELD_CONDITIONAL_ACCESS: ReadonlyMap<
 	[
 		"myFplCompetitionsDesk",
 		[{ argument: "tournamentId", when: "provided", access: "viewerTournamentMember" }],
+	],
+	[
+		"myTournamentReviewCatalog",
+		[
+			{ argument: "scope", equals: "MANAGED", access: "verifiedEntry" },
+			{ argument: "scope", equals: "ALL", access: "platformAdmin" },
+		],
 	],
 ]);
 export const LIGHTWEIGHT_CORE_FIELDS: ReadonlySet<string> = new Set(
