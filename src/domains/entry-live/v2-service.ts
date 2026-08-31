@@ -2945,15 +2945,18 @@ const nowIso = (): string => new Date().toISOString();
 
 type FreshnessWindow = {
 	staleAtMs: number;
-	reasonCode: "SOURCE_OLDER_THAN_30_SECONDS" | "SOURCE_PAST_EXPECTED_REFRESH";
+	reasonCode: LivePointsFreshnessReasonCode;
 };
 
-type FreshnessPublication = {
+export type LivePointsFreshnessReasonCode =
+	"SOURCE_OLDER_THAN_30_SECONDS" | "SOURCE_PAST_EXPECTED_REFRESH";
+
+export type LivePointsFreshnessPublication = {
 	sourceCheckedAt: string;
 	expectedNextCheckAt: string | null;
 };
 
-const freshnessWindowFor = (publication: FreshnessPublication): FreshnessWindow => {
+const freshnessWindowFor = (publication: LivePointsFreshnessPublication): FreshnessWindow => {
 	const sourceCheckedAtMs = Date.parse(publication.sourceCheckedAt);
 	const expectedNextCheckAtMs = publication.expectedNextCheckAt
 		? Date.parse(publication.expectedNextCheckAt)
@@ -2971,6 +2974,24 @@ const freshnessWindowFor = (publication: FreshnessPublication): FreshnessWindow 
 	return {
 		staleAtMs: sourceCheckedAtMs + LIVE_POINTS_FRESHNESS_SECONDS * 1000,
 		reasonCode: "SOURCE_OLDER_THAN_30_SECONDS",
+	};
+};
+
+export type LivePointsFreshnessV2 = {
+	staleAt: string;
+	isFresh: boolean;
+	reasonCode: LivePointsFreshnessReasonCode;
+};
+
+export const getLivePointsFreshnessV2 = (
+	publication: LivePointsFreshnessPublication,
+	nowMs = Date.now()
+): LivePointsFreshnessV2 => {
+	const window = freshnessWindowFor(publication);
+	return {
+		staleAt: new Date(window.staleAtMs).toISOString(),
+		isFresh: nowMs <= window.staleAtMs,
+		reasonCode: window.reasonCode,
 	};
 };
 

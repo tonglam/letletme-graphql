@@ -22,6 +22,7 @@ import {
 } from "./tournament-entry-window";
 import {
 	calcLivePointsForEntriesV2,
+	getLivePointsFreshnessV2,
 	readLivePublicationV2,
 	type LivePublicationReadV2,
 } from "../entry-live/v2-service";
@@ -57,9 +58,7 @@ const publicationDeliveryState = (publication: LivePublicationReadV2 | null): st
 	if (!publication) return "UNAVAILABLE";
 	if (publication.publication.state === "FINALIZED") return "FINAL";
 	if (publication.servedFrom !== "REDIS_CURRENT") return "DEGRADED";
-	return Date.now() - Date.parse(publication.publication.sourceCheckedAt) <= 30_000
-		? "FRESH"
-		: "STALE";
+	return getLivePointsFreshnessV2(publication.publication).isFresh ? "FRESH" : "STALE";
 };
 
 const publicationSource = (publication: LivePublicationReadV2 | null): string => {
@@ -92,6 +91,7 @@ const publicationAvailability = (publication: LivePublicationReadV2 | null): str
 
 const publicationDelivery = (publication: LivePublicationReadV2 | null) => {
 	const state = publicationDeliveryState(publication);
+	const freshness = publication ? getLivePointsFreshnessV2(publication.publication) : null;
 	return {
 		state,
 		servedFrom: publicationSource(publication),
@@ -100,7 +100,9 @@ const publicationDelivery = (publication: LivePublicationReadV2 | null) => {
 				? ["PUBLICATION_UNAVAILABLE"]
 				: state === "DEGRADED"
 					? ["FALLBACK_SERVED"]
-					: [],
+					: state === "STALE" && freshness
+						? [freshness.reasonCode]
+						: [],
 	};
 };
 
@@ -163,7 +165,7 @@ const publicationTimes = (publication: LivePublicationReadV2 | null) => {
 		publishedAt: value.publishedAt,
 		checkpointedAt: value.checkpointedAt,
 		servedAt: now,
-		staleAt: new Date(Date.parse(value.sourceCheckedAt) + 30_000).toISOString(),
+		staleAt: getLivePointsFreshnessV2(value).staleAt,
 		nextRefreshAt: value.expectedNextCheckAt,
 	};
 };
