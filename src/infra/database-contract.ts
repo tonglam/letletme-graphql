@@ -63,6 +63,9 @@ export const GRAPHQL_CONTRACT_RELATIONS = [
 		"competition.my_fpl_snapshot_entries",
 		"competition.my_fpl_snapshot_tournament_rows",
 		"competition.my_fpl_snapshot_tournament_aggregates",
+		"competition.tournament_review_publications",
+		"competition.tournament_review_heads",
+		"competition.tournament_review_obligations",
 	]),
 ].sort();
 

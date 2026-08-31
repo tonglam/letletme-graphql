@@ -14,6 +14,15 @@ import {
 	type MyFplSnapshotMeta,
 } from "./repository";
 import { buildDataCompleteness } from "../../graphql/data-completeness";
+import {
+	myTournamentReviewRepository,
+	type MyTournamentGameweekReview,
+	type MyTournamentReviewCatalog,
+	type MyTournamentReviewRepository,
+	type MyTournamentReviewScope,
+	type MyTournamentReviewStatus,
+	type MyTournamentSeasonReview,
+} from "./tournament-review-v2.repository";
 
 type TeamDeskArgs = { eventId?: number | null; snapshotRevision?: string | null };
 type TeamGameweekArgs = { eventId: number; snapshotRevision?: string | null };
@@ -36,8 +45,26 @@ type CompetitionSeasonPathArgs = {
 	snapshotRevision?: string | null;
 };
 type CompetitionSetupStatusArgs = { tournamentId: number };
+type MyTournamentReviewCatalogArgs = { scope?: MyTournamentReviewScope | null };
+type MyTournamentGameweekReviewArgs = {
+	tournamentId: number;
+	eventId: number;
+	first?: number | null;
+	after?: string | null;
+	revision?: string | null;
+};
+type MyTournamentSeasonReviewArgs = {
+	tournamentId: number;
+	throughEventId: number;
+	first?: number | null;
+	after?: string | null;
+};
+type MyTournamentReviewStatusArgs = { tournamentId: number };
 
-export const createMyFplResolvers = (repository: MyFplRepository = myFplRepository) => ({
+export const createMyFplResolvers = (
+	repository: MyFplRepository = myFplRepository,
+	reviewRepository: MyTournamentReviewRepository = myTournamentReviewRepository
+) => ({
 	Query: {
 		myFplTeamDesk: (
 			_parent: unknown,
@@ -104,6 +131,38 @@ export const createMyFplResolvers = (repository: MyFplRepository = myFplReposito
 		): Promise<MyFplCompetitionSetupStatus> =>
 			measureRequestStage(context.requestTiming, "myFplCompetitionSetupStatus", () =>
 				repository.loadCompetitionSetupStatus(context, args.tournamentId)
+			),
+		myTournamentReviewCatalog: (
+			_parent: unknown,
+			args: MyTournamentReviewCatalogArgs,
+			context: GraphQLContext
+		): Promise<MyTournamentReviewCatalog> =>
+			measureRequestStage(context.requestTiming, "myTournamentReviewCatalog", () =>
+				reviewRepository.loadCatalog(context, args.scope ?? "ACCESSIBLE")
+			),
+		myTournamentGameweekReview: (
+			_parent: unknown,
+			args: MyTournamentGameweekReviewArgs,
+			context: GraphQLContext
+		): Promise<MyTournamentGameweekReview> =>
+			measureRequestStage(context.requestTiming, "myTournamentGameweekReview", () =>
+				reviewRepository.loadGameweekReview(context, args)
+			),
+		myTournamentSeasonReview: (
+			_parent: unknown,
+			args: MyTournamentSeasonReviewArgs,
+			context: GraphQLContext
+		): Promise<MyTournamentSeasonReview> =>
+			measureRequestStage(context.requestTiming, "myTournamentSeasonReview", () =>
+				reviewRepository.loadSeasonReview(context, args)
+			),
+		myTournamentReviewStatus: (
+			_parent: unknown,
+			args: MyTournamentReviewStatusArgs,
+			context: GraphQLContext
+		): Promise<MyTournamentReviewStatus> =>
+			measureRequestStage(context.requestTiming, "myTournamentReviewStatus", () =>
+				reviewRepository.loadStatus(context, args.tournamentId)
 			),
 	},
 	MyFplSnapshotMeta: {

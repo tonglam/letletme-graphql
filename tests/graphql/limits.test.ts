@@ -753,6 +753,21 @@ describe("GraphQL request limits", () => {
 		}
 	});
 
+	it("charges V2 tournament review roots by bounded workload", () => {
+		const cases = [
+			["query { myTournamentReviewCatalog { tournaments { tournamentId } } }", 10],
+			["query { myTournamentGameweekReview(tournamentId: 6953, eventId: 4) { state } }", 20],
+			["query { myTournamentSeasonReview(tournamentId: 6953, throughEventId: 4) { state } }", 20],
+			["query { myTournamentReviewStatus(tournamentId: 6953) { tournamentId } }", 5],
+		] as const;
+		for (const [query, rateLimitCostUnits] of cases) {
+			expect(validateGraphQLRequestLimits({ query }, schema)).toMatchObject({
+				ok: true,
+				rateLimitCostUnits,
+			});
+		}
+	});
+
 	it("allows one bounded competitions desk projection above the generic AST ceiling", () => {
 		const fields = Array.from({ length: 110 }, () => "__typename").join(" ");
 		expect(

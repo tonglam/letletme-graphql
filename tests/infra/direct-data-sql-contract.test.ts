@@ -737,6 +737,7 @@ describe("direct Data SQL contract", () => {
 			new Set([
 				"content.publication_payloads",
 				"ops.dataset_publication_items",
+				"competition.tournament_review_publications",
 				"competition.my_fpl_snapshot_entries",
 				"competition.my_fpl_snapshot_tournament_rows",
 				"competition.my_fpl_snapshot_tournament_aggregates",

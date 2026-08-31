@@ -24,6 +24,7 @@ import { LeagueType } from "../../../src/domains/leagues/repository";
 import type { GraphQLContext } from "../../../src/graphql/context";
 import { gqlCacheKey } from "../../../src/infra/cache-key";
 import { TestRedis, testLogger } from "../../helpers/data-publication";
+import type { MyTournamentReviewRepository } from "../../../src/domains/my-fpl/tournament-review-v2.repository";
 
 const verifiedPrincipal = {
 	userId: "user-1",
@@ -1825,5 +1826,65 @@ describe("My FPL review repository", () => {
 		await expect(
 			resolvers.Query.myFplCompetitionSetupStatus(null, { tournamentId: 7 }, context)
 		).rejects.toThrow("database unavailable");
+	});
+
+	it("delegates every V2 review root and exposes snapshot completeness", async () => {
+		const calls: string[] = [];
+		const reviewRepository: MyTournamentReviewRepository = {
+			loadCatalog: async (_context, scope) => {
+				calls.push("catalog:" + scope);
+				return {
+					state: "READY",
+					asOf: "2026-08-20T00:00:00.000Z",
+					viewerEntryId: 123,
+					adminReadAll: false,
+					tournaments: [],
+				};
+			},
+			loadGameweekReview: async (_context, args) => {
+				calls.push("gameweek:" + args.tournamentId + ":" + args.eventId);
+				return { state: "READY" } as never;
+			},
+			loadSeasonReview: async (_context, args) => {
+				calls.push("season:" + args.tournamentId + ":" + args.throughEventId);
+				return { state: "READY" } as never;
+			},
+			loadStatus: async (_context, tournamentId) => {
+				calls.push("status:" + tournamentId);
+				return { state: "READY" } as never;
+			},
+		};
+		const fixture = makeFixture();
+		const resolvers = createMyFplResolvers(fixture.repository, reviewRepository);
+		await resolvers.Query.myTournamentReviewCatalog(null, { scope: null }, fixture.context);
+		await resolvers.Query.myTournamentGameweekReview(
+			null,
+			{ tournamentId: 7, eventId: 1, first: 20, after: null, revision: "rev-1" },
+			fixture.context
+		);
+		await resolvers.Query.myTournamentSeasonReview(
+			null,
+			{ tournamentId: 7, throughEventId: 1, first: 20, after: null },
+			fixture.context
+		);
+		await resolvers.Query.myTournamentReviewStatus(null, { tournamentId: 7 }, fixture.context);
+		const completeness = resolvers.MyFplSnapshotMeta.completeness(
+			{
+				revision: "rev-1",
+				eventId: 1,
+				sourceCheckedAt: "2026-08-20T00:00:00.000Z",
+				freshness: "CURRENT",
+			} as never,
+			{},
+			fixture.context
+		);
+		expect(calls).toEqual(["catalog:ACCESSIBLE", "gameweek:7:1", "season:7:1", "status:7"]);
+		expect(completeness).toMatchObject({
+			contractKey: "my-fpl",
+			scopeKey: "season:2627:event:1",
+			revision: "rev-1",
+			complete: true,
+			eligibility: "ELIGIBLE",
+		});
 	});
 });

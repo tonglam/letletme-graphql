@@ -159,6 +159,10 @@ export const GRAPHQL_DOMAIN_MANIFEST: readonly GraphQLDomainManifestEntry[] = [
 		"myFplCompetitionBoard",
 		"myFplCompetitionSeasonPath",
 		"myFplCompetitionSetupStatus",
+		"myTournamentReviewCatalog",
+		"myTournamentGameweekReview",
+		"myTournamentSeasonReview",
+		"myTournamentReviewStatus",
 	]),
 	domain("leagues", "leagues", ["entryLeagues", "leagueEventResults"]),
 	domain("tournaments", "tournaments", [

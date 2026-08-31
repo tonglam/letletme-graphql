@@ -67,4 +67,7 @@ export const requiresLivePointsV2Contract = (rootFields: readonly string[]): boo
 	rootFields.some(isLivePointsRootField);
 
 export const hasLivePointsV2Contract = (headers: Headers): boolean =>
-	headers.get(LIVE_POINTS_CONTRACT_HEADER) === LIVE_POINTS_CONTRACT_VALUE;
+	(headers.get(LIVE_POINTS_CONTRACT_HEADER) ?? "")
+		.split(",")
+		.map((token) => token.trim())
+		.includes(LIVE_POINTS_CONTRACT_VALUE);
