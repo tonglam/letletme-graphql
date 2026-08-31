@@ -1,7 +1,11 @@
-import type { GraphQLResolveInfo } from "graphql";
+import {
+	Kind,
+	type FragmentDefinitionNode,
+	type GraphQLResolveInfo,
+	type SelectionNode,
+} from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
-import { parentSelectionRequestsField } from "../../graphql/selection-set";
-import { playersService } from "../players/service";
+import { getCoreDataSnapshot } from "../../infra/data-snapshot";
 import {
 	readLiveMatchday,
 	type LiveMatchdayRead,
@@ -123,7 +127,7 @@ const finalPublication = (read: LiveMatchdayRead): boolean =>
 	read.detail.publication.fixtureIdentityRevision ===
 		read.desk.publication.revisions.fixtureIdentity.revision;
 
-const toRevisionVector = (read: LiveMatchdayRead) => {
+const toRevisionVector = (read: LiveMatchdayRead, corePriceRevision: string | null = null) => {
 	const desk = read.desk;
 	const detail = read.detail;
 	return {
@@ -135,6 +139,7 @@ const toRevisionVector = (read: LiveMatchdayRead) => {
 		detailPublicationId: detail?.publication.publicationId ?? null,
 		detailGeneration: detail?.publication.generation ?? null,
 		playerDetail: detail?.publication.detail.revision ?? null,
+		corePriceRevision,
 	};
 };
 
@@ -163,6 +168,66 @@ const toTimes = (read: LiveMatchdayRead) => {
 
 type LiveMatchPlayerPriceMap = ReadonlyMap<number, number | null>;
 
+type LiveMatchPlayerEnrichment = {
+	prices: LiveMatchPlayerPriceMap;
+	corePriceRevision: string | null;
+};
+
+const emptyPlayerEnrichment: LiveMatchPlayerEnrichment = {
+	prices: new Map(),
+	corePriceRevision: null,
+};
+
+const coreRevisionFromContext = (context: GraphQLContext): string | null =>
+	context.dataRevision?.startsWith("core-") ? context.dataRevision : null;
+
+const directiveBoolean = (
+	info: GraphQLResolveInfo,
+	value: { kind: string; value?: unknown; name?: { value: string } }
+): boolean | null => {
+	if (value.kind === Kind.VARIABLE) {
+		return info.variableValues[value.name?.value ?? ""] === true;
+	}
+	if (value.kind === Kind.BOOLEAN) return value.value === true;
+	return null;
+};
+
+const selectionIsIncluded = (info: GraphQLResolveInfo, selection: SelectionNode): boolean => {
+	for (const directive of selection.directives ?? []) {
+		const condition = directive.arguments?.find((argument) => argument.name.value === "if");
+		if (!condition) continue;
+		const value = directiveBoolean(info, condition.value);
+		if (directive.name.value === "skip" && value === true) return false;
+		if (directive.name.value === "include" && value !== true) return false;
+	}
+	return true;
+};
+
+const selectionRequestsField = (info: GraphQLResolveInfo, fieldName: string): boolean => {
+	const fragments = info.fragments as Record<string, FragmentDefinitionNode>;
+	const visitedFragments = new Set<string>();
+	const walk = (selections: readonly SelectionNode[] | undefined): boolean => {
+		if (!selections) return false;
+		for (const selection of selections) {
+			if (!selectionIsIncluded(info, selection)) continue;
+			if (selection.kind === Kind.FIELD) {
+				if (selection.name.value === fieldName) return true;
+				if (walk(selection.selectionSet?.selections)) return true;
+				continue;
+			}
+			if (selection.kind === Kind.INLINE_FRAGMENT) {
+				if (walk(selection.selectionSet.selections)) return true;
+				continue;
+			}
+			if (visitedFragments.has(selection.name.value)) continue;
+			visitedFragments.add(selection.name.value);
+			if (walk(fragments[selection.name.value]?.selectionSet.selections)) return true;
+		}
+		return false;
+	};
+	return info.fieldNodes.some((node) => walk(node.selectionSet?.selections));
+};
+
 const liveMatchPlayerIds = (read: LiveMatchdayRead): number[] => [
 	...new Set(
 		(read.detail?.fixtures ?? []).flatMap((fixture) =>
@@ -179,9 +244,9 @@ const liveMatchPlayerIds = (read: LiveMatchdayRead): number[] => [
 const loadPlayerPrices = async (
 	context: GraphQLContext,
 	read: LiveMatchdayRead
-): Promise<LiveMatchPlayerPriceMap> => {
+): Promise<LiveMatchPlayerEnrichment> => {
 	const ids = liveMatchPlayerIds(read);
-	if (ids.length === 0) return new Map();
+	if (ids.length === 0) return emptyPlayerEnrichment;
 
 	const prices = new Map<number, number | null>();
 	const preload = context.playersByIdPreload;
@@ -194,24 +259,32 @@ const loadPlayerPrices = async (
 			missingIds.push(id);
 		}
 	}
-	if (missingIds.length === 0) return prices;
+	if (missingIds.length === 0) {
+		return {
+			prices,
+			corePriceRevision: coreRevisionFromContext(context),
+		};
+	}
 
 	try {
-		const players = await playersService.getPlayersByIds(context, missingIds);
-		for (const id of missingIds) prices.set(id, null);
-		for (const player of players) prices.set(player.id, player.price);
-		const nextPreload = new Map(context.playersByIdPreload ?? []);
-		for (const id of missingIds) if (!nextPreload.has(id)) nextPreload.set(id, null);
-		for (const player of players) nextPreload.set(player.id, player);
-		context.playersByIdPreload = nextPreload;
+		const core = await getCoreDataSnapshot(context);
+		const playersById = new Map(core.players.map((player) => [player.id, player]));
+		for (const id of missingIds) prices.set(id, playersById.get(id)?.price ?? null);
+		return {
+			prices,
+			corePriceRevision: `core-${core.revision}`,
+		};
 	} catch (error) {
 		for (const id of missingIds) prices.set(id, null);
 		context.logger.warn(
 			{ err: error, eventId: read.desk?.publication.eventId, playerCount: missingIds.length },
 			"Live Matches V2 player price enrichment unavailable"
 		);
+		return {
+			prices,
+			corePriceRevision: coreRevisionFromContext(context),
+		};
 	}
-	return prices;
 };
 
 const toPlayer = (
@@ -270,7 +343,10 @@ const toUnavailable = (read: LiveMatchdayRead) => {
 	};
 };
 
-const toResult = (read: LiveMatchdayRead, prices: LiveMatchPlayerPriceMap = new Map()) => {
+const toResult = (
+	read: LiveMatchdayRead,
+	enrichment: LiveMatchPlayerEnrichment = emptyPlayerEnrichment
+) => {
 	if (!read.desk) return toUnavailable(read);
 	const final = finalPublication(read);
 	const finalCheckpointPending =
@@ -302,7 +378,7 @@ const toResult = (read: LiveMatchdayRead, prices: LiveMatchPlayerPriceMap = new 
 			// hint carried by the repository result.
 			eventId: read.desk.publication.eventId,
 			state: read.desk.publication.state,
-			revisions: toRevisionVector(read),
+			revisions: toRevisionVector(read, enrichment.corePriceRevision),
 			times: toTimes(read),
 			detailDelivery: {
 				state: detailDeliveryState,
@@ -315,7 +391,7 @@ const toResult = (read: LiveMatchdayRead, prices: LiveMatchPlayerPriceMap = new 
 							: [detailServedFromReason(read.detail.servedFrom)]
 						: [detailDeliveryState === "PENDING" ? "DETAIL_PENDING" : "DETAIL_UNAVAILABLE"],
 			},
-			matches: toMatches(read.desk, read.detail, prices),
+			matches: toMatches(read.desk, read.detail, enrichment.prices),
 		},
 	};
 };
@@ -329,10 +405,10 @@ export const liveMatchesResolvers = {
 			info: GraphQLResolveInfo
 		) => {
 			const read = await readLiveMatchday(context, args.eventId ?? undefined);
-			const prices = parentSelectionRequestsField(info, "price")
+			const enrichment = selectionRequestsField(info, "price")
 				? await loadPlayerPrices(context, read)
-				: new Map<number, number | null>();
-			return toResult(read, prices);
+				: emptyPlayerEnrichment;
+			return toResult(read, enrichment);
 		},
 	},
 };

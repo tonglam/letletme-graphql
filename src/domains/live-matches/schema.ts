@@ -48,6 +48,7 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
 		lifecycle: String!
 		fixtureIdentity: String!
 		scoreState: String!
+		corePriceRevision: String
 		detailPublicationId: ID
 		detailGeneration: Int
 		playerDetail: String
